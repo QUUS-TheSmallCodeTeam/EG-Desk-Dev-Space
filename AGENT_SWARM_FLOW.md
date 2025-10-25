@@ -119,61 +119,66 @@ User → Main Thread
           │
      ┌────┴────┐
      │         │
-   ACCEPT   REJECT + Alternative
-     │         │
-     │         ▼
-     │    ┌──────────────┐
-     │    │ Main Thread  │ • Presents PM analysis
-     │    │ (Reports)    │ • Offers alternative
-     │    └──────┬───────┘
-     │           │
-     │           ▼
-     │     ★ USER DECISION
-     │           │
-     │      ┌────┼────┐
-     │      │    │    │
-     │   Accept Insist Cancel
-     │    Alt. Original
-     │      │    │    └──→ [STOP]
-     │      │    │
-     │      │    ▼
-     │      │  ┌──────────────┐
-     │      │  │  PM Agent    │ • Re-evaluates
-     │      │  │(Re-eval)     │ • Deeper analysis
-     │      │  └──────┬───────┘
-     │      │         │
-     │      │         ▼
-     │      │  ┌──────────────┐
-     │      │  │ Main Thread  │ • Presents result
-     │      │  │ (Reports)    │
-     │      │  └──────┬───────┘
-     │      │         │
-     │      │         ▼
-     │      │   ★ FINAL DECISION
-     │      │         │
-     │      │    ┌────┴────┐
-     │      │    │         │
-     │      │  Maintain  Evolve
-     │      │   vision    vision
-     │      │    │         │
-     │      │  [STOP]     ▼
-     │      │        ┌──────────────┐
-     │      │        │  PM Agent    │ • Updates
-     │      │        │(Updates docs)│   vision docs
-     │      │        └──────┬───────┘
-     │      │               │
-     │      └───────────────┘
-     │              │
-     └──────────────┘
-              │
-              ▼
-       ┌──────────────┐
-       │ Main Thread  │ • Reports approval/alternative/vision update
-       │ (Reports)    │
-       └──────┬───────┘
-              │
-              ▼
-      [Proceed to Implementation]
+   ACCEPT                              REJECT + Alternative
+     │                                        │
+     │                                        ▼
+     │                                   ┌──────────────┐
+     │                                   │ Main Thread  │ • Presents PM analysis
+     │                                   │ (Reports)    │ • Offers alternative
+     │                                   └──────┬───────┘
+     │                                          │
+     │                                          ▼
+     │                                    ★ USER DECISION
+     │                                          │
+     │                                     ┌────┴────┬──────────────────┐
+     │                                     │         │                  │
+     │                                  Accept    Insist             Cancel
+     │                                   Alt.     Original
+     │                                     │         │                  └──→ [STOP]
+     │                                     │         │
+     │                                     │         ├──→ Debate Loop
+     │                                     │         │    (PM ↔ User, Multiple rounds)
+     │                                     │         │         │
+     │                                     │         │         ▼
+     │                                     │         │                   ★ FINAL DECISION
+     │                                     │         │                         │
+     │                                     │         │              ┌──────────┴──────────┐
+     │                                     │         │              │                     │
+     │                                     │         │          Evolve                Maintain
+     │                                     │         │          vision                 vision
+     │                                     │         │              │                     │
+     │                                     │         │              │                  [STOP]
+     │                                     │         │              │
+     │                                     │         └──────────────┘
+     │                                     │                        │
+     │                                     └────────────────────────┘
+     │                                                │
+     └────────────────────────────────────────────────┘
+                       │
+                       ▼
+                 If framework research?
+                       │
+                  ┌────┴────┐
+                  │         │
+                 Yes       No
+                  │         │
+                  │         ▼
+                  │  ┌──────────────┐
+                  │  │  PM Agent    │ • Updates vision docs
+                  │  │(Updates docs)│   (if evolved)
+                  │  └──────┬───────┘
+                  │         │
+                  │         ▼
+                  │  ┌──────────────┐
+                  │  │ Main Thread  │ • Reports final decision
+                  │  │ (Reports)    │
+                  │  └──────┬───────┘
+                  │         │
+                  │         ▼
+                  │  [Proceed to Implementation]
+                  │
+                  ▼
+            Scenario 2 (Research)
 ```
 
 ---
