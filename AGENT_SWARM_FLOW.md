@@ -72,61 +72,105 @@ User → Main Thread
 
 ---
 
-### Scenario 3: Vision Conflict
+### Scenario 3A: Vision Check - Simple Question
 
-**User Request:** "Should we add a floating AI assistant that follows the mouse cursor?"
+**User Request:** "How did I implement the theme system last time?"
 
 ```
 User → Main Thread
          │
+         ├──→ 3B: framework/UX adoption
+         │
          ▼
-   ┌──────────────┐
-   │  PM Agent    │ • Discovers vision docs
-   │  (Analyzes)  │ • Finds: AGAINST floating UI
-   └──────┬───────┘ • Returns: REJECT + Alternative
+   ┌──────────────────┐
+   │  PM Agent        │ • Checks vision docs
+   │  (Vision Check)  │ • Retrieves past decisions
+   └──────┬───────────┘
           │
           ▼
-   ┌──────────────┐
-   │ Main Thread  │ • Presents PM analysis
-   │ (Reports)    │ • Offers alternative
-   └──────┬───────┘
+   ┌──────────────────┐
+   │  Main Thread     │ • Presents answer
+   │  (Reports)       │
+   └──────┬───────────┘
           │
           ▼
-    ★ USER DECISION 1
+        User
+```
+
+---
+
+### Scenario 3B: Vision Check - Framework/UX Adoption
+
+**User Request:** "Should we add a floating AI assistant that follows the cursor?"
+
+```
+User → Main Thread
+         │
+         ├──→ 3A: simple question
+         │
+         ▼
+   ┌──────────────────┐
+   │  PM Agent        │ • Checks vision docs
+   │  (Vision Check)  │ • Analyzes alignment
+   └──────┬───────────┘
           │
-      ┌───┼───┐
-      │   │   │
-   Accept Insist Cancel
-   Alt.  Original
-      │   │   └──→ [STOP]
-      │   │
-      │   ▼
-      │   ┌──────────────┐
-      │   │  PM Agent    │ • Re-evaluates with user's rationale
-      │   │(Re-evaluates)│ • Provides deeper analysis
-      │   └──────┬───────┘
-      │          │
-      │          ▼
-      │   ┌──────────────┐
-      │   │ Main Thread  │ • Presents PM re-evaluation
-      │   │ (Reports)    │
-      │   └──────┬───────┘
-      │          │
-      │          ▼
-      │    ★ USER DECISION 2
-      │          │
-      │      ┌───┴───┐
-      │      │       │
-      │   Maintain  Evolve
-      │   vision    vision
-      │      │       │
-      │  [STOP]     ▼
-      │        ┌──────────────┐
-      │        │  PM Agent    │ • Updates vision docs
-      │        │(Updates docs)│
-      │        └──────┬───────┘
-      │               │
-      └───────────────┘
+          ▼
+    Vision aligned?
+          │
+     ┌────┴────┐
+     │         │
+   ACCEPT   REJECT + Alternative
+     │         │
+     │         ▼
+     │    ┌──────────────┐
+     │    │ Main Thread  │ • Presents PM analysis
+     │    │ (Reports)    │ • Offers alternative
+     │    └──────┬───────┘
+     │           │
+     │           ▼
+     │     ★ USER DECISION
+     │           │
+     │      ┌────┼────┐
+     │      │    │    │
+     │   Accept Insist Cancel
+     │    Alt. Original
+     │      │    │    └──→ [STOP]
+     │      │    │
+     │      │    ▼
+     │      │  ┌──────────────┐
+     │      │  │  PM Agent    │ • Re-evaluates
+     │      │  │(Re-eval)     │ • Deeper analysis
+     │      │  └──────┬───────┘
+     │      │         │
+     │      │         ▼
+     │      │  ┌──────────────┐
+     │      │  │ Main Thread  │ • Presents result
+     │      │  │ (Reports)    │
+     │      │  └──────┬───────┘
+     │      │         │
+     │      │         ▼
+     │      │   ★ FINAL DECISION
+     │      │         │
+     │      │    ┌────┴────┐
+     │      │    │         │
+     │      │  Maintain  Evolve
+     │      │   vision    vision
+     │      │    │         │
+     │      │  [STOP]     ▼
+     │      │        ┌──────────────┐
+     │      │        │  PM Agent    │ • Updates
+     │      │        │(Updates docs)│   vision docs
+     │      │        └──────┬───────┘
+     │      │               │
+     │      └───────────────┘
+     │              │
+     └──────────────┘
+              │
+              ▼
+       ┌──────────────┐
+       │ Main Thread  │ • Reports approval/alternative/vision update
+       │ (Reports)    │
+       └──────┬───────┘
               │
               ▼
       [Proceed to Implementation]
