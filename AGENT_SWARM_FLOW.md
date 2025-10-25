@@ -121,11 +121,13 @@ User → Main Thread
      │         │
    ACCEPT                              REJECT + Alternative
      │                                        │
+     │                                        │
      │                                        ▼
      │                                   ┌──────────────┐
      │                                   │ Main Thread  │ • Presents PM analysis
      │                                   │ (Reports)    │ • Offers alternative
      │                                   └──────┬───────┘
+     │                                          │
      │                                          │
      │                                          ▼
      │                                    ★ USER DECISION
@@ -133,23 +135,24 @@ User → Main Thread
      │                                     ┌────┴────┬──────────────────┐
      │                                     │         │                  │
      │                                  Accept    Insist             Cancel
-     │                                   Alt.     Original
+     │                                   Alt.     Original               │
+     │                                     │         │                  │
      │                                     │         │                  └──→ [STOP]
      │                                     │         │
-     │                                     │         ├──→ Debate Loop
-     │                                     │         │    (PM ↔ User, Multiple rounds)
-     │                                     │         │         │
-     │                                     │         │         ▼
-     │                                     │         │                   ★ FINAL DECISION
-     │                                     │         │                         │
-     │                                     │         │              ┌──────────┴──────────┐
-     │                                     │         │              │                     │
-     │                                     │         │          Evolve                Maintain
-     │                                     │         │          vision                 vision
-     │                                     │         │              │                     │
-     │                                     │         │              │                  [STOP]
-     │                                     │         │              │
-     │                                     │         └──────────────┘
+     │                                     │         └──→ Debate Loop
+     │                                     │              (PM ↔ User, Multiple rounds)
+     │                                     │                   │
+     │                                     │                   ▼
+     │                                     │              ★ FINAL DECISION
+     │                                     │                   │
+     │                                     │        ┌──────────┴──────────┐
+     │                                     │        │                     │
+     │                                     │     Evolve                Maintain
+     │                                     │     vision                 vision
+     │                                     │        │                     │
+     │                                     │        │                  [STOP]
+     │                                     │        │
+     │                                     │        └─────────────────────────┘
      │                                     │                        │
      │                                     └────────────────────────┘
      │                                                │
