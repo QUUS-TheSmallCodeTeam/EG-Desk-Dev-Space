@@ -7,140 +7,171 @@ This document maps the complete agent orchestration system for the EG-DESK proje
 This diagram shows the complete routing logic and agent communication flow. **CRITICAL**: All subagents report back to Main Thread (via subagent_reports/), and Main Thread communicates results to User.
 
 ```
-                                                    User Request
-                                                         │
-                                                         ▼
-                                              ┌─────────────────┐
-                                              │  Main Thread    │
-                                              │ (Analyzes type) │
-                                              └────────┬────────┘
-                                                       │
-        ┬──────────────────────┬──────────────────────┼──────────────────────┬──────────────────────┬
-        │                      │                      │                      │                      │
-        ▼                      ▼                      ▼                      ▼                      ▼
-  Simple Task          Vision Question      Tech Investigation          Development          Agent Creation
-        │                      │                      │                      │                      │
-        │                      │              Has analyzer?                  │                      │
-        │                      │              ┌───────┴───────┐              │                      │
-        ▼                      ▼             Yes              No             ▼                      ▼
-  MT executes          ┌──────────┐    ┌──────────┐    ┌──────────┐  ┌──────────┐          ┌────────────┐
-        │              │PM Agent  │    │Analyzer  │    │PM Agent  │  │PM Agent  │          │claude-agent│
-        │              │(writes   │    │Agent     │    │(writes   │  │(writes   │          │-sdk-       │
-        │              │report to │    │(writes   │    │gap diag  │  │strategic │          │analyzer    │
-        │              │subagent_ │    │report to │    │to sub-   │  │guide to  │          │(creates    │
-        │              │reports/) │    │subagent_ │    │agent_    │  │subagent_ │          │agent file  │
-        │              └────┬─────┘    │reports/) │    │reports/) │  │reports/) │          │at .claude/ │
-        │                   │          └────┬─────┘    └────┬─────┘  └────┬─────┘          │agents/)    │
-        │                   │               │               │             │                └─────┬──────┘
-        │                   │               │               ▼             │                      │
-        │                   │               │        [Tech Research       │                      │
-        │                   │               │         Workflow]            │                      │
-        │                   │               │               │             │                      │
-        │                   └───────────────┴───────────────┤             │                      │
-        │                                                   │             │                      │
-        │                                                   ▼             │                      │
-        │                                        ┌──────────────────┐     │                      │
-        │                                        │   Main Thread    │     │                      │
-        │                                        │  (reads report   │     │                      │
-        │                                        │from subagent_    │     │                      │
-        │                                        │   reports/)      │◄────┘                      │
-        │                                        └────────┬─────────┘                            │
-        │                                                 │                                      │
-        │                                                 ▼                                      │
-        │                                        ┌──────────────────┐                            │
-        │                                        │   Main Thread    │                            │
-        │                                        │  (synthesizes)   │                            │
-        │                                        └────────┬─────────┘                            │
-        │                                                 │                                      │
-        │                                                 ▼                                      │
-        │                                        [PM-Driven Dev                                  │
-        │                                         Workflow Below]                                │
-        │                                                 │                                      │
-        └─────────────────────────────────────────────────┼──────────────────────────────────────┘
-                                                          │
-                                                          ▼
-                                                        USER
-                                                          │
-                                                    (After USER)
-                                                          │
-        ┬─────────────────────────────────────────────────┼──────────────────────────────────────┬
-        │                                                 │                                      │
-        ▼                                                 ▼                                      ▼
-   Simple Task                                    Tech Invest. (No)                      Agent Creation
-   Vision Ques.                                   requires follow-up                     (Complete)
-   Tech Invest. (Yes)                                    │
-   (Complete - END)                                      │
-                                                         ▼
-                                              ┌──────────────────┐
-                                              │   Main Thread    │
-                                              │ (plans parallel  │
-                                              │  research)       │
-                                              └────────┬─────────┘
-                                                       │
-                                        ┌──────────────┼──────────────┐
-                                        │              │              │
-                                        ▼              ▼              ▼
-                                  ┌──────────┐  ┌──────────┐  ┌──────────┐
-                                  │Research  │  │Research  │  │Research  │
-                                  │Agent 1   │  │Agent 2   │  │Agent 3   │
-                                  │(writes to│  │(writes to│  │(writes to│
-                                  │subagent_ │  │subagent_ │  │subagent_ │
-                                  │reports/) │  │reports/) │  │reports/) │
-                                  └────┬─────┘  └────┬─────┘  └────┬─────┘
-                                       │              │              │
-                                       └──────────────┼──────────────┘
-                                                      │
-                                                      ▼
-                                           ┌──────────────────┐
-                                           │   Main Thread    │
-                                           │ (organizes       │
-                                           │  findings in     │
-                                           │  references/)    │
-                                           └────────┬─────────┘
-                                                    │
-                                                    ▼
-                                           ┌──────────────────┐
-                                           │Technical Analyzer│
-                                           │(writes report to │
-                                           │subagent_reports/)│
-                                           └────────┬─────────┘
-                                                    │
-                                                    ▼
-                                           ┌──────────────────┐
-                                           │   PM Agent       │
-                                           │ (evaluates &     │
-                                           │  recommends)     │
-                                           └────────┬─────────┘
-                                                    │
-                                                    ▼
-                                           ┌──────────────────┐
-                                           │   Main Thread    │
-                                           │  (reads report)  │
-                                           └────────┬─────────┘
-                                                    │
-                                                    ▼
-                                                  USER
-                                                    │
-                                            (Approve/Reject?)
-                                                    │
-                                            [If Approve]
-                                                    │
-                                                    ▼
-                                           ┌──────────────────┐
-                                           │   PM Agent       │
-                                           │ (adopts tech,    │
-                                           │  updates stack,  │
-                                           │  creates PRD)    │
-                                           └────────┬─────────┘
-                                                    │
-                                                    ▼
-                                        [Proceed to PM-Driven
-                                         Dev Workflow Below]
-                                                    │
-                                                    ▼
-                                                  USER
+                          ┌──────────────────────────────────────────────────────────────┐
+                          │                                                              │
+                          │  [All "New Req?" loops back here]                            │
+                          ▼                                                              │
+                    User Request                                                         │
+                         │                                                               │
+                         ▼                                                               │
+                ┌─────────────────┐                                                      │
+                │  Main Thread    │◄─────────────────────────────────────────────────────┘
+                │ (Analyzes type) │
+                └────────┬────────┘
+                         │
+   ┬────────────────────────┬────────────────────────┬────────────────────────┬────────────────────────┬
+   │                        │                        │                        │                        │
+   ▼                        ▼                        ▼                        ▼                        ▼
+Simple Task            Research              Vision Question            Development            Agent Creation
+   │                        │                        │                        │                        │
+   │                 Has analyzer?                   │                        │                        │
+   │                 ┌──────┴──────┐                 │                        │                        │
+   │                Yes            No                 │                        │                        │
+   │                 │              │                 │                        │                        │
+   ▼                 ▼              ▼                 ▼                        ▼                        ▼
+┌──────────┐   ┌──────────┐   ┌──────────┐   ┌──────────┐            ┌──────────┐            ┌──────────┐
+│Main      │   │Analyzer  │   │Main      │   │PM Agent  │            │PM Agent  │            │claude-   │
+│Thread    │   │Agent     │   │Thread    │   │          │            │(strategic│            │agent-sdk │
+│(executes)│   │          │   │(plans    │   │          │            │guide)    │            │-analyzer │
+└─────┬────┘   └─────┬────┘   │research) │   └─────┬────┘            └─────┬────┘            └─────┬────┘
+      │              │         └─────┬────┘         │                       │                       │
+      │              │               │              │                       │                       │
+      │              │          ┌────┼────┐         │                       │                       │
+      │              │          │    │    │         │                       │                       ▼
+      │              │          ▼    ▼    ▼         │                       │                ┌──────────┐
+      │              │     ┌──────────────────┐     │                       │                │Main      │
+      │              │     │Research │Research│     │                       │                │Thread    │
+      │              │     │Agent 1  │Agent 2 │     │                       │                │(reads &  │
+      │              │     │         │Research│     │                       │                │confirms) │
+      │              │     │         │Agent 3 │     │                       │                └─────┬────┘
+      │              │     └────┬────┴────┬───┘     │                       │                      │
+      │              │          │         │         │                       │                      │
+      │              │          └─────────┼─────┐   │                       │                      ▼
+      │              │                    │     │   │                       │                    USER
+      │              │                    ▼     │   │                       │                (Complete)
+      │              │             ┌──────────┐ │   │                       │                      │
+      │              │             │Main      │ │   │                       │                ┌─────┴─────┐
+      │              │             │Thread    │ │   │                       │                │           │
+      │              │             │(organizes│ │   │                       │              Done?      New Req?
+      │              │             │findings) │ │   │                       │                │           │
+      │              │             └─────┬────┘ │   │                       │                └→END       └──────┐
+      │              │                   │      │   │                       │                                   │
+      │              ├───────────────────┴──────┘   │                       │                                   │
+      │              │                              │                       │                                   │
+      │              │        ┌──────────┐          │                       │                                   │
+      │              │        │Main      │          │                       │                                   │
+      │              │        │Thread    │          │                       │                                   │
+      │              │        │(reads    │          │                       │                                   │
+      │              │        │report)   │          │                       │                                   │
+      │              │        └─────┬────┘          │                       │                                   │
+      │              │              │               │                       │                                   │
+      │              └──────────────┼───────────────┘                       │                                   │
+      │                             │                                       │                                   │
+      │                             ▼                                       │                                   │
+      │                           USER                                      │                                   │
+      │                             │                                       │                                   │
+      │                  ┌──────────┼──────────┐                            │                                   │
+      │                  │          │          │                            │                                   │
+      │               Done?     Implement?  NewReq?                         │                                   │
+      │                  │          │          │                            │                                   │
+      │                  │          │          └────────────────────────────┤                                   │
+      │                  └→END      │                                       │                                   │
+      │                             │                                       │                                   │
+      │         ┌───────────────────┘                                       │                                   │
+      │         │                                                           │                                   │
+      │         │                 ┌──────────┐                              │                                   │
+      │         │                 │Main      │                              │                                   │
+      │         │                 │Thread    │                              │                                   │
+      │         │                 │(reads    │                              │                                   │
+      │         │                 │report)   │                              │                                   │
+      │         │                 └─────┬────┘                              │                                   │
+      │         │                       │                                   │                                   │
+      │         │                       ▼                                   │                                   │
+      │         │                     USER                                  │                                   │
+      │         │                       │                                   │                                   │
+      │         │             ┌─────────┼─────────┐                         │                                   │
+      │         │             │         │         │                         │                                   │
+      │         │         Approve    Insist    Cancel                       │                                   │
+      │         │             │         │         │                         │                                   │
+      │         │             │         │         └─→END                    │                                   │
+      │         │             │         │                                   │                                   │
+      │         │             │    ┌────┴───┐                               │                                   │
+      │         │             │    │PM loop │                               │                                   │
+      │         │             │    └────┬───┘                               │                                   │
+      │         │             │         │                                   │                                   │
+      │         │             │         └────────────┐                      │                                   │
+      │         │             │                      │                      │                                   │
+      │         └─────────────┴──────────────────────┘                      │                                   │
+      │                                                                     │                                   │
+      │                                      ┌────────────┐                 │                                   │
+      │                                      │Main Thread │                 │                                   │
+      │                                      │(synthesizes│                 │                                   │
+      │                                      │ PM+patterns│                 │                                   │
+      │                                      └──────┬─────┘                 │                                   │
+      │                                             │                       │                                   │
+      │                                             ▼                       │                                   │
+      │                                    ┌─────────────────┐              │                                   │
+      │                                    │Framework        │              │                                   │
+      │                                    │Analyzer         │              │                                   │
+      │                                    │(pattern         │              │                                   │
+      │                                    │discovery)       │              │                                   │
+      │                                    └────────┬────────┘              │                                   │
+      │                                             │                       │                                   │
+      │                                             ▼                       │                                   │
+      │                                      ┌────────────┐                 │                                   │
+      │                                      │coding-agent│                 │                                   │
+      │                                      │(implements)│                 │                                   │
+      │                                      └──────┬─────┘                 │                                   │
+      │                                             │                       │                                   │
+      │                                    ┌────────┼────────┐              │                                   │
+      │                                    │        │        │              │                                   │
+      │                              Needs new?  Build/Test  Complex UX?    │                                   │
+      │                                    │        │        │              │                                   │
+      │                                    ▼        │        ▼              │                                   │
+      │                              ┌──────────┐   │  ┌──────────┐         │                                   │
+      │                              │PM gap    │   │  │UX Flow   │         │                                   │
+      │                              │diagnosis │   │  │Validator │         │                                   │
+      │                              └─────┬────┘   │  └─────┬────┘         │                                   │
+      │                                    │        │        │               │                                   │
+      │                                    │        │    Issues?            │                                   │
+      │                                    │        │    ┌───┴───┐          │                                   │
+      │                                    │        │   Yes     No           │                                   │
+      │                                    │        │    │       │           │                                   │
+      │                         [Triggers  │        │    │       ▼           │                                   │
+      │                          Research: │        │    │  ┌──────────┐     │                                   │
+      │                          No path]  │        │    │  │Main      │     │                                   │
+      │                                    │        │    │  │Thread    │     │                                   │
+      │                                    │        │    │  │(build &  │     │                                   │
+      │                                    │        │    │  │commit)   │     │                                   │
+      │                                    │        │    │  └─────┬────┘     │                                   │
+      │                                    │        │    │        │          │                                   │
+      │                                    │        │    └────────┘          │                                   │
+      │                                    │        │             │          │                                   │
+      │                                    │        │             ▼          │                                   │
+      │                                    │        │           USER         │                                   │
+      │                                    │        │             │          │                                   │
+      │                                    │        │       ┌─────┼─────┐    │                                   │
+      │                                    │        │       │     │     │    │                                   │
+      │                                    │        │    Done? Refine? NewReq?
+      │                                    │        │       │     │     │
+      │                                    │        │       │     │     └────────────────────────────────────────┐
+      │                                    │        │       │     │                                              │
+      │                                    │        │       └→END └──[Loop Dev]                                  │
+      │                                    │        │                                                            │
+      │                                    │        └──────────────────────────┐                                 │
+      │                                    │                                   │                                 │
+      │                                    └───────────────────────────────────┼─────────────────────────────────┘
+      │                                                                        │
+      └────────────────────────────────────────────────────────────────────────┘
+                                           │
+                                           ▼
+                                         USER
+                                      (Complete)
+```
 
-   Development (Detailed Steps Below)
+## Development (Detailed Steps Below)
+
+```
         │
         │ Step 1: Strategic Guide (shown above in main diagram)
         │ Step 2: Framework Investigation
@@ -255,10 +286,6 @@ User → Main Thread (analyzes) → Glob("packages/ai-chat/**/*") → User
 
 **Total Agents:** 0 | **Who Wrote Code:** Nobody | **Duration:** Immediate
 
-⚠️ **Common Mistakes:**
-- ❌ Using agents for simple tasks → Wastes resources
-- ❌ Using bash commands (find, ls) instead of Glob → Use specialized tools
-
 ---
 
 ### Scenario 2: Vision Conflict with Decision Branches
@@ -326,12 +353,6 @@ User → Main Thread (analyzes: vision alignment question)
 - **User can challenge vision**: PM reassesses, but user has final authority
 - **Vision can evolve**: PM documents evolution with user's rationale
 - **Institutional memory preserved**: Updates vision docs with reasoning
-
-⚠️ **Common Mistakes:**
-- ❌ PM auto-accepts conflicting features → Violates vision integrity
-- ❌ PM rejects without alternative → Unhelpful, user feels blocked
-- ❌ User challenges ignored → PM must always reassess when challenged
-- ❌ Vision evolution undocumented → Lost institutional memory
 
 ---
 
@@ -475,12 +496,6 @@ User → Main Thread (analyzes: development task)
 - ✅ Use for: Complex flows, state management, race conditions, async ops, critical features
 - ❌ Skip for: Simple CRUD, pure UI styling, documentation updates
 
-⚠️ **Common Mistakes:**
-- ❌ Skipping PM for development tasks → No strategic alignment, no PRD
-- ❌ Auto-resolving conflicts → coding-agent cannot make strategic decisions
-- ❌ Forgetting CODEBASE_STRUCTURE.md update → Future conflicts undetectable
-- ❌ Hardcoding EG-DESK paths → Use Glob to discover eg-desk*/ dynamically
-
 ---
 
 ### Scenario 4: Technology Research & Investigation
@@ -526,12 +541,6 @@ User → Main Thread (analyzes: adopted tech investigation)
 - PM requests during Development workflow: "I need to know how Theia implements X"
 - User asks direct questions: "How does Electron handle IPC?"
 - MT needs technical patterns: "What's the Theia DI pattern for services?"
-
-⚠️ **Common Mistakes:**
-- ❌ Going through PM for adopted tech questions → Unnecessary overhead
-- ❌ Using general-purpose agents for recurring tech → Create analyzer agent instead
-- ❌ Not reading references/[tech]/ → Lose institutional memory
-- ❌ Main Thread investigates directly → Violates metaphysical separation
 
 ---
 
@@ -625,14 +634,6 @@ User → Main Thread (analyzes: technology gap)
 - User can reject entire research without polluting references/
 - Clean separation: tentative vs confirmed knowledge
 
-⚠️ **Common Mistakes:**
-- ❌ PM creates full research plan → MT should plan research, PM only diagnoses
-- ❌ User approval for "proceed with research?" → Auto-proceed, approval is for adoption
-- ❌ Research findings directly to references/ → Use subagent_reports/ first
-- ❌ Skipping PM evaluation → Research findings need vision alignment check
-- ❌ Keeping subagent_reports/ after decision → Delete temporary files
-- ❌ Not creating analyzer agent → If tech investigated frequently, create analyzer
-
 ---
 
 ### Scenario 5: Agent Creation Request
@@ -657,12 +658,6 @@ MT → User ("Agent created. Restart session to use konva-analyzer.")
 - **claude-agent** reads best practices, examines existing agents, designs and creates new agent file
 - **Evidence-based design**: claude-agent always reads `subagent-best-practices.md` before creating agents
 
-⚠️ **Common Mistakes:**
-- ❌ Main Thread creates agent directly → No best practices validation
-- ❌ Creating agent without reading existing agents → Inconsistent patterns
-- ❌ Skipping subagent-best-practices.md → Poor agent design
-- ❌ Creating temporary agents for recurring tasks → Should be permanent agents
-
 ---
 
 ### Scenario 6: Simple File Edit (coding-agent)
@@ -678,49 +673,7 @@ User → MT (analyzes: simple edit) → coding-agent (Read README, Edit typo) �
 
 **Key Point:** ALL file changes go through coding-agent for consistency. Main Thread NEVER edits application files directly.
 
-⚠️ **Common Mistakes:**
-- ❌ Main Thread edits files directly → Breaks consistency pattern
-- ❌ Skipping coding-agent for "simple" changes → ALL changes should use coding-agent
-- ❌ Not reading file before editing → Edit tool requires prior Read
-
 ---
-
-## Success Metrics
-
-**For Main Thread:**
-- ✅ Routes requests to appropriate handlers (direct vs agent vs PM-driven)
-- ✅ Delegates domain reading to specialized agents
-- ✅ Synthesizes agent results clearly
-- ✅ Builds, tests, commits successfully
-- ✅ Context remains clean (doesn't read vision/codebase when orchestrating)
-
-**For PM Agent:**
-- ✅ Discovers vision docs and tech stack dynamically (Glob)
-- ✅ Provides complete strategic direction (framework, location, phasing)
-- ✅ Creates/updates PRDs
-- ✅ Detects vision conflicts with evidence
-- ✅ Suggests vision-aligned alternatives
-- ✅ Documents vision evolution with rationale
-
-**For Framework Agents:**
-- ✅ Returns evidence-based patterns (file:line references)
-- ✅ Provides file lists with actions (CREATE/MODIFY/DELETE/REFERENCE)
-- ✅ Stays within domain expertise
-
-**For coding-agent:**
-- ✅ Discovers EG-DESK codebase dynamically (Glob eg-desk*/)
-- ✅ Checks CODEBASE_STRUCTURE.md for conflicts (EG-DESK custom code only)
-- ✅ STOPS immediately if conflict detected (reports to Main Thread)
-- ✅ Updates structure document after successful implementation
-- ✅ Implements exactly what Main Thread instructed
-- ✅ Follows framework patterns precisely
-- ✅ Keeps Main Thread's context clean
-
-**For User:**
-- ✅ Understands why features approved/rejected (vision alignment)
-- ✅ Can challenge vision with rationale (PM reassesses)
-- ✅ Makes informed decisions (PM provides scoring, tradeoffs)
-- ✅ Sees institutional memory preserved (PRDs, updated vision docs)
 
 ## Appendix: Roles and Responsibilities Reference
 
@@ -745,17 +698,3 @@ User → MT (analyzes: simple edit) → coding-agent (Read README, Edit typo) �
 - **Research Notes**: general-purpose writes to subagent_reports/, PM moves to ideas/ after approval
 - **PRDs**: egdesk-pm-agent creates/updates in ideas/confirmed/
 
-## Conclusion
-
-This agent swarm system balances **strategic alignment** (PM guides vision) with **efficient execution** (Main Thread orchestrates, specialized agents analyze, coding-agent implements). The **metaphysical separation** principle ensures Main Thread's context remains clean for orchestration by delegating domain reading to specialized agents.
-
-**Key success factors:**
-1. **PM provides strategic direction** - framework, location, phasing, vision alignment
-2. **Main Thread orchestrates but doesn't read domains** - preserves context for coordination
-3. **Specialized agents analyze their domains** - return synthesized findings, not raw data
-4. **coding-agent implements exclusively** - all code changes go through one path for consistency
-5. **Conflict detection prevents duplicates** - CODEBASE_STRUCTURE.md registry for EG-DESK custom code
-6. **User retains authority** - can challenge vision, approve technology, resolve conflicts
-7. **Research flow validated** - subagent_reports/ → PM review → user approval → ideas/ (institutional memory)
-
-The result: **Fast, vision-aligned development with institutional memory preservation.**
