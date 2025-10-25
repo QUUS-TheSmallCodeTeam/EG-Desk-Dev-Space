@@ -35,7 +35,7 @@ EG-DESK의 무한 캔버스 위에 표시되는 WebContentsView 브라우저를 
 | **Theia 사례** | 사용 중 (v24.10.0) | Playwright MCP (보조) | 검증된 패턴 참고 가능 |
 
 **Playwright의 역할**: 참고 자료로만 활용
-- `ideas&external_references/playwright/` 소스코드에서 고수준 API 디자인, Selector 엔진, 아키텍처 패턴 학습
+- `references/playwright/` 소스코드에서 고수준 API 디자인, Selector 엔진, 아키텍처 패턴 학습
 - 실제 구현은 Puppeteer-core + CDP
 
 ---
@@ -1013,8 +1013,8 @@ async function queryDOM(selector?: string): Promise<string> {
 
 ### 참고 자료
 
-- **Puppeteer**: `ideas&external_references/puppeteer/` (실제 구현 참고)
-- **Playwright**: `ideas&external_references/playwright/` (API 디자인 참고)
+- **Puppeteer**: `references/puppeteer/` (실제 구현 참고)
+- **Playwright**: `references/playwright/` (API 디자인 참고)
 - **Theia 사례**: `packages/ai-ide/src/node/app-tester-agent/` (검증된 패턴)
 - **Electron 문서**: CDP 통합, WebContents Debugger API
 

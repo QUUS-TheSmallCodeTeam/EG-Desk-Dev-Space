@@ -198,7 +198,7 @@ flowchart TD
     subgraph SG1 [" "]
         direction LR
         Entry1[" "]:::invisible --> PMIdea["PM Agent: Document Idea
-  • Write: ideas&external_references/
+  • Write: references/
     eg-desk ideas/proximity-ai-idea.md
   • Saves concept, user rationale"]:::wideBox --> End1(["Stop
   • Idea saved for later
@@ -323,7 +323,7 @@ flowchart TD
     subgraph SG1 [" "]
         direction LR
         Entry1[" "]:::invisible --> PMIdea["PM Agent: Document Evolution Idea
-  • Write: ideas&external_references/eg-desk ideas/
+  • Write: references/eg-desk ideas/
     floating-ai-vision-evolution.md
   • Saves vision evolution concept, user rationale, affected features
   • Returns: Evolution idea documented"]:::wideBox --> End1(["Stop
@@ -539,7 +539,7 @@ flowchart TD
     subgraph SG4 [" "]
         direction LR
         Entry4[" "]:::invisible --> Later{"User: 나중에 구현?"}:::wideDecision --> SaveIdea["PM: Document Idea
-  • Write: ideas&external_references/
+  • Write: references/
     eg-desk ideas/[feature]-idea.md
   • Saves concept, rationale"]:::wideBox --> ResultD(["Stop
   • Idea saved for later
@@ -920,7 +920,7 @@ flowchart TD
 - **Parallel execution:** Multiple research agents run simultaneously
 - **Role separation:** PM diagnoses GAP (not technical scoring), Main Thread plans/executes research, PM evaluates vision alignment
 - **PM waits for user approval** before updating technology-stack.md
-- **Institutional memory:** Research docs preserved in ideas&external_references/
+- **Institutional memory:** Research docs preserved in references/
 
 **User:** "캔버스에 3D visualization을 추가하고 싶어. 어떤 framework가 좋을까?"
 
@@ -961,7 +961,7 @@ flowchart TD
   • Agent3: WebGL (lightweight, 2-3mo dev)"]:::wideBox
 
     --> Org["PHASE 4: MT Organize
-  • Write 3 docs: ideas&external_references/
+  • Write 3 docs: references/
     - threejs-research.md
     - babylonjs-research.md
     - webgl-research.md"]:::wideBox
@@ -1564,7 +1564,7 @@ flowchart TD
     Institutional Memory
 
     Everything documented:
-    - Research docs in ideas&external_references/
+    - Research docs in references/
     - PRDs for features
     - Decision rationales preserved
     - CODEBASE_STRUCTURE.md maintained
@@ -1952,7 +1952,7 @@ flowchart TD
   • Purpose: Orchestration guidance only"]:::wideBox
 
     MT --> Cannot["❌ CANNOT Read (When Orchestrating): Domain files
-  • ideas&external_references/ (PM domain)
+  • references/ (PM domain)
   • packages/ (framework analyzer domain)
   • App/framework code (Delegate to preserve context)
   • Vision/strategy docs (PM reads these)
@@ -2329,7 +2329,7 @@ flowchart TD
   • Cleanup:
     Bash: rm subagent_reports/[file].md
     OR
-    Bash: mv to ideas&external_references/ (if valuable)"]:::wideBox
+    Bash: mv to references/ (if valuable)"]:::wideBox
 
     --> End(["Complete
   • Benefit:

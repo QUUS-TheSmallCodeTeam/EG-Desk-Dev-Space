@@ -79,7 +79,17 @@
       "WebFetch(domain:stackoverflow.com)",
       "WebFetch(domain:gist.github.com)",
       "Read(//c/Projects/surf/**)",
-      "Bash(cd:*)"
+      "Bash(cd:*)",
+      "Bash(for dir in theia playwright puppeteer gemini-cli infinite-canvas)",
+      "Bash(do if [ -d \"$dir\" ])",
+      "Bash([ ! -d \"$dir/$dir\" ])",
+      "Bash(then mkdir -p \"$dir_temp\")",
+      "Bash(fi)",
+      "Bash(done)",
+      "Bash(do touch \"$dir/online_references.md\")",
+      "Bash(for file in .claude/commands/*.md)",
+      "Bash(do sed -i 's/ideas&external_references\\//references\\//g' \"$file\")",
+      "Bash(git ls-tree:*)"
     ],
     "deny": [],
     "ask": []

@@ -81,7 +81,7 @@ You: /pm-research-planning
 ### Situation 4: Research Results Evaluation
 
 **Main Thread Request Pattern**:
-- "Research complete. Findings in ideas&external_references/. Evaluate and recommend."
+- "Research complete. Findings in references/. Evaluate and recommend."
 - "I investigated [options]. Which aligns with vision?"
 
 **Execute Slash Command**: `/pm-research-evaluation`
@@ -375,7 +375,7 @@ Addressed MT request on deferral approach:
 ### Report Lifecycle
 
 **Active work**: Report exists in `subagent_reports/`
-**Completed**: Main Thread deletes report OR archives to `ideas&external_references/`
+**Completed**: Main Thread deletes report OR archives to `references/`
 
 You are NOT responsible for cleanup - Main Thread handles that.
 
@@ -393,20 +393,20 @@ When Main Thread provides research findings (from framework agents, research age
 1. **Clone or download the repository**:
    ```bash
    # Clone approach (preferred)
-   Bash: cd ideas&external_references && git clone [github-url] [project-name]
+   Bash: cd references && git clone [github-url] [project-name]
 
    # OR download zip approach
-   Bash: cd ideas&external_references && wget [zip-url] -O [project-name].zip
+   Bash: cd references && wget [zip-url] -O [project-name].zip
    Bash: unzip [project-name].zip && rm [project-name].zip
    ```
 
-2. **Location**: `ideas&external_references/[project-name]/`
-   - Example: `ideas&external_references/infinite-canvas/`
-   - Example: `ideas&external_references/gemini-cli/`
+2. **Location**: `references/[project-name]/`
+   - Example: `references/infinite-canvas/`
+   - Example: `references/gemini-cli/`
 
 3. **Create research summary** alongside the code:
    ```markdown
-   File: ideas&external_references/[project-name]-research.md
+   File: references/[project-name]-research.md
 
    # [Project Name] - Research Summary
 
@@ -456,9 +456,9 @@ When Main Thread provides research findings (from framework agents, research age
    ```
 
 4. **If research leads to PRD** (feature confirmed):
-   - Move summary to PRD: `ideas&external_references/eg-desk ideas/features/[feature]-prd.md`
-   - Keep cloned source in `ideas&external_references/[project-name]/`
-   - Update PRD with reference: "Implementation references: `ideas&external_references/[project-name]/`"
+   - Move summary to PRD: `ideas/confirmed/[feature]-prd.md`
+   - Keep cloned source in `references/[project-name]/`
+   - Update PRD with reference: "Implementation references: `references/[project-name]/`"
 
 ### 2. Web Search Research
 
@@ -469,7 +469,7 @@ When Main Thread provides research findings (from framework agents, research age
 **Process:**
 1. **Create research document**:
    ```markdown
-   File: ideas&external_references/[topic]-research.md
+   File: references/[topic]-research.md
 
    # [Topic] - Web Research Summary
 
@@ -531,7 +531,7 @@ When Main Thread provides research findings (from framework agents, research age
 
 3. **If research leads to PRD** (feature confirmed):
    - Incorporate research summary into PRD
-   - Reference original research doc: "Research details: `ideas&external_references/[topic]-research.md`"
+   - Reference original research doc: "Research details: `references/[topic]-research.md`"
    - Update research doc status to "INCORPORATED INTO PRD"
 
 ### 3. Research-to-PRD Workflow
@@ -547,7 +547,7 @@ When Main Thread provides research findings (from framework agents, research age
 **Process:**
 ```bash
 # Create PRD
-Write: ideas&external_references/eg-desk ideas/features/[feature]-prd.md
+Write: ideas/confirmed/[feature]-prd.md
 
 # PRD should include:
 - Research findings (from [topic]-research.md)
@@ -561,14 +561,14 @@ Write: ideas&external_references/eg-desk ideas/features/[feature]-prd.md
 ## References
 
 **Research Documents**:
-- `ideas&external_references/[topic]-research.md` - Web research findings
-- `ideas&external_references/[project-name]-research.md` - GitHub project analysis
+- `references/[topic]-research.md` - Web research findings
+- `references/[project-name]-research.md` - GitHub project analysis
 
 **Source Code References**:
-- `ideas&external_references/[project-name]/` - Cloned reference implementation
+- `references/[project-name]/` - Cloned reference implementation
 
 **Brainstorming History**:
-- `ideas&external_references/eg-desk ideas/brainstorming/[date]_[feature].md` - Original idea evolution
+- `ideas/brainstorming/[date]_[feature].md` - Original idea evolution
 ```
 
 **Scenario B: Research → Direct PRD (No "later" phase)**
@@ -576,16 +576,16 @@ Write: ideas&external_references/eg-desk ideas/features/[feature]-prd.md
 User says "바로 구현" immediately → Skip brainstorm, research → PRD directly:
 
 ```bash
-Write: ideas&external_references/eg-desk ideas/features/[feature]-prd.md
+Write: ideas/confirmed/[feature]-prd.md
 # Include research summary inline
 ```
 
 ### 4. Folder Organization
 
-**Reference Materials Root**: `ideas&external_references/`
+**Reference Materials Root**: `references/`
 
 ```
-ideas&external_references/
+references/
 ├── [github-project-1]/              # Cloned GitHub reference (source code)
 │   ├── src/
 │   ├── package.json
@@ -603,10 +603,10 @@ ideas&external_references/
 ```
 
 **Key Principles**:
-- ✅ GitHub projects: Root of `ideas&external_references/`
-- ✅ Research summaries: Root of `ideas&external_references/`
-- ✅ PRDs: `ideas&external_references/eg-desk ideas/features/` (only confirmed)
-- ✅ Brainstorms: `ideas&external_references/eg-desk ideas/brainstorming/` (deferred ideas)
+- ✅ GitHub projects: Root of `references/`
+- ✅ Research summaries: Root of `references/`
+- ✅ PRDs: `ideas/confirmed/` (only confirmed)
+- ✅ Brainstorms: `ideas/brainstorming/` (deferred ideas)
 
 ### 5. Documentation Quality Standards
 

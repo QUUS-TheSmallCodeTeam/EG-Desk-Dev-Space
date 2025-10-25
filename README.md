@@ -56,7 +56,7 @@ eg-desk/
 │   ├── agents/                  # Specialized AI agents
 │   ├── commands/                # Slash commands
 │   └── prompts/                 # Prompt templates
-├── ideas&external_references/    # Research materials
+├── references/    # Research materials
 │   ├── theia/                   # Theia framework (git clone)
 │   ├── claude-agent-sdk/        # Claude agent development
 │   ├── infinite-canvas/         # Canvas library reference

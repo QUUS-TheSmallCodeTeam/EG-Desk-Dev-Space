@@ -192,7 +192,7 @@ Bash: rm subagent_reports/YYYYMMDD_HHMM_[topic]-[agent-name].md
 
 **ARCHIVE** (if valuable for institutional memory):
 ```bash
-Bash: mv subagent_reports/YYYYMMDD_HHMM_[topic]-[agent-name].md ideas&external_references/[topic]-analysis.md
+Bash: mv subagent_reports/YYYYMMDD_HHMM_[topic]-[agent-name].md references/[topic]-analysis.md
 ```
 
 ### When to Delete Reports
@@ -281,19 +281,19 @@ Use git worktrees for complete filesystem isolation when multiple agents need to
 
 1. **Create worktrees** (one per parallel agent):
    ```bash
-   Bash: git worktree add ../theia-fork-task1 -b task1-branch
-   Bash: git worktree add ../theia-fork-task2 -b task2-branch
-   Bash: git worktree add ../theia-fork-task3 -b task3-branch
+   Bash: git worktree add ../egdesk-task1 -b task1-branch
+   Bash: git worktree add ../egdesk-task2 -b task2-branch
+   Bash: git worktree add ../egdesk-task3 -b task3-branch
    ```
 
 2. **Spawn coding-agents with worktree paths**:
    ```
    Task(agent: "coding-agent",
-        prompt: "Working directory: C:/Projects/theia-fork-task1
+        prompt: "Working directory: C:/Projects/egdesk-task1
                  [Agent 1 implementation instructions]")
 
    Task(agent: "coding-agent",
-        prompt: "Working directory: C:/Projects/theia-fork-task2
+        prompt: "Working directory: C:/Projects/egdesk-task2
                  [Agent 2 implementation instructions]")
    ```
 
@@ -304,7 +304,7 @@ Use git worktrees for complete filesystem isolation when multiple agents need to
 
 4. **Cleanup worktrees**:
    ```bash
-   Bash: git worktree remove ../theia-fork-task1 ../theia-fork-task2 ../theia-fork-task3
+   Bash: git worktree remove ../egdesk-task1 ../egdesk-task2 ../egdesk-task3
    ```
 
 **When to use**: Multiple agents modifying same files (package.json, tsconfig.json), experimenting with multiple approaches, or needing zero collision risk.
@@ -338,7 +338,7 @@ Subagent creates single report without `-p` suffix.
 [Research Workflow:]
 1. Invoke PM: "User wants [capability]. Current stack support?" → PM diagnoses limitation, returns RESEARCH_NEEDED with criteria
 2. Execute parallel research: Spawn 3+ general-purpose agents simultaneously (Three.js, Babylon.js, WebGL, etc.)
-3. Organize findings: Write to ideas&external_references/[tech]-research.md (institutional memory)
+3. Organize findings: Write to references/[tech]-research.md (institutional memory)
 4. Query analyzer agents: Technical assessment of integration complexity
 5. Return to PM: "/pm-research-evaluation" with findings → PM scores, recommends, updates technology-stack.md, creates PRD
 6. Implement (if approved): Follow Pattern 2 with new technology
@@ -347,7 +347,7 @@ Subagent creates single report without `-p` suffix.
 **Key Points:**
 - PM diagnoses limitation (not chooses framework)
 - Main Thread does research (parallel for speed)
-- Main Thread organizes findings in ideas&external_references/
+- Main Thread organizes findings in references/
 - PM evaluates results (vision-aligned recommendation)
 - Research preserved (institutional memory)
 
@@ -388,11 +388,11 @@ For one-off or experimental specialized tasks without creating a full agent:
 
 This is a fork of Eclipse Theia with Electron integration. The project contains:
 - **Framework analyzers**: Specialized agents for Theia and Electron framework analysis
-- **Reference materials**: Best practices and documentation in `ideas&external_references/`
+- **Reference materials**: Best practices and documentation in `references/`
 - **Agent swarm system**: Coordinated multi-agent workflows for complex tasks
 
 ## Key Resources
-- `ideas&external_references/claude-agent-sdk/` - Agent development best practices
+- `references/claude-agent-sdk/` - Agent development best practices
 - `.claude/agents/` - Specialized subagent definitions
 - `AGENTS.md` - Agent system documentation
 - `theia_overview.md` - Theia framework overview
@@ -514,20 +514,20 @@ I'll consult PM for strategic guidance, then execute the implementation.
 
    **Option C - Worktree Parallel** (shared file modifications):
    # Create worktrees
-   Bash: git worktree add ../theia-fork-task1 -b task1-branch
-   Bash: git worktree add ../theia-fork-task2 -b task2-branch
+   Bash: git worktree add ../egdesk-task1 -b task1-branch
+   Bash: git worktree add ../egdesk-task2 -b task2-branch
 
    # Spawn agents in different worktrees
    Task(agent: "coding-agent",
-        prompt: "Working directory: C:/Projects/theia-fork-task1
+        prompt: "Working directory: C:/Projects/egdesk-task1
                  [Agent 1 instructions]")
    Task(agent: "coding-agent",
-        prompt: "Working directory: C:/Projects/theia-fork-task2
+        prompt: "Working directory: C:/Projects/egdesk-task2
                  [Agent 2 instructions]")
 
    # Merge and cleanup after completion
    Bash: git checkout master && git merge task1-branch task2-branch
-   Bash: git worktree remove ../theia-fork-task1 ../theia-fork-task2
+   Bash: git worktree remove ../egdesk-task1 ../egdesk-task2
 
    Decision: Single task → A | Multiple tasks, independent files → B | Multiple tasks, shared files → C
 

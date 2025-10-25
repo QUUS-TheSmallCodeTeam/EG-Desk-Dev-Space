@@ -222,7 +222,7 @@ Bash: find subagent_reports -name "*.md" -type f 2>/dev/null | head -20
 
    **Action Required**:
    A) Delete (task resolved/abandoned)
-   B) Archive to ideas&external_references/ (valuable insights)
+   B) Archive to references/ (valuable insights)
    C) Keep (still actively working on it)
    ```
 

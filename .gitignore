@@ -40,9 +40,9 @@ typedoc.tsconfig.json
 
 # External cloned repositories (downloaded via setup.sh)
 # These are large external projects that should be cloned separately
-ideas&external_references/theia/
-ideas&external_references/playwright/
-ideas&external_references/puppeteer/
-ideas&external_references/gemini-cli/
-ideas&external_references/gemini-cli-main/
-ideas&external_references/infinite-canvas/infinite-canvas-master/
+# Nested structure: references/[project]/[project]/
+references/theia/theia/
+references/playwright/playwright/
+references/puppeteer/puppeteer/
+references/gemini-cli/gemini-cli/
+references/infinite-canvas/infinite-canvas/

@@ -350,11 +350,11 @@ Grep: "class.*ThemeSwitcher" (example pattern)
 ### Documentation Actions Taken
 
 **PRD Created** (if APPROVED):
-- File: `ideas&external_references/eg-desk ideas/features/[feature-name]-prd.md`
+- File: `references/eg-desk ideas/features/[feature-name]-prd.md`
 - Content: [Brief summary of PRD contents]
 
 **Vision Docs Updated** (if applicable):
-- File: `ideas&external_references/eg-desk ideas/[doc].md`
+- File: `references/eg-desk ideas/[doc].md`
 - Changes: [What was updated]
 
 **No Documentation Changes** (if REJECTED or waiting for user input)
@@ -362,7 +362,7 @@ Grep: "class.*ThemeSwitcher" (example pattern)
 ### References for Main Thread
 
 **Vision Documents Analyzed**:
-- `ideas&external_references/eg-desk ideas/[doc1].md` - [Key principle extracted]
+- `references/eg-desk ideas/[doc1].md` - [Key principle extracted]
 
 **Code Structure Discovered**:
 - `packages/[package]/` - [Similar feature found here]
@@ -396,4 +396,4 @@ Grep: "class.*ThemeSwitcher" (example pattern)
 
 **Considerations**: Manual override, preference persistence, smooth transitions
 
-**PRD Created**: `ideas&external_references/eg-desk ideas/features/time-based-terminal-theme-prd.md`
+**PRD Created**: `references/eg-desk ideas/features/time-based-terminal-theme-prd.md`

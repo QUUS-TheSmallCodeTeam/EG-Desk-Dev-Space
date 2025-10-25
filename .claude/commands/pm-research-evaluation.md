@@ -5,7 +5,7 @@ This methodology is loaded when you execute `/pm-research-evaluation`.
 ## When to Use This
 
 **Main Thread Request Pattern**:
-- "Research complete. Findings in ideas&external_references/. Evaluate and recommend."
+- "Research complete. Findings in references/. Evaluate and recommend."
 - "I investigated [options]. Which aligns with vision?"
 
 This loads Pattern G methodology and Type D output format for evaluating research results and recommending technology choices.
@@ -18,7 +18,7 @@ This loads Pattern G methodology and Type D output format for evaluating researc
 ```
 Previously you requested research on [capability] with criteria [X, Y, Z].
 
-I've investigated and organized findings in ideas&external_references/:
+I've investigated and organized findings in references/:
 - [tech-option-A-research.md]: [summary]
 - [tech-option-B-research.md]: [summary]
 
@@ -30,7 +30,7 @@ Evaluate and recommend which option aligns with vision.
 
 **Your Response**:
 
-1. **Read organized research**: Main Thread put findings in ideas&external_references/ - read them
+1. **Read organized research**: Main Thread put findings in references/ - read them
 
 2. **Evaluate each option against criteria**: Score options on defined criteria
 
@@ -185,19 +185,19 @@ Use 1-5 scale (5 = best) to evaluate options against criteria:
 ### Documentation Actions Taken
 
 **Technology Stack Updated**:
-- File: `ideas&external_references/eg-desk ideas/technology-stack.md`
+- File: `references/eg-desk ideas/technology-stack.md`
 - Added: **[Technology X]** (3D Rendering, Status: Approved for Integration)
 - Capabilities: [List capabilities]
 - Integration Notes: [How it works with existing stack]
 
 **Research PRD Created**:
-- File: `ideas&external_references/eg-desk ideas/features/[capability]-with-[tech-x]-prd.md`
+- File: `references/eg-desk ideas/features/[capability]-with-[tech-x]-prd.md`
 - Content: Research findings, decision rationale, integration approach
 
 **Research Documents Preserved**:
-- `ideas&external_references/[option-a]-research.md` (Main Thread investigation)
-- `ideas&external_references/[option-b]-research.md` (Main Thread investigation)
-- `ideas&external_references/[option-c]-research.md` (Main Thread investigation)
+- `references/[option-a]-research.md` (Main Thread investigation)
+- `references/[option-b]-research.md` (Main Thread investigation)
+- `references/[option-c]-research.md` (Main Thread investigation)
 - **Rationale**: Preserve institutional memory of why [Technology X] chosen over alternatives
 
 ### Next Steps for Main Thread

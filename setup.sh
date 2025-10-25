@@ -3,20 +3,27 @@
 
 echo "🚀 Setting up EG-DESK external references..."
 
-cd "ideas&external_references" || exit 1
+cd "references" || exit 1
 
-# Function to clone or update repository
+# Function to clone or update repository with nested structure
 clone_or_update() {
     local url=$1
     local dir=$2
     local name=$3
 
-    if [ -d "$dir" ]; then
+    # Create parent directory if not exists
+    mkdir -p "$dir"
+
+    if [ -d "$dir/$dir" ]; then
         echo "📦 Updating $name..."
-        cd "$dir" && git pull --depth 1 && cd ..
+        cd "$dir/$dir" && git pull --depth 1 && cd ../..
     else
         echo "📥 Cloning $name (shallow)..."
+        cd "$dir"
         git clone --depth 1 "$url" "$dir"
+        # Create online_references.md if not exists
+        [ ! -f "online_references.md" ] && touch "online_references.md"
+        cd ..
     fi
 }
 
@@ -26,30 +33,21 @@ clone_or_update "https://github.com/microsoft/playwright.git" "playwright" "Play
 clone_or_update "https://github.com/puppeteer/puppeteer.git" "puppeteer" "Puppeteer Automation"
 clone_or_update "https://github.com/google-gemini/gemini-cli.git" "gemini-cli" "Google Gemini CLI"
 
-# Clone infinite-canvas into subfolder
-if [ -d "infinite-canvas/infinite-canvas-master" ]; then
-    echo "📦 Updating infinite-canvas..."
-    cd "infinite-canvas/infinite-canvas-master" && git pull --depth 1 && cd ../..
-else
-    echo "📥 Cloning infinite-canvas (shallow)..."
-    mkdir -p "infinite-canvas"
-    cd "infinite-canvas"
-    git clone --depth 1 "https://github.com/emilefokkema/infinite-canvas.git" "infinite-canvas-master"
-    cd ..
-fi
+# Clone infinite-canvas
+clone_or_update "https://github.com/emilefokkema/infinite-canvas.git" "infinite-canvas" "Infinite Canvas"
 
-# Note: claude-agent-sdk and eg-desk ideas are project-specific resources
-# already included in the repository
+# Note: claude-agent-sdk is project-specific resource already included
+# EG-DESK ideas are managed in the ideas/ folder (features and brainstorming)
 
 cd ..
 
 echo "✅ External references setup complete!"
 echo ""
 echo "📂 Cloned repositories:"
-echo "   - ideas&external_references/theia/ (~54MB)"
-echo "   - ideas&external_references/playwright/ (~100MB)"
-echo "   - ideas&external_references/puppeteer/ (~20MB)"
-echo "   - ideas&external_references/gemini-cli/ (~10MB)"
-echo "   - ideas&external_references/infinite-canvas/infinite-canvas-master/ (~2MB)"
+echo "   - references/theia/theia/ (~54MB)"
+echo "   - references/playwright/playwright/ (~100MB)"
+echo "   - references/puppeteer/puppeteer/ (~20MB)"
+echo "   - references/gemini-cli/gemini-cli/ (~10MB)"
+echo "   - references/infinite-canvas/infinite-canvas/ (~2MB)"
 echo ""
 echo "💡 To update references later, run: ./setup.sh"

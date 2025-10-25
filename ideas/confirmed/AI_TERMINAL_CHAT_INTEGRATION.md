@@ -293,8 +293,8 @@ if (response.includesCommand) {
 
 ## 관련 리소스
 
-- **Claude Agent SDK**: `ideas&external_references/claude-agent-sdk/`
-- **Gemini CLI**: `ideas&external_references/gemini-cli/`
+- **Claude Agent SDK**: `references/claude-agent-sdk/`
+- **Gemini CLI**: `references/gemini-cli/`
 - **Theia AI Packages**: All `@theia/ai-*` packages in monorepo
 - **xterm.js Docs**: https://xtermjs.org/
 - **node-pty**: Used by `@theia/terminal`

@@ -97,7 +97,7 @@
   - Large-scale visualizations
   - Zoom/pan required
 - **Location**: TBD (planned: eg-desk_taehwa/canvas/)
-- **Documentation**: `ideas&external_references/infinite-canvas/`
+- **Documentation**: `references/infinite-canvas/`
 - **Integration Notes**:
   - To be used with Konva.js for object manipulation
   - Consider performance implications

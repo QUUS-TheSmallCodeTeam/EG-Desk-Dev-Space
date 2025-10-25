@@ -7,7 +7,7 @@ This folder contains reference materials for EG-DESK development.
 After cloning the main repository, you need to clone the external reference repositories:
 
 ```bash
-cd ideas&external_references
+cd references
 
 # Clone Theia (shallow clone for reference)
 git clone --depth 1 https://github.com/eclipse-theia/theia.git theia
@@ -40,7 +40,7 @@ setup.bat
 ## Folder Structure
 
 ```
-ideas&external_references/
+references/
 ├── README.md                 # Original reference docs
 ├── SETUP.md                  # This file - setup instructions
 ├── claude-agent-sdk/        # Claude agent development resources ✅ (in git)

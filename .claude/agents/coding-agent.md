@@ -62,7 +62,7 @@ Main Thread may spawn you in a git worktree (separate working directory) for par
 **HOW TO DISCOVER YOUR WORKTREE**:
 
 1. **CHECK PROMPT FIRST**: Look for "Working directory: " string at beginning of task prompt
-   - Example prompt: `Working directory: C:/Projects/theia-fork-task1\n\nImplement Feature A...`
+   - Example prompt: `Working directory: C:/Projects/egdesk-task1\n\nImplement Feature A...`
    - If found: Use that path as base for all file operations
    - If NOT found: Use current working directory (default project root)
 
@@ -70,9 +70,9 @@ Main Thread may spawn you in a git worktree (separate working directory) for par
 
 1. **All file operations use that base directory**:
    - Read, Write, Edit: Interpret relative paths from worktree directory
-   - Example: Working directory `C:/Projects/theia-fork-task1`
-     - File `package.json` → `C:/Projects/theia-fork-task1/package.json`
-     - File `packages/core/src/index.ts` → `C:/Projects/theia-fork-task1/packages/core/src/index.ts`
+   - Example: Working directory `C:/Projects/egdesk-task1`
+     - File `package.json` → `C:/Projects/egdesk-task1/package.json`
+     - File `packages/core/src/index.ts` → `C:/Projects/egdesk-task1/packages/core/src/index.ts`
 
 2. **Follow all normal processes within that worktree**:
    - Conflict check: Read `[worktree]/eg-desk*/CODEBASE_STRUCTURE.md`
@@ -85,24 +85,24 @@ Main Thread may spawn you in a git worktree (separate working directory) for par
    - Work normally - Main Thread handles merge/cleanup
 
 **When no working directory specified:**
-- Use current working directory (default: project root `C:/Projects/theia-fork`)
+- Use current working directory (default: project root `C:/Projects/EG-Desk-Dev-Space`)
 
 **Why worktrees?**
 - **Parallel execution**: Multiple coding-agents can modify same files simultaneously
-- **Filesystem isolation**: Each worktree = independent directory (e.g., `theia-fork-task1/`, `theia-fork-task2/`)
+- **Filesystem isolation**: Each worktree = independent directory (e.g., `egdesk-task1/`, `egdesk-task2/`)
 - **No collisions**: Your `package.json` ≠ other agent's `package.json` (different physical files)
 - **Main Thread merges**: After completion, Main Thread runs `git merge` to combine branches
 
 **Example invocation:**
 ```
 Task(agent: "coding-agent",
-     prompt: "Working directory: C:/Projects/theia-fork-task1
+     prompt: "Working directory: C:/Projects/egdesk-task1
 
              Implement Feature A...
              [rest of instructions]")
 ```
 
-Your file operations automatically use `C:/Projects/theia-fork-task1/` as base.
+Your file operations automatically use `C:/Projects/egdesk-task1/` as base.
 
 ## Your Process
 
