@@ -2,88 +2,244 @@
 
 This document maps the complete agent orchestration system for the EG-DESK project through concrete workflow scenarios, showing exactly who does what at each step.
 
-## System Overview
+## Master Flow Diagram: All Request Types
+
+This diagram shows the complete routing logic and agent communication flow. **CRITICAL**: All subagents report back to Main Thread (via subagent_reports/), and Main Thread communicates results to User.
 
 ```
-User Request
-     │
-     ▼
-Main Thread (analyzes & routes)
-     │
-     ├─ Simple? → Execute directly
-     ├─ Framework question? → Direct to framework analyzer agent
-     ├─ New agent? → Invoke claude-agent-sdk-analyzer-agent
-     │
-     └─ Development task? → PM-driven workflow:
-            │
-            ▼
-         PM Agent (Strategic Guide)
-            ├─ Discovers tech stack (Glob technology-stack.md)
-            ├─ Vision alignment check
-            ├─ Technology stack selection (from discovered stack)
-            ├─ Implementation status check (already implemented?)
-            ├─ Code location (eg-desk_taehwa/ or packages/)
-            ├─ Implementation phasing
-            ├─ Creates PRD (if approved)
-            └─ Returns strategic guide to Main Thread
-                 │
-                 ▼
-         Main Thread (Executor)
-            ├─ Creates plan based on PM's guide
-            ├─ Queries framework agents (per PM's direction)
-            ├─ (Optional) Returns to PM for plan review
-            ├─ Synthesizes PM guide + framework patterns
-            └─ Spawns coding-agent(s):
-                 • Direction (what to implement)
-                 • File list (CREATE/MODIFY/DELETE/REFERENCE)
-                 • coding-agent reads files for details
-            │
-            ▼
-         Main Thread builds, tests, commits
+                                                    User Request
+                                                         │
+                                                         ▼
+                                              ┌─────────────────┐
+                                              │  Main Thread    │
+                                              │ (Analyzes type) │
+                                              └────────┬────────┘
+                                                       │
+        ┬──────────────────────┬──────────────────────┼──────────────────────┬──────────────────────┬
+        │                      │                      │                      │                      │
+        ▼                      ▼                      ▼                      ▼                      ▼
+  Simple Task          Vision Question      Tech Investigation          Development          Agent Creation
+        │                      │                      │                      │                      │
+        │                      │              Has analyzer?                  │                      │
+        │                      │              ┌───────┴───────┐              │                      │
+        ▼                      ▼             Yes              No             ▼                      ▼
+  MT executes          ┌──────────┐    ┌──────────┐    ┌──────────┐  ┌──────────┐          ┌────────────┐
+        │              │PM Agent  │    │Analyzer  │    │PM Agent  │  │PM Agent  │          │claude-agent│
+        │              │(writes   │    │Agent     │    │(writes   │  │(writes   │          │-sdk-       │
+        │              │report to │    │(writes   │    │gap diag  │  │strategic │          │analyzer    │
+        │              │subagent_ │    │report to │    │to sub-   │  │guide to  │          │(creates    │
+        │              │reports/) │    │subagent_ │    │agent_    │  │subagent_ │          │agent file  │
+        │              └────┬─────┘    │reports/) │    │reports/) │  │reports/) │          │at .claude/ │
+        │                   │          └────┬─────┘    └────┬─────┘  └────┬─────┘          │agents/)    │
+        │                   │               │               │             │                └─────┬──────┘
+        │                   │               │               ▼             │                      │
+        │                   │               │        [Tech Research       │                      │
+        │                   │               │         Workflow]            │                      │
+        │                   │               │               │             │                      │
+        │                   └───────────────┴───────────────┤             │                      │
+        │                                                   │             │                      │
+        │                                                   ▼             │                      │
+        │                                        ┌──────────────────┐     │                      │
+        │                                        │   Main Thread    │     │                      │
+        │                                        │  (reads report   │     │                      │
+        │                                        │from subagent_    │     │                      │
+        │                                        │   reports/)      │◄────┘                      │
+        │                                        └────────┬─────────┘                            │
+        │                                                 │                                      │
+        │                                                 ▼                                      │
+        │                                        ┌──────────────────┐                            │
+        │                                        │   Main Thread    │                            │
+        │                                        │  (synthesizes)   │                            │
+        │                                        └────────┬─────────┘                            │
+        │                                                 │                                      │
+        │                                                 ▼                                      │
+        │                                        [PM-Driven Dev                                  │
+        │                                         Workflow Below]                                │
+        │                                                 │                                      │
+        └─────────────────────────────────────────────────┼──────────────────────────────────────┘
+                                                          │
+                                                          ▼
+                                                        USER
+                                                          │
+                                                    (After USER)
+                                                          │
+        ┬─────────────────────────────────────────────────┼──────────────────────────────────────┬
+        │                                                 │                                      │
+        ▼                                                 ▼                                      ▼
+   Simple Task                                    Tech Invest. (No)                      Agent Creation
+   Vision Ques.                                   requires follow-up                     (Complete)
+   Tech Invest. (Yes)                                    │
+   (Complete - END)                                      │
+                                                         ▼
+                                              ┌──────────────────┐
+                                              │   Main Thread    │
+                                              │ (plans parallel  │
+                                              │  research)       │
+                                              └────────┬─────────┘
+                                                       │
+                                        ┌──────────────┼──────────────┐
+                                        │              │              │
+                                        ▼              ▼              ▼
+                                  ┌──────────┐  ┌──────────┐  ┌──────────┐
+                                  │Research  │  │Research  │  │Research  │
+                                  │Agent 1   │  │Agent 2   │  │Agent 3   │
+                                  │(writes to│  │(writes to│  │(writes to│
+                                  │subagent_ │  │subagent_ │  │subagent_ │
+                                  │reports/) │  │reports/) │  │reports/) │
+                                  └────┬─────┘  └────┬─────┘  └────┬─────┘
+                                       │              │              │
+                                       └──────────────┼──────────────┘
+                                                      │
+                                                      ▼
+                                           ┌──────────────────┐
+                                           │   Main Thread    │
+                                           │ (organizes       │
+                                           │  findings in     │
+                                           │  references/)    │
+                                           └────────┬─────────┘
+                                                    │
+                                                    ▼
+                                           ┌──────────────────┐
+                                           │Technical Analyzer│
+                                           │(writes report to │
+                                           │subagent_reports/)│
+                                           └────────┬─────────┘
+                                                    │
+                                                    ▼
+                                           ┌──────────────────┐
+                                           │   PM Agent       │
+                                           │ (evaluates &     │
+                                           │  recommends)     │
+                                           └────────┬─────────┘
+                                                    │
+                                                    ▼
+                                           ┌──────────────────┐
+                                           │   Main Thread    │
+                                           │  (reads report)  │
+                                           └────────┬─────────┘
+                                                    │
+                                                    ▼
+                                                  USER
+                                                    │
+                                            (Approve/Reject?)
+                                                    │
+                                            [If Approve]
+                                                    │
+                                                    ▼
+                                           ┌──────────────────┐
+                                           │   PM Agent       │
+                                           │ (adopts tech,    │
+                                           │  updates stack,  │
+                                           │  creates PRD)    │
+                                           └────────┬─────────┘
+                                                    │
+                                                    ▼
+                                        [Proceed to PM-Driven
+                                         Dev Workflow Below]
+                                                    │
+                                                    ▼
+                                                  USER
 
-Roles: PM guides strategy → Main Thread executes → coding-agent implements
-```
-
-## Critical Architecture Principle: Metaphysical Separation
-
-**Main Thread** operates at a **meta-level** when orchestrating - it coordinates agents but delegates domain-specific file reading to specialized agents.
-
-### File Reading Hierarchy:
-
-```
-┌─────────────────────────────────────────────────┐
-│ Meta Level (Orchestration)                      │
-│                                                  │
-│ Main Thread:                                    │
-│  • Routes requests                              │
-│  • Identifies agents (from system prompt)       │
-│  • Creates mission prompts (orchestration)      │
-│  • Invokes agents                               │
-│  • Synthesizes results                          │
-│  • Builds/tests/commits (Bash only)             │
-│  • NEVER writes application code                │
-│  • Preserves context (delegates heavy reading)  │
-│                                                  │
-│ Can read for orchestration:                     │
-│  • .claude/prompts/ (orchestration guidelines)  │
-│  • .claude/agents/ (OPTIONAL - only for details)│
-│                                                  │
-│ Cannot read when orchestrating:                 │
-│  • vision docs, codebase (delegate to agents)   │
-└─────────────────────────────────────────────────┘
-         │
-         │ (delegates to)
-         ▼
-┌─────────────────────────────────────────────────┐
-│ Domain Level (Analysis & Expertise)             │
-│                                                  │
-│ PM Agent: reads vision docs                     │
-│ Framework Agents: read codebase/docs            │
-│ SDK Analyzer: reads SDK docs                    │
-│ coding-agent: WRITES code (only entity)         │
-│                                                  │
-│ Each agent reads/writes ONLY its domain         │
-└─────────────────────────────────────────────────┘
+   Development (Detailed Steps Below)
+        │
+        │ Step 1: Strategic Guide (shown above in main diagram)
+        │ Step 2: Framework Investigation
+        │
+        ▼
+   ┌──────────────────────┐
+   │   Main Thread        │
+   │ (plans investigation)│
+   └──────────┬───────────┘
+              │
+              ▼
+   ┌──────────────────────┐
+   │  Framework Analyzer  │
+   │  (writes report)     │
+   └──────────┬───────────┘
+              │
+              ▼
+   ┌──────────────────────┐
+   │   Main Thread        │
+   │  (reads report)      │
+   └──────────┬───────────┘
+              │
+              ▼
+   Extracts patterns
+              │
+              │ Step 3: Implementation Planning
+              │
+              ▼
+   ┌──────────────────────┐
+   │   Main Thread        │
+   │   (synthesizes       │
+   │  PM + Analyzer)      │
+   └──────────┬───────────┘
+              │
+              ▼
+   Creates impl plan
+   (Direction + File list)
+              │
+              ▼
+         ★ DELEGATION DECISION
+              │
+     ┌────────┴────────┐
+     │                 │
+     ▼                 ▼
+┌──────────┐    ┌──────────────┐
+│Main      │    │coding-agent  │
+│Thread    │    │(implements)  │
+│(<3 files)│    │(3+ files)    │
+└────┬─────┘    └──────┬───────┘
+     │                 │
+     │      ★ PARALLEL DECISION
+     │                 │
+     │    ┌────────────┼────────────┐
+     │    │            │            │
+     │    ▼            ▼            ▼
+     │ Sequential  Simple P.  Worktree P.
+     │    │            │            │
+     │    └────────────┼────────────┘
+     │                 │
+     └─────────────────┘
+              │
+              │ Step 4 (Optional): UX Flow Validation
+              │
+              ▼
+   ┌──────────────────────┐
+   │  UX Flow Validator   │
+   │  (writes report)     │
+   └──────────┬───────────┘
+              │
+              ▼
+   ┌──────────────────────┐
+   │   Main Thread        │
+   │  (reads report)      │
+   └──────────┬───────────┘
+              │
+              ▼
+      Issues found?
+              │
+     ┌────────┴────────┐
+    Yes               No
+     │                 │
+     ▼                 │
+┌─────────────┐        │
+│coding-agent │        │
+│  (fixes)    │        │
+└──────┬──────┘        │
+       │               │
+       └─→ Re-validate │
+                       │
+                       │ Step 5: Build & Commit
+                       │
+                       ▼
+            ┌──────────────────────┐
+            │   Main Thread        │
+            │ (build/test/commit)  │
+            └──────────┬───────────┘
+                       │
+                       ▼
+                     USER
 ```
 
 ## Workflow Scenarios
@@ -99,30 +255,13 @@ User → Main Thread (analyzes) → Glob("packages/ai-chat/**/*") → User
 
 **Total Agents:** 0 | **Who Wrote Code:** Nobody | **Duration:** Immediate
 
----
-
-### Scenario 2: Framework Question (Direct Agent)
-
-**User Request:** "How does Theia's dependency injection work?"
-
-**Flow:**
-```
-User → Main Thread (analyzes: Theia question)
-     ↓
-Task(agent: "theia-analyzer-agent", prompt: "Analyze Theia's DI system...")
-     ↓
-theia-analyzer-agent: Read(di.ts) + Grep("@injectable") + Glob(*-module.ts)
-     ↓ (returns detailed explanation with file refs)
-Main Thread → User
-```
-
-**Total Agents:** 1 (theia-analyzer-agent) | **Who Wrote Code:** Nobody | **Duration:** Single agent
-
-**Key Point:** Main Thread directly invoked the framework agent without going through swarm manager (efficiency optimization for single-domain questions).
+⚠️ **Common Mistakes:**
+- ❌ Using agents for simple tasks → Wastes resources
+- ❌ Using bash commands (find, ls) instead of Glob → Use specialized tools
 
 ---
 
-### Scenario 3: Vision Conflict with Decision Branches
+### Scenario 2: Vision Conflict with Decision Branches
 
 **User Request:** "Should we add a floating AI assistant that follows the mouse cursor?"
 
@@ -130,22 +269,49 @@ Main Thread → User
 
 **Flow:**
 ```
-PHASE 0: PM ANALYSIS
-User → MT → PM (discovers vision docs, finds AGAINST floating UI, reason: breaks spatial affordances)
-         ↓
-PM Returns: REJECT + Alternative (proximity-based AI, vision-aligned)
-
-★ USER DECISION 1: A) Accept alternative | B) Insist on original | C) Cancel
+User → Main Thread (analyzes: vision alignment question)
          │
-   ┌─────┼─────┐
-   A     B     C → [STOP]
-   │     │
-   │     └──→ PM Re-evaluates → ★ USER DECISION 2: Maintain vision | Evolve vision?
-   │                                                │                  │
-   │                                          [STOP - maintain]        ▼
-   │                                                         PM: Update vision docs
-   │                                                              + Document evolution
-   └─────────────────────────────────────────────────────────────────┴──→ Implementation
+         ▼
+   ┌──────────────┐
+   │  PM Agent    │ • Discovers vision docs (Glob ideas/)
+   │  (Analyzes)  │ • Finds: AGAINST floating UI
+   └──────┬───────┘ • Reason: breaks spatial affordances
+          │         • Returns: REJECT + Alternative
+          │           (proximity-based AI, vision-aligned)
+          ▼
+    ★ USER DECISION 1
+          │
+      ┌───┼───┐
+      │   │   │
+      A   B   C
+   Accept Insist Cancel
+   Alt.  Original  │
+      │   │   └──→ [STOP]
+      │   │
+      │   ▼
+      │   ┌──────────────┐
+      │   │  PM Agent    │ • Re-evaluates with user's rationale
+      │   │(Re-evaluates)│ • Provides deeper analysis
+      │   └──────┬───────┘
+      │          │
+      │          ▼
+      │    ★ USER DECISION 2
+      │          │
+      │      ┌───┴───┐
+      │      │       │
+      │   Maintain  Evolve
+      │   vision    vision
+      │      │       │
+      │  [STOP]     ▼
+      │        ┌──────────────┐
+      │        │  PM Agent    │ • Updates vision docs
+      │        │(Updates docs)│ • Documents evolution rationale
+      │        └──────┬───────┘
+      │               │
+      └───────────────┘
+              │
+              ▼
+      [Proceed to Implementation]
 ```
 
 **Decision Gates:**
@@ -154,189 +320,318 @@ PM Returns: REJECT + Alternative (proximity-based AI, vision-aligned)
 
 **Total Agents:** 2-3 (PM rejection → optional PM re-evaluation → optional PM vision update)
 
-**Critical Observations:**
+**Key Points:**
 - **PM provides insight, not just rejection**: Explains why conflict exists with evidence
 - **Constructive alternative**: Vision-aligned approach that solves same user need
 - **User can challenge vision**: PM reassesses, but user has final authority
 - **Vision can evolve**: PM documents evolution with user's rationale
 - **Institutional memory preserved**: Updates vision docs with reasoning
 
+⚠️ **Common Mistakes:**
+- ❌ PM auto-accepts conflicting features → Violates vision integrity
+- ❌ PM rejects without alternative → Unhelpful, user feels blocked
+- ❌ User challenges ignored → PM must always reassess when challenged
+- ❌ Vision evolution undocumented → Lost institutional memory
+
 ---
 
-### Scenario 4: Development with PM Strategic Guide
+### Scenario 3: Development with PM Strategic Guide
 
-**User Request:**
-```
-"Add a custom terminal theme that changes based on time of day"
-```
+**User Request:** "Add a custom terminal theme that changes based on time of day"
 
 **Variations covered:**
-- **Base flow**: PM guide → Framework investigation → Implementation
-- **Optional delegation**: Main Thread delegates to coding-agent if implementation complex (3+ files)
-- **Optional conflict check**: PM checks via Grep if feature already exists in eg-desk_taehwa/ (EG-DESK custom code only, not Theia framework)
-- **Optional UX validation**: ux-flow-simulator-agent validates complex flows
+- Base flow: PM guide → Framework investigation → Implementation
+- Optional delegation: Main Thread delegates to coding-agent if complex (3+ files)
+- Optional conflict check: Checks if feature exists in eg-desk_taehwa/ (EG-DESK custom code only)
+- Optional UX validation: ux-flow-simulator-agent validates complex flows
+- Parallel execution: Sequential / Simple Parallel / Worktree Parallel options
 
-**Step-by-Step Flow:**
+**Flow:**
 
 ```
-          ┌─────────────────────────────┐
-          │ PHASE 0: PM STRATEGIC GUIDE │
-          └──────────┬──────────────────┘
-                     ↓
-┌────────────────────────────────────────────────────────────┐
-│ Steps 1-7: User → Main Thread → PM Agent                  │
-│ • PM: Dynamic discovery (Glob vision docs + tech stack)    │
-│ • PM: Analyzes vision + existing structure                 │
-│ • PM: Creates PRD                                          │
-│ • PM Returns: APPROVE                                      │
-│   - Framework: Theia (terminal theming is Theia domain)    │
-│   - Location: packages/terminal/src/browser/               │
-│   - Approach: Phase 1-3 (analyze → design → implement)     │
-│   - Considerations: Manual override, preference persistence│
-└────────────────────┬───────────────────────────────────────┘
-                     │
-          ┌──────────┴────────────────────────────────────┐
-          │ PHASE 1: FRAMEWORK INVESTIGATION PLANNING     │
-          └──────────┬────────────────────────────────────┘
-                     ↓
-┌────────────────────────────────────────────────────────────┐
-│ Step 8: Main Thread                                        │
-│ • Plans investigation based on PM's guide                  │
-│ • Output: Query theia-analyzer for theme patterns, DI      │
-└────────────────────┬───────────────────────────────────────┘
-                     │
-          ┌──────────┴────────────────────────────────────┐
-          │ PHASE 2: FRAMEWORK INVESTIGATION (EXECUTION)  │
-          └──────────┬────────────────────────────────────┘
-                     ↓
-┌────────────────────────────────────────────────────────────┐
-│ Steps 9-11: Main Thread → theia-analyzer-agent             │
-│ • Analyzer reads terminal-theme-service.ts                 │
-│ • Analyzer reads terminal-frontend-module.ts               │
-│ • Analyzer returns: Pattern found + File List              │
-│   - CREATE time-based-theme-switcher.ts                    │
-│   - MODIFY terminal-frontend-module.ts:36                  │
-│   - REFERENCE workspace-service.ts:89 (@injectable pattern)│
-└────────────────────┬───────────────────────────────────────┘
-                     │
-          ┌──────────┴────────────────────────┐
-          │ PHASE 3: IMPLEMENTATION PLANNING  │
-          └──────────┬────────────────────────┘
-                     ↓
-┌────────────────────────────────────────────────────────────┐
-│ Step 12: Main Thread                                       │
-│ • Synthesizes PM guide + framework patterns                │
-│ • Creates implementation plan:                             │
-│   - Direction: Create TimeBasedThemeSwitcher (Theia DI)    │
-│   - File List: CREATE/MODIFY/REFERENCE with line numbers   │
-└────────────────────┬───────────────────────────────────────┘
-                     │
-          ┌──────────┴──────────────────────────────────┐
-          │ PHASE 4: IMPLEMENTATION                     │
-          │ If complex: Delegate to coding-agent        │
-          │ If simple: Main Thread implements directly  │
-          └──────────┬──────────────────────────────────┘
-                     ↓
-┌────────────────────────────────────────────────────────────┐
-│ Steps 13-15: Coding Agent Delegation (if complex)          │
-│                                                            │
-│ ★ EXECUTION OPTIONS (Main Thread decides):                │
-│                                                            │
-│ ○ Option A - Sequential (Single Agent):                   │
-│   Task(agent: "coding-agent",                             │
-│        prompt: "Direction + File List")                   │
-│                                                            │
-│ ○ Option B - Simple Parallel (Independent Files):        │
-│   Task(agent: "coding-agent", prompt: "[Agent 1: X,Y]")  │
-│   Task(agent: "coding-agent", prompt: "[Agent 2: A,B]")  │
-│   Use when: Agents modify different files                 │
-│                                                            │
-│ ○ Option C - Worktree Parallel (Shared Files):           │
-│   # Create worktrees                                      │
-│   Bash: git worktree add ../egdesk-t1 -b task1           │
-│   Bash: git worktree add ../egdesk-t2 -b task2           │
-│   # Spawn agents in different worktrees                   │
-│   Task(agent: "coding-agent",                             │
-│        prompt: "Working dir: C:/Projects/egdesk-t1        │
-│                 [Agent 1 instructions]")                  │
-│   Task(agent: "coding-agent",                             │
-│        prompt: "Working dir: C:/Projects/egdesk-t2        │
-│                 [Agent 2 instructions]")                  │
-│   # After completion                                      │
-│   Bash: git checkout master && git merge task1 task2     │
-│   Bash: git worktree remove ../egdesk-t1 ../egdesk-t2    │
-│   Use when: Multiple agents need same files (package.json)│
-│                                                            │
-│ • Decision tree: Single task → A                          │
-│                  Multiple tasks, different files → B      │
-│                  Multiple tasks, same files → C           │
-│                                                            │
-│ • All options: coding-agent checks CODEBASE_STRUCTURE.md  │
-│   (EG-DESK custom code only) for conflicts first          │
-│ • If conflict: STOP, report to Main Thread → User decides │
-│ • If no conflict: Implement + Update structure doc        │
-└────────────────────┬───────────────────────────────────────┘
-                     │
-          ┌──────────┴──────────────────────────┐
-          │ PHASE 4.5: UX FLOW VALIDATION       │
-          │            (Optional)               │
-          └──────────┬──────────────────────────┘
-                     ↓
-┌────────────────────────────────────────────────────────────┐
-│ Steps 16a-d: UX Flow Simulator (optional)                  │
-│ • Main Thread decides: Complex flow? Worth validating?     │
-│ • If yes: Invoke ux-flow-simulator-agent                   │
-│ • Simulator traces execution paths                         │
-│ • If issues found → coding-agent fixes → Re-validate       │
-│ • If no issues → Proceed to build                          │
-│                                                            │
-│ Skip validation for:                                       │
-│ ❌ Simple CRUD operations                                  │
-│ ❌ Pure UI styling changes                                 │
-│ ❌ Documentation updates                                   │
-│                                                            │
-│ Use validation for:                                        │
-│ ✅ Complex user interaction flows                          │
-│ ✅ State management with race conditions                   │
-│ ✅ Async operations or event handling                      │
-│ ✅ Critical features (security, data integrity)            │
-└────────────────────┬───────────────────────────────────────┘
-                     │
-          ┌──────────┴──────────────┐
-          │ PHASE 5: BUILD & COMMIT │
-          └──────────┬──────────────┘
-                     ↓
-┌────────────────────────────────────────────────────────────┐
-│ Step 17: Main Thread                                       │
-│ • Builds, tests, commits                                   │
-│ • Tools: Bash("npm run build && git add . && git commit")  │
-└────────────────────────────────────────────────────────────┘
+User → Main Thread (analyzes: development task)
+         │
+         ▼
+   ┌──────────────┐
+   │  PM Agent    │ • Discovers tech stack (Glob technology-stack.md)
+   │  (Strategic  │ • Vision alignment check
+   │   Guide)     │ • Analyzes existing structure
+   └──────┬───────┘ • Creates PRD
+          │         • Returns: APPROVE
+          │           - Framework: Theia (terminal theming)
+          │           - Location: packages/terminal/src/browser/
+          │           - Approach: analyze → design → implement
+          │           - Considerations: manual override, persistence
+          ▼
+    Approve / Reject / Alternative?
+          │
+    [If Approve]
+          │
+          ▼
+   ┌──────────────────┐
+   │  Main Thread     │ • Plans investigation based on PM's guide
+   │  (Plans          │ • Identifies patterns to research
+   │   investigation) │ • Output: Query theia-analyzer for theme patterns, DI
+   └──────┬───────────┘
+          │
+          ▼
+   ┌──────────────────────┐
+   │  theia-analyzer      │ • Reads terminal-theme-service.ts
+   │  (Framework          │ • Reads terminal-frontend-module.ts
+   │   investigation)     │ • Returns pattern + file list:
+   └──────┬───────────────┘   - CREATE time-based-theme-switcher.ts
+          │                   - MODIFY terminal-frontend-module.ts:36
+          │                   - REFERENCE workspace-service.ts:89 (@injectable)
+          ▼
+   ┌──────────────────────┐
+   │  Main Thread         │ • Synthesizes PM guide + framework patterns
+   │  (Creates impl plan) │ • Creates implementation plan:
+   └──────┬───────────────┘   - Direction: Create TimeBasedThemeSwitcher
+          │                   - File list: CREATE/MODIFY/REFERENCE w/ line nums
+          ▼
+    ★ DELEGATION DECISION
+          │
+      ┌───┴───┐
+      │       │
+      ▼       ▼
+   Simple   Complex (3+ files)
+      │       │
+      │       │
+      ▼       ▼
+   ┌──────┐ ┌────────────────┐
+   │ Main │ │ coding-agent   │ • Checks CODEBASE_STRUCTURE.md for conflicts
+   │Thread│ │ (Implements)   │   (EG-DESK custom code only)
+   └──┬───┘ └────┬───────────┘ • If conflict: STOP → User decides
+      │          │             • If no conflict: Implement
+      │          │
+      │          ▼
+      │    ★ PARALLEL DECISION (for complex tasks)
+      │          │
+      │      ┌───┼───┐
+      │      │   │   │
+      │      ▼   ▼   ▼
+      │   ┌──────────────────────────────────────────────────┐
+      │   │ Option A: Sequential (1 agent)                   │
+      │   │   Task(agent: "coding-agent",                    │
+      │   │        prompt: "Direction + File List")          │
+      │   │                                                  │
+      │   │ Option B: Simple Parallel (different files)     │
+      │   │   Task(agent: "coding-agent", "[Agent 1: X,Y]") │
+      │   │   Task(agent: "coding-agent", "[Agent 2: A,B]") │
+      │   │                                                  │
+      │   │ Option C: Worktree Parallel (same files)        │
+      │   │   Bash: git worktree add ../egdesk-t1 -b task1  │
+      │   │   Bash: git worktree add ../egdesk-t2 -b task2  │
+      │   │   Task(agent: "coding-agent",                   │
+      │   │        prompt: "Working dir: egdesk-t1 ...")    │
+      │   │   Task(agent: "coding-agent",                   │
+      │   │        prompt: "Working dir: egdesk-t2 ...")    │
+      │   │   Bash: git checkout master && git merge ...    │
+      │   │   Bash: git worktree remove ...                 │
+      │   └──────────────────┬───────────────────────────────┘
+      │                      │
+      └──────────────────────┘
+                │
+                ▼
+   ┌────────────────────────┐
+   │ (Optional) UX Flow     │ • Main Thread decides: Complex flow?
+   │  Validator             │ • If yes: Invoke ux-flow-simulator-agent
+   └────────┬───────────────┘ • Traces execution paths
+            │                 • If issues: coding-agent fixes → Re-validate
+            │
+            ▼
+   ┌────────────────────────┐
+   │  Main Thread           │ • Builds, tests, commits
+   │  (Build/Test/Commit)   │ • Bash("npm run build && git add . && git commit")
+   └────────────────────────┘
 ```
 
-**Total Agents Invoked:** 2-4 (PM → framework analyzer → optional coding-agent → optional ux-flow-simulator)
+**Total Agents:** 2-4 (PM → framework analyzer → optional coding-agent → optional ux-flow-simulator)
 
 **Who Wrote Code:** coding-agent (if delegated) or Main Thread (if simple)
 
-**Critical Observations:**
-- **PM provides complete strategic direction**: Framework, location, approach, considerations
+**Key Points:**
+- **PM provides strategic direction**: Framework, location, approach, considerations
 - **PM creates PRD**: Documents approved feature
 - **Main Thread plans investigation**: Identifies framework patterns to research
-- **Framework agent investigates**: Provides technical patterns (not strategic direction)
-- **Main Thread creates implementation plan**: Synthesizes PM guide + framework patterns
-- **Conflict detection** (EG-DESK custom code only): coding-agent checks CODEBASE_STRUCTURE.md BEFORE implementing, STOPS if conflict found, reports to user for decision
-- **Structure document updates** (EG-DESK custom code only): coding-agent updates after successful implementation
-- **coding-agent executes** (optional): Follows synthesized plan, keeps Main Thread context clean
-- **UX flow validation** (optional): Main Thread's discretion for complex flows
-- **Main Thread builds/tests/commits**: Retains control of deployment
+- **Framework agent investigates**: Returns technical patterns (not strategic direction)
+- **Main Thread synthesizes**: PM guide + framework patterns → implementation plan
+- **Conflict detection** (EG-DESK custom code only): coding-agent checks CODEBASE_STRUCTURE.md BEFORE implementing
+- **Structure document updates** (EG-DESK custom code only): coding-agent updates after success
+- **coding-agent delegation** (optional): For large implementations (3+ files), preserves MT context
+- **UX validation** (optional): Main Thread's discretion for complex flows
+- **Main Thread retains control**: Builds, tests, commits
 
-**When to use coding-agent delegation:**
+**When to delegate to coding-agent:**
 - Large implementations (3+ files)
 - Main Thread needs to stay available for orchestration
 - Context preservation is critical
 
 **When conflict checking applies:**
 - **YES**: EG-DESK custom features (eg-desk_taehwa/*) - check CODEBASE_STRUCTURE.md
-- **NO**: Theia framework modifications (packages/*) - no conflict checking needed
+- **NO**: Theia framework modifications (packages/*) - no conflict checking
+
+**UX validation criteria:**
+- ✅ Use for: Complex flows, state management, race conditions, async ops, critical features
+- ❌ Skip for: Simple CRUD, pure UI styling, documentation updates
+
+⚠️ **Common Mistakes:**
+- ❌ Skipping PM for development tasks → No strategic alignment, no PRD
+- ❌ Auto-resolving conflicts → coding-agent cannot make strategic decisions
+- ❌ Forgetting CODEBASE_STRUCTURE.md update → Future conflicts undetectable
+- ❌ Hardcoding EG-DESK paths → Use Glob to discover eg-desk*/ dynamically
+
+---
+
+### Scenario 4: Technology Research & Investigation
+
+This scenario covers two workflows depending on whether a dedicated analyzer agent exists:
+
+**Branch A: Adopted Technology Investigation** - When analyzer agent exists (theia/electron/infinite-canvas)
+**Branch B: New Technology Evaluation** - When researching new technologies for adoption
+
+---
+
+#### Branch A: Adopted Technology Investigation
+
+**User Request:** "How does Theia's dependency injection work?"
+
+**When to use:** Investigating details of already-adopted technologies with dedicated analyzer agents.
+
+**Flow:**
+```
+User → Main Thread (analyzes: adopted tech investigation)
+         │
+         ▼
+   ┌──────────────────────┐
+   │  Analyzer Agent      │ • Reads references/[tech]/
+   │  (theia/electron/    │   (previous investigation files)
+   │   infinite-canvas)   │ • WebFetch + WebSearch (official docs)
+   └──────────┬───────────┘ • Returns detailed investigation
+              │               with file:line references
+              ▼
+          Result
+```
+
+**Total Agents:** 1 (analyzer agent) | **Who Wrote Code:** Nobody | **Duration:** Single agent
+
+**Key Points:**
+- **Analyzer agents** investigate adopted technologies with institutional memory
+- **Read references/[tech]/**: Previous investigation files guide research
+- **WebFetch + WebSearch**: Access official docs for up-to-date info
+- **No PM involvement**: These are technical investigations, not strategic decisions
+- **file:line references**: Analyzer provides evidence-based explanations
+
+**When analyzer agents get involved:**
+- PM requests during Development workflow: "I need to know how Theia implements X"
+- User asks direct questions: "How does Electron handle IPC?"
+- MT needs technical patterns: "What's the Theia DI pattern for services?"
+
+⚠️ **Common Mistakes:**
+- ❌ Going through PM for adopted tech questions → Unnecessary overhead
+- ❌ Using general-purpose agents for recurring tech → Create analyzer agent instead
+- ❌ Not reading references/[tech]/ → Lose institutional memory
+- ❌ Main Thread investigates directly → Violates metaphysical separation
+
+---
+
+#### Branch B: New Technology Evaluation
+
+**User Request:** "캔버스에 3D visualization을 추가하고 싶어. 어떤 framework가 좋을까?"
+
+**When to use:** Evaluating new technologies not yet in tech stack, requires PM for vision alignment.
+
+**Flow:**
+```
+User → Main Thread (analyzes: technology gap)
+         │
+         ▼
+   ┌──────────────┐
+   │  PM Agent    │ • Discovers tech stack (Glob technology-stack.md)
+   │  (Diagnoses  │ • Diagnoses: Konva.js = 2D-only, cannot render 3D
+   │   Gap)       │ • Returns: RESEARCH_NEEDED
+   └──────┬───────┘   - Gap: 3D rendering
+          │           - Criteria: bundle size, integration, performance
+          │           - Options: Three.js, Babylon.js, WebGL
+          ▼
+   ┌──────────────────┐
+   │  Main Thread     │ • Plans parallel research (auto-proceed)
+   │  (Plans          │ • Chooses 3 frameworks to investigate
+   │   research)      │ • No user approval needed for research start
+   └──────┬───────────┘
+          │
+          ▼
+   ┌─────────┐ ┌─────────┐ ┌─────────┐
+   │Research │ │Research │ │Research │ • WebFetch, WebSearch
+   │Agent 1  │ │Agent 2  │ │Agent 3  │ • Write to subagent_reports/
+   │Three.js │ │Babylon  │ │ WebGL   │   (temporary, NOT references/)
+   └────┬────┘ └────┬────┘ └────┬────┘
+        │           │           │
+        └───────────┼───────────┘
+                    │
+                    ▼
+   ┌──────────────────────────┐
+   │  Technical Analyzer      │ • Reads subagent_reports/*.md
+   │  (if applicable)         │ • Analyzes integration complexity
+   └──────┬───────────────────┘ • Returns: Three.js (medium), Babylon (high)
+          │
+          ▼
+   ┌──────────────────────────┐
+   │  PM Agent                │ • Reads subagent_reports/
+   │  (Evaluates)             │ • May WebSearch for additional info
+   └──────┬───────────────────┘ • Evaluates against criteria + vision
+          │                     • Returns: Recommended Three.js (4.2/5)
+          │                       - Rationale + Scoring + Tradeoffs
+          ▼
+    ★ USER DECISION
+          │
+      ┌───┼───┐
+      │   │   │
+      A   B   C
+  Approve Choose Modify
+  Three.js different criteria
+      │   │   │
+      │   │   └──→ Loop back to research
+      │   │
+      └───┴──→ ┌──────────────────┐
+               │  PM Agent        │ • Adopts technology
+               │  (Adopts tech)   │ • Updates tech-stack.md
+               └──────┬───────────┘ • Moves findings → references/
+                      │             • Deletes other subagent_reports/
+                      │             • Creates PRD
+                      │             • (Optional) Create analyzer agent
+                      │               if recurring investigation needed
+                      ▼
+               [Proceed to PM-Driven Development Workflow]
+```
+
+**Decision Gate:** User approves technology adoption? Choose different? Modify criteria?
+
+**Total Agents:** 5+ (PM diagnosis → 3 parallel research → technical analyzer → PM evaluation → PM adoption)
+
+**Key Points:**
+- **PM diagnoses gap**: Identifies limitation in current stack, suggests options
+- **Main Thread plans research**: Decides frameworks to investigate (auto-proceed, no user approval)
+- **Research to subagent_reports/**: Temporary workspace, NOT institutional memory yet
+- **PM evaluates**: Reads reports, may WebSearch, scores against criteria + vision
+- **User approves adoption**: Decision gate is technology choice, not research start
+- **PM adopts tech**: Moves confirmed findings to references/, updates tech-stack.md
+- **Optional analyzer creation**: If technology requires recurring investigation, create dedicated analyzer
+- **Cleanup**: Delete subagent_reports/ after decision
+
+**Why subagent_reports/ first?**
+- Temporary workspace for research notes
+- PM can validate findings before institutional memory
+- User can reject entire research without polluting references/
+- Clean separation: tentative vs confirmed knowledge
+
+⚠️ **Common Mistakes:**
+- ❌ PM creates full research plan → MT should plan research, PM only diagnoses
+- ❌ User approval for "proceed with research?" → Auto-proceed, approval is for adoption
+- ❌ Research findings directly to references/ → Use subagent_reports/ first
+- ❌ Skipping PM evaluation → Research findings need vision alignment check
+- ❌ Keeping subagent_reports/ after decision → Delete temporary files
+- ❌ Not creating analyzer agent → If tech investigated frequently, create analyzer
 
 ---
 
@@ -362,6 +657,12 @@ MT → User ("Agent created. Restart session to use konva-analyzer.")
 - **claude-agent** reads best practices, examines existing agents, designs and creates new agent file
 - **Evidence-based design**: claude-agent always reads `subagent-best-practices.md` before creating agents
 
+⚠️ **Common Mistakes:**
+- ❌ Main Thread creates agent directly → No best practices validation
+- ❌ Creating agent without reading existing agents → Inconsistent patterns
+- ❌ Skipping subagent-best-practices.md → Poor agent design
+- ❌ Creating temporary agents for recurring tasks → Should be permanent agents
+
 ---
 
 ### Scenario 6: Simple File Edit (coding-agent)
@@ -377,171 +678,12 @@ User → MT (analyzes: simple edit) → coding-agent (Read README, Edit typo) �
 
 **Key Point:** ALL file changes go through coding-agent for consistency. Main Thread NEVER edits application files directly.
 
----
-
-### Scenario 7: New Technology Research & Evaluation
-
-**User Request:** "캔버스에 3D visualization을 추가하고 싶어. 어떤 framework가 좋을까?"
-
-**Why this scenario:** User needs capability not in current stack - requires technology research. Shows complete flow with PM diagnosis, research execution, and user decision points.
-
-**Critical Flow (CORRECTED):**
-1. PM diagnoses limitation (NOT full research plan)
-2. Main Thread plans research (decides frameworks to investigate)
-3. NO user approval for starting research (auto-proceed)
-4. Research agents write to subagent_reports/ (temporary, NOT ideas/)
-5. PM reviews subagent_reports/, may use WebSearch
-6. User approval for technology adoption (decision gate)
-7. PM moves confirmed findings: subagent_reports/ → references/
-8. Delete subagent_reports/ after decision
-
-**Flow:**
-```
-PHASE 0: LIMITATION DIAGNOSIS
-User → MT → PM (discovers tech stack, diagnoses: Konva.js = 2D-only, cannot render 3D)
-         ↓
-PM Returns: RESEARCH_NEEDED + Gap + Criteria (bundle, integration, perf) + Options (Three.js, Babylon.js, WebGL)
-
-PHASE 1: MT PLANS RESEARCH (NO USER APPROVAL - AUTO-PROCEED)
-MT: Chooses 3 parallel investigations
-
-PHASE 2: PARALLEL RESEARCH EXECUTION → subagent_reports/ (temporary)
-MT spawns 3 Tasks simultaneously:
-  Task(agent: "general-purpose", "Research Three.js...") → subagent_reports/threejs.md
-  Task(agent: "general-purpose", "Research Babylon.js...") → subagent_reports/babylonjs.md
-  Task(agent: "general-purpose", "Research WebGL...") → subagent_reports/webgl.md
-
-PHASE 3: TECHNICAL ANALYSIS
-MT → infinite-canvas-analyzer-agent (reads subagent_reports/*.md)
-  ↓ Returns: Three.js (medium), Babylon.js (high complexity)
-
-PHASE 4: PM EVALUATION
-MT → PM (reads subagent_reports/, may WebSearch)
-  ↓ Evaluates against criteria + vision alignment
-  ↓ Returns: Recommended Three.js (4.2/5) | Rationale + Scoring + Tradeoffs
-
-★ USER DECISION: A) Approve Three.js | B) Choose different | C) Modify criteria (re-research)
-         │
-   ┌─────┼──────┐
-   A     B      C → Loop to Phase 2
-   │     │
-   └─────┴──→ PM: Adopt tech → Update tech-stack.md → Move [choice].md → ideas/
-               → Delete other reports → Create PRD → Implementation
-```
-
-**Decision Gate:** User approves technology adoption? Choose different? Modify criteria?
-
-**Total Agents:** 5+ (PM diagnosis → 3 parallel research → analyzer → PM evaluation → PM adoption)
-
-**Critical Flow Corrections:**
-- ✅ PM diagnoses gap (NOT full research plan)
-- ✅ Main Thread creates research plan (decides frameworks)
-- ✅ NO user approval for "proceed with research?" (auto-proceed)
-- ✅ Research findings go to **subagent_reports/** first (NOT ideas/)
-- ✅ PM reviews **subagent_reports/**, may use WebSearch
-- ✅ User approves **technology adoption decision** (not research start)
-- ✅ PM moves confirmed findings: subagent_reports/ → references/
-- ✅ Delete subagent_reports/ after decision
-
-**Why subagent_reports/ first?**
-- Temporary workspace for research notes
-- PM can validate findings before institutional memory
-- User can reject entire research without polluting ideas/
-- Clean separation: tentative vs confirmed knowledge
+⚠️ **Common Mistakes:**
+- ❌ Main Thread edits files directly → Breaks consistency pattern
+- ❌ Skipping coding-agent for "simple" changes → ALL changes should use coding-agent
+- ❌ Not reading file before editing → Edit tool requires prior Read
 
 ---
-
-## Quick Reference
-
-### Decision Matrix
-
-| Request Type | Route To | When | Who Writes Code | Duration |
-|--------------|----------|------|-----------------|----------|
-| **Simple Question** | Direct execution | File listing, basic git, grep | Nobody | Immediate |
-| **Framework Question** | Direct to framework agent | Theia/Electron/Canvas specific questions | Nobody | Single agent |
-| **Vision Question** | egdesk-pm-agent | Feature alignment, strategic decisions | Nobody | Single PM turn |
-| **Vision Conflict** | egdesk-pm-agent | User proposes conflicting feature | coding-agent (if user evolves vision) | 2-3 PM turns |
-| **Development Task** | PM-driven workflow | Implementing EG-DESK features | coding-agent | Multi-phase |
-| **Technology Research** | PM diagnosis → Research → PM evaluation | Need capability not in current stack | coding-agent (after adoption) | 5+ agents |
-| **Agent Creation** | claude-agent-sdk-analyzer-agent | Need new specialized agent | claude-agent | Single agent |
-| **Simple Edit** | coding-agent | Typo fixes, small changes | coding-agent | Single agent |
-
-### Common Patterns (Brief)
-
-**Pattern 1: Quick Framework Question** → See Scenario 2
-- Main Thread → framework analyzer → User
-
-**Pattern 2: Strategic Validation** → See Scenario 3
-- Main Thread → PM → User decision → Optional PM evolution
-
-**Pattern 3: Full Development Cycle** → See Scenario 4
-- Main Thread → PM guide → Framework investigation → Implementation → Build/commit
-
-**Pattern 4: Agent Creation** → See Scenario 5
-- Main Thread → claude-agent-sdk-analyzer → User (restart session)
-
-**Pattern 5: Large Implementation** → See Scenario 4 (coding-agent delegation)
-- Same as Pattern 3, but Main Thread delegates to coding-agent (3+ files)
-
-**Pattern 6: Conflict Detection** → See Scenario 4 (EG-DESK custom code)
-- coding-agent checks CODEBASE_STRUCTURE.md BEFORE implementing
-- If conflict: STOP → User decides → Retry with resolution
-
-**Pattern 7: UX Flow Validation** → See Scenario 4 (optional)
-- coding-agent implements → Main Thread validates via ux-flow-simulator
-- If issues: coding-agent fixes → Re-validate → Build
-
-**Pattern 8: Technology Research** → See Scenario 7
-- PM diagnoses gap → MT plans research → Research to subagent_reports/ → PM reviews → User approves → PM adopts (moves to ideas/)
-
-**Pattern 9: Worktree-based Parallel Implementation** → See Scenario 4 (Option C)
-- Main Thread creates git worktrees (separate directories)
-- Spawns multiple coding-agents in different worktrees
-- Each agent works in isolated filesystem (no collision possible)
-- Main Thread merges branches and cleans up worktrees
-- Use when: Multiple agents need to modify same files (package.json, tsconfig.json, shared configs)
-
-### Anti-Patterns to Avoid
-
-❌ **Main Thread Reads Vision Docs When Orchestrating**
-- **Why wrong**: Pollutes Main Thread's context with large documents
-- **What instead**: PM agent reads vision docs, returns summary
-
-❌ **Main Thread Reads Codebase When Orchestrating**
-- **Why wrong**: Context overload, metaphysical separation violation
-- **What instead**: Framework agents read codebase, return patterns
-
-❌ **Main Thread Edits Application Files Directly**
-- **Why wrong**: Inconsistent with coding-agent pattern, context pollution
-- **What instead**: Always delegate to coding-agent (even simple edits)
-
-❌ **Skipping PM for Development Tasks**
-- **Why wrong**: No strategic alignment, no PRD, no vision check
-- **What instead**: Always consult PM first for development work
-
-❌ **User Approval Gate for "Proceed with Research?"**
-- **Why wrong**: Unnecessary friction, research is exploration not commitment
-- **What instead**: Auto-proceed with research, user approves adoption decision
-
-❌ **Research Findings Directly to references/**
-- **Why wrong**: Pollutes institutional memory with unvalidated research
-- **What instead**: subagent_reports/ → PM review → User approval → PM moves to ideas/
-
-❌ **PM Creates Full Research Plan**
-- **Why wrong**: PM should diagnose gap, not design research execution
-- **What instead**: PM diagnoses limitation + suggests options, Main Thread creates research plan
-
-❌ **Auto-Resolving Conflicts**
-- **Why wrong**: coding-agent cannot make strategic decisions about naming/keybindings
-- **What instead**: STOP immediately, report to Main Thread → User decides
-
-❌ **Forgetting to Update CODEBASE_STRUCTURE.md**
-- **Why wrong**: Future conflicts undetectable, registry becomes stale
-- **What instead**: coding-agent updates structure doc AFTER successful implementation
-
-❌ **Hardcoding EG-DESK Paths**
-- **Why wrong**: Project structure may change
-- **What instead**: coding-agent uses Glob to discover eg-desk*/ and CODEBASE_STRUCTURE.md dynamically
 
 ## Success Metrics
 
