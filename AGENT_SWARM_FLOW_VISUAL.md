@@ -323,7 +323,7 @@ flowchart TD
     subgraph SG1 [" "]
         direction LR
         Entry1[" "]:::invisible --> PMIdea["PM Agent: Document Evolution Idea
-  • Write: references/eg-desk ideas/
+  • Write: ideas/brainstorming/
     floating-ai-vision-evolution.md
   • Saves vision evolution concept, user rationale, affected features
   • Returns: Evolution idea documented"]:::wideBox --> End1(["Stop

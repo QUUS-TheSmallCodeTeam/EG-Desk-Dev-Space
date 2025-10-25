@@ -185,19 +185,19 @@ Use 1-5 scale (5 = best) to evaluate options against criteria:
 ### Documentation Actions Taken
 
 **Technology Stack Updated**:
-- File: `references/eg-desk ideas/technology-stack.md`
+- File: `ideas/technology-stack.md`
 - Added: **[Technology X]** (3D Rendering, Status: Approved for Integration)
 - Capabilities: [List capabilities]
 - Integration Notes: [How it works with existing stack]
 
 **Research PRD Created**:
-- File: `references/eg-desk ideas/features/[capability]-with-[tech-x]-prd.md`
+- File: `ideas/confirmed/[capability]-with-[tech-x]-prd.md`
 - Content: Research findings, decision rationale, integration approach
 
 **Research Documents Preserved**:
-- `references/[option-a]-research.md` (Main Thread investigation)
-- `references/[option-b]-research.md` (Main Thread investigation)
-- `references/[option-c]-research.md` (Main Thread investigation)
+- `references/[project-a]/online_references.md` (Main Thread investigation)
+- `references/[project-b]/online_references.md` (Main Thread investigation)
+- `references/[project-c]/online_references.md` (Main Thread investigation)
 - **Rationale**: Preserve institutional memory of why [Technology X] chosen over alternatives
 
 ### Next Steps for Main Thread

@@ -51,27 +51,78 @@ The platform allows users to:
 ## Repository Structure
 
 ```
-eg-desk/
+EG-Desk-Dev-Space/
+├── src/                          # Development code (EG-DESK implementations)
+│   └── CODEBASE_STRUCTURE.md    # Services & keybindings registry
+├── docs/                         # External public documentation
+│   ├── EG-DESK_Whitepaper.md
+│   └── EG-DESK_백서_한글.md
+├── ideas/                        # Feature ideation and planning
+│   ├── brainstorming/           # Deferred or exploratory ideas
+│   └── confirmed/               # Approved PRDs ready for implementation
+├── references/                   # External reference materials
+│   └── [project]/
+│       ├── [project]/           # git clone (shallow, NOT git tracked)
+│       └── online_references.md # Research notes (git tracked)
 ├── .claude/                      # AI Agent Swarm System
-│   ├── agents/                  # Specialized AI agents
+│   ├── agents/                  # Agent definitions
 │   ├── commands/                # Slash commands
 │   └── prompts/                 # Prompt templates
-├── references/    # Research materials
-│   ├── theia/                   # Theia framework (git clone)
-│   ├── claude-agent-sdk/        # Claude agent development
-│   ├── infinite-canvas/         # Canvas library reference
-│   └── [other references]/
-├── docs/                         # Development documentation
-│   └── CODEBASE_STRUCTURE.md
-├── src/                          # Future: EG-DESK implementation
-│   ├── core/                    # (To be created)
-│   ├── native-tools/            # (To be created)
-│   └── external-integrations/   # (To be created)
-├── subagent_reports/            # AI agent analysis reports
-├── CLAUDE.md                     # Main agent instructions
-├── AGENTS.md                     # Agent system documentation
-└── AGENT_SWARM_FLOW.md          # Agent workflow documentation
+├── subagent_reports/            # Temporary agent communication (NOT git tracked)
+└── (Root docs: CLAUDE.md, AGENT_SWARM_FLOW.md, etc.)
 ```
+
+### Folder Rules (Managed by Swarm Team Agent)
+
+#### src/
+**Purpose**: Actual development code (EG-DESK custom implementations)
+- **Required files**: `CODEBASE_STRUCTURE.md` (services/keybindings registry)
+- **Allowed types**: `.ts`, `.tsx`, `.js`, `.jsx` (source code only)
+- **Git tracked**: Yes
+- **Validation**: No markdown documentation files (use `docs/` instead)
+
+#### docs/
+**Purpose**: External public documentation (whitepapers, design docs)
+- **Target audience**: External stakeholders, contributors
+- **Allowed types**: `.md`, `.pdf` (documentation only)
+- **Examples**: `EG-DESK_Whitepaper.md`, `EG-DESK_백서_한글.md`
+- **Git tracked**: Yes
+- **Validation**: No code files (`.ts`, `.tsx`, `.js`)
+
+#### ideas/
+**Purpose**: Feature ideation and planning
+- **Structure**:
+  - `brainstorming/`: Deferred or exploratory ideas
+  - `confirmed/`: Approved PRDs ready for implementation
+- **Content**: Markdown files with structured headers
+- **Git tracked**: Yes
+- **Validation**: PRD files must have required sections (Summary, Problem Statement, Proposed Solution)
+
+#### references/
+**Purpose**: External reference materials (cloned projects, research notes)
+- **Structure per project**:
+  - `[project]/online_references.md` ← User research notes (**required**, git tracked)
+  - `[project]/[project]/` ← git clone shallow (optional, **NOT** git tracked)
+- **Setup**: Run `bash setup.sh` to clone external repositories
+- **Git tracked**: Only `online_references.md` files (cloned repos excluded via `.gitignore`)
+- **Validation**:
+  - `online_references.md` must have `# [Project] References` header
+  - If `[project]/` subfolder exists, `setup.sh` must have corresponding clone command
+
+#### .claude/
+**Purpose**: AI Agent Swarm System (agent definitions, commands, prompts)
+- **Structure**:
+  - `agents/`: Agent definition files (`.md` with YAML frontmatter)
+  - `commands/`: Slash command implementations
+  - `prompts/`: Reusable prompt templates
+- **Git tracked**: Yes
+- **Validation**: Agent files must have valid YAML frontmatter
+
+#### subagent_reports/
+**Purpose**: Temporary agent-to-agent communication (file-based reporting)
+- **Content**: Agent work reports (created during tasks, deleted after completion)
+- **Git tracked**: No (temporary workspace, excluded via `.gitignore`)
+- **Lifecycle**: Created by agents → Read by Main Thread → Deleted when task complete
 
 ## Technology Stack (Planned)
 
@@ -167,4 +218,4 @@ Project maintained by Taehwa Team
 ---
 
 **Repository Created**: 2024-10-24
-**Last Updated**: 2024-10-24
+**Last Updated**: 2025-10-25

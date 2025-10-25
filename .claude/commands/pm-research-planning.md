@@ -149,22 +149,22 @@ Main Thread should run **3 parallel investigations**:
 
 **Investigation 1: [Option A]** (agent: general-purpose + WebSearch)
 - Research [Option A] capabilities, bundle size, integration approach
-- Organize findings in: `references/[option-a]-research.md`
+- Organize findings in: `references/[project-a]/online_references.md`
 
 **Investigation 2: [Option B]** (agent: general-purpose + WebSearch)
 - Research [Option B] capabilities, bundle size, integration approach
-- Organize findings in: `references/[option-b]-research.md`
+- Organize findings in: `references/[project-b]/online_references.md`
 
 **Investigation 3: [Option C]** (agent: general-purpose)
 - Assess feasibility of [Option C] implementation
-- Organize findings in: `references/[option-c]-research.md`
+- Organize findings in: `references/[project-c]/online_references.md`
 
 **All 3 can run simultaneously** - no dependencies between investigations.
 
 ### Expected Outcome
 
 **Main Thread will return with**:
-- 3 research documents organized in `references/`
+- 3 research documents organized in `references/[project]/online_references.md`
 - Analyzer agent reports on integration complexity, performance
 - Request for PM evaluation: "Which option aligns with vision?"
 
@@ -177,7 +177,7 @@ Main Thread should run **3 parallel investigations**:
 ### Next Steps for Main Thread
 
 1. **Investigate options in parallel**: Run 3 agents simultaneously to research options
-2. **Organize findings**: Create research documents in `references/`
+2. **Organize findings**: Create research documents in `references/[project]/online_references.md`
 3. **Query analyzer agents**: Get technical assessment of integration complexity
 4. **Return to PM**: Present findings for evaluation and recommendation
 ```

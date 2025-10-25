@@ -338,7 +338,7 @@ Subagent creates single report without `-p` suffix.
 [Research Workflow:]
 1. Invoke PM: "User wants [capability]. Current stack support?" → PM diagnoses limitation, returns RESEARCH_NEEDED with criteria
 2. Execute parallel research: Spawn 3+ general-purpose agents simultaneously (Three.js, Babylon.js, WebGL, etc.)
-3. Organize findings: Write to references/[tech]-research.md (institutional memory)
+3. Organize findings: Write to references/[project]/online_references.md (institutional memory)
 4. Query analyzer agents: Technical assessment of integration complexity
 5. Return to PM: "/pm-research-evaluation" with findings → PM scores, recommends, updates technology-stack.md, creates PRD
 6. Implement (if approved): Follow Pattern 2 with new technology
@@ -347,7 +347,7 @@ Subagent creates single report without `-p` suffix.
 **Key Points:**
 - PM diagnoses limitation (not chooses framework)
 - Main Thread does research (parallel for speed)
-- Main Thread organizes findings in references/
+- Main Thread organizes findings in references/[project]/online_references.md
 - PM evaluates results (vision-aligned recommendation)
 - Research preserved (institutional memory)
 

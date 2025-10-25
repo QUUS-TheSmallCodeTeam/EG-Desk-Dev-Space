@@ -89,7 +89,8 @@
       "Bash(do touch \"$dir/online_references.md\")",
       "Bash(for file in .claude/commands/*.md)",
       "Bash(do sed -i 's/ideas&external_references\\//references\\//g' \"$file\")",
-      "Bash(git ls-tree:*)"
+      "Bash(git ls-tree:*)",
+      "Bash(tree:*)"
     ],
     "deny": [],
     "ask": []

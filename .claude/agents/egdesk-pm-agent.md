@@ -385,80 +385,56 @@ When Main Thread provides research findings (from framework agents, research age
 
 ### 1. GitHub Reference Projects
 
-**When research involves GitHub project analysis:**
+**When research involves analyzing external GitHub projects:**
 
-**Principle**: Download and preserve the source code locally.
+**Principle**: Clone repository for code analysis + document findings in online_references.md
 
 **Process:**
-1. **Clone or download the repository**:
+1. **Update setup.sh** to include new project:
    ```bash
-   # Clone approach (preferred)
-   Bash: cd references && git clone [github-url] [project-name]
+   Edit: setup.sh
+   # Add line in clone section (around line 10-13):
+   clone_or_update "https://github.com/[org]/[project].git" "[project]" "[Project Display Name]"
 
-   # OR download zip approach
-   Bash: cd references && wget [zip-url] -O [project-name].zip
-   Bash: unzip [project-name].zip && rm [project-name].zip
+   # Update documentation section (around line 36):
+   echo "   - references/[project]/[project]/ (~XMB)"
    ```
 
-2. **Location**: `references/[project-name]/`
-   - Example: `references/infinite-canvas/`
-   - Example: `references/gemini-cli/`
-
-3. **Create research summary** alongside the code:
+2. **Create online_references.md template**:
    ```markdown
-   File: references/[project-name]-research.md
+   File: references/[project]/online_references.md
 
-   # [Project Name] - Research Summary
+   # [Project Name] References
 
-   **Source**: [GitHub URL]
-   **Cloned**: YYYY-MM-DD HH:MM KST
-   **Research Context**: [Why we're investigating this project]
+   ## Official Documentation & Resources
 
-   ## Project Background
+   **Core Resources**:
+   - [Official website URL] - [Description]
+   - [GitHub repository URL] - [Description]
+   - [Documentation URL] - [Description]
 
-   [What this project does, its purpose, maturity level]
-
-   ## Key Findings (In Context of EG-DESK Needs)
-
-   **What We Needed**:
-   - [EG-DESK requirement 1]
-   - [EG-DESK requirement 2]
-
-   **What This Project Provides**:
-   - ✅ [Feature that meets requirement]
-   - ⚠️ [Feature with limitations]
-   - ❌ [Missing feature]
-
-   ## Technical Analysis
-
-   **Architecture**:
-   - [Key architectural patterns found]
-
-   **Integration Approach**:
-   - [How this could integrate with EG-DESK]
-
-   **Code References** (in cloned source):
-   - `[project-name]/src/core.ts:45` - [Key pattern]
-   - `[project-name]/examples/usage.ts:120` - [Usage example]
-
-   ## Evaluation Against Criteria
-
-   | Criterion | Rating | Notes |
-   |-----------|--------|-------|
-   | [Criterion 1] | [1-5] | [Finding] |
-   | [Criterion 2] | [1-5] | [Finding] |
-
-   ## Recommendation
-
-   [Use / Don't Use / Needs More Research]
-
-   **Rationale**: [Vision-aligned reasoning]
+   **Key Notes**:
+   - [Important note about license, usage, etc.]
+   - [Installation/setup note]
+   - [Integration consideration]
    ```
 
-4. **If research leads to PRD** (feature confirmed):
-   - Move summary to PRD: `ideas/confirmed/[feature]-prd.md`
-   - Keep cloned source in `references/[project-name]/`
-   - Update PRD with reference: "Implementation references: `references/[project-name]/`"
+3. **Run setup.sh** to clone the repository:
+   ```bash
+   Bash: bash setup.sh
+   ```
+
+   This creates: `references/[project]/[project]/` with cloned source code
+
+4. **Document research findings** in `online_references.md`:
+   - Update the template with actual URLs and research
+   - Add sections for specific EG-DESK integration considerations
+   - Reference code patterns: `references/[project]/[project]/src/file.ts:line`
+
+5. **If research leads to PRD** (feature confirmed):
+   - Create PRD: `ideas/confirmed/[feature]-prd.md`
+   - Reference cloned source: "Implementation references: `references/[project]/[project]/`"
+   - Reference research: "Research notes: `references/[project]/online_references.md`"
 
 ### 2. Web Search Research
 
@@ -469,7 +445,7 @@ When Main Thread provides research findings (from framework agents, research age
 **Process:**
 1. **Create research document**:
    ```markdown
-   File: references/[topic]-research.md
+   File: references/[topic]/online_references.md
 
    # [Topic] - Web Research Summary
 
@@ -531,7 +507,7 @@ When Main Thread provides research findings (from framework agents, research age
 
 3. **If research leads to PRD** (feature confirmed):
    - Incorporate research summary into PRD
-   - Reference original research doc: "Research details: `references/[topic]-research.md`"
+   - Reference original research doc: "Research details: `references/[topic]/online_references.md`"
    - Update research doc status to "INCORPORATED INTO PRD"
 
 ### 3. Research-to-PRD Workflow
@@ -561,11 +537,11 @@ Write: ideas/confirmed/[feature]-prd.md
 ## References
 
 **Research Documents**:
-- `references/[topic]-research.md` - Web research findings
-- `references/[project-name]-research.md` - GitHub project analysis
+- `references/[topic]/online_references.md` - Web research findings
+- `references/[project-name]/online_references.md` - GitHub project analysis
 
 **Source Code References**:
-- `references/[project-name]/` - Cloned reference implementation
+- `references/[project-name]/[project-name]/` - Cloned reference implementation
 
 **Brainstorming History**:
 - `ideas/brainstorming/[date]_[feature].md` - Original idea evolution
@@ -586,25 +562,27 @@ Write: ideas/confirmed/[feature]-prd.md
 
 ```
 references/
-├── [github-project-1]/              # Cloned GitHub reference (source code)
-│   ├── src/
-│   ├── package.json
-│   └── README.md
-├── [github-project-2]/              # Another reference project
-├── [topic-1]-research.md            # Web research summary
-├── [topic-2]-research.md            # Another research doc
-├── eg-desk ideas/
-│   ├── brainstorming/
-│   │   └── YYYY-MM-DD_HHMM_[feature].md
-│   ├── features/                    # CONFIRMED features only
-│   │   └── [feature]-prd.md         # References research docs above
-│   ├── architecture/
-│   └── technology-stack.md
+├── [project-name]/                  # Reference project folder
+│   ├── [project-name]/              # Cloned GitHub repo (created by setup.sh)
+│   │   ├── src/
+│   │   ├── package.json
+│   │   └── README.md
+│   └── online_references.md         # Research notes for this project
+├── [another-project]/
+│   ├── [another-project]/           # Cloned repo
+│   └── online_references.md
+ideas/
+├── brainstorming/
+│   └── YYYY-MM-DD_HHMM_[feature].md
+├── confirmed/                       # CONFIRMED features only
+│   └── [feature]-prd.md             # References research docs above
+├── architecture/
+└── technology-stack.md
 ```
 
 **Key Principles**:
-- ✅ GitHub projects: Root of `references/`
-- ✅ Research summaries: Root of `references/`
+- ✅ GitHub projects: `references/[project]/[project]/` (cloned by setup.sh)
+- ✅ Research summaries: `references/[project]/online_references.md`
 - ✅ PRDs: `ideas/confirmed/` (only confirmed)
 - ✅ Brainstorms: `ideas/brainstorming/` (deferred ideas)
 

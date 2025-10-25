@@ -585,7 +585,7 @@ MT → PM (reads subagent_reports/, may WebSearch)
 | Agent | Domain | Can Read | Can Write | Output Format | Model |
 |-------|--------|----------|-----------|---------------|-------|
 | **Main Thread** | Orchestration | .claude/prompts/, .claude/agents/ (optional) | None (application code) | Synthesized plans, user communication | Default |
-| **egdesk-pm-agent** | Vision & Strategy | references/eg-desk ideas/, technology-stack.md | PRDs, vision docs, tech stack updates | Strategic guide, PRD, evaluation report | Inherit |
+| **egdesk-pm-agent** | Vision & Strategy | ideas/, technology-stack.md | PRDs, vision docs, tech stack updates | Strategic guide, PRD, evaluation report | Inherit |
 | **theia-analyzer-agent** | Theia Framework | packages/*, Theia docs | None | Pattern analysis, file lists (CREATE/MODIFY/DELETE/REFERENCE) | Inherit |
 | **electron-analyzer-agent** | Electron Framework | Electron docs (WebFetch) | None | Pattern analysis, API guidance | Inherit |
 | **infinite-canvas-analyzer-agent** | Infinite Canvas | references/infinite-canvas/ | None | Integration analysis | Inherit |
@@ -602,7 +602,7 @@ MT → PM (reads subagent_reports/, may WebSearch)
 - **Worktree Management**: Main Thread creates/merges/removes worktrees (git worktree commands), coding-agents work within assigned worktrees
 - **Structure Registry**: coding-agent maintains CODEBASE_STRUCTURE.md (EG-DESK custom code only)
 - **Research Notes**: general-purpose writes to subagent_reports/, PM moves to ideas/ after approval
-- **PRDs**: egdesk-pm-agent creates/updates in references/eg-desk ideas/features/
+- **PRDs**: egdesk-pm-agent creates/updates in ideas/confirmed/
 
 ## Conclusion
 
