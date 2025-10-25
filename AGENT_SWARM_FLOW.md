@@ -40,6 +40,13 @@ User → Main Thread
               │
               ▼
             User
+              │
+         ┌────┴─────┐
+         │          │
+      [STOP]    Adopt tech?
+                   │
+                   ▼
+            Scenario 3B (Vision Check)
 ```
 
 ---
@@ -68,6 +75,13 @@ User → Main Thread
               │
               ▼
             User
+              │
+         ┌────┴─────┐
+         │          │
+      [STOP]    Adopt tech?
+                   │
+                   ▼
+            Scenario 3B (Vision Check)
 ```
 
 ---
@@ -117,12 +131,12 @@ User → Main Thread
           ▼
     Vision aligned?
           │
-     ┌────┴────┐
-     │         │
+     ┌────┴────────────────────────────────────┐
+     │                                          │
    ACCEPT                              REJECT + Alternative
-     │                                        │
-     │                                        │
-     │                                        ▼
+     │                                          │
+     │                                          │
+     │                                          ▼
      │                                   ┌──────────────┐
      │                                   │ Main Thread  │ • Presents PM analysis
      │                                   │ (Reports)    │ • Offers alternative
@@ -152,36 +166,35 @@ User → Main Thread
      │                                     │        │                     │
      │                                     │        │                  [STOP]
      │                                     │        │
-     │                                     │        └─────────────────────────┘
-     │                                     │                        │
-     │                                     └────────────────────────┘
-     │                                                │
-     └────────────────────────────────────────────────┘
-                       │
-                       ▼
-                 If framework research?
-                       │
-                  ┌────┴────┐
-                  │         │
-                 Yes       No
-                  │         │
-                  │         ▼
-                  │  ┌──────────────┐
-                  │  │  PM Agent    │ • Updates vision docs
-                  │  │(Updates docs)│   (if evolved)
-                  │  └──────┬───────┘
-                  │         │
-                  │         ▼
-                  │  ┌──────────────┐
-                  │  │ Main Thread  │ • Reports final decision
-                  │  │ (Reports)    │
-                  │  └──────┬───────┘
-                  │         │
-                  │         ▼
-                  │  [Proceed to Implementation]
-                  │
-                  ▼
-            Scenario 2 (Research)
+     │                                     │        │
+     └─────────────────────────────────────┴────────┘
+                                    │
+                                    │
+                                    │
+                                    ▼
+                      If framework research?
+                                    │
+                               ┌────┴────┐
+                               │         │
+                              Yes       No
+                               │         │
+                               │         ▼
+                               │  ┌──────────────┐
+                               │  │  PM Agent    │ • Updates vision docs
+                               │  │(Updates docs)│   (if evolved)
+                               │  └──────┬───────┘
+                               │         │
+                               │         ▼
+                               │  ┌──────────────┐
+                               │  │ Main Thread  │ • Reports final decision
+                               │  │ (Reports)    │
+                               │  └──────┬───────┘
+                               │         │
+                               │         ▼
+                               │  [Proceed to Implementation]
+                               │
+                               ▼
+                         Scenario 2 (Research)
 ```
 
 ---
