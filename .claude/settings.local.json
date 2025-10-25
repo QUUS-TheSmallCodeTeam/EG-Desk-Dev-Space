@@ -90,7 +90,8 @@
       "Bash(for file in .claude/commands/*.md)",
       "Bash(do sed -i 's/ideas&external_references\\//references\\//g' \"$file\")",
       "Bash(git ls-tree:*)",
-      "Bash(tree:*)"
+      "Bash(tree:*)",
+      "Read(//c/Users/차민수/.claude/**)"
     ],
     "deny": [],
     "ask": []

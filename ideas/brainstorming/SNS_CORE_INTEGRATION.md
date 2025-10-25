@@ -33,7 +33,7 @@ EG-DESK는 다음과 같은 에이전트 스웜 시스템을 운영 중:
 - **Main Thread**: 사용자와 직접 통신, 작업 조율
 - **PM Agent** (egdesk-pm-agent): 전략적 가이드 제공
 - **Framework Analyzers**: theia-analyzer-agent, electron-analyzer-agent
-- **Specialized Agents**: ux-flow-simulator, error-recovery, coding-agent 등
+- **Specialized Agents**: ux-flow-simulator, coding-agent 등
 
 ### 도입 시나리오
 

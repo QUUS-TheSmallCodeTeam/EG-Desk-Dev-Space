@@ -426,7 +426,6 @@ After receiving PM's initial strategic guide, you **may return for additional co
 - **Simple implementation details** → Ask framework agents
 - **Following PM's guide exactly as provided** → Just execute
 - **Minor code adjustments** → Handle directly
-- **Tactical debugging** → Use error-recovery-agent
 - **Pure technical patterns** → Query framework agents
 
 ### How to Return to PM:

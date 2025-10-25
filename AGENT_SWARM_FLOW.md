@@ -592,7 +592,6 @@ MT → PM (reads subagent_reports/, may WebSearch)
 | **coding-agent** | Code Execution | Target files (any worktree) | Application code (CREATE/MODIFY), CODEBASE_STRUCTURE.md | Implementation report, conflict reports | Inherit |
 | **claude-agent-sdk-analyzer-agent** | Agent Architecture | .claude/agents/, subagent-best-practices.md | .claude/agents/*.md | Agent spec, best practices report | Inherit |
 | **ux-flow-simulator-agent** | UX Validation | Implemented files | None | Flow validation report, issue list | Inherit |
-| **error-recovery-agent** | Error Diagnosis | Build logs, error traces, relevant code | None | Root cause analysis, recovery strategy | Inherit |
 | **general-purpose** | Research | Web (WebSearch, WebFetch) | subagent_reports/*.md (temporary) | Research findings | Inherit |
 
 **Key Ownership:**
