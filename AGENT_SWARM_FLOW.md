@@ -118,56 +118,45 @@ User → Main Thread
 **User Request:** "Should we add a floating AI assistant that follows the cursor?"
 
 ```
-User → Main Thread
-         │
-         ├──→ 3A: simple question
-         │
-         ▼
-   ┌──────────────────┐
-   │  PM Agent        │ • Checks vision docs
-   │  (Vision Check)  │ • Analyzes alignment
-   └──────┬───────────┘
-          │
-          ▼
-    Vision aligned?
-          │
-     ┌────┴────────────────────────────────────┐
-     │                                          │
-   ACCEPT                              REJECT + Alternative
-     │                                          │
-     │                                          │
-     │                                          ▼
-     │                                   ┌──────────────┐
-     │                                   │ Main Thread  │ • Presents PM analysis
-     │                                   │ (Reports)    │ • Offers alternative
-     │                                   └──────┬───────┘
-     │                                          │
-     │                                          │
-     │                                          ▼
-     │                                    ★ USER DECISION
-     │                                          │
-     │                                     ┌────┴────┬──────────────────┐
-     │                                     │         │                  │
-     │                                  Accept    Insist             Cancel
-     │                                   Alt.     Original               │
-     │                                     │         │                  │
-     │                                     │         │                  └──→ [STOP]
-     │                                     │         │
-     │                                     │         └──→ Debate Loop
-     │                                     │              (PM ↔ User, Multiple rounds)
-     │                                     │                   │
-     │                                     │                   ▼
-     │                                     │              ★ FINAL DECISION
-     │                                     │                   │
-     │                                     │        ┌──────────┴──────────┐
-     │                                     │        │                     │
-     │                                     │     Evolve                Maintain
-     │                                     │     vision                 vision
-     │                                     │        │                     │
-     │                                     │        │                  [STOP]
-     │                                     │        │
-     │                                     │        │
-     └─────────────────────────────────────┴────────┘
+User → Main Thread ←─────────────────────────────────────────────────────────────────────┐
+         │                                                                               │
+         ├──→ 3A: simple question                                                        │
+         │                                                                         ┌─────┴─────┐
+         ▼                                                                         │  DEBATE   │
+   ┌──────────────────┐                                                            │   LOOP    │
+   │  PM Agent        │ • Checks vision docs                                       │           │
+   │  (Vision Check)  │ • Analyzes alignment                                       │ User new  │
+   └──────┬───────────┘                                                            │ reasoning │
+          │                                                                         │     ↓     │
+          ▼                                                                         │ Main re-  │
+    Vision aligned?                                                                 │ analyzes  │
+          │                                                                         │     ↓     │
+     ┌────┴────────────────────────────────────┐                                   │ 3A or 3B  │
+     │                                          │                                   └───────────┘
+   ACCEPT                              REJECT + Alternative                               │
+     │                                          │                                         │
+     │                                          │                                         │
+     │                                          ▼                                         │
+     │                                   ┌──────────────┐                                 │
+     │                                   │ Main Thread  │ • Presents PM analysis          │
+     │                                   │ (Reports)    │ • Offers alternative            │
+     │                                   └──────┬───────┘                                 │
+     │                                          │                                         │
+     │                                          │                                         │
+     │                                          ▼                                         │
+     │                                    ★ USER DECISION                                 │
+     │                                          │                                         │
+     │                                     ┌────┴────┬─────────────┐                     │
+     │                                     │         │             │                     │
+     │                                  Accept    Insist        Cancel                   │
+     │                                   Alt.     Original          │                     │
+     │                                     │         │             │                     │
+     │                                     │         │             └──→ [STOP]            │
+     │                                     │         │                                   │
+     │                                     │         └───────────────────────────────────┘
+     │                                     │
+     │                                     │
+     └─────────────────────────────────────┘
                                     │
                                     │
                                     │
@@ -191,7 +180,7 @@ User → Main Thread
                                │  └──────┬───────┘
                                │         │
                                │         ▼
-                               │  [Proceed to Implementation]
+                               │  Scenario 4 (Development)
                                │
                                ▼
                          Scenario 2 (Research)
@@ -204,86 +193,207 @@ User → Main Thread
 **User Request:** "Add a custom terminal theme that changes based on time of day"
 
 ```
-User → Main Thread
-         │
-         ▼
-   ┌──────────────┐
-   │  PM Agent    │ • Discovers tech stack
-   │  (Strategic  │ • Vision alignment check
-   │   Guide)     │ • Creates PRD
-   └──────┬───────┘ • Returns: APPROVE
-          │           - Framework: Theia
-          │           - Location: packages/terminal/src/browser/
-          ▼
-   ┌──────────────────┐
-   │  Main Thread     │ • Presents PM strategic guide
-   │  (Reports)       │ • Asks for user approval
-   └──────┬───────────┘
-          │
-          ▼
-    Approve / Reject / Alternative?
-          │
-    [If Approve]
-          │
-          ▼
-   ┌──────────────────┐
-   │  Main Thread     │ • Plans investigation
-   │  (Plans          │ • Identifies patterns to research
-   │   investigation) │
-   └──────┬───────────┘
-          │
-          ▼
-   ┌──────────────────────┐
-   │  theia-analyzer      │ • Reads terminal-theme-service.ts
-   │  (Framework          │ • Returns pattern + file list:
-   │   investigation)     │   - CREATE time-based-theme-switcher.ts
-   └──────┬───────────────┘   - MODIFY terminal-frontend-module.ts:36
-          │                   - REFERENCE workspace-service.ts:89
-          ▼
-   ┌──────────────────────┐
-   │  Main Thread         │ • Synthesizes PM guide + framework patterns
-   │  (Creates impl plan) │ • Creates implementation plan
-   └──────┬───────────────┘
-          │
-          ▼
-    ★ DELEGATION DECISION
-          │
-      ┌───┴───┐
-      │       │
-      ▼       ▼
-   Simple   Complex (3+ files)
-      │       │
-      ▼       ▼
-   ┌──────┐ ┌────────────────┐
-   │ Main │ │ coding-agent   │ • Checks conflicts (EG-DESK custom only)
-   │Thread│ │ (Implements)   │ • If conflict: STOP → User decides
-   └──┬───┘ └────┬───────────┘ • If no conflict: Implement
-      │          │
-      │          ▼
-      │    ★ PARALLEL DECISION
-      │          │
-      │      ┌───┼───┐
-      │      │   │   │
-      │      ▼   ▼   ▼
-      │   ┌──────────────────────────────────────────────────┐
-      │   │ Option A: Sequential (1 agent)                   │
-      │   │ Option B: Simple Parallel (different files)     │
-      │   │ Option C: Worktree Parallel (same files)        │
-      │   └──────────────────┬───────────────────────────────┘
-      │                      │
-      └──────────────────────┘
-                │
-                ▼
-   ┌────────────────────────┐
-   │ (Optional) UX Flow     │ • If complex: Invoke ux-flow-simulator
-   │  Validator             │ • Traces execution paths
-   └────────┬───────────────┘ • If issues: Fix → Re-validate
-            │
-            ▼
-   ┌────────────────────────┐
-   │  Main Thread           │ • Build, test, commit
-   │  (Build/Test/Commit)   │
-   └────────────────────────┘
+User → ┌─────────────┐ (Attaches prev PM reports) → ┌───────────┐ ←──────────────────────────────────────────────────────────────────────────────────┐
+       │ Main Thread │                               │ PM Agent  │                                                                                  │
+       └─────────────┘                               └─────┬─────┘                                                                                  │
+                                                           │ Returns PM report                                                                      │
+                                                           ▼                                                                                        │
+                                                   ┌───────────────┐                                                                                │
+                                                   │ Main Thread   │ Reads PM report, presents to User                                              │
+                                                   │  (Reports)    │                                                                                │
+                                                   └───────┬───────┘                                                                                │
+                                                           │                                                                                        │
+                                               PM response type:                                                                                    │
+           ┌───────────────────────────────────┼───────────────────────────────────────────┐                                            │
+           │                                   │                                           │                                            │
+       APPROVE                              CONFLICT                              RESEARCH_NEEDED                                      │
+           │                                   │                                           │                                            │
+           │                                   ▼                                           ▼                                            │
+           │                           ┌───────────────┐                           Scenario 2 (Research)                                │
+           │                           │ Main Thread   │ Presents conflict                                                              │
+           │                           │   (Reports)   │ + alternatives to User                                                         │
+           │                           └───────┬───────┘                                                                                │
+           │                                   │                                                                                        │
+           │               ┌───────────────────┴───────────────┐                                                                        │
+           │               │                                   │                                                                        │
+           │       User: Accept Alt.               User: Insist Original                                                                │
+           │               │                                   │                                                                        │
+           │               │                                   └─→ Scenario 3                                                           │
+           │               │                                                                                                            │
+           │               └────────────────────────────────────────────────────────────────────────────────────────────────────────────┘
+           │                                                                                                                            │
+           ▼                                                                                                                            │
+               ┌───────┴───────┐                                                                                                                                    │
+               │               │                                                                                                                                    │
+           Single option   Multiple options                                                                                                                       │
+               │               │                                                                                                                                    │
+               ▼               ▼                                                                                                                                    │
+       ┌───────┴───────┐   ┌───┴───────────────┐                                                                                                                   │
+       │               │   │                   │                                                                                                                   │
+   User: Accept   Request User chooses   Request vision                                                                                                           │
+                  check   one            check                                                                                                                     │
+       │               │   │                   │                                                                                                                   │
+       │               │   │                   └─→ Scenario 3B (Vision Check)                                                                                      │
+       │               │   │                                                                                                                                       │
+       │               └───┴─→ Scenario 3B (Vision Check)                                                                                                          │
+       │                                                                                                                                                           │
+       └───────────────────┘                                                                                                                                       │
+               │                                                                                                                                                   │
+               ▼                                                                                                                                                   │
+   ┌───────────────┐                                                                                                                                                │
+   │ Main Thread   │ Asks: "Approve this plan?"                                                                                                                     │
+   │  (Requests)   │                                                                                                                                                │
+   └───────┬───────┘                                                                                                                                                │
+                   │                                                                                                                                           │
+   ┌───────────────┴───────────────────────┐                                                                                                                   │
+   │                   │                   │                                                                                                                   │
+User: Approve      User: Reject    User: Request Changes                                                                                                       │
+   │                   │                   │                                                                                                                   │
+   │                   └──→ [STOP]         └──→ Back to PM (with feedback)                                                                                     │
+   │                                                                                                                                                           │
+   ▼                                                                                                                                                           │
+┌───────────────┐                                                                                                                                              │
+│ Main Thread   │ Plans framework investigation                                                                                                                │
+│   (Plans)     │                                                                                                                                              │
+└───────┬───────┘                                                                                                                                              │
+        │                                                                                                                                              │
+┌───────┴───────┐                                                                                                                                      │
+│               │                                                                                                                                      │
+Parallel    Sequential                                                                                                                                │
+│               │                                                                                                                                      │
+▼               ▼                                                                                                                                      │
+┌──────────────────┐  ┌──────────────────┐                                                                                                            │
+│ Framework Agents │  │ Framework Agent  │                                                                                                            │
+│   (Parallel)     │  │  (Sequential)    │                                                                                                            │
+└────────┬─────────┘  └────────┬─────────┘                                                                                                            │
+         │                     │                                                                                                                      │
+         └──────────┬──────────┘ Return patterns + file lists                                                                                         │
+                    │                                                                                                                                  │
+                    ▼                                                                                                                                  │
+            ┌───────────────┐                                                                                                                          │
+            │ Main Thread   │ Synthesizes findings                                                                                                    │
+            │ (Synthesizes) │                                                                                                                          │
+            └───────┬───────┘                                                                                                                          │
+                    │                                                                                                                                  │
+    ┌───────────────┴───────────────┐                                                                                                                  │
+    │                               │                                                                                                                  │
+Need PM Review              No PM Review                                                                                                              │
+    │                               │                                                                                                                  │
+    ▼                               │                                                                                                                  │
+┌───────────┐                       │                                                                                                                  │
+│ PM Agent  │ Reviews plan           │                                                                                                                  │
+│  (Review) │                       │                                                                                                                  │
+└─────┬─────┘                       │                                                                                                                  │
+      │                             │                                                                                                                  │
+      ▼                             │                                                                                                                  │
+┌───────────────┐                   │                                                                                                                  │
+│ Main Thread   │ Reads PM review   │                                                                                                                  │
+│ (Synthesizes) │                   │                                                                                                                  │
+└───────┬───────┘                   │                                                                                                                  │
+        │                           │                                                                                                                  │
+        └───────────┬───────────────┘                                                                                                                  │
+                    │                                                                                                                                  │
+                    ▼                                                                                                                                  │
+            ┌───────────────┐                                                                                                                          │
+            │ Main Thread   │ Creates complete impl plan                                                                                              │
+            │ (Synthesizes) │ PM guide + framework patterns                                                                                           │
+            └───────┬───────┘                                                                                                                          │
+                    │                                                                                                                                  │
+                    ▼                                                                                                                                  │
+            ┌───────────────┐                                                                                                                          │
+            │ coding-agent  │ Checks CODEBASE_STRUCTURE.md                                                                                            │
+            │   (Checks)    │ Returns: OK / CONFLICT                                                                                                  │
+            └───────┬───────┘                                                                                                                          │
+                    │                                                                                                                                  │
+                    ▼                                                                                                                                  │
+            ┌───────────────┐                                                                                                                          │
+            │ Main Thread   │ Reads check result                                                                                                      │
+            │  (Analyzes)   │                                                                                                                          │
+            └───────┬───────┘                                                                                                                          │
+                    │                                                                                                                                  │
+    ┌───────────────┴───────────────┐                                                                                                                  │
+    │                               │                                                                                                                  │
+No conflict                     CONFLICT                                                                                                               │
+    │                               │                                                                                                                  │
+    │                               ▼                                                                                                                  │
+    │                       ┌───────────────┐                                                                                                          │
+    │                       │ Main Thread   │ Reports conflict                                                                                        │
+    │                       │   (Reports)   │ Presents options to User                                                                                │
+    │                       └───────┬───────┘                                                                                                          │
+    │                               │                                                                                                                  │
+    │               ┌───────────────┴───────────────┐                                                                                                  │
+    │               │                               │                                                                                                  │
+    │       User: Rename/Override            User: Cancel                                                                                             │
+    │               │                               │                                                                                                  │
+    │               │                               └──→ [STOP]                                                                                       │
+    │               │                                                                                                                                  │
+    └───────────────┘                                                                                                                                  │
+                    │                                                                                                                                  │
+                    ▼                                                                                                                                  │
+            ┌───────────────┐                                                                                                                          │
+            │ coding-agent  │ Implements (Sequential / Simple Parallel / Worktree Parallel)                                                           │
+            │ (Implements)  │ Updates CODEBASE_STRUCTURE.md                                                                                           │
+            └───────┬───────┘ Returns implementation report                                                                                           │
+                    │                                                                                                                                  │
+                    ▼                                                                                                                                  │
+            ┌───────────────┐                                                                                                                          │
+            │ Main Thread   │ Reads implementation report                                                                                             │
+            │   (Reviews)   │                                                                                                                          │
+            └───────┬───────┘                                                                                                                          │
+                    │                                                                                                                                  │
+    ┌───────────────┴───────────────┐                                                                                                                  │
+    │                               │                                                                                                                  │
+Need UX Validation          No UX Validation                                                                                                           │
+    │                               │                                                                                                                  │
+    ▼                               │                                                                                                                  │
+┌────────────────┐                  │                                                                                                                  │
+│ ux-flow-       │ Traces flows     │                                                                                                                  │
+│ simulator      │ Returns:Issues/OK│                                                                                                                  │
+└────────┬───────┘                  │                                                                                                                  │
+         │                          │                                                                                                                  │
+         ▼                          │                                                                                                                  │
+┌───────────────┐                   │                                                                                                                  │
+│ Main Thread   │ Reads UX report   │                                                                                                                  │
+│  (Analyzes)   │                   │                                                                                                                  │
+└───────┬───────┘                   │                                                                                                                  │
+        │                           │                                                                                                                  │
+┌───────┴───────┐                   │                                                                                                                  │
+│               │                   │                                                                                                                  │
+Issues      No issues                │                                                                                                                  │
+│               │                   │                                                                                                                  │
+│               └───────────────────┘                                                                                                                  │
+│                                   │                                                                                                                  │
+└─→ Fix via coding-agent (loop back)│                                                                                                                  │
+                                    │                                                                                                                  │
+                    ┌───────────────┘                                                                                                                  │
+                    │                                                                                                                                  │
+                    ▼                                                                                                                                  │
+            ┌───────────────┐                                                                                                                          │
+            │ Main Thread   │ Asks User: "Proceed with build/test?"                                                                                   │
+            │  (Requests)   │                                                                                                                          │
+            └───────┬───────┘                                                                                                                          │
+                    │                                                                                                                                  │
+    ┌───────────────┴───────────────┐                                                                                                                  │
+    │                               │                                                                                                                  │
+User: Yes                       User: No                                                                                                               │
+    │                               │                                                                                                                  │
+    │                               └──→ [STOP] (User tests manually)                                                                                 │
+    │                                                                                                                                                  │
+    ▼                                                                                                                                                  │
+┌───────────────┐                                                                                                                                      │
+│ Main Thread   │ Build & Test                                                                                                                        │
+│(Build & Test) │ npm run build, npm test                                                                                                             │
+└───────┬───────┘                                                                                                                                      │
+        │                                                                                                                                              │
+┌───────┴───────┐                                                                                                                                      │
+│               │                                                                                                                                      │
+Success      Failure                                                                                                                                   │
+│               │                                                                                                                                      │
+▼               └──────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────┘
+┌─────────────┐
+│ Main Thread │
+│  (Commit)   │
+└─────────────┘
 ```
 
 ---
