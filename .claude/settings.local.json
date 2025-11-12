@@ -91,7 +91,8 @@
       "Bash(do sed -i 's/ideas&external_references\\//references\\//g' \"$file\")",
       "Bash(git ls-tree:*)",
       "Bash(tree:*)",
-      "Read(//c/Users/차민수/.claude/**)"
+      "Read(//c/Users/차민수/.claude/**)",
+      "WebFetch(domain:claude.ai)"
     ],
     "deny": [],
     "ask": []
