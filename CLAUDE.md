@@ -43,44 +43,102 @@ For questions specifically about Theia or Electron frameworks, invoke the approp
 - "What's the correct way to use Electron's dialog API?" → electron-analyzer-agent
 - "Explain Theia's dependency injection pattern" → theia-analyzer-agent
 
-### 3. EG-DESK Development Planning & Execution → PM-Driven Workflow
+### 3. EG-DESK Development Decisions & Planning → PM-Driven Workflow
 
-For actual development tasks, multi-step workflows, or cross-framework implementation, follow the PM-driven workflow where PM Agent provides strategic direction.
+The PM agent supports two distinct workflows depending on whether the user is deciding or implementing.
 
-**When to use PM-driven workflow:**
-- Implementing new features for the EG-DESK application
-- Multi-step development workflows
-- Tasks involving both Theia AND Electron frameworks
-- Complex troubleshooting requiring multiple agents
-- Strategic implementation planning
-- Coordinated analysis across multiple systems
+---
+
+#### 3a. Strategic Consultation (Help Me Decide)
+
+**When to use:**
+- User asks "should I implement X?"
+- User wants to evaluate whether a feature aligns with vision
+- User needs recommendation between multiple approaches
+- User is exploring feasibility before committing
+
+**User request patterns:**
+- "Can I integrate Docker into EG-DESK?"
+- "Should I use Docker or direct process spawning?"
+- "Is this feature worth implementing?"
+- "Does this align with the vision?"
+
+**Workflow:**
+1. **Invoke PM for consultation** (explicitly state this is consultation):
+   ```
+   Task(agent: "egdesk-pm-agent",
+        prompt: "User is asking whether to implement [feature].
+                 This is a CONSULTATION - provide strategic analysis
+                 and recommendation but DO NOT create PRD.
+
+                 User's question: [quote user request]
+
+                 Provide vision alignment analysis, pros/cons,
+                 and recommendation (APPROVE/MODIFY/REJECT).")
+   ```
+
+2. **PM provides strategic analysis**:
+   - Vision alignment assessment
+   - Technical feasibility analysis
+   - Recommendation with rationale
+   - **NO PRD created** (brainstorming file may be created instead)
+
+3. **Present analysis to user** and await decision:
+   - User may approve → Proceed to 3b (Implementation Planning)
+   - User may defer → Create/update brainstorming file
+   - User may reject → No further action
 
 **Examples:**
-- "Help me add a custom menu system with native OS integration"
-- "Implement a new sidebar panel with Electron integration"
-- "Debug this issue that involves both Theia's extension system and Electron's IPC"
-- "Plan out how to add collaborative editing to EG-DESK"
+- "Should we add 3D visualization to spatial canvas?"
+- "Can EG-DESK support Docker orchestration?"
+- "Is real-time collaboration in scope for our vision?"
 
-**How it works (PM-Driven):**
-1. **Consult PM for strategic guide**:
-   - Invoke `egdesk-pm-agent` with user request
-   - PM provides: Framework choice, code location, implementation phasing, considerations
-   - PM creates PRD if feature approved
+---
 
-2. **Plan framework investigation** based on PM's strategic guide:
+#### 3b. Implementation Planning (Already Decided)
+
+**When to use:**
+- User has decided to implement a feature
+- User explicitly requests implementation ("add X", "implement Y")
+- Following up from approved consultation (3a → 3b transition)
+
+**User request patterns:**
+- "Implement Docker orchestration for mini-apps"
+- "Add a custom menu system with native OS integration"
+- "Let's add collaborative editing to EG-DESK"
+
+**Workflow:**
+1. **Consult PM for strategic guide** (feature is approved):
+   ```
+   Task(agent: "egdesk-pm-agent",
+        prompt: "User has decided to implement [feature].
+                 This is APPROVED - provide strategic guide
+                 and create PRD.
+
+                 User's request: [quote user request]
+
+                 Provide framework choice, code location,
+                 implementation phasing, and create PRD.")
+   ```
+
+2. **PM provides implementation guide**:
+   - Framework choice, code location, implementation phasing, considerations
+   - **Creates PRD** in `ideas/confirmed/[feature]-prd.md`
+
+3. **Plan framework investigation** based on PM's strategic guide:
    - Follow PM's recommended phasing
    - Identify which framework agents to query (per PM's direction)
    - Determine what technical patterns to research
 
-3. **Execute framework investigation** (query framework agents as directed by PM):
+4. **Execute framework investigation** (query framework agents as directed by PM):
    - Invoke framework agents to get technical patterns
    - Framework agents return: Patterns, file lists (CREATE/MODIFY/DELETE/REFERENCE)
 
-4. **(Optional) Return to PM for plan review**:
+5. **(Optional) Return to PM for plan review**:
    - If complex: Present your implementation plan + framework findings to PM
    - PM validates plan, suggests improvements, flags user decisions
 
-5. **Create implementation plan** (synthesize PM guide + framework patterns into coding instructions):
+6. **Create implementation plan** (synthesize PM guide + framework patterns into coding instructions):
 
    Format coding-agent prompt with complete context:
    ```
@@ -103,13 +161,13 @@ For actual development tasks, multi-step workflows, or cross-framework implement
       - [Pattern to follow]
    ```
 
-6. **Spawn coding-agent(s)** with synthesized instructions:
+7. **Spawn coding-agent(s)** with synthesized instructions:
    - Provide complete implementation context
    - Include PM guidance + framework patterns
    - Specify exact files and operations
    - coding-agent reads files and executes
 
-7. **(Optional) Validate UX flow** via ux-flow-simulator-agent:
+8. **(Optional) Validate UX flow** via ux-flow-simulator-agent:
 
    **When to validate:**
    - ✅ Complex user interaction flows
@@ -138,9 +196,11 @@ For actual development tasks, multi-step workflows, or cross-framework implement
    - ✅ No issues → Proceed to build
    - ⚠️ Issues found → Fix via coding-agent → Re-validate
 
-8. **Build, test, and commit** the changes
+9. **Build, test, and commit** the changes
 
-**Your role**: Communicator & Executor (not decision-maker)
+---
+
+**Your role in both workflows**: Communicator & Executor (not decision-maker)
 - Present user requests to PM
 - Create plans based on PM's strategic guide
 - Query technical agents as PM directs
@@ -467,18 +527,49 @@ Trust judgment (clear guide = execute, uncertain = consult). Always include prev
 [Use Task tool to invoke theia-analyzer-agent OR electron-analyzer-agent with the question]
 ```
 
-### Pattern 2: PM-Driven Development (development work)
+### Pattern 2a: Strategic Consultation (help me decide)
 ```
-[Analyze: This is EG-DESK development work requiring strategic planning]
+[Analyze: User is asking whether to implement something, not requesting implementation]
 
-I'll consult PM for strategic guidance, then execute the implementation.
+I'll consult PM for strategic analysis to help user decide.
 
-[PM-Driven Workflow:]
-1. Invoke egdesk-pm-agent: "User wants [feature]. Provide strategic guide."
+[Consultation Workflow:]
+1. Invoke egdesk-pm-agent for consultation (NO PRD):
    → Task(agent: "egdesk-pm-agent",
-          prompt: "/pm-strategic-guide
-                   User wants [feature].
-                   Provide strategic guide.")
+          prompt: "User is asking whether to implement [feature].
+                   This is a CONSULTATION - provide strategic analysis
+                   and recommendation but DO NOT create PRD.
+
+                   User's question: [quote user request]
+
+                   Provide vision alignment analysis, pros/cons,
+                   and recommendation (APPROVE/MODIFY/REJECT).")
+   → PM returns: Vision analysis, recommendation, NO PRD created
+
+2. Present PM's analysis to user
+3. Await user decision:
+   - If approved → Follow Pattern 2b (Implementation)
+   - If deferred → File moved to brainstorming/
+   - If rejected → No further action
+```
+
+### Pattern 2b: Implementation Planning (already decided)
+```
+[Analyze: User has decided to implement or explicitly requests implementation]
+
+I'll consult PM for strategic implementation guide.
+
+[Implementation Workflow:]
+1. Invoke egdesk-pm-agent for implementation guide (creates PRD):
+   → Task(agent: "egdesk-pm-agent",
+          prompt: "User has decided to implement [feature].
+                   This is APPROVED - provide strategic guide
+                   and create PRD.
+
+                   User's request: [quote user request]
+
+                   Provide framework choice, code location,
+                   implementation phasing, and create PRD.")
    → PM returns: Framework, location, phasing, considerations, creates PRD
 
 2. Plan framework investigation based on PM's guide:
