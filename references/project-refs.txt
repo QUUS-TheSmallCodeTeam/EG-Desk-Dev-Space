@@ -1,0 +1,21 @@
+# EG-Desk-Dev-Space references (one name per line)
+# Names must match ~/.claude/reference-registry.tsv name column
+theia
+playwright
+puppeteer
+gemini-cli
+surf
+infinite-canvas
+egdesk-scratch
+brave-browser
+memori
+openmetadata
+puppeteer-in-electron
+claude-code
+memvid
+agent-browser-protocol
+mirofish
+light-system
+claude-agent-sdk
+ai-cli-integration
+electron-playwright-integration

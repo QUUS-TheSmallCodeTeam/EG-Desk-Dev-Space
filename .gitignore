@@ -3,6 +3,7 @@ node_modules
 build
 lib
 tmp
+.tmp
 *.log
 .idea
 .metadata
@@ -38,12 +39,19 @@ dependency-check-summary.txt*
 allure-results
 typedoc.tsconfig.json
 
-# External cloned repositories (downloaded via setup.sh)
-# These are large external projects that should be cloned separately
-# Nested structure: references/[project]/[project]/
-references/theia/theia/
-references/playwright/playwright/
-references/puppeteer/puppeteer/
-references/gemini-cli/gemini-cli/
-references/surf/surf/
-references/infinite-canvas/infinite-canvas/
+# External references (cloned via setup.sh)
+references/*/
+!references/project-refs.txt
+!references/README.md
+!references/SETUP.md
+references/manifest.tsv
+
+# Playwright persistent context (contains sensitive session data)
+playwright-user-data/
+
+# Screenshot files from automation scripts
+google-apps-script-api-enabled.png
+error-screenshot.png
+
+# Education materials (local teaching content)
+edu/
