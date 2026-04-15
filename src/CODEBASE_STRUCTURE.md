@@ -4,6 +4,13 @@
 > **Last updated**: [Never - this is the initial template]
 > **CRITICAL**: Update after EVERY implementation to prevent conflicts
 
+## Architecture Note
+
+> EG-Desk의 app-level desktop framework는 **Electron**입니다.
+> Eclipse Theia는 IDE 컴포넌트 프레임워크로, 에디터/터미널/파일시스템 등 IDE 기능을 담당합니다.
+> 이 문서의 Services, Commands, Keybindings는 주로 Theia IDE 레이어의 커스텀 코드를 추적합니다.
+> Electron 레이어(IPC, native menus, window management 등)의 커스텀 코드는 별도 섹션에서 관리합니다.
+
 ## Purpose
 
 This document tracks all EG-DESK custom code (services, keybindings, commands, features) to prevent naming conflicts and duplicate implementations.
@@ -35,6 +42,14 @@ This document tracks all EG-DESK custom code (services, keybindings, commands, f
 
 **Current Modifications**:
 - (None yet - add modifications here)
+
+### Electron Layer Customizations
+
+> List Electron main/renderer process customizations
+> Format: `ModuleName`: file-path:line - Brief description
+
+**Current Customizations**:
+- (None yet - add customizations here)
 
 ---
 
@@ -135,12 +150,17 @@ FeatureName
 **Example Entry**:
 ```
 TimeBasedThemeSwitcher
-  ├─ depends on → TerminalThemeService (Theia core)
-  ├─ depends on → PreferenceService (Theia core)
+  ├─ depends on → TerminalThemeService (Theia IDE layer)
+  ├─ depends on → PreferenceService (Theia IDE layer)
   └─ registered in → terminal-frontend-module.ts
 
+NativeMenuManager
+  ├─ depends on → Menu (Electron main process)
+  ├─ depends on → CommandRegistry (Theia IDE layer)
+  └─ registered in → electron-main-module.ts
+
 CustomThemeService
-  └─ extends → ThemeService (Theia core)
+  └─ extends → ThemeService (Theia IDE layer)
 ```
 
 ---

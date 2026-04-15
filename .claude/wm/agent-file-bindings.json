@@ -1,0 +1,28 @@
+{
+  "version": 1,
+  "updated": "2026-03-02T23:00:00+09:00",
+  "task": "Canvas browser window drag-and-drop",
+  "bindings": {
+    "coding-agent": {
+      "reads": [
+        "ideas/confirmed/INFINITE_CANVAS_BROWSER_INTEGRATION.md",
+        "ideas/confirmed/EG-DESK_Spatial_Canvas_UX_Solutions.md",
+        "ideas/confirmed/technology-stack.md",
+        "ideas/brainstorming/APP_RUNTIME_ARCHITECTURE.md",
+        "src/CODEBASE_STRUCTURE.md",
+        "references/egdesk-scratch/TECH_STACK.md"
+      ],
+      "context": "Sprint-leader. Implements drag-drop on canvas using PRDs + research output from explore-agent."
+    },
+    "explore-agent": {
+      "reads": [
+        "ideas/confirmed/INFINITE_CANVAS_BROWSER_INTEGRATION.md",
+        "ideas/confirmed/UNIFIED_BROWSER_AUTOMATION_API.md",
+        "ideas/confirmed/CONTEXT_AWARE_BROWSER_AUTOMATION.md",
+        "ideas/confirmed/technology-stack.md",
+        "references/infinite-canvas/online_references.md"
+      ],
+      "context": "Research worker. Investigates drag-drop frameworks and Electron window management patterns. Saves to references/."
+    }
+  }
+}

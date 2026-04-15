@@ -1,21 +1,95 @@
 # EG-Desk-Dev-Space references (one name per line)
 # Names must match ~/.claude/reference-registry.tsv name column
+#
+# Format:
+#   name              Flat reference
+#   group-name/       Group folder
+#     name            Group member (2-space indent per level)
+
+# ─── Browser & Automation ───
+browser/
+  surf
+  brave-browser
+  lightpanda
+  browser-automation/
+    playwright
+    puppeteer
+    browser-use
+    puppeteer-in-electron
+    agent-browser-protocol
+
+# ─── IDE & Desktop ───
 theia
-playwright
-puppeteer
-gemini-cli
-surf
-infinite-canvas
 egdesk-scratch
-brave-browser
-memori
-openmetadata
-puppeteer-in-electron
+infinite-canvas
+xyflow
+anytype
+zen-browser
+
+# ─── AI & Agents ───
+gemini-cli
 claude-code
+memori
 memvid
-agent-browser-protocol
 mirofish
+gstack
+bkit-claude-code
+claude-mem
+agent-orchestration/
+  oh-my-claudecode
+  clawteam
+  deer-flow
+  deepagentsjs
+  claude-agent-flow
+  agent-orchestrator
+  paperclip
+  ruflo
+  724-office
+agent-tools/
+  awesome-openclaw-agents
+  nvidia-nemoclaw
+  sim-studio
+  superpowers
+  cc-wf-studio
+  agent-deck
+  agent-skills-cli
+  prompt-master
+  claude-howto
+agent-research/
+  copilotkit
+  hermes-agent
+  openjarvis
+  autoresearch
+  nodeskclaw
+  walnut
+  context-mode
+  browseros
+  atlas
+  500-ai-agents
+  awesome-ai-agents
+agent-messaging/
+  amp
+  nats
+  anp
+
+# ─── Docs & Research ───
 light-system
 claude-agent-sdk
-ai-cli-integration
 electron-playwright-integration
+openmetadata
+research-lab/
+  paper-qa
+  pasa
+  grobid
+  mineru
+  ai-scientist
+  labclaw
+
+# ─── Document Processing ───
+pyhwp
+unhwp
+koreancode
+lemonade
+
+# ─── Memory & Knowledge ───
+neuronfs
