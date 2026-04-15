@@ -17,7 +17,13 @@ export type EntityDisplayState = 'covered' | 'spread' | 'full'
 
 // ─── Type-specific props per entity type ────────────────────────────
 export interface EntityTypePropsMap {
-  browser: { url: string; webContentsViewId?: string; title?: string; favicon?: string }
+  browser: {
+    url: string
+    browserId?: number
+    webContentsViewId?: string
+    title?: string
+    favicon?: string
+  }
   ide: { sessionId: string; openFiles: string[]; language?: string }
   chat: { conversationId: string; agentConfig?: object }
   'file-preview': { filePath: string; mime: string; pageIndex?: number }

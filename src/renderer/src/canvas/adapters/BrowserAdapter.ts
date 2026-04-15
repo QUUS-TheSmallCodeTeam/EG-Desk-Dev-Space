@@ -1,215 +1,488 @@
 /**
- * BrowserAdapter — OSR-based embedded browser (POC, display-only)
+ * BrowserAdapter - OSR-based embedded browser.
  *
- * Architecture:
- *  - BrowserFrame: React component that:
- *      1. On mount, calls window.api.browser.create() to spin up the OSR window
- *      2. Subscribes to onFrame events from main, decodes PNG buffer via ImageBitmap,
- *         and draws each frame directly onto a <canvas> element (bypasses img.src issues)
- *  - adapter.hydrate: delegates to the same ensureHydrated path (for re-hydration)
- *  - adapter.suspend: exports canvas toDataURL as snapshot
- *  - releaseBrowserInstance: tears down the OSR window on entity discard
+ * Preferred pipeline:
+ *   main: offscreen BrowserWindow(useSharedTexture=true)
+ *   preload: sharedTexture receiver -> VideoFrame
+ *   renderer: draw VideoFrame directly to <canvas>
  *
- * Phase 1 constraints:
- *  - Display-only (no click/keyboard interaction forwarding)
- *  - CPU bitmap mode (useSharedTexture deferred)
- *  - 30fps from main via OSR paint event
- *
- * Rendering pipeline:
- *  main: NativeImage.toPNG() → IPC Buffer → Uint8Array
- *  renderer: Blob + createImageBitmap() → canvas.drawImage()
- *  Rationale: img.src with blob:// or data: URLs fails in Electron contextIsolation mode
- *  when the Uint8Array originates from contextBridge. Canvas + ImageBitmap works reliably.
+ * Fallback pipeline:
+ *   main: NativeImage.toPNG() -> IPC Uint8Array
+ *   renderer: Blob + createImageBitmap() -> canvas.drawImage()
  */
-import { createElement, useEffect, useRef } from 'react'
-import type { BrowserFrameEvent } from '../../../../shared/browser.js'
+import { createElement, useEffect, useRef, useState } from 'react'
+import type {
+  BrowserCreateRequest,
+  BrowserFrameEvent,
+  BrowserPresentationMode,
+  BrowserStateEvent
+} from '../../../../shared/browser.js'
 import type { CanvasEntity, EntityAdapter } from '../types'
+import { useCanvasStore } from '../store'
 
-// ── Instance state ────────────────────────────────────────────────────
 interface BrowserInstance {
   browserId: number | null
-  // Canvas ref for direct frame rendering
   canvasRef: HTMLCanvasElement | null
-  // Last raw PNG buffer — used for suspend snapshot
   lastBuffer: Uint8Array | null
+  lastWidth: number
+  lastHeight: number
+  currentUrl: string
+  presentationMode: BrowserPresentationMode
+  ownsRuntime: boolean
   unsubscribe: (() => void) | null
-  // Prevents duplicate create() calls during StrictMode double-effect or HMR
   creating: boolean
+  pendingFrame: BrowserFrameEvent | null
+  drawScheduled: number | null
+  drawing: boolean
 }
 
-// Registry keyed by entity id
 const instances = new Map<string, BrowserInstance>()
+
+function createBrowserInstance(): BrowserInstance {
+  return {
+    browserId: null,
+    canvasRef: null,
+    lastBuffer: null,
+    lastWidth: 1280,
+    lastHeight: 800,
+    currentUrl: 'about:blank',
+    presentationMode: 'canvas',
+    ownsRuntime: false,
+    unsubscribe: null,
+    creating: false,
+    pendingFrame: null,
+    drawScheduled: null,
+    drawing: false
+  }
+}
 
 export function getBrowserInstance(id: string): BrowserInstance | undefined {
   return instances.get(id)
 }
 
-/** Draw a PNG Uint8Array onto a canvas via ImageBitmap (works in Electron contextIsolation). */
-async function drawPNGBuffer(canvas: HTMLCanvasElement, buffer: Uint8Array): Promise<void> {
-  const ab = new ArrayBuffer(buffer.byteLength)
-  new Uint8Array(ab).set(buffer)
+function isVideoFrame(frame: unknown): frame is VideoFrame {
+  return typeof VideoFrame !== 'undefined' && frame instanceof VideoFrame
+}
+
+function closeVideoFrame(frame: unknown): void {
+  if (
+    typeof frame === 'object' &&
+    frame !== null &&
+    'close' in frame &&
+    typeof (frame as { close: unknown }).close === 'function'
+  ) {
+    ;(frame as { close: () => void }).close()
+  }
+}
+
+function updateCanvasSize(canvas: HTMLCanvasElement, width: number, height: number): void {
+  if (canvas.width !== width) canvas.width = width
+  if (canvas.height !== height) canvas.height = height
+  canvas.style.width = `${width}px`
+  canvas.style.height = `${height}px`
+}
+
+function get2dContext(canvas: HTMLCanvasElement): CanvasRenderingContext2D | null {
+  return canvas.getContext('2d', {
+    alpha: false,
+    desynchronized: true
+  } as CanvasRenderingContext2DSettings)
+}
+
+async function drawBitmapFrame(canvas: HTMLCanvasElement, event: BrowserFrameEvent): Promise<void> {
+  if (event.kind !== 'bitmap') return
+
+  updateCanvasSize(canvas, event.width, event.height)
+
+  const ab = new ArrayBuffer(event.buffer.byteLength)
+  new Uint8Array(ab).set(event.buffer)
   const blob = new Blob([ab], { type: 'image/png' })
   const bitmap = await createImageBitmap(blob)
-  const ctx = canvas.getContext('2d')
-  if (ctx) {
+
+  try {
+    const ctx = get2dContext(canvas)
+    if (!ctx) return
     ctx.drawImage(bitmap, 0, 0, canvas.width, canvas.height)
+  } finally {
     bitmap.close()
   }
 }
 
-// ── BrowserFrame component ─────────────────────────────────────────────
+function drawSharedTextureFrame(canvas: HTMLCanvasElement, event: BrowserFrameEvent): void {
+  if (event.kind !== 'shared-texture') return
+  if (!isVideoFrame(event.frame)) {
+    closeVideoFrame(event.frame)
+    return
+  }
+
+  updateCanvasSize(canvas, event.width, event.height)
+
+  const ctx = get2dContext(canvas)
+  if (!ctx) {
+    event.frame.close()
+    return
+  }
+
+  try {
+    ctx.drawImage(event.frame as unknown as CanvasImageSource, 0, 0, canvas.width, canvas.height)
+  } finally {
+    event.frame.close()
+  }
+}
+
+async function drawFrame(instance: BrowserInstance, event: BrowserFrameEvent): Promise<void> {
+  const canvas = instance.canvasRef
+  if (!canvas) {
+    if (event.kind === 'shared-texture') {
+      closeVideoFrame(event.frame)
+    }
+    return
+  }
+
+  instance.lastWidth = event.width
+  instance.lastHeight = event.height
+
+  if (event.kind === 'shared-texture') {
+    drawSharedTextureFrame(canvas, event)
+    return
+  }
+
+  instance.lastBuffer = event.buffer
+  await drawBitmapFrame(canvas, event)
+}
+
+function scheduleNextDraw(instance: BrowserInstance): void {
+  if (instance.drawScheduled !== null || instance.drawing) return
+
+  instance.drawScheduled = window.requestAnimationFrame(() => {
+    instance.drawScheduled = null
+
+    const event = instance.pendingFrame
+    instance.pendingFrame = null
+    if (!event) return
+
+    instance.drawing = true
+    void drawFrame(instance, event)
+      .catch((error) => {
+        console.warn('[BrowserAdapter] failed to draw frame', error)
+        if (event.kind === 'shared-texture') {
+          closeVideoFrame(event.frame)
+        }
+      })
+      .finally(() => {
+        instance.drawing = false
+        if (instance.pendingFrame) {
+          scheduleNextDraw(instance)
+        }
+      })
+  })
+}
+
+function queueFrame(instance: BrowserInstance, event: BrowserFrameEvent): void {
+  const previousPending = instance.pendingFrame
+  if (previousPending?.kind === 'shared-texture') {
+    closeVideoFrame(previousPending.frame)
+  }
+
+  instance.pendingFrame = event
+  scheduleNextDraw(instance)
+}
+
+function attachFrameSubscription(instance: BrowserInstance, browserId: number): void {
+  if (instance.unsubscribe) return
+
+  instance.unsubscribe = window.api.browser.onFrame((event: BrowserFrameEvent) => {
+    if (event.browserId !== browserId) return
+    queueFrame(instance, event)
+  })
+}
+
+async function ensureBrowserInstance(
+  entityId: string,
+  url: string,
+  width: number,
+  height: number
+): Promise<BrowserInstance> {
+  let instance = instances.get(entityId)
+  if (!instance) {
+    instance = createBrowserInstance()
+    instances.set(entityId, instance)
+  }
+
+  if (instance.browserId !== null) {
+    attachFrameSubscription(instance, instance.browserId)
+    if (instance.ownsRuntime) {
+      void window.api.browser.resize(instance.browserId, width, height)
+    }
+    if (instance.ownsRuntime && url !== instance.currentUrl) {
+      instance.currentUrl = url
+      void window.api.browser.navigate(instance.browserId, url)
+    }
+    return instance
+  }
+
+  if (instance.creating) return instance
+
+  instance.creating = true
+  try {
+    const request: BrowserCreateRequest = { url, width, height }
+    const browserId = await window.api.browser.create(request)
+
+    if (instances.get(entityId) !== instance) {
+      await window.api.browser.destroy(browserId)
+      return createBrowserInstance()
+    }
+
+    instance.browserId = browserId
+    instance.currentUrl = url
+    instance.presentationMode = 'canvas'
+    instance.ownsRuntime = true
+    attachFrameSubscription(instance, browserId)
+    console.log(`[BrowserAdapter] created entityId=${entityId} browserId=${browserId}`)
+    return instance
+  } finally {
+    instance.creating = false
+  }
+}
+
 interface BrowserFrameProps {
-  entityId: string
-  url: string
+  entity: CanvasEntity<'browser'>
   width: number
   height: number
 }
 
-function BrowserFrame({ entityId, url, width, height }: BrowserFrameProps): JSX.Element {
+function BrowserFrame({ entity, width, height }: BrowserFrameProps): JSX.Element {
+  const { dispatch } = useCanvasStore()
+  const entityId = entity.id
+  const url = entity.typeProps.url
   const canvasRef = useRef<HTMLCanvasElement | null>(null)
-  const hasFrameRef = useRef(false)
+  const [browserId, setBrowserId] = useState<number | null>(null)
+  const [presentationMode, setPresentationModeState] = useState<BrowserPresentationMode>('canvas')
+  const entityRef = useRef(entity)
 
-  // Register canvas with instance so drawPNGBuffer can target it
+  entityRef.current = entity
+
   useEffect(() => {
     const instance = instances.get(entityId)
     if (instance) {
       instance.canvasRef = canvasRef.current
-      // Replay last frame if available
+      setBrowserId(instance.browserId)
+      setPresentationModeState(instance.presentationMode)
+      if (canvasRef.current) {
+        updateCanvasSize(canvasRef.current, width, height)
+      }
       if (instance.lastBuffer && canvasRef.current) {
-        drawPNGBuffer(canvasRef.current, instance.lastBuffer).catch(console.warn)
-        hasFrameRef.current = true
+        void drawBitmapFrame(canvasRef.current, {
+          browserId: instance.browserId ?? -1,
+          kind: 'bitmap',
+          buffer: instance.lastBuffer,
+          width: instance.lastWidth,
+          height: instance.lastHeight
+        }).catch(console.warn)
       }
     }
+
     return () => {
-      const inst = instances.get(entityId)
-      if (inst) inst.canvasRef = null
+      const current = instances.get(entityId)
+      if (current) {
+        current.canvasRef = null
+      }
     }
-  }, [entityId])
+  }, [entityId, width, height])
 
   useEffect(() => {
-    const existing = instances.get(entityId)
+    void ensureBrowserInstance(entityId, url, width, height).then((instance) => {
+      instance.canvasRef = canvasRef.current
+      setBrowserId(instance.browserId)
+      setPresentationModeState(instance.presentationMode)
+      if (instance.browserId !== null && entityRef.current.typeProps.browserId !== instance.browserId) {
+        dispatch({
+          type: 'UPDATE_ENTITY',
+          id: entityId,
+          patch: {
+            typeProps: {
+              ...entityRef.current.typeProps,
+              browserId: instance.browserId
+            } as CanvasEntity<'browser'>['typeProps']
+          }
+        })
+      }
+      if (canvasRef.current) {
+        updateCanvasSize(canvasRef.current, width, height)
+      }
+    })
+    // Browser lifecycle is owned by releaseBrowserInstance on discard.
+  }, [dispatch, entityId, url, width, height])
 
-    // Already have a browserId (fully created) — just re-subscribe to frames.
-    if (existing && existing.browserId !== null) {
-      const unsub = window.api.browser.onFrame((event: BrowserFrameEvent) => {
-        if (event.browserId === existing.browserId && existing.canvasRef) {
-          existing.lastBuffer = event.buffer
-          drawPNGBuffer(existing.canvasRef, event.buffer).catch(console.warn)
-        }
-      })
-      return unsub
+  useEffect(() => {
+    if (browserId === null) {
+      return
     }
 
-    // Already in the middle of create() — guard against StrictMode double-fire.
-    if (existing && existing.creating) {
-      return undefined
-    }
-
-    // New entity — create slot and call browser:create
-    const instance: BrowserInstance = {
-      browserId: null,
-      canvasRef: canvasRef.current,
-      lastBuffer: null,
-      unsubscribe: null,
-      creating: true
-    }
-    instances.set(entityId, instance)
-
-    window.api.browser.create(url).then((browserId) => {
-      if (instances.get(entityId) !== instance) {
-        window.api.browser.destroy(browserId)
+    return window.api.browser.onState((event: BrowserStateEvent) => {
+      if (event.browserId !== browserId) {
         return
       }
-      instance.browserId = browserId
-      instance.creating = false
-      console.log(`[BrowserFrame] created entityId=${entityId} browserId=${browserId}`)
 
-      const unsub = window.api.browser.onFrame((event: BrowserFrameEvent) => {
-        if (event.browserId === browserId) {
-          instance.lastBuffer = event.buffer
-          if (instance.canvasRef) {
-            drawPNGBuffer(instance.canvasRef, event.buffer).catch(console.warn)
+      const instance = instances.get(entityId)
+      if (instance) {
+        instance.currentUrl = event.url
+        instance.presentationMode = event.mode
+      }
+
+      setPresentationModeState(event.mode)
+
+      const currentTypeProps = entityRef.current.typeProps
+      const nextTitle = event.title ?? undefined
+      if (
+        currentTypeProps.url !== event.url ||
+        currentTypeProps.title !== nextTitle ||
+        currentTypeProps.browserId !== browserId
+      ) {
+        dispatch({
+          type: 'UPDATE_ENTITY',
+          id: entityId,
+          patch: {
+            typeProps: {
+              ...currentTypeProps,
+              url: event.url,
+              title: nextTitle,
+              browserId
+            } as CanvasEntity<'browser'>['typeProps']
           }
-        }
-      })
-      instance.unsubscribe = unsub
+        })
+      }
     })
+  }, [browserId, dispatch, entityId])
 
-    return () => {
-      // Do NOT delete from instances here — cleanup is handled solely by
-      // releaseBrowserInstance() on entity discard, so HMR/StrictMode
-      // re-mounts can pick up the existing instance.
+  useEffect(() => {
+    if (browserId === null) {
+      return
     }
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [entityId])
 
-  return createElement('canvas', {
-    ref: canvasRef,
-    width,
-    height,
-    style: {
+    void window.api.browser.resize(browserId, width, height)
+  }, [browserId, height, width])
+
+  useEffect(() => {
+    return () => {
+      if (browserId !== null && presentationMode === 'window') {
+        void window.api.browser.setPresentationMode(browserId, 'canvas')
+      }
+    }
+  }, [browserId, presentationMode])
+
+  const handlePresentationToggle = (): void => {
+    if (browserId === null) return
+    const nextMode: BrowserPresentationMode = presentationMode === 'canvas' ? 'window' : 'canvas'
+    void window.api.browser.setPresentationMode(browserId, nextMode)
+  }
+
+  return createElement(
+    'div',
+    {
+      style: {
+        position: 'relative',
+        width,
+        height
+      }
+    },
+    createElement('canvas', {
+      ref: canvasRef,
       width,
       height,
-      display: 'block',
-      pointerEvents: 'none',
-      userSelect: 'none',
-      borderRadius: 8
-    }
-  })
+      style: {
+        width,
+        height,
+        display: 'block',
+        pointerEvents: 'none',
+        userSelect: 'none',
+        borderRadius: 12,
+        background: '#ffffff',
+        border: '1px solid rgba(212, 208, 202, 0.9)',
+        boxShadow: '0 16px 40px rgba(0, 0, 0, 0.08)'
+      }
+    }),
+    createElement(
+      'button',
+      {
+        type: 'button',
+        onClick: handlePresentationToggle,
+        disabled: browserId === null,
+        style: {
+          position: 'absolute',
+          top: 12,
+          right: 12,
+          zIndex: 2,
+          padding: '6px 10px',
+          borderRadius: 999,
+          border: '1px solid rgba(212, 208, 202, 0.9)',
+          background: 'rgba(255, 255, 255, 0.92)',
+          color: '#1a1a1a',
+          fontSize: 12,
+          fontWeight: 600,
+          boxShadow: '0 6px 18px rgba(0, 0, 0, 0.08)',
+          cursor: browserId === null ? 'not-allowed' : 'pointer'
+        }
+      },
+      presentationMode === 'window' ? 'Hide active browser' : 'Show active browser'
+    )
+  )
 }
 
-// ── Adapter ──────────────────────────────────────────────────────────
 export const BrowserAdapter: EntityAdapter<'browser'> = {
   type: 'browser',
 
   async hydrate(entity) {
-    let instance = instances.get(entity.id)
-    if (instance) return instance
-
-    instance = { browserId: null, canvasRef: null, lastBuffer: null, unsubscribe: null, creating: true }
-    instances.set(entity.id, instance)
-
-    const browserId = await window.api.browser.create(entity.typeProps.url)
-    instance.browserId = browserId
-    instance.creating = false
-
-    const unsub = window.api.browser.onFrame((event: BrowserFrameEvent) => {
-      if (event.browserId === browserId) {
-        instance!.lastBuffer = event.buffer
-        if (instance!.canvasRef) {
-          drawPNGBuffer(instance!.canvasRef, event.buffer).catch(console.warn)
-        }
-      }
-    })
-    instance.unsubscribe = unsub
-
-    return instance
+    return ensureBrowserInstance(entity.id, entity.typeProps.url, entity.size.w, entity.size.h)
   },
 
   async suspend(instance) {
-    const b = instance as BrowserInstance
-    if (b.canvasRef) {
-      return b.canvasRef.toDataURL('image/png')
+    const browser = instance as BrowserInstance
+    if (browser.browserId !== null) {
+      try {
+        return await window.api.browser.captureSnapshot(browser.browserId)
+      } catch (error) {
+        console.warn('[BrowserAdapter] live snapshot capture failed during suspend', error)
+      }
     }
-    if (b.lastBuffer) {
-      // Fallback: draw buffer onto a temp canvas
+    if (browser.canvasRef) {
+      return browser.canvasRef.toDataURL('image/png')
+    }
+    if (browser.lastBuffer) {
       const canvas = document.createElement('canvas')
-      canvas.width = 1280
-      canvas.height = 800
-      await drawPNGBuffer(canvas, b.lastBuffer)
+      updateCanvasSize(canvas, browser.lastWidth, browser.lastHeight)
+      await drawBitmapFrame(canvas, {
+        browserId: browser.browserId ?? -1,
+        kind: 'bitmap',
+        buffer: browser.lastBuffer,
+        width: browser.lastWidth,
+        height: browser.lastHeight
+      })
       return canvas.toDataURL('image/png')
     }
     return 'data:image/png;base64,iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVQIW2NkAAIAAAoAAv/lxKUAAAAASUVORK5CYII='
   },
 
   async captureSnapshot(instance) {
-    const b = instance as BrowserInstance
-    if (b.canvasRef) return b.canvasRef.toDataURL('image/png')
-    if (b.lastBuffer) {
+    const browser = instance as BrowserInstance
+    if (browser.browserId !== null) {
+      try {
+        return await window.api.browser.captureSnapshot(browser.browserId)
+      } catch (error) {
+        console.warn('[BrowserAdapter] live snapshot capture failed', error)
+      }
+    }
+    if (browser.canvasRef) return browser.canvasRef.toDataURL('image/png')
+    if (browser.lastBuffer) {
       const canvas = document.createElement('canvas')
-      canvas.width = 1280
-      canvas.height = 800
-      await drawPNGBuffer(canvas, b.lastBuffer)
+      updateCanvasSize(canvas, browser.lastWidth, browser.lastHeight)
+      await drawBitmapFrame(canvas, {
+        browserId: browser.browserId ?? -1,
+        kind: 'bitmap',
+        buffer: browser.lastBuffer,
+        width: browser.lastWidth,
+        height: browser.lastHeight
+      })
       return canvas.toDataURL('image/png')
     }
     throw new Error('BrowserAdapter.captureSnapshot: no frame received yet')
@@ -217,28 +490,36 @@ export const BrowserAdapter: EntityAdapter<'browser'> = {
 
   render(entity) {
     return createElement(BrowserFrame, {
-      entityId: entity.id,
-      url: entity.typeProps.url,
+      entity,
       width: entity.size.w,
       height: entity.size.h
     })
   }
 }
 
-/** Called when entity is discarded — tear down OSR window + listener */
 export async function releaseBrowserInstance(id: string): Promise<void> {
   const instance = instances.get(id)
   if (!instance) return
 
   instance.unsubscribe?.()
   instance.unsubscribe = null
+
+  if (instance.drawScheduled !== null) {
+    window.cancelAnimationFrame(instance.drawScheduled)
+    instance.drawScheduled = null
+  }
+
+  if (instance.pendingFrame?.kind === 'shared-texture') {
+    closeVideoFrame(instance.pendingFrame.frame)
+  }
+  instance.pendingFrame = null
   instance.canvasRef = null
   instance.lastBuffer = null
 
-  if (instance.browserId !== null) {
+  if (instance.browserId !== null && instance.ownsRuntime) {
     await window.api.browser.destroy(instance.browserId)
-    instance.browserId = null
   }
+  instance.browserId = null
 
   instances.delete(id)
 }

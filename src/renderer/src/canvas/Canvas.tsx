@@ -16,6 +16,8 @@ import { useCanvasTransform } from './hooks/useCanvasTransform'
 import ViewportContainer from './ViewportContainer'
 import EntityLayer from './EntityLayer'
 
+const ENABLE_BROWSER_SEED = true
+
 export default function Canvas(): JSX.Element {
   const rootRef = useRef<HTMLDivElement | null>(null)
   const { state, dispatch } = useCanvasStore()
@@ -41,9 +43,14 @@ export default function Canvas(): JSX.Element {
     return () => ro.disconnect()
   }, [])
 
+  useEffect(() => {
+    console.log('[Canvas] shell mounted')
+  }, [])
+
   // POC: Seed a default Browser entity (naver.com) on first mount.
   // Guard with ref so HMR / StrictMode double-fire doesn't create duplicates.
   useEffect(() => {
+    if (!ENABLE_BROWSER_SEED) return
     if (browserSeededRef.current) return
     browserSeededRef.current = true
 

@@ -4,6 +4,9 @@ import type { BrowserApi } from '../shared/browser.js'
 
 interface EgDeskApi extends CodexDesktopApi {
   browser: BrowserApi
+  debug: {
+    log: (level: 'log' | 'warn' | 'error', entries: string[]) => void
+  }
 }
 
 declare global {
