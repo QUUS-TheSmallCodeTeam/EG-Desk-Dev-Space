@@ -3,7 +3,18 @@
 > **Purpose**: Centralized registry of all technologies, frameworks, and libraries used in EG-DESK
 > **Maintained by**: PM Agent (auto-update) + Human decisions (ideation/research phases)
 > **Used by**: PM Agent for technology selection guidance during feature implementation
-> **Last Updated**: 2026-04-13 (v2 — 2-tier license policy, State Management addendum, Canvas Entity Coordinate System placeholder)
+> **Last Updated**: 2026-04-17 (v3 — Firefox Shell pivot per ADR-007. Section 2 renamed to "App Shell Framework", Electron → Transitional, Firefox chrome JS + fx-autoconfig + Surfer + WASM + Rust helper 신규 entries)
+
+> ### 🟠 2026-04-17 PIVOT NOTE
+>
+> EG-Desk 는 **Electron 에서 Firefox chrome JS shell 로 전환** (ADR-007). 이 문서 섹션 2 (App Shell Framework) 구조가 바뀜:
+> - Electron 은 **Transitional** — 현 Electron 코드베이스는 단계적 이관 대상, 신규 기능은 Firefox shell 에 작성
+> - Firefox + fx-autoconfig + Surfer 가 새 primary framework
+> - Rust helper 바이너리가 OS-deep 기능 담당 (tray / hotkey / pty / file-watch)
+> - WASM 이 연산 헤비 in-process 모듈 담당
+> - Mini-app 은 번들된 bun/node subprocess
+>
+> **관련 문서**: [`FIREFOX_SHELL_STRATEGY.md`](FIREFOX_SHELL_STRATEGY.md), [`ADR-007`](../../.claude/docs/decisions/007-firefox-shell-over-electron.md), [`apps/firefox-ui-demo/`](../../apps/firefox-ui-demo/)
 
 ---
 
@@ -50,34 +61,83 @@
 
 ---
 
-## 2. Desktop Application Framework (App-level)
+## 2. App Shell Framework (App-level)
 
-### Electron
-- **Category**: Desktop Application Framework (Main)
-- **Version**: (Check package.json)
-- **Purpose**: EG-Desk 앱 전체의 메인 desktop framework. 크로스 플랫폼 데스크톱 앱 shell, 프로세스 관리, OS 네이티브 통합을 담당
+### 2.1 Firefox Chrome JS Shell — **PRIMARY (2026-04-17+)**
+- **Category**: App shell framework — primary, per ADR-007
+- **Purpose**: EG-Desk 앱 전체 shell. Firefox 바이너리 위에 chrome JS 로 커스텀 UI (4-Edge Framework + canvas + entity cards) 구축. Privileged context 라 agent 가 DOM + OS 동시 자연 접근
+- **Engine**: Gecko (웹 렌더) + SpiderMonkey (privileged JS)
 - **Capabilities**:
-  - Native menus (Menu.buildFromTemplate)
-  - Native dialogs (file picker, message box)
-  - System tray integration
-  - Notifications
-  - Native file system access
-  - IPC (Inter-Process Communication)
-  - Window management
-  - Auto-updater
-- **Use When**:
-  - 앱 전체 아키텍처 결정 (프로세스 모델, 보안 정책)
-  - OS native 기능 (native menus, dialogs)
-  - System-level integration (tray, notifications)
-  - Desktop-specific features
-- **Location**: `packages/electron-*`
+  - Full browser web 렌더 (카드 안에 real webpage)
+  - Privileged API: `IOUtils`, `PathUtils`, `Services.*`, `Subprocess.sys.mjs`
+  - XPCOM: `nsIFile`, `nsIChannel`, `nsIFilePicker`, etc.
+  - JSActor 기반 content↔chrome 통신 (Electron IPC 대응)
+  - XUL `<browser>` 로 canvas 에 실제 웹페이지 embed (popup/oauth 도 `window.browserDOMWindow` override 로 카드 라우팅)
+  - WebAssembly native-speed in-process
+  - System tray / hotkey / pty → 별도 Rust helper 바이너리 (섹션 2.3)
+- **Loader**: fx-autoconfig (MrOtherGuy) — runtime chrome JS 주입
+- **Path**: 1 (runtime injection POC) → 2 (portable 재패키징) → 2+WASM → 3 (Firefox fork + Surfer)
+- **Current POC**: `apps/firefox-ui-demo/`
 - **Documentation**:
-  - Official: https://www.electronjs.org/docs/
-  - Security: https://www.electronjs.org/docs/latest/tutorial/security
-- **Integration Notes**:
-  - EG-Desk의 app-level desktop framework — 모든 컴포넌트(Theia IDE, Canvas, AI 등)가 Electron 위에서 동작
-  - Theia는 Electron 내에서 IDE 컴포넌트 역할
-  - Security: Enable contextIsolation, disable nodeIntegration
+  - Strategy: [`FIREFOX_SHELL_STRATEGY.md`](FIREFOX_SHELL_STRATEGY.md)
+  - ADR: [`007-firefox-shell-over-electron`](../../.claude/docs/decisions/007-firefox-shell-over-electron.md)
+  - Mozilla chrome docs: https://firefox-source-docs.mozilla.org/
+- **License**: MPL 2.0 (Firefox). Custom overlay 코드는 우리 소유
+- **Trademark**: Mozilla trademark policy 준수 — 앱명 `EGDesk` 단독, "Built on Mozilla Firefox" 고지
+
+### 2.2 Surfer — Firefox Fork Build Tool (Path 3)
+- **Category**: Browser fork 빌드 오케스트레이터 (필요시, Path 3)
+- **Purpose**: Firefox 소스 다운로드 + patch 적용 + `mach build` 호출 + packaging 자동화. Zen Browser 가 쓰는 툴
+- **Source**: [zen-browser/surfer](https://github.com/zen-browser/surfer)
+- **Prerequisite**: Mozilla 빌드 환경 (Rust, clang, MSVC/Xcode, ~30GB)
+- **Use When**: Path 3 fork 필요시 (runtime injection 한계 도달 또는 완전 독립 브랜드 요구)
+- **License**: Apache 2.0
+- **Build 시간**: 환경 setup 2~3일 + 최초 `mach build` 30분~2시간 (머신 의존)
+
+### 2.3 egdesk-helper — OS Bridge Rust Binary
+- **Category**: 단일 Rust 바이너리. Firefox 내장에 없는 OS 기능 담당
+- **Purpose**: chrome JS 에서 `Subprocess.call` 로 spawn, WebSocket IPC 로 이벤트 교환
+- **Crates (후보)**:
+  - `portable-pty` — 크로스플랫폼 PTY (Windows ConPTY + Unix forkpty)
+  - `alacritty_terminal` — 터미널 상태머신 + ANSI 파서
+  - `tray-icon` — 시스템 트레이
+  - `global-hotkey` — OS 레벨 단축키 후킹
+  - `notify` — 파일시스템 watcher (fs.watch 대응)
+  - `tokio-tungstenite` — async WebSocket
+- **Spec**: [`EGDESK_HELPER_BINARY_SPEC.md`](../brainstorming/EGDESK_HELPER_BINARY_SPEC.md) (작성 예정)
+- **License**: MIT / Apache 2.0 (우리 소유, 오픈소스 공개 검토)
+- **Size**: ~5MB static link 목표
+
+### 2.4 WebAssembly (WASM) — In-process Native Layer
+- **Category**: 연산 헤비 in-process 모듈 (IPC 회피용)
+- **Purpose**: SpiderMonkey 내장 WASM 실행기로 Rust → wasm32 컴파일 모듈 직접 로드. near-native 속도, sandboxed
+- **Use When**: 고빈도/지연 민감 연산 (vector search, syntax parser, image/audio DSP, crypto)
+- **Not For**: OS syscall 필요 기능 (→ Helper 바이너리 또는 chrome JS `IOUtils/Subprocess` 경유)
+- **Spec**: [`EGDESK_WASM_LAYER.md`](../brainstorming/EGDESK_WASM_LAYER.md) (작성 예정)
+
+### 2.5 ~~Electron~~ — Transitional
+- **Status**: ~~PRIMARY~~ → **Transitional per ADR-007 (2026-04-17)**. 신규 기능 작성 금지. 기존 코드베이스 단계 이관 대상
+- **역사적 Purpose**: 이전엔 EG-Desk 앱 전체의 메인 desktop framework 였음
+- **Why Superseded**: OSR + shared texture 로 canvas 안에 real browser UX 를 넣는 한계, agent 의 DOM+OS 동시 접근 제약, ABP (Chromium fork) 경로의 ROI 불일치. ADR-007 참조
+- **Current Location**: `src/main/`, `src/renderer/`, `src/preload/` — 단계 이관 / deprecate 대상
+- **Capabilities 매핑 (Electron → Firefox shell)**:
+  | Electron | Firefox shell 대응 |
+  |----------|-------------------|
+  | `electron.app`, `BrowserWindow` | chrome JS boot + `spawnBrowserCard` (XUL `<browser>`) |
+  | `ipcMain` / `ipcRenderer` | JSActor (`sendQuery` / `sendAsyncMessage`) |
+  | `contextBridge` | JSActor 쌍 + content script |
+  | `electron.Tray` | egdesk-helper (`tray-icon` crate) |
+  | `electron.globalShortcut` | egdesk-helper (`global-hotkey` crate) |
+  | `electron.Menu` | Firefox chrome menubar 커스터마이즈 + chrome JS 메뉴 |
+  | `electron.dialog` | `nsIFilePicker` XPCOM |
+  | `electron.clipboard` | `Services.clipboard` |
+  | `electron.Notification` | 웹 `Notification` API |
+  | `desktopCapturer` | `getDisplayMedia()` (권한 모델 다름) |
+  | `autoUpdater` | Firefox AUS 프로토콜 + 자체 업데이트 서버 |
+  | Node `fs` | `IOUtils` |
+  | Node `child_process` | `Subprocess.sys.mjs` |
+  | Node `path` | `PathUtils` |
+  | Native `.node` addon | WASM in-process OR helper subprocess |
 
 ---
 

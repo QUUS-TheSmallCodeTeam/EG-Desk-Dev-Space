@@ -1,5 +1,10 @@
 # firefox-ui-demo
 
+> **2026-04-17 Platform pivot 확정**: 본 데모가 EG-Desk 의 Electron → Firefox shell 전환을 증명하는 **Path 1 POC** 로 공식화됨.
+> - 결정: [`ADR-007`](../../.claude/docs/decisions/007-firefox-shell-over-electron.md)
+> - 전략: [`FIREFOX_SHELL_STRATEGY.md`](../../ideas/confirmed/FIREFOX_SHELL_STRATEGY.md)
+> - 로드맵: [`FIREFOX_SHELL_ROADMAP.md`](../../ideas/confirmed/FIREFOX_SHELL_ROADMAP.md)
+
 **Firefox를 EG-Desk의 UI 캔버스로 쓸 수 있는가?** 에 대한 실제 동작 데모.
 
 Electron browser-in-canvas POC (`docs/browser-canvas-osr-poc-2026-04-15.md`)는 OSR + shared texture까지 갔지만 popup / IME / file chooser / focus 같은 "진짜 브라우저 UX"를 canvas 안에 복제하는 건 근본적으로 호스트 컴포지터 문제라서 막혔다. 이 데모는 **정반대 접근** — 브라우저를 canvas 안에 집어넣는 대신, **브라우저 자체를 우리 UI로 재프로그래밍**한다.

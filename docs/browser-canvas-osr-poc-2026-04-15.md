@@ -116,3 +116,26 @@ The current implementation captures and restores `url + scrollX + scrollY`. It i
 - `src/renderer/src/main.tsx`
 - `src/renderer/src/components/RootErrorBoundary.tsx`
 - `vite.config.ts`
+
+---
+
+## Postmortem — 2026-04-17: Firefox Shell 로 방향 전환
+
+이 POC 의 핵심 결론 (popup / IME / file chooser / focus ring / DevTools 를 canvas 안에 넣는 게 호스트 컴포지터 문제로 근본 차단) 이 EG-Desk 의 canvas + real browser entity 비전을 Electron 로는 달성 불가함을 증명했다.
+
+2026-04-17 세션에서 대안으로 **Firefox chrome JS shell** 경로가 검증됨 (`apps/firefox-ui-demo/`):
+
+- Firefox `browser.xhtml` 은 XHTML + privileged JS, `fx-autoconfig` 로 runtime injection 가능
+- XUL `<browser>` 엘리먼트로 canvas 카드에 **실제 웹페이지 + full browser capabilities** 렌더 (popup, IME, DevTools, 확장 그대로 유지)
+- `window.browserDOMWindow` override 로 popup/OAuth 를 카드로 라우팅
+- Chrome JS 는 privileged context 라 agent 가 DOM + OS 동시 자연 접근
+
+**결정**: Electron → Firefox chrome JS shell pivot (ADR-007).
+
+**승계 문서**:
+- [`ADR-007`](../.claude/docs/decisions/007-firefox-shell-over-electron.md)
+- [`FIREFOX_SHELL_STRATEGY.md`](../ideas/confirmed/FIREFOX_SHELL_STRATEGY.md)
+- [`FIREFOX_SHELL_ROADMAP.md`](../ideas/confirmed/FIREFOX_SHELL_ROADMAP.md)
+- [`apps/firefox-ui-demo/`](../apps/firefox-ui-demo/) (Path 1 POC)
+
+본 POC 의 OSR + shared texture 코드는 deprecate 단계. 단계적 이관 예정.

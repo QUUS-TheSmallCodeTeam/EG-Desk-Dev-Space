@@ -3,7 +3,9 @@
 **Research Date**: 2026-04-14
 **Investigator**: Session Lead (direct WebSearch/WebFetch in conversation)
 **Context**: EG-Desk 무한 캔버스 위에 웹 엔티티(Browser)를 올리는 방법 — 렌더링 경로 + 풀 브라우저 한계 조사
-**Status**: 2026-04-15 기준 방향 확정 — EG-Desk는 workspace app, browser는 내부 capability. 아키텍처는 Electron shell + BrowserOS/ABP 계열 엔진 통합 방향.
+**Status**: ~~2026-04-15 기준 방향 확정 — Electron shell + BrowserOS/ABP 계열 엔진 통합 방향~~ → **2026-04-17 재확정 (ADR-007): Firefox chrome JS shell + XUL `<browser>` 카드.** 본 문서의 렌더링 경로 비교 (OSR, WebContentsView, iframe, BrowserView) 는 역사적 가치로 보존. Firefox shell 경로 상세는 [`apps/firefox-ui-demo/docs/RESEARCH.md`](../../apps/firefox-ui-demo/docs/RESEARCH.md) (fx-autoconfig / Surfer / XUL browser) 및 [`FIREFOX_SHELL_STRATEGY.md`](../confirmed/FIREFOX_SHELL_STRATEGY.md) 참조.
+
+> **요약**: 본 문서는 Electron 시절 렌더링 경로 탐색 기록. Firefox shell 결정 후 canvas 에 웹페이지 embed 는 XUL `<browser>` 단일 경로로 수렴.
 
 ---
 

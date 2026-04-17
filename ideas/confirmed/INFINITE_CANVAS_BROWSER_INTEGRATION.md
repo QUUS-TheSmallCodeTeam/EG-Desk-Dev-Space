@@ -1,5 +1,19 @@
 # Theia 무한 캔버스 브라우저 통합: WebContentsView 혁신
 
+> ## 🟡 UPDATED for Firefox Shell (2026-04-17, ADR-007)
+>
+> **전제 (Electron WebContentsView) 가 Firefox shell pivot 으로 변경됨.**
+>
+> Canvas 에 브라우저를 embed 하는 경로가 Electron `WebContentsView` → Firefox **XUL `<browser>` 엘리먼트** 로 전환. `apps/firefox-ui-demo/overlay/JS/eg-desk-surface.uc.js::spawnBrowserCard()` 에 baseline 구현 있음. Popup / `window.open` / OAuth 는 `window.browserDOMWindow` override 로 카드에 라우팅 (동일 파일 `installPopupCapture()`).
+>
+> **무효화된 섹션**: Theia + Electron WebContentsView 통합 상세, BrowserWindow vs WebContentsView 비교 — Firefox 에선 이 선택지 자체가 없음 (XUL `<browser>` 단일 경로)
+>
+> **유효한 섹션**: 무한 캔버스 UX 목표, 브라우저 entity 모델, pan/zoom 요구사항, security 모델 검토 — 이 모두 Firefox shell 에서 재구현 대상
+>
+> **승계**: [`FIREFOX_SHELL_STRATEGY.md`](FIREFOX_SHELL_STRATEGY.md), [`ADR-007`](../../.claude/docs/decisions/007-firefox-shell-over-electron.md), [`apps/firefox-ui-demo/`](../../apps/firefox-ui-demo/)
+
+---
+
 ## 💡 핵심 발견: Theia는 이미 Electron이다!
 
 **중요한 깨달음**: Theia는 이미 Electron 37.2.1을 사용하고 있으며, 2024년 최신 WebContentsView API를 지원합니다. 문제는 Theia가 아직 구식 BrowserWindow 아키텍처를 사용하고 있다는 것입니다. 이것이 바로 우리의 **기회**입니다!

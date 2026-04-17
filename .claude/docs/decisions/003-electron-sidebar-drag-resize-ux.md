@@ -1,9 +1,12 @@
 # 003. Electron Sidebar Drag-Resize UX Reference
 
-**Status**: Decided
-**Date**: 2026-04-13 (Decided 2026-04-13 — 유저 승인, anytype 차용 거절 확정)
+**Status**: Decided · **Amended by ADR-007 (2026-04-17)** — UX 패턴 유효, 구현 경로는 Firefox chrome JS 로 전환
+**Date**: 2026-04-13 (Decided 2026-04-13 — 유저 승인, anytype 차용 거절 확정) · 2026-04-17 Firefox impl amendment
 **Deciders**: egdesk-pm-agent, Session Lead, User
 **Related SPEC**: `ideas/brainstorming/DESIGN_SYSTEM_SPEC.md` §7-3 (PresetBag, Left Edge)
+**Related ADR**: [007-firefox-shell-over-electron](007-firefox-shell-over-electron.md) — platform pivot
+
+> **Amendment (2026-04-17, ADR-007)**: 본 ADR 의 **UX 패턴 (PresetBag 2-state 토글, drag 감도, hover threshold 등) 은 전부 유효**. 구현 경로만 Electron → Firefox chrome JS 로 전환. Baseline: [`apps/firefox-ui-demo/overlay/JS/eg-desk-surface.uc.js::buildPresetBag()`](../../../apps/firefox-ui-demo/overlay/JS/eg-desk-surface.uc.js). 제목에 "Electron" 남은 건 히스토리 보존 목적, retroactive rename 안 함.
 
 ## Context
 

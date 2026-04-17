@@ -1,11 +1,18 @@
 # 006. Canvas Entity Foundation v1 — Entity-Agnostic Infrastructure (BLOCKER)
 
-**Status**: Decided
-**Date**: Decided 2026-04-13 — 유저 승인 (v2: viewport-based + 중심점 기준 반영)
+**Status**: Decided · **Firefox impl note added 2026-04-17 (ADR-007)**
+**Date**: Decided 2026-04-13 — 유저 승인 (v2: viewport-based + 중심점 기준 반영) · 2026-04-17 Firefox impl 경로 확정
 **Deciders**: egdesk-pm-agent, Session Lead, User
 **Related SPEC**: `ideas/brainstorming/DESIGN_SYSTEM_SPEC.md` §9-3 (Placeholder → v1 명세), §7-4 (HUD/Entity 이중 모드), §8 (카드 3-state L0-L3), §7-2 (Dock 드래그드롭 trigger)
-**Related ADR**: ADR-001 (xyflow 개념 차용 근거), ADR-004 (Dock 객체축 호스팅), ADR-005 (screenshot capture 공유 인프라)
-**Blocker for**: ADR-007+ (Browser Entity, IDE Entity, Chat Entity, File Preview Entity, etc.)
+**Related ADR**: ADR-001 (xyflow 개념 차용 근거), ADR-004 (Dock 객체축 호스팅), ADR-005 (screenshot capture 공유 인프라), **ADR-007 (platform pivot — Firefox chrome JS shell)**
+**Blocker for**: ~~ADR-007+~~ → Entity type ADRs ADR-008+ (Browser Entity, IDE Entity, Chat Entity, File Preview Entity, etc.) — ADR-007 이 platform pivot 으로 번호 이동
+
+> **Firefox Implementation Note (2026-04-17, ADR-007)**: Entity Foundation 모델 (L0-L3 lifecycle, viewport-based context, 중심점 기준) 은 platform-agnostic 이라 Firefox shell 에서도 유효. 구체 구현은:
+> - **Entity 카드 = XUL `<browser>` 엘리먼트** (`document.createXULElement('browser')` with `type="content" remote="true"`)
+> - Baseline: [`apps/firefox-ui-demo/overlay/JS/eg-desk-surface.uc.js::spawnBrowserCard()`](../../../apps/firefox-ui-demo/overlay/JS/eg-desk-surface.uc.js)
+> - Lifecycle `hydrated` 는 XUL `<browser>` 의 `docShell` 초기화 시점
+> - Viewport context 파싱은 `browsingContext.currentWindowGlobal.drawSnapshot()` 또는 JSActor
+> - Canvas pan/zoom: `#egd-canvas-layer` 에 CSS transform (동일 파일 `installCanvasPanZoom()`)
 
 ---
 

@@ -1,6 +1,17 @@
 # EG-DESK Spatial Canvas UX 종합 솔루션
 
-*Last Updated: 2025-10-04*
+*Last Updated: 2025-10-04 · Firefox shell note added 2026-04-17*
+
+> ## 🟢 MOSTLY VALID under Firefox Shell (2026-04-17, ADR-007)
+>
+> 본 문서는 **UX 솔루션 중심** 이라 Firefox shell pivot 후에도 **대부분 유효**. 구현 세부만 교체:
+> - Canvas = chrome JS + 우리 overlay (Electron renderer 대신)
+> - Browser entity = XUL `<browser>` card (WebContentsView 대신)
+> - IPC = JSActor + WebSocket (helper) + Subprocess (`child_process` 대신)
+>
+> 각 섹션의 "Electron / WebContentsView / IPC" 언급은 Firefox shell 등가물로 읽을 것. UX 의사결정 로직 (3-state 카드, Edge Framework, Zone Model, proximity=relevance) 은 그대로.
+>
+> **참조**: [`FIREFOX_SHELL_STRATEGY.md`](FIREFOX_SHELL_STRATEGY.md), [`ADR-007`](../../.claude/docs/decisions/007-firefox-shell-over-electron.md)
 
 ## 개요
 

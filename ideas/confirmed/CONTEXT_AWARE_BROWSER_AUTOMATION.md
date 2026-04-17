@@ -1,11 +1,29 @@
 # Context-Aware Browser Automation
 
+> ## 🟡 UPDATED for Firefox Shell (2026-04-17, ADR-007)
+>
+> **개념 (Website Roadmap, 사전 정의 컨텍스트, 80-20 문제 해결) 은 유효**. 구현 경로만 Firefox chrome JS 로 교체.
+>
+> **변경 매핑**:
+> - ~~CDP / Playwright wrapper~~ → **chrome JS 의 `gBrowser`, `browsingContext`, JSActor, `nsIWebProgressListener` 직접 사용**
+> - ~~Electron `webContents.executeJavaScript`~~ → **JSActor `sendQuery` / `sendAsyncMessage` 패턴**
+> - ~~Electron IPC 브릿지~~ → **chrome JS 가 이미 privileged context 라서 IPC 최소화**
+> - **Roadmap 정의 포맷, agent 로직, Phase 1~N 목표 구조는 그대로 유지**
+>
+> 각 구현 섹션의 "CDP", "Playwright", "webContents" 레퍼런스는 Firefox 등가물로 읽어야 함. 세부 패턴은 [`ideas/brainstorming/FIREFOX_CHROME_JS_PATTERNS.md`](../brainstorming/FIREFOX_CHROME_JS_PATTERNS.md) (작성 예정) 참조.
+>
+> **승계 문서**:
+> - [`FIREFOX_SHELL_STRATEGY.md`](FIREFOX_SHELL_STRATEGY.md)
+> - [`ADR-007`](../../.claude/docs/decisions/007-firefox-shell-over-electron.md)
+
+---
+
 ## PRD Metadata
 
 **Created**: 2026-01-23
-**Status**: Approved (Phase 1 POC)
+**Status**: Approved (Phase 1 POC) — **구현 경로 update 2026-04-17 (ADR-007)**
 **Author**: egdesk-pm-agent
-**Related PRD**: `UNIFIED_BROWSER_AUTOMATION_API.md`
+**Related PRD**: ~~`UNIFIED_BROWSER_AUTOMATION_API.md`~~ (Superseded) → `FIREFOX_SHELL_STRATEGY.md`
 **Consultation Report**: `subagent_reports/20260123_context-aware-chrome-automation-pm-consultation.md`
 
 ---

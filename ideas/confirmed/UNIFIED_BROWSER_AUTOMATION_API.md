@@ -1,12 +1,37 @@
 # Unified Browser Automation API
+
+> ## 🔴 SUPERSEDED by ADR-007 (2026-04-17)
+>
+> **전제 (Electron + CDP + Playwright wrapper) 가 Firefox shell pivot 으로 무효화됨.**
+>
+> EG-Desk 는 Firefox chrome JS shell 로 전환 (ADR-007). Firefox chrome 에선 **CDP wrapper 층이 불필요** — 우리는 이미 privileged context 안에 있어서 `gBrowser`, `browsingContext`, JSActor, `nsIWebProgressListener` 같은 **native 인터페이스로 자동화가 직접** 가능.
+>
+> **본 문서의 무효화된 부분**:
+> - CDP Connection Manager
+> - Playwright/Puppeteer wrapper 레이어
+> - Auto-wait 직접 구현 (→ 필요시 `TabStateFlags`, `webProgressListener` 이벤트 또는 XUL `<browser>` 의 `busy`/`docShell.busyFlags` 로 대체)
+>
+> **본 문서의 유효한 개념** (Firefox 경로에서도 재사용):
+> - 제어권 핸드오프 프로토콜 (User ↔ AI)
+> - Visual feedback system (가상 커서, guided tour)
+> - 세션 기록 및 재생 (우리는 chrome JS + IOUtils 로 구현)
+> - Unified API 인터페이스 형태 (구현체만 chrome JS 네이티브로 교체)
+>
+> **승계**:
+> - [`FIREFOX_SHELL_STRATEGY.md`](FIREFOX_SHELL_STRATEGY.md)
+> - [`ADR-007`](../../.claude/docs/decisions/007-firefox-shell-over-electron.md)
+> - 후속 문서 `CONTEXT_AWARE_BROWSER_AUTOMATION.md` (Firefox chrome JS 경로로 update 예정)
+
+---
+
 ## AI 에이전트가 캔버스 위 브라우저를 직접 제어하는 통합 자동화 API
 
 **작성일**: 2025-10-10
 **최종 수정**: 2025-12-04 (제어권 핸드오프 프로토콜 및 세션 최적화 추가)
-**상태**: Technical Specification
+**상태**: ~~Technical Specification~~ → **Superseded 2026-04-17 (ADR-007)**
 **관련 문서**:
 - `EG-DESK_Whitepaper.md` - Browser Control Subsystem (Lines 176-194)
-- `INFINITE_CANVAS_BROWSER_INTEGRATION.md` - WebContentsView Architecture
+- `INFINITE_CANVAS_BROWSER_INTEGRATION.md` - WebContentsView Architecture ← Firefox 경로로 update 예정
 - `EG-DESK_Spatial_Canvas_UX_Solutions.md` - Guided Tour Visualization
 
 ---

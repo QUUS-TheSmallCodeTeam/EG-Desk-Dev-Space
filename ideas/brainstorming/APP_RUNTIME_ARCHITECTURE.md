@@ -1,5 +1,13 @@
 # APP_RUNTIME_ARCHITECTURE
 
+> ## 🟡 SUPERSEDED by MINI_APP_ECOSYSTEM.md (2026-04-17, ADR-007)
+>
+> 본 문서는 **Electron + Node main 전제**로 작성됨. Firefox shell pivot (ADR-007) 로 mini-app 실행 경로가 변경:
+> - ~~Electron main 에서 사용자 앱 실행~~ → **Firefox chrome JS 가 `Subprocess.call` 로 bun/node spawn**
+> - 본 문서의 아키텍처 핵심 아이디어 (manifest 기반, runtime 지원, 사용자 정의 앱) 는 유효
+>
+> **승계 문서**: [`MINI_APP_ECOSYSTEM.md`](MINI_APP_ECOSYSTEM.md) — Firefox shell 경로로 재작성된 신규 아키텍처
+
 사용자가 웹서버 코드를 다운받아 EG-DESK 안에서 앱처럼 실행하는 UX 구현 전략.
 사용자 정의 앱 포함.
 

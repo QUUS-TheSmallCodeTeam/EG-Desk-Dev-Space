@@ -4,6 +4,12 @@ WebAssembly Component Model을 활용한 EG-DESK 성능 최적화 및 네이티�
 
 **출처**: [Making WebAssembly a First-Class Language on the Web - Mozilla Hacks (2026.02)](https://hacks.mozilla.org/2026/02/making-webassembly-a-first-class-language-on-the-web/)
 
+> ## 🟢 본 문서는 **장기 비전** (Component Model). 현재 실용 stack 은 [`EGDESK_WASM_LAYER.md`](EGDESK_WASM_LAYER.md) — wasm-bindgen 기반.
+>
+> Firefox shell pivot (ADR-007) 에서 WASM 은 **Layer 2 in-process native** 역할로 채택. 현재 (2026) 는 wasm-bindgen + raw WASM 사용. Component Model 안정화 시 본 문서로 upgrade.
+>
+> **관련**: [`FIREFOX_SHELL_STRATEGY.md`](../confirmed/FIREFOX_SHELL_STRATEGY.md) Layer 2, [`EGDESK_WASM_LAYER.md`](EGDESK_WASM_LAYER.md)
+
 ---
 
 ## 배경: WebAssembly의 현재 문제

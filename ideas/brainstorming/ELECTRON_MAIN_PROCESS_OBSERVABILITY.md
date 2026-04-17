@@ -1,8 +1,22 @@
 # Electron Main Process Observability via Node Inspector CDP
 
-> **Status**: Brainstorming — 지금 당장 구현 안 함. 나중 참고용.
+> **Status**: ~~Brainstorming — 지금 당장 구현 안 함~~ → **Historical (2026-04-17, ADR-007 Firefox shell pivot)**
 > **Created**: 2026-04-10
 > **Trigger condition**: Main process에 로직이 쌓이기 시작하는 시점 (아래 "발동 시점" 참조)
+
+> ## 🟡 Firefox Shell 에서의 등가물 (2026-04-17, ADR-007)
+>
+> Firefox chrome JS 는 "main process" 개념 대응이 다름:
+> - **Browser Console** (Ctrl+Shift+J) — chrome JS 와 content log 통합. `devtools.chrome.enabled = true` 필요
+> - **Browser Toolbox** (Ctrl+Alt+Shift+I) — chrome DOM + JS debugger. privileged context 전체 관찰
+> - **`about:processes`** — 각 content process CPU/메모리
+> - **`about:performance`** — tab 별 성능 프로파일
+> - **`Services.console.registerListener(listener)`** — 프로그래매틱 콘솔 메시지 구독
+> - **Chrome JS 는 단일 프로세스** (Electron main 과 달리 별 Node 없음) 라 Node Inspector CDP 자체는 불필요. Content process 관찰은 `nsIWebProgressListener` / JSActor 로
+>
+> **관련**: [`FIREFOX_CHROME_JS_PATTERNS.md`](FIREFOX_CHROME_JS_PATTERNS.md) §8 (디버깅)
+
+본 문서는 Electron 시절 observability 계획으로 역사적 가치 보존. Firefox shell 에선 위의 등가물 사용.
 
 ## 문제
 

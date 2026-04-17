@@ -1,5 +1,20 @@
 # AI Terminal Chat Integration Ideas
 
+> ## 🟡 UPDATED for Firefox Shell (2026-04-17, ADR-007)
+>
+> **전제 (Theia + Electron) 가 Firefox shell pivot 으로 변경됨.**
+>
+> 터미널 구현 경로:
+> - ~~Theia ai-terminal + node-pty in-process~~ → **`egdesk-helper` Rust 바이너리 (`portable-pty` + `alacritty_terminal` crate) + xterm.js content + WebSocket IPC**
+> - 터미널 카드 = canvas 위 floating card (Browser entity 패턴 재사용)
+> - Agent 가 명령 실행 / 결과 캡처 시 helper 의 구조화 이벤트 스트림 소비 (raw PTY 파싱 불필요)
+>
+> **유효한 섹션**: Overlay 패턴, chat UI 컨셉, agent 통합 UX — UI/UX 본문은 Firefox shell 에서도 재사용
+>
+> **승계**: [`FIREFOX_SHELL_STRATEGY.md`](FIREFOX_SHELL_STRATEGY.md), [`EGDESK_HELPER_BINARY_SPEC.md`](../brainstorming/EGDESK_HELPER_BINARY_SPEC.md) (작성 예정)
+
+---
+
 ## 개요
 Claude Code / Gemini CLI를 Theia 앱 내에서 터미널 스타일 UI로 통합하는 방법
 

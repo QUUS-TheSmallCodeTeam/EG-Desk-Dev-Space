@@ -1,13 +1,31 @@
 # Agent Browser Protocol (ABP) Integration
 
+> ## 🔴 SUPERSEDED by ADR-007 (2026-04-17)
+>
+> EG-Desk 는 **Firefox chrome JS shell 로 platform pivot** (ADR-007). ABP = Chromium fork 라서 엔진 불일치로 직접 도입 불가.
+>
+> **현 상태**:
+> - 본 문서의 **ABP 철학 (agent-aware engine, settled boundary, composited hit test 등) 은 장기 가치** 로 in-place 보존
+> - **직접 도입은 보류**. 향후 Path 3 (Firefox fork + Gecko patch) 에서 일부 개념 이식 가능
+> - **기존 "CDP wrapper 대체" 주장은 무효화** — Firefox chrome JS 는 `gBrowser`, `browsingContext`, `nsIWebProgressListener`, JSActor 로 네이티브 equivalent 를 **HTTP 서버 층 없이** 제공
+>
+> **승계 경로**:
+> - 전략: [`FIREFOX_SHELL_STRATEGY.md`](FIREFOX_SHELL_STRATEGY.md)
+> - ADR: [`.claude/docs/decisions/007-firefox-shell-over-electron.md`](../../.claude/docs/decisions/007-firefox-shell-over-electron.md)
+> - POC: [`apps/firefox-ui-demo/`](../../apps/firefox-ui-demo/)
+>
+> 이 문서는 히스토리 + 추후 Gecko patch 참고 자료로 보존.
+
+---
+
 ## AI 에이전트를 위해 브라우저 엔진 자체를 재설계한 Chromium 포크를 EG-DESK workspace app의 브라우저 서브시스템으로 도입
 
 **작성일**: 2026-03-14
-**상태**: Confirmed — 도입 결정
+**상태**: ~~Confirmed — 도입 결정~~ → **Superseded 2026-04-17 (ADR-007)**
 **관련 문서**:
-- `UNIFIED_BROWSER_AUTOMATION_API.md` — 기존 CDP 기반 자동화 계획 (ABP가 엔진 레벨에서 대체)
-- `CONTEXT_AWARE_BROWSER_AUTOMATION.md` — 컨텍스트 인식 자동화
-- `references/agent-browser-protocol/` — ABP 소스 코드
+- `UNIFIED_BROWSER_AUTOMATION_API.md` — 기존 CDP 기반 자동화 계획 (ABP가 엔진 레벨에서 대체) ← 이것도 Superseded
+- `CONTEXT_AWARE_BROWSER_AUTOMATION.md` — 컨텍스트 인식 자동화 ← Firefox 경로로 update 예정
+- `references/agent-browser-protocol/` — ABP 소스 코드 (보존, Path 3 참고용)
 
 ---
 

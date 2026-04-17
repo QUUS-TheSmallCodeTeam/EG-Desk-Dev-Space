@@ -35,11 +35,12 @@ EG-Desk 프로젝트의 아키텍처/기술/UX 결정 기록. 외부 레퍼런�
 | 003 | [Electron Sidebar Drag-Resize UX Reference](003-electron-sidebar-drag-resize-ux.md) | Decided | 2026-04-13 | §7-3 |
 | 004 | [Canvas Tools Integration into Dock](004-canvas-tools-integration-into-dock.md) | Decided | 2026-04-13 | §7 Edge 정렬/너비 정책 (v2), §7-1 (v2, 중앙 anchor), §7-2 (v2, content-aware width), §7 L316 (v2), §9-1 (Superseded v1), §10-2 designMd (v2) |
 | 005 | [PresetBag Interaction Pattern (Mini-map + Click Semantics)](005-presetbag-interaction-pattern.md) | Decided (좌클릭 TBD) | 2026-04-13 | §7-3 (v2 확장) |
-| 006 | [Canvas Entity Foundation v1 (BLOCKER)](006-canvas-entity-foundation.md) | Decided (v2) · Phase 1 MVP implemented 2026-04-13 | 2026-04-13 | §7-4 HUD/Entity 이중모드, §9-3 (placeholder → v1 명세), §8 카드 3-state |
+| 006 | [Canvas Entity Foundation v1 (BLOCKER)](006-canvas-entity-foundation.md) | Decided (v2) · Phase 1 MVP implemented 2026-04-13 · **Firefox impl note 2026-04-17** (ADR-007) | 2026-04-13 | §7-4 HUD/Entity 이중모드, §9-3 (placeholder → v1 명세), §8 카드 3-state |
+| 007 | [Firefox Shell over Electron — Platform Pivot](007-firefox-shell-over-electron.md) | **Decided** | 2026-04-17 | `FIREFOX_SHELL_STRATEGY.md`, `FIREFOX_SHELL_ROADMAP.md`, amends ADR-003/006, supersedes ABP + UNIFIED_AUTOMATION docs |
 
 ## 예정 (다음 세션)
 
-- **Entity type ADRs (ADR-007+) — FIFO lazy addition** (ADR-006 §5.11). Browser / IDE / Chat / File Preview / Gadget 등 유저 요청 순서대로 개별 ADR + adapter 추가. Pre-priority 없음.
+- **Entity type ADRs — FIFO lazy addition, ADR-008 부터** (ADR-006 §5.11, ADR-007 platform pivot 이후 번호 이동). Browser / IDE / Chat / File Preview / Gadget 등 유저 요청 순서대로 개별 ADR + adapter 추가. Pre-priority 없음.
 - **Overlay / Edge customization ADR (shelf-review-agent 2라운드 결과 기반)** — Surf `Overlay=별도 BrowserWindow` 채택 여부, Edge position 런타임 전환 여부
 - **Immersion Levels Framework ADR (zen-browser 2라운드)** — L0 Ambient / L1 Pan / L2 Compact / L3 Full-screen 4단계 공식화
 - **Glance Interaction Pattern ADR (zen-browser)** — modifier+click temporal preview vs persistent HUD 구분
