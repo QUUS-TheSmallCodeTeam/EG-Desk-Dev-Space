@@ -1,0 +1,19 @@
+<!DOCTYPE html>
+<html>
+<head><meta charset="utf-8"><title>Popup Capture Test</title></head>
+<body style="font:500 16px -apple-system,system-ui,sans-serif;padding:40px;color:#1A1A1A;background:#F5F3EF;margin:0">
+  <h1 style="color:#2D5A7B;margin:0 0 12px">Popup Capture Test</h1>
+  <p style="color:#5A5A5A;margin:0 0 24px">Firing <code>window.open("https://example.com")</code> in 800ms — expected: new canvas card appears.</p>
+  <p id="status" style="color:#2E7D32;font-weight:600"></p>
+  <button id="manual" style="padding:8px 16px;background:#2D5A7B;color:#fff;border:none;border-radius:8px;cursor:pointer;margin-top:12px">Trigger popup manually</button>
+  <script>
+    function doPopup(){
+      var w = window.open('https://example.com', '_blank');
+      document.getElementById('status').textContent = 'window.open returned: ' + (w ? 'OK' : 'NULL (blocked)');
+      console.warn('[popup-test] window.open →', w);
+    }
+    document.getElementById('manual').addEventListener('click', doPopup);
+    setTimeout(doPopup, 800);
+  </script>
+</body>
+</html>
