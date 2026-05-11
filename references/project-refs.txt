@@ -45,6 +45,7 @@ agent-orchestration/
   paperclip
   ruflo
   724-office
+  dot-studio
 agent-tools/
   awesome-openclaw-agents
   nvidia-nemoclaw

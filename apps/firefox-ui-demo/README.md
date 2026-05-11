@@ -31,7 +31,8 @@ apps/firefox-ui-demo/
 │   └── CSS/
 │       └── eg-desk-demo.uc.css
 └── docs/
-    └── RESEARCH.md           경로 조사 요약 (autoconfig vs fork vs GeckoView)
+    ├── RESEARCH.md           경로 조사 요약 (autoconfig vs fork vs GeckoView)
+    └── CODEX_HUD_DESIGN_V1.md Codex Chat HUD 상세 UX/기능 설계
 ```
 
 ## 실행 방법 (Windows)
@@ -67,6 +68,23 @@ cd apps/firefox-ui-demo/scripts
 sudo ./install.sh       # macOS: /Applications/Firefox.app/Contents/Resources
                         # Linux: /usr/lib/firefox 또는 /opt/firefox
 ```
+
+### macOS gesture helper prototype
+
+트랙패드 `gesture begin/end` latency 를 보기 위한 macOS 전용 helper 프로토타입도 포함되어 있다.
+
+```bash
+cd apps/firefox-ui-demo/scripts
+./run-macos-gesture-helper.sh
+```
+
+helper 는 `http://127.0.0.1:39217/events` 로 SSE를 열고, overlay 는 여기에 연결해 `gestureScrollBegin / gestureScrollEnd` 와 latency 를 표시한다.
+
+### Codex Chat HUD design
+
+Firefox HUD 에 붙는 Codex chat 의 상세 화면/상태/행동 규칙은 아래 문서를 기준으로 한다.
+
+- [`docs/CODEX_HUD_DESIGN_V1.md`](./docs/CODEX_HUD_DESIGN_V1.md)
 
 ## 제거
 

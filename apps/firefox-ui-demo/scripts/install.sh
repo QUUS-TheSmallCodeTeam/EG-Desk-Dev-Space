@@ -12,13 +12,55 @@ SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 REPO_ROOT="$(dirname "$SCRIPT_DIR")"
 OVERLAY_DIR="$REPO_ROOT/overlay"
 TMP_CLONE="$(mktemp -d -t egdesk-fx-autoconfig.XXXXXX)"
+CURRENT_OS="$(uname -s)"
+TARGET_USER="${SUDO_USER:-$(id -un)}"
+
+cleanup() {
+  rm -rf "$TMP_CLONE"
+}
+
+trap cleanup EXIT
+
+resolve_home_dir() {
+  local user="$1"
+  case "$CURRENT_OS" in
+    Darwin)
+      dscl . -read "/Users/$user" NFSHomeDirectory 2>/dev/null | awk '{print $2}'
+      ;;
+    Linux)
+      if command -v getent >/dev/null 2>&1; then
+        getent passwd "$user" | cut -d: -f6
+      else
+        local expanded
+        expanded="$(eval echo "~$user")"
+        if [[ "$expanded" == "~$user" ]]; then
+          return 1
+        fi
+        echo "$expanded"
+      fi
+      ;;
+    *)
+      return 1
+      ;;
+  esac
+}
+
+TARGET_HOME="$(resolve_home_dir "$TARGET_USER")"
+if [[ -z "$TARGET_HOME" ]] || [[ ! -d "$TARGET_HOME" ]]; then
+  echo "[ERROR] 사용자 홈 디렉터리를 확인할 수 없습니다: $TARGET_USER"
+  exit 1
+fi
 
 # -------- Firefox 인스톨 디렉터리 탐지 --------
 FF_INSTALL=""
-case "$(uname -s)" in
+case "$CURRENT_OS" in
   Darwin)
-    FF_INSTALL="/Applications/Firefox.app/Contents/Resources"
-    FF_PROFILES_ROOT="$HOME/Library/Application Support/Firefox/Profiles"
+    if [[ -d "/Applications/Firefox.app/Contents/Resources" ]]; then
+      FF_INSTALL="/Applications/Firefox.app/Contents/Resources"
+    elif [[ -d "$TARGET_HOME/Applications/Firefox.app/Contents/Resources" ]]; then
+      FF_INSTALL="$TARGET_HOME/Applications/Firefox.app/Contents/Resources"
+    fi
+    FF_PROFILES_ROOT="$TARGET_HOME/Library/Application Support/Firefox/Profiles"
     ;;
   Linux)
     if [[ -d "/usr/lib/firefox" ]]; then
@@ -28,10 +70,10 @@ case "$(uname -s)" in
     elif [[ -d "/usr/lib64/firefox" ]]; then
       FF_INSTALL="/usr/lib64/firefox"
     fi
-    FF_PROFILES_ROOT="$HOME/.mozilla/firefox"
+    FF_PROFILES_ROOT="$TARGET_HOME/.mozilla/firefox"
     ;;
   *)
-    echo "[ERROR] Unsupported OS: $(uname -s)"
+    echo "[ERROR] Unsupported OS: $CURRENT_OS"
     exit 1
     ;;
 esac
@@ -39,10 +81,12 @@ esac
 if [[ -z "$FF_INSTALL" ]] || [[ ! -d "$FF_INSTALL" ]]; then
   echo "[ERROR] Firefox 인스톨 디렉터리를 찾을 수 없습니다."
   echo "        macOS: /Applications/Firefox.app/Contents/Resources"
+  echo "               $TARGET_HOME/Applications/Firefox.app/Contents/Resources"
   echo "        Linux: /usr/lib/firefox, /opt/firefox, /usr/lib64/firefox"
   exit 1
 fi
 echo "[info] Firefox install: $FF_INSTALL"
+echo "[info] Target user: $TARGET_USER"
 
 # -------- 프로필 탐지 --------
 if [[ ! -d "$FF_PROFILES_ROOT" ]]; then
@@ -71,9 +115,9 @@ command -v git >/dev/null 2>&1 || {
   exit 1
 }
 
-# -------- root 체크 (인스톨 디렉터리 쓰기용) --------
-if [[ "$(id -u)" -ne 0 ]]; then
-  echo "[ERROR] 이 스크립트는 Firefox 인스톨 디렉터리에 써야 해서 root 권한이 필요합니다."
+# -------- 권한 체크 (시스템 Firefox 인스톨일 때만 sudo 필요) --------
+if [[ ! -w "$FF_INSTALL" ]] && [[ "$(id -u)" -ne 0 ]]; then
+  echo "[ERROR] Firefox 인스톨 디렉터리에 쓰기 권한이 없습니다: $FF_INSTALL"
   echo "        sudo ./install.sh"
   exit 1
 fi
@@ -108,11 +152,7 @@ USERCHROME="$FF_PROFILE/chrome/userChrome.css"
 } > "$USERCHROME"
 
 # -------- 소유권 복구 (root 가 만든 파일을 user 프로필로) --------
-if [[ -n "${SUDO_USER:-}" ]]; then
-  chown -R "$SUDO_USER" "$FF_PROFILE/chrome" 2>/dev/null || true
-fi
-
-rm -rf "$TMP_CLONE"
+chown -R "$TARGET_USER" "$FF_PROFILE/chrome" 2>/dev/null || true
 
 cat <<EOF
 
