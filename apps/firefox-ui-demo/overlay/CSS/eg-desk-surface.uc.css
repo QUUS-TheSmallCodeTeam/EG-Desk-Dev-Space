@@ -2497,3 +2497,118 @@
 .egd-settings-codex-login-text {
   flex: 1;
 }
+
+
+/* ── Chat UI Improvements: Markdown, Timestamps, Chat Home ── */
+
+/* Message bubble timestamp */
+.egd-codex-bubble-time {
+  margin-top: 4px;
+  font-size: 10px;
+  line-height: 1.2;
+  color: var(--egd-on-surface-variant);
+  opacity: 0.6;
+  text-align: right;
+}
+.egd-codex-message-row-assistant .egd-codex-bubble-time {
+  text-align: left;
+}
+
+/* Code block (pre) */
+.egd-codex-code-block {
+  margin: 6px 0 4px;
+  padding: 10px 12px;
+  background: rgba(30, 40, 55, 0.88);
+  color: #e0e8f0;
+  border-radius: 8px;
+  font-family: 'SF Mono', 'Fira Code', 'JetBrains Mono', Menlo, Consolas, monospace;
+  font-size: 11px;
+  line-height: 1.5;
+  overflow-x: auto;
+  white-space: pre;
+  -moz-user-select: text;
+  user-select: text;
+}
+.egd-codex-code-block code {
+  font-family: inherit;
+  font-size: inherit;
+  background: none;
+  padding: 0;
+  border-radius: 0;
+}
+
+/* Inline code */
+.egd-codex-inline-code {
+  padding: 1px 5px;
+  background: rgba(100, 120, 150, 0.15);
+  border-radius: 4px;
+  font-family: 'SF Mono', 'Fira Code', Menlo, Consolas, monospace;
+  font-size: 0.92em;
+  color: #c0392b;
+}
+.egd-codex-bubble-user .egd-codex-inline-code {
+  background: rgba(255, 255, 255, 0.2);
+  color: #fff;
+}
+
+/* Bold/italic in bubble */
+.egd-codex-bubble-content strong {
+  font-weight: 700;
+}
+.egd-codex-bubble-content em {
+  font-style: italic;
+}
+
+/* Thread item avatar */
+.egd-codex-thread-avatar {
+  width: 36px;
+  height: 36px;
+  min-width: 36px;
+  border-radius: 50%;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  color: #fff;
+  font-size: 14px;
+  font-weight: 700;
+  flex-shrink: 0;
+  letter-spacing: 0.5px;
+}
+
+/* Thread item body (right side of avatar) */
+.egd-codex-thread-item-body {
+  flex: 1;
+  min-width: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+}
+
+/* Thread item top row (title + time) */
+.egd-codex-thread-item-top {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+}
+
+/* Thread item bottom row (preview + actions) */
+.egd-codex-thread-item-bottom {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 6px;
+}
+.egd-codex-thread-item-bottom .egd-codex-thread-preview {
+  flex: 1;
+  min-width: 0;
+}
+
+/* Thread relative time */
+.egd-codex-thread-time {
+  font-size: 10px;
+  color: var(--egd-on-surface-variant);
+  opacity: 0.7;
+  white-space: nowrap;
+  flex-shrink: 0;
+}

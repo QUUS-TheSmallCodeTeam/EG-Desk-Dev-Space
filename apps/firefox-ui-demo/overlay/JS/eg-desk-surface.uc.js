@@ -590,6 +590,100 @@
     return card;
   }
 
+
+  function stripMarkdown(text) {
+    if (!text) return '';
+    return text.replace(/\*\*(.+?)\*\*/g, '$1')
+               .replace(/__(.+?)__/g, '$1')
+               .replace(/\*(.+?)\*/g, '$1')
+               .replace(/_(.+?)_/g, '$1')
+               .replace(/`(.+?)`/g, '$1')
+               .replace(/```[\s\S]*?```/g, '[code]')
+               .replace(/\n/g, ' ')
+               .trim();
+  }
+  function appendRichText(container, text) {
+    if (!text) return;
+    // Split by code blocks first
+    const codeBlockRe = /```(\w*)\n?([\s\S]*?)```/g;
+    let lastIdx = 0;
+    for (const m of text.matchAll(codeBlockRe)) {
+      if (m.index > lastIdx) {
+        appendInlineMarkdown(container, text.slice(lastIdx, m.index));
+      }
+      const lang = m[1] || '';
+      const codeText = m[2].replace(/\n$/, '');
+      const pre = el('pre', { class: 'egd-codex-code-block' });
+      const codeEl = el('code', { class: lang ? `language-${lang}` : '' }, codeText);
+      pre.appendChild(codeEl);
+      container.appendChild(pre);
+      lastIdx = m.index + m[0].length;
+    }
+    if (lastIdx < text.length) {
+      appendInlineMarkdown(container, text.slice(lastIdx));
+    }
+  }
+  function appendInlineMarkdown(container, text) {
+    // Process inline markdown: **bold**, *italic*, `code`, links
+    const inlineRe = /(\*\*(.+?)\*\*|__(.+?)__|`(.+?)`|\*(.+?)\*|_(.+?)_|https?:\/\/[^\s]+)/g;
+    let lastIdx = 0;
+    for (const m of text.matchAll(inlineRe)) {
+      if (m.index > lastIdx) {
+        // Plain text - split by newlines
+        const plain = text.slice(lastIdx, m.index);
+        appendPlainWithBreaks(container, plain);
+      }
+      if (m[2] || m[3]) {
+        // **bold** or __bold__
+        container.appendChild(el('strong', {}, m[2] || m[3]));
+      } else if (m[4]) {
+        // `code`
+        container.appendChild(el('code', { class: 'egd-codex-inline-code' }, m[4]));
+      } else if (m[5] || m[6]) {
+        // *italic* or _italic_
+        container.appendChild(el('em', {}, m[5] || m[6]));
+      } else if (m[0].startsWith('http')) {
+        // URL
+        const { url, trailing } = trimLinkMatch(m[0]);
+        const anchor = el('a', { class: 'egd-codex-inline-link', href: url, title: url }, url);
+        anchor.addEventListener('click', (ev) => { ev.preventDefault(); ev.stopPropagation(); openUrlInBrowserCard(url); });
+        container.appendChild(anchor);
+        if (trailing) container.appendChild(document.createTextNode(trailing));
+      }
+      lastIdx = m.index + m[0].length;
+    }
+    if (lastIdx < text.length) {
+      appendPlainWithBreaks(container, text.slice(lastIdx));
+    }
+  }
+  function appendPlainWithBreaks(container, text) {
+    const lines = text.split('\n');
+    for (let i = 0; i < lines.length; i++) {
+      if (lines[i]) container.appendChild(document.createTextNode(lines[i]));
+      if (i < lines.length - 1) container.appendChild(document.createElement('br'));
+    }
+  }
+  function formatMessageTime(ts) {
+    if (!ts) return '';
+    const d = new Date(ts);
+    const h = d.getHours();
+    const m = d.getMinutes().toString().padStart(2, '0');
+    const ampm = h < 12 ? '오전' : '오후';
+    const h12 = h % 12 || 12;
+    return `${ampm} ${h12}:${m}`;
+  }
+  function formatRelativeTime(ts) {
+    if (!ts) return '';
+    const now = Date.now();
+    const diff = now - ts;
+    if (diff < 60000) return '방금';
+    if (diff < 3600000) return `${Math.floor(diff / 60000)}분 전`;
+    if (diff < 86400000) return `${Math.floor(diff / 3600000)}시간 전`;
+    if (diff < 604800000) return `${Math.floor(diff / 86400000)}일 전`;
+    const d = new Date(ts);
+    return `${d.getMonth() + 1}/${d.getDate()}`;
+  }
+
   function buildCodexVerificationUrl(status) {
     if (typeof status?.authUrl === 'string' && status.authUrl) {
       return status.authUrl;
@@ -906,24 +1000,37 @@
             class: `egd-codex-thread-item${activeThread && thread.id === activeThread.id ? ' egd-codex-thread-item-active' : ''}${threadMenuOpen ? ' egd-codex-thread-item-menu-open' : ''}`,
           });
           item.addEventListener('click', () => codexBridge.selectThread(thread.id, { openConversation: mode === 'hud' }));
+          const lastMsg = thread.messages && thread.messages.length > 0 ? thread.messages[thread.messages.length - 1] : null;
+          const lastTime = lastMsg && lastMsg.createdAt ? formatRelativeTime(lastMsg.createdAt) : '';
+          const avatarInitial = (thread.title || '?')[0].toUpperCase();
+          const avatarColors = ['#2D5A7B','#7B2D5A','#5A7B2D','#2D7B5A','#7B5A2D','#5A2D7B','#3D6B8B','#8B3D6B'];
+          const avatarColor = avatarColors[Math.abs(thread.id.split('').reduce((a,c) => a + c.charCodeAt(0), 0)) % avatarColors.length];
           item.append(
             el('div', { class: 'egd-codex-thread-item-row' },
-              el('div', { class: 'egd-codex-thread-title' }, thread.title),
-              el('div', { class: 'egd-codex-thread-item-actions' },
-                thread.unreadCount > 0
-                  ? el('span', { class: 'egd-codex-thread-unread' }, String(thread.unreadCount))
-                  : null,
-                el('button', {
-                  class: `egd-codex-thread-menu-trigger${threadMenuOpen ? ' egd-codex-thread-menu-trigger-active' : ''}`,
-                  title: '채팅방 메뉴',
-                  onclick: (ev) => {
-                    ev.stopPropagation();
-                    codexBridge.toggleThreadMenu(thread.id, ev.currentTarget);
-                  },
-                }, '⋯'),
+              el('div', { class: 'egd-codex-thread-avatar', style: { background: avatarColor } }, avatarInitial),
+              el('div', { class: 'egd-codex-thread-item-body' },
+                el('div', { class: 'egd-codex-thread-item-top' },
+                  el('div', { class: 'egd-codex-thread-title' }, thread.title),
+                  el('div', { class: 'egd-codex-thread-time' }, lastTime),
+                ),
+                el('div', { class: 'egd-codex-thread-item-bottom' },
+                  el('div', { class: 'egd-codex-thread-preview' }, stripMarkdown(codexThreadPreview(thread))),
+                  el('div', { class: 'egd-codex-thread-item-actions' },
+                    thread.unreadCount > 0
+                      ? el('span', { class: 'egd-codex-thread-unread' }, String(thread.unreadCount))
+                      : null,
+                    el('button', {
+                      class: `egd-codex-thread-menu-trigger${threadMenuOpen ? ' egd-codex-thread-menu-trigger-active' : ''}`,
+                      title: '채팅방 메뉴',
+                      onclick: (ev) => {
+                        ev.stopPropagation();
+                        codexBridge.toggleThreadMenu(thread.id, ev.currentTarget);
+                      },
+                    }, '⋯'),
+                  ),
+                ),
               ),
             ),
-            el('div', { class: 'egd-codex-thread-preview' }, codexThreadPreview(thread)),
           );
           if (threadMenuOpen) {
             item.appendChild(renderThreadMenu(thread));
@@ -1074,7 +1181,7 @@
         } else {
           for (const message of activeThread.messages) {
             const content = el('div', { class: 'egd-codex-bubble-content egd-codex-richtext' });
-            appendLinkedText(content, message.content || (message.status === 'streaming' ? '…' : ''));
+            appendRichText(content, message.content || (message.status === 'streaming' ? '…' : ''));
             const bubble = el('div', {
               class: `egd-codex-bubble egd-codex-bubble-${message.role}${message.status === 'error' ? ' egd-codex-bubble-error' : ''}`,
             },
@@ -1083,9 +1190,15 @@
             );
             if (message.role === 'user') {
               { const _rm = codexReadMeta(message, activeThread); if (_rm) bubble.appendChild(_rm); }
+            if (message.createdAt) {
+              bubble.appendChild(el('div', { class: 'egd-codex-bubble-time' }, formatMessageTime(message.createdAt)));
+            }
             }
             if (message.status === 'streaming' && message.role === 'assistant') {
               bubble.appendChild(el('div', { class: 'egd-codex-streaming' }, el('div', { class: 'egd-codex-typing-dots' }, el('span'), el('span'), el('span')), '코덱스가 입력 중'));
+            }
+            if (message.role === 'assistant' && message.createdAt && message.status !== 'streaming') {
+              bubble.appendChild(el('div', { class: 'egd-codex-bubble-time' }, formatMessageTime(message.createdAt)));
             }
             messages.appendChild(el('div', {
               class: `egd-codex-message-row egd-codex-message-row-${message.role || 'assistant'}`,
@@ -3310,6 +3423,7 @@
       installCanvasPanZoom(canvasViewport, canvasLayer);
       installNativeGestureHelperBridge();
       state.codexBridge = installCodexBridge();
+      window.__egdesk = { state, codexBridge: state.codexBridge };
       host.appendChild(buildDeskRail());
       host.appendChild(buildDock());
       host.appendChild(buildPresetBag());

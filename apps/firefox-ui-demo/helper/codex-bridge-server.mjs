@@ -1,5 +1,6 @@
 import { createServer } from 'node:http'
 import { spawn } from 'node:child_process'
+import { Codex } from '@openai/codex-sdk'
 
 const BRIDGE_PORT = 39218
 const APP_SERVER_PORT = 39219
@@ -16,6 +17,10 @@ let reconnectTimer = null
 let loginPollTimer = null
 let nextRequestId = 1
 const pendingRequests = new Map()
+
+// ── Codex SDK (chat) ──
+let codexSdk = null
+const sdkThreads = new Map() // conversationId → Thread
 
 const authState = {
   isLoggedIn: false,
@@ -387,11 +392,11 @@ async function startChatgptLogin() {
   return result
 }
 
-function extractChunkLines(buffer) {
-  const normalized = buffer.replace(/\r\n/g, '\n')
-  const parts = normalized.split('\n')
-  const remainder = parts.pop() ?? ''
-  return { lines: parts, remainder }
+function ensureCodexSdk() {
+  if (!codexSdk) {
+    codexSdk = new Codex()
+  }
+  return codexSdk
 }
 
 async function handleChatSend(body) {
@@ -411,23 +416,23 @@ async function handleChatSend(body) {
         createdAt: Date.now()
       }
     })
-    emitChatEvent('assistant_start', {
-      conversationId: fallbackConversationId,
-      messageId,
-      role: 'assistant',
-      status: 'streaming',
-    })
+    // emitChatEvent('assistant_start', {
+    // conversationId: fallbackConversationId,
+    // messageId,
+    // role: 'assistant',
+    // status: 'streaming',
+    // })
     broadcast({
       type: 'assistant-error',
       conversationId: fallbackConversationId,
       messageId,
       error: 'Codex login is required before sending messages.'
     })
-    emitChatEvent('assistant_error', {
-      conversationId: fallbackConversationId,
-      messageId,
-      error: 'Codex login is required before sending messages.',
-    })
+    // emitChatEvent('assistant_error', {
+    // conversationId: fallbackConversationId,
+    // messageId,
+    // error: 'Codex login is required before sending messages.',
+    // })
     return {
       accepted: false,
       conversationId: fallbackConversationId,
@@ -435,154 +440,160 @@ async function handleChatSend(body) {
     }
   }
 
-  return new Promise((resolve) => {
-    const messageId = createMessageId('assistant')
-    const args = body.conversationId
-      ? ['exec', 'resume', '--json', body.conversationId, body.message]
-      : ['exec', '--json', body.message]
+  const codex = ensureCodexSdk()
+  const messageId = createMessageId('assistant')
+  let conversationId = body.conversationId ?? ''
+  let started = false
+  let sawAgentMessage = false
 
-    const child = spawn('codex', args, {
-      cwd: process.cwd(),
-      env: process.env,
-      stdio: ['ignore', 'pipe', 'pipe']
-    })
-
-    let conversationId = body.conversationId ?? ''
-    let stdoutBuffer = ''
-    let stderrText = ''
-    let resolved = false
-    let started = false
-    let sawAgentMessage = false
-    let pendingItemError = null
-
-    const ensureStarted = () => {
-      if (started || !conversationId) return
-      started = true
-      broadcast({
-        type: 'assistant-start',
-        conversationId,
-        message: {
-          id: messageId,
-          role: 'assistant',
-          content: '',
-          status: 'streaming',
-          createdAt: Date.now()
-        }
-      })
-      emitChatEvent('assistant_start', {
-        conversationId,
-        messageId,
+  const ensureStarted = (cid) => {
+    if (started) return
+    started = true
+    broadcast({
+      type: 'assistant-start',
+      conversationId: cid,
+      message: {
+        id: messageId,
         role: 'assistant',
+        content: '',
         status: 'streaming',
-      })
-      if (!resolved) {
-        resolved = true
-        resolve({ accepted: true, conversationId })
+        createdAt: Date.now()
+      }
+    })
+    // emitChatEvent('assistant_start', {
+    // conversationId: cid,
+    // messageId,
+    // role: 'assistant',
+    // status: 'streaming',
+    // })
+  }
+
+  try {
+    // 기존 스레드 재개 또는 새 스레드 생성
+    let thread = conversationId ? sdkThreads.get(conversationId) : null
+    if (!thread && conversationId) {
+      thread = codex.resumeThread(conversationId)
+      sdkThreads.set(conversationId, thread)
+    }
+    if (!thread) {
+      thread = codex.startThread({ skipGitRepoCheck: true })
+    }
+
+    if (conversationId) ensureStarted(conversationId)
+
+    // SDK 스트리밍으로 응답 수신
+    const { events } = await thread.runStreamed(body.message)
+    let fullResponse = ''
+
+    for await (const event of events) {
+      // 스레드 ID 확보
+      if (thread.id && !conversationId) {
+        conversationId = thread.id
+        sdkThreads.set(conversationId, thread)
+        ensureStarted(conversationId)
+      }
+
+      const cid = conversationId || fallbackConversationId
+
+      switch (event.type) {
+        case 'item.completed': {
+          const item = event.item
+          if (item && item.type === 'agent_message' && typeof item.text === 'string') {
+            ensureStarted(cid)
+            sawAgentMessage = true
+            fullResponse += item.text
+            broadcast({
+              type: 'assistant-delta',
+              conversationId: cid,
+              messageId,
+              delta: item.text
+            })
+            // emitChatEvent('assistant_delta', {
+            // conversationId: cid,
+            // messageId,
+            // delta: item.text,
+            // })
+            broadcast({
+              type: 'assistant-complete',
+              conversationId: cid,
+              messageId
+            })
+            // emitChatEvent('assistant_complete', {
+            // conversationId: cid,
+            // messageId,
+            // })
+          }
+          if (item && item.type === 'error' && typeof item.message === 'string' && !item.message.includes('[features].collab')) {
+            ensureStarted(cid)
+            broadcast({
+              type: 'assistant-error',
+              conversationId: cid,
+              messageId,
+              error: item.message
+            })
+            // emitChatEvent('assistant_error', {
+            // conversationId: cid,
+            // messageId,
+            // error: item.message,
+            // })
+          }
+          break
+        }
+        case 'turn.completed': {
+          // 턴 완료 - usage 정보 포함
+          if (event.usage) {
+            // emitChatEvent('turn_completed', {
+            // conversationId: cid,
+            // messageId,
+            // usage: event.usage,
+            // })
+          }
+          break
+        }
       }
     }
 
-    if (conversationId) ensureStarted()
-
-    child.stdout.on('data', (chunk) => {
-      stdoutBuffer += chunk.toString()
-      const { lines, remainder } = extractChunkLines(stdoutBuffer)
-      stdoutBuffer = remainder
-
-      for (const rawLine of lines) {
-        const line = rawLine.trim()
-        if (!line.startsWith('{')) continue
-        try {
-          const parsed = JSON.parse(line)
-          if (parsed.type === 'thread.started' && typeof parsed.thread_id === 'string') {
-            conversationId = parsed.thread_id
-            ensureStarted()
-            continue
-          }
-          if (parsed.type === 'item.completed' && parsed.item && typeof parsed.item === 'object') {
-            const item = parsed.item
-            if (item.type === 'agent_message' && typeof item.text === 'string') {
-              ensureStarted()
-              sawAgentMessage = true
-              broadcast({
-                type: 'assistant-delta',
-                conversationId: conversationId || fallbackConversationId,
-                messageId,
-                delta: item.text
-              })
-              emitChatEvent('assistant_delta', {
-                conversationId: conversationId || fallbackConversationId,
-                messageId,
-                delta: item.text,
-              })
-              broadcast({
-                type: 'assistant-complete',
-                conversationId: conversationId || fallbackConversationId,
-                messageId
-              })
-              emitChatEvent('assistant_complete', {
-                conversationId: conversationId || fallbackConversationId,
-                messageId,
-              })
-              continue
-            }
-            if (item.type === 'error' && typeof item.message === 'string' && !item.message.includes('[features].collab')) {
-              pendingItemError = item.message
-            }
-          }
-        } catch {}
-      }
-    })
-
-    child.stderr.on('data', (chunk) => {
-      stderrText += chunk.toString()
-    })
-
-    child.on('error', (error) => {
-      const finalConversationId = conversationId || fallbackConversationId
-      ensureStarted()
+    const finalConversationId = conversationId || fallbackConversationId
+    if (!sawAgentMessage) {
+      ensureStarted(finalConversationId)
       broadcast({
         type: 'assistant-error',
         conversationId: finalConversationId,
         messageId,
-        error: `Failed to start Codex chat execution: ${error.message}`
+        error: 'Codex did not return a chat response.'
       })
-      emitChatEvent('assistant_error', {
-        conversationId: finalConversationId,
-        messageId,
-        error: `Failed to start Codex chat execution: ${error.message}`,
-      })
-      if (!resolved) {
-        resolved = true
-        resolve({ accepted: false, conversationId: finalConversationId, error: error.message })
-      }
-    })
+      // emitChatEvent('assistant_error', {
+      // conversationId: finalConversationId,
+      // messageId,
+      // error: 'Codex did not return a chat response.',
+      // })
+    }
 
-    child.on('close', (code) => {
-      const finalConversationId = conversationId || fallbackConversationId
-      if (!resolved) {
-        resolved = true
-        resolve({
-          accepted: code === 0,
-          conversationId: finalConversationId,
-          error: code === 0 ? undefined : (pendingItemError ?? stderrText.trim()) || 'Codex chat failed'
-        })
-      }
-      if (!sawAgentMessage) {
-        ensureStarted()
-        broadcast({
-          type: 'assistant-error',
-          conversationId: finalConversationId,
-          messageId,
-          error: (pendingItemError ?? stderrText.trim()) || 'Codex did not return a chat response.'
-        })
-        emitChatEvent('assistant_error', {
-          conversationId: finalConversationId,
-          messageId,
-          error: (pendingItemError ?? stderrText.trim()) || 'Codex did not return a chat response.',
-        })
-      }
+    return {
+      accepted: sawAgentMessage,
+      conversationId: finalConversationId,
+      error: sawAgentMessage ? undefined : 'Codex did not return a chat response.'
+    }
+  } catch (error) {
+    const cid = conversationId || fallbackConversationId
+    ensureStarted(cid)
+    broadcast({
+      type: 'assistant-error',
+      conversationId: cid,
+      messageId,
+      error: `Codex SDK error: ${error.message}`
     })
-  })
+    // emitChatEvent('assistant_error', {
+    // conversationId: cid,
+    // messageId,
+    // error: `Codex SDK error: ${error.message}`,
+    // })
+    return {
+      accepted: false,
+      conversationId: cid,
+      error: error.message
+    }
+  }
 }
 
 function readJsonBody(req) {
