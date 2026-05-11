@@ -22,6 +22,7 @@
     { id: 'shelf',    label: '서재',    icon: '📚' },
     { id: 'browser',  label: '브라우저', icon: '🌐' },
     { id: 'ide',      label: 'IDE',     icon: '‹›' },
+    { id: 'settings', label: '설정',   icon: '⚙️' },
     { id: 'create',   label: '추가',      icon: '＋' },
   ];
   const DOCK_CENTER = [
@@ -246,9 +247,16 @@
     if (!message || message.role !== 'user') return '';
     const readBy = Array.isArray(message.readBy) ? message.readBy : [];
     const others = readBy.filter((name) => name !== SELF_MEMBER);
-    if (others.length === 0) return '전송됨';
-    if (thread?.type === 'dm') return '읽음';
-    return `${others.length}명 읽음`;
+    if (others.length === 0) {
+      return el('span', { class: 'egd-codex-bubble-read' },
+        el('span', { class: 'egd-codex-read-icon' }, '\u2713'), ' \uc804\uc1a1\ub428');
+    }
+    if (thread?.type === 'dm') {
+      return el('span', { class: 'egd-codex-bubble-read' },
+        el('span', { class: 'egd-codex-read-icon egd-codex-read-icon-read' }, '\u2713\u2713'), ' \uc77d\uc74c');
+    }
+    return el('span', { class: 'egd-codex-bubble-read' },
+      el('span', { class: 'egd-codex-read-icon egd-codex-read-icon-read' }, '\u2713\u2713'), ` ${others.length}\uba85 \uc77d\uc74c`);
   }
   const ZOOM_MIN = 0.2;
   const ZOOM_MAX = 4.5;
@@ -405,6 +413,8 @@
             } else if (kind === 'left') {
               if (item.id === 'browser') {
                 spawnBrowserCard();
+              } else if (item.id === 'settings') {
+                spawnSettingsCard();
               } else if (item.id === 'chat' && state.codex.chatDockMode === 'canvas' && state.codex.chatCardEntityId) {
                 const chatCard = document.getElementById(state.codex.chatCardEntityId);
                 if (chatCard) {
@@ -1072,10 +1082,10 @@
             content,
             );
             if (message.role === 'user') {
-              bubble.appendChild(el('div', { class: 'egd-codex-bubble-read' }, codexReadMeta(message, activeThread)));
+              { const _rm = codexReadMeta(message, activeThread); if (_rm) bubble.appendChild(_rm); }
             }
             if (message.status === 'streaming' && message.role === 'assistant') {
-              bubble.appendChild(el('div', { class: 'egd-codex-streaming' }, '응답 생성 중…'));
+              bubble.appendChild(el('div', { class: 'egd-codex-streaming' }, el('div', { class: 'egd-codex-typing-dots' }, el('span'), el('span'), el('span')), '코덱스가 입력 중'));
             }
             messages.appendChild(el('div', {
               class: `egd-codex-message-row egd-codex-message-row-${message.role || 'assistant'}`,
@@ -1202,6 +1212,9 @@
         contentChildren.push(mainPane);
       }
       body.appendChild(el('div', { class: shellClasses }, ...contentChildren));
+      const msgEl = body.querySelector(".egd-codex-messages");
+      if (msgEl) requestAnimationFrame(() => { msgEl.scrollTop = msgEl.scrollHeight; });
+      // Auto-scroll messages to bottom
     };
 
     unsubscribe = codexBridge.subscribe(render)
@@ -2297,6 +2310,328 @@
   const CARD_HEADER_H = 50;
   const CARD_ASPECT = CARD_LOGICAL_H / CARD_LOGICAL_W;
   const cardHeightForWidth = (width) => Math.round(CARD_HEADER_H + width * CARD_ASPECT);
+
+  // ============ Settings Canvas Card ============
+  const SETTINGS_MODELS = [
+    { id: 'gpt-4.1', name: 'GPT-4.1', provider: 'openai', desc: 'OpenAI \uCD5C\uC2E0 \uB300\uD615 \uBAA8\uB378', icon: 'G', color: '#10A37F', enabled: true, isDefault: true },
+    { id: 'gpt-4.1-mini', name: 'GPT-4.1 Mini', provider: 'openai', desc: '\uBE60\uB974\uACE0 \uACBD\uC81C\uC801\uC778 \uC18C\uD615 \uBAA8\uB378', icon: 'g', color: '#10A37F', enabled: true, isDefault: false },
+    { id: 'claude-4-sonnet', name: 'Claude 4 Sonnet', provider: 'anthropic', desc: 'Anthropic \uACE0\uC131\uB2A5 \uBAA8\uB378', icon: 'C', color: '#D97706', enabled: true, isDefault: false },
+    { id: 'claude-4-haiku', name: 'Claude 4 Haiku', provider: 'anthropic', desc: '\uBE60\uB978 \uC751\uB2F5 \uC18C\uD615 \uBAA8\uB378', icon: 'c', color: '#D97706', enabled: false, isDefault: false },
+    { id: 'gemini-2.5-pro', name: 'Gemini 2.5 Pro', provider: 'google', desc: 'Google \uCD5C\uC2E0 \uB300\uD615 \uBAA8\uB378', icon: 'G', color: '#4285F4', enabled: true, isDefault: false },
+    { id: 'gemini-2.5-flash', name: 'Gemini 2.5 Flash', provider: 'google', desc: '\uBE60\uB978 \uC751\uB2F5 \uACBD\uC81C\uD615 \uBAA8\uB378', icon: 'f', color: '#4285F4', enabled: false, isDefault: false },
+  ];
+  const CODEX_ACCOUNT = {
+    email: 'm8chaa@gmail.com',
+    name: 'Minsoo Cha',
+    avatar: 'M',
+    plan: 'Pro',
+    loggedIn: true,
+    connectedProviders: ['openai', 'anthropic', 'google'],
+  };
+  const SETTINGS_PROVIDERS = [
+    { id: 'openai', name: 'OpenAI', icon: '\u2B50', models: ['GPT-4.1', 'GPT-4.1 Mini', 'GPT-4.1 Nano'], quota: '\uBB34\uC81C\uD55C' },
+    { id: 'anthropic', name: 'Anthropic', icon: '\u26A1', models: ['Claude 4 Sonnet', 'Claude 4 Haiku'], quota: '\uBB34\uC81C\uD55C' },
+    { id: 'google', name: 'Google AI', icon: '\u2B22', models: ['Gemini 2.5 Pro', 'Gemini 2.5 Flash'], quota: '\uBB34\uC81C\uD55C' },
+    { id: 'local', name: 'Local (Ollama)', icon: '\uD83D\uDDA5\uFE0F', models: ['Llama 3', 'Mistral'], quota: '\uB85C\uCEEC' },
+  ];
+  const SETTINGS_AGENTS = [
+    { id: 'a1', name: '\uCF54\uB371\uC2A4 \uC5B4\uC2DC\uC2A4\uD134\uD2B8', desc: '\uAE30\uBCF8 AI \uC5B4\uC2DC\uC2A4\uD134\uD2B8', model: 'gpt-4.1', color: '#2D5A7B', prompt: '\uB2F9\uC2E0\uC740 \uB3C4\uC6C0\uC774 \uB418\uB294 AI \uC5B4\uC2DC\uC2A4\uD134\uD2B8\uC785\uB2C8\uB2E4.', active: true },
+    { id: 'a2', name: '\uCF54\uB4DC \uB9AC\uBDF0\uC5B4', desc: '\uCF54\uB4DC \uB9AC\uBDF0 \uBC0F \uBC84\uADF8 \uD0D0\uC9C0 \uC804\uBB38', model: 'claude-4-sonnet', color: '#8B5CF6', prompt: '\uB2F9\uC2E0\uC740 \uCF54\uB4DC \uB9AC\uBDF0 \uC804\uBB38\uAC00\uC785\uB2C8\uB2E4.', active: true },
+    { id: 'a3', name: '\uBC88\uC5ED\uAC00', desc: '\uB2E4\uAD6D\uC5B4 \uBC88\uC5ED \uC804\uBB38', model: 'gemini-2.5-pro', color: '#059669', prompt: '\uB2F9\uC2E0\uC740 \uC804\uBB38 \uBC88\uC5ED\uAC00\uC785\uB2C8\uB2E4.', active: false },
+  ];
+
+  function spawnSettingsCard() {
+    const id = `egd-settings-card-${++cardSeq}`;
+    const initialWidth = 560;
+    const initialHeight = 480;
+    const offset = ((cardSeq - 1) % 6) * 24;
+    const center = viewportToCanvasPoint(
+      window.innerWidth / 2 + offset,
+      window.innerHeight / 2 + offset,
+    );
+    const card = el('div', {
+      id,
+      class: 'egd-canvas-card egd-settings-card',
+      style: {
+        top: Math.round(center.y - initialHeight / 2) + 'px',
+        left: Math.round(center.x - initialWidth / 2) + 'px',
+        width: initialWidth + 'px',
+        height: initialHeight + 'px',
+        zIndex: String(++cardZ),
+      },
+    });
+
+    const header = el('div', { class: 'egd-card-header' },
+      el('div', { class: 'egd-card-topbar' },
+        el('div', { class: 'egd-card-dots-shell' },
+          el('div', { class: 'egd-card-dots' },
+            el('span', { class: 'egd-card-dot egd-card-dot-close', onclick: (ev) => { ev.stopPropagation(); card.remove(); } }),
+            el('span', { class: 'egd-card-dot egd-card-dot-min' }),
+            el('span', { class: 'egd-card-dot egd-card-dot-max' }),
+          ),
+        ),
+      ),
+    );
+
+    const contentArea = el('div', { class: 'egd-settings-content' });
+    let activeTab = 'models';
+
+    const renderModelsTab = () => {
+      contentArea.textContent = '';
+      const section = el('div', { class: 'egd-settings-section' });
+      section.appendChild(el('div', { class: 'egd-settings-section-title' }, 'AI \uBAA8\uB378 \uBAA9\uB85D'));
+      for (const model of SETTINGS_MODELS) {
+        const toggle = el('button', {
+          class: 'egd-settings-toggle' + (model.enabled ? ' egd-settings-toggle-on' : ''),
+          onclick: () => {
+            model.enabled = !model.enabled;
+            renderModelsTab();
+          },
+        });
+        const row = el('div', { class: 'egd-settings-model-row' },
+          el('div', { class: 'egd-settings-model-icon', style: { background: model.color } }, model.icon),
+          el('div', { class: 'egd-settings-model-info' },
+            el('div', { class: 'egd-settings-model-name' }, model.name),
+            el('div', { class: 'egd-settings-model-desc' }, model.desc),
+          ),
+          ...(model.isDefault ? [el('span', { class: 'egd-settings-default-badge' }, '\uAE30\uBCF8')] : []),
+          toggle,
+        );
+        section.appendChild(row);
+      }
+      contentArea.appendChild(section);
+    };
+
+    const renderProvidersTab = () => {
+      contentArea.textContent = '';
+
+      // --- Codex Account Section ---
+      const acctSection = el('div', { class: 'egd-settings-section' });
+      acctSection.appendChild(el('div', { class: 'egd-settings-section-title' }, 'Codex \uACC4\uC815'));
+      if (CODEX_ACCOUNT.loggedIn) {
+        const acctCard = el('div', { class: 'egd-settings-codex-account' },
+          el('div', { class: 'egd-settings-codex-avatar', style: { background: '#2D5A7B' } }, CODEX_ACCOUNT.avatar),
+          el('div', { class: 'egd-settings-codex-info' },
+            el('div', { class: 'egd-settings-codex-name' },
+              CODEX_ACCOUNT.name,
+              el('span', { class: 'egd-settings-plan-badge' }, CODEX_ACCOUNT.plan),
+            ),
+            el('div', { class: 'egd-settings-codex-email' }, CODEX_ACCOUNT.email),
+          ),
+          el('button', { class: 'egd-settings-btn egd-settings-btn-danger', onclick: () => {
+            CODEX_ACCOUNT.loggedIn = false;
+            CODEX_ACCOUNT.connectedProviders = [];
+            renderProvidersTab();
+          } }, '\uB85C\uADF8\uC544\uC6C3'),
+        );
+        acctSection.appendChild(acctCard);
+      } else {
+        const loginCard = el('div', { class: 'egd-settings-codex-login' },
+          el('div', { class: 'egd-settings-codex-login-icon' }, '\uD83D\uDD11'),
+          el('div', { class: 'egd-settings-codex-login-text' },
+            el('div', { style: { fontWeight: '600', marginBottom: '4px' } }, 'Codex\uC5D0 \uB85C\uADF8\uC778\uD558\uC138\uC694'),
+            el('div', { style: { fontSize: '12px', color: '#666' } }, 'Codex \uACC4\uC815\uC73C\uB85C \uBAA8\uB4E0 AI Provider\uB97C \uD1B5\uD569 \uAD00\uB9AC\uD569\uB2C8\uB2E4.'),
+          ),
+          el('button', { class: 'egd-settings-btn egd-settings-btn-primary', onclick: () => {
+            CODEX_ACCOUNT.loggedIn = true;
+            CODEX_ACCOUNT.email = 'm8chaa@gmail.com';
+            CODEX_ACCOUNT.name = 'Minsoo Cha';
+            CODEX_ACCOUNT.connectedProviders = ['openai', 'anthropic', 'google'];
+            renderProvidersTab();
+          } }, '\uB85C\uADF8\uC778'),
+        );
+        acctSection.appendChild(loginCard);
+      }
+      contentArea.appendChild(acctSection);
+
+      // --- Connected Providers Section ---
+      const provSection = el('div', { class: 'egd-settings-section' });
+      provSection.appendChild(el('div', { class: 'egd-settings-section-title' }, '\uC5F0\uACB0\uB41C AI Provider'));
+      for (const prov of SETTINGS_PROVIDERS) {
+        const isConnected = CODEX_ACCOUNT.loggedIn && CODEX_ACCOUNT.connectedProviders.includes(prov.id);
+        const statusDot = isConnected ? 'egd-settings-status-dot-ok' : 'egd-settings-status-dot-off';
+        const statusText = isConnected ? '\uC5F0\uACB0\uB428' : '\uBBF8\uC5F0\uACB0';
+        const toggleBtn = CODEX_ACCOUNT.loggedIn
+          ? el('button', {
+              class: 'egd-settings-toggle' + (isConnected ? ' egd-settings-toggle-on' : ''),
+              onclick: () => {
+                if (isConnected) {
+                  CODEX_ACCOUNT.connectedProviders = CODEX_ACCOUNT.connectedProviders.filter(p => p !== prov.id);
+                } else {
+                  CODEX_ACCOUNT.connectedProviders.push(prov.id);
+                }
+                renderProvidersTab();
+              },
+            })
+          : null;
+        const row = el('div', { class: 'egd-settings-provider-row' },
+          el('div', { class: 'egd-settings-provider-logo' }, prov.icon),
+          el('div', { class: 'egd-settings-provider-info' },
+            el('div', { class: 'egd-settings-provider-name' }, prov.name),
+            el('div', { class: 'egd-settings-provider-status' },
+              el('span', { class: `egd-settings-status-dot ${statusDot}` }),
+              statusText,
+              ...(isConnected ? [' \u00B7 ', prov.models.join(', ')] : []),
+            ),
+            ...(isConnected ? [el('div', { class: 'egd-settings-provider-quota' }, '\uC0AC\uC6A9\uB7C9: ' + prov.quota)] : []),
+          ),
+          ...(toggleBtn ? [toggleBtn] : []),
+        );
+        provSection.appendChild(row);
+      }
+      contentArea.appendChild(provSection);
+    };
+
+    let showAgentForm = false;
+    let editingAgent = null;
+    const renderAgentsTab = () => {
+      contentArea.textContent = '';
+      if (showAgentForm) {
+        const form = el('div', { class: 'egd-settings-form' });
+        const nameInput = el('input', { class: 'egd-settings-form-input', type: 'text', value: editingAgent ? editingAgent.name : '', placeholder: 'Agent \uC774\uB984' });
+        const descInput = el('input', { class: 'egd-settings-form-input', type: 'text', value: editingAgent ? editingAgent.desc : '', placeholder: '\uC124\uBA85' });
+        const modelSelect = el('select', { class: 'egd-settings-form-select' });
+        for (const m of SETTINGS_MODELS.filter(m => m.enabled)) {
+          const opt = el('option', { value: m.id }, m.name);
+          if (editingAgent && editingAgent.model === m.id) opt.selected = true;
+          modelSelect.appendChild(opt);
+        }
+        const promptArea = el('textarea', { class: 'egd-settings-form-textarea', placeholder: '\uC2DC\uC2A4\uD15C \uD504\uB86C\uD504\uD2B8' });
+        if (editingAgent) promptArea.value = editingAgent.prompt;
+        form.appendChild(el('div', {}, el('div', { class: 'egd-settings-form-label' }, 'Agent \uC774\uB984'), nameInput));
+        form.appendChild(el('div', {}, el('div', { class: 'egd-settings-form-label' }, '\uC124\uBA85'), descInput));
+        form.appendChild(el('div', {}, el('div', { class: 'egd-settings-form-label' }, '\uC0AC\uC6A9 \uBAA8\uB378'), modelSelect));
+        form.appendChild(el('div', {}, el('div', { class: 'egd-settings-form-label' }, '\uC2DC\uC2A4\uD15C \uD504\uB86C\uD504\uD2B8'), promptArea));
+        form.appendChild(el('div', { class: 'egd-settings-form-actions' },
+          el('button', { class: 'egd-settings-btn', onclick: () => { showAgentForm = false; editingAgent = null; renderAgentsTab(); } }, '\uCDE8\uC18C'),
+          el('button', { class: 'egd-settings-btn egd-settings-btn-primary', onclick: () => {
+            if (editingAgent) {
+              editingAgent.name = nameInput.value || editingAgent.name;
+              editingAgent.desc = descInput.value || editingAgent.desc;
+              editingAgent.model = modelSelect.value;
+              editingAgent.prompt = promptArea.value;
+            } else {
+              SETTINGS_AGENTS.push({
+                id: 'a' + (SETTINGS_AGENTS.length + 1),
+                name: nameInput.value || '\uC0C8 Agent',
+                desc: descInput.value || '',
+                model: modelSelect.value,
+                color: '#' + Math.floor(Math.random()*16777215).toString(16).padStart(6, '0'),
+                prompt: promptArea.value,
+                active: true,
+              });
+            }
+            showAgentForm = false; editingAgent = null; renderAgentsTab();
+          } }, editingAgent ? '\uC800\uC7A5' : '\uC0DD\uC131'),
+        ));
+        contentArea.appendChild(form);
+        return;
+      }
+      const section = el('div', { class: 'egd-settings-section' });
+      section.appendChild(el('div', { class: 'egd-settings-section-title' }, 'Agent \uBAA9\uB85D'));
+      if (SETTINGS_AGENTS.length === 0) {
+        section.appendChild(el('div', { class: 'egd-settings-empty' }, '\uC0DD\uC131\uB41C Agent\uAC00 \uC5C6\uC2B5\uB2C8\uB2E4.'));
+      }
+      for (const agent of SETTINGS_AGENTS) {
+        const toggle = el('button', {
+          class: 'egd-settings-toggle' + (agent.active ? ' egd-settings-toggle-on' : ''),
+          onclick: () => { agent.active = !agent.active; renderAgentsTab(); },
+        });
+        const modelName = SETTINGS_MODELS.find(m => m.id === agent.model)?.name || agent.model;
+        const row = el('div', { class: 'egd-settings-agent-row' },
+          el('div', { class: 'egd-settings-agent-avatar', style: { background: agent.color } }, agent.name.charAt(0)),
+          el('div', { class: 'egd-settings-agent-info' },
+            el('div', { class: 'egd-settings-agent-name' }, agent.name),
+            el('div', { class: 'egd-settings-agent-desc' }, agent.desc),
+            el('div', { class: 'egd-settings-agent-model' }, '\uBAA8\uB378: ' + modelName),
+          ),
+          el('div', { class: 'egd-settings-agent-actions' },
+            el('button', { class: 'egd-settings-btn', onclick: () => { editingAgent = agent; showAgentForm = true; renderAgentsTab(); } }, '\uD3B8\uC9D1'),
+            el('button', { class: 'egd-settings-btn egd-settings-btn-danger', onclick: () => {
+              const idx = SETTINGS_AGENTS.indexOf(agent);
+              if (idx >= 0) SETTINGS_AGENTS.splice(idx, 1);
+              renderAgentsTab();
+            } }, '\uC0AD\uC81C'),
+          ),
+          toggle,
+        );
+        section.appendChild(row);
+      }
+      section.appendChild(el('div', { style: { marginTop: '12px' } },
+        el('button', { class: 'egd-settings-btn egd-settings-btn-primary', onclick: () => { showAgentForm = true; editingAgent = null; renderAgentsTab(); } }, '+ \uC0C8 Agent \uC0DD\uC131'),
+      ));
+      contentArea.appendChild(section);
+    };
+
+    const tabs = el('div', { class: 'egd-settings-tabs' });
+    const tabDefs = [
+      { id: 'models', label: 'AI \uBAA8\uB378', render: renderModelsTab },
+      { id: 'providers', label: '\uACC4\uC815 & Provider', render: renderProvidersTab },
+      { id: 'agents', label: 'Agent \uAD00\uB9AC', render: renderAgentsTab },
+    ];
+    const renderTabs = () => {
+      tabs.textContent = '';
+      for (const t of tabDefs) {
+        tabs.appendChild(el('button', {
+          class: 'egd-settings-tab' + (activeTab === t.id ? ' egd-settings-tab-active' : ''),
+          onclick: () => { activeTab = t.id; renderTabs(); t.render(); },
+        }, t.label));
+      }
+    };
+
+    const shell = el('div', { class: 'egd-settings-shell' },
+      el('div', { class: 'egd-settings-header' },
+        el('span', { style: { fontSize: '18px' } }, '\u2699\uFE0F'),
+        el('div', { class: 'egd-settings-header-title' }, '\uC0C1\uC138 \uC124\uC815'),
+      ),
+      tabs,
+      contentArea,
+    );
+
+    const body = el('div', { class: 'egd-card-body', style: { overflow: 'hidden' } }, shell);
+    const resizeHits = [
+      { cls: 'egd-card-resize-hit-n',  edges: { top: true } },
+      { cls: 'egd-card-resize-hit-e',  edges: { right: true } },
+      { cls: 'egd-card-resize-hit-s',  edges: { bottom: true } },
+      { cls: 'egd-card-resize-hit-w',  edges: { left: true } },
+      { cls: 'egd-card-resize-hit-nw', edges: { top: true, left: true } },
+      { cls: 'egd-card-resize-hit-ne', edges: { top: true, right: true } },
+      { cls: 'egd-card-resize-hit-se', edges: { bottom: true, right: true } },
+      { cls: 'egd-card-resize-hit-sw', edges: { bottom: true, left: true } },
+    ].map(({ cls, edges }) => el('div', {
+      class: `egd-card-resize-hit ${cls}`,
+      data: { edges: JSON.stringify(edges) },
+    }));
+
+    card.appendChild(header);
+    card.appendChild(body);
+    for (const hit of resizeHits) card.appendChild(hit);
+    const host = document.getElementById('egd-canvas-layer') || document.documentElement;
+    host.appendChild(card);
+    setActiveEntity(card);
+
+    renderTabs();
+    renderModelsTab();
+
+    // Drag support
+    let drag = null;
+    header.addEventListener('mousedown', (ev) => {
+      if (ev.target.closest('input, button, .egd-card-dot')) return;
+      card.style.zIndex = String(++cardZ);
+      setActiveEntity(card);
+      drag = { x: ev.clientX, y: ev.clientY, left: card.offsetLeft, top: card.offsetTop };
+      ev.preventDefault();
+    });
+    document.addEventListener('mousemove', (ev) => {
+      if (!drag) return;
+      card.style.left = (drag.left + ev.clientX - drag.x) + 'px';
+      card.style.top = (drag.top + ev.clientY - drag.y) + 'px';
+    });
+    document.addEventListener('mouseup', () => { drag = null; });
+
+    return card;
+  }
+
 
   function spawnBrowserCard(initialUrl = 'https://duckduckgo.com') {
     const id = `egd-browser-card-${++cardSeq}`;
