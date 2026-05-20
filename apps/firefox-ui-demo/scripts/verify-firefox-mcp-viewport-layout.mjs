@@ -129,6 +129,7 @@ async function main() {
 
       document.querySelectorAll('.egd-canvas-card, .egd-canvas-shape').forEach(cleanupEntity);
       [
+        '#egd-window-controls',
         '#egd-desk-rail',
         '#egd-dock',
         '#egd-preset-bag',
@@ -154,6 +155,7 @@ async function main() {
 
       return {
         href: document.location.href,
+        hasWindowControls: !!document.getElementById('egd-window-controls'),
         hasRail: !!document.getElementById('egd-desk-rail'),
         railName: document.querySelector('.egd-rail-agenda-name')?.textContent?.trim() || null,
         helperStatusExists: !!document.getElementById('egd-input-helper-status'),
@@ -162,7 +164,7 @@ async function main() {
   }, 30000));
 
   const remount = parseToolJson(remountText);
-  if (!remount.hasRail || remount.railName !== 'EG-Desk Agenda' || remount.helperStatusExists) {
+  if (!remount.hasWindowControls || !remount.hasRail || remount.railName !== 'EG-Desk Agenda' || remount.helperStatusExists) {
     throw new Error(`Overlay remount failed: ${JSON.stringify(remount, null, 2)}`);
   }
 
@@ -215,6 +217,8 @@ async function main() {
       }).then((card) => {
         const cardRect = rectOf(card);
         const safe = safeViewportRect();
+        const windowControls = document.getElementById('egd-window-controls');
+        const windowControlButtons = Array.from(windowControls?.querySelectorAll('.egd-window-control') || []);
         const tolerance = 3;
         const fitsSafeArea = cardRect.left >= safe.left - tolerance
           && cardRect.top >= safe.top - tolerance
@@ -225,6 +229,9 @@ async function main() {
           railCardBadge: document.querySelector('.egd-rail-card-badge')?.textContent?.trim() || null,
           railCardBadgeHidden: !!document.querySelector('.egd-rail-card-badge')?.hidden,
           helperStatusExists: !!document.getElementById('egd-input-helper-status'),
+          windowControlsRect: rectOf(document.getElementById('egd-window-controls')),
+          windowControlCount: document.querySelectorAll('#egd-window-controls .egd-window-control').length,
+          windowControlTitles: windowControlButtons.map((node) => node.title),
           minimapOpen: !!document.getElementById('egd-desk-minimap'),
           minimapRows: document.querySelectorAll('#egd-desk-minimap .egd-minimap-row').length,
           hudHidden: !!document.getElementById('egd-hud')?.classList.contains('egd-hud-hidden'),
@@ -243,6 +250,9 @@ async function main() {
   const check = parseToolJson(checkText);
   const failures = [];
   if (check.railName !== 'EG-Desk Agenda') failures.push('rail label');
+  if (check.windowControlCount !== 3) failures.push('window control count');
+  if (!check.windowControlTitles.includes('창 닫기') || !check.windowControlTitles.includes('창 최소화') || !check.windowControlTitles.includes('창 전체화면 전환')) failures.push('window control titles');
+  if (!check.windowControlsRect || check.windowControlsRect.left >= check.railRect.left) failures.push('window controls placement');
   if (check.railCardBadge !== 'Terminal · Maximized' || check.railCardBadgeHidden) failures.push('maximized badge');
   if (check.helperStatusExists) failures.push('helper status hidden');
   if (!check.minimapOpen) failures.push('minimap');

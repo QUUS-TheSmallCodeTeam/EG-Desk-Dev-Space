@@ -3027,6 +3027,44 @@
     refreshDeskMinimap();
   }
 
+  function handleWindowControl(action) {
+    if (action === 'close') {
+      window.close();
+      return;
+    }
+    if (action === 'minimize') {
+      if (typeof window.minimize === 'function') window.minimize();
+      return;
+    }
+    if (typeof window.fullScreen === 'boolean') {
+      window.fullScreen = !window.fullScreen;
+      return;
+    }
+    if (window.windowState === window.STATE_MAXIMIZED && typeof window.restore === 'function') {
+      window.restore();
+    } else if (typeof window.maximize === 'function') {
+      window.maximize();
+    }
+  }
+
+  function buildWindowControls() {
+    document.getElementById('egd-window-controls')?.remove();
+    const button = (action, label) => el('button', {
+      class: `egd-window-control egd-window-control-${action}`,
+      title: label,
+      'aria-label': label,
+      onclick: (ev) => {
+        ev.stopPropagation();
+        handleWindowControl(action);
+      },
+    });
+    return el('div', { id: 'egd-window-controls', class: 'egd-edge', role: 'toolbar', 'aria-label': '창 제어' },
+      button('close', '창 닫기'),
+      button('minimize', '창 최소화'),
+      button('zoom', '창 전체화면 전환'),
+    );
+  }
+
   // ============ Top: Viewport Agenda Rail ============
   function buildDeskRail() {
     const rail = el('div', { id: 'egd-desk-rail', class: 'egd-edge egd-frosted' });
@@ -8329,6 +8367,7 @@
           storagePref: AGENDA_STORAGE_PREF,
         },
       };
+      host.appendChild(buildWindowControls());
       host.appendChild(buildDeskRail());
       installRailSearchShortcut();
       host.appendChild(buildDock());
