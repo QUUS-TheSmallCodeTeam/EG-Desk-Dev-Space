@@ -5684,6 +5684,8 @@
       canGoForward: false,
       security: browserSecurityLabel(normalizedUrl),
       homeUrl: normalizeBrowserUri(options.homeUrl || 'https://duckduckgo.com'),
+      history: [normalizedUrl],
+      historyIndex: 0,
     };
 
     const pageTitle = el('div', { class: 'egd-card-page-title' }, browserState.title);
@@ -5833,7 +5835,36 @@
       canGoForward: browserState.canGoForward,
       homeUrl: browserState.homeUrl,
       sourceKey: card.dataset.sourceKey || '',
+      historyIndex: browserState.historyIndex,
+      historyLength: browserState.history.length,
     });
+    const readNativeHistoryFlags = () => {
+      let canGoBack = false;
+      let canGoForward = false;
+      try { canGoBack = !!(xulBrowser?.canGoBack ?? xulBrowser?.webNavigation?.canGoBack); } catch {}
+      try { canGoForward = !!(xulBrowser?.canGoForward ?? xulBrowser?.webNavigation?.canGoForward); } catch {}
+      return { canGoBack, canGoForward };
+    };
+    const updateHistoryFlags = () => {
+      const nativeHistory = readNativeHistoryFlags();
+      browserState.canGoBack = browserState.historyIndex > 0 || nativeHistory.canGoBack;
+      browserState.canGoForward = browserState.historyIndex < browserState.history.length - 1 || nativeHistory.canGoForward;
+    };
+    const pushBrowserHistory = (url, options = {}) => {
+      const normalized = normalizeBrowserUri(url);
+      if (!normalized) return;
+      if (!Array.isArray(browserState.history) || browserState.history.length === 0) {
+        browserState.history = [normalized];
+        browserState.historyIndex = 0;
+      } else if (options.replace) {
+        browserState.history[browserState.historyIndex] = normalized;
+      } else if (browserState.history[browserState.historyIndex] !== normalized) {
+        browserState.history = browserState.history.slice(0, browserState.historyIndex + 1);
+        browserState.history.push(normalized);
+        browserState.historyIndex = browserState.history.length - 1;
+      }
+      updateHistoryFlags();
+    };
     const readBrowserUri = () => {
       try {
         const uri = xulBrowser?.currentURI?.spec;
@@ -5864,6 +5895,7 @@
       return browserDisplayHost(browserState.uri);
     };
     const syncBrowserChrome = () => {
+      updateHistoryFlags();
       card.classList.toggle('egd-browser-loading', !!browserState.loading);
       card.dataset.browserLoading = browserState.loading ? 'true' : 'false';
       pageTitle.textContent = browserState.title || browserDisplayHost(browserState.uri);
@@ -5905,12 +5937,12 @@
       if (nextUri && !isTransientInitialBlank) browserState.uri = nextUri;
       browserState.security = browserSecurityLabel(browserState.uri);
       browserState.title = readBrowserTitle();
-      try { browserState.canGoBack = !!(xulBrowser?.canGoBack ?? xulBrowser?.webNavigation?.canGoBack); } catch { browserState.canGoBack = false; }
-      try { browserState.canGoForward = !!(xulBrowser?.canGoForward ?? xulBrowser?.webNavigation?.canGoForward); } catch { browserState.canGoForward = false; }
       if (browserState.uri !== previousUri) {
+        pushBrowserHistory(browserState.uri, { replace: options.replaceHistory });
         bindCardSourceRef(card, browserSourceRef(browserState.uri, options.sourceRef || {}));
         if (options.markDirtyOnLocationChange) markAgendaDirty('browser-location-change', card);
       }
+      updateHistoryFlags();
       syncBrowserChrome();
       return getBrowserStateSnapshot();
     };
@@ -5930,6 +5962,7 @@
       browserState.security = browserSecurityLabel(url);
       browserState.title = browserDisplayHost(url);
       urlInput.value = url;
+      pushBrowserHistory(url, { replace: navOptions.replaceHistory });
       bindCardSourceRef(card, browserSourceRef(url, navOptions.sourceRef || {}));
       setBrowserLoading(true);
       const loaded = loadBrowserUri(url);
@@ -5938,6 +5971,20 @@
       return loaded ? getBrowserStateSnapshot() : null;
     };
     const goBrowserBack = () => {
+      if (browserState.historyIndex > 0) {
+        browserState.historyIndex -= 1;
+        const url = browserState.history[browserState.historyIndex];
+        browserState.uri = url;
+        browserState.security = browserSecurityLabel(url);
+        browserState.title = browserDisplayHost(url);
+        urlInput.value = url;
+        bindCardSourceRef(card, browserSourceRef(url));
+        setBrowserLoading(true);
+        loadBrowserUri(url);
+        markAgendaDirty('browser-back', card);
+        syncBrowserChrome();
+        return getBrowserStateSnapshot();
+      }
       try {
         setBrowserLoading(true);
         xulBrowser?.goBack?.();
@@ -5949,6 +5996,20 @@
       }
     };
     const goBrowserForward = () => {
+      if (browserState.historyIndex < browserState.history.length - 1) {
+        browserState.historyIndex += 1;
+        const url = browserState.history[browserState.historyIndex];
+        browserState.uri = url;
+        browserState.security = browserSecurityLabel(url);
+        browserState.title = browserDisplayHost(url);
+        urlInput.value = url;
+        bindCardSourceRef(card, browserSourceRef(url));
+        setBrowserLoading(true);
+        loadBrowserUri(url);
+        markAgendaDirty('browser-forward', card);
+        syncBrowserChrome();
+        return getBrowserStateSnapshot();
+      }
       try {
         setBrowserLoading(true);
         xulBrowser?.goForward?.();
@@ -6091,10 +6152,28 @@
     }
 
     urlInput.addEventListener('keydown', (ev) => {
+      if (ev.key === 'Escape') {
+        urlInput.value = browserState.uri;
+        urlInput.blur();
+        ev.preventDefault();
+        ev.stopPropagation();
+        return;
+      }
       if (ev.key !== 'Enter') return;
+      ev.preventDefault();
+      ev.stopPropagation();
       const url = urlInput.value.trim();
-      if (!url) return;
+      if (!url) {
+        urlInput.value = browserState.uri;
+        return;
+      }
       navigateBrowser(url);
+    });
+    urlInput.addEventListener('focus', () => {
+      window.setTimeout(() => urlInput.select?.(), 0);
+    });
+    urlInput.addEventListener('blur', () => {
+      if (!urlInput.value.trim()) urlInput.value = browserState.uri;
     });
 
     // ---- Fit-to-card scaling: width 기준 scale, height 는 logical viewport 로 흡수 ----

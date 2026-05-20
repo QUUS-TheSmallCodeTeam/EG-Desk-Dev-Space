@@ -182,6 +182,38 @@ async function main() {
             const stopResult = api.browserRuntime.stop(card.id);
             const homeResult = api.browserRuntime.home(card.id);
             return wait(150).then(() => {
+              const afterHome = api.browserRuntime.state(card.id);
+              const urlInput = card.querySelector('.egd-card-url');
+              urlInput.focus();
+              urlInput.value = 'example.org/browser typed?x=1#fragment';
+              const enterEvent = new KeyboardEvent('keydown', {
+                key: 'Enter',
+                bubbles: true,
+                cancelable: true,
+                view: window,
+              });
+              urlInput.dispatchEvent(enterEvent);
+              return wait(150).then(() => {
+                const afterTypedEnter = api.browserRuntime.state(card.id);
+                const escapeValueBefore = urlInput.value;
+                urlInput.value = 'temporary invalid draft';
+                const escapeEvent = new KeyboardEvent('keydown', {
+                  key: 'Escape',
+                  bubbles: true,
+                  cancelable: true,
+                  view: window,
+                });
+                urlInput.dispatchEvent(escapeEvent);
+                const escapeValueAfter = urlInput.value;
+                urlInput.value = '';
+                urlInput.dispatchEvent(new Event('blur', { bubbles: true }));
+                const emptyBlurValue = urlInput.value;
+                const backState = api.browserRuntime.back(card.id);
+                return wait(150).then(() => {
+                  const afterBack = api.browserRuntime.state(card.id);
+                  const forwardState = api.browserRuntime.forward(card.id);
+                  return wait(150).then(() => {
+                    const afterForward = api.browserRuntime.state(card.id);
               const menuButton = card.querySelector('.egd-card-menu');
               menuButton?.click();
               const menu = document.querySelector('.egd-browser-menu');
@@ -195,12 +227,23 @@ async function main() {
                 initial,
                 navState,
                 afterNav,
+                afterHome,
+                afterTypedEnter,
+                backState,
+                afterBack,
+                forwardState,
+                afterForward,
                 finalState,
                 duplicateCreated: !!duplicate && afterCount === beforeCount + 1,
                 duplicateUri: duplicate?._browserState?.uri || duplicate?.querySelector('.egd-card-url')?.value || null,
                 reloadResult,
                 stopResult,
+                homeResult,
                 homeUri: finalState?.uri || null,
+                enterDefaultPrevented: enterEvent.defaultPrevented,
+                escapeValueBefore,
+                escapeValueAfter,
+                emptyBlurValue,
                 buttonTitles: buttons.map((node) => node.title || ''),
                 backDisabled: !!card.querySelector('.egd-card-nav-btn[title="뒤로"]')?.disabled,
                 forwardDisabled: !!card.querySelector('.egd-card-nav-btn[title="앞으로"]')?.disabled,
@@ -212,6 +255,9 @@ async function main() {
                 sourceUri: card._sourceRef?.uri || null,
                 dirty: api.state.agenda.dirty,
               };
+                  });
+                });
+              });
             });
           });
         });
@@ -225,7 +271,14 @@ async function main() {
   if (check.sourceUri !== check.finalState?.uri) failures.push('source ref follows current uri');
   if (!check.duplicateCreated || check.duplicateUri !== 'https://example.com/browser-control-b') failures.push('duplicate card');
   if (check.reloadResult !== true || check.stopResult !== true) failures.push('reload/stop command');
-  if (check.homeUri !== 'https://duckduckgo.com/') failures.push('home command');
+  if (!check.homeResult || check.afterHome?.uri !== 'https://duckduckgo.com/') failures.push('home command');
+  if (check.afterTypedEnter?.uri !== 'https://example.org/browser%20typed?x=1') failures.push('address bar enter normalization');
+  if (check.enterDefaultPrevented !== true) failures.push('address bar enter default prevention');
+  if (check.escapeValueBefore !== check.afterTypedEnter?.uri || check.escapeValueAfter !== check.afterTypedEnter?.uri) failures.push('address bar escape restore');
+  if (check.emptyBlurValue !== check.afterTypedEnter?.uri) failures.push('address bar empty blur restore');
+  if (check.afterBack?.uri !== 'https://duckduckgo.com/' || check.afterForward?.uri !== 'https://example.org/browser%20typed?x=1') failures.push('local back/forward history');
+  if ((check.finalState?.historyLength || 0) < 4 || check.finalState?.historyIndex !== check.finalState.historyLength - 1) failures.push('history snapshot');
+  if (check.homeUri !== 'https://example.org/browser%20typed?x=1') failures.push('final current uri');
   if (!check.buttonTitles.includes('홈') || !check.buttonTitles.includes('복제') || !check.buttonTitles.includes('더보기')) failures.push('toolbar controls');
   if (!check.pageTitle || !check.pageStatus || !check.securityText) failures.push('browser chrome status');
   if (!check.menuOpen || check.menuLabels.length < 5 || !check.menuLabels.includes('URL 복사')) failures.push('browser menu');
