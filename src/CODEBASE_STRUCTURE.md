@@ -266,4 +266,4 @@ This file is your **conflict prevention system**. Check it before:
 
 ---
 
-*This file is part of the EG-DESK agent swarm system. See AGENT_SWARM_FLOW.md for workflow details.*
+*This file is part of the EG-DESK agent swarm system. See ../.claude/docs/AGENT_SWARM_FLOW.md for workflow details.*

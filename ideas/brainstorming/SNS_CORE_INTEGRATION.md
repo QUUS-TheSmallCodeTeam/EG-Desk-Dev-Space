@@ -129,5 +129,5 @@ SNS-Core는 에이전트 스웜 시스템의 토큰 효율성을 크게 개선�
 
 ## 참고 자료
 - [sns-core GitHub](https://github.com/EsotericShadow/sns-core)
-- [EG-DESK Agent Swarm 아키텍처](../../AGENT_SWARM_FLOW.md)
+- [EG-DESK Agent Swarm 아키텍처](../../.claude/docs/AGENT_SWARM_FLOW.md)
 - [Claude Agent SDK](../claude-agent-sdk/)
