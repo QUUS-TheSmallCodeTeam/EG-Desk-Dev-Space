@@ -8,7 +8,41 @@
 (function eg_desk_surface() {
   'use strict';
   const TAG = '[eg-desk-surface]';
+  const BROWSER_AGENT_ACTOR_NAME = 'EGDeskBrowserAgentRuntime';
+  let browserAgentActorReady = false;
   console.warn(TAG, 'loaded, readyState =', document.readyState);
+
+  function ensureBrowserAgentActor() {
+    if (browserAgentActorReady) return true;
+    try {
+      const { ActorManagerParent } = ChromeUtils.importESModule('resource://gre/modules/ActorManagerParent.sys.mjs');
+      ActorManagerParent.addJSWindowActors({
+        [BROWSER_AGENT_ACTOR_NAME]: {
+          parent: {
+            esModuleURI: 'chrome://userchrome/content/EGDeskBrowserAgentRuntimeParent.sys.mjs',
+          },
+          child: {
+            esModuleURI: 'chrome://userchrome/content/EGDeskBrowserAgentRuntimeChild.sys.mjs',
+            events: {
+              DOMWindowCreated: {},
+              DOMContentLoaded: {},
+            },
+          },
+          allFrames: false,
+        },
+      });
+      browserAgentActorReady = true;
+      return true;
+    } catch (err) {
+      const message = err?.message || String(err);
+      if (/already|duplicate|exists/i.test(message)) {
+        browserAgentActorReady = true;
+        return true;
+      }
+      console.warn(TAG, 'browser agent actor registration failed', err);
+      return false;
+    }
+  }
 
   const PRESETS = [
     { id: 'react-dev',  label: 'RD', name: 'React 개발',  count: 5 },
@@ -5676,6 +5710,19 @@
     let xulBrowser = null;
     let browserLoadTimer = 0;
     let browserMenuPanel = null;
+    const agentRefByNode = new WeakMap();
+    const agentNodeByRef = new Map();
+    let agentRefSeq = 0;
+    let agentBridgeInstalled = false;
+    let agentBridgeSeq = 0;
+    const agentBridgePending = new Map();
+    const agentBridgeId = [
+      card.id,
+      Date.now().toString(36),
+      Math.random().toString(36).slice(2, 8),
+    ].join('-');
+    const agentBridgeRequestTopic = `egdesk:agent-request:${agentBridgeId}`;
+    const agentBridgeResponseTopic = `egdesk:agent-response:${agentBridgeId}`;
     const browserState = {
       uri: normalizedUrl,
       title: browserDisplayHost(normalizedUrl),
@@ -5894,6 +5941,742 @@
       } catch {}
       return browserDisplayHost(browserState.uri);
     };
+    const readBrowserDocument = () => {
+      try {
+        const doc = xulBrowser?.contentDocument || xulBrowser?.contentWindow?.document;
+        if (doc?.documentElement) return doc;
+      } catch {}
+      try {
+        const doc = xulBrowser?.browsingContext?.currentWindowGlobal?.document;
+        if (doc?.documentElement) return doc;
+      } catch {}
+      try {
+        const doc = xulBrowser?.ownerGlobal?.gBrowser?.selectedBrowser?.contentDocument;
+        if (doc?.documentElement) return doc;
+      } catch {}
+      return null;
+    };
+    const compactAgentText = (value, max = 180) => {
+      const text = String(value || '').replace(/\s+/g, ' ').trim();
+      return text.length > max ? text.slice(0, max - 1).trimEnd() + '…' : text;
+    };
+    const agentElementRef = (node) => {
+      if (!node || typeof node !== 'object') return '';
+      const existing = agentRefByNode.get(node);
+      if (existing) return existing;
+      const ref = `el_${++agentRefSeq}`;
+      agentRefByNode.set(node, ref);
+      agentNodeByRef.set(ref, node);
+      return ref;
+    };
+    const agentNodeForRef = (ref) => {
+      const node = agentNodeByRef.get(ref);
+      return node?.isConnected ? node : null;
+    };
+    const isAgentVisibleElement = (node) => {
+      if (!node?.getBoundingClientRect) return false;
+      const rect = node.getBoundingClientRect();
+      if (rect.width <= 0 || rect.height <= 0) return false;
+      try {
+        const style = node.ownerDocument?.defaultView?.getComputedStyle?.(node);
+        if (style?.display === 'none' || style?.visibility === 'hidden' || Number(style?.opacity) === 0) return false;
+      } catch {}
+      return true;
+    };
+    const agentElementRole = (node) => {
+      const explicitRole = node.getAttribute?.('role');
+      if (explicitRole) return explicitRole;
+      const tag = String(node.tagName || '').toLowerCase();
+      if (tag === 'a') return 'link';
+      if (tag === 'button') return 'button';
+      if (tag === 'select') return 'combobox';
+      if (tag === 'textarea') return 'textbox';
+      if (tag === 'input') {
+        const type = String(node.getAttribute('type') || 'text').toLowerCase();
+        if (['button', 'submit', 'reset'].includes(type)) return 'button';
+        if (['checkbox', 'radio', 'range', 'search', 'email', 'password', 'number', 'date', 'time'].includes(type)) return type;
+        return 'textbox';
+      }
+      if (node.isContentEditable) return 'textbox';
+      return tag || 'element';
+    };
+    const agentElementLabel = (node) => {
+      const doc = node.ownerDocument;
+      const ariaLabelledBy = node.getAttribute?.('aria-labelledby');
+      if (ariaLabelledBy && doc) {
+        const labelled = ariaLabelledBy.split(/\s+/).map((id) => doc.getElementById(id)?.textContent || '').join(' ');
+        if (labelled.trim()) return compactAgentText(labelled);
+      }
+      const label = node.getAttribute?.('aria-label')
+        || node.getAttribute?.('alt')
+        || node.getAttribute?.('title')
+        || node.getAttribute?.('placeholder')
+        || node.innerText
+        || node.textContent
+        || node.getAttribute?.('name')
+        || node.getAttribute?.('id')
+        || node.value
+        || '';
+      return compactAgentText(label, 120);
+    };
+    const agentElementValue = (node) => {
+      const tag = String(node.tagName || '').toLowerCase();
+      if (tag === 'select') return compactAgentText(node.selectedOptions?.[0]?.textContent || node.value || '', 120);
+      if (tag === 'textarea' || tag === 'input') return compactAgentText(node.value || '', 120);
+      if (node.isContentEditable) return compactAgentText(node.innerText || node.textContent || '', 120);
+      return '';
+    };
+    const agentElementSignature = (item) => [
+      item.role || '',
+      item.label || '',
+      item.href || '',
+      item.value || '',
+    ].join('|');
+    const agentVisibleTextSegments = (doc, limit = 80) => {
+      const root = doc?.body || doc?.documentElement;
+      if (!root) return [];
+      const nodeFilter = doc.defaultView?.NodeFilter || window.NodeFilter;
+      const walker = doc.createTreeWalker(root, nodeFilter.SHOW_TEXT, {
+        acceptNode: (node) => {
+          const text = compactAgentText(node.nodeValue, 180);
+          if (!text || text.length < 2) return nodeFilter.FILTER_REJECT;
+          const parent = node.parentElement;
+          if (!parent || !isAgentVisibleElement(parent)) return nodeFilter.FILTER_REJECT;
+          return nodeFilter.FILTER_ACCEPT;
+        },
+      });
+      const seen = new Set();
+      const segments = [];
+      let node = walker.nextNode();
+      while (node && segments.length < limit) {
+        const text = compactAgentText(node.nodeValue, 180);
+        if (text && !seen.has(text)) {
+          seen.add(text);
+          segments.push(text);
+        }
+        node = walker.nextNode();
+      }
+      return segments;
+    };
+    const agentInteractiveElements = (doc, limit = 80) => {
+      if (!doc?.querySelectorAll) return [];
+      const selector = [
+        'a[href]',
+        'button',
+        'input',
+        'textarea',
+        'select',
+        '[role]',
+        '[tabindex]',
+        '[contenteditable="true"]',
+      ].join(',');
+      return Array.from(doc.querySelectorAll(selector))
+        .filter(isAgentVisibleElement)
+        .slice(0, limit)
+        .map((node) => {
+          const rect = node.getBoundingClientRect();
+          return {
+            ref: agentElementRef(node),
+            role: agentElementRole(node),
+            label: agentElementLabel(node),
+            tag: String(node.tagName || '').toLowerCase(),
+            href: node.href || node.getAttribute?.('href') || '',
+            value: agentElementValue(node),
+            disabled: !!node.disabled || node.getAttribute?.('aria-disabled') === 'true',
+            bounds: {
+              x: Math.round(rect.left),
+              y: Math.round(rect.top),
+              width: Math.round(rect.width),
+              height: Math.round(rect.height),
+            },
+          };
+        });
+    };
+    const agentFocusedElement = (doc) => {
+      const active = doc?.activeElement;
+      if (!active || active === doc.body || active === doc.documentElement) return null;
+      if (!isAgentVisibleElement(active)) return null;
+      return {
+        ref: agentElementRef(active),
+        role: agentElementRole(active),
+        label: agentElementLabel(active),
+        value: agentElementValue(active),
+      };
+    };
+    const browserAgentActor = () => {
+      if (!ensureBrowserAgentActor()) return null;
+      try {
+        const windowGlobal = xulBrowser?.browsingContext?.currentWindowGlobal;
+        return windowGlobal?.getActor?.(BROWSER_AGENT_ACTOR_NAME) || null;
+      } catch {
+        return null;
+      }
+    };
+    const browserAgentDebug = () => {
+      let ensureResult = false;
+      let actor = null;
+      let actorError = '';
+      let parentModule = null;
+      let parentModuleError = '';
+      let childModule = null;
+      let childModuleError = '';
+      try {
+        ensureResult = ensureBrowserAgentActor();
+        actor = xulBrowser?.browsingContext?.currentWindowGlobal?.getActor?.(BROWSER_AGENT_ACTOR_NAME) || null;
+      } catch (err) {
+        actorError = err?.message || String(err);
+      }
+      try {
+        parentModule = Object.keys(ChromeUtils.importESModule('chrome://userchrome/content/EGDeskBrowserAgentRuntimeParent.sys.mjs'));
+      } catch (err) {
+        parentModuleError = err?.message || String(err);
+      }
+      try {
+        childModule = Object.keys(ChromeUtils.importESModule('chrome://userchrome/content/EGDeskBrowserAgentRuntimeChild.sys.mjs'));
+      } catch (err) {
+        childModuleError = err?.message || String(err);
+      }
+      return {
+        cardId: card.id,
+        actorName: BROWSER_AGENT_ACTOR_NAME,
+        actorReady: browserAgentActorReady,
+        ensureResult,
+        actorError,
+        parentModule,
+        parentModuleError,
+        childModule,
+        childModuleError,
+        hasBrowser: !!xulBrowser,
+        browserLocalName: xulBrowser?.localName || '',
+        hasBrowsingContext: !!xulBrowser?.browsingContext,
+        browsingContextId: xulBrowser?.browsingContext?.id || null,
+        hasCurrentWindowGlobal: !!xulBrowser?.browsingContext?.currentWindowGlobal,
+        currentWindowGlobalKeys: xulBrowser?.browsingContext?.currentWindowGlobal
+          ? Object.getOwnPropertyNames(Object.getPrototypeOf(xulBrowser.browsingContext.currentWindowGlobal)).slice(0, 40)
+          : [],
+        hasGetActor: typeof xulBrowser?.browsingContext?.currentWindowGlobal?.getActor === 'function',
+        hasActor: !!actor,
+        actorKeys: actor ? Object.getOwnPropertyNames(Object.getPrototypeOf(actor)).slice(0, 40) : [],
+        hasActorSendQuery: typeof actor?.sendQuery === 'function',
+        hasMessageManager: !!browserAgentMessageManager(),
+        uri: browserState.uri,
+        title: readBrowserTitle(),
+      };
+    };
+    const browserAgentActorRequest = async (method, payload = {}) => {
+      const actor = browserAgentActor();
+      if (!actor?.sendQuery) throw new Error('Browser agent JSActor unavailable');
+      return actor.sendQuery(method, payload);
+    };
+    const browserAgentSnapshot = async (snapshotOptions = {}) => {
+      const doc = readBrowserDocument();
+      let bridgeError = '';
+      if (!doc) {
+        try {
+          const actorSnapshot = await browserAgentActorRequest('snapshot', { options: snapshotOptions });
+          return {
+            cardId: card.id,
+            ...actorSnapshot,
+          };
+        } catch (err) {
+          bridgeError = `actor: ${err?.message || String(err)}`;
+        }
+        try {
+          const bridged = await browserAgentBridgeRequest('snapshot', { options: snapshotOptions });
+          return {
+            cardId: card.id,
+            ...bridged,
+          };
+        } catch (err) {
+          bridgeError = `${bridgeError}; frameScript: ${err?.message || String(err)}`;
+        }
+      }
+      syncBrowserStateFromBrowser({ markDirtyOnLocationChange: false });
+      const text = doc ? agentVisibleTextSegments(doc, snapshotOptions.textLimit || 80) : [];
+      const interactiveElements = doc ? agentInteractiveElements(doc, snapshotOptions.elementLimit || 80) : [];
+      const focusedElement = doc ? agentFocusedElement(doc) : null;
+      return {
+        cardId: card.id,
+        url: browserState.uri,
+        title: readBrowserTitle(),
+        readyState: doc?.readyState || '',
+        text,
+        interactiveElements,
+        focusedElement,
+        inaccessible: !doc,
+        bridgeError,
+      };
+    };
+    const browserAgentFrameScriptSource = () => `
+      (() => {
+        const requestTopic = ${JSON.stringify(agentBridgeRequestTopic)};
+        const responseTopic = ${JSON.stringify(agentBridgeResponseTopic)};
+        globalThis.__egdeskAgentBridgeTopics ||= new Set();
+        if (globalThis.__egdeskAgentBridgeTopics.has(requestTopic)) return;
+        globalThis.__egdeskAgentBridgeTopics.add(requestTopic);
+        const refByNode = new WeakMap();
+        const nodeByRef = new Map();
+        let refSeq = 0;
+        const compact = (value, max = 180) => {
+          const text = String(value || '').replace(/\\s+/g, ' ').trim();
+          return text.length > max ? text.slice(0, max - 1).trimEnd() + '…' : text;
+        };
+        const elementRef = (node) => {
+          const existing = refByNode.get(node);
+          if (existing) return existing;
+          const ref = 'el_' + (++refSeq);
+          refByNode.set(node, ref);
+          nodeByRef.set(ref, node);
+          return ref;
+        };
+        const nodeForRef = (ref) => {
+          const node = nodeByRef.get(ref);
+          return node && node.isConnected ? node : null;
+        };
+        const isVisible = (node) => {
+          if (!node || !node.getBoundingClientRect) return false;
+          const rect = node.getBoundingClientRect();
+          if (rect.width <= 0 || rect.height <= 0) return false;
+          const style = content.getComputedStyle(node);
+          return style.display !== 'none' && style.visibility !== 'hidden' && Number(style.opacity) !== 0;
+        };
+        const roleFor = (node) => {
+          const explicit = node.getAttribute?.('role');
+          if (explicit) return explicit;
+          const tag = String(node.tagName || '').toLowerCase();
+          if (tag === 'a') return 'link';
+          if (tag === 'button') return 'button';
+          if (tag === 'select') return 'combobox';
+          if (tag === 'textarea') return 'textbox';
+          if (tag === 'input') {
+            const type = String(node.getAttribute('type') || 'text').toLowerCase();
+            if (['button', 'submit', 'reset'].includes(type)) return 'button';
+            if (['checkbox', 'radio', 'range', 'search', 'email', 'password', 'number', 'date', 'time'].includes(type)) return type;
+            return 'textbox';
+          }
+          if (node.isContentEditable) return 'textbox';
+          return tag || 'element';
+        };
+        const labelFor = (node) => {
+          const doc = node.ownerDocument;
+          const labelledBy = node.getAttribute?.('aria-labelledby');
+          if (labelledBy) {
+            const labelled = labelledBy.split(/\\s+/).map((id) => doc.getElementById(id)?.textContent || '').join(' ');
+            if (labelled.trim()) return compact(labelled, 120);
+          }
+          if (node.id) {
+            const label = doc.querySelector('label[for="' + CSS.escape(node.id) + '"]');
+            if (label?.textContent?.trim()) return compact(label.textContent, 120);
+          }
+          return compact(
+            node.getAttribute?.('aria-label')
+              || node.getAttribute?.('alt')
+              || node.getAttribute?.('title')
+              || node.getAttribute?.('placeholder')
+              || node.innerText
+              || node.textContent
+              || node.getAttribute?.('name')
+              || node.getAttribute?.('id')
+              || node.value
+              || '',
+            120,
+          );
+        };
+        const valueFor = (node) => {
+          const tag = String(node.tagName || '').toLowerCase();
+          if (tag === 'select') return compact(node.selectedOptions?.[0]?.textContent || node.value || '', 120);
+          if (tag === 'textarea' || tag === 'input') return compact(node.value || '', 120);
+          if (node.isContentEditable) return compact(node.innerText || node.textContent || '', 120);
+          return '';
+        };
+        const signature = (item) => [item.role || '', item.label || '', item.href || '', item.value || ''].join('|');
+        const textSegments = (doc, limit = 80) => {
+          const root = doc.body || doc.documentElement;
+          if (!root) return [];
+          const filter = content.NodeFilter;
+          const walker = doc.createTreeWalker(root, filter.SHOW_TEXT, {
+            acceptNode: (node) => {
+              const text = compact(node.nodeValue, 180);
+              if (!text || text.length < 2) return filter.FILTER_REJECT;
+              const parent = node.parentElement;
+              if (!parent || !isVisible(parent)) return filter.FILTER_REJECT;
+              return filter.FILTER_ACCEPT;
+            },
+          });
+          const seen = new Set();
+          const segments = [];
+          let node = walker.nextNode();
+          while (node && segments.length < limit) {
+            const text = compact(node.nodeValue, 180);
+            if (text && !seen.has(text)) {
+              seen.add(text);
+              segments.push(text);
+            }
+            node = walker.nextNode();
+          }
+          return segments;
+        };
+        const interactiveElements = (doc, limit = 80) => {
+          const selector = ['a[href]', 'button', 'input', 'textarea', 'select', '[role]', '[tabindex]', '[contenteditable="true"]'].join(',');
+          return Array.from(doc.querySelectorAll(selector)).filter(isVisible).slice(0, limit).map((node) => {
+            const rect = node.getBoundingClientRect();
+            return {
+              ref: elementRef(node),
+              role: roleFor(node),
+              label: labelFor(node),
+              tag: String(node.tagName || '').toLowerCase(),
+              href: node.href || node.getAttribute?.('href') || '',
+              value: valueFor(node),
+              disabled: !!node.disabled || node.getAttribute?.('aria-disabled') === 'true',
+              bounds: {
+                x: Math.round(rect.left),
+                y: Math.round(rect.top),
+                width: Math.round(rect.width),
+                height: Math.round(rect.height),
+              },
+            };
+          });
+        };
+        const focusedElement = (doc) => {
+          const active = doc.activeElement;
+          if (!active || active === doc.body || active === doc.documentElement || !isVisible(active)) return null;
+          return { ref: elementRef(active), role: roleFor(active), label: labelFor(active), value: valueFor(active) };
+        };
+        const snapshot = (options = {}) => {
+          const doc = content.document;
+          return {
+            url: content.location.href,
+            title: doc.title || '',
+            readyState: doc.readyState || '',
+            text: textSegments(doc, options.textLimit || 80),
+            interactiveElements: interactiveElements(doc, options.elementLimit || 80),
+            focusedElement: focusedElement(doc),
+            inaccessible: false,
+          };
+        };
+        const diffLists = (beforeList, afterList, keyFn, limit = 20) => {
+          const beforeKeys = new Set((beforeList || []).map(keyFn));
+          return (afterList || []).filter((item) => !beforeKeys.has(keyFn(item))).slice(0, limit);
+        };
+        const diff = (before, after) => {
+          const newVisibleText = diffLists(before?.text, after?.text, (item) => item, 20);
+          const removedVisibleText = diffLists(after?.text, before?.text, (item) => item, 20);
+          const newInteractiveElements = diffLists(before?.interactiveElements, after?.interactiveElements, signature, 20);
+          const removedInteractiveElements = diffLists(after?.interactiveElements, before?.interactiveElements, signature, 20);
+          return {
+            urlChanged: before?.url !== after?.url,
+            titleChanged: before?.title !== after?.title,
+            url: after?.url || '',
+            title: after?.title || '',
+            newVisibleText,
+            removedVisibleText,
+            focusedElement: after?.focusedElement || null,
+            newInteractiveElements,
+            removedInteractiveElements,
+            visibleTextChanged: newVisibleText.length > 0 || removedVisibleText.length > 0,
+            interactiveChanged: newInteractiveElements.length > 0 || removedInteractiveElements.length > 0,
+          };
+        };
+        const dispatchInputEvents = (node) => {
+          node.dispatchEvent(new content.Event('input', { bubbles: true, cancelable: true }));
+          node.dispatchEvent(new content.Event('change', { bubbles: true, cancelable: true }));
+        };
+        const targetFor = (action) => {
+          if (action.ref) return nodeForRef(action.ref);
+          if (action.selector) return content.document.querySelector(action.selector);
+          return null;
+        };
+        const perform = (action = {}) => {
+          const type = action.type || action.action || 'snapshot';
+          if (type === 'navigate') {
+            content.location.href = String(action.url || action.value || content.location.href);
+            return { ok: true };
+          }
+          if (type === 'scroll') {
+            content.scrollBy({ left: action.dx || 0, top: action.dy || action.deltaY || 0, behavior: 'instant' });
+            return { ok: true };
+          }
+          if (type === 'snapshot') return { ok: true };
+          const target = targetFor(action);
+          if (!target) throw new Error('Browser agent target not found: ' + (action.ref || action.selector || ''));
+          target.scrollIntoView?.({ block: 'center', inline: 'center' });
+          if (type === 'click') {
+            target.focus?.();
+            const pageTarget = target.wrappedJSObject || target;
+            const eventResults = [];
+            for (const eventName of ['pointerdown', 'mousedown', 'pointerup', 'mouseup', 'click']) {
+              const Ctor = eventName.startsWith('pointer') && content.PointerEvent ? content.PointerEvent : content.MouseEvent;
+              eventResults.push({
+                eventName,
+                notCanceled: pageTarget.dispatchEvent(new Ctor(eventName, {
+                  bubbles: true,
+                  cancelable: true,
+                  view: content,
+                  button: 0,
+                  buttons: eventName.endsWith('down') ? 1 : 0,
+                })),
+              });
+            }
+            const clickResult = pageTarget.click?.();
+            return {
+              ok: true,
+              ref: action.ref || elementRef(target),
+              clickDiagnostics: {
+                hasWrappedTarget: !!target.wrappedJSObject,
+                hasClick: typeof pageTarget.click === 'function',
+                clickResult: clickResult === undefined ? null : clickResult,
+                eventResults,
+              },
+            };
+          }
+          if (type === 'fill' || type === 'type') {
+            target.focus?.();
+            const value = String(action.text ?? action.value ?? '');
+            if ('value' in target) {
+              target.value = type === 'type' ? String(target.value || '') + value : value;
+            } else if (target.isContentEditable) {
+              target.textContent = type === 'type' ? String(target.textContent || '') + value : value;
+            } else {
+              throw new Error('Browser agent target is not editable: ' + (action.ref || action.selector || ''));
+            }
+            dispatchInputEvents(target);
+            return { ok: true, ref: action.ref || elementRef(target) };
+          }
+          if (type === 'press') {
+            target.focus?.();
+            const key = String(action.key || 'Enter');
+            const eventInit = { key, bubbles: true, cancelable: true, view: content };
+            target.dispatchEvent(new content.KeyboardEvent('keydown', eventInit));
+            target.dispatchEvent(new content.KeyboardEvent('keyup', eventInit));
+            return { ok: true, ref: action.ref || elementRef(target), key };
+          }
+          throw new Error('Unsupported browser agent action: ' + type);
+        };
+        addMessageListener(requestTopic, async (message) => {
+          const { requestId, method, payload } = message.data || {};
+          try {
+            if (method === 'snapshot') {
+              sendAsyncMessage(responseTopic, { requestId, ok: true, payload: snapshot(payload?.options || {}) });
+              return;
+            }
+            if (method === 'act') {
+              const before = snapshot(payload?.options?.snapshot || {});
+              const result = perform(payload?.action || {});
+              const settleMs = Number.isFinite(payload?.options?.settleMs) ? payload.options.settleMs : 250;
+              await new Promise((resolve) => content.setTimeout(resolve, Math.max(0, settleMs)));
+              const after = snapshot(payload?.options?.snapshot || {});
+              sendAsyncMessage(responseTopic, {
+                requestId,
+                ok: true,
+                payload: {
+                  ok: true,
+                  action: payload?.action || {},
+                  result,
+                  before,
+                  after,
+                  observation: diff(before, after),
+                },
+              });
+              return;
+            }
+            throw new Error('Unsupported browser agent bridge method: ' + method);
+          } catch (error) {
+            sendAsyncMessage(responseTopic, { requestId, ok: false, error: error?.message || String(error) });
+          }
+        });
+      })();
+    `;
+    const browserAgentMessageManager = () => {
+      try {
+        return xulBrowser?.messageManager || xulBrowser?.frameLoader?.messageManager || null;
+      } catch {
+        return null;
+      }
+    };
+    const ensureBrowserAgentBridge = () => {
+      const manager = browserAgentMessageManager();
+      if (!manager) return null;
+      if (!agentBridgeInstalled) {
+        manager.addMessageListener(agentBridgeResponseTopic, (message) => {
+          const data = message.data || {};
+          const pending = agentBridgePending.get(data.requestId);
+          if (!pending) return;
+          agentBridgePending.delete(data.requestId);
+          window.clearTimeout(pending.timer);
+          if (data.ok) pending.resolve(data.payload);
+          else pending.reject(new Error(data.error || 'Browser agent bridge failed'));
+        });
+        manager.loadFrameScript(
+          'data:application/javascript;charset=utf-8,' + encodeURIComponent(browserAgentFrameScriptSource()),
+          true,
+        );
+        agentBridgeInstalled = true;
+      }
+      return manager;
+    };
+    const browserAgentBridgeRequest = (method, payload = {}, timeoutMs = 10000) => {
+      const manager = ensureBrowserAgentBridge();
+      if (!manager) return Promise.reject(new Error('Browser agent bridge unavailable'));
+      const requestId = `${card.id}-${++agentBridgeSeq}`;
+      return new Promise((resolve, reject) => {
+        const timer = window.setTimeout(() => {
+          agentBridgePending.delete(requestId);
+          reject(new Error(`Browser agent bridge timeout: ${method}`));
+        }, timeoutMs);
+        agentBridgePending.set(requestId, { resolve, reject, timer });
+        manager.sendAsyncMessage(agentBridgeRequestTopic, { requestId, method, payload });
+      });
+    };
+    const diffAgentLists = (beforeList, afterList, keyFn, limit = 20) => {
+      const beforeKeys = new Set((beforeList || []).map(keyFn));
+      return (afterList || []).filter((item) => !beforeKeys.has(keyFn(item))).slice(0, limit);
+    };
+    const diffBrowserAgentSnapshots = (before, after) => {
+      const newVisibleText = diffAgentLists(before?.text, after?.text, (item) => item, 20);
+      const removedVisibleText = diffAgentLists(after?.text, before?.text, (item) => item, 20);
+      const newInteractiveElements = diffAgentLists(
+        before?.interactiveElements,
+        after?.interactiveElements,
+        agentElementSignature,
+        20,
+      );
+      const removedInteractiveElements = diffAgentLists(
+        after?.interactiveElements,
+        before?.interactiveElements,
+        agentElementSignature,
+        20,
+      );
+      return {
+        urlChanged: before?.url !== after?.url,
+        titleChanged: before?.title !== after?.title,
+        url: after?.url || '',
+        title: after?.title || '',
+        newVisibleText,
+        removedVisibleText,
+        focusedElement: after?.focusedElement || null,
+        newInteractiveElements,
+        removedInteractiveElements,
+        visibleTextChanged: newVisibleText.length > 0 || removedVisibleText.length > 0,
+        interactiveChanged: newInteractiveElements.length > 0 || removedInteractiveElements.length > 0,
+      };
+    };
+    const dispatchAgentInputEvents = (node) => {
+      node.dispatchEvent(new Event('input', { bubbles: true, cancelable: true }));
+      node.dispatchEvent(new Event('change', { bubbles: true, cancelable: true }));
+    };
+    const performBrowserAgentAction = (action = {}) => {
+      const doc = readBrowserDocument();
+      const type = action.type || action.action || 'snapshot';
+      if (type === 'navigate') {
+        return navigateBrowser(action.url || action.value || browserState.uri, action.options || {});
+      }
+      if (type === 'scroll') {
+        const win = doc?.defaultView;
+        win?.scrollBy?.({ left: action.dx || 0, top: action.dy || action.deltaY || 0, behavior: 'instant' });
+        return { ok: true };
+      }
+      const target = action.ref
+        ? agentNodeForRef(action.ref)
+        : action.selector && doc?.querySelector?.(action.selector);
+      if (!target) throw new Error(`Browser agent target not found: ${action.ref || action.selector || ''}`);
+      target.scrollIntoView?.({ block: 'center', inline: 'center' });
+      if (type === 'click') {
+        target.focus?.();
+        const targetWindow = target.ownerDocument?.defaultView || window;
+        for (const eventName of ['pointerdown', 'mousedown', 'pointerup', 'mouseup', 'click']) {
+          const Ctor = eventName.startsWith('pointer') && targetWindow.PointerEvent ? targetWindow.PointerEvent : targetWindow.MouseEvent;
+          target.dispatchEvent(new Ctor(eventName, {
+            bubbles: true,
+            cancelable: true,
+            view: targetWindow,
+            button: 0,
+            buttons: eventName.endsWith('down') ? 1 : 0,
+          }));
+        }
+        target.click?.();
+        return { ok: true, ref: action.ref || agentElementRef(target) };
+      }
+      if (type === 'fill' || type === 'type') {
+        target.focus?.();
+        const value = String(action.text ?? action.value ?? '');
+        if ('value' in target) {
+          target.value = type === 'type' ? String(target.value || '') + value : value;
+        } else if (target.isContentEditable) {
+          target.textContent = type === 'type' ? String(target.textContent || '') + value : value;
+        } else {
+          throw new Error(`Browser agent target is not editable: ${action.ref || action.selector || ''}`);
+        }
+        dispatchAgentInputEvents(target);
+        return { ok: true, ref: action.ref || agentElementRef(target) };
+      }
+      if (type === 'press') {
+        target.focus?.();
+        const key = String(action.key || 'Enter');
+        const eventInit = { key, bubbles: true, cancelable: true, view: doc?.defaultView || window };
+        target.dispatchEvent(new KeyboardEvent('keydown', eventInit));
+        target.dispatchEvent(new KeyboardEvent('keyup', eventInit));
+        return { ok: true, ref: action.ref || agentElementRef(target), key };
+      }
+      if (type === 'snapshot') return { ok: true };
+      throw new Error(`Unsupported browser agent action: ${type}`);
+    };
+    const browserAgentAct = async (action = {}, actOptions = {}) => {
+      if (!readBrowserDocument()) {
+        let actorError = '';
+        try {
+          const actorResult = await browserAgentActorRequest('act', { action, options: actOptions });
+          return {
+            ...actorResult,
+            before: { cardId: card.id, ...actorResult.before },
+            after: { cardId: card.id, ...actorResult.after },
+          };
+        } catch (err) {
+          actorError = `actor: ${err?.message || String(err)}`;
+        }
+        try {
+          const bridged = await browserAgentBridgeRequest('act', { action, options: actOptions }, Math.max(10000, (actOptions.settleMs || 250) + 5000));
+          return {
+            ...bridged,
+            before: { cardId: card.id, ...bridged.before },
+            after: { cardId: card.id, ...bridged.after },
+          };
+        } catch (err) {
+          const fallbackSnapshot = await browserAgentSnapshot(actOptions.snapshot || {});
+          return {
+            ok: false,
+            action,
+            result: null,
+            error: `${actorError}; frameScript: ${err?.message || String(err)}`,
+            before: fallbackSnapshot,
+            after: fallbackSnapshot,
+            observation: diffBrowserAgentSnapshots(fallbackSnapshot, fallbackSnapshot),
+          };
+        }
+      }
+      const before = await browserAgentSnapshot(actOptions.snapshot || {});
+      let result = null;
+      let ok = true;
+      let error = null;
+      try {
+        result = performBrowserAgentAction(action);
+        if (result?.then) result = await result;
+      } catch (err) {
+        ok = false;
+        error = err?.message || String(err);
+      }
+      const settleMs = Number.isFinite(actOptions.settleMs) ? actOptions.settleMs : 250;
+      await new Promise((resolve) => window.setTimeout(resolve, Math.max(0, settleMs)));
+      const after = await browserAgentSnapshot(actOptions.snapshot || {});
+      return {
+        ok,
+        action,
+        result,
+        error,
+        before,
+        after,
+        observation: diffBrowserAgentSnapshots(before, after),
+      };
+    };
     const syncBrowserChrome = () => {
       updateHistoryFlags();
       card.classList.toggle('egd-browser-loading', !!browserState.loading);
@@ -6099,6 +6882,9 @@
       copyUrl: () => copyTextToClipboard(browserState.uri),
       menu: showBrowserMenu,
       closeMenu: closeBrowserMenu,
+      agentSnapshot: browserAgentSnapshot,
+      agentAct: browserAgentAct,
+      agentDebug: browserAgentDebug,
     };
     const onBrowserLoadStart = () => setBrowserLoading(true);
     const onBrowserLoadDone = () => {
@@ -7012,6 +7798,14 @@
           home: (cardOrId) => browserCardControl(cardOrId, 'home'),
           duplicate: (cardOrId) => browserCardControl(cardOrId, 'duplicate'),
           copyUrl: (cardOrId) => browserCardControl(cardOrId, 'copyUrl'),
+          agentSnapshot: (cardOrId, options = {}) => browserCardControl(cardOrId, 'agentSnapshot', options),
+          agentAct: (cardOrId, action = {}, options = {}) => browserCardControl(cardOrId, 'agentAct', action, options),
+          agentDebug: (cardOrId) => browserCardControl(cardOrId, 'agentDebug'),
+        },
+        browserAgent: {
+          snapshot: (cardOrId, options = {}) => browserCardControl(cardOrId, 'agentSnapshot', options),
+          act: (cardOrId, action = {}, options = {}) => browserCardControl(cardOrId, 'agentAct', action, options),
+          debug: (cardOrId) => browserCardControl(cardOrId, 'agentDebug'),
         },
         sourceRefs: {
           keyFor: sourceRefKey,

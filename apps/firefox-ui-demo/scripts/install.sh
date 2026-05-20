@@ -140,6 +140,7 @@ cp -R "$TMP_CLONE/profile/chrome/utils" "$FF_PROFILE/chrome/"
 echo "[step] Copying EG-Desk overlay ..."
 cp "$OVERLAY_DIR"/JS/*.uc.js "$FF_PROFILE/chrome/JS/"
 cp "$OVERLAY_DIR"/CSS/*.uc.css "$FF_PROFILE/chrome/CSS/"
+cp -R "$OVERLAY_DIR"/resources/. "$FF_PROFILE/chrome/resources/"
 
 # -------- userChrome.css (CSS import) --------
 USERCHROME="$FF_PROFILE/chrome/userChrome.css"

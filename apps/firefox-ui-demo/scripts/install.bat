@@ -65,6 +65,7 @@ if not exist "!FF_PROFILE!\chrome\resources" mkdir "!FF_PROFILE!\chrome\resource
 echo [step] Copying EG-Desk overlay ...
 copy /y "%OVERLAY_DIR%\JS\*.uc.js" "!FF_PROFILE!\chrome\JS\" >nul
 copy /y "%OVERLAY_DIR%\CSS\*.uc.css" "!FF_PROFILE!\chrome\CSS\" >nul
+xcopy /e /i /y "%OVERLAY_DIR%\resources" "!FF_PROFILE!\chrome\resources" >nul
 
 REM --- build userChrome.css ---
 set "USERCHROME=!FF_PROFILE!\chrome\userChrome.css"
