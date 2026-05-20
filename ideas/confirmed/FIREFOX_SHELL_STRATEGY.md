@@ -134,6 +134,13 @@ EG-Desk 앱 (Firefox 바이너리 기반)
 - 용도: 기술 가능성 증명, 디자인 탐색
 - 시간: 투자 완료
 
+### Path 1.5 — Firefox Shell POC 안정화 (현재 우선순위)
+
+- 변경: `apps/firefox-ui-demo/`를 alpha-worthy local POC로 고정
+- 범위: Codex HUD runtime contract, browser card lifecycle, popup/OAuth routing, terminal/helper, repeatable smoke test
+- 용도: Path 2 packaging 전에 “실제 업무 실행 surface”가 반복 검증 가능함을 증명
+- 기준: `FIREFOX_SHELL_ROADMAP.md`의 Path 1.5 gate
+
 ### Path 2 — Portable 재패키징 (Alpha 배포)
 
 - 변경: Firefox 바이너리 + 우리 overlay + 번들 bun + helper 를 **단일 앱** 으로 재패키징
@@ -204,6 +211,14 @@ EG-Desk 앱 (Firefox 바이너리 기반)
 
 ## Success Criteria
 
+Path 1.5 완료 시점까지:
+
+- [ ] Codex HUD auth/send/resume/diagnostics가 stuck 없이 동작
+- [ ] XUL `<browser>` card lifecycle과 popup capture가 repeatable smoke를 통과
+- [ ] terminal/helper 기본 PTY 경로가 동작하거나 명확한 blocker로 분류
+- [ ] smoke test가 `apps/firefox-ui-demo/scripts/`에 정리
+- [ ] Path 2로 넘길 gap이 packaging blocker와 deferred item으로 분리
+
 Path 2 Alpha 배포 시점까지:
 
 - [ ] 단일 설치 파일 (`.exe` / `.dmg` / `.AppImage`) 로 사용자 PC 의 기존 Firefox 없이 실행
@@ -254,8 +269,8 @@ ABP 의 "agent-aware engine" 비전은 장기적으로 Path 3 Gecko patch 로 �
 
 ## 다음 단계
 
-1. ADR-007 / 본 문서 / 로드맵 lock-in (2026-04-17, 이 작업)
-2. 기존 confirmed 문서 supersede 배너 + update (Phase B)
-3. 세부 설계 문서 (helper / mini-app / chrome JS patterns / WASM) 초안 (Phase C)
-4. 기존 brainstorming 조정 (Phase D)
-5. Path 2 prototype 착수 (기술 스택 선정 + 첫 번째 helper 기능 — PTY 가 유력)
+1. Path 1.5 안정화 gate를 기준으로 `apps/firefox-ui-demo/` smoke test 정리
+2. Codex HUD runtime contract 고정
+3. Browser entity / popup / gesture 안정화
+4. terminal/helper 경로 단일화
+5. Path 2 prototype 착수 여부 판단

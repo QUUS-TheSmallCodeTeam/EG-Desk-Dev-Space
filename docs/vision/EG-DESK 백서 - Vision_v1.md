@@ -7,6 +7,14 @@
 
 ---
 
+## 현재 구현 기준 주석 (2026-05)
+
+이 문서는 EG-DESK의 장기 제품 비전을 설명하는 전략 문서입니다. 핵심 비전인 공간 캔버스, Agenda, 앰비언트 AI, 관찰 학습, 계정 격리는 유지됩니다.
+
+다만 본문 중 Electron 세션 분리, Electron 기반 창 구조, 기존 2025 마일스톤은 2026년 4월 Firefox shell pivot 이전의 기술 전제입니다. 현재 구현 기준은 [`../../ideas/confirmed/FIREFOX_SHELL_STRATEGY.md`](../../ideas/confirmed/FIREFOX_SHELL_STRATEGY.md)와 [`../../ideas/confirmed/FIREFOX_SHELL_ROADMAP.md`](../../ideas/confirmed/FIREFOX_SHELL_ROADMAP.md)입니다. 구현상으로는 `apps/firefox-ui-demo/`의 Firefox chrome JS shell, XUL `<browser>` 카드, Codex HUD, helper/terminal 경로를 우선합니다.
+
+---
+
 ## 요약
 
 현재의 AI 도구들은 강력하지만, 여전히 사용자가 AI와 "대화"해야 하는 별도의 인터페이스입니다. EG-DESK Vision은 더 근본적인 질문을 던집니다: **AI가 환경 자체에 녹아든다면 어떨까요?**
@@ -15,6 +23,7 @@
 
 **비전의 핵심**:
 - **공간 캔버스**: 작업이 물리적 책상처럼 공간에 배치됨
+- **Agenda**: 업무와 브라우저, 파일, 챗, 에이전트, 맥락을 페어링
 - **앰비언트 AI**: 지속적인 채팅창 없이 필요 시 Cmd+K로 호출
 - **관찰 학습**: 한 번 하면 AI가 자동화로 변환
 - **계정 격리**: 업무와 개인의 완벽한 분리
@@ -112,7 +121,68 @@ AI 추론:
 - 줌/팬 지연 <16ms
 - 메모리 사용: 리소스당 <1MB
 
-### 2.3. 근접성 기반 문맥
+### 2.3. Agenda: 업무와 실행 환경의 페어링
+
+**문제**: 실제 업무의 경계는 폴더 하나가 아니다.
+
+개발자 도구나 AI 코딩 도구에서 "프로젝트"는 보통 하나의 폴더 또는 git root를 의미한다. 그러나 일반 업무는 여러 폴더, 웹사이트, 브라우저 계정, 챗 스레드, 에이전트 맥락, 문서 산출물을 동시에 사용한다. 폴더는 이 중 하나의 리소스일 뿐, 업무 전체의 경계가 아니다.
+
+**개념**: Agenda는 특정 업무를 시작하기 위해 필요한 실행 환경의 페어링 단위다.
+
+```
+Agenda: 월별 세무 보고서
+├── Browser: 홈택스
+├── Browser: Gmail
+├── File: 부가세 보고서.xlsx
+├── Chat: Codex 분석 스레드
+├── Agent context: 세무 보고서 작성 맥락
+└── Output: 제출용 PDF
+```
+
+Agenda는 할 일 목록이 아니다. 사용자가 실제로 일을 시작할 수 있도록 브라우저, 파일, 챗, 에이전트, 맥락, 계정 상태를 함께 묶어 Desk 위에 펼치는 **업무 페어링 객체**다.
+
+**Desk / Library / Agenda / Card 관계**:
+
+| 개념 | 역할 |
+|---|---|
+| Library | 장기 보관 및 검색 가능한 자료/지식 catalog |
+| Desk | Agenda가 펼쳐지는 supra-folder live work surface |
+| Agenda | 업무와 실행 환경의 페어링. 폴더가 아니라 업무의 경계 |
+| Card | Desk 위에서 Agenda나 리소스를 보는 view/runtime surface |
+
+Card는 Agenda 자체가 아니라 view다. 하나의 Agenda는 Agenda Card로 대표될 수 있고, 동시에 Browser Card, File Card, Chat Card, Terminal Card 같은 여러 runtime card를 펼칠 수 있다.
+
+```
+Agenda Card: 월별 세무 보고서
+  ├─ Browser Card: 홈택스
+  ├─ Browser Card: Gmail
+  ├─ File Card: 보고서.xlsx
+  └─ Chat Card: Codex 분석
+```
+
+**무한 캔버스에서의 표현**:
+
+Agenda는 카드 하나로만 표시되지 않는다. Desk 위에서는 하나의 업무 구역(region)으로 구분된다.
+
+- Agenda Header Card: 제목, 목표, 상태, 진행률
+- Agenda Region: 관련 카드들을 품는 시각적 작업 구역
+- Member Cards: 브라우저, 파일, 챗, 터미널, 미니앱 카드
+- Focus Mode: 현재 Agenda만 선명하게 보고 다른 Agenda는 흐림
+- Collapse/Expand: 접으면 Agenda Card 하나로 축약
+
+Nested Agenda도 가능하다. 다만 폴더 트리가 아니라 업무 분해 그래프다.
+
+```
+Agenda: 월별 세무 보고서
+├── Sub-agenda: 데이터 수집
+├── Sub-agenda: 이메일 문의 검증
+├── Sub-agenda: 보고서 작성
+└── Sub-agenda: 리뷰 및 제출
+```
+
+기술적으로는 더 깊은 nesting을 허용하되, Desk는 현재 작업할 active slice를 중심으로 보여준다. 전체 구조는 Agenda graph로 유지하고, 사용자는 필요한 부분만 Desk 위에 펼친다.
+
+### 2.4. 근접성 기반 문맥
 
 **원리**: 게슈탈트 근접성 법칙
 
@@ -142,7 +212,7 @@ AI 추론:
 
 이미 검증된 기술: 추천 시스템, 지리 공간 분석
 
-### 2.4. Cmd+K 커맨드 팔레트
+### 2.5. Cmd+K 커맨드 팔레트
 
 **사용자 경험**:
 
@@ -168,6 +238,7 @@ AI 추론:
 
 ```python
 context = {
+  "agenda": "월별 세무 보고서",
   "focus": "Excel (부가세 보고서)",
   "nearby": [
     {"resource": "홈택스", "distance": 50, "relevance": 0.95},
@@ -310,35 +381,27 @@ workflow = {
 
 ### 4.2. 기술적 타당성
 
-*"어떻게 OS 레벨 격리가 가능하나?"*
+*"어떻게 계정 격리가 가능하나?"*
 
-**Electron 세션 분리**:
+**현재 구현 기준: Firefox profile / container 격리**
 
-```javascript
-// 윈도우 1: 업무 세션
-const workSession = session.fromPartition('persist:work');
-const workWindow = new BrowserWindow({
-  webPreferences: { session: workSession }
-});
+2026년 4월 Firefox shell pivot 이후 계정 격리는 Electron session이 아니라 Firefox의 프로필과 컨테이너 모델로 재해석한다.
 
-// 윈도우 2: 개인 세션
-const personalSession = session.fromPartition('persist:personal');
-const personalWindow = new BrowserWindow({
-  webPreferences: { session: personalSession }
-});
-```
+구현 방향:
+- Path 1: 사용자의 기존 Firefox profile 위에서 POC 검증
+- Path 2: EGDesk 전용 bundled profile을 만들고 workspace/account별 profile 또는 container 정책 적용
+- Path 3: runtime injection으로 부족한 격리 요구가 누적될 때 Firefox fork에서 더 깊은 profile/container UX 제공
 
-각 세션은 독립적:
+격리 대상:
 - 쿠키 저장소
 - 로컬 스토리지
 - IndexedDB
 - 캐시
+- 비밀번호/인증 흐름
 
-**Chrome 프로필과 동일 원리**:
-- Chrome: 사용자당 프로필
-- EG-DESK: 계정당 Electron 세션
-
-이미 검증된 기술: 수백만 명이 Chrome 프로필 사용
+**브라우저 프로필과 동일 원리**:
+- Firefox/Chrome: 사용자 또는 컨테이너별 세션 격리
+- EG-DESK: workspace/account별 브라우징 영토를 시각적 workspace와 연결
 
 ### 4.3. 자동 인증
 
@@ -686,7 +749,9 @@ AI 도구의 미래는 더 많은 기능이 아니라 **더 나은 통합**입�
 
 EG-DESK Vision은 AI를 환경 자체에 녹입니다. 공간 캔버스는 물리적 책상처럼 직관적이고, 앰비언트 AI는 보이지 않지만 항상 인식하며, 관찰 학습은 한 번의 시연을 반복 가능한 자동화로 변환합니다.
 
-이것은 단순한 제품 로드맵이 아닙니다. **업무 방식의 패러다임 전환**입니다. 기존 연구(앰비언트 컴퓨팅, 게슈탈트 심리학, 강화 학습)에 기반하고, 검증된 기술(Canvas API, 시퀀스 학습, Electron)로 구현 가능하며, 명확한 시장 기회($196억)가 있습니다.
+Agenda는 이 환경의 업무 경계입니다. 폴더 하나가 아니라 브라우저, 파일, 챗, 에이전트, 맥락이 함께 묶인 업무 페어링을 Desk 위에 펼쳐 사용자가 바로 일을 시작하게 합니다.
+
+이것은 단순한 제품 로드맵이 아닙니다. **업무 방식의 패러다임 전환**입니다. 기존 연구(앰비언트 컴퓨팅, 게슈탈트 심리학, 강화 학습)에 기반하고, 검증된 기술(Canvas API, 시퀀스 학습, Firefox shell)로 구현 가능하며, 명확한 시장 기회($196억)가 있습니다.
 
 2025-2026년, EG-DESK는 AI 도구가 어떻게 작동해야 하는지를 재정의합니다. 보이지 않고, 직관적이며, 강력한 - 진정한 앰비언트 AI 워크스페이스입니다.
 
@@ -702,4 +767,4 @@ EG-DESK Vision은 AI를 환경 자체에 녹입니다. 공간 캔버스는 물�
 
 ---
 
-*본 문서는 EG-DESK의 장기 전략적 방향을 제시합니다. 현재 역량에 대해서는 `docs/production/EG-DESK 백서 - Production_v1.md`를 참조하십시오. 로드맵은 사용자 피드백 및 기술 진전에 따라 조정될 수 있습니다.*
+*본 문서는 EG-DESK의 장기 전략적 방향을 제시합니다. 현재 역량에 대해서는 `docs/production/EG-DESK 백서 - Production_v8_한글.md`를 참조하십시오. 구현 기준 로드맵은 `ideas/confirmed/FIREFOX_SHELL_ROADMAP.md`를 우선합니다.*

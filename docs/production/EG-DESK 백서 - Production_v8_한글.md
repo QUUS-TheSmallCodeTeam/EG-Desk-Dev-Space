@@ -7,6 +7,14 @@ Whitepaper: The Sovereign Execution Layer for Enterprise AI
 
 ---
 
+## 현재 구현 기준 주석 (2026-05)
+
+본 백서는 2026년 1월 기준의 대외 설명 문서입니다. AI 실행 단절, 데이터 주권, Ontology, Managed Intelligence라는 제품 명제는 유지됩니다.
+
+다만 본문 중 Playwright 중심 실행 계층, Electron 계열 구현 전제, 구체 로드맵 문구는 2026년 4월 Firefox shell pivot 이전의 표현을 포함합니다. 현재 기술 기준은 [`../../ideas/confirmed/FIREFOX_SHELL_STRATEGY.md`](../../ideas/confirmed/FIREFOX_SHELL_STRATEGY.md)와 [`../../ideas/confirmed/FIREFOX_SHELL_ROADMAP.md`](../../ideas/confirmed/FIREFOX_SHELL_ROADMAP.md)입니다. 현재 구현은 `apps/firefox-ui-demo/`의 Firefox chrome JS shell을 기준으로 하며, real browser surface, Codex HUD, terminal/helper, XUL `<browser>` entity를 우선합니다.
+
+---
+
 ## Disclaimer
 
 본 백서는 2026년 1월 29일 기준의 EG-DESK 시스템 설계, 서비스 모델 및 기술 구현에 관한 내용을 담고 있습니다. EG-DESK 개발팀은 본 백서에 기술된 시스템의 설계 원칙, 기술 사양 및 구현 현황에 대한 정보를 제공합니다. 본 백서는 기술 문서로서 시스템의 현재 상태와 향후 개발 방향을 설명하며, 구현 세부사항은 개발 진행에 따라 변경될 수 있습니다. 본 문서에 기술된 AI Agent Scaffold, Ontology 지식 모델 및 데이터 관개 모델은 EG-DESK의 핵심 지적 자산입니다.
@@ -138,7 +146,7 @@ EG-DESK 아키텍처에서 미니앱의 프론트엔드 코드는 수백 줄 수
 ## 8. 핵심 기술 아키텍처
 
 ### 8.1 시스템 구조
-사용자가 자연어로 요청하거나 미니앱을 실행하면 다중 AI 모델 통합 계층이 Ontology 4계층을 결합합니다. 이후 브라우저 우선 자동화 계층(Playwright 기반)을 통해 실제 웹 시스템(금융, 소셜미디어, CMS 등)을 제어합니다.
+사용자가 자연어로 요청하거나 미니앱을 실행하면 다중 AI 모델 통합 계층이 Ontology 4계층을 결합합니다. 이후 Firefox chrome JS 기반의 브라우저 우선 실행 계층을 통해 실제 웹 시스템(금융, 소셜미디어, CMS 등)을 제어합니다. Playwright류 자동화는 보조 검증/외부 자동화 경로로 둘 수 있으나, 현재 제품 구현 기준은 EG-DESK 내부의 real browser surface를 직접 제어하는 Firefox shell입니다.
 
 ### 8.2 동적 환경 적응
 전통적 RPA가 UI 변경 시 스크립트 실패와 수동 재작성을 반복하는 것과 달리, EG-DESK는 예외 발생 시 AI 에이전트가 즉시 개입하여 문제를 분석하고 Ontology를 자동 업데이트합니다. 이는 시스템이 스스로 환경 변화에 적응하는 지능형 구조임을 의미합니다.

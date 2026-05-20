@@ -2,7 +2,7 @@
 
 **작성일**: 2026-04-17
 **상태**: Confirmed — 전략 PRD 에 따른 실행 계획
-**관련**: [ADR-007](../../.claude/docs/decisions/007-firefox-shell-over-electron.md), [`FIREFOX_SHELL_STRATEGY.md`](FIREFOX_SHELL_STRATEGY.md)
+**관련**: [ADR-007](../../.claude/docs/decisions/007-firefox-shell-over-electron.md), [`FIREFOX_SHELL_STRATEGY.md`](FIREFOX_SHELL_STRATEGY.md), [`PATH_1_5_STABILIZATION.md`](../../apps/firefox-ui-demo/docs/PATH_1_5_STABILIZATION.md)
 
 ---
 
@@ -11,10 +11,10 @@
 Firefox chrome JS shell 전환의 단계적 실행 계획. 각 phase 는 이전 산출물을 compound 하고 `Gate` (다음 phase 진입 조건) 로 제어.
 
 ```
-Path 1 (완료)     Path 2            Path 2+WASM        Path 3 (선택)
-POC runtime   ─→  Portable pkg  ─→  연산 레이어 추가  ─→ Firefox fork
-inject            Alpha 배포         (점진)              Beta/GA
-2026-04-17        ~3주               모듈당 1주 × N      2~3주 + CI
+Path 1 (완료)     Path 1.5              Path 2            Path 2+WASM        Path 3 (선택)
+POC runtime   ─→  POC 안정화       ─→  Portable pkg  ─→  연산 레이어 추가  ─→ Firefox fork
+inject            alpha-worthy gate      Alpha 배포         (점진)              Beta/GA
+2026-04-17        현재 우선순위          ~3주               모듈당 1주 × N      2~3주 + CI
 ```
 
 ---
@@ -38,11 +38,59 @@ inject            Alpha 배포         (점진)              Beta/GA
 - ✅ `Subprocess.sys.mjs` 로 임의 바이너리 spawn 가능
 - ✅ `IOUtils` 가 Node `fs` 의 ~90% 커버
 
-### Gate → Path 2 진입 조건
+### Gate → Path 1.5 진입 조건
 
 - [x] Session Lead + 유저 승인 (ADR-007 Decided)
 - [x] 기존 confirmed 문서 supersede/update 완료 (Phase B)
 - [x] 새 설계 문서 skeleton 완료 (Phase C)
+
+---
+
+## Path 1.5 — Firefox Shell POC 안정화 (현재 우선순위)
+
+### 목표
+
+Path 2 portable packaging 전에 `apps/firefox-ui-demo/`를 alpha-worthy local POC로 고정한다. 목적은 기능 추가가 아니라, 현재 POC가 “실제 업무 실행 surface”로 반복 실행될 수 있음을 증명하는 것이다.
+
+### Deliverables
+
+| 영역 | 산출물 | 비고 |
+|------|-------|------|
+| **Source of truth 정리** | Firefox shell 전략/로드맵을 현재 기준으로 고정하고 백서에는 pivot 주석 추가 | 백서는 비전/대외 설명, roadmap은 실행 기준 |
+| **Codex HUD 안정화** | auth / send / streaming / retry / resume / diagnostics / HUD↔canvas 이동 검증 | multi-provider 전 확정 |
+| **Browser entity 안정화** | XUL `<browser>` card 생성/이동/resize/scroll/focus/popup capture 검증 | OAuth/window.open 포함 |
+| **Terminal/helper 안정화** | terminal card spawn/write/read/resize/kill 경로를 하나로 고정 | Node fallback과 Rust helper 후보 정리 |
+| **반복 검증 스크립트** | 설치, bridge, HUD, browser card, terminal smoke를 repeatable script로 정리 | root one-off probe 금지 |
+| **문서 반영** | 구현 상태와 known gaps를 [`apps/firefox-ui-demo/docs/PATH_1_5_STABILIZATION.md`](../../apps/firefox-ui-demo/docs/PATH_1_5_STABILIZATION.md)에 유지 | packaging 전에 open issue 명시 |
+
+### Gating 체크리스트
+
+- [ ] Firefox overlay가 clean profile에서 부팅되고 4-Edge UI가 표시된다.
+- [ ] browser card 생성, URL 이동, 뒤/앞/새로고침, resize, drag가 안정 동작한다.
+- [ ] `window.open` / OAuth류 popup이 새 browser card로 라우팅된다.
+- [ ] card 내부 스크롤과 desk pan/zoom이 gesture 중간에 섞이지 않는다.
+- [ ] Codex bridge가 `/v1/state`, `/auth/status`, `/chat/send` 기준으로 일관된 상태를 반환한다.
+- [ ] Codex login 중복 실행, 취소, signout, 재로그인이 stuck 없이 처리된다.
+- [ ] Codex 대화가 thread별 `conversationId`로 resume되고 실패 시 사용자에게 명확히 보인다.
+- [ ] HUD chat과 pinned canvas chat entity 간 이동이 데이터 손실 없이 동작한다.
+- [ ] terminal card가 PTY spawn/write/read/resize/kill 기본 경로를 통과한다.
+- [ ] bridge/helper 종료 후 UI가 crash 대신 reconnect/offline 상태를 표시한다.
+- [ ] 주요 smoke test가 `apps/firefox-ui-demo/scripts/` 아래 repeatable command로 존재한다.
+- [ ] Path 2로 옮길 known gaps가 문서화되어 있다.
+
+### 우선순위
+
+1. Codex HUD runtime contract 고정
+2. Browser entity / popup / gesture 안정화
+3. Terminal/helper 경로 단일화
+4. Repeatable smoke test 정리
+5. Path 2 packaging 착수 판단
+
+### Gate → Path 2 진입 조건
+
+- [ ] 위 Gating 체크리스트 80% 이상 충족
+- [ ] 남은 gap이 packaging blocker인지 deferred item인지 분류됨
+- [ ] Path 2가 기능 개발이 아니라 packaging/배포 문제로 좁혀짐
 
 ---
 

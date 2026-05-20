@@ -4,6 +4,13 @@
 > - 결정: [`ADR-007`](../../.claude/docs/decisions/007-firefox-shell-over-electron.md)
 > - 전략: [`FIREFOX_SHELL_STRATEGY.md`](../../ideas/confirmed/FIREFOX_SHELL_STRATEGY.md)
 > - 로드맵: [`FIREFOX_SHELL_ROADMAP.md`](../../ideas/confirmed/FIREFOX_SHELL_ROADMAP.md)
+> - 현재 안정화 gate: [`docs/PATH_1_5_STABILIZATION.md`](./docs/PATH_1_5_STABILIZATION.md)
+> - Chat design grammar: [`docs/CHAT_DESIGN_GRAMMAR_V1.md`](./docs/CHAT_DESIGN_GRAMMAR_V1.md)
+> - Chat/canvas/agent UX model: [`docs/CHAT_CANVAS_AGENT_LAYER_MODEL.md`](./docs/CHAT_CANVAS_AGENT_LAYER_MODEL.md)
+> - Desk/Agenda/Card runtime model: [`docs/DESK_AGENDA_CARD_RUNTIME_MODEL.md`](./docs/DESK_AGENDA_CARD_RUNTIME_MODEL.md)
+> - AI canvas annotation layer: [`docs/AI_CANVAS_ANNOTATION_LAYER.md`](./docs/AI_CANVAS_ANNOTATION_LAYER.md)
+> - Canvas run playback model: [`docs/CANVAS_RUN_PLAYBACK_MODEL.md`](./docs/CANVAS_RUN_PLAYBACK_MODEL.md)
+> - Viewport layout/interaction model: [`docs/VIEWPORT_LAYOUT_INTERACTION_MODEL.md`](./docs/VIEWPORT_LAYOUT_INTERACTION_MODEL.md)
 
 **Firefox를 EG-Desk의 UI 캔버스로 쓸 수 있는가?** 에 대한 실제 동작 데모.
 
@@ -84,6 +91,7 @@ helper 는 `http://127.0.0.1:39217/events` 로 SSE를 열고, overlay 는 여기
 
 Firefox HUD 에 붙는 Codex chat 의 상세 화면/상태/행동 규칙은 아래 문서를 기준으로 한다.
 
+- [`docs/CHAT_DESIGN_GRAMMAR_V1.md`](./docs/CHAT_DESIGN_GRAMMAR_V1.md)
 - [`docs/CODEX_HUD_DESIGN_V1.md`](./docs/CODEX_HUD_DESIGN_V1.md)
 
 ## 제거

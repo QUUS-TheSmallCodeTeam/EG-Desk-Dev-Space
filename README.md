@@ -1,221 +1,125 @@
 # EG-DESK
 
-**Spatial Canvas Platform for AI-Powered Workflow Management**
+EG-DESK is currently moving toward a Firefox-shell implementation: Firefox provides the real browser surface, while EG-DESK overlays workspace UI, Codex chat, terminal experiments, and automation controls into Firefox chrome.
 
-EG-DESK is an Electron-based desktop application featuring an infinite canvas interface where users can organize and interact with multiple content types: browser windows, native tools, AI-generated web applications, and code editors.
+The old Electron/Vite app still exists as a legacy POC under `src/`, but the active implementation path is now `apps/firefox-ui-demo/`.
 
-## Project Status
+## Current Status
 
-**Current Phase**: Research & Architecture Planning
+**Active path**: Firefox shell POC
 
-This repository is in the research and planning phase. We are evaluating technologies, designing the architecture, and preparing for implementation.
+Most recent product work lives in `apps/firefox-ui-demo/`:
 
-## Architecture Overview
+- 4-edge Firefox chrome surface overlay
+- Codex chat HUD and thread UI
+- Codex bridge server using `@openai/codex-sdk`
+- Settings/provider/account UI experiments
+- Terminal card and PTY helper experiments
+- Firefox profile install/sync and Marionette verification scripts
 
-### Core Concept
-
-EG-DESK = **Infinite Canvas** + **Window Management** + **AI Orchestration**
-
-The platform allows users to:
-- Place multiple browser windows (WebContent) on an infinite canvas
-- Embed native EG-DESK tools (code editor, workflow diagram, settings)
-- Display AI-generated web apps served on localhost as if they were local applications
-- Seamlessly integrate with AI agents for automated workflows
-
-### Key Components
-
-1. **Infinite Canvas System**
-   - Primary user interface
-   - Spatial organization of windows and content
-   - Pan, zoom, and arrange functionality
-
-2. **Window Management**
-   - BaseWindow with multiple WebContents (browser-like)
-   - Native tool windows (code editor, diagrams, settings)
-   - Dynamic window creation and placement
-
-3. **Browser Control**
-   - Full web browsing capabilities
-   - Multiple simultaneous web pages
-   - Web content automation
-
-4. **AI Agent Orchestration**
-   - AI agents for workflow automation
-   - Integration with code tools and browsers
-   - Automated task execution
-
-5. **External Tool Integration**
-   - Theia: Code editor and IDE capabilities (embeddable tool)
-   - Other embeddable tools as needed
+The legacy Electron/Vite app in `src/` remains useful reference material for canvas, offscreen browser rendering, and Codex IPC, but it is no longer the default place for new feature work.
 
 ## Repository Structure
 
-```
+```text
 EG-Desk-Dev-Space/
-├── src/                          # Development code (EG-DESK implementations)
-│   └── CODEBASE_STRUCTURE.md    # Services & keybindings registry
-├── docs/                         # External public documentation
-│   ├── EG-DESK_Whitepaper.md
-│   └── EG-DESK_백서_한글.md
-├── ideas/                        # Feature ideation and planning
-│   ├── brainstorming/           # Deferred or exploratory ideas
-│   └── confirmed/               # Approved PRDs ready for implementation
-├── references/                   # External reference materials
-│   └── [project]/
-│       ├── [project]/           # git clone (shallow, NOT git tracked)
-│       └── online_references.md # Research notes (git tracked)
-├── .claude/                      # AI Agent Swarm System
-│   ├── agents/                  # Agent definitions
-│   ├── commands/                # Slash commands
-│   └── prompts/                 # Prompt templates
-├── subagent_reports/            # Temporary agent communication (NOT git tracked)
-└── (Root docs: CLAUDE.md, AGENT_SWARM_FLOW.md, etc.)
+├── apps/
+│   └── firefox-ui-demo/              # Active Firefox shell POC
+│       ├── overlay/
+│       │   ├── JS/                   # Firefox chrome runtime scripts
+│       │   ├── CSS/                  # Firefox chrome surface styles
+│       │   └── resources/            # chrome-loadable HTML/vendor assets
+│       ├── helper/                   # Node Codex bridge and HTTP endpoints
+│       ├── helper-rust/              # Rust PTY helper candidate
+│       ├── scripts/                  # install/run/verification scripts
+│       └── docs/                     # Firefox POC design notes
+├── src/                              # Legacy Electron/Vite POC
+│   ├── main/
+│   ├── preload/
+│   ├── renderer/
+│   └── shared/
+├── docs/                             # Project docs, whitepapers, references
+├── ideas/                            # Brainstorming and confirmed plans
+├── references/                       # Local external library checkouts, ignored
+├── outputs/                          # Local generated artifacts, ignored
+├── .claude/                          # Claude-style swarm/workflow material
+└── AGENTS.md                         # Working rules for agents
 ```
 
-### Folder Rules (Managed by Swarm Team Agent)
+## Firefox POC
 
-#### src/
-**Purpose**: Actual development code (EG-DESK custom implementations)
-- **Required files**: `CODEBASE_STRUCTURE.md` (services/keybindings registry)
-- **Allowed types**: `.ts`, `.tsx`, `.js`, `.jsx` (source code only)
-- **Git tracked**: Yes
-- **Validation**: No markdown documentation files (use `docs/` instead)
+Main files:
 
-#### docs/
-**Purpose**: External public documentation (whitepapers, design docs)
-- **Target audience**: External stakeholders, contributors
-- **Allowed types**: `.md`, `.pdf` (documentation only)
-- **Examples**: `EG-DESK_Whitepaper.md`, `EG-DESK_백서_한글.md`
-- **Git tracked**: Yes
-- **Validation**: No code files (`.ts`, `.tsx`, `.js`)
+- `apps/firefox-ui-demo/overlay/JS/eg-desk-surface.uc.js`
+- `apps/firefox-ui-demo/overlay/CSS/eg-desk-surface.uc.css`
+- `apps/firefox-ui-demo/helper/codex-bridge-server.mjs`
+- `apps/firefox-ui-demo/overlay/resources/terminal.html`
+- `apps/firefox-ui-demo/helper-rust/src/main.rs`
 
-#### ideas/
-**Purpose**: Feature ideation and planning
-- **Structure**:
-  - `brainstorming/`: Deferred or exploratory ideas
-  - `confirmed/`: Approved PRDs ready for implementation
-- **Content**: Markdown files with structured headers
-- **Git tracked**: Yes
-- **Validation**: PRD files must have required sections (Summary, Problem Statement, Proposed Solution)
-
-#### references/
-**Purpose**: External reference materials (cloned projects, research notes)
-- **Structure per project**:
-  - `[project]/online_references.md` ← User research notes (**required**, git tracked)
-  - `[project]/[project]/` ← git clone shallow (optional, **NOT** git tracked)
-- **Setup**: Run `bash setup.sh` to clone external repositories
-- **Git tracked**: Only `online_references.md` files (cloned repos excluded via `.gitignore`)
-- **Validation**:
-  - `online_references.md` must have `# [Project] References` header
-  - If `[project]/` subfolder exists, `setup.sh` must have corresponding clone command
-
-#### .claude/
-**Purpose**: AI Agent Swarm System (agent definitions, commands, prompts)
-- **Structure**:
-  - `agents/`: Agent definition files (`.md` with YAML frontmatter)
-  - `commands/`: Slash command implementations
-  - `prompts/`: Reusable prompt templates
-- **Git tracked**: Yes
-- **Validation**: Agent files must have valid YAML frontmatter
-
-#### subagent_reports/
-**Purpose**: Temporary agent-to-agent communication (file-based reporting)
-- **Content**: Agent work reports (created during tasks, deleted after completion)
-- **Git tracked**: No (temporary workspace, excluded via `.gitignore`)
-- **Lifecycle**: Created by agents → Read by Main Thread → Deleted when task complete
-
-## Technology Stack (Planned)
-
-- **Desktop Framework**: Electron
-- **Canvas System**: Custom infinite canvas implementation
-- **Window Management**: Electron BaseWindow + WebContents
-- **Code Editor Integration**: Eclipse Theia (embeddable)
-- **AI Integration**: Multiple LLM providers
-- **Build System**: TBD (researching electron-vite, webpack)
-- **UI Framework**: TBD (researching Svelte, React)
-
-## Development Phases
-
-### Phase 0: Research (Current)
-- Architecture design
-- Technology evaluation
-- Reference material collection
-- AI agent system setup
-
-### Phase 1: Core Implementation (Planned)
-- Infinite Canvas system
-- Window management
-- Browser control layer
-
-### Phase 2: Tool Integration (Planned)
-- Theia code editor integration
-- Native tool development
-- AI agent integration
-
-### Phase 3: Advanced Features (Planned)
-- AI-generated web app hosting
-- Workflow automation
-- Advanced canvas features
-
-## AI Agent Swarm
-
-This project uses a sophisticated AI agent system for development:
-- **PM Agent**: Strategic planning and architecture decisions
-- **Framework Analyzers**: Theia and Electron expertise
-- **Coding Agents**: Implementation execution
-- **UX Simulator**: Flow validation and error detection
-
-See `AGENTS.md` and `AGENT_SWARM_FLOW.md` for details.
-
-## Getting Started
-
-### 1. Clone the Repository
+Run the bridge server:
 
 ```bash
-git clone https://github.com/QUUS-TheSmallCodeTeam/EG-Desk-Dev-Space.git
-cd EG-Desk-Dev-Space
+cd apps/firefox-ui-demo/helper
+npm install
+node codex-bridge-server.mjs
 ```
 
-### 2. Setup External References
-
-Run the setup script to download external reference code (Theia, Playwright, Puppeteer, etc.):
+or:
 
 ```bash
-# Linux/Mac
-./setup.sh
-
-# Windows
-setup.bat
+apps/firefox-ui-demo/scripts/run-codex-bridge.sh
 ```
 
-This will download ~186MB of external reference materials:
-- Theia framework (~54MB)
-- Playwright testing library (~100MB)
-- Puppeteer automation (~20MB)
-- Google Gemini CLI (~10MB)
-- Infinite Canvas library (~2MB)
+Install/sync the Firefox overlay:
 
-### 3. Explore the Codebase
+```bash
+cd apps/firefox-ui-demo/scripts
+./install.sh
+```
 
-**Note**: Implementation has not yet begun. This repository currently contains:
-- Architecture planning documents
-- Reference materials (external projects cloned via setup script)
-- AI agent system configuration
-- Research and analysis
+For the Rust PTY helper candidate:
 
-## Contributing
+```bash
+cd apps/firefox-ui-demo/helper-rust
+cargo build --release
+```
 
-This project is in early research phase. Contributions will be welcomed once implementation begins.
+## Legacy Electron/Vite POC
 
-## License
+The Electron app is still available for reference:
 
-TBD
+```bash
+npm install
+npm run dev
+npm run dev:full
+npm run build
+npm run typecheck
+```
 
-## Contact
+Treat `src/` as legacy unless a task explicitly targets Electron/Vite.
 
-Project maintained by Taehwa Team
+## Local Artifacts
 
----
+The repository has local-only material that should stay out of commits:
 
-**Repository Created**: 2024-10-24
-**Last Updated**: 2025-10-25
+- `references/`: local external library checkouts
+- `outputs/`: generated spreadsheets, screenshots, cleanup archives
+- `node_modules/`, nested `node_modules/`, Rust `target/`
+- browser profiles, MCP state, screenshots, `.bak.*` files
+
+Current cleanup archives are under:
+
+```text
+outputs/cleanup-20260518/
+```
+
+## Project Notes
+
+The old Electron-first README language is intentionally removed. The current working assumption is:
+
+```text
+apps/firefox-ui-demo/ = active implementation path
+src/                  = legacy Electron/Vite POC
+```
+
+Last updated: 2026-05-18
