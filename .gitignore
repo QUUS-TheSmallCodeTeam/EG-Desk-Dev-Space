@@ -1,10 +1,14 @@
 .DS_Store
 node_modules
+**/node_modules/
 build
 lib
 tmp
 .tmp
 *.log
+*.bak
+*.bak.*
+*.orig
 .idea
 .metadata
 *.iml
@@ -28,6 +32,7 @@ gh-pages
 .vscode/ipch
 dev-packages/electron/compile_commands.json
 *.tsbuildinfo
+**/target/
 .eslintcache
 out/
 dist/
@@ -54,6 +59,11 @@ playwright-user-data/
 # Screenshot files from automation scripts
 google-apps-script-api-enabled.png
 error-screenshot.png
+chat_*.png
+egdesk_*.png
+egdesk-*.png
+codex_login*.png
+settings_*.png
 
 # Education materials (local teaching content)
 edu/
@@ -61,10 +71,32 @@ edu/
 # Local MCP / automation artifacts
 /.mcp.json
 /.playwright-mcp/
+/.surfer/
 /dist-electron/
 /screenshots/
+/outputs/
 /hot-reload-result.txt
 /근태관리 instruction.md
 /paste.md
 /docs/design-review/
 /docs/egdesk-review-screenshot.jpeg
+
+# Root-level ad hoc automation probes
+/check-*.js
+/check_*.js
+/open_*.js
+/send-*.js
+/test-*.js
+/test_*.js
+/test_*.py
+/rdp_*.py
+/marionette_*.py
+/fix_*.py
+/patch_*.py
+/test_*.sh
+
+# Firefox UI demo local probes and build artifacts
+/apps/firefox-ui-demo/user.js
+/apps/firefox-ui-demo/**/*.bak
+/apps/firefox-ui-demo/**/*.bak.*
+/apps/firefox-ui-demo/helper-rust/target/
