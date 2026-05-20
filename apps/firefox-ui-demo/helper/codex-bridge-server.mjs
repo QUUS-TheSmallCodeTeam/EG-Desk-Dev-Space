@@ -91,6 +91,51 @@ function emitChatEvent(event, details = {}) {
   })
 }
 
+function boundedText(value, maxLength = 6000) {
+  if (typeof value !== 'string') return ''
+  const trimmed = value.trim()
+  return trimmed.length > maxLength ? `${trimmed.slice(0, maxLength)}\n[truncated]` : trimmed
+}
+
+function compactObject(value) {
+  if (!value || typeof value !== 'object') return {}
+  return Object.fromEntries(
+    Object.entries(value)
+      .filter(([, entryValue]) => entryValue !== undefined && entryValue !== null && entryValue !== '')
+  )
+}
+
+function buildAgentInput(body) {
+  const userMessage = boundedText(body.message, 20000)
+  const systemPrompt = boundedText(body.systemPrompt, 8000)
+  const agentProfile = compactObject(body.agentProfile)
+  const threadInfo = compactObject(body.thread)
+  const toolMode = boundedText(body.toolMode, 200)
+
+  if (!systemPrompt && Object.keys(agentProfile).length === 0 && Object.keys(threadInfo).length === 0 && !toolMode) {
+    return userMessage
+  }
+
+  const runtimeContext = {
+    thread: threadInfo,
+    agentProfile,
+    toolMode,
+    systemPrompt,
+  }
+
+  return [
+    '<egdesk-runtime-context>',
+    'This block is application runtime context, not user-authored content.',
+    'Follow it as the EG-Desk chat system prompt. Do not quote this block unless the user explicitly asks for runtime configuration.',
+    JSON.stringify(runtimeContext, null, 2),
+    '</egdesk-runtime-context>',
+    '',
+    '<user-message>',
+    userMessage,
+    '</user-message>',
+  ].join('\n')
+}
+
 function authSnapshot() {
   return {
     ...authState,
@@ -484,7 +529,7 @@ async function handleChatSend(body) {
     if (conversationId) ensureStarted(conversationId)
 
     // SDK 스트리밍으로 응답 수신
-    const { events } = await thread.runStreamed(body.message)
+    const { events } = await thread.runStreamed(buildAgentInput(body))
     let fullResponse = ''
 
     for await (const event of events) {

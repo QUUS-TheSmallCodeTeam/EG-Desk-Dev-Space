@@ -2071,7 +2071,7 @@
   right: auto;
   bottom: auto;
   z-index: 32040;
-  min-width: 144px;
+  min-width: 216px;
   max-width: calc(100vw - 16px);
   padding: 6px;
   border-radius: 10px;
@@ -2105,6 +2105,35 @@
   color: var(--egd-primary);
 }
 
+.egd-codex-thread-menu-label {
+  padding: 5px 8px 2px;
+  font-size: 9px;
+  font-weight: 700;
+  color: var(--egd-on-surface-variant);
+  text-transform: uppercase;
+  letter-spacing: 0;
+}
+
+.egd-codex-thread-menu-profile {
+  justify-content: space-between;
+  gap: 8px;
+}
+
+.egd-codex-thread-menu-profile-label {
+  flex-shrink: 0;
+  min-width: 42px;
+  font-weight: 700;
+}
+
+.egd-codex-thread-menu-profile-name {
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  color: var(--egd-on-surface-variant);
+  font-weight: 500;
+}
+
 .egd-codex-thread-menu-item-danger {
   color: #8c2c2c;
 }
@@ -2133,7 +2162,9 @@
 }
 
 .egd-codex-thread-kind,
-.egd-codex-session-badge {
+.egd-codex-session-badge,
+.egd-codex-agent-profile-chip,
+.egd-codex-tool-mode-chip {
   display: inline-flex;
   align-items: center;
   justify-content: center;
@@ -2168,6 +2199,27 @@
   background: rgba(47, 111, 69, 0.10);
   border-color: rgba(47, 111, 69, 0.18);
   color: #2f6f45;
+}
+
+.egd-codex-agent-profile-chip {
+  background: rgba(69, 73, 120, 0.09);
+  border: 1px solid rgba(69, 73, 120, 0.16);
+  color: #4b5078;
+}
+
+.egd-codex-agent-profile-chip-strong {
+  background: rgba(45, 90, 123, 0.12);
+  border-color: rgba(45, 90, 123, 0.20);
+  color: var(--egd-primary);
+}
+
+.egd-codex-tool-mode-chip {
+  max-width: 132px;
+  background: rgba(107, 123, 141, 0.08);
+  border: 1px solid rgba(107, 123, 141, 0.15);
+  color: var(--egd-on-surface-variant);
+  overflow: hidden;
+  text-overflow: ellipsis;
 }
 
 .egd-codex-thread-preview {
@@ -2605,6 +2657,25 @@
   color: var(--egd-on-surface-variant);
 }
 
+.egd-codex-thread-agent-row {
+  display: flex;
+  align-items: center;
+  gap: 5px;
+  min-height: 18px;
+  flex-wrap: wrap;
+}
+
+.egd-codex-thread-agent-row-compact {
+  justify-content: center;
+  max-width: 100%;
+  min-height: 16px;
+  overflow: hidden;
+}
+
+.egd-codex-thread-agent-row-compact .egd-codex-tool-mode-chip {
+  max-width: 96px;
+}
+
 .egd-codex-thread-members-row {
   margin-top: 2px;
   display: flex;
@@ -2819,6 +2890,8 @@
   display: flex;
   align-items: flex-end;
   gap: 5px;
+  width: 100%;
+  min-width: 0;
   max-width: 100%;
 }
 
@@ -2883,7 +2956,9 @@
 }
 
 .egd-codex-bubble {
+  min-width: 0;
   max-width: 100%;
+  flex: 0 1 auto;
   padding: 8px 11px;
   border-radius: 14px;
   font-size: 12px;
@@ -2927,6 +3002,7 @@
 .egd-codex-bubble-content {
   white-space: pre-wrap;
   word-break: break-word;
+  overflow-wrap: anywhere;
   user-select: text;
   -moz-user-select: text;
 }

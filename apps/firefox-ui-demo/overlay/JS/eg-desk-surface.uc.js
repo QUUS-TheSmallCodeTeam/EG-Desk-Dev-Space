@@ -88,9 +88,160 @@
       emptyPreview: '아직 Agenda 메시지가 없습니다',
     },
   };
+  const DEFAULT_CODEX_AGENT_PROFILE_ID = 'conversational-coding';
+  const CODEX_AGENT_PROFILE_DEFS = [
+    {
+      id: 'conversational-coding',
+      label: 'Chat',
+      name: 'Conversational Coding Agent',
+      category: 'conversation',
+      toolMode: 'basic-tools',
+      summary: '짧은 대화 응답과 필요 시 기본 tool call을 수행하는 기본 채팅 프로필',
+      capabilities: ['conversation', 'basic-tool-call', 'coding-context'],
+      systemPrompt: [
+        'You are EG-Desk\'s default conversational coding assistant.',
+        'Keep chat replies short and direct: use chat for conclusions, brief summaries, and result links.',
+        'When durable artifacts, reports, evidence, or long explanations are needed, prefer canvas cards or linked outputs instead of long chat bubbles.',
+        'Use project context and available tools when needed, verify claims before presenting them as facts, and ask clarifying questions only when blocked.',
+      ].join('\n'),
+    },
+    {
+      id: 'tool-operator',
+      label: 'Tool',
+      name: 'Basic Tool Operator',
+      category: 'tool',
+      toolMode: 'tool-call',
+      summary: '요청을 안전한 tool call 흐름으로 바꾸고 관찰 결과만 보고하는 프로필',
+      capabilities: ['tool-call', 'runtime-check', 'result-summary'],
+      systemPrompt: [
+        'You are EG-Desk\'s tool-operating assistant.',
+        'Convert the user request into the smallest safe set of concrete tool actions.',
+        'Report what was actually observed, separate failures from assumptions, and do not claim tool results without seeing them.',
+        'Keep the visible chat response compact and route bulky outputs to canvas artifacts when available.',
+      ].join('\n'),
+    },
+    {
+      id: 'coding-project-manager',
+      label: 'PM',
+      name: 'Coding Project Manager',
+      category: 'coding',
+      toolMode: 'project-management',
+      summary: 'high-level 목표를 유지하면서 coding sub-goal, verification, agent routing을 관리하는 프로필',
+      capabilities: ['agenda-routing', 'task-planning', 'verification-plan', 'agent-coordination'],
+      systemPrompt: [
+        'You are EG-Desk\'s coding project manager agent.',
+        'Preserve the high-level objective and agenda context while decomposing work into scoped coding tasks.',
+        'Decide whether work belongs in Agent DM, an Agenda Thread, a specialized agent, or a concrete implementation pass.',
+        'Track risks, verification requirements, and unresolved decisions; keep final chat output brief with links or canvas cards for detailed artifacts.',
+      ].join('\n'),
+    },
+    {
+      id: 'codebase-explorer',
+      label: 'Explore',
+      name: 'Codebase Explorer',
+      category: 'coding',
+      toolMode: 'read-only-code',
+      summary: '수정 전에 코드베이스를 읽고 runtime boundary와 file ownership을 파악하는 프로필',
+      capabilities: ['code-reading', 'file-reference', 'architecture-boundary'],
+      systemPrompt: [
+        'You are EG-Desk\'s codebase explorer.',
+        'Read existing source before proposing edits, identify ownership boundaries, and ground conclusions in file references or runtime evidence.',
+        'Avoid speculative architecture claims and avoid modifying files unless the user explicitly requests implementation.',
+        'Return concise findings that another coding agent can act on.',
+      ].join('\n'),
+    },
+    {
+      id: 'implementation-worker',
+      label: 'Build',
+      name: 'Implementation Worker',
+      category: 'coding',
+      toolMode: 'implementation',
+      summary: 'scope가 정해진 코드 수정, 테스트, 회귀 확인을 수행하는 프로필',
+      capabilities: ['code-edit', 'test-run', 'regression-check'],
+      systemPrompt: [
+        'You are EG-Desk\'s implementation worker.',
+        'Implement the scoped change using the existing codebase patterns and the smallest effective edit.',
+        'Do not revert unrelated user changes; adapt to the current worktree and verify behavior with targeted tests or runtime checks.',
+        'Report changed files, verification, and remaining risks succinctly.',
+      ].join('\n'),
+    },
+    {
+      id: 'review-verifier',
+      label: 'Verify',
+      name: 'Review and Verification Agent',
+      category: 'coding',
+      toolMode: 'verification',
+      summary: '버그, 회귀, 누락 테스트, UI runtime evidence를 우선 점검하는 프로필',
+      capabilities: ['code-review', 'runtime-verification', 'test-gap-analysis'],
+      systemPrompt: [
+        'You are EG-Desk\'s review and verification agent.',
+        'Lead with bugs, regressions, missing tests, and evidence; keep style commentary secondary unless it affects usability or correctness.',
+        'Use screenshots, logs, runtime checks, and file references for UI or behavior claims.',
+        'If no issues are found, say that clearly and name the remaining test gaps.',
+      ].join('\n'),
+    },
+  ];
+  const CODEX_AGENT_PROFILES = Object.fromEntries(CODEX_AGENT_PROFILE_DEFS.map((profile) => [profile.id, profile]));
+  const CODEX_AGENT_PROFILE_ORDER = CODEX_AGENT_PROFILE_DEFS.map((profile) => profile.id);
 
   function codexThreadKindMeta(type) {
     return type === 'group' ? THREAD_KIND_META.group : THREAD_KIND_META.dm;
+  }
+
+  function codexAgentProfile(profileId) {
+    return CODEX_AGENT_PROFILES[profileId] || CODEX_AGENT_PROFILES[DEFAULT_CODEX_AGENT_PROFILE_ID];
+  }
+
+  function normalizeCodexAgentProfileId(profileId, fallbackProfileId = DEFAULT_CODEX_AGENT_PROFILE_ID) {
+    if (typeof profileId === 'string' && CODEX_AGENT_PROFILES[profileId]) return profileId;
+    if (typeof fallbackProfileId === 'string' && CODEX_AGENT_PROFILES[fallbackProfileId]) return fallbackProfileId;
+    return DEFAULT_CODEX_AGENT_PROFILE_ID;
+  }
+
+  function defaultCodexAgentProfileIdForThread(type, title = '') {
+    const normalizedTitle = String(title || '').toLowerCase();
+    if (normalizedTitle.includes('review') || normalizedTitle.includes('verify') || normalizedTitle.includes('검증') || normalizedTitle.includes('리뷰')) {
+      return 'review-verifier';
+    }
+    if (normalizedTitle.includes('explore') || normalizedTitle.includes('research') || normalizedTitle.includes('조사')) {
+      return 'codebase-explorer';
+    }
+    if (normalizedTitle.includes('build') || normalizedTitle.includes('implement') || normalizedTitle.includes('구현')) {
+      return 'implementation-worker';
+    }
+    return type === 'group' ? 'coding-project-manager' : DEFAULT_CODEX_AGENT_PROFILE_ID;
+  }
+
+  function codexThreadAgentProfile(thread) {
+    return codexAgentProfile(thread?.agentProfileId || defaultCodexAgentProfileIdForThread(thread?.type, thread?.title));
+  }
+
+  function codexThreadToolMode(thread) {
+    return thread?.toolMode || codexThreadAgentProfile(thread).toolMode;
+  }
+
+  function codexThreadSystemPrompt(thread) {
+    const prompt = typeof thread?.systemPrompt === 'string' ? thread.systemPrompt.trim() : '';
+    return prompt || codexThreadAgentProfile(thread).systemPrompt;
+  }
+
+  function codexThreadRuntimeConfig(thread) {
+    const profile = codexThreadAgentProfile(thread);
+    return {
+      threadId: thread?.id || null,
+      threadType: thread?.type || 'dm',
+      threadTitle: thread?.title || '',
+      agentProfile: {
+        id: profile.id,
+        label: profile.label,
+        name: profile.name,
+        category: profile.category,
+        summary: profile.summary,
+        capabilities: profile.capabilities,
+      },
+      toolMode: codexThreadToolMode(thread),
+      systemPrompt: codexThreadSystemPrompt(thread),
+    };
   }
 
   function codexThreadKindLabel(type) {
@@ -122,12 +273,13 @@
     if (!thread) return '';
     const kind = codexThreadLongLabel(thread.type);
     const session = codexThreadSessionLabel(thread);
+    const profile = codexThreadAgentProfile(thread);
     if (thread.type === 'group') {
       const count = Math.max(0, (thread.participants || []).length);
-      return `${kind} · 멤버 ${count}명 · ${session}`;
+      return `${kind} · 멤버 ${count}명 · ${session} · ${profile.label}`;
     }
     const peer = (thread.participants || []).find((name) => name !== SELF_MEMBER) || 'Agent';
-    return `${kind} · ${peer} · ${session}`;
+    return `${kind} · ${peer} · ${session} · ${profile.label}`;
   }
 
   function createCodexThread(type, title, subtitle = '', options = {}) {
@@ -145,6 +297,11 @@
     if (type === 'group' && participants.includes('코덱스 어시스턴트') && participantRoles['코덱스 어시스턴트'] === 'member') {
       participantRoles['코덱스 어시스턴트'] = 'admin';
     }
+    const agentProfileId = normalizeCodexAgentProfileId(
+      options.agentProfileId,
+      defaultCodexAgentProfileIdForThread(type, title)
+    );
+    const agentProfile = codexAgentProfile(agentProfileId);
     const safeSubtitle = subtitle || buildThreadSubtitle(type, participants);
     return {
       id: `thread-${type}-${Math.random().toString(36).slice(2, 9)}`,
@@ -153,6 +310,9 @@
       subtitle: safeSubtitle,
       participants,
       participantRoles,
+      agentProfileId,
+      toolMode: options.toolMode || agentProfile.toolMode,
+      systemPrompt: options.systemPrompt || agentProfile.systemPrompt,
       pinned: Boolean(options.pinned),
       conversationId: null,
       messages: [],
@@ -170,6 +330,7 @@
           [SELF_MEMBER]: 'owner',
           '코덱스 어시스턴트': 'member',
         },
+        agentProfileId: 'conversational-coding',
         pinned: true,
       }),
       createCodexThread('group', 'EG-Desk Agenda', '', {
@@ -180,6 +341,7 @@
           미나: 'admin',
           디자이너: 'member',
         },
+        agentProfileId: 'coding-project-manager',
       }),
     ];
   }
@@ -324,12 +486,17 @@
     if (!query) return true;
     const q = query.trim().toLowerCase();
     if (!q) return true;
+    const profile = codexThreadAgentProfile(thread);
     return [
       thread.title,
       thread.subtitle,
       codexThreadKindLabel(thread.type),
       codexThreadLongLabel(thread.type),
       codexThreadSessionLabel(thread),
+      profile.label,
+      profile.name,
+      profile.summary,
+      codexThreadToolMode(thread),
       codexThreadPreview(thread),
       ...(thread.participants || []),
     ]
@@ -3095,6 +3262,45 @@
     return hud;
   }
 
+  function syncHudViewportFit() {
+    const hud = document.getElementById('egd-hud');
+    if (!hud) return;
+    const margin = 10;
+    hud.style.maxWidth = '';
+    hud.style.left = '';
+    hud.style.right = `${margin}px`;
+    if (hud.classList.contains('egd-hud-hidden')) return;
+
+    const clamp = () => {
+      const viewportW = window.innerWidth || document.documentElement.clientWidth || 0;
+      if (!viewportW) return;
+      const maxWidth = Math.max(240, viewportW - margin * 2);
+      hud.style.maxWidth = `${maxWidth}px`;
+      const rect = hud.getBoundingClientRect();
+      const computedLeft = Number.parseFloat(getComputedStyle(hud).left);
+      const visualOffset = Number.isFinite(computedLeft) ? rect.left - computedLeft : 0;
+      const width = Math.min(rect.width || 396, maxWidth);
+      let left = Math.max(margin, viewportW - width - margin - visualOffset);
+      hud.style.left = `${left}px`;
+      hud.style.right = 'auto';
+      const adjustedRect = hud.getBoundingClientRect();
+      const overflowRight = adjustedRect.right - viewportW + margin;
+      if (overflowRight > 0) {
+        left = Math.max(margin, left - overflowRight);
+        hud.style.left = `${left}px`;
+      }
+      const finalRect = hud.getBoundingClientRect();
+      const overflowLeft = margin - finalRect.left;
+      if (overflowLeft > 0) {
+        hud.style.left = `${left + overflowLeft}px`;
+      }
+    };
+
+    clamp();
+    window.requestAnimationFrame?.(clamp);
+    window.setTimeout(clamp, 240);
+  }
+
   function trimLinkMatch(rawUrl) {
     let url = rawUrl;
     let trailing = '';
@@ -3500,31 +3706,58 @@
       const typeScopedUnread = typeScopedThreads.filter((thread) => (thread.unreadCount || 0) > 0);
       const typeScopedPinned = typeScopedThreads.filter((thread) => thread.pinned);
 
-      const renderThreadMenu = (thread) => el('div', {
-        class: 'egd-codex-thread-menu',
-        style: {
-          left: `${Math.round(codex.threadMenu?.left ?? 12)}px`,
-          top: `${Math.round(codex.threadMenu?.top ?? 12)}px`,
-        },
-        onclick: (ev) => ev.stopPropagation(),
-      },
-      el('button', {
-        class: `egd-codex-thread-menu-item${thread.pinned ? ' egd-codex-thread-menu-item-active' : ''}`,
-        onclick: () => codexBridge.toggleThreadPin(thread.id),
-      }, thread.pinned ? '채팅방 고정 해제' : '채팅방 고정'),
-      el('button', {
-        class: 'egd-codex-thread-menu-item',
-        onclick: () => codexBridge.renameThread(thread.id),
-      }, '채팅방 이름 변경'),
-      el('button', {
-        class: 'egd-codex-thread-menu-item egd-codex-thread-menu-item-danger',
-        onclick: () => codexBridge.deleteThread(thread.id),
-      }, '채팅방 삭제'),
-      el('button', {
-        class: 'egd-codex-thread-menu-item',
-        onclick: () => codexBridge.closeThreadMenu(),
-      }, '닫기'),
-      );
+      const renderThreadMenu = (thread) => {
+        const activeProfile = codexThreadAgentProfile(thread);
+        const menuChildren = [
+          el('button', {
+            class: `egd-codex-thread-menu-item${thread.pinned ? ' egd-codex-thread-menu-item-active' : ''}`,
+            onclick: () => codexBridge.toggleThreadPin(thread.id),
+          }, thread.pinned ? '채팅방 고정 해제' : '채팅방 고정'),
+          el('button', {
+            class: 'egd-codex-thread-menu-item',
+            onclick: () => codexBridge.renameThread(thread.id),
+          }, '채팅방 이름 변경'),
+          el('div', { class: 'egd-codex-thread-menu-label' }, 'Agent profile'),
+          ...CODEX_AGENT_PROFILE_DEFS.map((profile) => el('button', {
+            class: `egd-codex-thread-menu-item egd-codex-thread-menu-profile${profile.id === activeProfile.id ? ' egd-codex-thread-menu-item-active' : ''}`,
+            title: profile.summary,
+            onclick: () => codexBridge.setThreadAgentProfile(thread.id, profile.id),
+          },
+          el('span', { class: 'egd-codex-thread-menu-profile-label' }, profile.label),
+          el('span', { class: 'egd-codex-thread-menu-profile-name' }, profile.name),
+          )),
+          el('button', {
+            class: 'egd-codex-thread-menu-item egd-codex-thread-menu-item-danger',
+            onclick: () => codexBridge.deleteThread(thread.id),
+          }, '채팅방 삭제'),
+          el('button', {
+            class: 'egd-codex-thread-menu-item',
+            onclick: () => codexBridge.closeThreadMenu(),
+          }, '닫기'),
+        ];
+        return el('div', {
+          class: 'egd-codex-thread-menu',
+          style: {
+            left: `${Math.round(codex.threadMenu?.left ?? 12)}px`,
+            top: `${Math.round(codex.threadMenu?.top ?? 12)}px`,
+          },
+          onclick: (ev) => ev.stopPropagation(),
+        }, ...menuChildren);
+      };
+
+      const renderThreadAgentRow = (thread, compact = false) => {
+        const runtime = codexThreadRuntimeConfig(thread);
+        return el('div', { class: `egd-codex-thread-agent-row${compact ? ' egd-codex-thread-agent-row-compact' : ''}` },
+          el('span', {
+            class: 'egd-codex-agent-profile-chip egd-codex-agent-profile-chip-strong',
+            title: runtime.agentProfile.name,
+          }, runtime.agentProfile.label),
+          el('span', {
+            class: 'egd-codex-tool-mode-chip',
+            title: runtime.agentProfile.summary,
+          }, runtime.toolMode),
+        );
+      };
 
       const renderThreadSection = (label, threads, options = {}) => {
         const excludedIds = options.excludeIds instanceof Set ? options.excludeIds : null;
@@ -3559,6 +3792,7 @@
           const lastTime = lastMsg && lastMsg.createdAt ? formatRelativeTime(lastMsg.createdAt) : '';
           const kindMeta = codexThreadKindMeta(thread.type);
           const sessionLabel = codexThreadSessionLabel(thread);
+          const profile = codexThreadAgentProfile(thread);
           const avatarInitial = (thread.title || '?')[0].toUpperCase();
           const avatarColors = ['#2D5A7B','#7B2D5A','#5A7B2D','#2D7B5A','#7B5A2D','#5A2D7B','#3D6B8B','#8B3D6B'];
           const avatarColor = avatarColors[Math.abs(thread.id.split('').reduce((a,c) => a + c.charCodeAt(0), 0)) % avatarColors.length];
@@ -3573,6 +3807,7 @@
                   el('div', { class: 'egd-codex-thread-meta-row' },
                     el('span', { class: `egd-codex-thread-kind egd-codex-thread-kind-${thread.type}` }, kindMeta.label),
                     el('span', { class: `egd-codex-session-badge egd-codex-session-badge-${sessionLabel.toLowerCase()}` }, sessionLabel),
+                    el('span', { class: 'egd-codex-agent-profile-chip', title: profile.name }, profile.label),
                   ),
                   el('div', { class: 'egd-codex-thread-item-bottom' },
                     el('div', { class: 'egd-codex-thread-preview' }, stripMarkdown(codexThreadPreview(thread))),
@@ -3654,6 +3889,7 @@
             el('div', { class: 'egd-codex-conversation-hud-center' },
               el('div', { class: 'egd-codex-conversation-hud-title' }, activeThread.title),
               el('div', { class: 'egd-codex-conversation-hud-sub' }, titleSubtitle),
+              renderThreadAgentRow(activeThread, true),
             ),
             el('button', {
               class: `egd-codex-conversation-menu-trigger${threadMenuOpen ? ' egd-codex-conversation-menu-trigger-active' : ''}`,
@@ -3738,6 +3974,7 @@
           conversation.appendChild(el('div', { class: 'egd-codex-thread-active-head' },
             el('div', { class: 'egd-codex-thread-active-title' }, activeThread.title),
             el('div', { class: 'egd-codex-thread-active-sub' }, codexThreadHeaderSubtitle(activeThread)),
+            renderThreadAgentRow(activeThread),
             memberRowWrap,
           ));
         }
@@ -3749,7 +3986,7 @@
             el('div', { class: 'egd-codex-empty-title' }, codex.authStatus.isLoggedIn ? '아직 메시지가 없습니다' : '로그인 후 대화할 수 있습니다'),
             el('div', { class: 'egd-codex-empty-sub' },
               codex.authStatus.isLoggedIn
-                ? `${activeKindLabel} · ${codexThreadSessionLabel(activeThread)}`
+                ? `${activeKindLabel} · ${codexThreadSessionLabel(activeThread)} · ${codexThreadAgentProfile(activeThread).name}`
                 : 'Codex 로그인이 필요합니다.',
             ),
           ];
@@ -4063,10 +4300,20 @@
             participantRoles[member] = member === SELF_MEMBER ? 'owner' : 'member';
           }
         }
+        const agentProfileId = normalizeCodexAgentProfileId(
+          thread.agentProfileId,
+          defaultCodexAgentProfileIdForThread(thread.type, thread.title)
+        );
+        const agentProfile = codexAgentProfile(agentProfileId);
         return {
           ...thread,
           participants,
           participantRoles,
+          agentProfileId,
+          toolMode: thread.toolMode || agentProfile.toolMode,
+          systemPrompt: typeof thread.systemPrompt === 'string' && thread.systemPrompt.trim()
+            ? thread.systemPrompt
+            : agentProfile.systemPrompt,
           pinned: Boolean(thread.pinned),
         };
       });
@@ -4522,6 +4769,35 @@
         state.codex.threadFilter = normalizeThreadFilter(filter);
         emit();
       },
+      agentProfiles() {
+        return CODEX_AGENT_PROFILE_DEFS.map((profile) => ({ ...profile }));
+      },
+      threadRuntimeConfig(threadId = state.codex.activeThreadId) {
+        const thread = getCodexThreadById(state.codex, threadId) || getActiveCodexThread(state.codex);
+        return codexThreadRuntimeConfig(thread);
+      },
+      setThreadAgentProfile(threadId, profileId) {
+        if (!threadId) return;
+        const normalizedProfileId = normalizeCodexAgentProfileId(profileId);
+        const profile = codexAgentProfile(normalizedProfileId);
+        updateThreadById(threadId, (thread) => ({
+          ...thread,
+          agentProfileId: normalizedProfileId,
+          toolMode: profile.toolMode,
+          systemPrompt: profile.systemPrompt,
+        }));
+        state.codex.threadMenu = null;
+        state.codex.memberMenu = null;
+        emit();
+      },
+      cycleThreadAgentProfile(threadId) {
+        const thread = getCodexThreadById(state.codex, threadId);
+        if (!thread) return;
+        const currentId = normalizeCodexAgentProfileId(thread.agentProfileId, defaultCodexAgentProfileIdForThread(thread.type, thread.title));
+        const currentIndex = CODEX_AGENT_PROFILE_ORDER.indexOf(currentId);
+        const nextId = CODEX_AGENT_PROFILE_ORDER[(currentIndex + 1) % CODEX_AGENT_PROFILE_ORDER.length] || DEFAULT_CODEX_AGENT_PROFILE_ID;
+        this.setThreadAgentProfile(threadId, nextId);
+      },
       setHudView(view) {
         state.codex.hudView = normalizeHudView(view);
         if (state.codex.hudView === 'list') {
@@ -4544,7 +4820,7 @@
         } else {
           const rect = anchorEl?.getBoundingClientRect?.();
           const placement = rect
-            ? resolveFloatingMenuPlacement(rect, 152, 146)
+            ? resolveFloatingMenuPlacement(rect, 230, 288)
             : { left: 12, top: 12 };
           state.codex.threadMenu = { threadId, ...placement };
         }
@@ -4670,7 +4946,10 @@
         const participants = normalizedType === 'group'
           ? [SELF_MEMBER, '코덱스 어시스턴트', `멤버 ${nextNonce}`]
           : [SELF_MEMBER, label];
-        const thread = createCodexThread(normalizedType, label, '', { participants });
+        const thread = createCodexThread(normalizedType, label, '', {
+          participants,
+          agentProfileId: options.agentProfileId,
+        });
         state.codex.threadNonce = nextNonce;
         state.codex.threads = [thread, ...state.codex.threads];
         state.codex.activeThreadId = thread.id;
@@ -4822,11 +5101,20 @@
         state.codex.draft = '';
         emit();
         try {
+          const runtimeConfig = codexThreadRuntimeConfig(activeThread);
           const result = await fetchJson('/chat/send', {
             method: 'POST',
             body: JSON.stringify({
               conversationId: activeThread.conversationId ?? undefined,
               message: content,
+              systemPrompt: runtimeConfig.systemPrompt,
+              agentProfile: runtimeConfig.agentProfile,
+              toolMode: runtimeConfig.toolMode,
+              thread: {
+                id: runtimeConfig.threadId,
+                type: runtimeConfig.threadType,
+                title: runtimeConfig.threadTitle,
+              },
             }),
           });
           if (result.conversationId) {
@@ -4872,6 +5160,7 @@
     hud.dataset.app = appId;
     hud.classList.remove('egd-hud-hidden');
     hud.querySelector('.egd-hud-title').textContent = appId === 'chat' ? '코덱스 채팅' : appLabel;
+    syncHudViewportFit();
     body.textContent = '';
     if (appId === 'chat' && state.codexBridge) {
       state.codexBridge.openHudHome?.();
@@ -7953,6 +8242,7 @@
       host.appendChild(buildPresetBag());
       host.appendChild(buildHUD());
       if (savedAgendaSnapshot) restoreAgendaSnapshot(savedAgendaSnapshot);
+      window.addEventListener('resize', syncHudViewportFit);
       installPopupCapture();
       console.warn(TAG, 'ready ✅');
     } catch (err) {
