@@ -696,15 +696,18 @@
 }
 
 .egd-window-control {
+  appearance: none;
+  -moz-appearance: none;
+  display: block;
   width: 12px;
   height: 12px;
   border-radius: 50%;
   box-shadow: inset 0 0 0 1px rgba(0, 0, 0, 0.12);
 }
 
-.egd-window-control-close { background: #FF6057; }
-.egd-window-control-minimize { background: #FFBD2E; }
-.egd-window-control-zoom { background: #27C93F; }
+.egd-edge button.egd-window-control-close { background: #FF6057; }
+.egd-edge button.egd-window-control-minimize { background: #FFBD2E; }
+.egd-edge button.egd-window-control-zoom { background: #27C93F; }
 
 .egd-window-control:hover {
   filter: brightness(0.96);

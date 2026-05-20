@@ -232,6 +232,7 @@ async function main() {
           windowControlsRect: rectOf(document.getElementById('egd-window-controls')),
           windowControlCount: document.querySelectorAll('#egd-window-controls .egd-window-control').length,
           windowControlTitles: windowControlButtons.map((node) => node.title),
+          windowControlColors: windowControlButtons.map((node) => getComputedStyle(node).backgroundColor),
           minimapOpen: !!document.getElementById('egd-desk-minimap'),
           minimapRows: document.querySelectorAll('#egd-desk-minimap .egd-minimap-row').length,
           hudHidden: !!document.getElementById('egd-hud')?.classList.contains('egd-hud-hidden'),
@@ -252,6 +253,7 @@ async function main() {
   if (check.railName !== 'EG-Desk Agenda') failures.push('rail label');
   if (check.windowControlCount !== 3) failures.push('window control count');
   if (!check.windowControlTitles.includes('창 닫기') || !check.windowControlTitles.includes('창 최소화') || !check.windowControlTitles.includes('창 전체화면 전환')) failures.push('window control titles');
+  if (!check.windowControlColors?.includes('rgb(255, 96, 87)') || !check.windowControlColors?.includes('rgb(255, 189, 46)') || !check.windowControlColors?.includes('rgb(39, 201, 63)')) failures.push('window control colors');
   if (!check.windowControlsRect || check.windowControlsRect.left >= check.railRect.left) failures.push('window controls placement');
   if (check.railCardBadge !== 'Terminal · Maximized' || check.railCardBadgeHidden) failures.push('maximized badge');
   if (check.helperStatusExists) failures.push('helper status hidden');
