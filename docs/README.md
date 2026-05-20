@@ -10,6 +10,7 @@ EG-DESK의 현재 구현 기준은 **Firefox shell**입니다.
 
 - 제품/기술 전략 기준: [`../ideas/confirmed/FIREFOX_SHELL_STRATEGY.md`](../ideas/confirmed/FIREFOX_SHELL_STRATEGY.md)
 - 개발 로드맵 기준: [`../ideas/confirmed/FIREFOX_SHELL_ROADMAP.md`](../ideas/confirmed/FIREFOX_SHELL_ROADMAP.md)
+- 제품 비전/개발 투두 living index: [`../ideas/confirmed/EGDESK_PRODUCT_VISION_AND_DEV_TODO.md`](../ideas/confirmed/EGDESK_PRODUCT_VISION_AND_DEV_TODO.md)
 - 현재 구현 위치: [`../apps/firefox-ui-demo/`](../apps/firefox-ui-demo/)
 - Desk/Agenda/Card 런타임 모델: [`../apps/firefox-ui-demo/docs/DESK_AGENDA_CARD_RUNTIME_MODEL.md`](../apps/firefox-ui-demo/docs/DESK_AGENDA_CARD_RUNTIME_MODEL.md)
 - Chat 디자인 문법: [`../apps/firefox-ui-demo/docs/CHAT_DESIGN_GRAMMAR_V1.md`](../apps/firefox-ui-demo/docs/CHAT_DESIGN_GRAMMAR_V1.md)
@@ -45,7 +46,7 @@ EG-DESK의 현재 구현 기준은 **Firefox shell**입니다.
 
 **"지금 무엇을 할 수 있나요?"** → Production 백서
 **"앞으로 어떻게 발전하나요?"** → Vision 백서
-**"지금 어디를 개발해야 하나요?"** → Firefox Shell Strategy / Roadmap
+**"지금 어디를 개발해야 하나요?"** → Product Vision and Development Todo / Firefox Shell Roadmap
 
 **투자 검토 중이신가요?**
 → Production 백서 (현재 역량) + Vision 백서 (성장 잠재력)
