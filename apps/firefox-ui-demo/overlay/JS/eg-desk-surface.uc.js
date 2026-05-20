@@ -5849,6 +5849,13 @@
       } catch {}
       return browserState.uri;
     };
+    const readRequestedBrowserUri = () => {
+      try {
+        const uri = xulBrowser?.getAttribute?.('src') || xulBrowser?.src;
+        if (uri) return normalizeBrowserUri(uri);
+      } catch {}
+      return '';
+    };
     const readBrowserTitle = () => {
       try {
         const title = xulBrowser?.contentTitle || xulBrowser?.contentDocument?.title;
@@ -5889,7 +5896,13 @@
     const syncBrowserStateFromBrowser = (options = {}) => {
       const previousUri = browserState.uri;
       const nextUri = normalizeBrowserUri(readBrowserUri());
-      if (nextUri) browserState.uri = nextUri;
+      const requestedUri = readRequestedBrowserUri();
+      const isTransientInitialBlank = nextUri === 'about:blank'
+        && previousUri
+        && previousUri !== 'about:blank'
+        && requestedUri
+        && requestedUri !== 'about:blank';
+      if (nextUri && !isTransientInitialBlank) browserState.uri = nextUri;
       browserState.security = browserSecurityLabel(browserState.uri);
       browserState.title = readBrowserTitle();
       try { browserState.canGoBack = !!(xulBrowser?.canGoBack ?? xulBrowser?.webNavigation?.canGoBack); } catch { browserState.canGoBack = false; }
@@ -6258,7 +6271,7 @@
     return card;
   }
   // ============ Terminal Canvas Card ============
-  const EGDESK_HELPER_PORT = 39300;
+  const EGDESK_HELPER_PORT = 39218;
   const TERMINAL_HTML_URL = 'chrome://userchrome/content/terminal.html';
 
   function spawnTerminalCard() {
