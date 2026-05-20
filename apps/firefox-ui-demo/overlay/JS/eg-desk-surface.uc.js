@@ -9,6 +9,7 @@
   'use strict';
   const TAG = '[eg-desk-surface]';
   const BROWSER_AGENT_ACTOR_NAME = 'EGDeskBrowserAgentRuntime';
+  const BROWSER_AGENT_HISTORY_LIMIT = 100;
   let browserAgentActorReady = false;
   console.warn(TAG, 'loaded, readyState =', document.readyState);
 
@@ -5713,9 +5714,11 @@
     const agentRefByNode = new WeakMap();
     const agentNodeByRef = new Map();
     let agentRefSeq = 0;
+    let agentActionSeq = 0;
     let agentBridgeInstalled = false;
     let agentBridgeSeq = 0;
     const agentBridgePending = new Map();
+    const agentActionHistory = [];
     const agentBridgeId = [
       card.id,
       Date.now().toString(36),
@@ -6167,6 +6170,72 @@
       const actor = browserAgentActor();
       if (!actor?.sendQuery) throw new Error('Browser agent JSActor unavailable');
       return actor.sendQuery(method, payload);
+    };
+    const cloneBrowserAgentPayload = (value) => {
+      if (value == null) return value;
+      try {
+        if (typeof structuredClone === 'function') return structuredClone(value);
+      } catch {}
+      try {
+        return JSON.parse(JSON.stringify(value));
+      } catch {
+        return value;
+      }
+    };
+    const browserAgentHistory = (options = {}) => {
+      const limit = Number.isFinite(options.limit) ? Math.max(0, options.limit) : agentActionHistory.length;
+      const entries = limit ? agentActionHistory.slice(-limit) : [];
+      return entries.map((entry) => cloneBrowserAgentPayload(entry));
+    };
+    const clearBrowserAgentHistory = () => {
+      const removed = agentActionHistory.length;
+      agentActionHistory.length = 0;
+      return { cardId: card.id, removed };
+    };
+    const recordBrowserAgentAction = (entry) => {
+      agentActionHistory.push(entry);
+      while (agentActionHistory.length > BROWSER_AGENT_HISTORY_LIMIT) agentActionHistory.shift();
+      const eventDetail = cloneBrowserAgentPayload(entry);
+      try {
+        card.dispatchEvent(new CustomEvent('egdesk:browser-agent-action', {
+          bubbles: false,
+          detail: eventDetail,
+        }));
+      } catch {}
+      try {
+        window.dispatchEvent(new CustomEvent('egdesk:browser-agent-action', {
+          detail: eventDetail,
+        }));
+      } catch {}
+      return entry;
+    };
+    const finalizeBrowserAgentAct = (payload, meta = {}) => {
+      const endedAtMs = Date.now();
+      const startedAtMs = Number.isFinite(meta.startedAtMs) ? meta.startedAtMs : endedAtMs;
+      const entry = {
+        id: `${card.id}-agent-action-${++agentActionSeq}`,
+        cardId: card.id,
+        sequence: agentActionSeq,
+        startedAt: new Date(startedAtMs).toISOString(),
+        endedAt: new Date(endedAtMs).toISOString(),
+        durationMs: Math.max(0, endedAtMs - startedAtMs),
+        source: meta.source || 'unknown',
+        url: payload?.after?.url || payload?.before?.url || browserState.uri,
+        title: payload?.after?.title || payload?.before?.title || readBrowserTitle(),
+        ok: !!payload?.ok,
+        action: cloneBrowserAgentPayload(payload?.action || meta.action || {}),
+        result: cloneBrowserAgentPayload(payload?.result ?? null),
+        error: payload?.error || null,
+        before: cloneBrowserAgentPayload(payload?.before || null),
+        after: cloneBrowserAgentPayload(payload?.after || null),
+        observation: cloneBrowserAgentPayload(payload?.observation || {}),
+      };
+      if (meta.record !== false) recordBrowserAgentAction(entry);
+      return {
+        ...payload,
+        actionEntry: cloneBrowserAgentPayload(entry),
+        actionHistoryLength: agentActionHistory.length,
+      };
     };
     const browserAgentSnapshot = async (snapshotOptions = {}) => {
       const doc = readBrowserDocument();
@@ -6621,28 +6690,41 @@
       throw new Error(`Unsupported browser agent action: ${type}`);
     };
     const browserAgentAct = async (action = {}, actOptions = {}) => {
+      const startedAtMs = Date.now();
       if (!readBrowserDocument()) {
         let actorError = '';
         try {
           const actorResult = await browserAgentActorRequest('act', { action, options: actOptions });
-          return {
+          return finalizeBrowserAgentAct({
             ...actorResult,
+            action: actorResult.action || action,
             before: { cardId: card.id, ...actorResult.before },
             after: { cardId: card.id, ...actorResult.after },
-          };
+          }, {
+            action,
+            source: 'jsactor',
+            startedAtMs,
+            record: actOptions.record,
+          });
         } catch (err) {
           actorError = `actor: ${err?.message || String(err)}`;
         }
         try {
           const bridged = await browserAgentBridgeRequest('act', { action, options: actOptions }, Math.max(10000, (actOptions.settleMs || 250) + 5000));
-          return {
+          return finalizeBrowserAgentAct({
             ...bridged,
+            action: bridged.action || action,
             before: { cardId: card.id, ...bridged.before },
             after: { cardId: card.id, ...bridged.after },
-          };
+          }, {
+            action,
+            source: 'frame-script',
+            startedAtMs,
+            record: actOptions.record,
+          });
         } catch (err) {
           const fallbackSnapshot = await browserAgentSnapshot(actOptions.snapshot || {});
-          return {
+          return finalizeBrowserAgentAct({
             ok: false,
             action,
             result: null,
@@ -6650,7 +6732,12 @@
             before: fallbackSnapshot,
             after: fallbackSnapshot,
             observation: diffBrowserAgentSnapshots(fallbackSnapshot, fallbackSnapshot),
-          };
+          }, {
+            action,
+            source: 'fallback',
+            startedAtMs,
+            record: actOptions.record,
+          });
         }
       }
       const before = await browserAgentSnapshot(actOptions.snapshot || {});
@@ -6667,7 +6754,7 @@
       const settleMs = Number.isFinite(actOptions.settleMs) ? actOptions.settleMs : 250;
       await new Promise((resolve) => window.setTimeout(resolve, Math.max(0, settleMs)));
       const after = await browserAgentSnapshot(actOptions.snapshot || {});
-      return {
+      return finalizeBrowserAgentAct({
         ok,
         action,
         result,
@@ -6675,7 +6762,12 @@
         before,
         after,
         observation: diffBrowserAgentSnapshots(before, after),
-      };
+      }, {
+        action,
+        source: 'chrome-document',
+        startedAtMs,
+        record: actOptions.record,
+      });
     };
     const syncBrowserChrome = () => {
       updateHistoryFlags();
@@ -6884,6 +6976,8 @@
       closeMenu: closeBrowserMenu,
       agentSnapshot: browserAgentSnapshot,
       agentAct: browserAgentAct,
+      agentHistory: browserAgentHistory,
+      agentClearHistory: clearBrowserAgentHistory,
       agentDebug: browserAgentDebug,
     };
     const onBrowserLoadStart = () => setBrowserLoading(true);
@@ -7800,11 +7894,15 @@
           copyUrl: (cardOrId) => browserCardControl(cardOrId, 'copyUrl'),
           agentSnapshot: (cardOrId, options = {}) => browserCardControl(cardOrId, 'agentSnapshot', options),
           agentAct: (cardOrId, action = {}, options = {}) => browserCardControl(cardOrId, 'agentAct', action, options),
+          agentHistory: (cardOrId, options = {}) => browserCardControl(cardOrId, 'agentHistory', options),
+          agentClearHistory: (cardOrId) => browserCardControl(cardOrId, 'agentClearHistory'),
           agentDebug: (cardOrId) => browserCardControl(cardOrId, 'agentDebug'),
         },
         browserAgent: {
           snapshot: (cardOrId, options = {}) => browserCardControl(cardOrId, 'agentSnapshot', options),
           act: (cardOrId, action = {}, options = {}) => browserCardControl(cardOrId, 'agentAct', action, options),
+          history: (cardOrId, options = {}) => browserCardControl(cardOrId, 'agentHistory', options),
+          clearHistory: (cardOrId) => browserCardControl(cardOrId, 'agentClearHistory'),
           debug: (cardOrId) => browserCardControl(cardOrId, 'agentDebug'),
         },
         sourceRefs: {

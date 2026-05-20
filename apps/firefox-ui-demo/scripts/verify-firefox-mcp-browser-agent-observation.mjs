@@ -236,6 +236,9 @@ async function main() {
       return wait(150).then(async () => {
         const api = window.__egdesk;
         const card = api.cardRuntime.openBrowserCard(${JSON.stringify(pageUrl)}, { openMode: 'new' });
+        const actionEvents = [];
+        const onAgentAction = (event) => actionEvents.push(event.detail);
+        window.addEventListener('egdesk:browser-agent-action', onAgentAction);
         let lastSnapshot = null;
         const before = await waitFor(async () => {
           const snapshot = await api.browserAgent.snapshot(card.id);
@@ -262,6 +265,23 @@ async function main() {
         const afterClick = clickResult.after;
         const continueButton = afterClick.interactiveElements.find((item) => item.label === 'Continue');
         const fillResult = await api.browserAgent.act(card.id, { type: 'fill', ref: input.ref, value: '한글 입력' }, { settleMs: 150 });
+        const history = api.browserAgent.history(card.id);
+        const limitedHistory = api.browserAgent.history(card.id, { limit: 1 });
+        const clearResult = api.browserAgent.clearHistory(card.id);
+        const historyAfterClear = api.browserAgent.history(card.id);
+        const summarizeEntry = (entry) => ({
+          id: entry?.id || '',
+          actionType: entry?.action?.type || entry?.action?.action || '',
+          ok: !!entry?.ok,
+          source: entry?.source || '',
+          titleChanged: !!entry?.observation?.titleChanged,
+          newVisibleText: entry?.observation?.newVisibleText || [],
+          focusedValue: entry?.observation?.focusedElement?.value || '',
+        });
+        const historySummary = history.map(summarizeEntry);
+        const limitedHistorySummary = limitedHistory.map(summarizeEntry);
+        const eventSummary = actionEvents.map(summarizeEntry);
+        window.removeEventListener('egdesk:browser-agent-action', onAgentAction);
 
         document.querySelectorAll('.egd-canvas-card').forEach((node) => {
           try { if (typeof node._cleanup === 'function') node._cleanup(); } catch {}
@@ -278,12 +298,21 @@ async function main() {
           revealRef: reveal.ref,
           inputRef: input?.ref || null,
           clickOk: clickResult.ok,
+          clickActionEntry: summarizeEntry(clickResult.actionEntry),
+          clickHistoryLength: clickResult.actionHistoryLength,
           clickResult: clickResult.result,
           clickObservation: clickResult.observation,
           continueRef: continueButton?.ref || null,
           fillOk: fillResult.ok,
+          fillActionEntry: summarizeEntry(fillResult.actionEntry),
+          fillHistoryLength: fillResult.actionHistoryLength,
           fillFocusedElement: fillResult.after.focusedElement,
           fillObservation: fillResult.observation,
+          historySummary,
+          limitedHistorySummary,
+          clearResult,
+          historyAfterClearLength: historyAfterClear.length,
+          eventSummary,
           cleanupCardCount: document.querySelectorAll('.egd-canvas-card').length,
         };
       });
@@ -301,6 +330,15 @@ async function main() {
   if (!check.continueRef) failures.push('continue element ref');
   if (!check.fillOk) failures.push('fill action');
   if (check.fillFocusedElement?.value !== '한글 입력') failures.push('hangul fill value');
+  if (check.clickHistoryLength !== 1 || check.fillHistoryLength !== 2) failures.push('act return history length');
+  if (!check.clickActionEntry?.id || !check.clickActionEntry?.titleChanged) failures.push('click action entry');
+  if (!check.fillActionEntry?.id || check.fillActionEntry?.focusedValue !== '한글 입력') failures.push('fill action entry');
+  if (!Array.isArray(check.historySummary) || check.historySummary.length !== 2) failures.push('history length');
+  if (check.historySummary?.[0]?.id !== check.clickActionEntry?.id || check.historySummary?.[1]?.id !== check.fillActionEntry?.id) failures.push('history order');
+  if (!Array.isArray(check.limitedHistorySummary) || check.limitedHistorySummary.length !== 1 || check.limitedHistorySummary[0]?.id !== check.fillActionEntry?.id) failures.push('limited history');
+  if (!Array.isArray(check.eventSummary) || check.eventSummary.length !== 2) failures.push('action event count');
+  if (check.eventSummary?.[0]?.id !== check.clickActionEntry?.id || check.eventSummary?.[1]?.id !== check.fillActionEntry?.id) failures.push('action event order');
+  if (check.clearResult?.removed !== 2 || check.historyAfterClearLength !== 0) failures.push('clear history');
   if (check.cleanupCardCount !== 0) failures.push('cleanup');
   if (failures.length) {
     throw new Error(`Browser agent observation verification failed (${failures.join(', ')}): ${JSON.stringify(check, null, 2)}`);
