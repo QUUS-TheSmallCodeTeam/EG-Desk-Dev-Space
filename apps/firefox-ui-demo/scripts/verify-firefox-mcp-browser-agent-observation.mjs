@@ -267,6 +267,8 @@ async function main() {
         const fillResult = await api.browserAgent.act(card.id, { type: 'fill', ref: input.ref, value: '한글 입력' }, { settleMs: 150 });
         const history = api.browserAgent.history(card.id);
         const limitedHistory = api.browserAgent.history(card.id, { limit: 1 });
+        const notifications = api.browserAgent.notifications(card.id);
+        const limitedNotifications = api.browserAgent.notifications(card.id, { limit: 1 });
         const clearResult = api.browserAgent.clearHistory(card.id);
         const historyAfterClear = api.browserAgent.history(card.id);
         const summarizeEntry = (entry) => ({
@@ -277,9 +279,22 @@ async function main() {
           titleChanged: !!entry?.observation?.titleChanged,
           newVisibleText: entry?.observation?.newVisibleText || [],
           focusedValue: entry?.observation?.focusedElement?.value || '',
+          notificationType: entry?.notification?.type || '',
+          notificationChanged: !!entry?.notification?.changed,
+          notificationSummary: entry?.notification?.summary || '',
+        });
+        const summarizeNotification = (notification) => ({
+          type: notification?.type || '',
+          actionType: notification?.actionType || '',
+          changed: !!notification?.changed,
+          summary: notification?.summary || '',
+          focusedValue: notification?.changes?.focusedElement?.value || '',
+          newText: notification?.changes?.newVisibleText || [],
         });
         const historySummary = history.map(summarizeEntry);
         const limitedHistorySummary = limitedHistory.map(summarizeEntry);
+        const notificationSummary = notifications.map(summarizeNotification);
+        const limitedNotificationSummary = limitedNotifications.map(summarizeNotification);
         const eventSummary = actionEvents.map(summarizeEntry);
         window.removeEventListener('egdesk:browser-agent-action', onAgentAction);
 
@@ -302,14 +317,18 @@ async function main() {
           clickHistoryLength: clickResult.actionHistoryLength,
           clickResult: clickResult.result,
           clickObservation: clickResult.observation,
+          clickNotification: clickResult.notification,
           continueRef: continueButton?.ref || null,
           fillOk: fillResult.ok,
           fillActionEntry: summarizeEntry(fillResult.actionEntry),
+          fillNotification: fillResult.notification,
           fillHistoryLength: fillResult.actionHistoryLength,
           fillFocusedElement: fillResult.after.focusedElement,
           fillObservation: fillResult.observation,
           historySummary,
           limitedHistorySummary,
+          notificationSummary,
+          limitedNotificationSummary,
           clearResult,
           historyAfterClearLength: historyAfterClear.length,
           eventSummary,
@@ -333,11 +352,21 @@ async function main() {
   if (check.clickHistoryLength !== 1 || check.fillHistoryLength !== 2) failures.push('act return history length');
   if (!check.clickActionEntry?.id || !check.clickActionEntry?.titleChanged) failures.push('click action entry');
   if (!check.fillActionEntry?.id || check.fillActionEntry?.focusedValue !== '한글 입력') failures.push('fill action entry');
+  if (check.clickNotification?.type !== 'browser-dom-change' || !check.clickNotification.changed) failures.push('click notification type');
+  if (!String(check.clickNotification?.summary || '').includes('Details ready for the agent')) failures.push('click notification summary');
+  if (check.fillNotification?.type !== 'browser-dom-change' || !check.fillNotification.changed) failures.push('fill notification type');
+  if (!String(check.fillNotification?.summary || '').includes('한글 입력')) failures.push('fill notification summary');
+  if (!check.fillNotification?.changes?.focusedElementChanged) failures.push('fill notification focus diff');
   if (!Array.isArray(check.historySummary) || check.historySummary.length !== 2) failures.push('history length');
   if (check.historySummary?.[0]?.id !== check.clickActionEntry?.id || check.historySummary?.[1]?.id !== check.fillActionEntry?.id) failures.push('history order');
+  if (!check.historySummary?.[0]?.notificationSummary?.includes('Details ready for the agent')) failures.push('history notification summary');
   if (!Array.isArray(check.limitedHistorySummary) || check.limitedHistorySummary.length !== 1 || check.limitedHistorySummary[0]?.id !== check.fillActionEntry?.id) failures.push('limited history');
+  if (!Array.isArray(check.notificationSummary) || check.notificationSummary.length !== 2) failures.push('notification history length');
+  if (!check.notificationSummary?.[0]?.summary?.includes('Details ready for the agent')) failures.push('notification history click summary');
+  if (!check.limitedNotificationSummary?.[0]?.summary?.includes('한글 입력')) failures.push('limited notification summary');
   if (!Array.isArray(check.eventSummary) || check.eventSummary.length !== 2) failures.push('action event count');
   if (check.eventSummary?.[0]?.id !== check.clickActionEntry?.id || check.eventSummary?.[1]?.id !== check.fillActionEntry?.id) failures.push('action event order');
+  if (!check.eventSummary?.[1]?.notificationSummary?.includes('한글 입력')) failures.push('event notification summary');
   if (check.clearResult?.removed !== 2 || check.historyAfterClearLength !== 0) failures.push('clear history');
   if (check.cleanupCardCount !== 0) failures.push('cleanup');
   if (failures.length) {

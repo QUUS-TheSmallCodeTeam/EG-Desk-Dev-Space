@@ -17,6 +17,7 @@ EG-DESK의 현재 구현 기준은 **Firefox shell**입니다.
 - AI 캔버스 주석 레이어: [`../apps/firefox-ui-demo/docs/AI_CANVAS_ANNOTATION_LAYER.md`](../apps/firefox-ui-demo/docs/AI_CANVAS_ANNOTATION_LAYER.md)
 - 캔버스 Run Playback 모델: [`../apps/firefox-ui-demo/docs/CANVAS_RUN_PLAYBACK_MODEL.md`](../apps/firefox-ui-demo/docs/CANVAS_RUN_PLAYBACK_MODEL.md)
 - Viewport 레이아웃/인터랙션 모델: [`../apps/firefox-ui-demo/docs/VIEWPORT_LAYOUT_INTERACTION_MODEL.md`](../apps/firefox-ui-demo/docs/VIEWPORT_LAYOUT_INTERACTION_MODEL.md)
+- Browser Agent 관찰 런타임: [`../apps/firefox-ui-demo/docs/BROWSER_AGENT_OBSERVATION_RUNTIME.md`](../apps/firefox-ui-demo/docs/BROWSER_AGENT_OBSERVATION_RUNTIME.md)
 
 백서는 비전과 대외 설명을 위한 문서입니다. 구현 경로가 Electron/Playwright 전제로 쓰인 오래된 문단은 Firefox shell 기준으로 읽어야 합니다.
 

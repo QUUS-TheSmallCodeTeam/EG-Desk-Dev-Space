@@ -33,6 +33,7 @@ Core principles:
 | Canvas run playback | `apps/firefox-ui-demo/docs/CANVAS_RUN_PLAYBACK_MODEL.md` |
 | AI canvas annotation | `apps/firefox-ui-demo/docs/AI_CANVAS_ANNOTATION_LAYER.md` |
 | Chat agent profiles | `ideas/confirmed/CHAT_AGENT_PROFILE_RUNTIME.md` |
+| Browser agent observation runtime | `apps/firefox-ui-demo/docs/BROWSER_AGENT_OBSERVATION_RUNTIME.md` |
 | Browser agent protocol | `ideas/confirmed/AGENT_BROWSER_PROTOCOL_INTEGRATION.md` |
 
 ## Decided Product Concepts
@@ -100,7 +101,7 @@ Viewport HUD should reflect the Agenda or maximized card currently in view. When
 - [x] Basic browser controls: navigate, back, forward, reload, stop, home, duplicate, copy URL.
 - [x] Browser agent snapshot/action APIs.
 - [x] Action history API and event emission.
-- [ ] DOM-change notification summaries after AI/browser actions.
+- [x] DOM-change notification summaries after AI/browser actions.
 - [ ] Browser control toolbar polish: predictable icons, disabled states, tooltips, focus behavior.
 - [ ] Browser card tab/focus behavior for duplicate source refs.
 - [ ] OAuth/window.open popup flow regression suite.

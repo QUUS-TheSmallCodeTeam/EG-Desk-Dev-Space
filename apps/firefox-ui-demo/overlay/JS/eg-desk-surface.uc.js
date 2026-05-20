@@ -6476,10 +6476,95 @@
       const entries = limit ? agentActionHistory.slice(-limit) : [];
       return entries.map((entry) => cloneBrowserAgentPayload(entry));
     };
+    const browserAgentNotifications = (options = {}) => {
+      return browserAgentHistory(options)
+        .map((entry) => entry?.notification)
+        .filter(Boolean);
+    };
     const clearBrowserAgentHistory = () => {
       const removed = agentActionHistory.length;
       agentActionHistory.length = 0;
       return { cardId: card.id, removed };
+    };
+    const browserAgentActionType = (action = {}) => String(action.type || action.action || 'snapshot');
+    const browserAgentElementText = (item) => {
+      if (!item) return '';
+      const role = item.role || item.tag || 'element';
+      const label = item.label ? ` "${compactAgentText(item.label, 72)}"` : '';
+      const value = item.value ? ` value "${compactAgentText(item.value, 72)}"` : '';
+      return `${role}${label}${value}`.trim();
+    };
+    const browserAgentListText = (items = [], itemText = (item) => item, limit = 3) => {
+      const values = (items || []).map(itemText).filter(Boolean).slice(0, limit);
+      if (!values.length) return '';
+      const remaining = Math.max(0, items.length - values.length);
+      return remaining ? `${values.join(', ')} +${remaining}` : values.join(', ');
+    };
+    const browserAgentObservationChanged = (observation = {}) => {
+      return !!(
+        observation.urlChanged
+        || observation.titleChanged
+        || observation.visibleTextChanged
+        || observation.interactiveChanged
+        || observation.focusedElementChanged
+        || (observation.newVisibleText || []).length
+        || (observation.removedVisibleText || []).length
+        || (observation.newInteractiveElements || []).length
+        || (observation.removedInteractiveElements || []).length
+      );
+    };
+    const browserAgentObservationSummary = (observation = {}) => {
+      const parts = [];
+      if (observation.urlChanged) parts.push(`URL changed to ${compactAgentText(observation.url || 'unknown', 120)}`);
+      if (observation.titleChanged) parts.push(`title changed to "${compactAgentText(observation.title || '', 120)}"`);
+      const newText = browserAgentListText(observation.newVisibleText || [], (item) => `"${compactAgentText(item, 90)}"`);
+      if (newText) parts.push(`new visible text: ${newText}`);
+      const removedText = browserAgentListText(observation.removedVisibleText || [], (item) => `"${compactAgentText(item, 90)}"`);
+      if (removedText) parts.push(`removed visible text: ${removedText}`);
+      const newControls = browserAgentListText(observation.newInteractiveElements || [], browserAgentElementText);
+      if (newControls) parts.push(`new controls: ${newControls}`);
+      const removedControls = browserAgentListText(observation.removedInteractiveElements || [], browserAgentElementText);
+      if (removedControls) parts.push(`removed controls: ${removedControls}`);
+      const focus = browserAgentElementText(observation.focusedElement);
+      if (focus && observation.focusedElementChanged) parts.push(`focus: ${focus}`);
+      if (!parts.length) return 'No meaningful DOM, text, control, or focus change detected.';
+      return compactAgentText(parts.join('; '), 520);
+    };
+    const browserAgentNotificationFor = (payload = {}, meta = {}) => {
+      const observation = payload?.observation || {};
+      const action = payload?.action || meta.action || {};
+      const after = payload?.after || {};
+      const before = payload?.before || {};
+      const focusedElementChanged = typeof observation.focusedElementChanged === 'boolean'
+        ? observation.focusedElementChanged
+        : agentElementSignature(before.focusedElement || {}) !== agentElementSignature(after.focusedElement || {});
+      const normalizedObservation = {
+        ...observation,
+        focusedElementChanged,
+      };
+      return {
+        type: 'browser-dom-change',
+        cardId: card.id,
+        actionType: browserAgentActionType(action),
+        source: meta.source || 'unknown',
+        ok: !!payload?.ok,
+        changed: browserAgentObservationChanged(normalizedObservation),
+        summary: browserAgentObservationSummary(normalizedObservation),
+        url: normalizedObservation.url || after.url || before.url || browserState.uri,
+        title: normalizedObservation.title || after.title || before.title || readBrowserTitle(),
+        changes: {
+          urlChanged: !!normalizedObservation.urlChanged,
+          titleChanged: !!normalizedObservation.titleChanged,
+          visibleTextChanged: !!normalizedObservation.visibleTextChanged,
+          interactiveChanged: !!normalizedObservation.interactiveChanged,
+          focusedElementChanged: !!normalizedObservation.focusedElementChanged,
+          newVisibleText: cloneBrowserAgentPayload((normalizedObservation.newVisibleText || []).slice(0, 8)),
+          removedVisibleText: cloneBrowserAgentPayload((normalizedObservation.removedVisibleText || []).slice(0, 8)),
+          newInteractiveElements: cloneBrowserAgentPayload((normalizedObservation.newInteractiveElements || []).slice(0, 8)),
+          removedInteractiveElements: cloneBrowserAgentPayload((normalizedObservation.removedInteractiveElements || []).slice(0, 8)),
+          focusedElement: cloneBrowserAgentPayload(normalizedObservation.focusedElement || null),
+        },
+      };
     };
     const recordBrowserAgentAction = (entry) => {
       agentActionHistory.push(entry);
@@ -6501,6 +6586,7 @@
     const finalizeBrowserAgentAct = (payload, meta = {}) => {
       const endedAtMs = Date.now();
       const startedAtMs = Number.isFinite(meta.startedAtMs) ? meta.startedAtMs : endedAtMs;
+      const notification = browserAgentNotificationFor(payload, meta);
       const entry = {
         id: `${card.id}-agent-action-${++agentActionSeq}`,
         cardId: card.id,
@@ -6518,10 +6604,12 @@
         before: cloneBrowserAgentPayload(payload?.before || null),
         after: cloneBrowserAgentPayload(payload?.after || null),
         observation: cloneBrowserAgentPayload(payload?.observation || {}),
+        notification: cloneBrowserAgentPayload(notification),
       };
       if (meta.record !== false) recordBrowserAgentAction(entry);
       return {
         ...payload,
+        notification: cloneBrowserAgentPayload(notification),
         actionEntry: cloneBrowserAgentPayload(entry),
         actionHistoryLength: agentActionHistory.length,
       };
@@ -6728,6 +6816,7 @@
             title: after?.title || '',
             newVisibleText,
             removedVisibleText,
+            focusedElementChanged: signature(before?.focusedElement || {}) !== signature(after?.focusedElement || {}),
             focusedElement: after?.focusedElement || null,
             newInteractiveElements,
             removedInteractiveElements,
@@ -6911,6 +7000,7 @@
         title: after?.title || '',
         newVisibleText,
         removedVisibleText,
+        focusedElementChanged: agentElementSignature(before?.focusedElement || {}) !== agentElementSignature(after?.focusedElement || {}),
         focusedElement: after?.focusedElement || null,
         newInteractiveElements,
         removedInteractiveElements,
@@ -7266,6 +7356,7 @@
       agentSnapshot: browserAgentSnapshot,
       agentAct: browserAgentAct,
       agentHistory: browserAgentHistory,
+      agentNotifications: browserAgentNotifications,
       agentClearHistory: clearBrowserAgentHistory,
       agentDebug: browserAgentDebug,
     };
@@ -8184,6 +8275,7 @@
           agentSnapshot: (cardOrId, options = {}) => browserCardControl(cardOrId, 'agentSnapshot', options),
           agentAct: (cardOrId, action = {}, options = {}) => browserCardControl(cardOrId, 'agentAct', action, options),
           agentHistory: (cardOrId, options = {}) => browserCardControl(cardOrId, 'agentHistory', options),
+          agentNotifications: (cardOrId, options = {}) => browserCardControl(cardOrId, 'agentNotifications', options),
           agentClearHistory: (cardOrId) => browserCardControl(cardOrId, 'agentClearHistory'),
           agentDebug: (cardOrId) => browserCardControl(cardOrId, 'agentDebug'),
         },
@@ -8191,6 +8283,7 @@
           snapshot: (cardOrId, options = {}) => browserCardControl(cardOrId, 'agentSnapshot', options),
           act: (cardOrId, action = {}, options = {}) => browserCardControl(cardOrId, 'agentAct', action, options),
           history: (cardOrId, options = {}) => browserCardControl(cardOrId, 'agentHistory', options),
+          notifications: (cardOrId, options = {}) => browserCardControl(cardOrId, 'agentNotifications', options),
           clearHistory: (cardOrId) => browserCardControl(cardOrId, 'agentClearHistory'),
           debug: (cardOrId) => browserCardControl(cardOrId, 'agentDebug'),
         },
