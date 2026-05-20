@@ -34,6 +34,7 @@ Core principles:
 | AI canvas annotation | `apps/firefox-ui-demo/docs/AI_CANVAS_ANNOTATION_LAYER.md` |
 | Chat agent profiles | `ideas/confirmed/CHAT_AGENT_PROFILE_RUNTIME.md` |
 | Browser agent observation runtime | `apps/firefox-ui-demo/docs/BROWSER_AGENT_OBSERVATION_RUNTIME.md` |
+| Human-in-the-loop workflow await | `apps/firefox-ui-demo/docs/HUMAN_IN_LOOP_WORKFLOW_AWAIT_MODEL.md` |
 | Browser agent protocol | `ideas/confirmed/AGENT_BROWSER_PROTOCOL_INTEGRATION.md` |
 
 ## Decided Product Concepts
@@ -76,6 +77,10 @@ The current Codex SDK path has no dedicated system-prompt field, so EG-Desk send
 
 Browser cards should expose AI-observable state and action history. After an AI action, DOM/title/focus changes should be summarized back to the agent instead of forcing the model to rediscover the page from scratch every time.
 
+### Human-in-the-Loop Await
+
+AI workflows should support explicit waits for user action. OAuth/login handoffs, terminal-opened browser flows, file waits, and cross-app sync should become Await Tokens that can pause a workflow, watch the relevant browser/terminal/auth/file events, and resume automatically with an observation summary. Manual "continue" remains a fallback, not the default path.
+
 ### Viewport/HUD/Minimap
 
 Viewport HUD should reflect the Agenda or maximized card currently in view. When a card is maximized, HUD should hide and return only on specific user actions. The minimap is desk-level navigation: its viewport box must be draggable like RTS minimaps, and its world bounds should adapt to the sparsity of cards/agendas.
@@ -95,6 +100,7 @@ Viewport HUD should reflect the Agenda or maximized card currently in view. When
 - [ ] Add Agenda Thread routing affordance from Agent DM: move to thread, tag user in thread, or return to DM.
 - [ ] Add result-card creation from chat summary/result chips.
 - [ ] Add run playback card for long AI answers and step-by-step review/divert flow.
+- [ ] Add Await Token registry for user-action waits and auto-resume.
 
 ### P1 - Browser Control
 
@@ -105,6 +111,7 @@ Viewport HUD should reflect the Agenda or maximized card currently in view. When
 - [ ] Browser control toolbar polish: predictable icons, disabled states, tooltips, focus behavior.
 - [ ] Browser card tab/focus behavior for duplicate source refs.
 - [ ] OAuth/window.open popup flow regression suite.
+- [ ] Detect OAuth/browser completion events for Await Token satisfaction.
 
 ### P1 - Canvas and Viewport
 
@@ -132,6 +139,7 @@ Viewport HUD should reflect the Agenda or maximized card currently in view. When
 - [ ] Portable EGDesk packaging path.
 - [ ] Rust helper consolidation for terminal/PTY/native functions.
 - [ ] Bridge restart/reconnect UX without noisy user-facing diagnostics.
+- [ ] Terminal/browser/auth/file watcher bus for cross-app workflow sync.
 - [ ] Local persistence schema decision: SQLite-first with possible PocketBase/Convex sync bridge later.
 
 ## Documentation Rule

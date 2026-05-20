@@ -18,6 +18,7 @@ EG-DESK의 현재 구현 기준은 **Firefox shell**입니다.
 - 캔버스 Run Playback 모델: [`../apps/firefox-ui-demo/docs/CANVAS_RUN_PLAYBACK_MODEL.md`](../apps/firefox-ui-demo/docs/CANVAS_RUN_PLAYBACK_MODEL.md)
 - Viewport 레이아웃/인터랙션 모델: [`../apps/firefox-ui-demo/docs/VIEWPORT_LAYOUT_INTERACTION_MODEL.md`](../apps/firefox-ui-demo/docs/VIEWPORT_LAYOUT_INTERACTION_MODEL.md)
 - Browser Agent 관찰 런타임: [`../apps/firefox-ui-demo/docs/BROWSER_AGENT_OBSERVATION_RUNTIME.md`](../apps/firefox-ui-demo/docs/BROWSER_AGENT_OBSERVATION_RUNTIME.md)
+- Human-in-the-loop await 모델: [`../apps/firefox-ui-demo/docs/HUMAN_IN_LOOP_WORKFLOW_AWAIT_MODEL.md`](../apps/firefox-ui-demo/docs/HUMAN_IN_LOOP_WORKFLOW_AWAIT_MODEL.md)
 
 백서는 비전과 대외 설명을 위한 문서입니다. 구현 경로가 Electron/Playwright 전제로 쓰인 오래된 문단은 Firefox shell 기준으로 읽어야 합니다.
 
