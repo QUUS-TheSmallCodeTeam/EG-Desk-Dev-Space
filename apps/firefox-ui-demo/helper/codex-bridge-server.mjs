@@ -1,6 +1,8 @@
 import { createServer } from 'node:http'
 import { spawn } from 'node:child_process'
 import { Codex } from '@openai/codex-sdk'
+import { randomBytes } from 'node:crypto'
+import * as os from 'node:os'
 
 const BRIDGE_PORT = 39218
 const APP_SERVER_PORT = 39219
@@ -623,6 +625,118 @@ function sendJson(res, statusCode, data) {
   res.end(body)
 }
 
+
+// ── Terminal PTY support ──
+const terminalSessions = new Map()
+
+async function createTerminalSession(cols = 80, rows = 24, shell = null) {
+  const sessionId = `term-${randomBytes(6).toString('hex')}`
+  const defaultShell = shell || process.env.SHELL || (os.platform() === 'darwin' ? '/bin/zsh' : '/bin/bash')
+
+  let ptyProcess = null
+  let usePty = false
+
+  try {
+    const nodePty = await import('node-pty')
+    ptyProcess = nodePty.default.spawn(defaultShell, [], {
+      name: 'xterm-256color',
+      cols,
+      rows,
+      cwd: os.homedir(),
+      env: {
+        ...process.env,
+        TERM: 'xterm-256color',
+        COLORTERM: 'truecolor',
+      },
+    })
+    usePty = true
+  } catch (e) {
+    // Fallback: use child_process
+    console.warn('[terminal] node-pty not available, using child_process fallback')
+    ptyProcess = spawn(defaultShell, [], {
+      cwd: os.homedir(),
+      env: {
+        ...process.env,
+        TERM: 'dumb',
+        COLUMNS: String(cols),
+        LINES: String(rows),
+        ZDOTDIR: '/tmp/egdesk-zsh',
+        PS1: '\\n$ ',
+        PROMPT: '\\n$ ',
+      },
+      stdio: ['pipe', 'pipe', 'pipe'],
+      shell: false,
+    })
+  }
+
+  const outputBuffer = []
+  let exited = false
+  let exitCode = null
+
+  if (usePty) {
+    ptyProcess.onData((data) => { outputBuffer.push(data) })
+    ptyProcess.onExit(({ exitCode: code }) => { exited = true; exitCode = code })
+  } else {
+    ptyProcess.stdout.on('data', (data) => { outputBuffer.push(data.toString()) })
+    ptyProcess.stderr.on('data', (data) => { outputBuffer.push(data.toString()) })
+    ptyProcess.on('exit', (code) => { exited = true; exitCode = code })
+    ptyProcess.on('error', (err) => { outputBuffer.push(`\r\nError: ${err.message}\r\n`); exited = true })
+  }
+
+  const session = {
+    id: sessionId,
+    process: ptyProcess,
+    usePty,
+    outputBuffer,
+    exited: () => exited,
+    exitCode: () => exitCode,
+    shell: defaultShell,
+    cols,
+    rows,
+    createdAt: Date.now(),
+  }
+  terminalSessions.set(sessionId, session)
+  return session
+}
+
+function writeToTerminal(sessionId, data) {
+  const session = terminalSessions.get(sessionId)
+  if (!session) return { error: 'Session not found' }
+  if (session.exited()) return { error: 'Session has exited' }
+  const proc = session.process
+  if (session.usePty) { proc.write(data) }
+  else if (proc.stdin) { proc.stdin.write(data) }
+  return { ok: true }
+}
+
+function readFromTerminal(sessionId) {
+  const session = terminalSessions.get(sessionId)
+  if (!session) return { error: 'Session not found', data: '', exited: true }
+  const data = session.outputBuffer.splice(0).join('')
+  return { data, exited: session.exited(), exitCode: session.exitCode() }
+}
+
+function resizeTerminal(sessionId, cols, rows) {
+  const session = terminalSessions.get(sessionId)
+  if (!session) return { error: 'Session not found' }
+  if (session.exited()) return { error: 'Session has exited' }
+  session.cols = cols
+  session.rows = rows
+  if (session.usePty && session.process.resize) { session.process.resize(cols, rows) }
+  return { ok: true }
+}
+
+function killTerminal(sessionId) {
+  const session = terminalSessions.get(sessionId)
+  if (!session) return { error: 'Session not found' }
+  try {
+    if (session.process.kill) session.process.kill()
+    else if (session.process.destroy) session.process.destroy()
+  } catch (e) { /* ignore */ }
+  terminalSessions.delete(sessionId)
+  return { ok: true }
+}
+
 const bridgeServer = createServer(async (req, res) => {
   if (!req.url) {
     sendJson(res, 404, { error: 'Not found' })
@@ -757,6 +871,57 @@ const bridgeServer = createServer(async (req, res) => {
     return
   }
 
+  // ── Terminal endpoints ──
+  if (req.method === 'POST' && req.url === '/terminal/spawn') {
+    try {
+      const body = await readJsonBody(req)
+      const session = await createTerminalSession(body.cols, body.rows, body.shell)
+      sendJson(res, 200, { sessionId: session.id, shell: session.shell, cols: session.cols, rows: session.rows })
+    } catch (error) {
+      sendJson(res, 500, { error: error instanceof Error ? error.message : String(error) })
+    }
+    return
+  }
+  if (req.method === 'POST' && req.url === '/terminal/write') {
+    try {
+      const body = await readJsonBody(req)
+      const result = writeToTerminal(body.sessionId, body.data)
+      sendJson(res, result.error ? 400 : 200, result)
+    } catch (error) {
+      sendJson(res, 500, { error: error instanceof Error ? error.message : String(error) })
+    }
+    return
+  }
+  if (req.method === 'POST' && req.url === '/terminal/read') {
+    try {
+      const body = await readJsonBody(req)
+      const result = readFromTerminal(body.sessionId)
+      sendJson(res, result.error ? 400 : 200, result)
+    } catch (error) {
+      sendJson(res, 500, { error: error instanceof Error ? error.message : String(error) })
+    }
+    return
+  }
+  if (req.method === 'POST' && req.url === '/terminal/resize') {
+    try {
+      const body = await readJsonBody(req)
+      const result = resizeTerminal(body.sessionId, body.cols, body.rows)
+      sendJson(res, result.error ? 400 : 200, result)
+    } catch (error) {
+      sendJson(res, 500, { error: error instanceof Error ? error.message : String(error) })
+    }
+    return
+  }
+  if (req.method === 'POST' && req.url === '/terminal/kill') {
+    try {
+      const body = await readJsonBody(req)
+      const result = killTerminal(body.sessionId)
+      sendJson(res, 200, result)
+    } catch (error) {
+      sendJson(res, 500, { error: error instanceof Error ? error.message : String(error) })
+    }
+    return
+  }
   sendJson(res, 404, { error: 'Not found' })
 })
 
@@ -776,4 +941,9 @@ process.on('SIGTERM', () => process.exit(0))
 process.on('exit', () => {
   try { appServerSocket?.close(); } catch {}
   try { appServerProcess?.kill(); } catch {}
+  // Cleanup terminal sessions
+  for (const [id, session] of terminalSessions) {
+    try { if (session.process.kill) session.process.kill() } catch {}
+  }
+  terminalSessions.clear()
 })

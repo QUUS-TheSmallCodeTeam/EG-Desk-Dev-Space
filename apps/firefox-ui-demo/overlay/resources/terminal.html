@@ -1,0 +1,243 @@
+<!DOCTYPE html>
+<html>
+<head>
+  <meta charset="utf-8">
+  <title>EG-Desk Terminal</title>
+  <link rel="stylesheet" href="chrome://userchrome/content/vendor/xterm.min.css">
+  <style>
+    * { margin: 0; padding: 0; box-sizing: border-box; }
+    html, body {
+      width: 100%; height: 100%;
+      background: #1a1a2e;
+      overflow: hidden;
+    }
+    #terminal-container {
+      width: 100%; height: 100%;
+      padding: 4px;
+    }
+    #terminal-container .xterm {
+      height: 100%;
+    }
+    /* Status overlay */
+    #status-overlay {
+      position: absolute;
+      top: 50%; left: 50%;
+      transform: translate(-50%, -50%);
+      color: #888;
+      font-family: monospace;
+      font-size: 13px;
+      text-align: center;
+      pointer-events: none;
+      z-index: 10;
+    }
+    #status-overlay.hidden { display: none; }
+  </style>
+</head>
+<body>
+  <div id="status-overlay">Connecting...</div>
+  <div id="terminal-container"></div>
+
+  <script src="chrome://userchrome/content/vendor/xterm.min.js"></script>
+  <script src="chrome://userchrome/content/vendor/addon-fit.min.js"></script>
+  <script src="chrome://userchrome/content/vendor/addon-web-links.min.js"></script>
+  <script>
+  'use strict';
+  (() => {
+    const HELPER_PORT = 39300;
+    const statusEl = document.getElementById('status-overlay');
+    const containerEl = document.getElementById('terminal-container');
+
+    // ---- xterm.js setup ----
+    const term = new Terminal({
+      cursorBlink: true,
+      cursorStyle: 'bar',
+      fontSize: 13,
+      fontFamily: '"JetBrains Mono", "Fira Code", "SF Mono", Menlo, Monaco, "Courier New", monospace',
+      theme: {
+        background: '#1a1a2e',
+        foreground: '#e0e0e0',
+        cursor: '#f8f8f2',
+        selectionBackground: 'rgba(248,248,242,0.2)',
+        black: '#21222c',
+        red: '#ff5555',
+        green: '#50fa7b',
+        yellow: '#f1fa8c',
+        blue: '#bd93f9',
+        magenta: '#ff79c6',
+        cyan: '#8be9fd',
+        white: '#f8f8f2',
+        brightBlack: '#6272a4',
+        brightRed: '#ff6e6e',
+        brightGreen: '#69ff94',
+        brightYellow: '#ffffa5',
+        brightBlue: '#d6acff',
+        brightMagenta: '#ff92df',
+        brightCyan: '#a4ffff',
+        brightWhite: '#ffffff',
+      },
+      allowProposedApi: true,
+      scrollback: 5000,
+    });
+
+    const fitAddon = new FitAddon.FitAddon();
+    term.loadAddon(fitAddon);
+
+    if (typeof WebLinksAddon !== 'undefined') {
+      term.loadAddon(new WebLinksAddon.WebLinksAddon());
+    }
+
+    term.open(containerEl);
+
+    // Initial fit
+    requestAnimationFrame(() => {
+      fitAddon.fit();
+      connectWebSocket();
+    });
+
+    // ---- WebSocket + JSON-RPC ----
+    let ws = null;
+    let ptyId = null;
+    let rpcId = 0;
+    const pendingRpc = new Map(); // id → { resolve, reject }
+
+    function sendRpc(method, params) {
+      return new Promise((resolve, reject) => {
+        if (!ws || ws.readyState !== WebSocket.OPEN) {
+          reject(new Error('WebSocket not connected'));
+          return;
+        }
+        const id = ++rpcId;
+        pendingRpc.set(id, { resolve, reject });
+        ws.send(JSON.stringify({ jsonrpc: '2.0', id, method, params }));
+      });
+    }
+
+    function connectWebSocket() {
+      statusEl.textContent = 'Connecting...';
+      statusEl.classList.remove('hidden');
+
+      ws = new WebSocket(`ws://127.0.0.1:${HELPER_PORT}`);
+
+      ws.onopen = async () => {
+        statusEl.classList.add('hidden');
+        try {
+          const cols = term.cols;
+          const rows = term.rows;
+          const result = await sendRpc('pty.spawn', {
+            shell: '/bin/zsh',
+            cols,
+            rows,
+          });
+          ptyId = result.ptyId;
+          // Notify parent chrome context
+          try {
+            window.parent.postMessage({ type: 'terminal-ready', ptyId }, '*');
+          } catch (e) {}
+          // Also expose on window for direct access
+          window.terminalAPI = {
+            ptyId,
+            write: (data) => {
+              if (ptyId && ws && ws.readyState === WebSocket.OPEN) {
+                sendRpc('pty.write', { ptyId, data }).catch(() => {});
+              }
+            },
+            kill: () => {
+              if (ptyId && ws && ws.readyState === WebSocket.OPEN) {
+                sendRpc('pty.kill', { ptyId }).catch(() => {});
+              }
+            },
+            resize: (cols, rows) => {
+              if (ptyId && ws && ws.readyState === WebSocket.OPEN) {
+                sendRpc('pty.resize', { ptyId, cols, rows }).catch(() => {});
+              }
+            },
+          };
+        } catch (e) {
+          term.write(`\r\n\x1b[31mFailed to spawn PTY: ${e.message}\x1b[0m\r\n`);
+        }
+      };
+
+      ws.onmessage = (event) => {
+        let msg;
+        try { msg = JSON.parse(event.data); } catch { return; }
+
+        // JSON-RPC response
+        if (msg.id != null && pendingRpc.has(msg.id)) {
+          const { resolve, reject } = pendingRpc.get(msg.id);
+          pendingRpc.delete(msg.id);
+          if (msg.error) {
+            reject(new Error(msg.error.message || 'RPC error'));
+          } else {
+            resolve(msg.result);
+          }
+          return;
+        }
+
+        // JSON-RPC notification (event)
+        if (msg.method === 'pty.output' && msg.params) {
+          term.write(msg.params.data);
+        } else if (msg.method === 'pty.exit' && msg.params) {
+          term.write(`\r\n\x1b[90m[Process exited with code ${msg.params.code}]\x1b[0m\r\n`);
+          ptyId = null;
+        }
+      };
+
+      ws.onclose = () => {
+        statusEl.textContent = 'Disconnected. Click to reconnect.';
+        statusEl.classList.remove('hidden');
+        statusEl.style.pointerEvents = 'auto';
+        statusEl.style.cursor = 'pointer';
+        statusEl.onclick = () => {
+          statusEl.style.pointerEvents = 'none';
+          statusEl.style.cursor = 'default';
+          statusEl.onclick = null;
+          connectWebSocket();
+        };
+        // Reject all pending RPCs
+        for (const [, { reject }] of pendingRpc) {
+          reject(new Error('WebSocket closed'));
+        }
+        pendingRpc.clear();
+      };
+
+      ws.onerror = (err) => {
+        console.error('Terminal WebSocket error:', err);
+      };
+    }
+
+    // ---- Terminal input → PTY ----
+    term.onData((data) => {
+      if (!ptyId || !ws || ws.readyState !== WebSocket.OPEN) return;
+      sendRpc('pty.write', { ptyId, data }).catch(() => {});
+    });
+
+    // ---- Resize handling ----
+    let resizeTimeout = null;
+    const doResize = () => {
+      fitAddon.fit();
+      if (ptyId && ws && ws.readyState === WebSocket.OPEN) {
+        sendRpc('pty.resize', { ptyId, cols: term.cols, rows: term.rows }).catch(() => {});
+      }
+    };
+
+    const ro = new ResizeObserver(() => {
+      clearTimeout(resizeTimeout);
+      resizeTimeout = setTimeout(doResize, 50);
+    });
+    ro.observe(containerEl);
+
+    // ---- Cleanup on unload ----
+    window.addEventListener('unload', () => {
+      if (ptyId && ws && ws.readyState === WebSocket.OPEN) {
+        // Best-effort kill
+        try {
+          ws.send(JSON.stringify({ jsonrpc: '2.0', id: ++rpcId, method: 'pty.kill', params: { ptyId } }));
+        } catch {}
+      }
+      try { ws.close(); } catch {}
+      try { ro.disconnect(); } catch {}
+    });
+  })();
+  </script>
+</body>
+</html>
