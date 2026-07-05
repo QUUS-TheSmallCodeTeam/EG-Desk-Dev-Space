@@ -358,6 +358,16 @@ function spawnAppServer() {
     const text = chunk.toString().trim()
     if (text) console.error(text)
   })
+  appServerProcess.on('error', (error) => {
+    // PATH에 codex CLI가 없으면(launchd/non-login shell 등) spawn ENOENT가
+    // 'error' 이벤트로 온다 — 핸들러가 없으면 브리지 프로세스 전체가 크래시.
+    appServerReady = false
+    updateAuthState({
+      statusText: `codex CLI spawn failed (${error?.code || error?.message || 'unknown'}) — check PATH`,
+      loginInProgress: false,
+    })
+    scheduleAppServerReconnect()
+  })
   appServerProcess.on('close', () => {
     appServerReady = false
     appServerSocket = null
@@ -968,6 +978,16 @@ const bridgeServer = createServer(async (req, res) => {
     return
   }
   sendJson(res, 404, { error: 'Not found' })
+})
+
+bridgeServer.on('error', (error) => {
+  if (error?.code === 'EADDRINUSE') {
+    // 이미 다른 브리지가 떠 있음 — 자동 기동(런처)과의 이중 실행은 정상 시나리오
+    console.error(`[egdesk-codex-bridge] port ${BRIDGE_PORT} already in use — another bridge is running. Exiting.`)
+    process.exit(0)
+  }
+  console.error('[egdesk-codex-bridge] server error:', error)
+  process.exit(1)
 })
 
 bridgeServer.listen(BRIDGE_PORT, '127.0.0.1', () => {

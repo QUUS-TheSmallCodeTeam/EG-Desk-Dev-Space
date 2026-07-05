@@ -33,6 +33,16 @@ cp -R "$REPO_ROOT"/overlay/resources/. "$PROFILE/chrome/resources/"
 
 rm -rf "$PROFILE/startupCache"
 
+# codex-bridge(:39218 — 터미널 PTY + codex chat/auth 백엔드) 미기동 시 자동 기동.
+# 브리지가 없으면 overlay의 터미널 카드와 채팅 로그인이 전부 "오프라인"이 된다.
+if ! nc -z 127.0.0.1 39218 2>/dev/null; then
+  BRIDGE_LOG="${TMPDIR:-/tmp}/egdesk-codex-bridge.log"
+  echo "[info] codex-bridge not running — starting in background (log: $BRIDGE_LOG)"
+  nohup "$SCRIPT_DIR/run-codex-bridge.sh" >> "$BRIDGE_LOG" 2>&1 &
+else
+  echo "[info] codex-bridge already running on :39218"
+fi
+
 echo "[info] Firefox: $FIREFOX"
 echo "[info] Profile: $PROFILE"
 echo "[info] Marionette: 127.0.0.1:2828"

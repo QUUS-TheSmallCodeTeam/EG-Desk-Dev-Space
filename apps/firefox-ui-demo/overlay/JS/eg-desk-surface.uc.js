@@ -12541,7 +12541,7 @@
       }
     };
 
-    console.warn(TAG, 'terminal card spawned (chrome:// + Rust helper)', id);
+    console.warn(TAG, 'terminal card spawned (chrome:// + node bridge :39218)', id);
     card._cleanup = cleanupCard;
     card._termBrowser = termBrowser;
     return card;
