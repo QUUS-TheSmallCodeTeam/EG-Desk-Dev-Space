@@ -701,6 +701,16 @@ async function createTerminalSession(cols = 80, rows = 24, shell = null) {
   const sessionId = `term-${randomBytes(6).toString('hex')}`
   const defaultShell = shell || process.env.SHELL || (os.platform() === 'darwin' ? '/bin/zsh' : '/bin/bash')
 
+  // 브리지가 GUI/백그라운드에서 뜨면 LANG/LC_*가 비어 PTY가 C 로케일이 된다 —
+  // zsh ZLE가 한글 등 멀티바이트 입력을 <0084> 식 바이트 조각으로 렌더링.
+  // UTF-8 로케일을 보장한다 (기존 UTF-8 설정은 존중).
+  const isUtf8 = (v) => typeof v === 'string' && /utf-?8/i.test(v)
+  const localeEnv = {
+    LANG: isUtf8(process.env.LANG) ? process.env.LANG : 'ko_KR.UTF-8',
+    LC_CTYPE: isUtf8(process.env.LC_CTYPE) ? process.env.LC_CTYPE
+      : (isUtf8(process.env.LANG) ? process.env.LANG : 'ko_KR.UTF-8'),
+  }
+
   let ptyProcess = null
   let usePty = false
 
@@ -713,6 +723,7 @@ async function createTerminalSession(cols = 80, rows = 24, shell = null) {
       cwd: os.homedir(),
       env: {
         ...process.env,
+        ...localeEnv,
         TERM: 'xterm-256color',
         COLORTERM: 'truecolor',
       },
@@ -725,6 +736,7 @@ async function createTerminalSession(cols = 80, rows = 24, shell = null) {
       cwd: os.homedir(),
       env: {
         ...process.env,
+        ...localeEnv,
         TERM: 'dumb',
         COLUMNS: String(cols),
         LINES: String(rows),

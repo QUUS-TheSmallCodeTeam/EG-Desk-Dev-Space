@@ -151,9 +151,19 @@
       }
     }
 
-    async function writeToTerminal(data) {
-      if (!ptyId || !connected) return;
-      await postTerminal('/terminal/write', { sessionId: ptyId, data });
+    // 키 입력은 keystroke마다 개별 HTTP POST로 나가므로, 직렬화하지 않으면
+    // 응답 순서에 따라 글자가 뒤섞인다 (빠른 연타 시 'pwd' → 'pw'+'d' 등 — 실측).
+    let writeChain = Promise.resolve();
+    function writeToTerminal(data) {
+      if (!ptyId || !connected) return Promise.resolve();
+      const sessionAtEnqueue = ptyId;
+      writeChain = writeChain
+        .then(() => {
+          if (ptyId !== sessionAtEnqueue || !connected) return undefined;
+          return postTerminal('/terminal/write', { sessionId: ptyId, data });
+        })
+        .catch(() => {});
+      return writeChain;
     }
 
     function exposeTerminalApi() {
@@ -236,6 +246,19 @@
     window.addEventListener('mousedown', () => {
       setTimeout(() => term.focus(), 0);
     });
+
+    // ---- IME(한글 등) composition → PTY ----
+    // 이 chrome-privileged iframe 환경에서는 xterm의 composition 처리가 동작하지
+    // 않는다 (commit이 onData로 안 옴 — 실측). 커밋된 문자열(ev.data)을 PTY로
+    // 직접 전달하고, xterm이 못 치우는 helper textarea 잔류물을 비운다.
+    // 주의: xterm의 composition 경로가 살아나면 이중 전송이 되므로, 그때는
+    // 이 포워더를 제거해야 한다 (판별: dataEventCount가 commit 시 증가하는지).
+    containerEl.addEventListener('compositionend', (ev) => {
+      const committed = ev.data;
+      if (committed) writeToTerminal(committed).catch(() => {});
+      const ta = containerEl.querySelector('.xterm-helper-textarea');
+      if (ta) ta.value = '';
+    }, true);
 
     // ---- Resize handling ----
     let resizeTimeout = null;
