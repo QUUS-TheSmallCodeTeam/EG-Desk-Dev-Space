@@ -11,7 +11,50 @@ const SCREENSHOT_PATH = process.argv[2] || '/tmp/egdesk-viewport-layout-final.pn
 const jsSourcePath = fileURLToPath(new URL('../overlay/JS/eg-desk-surface.uc.js', import.meta.url));
 const cssSourcePath = fileURLToPath(new URL('../overlay/CSS/eg-desk-surface.uc.css', import.meta.url));
 const jsSourceUrl = pathToFileURL(jsSourcePath).href;
+const cssSourceUrl = pathToFileURL(cssSourcePath).href;
 const cssText = readFileSync(cssSourcePath, 'utf8');
+const liveExtraCss = `
+
+/* Dev verification reload layer: override stale startup userChrome geometry. */
+#egd-desk-rail {
+  left: 20px !important;
+  right: 20px !important;
+  transform: none !important;
+  width: auto !important;
+  height: 44px !important;
+  border-radius: 22px !important;
+  padding: 0 14px !important;
+  gap: 14px !important;
+}
+#egd-window-controls {
+  position: static !important;
+  height: 24px !important;
+  width: max-content !important;
+  padding: 0 !important;
+}
+#egd-dock {
+  bottom: 14px !important;
+  height: 48px !important;
+  border-radius: 14px !important;
+  gap: 14px !important;
+  padding: 0 16px !important;
+}
+#egd-preset-bag {
+  width: 52px !important;
+  height: auto !important;
+  max-height: calc(100vh - 160px) !important;
+  padding: 10px 7px !important;
+  gap: 9px !important;
+}
+#egd-desk-minimap {
+  top: 70px !important;
+  right: 72px !important;
+  width: 246px !important;
+  padding: 9px !important;
+  border-radius: 12px !important;
+}
+.egd-minimap-map { height: 104px !important; }
+`;
 
 const proc = spawn('npx', [
   '-y',
@@ -93,14 +136,23 @@ function parseToolJson(text) {
   if (trimmed.startsWith('Error:')) {
     throw new Error(trimmed);
   }
+  // firefox-devtools-mcp >= 0.7: result JSON is wrapped in a ```json fence
+  const fenced = trimmed.match(/```json\s*\n([\s\S]*?)\n```/);
+  if (fenced) return JSON.parse(fenced[1]);
   const jsonText = trimmed.startsWith('Result:')
     ? trimmed.slice('Result:'.length).trim()
     : trimmed;
   return JSON.parse(jsonText);
 }
 
-async function callTool(name, args = {}, timeoutMs = 15000) {
-  return request('tools/call', { name, arguments: args }, timeoutMs);
+async function callTool(name, args = {}, timeoutMs = 60000) {
+  let toolArgs = args;
+  // firefox-devtools-mcp >= 0.7: evaluate_privileged_script takes `function`
+  // (callable string) instead of `expression`. Wrap legacy IIFE expressions.
+  if (name === 'evaluate_privileged_script' && typeof toolArgs.expression === 'string') {
+    toolArgs = { function: `() => (\n${toolArgs.expression}\n)` };
+  }
+  return request('tools/call', { name, arguments: toolArgs }, timeoutMs);
 }
 
 async function main() {
@@ -121,7 +173,7 @@ async function main() {
   await callTool('select_privileged_context', { contextId: contextMatch[1] });
 
   const remountText = resultText(await callTool('evaluate_privileged_script', {
-    expression: `(() => {
+    expression: `(async () => {
       const cleanupEntity = (node) => {
         try { if (typeof node._cleanup === 'function') node._cleanup(); } catch {}
         node.remove();
@@ -147,10 +199,26 @@ async function main() {
         style.id = 'egd-viewport-layout-live-style';
         document.documentElement.appendChild(style);
       }
-      style.textContent = ${JSON.stringify(cssText)};
+      // firefox-devtools-mcp >= 0.7: 16KB 상한 — 본 CSS는 IOUtils로 로드, 오버라이드만 인라인
+      style.textContent = await IOUtils.readUTF8(${JSON.stringify(cssSourcePath)}) + ${JSON.stringify(liveExtraCss)};
 
-      window.__egdesk = undefined;
+      // 이전 verify가 남긴 영속 agenda 상태('Rail Alpha' 등) 초기화 — 순서 의존 제거
+    try { window.__egdesk?.agenda?.clearSavedState?.(); } catch {}
+    window.__egdesk = undefined;
       const ServicesRef = globalThis.Services || ChromeUtils.importESModule('resource://gre/modules/Services.sys.mjs').Services;
+      let liveSheetRegistered = false;
+      try {
+        const sheetService = Cc['@mozilla.org/content/style-sheet-service;1']
+          .getService(Ci.nsIStyleSheetService);
+        const cssUri = ServicesRef.io.newURI(${JSON.stringify(cssSourceUrl)});
+        if (sheetService.sheetRegistered(cssUri, sheetService.USER_SHEET)) {
+          sheetService.unregisterSheet(cssUri, sheetService.USER_SHEET);
+        }
+        sheetService.loadAndRegisterSheet(cssUri, sheetService.USER_SHEET);
+        liveSheetRegistered = sheetService.sheetRegistered(cssUri, sheetService.USER_SHEET);
+      } catch (err) {
+        console.warn('[egdesk verify] source CSS user-sheet registration failed', err);
+      }
       ServicesRef.scriptloader.loadSubScript(${JSON.stringify(jsSourceUrl)}, window, 'UTF-8');
 
       return {
@@ -159,6 +227,7 @@ async function main() {
         hasRail: !!document.getElementById('egd-desk-rail'),
         railName: document.querySelector('.egd-rail-agenda-name')?.textContent?.trim() || null,
         helperStatusExists: !!document.getElementById('egd-input-helper-status'),
+        liveSheetRegistered,
       };
     })()`,
   }, 30000));
@@ -207,6 +276,7 @@ async function main() {
         const minimapButton = Array.from(document.querySelectorAll('.egd-rail-icon')).find((node) => node.title === '미니맵');
         if (!minimapButton) throw new Error('missing minimap button');
         minimapButton.click();
+        window.__egdeskViewportLayoutMinimapBefore = rectOf(document.getElementById('egd-desk-minimap'));
         clickDock('terminal');
         return wait(600);
       }).then(() => {
@@ -233,6 +303,7 @@ async function main() {
           windowControlCount: document.querySelectorAll('#egd-window-controls .egd-window-control').length,
           windowControlTitles: windowControlButtons.map((node) => node.title),
           windowControlColors: windowControlButtons.map((node) => getComputedStyle(node).backgroundColor),
+          minimapBeforeFullscreen: window.__egdeskViewportLayoutMinimapBefore || null,
           minimapOpen: !!document.getElementById('egd-desk-minimap'),
           minimapRows: document.querySelectorAll('#egd-desk-minimap .egd-minimap-row').length,
           hudHidden: !!document.getElementById('egd-hud')?.classList.contains('egd-hud-hidden'),
@@ -242,6 +313,7 @@ async function main() {
           railRect: rectOf(document.getElementById('egd-desk-rail')),
           dockRect: rectOf(document.getElementById('egd-dock')),
           bagRect: rectOf(document.getElementById('egd-preset-bag')),
+          minimapRect: rectOf(document.getElementById('egd-desk-minimap')),
           fitsSafeArea,
         };
       });
@@ -250,15 +322,23 @@ async function main() {
 
   const check = parseToolJson(checkText);
   const failures = [];
+  if (!remount.liveSheetRegistered) failures.push('source css live sheet');
   if (check.railName !== 'EG-Desk Agenda') failures.push('rail label');
   if (check.windowControlCount !== 3) failures.push('window control count');
   if (!check.windowControlTitles.includes('창 닫기') || !check.windowControlTitles.includes('창 최소화') || !check.windowControlTitles.includes('창 전체화면 전환')) failures.push('window control titles');
   if (!check.windowControlColors?.includes('rgb(255, 96, 87)') || !check.windowControlColors?.includes('rgb(255, 189, 46)') || !check.windowControlColors?.includes('rgb(39, 201, 63)')) failures.push('window control colors');
-  if (!check.windowControlsRect || check.windowControlsRect.left >= check.railRect.left) failures.push('window controls placement');
+  if (check.railRect?.height !== 44 || check.dockRect?.height !== 48 || check.bagRect?.width !== 52 || check.minimapBeforeFullscreen?.width !== 246) failures.push('chrome density');
+  const controlsInsideRail = check.windowControlsRect
+    && check.railRect
+    && check.windowControlsRect.left >= check.railRect.left
+    && check.windowControlsRect.right <= check.railRect.right
+    && check.windowControlsRect.top >= check.railRect.top
+    && check.windowControlsRect.bottom <= check.railRect.bottom;
+  if (!controlsInsideRail) failures.push('window controls fused rail placement');
   if (check.railCardBadge !== 'Terminal · Maximized' || check.railCardBadgeHidden) failures.push('maximized badge');
   if (check.helperStatusExists) failures.push('helper status hidden');
-  if (!check.minimapOpen) failures.push('minimap');
-  if (check.minimapRows < 1) failures.push('minimap rows');
+  if (!check.minimapBeforeFullscreen) failures.push('minimap open before maximized');
+  if (check.minimapOpen) failures.push('minimap hidden while maximized');
   if (!check.hudHidden) failures.push('hud hidden while maximized');
   if (!check.cardFullscreenClass) failures.push('card maximized class');
   if (!check.fitsSafeArea) failures.push('safe area fit');

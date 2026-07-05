@@ -83,6 +83,9 @@ function resultText(result) {
 
 function parseToolJson(text) {
   const trimmed = String(text || '').trim();
+  // firefox-devtools-mcp >= 0.7: result JSON is wrapped in a ```json fence
+  const fenced = trimmed.match(/```json\s*\n([\s\S]*?)\n```/);
+  if (fenced) return JSON.parse(fenced[1]);
   const jsonText = trimmed.startsWith('Result:')
     ? trimmed.slice('Result:'.length).trim()
     : trimmed;
@@ -90,7 +93,15 @@ function parseToolJson(text) {
 }
 
 async function callTool(name, args = {}) {
-  return request('tools/call', { name, arguments: args });
+  let toolArgs = args;
+  // firefox-devtools-mcp >= 0.7: evaluate_privileged_script takes `function`
+  // (callable string) instead of `expression`. Wrap legacy IIFE expressions.
+  if (name === 'evaluate_privileged_script' && typeof toolArgs.expression === 'string') {
+    toolArgs = { function: `() => (
+${toolArgs.expression}
+)` };
+  }
+  return request('tools/call', { name, arguments: toolArgs });
 }
 
 async function main() {

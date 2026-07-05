@@ -12,6 +12,16 @@ const jsSourcePath = fileURLToPath(new URL('../overlay/JS/eg-desk-surface.uc.js'
 const cssSourcePath = fileURLToPath(new URL('../overlay/CSS/eg-desk-surface.uc.css', import.meta.url));
 const jsSourceUrl = pathToFileURL(jsSourcePath).href;
 const cssText = readFileSync(cssSourcePath, 'utf8');
+const liveExtraCss = `
+
+/* Dev verification reload layer: override stale startup userChrome geometry. */
+#egd-desk-rail { left: 20px !important; right: 20px !important; transform: none !important; width: auto !important; height: 44px !important; border-radius: 22px !important; padding: 0 14px !important; gap: 14px !important; }
+#egd-window-controls { position: static !important; height: 24px !important; width: max-content !important; padding: 0 !important; }
+#egd-dock { bottom: 14px !important; height: 48px !important; border-radius: 14px !important; gap: 14px !important; padding: 0 16px !important; }
+#egd-preset-bag { width: 52px !important; height: auto !important; max-height: calc(100vh - 160px) !important; padding: 10px 7px !important; gap: 9px !important; }
+#egd-desk-minimap { top: 70px !important; right: 72px !important; width: 246px !important; padding: 9px !important; border-radius: 12px !important; }
+.egd-minimap-map { height: 104px !important; }
+`;
 
 const proc = spawn('npx', [
   '-y',
@@ -57,7 +67,7 @@ proc.on('exit', (code, signal) => {
   pending.clear();
 });
 
-function request(method, params = {}, timeoutMs = 15000) {
+function request(method, params = {}, timeoutMs = 60000) {
   const id = nextId++;
   proc.stdin.write(JSON.stringify({ jsonrpc: '2.0', id, method, params }) + '\n');
 
@@ -91,14 +101,23 @@ function resultText(result) {
 function parseToolJson(text) {
   const trimmed = String(text || '').trim();
   if (trimmed.startsWith('Error:')) throw new Error(trimmed);
+  // firefox-devtools-mcp >= 0.7: result JSON is wrapped in a ```json fence
+  const fenced = trimmed.match(/```json\s*\n([\s\S]*?)\n```/);
+  if (fenced) return JSON.parse(fenced[1]);
   const jsonText = trimmed.startsWith('Result:')
     ? trimmed.slice('Result:'.length).trim()
     : trimmed;
   return JSON.parse(jsonText);
 }
 
-async function callTool(name, args = {}, timeoutMs = 15000) {
-  return request('tools/call', { name, arguments: args }, timeoutMs);
+async function callTool(name, args = {}, timeoutMs = 60000) {
+  let toolArgs = args;
+  // firefox-devtools-mcp >= 0.7: evaluate_privileged_script takes `function`
+  // (callable string) instead of `expression`. Wrap legacy IIFE expressions.
+  if (name === 'evaluate_privileged_script' && typeof toolArgs.expression === 'string') {
+    toolArgs = { function: `() => (\n${toolArgs.expression}\n)` };
+  }
+  return request('tools/call', { name, arguments: toolArgs }, timeoutMs);
 }
 
 async function main() {
@@ -106,7 +125,7 @@ async function main() {
     protocolVersion: '2024-11-05',
     capabilities: {},
     clientInfo: { name: 'egdesk-firefox-mcp-minimap-drag-verify', version: '0.1.0' },
-  });
+  }, 60000);
   notify('notifications/initialized');
 
   const contexts = await callTool('list_privileged_contexts');
@@ -119,7 +138,7 @@ async function main() {
   await callTool('select_privileged_context', { contextId: contextMatch[1] });
 
   const remountText = resultText(await callTool('evaluate_privileged_script', {
-    expression: `(() => {
+    expression: `(async () => {
       const cleanupEntity = (node) => {
         try { if (typeof node._cleanup === 'function') node._cleanup(); } catch {}
         node.remove();
@@ -143,7 +162,8 @@ async function main() {
         style.id = 'egd-minimap-drag-live-style';
         document.documentElement.appendChild(style);
       }
-      style.textContent = ${JSON.stringify(cssText)};
+      // firefox-devtools-mcp >= 0.7: 16KB 상한 — 본 CSS는 IOUtils로 로드, 오버라이드만 인라인
+      style.textContent = await IOUtils.readUTF8(${JSON.stringify(cssSourcePath)}) + ${JSON.stringify(liveExtraCss)};
 
       window.__egdesk = undefined;
       const ServicesRef = globalThis.Services || ChromeUtils.importESModule('resource://gre/modules/Services.sys.mjs').Services;

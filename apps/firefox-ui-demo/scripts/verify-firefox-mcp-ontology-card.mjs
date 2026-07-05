@@ -1,0 +1,319 @@
+#!/usr/bin/env node
+
+import { spawn } from 'node:child_process';
+import { readFileSync } from 'node:fs';
+import { fileURLToPath, pathToFileURL } from 'node:url';
+
+const MCP_PACKAGE = process.env.EGDESK_FIREFOX_MCP_PACKAGE || '@mozilla/firefox-devtools-mcp-moz@latest';
+const MARIONETTE_PORT = process.env.EGDESK_MARIONETTE_PORT || '2828';
+const SCREENSHOT_PATH = process.argv[2] || '/tmp/egdesk-ontology-card-verify.png';
+const jsSourcePath = fileURLToPath(new URL('../overlay/JS/eg-desk-surface.uc.js', import.meta.url));
+const cssSourcePath = fileURLToPath(new URL('../overlay/CSS/eg-desk-surface.uc.css', import.meta.url));
+const jsSourceUrl = pathToFileURL(jsSourcePath).href;
+const cssText = readFileSync(cssSourcePath, 'utf8');
+
+const proc = spawn('npx', [
+  '-y',
+  MCP_PACKAGE,
+  '--connectExisting',
+  '--marionettePort',
+  MARIONETTE_PORT,
+  '--enablePrivilegedContext',
+  '--enableScript',
+], { stdio: ['pipe', 'pipe', 'pipe'] });
+
+let nextId = 1;
+let stdoutBuffer = '';
+let stderrBuffer = '';
+const pending = new Map();
+
+proc.stdout.on('data', (chunk) => {
+  stdoutBuffer += chunk.toString();
+  let index;
+  while ((index = stdoutBuffer.indexOf('\n')) >= 0) {
+    const line = stdoutBuffer.slice(0, index).trim();
+    stdoutBuffer = stdoutBuffer.slice(index + 1);
+    if (!line.startsWith('{')) continue;
+
+    const message = JSON.parse(line);
+    if (message.id && pending.has(message.id)) {
+      const { resolve, reject } = pending.get(message.id);
+      pending.delete(message.id);
+      if (message.error) reject(new Error(JSON.stringify(message.error)));
+      else resolve(message.result);
+    }
+  }
+});
+
+proc.stderr.on('data', (chunk) => {
+  stderrBuffer += chunk.toString();
+});
+
+proc.on('exit', (code, signal) => {
+  for (const { reject } of pending.values()) {
+    reject(new Error(`MCP server exited code=${code} signal=${signal}`));
+  }
+  pending.clear();
+});
+
+function request(method, params = {}, timeoutMs = 15000) {
+  const id = nextId++;
+  proc.stdin.write(JSON.stringify({ jsonrpc: '2.0', id, method, params }) + '\n');
+
+  return new Promise((resolve, reject) => {
+    const timer = setTimeout(() => {
+      pending.delete(id);
+      reject(new Error(`Timeout waiting for ${method}`));
+    }, timeoutMs);
+
+    pending.set(id, {
+      resolve: (value) => {
+        clearTimeout(timer);
+        resolve(value);
+      },
+      reject: (error) => {
+        clearTimeout(timer);
+        reject(error);
+      },
+    });
+  });
+}
+
+function notify(method, params = {}) {
+  proc.stdin.write(JSON.stringify({ jsonrpc: '2.0', method, params }) + '\n');
+}
+
+function resultText(result) {
+  return (result.content || []).map((item) => item.text || '').join('\n');
+}
+
+function parseToolJson(text) {
+  const trimmed = String(text || '').trim();
+  if (trimmed.startsWith('Error:')) throw new Error(trimmed);
+  // firefox-devtools-mcp >= 0.7: result JSON is wrapped in a ```json fence
+  const fenced = trimmed.match(/```json\s*\n([\s\S]*?)\n```/);
+  if (fenced) return JSON.parse(fenced[1]);
+  const jsonText = trimmed.startsWith('Result:')
+    ? trimmed.slice('Result:'.length).trim()
+    : trimmed;
+  return JSON.parse(jsonText);
+}
+
+async function callTool(name, args = {}, timeoutMs = 15000) {
+  let toolArgs = args;
+  // firefox-devtools-mcp >= 0.7: evaluate_privileged_script takes `function`
+  // (callable string) instead of `expression`. Wrap legacy IIFE expressions.
+  if (name === 'evaluate_privileged_script' && typeof toolArgs.expression === 'string') {
+    toolArgs = { function: `() => (\n${toolArgs.expression}\n)` };
+  }
+  return request('tools/call', { name, arguments: toolArgs }, timeoutMs);
+}
+
+async function main() {
+  await request('initialize', {
+    protocolVersion: '2024-11-05',
+    capabilities: {},
+    clientInfo: { name: 'egdesk-firefox-mcp-ontology-card-verify', version: '0.1.0' },
+  }, 60000);
+  notify('notifications/initialized');
+
+  const contexts = await callTool('list_privileged_contexts');
+  const contextText = resultText(contexts);
+  const contextMatch = contextText.match(/\s([0-9a-f-]{36}): chrome:\/\/browser\/content\/browser\.xhtml/);
+  if (!contextMatch) {
+    throw new Error(`Firefox chrome context not found.\n${contextText}`);
+  }
+
+  await callTool('select_privileged_context', { contextId: contextMatch[1] });
+
+  const remountText = resultText(await callTool('evaluate_privileged_script', {
+    expression: `(async () => {
+      const cleanupEntity = (node) => {
+        try { if (typeof node._cleanup === 'function') node._cleanup(); } catch {}
+        node.remove();
+      };
+      document.querySelectorAll('.egd-canvas-card, .egd-canvas-shape').forEach(cleanupEntity);
+      [
+        '#egd-desk-rail',
+        '#egd-dock',
+        '#egd-preset-bag',
+        '#egd-hud',
+        '#egd-canvas-viewport',
+        '#egd-selection-marquee',
+        '#egd-zoom-indicator',
+        '#egd-input-helper-status',
+        '#egd-desk-minimap',
+      ].forEach((selector) => document.querySelectorAll(selector).forEach((node) => node.remove()));
+
+      let style = document.getElementById('egd-ontology-live-style');
+      if (!style) {
+        style = document.createElementNS('http://www.w3.org/1999/xhtml', 'style');
+        style.id = 'egd-ontology-live-style';
+        document.documentElement.appendChild(style);
+      }
+      // firefox-devtools-mcp >= 0.7: 함수 문자열 16KB 상한 — CSS는 privileged
+    // context에서 직접 로드 (IOUtils — sync XHR은 file://에 NetworkError)
+    style.textContent = await IOUtils.readUTF8(${JSON.stringify(cssSourcePath)});
+
+      window.__egdesk = undefined;
+      const ServicesRef = globalThis.Services || ChromeUtils.importESModule('resource://gre/modules/Services.sys.mjs').Services;
+      ServicesRef.scriptloader.loadSubScript(${JSON.stringify(jsSourceUrl)}, window, 'UTF-8');
+
+      return {
+        hasApi: !!window.__egdesk?.cardRuntime?.openOntologyMapCard,
+        hasRail: !!document.getElementById('egd-desk-rail'),
+      };
+    })()`,
+  }, 30000));
+  const remount = parseToolJson(remountText);
+  if (!remount.hasApi || !remount.hasRail) {
+    throw new Error(`Overlay remount failed: ${JSON.stringify(remount, null, 2)}`);
+  }
+
+  const checkText = resultText(await callTool('evaluate_privileged_script', {
+    expression: `(() => {
+      const wait = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
+      const api = window.__egdesk;
+      if (!api?.cardRuntime?.openOntologyMapCard) {
+        return { hasApi: false };
+      }
+      const card = api.cardRuntime.openOntologyMapCard();
+      return wait(1000).then(() => {
+        const focusButton = card.querySelector('.egd-ontology-mode-btn[data-mode="focus"]');
+        const spatialButton = card.querySelector('.egd-ontology-mode-btn[data-mode="spatial"]');
+        const timeButton = card.querySelector('.egd-ontology-mode-btn[data-mode="time"]');
+        if (timeButton) timeButton.click();
+        return wait(250).then(() => {
+          const firstNode = card.querySelector('.egd-ontology-node');
+          if (firstNode) firstNode.dispatchEvent(new MouseEvent('click', { bubbles: true }));
+          if (spatialButton) spatialButton.click();
+          return wait(250).then(() => {
+            if (card._ontologyState) card._ontologyState.selectedId = 'entity.llm_chat_session';
+            if (focusButton) focusButton.click();
+            return wait(250).then(() => {
+              const identityRailCount = card.querySelectorAll('.egd-ontology-identity-rail .egd-ontology-rail-item').length;
+              const presentPane = card.querySelector('.egd-ontology-time-pane-present .egd-ontology-pane-hit');
+              if (presentPane) presentPane.dispatchEvent(new MouseEvent('click', { bubbles: true }));
+              return wait(250).then(() => {
+                const stage = card.querySelector('.egd-ontology-stage');
+                if (stage) stage.dispatchEvent(new WheelEvent('wheel', { bubbles: true, cancelable: true, deltaY: 120 }));
+                return wait(250).then(() => {
+                  const noviceGuide = card.querySelector('.egd-ontology-novice-guide');
+                  const noviceGuideBox = noviceGuide?.getBBox ? noviceGuide.getBBox() : null;
+                  return ({
+              hasApi: true,
+              cardId: card.id,
+              nodeCount: card._ontologyGraph?.nodes?.length || 0,
+              edgeCount: card._ontologyGraph?.edges?.length || 0,
+              visibleNodeCount: card.querySelectorAll('.egd-ontology-node').length,
+              visibleEdgeCount: card.querySelectorAll('.egd-ontology-edge').length,
+              timePaneCount: card.querySelectorAll('.egd-ontology-time-pane').length,
+              physicalPaneWrapperCount: card.querySelectorAll('.egd-ontology-physical-pane-wrapper').length,
+              virtualPaneWrapperCount: card.querySelectorAll('.egd-ontology-time-virtual-pane-wrapper').length,
+              trajectoryPaneWrapperCount: card.querySelectorAll('.egd-ontology-trajectory-pane-wrapper').length,
+              timeAxisArrowCount: card.querySelectorAll('.egd-ontology-time-axis-arrow').length,
+              identityRailCount,
+              paneInventoryNodeCount: card.querySelectorAll('.egd-ontology-pane-inventory-node').length,
+              paneInventoryDetailItemCount: card.querySelectorAll('.egd-ontology-pane-inventory-item').length,
+              depthBandCount: card.querySelectorAll('.egd-ontology-inventory-depth-band').length,
+              depthConnectorCount: card.querySelectorAll('.egd-ontology-depth-connector').length,
+              depthConnectorPortCount: card.querySelectorAll('.egd-ontology-depth-connector-port').length,
+              inventoryRelationCount: card.querySelectorAll('.egd-ontology-inventory-relation').length,
+              inventoryRelationArrowCount: card.querySelectorAll('.egd-ontology-inventory-relation-arrow').length,
+              temporalObjectLinkCount: card.querySelectorAll('.egd-ontology-temporal-object-link').length,
+              temporalObjectLinkArrowCount: card.querySelectorAll('.egd-ontology-temporal-object-link-arrow').length,
+              nodePortCount: card.querySelectorAll('.egd-ontology-node-port').length,
+              noviceGuideCount: card.querySelectorAll('.egd-ontology-novice-guide').length,
+              noviceOverlayChildCount: card.querySelector('.egd-ontology-novice-overlay')?.childElementCount || 0,
+              guidePhysicalAssemblyCount: card.querySelectorAll('.egd-ontology-guide-physical-assembly').length,
+              guideGoalGateCount: card.querySelectorAll('.egd-ontology-guide-goal-gate').length,
+              guideGoalGatePortCount: card.querySelectorAll('.egd-ontology-guide-goal-gate-port').length,
+              guideGoalBridgeCount: card.querySelectorAll('.egd-ontology-guide-goal-bridge').length,
+              noviceGuideBox: noviceGuideBox ? {
+                x: Math.round(noviceGuideBox.x),
+                y: Math.round(noviceGuideBox.y),
+                width: Math.round(noviceGuideBox.width),
+                height: Math.round(noviceGuideBox.height),
+              } : null,
+              focusTarget: card._ontologyState?.focusTarget || null,
+              activePane: card._ontologyState?.activePane || null,
+              activeDepth: card._ontologyState?.activeDepth || null,
+              hasKoreanLabels: /초점/.test(card.querySelector('.egd-ontology-mode-btn[data-mode="focus"]')?.textContent || '')
+                && /인벤토리/.test(card.querySelector('.egd-ontology-detail')?.textContent || '')
+                && /채팅 카드/.test(card.querySelector('.egd-ontology-stage')?.textContent || ''),
+              hasDetailTitle: !!card.querySelector('.egd-ontology-detail-title')?.textContent?.trim(),
+              mode: card._ontologyState?.mode,
+              selectedId: card._ontologyState?.selectedId || null,
+              hasSourceRef: card._sourceRef?.kind === 'ontology-map',
+              dirty: api.state.agenda.dirty,
+              });
+              });
+              });
+            });
+          });
+        });
+      });
+    })()`,
+  }, 30000));
+
+  const check = parseToolJson(checkText);
+  const failures = [];
+  if (!check.hasApi) failures.push('missing ontology card API');
+  if (check.nodeCount < 10) failures.push('graph nodes');
+  if (check.edgeCount < 10) failures.push('graph edges');
+  if (check.visibleNodeCount < 12 || check.visibleNodeCount > 28) failures.push('focus visible nodes');
+  if (check.visibleEdgeCount > 8) failures.push('focus visible edges');
+  if (check.timePaneCount !== 4) failures.push('time panes');
+  if (check.physicalPaneWrapperCount !== 4) failures.push('physical pane wrappers');
+  if (check.virtualPaneWrapperCount !== 4) failures.push('time virtual pane wrappers');
+  if (check.trajectoryPaneWrapperCount !== 1) failures.push('trajectory pane wrapper');
+  if (check.timeAxisArrowCount !== 1) failures.push('time axis direction');
+  if (check.identityRailCount < 4) failures.push('identity rail');
+  if (check.focusTarget !== 'pane' || check.activePane !== 'present') failures.push('pane inventory selection');
+  if (!['all', 'physical', 'binding', 'virtual'].includes(check.activeDepth)) failures.push('vertical depth state');
+  if (check.paneInventoryNodeCount < 12) failures.push('pane inventory nodes');
+  if (check.paneInventoryDetailItemCount < 6) failures.push('pane inventory detail');
+  if (check.depthBandCount !== 12) failures.push('depth bands');
+  if (check.depthConnectorCount < 1) failures.push('depth connectors');
+  if (check.depthConnectorPortCount < 3) failures.push('connector ports');
+  if (check.inventoryRelationCount < 4) failures.push('inventory node relations');
+  if (check.inventoryRelationArrowCount < 4) failures.push('inventory relation arrows');
+  if (check.temporalObjectLinkCount < 4) failures.push('temporal object links');
+  if (check.temporalObjectLinkArrowCount < 4) failures.push('temporal object link arrows');
+  if (check.nodePortCount < 12) failures.push('node ports');
+  if (check.noviceGuideCount !== 1) failures.push('novice guide overlay');
+  if (check.noviceOverlayChildCount < 1) failures.push('novice overlay children');
+  if (check.guidePhysicalAssemblyCount !== 1) failures.push('guide physical assembly');
+  if (!check.noviceGuideBox || check.noviceGuideBox.width < 1200 || check.noviceGuideBox.height < 700) failures.push('novice guide bounds');
+  if (!check.hasKoreanLabels) failures.push('korean labels');
+  if (!check.hasDetailTitle) failures.push('detail panel');
+  if (check.mode !== 'focus') failures.push('mode switching');
+  if (!check.selectedId) failures.push('node selection');
+  if (!check.hasSourceRef) failures.push('source ref');
+  if (!check.dirty) failures.push('agenda dirty');
+  if (failures.length) {
+    throw new Error(`Ontology card verification failed (${failures.join(', ')}): ${JSON.stringify(check, null, 2)}`);
+  }
+
+  const screenshot = resultText(await callTool('screenshot_page', { saveTo: SCREENSHOT_PATH }, 30000));
+
+  console.log(JSON.stringify({
+    ok: true,
+    contextId: contextMatch[1],
+    screenshot: SCREENSHOT_PATH,
+    check,
+    screenshotResult: screenshot,
+  }, null, 2));
+}
+
+main().catch((error) => {
+  console.error(error.stack || error.message || String(error));
+  if (stderrBuffer.trim()) {
+    console.error('\n[MCP stderr]');
+    console.error(stderrBuffer.trim());
+  }
+  process.exitCode = 1;
+}).finally(() => {
+  proc.stdin.end();
+  setTimeout(() => proc.kill('SIGTERM'), 500);
+});

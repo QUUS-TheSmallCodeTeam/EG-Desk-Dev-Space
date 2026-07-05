@@ -146,6 +146,9 @@ function resultText(result) {
 function parseToolJson(text) {
   const trimmed = String(text || '').trim();
   if (trimmed.startsWith('Error:')) throw new Error(trimmed);
+  // firefox-devtools-mcp >= 0.7: result JSON is wrapped in a ```json fence
+  const fenced = trimmed.match(/```json\s*\n([\s\S]*?)\n```/);
+  if (fenced) return JSON.parse(fenced[1]);
   const jsonText = trimmed.startsWith('Result:')
     ? trimmed.slice('Result:'.length).trim()
     : trimmed;
@@ -153,11 +156,17 @@ function parseToolJson(text) {
 }
 
 async function callTool(name, args = {}, timeoutMs = 45000) {
-  return request('tools/call', { name, arguments: args }, timeoutMs);
+  let toolArgs = args;
+  // firefox-devtools-mcp >= 0.7: evaluate_privileged_script takes `function`
+  // (callable string) instead of `expression`. Wrap legacy IIFE expressions.
+  if (name === 'evaluate_privileged_script' && typeof toolArgs.expression === 'string') {
+    toolArgs = { function: `() => (\n${toolArgs.expression}\n)` };
+  }
+  return request('tools/call', { name, arguments: toolArgs }, timeoutMs);
 }
 
 function remountExpression(styleId) {
-  return `(() => {
+  return `(async () => {
     const cleanupEntity = (node) => {
       try { if (typeof node._cleanup === 'function') node._cleanup(); } catch {}
       node.remove();
@@ -185,7 +194,9 @@ function remountExpression(styleId) {
       style.id = ${JSON.stringify(styleId)};
       document.documentElement.appendChild(style);
     }
-    style.textContent = ${JSON.stringify(cssText)};
+    // firefox-devtools-mcp >= 0.7: 함수 문자열 16KB 상한 — CSS는 privileged
+    // context에서 직접 로드 (IOUtils — sync XHR은 file://에 NetworkError)
+    style.textContent = await IOUtils.readUTF8(${JSON.stringify(cssSourcePath)});
 
     window.__egdesk = undefined;
     const ServicesRef = globalThis.Services || ChromeUtils.importESModule('resource://gre/modules/Services.sys.mjs').Services;

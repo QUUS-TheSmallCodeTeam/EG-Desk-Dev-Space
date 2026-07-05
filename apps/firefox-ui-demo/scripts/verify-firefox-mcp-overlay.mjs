@@ -83,7 +83,15 @@ function resultText(result) {
 }
 
 async function callTool(name, args = {}) {
-  return request('tools/call', { name, arguments: args });
+  let toolArgs = args;
+  // firefox-devtools-mcp >= 0.7: evaluate_privileged_script takes `function`
+  // (callable string) instead of `expression`. Wrap legacy IIFE expressions.
+  if (name === 'evaluate_privileged_script' && typeof toolArgs.expression === 'string') {
+    toolArgs = { function: `() => (
+${toolArgs.expression}
+)` };
+  }
+  return request('tools/call', { name, arguments: toolArgs });
 }
 
 async function main() {
