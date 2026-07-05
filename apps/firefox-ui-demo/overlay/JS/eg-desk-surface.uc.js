@@ -12847,6 +12847,10 @@
         return;
       }
       if (ev.button !== 0) return;
+      if (ev.metaKey) {        // Cmd+드래그 = 팬 (Cmd+휠 팬과 일관된 modifier)
+        beginCanvasPan(ev);
+        return;
+      }
       if (state.panModifier || state.activeTool === 'hand') {
         beginCanvasPan(ev);
         return;
@@ -12988,32 +12992,13 @@
       ev.stopPropagation();
     }, { passive: false, capture: true });
 
-    // 타이핑 중(입력창/터미널 iframe/편집영역)에는 Space 팬을 발동하지 않는다.
-    // 주의: (1) 서브문서 요소는 cross-global이라 instanceof Element가 false —
-    // 덕타이핑으로 판별. (2) browser.xhtml은 XHTML이라 tagName이 소문자 —
-    // localName으로 비교. (둘 다 실측으로 잡은 함정)
-    const isTypingContext = (target) => {
-      const el = target && typeof target.closest === 'function' ? target : null;
-      if (el && el.closest('input, textarea, select, iframe, browser, [contenteditable]')) return true;
-      const active = document.activeElement;
-      if (!active) return false;
-      const name = String(active.localName || '').toLowerCase();
-      if (['iframe', 'browser', 'input', 'textarea', 'select'].includes(name)) return true;
-      return typeof active.closest === 'function'
-        && !!active.closest('input, textarea, [contenteditable]');
-    };
-
     // 리셋 단축키: Ctrl+0
+    // (팬 modifier로 Space는 쓰지 않는다 — 터미널/브라우저 카드 안의
+    //  스페이스 입력과 충돌. Cmd+드래그가 팬 제스처)
     window.addEventListener('keydown', (ev) => {
       if (ev.key === 'Shift') {
         state.panModifier = true;
         syncPanModeCursor();
-      }
-      // Space+드래그 팬 (Figma/Miro 관습) — 무한캔버스 표준 제스처
-      if (ev.code === 'Space' && !isTypingContext(ev.target)) {
-        state.panModifier = true;
-        syncPanModeCursor();
-        ev.preventDefault();
       }
       if ((ev.ctrlKey || ev.metaKey) && ev.key === '0') {
         state.panTarget = { x: 0, y: 0 };
@@ -13023,7 +13008,7 @@
       }
     });
     window.addEventListener('keyup', (ev) => {
-      if (ev.key !== 'Shift' && ev.code !== 'Space') return;
+      if (ev.key !== 'Shift') return;
       state.panModifier = false;
       if (!pan) delete document.documentElement.dataset.egdPanDragging;
       syncPanModeCursor();

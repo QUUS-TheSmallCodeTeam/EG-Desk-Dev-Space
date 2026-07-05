@@ -1,5 +1,5 @@
 import { createServer } from 'node:http'
-import { spawn } from 'node:child_process'
+import { spawn, spawnSync } from 'node:child_process'
 import { Codex } from '@openai/codex-sdk'
 import { randomBytes } from 'node:crypto'
 import * as os from 'node:os'
@@ -449,9 +449,32 @@ async function startChatgptLogin() {
   return result
 }
 
+// macOS XProtect가 SDK 번들 codex(0.130.0)를 악성코드로 오탐 → 격리 →
+// 'Codex Exec exited with signal SIGKILL' (2026-07-05 실사용 발생).
+// auth(app-server)와 같은 PATH의 codex CLI를 채팅 실행에도 사용한다 —
+// XProtect 통과 검증된 바이너리 + auth/chat 버전 스큐(0.130 vs 0.142)도 해소.
+function resolveCodexBinary() {
+  if (process.env.EGDESK_CODEX_BIN) return process.env.EGDESK_CODEX_BIN
+  try {
+    const result = spawnSync('/usr/bin/which', ['codex'], { env: process.env, encoding: 'utf8' })
+    const found = (result.stdout || '').trim()
+    if (found) return found
+  } catch {}
+  return null // fallback: SDK 번들 바이너리
+}
+
 function ensureCodexSdk() {
   if (!codexSdk) {
-    codexSdk = new Codex()
+    const codexPathOverride = resolveCodexBinary()
+    if (codexPathOverride) console.log(`[chat] codex binary: ${codexPathOverride}`)
+    else console.warn('[chat] PATH에 codex 없음 — SDK 번들 바이너리 사용 (XProtect 격리 위험)')
+    codexSdk = new Codex({
+      ...(codexPathOverride ? { codexPathOverride } : {}),
+      // 유저 config.toml의 실험 기능(chronicle 등) 경고문을 SDK가 치명 에러로
+      // 오해해 채팅이 전부 assistant-error가 됨 — 브리지 스코프에서만 억제
+      // (유저 전역 ~/.codex/config.toml은 건드리지 않는다)
+      config: { suppress_unstable_features_warning: true },
+    })
   }
   return codexSdk
 }
