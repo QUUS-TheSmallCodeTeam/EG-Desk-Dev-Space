@@ -684,6 +684,19 @@ function sendJson(res, statusCode, data) {
 // ── Terminal PTY support ──
 const terminalSessions = new Map()
 
+// npm 설치 과정에서 node-pty spawn-helper의 실행 비트가 소실되는 경우가 있어
+// (posix_spawnp failed → 조용히 child_process fallback 강등) 기동 시 복구한다.
+try {
+  const { chmodSync, readdirSync } = await import('node:fs')
+  const { fileURLToPath } = await import('node:url')
+  const path = await import('node:path')
+  const prebuilds = path.join(path.dirname(fileURLToPath(import.meta.url)), 'node_modules', 'node-pty', 'prebuilds')
+  for (const dir of readdirSync(prebuilds)) {
+    if (!dir.startsWith('darwin')) continue
+    try { chmodSync(path.join(prebuilds, dir, 'spawn-helper'), 0o755) } catch {}
+  }
+} catch {}
+
 async function createTerminalSession(cols = 80, rows = 24, shell = null) {
   const sessionId = `term-${randomBytes(6).toString('hex')}`
   const defaultShell = shell || process.env.SHELL || (os.platform() === 'darwin' ? '/bin/zsh' : '/bin/bash')
@@ -706,8 +719,8 @@ async function createTerminalSession(cols = 80, rows = 24, shell = null) {
     })
     usePty = true
   } catch (e) {
-    // Fallback: use child_process
-    console.warn('[terminal] node-pty not available, using child_process fallback')
+    // Fallback: use child_process — 프롬프트/에코 없는 강등 모드이므로 반드시 원인 로깅
+    console.warn(`[terminal] node-pty not available, using child_process fallback: ${e?.message || e}`)
     ptyProcess = spawn(defaultShell, [], {
       cwd: os.homedir(),
       env: {

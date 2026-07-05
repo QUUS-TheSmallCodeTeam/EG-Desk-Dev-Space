@@ -173,6 +173,13 @@
         write: (data) => {
           return writeToTerminal(data);
         },
+        focus: () => {
+          term.focus();
+        },
+        paste: (data) => {
+          term.paste(String(data ?? ''));
+        },
+        dataEventCount: () => dataEvents,
         kill: () => {
           if (!ptyId) return Promise.resolve({ ok: true });
           const killPromise = postTerminal('/terminal/kill', { sessionId: ptyId });
@@ -209,6 +216,7 @@
         exposeTerminalApi();
         readTimer = setInterval(readTerminalOutput, 80);
         void readTerminalOutput();
+        term.focus();
       } catch (e) {
         connected = false;
         showDisconnected(`Disconnected. ${e.message || 'Click to reconnect.'}`);
@@ -217,8 +225,16 @@
     }
 
     // ---- Terminal input -> PTY ----
+    let dataEvents = 0; // 진단용: xterm이 사용자 입력을 인식한 횟수
     term.onData((data) => {
+      dataEvents += 1;
       writeToTerminal(data).catch(() => {});
+    });
+
+    // 프레임 내부 어디를 클릭해도 xterm으로 포커스 복귀
+    // (chrome host의 프레임 포커스 핸드오프는 부모(eg-desk-surface)가 담당)
+    window.addEventListener('mousedown', () => {
+      setTimeout(() => term.focus(), 0);
     });
 
     // ---- Resize handling ----

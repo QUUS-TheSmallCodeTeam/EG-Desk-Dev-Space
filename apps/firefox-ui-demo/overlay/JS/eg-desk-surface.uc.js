@@ -3354,20 +3354,31 @@
       const maxWidth = Math.max(240, viewportW - margin * 2);
       hud.style.maxWidth = `${maxWidth}px`;
       const rect = hud.getBoundingClientRect();
-      const computedLeft = Number.parseFloat(getComputedStyle(hud).left);
-      const visualOffset = Number.isFinite(computedLeft) ? rect.left - computedLeft : 0;
+      const computedStyle = getComputedStyle(hud);
+      const computedLeft = Number.parseFloat(computedStyle.left);
+      // visualOffset은 조상 transform/zoom 보정용 — HUD 자신의 진행 중
+      // slide-in transform(translateX)까지 포함하면 오픈 직후 left가
+      // 화면 중앙으로 밀렸다가 240ms 후 우측으로 스냅하는 글리치 발생.
+      // 자기 transform의 X 성분은 측정에서 제외한다.
+      let ownTx = 0;
+      if (computedStyle.transform && computedStyle.transform !== 'none') {
+        try { ownTx = new DOMMatrixReadOnly(computedStyle.transform).e; } catch {}
+      }
+      const visualOffset = Number.isFinite(computedLeft) ? rect.left - ownTx - computedLeft : 0;
       const width = Math.min(rect.width || 396, maxWidth);
       let left = Math.max(margin, viewportW - width - margin - visualOffset);
       hud.style.left = `${left}px`;
       hud.style.right = 'auto';
+      // overflow 보정도 자기 transform 제외한 layout 기준으로 측정 —
+      // gBCR 그대로 쓰면 slide-in 중 재측정이 left를 다시 중앙으로 끌어내린다
       const adjustedRect = hud.getBoundingClientRect();
-      const overflowRight = adjustedRect.right - viewportW + margin;
+      const overflowRight = (adjustedRect.right - ownTx) - viewportW + margin;
       if (overflowRight > 0) {
         left = Math.max(margin, left - overflowRight);
         hud.style.left = `${left}px`;
       }
       const finalRect = hud.getBoundingClientRect();
-      const overflowLeft = margin - finalRect.left;
+      const overflowLeft = margin - (finalRect.left - ownTx);
       if (overflowLeft > 0) {
         hud.style.left = `${left + overflowLeft}px`;
       }
@@ -5463,6 +5474,9 @@
     const hud = document.getElementById('egd-hud');
     if (!hud) return;
     hud.classList.toggle('egd-hud-hidden', hidden);
+    // 재표시 경로(카드 풀스크린 해제 등)에서도 도킹 위치 재계산 —
+    // 이전 오픈에서 남은 inline left가 stale하면 중앙에 도킹되는 잔존 버그 방지
+    if (!hidden) syncHudViewportFit();
   }
 
   function syncCardFullscreenLayout() {
@@ -12456,6 +12470,28 @@
     for (const target of [card, header]) {
       target.addEventListener('mousedown', () => activateCard(), true);
     }
+    // ---- Keyboard focus handoff ----
+    // chrome 문서에서는 iframe 요소 자체가 chrome activeElement가 되어야
+    // 키 이벤트가 서브문서(xterm)로 라우팅된다. xterm의 in-frame focus만으로는
+    // 프레임 경계를 못 넘으므로 부모 쪽에서 명시적으로 핸드오프한다.
+    const focusTerminal = () => {
+      try {
+        termBrowser.focus();
+        termBrowser.contentWindow?.terminalAPI?.focus?.();
+      } catch {}
+    };
+    card.addEventListener('mousedown', () => {
+      if (state.panModifier) return;
+      // xterm의 mousedown preventDefault 이후에 포커스가 잡히도록 defer
+      setTimeout(focusTerminal, 0);
+    }, true);
+    // 최초 연결 완료 시 자동 포커스 (terminal.html이 terminal-ready postMessage 발송)
+    const onTerminalReady = (ev) => {
+      if (ev.data?.type === 'terminal-ready' && ev.source === termBrowser.contentWindow) {
+        focusTerminal();
+      }
+    };
+    window.addEventListener('message', onTerminalReady);
 
     // ---- Header drag (move) ----
     let drag = null;
@@ -12530,6 +12566,7 @@
     const cleanupCard = () => {
       document.removeEventListener('mousemove', onMouseMove);
       document.removeEventListener('mouseup', onMouseUp);
+      window.removeEventListener('message', onTerminalReady);
       // Kill PTY session via the browser's terminalAPI
       try {
         const contentWin = termBrowser.contentWindow || termBrowser.contentDocument?.defaultView;
