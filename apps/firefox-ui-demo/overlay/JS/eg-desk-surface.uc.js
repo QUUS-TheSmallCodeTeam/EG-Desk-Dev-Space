@@ -53,10 +53,12 @@
   ];
 
   const DOCK_LEFT = [
-    { id: 'chat',     label: '채팅',    icon: '☰' },
+    // 아이콘 규칙: 모노크롬 텍스트 글리프. 이모지 기본표시(컬러) 코드포인트는
+    // ︎(VS15)로 텍스트 표시 강제 — macOS Firefox chrome에서 렌더 실측 완료.
+    { id: 'chat',     label: '채팅',    icon: '🗨︎' },
     { id: 'shelf',    label: '서재',    icon: '▤' },
-    { id: 'ontology', label: '온톨로지', icon: '◇' },
-    { id: 'browser',  label: '브라우저', icon: '◎' },
+    { id: 'ontology', label: '온톨로지', icon: '❖' },
+    { id: 'browser',  label: '브라우저', icon: '🌐︎' },
     { id: 'ide',      label: 'IDE',     icon: '<>' },
     { id: 'terminal', label: '터미널',  icon: '>_' },
     { id: 'settings', label: '설정',   icon: '⚙' },
@@ -64,14 +66,14 @@
   ];
   const DOCK_CENTER = [
     { id: 'pencil',   label: '펜',  icon: '✎' },
-    { id: 'hand',     label: '손',    icon: '↕' },
+    { id: 'hand',     label: '손',    icon: '✥' },
     { id: 'square',   label: '사각형',  icon: '□' },
     { id: 'ellipse',  label: '원',      icon: '○' },
     { id: 'line',     label: '선',      icon: '╱' },
-    { id: 'arrow',    label: '화살표',   icon: '↖', active: true },
+    { id: 'arrow',    label: '선택',   icon: '↖', active: true },
   ];
   const DOCK_RIGHT = [
-    { id: 'trash',    label: '휴지통',   icon: '⌫' },
+    { id: 'trash',    label: '휴지통',   icon: '🗑︎' },
   ];
 
   const SELF_MEMBER = '나';
@@ -2365,7 +2367,7 @@
             ev.stopPropagation();
             deleteAgenda(entry.id);
           },
-        }, '⌫'),
+        }, '🗑︎'),
       ),
     ));
     panel.replaceChildren(
