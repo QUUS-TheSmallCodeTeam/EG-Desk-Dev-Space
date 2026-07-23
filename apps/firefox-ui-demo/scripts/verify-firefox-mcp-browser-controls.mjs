@@ -265,6 +265,19 @@ async function main() {
                 menuLabels,
                 sourceUri: card._sourceRef?.uri || null,
                 dirty: api.state.agenda.dirty,
+                deskWindowShell: {
+                  mounted: card.classList.contains('egd-desk-window') && card._deskWindowShell?.root === card,
+                  kind: card.dataset.deskWindowKind || '',
+                  inputPolicy: card.dataset.deskWindowInputPolicy || '',
+                  titlebarCount: card.querySelectorAll('.egd-desk-window-titlebar').length,
+                  identityCount: card.querySelectorAll('.egd-desk-window-identity').length,
+                  toolbarCount: card.querySelectorAll('.egd-desk-window-toolbar').length,
+                  progressCount: card.querySelectorAll('.egd-desk-window-progress').length,
+                  resizeHandleCount: card.querySelectorAll('.egd-card-resize-hit').length,
+                  minimizeDisabled: card.querySelector('.egd-card-dot-min')?.getAttribute('aria-disabled') === 'true',
+                  maximizeInteractive: card.querySelector('.egd-card-dot-max')?.getAttribute('role') === 'button',
+                  titlebarHeight: card.querySelector('.egd-desk-window-titlebar')?.getBoundingClientRect().height || 0,
+                },
               };
                   });
                 });
@@ -293,12 +306,116 @@ async function main() {
   if (!check.buttonTitles.includes('홈') || !check.buttonTitles.includes('복제') || !check.buttonTitles.includes('더보기')) failures.push('toolbar controls');
   if (!check.pageTitle || !check.pageStatus || !check.securityText) failures.push('browser chrome status');
   if (!check.menuOpen || check.menuLabels.length < 5 || !check.menuLabels.includes('URL 복사')) failures.push('browser menu');
+  if (
+    !check.deskWindowShell?.mounted
+    || check.deskWindowShell.kind !== 'browser'
+    || check.deskWindowShell.inputPolicy !== 'native-content'
+    || check.deskWindowShell.titlebarCount !== 1
+    || check.deskWindowShell.identityCount !== 1
+    || check.deskWindowShell.toolbarCount !== 1
+    || check.deskWindowShell.progressCount !== 1
+    || check.deskWindowShell.resizeHandleCount !== 8
+    || !check.deskWindowShell.minimizeDisabled
+    || !check.deskWindowShell.maximizeInteractive
+    || Math.abs(check.deskWindowShell.titlebarHeight - 32) > 0.75
+  ) failures.push('Browser Desk Window Shell');
   if (!check.dirty) failures.push('agenda dirty');
   if (failures.length) {
     throw new Error(`Browser controls verification failed (${failures.join(', ')}): ${JSON.stringify(check, null, 2)}`);
   }
 
   const screenshot = resultText(await callTool('screenshot_page', { saveTo: SCREENSHOT_PATH }, 30000));
+
+  const lifecycle = parseToolJson(resultText(await callTool('evaluate_privileged_script', {
+    expression: `(async () => {
+      const wait = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
+      const card = window.__egdesk.cardRuntime.openBrowserCard('https://example.com/desk-window-lifecycle', { openMode: 'new' });
+      await wait(100);
+      const shell = card._deskWindowShell;
+      const before = {
+        width: card.offsetWidth,
+        height: card.offsetHeight,
+        left: card.offsetLeft,
+        top: card.offsetTop,
+      };
+      const handle = card.querySelector('.egd-card-resize-hit-se');
+      handle.dispatchEvent(new MouseEvent('mousedown', {
+        button: 0,
+        clientX: card.getBoundingClientRect().right,
+        clientY: card.getBoundingClientRect().bottom,
+        bubbles: true,
+        cancelable: true,
+        view: window,
+      }));
+      window.dispatchEvent(new MouseEvent('mousemove', {
+        button: 0,
+        clientX: card.getBoundingClientRect().right + 48,
+        clientY: card.getBoundingClientRect().bottom + 36,
+        bubbles: true,
+        cancelable: true,
+        view: window,
+      }));
+      window.dispatchEvent(new MouseEvent('mouseup', {
+        button: 0,
+        bubbles: true,
+        cancelable: true,
+        view: window,
+      }));
+      await wait(30);
+      const resized = {
+        width: card.offsetWidth,
+        height: card.offsetHeight,
+        left: card.offsetLeft,
+        top: card.offsetTop,
+      };
+
+      const maximize = card.querySelector('.egd-card-dot-max');
+      maximize.click();
+      await wait(30);
+      const maximized = card.classList.contains('egd-card-fullscreen')
+        && document.documentElement.classList.contains('egd-card-fullscreen-active');
+      maximize.click();
+      await wait(30);
+      const restored = {
+        width: card.offsetWidth,
+        height: card.offsetHeight,
+        left: card.offsetLeft,
+        top: card.offsetTop,
+      };
+
+      let cleanupCount = 0;
+      shell.registerCleanup(() => { cleanupCount += 1; });
+      shell.requestClose();
+      shell.requestClose();
+      await wait(30);
+      return {
+        before,
+        resized,
+        resizedLarger: resized.width > before.width + 20 && resized.height > before.height + 15,
+        maximized,
+        restoredAfterMaximize:
+          Math.abs(restored.width - resized.width) <= 1
+          && Math.abs(restored.height - resized.height) <= 1
+          && Math.abs(restored.left - resized.left) <= 1
+          && Math.abs(restored.top - resized.top) <= 1,
+        cleanupCount,
+        removed: !card.isConnected,
+        deskStillVisible:
+          !!document.getElementById('egd-canvas-viewport')
+          && !!document.getElementById('egd-desk-rail'),
+      };
+    })()`,
+  }, 30000)));
+  if (
+    !lifecycle.resizedLarger
+    || !lifecycle.maximized
+    || !lifecycle.restoredAfterMaximize
+    || lifecycle.cleanupCount !== 1
+    || !lifecycle.removed
+    || !lifecycle.deskStillVisible
+  ) {
+    throw new Error(`Desk Window lifecycle verification failed: ${JSON.stringify(lifecycle, null, 2)}`);
+  }
 
   const cleanup = parseToolJson(resultText(await callTool('evaluate_privileged_script', {
     expression: `(() => {
@@ -330,6 +447,7 @@ async function main() {
     screenshot: SCREENSHOT_PATH,
     remount,
     check,
+    lifecycle,
     cleanup,
     screenshotResult: screenshot,
   }, null, 2));

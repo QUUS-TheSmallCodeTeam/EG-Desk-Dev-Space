@@ -1,9 +1,9 @@
 {
-  "schemaVersion": 1,
+  "schemaVersion": 3,
   "sourceRoot": "ontology",
-  "sourceHash": "89a91dda53b4b624ae1b0566d5629fd053910007",
-  "nodeCount": 94,
-  "edgeCount": 388,
+  "sourceHash": "871a97c0979e9f6f0133fba2c0182c44aeacfe64",
+  "nodeCount": 102,
+  "edgeCount": 383,
   "nodes": [
     {
       "id": "action.execution",
@@ -16,6 +16,16 @@
       "path": null,
       "ontologyPath": null,
       "relations": {},
+      "relationEdges": [],
+      "viewCells": [],
+      "subjectId": null,
+      "snapshotId": null,
+      "timeSlice": null,
+      "snapshotStatus": null,
+      "continuesFrom": null,
+      "rootRef": null,
+      "occurrences": [],
+      "referenceEdges": [],
       "wikiLinks": [],
       "body": "",
       "synthetic": true
@@ -44,6 +54,15 @@
         ]
       },
       "relationEdges": [],
+      "viewCells": [],
+      "subjectId": null,
+      "snapshotId": null,
+      "timeSlice": null,
+      "snapshotStatus": null,
+      "continuesFrom": null,
+      "rootRef": null,
+      "occurrences": [],
+      "referenceEdges": [],
       "wikiLinks": [],
       "body": "# Runtime Actors\n\nRuntime actors are entities that can observe, decide, or act inside EG-Desk.\n\nExamples:\n\n- human user\n- Codex root thread\n- subagent\n- browser controller\n- terminal process\n- MCP tool\n- heartbeat automation\n- external service\n\nActors should be described by coordinates, not just names:\n\n```text\nActor = {\n  reality_scope,\n  architecture_scope,\n  present_surface,\n  past_sources,\n  future_objective,\n  multiverse_branch,\n  allowed_actions,\n  output_contract\n}\n```\n\nThis is where swarm design fits. A swarm is a coordinated pattern of runtime actors over the EG-Desk ontology, not the ontology's foundation."
     },
@@ -58,6 +77,16 @@
       "path": null,
       "ontologyPath": null,
       "relations": {},
+      "relationEdges": [],
+      "viewCells": [],
+      "subjectId": null,
+      "snapshotId": null,
+      "timeSlice": null,
+      "snapshotStatus": null,
+      "continuesFrom": null,
+      "rootRef": null,
+      "occurrences": [],
+      "referenceEdges": [],
       "wikiLinks": [],
       "body": "",
       "synthetic": true
@@ -81,6 +110,15 @@
         ]
       },
       "relationEdges": [],
+      "viewCells": [],
+      "subjectId": null,
+      "snapshotId": null,
+      "timeSlice": null,
+      "snapshotStatus": null,
+      "continuesFrom": null,
+      "rootRef": null,
+      "occurrences": [],
+      "referenceEdges": [],
       "wikiLinks": [
         "egdesk-desk.md",
         "egdesk-agenda.md",
@@ -101,6 +139,16 @@
       "path": null,
       "ontologyPath": null,
       "relations": {},
+      "relationEdges": [],
+      "viewCells": [],
+      "subjectId": null,
+      "snapshotId": null,
+      "timeSlice": null,
+      "snapshotStatus": null,
+      "continuesFrom": null,
+      "rootRef": null,
+      "occurrences": [],
+      "referenceEdges": [],
       "wikiLinks": [],
       "body": "",
       "synthetic": true
@@ -116,6 +164,16 @@
       "path": null,
       "ontologyPath": null,
       "relations": {},
+      "relationEdges": [],
+      "viewCells": [],
+      "subjectId": null,
+      "snapshotId": null,
+      "timeSlice": null,
+      "snapshotStatus": null,
+      "continuesFrom": null,
+      "rootRef": null,
+      "occurrences": [],
+      "referenceEdges": [],
       "wikiLinks": [],
       "body": "",
       "synthetic": true
@@ -131,6 +189,16 @@
       "path": null,
       "ontologyPath": null,
       "relations": {},
+      "relationEdges": [],
+      "viewCells": [],
+      "subjectId": null,
+      "snapshotId": null,
+      "timeSlice": null,
+      "snapshotStatus": null,
+      "continuesFrom": null,
+      "rootRef": null,
+      "occurrences": [],
+      "referenceEdges": [],
       "wikiLinks": [],
       "body": "",
       "synthetic": true
@@ -158,6 +226,15 @@
         ]
       },
       "relationEdges": [],
+      "viewCells": [],
+      "subjectId": null,
+      "snapshotId": null,
+      "timeSlice": null,
+      "snapshotStatus": null,
+      "continuesFrom": null,
+      "rootRef": null,
+      "occurrences": [],
+      "referenceEdges": [],
       "wikiLinks": [],
       "body": "# Space Axis\n\nThe space axis is for physical, spatial, and compute-object reality.\n\nIt includes:\n\n- people, companies, places, and devices\n- CPU, RAM, disk, GPU, OS, browser, terminal, backend, database\n- files, folders, repos, Drive documents, source refs as addressable objects\n- visible panes, cards, canvas placement, and screen surfaces\n\n## Rule\n\nSpace is not just visual layout. It is the object/surface/resource axis.\n\n```text\nSpace\n  -> physical object\n  -> compute object\n  -> file/storage object\n  -> visible surface\n```\n\nStorage and topology are not separate primary axes. They are binding patterns inside or across Space, Time, and Virtual."
     },
@@ -188,6 +265,15 @@
         ]
       },
       "relationEdges": [],
+      "viewCells": [],
+      "subjectId": null,
+      "snapshotId": null,
+      "timeSlice": null,
+      "snapshotStatus": null,
+      "continuesFrom": null,
+      "rootRef": null,
+      "occurrences": [],
+      "referenceEdges": [],
       "wikiLinks": [],
       "body": "# Time Axis\n\nThe time axis is for temporal state and transition.\n\nIn product-facing views, the main time axis flows left to right:\n\n```text\nPast -> Present -> Future\n```\n\nBackward references can exist as evidence lookup or memory retrieval, but the visible time axis should not be drawn as a bidirectional arrow unless the view is explicitly about branching, rewind, or comparison.\n\nIt includes:\n\n- past evidence, memory, chat history, logs, revisions\n- present executable state and active context\n- future vision, goals, plans, tasks, and commitments\n- multiverse branches, simulations, and hypothetical states\n- events and actions as transitions\n\n## Rule\n\nAction is not a separate primary axis. It is a temporal transition that touches Space and Virtual.\n\n```text\nAction\n  = Time transition\n  + Space target\n  + Virtual meaning\n```"
     },
@@ -217,6 +303,15 @@
         ]
       },
       "relationEdges": [],
+      "viewCells": [],
+      "subjectId": null,
+      "snapshotId": null,
+      "timeSlice": null,
+      "snapshotStatus": null,
+      "continuesFrom": null,
+      "rootRef": null,
+      "occurrences": [],
+      "referenceEdges": [],
       "wikiLinks": [],
       "body": "# Virtual Axis\n\nThe virtual axis is for conceptual and semantic identity.\n\nIt includes:\n\n- canonical concepts and entities\n- ontology concepts\n- goals, plans, tasks, blockers, decisions\n- agent identity, role, memory, and context meaning\n- source reference meaning, not just the bytes or path\n\n## Rule\n\nIntent is not a separate primary axis. It is a virtual meaning that becomes temporal commitment and spatial work.\n\n```text\nIntent\n  = Virtual objective\n  + Time commitment\n  + Space artifact or action surface\n```"
     },
@@ -231,6 +326,16 @@
       "path": null,
       "ontologyPath": null,
       "relations": {},
+      "relationEdges": [],
+      "viewCells": [],
+      "subjectId": null,
+      "snapshotId": null,
+      "timeSlice": null,
+      "snapshotStatus": null,
+      "continuesFrom": null,
+      "rootRef": null,
+      "occurrences": [],
+      "referenceEdges": [],
       "wikiLinks": [],
       "body": "",
       "synthetic": true
@@ -246,6 +351,16 @@
       "path": null,
       "ontologyPath": null,
       "relations": {},
+      "relationEdges": [],
+      "viewCells": [],
+      "subjectId": null,
+      "snapshotId": null,
+      "timeSlice": null,
+      "snapshotStatus": null,
+      "continuesFrom": null,
+      "rootRef": null,
+      "occurrences": [],
+      "referenceEdges": [],
       "wikiLinks": [],
       "body": "",
       "synthetic": true
@@ -261,6 +376,16 @@
       "path": null,
       "ontologyPath": null,
       "relations": {},
+      "relationEdges": [],
+      "viewCells": [],
+      "subjectId": null,
+      "snapshotId": null,
+      "timeSlice": null,
+      "snapshotStatus": null,
+      "continuesFrom": null,
+      "rootRef": null,
+      "occurrences": [],
+      "referenceEdges": [],
       "wikiLinks": [],
       "body": "",
       "synthetic": true
@@ -276,6 +401,16 @@
       "path": null,
       "ontologyPath": null,
       "relations": {},
+      "relationEdges": [],
+      "viewCells": [],
+      "subjectId": null,
+      "snapshotId": null,
+      "timeSlice": null,
+      "snapshotStatus": null,
+      "continuesFrom": null,
+      "rootRef": null,
+      "occurrences": [],
+      "referenceEdges": [],
       "wikiLinks": [],
       "body": "",
       "synthetic": true
@@ -291,6 +426,16 @@
       "path": null,
       "ontologyPath": null,
       "relations": {},
+      "relationEdges": [],
+      "viewCells": [],
+      "subjectId": null,
+      "snapshotId": null,
+      "timeSlice": null,
+      "snapshotStatus": null,
+      "continuesFrom": null,
+      "rootRef": null,
+      "occurrences": [],
+      "referenceEdges": [],
       "wikiLinks": [],
       "body": "",
       "synthetic": true
@@ -310,8 +455,41 @@
       "ontologyPath": "concepts/compute.md",
       "relations": {},
       "relationEdges": [],
+      "viewCells": [],
+      "subjectId": null,
+      "snapshotId": null,
+      "timeSlice": null,
+      "snapshotStatus": null,
+      "continuesFrom": null,
+      "rootRef": null,
+      "occurrences": [],
+      "referenceEdges": [],
       "wikiLinks": [],
       "body": "# Hardware Compute\n\nCompute is an object handle for local compute substrate.\n\nWhether it groups CPU, RAM, disk, GPU, or other resources belongs in a relation map."
+    },
+    {
+      "id": "computer",
+      "label": "컴퓨터",
+      "type": "concept_handle",
+      "layer": "architecture",
+      "summary": "Reusable computer concept referenced by physical and virtual composites.",
+      "aliases": [],
+      "abbreviations": {},
+      "path": "ontology/concepts/computer.md",
+      "ontologyPath": "concepts/computer.md",
+      "relations": {},
+      "relationEdges": [],
+      "viewCells": [],
+      "subjectId": null,
+      "snapshotId": null,
+      "timeSlice": null,
+      "snapshotStatus": null,
+      "continuesFrom": null,
+      "rootRef": null,
+      "occurrences": [],
+      "referenceEdges": [],
+      "wikiLinks": [],
+      "body": "# 컴퓨터\n\nThe same computer concept may appear through multiple reference occurrences."
     },
     {
       "id": "cpu",
@@ -332,6 +510,15 @@
       "ontologyPath": "concepts/cpu.md",
       "relations": {},
       "relationEdges": [],
+      "viewCells": [],
+      "subjectId": null,
+      "snapshotId": null,
+      "timeSlice": null,
+      "snapshotStatus": null,
+      "continuesFrom": null,
+      "rootRef": null,
+      "occurrences": [],
+      "referenceEdges": [],
       "wikiLinks": [],
       "body": "# CPU\n\nCPU is an object handle for an execution resource.\n\nIts position in a hierarchy depends on the active relation map."
     },
@@ -351,6 +538,15 @@
       "ontologyPath": "concepts/desktop.md",
       "relations": {},
       "relationEdges": [],
+      "viewCells": [],
+      "subjectId": null,
+      "snapshotId": null,
+      "timeSlice": null,
+      "snapshotStatus": null,
+      "continuesFrom": null,
+      "rootRef": null,
+      "occurrences": [],
+      "referenceEdges": [],
       "wikiLinks": [],
       "body": "# Desktop\n\nDesktop is an object handle for the visible operating plane.\n\nWhat it contains depends on the relation map being used."
     },
@@ -370,6 +566,15 @@
       "ontologyPath": "concepts/disk.md",
       "relations": {},
       "relationEdges": [],
+      "viewCells": [],
+      "subjectId": null,
+      "snapshotId": null,
+      "timeSlice": null,
+      "snapshotStatus": null,
+      "continuesFrom": null,
+      "rootRef": null,
+      "occurrences": [],
+      "referenceEdges": [],
       "wikiLinks": [],
       "body": "# Disk\n\nDisk is an object handle for persistent local storage.\n\nIts position in a hierarchy depends on the active relation map."
     },
@@ -403,6 +608,15 @@
         ]
       },
       "relationEdges": [],
+      "viewCells": [],
+      "subjectId": null,
+      "snapshotId": null,
+      "timeSlice": null,
+      "snapshotStatus": null,
+      "continuesFrom": null,
+      "rootRef": null,
+      "occurrences": [],
+      "referenceEdges": [],
       "wikiLinks": [],
       "body": "# Agenda\n\nAgenda is an EG-Desk product concept, not a generic todo list or folder.\n\nAn Agenda is the work boundary that pairs a task, objective, or project slice with the execution environment needed to do it.\n\nAn Agenda can include:\n\n- browser cards\n- file cards\n- chat cards\n- terminal cards\n- agent/context bindings\n- account/profile bindings\n- result cards\n- run bubbles and run playback\n\nAgenda nesting is a work decomposition graph, not a folder tree. Deep structure can exist in data, while the Desk UI shows the active slice.\n\n## Stable Definition\n\n```text\nAgenda = work + execution environment pairing\n```"
     },
@@ -434,6 +648,15 @@
         ]
       },
       "relationEdges": [],
+      "viewCells": [],
+      "subjectId": null,
+      "snapshotId": null,
+      "timeSlice": null,
+      "snapshotStatus": null,
+      "continuesFrom": null,
+      "rootRef": null,
+      "occurrences": [],
+      "referenceEdges": [],
       "wikiLinks": [],
       "body": "# Card\n\nCard is an EG-Desk product concept, not a generic rectangular UI element.\n\nA Card is a visible work surface on the Desk. Some cards also own or attach to a runtime process, browser context, file view, chat session, terminal session, or generated artifact.\n\nCard state is stored in Desk/world coordinates, not viewport pixels.\n\n## Stable Definition\n\n```text\nCard = view/runtime surface on the Desk\n```\n\nThe card concept covers a family of specific card types, such as browser card, file card, chat card, terminal card, result card, and ontology map card."
     },
@@ -467,6 +690,15 @@
         ]
       },
       "relationEdges": [],
+      "viewCells": [],
+      "subjectId": null,
+      "snapshotId": null,
+      "timeSlice": null,
+      "snapshotStatus": null,
+      "continuesFrom": null,
+      "rootRef": null,
+      "occurrences": [],
+      "referenceEdges": [],
       "wikiLinks": [],
       "body": "# Desk\n\nDesk is an EG-Desk product concept, not a generic desktop definition.\n\nIn EG-Desk, a Desk is the computer-level live work surface. It should feel like using \"my computer as a desk\", while internally projecting OS, browser, process, file, account, and agent resources into a canvas.\n\nDesk is not the same as:\n\n- a browser profile\n- a project folder\n- a static canvas document\n- the generic `desktop` object handle\n\nThe generic `desktop` handle can represent the visible operating plane. `egdesk.desk` is the product-level concept that gives that plane EG-Desk behavior, state, source refs, agenda membership, and runtime attachment rules.\n\n## Stable Definition\n\n```text\nDesk = computer-level live work surface\n```\n\nDesk contains Agendas and Cards. Its concrete runtime grouping may still be declared by relation maps."
     },
@@ -475,31 +707,29 @@
       "label": "Canvas-Native Ontology Rendering Plan",
       "type": "implementation_plan",
       "layer": "ontology",
-      "summary": "Plan for rendering EG-Desk ontology directly on the EG-Desk infinite canvas.",
+      "summary": "Implemented plan for a Desk-native time-snapshot composite lens.",
       "aliases": [],
       "abbreviations": {},
       "path": "ontology/canvas-rendering-plan.md",
       "ontologyPath": "canvas-rendering-plan.md",
       "relations": {
-        "implements": [
-          "egdesk.world",
-          "view.egdesk.world_graph",
-          "view.egdesk.faceted_concept_model"
-        ],
         "uses": [
           "egdesk.ontology.schema",
-          "ontology.canonical_concept",
-          "ontology.facet",
-          "ontology.projection",
-          "view.identity_rail",
-          "source.ref"
+          "view.time_sliced_flat_deck"
         ]
       },
       "relationEdges": [],
-      "wikiLinks": [
-        "views/time-sliced-flat-deck.md"
-      ],
-      "body": "# Canvas-Native Ontology Rendering Plan\n\nThe ontology should not become a standalone marketing website as its final home.\n\nThe source of truth is Markdown. The primary viewing surface is EG-Desk's infinite canvas. A separate browser page may exist as a development harness later, but the product-facing concept should render as an EG-Desk canvas card or canvas-native view.\n\nThe highest-value Markdown units are relation maps, not encyclopedia-like object definitions. Object pages can stay thin; relation maps declare the custom hierarchy and assembly that matter for the current work.\n\n## Direction\n\n```text\nontology/*.md\n  -> parser\n  -> graph.json\n  -> EG-Desk Ontology Map Card\n      -> canonical concept selection\n      -> three-axis focus view\n      -> identity rail\n      -> node detail\n      -> context bundle\n```\n\n## Product Placement\n\nThere are two product placements for the same renderer:\n\n1. `Ontology Map Card`\n   - interactive work surface inside EG-Desk\n   - supports coordinate-lens navigation, local pan/zoom, object selection, relation selection, and context loading\n   - does not expose hierarchy/time/spatial/focus/tilt as user-facing mode buttons\n\n2. `About / Vision curated preset`\n   - read-only or guided view using the same graph data\n   - explains EG-Desk's world model to a user without turning the first screen into a landing page\n\n## Primary Focus Layout\n\nThe product-facing focus layout should use time-sliced spatial panes.\n\n```text\nPast Pane  ->    Present Pane(active)  ->    Future Pane\nspace@past       space@present               space@future\n```\n\nThe concrete visualization method is [[views/time-sliced-flat-deck.md]].\n\nRules:\n\n- Time arranges panes horizontally in one direction: past on the left, present in the center, future on the right.\n- A physical pane is a real surface/container object.\n- Each time slice has a time-local virtual pane assembled from the physical pane and its evidence/meaning.\n- A trajectory pane is the assembled semantic/time-space across past, present, and future.\n- Objects live on physical panes: cards, files, runtime resources, surfaces, and people.\n- Virtual concepts are overlays or identity bindings attached to objects on physical panes, time-local virtual panes, and the trajectory pane.\n- `storage`, `topology`, `intent`, and `action` are binding types inside or between panes, not primary axes.\n- The product view should wrap all relevant levels: physical pane wrappers around actual panes, time-local virtual pane wrappers inside each slice, and a trajectory pane wrapper around the composed time-sliced space.\n- Pane labels should be unnecessary in the product view; the time-flow position, active emphasis, wrappers, and contained objects should make each pane's role inferable.\n- Internal strata such as object layer, binding band, axis, and virtual overlay should be visualized with bands, ribbons, anchors, and containment rather than written as labels in the canvas.\n- Focus mode should avoid global graph edges. It should show selected-object projections and selected-only relation details.\n- The current visualization method is a flat 2D deck seen from a shallow 2.5D camera angle. Pane thickness is not semantic; the angle only makes adjacent time panes and depth layers readable together.\n\n## Projection Types\n\nThe renderer may keep hierarchy, time, and spatial projections as internal development presets over the same canonical concept model, but the product interaction should not ask the user to choose these as modes.\n\n```text\ncanonical concept\n  + facet\n  + view rule\n  = projection node\n```\n\n### Hierarchy\n\nAnswers:\n\n```text\nWhere does this concept belong?\nWhat contains what?\nWhat should the LLM load first?\n```\n\n### Time\n\nAnswers:\n\n```text\nHow does evidence become present state?\nHow does present action update future plans?\nWhere do branches and simulations live?\n```\n\n### Spatial\n\nAnswers:\n\n```text\nWhere is this concept placed in the EG-Desk world?\nWhich runtime surface, actor, sourceRef, and objective are connected?\n```\n\nSpatial starts as a 2D pane layout:\n\n```text\n2D pane layout\n+ layer/depth emphasis\n+ connection lines\n+ layer clusters\n```\n\n2.5D or full 3D can come later only if thickness has a clear semantic role. The default pane should remain flat.\n\n### Time-Sliced Pane Focus\n\nAnswers:\n\n```text\nWhich time pane is active?\nWhich objects live on that space-at-time pane?\nWhich virtual identity overlays those objects?\nWhich binding types are active in this pane?\n```\n\nThis is the mode needed for concepts such as `entity.llm_chat_session`, where the active present pane contains spatial objects such as a chat card/session file/runtime, while virtual identity and intent overlay those objects and the side panes show past/future context.\n\n### Pane Inventory\n\nPane inventory answers:\n\n```text\nWhat objects are present in this time-local pane?\nWhich physical, storage, topology, intent, and action objects should be scanned together?\nWhich object should become the next object focus?\n```\n\nInteraction rule:\n\n- click pane empty space -> pane inventory\n- click an inventory object -> object focus\n- click a layer band -> emphasize that layer in the selected time pane\n- horizontal trackpad scroll -> move across time panes\n- vertical trackpad scroll -> emphasize one visual stratum in the selected time pane\n- pinch or Cmd/Ctrl + wheel -> semantic zoom\n- blank-pane drag -> card-local pan\n- click relation stroke -> side-panel relation detail\n- show a bounded inventory cluster, not all global graph edges\n- avoid generic mode toolbar controls such as focus/hierarchy/time/spatial or virtual/physical buttons\n\nVisual rule:\n\n- use unlabeled depth bands for physical / binding / virtual\n- show connection points on inventory objects\n- show orthogonal tree connectors for assembly/containment, such as desktop -> terminal -> cpu/ram/disk\n- show actual node-to-node connectors for co-present graph edges; depth connectors are structure, not semantic relation evidence\n- avoid visible relation label chips in the canvas; keep the visual reading simple\n\n## MVP\n\nThe first implementation should be deliberately small:\n\n- Parse Markdown frontmatter and wiki links into `graph.json`.\n- Copy `graph.json` into Firefox chrome resources.\n- Add a Dock entry that opens an `Ontology Map` card.\n- Render nodes and edges in SVG.\n- Support card-local pan and zoom.\n- Render one coordinate-lens view first.\n- Keep projection presets internal until there is a product reason to expose them.\n- Show selected node detail from parsed Markdown summary/body.\n\n## Next Renderer Step\n\nThe next renderer step should not add more global edge density. It should add selection-driven three-axis focus:\n\n- selected canonical concept\n- active time pane\n- identity rail for sibling projections\n- binding chips for storage/topology/intent/action\n- side pane previews for past/future context\n\n## Non-Goals For MVP\n\n- No full Markdown editor.\n- No graph mutation UI.\n- No external web app requirement.\n- No real Three.js scene yet.\n- No attempt to replace the existing Desk/Agenda/Card runtime model."
+      "viewCells": [],
+      "subjectId": null,
+      "snapshotId": null,
+      "timeSlice": null,
+      "snapshotStatus": null,
+      "continuesFrom": null,
+      "rootRef": null,
+      "occurrences": [],
+      "referenceEdges": [],
+      "wikiLinks": [],
+      "body": "# Canvas-Native Ontology Rendering Plan\n\n## Implemented v2\n\n- Ontology renders as a movable/resizable card inside the existing Desk.\n- Markdown graph generation uses schema version 3.\n- `subject_id`, `snapshot_id`, `ref_id`, recursive occurrences, and reference\n  edges are parsed and validated.\n- Runtime strata are `virtual` and `physical` only.\n- Present and future company-server snapshots demonstrate one continuing subject\n  with different Markdown documents and composites.\n- Time is a top axis with three coordinates across two time-continuous,\n  infinite-feel virtual/physical planes. The planes use paired local coordinates\n  and equal-sized projected frames with roughly three-quarter-frame overlap.\n  Virtual stays above physical; layer selection shifts one shared POV instead\n  of exchanging their frame positions;\n  their time boundaries create six addressable regions with no outer time surface\n  or six-card layout.\n- Snapshot roots with an empty `parent_ref` are scattered as the overview.\n  Layer changes never promote descendants into roots. Selecting a root expands\n  it with same-layer direct children; a time coordinate without a snapshot\n  stays concept- and edge-free.\n- The active layer pane renders the selected reference plus same-layer direct\n  children only; cross-layer children stay faintly visible on the rear pane and\n  move through the same time-coordinate camera below a translucent front-pane\n  veil. Their paired layer connectors remain vertical on screen.\n- Parent breadcrumb and literal square child indicators are implemented.\n- Side time coordinates use projected geometry, a five-item cap across their\n  two plane regions, and `+N` edge bundles.\n- Temporal edges use right/left anchors; cross-layer edges use dashed paired\n  depth anchors aligned vertically between the overlapping layers. Lines\n  have no relation labels.\n- Time and layer navigation are click-only semantic changes; blank/background\n  drag pans both coupled layer occurrence fields.\n- Pan, wheel pan, zoom, minimap, header drag, fullscreen, close, and reopen paths\n  are independently verified.\n- Search and right-side inspector are not mounted.\n\n## Runtime files\n\n```text\nontology/schema.md\nontology/snapshots/*.md\napps/firefox-ui-demo/scripts/generate-ontology-graph.mjs\napps/firefox-ui-demo/overlay/resources/ontology/graph.json\napps/firefox-ui-demo/overlay/JS/eg-desk-surface.uc.js\napps/firefox-ui-demo/overlay/CSS/eg-desk-surface.uc.css\n```\n\n## Deferred\n\n- search and automatic ancestor-path opening;\n- optional details inspector;\n- ontology editing and node repositioning;\n- future branching/multiverse authoring;\n- larger-domain performance and lazy occurrence loading."
     },
     {
       "id": "egdesk.ontology.index",
@@ -561,9 +791,21 @@
         ]
       },
       "relationEdges": [],
+      "viewCells": [],
+      "subjectId": null,
+      "snapshotId": null,
+      "timeSlice": null,
+      "snapshotStatus": null,
+      "continuesFrom": null,
+      "rootRef": null,
+      "occurrences": [],
+      "referenceEdges": [],
       "wikiLinks": [
-        "concepts/egdesk-world.md",
         "schema.md",
+        "concepts/time-sliced-spatial-pane.md",
+        "views/time-sliced-flat-deck.md",
+        "canvas-rendering-plan.md",
+        "concepts/egdesk-world.md",
         "concepts/canonical-concept.md",
         "concepts/facet.md",
         "concepts/axes/axis-space.md",
@@ -573,9 +815,6 @@
         "concepts/projection.md",
         "concepts/cross-facet-binding.md",
         "concepts/view-projection.md",
-        "concepts/identity-rail.md",
-        "concepts/time-sliced-spatial-pane.md",
-        "views/time-sliced-flat-deck.md",
         "concepts/facets/facet-space.md",
         "concepts/facets/facet-topology.md",
         "concepts/facets/facet-time.md",
@@ -604,9 +843,9 @@
         "maps/llm-chat-runtime-assembly.md",
         "views/egdesk-world-graph.md",
         "views/faceted-concept-model.md",
-        "canvas-rendering-plan.md"
+        "concepts/identity-rail.md"
       ],
-      "body": "# EG-Desk Ontology\n\nThis folder is the source-of-truth seed for EG-Desk's ontology-aware operating world.\n\nThe ontology should be readable as Markdown, linkable like Obsidian, and parseable by a local web UI. The web UI can render graphs, timelines, and detail panels, but it should not become the source of truth.\n\n## Core Sentence\n\nEG-Desk is an ontology-aware operating desk that projects reality, compute architecture, and time-axis representatives into a live work surface.\n\n```text\nReality\n+ Hardware and software architecture\n+ Time-axis representatives\n  - Past\n  - Present\n  - Future\n  - Multiverse\n= EG-Desk virtual operating world\n```\n\n## Primary Load Order\n\nFor an LLM or parser, start here:\n\n1. [[concepts/egdesk-world.md]]\n2. [[schema.md]]\n3. [[concepts/canonical-concept.md]]\n4. [[concepts/facet.md]]\n5. [[concepts/axes/axis-space.md]]\n6. [[concepts/axes/axis-time.md]]\n7. [[concepts/axes/axis-virtual.md]]\n8. [[concepts/binding-type.md]]\n9. [[concepts/projection.md]]\n10. [[concepts/cross-facet-binding.md]]\n11. [[concepts/view-projection.md]]\n12. [[concepts/identity-rail.md]]\n13. [[concepts/time-sliced-spatial-pane.md]]\n14. [[views/time-sliced-flat-deck.md]]\n15. [[concepts/facets/facet-space.md]]\n16. [[concepts/facets/facet-topology.md]]\n17. [[concepts/facets/facet-time.md]]\n18. [[concepts/facets/facet-storage.md]]\n19. [[concepts/facets/facet-intent.md]]\n20. [[concepts/facets/facet-action.md]]\n21. [[concepts/reality.md]]\n22. [[concepts/architecture-runtime.md]]\n23. [[concepts/time-past.md]]\n24. [[concepts/time-present.md]]\n25. [[concepts/time-future.md]]\n26. [[concepts/time-multiverse.md]]\n27. [[concepts/operation-layer.md]]\n28. [[concepts/actor-runtime.md]]\n29. [[concepts/source-ref.md]]\n30. [[concepts/structured-output.md]]\n31. [[concepts/egdesk-desk.md]]\n32. [[concepts/egdesk-agenda.md]]\n33. [[concepts/egdesk-card.md]]\n34. [[concepts/egdesk-run-bubble.md]]\n35. [[concepts/egdesk-run-playback.md]]\n\nFor concrete assembly examples, load:\n\n1. [[examples/llm-chat-session.md]]\n2. [[examples/desktop-runtime.md]]\n3. [[examples/chat-memory.md]]\n\nFor custom relation maps, load:\n\n1. [[maps/local-runtime-inventory.md]]\n2. [[maps/llm-chat-runtime-assembly.md]]\n\nFor visual overviews, open:\n\n1. [[views/egdesk-world-graph.md]]\n2. [[views/faceted-concept-model.md]]\n3. [[views/time-sliced-flat-deck.md]]\n\nFor the canvas-native rendering path, open [[canvas-rendering-plan.md]].\n\n## Boundary\n\nSubagents, tools, browser controllers, and human collaborators are runtime actors inside the EG-Desk world. They are not the root ontology.\n\nThe root ontology is:\n\n```text\ncanonical concepts\n  -> three primary axes\n      -> Space\n      -> Time\n      -> Virtual\n  -> binding types\n      -> storage / topology / intent / action\n  -> world topology\n      -> reality\n      -> architecture\n      -> time representatives\n      -> operation layer\n      -> actors and actions\n```\n\nHierarchy is axis-local. A physical pane is a real surface/container object; each time slice also has a time-local virtual pane assembled from physical evidence and meaning. Past, present, and future are then wrapped again by a trajectory pane. Objects live on physical panes, and virtual concepts act as semantic overlays or identity bindings on those objects and across the composed virtual panes. Storage, topology, intent, and action describe how Space, Time, and Virtual intertwine.\n\n## Concept Definition Boundary\n\nUse different document weights for different concept classes:\n\n```text\ngeneric object handles\n  -> thin page\n  -> aliases / abbreviations / source identity hints\n  -> relation maps declare context-specific assembly\n\nEG-Desk product concepts\n  -> short real definition\n  -> boundaries against generic meanings\n  -> stable product relations\n  -> relation maps only for specific runtime assembly\n```\n\nExamples:\n\n- `desktop` is a generic object handle for the visible operating plane.\n- `egdesk.desk` is the EG-Desk product concept for a computer-level live work surface.\n- `terminal`, `cpu`, `ram`, and `disk` stay thin handles.\n- `egdesk.agenda`, `egdesk.card`, `egdesk.run_bubble`, and `egdesk.run_playback` keep product definitions because their meaning is custom to EG-Desk.\n\n## Existing Project Anchors\n\nThis ontology wraps existing EG-Desk product/runtime decisions rather than replacing them:\n\n- `Desk / Agenda / Card`: `apps/firefox-ui-demo/docs/DESK_AGENDA_CARD_RUNTIME_MODEL.md`\n- `Chat / Canvas / Agent layer`: `apps/firefox-ui-demo/docs/CHAT_CANVAS_AGENT_LAYER_MODEL.md`\n- `Run Playback`: `apps/firefox-ui-demo/docs/CANVAS_RUN_PLAYBACK_MODEL.md`\n- `Browser Agent Observation`: `apps/firefox-ui-demo/docs/BROWSER_AGENT_OBSERVATION_RUNTIME.md`\n- `Ontology Bridge`: `docs/vision/ontology-bridge.md`"
+      "body": "# EG-Desk Ontology\n\nThis folder is the source-of-truth seed for EG-Desk's ontology-aware operating world.\n\nThe ontology should be readable as Markdown, linkable like Obsidian, and parseable by a local web UI. The web UI can render graphs, timelines, and detail panels, but it should not become the source of truth.\n\n## Core Sentence\n\nEG-Desk is an ontology-aware operating desk that projects reality, compute architecture, and time-axis representatives into a live work surface.\n\n```text\nReality\n+ Hardware and software architecture\n+ Time-axis representatives\n  - Past\n  - Present\n  - Future\n  - Multiverse\n= EG-Desk virtual operating world\n```\n\n## Primary Load Order\n\nFor the current composite-lens v2 viewer, load this contract first:\n\n1. [[schema.md]]\n2. the selected file under `snapshots/`\n3. [[concepts/time-sliced-spatial-pane.md]]\n4. [[views/time-sliced-flat-deck.md]]\n5. [[canvas-rendering-plan.md]]\n\nThe snapshot occurrence tree and reference edges control the visible viewer.\nThe broader faceted model below remains authoring metadata and future explorer\nmaterial; it does not add a third runtime stratum or a right-side rail to v2.\n\n## Broader Ontology Load Order\n\nFor an LLM or parser, start here:\n\n1. [[concepts/egdesk-world.md]]\n2. [[schema.md]]\n3. [[concepts/canonical-concept.md]]\n4. [[concepts/time-sliced-spatial-pane.md]]\n5. [[views/time-sliced-flat-deck.md]]\n6. [[canvas-rendering-plan.md]]\n7. [[concepts/facet.md]]\n8. [[concepts/axes/axis-space.md]]\n9. [[concepts/axes/axis-time.md]]\n10. [[concepts/axes/axis-virtual.md]]\n11. [[concepts/binding-type.md]]\n12. [[concepts/projection.md]]\n13. [[concepts/cross-facet-binding.md]]\n14. [[concepts/view-projection.md]]\n15. [[concepts/facets/facet-space.md]]\n16. [[concepts/facets/facet-topology.md]]\n17. [[concepts/facets/facet-time.md]]\n18. [[concepts/facets/facet-storage.md]]\n19. [[concepts/facets/facet-intent.md]]\n20. [[concepts/facets/facet-action.md]]\n21. [[concepts/reality.md]]\n22. [[concepts/architecture-runtime.md]]\n23. [[concepts/time-past.md]]\n24. [[concepts/time-present.md]]\n25. [[concepts/time-future.md]]\n26. [[concepts/time-multiverse.md]]\n27. [[concepts/operation-layer.md]]\n28. [[concepts/actor-runtime.md]]\n29. [[concepts/source-ref.md]]\n30. [[concepts/structured-output.md]]\n31. [[concepts/egdesk-desk.md]]\n32. [[concepts/egdesk-agenda.md]]\n33. [[concepts/egdesk-card.md]]\n34. [[concepts/egdesk-run-bubble.md]]\n35. [[concepts/egdesk-run-playback.md]]\n\nFor concrete assembly examples, load:\n\n1. [[examples/llm-chat-session.md]]\n2. [[examples/desktop-runtime.md]]\n3. [[examples/chat-memory.md]]\n\nFor custom relation maps, load:\n\n1. [[maps/local-runtime-inventory.md]]\n2. [[maps/llm-chat-runtime-assembly.md]]\n\nFor visual overviews, open:\n\n1. [[views/egdesk-world-graph.md]]\n2. [[views/faceted-concept-model.md]]\n3. [[views/time-sliced-flat-deck.md]]\n\nFor the canvas-native rendering path, the first six documents above are the\nnormative contract. [[concepts/identity-rail.md]] is deferred and must not be\ntreated as part of the current Ontology Card layout.\n\n## Boundary\n\nSubagents, tools, browser controllers, and human collaborators are runtime actors inside the EG-Desk world. They are not the root ontology.\n\nThe root ontology is:\n\n```text\ncanonical concepts\n  -> three primary axes\n      -> Space\n      -> Time\n      -> Virtual\n  -> binding types\n      -> storage / topology / intent / action\n  -> world topology\n      -> reality\n      -> architecture\n      -> time representatives\n      -> operation layer\n      -> actors and actions\n```\n\nThe flat-deck viewer reads separate past/present/future composite snapshots through two runtime strata, `virtual` and `physical`. It renders the selected reference and its direct children as a local rectangle composition; reused, cyclic, cross-layer, and temporal relationships remain reference edges. Information and meaning are virtual concept attributes, not an additional runtime stratum.\n\n## Concept Definition Boundary\n\nUse different document weights for different concept classes:\n\n```text\ngeneric object handles\n  -> thin page\n  -> aliases / abbreviations / source identity hints\n  -> relation maps declare context-specific assembly\n\nEG-Desk product concepts\n  -> short real definition\n  -> boundaries against generic meanings\n  -> stable product relations\n  -> relation maps only for specific runtime assembly\n```\n\nExamples:\n\n- `desktop` is a generic object handle for the visible operating plane.\n- `egdesk.desk` is the EG-Desk product concept for a computer-level live work surface.\n- `terminal`, `cpu`, `ram`, and `disk` stay thin handles.\n- `egdesk.agenda`, `egdesk.card`, `egdesk.run_bubble`, and `egdesk.run_playback` keep product definitions because their meaning is custom to EG-Desk.\n\n## Existing Project Anchors\n\nThis ontology wraps existing EG-Desk product/runtime decisions rather than replacing them:\n\n- `Desk / Agenda / Card`: `apps/firefox-ui-demo/docs/DESK_AGENDA_CARD_RUNTIME_MODEL.md`\n- `Chat / Canvas / Agent layer`: `apps/firefox-ui-demo/docs/CHAT_CANVAS_AGENT_LAYER_MODEL.md`\n- `Run Playback`: `apps/firefox-ui-demo/docs/CANVAS_RUN_PLAYBACK_MODEL.md`\n- `Browser Agent Observation`: `apps/firefox-ui-demo/docs/BROWSER_AGENT_OBSERVATION_RUNTIME.md`\n- `Ontology Bridge`: `docs/vision/ontology-bridge.md`"
     },
     {
       "id": "egdesk.ontology.schema",
@@ -625,8 +864,17 @@
         ]
       },
       "relationEdges": [],
+      "viewCells": [],
+      "subjectId": null,
+      "snapshotId": null,
+      "timeSlice": null,
+      "snapshotStatus": null,
+      "continuesFrom": null,
+      "rootRef": null,
+      "occurrences": [],
+      "referenceEdges": [],
       "wikiLinks": [],
-      "body": "# Ontology Schema\n\nEach ontology file is a graph node. Markdown body is for human reading. Frontmatter is for parsers and LLM context selection.\n\nThe ontology is not meant to become a Wikipedia clone. Basic object pages such as `terminal`, `cpu`, or `disk` can be thin handles. EG-Desk product concepts such as `egdesk.desk`, `egdesk.agenda`, or `egdesk.card` should keep short definitions because their meaning is custom to EG-Desk. The most important authored units for context-specific hierarchy are relation maps: notes that declare how objects are assembled for a specific work context.\n\n## Required Frontmatter\n\n```yaml\nid: time.present\ntype: representative\nlayer: time\nsummary: Current executable state of the EG-Desk world.\nrelations:\n  receives_from:\n    - time.past\n  drives:\n    - action.execution\n```\n\n## Stable Fields\n\n| Field | Purpose |\n|---|---|\n| `id` | Stable machine id. Prefer dotted ids. |\n| `type` | Concept category such as `world`, `representative`, `surface`, `actor`, `primitive`. |\n| `layer` | Coarse grouping such as `reality`, `architecture`, `time`, `operation`, `runtime`, `evidence`. |\n| `summary` | One-line context summary for LLM preloading and graph labels. |\n| `aliases` | Thin object-name variants, alternate spellings, or common labels. |\n| `abbreviations` | Ambiguous short forms mapped to possible expansions. |\n| `relations` | Typed edges to other concept ids. |\n| `relation_edges` | Edges declared by a relation map between arbitrary source and target ids. |\n\n## Object Handle Metadata\n\nObject pages should stay thin, but they can carry name-disambiguation metadata.\n\n```yaml\nid: moq\ntype: object_handle\nlayer: operation\nsummary: Object handle for an ambiguous MOQ token in a specific work context.\naliases:\n  - MOQ\n  - M.O.Q.\nabbreviations:\n  MOQ:\n    - minimum order quantity\n    - message-oriented queue\n```\n\nThis does not define a universal concept. It only tells the parser and LLM what names may point at the same handle, and what ambiguity should be preserved.\n\n## Product Concept Definitions\n\nEG-Desk-specific concepts should have definitions because they are not generic world objects.\n\n```yaml\nid: egdesk.card\ntype: product_concept\nlayer: runtime\nsummary: EG-Desk visible work/runtime surface on the Desk.\naliases:\n  - Card\nrelations:\n  operates_inside:\n    - egdesk.desk\n  binds:\n    - source.ref\n```\n\nKeep these definitions short. They should explain the EG-Desk meaning, the boundary against generic meanings, and stable product relations. Do not put every possible runtime composition into the product concept page; use relation maps for that.\n\n## Relation Map Notes\n\nUse relation map notes when the value is in the user's custom assembly, not in the generic definition of a concept.\n\n```yaml\nid: map.llm_chat_runtime_assembly\ntype: relation_map\nlayer: architecture\nsummary: Custom runtime assembly for understanding an LLM chat session inside EG-Desk.\nrelations:\n  organizes:\n    - entity.llm_chat_session\nrelation_edges:\n  - source: desktop\n    relation: contains\n    target: terminal\n  - source: terminal\n    relation: uses\n    target: cpu\n```\n\nThis means:\n\n```text\nterminal.md says what object handle \"terminal\" refers to.\nmap.llm_chat_runtime_assembly.md says how terminal is assembled in this context.\n```\n\nThe same object can participate in a different relation map for another domain.\n\n## Faceted Modeling Fields\n\nThese can appear in frontmatter for simple cases or in the Markdown body for richer examples. The current parser treats frontmatter as the graph edge source and Markdown as human/LLM context.\n\n| Field | Purpose |\n|---|---|\n| `canonical_id` | Stable identity shared by projections of the same thing. |\n| `facet` | Lens used by a projection, such as `facet.space` or `facet.time`. |\n| `projection_id` | Stable id for a drawable projection node. |\n| `view` | Intended view preset or rendering mode. |\n| `source_ref` | Durable pointer to the file, repo, DB row, URL, or runtime state backing the concept. |\n| `axis` | Primary axis for a projection: `axis.space`, `axis.time`, or `axis.virtual`. |\n| `binding_type` | Intertwining pattern such as `storage`, `topology`, `intent`, or `action`. |\n\nProjection ids should make the facet obvious:\n\n```text\nprojection.<canonical>.<facet>.<local_name>\n```\n\nExample:\n\n```text\nprojection.llm_chat_session.storage.session_file\n```\n\n## Relation Vocabulary\n\nStart with a small relation set:\n\n| Relation | Meaning |\n|---|---|\n| `contains` | Parent concept contains child concepts inside the same axis or runtime stratum. |\n| `part_of` | Child concept belongs to a same-stratum parent assembly. |\n| `implemented_by` | Virtual/product object is realized through information and physical objects. |\n| `runs_on` | Information/runtime object executes on a physical substrate. |\n| `stored_in` | Information object or evidence is persisted in a storage substrate. |\n| `represents` | Node represents a real, information, or virtual thing. |\n| `projects_into` | Source is projected into a runtime/view layer. |\n| `receives_from` | Node is updated by another node. |\n| `drives` | Node drives another node or action. |\n| `acts_on` | Actor/action acts on a target surface/object. |\n| `observes` | Node observes target state without owning it. |\n| `records` | Node records traces/evidence about target. |\n| `branches_into` | Node can produce alternate branches or futures. |\n| `branches_from` | Node branches from a current state, goal, or plan. |\n| `binds` | Node binds a concept to a runtime resource. |\n| `derived_from` | Node is derived from another node or evidence. |\n| `represented_by` | Abstract concept is represented by concrete runtime/evidence nodes. |\n| `provides_evidence_for` | Evidence-bearing node supports another node. |\n| `updates` | Node mutates or refreshes another node. |\n| `uses` | Node depends on a primitive, actor, or resource. |\n| `informs` | Node influences another node without directly updating it. |\n| `operates_inside` | Actor/process is scoped inside a world or surface. |\n| `receives_constraints_from` | Node is governed by another node's constraints. |\n| `constrains` | Node limits or governs another node. |\n| `visualizes` | View node visualizes another concept or graph. |\n| `visualized_by` | Concept is visualized by a view node. |\n| `implements` | Plan or artifact implements a concept or decision. |\n| `same_identity_as` | Projection shares canonical identity with another projection. |\n| `projects_as` | Canonical concept projects into a specific projection node. |\n\n## Faceted Modeling Rule\n\nDo not use one hierarchy to represent every axis.\n\n```text\nCanonical Concept\n  -> Space axis projection\n  -> Time axis projection\n  -> Virtual axis projection\n  -> Binding types between axes\n```\n\nThe primary axes are:\n\n```text\nSpace\nTime\nVirtual\n```\n\n`storage`, `topology`, `intent`, and `action` are binding types, not primary axes.\n\nContainment is valid only inside one primary axis.\n\nCross-facet relations should be explicit bindings, identity-rail entries, or selected-focus connectors.\n\n## Context Loading Rule\n\nAn LLM should not load the whole ontology by default.\n\n```text\nindex.md\n  -> selected concept files\n  -> selected relation neighbors\n  -> source docs only when needed\n```\n\n## Web UI Rule\n\nThe web UI may cache parsed nodes and edges, but generated caches are secondary. The canonical source remains Markdown frontmatter and links.\n\nThe renderer should draw projections as the primary screen nodes and preserve canonical identity in the detail panel or identity rail."
+      "body": "# Ontology Schema\n\nEach ontology file is a graph node. Markdown body is for human reading. Frontmatter is for parsers and LLM context selection.\n\nThe ontology is not meant to become a Wikipedia clone. Basic object pages such as `terminal`, `cpu`, or `disk` can be thin handles. EG-Desk product concepts such as `egdesk.desk`, `egdesk.agenda`, or `egdesk.card` should keep short definitions because their meaning is custom to EG-Desk. The most important authored units for context-specific hierarchy are relation maps: notes that declare how objects are assembled for a specific work context.\n\n## Required Frontmatter\n\n```yaml\nid: time.present\ntype: representative\nlayer: time\nsummary: Current executable state of the EG-Desk world.\nrelations:\n  receives_from:\n    - time.past\n  drives:\n    - action.execution\n```\n\n## Stable Fields\n\n| Field | Purpose |\n|---|---|\n| `id` | Stable machine id. Prefer dotted ids. |\n| `type` | Concept category such as `world`, `representative`, `surface`, `actor`, `primitive`. |\n| `layer` | Coarse grouping such as `reality`, `architecture`, `time`, `operation`, `runtime`, `evidence`. |\n| `summary` | One-line context summary for LLM preloading and graph labels. |\n| `aliases` | Thin object-name variants, alternate spellings, or common labels. |\n| `abbreviations` | Ambiguous short forms mapped to possible expansions. |\n| `relations` | Typed edges to other concept ids. |\n| `relation_edges` | Edges declared by a relation map between arbitrary source and target ids. |\n| `view_cells` | Legacy view-specific home cells declared by a relation map. |\n| `subject_id` | Stable real-world subject shared by time-specific snapshot documents. |\n| `snapshot_id` | Unique ontology identity for one time-specific composite document. |\n| `occurrences` | Reference occurrences that form the snapshot's recursive rectangle tree. |\n| `reference_edges` | Typed links between occurrences, including time, layer, identity, and cyclic links. |\n\n## Object Handle Metadata\n\nObject pages should stay thin, but they can carry name-disambiguation metadata.\n\n```yaml\nid: moq\ntype: object_handle\nlayer: operation\nsummary: Object handle for an ambiguous MOQ token in a specific work context.\naliases:\n  - MOQ\n  - M.O.Q.\nabbreviations:\n  MOQ:\n    - minimum order quantity\n    - message-oriented queue\n```\n\nThis does not define a universal concept. It only tells the parser and LLM what names may point at the same handle, and what ambiguity should be preserved.\n\n## Product Concept Definitions\n\nEG-Desk-specific concepts should have definitions because they are not generic world objects.\n\n```yaml\nid: egdesk.card\ntype: product_concept\nlayer: runtime\nsummary: EG-Desk visible work/runtime surface on the Desk.\naliases:\n  - Card\nrelations:\n  operates_inside:\n    - egdesk.desk\n  binds:\n    - source.ref\n```\n\nKeep these definitions short. They should explain the EG-Desk meaning, the boundary against generic meanings, and stable product relations. Do not put every possible runtime composition into the product concept page; use relation maps for that.\n\n## Relation Map Notes\n\nUse relation map notes when the value is in the user's custom assembly, not in the generic definition of a concept.\n\n```yaml\nid: map.llm_chat_runtime_assembly\ntype: relation_map\nlayer: architecture\nsummary: Custom runtime assembly for understanding an LLM chat session inside EG-Desk.\nrelations:\n  organizes:\n    - entity.llm_chat_session\nrelation_edges:\n  - source: desktop\n    relation: contains\n    target: terminal\n  - source: terminal\n    relation: uses\n    target: cpu\n```\n\nThis means:\n\n```text\nterminal.md says what object handle \"terminal\" refers to.\nmap.llm_chat_runtime_assembly.md says how terminal is assembled in this context.\n```\n\nThe same object can participate in a different relation map for another domain.\n\n## Composite Snapshot Notes\n\nTime-specific composites are separate Markdown files even when they describe\none continuing real-world subject. `subject_id` stays stable; `snapshot_id` and\nthe occurrence tree may change.\n\n```yaml\nid: snapshot.company_server.present\ntype: composite_snapshot\nsubject_id: company-server\nsnapshot_id: company-server@present\ntime_slice: present\nstatus: observed\nroot_ref: present.server\noccurrences:\n  - ref_id: present.server\n    concept_id: server\n    layer: virtual\n  - ref_id: present.server.computer\n    concept_id: computer\n    parent_ref: present.server\n    relation: runs_on\n    layer: physical\nreference_edges:\n  - source_ref: present.server\n    relation: implemented_by\n    target_ref: present.server.computer\n```\n\nSnapshot rules:\n\n- `time_slice` is `past`, `present`, or `future`.\n- `status` is `historical`, `observed`, or `planned`.\n- occurrence `layer` is only `virtual` or `physical`.\n- `ref_id` is unique inside the complete generated graph.\n- `root_ref` and every `parent_ref` must resolve.\n- `parent_ref` must not form a cycle.\n- the same `concept_id` may appear through many reference occurrences.\n- containment, assembly, classification, and runtime relations use the same\n  rectangle grammar; their typed `relation` values remain in data.\n- reference lines represent reused concepts, cycles, layer crossings, and\n  time transitions that cannot be expressed by finite nesting alone.\n\n## Legacy View Cell Notes\n\nHome placement is view- and map-specific, not a universal property of an\nobject. Declare it on the relation map that owns the curated projection:\n\n```yaml\nview_cells:\n  - node: entity.llm_chat_session\n    view: view.time_sliced_flat_deck\n    time_slice: present\n    runtime_stratum: virtual\n    role: identity_anchor\n    x: 0.15\n    y: 0.16\n    order: 10\n```\n\n`time_slice` must be `past`, `present`, or `future`.\n`runtime_stratum` must be `virtual` or `physical`. Information and meaning are\nattributes or types of virtual concepts, not a third runtime stratum.\nThe same node may have only one home cell inside one map/view pair. `x` and\n`y` are optional normalized layout hints. Do not author `LayerDepth`; derive it\nfrom same-stratum `contains` / `part_of` relations.\n\n`role` defaults to `projection`. `identity_anchor` is retained only for legacy\nauthored views. The composite-lens renderer selects by `ref_id` and does not\nrequire a separate canonical identity node on screen.\n\n## Faceted Modeling Fields\n\nThese can appear in frontmatter for simple cases or in the Markdown body for richer examples. The current parser treats frontmatter as the graph edge source and Markdown as human/LLM context.\n\n| Field | Purpose |\n|---|---|\n| `canonical_id` | Stable identity shared by projections of the same thing. |\n| `facet` | Lens used by a projection, such as `facet.space` or `facet.time`. |\n| `projection_id` | Stable id for a drawable projection node. |\n| `view` | Intended view preset or rendering mode. |\n| `source_ref` | Durable pointer to the file, repo, DB row, URL, or runtime state backing the concept. |\n| `axis` | Primary axis for a projection: `axis.space`, `axis.time`, or `axis.virtual`. |\n| `binding_type` | Intertwining pattern such as `storage`, `topology`, `intent`, or `action`. |\n\nProjection ids should make the facet obvious:\n\n```text\nprojection.<canonical>.<facet>.<local_name>\n```\n\nExample:\n\n```text\nprojection.llm_chat_session.storage.session_file\n```\n\n## Relation Vocabulary\n\nStart with a small relation set:\n\n| Relation | Meaning |\n|---|---|\n| `contains` | Parent occurrence contains a child in the authored local composite. |\n| `part_of` | Child occurrence belongs to an authored parent composite. |\n| `implemented_by` | A virtual/product occurrence is realized through another occurrence, often on the physical stratum. |\n| `runs_on` | A software/runtime occurrence executes on a physical substrate. |\n| `stored_in` | An information-bearing concept or evidence is persisted in a storage substrate. |\n| `represents` | Node represents a real, information, or virtual thing. |\n| `projects_into` | Source is projected into a runtime/view layer. |\n| `receives_from` | Node is updated by another node. |\n| `drives` | Node drives another node or action. |\n| `acts_on` | Actor/action acts on a target surface/object. |\n| `observes` | Node observes target state without owning it. |\n| `records` | Node records traces/evidence about target. |\n| `branches_into` | Node can produce alternate branches or futures. |\n| `branches_from` | Node branches from a current state, goal, or plan. |\n| `binds` | Node binds a concept to a runtime resource. |\n| `derived_from` | Node is derived from another node or evidence. |\n| `represented_by` | Abstract concept is represented by concrete runtime/evidence nodes. |\n| `provides_evidence_for` | Evidence-bearing node supports another node. |\n| `updates` | Node mutates or refreshes another node. |\n| `uses` | Node depends on a primitive, actor, or resource. |\n| `informs` | Node influences another node without directly updating it. |\n| `operates_inside` | Actor/process is scoped inside a world or surface. |\n| `receives_constraints_from` | Node is governed by another node's constraints. |\n| `constrains` | Node limits or governs another node. |\n| `visualizes` | View node visualizes another concept or graph. |\n| `visualized_by` | Concept is visualized by a view node. |\n| `implements` | Plan or artifact implements a concept or decision. |\n| `same_identity_as` | Projection shares canonical identity with another projection. |\n| `projects_as` | Canonical concept projects into a specific projection node. |\n\n## Reference-Web Modeling Rule\n\nThe default visual grammar is rectangle-first: the selected reference and its\ndirect children form one local composite. The data model still preserves the\ntyped relation carried by each occurrence.\n\n```text\nConcept\n  -> referenced by many occurrences\n  -> occurrences form local composite rectangles\n  -> reference edges connect reused, cyclic, layer, and time contexts\n```\n\nThe runtime strata are:\n\n```text\nVirtual\nPhysical\n```\n\nTime is represented by separate snapshot documents and time-axis reference\nedges. Each time coordinate partitions continuous virtual and physical planes;\ntime is not itself a pane surface.\nStorage, topology, intent, and action remain relation metadata rather than\nadditional strata.\n\n## Context Loading Rule\n\nAn LLM should not load the whole ontology by default.\n\n```text\nindex.md\n  -> selected concept files\n  -> selected relation neighbors\n  -> source docs only when needed\n```\n\n## Web UI Rule\n\nThe web UI may cache parsed nodes and edges, but generated caches are secondary. The canonical source remains Markdown frontmatter and links.\n\nThe current composite-lens renderer draws reference occurrences as its primary\nscreen objects. It preserves canonical identity through `concept_id`, while\nselection and rectangle nesting use `ref_id`. A future inspector or alternate\nfaceted view may expose projection metadata, but neither is required by v2."
     },
     {
       "id": "egdesk.run_bubble",
@@ -655,6 +903,15 @@
         ]
       },
       "relationEdges": [],
+      "viewCells": [],
+      "subjectId": null,
+      "snapshotId": null,
+      "timeSlice": null,
+      "snapshotStatus": null,
+      "continuesFrom": null,
+      "rootRef": null,
+      "occurrences": [],
+      "referenceEdges": [],
       "wikiLinks": [],
       "body": "# Run Bubble\n\nRun Bubble is an EG-Desk product concept.\n\nIt is the inspectable record for one run: plan, action, context, evidence, intermediate artifacts, and provenance. It is not hidden model reasoning. It is the user-facing, checkable trace EG-Desk can preserve.\n\n## Stable Definition\n\n```text\nRun Bubble = inspectable plan/action/context record for one run\n```"
     },
@@ -684,6 +941,15 @@
         ]
       },
       "relationEdges": [],
+      "viewCells": [],
+      "subjectId": null,
+      "snapshotId": null,
+      "timeSlice": null,
+      "snapshotStatus": null,
+      "continuesFrom": null,
+      "rootRef": null,
+      "occurrences": [],
+      "referenceEdges": [],
       "wikiLinks": [],
       "body": "# Run Playback\n\nRun Playback is an EG-Desk product concept.\n\nIt is the guided, step-by-step canvas walkthrough for a result. It lets the user follow derivation spatially on the Desk: what evidence was used, which cards mattered, what changed, and how the final output emerged.\n\nRun Playback is related to Run Bubble, but they are not the same:\n\n- Run Bubble stores the inspectable record.\n- Run Playback presents a guided temporal/spatial walkthrough.\n\n## Stable Definition\n\n```text\nRun Playback = guided canvas replay for one run\n```"
     },
@@ -715,6 +981,15 @@
         ]
       },
       "relationEdges": [],
+      "viewCells": [],
+      "subjectId": null,
+      "snapshotId": null,
+      "timeSlice": null,
+      "snapshotStatus": null,
+      "continuesFrom": null,
+      "rootRef": null,
+      "occurrences": [],
+      "referenceEdges": [],
       "wikiLinks": [
         "reality.md",
         "architecture-runtime.md",
@@ -725,7 +1000,7 @@
         "cross-facet-binding.md",
         "identity-rail.md"
       ],
-      "body": "# EG-Desk World\n\nEG-Desk is not primarily a chat UI, a task runner, or a swarm manager.\n\nIt is a virtual operating world layered over reality and compute architecture. It lets the user see and manipulate work through time-aware representatives:\n\n- [[reality.md]]: real companies, people, machines, files, services, customers, and accounts.\n- [[architecture-runtime.md]]: hardware, OS, browser, terminal, app, cloud, repo, and database surfaces.\n- [[time-past.md]]: evidence, logs, prior messages, git history, file revisions, and execution traces.\n- [[time-present.md]]: current executable state and active work surface.\n- [[time-future.md]]: vision, goals, plans, and tasks.\n- [[time-multiverse.md]]: alternate branches, simulations, hypothetical states, and candidate futures.\n\nRuntime actors such as humans, Codex, subagents, tools, browser controllers, and automation jobs operate inside this world. They should be assigned coordinates in the ontology rather than treated as the ontology itself.\n\n## Design Implication\n\nSwarm design comes after world design.\n\n```text\nEG-Desk World\n  -> defines surfaces, evidence, time, permissions, and source refs\nRuntime Actors\n  -> operate inside those definitions\nSwarm\n  -> coordinated actor pattern, not the root model\n```\n\nThe world is also faceted. One drawn hierarchy is not enough.\n\n```text\nCanonical Concept\n  -> Space projection\n  -> Topology projection\n  -> Time projection\n  -> Storage projection\n  -> Intent projection\n  -> Action projection\n```\n\nHierarchy, overlap, and containment are lens-local. Cross-lens truth is represented by [[cross-facet-binding.md]] and surfaced through [[identity-rail.md]]."
+      "body": "# EG-Desk World\n\nEG-Desk is not primarily a chat UI, a task runner, or a swarm manager.\n\nIt is a virtual operating world layered over reality and compute architecture. It lets the user see and manipulate work through time-aware representatives:\n\n- [[reality.md]]: real companies, people, machines, files, services, customers, and accounts.\n- [[architecture-runtime.md]]: hardware, OS, browser, terminal, app, cloud, repo, and database surfaces.\n- [[time-past.md]]: evidence, logs, prior messages, git history, file revisions, and execution traces.\n- [[time-present.md]]: current executable state and active work surface.\n- [[time-future.md]]: vision, goals, plans, and tasks.\n- [[time-multiverse.md]]: alternate branches, simulations, hypothetical states, and candidate futures.\n\nRuntime actors such as humans, Codex, subagents, tools, browser controllers, and automation jobs operate inside this world. They should be assigned coordinates in the ontology rather than treated as the ontology itself.\n\n## Design Implication\n\nSwarm design comes after world design.\n\n```text\nEG-Desk World\n  -> defines surfaces, evidence, time, permissions, and source refs\nRuntime Actors\n  -> operate inside those definitions\nSwarm\n  -> coordinated actor pattern, not the root model\n```\n\nThe world is also faceted. One global containment tree is not enough, but a\nselected occurrence can still be explained as a bounded local rectangle\ncomposition.\n\n```text\nCanonical Concept\n  -> Space projection\n  -> Topology projection\n  -> Time projection\n  -> Storage projection\n  -> Intent projection\n  -> Action projection\n```\n\nIn the current viewer, `concept_id` preserves reusable identity and `ref_id`\nidentifies each contextual occurrence. The selected occurrence and its direct\nchildren form the local rectangle composition. Reuse, cycles, layer crossings,\nand time continuity use typed [[cross-facet-binding.md|reference edges]]. The\n[[identity-rail.md]] is deferred and is not part of the v2 card.\n\nSpace, Time, and Virtual above are ontology-authoring axes. They must not be\nconfused with the viewer's two runtime strata, `virtual` and `physical`."
     },
     {
       "id": "entity.chat_memory",
@@ -756,6 +1031,15 @@
         ]
       },
       "relationEdges": [],
+      "viewCells": [],
+      "subjectId": null,
+      "snapshotId": null,
+      "timeSlice": null,
+      "snapshotStatus": null,
+      "continuesFrom": null,
+      "rootRef": null,
+      "occurrences": [],
+      "referenceEdges": [],
       "wikiLinks": [],
       "body": "# Chat Memory\n\nChat memory is a useful stress test because it can be understood as an object or a verb.\n\nAs an object, it may be a stored trace.\n\nAs a temporal representative, it is Past evidence.\n\nAs a runtime operation, it is read, summarized, selected, or ignored.\n\n## Facet Projections\n\n| Facet | Projection | Valid Reading |\n|---|---|---|\n| Time | `projection.chat_memory.time.past_evidence` | Prior messages, tool calls, and decisions are Past evidence. |\n| Storage | `projection.chat_memory.storage.trace_file` | The memory has a durable source reference such as a log, file, index, or database row. |\n| Intent | `projection.chat_memory.intent.context_input` | The memory is selected because it helps the current objective. |\n| Action | `projection.chat_memory.action.file_read` | Loading memory is a verb: read, retrieve, summarize, and bind to present context. |\n\n## Modeling Rule\n\nDo not force chat memory into only one of these:\n\n```text\nfile object\npast state\ncontext source\nread action\n```\n\nIt is a canonical concept with facet projections."
     },
@@ -788,6 +1072,15 @@
         ]
       },
       "relationEdges": [],
+      "viewCells": [],
+      "subjectId": null,
+      "snapshotId": null,
+      "timeSlice": null,
+      "snapshotStatus": null,
+      "continuesFrom": null,
+      "rootRef": null,
+      "occurrences": [],
+      "referenceEdges": [],
       "wikiLinks": [],
       "body": "# Desktop Runtime\n\nDesktop runtime is both a visible workspace and an execution substrate.\n\nThose are not the same projection.\n\n## Facet Projections\n\n| Facet | Projection | Valid Reading |\n|---|---|---|\n| Space | `projection.desktop_runtime.space.desktop_plane` | The visible desktop/canvas plane that contains cards and panes. |\n| Topology | `projection.desktop_runtime.topology.hardware_os` | The Mac/Windows/Linux runtime composed of CPU, RAM, Disk, GPU, OS, browser, terminal, helper services, and network. |\n| Storage | `projection.desktop_runtime.storage.local_disk` | Local filesystem and app state that can persist sessions, source files, logs, and caches. |\n| Action | `projection.desktop_runtime.action.app_execution` | App execution, shell commands, browser operations, file IO, and automation steps. |\n\n## Relation Map Rule\n\nThe chat card can be visibly inside the desktop plane while the chat runtime uses topology resources and writes storage traces. Those statements should be authored in relation maps, not as universal definitions of desktop, terminal, disk, CPU, or RAM.\n\n```text\nSpace:\n  Desktop plane contains Chat Card\n\nTopology:\n  Chat Runtime depends on Desktop Runtime\n\nStorage:\n  Chat Session File is stored on Disk\n```\n\nThese are three different statements. The renderer must keep their facet labels visible or inferable.\n\nFor the current EG-Desk LLM chat context, see `map.llm_chat_runtime_assembly`."
     },
@@ -796,15 +1089,14 @@
       "label": "LLM Chat Session",
       "type": "canonical_entity",
       "layer": "runtime",
-      "summary": "Canonical identity for an LLM chat session across space, topology, storage, time, intent, and action facets.",
+      "summary": "Reusable concept identity for an LLM chat session across many reference occurrences.",
       "aliases": [],
       "abbreviations": {},
       "path": "ontology/examples/llm-chat-session.md",
       "ontologyPath": "examples/llm-chat-session.md",
       "relations": {
         "uses": [
-          "ontology.canonical_concept",
-          "ontology.facet"
+          "ontology.canonical_concept"
         ],
         "represented_by": [
           "projection.llm_chat_session.space.chat_card",
@@ -817,14 +1109,20 @@
         "binds": [
           "entity.desktop_runtime",
           "entity.chat_memory"
-        ],
-        "operates_inside": [
-          "egdesk.world"
         ]
       },
       "relationEdges": [],
+      "viewCells": [],
+      "subjectId": null,
+      "snapshotId": null,
+      "timeSlice": null,
+      "snapshotStatus": null,
+      "continuesFrom": null,
+      "rootRef": null,
+      "occurrences": [],
+      "referenceEdges": [],
       "wikiLinks": [],
-      "body": "# LLM Chat Session\n\nThis example is the canonical test case for faceted ontology rendering.\n\nAn LLM chat session cannot be honestly represented by one hierarchy.\n\nIt is primarily a Virtual entity that is anchored into Space and Time.\n\n## Primary Axis Projections\n\n| Axis | Projection | Valid Reading |\n|---|---|---|\n| Virtual | `entity.llm_chat_session` | The canonical semantic identity of the chat session. |\n| Space | `projection.llm_chat_session.space.chat_card` | The chat appears as a card or panel on the Desk. |\n| Time | `projection.llm_chat_session.time.memory_trace` | Prior messages and tool calls become Past evidence used by the present turn. |\n\n## Binding Types\n\n| Binding | Projection | Axis Intertwine |\n|---|---|---|\n| Topology | `projection.llm_chat_session.topology.runtime` | Space compute resources + Virtual runtime identity + Present executable state. |\n| Storage | `projection.llm_chat_session.storage.session_file` | Space file object + Virtual source identity + Time history/revision. |\n| Intent | `projection.llm_chat_session.intent.context_binding` | Virtual objective + Time commitment + Space artifact/action surface. |\n| Action | `projection.llm_chat_session.action.message_send` | Time transition + Space target + Virtual operation meaning. |\n\n## Binding Rule\n\nThe projections are connected by identity and relation maps, not by forced containment.\n\n```text\nentity.llm_chat_session\n  has projections in multiple facets\n  binds to entity.chat_memory\n  binds to entity.desktop_runtime\n```\n\nThe concrete runtime assembly for this example belongs in `map.llm_chat_runtime_assembly`.\n\n## Rendering Rule\n\nDefault view:\n\n```text\nShow one active facet projection.\n```\n\nOn selection:\n\n```text\nShow identity rail:\n  Virtual -> LLM Chat Session\n  Space   -> Chat Card / Runtime / Session File anchors\n  Time    -> Memory Trace / Message Events\n  Binding -> topology / storage / intent / action\n```\n\nDo not draw every relation all the time. Reveal cross-facet bindings only when the selected concept needs them."
+      "body": "# LLM Chat Session\n\nThis is a reusable concept handle, not one fixed drawable node.\n\nA chat session can be referenced below a Desk card, a runtime, a stored trace,\nor a future goal. Each use is a distinct `ref_id` pointing at the same concept.\nThe viewer expands one local rectangle composition at a time and uses reference\nedges to connect the other occurrences.\n\nTime-specific state should be authored as separate composite snapshot files\nthat share a stable real-world `subject_id` when they describe one continuing\nsession."
     },
     {
       "id": "facet.action",
@@ -850,6 +1148,15 @@
         ]
       },
       "relationEdges": [],
+      "viewCells": [],
+      "subjectId": null,
+      "snapshotId": null,
+      "timeSlice": null,
+      "snapshotStatus": null,
+      "continuesFrom": null,
+      "rootRef": null,
+      "occurrences": [],
+      "referenceEdges": [],
       "wikiLinks": [],
       "body": "# Action Facet\n\nThe action facet describes what happens.\n\nIt is the facet for:\n\n- read\n- write\n- click\n- type\n- message send\n- tool call\n- file edit\n- command execution\n- deployment\n- state transition\n\n## Containment Rule\n\nAction containment means sequence, transaction, or suboperation.\n\n```text\nImplement feature\n  contains read files\n  contains edit files\n  contains run verification\n  contains report result\n```\n\nAn action projection may touch storage, topology, time, and space, but it should remain a verb/event rather than being flattened into an object hierarchy.\n\n## Example\n\nFor `entity.llm_chat_session`, action projections may be:\n\n```text\nprojection.llm_chat_session.action.message_send\nprojection.llm_chat_session.action.file_read\nprojection.llm_chat_session.action.context_assemble\nprojection.llm_chat_session.action.tool_call\n```"
     },
@@ -877,6 +1184,15 @@
         ]
       },
       "relationEdges": [],
+      "viewCells": [],
+      "subjectId": null,
+      "snapshotId": null,
+      "timeSlice": null,
+      "snapshotStatus": null,
+      "continuesFrom": null,
+      "rootRef": null,
+      "occurrences": [],
+      "referenceEdges": [],
       "wikiLinks": [],
       "body": "# Intent Facet\n\nThe intent facet describes why a concept matters in the work system.\n\nIt is the facet for:\n\n- user objective\n- goal\n- plan\n- task\n- decision blocker\n- acceptance condition\n- priority and scope\n\n## Containment Rule\n\nIntent containment means objective decomposition.\n\n```text\nVision\n  contains goal\n  contains plan\n  contains task\n```\n\nThis does not mean the task is physically stored inside the future or visually contained inside the card.\n\n## Example\n\nFor `entity.llm_chat_session`, the intent projection may be:\n\n```text\nprojection.llm_chat_session.intent.context_binding\n  label: Active Context Binding\n  objective: answer or execute the user's current request\n  acceptance: the requested work is complete and verified\n```"
     },
@@ -904,6 +1220,15 @@
         ]
       },
       "relationEdges": [],
+      "viewCells": [],
+      "subjectId": null,
+      "snapshotId": null,
+      "timeSlice": null,
+      "snapshotStatus": null,
+      "continuesFrom": null,
+      "rootRef": null,
+      "occurrences": [],
+      "referenceEdges": [],
       "wikiLinks": [],
       "body": "# Space Facet\n\nThe space facet describes where a concept appears in the visible EG-Desk canvas.\n\nIt is the facet for:\n\n- desktop panes\n- cards\n- panels\n- 2D/2.5D canvas placement\n- visible overlap\n- camera position, pan, zoom, and tilt\n\n## Containment Rule\n\nSpatial containment means visible containment only.\n\n```text\nDesktop pane\n  contains Browser Card\n  contains Chat Card\n  contains Ontology Map Card\n```\n\nIt does not automatically mean runtime ownership, file storage, memory, or intent ownership.\n\n## Example\n\nFor `entity.llm_chat_session`, the space projection may be:\n\n```text\nprojection.llm_chat_session.space.chat_card\n  label: Chat Card\n  parent plane: Desktop\n  readable as: the user-facing place where the conversation is visible\n```"
     },
@@ -932,6 +1257,15 @@
         ]
       },
       "relationEdges": [],
+      "viewCells": [],
+      "subjectId": null,
+      "snapshotId": null,
+      "timeSlice": null,
+      "snapshotStatus": null,
+      "continuesFrom": null,
+      "rootRef": null,
+      "occurrences": [],
+      "referenceEdges": [],
       "wikiLinks": [],
       "body": "# Storage Facet\n\nThe storage facet describes where durable bytes and references live.\n\nIt is the facet for:\n\n- local files\n- session logs\n- Git repos\n- databases\n- Drive documents\n- caches\n- source references\n\n## Containment Rule\n\nStorage containment means resource address containment.\n\n```text\nDisk\n  contains folder\n  contains file\n\nRepo\n  contains tracked source file\n\nDatabase\n  contains table\n  contains row\n```\n\nA storage node can represent the same canonical concept as a space or time node, but it should not be merged into those hierarchies.\n\n## Example\n\nFor `entity.llm_chat_session`, the storage projection may be:\n\n```text\nprojection.llm_chat_session.storage.session_file\n  label: Session File\n  address: local session log or database row\n  source_ref: stable pointer used for reload\n```"
     },
@@ -961,6 +1295,15 @@
         ]
       },
       "relationEdges": [],
+      "viewCells": [],
+      "subjectId": null,
+      "snapshotId": null,
+      "timeSlice": null,
+      "snapshotStatus": null,
+      "continuesFrom": null,
+      "rootRef": null,
+      "occurrences": [],
+      "referenceEdges": [],
       "wikiLinks": [],
       "body": "# Time Facet\n\nThe time facet describes when a concept exists or acts.\n\nIt is the facet for:\n\n- past evidence and memory\n- present executable state\n- future goals, plans, and tasks\n- multiverse branches and simulations\n- causal order\n\n## Containment Rule\n\nTime containment means temporal membership or causality.\n\n```text\nPast\n  contains chat history\n  contains file revision\n  contains execution log\n\nFuture\n  contains goal\n  contains plan\n  contains task\n```\n\nThis does not mean the past memory is visually inside a desktop card or physically inside the CPU.\n\n## Example\n\nFor `entity.llm_chat_session`, the time projection may be:\n\n```text\nprojection.llm_chat_session.time.memory_trace\n  label: Chat Memory Trace\n  phase: Past\n  evidence: messages, tool calls, decisions, summaries\n```"
     },
@@ -987,6 +1330,15 @@
         ]
       },
       "relationEdges": [],
+      "viewCells": [],
+      "subjectId": null,
+      "snapshotId": null,
+      "timeSlice": null,
+      "snapshotStatus": null,
+      "continuesFrom": null,
+      "rootRef": null,
+      "occurrences": [],
+      "referenceEdges": [],
       "wikiLinks": [],
       "body": "# Topology Facet\n\nThe topology facet describes how runtime objects depend on each other.\n\nIt is the facet for:\n\n- hardware and OS resources\n- app, browser, terminal, helper, API, backend, and database paths\n- resource dependency\n- execution boundary\n- local versus cloud placement\n\n## Containment Rule\n\nTopology containment means runtime composition or dependency, not visual overlap.\n\n```text\nDesktop runtime\n  uses OS\n  uses CPU\n  uses RAM\n  uses Disk\n\nLLM chat session\n  uses model runtime\n  uses context window\n  uses tool bridge\n```\n\nThe topology facet can show that a chat session uses CPU/RAM while the space facet shows that the same session is a card on the desktop.\n\n## Example\n\nFor `entity.llm_chat_session`, the topology projection may be:\n\n```text\nprojection.llm_chat_session.topology.runtime\n  label: Chat Runtime\n  reads from: context window\n  calls: tool bridge\n  depends on: CPU/RAM/network/model endpoint\n```"
     },
@@ -1001,6 +1353,16 @@
       "path": null,
       "ontologyPath": null,
       "relations": {},
+      "relationEdges": [],
+      "viewCells": [],
+      "subjectId": null,
+      "snapshotId": null,
+      "timeSlice": null,
+      "snapshotStatus": null,
+      "continuesFrom": null,
+      "rootRef": null,
+      "occurrences": [],
+      "referenceEdges": [],
       "wikiLinks": [],
       "body": "",
       "synthetic": true
@@ -1016,6 +1378,16 @@
       "path": null,
       "ontologyPath": null,
       "relations": {},
+      "relationEdges": [],
+      "viewCells": [],
+      "subjectId": null,
+      "snapshotId": null,
+      "timeSlice": null,
+      "snapshotStatus": null,
+      "continuesFrom": null,
+      "rootRef": null,
+      "occurrences": [],
+      "referenceEdges": [],
       "wikiLinks": [],
       "body": "",
       "synthetic": true
@@ -1031,6 +1403,16 @@
       "path": null,
       "ontologyPath": null,
       "relations": {},
+      "relationEdges": [],
+      "viewCells": [],
+      "subjectId": null,
+      "snapshotId": null,
+      "timeSlice": null,
+      "snapshotStatus": null,
+      "continuesFrom": null,
+      "rootRef": null,
+      "occurrences": [],
+      "referenceEdges": [],
       "wikiLinks": [],
       "body": "",
       "synthetic": true
@@ -1046,6 +1428,16 @@
       "path": null,
       "ontologyPath": null,
       "relations": {},
+      "relationEdges": [],
+      "viewCells": [],
+      "subjectId": null,
+      "snapshotId": null,
+      "timeSlice": null,
+      "snapshotStatus": null,
+      "continuesFrom": null,
+      "rootRef": null,
+      "occurrences": [],
+      "referenceEdges": [],
       "wikiLinks": [],
       "body": "",
       "synthetic": true
@@ -1061,6 +1453,16 @@
       "path": null,
       "ontologyPath": null,
       "relations": {},
+      "relationEdges": [],
+      "viewCells": [],
+      "subjectId": null,
+      "snapshotId": null,
+      "timeSlice": null,
+      "snapshotStatus": null,
+      "continuesFrom": null,
+      "rootRef": null,
+      "occurrences": [],
+      "referenceEdges": [],
       "wikiLinks": [],
       "body": "",
       "synthetic": true
@@ -1076,6 +1478,16 @@
       "path": null,
       "ontologyPath": null,
       "relations": {},
+      "relationEdges": [],
+      "viewCells": [],
+      "subjectId": null,
+      "snapshotId": null,
+      "timeSlice": null,
+      "snapshotStatus": null,
+      "continuesFrom": null,
+      "rootRef": null,
+      "occurrences": [],
+      "referenceEdges": [],
       "wikiLinks": [],
       "body": "",
       "synthetic": true
@@ -1091,6 +1503,16 @@
       "path": null,
       "ontologyPath": null,
       "relations": {},
+      "relationEdges": [],
+      "viewCells": [],
+      "subjectId": null,
+      "snapshotId": null,
+      "timeSlice": null,
+      "snapshotStatus": null,
+      "continuesFrom": null,
+      "rootRef": null,
+      "occurrences": [],
+      "referenceEdges": [],
       "wikiLinks": [],
       "body": "",
       "synthetic": true
@@ -1106,6 +1528,16 @@
       "path": null,
       "ontologyPath": null,
       "relations": {},
+      "relationEdges": [],
+      "viewCells": [],
+      "subjectId": null,
+      "snapshotId": null,
+      "timeSlice": null,
+      "snapshotStatus": null,
+      "continuesFrom": null,
+      "rootRef": null,
+      "occurrences": [],
+      "referenceEdges": [],
       "wikiLinks": [],
       "body": "",
       "synthetic": true
@@ -1121,6 +1553,16 @@
       "path": null,
       "ontologyPath": null,
       "relations": {},
+      "relationEdges": [],
+      "viewCells": [],
+      "subjectId": null,
+      "snapshotId": null,
+      "timeSlice": null,
+      "snapshotStatus": null,
+      "continuesFrom": null,
+      "rootRef": null,
+      "occurrences": [],
+      "referenceEdges": [],
       "wikiLinks": [],
       "body": "",
       "synthetic": true
@@ -1136,6 +1578,16 @@
       "path": null,
       "ontologyPath": null,
       "relations": {},
+      "relationEdges": [],
+      "viewCells": [],
+      "subjectId": null,
+      "snapshotId": null,
+      "timeSlice": null,
+      "snapshotStatus": null,
+      "continuesFrom": null,
+      "rootRef": null,
+      "occurrences": [],
+      "referenceEdges": [],
       "wikiLinks": [],
       "body": "",
       "synthetic": true
@@ -1151,9 +1603,67 @@
       "path": null,
       "ontologyPath": null,
       "relations": {},
+      "relationEdges": [],
+      "viewCells": [],
+      "subjectId": null,
+      "snapshotId": null,
+      "timeSlice": null,
+      "snapshotStatus": null,
+      "continuesFrom": null,
+      "rootRef": null,
+      "occurrences": [],
+      "referenceEdges": [],
       "wikiLinks": [],
       "body": "",
       "synthetic": true
+    },
+    {
+      "id": "macbook",
+      "label": "MacBook",
+      "type": "hardware_resource",
+      "layer": "architecture",
+      "summary": "Apple notebook computer used as a concrete host in the present company-server snapshot.",
+      "aliases": [],
+      "abbreviations": {},
+      "path": "ontology/concepts/macbook.md",
+      "ontologyPath": "concepts/macbook.md",
+      "relations": {},
+      "relationEdges": [],
+      "viewCells": [],
+      "subjectId": null,
+      "snapshotId": null,
+      "timeSlice": null,
+      "snapshotStatus": null,
+      "continuesFrom": null,
+      "rootRef": null,
+      "occurrences": [],
+      "referenceEdges": [],
+      "wikiLinks": [],
+      "body": "# MacBook\n\nA concrete computer implementation used by the present snapshot fixture."
+    },
+    {
+      "id": "macos",
+      "label": "macOS",
+      "type": "software_resource",
+      "layer": "runtime",
+      "summary": "macOS operating system referenced by the present MacBook composite.",
+      "aliases": [],
+      "abbreviations": {},
+      "path": "ontology/concepts/macos.md",
+      "ontologyPath": "concepts/macos.md",
+      "relations": {},
+      "relationEdges": [],
+      "viewCells": [],
+      "subjectId": null,
+      "snapshotId": null,
+      "timeSlice": null,
+      "snapshotStatus": null,
+      "continuesFrom": null,
+      "rootRef": null,
+      "occurrences": [],
+      "referenceEdges": [],
+      "wikiLinks": [],
+      "body": "# macOS\n\nThe virtual operating-system component of the present host."
     },
     {
       "id": "map.llm_chat_runtime_assembly",
@@ -1174,7 +1684,13 @@
           "terminal",
           "cpu",
           "ram",
-          "disk"
+          "disk",
+          "egdesk.agenda",
+          "egdesk.card",
+          "goal",
+          "plan",
+          "task",
+          "output.structured"
         ]
       },
       "relationEdges": [
@@ -1200,7 +1716,7 @@
         },
         {
           "source": "projection.llm_chat_session.space.chat_card",
-          "relation": "represented_by",
+          "relation": "projects_into",
           "target": "desktop"
         },
         {
@@ -1210,12 +1726,262 @@
         },
         {
           "source": "projection.llm_chat_session.storage.session_file",
-          "relation": "uses",
+          "relation": "stored_in",
           "target": "disk"
+        },
+        {
+          "source": "projection.llm_chat_session.intent.context_binding",
+          "relation": "drives",
+          "target": "projection.llm_chat_session.action.message_send"
+        },
+        {
+          "source": "projection.llm_chat_session.action.message_send",
+          "relation": "acts_on",
+          "target": "terminal"
+        },
+        {
+          "source": "entity.chat_memory",
+          "relation": "provides_evidence_for",
+          "target": "projection.llm_chat_session.intent.context_binding"
+        },
+        {
+          "source": "projection.chat_memory.storage.trace_file",
+          "relation": "provides_evidence_for",
+          "target": "projection.llm_chat_session.storage.session_file"
+        },
+        {
+          "source": "projection.llm_chat_session.intent.context_binding",
+          "relation": "drives",
+          "target": "goal"
+        },
+        {
+          "source": "projection.llm_chat_session.action.message_send",
+          "relation": "drives",
+          "target": "output.structured"
+        },
+        {
+          "source": "goal",
+          "relation": "contains",
+          "target": "plan"
+        },
+        {
+          "source": "plan",
+          "relation": "contains",
+          "target": "task"
         }
       ],
+      "viewCells": [
+        {
+          "node": "projection.llm_chat_session.time.memory_trace",
+          "view": "view.time_sliced_flat_deck",
+          "timeSlice": "past",
+          "runtimeStratum": "virtual",
+          "role": "projection",
+          "x": 0.28,
+          "y": 0.18,
+          "order": 10
+        },
+        {
+          "node": "entity.chat_memory",
+          "view": "view.time_sliced_flat_deck",
+          "timeSlice": "past",
+          "runtimeStratum": "virtual",
+          "role": "identity_anchor",
+          "x": 0.7,
+          "y": 0.4,
+          "order": 20
+        },
+        {
+          "node": "projection.chat_memory.storage.trace_file",
+          "view": "view.time_sliced_flat_deck",
+          "timeSlice": "past",
+          "runtimeStratum": "virtual",
+          "role": "projection",
+          "x": 0.68,
+          "y": 0.82,
+          "order": 30
+        },
+        {
+          "node": "entity.llm_chat_session",
+          "view": "view.time_sliced_flat_deck",
+          "timeSlice": "present",
+          "runtimeStratum": "virtual",
+          "role": "identity_anchor",
+          "x": 0.15,
+          "y": 0.16,
+          "order": 10
+        },
+        {
+          "node": "projection.llm_chat_session.intent.context_binding",
+          "view": "view.time_sliced_flat_deck",
+          "timeSlice": "present",
+          "runtimeStratum": "virtual",
+          "role": "projection",
+          "x": 0.4,
+          "y": 0.34,
+          "order": 20
+        },
+        {
+          "node": "egdesk.agenda",
+          "view": "view.time_sliced_flat_deck",
+          "timeSlice": "present",
+          "runtimeStratum": "virtual",
+          "role": "projection",
+          "x": 0.62,
+          "y": 0.16,
+          "order": 30
+        },
+        {
+          "node": "egdesk.card",
+          "view": "view.time_sliced_flat_deck",
+          "timeSlice": "present",
+          "runtimeStratum": "virtual",
+          "role": "projection",
+          "x": 0.84,
+          "y": 0.18,
+          "order": 40
+        },
+        {
+          "node": "projection.llm_chat_session.space.chat_card",
+          "view": "view.time_sliced_flat_deck",
+          "timeSlice": "present",
+          "runtimeStratum": "virtual",
+          "role": "projection",
+          "x": 0.18,
+          "y": 0.46,
+          "order": 50
+        },
+        {
+          "node": "projection.llm_chat_session.action.message_send",
+          "view": "view.time_sliced_flat_deck",
+          "timeSlice": "present",
+          "runtimeStratum": "virtual",
+          "role": "projection",
+          "x": 0.38,
+          "y": 0.48,
+          "order": 60
+        },
+        {
+          "node": "projection.llm_chat_session.topology.runtime",
+          "view": "view.time_sliced_flat_deck",
+          "timeSlice": "present",
+          "runtimeStratum": "virtual",
+          "role": "projection",
+          "x": 0.58,
+          "y": 0.46,
+          "order": 70
+        },
+        {
+          "node": "projection.llm_chat_session.storage.session_file",
+          "view": "view.time_sliced_flat_deck",
+          "timeSlice": "present",
+          "runtimeStratum": "virtual",
+          "role": "projection",
+          "x": 0.82,
+          "y": 0.46,
+          "order": 80
+        },
+        {
+          "node": "desktop",
+          "view": "view.time_sliced_flat_deck",
+          "timeSlice": "present",
+          "runtimeStratum": "virtual",
+          "role": "projection",
+          "x": 0.18,
+          "y": 0.66,
+          "order": 90
+        },
+        {
+          "node": "terminal",
+          "view": "view.time_sliced_flat_deck",
+          "timeSlice": "present",
+          "runtimeStratum": "virtual",
+          "role": "projection",
+          "x": 0.58,
+          "y": 0.66,
+          "order": 100
+        },
+        {
+          "node": "cpu",
+          "view": "view.time_sliced_flat_deck",
+          "timeSlice": "present",
+          "runtimeStratum": "physical",
+          "role": "projection",
+          "x": 0.31,
+          "y": 0.7,
+          "order": 110
+        },
+        {
+          "node": "ram",
+          "view": "view.time_sliced_flat_deck",
+          "timeSlice": "present",
+          "runtimeStratum": "physical",
+          "role": "projection",
+          "x": 0.5,
+          "y": 0.7,
+          "order": 120
+        },
+        {
+          "node": "disk",
+          "view": "view.time_sliced_flat_deck",
+          "timeSlice": "present",
+          "runtimeStratum": "physical",
+          "role": "projection",
+          "x": 0.69,
+          "y": 0.7,
+          "order": 130
+        },
+        {
+          "node": "goal",
+          "view": "view.time_sliced_flat_deck",
+          "timeSlice": "future",
+          "runtimeStratum": "virtual",
+          "role": "projection",
+          "x": 0.48,
+          "y": 0.22,
+          "order": 10
+        },
+        {
+          "node": "plan",
+          "view": "view.time_sliced_flat_deck",
+          "timeSlice": "future",
+          "runtimeStratum": "virtual",
+          "role": "projection",
+          "x": 0.34,
+          "y": 0.48,
+          "order": 20
+        },
+        {
+          "node": "task",
+          "view": "view.time_sliced_flat_deck",
+          "timeSlice": "future",
+          "runtimeStratum": "virtual",
+          "role": "projection",
+          "x": 0.64,
+          "y": 0.62,
+          "order": 30
+        },
+        {
+          "node": "output.structured",
+          "view": "view.time_sliced_flat_deck",
+          "timeSlice": "future",
+          "runtimeStratum": "virtual",
+          "role": "projection",
+          "x": 0.5,
+          "y": 0.82,
+          "order": 40
+        }
+      ],
+      "subjectId": null,
+      "snapshotId": null,
+      "timeSlice": null,
+      "snapshotStatus": null,
+      "continuesFrom": null,
+      "rootRef": null,
+      "occurrences": [],
+      "referenceEdges": [],
       "wikiLinks": [],
-      "body": "# LLM Chat Runtime Assembly\n\nThis note is not a generic definition of terminal, CPU, RAM, or disk.\n\nIt declares one useful way to assemble those objects for the EG-Desk LLM chat context.\n\n```text\ndesktop\n  -> terminal\n      -> cpu\n      -> ram\n      -> disk\n\nLLM chat session\n  -> chat card on desktop\n  -> runtime through terminal\n  -> session file on disk\n```\n\nIf the domain changes, create another relation map instead of rewriting the base object pages."
+      "body": "# LLM Chat Runtime Assembly\n\nThis note is not a generic definition of terminal, CPU, RAM, or disk.\n\nIt declares one useful way to assemble those objects for the EG-Desk LLM chat context.\n\n```text\ndesktop\n  -> terminal\n      -> cpu\n      -> ram\n      -> disk\n\nLLM chat session\n  -> chat card projected into the desktop\n  -> runtime through terminal\n  -> session file on disk\n  -> past evidence becomes present context\n  -> present intent and action drive future goals and outputs\n```\n\n`view_cells` is a legacy curated projection for this relation map. It gives a\nnode one authored home cell for the older map view, but it is not the source of\ntruth for the composite lens.\n\nThe current flat-deck viewer reads `composite_snapshot` documents and selects\noccurrences by `ref_id`. It derives the active rectangle composition from\n`parent_ref`, and derives cross-time/layer/reuse routes from `reference_edges`.\nThis map remains useful as a typed relation-web example and compatibility\nfixture; it must not be interpreted as the inventory of every visible node.\n\nIf the domain changes, create another relation map instead of rewriting the base object pages."
     },
     {
       "id": "map.local_runtime_inventory",
@@ -1298,6 +2064,15 @@
           "target": "disk"
         }
       ],
+      "viewCells": [],
+      "subjectId": null,
+      "snapshotId": null,
+      "timeSlice": null,
+      "snapshotStatus": null,
+      "continuesFrom": null,
+      "rootRef": null,
+      "occurrences": [],
+      "referenceEdges": [],
       "wikiLinks": [],
       "body": "# Local Runtime Inventory\n\nThis is a custom inventory map for EG-Desk product work.\n\nIt is not a universal definition of computers. It declares the object grouping that is useful for reading the current local development/runtime context.\n\nIf the work changes, create another relation map instead of expanding object pages into generic encyclopedia entries."
     },
@@ -1325,8 +2100,17 @@
         ]
       },
       "relationEdges": [],
+      "viewCells": [],
+      "subjectId": null,
+      "snapshotId": null,
+      "timeSlice": null,
+      "snapshotStatus": null,
+      "continuesFrom": null,
+      "rootRef": null,
+      "occurrences": [],
+      "referenceEdges": [],
       "wikiLinks": [],
-      "body": "# Binding Type\n\nBinding types explain how the three primary axes intertwine.\n\nThey are not primary axes.\n\n## Core Binding Types\n\n```text\nstorage\n  = Space address/object\n  + Virtual identity/source meaning\n  + Time revision/history/snapshot\n\ntopology\n  = Space compute resources\n  + Virtual dependency/runtime identity\n  + Time current executable state\n\nintent\n  = Virtual objective\n  + Time commitment\n  + Space artifact/surface\n\naction\n  = Time transition\n  + Space target\n  + Virtual operation meaning\n```\n\nThe renderer should show binding types as strips, chips, or intersection bands between axes rather than as top-level panes."
+      "body": "# Binding Type\n\nBinding types explain how the three primary axes intertwine.\n\nThey are not primary axes.\n\n## Core Binding Types\n\n```text\nstorage\n  = Space address/object\n  + Virtual identity/source meaning\n  + Time revision/history/snapshot\n\ntopology\n  = Space compute resources\n  + Virtual dependency/runtime identity\n  + Time current executable state\n\nintent\n  = Virtual objective\n  + Time commitment\n  + Space artifact/surface\n\naction\n  = Time transition\n  + Space target\n  + Virtual operation meaning\n```\n\nBinding types remain typed data. In the composite-lens v2 they may be compacted\ninto the same nested-rectangle grammar used by other local relations. When a\nbinding crosses time, runtime stratum, reused occurrences, or a cycle, the\nrenderer exposes it as a reference edge. Strips, chips, and intersection bands\nare optional future view treatments, not required shapes."
     },
     {
       "id": "ontology.canonical_concept",
@@ -1349,18 +2133,24 @@
         ]
       },
       "relationEdges": [],
-      "wikiLinks": [
-        "projection.md",
-        "facet.md"
-      ],
-      "body": "# Canonical Concept\n\nA canonical concept is the stable identity of a thing in the EG-Desk world.\n\nIt is not the same as the node drawn on screen. A screen node is a [[projection.md]] of a canonical concept through a specific [[facet.md]].\n\n## Rule\n\n```text\nCanonical Concept\n  !=\nView Node\n```\n\nThe same canonical concept can appear differently depending on lens:\n\n```text\nentity.llm_chat_session\n  space projection    -> Chat Card on Desk\n  topology projection -> runtime session using CPU/RAM\n  storage projection  -> session JSONL on Disk\n  time projection     -> Past memory trace\n  intent projection   -> active context/goal binding\n  action projection   -> message-send / file-read / context-assemble\n```\n\nThis prevents EG-Desk from forcing multi-facet things into a single false hierarchy.\n\n## Visual Rule\n\nWhen a user selects a concept, the renderer should keep canonical identity stable while allowing the active lens to change.\n\n```text\nSelect canonical concept\n  -> show active lens projection\n  -> show identity rail with other facet projections\n  -> show cross-facet bindings only for the selected concept\n```"
+      "viewCells": [],
+      "subjectId": null,
+      "snapshotId": null,
+      "timeSlice": null,
+      "snapshotStatus": null,
+      "continuesFrom": null,
+      "rootRef": null,
+      "occurrences": [],
+      "referenceEdges": [],
+      "wikiLinks": [],
+      "body": "# Canonical Concept\n\nA canonical concept is the reusable semantic identity of a thing in the\nEG-Desk world. In schema v3 this is the `concept_id`.\n\nIt is not the same as one occurrence drawn on screen. The same concept may be\nreferenced many times through distinct `ref_id` values in different snapshots\nor local composites.\n\n## Rule\n\n```text\nconcept_id\n  -> ref_id A in one composite\n  -> ref_id B in another composite\n  -> ref_id C in another time snapshot\n```\n\nThe same canonical concept can appear differently depending on lens:\n\n```text\nentity.llm_chat_session\n  space projection    -> Chat Card on Desk\n  topology projection -> runtime session using CPU/RAM\n  storage projection  -> session JSONL on Disk\n  time projection     -> Past memory trace\n  intent projection   -> active context/goal binding\n  action projection   -> message-send / file-read / context-assemble\n```\n\nThis lets a concept such as `computer` participate in several relationship\nwebs without duplicating its canonical definition.\n\n## Visual Rule\n\nThe composite-lens renderer selects an occurrence, not a global concept node.\nIt keeps canonical identity available through `concept_id` while navigation\nchanges `selectedRefId`.\n\n```text\nSelect ref_id\n  -> show that occurrence and its direct children\n  -> keep concept_id as reusable semantic identity\n  -> connect other occurrences through typed reference edges\n```"
     },
     {
       "id": "ontology.cross_facet_binding",
       "label": "Cross-Facet Binding",
       "type": "meta_model",
       "layer": "ontology",
-      "summary": "Connection between projections of the same canonical concept or between different facets.",
+      "summary": "Typed reference edge between occurrences, including reused concepts or different facets.",
       "aliases": [],
       "abbreviations": {},
       "path": "ontology/concepts/cross-facet-binding.md",
@@ -1375,8 +2165,17 @@
         ]
       },
       "relationEdges": [],
+      "viewCells": [],
+      "subjectId": null,
+      "snapshotId": null,
+      "timeSlice": null,
+      "snapshotStatus": null,
+      "continuesFrom": null,
+      "rootRef": null,
+      "occurrences": [],
+      "referenceEdges": [],
       "wikiLinks": [],
-      "body": "# Cross-Facet Binding\n\nCross-facet binding connects projections without pretending they belong in the same hierarchy.\n\nExample:\n\n```text\nentity.llm_chat_session\n  Space projection: Chat Card\n  Storage projection: session JSONL file\n  Time projection: Past memory trace\n```\n\nThese projections are the same canonical concept from different lenses. They should be linked through identity binding, not by nesting all of them into one plane.\n\n## Visual Rule\n\nShow cross-facet bindings only when useful:\n\n- selected concept identity rail\n- hover/focus highlight\n- explicit cross-lens mode\n\nDo not show all cross-facet bindings by default."
+      "body": "# Cross-Facet Binding\n\nCross-facet binding connects occurrences without duplicating their canonical\nconcept identity or forcing the complete relationship web into one rectangle\ntree.\n\nExample:\n\n```text\nentity.llm_chat_session\n  Space projection: Chat Card\n  Storage projection: session JSONL file\n  Time projection: Past memory trace\n```\n\nThese projections can share one `concept_id` while using different `ref_id`\nvalues. A local composite may nest the occurrence that matters in its current\ncontext; other occurrences remain linked by typed reference edges.\n\n## Visual Rule\n\nShow cross-facet bindings only when relevant to the current selected reference:\n\n- visible cross-layer bridge\n- visible time transition\n- reused-reference or cycle route\n- optional future search/inspector result\n\nDo not show all cross-facet bindings by default."
     },
     {
       "id": "ontology.facet",
@@ -1405,6 +2204,15 @@
         ]
       },
       "relationEdges": [],
+      "viewCells": [],
+      "subjectId": null,
+      "snapshotId": null,
+      "timeSlice": null,
+      "snapshotStatus": null,
+      "continuesFrom": null,
+      "rootRef": null,
+      "occurrences": [],
+      "referenceEdges": [],
       "wikiLinks": [
         "axes/axis-space.md",
         "axes/axis-time.md",
@@ -1414,11 +2222,9 @@
         "facets/facet-time.md",
         "facets/facet-storage.md",
         "facets/facet-intent.md",
-        "facets/facet-action.md",
-        "binding-type.md",
-        "cross-facet-binding.md"
+        "facets/facet-action.md"
       ],
-      "body": "# Facet\n\nA facet is a lens over the EG-Desk world.\n\nPrimary axes are not the same as facets.\n\n```text\nPrimary axes:\n  Space\n  Time\n  Virtual\n\nBinding / secondary facets:\n  storage\n  topology\n  intent\n  action\n```\n\nFacets answer:\n\n```text\nWhich aspect of this canonical concept are we looking at?\nWhich containment rules are valid in this view?\nWhich edges should be visible by default?\n```\n\n## Primary Axes\n\n- [[axes/axis-space.md]]\n- [[axes/axis-time.md]]\n- [[axes/axis-virtual.md]]\n\n## Secondary Facets / Binding Views\n\n- [[facets/facet-space.md]]\n- [[facets/facet-topology.md]]\n- [[facets/facet-time.md]]\n- [[facets/facet-storage.md]]\n- [[facets/facet-intent.md]]\n- [[facets/facet-action.md]]\n\n## Containment Rule\n\nContainment and visual overlap are valid only inside a single primary axis.\n\n```text\nValid:\n  Space axis: Desktop contains Browser Card\n  Space axis: Disk contains session JSONL file\n  Time axis: Past contains evidence trace\n  Virtual axis: Goal contains tasks\n\nInvalid:\n  Desktop visually contains Past memory just because the memory is stored on disk.\n```\n\nCross-axis relations should use [[binding-type.md]], [[cross-facet-binding.md]], ports, or identity rail entries instead of overlap."
+      "body": "# Facet\n\nA facet is a lens over the EG-Desk world.\n\nPrimary axes are not the same as facets.\n\n```text\nPrimary axes:\n  Space\n  Time\n  Virtual\n\nBinding / secondary facets:\n  storage\n  topology\n  intent\n  action\n```\n\nFacets answer:\n\n```text\nWhich aspect of this canonical concept are we looking at?\nWhich containment rules are valid in this view?\nWhich edges should be visible by default?\n```\n\n## Primary Axes\n\n- [[axes/axis-space.md]]\n- [[axes/axis-time.md]]\n- [[axes/axis-virtual.md]]\n\n## Secondary Facets / Binding Views\n\n- [[facets/facet-space.md]]\n- [[facets/facet-topology.md]]\n- [[facets/facet-time.md]]\n- [[facets/facet-storage.md]]\n- [[facets/facet-intent.md]]\n- [[facets/facet-action.md]]\n\n## Composite Rule\n\nThe visual grammar does not require a different shape for each relation type.\nAn authored snapshot may compact containment, assembly, classification, or\nruntime dependency into nested rectangles when that local composition is the\nuseful explanation.\n\n```text\nServer\n  -> Computer\n      -> MacBook\n\nSession\n  -> Computer reference\n```\n\nThe exact typed relation remains in data even when the visual shape is a\nrectangle. Reused concepts, cycles, time continuity, and layer crossings that\ncannot be expressed by finite nesting use reference occurrences and typed\nreference edges."
     },
     {
       "id": "ontology.projection",
@@ -1442,8 +2248,17 @@
         ]
       },
       "relationEdges": [],
+      "viewCells": [],
+      "subjectId": null,
+      "snapshotId": null,
+      "timeSlice": null,
+      "snapshotStatus": null,
+      "continuesFrom": null,
+      "rootRef": null,
+      "occurrences": [],
+      "referenceEdges": [],
       "wikiLinks": [],
-      "body": "# Projection\n\nA projection is how a canonical concept appears inside a specific facet.\n\nProjection nodes are what the renderer draws.\n\n```text\ncanonical concept + facet + view rules = projection node\n```\n\n## Projection Shape\n\n```yaml\ncanonical_id: entity.llm_chat_session\nfacet: facet.storage\nprojection_id: projection.llm_chat_session.storage.file\nshape: file\nlabel: Session JSONL\nsource_ref: ~/.codex/sessions/...\n```\n\n## Renderer Rule\n\nThe renderer should draw projections, not raw canonical concepts.\n\nThe detail panel can show canonical identity and all available projections."
+      "body": "# Projection\n\nA projection is how a canonical concept appears inside a specific facet or\nview. It is optional modeling metadata, not the only drawable unit.\n\n```text\ncanonical concept + facet + view rules = projection node\n```\n\n## Projection Shape\n\n```yaml\ncanonical_id: entity.llm_chat_session\nfacet: facet.storage\nprojection_id: projection.llm_chat_session.storage.file\nshape: file\nlabel: Session JSONL\nsource_ref: ~/.codex/sessions/...\n```\n\n## Renderer Rule\n\nThe current composite-lens renderer draws snapshot occurrences keyed by\n`ref_id`. An occurrence may refer directly to a canonical concept or to a\nprojection concept. The renderer does not require an `identity_anchor`, detail\npanel, or identity rail.\n\nProjection metadata can be exposed later by search, an optional inspector, or\nan alternate faceted view without changing the v2 rectangle grammar."
     },
     {
       "id": "operation.layer",
@@ -1476,6 +2291,15 @@
         ]
       },
       "relationEdges": [],
+      "viewCells": [],
+      "subjectId": null,
+      "snapshotId": null,
+      "timeSlice": null,
+      "snapshotStatus": null,
+      "continuesFrom": null,
+      "rootRef": null,
+      "occurrences": [],
+      "referenceEdges": [],
       "wikiLinks": [],
       "body": "# Operation Layer\n\nThe Operation Layer is where LLMs, tools, automation, and human decisions interact with the EG-Desk world.\n\nIt does four things:\n\n1. Recognizes real-world objects and places behind digital resources.\n2. Binds those objects to executable surfaces through source refs.\n3. Performs actions through runtime actors and tools.\n4. Emits structured outputs that update Past, Present, Future, or Multiverse.\n\nThe Operation Layer is not identical to a single model or subagent. It is the mapping and execution layer that lets many actor types work inside the same ontology."
     },
@@ -1505,6 +2329,15 @@
         ]
       },
       "relationEdges": [],
+      "viewCells": [],
+      "subjectId": null,
+      "snapshotId": null,
+      "timeSlice": null,
+      "snapshotStatus": null,
+      "continuesFrom": null,
+      "rootRef": null,
+      "occurrences": [],
+      "referenceEdges": [],
       "wikiLinks": [],
       "body": "# Structured Output\n\nStructured Output is the bridge from action to reusable world state.\n\nExamples:\n\n- state diff\n- decision record\n- plan update\n- task list\n- evidence bundle\n- artifact manifest\n- source-ref list\n- branch comparison\n- run playback record\n\nStructured Output should be both human-readable and machine-readable. It is how EG-Desk turns an action into future context without forcing the LLM to reread an entire transcript.\n\n## Output Contract Shape\n\n```yaml\nid: output.example\ntype: decision_record\nsummary: One-line result.\nupdates:\n  future:\n    goals: []\n    plans: []\n  past:\n    evidence_refs: []\n  present:\n    changed_surfaces: []\nsource_refs: []\n```"
     },
@@ -1519,6 +2352,16 @@
       "path": null,
       "ontologyPath": null,
       "relations": {},
+      "relationEdges": [],
+      "viewCells": [],
+      "subjectId": null,
+      "snapshotId": null,
+      "timeSlice": null,
+      "snapshotStatus": null,
+      "continuesFrom": null,
+      "rootRef": null,
+      "occurrences": [],
+      "referenceEdges": [],
       "wikiLinks": [],
       "body": "",
       "synthetic": true
@@ -1534,6 +2377,16 @@
       "path": null,
       "ontologyPath": null,
       "relations": {},
+      "relationEdges": [],
+      "viewCells": [],
+      "subjectId": null,
+      "snapshotId": null,
+      "timeSlice": null,
+      "snapshotStatus": null,
+      "continuesFrom": null,
+      "rootRef": null,
+      "occurrences": [],
+      "referenceEdges": [],
       "wikiLinks": [],
       "body": "",
       "synthetic": true
@@ -1549,6 +2402,16 @@
       "path": null,
       "ontologyPath": null,
       "relations": {},
+      "relationEdges": [],
+      "viewCells": [],
+      "subjectId": null,
+      "snapshotId": null,
+      "timeSlice": null,
+      "snapshotStatus": null,
+      "continuesFrom": null,
+      "rootRef": null,
+      "occurrences": [],
+      "referenceEdges": [],
       "wikiLinks": [],
       "body": "",
       "synthetic": true
@@ -1564,6 +2427,16 @@
       "path": null,
       "ontologyPath": null,
       "relations": {},
+      "relationEdges": [],
+      "viewCells": [],
+      "subjectId": null,
+      "snapshotId": null,
+      "timeSlice": null,
+      "snapshotStatus": null,
+      "continuesFrom": null,
+      "rootRef": null,
+      "occurrences": [],
+      "referenceEdges": [],
       "wikiLinks": [],
       "body": "",
       "synthetic": true
@@ -1579,6 +2452,16 @@
       "path": null,
       "ontologyPath": null,
       "relations": {},
+      "relationEdges": [],
+      "viewCells": [],
+      "subjectId": null,
+      "snapshotId": null,
+      "timeSlice": null,
+      "snapshotStatus": null,
+      "continuesFrom": null,
+      "rootRef": null,
+      "occurrences": [],
+      "referenceEdges": [],
       "wikiLinks": [],
       "body": "",
       "synthetic": true
@@ -1594,6 +2477,16 @@
       "path": null,
       "ontologyPath": null,
       "relations": {},
+      "relationEdges": [],
+      "viewCells": [],
+      "subjectId": null,
+      "snapshotId": null,
+      "timeSlice": null,
+      "snapshotStatus": null,
+      "continuesFrom": null,
+      "rootRef": null,
+      "occurrences": [],
+      "referenceEdges": [],
       "wikiLinks": [],
       "body": "",
       "synthetic": true
@@ -1609,6 +2502,16 @@
       "path": null,
       "ontologyPath": null,
       "relations": {},
+      "relationEdges": [],
+      "viewCells": [],
+      "subjectId": null,
+      "snapshotId": null,
+      "timeSlice": null,
+      "snapshotStatus": null,
+      "continuesFrom": null,
+      "rootRef": null,
+      "occurrences": [],
+      "referenceEdges": [],
       "wikiLinks": [],
       "body": "",
       "synthetic": true
@@ -1624,6 +2527,16 @@
       "path": null,
       "ontologyPath": null,
       "relations": {},
+      "relationEdges": [],
+      "viewCells": [],
+      "subjectId": null,
+      "snapshotId": null,
+      "timeSlice": null,
+      "snapshotStatus": null,
+      "continuesFrom": null,
+      "rootRef": null,
+      "occurrences": [],
+      "referenceEdges": [],
       "wikiLinks": [],
       "body": "",
       "synthetic": true
@@ -1639,6 +2552,16 @@
       "path": null,
       "ontologyPath": null,
       "relations": {},
+      "relationEdges": [],
+      "viewCells": [],
+      "subjectId": null,
+      "snapshotId": null,
+      "timeSlice": null,
+      "snapshotStatus": null,
+      "continuesFrom": null,
+      "rootRef": null,
+      "occurrences": [],
+      "referenceEdges": [],
       "wikiLinks": [],
       "body": "",
       "synthetic": true
@@ -1654,6 +2577,16 @@
       "path": null,
       "ontologyPath": null,
       "relations": {},
+      "relationEdges": [],
+      "viewCells": [],
+      "subjectId": null,
+      "snapshotId": null,
+      "timeSlice": null,
+      "snapshotStatus": null,
+      "continuesFrom": null,
+      "rootRef": null,
+      "occurrences": [],
+      "referenceEdges": [],
       "wikiLinks": [],
       "body": "",
       "synthetic": true
@@ -1669,6 +2602,16 @@
       "path": null,
       "ontologyPath": null,
       "relations": {},
+      "relationEdges": [],
+      "viewCells": [],
+      "subjectId": null,
+      "snapshotId": null,
+      "timeSlice": null,
+      "snapshotStatus": null,
+      "continuesFrom": null,
+      "rootRef": null,
+      "occurrences": [],
+      "referenceEdges": [],
       "wikiLinks": [],
       "body": "",
       "synthetic": true
@@ -1684,6 +2627,16 @@
       "path": null,
       "ontologyPath": null,
       "relations": {},
+      "relationEdges": [],
+      "viewCells": [],
+      "subjectId": null,
+      "snapshotId": null,
+      "timeSlice": null,
+      "snapshotStatus": null,
+      "continuesFrom": null,
+      "rootRef": null,
+      "occurrences": [],
+      "referenceEdges": [],
       "wikiLinks": [],
       "body": "",
       "synthetic": true
@@ -1699,6 +2652,16 @@
       "path": null,
       "ontologyPath": null,
       "relations": {},
+      "relationEdges": [],
+      "viewCells": [],
+      "subjectId": null,
+      "snapshotId": null,
+      "timeSlice": null,
+      "snapshotStatus": null,
+      "continuesFrom": null,
+      "rootRef": null,
+      "occurrences": [],
+      "referenceEdges": [],
       "wikiLinks": [],
       "body": "",
       "synthetic": true
@@ -1714,6 +2677,16 @@
       "path": null,
       "ontologyPath": null,
       "relations": {},
+      "relationEdges": [],
+      "viewCells": [],
+      "subjectId": null,
+      "snapshotId": null,
+      "timeSlice": null,
+      "snapshotStatus": null,
+      "continuesFrom": null,
+      "rootRef": null,
+      "occurrences": [],
+      "referenceEdges": [],
       "wikiLinks": [],
       "body": "",
       "synthetic": true
@@ -1729,6 +2702,16 @@
       "path": null,
       "ontologyPath": null,
       "relations": {},
+      "relationEdges": [],
+      "viewCells": [],
+      "subjectId": null,
+      "snapshotId": null,
+      "timeSlice": null,
+      "snapshotStatus": null,
+      "continuesFrom": null,
+      "rootRef": null,
+      "occurrences": [],
+      "referenceEdges": [],
       "wikiLinks": [],
       "body": "",
       "synthetic": true
@@ -1752,6 +2735,15 @@
       "ontologyPath": "concepts/ram.md",
       "relations": {},
       "relationEdges": [],
+      "viewCells": [],
+      "subjectId": null,
+      "snapshotId": null,
+      "timeSlice": null,
+      "snapshotStatus": null,
+      "continuesFrom": null,
+      "rootRef": null,
+      "occurrences": [],
+      "referenceEdges": [],
       "wikiLinks": [],
       "body": "# RAM\n\nRAM is an object handle for working memory.\n\nIts position in a hierarchy depends on the active relation map."
     },
@@ -1777,6 +2769,15 @@
         ]
       },
       "relationEdges": [],
+      "viewCells": [],
+      "subjectId": null,
+      "snapshotId": null,
+      "timeSlice": null,
+      "snapshotStatus": null,
+      "continuesFrom": null,
+      "rootRef": null,
+      "occurrences": [],
+      "referenceEdges": [],
       "wikiLinks": [
         "source-ref.md"
       ],
@@ -1793,6 +2794,16 @@
       "path": null,
       "ontologyPath": null,
       "relations": {},
+      "relationEdges": [],
+      "viewCells": [],
+      "subjectId": null,
+      "snapshotId": null,
+      "timeSlice": null,
+      "snapshotStatus": null,
+      "continuesFrom": null,
+      "rootRef": null,
+      "occurrences": [],
+      "referenceEdges": [],
       "wikiLinks": [],
       "body": "",
       "synthetic": true
@@ -1808,9 +2819,67 @@
       "path": null,
       "ontologyPath": null,
       "relations": {},
+      "relationEdges": [],
+      "viewCells": [],
+      "subjectId": null,
+      "snapshotId": null,
+      "timeSlice": null,
+      "snapshotStatus": null,
+      "continuesFrom": null,
+      "rootRef": null,
+      "occurrences": [],
+      "referenceEdges": [],
       "wikiLinks": [],
       "body": "",
       "synthetic": true
+    },
+    {
+      "id": "server",
+      "label": "회사 서버",
+      "type": "concept_handle",
+      "layer": "runtime",
+      "summary": "A server role whose concrete implementation can change between ontology snapshots.",
+      "aliases": [],
+      "abbreviations": {},
+      "path": "ontology/concepts/server.md",
+      "ontologyPath": "concepts/server.md",
+      "relations": {},
+      "relationEdges": [],
+      "viewCells": [],
+      "subjectId": null,
+      "snapshotId": null,
+      "timeSlice": null,
+      "snapshotStatus": null,
+      "continuesFrom": null,
+      "rootRef": null,
+      "occurrences": [],
+      "referenceEdges": [],
+      "wikiLinks": [],
+      "body": "# 회사 서버\n\n`server` is a reusable concept handle. A time-specific company server belongs in a composite snapshot."
+    },
+    {
+      "id": "server-rack",
+      "label": "서버랙",
+      "type": "hardware_resource",
+      "layer": "architecture",
+      "summary": "Rack-mounted server hardware planned as the future company-server host.",
+      "aliases": [],
+      "abbreviations": {},
+      "path": "ontology/concepts/server-rack.md",
+      "ontologyPath": "concepts/server-rack.md",
+      "relations": {},
+      "relationEdges": [],
+      "viewCells": [],
+      "subjectId": null,
+      "snapshotId": null,
+      "timeSlice": null,
+      "snapshotStatus": null,
+      "continuesFrom": null,
+      "rootRef": null,
+      "occurrences": [],
+      "referenceEdges": [],
+      "wikiLinks": [],
+      "body": "# 서버랙\n\nA concrete future implementation of the company server's computer role."
     },
     {
       "id": "simulated.state",
@@ -1823,9 +2892,237 @@
       "path": null,
       "ontologyPath": null,
       "relations": {},
+      "relationEdges": [],
+      "viewCells": [],
+      "subjectId": null,
+      "snapshotId": null,
+      "timeSlice": null,
+      "snapshotStatus": null,
+      "continuesFrom": null,
+      "rootRef": null,
+      "occurrences": [],
+      "referenceEdges": [],
       "wikiLinks": [],
       "body": "",
       "synthetic": true
+    },
+    {
+      "id": "snapshot.company_server.future",
+      "label": "회사 서버 · 미래",
+      "type": "composite_snapshot",
+      "layer": "runtime",
+      "summary": "Planned future composition of the same company-server subject.",
+      "aliases": [],
+      "abbreviations": {},
+      "path": "ontology/snapshots/company-server.future.md",
+      "ontologyPath": "snapshots/company-server.future.md",
+      "relations": {},
+      "relationEdges": [],
+      "viewCells": [],
+      "subjectId": "company-server",
+      "snapshotId": "company-server@future",
+      "timeSlice": "future",
+      "snapshotStatus": "planned",
+      "continuesFrom": "company-server@present",
+      "rootRef": "future.server",
+      "occurrences": [
+        {
+          "refId": "future.server",
+          "conceptId": "server",
+          "parentRef": null,
+          "relation": "contains",
+          "layer": "virtual",
+          "label": "회사 서버",
+          "order": 10
+        },
+        {
+          "refId": "future.server.computer",
+          "conceptId": "computer",
+          "parentRef": "future.server",
+          "relation": "runs_on",
+          "layer": "physical",
+          "label": "컴퓨터 / PC",
+          "order": 20
+        },
+        {
+          "refId": "future.server.computer.rack",
+          "conceptId": "server-rack",
+          "parentRef": "future.server.computer",
+          "relation": "instance_of",
+          "layer": "physical",
+          "label": "서버랙",
+          "order": 30
+        },
+        {
+          "refId": "future.server.computer.rack.windows",
+          "conceptId": "windows-os",
+          "parentRef": "future.server.computer.rack",
+          "relation": "runs",
+          "layer": "virtual",
+          "label": "Windows OS",
+          "order": 40
+        },
+        {
+          "refId": "future.server.computer.rack.cpu",
+          "conceptId": "cpu",
+          "parentRef": "future.server.computer.rack",
+          "relation": "composed_of",
+          "layer": "physical",
+          "label": "CPU",
+          "order": 50
+        },
+        {
+          "refId": "future.server.computer.rack.ram",
+          "conceptId": "ram",
+          "parentRef": "future.server.computer.rack",
+          "relation": "composed_of",
+          "layer": "physical",
+          "label": "RAM",
+          "order": 60
+        },
+        {
+          "refId": "future.server.computer.rack.disk",
+          "conceptId": "disk",
+          "parentRef": "future.server.computer.rack",
+          "relation": "composed_of",
+          "layer": "physical",
+          "label": "Disk",
+          "order": 70
+        }
+      ],
+      "referenceEdges": [
+        {
+          "sourceRef": "future.server",
+          "relation": "implemented_by",
+          "targetRef": "future.server.computer"
+        },
+        {
+          "sourceRef": "future.server.computer",
+          "relation": "refers_to",
+          "targetRef": "future.server.computer.rack"
+        },
+        {
+          "sourceRef": "present.server",
+          "relation": "continues_as",
+          "targetRef": "future.server"
+        },
+        {
+          "sourceRef": "present.server.computer",
+          "relation": "reconfigured_as",
+          "targetRef": "future.server.computer"
+        },
+        {
+          "sourceRef": "present.server.computer.macbook",
+          "relation": "replaced_by",
+          "targetRef": "future.server.computer.rack"
+        },
+        {
+          "sourceRef": "present.server.computer.macbook.macos",
+          "relation": "migrates_to",
+          "targetRef": "future.server.computer.rack.windows"
+        }
+      ],
+      "wikiLinks": [],
+      "body": "# 회사 서버 · 미래\n\nThe real subject remains `company-server`, while this planned snapshot has a different document and composite identity."
+    },
+    {
+      "id": "snapshot.company_server.present",
+      "label": "회사 서버 · 현재",
+      "type": "composite_snapshot",
+      "layer": "runtime",
+      "summary": "Observed present composition of the single company-server subject.",
+      "aliases": [],
+      "abbreviations": {},
+      "path": "ontology/snapshots/company-server.present.md",
+      "ontologyPath": "snapshots/company-server.present.md",
+      "relations": {},
+      "relationEdges": [],
+      "viewCells": [],
+      "subjectId": "company-server",
+      "snapshotId": "company-server@present",
+      "timeSlice": "present",
+      "snapshotStatus": "observed",
+      "continuesFrom": null,
+      "rootRef": "present.server",
+      "occurrences": [
+        {
+          "refId": "present.server",
+          "conceptId": "server",
+          "parentRef": null,
+          "relation": "contains",
+          "layer": "virtual",
+          "label": "회사 서버",
+          "order": 10
+        },
+        {
+          "refId": "present.server.computer",
+          "conceptId": "computer",
+          "parentRef": "present.server",
+          "relation": "runs_on",
+          "layer": "physical",
+          "label": "컴퓨터",
+          "order": 20
+        },
+        {
+          "refId": "present.server.computer.macbook",
+          "conceptId": "macbook",
+          "parentRef": "present.server.computer",
+          "relation": "instance_of",
+          "layer": "physical",
+          "label": "MacBook",
+          "order": 30
+        },
+        {
+          "refId": "present.server.computer.macbook.macos",
+          "conceptId": "macos",
+          "parentRef": "present.server.computer.macbook",
+          "relation": "runs",
+          "layer": "virtual",
+          "label": "macOS",
+          "order": 40
+        },
+        {
+          "refId": "present.server.computer.macbook.cpu",
+          "conceptId": "cpu",
+          "parentRef": "present.server.computer.macbook",
+          "relation": "composed_of",
+          "layer": "physical",
+          "label": "CPU",
+          "order": 50
+        },
+        {
+          "refId": "present.server.computer.macbook.ram",
+          "conceptId": "ram",
+          "parentRef": "present.server.computer.macbook",
+          "relation": "composed_of",
+          "layer": "physical",
+          "label": "RAM",
+          "order": 60
+        },
+        {
+          "refId": "present.server.computer.macbook.disk",
+          "conceptId": "disk",
+          "parentRef": "present.server.computer.macbook",
+          "relation": "composed_of",
+          "layer": "physical",
+          "label": "Disk",
+          "order": 70
+        }
+      ],
+      "referenceEdges": [
+        {
+          "sourceRef": "present.server",
+          "relation": "implemented_by",
+          "targetRef": "present.server.computer"
+        },
+        {
+          "sourceRef": "present.server.computer",
+          "relation": "refers_to",
+          "targetRef": "present.server.computer.macbook"
+        }
+      ],
+      "wikiLinks": [],
+      "body": "# 회사 서버 · 현재\n\nThe real subject is `company-server`. This file is its observed present ontology snapshot."
     },
     {
       "id": "source.ref",
@@ -1850,6 +3147,15 @@
         ]
       },
       "relationEdges": [],
+      "viewCells": [],
+      "subjectId": null,
+      "snapshotId": null,
+      "timeSlice": null,
+      "snapshotStatus": null,
+      "continuesFrom": null,
+      "rootRef": null,
+      "occurrences": [],
+      "referenceEdges": [],
       "wikiLinks": [],
       "body": "# SourceRef\n\nSourceRef binds ontology concepts to real resources.\n\nIt should remain small and extensible:\n\n```ts\ntype SourceRef = {\n  kind: string;\n  uri?: string;\n  path?: string;\n  id?: string;\n  scope?: string;\n  accountId?: string;\n  profileId?: string;\n  openMode?: string;\n};\n```\n\nSourceRef exists because URL, file path, repo path, account, browser profile, and runtime session are not interchangeable identities.\n\nExamples:\n\n- same URL under different browser profiles\n- same file path in different worktrees\n- same Gmail thread under different account visibility\n- same Codex thread as chat history, session JSONL, and current UI card\n\nSourceRef lets EG-Desk preserve those distinctions."
     },
@@ -1864,6 +3170,16 @@
       "path": null,
       "ontologyPath": null,
       "relations": {},
+      "relationEdges": [],
+      "viewCells": [],
+      "subjectId": null,
+      "snapshotId": null,
+      "timeSlice": null,
+      "snapshotStatus": null,
+      "continuesFrom": null,
+      "rootRef": null,
+      "occurrences": [],
+      "referenceEdges": [],
       "wikiLinks": [],
       "body": "",
       "synthetic": true
@@ -1879,6 +3195,16 @@
       "path": null,
       "ontologyPath": null,
       "relations": {},
+      "relationEdges": [],
+      "viewCells": [],
+      "subjectId": null,
+      "snapshotId": null,
+      "timeSlice": null,
+      "snapshotStatus": null,
+      "continuesFrom": null,
+      "rootRef": null,
+      "occurrences": [],
+      "referenceEdges": [],
       "wikiLinks": [],
       "body": "",
       "synthetic": true
@@ -1894,6 +3220,16 @@
       "path": null,
       "ontologyPath": null,
       "relations": {},
+      "relationEdges": [],
+      "viewCells": [],
+      "subjectId": null,
+      "snapshotId": null,
+      "timeSlice": null,
+      "snapshotStatus": null,
+      "continuesFrom": null,
+      "rootRef": null,
+      "occurrences": [],
+      "referenceEdges": [],
       "wikiLinks": [],
       "body": "",
       "synthetic": true
@@ -1909,6 +3245,16 @@
       "path": null,
       "ontologyPath": null,
       "relations": {},
+      "relationEdges": [],
+      "viewCells": [],
+      "subjectId": null,
+      "snapshotId": null,
+      "timeSlice": null,
+      "snapshotStatus": null,
+      "continuesFrom": null,
+      "rootRef": null,
+      "occurrences": [],
+      "referenceEdges": [],
       "wikiLinks": [],
       "body": "",
       "synthetic": true
@@ -1933,6 +3279,15 @@
       "ontologyPath": "concepts/terminal.md",
       "relations": {},
       "relationEdges": [],
+      "viewCells": [],
+      "subjectId": null,
+      "snapshotId": null,
+      "timeSlice": null,
+      "snapshotStatus": null,
+      "continuesFrom": null,
+      "rootRef": null,
+      "occurrences": [],
+      "referenceEdges": [],
       "wikiLinks": [],
       "body": "# Terminal\n\nTerminal is an object handle for command-line execution surfaces.\n\nIts role in a specific runtime assembly belongs in a relation map, not in this base object page."
     },
@@ -1962,6 +3317,15 @@
         ]
       },
       "relationEdges": [],
+      "viewCells": [],
+      "subjectId": null,
+      "snapshotId": null,
+      "timeSlice": null,
+      "snapshotStatus": null,
+      "continuesFrom": null,
+      "rootRef": null,
+      "occurrences": [],
+      "referenceEdges": [],
       "wikiLinks": [],
       "body": "# Future Representative\n\nFuture is the intent-bearing representative.\n\nIt includes:\n\n- Vision: durable direction and product/business intent\n- Goals: active objectives\n- Plans: human-readable work structure\n- Tasks: executable work units\n\nFuture answers:\n\n```text\nWhere are we trying to go?\nWhy does the next action matter?\nWhat sequence should turn possible state into real state?\n```\n\nFuture should be connected to Present through executable tasks, not left as a static roadmap."
     },
@@ -1991,6 +3355,15 @@
         ]
       },
       "relationEdges": [],
+      "viewCells": [],
+      "subjectId": null,
+      "snapshotId": null,
+      "timeSlice": null,
+      "snapshotStatus": null,
+      "continuesFrom": null,
+      "rootRef": null,
+      "occurrences": [],
+      "referenceEdges": [],
       "wikiLinks": [],
       "body": "# Multiverse Representative\n\nMultiverse is the representative for possible worlds.\n\nExamples:\n\n- alternate implementation plans\n- simulated user reactions\n- possible UI states\n- branch/worktree futures\n- rollback paths\n- product strategy options\n- hypothetical company or customer states\n\nMultiverse answers:\n\n```text\nWhat could happen?\nWhat path should we choose?\nWhat should remain only a simulation?\nWhat branch can be tested without committing it to reality?\n```\n\nThis layer is necessary because EG-Desk should support planning, simulation, and branching without confusing those possibilities with current reality."
     },
@@ -2021,6 +3394,15 @@
         ]
       },
       "relationEdges": [],
+      "viewCells": [],
+      "subjectId": null,
+      "snapshotId": null,
+      "timeSlice": null,
+      "snapshotStatus": null,
+      "continuesFrom": null,
+      "rootRef": null,
+      "occurrences": [],
+      "referenceEdges": [],
       "wikiLinks": [
         "time-present.md",
         "structured-output.md"
@@ -2053,15 +3435,24 @@
         ]
       },
       "relationEdges": [],
+      "viewCells": [],
+      "subjectId": null,
+      "snapshotId": null,
+      "timeSlice": null,
+      "snapshotStatus": null,
+      "continuesFrom": null,
+      "rootRef": null,
+      "occurrences": [],
+      "referenceEdges": [],
       "wikiLinks": [],
       "body": "# Present Representative\n\nPresent is the current executable state.\n\nIt includes:\n\n- visible Desk, Agenda, and Card state\n- open browser profiles and pages\n- active terminal processes\n- current files and repo state\n- running helper services\n- current user intent and selected context\n- available actors, tools, permissions, and runtime bindings\n\nPresent answers:\n\n```text\nWhat is live right now?\nWhat can be acted on right now?\nWhat changed since the last observed state?\n```\n\nThe Present Representative is where EG-Desk differs from a passive knowledge base. It binds ontology to executable surfaces."
     },
     {
       "id": "view.egdesk.faceted_concept_model",
-      "label": "Faceted Concept Model",
+      "label": "Faceted Concept Model (Authoring / Deferred Explorer)",
       "type": "view",
       "layer": "ontology",
-      "summary": "Mermaid view of canonical concepts, facets, projections, and cross-facet bindings.",
+      "summary": "Deferred authoring view of canonical concepts, facets, projections, and occurrence references.",
       "aliases": [],
       "abbreviations": {},
       "path": "ontology/views/faceted-concept-model.md",
@@ -2073,14 +3464,20 @@
           "ontology.projection",
           "ontology.cross_facet_binding",
           "entity.llm_chat_session"
-        ],
-        "uses": [
-          "view.identity_rail"
         ]
       },
       "relationEdges": [],
+      "viewCells": [],
+      "subjectId": null,
+      "snapshotId": null,
+      "timeSlice": null,
+      "snapshotStatus": null,
+      "continuesFrom": null,
+      "rootRef": null,
+      "occurrences": [],
+      "referenceEdges": [],
       "wikiLinks": [],
-      "body": "# Faceted Concept Model\n\n```mermaid\nflowchart LR\n    Canonical[\"Canonical Concept<br/>stable identity\"]\n\n    subgraph Facets[\"Facet Lenses\"]\n        Space[\"Space<br/>visible card / pane / canvas\"]\n        Topology[\"Topology<br/>runtime dependency\"]\n        Storage[\"Storage<br/>file / repo / DB / SourceRef\"]\n        Time[\"Time<br/>past / present / future / multiverse\"]\n        Intent[\"Intent<br/>goal / plan / task / blocker\"]\n        Action[\"Action<br/>read / write / click / run\"]\n    end\n\n    subgraph Example[\"entity.llm_chat_session\"]\n        ChatCard[\"Chat Card<br/>space projection\"]\n        Runtime[\"Chat Runtime<br/>topology projection\"]\n        SessionFile[\"Session File<br/>storage projection\"]\n        MemoryTrace[\"Memory Trace<br/>time projection\"]\n        ContextBinding[\"Context Binding<br/>intent projection\"]\n        MessageEvents[\"Message / Tool Events<br/>action projection\"]\n    end\n\n    Rail[\"Identity Rail<br/>selected concept focus\"]\n    Binding[\"Cross-Facet Binding<br/>identity, sourceRef, causality\"]\n\n    Canonical --> Space\n    Canonical --> Topology\n    Canonical --> Storage\n    Canonical --> Time\n    Canonical --> Intent\n    Canonical --> Action\n\n    Space --> ChatCard\n    Topology --> Runtime\n    Storage --> SessionFile\n    Time --> MemoryTrace\n    Intent --> ContextBinding\n    Action --> MessageEvents\n\n    ChatCard -. same identity .-> Rail\n    Runtime -. same identity .-> Rail\n    SessionFile -. same identity .-> Rail\n    MemoryTrace -. same identity .-> Rail\n    ContextBinding -. same identity .-> Rail\n    MessageEvents -. same identity .-> Rail\n\n    Rail --> Binding\n    Binding -. selected only .-> ChatCard\n    Binding -. selected only .-> Runtime\n    Binding -. selected only .-> SessionFile\n    Binding -. selected only .-> MemoryTrace\n    Binding -. selected only .-> ContextBinding\n    Binding -. selected only .-> MessageEvents\n```\n\n## Reading Rule\n\nThe diagram should be read as:\n\n```text\none identity\n  many facet projections\n  selected-focus binding\n```\n\nIt should not be read as one global containment tree."
+      "body": "# Faceted Concept Model (Authoring / Deferred Explorer)\n\nThis is an ontology-authoring overview, not the current Ontology Card layout.\nComposite-lens v2 does not mount an identity rail. It draws selected `ref_id`\noccurrences from snapshot documents and preserves shared identity through\n`concept_id`.\n\n```mermaid\nflowchart LR\n    Canonical[\"Canonical Concept<br/>stable identity\"]\n\n    subgraph Facets[\"Facet Lenses\"]\n        Space[\"Space<br/>visible card / pane / canvas\"]\n        Topology[\"Topology<br/>runtime dependency\"]\n        Storage[\"Storage<br/>file / repo / DB / SourceRef\"]\n        Time[\"Time<br/>past / present / future / multiverse\"]\n        Intent[\"Intent<br/>goal / plan / task / blocker\"]\n        Action[\"Action<br/>read / write / click / run\"]\n    end\n\n    subgraph Example[\"entity.llm_chat_session\"]\n        ChatCard[\"Chat Card<br/>space projection\"]\n        Runtime[\"Chat Runtime<br/>topology projection\"]\n        SessionFile[\"Session File<br/>storage projection\"]\n        MemoryTrace[\"Memory Trace<br/>time projection\"]\n        ContextBinding[\"Context Binding<br/>intent projection\"]\n        MessageEvents[\"Message / Tool Events<br/>action projection\"]\n    end\n\n    Occurrence[\"Reference Occurrences<br/>distinct ref_id values\"]\n    Binding[\"Reference Edges<br/>identity, sourceRef, causality\"]\n\n    Canonical --> Space\n    Canonical --> Topology\n    Canonical --> Storage\n    Canonical --> Time\n    Canonical --> Intent\n    Canonical --> Action\n\n    Space --> ChatCard\n    Topology --> Runtime\n    Storage --> SessionFile\n    Time --> MemoryTrace\n    Intent --> ContextBinding\n    Action --> MessageEvents\n\n    ChatCard -. referenced as .-> Occurrence\n    Runtime -. referenced as .-> Occurrence\n    SessionFile -. referenced as .-> Occurrence\n    MemoryTrace -. referenced as .-> Occurrence\n    ContextBinding -. referenced as .-> Occurrence\n    MessageEvents -. referenced as .-> Occurrence\n\n    Occurrence --> Binding\n    Binding -. selected only .-> ChatCard\n    Binding -. selected only .-> Runtime\n    Binding -. selected only .-> SessionFile\n    Binding -. selected only .-> MemoryTrace\n    Binding -. selected only .-> ContextBinding\n    Binding -. selected only .-> MessageEvents\n```\n\n## Reading Rule\n\nThe diagram should be read as:\n\n```text\none identity\n  many facet projections\n  many contextual occurrences\n  selected-reference edges\n```\n\nIt should not be read as one global containment tree, nor as a requirement to\nshow all facets at once. The v2 viewer chooses one occurrence and expands only\nits direct children."
     },
     {
       "id": "view.egdesk.world_graph",
@@ -2098,15 +3495,24 @@
         ]
       },
       "relationEdges": [],
+      "viewCells": [],
+      "subjectId": null,
+      "snapshotId": null,
+      "timeSlice": null,
+      "snapshotStatus": null,
+      "continuesFrom": null,
+      "rootRef": null,
+      "occurrences": [],
+      "referenceEdges": [],
       "wikiLinks": [],
       "body": "# EG-Desk World Graph\n\n```mermaid\nflowchart LR\n    Reality[\"Reality<br/>people, company, files, accounts, services\"]\n\n    subgraph Architecture[\"Hardware + Software Architecture\"]\n        HW[\"Compute<br/>CPU / RAM / Disk / GPU\"]\n        OS[\"OS / Desktop\"]\n        Surface[\"Execution Surfaces<br/>Browser / Terminal / App / Files\"]\n        Cloud[\"Cloud<br/>API / Backend / DB\"]\n        Repo[\"Repo / Code\"]\n        Desk[\"Desk / Agenda / Card\"]\n    end\n\n    subgraph Past[\"Past Representative\"]\n        Chat[\"Chat History\"]\n        Git[\"Git / File Revisions\"]\n        Logs[\"Execution Logs\"]\n        Tools[\"Tool History\"]\n        Evidence[\"Evidence / Provenance\"]\n    end\n\n    subgraph Present[\"Present Representative\"]\n        State[\"Current Runtime State\"]\n        Actors[\"Runtime Actors<br/>Human / Codex / Subagents / Tools\"]\n        Action[\"Action<br/>click / type / edit / run / deploy\"]\n    end\n\n    subgraph Future[\"Future Representative\"]\n        Vision[\"Vision\"]\n        Goals[\"Goals\"]\n        Plans[\"Plans\"]\n        Tasks[\"Tasks\"]\n    end\n\n    subgraph Multi[\"Multiverse Representative\"]\n        Branches[\"Alternative Branches\"]\n        Sims[\"Simulations\"]\n        Hypo[\"Hypothetical States\"]\n        Candidates[\"Candidate Futures\"]\n    end\n\n    Operation[\"Operation Layer<br/>LLM + tools + mapping + execution\"]\n    SourceRef[\"SourceRef<br/>resource identity binding\"]\n    Output[\"Structured Output<br/>state diff / decision / plan / artifact\"]\n\n    Reality --> HW\n    Reality --> SourceRef\n    HW --> OS --> Surface\n    Surface <--> Cloud\n    Surface <--> Repo\n    Surface --> Desk\n    Cloud --> SourceRef\n    Repo --> SourceRef\n\n    Chat --> Evidence\n    Git --> Evidence\n    Logs --> Evidence\n    Tools --> Evidence\n    Evidence --> SourceRef\n\n    SourceRef --> State\n    Desk --> State\n    Evidence --> State\n\n    State --> Operation\n    Operation --> Actors\n    Actors --> Action\n    Action --> Surface\n    Action --> Cloud\n    Action --> Repo\n    Action --> Logs\n\n    State --> Output\n    Evidence --> Output\n    Action --> Output\n    Output --> Goals\n    Vision --> Goals --> Plans --> Tasks\n    Tasks --> Action\n\n    Goals --> Branches\n    Plans --> Sims\n    State --> Hypo\n    Candidates --> Goals\n    Multi --> Output\n```"
     },
     {
       "id": "view.identity_rail",
-      "label": "Identity Rail",
+      "label": "Identity Rail (Deferred)",
       "type": "view_model",
       "layer": "ontology",
-      "summary": "UI rail that shows all known projections of the selected canonical concept.",
+      "summary": "Deferred optional UI for listing projections or occurrences of a selected canonical concept.",
       "aliases": [],
       "abbreviations": {},
       "path": "ontology/concepts/identity-rail.md",
@@ -2121,8 +3527,17 @@
         ]
       },
       "relationEdges": [],
+      "viewCells": [],
+      "subjectId": null,
+      "snapshotId": null,
+      "timeSlice": null,
+      "snapshotStatus": null,
+      "continuesFrom": null,
+      "rootRef": null,
+      "occurrences": [],
+      "referenceEdges": [],
       "wikiLinks": [],
-      "body": "# Identity Rail\n\nThe identity rail is the UI that keeps a selected canonical concept stable across lens changes.\n\nFor example:\n\n```text\nSelected: entity.llm_chat_session\n\nSpace     -> Chat Card on Desk\nTopology  -> runtime session using CPU/RAM\nStorage   -> session JSONL on Disk\nTime      -> Past memory trace\nIntent    -> active context/goal binding\nAction    -> message-send / file-read / context-assemble\n```\n\nThe identity rail prevents the user from confusing facet projections with different concepts."
+      "body": "# Identity Rail (Deferred)\n\nThe identity rail is an optional future UI for listing projections or reused\noccurrences of a selected canonical concept.\n\nFor example:\n\n```text\nSelected: entity.llm_chat_session\n\nSpace     -> Chat Card on Desk\nTopology  -> runtime session using CPU/RAM\nStorage   -> session JSONL on Disk\nTime      -> Past memory trace\nIntent    -> active context/goal binding\nAction    -> message-send / file-read / context-assemble\n```\n\nThe current composite-lens v2 does not mount or reserve space for this rail.\nCanonical identity is carried by `concept_id`; the selected visual instance is\ncarried by `ref_id`; nearby reuse is shown through relevant reference edges."
     },
     {
       "id": "view.projection",
@@ -2140,45 +3555,59 @@
           "ontology.facet",
           "ontology.projection",
           "ontology.cross_facet_binding"
-        ],
-        "contains": [
-          "view.identity_rail"
         ]
       },
       "relationEdges": [],
+      "viewCells": [],
+      "subjectId": null,
+      "snapshotId": null,
+      "timeSlice": null,
+      "snapshotStatus": null,
+      "continuesFrom": null,
+      "rootRef": null,
+      "occurrences": [],
+      "referenceEdges": [],
       "wikiLinks": [],
-      "body": "# View Projection\n\nA view projection is the assembled view the user sees.\n\nIt can be:\n\n- single-facet view: `Space`, `Topology`, `Time`, `Storage`, `Intent`, `Action`\n- controlled cross-facet view: selected object projected across several facets\n- curated About/Vision view: a guided read-only explanation\n\n## Renderer Rule\n\n```text\nDefault:\n  one primary facet at a time\n\nOn selection:\n  keep canonical identity\n  show related projections in identity rail\n  reveal cross-facet connectors only for selected concept\n```\n\nThis keeps the canvas readable while preserving multi-facet truth."
+      "body": "# View Projection\n\nA view projection is the assembled view the user sees.\n\nIt can be:\n\n- single-facet view: `Space`, `Topology`, `Time`, `Storage`, `Intent`, `Action`\n- controlled cross-facet view: selected object projected across several facets\n- curated About/Vision view: a guided read-only explanation\n\n## Renderer Rule\n\n```text\nComposite lens:\n  select one occurrence by ref_id\n  show that occurrence and its direct children\n  keep concept_id stable across reused occurrences\n  reveal only reference edges relevant to the visible focus\n```\n\nThis keeps the canvas readable while preserving the larger relationship web.\nAn identity rail is an optional future view, not part of the v2 Ontology Card."
     },
     {
       "id": "view.time_sliced_flat_deck",
       "label": "Time-Sliced Flat Deck",
       "type": "view_model",
       "layer": "ontology",
-      "summary": "Interactive flat-deck visualization method for EG-Desk ontology panes.",
+      "summary": "Two-layer, time-sliced composite lens for reference-occurrence snapshots.",
       "aliases": [],
       "abbreviations": {},
       "path": "ontology/views/time-sliced-flat-deck.md",
       "ontologyPath": "views/time-sliced-flat-deck.md",
       "relations": {
         "visualizes": [
-          "view.time_sliced_spatial_pane",
-          "entity.llm_chat_session",
-          "map.llm_chat_runtime_assembly"
+          "snapshot.company_server.present",
+          "snapshot.company_server.future"
         ],
         "constrains": [
           "egdesk.ontology.canvas_rendering_plan"
         ]
       },
       "relationEdges": [],
+      "viewCells": [],
+      "subjectId": null,
+      "snapshotId": null,
+      "timeSlice": null,
+      "snapshotStatus": null,
+      "continuesFrom": null,
+      "rootRef": null,
+      "occurrences": [],
+      "referenceEdges": [],
       "wikiLinks": [],
-      "body": "# Time-Sliced Flat Deck\n\nThis view renders the EG-Desk ontology as a set of flat 2D pane surfaces seen from a shallow 2.5D camera angle.\n\nThe camera angle is only a reading aid. Pane thickness is not semantic. The ontology still uses three primary axes:\n\n```text\nTime\nSpace\nVirtual\n```\n\nThe rendered pane is a coordinate cell where time and physical/virtual depth are applied together:\n\n```text\nRendered Pane = TimeSlice x DepthLayer\n\nTimeSlice  = past | present | future | multiverse\nDepthLayer = physical | binding | virtual\n```\n\n## Why This View Exists\n\nThe ontology cannot be read well as a simple node graph because the same concept can participate in several assemblies:\n\n```text\ndesktop\n  -> terminal\n      -> cpu\n      -> ram\n      -> disk\n\nentity.llm_chat_session\n  -> chat card on desktop\n  -> runtime through terminal\n  -> session file on disk\n  -> context binding\n  -> future goal\n```\n\nThe flat-deck view makes those assemblies browsable without duplicating objects across panes.\n\n## Home Pane Rule\n\nEach object has exactly one home pane in this view.\n\n```text\nobject\n  -> one visible home card\n  -> optional ghost/reference context elsewhere\n```\n\nDo not draw the same object as a full card in multiple panes. For example, `desktop` belongs to the present physical pane. A future goal may reference the desktop, but the future pane should not contain another full `desktop` card.\n\nDefault home placement:\n\n```text\npast\n  -> chat memory\n  -> memory trace\n  -> evidence/history files\n\npresent physical\n  -> desktop\n  -> terminal\n  -> cpu\n  -> ram\n  -> disk\n  -> concrete files/cards/runtime surfaces\n\npresent binding\n  -> topology use\n  -> storage link\n  -> action path\n  -> context binding\n\npresent virtual\n  -> entity.llm_chat_session\n  -> egdesk.desk\n  -> egdesk.agenda\n  -> egdesk.card\n\nfuture\n  -> goal\n  -> plan\n  -> task\n  -> structured output\n\nmultiverse\n  -> alternate plan\n  -> candidate future\n```\n\n## Visual Grammar\n\nThe canvas should show structure with geometry, not explanatory labels.\n\n```text\nleft/right position  -> time\nup/down depth        -> virtual / binding / physical emphasis\nlarge active deck    -> currently selected time slice\ndim side deck        -> adjacent time context\nnode card            -> object's home pane\nthin ghost node      -> context/reference only\northogonal line      -> assembly or relation direction\nside panel           -> relation meaning and selected details\n```\n\nCanvas labels should name objects, not schema categories. Avoid visible labels such as axis, physical, virtual, binding, topology, storage, intent, or action unless the user is explicitly editing the model.\n\nDo not subdivide the active pane with visible internal rectangles. Physical/virtual depth should be readable from vertical placement, containment paths, connector ports, and the right-side lens state.\n\n## Relation Line Rule\n\nRelation lines on the canvas show only existence, direction, and emphasis.\n\nThe relation type, source/target text, and explanation belong in the right-side detail panel.\n\nPreferred line style:\n\n```text\nlong orthogonal connector\nsquare turns\nthin stroke\nsubtle arrow endpoint\nno relation label chip on canvas\n```\n\nAssembly examples:\n\n```text\ndesktop\n|_____\n|     |\nterminal\n|_____\n|  |  |\ncpu ram disk\n```\n\nFor time-crossing relations, use a horizontal-forward path:\n\n```text\npast evidence -> present context -> future goal\n```\n\nThe time axis is visually left-to-right. It is not bidirectional unless the view is explicitly about rewind, comparison, or branching.\n\n## Interaction Grammar\n\nThe view is a lens, not a mode toolbar.\n\n```text\nLens = selected object/relation + active TimeSlice + active DepthLayer\n```\n\nExpected interaction:\n\n```text\nhorizontal trackpad scroll -> move active time slice\nvertical trackpad scroll   -> emphasize depth layer\npinch or Cmd/Ctrl + wheel  -> semantic zoom\nblank deck drag            -> card-local pan\nempty pane click           -> pane inventory\nobject click               -> object focus\nrelation stroke click      -> side-panel relation detail\n```\n\nDo not expose product-facing buttons named focus, hierarchy, time, spatial, virtual, physical, or tilt. Those are implementation terms.\n\n## Active Pane Behavior\n\nThe active pane should be visually dominant.\n\n```text\nactive pane\n  -> high opacity\n  -> trapezoid desk surface, with the back edge narrower than the front edge\n  -> all home objects for that pane visible\n  -> selected and connected objects sharp\n  -> unrelated objects dimmed but still locatable\n\nadjacent panes\n  -> lower opacity\n  -> only home objects or ghost context needed for reading the selected path\n```\n\nWhen an object is selected, connected upper/lower depth objects may become sharper. This should feel like moving the lens through the deck, not switching to a separate graph mode.\n\n## Non-Goals\n\nThis view is not:\n\n- a Wikipedia-style concept definition page\n- a global force-directed graph\n- a generic graph database browser\n- a 3D model where pane thickness carries meaning\n- a subagent topology diagram\n\nSubagents and tools can be shown as runtime actors inside the ontology, but they are not the foundation of the visualization."
+      "body": "# Time-Sliced Flat Deck\n\nThe flat deck is a shallow 2.5D reading aid over time-specific composite\nsnapshots.\n\n```text\nLens = active TimeSlice\n     + active Layer\n     + selected ref_id\n     + camera\n```\n\n```text\nTimeSlice = past | present | future\nLayer     = virtual | physical\n```\n\nTime is represented by separate snapshot documents. One real subject can keep\nthe same `subject_id` while its snapshot document, root reference, and recursive\ncomposition change.\n\n## Local projection\n\nTime is an axis of three coordinates, not a set of container panes. A\ntime-continuous virtual plane and time-continuous physical plane are partitioned\nby the three time coordinates. Virtual and physical use paired plane-local\ncoordinates and equal-sized projected frames. The trailing frame moves in depth\nwithout changing size. Roughly three quarters of the frames overlap and only a\nnarrow depth strip remains exposed. The inactive layer is shaded, its concepts\nsit below a translucent active-layer veil, and paired cross-layer connectors\ndrop vertically on screen. This yields six addressable regions without six\nfloating cards.\n\nVirtual remains above physical in world coordinates. Selecting physical moves\nthe shared POV down one depth step and brings physical into the main reading\narea; the two plane frames do not exchange positions.\n\nEach time coordinate first renders its snapshot-root occurrences scattered in\nthe surface region matching their layer. A snapshot root has an empty\n`parent_ref`. Crossing from a physical parent to a virtual child does not create\na new root or break composite ancestry. Selecting one root expands only that\noccurrence and its immediate same-layer children; a cross-layer direct child is\nshown on the other plane and remains attached to the same ancestry.\n\nThe active layer pane renders the selected occurrence and its same-layer direct\nchildren. Cross-layer direct children remain faintly visible on the rear layer\nand move through the same time-coordinate camera.\nSelecting a child makes it the next root. Its parent becomes a breadcrumb.\nFurther children are represented by literal square pips, one per direct child.\n\nThe local nesting does not claim that every relation is physical containment.\nIt is a visual expansion of a typed reference occurrence. Relation type remains\nin data.\n\n## Reference web\n\nLines connect visible occurrences when nesting alone is insufficient:\n\n- same subject across snapshots;\n- same concept referenced in several composites;\n- virtual/physical realization;\n- replacement or migration;\n- cyclic or peer relationships.\n\nHidden endpoints resolve to the nearest visible selected/direct-child boundary.\nTime links use right/left box midpoints. Cross-layer links use paired local\ncoordinates and a dashed line along the perspective-derived layer-separation\ndirection, visually perpendicular to the planes. Connection lines do not render\nrelation-name labels. Both endpoints share one camera, so pan and zoom move them\nas a coupled pair.\n\nA time coordinate without a snapshot is strictly empty: it has no synthetic\noccurrence, placeholder composite, or connection endpoint.\n\n## Side context\n\nInactive time coordinates show up to five related occurrences across their two\nplane regions. Remaining occurrences are bundled into a line count. Each box is\nplaced in the region matching its layer, and boxes and labels use projected\ngeometry. Past and future boxes remain slanted with their side coordinate.\n\n## Navigation\n\n- time and layer changes are click-only semantic operations.\n- ordinary wheel and blank/background drag pan both coupled layer occurrence\n  fields.\n- Cmd/Ctrl + wheel or pinch zooms.\n- plane surfaces remain fixed; coupled virtual and physical content moves.\n- active content is clipped to its layer region, while the other plane remains\n  context.\n- no node-layout editing exists in this viewer."
     },
     {
       "id": "view.time_sliced_spatial_pane",
-      "label": "Time-Sliced Spatial Pane",
+      "label": "Time-Sliced Spatial Coordinate",
       "type": "view_model",
       "layer": "ontology",
-      "summary": "A physical pane is a surface object; a time-sliced spatial pane is a virtual wrapper assembled from physical panes at a specific time.",
+      "summary": "A time-axis coordinate that partitions continuous virtual and physical 2.5D planes for one composite snapshot.",
       "aliases": [],
       "abbreviations": {},
       "path": "ontology/concepts/time-sliced-spatial-pane.md",
@@ -2186,17 +3615,24 @@
       "relations": {
         "uses": [
           "axis.time",
-          "axis.space",
           "axis.virtual"
         ],
-        "constrains": [
-          "view.projection",
-          "view.identity_rail"
+        "implemented_by": [
+          "view.time_sliced_flat_deck"
         ]
       },
       "relationEdges": [],
+      "viewCells": [],
+      "subjectId": null,
+      "snapshotId": null,
+      "timeSlice": null,
+      "snapshotStatus": null,
+      "continuesFrom": null,
+      "rootRef": null,
+      "occurrences": [],
+      "referenceEdges": [],
       "wikiLinks": [],
-      "body": "# Time-Sliced Spatial Pane\n\nSeparate the physical object from the virtual assembly.\n\n```text\nphysical pane = visible surface/container object\ntime-local virtual pane = semantic layer assembled from physical panes in one time slice\ntrajectory pane = composed virtual space across past/present/future slices\ntime-sliced spatial pane = virtual pane at time T\n```\n\nObjects live on physical panes.\n\nThe renderer should also wrap the virtual pane that emerges inside each time slice. Past, present, and future all have this split:\n\n```text\ntime slice\n  physical pane wrapper\n  time-local virtual pane wrapper\n```\n\nVirtual concepts and entities are overlays or identity bindings attached to objects on the physical panes and to the assembled virtual pane.\n\n## Layout Rule\n\n```text\nPast Pane     Present Pane(active)     Future Pane\nspace@past    space@present            space@future\n```\n\nInside the active pane:\n\n```text\nspace objects\n  -> cards, files, runtime resources, surfaces\n\nbinding band\n  -> storage, topology, intent, action\n\nvirtual overlay\n  -> canonical identity, entity meaning, goals, context binding\n```\n\nTime arranges pane assemblies. Space fills physical panes. Virtual explains identity and meaning on top of objects and across the assembled pane.\n\n## Rendering Rule\n\nThe product view should show three containment levels:\n\n- physical pane wrapper: the actual surface/container that objects occupy\n- time-local virtual pane wrapper: the semantic layer assembled inside one time slice\n- trajectory pane wrapper: the composed semantic/time-space across past, present, and future\n\nThe wrappers can be unlabeled in the main view if position, emphasis, and contained objects make the relation inferable.\n\nCanvas labels should name objects, not schema categories. Terms such as axis, binding, physical, and virtual can guide layout and selection emphasis, but they should not dominate the visible node labels.\n\n## Inventory Rule\n\nA pane can be selected directly.\n\n```text\npane selection\n  -> inventory of objects in that time-local pane\n  -> object selection\n  -> object focus\n```\n\nPane inventory should expose multiple co-present objects without drawing every global edge. It should still draw bounded node-to-node connectors for actual co-present graph edges. Depth bands and rails only explain physical / binding / virtual structure; assembly should use orthogonal tree connectors, for example `desktop -> terminal -> cpu/ram/disk`.\n\nVertical navigation inside a selected pane should travel depth:\n\n```text\nphysical\n  -> binding\n  -> virtual\n```\n\nThis must be visible through bands, connector ports, and vertical connectors, not through canvas labels alone."
+      "body": "# Time-Sliced Spatial Coordinate\n\nOne time coordinate selects one composite snapshot. Time itself is shown only\non the top axis. The coordinate cuts across two depth-stacked planes.\n\n```text\nLayerPane = TimeSlice × Layer × selected ref_id\n\nTimeSlice = past | present | future\nLayer     = virtual | physical\n```\n\nThe active layer pane displays the selected occurrence and its same-layer direct\nchildren. A cross-layer child stays faintly visible on the rear layer and\nconnects along the shared projected depth vector. The view does not expand an\nunlimited hierarchy. Selecting a\nchild replaces the focus root; the previous parent becomes a breadcrumb.\n\nInactive time coordinates remain projected side context with at most five\nconnected occurrences across their virtual and physical panes. Their labels and\nboxes follow coordinate-local geometry.\n\nThe virtual and physical planes are viewed from roughly 45 degrees above and\nextend beyond the viewport. They use paired local coordinates and equal-sized\nframes separated by about one quarter of a frame in projected depth, leaving\nroughly three quarters overlapped and a narrow strip exposed. Rear concepts sit\nbelow a translucent front-plane veil, and paired cross-layer connectors drop\nvertically on screen. Background drag and wheel pan one time-coordinate camera\nshared by both layers; plane geometry stays fixed and coupled content is clipped\nto the union of the two surfaces. Time and layer never change from wheel\ndirection.\n\nVirtual remains above physical in world coordinates. Activating physical\ntranslates the shared viewpoint down one depth step instead of exchanging the\ntwo pane frames."
     },
     {
       "id": "vision",
@@ -2209,9 +3645,43 @@
       "path": null,
       "ontologyPath": null,
       "relations": {},
+      "relationEdges": [],
+      "viewCells": [],
+      "subjectId": null,
+      "snapshotId": null,
+      "timeSlice": null,
+      "snapshotStatus": null,
+      "continuesFrom": null,
+      "rootRef": null,
+      "occurrences": [],
+      "referenceEdges": [],
       "wikiLinks": [],
       "body": "",
       "synthetic": true
+    },
+    {
+      "id": "windows-os",
+      "label": "Windows OS",
+      "type": "software_resource",
+      "layer": "runtime",
+      "summary": "Windows operating system referenced by the future server-rack composite.",
+      "aliases": [],
+      "abbreviations": {},
+      "path": "ontology/concepts/windows-os.md",
+      "ontologyPath": "concepts/windows-os.md",
+      "relations": {},
+      "relationEdges": [],
+      "viewCells": [],
+      "subjectId": null,
+      "snapshotId": null,
+      "timeSlice": null,
+      "snapshotStatus": null,
+      "continuesFrom": null,
+      "rootRef": null,
+      "occurrences": [],
+      "referenceEdges": [],
+      "wikiLinks": [],
+      "body": "# Windows OS\n\nThe virtual operating-system component planned for the future server snapshot."
     }
   ],
   "edges": [
@@ -2545,27 +4015,6 @@
       "kind": "frontmatter"
     },
     {
-      "id": "egdesk.ontology.canvas_rendering_plan:implements:egdesk.world",
-      "source": "egdesk.ontology.canvas_rendering_plan",
-      "target": "egdesk.world",
-      "relation": "implements",
-      "kind": "frontmatter"
-    },
-    {
-      "id": "egdesk.ontology.canvas_rendering_plan:implements:view.egdesk.faceted_concept_model",
-      "source": "egdesk.ontology.canvas_rendering_plan",
-      "target": "view.egdesk.faceted_concept_model",
-      "relation": "implements",
-      "kind": "frontmatter"
-    },
-    {
-      "id": "egdesk.ontology.canvas_rendering_plan:implements:view.egdesk.world_graph",
-      "source": "egdesk.ontology.canvas_rendering_plan",
-      "target": "view.egdesk.world_graph",
-      "relation": "implements",
-      "kind": "frontmatter"
-    },
-    {
       "id": "egdesk.ontology.canvas_rendering_plan:uses:egdesk.ontology.schema",
       "source": "egdesk.ontology.canvas_rendering_plan",
       "target": "egdesk.ontology.schema",
@@ -2573,46 +4022,11 @@
       "kind": "frontmatter"
     },
     {
-      "id": "egdesk.ontology.canvas_rendering_plan:uses:ontology.canonical_concept",
-      "source": "egdesk.ontology.canvas_rendering_plan",
-      "target": "ontology.canonical_concept",
-      "relation": "uses",
-      "kind": "frontmatter"
-    },
-    {
-      "id": "egdesk.ontology.canvas_rendering_plan:uses:ontology.facet",
-      "source": "egdesk.ontology.canvas_rendering_plan",
-      "target": "ontology.facet",
-      "relation": "uses",
-      "kind": "frontmatter"
-    },
-    {
-      "id": "egdesk.ontology.canvas_rendering_plan:uses:ontology.projection",
-      "source": "egdesk.ontology.canvas_rendering_plan",
-      "target": "ontology.projection",
-      "relation": "uses",
-      "kind": "frontmatter"
-    },
-    {
-      "id": "egdesk.ontology.canvas_rendering_plan:uses:source.ref",
-      "source": "egdesk.ontology.canvas_rendering_plan",
-      "target": "source.ref",
-      "relation": "uses",
-      "kind": "frontmatter"
-    },
-    {
-      "id": "egdesk.ontology.canvas_rendering_plan:uses:view.identity_rail",
-      "source": "egdesk.ontology.canvas_rendering_plan",
-      "target": "view.identity_rail",
-      "relation": "uses",
-      "kind": "frontmatter"
-    },
-    {
-      "id": "egdesk.ontology.canvas_rendering_plan:wiki:view.time_sliced_flat_deck",
+      "id": "egdesk.ontology.canvas_rendering_plan:uses:view.time_sliced_flat_deck",
       "source": "egdesk.ontology.canvas_rendering_plan",
       "target": "view.time_sliced_flat_deck",
-      "relation": "wiki_link",
-      "kind": "markdown"
+      "relation": "uses",
+      "kind": "frontmatter"
     },
     {
       "id": "egdesk.ontology.index:defines:actor.runtime",
@@ -3553,13 +4967,6 @@
       "kind": "frontmatter"
     },
     {
-      "id": "entity.llm_chat_session:operates_inside:egdesk.world",
-      "source": "entity.llm_chat_session",
-      "target": "egdesk.world",
-      "relation": "operates_inside",
-      "kind": "frontmatter"
-    },
-    {
       "id": "entity.llm_chat_session:represented_by:projection.llm_chat_session.action.message_send",
       "source": "entity.llm_chat_session",
       "target": "projection.llm_chat_session.action.message_send",
@@ -3605,13 +5012,6 @@
       "id": "entity.llm_chat_session:uses:ontology.canonical_concept",
       "source": "entity.llm_chat_session",
       "target": "ontology.canonical_concept",
-      "relation": "uses",
-      "kind": "frontmatter"
-    },
-    {
-      "id": "entity.llm_chat_session:uses:ontology.facet",
-      "source": "entity.llm_chat_session",
-      "target": "ontology.facet",
       "relation": "uses",
       "kind": "frontmatter"
     },
@@ -3848,18 +5248,82 @@
       "declaredBy": "map.llm_chat_runtime_assembly"
     },
     {
-      "id": "map.llm_chat_runtime_assembly:declares:projection.llm_chat_session.space.chat_card:represented_by:desktop",
-      "source": "projection.llm_chat_session.space.chat_card",
-      "target": "desktop",
-      "relation": "represented_by",
+      "id": "map.llm_chat_runtime_assembly:declares:entity.chat_memory:provides_evidence_for:projection.llm_chat_session.intent.context_binding",
+      "source": "entity.chat_memory",
+      "target": "projection.llm_chat_session.intent.context_binding",
+      "relation": "provides_evidence_for",
       "kind": "relation_map",
       "declaredBy": "map.llm_chat_runtime_assembly"
     },
     {
-      "id": "map.llm_chat_runtime_assembly:declares:projection.llm_chat_session.storage.session_file:uses:disk",
+      "id": "map.llm_chat_runtime_assembly:declares:goal:contains:plan",
+      "source": "goal",
+      "target": "plan",
+      "relation": "contains",
+      "kind": "relation_map",
+      "declaredBy": "map.llm_chat_runtime_assembly"
+    },
+    {
+      "id": "map.llm_chat_runtime_assembly:declares:plan:contains:task",
+      "source": "plan",
+      "target": "task",
+      "relation": "contains",
+      "kind": "relation_map",
+      "declaredBy": "map.llm_chat_runtime_assembly"
+    },
+    {
+      "id": "map.llm_chat_runtime_assembly:declares:projection.chat_memory.storage.trace_file:provides_evidence_for:projection.llm_chat_session.storage.session_file",
+      "source": "projection.chat_memory.storage.trace_file",
+      "target": "projection.llm_chat_session.storage.session_file",
+      "relation": "provides_evidence_for",
+      "kind": "relation_map",
+      "declaredBy": "map.llm_chat_runtime_assembly"
+    },
+    {
+      "id": "map.llm_chat_runtime_assembly:declares:projection.llm_chat_session.action.message_send:acts_on:terminal",
+      "source": "projection.llm_chat_session.action.message_send",
+      "target": "terminal",
+      "relation": "acts_on",
+      "kind": "relation_map",
+      "declaredBy": "map.llm_chat_runtime_assembly"
+    },
+    {
+      "id": "map.llm_chat_runtime_assembly:declares:projection.llm_chat_session.action.message_send:drives:output.structured",
+      "source": "projection.llm_chat_session.action.message_send",
+      "target": "output.structured",
+      "relation": "drives",
+      "kind": "relation_map",
+      "declaredBy": "map.llm_chat_runtime_assembly"
+    },
+    {
+      "id": "map.llm_chat_runtime_assembly:declares:projection.llm_chat_session.intent.context_binding:drives:goal",
+      "source": "projection.llm_chat_session.intent.context_binding",
+      "target": "goal",
+      "relation": "drives",
+      "kind": "relation_map",
+      "declaredBy": "map.llm_chat_runtime_assembly"
+    },
+    {
+      "id": "map.llm_chat_runtime_assembly:declares:projection.llm_chat_session.intent.context_binding:drives:projection.llm_chat_session.action.message_send",
+      "source": "projection.llm_chat_session.intent.context_binding",
+      "target": "projection.llm_chat_session.action.message_send",
+      "relation": "drives",
+      "kind": "relation_map",
+      "declaredBy": "map.llm_chat_runtime_assembly"
+    },
+    {
+      "id": "map.llm_chat_runtime_assembly:declares:projection.llm_chat_session.space.chat_card:projects_into:desktop",
+      "source": "projection.llm_chat_session.space.chat_card",
+      "target": "desktop",
+      "relation": "projects_into",
+      "kind": "relation_map",
+      "declaredBy": "map.llm_chat_runtime_assembly"
+    },
+    {
+      "id": "map.llm_chat_runtime_assembly:declares:projection.llm_chat_session.storage.session_file:stored_in:disk",
       "source": "projection.llm_chat_session.storage.session_file",
       "target": "disk",
-      "relation": "uses",
+      "relation": "stored_in",
       "kind": "relation_map",
       "declaredBy": "map.llm_chat_runtime_assembly"
     },
@@ -3924,9 +5388,51 @@
       "kind": "frontmatter"
     },
     {
+      "id": "map.llm_chat_runtime_assembly:uses:egdesk.agenda",
+      "source": "map.llm_chat_runtime_assembly",
+      "target": "egdesk.agenda",
+      "relation": "uses",
+      "kind": "frontmatter"
+    },
+    {
+      "id": "map.llm_chat_runtime_assembly:uses:egdesk.card",
+      "source": "map.llm_chat_runtime_assembly",
+      "target": "egdesk.card",
+      "relation": "uses",
+      "kind": "frontmatter"
+    },
+    {
+      "id": "map.llm_chat_runtime_assembly:uses:goal",
+      "source": "map.llm_chat_runtime_assembly",
+      "target": "goal",
+      "relation": "uses",
+      "kind": "frontmatter"
+    },
+    {
+      "id": "map.llm_chat_runtime_assembly:uses:output.structured",
+      "source": "map.llm_chat_runtime_assembly",
+      "target": "output.structured",
+      "relation": "uses",
+      "kind": "frontmatter"
+    },
+    {
+      "id": "map.llm_chat_runtime_assembly:uses:plan",
+      "source": "map.llm_chat_runtime_assembly",
+      "target": "plan",
+      "relation": "uses",
+      "kind": "frontmatter"
+    },
+    {
       "id": "map.llm_chat_runtime_assembly:uses:ram",
       "source": "map.llm_chat_runtime_assembly",
       "target": "ram",
+      "relation": "uses",
+      "kind": "frontmatter"
+    },
+    {
+      "id": "map.llm_chat_runtime_assembly:uses:task",
+      "source": "map.llm_chat_runtime_assembly",
+      "target": "task",
       "relation": "uses",
       "kind": "frontmatter"
     },
@@ -4159,20 +5665,6 @@
       "kind": "frontmatter"
     },
     {
-      "id": "ontology.canonical_concept:wiki:ontology.facet",
-      "source": "ontology.canonical_concept",
-      "target": "ontology.facet",
-      "relation": "wiki_link",
-      "kind": "markdown"
-    },
-    {
-      "id": "ontology.canonical_concept:wiki:ontology.projection",
-      "source": "ontology.canonical_concept",
-      "target": "ontology.projection",
-      "relation": "wiki_link",
-      "kind": "markdown"
-    },
-    {
       "id": "ontology.cross_facet_binding:binds:ontology.canonical_concept",
       "source": "ontology.cross_facet_binding",
       "target": "ontology.canonical_concept",
@@ -4323,20 +5815,6 @@
       "id": "ontology.facet:wiki:facets/facet-topology.md",
       "source": "ontology.facet",
       "target": "facets/facet-topology.md",
-      "relation": "wiki_link",
-      "kind": "markdown"
-    },
-    {
-      "id": "ontology.facet:wiki:ontology.binding_type",
-      "source": "ontology.facet",
-      "target": "ontology.binding_type",
-      "relation": "wiki_link",
-      "kind": "markdown"
-    },
-    {
-      "id": "ontology.facet:wiki:ontology.cross_facet_binding",
-      "source": "ontology.facet",
-      "target": "ontology.cross_facet_binding",
       "relation": "wiki_link",
       "kind": "markdown"
     },
@@ -4782,13 +6260,6 @@
       "kind": "frontmatter"
     },
     {
-      "id": "view.egdesk.faceted_concept_model:uses:view.identity_rail",
-      "source": "view.egdesk.faceted_concept_model",
-      "target": "view.identity_rail",
-      "relation": "uses",
-      "kind": "frontmatter"
-    },
-    {
       "id": "view.egdesk.faceted_concept_model:visualizes:entity.llm_chat_session",
       "source": "view.egdesk.faceted_concept_model",
       "target": "entity.llm_chat_session",
@@ -4852,13 +6323,6 @@
       "kind": "frontmatter"
     },
     {
-      "id": "view.projection:contains:view.identity_rail",
-      "source": "view.projection",
-      "target": "view.identity_rail",
-      "relation": "contains",
-      "kind": "frontmatter"
-    },
-    {
       "id": "view.projection:uses:ontology.canonical_concept",
       "source": "view.projection",
       "target": "ontology.canonical_concept",
@@ -4894,45 +6358,24 @@
       "kind": "frontmatter"
     },
     {
-      "id": "view.time_sliced_flat_deck:visualizes:entity.llm_chat_session",
+      "id": "view.time_sliced_flat_deck:visualizes:snapshot.company_server.future",
       "source": "view.time_sliced_flat_deck",
-      "target": "entity.llm_chat_session",
+      "target": "snapshot.company_server.future",
       "relation": "visualizes",
       "kind": "frontmatter"
     },
     {
-      "id": "view.time_sliced_flat_deck:visualizes:map.llm_chat_runtime_assembly",
+      "id": "view.time_sliced_flat_deck:visualizes:snapshot.company_server.present",
       "source": "view.time_sliced_flat_deck",
-      "target": "map.llm_chat_runtime_assembly",
+      "target": "snapshot.company_server.present",
       "relation": "visualizes",
       "kind": "frontmatter"
     },
     {
-      "id": "view.time_sliced_flat_deck:visualizes:view.time_sliced_spatial_pane",
-      "source": "view.time_sliced_flat_deck",
-      "target": "view.time_sliced_spatial_pane",
-      "relation": "visualizes",
-      "kind": "frontmatter"
-    },
-    {
-      "id": "view.time_sliced_spatial_pane:constrains:view.identity_rail",
+      "id": "view.time_sliced_spatial_pane:implemented_by:view.time_sliced_flat_deck",
       "source": "view.time_sliced_spatial_pane",
-      "target": "view.identity_rail",
-      "relation": "constrains",
-      "kind": "frontmatter"
-    },
-    {
-      "id": "view.time_sliced_spatial_pane:constrains:view.projection",
-      "source": "view.time_sliced_spatial_pane",
-      "target": "view.projection",
-      "relation": "constrains",
-      "kind": "frontmatter"
-    },
-    {
-      "id": "view.time_sliced_spatial_pane:uses:axis.space",
-      "source": "view.time_sliced_spatial_pane",
-      "target": "axis.space",
-      "relation": "uses",
+      "target": "view.time_sliced_flat_deck",
+      "relation": "implemented_by",
       "kind": "frontmatter"
     },
     {
@@ -4948,6 +6391,460 @@
       "target": "axis.virtual",
       "relation": "uses",
       "kind": "frontmatter"
+    }
+  ],
+  "snapshots": [
+    {
+      "id": "snapshot.company_server.future",
+      "subjectId": "company-server",
+      "snapshotId": "company-server@future",
+      "timeSlice": "future",
+      "status": "planned",
+      "continuesFrom": "company-server@present",
+      "rootRef": "future.server",
+      "sourcePath": "ontology/snapshots/company-server.future.md",
+      "label": "회사 서버 · 미래",
+      "occurrences": [
+        {
+          "refId": "future.server",
+          "conceptId": "server",
+          "parentRef": null,
+          "relation": "contains",
+          "layer": "virtual",
+          "label": "회사 서버",
+          "order": 10
+        },
+        {
+          "refId": "future.server.computer",
+          "conceptId": "computer",
+          "parentRef": "future.server",
+          "relation": "runs_on",
+          "layer": "physical",
+          "label": "컴퓨터 / PC",
+          "order": 20
+        },
+        {
+          "refId": "future.server.computer.rack",
+          "conceptId": "server-rack",
+          "parentRef": "future.server.computer",
+          "relation": "instance_of",
+          "layer": "physical",
+          "label": "서버랙",
+          "order": 30
+        },
+        {
+          "refId": "future.server.computer.rack.windows",
+          "conceptId": "windows-os",
+          "parentRef": "future.server.computer.rack",
+          "relation": "runs",
+          "layer": "virtual",
+          "label": "Windows OS",
+          "order": 40
+        },
+        {
+          "refId": "future.server.computer.rack.cpu",
+          "conceptId": "cpu",
+          "parentRef": "future.server.computer.rack",
+          "relation": "composed_of",
+          "layer": "physical",
+          "label": "CPU",
+          "order": 50
+        },
+        {
+          "refId": "future.server.computer.rack.ram",
+          "conceptId": "ram",
+          "parentRef": "future.server.computer.rack",
+          "relation": "composed_of",
+          "layer": "physical",
+          "label": "RAM",
+          "order": 60
+        },
+        {
+          "refId": "future.server.computer.rack.disk",
+          "conceptId": "disk",
+          "parentRef": "future.server.computer.rack",
+          "relation": "composed_of",
+          "layer": "physical",
+          "label": "Disk",
+          "order": 70
+        }
+      ],
+      "referenceEdges": [
+        {
+          "sourceRef": "future.server",
+          "relation": "implemented_by",
+          "targetRef": "future.server.computer"
+        },
+        {
+          "sourceRef": "future.server.computer",
+          "relation": "refers_to",
+          "targetRef": "future.server.computer.rack"
+        },
+        {
+          "sourceRef": "present.server",
+          "relation": "continues_as",
+          "targetRef": "future.server"
+        },
+        {
+          "sourceRef": "present.server.computer",
+          "relation": "reconfigured_as",
+          "targetRef": "future.server.computer"
+        },
+        {
+          "sourceRef": "present.server.computer.macbook",
+          "relation": "replaced_by",
+          "targetRef": "future.server.computer.rack"
+        },
+        {
+          "sourceRef": "present.server.computer.macbook.macos",
+          "relation": "migrates_to",
+          "targetRef": "future.server.computer.rack.windows"
+        }
+      ]
+    },
+    {
+      "id": "snapshot.company_server.present",
+      "subjectId": "company-server",
+      "snapshotId": "company-server@present",
+      "timeSlice": "present",
+      "status": "observed",
+      "continuesFrom": null,
+      "rootRef": "present.server",
+      "sourcePath": "ontology/snapshots/company-server.present.md",
+      "label": "회사 서버 · 현재",
+      "occurrences": [
+        {
+          "refId": "present.server",
+          "conceptId": "server",
+          "parentRef": null,
+          "relation": "contains",
+          "layer": "virtual",
+          "label": "회사 서버",
+          "order": 10
+        },
+        {
+          "refId": "present.server.computer",
+          "conceptId": "computer",
+          "parentRef": "present.server",
+          "relation": "runs_on",
+          "layer": "physical",
+          "label": "컴퓨터",
+          "order": 20
+        },
+        {
+          "refId": "present.server.computer.macbook",
+          "conceptId": "macbook",
+          "parentRef": "present.server.computer",
+          "relation": "instance_of",
+          "layer": "physical",
+          "label": "MacBook",
+          "order": 30
+        },
+        {
+          "refId": "present.server.computer.macbook.macos",
+          "conceptId": "macos",
+          "parentRef": "present.server.computer.macbook",
+          "relation": "runs",
+          "layer": "virtual",
+          "label": "macOS",
+          "order": 40
+        },
+        {
+          "refId": "present.server.computer.macbook.cpu",
+          "conceptId": "cpu",
+          "parentRef": "present.server.computer.macbook",
+          "relation": "composed_of",
+          "layer": "physical",
+          "label": "CPU",
+          "order": 50
+        },
+        {
+          "refId": "present.server.computer.macbook.ram",
+          "conceptId": "ram",
+          "parentRef": "present.server.computer.macbook",
+          "relation": "composed_of",
+          "layer": "physical",
+          "label": "RAM",
+          "order": 60
+        },
+        {
+          "refId": "present.server.computer.macbook.disk",
+          "conceptId": "disk",
+          "parentRef": "present.server.computer.macbook",
+          "relation": "composed_of",
+          "layer": "physical",
+          "label": "Disk",
+          "order": 70
+        }
+      ],
+      "referenceEdges": [
+        {
+          "sourceRef": "present.server",
+          "relation": "implemented_by",
+          "targetRef": "present.server.computer"
+        },
+        {
+          "sourceRef": "present.server.computer",
+          "relation": "refers_to",
+          "targetRef": "present.server.computer.macbook"
+        }
+      ]
+    }
+  ],
+  "occurrences": [
+    {
+      "refId": "future.server",
+      "conceptId": "server",
+      "parentRef": null,
+      "relation": "contains",
+      "layer": "virtual",
+      "label": "회사 서버",
+      "order": 10,
+      "snapshotDocId": "snapshot.company_server.future",
+      "snapshotId": "company-server@future",
+      "subjectId": "company-server",
+      "timeSlice": "future",
+      "status": "planned"
+    },
+    {
+      "refId": "future.server.computer",
+      "conceptId": "computer",
+      "parentRef": "future.server",
+      "relation": "runs_on",
+      "layer": "physical",
+      "label": "컴퓨터 / PC",
+      "order": 20,
+      "snapshotDocId": "snapshot.company_server.future",
+      "snapshotId": "company-server@future",
+      "subjectId": "company-server",
+      "timeSlice": "future",
+      "status": "planned"
+    },
+    {
+      "refId": "future.server.computer.rack",
+      "conceptId": "server-rack",
+      "parentRef": "future.server.computer",
+      "relation": "instance_of",
+      "layer": "physical",
+      "label": "서버랙",
+      "order": 30,
+      "snapshotDocId": "snapshot.company_server.future",
+      "snapshotId": "company-server@future",
+      "subjectId": "company-server",
+      "timeSlice": "future",
+      "status": "planned"
+    },
+    {
+      "refId": "future.server.computer.rack.cpu",
+      "conceptId": "cpu",
+      "parentRef": "future.server.computer.rack",
+      "relation": "composed_of",
+      "layer": "physical",
+      "label": "CPU",
+      "order": 50,
+      "snapshotDocId": "snapshot.company_server.future",
+      "snapshotId": "company-server@future",
+      "subjectId": "company-server",
+      "timeSlice": "future",
+      "status": "planned"
+    },
+    {
+      "refId": "future.server.computer.rack.disk",
+      "conceptId": "disk",
+      "parentRef": "future.server.computer.rack",
+      "relation": "composed_of",
+      "layer": "physical",
+      "label": "Disk",
+      "order": 70,
+      "snapshotDocId": "snapshot.company_server.future",
+      "snapshotId": "company-server@future",
+      "subjectId": "company-server",
+      "timeSlice": "future",
+      "status": "planned"
+    },
+    {
+      "refId": "future.server.computer.rack.ram",
+      "conceptId": "ram",
+      "parentRef": "future.server.computer.rack",
+      "relation": "composed_of",
+      "layer": "physical",
+      "label": "RAM",
+      "order": 60,
+      "snapshotDocId": "snapshot.company_server.future",
+      "snapshotId": "company-server@future",
+      "subjectId": "company-server",
+      "timeSlice": "future",
+      "status": "planned"
+    },
+    {
+      "refId": "future.server.computer.rack.windows",
+      "conceptId": "windows-os",
+      "parentRef": "future.server.computer.rack",
+      "relation": "runs",
+      "layer": "virtual",
+      "label": "Windows OS",
+      "order": 40,
+      "snapshotDocId": "snapshot.company_server.future",
+      "snapshotId": "company-server@future",
+      "subjectId": "company-server",
+      "timeSlice": "future",
+      "status": "planned"
+    },
+    {
+      "refId": "present.server",
+      "conceptId": "server",
+      "parentRef": null,
+      "relation": "contains",
+      "layer": "virtual",
+      "label": "회사 서버",
+      "order": 10,
+      "snapshotDocId": "snapshot.company_server.present",
+      "snapshotId": "company-server@present",
+      "subjectId": "company-server",
+      "timeSlice": "present",
+      "status": "observed"
+    },
+    {
+      "refId": "present.server.computer",
+      "conceptId": "computer",
+      "parentRef": "present.server",
+      "relation": "runs_on",
+      "layer": "physical",
+      "label": "컴퓨터",
+      "order": 20,
+      "snapshotDocId": "snapshot.company_server.present",
+      "snapshotId": "company-server@present",
+      "subjectId": "company-server",
+      "timeSlice": "present",
+      "status": "observed"
+    },
+    {
+      "refId": "present.server.computer.macbook",
+      "conceptId": "macbook",
+      "parentRef": "present.server.computer",
+      "relation": "instance_of",
+      "layer": "physical",
+      "label": "MacBook",
+      "order": 30,
+      "snapshotDocId": "snapshot.company_server.present",
+      "snapshotId": "company-server@present",
+      "subjectId": "company-server",
+      "timeSlice": "present",
+      "status": "observed"
+    },
+    {
+      "refId": "present.server.computer.macbook.cpu",
+      "conceptId": "cpu",
+      "parentRef": "present.server.computer.macbook",
+      "relation": "composed_of",
+      "layer": "physical",
+      "label": "CPU",
+      "order": 50,
+      "snapshotDocId": "snapshot.company_server.present",
+      "snapshotId": "company-server@present",
+      "subjectId": "company-server",
+      "timeSlice": "present",
+      "status": "observed"
+    },
+    {
+      "refId": "present.server.computer.macbook.disk",
+      "conceptId": "disk",
+      "parentRef": "present.server.computer.macbook",
+      "relation": "composed_of",
+      "layer": "physical",
+      "label": "Disk",
+      "order": 70,
+      "snapshotDocId": "snapshot.company_server.present",
+      "snapshotId": "company-server@present",
+      "subjectId": "company-server",
+      "timeSlice": "present",
+      "status": "observed"
+    },
+    {
+      "refId": "present.server.computer.macbook.macos",
+      "conceptId": "macos",
+      "parentRef": "present.server.computer.macbook",
+      "relation": "runs",
+      "layer": "virtual",
+      "label": "macOS",
+      "order": 40,
+      "snapshotDocId": "snapshot.company_server.present",
+      "snapshotId": "company-server@present",
+      "subjectId": "company-server",
+      "timeSlice": "present",
+      "status": "observed"
+    },
+    {
+      "refId": "present.server.computer.macbook.ram",
+      "conceptId": "ram",
+      "parentRef": "present.server.computer.macbook",
+      "relation": "composed_of",
+      "layer": "physical",
+      "label": "RAM",
+      "order": 60,
+      "snapshotDocId": "snapshot.company_server.present",
+      "snapshotId": "company-server@present",
+      "subjectId": "company-server",
+      "timeSlice": "present",
+      "status": "observed"
+    }
+  ],
+  "referenceEdges": [
+    {
+      "id": "snapshot.company_server.future:reference:0:future.server:implemented_by:future.server.computer",
+      "sourceRef": "future.server",
+      "relation": "implemented_by",
+      "targetRef": "future.server.computer",
+      "declaredBy": "snapshot.company_server.future"
+    },
+    {
+      "id": "snapshot.company_server.future:reference:1:future.server.computer:refers_to:future.server.computer.rack",
+      "sourceRef": "future.server.computer",
+      "relation": "refers_to",
+      "targetRef": "future.server.computer.rack",
+      "declaredBy": "snapshot.company_server.future"
+    },
+    {
+      "id": "snapshot.company_server.future:reference:2:present.server:continues_as:future.server",
+      "sourceRef": "present.server",
+      "relation": "continues_as",
+      "targetRef": "future.server",
+      "declaredBy": "snapshot.company_server.future"
+    },
+    {
+      "id": "snapshot.company_server.future:reference:3:present.server.computer:reconfigured_as:future.server.computer",
+      "sourceRef": "present.server.computer",
+      "relation": "reconfigured_as",
+      "targetRef": "future.server.computer",
+      "declaredBy": "snapshot.company_server.future"
+    },
+    {
+      "id": "snapshot.company_server.future:reference:4:present.server.computer.macbook:replaced_by:future.server.computer.rack",
+      "sourceRef": "present.server.computer.macbook",
+      "relation": "replaced_by",
+      "targetRef": "future.server.computer.rack",
+      "declaredBy": "snapshot.company_server.future"
+    },
+    {
+      "id": "snapshot.company_server.future:reference:5:present.server.computer.macbook.macos:migrates_to:future.server.computer.rack.windows",
+      "sourceRef": "present.server.computer.macbook.macos",
+      "relation": "migrates_to",
+      "targetRef": "future.server.computer.rack.windows",
+      "declaredBy": "snapshot.company_server.future"
+    },
+    {
+      "id": "snapshot.company_server.present:reference:0:present.server:implemented_by:present.server.computer",
+      "sourceRef": "present.server",
+      "relation": "implemented_by",
+      "targetRef": "present.server.computer",
+      "declaredBy": "snapshot.company_server.present"
+    },
+    {
+      "id": "snapshot.company_server.present:reference:1:present.server.computer:refers_to:present.server.computer.macbook",
+      "sourceRef": "present.server.computer",
+      "relation": "refers_to",
+      "targetRef": "present.server.computer.macbook",
+      "declaredBy": "snapshot.company_server.present"
     }
   ]
 }

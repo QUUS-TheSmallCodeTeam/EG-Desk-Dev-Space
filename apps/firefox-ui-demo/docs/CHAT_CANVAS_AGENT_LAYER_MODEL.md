@@ -84,7 +84,7 @@ The result card keeps a binding back to the chat run that created it.
 ```ts
 Card = {
   id: string;
-  viewType: "agenda" | "browser" | "file" | "chat" | "terminal" | "ppt" | "excel" | "notes";
+  viewType: "agenda" | "browser" | "file" | "chat" | "terminal" | "ppt" | "excel" | "notes" | "ontology";
   target: ResourceBinding;
   agendaId?: string;
   runId?: string;

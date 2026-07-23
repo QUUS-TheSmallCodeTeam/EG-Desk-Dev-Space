@@ -11,6 +11,7 @@
 > - AI canvas annotation layer: [`docs/AI_CANVAS_ANNOTATION_LAYER.md`](./docs/AI_CANVAS_ANNOTATION_LAYER.md)
 > - Canvas run playback model: [`docs/CANVAS_RUN_PLAYBACK_MODEL.md`](./docs/CANVAS_RUN_PLAYBACK_MODEL.md)
 > - Viewport layout/interaction model: [`docs/VIEWPORT_LAYOUT_INTERACTION_MODEL.md`](./docs/VIEWPORT_LAYOUT_INTERACTION_MODEL.md)
+> - Ontology canvas rendering: [`docs/ONTOLOGY_CANVAS_RENDERING.md`](./docs/ONTOLOGY_CANVAS_RENDERING.md)
 
 **Firefox를 EG-Desk의 UI 캔버스로 쓸 수 있는가?** 에 대한 실제 동작 데모.
 

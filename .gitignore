@@ -100,3 +100,10 @@ edu/
 /apps/firefox-ui-demo/**/*.bak
 /apps/firefox-ui-demo/**/*.bak.*
 /apps/firefox-ui-demo/helper-rust/target/
+
+# Local WM snapshots and personal Mac automation
+/.claude/wm/file-map.preview.json
+/.codex/wm/file-inventory.txt
+/.codex/wm/file-inventory-hash
+/scripts/awayke-thermal-guard.zsh
+/scripts/com.minsoo.awayke-thermal-guard.plist

@@ -456,7 +456,10 @@ This distinction prevents EG-Desk from feeling like it is fighting the user's sp
 
 ## Interaction Ownership
 
-Input ownership is determined by gesture start and current viewport mode.
+Input ownership is determined by gesture start, current viewport mode, and the
+active Desk Window adapter policy. The common Desk Window Shell owns only titlebar,
+window-control, resize-handle, focus, and presentation gestures. It does not
+reinterpret an adapter's content gestures.
 
 ```text
 card body
@@ -481,17 +484,53 @@ Run Playback overlay
 Wheel policy:
 
 ```text
-wheel on card
-  -> card scroll
+wheel on native-content / document-ui card
+  -> adapter content scroll
 
 wheel outside card
   -> canvas pan/zoom policy
 
 cmd + wheel
-  -> canvas-level command priority
+  -> active card command when explicitly owned; otherwise canvas-level command
+
+wheel inside ontology stage
+  -> ontology active-cell pan
+
+cmd/ctrl + wheel inside ontology stage
+  -> ontology active-cell zoom
+
+time and layer changes
+  -> click targets only
 
 HUD peek overlay
   -> HUD owns wheel while pointer is inside HUD
+```
+
+Desk Window adapter policies:
+
+| Policy | Windows | Viewport interaction rule |
+|---|---|---|
+| `native-content` | Browser, Terminal | content owns pointer, wheel, selection, and keys after card activation |
+| `adapter-owned` | Ontology | stage owns its camera and semantic navigation gestures |
+| `document-ui` | Settings | chrome-DOM controls own ordinary form and scroll input |
+
+Shared conflict rules:
+
+```text
+gesture starts on titlebar
+  -> shell move; adapter does not receive the drag
+
+gesture starts on resize target
+  -> shell resize; adapter receives only the resulting size notification
+
+gesture starts in Desk Window body
+  -> adapter policy wins; the Desk Window never moves
+
+pan modifier starts on shell or permitted activation overlay
+  -> Desk camera may claim the gesture
+
+fullscreen/maximized Desk Window
+  -> same ownership rules; presentation mode does not rewrite adapter input
 ```
 
 Keyboard policy:
@@ -518,6 +557,10 @@ Esc
 Current implementation anchors:
 
 ```text
+spawnDeskWindowShell()
+  -> live shared Browser/Ontology window frame and lifecycle
+  -> owns titlebar drag, eight-way resize, maximize/restore, sourceRef, and cleanup
+
 safeViewportRect()
   -> should become the shared safe-area resolver
 

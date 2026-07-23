@@ -59,7 +59,9 @@ Path 2 portable packaging 전에 `apps/firefox-ui-demo/`를 alpha-worthy local P
 | **Source of truth 정리** | Firefox shell 전략/로드맵을 현재 기준으로 고정하고 백서에는 pivot 주석 추가 | 백서는 비전/대외 설명, roadmap은 실행 기준 |
 | **Codex HUD 안정화** | auth / send / streaming / retry / resume / diagnostics / HUD↔canvas 이동 검증 | multi-provider 전 확정 |
 | **Browser entity 안정화** | XUL `<browser>` card 생성/이동/resize/scroll/focus/popup capture 검증 | OAuth/window.open 포함 |
+| **Browser runtime attach PoC** | visible Browser Card와 hidden BrowserRuntime 분리 검증 | `browsingContext`, DOM state, agent actor 유지 확인 |
 | **Terminal/helper 안정화** | terminal card spawn/write/read/resize/kill 경로를 하나로 고정 | Node fallback과 Rust helper 후보 정리 |
+| **Terminal session attach PoC** | terminal session과 xterm card client 분리 | close=detach, explicit kill, replay buffer/cursor 검증 |
 | **반복 검증 스크립트** | 설치, bridge, HUD, browser card, terminal smoke를 repeatable script로 정리 | root one-off probe 금지 |
 | **문서 반영** | 구현 상태와 known gaps를 [`apps/firefox-ui-demo/docs/PATH_1_5_STABILIZATION.md`](../../apps/firefox-ui-demo/docs/PATH_1_5_STABILIZATION.md)에 유지 | packaging 전에 open issue 명시 |
 
@@ -68,12 +70,14 @@ Path 2 portable packaging 전에 `apps/firefox-ui-demo/`를 alpha-worthy local P
 - [ ] Firefox overlay가 clean profile에서 부팅되고 4-Edge UI가 표시된다.
 - [ ] browser card 생성, URL 이동, 뒤/앞/새로고침, resize, drag가 안정 동작한다.
 - [ ] `window.open` / OAuth류 popup이 새 browser card로 라우팅된다.
+- [ ] awaited/recent BrowserRuntime이 hidden host에서 background-live 상태로 유지되고 foreground card에 재부착된다.
 - [ ] card 내부 스크롤과 desk pan/zoom이 gesture 중간에 섞이지 않는다.
 - [ ] Codex bridge가 `/v1/state`, `/auth/status`, `/chat/send` 기준으로 일관된 상태를 반환한다.
 - [ ] Codex login 중복 실행, 취소, signout, 재로그인이 stuck 없이 처리된다.
 - [ ] Codex 대화가 thread별 `conversationId`로 resume되고 실패 시 사용자에게 명확히 보인다.
 - [ ] HUD chat과 pinned canvas chat entity 간 이동이 데이터 손실 없이 동작한다.
 - [ ] terminal card가 PTY spawn/write/read/resize/kill 기본 경로를 통과한다.
+- [ ] terminal session이 visible card와 분리되어 detach/reattach되고 출력 replay가 중복/유실 없이 동작한다.
 - [ ] bridge/helper 종료 후 UI가 crash 대신 reconnect/offline 상태를 표시한다.
 - [ ] 주요 smoke test가 `apps/firefox-ui-demo/scripts/` 아래 repeatable command로 존재한다.
 - [ ] Path 2로 옮길 known gaps가 문서화되어 있다.

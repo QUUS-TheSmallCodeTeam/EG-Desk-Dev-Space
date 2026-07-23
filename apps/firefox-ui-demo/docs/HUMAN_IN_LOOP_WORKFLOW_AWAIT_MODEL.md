@@ -92,6 +92,34 @@ type AwaitTarget =
 
 The target is where EG-Desk should watch for completion.
 
+For browser and terminal waits, `cardId` is only the current visible surface. The durable wait target should be the runtime identity when available:
+
+```text
+terminal await target
+  prefer sessionId
+  cardId is optional foreground view
+
+browser await target
+  prefer runtimeId/sourceRef
+  cardId is optional foreground view
+```
+
+If the visible card is closed while an await token is active, EG-Desk should detach the view rather than kill the runtime. The runtime moves to `background-live` and keeps emitting observation events until the await token is satisfied, cancelled, expired, or explicitly killed.
+
+```text
+user closes awaited Terminal Card
+  -> remove visible card
+  -> keep terminal session alive
+  -> continue watching terminal output / exit
+
+user closes awaited Browser Card
+  -> remove visible card
+  -> keep BrowserRuntime in hidden host when feasible
+  -> continue watching URL / DOM / auth state
+```
+
+When the user opens the waiting item again, EG-Desk should create a new foreground card attached to the existing runtime. This is attach/reattach, not a new terminal session or new browser tab.
+
 ## Await Conditions
 
 ```ts

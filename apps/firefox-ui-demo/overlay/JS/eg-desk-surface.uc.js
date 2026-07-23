@@ -2989,6 +2989,7 @@
     const map = panel.querySelector('.egd-minimap-map');
     if (!map) return;
     let drag = null;
+    let viewDrag = null;
     const setFromEvent = (ev) => {
       const model = minimapWorldModel(map);
       const point = minimapPointToWorld(ev.clientX, ev.clientY, map, model);
@@ -5363,19 +5364,6 @@
       });
     }
 
-    const activateCard = () => {
-      if (state.panModifier) return;
-      setActiveEntity(card);
-    };
-    const focusCard = () => {
-      focusCanvasCard(card);
-    };
-    const startPanIfNeeded = (ev) => {
-      if (!state.panModifier || ev.button !== 0) return false;
-      if (typeof state.startCanvasPanDrag !== 'function') return false;
-      state.startCanvasPanDrag(ev);
-      return true;
-    };
     const routeWheelToCanvas = (ev) => {
       if (ev.ctrlKey || ev.metaKey) return;
       const allowCardScroll = state.activeEntityId === card.id && body.contains(ev.target);
@@ -5555,6 +5543,11 @@
     if (!isCardFullscreen(card)) card.style.zIndex = String(++cardZ);
   }
 
+  function syncOntologyPresentationState() {
+    document.documentElement.classList.remove('egd-ontology-focus-active', 'egd-ontology-object-focus-active');
+    syncViewportAgendaRail();
+  }
+
   function closeCanvasCard(card, cleanup) {
     if (!card) return;
     if (isCardFullscreen(card)) exitCardFullscreen(card, { restoreRect: false });
@@ -5567,6 +5560,7 @@
     }
     if (state.activeEntityId === card.id) setActiveEntity(null);
     card.remove();
+    syncOntologyPresentationState();
     markAgendaDirty('close-card', card);
   }
 
@@ -5579,6 +5573,275 @@
       ev.preventDefault();
       ev.stopPropagation();
     });
+  }
+
+  const DESK_WINDOW_RESIZE_HITS = [
+    { cls: 'egd-card-resize-hit-n', edges: { top: true } },
+    { cls: 'egd-card-resize-hit-e', edges: { right: true } },
+    { cls: 'egd-card-resize-hit-s', edges: { bottom: true } },
+    { cls: 'egd-card-resize-hit-w', edges: { left: true } },
+    { cls: 'egd-card-resize-hit-nw', edges: { top: true, left: true } },
+    { cls: 'egd-card-resize-hit-ne', edges: { top: true, right: true } },
+    { cls: 'egd-card-resize-hit-se', edges: { bottom: true, right: true } },
+    { cls: 'egd-card-resize-hit-sw', edges: { bottom: true, left: true } },
+  ];
+
+  function spawnDeskWindowShell(options = {}) {
+    const kind = String(options.kind || 'window');
+    const className = ['egd-canvas-card', 'egd-desk-window', options.className]
+      .filter(Boolean)
+      .join(' ');
+    const root = el('div', {
+      id: options.id,
+      class: className,
+      data: {
+        deskWindowKind: kind,
+        deskWindowInputPolicy: options.inputPolicy || 'document-ui',
+      },
+      style: options.style || {},
+    });
+    const cleanupStack = [];
+    const resizeListeners = new Set();
+    let cleaned = false;
+    let closing = false;
+
+    const registerCleanup = (dispose) => {
+      if (typeof dispose !== 'function') return () => {};
+      if (cleaned) {
+        try { dispose(); } catch (error) { console.warn(TAG, 'late Desk Window cleanup failed', error); }
+        return () => {};
+      }
+      cleanupStack.push(dispose);
+      return () => {
+        const index = cleanupStack.indexOf(dispose);
+        if (index >= 0) cleanupStack.splice(index, 1);
+      };
+    };
+    const runCleanup = () => {
+      if (cleaned) return;
+      cleaned = true;
+      for (let index = cleanupStack.length - 1; index >= 0; index -= 1) {
+        try { cleanupStack[index](); } catch (error) { console.warn(TAG, 'Desk Window cleanup failed', error); }
+      }
+      cleanupStack.length = 0;
+      resizeListeners.clear();
+    };
+    const requestClose = () => {
+      if (closing || !root.isConnected) return;
+      closing = true;
+      closeCanvasCard(root);
+    };
+
+    const closeControl = el('span', {
+      class: 'egd-card-dot egd-card-dot-close egd-desk-window-control',
+      role: 'button',
+      tabindex: '0',
+      title: '창 닫기',
+      onclick: (ev) => { ev.stopPropagation(); requestClose(); },
+    });
+    const minimizeControl = el('span', {
+      class: 'egd-card-dot egd-card-dot-min egd-desk-window-control egd-desk-window-control-disabled',
+      'aria-disabled': 'true',
+      title: '창 최소화는 아직 지원되지 않음',
+    });
+    const maximizeControl = el('span', {
+      class: 'egd-card-dot egd-card-dot-max egd-desk-window-control',
+      role: 'button',
+      tabindex: '0',
+      title: '창 최대화',
+      onclick: (ev) => { ev.stopPropagation(); toggleCardFullscreen(root); },
+    });
+    for (const control of [closeControl, maximizeControl]) {
+      control.addEventListener('keydown', (ev) => {
+        if (ev.key !== 'Enter' && ev.key !== ' ') return;
+        ev.preventDefault();
+        control.click();
+      });
+    }
+
+    const identity = el('div', { class: 'egd-desk-window-identity' });
+    const actions = el('div', { class: 'egd-desk-window-actions' });
+    const topbar = el('div', { class: 'egd-card-topbar egd-desk-window-titlebar' },
+      el('div', { class: 'egd-card-dots-shell' },
+        el('div', { class: 'egd-card-dots' }, closeControl, minimizeControl, maximizeControl),
+      ),
+      identity,
+      actions,
+    );
+    const header = el('div', {
+      class: ['egd-card-header', 'egd-desk-window-header', options.headerClassName]
+        .filter(Boolean)
+        .join(' '),
+    }, topbar);
+    const toolbar = options.toolbar
+      ? el('div', { class: 'egd-card-toolbar egd-desk-window-toolbar' })
+      : null;
+    const progress = options.progress
+      ? el('div', { class: 'egd-card-progress egd-desk-window-progress' })
+      : null;
+    if (toolbar) header.appendChild(toolbar);
+    if (progress) header.appendChild(progress);
+
+    const body = el('div', {
+      class: ['egd-card-body', 'egd-desk-window-body', options.bodyClassName]
+        .filter(Boolean)
+        .join(' '),
+    });
+    const resizeHits = DESK_WINDOW_RESIZE_HITS.map(({ cls, edges }) => el('div', {
+      class: `egd-card-resize-hit ${cls}`,
+      data: { edges: JSON.stringify(edges) },
+    }));
+    root.appendChild(header);
+    root.appendChild(body);
+    for (const hit of resizeHits) root.appendChild(hit);
+
+    const host = options.host || document.getElementById('egd-canvas-layer') || document.documentElement;
+    host.appendChild(root);
+    if (options.sourceRef) bindCardSourceRef(root, options.sourceRef);
+    markAgendaDirty(options.createDirtyReason || `create-${kind}-window`, root);
+    setActiveEntity(root);
+
+    const startPanIfNeeded = (ev) => {
+      if (!state.panModifier || ev.button !== 0) return false;
+      if (typeof state.startCanvasPanDrag !== 'function') return false;
+      state.startCanvasPanDrag(ev);
+      return true;
+    };
+    const focus = () => focusCanvasCard(root);
+    const onRootMouseDown = (ev) => {
+      if (startPanIfNeeded(ev)) {
+        ev.preventDefault();
+        ev.stopPropagation();
+        return;
+      }
+      if (!state.panModifier) focus();
+    };
+    root.addEventListener('mousedown', onRootMouseDown, true);
+
+    let drag = null;
+    let resize = null;
+    const beginWindowDrag = (ev) => {
+      if (ev.button !== 0 || isCardFullscreen(root)) return;
+      if (drag || ev.target.closest('.egd-desk-window-toolbar')) return;
+      if (ev.target.closest('input, button, .egd-card-dot, [data-no-window-drag]')) return;
+      focus();
+      drag = {
+        x: ev.clientX,
+        y: ev.clientY,
+        left: root.offsetLeft,
+        top: root.offsetTop,
+      };
+      ev.preventDefault();
+    };
+    header.addEventListener('mousedown', beginWindowDrag);
+    installCardHeaderFullscreenToggle(root, topbar);
+
+    const minWidth = Number.isFinite(options.minWidth) ? options.minWidth : 320;
+    const minHeight = Number.isFinite(options.minHeight) ? options.minHeight : 250;
+    for (const hit of resizeHits) {
+      hit.addEventListener('mousedown', (ev) => {
+        if (ev.button !== 0 || isCardFullscreen(root)) return;
+        focus();
+        resize = {
+          edges: JSON.parse(hit.dataset.edges),
+          x: ev.clientX,
+          y: ev.clientY,
+          left: root.offsetLeft,
+          top: root.offsetTop,
+          width: root.offsetWidth,
+          height: root.offsetHeight,
+        };
+        ev.preventDefault();
+        ev.stopPropagation();
+      });
+    }
+
+    const notifyResize = () => {
+      const rect = {
+        width: root.offsetWidth,
+        height: root.offsetHeight,
+        left: root.offsetLeft,
+        top: root.offsetTop,
+      };
+      for (const listener of resizeListeners) {
+        try { listener(rect); } catch (error) { console.warn(TAG, 'Desk Window resize listener failed', error); }
+      }
+    };
+    const onMove = (ev) => {
+      const zoom = canvasZoom();
+      if (drag) {
+        root.style.left = (drag.left + (ev.clientX - drag.x) / zoom) + 'px';
+        root.style.top = (drag.top + (ev.clientY - drag.y) / zoom) + 'px';
+        return;
+      }
+      if (!resize) return;
+      const dx = (ev.clientX - resize.x) / zoom;
+      const dy = (ev.clientY - resize.y) / zoom;
+      let nextLeft = resize.left;
+      let nextTop = resize.top;
+      let nextWidth = resize.width;
+      let nextHeight = resize.height;
+      if (resize.edges.right) nextWidth = Math.max(minWidth, resize.width + dx);
+      if (resize.edges.bottom) nextHeight = Math.max(minHeight, resize.height + dy);
+      if (resize.edges.left) {
+        nextWidth = Math.max(minWidth, resize.width - dx);
+        nextLeft = resize.left + (resize.width - nextWidth);
+      }
+      if (resize.edges.top) {
+        nextHeight = Math.max(minHeight, resize.height - dy);
+        nextTop = resize.top + (resize.height - nextHeight);
+      }
+      root.style.left = nextLeft + 'px';
+      root.style.top = nextTop + 'px';
+      root.style.width = nextWidth + 'px';
+      root.style.height = nextHeight + 'px';
+      notifyResize();
+    };
+    const onUp = () => {
+      if (drag) markAgendaDirty(options.moveDirtyReason || `move-${kind}-window`, root);
+      if (resize) markAgendaDirty(options.resizeDirtyReason || `resize-${kind}-window`, root);
+      drag = null;
+      resize = null;
+    };
+    window.addEventListener('mousemove', onMove);
+    window.addEventListener('mouseup', onUp);
+
+    const resizeObserver = new ResizeObserver(notifyResize);
+    resizeObserver.observe(root);
+    registerCleanup(() => {
+      root.removeEventListener('mousedown', onRootMouseDown, true);
+      window.removeEventListener('mousemove', onMove);
+      window.removeEventListener('mouseup', onUp);
+      try { resizeObserver.disconnect(); } catch {}
+    });
+
+    const shell = {
+      root,
+      slots: { header, topbar, identity, actions, toolbar, progress, content: body },
+      resizeHits,
+      focus,
+      requestClose,
+      startPanIfNeeded,
+      registerCleanup,
+      onResize(listener) {
+        if (typeof listener !== 'function') return () => {};
+        resizeListeners.add(listener);
+        queueMicrotask(() => {
+          if (!cleaned && resizeListeners.has(listener)) {
+            try { listener({
+              width: root.offsetWidth,
+              height: root.offsetHeight,
+              left: root.offsetLeft,
+              top: root.offsetTop,
+            }); } catch (error) { console.warn(TAG, 'Desk Window initial resize listener failed', error); }
+          }
+        });
+        return () => resizeListeners.delete(listener);
+      },
+    };
+    root._cleanup = runCleanup;
+    root._deskWindowShell = shell;
+    return shell;
   }
 
   // ============ Canvas Shapes ============
@@ -5705,120 +5968,19 @@
     { id: 'a2', name: '\uCF54\uB4DC \uB9AC\uBDF0\uC5B4', desc: '\uCF54\uB4DC \uB9AC\uBDF0 \uBC0F \uBC84\uADF8 \uD0D0\uC9C0 \uC804\uBB38', model: 'claude-4-sonnet', color: '#8B5CF6', prompt: '\uB2F9\uC2E0\uC740 \uCF54\uB4DC \uB9AC\uBDF0 \uC804\uBB38\uAC00\uC785\uB2C8\uB2E4.', active: true },
     { id: 'a3', name: '\uBC88\uC5ED\uAC00', desc: '\uB2E4\uAD6D\uC5B4 \uBC88\uC5ED \uC804\uBB38', model: 'gemini-2.5-pro', color: '#059669', prompt: '\uB2F9\uC2E0\uC740 \uC804\uBB38 \uBC88\uC5ED\uAC00\uC785\uB2C8\uB2E4.', active: false },
   ];
-  const ONTOLOGY_FACET_ORDER = ['space', 'topology', 'storage', 'time', 'intent', 'action'];
-  const ONTOLOGY_PRIMARY_AXIS_ORDER = ['virtual', 'space', 'time'];
-  const ONTOLOGY_BINDING_TYPES = ['topology', 'storage', 'intent', 'action'];
-  const ONTOLOGY_DEPTH_ORDER = ['physical', 'information', 'virtual'];
-  const ONTOLOGY_TIME_PANE_ORDER = ['past', 'present', 'future', 'multiverse'];
+  const ONTOLOGY_TIME_PANE_ORDER = ['past', 'present', 'future'];
+  const ONTOLOGY_GRAPH_SCHEMA_VERSION = 3;
   const ONTOLOGY_TIME_PANE_LABELS = {
     past: '과거',
     present: '현재',
     future: '미래',
     multiverse: '분기',
   };
-  const ONTOLOGY_DEPTH_NAV_ORDER = ['virtual', 'information', 'physical'];
-  const ONTOLOGY_DEPTH_LABELS = {
-    all: '전체',
-    virtual: '의미',
-    information: '정보',
-    physical: '기반',
-  };
-  const ONTOLOGY_FACET_LABELS = {
-    space: '공간',
-    topology: '토폴로지',
-    storage: '저장',
-    time: '시간',
-    intent: '의도',
-    action: '행동',
-  };
-  const ONTOLOGY_AXIS_LABELS = {
-    space: '공간',
-    time: '시간',
-    virtual: '가상',
-  };
-  const ONTOLOGY_AXIS_DESCRIPTIONS = {
-    space: '현실/물리/컴퓨트 객체, 파일, 카드, 표면',
-    time: '과거 증거, 현재 상태, 미래 목표, 이벤트',
-    virtual: '개념, entity, 의미, 목표, 정체성',
-  };
-  const ONTOLOGY_BINDING_LABELS = {
-    topology: '토폴로지',
-    storage: '저장',
-    intent: '의도',
-    action: '행동',
-  };
-  const ONTOLOGY_BINDING_DESCRIPTIONS = {
-    topology: '공간 리소스 + 가상 런타임 + 현재 상태',
-    storage: '공간 파일 + 가상 source identity + 시간 이력',
-    intent: '가상 목표 + 시간 약속 + 공간 산출물',
-    action: '시간 전이 + 공간 대상 + 가상 의미',
-  };
-  const ONTOLOGY_NODE_LABELS = {
-    'entity.llm_chat_session': '채팅 세션',
-    'entity.chat_memory': '채팅 기억',
-    'entity.desktop_runtime': '데스크톱 런타임',
-    'egdesk.world': 'EG-Desk 세계',
-    'time.past': '과거',
-    'time.present': '현재',
-    'time.future': '미래',
-    'time.multiverse': '멀티버스',
-    'projection.llm_chat_session.space.chat_card': '채팅 카드',
-    'projection.llm_chat_session.topology.runtime': '런타임',
-    'projection.llm_chat_session.storage.session_file': '세션 파일',
-    'projection.llm_chat_session.time.memory_trace': '기억 흔적',
-    'projection.llm_chat_session.intent.context_binding': '컨텍스트 연결',
-    'projection.llm_chat_session.action.message_send': '메시지 전송',
-    'projection.chat_memory.time.past_evidence': '과거 증거',
-    'projection.chat_memory.storage.trace_file': '흔적 파일',
-    'projection.chat_memory.intent.context_input': '컨텍스트 입력',
-    'projection.chat_memory.action.file_read': '파일 읽기',
-    'projection.desktop_runtime.space.desktop_plane': '데스크톱 평면',
-    'projection.desktop_runtime.topology.hardware_os': '하드웨어/OS',
-    'projection.desktop_runtime.storage.local_disk': '로컬 디스크',
-    'projection.desktop_runtime.action.app_execution': '앱 실행',
-    'egdesk.desk': '데스크',
-    'egdesk.agenda': '아젠다',
-    'egdesk.card': '카드',
-    'egdesk.run_bubble': '실행 버블',
-    'egdesk.run_playback': '실행 재생',
-    'output.structured': '구조화 산출',
-    'alternate.plan': '대안 계획',
-    'candidate.future': '후보 미래',
-    goal: '목표',
-    plan: '계획',
-    task: '작업',
-    desktop: '데스크톱',
-    terminal: '터미널',
-    cpu: 'CPU',
-    ram: 'RAM',
-    disk: '디스크',
-    compute: '연산',
-  };
-  const ONTOLOGY_NODE_SUMMARIES = {
-    'entity.llm_chat_session': 'LLM 채팅 세션의 표준 정체성입니다. 하나의 세션이 가상 entity로 존재하고, 공간 객체와 시간 흐름에 동시에 고정됩니다.',
-    'entity.chat_memory': '채팅 기억은 과거 증거, 저장된 흔적, 현재 컨텍스트 입력, 읽기 행동으로 동시에 해석됩니다.',
-    'entity.desktop_runtime': '데스크톱 런타임은 보이는 작업 공간이면서 동시에 앱 실행과 파일 저장을 지탱하는 실행 기반입니다.',
-    'output.structured': '현재 실행이나 메시지 전송이 미래의 확인 가능한 산출물로 정리된 상태입니다.',
-    'alternate.plan': '현재 계획에서 갈라져 나온 대안 경로입니다. 아직 현재 현실은 아니지만 비교 가능한 후보입니다.',
-    'candidate.future': '멀티버스 후보 중 선택되면 미래 목표나 계획으로 승격될 수 있는 상태입니다.',
-    goal: '미래 시간대에서 현재 컨텍스트가 향하는 목표입니다.',
-    plan: '목표를 실행 가능한 순서나 경로로 풀어낸 계획입니다.',
-    task: '계획을 실제 행동 단위로 잘라낸 작업입니다.',
-  };
-
-  function ontologyLayerColor(layer) {
-    const colors = {
-      reality: '#B45F4D',
-      architecture: '#2D5A7B',
-      time: '#6F5A9A',
-      operation: '#3F7B61',
-      runtime: '#8A6B2E',
-      evidence: '#596875',
-      projection: '#6E655D',
-      ontology: '#5D6370',
-    };
-    return colors[layer] || '#5D6370';
-  }
+  const ONTOLOGY_LAYER_ORDER = ['virtual', 'physical'];
+  const ONTOLOGY_CAMERA_ZOOM_MIN = 0.72;
+  const ONTOLOGY_CAMERA_ZOOM_MAX = 2.2;
+  const ONTOLOGY_CAMERA_ZOOM_STEP = 0.12;
+  const ontologyModelCache = new WeakMap();
 
   function ontologyTitleCase(value) {
     return String(value || '')
@@ -5828,4331 +5990,1521 @@
       .join(' ');
   }
 
-  function ontologyProjectionFacet(id) {
-    if (!String(id || '').startsWith('projection.')) return null;
-    const parts = String(id).split('.');
-    return parts.find((part, index) => index > 0 && ONTOLOGY_FACET_ORDER.includes(part)) || null;
-  }
-
-  function ontologyProjectionCanonicalId(id) {
-    if (!String(id || '').startsWith('projection.')) return null;
-    const parts = String(id).split('.');
-    const facetIndex = parts.findIndex((part, index) => index > 0 && ONTOLOGY_FACET_ORDER.includes(part));
-    if (facetIndex <= 1) return null;
-    return `entity.${parts.slice(1, facetIndex).join('.')}`;
-  }
-
-  function ontologyAxisForFacet(facet) {
-    if (facet === 'time' || facet === 'action') return 'time';
-    if (facet === 'intent') return 'virtual';
-    if (facet === 'space' || facet === 'topology' || facet === 'storage') return 'space';
-    return 'virtual';
-  }
-
-  function ontologyAxisForNode(node) {
-    if (!node?.id) return 'virtual';
-    if (node.id.startsWith('entity.') || node.type === 'canonical_entity') return 'virtual';
-    return ontologyAxisForFacet(ontologyProjectionFacet(node.id));
-  }
-
-  function ontologyBindingTypeForProjection(node) {
-    const facet = ontologyProjectionFacet(node?.id);
-    return ONTOLOGY_BINDING_TYPES.includes(facet) ? facet : null;
-  }
-
-  function ontologyNodeById(graph, id) {
-    return (graph?.nodes || []).find((node) => node.id === id) || null;
-  }
-
-  function ontologyEdgesForSource(graph, source, relation = null) {
-    return (graph?.edges || []).filter((edge) => edge.source === source && (!relation || edge.relation === relation));
-  }
-
-  function ontologyCanonicalIdForNode(graph, node) {
-    if (!node?.id) return null;
-    if (node.id.startsWith('entity.')) return node.id;
-    const projectedCanonical = ontologyProjectionCanonicalId(node.id);
-    if (projectedCanonical && ontologyNodeById(graph, projectedCanonical)) return projectedCanonical;
-    const incomingRepresentation = (graph?.edges || []).find((edge) => (
-      edge.target === node.id
-      && edge.relation === 'represented_by'
-      && edge.source.startsWith('entity.')
-    ));
-    return incomingRepresentation?.source || null;
-  }
-
-  function ontologyProjectionNodesForCanonical(graph, canonicalId) {
-    if (!canonicalId) return [];
-    const ids = new Set();
-    for (const edge of ontologyEdgesForSource(graph, canonicalId, 'represented_by')) {
-      if (edge.target?.startsWith('projection.')) ids.add(edge.target);
-    }
-    const canonicalStem = canonicalId.replace(/^entity\./, '');
-    for (const node of graph?.nodes || []) {
-      if (node.id?.startsWith(`projection.${canonicalStem}.`)) ids.add(node.id);
-    }
-    return Array.from(ids)
-      .map((id) => ontologyNodeById(graph, id))
-      .filter(Boolean)
-      .sort((a, b) => {
-        const aFacet = ontologyProjectionFacet(a.id);
-        const bFacet = ontologyProjectionFacet(b.id);
-        return ONTOLOGY_FACET_ORDER.indexOf(aFacet) - ONTOLOGY_FACET_ORDER.indexOf(bFacet) || a.id.localeCompare(b.id);
-      });
-  }
-
-  function ontologyAddNodeId(graph, ids, id) {
-    if (id && ontologyNodeById(graph, id)) ids.add(id);
-  }
-
-  function ontologyAddProjectionIds(graph, ids, canonicalId, facets) {
-    const facetSet = new Set(facets);
-    for (const projection of ontologyProjectionNodesForCanonical(graph, canonicalId)) {
-      if (facetSet.has(ontologyProjectionFacet(projection.id))) ids.add(projection.id);
-    }
-  }
-
-  function ontologyPaneInventoryNodes(graph, phase, selected) {
-    const ids = new Set();
-    const canonicalId = ontologyCanonicalIdForNode(graph, selected) || selected?.id || 'entity.llm_chat_session';
-
-    if (phase === 'past') {
-      ontologyAddProjectionIds(graph, ids, canonicalId, ['time']);
-      ontologyAddNodeId(graph, ids, 'entity.chat_memory');
-      ontologyAddProjectionIds(graph, ids, 'entity.chat_memory', ['time', 'storage', 'action']);
-    } else if (phase === 'future') {
-      ontologyAddProjectionIds(graph, ids, canonicalId, ['intent', 'action']);
-      ontologyAddNodeId(graph, ids, 'output.structured');
-      ontologyAddNodeId(graph, ids, 'goal');
-      ontologyAddNodeId(graph, ids, 'plan');
-      ontologyAddNodeId(graph, ids, 'task');
-    } else if (phase === 'multiverse') {
-      ontologyAddNodeId(graph, ids, 'alternate.plan');
-      ontologyAddNodeId(graph, ids, 'candidate.future');
-    } else {
-      ontologyAddNodeId(graph, ids, canonicalId);
-      ontologyAddNodeId(graph, ids, 'egdesk.desk');
-      ontologyAddNodeId(graph, ids, 'egdesk.agenda');
-      ontologyAddNodeId(graph, ids, 'egdesk.card');
-      ontologyAddProjectionIds(graph, ids, canonicalId, ['space', 'topology', 'storage', 'intent', 'action']);
-      ontologyAddNodeId(graph, ids, 'desktop');
-      ontologyAddNodeId(graph, ids, 'terminal');
-      ontologyAddNodeId(graph, ids, 'cpu');
-      ontologyAddNodeId(graph, ids, 'ram');
-      ontologyAddNodeId(graph, ids, 'disk');
-      ontologyAddNodeId(graph, ids, 'entity.desktop_runtime');
-      ontologyAddProjectionIds(graph, ids, 'entity.desktop_runtime', ['topology', 'storage']);
-    }
-
-    return Array.from(ids)
-      .map((id) => ontologyNodeById(graph, id))
-      .filter(Boolean);
-  }
-
-  function ontologyCreateDeckGeometry(bounds, active) {
-    if (bounds?.corners) {
-      const corner = (name) => ({
-        x: bounds.x + Number(bounds.corners[name]?.x || 0),
-        y: bounds.y + Number(bounds.corners[name]?.y || 0),
-      });
-      const corners = {
-        tl: corner('tl'),
-        tr: corner('tr'),
-        br: corner('br'),
-        bl: corner('bl'),
-      };
-      const box = {
-        minX: Math.min(corners.tl.x, corners.tr.x, corners.br.x, corners.bl.x),
-        maxX: Math.max(corners.tl.x, corners.tr.x, corners.br.x, corners.bl.x),
-        minY: Math.min(corners.tl.y, corners.tr.y, corners.br.y, corners.bl.y),
-        maxY: Math.max(corners.tl.y, corners.tr.y, corners.br.y, corners.bl.y),
-      };
-      const lerpPoint = (a, b, t) => ({
-        x: a.x + (b.x - a.x) * t,
-        y: a.y + (b.y - a.y) * t,
-      });
-      const point = (u, v) => {
-        const top = lerpPoint(corners.tl, corners.tr, u);
-        const bottom = lerpPoint(corners.bl, corners.br, u);
-        return lerpPoint(top, bottom, v);
-      };
-      const pathFromPoints = (points) => `M ${points.map((p) => `${p.x.toFixed(1)} ${p.y.toFixed(1)}`).join(' L ')} Z`;
-      const path = (offsetX = 0, offsetY = 0) => pathFromPoints([
-        point(0, 0),
-        point(1, 0),
-        point(1, 1),
-        point(0, 1),
-      ].map((p) => ({ x: p.x + offsetX, y: p.y + offsetY })));
-      const rectPath = (u, v, w, h) => pathFromPoints([
-        point(u, v),
-        point(u + w, v),
-        point(u + w, v + h),
-        point(u, v + h),
-      ]);
-      return { corners, box, point, path, rectPath };
-    }
-    const skew = Number(bounds?.skew || 0);
-    const topInset = Number(bounds.topInset ?? (active ? Math.min(82, bounds.w * 0.09) : 0));
-    const bottomOutset = Number(bounds.bottomOutset ?? (active ? Math.min(16, bounds.w * 0.02) : 0));
-    const frontDrop = Number(bounds.frontDrop ?? (active ? 18 : 0));
+  function createOntologyPlaneGeometry(point, extra = {}) {
     const corners = {
-      tl: { x: bounds.x + topInset, y: bounds.y },
-      tr: { x: bounds.x + bounds.w - topInset, y: bounds.y - skew * (active ? 0.28 : 1) },
-      br: { x: bounds.x + bounds.w + bottomOutset, y: bounds.y + bounds.h - skew * (active ? 0.06 : 1) + frontDrop },
-      bl: { x: bounds.x - bottomOutset, y: bounds.y + bounds.h + frontDrop },
-    };
-    const box = {
-      minX: Math.min(corners.tl.x, corners.tr.x, corners.br.x, corners.bl.x),
-      maxX: Math.max(corners.tl.x, corners.tr.x, corners.br.x, corners.bl.x),
-      minY: Math.min(corners.tl.y, corners.tr.y, corners.br.y, corners.bl.y),
-      maxY: Math.max(corners.tl.y, corners.tr.y, corners.br.y, corners.bl.y),
-    };
-    const lerpPoint = (a, b, t) => ({
-      x: a.x + (b.x - a.x) * t,
-      y: a.y + (b.y - a.y) * t,
-    });
-    const point = (u, v) => {
-      const top = lerpPoint(corners.tl, corners.tr, u);
-      const bottom = lerpPoint(corners.bl, corners.br, u);
-      return lerpPoint(top, bottom, v);
+      tl: point(0, 0),
+      tr: point(1, 0),
+      br: point(1, 1),
+      bl: point(0, 1),
     };
     const pathFromPoints = (points) => `M ${points.map((p) => `${p.x.toFixed(1)} ${p.y.toFixed(1)}`).join(' L ')} Z`;
-    const path = (offsetX = 0, offsetY = 0) => pathFromPoints([
-      point(0, 0),
-      point(1, 0),
-      point(1, 1),
-      point(0, 1),
-    ].map((p) => ({ x: p.x + offsetX, y: p.y + offsetY })));
     const rectPath = (u, v, w, h) => pathFromPoints([
       point(u, v),
       point(u + w, v),
       point(u + w, v + h),
       point(u, v + h),
     ]);
-    return { corners, box, point, path, rectPath };
+    return { corners, point, rectPath, ...extra };
   }
 
-  function ontologyCreateDeckScene(graph, selected, localState = {}) {
-    const selectedPhase = ontologyPhaseForNode(selected);
-    const activePane = localState.activePane || selectedPhase || 'present';
-    const phaseLabels = { past: '과거', present: '현재', future: '미래', multiverse: '분기' };
-    const phaseColor = (phase) => (phase === 'present'
-      ? '#2D5A7B'
-      : phase === 'past' || phase === 'multiverse'
-        ? '#6F5A9A'
-        : '#8A6B2E');
-    const paneBounds = {
-      past: {
-        x: 28,
-        y: 252,
-        w: 216,
-        h: 330,
-        corners: {
-          tl: { x: 44, y: 22 },
-          tr: { x: 208, y: 54 },
-          br: { x: 216, y: 302 },
-          bl: { x: 0, y: 330 },
-        },
-      },
-      present: {
-        x: 260,
-        y: 222,
-        w: 804,
-        h: 360,
-        corners: {
-          tl: { x: 92, y: 0 },
-          tr: { x: 712, y: 0 },
-          br: { x: 804, y: 360 },
-          bl: { x: 0, y: 360 },
-        },
-      },
-      future: {
-        x: 1084,
-        y: 252,
-        w: 222,
-        h: 330,
-        corners: {
-          tl: { x: 8, y: 54 },
-          tr: { x: 172, y: 22 },
-          br: { x: 222, y: 330 },
-          bl: { x: 0, y: 302 },
-        },
-      },
-      multiverse: { x: 920, y: 690, w: 300, h: 128, skew: 24, topInset: 22, bottomOutset: 6, frontDrop: 6 },
+  function createOntologyDeckGeometry(bounds) {
+    const corner = (name) => ({
+      x: Number(bounds.x || 0) + Number(bounds.corners[name]?.x || 0),
+      y: Number(bounds.y || 0) + Number(bounds.corners[name]?.y || 0),
+    });
+    const sourceCorners = {
+      tl: corner('tl'),
+      tr: corner('tr'),
+      br: corner('br'),
+      bl: corner('bl'),
     };
-    const enforcePaneGap = () => {
-      const minGap = 18;
-      const paneBox = (phase) => ontologyCreateDeckGeometry(paneBounds[phase], phase === activePane).box;
-      let pastBox = paneBox('past');
-      let presentBox = paneBox('present');
-      if (pastBox.maxX + minGap > presentBox.minX) {
-        paneBounds.past.x -= pastBox.maxX + minGap - presentBox.minX;
-      }
-      presentBox = paneBox('present');
-      let futureBox = paneBox('future');
-      if (presentBox.maxX + minGap > futureBox.minX) {
-        paneBounds.future.x += presentBox.maxX + minGap - futureBox.minX;
-      }
-      futureBox = paneBox('future');
-      if (futureBox.maxX > 1310) {
-        const overflow = futureBox.maxX - 1310;
-        paneBounds.future.x -= overflow;
-        paneBounds.present.x -= overflow;
-        pastBox = paneBox('past');
-        presentBox = paneBox('present');
-        if (pastBox.maxX + minGap > presentBox.minX) {
-          paneBounds.past.x -= pastBox.maxX + minGap - presentBox.minX;
-        }
-      }
+    const lerpPoint = (a, b, t) => ({
+      x: a.x + (b.x - a.x) * t,
+      y: a.y + (b.y - a.y) * t,
+    });
+    const point = (u, v) => {
+      const top = lerpPoint(sourceCorners.tl, sourceCorners.tr, u);
+      const bottom = lerpPoint(sourceCorners.bl, sourceCorners.br, u);
+      return lerpPoint(top, bottom, v);
     };
-    enforcePaneGap();
-    const panes = new Map(Object.entries(paneBounds).map(([phase, bounds]) => {
-      const active = phase === activePane;
-      return [phase, {
-        phase,
-        bounds,
-        active,
-        label: phaseLabels[phase],
-        color: phaseColor(phase),
-        nodes: ontologyPaneInventoryNodes(graph, phase, selected),
-        geometry: ontologyCreateDeckGeometry(bounds, active),
-      }];
-    }));
-    const referenceSurfaces = {
-      present: [
-        {
-          id: 'lower-physical',
-          geometry: ontologyCreateDeckGeometry({
-            x: 298,
-            y: 574,
-            w: 802,
-            h: 166,
-            corners: {
-              tl: { x: 42, y: 0 },
-              tr: { x: 760, y: 0 },
-              br: { x: 802, y: 166 },
-              bl: { x: 0, y: 166 },
-            },
-          }, true),
-          fill: 'rgba(45, 90, 123, 0.078)',
-          stroke: 'rgba(45, 90, 123, 0.28)',
-          width: '1.25',
-          opacity: '0.80',
-        },
-      ],
-    };
-    const temporalRoutes = [
-      {
-        fromPhase: 'past',
-        fromId: 'entity.chat_memory',
-        toPhase: 'present',
-        toId: 'projection.llm_chat_session.intent.context_binding',
-        kind: 'evidence-context',
-        stroke: 'rgba(111, 90, 154, 0.78)',
-        width: '3.4',
-        label: '기억→맥락',
-      },
-      {
-        fromPhase: 'past',
-        fromId: 'projection.chat_memory.storage.trace_file',
-        toPhase: 'present',
-        toId: 'projection.llm_chat_session.storage.session_file',
-        kind: 'storage-trace',
-        stroke: 'rgba(89, 104, 117, 0.58)',
-        dash: '7 5',
-        width: '2.6',
-      },
-      {
-        fromPhase: 'present',
-        fromId: 'projection.llm_chat_session.intent.context_binding',
-        toPhase: 'future',
-        toId: 'goal',
-        kind: 'intent-goal',
-        stroke: 'rgba(138, 107, 46, 0.78)',
-        width: '3.4',
-        label: '맥락→목표',
-      },
-      {
-        fromPhase: 'present',
-        fromId: 'projection.llm_chat_session.action.message_send',
-        toPhase: 'future',
-        toId: 'output.structured',
-        kind: 'action-output',
-        stroke: 'rgba(180, 95, 77, 0.58)',
-        dash: '5 5',
-        width: '2.6',
-      },
-      {
-        fromPhase: 'future',
-        fromId: 'plan',
-        toPhase: 'multiverse',
-        toId: 'alternate.plan',
-        kind: 'plan-branch',
-        stroke: 'rgba(111, 90, 154, 0.64)',
-        dash: '5 6',
-        width: '2.7',
-        label: '계획 분기',
-      },
-      {
-        fromPhase: 'multiverse',
-        fromId: 'candidate.future',
-        toPhase: 'future',
-        toId: 'goal',
-        kind: 'candidate-select',
-        stroke: 'rgba(111, 90, 154, 0.54)',
-        dash: '7 6',
-        width: '2.5',
-      },
-    ];
-    return { activePane, panes, paneBounds, phaseLabels, phaseColor, temporalRoutes, referenceSurfaces };
+    return createOntologyPlaneGeometry(point);
   }
 
-  function ontologyProjectionLabel(node) {
-    const facet = ontologyProjectionFacet(node?.id);
-    const axis = ontologyAxisForFacet(facet);
-    if (ONTOLOGY_NODE_LABELS[node?.id]) return `${ONTOLOGY_AXIS_LABELS[axis] || '축'} · ${ONTOLOGY_NODE_LABELS[node.id]}`;
-    if (!facet) return String(node?.label || node?.id || '');
-    const parts = String(node.id).split('.');
-    const facetIndex = parts.indexOf(facet);
-    const local = parts.slice(facetIndex + 1).join('_');
-    return `${ONTOLOGY_FACET_LABELS[facet]} · ${ontologyTitleCase(local)}`;
-  }
-
-  function ontologyDisplayLabel(node, mode) {
-    if (!node) return '';
-    if (ONTOLOGY_NODE_LABELS[node.id]) return ONTOLOGY_NODE_LABELS[node.id];
-    if (node.id?.startsWith('entity.')) return node.label || ontologyTitleCase(node.id.replace(/^entity\./, ''));
-    if (node.id?.startsWith('projection.') && mode === 'focus') return ontologyProjectionLabel(node);
-    return String(node.label || node.id);
-  }
-
-  function ontologyNamespaceBadge(node) {
-    const id = String(node?.id || '');
-    const namespace = id.includes('.') ? id.split('.')[0] : '';
-    if (!namespace) return '';
-    if (namespace === 'egdesk') return namespace;
-    if (node?.type === 'product_concept' || node?.type === 'external_concept') return namespace;
-    return '';
-  }
-
-  function ontologyObjectLayerBadge(node) {
-    const id = String(node?.id || '');
-    const badges = {
-      desktop: 'assembly',
-      terminal: 'surface',
-      cpu: 'resource',
-      ram: 'resource',
-      disk: 'resource',
-      compute: 'substrate',
-    };
-    return badges[id] || '';
-  }
-
-  function ontologyDisplayMeta(node, mode) {
-    if (!node) return '';
-    if (node.id?.startsWith('projection.') && mode === 'focus') {
-      const facet = ontologyProjectionFacet(node.id);
-      return ONTOLOGY_FACET_LABELS[facet] || '';
+  function ontologyUnprojectDeckPoint(geometry, target, initial = { u: 0.5, v: 0.5 }) {
+    let u = Number.isFinite(initial.u) ? initial.u : 0.5;
+    let v = Number.isFinite(initial.v) ? initial.v : 0.5;
+    const epsilon = 0.0005;
+    for (let iteration = 0; iteration < 8; iteration += 1) {
+      const current = geometry.point(u, v);
+      const alongU = geometry.point(u + epsilon, v);
+      const alongV = geometry.point(u, v + epsilon);
+      const ux = (alongU.x - current.x) / epsilon;
+      const uy = (alongU.y - current.y) / epsilon;
+      const vx = (alongV.x - current.x) / epsilon;
+      const vy = (alongV.y - current.y) / epsilon;
+      const determinant = ux * vy - uy * vx;
+      if (Math.abs(determinant) < 0.000001) break;
+      const errorX = target.x - current.x;
+      const errorY = target.y - current.y;
+      u += (errorX * vy - errorY * vx) / determinant;
+      v += (ux * errorY - uy * errorX) / determinant;
     }
-    const typeLabels = {
-      canonical_entity: '표준 개념',
-      world: '세계',
-      projection: '투영',
-      product_concept: '제품 개념',
-      reference: '참조',
-      facet: '축',
-      runtime_surface: '표면',
-      hardware_resource: '리소스',
-      hardware_group: '리소스 묶음',
+    return { u, v };
+  }
+
+  function createOntologyLayerGeometry(geometry, frame) {
+    const point = (u, v) => geometry.point(
+      frame.u + u * frame.w,
+      frame.v + v * frame.h,
+    );
+    return createOntologyPlaneGeometry(point, { frame });
+  }
+
+  function createOntologyCameraGeometry(geometry, camera, focusSpec) {
+    const origin = {
+      u: focusSpec.u + focusSpec.w / 2,
+      v: focusSpec.v + focusSpec.h / 2,
     };
-    const layerLabels = {
-      runtime: '런타임',
-      architecture: '아키텍처',
-      ontology: '온톨로지',
-      evidence: '증거',
-      time: '시간',
-      operation: '작업',
+    const originPoint = geometry.point(origin.u, origin.v);
+    const cameraCenter = ontologyUnprojectDeckPoint(geometry, {
+      x: originPoint.x + (Number(camera.x) || 0),
+      y: originPoint.y + (Number(camera.y) || 0),
+    }, origin);
+    const zoom = Math.max(0.01, Number(camera.zoom) || 1);
+    const mapCoordinates = (u, v) => ({
+      u: cameraCenter.u + (u - origin.u) * zoom,
+      v: cameraCenter.v + (v - origin.v) * zoom,
+    });
+    const point = (u, v) => {
+      const mapped = mapCoordinates(u, v);
+      return geometry.point(mapped.u, mapped.v);
     };
-    return `${layerLabels[node.layer] || node.layer || '레이어'} · ${typeLabels[node.type] || node.type || '개념'}`;
-  }
-
-  function ontologyNodeSize(node, mode) {
-    if (mode !== 'focus') return { width: 128, height: 48 };
-    if (node?.id?.startsWith('entity.')) return { width: 196, height: 62 };
-    if (node?.id?.startsWith('projection.')) return { width: 186, height: 56 };
-    return { width: 156, height: 50 };
-  }
-
-  function ontologyTrimText(value, max) {
-    const text = String(value || '');
-    return text.length > max ? `${text.slice(0, Math.max(0, max - 1))}\u2026` : text;
-  }
-
-  function ontologyFacetDescription(facet) {
-    const descriptions = {
-      space: '보이는 위치, 카드, 패널, 캔버스',
-      topology: '런타임 의존성, 리소스 사용',
-      storage: '파일, 저장소, DB, 소스 참조',
-      time: '과거, 현재, 미래, 분기',
-      intent: '목표, 계획, 작업, 막힘',
-      action: '읽기, 쓰기, 클릭, 실행, 전송',
+    const viewportSpec = {
+      u: origin.u + (focusSpec.u - cameraCenter.u) / zoom,
+      v: origin.v + (focusSpec.v - cameraCenter.v) / zoom,
+      w: focusSpec.w / zoom,
+      h: focusSpec.h / zoom,
     };
-    return descriptions[facet] || '축 투영';
+    return createOntologyPlaneGeometry(point, { cameraCenter, viewportSpec });
   }
 
-  function ontologyRelationLabel(relation) {
-    const labels = {
-      binds: '묶음',
-      represented_by: '나타남',
-      derived_from: '파생됨',
-      provides_evidence_for: '증거 제공',
-      operates_inside: '내부에서 작동',
-      uses: '사용',
-      contains: '포함',
-      visualizes: '시각화',
-      wiki_link: '문서 링크',
-      drives: '구동',
-      records: '기록',
-      receives_from: '받음',
-    };
-    return labels[relation] || relation;
-  }
-
-  function ontologyFacetPlaneColor(facet) {
-    const colors = {
-      space: '#2D5A7B',
-      topology: '#3F7B61',
-      storage: '#596875',
-      time: '#6F5A9A',
-      intent: '#8A6B2E',
-      action: '#B45F4D',
-    };
-    return colors[facet] || '#5D6370';
-  }
-
-  function ontologyAxisColor(axis) {
-    const colors = {
-      virtual: '#8A6B2E',
-      space: '#2D5A7B',
-      time: '#6F5A9A',
-    };
-    return colors[axis] || '#5D6370';
-  }
-
-  function ontologyDepthForNode(node) {
-    const facet = ontologyProjectionFacet(node?.id);
-    if (facet === 'time' || facet === 'intent') return 'virtual';
-    if (facet === 'space' || facet === 'topology' || facet === 'storage' || facet === 'action') return 'information';
-    if (['cpu', 'ram', 'disk', 'compute'].includes(node?.id)) return 'physical';
-    if (['desktop', 'terminal'].includes(node?.id)) return 'information';
-    if (node?.id?.startsWith('time.') || node?.id === 'goal' || node?.id === 'plan' || node?.id === 'task') return 'virtual';
-    if (node?.id === 'output.structured' || node?.layer === 'operation') return 'information';
-    if (node?.type === 'product_concept') return 'virtual';
-    if (node?.id?.startsWith('entity.') || node?.type === 'canonical_entity') return 'virtual';
-    if (node?.layer === 'architecture' || node?.layer === 'runtime' || node?.layer === 'evidence') return 'information';
-    return 'virtual';
-  }
-
-  function ontologyNormalizeDepth(depth, fallback = 'virtual') {
-    if (ONTOLOGY_DEPTH_NAV_ORDER.includes(depth)) return depth;
-    return ONTOLOGY_DEPTH_NAV_ORDER.includes(fallback) ? fallback : 'virtual';
-  }
-
-  function ontologyDefaultDepthForPane(pane, selected) {
-    if (selected && ontologyPhaseForNode(selected) === pane) return ontologyDepthForNode(selected);
-    return 'virtual';
-  }
-
-  function ontologyDepthColor(depth) {
-    const colors = {
-      physical: '#2D5A7B',
-      information: '#3F7B61',
-      virtual: '#8A6B2E',
-    };
-    return colors[depth] || '#5D6370';
-  }
-
-  function ontologyShiftPane(current, deltaX) {
-    const order = ONTOLOGY_TIME_PANE_ORDER;
-    const index = Math.max(0, order.indexOf(current));
-    const next = deltaX > 0 ? index + 1 : index - 1;
-    return order[Math.max(0, Math.min(order.length - 1, next))];
-  }
-
-  function ontologyShiftDepth(current, deltaY) {
-    const normalized = ontologyNormalizeDepth(current);
-    const index = ONTOLOGY_DEPTH_NAV_ORDER.indexOf(normalized);
-    if (index < 0) return 'virtual';
-    const next = deltaY > 0 ? index + 1 : index - 1;
-    return ONTOLOGY_DEPTH_NAV_ORDER[Math.max(0, Math.min(ONTOLOGY_DEPTH_NAV_ORDER.length - 1, next))];
-  }
-
-  function ontologyPhaseForNode(node) {
-    const id = String(node?.id || '');
-    if (id === 'goal' || id === 'plan' || id === 'task' || id === 'output.structured') return 'future';
-    if (id === 'alternate.plan' || id === 'candidate.future') return 'multiverse';
-    if (id === 'entity.chat_memory' || id.startsWith('projection.chat_memory.')) return 'past';
-    return 'present';
-  }
-
-  function ontologyProjectionLocalLabel(node) {
-    if (ONTOLOGY_NODE_LABELS[node?.id]) return ONTOLOGY_NODE_LABELS[node.id];
-    const label = ontologyProjectionLabel(node);
-    return label.replace(/^[^·]+·\s*/, '');
-  }
-
-  function ontologyResetFocusViewport(localState) {
-    localState.pan = { x: 0, y: 0 };
-    localState.zoom = 1;
-    localState.tilt = 0;
-    localState.paneSlides = {};
-  }
-
-  function ontologyPaneSlideKey(phase, depth) {
-    return `${phase || 'present'}:${ontologyNormalizeDepth(depth)}`;
-  }
-
-  function ontologyPaneSlide(localState, phase, depth) {
-    const slide = localState?.paneSlides?.[ontologyPaneSlideKey(phase, depth)];
-    return {
-      u: Number.isFinite(slide?.u) ? slide.u : 0,
-      v: Number.isFinite(slide?.v) ? slide.v : 0,
-    };
-  }
-
-  function ontologySetPaneSlide(localState, phase, depth, slide) {
-    localState.paneSlides = localState.paneSlides || {};
-    localState.paneSlides[ontologyPaneSlideKey(phase, depth)] = {
-      u: Number(slide?.u) || 0,
-      v: Number(slide?.v) || 0,
-    };
-  }
-
-  function ontologyPaneSurfaceGeometry(graph, selected, localState, phase = 'present', depth = 'virtual') {
-    const deckScene = ontologyCreateDeckScene(graph, selected, localState);
-    const paneScene = deckScene.panes.get(phase) || deckScene.panes.get('present');
-    const baseGeometry = paneScene?.geometry;
-    if (phase === 'present' && ontologyNormalizeDepth(depth) === 'physical') {
-      const lowerSurface = (deckScene.referenceSurfaces.present || [])
-        .find((surface) => surface.id === 'lower-physical');
-      return lowerSurface?.geometry || baseGeometry;
+  function validateOntologyGraph(graph) {
+    if (graph?.schemaVersion !== ONTOLOGY_GRAPH_SCHEMA_VERSION) {
+      throw new Error(`Unsupported ontology graph schema: ${graph?.schemaVersion ?? 'missing'}`);
     }
-    return baseGeometry;
+    for (const field of ['nodes', 'snapshots', 'occurrences', 'referenceEdges']) {
+      if (!Array.isArray(graph[field])) throw new Error(`Ontology graph field must be an array: ${field}`);
+    }
+    return graph;
   }
 
-  function ontologyProjectPaneDragDelta(deltaX, deltaY, geometry) {
-    const rawX = Number(deltaX) || 0;
-    const rawY = Number(deltaY) || 0;
-    if (!geometry?.point || (Math.abs(rawX) < 0.01 && Math.abs(rawY) < 0.01)) return { u: 0, v: 0 };
-    const center = geometry.point(0.5, 0.5);
-    const uEdge = geometry.point(0.6, 0.5);
-    const vEdge = geometry.point(0.5, 0.6);
-    const uAxis = { x: (uEdge.x - center.x) * 10, y: (uEdge.y - center.y) * 10 };
-    const vAxis = { x: (vEdge.x - center.x) * 10, y: (vEdge.y - center.y) * 10 };
-    const determinant = uAxis.x * vAxis.y - uAxis.y * vAxis.x;
-    if (Math.abs(determinant) < 0.01) return { u: 0, v: 0 };
-    return {
-      u: (rawX * vAxis.y - rawY * vAxis.x) / determinant,
-      v: (uAxis.x * rawY - uAxis.y * rawX) / determinant,
+  function getOntologyModel(graph) {
+    const cached = ontologyModelCache.get(graph);
+    if (cached) return cached;
+    const nodesById = new Map((graph?.nodes || []).map((node) => [node.id, node]));
+    const snapshots = (graph?.snapshots || []).slice();
+    const occurrences = (graph?.occurrences || []).slice();
+    const byRef = new Map(occurrences.map((occurrence) => [occurrence.refId, occurrence]));
+    const childrenByRef = new Map();
+    occurrences.forEach((occurrence) => {
+      if (!occurrence.parentRef) return;
+      if (!childrenByRef.has(occurrence.parentRef)) childrenByRef.set(occurrence.parentRef, []);
+      childrenByRef.get(occurrence.parentRef).push(occurrence);
+    });
+    childrenByRef.forEach((children) => children.sort((a, b) => (
+      (Number(a.order) || 0) - (Number(b.order) || 0) || a.refId.localeCompare(b.refId)
+    )));
+    const labelFor = (occurrence) => occurrence?.label
+      || nodesById.get(occurrence?.conceptId)?.label
+      || ontologyTitleCase(occurrence?.conceptId || occurrence?.refId || 'concept');
+    const rootsByPhase = new Map();
+    snapshots.forEach((snapshot) => {
+      const root = byRef.get(snapshot.rootRef);
+      if (root && !rootsByPhase.has(snapshot.timeSlice)) rootsByPhase.set(snapshot.timeSlice, root);
+    });
+    const isPlaneRoot = (occurrence) => {
+      if (!occurrence) return false;
+      const parent = occurrence.parentRef ? byRef.get(occurrence.parentRef) : null;
+      return !parent || parent.timeSlice !== occurrence.timeSlice || parent.snapshotId !== occurrence.snapshotId;
     };
+    const planeRootsByCell = new Map();
+    occurrences.forEach((occurrence) => {
+      if (!isPlaneRoot(occurrence)) return;
+      const key = `${occurrence.timeSlice}:${occurrence.layer}`;
+      if (!planeRootsByCell.has(key)) planeRootsByCell.set(key, []);
+      planeRootsByCell.get(key).push(occurrence);
+    });
+    planeRootsByCell.forEach((roots) => roots.sort((a, b) => (
+      (Number(a.order) || 0) - (Number(b.order) || 0) || a.refId.localeCompare(b.refId)
+    )));
+    const model = {
+      snapshots,
+      occurrences,
+      byRef,
+      childrenByRef,
+      rootsByPhase,
+      isPlaneRoot,
+      planeRootsFor: (phase, layer) => planeRootsByCell.get(`${phase}:${layer}`) || [],
+      labelFor,
+      referenceEdges: graph?.referenceEdges || [],
+    };
+    ontologyModelCache.set(graph, model);
+    return model;
   }
 
-  function ontologySetPane(localState, pane) {
-    if (!ONTOLOGY_TIME_PANE_ORDER.includes(pane)) return false;
-    localState.focusTarget = 'pane';
-    localState.activePane = pane;
-    localState.activeDepth = ontologyNormalizeDepth(localState.activeDepth);
-    localState.selectedRelation = null;
-    ontologyResetFocusViewport(localState);
+  function getOntologyCamera(localState) {
+    const key = `${localState.activePane || 'present'}:coupled-layers`;
+    if (!localState.cameraByCell) localState.cameraByCell = {};
+    if (!localState.cameraByCell[key]) localState.cameraByCell[key] = { x: 0, y: 0, zoom: 1 };
+    const camera = localState.cameraByCell[key];
+    localState.pan = { x: camera.x, y: camera.y };
+    localState.zoom = camera.zoom;
+    return camera;
+  }
+
+  function setOntologyLayer(localState, layer) {
+    if (!ONTOLOGY_LAYER_ORDER.includes(layer)) return false;
+    localState.activeLayer = layer;
+    localState.activeStratum = layer;
+    localState.activeDepth = layer;
     return true;
   }
 
-  function ontologySetDepth(localState, depth) {
-    if (!ONTOLOGY_DEPTH_NAV_ORDER.includes(depth)) return false;
-    localState.focusTarget = 'pane';
-    localState.activeDepth = depth;
-    localState.selectedRelation = null;
-    ontologyResetFocusViewport(localState);
+  function adjustOntologyCameraZoom(camera, direction) {
+    camera.zoom = Math.max(
+      ONTOLOGY_CAMERA_ZOOM_MIN,
+      Math.min(ONTOLOGY_CAMERA_ZOOM_MAX, camera.zoom + direction * ONTOLOGY_CAMERA_ZOOM_STEP),
+    );
+  }
+
+  function resetOntologyCamera(camera) {
+    camera.x = 0;
+    camera.y = 0;
+    camera.zoom = 1;
+  }
+
+  function selectOntologyOccurrence(localState, model, refId, options = {}) {
+    const occurrence = model.byRef.get(refId);
+    if (!occurrence) return false;
+    localState.selectedRefId = occurrence.refId;
+    localState.selectedId = occurrence.refId;
+    localState.selectedConceptId = occurrence.conceptId;
+    localState.activePane = occurrence.timeSlice;
+    if (options.keepLayer !== true) setOntologyLayer(localState, occurrence.layer);
     return true;
   }
 
-  function ontologyAdjustZoom(localState, direction) {
-    const factor = direction > 0 ? 1.12 : 0.88;
-    localState.zoom = Math.max(0.38, Math.min(2.6, (localState.zoom || 1) * factor));
+  function activateOntologyPane(localState, model, phase, preferredConceptId = null) {
+    if (!ONTOLOGY_TIME_PANE_ORDER.includes(phase)) return false;
+    const candidates = model.occurrences.filter((occurrence) => occurrence.timeSlice === phase);
+    const target = candidates.find((occurrence) => occurrence.conceptId === preferredConceptId)
+      || model.rootsByPhase.get(phase)
+      || candidates[0];
+    localState.activePane = phase;
+    if (target) {
+      selectOntologyOccurrence(localState, model, target.refId);
+    } else {
+      localState.selectedRefId = null;
+      localState.selectedId = null;
+      localState.selectedConceptId = null;
+    }
+    return true;
   }
 
-  function ontologyHandleSemanticWheel(localState, ev) {
-    if (ev.ctrlKey || ev.metaKey) {
-      ontologyAdjustZoom(localState, ev.deltaY < 0 ? 1 : -1);
-      return true;
-    }
-    const absX = Math.abs(ev.deltaX || 0);
-    const absY = Math.abs(ev.deltaY || 0);
-    if (Math.max(absX, absY) < 12) return false;
-    const now = performance.now();
-    if (now - (localState.lastWheelNavAt || 0) < 210) return true;
-    if (absX > absY * 1.12) {
-      const nextPane = ontologyShiftPane(localState.activePane || 'present', ev.deltaX);
-      ontologySetPane(localState, nextPane);
-      localState.lastWheelNavAt = now;
-      return true;
-    }
-    if (absY > absX * 1.12) {
-      const nextDepth = ontologyShiftDepth(localState.activeDepth, ev.deltaY);
-      ontologySetDepth(localState, nextDepth);
-      localState.lastWheelNavAt = now;
-      return true;
-    }
-    return false;
+  function getOntologySideItems(model, phase, visibleRefs, selected) {
+    const phaseOccurrences = model.occurrences.filter((occurrence) => occurrence.timeSlice === phase);
+    const visibleConcepts = new Set(visibleRefs.map((occurrence) => occurrence.conceptId));
+    const edgeEndpointRefs = new Set();
+    model.referenceEdges.forEach((edge) => {
+      if (visibleRefs.some((occurrence) => occurrence.refId === edge.sourceRef)) edgeEndpointRefs.add(edge.targetRef);
+      if (visibleRefs.some((occurrence) => occurrence.refId === edge.targetRef)) edgeEndpointRefs.add(edge.sourceRef);
+    });
+    return phaseOccurrences.filter((occurrence) => (
+      model.isPlaneRoot(occurrence)
+      || edgeEndpointRefs.has(occurrence.refId)
+      || visibleConcepts.has(occurrence.conceptId)
+    )).sort((a, b) => {
+      const rank = (occurrence) => {
+        if (occurrence.conceptId === selected?.conceptId) return 0;
+        if (visibleConcepts.has(occurrence.conceptId)) return 1;
+        if (edgeEndpointRefs.has(occurrence.refId)) return 2;
+        if (model.isPlaneRoot(occurrence)) return 3;
+        return 4;
+      };
+      return rank(a) - rank(b)
+        || (Number(a.order) || 0) - (Number(b.order) || 0)
+        || a.refId.localeCompare(b.refId);
+    });
   }
 
-  function ontologyFocusNodeIds(graph, selected) {
-    const ids = new Set();
-    const canonicalId = ontologyCanonicalIdForNode(graph, selected);
-    if (canonicalId) {
-      ids.add(canonicalId);
-      for (const projection of ontologyProjectionNodesForCanonical(graph, canonicalId)) ids.add(projection.id);
-      for (const edge of graph?.edges || []) {
-        if (edge.source === canonicalId && ['binds', 'derived_from', 'provides_evidence_for', 'operates_inside'].includes(edge.relation)) {
-          ids.add(edge.target);
-        }
-        if (edge.target === canonicalId && ['binds', 'derived_from', 'provides_evidence_for'].includes(edge.relation)) {
-          ids.add(edge.source);
-        }
-      }
-      if (selected?.id) ids.add(selected.id);
-      return ids;
-    }
-
-    if (selected?.id) ids.add(selected.id);
-    for (const edge of graph?.edges || []) {
-      if (edge.source === selected?.id) ids.add(edge.target);
-      if (edge.target === selected?.id) ids.add(edge.source);
-      if (ids.size > 16) break;
-    }
-    return ids;
+  function drawOntologyText(parent, geometry, u, v, textValue, attrs = {}) {
+    const { anchor = 'middle', ...svgAttrs } = attrs;
+    const point = geometry.point(u, v);
+    const angle = Math.atan2(
+      geometry.corners.tr.y - geometry.corners.tl.y,
+      geometry.corners.tr.x - geometry.corners.tl.x,
+    ) * 180 / Math.PI;
+    const node = svgEl('text', {
+      x: point.x,
+      y: point.y,
+      transform: Math.abs(angle) > 0.1 ? `rotate(${angle.toFixed(2)} ${point.x.toFixed(1)} ${point.y.toFixed(1)})` : null,
+      'text-anchor': anchor,
+      fill: '#252c33',
+      'font-family': 'Inter, -apple-system, BlinkMacSystemFont, Segoe UI, system-ui, sans-serif',
+      'font-size': '12',
+      'font-weight': '800',
+      ...svgAttrs,
+    }, textValue);
+    parent.appendChild(node);
+    return node;
   }
 
-  function ontologyRelatedNodeIds(graph, selected) {
-    const ids = new Set();
-    const canonicalId = ontologyCanonicalIdForNode(graph, selected) || selected?.id;
-    if (selected?.id) ids.add(selected.id);
-    if (canonicalId) {
-      ids.add(canonicalId);
-      for (const projection of ontologyProjectionNodesForCanonical(graph, canonicalId)) ids.add(projection.id);
+  function drawOntologyChildPips(parent, geometry, spec, count, layer) {
+    const columns = 9;
+    const anchorU = spec.u + spec.w - 0.025;
+    const anchorV = spec.v + spec.h - 0.025;
+    const origin = geometry.point(anchorU, anchorV);
+    const alongU = geometry.point(anchorU + 0.01, anchorV);
+    const alongV = geometry.point(anchorU, anchorV + 0.01);
+    const pixelsPerU = Math.max(1, Math.hypot(alongU.x - origin.x, alongU.y - origin.y) / 0.01);
+    const pixelsPerV = Math.max(1, Math.hypot(alongV.x - origin.x, alongV.y - origin.y) / 0.01);
+    const pipSizePx = 7;
+    const pipGapPx = 4;
+    const pipW = Math.min(pipSizePx / pixelsPerU, spec.w / 14);
+    const pipH = Math.min(pipSizePx / pixelsPerV, spec.h / 5);
+    const gapX = pipW + pipGapPx / pixelsPerU;
+    const gapY = pipH + pipGapPx / pixelsPerV;
+    for (let index = 0; index < count; index += 1) {
+      const column = index % columns;
+      const row = Math.floor(index / columns);
+      const u = spec.u + spec.w - 0.025 - pipW - column * gapX;
+      const v = spec.v + spec.h - 0.025 - pipH - row * gapY;
+      parent.appendChild(svgEl('path', {
+        class: `egd-ontology-v2-pip egd-ontology-v2-pip-${layer}`,
+        d: geometry.rectPath(u, v, pipW, pipH),
+        fill: layer === 'virtual' ? 'rgba(103, 67, 166, 0.82)' : 'rgba(35, 76, 106, 0.84)',
+        stroke: 'rgba(255, 255, 255, 0.90)',
+        'stroke-width': '0.6',
+        'data-pip-index': String(index),
+      }));
     }
-
-    for (let pass = 0; pass < 2; pass += 1) {
-      for (const edge of graph?.edges || []) {
-        const touchesFocus = ids.has(edge.source) || ids.has(edge.target);
-        if (!touchesFocus) continue;
-        if (pass === 1 && edge.kind !== 'relation_map') continue;
-        ids.add(edge.source);
-        ids.add(edge.target);
-      }
-    }
-    return ids;
   }
 
-  function ontologyNarrativeNodeIds(graph, selected) {
-    const ids = new Set();
-    const add = (id) => {
-      if (id && ontologyNodeById(graph, id)) ids.add(id);
-    };
-    const addCanonicalBundle = (canonicalId) => {
-      add(canonicalId);
-      for (const projection of ontologyProjectionNodesForCanonical(graph, canonicalId)) add(projection.id);
-    };
-    const selectedId = selected?.id || 'entity.llm_chat_session';
-    const canonicalId = ontologyCanonicalIdForNode(graph, selected) || selectedId;
-    addCanonicalBundle(canonicalId);
-
-    [
-      'entity.llm_chat_session',
-      'projection.llm_chat_session.space.chat_card',
-      'projection.llm_chat_session.topology.runtime',
-      'projection.llm_chat_session.storage.session_file',
-      'projection.llm_chat_session.intent.context_binding',
-      'projection.llm_chat_session.action.message_send',
-      'entity.chat_memory',
-      'projection.chat_memory.storage.trace_file',
-      'goal',
-      'output.structured',
-      'desktop',
-      'terminal',
-      'cpu',
-      'ram',
-      'disk',
-    ].forEach(add);
-
-    if (selectedId === 'goal' || selectedId === 'plan' || selectedId === 'task') {
-      ['goal', 'plan', 'task', 'alternate.plan', 'candidate.future'].forEach(add);
-    }
-
-    return ids;
-  }
-
-  function ontologyVisibleGraph(graph, mode, selected) {
-    const allNodes = graph?.nodes || [];
-    const allEdges = graph?.edges || [];
-    if (mode !== 'focus') return { nodes: allNodes, edges: allEdges };
-
-    const ids = ontologyFocusNodeIds(graph, selected);
-    const relationPriority = new Set(['represented_by', 'binds', 'derived_from', 'provides_evidence_for', 'operates_inside']);
-    return {
-      nodes: allNodes.filter((node) => ids.has(node.id)),
-      edges: allEdges.filter((edge) => (
-        ids.has(edge.source)
-        && ids.has(edge.target)
-        && (relationPriority.has(edge.relation) || edge.source === selected?.id || edge.target === selected?.id)
-      )),
-    };
-  }
-
-  function renderOntologySvgNode(parent, node, point, options = {}) {
-    const color = options.color || ontologyLayerColor(node.layer);
-    const size = options.size || ontologyNodeSize(node, options.mode || 'focus');
-    const meta = Object.prototype.hasOwnProperty.call(options, 'meta')
-      ? String(options.meta || '')
-      : ontologyDisplayMeta(node, options.mode || 'focus');
-    const namespaceBadge = Object.prototype.hasOwnProperty.call(options, 'namespaceBadge')
-      ? String(options.namespaceBadge || '')
-      : ontologyNamespaceBadge(node);
-    const layerBadge = Object.prototype.hasOwnProperty.call(options, 'layerBadge')
-      ? String(options.layerBadge || '')
-      : '';
+  function drawOntologyOccurrenceBox(parent, model, geometry, spec, occurrence, options = {}) {
+    const childCount = model.childrenByRef.get(occurrence.refId)?.length || 0;
+    const expandedRoot = !!(options.root && options.expanded);
     const group = svgEl('g', {
-      class: `egd-ontology-node${options.selected ? ' egd-ontology-node-selected' : ''}${options.extraClass ? ` ${options.extraClass}` : ''}`,
-      transform: `translate(${point.x} ${point.y})`,
-      data: { id: node.id },
+      class: `egd-ontology-v2-box${options.root ? ' egd-ontology-v2-box-root' : ''}${expandedRoot ? ' egd-ontology-v2-box-root-expanded' : ''}${options.side ? ' egd-ontology-v2-box-side' : ''}${options.overview ? ' egd-ontology-v2-box-overview' : ''}${options.context ? ' egd-ontology-v2-box-context' : ''}${options.behind ? ' egd-ontology-v2-box-behind' : ''}`,
+      data: {
+        refId: occurrence.refId,
+        conceptId: occurrence.conceptId,
+        phase: occurrence.timeSlice,
+        layer: occurrence.layer,
+        contextRole: options.contextRole || '',
+      },
       onclick: options.onclick,
     });
-    group.appendChild(svgEl('rect', {
-      class: 'egd-ontology-node-box',
-      x: -size.width / 2,
-      y: -size.height / 2,
-      width: size.width,
-      height: size.height,
-      rx: options.rx || 8,
-      fill: options.fill || (node.synthetic ? '#F7F5F0' : '#FFFFFF'),
-      stroke: color,
-      'stroke-width': options.selected ? '2.4' : '1.35',
+    const boxPath = geometry.rectPath(spec.u, spec.v, spec.w, spec.h);
+    const boxFill = options.root ? 'rgba(255, 254, 250, 0.88)' : options.side ? 'rgba(255, 255, 255, 0.88)' : options.overview ? 'rgba(255, 255, 255, 0.92)' : 'rgba(255, 255, 255, 0.95)';
+    const boxStroke = occurrence.layer === 'virtual' ? 'rgba(103, 67, 166, 0.68)' : 'rgba(35, 76, 106, 0.70)';
+    group.appendChild(svgEl('path', {
+      class: `egd-ontology-v2-box-path egd-ontology-v2-box-path-${occurrence.layer}${expandedRoot ? ' egd-ontology-v2-box-fill' : ''}`,
+      d: boxPath,
+      fill: boxFill,
+      stroke: expandedRoot ? 'none' : boxStroke,
+      'stroke-width': options.root ? '2.3' : options.side ? '1.2' : '1.7',
     }));
-    if (namespaceBadge) {
-      const badgeText = ontologyTrimText(namespaceBadge === 'egdesk' ? 'egdesk' : namespaceBadge, 12);
-      const badgeWidth = Math.max(54, Math.min(78, badgeText.length * 6.4 + 18));
-      const badgeX = size.width / 2 - badgeWidth - 8;
-      const badgeY = -size.height / 2 + 7;
-      group.appendChild(svgEl('rect', {
-        class: 'egd-ontology-node-namespace-badge',
-        x: badgeX,
-        y: badgeY,
-        width: badgeWidth,
-        height: 18,
-        rx: 6,
-        fill: 'rgba(45, 90, 123, 0.20)',
-        stroke: 'rgba(45, 90, 123, 0.42)',
-        'stroke-width': '1.1',
+    if (expandedRoot) {
+      const labelWidth = Math.min(spec.w * 0.40, Math.max(0.105, model.labelFor(occurrence).length * 0.013));
+      const gapStartU = spec.u + 0.035;
+      const gapEndU = gapStartU + labelWidth;
+      const topLeft = geometry.point(spec.u, spec.v);
+      const gapStart = geometry.point(gapStartU, spec.v);
+      const gapEnd = geometry.point(gapEndU, spec.v);
+      const topRight = geometry.point(spec.u + spec.w, spec.v);
+      const bottomRight = geometry.point(spec.u + spec.w, spec.v + spec.h);
+      const bottomLeft = geometry.point(spec.u, spec.v + spec.h);
+      group.appendChild(svgEl('path', {
+        class: `egd-ontology-v2-box-outline egd-ontology-v2-box-outline-${occurrence.layer}`,
+        d: `M ${gapEnd.x.toFixed(1)} ${gapEnd.y.toFixed(1)} L ${topRight.x.toFixed(1)} ${topRight.y.toFixed(1)} L ${bottomRight.x.toFixed(1)} ${bottomRight.y.toFixed(1)} L ${bottomLeft.x.toFixed(1)} ${bottomLeft.y.toFixed(1)} L ${topLeft.x.toFixed(1)} ${topLeft.y.toFixed(1)} L ${gapStart.x.toFixed(1)} ${gapStart.y.toFixed(1)}`,
+        fill: 'none',
+        stroke: boxStroke,
+        'stroke-width': '2.3',
       }));
-      group.appendChild(svgEl('text', {
-        class: 'egd-ontology-node-namespace-text',
-        x: badgeX + badgeWidth / 2,
-        y: badgeY + 12.7,
-        fill: 'rgba(36, 78, 109, 0.90)',
-        'font-family': 'Inter, -apple-system, Segoe UI, system-ui, sans-serif',
-        'font-size': '8.8',
+      group.appendChild(svgEl('path', {
+        class: 'egd-ontology-v2-legend-gap',
+        d: `M ${gapStart.x.toFixed(1)} ${gapStart.y.toFixed(1)} L ${gapEnd.x.toFixed(1)} ${gapEnd.y.toFixed(1)}`,
+        fill: 'none',
+        stroke: boxFill,
+        'stroke-width': '3.2',
+      }));
+      drawOntologyText(group, geometry, gapStartU + 0.012, spec.v + 0.018, model.labelFor(occurrence), {
+        class: 'egd-ontology-v2-label egd-ontology-v2-label-root',
+        anchor: 'start',
+        'font-size': '14',
         'font-weight': '900',
-        'text-anchor': 'middle',
-      }, badgeText));
-    }
-    if (layerBadge) {
-      const badgeText = ontologyTrimText(layerBadge, 10);
-      const badgeWidth = Math.max(34, Math.min(62, badgeText.length * 4.8 + 12));
-      const badgeX = -size.width / 2 + 7;
-      const badgeY = size.height / 2 - 19;
-      group.appendChild(svgEl('rect', {
-        class: 'egd-ontology-node-layer-badge',
-        x: badgeX,
-        y: badgeY,
-        width: badgeWidth,
-        height: 13,
-        rx: 5,
-        fill: 'rgba(92, 97, 105, 0.08)',
-        stroke: 'rgba(92, 97, 105, 0.18)',
-        'stroke-width': '0.7',
-      }));
-      group.appendChild(svgEl('text', {
-        class: 'egd-ontology-node-layer-text',
-        x: badgeX + badgeWidth / 2,
-        y: badgeY + 9.2,
-        fill: '#596875',
-        'font-family': 'Inter, -apple-system, Segoe UI, system-ui, sans-serif',
-        'font-size': '7',
-        'font-weight': '750',
-        'text-anchor': 'middle',
-      }, badgeText));
-    }
-    if (options.icon) {
-      const iconX = -size.width / 2 + 16;
-      const iconY = meta ? -4 : 5;
-      group.appendChild(svgEl('rect', {
-        class: 'egd-ontology-node-icon-bg',
-        x: iconX - 9,
-        y: iconY - 11,
-        width: 18,
-        height: 18,
-        rx: 4,
-        fill: options.iconBg || 'rgba(92, 97, 105, 0.08)',
-        stroke: options.iconBgStroke || 'rgba(92, 97, 105, 0.18)',
-        'stroke-width': '0.7',
-      }));
-      group.appendChild(svgEl('text', {
-        class: 'egd-ontology-node-icon',
-        x: iconX,
-        y: iconY,
-        fill: options.iconColor || color,
-        'font-family': 'Inter, -apple-system, Segoe UI, system-ui, sans-serif',
-        'font-size': options.iconSize || '13',
+      });
+    } else if (options.root) {
+      drawOntologyText(group, geometry, spec.u + spec.w / 2, spec.v + spec.h * 0.52, model.labelFor(occurrence), {
+        class: 'egd-ontology-v2-label egd-ontology-v2-label-root egd-ontology-v2-label-root-centered',
+        'font-size': '15',
         'font-weight': '900',
-        'text-anchor': 'middle',
-        'pointer-events': 'none',
-      }, String(options.icon)));
+      });
+    } else {
+      drawOntologyText(group, geometry, spec.u + spec.w / 2, spec.v + spec.h * 0.48, model.labelFor(occurrence), {
+        class: 'egd-ontology-v2-label',
+        'font-size': options.side || options.context || options.overview ? '10' : '12',
+      });
     }
-    group.appendChild(svgEl('text', {
-      class: 'egd-ontology-node-label',
-      x: -size.width / 2 + (options.icon ? 34 : 14),
-      y: layerBadge ? (meta ? -8 : -6) : (meta ? -5 : 4),
-      fill: options.labelFill || '#1A1A1A',
-      'font-family': 'Inter, -apple-system, Segoe UI, system-ui, sans-serif',
-      'font-size': '11',
-      'font-weight': '700',
-    }, ontologyTrimText(options.label || ontologyDisplayLabel(node, options.mode || 'focus'), options.labelMax || 25)));
-    if (meta) {
-      group.appendChild(svgEl('text', {
-        class: 'egd-ontology-node-meta',
-        x: -size.width / 2 + 14,
-        y: 12,
-        fill: '#5A5A5A',
-        'font-family': 'Inter, -apple-system, Segoe UI, system-ui, sans-serif',
-        'font-size': '9',
-        'font-weight': '500',
-      }, ontologyTrimText(meta, options.metaMax || 28)));
-    }
-    if (options.showPorts) {
-      group.appendChild(svgEl('circle', {
-        class: 'egd-ontology-node-port egd-ontology-node-port-top',
-        cx: 0,
-        cy: -size.height / 2,
-        r: 4,
-        fill: color,
-        stroke: 'rgba(255, 255, 255, 0.92)',
-        'stroke-width': '1.4',
-      }));
-      group.appendChild(svgEl('circle', {
-        class: 'egd-ontology-node-port egd-ontology-node-port-bottom',
-        cx: 0,
-        cy: size.height / 2,
-        r: 4,
-        fill: color,
-        stroke: 'rgba(255, 255, 255, 0.92)',
-        'stroke-width': '1.4',
-      }));
+    if (childCount && !options.root && !options.side && (!options.context || options.contextRole === 'child')) {
+      drawOntologyChildPips(group, geometry, spec, childCount, occurrence.layer);
     }
     parent.appendChild(group);
     return group;
   }
 
-  function renderOntologyFocusPlanes(graphGroup, graph, selected, localState, onSelect, onPaneSelect, onRelationSelect, onDepthSelect) {
-    const canonicalId = ontologyCanonicalIdForNode(graph, selected) || selected?.id;
-    const canonicalNode = ontologyNodeById(graph, canonicalId) || selected;
-    const projectionNodes = ontologyProjectionNodesForCanonical(graph, canonicalId);
-    const projectionByFacet = new Map(projectionNodes.map((node) => [ontologyProjectionFacet(node.id), node]));
-    const selectedRelatedIds = ontologyRelatedNodeIds(graph, selected);
-    const narrativeIds = ontologyNarrativeNodeIds(graph, selected);
-    const focusTarget = localState.focusTarget || 'object';
-    const selectedPhase = ontologyPhaseForNode(selected);
-    const usePaneMap = true;
-    const deckScene = ontologyCreateDeckScene(graph, selected, localState);
-    const activePane = deckScene.activePane || selectedPhase || 'present';
-    const phaseLabels = deckScene.phaseLabels;
-    const phaseColor = deckScene.phaseColor;
-    const paneGroup = svgEl('g', { class: 'egd-ontology-focus-planes egd-ontology-time-panes' });
-    const temporalLinkGroup = svgEl('g', { class: 'egd-ontology-temporal-object-links' });
-    const centerGroup = svgEl('g', { class: 'egd-ontology-focus-center' });
-    const contextGroup = svgEl('g', { class: 'egd-ontology-focus-context' });
-    const noviceOverlayGroup = svgEl('g', { class: 'egd-ontology-novice-overlay' });
-    localState.clipId = localState.clipId || newAgendaId('ontology-clip');
-    const contentClipRootId = localState.clipId;
-
-    const drawPane = (phase, bounds) => {
-      const active = usePaneMap ? phase === activePane : phase === 'present';
-      const color = phaseColor(phase);
-      const pane = svgEl('g', {
-        class: `egd-ontology-time-pane egd-ontology-time-pane-${phase}${active ? ' egd-ontology-time-pane-active' : ''}`,
-        data: { phase },
-      });
-      const sliceX = bounds.x + bounds.w / 2;
-      pane.appendChild(svgEl('line', {
-        class: 'egd-ontology-time-slice-guide',
-        x1: sliceX,
-        y1: 132,
-        x2: sliceX,
-        y2: bounds.y + bounds.h + 26,
-        stroke: color,
-        'stroke-width': active ? '2.1' : '1.2',
-        'stroke-opacity': active ? '0.34' : '0.14',
-        'stroke-dasharray': active ? '12 12' : '8 12',
-        'vector-effect': 'non-scaling-stroke',
-        'pointer-events': 'none',
-      }));
-      pane.appendChild(svgEl('circle', {
-        class: 'egd-ontology-time-slice-guide-dot',
-        cx: sliceX,
-        cy: 146,
-        r: active ? 5.5 : 4,
-        fill: '#FFFFFF',
-        stroke: color,
-        'stroke-width': active ? '2' : '1.2',
-        'stroke-opacity': active ? '0.56' : '0.26',
-        'pointer-events': 'none',
-      }));
-      pane.appendChild(svgEl('rect', {
-        class: 'egd-ontology-pane-hit',
-        x: bounds.x,
-        y: bounds.y,
-        width: bounds.w,
-        height: bounds.h,
-        rx: active ? 22 : 18,
-        fill: 'transparent',
-        onmousedown: (ev) => {
-          ev.preventDefault();
-          ev.stopPropagation();
-        },
-        onclick: (ev) => {
-          ev.preventDefault();
-          ev.stopPropagation();
-          onPaneSelect(phase);
-        },
-      }));
-      paneGroup.appendChild(pane);
-      return pane;
-    };
-
-    paneGroup.appendChild(svgEl('line', {
-      class: 'egd-ontology-trajectory-open-canvas-baseline',
-      x1: 46,
-      y1: 708,
-      x2: 1274,
-      y2: 708,
-      stroke: 'rgba(138, 107, 46, 0.14)',
-      'stroke-width': '1.2',
-      'stroke-dasharray': '10 12',
-      'vector-effect': 'non-scaling-stroke',
-      'pointer-events': 'none',
-    }));
-    if (!usePaneMap) {
-      paneGroup.appendChild(svgEl('path', {
-        class: 'egd-ontology-time-flow-band',
-        d: 'M 132 146 L 1148 146 L 1148 136 L 1196 166 L 1148 196 L 1148 186 L 132 186 Z',
-        fill: 'rgba(111, 90, 154, 0.012)',
-        stroke: 'rgba(111, 90, 154, 0.055)',
-        'stroke-width': '0.8',
-        'stroke-linejoin': 'miter',
-        opacity: '0.54',
-        'pointer-events': 'none',
-      }));
-      paneGroup.appendChild(svgEl('text', {
-        x: 664,
-        y: 170,
-        fill: 'rgba(111, 90, 154, 0.38)',
-        'font-family': 'Inter, -apple-system, Segoe UI, system-ui, sans-serif',
-        'font-size': '11',
-        'font-weight': '850',
-        'text-anchor': 'middle',
-        'pointer-events': 'none',
-      }, '과거 → 현재 → 미래'));
-    }
-
-    const paneBounds = deckScene.paneBounds;
-    drawPane('past', paneBounds.past);
-    drawPane('present', paneBounds.present);
-    drawPane('future', paneBounds.future);
-    paneGroup.appendChild(temporalLinkGroup);
-
-    {
-      const timeAxisY = 116;
-      const timeAxisStart = paneBounds.past.x + paneBounds.past.w / 2;
-      const timeAxisNow = paneBounds.present.x + paneBounds.present.w / 2;
-      const timeAxisEnd = paneBounds.future.x + paneBounds.future.w / 2;
-      centerGroup.appendChild(svgEl('path', {
-        class: 'egd-ontology-time-axis',
-        d: `M ${timeAxisStart} ${timeAxisY} L ${timeAxisEnd} ${timeAxisY}`,
-        fill: 'none',
-        stroke: 'rgba(111, 90, 154, 0.28)',
-        'stroke-width': '1.6',
-        'stroke-linecap': 'round',
-        'stroke-dasharray': '10 10',
-        'pointer-events': 'none',
-      }));
-      centerGroup.appendChild(svgEl('polygon', {
-        class: 'egd-ontology-time-axis-arrow',
-        points: `${timeAxisEnd + 22},${timeAxisY} ${timeAxisEnd - 4},${timeAxisY - 12} ${timeAxisEnd - 4},${timeAxisY + 12}`,
-        fill: 'rgba(111, 90, 154, 0.34)',
-        'pointer-events': 'none',
-      }));
-      [
-        { x: timeAxisStart, label: '과거', fill: '#6F5A9A', active: activePane === 'past' },
-        { x: timeAxisNow, label: '현재', fill: '#4E5360', active: activePane === 'present' },
-        { x: timeAxisEnd, label: '미래', fill: '#6F5A9A', active: activePane === 'future' },
-      ].forEach((tick) => {
-        centerGroup.appendChild(svgEl('circle', {
-          class: `egd-ontology-time-axis-tick${tick.active ? ' egd-ontology-time-axis-tick-active' : ''}`,
-          cx: tick.x,
-          cy: timeAxisY,
-          r: tick.active ? 5.2 : 4,
-          fill: '#FFFFFF',
-          stroke: tick.fill,
-          'stroke-width': tick.active ? '2' : '1.25',
-          'stroke-opacity': tick.active ? '0.76' : '0.34',
-          'pointer-events': 'none',
-        }));
-        centerGroup.appendChild(svgEl('text', {
-          class: `egd-ontology-time-axis-label${tick.active ? ' egd-ontology-time-axis-label-active' : ''}`,
-          x: tick.x,
-          y: timeAxisY + 26,
-          fill: tick.fill,
-          'font-family': 'Inter, -apple-system, Segoe UI, system-ui, sans-serif',
-          'font-size': tick.active ? '13' : '12',
-          'font-weight': tick.active ? '900' : '850',
-          'text-anchor': 'middle',
-          opacity: tick.active ? '0.88' : '0.54',
-          'pointer-events': 'none',
-        }, tick.label));
-      });
-    }
-
-    const drawFocusLegend = () => {
-      const legend = svgEl('g', { class: 'egd-ontology-focus-legend' });
-      const x = 70;
-      const y = 108;
-      legend.appendChild(svgEl('rect', {
-        x,
-        y,
-        width: 404,
-        height: 132,
-        rx: 14,
-        fill: 'rgba(255, 255, 255, 0.92)',
-        stroke: 'rgba(92, 97, 105, 0.22)',
-        'stroke-width': '1.25',
-      }));
-      const rows = [
-        { label: '시간대 간 연결', color: '#6F5A9A', dash: null, width: 3.8, arrow: true },
-        { label: '시간대 안 연결', color: '#3F7B61', dash: null, width: 3.4 },
-        { label: '물리 계층선', color: '#2D5A7B', dash: null, width: 3.2 },
-        { label: '객체층: 물리 / 연결 / 가상', color: '#2D5A7B', swatches: ['#2D5A7B', '#3F7B61', '#8A6B2E'] },
-        { label: 'EG-Desk 배지 = 커스텀 개념', color: '#2D5A7B', badge: 'EG-Desk' },
-      ];
-      rows.forEach((row, index) => {
-        const rowY = y + 21 + index * 22;
-        if (row.swatches) {
-          row.swatches.forEach((color, swatchIndex) => {
-            legend.appendChild(svgEl('rect', {
-              x: x + 14 + swatchIndex * 15,
-              y: rowY - 8,
-              width: 11,
-              height: 11,
-              rx: 3,
-              fill: color,
-              opacity: '0.82',
-            }));
-          });
-        } else if (row.badge) {
-          legend.appendChild(svgEl('rect', {
-            x: x + 14,
-            y: rowY - 12,
-            width: 58,
-            height: 19,
-            rx: 6,
-            fill: 'rgba(45, 90, 123, 0.13)',
-            stroke: 'rgba(45, 90, 123, 0.28)',
-            'stroke-width': '1',
-          }));
-          legend.appendChild(svgEl('text', {
-            x: x + 43,
-            y: rowY + 1,
-            fill: 'rgba(45, 90, 123, 0.78)',
-            'font-family': 'Inter, -apple-system, Segoe UI, system-ui, sans-serif',
-            'font-size': '8.8',
-            'font-weight': '900',
-            'text-anchor': 'middle',
-          }, row.badge));
-        } else {
-          legend.appendChild(svgEl('path', {
-            d: `M ${x + 14} ${rowY - 2} L ${x + 56} ${rowY - 2}`,
-            fill: 'none',
-            stroke: row.color,
-            'stroke-width': row.width || (index === 0 ? '3' : '2.2'),
-            'stroke-dasharray': row.dash,
-            'stroke-linecap': 'square',
-          }));
-          if (row.arrow) {
-            legend.appendChild(svgEl('polygon', {
-              points: `${x + 60},${rowY - 2} ${x + 51},${rowY - 7} ${x + 51},${rowY + 3}`,
-              fill: row.color,
-            }));
-          }
-        }
-        legend.appendChild(svgEl('text', {
-          x: x + 70,
-          y: rowY + 2,
-          fill: 'rgba(30, 38, 45, 0.80)',
-          'font-family': 'Inter, -apple-system, Segoe UI, system-ui, sans-serif',
-          'font-size': '12',
-          'font-weight': '900',
-        }, row.label));
-      });
-      centerGroup.appendChild(legend);
-    };
-    if (!usePaneMap) drawFocusLegend();
-
-    const drawBrowseSpine = () => {
-      const steps = [
-        { x: 286, y: 666, label: '과거 기억', meta: '저장된 흔적', color: '#6F5A9A' },
-        { x: 540, y: 666, label: '현재 물리 실행', meta: '기기 · 파일 · 앱', color: '#2D5A7B' },
-        { x: 794, y: 666, label: '현재 의미 연결', meta: '세션 · 컨텍스트', color: '#3F7B61' },
-        { x: 1048, y: 666, label: '미래 목표', meta: '산출 · 계획', color: '#8A6B2E' },
-      ];
-      steps.slice(0, -1).forEach((step, index) => {
-        const next = steps[index + 1];
-        centerGroup.appendChild(svgEl('path', {
-          class: 'egd-ontology-browse-spine-arrow',
-          d: `M ${step.x + 96} ${step.y} L ${next.x - 96} ${next.y}`,
-          fill: 'none',
-          stroke: 'rgba(111, 90, 154, 0.52)',
-          'stroke-width': '3.2',
-          'stroke-linecap': 'square',
-          'pointer-events': 'none',
-        }));
-        centerGroup.appendChild(svgEl('polygon', {
-          class: 'egd-ontology-browse-spine-arrow-head',
-          points: `${next.x - 90},${next.y} ${next.x - 102},${next.y - 6} ${next.x - 102},${next.y + 6}`,
-          fill: 'rgba(111, 90, 154, 0.62)',
-          'pointer-events': 'none',
-        }));
-      });
-      steps.forEach((step, index) => {
-        centerGroup.appendChild(svgEl('rect', {
-          class: 'egd-ontology-browse-spine-card',
-          x: step.x - 96,
-          y: step.y - 34,
-          width: 192,
-          height: 68,
-          rx: 12,
-          fill: 'rgba(255, 255, 255, 0.94)',
-          stroke: step.color,
-          'stroke-width': '2',
-          'stroke-opacity': '0.46',
-          'pointer-events': 'none',
-        }));
-        centerGroup.appendChild(svgEl('circle', {
-          cx: step.x - 72,
-          cy: step.y,
-          r: 12,
-          fill: step.color,
-          opacity: '0.86',
-          'pointer-events': 'none',
-        }));
-        centerGroup.appendChild(svgEl('text', {
-          x: step.x - 72,
-          y: step.y + 4,
-          fill: '#FFFFFF',
-          'font-family': 'Inter, -apple-system, Segoe UI, system-ui, sans-serif',
-          'font-size': '10',
-          'font-weight': '900',
-          'text-anchor': 'middle',
-          'pointer-events': 'none',
-        }, String(index + 1)));
-        centerGroup.appendChild(svgEl('text', {
-          x: step.x - 50,
-          y: step.y - 6,
-          fill: '#1A1A1A',
-          'font-family': 'Inter, -apple-system, Segoe UI, system-ui, sans-serif',
-          'font-size': '13.4',
-          'font-weight': '900',
-          'pointer-events': 'none',
-        }, step.label));
-        centerGroup.appendChild(svgEl('text', {
-          x: step.x - 50,
-          y: step.y + 14,
-          fill: 'rgba(90, 90, 90, 0.82)',
-          'font-family': 'Inter, -apple-system, Segoe UI, system-ui, sans-serif',
-          'font-size': '10.6',
-          'font-weight': '750',
-          'pointer-events': 'none',
-        }, step.meta));
-      });
-    };
-    if (!usePaneMap) drawBrowseSpine();
-
-    const drawNoviceGuideBoard = () => {
-      if (!usePaneMap) return;
-      const selectedGoal = selected?.id === 'goal';
-      const relationFocus = selectedGoal ? 'future' : activePane;
-      const isPastRelationFocus = relationFocus === 'past';
-      const isCurrentRelationFocus = relationFocus === 'present';
-      const isFutureRelationFocus = relationFocus === 'future';
-      const board = svgEl('g', { class: 'egd-ontology-novice-guide' });
-      board.appendChild(svgEl('rect', {
-        x: 32,
-        y: 96,
-        width: 1312,
-        height: 814,
-        rx: 26,
-        fill: 'rgba(250, 249, 246, 0.995)',
-        stroke: 'rgba(92, 97, 105, 0.20)',
-        'stroke-width': '1.4',
-        'pointer-events': 'none',
-      }));
-      const drawSimpleLabel = (x, y, text, color, size = 16, anchor = 'start', opacity = '1') => {
-        board.appendChild(svgEl('text', {
-          x,
-          y,
-          fill: color,
-          'font-family': 'Inter, -apple-system, Segoe UI, system-ui, sans-serif',
-          'font-size': String(size),
-          'font-weight': '950',
-          'text-anchor': anchor,
-          opacity,
-          'pointer-events': 'none',
-        }, text));
-      };
-      const drawShelf = (x, y, w, h, label, color, options = {}) => {
-        const opacity = options.opacity ?? '1';
-        const variant = options.variant || 'pane';
-        if (variant === 'physical') {
-          board.appendChild(svgEl('rect', {
-            x: x + 4,
-            y: y + h - 12,
-            width: w - 8,
-            height: 14,
-            rx: 5,
-            fill: 'rgba(45, 90, 123, 0.16)',
-            opacity,
-            'pointer-events': 'none',
-          }));
-        }
-        board.appendChild(svgEl('rect', {
-          x,
-          y,
-          width: w,
-          height: h,
-          rx: options.rx || (variant === 'physical' ? 8 : variant === 'binding' ? 18 : 16),
-          fill: options.fill,
-          stroke: color,
-          'stroke-width': variant === 'physical' ? (options.strong ? '3.8' : '2.6') : variant === 'binding' ? (options.strong ? '3' : '2.2') : (options.strong ? '3.2' : '2'),
-          'stroke-opacity': variant === 'physical' ? (options.strong ? '0.86' : '0.50') : variant === 'binding' ? (options.strong ? '0.66' : '0.34') : (options.strong ? '0.78' : '0.38'),
-          opacity,
-          'pointer-events': 'none',
-        }));
-        if (variant === 'binding') {
-          board.appendChild(svgEl('line', {
-            x1: x + 20,
-            y1: y + h / 2,
-            x2: x + w - 20,
-            y2: y + h / 2,
-            stroke: color,
-            'stroke-width': options.strong ? '7.2' : '4.8',
-            'stroke-linecap': 'round',
-            opacity: String(Math.min(Number(opacity) || 1, options.strong ? 0.82 : 0.34)),
-            'pointer-events': 'none',
-          }));
-        }
-        board.appendChild(svgEl('circle', {
-          cx: x + 24,
-          cy: y + 25,
-          r: variant === 'physical' ? (options.strong ? 10 : 7) : options.strong ? 12 : 8,
-          fill: color,
-          opacity: variant === 'binding' ? (options.strong ? '0.74' : '0.46') : options.strong ? '0.90' : '0.58',
-          'pointer-events': 'none',
-        }));
-        drawSimpleLabel(x + 46, y + 31, label, color, options.titleSize || 15);
-        if (options.role) {
-          board.appendChild(svgEl('text', {
-            x: x + 46,
-            y: y + 50,
-            fill: color,
-            opacity: '0.68',
-            'font-family': 'Inter, -apple-system, Segoe UI, system-ui, sans-serif',
-            'font-size': options.roleSize || '10.8',
-            'font-weight': '850',
-            'pointer-events': 'none',
-          }, options.role));
-        }
-      };
-      const drawSimpleNode = (x, y, w, h, label, color, options = {}) => {
-        const opacity = options.opacity ?? '1';
-        board.appendChild(svgEl('rect', {
-          x,
-          y,
-          width: w,
-          height: h,
-          rx: options.kind === 'physical' ? 5 : options.kind === 'connector' ? 16 : 10,
-          fill: options.fill || 'rgba(255, 255, 255, 0.96)',
-          stroke: color,
-          'stroke-width': options.strong ? '3.4' : '2.2',
-          'stroke-opacity': options.strong ? '0.88' : '0.62',
-          opacity,
-          'pointer-events': 'none',
-        }));
-        if (options.badge) {
-          const badgeLabel = options.namespaceLabel || 'egdesk';
-          board.appendChild(svgEl('rect', {
-            x: x + 1,
-            y: y + 1,
-            width: w - 2,
-            height: 28,
-            rx: options.kind === 'connector' ? 15 : 9,
-            fill: 'rgba(45, 90, 123, 0.18)',
-            stroke: 'rgba(45, 90, 123, 0.34)',
-            'stroke-width': '1',
-            opacity,
-            'pointer-events': 'none',
-          }));
-          board.appendChild(svgEl('text', {
-            x: x + 14,
-            y: y + 19,
-            fill: 'rgba(24, 60, 86, 0.76)',
-            'font-family': 'Inter, -apple-system, Segoe UI, system-ui, sans-serif',
-            'font-size': '11',
-            'font-weight': '900',
-            opacity,
-            'pointer-events': 'none',
-          }, options.badgeLabel || '개념'));
-          board.appendChild(svgEl('text', {
-            x: x + w - 18,
-            y: y + 19,
-            fill: 'rgba(24, 60, 86, 0.94)',
-            'font-family': 'Inter, -apple-system, Segoe UI, system-ui, sans-serif',
-            'font-size': '12.8',
-            'font-weight': '950',
-            'text-anchor': 'end',
-            opacity,
-            'pointer-events': 'none',
-          }, badgeLabel));
-        }
-        board.appendChild(svgEl('text', {
-          x: x + 16,
-          y: y + (options.badge ? 47 : 29),
-          fill: '#1A1A1A',
-          'font-family': 'Inter, -apple-system, Segoe UI, system-ui, sans-serif',
-          'font-size': options.large ? '16.5' : '14.8',
-          'font-weight': '950',
-          opacity,
-          'pointer-events': 'none',
-        }, label));
-      };
-      const drawRelationHub = (x, y, w, h, label, options = {}) => {
-        const opacity = options.opacity ?? '1';
-        const strong = Boolean(options.strong);
-        const color = options.color || '#3F7B61';
-        board.appendChild(svgEl('rect', {
-          x,
-          y,
-          width: w,
-          height: h,
-          rx: h / 2,
-          fill: strong ? 'rgba(240, 250, 245, 0.98)' : 'rgba(250, 253, 251, 0.96)',
-          stroke: color,
-          'stroke-width': strong ? '5.2' : '3.2',
-          'stroke-opacity': strong ? '0.86' : '0.66',
-          opacity,
-          'pointer-events': 'none',
-        }));
-        board.appendChild(svgEl('line', {
-          x1: x + 22,
-          y1: y + h / 2,
-          x2: x + w - 22,
-          y2: y + h / 2,
-          stroke: color,
-          'stroke-width': strong ? '6.2' : '4.4',
-          'stroke-linecap': 'square',
-          opacity: String(Math.min(Number(opacity) || 1, strong ? 0.72 : 0.42)),
-          'pointer-events': 'none',
-        }));
-        [x + 22, x + w - 22].forEach((cx) => {
-          board.appendChild(svgEl('circle', {
-            cx,
-            cy: y + h / 2,
-            r: strong ? 9 : 7,
-            fill: '#FFFFFF',
-            stroke: color,
-            'stroke-width': strong ? '3.2' : '2.4',
-            opacity,
-            'pointer-events': 'none',
-          }));
-        });
-        board.appendChild(svgEl('text', {
-          x: x + w / 2,
-          y: y + h / 2 + 5,
-          fill: color,
-          'font-family': 'Inter, -apple-system, Segoe UI, system-ui, sans-serif',
-          'font-size': '14',
-          'font-weight': '950',
-          'text-anchor': 'middle',
-          opacity,
-          'pointer-events': 'none',
-        }, `관계: ${label}`));
-      };
-      const drawGlyphKey = (activeKind = 'same') => {
-        const x = 858;
-        const y = 214;
-        board.appendChild(svgEl('rect', {
-          x,
-          y,
-          width: 382,
-          height: 62,
-          rx: 13,
-          fill: 'rgba(255, 255, 255, 0.94)',
-          stroke: 'rgba(92, 97, 105, 0.20)',
-          'stroke-width': '1.2',
-          'pointer-events': 'none',
-        }));
-        board.appendChild(svgEl('text', {
-          x: x + 16,
-          y: y + 18,
-          fill: 'rgba(26,26,26,0.70)',
-          'font-family': 'Inter, -apple-system, Segoe UI, system-ui, sans-serif',
-          'font-size': '10.2',
-          'font-weight': '950',
-          'pointer-events': 'none',
-        }, '지금 보는 관계'));
-        const items = [
-          { x: x + 58, y: y + 38, label: '현재 안', color: '#3F7B61', kind: 'socket', family: 'same', w: 108 },
-          { x: x + 210, y: y + 38, label: '현재 → 미래', color: '#5B4388', kind: 'portal', family: 'time', w: 132 },
-          { x: x + 58, y: y + 58, label: '부품 묶음', color: '#2D5A7B', kind: 'tree', family: 'part', w: 108 },
-          { x: x + 210, y: y + 58, label: '소속 배지', color: '#2D5A7B', kind: 'badge', family: 'badge', w: 108 },
-        ];
-        items.filter((item) => item.family === activeKind || item.family === 'part' || item.family === 'badge').forEach((item) => {
-          const gx = item.x;
-          const gy = item.y;
-          const active = true;
-          board.appendChild(svgEl('rect', {
-            x: gx - 46,
-            y: gy - 13,
-            width: item.w,
-            height: 20,
-            rx: 9,
-            fill: active ? `${item.color}22` : 'rgba(255,255,255,0.58)',
-            stroke: item.color,
-            'stroke-width': active ? '1.8' : '0.9',
-            'stroke-opacity': active ? '0.54' : '0.18',
-            opacity: active ? '1' : '0.42',
-            'pointer-events': 'none',
-          }));
-          if (item.kind === 'portal') {
-            board.appendChild(svgEl('rect', { x: gx - 25, y: gy - 12, width: 11, height: 24, rx: 4, fill: 'rgba(91,67,136,0.14)', stroke: item.color, 'stroke-width': '1.5', opacity: active ? '1' : '0.42', 'pointer-events': 'none' }));
-            board.appendChild(svgEl('path', { d: `M ${gx - 38} ${gy} L ${gx - 26} ${gy} M ${gx - 13} ${gy} L ${gx + 2} ${gy}`, fill: 'none', stroke: item.color, 'stroke-width': '3.2', 'stroke-dasharray': '6 4', 'stroke-linecap': 'square', opacity: active ? '1' : '0.42', 'pointer-events': 'none' }));
-          } else if (item.kind === 'socket') {
-            board.appendChild(svgEl('line', { x1: gx - 36, y1: gy, x2: gx + 3, y2: gy, stroke: item.color, 'stroke-width': '4.2', 'stroke-linecap': 'square', opacity: active ? '1' : '0.42', 'pointer-events': 'none' }));
-            [gx - 35, gx + 2].forEach((cx) => board.appendChild(svgEl('circle', { cx, cy: gy, r: 4.2, fill: '#FFFFFF', stroke: item.color, 'stroke-width': '1.9', opacity: active ? '1' : '0.42', 'pointer-events': 'none' })));
-          } else if (item.kind === 'tree') {
-            board.appendChild(svgEl('path', { d: `M ${gx - 15} ${gy - 11} L ${gx - 15} ${gy + 9} M ${gx - 33} ${gy} L ${gx + 2} ${gy} M ${gx - 33} ${gy} L ${gx - 33} ${gy + 8} M ${gx + 2} ${gy} L ${gx + 2} ${gy + 8}`, fill: 'none', stroke: item.color, 'stroke-width': '3', 'stroke-linecap': 'square', opacity: active ? '1' : '0.42', 'pointer-events': 'none' }));
-          } else {
-            board.appendChild(svgEl('rect', { x: gx - 42, y: gy - 9, width: 51, height: 18, rx: 5, fill: 'rgba(45,90,123,0.24)', stroke: 'rgba(45,90,123,0.58)', 'stroke-width': '1', opacity: active ? '1' : '0.42', 'pointer-events': 'none' }));
-            board.appendChild(svgEl('text', { x: gx - 16, y: gy + 3, fill: 'rgba(24,60,86,0.98)', 'font-family': 'Inter, -apple-system, Segoe UI, system-ui, sans-serif', 'font-size': '8.2', 'font-weight': '950', 'text-anchor': 'middle', opacity: active ? '1' : '0.42', 'pointer-events': 'none' }, 'egdesk'));
-          }
-          board.appendChild(svgEl('text', {
-            x: gx + 8,
-            y: gy + 4,
-            fill: item.color,
-            'font-family': 'Inter, -apple-system, Segoe UI, system-ui, sans-serif',
-            'font-size': '10.2',
-            'font-weight': '900',
-            opacity: active ? '1' : '0.42',
-            'pointer-events': 'none',
-          }, item.label));
-        });
-      };
-      const drawMiniPane = (x, title, color, side) => {
-        const paneOpacity = side === activePane ? '0.72' : '0.34';
-        board.appendChild(svgEl('rect', {
-          x,
-          y: 330,
-          width: 210,
-          height: 328,
-          rx: 20,
-          fill: 'rgba(255,255,255,0.90)',
-          stroke: color,
-          'stroke-width': side === activePane ? '2.6' : '1.6',
-          'stroke-opacity': side === activePane ? '0.58' : '0.24',
-          opacity: selectedGoal ? (side === 'future' ? '0.72' : '0.22') : paneOpacity,
-          'pointer-events': 'none',
-        }));
-        drawSimpleLabel(x + 22, 363, title, color, 19);
-        drawShelf(x + 22, 390, 166, 72, '가상', '#8A6B2E', { fill: 'rgba(255,249,237,0.78)', opacity: selectedGoal && side !== 'future' ? '0.18' : '0.78' });
-        drawShelf(x + 22, 482, 166, 56, '연결', '#3F7B61', { fill: 'rgba(236,249,242,0.78)', opacity: selectedGoal && side !== 'future' ? '0.18' : '0.64' });
-        drawShelf(x + 22, 558, 166, 78, '물리', '#2D5A7B', { fill: 'rgba(226,239,246,0.78)', opacity: selectedGoal && side !== 'future' ? '0.14' : '0.64' });
-        if (side === 'past') {
-          drawSimpleNode(x + 48, 410, 118, 42, '채팅 기억', '#6F5A9A', { opacity: selectedGoal ? '0.16' : '0.70' });
-          drawSimpleNode(x + 48, 580, 118, 38, '흔적 파일', '#596875', { opacity: selectedGoal ? '0.12' : '0.54' });
-        } else {
-          drawSimpleNode(x + 48, 410, 118, 42, '목표', '#8A6B2E', { badge: 'egdesk', opacity: selectedGoal ? '1' : '0.62', strong: selectedGoal });
-          drawSimpleNode(x + 58, 582, 106, 38, '산출', '#2D5A7B', { opacity: selectedGoal ? '0.42' : '0.40' });
-        }
-      };
-      const drawSimplePortal = (path, color, options = {}) => {
-        const opacity = options.opacity || '1';
-        board.appendChild(svgEl('path', {
-          d: path,
-          fill: 'none',
-          stroke: 'rgba(255,255,255,0.94)',
-          'stroke-width': options.underlay || '11',
-          'stroke-linecap': 'round',
-          'stroke-linejoin': 'miter',
-          opacity,
-          'pointer-events': 'none',
-        }));
-        board.appendChild(svgEl('path', {
-          class: options.className || 'egd-ontology-guide-temporal-corridor',
-          d: path,
-          fill: 'none',
-          stroke: color,
-          'stroke-width': options.railWidth || '4.2',
-          'stroke-linecap': 'round',
-          'stroke-linejoin': 'miter',
-          'stroke-dasharray': options.solid ? '' : (options.dash || '13 8'),
-          opacity: options.railOpacity || opacity,
-          'pointer-events': 'none',
-        }));
-      };
-      const columns = {
-        past: { x: 122, w: 226, title: '과거', color: '#6F5A9A' },
-        present: { x: 398, w: 570, title: '현재', color: '#2D5A7B' },
-        future: { x: 1014, w: 226, title: '미래', color: '#8A6B2E' },
-      };
-      const rows = {
-        virtual: { y: 306, h: 112, label: '가상', color: '#8A6B2E', fill: 'rgba(255,249,237,0.98)' },
-        binding: { y: 446, h: 82, label: '연결', color: '#3F7B61', fill: 'rgba(236,249,242,0.98)' },
-        physical: { y: 556, h: 162, label: '물리', color: '#2D5A7B', fill: 'rgba(226,239,246,0.98)' },
-      };
-      const paneOpacity = (key) => {
-        if (!selectedGoal) return key === activePane ? '1' : '0.44';
-        if (key === 'future') return '0.46';
-        if (key === 'present') return '0.30';
-        return '0.10';
-      };
-      const drawRelationLabel = (x, y, text, color, width, options = {}) => {
-        const opacity = options.opacity ?? '1';
-        const glyph = options.kind || '';
-        const glyphSpace = glyph ? 42 : 0;
-        board.appendChild(svgEl('rect', {
-          x,
-          y: y - 17,
-          width,
-          height: glyph ? 28 : 24,
-          rx: glyph ? 11 : 8,
-          fill: 'rgba(255,255,255,0.94)',
-          stroke: color,
-          'stroke-width': glyph ? '2' : '1.5',
-          'stroke-opacity': glyph ? '0.62' : '0.46',
-          opacity,
-          'pointer-events': 'none',
-        }));
-        if (glyph === 'socket') {
-          const gx = x + 24;
-          board.appendChild(svgEl('line', { x1: gx - 13, y1: y - 3, x2: gx + 13, y2: y - 3, stroke: color, 'stroke-width': '4.2', 'stroke-linecap': 'square', opacity, 'pointer-events': 'none' }));
-          [gx - 13, gx + 13].forEach((cx) => board.appendChild(svgEl('circle', { cx, cy: y - 3, r: 4.8, fill: '#FFFFFF', stroke: color, 'stroke-width': '2', opacity, 'pointer-events': 'none' })));
-        } else if (glyph === 'portal') {
-          const gx = x + 24;
-          board.appendChild(svgEl('rect', { x: gx - 5, y: y - 16, width: 10, height: 26, rx: 4, fill: 'rgba(91,67,136,0.14)', stroke: color, 'stroke-width': '1.8', opacity, 'pointer-events': 'none' }));
-          board.appendChild(svgEl('path', { d: `M ${gx - 22} ${y - 3} L ${gx - 7} ${y - 3} M ${gx + 7} ${y - 3} L ${gx + 22} ${y - 3}`, fill: 'none', stroke: color, 'stroke-width': '4', 'stroke-dasharray': '6 4', 'stroke-linecap': 'square', opacity, 'pointer-events': 'none' }));
-        }
-        board.appendChild(svgEl('text', {
-          x: x + glyphSpace + (width - glyphSpace) / 2,
-          y: glyph ? y + 1 : y,
-          fill: color,
-          'font-family': 'Inter, -apple-system, Segoe UI, system-ui, sans-serif',
-          'font-size': glyph ? '12.4' : '10.8',
-          'font-weight': '950',
-          'text-anchor': 'middle',
-          opacity,
-          'pointer-events': 'none',
-        }, text));
-      };
-      const drawLayerGrammarBoardV2 = () => {
-        const focusFuture = isFutureRelationFocus;
-        const focusPast = isPastRelationFocus;
-        const selectedGoal = selected?.id === 'goal';
-        const timeLens = selectedGoal || focusFuture || focusPast;
-        const colors = {
-          past: '#6F5A9A',
-          present: '#2D5A7B',
-          future: '#8A6B2E',
-          virtual: '#8A6B2E',
-          physical: '#244E6C',
-          same: '#238A66',
-          axis: '#7A8086',
-          time: '#6D3FA3',
-        };
-
-        const drawTimeRail = () => {
-          const x1 = 172;
-          const x2 = 1218;
-          const y = 184;
-          board.appendChild(svgEl('line', { x1, y1: y, x2, y2: y, stroke: colors.axis, 'stroke-width': '6.2', 'stroke-linecap': 'square', opacity: '0.76', 'pointer-events': 'none' }));
-          board.appendChild(svgEl('polygon', { points: `${x2},${y} ${x2 - 22},${y - 10} ${x2 - 22},${y + 10}`, fill: colors.axis, opacity: '0.78', 'pointer-events': 'none' }));
-          drawSimpleLabel(x2 - 6, y - 18, '시간', colors.axis, 13, 'end', '0.74');
-          const boundaryColor = selectedGoal || focusFuture
-            ? colors.time
-            : focusPast
-              ? colors.past
-              : colors.present;
-          const boundaryXs = selectedGoal || focusFuture
-            ? [690]
-            : focusPast
-              ? [360, 690]
-              : [260, 806];
-          boundaryXs.forEach((x) => {
-            board.appendChild(svgEl('line', {
-              x1: x,
-              y1: y - 14,
-              x2: x,
-              y2: y + 28,
-              stroke: boundaryColor,
-              'stroke-width': '3',
-              'stroke-opacity': selectedGoal || focusFuture ? '0.42' : '0.48',
-              'stroke-linecap': 'square',
-              'pointer-events': 'none',
-            }));
-            board.appendChild(svgEl('line', {
-              class: 'egd-ontology-time-slice-boundary',
-              x1: x,
-              y1: y + 20,
-              x2: x,
-              y2: 806,
-              stroke: boundaryColor,
-              'stroke-width': '2.4',
-              'stroke-opacity': selectedGoal || focusFuture ? '0.34' : '0.40',
-              'stroke-dasharray': '16 12',
-              'pointer-events': 'none',
-            }));
-            board.appendChild(svgEl('line', {
-              class: 'egd-ontology-time-slice-boundary-halo',
-              x1: x + 5,
-              y1: y + 20,
-              x2: x + 5,
-              y2: 806,
-              stroke: boundaryColor,
-              'stroke-width': '0.9',
-              'stroke-opacity': '0.10',
-              'stroke-dasharray': '16 12',
-              'pointer-events': 'none',
-            }));
-          });
-          const ticks = selectedGoal
-            ? [[525, colors.present, 'present'], [1015, colors.future, 'future']]
-            : [[226, colors.past, 'past'], [525, colors.present, 'present'], [1015, colors.future, 'future']];
-          const tickLabels = { past: '과거', present: '현재', future: '미래' };
-          ticks.forEach(([x, color, key]) => {
-            const active = key === activePane || (selectedGoal && key === 'future');
-            board.appendChild(svgEl('circle', { cx: x, cy: y, r: active ? 9 : 6.5, fill: color, stroke: '#FFFFFF', 'stroke-width': active ? '3' : '2', opacity: selectedGoal ? '0.48' : '1', 'pointer-events': 'none' }));
-            drawSimpleLabel(x, y + 30, tickLabels[key] || key, color, active ? 15 : 12, 'middle', active ? '0.84' : '0.42');
-          });
-        };
-
-        const drawLayerStage = (x, y, w, h, title, color, options = {}) => {
-          const opacity = options.opacity ?? '1';
-          drawSimpleLabel(x + 34, y + 48, title, color, options.active ? 26 : 22, 'start', opacity);
-          const vx = x + 54;
-          const vy = y + 78;
-          const vw = w - 108;
-          const vh = 142;
-          board.appendChild(svgEl('rect', { x: vx, y: vy + 20, width: vw, height: vh - 24, rx: 8, fill: 'rgba(255,249,237,0.36)', stroke: colors.virtual, 'stroke-width': options.active ? '2.0' : '1.4', 'stroke-opacity': options.active ? '0.46' : '0.22', 'stroke-dasharray': options.active ? 'none' : '12 10', opacity, 'pointer-events': 'none' }));
-          board.appendChild(svgEl('line', { x1: vx + 26, y1: vy + 36, x2: vx + vw - 26, y2: vy + 36, stroke: '#FFFFFF', 'stroke-width': '2', 'stroke-opacity': '0.64', opacity, 'pointer-events': 'none' }));
-          const fy = y + h - 162;
-          const floorOpacity = options.floorOpacity ?? opacity;
-          board.appendChild(svgEl('rect', { x: x + 30, y: fy, width: w - 60, height: 156, rx: 8, fill: 'rgba(198,225,240,0.92)', stroke: colors.physical, 'stroke-width': '2.6', 'stroke-opacity': '0.74', opacity: floorOpacity, 'pointer-events': 'none' }));
-          board.appendChild(svgEl('line', { x1: x + 78, y1: fy + 18, x2: x + w - 78, y2: fy + 18, stroke: '#FFFFFF', 'stroke-width': '2.2', 'stroke-opacity': '0.68', opacity: floorOpacity, 'pointer-events': 'none' }));
-          const ry = y + 252;
-          return {
-            virtual: { x: vx, y: vy, w: vw, h: vh },
-            relation: { x: x + 64, y: ry, w: w - 128, h: 56 },
-            floor: { x: x + 46, y: fy, w: w - 92, h: 140 },
-          };
-        };
-
-        const drawSameRelationLine = (x1, y1, x2, y2, opacity = '1') => {
-          const midY = y1 + (y2 - y1) * 0.56;
-          const path = `M ${x1} ${y1} L ${x1} ${midY} L ${x2} ${midY} L ${x2} ${y2}`;
-          board.appendChild(svgEl('path', { d: path, fill: 'none', stroke: colors.same, 'stroke-width': '2.4', 'stroke-opacity': '0.68', 'stroke-linecap': 'square', 'stroke-linejoin': 'miter', opacity, 'pointer-events': 'none' }));
-          [[x1, y1], [x2, y2]].forEach(([cx, cy]) => board.appendChild(svgEl('circle', { cx, cy, r: 4.5, fill: '#FFFFFF', stroke: colors.same, 'stroke-width': '1.9', opacity, 'pointer-events': 'none' })));
-        };
-
-        const drawTemporalSocket = (cx, cy, options = {}) => {
-          board.appendChild(svgEl('rect', { x: cx - 10, y: cy - 28, width: 20, height: 56, rx: 6, fill: 'rgba(107,73,160,0.10)', stroke: colors.time, 'stroke-width': options.strong ? '2.1' : '1.7', 'stroke-opacity': '0.72', 'pointer-events': 'none' }));
-          board.appendChild(svgEl('rect', { x: cx - 3, y: cy - 16, width: 6, height: 32, rx: 2, fill: '#FFFFFF', stroke: colors.time, 'stroke-width': '1.4', 'pointer-events': 'none' }));
-        };
-
-        const drawTimeBridge = (x1, y1, x2, y2, options = {}) => {
-          const midA = x1 + (x2 - x1) * 0.38;
-          const midB = x1 + (x2 - x1) * 0.62;
-          const straight = Math.abs(y2 - y1) < 16;
-          const path = straight
-            ? `M ${x1} ${y1} L ${x2} ${y2}`
-            : `M ${x1} ${y1} L ${midA} ${y1} L ${midA} ${y2} L ${midB} ${y2} L ${x2} ${y2}`;
-          board.appendChild(svgEl('path', { d: path, fill: 'none', stroke: 'rgba(109,63,163,0.10)', 'stroke-width': options.goal ? '8' : '7', 'stroke-linecap': 'square', 'stroke-linejoin': 'miter', 'pointer-events': 'none' }));
-          board.appendChild(svgEl('path', { class: options.goal ? 'egd-ontology-guide-goal-bridge' : 'egd-ontology-guide-temporal-corridor', d: path, fill: 'none', stroke: colors.time, 'stroke-width': options.goal ? '3.2' : '2.8', 'stroke-opacity': '0.76', 'stroke-linecap': 'square', 'stroke-linejoin': 'miter', 'pointer-events': 'none' }));
-          board.appendChild(svgEl('polygon', { points: `${x2},${y2} ${x2 - 12},${y2 - 6} ${x2 - 12},${y2 + 6}`, fill: colors.time, opacity: '0.88', 'pointer-events': 'none' }));
-          const gateXs = options.gateXs || [midA, midB];
-          gateXs.forEach((gx, index) => {
-            const sideColor = options.gateSideColors?.[index];
-            if (sideColor) {
-              const sideX = index === 0 ? gx - 12 : gx + 12;
-              board.appendChild(svgEl('line', { x1: sideX, y1: y2 - 28, x2: sideX, y2: y2 + 28, stroke: sideColor, 'stroke-width': '2.4', 'stroke-linecap': 'square', opacity: '0.48', 'pointer-events': 'none' }));
-            }
-            board.appendChild(svgEl('rect', { class: options.goal ? 'egd-ontology-guide-goal-gate' : 'egd-ontology-guide-boundary-gate', x: gx - 8, y: y2 - 28, width: 16, height: 56, rx: 5, fill: 'rgba(109,63,163,0.08)', stroke: colors.time, 'stroke-width': '1.7', 'stroke-opacity': '0.68', 'pointer-events': 'none' }));
-          });
-          [[x1, y1], [x2, y2]].forEach(([cx, cy]) => board.appendChild(svgEl('circle', { class: options.goal ? 'egd-ontology-guide-goal-endpoint' : '', cx, cy, r: 4.8, fill: '#FFFFFF', stroke: colors.time, 'stroke-width': '1.8', opacity: '0.88', 'pointer-events': 'none' })));
-          gateXs.forEach((cx) => board.appendChild(svgEl('rect', { class: options.goal ? 'egd-ontology-guide-goal-gate-port' : '', x: cx - 2.2, y: y2 - 10, width: 4.4, height: 20, rx: 2, fill: '#FFFFFF', stroke: colors.time, 'stroke-width': '1.4', 'pointer-events': 'none' })));
-        };
-
-        const drawTemporalBridgeTag = (cx, cy, opacity = '1') => {
-          board.appendChild(svgEl('rect', { x: cx - 52, y: cy - 18, width: 104, height: 28, rx: 11, fill: 'rgba(255,255,255,0.96)', stroke: colors.time, 'stroke-width': '1.9', 'stroke-opacity': '0.46', opacity, 'pointer-events': 'none' }));
-          [-4, 4].forEach((offset) => board.appendChild(svgEl('line', { x1: cx - 38, y1: cy + offset - 4, x2: cx - 18, y2: cy + offset - 4, stroke: colors.time, 'stroke-width': '2.4', 'stroke-linecap': 'square', opacity, 'pointer-events': 'none' })));
-          drawSimpleLabel(cx + 14, cy + 1, '시간 간', colors.time, 11.4, 'middle', opacity);
-        };
-
-        const drawSelectedContextFrame = () => {
-          const railY = 326;
-          board.appendChild(svgEl('line', { x1: 402, y1: railY, x2: 1116, y2: railY, stroke: colors.axis, 'stroke-width': '5.2', 'stroke-linecap': 'square', opacity: '0.34', 'pointer-events': 'none' }));
-          board.appendChild(svgEl('polygon', { points: `1116,${railY} 1099,${railY - 8} 1099,${railY + 8}`, fill: colors.axis, opacity: '0.34', 'pointer-events': 'none' }));
-          [[526, colors.present, '현재'], [1016, colors.future, '미래']].forEach(([x, color, label]) => {
-            board.appendChild(svgEl('circle', { cx: x, cy: railY, r: 7, fill: color, stroke: '#FFFFFF', 'stroke-width': '2.3', opacity: '0.44', 'pointer-events': 'none' }));
-            board.appendChild(svgEl('path', { d: `M ${x} ${railY + 13} L ${x} 382`, fill: 'none', stroke: color, 'stroke-width': '3.4', 'stroke-dasharray': '10 8', opacity: '0.30', 'pointer-events': 'none' }));
-            drawSimpleLabel(x - 24, 374, label, color, 17, 'middle', '0.42');
-          });
-          board.appendChild(svgEl('rect', { x: 334, y: 360, width: 332, height: 204, rx: 26, fill: 'rgba(255,255,255,0.20)', stroke: colors.present, 'stroke-width': '2.2', 'stroke-opacity': '0.30', 'pointer-events': 'none' }));
-          board.appendChild(svgEl('rect', { x: 834, y: 356, width: 358, height: 210, rx: 26, fill: 'rgba(255,255,255,0.20)', stroke: colors.future, 'stroke-width': '2.2', 'stroke-opacity': '0.32', 'pointer-events': 'none' }));
-          board.appendChild(svgEl('rect', { x: 374, y: 384, width: 248, height: 66, rx: 18, fill: 'rgba(255,249,237,0.28)', stroke: colors.virtual, 'stroke-width': '1.8', 'stroke-opacity': '0.24', 'pointer-events': 'none' }));
-          board.appendChild(svgEl('rect', { x: 368, y: 452, width: 270, height: 58, rx: 16, fill: 'rgba(236,249,242,0.34)', stroke: colors.same, 'stroke-width': '1.7', 'stroke-opacity': '0.24', 'pointer-events': 'none' }));
-          board.appendChild(svgEl('polygon', { points: '372,514 636,514 652,552 356,552', fill: 'rgba(198,225,240,0.28)', stroke: colors.physical, 'stroke-width': '1.9', 'stroke-opacity': '0.26', 'pointer-events': 'none' }));
-          board.appendChild(svgEl('rect', { x: 870, y: 392, width: 278, height: 78, rx: 18, fill: 'rgba(255,249,237,0.34)', stroke: colors.virtual, 'stroke-width': '1.8', 'stroke-opacity': '0.28', 'pointer-events': 'none' }));
-          board.appendChild(svgEl('polygon', { points: '878,492 1142,492 1160,548 858,548', fill: 'rgba(198,225,240,0.20)', stroke: colors.physical, 'stroke-width': '1.8', 'stroke-opacity': '0.18', 'pointer-events': 'none' }));
-        };
-
-        const drawTimeDrop = (x, railY, targetY, color, opacity = '1') => {
-          board.appendChild(svgEl('line', { x1: x, y1: railY + 12, x2: x, y2: railY + 78, stroke: color, 'stroke-width': '1.9', 'stroke-linecap': 'square', 'stroke-dasharray': '10 10', opacity: String(Number(opacity) * 0.78), 'pointer-events': 'none' }));
-          board.appendChild(svgEl('circle', { cx: x, cy: railY + 84, r: 8, fill: '#FFFFFF', stroke: color, 'stroke-width': '2.4', opacity, 'pointer-events': 'none' }));
-        };
-
-        const drawDesktopTree = (x, y, scale = 1, opacity = '1') => {
-          const sw = (v) => v * scale;
-          const node = (nx, ny, w, h, label, strong = false) => {
-            board.appendChild(svgEl('rect', { x: x + sw(nx), y: y + sw(ny), width: sw(w), height: sw(h), rx: 5, fill: '#FFFFFF', stroke: colors.physical, 'stroke-width': strong ? '2.7' : '2.1', 'stroke-opacity': '0.90', opacity, 'pointer-events': 'none' }));
-            drawSimpleLabel(x + sw(nx + w / 2), y + sw(ny + h / 2 + 5), label, '#111111', 13.8 * scale, 'middle');
-          };
-          node(82, 0, 184, 38, '데스크톱 조립체', true);
-          node(110, 58, 128, 36, '터미널', true);
-          board.appendChild(svgEl('path', { d: `M ${x + sw(174)} ${y + sw(38)} L ${x + sw(174)} ${y + sw(58)} M ${x + sw(174)} ${y + sw(94)} L ${x + sw(174)} ${y + sw(122)} L ${x + sw(56)} ${y + sw(122)} L ${x + sw(56)} ${y + sw(140)} M ${x + sw(174)} ${y + sw(122)} L ${x + sw(174)} ${y + sw(140)} M ${x + sw(174)} ${y + sw(122)} L ${x + sw(292)} ${y + sw(122)} L ${x + sw(292)} ${y + sw(140)}`, fill: 'none', stroke: '#FFFFFF', 'stroke-width': sw(5.2), 'stroke-linecap': 'square', 'stroke-linejoin': 'miter', opacity, 'pointer-events': 'none' }));
-          board.appendChild(svgEl('path', { d: `M ${x + sw(174)} ${y + sw(38)} L ${x + sw(174)} ${y + sw(58)} M ${x + sw(174)} ${y + sw(94)} L ${x + sw(174)} ${y + sw(122)} L ${x + sw(56)} ${y + sw(122)} L ${x + sw(56)} ${y + sw(140)} M ${x + sw(174)} ${y + sw(122)} L ${x + sw(174)} ${y + sw(140)} M ${x + sw(174)} ${y + sw(122)} L ${x + sw(292)} ${y + sw(122)} L ${x + sw(292)} ${y + sw(140)}`, fill: 'none', stroke: colors.physical, 'stroke-width': sw(2.8), 'stroke-linecap': 'square', 'stroke-linejoin': 'miter', opacity, 'pointer-events': 'none' }));
-          node(10, 140, 92, 36, 'CPU');
-          node(128, 140, 92, 36, 'RAM');
-          node(246, 140, 92, 36, '디스크');
-        };
-
-        const drawSameLens = () => {
-          drawTimeDrop(525, 184, 302, colors.present, '0.82');
-          const stage = drawLayerStage(278, 302, 520, 470, '현재', colors.present, { active: true });
-          drawSimpleNode(stage.virtual.x + 170, stage.virtual.y + 56, 238, 58, '채팅 세션', colors.virtual, { badge: 'egdesk', namespaceLabel: 'egdesk', strong: true, fill: 'rgba(255,255,255,0.98)' });
-          drawSameRelationLine(stage.virtual.x + 289, stage.virtual.y + 114, stage.floor.x + stage.floor.w / 2, stage.floor.y + 24);
-          drawDesktopTree(stage.floor.x + 30, stage.floor.y + 6, 0.84);
-        };
-
-        const drawTimeLens = () => {
-          if (selectedGoal) {
-            drawTimeDrop(525, 184, 338, colors.present, '0.32');
-            drawTimeDrop(1015, 184, 292, colors.future, '0.56');
-            const source = drawLayerStage(294, 338, 360, 420, '현재', colors.present, { opacity: '0.54', floorOpacity: '0.44' });
-            const target = drawLayerStage(732, 292, 520, 492, '미래', colors.future, { active: true, opacity: '0.68', floorOpacity: '0.42' });
-            const sourceNode = { x: source.virtual.x + 84, y: target.virtual.y + 58, w: 154, h: 54 };
-            const targetNode = { x: target.virtual.x + 166, y: target.virtual.y + 58, w: 184, h: 58 };
-            drawDesktopTree(source.floor.x + 14, source.floor.y + 8, 0.62, '0.54');
-            drawSimpleNode(sourceNode.x, sourceNode.y, sourceNode.w, sourceNode.h, '채팅 세션', colors.virtual, { badge: 'egdesk', namespaceLabel: 'egdesk', opacity: '0.38', fill: 'rgba(255,255,255,0.86)' });
-            drawSimpleNode(targetNode.x, targetNode.y, targetNode.w, targetNode.h, '목표', colors.virtual, { badge: 'egdesk', namespaceLabel: 'egdesk', strong: true, fill: 'rgba(255,255,255,0.98)' });
-            drawTimeBridge(sourceNode.x + sourceNode.w + 12, sourceNode.y + sourceNode.h / 2, targetNode.x, targetNode.y + targetNode.h / 2, { goal: true, gateXs: [688, target.virtual.x + 18], gateSideColors: [colors.present, colors.future] });
-            return;
-          }
-          if (focusFuture) {
-            drawTimeDrop(525, 184, 338, colors.present, '0.38');
-            drawTimeDrop(1015, 184, 292, colors.future, '0.86');
-            const source = drawLayerStage(294, 338, 360, 420, '현재', colors.present, { opacity: '0.74', floorOpacity: '0.34' });
-            const target = drawLayerStage(732, 292, 520, 492, '미래', colors.future, { active: true, floorOpacity: '0.38' });
-            const sourceNode = { x: source.virtual.x + 84, y: target.virtual.y + 58, w: 154, h: 54 };
-            const targetNode = { x: target.virtual.x + 166, y: target.virtual.y + 58, w: 184, h: 58 };
-            drawDesktopTree(source.floor.x + 14, source.floor.y + 8, 0.62, '0.48');
-            drawSimpleNode(sourceNode.x, sourceNode.y, sourceNode.w, sourceNode.h, '채팅 세션', colors.virtual, { badge: 'egdesk', namespaceLabel: 'egdesk', opacity: '0.44', fill: 'rgba(255,255,255,0.88)' });
-            drawSimpleNode(targetNode.x, targetNode.y, targetNode.w, targetNode.h, '목표', colors.virtual, { badge: 'egdesk', namespaceLabel: 'egdesk', strong: true, fill: 'rgba(255,255,255,0.98)' });
-            drawTimeBridge(sourceNode.x + sourceNode.w + 12, sourceNode.y + sourceNode.h / 2, targetNode.x, targetNode.y + targetNode.h / 2, { gateXs: [688, target.virtual.x + 18], gateSideColors: [colors.present, colors.future] });
-            return;
-          }
-          const left = drawLayerStage(310, 302, 430, 470, '현재', colors.present, { active: !focusPast, floorOpacity: '0.26' });
-          const right = drawLayerStage(800, 302, 430, 470, '미래', colors.future, { active: focusFuture, floorOpacity: '0.24' });
-          drawSimpleNode(left.virtual.x + 148, left.virtual.y + 56, 170, 52, '채팅 세션', colors.virtual, { badge: 'egdesk', namespaceLabel: 'egdesk', opacity: focusPast ? '0.38' : '0.16', fill: 'rgba(255,255,255,0.98)' });
-          drawSameRelationLine(left.virtual.x + 233, left.virtual.y + 108, left.floor.x + left.floor.w / 2, left.floor.y + 18, focusPast ? '0.22' : '0.56');
-          drawSimpleNode(right.virtual.x + 110, right.virtual.y + 56, 160, 54, '목표', colors.virtual, { badge: 'egdesk', namespaceLabel: 'egdesk', strong: focusFuture, opacity: focusPast ? '0.18' : '1', fill: 'rgba(255,255,255,0.98)' });
-        };
-
-        drawTimeRail();
-        if (timeLens) drawTimeLens();
-        else drawSameLens();
-        noviceOverlayGroup.appendChild(board);
-      };
-      drawLayerGrammarBoardV2();
-    };
-
-    const renderProjection = (facet, point, size = { width: 190, height: 44 }) => {
-      const projection = projectionByFacet.get(facet);
-      if (!projection) return;
-      const axis = ontologyAxisForFacet(facet);
-      renderOntologySvgNode(paneGroup, projection, point, {
-        mode: 'focus',
-        color: ontologyAxisColor(axis),
-        fill: 'rgba(255, 255, 255, 0.95)',
-        extraClass: `egd-ontology-node-projection egd-ontology-axis-projection egd-ontology-binding-${facet}`,
-        selected: projection.id === selected?.id,
-        label: ontologyProjectionLocalLabel(projection),
-        meta: '',
-        size,
-        labelMax: 24,
-        metaMax: 22,
-        onclick: (ev) => {
-          ev.stopPropagation();
-          onSelect(projection.id);
-        },
-      });
-    };
-
-    const renderPaneInventory = (phase) => {
-      const bounds = paneBounds[phase] || paneBounds.present;
-      const activeDepth = ontologyNormalizeDepth(localState.activeDepth, ontologyDefaultDepthForPane(phase, selected));
-      const phaseActive = !usePaneMap || phase === activePane;
-      const phaseOpacity = phaseActive ? 1 : 0.28;
-      const nodes = ontologyPaneInventoryNodes(graph, phase, selected);
-      const guideOrder = {
-        past: [
-          'entity.chat_memory',
-          'projection.chat_memory.storage.trace_file',
-        ],
-        present: [
-          'desktop',
-          'terminal',
-          'cpu',
-          'ram',
-          'disk',
-          'projection.llm_chat_session.storage.session_file',
-          'projection.llm_chat_session.intent.context_binding',
-          'projection.llm_chat_session.action.message_send',
-          'entity.llm_chat_session',
-        ],
-        future: [
-          'output.structured',
-          'goal',
-          'plan',
-        ],
-        multiverse: ['alternate.plan', 'candidate.future'],
-      };
-      const guideIds = guideOrder[phase] || [];
-      const supplementalNodes = focusTarget === 'pane'
-        ? []
-        : nodes.filter((node) => !guideIds.includes(node.id) && narrativeIds.has(node.id));
-      const visibleNodes = [
-        ...guideIds.map((id) => nodes.find((node) => node.id === id)).filter(Boolean),
-        ...supplementalNodes,
-      ].filter((node, index, list) => list.findIndex((candidate) => candidate.id === node.id) === index);
-      const tileWidth = phase === 'present' ? 118 : phase === 'multiverse' ? 90 : 104;
-      const tileHeight = phase === 'multiverse' ? 40 : 52;
-      const laneInsetX = phase === 'present' ? 38 : 28;
-      const clampLaneX = (x, width = tileWidth) => {
-        const min = bounds.x + laneInsetX + width / 2;
-        const max = bounds.x + bounds.w - laneInsetX - width / 2;
-        if (max < min) return bounds.x + bounds.w / 2;
-        return Math.max(min, Math.min(max, x));
-      };
-      const laneXAt = (count, index, preferredCenter, preferredGap, width = tileWidth) => {
-        const safeLeft = bounds.x + laneInsetX + width / 2;
-        const safeRight = bounds.x + bounds.w - laneInsetX - width / 2;
-        if (count <= 1 || safeRight <= safeLeft) return clampLaneX(preferredCenter, width);
-        const maxGap = Math.max(0, (safeRight - safeLeft) / (count - 1));
-        const gap = Math.min(preferredGap, maxGap);
-        const preferredStart = preferredCenter - ((count - 1) * gap) / 2;
-        const start = Math.max(safeLeft, Math.min(safeRight - (count - 1) * gap, preferredStart));
-        return start + index * gap;
-      };
-      const tallActivePane = phaseActive && bounds.h > 430;
-      const laneY = tallActivePane
-        ? {
-          virtual: bounds.y + 124,
-          information: bounds.y + 264,
-          physical: bounds.y + 422,
-        }
-        : phase === 'multiverse'
-          ? {
-            virtual: bounds.y + 42,
-            information: bounds.y + 72,
-            physical: bounds.y + 100,
-          }
-          : {
-            virtual: bounds.y + 86,
-            information: bounds.y + 190,
-            physical: bounds.y + 300,
-          };
-      const laneHeightByDepth = tallActivePane
-        ? { virtual: 126, information: 98, physical: 194 }
-        : phase === 'multiverse'
-          ? { virtual: 44, information: 32, physical: 32 }
-          : { virtual: 54, information: 54, physical: 54 };
-      const grouped = new Map(ONTOLOGY_DEPTH_ORDER.map((depth) => [depth, []]));
-      visibleNodes.forEach((node) => grouped.get(ontologyDepthForNode(node)).push(node));
-
-      if (phase === 'present') {
-        paneGroup.appendChild(svgEl('rect', {
-          class: 'egd-ontology-physical-base-plate',
-          x: bounds.x + 34,
-          y: bounds.y + 88,
-          width: bounds.w - 68,
-          height: bounds.h - 118,
-          rx: 20,
-          fill: 'rgba(45, 90, 123, 0.075)',
-          stroke: 'rgba(45, 90, 123, 0.30)',
-          'stroke-width': '1.8',
-          opacity: phaseOpacity,
-          'pointer-events': 'none',
-        }));
-      }
-
-      ONTOLOGY_DEPTH_ORDER.forEach((depth) => {
-        const laneHeight = laneHeightByDepth[depth] || 70;
-        const y = laneY[depth] - laneHeight / 2;
-        const highlighted = activeDepth === depth;
-        const insetX = phase === 'present' ? 38 : 28;
-        if (phase === 'present' && focusTarget !== 'pane') {
-          paneGroup.appendChild(svgEl('rect', {
-            class: `egd-ontology-present-subpane egd-ontology-present-subpane-${depth}`,
-            x: bounds.x + insetX - 8,
-            y: y - 8,
-            width: bounds.w - (insetX - 8) * 2,
-            height: laneHeight + 16,
-            rx: depth === 'information' ? 12 : 20,
-            fill: depth === 'physical'
-              ? 'rgba(45, 90, 123, 0.105)'
-              : depth === 'information'
-                ? 'rgba(63, 123, 97, 0.070)'
-                : 'rgba(255, 249, 237, 0.42)',
-            stroke: ontologyDepthColor(depth),
-            'stroke-width': highlighted ? (depth === 'physical' ? '1.9' : '1.45') : '0.95',
-            'stroke-opacity': highlighted ? (depth === 'physical' ? '0.42' : '0.34') : '0.22',
-            opacity: phaseOpacity,
-            'pointer-events': 'none',
-          }));
-        }
-        paneGroup.appendChild(svgEl('rect', {
-          class: `egd-ontology-inventory-depth-band egd-ontology-inventory-depth-${depth}`,
-            x: bounds.x + insetX,
-            y,
-            width: bounds.w - insetX * 2,
-            height: laneHeight,
-            rx: 16,
-            fill: ontologyDepthColor(depth),
-            opacity: phaseActive ? (highlighted ? (phase === 'present' ? '0.12' : '0.060') : '0.044') : '0.018',
-            stroke: ontologyDepthColor(depth),
-            'stroke-width': highlighted ? (phase === 'present' ? '1.7' : '1.2') : '0.8',
-            'stroke-opacity': phaseActive ? (highlighted ? (phase === 'present' ? '0.34' : '0.16') : '0.14') : '0.04',
-            'pointer-events': 'none',
-          }));
-        paneGroup.appendChild(svgEl('rect', {
-          class: `egd-ontology-depth-hit egd-ontology-depth-hit-${phase} egd-ontology-depth-hit-${depth}`,
-          x: bounds.x + insetX,
-          y,
-          width: bounds.w - insetX * 2,
-          height: laneHeight,
-          rx: 16,
-          fill: 'transparent',
-          onclick: (ev) => {
-            ev.preventDefault();
-            ev.stopPropagation();
-            onDepthSelect?.(depth, phase);
-          },
-        }));
-      });
-      if (!usePaneMap && phase !== 'multiverse') {
-        const railX = bounds.x + 44;
-        paneGroup.appendChild(svgEl('line', {
-          class: 'egd-ontology-depth-rail',
-          x1: railX,
-          y1: laneY.physical,
-          x2: railX,
-          y2: laneY.virtual,
-          stroke: 'rgba(92, 97, 105, 0.18)',
-          'stroke-width': '2',
-          'stroke-linecap': 'round',
-          opacity: phaseOpacity,
-          'pointer-events': 'none',
-        }));
-        ONTOLOGY_DEPTH_ORDER.forEach((depth) => {
-          const highlighted = activeDepth === depth;
-          paneGroup.appendChild(svgEl('circle', {
-            class: `egd-ontology-depth-rail-dot egd-ontology-depth-rail-dot-${depth}`,
-            cx: railX,
-            cy: laneY[depth],
-            r: highlighted ? 6 : 4,
-          fill: ontologyDepthColor(depth),
-          opacity: phaseActive ? (highlighted ? '0.82' : '0.28') : '0.14',
-            stroke: 'rgba(255, 255, 255, 0.92)',
-            'stroke-width': '1.4',
-            'pointer-events': 'none',
-          }));
-        });
-      }
-
-      const placedItems = [];
-      const topologyTreeIds = new Set(['desktop', 'terminal', 'cpu', 'ram', 'disk']);
-      ONTOLOGY_DEPTH_ORDER.forEach((depth) => {
-        const group = grouped.get(depth).filter((node) => !(phase === 'present' && topologyTreeIds.has(node.id)));
-        if (phase === 'present' && depth === 'virtual') {
-          const productIds = ['egdesk.desk', 'egdesk.agenda', 'egdesk.card'];
-          const productNodes = productIds
-            .map((id) => group.find((node) => node.id === id))
-            .filter(Boolean);
-          const entityNodes = group.filter((node) => !productIds.includes(node.id)).slice(0, 2);
-          const entityGap = 136;
-          const entityCenter = bounds.x + bounds.w * 0.48;
-          const entityStart = entityCenter - ((entityNodes.length - 1) * entityGap) / 2;
-          entityNodes.forEach((node, index) => {
-            placedItems.push({
-              node,
-              depth,
-              point: { x: entityStart + index * entityGap, y: laneY.virtual - 30 },
-            });
-          });
-          const productGap = 122;
-          const productCenter = bounds.x + bounds.w * 0.62;
-          const productStart = productCenter - ((productNodes.length - 1) * productGap) / 2;
-          productNodes.forEach((node, index) => {
-            placedItems.push({
-              node,
-              depth,
-              point: { x: productStart + index * productGap, y: laneY.virtual + 30 },
-              productChain: true,
-            });
-          });
-          return;
-        }
-        const maxPerLane = phase === 'present'
-          ? (depth === 'physical' ? 2 : 3)
-          : phase === 'multiverse'
-            ? 2
-            : phase === 'future' && depth === 'virtual'
-              ? 3
-              : 2;
-        const laneNodes = group.slice(0, maxPerLane);
-        const gapX = phase === 'present' ? 132 : phase === 'multiverse' ? 104 : 96;
-        const centerX = phase === 'present' ? bounds.x + bounds.w * (depth === 'physical' ? 0.70 : 0.62) : bounds.x + bounds.w / 2;
-        laneNodes.forEach((node, index) => {
-          placedItems.push({
-            node,
-            depth,
-            point: { x: laneXAt(laneNodes.length, index, centerX, gapX), y: laneY[depth] },
-          });
-        });
-      });
-      if (phase === 'present') {
-        const treeCenterX = bounds.x + bounds.w * 0.44;
-        const topologyPoints = {
-          desktop: { x: treeCenterX, y: laneY.information - 50 },
-          terminal: { x: treeCenterX, y: laneY.information + 16 },
-          cpu: { x: treeCenterX - 132, y: laneY.physical + 63 },
-          ram: { x: treeCenterX, y: laneY.physical + 63 },
-          disk: { x: treeCenterX + 132, y: laneY.physical + 63 },
-        };
-        for (const id of ['desktop', 'terminal', 'cpu', 'ram', 'disk']) {
-          const node = visibleNodes.find((candidate) => candidate.id === id);
-          if (!node) continue;
-          placedItems.push({
-            node,
-            depth: ontologyDepthForNode(node),
-            point: topologyPoints[id],
-            compact: true,
-          });
-        }
-      }
-      const placedById = new Map(placedItems.map((item) => [item.node.id, item]));
-      placedItems.forEach((item) => {
-        item.size = {
-          width: item.compact ? 96 : phase === 'multiverse' ? 98 : tileWidth,
-          height: item.compact ? 50 : phase === 'multiverse' ? 40 : tileHeight,
-        };
-        item.point.x = clampLaneX(item.point.x, item.size.width);
-      });
-      const productChainIds = new Set(['egdesk.desk', 'egdesk.agenda', 'egdesk.card']);
-      const renderedTreeEdgeIds = new Set();
-      const isRelatedItem = (item) => {
-        const itemCanonicalId = ontologyCanonicalIdForNode(graph, item?.node);
-        return narrativeIds.has(item?.node?.id)
-          || selectedRelatedIds.has(item?.node?.id)
-          || (itemCanonicalId && (narrativeIds.has(itemCanonicalId) || selectedRelatedIds.has(itemCanonicalId)));
-      };
-      const isNarrativeEdge = (edge) => narrativeIds.has(edge.source) && narrativeIds.has(edge.target);
-
-      if (phase === 'present') {
-        const productChain = ['egdesk.desk', 'egdesk.agenda', 'egdesk.card']
-          .map((id) => placedById.get(id))
-          .filter(Boolean);
-        if (productChain.length > 1) {
-          productChain.slice(0, -1).forEach((item, index) => {
-            const next = productChain[index + 1];
-            const itemSize = item.size || { width: tileWidth, height: tileHeight };
-            const nextSize = next.size || { width: tileWidth, height: tileHeight };
-            const y = item.point.y + tileHeight / 2 + 7;
-            const startX = item.point.x + itemSize.width / 2 - 8;
-            const endX = next.point.x - nextSize.width / 2 + 8;
-            paneGroup.appendChild(svgEl('path', {
-              class: 'egd-ontology-product-chain-connector',
-              d: `M ${startX} ${y} L ${endX} ${y}`,
-              fill: 'none',
-              stroke: 'rgba(138, 107, 46, 0.16)',
-              'stroke-width': '1.1',
-              'stroke-linecap': 'square',
-              'pointer-events': 'none',
-            }));
-          });
-        }
-      }
-
-      if (phase === 'present') {
-        const drawAssemblyPath = (sourceId, targetId, edgeRelation, options = {}) => {
-          const from = placedById.get(sourceId);
-          const to = placedById.get(targetId);
-          if (!from || !to) return;
-          const related = isRelatedItem(from) || isRelatedItem(to);
-          const fromSize = from.size || { width: 76, height: 44 };
-          const toSize = to.size || { width: 76, height: 44 };
-          const start = { x: from.point.x, y: from.point.y + fromSize.height / 2 - 3 };
-          const end = { x: to.point.x, y: to.point.y - toSize.height / 2 + 3 };
-          const busY = options.busY || (start.y + end.y) / 2;
-          const d = sourceId === 'terminal' && ['cpu', 'ram', 'disk'].includes(targetId)
-            ? `M ${start.x} ${start.y} L ${start.x} ${busY} L ${end.x} ${busY} L ${end.x} ${end.y}`
-            : `M ${start.x} ${start.y} L ${end.x} ${end.y}`;
-          paneGroup.appendChild(svgEl('path', {
-            class: `egd-ontology-depth-connector egd-ontology-assembly-tree-connector egd-ontology-assembly-tree-${edgeRelation}`,
-            d,
-            fill: 'none',
-            stroke: edgeRelation === 'contains' ? 'rgba(45, 90, 123, 0.48)' : 'rgba(45, 90, 123, 0.36)',
-            'stroke-width': related ? '1.9' : '1.35',
-            'stroke-linecap': 'square',
-            'stroke-linejoin': 'miter',
-            opacity: phaseActive ? (related ? '0.92' : '0.58') : '0.16',
-            'pointer-events': 'none',
-          }));
-          [start, end].forEach((point, portIndex) => {
-            paneGroup.appendChild(svgEl('circle', {
-              class: `egd-ontology-depth-connector-port egd-ontology-assembly-tree-port-${portIndex ? to.depth : from.depth}`,
-              cx: point.x,
-              cy: point.y,
-              r: related ? 4.4 : 3.5,
-              fill: ontologyDepthColor(portIndex ? to.depth : from.depth),
-              opacity: phaseActive ? (related ? '0.78' : '0.42') : '0.14',
-              stroke: 'rgba(255, 255, 255, 0.92)',
-              'stroke-width': '1.1',
-              'pointer-events': 'none',
-            }));
-          });
-        };
-        const relationFor = (sourceId, targetId) => (graph?.edges || []).find((edge) => (
-          edge.source === sourceId
-          && edge.target === targetId
-          && (edge.relation === 'contains' || edge.relation === 'uses')
-        ));
-        [
-          ['desktop', 'terminal', null],
-          ['terminal', 'cpu', laneY.physical + 48],
-          ['terminal', 'ram', laneY.physical + 48],
-          ['terminal', 'disk', laneY.physical + 48],
-        ].forEach(([sourceId, targetId, busY]) => {
-          const edge = relationFor(sourceId, targetId);
-          if (!edge) return;
-          renderedTreeEdgeIds.add(edge.id);
-          drawAssemblyPath(sourceId, targetId, edge.relation, busY ? { busY } : {});
-        });
-      }
-
-      const treeEdges = (graph?.edges || [])
-        .filter((edge) => (
-          !renderedTreeEdgeIds.has(edge.id)
-          && (
-          placedById.has(edge.source)
-          && placedById.has(edge.target)
-          && topologyTreeIds.has(edge.source)
-          && topologyTreeIds.has(edge.target)
-          && (
-            edge.relation === 'contains'
-            || edge.relation === 'uses'
-          )
-          )
-        ))
-        .slice(0, 6);
-      treeEdges.forEach((edge, index) => {
-        const from = placedById.get(edge.source);
-        const to = placedById.get(edge.target);
-        const fromSize = from.size || { width: tileWidth, height: tileHeight };
-        const toSize = to.size || { width: tileWidth, height: tileHeight };
-        const signY = Math.sign(to.point.y - from.point.y) || 1;
-        const start = { x: from.point.x, y: from.point.y + signY * (fromSize.height / 2 - 5) };
-        const end = { x: to.point.x, y: to.point.y - signY * (toSize.height / 2 - 5) };
-        const midY = (start.y + end.y) / 2 + (index % 2 ? 6 : -6);
-        paneGroup.appendChild(svgEl('path', {
-          class: `egd-ontology-depth-connector egd-ontology-inventory-tree-connector egd-ontology-inventory-tree-${edge.relation}`,
-          d: `M ${start.x} ${start.y} L ${start.x} ${midY} L ${end.x} ${midY} L ${end.x} ${end.y}`,
-          fill: 'none',
-          stroke: edge.relation === 'contains' ? 'rgba(45, 90, 123, 0.32)' : 'rgba(92, 97, 105, 0.26)',
-          'stroke-width': edge.relation === 'contains' ? '1.6' : '1.25',
-          'stroke-linecap': 'square',
-          'stroke-linejoin': 'miter',
-          opacity: phaseOpacity,
-          'pointer-events': 'none',
-        }));
-        [start, end].forEach((point, portIndex) => {
-          paneGroup.appendChild(svgEl('circle', {
-            class: `egd-ontology-depth-connector-port egd-ontology-depth-connector-port-${portIndex ? to.depth : from.depth}`,
-            cx: point.x,
-            cy: point.y,
-            r: 3.8,
-            fill: ontologyDepthColor(portIndex ? to.depth : from.depth),
-            opacity: phaseActive ? '0.54' : '0.18',
-            stroke: 'rgba(255, 255, 255, 0.9)',
-            'stroke-width': '1',
-            'pointer-events': 'none',
-          }));
-        });
-      });
-
-      const relationPriority = new Set(['represented_by', 'binds', 'uses']);
-      const showBrowseObjectRelations = focusTarget !== 'pane'
-        || (phaseActive && selected?.id && ontologyPhaseForNode(selected) === phase);
-      const relationEdges = (graph?.edges || [])
-        .filter((edge) => (
-          showBrowseObjectRelations
-          &&
-          relationPriority.has(edge.relation)
-          && placedById.has(edge.source)
-          && placedById.has(edge.target)
-          && !productChainIds.has(edge.source)
-          && !productChainIds.has(edge.target)
-          && (isNarrativeEdge(edge) || edge.source === selected?.id || edge.target === selected?.id)
-          && (focusTarget !== 'pane' || edge.source === selected?.id || edge.target === selected?.id)
-          && (phase !== 'present' || edge.kind === 'relation_map' || edge.source === selected?.id || edge.target === selected?.id)
-          && !(edge.relation === 'uses' && topologyTreeIds.has(edge.source) && topologyTreeIds.has(edge.target))
-        ))
-        .sort((a, b) => {
-          const aSelected = a.source === selected?.id || a.target === selected?.id ? 0 : 1;
-          const bSelected = b.source === selected?.id || b.target === selected?.id ? 0 : 1;
-          return aSelected - bSelected || String(a.id || '').localeCompare(String(b.id || ''));
-        })
-        .slice(0, focusTarget === 'pane' ? 2 : phase === 'present' ? 5 : 6);
-      relationEdges.forEach((edge, index) => {
-        const from = placedById.get(edge.source);
-        const to = placedById.get(edge.target);
-        const related = isNarrativeEdge(edge) || selectedRelatedIds.has(edge.source) || selectedRelatedIds.has(edge.target);
-        const sameDepth = from.depth === to.depth;
-        const fromSize = from.size || { width: tileWidth, height: tileHeight };
-        const toSize = to.size || { width: tileWidth, height: tileHeight };
-        const stroke = edge.relation === 'binds'
-          ? 'rgba(63, 123, 97, 0.36)'
-          : edge.relation === 'represented_by'
-            ? 'rgba(138, 107, 46, 0.34)'
-            : 'rgba(92, 97, 105, 0.26)';
-        const signY = Math.sign(to.point.y - from.point.y) || 1;
-        const signX = Math.sign(to.point.x - from.point.x) || 1;
-        const start = sameDepth
-          ? { x: from.point.x + signX * (fromSize.width / 2 - 4), y: from.point.y }
-          : { x: from.point.x, y: from.point.y + signY * (fromSize.height / 2 - 4) };
-        const end = sameDepth
-          ? { x: to.point.x - signX * (toSize.width / 2 - 4), y: to.point.y }
-          : { x: to.point.x, y: to.point.y - signY * (toSize.height / 2 - 4) };
-        const midY = (start.y + end.y) / 2;
-        const midX = (start.x + end.x) / 2;
-        const busY = sameDepth
-          ? start.y + (from.depth === 'virtual' ? 36 + index * 2 : -36 - index * 2)
-          : midY + (index % 2 ? 8 : -8);
-        const d = sameDepth
-          ? `M ${start.x} ${start.y} L ${start.x} ${busY} L ${end.x} ${busY} L ${end.x} ${end.y}`
-          : `M ${start.x} ${start.y} L ${start.x} ${busY} L ${end.x} ${busY} L ${end.x} ${end.y}`;
-        paneGroup.appendChild(svgEl('path', {
-          class: `egd-ontology-inventory-relation egd-ontology-clickable-relation egd-ontology-inventory-relation-${edge.relation}`,
-          d,
-          fill: 'none',
-          stroke,
-          'stroke-width': focusTarget === 'pane'
-            ? (related ? '1.05' : '0.7')
-            : related ? (edge.relation === 'binds' ? '1.45' : '1.25') : (edge.relation === 'binds' ? '0.95' : '0.8'),
-          'stroke-dasharray': edge.relation === 'represented_by' ? '5 6' : '3 5',
-          'stroke-linecap': 'square',
-          'stroke-linejoin': 'miter',
-          opacity: phaseActive ? (related ? (focusTarget === 'pane' ? '0.52' : '0.82') : '0.12') : '0.07',
-          onclick: (ev) => {
-            ev.preventDefault();
-            ev.stopPropagation();
-            onRelationSelect?.(edge, phase);
-          },
-        }));
-        paneGroup.appendChild(svgEl('circle', {
-          class: 'egd-ontology-inventory-relation-source',
-          cx: start.x,
-          cy: start.y,
-          r: 3.2,
-          fill: stroke,
-          opacity: phaseActive ? (related ? '0.72' : '0.12') : '0.07',
-          'pointer-events': 'none',
-        }));
-        paneGroup.appendChild(svgEl('polygon', {
-          class: 'egd-ontology-inventory-relation-arrow',
-          points: sameDepth
-            ? `${end.x},${end.y} ${end.x - signX * 8},${end.y - 4} ${end.x - signX * 8},${end.y + 4}`
-            : `${end.x},${end.y} ${end.x - 4},${end.y - signY * 8} ${end.x + 4},${end.y - signY * 8}`,
-          fill: stroke,
-          opacity: phaseActive ? (related ? '0.78' : '0.14') : '0.07',
-          'pointer-events': 'none',
-        }));
-      });
-
-      placedItems.forEach((item) => {
-        const { node, depth, point, compact } = item;
-        const facet = ontologyProjectionFacet(node.id);
-        const axis = ontologyAxisForNode(node);
-        const highlighted = activeDepth === depth;
-        const related = isRelatedItem(item);
-        const nodeSize = item.size || { width: compact ? 96 : phase === 'multiverse' ? 98 : tileWidth, height: compact ? 50 : phase === 'multiverse' ? 40 : tileHeight };
-        const rendered = renderOntologySvgNode(paneGroup, node, point, {
-          mode: 'focus',
-          color: facet ? ontologyFacetPlaneColor(facet) : ontologyAxisColor(axis),
-          fill: node.id?.startsWith('entity.') ? 'rgba(255, 249, 237, 0.96)' : 'rgba(255, 255, 255, 0.94)',
-          extraClass: `egd-ontology-pane-inventory-node egd-ontology-depth-${depth}${related ? ' egd-ontology-pane-inventory-node-related' : ' egd-ontology-pane-inventory-node-unrelated'}${highlighted ? '' : ' egd-ontology-depth-muted'}`,
-          selected: node.id === selected?.id,
-          label: ontologyDisplayLabel(node, 'focus').replace(/^[^·]+·\s*/, ''),
-          meta: '',
-          size: nodeSize,
-          labelMax: compact ? 12 : phase === 'present' ? 18 : phase === 'multiverse' ? 12 : 20,
-          metaMax: compact ? 10 : phase === 'present' ? 18 : phase === 'multiverse' ? 12 : 20,
-          layerBadge: ontologyObjectLayerBadge(node),
-          showPorts: true,
-          onclick: (ev) => {
-            ev.stopPropagation();
-            onSelect(node.id);
-          },
-        });
-        rendered.dataset.phase = phase;
-        rendered.dataset.depth = depth;
-        if (!phaseActive) rendered.setAttribute('opacity', related ? '0.26' : '0.10');
-        else if (!highlighted) rendered.setAttribute('opacity', related ? '0.72' : '0.14');
-        else if (!related) rendered.setAttribute('opacity', '0.30');
-      });
-
-      if (nodes.length > placedItems.length && focusTarget !== 'pane') {
-        const x = phase === 'present' ? bounds.x + bounds.w - 74 : bounds.x + bounds.w / 2;
-        const y = bounds.y + bounds.h - 38;
-        paneGroup.appendChild(svgEl('text', {
-          class: 'egd-ontology-pane-inventory-more',
-          x,
-          y,
-          fill: 'rgba(92, 97, 105, 0.72)',
-          'font-family': 'Inter, -apple-system, Segoe UI, system-ui, sans-serif',
-          'font-size': '10',
-          'font-weight': '800',
-          'text-anchor': 'middle',
-        }, `+${nodes.length - placedItems.length}`));
-      }
-      return {
-        phase,
-        bounds,
-        placedItems,
-        placedById,
-      };
-    };
-
-    const renderDeckPaneInventory = (phase) => {
-      const paneScene = deckScene.panes.get(phase) || deckScene.panes.get('present');
-      const bounds = paneScene?.bounds || paneBounds.present;
-      const activeDepth = ontologyNormalizeDepth(localState.activeDepth, ontologyDefaultDepthForPane(phase, selected));
-      const phaseActive = Boolean(paneScene?.active ?? phase === activePane);
-      const phaseOpacity = phaseActive ? 1 : 0.58;
-      const nodes = paneScene?.nodes || ontologyPaneInventoryNodes(graph, phase, selected);
-      const color = paneScene?.color || phaseColor(phase);
-      const geometry = paneScene?.geometry || ontologyCreateDeckGeometry(bounds, phaseActive);
-      const presentReferenceSurfaces = phase === 'present'
-        ? (deckScene.referenceSurfaces.present || [])
-        : [];
-      const lowerSurface = presentReferenceSurfaces.find((surface) => surface.id === 'lower-physical');
-      const itemGeometry = phase === 'present' && activeDepth === 'physical'
-        ? (lowerSurface?.geometry || geometry)
-        : geometry;
-      const deckPoint = geometry.point;
-      const itemDeckPoint = itemGeometry.point;
-      const deckPath = geometry.path;
-      const deckRectPath = geometry.rectPath;
-      const phaseClass = `egd-ontology-deck-pane egd-ontology-deck-pane-${phase}${phaseActive ? ' egd-ontology-deck-pane-active' : ''}`;
-      const deckGroup = svgEl('g', { class: phaseClass });
-      const drawScaffoldNode = (parent, point, label, options = {}) => {
-        const width = options.width || 96;
-        const height = options.height || 30;
-        const group = svgEl('g', {
-          class: `egd-ontology-shape-scaffold-node${options.extraClass ? ` ${options.extraClass}` : ''}`,
-          'pointer-events': 'none',
-        });
-        group.appendChild(svgEl('rect', {
-          x: point.x - width / 2,
-          y: point.y - height / 2,
-          width,
-          height,
-          rx: 7,
-          fill: options.fill || 'rgba(255, 255, 255, 0.60)',
-          stroke: options.stroke || 'rgba(92, 97, 105, 0.28)',
-          'stroke-width': options.strokeWidth || '1.05',
-        }));
-        if (options.icon) {
-          group.appendChild(svgEl('text', {
-            x: point.x - width / 2 + 16,
-            y: point.y + 4,
-            fill: options.iconFill || options.stroke || 'rgba(92, 97, 105, 0.42)',
-            'font-family': 'Inter, -apple-system, Segoe UI, system-ui, sans-serif',
-            'font-size': '12.5',
-            'font-weight': '900',
-          }, options.icon));
-        }
-        group.appendChild(svgEl('text', {
-          x: point.x + (options.icon ? 8 : 0),
-          y: point.y + (options.meta ? -2 : 4),
-          fill: options.textFill || 'rgba(37, 44, 51, 0.56)',
-          'font-family': 'Inter, -apple-system, Segoe UI, system-ui, sans-serif',
-          'font-size': options.fontSize || '11',
-          'font-weight': options.fontWeight || '800',
-          'text-anchor': options.icon ? 'start' : 'middle',
-        }, label));
-        if (options.meta) {
-          group.appendChild(svgEl('text', {
-            x: point.x + (options.icon ? 8 : 0),
-            y: point.y + 12,
-            fill: options.metaFill || 'rgba(92, 97, 105, 0.42)',
-            'font-family': 'Inter, -apple-system, Segoe UI, system-ui, sans-serif',
-            'font-size': '8.5',
-            'font-weight': '700',
-            'text-anchor': options.icon ? 'start' : 'middle',
-          }, options.meta));
-        }
-        parent.appendChild(group);
-        return group;
-      };
-      const drawScaffoldPath = (parent, points, options = {}) => {
-        if (!points?.length) return null;
-        const path = svgEl('path', {
-          class: options.className || 'egd-ontology-shape-scaffold-path',
-          d: `M ${points.map((point) => `${point.x.toFixed(1)} ${point.y.toFixed(1)}`).join(' L ')}`,
-          fill: 'none',
-          stroke: options.stroke || 'rgba(92, 97, 105, 0.24)',
-          'stroke-width': options.width || '1.15',
-          'stroke-dasharray': options.dash || '6 7',
-          'stroke-linecap': 'square',
-          'stroke-linejoin': 'miter',
-          'pointer-events': 'none',
-        });
-        parent.appendChild(path);
-        return path;
-      };
-      if (phase === 'present' && lowerSurface) {
-        const physicalGeometry = lowerSurface.geometry;
-        const physicalPoint = physicalGeometry.point;
-        const physicalActive = activeDepth === 'physical';
-        const physicalGroup = svgEl('g', {
-          class: `egd-ontology-physical-pane${physicalActive ? ' egd-ontology-physical-pane-active' : ''}`,
-        });
-        [
-          [deckPoint(0.035, 0.965), physicalPoint(0.055, 0.04)],
-          [deckPoint(0.965, 0.965), physicalPoint(0.945, 0.04)],
-        ].forEach(([from, to]) => {
-          physicalGroup.appendChild(svgEl('path', {
-            class: 'egd-ontology-physical-pane-strut',
-            d: `M ${from.x.toFixed(1)} ${from.y.toFixed(1)} L ${to.x.toFixed(1)} ${to.y.toFixed(1)}`,
-            fill: 'none',
-            stroke: 'rgba(45, 90, 123, 0.26)',
-            'stroke-width': physicalActive ? '1.6' : '1.1',
-            'stroke-dasharray': '8 10',
-            'pointer-events': 'none',
-          }));
-        });
-        physicalGroup.appendChild(svgEl('path', {
-          class: 'egd-ontology-deck-reference egd-ontology-deck-reference-lower-physical egd-ontology-physical-pane-surface',
-          d: physicalGeometry.path(),
-          fill: physicalActive ? 'rgba(234, 246, 255, 0.74)' : 'rgba(234, 246, 255, 0.48)',
-          stroke: physicalActive ? 'rgba(45, 90, 123, 0.64)' : 'rgba(45, 90, 123, 0.52)',
-          'stroke-width': physicalActive ? '2.1' : '1.55',
-          'stroke-linejoin': 'miter',
-          onclick: (ev) => {
-            ev.preventDefault();
-            ev.stopPropagation();
-            onDepthSelect?.('physical', phase);
-          },
-        }));
-        const physicalRim = [
-          physicalPoint(0.025, 0.025),
-          physicalPoint(0.975, 0.025),
-          physicalPoint(0.975, 0.975),
-          physicalPoint(0.025, 0.975),
-        ];
-        physicalGroup.appendChild(svgEl('path', {
-          class: 'egd-ontology-physical-pane-rim',
-          d: `M ${physicalRim.map((point) => `${point.x.toFixed(1)} ${point.y.toFixed(1)}`).join(' L ')} Z`,
-          fill: 'none',
-          stroke: 'rgba(45, 90, 123, 0.30)',
-          'stroke-width': '1',
-          'stroke-linejoin': 'miter',
-          'pointer-events': 'none',
-        }));
-        for (let row = 0; row < 4; row += 1) {
-          for (let column = 0; column < 8; column += 1) {
-            const dot = physicalPoint(0.16 + column * 0.10, 0.18 + row * 0.20);
-            physicalGroup.appendChild(svgEl('circle', {
-              class: 'egd-ontology-physical-pane-dot',
-              cx: dot.x,
-              cy: dot.y,
-              r: physicalActive ? 1.15 : 0.9,
-              fill: 'rgba(45, 90, 123, 0.18)',
-              'pointer-events': 'none',
-            }));
-          }
-        }
-        if (!physicalActive) {
-          const desktopAssembly = physicalPoint(0.50, 0.20);
-          const terminalSurface = physicalPoint(0.50, 0.42);
-          const cpuResource = physicalPoint(0.31, 0.74);
-          const ramResource = physicalPoint(0.50, 0.74);
-          const diskResource = physicalPoint(0.69, 0.74);
-          drawScaffoldPath(physicalGroup, [deckPoint(0.38, 0.90), desktopAssembly, terminalSurface, cpuResource], {
-            stroke: 'rgba(45, 90, 123, 0.22)',
-            dash: '7 8',
-          });
-          drawScaffoldPath(physicalGroup, [terminalSurface, ramResource], {
-            stroke: 'rgba(45, 90, 123, 0.22)',
-            dash: '7 8',
-          });
-          drawScaffoldPath(physicalGroup, [deckPoint(0.73, 0.82), diskResource], {
-            stroke: 'rgba(45, 90, 123, 0.22)',
-            dash: '7 8',
-          });
-          drawScaffoldPath(physicalGroup, [cpuResource, ramResource, diskResource], {
-            stroke: 'rgba(45, 90, 123, 0.24)',
-            dash: '6 7',
-          });
-          drawScaffoldNode(physicalGroup, desktopAssembly, '데스크톱', {
-            width: 110,
-            height: 38,
-            meta: 'assembly',
-            fill: 'rgba(245, 250, 253, 0.58)',
-            stroke: 'rgba(45, 90, 123, 0.30)',
-            textFill: 'rgba(45, 74, 96, 0.58)',
-          });
-          drawScaffoldNode(physicalGroup, terminalSurface, '터미널', {
-            width: 110,
-            height: 38,
-            meta: 'surface',
-            fill: 'rgba(245, 250, 253, 0.58)',
-            stroke: 'rgba(45, 90, 123, 0.30)',
-            textFill: 'rgba(45, 74, 96, 0.58)',
-          });
-          [
-            [cpuResource, 'CPU'],
-            [ramResource, 'RAM'],
-            [diskResource, '디스크'],
-          ].forEach(([point, label]) => {
-            drawScaffoldNode(physicalGroup, point, label, {
-              width: 106,
-              height: 36,
-              meta: 'resource',
-              fill: 'rgba(245, 250, 253, 0.62)',
-              stroke: 'rgba(45, 90, 123, 0.32)',
-              textFill: 'rgba(45, 74, 96, 0.58)',
-            });
-          });
-        }
-        paneGroup.appendChild(physicalGroup);
-      }
-      if (phaseActive) {
-        const frontLeft = deckPoint(0.00, 0.992);
-        const frontRight = deckPoint(1.00, 0.992);
-        const lipDrop = 15;
-        deckGroup.appendChild(svgEl('path', {
-          class: 'egd-ontology-deck-front-lip',
-          d: `M ${frontLeft.x.toFixed(1)} ${frontLeft.y.toFixed(1)} L ${frontRight.x.toFixed(1)} ${frontRight.y.toFixed(1)} L ${(frontRight.x + 2).toFixed(1)} ${(frontRight.y + lipDrop).toFixed(1)} L ${(frontLeft.x - 2).toFixed(1)} ${(frontLeft.y + lipDrop).toFixed(1)} Z`,
-          fill: 'rgba(194, 188, 174, 0.22)',
-          stroke: 'rgba(255, 255, 255, 0.52)',
-          'stroke-width': '1.2',
-          'pointer-events': 'none',
-        }));
-      }
-      deckGroup.appendChild(svgEl('path', {
-        class: 'egd-ontology-deck-surface',
-        d: deckPath(),
-        fill: phaseActive ? 'rgba(255, 253, 247, 0.965)' : 'rgba(255, 255, 255, 0.58)',
-        stroke: phaseActive ? 'rgba(255, 255, 255, 0.94)' : color,
-        'stroke-width': phaseActive ? '2.6' : '1.15',
-        'stroke-opacity': phaseActive ? '0.96' : '0.28',
-        opacity: phaseOpacity,
-        'pointer-events': 'none',
-      }));
-      if (phaseActive) {
-        const activeRim = [
-          deckPoint(0.018, 0.018),
-          deckPoint(0.982, 0.018),
-          deckPoint(0.982, 0.985),
-          deckPoint(0.018, 0.985),
-        ];
-        deckGroup.appendChild(svgEl('path', {
-          class: 'egd-ontology-deck-glass-rim',
-          d: `M ${activeRim.map((point) => `${point.x.toFixed(1)} ${point.y.toFixed(1)}`).join(' L ')} Z`,
-          fill: 'none',
-          stroke: 'rgba(216, 207, 192, 0.46)',
-          'stroke-width': '1.1',
-          'stroke-linejoin': 'miter',
-          'pointer-events': 'none',
-        }));
-      } else if (phase !== 'multiverse') {
-        const mutedRim = [
-          deckPoint(0.025, 0.025),
-          deckPoint(0.975, 0.025),
-          deckPoint(0.975, 0.975),
-          deckPoint(0.025, 0.975),
-        ];
-        deckGroup.appendChild(svgEl('path', {
-          class: 'egd-ontology-deck-glass-rim egd-ontology-deck-glass-rim-muted',
-          d: `M ${mutedRim.map((point) => `${point.x.toFixed(1)} ${point.y.toFixed(1)}`).join(' L ')} Z`,
-          fill: 'none',
-          stroke: 'rgba(138, 126, 113, 0.32)',
-          'stroke-width': '0.9',
-          'stroke-linejoin': 'miter',
-          opacity: '0.62',
-          'pointer-events': 'none',
-        }));
-      }
-      if (phaseActive) {
-        for (let row = 0; row < 5; row += 1) {
-          for (let column = 0; column < 9; column += 1) {
-            const dot = deckPoint(0.14 + column * 0.09, 0.15 + row * 0.16);
-            deckGroup.appendChild(svgEl('circle', {
-              class: 'egd-ontology-deck-surface-dot',
-              cx: dot.x,
-              cy: dot.y,
-              r: 0.85,
-              fill: 'rgba(138, 107, 46, 0.10)',
-              'pointer-events': 'none',
-            }));
-          }
-        }
-      }
-      if (!usePaneMap && phase !== 'multiverse') {
-        const labelPoint = deckPoint(0.50, phaseActive ? 0.055 : 0.12);
-        deckGroup.appendChild(svgEl('text', {
-          class: 'egd-ontology-deck-phase-label',
-          x: labelPoint.x,
-          y: labelPoint.y,
-          fill: phase === 'present' ? 'rgba(45, 62, 74, 0.70)' : color,
-          'font-family': 'Inter, -apple-system, Segoe UI, system-ui, sans-serif',
-          'font-size': phaseActive ? '13' : '12',
-          'font-weight': phaseActive ? '900' : '800',
-          'text-anchor': 'middle',
-          opacity: phaseActive ? '0.92' : '0.56',
-          'pointer-events': 'none',
-        }, phaseLabels[phase]));
-      }
-
-      const depthHitSpecs = {
-        virtual: { u: 0.05, v: 0.05, w: 0.90, h: 0.31 },
-        information: { u: 0.05, v: 0.36, w: 0.90, h: 0.23 },
-        physical: { u: 0.05, v: 0.59, w: 0.90, h: 0.36 },
-      };
-      ['physical', 'information', 'virtual'].forEach((depth) => {
-        const spec = depthHitSpecs[depth];
-        deckGroup.appendChild(svgEl('path', {
-          class: `egd-ontology-depth-hit egd-ontology-depth-hit-${phase} egd-ontology-depth-hit-${depth}`,
-          d: deckRectPath(spec.u, spec.v, spec.w, spec.h),
-          fill: 'transparent',
-          onclick: (ev) => {
-            ev.preventDefault();
-            ev.stopPropagation();
-            onDepthSelect?.(depth, phase);
-          },
-        }));
-      });
-
-      const referenceGroup = svgEl('g', { class: 'egd-ontology-reference-scaffolds' });
-      const drawReferenceNode = (point, label, options = {}) => {
-        const width = options.width || 106;
-        const height = options.height || 34;
-        const opacity = options.opacity ?? (phaseActive ? 0.44 : 0.16);
-        const stroke = options.stroke || 'rgba(92, 97, 105, 0.26)';
-        const group = svgEl('g', {
-          class: `egd-ontology-reference-node${options.extraClass ? ` ${options.extraClass}` : ''}`,
-          opacity,
-          'pointer-events': 'none',
-        });
-        group.appendChild(svgEl('rect', {
-          x: point.x - width / 2,
-          y: point.y - height / 2,
-          width,
-          height,
-          rx: 7,
-          fill: options.fill || 'rgba(255, 255, 255, 0.62)',
-          stroke,
-          'stroke-width': options.strong ? '1.4' : '1',
-        }));
-        if (options.icon) {
-          group.appendChild(svgEl('text', {
-            x: point.x - width / 2 + 16,
-            y: point.y + 4,
-            fill: stroke,
-            'font-family': 'Inter, -apple-system, Segoe UI, system-ui, sans-serif',
-            'font-size': '13',
-            'font-weight': '900',
-          }, options.icon));
-        }
-        group.appendChild(svgEl('text', {
-          x: point.x + (options.icon ? 8 : 0),
-          y: point.y + (options.meta ? -2 : 4),
-          fill: options.textFill || 'rgba(37, 44, 51, 0.62)',
-          'font-family': 'Inter, -apple-system, Segoe UI, system-ui, sans-serif',
-          'font-size': options.fontSize || '11',
-          'font-weight': options.strong ? '850' : '700',
-          'text-anchor': options.icon ? 'start' : 'middle',
-        }, label));
-        if (options.meta) {
-          group.appendChild(svgEl('text', {
-            x: point.x + (options.icon ? 8 : 0),
-            y: point.y + 12,
-            fill: 'rgba(92, 97, 105, 0.46)',
-            'font-family': 'Inter, -apple-system, Segoe UI, system-ui, sans-serif',
-            'font-size': '8.5',
-            'font-weight': '700',
-            'text-anchor': options.icon ? 'start' : 'middle',
-          }, options.meta));
-        }
-        referenceGroup.appendChild(group);
-      };
-      const drawReferencePath = (points, options = {}) => {
-        if (!points?.length) return;
-        referenceGroup.appendChild(svgEl('path', {
-          class: 'egd-ontology-reference-connector',
-          d: `M ${points.map((point) => `${point.x} ${point.y}`).join(' L ')}`,
-          fill: 'none',
-          stroke: options.stroke || 'rgba(92, 97, 105, 0.24)',
-          'stroke-width': options.width || '1.2',
-          'stroke-dasharray': options.dash || '5 6',
-          'stroke-linecap': 'square',
-          'stroke-linejoin': 'miter',
-          opacity: options.opacity ?? (phaseActive ? '0.38' : '0.12'),
-          'pointer-events': 'none',
-        }));
-      };
-      if (referenceGroup.childNodes.length) paneGroup.appendChild(referenceGroup);
-      paneGroup.appendChild(deckGroup);
-      const contentClipId = `${contentClipRootId}-${phase}-${activeDepth}`;
-      paneGroup.appendChild(svgEl('defs', {},
-        svgEl('clipPath', { id: contentClipId, clipPathUnits: 'userSpaceOnUse' },
-          svgEl('path', { d: itemGeometry.path() }),
-        ),
-      ));
-      const contentGroup = svgEl('g', {
-        class: `egd-ontology-pane-content egd-ontology-pane-content-${phase}`,
-        data: { phase, depth: activeDepth },
-        'clip-path': `url(#${contentClipId})`,
-      });
-      paneGroup.appendChild(contentGroup);
-
-      const nodeHomePhase = (node) => {
-        const id = String(node?.id || '');
-        if (id === 'alternate.plan' || id === 'candidate.future') return 'multiverse';
-        if (id === 'goal' || id === 'plan' || id === 'task' || id === 'output.structured') return 'future';
-        if (id === 'entity.chat_memory' || id.startsWith('projection.chat_memory.') || id === 'projection.llm_chat_session.time.memory_trace') return 'past';
-        return 'present';
-      };
-      const guideOrder = {
-        past: [
-          'projection.llm_chat_session.time.memory_trace',
-          'entity.chat_memory',
-          'projection.chat_memory.storage.trace_file',
-        ],
-        present: [
-          'entity.llm_chat_session',
-          'projection.llm_chat_session.intent.context_binding',
-          'egdesk.agenda',
-          'egdesk.card',
-          'projection.llm_chat_session.action.message_send',
-          'desktop',
-          'terminal',
-          'cpu',
-          'ram',
-          'disk',
-          'projection.llm_chat_session.storage.session_file',
-        ],
-        future: [
-          'goal',
-          'plan',
-          'task',
-          'output.structured',
-        ],
-        multiverse: ['alternate.plan', 'candidate.future'],
-      };
-      const homeNodes = nodes.filter((node) => nodeHomePhase(node) === phase);
-      const guidedNodes = (guideOrder[phase] || [])
-        .map((id) => homeNodes.find((node) => node.id === id) || ontologyNodeById(graph, id))
-        .filter((node) => node && nodeHomePhase(node) === phase);
-      const relationEndpointIds = localState.selectedRelation
-        ? new Set([localState.selectedRelation.source, localState.selectedRelation.target])
-        : new Set();
-      const supplementalNodes = focusTarget === 'pane'
-        ? []
-        : homeNodes.filter((node) => (
-          !guidedNodes.some((guided) => guided.id === node.id)
-          && (node.id === selected?.id || relationEndpointIds.has(node.id) || narrativeIds.has(node.id))
-        ));
-      const visibleNodes = [...guidedNodes, ...supplementalNodes]
-        .filter((node, index, list) => list.findIndex((candidate) => candidate.id === node.id) === index);
-      const depthVisibleNodes = visibleNodes.filter((node) => ontologyDepthForNode(node) === activeDepth);
-
-      const placements = {
-        past: {
-          'projection.chat_memory.time.past_evidence': { u: 0.36, v: 0.12 },
-          'projection.llm_chat_session.time.memory_trace': { u: 0.48, v: 0.30 },
-          'entity.chat_memory': { u: 0.58, v: 0.48 },
-          'projection.chat_memory.action.file_read': { u: 0.42, v: 0.66 },
-          'projection.chat_memory.storage.trace_file': { u: 0.48, v: 0.84 },
-        },
-        present: {
-          'entity.llm_chat_session': { u: 0.24, v: 0.25 },
-          'projection.llm_chat_session.intent.context_binding': { u: 0.49, v: 0.39 },
-          'egdesk.agenda': { u: 0.67, v: 0.25 },
-          'egdesk.card': { u: 0.83, v: 0.38 },
-          'projection.llm_chat_session.action.message_send': { u: 0.30, v: 0.53 },
-          desktop: { u: 0.38, v: 0.30 },
-          terminal: { u: 0.58, v: 0.46 },
-          cpu: { u: 0.31, v: 0.76 },
-          ram: { u: 0.50, v: 0.76 },
-          disk: { u: 0.69, v: 0.76 },
-          'projection.llm_chat_session.storage.session_file': { u: 0.78, v: 0.42 },
-          'projection.desktop_runtime.topology.hardware_os': { u: 0.26, v: 0.48 },
-          'projection.desktop_runtime.space.desktop_plane': { u: 0.27, v: 0.57 },
-          'projection.desktop_runtime.action.app_execution': { u: 0.76, v: 0.46 },
-          'projection.desktop_runtime.storage.local_disk': { u: 0.90, v: 0.74 },
-        },
-        future: {
-          goal: { u: 0.48, v: 0.22 },
-          plan: { u: 0.36, v: 0.46 },
-          task: { u: 0.62, v: 0.62 },
-          'output.structured': { u: 0.48, v: 0.82 },
-        },
-        multiverse: {
-          'alternate.plan': { u: 0.34, v: 0.42 },
-          'candidate.future': { u: 0.66, v: 0.56 },
-        },
-      };
-      const fallbackSlots = {
-        virtual: [{ u: 0.28, v: 0.19 }, { u: 0.50, v: 0.24 }, { u: 0.72, v: 0.20 }],
-        information: [{ u: 0.28, v: 0.48 }, { u: 0.50, v: 0.48 }, { u: 0.72, v: 0.48 }],
-        physical: [{ u: 0.28, v: 0.63 }, { u: 0.50, v: 0.66 }, { u: 0.72, v: 0.63 }],
-      };
-      const fallbackCounts = { virtual: 0, information: 0, physical: 0 };
-      const fallbackPlacement = (depth) => {
-        const slots = fallbackSlots[depth] || fallbackSlots.information;
-        const index = fallbackCounts[depth] % slots.length;
-        fallbackCounts[depth] += 1;
-        return slots[index];
-      };
-      const nodeSizeFor = (node, depth) => {
-        const id = node?.id || '';
-        if (!phaseActive) return { width: phase === 'multiverse' ? 92 : 104, height: phase === 'multiverse' ? 36 : 40 };
-        if (phase === 'past') {
-          if (id.startsWith('entity.')) return { width: 120, height: 42 };
-          if (id.startsWith('projection.')) return { width: 126, height: 40 };
-        }
-        if (phase === 'future') {
-          if (id === 'goal') return { width: 118, height: 44 };
-          if (id === 'plan' || id === 'task') return { width: 96, height: 40 };
-          if (id === 'output.structured') return { width: 124, height: 42 };
-        }
-        if (id.startsWith('projection.desktop_runtime.')) return { width: 124, height: 38 };
-        if (['cpu', 'ram', 'disk'].includes(id)) return { width: 116, height: 42 };
-        if (id === 'desktop' || id === 'terminal') return { width: 116, height: 42 };
-        if (id.startsWith('egdesk.')) return { width: 116, height: 44 };
-        if (id.startsWith('entity.')) return { width: depth === 'virtual' ? 142 : 132, height: 46 };
-        if (id.startsWith('projection.')) return { width: 146, height: 42 };
-        return { width: 122, height: 44 };
-      };
-      const nodeIconFor = (node) => {
-        const id = String(node?.id || '');
-        const icons = {
-          'entity.llm_chat_session': '▢',
-          'entity.chat_memory': '▢',
-          'projection.llm_chat_session.intent.context_binding': '∞',
-          'projection.llm_chat_session.action.message_send': '↗',
-          'projection.llm_chat_session.storage.session_file': '◰',
-          'projection.chat_memory.storage.trace_file': '◰',
-          desktop: '▭',
-          terminal: '>_',
-          cpu: '▦',
-          ram: '▥',
-          disk: '◉',
-          goal: '◎',
-          plan: '▤',
-          task: '☷',
-          'output.structured': '◇',
-        };
-        return icons[id] || (id.startsWith('egdesk.') ? '□' : '');
-      };
-      const nodeVisualFor = (node, depth) => {
-        const visualByDepth = {
-          virtual: {
-            stroke: '#8A6B2E',
-            fill: 'rgba(255, 252, 246, 0.98)',
-            iconColor: '#8A6B2E',
-            iconBg: 'rgba(138, 107, 46, 0.10)',
-            iconBgStroke: 'rgba(138, 107, 46, 0.20)',
-            labelFill: '#1A1A1A',
-          },
-          binding: {
-            stroke: '#3F7B61',
-            fill: 'rgba(249, 255, 251, 0.98)',
-            iconColor: '#3F7B61',
-            iconBg: 'rgba(63, 123, 97, 0.10)',
-            iconBgStroke: 'rgba(63, 123, 97, 0.20)',
-            labelFill: '#1A1A1A',
-          },
-          physical: {
-            stroke: '#326DA8',
-            fill: 'rgba(250, 253, 255, 0.98)',
-            iconColor: '#326DA8',
-            iconBg: 'rgba(50, 109, 168, 0.10)',
-            iconBgStroke: 'rgba(50, 109, 168, 0.20)',
-            labelFill: '#1A1A1A',
-          },
-        };
-        return visualByDepth[depth] || visualByDepth.virtual;
-      };
-      // Keep graph labels apart using the same separation model used by Dagre/ELK layouts, then relax collisions D3-force style.
-      const layeredLayoutSpacing = {
-        nodeNode: phaseActive ? (phase === 'present' ? 18 : 14) : 8,
-        nodeNodeBetweenLayers: phaseActive ? (phase === 'present' ? 28 : 22) : 10,
-        collisionIterations: 16,
-      };
-      const collisionPaddingFor = (a, b) => (
-        a.depth === b.depth
-          ? layeredLayoutSpacing.nodeNode / 2
-          : layeredLayoutSpacing.nodeNodeBetweenLayers / 2
-      );
-      const itemBox = (item, point = item.point, padding = layeredLayoutSpacing.nodeNode / 2) => ({
-        left: point.x - item.size.width / 2 - padding,
-        right: point.x + item.size.width / 2 + padding,
-        top: point.y - item.size.height / 2 - padding,
-        bottom: point.y + item.size.height / 2 + padding,
-      });
-      const boxOverlap = (a, b) => (
-        a.left < b.right
-        && a.right > b.left
-        && a.top < b.bottom
-        && a.bottom > b.top
-      );
-      const resolvePaneCollisions = (items) => {
-        const diagonalX = phase === 'past' ? -14 : phase === 'future' ? 16 : 12;
-        for (let iteration = 0; iteration < layeredLayoutSpacing.collisionIterations; iteration += 1) {
-          let moved = false;
-          for (let i = 0; i < items.length; i += 1) {
-            for (let j = i + 1; j < items.length; j += 1) {
-              const fixed = items[i];
-              const moving = items[j];
-              const padding = collisionPaddingFor(fixed, moving);
-              const fixedBox = itemBox(fixed, fixed.point, padding);
-              const movingBox = itemBox(moving, moving.point, padding);
-              if (!boxOverlap(fixedBox, movingBox)) continue;
-              const overlapY = Math.min(fixedBox.bottom - movingBox.top, movingBox.bottom - fixedBox.top);
-              const overlapX = Math.min(fixedBox.right - movingBox.left, movingBox.right - fixedBox.left);
-              const yDirection = moving.point.y >= fixed.point.y ? 1 : -1;
-              const xDirection = moving.point.x >= fixed.point.x ? 1 : -1;
-              const preferred = {
-                x: moving.point.x + diagonalX * yDirection,
-                y: moving.point.y + yDirection * Math.min(52, Math.max(18, overlapY + 6)),
-              };
-              let nextPoint = preferred;
-              if (boxOverlap(fixedBox, itemBox(moving, nextPoint, padding))) {
-                nextPoint = {
-                  x: moving.point.x + xDirection * Math.min(72, Math.max(24, overlapX + 8)),
-                  y: moving.point.y + yDirection * Math.min(34, Math.max(14, overlapY * 0.55)),
-                };
-              }
-              if (nextPoint.x !== moving.point.x || nextPoint.y !== moving.point.y) {
-                moving.point = nextPoint;
-                moved = true;
-              }
-            }
-          }
-          if (!moved) break;
-        }
-      };
-      const paneSlide = phaseActive ? ontologyPaneSlide(localState, phase, activeDepth) : { u: 0, v: 0 };
-      const placedItems = depthVisibleNodes.map((node) => {
-        const depth = ontologyDepthForNode(node);
-        const uv = placements[phase]?.[node.id] || fallbackPlacement(depth);
-        const size = nodeSizeFor(node, depth);
-        const basePoint = itemDeckPoint(uv.u + paneSlide.u, uv.v + paneSlide.v);
-        return {
-          node,
-          depth,
-          size,
-          point: basePoint,
-        };
-      });
-      resolvePaneCollisions(placedItems);
-      const placedById = new Map(placedItems.map((item) => [item.node.id, item]));
-      const isRelatedItem = (item) => {
-        const itemCanonicalId = ontologyCanonicalIdForNode(graph, item?.node);
-        return item?.node?.id === selected?.id
-          || narrativeIds.has(item?.node?.id)
-          || selectedRelatedIds.has(item?.node?.id)
-          || (itemCanonicalId && (narrativeIds.has(itemCanonicalId) || selectedRelatedIds.has(itemCanonicalId)));
-      };
-      const isNarrativeEdge = (edge) => narrativeIds.has(edge.source) && narrativeIds.has(edge.target);
-      const itemAnchor = (item, side = 'center') => {
-        const size = item.size || { width: 100, height: 42 };
-        if (side === 'top') return { x: item.point.x, y: item.point.y - size.height / 2 + 2 };
-        if (side === 'bottom') return { x: item.point.x, y: item.point.y + size.height / 2 - 2 };
-        if (side === 'left') return { x: item.point.x - size.width / 2 + 3, y: item.point.y };
-        if (side === 'right') return { x: item.point.x + size.width / 2 - 3, y: item.point.y };
-        return { x: item.point.x, y: item.point.y };
-      };
-      const structuralEdgeIds = new Set();
-      const drawAssemblyConnector = (sourceId, targetId, edgeRelation, busY = null) => {
-        const from = placedById.get(sourceId);
-        const to = placedById.get(targetId);
-        if (!from || !to) return;
-        const related = isRelatedItem(from) || isRelatedItem(to);
-        const start = itemAnchor(from, 'bottom');
-        const end = itemAnchor(to, 'top');
-        const midY = busY || (start.y + end.y) / 2;
-        contentGroup.appendChild(svgEl('path', {
-          class: `egd-ontology-depth-connector egd-ontology-assembly-tree-connector egd-ontology-assembly-tree-${edgeRelation}`,
-          d: `M ${start.x} ${start.y} L ${start.x} ${midY} L ${end.x} ${midY} L ${end.x} ${end.y}`,
-          fill: 'none',
-          stroke: edgeRelation === 'contains' ? 'rgba(45, 90, 123, 0.50)' : 'rgba(45, 90, 123, 0.38)',
-          'stroke-width': phaseActive ? (related ? '1.7' : '1.15') : '0.9',
-          'stroke-linecap': 'square',
-          'stroke-linejoin': 'miter',
-          opacity: phaseActive ? (related ? '0.86' : '0.40') : '0.14',
-          'pointer-events': 'none',
-        }));
-      };
-      const drawReferenceConnector = (sourceId, targetId, options = {}) => {
-        const from = placedById.get(sourceId);
-        const to = placedById.get(targetId);
-        if (!from || !to) return;
-        const start = itemAnchor(from, options.fromSide || 'bottom');
-        const end = itemAnchor(to, options.toSide || 'top');
-        const busY = options.busY ?? (start.y + end.y) / 2;
-        const d = options.direct
-          ? `M ${start.x} ${start.y} L ${end.x} ${end.y}`
-          : `M ${start.x} ${start.y} L ${start.x} ${busY} L ${end.x} ${busY} L ${end.x} ${end.y}`;
-        if (options.glow) {
-          contentGroup.appendChild(svgEl('path', {
-            class: 'egd-ontology-reference-route-glow',
-            d,
-            fill: 'none',
-            stroke: options.glowStroke || 'rgba(255, 225, 156, 0.58)',
-            'stroke-width': options.glowWidth || '8',
-            'stroke-linecap': 'square',
-            'stroke-linejoin': 'miter',
-            opacity: phaseActive ? '0.74' : '0.12',
-            'pointer-events': 'none',
-          }));
-        }
-        contentGroup.appendChild(svgEl('path', {
-          class: 'egd-ontology-reference-route',
-          d,
-          fill: 'none',
-          stroke: options.stroke || 'rgba(63, 123, 97, 0.42)',
-          'stroke-width': options.width || '1.55',
-          'stroke-dasharray': options.dash || null,
-          'stroke-linecap': 'square',
-          'stroke-linejoin': 'miter',
-          opacity: phaseActive ? (options.opacity || '0.68') : '0.10',
-          'pointer-events': 'none',
-        }));
-      };
-      if (phase === 'present') {
-        const relationFor = (sourceId, targetId) => (graph?.edges || []).find((edge) => (
-          edge.source === sourceId
-          && edge.target === targetId
-          && (edge.relation === 'contains' || edge.relation === 'uses')
-        ));
-        [
-          ['desktop', 'terminal', null],
-          ['terminal', 'cpu', placedById.get('terminal')?.point.y + 38],
-          ['terminal', 'ram', placedById.get('terminal')?.point.y + 38],
-          ['terminal', 'disk', placedById.get('terminal')?.point.y + 38],
-        ].forEach(([sourceId, targetId, busY]) => {
-          const edge = relationFor(sourceId, targetId);
-          if (!edge) return;
-          structuralEdgeIds.add(edge.id);
-          drawAssemblyConnector(sourceId, targetId, edge.relation, busY);
-        });
-        drawReferenceConnector(
-          'projection.llm_chat_session.intent.context_binding',
-          'projection.llm_chat_session.action.message_send',
-          { stroke: 'rgba(63, 123, 97, 0.44)', width: '1.8', opacity: '0.60' },
-        );
-        drawReferenceConnector(
-          'projection.llm_chat_session.action.message_send',
-          'desktop',
-          { stroke: 'rgba(63, 123, 97, 0.34)', width: '1.35', opacity: '0.38', busY: placedById.get('desktop')?.point.y - 38 },
-        );
-        drawReferenceConnector(
-          'projection.llm_chat_session.action.message_send',
-          'terminal',
-          { stroke: 'rgba(63, 123, 97, 0.34)', width: '1.35', opacity: '0.38', busY: placedById.get('terminal')?.point.y - 38 },
-        );
-        drawReferenceConnector(
-          'projection.llm_chat_session.storage.session_file',
-          'disk',
-          { stroke: 'rgba(92, 97, 105, 0.24)', width: '1.2', dash: '5 6', opacity: '0.32' },
-        );
-      }
-
-      const relationPriority = new Set(['represented_by', 'binds', 'derived_from', 'provides_evidence_for', 'operates_inside', 'uses']);
-      const selectedRelationKey = localState.selectedRelation
-        ? `${localState.selectedRelation.source}|${localState.selectedRelation.relation}|${localState.selectedRelation.target}`
-        : '';
-      const referenceRelationKeys = new Set([
-        'entity.llm_chat_session|represented_by|projection.llm_chat_session.intent.context_binding',
-      ]);
-      const relationEdges = (graph?.edges || [])
-        .filter((edge) => (
-          !structuralEdgeIds.has(edge.id)
-          && (phase !== 'present' || referenceRelationKeys.has(`${edge.source}|${edge.relation}|${edge.target}`))
-          && relationPriority.has(edge.relation)
-          && placedById.has(edge.source)
-          && placedById.has(edge.target)
-          && !(edge.relation === 'uses' && ['desktop', 'terminal', 'cpu', 'ram', 'disk'].includes(edge.source) && ['desktop', 'terminal', 'cpu', 'ram', 'disk'].includes(edge.target))
-          && (
-            focusTarget !== 'pane'
-            || edge.source === selected?.id
-            || edge.target === selected?.id
-            || edge.kind === 'relation_map'
-            || isNarrativeEdge(edge)
-          )
-          && (isNarrativeEdge(edge) || edge.source === selected?.id || edge.target === selected?.id || edge.kind === 'relation_map')
-        ))
-        .sort((a, b) => {
-          const aSelected = a.source === selected?.id || a.target === selected?.id ? 0 : 1;
-          const bSelected = b.source === selected?.id || b.target === selected?.id ? 0 : 1;
-          return aSelected - bSelected || String(a.id || '').localeCompare(String(b.id || ''));
-        })
-        .slice(0, phase === 'present' ? 8 : 4);
-      relationEdges.forEach((edge, index) => {
-        const from = placedById.get(edge.source);
-        const to = placedById.get(edge.target);
-        const sameDepth = from.depth === to.depth;
-        const selectedEdge = selectedRelationKey === `${edge.source}|${edge.relation}|${edge.target}`;
-        const primaryRouteEdge = (
-          edge.source === 'entity.llm_chat_session'
-          && edge.target === 'projection.llm_chat_session.intent.context_binding'
-        );
-        const related = selectedEdge || isNarrativeEdge(edge) || selectedRelatedIds.has(edge.source) || selectedRelatedIds.has(edge.target);
-        const signX = Math.sign(to.point.x - from.point.x) || 1;
-        const signY = Math.sign(to.point.y - from.point.y) || 1;
-        const start = sameDepth ? itemAnchor(from, signX > 0 ? 'right' : 'left') : itemAnchor(from, signY > 0 ? 'bottom' : 'top');
-        const end = sameDepth ? itemAnchor(to, signX > 0 ? 'left' : 'right') : itemAnchor(to, signY > 0 ? 'top' : 'bottom');
-        const busY = sameDepth
-          ? start.y + (from.depth === 'virtual' ? 26 + index * 2 : -24 - index * 2)
-          : (start.y + end.y) / 2 + (index % 2 ? 6 : -6);
-        const stroke = primaryRouteEdge
-          ? 'rgba(234, 177, 70, 0.86)'
-          : edge.relation === 'binds'
-          ? 'rgba(63, 123, 97, 0.54)'
-          : edge.relation === 'represented_by'
-            ? 'rgba(138, 107, 46, 0.48)'
-            : edge.relation === 'provides_evidence_for' || edge.relation === 'derived_from'
-              ? 'rgba(111, 90, 154, 0.48)'
-              : 'rgba(92, 97, 105, 0.38)';
-        const relationOpacity = primaryRouteEdge
-          ? '0.84'
-          : phaseActive
-            ? (related ? '0.34' : '0.10')
-            : '0.05';
-        if (primaryRouteEdge) {
-          contentGroup.appendChild(svgEl('path', {
-            class: 'egd-ontology-inventory-relation-glow',
-            d: `M ${start.x} ${start.y} L ${start.x} ${busY} L ${end.x} ${busY} L ${end.x} ${end.y}`,
-            fill: 'none',
-            stroke: 'rgba(255, 225, 156, 0.70)',
-            'stroke-width': '10',
-            'stroke-linecap': 'square',
-            'stroke-linejoin': 'miter',
-            opacity: phaseActive ? '0.82' : '0.10',
-            'pointer-events': 'none',
-          }));
-        }
-        contentGroup.appendChild(svgEl('path', {
-          class: `egd-ontology-inventory-relation egd-ontology-clickable-relation egd-ontology-inventory-relation-${edge.relation}`,
-          d: `M ${start.x} ${start.y} L ${start.x} ${busY} L ${end.x} ${busY} L ${end.x} ${end.y}`,
-          fill: 'none',
-          stroke,
-          'stroke-width': primaryRouteEdge ? '3.6' : selectedEdge ? '1.4' : related ? '0.95' : '0.65',
-          'stroke-linecap': 'square',
-          'stroke-linejoin': 'miter',
-          opacity: relationOpacity,
-          onclick: (ev) => {
-            ev.preventDefault();
-            ev.stopPropagation();
-            onRelationSelect?.(edge, phase);
-          },
-        }));
-        contentGroup.appendChild(svgEl('polygon', {
-          class: 'egd-ontology-inventory-relation-arrow',
-          points: `${end.x},${end.y} ${end.x - signX * 8},${end.y - 4} ${end.x - signX * 8},${end.y + 4}`,
-          fill: stroke,
-          opacity: primaryRouteEdge ? '0.76' : phaseActive ? (related ? '0.30' : '0.08') : '0.04',
-          'pointer-events': 'none',
-        }));
-      });
-
-      placedItems.forEach((item) => {
-        const { node, depth, point, size } = item;
-        const facet = ontologyProjectionFacet(node.id);
-        const axis = ontologyAxisForNode(node);
-        const highlighted = activeDepth === depth;
-        const related = isRelatedItem(item);
-        const visual = nodeVisualFor(node, depth);
-        const rendered = renderOntologySvgNode(contentGroup, node, point, {
-          mode: 'focus',
-          color: visual.stroke || (facet ? ontologyFacetPlaneColor(facet) : ontologyAxisColor(axis)),
-          fill: visual.fill,
-          extraClass: `egd-ontology-pane-inventory-node egd-ontology-deck-node egd-ontology-depth-${depth}${related ? ' egd-ontology-pane-inventory-node-related' : ' egd-ontology-pane-inventory-node-unrelated'}${highlighted ? '' : ' egd-ontology-depth-muted'}`,
-          selected: node.id === selected?.id,
-          label: ontologyDisplayLabel(node, 'focus').replace(/^[^·]+·\s*/, ''),
-          meta: '',
-          size,
-          labelMax: phaseActive ? (node.id?.startsWith('projection.') ? 16 : 18) : 12,
-          metaMax: 0,
-          namespaceBadge: '',
-          layerBadge: '',
-          icon: nodeIconFor(node),
-          iconColor: visual.iconColor,
-          iconBg: visual.iconBg,
-          iconBgStroke: visual.iconBgStroke,
-          labelFill: visual.labelFill,
-          showPorts: phaseActive,
-          onclick: (ev) => {
-            ev.stopPropagation();
-            onSelect(node.id);
-          },
-        });
-        rendered.dataset.phase = phase;
-        rendered.dataset.depth = depth;
-        if (!phaseActive) rendered.setAttribute('opacity', related ? '0.42' : '0.20');
-        else if (!highlighted) rendered.setAttribute('opacity', related ? '0.56' : '0.12');
-        else if (!related) rendered.setAttribute('opacity', '0.34');
-      });
-
-      return {
-        phase,
-        bounds,
-        placedItems,
-        placedById,
-      };
-    };
-
-    if (usePaneMap) {
-      const panePlacements = new Map();
-      ['past', 'present', 'future'].forEach((phase) => {
-        panePlacements.set(phase, renderDeckPaneInventory(phase));
-      });
-      const drawTemporalObjectLink = (fromPhase, fromId, toPhase, toId, options = {}) => {
-        const fromPane = panePlacements.get(fromPhase);
-        const toPane = panePlacements.get(toPhase);
-        const from = fromPane?.placedById?.get(fromId);
-        const to = toPane?.placedById?.get(toId);
-        if (!from || !to) return;
-        const fromSize = from.size || { width: 104, height: 46 };
-        const toSize = to.size || { width: 104, height: 46 };
-        const forward = to.point.x >= from.point.x;
-        const start = {
-          x: from.point.x + (forward ? fromSize.width / 2 - 2 : -fromSize.width / 2 + 2),
-          y: from.point.y,
-        };
-        const end = {
-          x: to.point.x - (forward ? toSize.width / 2 - 2 : -toSize.width / 2 + 2),
-          y: to.point.y,
-        };
-        const busX = options.busX || (start.x + end.x) / 2;
-        const related = narrativeIds.has(fromId) || narrativeIds.has(toId) || selectedRelatedIds.has(fromId) || selectedRelatedIds.has(toId);
-        const primary = options.kind === 'evidence-context' || options.kind === 'intent-goal' || options.kind === 'plan-branch';
-        const glow = options.kind === 'intent-goal' || options.glow;
-        const contextRoute = options.kind === 'evidence-context';
-        const secondaryRoute = !glow && !contextRoute;
-        temporalLinkGroup.appendChild(svgEl('path', {
-          class: `egd-ontology-temporal-object-link-underlay egd-ontology-temporal-object-link-underlay-${options.kind || 'flow'}`,
-          d: `M ${start.x} ${start.y} L ${busX} ${start.y} L ${busX} ${end.y} L ${end.x} ${end.y}`,
-          fill: 'none',
-          stroke: glow ? 'rgba(255, 225, 156, 0.72)' : 'rgba(255, 255, 255, 0.82)',
-          'stroke-width': glow ? '15' : secondaryRoute ? '3.2' : String((Number(options.width || 2) || 2) + 3.4),
-          'stroke-linecap': 'square',
-          'stroke-linejoin': 'miter',
-          opacity: secondaryRoute ? '0.22' : '1',
-          'pointer-events': 'none',
-        }));
-        temporalLinkGroup.appendChild(svgEl('path', {
-          class: `egd-ontology-temporal-object-link egd-ontology-temporal-object-link-${options.kind || 'flow'}`,
-          d: `M ${start.x} ${start.y} L ${busX} ${start.y} L ${busX} ${end.y} L ${end.x} ${end.y}`,
-          fill: 'none',
-          stroke: glow ? 'rgba(234, 177, 70, 0.88)' : options.stroke || 'rgba(111, 90, 154, 0.34)',
-          'stroke-width': glow ? '5.6' : contextRoute ? '2.6' : secondaryRoute ? '1.15' : primary ? '2.2' : related ? options.width || '1.6' : '1.1',
-          'stroke-dasharray': options.dash || null,
-          'stroke-linecap': 'square',
-          'stroke-linejoin': 'miter',
-          opacity: glow ? '0.98' : contextRoute ? '0.42' : secondaryRoute ? '0.16' : related ? '0.32' : '0.10',
-          'pointer-events': 'none',
-        }));
-        temporalLinkGroup.appendChild(svgEl('circle', {
-          class: 'egd-ontology-temporal-object-link-source',
-          cx: start.x,
-          cy: start.y,
-          r: primary ? 4.2 : 3.2,
-          fill: options.stroke || 'rgba(111, 90, 154, 0.34)',
-          opacity: glow ? '0.72' : contextRoute ? '0.34' : secondaryRoute ? '0.12' : related ? '0.40' : '0.16',
-          'pointer-events': 'none',
-        }));
-        temporalLinkGroup.appendChild(svgEl('polygon', {
-          class: 'egd-ontology-temporal-object-link-arrow',
-          points: `${end.x},${end.y} ${end.x - (forward ? 8 : -8)},${end.y - 4} ${end.x - (forward ? 8 : -8)},${end.y + 4}`,
-          fill: options.stroke || 'rgba(111, 90, 154, 0.34)',
-          opacity: glow ? '0.78' : contextRoute ? '0.38' : secondaryRoute ? '0.12' : related ? '0.42' : '0.16',
-          'pointer-events': 'none',
-        }));
-        if (options.label && options.showLabel) {
-          const labelX = busX + (forward ? -6 : 6);
-          const labelY = (start.y + end.y) / 2 - 8;
-          const labelText = String(options.label);
-          const labelWidth = Math.max(64, Math.min(124, labelText.length * 9.5 + 18));
-          temporalLinkGroup.appendChild(svgEl('rect', {
-            class: 'egd-ontology-temporal-object-link-label-bg',
-            x: labelX - labelWidth / 2,
-            y: labelY - 10,
-            width: labelWidth,
-            height: 24,
-            rx: 8,
-            fill: 'rgba(255, 255, 255, 0.90)',
-            stroke: options.stroke || 'rgba(111, 90, 154, 0.34)',
-            'stroke-width': '0.8',
-            'stroke-opacity': '0.28',
-            opacity: related ? '1' : '0.42',
-            'pointer-events': 'none',
-          }));
-          temporalLinkGroup.appendChild(svgEl('text', {
-            class: 'egd-ontology-temporal-object-link-label',
-            x: labelX,
-            y: labelY + 4,
-            fill: options.stroke || 'rgba(111, 90, 154, 0.72)',
-            'font-family': 'Inter, -apple-system, Segoe UI, system-ui, sans-serif',
-            'font-size': primary ? '12' : '10.5',
-            'font-weight': '900',
-            'text-anchor': 'middle',
-            opacity: related ? '1' : '0.42',
-            'pointer-events': 'none',
-          }, labelText));
-        }
-      };
-      const drawGoalLensBridgeContract = () => {
-        if (selected?.id !== 'goal') return;
-        const fromPane = panePlacements.get('present');
-        const toPane = panePlacements.get('future');
-        const from = fromPane?.placedById?.get('projection.llm_chat_session.intent.context_binding');
-        const to = toPane?.placedById?.get('goal');
-        if (!from || !to) return;
-        const start = {
-          x: from.point.x + (from.size?.width || 120) / 2 - 4,
-          y: from.point.y,
-        };
-        const end = {
-          x: to.point.x - (to.size?.width || 120) / 2 + 4,
-          y: to.point.y,
-        };
-        const busX = (start.x + end.x) / 2;
-        const d = `M ${start.x} ${start.y} L ${busX} ${start.y} L ${busX} ${end.y} L ${end.x} ${end.y}`;
-        temporalLinkGroup.appendChild(svgEl('path', {
-          d,
-          fill: 'none',
-          stroke: 'rgba(255, 255, 255, 0.88)',
-          'stroke-width': '8',
-          'stroke-linecap': 'square',
-          'stroke-linejoin': 'miter',
-          'pointer-events': 'none',
-        }));
-        temporalLinkGroup.appendChild(svgEl('path', {
-          class: 'egd-ontology-guide-goal-bridge',
-          d,
-          fill: 'none',
-          stroke: 'rgba(91, 67, 136, 0.82)',
-          'stroke-width': '2.4',
-          'stroke-linecap': 'square',
-          'stroke-linejoin': 'miter',
-          'pointer-events': 'none',
-        }));
-        [busX - 18, busX + 18].forEach((x) => {
-          temporalLinkGroup.appendChild(svgEl('rect', {
-            class: 'egd-ontology-guide-goal-gate',
-            x: x - 6,
-            y: end.y - 22,
-            width: 12,
-            height: 44,
-            rx: 4,
-            fill: 'rgba(91, 67, 136, 0.16)',
-            stroke: 'rgba(91, 67, 136, 0.70)',
-            'stroke-width': '1.5',
-            'pointer-events': 'none',
-          }));
-          temporalLinkGroup.appendChild(svgEl('circle', {
-            class: 'egd-ontology-guide-goal-gate-port',
-            cx: x,
-            cy: end.y,
-            r: 4.2,
-            fill: '#FFFFFF',
-            stroke: 'rgba(91, 67, 136, 0.76)',
-            'stroke-width': '1.5',
-            'pointer-events': 'none',
-          }));
-        });
-        [start, end].forEach((point) => {
-          temporalLinkGroup.appendChild(svgEl('circle', {
-            class: 'egd-ontology-guide-goal-endpoint',
-            cx: point.x,
-            cy: point.y,
-            r: 6,
-            fill: '#FFFFFF',
-            stroke: 'rgba(91, 67, 136, 0.78)',
-            'stroke-width': '2',
-            'pointer-events': 'none',
-          }));
-        });
-      };
-      deckScene.temporalRoutes.forEach((route) => {
-        drawTemporalObjectLink(route.fromPhase, route.fromId, route.toPhase, route.toId, route);
-      });
-      drawGoalLensBridgeContract();
-      graphGroup.appendChild(paneGroup);
-      graphGroup.appendChild(centerGroup);
-      graphGroup.appendChild(contextGroup);
-      graphGroup.appendChild(noviceOverlayGroup);
+  function renderOntologyMap(stage, graph, localState) {
+    const model = getOntologyModel(graph);
+    if (!model.snapshots.length) {
+      stage.textContent = '';
+      stage.appendChild(el('div', { class: 'egd-ontology-empty' }, '표시할 composite snapshot이 없습니다.'));
       return;
     }
-
-    if (canonicalNode) {
-      renderOntologySvgNode(paneGroup, canonicalNode, { x: 664, y: 450 }, {
-        mode: 'focus',
-        color: ontologyAxisColor('virtual'),
-        fill: 'rgba(255, 249, 237, 0.96)',
-        extraClass: 'egd-ontology-node-canonical egd-ontology-virtual-overlay',
-        selected: canonicalNode.id === selected?.id,
-        label: ontologyDisplayLabel(canonicalNode, 'focus'),
-        meta: '가상 오버레이 · 표준 정체성',
-        size: { width: 244, height: 56 },
-        labelMax: 28,
-        metaMax: 22,
-        onclick: (ev) => {
-          ev.stopPropagation();
-          onSelect(canonicalNode.id);
-        },
-      });
+    const rerender = () => renderOntologyMap(stage, graph, localState);
+    syncOntologyPresentationState();
+    if (!ONTOLOGY_TIME_PANE_ORDER.includes(localState.activePane)) localState.activePane = 'present';
+    if (!ONTOLOGY_LAYER_ORDER.includes(localState.activeLayer)) setOntologyLayer(localState, 'virtual');
+    let selected = model.byRef.get(localState.selectedRefId || localState.selectedId);
+    if (!selected || selected.timeSlice !== localState.activePane) {
+      selected = model.rootsByPhase.get(localState.activePane) || null;
     }
-
-    paneGroup.appendChild(svgEl('line', {
-      x1: present.x + 28,
-      y1: present.y + 106,
-      x2: present.x + present.w - 28,
-      y2: present.y + 106,
-      stroke: 'rgba(45, 90, 123, 0.12)',
-      'stroke-width': '1.3',
-    }));
-    paneGroup.appendChild(svgEl('line', {
-      x1: present.x + 28,
-      y1: present.y + 252,
-      x2: present.x + present.w - 28,
-      y2: present.y + 252,
-      stroke: 'rgba(138, 107, 46, 0.12)',
-      'stroke-width': '1.3',
-    }));
-    paneGroup.appendChild(svgEl('rect', {
-      class: 'egd-ontology-physical-object-band',
-      x: present.x + 34,
-      y: present.y + 82,
-      width: present.w - 68,
-      height: 92,
-      rx: 16,
-      fill: 'rgba(45, 90, 123, 0.045)',
-      stroke: 'rgba(45, 90, 123, 0.10)',
-      'stroke-width': '1',
-      'pointer-events': 'none',
-    }));
-    paneGroup.appendChild(svgEl('path', {
-      class: 'egd-ontology-binding-ribbon',
-      d: 'M 450 330 C 548 318, 766 318, 878 330',
-      fill: 'none',
-      stroke: 'rgba(138, 107, 46, 0.18)',
-      'stroke-width': '18',
-      'stroke-linecap': 'round',
-      'pointer-events': 'none',
-    }));
-    paneGroup.appendChild(svgEl('path', {
-      class: 'egd-ontology-binding-ribbon-core',
-      d: 'M 450 330 C 548 318, 766 318, 878 330',
-      fill: 'none',
-      stroke: 'rgba(138, 107, 46, 0.24)',
-      'stroke-width': '2',
-      'stroke-linecap': 'round',
-      'pointer-events': 'none',
-    }));
-    paneGroup.appendChild(svgEl('rect', {
-      class: 'egd-ontology-virtual-overlay-band',
-      x: present.x + 118,
-      y: present.y + 308,
-      width: present.w - 236,
-      height: 124,
-      rx: 18,
-      fill: 'rgba(138, 107, 46, 0.055)',
-      stroke: 'rgba(138, 107, 46, 0.13)',
-      'stroke-width': '1',
-      'pointer-events': 'none',
-    }));
-    [
-      ['M 518 296 C 548 328, 614 372, 664 422', 'rgba(45, 90, 123, 0.22)'],
-      ['M 664 296 C 664 334, 664 384, 664 422', 'rgba(63, 123, 97, 0.22)'],
-      ['M 810 296 C 782 328, 720 372, 664 422', 'rgba(89, 104, 117, 0.22)'],
-    ].forEach(([d, stroke]) => {
-      paneGroup.appendChild(svgEl('path', {
-        class: 'egd-ontology-meaning-ribbon',
-        d,
-        fill: 'none',
-        stroke,
-        'stroke-width': '2.4',
-        'stroke-linecap': 'round',
-        'stroke-dasharray': '7 6',
-        'pointer-events': 'none',
-      }));
-    });
-
-    renderProjection('space', { x: 518, y: 274 }, { width: 136, height: 44 });
-    renderProjection('topology', { x: 664, y: 274 }, { width: 136, height: 44 });
-    renderProjection('storage', { x: 810, y: 274 }, { width: 136, height: 44 });
-    renderProjection('intent', { x: 664, y: 384 }, { width: 210, height: 44 });
-    renderProjection('time', { x: 204, y: 346 }, { width: 178, height: 44 });
-    renderProjection('action', { x: 1116, y: 346 }, { width: 178, height: 44 });
-
-    const drawBindingAnchor = (label, x, y, color) => {
-      const chip = svgEl('g', { class: 'egd-ontology-binding-anchor' });
-      chip.appendChild(svgEl('title', {}, label));
-      chip.appendChild(svgEl('rect', {
-        x,
-        y,
-        width: 76,
-        height: 24,
-        rx: 12,
-        fill: 'rgba(255, 255, 255, 0.82)',
-        stroke: color,
-        'stroke-width': '1.1',
-        'stroke-opacity': '0.22',
-      }));
-      chip.appendChild(svgEl('circle', {
-        cx: x + 20,
-        cy: y + 12,
-        r: 4.5,
-        fill: color,
-        opacity: '0.82',
-      }));
-      chip.appendChild(svgEl('line', {
-        x1: x + 31,
-        y1: y + 12,
-        x2: x + 58,
-        y2: y + 12,
-        stroke: color,
-        'stroke-width': '1.6',
-        'stroke-linecap': 'round',
-        opacity: '0.46',
-      }));
-      centerGroup.appendChild(chip);
-    };
-    drawBindingAnchor('토폴로지', 530, 330, ontologyAxisColor('space'));
-    drawBindingAnchor('저장', 622, 330, ontologyAxisColor('space'));
-    drawBindingAnchor('의도', 714, 330, ontologyAxisColor('virtual'));
-    drawBindingAnchor('행동', 1054, 404, ontologyAxisColor('time'));
-
-    const contextEdges = (graph?.edges || []).filter((edge) => (
-      edge.source === canonicalId
-      && ['binds', 'derived_from', 'provides_evidence_for', 'operates_inside'].includes(edge.relation)
-    ));
-    contextEdges.slice(0, 4).forEach((edge, index) => {
-      const node = ontologyNodeById(graph, edge.target);
-      const x = 442 + index * 164;
-      const y = 604;
-      const chip = svgEl('g', {
-        class: 'egd-ontology-context-chip',
-        onclick: (ev) => {
-          ev.stopPropagation();
-          onSelect(edge.target);
-        },
-      });
-      chip.appendChild(svgEl('rect', {
-        x,
-        y,
-        width: 150,
-        height: 32,
-        rx: 16,
-        fill: 'rgba(247, 245, 240, 0.88)',
-        stroke: 'rgba(92, 97, 105, 0.22)',
-        'stroke-width': '1.2',
-      }));
-      chip.appendChild(svgEl('text', {
-        x: x + 75,
-        y: y + 21,
-        fill: '#5A5A5A',
-        'font-family': 'Inter, -apple-system, Segoe UI, system-ui, sans-serif',
-        'font-size': '10',
-        'font-weight': '700',
-        'text-anchor': 'middle',
-      }, ontologyTrimText(ontologyDisplayLabel(node, 'focus') || edge.target, 18)));
-      contextGroup.appendChild(chip);
-    });
-
-    drawNoviceGuideBoard();
-
-    graphGroup.appendChild(paneGroup);
-    graphGroup.appendChild(centerGroup);
-    graphGroup.appendChild(contextGroup);
-    graphGroup.appendChild(noviceOverlayGroup);
-  }
-
-  function ontologyLaneForNode(node) {
-    const id = node?.id || '';
-    if (id.includes('past') || id.startsWith('history.') || id.startsWith('logs.') || id.startsWith('revisions.')) return 'past';
-    if (id.includes('present') || id.startsWith('desk.') || id.startsWith('surface.') || id.startsWith('architecture.')) return 'present';
-    if (id.includes('future') || id.startsWith('vision') || id.startsWith('goal') || id.startsWith('plan') || id.startsWith('task') || id.startsWith('candidate.')) return 'future';
-    if (id.includes('multiverse') || id.startsWith('alternate.') || id.startsWith('simulated.') || id.startsWith('candidate.')) return 'multiverse';
-    return 'support';
-  }
-
-  function ontologyProjectPoint(point, mode, tilt) {
-    const z = mode === 'spatial' ? (point.z || 0) : 0;
-    const factor = Math.max(0, Math.min(60, Number(tilt) || 0)) / 60;
-    return {
-      x: point.x + z * 46 * factor,
-      y: point.y - z * 28 * factor,
-    };
-  }
-
-  function ontologyLayoutGraph(graph, mode, selected) {
-    const nodes = graph?.nodes || [];
-    const positions = new Map();
-    const layerOrder = ['reality', 'architecture', 'time', 'operation', 'runtime', 'evidence', 'ontology'];
-    const timeLaneOrder = ['past', 'present', 'future', 'multiverse', 'support'];
-    const coreSpatial = new Map([
-      ['reality.base', { x: 70, y: 320, z: -2 }],
-      ['architecture.runtime', { x: 310, y: 240, z: -1 }],
-      ['time.past', { x: 250, y: 520, z: -1 }],
-      ['time.present', { x: 590, y: 320, z: 0 }],
-      ['operation.layer', { x: 820, y: 320, z: 1 }],
-      ['actor.runtime', { x: 1020, y: 320, z: 2 }],
-      ['output.structured', { x: 820, y: 540, z: 1 }],
-      ['time.future', { x: 1090, y: 160, z: 2 }],
-      ['time.multiverse', { x: 1120, y: 520, z: 2 }],
-      ['source.ref', { x: 580, y: 560, z: 0 }],
-      ['egdesk.world', { x: 560, y: 120, z: 0 }],
-    ]);
-
-    if (mode === 'focus') {
-      const selectedNode = selected || nodes[0] || null;
-      const canonicalId = ontologyCanonicalIdForNode(graph, selectedNode);
-      const projectionNodes = ontologyProjectionNodesForCanonical(graph, canonicalId).filter((node) => nodes.some((candidate) => candidate.id === node.id));
-      const canonicalNode = nodes.find((node) => node.id === canonicalId) || selectedNode;
-      if (canonicalNode) positions.set(canonicalNode.id, { x: 660, y: 360, z: 0.5 });
-
-      const facetSlots = {
-        space: { x: 330, y: 190, z: -1.2 },
-        topology: { x: 660, y: 145, z: -0.9 },
-        storage: { x: 990, y: 190, z: -1.2 },
-        time: { x: 330, y: 545, z: 1.1 },
-        intent: { x: 660, y: 595, z: 1.25 },
-        action: { x: 990, y: 545, z: 1.1 },
-      };
-      projectionNodes.forEach((node, index) => {
-        const facet = ontologyProjectionFacet(node.id);
-        const slot = facetSlots[facet] || {
-          x: 340 + (index % 3) * 310,
-          y: 190 + Math.floor(index / 3) * 320,
-          z: (index % 3) - 1,
-        };
-        positions.set(node.id, slot);
-      });
-
-      const remainder = nodes
-        .filter((node) => !positions.has(node.id))
-        .sort((a, b) => a.id.localeCompare(b.id));
-      remainder.forEach((node, index) => {
-        const x = 365 + index * 210;
-        positions.set(node.id, { x, y: 710, z: 0 });
-      });
-      return positions;
+    const emptyPhase = !selected;
+    if (selected) {
+      selectOntologyOccurrence(localState, model, selected.refId, { keepLayer: true });
+    } else {
+      localState.selectedRefId = null;
+      localState.selectedId = null;
+      localState.selectedConceptId = null;
     }
-
-    if (mode === 'time') {
-      const groups = new Map(timeLaneOrder.map((lane) => [lane, []]));
-      for (const node of nodes) groups.get(ontologyLaneForNode(node)).push(node);
-      for (const [lane, group] of groups.entries()) {
-        const laneIndex = timeLaneOrder.indexOf(lane);
-        const x = 95 + laneIndex * 260;
-        group
-          .sort((a, b) => a.id.localeCompare(b.id))
-          .forEach((node, index) => {
-            positions.set(node.id, { x, y: 105 + index * 74, z: laneIndex - 2 });
-          });
-      }
-      return positions;
-    }
-
-    if (mode === 'spatial') {
-      const remainder = nodes.filter((node) => !coreSpatial.has(node.id));
-      for (const [id, pos] of coreSpatial.entries()) positions.set(id, pos);
-      const layerGroups = new Map();
-      for (const node of remainder) {
-        const layer = node.layer || 'ontology';
-        if (!layerGroups.has(layer)) layerGroups.set(layer, []);
-        layerGroups.get(layer).push(node);
-      }
-      for (const [layer, group] of layerGroups.entries()) {
-        const layerIndex = layerOrder.indexOf(layer);
-        const radius = 145 + Math.max(0, layerIndex) * 22;
-        const center = layer === 'evidence'
-          ? { x: 300, y: 470, z: -1 }
-          : layer === 'architecture'
-            ? { x: 360, y: 260, z: -1 }
-            : layer === 'runtime'
-              ? { x: 960, y: 370, z: 2 }
-              : layer === 'time'
-                ? { x: 900, y: 285, z: 1 }
-                : { x: 610, y: 340, z: 0 };
-        group
-          .sort((a, b) => a.id.localeCompare(b.id))
-          .forEach((node, index) => {
-            const angle = (Math.PI * 2 * index) / Math.max(1, group.length);
-            positions.set(node.id, {
-              x: center.x + Math.cos(angle) * radius,
-              y: center.y + Math.sin(angle) * radius * 0.58,
-              z: center.z + ((index % 3) - 1) * 0.45,
-            });
-          });
-      }
-      return positions;
-    }
-
-    const groups = new Map(layerOrder.map((layer) => [layer, []]));
-    for (const node of nodes) {
-      const layer = groups.has(node.layer) ? node.layer : 'ontology';
-      groups.get(layer).push(node);
-    }
-    for (const [layer, group] of groups.entries()) {
-      const layerIndex = layerOrder.indexOf(layer);
-      const x = 80 + layerIndex * 185;
-      group
-        .sort((a, b) => a.id.localeCompare(b.id))
-        .forEach((node, index) => {
-          positions.set(node.id, { x, y: 92 + index * 70, z: layerIndex - 3 });
-        });
-    }
-    return positions;
-  }
-
-  function ontologyAliasLine(node) {
-    return Array.isArray(node?.aliases) && node.aliases.length
-      ? node.aliases.join(', ')
-      : '';
-  }
-
-  function ontologyAbbreviationLines(node) {
-    if (!node?.abbreviations || typeof node.abbreviations !== 'object') return [];
-    return Object.entries(node.abbreviations)
-      .filter(([, values]) => Array.isArray(values) && values.length)
-      .map(([key, values]) => `${key}: ${values.join(' / ')}`);
-  }
-
-  function ontologyContextBundle(graph, nodeId) {
-    const node = (graph?.nodes || []).find((item) => item.id === nodeId);
-    if (!node) return '';
-    const edges = (graph?.edges || []).filter((edge) => edge.source === nodeId || edge.target === nodeId);
-    const edgeLines = edges.map((edge) => `- ${edge.source} -[${edge.relation}]-> ${edge.target}`).join('\n');
-    const aliasLine = ontologyAliasLine(node);
-    const abbreviationLines = ontologyAbbreviationLines(node);
-    return [
-      `# ${node.label || node.id}`,
-      '',
-      `id: ${node.id}`,
-      `type: ${node.type || ''}`,
-      `layer: ${node.layer || ''}`,
-      `path: ${node.path || 'synthetic'}`,
-      ...(aliasLine ? [`aliases: ${aliasLine}`] : []),
-      '',
-      node.summary || '',
-      ...(abbreviationLines.length ? [
-        '',
-        '## Abbreviations',
-        ...abbreviationLines.map((line) => `- ${line}`),
-      ] : []),
-      '',
-      '## Relations',
-      edgeLines || '- none',
-      '',
-      '## Body',
-      node.body || '(no body)',
-    ].join('\n');
-  }
-
-  function renderOntologyMap(stage, detail, graph, localState) {
-    const allNodes = graph?.nodes || [];
-    const allEdges = graph?.edges || [];
-    const selected = allNodes.find((node) => node.id === localState.selectedId)
-      || allNodes.find((node) => node.id === 'entity.llm_chat_session')
-      || allNodes.find((node) => node.id === 'egdesk.world')
-      || allNodes[0]
-      || null;
-    if (selected) localState.selectedId = selected.id;
-    if (!ONTOLOGY_TIME_PANE_ORDER.includes(localState.activePane)) {
-      localState.activePane = selected ? ontologyPhaseForNode(selected) : 'present';
-    }
-    localState.activeDepth = ontologyNormalizeDepth(
-      localState.activeDepth,
-      ontologyDefaultDepthForPane(localState.activePane || 'present', selected),
+    setOntologyLayer(
+      localState,
+      ONTOLOGY_LAYER_ORDER.includes(localState.activeLayer) ? localState.activeLayer : selected?.layer || 'virtual',
     );
-    const visibleGraph = ontologyVisibleGraph(graph, localState.mode, selected);
-    const nodes = visibleGraph.nodes || [];
-    const edges = visibleGraph.edges || [];
-    const positions = ontologyLayoutGraph({ ...graph, nodes }, localState.mode, selected);
+    const layerPovShiftV = localState.activeLayer === 'physical' ? -0.170 : 0;
+    const camera = getOntologyCamera(localState);
+    const directChildren = emptyPhase ? [] : (model.childrenByRef.get(selected.refId) || []);
+    const mainChildren = directChildren.filter((occurrence) => occurrence.layer === localState.activeLayer);
+    const visibleRefs = selected ? [selected, ...directChildren] : [];
+    const visibleRefIds = new Set(visibleRefs.map((occurrence) => occurrence.refId));
+    const temporallyCoupledRefIds = new Set();
+    model.referenceEdges.forEach((edge) => {
+      const source = model.byRef.get(edge.sourceRef);
+      const target = model.byRef.get(edge.targetRef);
+      if (!source || !target || source.timeSlice === target.timeSlice) return;
+      if (visibleRefIds.has(source.refId) && target.timeSlice !== localState.activePane) {
+        temporallyCoupledRefIds.add(target.refId);
+      }
+      if (visibleRefIds.has(target.refId) && source.timeSlice !== localState.activePane) {
+        temporallyCoupledRefIds.add(source.refId);
+      }
+    });
     const card = stage.closest?.('.egd-ontology-card');
-    if (card) card.classList.toggle('egd-ontology-canvas-first', false);
-    document.documentElement.classList.toggle('egd-ontology-focus-active', localState.mode === 'focus');
-    document.documentElement.classList.remove('egd-ontology-object-focus-active');
+    if (card) {
+      card.classList.add('egd-ontology-canvas-first', 'egd-ontology-v2');
+      card.dataset.activePane = localState.activePane;
+      card.dataset.activeLayer = localState.activeLayer;
+      card.dataset.layerPovShiftV = layerPovShiftV.toFixed(3);
+    }
+
     const stageRect = stage.getBoundingClientRect?.();
-    const stageAspect = stageRect?.height > 20 ? stageRect.width / stageRect.height : 1.45;
-    const lensViewBox = (centerX, y, height, { minWidth = 920, maxWidth = 1120 } = {}) => {
-      const width = Math.max(minWidth, Math.min(maxWidth, Math.round(height * stageAspect)));
-      return `${Math.round(centerX - width / 2)} ${y} ${width} ${height}`;
+    const height = 760;
+    const aspect = stageRect?.height > 100 ? stageRect.width / stageRect.height : 1.65;
+    const width = Math.max(1120, Math.min(1580, Math.round(height * aspect)));
+    const paneBounds = {};
+    const timeShares = localState.activePane === 'past'
+      ? [0.18, 0.82, 0.91, 1]
+      : localState.activePane === 'future'
+        ? [0, 0.09, 0.18, 0.82]
+        : [0, 0.18, 0.82, 1];
+    const activeTimeIndex = ONTOLOGY_TIME_PANE_ORDER.indexOf(localState.activePane);
+    const topY = 96;
+    // Keep the trailing layer above the Desk Dock instead of letting the
+    // projected plane disappear through the card's lower edge.
+    const bottomY = height - 72;
+    const topLeft = -48;
+    const topRight = width + 48;
+    const bottomLeft = -170;
+    const bottomRight = width + 170;
+    const sideTimeTiltY = 72;
+    const interpolateX = (left, right, t) => left + (right - left) * t;
+    const boundaryTiltY = (boundaryIndex) => {
+      if (boundaryIndex < activeTimeIndex) {
+        return sideTimeTiltY * (activeTimeIndex - boundaryIndex) / Math.max(1, activeTimeIndex);
+      }
+      if (boundaryIndex > activeTimeIndex + 1) {
+        return sideTimeTiltY * (boundaryIndex - activeTimeIndex - 1)
+          / Math.max(1, ONTOLOGY_TIME_PANE_ORDER.length - activeTimeIndex - 1);
+      }
+      return 0;
     };
-    const focusViewBox = (() => {
-      if (localState.mode !== 'focus') return '0 0 1320 780';
-      return '0 76 1320 740';
-    })();
+    ONTOLOGY_TIME_PANE_ORDER.forEach((phase, index) => {
+      const leftTiltY = boundaryTiltY(index);
+      const rightTiltY = boundaryTiltY(index + 1);
+      paneBounds[phase] = {
+        x: 0,
+        y: 0,
+        w: width,
+        h: height,
+        corners: {
+          tl: {
+            x: interpolateX(topLeft, topRight, timeShares[index]),
+            y: topY - leftTiltY,
+          },
+          tr: {
+            x: interpolateX(topLeft, topRight, timeShares[index + 1]),
+            y: topY - rightTiltY,
+          },
+          br: {
+            x: interpolateX(bottomLeft, bottomRight, timeShares[index + 1]),
+            y: bottomY - rightTiltY,
+          },
+          bl: {
+            x: interpolateX(bottomLeft, bottomRight, timeShares[index]),
+            y: bottomY - leftTiltY,
+          },
+        },
+      };
+    });
+    const geometries = new Map(Object.entries(paneBounds).map(([phase, bounds]) => [
+      phase,
+      createOntologyDeckGeometry(bounds),
+    ]));
+    // Virtual and physical keep a stable world-space order. Selecting physical
+    // lowers the POV by one depth step; it never swaps the two plane frames.
+    const virtualLayerFrame = { u: 0, v: 0.055 + layerPovShiftV, w: 1, h: 0.620 };
+    const physicalLayerFrame = { u: 0, v: 0.225 + layerPovShiftV, w: 1, h: 0.620 };
+    const layerFrameSpecs = {
+      virtual: virtualLayerFrame,
+      physical: physicalLayerFrame,
+    };
+    const planeSpec = { u: 0, v: 0, w: 1, h: 1 };
+    const layerSpecs = {
+      virtual: { ...planeSpec },
+      physical: { ...planeSpec },
+    };
+    const sideLayerSpecs = layerSpecs;
+    const layerGeometries = new Map();
+    ONTOLOGY_TIME_PANE_ORDER.forEach((phase) => {
+      ONTOLOGY_LAYER_ORDER.forEach((layer) => {
+        layerGeometries.set(
+          `${phase}:${layer}`,
+          createOntologyLayerGeometry(geometries.get(phase), layerFrameSpecs[layer]),
+        );
+      });
+    });
+    const layerGeometryFor = (phase, layer) => layerGeometries.get(`${phase}:${layer}`);
+    const layerRenderOrder = ONTOLOGY_LAYER_ORDER
+      .filter((layer) => layer !== localState.activeLayer)
+      .concat(localState.activeLayer);
 
     stage.textContent = '';
     const svg = svgEl('svg', {
-      class: `egd-ontology-svg egd-ontology-mode-${localState.mode}`,
-      viewBox: focusViewBox,
+      class: 'egd-ontology-svg egd-ontology-v2-svg',
+      viewBox: `0 0 ${width} ${height}`,
       preserveAspectRatio: 'xMidYMid meet',
       role: 'img',
-      'aria-label': 'EG-Desk 온톨로지 지도',
-      style: localState.mode === 'spatial'
-        ? { transform: `perspective(1100px) rotateX(${Math.round(localState.tilt * 0.35)}deg)` }
-        : {},
+      'aria-label': '시간 및 가상 물리 층을 탐색하는 온톨로지 복합 렌즈',
     });
-    const graphGroup = svgEl('g', {
-      class: 'egd-ontology-graph',
-      transform: localState.mode === 'focus'
-        ? `scale(${localState.zoom})`
-        : `translate(${localState.pan.x} ${localState.pan.y}) scale(${localState.zoom})`,
-      style: localState.mode === 'spatial'
-        ? { transformOrigin: '50% 50%', transformBox: 'fill-box' }
-        : {},
+    const cameraGroup = svgEl('g', {
+      class: 'egd-ontology-v2-camera',
+      data: { cameraSpace: 'plane' },
     });
+    const surfaceGroup = svgEl('g', { class: 'egd-ontology-v2-surfaces' });
+    const edgeGroup = svgEl('g', { class: 'egd-ontology-v2-reference-edges' });
+    const depthEdgeGroup = svgEl('g', { class: 'egd-ontology-v2-reference-edges egd-ontology-v2-depth-edges' });
+    const coupledBehindNodeGroup = svgEl('g', { class: 'egd-ontology-v2-nodes egd-ontology-v2-coupled-behind-nodes' });
+    const frontLayerVeilGroup = svgEl('g', { class: 'egd-ontology-v2-front-layer-veil' });
+    const activeNodeGroup = svgEl('g', { class: 'egd-ontology-v2-nodes egd-ontology-v2-active-nodes' });
+    const fixedNodeGroup = svgEl('g', { class: 'egd-ontology-v2-side-nodes' });
+    const cameraOverlayGroup = svgEl('g', { class: 'egd-ontology-v2-camera-overlays' });
+    const overlayGroup = svgEl('g', { class: 'egd-ontology-v2-overlays' });
+    const layerControlGroup = svgEl('g', { class: 'egd-ontology-v2-layer-controls' });
+    const placements = new Map();
+    const sideInventories = new Map();
 
-    if (localState.mode === 'focus') {
-      renderOntologyFocusPlanes(graphGroup, graph, selected, localState, (nodeId) => {
-        const nextNode = ontologyNodeById(graph, nodeId);
-        localState.focusTarget = 'object';
-        localState.selectedId = nodeId;
-        localState.activePane = ontologyPhaseForNode(nextNode);
-        localState.activeDepth = ontologyDepthForNode(nextNode);
-        localState.selectedRelation = null;
-        ontologyResetFocusViewport(localState);
-        renderOntologyMap(stage, detail, graph, localState);
-      }, (phase) => {
-        ontologySetPane(localState, phase);
-        localState.activeDepth = ontologyNormalizeDepth(
-          localState.activeDepth,
-          ontologyDefaultDepthForPane(phase, selected),
-        );
-        renderOntologyMap(stage, detail, graph, localState);
-      }, (edge, phase) => {
-        const sourceNode = ontologyNodeById(graph, edge.source);
-        localState.focusTarget = 'relation';
-        localState.activePane = phase || localState.activePane || 'present';
-        localState.activeDepth = ontologyDepthForNode(sourceNode);
-        localState.selectedRelation = {
-          source: edge.source,
-          target: edge.target,
-          relation: edge.relation,
-          kind: edge.kind || '',
-        };
-        localState.selectedId = edge.source;
-        ontologyResetFocusViewport(localState);
-        renderOntologyMap(stage, detail, graph, localState);
-      }, (depth, phase) => {
-        localState.focusTarget = 'pane';
-        localState.activePane = phase || localState.activePane || 'present';
-        localState.activeDepth = ontologyNormalizeDepth(depth);
-        localState.selectedRelation = null;
-        ontologyResetFocusViewport(localState);
-        renderOntologyMap(stage, detail, graph, localState);
+    ONTOLOGY_TIME_PANE_ORDER.forEach((phase) => {
+      const geometry = geometries.get(phase);
+      const active = phase === localState.activePane;
+      const pane = svgEl('g', {
+        class: `egd-ontology-time-coordinate egd-ontology-time-coordinate-${phase}${active ? ' egd-ontology-time-coordinate-active' : ''}`,
+        data: { phase },
       });
-    } else {
-      const edgeGroup = svgEl('g', { class: 'egd-ontology-edges' });
-      for (const edge of edges) {
-        const from = positions.get(edge.source);
-        const to = positions.get(edge.target);
-        if (!from || !to) continue;
-        const p1 = ontologyProjectPoint(from, localState.mode, localState.tilt);
-        const p2 = ontologyProjectPoint(to, localState.mode, localState.tilt);
-        edgeGroup.appendChild(svgEl('path', {
-          class: `egd-ontology-edge egd-ontology-edge-${edge.relation}`,
-          d: `M ${p1.x} ${p1.y} C ${(p1.x + p2.x) / 2} ${p1.y}, ${(p1.x + p2.x) / 2} ${p2.y}, ${p2.x} ${p2.y}`,
+      const activateLayerAtPhase = (layer, ev) => {
+        ev?.preventDefault?.();
+        ev?.stopPropagation?.();
+        if (phase !== localState.activePane) activateOntologyPane(localState, model, phase, selected?.conceptId || null);
+        setOntologyLayer(localState, layer);
+        const related = model.occurrences.find((occurrence) => (
+          occurrence.timeSlice === phase && occurrence.layer === layer && occurrence.conceptId === selected?.conceptId
+        )) || model.occurrences.find((occurrence) => occurrence.timeSlice === phase && occurrence.layer === layer);
+        if (related) selectOntologyOccurrence(localState, model, related.refId, { keepLayer: true });
+        rerender();
+      };
+      pane.appendChild(svgEl('path', {
+        class: `egd-ontology-pane-hit egd-ontology-v2-time-axis-hit egd-ontology-v2-pane-hit-${phase}`,
+        d: geometry.rectPath(0.22, 0.0, 0.56, 0.085),
+        fill: 'transparent',
+        stroke: 'transparent',
+        onclick: (ev) => {
+          ev.preventDefault();
+          ev.stopPropagation();
+          activateOntologyPane(localState, model, phase, selected?.conceptId || null);
+          rerender();
+        },
+      }));
+      drawOntologyText(pane, geometry, 0.50, active ? 0.035 : 0.08, ONTOLOGY_TIME_PANE_LABELS[phase], {
+        class: 'egd-ontology-v2-time-coordinate-label',
+        fill: active ? 'rgba(39, 48, 56, 0.82)' : 'rgba(59, 66, 73, 0.58)',
+        'font-size': active ? '15' : '13',
+        'font-weight': '900',
+      });
+      const strutGroup = svgEl('g', {
+        class: `egd-ontology-v2-layer-struts${active ? ' egd-ontology-v2-layer-struts-active' : ''}`,
+        data: { phase },
+      });
+      [0.075, 0.925].forEach((u) => {
+        const from = layerGeometryFor(phase, localState.activeLayer).point(u, 0.060);
+        const trailingLayer = localState.activeLayer === 'virtual' ? 'physical' : 'virtual';
+        const to = layerGeometryFor(phase, trailingLayer).point(u, 0.060);
+        strutGroup.appendChild(svgEl('path', {
+          class: 'egd-ontology-v2-layer-strut',
+          d: `M ${from.x.toFixed(1)} ${from.y.toFixed(1)} L ${to.x.toFixed(1)} ${to.y.toFixed(1)}`,
           fill: 'none',
-          stroke: 'rgba(92, 97, 105, 0.20)',
-          'stroke-width': '1.35',
-          'stroke-linecap': 'round',
-          'vector-effect': 'non-scaling-stroke',
-          'data-relation': edge.relation,
+          stroke: active ? 'rgba(45, 90, 123, 0.34)' : 'rgba(45, 90, 123, 0.22)',
+          'stroke-width': active ? '1.35' : '0.95',
+          'stroke-dasharray': '5 5',
+          data: { phase, anchorU: u },
         }));
-      }
-      graphGroup.appendChild(edgeGroup);
-
-      const nodeGroup = svgEl('g', { class: 'egd-ontology-nodes' });
-      for (const node of nodes) {
-        const pos = positions.get(node.id);
-        if (!pos) continue;
-        const point = ontologyProjectPoint(pos, localState.mode, localState.tilt);
-        const color = ontologyLayerColor(node.layer);
-        renderOntologySvgNode(nodeGroup, node, point, {
-          mode: localState.mode,
-          color,
-          fill: node.id?.startsWith('entity.') ? '#FFF9ED' : node.synthetic ? '#F7F5F0' : '#FFFFFF',
-          selected: node.id === selected?.id,
-          labelMax: 19,
-          metaMax: 24,
-          onclick: (ev) => {
-            ev.stopPropagation();
-            localState.focusTarget = 'object';
-            localState.selectedId = node.id;
-            localState.selectedRelation = null;
-            renderOntologyMap(stage, detail, graph, localState);
-          },
+      });
+      pane.appendChild(strutGroup);
+      if (active) {
+        layerRenderOrder.forEach((layer) => {
+          const spec = layerSpecs[layer];
+          const layerGeometry = layerGeometryFor(phase, layer);
+          const layerActive = localState.activeLayer === layer;
+          pane.appendChild(svgEl('path', {
+            class: `egd-ontology-v2-layer-shadow egd-ontology-v2-layer-shadow-${layer}${layerActive ? ' egd-ontology-v2-layer-shadow-active' : ''}`,
+            d: layerGeometry.rectPath(spec.u, spec.v, spec.w, spec.h),
+            transform: 'translate(0 12)',
+            fill: layer === 'virtual' ? 'rgba(73, 52, 110, 0.045)' : 'rgba(27, 58, 78, 0.055)',
+            stroke: 'none',
+            data: { phase, layer },
+          }));
+          pane.appendChild(svgEl('path', {
+            class: `egd-ontology-v2-layer-pane egd-ontology-v2-layer-surface egd-ontology-v2-layer-surface-${layer}${layerActive ? ' egd-ontology-v2-layer-surface-active' : ' egd-ontology-v2-layer-surface-behind'}`,
+            d: layerGeometry.rectPath(spec.u, spec.v, spec.w, spec.h),
+            fill: layer === 'virtual' ? 'rgba(126, 87, 194, 0.078)' : 'rgba(45, 90, 123, 0.085)',
+            stroke: layer === 'virtual'
+              ? (layerActive ? 'rgba(103, 67, 166, 0.64)' : 'rgba(126, 87, 194, 0.38)')
+              : (layerActive ? 'rgba(35, 76, 106, 0.66)' : 'rgba(45, 90, 123, 0.40)'),
+            'stroke-width': layerActive ? '2.1' : '1.15',
+            data: { phase, layer, planeRole: layerActive ? 'main' : 'trailing' },
+            onclick: (ev) => {
+              if (localState.suppressNextSurfaceClick) {
+                localState.suppressNextSurfaceClick = false;
+                return;
+              }
+              activateLayerAtPhase(layer, ev);
+            },
+          }));
+        });
+        // Keep both layer selectors above the overlapping surfaces. Otherwise
+        // the front surface steals clicks from the visible trailing label.
+        layerRenderOrder.forEach((layer) => {
+          const spec = layerSpecs[layer];
+          const layerGeometry = layerGeometryFor(phase, layer);
+          const layerActive = localState.activeLayer === layer;
+          const activateLayerLabel = (ev) => activateLayerAtPhase(layer, ev);
+          const labelControl = svgEl('g', {
+            class: `egd-ontology-v2-layer-label-control egd-ontology-v2-layer-label-control-${layer}`,
+            data: { phase, layer },
+            role: 'button',
+            tabindex: '0',
+            'aria-label': `${layer === 'virtual' ? '가상' : '물리'} 층으로 이동`,
+            onclick: activateLayerLabel,
+            onkeydown: (ev) => {
+              if (ev.key === 'Enter' || ev.key === ' ') activateLayerLabel(ev);
+            },
+          });
+          labelControl.appendChild(svgEl('path', {
+            class: 'egd-ontology-v2-layer-label-hit',
+            d: layerGeometry.rectPath(spec.u + 0.012, spec.v + 0.012, 0.13, 0.11),
+            fill: 'transparent',
+            stroke: 'none',
+          }));
+          drawOntologyText(labelControl, layerGeometry, spec.u + 0.025, spec.v + 0.055, layer === 'virtual' ? '가상' : '물리', {
+            class: `egd-ontology-v2-layer-label egd-ontology-v2-layer-label-${layer}`,
+            anchor: 'start',
+            fill: layer === 'virtual'
+              ? (layerActive ? 'rgba(103, 67, 166, 0.88)' : 'rgba(103, 67, 166, 0.48)')
+              : (layerActive ? 'rgba(35, 76, 106, 0.90)' : 'rgba(35, 76, 106, 0.52)'),
+            'font-size': '11',
+            'font-weight': '900',
+          });
+          layerControlGroup.appendChild(labelControl);
+          if (!layerActive) {
+            const switchV = layer === 'physical' ? 0.86 : 0.02;
+            layerControlGroup.appendChild(svgEl('path', {
+              class: `egd-ontology-v2-layer-switch-hit egd-ontology-v2-layer-switch-hit-${layer}`,
+              d: layerGeometry.rectPath(spec.u + 0.08, spec.v + switchV, 0.84, 0.10),
+              fill: 'rgba(255, 255, 255, 0.001)',
+              stroke: 'none',
+              data: { phase, layer },
+              role: 'button',
+              tabindex: '0',
+              'aria-label': `${layer === 'virtual' ? '가상' : '물리'} 층으로 이동`,
+              onclick: activateLayerLabel,
+              onkeydown: (ev) => {
+                if (ev.key === 'Enter' || ev.key === ' ') activateLayerLabel(ev);
+              },
+            }));
+          }
+        });
+      } else {
+        layerRenderOrder.forEach((layer) => {
+          const spec = sideLayerSpecs[layer];
+          const layerGeometry = layerGeometryFor(phase, layer);
+          const layerActive = localState.activeLayer === layer;
+          pane.appendChild(svgEl('path', {
+            class: `egd-ontology-v2-layer-shadow egd-ontology-v2-side-layer-shadow egd-ontology-v2-layer-shadow-${layer}`,
+            d: layerGeometry.rectPath(spec.u, spec.v, spec.w, spec.h),
+            transform: 'translate(0 8)',
+            fill: layer === 'virtual' ? 'rgba(73, 52, 110, 0.030)' : 'rgba(27, 58, 78, 0.036)',
+            stroke: 'none',
+            data: { phase, layer },
+          }));
+          pane.appendChild(svgEl('path', {
+            class: `egd-ontology-v2-layer-pane egd-ontology-v2-side-layer egd-ontology-v2-side-layer-${layer}${layerActive ? ' egd-ontology-v2-side-layer-front' : ' egd-ontology-v2-side-layer-behind'}`,
+            d: layerGeometry.rectPath(spec.u, spec.v, spec.w, spec.h),
+            fill: layer === 'virtual' ? 'rgba(126, 87, 194, 0.025)' : 'rgba(45, 90, 123, 0.030)',
+            stroke: layer === 'virtual' ? 'rgba(126, 87, 194, 0.26)' : 'rgba(45, 90, 123, 0.28)',
+            'stroke-width': layerActive ? '1.25' : '0.95',
+            data: { phase, layer, planeRole: layerActive ? 'main' : 'trailing' },
+            onclick: (ev) => activateLayerAtPhase(layer, ev),
+          }));
+          drawOntologyText(pane, layerGeometry, spec.u + 0.06, spec.v + 0.085, layer === 'virtual' ? '가상' : '물리', {
+            class: `egd-ontology-v2-side-layer-label egd-ontology-v2-layer-label-${layer}`,
+            anchor: 'start',
+            fill: layer === 'virtual' ? 'rgba(103, 67, 166, 0.58)' : 'rgba(35, 76, 106, 0.62)',
+            'font-size': '8.5',
+            'font-weight': '900',
+          });
         });
       }
-      graphGroup.appendChild(nodeGroup);
-    }
-    svg.appendChild(graphGroup);
-    stage.appendChild(svg);
-    stage.appendChild(el('div', { class: 'egd-ontology-stage-mini-tools', 'aria-hidden': 'true' },
-      el('span', { class: 'egd-ontology-stage-mini-tool' }, '⌁'),
-      el('span', { class: 'egd-ontology-stage-mini-tool' }, '⌖'),
-      el('span', { class: 'egd-ontology-stage-mini-tool' }, '+'),
-      el('span', { class: 'egd-ontology-stage-mini-tool' }, '-'),
-    ));
+      surfaceGroup.appendChild(pane);
+    });
 
-    detail.textContent = '';
-    if (!selected) {
-      detail.appendChild(el('div', { class: 'egd-ontology-empty' }, '불러온 온톨로지 노드가 없습니다.'));
-      return;
-    }
-    const relationNodeLabel = (id) => {
-      const node = ontologyNodeById(graph, id);
-      return (node ? ontologyDisplayLabel(node, 'focus') : (ONTOLOGY_NODE_LABELS[id] || id)).replace(/^[^·]+·\s*/, '');
-    };
-    const lensHeader = () => detail.appendChild(el('div', { class: 'egd-ontology-lens-heading' },
-      el('span', {}, '렌즈 상태'),
-      el('span', { class: 'egd-ontology-lens-heading-icon' }, '▱'),
-    ));
-    const lensSection = (title, ...children) => {
-      const section = el('section', { class: 'egd-ontology-lens-section' },
-        el('div', { class: 'egd-ontology-detail-subtitle' }, title),
-        ...children,
-      );
-      detail.appendChild(section);
-      return section;
-    };
-    const lensCard = (...children) => el('div', { class: 'egd-ontology-lens-card' }, ...children);
-    const lensButton = (text, onclick, extraClass = '') => el('button', {
-      class: `egd-ontology-lens-card egd-ontology-lens-button${extraClass ? ` ${extraClass}` : ''}`,
-      onclick,
-    }, text);
-    const lensMetricGrid = (...rows) => el('div', { class: 'egd-ontology-lens-metrics' },
-      ...rows.map(([label, value]) => el('div', { class: 'egd-ontology-lens-metric' },
-        el('span', {}, label),
-        el('strong', {}, value),
-      )),
-    );
-    const selectedLensCard = (node, subtitle = '') => lensCard(
-      el('div', { class: 'egd-ontology-lens-object' },
-        el('span', { class: 'egd-ontology-lens-object-icon' }, node?.id === 'goal' ? '◎' : node?.id?.startsWith('entity.') ? '▢' : '◇'),
-        el('span', { class: 'egd-ontology-lens-object-label' }, relationNodeLabel(node?.id || selected.id)),
-        el('span', { class: 'egd-ontology-lens-copy' }, '□'),
-      ),
-      subtitle ? el('div', { class: 'egd-ontology-lens-muted' }, subtitle) : null,
-    );
-    const appendChipRow = (labels) => detail.appendChild(el('div', { class: 'egd-ontology-chip-row' },
-      ...labels.filter(Boolean).map((label) => el('span', { class: 'egd-ontology-chip' }, label)),
-    ));
-    const lensChipRow = (labels) => el('div', { class: 'egd-ontology-chip-row egd-ontology-chip-row-compact' },
-      ...labels.filter(Boolean).map((label) => el('span', { class: 'egd-ontology-chip' }, label)),
-    );
-    if (localState.focusTarget === 'relation' && localState.selectedRelation) {
-      const relation = localState.selectedRelation;
-      const sourceNode = ontologyNodeById(graph, relation.source);
-      const targetNode = ontologyNodeById(graph, relation.target);
-      const sourceLabel = ontologyDisplayLabel(sourceNode, 'focus').replace(/^[^·]+·\s*/, '') || relation.source;
-      const targetLabel = ontologyDisplayLabel(targetNode, 'focus').replace(/^[^·]+·\s*/, '') || relation.target;
-      lensHeader();
-      detail.appendChild(el('div', { class: 'egd-ontology-detail-title' }, '관계'));
-      detail.appendChild(el('div', { class: 'egd-ontology-detail-id' }, `${sourceLabel} -> ${targetLabel}`));
-      lensSection('연결 경로', lensCard(
-        el('div', { class: 'egd-ontology-lens-pathline' },
-          el('span', {}, sourceLabel),
-          el('b', {}, '→'),
-          el('span', {}, targetLabel),
-        ),
-      ));
-      lensSection('관계 정보', lensMetricGrid(
-        ['관계 수', '1'],
-        ['경로 길이', '1 홉'],
-        ['경로 유형', '출발 → 도착'],
-        ['시간 방향', `${ONTOLOGY_TIME_PANE_LABELS[localState.activePane || 'present'] || '현재'}`],
-      ));
-      lensSection('양끝 객체',
-        lensButton(`출발  ${sourceLabel}`, () => {
-          localState.focusTarget = 'object';
-          localState.selectedRelation = null;
-          localState.selectedId = relation.source;
-          renderOntologyMap(stage, detail, graph, localState);
-        }),
-        lensButton(`도착  ${targetLabel}`, () => {
-          localState.focusTarget = 'object';
-          localState.selectedRelation = null;
-          localState.selectedId = relation.target;
-          renderOntologyMap(stage, detail, graph, localState);
-        }),
-      );
-      appendChipRow([ontologyRelationLabel(relation.relation), relation.kind]);
-      detail.appendChild(el('button', {
-        class: 'egd-ontology-copy',
-        onclick: () => copyTextToClipboard(`${relation.source} --${relation.relation}-> ${relation.target}`),
-      }, '관계 복사'));
-      return;
-    }
-    if (localState.mode === 'focus' && localState.focusTarget === 'pane') {
-      const phase = localState.activePane || 'present';
-      const phaseLabels = { past: '과거', present: '현재', future: '미래', multiverse: '멀티버스' };
-      const inventoryNodes = ontologyPaneInventoryNodes(graph, phase, selected);
-      const paneNodeLabel = (node) => ontologyDisplayLabel(node, 'focus').replace(/^[^·]+·\s*/, '');
-      const paneDepth = ontologyNormalizeDepth(localState.activeDepth, ontologyDefaultDepthForPane(phase, selected));
-      lensHeader();
-      detail.appendChild(el('div', { class: 'egd-ontology-detail-title' }, `${phaseLabels[phase] || phase} 시간대`));
-      detail.appendChild(el('div', { class: 'egd-ontology-detail-id' }, '선택된 객체'));
-      detail.appendChild(selectedLensCard(selected, phaseLabels[phase] || phase));
-      lensSection('시간 위치', lensCard(
-        el('div', { class: 'egd-ontology-lens-pathline' },
-          el('span', { class: phase === 'past' ? 'egd-ontology-lens-dot-active' : '' }, '과거'),
-          el('b', {}, '→'),
-          el('span', { class: phase === 'present' ? 'egd-ontology-lens-dot-active' : '' }, '현재'),
-          el('b', {}, '→'),
-          el('span', { class: phase === 'future' ? 'egd-ontology-lens-dot-active' : '' }, '미래'),
-        ),
-      ));
-      lensSection('연결 경로', lensCard(
-        el('div', { class: 'egd-ontology-lens-pathline' },
-          el('span', {}, '컨텍스트 연결'),
-          el('b', {}, '→'),
-          el('span', {}, '목표'),
-        ),
-      ));
-      lensSection('관계 정보', lensMetricGrid(
-        ['관계 수', phase === 'present' ? '2' : '1'],
-        ['경로 길이', phase === 'present' ? '2 홉' : '1 홉'],
-        ['경로 유형', '출발 → 도착'],
-        ['시간 방향', phase === 'past' ? '과거 → 현재' : phase === 'future' ? '현재 → 미래' : '현재 → 미래'],
-      ));
-      const selectById = (nodeId) => {
-        const node = ontologyNodeById(graph, nodeId);
-        if (!node) return;
-        localState.focusTarget = 'object';
-        localState.selectedId = node.id;
-        localState.selectedRelation = null;
-        ontologyResetFocusViewport(localState);
-        renderOntologyMap(stage, detail, graph, localState);
-      };
-      lensSection('상위 연결 (위층)',
-        lensButton('컨텍스트 연결  →  목표', () => selectById('goal')),
-      );
-      lensSection('하위 연결 (아래층)',
-        lensCard(
-          el('div', { class: 'egd-ontology-lens-pathline' },
-            el('span', {}, '메시지 전송'),
-            el('b', {}, '↓'),
-            el('span', {}, '터미널'),
+    const activeGeometry = layerGeometryFor(localState.activePane, localState.activeLayer);
+    const mainSpec = layerSpecs[localState.activeLayer];
+    const activeCameraGeometry = createOntologyCameraGeometry(activeGeometry, camera, mainSpec);
+    const cameraGeometriesByCell = new Map();
+    ONTOLOGY_TIME_PANE_ORDER.forEach((phase) => {
+      ONTOLOGY_LAYER_ORDER.forEach((layer) => {
+        cameraGeometriesByCell.set(
+          `${phase}:${layer}`,
+          createOntologyCameraGeometry(layerGeometryFor(phase, layer), camera, layerSpecs[layer]),
+        );
+      });
+    });
+    const activeLayerCameraGeometries = new Map(ONTOLOGY_LAYER_ORDER.map((layer) => [
+      layer,
+      cameraGeometriesByCell.get(`${localState.activePane}:${layer}`),
+    ]));
+    const cameraClipId = `egd-ontology-v2-camera-clip-${String(card?.id || 'card').replace(/[^a-z0-9_-]/gi, '-')}`;
+    const defs = svgEl('defs');
+    const cameraClip = svgEl('clipPath', { id: cameraClipId });
+    ONTOLOGY_LAYER_ORDER.forEach((layer) => {
+      const geometry = layerGeometryFor(localState.activePane, layer);
+      const spec = layerSpecs[layer];
+      cameraClip.appendChild(svgEl('path', { d: geometry.rectPath(spec.u, spec.v, spec.w, spec.h) }));
+    });
+    defs.appendChild(cameraClip);
+    const layerClipIds = new Map();
+    const layerClipBaseId = `egd-ontology-v2-layer-clip-${String(card?.id || 'card').replace(/[^a-z0-9_-]/gi, '-')}`;
+    ONTOLOGY_TIME_PANE_ORDER.forEach((phase) => {
+      ONTOLOGY_LAYER_ORDER.forEach((layer) => {
+        const clipId = `${layerClipBaseId}-${phase}-${layer}`;
+        const clip = svgEl('clipPath', { id: clipId });
+        clip.appendChild(svgEl('path', {
+          d: layerGeometryFor(phase, layer).rectPath(
+            layerSpecs[layer].u,
+            layerSpecs[layer].v,
+            layerSpecs[layer].w,
+            layerSpecs[layer].h,
           ),
-          el('div', { class: 'egd-ontology-lens-muted' }, '데스크톱 → 터미널 → (CPU / RAM / 디스크)'),
-        ),
-      );
-      lensSection('관련 객체 (동일 층)', lensChipRow({
-        virtual: ['컨텍스트 연결', '아젠다', '카드'],
-        binding: ['메시지 전송', '터미널'],
-        physical: ['세션 파일', '데스크톱', 'CPU / RAM / 디스크'],
-      }[paneDepth] || []));
-      lensSection('메모', el('textarea', {
-        class: 'egd-ontology-lens-memo',
-        placeholder: '메모를 입력하세요...',
-        rows: 3,
-      }));
-      return;
+        }));
+        defs.appendChild(clip);
+        layerClipIds.set(`${phase}:${layer}`, clipId);
+      });
+    });
+    svg.appendChild(defs);
+    cameraGroup.setAttribute('clip-path', `url(#${cameraClipId})`);
+    depthEdgeGroup.setAttribute('clip-path', `url(#${cameraClipId})`);
+    const trailingCameraLayer = localState.activeLayer === 'virtual' ? 'physical' : 'virtual';
+    const activeNodeClipId = layerClipIds.get(`${localState.activePane}:${localState.activeLayer}`);
+    const trailingNodeClipId = layerClipIds.get(`${localState.activePane}:${trailingCameraLayer}`);
+    activeNodeGroup.setAttribute('clip-path', `url(#${activeNodeClipId})`);
+    activeNodeGroup.dataset.clipLayer = localState.activeLayer;
+    coupledBehindNodeGroup.setAttribute('clip-path', `url(#${trailingNodeClipId})`);
+    coupledBehindNodeGroup.dataset.clipLayer = trailingCameraLayer;
+    cameraOverlayGroup.setAttribute('clip-path', `url(#${activeNodeClipId})`);
+    cameraOverlayGroup.dataset.clipLayer = localState.activeLayer;
+    frontLayerVeilGroup.appendChild(svgEl('path', {
+      class: `egd-ontology-v2-layer-occlusion egd-ontology-v2-layer-occlusion-${localState.activeLayer}`,
+      d: activeGeometry.rectPath(mainSpec.u, mainSpec.v, mainSpec.w, mainSpec.h),
+      fill: localState.activeLayer === 'virtual'
+        ? 'rgba(248, 246, 252, 0.48)'
+        : 'rgba(244, 248, 250, 0.48)',
+      data: { phase: localState.activePane, layer: localState.activeLayer },
+    }));
+    const rootExpanded = mainChildren.length > 0;
+    const rootWidth = rootExpanded ? Math.min(0.56, mainSpec.w - 0.18) : Math.min(0.34, mainSpec.w - 0.22);
+    const rootHeight = rootExpanded ? Math.min(0.30, mainSpec.h - 0.13) : Math.min(0.16, mainSpec.h - 0.20);
+    const rootSpec = selected ? {
+      u: mainSpec.u + (mainSpec.w - rootWidth) / 2,
+      v: mainSpec.v + (rootExpanded ? 0.18 : 0.23),
+      w: rootWidth,
+      h: rootHeight,
+    } : null;
+    if (selected && rootSpec) {
+      placements.set(selected.refId, { occurrence: selected, geometry: activeCameraGeometry, spec: rootSpec, kind: 'root', camera: true });
     }
-    const selectedIdLabel = selected.id === 'goal'
-      ? '미래 목표'
-      : selected.id?.startsWith('egdesk.')
-        ? 'egdesk 개념'
-        : relationNodeLabel(selected.id);
-    const selectedPhaseLabel = ONTOLOGY_TIME_PANE_LABELS[localState.activePane || ontologyPhaseForNode(selected)] || '현재';
-    const outgoingEdges = allEdges.filter((edge) => edge.source === selected.id).slice(0, 4);
-    const incomingEdges = allEdges.filter((edge) => edge.target === selected.id).slice(0, 4);
-    lensHeader();
-    detail.appendChild(el('div', { class: 'egd-ontology-detail-title' }, ontologyDisplayLabel(selected, localState.mode)));
-    detail.appendChild(el('div', { class: 'egd-ontology-detail-id' }, selectedIdLabel));
-    detail.appendChild(selectedLensCard(selected, selectedPhaseLabel));
-    const selectedSummary = selected.id === 'goal'
-      ? '현재 시간대의 컨텍스트 연결이 미래 목표로 이어지는 선택 경로입니다. 화면의 보라색 경로가 현재 컨텍스트에서 미래 목표로 가는 시간 간 연결을 보여줍니다.'
-      : ONTOLOGY_NODE_SUMMARIES[selected.id] || selected.summary || '아직 요약이 없습니다.';
-    lensSection('시간 위치', lensCard(
-      el('div', { class: 'egd-ontology-lens-pathline' },
-        el('span', {}, '과거'),
-        el('b', {}, '→'),
-        el('span', { class: (localState.activePane || ontologyPhaseForNode(selected)) === 'present' ? 'egd-ontology-lens-dot-active' : '' }, '현재'),
-        el('b', {}, '→'),
-        el('span', { class: selected.id === 'goal' || localState.activePane === 'future' ? 'egd-ontology-lens-dot-active' : '' }, '미래'),
+    const parent = selected?.parentRef ? model.byRef.get(selected.parentRef) : null;
+    const crossLayerContextRefIds = new Set([
+      ...(parent && parent.layer !== localState.activeLayer ? [parent.refId] : []),
+      ...directChildren.filter((child) => child.layer !== localState.activeLayer).map((child) => child.refId),
+    ]);
+    if (parent) {
+      const parentLabelWidth = Math.max(0.14, Math.min(0.23, model.labelFor(parent).length * 0.016));
+      const tabSpec = { u: rootSpec.u + 0.025, v: rootSpec.v - 0.078, w: parentLabelWidth, h: 0.052 };
+      const tab = svgEl('g', {
+        class: 'egd-ontology-v2-breadcrumb',
+        data: { refId: parent.refId },
+        onclick: (ev) => {
+          ev.preventDefault();
+          ev.stopPropagation();
+          selectOntologyOccurrence(localState, model, parent.refId);
+          rerender();
+        },
+      });
+      tab.appendChild(svgEl('path', {
+        class: 'egd-ontology-v2-breadcrumb-path',
+        d: activeCameraGeometry.rectPath(tabSpec.u, tabSpec.v, tabSpec.w, tabSpec.h),
+        fill: 'rgba(248, 244, 236, 0.98)',
+        stroke: 'rgba(116, 104, 91, 0.44)',
+        'stroke-width': '1.4',
+      }));
+      drawOntologyText(tab, activeCameraGeometry, tabSpec.u + 0.025, tabSpec.v + tabSpec.h * 0.64, `← ${model.labelFor(parent)}`, {
+        class: 'egd-ontology-v2-breadcrumb-label', anchor: 'start', fill: 'rgba(47, 55, 63, 0.82)', 'font-size': '10', 'font-weight': '850',
+      });
+      cameraOverlayGroup.appendChild(tab);
+    }
+
+    if (emptyPhase) {
+      const marker = activeCameraGeometry.point(0.38, 0.34);
+      const markerTail = activeCameraGeometry.point(0.415, 0.34);
+      const emptyState = svgEl('g', {
+        class: 'egd-ontology-v2-empty-state',
+        data: { phase: localState.activePane, layer: localState.activeLayer },
+        role: 'status',
+        'aria-label': `${ONTOLOGY_TIME_PANE_LABELS[localState.activePane]} 시점에는 snapshot이 없습니다`,
+      });
+      emptyState.appendChild(svgEl('circle', {
+        class: 'egd-ontology-v2-empty-state-mark',
+        cx: marker.x,
+        cy: marker.y,
+        r: 4,
+        fill: localState.activeLayer === 'virtual' ? 'rgba(103, 67, 166, 0.56)' : 'rgba(35, 76, 106, 0.58)',
+      }));
+      emptyState.appendChild(svgEl('path', {
+        class: 'egd-ontology-v2-empty-state-line',
+        d: `M ${marker.x.toFixed(1)} ${marker.y.toFixed(1)} L ${markerTail.x.toFixed(1)} ${markerTail.y.toFixed(1)}`,
+        fill: 'none',
+        stroke: localState.activeLayer === 'virtual' ? 'rgba(103, 67, 166, 0.34)' : 'rgba(35, 76, 106, 0.36)',
+        'stroke-width': '1.4',
+      }));
+      drawOntologyText(emptyState, activeCameraGeometry, 0.43, 0.343, '이 시점에는 snapshot이 없습니다', {
+        class: 'egd-ontology-v2-empty-state-title',
+        anchor: 'start',
+        fill: 'rgba(47, 55, 63, 0.68)',
+        'font-size': '12',
+        'font-weight': '850',
+      });
+      drawOntologyText(emptyState, activeCameraGeometry, 0.43, 0.386, '상단 시간축에서 다른 시점을 선택할 수 있습니다', {
+        class: 'egd-ontology-v2-empty-state-help',
+        anchor: 'start',
+        fill: 'rgba(76, 83, 90, 0.46)',
+        'font-size': '9.5',
+        'font-weight': '700',
+      });
+      cameraOverlayGroup.appendChild(emptyState);
+    }
+
+    const childSpecs = [];
+    if (mainChildren.length) {
+      const columns = mainChildren.length === 1 ? 1 : Math.min(3, mainChildren.length);
+      const rows = Math.ceil(mainChildren.length / columns);
+      const areaU = rootSpec.u + 0.05;
+      const areaV = rootSpec.v + 0.09;
+      const areaW = rootSpec.w - 0.10;
+      const areaH = rootSpec.h - 0.13;
+      const gapU = 0.025;
+      const gapV = 0.025;
+      const cellW = Math.min(mainChildren.length === 1 ? areaW * 0.54 : areaW, (areaW - gapU * (columns - 1)) / columns);
+      const cellH = Math.min(0.10, (areaH - gapV * (rows - 1)) / rows);
+      mainChildren.forEach((child, index) => {
+        const row = Math.floor(index / columns);
+        const column = index % columns;
+        const usedW = columns * cellW + (columns - 1) * gapU;
+        const spec = {
+          u: areaU + (areaW - usedW) / 2 + column * (cellW + gapU),
+          v: areaV + Math.max(0, (areaH - (rows * cellH + (rows - 1) * gapV)) / 2) + row * (cellH + gapV),
+          w: cellW,
+          h: cellH,
+        };
+        childSpecs.push({ occurrence: child, spec });
+        placements.set(child.refId, { occurrence: child, geometry: activeCameraGeometry, spec, kind: 'child', camera: true });
+      });
+    }
+
+    const overviewSpecs = [];
+    ONTOLOGY_TIME_PANE_ORDER.forEach((phase) => {
+      const active = phase === localState.activePane;
+      const items = active
+        ? ONTOLOGY_LAYER_ORDER.flatMap((layer) => model.planeRootsFor(phase, layer))
+        : getOntologySideItems(model, phase, visibleRefs, selected);
+      if (!active) sideInventories.set(phase, items);
+      const layerIndexes = { virtual: 0, physical: 0 };
+      const visibleItems = items.slice(0, active ? 12 : 5).filter((occurrence) => (
+        !active || (occurrence.refId !== selected?.refId && !crossLayerContextRefIds.has(occurrence.refId))
+      ));
+      const layerCounts = {
+        virtual: visibleItems.filter((occurrence) => occurrence.layer !== 'physical').length,
+        physical: visibleItems.filter((occurrence) => occurrence.layer === 'physical').length,
+      };
+      visibleItems.forEach((occurrence) => {
+        const layer = occurrence.layer === 'physical' ? 'physical' : 'virtual';
+        const layerSpec = sideLayerSpecs[layer];
+        const geometry = layerGeometryFor(phase, layer);
+        const layerIndex = layerIndexes[layer]++;
+        const count = Math.max(1, layerCounts[layer]);
+        let spec;
+        let placementGeometry = geometry;
+        let cameraBound = false;
+        if (active) {
+          const focusOccupiesLayer = !!selected && selected.layer === layer;
+          const columns = focusOccupiesLayer ? 1 : Math.min(3, count);
+          const rows = Math.ceil(count / columns);
+          const areaU = focusOccupiesLayer ? 0.66 : 0.13;
+          const areaW = focusOccupiesLayer ? 0.25 : 0.74;
+          const gapU = 0.035;
+          const gapV = 0.035;
+          const cellW = Math.min(0.24, (areaW - gapU * (columns - 1)) / columns);
+          const cellH = Math.min(0.14, layerSpec.h * 0.26);
+          const usedW = columns * cellW + gapU * (columns - 1);
+          const usedH = rows * cellH + gapV * (rows - 1);
+          const column = layerIndex % columns;
+          const row = Math.floor(layerIndex / columns);
+          spec = {
+            u: areaU + (areaW - usedW) / 2 + column * (cellW + gapU),
+            v: layerSpec.v + Math.max(0.06, (layerSpec.h - usedH) / 2) + row * (cellH + gapV),
+            w: cellW,
+            h: cellH,
+          };
+          placementGeometry = activeLayerCameraGeometries.get(layer);
+          cameraBound = true;
+        } else {
+          const sideSafeArea = phase === 'past'
+            ? { u: 0.50, w: 0.46 }
+            : phase === 'future'
+              ? { u: 0.04, w: 0.46 }
+              : { u: 0.12, w: 0.76 };
+          const topPadding = Math.min(0.11, layerSpec.h * 0.24);
+          const availableHeight = Math.max(0.10, layerSpec.h - topPadding - 0.08);
+          const cellH = Math.min(0.12, availableHeight / count * 0.78);
+          const step = availableHeight / count;
+          spec = {
+            u: sideSafeArea.u,
+            v: layerSpec.v + topPadding + layerIndex * step,
+            w: sideSafeArea.w,
+            h: cellH,
+          };
+          if (temporallyCoupledRefIds.has(occurrence.refId)) {
+            placementGeometry = cameraGeometriesByCell.get(`${phase}:${layer}`);
+            cameraBound = true;
+          }
+        }
+        overviewSpecs.push({
+          occurrence,
+          geometry: placementGeometry,
+          spec,
+          phase,
+          active,
+          cameraBound,
+          behind: active && layer !== localState.activeLayer,
+        });
+        placements.set(occurrence.refId, {
+          occurrence,
+          geometry: placementGeometry,
+          spec,
+          kind: active ? 'overview' : 'side',
+          camera: cameraBound,
+        });
+      });
+    });
+
+    const centerOf = (placement) => {
+      return placement.geometry.point(
+        placement.spec.u + placement.spec.w / 2,
+        placement.spec.v + placement.spec.h / 2,
+      );
+    };
+    const anchorOf = (placement, anchor = 'center') => {
+      const { spec, geometry } = placement;
+      if (anchor === 'left') return geometry.point(spec.u, spec.v + spec.h / 2);
+      if (anchor === 'right') return geometry.point(spec.u + spec.w, spec.v + spec.h / 2);
+      if (anchor === 'top') return geometry.point(spec.u + spec.w / 2, spec.v);
+      if (anchor === 'bottom') return geometry.point(spec.u + spec.w / 2, spec.v + spec.h);
+      return centerOf(placement);
+    };
+    const planeUForScreenX = (geometry, v, screenX) => {
+      const left = geometry.point(0, v);
+      const right = geometry.point(1, v);
+      const span = right.x - left.x;
+      if (Math.abs(span) < 0.001) return 0.5;
+      return Math.max(0, Math.min(1, (screenX - left.x) / span));
+    };
+    const timeBoundarySegmentFor = (sourcePhase, targetPhase, layer) => {
+      const sourceIndex = ONTOLOGY_TIME_PANE_ORDER.indexOf(sourcePhase);
+      const targetIndex = ONTOLOGY_TIME_PANE_ORDER.indexOf(targetPhase);
+      if (sourceIndex < 0 || targetIndex < 0 || Math.abs(sourceIndex - targetIndex) !== 1) return null;
+      const leftPhase = ONTOLOGY_TIME_PANE_ORDER[Math.min(sourceIndex, targetIndex)];
+      const rightPhase = ONTOLOGY_TIME_PANE_ORDER[Math.max(sourceIndex, targetIndex)];
+      const boundaryGeometry = layerGeometryFor(leftPhase, layer);
+      if (!boundaryGeometry) return null;
+      return {
+        key: `${leftPhase}|${rightPhase}|${layer}`,
+        top: boundaryGeometry.corners.tr,
+        bottom: boundaryGeometry.corners.br,
+      };
+    };
+    const pointOnTimeBoundaryAtY = (boundary, screenY) => {
+      const spanY = boundary.bottom.y - boundary.top.y;
+      const t = Math.abs(spanY) < 0.001
+        ? 0.5
+        : Math.max(0, Math.min(1, (screenY - boundary.top.y) / spanY));
+      return {
+        x: boundary.top.x + (boundary.bottom.x - boundary.top.x) * t,
+        y: boundary.top.y + spanY * t,
+      };
+    };
+    const routeViaTimeBoundary = (start, end, sourcePhase, targetPhase, layer) => {
+      const boundary = timeBoundarySegmentFor(sourcePhase, targetPhase, layer);
+      if (!boundary) return null;
+      const entry = pointOnTimeBoundaryAtY(boundary, start.y);
+      const exit = pointOnTimeBoundaryAtY(boundary, end.y);
+      return {
+        boundary,
+        entry,
+        exit,
+        d: `M ${start.x.toFixed(1)} ${start.y.toFixed(1)} L ${entry.x.toFixed(1)} ${entry.y.toFixed(1)} L ${exit.x.toFixed(1)} ${exit.y.toFixed(1)} L ${end.x.toFixed(1)} ${end.y.toFixed(1)}`,
+      };
+    };
+    const edgeKeys = new Set();
+    const drawEdge = (sourceRef, targetRef, relation) => {
+      const source = placements.get(sourceRef);
+      const target = placements.get(targetRef);
+      if (!source || !target) return;
+      const key = `${sourceRef}|${relation}|${targetRef}`;
+      if (edgeKeys.has(key)) return;
+      edgeKeys.add(key);
+      const sourceOccurrence = source.occurrence;
+      const targetOccurrence = target.occurrence;
+      const temporal = sourceOccurrence.timeSlice !== targetOccurrence.timeSlice;
+      const crossLayer = sourceOccurrence.layer !== targetOccurrence.layer;
+      let kind = 'reference';
+      let sourceAnchor = 'right';
+      let targetAnchor = 'left';
+      let start;
+      let end;
+      let d;
+      let temporalBoundaryRoute = null;
+      let forward = true;
+      if (temporal) {
+        kind = 'temporal';
+        const sourceIndex = ONTOLOGY_TIME_PANE_ORDER.indexOf(sourceOccurrence.timeSlice);
+        const targetIndex = ONTOLOGY_TIME_PANE_ORDER.indexOf(targetOccurrence.timeSlice);
+        forward = targetIndex >= sourceIndex;
+        sourceAnchor = forward ? 'right' : 'left';
+        targetAnchor = forward ? 'left' : 'right';
+        start = anchorOf(source, sourceAnchor);
+        end = anchorOf(target, targetAnchor);
+        const boundaryLayer = sourceOccurrence.layer === targetOccurrence.layer
+          ? sourceOccurrence.layer
+          : localState.activeLayer;
+        temporalBoundaryRoute = routeViaTimeBoundary(
+          start,
+          end,
+          sourceOccurrence.timeSlice,
+          targetOccurrence.timeSlice,
+          boundaryLayer,
+        );
+        if (temporalBoundaryRoute) {
+          d = temporalBoundaryRoute.d;
+        } else {
+          const busX = (start.x + end.x) / 2;
+          d = `M ${start.x.toFixed(1)} ${start.y.toFixed(1)} L ${busX.toFixed(1)} ${start.y.toFixed(1)} L ${busX.toFixed(1)} ${end.y.toFixed(1)} L ${end.x.toFixed(1)} ${end.y.toFixed(1)}`;
+        }
+      } else if (crossLayer) {
+        kind = 'layer';
+        const depthCoordinates = source.depthCoordinates || target.depthCoordinates;
+        sourceAnchor = 'depth';
+        targetAnchor = 'depth';
+        const sourceDepthCoordinate = depthCoordinates?.[sourceRef];
+        const targetDepthCoordinate = depthCoordinates?.[targetRef];
+        start = sourceDepthCoordinate
+          ? source.geometry.point(sourceDepthCoordinate.u, sourceDepthCoordinate.v)
+          : centerOf(source);
+        end = targetDepthCoordinate
+          ? target.geometry.point(targetDepthCoordinate.u, targetDepthCoordinate.v)
+          : centerOf(target);
+        const sharedX = sourceOccurrence.layer === localState.activeLayer
+          ? start.x
+          : targetOccurrence.layer === localState.activeLayer
+            ? end.x
+            : (start.x + end.x) / 2;
+        start = { x: sharedX, y: start.y };
+        end = { x: sharedX, y: end.y };
+        d = `M ${start.x.toFixed(1)} ${start.y.toFixed(1)} L ${end.x.toFixed(1)} ${end.y.toFixed(1)}`;
+      } else {
+        const sourceCenter = centerOf(source);
+        const targetCenter = centerOf(target);
+        forward = targetCenter.x >= sourceCenter.x;
+        sourceAnchor = forward ? 'right' : 'left';
+        targetAnchor = forward ? 'left' : 'right';
+        start = anchorOf(source, sourceAnchor);
+        end = anchorOf(target, targetAnchor);
+        const busX = (start.x + end.x) / 2;
+        d = `M ${start.x.toFixed(1)} ${start.y.toFixed(1)} L ${busX.toFixed(1)} ${start.y.toFixed(1)} L ${busX.toFixed(1)} ${end.y.toFixed(1)} L ${end.x.toFixed(1)} ${end.y.toFixed(1)}`;
+      }
+      const edgeStroke = kind === 'temporal'
+        ? 'rgba(111, 90, 154, 0.46)'
+        : kind === 'layer'
+          ? 'rgba(35, 76, 106, 0.48)'
+          : 'rgba(82, 89, 98, 0.26)';
+      let temporalPaneClipId = null;
+      if (kind === 'temporal') {
+        temporalPaneClipId = `${layerClipBaseId}-temporal-${edgeKeys.size}`;
+        const temporalPaneClip = svgEl('clipPath', { id: temporalPaneClipId });
+        [sourceOccurrence, targetOccurrence].forEach((occurrence) => {
+          const clipGeometry = layerGeometryFor(occurrence.timeSlice, occurrence.layer);
+          const clipSpec = layerSpecs[occurrence.layer];
+          temporalPaneClip.appendChild(svgEl('path', {
+            d: clipGeometry.rectPath(clipSpec.u, clipSpec.v, clipSpec.w, clipSpec.h),
+          }));
+        });
+        defs.appendChild(temporalPaneClip);
+      }
+      const targetEdgeGroup = kind === 'layer' ? depthEdgeGroup : edgeGroup;
+      targetEdgeGroup.appendChild(svgEl('path', {
+        class: `egd-ontology-v2-edge egd-ontology-v2-edge-${kind}`,
+        d,
+        'clip-path': temporalPaneClipId ? `url(#${temporalPaneClipId})` : null,
+        fill: 'none',
+        stroke: edgeStroke,
+        'stroke-width': kind === 'temporal' ? '1.55' : kind === 'layer' ? '1.7' : '1.1',
+        'stroke-dasharray': kind === 'layer' ? '6 5' : null,
+        data: {
+          sourceRef,
+          targetRef,
+          sourceAnchor,
+          targetAnchor,
+          relation,
+          temporalBoundaryKey: temporalBoundaryRoute?.boundary.key || '',
+          temporalBoundaryAligned: temporalBoundaryRoute ? 'true' : 'false',
+          paneClipped: temporalPaneClipId ? 'true' : 'false',
+          depthDx: kind === 'layer' ? (end.x - start.x).toFixed(2) : '',
+          depthDy: kind === 'layer' ? (end.y - start.y).toFixed(2) : '',
+        },
+      }));
+      if (kind !== 'layer') {
+        edgeGroup.appendChild(svgEl('polygon', {
+          class: 'egd-ontology-v2-edge-arrow',
+          points: `${end.x},${end.y} ${end.x - (forward ? 6 : -6)},${end.y - 3} ${end.x - (forward ? 6 : -6)},${end.y + 3}`,
+          'clip-path': temporalPaneClipId ? `url(#${temporalPaneClipId})` : null,
+          fill: edgeStroke,
+        }));
+      }
+    };
+    model.referenceEdges.forEach((edge) => {
+      const source = model.byRef.get(edge.sourceRef);
+      const target = model.byRef.get(edge.targetRef);
+      const nestedOnOnePlane = source && target
+        && source.timeSlice === target.timeSlice
+        && source.layer === target.layer
+        && (source.parentRef === target.refId || target.parentRef === source.refId);
+      if (!nestedOnOnePlane) drawEdge(edge.sourceRef, edge.targetRef, edge.relation);
+    });
+
+    const contextualRefs = [];
+    if (parent && parent.layer !== localState.activeLayer) contextualRefs.push({ occurrence: parent, role: 'parent' });
+    directChildren.filter((child) => child.layer !== localState.activeLayer).forEach((child) => contextualRefs.push({ occurrence: child, role: 'child' }));
+    const visibleContextualRefs = contextualRefs.slice(0, 5);
+    visibleContextualRefs.forEach(({ occurrence, role }, index) => {
+      if (placements.has(occurrence.refId)) return;
+      const contextSpec = layerSpecs[occurrence.layer];
+      if (!contextSpec) return;
+      const mainPlacement = placements.get(selected?.refId);
+      if (!mainPlacement) return;
+      const w = Math.min(0.16, mainPlacement.spec.w * 0.38);
+      const h = Math.min(0.16, Math.max(0.13, mainPlacement.spec.h * 0.58));
+      const slot = (index + 1) / (visibleContextualRefs.length + 1);
+      const contextIsBelow = occurrence.layer === 'physical';
+      const contextCenterV = mainPlacement.spec.v + mainPlacement.spec.h * 0.58 + (contextIsBelow ? 0.025 : -0.025);
+      const trailingAnchorV = contextCenterV + (contextIsBelow ? -h / 2 : h / 2);
+      const activeDepthCoordinate = {
+        u: mainPlacement.spec.u + mainPlacement.spec.w * slot,
+        v: contextIsBelow ? mainPlacement.spec.v + mainPlacement.spec.h : mainPlacement.spec.v,
+      };
+      const activeDepthPoint = mainPlacement.geometry.point(activeDepthCoordinate.u, activeDepthCoordinate.v);
+      const contextGeometry = activeLayerCameraGeometries.get(occurrence.layer);
+      const trailingAnchorU = Math.max(
+        w / 2,
+        Math.min(1 - w / 2, planeUForScreenX(contextGeometry, trailingAnchorV, activeDepthPoint.x)),
+      );
+      const spec = {
+        u: trailingAnchorU - w / 2,
+        v: contextCenterV - h / 2,
+        w,
+        h,
+      };
+      const trailingDepthCoordinate = {
+        u: spec.u + spec.w / 2,
+        v: trailingAnchorV,
+      };
+      drawOntologyOccurrenceBox(coupledBehindNodeGroup, model, contextGeometry, spec, occurrence, {
+        context: true,
+        contextRole: role,
+        behind: true,
+        onclick: (ev) => {
+          ev.preventDefault();
+          ev.stopPropagation();
+          selectOntologyOccurrence(localState, model, occurrence.refId);
+          rerender();
+        },
+      });
+      const contextPlacement = {
+        occurrence,
+        geometry: contextGeometry,
+        spec,
+        camera: true,
+        kind: 'context',
+        depthCoordinates: {
+          [selected.refId]: activeDepthCoordinate,
+          [occurrence.refId]: trailingDepthCoordinate,
+        },
+      };
+      placements.set(occurrence.refId, contextPlacement);
+      if (selected) {
+        const explicitEdge = model.referenceEdges.find((edge) => (
+          (edge.sourceRef === selected.refId && edge.targetRef === occurrence.refId)
+          || (edge.sourceRef === occurrence.refId && edge.targetRef === selected.refId)
+        ));
+        const sourceRef = explicitEdge?.sourceRef || (role === 'parent' ? occurrence.refId : selected.refId);
+        const targetRef = explicitEdge?.targetRef || (role === 'parent' ? selected.refId : occurrence.refId);
+        drawEdge(sourceRef, targetRef, explicitEdge?.relation || occurrence.relation || 'contains');
+      }
+    });
+
+    ONTOLOGY_TIME_PANE_ORDER.filter((phase) => phase !== localState.activePane).forEach((phase) => {
+      const items = sideInventories.get(phase) || [];
+      if (items.length <= 5) return;
+      const fromPlacement = placements.get(selected?.refId);
+      if (!fromPlacement) return;
+      const forward = ONTOLOGY_TIME_PANE_ORDER.indexOf(phase) > ONTOLOGY_TIME_PANE_ORDER.indexOf(localState.activePane);
+      const from = anchorOf(fromPlacement, forward ? 'right' : 'left');
+      const sideGeometry = layerGeometryFor(phase, localState.activeLayer);
+      const to = sideGeometry.point(phase === 'past' ? 0.96 : 0.04, 0.52);
+      const boundaryRoute = routeViaTimeBoundary(
+        from,
+        to,
+        localState.activePane,
+        phase,
+        localState.activeLayer,
+      );
+      const busX = (from.x + to.x) / 2;
+      const d = boundaryRoute?.d
+        || `M ${from.x.toFixed(1)} ${from.y.toFixed(1)} L ${busX.toFixed(1)} ${from.y.toFixed(1)} L ${busX.toFixed(1)} ${to.y.toFixed(1)} L ${to.x.toFixed(1)} ${to.y.toFixed(1)}`;
+      edgeGroup.appendChild(svgEl('path', {
+        class: 'egd-ontology-v2-edge egd-ontology-v2-edge-bundle', d,
+        fill: 'none', stroke: 'rgba(111, 90, 154, 0.38)', 'stroke-width': '1.7',
+        data: {
+          temporalBoundaryKey: boundaryRoute?.boundary.key || '',
+          temporalBoundaryAligned: boundaryRoute ? 'true' : 'false',
+        },
+      }));
+      const labelPoint = boundaryRoute
+        ? {
+          x: (boundaryRoute.entry.x + boundaryRoute.exit.x) / 2,
+          y: (boundaryRoute.entry.y + boundaryRoute.exit.y) / 2 - 8,
+        }
+        : { x: busX, y: (from.y + to.y) / 2 - 8 };
+      edgeGroup.appendChild(svgEl('rect', {
+        class: 'egd-ontology-v2-bundle-label-bg', x: labelPoint.x - 18, y: labelPoint.y - 13, width: 36, height: 22, rx: 7,
+        fill: 'rgba(255, 255, 255, 0.94)', stroke: 'rgba(111, 90, 154, 0.46)', 'stroke-width': '1',
+      }));
+      edgeGroup.appendChild(svgEl('text', {
+        class: 'egd-ontology-v2-bundle-label', x: labelPoint.x, y: labelPoint.y + 3, 'text-anchor': 'middle',
+        fill: 'rgba(89, 69, 132, 0.94)', 'font-size': '10', 'font-weight': '900',
+      }, `+${items.length - 5}`));
+    });
+
+    if (selected && rootSpec) drawOntologyOccurrenceBox(activeNodeGroup, model, activeCameraGeometry, rootSpec, selected, {
+      root: true,
+      expanded: mainChildren.length > 0,
+    });
+    childSpecs.forEach(({ occurrence, spec }) => {
+      drawOntologyOccurrenceBox(activeNodeGroup, model, activeCameraGeometry, spec, occurrence, {
+        onclick: (ev) => {
+          ev.preventDefault();
+          ev.stopPropagation();
+          selectOntologyOccurrence(localState, model, occurrence.refId);
+          rerender();
+        },
+      });
+    });
+    overviewSpecs.forEach(({ occurrence, geometry, spec, phase, active, cameraBound, behind }) => {
+      const targetGroup = active
+        ? (behind ? coupledBehindNodeGroup : activeNodeGroup)
+        : fixedNodeGroup;
+      const renderedBox = drawOntologyOccurrenceBox(targetGroup, model, geometry, spec, occurrence, {
+        side: !active,
+        overview: active,
+        behind: behind || (!active && occurrence.layer !== localState.activeLayer),
+        onclick: (ev) => {
+          ev.preventDefault();
+          ev.stopPropagation();
+          if (!active) activateOntologyPane(localState, model, phase, occurrence.conceptId);
+          selectOntologyOccurrence(localState, model, occurrence.refId);
+          rerender();
+        },
+      });
+      if (!active) {
+        const clipId = layerClipIds.get(`${phase}:${occurrence.layer}`);
+        if (clipId) renderedBox.setAttribute('clip-path', `url(#${clipId})`);
+        renderedBox.dataset.clipLayer = occurrence.layer;
+        if (cameraBound) renderedBox.dataset.cameraCoupled = 'temporal';
+      }
+    });
+
+    const arrowY = 62;
+    const paneCenters = ONTOLOGY_TIME_PANE_ORDER.map((phase) => {
+      const geometry = geometries.get(phase);
+      return { phase, point: geometry.point(0.5, 0) };
+    }).sort((a, b) => a.point.x - b.point.x);
+    for (let index = 0; index < paneCenters.length - 1; index += 1) {
+      const from = paneCenters[index].point;
+      const to = paneCenters[index + 1].point;
+      overlayGroup.appendChild(svgEl('path', {
+        class: 'egd-ontology-v2-time-axis-arrow',
+        d: `M ${from.x + 24} ${arrowY} L ${to.x - 24} ${arrowY}`,
+        fill: 'none', stroke: 'rgba(111, 90, 154, 0.30)', 'stroke-width': '1.5', 'stroke-dasharray': '7 6',
+      }));
+      overlayGroup.appendChild(svgEl('polygon', {
+        class: 'egd-ontology-v2-time-axis-arrow-head',
+        points: `${to.x - 24},${arrowY} ${to.x - 34},${arrowY - 5} ${to.x - 34},${arrowY + 5}`,
+        fill: 'rgba(111, 90, 154, 0.66)',
+      }));
+    }
+
+    cameraGroup.appendChild(coupledBehindNodeGroup);
+    cameraGroup.appendChild(frontLayerVeilGroup);
+    cameraGroup.appendChild(activeNodeGroup);
+    cameraGroup.appendChild(cameraOverlayGroup);
+    svg.appendChild(surfaceGroup);
+    svg.appendChild(edgeGroup);
+    svg.appendChild(cameraGroup);
+    svg.appendChild(depthEdgeGroup);
+    svg.appendChild(fixedNodeGroup);
+    svg.appendChild(overlayGroup);
+    // Interaction controls stay above visual occlusion and shading layers.
+    svg.appendChild(layerControlGroup);
+    stage.appendChild(svg);
+    stage.appendChild(el('div', {
+      class: 'egd-ontology-stage-hint',
+      'aria-hidden': 'true',
+    }, '드래그 이동  ·  휠 스크롤  ·  ⌘/Ctrl + 휠 확대'));
+
+    const minimap = el('div', {
+      class: 'egd-ontology-minimap egd-ontology-v2-minimap',
+      data: {
+        activePane: localState.activePane,
+        activeStratum: localState.activeLayer,
+        zoom: camera.zoom.toFixed(2),
+      },
+      role: 'navigation',
+      'aria-label': `${ONTOLOGY_TIME_PANE_LABELS[localState.activePane]} pane 개념 분포 미니맵`,
+    });
+    const miniCorners = ONTOLOGY_LAYER_ORDER.flatMap((layer) => (
+      Object.values(layerGeometryFor(localState.activePane, layer).corners)
+    ));
+    const miniMinX = Math.min(...miniCorners.map((point) => point.x));
+    const miniMaxX = Math.max(...miniCorners.map((point) => point.x));
+    const miniMinY = Math.min(...miniCorners.map((point) => point.y));
+    const miniMaxY = Math.max(...miniCorners.map((point) => point.y));
+    const miniPadX = Math.max(8, (miniMaxX - miniMinX) * 0.018);
+    const miniPadY = Math.max(6, (miniMaxY - miniMinY) * 0.025);
+    const miniViewWidth = miniMaxX - miniMinX + miniPadX * 2;
+    const miniViewHeight = miniMaxY - miniMinY + miniPadY * 2;
+    const miniSvg = svgEl('svg', {
+      class: 'egd-ontology-minimap-map',
+      viewBox: `${(miniMinX - miniPadX).toFixed(1)} ${(miniMinY - miniPadY).toFixed(1)} ${(miniMaxX - miniMinX + miniPadX * 2).toFixed(1)} ${(miniMaxY - miniMinY + miniPadY * 2).toFixed(1)}`,
+      preserveAspectRatio: 'none',
+      data: { scope: 'active-pane', phase: localState.activePane },
+    });
+    layerRenderOrder.forEach((layer) => {
+      const miniGeometry = layerGeometryFor(localState.activePane, layer);
+      const spec = layerSpecs[layer];
+      const activateMiniRegion = (ev) => {
+        ev.preventDefault();
+        ev.stopPropagation();
+        setOntologyLayer(localState, layer);
+        rerender();
+      };
+      miniSvg.appendChild(svgEl('path', {
+        class: `egd-ontology-minimap-layer-pane egd-ontology-minimap-time-active${layer === localState.activeLayer ? ' egd-ontology-minimap-layer-pane-active' : ''}`,
+        d: miniGeometry.rectPath(spec.u, spec.v, spec.w, spec.h),
+        fill: layer === 'virtual' ? '#7E57C2' : '#2D5A7B',
+        data: { phase: localState.activePane, layer },
+        tabindex: '0',
+        role: 'button',
+        'aria-label': `${ONTOLOGY_TIME_PANE_LABELS[localState.activePane]} ${layer === 'virtual' ? '가상' : '물리'} 층으로 이동`,
+        onclick: activateMiniRegion,
+        onkeydown: (ev) => {
+          if (ev.key === 'Enter' || ev.key === ' ') activateMiniRegion(ev);
+        },
+      }));
+    });
+    const minimapRefs = new Set();
+    placements.forEach((placement, refId) => {
+      if (placement.occurrence.timeSlice !== localState.activePane) return;
+      if (minimapRefs.has(refId)) return;
+      minimapRefs.add(refId);
+      const occurrence = placement.occurrence;
+      const geometry = layerGeometryFor(occurrence.timeSlice, occurrence.layer);
+      const point = geometry.point(
+        placement.spec.u + placement.spec.w / 2,
+        placement.spec.v + placement.spec.h / 2,
+      );
+      const isSelected = refId === selected?.refId;
+      const markerSize = isSelected ? 5 : 3.5;
+      miniSvg.appendChild(svgEl('ellipse', {
+        class: `egd-ontology-minimap-node${isSelected ? ' egd-ontology-minimap-node-selected' : ''}`,
+        cx: point.x,
+        cy: point.y,
+        rx: markerSize * miniViewWidth / 168,
+        ry: markerSize * miniViewHeight / 110,
+        fill: occurrence.layer === 'virtual' ? '#6F469F' : '#244F6C',
+        stroke: 'rgba(255, 255, 255, 0.94)',
+        'stroke-width': isSelected ? '4' : '2.5',
+        data: { refId, phase: occurrence.timeSlice, layer: occurrence.layer },
+        role: 'button',
+        tabindex: '0',
+        'aria-label': `${model.labelFor(occurrence)} 개념으로 이동`,
+        onclick: (ev) => {
+          ev.preventDefault();
+          ev.stopPropagation();
+          selectOntologyOccurrence(localState, model, refId);
+          rerender();
+        },
+        onkeydown: (ev) => {
+          if (ev.key !== 'Enter' && ev.key !== ' ') return;
+          ev.preventDefault();
+          ev.stopPropagation();
+          selectOntologyOccurrence(localState, model, refId);
+          rerender();
+        },
+      }));
+    });
+    miniSvg.appendChild(svgEl('path', {
+      class: 'egd-ontology-minimap-viewport-halo',
+      d: activeGeometry.rectPath(
+        activeCameraGeometry.viewportSpec.u,
+        activeCameraGeometry.viewportSpec.v,
+        activeCameraGeometry.viewportSpec.w,
+        activeCameraGeometry.viewportSpec.h,
+      ),
+      fill: 'none', stroke: 'rgba(255, 255, 255, 0.92)', 'stroke-width': '4.2',
+    }));
+    miniSvg.appendChild(svgEl('path', {
+      class: 'egd-ontology-minimap-viewport',
+      d: activeGeometry.rectPath(
+        activeCameraGeometry.viewportSpec.u,
+        activeCameraGeometry.viewportSpec.v,
+        activeCameraGeometry.viewportSpec.w,
+        activeCameraGeometry.viewportSpec.h,
+      ),
+      fill: 'none',
+      stroke: localState.activeLayer === 'virtual' ? 'rgba(103, 67, 166, 0.96)' : 'rgba(35, 76, 106, 0.96)',
+      'stroke-width': '2.2',
+      'stroke-dasharray': '5 3',
+    }));
+    const minimapSummaryId = `${String(card?.id || 'ontology')}-minimap-summary`;
+    minimap.setAttribute('aria-describedby', minimapSummaryId);
+    minimap.appendChild(miniSvg);
+    minimap.appendChild(el('div', {
+      id: minimapSummaryId,
+      class: 'egd-ontology-minimap-context',
+    },
+      el('span', { class: 'egd-ontology-minimap-context-title' },
+        selected ? `${model.labelFor(selected)} 주변` : '선택된 개념 없음'),
+      el('span', { class: 'egd-ontology-minimap-context-coordinate' },
+        `${ONTOLOGY_TIME_PANE_LABELS[localState.activePane]} · ${localState.activeLayer === 'virtual' ? '가상' : '물리'}`,
       ),
     ));
-    if (selected.id === 'goal') {
-      lensSection('선택 경로', lensCard(
-        el('div', { class: 'egd-ontology-lens-pathline' },
-          el('span', {}, '컨텍스트 연결'),
-          el('b', {}, '→'),
-          el('span', {}, '목표'),
-        ),
-      ));
-    }
-    lensSection('관계 정보', lensMetricGrid(
-      ['나가는 관계', String(outgoingEdges.length)],
-      ['들어오는 관계', String(incomingEdges.length)],
-      ['시간 위치', selectedPhaseLabel],
+    minimap.appendChild(el('div', {
+      class: 'egd-ontology-minimap-legend',
+      'aria-hidden': 'true',
+    },
+      el('span', { class: 'egd-ontology-minimap-legend-item' },
+        el('i', { class: 'egd-ontology-minimap-legend-swatch egd-ontology-minimap-legend-swatch-virtual' }), '가상'),
+      el('span', { class: 'egd-ontology-minimap-legend-item' },
+        el('i', { class: 'egd-ontology-minimap-legend-swatch egd-ontology-minimap-legend-swatch-physical' }), '물리'),
+      el('span', { class: 'egd-ontology-minimap-legend-item' },
+        el('i', { class: 'egd-ontology-minimap-legend-swatch egd-ontology-minimap-legend-swatch-selected' }), '선택'),
+      el('span', { class: 'egd-ontology-minimap-legend-item' },
+        el('i', { class: 'egd-ontology-minimap-legend-swatch egd-ontology-minimap-legend-swatch-viewport' }), '화면'),
     ));
-    detail.appendChild(el('p', { class: 'egd-ontology-summary' }, selectedSummary));
-    const aliasLine = ontologyAliasLine(selected);
-    const abbreviationLines = ontologyAbbreviationLines(selected);
-    if (aliasLine || abbreviationLines.length) {
-      const nameMetadata = el('div', { class: 'egd-ontology-relation-list' },
-        el('div', { class: 'egd-ontology-detail-subtitle' }, '이름 메타데이터'),
-      );
-      if (aliasLine) nameMetadata.appendChild(el('div', { class: 'egd-ontology-path' }, `별칭: ${aliasLine}`));
-      for (const line of abbreviationLines) {
-        nameMetadata.appendChild(el('div', { class: 'egd-ontology-path' }, `약어: ${line}`));
-      }
-      detail.appendChild(nameMetadata);
-    }
-    if (selected.path) detail.appendChild(el('div', { class: 'egd-ontology-path' }, selected.path));
-
-    const canonicalId = ontologyCanonicalIdForNode(graph, selected);
-    const projectionNodes = ontologyProjectionNodesForCanonical(graph, canonicalId);
-    if (canonicalId && projectionNodes.length) {
-      const rail = el('div', { class: 'egd-ontology-identity-rail' },
-        el('div', { class: 'egd-ontology-detail-subtitle' }, '정체성 레일'),
-        el('button', {
-          class: 'egd-ontology-rail-item' + (selected.id === canonicalId ? ' egd-ontology-rail-item-active' : ''),
-        onclick: () => {
-          localState.selectedId = canonicalId;
-          localState.selectedRelation = null;
-          ontologyResetFocusViewport(localState);
-          renderOntologyMap(stage, detail, graph, localState);
-        },
-      },
-          el('span', { class: 'egd-ontology-rail-facet' }, '정체성'),
-          el('span', { class: 'egd-ontology-rail-label' }, ontologyDisplayLabel(ontologyNodeById(graph, canonicalId), 'focus')),
-        ),
-      );
-      for (const projection of projectionNodes) {
-        const facet = ontologyProjectionFacet(projection.id);
-        rail.appendChild(el('button', {
-          class: 'egd-ontology-rail-item' + (selected.id === projection.id ? ' egd-ontology-rail-item-active' : ''),
-          onclick: () => {
-            localState.selectedId = projection.id;
-            localState.selectedRelation = null;
-            ontologyResetFocusViewport(localState);
-            renderOntologyMap(stage, detail, graph, localState);
-          },
-        },
-          el('span', { class: 'egd-ontology-rail-facet' }, ONTOLOGY_FACET_LABELS[facet] || 'Facet'),
-          el('span', { class: 'egd-ontology-rail-label' }, ontologyProjectionLabel(projection).replace(/^[^·]+·\s*/, '')),
-        ));
-      }
-      detail.appendChild(rail);
-    }
-
-    const relationList = el('div', { class: 'egd-ontology-relation-list' });
-    relationList.appendChild(el('div', { class: 'egd-ontology-detail-subtitle' }, '나가는 관계'));
-    for (const edge of allEdges.filter((edge) => edge.source === selected.id).slice(0, 12)) {
-      relationList.appendChild(el('button', {
-        class: 'egd-ontology-relation',
-        onclick: () => {
-          localState.selectedId = edge.target;
-          localState.selectedRelation = null;
-          ontologyResetFocusViewport(localState);
-          renderOntologyMap(stage, detail, graph, localState);
-        },
-      }, `${ontologyRelationLabel(edge.relation)} → ${relationNodeLabel(edge.target)}`));
-    }
-    relationList.appendChild(el('div', { class: 'egd-ontology-detail-subtitle' }, '들어오는 관계'));
-    for (const edge of allEdges.filter((edge) => edge.target === selected.id).slice(0, 12)) {
-      relationList.appendChild(el('button', {
-        class: 'egd-ontology-relation',
-        onclick: () => {
-          localState.selectedId = edge.source;
-          localState.selectedRelation = null;
-          ontologyResetFocusViewport(localState);
-          renderOntologyMap(stage, detail, graph, localState);
-        },
-      }, `${relationNodeLabel(edge.source)} → ${ontologyRelationLabel(edge.relation)}`));
-    }
-    detail.appendChild(relationList);
-
-    detail.appendChild(el('button', {
-      class: 'egd-ontology-copy',
-      onclick: () => copyTextToClipboard(ontologyContextBundle(graph, selected.id)),
-    }, '선택 관계 복사'));
+    stage.appendChild(minimap);
+    const tools = el('div', { class: 'egd-ontology-stage-mini-tools' },
+      el('button', { class: 'egd-ontology-stage-mini-tool egd-ontology-stage-mini-tool-zoom-in', title: '확대', onclick: (ev) => {
+        ev.stopPropagation(); adjustOntologyCameraZoom(camera, 1); rerender();
+      } }, '+'),
+      el('button', { class: 'egd-ontology-stage-mini-tool egd-ontology-stage-mini-tool-reset', title: '맞춤', onclick: (ev) => {
+        ev.stopPropagation(); resetOntologyCamera(camera); rerender();
+      } }, '⌂'),
+      el('button', { class: 'egd-ontology-stage-mini-tool egd-ontology-stage-mini-tool-zoom-out', title: '축소', onclick: (ev) => {
+        ev.stopPropagation(); adjustOntologyCameraZoom(camera, -1); rerender();
+      } }, '−'),
+    );
+    stage.appendChild(tools);
+    stage.appendChild(el('div', { class: 'egd-ontology-stage-zoom-label' }, `${Math.round(camera.zoom * 100)}%`));
   }
 
   async function loadOntologyGraph() {
     const response = await fetch(ONTOLOGY_GRAPH_URL, { cache: 'no-store' });
     if (!response.ok) throw new Error(`Ontology graph load failed: ${response.status}`);
-    return response.json();
+    return validateOntologyGraph(await response.json());
   }
 
   function spawnOntologyMapCard(initialState = {}) {
@@ -10165,14 +7517,33 @@
     if (existing) return existing;
 
     const id = `egd-ontology-card-${++cardSeq}`;
-    const initialWidth = Math.min(1760, Math.max(1180, window.innerWidth - 40));
-    const initialHeight = Math.min(980, Math.max(720, window.innerHeight - 40));
+    const windowMargin = 12;
+    const safe = safeViewportRect({ avoidHud: false, margin: windowMargin });
+    const initialWidth = Math.min(1760, Math.max(900, safe.width));
+    const initialHeight = Math.min(900, Math.max(560, safe.height));
     const offset = ((cardSeq - 1) % 6) * 24;
-    const topLeft = viewportToCanvasPoint(20 + offset, 20 + offset);
-    const initialTop = Math.max(20, Math.round(topLeft.y));
-    const card = el('div', {
+    const placement = clampClientCardRect(
+      initialWidth,
+      initialHeight,
+      safe.left + safe.width / 2 + offset,
+      safe.top + safe.height / 2 + offset,
+      { avoidHud: false, margin: windowMargin },
+    );
+    const topLeft = viewportToCanvasPoint(placement.left, placement.top);
+    const initialTop = Math.round(topLeft.y);
+    const deskWindow = spawnDeskWindowShell({
       id,
-      class: 'egd-canvas-card egd-ontology-card',
+      kind: 'ontology',
+      className: 'egd-ontology-card',
+      headerClassName: 'egd-ontology-header',
+      bodyClassName: 'egd-ontology-body',
+      inputPolicy: 'adapter-owned',
+      sourceRef,
+      minWidth: 680,
+      minHeight: 440,
+      createDirtyReason: 'create-ontology-card',
+      moveDirtyReason: 'move-ontology-card',
+      resizeDirtyReason: 'resize-ontology-card',
       style: {
         top: initialTop + 'px',
         left: Math.round(topLeft.x) + 'px',
@@ -10181,75 +7552,63 @@
         zIndex: String(++cardZ),
       },
     });
+    const card = deskWindow.root;
+    deskWindow.slots.identity.classList.add('egd-ontology-titlebar-identity');
+    deskWindow.slots.identity.append(
+      el('div', { class: 'egd-ontology-title' }, '온톨로지'),
+      el('div', { class: 'egd-ontology-header-lens' }, '과거 · 현재 · 미래  /  가상 · 물리'),
+    );
 
-    const initialSelectedId = initialState.selectedId || 'entity.llm_chat_session';
-    const initialPane = initialState.activePane || 'present';
+    const initialSelectedRefId = initialState.selectedRefId || initialState.selectedId || 'present.server';
+    const initialPane = ONTOLOGY_TIME_PANE_ORDER.includes(initialState.activePane) ? initialState.activePane : 'present';
+    const initialLayer = ONTOLOGY_LAYER_ORDER.includes(initialState.activeLayer || initialState.activeStratum)
+      ? (initialState.activeLayer || initialState.activeStratum)
+      : 'virtual';
     const localState = {
-      mode: 'focus',
-      selectedId: initialSelectedId,
-      focusTarget: initialState.focusTarget || 'pane',
+      mode: 'composite',
+      selectedId: initialSelectedRefId,
+      selectedRefId: initialSelectedRefId,
+      selectedConceptId: initialState.selectedConceptId || 'server',
+      focusTarget: 'object',
       activePane: initialPane,
-      activeDepth: ontologyNormalizeDepth(
-        initialState.activeDepth,
-        ontologyDefaultDepthForPane(initialPane, { id: initialSelectedId }),
-      ),
+      activeLayer: initialLayer,
+      activeStratum: initialLayer,
+      activeDepth: initialLayer,
       pan: initialState.pan || { x: 0, y: 0 },
-      paneSlides: initialState.paneSlides || {},
       zoom: Number.isFinite(initialState.zoom) ? initialState.zoom : 1,
-      tilt: 0,
+      cameraByCell: initialState.cameraByCell || {},
     };
     card._ontologyState = localState;
 
-    let cleanup = () => {};
     let stage;
-    let detail;
     card._ontologyRender = () => {
-      if (stage && detail && card._ontologyGraph) renderOntologyMap(stage, detail, card._ontologyGraph, localState);
+      if (stage && card._ontologyGraph) renderOntologyMap(stage, card._ontologyGraph, localState);
     };
     card._ontologyApplyWheelDelta = (deltaX = 0, deltaY = 0, modifiers = {}) => {
-      ontologyHandleSemanticWheel(localState, {
-        deltaX,
-        deltaY,
-        ctrlKey: !!modifiers.ctrlKey,
-        metaKey: !!modifiers.metaKey,
-      });
-      if (stage && detail && card._ontologyGraph) renderOntologyMap(stage, detail, card._ontologyGraph, localState);
+      const camera = getOntologyCamera(localState);
+      if (modifiers.ctrlKey || modifiers.metaKey) {
+        adjustOntologyCameraZoom(camera, deltaY < 0 ? 1 : -1);
+      } else {
+        camera.x -= deltaX;
+        camera.y -= deltaY;
+      }
+      if (stage && card._ontologyGraph) renderOntologyMap(stage, card._ontologyGraph, localState);
       return {
         activePane: localState.activePane,
-        activeDepth: localState.activeDepth,
-        paneSlides: localState.paneSlides,
-        zoom: localState.zoom,
+        activeLayer: localState.activeLayer,
+        activeDepth: localState.activeLayer,
+        activeStratum: localState.activeLayer,
+        pan: { x: camera.x, y: camera.y },
+        zoom: camera.zoom,
       };
     };
-    const header = el('div', { class: 'egd-card-header egd-ontology-header' },
-      el('div', { class: 'egd-card-topbar' },
-        el('div', { class: 'egd-card-dots-shell' },
-          el('div', { class: 'egd-card-dots' },
-            el('span', { class: 'egd-card-dot egd-card-dot-close', onclick: (ev) => { ev.stopPropagation(); closeCanvasCard(card, cleanup); } }),
-            el('span', { class: 'egd-card-dot egd-card-dot-min' }),
-            el('span', { class: 'egd-card-dot egd-card-dot-max' }),
-          ),
-        ),
-        el('div', { class: 'egd-ontology-title' }, '온톨로지 맵'),
-        el('div', { class: 'egd-ontology-search-shell' },
-          el('span', { class: 'egd-ontology-search-icon' }, '⌕'),
-          el('input', {
-            class: 'egd-ontology-search',
-            type: 'search',
-            placeholder: '객체, 관계, 태그 검색... (⌘K)',
-            onmousedown: (ev) => ev.stopPropagation(),
-            onclick: (ev) => ev.stopPropagation(),
-          }),
-        ),
-        el('div', { class: 'egd-ontology-header-actions' },
-          el('button', { class: 'egd-ontology-header-icon', title: '렌즈' }, '⌘'),
-          el('button', { class: 'egd-ontology-header-icon', title: '알림' }, '⌁'),
-          el('button', { class: 'egd-ontology-header-icon egd-ontology-header-badged', title: '상태' }, '▣'),
-          el('div', { class: 'egd-ontology-avatar' }, 'M'),
-        ),
-      ),
-    );
-
+    card._ontologyPanBy = (deltaX = 0, deltaY = 0) => {
+      const camera = getOntologyCamera(localState);
+      camera.x += deltaX;
+      camera.y += deltaY;
+      card._ontologyRender();
+      return { x: camera.x, y: camera.y };
+    };
     stage = el('div', {
       class: 'egd-ontology-stage',
       tabindex: '0',
@@ -10257,118 +7616,107 @@
     },
       el('div', { class: 'egd-ontology-loading' }, '온톨로지 그래프를 불러오는 중...'),
     );
-    detail = el('aside', { class: 'egd-ontology-detail' });
-    const body = el('div', { class: 'egd-card-body egd-ontology-body' }, stage, detail);
-    card.appendChild(header);
-    card.appendChild(body);
-
-    const host = document.getElementById('egd-canvas-layer') || document.documentElement;
-    host.appendChild(card);
-    bindCardSourceRef(card, sourceRef);
-    markAgendaDirty('create-ontology-card', card);
-    setActiveEntity(card);
-
-    let drag = null;
-    let paneSlideDrag = null;
-    header.addEventListener('mousedown', (ev) => {
-      if (ev.target.closest('input, button, .egd-card-dot')) return;
-      if (isCardFullscreen(card)) return;
-      focusCanvasCard(card);
-      drag = { x: ev.clientX, y: ev.clientY, left: card.offsetLeft, top: card.offsetTop };
-      ev.preventDefault();
+    const body = deskWindow.slots.content;
+    body.appendChild(stage);
+    deskWindow.onResize(() => {
+      if (card._ontologyGraph) renderOntologyMap(stage, card._ontologyGraph, localState);
     });
-    installCardHeaderFullscreenToggle(card, header);
-    stage.addEventListener('mousedown', (ev) => {
-      if (ev.button !== 0 || ev.target.closest('.egd-ontology-node')) return;
+
+    let viewDrag = null;
+    const beginViewPan = (ev) => {
+      if (ev.button !== 0 || ev.target.closest('.egd-ontology-v2-breadcrumb, .egd-ontology-v2-layer-label-control, .egd-ontology-v2-layer-switch-hit, .egd-ontology-minimap, .egd-ontology-stage-mini-tools, .egd-ontology-stage-zoom-label')) return;
+      const conceptBox = ev.target.closest('.egd-ontology-v2-box');
+      if (conceptBox && !conceptBox.classList.contains('egd-ontology-v2-box-root')) return;
+      const paneHit = ev.target.closest('.egd-ontology-v2-pane-hit');
+      if (paneHit && paneHit.dataset.phase !== localState.activePane) return;
+      if (viewDrag) return;
       focusCanvasCard(card);
-      stage.focus({ preventScroll: true });
-      const phase = localState.activePane || 'present';
-      const depth = ontologyNormalizeDepth(localState.activeDepth);
-      paneSlideDrag = {
-        x: ev.clientX,
-        y: ev.clientY,
-        phase,
-        depth,
-        slide: ontologyPaneSlide(localState, phase, depth),
-        geometry: ontologyPaneSurfaceGeometry(
-          card._ontologyGraph,
-          ontologyNodeById(card._ontologyGraph, localState.selectedId),
-          localState,
-          phase,
-          depth,
-        ),
-      };
+      try { stage.focus({ preventScroll: true }); } catch { stage.focus(); }
+      const camera = getOntologyCamera(localState);
+      viewDrag = { x: ev.clientX, y: ev.clientY, panX: camera.x, panY: camera.y, moved: false, pointerId: ev.pointerId ?? null };
+      if (ev.pointerId != null) {
+        try { stage.setPointerCapture(ev.pointerId); } catch {}
+      }
+      stage.classList.add('egd-ontology-stage-panning');
       ev.preventDefault();
-      ev.stopPropagation();
-    });
+    };
+    stage.addEventListener('pointerdown', beginViewPan, { capture: true });
+    stage.addEventListener('mousedown', beginViewPan, { capture: true });
     stage.addEventListener('wheel', (ev) => {
       ev.preventDefault();
       ev.stopPropagation();
-      ontologyHandleSemanticWheel(localState, ev);
-      if (card._ontologyGraph) renderOntologyMap(stage, detail, card._ontologyGraph, localState);
+      if (ev.target.closest('.egd-ontology-minimap, .egd-ontology-stage-mini-tools, .egd-ontology-stage-zoom-label')) return;
+      card._ontologyApplyWheelDelta(ev.deltaX, ev.deltaY, { ctrlKey: ev.ctrlKey, metaKey: ev.metaKey });
     }, { capture: true, passive: false });
     body.addEventListener('wheel', (ev) => {
       if (!stage.contains(ev.target)) ev.stopPropagation();
     }, { capture: true, passive: false });
     stage.addEventListener('keydown', (ev) => {
       let handled = true;
+      const camera = getOntologyCamera(localState);
       if (ev.key === 'ArrowLeft') {
-        ontologySetPane(localState, ontologyShiftPane(localState.activePane || 'present', -1));
+        camera.x += 36;
       } else if (ev.key === 'ArrowRight') {
-        ontologySetPane(localState, ontologyShiftPane(localState.activePane || 'present', 1));
+        camera.x -= 36;
       } else if (ev.key === 'ArrowUp') {
-        ontologySetDepth(localState, ontologyShiftDepth(localState.activeDepth, -1));
+        camera.y += 36;
       } else if (ev.key === 'ArrowDown') {
-        ontologySetDepth(localState, ontologyShiftDepth(localState.activeDepth, 1));
+        camera.y -= 36;
       } else if (ev.key === '0') {
-        ontologyResetFocusViewport(localState);
+        resetOntologyCamera(camera);
       } else {
         handled = false;
       }
       if (!handled) return;
       ev.preventDefault();
       ev.stopPropagation();
-      if (card._ontologyGraph) renderOntologyMap(stage, detail, card._ontologyGraph, localState);
+      if (card._ontologyGraph) renderOntologyMap(stage, card._ontologyGraph, localState);
     });
 
     const onMove = (ev) => {
-      const s = canvasZoom();
-      if (drag) {
-        card.style.left = (drag.left + (ev.clientX - drag.x) / s) + 'px';
-        card.style.top = (drag.top + (ev.clientY - drag.y) / s) + 'px';
-        return;
-      }
-      if (paneSlideDrag) {
-        const surfaceDelta = ontologyProjectPaneDragDelta(
-          (ev.clientX - paneSlideDrag.x) / s,
-          (ev.clientY - paneSlideDrag.y) / s,
-          paneSlideDrag.geometry,
-        );
-        ontologySetPaneSlide(localState, paneSlideDrag.phase, paneSlideDrag.depth, {
-          u: paneSlideDrag.slide.u + surfaceDelta.u,
-          v: paneSlideDrag.slide.v + surfaceDelta.v,
-        });
-        if (card._ontologyGraph) renderOntologyMap(stage, detail, card._ontologyGraph, localState);
+      if (viewDrag) {
+        const distance = Math.hypot(ev.clientX - viewDrag.x, ev.clientY - viewDrag.y);
+        if (distance > 3) viewDrag.moved = true;
+        const camera = getOntologyCamera(localState);
+        camera.x = viewDrag.panX + (ev.clientX - viewDrag.x);
+        camera.y = viewDrag.panY + (ev.clientY - viewDrag.y);
+        if (card._ontologyGraph) renderOntologyMap(stage, card._ontologyGraph, localState);
+        stage.classList.add('egd-ontology-stage-panning');
       }
     };
     const onUp = () => {
-      if (drag) markAgendaDirty('move-ontology-card', card);
-      drag = null;
-      paneSlideDrag = null;
+      if (viewDrag?.moved) {
+        localState.suppressNextSurfaceClick = true;
+        setTimeout(() => { localState.suppressNextSurfaceClick = false; }, 0);
+      }
+      viewDrag = null;
+      stage.classList.remove('egd-ontology-stage-panning');
     };
+    stage.addEventListener('mousemove', onMove, { capture: true });
+    stage.addEventListener('mouseup', onUp, { capture: true });
+    stage.addEventListener('pointermove', onMove, { capture: true });
+    stage.addEventListener('pointerup', onUp, { capture: true });
     document.addEventListener('mousemove', onMove);
     document.addEventListener('mouseup', onUp);
-    cleanup = () => {
+    document.addEventListener('pointermove', onMove);
+    document.addEventListener('pointerup', onUp);
+    deskWindow.registerCleanup(() => {
       document.removeEventListener('mousemove', onMove);
       document.removeEventListener('mouseup', onUp);
-      if (state.activeEntityId === card.id) setActiveEntity(null);
-    };
-    card._cleanup = cleanup;
+      document.removeEventListener('pointermove', onMove);
+      document.removeEventListener('pointerup', onUp);
+      stage.removeEventListener('pointerdown', beginViewPan, { capture: true });
+      stage.removeEventListener('mousedown', beginViewPan, { capture: true });
+      stage.removeEventListener('mousemove', onMove, { capture: true });
+      stage.removeEventListener('mouseup', onUp, { capture: true });
+      stage.removeEventListener('pointermove', onMove, { capture: true });
+      stage.removeEventListener('pointerup', onUp, { capture: true });
+    });
 
     loadOntologyGraph()
       .then((graph) => {
         card._ontologyGraph = graph;
-        renderOntologyMap(stage, detail, graph, localState);
+        renderOntologyMap(stage, graph, localState);
       })
       .catch((error) => {
         stage.textContent = '';
@@ -10748,10 +8096,19 @@
       window.innerWidth / 2 + offset,
       window.innerHeight / 2 + offset,
     );
-
-    const card = el('div', {
+    const deskWindow = spawnDeskWindowShell({
       id,
-      class: 'egd-canvas-card egd-browser-card',
+      kind: 'browser',
+      className: 'egd-browser-card',
+      inputPolicy: 'native-content',
+      sourceRef,
+      toolbar: true,
+      progress: true,
+      minWidth: 320,
+      minHeight: 250,
+      createDirtyReason: 'create-browser-card',
+      moveDirtyReason: 'move-browser-card',
+      resizeDirtyReason: 'resize-browser-card',
       style: {
         top: Math.round(center.y - initialHeight / 2) + 'px',
         left: Math.round(center.x - initialWidth / 2) + 'px',
@@ -10760,6 +8117,7 @@
         zIndex: String(++cardZ),
       },
     });
+    const card = deskWindow.root;
 
     const urlInput = el('input', {
       type: 'text',
@@ -10802,7 +8160,6 @@
       class: 'egd-card-omnibox-icon egd-card-security',
       title: browserState.security,
     }, browserSecurityGlyph(normalizedUrl));
-    const progressStrip = el('div', { class: 'egd-card-progress' });
     const backButton = el('button', {
       class: 'egd-card-nav-btn',
       title: '뒤로',
@@ -10854,35 +8211,22 @@
       },
     }, '⋮');
 
-    const header = el('div', { class: 'egd-card-header' },
-      el('div', { class: 'egd-card-topbar' },
-        el('div', { class: 'egd-card-dots-shell' },
-          el('div', { class: 'egd-card-dots' },
-            el('span', { class: 'egd-card-dot egd-card-dot-close', onclick: (ev) => { ev.stopPropagation(); closeCanvasCard(card, cleanupCard); } }),
-            el('span', { class: 'egd-card-dot egd-card-dot-min' }),
-            el('span', { class: 'egd-card-dot egd-card-dot-max' }),
-          ),
-        ),
-        el('div', { class: 'egd-card-page-meta' },
-          pageTitle,
-          pageStatus,
-        ),
+    const header = deskWindow.slots.header;
+    deskWindow.slots.identity.classList.add('egd-card-page-meta');
+    deskWindow.slots.identity.append(pageTitle, pageStatus);
+    deskWindow.slots.toolbar.append(
+      el('div', { class: 'egd-card-nav' },
+        backButton,
+        forwardButton,
+        reloadButton,
+        homeButton,
       ),
-      el('div', { class: 'egd-card-toolbar' },
-        el('div', { class: 'egd-card-nav' },
-          backButton,
-          forwardButton,
-          reloadButton,
-          homeButton,
-        ),
-        el('div', { class: 'egd-card-omnibox' },
-          securityIcon,
-          urlInput,
-        ),
-        duplicateButton,
-        menuButton,
+      el('div', { class: 'egd-card-omnibox' },
+        securityIcon,
+        urlInput,
       ),
-      progressStrip,
+      duplicateButton,
+      menuButton,
     );
 
     // ---- Body → wrap (logical 1440×900) → XUL browser ----
@@ -10891,30 +8235,8 @@
     wrap.style.height = CARD_LOGICAL_H + 'px';
 
     const bodyCapture = el('div', { class: 'egd-card-body-capture' });
-    const body = el('div', { class: 'egd-card-body' }, wrap, bodyCapture);
-    const resizeHits = [
-      { cls: 'egd-card-resize-hit-n',  edges: { top: true } },
-      { cls: 'egd-card-resize-hit-e',  edges: { right: true } },
-      { cls: 'egd-card-resize-hit-s',  edges: { bottom: true } },
-      { cls: 'egd-card-resize-hit-w',  edges: { left: true } },
-      { cls: 'egd-card-resize-hit-nw', edges: { top: true, left: true } },
-      { cls: 'egd-card-resize-hit-ne', edges: { top: true, right: true } },
-      { cls: 'egd-card-resize-hit-se', edges: { bottom: true, right: true } },
-      { cls: 'egd-card-resize-hit-sw', edges: { bottom: true, left: true } },
-    ].map(({ cls, edges }) => el('div', {
-      class: `egd-card-resize-hit ${cls}`,
-      data: { edges: JSON.stringify(edges) },
-    }));
-
-    card.appendChild(header);
-    card.appendChild(body);
-    for (const hit of resizeHits) card.appendChild(hit);
-
-    const host = document.getElementById('egd-canvas-layer') || document.documentElement;
-    host.appendChild(card);
-    bindCardSourceRef(card, sourceRef);
-    markAgendaDirty('create-browser-card', card);
-    setActiveEntity(card);
+    const body = deskWindow.slots.content;
+    body.append(wrap, bodyCapture);
 
     try {
       xulBrowser = document.createXULElement('browser');
@@ -12092,11 +9414,11 @@
           top: Math.round(pos.top) + 'px',
         },
       },
-        item('복제', '현재 URL을 새 카드로 열기', duplicateBrowser),
+        item('복제', '현재 URL을 새 Desk Window로 열기', duplicateBrowser),
         item('URL 복사', browserState.uri, () => copyTextToClipboard(browserState.uri)),
         item('홈', browserState.homeUrl, () => navigateBrowser(browserState.homeUrl)),
         item(browserState.loading ? '중지' : '새로고침', browserState.loading ? '로드 중지' : '현재 페이지 새로고침', () => (browserState.loading ? stopBrowser() : reloadBrowser())),
-        item(isCardFullscreen(card) ? '창 복귀' : '전체화면', '카드 전체화면 전환', () => toggleCardFullscreen(card)),
+        item(isCardFullscreen(card) ? '창 복귀' : '최대화', 'Desk Window 최대화 전환', () => toggleCardFullscreen(card)),
       );
       browserMenuPanel._outsideHandler = (event) => {
         if (browserMenuPanel?.contains(event.target) || anchor.contains(event.target)) return;
@@ -12169,14 +9491,13 @@
       state.panCanvasByWheel(ev);
     };
     bodyCapture.addEventListener('mousedown', (ev) => {
-      if (startPanIfNeeded(ev)) return;
-      focusCard();
+      if (deskWindow.startPanIfNeeded(ev)) return;
+      deskWindow.focus();
       ev.preventDefault();
       ev.stopPropagation();
     }, true);
     bodyCapture.addEventListener('wheel', routeWheelToCanvas, { passive: false });
     for (const target of [card, header, body, wrap, xulBrowser]) {
-      target.addEventListener('mousedown', () => activateCard(), true);
       target.addEventListener('wheel', routeWheelToCanvas, { passive: false, capture: true });
     }
 
@@ -12219,136 +9540,7 @@
       wrap.style.height = logicalHeight + 'px';
       wrap.style.transform = `scale(${scale})`;
     };
-    const ro = new ResizeObserver(updateFitScale);
-    ro.observe(body);
-    queueMicrotask(updateFitScale);
-
-    // ---- Card header drag (이동) ----
-    let drag = null;
-    header.addEventListener('mousedown', (ev) => {
-      if (startPanIfNeeded(ev)) return;
-      if (isCardFullscreen(card)) return;
-      if (ev.target.closest('input, button, .egd-card-dot')) return;
-      focusCard();
-      drag = { x: ev.clientX, y: ev.clientY, left: card.offsetLeft, top: card.offsetTop };
-      ev.preventDefault();
-    });
-    installCardHeaderFullscreenToggle(card, header);
-
-    // ---- Resize hit zones (4변 + 4코너) ----
-    let resize = null;
-    const MIN_W = 320;
-    const MIN_H = 250;
-    const RESIZE_EDGE_X = 10;
-    const RESIZE_EDGE_Y = 7;
-    const RESIZE_CORNER_X = 15;
-    const RESIZE_CORNER_Y = 13;
-    const getResizeEdges = (ev) => {
-      const rect = card.getBoundingClientRect();
-      const x = ev.clientX - rect.left;
-      const y = ev.clientY - rect.top;
-      const left = x >= 0 && x <= RESIZE_EDGE_X;
-      const right = x >= rect.width - RESIZE_EDGE_X && x <= rect.width;
-      const top = y >= 0 && y <= RESIZE_EDGE_Y;
-      const bottom = y >= rect.height - RESIZE_EDGE_Y && y <= rect.height;
-      const cornerLeft = x >= 0 && x <= RESIZE_CORNER_X;
-      const cornerRight = x >= rect.width - RESIZE_CORNER_X && x <= rect.width;
-      const cornerTop = y >= 0 && y <= RESIZE_CORNER_Y;
-      const cornerBottom = y >= rect.height - RESIZE_CORNER_Y && y <= rect.height;
-      if (cornerTop && cornerLeft) return { left: true, top: true, right: false, bottom: false };
-      if (cornerTop && cornerRight) return { left: false, top: true, right: true, bottom: false };
-      if (cornerBottom && cornerRight) return { left: false, top: false, right: true, bottom: true };
-      if (cornerBottom && cornerLeft) return { left: true, top: false, right: false, bottom: true };
-      if (!left && !right && !top && !bottom) return null;
-      return { left, right, top, bottom };
-    };
-    const resizeCursor = (edges) => {
-      if (!edges) return 'default';
-      if ((edges.top && edges.left) || (edges.bottom && edges.right)) return 'nwse-resize';
-      if ((edges.top && edges.right) || (edges.bottom && edges.left)) return 'nesw-resize';
-      if (edges.left || edges.right) return 'ew-resize';
-      if (edges.top || edges.bottom) return 'ns-resize';
-      return 'default';
-    };
-    const updateResizeCursor = (ev) => {
-      if (drag || resize) return;
-      card.style.cursor = resizeCursor(getResizeEdges(ev));
-    };
-    const beginResize = (ev, edges) => {
-      if (startPanIfNeeded(ev)) return;
-      if (isCardFullscreen(card)) return;
-      focusCard();
-      resize = {
-        edges,
-        x: ev.clientX, y: ev.clientY,
-        left: card.offsetLeft,
-        top: card.offsetTop,
-        w: card.offsetWidth,
-        h: card.offsetHeight,
-      };
-      ev.preventDefault();
-      ev.stopPropagation();
-    };
-    card.addEventListener('mousemove', updateResizeCursor);
-    card.addEventListener('mouseleave', () => {
-      if (!drag && !resize) card.style.cursor = 'default';
-    });
-    card.addEventListener('mousedown', (ev) => {
-      const edges = getResizeEdges(ev);
-      if (!edges) return;
-      beginResize(ev, edges);
-    }, true);
-    for (const hit of resizeHits) {
-      hit.addEventListener('mousedown', (ev) => beginResize(ev, JSON.parse(hit.dataset.edges)));
-    }
-
-    const onMove = (ev) => {
-      const s = canvasZoom();
-      if (drag) {
-        card.style.left = (drag.left + (ev.clientX - drag.x) / s) + 'px';
-        card.style.top  = (drag.top  + (ev.clientY - drag.y) / s) + 'px';
-      } else if (resize) {
-        const dx = (ev.clientX - resize.x) / s;
-        const dy = (ev.clientY - resize.y) / s;
-        let nextLeft = resize.left;
-        let nextTop = resize.top;
-        let nextWidth = resize.w;
-        let nextHeight = resize.h;
-
-        if (resize.edges.right) nextWidth = Math.max(MIN_W, resize.w + dx);
-        if (resize.edges.bottom) nextHeight = Math.max(MIN_H, resize.h + dy);
-        if (resize.edges.left) {
-          const rawWidth = resize.w - dx;
-          nextWidth = Math.max(MIN_W, rawWidth);
-          nextLeft = resize.left + (resize.w - nextWidth);
-        }
-        if (resize.edges.top) {
-          const rawHeight = resize.h - dy;
-          nextHeight = Math.max(MIN_H, rawHeight);
-          nextTop = resize.top + (resize.h - nextHeight);
-        }
-
-        card.style.left = nextLeft + 'px';
-        card.style.top = nextTop + 'px';
-        card.style.width = nextWidth + 'px';
-        card.style.height = nextHeight + 'px';
-        card.style.cursor = resizeCursor(resize.edges);
-      }
-    };
-    const onUp = () => {
-      if (drag) markAgendaDirty('move-browser-card', card);
-      if (resize) markAgendaDirty('resize-browser-card', card);
-      drag = null;
-      resize = null;
-      card.style.cursor = 'default';
-    };
-    window.addEventListener('mousemove', onMove);
-    window.addEventListener('mouseup', onUp);
-
-    card.addEventListener('mousedown', (ev) => {
-      if (startPanIfNeeded(ev)) return;
-      focusCard();
-    });
+    deskWindow.onResize(updateFitScale);
 
     const cleanupCard = () => {
       if (state.codex.authCardEntityId === card.id) {
@@ -12366,16 +9558,12 @@
         try { xulBrowser.removeEventListener(eventName, onBrowserLoadDone, true); } catch {}
       }
       try { xulBrowser.removeEventListener('DOMTitleChanged', onBrowserTitle, true); } catch {}
-      if (state.activeEntityId === card.id) setActiveEntity(null);
-      try { ro.disconnect(); } catch {}
-      window.removeEventListener('mousemove', onMove);
-      window.removeEventListener('mouseup', onUp);
     };
 
-    console.warn(TAG, 'browser card spawned', id, normalizedUrl);
+    console.warn(TAG, 'browser Desk Window spawned', id, normalizedUrl);
     card._xulBrowser = xulBrowser;
     card._wrap = wrap;
-    card._cleanup = cleanupCard;
+    deskWindow.registerCleanup(cleanupCard);
     return card;
   }
   // ============ Terminal Canvas Card ============

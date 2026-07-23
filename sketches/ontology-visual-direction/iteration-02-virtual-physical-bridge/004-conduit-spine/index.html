@@ -1,0 +1,44 @@
+<!doctype html>
+<html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Conduit Spine</title>
+<link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700&family=JetBrains+Mono:wght@400;500;600&display=swap" rel="stylesheet">
+<style>
+*{box-sizing:border-box} body{margin:0;font-family:Inter,system-ui,sans-serif;background:#08090a;color:#f4f5f7} .app{min-height:100vh;background:radial-gradient(circle at 46% 30%,#161a24,#08090a 68%)}
+.topbar{height:64px;display:flex;align-items:center;gap:18px;padding:0 24px;border-bottom:1px solid rgba(255,255,255,.08);background:rgba(10,11,14,.9)} .topbar strong{font-size:15px}.topbar span{font:12px JetBrains Mono,monospace;color:#737b89}.topbar button{margin-left:auto;background:rgba(255,255,255,.05);color:#d0d6e0;border:1px solid rgba(255,255,255,.1);border-radius:999px;padding:9px 14px}
+main{height:calc(100vh - 64px);display:grid;grid-template-columns:1fr 360px}.desk{position:relative;overflow:hidden;background-image:linear-gradient(rgba(255,255,255,.035) 1px,transparent 1px),linear-gradient(90deg,rgba(255,255,255,.035) 1px,transparent 1px);background-size:42px 42px}.lens{padding:30px;background:#0f1011;border-left:1px solid rgba(255,255,255,.08)}.lens small{font:11px JetBrains Mono,monospace;color:#737b89;text-transform:uppercase}.lens h1{font-size:24px;margin:8px 0 24px}.chain-row{display:flex;justify-content:space-between;align-items:center;border-bottom:1px solid rgba(255,255,255,.07);padding:16px 0}.chain-row b{font:12px JetBrains Mono,monospace;text-transform:uppercase}.chain-row span{color:#b5bbc7;font-size:13px}.lens p{color:#8a8f98;line-height:1.5}.time{position:absolute;top:64px;width:190px;height:120px;border:1px solid rgba(255,255,255,.07);border-radius:18px;background:rgba(255,255,255,.025);color:#62666d;padding:22px;font-weight:600}.time small{font-weight:400}.past{left:6%}.future{right:6%}.surface{position:absolute;left:21%;right:20%;height:150px;clip-path:polygon(8% 0,92% 0,100% 100%,0 100%);border:1px solid rgba(255,255,255,.10);padding:18px 50px}.surface b{font:12px JetBrains Mono,monospace;letter-spacing:.1em}.surface span{float:right;color:#737b89;font-size:12px}.virtual{top:112px;background:linear-gradient(180deg,rgba(215,168,79,.14),rgba(215,168,79,.045))}.information{top:278px;background:linear-gradient(180deg,rgba(67,184,131,.14),rgba(67,184,131,.045))}.physical{top:444px;background:linear-gradient(180deg,rgba(88,166,214,.16),rgba(88,166,214,.055))}.node{position:absolute;width:184px;border-radius:15px;padding:14px 14px 14px 44px;background:#121419;border:1px solid rgba(255,255,255,.1);box-shadow:0 18px 45px rgba(0,0,0,.28);z-index:5}.node i{position:absolute;left:14px;top:18px;width:18px;height:18px;border-radius:5px}.node strong{font-size:14px}.node small{display:block;margin-top:5px;font:11px JetBrains Mono,monospace;color:#737b89}.semantic{left:30%;top:168px}.semantic i{background:rgba(215,168,79,.18);border:1px solid #d7a84f}.semantic.side.a{left:58%;top:184px;opacity:.65}.runtime{left:31%;top:332px}.runtime i{background:rgba(67,184,131,.18);border:1px solid #43b883}.runtime.side.b{left:60%;top:344px;opacity:.68}.machine{top:516px}.machine i{background:rgba(88,166,214,.18);border:1px solid #58a6d6}.cpu{left:26%}.ram{left:45%}.disk{left:64%}.selected{border-color:#f5c86a;box-shadow:0 0 0 1px rgba(245,200,106,.45),0 20px 54px rgba(0,0,0,.42)}.same-layer{position:absolute;inset:0;z-index:1}.same-layer path{fill:none;stroke:rgba(255,255,255,.18);stroke-width:2;stroke-dasharray:5 8}.bridge{position:absolute;left:47%;top:182px;width:220px;height:390px;z-index:8;pointer-events:none}.socket{position:absolute;left:50%;transform:translateX(-50%);width:36px;height:36px;border-radius:50%;box-shadow:0 0 0 8px rgba(255,255,255,.035),0 0 34px rgba(255,255,255,.12)}.socket span{position:absolute;left:48px;top:6px;width:150px;font:11px JetBrains Mono,monospace;color:#d0d6e0}.socket.v{top:0;background:#d7a84f}.socket.i{top:162px;background:#43b883}.socket.p{top:324px;background:#58a6d6}.pipe{position:absolute;left:calc(50% - 3px);width:6px;border-radius:999px;background:linear-gradient(#d7a84f,#43b883);box-shadow:0 0 24px rgba(67,184,131,.28)}.p1{top:34px;height:130px}.p2{top:196px;height:128px;background:linear-gradient(#43b883,#58a6d6);box-shadow:0 0 24px rgba(88,166,214,.30)}.callout{position:absolute;left:55%;top:236px;width:260px;padding:18px;border-radius:18px;background:rgba(10,11,14,.82);border:1px solid rgba(255,255,255,.10);z-index:9}.callout small{font:11px JetBrains Mono,monospace;color:#737b89;text-transform:uppercase}.callout strong{display:block;margin:8px 0;color:#f4f5f7}.callout p{margin:0;color:#9aa2ae;line-height:1.45;font-size:13px}
+</style></head>
+<body>
+<div class="app">
+  <header class="topbar"><strong>EG-Desk Ontology</strong><span>runtime bridge as the main visual artifact</span><button>present stack</button></header>
+  <main>
+    <section class="desk">
+      <div class="time past">past<br><small>memory trace</small></div>
+      <div class="time future">future<br><small>goal / plan</small></div>
+      <div class="surface virtual"><b>VIRTUAL</b><span>semantic object</span></div>
+      <div class="surface information"><b>INFORMATION</b><span>runtime projection</span></div>
+      <div class="surface physical"><b>PHYSICAL</b><span>machine substrate</span></div>
+      <svg class="same-layer" viewBox="0 0 1200 720" preserveAspectRatio="none">
+        <path d="M382 205 C470 150 590 165 690 210" />
+        <path d="M385 360 C500 315 610 325 720 365" />
+      </svg>
+      <div class="node selected semantic"><i></i><strong>LLM chat session</strong><small>virtual · selected</small></div>
+      <div class="node semantic side a"><i></i><strong>Agenda</strong><small>same-layer context</small></div>
+      <div class="node runtime"><i></i><strong>session_file.yaml</strong><small>information projection</small></div>
+      <div class="node runtime side b"><i></i><strong>Terminal process</strong><small>runtime host</small></div>
+      <div class="node machine cpu"><i></i><strong>CPU</strong><small>tokens / inference</small></div>
+      <div class="node machine ram"><i></i><strong>RAM</strong><small>context window</small></div>
+      <div class="node machine disk"><i></i><strong>Disk</strong><small>session DB</small></div>
+      <div class="bridge">
+        <div class="socket v"><span>semantic object</span></div>
+        <div class="pipe p1"></div>
+        <div class="socket i"><span>runtime projection</span></div>
+        <div class="pipe p2"></div>
+        <div class="socket p"><span>physical substrate</span></div>
+      </div>
+      <div class="callout"><small>selected chain</small><strong>virtual → information → physical</strong><p>The selected abstract object is shown as a runtime chain, not just a node on a pane.</p></div>
+    </section>
+    <aside class="lens"><small>lens</small><h1>LLM chat session</h1><div class="chain-row"><b>virtual</b><span>semantic object</span></div><div class="chain-row"><b>information</b><span>session file + terminal</span></div><div class="chain-row"><b>physical</b><span>CPU · RAM · disk</span></div><hr><p>The bridge is the primary object. Side relations are intentionally muted.</p></aside>
+  </main>
+</div>
+<script>document.querySelectorAll('.node').forEach(n=>n.onclick=()=>{document.querySelectorAll('.node').forEach(x=>x.classList.remove('selected'));n.classList.add('selected')})</script>
+</body></html>

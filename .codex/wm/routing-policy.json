@@ -1,0 +1,67 @@
+{
+  "version": 1,
+  "updated": "2026-06-21T16:54:45+09:00",
+  "purpose": "Reusable routing policy and default role/file boundaries for Codex-native 2.5-way operation. This is not a worker prompt bundle or a live communication channel.",
+  "persistence_policy": {
+    "default_context_delivery": "inline",
+    "persist_only_when": [
+      "context will be reused by future turns or missions",
+      "context is too large and must be relayed multiple times",
+      "state must be compared for drift",
+      "a mission must be resumable after interruption or compaction",
+      "a stable role/file boundary should outlive a single task"
+    ],
+    "do_not_persist_for": [
+      "single-use worker prompts",
+      "one-time web search summaries",
+      "temporary reasoning that can be returned directly to Main",
+      "raw tool outputs unless they are needed as reusable evidence"
+    ],
+    "large_or_repeated_mission_context": ".tmp/codex-swarm/<mission-id>/"
+  },
+  "role_boundaries": {
+    "main-codex": {
+      "role": "user-facing Session Lead, router, final synthesizer, and final arbiter",
+      "reads_directly": [
+        "AGENTS.md",
+        "user-named files",
+        "files immediately required for lightweight actions"
+      ],
+      "asks_wm_for": [
+        "broad file reads",
+        "source-boundary decisions",
+        "new persistent file locations",
+        "task scope assignments",
+        "path-context decisions that depend on .codex/wm/file-map.json"
+      ],
+      "does_not_own": [
+        "repo-wide source discovery",
+        "durable file tracking",
+        "contextual file map maintenance"
+      ]
+    },
+    "wm-second-brain": {
+      "role": "file-structure intelligence, source selection, file tracking, mission drift detection, and reusable routing context",
+      "owns": [
+        ".codex/wm/file-inventory.txt",
+        ".codex/wm/file-inventory-hash",
+        ".codex/wm/file-map.json",
+        ".codex/wm/routing-policy.json"
+      ],
+      "reads_for_project_context": [
+        "AGENTS.md",
+        "project context sources identified by .codex/wm/file-map.json"
+      ],
+      "may_compare_against": [
+        "reference-only or historical context sources identified by .codex/wm/file-map.json"
+      ],
+      "does_not_edit": [
+        "product source",
+        "user-facing docs",
+        "external agent/tool artifacts identified by .codex/wm/file-map.json",
+        "git state"
+      ],
+      "context_delivery": "Return compact task context inline to Main by default. Persist only reusable, repeated, drift-sensitive, or resumable context."
+    }
+  }
+}

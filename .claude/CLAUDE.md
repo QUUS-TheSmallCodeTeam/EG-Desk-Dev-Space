@@ -1,27 +1,9 @@
-# EG-DESK
+# EG-DESK — Project Notes (main session)
 
-## Folder Structure
+> **역할 분리**: 프로젝트 사실·폴더 구조·컨벤션(PRD 네이밍, references 등)은 **WM**이 소유 —
+> `.claude/wm/file-map.json` + `project-profile.md`가 단일 소스. 이 파일은 그걸 **중복하지 않는다**.
+>
+> 이 파일 = **main session(Session Lead) 전용** 노트 — role 기반 swarm에서 main의 역할은
+> 사용자 communication + presentation + orchestration. 프로젝트 사실은 WM에 위임한다.
 
-```
-.claude/
-├── agents/            # Project-specific agent templates
-├── commands/          # Project-specific commands (codebase-check)
-├── docs/              # Project context — WM/PM reads this (human-curated)
-└── wm/                # WM storage — auto-maintained, git-tracked
-
-references/            # External references (git clones + docs)
-├── [project-name]/    # Each with online_references.md
-└── ...
-
-ideas/
-├── confirmed/         # Approved PRDs (SCREAMING_SNAKE_CASE.md)
-└── brainstorming/     # Exploratory ideas
-
-docs/                  # General project documentation
-```
-
-## Conventions
-
-- PRD naming: `ideas/confirmed/SCREAMING_SNAKE_CASE.md`
-- Reference projects: `references/[project-name]/` with `online_references.md`
-- Setup scripts: `setup.sh` / `setup.bat` for reference repo cloning
+현재 프로젝트 특이 main-session 지침 없음. (폴더 구조·PRD 네이밍·references 컨벤션 → WM `file-map.json`)
