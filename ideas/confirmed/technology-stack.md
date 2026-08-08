@@ -425,7 +425,7 @@
 
 ## 9. External Reference License Policy
 
-> **근거 ADR**: [`.claude/docs/decisions/002-external-reference-license-policy.md`](../../.claude/docs/decisions/002-external-reference-license-policy.md) (Status: Proposed v2 — **2-tier 전환**, user 승인 대기). 본 섹션은 ADR 요약. 상세 근거/대안 평가는 ADR 본문 참조.
+> **근거 ADR**: [`.claude/docs/decisions/002-external-reference-license-policy.md`](../../.claude/docs/decisions/002-external-reference-license-policy.md) (Status: **Decided v2 — 2-tier**, user approved 2026-04-13). 본 섹션은 ADR 요약. 상세 근거/대안 평가는 ADR 본문 참조.
 > **EG-Desk는 상업화 전제 프로덕트** — `docs/EG-DESK_Whitepaper.md §10`, `docs/vision/EG-DESK 백서 - Vision_v1.md L663`, `docs/production/EG-DESK 백서 - Production_v7_temp_한글.md L1467`.
 
 ### Purpose
@@ -453,16 +453,16 @@
 | theia | EPL 2.0 + GPL 2 w/ Classpath | 🔴 **Red** (v1 Yellow → v2 승격). 기존 npm binary 사용은 유지, **소스 포팅은 금지**. |
 | claude-agent-sdk / gemini-cli / infinite-canvas / light-system | 미확인 | ⏳ TBD |
 
-> ⏳ TBD 항목은 다음 세션에서 `references/[name]/LICENSE*` 확인 후 갱신. ADR-002 Decided 전환 시 재분류 반영.
+> ⏳ TBD 항목은 `references/[name]/LICENSE*`를 확인한 뒤 갱신. 정책 자체를 변경해야 하는 재분류는 ADR 갱신 절차를 따른다.
 
 ### 운영 규칙 (요약)
 
 1. **setup.sh / 수동**: 신규 clone 시 `references/[name]/LICENSE_CATEGORY.md`에 🟢 Green 또는 🔴 Red + 원본 라이선스 경로 기록
 2. **Agent template rule** (coding-agent / design-agent 등 Write 권한 agent):
    > "코드 작성 중 `references/[name]/` 코드 복사/포팅 시 `references/[name]/LICENSE_CATEGORY.md`를 선행 확인. 🔴 Red는 **개념 참고만, 단 한 줄도 복사 금지**. 🟢 Green은 표기 조건 준수 (파일 상단 주석 또는 NOTICE.md)."
-3. **PM 책임**: 신규 reference 추가 시 egdesk-pm-agent가 Green/Red 분류. 모호한 dual-license / custom license는 ADR 개별 평가.
+3. **PM 책임**: 신규 reference 추가 시 Codex-native EG-Desk PM이 Green/Red 분류를 검토. 모호한 dual-license / custom license는 ADR 개별 평가.
 4. **npm 의존성 정책**: Red tier 라이브러리를 `package.json`에 신규 추가하려면 **개별 ADR로 유저 승인**. Binary만 쓰는 기존 사용(예: Theia)은 유지.
-5. **Status 전환**: 본 정책은 ADR-002 Decided 승인 시 구속력 발생. Proposed 단계에서도 권고로 작동.
+5. **Status**: 본 정책은 ADR-002 Decided v2에 따라 현재 구속력 있는 기준으로 작동.
 
 ### 현재 세션 파생 결정
 
@@ -621,7 +621,8 @@ If no existing technology matches requirements:
 **Current Status**:
 - ✅ **Production**: Theia, Electron, Playwright, Claude API, OpenAI GPT, Google Gemini, Ollama, SQLite, AES-256, TLS 1.3
 - 🔬 **Research**: Infinite Canvas, Konva.js
-- 📋 **Proposed**: Zustand + shallow equality (Pan Immersion v1 체감 평가 후 확정), External Reference License Policy (ADR-002 Decided 대기)
+- 📋 **Proposed**: Zustand + shallow equality (Pan Immersion v1 체감 평가 후 확정)
+- ✅ **Governance**: External Reference License Policy (ADR-002 Decided v2)
 
 ---
 

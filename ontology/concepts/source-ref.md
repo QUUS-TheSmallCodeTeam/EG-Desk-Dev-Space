@@ -33,7 +33,9 @@ type SourceRef = {
 };
 ```
 
-SourceRef exists because URL, file path, repo path, account, browser profile, and runtime session are not interchangeable identities.
+SourceRef exists because URL, file path, repo path, account, browser profile,
+and runtime session are not interchangeable reference coordinates, even when
+some of them resolve to identical content.
 
 Examples:
 
@@ -44,3 +46,19 @@ Examples:
 
 SourceRef lets EG-Desk preserve those distinctions.
 
+Preserving the distinctions does not mean they are one identity dimension.
+EG-Desk separates:
+
+```text
+source/evidence reference
+content identity and revision
+resource identity/locator
+account/profile permission and execution context
+view/runtime instance
+```
+
+If two accounts expose verified identical content, that content can support the
+same claim. The account/profile still matters for hidden data, available
+actions, authorization, and audit identity. Read/evidence deduplication and
+action authorization therefore use different comparisons even if one
+extensible SourceRef record currently carries fields for both.

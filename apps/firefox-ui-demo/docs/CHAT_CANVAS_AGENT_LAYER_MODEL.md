@@ -4,13 +4,22 @@
 **Status**: Product/UX architecture note
 **Scope**: EG-Desk chat UI, canvas outcomes, agent profile/config, run inspection
 
+> **Terminology correction (2026-08-05):** this note's `Run Playback` and
+> derivation language is superseded. Use Answer Briefing from Contract §8 and
+> Atlas `OBJ-038` / `AI-05`: Agent proposes the Answer's public target set,
+> Briefing Order, Focus Scope, and Step Explanation; System performs
+> user-controlled step transitions. It is not a Run replay.
+
 ---
 
 ## Core Principle
 
-EG-Desk chat is not the place where final work lives.
+Chat and Canvas are medium-specific projections of one answer.
 
-Chat is the human communication layer. Canvas is the work surface. Agent profile and run inspection are where process, configuration, and context are inspected.
+Chat is the conversational communication layer. Canvas is the spatial, visual,
+interactive, and artifact work surface. Neither is a dumping ground for content
+that belongs in the other. Agent profile and run inspection are where process,
+configuration, and context are inspected.
 
 ```text
 Conversation = what the user and agent said
@@ -54,11 +63,29 @@ Agent:
 
 Clicking a result chip opens the result on the canvas as a card.
 
+`Result Chip` is a compact navigation affordance in the chat UI. It is not a
+durable domain object. Its linked artifact, message, run, or view can be
+durable.
+
+---
+
+## Agenda Thread
+
+An Agenda Thread is a work-scoped shared conversation. Multiple agents, the
+user, and later authorized collaborators may participate like a group chat.
+Messages, results, step comments, and run status share the Agenda context.
+
+Moving work from Agent DM to an Agenda Thread must not expose an entire private
+DM automatically. The system links or copies only the selected messages and
+resolved context needed for the shared work.
+
 ---
 
 ## Canvas Outcome
 
-Final output belongs on the Desk/canvas, not inside the chat bubble.
+Spatial, visual, interactive, and artifact-oriented parts of the answer belong
+on the Desk/canvas. Conversational explanation, decisions, and next actions can
+remain complete in Chat. Both surfaces bind to the same result and provenance.
 
 Result chip behavior:
 
@@ -137,7 +164,11 @@ Agent:
 [Result Walkthrough] [Report Card] [Evidence Notes] [Run]
 ```
 
-If the user says "어? 이거 아닌데" during playback, EG-Desk should record a divert event. The agent can branch from that step if the result is wrong, or steer the user back to an earlier evidence step if the confusion is resolved there.
+The user can pause on any playback step and leave a comment anchored to that
+step or its focused target. The user may insert selected step comments into the
+next Chat message, which carries the step reference and relevant visible
+context. This is an annotation-to-conversation flow, not an automatic run
+branch.
 
 Run Playback details are modeled separately in [`CANVAS_RUN_PLAYBACK_MODEL.md`](./CANVAS_RUN_PLAYBACK_MODEL.md).
 

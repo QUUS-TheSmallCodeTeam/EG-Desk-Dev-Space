@@ -1,7 +1,7 @@
 {
   "schemaVersion": 3,
   "sourceRoot": "ontology",
-  "sourceHash": "871a97c0979e9f6f0133fba2c0182c44aeacfe64",
+  "sourceHash": "76cb404a63d6a8a7b551655e405a034520682809",
   "nodeCount": 102,
   "edgeCount": 383,
   "nodes": [
@@ -618,7 +618,7 @@
       "occurrences": [],
       "referenceEdges": [],
       "wikiLinks": [],
-      "body": "# Agenda\n\nAgenda is an EG-Desk product concept, not a generic todo list or folder.\n\nAn Agenda is the work boundary that pairs a task, objective, or project slice with the execution environment needed to do it.\n\nAn Agenda can include:\n\n- browser cards\n- file cards\n- chat cards\n- terminal cards\n- agent/context bindings\n- account/profile bindings\n- result cards\n- run bubbles and run playback\n\nAgenda nesting is a work decomposition graph, not a folder tree. Deep structure can exist in data, while the Desk UI shows the active slice.\n\n## Stable Definition\n\n```text\nAgenda = work + execution environment pairing\n```"
+      "body": "# Agenda\n\nAgenda is an EG-Desk product concept, not a generic todo list or folder.\n\nAn Agenda is the work boundary that pairs a task, objective, or project slice with the execution environment needed to do it.\n\nAn Agenda can include:\n\n- browser cards\n- file cards\n- chat cards\n- terminal cards\n- agent/context bindings\n- account/profile bindings\n- result cards\n- run bubbles and run playback\n\nAgenda nesting is a work decomposition graph, not a folder tree. Deep structure can exist in data, while the Desk UI shows the active slice.\n\nAn Agenda is explicitly retained reusable work state. Automatically recovered\nDesk layout, transient grouping, and open views may be associated with an\nAgenda without becoming part of its saved revision.\n\n## Stable Definition\n\n```text\nAgenda = work + execution environment pairing\n```"
     },
     {
       "id": "egdesk.card",
@@ -951,7 +951,7 @@
       "occurrences": [],
       "referenceEdges": [],
       "wikiLinks": [],
-      "body": "# Run Playback\n\nRun Playback is an EG-Desk product concept.\n\nIt is the guided, step-by-step canvas walkthrough for a result. It lets the user follow derivation spatially on the Desk: what evidence was used, which cards mattered, what changed, and how the final output emerged.\n\nRun Playback is related to Run Bubble, but they are not the same:\n\n- Run Bubble stores the inspectable record.\n- Run Playback presents a guided temporal/spatial walkthrough.\n\n## Stable Definition\n\n```text\nRun Playback = guided canvas replay for one run\n```"
+      "body": "# Run Playback\n\nRun Playback is an EG-Desk product concept.\n\nIt is the Prezi-like, guided temporal/spatial canvas walkthrough for a result.\nIt lets the user follow what evidence was used, which Desk Windows mattered,\nwhat changed, and how the final output emerged. The user can anchor comments to\na step and insert selected comments into the next Chat message.\n\nRun Playback is related to Run Bubble, but they are not the same:\n\n- Run Bubble stores the inspectable record.\n- Run Playback presents a guided temporal/spatial walkthrough.\n\nPlayback comments are annotations linked back to conversation. They do not\nautomatically branch or fork a run.\n\n## Stable Definition\n\n```text\nRun Playback = guided canvas replay for one run\n```"
     },
     {
       "id": "egdesk.world",
@@ -3157,7 +3157,7 @@
       "occurrences": [],
       "referenceEdges": [],
       "wikiLinks": [],
-      "body": "# SourceRef\n\nSourceRef binds ontology concepts to real resources.\n\nIt should remain small and extensible:\n\n```ts\ntype SourceRef = {\n  kind: string;\n  uri?: string;\n  path?: string;\n  id?: string;\n  scope?: string;\n  accountId?: string;\n  profileId?: string;\n  openMode?: string;\n};\n```\n\nSourceRef exists because URL, file path, repo path, account, browser profile, and runtime session are not interchangeable identities.\n\nExamples:\n\n- same URL under different browser profiles\n- same file path in different worktrees\n- same Gmail thread under different account visibility\n- same Codex thread as chat history, session JSONL, and current UI card\n\nSourceRef lets EG-Desk preserve those distinctions."
+      "body": "# SourceRef\n\nSourceRef binds ontology concepts to real resources.\n\nIt should remain small and extensible:\n\n```ts\ntype SourceRef = {\n  kind: string;\n  uri?: string;\n  path?: string;\n  id?: string;\n  scope?: string;\n  accountId?: string;\n  profileId?: string;\n  openMode?: string;\n};\n```\n\nSourceRef exists because URL, file path, repo path, account, browser profile,\nand runtime session are not interchangeable reference coordinates, even when\nsome of them resolve to identical content.\n\nExamples:\n\n- same URL under different browser profiles\n- same file path in different worktrees\n- same Gmail thread under different account visibility\n- same Codex thread as chat history, session JSONL, and current UI card\n\nSourceRef lets EG-Desk preserve those distinctions.\n\nPreserving the distinctions does not mean they are one identity dimension.\nEG-Desk separates:\n\n```text\nsource/evidence reference\ncontent identity and revision\nresource identity/locator\naccount/profile permission and execution context\nview/runtime instance\n```\n\nIf two accounts expose verified identical content, that content can support the\nsame claim. The account/profile still matters for hidden data, available\nactions, authorization, and audit identity. Read/evidence deduplication and\naction authorization therefore use different comparisons even if one\nextensible SourceRef record currently carries fields for both."
     },
     {
       "id": "surface.browser",

@@ -61,7 +61,7 @@ Path 2 portable packaging 전에 `apps/firefox-ui-demo/`를 alpha-worthy local P
 | **Browser entity 안정화** | XUL `<browser>` card 생성/이동/resize/scroll/focus/popup capture 검증 | OAuth/window.open 포함 |
 | **Browser runtime attach PoC** | visible Browser Card와 hidden BrowserRuntime 분리 검증 | `browsingContext`, DOM state, agent actor 유지 확인 |
 | **Terminal/helper 안정화** | terminal card spawn/write/read/resize/kill 경로를 하나로 고정 | Node fallback과 Rust helper 후보 정리 |
-| **Terminal session attach PoC** | terminal session과 xterm card client 분리 | close=detach, explicit kill, replay buffer/cursor 검증 |
+| **Terminal session attach PoC** | terminal session과 xterm card client 분리 | explicit detach/pin/await는 runtime 유지, 일반 close는 선언된 lifecycle 적용, explicit kill, replay buffer/cursor 검증 |
 | **반복 검증 스크립트** | 설치, bridge, HUD, browser card, terminal smoke를 repeatable script로 정리 | root one-off probe 금지 |
 | **문서 반영** | 구현 상태와 known gaps를 [`apps/firefox-ui-demo/docs/PATH_1_5_STABILIZATION.md`](../../apps/firefox-ui-demo/docs/PATH_1_5_STABILIZATION.md)에 유지 | packaging 전에 open issue 명시 |
 

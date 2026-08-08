@@ -1,14 +1,25 @@
-# Human-in-the-Loop Workflow Await Model
+# Workflow Dependency and Human-in-the-Loop Await Model
 
 **Date**: 2026-05-20
 **Status**: Product/runtime model
-**Scope**: EG-Desk agent workflow pause/resume, OAuth/login waits, terminal-browser handoff, cross-app sync
+**Scope**: EG-Desk agent-task dependencies, automatic downstream start, user-action pause/resume, OAuth/login waits, terminal-browser handoff, cross-app sync
 
 ---
 
 ## Core Problem
 
-Some AI workflows cannot continue until the user completes an action outside the current agent response.
+The primary problem is coordinating dependent work without requiring the user
+or an agent to manually restart each next step.
+
+```text
+upstream agent task completes with evidence
+  -> dependency gate becomes satisfied
+  -> downstream task becomes ready
+  -> scheduler starts it automatically
+```
+
+Some dependency gates require a user action outside the current agent response.
+Human-in-the-loop waits are one subtype of the broader dependency model.
 
 Common examples:
 
@@ -20,7 +31,8 @@ Terminal command opens OAuth URL
   -> user has to type "계속" manually
 ```
 
-This is not just an OAuth issue. It is a cross-app sync issue:
+This is not just an OAuth or file-transfer issue. It is a workflow dependency
+and cross-app synchronization issue:
 
 ```text
 agent / terminal / browser / OS app / file system / user action
@@ -30,7 +42,24 @@ EG-Desk should treat these as first-class workflow waits, not as chat failures.
 
 ## Product Rule
 
-When an agent needs user action, it should pause the workflow with an explicit await state.
+Every agent task should expose a durable status and completion evidence.
+Downstream tasks wait on explicit dependency gates and start automatically when
+all required task results, approvals, or external conditions are satisfied.
+
+Minimum task states:
+
+```text
+queued
+waiting-on-dependency
+ready
+running
+approval-required
+completed
+failed
+cancelled
+```
+
+When a dependency needs user action, it pauses with an explicit Await state.
 
 The user should see what is waiting, complete the action in the right card/app, and EG-Desk should resume the workflow automatically when the awaited condition is satisfied. Manual "Continue" remains as a fallback, not the default path.
 
@@ -43,6 +72,9 @@ Agent starts task
   -> awaited condition becomes satisfied
   -> EG-Desk resumes the agent with an observation summary
 ```
+
+An `AwaitToken` below represents one external or human condition. It does not
+replace the parent task graph or redefine Await as file arrival.
 
 ## Await Token
 
@@ -82,6 +114,7 @@ Example:
 
 ```ts
 type AwaitTarget =
+  | { kind: "agent-task"; taskId: string; runId?: string }
   | { kind: "browser"; cardId?: string; sourceRef?: string }
   | { kind: "terminal"; cardId?: string; sessionId?: string }
   | { kind: "auth"; provider: string; accountId?: string }
@@ -124,6 +157,9 @@ When the user opens the waiting item again, EG-Desk should create a new foregrou
 
 ```ts
 type AwaitCondition =
+  | { kind: "task-complete"; taskId: string; requiredEvidence?: string[] }
+  | { kind: "approval-granted"; approvalId: string }
+  | { kind: "artifact-verified"; artifactId: string }
   | { kind: "auth-status"; provider: string; state: "logged-in" }
   | { kind: "browser-url"; pattern: string }
   | { kind: "browser-dom"; selector?: string; textIncludes?: string }
@@ -237,16 +273,19 @@ Await conditions match against these events.
 
 ## Initial Implementation Path
 
-1. Add in-memory Await Token registry in the Firefox shell runtime.
-2. Surface a small waiting chip/card in chat/canvas.
-3. Wire watchers for existing auth lifecycle, browser-agent notifications, and terminal output.
-4. Add manual continue/cancel buttons.
-5. Auto-resume by posting a structured resume message to the existing Codex thread.
-6. Persist pending Await Tokens in the Agenda snapshot.
+1. Define persisted task states, dependency edges, and completion evidence.
+2. Make upstream completion evaluate dependency gates and enqueue ready downstream tasks.
+3. Model Await Tokens as external/human dependency conditions inside that graph.
+4. Surface waiting reason, upstream status, and next task in Chat/Canvas.
+5. Wire watchers for existing auth lifecycle, browser-agent notifications, and terminal output.
+6. Add manual continue/cancel buttons as fallback controls.
+7. Resume through a checkpointed task/run context rather than an open LLM stream.
 
 ## Non-Goals
 
 - Do not hold a streaming LLM call open during long user waits.
+- Do not define Await primarily as waiting for file transfer or one external event.
+- Do not require users or agents to manually start every dependency-ready downstream task.
 - Do not require every OAuth flow to be implemented as a special case.
 - Do not rely on the user typing "계속" as the normal success path.
 - Do not hide the reason for waiting behind helper diagnostics.

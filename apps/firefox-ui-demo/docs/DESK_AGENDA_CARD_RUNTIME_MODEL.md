@@ -71,29 +71,43 @@ Collapse/Expand to an Agenda Card
 
 ---
 
-## Saved State vs Dirty Overlay
+## Saved Agenda, Automatic Desk Session, and Live Runtime
 
-The active Desk view is the composition of saved Agenda state plus unsaved canvas changes.
-
-```text
-Agenda saved state
-+
-Canvas dirty overlay
-=
-current work surface
-```
-
-Dirty overlay contains changes that are currently "on top of" the Agenda but not yet committed to it:
+The Desk and the Agenda library are related but separate product surfaces.
 
 ```text
-new cards
-moved cards
-resized cards
-temporary result cards
-opened sourceRefs
+actual Desk surface
+  automatic Desk session projection
+  + currently mounted views
+  + each view's live or reconstructed runtime state
+
+Sidebar Agenda section
+  separately listed saved Agendas
+  + explicit open/create/update actions
 ```
 
-When an Agenda is closed and dirty overlay exists, the user should be asked:
+The automatic Desk session restores what the user left open even when the user
+never saved an Agenda. Persisting that session for restart recovery does not
+commit it to an Agenda. Normal startup should feel like browser session restore:
+the Desk opens directly and prior views reappear without a mandatory recovery
+mode, origin badge, or keep/discard wizard.
+
+An unsaved Agenda indicator applies only when the user has an Agenda open and
+has changed the state that will be retained by that Agenda. It must not label
+every automatically restored Desk view as an unsaved Agenda change.
+
+```text
+automatic Desk-session change
+  opening, closing, moving, or resizing a Desk view
+  -> recorded for local session continuity according to the decided restore scope
+
+Agenda change
+  adding/removing a member, changing an Agenda binding, or updating saved layout
+  -> marked unsaved until the Agenda update action is performed
+```
+
+When an Agenda with unsaved Agenda changes is closed or switched, the product
+may require an explicit guard:
 
 ```text
 save changes
@@ -101,11 +115,39 @@ discard changes
 continue editing
 ```
 
+This guard is not part of ordinary application startup. Exact visible labels
+and gestures remain a UI contract and must not be replaced by abstract
+“keep/discard” language in a use-case trace.
+
+Current implementation drift:
+
+- startup restores the stored active Agenda snapshot, not an independent
+  automatic Desk session;
+- general canvas changes feed one `state.agenda.dirty` flag;
+- the current Agenda selector is a top rail/popover, while the latest product
+  direction places saved Agendas in a Sidebar area.
+
+These are implementation gaps, not evidence that the product lifecycles should
+be merged.
+
+Reference patterns, not implementation proof:
+
+- [Firefox Session Restore](https://support.mozilla.org/kb/restore-previous-session)
+  can reopen prior tabs and windows automatically at startup; its exceptional
+  recovery page is not the normal startup model.
+- [Chrome saved tab groups](https://support.google.com/chrome/answer/2391819)
+  remain separately reopenable after a group is closed, illustrating the
+  difference between a saved work grouping and the currently open tab session.
+- [VS Code Hot Exit](https://code.visualstudio.com/docs/editing/codebasics#_hot-exit)
+  restores unsaved editor/window state across restarts without turning that
+  recovery record into the user's saved project structure.
+
 ---
 
 ## Desk, Viewport, and Card State
 
-Desk stores persistent work-surface state.
+Desk state below is an auto-recovery record for the work surface. It is not an
+Agenda revision merely because it is serialized.
 
 ```ts
 type DeskState = {
@@ -538,6 +580,12 @@ closed
 
 ### Terminal Runtime Attach
 
+Terminal is an agent execution substrate and an optional expert/debug Desk
+Window. It is not the required primary coding UX. Project/folder navigation,
+file viewing/editing, diff, and run/test/review results may be presented through
+more suitable user-facing Desk Windows while agents use a terminal runtime
+behind them.
+
 Terminal should follow a terminal-multiplexer style split:
 
 ```text
@@ -563,15 +611,47 @@ spawn terminal runtime
 
 detach terminal card
   -> remove visible card
-  -> keep session in background-live if pinned/awaited
+  -> keep a detachable session in background-live
+  -> pin/await prevents ordinary background-runtime reclamation
 
 reattach terminal runtime
   -> open TerminalCard for sessionId
   -> replay output from ring buffer using client cursor
 
 kill terminal runtime
-  -> terminate PTY/tmux session explicitly
+  -> use a separate explicit process-termination action
+  -> show the target and impact before terminating PTY/tmux
+  -> keep final output as a read-only snapshot with exit/termination evidence
+  -> close that snapshot only through a separate view action
 ```
+
+Terminal continuity terminology is evidence-sensitive:
+
+```text
+reattach
+  -> the same verified sessionId and process/session owner still exist
+
+revive / relaunch
+  -> a new shell/process is created from recorded cwd, permitted environment,
+     shell startup context, and prior output snapshot
+  -> an arbitrary prior foreground command is not automatically rerun
+
+snapshot-only restore
+  -> prior output/provenance is shown but no live process exists
+```
+
+Closing the visible TerminalCard must not silently terminate a runtime that is
+defined as detachable. Resuming a declared idempotent task after restart is a
+scheduler decision with its own evidence and policy; it is not Terminal view
+restoration.
+
+The product must never call a newly spawned PTY a reconnect. This distinction
+follows the patterns documented by
+[VS Code persistent terminal sessions](https://code.visualstudio.com/docs/terminal/advanced#_persistent-sessions),
+which separates process reconnection from process revive, and
+[tmux](https://github.com/tmux/tmux/wiki/Getting-Started#attaching-and-detaching),
+which keeps the background session and its programs separate from attachable
+clients.
 
 The helper must not destructively drain terminal output for a single reader. Multi-attach and reconnect require per-client cursors or a replayable snapshot stream.
 
@@ -666,7 +746,28 @@ type SourceRef = {
 };
 ```
 
-Card types can extend this as needed. Browser identity must not be URL-only because the same URL can represent different sessions across profiles, containers, or accounts.
+Card types can extend this as needed. Browser runtime/view identity must not be
+URL-only because the same URL can be open through different profiles,
+containers, accounts, and permission contexts. This does not imply that
+verified identical content becomes a different fact.
+
+This shape is provisional and carries several dimensions that the product must
+keep semantically distinct:
+
+```text
+source/evidence reference
+content identity or revision
+resource identity/locator
+account/profile permission and execution context
+visible view/runtime instance
+```
+
+The same verified content can support the same claim across accounts, even when
+the accounts provide different hidden data or available actions. Content or
+canonical-resource deduplication must therefore be separate from action
+authorization and audit identity. `accountId` and `profileId` constrain how a
+resource is opened and acted on; they do not by themselves make identical
+content a different fact.
 
 ---
 

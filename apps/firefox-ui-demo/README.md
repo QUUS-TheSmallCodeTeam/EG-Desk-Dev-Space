@@ -9,7 +9,7 @@
 > - Chat/canvas/agent UX model: [`docs/CHAT_CANVAS_AGENT_LAYER_MODEL.md`](./docs/CHAT_CANVAS_AGENT_LAYER_MODEL.md)
 > - Desk/Agenda/Card runtime model: [`docs/DESK_AGENDA_CARD_RUNTIME_MODEL.md`](./docs/DESK_AGENDA_CARD_RUNTIME_MODEL.md)
 > - AI canvas annotation layer: [`docs/AI_CANVAS_ANNOTATION_LAYER.md`](./docs/AI_CANVAS_ANNOTATION_LAYER.md)
-> - Canvas run playback model: [`docs/CANVAS_RUN_PLAYBACK_MODEL.md`](./docs/CANVAS_RUN_PLAYBACK_MODEL.md)
+> - Legacy canvas Run Playback note (superseded by Answer Briefing in the Contract/Atlas): [`docs/CANVAS_RUN_PLAYBACK_MODEL.md`](./docs/CANVAS_RUN_PLAYBACK_MODEL.md)
 > - Viewport layout/interaction model: [`docs/VIEWPORT_LAYOUT_INTERACTION_MODEL.md`](./docs/VIEWPORT_LAYOUT_INTERACTION_MODEL.md)
 > - Ontology canvas rendering: [`docs/ONTOLOGY_CANVAS_RENDERING.md`](./docs/ONTOLOGY_CANVAS_RENDERING.md)
 

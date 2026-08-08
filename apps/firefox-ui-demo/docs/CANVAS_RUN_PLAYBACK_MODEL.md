@@ -1,8 +1,23 @@
-# Canvas Run Playback Model
+# Legacy Canvas Run Playback Model — superseded terminology
 
 **Date**: 2026-05-19
-**Status**: Product/UX architecture concept note
-**Scope**: EG-Desk chat summaries, result chips, canvas outputs, run walkthrough, branch/divert feedback
+**Status**: `SUPERSEDED / HISTORICAL REFERENCE`
+**Scope**: EG-Desk chat summaries, result links, temporal/spatial canvas walkthrough, and step comments
+
+> **2026-08-05 correction:** Do not implement this document's `RunPlayback`,
+> `PlaybackStep`, or Run-centered derivation model as the current product
+> contract. The current concept is an optional, user-controlled **Answer
+> Briefing** for one logical Answer: an Agent may propose the Canvas output set,
+> Briefing Order, Focus Scope, and Step Explanation; the System validates and
+> performs viewport/focus transitions when the user selects previous, next,
+> overview, a direct step, or exit. Moving between Briefing Steps is not a new
+> Agent Run and does not replay hidden reasoning or the Run trace.
+>
+> Current sources: [Interaction Contract §8](../../../ideas/confirmed/EGDESK_INTERACTION_AND_ORCHESTRATION_CONTRACT.md#8-canvas-answer-briefing-and-briefing-comments),
+> [Atlas OBJ-038](../../../ideas/confirmed/EGDESK_PRODUCT_INTERACTION_TRACE_ATLAS.md#atlas-obj-038),
+> and [Atlas AI-05](../../../ideas/confirmed/EGDESK_PRODUCT_INTERACTION_TRACE_ATLAS.md#atlas-ai-05).
+> The remainder of this file is retained only to audit earlier terminology and
+> interaction ideas; where it conflicts, the Contract and manual-first Atlas win.
 
 ---
 
@@ -13,7 +28,7 @@ Long AI answers are slow and frustrating to read in a chat bubble.
 EG-Desk already separates:
 
 ```text
-Chat Bubble = compact conclusion and summary
+Chat Bubble = conversationally complete explanation and conclusion
 Canvas Card = final work artifact
 Run Bubble  = inspectable plan/action/context
 Profile     = agent identity and configuration
@@ -28,7 +43,7 @@ Canvas Run Playback is the guided, step-by-step way to inspect that derivation o
 ## Core Sentence
 
 ```text
-Chat gives the short answer.
+Chat gives the conversational answer.
 Canvas shows the work.
 Run Playback lets the user follow how the work was derived.
 Run Bubble shows the inspectable plan/action/context record.
@@ -47,9 +62,8 @@ Run Playback        = the guided canvas replay for one run
 Result Walkthrough  = user-facing chip/action label
 Playback Step       = one stage of the derivation
 Step Rail           = left/right or vertical step navigation
-Divert              = user interrupts the walkthrough with "not this" or a correction
-Branch              = alternate follow-up path created from a divert
-Steer Back          = AI returns the user to an earlier step when the current confusion is resolved there
+Step Comment        = user annotation anchored to one playback step or focused target
+Add to Next Chat    = action that inserts selected step comments and references into the next message
 ```
 
 Avoid exposing this as `Thinking`. If a UI label is needed, use:
@@ -68,13 +82,13 @@ Context
 
 ```text
 Chat Bubble
-  -> compact answer
+  -> medium-appropriate conversational answer
   -> [Result Walkthrough] [Final Card] [Run]
 
 Canvas Run Playback
   -> step-by-step canvas follow-up
   -> focuses cards, annotations, intermediate outputs
-  -> allows divert/branch
+  -> collects step comments for the next conversation turn
 
 Run Bubble / Plan Bubble
   -> structured inspection of plan, action history, context, blockers, output bindings
@@ -83,7 +97,7 @@ Agent Profile
   -> agent identity, model/provider, config, recent runs
 ```
 
-Run Playback sits between a compact chat answer and the detailed Run Bubble.
+Run Playback sits between the conversational Chat answer and the detailed Run Bubble.
 
 It should answer:
 
@@ -109,7 +123,7 @@ Run Bubble should answer:
 5. Canvas enters Run Playback mode
 6. Step rail appears
 7. Each step focuses the relevant card/annotation/output
-8. User can continue, jump, divert, or open the final card
+8. User can continue, jump, comment, add comments to the next Chat message, or open the final card
 ```
 
 Example:
@@ -138,8 +152,7 @@ type RunPlayback = {
   title: string;
   summary: string;
   steps: PlaybackStep[];
-  branches: PlaybackBranch[];
-  feedbackEvents: PlaybackFeedbackEvent[];
+  comments: PlaybackStepComment[];
   createdAt: string;
 };
 
@@ -164,6 +177,16 @@ type PlaybackFocusTarget = {
   canvasRect?: { x: number; y: number; width: number; height: number };
   zoom?: number;
   reason?: string;
+};
+
+type PlaybackStepComment = {
+  id: string;
+  playbackId: string;
+  stepId: string;
+  targetId?: string;
+  userText: string;
+  includeInNextChat: boolean;
+  createdAt: string;
 };
 ```
 
@@ -215,98 +238,39 @@ Step 4. Final state
 
 ---
 
-## Divert Behavior
+## Step Comment Behavior
 
-The user can interrupt a playback step with reactions like:
-
-```text
-"어? 이거 아닌데"
-"여기서부터 다시"
-"이 근거 먼저 보여줘"
-"최종본 말고 중간 판단 보여줘"
-"이 단계는 스킵"
-```
-
-This should create a `Divert` event, not just a new plain chat message.
-
-```ts
-type PlaybackFeedbackEvent = {
-  id: string;
-  playbackId: string;
-  stepId: string;
-  kind:
-    | "not_this"
-    | "show_evidence"
-    | "skip_step"
-    | "jump_to_step"
-    | "branch_request"
-    | "style_preference"
-    | "accept_step";
-  userText?: string;
-  agentAssessment?: "agent_error" | "user_missed_context" | "ambiguous_requirement" | "preference_change";
-  outcome?: "branch_created" | "steered_back" | "step_revised" | "final_revised" | "noted_for_style";
-  createdAt: string;
-};
-```
-
-The agent then chooses one of two broad paths.
-
-### Branch
-
-If the user found a real issue or changed direction:
+The user can pause on any playback step and annotate what they see:
 
 ```text
-User: 어? 이거 아닌데
-Agent: 맞습니다. Step 3 판단을 새로 분기하겠습니다.
-Canvas: creates Branch B from Step 3
+"여기 해석이 달라"
+"이 근거를 다음 답변에서 먼저 다뤄줘"
+"이 화면의 표시된 부분을 수정해줘"
+"이 단계는 설명을 더 붙여줘"
 ```
 
-### Steer Back
-
-If the current confusion is explained by an earlier step:
+The comment remains anchored to the playback step and, when applicable, to a
+focused card, annotation, or evidence target. It does not automatically create
+a new run or branch.
 
 ```text
-User: 어? 이거 아닌데
-Agent: 이 부분은 Step 2에서 확인한 근거에 기반했습니다. 그 단계로 돌아가겠습니다.
-Canvas: jumps back to Step 2 and highlights the evidence
+pause on step
+-> write comment
+-> optionally select Add to Next Chat
+-> next Chat composer shows selected comments and step references
+-> user sends one follow-up message
+-> agent receives the comments with the relevant playback context
 ```
 
-This is important because the user may not be wrong or right in a binary way. The product should make the derivation inspectable enough that the user and agent can converge.
-
----
-
-## Branch Model
-
-```ts
-type PlaybackBranch = {
-  id: string;
-  parentPlaybackId: string;
-  fromStepId: string;
-  reason: string;
-  createdBy: "user" | "agent";
-  branchRunId?: string;
-  status: "open" | "accepted" | "abandoned" | "merged";
-  steps: PlaybackStep[];
-};
-```
-
-Branching should remain visible:
-
-```text
-Main path
-  Step 1 -> Step 2 -> Step 3 -> Step 4
-
-Branch B
-  from Step 3 -> revised Step 3B -> revised final
-```
-
-Do not silently overwrite the original path when the user diverts. Keep the original path so the agent can compare, steer back, or explain the difference.
+General workflow branching can be designed independently of Playback. Playback
+comments are an annotation-to-conversation mechanism.
 
 ---
 
 ## Personalization Signal
 
-Divert events are valuable personalization data.
+Playback navigation and explicit comment choices can be useful local
+personalization signals.
 
 Examples:
 
@@ -317,7 +281,7 @@ User often clicks "final only"
 User often says "근거 먼저"
   -> future result summaries should put evidence chips first
 
-User often diverts at interpretation steps
+User often comments on interpretation steps
   -> future runs should confirm interpretation before execution
 
 User often asks for visual walkthrough
@@ -332,7 +296,7 @@ type FollowupStyleSignal = {
   userId?: string;
   agentId?: string;
   agendaId?: string;
-  source: "playback_divert" | "step_accept" | "chip_click" | "manual_preference";
+  source: "step_comment" | "step_navigation" | "result_link_click" | "manual_preference";
   signal:
     | "prefers_final_first"
     | "prefers_evidence_first"
@@ -389,7 +353,8 @@ Step rail
 Jump to final
 Show evidence
 Open Run
-Divert from here
+Comment on this step
+Add selected comments to next Chat
 Exit playback
 ```
 
@@ -454,20 +419,20 @@ P0:
 - Playback can focus existing canvas cards step-by-step.
 - Playback can show short step summaries.
 - User can go previous/next/final/exit.
-- Divert event can be recorded as local data.
+- Step comments can be recorded as local data and inserted into the next Chat message.
 
 P1:
 
 - Playback can show/hide annotations per step.
-- Playback can branch from a selected step.
-- Agent can steer user back to earlier evidence step.
-- Step acceptance/rejection updates follow-up style signals.
+- Step comments can anchor to focused cards, annotations, or evidence.
+- Selected comments carry their step context into the next agent turn.
+- Explicit navigation and comment choices can update local follow-up style signals.
 
 P2:
 
 - Automatic playback outline generation from run plans.
 - Personalization layer changes future answer format.
-- Branch comparison UI.
+- Collaborative step comments and presentation control.
 - Optional export of playback as report/deck/walkthrough artifact.
 
 ---
@@ -479,9 +444,8 @@ The feature is aligned only if:
 - Long chat answers stay compact by default.
 - Clicking a result summary opens a guided walkthrough, not a wall of artifacts.
 - Each playback step is spatially anchored to cards, annotations, or outputs.
-- User can divert from any step.
-- The original path is preserved when a branch is created.
-- The agent can steer back to prior evidence when the user's confusion is resolved there.
-- Feedback events become local personalization signals.
+- User can comment on any step and explicitly add selected comments to the next Chat message.
+- Step comments retain their playback and target references.
+- A step comment does not automatically create a branch or new run.
+- Explicit comment/navigation events may become local personalization signals.
 - Raw hidden reasoning is not exposed as `Thinking`; only plan, rationale, evidence, action, and context are surfaced.
-

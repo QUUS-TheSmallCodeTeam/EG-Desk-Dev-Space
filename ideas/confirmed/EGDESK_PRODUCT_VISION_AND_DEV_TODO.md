@@ -2,20 +2,25 @@
 
 **Status**: Living source-of-truth index
 **Implementation path**: `apps/firefox-ui-demo/`
-**Last updated**: 2026-05-20
+**Last updated**: 2026-07-30
 
 This document tracks product decisions and development backlog items that came from active design/development discussion. It is not a marketing whitepaper. The public-facing vision remains in `docs/vision/`, while this file keeps the current product/runtime direction and todo surface aligned.
 
 ## Current Product Frame
 
-EG-Desk is a live work surface where a user starts work from an Agenda, not from a folder. A Desk is the active computer-like surface. An Agenda pairs the work objective with browser cards, files, chat, agents, terminal state, outputs, and context. Cards are views/runtime surfaces, not the Agenda itself.
+EG-Desk is a live work surface that organizes durable work through an Agenda
+rather than reducing work to a folder. A Desk is the active computer-like
+surface and can contain transient unsaved work before it is retained in an
+Agenda. An Agenda pairs the work objective with browser cards, files, chat,
+agents, execution state, outputs, and context. Cards are views/runtime surfaces,
+not the Agenda itself.
 
 Core principles:
 
 - Keep the first screen as the actual work surface, not a landing page.
 - Treat Agenda as the work boundary and Card as the view/runtime form.
-- Keep chat lightweight: short summary bubbles, result chips, and links to canvas artifacts.
-- Put long outputs, evidence, run playback, and visual steps on canvas cards.
+- Compose one answer across Chat and Canvas using each medium's own interaction grammar.
+- Put spatial, visual, interactive, artifact, and playback expressions on Canvas while keeping conversational explanation complete in Chat.
 - Let AI act on the same visible browser/canvas state the user can inspect.
 - Prefer repeatable Firefox MCP verification scripts for UI/runtime changes.
 
@@ -24,24 +29,30 @@ Core principles:
 | Area | Current source |
 |---|---|
 | Long-term product vision | `docs/vision/EG-DESK 백서 - Vision_v1.md` |
+| Interaction and orchestration contract | `ideas/confirmed/EGDESK_INTERACTION_AND_ORCHESTRATION_CONTRACT.md` |
+| Interaction trace and acceptance coverage (non-normative; not runtime evidence) | `ideas/confirmed/EGDESK_PRODUCT_INTERACTION_TRACE_ATLAS.md` |
 | Firefox shell strategy | `ideas/confirmed/FIREFOX_SHELL_STRATEGY.md` |
 | Firefox shell roadmap | `ideas/confirmed/FIREFOX_SHELL_ROADMAP.md` |
 | Desk/Agenda/Card runtime | `apps/firefox-ui-demo/docs/DESK_AGENDA_CARD_RUNTIME_MODEL.md` |
 | Chat/canvas/agent layer | `apps/firefox-ui-demo/docs/CHAT_CANVAS_AGENT_LAYER_MODEL.md` |
 | Chat visual grammar | `apps/firefox-ui-demo/docs/CHAT_DESIGN_GRAMMAR_V1.md` |
 | Viewport/HUD interaction | `apps/firefox-ui-demo/docs/VIEWPORT_LAYOUT_INTERACTION_MODEL.md` |
-| Canvas run playback | `apps/firefox-ui-demo/docs/CANVAS_RUN_PLAYBACK_MODEL.md` |
+| Answer Briefing | `ideas/confirmed/EGDESK_INTERACTION_AND_ORCHESTRATION_CONTRACT.md` §8 and `ideas/confirmed/EGDESK_PRODUCT_INTERACTION_TRACE_ATLAS.md` `OBJ-038` / `AI-05`; legacy `apps/firefox-ui-demo/docs/CANVAS_RUN_PLAYBACK_MODEL.md` is superseded |
 | AI canvas annotation | `apps/firefox-ui-demo/docs/AI_CANVAS_ANNOTATION_LAYER.md` |
 | Chat agent profiles | `ideas/confirmed/CHAT_AGENT_PROFILE_RUNTIME.md` |
 | Browser agent observation runtime | `apps/firefox-ui-demo/docs/BROWSER_AGENT_OBSERVATION_RUNTIME.md` |
 | Human-in-the-loop workflow await | `apps/firefox-ui-demo/docs/HUMAN_IN_LOOP_WORKFLOW_AWAIT_MODEL.md` |
-| Browser agent protocol | `ideas/confirmed/AGENT_BROWSER_PROTOCOL_INTEGRATION.md` |
+| Historical browser-agent protocol (Electron-era; superseded by ADR-007 and the Firefox runtime sources above) | `ideas/confirmed/AGENT_BROWSER_PROTOCOL_INTEGRATION.md` |
 
 ## Decided Product Concepts
 
 ### Desk
 
 Desk is closer to "computer / live work surface" than a browser profile or folder. One Desk can contain multiple browser profiles/accounts, files, chats, terminals, and cards. Switching Desk is closer to switching the working computer/work surface than changing a single project folder.
+
+Desk has an automatic local recovery lifecycle distinct from Agenda
+persistence. An unsaved arrangement may be restored after restart without
+becoming a saved Agenda revision.
 
 ### Agenda
 
@@ -58,7 +69,14 @@ There are two chat entry modes:
 - Agent DM: user talks to a specific agent profile. The agent can route work to an Agenda Thread when the work belongs there.
 - Agenda Thread: project/work-room chat attached to an Agenda. Multiple agents can participate like a group chat.
 
-Chat bubbles should be short. They should carry summaries and links/chips, while full results and step-by-step outputs live on canvas.
+Chat should remain conversationally complete and avoid pasting artifact bodies
+or raw execution traces. When Canvas carries the spatial/visual result, Chat
+uses an appropriate explanation plus links/chips into that result.
+
+Chat and Canvas are medium-specific projections of one answer. Chat keeps the
+conversational explanation; Canvas carries spatial, visual, interactive, and
+artifact-oriented expression. A result chip is a navigation affordance, not a
+durable product object.
 
 ### Agent Runtime
 
@@ -79,7 +97,27 @@ Browser cards should expose AI-observable state and action history. After an AI 
 
 ### Human-in-the-Loop Await
 
-AI workflows should support explicit waits for user action. OAuth/login handoffs, terminal-opened browser flows, file waits, and cross-app sync should become Await Tokens that can pause a workflow, watch the relevant browser/terminal/auth/file events, and resume automatically with an observation summary. Manual "continue" remains a fallback, not the default path.
+AI workflows should support dependency-aware Await states. When an upstream
+agent task completes with the required evidence and approvals, dependent tasks
+should become ready and start automatically. OAuth/login handoffs,
+terminal/browser events, file arrival, and user action are possible dependency
+conditions, not the definition of Await. Manual "continue" remains a fallback,
+not the default path.
+
+### Ontology Runtime and View
+
+Ontology is the system model that organizes agent context, relations, state,
+constraints, actions, and evidence. The current Ontology Desk Window visualizes
+and helps inspect/co-design that model; it is not a primary workflow in which an
+agent or end user manually manages the ontology.
+
+### Coding Surface
+
+Terminal is an agent execution substrate and optional expert/debug view. The
+primary user-facing coding experience should support project/folder, file tree,
+editor/viewer, diff, and run/test/review results. Non-trivial implementation
+design starts with current official documentation, active reference
+implementations, the local `references/` library, and verified license evidence.
 
 ### Viewport/HUD/Minimap
 
@@ -99,8 +137,8 @@ Viewport HUD should reflect the Agenda or maximized card currently in view. When
 - [ ] Add UI for viewing/editing full agent profile/system prompt config in a canvas settings panel.
 - [ ] Add Agenda Thread routing affordance from Agent DM: move to thread, tag user in thread, or return to DM.
 - [ ] Add result-card creation from chat summary/result chips.
-- [ ] Add run playback card for long AI answers and step-by-step review/divert flow.
-- [ ] Add Await Token registry for user-action waits and auto-resume.
+- [ ] Add Prezi-like canvas run playback with step comments that can be inserted into the next chat message.
+- [ ] Add dependency graph/task state registry and automatic downstream start; model user-action awaits as one dependency-gate type.
 
 ### P1 - Browser Control
 
@@ -109,7 +147,7 @@ Viewport HUD should reflect the Agenda or maximized card currently in view. When
 - [x] Action history API and event emission.
 - [x] DOM-change notification summaries after AI/browser actions.
 - [ ] Browser control toolbar polish: predictable icons, disabled states, tooltips, focus behavior.
-- [ ] Browser card tab/focus behavior for duplicate source refs.
+- [ ] Separate content/canonical-resource deduplication from profile/account execution context in SourceRef and Browser Card focus behavior.
 - [ ] OAuth/window.open popup flow regression suite.
 - [ ] Detect OAuth/browser completion events for Await Token satisfaction.
 
@@ -120,7 +158,7 @@ Viewport HUD should reflect the Agenda or maximized card currently in view. When
 - [x] HUD viewport fit checks.
 - [ ] Agenda region visual distinction on infinite canvas.
 - [ ] Card placement policy: empty-space search, active Agenda placement, unsaved changes guard.
-- [ ] Canvas output follow-up mode: step-by-step cards with arrows and divert points.
+- [ ] Canvas output follow-up mode: temporal/spatial steps, camera movement, annotations, and comment anchors.
 - [ ] AI canvas annotation mode: draw boxes/arrows/labels over cards or screenshots.
 
 ### P1 - Chat UX
@@ -133,6 +171,14 @@ Viewport HUD should reflect the Agenda or maximized card currently in view. When
 - [ ] Thread/session badges: `Resumed`, `Fresh`, `Forked`, `Stateless`.
 - [ ] Multi-agent participant state in Agenda Thread.
 
+### P1 - Context, Recovery, and Coding UX
+
+- [ ] Separate saved Agenda revisions from the automatically journaled Desk recovery surface.
+- [ ] Resolve run context from explicit selection, best-matching Agenda, transient Desk grouping/layout, visible resources, and account/permission scope.
+- [ ] Make the selected run context inspectable and correctable without exposing the whole Desk by default.
+- [ ] Research current project/file/editor/diff/test-result frameworks and active implementations before selecting the coding-surface integration path.
+- [ ] Add user-facing project/folder, file tree/search, editor/viewer, diff, and run/test/review result surfaces; keep terminal as an optional expert/debug view and agent substrate.
+
 ### P2 - Runtime/Packaging
 
 - [ ] Clean-profile boot verification gate.
@@ -141,6 +187,9 @@ Viewport HUD should reflect the Agenda or maximized card currently in view. When
 - [ ] Bridge restart/reconnect UX without noisy user-facing diagnostics.
 - [ ] Terminal/browser/auth/file watcher bus for cross-app workflow sync.
 - [ ] Local persistence schema decision: SQLite-first with possible PocketBase/Convex sync bridge later.
+- [ ] Add a Desk-visible host-activity view and control-lease model for computer-use that occurs outside native Desk Windows.
+- [ ] Prefer isolated app/desktop execution for global pointer/keyboard computer-use; require explicit handoff before controlling the user's active desktop.
+- [ ] Keep remote host-activity streaming, identity, and authorization behind the external-infrastructure approval gate.
 
 ## Documentation Rule
 

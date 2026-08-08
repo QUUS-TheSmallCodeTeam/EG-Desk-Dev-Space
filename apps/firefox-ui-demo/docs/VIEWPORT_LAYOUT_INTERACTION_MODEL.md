@@ -4,6 +4,11 @@
 **Status**: Product/runtime architecture decision note
 **Scope**: EG-Desk Firefox shell, viewport chrome, safe area, HUD visibility, card presentation modes, runtime diagnostics
 
+> **Terminology correction (2026-08-05):** `runPlayback` and `Run Playback`
+> below are legacy implementation labels. Current product meaning is Answer
+> Briefing under Contract §8 and Atlas `OBJ-038` / `AI-05`; viewport guidance is
+> retained only where it implements the selected Briefing Step's Focus Scope.
+
 ---
 
 ## Core Sentence
@@ -478,7 +483,7 @@ Dock / Rail / Bag
   -> viewport chrome commands
 
 Run Playback overlay
-  -> previous/next/divert/exit controls
+  -> previous/next/comment/add-to-next-Chat/exit controls
 ```
 
 Wheel policy:

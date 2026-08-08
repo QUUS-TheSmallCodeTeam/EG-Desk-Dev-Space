@@ -4,6 +4,12 @@
 **Status**: Product/UI decision note
 **Scope**: Firefox shell Chat HUD, canvas chat cards, agent profile entrypoints, Agenda routing
 
+> **Terminology correction (2026-08-05):** references below to `Run Playback`,
+> `Canvas Run Playback`, `Result Walkthrough`, or `Walkthrough Chip` are legacy
+> labels. The current concept is Answer Briefing as defined by Contract §8 and
+> Atlas `OBJ-038` / `AI-05`; it explains one Answer through ordered Canvas
+> targets and Focus Scopes and does not replay a Run or hidden reasoning.
+
 ---
 
 ## Core Sentence
@@ -11,7 +17,7 @@
 Chat is the work-entry surface. It is not the workspace, not the result viewer, and not the raw execution console.
 
 ```text
-Chat      = where the user speaks and receives compact replies
+Chat      = where the user speaks and receives conversationally complete replies
 Agenda    = where work belongs
 Canvas    = where work objects live
 Run       = one execution record
@@ -119,7 +125,7 @@ The chat timeline contains:
 
 - user bubbles
 - agent bubbles
-- compact summaries
+- conversationally complete replies and medium-appropriate summaries
 - result chips
 - walkthrough chips
 - run chips
@@ -179,6 +185,7 @@ The current UI pass should be considered aligned only if:
 - The user can tell whether a runtime is Fresh or Resumed without reading a paragraph.
 - The default chat surface reads as conversation, not a console.
 - Diagnostics are reachable but not mixed into the normal message flow.
-- A final result is represented as a chip/link that opens or focuses a canvas card.
-- A long or complex result can be followed through a Walkthrough Chip without turning the chat bubble into a long report.
+- A final result keeps a conversationally complete Chat explanation and may use a chip/link to open or focus its canvas artifact.
+- A Result Chip is a UI affordance and reference, not a separate durable domain object by default.
+- A long or complex result can be followed through a Walkthrough Chip without duplicating the full artifact body in Chat.
 - Agent/profile configuration is accessible from profile surfaces, not stuffed into chat bubbles.

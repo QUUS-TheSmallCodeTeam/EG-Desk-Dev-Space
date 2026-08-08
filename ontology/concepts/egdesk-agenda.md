@@ -38,9 +38,12 @@ An Agenda can include:
 
 Agenda nesting is a work decomposition graph, not a folder tree. Deep structure can exist in data, while the Desk UI shows the active slice.
 
+An Agenda is explicitly retained reusable work state. Automatically recovered
+Desk layout, transient grouping, and open views may be associated with an
+Agenda without becoming part of its saved revision.
+
 ## Stable Definition
 
 ```text
 Agenda = work + execution environment pairing
 ```
-
