@@ -1,6 +1,6 @@
 {
-  "version": 3,
-  "updated": "2026-06-22T00:08:00+09:00",
+  "version": 6,
+  "updated": "2026-07-30T12:26:51+09:00",
   "directories": {
     ".codex/": "[present] Codex-local project operating area.",
     ".codex/agents/": "[present] Project-scoped Codex custom subagent profiles.",
@@ -14,32 +14,41 @@
     "apps/firefox-ui-demo/helper-rust/": "[alt] Rust PTY helper candidate alongside the Node helper path.",
     "apps/firefox-ui-demo/scripts/": "[present] Install, sync, run, and repeatable Firefox/Marionette verification scripts.",
     "src/": "[past] Earlier Electron/Vite POC; useful as prior evidence for canvas, offscreen browser, and Codex IPC experiments.",
-    ".claude/": "[past][alt] Claude-style swarm materials and historical operating model references.",
+    ".claude/": "[past][alt] Claude-style swarm materials and historical operating model references. Path-specific current decision records are exceptions noted in key_files.",
     ".claude/wm/": "[past][alt] Earlier Claude WM operating memory. Use as reference when explicitly comparing formats or prior swarm behavior.",
     "docs/": "[present][vision] Project documentation, design notes, whitepapers, and production-facing written material.",
     "docs/codex/": "[present] Codex-facing project context and operating notes that should not live in AGENTS.md.",
-    "ideas/": "[future][vision] Exploratory and direction-setting product or architecture notes.",
-    "ideas/confirmed/": "[future][vision] Confirmed product or architecture direction notes.",
+    "ideas/": "[present][product-decision] Exploratory and confirmed product or architecture notes; PM evaluates status before use.",
+    "ideas/confirmed/": "[present][product-decision] Confirmed product or architecture sources. Current user decisions and Decided ADRs override stale entries.",
     "ontology/": "[present][vision] Ontology source seed for time, space, virtual, and related EG-Desk concepts.",
     "ontology/concepts/": "[present][vision] Ontology concept pages.",
     "ontology/concepts/axes/": "[present][vision] Primary ontology axis definitions.",
-    "references/": "[past][alt] External reference checkouts and research material; local comparison material rather than authored project state."
+    "references/": "[present][reference] Local external-reference library. WM maps paths, freshness, duplicates, and relevant code areas; PM evaluates product fit and license-policy implications; checkouts remain local-only."
   },
   "key_files": {
     "AGENTS.md": "[present] Main Codex profile for the current project folder.",
     "docs/codex/project-context.md": "[present] Codex-facing project context that should stay outside the Main profile.",
     ".codex/agents/wm-second-brain.toml": "[present] Project-scoped WM custom subagent profile.",
+    ".codex/agents/egdesk-pm.toml": "[present] Project-scoped Codex-native EG-Desk PM profile for product context, research framing, decision drift, and approval-candidate preparation.",
     ".codex/wm/README.md": "[present] WM operating memory rules.",
     ".codex/wm/file-inventory.txt": "[present] Raw snapshot of observed project files.",
     ".codex/wm/file-inventory-hash": "[present] Hash paired with file-inventory.txt for detecting changed observed file state.",
     ".codex/wm/file-map.json": "[present] WM path map in the .claude file-map shape: directories plus key_files. Values are time-tagged semantic notes.",
-    ".codex/wm/routing-policy.json": "[present] Main/WM routing policy. Role and task-routing rules live here, not in file-map entries.",
+    ".codex/wm/routing-policy.json": "[present] Main/PM/WM routing policy, research return path, and Main-owned approval-queue contract. Role and task-routing rules live here, not in file-map entries.",
     "apps/firefox-ui-demo/overlay/JS/eg-desk-surface.uc.js": "[present] Main Firefox chrome UI/runtime script.",
     "apps/firefox-ui-demo/overlay/CSS/eg-desk-surface.uc.css": "[present] Main Firefox chrome UI stylesheet.",
     "apps/firefox-ui-demo/helper/codex-bridge-server.mjs": "[present] Node bridge server for Codex chat and terminal HTTP endpoints.",
-    "ideas/confirmed/FIREFOX_SHELL_ROADMAP.md": "[future][vision] Firefox shell roadmap and direction context.",
+    "ideas/confirmed/EGDESK_PRODUCT_VISION_AND_DEV_TODO.md": "[present][product-decision] Living product direction and development index; PM must separate decided concepts from open implementation items.",
+    "ideas/confirmed/EGDESK_INTERACTION_AND_ORCHESTRATION_CONTRACT.md": "[present][product-decision] Confirmed interaction baseline for state lifecycles, context assembly, Chat/Canvas answer projection, agent dependencies, Playback comments, ontology/runtime separation, and Desk-external computer-use observability.",
+    "ideas/confirmed/EGDESK_PRODUCT_INTERACTION_TRACE_ATLAS.md": "[present][product-decision][coverage] Maintained non-normative interaction trace atlas; the interaction contract remains normative; not runtime evidence.",
+    "ideas/confirmed/FIREFOX_SHELL_ROADMAP.md": "[present][product-decision] Firefox shell roadmap; platform pivot is decided while later packaging and fork gates remain phase decisions.",
     "ontology/concepts/axes/axis-time.md": "[present][vision] Defines the time axis used to interpret past, present, future, alternate, and vision-facing context.",
-    ".claude/wm/file-map.json": "[past][alt] Earlier Claude WM map and current format reference for Codex WM file-map structure.",
-    ".claude/wm/project-profile.md": "[past] Earlier onboarding profile containing assumptions from a prior project state."
+    ".claude/agents/egdesk-pm-agent.md": "[past][reference] Earlier Claude PM profile. Method reference only; it is not the active Codex PM authority.",
+    ".claude/skills/pm/SKILL.md": "[past][reference] Earlier Claude PM consultation method. Do not duplicate it into .codex; selectively adapt current methods through the Codex PM profile.",
+    ".claude/docs/decisions/INDEX.md": "[present][product-decision][legacy-path] Current ADR index retained at its existing path during PM-profile migration. Decided records remain authoritative unless superseded or contradicted by a later explicit user decision.",
+    ".claude/docs/decisions/002-external-reference-license-policy.md": "[present][product-decision][legacy-path] Current Green/Red external-reference license policy; PM evaluates, WM locates evidence, and Main persists approved changes.",
+    ".claude/docs/decisions/007-firefox-shell-over-electron.md": "[present][product-decision][legacy-path] Decided Firefox-shell platform pivot.",
+    ".claude/wm/file-map.json": "[past][alt] Earlier Claude WM map and format reference for Codex WM file-map structure.",
+    ".claude/wm/project-profile.md": "[past][stale] Earlier onboarding profile containing Electron-era assumptions. Do not use as current PM identity unless WM selects a specific current section."
   }
 }

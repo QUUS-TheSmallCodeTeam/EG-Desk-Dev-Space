@@ -6,6 +6,37 @@ This document contains project reference context for Codex. It is not the Main a
 - The active implementation path is `apps/firefox-ui-demo/`. New EG-Desk UI/runtime work should start there unless the user explicitly asks for the legacy Electron path.
 - `src/` is a legacy Electron/Vite POC. It is still useful as reference for canvas, offscreen browser, and Codex IPC experiments, but it is not the current product direction.
 - Keep old experiments available for comparison, but do not extend both Firefox and Electron paths for the same feature without an explicit reason.
+- The Firefox-shell platform pivot is decided. Later choices such as packaging channel, portable distribution, or an optional Firefox fork are phase decisions, not a reopening of the platform direction.
+- The final business direction includes multi-user collaboration in which another authorized person can enter and work in a user's Desk.
+- Local capabilities may proceed autonomously. Actual server or network infrastructure, remote databases, identity providers, paid services, external deployment, credentials, domains, or external accounts require explicit user approval through Main's approval queue.
+- Product outcomes and authority boundaries should be explicit; implementation structure, refactoring, task decomposition, and technical method remain flexible unless they change an approved product outcome or risk boundary.
+- Prefer current external standards, official documentation, mature open-source work, and the local `references/` library before custom implementation. Reuse must follow the current license policy and verified evidence.
+
+## Codex Product Management
+- `.codex/agents/egdesk-pm.toml` is the active Codex-native EG-Desk PM profile.
+- PM owns product interpretation, final-capability baselines, roadmap and PRD coherence, research framing, external-reference product fit, decision drift, and approval-candidate preparation.
+- PM is not user-facing and does not own agent spawning, the approval queue, application code, tests, WM state, Git, or final operational routing.
+- PM defaults to read-only consultation. It may edit product, PRD, ADR, vision, or reference documents only when Main explicitly delegates that document work.
+- Main remains the only user-facing authority and owns queueing and batching approval candidates. Pending approval pauses only dependent work; independent local work continues.
+- WM owns file and source selection, local-reference location and freshness, current-vs-reference classification, and drift warnings. PM supplies product criteria; WM supplies local reality; Main composes and dispatches.
+- Research workers gather bounded evidence. They do not approve product direction. Main returns their evidence to PM for product-fit evaluation before routing implementation or approval.
+- `ideas/confirmed/EGDESK_PRODUCT_INTERACTION_TRACE_ATLAS.md` is the canonical user manual and UI-action specification: exact product-user input, visible response, next action, recovery, and completion evidence.
+- `ideas/confirmed/EGDESK_INTERACTION_AND_ORCHESTRATION_CONTRACT.md` is the canonical technical contract that makes those UI actions valid through state, data, identity, runtime, storage, recovery, and orchestration guarantees. Neither document is runtime evidence.
+- `docs/codex/egdesk-product-interaction-trace-atlas-editorial-ledger.md` owns product-owner `HUM-*` design gaps and keeps the older provenance/routing registry as a maintenance appendix. Main batches owner questions; only dependent work waits.
+- Product examples are coverage probes, not requirements by themselves. Detailed use cases must trace actor intent, starting state, exact UI action, visible feedback, state transition, agent/tool processing, recovery/approval, and completion evidence.
+- For non-trivial technical capabilities, WM first maps current source, dependencies, and local references; bounded research then compares current official sources and active reference implementations before implementation agents choose a method.
+
+### Product source precedence
+1. The user's latest explicit decision, as recorded or relayed by Main.
+2. Current Decided ADRs and confirmed product sources that do not conflict with that decision.
+3. This Codex project context and current WM routing context.
+4. Proposed PRDs, brainstorming notes, and current implementation evidence.
+5. Historical Claude swarm files and legacy implementation notes.
+
+### Existing Claude assets
+- Keep `.claude/agents/egdesk-pm-agent.md` and `.claude/skills/pm/SKILL.md` as historical method references; do not treat them as the active PM authority.
+- Keep existing PRDs under `ideas/` and existing ADRs under `.claude/docs/decisions/` in place during the PM-profile migration. Do not create duplicate Codex copies.
+- Do not use `.claude/wm/project-profile.md` as current project identity without a WM-selected, current section; it contains stale Electron-era assumptions.
 
 ## `.claude` Swarm Reference
 - Keep all Claude-style swarm artifacts under `.claude/`. Do not move, flatten, rename, or mirror them into Codex-specific folders unless the user explicitly asks.
