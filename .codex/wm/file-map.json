@@ -1,6 +1,6 @@
 {
-  "version": 6,
-  "updated": "2026-07-30T12:26:51+09:00",
+  "version": 7,
+  "updated": "2026-08-09T17:18:23+09:00",
   "directories": {
     ".codex/": "[present] Codex-local project operating area.",
     ".codex/agents/": "[present] Project-scoped Codex custom subagent profiles.",
@@ -39,8 +39,10 @@
     "apps/firefox-ui-demo/overlay/CSS/eg-desk-surface.uc.css": "[present] Main Firefox chrome UI stylesheet.",
     "apps/firefox-ui-demo/helper/codex-bridge-server.mjs": "[present] Node bridge server for Codex chat and terminal HTTP endpoints.",
     "ideas/confirmed/EGDESK_PRODUCT_VISION_AND_DEV_TODO.md": "[present][product-decision] Living product direction and development index; PM must separate decided concepts from open implementation items.",
-    "ideas/confirmed/EGDESK_INTERACTION_AND_ORCHESTRATION_CONTRACT.md": "[present][product-decision] Confirmed interaction baseline for state lifecycles, context assembly, Chat/Canvas answer projection, agent dependencies, Playback comments, ontology/runtime separation, and Desk-external computer-use observability.",
-    "ideas/confirmed/EGDESK_PRODUCT_INTERACTION_TRACE_ATLAS.md": "[present][product-decision][coverage] Maintained non-normative interaction trace atlas; the interaction contract remains normative; not runtime evidence.",
+    "ideas/confirmed/EGDESK_INTERACTION_AND_ORCHESTRATION_CONTRACT.md": "[present][product-decision][technical-contract] Canonical normative implementation guarantees for the product behavior exposed by the Atlas; not runtime evidence and not a PM/Main authoring guide.",
+    "ideas/confirmed/EGDESK_PRODUCT_INTERACTION_TRACE_ATLAS.md": "[present][product-decision][uiux-manual] Canonical user manual and UI-action specification for product-user input, visible response, System/Agent processing, recovery, and completion evidence; not runtime evidence or an AI authoring prompt.",
+    "docs/codex/egdesk-product-interaction-trace-atlas-editorial-ledger.md": "[present][product-owner-decision] Canonical product-owner HUM question and decision surface. The historical filename is retained for stable links; authoring, provenance, routing, and audit rules do not live here.",
+    "docs/codex/egdesk-product-documentation-governance.md": "[present][codex-governance] Canonical Main/PM/WM/document-agent receiving-situation, weave, source precedence, provenance, routing, stable-ID, audit-history, and validation rules. It does not define product behavior.",
     "ideas/confirmed/FIREFOX_SHELL_ROADMAP.md": "[present][product-decision] Firefox shell roadmap; platform pivot is decided while later packaging and fork gates remain phase decisions.",
     "ontology/concepts/axes/axis-time.md": "[present][vision] Defines the time axis used to interpret past, present, future, alternate, and vision-facing context.",
     ".claude/agents/egdesk-pm-agent.md": "[past][reference] Earlier Claude PM profile. Method reference only; it is not the active Codex PM authority.",

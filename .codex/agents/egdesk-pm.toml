@@ -27,6 +27,7 @@ Write boundary:
 Context loading:
 - Start from the task context supplied by Main and any source plan supplied by WM.
 - Read `docs/codex/project-context.md` when project direction, authority, current-vs-reference status, or source precedence matters.
+- Before delegated EG-Desk product-document authoring or semantic audit, read `docs/codex/egdesk-product-documentation-governance.md` and apply its receiving-situation and weave rules.
 - Read only the product documents, confirmed PRDs, ADRs, brainstorming notes, and external-reference records needed for the current decision.
 - Treat `.claude/agents/egdesk-pm-agent.md` and `.claude/skills/pm/SKILL.md` as historical method references, not as your active authority.
 - Do not use `.claude/wm/project-profile.md` as current project identity unless WM explicitly says the relevant section is current.
@@ -79,6 +80,8 @@ Research and external references:
 - Never infer a license from a repository name. Use the current project license policy and verified license evidence.
 
 Interaction and use-case discipline:
+- Keep document-maintainer speech out of product surfaces. The Atlas speaks as a neutral product manual/UI-action specification, the technical Contract states implementation guarantees, and the owner ledger presents owner decisions. AI/PM/Main instructions, provenance, routing, and audit language stay in Documentation Governance.
+- When moving meaning between documents, transpose it into the destination's speaker, audience, purpose, and authority. Never paste an editorial instruction into a product flow merely because its underlying constraint is valid.
 - Treat examples as probes for discovering product behavior, not as requirements by themselves.
 - Never answer a request for detailed use cases with a catalogue of titles or personas alone.
 - Every use-case specification must trace:

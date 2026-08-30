@@ -12,12 +12,14 @@ EG-DESK의 현재 구현 기준은 **Firefox shell**입니다.
 - 개발 로드맵 기준: [`../ideas/confirmed/FIREFOX_SHELL_ROADMAP.md`](../ideas/confirmed/FIREFOX_SHELL_ROADMAP.md)
 - 제품 비전/개발 투두 living index: [`../ideas/confirmed/EGDESK_PRODUCT_VISION_AND_DEV_TODO.md`](../ideas/confirmed/EGDESK_PRODUCT_VISION_AND_DEV_TODO.md)
 - 상호작용/오케스트레이션 규범 계약: [`../ideas/confirmed/EGDESK_INTERACTION_AND_ORCHESTRATION_CONTRACT.md`](../ideas/confirmed/EGDESK_INTERACTION_AND_ORCHESTRATION_CONTRACT.md)
-- 제품 상호작용 추적·수용 범위 atlas: [`../ideas/confirmed/EGDESK_PRODUCT_INTERACTION_TRACE_ATLAS.md`](../ideas/confirmed/EGDESK_PRODUCT_INTERACTION_TRACE_ATLAS.md) — 계약의 비규범 동반 문서이며 런타임 증거가 아님
+- 사용자 매뉴얼·UI 행동 정본: [`../ideas/confirmed/EGDESK_PRODUCT_INTERACTION_TRACE_ATLAS.md`](../ideas/confirmed/EGDESK_PRODUCT_INTERACTION_TRACE_ATLAS.md) — 제품 사용 흐름의 정본이며 런타임 증거가 아님
+- 제품 소유자 설계 Gap·결정 목록: [`codex/egdesk-product-interaction-trace-atlas-editorial-ledger.md`](codex/egdesk-product-interaction-trace-atlas-editorial-ledger.md)
+- AI·PM·Main용 제품 문서 운영 정본: [`codex/egdesk-product-documentation-governance.md`](codex/egdesk-product-documentation-governance.md)
 - 현재 구현 위치: [`../apps/firefox-ui-demo/`](../apps/firefox-ui-demo/)
 - Desk/Agenda/Card 런타임 모델: [`../apps/firefox-ui-demo/docs/DESK_AGENDA_CARD_RUNTIME_MODEL.md`](../apps/firefox-ui-demo/docs/DESK_AGENDA_CARD_RUNTIME_MODEL.md)
 - Chat 디자인 문법: [`../apps/firefox-ui-demo/docs/CHAT_DESIGN_GRAMMAR_V1.md`](../apps/firefox-ui-demo/docs/CHAT_DESIGN_GRAMMAR_V1.md)
 - AI 캔버스 주석 레이어: [`../apps/firefox-ui-demo/docs/AI_CANVAS_ANNOTATION_LAYER.md`](../apps/firefox-ui-demo/docs/AI_CANVAS_ANNOTATION_LAYER.md)
-- Answer Briefing 기준: [`../ideas/confirmed/EGDESK_INTERACTION_AND_ORCHESTRATION_CONTRACT.md`](../ideas/confirmed/EGDESK_INTERACTION_AND_ORCHESTRATION_CONTRACT.md#8-canvas-answer-briefing-and-briefing-comments), [`../ideas/confirmed/EGDESK_PRODUCT_INTERACTION_TRACE_ATLAS.md`](../ideas/confirmed/EGDESK_PRODUCT_INTERACTION_TRACE_ATLAS.md#atlas-obj-038); 기존 Run Playback note는 [historical/superseded](../apps/firefox-ui-demo/docs/CANVAS_RUN_PLAYBACK_MODEL.md)
+- Answer Briefing 기준: [`../ideas/confirmed/EGDESK_INTERACTION_AND_ORCHESTRATION_CONTRACT.md`](../ideas/confirmed/EGDESK_INTERACTION_AND_ORCHESTRATION_CONTRACT.md#tech-answer-briefing), [`../ideas/confirmed/EGDESK_PRODUCT_INTERACTION_TRACE_ATLAS.md`](../ideas/confirmed/EGDESK_PRODUCT_INTERACTION_TRACE_ATLAS.md#atlas-obj-038); 기존 Run Playback note는 [historical/superseded](../apps/firefox-ui-demo/docs/CANVAS_RUN_PLAYBACK_MODEL.md)
 - Viewport 레이아웃/인터랙션 모델: [`../apps/firefox-ui-demo/docs/VIEWPORT_LAYOUT_INTERACTION_MODEL.md`](../apps/firefox-ui-demo/docs/VIEWPORT_LAYOUT_INTERACTION_MODEL.md)
 - Browser Agent 관찰 런타임: [`../apps/firefox-ui-demo/docs/BROWSER_AGENT_OBSERVATION_RUNTIME.md`](../apps/firefox-ui-demo/docs/BROWSER_AGENT_OBSERVATION_RUNTIME.md)
 - Human-in-the-loop await 모델: [`../apps/firefox-ui-demo/docs/HUMAN_IN_LOOP_WORKFLOW_AWAIT_MODEL.md`](../apps/firefox-ui-demo/docs/HUMAN_IN_LOOP_WORKFLOW_AWAIT_MODEL.md)

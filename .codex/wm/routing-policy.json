@@ -1,6 +1,6 @@
 {
-  "version": 3,
-  "updated": "2026-07-30T11:41:55+09:00",
+  "version": 4,
+  "updated": "2026-08-09T17:18:23+09:00",
   "purpose": "Reusable routing policy and default role/file boundaries for Codex-native Main, EG-Desk PM, WM, and bounded worker operation. This is not a worker prompt bundle or a live communication channel.",
   "persistence_policy": {
     "default_context_delivery": "inline",
@@ -107,7 +107,12 @@
       ]
     },
     "interaction_specification": {
-      "canonical_source": "ideas/confirmed/EGDESK_INTERACTION_AND_ORCHESTRATION_CONTRACT.md",
+      "canonical_sources": {
+        "uiux_manual": "ideas/confirmed/EGDESK_PRODUCT_INTERACTION_TRACE_ATLAS.md",
+        "technical_contract": "ideas/confirmed/EGDESK_INTERACTION_AND_ORCHESTRATION_CONTRACT.md",
+        "owner_decisions": "docs/codex/egdesk-product-interaction-trace-atlas-editorial-ledger.md",
+        "documentation_governance": "docs/codex/egdesk-product-documentation-governance.md"
+      },
       "required_trace": [
         "actor intent and starting Desk/Agenda/context state",
         "exact user UI action",
@@ -117,7 +122,14 @@
         "dependency, recovery, and approval behavior",
         "user-visible completion evidence"
       ],
-      "examples_are_requirements": false
+      "examples_are_requirements": false,
+      "receiving_situation": {
+        "uiux_manual": "product behavior and human navigation only; no Main, PM, WM, provenance, routing, audit, or authoring instructions",
+        "technical_contract": "normative state, data, identity, runtime, storage, authority, recovery, and orchestration guarantees only; no document-maintenance workflow",
+        "owner_decisions": "product-owner questions and decisions only; no AI work registry or audit history",
+        "documentation_governance": "AI and maintainer authoring, weave, source, provenance, routing, ID, audit, and validator rules; no new product behavior"
+      },
+      "transposition_required": true
     },
     "research": {
       "flow": [

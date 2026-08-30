@@ -5,29 +5,25 @@
 **English name**: EG-Desk Interaction and Orchestration Contract  
 **Date**: 2026-08-08
 
-**문서 역할**: UI에서 약속한 동작을 실제 상태·데이터·런타임·권한·오케스트레이션으로 성립시키는 기술 계약  
-**사용자 매뉴얼 정본**: [EG-Desk 가상 사용설명서와 제품 상호작용 Atlas](./EGDESK_PRODUCT_INTERACTION_TRACE_ATLAS.md#atlas-manual-start)  
-**설계 gap·사용자 질문 정본**: [EG-Desk 설계 Gap 및 사용자 확인 원장](../../docs/codex/egdesk-product-interaction-trace-atlas-editorial-ledger.md#gap-owner-queue)  
+**문서 역할**: UI에서 약속한 동작을 실제 상태·데이터·런타임·권한·오케스트레이션으로 성립시키는 기술 계약
+**사용자 매뉴얼 정본**: [EG-Desk 가상 사용설명서와 제품 상호작용 Atlas](./EGDESK_PRODUCT_INTERACTION_TRACE_ATLAS.md#atlas-manual-start)
+**설계 gap·사용자 질문 정본**: [EG-Desk 설계 Gap 및 사용자 확인 원장](../../docs/codex/egdesk-product-interaction-trace-atlas-editorial-ledger.md#gap-owner-queue)
+**관련 문서 운영 원칙**: [EG-Desk 제품 문서 화자·운영 정본](../../docs/codex/egdesk-product-documentation-governance.md#doc-governance-top)
 **현재 구현 상태**: 이 문서와 별도다. 계약에 적혔다는 사실은 구현·테스트·배포 완료의 증거가 아니다.
 
-이 문서는 최종 EG-Desk 기능이 **어떤 기술적 사실을 보장해야 하는지**를 정의한다.
-특정 프레임워크·모듈명·클래스 구조·프로세스 개수를 고정하는 것이 더 효율적이라는
-근거가 없는 한 구현 Agent의 재량을 보존한다. 반대로 데이터 동일성, 권한 격리,
+최종 EG-Desk 기능은 이 계약에 정의된 기술적 사실을 보장해야 한다.
+특정 프레임워크·모듈명·클래스 구조·프로세스 개수는 제품 의미나 검증 결과가
+요구하지 않는 한 고정하지 않는다. 반대로 데이터 동일성, 권한 격리,
 과거 관찰 보존, 사용자 승인 경계처럼 구현 선택으로 바뀌면 제품 의미가 달라지는
 사항은 기술 불변조건으로 고정한다.
 
-최신 제품 소유자 결정이 우선한다. Atlas는 사람이 실제로 보고 누르는 순서를,
-이 계약서는 그 순서가 의존하는 기술 상태와 원리를, 설계 Gap 원장은 두 문서를
-왕복 검토하다 발견한 미결정을 소유한다. 같은 요구를 세 문서에 복사하지 않고
-안정적인 anchor로 서로 연결한다.
-
 <a id="tech-status-model"></a>
 
-## 0. 문서 상태, 기술 계층 및 양방향 탐색
+## 0. 기술 계약 범위, 구현 상태 및 양방향 탐색
 
 ### 0.1 결정 상태 범례
 
-| 상태 | 의미 | 구현 Agent가 할 수 있는 일 |
+| 상태 | 의미 | 적용 방식 |
 |---|---|---|
 | `FIXED-PRINCIPLE` | 제품 의미를 지키기 위해 구현과 무관하게 유지해야 하는 원칙 | 만족하는 구현을 선택하되 원칙을 약화하지 않는다 |
 | `SELECTED-BASELINE` | 현재 제품 방향에 가장 맞는 기본 기술 선택 | 더 나은 근거가 있으면 호환성·migration을 제시하고 변경 제안 가능 |
@@ -69,7 +65,7 @@ UI view, live resource, Agent Run, snapshot, 저장 record는 서로 같은 객�
 | 영역 | 현재 상태 | 계약 |
 |---|---|---|
 | 제품 shell | `SELECTED-BASELINE` | Firefox 기반 EG-Desk 전환을 기준으로 한다. Firefox 내부 결합 방식과 UI 모듈 구조는 `IMPLEMENTATION-DISCRETION`이다. |
-| UI 구성 | `IMPLEMENTATION-DISCRETION` | HTML/CSS/JS, Web Components, 상태 관리 라이브러리 등은 여러 Agent가 독립 수정·검증하기 쉬운 경계를 근거로 선택한다. 거대 단일 파일이나 특정 프레임워크를 문서가 미리 강제하지 않는다. |
+| UI 구성 | `IMPLEMENTATION-DISCRETION` | HTML/CSS/JS, Web Components, 상태 관리 라이브러리 등은 여러 Agent가 독립 수정·검증하기 쉬운 경계를 근거로 선택한다. 거대 단일 파일이나 특정 프레임워크는 계약 제약이 아니다. |
 | Agent engine boundary | `FIXED-PRINCIPLE` | 제품은 engine adapter 경계를 가지며 Run은 사용한 engine/profile/version을 고정한다. Codex용 현재 기준선은 rich-client 인증·대화·승인·stream event를 제공하는 [Codex App Server](https://developers.openai.com/codex/app-server)다. |
 | Codex 인증 | `SELECTED-BASELINE` | 구독 quota를 쓰는 Engine Profile은 ChatGPT managed browser login을 기본으로 한다. API key는 별도 profile이다. App Server의 active account·`planType`·rate-limit 상태를 검증하고 Run에 profile ID를 고정한다. |
 | Engine Profile 격리 | `SELECTED-BASELINE` | 서로 다른 AI 계정은 App Server process/config/credential store를 profile별로 격리한다. EG-Desk 로그인, AI 구독 계정, 웹 리소스 계정은 같은 identity로 합치지 않는다. |
@@ -106,42 +102,6 @@ App Server 관련 세부사항은 변동 가능한 외부 인터페이스다. �
 | 로컬 저장·내보내기·동기화 | [§15 로컬 저장](#tech-storage-export), [§15.1 `.egdesk`](#tech-portable-bundle) | [DATA-01](./EGDESK_PRODUCT_INTERACTION_TRACE_ATLAS.md#atlas-data-01) |
 | 접근성·동등 control | [§16](#tech-accessibility) | [UX-01](./EGDESK_PRODUCT_INTERACTION_TRACE_ATLAS.md#atlas-ux-01) |
 
-## 명세 작성 규칙
-
-사용 사례는 제품이 지원해야 할 상호작용과 상태 변화를 추적할 때만 유효하다.
-제목·페르소나·기능 목록만으로는 사용 사례 명세가 되지 않는다.
-
-앞으로 작성하는 모든 사용 사례 명세에는 다음 항목이 들어가야 한다.
-
-```text
-행위자의 의도
--> 시작 시점의 Desk·Agenda·context 상태
--> 정확한 화면 영역·component/label·사용자 gesture
--> 이름이 정해진 UI 영역에 즉시 나타나는 피드백
--> 영속 상태와 일시 상태의 전이
--> System/runtime 처리
--> 실제 Agent inference 또는 Agent가 지시한 외부 API/tool 활동
-   (Agent turn이나 tool action이 없으면 없음으로 기록)
--> dependency·recovery·approval 동작
--> 사용자가 확인할 수 있는 완료 증거
-```
-
-제품 내부의 hydration, context 해석, rendering, scheduling, watching,
-permission 검사, validation, version 승격, persistence, transport 관리는
-System/runtime 처리다. Agent Run 전후에 일어났다는 이유만으로 Agent가 상태를
-읽었거나 API를 호출했다고 서술해서는 안 된다.
-
-미결정 질문에는 세 경로가 있다. PM·UX·구현 역할은 이미 결정된 계약 안에서 정확한
-레이블·배치·되돌릴 수 있는 상호작용 세부를 조사할 수 있다. 핵심 제품 의미나 의도한
-사람의 작업 흐름을 바꾸는 선택은 구현 선택으로 확정하지 않고
-[설계 Gap 원장](../../docs/codex/egdesk-product-interaction-trace-atlas-editorial-ledger.md#gap-owner-queue)의
-`HUM-*` 질문으로 보낸다. Atlas의 `Q-*`는 상세 UI 연구와 안정적인 호환 anchor를
-담는다. `[A]`는 외부 인프라·데이터 전송·비용·credential·배포 또는 실제로 새로운
-실행 권한에만 쓴다. 제품 질문이 자동으로 승인 요청이 되는 것은 아니다.
-
-예시는 이 계약의 coverage를 시험하는 probe다. 예시에 등장했다는 이유만으로 제품
-요구사항이 되어서는 안 된다.
-
 <a id="tech-desk-lifecycle"></a>
 
 ## 1. 저장된 Agenda와 자동 Desk session 복원
@@ -153,7 +113,7 @@ System/runtime 처리다. Agent Run 전후에 일어났다는 이유만으로 Ag
 저장된 Agenda
   사용자가 명시적으로 저장하고 다시 열 수 있는 재사용 가능한 작업 결합
   자동으로 mount되지 않은 채 Sidebar의 Agenda 영역에 목록으로 표시
-  정확한 구성원·필수 field·저장 범위는 Atlas 질문으로 유지
+  정확한 구성원·필수 field·저장 범위는 HUM-AGENDA-001·Q-AG-02·Q-AG-08에서 미결정
   Agenda 열기는 시작 전제조건이 아니라 사용자 행동
 
 자동 Desk session
@@ -165,6 +125,26 @@ live view/runtime 상태
   mount된 Browser·File·Chat·Terminal view
   그 아래 browser context·process·app·connection이 아직 존재하는지 여부
 ```
+
+기본 topology는 하나의 Desk와 그 Desk에 속한 하나의 Canvas다.
+
+```text
+EG-Desk app session
+  -> Desk [1]
+     -> Canvas [1]
+        -> Agenda projection [0..n]
+        -> Agenda에 속하지 않은 자동 복원 view [0..n]
+```
+
+여러 Saved Agenda는 같은 Canvas에 동시에 열 수 있다. Agenda를 연다는 이유로 기존
+Canvas projection을 교체하거나 새 Desk를 만들지 않는다. 이미 열린 Agenda는 그
+projection을 재사용해 focus하고, 닫혀 있으면 새 projection을 같은 Canvas에 만든다.
+정확한 초기 위치·겹침 회피·활성 표시만 세부 UI 결정으로 남는다. 다중 Desk는
+Agenda 분리나 메모리 최적화 수단이 아니다.
+
+Agenda의 제품 의미는 [HUM-AGENDA-001](../../docs/codex/egdesk-product-interaction-trace-atlas-editorial-ledger.md#hum-agenda-001),
+연결된 세부 항목은 [Q-AG-02](../../docs/codex/egdesk-product-documentation-governance.md#atlas-q-ag-02)와
+[Q-AG-08](../../docs/codex/egdesk-product-documentation-governance.md#atlas-q-ag-08)에서 추적한다.
 
 자동 Desk session을 영속화해도 저장된 Agenda가 생성되거나 갱신되지 않는다. 데이터
 모델은 두 수명주기를 분리해야 한다. 다만 정상 시작에 recovery wizard, 항목별 출처
@@ -187,9 +167,24 @@ badge 또는 눈에 보이는 “Agenda revision 대 recovery journal” 검사 
 
 내부 시작 작업의 완료 순서는 제품 우선순위를 뜻하지 않는다. 목록에 나타났다는
 이유만으로 저장된 Agenda를 mount해서는 안 된다. 이미 복원된 Desk에서 Agenda를
-클릭했을 때 현재 Desk projection을 교체할지, 그 Desk에 합칠지, 또는 복수 Desk가
-별도로 승인된 경우에만 다른 Desk를 열지는 제품 상호작용 결정이다. 결정되기 전에는
-명시적 질문으로 남겨야 한다.
+클릭하면 같은 Canvas에 Agenda projection을 추가하거나 이미 열린 projection을 focus한다.
+자동 복원 view와 다른 Agenda projection은 교체하지 않는다.
+
+Agenda 닫기는 단순히 UI만 숨기는 background 전환이 아니다. System은 다음 순서를
+하나의 수명주기 전이로 처리한다.
+
+```text
+Agenda close
+  -> 닫을 Agenda projection과 영향받는 runtime ownership을 먼저 식별
+  -> 해당 Agenda projection 제거
+  -> 그 Agenda만 소유한 Browser context·process·connection·Task runtime 종료
+  -> 다른 Canvas projection이 소유·표현하는 shared runtime은 유지
+  -> Saved Agenda와 저장된 revision은 유지
+```
+
+사용자 또는 Agent의 의미 있는 작업을 Canvas에서 지운 채 hidden registry에서만 계속
+실행하는 `close-but-background` 상태는 만들지 않는다. background 실행이 유지되려면
+다른 Canvas projection이 그 작업의 소유·상태를 계속 표현해야 한다.
 
 Browser view 재구성과 Terminal 연속성은 다르다. Browser view는 이전 URL과 사용할
 수 있는 browser-session 상태에서 재구성할 수 있다. Terminal은 같은 process 또는
@@ -197,9 +192,9 @@ session identity가 검증된 경우에만 재연결됐다고 표현할 수 있�
 reconnect가 아니라 revive/relaunch이고, live process 없이 출력만 복원하면 snapshot이다.
 
 Agenda 열기, 복원된 view 닫기, Desk view를 Agenda에 연결하기, Agenda 갱신하기의
-정확한 control은 실제 UI 행동으로 명세해야 한다. 영역·component·label·gesture가
-정해지기 전에는 포괄적인 “유지”, “폐기”, “저장” 단계를 지어내지 말고 번호가 있는
-제품/UIUX 질문을 사용 사례 문서에 기록한다.
+정확한 control에는 실제 영역·component·label·gesture와 보이는 상태 전이가
+필요하다. 아직 결정되지 않은 control은 포괄적인 “유지”, “폐기”, “저장” 단계로
+간주하지 않고 연결된 `Q-*` 상태를 유지한다.
 
 <a id="tech-context-assembly"></a>
 
@@ -228,9 +223,10 @@ Agent가 암묵적인 API 호출로 Desk·Agenda store·layout·account registry
 증거가 아니다. Run은 어떤 signal과 resource를 선택했는지 기록하여 사용자가
 context를 검사하거나 수정할 수 있게 한다.
 
-Agent DM은 비공개·일시 상태로 남을 수 있다. 작업이 공유 작업 context에 속하면
-선택한 메시지와 그 context를 아직 결정되지 않은 Chat·Thread·Agenda 관계가 채택한
-공유 대화 형태에 연결하거나 옮길 수 있다.
+Agent 담당자 방은 비공개 관계로 남을 수 있다. 작업이 공유 작업 context에 속하면
+선택한 메시지·Canvas Memo reference와 그 context만 아직 결정되지 않은 workroom·
+Thread·Agenda 관계가 채택한 공유 대화 형태에 연결하거나 옮길 수 있다. 담당자 방
+전체 history를 하나의 모델 context나 공유 범위로 취급하지 않는다.
 
 <a id="tech-smart-read"></a>
 
@@ -240,8 +236,8 @@ Agent DM은 비공개·일시 상태로 남을 수 있다. 작업이 공유 작�
 
 큰 파일을 다루는 Reader는 요청 담당 Agent의 비교·판단·최종 답변 업무를 넘겨받는 일반
 subagent가 아니다. 여기서 **요청 담당 Agent**는 현재 사용자 요청과 사용자 대상
-Answer를 책임지는 Run-level 역할을 뜻한다. Codex 문서 운영 역할 `Main`이나 별도
-영속 제품 객체가 아니며, 여러 Agent가 기여하면 integration 기능이 이 책임을
+Answer를 책임지는 Run-level 역할을 뜻한다. 별도 영속 제품 객체가 아니며,
+여러 Agent가 기여하면 integration 기능이 이 책임을
 이어받을 수 있다. Reader는 기존 file-read가 요청 담당 Agent의 context를 넘칠 때도 원문을 지능적으로
 읽을 수 있게 하는 **도구 계층의 read session**이다.
 
@@ -343,8 +339,8 @@ parser/encoding/OCR → 권한·source revision 재검증 → 가능한 partitio
 끝나지 않으면 해당 source에 의존한 Task branch만 blocked로 두고 독립 작업은 계속한다.
 비밀번호, 로그인, 권한 승인, 더 나은 원본, 유료 OCR/외부 업로드가 필요할 때만
 영향받은 source·Task에 `사용자 조치 필요` 상태와 가능한 다음 행동을 Chat/Canvas에
-투영한다. 이는 문서 관리용 설계 Gap 원장이나 영속 `approval queue` 제품 객체가
-아니다. 정확한 묶음·레이블·노출 시점은
+투영한다. 사용자 조치 요청은 영향받은 Run·Task와 연결되는 상태이며, 별도 영속
+`approval queue` 제품 객체를 요구하지 않는다. 정확한 묶음·레이블·노출 시점은
 [HUM-READ-001](../../docs/codex/egdesk-product-interaction-trace-atlas-editorial-ledger.md#hum-read-001)에
 남기되, 새 credential·외부 전송·비용은 해당 Run의 `approval-required` 권한 흐름을
 통과하고 독립 Task는 계속한다.
@@ -399,6 +395,30 @@ override 범위는
 result chip은 연결된 결과·view·Answer Briefing을 focus하거나 여는 간결한 Chat UI
 affordance다. chip 자체는 영속 product-domain object가 아니다. 연결된 artifact·Run·
 message·view는 영속 객체일 수 있다.
+
+Chat 안에는 작업 상태를 말로만 전달하지 않도록 contributor·Task 상태·의존성·결과를
+가볍게 요약한 projection을 둘 수 있다. 이 표현은 자체 상태 기계를 갖거나 Canvas
+상태를 복제하지 않고, 안정적인 reference로 Canvas의 정본 Task·Result·Agent activity
+projection을 연다. 정확한 capsule·peek·inline 배치와 정보 밀도는 UI 결정으로 남는다.
+
+Canvas annotation은 두 의미를 구분한다.
+
+```text
+visual mark
+  target 또는 Canvas geometry + author/provenance + accept/reject + persistence
+
+Canvas Memo
+  target 또는 Canvas position + 사용자 본문 revision
+  + 작성자 identity가 분리된 짧은 Agent reply
+  + 선택적인 Agent-room message reference
+```
+
+Agent reply가 사용자 Memo 본문을 수정해서는 안 된다. 짧은 답으로 오해할 위험이
+있거나 정보가 부족하면 Agent는 관련 담당자 방에 Memo의 stable reference를 포함한
+message·mention을 만들 수 있다. 이 행동은 Canvas focus를 바꾸거나 Memo 안에서 긴
+대화를 자동 시작하지 않는다. Agent 방에서 후속 요청을 실제 전송할 때는 원 Memo
+revision과 anchor를 새 context 후보로 검증한다. 정확한 작성·mention·편집·삭제 UI와
+지속 범위는 `Q-MEDIA-06`, `Q-MEDIA-13`에서 남는다.
 
 일부 rendering 실패가 Answer 전체를 지워서는 안 된다. Canvas rendering이 실패하면
 Chat은 Answer를 유지하고 다시 rendering할 수 있게 한다. Chat rendering이 실패하면
@@ -510,9 +530,28 @@ browser 또는 computer-use 관찰
 ```
 
 Canvas 배치, viewer rendering, 상호작용 가능한 runtime session은 서로 다른
-수명주기다. 중요한 공개 활동에는 observation·provenance와 선택적인 resource/session
-reference를 가진 가벼운 latent Canvas node를 즉시 만들 수 있다. 무거운 Browser·
-Terminal·editor·File Viewer rendering은 화면에 보이거나 사용자가 열 때만 mount한다.
+수명주기다. 사용자 또는 Agent의 의미 있는 active·sleeping·historical-snapshot 작업에는
+observation·provenance와 선택적인 resource/session reference를 가진, Canvas에서 다시
+찾을 수 있는 node가 항상 있어야 한다. 숨은 registry에만 작업을 남겨서는 안 된다.
+
+```text
+Canvas projection state
+  active               renderer와 runtime이 사용 가능
+  sleeping             상태가 명시되고 wake 조건을 가짐
+  snapshot-only        live runtime 없이 역사적 observation만 보존
+
+renderer attachment
+  mounted              현재 그릴 수 있음
+  detached             무거운 renderer만 제거, Canvas node·상태·binding은 유지
+
+runtime lifecycle
+  live / suspended / ended / unavailable
+```
+
+이 세 축은 독립적이다. Canvas viewport 밖으로 pan됐다는 사실은 `sleeping`, `detached`,
+`suspended` 또는 `ended` 전이가 아니다. 메모리 압력과 resource policy에 따라 무거운
+Browser·Terminal·editor·File Viewer renderer는 detach하고 화면에 들어올 때 다시 mount할
+수 있지만, 사용자는 그 사이에도 node의 위치·상태·snapshot을 찾을 수 있어야 한다.
 불변 snapshot을 보존하려고 완전히 rendering된 숨은 Desktop을 계속 유지할 필요는 없다.
 content-addressed·chunked·compressed storage는 불변 identity와 lineage를 검사 가능하게
 유지하면서 같은 snapshot data를 중복 제거할 수 있다. 승인된 지속 Browser 또는 PTY
@@ -538,10 +577,15 @@ report set은 전체 tool trace의 복사본이 아니지만, 선별 과정에�
 
 ## 5. 여러 Agent가 참여하는 공유 대화 context
 
-EG-Desk에는 group chat 또는 thread와 비슷한 상호작용 형태를 가지되 명시적인 EG-Desk
-context의 지배를 받는 작업 범위 공유 대화 기능이 필요하다. 최종 제품에서 이를 일반
-Thread, Agenda 연결 대화, 다른 Chat 관계 또는 이름 붙은 Agenda Thread 중 무엇으로
-표현할지는 이 계약이 고정할 객체가 아니라 미결정 object/UI 결정이다.
+사람에게 보이는 기본 Chat 관계는 Agent/persona별 담당자 방이다. 방의 상대 정체성은
+Agent Profile이 제공하지만, 방 history·Profile revision·실제 Agent Runtime·Run과 모델
+context는 서로 다른 identity와 수명주기를 가진다. 같은 담당자에게 여러 업무를 맡길 때
+history를 어떤 section·filter·업무 reference로 구분할지는 미결정 UI다.
+
+EG-Desk에는 이 기본 관계와 별도로 group chat 또는 thread와 비슷한 상호작용 형태를
+가지되 명시적인 EG-Desk context의 지배를 받는 작업 범위 공유 대화 기능이 필요하다.
+최종 제품에서 이를 workroom, 일반 Thread, Agenda 연결 대화 또는 다른 Chat relation 중
+무엇으로 표현할지는 이 계약이 고정할 객체가 아니라 미결정 object/UI 결정이다.
 
 선택된 형태는 권한이 허용할 때 다음을 표현할 수 있어야 한다.
 
@@ -552,13 +596,18 @@ Thread, Agenda 연결 대화, 다른 Chat 관계 또는 이름 붙은 Agenda Thr
 - 내부 integration 역할을 제품 참가자로 만들지 않으면서 제한된 contribution을
   종합하는 integration result
 
-Agent DM에서 공유 대화로 옮긴다고 전체 DM history가 자동 공개되지는 않는다. System은
-공유 작업에 필요한, 사용자가 선택한 대화와 context만 연결하거나 복사한다. 정확한
-생성·열기·공유·재진입 UI는 Atlas 질문으로 남는다.
+Agent 담당자 방에서 공유 대화로 옮긴다고 방 전체 history가 자동 공개되지는 않는다.
+System은 공유 작업에 필요한, 사용자가 선택하거나 정책상 명시된 메시지·Memo reference·
+context만 연결하거나 복사한다. Agent끼리 위임한 대화와 진행 상태를 사용자에게 보여
+주는 workroom/supervision 화면도 담당자 방의 raw 내부 대화를 그대로 노출하지 않고
+contributor·범위·Task 상태·evidence·integration result를 Canvas 정본과 연결해야 한다.
+정확한 대화 관계는 [HUM-CONV-001](../../docs/codex/egdesk-product-interaction-trace-atlas-editorial-ledger.md#hum-conv-001),
+생성·열기·공유·재진입 UI는 [Q-AI-12](../../docs/codex/egdesk-product-documentation-governance.md#atlas-q-ai-12)와
+관련 `Q-COL-*` 세부 항목에서 미결정으로 남는다.
 
 <a id="tech-coding-surface"></a>
 
-## 6. 코딩 표면과 기술 조사
+## 6. 사람 중심 코딩 표면
 
 Terminal access는 Agent execution substrate이자 선택적인 expert/debug 표면이다.
 필수적인 주 코딩 UX가 아니다.
@@ -576,21 +625,11 @@ run·build·test·review 결과
 Agent는 이 view 뒤에서 shell·PTY·language server·build tool과 다른 adapter를 사용할
 수 있다.
 
-단순하지 않은 기술 기능을 설계하기 전에 Agent system은 다음 절차를 따른다.
-
-```text
-PM이 제품 vision 적합성·사용자 결과·acceptance·조사 필요성을 framing
--> WM이 현재 source·dependency·local references library를 mapping
--> research가 최신 공식 문서와 활성 reference implementation을 비교
--> 재사용 후보를 dependency 사용·protocol 호환·pattern 적용·code porting·inspiration으로 분류
--> license·security·maturity·integration cost·lock-in 검사
--> 구현 Agent가 제품 계약 안에서 방법 선택
--> integration 기능이 범위가 제한된 contribution을 합치고 conflict 관리
--> 독립 reviewer가 동작과 evidence 검증
-```
-
-조사가 부족하면 기술 선택을 `research pending`으로 표시해야 한다. 자체 framework를
-즉석에서 발명할 이유가 되지는 않는다.
+File view의 재진입 상태는 사용자가 다시 입력할 위치와 단순 관찰 위치를 구분한다.
+System은 resource locator·revision, scroll/visible range와 명시적으로 고정한
+annotation/range를 복원할 수 있지만 active caret, keyboard focus, transient text
+selection 또는 깜빡이는 cursor 위치는 복원하지 않는다. renderer가 다시 mount될 때
+이 일시 입력 상태를 새 focus처럼 재생해서는 안 된다.
 
 <a id="tech-terminal-runtime"></a>
 
@@ -628,6 +667,10 @@ process reconnection과 process revive는 서로 다른 주장이다. EG-Desk가
 
 detachable runtime의 보이는 Desk Window를 닫거나 분리해도 process를 말없이 죽여서는
 안 된다. process termination은 실행 전 대상과 영향이 보이는 별도의 파괴적 action이다.
+다만 process를 유지한다면 Canvas에는 그 process의 소유자·상태·재연결 행동을 나타내는
+다른 projection이 반드시 남아야 한다. 보이는 Terminal만 제거한 채 hidden registry에서
+process를 계속 돌리지 않는다. Agenda 전체를 닫을 때는 §1의 ownership 규칙에 따라 그
+Agenda만 소유한 process를 종료하고, 다른 projection이 함께 소유한 process만 유지한다.
 revive/relaunch가 새 shell·working directory·environment·이전 output snapshot을
 복원할 수는 있지만, 이전의 임의 foreground command를 자동 재실행해서는 안 된다.
 선언된 idempotent Task 재개는 Terminal view 복원이 아니라 scheduler policy에 속한다.
@@ -838,13 +881,16 @@ capability·availability·permission·approval·execution·success는 서로 다
 
 Profile 편집이나 provider·model·tool·Memory·policy·credential·authority·Ontology
 binding 변경은 active 또는 과거 Run을 변경하지 않는다. continue·retry·resume·new
-attempt·fork·stop은 이전 snapshot을 보존하고, 미결정 Atlas 상호작용 질문이 정한
-관계를 새로 만들어야 한다. Chat과 Canvas는 이 binding의 안전한 summary를 projection할
+attempt·fork·stop은 이전 snapshot을 보존하고, [HUM-RUN-001](../../docs/codex/egdesk-product-interaction-trace-atlas-editorial-ledger.md#hum-run-001)과
+[Q-AGENT-14](../../docs/codex/egdesk-product-documentation-governance.md#atlas-q-agent-14)가 정할 관계를 새로 만들어야 한다.
+Chat과 Canvas는 이 binding의 안전한 summary를 projection할
 수 있지만 Chat record가 Runtime이나 전체 snapshot인 것은 아니다. secret value·숨은
 chain-of-thought·제한 없는 raw system prompt는 필수 제품 disclosure가 아니다.
 
 정확한 object name·ownership scope·editable field·precedence UI·inspection control·
-recovery control·사용자에게 보이는 detail은 Atlas 질문으로 남는다. 그 미결정 세부가
+recovery control·사용자에게 보이는 detail은 [HUM-RUN-001](../../docs/codex/egdesk-product-interaction-trace-atlas-editorial-ledger.md#hum-run-001)의
+제품 의미와 [Q-AGENT-01](../../docs/codex/egdesk-product-documentation-governance.md#atlas-q-agent-01)–[Q-AGENT-14](../../docs/codex/egdesk-product-documentation-governance.md#atlas-q-agent-14)의
+관련 세부 항목에서 미결정으로 남는다. 그 미결정 세부가
 위의 binding·non-escalation·immutability boundary를 다시 열지는 않는다.
 
 <a id="tech-engine-profile"></a>
@@ -987,7 +1033,7 @@ Agent activity·input ownership·approval state·failure cause를 색·움직임
 
 ## 인수 증거
 
-UI가 존재하거나 문서에 서술됐다는 이유만으로 기능이 완료된 것은 아니다. acceptance에는
+UI가 존재하는 것만으로 기능 완료가 성립하지 않는다. acceptance에는
 다음 증거가 필요하다.
 
 - 완전한 interaction trace
