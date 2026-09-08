@@ -1,5 +1,7 @@
 # EG-Desk 가상 사용설명서와 제품 상호작용 Atlas
 
+**문서 목차**: [읽는 목적별 안내](../../docs/README.md#docs-start)
+
 **문서 역할**: EG-Desk를 켠 뒤 사용자가 실제로 보는 화면, 누르는 UI, 입력하는 값, 즉시 보이는 반응과 다음 행동을 정의하는 사용자 매뉴얼·UI 행동 정본  
 **기술 구현 정본**: [EG-Desk 기술 구현·상호작용·오케스트레이션 계약](./EGDESK_INTERACTION_AND_ORCHESTRATION_CONTRACT.md#tech-contract-top)  
 **설계 gap·사용자 질문 정본**: [EG-Desk 설계 Gap 및 사용자 확인 원장](../../docs/codex/egdesk-product-interaction-trace-atlas-editorial-ledger.md#gap-owner-queue)
@@ -55,6 +57,9 @@ Agent Runtime --request/tool intent--> System --validated UI/state change--> Des
 - 기본 제품 모델에는 하나의 Desk와 그 Desk에 속한 하나의 Canvas가 있다. 여러
   Saved Agenda를 같은 Canvas에 서로 독립된 projection으로 동시에 열 수 있으며,
   Agenda를 연다고 기존 내용을 교체하거나 새 Desk를 만들지 않는다.
+- 하나의 Desk·Canvas는 물리 PC 한 대를 뜻하지 않는다. 같은 Agenda에서 여러 PC의
+  자료와 실행을 연결할 수 있으며, 폴더는 그중 하나의 자료 위치다. 각 작업에서는
+  실행하는 PC·대상·계정·마지막 확인 상태를 구별할 수 있다.
 - **Chat, Browser, File/View**는 Canvas 위에 놓일 수 있는 제품 요소다. Chat이
   특정 Agent/persona와 관계를 이어 가는 방으로 보일 수 있지만, Agent 실행체가
   Chat 안에 살거나 대화 기록 전체가 모델 context라는 뜻은 아니다.
@@ -439,7 +444,7 @@ runtime을 종료하며 Saved Agenda는 보존한다. 이름 변경, 보관, 삭
 | ---: | --- | --- | --- | --- | --- | --- |
 | 1 | 저장된 Agenda 행의 행동 메뉴를 연다; 정확한 트리거와 접근성 레이블: `Q-AG-09` | 사용 가능한 수명주기 행동과 사용할 수 없는 이유: `Q-AG-09` | System이 Agenda를 식별한다. | 없음 | 변경 없음 | 메뉴 닫기/포커스 복귀: `Q-UX-02` |
 | 2 | `Q-AG-09`를 통해 이름 변경 컨트롤을 활성화하고 제목을 편집한 뒤 확정/취소한다 | 인라인 편집기 또는 대화상자, 유효성 검사 및 저장된 이름 피드백은 `Q-AG-09`에서 정의한다 | System은 Agenda 메타데이터만 업데이트한다. | 없음 | Agenda의 동일성은 유지되며, 제목은 변경될 수 있음 | 실패 시 이전 제목과 편집 가능한 입력이 유지된다 |
-| 3 | `Q-AG-19`를 통해 `[Agenda 닫기]`, 다시 열기 또는 보관 행동을 활성화한다 | 닫기를 선택하면 해당 Agenda 영역이 Canvas에서 사라지고 Saved Agenda 행은 Sidebar에 남는다. 실행 중인 전용 runtime과 공유 runtime의 영향은 행동 전에 구분되어 보인다 | 닫기에는 projection 제거와 그 Agenda만 소유한 runtime 종료를 적용한다. 다른 Agenda나 view가 함께 소유한 runtime은 그 소유 projection과 함께 유지한다. 보관은 `Q-AG-11`에서 정한 별도 상태만 적용한다 | 없음 | 닫힌 Agenda는 저장된 상태로 남고 전용 runtime은 종료됨; 공유 runtime과 보관 상태는 각 소유권·정책을 따름 | 정확한 영향 미리보기·다시 열기·보관 해제·실패·포커스·실행 취소 컨트롤: `Q-AG-11`, `Q-AG-19` |
+| 3 | `Q-AG-19`를 통해 `[Agenda 닫기]`, 다시 열기 또는 보관 행동을 활성화한다 | 전용·공유 runtime의 영향을 확인할 수 있다. 닫는 동안에는 종료 진행 상태가 남고, 종료가 확인되면 해당 Agenda 영역이 사라지며 Saved Agenda 행은 Sidebar에 남는다 | 전용 runtime의 새 행동·자동 재개를 막고 종료한다. 종료 확인 후 projection을 제거하고 다른 Agenda나 view가 소유하는 shared runtime은 그 표현과 함께 유지한다. 보관은 별도 정책을 따른다 | 전용 작업에 더 이상 새 행동을 요청하지 않는다 | 전용 runtime 종료가 확인돼야 닫힘이 된다. 종료 실패·상태 불명은 표시를 유지한다 | 이미 외부에 접수된 행동이 닫기로 취소되지는 않는다. 정확한 영향·실패·포커스·다시 열기 UI는 `Q-AG-11`, `Q-AG-19` |
 | 4 | `Q-AG-20`을 통해 삭제/확인/취소를 활성화한다; 삭제의 의미는 `Q-AG-12`를 따른다 | 범위, 유지되는 기반 리소스, 참조 및 영구성이 명시된다 | System은 확인 성공 후 결정된 Agenda 기록만 삭제한다 | 없음 | 영속적 Agenda가 제거될 수 있음 | 취소/실패/복구 경로: `Q-AG-20` |
 | 5 | `Q-AG-12`에서 복구를 지원하는 경우 `Q-AG-20`을 통해 정확한 컨트롤을 활성화한다 | 복원된 행과 완료 피드백이 나타난다 | System은 유지된 Agenda 기록을 복원한다. | 없음 | 영속적 상태가 복원됨 | 복구를 지원하지 않는 경우 삭제 전에 파괴 작업의 영구성을 명시한다 |
 
@@ -484,13 +489,18 @@ Canvas viewport 밖으로 pan된 뷰는 닫힘이나 sleep 상태가 아니다. 
 lifecycle은 가시성만으로 결정하지 않으며, 무거운 renderer를 분리하는 경우에도
 Canvas에는 해당 view를 다시 찾고 상태를 식별할 수 있는 가벼운 표현이 남는다.
 
+탭/view bar를 두 번 누르는 집중 보기는 기존 가로세로 비율을 유지하며 화면상 대상을
+확대한다. 일반 resize와 구별하며, 집중 보기에서 Browser 내부 viewport도 변경할지와
+원래 시점으로 돌아오는 세부 동작은 `Q-VIEW-06`, `Q-VIEW-12`에 남는다.
+사용자의 Canvas pan·zoom과 다른 view 선택은 Agent가 작업 중인 대상을 바꾸지 않는다.
+
 | 작업 | 제품 사용자 UI 행동 | 보이는 반응 | System 처리 | Agent 처리 | 상태 변화 | 경계 / 다음 행동 |
 | --- | --- | --- | --- | --- | --- | --- |
 | 이동 | 결정된 이동 대상을 시작 위치에서 끝 위치까지 드래그한다: `Q-VIEW-04` | 뷰가 포인터를 따라가고 최종 Canvas 위치에 자리 잡는다 | System이 활성 뷰/세션 지오메트리를 업데이트한다. | 없음 | Agenda는 명시적으로 저장/업데이트한 경우에만 변경됨 | 충돌, 스냅, Canvas 밖, 키보드 대안: `Q-VIEW-04` |
 | 크기 조절 | 결정된 크기 조절 핸들을 드래그하거나 키보드 행동을 사용한다: `Q-VIEW-04` | 크기 미리보기와 최종 경계가 나타난다 | System이 활성 뷰/세션 지오메트리를 업데이트한다. | 없음 | Agenda는 변경되지 않음 | 최소/최대/종횡비 동작: `Q-VIEW-04` |
 | 그룹화 | `Q-VIEW-10`에서 정의한 다중 선택/그룹화 또는 그룹 해제 상호작용을 수행한다 | 그룹 구성 관계가 `Q-VIEW-10`에 따라 가시적으로 표현된다 | System이 세션 그룹화를 업데이트한다. | 없음 | 영속성, 중첩 및 Agenda 관계는 `Q-VIEW-05`를 따름 | 그룹 의미/정책: `Q-VIEW-05`; 정확한 상호작용/실패: `Q-VIEW-10` |
 | 포커스 | `Q-VIEW-04`에 따라 뷰를 클릭하거나 키보드로 포커스한다 | 포커스와 입력 소유권이 선택 상태와 시각적으로 구분된다 | System이 포커스/입력을 전달한다. | 없음 | 런타임 포커스가 변경됨 | Browser/편집기/Terminal 단축키 소유권: `Q-VIEW-04` |
-| 최대화 | `Q-VIEW-12`를 통해 최대화/전체 화면/복원을 활성화한다 | 뷰는 `Q-VIEW-06`에서 결정한 프레젠테이션 모드를 사용한다; 복귀 컨트롤과 포커스 상태는 `Q-VIEW-12`를 따른다 | System은 프레젠테이션 지오메트리를 저장하고 선택된 모드만 적용한다. | 없음 | 프레젠테이션 상태가 변경되며, 저장된 지오메트리는 복구 가능함 | 의미/UI 크롬/헤드업 디스플레이/복원 정책: `Q-VIEW-06`; 정확한 상호작용: `Q-VIEW-12` |
+| 집중 보기·최대화 | 탭/view bar를 두 번 눌러 비율을 유지한 집중 보기를 연다. 나머지 최대화/전체 화면/복원 입력은 `Q-VIEW-12`를 따른다 | 대상이 기존 비율을 유지하며 확대된다. 원래 시점으로 돌아갈 수 있고, 다른 전체 화면 모드와의 관계는 `Q-VIEW-06`을 따른다 | System은 기존 프레젠테이션 지오메트리를 보존하고 집중 보기의 확대를 적용한다 | 없음 | 프레젠테이션 상태가 변경되며 저장된 지오메트리는 복구 가능함 | Browser 내부 viewport·layout 영향과 유지되는 UI는 `Q-VIEW-06`; 복귀·키보드 경로는 `Q-VIEW-12` |
 | 닫기 | `Q-VIEW-13`을 통해 뷰 닫기 컨트롤과 필요한 확인을 활성화한다 | 뷰가 닫히거나, 미저장 상태 또는 차단 사유가 보이는 채로 유지된다 | System은 결정된 닫기 경로가 끝난 후에만 뷰를 제거하고 연속성 상태를 업데이트한다. | 없음 | 리소스와 저장된 Agenda는 `Q-VIEW-07`을 따르며, 포커스는 `Q-VIEW-13`을 따름 | 리소스/런타임/Agenda 의미: `Q-VIEW-07`; 확인/실패/포커스 복귀: `Q-VIEW-13` |
 
 **완료 증거**: 최종 뷰 지오메트리, 그룹화, 포커스, 최대화 또는
@@ -711,15 +721,15 @@ Chat이나 대화를 열었다는 이유만으로 Agent 작업이 시작되지�
 
 **기술 참조**: [Effective Run binding](./EGDESK_INTERACTION_AND_ORCHESTRATION_CONTRACT.md#tech-agent-run-binding), [Identity planes](./EGDESK_INTERACTION_AND_ORCHESTRATION_CONTRACT.md#tech-engine-profile)
 
-**제품 전제**: 한 Run의 유효 구성은 Profile 한 개로 결정되지 않는다. System은 실제 제품 사용자 요청·위임, 대화 context, Profile revision의 instructions·personality, System·provider policy, 실제 사용 Memory revision, 현재 tool/model 가용성, 계정·리소스 권한, credential binding, 승인, Ontology version, budget·sandbox를 결합한다.  
+**제품 전제**: 한 Run의 유효 구성은 Profile 한 개로 결정되지 않는다. System은 실제 제품 사용자 요청·위임, 대화 context, Profile revision의 instructions·personality, System·provider policy, 실제 사용 Memory revision, 현재 tool/model 가용성, 계정·리소스 권한, credential binding, 승인, Ontology version, budget·sandbox를 결합한다. 첫 호출 뒤에도 새 자료와 사용자 조정은 같은 Run의 다음 모델 호출에 반영되며, 이전 호출이 받은 내용은 이력으로 남는다.
 **명세 상태**: 미결정 항목 있음  
 **시작 상태**: 전송 가능한 요청 초안과 선택되거나 자동 지정된 Agent Profile revision이 있지만, 아직 유효한 Run configuration snapshot은 없다.
 
 | # | 제품 사용자 UI 행동 | 즉시 보이는 반응 | System 처리 | Agent 처리 | 상태 변화 | 경계 및 다음 UI 행동 |
 |---:|---|---|---|---|---|---|
-| 1 | `Q-AI-02`의 전송/실행 컨트롤을 활성화한다 | 수락된 요청과 결합 중인 Agent/Profile, context, effective instruction, Memory, model/tool 가용성, 권한 또는 승인 대기 상태가 `Q-AGENT-12`, `Q-AGENT-18`에서 정한 수준으로 보인다 | System은 요청 시점의 제품 사용자 요청, 대화 context, Profile revision, 실제 적용할 instruction·personality·policy, Memory revision과 나머지 결합 입력을 고정해 검증한다 | 유효 결합이 완료되기 전에는 없음 | Run 후보와 configuration snapshot 후보가 생긴다 | 필수 model/tool/Profile이 유효하지 않으면 `Q-AGENT-04`, `Q-AGENT-20`의 수정·대체·대기·중지 UI로 이동한다 |
+| 1 | `Q-AI-02`의 전송/실행 컨트롤을 활성화한다 | 수락된 요청과 결합 중인 Agent/Profile, context, effective instruction, Memory, model/tool 가용성, 권한 또는 승인 대기 상태가 `Q-AGENT-12`, `Q-AGENT-18`에서 정한 수준으로 보인다 | System은 요청과 시작 조건을 기록하고, 적용되는 조직·Desk·Agent 정책에서 현재 Ontology 참조와 필요한 내용을 조회해 첫 호출의 입력을 검증한다 | 첫 호출 입력의 유효 결합이 완료되기 전에는 없음 | Run 후보와 첫 호출 configuration snapshot 후보가 생긴다 | 사용자가 Ontology revision 번호를 직접 입력할 필요는 없다. 필수 model/tool/Profile이 유효하지 않으면 `Q-AGENT-04`, `Q-AGENT-20`의 수정·대체·대기·중지 UI로 이동한다 |
 | 2 | 필요한 경우 `Q-AI-11`, `Q-AGENT-06`, `Q-AGENT-07`, `Q-AGENT-13`의 context/구성 검사 컨트롤로 포함 범위를 줄이거나 허용된 override를 선택하고 확정한다 | 제품 사용자 요청, 대화 context, Profile instructions·personality, System policy의 적용 순서, 실제 포함 Memory revision과 포함 이유, 활성 tool, 실제 권한, approval gate, Ontology version, budget가 서로 다른 항목으로 표시된다 | System은 결정된 우선순위와 교집합을 다시 계산해 불변 configuration snapshot을 생성한다 | 없음 | 유효한 Run configuration revision이 생성된다 | `capability ∩ 현재 가용성 ∩ 작업 위임 ∩ 계정·리소스 권한 ∩ 유효 승인 ∩ 실행 제약` 밖의 행동은 활성화되지 않는다 |
-| 3 | 없음 — 유효한 결합이 준비되면 실행된다. 사용자는 `Q-AI-02`로 중지할 수 있다 | Run 상태, 사용 중인 request/Profile/config/Memory revision과 제한 사유가 결정된 노출 수준으로 보인다 | System은 Run을 예약하고 상태 전환을 기록한다 | Agent 실행체가 snapshot에 고정된 요청·context·effective instruction·Memory·model·tool·제약 안에서 추론한다 | Run이 queued/running/waiting 중 하나로 전환된다 | Agent는 Profile, prompt, personality를 근거로 권한을 스스로 넓힐 수 없다 |
+| 3 | 없음 — 유효한 결합이 준비되면 실행된다. 사용자는 같은 Chat에서 추가 지시를 전송하거나 `Q-AI-02`로 중지할 수 있다 | Run 상태와 적용 중인 요청·구성이 보이고, 추가 지시가 수신됐는지 다음 호출에 반영됐는지 구분된다. 정확한 표시는 `Q-AGENT-18`을 따른다 | System은 Run을 예약한다. 도구 결과·사용자 조정·새 관찰을 다음 모델 호출의 context revision에 포함하고 호출별 실제 입력을 기록한다 | Agent는 해당 호출이 받은 자료와 제약을 사용해 같은 Run의 계획·후속 행동을 조정한다 | Run을 유지하며 호출별 context revision이 추가된다 | 일반적인 자료 변화에는 중지나 새 attempt를 요구하지 않는다. Profile, prompt, personality는 권한을 넓히지 못한다 |
 | 4 | Agent가 제안한 행동이 별도 검토 대상이면 `Q-AGENT-05`에서 정할 행동 검토 진입 컨트롤을 열고, 대상·계정·예상 효과를 확인한 뒤 `허용`, `거부` 또는 `취소` 컨트롤을 활성화한다. 위임 범위 안의 일반 행동에는 추가 클릭을 요구하지 않는다 | 대상 리소스, 정확한 행동, 입력 소유자, credential/account context, 예상 외부 효과, 승인 필요 사유와 선택 결과가 보인다 | System은 각 tool 요청 시점에 snapshot과 현재 권한·가용성·철회 상태를 다시 검증하고 credential은 비밀값이 아닌 관리되는 binding으로 전달한다 | Agent는 허용된 tool 요청만 제출하고 거부·취소 결과를 다음 계획에 반영한다 | 허용된 행동만 실행 상태가 되고, 거부·취소는 감사 가능한 상태로 남는다 | 검토 화면 열기 실패, 실행 실패, 재시도, 원 대상 포커스 복귀와 재진입은 `Q-AGENT-05`; 새 credential·외부 범위·비용·배포·민감 데이터 전송은 `A-AUTH-01`–`A-AUTH-03` |
 | 5 | 완료·부분 완료·실패 후 `Q-AGENT-11`, `Q-AGENT-12`, `Q-AGENT-18`의 실행 세부정보/증거 진입 컨트롤을 활성화한다 | 사용한 Profile/config revision, provider/model, tool, context·Ontology revision, 권한 결정, handoff, 출력과 독립 증거가 서로 구분되어 보인다 | System은 정해진 감사·보존 규칙으로 기록을 투영한다 | Agent는 결과와 evidence candidate를 제출할 수 있으나 자신의 성공을 인증하지 않는다 | Run은 completed/partial/failed/stopped 중 하나가 된다 | 클릭, spinner, API 응답 또는 Agent 보고만으로 외부 효과 성공을 주장하지 않는다 |
 
@@ -728,11 +738,11 @@ Chat이나 대화를 열었다는 이유만으로 Agent 작업이 시작되지�
 <a id="atlas-agent-03"></a>
 #### AGENT-03. model·tool·Profile 변경 뒤 Run 재시도·재개·분기
 
-**기술 참조**: [Run snapshot 불변성](./EGDESK_INTERACTION_AND_ORCHESTRATION_CONTRACT.md#tech-agent-run-binding), [장애 경계](./EGDESK_INTERACTION_AND_ORCHESTRATION_CONTRACT.md#tech-failure-boundaries)
+**기술 참조**: [호출별 기록과 Run 조정](./EGDESK_INTERACTION_AND_ORCHESTRATION_CONTRACT.md#tech-agent-run-binding), [장애 경계](./EGDESK_INTERACTION_AND_ORCHESTRATION_CONTRACT.md#tech-failure-boundaries)
 
-**제품 전제**: 실행 중 또는 실패한 Run을 조용히 다른 구성으로 계속하면 동일성과 재현성이 무너진다. retry, resume, fork, checkpoint 및 새 요청은 서로 다른 상태 전환이다.  
+**제품 전제**: 도구가 새 자료를 읽거나 사용자가 같은 업무의 방향을 조정하면 다음 모델 호출에 반영한다. 이 흐름은 별도의 전환 확인을 요구하지 않는다. 아래 trace는 실제 실행 실패, Engine·Profile 전환 또는 권한·대상 충돌 때문에 재시도·재개·분기 결정을 해야 하는 경우에 적용된다.
 **명세 상태**: 미결정 항목 있음  
-**시작 상태**: Run이 진행 중이거나 waiting/failed/stopped 상태이고, model/provider/tool/Profile/context/Ontology/권한 중 하나가 변경되었거나 더 이상 가용하지 않다.
+**시작 상태**: Run이 진행 중이거나 waiting/failed/stopped 상태이고, 기존 구성으로 실행할 수 없거나 사용자가 Engine·Profile·업무 분기를 바꾸려 한다. 일반적인 context·Ontology 관찰 갱신만 있는 경우는 `AI-02`의 같은 Run 조정으로 이어진다.
 
 | # | 제품 사용자 UI 행동 | 즉시 보이는 반응 | System 처리 | Agent 처리 | 상태 변화 | 경계 및 다음 UI 행동 |
 |---:|---|---|---|---|---|---|
@@ -759,6 +769,16 @@ Chat이나 대화를 열었다는 이유만으로 Agent 작업이 시작되지�
 | 3 | 복구 뒤 `Q-AGENT-20`의 `결과 확인` 컨트롤로 같은 view/Run의 상태·결과·증거 검증 화면을 다시 연다 | 반복 가능한 성공 또는 여전히 실패/부분 복구/원인 미확정인 상태와 다음 행동, 원 대상 복귀 컨트롤이 표시된다 | System은 마지막 검증 상태와 복구 시도를 기록하고 독립적인 성공 증거가 있는 경계만 복구됨으로 전환한다 | Agent는 재개된 configuration/context에 결합된 경우에만 계속한다 | 검증된 경계만 recovered가 되고 나머지는 기존 상태를 유지한다 | 검증 화면 실패·새로고침·재시도·원 view/Run 포커스 복귀·재진입은 `Q-AGENT-20`; 한 번의 렌더링만으로 전체 복구를 주장하지 않는다 |
 
 **완료 증거**: 어떤 경계가 실패했고 어떤 경계가 정상인지, 마지막 확인 시점과 복구 행동, 동일 process/새 process/snapshot 여부를 확인할 수 있다. 원인이 확인되지 않으면 그대로 남으며, 영향을 받지 않은 작업과 산출물은 보존된다.
+
+여러 PC 중 하나와 연결이 끊기면 해당 작업의 마지막 확인 상태·시점·이미 받은 결과는
+남는다. `중지`를 요청해도 종료 확인을 받기 전까지 그 작업은 종료 확인 대기 상태로
+보이며, 다른 PC에서 진행 중인 독립 작업은 계속 확인하고 조정할 수 있다. 연결이
+돌아오면 동일 실행과 결과를 대조한다. 아직 결과를 받지 못했다는 이유로 같은 발송·
+제출·파일 변경을 다른 PC에서 다시 실행하지 않는다.
+
+부분 완료에서는 검증된 산출물과 아직 필요한 작업이 함께 보인다. 복구 상세를 닫으면
+시작한 작업으로 돌아오며, 다른 업무의 초안·선택 대상은 바뀌지 않는다. 이미 허용된
+범위의 자동 재검사·연결 복구는 상세 화면을 열거나 별도 승인을 누를 때까지 기다리지 않는다.
 
 <a id="atlas-ai-01"></a>
 #### AI-01. 인공지능 요청 제출하기
@@ -799,8 +819,8 @@ Read의 raw capture·Context Packet·실제 Agent 전달 payload가 각자의 �
 | # | 제품 사용자 UI 행동 | 즉시 보이는 반응 | System 처리 | Agent 처리 | 상태 변화 | 경계 및 다음 UI 행동 |
 | ---: | --- | --- | --- | --- | --- | --- |
 | 1 | Chat 작성기 위의 요청 컨텍스트 영역에서 검사할 context item을 `Click`한다. 빠르게 빼려면 해당 item의 `Click [× 제거]`를 사용하며 표시 정책은 `Q-AI-03`을 따른다 | context 검사 화면에는 포함·제외된 resource, 선택 이유, 이 요청에 적용되는 범위와 항목별 `[이 요청에서 포함/제외]`, `[적용]`, `[취소]`가 보인다. 빠른 제거를 사용하면 item이 즉시 초안 영역에서 사라진다 | System은 범위가 한정된 context snapshot을 공개한다. | 실행 또는 재개 전까지 없음. | 초안 컨텍스트만 변경된다 | 행동 주체는 제품 사용자다. `[Esc]` 또는 `[취소]`는 작성기와 기존 초안으로 포커스를 돌리며 민감하거나 이용할 수 없는 컨텍스트는 암묵적으로 추가되지 않는다 |
-| 2 | 제품 사용자가 context item별 `[이 요청에서 포함/제외]`를 바꾸거나 `[대상 추가]`, Agenda 연결 변경, 권한 축소를 실행한 뒤 `Click [적용]` 또는 `Click [취소]` 한다 | `[적용]`하면 요청 컨텍스트 영역의 item·선택 이유·범위가 갱신되고, `[취소]`하면 이전 draft와 작성기 포커스가 유지된다 | System은 작업 컨텍스트를 다시 검증한다. | 확정 후 재개되기 전까지 없음. | 확정할 때만 새 컨텍스트 스냅샷이 생성된다 | 실행이 이미 시작된 경우 재시작/계속 의미 체계: `Q-AI-05` |
-| 3 | `Q-AI-05`에서 선택한 전송/재개/재시작 행동을 `Q-AI-02`의 컨트롤 계약을 통해 활성화한다 | 작업이 개정된 컨텍스트에 결합되어 있음이 명확히 보인다 | System은 context revision을 기록하고 선택한 전송·재개·재시작 전환에 결합한다. | Agent는 전송 또는 재개 후 개정되고 범위가 한정된 context만 사용한다. | Agent는 개정되고 범위가 한정된 컨텍스트만 사용한다 | 완료 시 어떤 컨텍스트 개정으로 결과가 생성되었는지 보여 준다 |
+| 2 | 제품 사용자가 context item별 `[이 요청에서 포함/제외]`를 바꾸거나 `[대상 추가]`, Agenda 연결 변경, 권한 축소를 실행한 뒤 `Click [적용]` 또는 `Click [취소]` 한다 | `[적용]`하면 요청 컨텍스트 영역의 item·선택 이유·범위가 갱신된다. 실행 중이면 조정 수신·반영 상태를 확인할 수 있고, `[취소]`하면 편집 전 draft와 작성기 포커스가 유지된다 | System은 범위를 다시 검증한다. 실행 중 변경은 같은 Run의 다음 모델 호출에 연결하고 이미 전달된 입력은 이력으로 보존한다 | 다음 호출에서 새 범위를 사용해 후속 행동을 조정한다 | 같은 Run 안에 새 context revision이 추가된다 | 제외는 과거 전달 취소가 아니다. 앞으로의 사용을 제한하고 권한·진행 중 행동 충돌이 있으면 해당 행동만 재검증한다. 세부 표시는 `Q-AI-05` |
+| 3 | 진행 중인 업무의 Chat 작성기에 추가 지시를 입력하고 `Q-AI-02`의 전송 컨트롤을 활성화한다 | 추가 메시지와 그 업무에 대한 조정 수신 여부가 나타나고, 반영 후에는 어떤 지시를 적용했는지 확인할 수 있다 | System은 가능한 가장 이른 다음 모델 호출에 조정을 넣는다. 이미 진행 중인 모델 호출이 새 메시지를 받았다고 표시하지 않는다 | 같은 Run의 다음 호출에서 새 지시를 반영해 계획·행동을 조정한다 | 새 Run이나 attempt 없이 호출별 입력과 결과 연결이 추가된다 | 의도적인 새 업무·분기와 실제 재시도는 별도 행동이다. 정확한 수신·반영 표시는 `Q-AI-05`, `Q-AGENT-18` |
 
 **완료 증거**: 결과 작업/답변에서 Agent가 사용한 정확한 컨텍스트 개정을
 검사할 수 있으며, 여기에는 어떤 Agenda, 일시적 레이아웃/그룹, 보이는 리소스
@@ -857,7 +877,7 @@ coverage, 원본 snapshot, 최종 Answer가 한 lineage로 연결되며 어느 �
 |---:|---|---|---|---|---|---|
 | 1 | 일반적으로는 없음 — 요청 담당 Agent가 현재 업무에 필요한 추가 읽기를 요청한다. 사용자가 직접 바꾸려면 읽기 세부정보에서 추천 기본안 `Click [읽기 방향 수정]` → `Type "표현보다 계약 조건을 우선해 다시 봐줘"` → `Click [적용]` 한다. | 기존 Reader Session ID와 packet revision, 새 read intent, `원문에서 다시 검토` 상태가 보인다. | 같은 immutable source snapshot과 shape index에 새 intent를 결합한다. | Reader는 이전 요약만 재요약하지 않고 원문으로 재진입해 새 packet revision을 만든다. 요청 담당 Agent는 새 packet을 받아 기존 판단을 유지·수정한다. | 새 packet이 이전 packet을 덮어쓰지 않고 `refines` 또는 `supersedes` 관계로 추가된다. | 사용자 직접 제어의 기본 노출·레이블은 `HUM-READ-001`; 자동 재호출은 사용자를 매번 멈추지 않는다. |
 | 2 | 판독 오류가 표시되기 전에는 없음 — System recovery가 자동 진행된다. | source별로 `다른 parser로 재시도`, `OCR 중`, `권한 다시 확인`처럼 공개 가능한 상태와 성공한 coverage가 유지된다. | 기존 parser 재시도, 대체 parser/encoding/OCR, source revision·권한 재검증을 bounded하게 수행한다. context overflow는 Reader 분할로 처리하며 판독 불가로 표시하지 않는다. | 읽을 수 있는 partition을 계속 처리하되 실패한 source가 필요한 결론은 확정하지 않는다. | 해당 source 의존 branch만 blocked일 수 있고 독립 작업은 계속된다. | 전체 coverage가 아니면 `전체 검토 완료`를 표시하지 않는다. |
-| 3 | 비밀번호·로그인·권한·대체 원본이 실제로 필요할 때 Chat 활동 표시 또는 Canvas 읽기 세부정보의 해당 source 행에서 `Click [검토]` → `Click [비밀번호 입력]`, `[권한 연결]`, `[파일 교체]` 또는 `[건너뛰고 범위 축소]` → `Click [계속]` 한다. | 해당 source에 `사용자 조치 필요`, 필요한 행동, 영향받는 결론, 계속 진행 중인 독립 작업과 민감정보 취급 경계가 보인다. 별도 approval queue 객체는 나타나지 않는다. | 사용자 입력을 필요한 source/branch에만 적용하고 Reader Session을 재개한다. | 복구된 source만 다시 읽고 요청 담당 Agent에 새 packet revision을 반환한다. | blocked branch가 ready/running으로 전환되거나 명시적으로 scope-reduced가 된다. | 외부 업로드·유료 OCR·새 credential은 해당 Task의 `approval-required` 권한 흐름을 따르며 독립 Task는 계속한다. |
+| 3 | 비밀번호·로그인·권한·대체 원본이 실제로 필요할 때 Chat 활동 표시 또는 Canvas 읽기 세부정보의 해당 source 행에서 `Click [검토]` → `Click [비밀번호 입력]`, `[권한 연결]`, `[파일 교체]` 또는 `[건너뛰고 범위 축소]` → `Click [계속]` 한다. | 해당 source에 `사용자 조치 필요`, 필요한 행동, 영향받는 결론, 계속 진행 중인 독립 작업과 민감정보 취급 경계가 보인다. 파일을 교체했으면 새 원본과 이전 판독 결과의 구분도 보인다. | 입력을 필요한 branch에 적용한다. 같은 원문은 기존 Reader를 재개하고, 교체 원문은 새 snapshot·coverage로 연결해 과거 packet을 보존한다. | 복구·교체된 source를 읽어 새 packet을 반환하고 요청 담당 Agent는 같은 업무의 다음 호출에 반영한다. | blocked branch가 ready/running으로 전환되거나 명시적으로 scope-reduced가 된다. | 교체 파일을 기존 hash의 원문으로 바꾸지 않는다. 외부 업로드·유료 OCR·새 credential은 해당 Task의 권한 흐름을 따르며 독립 Task는 계속한다. |
 
 **완료 증거**: 같은 Reader Session의 source snapshot, intent와 packet revision 이력,
 자동 recovery 시도, 사용자 조치, 최종 coverage가 보이며 읽지 못한 source가 남으면
@@ -875,7 +895,7 @@ coverage, 원본 snapshot, 최종 Answer가 한 lineage로 연결되며 어느 �
 | # | 제품 사용자 UI 행동 | 즉시 보이는 반응 | System 처리 | Agent 처리 | 상태 변화 | 경계 및 다음 UI 행동 |
 |---:|---|---|---|---|---|---|
 | 1 | 설정 또는 Chat header에서 추천 기본안 `Click [AI Engine]` → `Click [계정 추가]` → provider `Codex · ChatGPT 구독`을 선택한다. | 원래 화면에는 연결 대상 Engine Profile과 `인증 대기`가 보이고 전용 인증 탭/컨테이너가 열린다. | 해당 Engine Profile의 격리된 App Server login을 시작하고 반환된 auth URL을 전용 컨텍스트에 연다. | 없음 | pending login과 원래 포커스 복귀 지점이 기록된다. | 일반 Browser의 account A cookie를 말없이 재사용하지 않고 계정 선택을 제공한다. |
-| 2 | 전용 인증 화면에서 account B를 선택하고 provider가 요구하는 로그인을 완료한다. | provider 성공 화면 뒤 인증 탭이 닫히거나 완료 상태로 남고, 원래 설정/Chat control에 포커스가 돌아온다. Engine Profile에는 B의 확인 가능한 식별 정보와 plan/quota 상태가 나타난다. | callback 알림 뒤 active account/auth mode/plan을 다시 읽어 B와 일치하는지 검증한다. token은 credential store에만 둔다. | 없음 | Engine Profile B가 connected가 된다. | 취소·callback 손실·다른 계정 선택·quota 초과는 `연결됨`으로 표시하지 않고 `[다시 연결] [계정 변경]`을 제공한다. |
+| 2 | 전용 인증 화면에서 account B를 선택하고 provider가 요구하는 로그인을 완료한다. | provider 성공 화면 뒤 인증 탭이 닫히거나 완료 상태로 남고, 원래 설정/Chat control에 포커스가 돌아온다. Engine Profile에는 B의 식별 정보·인증 상태와 plan/quota의 확인 가능한 상태가 구분되어 나타난다. | callback 알림 뒤 active account/auth mode/plan을 다시 읽어 B와 일치하는지 검증한다. token은 credential store에만 둔다. | 없음 | 인증이 검증되면 Engine Profile B가 connected가 된다. 사용량 제한은 별도 availability 상태다. | 취소·callback 손실·계정 불일치는 인증 복구 대상으로 표시한다. quota 초과만으로 로그아웃 처리하지 않으며 재설정 시각·대기·허용된 대체 경로는 확인 가능한 범위와 기존 정책에 따라 제공한다. |
 | 3 | `Click [이 Chat에서 사용]` 또는 요청별 Engine 선택기에서 B를 선택하고 메시지를 전송한다. | Chat header와 실행 상태에 Engine Profile B가 보인다. 기존 Run은 원래 Engine identity를 유지한다. | 새 Run snapshot에 `engineProfileId=B`를 고정하고 B runtime의 실제 account 상태를 확인한다. | 선택된 engine에서만 새 Run을 시작한다. | 새 Run만 B quota/account에 결합된다. | 기본 적용 범위와 진행 중 Run 전환 의미는 `HUM-ENGINE-001`; 다른 Browser/메일 계정은 바뀌지 않는다. |
 
 **완료 증거**: EG-Desk identity A, Engine Profile B, Browser·연결 서비스 계정이
@@ -897,7 +917,7 @@ Chat·SQLite·snapshot·export에 노출되지 않는다.
 
 | # | 제품 사용자 UI 행동 | 즉시 보이는 반응 | System 처리 | Agent 처리 | 상태 변화 | 경계 및 다음 UI 행동 |
 | ---: | --- | --- | --- | --- | --- | --- |
-| 1 | avatar·이름으로 상대가 식별되는 Agent 담당자 방을 열고 작성기에 포커스를 두어 입력한 뒤 전송한다. 여러 Agent 공유 작업을 시작하거나 열 때는 `Q-AI-12`의 별도 UI를 사용한다 | 담당자 방에서는 상대 Agent 정체성이 보이고, 공유 작업 화면에서는 참여자·Agenda 연결·지속성 범위가 `Q-OBJ-06`과 `Q-AI-12`에 따라 보인다 | System은 메시지를 해당 관계에 저장하고 요청 경로를 지정한다. | 위임된 범위 안에서 응답한다 | 대화/작업 상태가 변경된다 | 담당자 방 전체가 공유 작업으로 보이지 않게 전송되는 일은 없다 |
+| 1 | avatar·이름으로 상대가 식별되는 Agent 담당자 방을 열고 작성기에 포커스를 두어 입력한 뒤 전송한다. 여러 Agent 공유 작업은 Chat 내부를 포함해 `Q-AI-12`에서 정할 공유 작업 UI로 시작하거나 연다 | 담당자 방에서는 상대 Agent 정체성이 보이고, 공유 작업 표현에는 참여자·Agenda 연결·지속성 범위가 `Q-OBJ-06`과 `Q-AI-12`에 따라 보인다 | System은 메시지를 해당 관계에 저장하고 요청 경로를 지정한다 | 위임된 범위 안에서 응답한다 | 대화/작업 상태가 변경된다 | 담당자 방 전체를 공유하지 않으며, 감독 정보를 별도 업무 화면으로 강제 분리하지 않는다 |
 | 2 | `Q-AI-13`을 통해 컨텍스트 공유 진입 항목을 활성화하고 콘텐츠/참여자를 선택한다 | 공유할 정확한 메시지, 컨텍스트 및 참여자가 미리 표시된다 | System은 `Q-OBJ-06`에 따라 결정된 링크 또는 사본만 준비한다. | 없음 | 대화/컨텍스트 관계가 보류 중이다 | 취소, 중복, 개인정보 보호 및 실행 취소: `Q-AI-13` |
 | 3 | `Q-AI-13`을 통해 컨텍스트 공유를 확인하거나 취소한다 | 선택된 공유 작업 화면에는 수락된 컨텍스트와 참여자만 표시되거나, 취소 후 변경되지 않은 상태로 돌아간다 | System은 성공한 경우에만 관계를 저장한다. | 없음 | 대화/컨텍스트 관계가 변경될 수 있다 | 컨텍스트 공유만으로는 새 작업에 권한을 부여하지 않는다 |
 | 4 | `Q-AI-12`와 `Q-AI-02`를 통해 공유 작업 요청을 입력하고 전송하거나 작업을 위임한다 | 범위가 한정된 요청과 참여 Agent 작업이 보인다. Chat의 가벼운 상태 표현은 Canvas의 정본 Task·Result projection을 연다 | System은 권한이 부여된 작업을 결합하고 예약하며 Chat 표시와 Canvas 정본 상태를 연결한다. | 의존성에 따라 작업할 수 있다 | 대화 및 작업 상태가 변경된다 | 완료 시 참여자별 기여와 종합된 결과를 구분한다. exact workroom UI는 `Q-OBJ-06`, `Q-AI-12`, `Q-AI-13`에서 정한다 |
@@ -1131,8 +1151,8 @@ Agent 편집도 저장/검사 성공도 전제하지 않는다.
 
 | # | 제품 사용자 UI 행동 | 즉시 보이는 반응 | System 처리 | Agent 처리 | 상태 변화 | 경계 및 다음 UI 행동 |
 | ---: | --- | --- | --- | --- | --- | --- |
-| 1 | `Q-AI-01`/`Q-AI-02`를 통해 권한상 허용된 요청을 제출한다 | 작업은 `Q-AI-03`과 `Q-AI-04`에 정의된 작업/컨텍스트 상태를 받는다 | System은 활성 Ontology 버전, 허용된 컨텍스트, 권한, 유효한 전환 집합을 바인딩한다 | 바인딩이 성공할 때까지 없음 | Run/Task에 검증된 Ontology version과 허용 전환 집합이 binding됨 | 누락되었거나 최신 상태가 아니거나 유효하지 않은 Ontology 바인딩은 `Q-ONT-02`를 따른다 |
-| 2 | 작업 실행 중에는 없음. 단, 사용자가 `Q-AI-02`를 통해 중지를 실행하는 경우는 제외한다 | 사용자에게 보이는 작업 상태는 `Q-AI-04`에 정의된 상태에서만 변경된다 | System은 바인딩된 Ontology를 기준으로 스케줄링과 상태 전환을 검증하고 증거를 기록한다 | Agent는 한정된 컨텍스트와 제약 안에서 추론하고 행동한다 | 검증된 전환에 따라 Task와 기록된 Agent cycle 상태가 변경됨 | Agent는 유효하지 않은 전환을 알리지 않고 승격할 수 없다 |
+| 1 | `Q-AI-01`/`Q-AI-02`를 통해 권한상 허용된 요청을 제출한다 | 작업은 `Q-AI-03`과 `Q-AI-04`에 정의된 작업/컨텍스트 상태를 받는다. 사용자는 Ontology revision 번호를 직접 입력하지 않는다 | System은 적용 정책으로 현재 참조와 필요한 내용을 조회하고 첫 호출의 컨텍스트·권한·유효 전환 집합을 결합한다 | 첫 호출의 바인딩이 성공할 때까지 없음 | 첫 호출에 실제 사용된 Ontology 참조·범위가 기록됨 | 필수 내용을 조회할 수 없거나 권한이 없으면 영향받는 실행 조건을 표시한다. 조직 지식 없는 최초 사용의 기본값은 `HUM-AGENT-001` |
+| 2 | 자동 진행을 확인하거나 같은 Chat에 추가 지시를 전송한다. 중지는 `Q-AI-02`를 따른다 | 작업 상태와 추가 지시의 수신·반영 여부를 확인할 수 있다 | System은 새 도구 관찰·사용자 조정·관련 Ontology 변경을 다음 호출에 포함하고 호출별 binding과 전환 증거를 보존한다 | Agent는 같은 Run의 다음 호출에서 새 내용을 해석해 계획·행동을 조정한다 | Run을 유지하며 context와 Ontology 사용 이력이 추가됨 | 자료 갱신만으로 멈추지 않는다. 권한·승인 대상·동시 쓰기 충돌은 해당 행동만 재검증한다 |
 | 3 | `Q-ONT-04` 또는 `Q-VIEW-09` 안의 해당 리소스 전용 결과 컨트롤을 통해 작업을 검사한다 | 바인딩된 모델 버전, 수락된 증거, 작업 상태, 모든 거부가 `Q-ONT-02`에 따라 서로 연관되어 표시된다 | System은 기록된 사이클 상태를 투영한다 | Agent는 출력/증거를 제공할 뿐, 거버넌스상의 진실을 제공하지 않는다 | 검사 projection과 포커스만 변경되며 Ontology binding과 Run 상태는 바뀌지 않음 | 재정의, 제안, 승격, 롤백은 각각 별도로 `Q-ONT-03`과 `Q-ONT-05`를 따른다 |
 
 **완료 증거**: 기록된 각 작업 전환은 바인딩된
@@ -1147,7 +1167,8 @@ Ontology 버전, 검증된 전환, 수락된 증거, Agent 출력,
 **기술 참조**: [Multi-user Desk](./EGDESK_INTERACTION_AND_ORCHESTRATION_CONTRACT.md#tech-collaboration-computer-use)
 **사용자 결정 참조**: [HUM-COLLAB-001](../../docs/codex/egdesk-product-interaction-trace-atlas-editorial-ledger.md#hum-collab-001), [HUM-REMOTE-001](../../docs/codex/egdesk-product-interaction-trace-atlas-editorial-ledger.md#hum-remote-001)
 
-**제품 전제**: 최종 비즈니스 범위에는 다중 사용자 협업이 포함된다  
+**제품 전제**: 최종 비즈니스 범위에는 다중 사용자 협업이 포함된다. 참가자와 실행 PC는 별개의 축이며, 같은 사람이 여러 PC의 자원을 연결하거나 여러 사람이 허용된 작업을 함께 볼 수 있다. 참여만으로 다른 PC의 모든 자료·계정·제어 권한을 얻지는 않는다.
+
 **명세 상태**: 미결정 항목 있음  
 **승인 게이트**: `A-INFRA-01`
 **시작 상태**: 현재 사용자에게 허용된 공유 범위 아래에 Desk가 존재하지만,
@@ -1161,12 +1182,13 @@ Ontology 버전, 검증된 전환, 수락된 증거, Agent 출력,
 | 2 | 권한 있는 공유 개시자가 `Q-COL-07`에 정의된 초대 전송 컨트롤을 실행한다 | 수신자, 전달 채널, 대기/전송됨/전달 상태, 만료, 취소/재전송 행동이 보인다 | System은 승인된 인프라를 통해 전달을 시도하고 이용 가능한 전달 증거만 기록한다 | 없음 | 초대 전달 상태; 접근 권한은 아직 증명되지 않는다 | 수신자를 찾을 수 없음, 전송 실패, 만료된 링크, 재전송, 취소: `Q-COL-07` |
 | 3 | 초대받은 사람이 `Q-COL-07`을 통해 수락/참여를 실행한다; 참여 의미 체계는 `Q-COL-02`를 따른다 | 초대받은 사람에게는 권한상 허용된 화면만 보인다; 공유하는 쪽에는 `Q-COL-03`에 따라 참여 상태가 보인다 | System은 승인된 인프라를 통해 인증, 권한 부여, 동기화를 수행한다 | 없음 | 수락이 성공한 경우에만 협업 권한과 공유 세션 상태가 생긴다 | 실패, 만료, 권한 회수, 재진입: `Q-COL-02`, `Q-COL-04`, `Q-COL-07` |
 | 4 | 협업자가 `Q-VIEW-09`를 통해 공유 리소스의 컨트롤을 실행한다; 충돌이 나타나면 `Q-COL-10`을 사용한다 | 행위자, 포커스/제어 소유권, 변경 사항, 충돌이 `Q-COL-05`와 `Q-COL-10`에 따라 표현된다 | System은 결정된 동시성/충돌 모델을 적용한다 | 없음 | 리소스 행동이나 해결이 성공한 경우에만 공유 데이터/세션이 변경된다 | 비공개 상태가 유출되지 않는다; 정확한 충돌/병합/실행 취소 UI: `Q-COL-10` |
-| 5 | 권한 있는 관리자가 `Q-COL-09`의 컨트롤/확인을 통해 접근 권한을 변경하거나 회수한다 | 양측 모두 그 결과로 생긴 권한 및 가능 행동 범위 또는 조치 가능한 실패를 본다 | System은 `Q-COL-04`와 `Q-COL-06`에 따라 허용된 변경만 적용한 후 결정을 기록한다 | 없음 | 성공한 경우에만 권한 부여가 변경된다 | 정확한 확인/실패/포커스 복귀: `Q-COL-09`; 관찰 권한과 제어 권한은 계속 분리된다 |
+| 5 | 권한 있는 관리자가 `Q-COL-09`의 컨트롤/확인을 통해 접근 권한을 변경하거나 회수한다 | 정책 적용과 각 측의 전달·적용 확인 상태, 가능한 행동 또는 실패가 구분되어 보인다. 오프라인 상대의 적용 여부는 미확인으로 남는다 | System은 `Q-COL-04`와 `Q-COL-06`에 따라 허용된 변경을 적용하고 도달 가능한 경계에서 후속 행동을 차단한다. 각 측의 전달·적용 증거를 별도로 기록한다 | 없음 | 정책 변경과 원격 적용 확인 상태를 별도로 갱신한다 | 정확한 확인/실패/포커스 복귀: `Q-COL-09`; 관찰 권한과 제어 권한은 계속 분리된다 |
 
 **완료 증거**: 초대 준비, 전달, 수락, 실제 접근은 각각 증거가 있는
 별도의 상태다; 양측 모두 행위자 귀속과 함께 권한상 허용된 동일한 공유 범위를 보며,
-회수되었거나 만료된 권한은 비공개 Desk/계정 상태를 노출하지 않으면서
-새로운 행동을 차단한다.
+회수되었거나 만료된 권한은 이를 검증하는 제어 경계에서 새로운 행동을 차단한다.
+연결이 끊긴 상대의 적용 여부와 이미 전송한 행동의 결과는 별도로 확인하며, 전달된
+과거 사본이 즉시 회수됐다고 표시하지 않는다. 비공개 Desk·계정 상태는 노출하지 않는다.
 
 <a id="atlas-cu-01"></a>
 #### CU-01. 물리적 입력 충돌 없는 Desk 외부 computer-use
@@ -1239,6 +1261,12 @@ Snapshot·Agenda가 같은 lineage로 다시 열리는 상태를 증명한다. �
 **완료 증거**: 모든 핵심 흐름은 결정된 키보드/접근성 경로로 계속 조작할 수 있고,
 포커스와 상태 변경이 안내되며, Canvas 또는 Answer Briefing의 의미를 색상, 위치 또는
 움직임만으로 제공하지 않는다.
+
+드래그로 옮기거나 크기를 바꾸는 항목은 클릭·탭으로도 해당 행동을 선택할 수 있으며,
+키보드로 같은 결과에 도달하는 경로를 제공한다. 상세 화면에서 돌아오면 시작한
+control로 복귀하고, 그 control이 사라졌으면 같은 업무의 접근 가능한 진입점으로 돌아온다.
+한글 등 입력기의 조합을 확정하는 키는 Chat 메시지 전송을 함께 실행하지 않는다.
+Agent의 진행·오류 알림은 사용자가 입력 중인 곳의 focus를 옮기지 않는다.
 
 ## 2. 화면·개념 관계 지도
 
@@ -2565,7 +2593,7 @@ Agent Profile은 다음 필드를 버전 단위로 표현할 수 있어야 한�
 | **context defaults** | 명시적 선택, Agenda, 대화, 보이는 Resource 중 어떤 후보를 우선 검토할지 | Desk 전체 자동 수집 규칙이 아니며 Run마다 검사·축소할 수 있어야 한다. |
 | **memory policy** | 허용된 메모리 종류, 범위, 기록 조건, 보존·삭제 기본값 | 메모리 내용 자체나 권한이 아니다. 정확한 범위는 `Q-AGENT-07`이 정한다. |
 | **credential-handle policy** | 어떤 종류의 불투명 credential handle을 요청할 수 있는지 | secret 값, 계정 소유권 또는 사용 승인이 아니다. |
-| **Ontology binding policy** | 기본 Ontology 선택 규칙, 요구 버전·제약·evidence 스키마 | 활성 binding은 Run snapshot에서 별도로 고정한다. |
+| **Ontology binding policy** | 기본 Ontology 선택 규칙, 요구 버전·제약·evidence 스키마 | System이 첫 호출 전 실제 내용을 조회하고, 호출마다 사용한 binding을 별도로 기록한다. |
 | **budget / sandbox / network / time defaults** | 비용·토큰·단계·시간 상한, 격리 수준, 네트워크 후보 범위 | 실제 Run 제한을 자동 확정하거나 외부 접근을 허용하지 않는다. |
 | **delegation ceiling** | 하위 Agent나 Task에 위임 가능한 최대 범위와 금지 범위 | 사용자의 현재 Task 위임보다 넓게 사용할 수 없다. |
 | **audit metadata** | 작성자, 버전, 변경 이유, 활성 시점, 대체·폐기 관계 | Profile 정의의 변경 이력이 실제 Run 성공을 증명하지 않는다. |
@@ -2620,7 +2648,7 @@ Resource에 행동할 permission이 있다는 뜻이 아니다.
 
 #### Context와 context revision
 
-System은 요청별로 다음 후보를 검토해 최소한의 context revision을 만든다.
+System은 각 모델 호출 전에 다음 후보와 새 사용자 조정·도구 관찰을 검토해 필요한 context revision을 만든다.
 
 - 현재 thread와 실행할 task의 범위·요구·선행 상태;
 - 사용자가 명시적으로 선택하거나 첨부한 대상;
@@ -2634,8 +2662,9 @@ System은 요청별로 다음 후보를 검토해 최소한의 context revision�
 각 포함 항목에는 식별자, 리비전, 포함 이유와 권한 범위가 필요하다. 민감하거나
 권한이 없는 후보는 암묵적으로 포함하지 않는다. 사용자가 실행 전 범위를 줄이거나
 수정할 수 있어야 하며, 실행 뒤에는 결과가 사용한 정확한 context revision을
-검사할 수 있어야 한다. 실행 중 변경은 기존 snapshot을 덮어쓰지 않고
-`Q-AI-05`와 `Q-AGENT-06`에서 정한 계속·재시작·포크 경로를 따른다.
+검사할 수 있어야 한다. 실행 중 새 자료·사용자 조정은 과거 snapshot을 보존하면서
+같은 Run의 다음 모델 호출에 반영된다. 반영 상태·범위 검사 UI는 `Q-AI-05`와
+`Q-AGENT-06`을 따른다. 일반적인 조정에 재시작·포크가 필요하지는 않다.
 
 Canvas의 공간 근접성은 포함 후보를 사람이 검토할 단서가 될 수는 있지만 그
 자체로 관련 사실, source 관계 또는 evidence가 아니다. System은 가까이 놓인
@@ -2669,17 +2698,19 @@ Profile이 handle 종류를 허용하거나 Run이 handle을 참조해도 권한
 
 #### Ontology binding
 
-Run은 활성 Ontology의 정확한 ID·version, 선택 이유, 제약 집합, 허용 전이와
-evidence 요구사항을 snapshot에 고정한다. Agent Profile은 기본 선택 정책만
-제안할 수 있다. System이 binding을 검증하기 전에는 Agent를 시작하지 않는다.
+System은 첫 모델 호출 전에 적용되는 조직·Desk·Agent 정책에서 활성 Ontology를 찾고
+필요한 내용을 읽어 입력에 결합한다. 사용자가 version 번호를 직접 입력하지 않아도 된다.
+각 호출이 사용한 참조·범위·선택 이유·제약·evidence 요구사항은 당시 기록으로 남는다.
+새로운 관련 내용이 관찰되면 같은 Run의 다음 호출에 반영하며 과거 기록을 바꾸지 않는다.
+Agent Profile은 선택 정책을 제공하며 실제 binding 검증과 입력 결합은 System 책임이다.
 
 Ontology가 제공하는 relation map은 제품 객체의 의미와 관계를 나타낸다. 특정
 module, framework, class, service, process 배치 또는 Runtime topology는 가능한
 구현 중 하나일 뿐이며 relation map이 이를 강제하지 않는다. 구현 topology를
 바꾸더라도 제품 의미, Run binding과 evidence 연결은 보존되어야 한다.
 
-Ontology가 누락되었거나 최신이 아니거나 Run 요구와 충돌하면 그 상태를 숨기지
-않고 대기·대체·거부 중 결정된 경로를 따른다. Ontology view는 binding을
+필수 Ontology를 읽지 못하거나 권한·실행 조건과 충돌하면 영향받는 범위와 필요한
+조치를 표시한다. 새 version을 발견한 것만으로 업무를 멈추지는 않는다. Ontology view는 binding을
 검사하는 투영일 뿐 binding이나 모델을 직접 변경하지 않는다. 선택·대체 정책은
 `Q-ONT-02`와 `Q-AGENT-09`가 정한다.
 
@@ -2703,8 +2734,9 @@ System이 확정해 snapshot에 기록한다.
 
 ### 5.7 Run snapshot
 
-Run snapshot은 실행 시도에 사용된 사실을 고정하는 감사 단위다. 최소 필드는 다음과
-같다.
+Run snapshot은 시작 조건과 각 모델 호출에 실제 사용된 사실을 추적하는 기록이다.
+한 사용자 요청 안에서도 모델 호출과 도구 사용은 반복되며, 다음 호출에는 새 context
+revision이 사용될 수 있다. 최소 필드는 다음과 같다.
 
 | 필드 | 기록할 내용 |
 |---|---|
@@ -2716,22 +2748,22 @@ Run snapshot은 실행 시도에 사용된 사실을 고정하는 감사 단위�
 | **engine binding** | AI Engine Profile ID, 격리된 runtime/config revision, 검증된 account·auth mode·plan/quota 상태; token 제외 |
 | **runtime resolution** | Runtime version, adapter, 현재 health와 기능 저하 사유 |
 | **provider/model resolution** | 요청값, 실제 provider·model·version, fallback 사건과 이유 |
-| **context binding** | context revision ID, direct payload 또는 Reader Session·Context Packet revision, coverage, 포함 Resource·source·evidence 리비전과 제외 이유 |
+| **context binding** | 모델 호출별 context revision ID, direct payload 또는 Reader Session·Context Packet revision, coverage, 포함 Resource·source·evidence 리비전, 사용자 조정 반영 여부와 제외 이유 |
 | **memory binding** | 실제 포함된 Memory ID·revision·scope, 포함 이유와 제외·최신 아님 판단; 비밀 원문은 별도 정책 적용 |
 | **authority binding** | Browser account/profile, 파일·폴더, 공유 역할 등 실제 account/resource authority |
 | **approval binding** | 필요한 승인 ID, 범위, 결정 행위자, 시각, 만료·철회 상태 |
 | **tool resolution** | 허용 후보, 실제 current availability, 선택된 tool version과 호출 범위 |
 | **credential handles** | 사용한 불투명 handle ID와 대상·scope·만료 메타데이터; secret 제외 |
-| **Ontology binding** | Ontology ID·version, 제약, 허용 전이, evidence 요구사항 |
+| **Ontology binding** | 모델 호출마다 실제 조회·전달한 Ontology 참조·범위·정책·시각, 제약, 허용 전이와 evidence 요구사항 |
 | **execution limits** | budget, sandbox, network, time와 변경 이력 |
 | **state transitions** | Run 상태와 Task의 정본 여덟 상태를 구분한 전이, 행위자, 원인과 시각 |
 | **outputs** | Answer, Result, artifact, projection과 개별 Agent 기여의 ID |
 | **completion evidence** | 완료 주장, 이를 지지하는 evidence, 불일치·알 수 없음과 남은 위험 |
 
-이미 시작한 실행 시도의 snapshot은 수정하지 않는다. 컨텍스트, 모델, Profile,
-권한 또는 제한이 바뀌면 새 revision·attempt·fork 가운데 결정된 관계를 만들고
-이전 snapshot과 연결한다. Run과 attempt의 최종 제품 경계는 `Q-OBJ-07`과
-`Q-AGENT-14`가 정한다.
+이미 실행한 호출의 snapshot은 수정하지 않는다. 새 사용자 지시·도구 결과·관련
+Ontology 관찰은 같은 Run의 다음 context revision에 연결한다. 실제 실행 실패의
+재시도와 의도적인 업무 분기에만 attempt·fork 관계를 만든다. Engine·Profile·실행
+상한의 명시적 변경과 나머지 수명주기 선택은 `Q-OBJ-07`, `Q-AGENT-14`에 남는다.
 
 ### 5.8 Chat·Canvas 투영과 system prompt 가시성
 
@@ -2791,7 +2823,7 @@ Agent chatter를 프레젠테이션 콘텐츠로 사용하지 않는다.
 | **AI Engine Profile** | account별 runtime·credential binding을 격리하고 새 Run에만 선택 결과를 적용한다. logout·quota 소진·기본값 변경은 활성 Run identity를 바꾸지 않는다. | 기본 적용 범위와 전환 UX: `HUM-ENGINE-001` |
 | **Reader Session** | immutable source snapshot·read intent·coverage·Context Packet revision을 보존하고 같은 source로 재호출한다. | 기본 노출과 사용자 개입: `HUM-READ-001` |
 | **Agent Runtime** | 초기화 전, 준비됨, 기능 저하, 사용 불가, 중지 상태를 구분하고 현재 availability를 계속 재평가한다. | 사용자에게 보일 health 수준과 자동 복구: `Q-AGENT-04`, `Q-AGENT-11` |
-| **Run** | 요청 수락 뒤 snapshot을 고정하고 상태 전이를 기록한다. 중지·재시도·포크·재할당은 원 실행을 덮어쓰지 않는다. | 최종 상태 집합과 attempt 관계: `Q-AI-04`, `Q-AI-05`, `Q-AGENT-14` |
+| **Run** | 시작 조건과 호출별 입력 이력을 보존하며, 새 관찰·사용자 조정은 같은 Run의 다음 호출에 반영한다. 중지·재시도·포크·재할당은 원 실행을 덮어쓰지 않는다. | 최종 상태 집합과 실제 retry·fork 관계: `Q-AI-04`, `Q-AGENT-14`; 조정 feedback: `Q-AI-05` |
 | **Task** | 독립 성공을 보존하고 실패한 의존 분기만 차단한다. 정본 상태는 `queued`, `waiting-on-dependency`, `ready`, `running`, `approval-required`, `completed`, `failed`, `cancelled`이며 조건 충족과 권한 검증 뒤 후속 Task를 시작한다. | retry·timeout·사용자 제어·부분 Result·대체 경로: `Q-ORCH-01`–`Q-ORCH-04`, `Q-ORCH-08` |
 
 #### Scheduler checkpoint와 waiting
@@ -2800,7 +2832,8 @@ Task가 승인, 사람 행동, 파일 도착, 로그인 또는 다른 외부 조
 System은 실행 범위, context revision, 완료된 기여, 남은 조건과 재개 규칙을
 checkpoint로 기록한다. `approval-required`나 `waiting-on-dependency` 상태 동안 LLM stream을
 열린 채 유지하지 않는다. 조건이 충족되면 권한·Ontology·가용성·최신 상태를 다시
-검증하고 checkpoint에서 새 디스패치 또는 결정된 resume attempt를 시작한다.
+검증하고 checkpoint의 업무를 다음 호출로 이어 간다. 실제 실행 실패를 다시 시도하는
+경우에만 retry attempt를 기록하며, 대기 조건이 풀린 것만으로 새 attempt를 만들지 않는다.
 취소되면 `cancelled`를 기록하고 자동 재개하지 않는다.
 
 #### 장애 진단
@@ -2855,7 +2888,8 @@ evidence 묶음, `last checked`와 버전 변화 뒤 재검증 범위는 `Q-AGEN
 6. **Chat은 Agent 관계 표면이지 실행체가 아니다**: 사람에게 보이는 기본 Chat은
    Agent/persona별 담당자 방으로 대화 입력과 답변 표현을 보여 주지만 Agent Runtime,
    전체 컨텍스트, 메모리, 자격 증명 또는 도구 세션을 담는 컨테이너가 아니다.
-   Chat을 닫는 것과 Run을 중지하는 것은 같은 행동이 아니다.
+   Chat 뷰를 닫아도 Run이 남는 경우에는 다른 Canvas 표현에서 그 실행을 찾을 수 있어야 한다.
+   Agenda 닫기는 3번의 종료 규칙을 따른다.
 7. **하나의 Answer, 여러 투영**: 하나의 논리적 Answer는 Chat의 대화형 표현과
    Canvas의 공간·시각·상호작용·산출물 표현을 함께 가질 수 있다. 어느 투영도
    다른 투영을 복제하거나 대체할 의무가 없고, 하나의 실패가 Answer 전체를
@@ -2889,15 +2923,19 @@ evidence 묶음, `last checked`와 버전 변화 뒤 재검증 범위는 `Q-AGEN
     승인된 객체로 직접 설명한다.
 17. **파일 선택기는 진입 UI다**: 파일·폴더 선택기는 대상을 고르는 일시적
     화면이며 프로젝트, Library, Agenda 또는 영속 객체가 아니다.
-18. **외부 computer-use는 비충돌이어야 한다**: 사람과 Agent의 물리 입력
-    소유권은 동시에 활성화되지 않는다. 관찰 화면이나 입력 재생은 결과 성공의
+18. **외부 computer-use는 비충돌이어야 한다**: 사람과 Agent가 같은 물리 입력
+    채널을 경쟁하지 않도록 입력을 격리하거나 해당 채널의 소유권을 인계한다.
+    다른 격리 실행면의 Agent 작업이 사용자 카메라·입력 focus를 빼앗지 않는다.
+    관찰 화면이나 입력 재생은 결과 성공의
     증거가 아니며, 긴급 중지는 성공 상태를 만들지 않는다.
 19. **로컬 우선, 동기화는 별도**: 로컬 저장·내보내기·백업·복원 설계는 원격
     계정이나 서버 없이 진행할 수 있다. 원격 백업·다중 기기 동기화는 데이터,
     신원, 암호화, 충돌, 비용과 삭제 정책을 정한 별도 승인 대상이다.
-20. **Run은 고정된 실행 스냅샷을 가진다**: 실행 시 사용한 Profile 버전,
-    제공자·모델, 컨텍스트 리비전, 도구 가용성, 권한, 승인, Ontology 바인딩과
-    제한을 감사할 수 있어야 한다. 이후 Profile 편집이 과거 Run을 바꾸지 않는다.
+20. **과거 입력은 보존하고 현재 업무는 조정한다**: 첫 모델 호출 전 적용 정책으로
+    필요한 Ontology와 자료를 조회·결합하고, 각 호출이 실제 사용한 Profile·모델·
+    context·도구·권한·승인·Ontology·제한을 기록한다. 새 관찰과 사용자 조정은 같은
+    Run의 다음 호출에 반영하며, 일반적인 변화에 중지·새 attempt·fork를 요구하지 않는다.
+    이후 변경이 과거 호출의 실제 입력을 바꾸지는 않는다.
 21. **원문 system prompt 노출을 가정하지 않는다**: 제품은 사용자에게 필요한
     정체성, 유효한 지침 요약, 제한, 버전과 실행 이유를 보여 줄 수 있어야 하지만,
     내부 정책이나 원문 system prompt 전체를 Chat에 노출한다고 전제하지 않는다.

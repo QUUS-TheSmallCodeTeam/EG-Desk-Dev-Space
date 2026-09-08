@@ -26,8 +26,9 @@
 3. `docs/references/codex-auth-chat-architecture-draft.md`
 - renderer는 인증 비밀을 소유하지 않고 UI 상태만 표현해야 한다는 경계.
 
-4. `docs/EG-DESK_Whitepaper.md`
+4. 당시 영문 백서 — 2026-09-06 삭제, 원문은 Git blob `e1ab95b9e62609d4b12d41b079a4bb32e6a4858c`로 보존
 - 고정형 채팅 UI의 과밀 문제 지적, 대화 패널은 맥락 도구로 최소 노이즈화해야 한다는 제품 방향.
+- 위 내용은 2026-04-19 당시 참고 맥락이다. 현재 대화의 제품 기준은 [Atlas CHAT-01](../../../ideas/confirmed/EGDESK_PRODUCT_INTERACTION_TRACE_ATLAS.md#atlas-chat-01)을 따른다.
 
 ## 3) 웹 조사
 

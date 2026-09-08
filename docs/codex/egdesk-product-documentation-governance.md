@@ -1,5 +1,7 @@
 # EG-Desk 제품 문서 화자·운영 정본
 
+**문서 목차**: [읽는 목적별 안내](../README.md#docs-start)
+
 <a id="doc-governance-top"></a>
 
 **수신자**: Main, PM, WM, 문서 유지보수자와 문서 작성·검증을 수행하는 AI Agent  
@@ -28,14 +30,45 @@ Atlas에 남길 수 있는 메타정보는 사람이 실제 내용을 찾기 위
 문서 생산자의 의도를 말하는 문장은 이 Governance로 이동한다. 제품 의미가 포함된 문장을 이동할
 때에는 수신 문서의 화자에 맞게 다시 써야 하며, 운영 문장을 제품 발화처럼 복사하지 않는다.
 
+비정본 설계에는 [ECS/CAP와 니즈 후보](../references/design-synthesis/egdesk-capability-scenario-connected-agent-work.md#needs-review)와
+[사용 흐름·UI 추천안](../references/design-synthesis/egdesk-ux-realization-proposals.md#ux-proposals-top)이 있다.
+전자는 의미 수준의 상황을, 후자는 그 상황에서 파생한 후보 control·입력·화면 반응과
+기술 연결을 소유한다. 구체 UI를 후자에 적었다는 이유만으로 Atlas의 확정 UI가 되지 않는다.
+후보를 발전시키라는 요청과 각 정책 기본값을 승인하는 결정은 구별해 기록한다.
+
+백서는 기업의 업무 담당자·의사결정자·파트너에게 제품의 문제의식, 이용 경험, 핵심 원리,
+도입 가치와 한계를 설명하는 대외 문서다. 저장소 경로·개발 전환 주석·Agent 편집 지시·
+검토 메모·미결정 라벨을 백서 안에 넣지 않는다. 변경 과정과 문체 조사 기록은 이 Governance
+또는 일회성 검토 대화에 둔다. 백서에는 서술을 뒷받침하는 출처·참고문헌만 남기며,
+설계 방향을 실제 출시·제공·검증 성과로 바꾸어 말하지 않는다.
+
+### 독서 입구와 중복 관리
+
+[docs/README](../README.md#docs-start)를 공통 독서 입구로 사용한다. 현재 설계 검토의
+출발점은 UX 추천안이고, 시나리오는 필요한 배경, Atlas·Contract는 제품 기준,
+사용자 확인 원장은 결정 확인, RWS·Governance는 근거와 유지보수 경로다.
+
+- 추천·대안·손실의 상세 내용은 UX 추천안에 둔다. 원장에서는 비교할 절로 연결한다.
+- 제품 질문·결정·현재 상태는 사용자 확인 원장에서 유지한다. 다른 문서는 현재 상태를
+  별도 복제하지 않고 해당 HUM으로 연결한다. Q의 세부 조사·route와 과거 감사 상태는 이 Governance에 남는다.
+- 시나리오의 니즈 점검에는 날짜가 있는 상황·공백·원 후보와 고유 검토 범위를 보존한다.
+  이 기록의 후보 문구를 최신 추천안이나 별도 승인 대기 목록으로 다시 관리하지 않는다.
+- 정본의 제품 동작과 기술 보장은 유지하며 원장에 결정한 내용이 반영될 때 함께 갱신한다.
+  문서 수준의 제안/정본 구분은 개별 정책의 승인 상태와 다르다.
+- 이동·병합 없이 가능한 정리는 기존 파일·앵커를 유지한다. 파일 수 감소를 위해 고유
+  근거·상황·질문·흐름을 삭제하거나 별도의 정리 보고서를 추가하지 않는다.
+
 ### 0.2 UI/UX ↔ 기술 계약 weave cycle
 
-한 기능 영역을 수정할 때 다음 cycle을 반복한다.
+새 기능은 사용 상황과 판단 흐름을 먼저 정하고, 그 흐름에 필요한 기술·UX를 왕복한 뒤
+구체 UI와 Atlas 사용 절차로 전개한다. 기존 UI를 정정하는 경우에는 해당 trace부터
+시작할 수 있다.
 
 ```text
-Atlas에서 정확한 사용자 입력·화면 반응을 쓴다
--> Contract에서 필요한 state/data/runtime/authority를 쓴다
--> Contract가 요구하지만 Atlas에서 조작·확인할 수 없는 부분을 Atlas에 되돌린다
+사용 상황·목표·행위자·정보·상태 전환을 확인한다
+-> 필요한 state/data/runtime/authority와 UX를 왕복한다
+-> 확정한 흐름에서 UI control·layout·입력·feedback을 구체화한다
+-> Atlas의 사용자 조작·화면 반응과 Contract의 기술 보장을 서로 연결한다
 -> 둘 중 하나를 확정하려면 제품 의미 선택이 필요한 경우 HUM-*로 분리한다
 -> HUM 답 없이도 가능한 작업과 실제 차단 범위를 기록한다
 -> link·anchor·semantic drift 검사를 실행한다
@@ -60,6 +93,21 @@ Atlas에서 정확한 사용자 입력·화면 반응을 쓴다
 System/runtime 처리다. Agent turn 전후에 일어났다는 이유만으로 Agent가 직접 수행했다고
 쓰지 않는다. 예시는 coverage probe이며 예시에 등장했다는 이유만으로 제품 요구사항으로
 승격하지 않는다.
+
+사용 시뮬레이션의 입력은 일반적인 가상 persona만으로 구성하지 않는다. WM이 관련 ECS·CAP와
+실대화 기반 RWS를 좁혀 연결하고, 시뮬레이션 역할은 해당 사례의 실제 목적·환경·중단/교정
+지점을 직접 읽은 뒤 현재 UX 경로를 따른다. UX 문서 안에 사례 링크가 있다는 사실은 그 원문을
+읽었다는 증거가 아니다. 검토 반환에는 실제 읽은 파일·절/행과 `관찰된 사례 사실 / 새 제품에서
+가정한 행동 / 발견한 설계 공백`을 구별해 남긴다. 근거가 없는 삭제·복구·소유권 같은 확장 분기는
+실제 사건으로 꾸미지 않고 가정 기반 검토로 표시한다. 모든 검토자에게 전체 대화를 전달할
+필요는 없으며, 다음 판단을 바꿀 관련 사례와 최신 사용자 결정만 준다.
+
+`보인다`는 문장은 상태명 나열만으로 충족되지 않는다. 시작 화면에서의 위치·인접 요소·
+기본 노출/펼침·가림·본문과 작성기의 면적·포커스 복귀를 설명하고 필요한 배치도를 붙인다.
+클릭 수는 명시한 출발 상태에서 진입·선택·확정·복귀를 나누어 계산하며, OS/provider 조작·입력·
+스크롤 비용을 숨기지 않는다. 여러 Agenda·동시 활동·긴 이름·좁은 화면으로 밀도를 높여 문서상
+사용 흐름을 재검토한다. 실제 조작감·가독성·도달 시간은 개발 중 실제 화면에서 확인하되,
+그 검증이 아직이라는 이유로 문서에서 찾을 수 있는 배치·경로 공백을 그대로 남기지 않는다.
 
 ### 0.4 외부 기술 조사와 구현 route
 
@@ -159,7 +207,7 @@ Atlas의 legacy label `USER-PRODUCT`가 붙은 기존 72개 항목은 ID 집합,
 |---|---|
 | 이 Codex 작업에서 사용자가 제시한 수정사항, 특히 Agenda와 Desk 복원을 분리하고 Chat/Canvas, Answer Briefing(기존 Playback 명칭), 오케스트레이션, Ontology, 코딩 UX, 협업 및 computer-use를 바로잡은 제품 설계 대화 차례 | 최상위 결정 근거가 되는 제품 입력 |
 | [EG-Desk 제품 비전 및 개발 할 일](../../ideas/confirmed/EGDESK_PRODUCT_VISION_AND_DEV_TODO.md), 실패한 Atlas 라운드 이전에 커밋된 `HEAD` 버전 | 이전 제품 기준선; 현재 미커밋 변환은 그 자체만으로 결정 근거가 되지 않음 |
-| [EG-Desk 비전 백서](../vision/EG-DESK%20백서%20-%20Vision_v1.md) | 장기 개념 기준선; 이후 사용자 수정사항이 우선함 |
+| 구 EG-Desk Vision v1 백서 — 2026-09-06 작업 트리에서 삭제; 삭제 직전 원문은 Git blob `8248b68b8ef9469285e562d6f82fef79b8cd4c0a` | 당시 장기 개념 기준선; 이후 사용자 수정사항이 우선하며 Production v8로 과거 근거를 바꾸지 않음 |
 | [apps/firefox-ui-demo/docs](../../apps/firefox-ui-demo/docs/) 아래에 있는 Firefox 제품/런타임 집중 문서의 커밋된 `HEAD` 버전 | 기준선 후보 및 용어 충돌의 증거 |
 | [apps/firefox-ui-demo](../../apps/firefox-ui-demo/) 아래의 현재 Firefox 소스 | 구현 관찰에만 사용 |
 | [Interaction Contract](../../ideas/confirmed/EGDESK_INTERACTION_AND_ORCHESTRATION_CONTRACT.md)의 final-correction 직전 `UNTRACKED` snapshot, SHA-256 `42892ce140f81d2a2b67c548591cfb7ed7eb02e280e46796014d4b12552f5478`, 452 lines; 삭제 전 Atlas snapshot SHA-256 `b577608f81b73bc2b7c8690fd35987a8f283a90dcddc3f45eecb02552bfb64b2` | 동작, 객체 또는 기본값을 정립하는 데 사용하지 않음; 초안 후 부정 감사는 해당 정확한 snapshot의 오염이 다시 나타났는지만 확인할 수 있음 |
@@ -348,7 +396,7 @@ stable-link 호환 색인으로 유지한다.
 | `P1-LIFECYCLE-RECOVERY` | 실행·세션 복원·기능 저하·재진입 | 9 |
 | `P2-AGENDA-LIFECYCLE` | Agenda 생성·열기·저장·충돌·보관·삭제 | 11 |
 | `P3-VIEW-CANVAS-DISCOVERY` | view 조작·Canvas 탐색·검색·Library | 12 |
-| `P4-CHAT-AI-MEDIA` | Chat·AI request·context·Canvas/Playback media | 12 |
+| `P4-CHAT-AI-MEDIA` | Chat·AI request·context·Canvas/Answer Briefing media | 12 |
 | `P5-ORCHESTRATION-APPROVAL` | 작업 전환과 승인 경계·컨트롤 | 3 |
 | `P6-ACCOUNT-BROWSER-EVIDENCE` | 계정·Browser·외부 효과 증거 | 9 |
 | `P7-CODE-TERMINAL` | 사람 중심 coding·file·Terminal lifecycle | 9 |
@@ -356,6 +404,61 @@ stable-link 호환 색인으로 유지한다.
 | `P9-DATA-ACCESSIBILITY` | 데이터 수명주기·키보드·접근성 | 7 |
 | `P10-AGENT-PROFILE-RUN` | capability/availability UI, 반복 acceptance, 경계별 장애 진단·복구 | 3 |
 | **합계** |  | **85** |
+
+<a id="pm-work-disposition"></a>
+### 8.2 현재 PM 조사·설계 분류 (2026-09-08)
+
+`OPEN`은 한 Q에 남은 세부 항목이 있다는 뜻이며 사용자 답변 대기와 동일하지 않다.
+아래 표는 registry의 PM 질문 85개를 기존 10개 work group으로 모두 연결한다.
+확정 원칙은 재질문에서 빼고, 추천안은 UI 비교에 사용하며, 기술 확인은 구현·검증
+작업으로 넘긴다. 정책에 의존하는 값만 HUM에 남긴다. `설계안 준비`를 owner 결정이나
+runtime 검증 완료로 해석하지 않으며, 혼합 질문 전체의 `OPEN` 상태는 유지한다.
+
+후속 사용 시뮬레이션에서는 [Library·그룹](../references/design-synthesis/egdesk-ux-realization-proposals.md#library-groups),
+[실행 설정](../references/design-synthesis/egdesk-ux-realization-proposals.md#execution-settings)·[정책 충돌](../references/design-synthesis/egdesk-ux-realization-proposals.md#policy-conflicts),
+[동시 변경](../references/design-synthesis/egdesk-ux-realization-proposals.md#collaboration-changes)·[소유권 이전](../references/design-synthesis/egdesk-ux-realization-proposals.md#desk-ownership),
+[Saved Agenda 삭제·복구](../references/design-synthesis/egdesk-ux-realization-proposals.md#agenda-delete-recover),
+[범위별 초기화](../references/design-synthesis/egdesk-ux-realization-proposals.md#data-reset)를 기존 9개 흐름·7개 정책절 안에서 보완했다.
+역할별 조작·보이는 결과·실패/취소/복귀를 문서로 대조한 것이며, 실제 입력·기술 동작 검증은
+기존 12개 검증 계획의 해당 행에 연결했다. 세부 추천을 확정 정책으로 승격하거나 아래 Q의
+담당·상태를 변경하지 않는다. 추천·대안 본문은 UX에만 유지한다.
+
+<a id="doc-scenario-walkthrough-inputs"></a>
+
+**2026-09-08 사용자 역할 검토의 사례 입력**: 첫 정제 검토에는 현재 UX·확정 경계를 전달했지만
+RWS 원문을 직접 읽도록 지정하지 않았다. 사용자 지적 뒤 아래 사례와 관련 ECS 본문을 두 역할에
+나누어 직접 읽도록 지정했다. 후속의 원문 읽기를 이전 검토의 근거로 소급하지 않는다.
+이 표는 재검토의 입력·적용 범위이며 전체 32개 사례를 모두 시뮬레이션했다는 뜻이 아니다.
+
+| 입력 사례 | 기록된 마찰·판단의 전이 | 연결할 UX·가정 경계 |
+|---|---|---|
+| [RWS-0006 독립 재현](../references/real-work-scenarios/cases/rws-0006-blind-reproduction-context-isolation.md) | 정답을 제외한 원천 재현, 근거·기간 예외 누락, 결과값과 재현 성공의 구별 | Chat·Memo·읽기·근거·정책 조정. 실제 급여 계산 기능을 요구하는 것이 아니며 Memo/Smart Read UI는 가정 |
+| [RWS-0007 실행면 혼선](../references/real-work-scenarios/cases/rws-0007-browser-surface-identity-lease.md)의 SR-01 | 다른 탭에서 작업하면 Agent가 연 드롭다운이 사라진다는 사용자 보고. 역할 검토 A가 지정 원 대화 turn 73–74를 추가 대조 | 조작면 identity·관찰·입력 방식·돌아오기. 합본의 잘못된 profile·stale transport·page/shell 사건을 SR-01 단독 관측으로 옮기지 않으며 focus 원인·해결 성공도 미확정 |
+| [RWS-0018 공유본과 시안](../references/real-work-scenarios/cases/rws-0018-shared-ax-dashboard-canonical.md) | 공유본 조기 변경 뒤 복구, 분리한 시안의 시각 검토와 수용된 내용 적용 | 결과·비교·live 재사용·변경 수락. 동시 편집 undo·Agenda 휴지통의 실제 성공을 뜻하지 않음 |
+| [RWS-0010 다중 PC 인계](../references/real-work-scenarios/cases/rws-0010-cross-device-release-handoff.md) | 새 PC의 준비와 release 권한 차이, 오래된 branch와 현재 상태 재확인 | 최초 사용·Agenda 재개·PC/계정·소유 권한. 실제 Canvas 초대나 live process 이전 사례가 아님 |
+| [RWS-0026 지식·역할 권한](../references/real-work-scenarios/cases/rws-0026-taehwa-knowledge-authority-and-acl.md) | 공통·역할 전용·실행 기록 구분, 계정별 read/write와 승격 권한 검사 | 적용 기준·조직 후보·공유 관리. 현재 ACL이나 전체 activation/rollback 동작의 증거로 재사용하지 않음 |
+| [RWS-0029 범위 한정 변경·pause](../references/real-work-scenarios/cases/rws-0029-exact-id-bounded-mail-mutation-and-pause.md) | 동일 message ID 범위 확인, 자동화 pause와 데이터 변경 분리 | 정확한 선택 범위·중지·삭제/초기화 확인. formal revert는 실행되지 않았으므로 복구 성공 사례로 쓰지 않음 |
+
+원문 읽기 확인은 파일·SR/claim·관련 흐름의 반환으로 확인한다. PC 양도·통합 초기화·소유권
+복구와 30 Agenda·활동 3개의 혼잡 상황은 이 사례의 실제 사건이 아니라 `HYPOTHETICAL-COVERAGE`다.
+사례별 상세 provenance를 제품 매뉴얼 본문에 끼워 넣지 않고, 필요한 사용자 행동·화면으로 전이한다.
+후속 역할 A는 RWS-0006·0007·0018 전문과 ECS-02·03·06, 역할 B는 RWS-0010·0026·0029 전문과
+ECS-01·04·05·07의 읽기 범위를 반환했다. 두 역할의 8개 finding을 전이·수정하고 수정 범위를
+재검토했다. 독립 검토 요청은 Reader의 읽기 책임을 업무 판단으로 바꾸지 않도록 별도 검토 Task로
+전개했다. RWS-0007은 합본 사건의 단일 출처 오귀속을 피하도록 SR-01의 사용자 보고로 좁혔다.
+
+| work group / 포함 Q | 확정 근거·준비된 흐름 | 남은 Agent 측 작업 | 정책에 의존하는 부분 |
+|---|---|---|---|
+| P1 — `Q-LIFE-01`, `Q-LIFE-02`, `Q-LIFE-03`, `Q-LIFE-05`, `Q-RESTORE-01`, `Q-RESTORE-03`, `Q-RESTORE-06`, `Q-RESTORE-07`, `Q-RESTORE-08` | [실제 Desk와 독립 Agenda 목록 복원](../../ideas/confirmed/EGDESK_PRODUCT_INTERACTION_TRACE_ATLAS.md#atlas-l-02), [첫 사용 흐름](../references/design-synthesis/egdesk-ux-realization-proposals.md#flow-first-use) | OS별 실행·종료·shell 실패 진입, 기록 주기·flush·손상 기록에서 마지막 유효 상태 선택. 한 resource 실패가 나머지 Desk를 막지 않는지 확인 | 저장·종료의 미저장 자료 기본 범위만 HUM-AGENDA·EXPORT |
+| P2 — `Q-AG-03`, `Q-AG-04`, `Q-AG-05`, `Q-AG-09`, `Q-AG-10`, `Q-AG-13`, `Q-AG-14`, `Q-AG-15`, `Q-AG-17`, `Q-AG-19`, `Q-AG-20` | [Agenda 저장·닫기](../references/design-synthesis/egdesk-ux-realization-proposals.md#flow-agenda) | 목록·이름 변경·저장 진입, 동시 수정·닫기 중 늦은 결과·종료 실패·취소·원 위치 복귀를 구체화하고 검사 | 저장 기본값·공유 instance·예약·삭제/복구만 HUM-AGENDA·SURFACE·ORCH |
+| P3 — `Q-VIEW-02`, `Q-VIEW-03`, `Q-VIEW-04`, `Q-VIEW-08`, `Q-VIEW-09`, `Q-VIEW-10`, `Q-VIEW-11`, `Q-VIEW-12`, `Q-VIEW-13`, `Q-DISC-02`, `Q-DISC-03`, `Q-LIB-01` | [조작면 관찰·복귀](../references/design-synthesis/egdesk-ux-realization-proposals.md#flow-surface), [입력 비간섭 계약](../../ideas/confirmed/EGDESK_INTERACTION_AND_ORCHESTRATION_CONTRACT.md#tech-collaboration-computer-use) | 탐색·선택·실제 resize 구분, resource별 native/adapter 입력 경로, 잠든 view 복귀, Library·검색·grouping UI 비교 | 공유 자원의 동일성·저장 범위는 HUM-SURFACE; 단순 레이블·배치는 결정 대기 아님 |
+| P4 — `Q-CHAT-02`, `Q-AI-02`, `Q-AI-10`, `Q-AI-11`, `Q-AI-12`, `Q-AI-13`, `Q-MEDIA-02`, `Q-MEDIA-07`, `Q-MEDIA-09`, `Q-MEDIA-11`, `Q-MEDIA-12`, `Q-MEDIA-13` | [담당자 방](../references/design-synthesis/egdesk-ux-realization-proposals.md#flow-chat), [Memo](../references/design-synthesis/egdesk-ux-realization-proposals.md#flow-memo), [답변·근거](../references/design-synthesis/egdesk-ux-realization-proposals.md#flow-answer) | 조합 입력·중복 제출·stale target·전송 실패·늦은 Worker 결과·초안 보존·원 Chat 복귀를 검사 | 공유 대화 관계·기여 공개 깊이·Memo 알림·편집 보존은 HUM-CONV·ANSWER·BRIEF·SNAPSHOT |
+| P5 — `Q-ORCH-05`, `Q-ORCH-06`, `Q-ORCH-08` | [기존 위임과 결정 경계](../references/design-synthesis/egdesk-ux-realization-proposals.md#ux-policy-options), [의존 작업](../../ideas/confirmed/EGDESK_INTERACTION_AND_ORCHESTRATION_CONTRACT.md#tech-dependency-orchestration) | 실제 gate에 한 번만 연결되는 요청·취소·만료·재진입, 독립 작업 유지와 부분 결과 보존을 검사 | 새 권한·기간·재위임 정책만 관련 HUM. 일반 분할·검토·복구는 대기 아님 |
+| P6 — `Q-AUTH-02`, `Q-AUTH-03`, `Q-AUTH-05`, `Q-AUTH-06`, `Q-AUTH-07`, `Q-AUTH-08`, `Q-BROWSER-01`, `Q-BROWSER-02`, `Q-BROWSER-03` | [identity 분리](../../ideas/confirmed/EGDESK_INTERACTION_AND_ORCHESTRATION_CONTRACT.md#tech-engine-profile), [첫 연결](../references/design-synthesis/egdesk-ux-realization-proposals.md#flow-first-use) | 실제 adapter의 OAuth/popup·다운로드·계정 식별·취소 뒤 callback, 접수 증거·중복 방지 범위를 확인 | 기본 계정 적용·사전 위임·공동 비용은 HUM-ENGINE·COLLAB |
+| P7 — `Q-CODE-02`, `Q-CODE-05`, `Q-CODE-06`, `Q-CODE-07`, `Q-CODE-08`, `Q-CODE-09`, `Q-TERM-03`, `Q-TERM-04`, `Q-TERM-05` | [파일 중심 작업](../references/design-synthesis/egdesk-ux-realization-proposals.md#flow-reading), [Terminal 동일성](../../ideas/confirmed/EGDESK_INTERACTION_AND_ORCHESTRATION_CONTRACT.md#tech-terminal-runtime) | 여러 root·PC의 파일 귀속, 명령·revision·검증 결과 연결, 동일 process 재연결·새 실행·snapshot과 닫기/종료를 검사 | 첫 파일 형식·편집 수준의 지원 약속만 HUM-CODE |
+| P8 — `Q-ONT-04`, `Q-ONT-05`, `Q-COL-07`, `Q-COL-08`, `Q-COL-09`, `Q-COL-10`, `Q-CU-05`, `Q-CU-06`, `Q-CU-07`, `Q-CU-08` | [기억·규칙](../references/design-synthesis/egdesk-ux-realization-proposals.md#flow-knowledge), [다중 PC·협업](../references/design-synthesis/egdesk-ux-realization-proposals.md#flow-portable) | 읽기 전용 검사, 초대 전달·참여 확인·권한 회수, stream·입력 소유권, 오프라인·재접속·원격 결과 대조를 mock과 실제 adapter 단계로 나눠 검사 | 조직 규칙 편집·승격, 공유·제어 기본값은 HUM-GOV·COLLAB. 실제 서버·전송은 HUM-REMOTE |
+| P9 — `Q-DATA-06`, `Q-DATA-07`, `Q-DATA-08`, `Q-DATA-09`, `Q-UX-02`, `Q-UX-03`, `Q-UX-04` | [반출입](../references/design-synthesis/egdesk-ux-realization-proposals.md#flow-portable), [동등 입력 계약](../../ideas/confirmed/EGDESK_INTERACTION_AND_ORCHESTRATION_CONTRACT.md#tech-accessibility) | 제외 자료·손상 bundle·설정 복구 표시, focus·키보드·모션 감소·비공간·드래그 없는 포인터 경로·IME 검사 | 반출 포함·암호화·import 충돌은 HUM-EXPORT. 접근성 출시 지원 약속만 HUM-A11Y |
+| P10 — `Q-AGENT-04`, `Q-AGENT-19`, `Q-AGENT-20` | [실패 경계](../../ideas/confirmed/EGDESK_INTERACTION_AND_ORCHESTRATION_CONTRACT.md#tech-failure-boundaries), [9흐름 기술 연결](../references/design-synthesis/egdesk-ux-realization-proposals.md#ux-tech-weave) | capability·availability·permission의 실제 probe, 사건 순서·중복·연결 손실·부분 완료별 인수 증거와 회귀 범위를 구체화. 성능 상한은 실제 환경·측정에 근거 | 기존 동작을 검증하는 방법·반복 조건은 사용자에게 결정받지 않음 |
 
 <!-- QUESTION-ROUTING-REGISTRY:START -->
 | question ID | route | decision batch / PM work group | status | legacy-compatible Q anchor |
@@ -750,6 +853,34 @@ Reference가 널리 쓰인다는 사실, 현재 구현에 이미 있다는 사�
 | [Prezi Present — topic and subtopic path](https://support.prezi.com/hc/en-us/articles/360044277273-Setting-a-path-for-topics-and-subtopics-in-Prezi-Present), [structuring a presentation](https://support.prezi.com/hc/en-us/articles/360003498513-Structuring-in-Prezi-Present) | Canvas의 Frame·Topic을 Timeline 순서로 배열하고, step 사이에서 Overview로 돌아가거나 다음 target으로 직접 zoom하는 presentation path 패턴을 제공한다. | 2026-08-05 확인한 rolling 공식 도움말. 개념·상호작용 명칭만 조사하며 code/assets를 가져오지 않는다. 모션은 비시각적·reduced-motion 대안을 대신하지 않는다. | `Frame`, `Timeline`, `Path`는 Focus Scope·순서·viewport 전환을 설명하는 참고 패턴이다. Prezi 객체·명칭·저장 모델을 EG-Desk 제품 객체로 복제하지 않고, Agent Run 재생 근거로도 사용하지 않는다. | `Q-MEDIA-04`, `Q-MEDIA-09`, `Q-UX-03` | `PRIMARY-REFERENCE / CONCEPT-ONLY` |
 | [Miro — Presentation mode](https://help.miro.com/hc/en-us/articles/34307373858450-Presentation-mode), [Frames](https://help.miro.com/hc/en-us/articles/360018261813-Frames) | Canvas Frame을 집중된 presentation mode에서 이전·다음 화살표로 이동하고, 공개 범위를 단계별로 조절하는 사용자 주도 탐색 패턴을 제공한다. | 2026-08-05 확인한 rolling 공식 도움말. 개념만 조사하며 code/assets를 가져오지 않는다. | `Presentation mode + Frames`는 브리핑 진입·Focus Scope·이전/다음 컨트롤의 참고다. Miro의 frame=slide 모델이나 협업 권한을 EG-Desk의 Answer Briefing 계약으로 그대로 전사하지 않는다. | `Q-MEDIA-04`, `Q-MEDIA-09`, `Q-MEDIA-10` | `PRIMARY-REFERENCE / CONCEPT-ONLY` |
 
+### 12.2 국문 백서 문체·구성 참고 (2026-09-06)
+
+백서 재작성에 사용한 설명 방식의 참고이며 제품의 실적·제공 상태·정책을 확정하는 근거가 아니다.
+검토 코멘트와 아래 참고 방식은 백서 본문으로 전사하지 않는다.
+
+| 참고 원문 | 확인 범위와 활용 | 전사하지 않은 내용 |
+|---|---|---|
+| [삼성SDS ChatGPT 기술 분석 백서 1부](https://www.samsungsds.com/kr/insights/chatgpt_whitepaper1.html), [2부](https://www.samsungsds.com/kr/insights/chatgpt_whitepaper2.html) | 공식 국문 본문의 개념 설명→원리→활용→한계 순서와 용어의 첫 설명을 참고 | 2023년 모델 성능·가격·시장 수치·당시 전망은 현재 EG-Desk 사실로 사용하지 않음 |
+| [네이버클라우드 보안 모범 사례](https://www.ncloud.com/api/support/download/5/120) | 2021년 PDF의 목차·서론·책임 공유 설명, 실제 5–6쪽 지면 확인. 책임 주체와 적용 범위를 풀어 설명하는 방식을 참고 | 인증·보안 역량·고객 실적을 EG-Desk의 보장으로 전환하지 않음 |
+| [카카오 코로나 백서 2 공식 국문 연재](https://brunch.co.kr/@kakao-it/418/) | 2022년 ‘이용자와 정부가 하나 된 디지털 방역’ 본문. 이용자의 상황→서비스가 연결한 경험→근거의 전개를 참고 | 사례·성과 수치·표현·도판을 복제하지 않음. PDF 전체를 완독했다고 주장하지 않음 |
+
+본문의 실질 인용은 NIA 「공공부문 초거대 AI 도입·활용 가이드라인」(2024, 26–28쪽)의
+업무·목표·단계적 도입 관점과 네이버클라우드 백서(2021, 6쪽)의 책임 공유 개념으로 한정했다.
+기존 출처 불명·시점 혼합 통계, 보편적 원샷 성공·무흔적 보장과 과거 출시 일정은 재사용하지 않았다.
+기존 파일명을 유지하고, 유입 앵커는 읽히는 개발 주석 없이 본문 탐색 앵커로 보존한다.
+
+### 12.3 입력·다중 PC 복구의 한정된 근거 (2026-09-08)
+
+아래 확인은 기존 입력·관찰·권한·완료 증거 계약을 구체화하기 위한 `PRIMARY-REFERENCE /
+RESEARCH-PATTERN`이다. 제품 기본값의 owner 승인을 대신하지 않는다. 문서 패턴만
+참고했으며 소스 코드·표준 원문을 복제하거나 의존성을 채택·재배포하지 않았다.
+
+| primary source / 확인 범위 | 적용한 판단 | 적용 한계·연결 |
+|---|---|---|
+| [W3C WCAG 2.2](https://www.w3.org/TR/WCAG22/), [Dragging Movements 해설](https://www.w3.org/WAI/WCAG22/Understanding/dragging-movements.html); WCAG 2.2 기준과 해당 해설 확인 | 제품이 만든 드래그 기능에 클릭·탭 대안과 키보드 경로를 각각 점검한다. focus·상태 안내와 비공간 경로를 같은 사용 흐름에서 확인한다 | 웹 콘텐츠 기준의 적용 패턴이다. Firefox shell·native 앱 전체의 준수나 특정 보조기술 지원을 입증하지 않는다. Contract §16, UX-01, Q-UX-02–04 |
+| [MDN KeyboardEvent.isComposing](https://developer.mozilla.org/en-US/docs/Web/API/KeyboardEvent/isComposing); rolling 문서, 조합 세션의 의미 확인 | 입력기의 조합 확정과 Chat 전송을 분리해 검사한다 | event 지원 설명만으로 한국어 IME·OS별 실제 이벤트 순서를 검증한 것은 아니다. Contract §16, UX 공통 입력, Q-AI-02 |
+| [RFC 9110 §9.2.2](https://www.rfc-editor.org/rfc/rfc9110.html#name-idempotent-methods)·[§13.1.1 If-Match](https://www.rfc-editor.org/rfc/rfc9110.html#name-if-match), [Amazon Builders’ Library: Making retries safe with idempotent APIs](https://aws.amazon.com/builders-library/making-retries-safe-with-idempotent-APIs/); 재시도·외부 효과·조건부 쓰기 의미 확인 | 응답 유실과 미실행을 구별하고 접수 증거·동일 요청·서비스 측 중복 방지를 대조한다. 동시 변경은 사용자가 본 버전과 현재 버전의 조건을 비교해 타인의 수정을 조용히 덮지 않는 패턴을 참고한다 | HTTP·API의 보장을 GUI 입력이나 로컬 요청 ID에 자동 적용하지 않는다. 조건부 쓰기 자체는 의미 충돌 해결·자동 병합이나 권한 부여가 아니다. AWS 서비스·특정 오케스트레이션·CRDT를 채택한 것이 아니다. Contract §12–13, Q-AGENT-20, Q-AUTH-06, Q-COL-05·10 |
+
 ## 13. audit checklist
 
 | 검사 | worker draft 상태 | Main final 상태 |
@@ -796,6 +927,13 @@ Reference가 널리 쓰인다는 사실, 현재 구현에 이미 있다는 사�
 | `ATL-ED-0017` | 2026-08-09 | owner input / WM / Main | 제품 문서 안의 AI·편집자·독자 사고 지시를 수신 상황에 맞게 분리했다. Atlas는 사용자 매뉴얼·UI 행동, Contract는 기술 보장, 사용자 확인 원장은 18개 owner 결정만 소유하고, weave·source·provenance·routing·ID·감사·검증은 이 운영 정본으로 이동했다. PM profile·project context·WM file map·routing policy·docs index도 네 정본 경계로 갱신했다 | 전용 validator: trace 43, action row 157, object 56, Q anchor/route 175, owner route 90, PM route 85, HUM 18, approval 6, tech anchor 28, 누락·중복·깨진 local link/fragment·금지 화자 누출 0; Atlas SHA `b8290005b7ea9fc529d3b496062de4b832b6344c9e629586995e833e11565cc6`, Contract SHA `c07fc102108220dc8fd685bbb362ed9aec5cc83551f354f8372e6ef7d51d39a8`, 사용자 확인 원장 SHA `e12bd6c942da5d2f32dd1e7c00ff90073d374460b95e80fa678f7a973fc24624`; `git diff --check` 통과 | `PASS-ACTUAL / PM-AUDIT-PENDING` |
 | `ATL-ED-0018` | 2026-08-09 | PM / Main | 분할 의미 감사에서 `Q-*` 본문을 Governance로 옮긴 뒤에도 Contract와 registry 도입부가 “Atlas 질문”이라고 가리키던 정본 소유권 모순 1건을 발견했다. Governance가 175개 `Q-*`의 본문·route·status·호환 anchor를 소유하도록 명시하고, Contract §1·§5·§14에서 제품 의미 `HUM-*`와 세부 UI `Q-*`를 각각 올바른 정본으로 연결했다 | 사람용 표면 PM 감사: Atlas 2,973행·사용자 확인 원장 194행 완독, `PASS`, P0/P1 0. 기술·운영 PM 감사: 최초 `REVISE` P1 1건 수정 후 focused 재감사 `PASS`, P0/P1 0. 전용 validator·fragment·`git diff --check` 재통과; Atlas SHA `b8290005b7ea9fc529d3b496062de4b832b6344c9e629586995e833e11565cc6`, Contract SHA `c16ed47260a2971c1472e10f09844cac6f19354c2162cebf192e04d6b3dac2b4`, 사용자 확인 원장 SHA `e12bd6c942da5d2f32dd1e7c00ff90073d374460b95e80fa678f7a973fc24624` | `REVIEWED / PASS-PM / PASS-ACTUAL / SUPERSEDES ATL-ED-0017 PM-AUDIT-PENDING` |
 | `ATL-ED-0019` | 2026-08-30 | owner input / WM / Main | 하나의 Desk·Canvas와 동일 Canvas의 복수 Saved Agenda projection, view/runtime별 lifecycle과 Canvas representation, Agenda 닫기 시 전용 runtime 종료·Saved Agenda 보존, File view 재진입의 caret·focus·transient selection 제외를 확정했다. 기본 Chat을 Agent/persona 담당자 방으로 정하고, 위치 고정 Canvas Memo의 사용자 본문·작성자별 짧은 답글·필요 시 Agent 방 mention을 시각 표식과 함께 `CANVAS-01`에 통합했다. 같은 Agent 방의 업무 구분과 agent-agent workroom·공유 대화의 정확한 UI는 `OPEN`으로 유지했다 | `HUM-DESK-001`을 `DECIDED`로 전환하고 `Q-OBJ-01`, `Q-OBJ-02`, `Q-AG-06`을 `DECIDED`로 전환; 질문 175개 중 3 `DECIDED` / 172 `OPEN`. 전용 validator: trace 43, action row 157, object 56, tech anchor 28, HUM 18, route 90/85, unresolved local link/fragment 0, `git diff --check` 통과. Atlas SHA `f9cfaf24422e22a21f352c2c521828839bfb99343192c6eb3ab5fc4ebba7fc2d`, Contract SHA `b6aa79f645190214332af72f849e57008cee6123ccd8c893dde853219e8ef920`, 사용자 확인 원장 SHA `225882a228f54b01f9efa32a3911889830a7d0bf8d02fff69deb01041b76f989` | `RECORDED / PASS-ACTUAL / PM-AUDIT-PENDING` |
+| `ATL-ED-0020` | 2026-09-06 | owner input / WM / PM / Main | 대화 요구를 네 정본·ECS/CAP와 대조했다. 최초 Ontology 조회와 같은 Run의 호출별 조정, 비율 유지 집중 보기·입력 비간섭을 정본까지 반영했다. 기존 가시성·불변 원문·권한 경계를 종료 확인, 교체 원문 coverage, Snapshot 비실행·접근 제한과 연결했고, 인증과 quota 제한을 구별했다. 일반 분할·검토·복구의 상시 사람 승인과 고정 Critic·배포 경로는 synthesis에서 정정했다. 기능 결합 후보 18개와 정상 이용 보완 분기 6개는 synthesis §10에 두고 기존 HUM으로 연결했다 | 현재 대화 `019f8d42-4886-7041-8421-c5e343d465e0`의 사용자 발언과 turn 78·85–98·132·134, 현행 정본 교차검토. WM routing, 분리된 PM/의미 검토; ECS 7·CAP 13·RWS 32와 정본 trace 43·HUM 18·Q 175의 링크·ID·표 구조 검사 PASS. 후보는 owner 결정이나 구현 완료로 승격하지 않음 | `CORRECTED / CANDIDATES-OPEN / STATIC-CHECKED` |
+| `ATL-ED-0021` | 2026-09-06 | owner request / WM / PM / Main | 기존 후보 18개를 별도 비정본 UX 추천안의 9개 흐름으로 전개했다. 조작·입력·즉시 반응·System/Agent·취소·복귀와 기술 연결을 작성하고, 정책 추천안·대안·손실을 7개 독립 선택 가능한 묶음으로 정리했다. 기존 확정 의미와 구현 재량은 재질문하지 않으며, HUM 정의·상태를 임의로 폐기하거나 신규 UI를 Atlas에 승격하지 않았다 | owner의 후속 진행 요청, WM의 sibling 문서 경로 권고, PM 정책 초안과 분할 흐름 검토. Slack·Figma·Miro·Mozilla·VS Code 공식 패턴을 한정 적용. 신규 문서 후보 18·흐름 9·정책 묶음 7, 링크·anchor·표 검사 PASS; 정본 ID·route 검증 PASS. 상세 교환 열람과 답장 대상, 비교표 편집 대상의 구분은 리뷰 후 보완 | `UX-PROPOSED / POLICY-OPEN / STATIC-CHECKED` |
+| `ATL-ED-0022` | 2026-09-06 | owner request / WM / PM / Main | 기존 README를 목적별 단일 독서 입구로 재배치하고 여섯 본문에 복귀 링크를 연결했다. 제품 질문·결정 상태는 HUM, 추천·대안은 UX 문서로 집중하고 HUM의 중복 기본안 설명을 링크로 치환했다. 시나리오 §10의 원 상황·공백·고유 검토 범위는 날짜가 있는 배경 기록으로 보존했다. 파일 추가·이동·병합 없이 구현 참고·백서·운영 자료를 기본 독서 경로 뒤로 정리했다 | WM의 README 유입·기존 slug 점검과 PM의 고유 질문 보존 검토. 기존 README anchor 10, needs 18, flow 9, policy 7과 정본 ID·route 보존, local link·표·diff 검사 PASS. 제품 정책·HUM 상태 변경 없음 | `ORGANIZED / CONTENT-PRESERVED / STATIC-CHECKED` |
+| `ATL-ED-0023` | 2026-09-06 | owner request / WM / Main | 사용자 확인에 따라 구 Production v7·Vision v1·영문 백서를 작업 트리에서 삭제하고 Production v8만 현행 EG-Desk 백서로 유지했다. 현재 목차·소스 색인은 v8로 연결하고, 과거 ADR·조사·clean-room 근거는 당시 인용과 삭제 전 Git 원문 식별자를 보존했다. legacy WM 스냅샷은 과거 범위 표시를 유지한다 | 삭제 전 세 파일은 각각 HEAD의 Git blob과 일치. 원문 식별자는 ADR-002 References와 본 source boundary에 보존. v8 본문 변경 없음, 정본·링크·diff 검사 PASS; Git 이력 복구 가능 | `WHITEPAPERS-CONSOLIDATED / HISTORY-PRESERVED` |
+| `ATL-ED-0024` | 2026-09-06 | owner request / WM / PM / Main | 국문 백서 3종의 설명 방식을 참고해 같은 Production v8 파일을 대외 독자용 10절로 재작성했다. 개발 전환 주석·저장소 경로·편집 지시·출처 미확인 통계·포괄적 성공/보안 보장·과거 출시 일정을 제거했다. 업무 경험·실행 원리·근거·Ontology·데이터 통제·도입 지원·협업·성과 조건을 설명하고 미결정 UI 기본값을 승격하지 않았다. 문체 조사와 검토 기록은 백서 밖 이 Governance에 보존했다 | §12.2 참고 범위, NIA·네이버클라우드 본문 출처 2개 원문 확인. PM 제품 정합성 PASS, 국문 편집 검토 5개 개선 후 PASS. 백서 목차·각주·표·유입 앵커·문서 링크 검사 및 diff check PASS. README와 현재 절 참조 갱신; 신규 백서 파일 없음 | `REWRITTEN / READER-VOICE-REVIEWED / STATIC-CHECKED` |
+| `ATL-ED-0025` | 2026-09-08 | owner request / WM / PM / Main | 다중 PC·Canvas 기반 Agenda 방향을 Atlas·Contract·project context에 명시하고, live 실행과 파일 반출입을 분리했다. 실행 위치·연결 미확인·종료 요청/확인·늦은 결과·부분 완료·입력 복귀를 9개 UX 흐름과 정본에 연결했다. HUM의 중복 기술 질문을 좁히되 Library·그룹·구성 변경 권한·협업 충돌·소유권 이전의 고유 선택은 보존했다. PM 질문 85개를 §8.2의 10묶음으로 전수 분류하고 17개 Q 본문에서 확정 원칙과 남은 설계·검증을 구별했다 | 현재 작업 `01a07eba-ac3d-77c0-98ae-d13a39f9b949`의 다중 PC 방향과 문서 정제 진행 요청. §12.3 primary reference, WM 전수 route 확인, UX authoring 및 독립 의미 검토의 7개 교정 후 확인 범위 PASS. UX flow 9·policy 7·검증 계획 12, 정본 trace 43·HUM 18·Q 175·PM 85 전수 연결과 표·anchor·local link 검사 PASS. 실제 runtime·네트워크·접근성 준수 검증은 미실시; Q 상태 3 DECIDED / 172 OPEN과 정책 PROPOSED 유지 | `REFINED / POLICY-OPEN / STATIC-CHECKED / REVIEWED` |
+| `ATL-ED-0026` | 2026-09-08 | owner request / WM / PM / user-role review / Main | 인계된 5범위의 추천·대안·조작·실패/취소/복귀를 UX·원장·Governance 3개 안에서 보완했다. Library·그룹·실행 소유, 설정 우선순위·사전 위임·실제 적용, 동시 변경·소유권 이전과 유효 복구 위임, Saved Agenda 자체 삭제·복구, 설정/연결/Profile/기록 초기화를 구별했다. 사용자 지적에 따라 배치도·기본/상세 노출·진입 클릭·혼잡 조건과 실대화 기반 역할 시뮬레이션을 추가했다 | 원 작업의 인계를 받은 `019f8d42-4886-7041-8421-c5e343d465e0`에서 진행. 처음의 UX-only 검토와 이후 6개 RWS·관련 ECS 직접 읽기를 구별했다. 역할 A/B의 8개 finding 반영·재검토, 삭제/초기화 5개 교정 재검토 PASS; PM의 기존 복구 위임 유효성 공백도 보완. UX 9흐름·9배치 노트·7정책·12검증 계획, 정본 43 trace·18 HUM·175 Q·PM 85 연결, ECS/CAP/RWS·link/anchor/table·diff 검사. 기존 시나리오 원본·백서·앱 코드 변경 없음. 실제 제품 실행 없이 문서상 사용 경로를 검토했으며 정책·Q 상태와 기존 승인 범위를 유지 | `REFINED / POLICY-OPEN / SCENARIO-WALKTHROUGH / STATIC-CHECKED` |
 
 이력 행은 append-only다. 수정이 필요하면 기존 사건을 덮어쓰지 않고 다음 `ATL-ED-*` 행에서 정정·대체 관계를 남긴다.
 
@@ -835,7 +973,7 @@ Reference가 널리 쓰인다는 사실, 현재 구현에 이미 있다는 사�
 
 - Aspect map: 21개.
 - trace: 43/43개가 map과 전수 색인에 포함됨.
-- 미결정 question: 175/175개가 coverage matrix의 1차 배정에 포함됨.
+- 전체 question: 결정 여부와 무관하게 175/175개가 coverage matrix의 1차 배정에 포함됨.
 - approval gate: 6/6개가 승인 edge와 matrix에 포함됨.
 - 확정·일부 결정 필요·runtime-only·비객체 개념은 모두 적어도 하나의 map 또는 object coverage 행에 포함됨.
 - 지도 어디에도 별도 Workspace, 일반 대기 Token 또는 고정된 외부 관찰 화면 이름을 제품 객체로 두지 않았고, Chat과 Agent runtime 사이에는 System binding이 유지됨.
@@ -888,7 +1026,7 @@ Reference가 널리 쓰인다는 사실, 현재 구현에 이미 있다는 사�
 | <a id="atlas-q-life-03"></a>`Q-LIFE-03` | 셸 자체를 시작할 수 없을 때 정확히 어떤 UI와 다음 행동이 표시되는가? | L-01 |
 | <a id="atlas-q-life-04"></a>`Q-LIFE-04` | 최초 사용/빈 Desk와 저장된 Agenda가 하나도 없는 사이드바에는 무엇이 표시되며, 정확히 어떤 행동이 제공되는가? | L-01 |
 | <a id="atlas-q-life-05"></a>`Q-LIFE-05` | 표시되는 운영체제, 창 및 앱 메뉴의 종료 행동 가운데 무엇을 지원하며, 어떤 포커스/확인 동작이 앱 종료와 뷰 닫기를 구분하는가? | L-03 |
-| <a id="atlas-q-restore-01"></a>`Q-RESTORE-01` | 제품 우선순위를 암시하지 않으면서 저장된 Agenda의 병렬 로딩과 Desk 복원을 어떻게 표현하는가? | L-02 |
+| <a id="atlas-q-restore-01"></a>`Q-RESTORE-01` | **확정 경계**: 실제 Desk를 먼저 사용할 수 있고 Agenda 목록은 독립적으로 로드된다. **남은 설계·검증**: 한쪽 지연·실패 표시, 재시도와 이미 사용 중인 view 보존. 두 로딩의 완료 순서를 다시 결정받지 않는다. | L-02 |
 | <a id="atlas-q-restore-02"></a>`Q-RESTORE-02` | 열려 있던 뷰, 위치와 크기, 그룹화, Canvas 이동/확대·축소, 저장되지 않은 편집기 콘텐츠, 채팅 및 일시적 출력 중 어떤 세션 세부 정보가 복원되는가? File view의 active caret·keyboard focus·transient text selection은 복원하지 않으며, scroll·보이는 위치와 명시적으로 고정한 annotation/range만 별도 정책에 따라 복원할 수 있다. | L-02, V-02, V-03 |
 | <a id="atlas-q-restore-03"></a>`Q-RESTORE-03` | 누락되었거나, 거부되었거나, 손상되었거나, 오프라인이거나, 부분적으로 복원된 리소스를 정확히 어떤 뷰별 UI와 목록 수준 UI로 처리하는가? | L-02 |
 | <a id="atlas-q-restore-04"></a>`Q-RESTORE-04` | Browser가 아닌 각 화면은 실행 중인 런타임과의 연결, 재구성된 뷰, 스냅샷 또는 명시적인 사용 불가 상태 중 무엇으로 복원되어야 하는가? | L-02, TERM-01 |
@@ -912,14 +1050,14 @@ Reference가 널리 쓰인다는 사실, 현재 구현에 이미 있다는 사�
 | <a id="atlas-q-ag-09"></a>`Q-AG-09` | 저장된 Agenda 행의 정확한 행동 메뉴 트리거, 이름 변경 편집기, 유효성 검사, 확정/취소 컨트롤 및 포커스 복귀 | AG-04 |
 | <a id="atlas-q-ag-10"></a>`Q-AG-10` | 정확한 생성 화면, 초기 포커스, 필드/구성원 유효성 검사, 취소 시 복귀, 성공 피드백 및 초안을 보존하는 영속화 실패 UI | AG-01 |
 | <a id="atlas-q-ag-11"></a>`Q-AG-11` | **확정 경계**: Agenda 닫기는 Canvas projection을 제거하고 그 Agenda만 소유한 runtime을 종료하며 Saved Agenda는 Sidebar에 보존한다. **남은 질문**: 보관의 별도 의미, 공유 runtime의 소유권 표시, 정확한 다시 열기·보관 해제 상호작용은 무엇인가? | AG-04 |
-| <a id="atlas-q-ag-12"></a>`Q-AG-12` | 삭제 확인 범위, 보존 기간, 참조, 복구 가능성, 복구 컨트롤 및 영구 삭제 경계 | AG-04 |
+| <a id="atlas-q-ag-12"></a>`Q-AG-12` | **비교안 준비**: [Saved Agenda 삭제·복구](../references/design-synthesis/egdesk-ux-realization-proposals.md#agenda-delete-recover)에 저장본·전용/공유 실행·참조·휴지통·영구 삭제 영향을 구분했다. **남은 선택**: HUM-AGENDA-001의 보관 기한·복구 범위이며 예약 삭제로 대신하지 않는다. | AG-04 |
 | <a id="atlas-q-ag-13"></a>`Q-AG-13` | 정확한 Agenda 생성 진입 화면, 표시되는 레이블/아이콘, 클릭 및 키보드 제스처, 그리고 생성 화면으로 들어갈 때의 포커스 전환 | AG-01 |
-| <a id="atlas-q-ag-14"></a>`Q-AG-14` | 정확한 저장/새 항목으로 저장/업데이트 진입 컨트롤, 대상 선택, 레이블, 확인, 성공 피드백, 포커스 복귀 및 사용 불가 상태 | AG-03 |
+| <a id="atlas-q-ag-14"></a>`Q-AG-14` | **설계안 준비**: UX Agenda 흐름의 저장 범위 미리보기·업데이트·다른 이름 저장·취소·복귀. **남은 설계·검증**: 동시 revision 변경·저장 실패·사용 불가 사유. 기본 저장 범위만 HUM-AGENDA-001에 종속된다. | AG-03 |
 | <a id="atlas-q-ag-15"></a>`Q-AG-15` | 저장됨/변경 있음 상태를 구분하는 정확한 표시와 다시 저장, 나가기, 현재 변경 사항 폐기, 취소 및 화면 이탈 방지 상호작용 | AG-03 |
 | <a id="atlas-q-ag-16"></a>`Q-AG-16` | Agenda 리비전/충돌 의미 체계: 덮어쓰기와 새 리비전의 구분, 기준 리비전이 최신이 아님을 감지하는 방식, 병합 가능 여부, 이력 보존 및 정본으로 인정되는 결과 | AG-03 |
 | <a id="atlas-q-ag-17"></a>`Q-AG-17` | 정확한 최신이 아닌 리비전/충돌 표시, 비교/병합/덮어쓰기/새 항목으로 저장/취소 컨트롤, 영속화 실패, 재시도 및 초안 보존 | AG-03 |
-| <a id="atlas-q-ag-19"></a>`Q-AG-19` | 정확한 보관, 닫기, 다시 열기 및 보관 해제 진입점/행동, 영향 미리보기, 성공/실패, 실행 취소, 키보드 경로 및 포커스 복귀 | AG-04 |
-| <a id="atlas-q-ag-20"></a>`Q-AG-20` | 정확한 삭제 진입점, 범위/영구성 확인, 취소/실패/재시도, 복구 진입점/행동, 사용 불가 상태, 키보드 경로 및 포커스 복귀 | AG-04 |
+| <a id="atlas-q-ag-19"></a>`Q-AG-19` | **확정 경계**: 닫기는 전용 실행 종료 확인까지 상태를 보존하고 Saved Agenda를 삭제하지 않는다. **남은 설계·검증**: 영향 미리보기·원격 미확인·종료 실패·재열기·키보드 복귀. 보관·예약·복구 기본값만 연결된 HUM에 종속된다. | AG-04 |
+| <a id="atlas-q-ag-20"></a>`Q-AG-20` | **설계안 준비**: [삭제·복구 분기](../references/design-synthesis/egdesk-ux-realization-proposals.md#agenda-delete-recover)의 Sidebar 진입·범위 확인·삭제 중단·복구·목록 복귀. **남은 검증**: 동시 저장·종료 미확인·이동 실패·영구 삭제 일부 실패·권한 철회·키보드 경로. | AG-04 |
 
 ### 뷰, Canvas 및 탐색
 
@@ -928,15 +1066,15 @@ Reference가 널리 쓰인다는 사실, 현재 구현에 이미 있다는 사�
 | <a id="atlas-q-view-01"></a>`Q-VIEW-01` | 리소스를 여는 최종 방식: 사이드바, Library, 파일 선택기, 끌어다 놓기, 명령 팔레트, Chat 링크, Canvas 행동 또는 기타 진입점 | V-01 |
 | <a id="atlas-q-view-02"></a>`Q-VIEW-02` | 열기 피드백, 초기 배치/크기/포커스, 중복 리소스 동작 및 키보드 경로 | V-01 |
 | <a id="atlas-q-view-03"></a>`Q-VIEW-03` | 정확한 사용 불가/미지원/권한 거부 UI 및 다음 행동 | V-01 |
-| <a id="atlas-q-view-04"></a>`Q-VIEW-04` | 이동/크기 조정/포커스를 위한 포인터, 트랙패드, 터치 및 키보드 상호작용, 선택과 포커스의 구분, 스냅/충돌/경계 | V-02 |
+| <a id="atlas-q-view-04"></a>`Q-VIEW-04` | **확정 경계**: 카메라 이동·선택·입력 focus와 실제 view resize는 다르다. **남은 설계·검증**: 포인터·트랙패드·키보드·드래그 없는 대안, 스냅·충돌·경계와 resize 후 재관찰. | V-02 |
 | <a id="atlas-q-view-05"></a>`Q-VIEW-05` | 임시 그룹화와 Agenda 구성원 포함의 의미 차이, 그룹화의 지속 여부 및 중첩 그룹 허용 여부 | V-02 |
-| <a id="atlas-q-view-06"></a>`Q-VIEW-06` | 최대화와 전체 화면의 구분, 유지되는 UI 외곽 요소/헤드업 표시 영역, 종료 동작 및 프레젠테이션 상태의 복원 여부 | V-02 |
+| <a id="atlas-q-view-06"></a>`Q-VIEW-06` | **확정 경계**: 탭/view bar 더블클릭은 기존 비율을 유지한 집중 보기다. **남은 질문**: Browser 내부 viewport·responsive layout 변경 여부, Canvas zoom·resize·page zoom과의 구분, 다른 전체 화면 모드와의 관계, 유지되는 UI와 원 시점 복귀 | V-02 |
 | <a id="atlas-q-view-07"></a>`Q-VIEW-07` | **확정 경계**: Canvas viewport 밖 이동은 닫기나 suspend가 아니며 lifecycle은 view/runtime별로 판단한다. Agenda 닫기는 그 Agenda만 소유한 runtime을 종료한다. **남은 질문**: 단일 뷰 닫기, Agenda에서 뷰 제거, 공유 runtime 분리와 기반 resource/process 종료를 어떤 컨트롤로 구분하는가? | V-02, TERM-01 |
-| <a id="atlas-q-view-08"></a>`Q-VIEW-08` | Canvas 탐색 제스처, 미니맵 역할, 경계, 이동/확대·축소 지속성, 키보드 대안 및 모션 감소 동작 | V-03 |
+| <a id="atlas-q-view-08"></a>`Q-VIEW-08` | **확정 경계**: pan·zoom은 Agent 실행 대상을 바꾸지 않는다. **남은 설계·검증**: 탐색 제스처·미니맵·경계·복귀 위치·모션 감소·비공간 대안. 저장되는 시점 범위는 Agenda/session 정책에 연결한다. | V-03 |
 | <a id="atlas-q-view-09"></a>`Q-VIEW-09` | 각 리소스 유형에서 어떤 컨트롤이 네이티브이고 어떤 컨트롤이 맞춤 조정된 것인지, 입력을 누가 소유하는지, 어떤 화면상 확인 증거가 성공을 입증하는지, 그리고 어떤 리소스별 흐름이 실패/복구를 정의하는가? | V-01 |
 | <a id="atlas-q-view-10"></a>`Q-VIEW-10` | 정확한 다중 선택, 그룹화, 그룹 해제, 그룹 들어가기/나오기, 키보드/포커스, 사용 불가, 실패 및 실행 취소 상호작용 | L-03, V-02 |
 | <a id="atlas-q-view-11"></a>`Q-VIEW-11` | 승인된 모든 리소스 진입 화면의 정확한 컨트롤/레이블, 대상 선택, 클릭/키보드/드롭 제스처, 열기와 포커스 행동의 구분, 중복 처리, 대기/오류 상태 및 포커스 복귀 | V-01 |
-| <a id="atlas-q-view-12"></a>`Q-VIEW-12` | 정확한 최대화, 전체 화면, 복원 및 이스케이프 컨트롤, 포인터/키보드 경로, 유지되는 복귀 어포던스, 포커스, 사용 불가 상태 및 실패 복구 | V-02 |
+| <a id="atlas-q-view-12"></a>`Q-VIEW-12` | **설계안 준비**: 비율 유지 집중 보기와 원 위치 복귀. **남은 설계·검증**: OS 전체 화면과의 구분, Esc 우선순위·대상 닫힘·실패·focus 복귀. 확대만으로 내부 layout이나 실행 대상을 바꾸지 않는다. | V-02 |
 | <a id="atlas-q-view-13"></a>`Q-VIEW-13` | 정확한 뷰 닫기 컨트롤, 저장되지 않았거나 실행 중인 리소스의 확인, 취소/강제 선택, 닫기 실패, 키보드 경로 및 성공 또는 취소 후 포커스가 이동할 위치 | V-02 |
 | <a id="atlas-q-disc-01"></a>`Q-DISC-01` | 전역 검색, Canvas 찾기, Agenda 검색, Library 검색 및 명령 팔레트 가운데 무엇이 서로 구별되는 화면인가? | V-03, DISC-01 |
 | <a id="atlas-q-disc-02"></a>`Q-DISC-02` | 정확한 검색어 입력, 필터/범위/지우기 컨트롤, 진행 상태, 결과 유형/순위, 결과 없음/최신 상태가 아닌 결과 상태, 결과 포커스/열기 동작 및 개인정보 보호 경계 | V-03, DISC-01 |
@@ -951,10 +1089,10 @@ Reference가 널리 쓰인다는 사실, 현재 구현에 이미 있다는 사�
 | <a id="atlas-q-chat-02"></a>`Q-CHAT-02` | Dock의 정확한 Chat 아이콘·레이블과 Canvas에 열리는 Agent 방의 header·avatar·이름·message bubble 작성자, Agent 방 전환·설정 진입, message timeline, 요청 컨텍스트 영역, 작성기, 보내기, 활동 표시, Canvas 상태 연결, 중지, 키보드·포커스·빈 상태·이용 불가·재진입 동작 | CHAT-01 |
 | <a id="atlas-q-chat-03"></a>`Q-CHAT-03` | Chat 기록, 초안 텍스트, 첨부 파일, 컨텍스트 참조, 작업/결과 상태 및 스크롤/포커스 상태 중 무엇이 닫기와 재시작 후에도 지속되는가? | CHAT-01, AI-05 |
 | <a id="atlas-q-ai-01"></a>`Q-AI-01` | 어떤 제품 화면에서 Agent 요청을 시작할 수 있으며, 각 화면은 어떤 초안/첨부 파일/컨텍스트 대상 유형을 지원하는가? | CHAT-01, AI-01, CODE-01 |
-| <a id="atlas-q-ai-02"></a>`Q-AI-02` | 정확한 보내기/실행/중지 컨트롤, 키보드 동작, 중복 제출 처리 및 요청 수락 피드백 | CHAT-01, AI-01 |
+| <a id="atlas-q-ai-02"></a>`Q-AI-02` | **설계안 준비**: UX 공통 입력의 전송·줄바꿈·중지와 담당 업무 표시. **남은 설계·검증**: IME 조합 확정, 연속 입력·중복 제출·수락 전 실패·늦은 수락, 요청과 초안 보존. 중지 요청을 종료 확인으로 표시하지 않는다. | CHAT-01, AI-01 |
 | <a id="atlas-q-ai-03"></a>`Q-AI-03` | 선택한 컨텍스트를 미리 보거나 수정해야 할 때 기본적으로 어떤 컨텍스트 사실이 표시되며, 어떤 민감한 범위 변경에 새로운 권한 결정이 필요한가? | AI-01, AI-02 |
 | <a id="atlas-q-ai-04"></a>`Q-AI-04` | 제품 Task의 정본 상태 `queued`, `waiting-on-dependency`, `ready`, `running`, `approval-required`, `completed`, `failed`, `cancelled` 각각을 어떤 레이블·표시기·원인·시간과 다음 컨트롤로 보여 주는가? Chat의 `Agent 작업 중` `[ · · · ]` 애니메이션과 접근성 텍스트는 model/tool/Reader lifecycle을 어떻게 요약하는가? 클릭 시 Snapshot View에서 direct tool의 완전한 명명 결과 또는 Smart Read의 `[원본 캡처] [이 Agent에게 전달된 내용] [변환 관계]`를 어떻게 구분하며, `[현재 열기]`로 별도 Live View를 열고 `[비교]`로 역사적·현재 상태를 나란히 놓는 정확한 viewer·레이블·키보드·포커스·권한 거부 UI는 무엇인가? Snapshot View와 Live View가 별도 identity로 공존하고, direct 결과 뒤의 무표시 생략과 Smart Read lineage 은폐를 허용하지 않는 경계는 다시 열지 않는다. snapshot을 어느 기간·범위로 보존하고 secret·redaction·삭제 정책 때문에 열 수 없을 때 어떤 상태와 manifest/hash를 남기는가? 사용자 중지·재시도·timeout이 어느 Task 전이를 만들고, `partial`은 Task 상태가 아닌 여러 Task의 Result 종합 상태로 어디에 표시하며, Run 수명주기와 어떻게 구분하는가? | AI-01, READ-01, READ-02, AI-06 |
-| <a id="atlas-q-ai-05"></a>`Q-AI-05` | 실행 시작 후 컨텍스트 수정 방식: 계속, 재시작, 포크 또는 새 요청 중 무엇이며, 어떤 출력이 유지되는가? | AI-02 |
+| <a id="atlas-q-ai-05"></a>`Q-AI-05` | **확정 경계**: 사용자 조정·도구 관찰·관련 자료 변화는 같은 Run의 가능한 가장 이른 다음 모델 호출에 반영하며 과거 입력은 보존한다. 일반적인 조정에는 재시작·새 attempt·fork가 필요하지 않다. **남은 질문**: 조정 수신과 실제 반영 상태, 여러 동시 업무 중 적용 대상, 앞으로의 context 제외와 과거 전달 기록의 차이를 어떤 UI로 표현하는가? | AI-02 |
 | <a id="atlas-q-ai-06"></a>`Q-AI-06` | Agent 담당자 방과 공유 workroom/Thread의 생성·참여자·Agenda 관계·지속성·개인정보·작업 권한 및 이전 대화·Memo reference·컨텍스트가 전송될 수 있는 범위 | AI-03 |
 | <a id="atlas-q-ai-07"></a>`Q-AI-07` | 어떤 Agent/제공자/프로필 선택지가 사용자에게 표시되며, 그중 하나를 선택할 때 어떤 기능/구성 정보가 반드시 보여야 하는가? | AI-01, AI-03, AI-06 |
 | <a id="atlas-q-ai-08"></a>`Q-AI-08` | Agent 경로 지정 선택은 작업, 대화, Agenda 또는 앱 범위별로 어떻게 지속되며, 사용자는 언제 자동 경로 지정을 검사하거나 재정의할 수 있는가? | AI-01, AI-03, AI-06 |
@@ -964,14 +1102,14 @@ Reference가 널리 쓰인다는 사실, 현재 구현에 이미 있다는 사�
 | <a id="atlas-q-ai-12"></a>`Q-AI-12` | 정확한 Agent 방 전환과 공유 workroom/Thread 생성·열기·선택, 참여자·위임 관계 표시, 작성기, 보내기/위임, 중지/재시도, 키보드/포커스, 실패 및 재진입 컨트롤 | AI-03 |
 | <a id="atlas-q-ai-13"></a>`Q-AI-13` | 정확한 컨텍스트 공유 진입점, 출처/대상/콘텐츠/참여자 선택, 미리보기, 확인/취소, 중복/개인정보 보호 경고, 실행 취소, 실패 및 포커스 복귀 | AI-03 |
 | <a id="atlas-q-media-01"></a>`Q-MEDIA-01` | Agent가 답변 의미와 산출물 유형에 맞는 매체 구성을 제안하고 System이 지원·권한·렌더 상태를 검증한다는 전제에서, 어떤 Agent Observation Snapshot과 고정된 파생 산출물을 Answer의 비교·근거·표·원자료 report set로 선별하며 제품 사용자는 언제 이를 재정의할 수 있는가? 원자료는 도구 호출 당시의 읽기 전용 Snapshot View로 열리고, 파생 표·요약·차트는 해당 snapshot에서 원 source/runtime revision으로 이동할 수 있어야 한다는 경계는 다시 열지 않는다. Answer Briefing의 역사적 snapshot·고정 산출물과 제품 사용자가 다루는 현재 Live View가 같은 Canvas에 공존한다는 전제에서, raw tool trace 전체와 숨은 추론을 복사하지 않으면서도 selection·summary·visualization이 provenance를 끊지 않는 정확한 표시·편집·복구 규칙은 무엇인가? | AI-04 |
-| <a id="atlas-q-media-02"></a>`Q-MEDIA-02` | 지속되는 도메인 객체를 새로 만들지 않는 탐색 어포던스로 Chat에서 Canvas target을 열거나 포커스하고 Canvas에서 원 Answer·Chat 위치로 돌아가는 정확한 컨트롤은 무엇인가? target이 누락·최신 아님·권한 거부인 경우, Chat 또는 Canvas 한쪽의 렌더 실패, 재시도·다시 연결·원위치 포커스 복귀와 재진입은 각각 어떻게 동작하는가? | AI-04 |
+| <a id="atlas-q-media-02"></a>`Q-MEDIA-02` | **확정 경계**: Chat–Canvas 이동은 같은 Answer의 탐색이며 새 도메인 객체·Run을 만들지 않는다. **남은 설계·검증**: 누락·stale·권한 거부·한쪽 렌더 실패에서 원문 연결·초안·원 Chat 위치를 보존하는 표시와 복귀. | AI-04 |
 | <a id="atlas-q-media-03"></a>`Q-MEDIA-03` | 화면 간 편집, 출처, 정본 결과 위치, 동기화 및 삭제 동작 | AI-04 |
 | <a id="atlas-q-media-04"></a>`Q-MEDIA-04` | 정본 제품명을 `Answer Briefing / 답변 브리핑`과 진입 레이블 `브리핑 보기`로 확정할 것인가? 이 기능은 제품 사용자에게 필요한 계획·증거·분석·결정·산출물을 시간·공간적으로 보여 주고 숨은 chain-of-thought를 노출하지 않는다는 전제에서, 하나의 Answer에 속한 Canvas projection의 어떤 산출물·visible target이 Briefing Step이 될 수 있고 Briefing Step 묶음·설명 순서·Focus Scope를 누가 작성·편집하며 무엇을 참조할 수 있는가? | AI-05 |
 | <a id="atlas-q-media-05"></a>`Q-MEDIA-05` | Briefing Step 또는 Briefing Step이 가리키는 visible target에 다음 Chat으로 보낼 댓글을 붙일 수 있다는 전제에서, 정확히 어떤 대상에 누가 작성·읽기·편집·삭제·공유할 수 있으며 댓글을 Canvas drawing primitive와 어떻게 구별하는가? | AI-05 |
 | <a id="atlas-q-media-06"></a>`Q-MEDIA-06` | **확정 경계**: Canvas annotation에는 도형형 시각 표식과 위치 고정형 Canvas Memo가 있다. Memo는 사용자 본문과 작성자별 짧은 답글을 분리하고 자동으로 긴 Chat으로 승격하지 않는다. **남은 질문**: 두 유형의 대상 모델, 수락 상태, 지속성, 출처, 원본 영향, target 누락과 Agent 방 mention 연결을 어떻게 표현하는가? 이것들은 Briefing Comment와 별개다. | CANVAS-01 |
 | <a id="atlas-q-media-07"></a>`Q-MEDIA-07` | 정확한 “다음 Chat에 포함” 컨트롤, 첨부 파일 미리보기/유효성 검사, 최신 대상과 맞지 않거나 누락된 Briefing Step에 대한 피드백, 제거/다시 연결, 전달/전송 실패 및 재시도 동작 | AI-05 |
 | <a id="atlas-q-media-08"></a>`Q-MEDIA-08` | 어떤 Briefing Comment와 Chat 초안/첨부 파일이 닫기나 재시작 후에도 지속되며, 해당 Answer Briefing 대상이 변경되거나 사라졌을 때 어떤 재진입 상태가 나타나는가? | AI-05, CHAT-01 |
-| <a id="atlas-q-media-09"></a>`Q-MEDIA-09` | 정확한 Answer Briefing 진입점, Briefing Step 순서·목록, 이전·다음·직접 이동·전체 보기·종료 컨트롤, Focus Scope·카메라·포커스 동작, 키보드 경로 및 움직임 감소 프레젠테이션은 무엇인가? 자동 진행은 별도 owner 결정 없이는 전제하지 않는다. | AI-05 |
+| <a id="atlas-q-media-09"></a>`Q-MEDIA-09` | **확정 경계**: 이전·다음·직접 이동·전체 보기는 수동 탐색이며 새 실행이 아니다. **남은 설계·검증**: 단계 목록·원 위치 복귀·target 누락·권한 거부·키보드·모션 감소. 자동 진행은 전제하지 않으며 편집 권한은 HUM-BRIEF-001에 연결한다. | AI-05 |
 | <a id="atlas-q-media-10"></a>`Q-MEDIA-10` | Answer Briefing 지속성, 편집/버전 권한, 삭제, 공유, 동시 보기/편집 및 기반 답변/산출물과의 관계 | AI-05 |
 | <a id="atlas-q-media-11"></a>`Q-MEDIA-11` | 정확한 Briefing Comment 생성/열기/편집/삭제/취소 컨트롤, 초안 유효성 검사, 저장/실패/실행 취소 상태, 키보드 경로, 포커스 복귀 및 편집 중 대상 유실 시 동작 | AI-05 |
 | <a id="atlas-q-media-12"></a>`Q-MEDIA-12` | 연결된 Canvas 표현의 정확한 편집/삭제/동기화 컨트롤, Chat 영향 미리보기, 충돌/실패/재시도/실행 취소, 키보드 경로 및 포커스 복귀 | AI-04 |
@@ -989,18 +1127,18 @@ Reference가 널리 쓰인다는 사실, 현재 구현에 이미 있다는 사�
 | <a id="atlas-q-agent-06"></a>`Q-AGENT-06` | thread/task, 명시적 선택, Agenda, 임시 그룹·레이아웃, visible/focused resource, 최근 관련 상태, 계정·권한·실행 범위로 만든 context revision을 어디서 검사·수정·제외하고, 민감 범위·포함 이유와 변경 뒤 continue·restart·fork 의미를 어떻게 표시하는가? | AGENT-01–AGENT-03, AI-02, CHAT-01 |
 | <a id="atlas-q-agent-07"></a>`Q-AGENT-07` | 대화·Agenda·Profile·제품 사용자·조직 Memory의 읽기/쓰기 범위, 자동 기록 조건, 검사·편집·삭제·내보내기·만료·이전·공유·동기화 경계는 무엇인가? 각 Run snapshot에는 실제 사용한 Memory ID·revision·scope와 포함 이유를 어떻게 남기고, 최신 아님·삭제됨·권한 거부 상태를 어떻게 표시하는가? | AGENT-01, AGENT-02, AI-02, CHAT-01, DATA-01 |
 | <a id="atlas-q-agent-08"></a>`Q-AGENT-08` | credential handle을 생성·선택·검사·교체·만료·철회하는 정확한 UI와 secret 비노출 방식은 무엇이며, provider/account/resource 불일치와 새 외부 권한 승인 경계를 어떻게 복구하는가? | AGENT-01, AGENT-02, AUTH-01, TOOL-01 |
-| <a id="atlas-q-agent-09"></a>`Q-AGENT-09` | Ontology binding의 scope·version을 선택·검사·교체하는 규칙과 누락·구버전·충돌 때 대기·거부·fallback·제품 사용자 개입 동작은 무엇인가? | AGENT-01–AGENT-03, ONT-01, ONT-02 |
+| <a id="atlas-q-agent-09"></a>`Q-AGENT-09` | **확정 경계**: 첫 호출 전 System이 적용 정책에서 active Ontology와 필요한 내용을 resolve·retrieve하며 사용자가 revision을 입력하지 않는다. 관련 변화는 같은 Run의 다음 호출에 반영하고 특정 DB·상시 watcher는 전제하지 않는다. **남은 질문**: 조직 지식 없는 최초 사용, 정책 우선순위·선택 범위·충돌 해소·검사 UI와 실제 읽기 실패의 대체 경로는 무엇인가? | AGENT-01–AGENT-03, ONT-01, ONT-02 |
 | <a id="atlas-q-agent-10"></a>`Q-AGENT-10` | 시간·토큰·비용·네트워크·파일시스템·sandbox·동시성 제한을 누가 어느 범위에서 설정·조정하며, Run 중 상한 상태·초과 행동·확대 승인 경계를 어디에 표시하는가? | AGENT-01–AGENT-03, AI-06, CODE-01 |
 | <a id="atlas-q-agent-11"></a>`Q-AGENT-11` | Runtime health, Run configuration snapshot, model/tool/context/Ontology/권한 결정, handoff, 비용, 출력·증거와 version을 사용자가 어느 수준으로 검사하고 무엇을 얼마나 보존·내보내기·삭제할 수 있는가? | AGENT-01–AGENT-03, AI-03, ONT-01, DATA-01 |
 | <a id="atlas-q-agent-12"></a>`Q-AGENT-12` | Chat·Canvas에서 Agent/Profile/Run/Task/context/Result의 관계와 상태를 각각 어떤 표현으로 보여 주고, 중복된 긴 본문 없이 어떤 컨트롤로 상세 정보·증거·원 실행을 여는가? | AGENT-01–AGENT-03, AI-03–AI-05, CANVAS-01 |
 | <a id="atlas-q-agent-13"></a>`Q-AGENT-13` | 제품 사용자 요청, 선택한 conversation context, Profile instructions·personality, 제품 System policy와 provider policy·guardrail은 어떤 우선순위로 effective instruction을 만들며, 각 항목 중 무엇을 원문·요약·version·hash로 누구에게 보여 주고 누가 편집할 수 있는가? 충돌·무효화·노출 제한은 어느 UI에서 어떻게 설명하는가? | AGENT-01, AGENT-02, AUTH-01 |
 | <a id="atlas-q-agent-14"></a>`Q-AGENT-14` | Run, execution attempt, resume, retry, fork, checkpoint, 새 요청, cancel, timeout, expiry의 최종 객체 관계와 상태 전이는 무엇인가? 전환 진입점, 차이·보존·외부 효과 미리보기, `확정`·`취소`, 실패·재시도, 원 Run 포커스 복귀·재진입과 기존 메시지·출력·증거 보존을 정확히 어떻게 보장하는가? | AGENT-01–AGENT-03, AI-02, AI-06 |
 | <a id="atlas-q-agent-15"></a>`Q-AGENT-15` | 상위 Run·Task가 하위 Agent·Task에 위임할 수 있는 scope, child configuration/context snapshot, dependency 상태, 결과 귀속과 권한 비확대 규칙은 무엇인가? | AGENT-02, AI-06, AI-07 |
-| <a id="atlas-q-agent-16"></a>`Q-AGENT-16` | Profile·provider·model·tool·Ontology·credential·권한 상태가 실행 중 바뀌었을 때 현재 Run을 계속·중지·재검증·같은 Run의 새 attempt·새 Run fork 중 어디로 전환하는가? 변경 알림과 전환 확인·취소 UI, 차이 미리보기, 실패·재시도, 원 Run 포커스 복귀와 재진입은 어떻게 동작하는가? | AGENT-01–AGENT-03, SYS-01 |
+| <a id="atlas-q-agent-16"></a>`Q-AGENT-16` | **확정 경계**: 일반적인 context·Ontology 관찰 갱신은 같은 Run의 다음 호출에서 처리한다. **남은 질문**: Engine·Profile·실행 상한의 명시적 변경, 실제 execution retry, 권한 철회·승인 대상 변경·동시 쓰기 충돌 때의 전환·차이·실패·재진입 UI와 정책은 무엇인가? | AGENT-01–AGENT-03, SYS-01 |
 | <a id="atlas-q-agent-17"></a>`Q-AGENT-17` | relation map의 제품 의미·version·검사·편집·거버넌스는 무엇이며, 이를 특정 module/framework/runtime topology를 강제하는 설계도로 오해하지 않게 어떤 관점별 UI와 문서 표현을 사용하는가? | AI-02, AI-06, ONT-01, ONT-02 |
 | <a id="atlas-q-agent-18"></a>`Q-AGENT-18` | 모든 Agent 제어 활동을 Desk에서 어디까지 보이게 투영하며, contributor·status·scope·evidence·integration result의 위치·밀도·보존과 raw agent chatter 제외를 어떻게 처리하는가? | AGENT-02, AI-03, AI-06, AI-07, CODE-01, TERM-01, CU-01 |
-| <a id="atlas-q-agent-19"></a>`Q-AGENT-19` | 핵심 성공·복구 흐름의 반복 가능한 acceptance 시나리오, 반복 횟수, 허용 편차, 장애 주입, evidence 묶음, last checked, version 변화 뒤 회귀·재검증 규칙은 무엇인가? | 모든 trace, 특히 L-01–L-03, AI-01, AI-06, TERM-01, CU-01, SYS-01 |
-| <a id="atlas-q-agent-20"></a>`Q-AGENT-20` | bridge/helper/transport/provider conversation/process/view별 health를 어느 UI에서 구분하며, 원인 미확정·last checked·영향 범위를 어떻게 표시하는가? 경계별 `다시 검사`·`재연결`·`새 실행`·`snapshot 열기`·`대체`·`중지` 컨트롤, 확정·취소, 실패·재시도·포커스 복귀와 복구 후 검증 화면 재진입은 정확히 어떻게 동작하는가? | SYS-01, L-02, V-01, TERM-01, CU-01 |
+| <a id="atlas-q-agent-19"></a>`Q-AGENT-19` | **검증 설계**: Contract 인수 증거와 UX §4.3을 기준으로 정상·취소·부분 완료·연결 단절·재접속·중복/늦은 사건의 순서를 바꾸어 검사한다. 실행 환경·version·입력·예상 결과·실제 증거·확인 시점을 기록한다. **남은 측정**: 실제 구현별 반복 범위·시간/용량 분포·회귀 대상. 수치나 구현 성공을 사용자 답변으로 대신하지 않는다. | 모든 trace, 특히 L-01–L-03, AI-01, AI-06, TERM-01, CU-01, SYS-01 |
+| <a id="atlas-q-agent-20"></a>`Q-AGENT-20` | **확정 경계**: 실행 위치·실패 boundary·마지막 관찰을 구분하고 원격 단절·중지 요청·종료 확인을 합치지 않는다. **남은 설계·검증**: 실제 health probe와 다시 검사·재연결·새 실행·snapshot·중지 경로, 부분 복구·늦은 결과·원 작업 복귀. | SYS-01, L-02, V-01, TERM-01, CU-01 |
 
 ### 오케스트레이션 및 승인
 
@@ -1010,7 +1148,7 @@ Reference가 널리 쓰인다는 사실, 현재 구현에 이미 있다는 사�
 | <a id="atlas-q-orch-02"></a>`Q-ORCH-02` | 어떤 종속성 실패가 어떤 하위 작업을 차단하는지, 독립적인 성공을 어떻게 보존하는지, 그리고 부분 결과가 언제 최종 종합에 들어갈 수 있는지 | AI-06 |
 | <a id="atlas-q-orch-03"></a>`Q-ORCH-03` | 일괄로 묶인 승인 필요 결정은 어느 검토 시점에, 기존 또는 새로운 어떤 제품 화면에서 제시되는가? 대기열 객체는 전제하지 않는다 | AI-07, AUTH-01 |
 | <a id="atlas-q-orch-04"></a>`Q-ORCH-04` | 각 작업 상태에서 어떤 취소, 재시도, 시간 초과, 재할당 및 대체 경로 전환을 허용하며, 이러한 전환이 실행 중이거나 종속되었거나 완료된 작업에 어떤 영향을 주는가? | AI-06 |
-| <a id="atlas-q-orch-05"></a>`Q-ORCH-05` | 요청된 행동 중 어떤 것이 새로운 외부 인프라, 자격 증명, 외부 데이터, 비용, 배포 또는 실질적으로 더 넓은 권한에 대한 확인된 승인 경계를 넘는가? 도메인 사례를 `A-INFRA-*`와 `A-AUTH-*` 중 하나에 어떻게 한 번만 매핑하는가? 그리고 어떤 경계선 사례, 철회 또는 만료 규칙이 적용되는가? | AI-07, AUTH-01, BROWSER-02, BROWSER-04 |
+| <a id="atlas-q-orch-05"></a>`Q-ORCH-05` | **확정 경계**: 기존 위임 안의 일반 분할·검토·복구는 계속한다. **남은 설계·검증**: 새 인프라·credential·전송·비용·배포·권한 확대를 해당 gate에 한 번만 연결하고, 철회·만료가 걸린 행동만 차단하는 사례와 복귀 경로. 새 위임 정책만 HUM에 남긴다. | AI-07, AUTH-01, BROWSER-02, BROWSER-04 |
 | <a id="atlas-q-orch-06"></a>`Q-ORCH-06` | 정확한 승인/거부/보류 컨트롤, 결정 패키지 레이아웃, 영향받는 작업 탐색, 포커스/키보드 동작, 확인 및 오류/재시도 피드백 | AI-07, AUTH-01 |
 | <a id="atlas-q-orch-07"></a>`Q-ORCH-07` | 외부 인프라·credential·비용·배포·민감 데이터·새 권한의 최종 승인권은 제품 소유자에게 있다는 전제에서, 어떤 범위를 누구에게 위임할 수 있고 승인·위임은 얼마나 지속되며 어떻게 철회·감사·알림 처리하는가? | AI-07, AUTH-01 |
 | <a id="atlas-q-orch-08"></a>`Q-ORCH-08` | 정확한 작업 선택 및 취소/재시도/재할당/대체 경로 진입점, 영향 미리보기, 확인/취소, 대기/실패, 키보드 경로 및 포커스 복귀 | AI-06 |
@@ -1039,10 +1177,10 @@ Reference가 널리 쓰인다는 사실, 현재 구현에 이미 있다는 사�
 | <a id="atlas-q-code-08"></a>`Q-CODE-08` | 정확한 빌드/테스트/검사/검토 컨트롤, 대상/명령/리비전 미리보기, 실행/취소/재시도, 결과 탐색/필터, 실패 상태, 키보드 경로 및 포커스 복귀 | CODE-01 |
 | <a id="atlas-q-code-09"></a>`Q-CODE-09` | 정확한 변경 비교 진입부/패널, 파일 및 변경 묶음 탐색, 현재안 대 제안안 비교, 수락/거부/되돌리기/부분 수락/계속 컨트롤, 파괴적 범위 미리보기, 취소/실행 취소, 최신 상태가 아니거나 충돌하는 변경 비교 처리, 적용 실패/재시도, 키보드 경로, 포커스 복귀 및 재진입 | CODE-01 |
 | <a id="atlas-q-term-01"></a>`Q-TERM-01` | Terminal이 사람들에게 언제 보이며, 이를 주된 코딩 UX로 만들지 않고 어떻게 여는지 | TERM-01 |
-| <a id="atlas-q-term-02"></a>`Q-TERM-02` | Terminal view 닫기, transport 분리, process 종료, 고정/백그라운드, read-only final-output snapshot이 서로 다른 행동이라는 전제에서 각 컨트롤·확인·결과와 process 종료 뒤 snapshot 보존 범위는 무엇인가? | TERM-01 |
-| <a id="atlas-q-term-03"></a>`Q-TERM-03` | 통신 연결 재수립, 검증된 동일 세션 재연결, 새 프로세스 재실행, 스냅샷 전용 복원, 프로세스/세션 동일성 확인 실패 및 재진입 UI | TERM-01, L-02 |
+| <a id="atlas-q-term-02"></a>`Q-TERM-02` | Terminal view 닫기, transport 분리, process 종료와 final-output snapshot은 서로 다르다. 유지되는 실행은 다른 Canvas 표현에서 찾을 수 있고 Agenda 닫기는 단독 소유 runtime 종료 규칙을 따른다는 전제에서, 각 제어·결과·보존 범위는 무엇인가? | TERM-01 |
+| <a id="atlas-q-term-03"></a>`Q-TERM-03` | **확정 경계**: transport 복구·동일 process 재연결·새 process·출력 snapshot을 구분한다. **남은 설계·검증**: PC/process 식별과 생존 증거, 동일성 확인 실패·재진입·이전 출력 보존. 대화·파일 복원만으로 live session 복구를 주장하지 않는다. | TERM-01, L-02 |
 | <a id="atlas-q-term-04"></a>`Q-TERM-04` | 정확한 선택적 Terminal 진입/열기 컨트롤, 새 세션 시작 대 기존 세션 연결 선택, 현재 작업 디렉터리/세션 표시, 대기/실패, 키보드 경로, 초기 포커스 및 복귀 동작 | TERM-01 |
-| <a id="atlas-q-term-05"></a>`Q-TERM-05` | 정확한 닫기/분리/종료/고정/백그라운드/스냅샷 컨트롤, 영향 미리보기, 확인/취소, 포그라운드 프로세스 상태, 실패, 키보드 경로 및 포커스 복귀 | TERM-01 |
+| <a id="atlas-q-term-05"></a>`Q-TERM-05` | **확정 경계**: view 닫기와 process 종료는 다르며 실행을 유지하면 다른 Canvas 표현에 소유·상태가 남는다. **남은 설계·검증**: 닫기·분리·종료·고정·snapshot의 영향과 취소, 원격 종료 미확인·실패·키보드 복귀. | TERM-01 |
 
 ### Ontology, 협업 및 computer-use
 
@@ -1077,19 +1215,19 @@ Reference가 널리 쓰인다는 사실, 현재 구현에 이미 있다는 사�
 
 | ID | 아직 정해야 할 제품 동작 | 영향받는 흐름 |
 |---|---|---|
-| <a id="atlas-q-data-01"></a>`Q-DATA-01` | 설정 정보 아키텍처 및 범위: 앱, Desk, Agenda, 계정/프로필, Agent, 협업자, 기기 | DATA-01 |
+| <a id="atlas-q-data-01"></a>`Q-DATA-01` | **비교안 준비**: [초기화 범주](../references/design-synthesis/egdesk-ux-realization-proposals.md#data-reset)를 앱 환경설정·계정 연결·Agent/Engine Profile 정의·업무 기록으로 나누고 PC 로컬과 공유 원본을 구별했다. **남은 선택**: HUM-EXPORT-001의 저장·초기화 범위; Desk·Agenda·협업자·기기의 실제 설정 연결은 검증한다. | DATA-01 |
 | <a id="atlas-q-data-02"></a>`Q-DATA-02` | 로컬 내보내기/백업 콘텐츠, 형식, 목적지, 자격 증명 제외, 암호화, 보존 및 검증 | DATA-01 |
 | <a id="atlas-q-data-03"></a>`Q-DATA-03` | 가져오기/복원 미리보기, 병합/덮어쓰기, 충돌, 롤백, 버전 호환성 및 성공적인 복원의 증거 | DATA-01 |
-| <a id="atlas-q-data-04"></a>`Q-DATA-04` | 로컬 기록, 감사 로그, 캐시, 생성된 산출물, 자격 증명 및 사용자 데이터의 보존/삭제/초기화 동작 | DATA-01, 모든 Agent 흐름 |
+| <a id="atlas-q-data-04"></a>`Q-DATA-04` | **비교안 준비**: [선택 범위 초기화](../references/design-synthesis/egdesk-ux-realization-proposals.md#data-reset)에 기록·로그·캐시·산출물·인증 정보의 삭제/보존 구분, 재동기화·외부 철회·부분 실패를 연결했다. **남은 선택·검증**: HUM-EXPORT-001의 복구·백업 정책, 참조별 실제 정리·새 입력 제외·최소 처리 기록·종료 미확인 상태를 대조한다. | DATA-01, 모든 Agent 흐름 |
 | <a id="atlas-q-data-05"></a>`Q-DATA-05` | 동기화가 승인되는 경우, 동기화할 객체/상태, 오프라인 편집, 충돌 소유권, 기기 제거, 암호화, 마이그레이션, 내보내기 및 삭제 | DATA-01, COL-01 |
-| <a id="atlas-q-data-06"></a>`Q-DATA-06` | 정확한 설정 진입 화면, 레이블/아이콘, 클릭 및 키보드 행동, 초기 포커스, 범위 탐색 및 닫기/복귀 동작 | DATA-01 |
+| <a id="atlas-q-data-06"></a>`Q-DATA-06` | **설계안 준비**: [설정·초기화 흐름](../references/design-synthesis/egdesk-ux-realization-proposals.md#data-reset)의 진입·범위 선택·미리보기·백업·적용·처리 내역·복귀. **남은 검증**: 초기 focus·탭 순서·레이블·미지원 사유·취소와 부분 적용 뒤 복귀를 실제 화면에서 확인한다. | DATA-01 |
 | <a id="atlas-q-data-07"></a>`Q-DATA-07` | 정확한 로컬 내보내기/백업 진입 컨트롤, 목적지 상호작용, 진행, 취소, 성공 접수 증거 및 실패 재시도 행동 | DATA-01 |
 | <a id="atlas-q-data-08"></a>`Q-DATA-08` | 정확한 가져오기/복원 진입 컨트롤, 미리보기 탐색, 확인/취소, 충돌 해결, 롤백, 성공 증거 및 실패 재시도 행동 | DATA-01 |
 | <a id="atlas-q-data-09"></a>`Q-DATA-09` | 정확한 원격 백업/동기화 요청 진입부, 승인 패키지 표시, 취소/연기 행동 및 승인 전 상태 | DATA-01 |
 | <a id="atlas-q-ux-01"></a>`Q-UX-01` | 목표 접근성 기준선 및 지원되는 키보드, 화면 읽기 프로그램, 대비, 확대/축소, 언어 및 입력 모드 | 전체 |
-| <a id="atlas-q-ux-02"></a>`Q-UX-02` | 사이드바, Canvas 뷰, 메뉴, 대화 상자, Chat 및 항목 닫기/제거에 대한 예측 가능한 포커스 이동 | 전체 |
-| <a id="atlas-q-ux-03"></a>`Q-UX-03` | 비시각적 Canvas/Answer Briefing 표현 및 움직임 감소 대안 | V-03, AI-05, ONT-01 |
-| <a id="atlas-q-ux-04"></a>`Q-UX-04` | 핵심 화면 키보드 순회 및 활성화 맵, 셸/리소스 뷰 전반의 단축키 소유권, 포커스 복구, 비활성/실행 가능 상태에 대한 접근성 안내, 오류/상태에 대한 접근성 안내 및 발견 가능성 | UX-01, 모든 흐름 |
+| <a id="atlas-q-ux-02"></a>`Q-UX-02` | **확정 경계**: 상세·메뉴·대화상자 종료는 시작한 control로 돌아가며 대상이 사라졌으면 같은 업무의 유효 진입점으로 복귀한다. **남은 검증**: Sidebar·Canvas·Chat·native 경계에서 focus 소유권·초안·삭제된 target·재진입 검사. | 전체 |
+| <a id="atlas-q-ux-03"></a>`Q-UX-03` | **확정 경계**: 비공간·모션 감소 경로에서도 같은 대상·단계·결과에 도달하며 Agent 실행과 카메라를 분리한다. **남은 검증**: Canvas·Briefing·Ontology의 의미 동등성과 상태 안내. 준수 수준·지원 조합의 약속만 HUM-A11Y-001에 남긴다. | V-03, AI-05, ONT-01 |
+| <a id="atlas-q-ux-04"></a>`Q-UX-04` | **확정 경계**: 핵심 행동에는 키보드·이름·상태·복귀 경로가 필요하다. **남은 설계·검증**: shell/resource 단축키 충돌·Esc 우선순위·조합 입력·비활성 사유·상태 갱신, 드래그 없는 포인터 대안을 실제 입력별로 확인한다. | UX-01, 모든 흐름 |
 
 <a id="doc-approval-registry"></a>
 

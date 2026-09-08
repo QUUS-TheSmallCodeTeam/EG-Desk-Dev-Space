@@ -21,13 +21,13 @@ EG-Desk는 `references/` 아래에 **외부 repo를 git clone하여 참고**한�
 **문제**: coding-agent가 레퍼런스를 참고하여 코드를 작성할 때, **라이선스 분류 없이 코드 복사**하면 다음 위험 발생:
 
 1. **ASAL/AGPL/SSPL 코드 포팅** → EG-Desk 전체 프로젝트가 동일 라이선스로 viral 전염
-2. **Non-Commercial-only 코드 포팅** → `docs/EG-DESK_Whitepaper.md §10 "Business Model"` 위반
+2. **Non-Commercial-only 코드 포팅** → 당시 [영문 백서의 사업 모델 전제](#whitepaper-git-sources)와 충돌
 3. **MPL 2.0 파일 copyleft** → 수정 파일 공개 의무 트리거
 
 EG-Desk는 **상업화 전제 프로덕트**임이 문서로 확정됨:
-- `docs/EG-DESK_Whitepaper.md §10.1 "Monetization Strategies"` (L766-775)
-- `docs/vision/EG-DESK 백서 - Vision_v1.md L663 "수익"`, L669 "마켓플레이스 수수료 10%"
-- `docs/production/EG-DESK 백서 - Production_v7_temp_한글.md L1467` "미니앱 수익화"
+- 당시 [영문 백서](#whitepaper-git-sources) §10.1 "Monetization Strategies" (L766-775)
+- 당시 [Vision v1 백서](#whitepaper-git-sources) L663 "수익", L669 "마켓플레이스 수수료 10%"
+- 당시 Production v7의 "미니앱 수익화" (L1467). 구버전 파일은 2026-09-06 정리했으며, 당시 원문은 Git blob `dad1e58ac45ca5e8420145022a8e9bbe75e9d7cf`에 보존된다. 현재 백서는 [Production v8](../../../docs/production/EG-DESK%20백서%20-%20Production_v8_한글.md)을 참조한다.
 
 → 라이선스 분류를 **명시적 정책으로 확립**하고, agent template에 rule로 반영 필요.
 
@@ -135,10 +135,17 @@ EG-Desk는 **상업화 전제 프로덕트**임이 문서로 확정됨:
 
 ## References
 
+<a id="whitepaper-git-sources"></a>
+
+2026-09-06 백서 정리 후 현행 문서는 [Production v8](../../../docs/production/EG-DESK%20백서%20-%20Production_v8_한글.md)이다.
+아래 삭제 전 원문은 Git 이력에 남으며, 예를 들어 `git show <blob ID>`로 확인할 수 있다.
+과거 판단의 인용을 현행 백서에 대한 인용으로 소급 변경하지 않는다.
+
 - `references/anytype/LICENSE.md:L1-9` (ASAL 1.0 원문)
 - `references/xyflow/LICENSE` (MIT)
-- `docs/EG-DESK_Whitepaper.md §10 "Business Model Considerations"`
-- `docs/vision/EG-DESK 백서 - Vision_v1.md L663 "수익"`
+- 구 영문 백서 §10 "Business Model Considerations" — Git blob `e1ab95b9e62609d4b12d41b079a4bb32e6a4858c`
+- 구 Vision v1 백서 L663 "수익" — Git blob `8248b68b8ef9469285e562d6f82fef79b8cd4c0a`
+- 구 Production v7 백서 L1467 "미니앱 수익화" — Git blob `dad1e58ac45ca5e8420145022a8e9bbe75e9d7cf`
 - `~/.claude/CLAUDE.md` "EG-Library (Reference Management)" 섹션
 - shelf-review-agent 1라운드 anytype 리뷰 (2026-04-13 세션)
 - [SPDX License List](https://spdx.org/licenses/) — 외부 참조용

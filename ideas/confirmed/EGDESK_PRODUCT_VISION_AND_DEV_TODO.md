@@ -4,7 +4,7 @@
 **Implementation path**: `apps/firefox-ui-demo/`
 **Last updated**: 2026-07-30
 
-This document tracks product decisions and development backlog items that came from active design/development discussion. It is not a marketing whitepaper. The public-facing vision remains in `docs/vision/`, while this file keeps the current product/runtime direction and todo surface aligned.
+This document tracks product decisions and development backlog items that came from active design/development discussion. It is not a marketing whitepaper. The public-facing whitepaper is [Production v8](../../docs/production/EG-DESK%20백서%20-%20Production_v8_한글.md), while this file keeps the current product/runtime direction and todo surface aligned.
 
 ## Current Product Frame
 
@@ -28,7 +28,7 @@ Core principles:
 
 | Area | Current source |
 |---|---|
-| Long-term product vision | `docs/vision/EG-DESK 백서 - Vision_v1.md` |
+| Public-facing whitepaper | [Production v8](../../docs/production/EG-DESK%20백서%20-%20Production_v8_한글.md) |
 | Interaction and orchestration contract | `ideas/confirmed/EGDESK_INTERACTION_AND_ORCHESTRATION_CONTRACT.md` |
 | Interaction trace and acceptance coverage (non-normative; not runtime evidence) | `ideas/confirmed/EGDESK_PRODUCT_INTERACTION_TRACE_ATLAS.md` |
 | Firefox shell strategy | `ideas/confirmed/FIREFOX_SHELL_STRATEGY.md` |

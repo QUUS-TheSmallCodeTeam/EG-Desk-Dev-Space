@@ -59,6 +59,11 @@ Pre-defined Website Roadmaps provide AI with structural understanding before exe
 
 ## Vision Alignment
 
+This section preserves the whitepaper references used when this PRD was written. Those citations did
+not specify an exact version. Removed whitepaper source snapshots remain in Git; see the
+[historical source identifiers](../../.claude/docs/decisions/002-external-reference-license-policy.md#whitepaper-git-sources).
+They are not retroactively attributed to the current Production v8 whitepaper.
+
 This feature strongly aligns with core EG-DESK principles:
 
 ### 1. Observation Learning (Whitepaper Section 3)
@@ -734,8 +739,9 @@ Some sites may have ToS against automated analysis:
 ### Internal Documents
 - `ideas/confirmed/UNIFIED_BROWSER_AUTOMATION_API.md` - Base browser automation PRD
 - `ideas/confirmed/technology-stack.md` - Technology stack registry
-- Vision Whitepaper (Observation Learning, Ambient AI)
-- Production Whitepaper (Oneshot Execution, Ontology)
+- Historical Vision Whitepaper (Observation Learning, Ambient AI; version unspecified in the original citation)
+- Historical Production Whitepaper (Oneshot Execution, Ontology; version unspecified in the original citation)
+- Current public-facing whitepaper: [Production v8](../../docs/production/EG-DESK%20백서%20-%20Production_v8_한글.md)
 
 ### Consultation Report
 - `subagent_reports/20260123_context-aware-chrome-automation-pm-consultation.md` - Full strategic analysis
@@ -754,4 +760,3 @@ Some sites may have ToS against automated analysis:
   - LLM Context Format (compressed, token-efficient)
   - Unified Control Layer (event normalization for AI/User actions)
   - Complete execution flow documentation
-

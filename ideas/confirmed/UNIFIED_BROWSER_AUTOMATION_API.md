@@ -30,7 +30,7 @@
 **최종 수정**: 2025-12-04 (제어권 핸드오프 프로토콜 및 세션 최적화 추가)
 **상태**: ~~Technical Specification~~ → **Superseded 2026-04-17 (ADR-007)**
 **관련 문서**:
-- `EG-DESK_Whitepaper.md` - Browser Control Subsystem (Lines 176-194)
+- 구 영문 백서의 Browser Control Subsystem (당시 인용 Lines 176-194) — 파일은 2026-09-06 삭제했으며 원문은 Git blob `e1ab95b9e62609d4b12d41b079a4bb32e6a4858c`로 보존
 - `INFINITE_CANVAS_BROWSER_INTEGRATION.md` - WebContentsView Architecture ← Firefox 경로로 update 예정
 - `EG-DESK_Spatial_Canvas_UX_Solutions.md` - Guided Tour Visualization
 

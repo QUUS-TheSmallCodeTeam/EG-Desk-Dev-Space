@@ -1,0 +1,16 @@
+54697b657681cc6f438c73b570ed6eaaf238ccfb70bc2f9a8e3e18e04123a54e  docs/references/real-work-scenarios/BROWSER_FRACTURE_ANALYSIS.md
+8e00d84b8000ec2345311002470d1e1ccbf9d85ea697e4ca72f9f2bffb9a5b23  docs/references/real-work-scenarios/INDEX.md
+86a965742c25818aa156316e61599f92c367972e5e19dba6edeec56900b8162e  docs/references/real-work-scenarios/MULTI_AGENT_TECHNIQUE_ANALYSIS.md
+be5887f62c4fcd563c52e36dc135d4a36d3cc589110c4132490e4d3b944b24c6  docs/references/real-work-scenarios/MULTI_DEVICE_HANDOFF_ANALYSIS.md
+96c686b4c79cbb6af8dc9bc3329bb4efaaf8d755ebc9b96ba36deae7deb11f8b  docs/references/real-work-scenarios/README.md
+9125a3bda92df0ec2ab19e49c288453ea48950a805c7cdca814bc76a7b306615  docs/references/real-work-scenarios/cases/rws-0001-git-checkpoint-push-evidence.md
+d211855ccc37ef67333d1e9e7f59d21fdd792c679f5e15d0f55c03b9736f2f8a  docs/references/real-work-scenarios/cases/rws-0002-worktree-integration-ownership.md
+cb91d23e947b45947017c05f82c3ad241ed97087c275fd8f79853437ca9ceb76  docs/references/real-work-scenarios/cases/rws-0003-bounded-map-reduce-semantic-audit.md
+4f3ba7062ee7b75741aa72fb4b8e0b762026f93ed611d03a7b1c10e6113f166c  docs/references/real-work-scenarios/cases/rws-0004-consensus-illusion-clean-room-escape.md
+c46837fdc5ab314c34b0d513a1cf9c9fd23fbac01a29454a5cf428d9110f0c88  docs/references/real-work-scenarios/cases/rws-0005-external-portal-state-machine.md
+070bf210b7a3a75d75f3351d5009fb1be91985ba7d8e0ff390479956bd10fe82  docs/references/real-work-scenarios/cases/rws-0006-blind-reproduction-context-isolation.md
+74ceb5cab093f167f1bd9fbae62a333634d7245d1636a466c7816981b02ce16e  docs/references/real-work-scenarios/cases/rws-0007-browser-surface-identity-lease.md
+320f95c6c4ff49d172efca986e333deb96103af93a188eab6d1e9760d06130da  docs/references/real-work-scenarios/cases/rws-0008-cross-layer-environment-recovery.md
+9565d5c662b7454e00ca5ac76623ea3a22981ff561fc873b92ea7291aa1514f6  docs/references/real-work-scenarios/cases/rws-0009-read-only-scope-lock.md
+98a5735f2479d102fbc366710cd23fd279737ea4f4ed82734ad7bc3a536073ac  docs/references/real-work-scenarios/cases/rws-0010-cross-device-release-handoff.md
+fe1fc8139b56ad3e8722783dbf9b2a7abe8d71a97ba3805c79420c3eba8d0b78  scripts/validate-real-work-scenarios.mjs

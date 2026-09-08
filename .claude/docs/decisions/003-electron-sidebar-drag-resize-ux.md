@@ -26,7 +26,7 @@ EG-Desk는 4-Edge Framework(SPEC §7)로 **고정 폭 Edge bar**를 사용한다
 
 선행 고려사항:
 - anytype은 ASAL 1.0 (🔴 Red, ADR-002) → **코드 포팅 금지, 개념 차용만 가능**
-- EG-Desk는 "invisible until invoked" ambient 철학 (`docs/EG-DESK_Whitepaper.md`)
+- 당시 영문 백서의 "invisible until invoked" ambient 전제 — 2026-09-06 원문 파일 삭제, Git blob `e1ab95b9e62609d4b12d41b079a4bb32e6a4858c`로 보존. 이 인용은 당시 검토 맥락이며 현재 제품 기준은 [Atlas](../../../ideas/confirmed/EGDESK_PRODUCT_INTERACTION_TRACE_ATLAS.md#atlas-manual-start)를 따른다.
 - 이미 Pan Immersion Mode v1 (Task #13)이 "Space/Cmd hold → 3 Edge 숨김"으로 **Edge visibility 제어** 일부 커버
 
 ## Options Considered

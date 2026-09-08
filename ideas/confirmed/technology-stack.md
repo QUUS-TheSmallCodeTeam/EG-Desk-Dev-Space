@@ -426,7 +426,7 @@
 ## 9. External Reference License Policy
 
 > **근거 ADR**: [`.claude/docs/decisions/002-external-reference-license-policy.md`](../../.claude/docs/decisions/002-external-reference-license-policy.md) (Status: **Decided v2 — 2-tier**, user approved 2026-04-13). 본 섹션은 ADR 요약. 상세 근거/대안 평가는 ADR 본문 참조.
-> **EG-Desk는 상업화 전제 프로덕트** — `docs/EG-DESK_Whitepaper.md §10`, `docs/vision/EG-DESK 백서 - Vision_v1.md L663`, `docs/production/EG-DESK 백서 - Production_v7_temp_한글.md L1467`.
+> **EG-Desk는 상업화 전제 프로덕트** — [Production v8 §8 조직의 도입·운영 지원](../../docs/production/EG-DESK%20백서%20-%20Production_v8_한글.md#wp-adoption). 삭제한 구버전·Vision·영문 백서의 당시 인용은 위 ADR에 Git 원문 식별자로 보존한다.
 
 ### Purpose
 
