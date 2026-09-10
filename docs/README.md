@@ -11,6 +11,7 @@
 | 읽을 목적 | 문서 | 담긴 내용 |
 |---|---|---|
 | 사용 흐름과 설계안을 검토 | [사용 흐름·UI 추천안](references/design-synthesis/egdesk-ux-realization-proposals.md#ux-proposals-top) | 9개 구체 흐름과 추천·대안. 아직 미승인 제안 |
+| 사용자처럼 한 동작씩 진행한 기록 확인 | [사용자 행동 리허설](references/design-synthesis/egdesk-user-action-rehearsal-log.md#results) | 8개 여정·9개 회차의 기록. 목표 도달·사용감·미도달·모형 공백을 구분 |
 | 선택지의 차이를 비교 | [정책 추천안 7묶음](references/design-synthesis/egdesk-ux-realization-proposals.md#ux-policy-options) | 같은 UI 추천안 문서의 비교 절 |
 | 결정된 것과 남은 선택 확인 | [사용자 확인 원장](codex/egdesk-product-interaction-trace-atlas-editorial-ledger.md#gap-owner-queue) | 질문·결정·현재 상태를 관리하는 한 곳 |
 | 제품 기준의 사용법 확인 | [사용설명서 Atlas](../ideas/confirmed/EGDESK_PRODUCT_INTERACTION_TRACE_ATLAS.md#atlas-manual-start) | 제품 행동 정본. 미결정 control은 본문에서 구별 |
@@ -84,6 +85,7 @@ EG-Desk 백서는 Production v8 한 개를 유지합니다. 구버전·Vision·�
 
 [제품 문서 운영 정본](codex/egdesk-product-documentation-governance.md#doc-governance-top)은
 Main·PM·WM과 문서 유지보수자의 역할·출처·Q 항목·검증·이력을 다룹니다.
+이후 시뮬레이션의 기본 운영과 개선안 검증·본문 반영은 [사용자·제품 Agent·System 연계 리허설과 개선 반복](codex/egdesk-product-documentation-governance.md#doc-sim-improvement-loop)을 따릅니다.
 
 ### 폴더 구조
 

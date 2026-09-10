@@ -6,7 +6,7 @@ import { fileURLToPath, pathToFileURL } from 'node:url';
 
 const MCP_PACKAGE = process.env.EGDESK_FIREFOX_MCP_PACKAGE || '@mozilla/firefox-devtools-mcp-moz@latest';
 const MARIONETTE_PORT = process.env.EGDESK_MARIONETTE_PORT || '2828';
-const SCREENSHOT_PATH = process.argv[2] || '/tmp/egdesk-chat-profiles-verify.png';
+const SCREENSHOT_PATH = process.argv[2] || true;
 
 const jsSourcePath = fileURLToPath(new URL('../overlay/JS/eg-desk-surface.uc.js', import.meta.url));
 const cssSourcePath = fileURLToPath(new URL('../overlay/CSS/eg-desk-surface.uc.css', import.meta.url));
@@ -14,16 +14,18 @@ const jsSourceUrl = pathToFileURL(jsSourcePath).href;
 const cssText = readFileSync(cssSourcePath, 'utf8');
 
 const proc = spawn('npx', [
-  '-y',
+  '--no-install',
   MCP_PACKAGE,
   '--connectExisting',
   '--marionettePort',
   MARIONETTE_PORT,
   '--enablePrivilegedContext',
   '--enableScript',
+  ...(typeof SCREENSHOT_PATH === 'string' ? ['--unrestricted-save-paths'] : []),
 ], { stdio: ['pipe', 'pipe', 'pipe'] });
 
 let nextId = 1;
+let privilegedContext = null;
 let stdoutBuffer = '';
 let stderrBuffer = '';
 const pending = new Map();
@@ -104,7 +106,7 @@ async function callTool(name, args = {}, timeoutMs = 45000) {
   // firefox-devtools-mcp >= 0.7: evaluate_privileged_script takes `function`
   // (callable string) instead of `expression`. Wrap legacy IIFE expressions.
   if (name === 'evaluate_privileged_script' && typeof toolArgs.expression === 'string') {
-    toolArgs = { function: `() => (\n${toolArgs.expression}\n)` };
+    toolArgs = { context: privilegedContext, function: `() => (\n${toolArgs.expression}\n)` };
   }
   return request('tools/call', { name, arguments: toolArgs }, timeoutMs);
 }
@@ -166,7 +168,16 @@ async function main() {
   const contextText = resultText(contexts);
   const contextMatch = contextText.match(/\s([0-9a-f-]{36}): chrome:\/\/browser\/content\/browser\.xhtml/);
   if (!contextMatch) throw new Error(`Firefox chrome context not found.\n${contextText}`);
+  privilegedContext = contextMatch[1];
   await callTool('select_privileged_context', { contextId: contextMatch[1] });
+
+  parseToolJson(resultText(await callTool('evaluate_privileged_script', {
+    expression: `(() => {
+      const profile = Services.dirsvc.get('ProfD', Ci.nsIFile).path;
+      if (!profile.includes('egdesk-chat-test-')) throw new Error('Use a disposable egdesk-chat-test-* profile; this test remounts the UI.');
+      return { profile };
+    })()`,
+  })));
 
   const remount = parseToolJson(resultText(await callTool('evaluate_privileged_script', {
     expression: remountExpression('egd-chat-profiles-live-style'),
@@ -268,7 +279,10 @@ async function main() {
         return rect.width > 0 && rect.height > 0 && rect.right > 0 && rect.bottom > 0 && rect.left < window.innerWidth && rect.top < window.innerHeight;
       }).map((node) => node.textContent.trim());
       const activeThread = api.state.codex.threads.find((entry) => entry.id === threadId);
+      document.querySelector('#egd-hud .egd-codex-conversation-menu-trigger')?.click();
+      const selectedProfileInMenu = document.querySelector('#egd-hud .egd-codex-thread-menu-profile.egd-codex-thread-menu-item-active .egd-codex-thread-menu-profile-label')?.textContent.trim();
       return {
+        selectedProfileInMenu,
         hudOpen: api.state.hudOpen,
         hudApp: api.state.hudApp,
         hudView: api.state.codex.hudView,
@@ -325,7 +339,8 @@ async function main() {
   if (!visualCheck.hudInsideViewport) failures.push('chat hud viewport fit');
   if (visualCheck.hudRightGap == null || visualCheck.hudRightGap < 0 || visualCheck.hudRightGap > 24) failures.push('chat hud right dock');
   if (!visualCheck.userBubbleInsideHud) failures.push('user bubble overflow');
-  if (!visualCheck.hasVisibleReviewChip || !visualCheck.hasVisibleVerificationToolChip) failures.push('profile chips visible');
+  if (visualCheck.hasVisibleReviewChip || visualCheck.hasVisibleVerificationToolChip) failures.push('runtime chips leaked into conversation header');
+  if (visualCheck.selectedProfileInMenu !== 'Verify') failures.push('active profile remains accessible in room menu');
 
   if (failures.length) {
     throw new Error(`Chat profile verification failed (${failures.join(', ')}): ${JSON.stringify({

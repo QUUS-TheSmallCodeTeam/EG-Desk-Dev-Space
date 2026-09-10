@@ -1,7 +1,7 @@
 {
-  "version": 4,
-  "updated": "2026-08-09T17:18:23+09:00",
-  "purpose": "Reusable routing policy and default role/file boundaries for Codex-native Main, EG-Desk PM, WM, and bounded worker operation. This is not a worker prompt bundle or a live communication channel.",
+  "version": 6,
+  "updated": "2026-09-09T00:56:31+09:00",
+  "purpose": "Reusable routing policy and default role/file boundaries for Codex-native Main, EG-Desk PM, WM, visual designer, and bounded worker operation. This is not a worker prompt bundle or a live communication channel.",
   "persistence_policy": {
     "default_context_delivery": "inline",
     "persist_only_when": [
@@ -95,6 +95,37 @@
         "final operational routing"
       ],
       "context_delivery": "Return product context, recommendations, research requests, approval candidates, decision drafts, and drift risks to Main."
+    },
+    "egdesk-visual-designer": {
+      "role": "visual design and art direction for bounded module interfaces, reference-led exploration, editable prototypes, and rendered visual critique",
+      "profile": ".codex/agents/egdesk-visual-designer.toml",
+      "agent_type": "egdesk_visual_designer",
+      "model_and_reasoning": "Inherited from the parent; the profile has no model or reasoning overrides.",
+      "consult_for": [
+        "composition, typography, proportion, spacing, surface hierarchy, imagery, icons, and module character",
+        "coherent visual alternatives using the same bounded scenario and content",
+        "screenshot-based aesthetic review, distinct from functional verification"
+      ],
+      "context_loading": "Use Main's bounded brief and WM-selected sources. Read the relevant scenario and requirements, inspect reference images directly, and distinguish approved, exploratory, rejected, and legacy references.",
+      "may_write_only_when_main_delegates": [
+        "exact prototype or artifact paths explicitly named by Main",
+        "generated rendering outputs inside the delegated output scope"
+      ],
+      "output_routing": "For in-conversation prototypes, follow the visualize skill and prefer an explicitly writable thread-scoped visualization root supplied in the current task. Do not default to repository sketches or persist one-time context.",
+      "does_not_own": [
+        "product meaning and requirements, owned by PM",
+        "source selection and path routing, owned by WM",
+        "user communication, dispatch, approvals, final integration, and Git, owned by Main",
+        "agent creation or a permanent multi-agent organization"
+      ],
+      "does_not_edit_by_default": [
+        "application source and canonical product documents",
+        "configuration, agent profiles, WM records, dependencies, and Git state"
+      ],
+      "separate_delegation_boundary": "Changes outside the exact prototype/artifact scope require separate explicit delegation by Main. User-facing presentation also requires Main's explicit delegation. Preserve other agents' changes and previous designs.",
+      "verification": "Render and inspect assigned sizes, exercise primary interactions, and report tested versus untested states. A mockup or screenshot is not evidence of product implementation, a real agent run, an external action, or a save.",
+      "runtime_invocation": "Main dispatches by agent_type and verifies runtime invocation separately. File presence or TOML validity alone is not activation evidence. [as-of 2026-09-09][Main-reported] Native registered-role invocation and artifact creation confirmed in fresh CLI 0.153.4; the existing Main task's role list did not refresh automatically. This does not establish rendering or visual QA success.",
+      "context_delivery": "Return concise Korean findings to Main: output paths, visual direction and tradeoffs, inspected screenshots/viewports, tested interactions, and remaining concerns. Keep design commentary outside the depicted product."
     }
   },
   "coordination_contracts": {

@@ -1,6 +1,6 @@
 {
-  "version": 7,
-  "updated": "2026-08-09T17:18:23+09:00",
+  "version": 9,
+  "updated": "2026-09-09T00:56:31+09:00",
   "directories": {
     ".codex/": "[present] Codex-local project operating area.",
     ".codex/agents/": "[present] Project-scoped Codex custom subagent profiles.",
@@ -30,11 +30,12 @@
     "docs/codex/project-context.md": "[present] Codex-facing project context that should stay outside the Main profile.",
     ".codex/agents/wm-second-brain.toml": "[present] Project-scoped WM custom subagent profile.",
     ".codex/agents/egdesk-pm.toml": "[present] Project-scoped Codex-native EG-Desk PM profile for product context, research framing, decision drift, and approval-candidate preparation.",
+    ".codex/agents/egdesk-visual-designer.toml": "[present][2026-09-09] Project-scoped Codex-native visual designer profile (name: egdesk_visual_designer) for bounded visual exploration, editable prototypes, and rendered visual review. [as-of 2026-09-09][Main-reported] Native registered-role invocation and artifact creation confirmed in fresh CLI 0.153.4; the existing Main task's role list did not refresh automatically. This does not establish rendering or visual QA success.",
     ".codex/wm/README.md": "[present] WM operating memory rules.",
     ".codex/wm/file-inventory.txt": "[present] Raw snapshot of observed project files.",
     ".codex/wm/file-inventory-hash": "[present] Hash paired with file-inventory.txt for detecting changed observed file state.",
     ".codex/wm/file-map.json": "[present] WM path map in the .claude file-map shape: directories plus key_files. Values are time-tagged semantic notes.",
-    ".codex/wm/routing-policy.json": "[present] Main/PM/WM routing policy, research return path, and Main-owned approval-queue contract. Role and task-routing rules live here, not in file-map entries.",
+    ".codex/wm/routing-policy.json": "[present] Main/PM/WM/visual-designer routing policy, research return path, and Main-owned approval-queue contract. Role and task-routing rules live here, not in file-map entries.",
     "apps/firefox-ui-demo/overlay/JS/eg-desk-surface.uc.js": "[present] Main Firefox chrome UI/runtime script.",
     "apps/firefox-ui-demo/overlay/CSS/eg-desk-surface.uc.css": "[present] Main Firefox chrome UI stylesheet.",
     "apps/firefox-ui-demo/helper/codex-bridge-server.mjs": "[present] Node bridge server for Codex chat and terminal HTTP endpoints.",

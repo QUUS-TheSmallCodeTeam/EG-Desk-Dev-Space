@@ -529,6 +529,13 @@
     return role || '메시지';
   }
 
+  function codexMessageAuthorLabel(message) {
+    const name = message?.authorName || message?.author;
+    return typeof name === 'string' && name.trim()
+      ? name.trim()
+      : codexMessageRoleLabel(message?.role);
+  }
+
   function codexReadMeta(message, thread) {
     if (!message || message.role !== 'user') return '';
     const readBy = Array.isArray(message.readBy) ? message.readBy : [];
@@ -597,16 +604,16 @@
   }
 
   function openCodexResultLink(link, message, thread) {
-    if (link?.url) {
-      openUrlInBrowserCard(link.url);
-      return;
-    }
     if (link?.cardId) {
       const card = document.getElementById(link.cardId);
       if (card) {
         focusCanvasCard(card);
         return;
       }
+    }
+    if (link?.url) {
+      openUrlInBrowserCard(link.url);
+      return;
     }
     console.warn(TAG, 'result chip has no canvas binding yet', {
       label: link?.label,
@@ -621,15 +628,19 @@
       ...links.map((link) => {
         const label = codexResultChipLabel(link);
         const kind = codexResultChipKind(label);
+        const isBound = Boolean(link?.url || (link?.cardId && document.getElementById(link.cardId)));
         return el('button', {
           class: `egd-codex-result-chip egd-codex-result-chip-${kind}`,
-          title: kind === 'run' ? 'Run detail' : 'Canvas result',
+          type: 'button',
+          title: isBound ? '연결된 자료 보기' : '연결된 자료가 없습니다',
+          disabled: isBound ? null : 'true',
           onclick: (ev) => {
             ev.preventDefault();
             ev.stopPropagation();
             openCodexResultLink(link, message, thread);
           },
-        }, label);
+        }, el('span', { class: 'egd-codex-result-label' }, label),
+        isBound ? el('span', { 'aria-hidden': 'true', class: 'egd-codex-result-arrow' }, '↗') : null);
       }),
     );
   }
@@ -2477,6 +2488,11 @@
   }
 
   function setActiveEntity(entity) {
+    const previous = state.activeEntityId ? document.getElementById(state.activeEntityId) : null;
+    if (previous !== entity) state.resetWheelSession?.();
+    if (previous && previous !== entity && previous.contains(document.activeElement)) {
+      document.activeElement?.blur?.();
+    }
     for (const node of document.querySelectorAll('.egd-entity-active, .egd-entity-selected')) {
       node.classList.remove('egd-entity-active', 'egd-entity-selected');
     }
@@ -3615,6 +3631,9 @@
 
   function mountCodexHUD(body, codexBridge, options = {}) {
     let unsubscribe = null;
+    let composerObserver = null;
+    let compositionInProgress = false;
+    let deferredCodex = null;
     const mode = options.mode || 'hud';
     const closeFloatingMenus = () => {
       codexBridge.closeMemberMenu();
@@ -3635,6 +3654,28 @@
     window.addEventListener('resize', onViewportMutate);
 
     const render = (codex) => {
+      if (compositionInProgress) {
+        deferredCodex = codex;
+        return;
+      }
+      const oldInput = body.querySelector('.egd-codex-input');
+      const oldMessages = body.querySelector('.egd-codex-messages');
+      const inputState = oldInput ? {
+        threadId: oldInput.dataset.threadId,
+        focused: document.activeElement === oldInput,
+        start: oldInput.selectionStart,
+        end: oldInput.selectionEnd,
+        direction: oldInput.selectionDirection,
+        scrollTop: oldInput.scrollTop,
+      } : null;
+      const messageState = oldMessages ? {
+        threadId: oldMessages.dataset.threadId,
+        lastUserMessageId: oldMessages.dataset.lastUserMessageId,
+        top: oldMessages.scrollTop,
+        atBottom: oldMessages.scrollHeight - oldMessages.scrollTop - oldMessages.clientHeight < 24,
+      } : null;
+      composerObserver?.disconnect();
+      composerObserver = null;
       body.textContent = '';
       const explicitActiveThread = codex.activeThreadId
         ? getCodexThreadById(codex, codex.activeThreadId)
@@ -3644,11 +3685,10 @@
         codex.activeThreadId = activeThread.id;
       }
 
-      const hudView = mode === 'hud'
-        ? ((normalizeHudView(codex.hudView) === 'conversation' && explicitActiveThread) ? 'conversation' : 'list')
-        : 'split';
-      const isHudListView = mode === 'hud' && hudView === 'list';
-      const isHudConversationView = mode === 'hud' && hudView === 'conversation';
+      const hudView = normalizeHudView(codex.hudView) === 'conversation' && explicitActiveThread
+        ? 'conversation' : 'list';
+      const isHudListView = hudView === 'list';
+      const isHudConversationView = hudView === 'conversation';
 
       const statusBridge = codex.error
         ? 'Codex 점검 필요'
@@ -3743,7 +3783,7 @@
         class: `egd-codex-thread-home-fixed${mode === 'hud' ? ' egd-codex-thread-home-fixed-hud' : ''}`,
       });
 
-      if (mode === 'hud') {
+      if (isHudListView) {
         const unreadCountTotal = codex.threads.reduce((sum, thread) => sum + (thread.unreadCount || 0), 0);
         threadTop.appendChild(el('div', { class: 'egd-codex-thread-home-head' },
           el('div', { class: 'egd-codex-thread-home-title-row' },
@@ -3968,23 +4008,25 @@
       const showConversation = Boolean(activeThread);
       const conversation = showConversation ? el('div', { class: 'egd-codex-conversation-pane' }) : null;
       if (conversation && activeThread) {
-        if (mode === 'hud') {
+        if (mode === 'hud' || activeThread.type === 'dm') {
           const threadMenuOpen = Boolean(codex.threadMenu && codex.threadMenu.threadId === activeThread.id);
-          const titleSubtitle = codexThreadHeaderSubtitle(activeThread);
           conversation.appendChild(el('div', { class: 'egd-codex-conversation-hud-head' },
             el('button', {
               class: 'egd-codex-conversation-back',
               title: '목록 홈으로',
+              'aria-label': '대화 목록으로 돌아가기',
               onclick: () => codexBridge.setHudView('list'),
             }, '←'),
             el('div', { class: 'egd-codex-conversation-hud-center' },
               el('div', { class: 'egd-codex-conversation-hud-title' }, activeThread.title),
-              el('div', { class: 'egd-codex-conversation-hud-sub' }, titleSubtitle),
-              renderThreadAgentRow(activeThread, true),
+              activeThread.type === 'group'
+                ? el('div', { class: 'egd-codex-conversation-hud-sub' }, (activeThread.participants || []).join(' · '))
+                : null,
             ),
             el('button', {
               class: `egd-codex-conversation-menu-trigger${threadMenuOpen ? ' egd-codex-conversation-menu-trigger-active' : ''}`,
               title: '채팅방 메뉴',
+              'aria-label': '채팅방 메뉴',
               onclick: (ev) => {
                 ev.stopPropagation();
                 codexBridge.toggleThreadMenu(activeThread.id, ev.currentTarget);
@@ -4063,14 +4105,35 @@
             ? el('div', { class: 'egd-codex-thread-members-row' }, memberRow, memberActions)
             : null;
           conversation.appendChild(el('div', { class: 'egd-codex-thread-active-head' },
+            el('button', {
+              class: 'egd-codex-conversation-back',
+              'aria-label': '대화 목록으로 돌아가기',
+              onclick: () => codexBridge.setHudView('list'),
+            }, '←'),
             el('div', { class: 'egd-codex-thread-active-title' }, activeThread.title),
-            el('div', { class: 'egd-codex-thread-active-sub' }, codexThreadHeaderSubtitle(activeThread)),
-            renderThreadAgentRow(activeThread),
+            el('button', {
+              class: 'egd-codex-conversation-menu-trigger',
+              'aria-label': '채팅방 메뉴',
+              onclick: (ev) => {
+                ev.stopPropagation();
+                codexBridge.toggleThreadMenu(activeThread.id, ev.currentTarget);
+              },
+            }, '⋯'),
             memberRowWrap,
           ));
+          if (codex.threadMenu?.threadId === activeThread.id) conversation.appendChild(renderThreadMenu(activeThread));
         }
 
-        const messages = el('div', { class: 'egd-codex-messages' });
+        const messages = el('div', {
+          class: 'egd-codex-messages',
+          role: 'log',
+          'aria-label': '대화 내역',
+          'aria-live': 'polite',
+          data: {
+            threadId: activeThread.id,
+            lastUserMessageId: activeThread.messages.filter(message => message.role === 'user').at(-1)?.id || '',
+          },
+        });
         if (!hasConversation) {
           const activeKindLabel = codexThreadLongLabel(activeThread.type);
           const emptyChildren = [
@@ -4101,8 +4164,9 @@
             const next = activeThread.messages[index + 1] || null;
             const previousDelta = message.createdAt && previous?.createdAt ? Math.abs(message.createdAt - previous.createdAt) : Infinity;
             const nextDelta = message.createdAt && next?.createdAt ? Math.abs(next.createdAt - message.createdAt) : Infinity;
-            const groupedWithPrevious = previous?.role === message.role && previousDelta < 120000;
-            const groupedWithNext = next?.role === message.role && nextDelta < 120000;
+            const author = codexMessageAuthorLabel(message);
+            const groupedWithPrevious = previous?.role === message.role && codexMessageAuthorLabel(previous) === author && previousDelta < 120000;
+            const groupedWithNext = next?.role === message.role && codexMessageAuthorLabel(next) === author && nextDelta < 120000;
             const parts = extractCodexResultLinks(message);
             const content = el('div', { class: 'egd-codex-bubble-content egd-codex-richtext' });
             appendRichText(content, parts.text || (message.status === 'streaming' ? '…' : ''));
@@ -4117,25 +4181,25 @@
               ].filter(Boolean).join(' '),
             },
             content,
-            resultChips,
             );
             if (message.status === 'streaming' && message.role === 'assistant') {
-              bubble.appendChild(el('div', { class: 'egd-codex-streaming' }, el('div', { class: 'egd-codex-typing-dots' }, el('span'), el('span'), el('span')), '코덱스가 입력 중'));
+              bubble.appendChild(el('div', {
+                class: 'egd-codex-streaming',
+                role: 'status',
+                'aria-label': `${author} 응답 중`,
+              }, el('div', { class: 'egd-codex-typing-dots', 'aria-hidden': 'true' }, el('span'), el('span'), el('span'))));
             }
             const roleLabel = !groupedWithPrevious && message.role !== 'user'
-              ? el('div', { class: 'egd-codex-message-role' }, codexMessageRoleLabel(message.role))
+              ? el('div', { class: 'egd-codex-message-role' }, author)
               : null;
             const meta = codexMessageTimeMeta(message, activeThread);
-            const lineChildren = message.role === 'user'
-              ? [meta, bubble]
-              : [bubble, meta];
-            const messageLine = el('div', { class: 'egd-codex-message-line' }, ...lineChildren);
-            const messageStack = el('div', { class: 'egd-codex-message-stack' }, roleLabel, messageLine);
+            const messageLine = el('div', { class: 'egd-codex-message-line' }, bubble);
+            const messageStack = el('div', { class: 'egd-codex-message-stack' }, roleLabel, messageLine, resultChips, meta);
             const avatar = message.role !== 'user'
               ? el('div', {
                   class: `egd-codex-message-avatar${groupedWithPrevious ? ' egd-codex-message-avatar-spacer' : ''}`,
-                  title: groupedWithPrevious ? '' : codexMessageRoleLabel(message.role),
-                }, groupedWithPrevious ? '' : codexMessageRoleLabel(message.role).slice(0, 1))
+                  'aria-hidden': 'true',
+                }, groupedWithPrevious ? '' : author.slice(0, 1))
               : null;
             messages.appendChild(el('div', {
               class: [
@@ -4202,41 +4266,66 @@
         }
       }
 
-      const allowComposer = Boolean(codex.authStatus.isLoggedIn && activeThread && (mode === 'canvas' || isHudConversationView));
+      const allowComposer = Boolean(codex.authStatus.isLoggedIn && activeThread && isHudConversationView);
       const footer = allowComposer
         ? (() => {
             const input = el('textarea', {
               class: 'egd-codex-input',
-              rows: '1',
-              placeholder: `${codexThreadLongLabel(activeThread.type)}에 메시지 보내기…`,
-              disabled: codex.isSending ? 'true' : null,
+              rows: '2',
+              placeholder: '메시지 보내기',
+              'aria-label': `${activeThread.title}에 보낼 메시지`,
+              data: { threadId: activeThread.id },
             });
+            const sendButton = el('button', {
+              class: 'egd-codex-send',
+              type: 'button',
+              'aria-label': '메시지 보내기',
+              title: '보내기',
+              onclick: () => { if (!compositionInProgress) void codexBridge.sendMessage(); },
+            }, el('span', { 'aria-hidden': 'true' }, '↑'));
             input.value = getCodexThreadDraft(codex, activeThread.id);
             const resizeComposer = () => {
+              if (!input.isConnected) return;
               input.style.height = 'auto';
-              input.style.height = `${Math.min(104, Math.max(22, input.scrollHeight))}px`;
+              const height = Math.min(144, Math.max(48, input.scrollHeight));
+              input.style.height = `${height}px`;
+              input.style.overflowY = input.scrollHeight > height ? 'auto' : 'hidden';
+              sendButton.disabled = codex.isSending || !input.value.trim();
             };
             input.addEventListener('input', () => {
               codexBridge.setDraft(input.value, activeThread.id);
               resizeComposer();
             });
             input.addEventListener('keydown', (ev) => {
-              if (ev.key !== 'Enter') return;
-              if (ev.shiftKey) return;
+              if (ev.key !== 'Enter' || !(ev.metaKey || ev.ctrlKey) || ev.shiftKey || ev.altKey) return;
+              if (ev.isComposing || compositionInProgress || ev.keyCode === 229) return;
               ev.preventDefault();
               void codexBridge.sendMessage();
             });
+            input.addEventListener('compositionstart', () => { compositionInProgress = true; });
+            input.addEventListener('compositionend', () => {
+              compositionInProgress = false;
+              codexBridge.setDraft(input.value, activeThread.id);
+              resizeComposer();
+              if (deferredCodex) {
+                const next = deferredCodex;
+                deferredCodex = null;
+                queueMicrotask(() => render(next));
+              }
+            });
+            let composerWidth = 0;
+            composerObserver = new ResizeObserver(() => {
+              if (input.clientWidth === composerWidth) return;
+              composerWidth = input.clientWidth;
+              resizeComposer();
+            });
+            composerObserver.observe(input);
             queueMicrotask(resizeComposer);
             return el('div', { class: 'egd-codex-footer' },
               el('div', { class: 'egd-codex-input-row' },
                 input,
-                el('button', {
-                  class: 'egd-codex-send',
-                  disabled: codex.isSending ? 'true' : null,
-                  onclick: () => codexBridge.sendMessage(),
-                }, codex.isSending ? '…' : '보내기'),
+                el('div', { class: 'egd-codex-compose-actions' }, sendButton),
               ),
-              el('div', { class: 'egd-codex-input-hint' }, 'Enter 전송 · Shift+Enter 줄바꿈'),
             );
           })()
         : null;
@@ -4244,20 +4333,10 @@
       const shellClasses = [
         'egd-codex-chat-shell',
         mode === 'canvas' ? 'egd-codex-chat-shell-canvas' : 'egd-codex-chat-shell-hud',
-        mode === 'hud' ? `egd-codex-hud-view-${hudView}` : 'egd-codex-hud-view-split',
+        `egd-codex-hud-view-${hudView}`,
       ].join(' ');
       const contentChildren = [];
-      if (mode === 'canvas') {
-        const mainPane = el('div', { class: 'egd-codex-chat-main' },
-          chromeRow,
-          authCard || null,
-          conversation || null,
-          diagnostics || null,
-          footer || null,
-        );
-        contentChildren.push(threadRail);
-        contentChildren.push(mainPane);
-      } else if (isHudListView) {
+      if (isHudListView) {
         const mainPane = el('div', { class: 'egd-codex-chat-main egd-codex-chat-main-list' },
           chromeRow,
           authCard || null,
@@ -4276,13 +4355,26 @@
       }
       body.appendChild(el('div', { class: shellClasses }, ...contentChildren));
       const msgEl = body.querySelector(".egd-codex-messages");
-      if (msgEl) requestAnimationFrame(() => { msgEl.scrollTop = msgEl.scrollHeight; });
-      // Auto-scroll messages to bottom
+      if (msgEl) requestAnimationFrame(() => {
+        if (!msgEl.isConnected) return;
+        const sentNewMessage = msgEl.dataset.lastUserMessageId !== messageState?.lastUserMessageId;
+        msgEl.scrollTop = messageState?.threadId === activeThread?.id && !messageState.atBottom && !sentNewMessage
+          ? messageState.top : msgEl.scrollHeight;
+      });
+      const newInput = body.querySelector('.egd-codex-input');
+      if (newInput && inputState?.threadId === activeThread?.id && inputState.focused) {
+        newInput.focus({ preventScroll: true });
+        newInput.setSelectionRange(inputState.start, inputState.end, inputState.direction);
+        requestAnimationFrame(() => { if (newInput.isConnected) newInput.scrollTop = inputState.scrollTop; });
+      }
     };
 
     unsubscribe = codexBridge.subscribe(render)
     body._codexCleanup = () => {
       unsubscribe?.();
+      composerObserver?.disconnect();
+      compositionInProgress = false;
+      deferredCodex = null;
       document.removeEventListener('mousedown', onDocumentMouseDown, true);
       document.removeEventListener('wheel', onViewportMutate, true);
       window.removeEventListener('resize', onViewportMutate);
@@ -5298,7 +5390,7 @@
     const id = `egd-chat-card-${++cardSeq}`;
     const safe = safeViewportRect({ avoidHud: true });
     const zoom = Math.max(0.001, state.zoomTarget || state.zoom || 1);
-    const width = Math.min(560, Math.max(420, Math.floor(safe.width / zoom)));
+    const width = Math.min(440, Math.max(360, Math.floor(safe.width / zoom)));
     const height = Math.min(680, Math.max(420, Math.floor(safe.height / zoom)));
     const placement = resolveCanvasCardPlacement(width, height, {
       anchorClientX,
@@ -5319,7 +5411,7 @@
     });
 
     const header = el('div', { class: 'egd-chat-card-header' },
-      el('div', { class: 'egd-chat-card-title' }, '코덱스 채팅'),
+      el('div', { class: 'egd-chat-card-title' }, '채팅'),
       el('div', { class: 'egd-chat-card-actions' },
         el('button', {
           class: 'egd-chat-card-action',
@@ -5374,6 +5466,11 @@
       state.panCanvasByWheel(ev);
     };
 
+    const activateCard = () => {
+      card.style.zIndex = String(++cardZ);
+      setActiveEntity(card);
+    };
+    const focusCard = activateCard;
     let drag = null;
     header.addEventListener('mousedown', (ev) => {
       if (startPanIfNeeded(ev)) return;
@@ -5389,6 +5486,7 @@
       target.addEventListener('mousedown', () => activateCard(), true);
       target.addEventListener('wheel', routeWheelToCanvas, { passive: false, capture: true });
     }
+    card.addEventListener('focusin', () => activateCard());
     const onMove = (ev) => {
       const s = canvasZoom();
       if (!drag) return;
@@ -9966,6 +10064,7 @@
       wheelSession.lastTs = 0;
       wheelSession.nativeActive = false;
     };
+    state.resetWheelSession = resetWheelSession;
     const resolveWheelSessionOwner = (target) => {
       if (shouldAllowActiveEntityScroll(target)) {
         wheelSession.owner = 'entity';

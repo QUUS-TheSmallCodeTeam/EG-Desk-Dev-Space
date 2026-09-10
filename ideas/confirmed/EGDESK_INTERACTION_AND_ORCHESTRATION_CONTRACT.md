@@ -39,6 +39,10 @@
 “may”, “candidate”, “exact UI remains open”이라고 명시한 부분만 각각 구현 재량,
 후보 또는 연결된 `HUM-*`/`Q-*` 미결정으로 읽는다.
 
+§17의 방법·수치·interface 이름은 `SELECTED-BASELINE`인 위임 설계 기준선이다.
+그 절에 연결된 인수 조건을 만족하는 동등 구현으로 바꿀 수 있으며 특정 module·언어·
+process 배치를 불변조건으로 만들지 않는다. 권한·입력 충실도·수명·완료 의미는 그대로 유지한다.
+
 <a id="tech-layer-map"></a>
 
 ### 0.2 기술 계층 지도
@@ -1146,3 +1150,1321 @@ UI가 존재하는 것만으로 기능 완료가 성립하지 않는다. accepta
 - 반복 가능한 성공 검사와 관련 recovery 검사
 - 사용자가 검사할 수 있는 artifact·state·action receipt
 - 현재 runtime evidence와 제안된 behavior의 명확한 구분
+
+<a id="implementation-design-details"></a>
+
+## 17. 구현 상세와 조건별 인수 절차
+
+다음은 기존 기술 경계를 구현하는 선택 기준선이다. 새로운 제품 권한을 부여하거나 이미 실행된 구현을 뜻하지 않는다. 버전·측정·호환성 결과로 동등한 구현을 선택할 수 있지만 입력·저장·권한·완료의 의미는 유지한다. 정책 선택에 종속된 값은 해당 조건 아래에서 동작한다.
+
+### 17.A 셸·Agenda·탐색
+
+<a id="impl-shell"></a>
+#### 셸 준비와 독립 복구 경계
+
+**화면 연결**: [사용자 조작](../../docs/references/design-synthesis/egdesk-ux-realization-proposals.md#ux-detail-shell)
+
+실행기는 Firefox renderer·bridge와 별도 수명을 가진다. 입력은 실행 의도, 선택된 설치/profile 참조, launch ID다. 로컬 IPC 준비 응답은 launch nonce·프로세스 세대·profile 식별·셸 준비 단계를 포함한다. 포트 응답이나 프로세스 존재만으로 준비 완료를 판정하지 않는다. 동일 실행 의도는 기존 인스턴스로 전달하며 timeout 뒤 중복 Firefox를 생성하지 않는다.
+
+실행기 오류 UI는 macOS NSAlert, Windows TaskDialogIndirect를 사용한다. Linux GUI 복구 의존성이 없거나 실패하면 `Terminal=true`인 독립 복구 진입점으로 같은 상태·행동을 제공한다. OS 오류와 사용자 취소는 시작 성공이 아니다. [Apple NSAlert](https://developer.apple.com/documentation/appkit/nsalert), [Windows TaskDialogIndirect](https://learn.microsoft.com/en-us/windows/win32/api/commctrl/nf-commctrl-taskdialogindirect), [Desktop Entry 규약](https://specifications.freedesktop.org/desktop-entry/latest/recognized-keys.html).
+
+셸 준비·Agenda 목록·Engine 연결은 독립 상태다. 종료는 로컬 새 dispatch 차단 → 확정 입력 기록 → 로컬 전용 runtime 종료 확인 → 최종 세션 commit → 셸 종료 순으로 수행한다. 정상 종료도 열린 Agenda 구성 자체를 삭제하지 않는다. 원격 runtime은 별도 소유·상태를 유지한다. 강제 종료·전원 손실에는 종료 handler 실행을 전제로 하지 않는다.
+
+**인수 절차:** 각 OS 진입, 반복 실행, 파일 연결 실행에 대해 실행 파일 누락·잘못된 준비 nonce·10초 지연·bridge 실패를 주입한다. 셸 없는 상태에서 복구 행동을 실행할 수 있고, 정상 경로는 Desk 하나이며 Engine 실패 중 파일 열기가 가능해야 한다. 종료 중 쓰기 지연·process 종료 거부를 주입해 취소/강제 종료의 대상·미기록 범위를 대조한다. 실패 fallback은 독립 복구 진입점이며 사용자 profile·credential을 지우지 않는다.
+
+##### 인계가 확인된 recorder의 종료 예외
+
+정상 종료의 로컬 runtime 종료 대상에서 제외할 수 있는 recorder는 독립 host 인계의 source·mask·구간 저장·Canvas 소유·중지 endpoint를 확인하고 host ACK를 받은 경우뿐이다. 앱 내부 MediaRecorder는 종료 대상에서 제외하지 않는다. 인계 실패·미확인은 앱을 유지하거나 기록을 종료하는 경로로 돌아간다. Agenda 닫기는 detached recorder도 기존 소유 규칙에 따라 종료한다.
+
+##### 10초 이전 준비 상태
+
+준비 단계는 `launching/frame-visible/interactive/unknown/failed`로 구분한다. 단계 변경과 접근성 상태 안내는 동일 launch ID에 결합하고 반복 실행은 기존 준비 요청에 합친다. 취소한 launch의 늦은 ready 응답은 화면 활성화에 사용하지 않는다.
+
+**미실행 인수 조건:** 0–10초 지연·반복 실행·취소 후 ready에서 빈 무표시 창, 중복 Desk, 반복 포커스 인계가 없는지 검사한다.
+
+##### macOS·Windows 비GUI 복구 진입
+
+복구 도구는 Firefox·bridge·AppKit/TaskDialog 오류 UI에 의존하지 않는다. macOS는 stdin/stdout 기반 독립 실행 파일과 실행 가능한 launcher script, Windows는 `/SUBSYSTEM:CONSOLE` 실행 파일을 기준선으로 한다. 기존 설치·profile 참조, launch nonce·세대를 재검증하고 credential·profile을 삭제하지 않는다. 문자 실행 기반은 [Apple Terminal](https://support.apple.com/en-ke/guide/terminal/apdb66b5242-0d18-49fc-9c47-a2498b7c91d5/mac), [Windows Console subsystem](https://learn.microsoft.com/en-us/cpp/build/reference/subsystem-specify-subsystem?view=msvc-170)을 따른다.
+
+복구 메뉴의 표시와 입력 처리는 같은 정의 `1=status, 2=diagnostics, 3=restart-same-install, 0=exit`에서 생성한다. 비GUI 복구의 OS별 매핑을 달리하지 않는다.
+
+**미실행 인수 조건:** Firefox·GUI 오류 모듈 사용 불가에서 진단·동일 설치 재시도·종료를 수행하고, `0`은 종료만, `3`은 검증된 동일 설치 재시작만 요청하는지 대조한다. 재시작 중복·다른 profile 연결·OS 차단 우회는 0건이어야 한다.
+
+##### 부분 종료 취소와 숨은 runtime 방지
+
+앱 종료는 `prepare→flush→stop-owned→commit-session→quit`와 단일 quit operation을 사용한다. 새 로컬 dispatch를 먼저 차단하고 종료 전 열린 구성 및 대상 집합을 고정한다. 취소는 미발송 종료 요청만 제거한다. 이미 발송한 요청은 조회로 판정하며, 미발송·권한 유효 대상만 다시 dispatch 가능하게 한다. 진행 중 commit 결과도 확인한 뒤 종료 취소를 완료한다. 강제 종료는 명시한 로컬 범위만 처리하며 마지막 유효 세션을 남긴다.
+
+앱 종료 후 녹화 계속은 기존 recorder 호스트 인계 계약의 유효 소유자·지속 실행·Canvas 표시 인계 receipt가 있는 대상만 예외다. 인계 불가이면 기록 중지 후 종료하거나 종료를 취소한다. 이 예외를 일반 runtime의 background 유지로 확대하지 않으며, Agenda 닫기는 여전히 전용 recorder를 종료한다.
+
+**미실행 인수 조건:** 부분 저장·부분 종료·응답 유실·취소·강제 종료에서 숨은 실행과 자동 부활이 없고, recorder 인계 실패가 계속 기록 허용으로 바뀌지 않아야 한다.
+
+<a id="impl-restore"></a>
+#### 자동 세션의 commit과 복구
+
+**화면 연결**: [사용자 조작](../../docs/references/design-synthesis/egdesk-ux-realization-proposals.md#ux-detail-restore)
+
+로컬 저장은 SQLite 단일 writer, WAL, `synchronous=FULL`을 사용한다. WAL-reset 수정이 포함된 3.51.3 이상 또는 공식 수정 backport를 기준으로 한다. WAL DB를 네트워크 공유 파일로 동시 사용하지 않는다. [SQLite WAL](https://www.sqlite.org/wal.html).
+
+세션 generation은 `sessionId, deviceId, seq, parentSeq, schemaVersion, stateHash, eventCursor, viewStates, draftRefs`를 가진다. 자료 URI·runtime ID·권한 참조와 payload hash를 구분한다. 외부 파일의 누락은 View의 degraded 상태이지 세션 구조 전체의 무효가 아니다.
+
+View 열기·닫기 확정·그룹 변경·소유 변경은 즉시 commit 대상으로 한다. pan·scroll·드래그 중간 값은 300ms idle 또는 최대 2초에 합치며 pointer-up에서 최종값을 기록한다. 허용된 편집 초안은 조합 완료 후 300ms idle, 계속 입력할 때 최대 1초마다 기록 대상으로 만든다. 이 시간은 정상 writer의 전송 목표이며 디스크 장애 중 보존 보장이 아니다.
+
+불변 payload 임시 기록 → 길이/hash 확인 → publish → `BEGIN IMMEDIATE` → event·참조·materialized state·generation head 갱신 → COMMIT으로 처리한다. 실패 시 rollback하며 기존 head를 유지한다. orphan payload는 참조되지 않은 상태로 남고 성공 기록으로 노출하지 않는다. lock 충돌은 250/1000/3000ms의 제한된 재시도 후 사용자 재시도로 전환한다. [SQLite transaction](https://www.sqlite.org/lang_transaction.html).
+
+정상 종료는 편집기 flush와 진행 중 DB commit을 기다린다. Firefox `requestTabStateFlush()`는 수집 완료와 장시간 대기 가능성을 가진다. 이를 EG-Desk DB의 원자적 commit이나 모든 Browser form의 디스크 보존으로 오인하지 않는다. 검증된 native 상태를 얻지 못하면 해당 Browser는 URL 기반 재구성으로 기록한다. [Firefox Session Store](https://firefox-source-docs.mozilla.org/toolkit/components/sessionstore/utils.html).
+
+복구는 commit된 generation 중 schema·hash·내부 참조가 유효한 최대 seq를 사용한다. 정상 종료 표지가 없어도 유효 commit을 버리지 않는다. 별도 정상 DB 보존본은 online backup API로 만들고 무결성 확인 뒤 최근 두 보존본을 교대 유지한다. 변경이 있으면 60초 간격과 정상 종료에 시도하며 backup 실패를 원 DB 손상으로 표시하지 않는다. DB 전체 손상 시 원 DB/WAL을 보존하고 마지막 유효 보존본을 새 복구 저장소로 연다. 없으면 빈 Desk로 진행한다. [SQLite Backup API](https://www.sqlite.org/backup.html).
+
+복원 요청은 `restoreEpoch`와 View version을 가진다. 사용자 변경 이후 도착한 결과는 해당 View를 덮지 않으며 닫기 tombstone을 존중한다. Browser는 허용된 native 상태/URL, 파일은 원본 revision+초안, Chat은 기존 event 참조, Terminal은 검증된 process 또는 출력 Snapshot으로 복원한다. 재연결 자체는 모델 호출이 아니다.
+
+**인수 절차:** payload publish 전후·DB COMMIT 전후·backup 중에 강제 종료를 주입한다. 마지막 유효 generation 또는 명시된 보존본만 복원되고 부분 구성 혼합이 없어야 한다. 목록 읽기를 지연시킨 동안 새 View를 열고 기존 View를 닫아 늦은 복원이 되돌리지 않는지 확인한다. 파일 누락·권한 철회·DB 손상·미저장 보존 두 정책을 각각 대조한다. fallback에서도 Saved Agenda와 손상 증거는 유지한다.
+
+정상 DB 보존본은 online backup API로 만들고 무결성 확인 뒤 최근 두 사본을 교대 유지한다. 변경이 있으면 60초 간격과 정상 종료에 시도한다. 이 사본은 **제품이 관리하는 제한된 crash-recovery 저장물**이며, 사용자 초기화의 선택형 자동 보호 백업을 켜거나 대신하지 않는다. 두 기능의 목적·수명·상태·포함 범위를 분리한다. 사본 생성 실패를 원 DB 손상으로 표시하지 않는다.
+
+명시적 삭제·초기화는 대상 기록과 payload를 포함하는 관리형 사본까지 처리 집합에 넣는다. 삭제 범위·정책·삭제 epoch를 먼저 기록하고, 관련 사본의 신규 생성·복구 활성화를 차단한다. 사본에서는 대상 기록을 제외해 재작성하거나 정책이 허용한 정리를 수행한다. 암호화된 사본의 키 교체를 사용하는 경우에는 대상 데이터가 없는 사본으로 재작성하고 이전 사본을 해독할 키의 폐기까지 확인한다. 키 이름 변경·새 키 발급·만료일 설정만으로 삭제 완료를 판정하지 않는다.
+
+복구 과정은 최신 삭제 tombstone과 삭제 epoch를 오래된 사본 값으로 되돌리지 않는다. 사본을 활성화하기 전에 이후 삭제를 적용하고, 최신 삭제 상태를 확인할 수 없으면 해당 기록의 복원을 차단한다. DB 전체 손상 시에도 이 검사를 통과한 보존본만 복구 저장소로 연다. 통과하는 사본이 없으면 빈 Desk로 진행하며 삭제 대상 데이터를 자동 재활성화하지 않는다.
+
+복구 가능한 대상 데이터가 사본에 남거나 키 폐기·정리 결과가 미확인이면 `deletionPending`을 유지한다. 보존 제한이나 사용자에게 명시된 보관 정책 때문에 즉시 정리할 수 없는 경우에는 대상·이유·기한을 표시하며 숨은 보존 예외를 만들지 않는다. **인수 절차:** 삭제 직후·사본 재작성 중·키 폐기 전후에 충돌을 주입하고 각 관리형 사본으로 복구를 시도한다. 삭제한 기록이 재등장하지 않고, 남은 사본이 있는 동안 완료 표시가 나오지 않아야 한다. 사용자가 선택적으로 만든 보호 백업은 별도 정책·영향 목록으로 대조한다.
+
+<a id="impl-agenda"></a>
+#### 저장 구성, 충돌과 정본 revision
+
+**화면 연결**: [사용자 조작](../../docs/references/design-synthesis/egdesk-ux-realization-proposals.md#ux-detail-agenda)
+
+Agenda는 `agendaId, title, metadataVersion, headRevision`과 불변 구성 revision을 가진다. 구성 revision에는 포함 목록·resource/context 참조·선택 배치·허용 payload·checkpoint 참조·parent revision을 기록한다. 이름 변경은 metadataVersion만 갱신한다. 저장 범위에 없는 파일 내용·credential·runtime을 복제하지 않는다.
+
+업데이트 요청은 `operationId, agendaId, expectedHead, draftHash, includedMemberIds`다. 하나의 transaction에서 expectedHead를 비교하고 새 revision과 head를 함께 기록한다. 같은 operationId 재요청은 같은 결과를 반환한다. 불일치는 충돌이며 저장 성공으로 처리하지 않는다.
+
+3-way 비교는 기준·최신·초안을 사용한다. 서로 다른 필드의 변경과 겹치지 않는 구성원 추가는 병합 미리보기를 만들 수 있다. 같은 필드, 삭제/수정 충돌, 배치 부모의 충돌은 명시적 해결이 필요하다. 파일 본문·업무 의미를 이 저장 알고리즘으로 자동 병합하지 않는다. ‘덮어쓰기’도 최신 head의 후속 revision이며 기존 내용을 조용히 수정하지 않는다.
+
+저장 이력 정책이 최신만이면 과거 구성 복구는 제공하지 않되, 다른 Answer/Snapshot이 참조하는 불변 payload까지 삭제하지 않는다. 이력 복구는 과거 head로 시간을 되감는 대신 선택 구성을 새 revision으로 발행한다.
+
+다른 PC에 정본 authority가 있으면 동일 expectedHead protocol과 operation receipt를 사용한다. offline 초안은 `로컬 보관·업데이트 미전달`이며 정본 성공이 아니다. 실제 원격 transport·identity·비용의 승인과 무관하게 동일 protocol의 로컬 다중 client 검사는 가능하다.
+
+**인수 절차:** 두 client가 r7에서 서로 다른 필드와 같은 필드를 각각 변경하고 저장한다. 비충돌 병합 미리보기, 충돌별 값 선택, 비교 도중 r9 도착, 응답 유실 후 동일 operationId 재시도를 검사한다. 초안 보존·단일 성공 revision·범위 밖 변경 0건이 acceptance다. 한글 80자/81자·조합 Enter·동명이름·쓰기 실패·최신만/전체 이력 복구도 확인한다. fallback은 원 초안과 새 Agenda 저장이며 강제 덮어쓰기가 아니다.
+
+##### 생성 재시도와 projection identity
+
+최초 전송 전에 `createOperationId, newAgendaId, initialRevisionId, draftHash, sourceProjectionId?`를 로컬 outbox에 기록한다. 생성 revision·head·operation 결과를 원자적으로 저장하며 같은 operation 재요청은 같은 ID와 결과를 반환한다. 같은 operation의 다른 hash는 거부한다. 응답 유실은 operation 조회 후 재시도한다. 로컬 의도 기록 실패 시 외부 전송하지 않고 메모리 초안을 유지하며 `아직 기록되지 않음`을 표시한다. 영속화되지 않은 초안의 앱 재시작 복구는 약속하지 않는다.
+
+**미실행 인수 조건:** 생성·다른 이름 저장의 응답 유실과 반복 클릭에서 Agenda/projection 중복 0건, 원 A의 identity·변경 상태 유지 여부를 검사한다.
+
+##### 구성원 유효성과 직렬화
+
+검증 결과는 `memberId, kind, resourceId/viewId, sourceRevision/range, mode, availability, accessEpoch`에 결합한다. commit 직전에 선택 집합·권한·draft version을 재검사한다. 동일 View 중복만 합치며 같은 Resource의 다른 View는 합치지 않는다. credential·살아 있는 process·임의 실행 명령은 직렬화하지 않는다. 원문 포함 권한을 확인하지 못하면 원문을 기록하지 않는다.
+
+**미실행 인수 조건:** 이름 경계값·IME·선택 후 권한 철회·offline·중복 View에서 잘못된 포함·조용한 누락·권한 확대가 없는지 검사한다.
+
+<a id="impl-agenda-lifecycle"></a>
+#### 소유권에 따른 닫기와 삭제
+
+**화면 연결**: [사용자 조작](../../docs/references/design-synthesis/egdesk-ux-realization-proposals.md#ux-detail-agenda-lifecycle)
+
+자료 참조 집합과 runtime 유지 소유 집합을 분리한다. 단일 소유 정책은 소유자 수 1을, 공동 유지 정책은 명시적으로 승인된 소유 집합을 집행한다. 살아 있는 runtime을 유지하는 소유자는 Canvas에서 찾을 수 있는 표현을 가져야 한다.
+
+닫기 입력은 `operationId, targetProjection, expectedOwnershipVersion, runtimeTargets`다. 의도 기록 → 소유/권한 재확인 → 새 행동 차단 → 대상별 종료 요청 → receipt 기록 → projection 제거로 처리한다. 외부 process 종료와 SQLite commit을 하나의 분산 transaction으로 주장하지 않는다. 소유가 바뀌면 종료 대상을 다시 계산하고 새 소유자의 실행을 끊지 않는다.
+
+Codex는 기존 구독 인증 Engine Profile의 app-server 연결을 사용한다. 새 연결마다 `initialize → initialized` 후 메서드를 호출한다. 이력 표시는 `thread/read`, 실행 연결은 검증된 thread에 대한 `thread/resume`, 실제 사용자 재개는 `turn/start`로 구분한다. 정상 steering 때문에 fork나 interrupt를 호출하지 않는다. `turn/interrupt`의 `{}`는 요청 접수이며 `turn/completed`의 interrupted 상태와 별도 tool/process 종료 증거를 확인한다. 다른 작업까지 멈추기 위해 account 전체 app-server를 종료하지 않는다. [공식 App Server 계약](https://learn.chatgpt.com/docs/app-server).
+
+통신 단절은 종료 확인이 아니다. 재접속하면 동일 기기·process 세대·thread·계정·operation을 대조한다. 외부 효과가 미확인이면 현재 상태/receipt를 조회하기 전 재발송하지 않는다. 성공한 독립 작업과 늦은 결과는 보존하되 중지된 작업의 새 행동을 만들지 않는다.
+
+삭제는 확인한 Agenda revision과 소유 version에 결합한다. 종료 미확인은 삭제 대기다. 휴지통 이동은 복구 정책·만료·구성 참조를 원자적으로 기록한다. 복구는 현재 권한을 다시 검사한다. 영구 삭제는 선택 참조 제거와 미참조 payload 정리의 결과를 따로 기록하며 공유 참조·원본 파일·방·credential은 제외한다. 처리 중 권한 철회는 미실행 단계만 중지한다.
+
+**인수 절차:** 공동 소유/단일 소유 각각에서 A 닫기, B 참조 유지, 소유 이전 경합, 원격 종료 응답 유실을 재현한다. 전용 종료 확인 전 Canvas 표현이 남고 공유 실행이 유지되어야 한다. 이어 동시 저장·휴지통 이동 실패·복구 실패·권한 철회·영구 삭제 일부 실패를 주입한다. 실패 대상만 재시도하며 이미 종료/삭제한 항목을 복구됐다고 표시하지 않아야 한다. 재열기 후 모델 호출·예약 재개·catch-up 자동 실행은 0건이어야 한다.
+
+##### Agenda 구성 변경과 파일 편집을 분리한다
+
+닫기 의도에 `projectionId, configDraftVersion, baseAgendaRevision, fileBufferVersions, 선택한 처리, operationId`를 고정한다. 선택 검증→선택한 파일 저장/초안 처리→그 결과 revision에 결합된 Agenda 저장→전용 실행 종료 확인→projection 제거 순서다. 각 완료 receipt를 보존하고 재시도는 미완료 단계만 수행한다. 앱 종료의 자동 세션 기록은 이 명시적 Agenda 닫기와 다르며 Saved Agenda를 갱신하지 않는다.
+
+**미실행 인수 조건:** 네 변경 조합에 저장 실패·충돌·취소를 주입하여 구성과 파일의 상호 폐기 0건, 저장 확인 전 projection 제거 0건을 검사한다.
+
+##### 휴지통 밖 삭제 처리 내역
+
+삭제 operation은 목록 분류와 독립적으로 영속화한다. 기간 만료는 선택된 정책에 따라 같은 상태 기계를 시작하며 새 승인이나 새 보관 기한을 만들지 않는다. 완료는 종료·참조 처리·삭제 대상 payload 및 관리형 복구 사본 처리 결과에 따른다. 적법하게 공유 유지되는 자료는 삭제 범위 밖으로 구별한다. 최신 삭제 epoch를 확인하지 못하는 보존본은 복구에 사용하지 않는다.
+
+**미실행 인수 조건:** 세 삭제 정책의 부분 실패·재시작·권한 철회에서 처리 재진입 가능, 실패 항목만 재시도, 삭제 데이터 재등장 0건을 검사한다.
+
+##### 공동 유지 책임 해제
+
+`runtimeId, ownerProjectionId, expectedOwnershipVersion, operationId`로 조건부 변경한다. 다른 소유자가 남으면 owner set만 갱신한다. 마지막 소유자는 종료 receipt 또는 권한이 검증된 다른 열린 projection의 인수 receipt 전에 제거하지 않는다. 동시 해제로 마지막 소유자가 되는 경우 영향이 달라졌음을 표시하고 기존 비종료 선택으로 실행을 끝내지 않는다. 소유 해제는 접근 권한·Run 귀속·실행 권한의 이전이 아니다. 요청 중단으로 이미 종료한 실행을 되살리지 않는다.
+
+**미실행 인수 조건:** A/B 공동 유지, 마지막 소유자, 동시 해제, 원격 ACK 유실, 권한 철회에서 소유 없는 활성 runtime·숨은 실행·자동 재시작 0건을 검사한다.
+
+<a id="impl-view"></a>
+#### 좌표, 배치와 입력 소유
+
+**화면 연결**: [사용자 조작](../../docs/references/design-synthesis/egdesk-ux-realization-proposals.md#ux-detail-view)
+
+Camera transform, View logical rectangle, Browser viewport, page zoom, OS 창 모드를 독립 상태로 저장한다. 좌표 변환은 실제 표시 중인 matrix의 역변환을 사용하며 애니메이션의 목표 matrix를 대신 쓰지 않는다. 집중 배율은 `min(가용폭/View폭, 가용높이/View높이)`다. 집중 보기에서 logical rectangle이나 Browser width/height를 쓰지 않는다.
+
+드래그는 shell handle에서 Pointer Capture로 시작하고 종료/취소 때 해제한다. 콘텐츠가 소유한 드래그·편집 입력을 Canvas 이동으로 바꾸지 않는다. 다만 Canvas 탐색 상태의 비활성 Chat 위 두 손가락 스크롤은 아래의 콘텐츠 활성 경계에 따라 Canvas가 처리한다. 실제 resize 전 해당 surface의 새 입력을 차단하고, 크기 변경 후 ResizeObserver·Browser 관찰에서 viewport와 document generation을 갱신한 뒤 stale action을 재검증한다. pan만으로 logical target을 바꾸지 않는다. [Pointer Capture](https://developer.mozilla.org/en-US/docs/Web/API/Element/setPointerCapture), [ResizeObserver](https://developer.mozilla.org/en-US/docs/Web/API/ResizeObserver).
+
+##### Chat 콘텐츠 활성과 두 손가락 탐색의 입력 경계
+
+사람의 콘텐츠 활성 상태, pointer hit-test 위치, 배치 선택, 키보드 focus, Agent의 입력 lease를 구별한다. Chat 본문·작성기 클릭은 해당 Chat을 콘텐츠 활성 대상으로 만들고 같은 상태로 시각 표시를 갱신한다. 작성기 클릭은 기존 입력칸 동작과 함께 처리하며 별도 활성화 버튼이나 두 번째 클릭을 요구하지 않는다.
+
+활성 Chat 위의 두 손가락 스크롤은 Chat 내부에 전달하고 camera에 같은 입력을 중복 적용하지 않는다. Chat 내부의 scroll 끝에서도 Canvas로 이어서 전달하지 않는다. 빈 Canvas 클릭은 Chat 콘텐츠 활성을 해제하지만 click 자체로 camera·View geometry·대화·초안을 변경하지 않는다. 이후 비활성 Chat 위 hover는 콘텐츠 활성이나 입력권을 만들지 않는다. 이 상태의 modifier 없는 두 손가락 스크롤은 Canvas camera만 이동하고 Chat의 내부 scroll은 유지한다. 별도 Pan 도구 상태를 이 경로의 선행조건으로 검사하지 않는다.
+
+이 전환은 사람의 로컬 UI 입력 분배다. Agent의 작업 target·입력 lease, 다른 참가자의 상태, Browser viewport, Agenda 소속이나 runtime 생애를 덮어쓰지 않는다. native 입력·보안 확인·콘텐츠별 modifier·zoom·기존 키보드 대안은 별도의 입력 계약을 유지한다. 이벤트 수신·전달의 구현 방식은 이 상태 보장을 만족하는 Firefox shell/renderer 경계에서 선택한다.
+
+**미실행 인수 조건:** Chat 클릭 → 활성 표시와 작성기 커서 → Chat 위 내부 scroll → 빈 Canvas 클릭 → 활성 해제 → 포인터를 같은 Chat 위로 이동 → Canvas pan → Chat 재클릭의 각 상태를 확인한다. Canvas 탐색 단계의 Pan 버튼·보조키 요구 0, hover 재활성화 0, 한 입력의 Chat/Canvas 중복 적용 0, scroll 끝의 뜻하지 않은 camera 이동 0을 검사한다. 대화·초안·View geometry·Browser viewport·Agent target/lease가 보존되는지 대조한다. 시각 활성 표시와 실제 입력 대상의 불일치도 실패다. 이 조건은 새 규칙의 검증 계획이며 P0 재리허설이나 실제 Firefox 시험을 통과했다는 기록이 아니다.
+
+focus token은 surface·View·control role·목록 위치를 가리킨다. 닫힌 DOM element 자체를 복원하지 않는다. IME 조합 여부와 composition lifecycle을 함께 추적하고 조합 확정 키를 저장·검색 결과 실행에 재사용하지 않는다. 콘텐츠의 Escape·찾기·편집기 undo는 콘텐츠 소유다. [IME 상태](https://developer.mozilla.org/en-US/docs/Web/API/KeyboardEvent/isComposing), [W3C focus 복귀](https://www.w3.org/WAI/ARIA/apg/patterns/dialog-modal/).
+
+그룹은 부모 관계의 비순환 배치 그래프이며 권한·실행 경계가 아니다. ungroup은 world position을 보존한다. undo는 해당 변경의 대상 version이 유지될 때만 역연산하고 다른 사용자의 후속 배치를 덮지 않는다. 드래그 외에도 이동/크기 숫자 입력을 동일 command로 처리한다. [W3C 드래그 없는 포인터 경로](https://www.w3.org/WAI/WCAG22/Understanding/dragging-movements.html).
+
+기존 Firefox shell의 DOM/CSS 경로를 확장한다. InfiniteCanvas의 camera 개념과 xyflow의 node·minimap 패턴은 참고만 하며 dependency/code port로 채택하지 않는다. 라이선스·현재 renderer 적합성을 확인하지 않은 코드 이식은 포함하지 않는다.
+
+**인수 절차:** 동일 Browser를 pan·zoom·집중 보기 왕복한 전후의 내부 viewport, page zoom, target ID를 대조한다. 실제 960→1280px resize에서는 responsive 변화와 observation revision 증가를 확인하고 이전 좌표 행동을 차단한다. 한글 입력 중 다른 surface 탐색, native modal 취소, 사이트 전체 화면, 대상 닫힘, 모션 감소, 키보드·숫자 입력·그룹 중첩/해제를 검사한다. 변환된 live renderer가 이를 만족하지 못하면 집중 진입을 되돌리고 원 크기 View·명시적 resize 경로를 유지한다. Snapshot을 Live처럼 대신 보여 주지 않는다.
+
+Canvas geometry와 renderer attachment는 `viewId`에 결합하고 Agenda 소속은 별도 membership 관계로 유지한다. 동일 View가 여러 Agenda에 속해도 물리적 위치·크기·renderer attachment는 한 벌이다. Agenda를 추가로 열 때 기존 View의 geometry를 저장된 좌표로 덮거나 renderer를 새 영역으로 재부모화하지 않는다. 새 View 생성에만 해당 projection의 저장 위치를 적용한다. 서로 다른 `viewId`가 같은 `resourceId`를 참조하는 경우에는 별도 geometry를 유지하며, resource 일치만으로 View나 runtime을 병합하지 않는다.
+
+보조 드래그 pan은 셸 Canvas의 빈 영역 또는 명시적 Pan 도구에서 시작한 ⌘/Ctrl 드래그로 처리한다. 해당 드래그 시작 조건이 충족된 뒤 Pointer Capture를 획득하고 종료·취소 때 해제한다. 이 보조 경로의 조건을 앞서 정의한 비활성 Chat 위 두 손가락 pan에 추가하지 않는다. Space 기본 pan 경로를 추가하지 않는다. 콘텐츠가 소유한 드래그·텍스트 선택·편집·modifier 입력은 해당 콘텐츠 소유로 남긴다. **인수 절차:** 같은 View를 포함하는 다른 Agenda를 연 전후의 위치·크기·attachment identity를 비교하고, 같은 Resource의 별도 View 두 개는 각각 유지되는지 확인한다. 사이트 안의 ⌘/Ctrl 드래그·텍스트 선택·편집 입력이 Canvas pan으로 전환되지 않아야 한다.
+
+##### View별 최소 rect 검사
+
+허용 rect는 공통 최솟값만으로 결정하지 않고 View 유형별 최소값을 적용한다. Chat의 최소는 **320×420**이다. `[크기]` 숫자 입력·핸들 드래그·저장 구성 복원은 모두 같은 validator를 사용하며 320×240 Chat을 허용하지 않는다.
+
+사용자 숫자 입력 오류는 값과 초안을 유지하고 `Chat 최소 높이 420px`를 표시한다. 작은 과거 저장 rect를 복원할 때는 최소 rect로 표시하되 원 기록을 조용히 덮지 않는다. 검토 배치의 임시 rect와 NORMAL 저장 rect를 구분한다. 다른 Browser의 viewport나 실행 대상은 변경하지 않는다.
+
+##### 공유 배치의 복원·폐기는 현재 version을 존중한다
+
+geometry와 그룹 관계에 단조 증가 version 및 변경 operation/actor를 기록한다. 구성 폐기의 geometry 역변경은 해당 초안의 마지막 배치 operation version이 현재값과 일치할 때만 적용한다. 불일치는 현재 배치를 유지하고 처리 결과에 기록한다. 기존 View는 저장된 다른 부모 그룹으로 재귀속하지 않는다. 저장 그룹은 신규 View에만 구성하며, 기존 View는 탐색 참조로 남긴다. 과거 저장 revision은 수정하지 않는다.
+
+**미실행 인수 조건:** A 수정→B의 후속 이동/그룹화→A 폐기·재열기에서 B의 후속 배치, 단일 부모 관계, renderer attachment가 유지되는지 검사한다.
+
+##### resize의 무변경·거부·응답 유실
+
+`resizeId, viewId, expectedGeometryVersion, requestedSize, observationGeneration, leaseEpoch`를 사용한다. 유효성 검사와 동일 크기 판정은 입력 차단 전에 수행한다. 실제 변경 때만 surface-local fence를 설치하며 기존 lease를 연장하지 않는다.
+
+거부 시 이전 크기를 확인한 뒤 fence를 해제한다. ACK 유실은 재발송 전에 실제 크기·문서 generation을 조회한다. 요청 크기이면 적용 receipt, 이전 크기이면 무변경 종료, 제3의 크기이면 현재값 보존·충돌로 처리한다. 조회도 실패하면 조작 불가 상태를 유지한다. 성공·실패 후 입력은 현재 권한·소유자·lease 유효성을 다시 확인한 경우에만 허용한다. 만료·철회된 lease를 복원하거나 차단 중 키 입력을 뒤늦게 재생하지 않는다.
+
+**미실행 인수 조건:** 동일 크기, 거부, ACK 유실, 제3자 resize, 권한 철회와 사용자 입력 개입에서 영구 대기·오래된 입력 재생·lease 부활이 없는지 검사한다.
+
+##### 유형별 최소 크기
+
+드래그·숫자 입력·복원은 같은 유형별 validator를 사용한다. 과거 기록이 현재 최소값보다 작으면 지원 최소값으로 재구성하고 보정 사실을 표시하되 과거 revision은 바꾸지 않는다. 카메라 확대·축소는 실제 resize 검증과 분리한다.
+
+**미실행 인수 조건:** Chat 320×419 거부·320×420 허용, 경계값 복원, 숫자/드래그 결과 일치와 작성기 보존을 검사한다.
+
+##### 제거 대상과 활성 Agenda를 고정한다
+
+제외 입력은 `projectionId, viewId, expectedMembershipVersion, operationId`다. 해당 membership만 변경하고 Saved Agenda 갱신은 명시적 저장 때 수행한다. geometry·runtime ownership·다른 membership은 유지한다. 마지막 소속을 제거해도 살아 있는 runtime의 View/node는 Agenda 밖 Canvas에 남고 `실행 유지: A`처럼 실제 소유자를 표시한다.
+
+**미실행 인수 조건:** A/B 공유 View에서 B 제외 도중 카메라·활성 선택을 바꾸어도 A 제외·runtime 종료·View 복제가 발생하지 않아야 한다.
+
+##### 상대 좌표·배치 충돌·정리 범위
+
+신규 world rectangle은 `projectionOrigin + savedLocalRect`로 계산한다. 제목·여백·신규 객체를 포함한 전체 bounding box를 사용한다. 시작점은 보이는 Canvas 왼쪽 위 16px 지점을 world 좌표로 변환한 위치다. 24px 격자의 Manhattan 거리 순, 동률은 위→왼쪽 순으로 후보를 검사한다. 기존 View·그룹·다른 projection의 점유 사각형을 24px 확장하여 충돌을 검사한다.
+
+한 UI 처리 단위에서 64후보, 총 4096후보 후에도 실패하면 전체 점유영역 오른쪽 끝+24px 위치를 검사한다. 유효한 배치를 얻지 못하면 무변경 실패다. commit은 Canvas layout version을 비교한다. 정리는 선택 순서의 최상위 객체에 같은 알고리즘을 적용하며 미선택 객체와 이미 배치한 선택 객체를 장애물로 사용한다. 세 번의 version 경합 후 사용자 재시도로 전환한다.
+
+**미실행 인수 조건:** 30 Agenda·200 View·공유 View·음수 좌표에서 결정적 배치, 신규 겹침 회피, 미선택 geometry 불변을 검사한다.
+
+##### Canvas 배치 실행 취소
+
+명령은 변경 전 값·write-set·적용 후 geometry/group version을 보존한다. 모든 대상의 현재 version이 일치할 때만 역변경을 원자적으로 적용하고 새 version/event를 만든다. 하나라도 불일치하면 전체 undo를 거부한다. 닫힌 View·runtime을 재생성하거나 파일 저장·카메라 이동을 되돌리지 않는다.
+
+**미실행 인수 조건:** 그룹/해제/정리 후 타인 변경·대상 닫힘에서 부분 덮어쓰기와 runtime 부활 0건을 검사한다.
+
+##### Pan 위치·zoom 경계·스냅 해제
+
+확대 기준점의 world 좌표를 `M⁻¹(p)`로 고정한 채 새 camera translation을 계산한다. 음수 좌표 pan을 허용하고 비유한 값은 이전 카메라를 유지하며 거부한다. 전체 보기는 같은 zoom 범위에서 맞추며 전부 담을 수 없으면 그 사실과 미니맵·화면 목록을 제공한다. 탐색은 활성 Agenda·실행 대상·Browser viewport를 바꾸지 않는다.
+
+**미실행 인수 조건:** 배율 끝값·서로 다른 pivot·스냅 해제·모션 감소·사이트 modifier 입력에서 좌표 오귀속과 Space pan이 없는지 검사한다. 같은 포인터 위치에서도 Chat 콘텐츠 활성/해제 상태에 따라 내부 scroll과 Canvas pan이 구별되고, 어느 경로도 Browser viewport·Agent 실행 대상을 바꾸지 않는지 앞의 입력 전환 인수 조건과 함께 검사한다.
+
+<a id="impl-discovery"></a>
+#### 범위 검색, 열기 resolver와 큐레이션
+
+**화면 연결**: [사용자 조작](../../docs/references/design-synthesis/egdesk-ux-realization-proposals.md#ux-detail-discovery)
+
+검색 입력은 `query, scope, filters, requestGeneration, accessContext`다. 결과는 stable ID·유형·source revision·접근 상태·명시적 action을 가진다. 동일 resolver가 Dock·파일 선택·드롭·Chat 링크·검색·Library를 처리한다. action은 focus-existing, open-view, open-agenda, add-reference로 구분한다.
+
+로컬 FTS5를 사용하되 제목·허용된 기존 검색 텍스트만 index한다. NFC 정규화된 3자 이상 부분 검색에는 trigram을, 1–2자에는 범위가 제한된 parameterized 제목 검색을 사용한다. 한국어 형태소 분석을 제공한다고 주장하지 않는다. 입력은 SQL/명령으로 평가하지 않는다. [SQLite FTS5](https://www.sqlite.org/fts5.html).
+
+권한 필터는 snippet·개수 생성 전에 적용하고 열기 직전에 다시 확인한다. 과거 계정으로 수집한 snippet을 현재 권한이 없는 사용자에게 표시하지 않는다. 늦은 검색 응답은 requestGeneration이 다르면 폐기한다. 검색 취소·재입력은 View·자료를 변경하지 않는다.
+
+index 실패 시 canonical metadata의 제목 검색으로 fallback한다. `[색인 다시 만들기]`는 파생 index만 재구성하며 자료·대화·Snapshot을 삭제하지 않는다. 명령 팔레트는 권한·focus 범위를 가진 명시적 command 목록이며 사이트 입력에서 전역 단축키를 강제 포획하지 않는다.
+
+Library 정책은 허용된 등록 대상 유형 집합으로 집행한다. 집합이 비어 있으면 Library UI·등록 쓰기가 없으며 일반 resource index와 Saved Agenda 검색은 계속 제공한다. 등록은 참조 생성이지 원문 캡처·실행 소유 추가가 아니다.
+
+**인수 절차:** 한글 1·2·3자, 조합 중 Enter, 긴 동명이름 30개, Canvas View 200개, 권한 철회, offline 대상, 검색 응답 역전을 검사한다. 정확한 범위·action·focus 복귀가 유지되고 권한 밖 제목/snippet 노출과 원치 않은 모델·웹 요청은 0건이어야 한다. Library의 전체 유형/자료만/없음 분기에서 등록 메뉴·저장 결과를 대조한다. index 실패에도 제목 검색과 원 작업 복귀가 가능해야 한다.
+
+##### 검색 실행과 취소의 복귀를 나눈다
+
+탐색 종료에 `closeReason=cancel|executed`, `navigationId`, `originReturnToken`, `destinationId`를 기록한다. `executed`는 목적지 또는 그 loading node 생성과 포커스 인계가 확정된 뒤 한 번만 적용하며 cancel 복귀 handler를 실행하지 않는다. 늦은 callback은 요청 generation으로 폐기한다. 결과 렌더 실패는 확보된 목적지 node의 실패 상태이지 자동 원 위치 복귀가 아니다.
+
+**미실행 인수 조건:** 클릭·Enter·Esc·대상 삭제·늦은 응답에서 목적지 이동의 즉시 취소, 이중 복귀, 취소에 의한 신규 View 생성이 없는지 검사한다.
+
+### 17.B 대화·읽기·답변
+
+<a id="impl-chat-request"></a>
+
+#### 요청 접수·입력·재진입 계약
+
+**화면 연결**: [사용자 조작](../../docs/references/design-synthesis/egdesk-ux-realization-proposals.md#ux-detail-chat-entry)
+
+공통 입력은 native textarea와 버튼을 사용하고 UI 구성 프레임워크는 제한하지 않는다. `compositionstart/end`, `KeyboardEvent.isComposing`, 해당 물리 키의 keyup까지 유지하는 전송 억제 표식으로 조합 확정과 전송을 분리한다. 전송 handlers는 현재 입력 소유자가 Chat일 때만 실행한다. 대화상자의 초기 focus·Esc·호출자 복귀는 APG 패턴을 적용한다. [IME 근거](https://developer.mozilla.org/en-US/docs/Web/API/KeyboardEvent/isComposing), [focus 근거](https://www.w3.org/WAI/ARIA/apg/patterns/dialog-modal/).
+
+입력 계약은 `draftId/revision, requestId, conversationId, targetRunId?, actor, text, attachmentRefs, contextRevision, returnToken`이다. SQLite transaction으로 요청 event와 outbox를 함께 기록한 뒤 Engine adapter에 전달한다. `(requestId, revision)`은 고유하며 응답은 이 키에 귀속한다. 초안 저장 확인 전 성공 표시를 내지 않는다.
+
+Codex 연결은 구독 인증된 App Server adapter를 재사용한다. JSON-RPC stdio, `initialize → initialized`, `turn/start`, 활성 turn의 `turn/steer(expectedTurnId)`, `turn/interrupt`를 사용한다. 인증은 managed ChatGPT login 후 `account/read`로 확인한다. 일반 유료 API SDK로 대체하지 않는다. [App Server 공식 계약](https://developers.openai.com/codex/app-server).
+
+Engine adapter는 product Run과 engine thread/turn/item ID를 따로 연결한다. `turn/steer` 응답은 수락 증거이지 per-inference 적용 증거가 아니다. `inputIds/contextRevision/payloadHash/inferenceRef`를 결합한 소비·전달 receipt가 있을 때만 반영 확인으로 승격한다. 관찰 기능이 없는 adapter는 `수락됨·반영 시점 확인 불가`를 반환한다. 일반 조정을 위해 interrupt/fork하지 않는다. turn 종료 경합은 상태 조회 후 같은 product Run의 다음 허용 turn에 연결한다.
+
+응답 유실은 재전송 전에 `thread/read`와 저장된 item/turn binding을 대조한다. 수락을 식별하지 못하면 unknown을 유지한다. 취소 intent는 늦은 수락에도 적용하되 중복 실행을 만들지 않는다.
+
+인수 절차: 한글 조합 확정, 전송키 연타, 수락 지연, 수락 직후 연결 단절, 다음 초안 입력, 재시작을 순서대로 주입한다. 요청당 dispatch 1건, 조합 확정 전송 0건, 다음 초안 손실 0건이어야 한다. 식별 불가능한 수락은 보존된 요청과 상태 확인 UI로 fallback한다.
+
+##### 검토 배치·확정 범위 결합
+
+`enterReviewLayout/exitReviewLayout`은 viewId를 유지하고 이전 rect·view state·returnToken을 저장한다. 승인 확정은 선택 집합·payload·수신자·권한·비용의 `reviewedScopeHash`를 현재 값과 비교한다. 달라졌으면 바뀐 범위만 다시 표시하고 기존 확정을 적용하지 않는다. 이 hash는 검토 화면의 범위 결합이지 사람이 모든 문장을 이해했다는 증거가 아니다.
+
+미실행 인수조건: 두 NORMAL 크기, 두 검토 배치, 긴 승인 값에서 합계 치수·동시 가시성·초안 보존·복귀 일치·scope 변경 후 옛 승인 사용 0을 검사한다.
+
+<a id="impl-context-share"></a>
+
+#### Context·권한·공유 relation 계약
+
+**화면 연결**: [사용자 조작](../../docs/references/design-synthesis/egdesk-ux-realization-proposals.md#ux-detail-context-share)
+
+resolver 입력은 명시 선택, 업무 binding, 허용된 Agenda·layout signal, 현재 정책과 source descriptor다. 출력 item은 `sourceRef, revision/hash, range, payloadRole, include/exclude, reason, authorityRef, recipientScope`를 갖는다. relevance 판단과 권한 판단은 다른 필드다.
+
+위임 가능한 행동은 Profile ceiling ∩ 현재 capability ∩ Task 위임 ∩ resource authority ∩ 승인 ∩ 실행 상한의 교집합이다. child에게 이 집합보다 큰 grant를 발급하지 않는다. 공유 대화 참여·Agent mention은 Engine 사용권·업무 계정·OS 권한을 부여하지 않는다.
+
+공유 relation은 `conversationId, participants, scopeRef, agendaRefs, messageRefs, contributionRefs`로 저장한다. 개인 방 history와 engine thread를 그대로 공유하지 않는다. 공유 operation은 `operationId, baseRevision, selectedRefs, recipients, grantRevision`을 포함한다. 수신자별 권한 검사 후 허용된 본문/참조만 materialize한다. 전송 전 grant가 바뀌면 재검사하며 실패 초안은 보존한다.
+
+독립 검토는 명시적인 별도 Task와 새 engine context로 구성할 수 있다. 허용 입력 manifest를 고정하고 제외 자료는 대화·memory·요약·tool 검색 경로 모두에서 차단한다. engine history가 상속되는 환경에서는 독립성을 확인했다고 표시하지 않는다. 원문 읽기만 요청한 Reader에 업무 판단 권한을 넘기지 않는다.
+
+셸 controller는 `open/focus`, `captureReturn/restoreReturn`, `focusGroup` 의미 계약을 제공한다. returnToken에는 View·message/step·scroll·Canvas 시점·draft ID를 담고 runtime 재시작 권한은 담지 않는다. Engine adapter는 binding·capability·수락/적용/중지 receipt를, 자료 서비스는 source identity·range·허용 payload·보존 상태를 제공한다.
+
+인수 절차: 두 업무·두 참가자 중 한 사람만 원천 접근권을 가진 fixture에서 포함 변경, 공유, 권한 철회, 독립 검토를 수행한다. 다른 업무 변경·비공개 본문 유출·제외 정답 유입은 각각 0건이어야 한다. 경합은 공유 보류와 원 초안 복귀로 처리하며 독립 업무는 계속한다.
+
+##### 독립 입력 manifest의 집행
+
+제안된 EG-Desk 내부 계약은 `prepareIsolatedTask(manifest, isolationPolicy)`와 `startIsolatedTask(preparedToken)`이다. 공개 Engine API 자체의 기능명으로 주장하지 않는다.
+
+| 필수 capability | 집행 방법 |
+|---|---|
+| 새 실행 context | 기존 engine history의 resume/fork 없이 새 context 생성; 부모 대화·요약 자동 상속 금지 |
+| 기억·환경 입력 제한 | 자동 memory 주입 차단; 허용된 지침·원천만 제공하는 격리 입력 root 사용 |
+| 도구 접근 제한 | source manifest의 positive allowlist로 읽기 gateway 집행; 통제되지 않는 native tool·shell·network 경로 비활성 |
+| 전달 증거 | 실제 입력 경계의 manifest/hash·context ID·Engine/도구 구성 version과 receipt 결합 |
+
+네 capability와 해당 구성의 conformance 근거가 모두 유효해야 준비 token을 발급한다. 시작 직전에 manifest·권한 epoch·도구 구성을 다시 대조한다. 하나라도 미지원·미확인이면 **독립 Task dispatch는 0건**이다. 실행 중 보장이 깨지면 해당 Task의 다음 입력·도구 행동을 차단한다. 입력 root는 읽기 전용이며 결과 작성은 지정된 임시 산출물 범위만 허용한다.
+
+독립 Task는 기존 product Run에 연결할 수 있으며 일반 조정에 새 Run·fork를 강제하지 않는다. 보장 범위는 이번 실행의 입력·도구 경계이지 모델 학습 지식의 부재가 아니다.
+
+미실행 인수조건: 제외 정답을 history·memory·요약·도구 경로에 각각 배치하여 유입 0을 검사한다. 미지원 adapter에서는 시작 0, 초안 보존이어야 한다. 기간 예외 근거를 제거한 RWS-0006형 fixture는 숫자가 일치해도 `확인 필요`이며 일반규칙 대체·전체 재현 성공을 허용하지 않는다. coverage 계산은 System, 업무 판정은 담당 Agent가 맡는다.
+
+##### 경로 설정과 상속
+
+경로 record는 `scopeType/scopeId, agentRef/profileRef, revision, author, delegationRef`다. CRUD는 expected revision과 operationId로 기록한다. 우선순위는 명시 요청→업무 binding→방→routing Agenda→앱이다. 미설정은 상속하지만 설정된 Agent의 이용 불가는 조용히 건너뛰지 않는다. 사전 위임 목록 안의 대체만 허용하고, 그 밖에는 `[허용된 다른 담당 선택] [설정 유지·대기]`를 제공한다. Engine 계정 기본값은 별도 record다.
+
+각 범위의 저장·해제·재시작·충돌, Agent 이용 불가에서 적용 출처 일치·기존 업무 오변경 0·방 identity 변경 0을 검사한다.
+
+##### 지속 공개 cursor와 grant
+
+지속 binding은 `bindingId, conversationId, ownerScopeRef, mode, workRef, initialRefs, startCursor, endCursor, status, participantEpoch`를 가진다. workRef는 request/Task와 포함할 하위 범위를 명시한다. 수신자별 `grantId/epoch, joinCursor, scanCursor, deliveryStates/ackCursor`를 기록한다.
+
+coordinator의 durable 사건 순서를 사용한다. 각 사건은 업무 범위·수신자의 현 grant·payload lineage·가림 조건을 검사한 뒤 materialize한다. 중복 키는 `bindingId+eventId+recipientId+payloadRevision`이다. 제외 사건도 내부 처리 결과를 기록하되 비공개 이름·존재·개수를 수신자에게 노출하지 않는다.
+
+종료/철회는 binding epoch를 올리고 미전달 항목을 취소한다. 재접속은 cursor와 현 epoch를 대조하며 옛 queue·grant를 부활시키지 않는다. 실패·미확인은 `[공유 상태 확인]`, 유효 binding의 정확한 미전달 집합만 `[다시 시도]`한다. 일반 메시지 저장·공유 delivery event에는 Engine outbox를 만들지 않는다.
+
+미실행 인수조건: 초기 참조, 이후 사건, 권한 변경, 새 참가자, 종료 중 전송, 재접속을 교차하여 범위 밖 공개·중복 전달·과거 자동 backfill·철회 부활·공유만으로 Engine 호출이 각각 0이어야 한다. 실제 원격 연결이 승인·설정되지 않았으면 원격 delivery만 대기하며 로컬 대화와 독립 업무는 유지한다.
+
+<a id="impl-reader-observation"></a>
+
+#### Reader admission·coverage·Snapshot 계약
+
+**화면 연결**: [사용자 조작](../../docs/references/design-synthesis/egdesk-ux-realization-proposals.md#ux-detail-reader-observation)
+
+텍스트 admission 비용은 대상 모델·입력 경로에 대해 검증된 tokenizer를 우선 사용할 수 있다. tokenizer를 사용할 수 없는 경로는 **검증된 UTF-8 기반 보수적 상한을 텍스트에 한해** 사용할 수 있다. 이 상한은 실제 전달 텍스트의 인코딩 길이와 해당 경로에서 검증한 직렬화·특수 토큰·고정 overhead를 포함하며 적용 조건과 estimator version을 기록한다. 임의 파일 byte 수를 곧바로 token 수로 간주하지 않는다. 어느 방법이든 필수 대화·답변 reserve·tool overhead·동시 예약량·첨부 간 참조와 함께 평가한다. 이미지·PDF 페이지·기타 비텍스트 비용에는 텍스트 상한을 적용하지 않고 해당 modality의 검증된 비용 모델을 사용한다. 상한의 적용 조건이나 비용을 확인할 수 없으면 parent transcript에 넣기 전에 bounded read 또는 Reader로 전환하고 그 변환·coverage를 기록한다.
+
+전체 읽기는 `sourceHash + shapeIndex + complete partition manifest`를 기준으로 비중첩 core range와 별도 overlap range를 배정한다. 성공 coverage는 core의 합집합으로 계산한다. 슬롯 부족은 queued wave로 처리한다. 재질문은 같은 sourceHash에서 새 intent·packet revision을 만들며 이전 요약만 재요약하지 않는다. 키워드 기반 targeted 읽기는 검색 hit 전체 manifest를 별도로 고정한다.
+
+Reader 결과는 선택 span·coverage·누락 이유·변환·오류를 반환한다. business verdict는 parent가 작성한다. 복구는 같은 parser 1회 재시도 → 허용된 대체 parser/encoding → 허용된 OCR 순으로 상한 안에서 수행한다. 손상·암호·권한·미지원과 context overflow를 구분한다.
+
+파서 선택은 파일 서비스가 제공하는 adapter descriptor에 결합한다. MinerU의 `discarded_blocks`·backend/version, GROBID의 페이지·구조 좌표는 추출 결과를 원문에 연결하는 연구 대안이다. 자동 제거된 각주 등을 전체 판독으로 숨기지 않는다. 좌표의 페이지 시작값·단위·CropBox를 정규화한다. [MinerU 출력 계약](https://opendatalab.github.io/MinerU/reference/output_files/), [GROBID 좌표 계약](https://grobid.readthedocs.io/en/latest/Coordinates-in-PDF/).
+
+observation manifest는 named operation, raw/delivered/preview role별 hash·length, source revision, tool/Reader identity, coverage와 transformation을 보존한다. EG-Desk 통제 tool gateway는 반환 직전 명명 결과 전체와 전달 payload를 기록한다. 직접 결과의 무표시 잘림은 오류다. opaque provider 결과는 관찰 가능한 경계만 기록한다.
+
+Snapshot renderer는 script·network·현재 로그인 행동을 실행하지 않는다. Live는 별도 view identity다. 삭제·가림은 원 hash 덮어쓰기가 아니라 tombstone·파생 object·정책 event다. 저장소의 실제 정리 결과를 받기 전 `삭제됨`을 표시하지 않는다.
+
+Task 상태는 scheduler의 정본 event로 투영한다. 중지 확인 뒤 cancelled, 실행 실패 확인 뒤 failed로 전이한다. 실제 failed Task의 재시도는 실패 attempt를 보존하고 새 attempt를 생성한다. completed/cancelled Task와 그 terminal attempt는 수정하지 않는다. 명시적 continue는 `continuesTaskId`로 원 Task를 가리키는 후속 Task와 실행 binding을 생성하며 기존 request·conversation·source·result 관계를 유지한다. Engine의 새 turn이나 필요한 후속 실행 binding은 새 사용자 요청·새 담당자 방과 동일하지 않다. continue 시 현재 권한·의존성·외부 효과 receipt를 다시 검사하고, 확인되지 않은 외부 행동은 자동 반복하지 않는다. 늦은 packet이나 재접속 event만으로 continue를 생성해서는 안 된다.
+
+인수 절차: 41행 direct 결과, 분할 원문 중 1개 누락, OCR 실패, 원문 교체, 권한 철회, 중지 뒤 packet 도착을 주입한다. 정확한 payload hash, 미판독 표시, 새 원문 coverage 초기화, 취소 후 후속 실행 0건을 확인한다. 복구 불가는 원문 보기·대체 자료·명시적 범위 축소로 fallback한다.
+
+활동 navigation resolver는 `activityKind, taskStatus, liveBinding, observationRef, lastConfirmedAt`을 입력으로 사용한다. 실행 중인 interactive Browser/Terminal에 유효한 liveBinding이 있으면 기존 viewId·runtime identity를 반환한다. renderer가 detached라면 같은 View에 다시 부착하며 runtime을 재실행하지 않는다. 완료된 command/file-read에는 정확한 observationRef를 반환한다. Live 부재·연결 미확인은 기존 Canvas 논리 node와 선택적인 마지막 Snapshot을 반환한다. 명시적인 `[당시 관찰]`·`[현재 조작면]` 입력은 이 기본 경로와 독립적으로 각각의 identity를 해소한다.
+
+##### 역할별 가림의 원자적 접근 제한
+
+가림 operation은 `operationId, selectedRefs, mandatoryRefs, policyRevision, authorityEpoch, role별 처리상태`를 저장한다. 새 제한 epoch를 적용하여 대상의 기존 일반 열람·재첨부를 먼저 차단하고, 가림본을 불변 저장한 뒤 검증된 표현만 공개한다. 상태는 `가림 적용됨 / 제한 유지·처리 실패 / 결과 미확인`이며 원본 정리 상태는 별도다. `[상태 확인] [미완료 항목 재시도]`는 같은 operation의 미완료 대상만 처리한다. 실패 때문에 무가림 원본을 다시 노출하지 않는다.
+
+미실행 인수조건: 같은 지정 비밀이 raw·packet·preview·Answer·index·replica에 존재하는 fixture에서 중간 저장 실패를 주입한다. 제한 후 무권한 노출 0, 과거 전달 hash 변경 0, 미완료 사본의 삭제 완료 오표시 0이어야 한다.
+
+<a id="impl-answer-revisions"></a>
+
+#### Answer identity·매체·수정본 계약
+
+**화면 연결**: [사용자 조작](../../docs/references/design-synthesis/egdesk-ux-realization-proposals.md#ux-detail-answer-revisions)
+
+`request → runs/tasks → contributions/results/artifacts → answerId/revision → projections` 관계를 사용한다. Answer revision은 여러 Result·artifact를 참조할 수 있고 artifact는 여러 답변에서 재사용할 수 있다. Result의 aggregate completeness와 Task status는 다른 필드다.
+
+Agent는 `reportItems, explanation, selectedEvidence, selectionReason`을 제안한다. System은 target existence·권한·payload lineage·renderer capability를 검증한다. `sourceChanged`는 revision 비교 결과이며 의미 영향 판단과 구분한다. renderer retry는 저장된 Answer revision을 다시 그릴 뿐 모델을 호출하지 않는다.
+
+사용자 수정은 `author, baseAnswerRevision, changedFields, sourceRefs`를 가진 새 revision이다. annotation-only 정책은 이 mutation을 거부하되 댓글·개인 view state는 허용한다. 설명 갱신 요청은 저장된 수정본 hash에 결합하고 자동형도 같은 revision 요청을 중복 생성하지 않는다.
+
+저장은 짧은 SQLite transaction과 `baseRevision` 비교로 처리한다. 충돌하면 최신 값과 사용자 초안을 함께 반환한다. 겹치지 않는 변경만 허용된 정책으로 병합하고 같은 필드 충돌은 덮어쓰지 않는다. SQLite의 단일 동시 writer 제약을 고려해 IO·렌더·모델 호출을 transaction 밖에서 수행한다. [SQLite transaction 계약](https://www.sqlite.org/lang_transaction.html).
+
+인수 절차: Chat/Canvas에서 같은 답변을 열고 사본 저장, 동시 수정, source 변경, 한쪽 renderer 실패를 발생시킨다. answerId 유지, 서로 다른 작성자 revision 보존, 과거 payload 불변, 탐색/렌더 retry의 모델 호출 0건이 합격 조건이다. 실패 시 원답변·사용자 초안·읽기 쉬운 표현을 유지한다.
+
+##### 답변 삭제와 잔존 참조
+
+삭제는 `operationId, answerId, frozenRevisionIds, expectedHead, authorityEpoch, deleteSet, retainedRefs`에 결합한다. 대상의 새 게시·재첨부를 차단하고 참조 제거와 payload 정리를 항목별로 기록한다. 대표 revision을 삭제하면 대표 참조를 비우며 다른 판단을 자동 대표로 채택하지 않는다.
+
+Chat 전달 event는 유지하되 삭제된 Answer payload에 의존하는 표현·cache는 `삭제된 답변`으로 바꾼다. 독립적으로 보존되는 메시지 사본·provider 전달분은 남는 사본으로 명시한다. 공유 artifact는 다른 유효 참조 때문에 유지할 수 있으며 `참조 해제·공유 사본 유지`로 표시한다. 댓글은 허용된 본문과 원 연결 기록을 남기고, Briefing은 영향을 받은 target을 유실 상태로 표시한다. 강제 개인정보 조건은 가림·삭제 연동 규칙을 따른다.
+
+`삭제됨 / 보존됨 / 정리 대기 / 실패 / 미확인`을 구분하고 같은 operation으로 상태 확인·미완료 재시도를 수행한다. 삭제는 Run 중지가 아니다. 늦은 게시 event는 삭제된 Answer를 부활시키지 않고 기여 기록으로 보존한다. 복구가 허용되면 현재 권한으로 새 revision을 만들며 물리 삭제된 byte의 복구를 약속하지 않는다.
+
+미실행 인수조건: revision 단독/전체 삭제, 다른 Answer의 artifact 재사용, 동시 새 revision, 열린 두 표현, 부분 정리 실패에서 범위 밖 삭제·자동 부활 0이어야 한다.
+
+##### 개인 표시의 독립 상태
+
+`personalViewPreferences`는 `actorId/viewId/answerRevision`에 결합하고 Answer mutation과 분리한다. 주석 전용 검사는 본문·report item 집합·설명 순서·사용자 대표 변경 모두에 적용한다. 개인 표시·renderer retry는 모델 호출을 만들지 않는다. 양 정책에서 개인 숨기기 이후 Answer hash·공유 표현 무변경을 검사한다.
+
+##### 게시·대표·선택 참조
+
+`agentHead`, `representativeRef`, `representativeMode=followAgent|pinned`, View별 `selectedRevision`을 분리한다. 초기 대표는 Agent 게시본을 따른다. 실제 새 Agent 답변은 agentHead를 갱신하며 followAgent일 때만 대표도 갱신한다. 사용자 수정본 저장은 이를 변경하지 않는다. 명시 대표 선택은 pinned, `[새 Agent 답변 따르기]`는 followAgent로 전환한다. 주석 전용으로 정책이 바뀌어도 기존 수정본의 작성자·이력은 유지한다.
+
+대표 변경은 expected revision 비교와 한 transaction으로 기록한다. 실패·충돌은 초안과 기존 대표를 유지하고 `[상태 확인] [차이 다시 보기]`를 제공한다. 렌더 재시도는 선택 revision만 다시 그린다. 인수조건은 과거 Chat 무변경, 저장만으로 대표 변경 0, 양 표현의 명시 선택 일치, 타인 초안 유실 0이다.
+
+##### 원 대화 복귀 binding
+
+Canvas Answer projection의 탐색 기록은 `originConversationId, originMessageId, answerId, answerRevision, originViewId, returnPosition, navigationGeneration`을 가진다. 복귀는 현재 ACL을 검사한 동일 참조만 열며 새 대표 revision이나 다른 방을 자동 선택하지 않는다. 출발 참조가 없으면 접근 가능한 명시적 Answer-message 연결만 후보로 조회한다. 권한 상실·누락·오래된 navigationGeneration에서는 원 Canvas를 보존하고 늦은 focus commit을 취소한다.
+
+미실행 인수: Chat 답변→Canvas→복귀에서 동일 방·메시지·revision·초안·스크롤을 확인한다. 연결 0/1/복수, 권한 철회, 메시지 삭제, 조회 중 다른 탐색을 교차하여 비공개 후보 노출·잘못된 답변 복귀·새 모델 호출이 각각 0이어야 한다.
+
+<a id="impl-briefing-comment"></a>
+
+#### Briefing·Step·Comment 계약
+
+**화면 연결**: [사용자 조작](../../docs/references/design-synthesis/egdesk-ux-realization-proposals.md#ux-detail-briefing-comment)
+
+Briefing은 `briefingId, revision, answerRevision, author, orderedGroups/steps`를 갖는다. Step은 안정적인 ID, 고정 targetRefs, selector, 설명, focus scope, fallback을 갖는다. 순서 숫자를 identity로 사용하지 않는다.
+
+read-only 정책은 그룹·단계·전체 순서·설명·target·Focus Scope의 사용자 mutation을 거부한다. edit 정책은 reorder/add/delete/relink를 revision event로 저장한다. Comment는 `commentId, author, bodyRevision, briefingRevision, stepId, targetRef?, visibility`로 별도 보존한다. 현재 구성에서 Step을 빼도 과거 revision의 Comment는 그 단계에 남는다. 실제 참조 revision이나 target이 삭제된 경우에만 orphan으로 표시한다. 동시 시청은 각자 presentation cursor를 유지한다.
+
+`다음 Chat에 포함`은 comment revision과 target manifest를 공통 draft에 원자적으로 연결한다. 첨부 dedupe key는 draftId+commentId이며 선택 revision은 별도 값으로 고정한다. 전송 때 권한·target 상태를 다시 검사한다. target이 없어도 허용된 댓글 본문만 전달하는 분기를 명시적으로 선택할 수 있다.
+
+탐색은 셸 controller의 focusGroup·returnToken을 사용한다. 저장된 presentation state는 engine 실행 상태를 변경하지 않는다. 숨은 reasoning item은 Briefing material allowlist에 들어가지 않는다.
+
+인수 절차: 8단계에서 3단계 댓글 작성 → 순서 변경 → 대상 삭제 → 동시 편집 → 종료·재진입 → 첨부 두 번을 수행한다. 댓글의 원 step ID·revision 유지, 첨부 1개, 원 초안 복귀, 탐색 모델 호출 0건이 합격 조건이다. 실패는 orphan 댓글과 편집 초안을 보존하고 전체 목록·재연결로 fallback한다.
+
+##### 브리핑 수명과 과거 단계
+
+Briefing은 Answer의 소유 범위를 참조하되 생성·편집·공유·삭제 capability를 각각 검사한다. 공유는 고정 revision manifest를 사용하며 원천 권한·Engine 사용권을 추가하지 않는다. 제한된 제목·내용·존재 정보는 수신자별로 가리고, 필수 공개 조건을 충족하지 못하면 해당 공유만 막는다.
+
+단계 제거는 새 Briefing revision의 구성 변경이다. 과거 revision에 남은 단계·댓글은 유효하며 `이전 버전의 단계`로 표시한다. 실제 참조 revision 또는 target이 삭제됐을 때만 orphan이다. Briefing 자체 삭제는 Answer 삭제의 frozen-ID·상태 확인 절차를 재사용하되 기반 Answer·artifact·댓글 본문을 자동 삭제하지 않는다. 열린 표현은 삭제 상태로 전환하고 `[Answer로 돌아가기]`를 제공한다.
+
+##### 단계별 조건부 편집
+
+읽기 전용 정책은 Step뿐 아니라 묶음, 전체 순서, 설명, target, Focus Scope의 사용자 mutation을 모두 거부한다. 댓글 권한과 수명주기 삭제 권한은 별도로 검사한다.
+
+편집 입력은 `operationId, briefingId, baseRevision, changesByStableId`다. 단계 이동은 순번 덮어쓰기가 아니라 `stepId/fromGroup/toGroup/afterStepId`로 기록한다. 서로 다른 단계의 비충돌 변경만 병합한다. 같은 단계 이동, 같은 삽입 위치의 순서 충돌, 삭제/편집 충돌은 `[최신본 유지] [내 초안 보존] [다시 배치·편집]`로 해결한다. 저장 직전에 ID 중복·유실·그룹 순환과 최신 revision을 다시 검사한다.
+
+`[내 버전으로 보존]`은 같은 Briefing의 분기 revision을 저장하며 게시 head를 바꾸지 않는다. 성공한 게시만 head를 변경한다. 응답 유실은 operation 상태 조회 후 재시도한다.
+
+미실행 인수조건: 두 편집자가 같은 8단계에서 이동/삭제/설명 편집을 교차 수행한다. head 갱신은 조건부 단일 성공, 무시된 변경은 초안 보존, 단계 중복·조용한 유실 0, 댓글의 원 step/revision 변경 0이어야 한다.
+
+##### 댓글 mutation과 실패
+
+댓글 mutation은 `operationId, commentId, expectedBodyRevision, targetManifest, authorityEpoch`로 처리한다. 생성 ID는 재시도에도 유지한다. 저장·삭제 응답 유실은 같은 operation을 조회한다. 자기 변경 undo와 삭제 복구는 현재 권한·보존 상태를 검사한 새 event이며 타인의 이후 변경을 없애지 않는다. 물리 삭제·강제 가림으로 복구 불가능하면 이유를 표시한다.
+
+`commentId`의 변경 이력은 닫기·재진입 후에도 자기 mutation을 선택할 수 있게 한다. 역변경에는 `undoOfOperationId`와 현재 expectedBodyRevision을 기록하고 동일 undo operation의 중복 commit을 막는다. **미실행 인수 조건:** v1 저장→v2 수정 저장→닫기·재진입→자기 수정 되돌리기에서 새 revision의 본문을 대조한다. 타인 후속 변경은 보존하고 경합은 비교로 복귀하며 응답 유실·재시도에도 중복 event는 0건이어야 한다.
+
+미실행 인수조건: 저장 중 추가 입력, 응답 유실, 삭제/수정 경합, 대상 유실, 재시작에서 중복 댓글 0·허용된 초안 유실 0·권한 우회 복구 0이어야 한다.
+
+##### 댓글 identity별 첨부
+
+미전송 초안의 첨부 고유 키는 `draftId + commentId`다. 첨부 값은 선택한 `bodyRevision, briefingRevision, stepId, targetManifestHash`를 고정한다. 같은 revision을 다시 포함하면 기존 첨부를 연다. 새 revision이면 `v1이 이미 첨부됨`과 `[기존 유지] [v2로 교체]`를 제공한다. 교체는 해당 초안의 첨부 한 개만 원자적으로 갱신한다.
+
+전송 접수 시 고정한 요청 payload는 이후 댓글 수정·첨부 교체로 바꾸지 않는다. 해당 요청에 추가할 변경은 다음 초안에서 처리한다. 재진입·전송 시 권한과 target 상태를 재검사하며 `[참조 제거]`는 댓글 자체를 삭제하지 않는다.
+
+미실행 인수조건: v1 포함→수정→v2 교체→재시작→동일 operation 재시도에서도 첨부는 1개다. 다른 commentId는 별도 첨부이고 이미 전송한 v1 hash는 유지해야 한다.
+
+##### 오류 단계 탐색
+
+resolver는 `briefingRevision/stepId/authorityEpoch`로 결과와 fallback을 반환한다. 댓글 가능 여부는 별도 검사한다. 위 다섯 오류/변경 상태에서 탐색 모델 호출 0·Live 재실행 0·비공개 노출 0·복귀 대상 보존을 검사한다.
+
+<a id="impl-canvas-annotation"></a>
+
+#### Annotation geometry·작성자·알림 계약
+
+**화면 연결**: [사용자 조작](../../docs/references/design-synthesis/egdesk-ux-realization-proposals.md#ux-detail-canvas-annotation)
+
+visual mark, Canvas Memo, Briefing Comment는 서로 다른 type을 갖는다. 공통 target은 Canvas world 좌표 또는 `sourceHash + source-relative selector`다. zoom·pan은 저장 geometry를 바꾸지 않는다.
+
+도형은 허용된 SVG primitive와 수치 좌표로 표현하며 script·foreignObject·외부 resource는 허용하지 않는다. 텍스트 target은 위치 selector와 허용된 짧은 quote/prefix/suffix를 사용할 수 있다. 민감 원문의 quote 복제가 허용되지 않으면 위치 selector만 사용한다. 새 revision의 다중 일치는 자동 재연결하지 않고 후보를 반환한다. 이는 W3C 모델의 selector 패턴을 차용하는 것이며 전체 표준 구현 선언은 아니다. [Web Annotation selector 근거](https://www.w3.org/TR/annotation-model/#selectors).
+
+Memo body revision과 reply event의 author는 분리한다. Agent reply에는 basedOnMemoRevision과 sourceRefs를 붙인다. 응답 trigger는 명시 질문 또는 유효한 assigned-scope grant다. 알림 dedupe는 `memoId + issueId + recipient`로 하며 답글·렌더·재접속을 새 쟁점으로 간주하지 않는다. 재촉은 만료·취소 가능한 별도 예약으로 처리한다.
+
+인수 절차: 50%/200% zoom에서 표식 이동, 메모 수정 중 늦은 답글, 대상 삭제, 동일 알림 재전달, 재시작을 수행한다. source-relative 위치 유지, 사용자 본문 무변경, 알림 1건, 마지막 위치와 초안 복원이 합격 조건이다. selector를 해소하지 못하면 마지막 위치의 경고 node와 수동 재연결을 사용한다.
+
+표식 mutation은 `author, targetRef, baseRevision, grantRef, applicationMode`를 포함한다. `applicationMode=direct`는 위임된 report 편집 범위 안에서 검증·저장되며 사람의 approval event를 생성하지 않는다. `applicationMode=proposal`은 적용 전 후보를 보존하고 권한 있는 행위자의 수락 또는 기각을 기록한다. 제안 수락으로 기존 위임 밖의 다른 자료·계정·행동까지 허용하지 않는다. 두 모드 모두 작성자와 근거를 보존하며 저장·채택을 사실 검증 상태와 분리한다.
+
+### 17.C Agent·실행·계정
+
+<a id="impl-agent-profile"></a>
+#### Profile revision과 Engine adapter — §14 확장
+
+**화면 연결**: [사용자 조작](../../docs/references/design-synthesis/egdesk-ux-realization-proposals.md#ux-detail-agent-profile)
+
+Profile record는 안정 ID, owner, visibility, activeRevision을 가진다. revision은 내용 hash·작성자·부모 revision·검사 결과를 가진 불변 record다. 활성화·대체·보관은 pointer와 lifecycle event를 원자적으로 변경한다. `expectedRevision`이 다른 쓰기는 충돌로 반환하며 초안을 보존한다. 참조 중 revision 삭제는 tombstone과 별도 payload 보존 정책을 적용한다. import는 새 비활성 ID로 만들고 credential·실행 권한을 가져오지 않는다.
+
+설정 존재, adapter discovery, bounded 호출 성공, 결과 전달은 서로 다른 검사 결과다. 자동 routing의 입력은 사용자 override, Profile 후보, 실제 availability, modality·privacy·예산·authority 조건이다. System이 후보를 필터링하고 우선순위 또는 위임된 모델 제안으로 선택하되 실제 결정·이유·대체 전후 값을 기록한다.
+
+adapter manifest는 `engineVersion/schemaHash/capabilities/toolCatalogHash/configHash`를 고정한다. `model/list`의 식별자·modality·지원 옵션을 사용하며 숨은 세부 모델 버전이나 context window를 만들어내지 않는다. 실험적 dynamic tool 기능은 명시적으로 분리한다. 기본 연결은 로컬 stdio JSONL과 initialize handshake이며 App Server WebSocket의 실험적 지원 상태를 운영용 안정성으로 승격하지 않는다. [공식 App Server](https://learn.chatgpt.com/docs/app-server#protocol), [모델 목록](https://learn.chatgpt.com/docs/app-server#models).
+
+인수 절차: 저장 성공/발견 실패/호출 실패/전달 실패를 각각 주입한다. revision과 네 상태가 일치하고 과거 Run 변경이 없어야 한다. 활성화 충돌·공유 철회·참조 중 삭제·내보내기/재가져오기를 검사한다. 미지원 schema에서는 해당 기능만 비활성화하고 기존 revision 검사·초안·수동 설정을 유지한다.
+
+##### Profile lifecycle·pin의 원자 적용
+
+Profile lifecycle은 `draft/active/disabled/archived/deleted`이며 discovery·호출 성공과 별개다. 기본값은 `bindingId,targetId,profileId,revision,status,revisionCounter`로 관리한다. 사용 중단·보관·삭제 transaction은 lifecycle과 관련 기본값의 `unavailable(reason)`을 함께 기록한다. 기본값을 다른 Profile로 치환하지 않는다.
+
+대체는 frozen binding ID 집합과 편집 권한을 검사하여 적용한다. 이동은 ID를 유지하지만 ACL epoch를 변경하고 기존 참조의 접근권을 재평가한다. 활성화·복원은 최신 검사와 `expectedRevision`을 요구한다. 재활성화가 과거 기본값·공유 grant를 부활시키지 않는다. Agent ID·room ID·Memory 소유는 Profile 변경 transaction 밖이다.
+
+모델 선택 순서는 **강제 제한 → 유효 pin → 명시 모델 요청 → 위임된 fallback 순서**다. pin과 요청이 충돌하면 해소 전 dispatch하지 않는다. exact pin은 공개·검증된 revision이 있어야 성립한다. fallback은 필수 output contract hash·modality·전송 범위·비용 제한을 만족해야 한다. 후보가 없으면 availability 대기이며 pin을 조용히 해제하지 않는다.
+
+인수: 유일 기본값 중단 후 잘못된 모델 호출 0건, 선택 집합 밖 대체 0건, 재활성화 후 기본값 자동 복원 0건. pinned 모델 제거·계약 불일치 후보 추가 시 fallback 0건; 명시적 pin 해제 후 허용 후보만 선택해야 한다.
+
+##### 요청 초안의 설정 적용
+
+미전송 요청의 실행 설정은 draft request ID와 draftConfigRevision에만 기록한다. `이번 업무에 적용`으로 Run·provider turn·도구 실행을 생성하지 않는다. 전송 수락 때 최신 정책·권한·가용성과 초안 revision을 다시 대조해 첫 Run binding을 만든다. 이미 진행 중인 명시 대상의 설정 변경은 기존 Run 조정 계약을 따른다.
+
+미실행 인수: 새 업무 초안의 설정 변경·취소·전송, 다른 진행 중 업무와 동시 편집을 교차한다. 전송 전 모델/도구 호출, 다른 업무 설정 변경, 취소한 초안 설정의 늦은 적용은 0이어야 한다.
+
+<a id="impl-context-budget"></a>
+#### 실행 한도·모델 용량·Reader 복구
+
+**화면 연결**: [사용자 조작](../../docs/references/design-synthesis/egdesk-ux-realization-proposals.md#ux-detail-context-policy)
+
+System resolver는 첫 호출 및 이후 호출 직전에 적용 정책과 관련 source revision을 읽는다. 저장 매체별 `resolve/read/compareRevision` 인터페이스를 사용하며 상시 watcher를 요구하지 않는다. 각 포함 항목에 `sourceId/revision/scope/reason/authorityRevision`을 기록한다. Memory는 동일 검사 뒤 포함하며 자동 기록 동의와 읽기 권한을 별도 검사한다. 외부 내용은 지시 권한을 갖지 않는다. 모델은 해석·계획·판단을 담당하고 System이 구조 검사·권한 교집합·저장·coverage를 담당한다.
+
+**운영 조정값과 중단 권한을 분리한다.** 128,000토큰·30분은 장시간 실행 인수 fixture이며 제품의 암묵적 Run 종료 한도가 아니다. soft watchdog은 관측 사용량·경과 시간·진행 정체를 표시하고 checkpoint를 남길 수 있지만, 그 신호만으로 실행·예약·사용자 목표를 중단하거나 완료 처리하지 않는다.
+
+hard ceiling은 제품 소유자 정책 또는 사용자가 명시한 제한에만 존재하며 `value/unit/scope/origin/authorizedBy/effectiveAt`을 기록한다. 미설정 값은 `null`이며 fixture 수치로 채우지 않는다. 상한 도달에 따른 대기·중지·재개는 중앙 Run 수명주기를 따른다. 계정 전환으로 연결된 새 Run이 생겨도 같은 업무에 설정한 총예산·사용량 원장을 초기화하지 않는다.
+
+Reader 포함 동시 추론 2개, 직접 반환·packet 목표 4,096토큰, Reader chunk 목표 4,096토큰은 초기 조정값으로 유지한다. 실제 허용량은 호출별 admission 결과로 낮출 수 있다. 이 숫자는 전체 읽기 범위나 장기 업무 수명의 제한이 아니다.
+
+**모델 용량은 authoritative export로 확인한다.** adapter는 실제 선택된 모델의 runtime metadata에서 `ModelCapacityV1`을 내보낸다. record에는 Engine build·모델 식별자·모델 선택 revision·metadata 출처/hash·fallback 여부·설정 override·resolved/usable context window·확인 시각을 포함한다. `model/list`에 없는 window를 추정해서 채우지 않으며 사용자 설정값만으로 실제 모델 용량이 입증됐다고 보지 않는다.
+
+계측 참조 commit `d6489472f3c15e87d2d7763a5fde033545c530f8`의 `ModelInfo`에는 `context_window`, `max_context_window`, `effective_context_window_percent`, `resolved_context_window()`, `usable_context_window()`가 있다. export는 이 해소 결과와 원천을 함께 전달하며 fallback metadata를 authoritative 값으로 승격하지 않는다. 이 참조 commit은 설치된 Engine 버전의 확인을 대신하지 않는다. [고정 revision의 모델 metadata](https://github.com/openai/codex/blob/d6489472f3c15e87d2d7763a5fde033545c530f8/codex-rs/protocol/src/openai_models.rs#L398).
+
+엄격 admission은 다음 조건을 사용한다.
+
+`A = max(0, min(4096, floor(.8L), Wusable − Hbound − O − S))`
+
+여기서 `L`은 검증된 tool-output 한도, `Wusable`은 authoritative export의 사용 가능 window, `Hbound`는 해당 호출의 기존 입력·직렬화 비용 상계, `O=min(4096,floor(Wusable/4))`는 답변 여유, `S=max(1024,ceil(.15×Wusable))`는 추가 안전 여유의 초기값이다. 전달 후보의 검증된 비용 상계가 `A` 이하여야 한다. 필요한 용량·비용 상계를 확인하지 못하면 `ENGINE_CAPACITY_UNKNOWN`으로 엄격 dispatch를 막는다. **8,192 같은 추정 window로 guard 통과를 만들지 않는다.** UI에는 `[용량 정보 다시 확인] [지원되는 동일 구독 Engine 설정] [자료 직접 열기]`를 제공하며 독립 업무는 계속한다.
+
+크기 초과는 파일 판독 실패가 아니다. chunk를 줄이고 문단·행·셀·텍스트 구간·페이지 내부 영역으로 더 작게 분할한다. 기존 Reader의 대화 누적이 원인이면 동일한 불변 source와 미완료 coverage를 가진 fresh Reader를 사용한다. packet 통합도 한 번에 들어가지 않으면 계층적으로 나눈다. 512토큰을 일반 읽기의 종료 하한으로 사용하지 않는다.
+
+최소 Reader 지시와 가장 작은 유효 입력 단위조차 수용하지 못하면 `ENGINE_CONTEXT_CONFIGURATION_ERROR`로 분리한다. 해당 파일은 `coverage pending`이며 미판독 완료·손상 파일로 분류하지 않는다. 동일 입력·동일 설정의 무진전 재호출은 반복하지 않고 용량·설정을 재해소한다. 실제 실패 실행의 attempt와 재시도는 중앙 Run 수명주기에만 기록한다. quota 소진은 별도 계정 한도 상태이며 유료 API로 자동 전환하지 않는다.
+
+#### 버전 고정 계측과 전달 증거
+
+엄격 관찰의 계측 계약 버전은 제안된 `egdesk-input-receipt/v1`이다. 지원 여부는 다음 묶음으로 판정한다.
+
+`upstreamCommit + engineBinaryHash + patchHash + protocolSchemaHash + instrumentationVersion + transportMode + conformanceEvidenceHash`
+
+같은 함수 이름이 존재하거나 App Server 연결이 성공했다는 사실만으로 지원을 활성화하지 않는다. 묶음이 바뀌거나 필수 증거가 없으면 해당 엄격 관찰 capability를 비활성화한다. 이 계측은 stock App Server의 공개 API나 이미 구현된 기능이라는 뜻이 아니다.
+
+참조 원천은 위의 고정 commit이며 관찰 경계를 다음과 같이 구분한다.
+
+| 경계 | 계측 위치와 보장 범위 |
+|---|---|
+| `raw_capture` | EG-Desk gateway가 명명한 source 범위에서 직접 획득한 byte. 이 경계 밖의 원본 전체를 주장하지 않음 |
+| `engine_history_pre/post` | `ContextManager::record_items_with_metadata`의 `truncate_function_output_payload` 호출 전후. native handler가 그보다 먼저 잘랐다면 pre 값도 전체 원문이 아님 |
+| `outbound_request` | HTTP는 `prepare_response_items_for_request` 이후 실제 요청 전달 지점. WebSocket은 최종 `ws_request`를 만든 뒤 `stream_request` 직전 |
+| `logical_input_lineage` | WebSocket delta에는 `previous_response_id`와 앞선 요청·응답 연결을 보존. 실제 wire delta와 재구성한 논리 입력을 별도 표시 |
+| `native_event_output` | 관찰된 item/event 출력. 위 계측과 연결되기 전에는 모델 입력이나 원본 전체로 표시하지 않음 |
+
+[출력 잘림 경계](https://github.com/openai/codex/blob/d6489472f3c15e87d2d7763a5fde033545c530f8/codex-rs/core/src/context_manager/history.rs#L349), [요청 준비·전송 경계](https://github.com/openai/codex/blob/d6489472f3c15e87d2d7763a5fde033545c530f8/codex-rs/core/src/client.rs#L1609).
+
+compaction 요청도 별도 입력 변환·전송 계측 대상으로 포함한다. 연결 준비용 `generate=false`를 추론 호출로 집계하지 않는다. application payload의 원문·파생본·전송 hash와 request lineage를 연결하되 secret·인증 header·숨은 추론을 사용자 Snapshot에 복제하지 않는다. outbound 기록은 명명한 전송 경계의 증거이며 원격 모델 내부의 실제 처리 전체를 관찰했다는 주장이 아니다.
+
+중개 읽기는 반환 범위·continuation을 명명 전에 확정한다. 뒤에서 잘림이 발생하면 같은 결과를 온전히 전달했다고 표시하지 않고 해당 엄격 dispatch를 차단한 뒤 명시적 bounded result 또는 Reader packet으로 재구성한다. native event를 수신하는 방식으로 모든 native tool의 원시 출력을 가로챌 수 있다고 가정하지 않는다. 중개·차단·계측이 검증되지 않은 경로는 보호된 읽기의 우회 경로가 될 수 없다.
+
+EG-Desk read/tool gateway가 원문을 불변 저장한 뒤 named bounded result 또는 Reader packet을 반환한다. 직접 반환의 범위·continuation은 결과를 명명하기 전에 정한다. 반환 후 잘라놓고 같은 결과라고 기록하지 않는다. MCP의 도구별 `output_token_limit`과 직렬화 여유를 adapter 설정에 고정한다. 다른 MCP·앱·shell·web 도구는 각각 별도 allowlist와 집행 경로가 필요하며 sandbox network 설정 하나가 이들을 통제한다고 가정하지 않는다. [MCP 제한](https://learn.chatgpt.com/docs/extend/mcp), [설정 참조](https://learn.chatgpt.com/docs/config-file/config-reference).
+
+명시적 전체 업무 한도가 있으면 관측 사용량과 미정산 예약량을 그 한도에 함께 계산한다. 한도가 없으면 사용량·예약은 관측값으로 유지하며 임의 한도를 만들어 작업을 종료하지 않는다. 부모·Reader·Worker는 같은 업무 사용량 원장을 공유한다. provider 출력·내부 재시도 비용을 제한할 수 없는 경로는 엄격 총량 보장을 표시하지 않는다. 승인 대기에는 추론 slot을 점유하지 않는다.
+
+##### 제한별 설정·집행 계약
+
+공통 `LimitEnvelope`는 종류·단위·scope·값·상한 출처·변경 주체·epoch·집행 adapter를 가진다. 자식은 parent 한도를 분배받거나 좁힐 수 있지만 넓히지 못한다. 범위 확대 권한과 실제 자원 접근권은 별도다.
+
+| 제한 | 단위·소유/변경 범위 | 실제 집행·미지원 처리 | 경계값 oracle |
+|---|---|---|---|
+| 시간 | `deadlineAt` UTC, 호출별 `timeoutMs`; 설정 소유자/해당 수임자 | scheduler가 시작 전 deadline 검사, executor가 monotonic timeout 집행. 종료 미확인은 중지 요청 상태 유지 | deadline 직전 허용/도달 후 새 dispatch 0; watchdog만으로 종료 0 |
+| 토큰 | 업무 전체 관측+예약 token; parent 원장 공유 | 호출 전 예약, 실제 usage 정산. 출력·재시도 상계 미검증이면 엄격 총량 모드 시작 불가 | 예약 포함 B 이하만 입장, B 초과 0; unknown을 0으로 계산 금지 |
+| 비용 | 통화별 금액·유료 작업 상한; 비용 권한자 | 견적/상계 예약 후 dispatch. 가격 불명은 엄격 유료 작업 차단. 구독 사용량을 금액으로 환산하지 않음 | 잔액 2에 상계 2 허용, 3 거부 |
+| 네트워크 | protocol·host·port·전송 범위; 조직/Desk 상한 안 Task subset | command는 활성 sandbox proxy, Browser·MCP·커넥터는 각 gateway에서 목적지·redirect·행동·전송 자료 검사 | 허용 host의 다른 port·redirect 밖 목적지 거부 |
+| 파일 접근 | 읽기/쓰기/실행별 root·제외 경로; 자원 권한자 | 최종 경로와 열린 directory/file handle 기준 검사, symlink·상위 탈출 차단. native command는 OS sandbox 병행 | `/allow` 허용이 `/allow2`·외부 symlink를 허용하지 않음 |
+| sandbox | 자료 읽기/선택 경로 수정/명시적 광역 권한; 정책 소유자 | 지원되는 OS 격리를 생성하고 실제 정책 hash 확인. 지원 불가면 제한 동작을 실행하지 않음 | 설정 성공이 아닌 실제 금지 read/write/network 실패 확인 |
+| 동시성 | parent 업무·Engine pool의 활성 추론 수; 범위 내 scheduler 조정 | SQLite reservation으로 child·Reader 포함 원자 slot 획득. 2→1 축소는 새 입장 차단 후 drain, 목표 취소 없음 | 동시 두 입장 경쟁에서 초과 slot 0 |
+
+Engine 서비스 통신, sandbox command, Browser, MCP, 커넥터의 제한을 합쳐 하나의 네트워크 보장으로 표시하지 않는다. command proxy의 domain rule은 proxy가 실제 활성일 때만 집행된다. [공식 집행 범위](https://learn.chatgpt.com/docs/permissions#what-the-network-proxy-does-not-control).
+
+모든 실행 경로는 `operationId,target,authorityEpoch,limitEpoch`를 gateway에 제출한다. 미중개 native 도구는 제공 tool catalog에서 제외하고 해당 sandbox도 제한한다. `thread/shellCommand`, `process/spawn`처럼 sandbox 밖 경로를 제한 업무의 우회 실행에 사용하지 않는다. 특정 경로에서 정책을 집행할 수 없으면 그 capability만 unavailable로 표시한다. [App Server 실행 경계](https://learn.chatgpt.com/docs/app-server#api-overview).
+
+##### Memory·instruction 검증 record
+
+Memory는 `id,revision,owner,scope,conditions,sourceRefs,judgmentKind,reuseState,validUntil,consentRef,authorityEpoch`를 가진다. 모델은 후보 내용과 의미를 제안하고 System은 기록 권한·동의 조건·참조를 검사한다. Profile의 정책 변경은 Memory 본문·소유권 변경이 아니다.
+
+이동은 대상 새 ID 생성과 원 ID의 `moved` tombstone을 한 transaction으로 적용한다. 대상 저장 실패 시 원본은 active로 남는다. 삭제·만료·이동 tombstone과 `reuseEpoch`는 오래된 활성 event보다 우선한다. 동기화·import는 tombstone을 확인한 뒤 indexing하며 예전 active record를 다시 admission하지 않는다. 물리 payload 정리는 기존 저장·보관 계약을 따르고, 재사용 금지와 삭제 완료를 혼동하지 않는다.
+
+effective instruction receipt는 항목별 `sourceKind,sourceRef,revision,disclosure,editableBy,precedenceClass,appliedState,winnerRef,reason,affectedActions`를 기록한다. provider가 공개하지 않은 원문·식별자는 생성하지 않는다. 원문 열람과 편집, 편집과 활성화 권한을 별도로 검사한다.
+
+인수: 각 Memory 범위의 무권한 write/이동 0건, 자동 동의 불일치 항목 활성화 0건, 종료한 임시 구간·삭제/만료 기억의 재동기화 admission 0건. Profile 공유만으로 Agent 개인 기억 공개 0건. 정책 충돌 receipt는 실제 적용 입력과 일치해야 한다.
+
+<a id="impl-run-orchestration"></a>
+#### Run·Task·복구 전이 — §9·11·13 확장
+
+**화면 연결**: [사용자 조작](../../docs/references/design-synthesis/egdesk-ux-realization-proposals.md#ux-detail-run-control)
+
+Run은 `binding/running/waiting/stopping/stopped/completed/failed`를 사용한다. 연결 미확인은 실행 상태와 별도 health 축이며 timeout·expiry는 원인 필드다. Task의 정본 여덟 상태는 유지한다. attempt는 실제 실패 execution을 다시 수행할 때만 증가한다. checkpoint 재개·일반 조정·설정 적용은 새 attempt가 아니다.
+
+사용자 업무의 최초 request·room·Task lineage와 provider의 thread/turn·실행체 generation을 분리한다. 일반 source·Ontology·모델·Profile·실행 PC 조정은 같은 EG-Desk Run에 configuration/context revision을 추가한다. 조정·새 provider turn·fresh Reader·PC handoff 자체는 실패 attempt나 의도적 fork가 아니다.
+
+활성 provider turn에 추가하는 일반 입력은 `turn/steer`의 `expectedTurnId`로 대상 turn을 확인한다. 모델·cwd·sandbox·output schema override를 steer에 넣지 않는다. 모델·Profile 등 provider turn 단위 설정은 현재 turn이 끝난 뒤 같은 Run의 다음 `turn/start` 또는 adapter가 지원하는 명시적 세션 재결합에서 적용한다. PC handoff는 이전 writer의 중지·lease 해제를 확인한 뒤 같은 Run의 새 실행 binding으로 이어간다. 권한 철회·승인 대상 변경·동시 쓰기 충돌에 걸린 행동만 즉시 fence한다. [steer 제약](https://learn.chatgpt.com/docs/app-server#steer-an-active-turn), [turn 시작](https://learn.chatgpt.com/docs/app-server#start-a-turn).
+
+계정 principal 변경에 새 Run이 필요한 adapter에서는 새 Run에 `continuesRunId`와 동일한 사용자 업무·최초 request·room·Task lineage 참조를 기록한다. System이 허용된 현재 context·완료 기여·미완료 조건·미확인 ActionIntent를 연결하며 새 사용자 prompt를 요구하지 않는다. 이전 실행의 완료 작업·외부 효과를 다시 수행하지 않고 credential·승인은 새 principal에서 재검증한다. 전환은 하나의 업무 안의 계정 변경 사건으로 표시하며 기존 실행 기록을 덮지 않는다.
+
+retry·resume·cancel·timeout·expiry·late result의 상태 전이는 이 중앙 계약만 사용한다. Browser·Terminal·Reader adapter는 관찰·오류·중지 확인·결과 receipt를 반환하며 자체적인 경쟁 Run/attempt 수명주기를 만들지 않는다.
+
+#### 수정된 인수 조건
+
+- 420×600·320×420에서 설정과 승인 경로를 수행한다. 자동 확대 없이 작성기·업무 대상이 유지되고, 명시적 확장만 520×680을 사용해야 한다.
+- 진행 중 Browser·Terminal 활동은 기존 Live ID로, 완료된 읽기·명령은 Snapshot으로 이동해야 한다. Live 미생성·연결 불명 상태에서 새 실행 생성은 0건이어야 한다.
+- 명시적 hard ceiling 없는 목표가 128k토큰·30분 fixture 경계를 넘어도 watchdog만으로 종료·취소되지 않아야 한다. 별도로 설정한 hard ceiling은 기록된 중앙 전이를 따라야 한다.
+- 용량 누락·fallback metadata에서는 엄격 admission 통과가 0건이어야 한다. 크기 초과 자료는 더 작은 단위·fresh Reader로 이어지고 미완료 coverage가 남아야 한다.
+- 계정 전환 후 같은 업무·room·request·Task lineage와 초안을 유지하고 새 사용자 prompt·완료 작업 재실행은 0건이어야 한다. 일반 모델·Profile·source·PC 조정에서는 Run ID를 유지해야 한다.
+- 각 지원 계측 묶음에서 native event, history 전후, compaction, HTTP·WebSocket 전송을 대조한다. 명명되지 않은 잘림과 native event를 전체 모델 입력으로 오표시하는 경우는 0건이어야 한다.
+
+대기 해소는 같은 Run·attempt를 재개한다. 실패 Task 재시도는 같은 Task의 새 attempt다. 완료·취소 Task 재작업은 연결된 새 Task다. 의도적 fork는 새 Run과 선택한 이력 범위를 만들며 외부 효과를 재생하지 않는다. stopped Run의 명시적 계속은 새 실행 구간을 기록하고 취소 Task를 자동 부활시키지 않는다. deadline 만료는 후속 dispatch를 막고 중지를 요청하며 종료 확인을 기다린다.
+
+Task graph는 모델이 제안하고 System이 cycle·authority·write set·증거 조건을 검사한다. edge는 필수 성공/허용된 부분 증거/선택 참고를 구분한다. 필수 edge 실패는 해당 후손만 차단한다. 부분 기여는 source revision·coverage·미해결점을 보존한 채 통합할 수 있으나 필수 완료조건을 충족하지 않으면 Result.completeness는 partial이며 Run 상태는 필수 조건과 중앙 전이에 따른다. 통합의 업무 판단은 담당 모델, 조건 충족 검사는 System 책임이다.
+
+child 권한은 parent 위임·Profile 상한·계정 권한의 교집합이다. child에는 필요한 context snapshot만 전달한다. write lease는 resource·revision·executor generation에 결합한다. 재할당은 기존 lease 종료 확인 후 새 generation에 부여한다. 통합 후보는 하나씩 고정 revision에서 검사하며 실패 후보만 반환한다.
+
+상태 event와 dispatch intent는 SQLite transaction/outbox로 기록한다. 중복 event ID는 무시하고 늦은 event는 실행 generation·취소 fence·입력 revision으로 평가한다. 늦은 성공 evidence는 보존하지만 취소된 후속 실행을 깨우지 않는다.
+
+health는 host nonce 응답, process generation/exit, adapter handshake, bounded `thread/read`, 계정·도구 상태를 독립 조회한다. catalog 응답을 추론 성공으로 취급하지 않는다. 활성 상태는 10초 간격, 30초 무응답이면 `미확인`; 재연결은 1/2/4/8/16/30초와 ±20% jitter로 제한한다. 이는 검사 정책이지 장애 확정 기준이 아니다. process 교체는 새 identity이며, Engine process가 다른 Run도 소유하면 전체 process를 종료하지 않는다.
+
+인수는 정상·취소·부분 완료·단절·재접속·중복·늦은 결과를 바꾼 6개 순서 fixture를 각각 30회 수행한다. 1/2/12 Task와 1/30 Agenda를 조합하고 동일 revision에 대한 의미 결과·권한·receipt를 비교한다. 초기 목표는 오귀속·중복 외부 실행·독립 결과 유실 0건이다. 시간·용량은 p50/p95/max와 환경·version·확인 시각을 기록하며 아직 측정값은 없다. 실패하면 해당 adapter 기능을 차단하고 checkpoint·Snapshot·독립 작업을 유지한다.
+
+##### 결과 완전성의 별도 축
+
+Run 상태는 `binding/running/waiting/stopping/stopped/completed/failed`다. **`partial`은 Run·Task enum이 아니라 Result.completeness에만 기록한다.** Run 전이는 중앙 전이표의 scheduler event를 사용한다.
+
+부분 Result가 있어도 실행 중인 Run은 running, 조건을 기다리면 waiting, 종료가 확인된 중지는 stopped로 표시한다. 필수 완료조건 미충족을 partial Run으로 우회하거나 작업 완료로 표시하지 않는다. UI는 `실행 상태`와 `결과 범위: 부분·완료 2/실패 1`을 별도 줄로 제공한다. Task의 정본 여덟 상태와 과거 attempt는 유지한다.
+
+인수조건은 running/waiting/stopped/failed Run에서 부분 Result 표시가 가능하고, completeness 갱신만으로 Run 전이·새 attempt·후속 실행이 발생하지 않는 것이다. 상세 전이 정의는 중앙 전이표 한 곳에만 둔다.
+
+##### 중앙 상태·사건 전이
+
+Run execution enum은 `binding/running/waiting/stopping/stopped/completed/failed`다. **`partial`은 여기에 없다.** Result completeness는 `none/partial/complete`, 효과·근거의 미확인은 별도 필드다. 완료·실패·중지 이후 명시적 계속은 같은 Run의 새 execution epoch를 만들며 과거 epoch와 Result를 보존한다.
+
+Task는 기존 여덟 상태를 사용한다. `terminalBlock`은 실패·취소된 필수 선행조건 때문에 자동 진행할 수 없다는 dependency 속성이며 새 Task 상태가 아니다. 취소 Task는 자동 부활하지 않는다. attempt는 실패한 execution을 실제 재dispatch할 때만 증가한다.
+
+| 사건 | Run 전이 | Task·ID·후손·종료 조건 |
+|---|---|---|
+| 요청 수락 | 없음→binding | 새 Run/Task. 초기 Task는 preflight dependency 대기 |
+| preflight 통과 | binding→running | 조건 충족 Task `waiting-on-dependency→ready→queued→running`; dispatch 시 첫 attempt |
+| 승인/재연결 등 가역 조건 대기 | runnable이 없으면 waiting | 해당 Task만 approval-required 또는 waiting-on-dependency; 추론 slot 반환 |
+| 조건 충족 | waiting→running | 같은 Run·Task·attempt로 ready→queued→running |
+| 일반 source/model/Profile/PC 조정 | 같은 Run, 작업 상태 유지 | context/config revision 추가. 필요한 적용 경계만 사용; 새 attempt/fork 없음 |
+| 실행 실패 | 독립 실행 있으면 running | 해당 Task failed. 필수 후손은 dependency 대기+terminalBlock; 기여·실패 receipt 보존 |
+| failed Run의 `[재시도]` 확정 | failed→binding→running 또는 waiting | 선택한 failed Task만 재준비. 새 attempt는 실제 dispatch 때 생성; 완료 sibling 유지 |
+| 필수 Task 취소 | 독립 실행 중이면 running | 미시작 Task는 cancelled. 실행 중이면 cancel fence 후 terminal/중지 확인까지 running+stopRequested; 이후 cancelled. 필수 후손 terminalBlock |
+| 필수 행동 승인 거부 | 독립 실행 중이면 running | intent denied. 그 효과가 완료에 필수이고 허용 대안이 없으면 Task cancelled(reason=denied); 후손 terminalBlock |
+| 승인 grant 만료 | runnable 없으면 waiting | 미실행 행동 approval-required(reason=expired). 새 유효 승인 전 실행 금지; Task 자동 취소 아님 |
+| Await의 명시 deadline 만료 | 독립 실행 중이면 running | 미실행 Task cancelled(reason=condition-expired); 필수 후손 terminalBlock |
+| 호출 timeout | 집계에 따름 | 실제 실행 Task failed(reason=timeout); 미확인 효과는 별도 유지 |
+| 전체 Run 중지/명시 hard deadline | running/waiting→stopping→stopped | 미시작 Task cancelled, 실행 중 Task는 종료 확인까지 stopRequested. 원격 응답 없음이면 stopping 유지 |
+| completed Run에 후속 지시 수락 | completed→binding | 같은 Run·room·업무, 새 Task·execution epoch. 완료 Task와 이전 Result 불변 |
+| stopped Run의 명시적 계속 | stopped→binding | 중지 latch를 명시적으로 해제. 필요한 취소 작업은 새 대체 Task로 연결하고 원 cancelled 상태 유지 |
+| 의도적 fork | 원 Run 불변, 새 Run binding | 선택 context와 `forkedFrom`만 연결. 승인·lease·외부 효과 재생 금지 |
+| 늦은/중복 event | 유효한 최신 상태 유지 | event ID·epoch·attempt·fence 검사. 취소 뒤 결과는 보존하되 후손 dispatch를 깨우지 않음 |
+
+거부된 행동과 다른 대안이 허용된 경우에는 같은 목표의 새 대체 Task를 만들 수 있다. 거부된 동일 효과의 재시도에는 새 명시적 권한이 필요하다. 대체 결과는 `satisfiesCriterionId`로 연결하며 원 취소 Task를 completed로 바꾸지 않는다.
+
+**Parent 집계 우선순위:** 전체 중지 latch → 진행 중 preflight → runnable/실행 Task가 있으면 running → 유효한 가역 대기가 있으면 waiting → 남은 필수 criterion이 terminalBlock이면 failed → 필수 criterion 충족 및 남은 실행 의무가 없으면 completed. 따라서 필수 취소/거부 때문에 미완료인 Run을 `completed + partial`로 숨기지 않는다. 허용된 선택 항목만 빠진 경우에 한해 completed와 Result partial이 함께 존재할 수 있다.
+
+전환은 `operationId,expectedRunRevision,frozenTaskIds`로 조건부 기록한다. checkpoint 재개는 이후의 완료·승인 철회·외부 효과 journal을 먼저 대조한다. 응답 유실은 같은 operation 상태 조회이며 새로운 실행 명령이 아니다.
+
+##### 여섯 순서 fixture — 미실행 인수 명세
+
+공통 fixture는 실제 업무 서비스 대신 상태를 기록하는 provider/model simulator를 사용한다. 입력은 `doc@1={"amount":10}`, 독립 계산 `2+2`; Task graph는 `A=Reader`, `B=독립 계산`, `X=제출(A+승인 필요)`, `J=종합(B+X)`이며 모두 필수다. 기대 최종 내용은 `{amount:10,check:4,receipt:"receipt-1"}`이다.
+
+초기 preflight 뒤 A/B가 실행된 상태를 `(running; r,r,d,d; none)`으로 쓴다. 순서는 Run; A/B/X/J; Result completeness다. 약어는 `r=running,c=completed,d=waiting-on-dependency,a=approval-required,f=failed,x=cancelled`, `d!`는 terminalBlock이다. ready·queued·dispatch 중간 event도 전이표대로 기록한다.
+
+공통 완료 suffix S는 **유효 승인→X ready/queued/running→provider 접수+독립 조회+X 종료→J ready/queued/running→J 완료**다. 기대 vector는 차례로 `(running;c,c,r,d;partial)` → `(running;c,c,c,r;partial)` → `(completed;c,c,c,c;complete)`다.
+
+| fixture | 사건 순서와 단계별 기대 |
+|---|---|
+| F1 정상 | A 완료→`(running;c,r,a,d;partial)`; B 완료→`(waiting;c,c,a,d;partial)`; S |
+| F2 실패·failed Run 재시도 | A 실패→`(running;f,r,d!,d!;none)`; B 완료→`(failed;f,c,d!,d!;partial)`; A 재시도 확정→binding; A attempt 2 dispatch→`(running;r,c,d,d;partial)`; A 완료→waiting/a; S |
+| F3 필수 취소·늦은 결과 | A 완료→running/c,r,a,d; X 취소→running/c,r,x,d!; B 완료→failed/c,c,x,d!; 옛 grant·옛 executor 결과 수신→동일 상태. X 실제 dispatch 0, 취소 Task 재시작 0 |
+| F4 보류·provider 요청 소멸·만료·거부 | A/B 완료→waiting/c,c,a,d; 보류→불변; provider 요청 p1 cleared→불변; 새 p2에 묶인 승인 만료→a 유지; 재검토에서 거부→failed/c,c,x,d!; 늦은 p1 응답→불변 |
+| F5 전송 뒤 단절·재탐색·hard expiry | A/B 완료·승인·X 전송→running/c,c,r,d; 응답 유실→같은 상태+health unknown; reload/back/복원→재전송 0; fixture에 명시한 Run deadline 도달→stopping/c,c,r,x; 재접속·X 종료 확인→stopped/c,c,x,x; 접수 조회는 receipt-1을 보존하되 J 재개 0 |
+| F6 completed Run 계속·중복 | F1 완료 후 후속 지시→같은 Run binding, 새 Task K; K running 중 일반 조정→같은 Run·attempt; 옛 J 완료 중복→K 불변; K의 최신 지시 결과 완료→새 epoch completed·새 Result revision, 옛 Result 불변 |
+
+모든 단계에서 비교할 집합은 `dispatch IDs, Task/attempt/epoch, input/source revisions, grant decisions, provider request bindings, stop/exit receipts, effect receipts, contribution dispositions`다. F1/F2/F6은 기대 내용·정확한 후속 시작의 양성 oracle도 검사한다. F3/F4는 X 접수 0, F5는 접수 정확히 1이며 조회·재탐색으로 증가하지 않아야 한다.
+
+각 fixture를 고정 seed 0–29로 30회 수행한다. source·schema·adapter build·시계 사건·입력과 기대 vector를 고정한다. 사건별 실제 증거·확인 시각·시간/용량 분포를 기록한다. 이는 실행 횟수 계획이며 현재 통과·성능 수치가 아니다.
+
+##### 시도 이력 조회·비교
+
+이력 조회는 `runId, taskId, attemptId, eventSequence`와 현재 읽기 권한으로 범위를 제한한다. 두 시도의 비교 manifest는 선택 시점의 config/input/result/receipt 참조와 실제 확인 상태를 고정하며 raw payload를 현재 원본으로 재생성하지 않는다. 결과 부족은 누락/미확인으로 남기고 이후 갱신은 명시적 재조회에서만 적용한다. 비교용 조회는 Run·Task·attempt 상태를 바꾸지 않는다.
+
+미실행 인수: 같은 Task의 실패 시도와 재시도 결과를 선택해 입력·설정·산출물·외부 receipt 차이를 대조한다. 시도 1개·자료 삭제·권한 철회·늦은 결과·재진입을 포함한다. 다른 Task 기록 혼합·과거 자료 덮기·조회로 인한 dispatch/attempt 증가·다른 초안 유실은 0이어야 한다.
+
+<a id="impl-approval-receipts"></a>
+#### 유효 권한과 외부 효과 — §9·3 확장
+
+**화면 연결**: [사용자 조작](../../docs/references/design-synthesis/egdesk-ux-realization-proposals.md#ux-detail-approval)
+
+유효 행동은 `capability ∩ availability ∩ Profile ceiling ∩ Task delegation ∩ resource authority ∩ System/provider restrictions ∩ sandbox/network ∩ active approval ∩ execution limits`다. 승인이 불필요한 기존 위임에는 별도 승인 항목을 생성하지 않는다.
+
+ActionIntent는 요청자·실행자·계정·resource revision·payload hash·전송 대상·효과 유형·비용 상한·만료·idempotency 지원 여부를 가진다. gate fingerprint가 같은 요청만 묶되 같은 패키지의 서로 다른 행동은 별도 intent와 결정을 유지한다. 승인 시점과 실행 직전에 authority·payload를 다시 비교한다.
+
+제품의 허용·거부·행동 취소만 아래 메서드별 provider 응답으로 변환한다. 검토 닫기·Esc와 보류는 승인 응답을 보내지 않는다. `acceptForSession`이나 session permission grant는 명시된 지속 위임이 있을 때만 사용한다. UI 보류는 승인 응답이 아니며 provider 요청이 끝나도 제품 intent의 대기·만료 관계를 남긴다. [App Server 승인 프로토콜](https://learn.chatgpt.com/docs/app-server#approvals).
+
+gateway는 executor lease와 단일 dispatch 기록을 요구한다. 서비스의 멱등 키를 지원할 때 같은 논리 행동의 재시도에 재사용한다. 지원하지 않으면 read-only receipt 조회가 선행한다. HTTP 성공·로컬 UUID·버튼 클릭만으로 exactly-once를 보장하지 않는다. receipt와 현재 업무 상태가 충돌하면 기존 판단을 stale로 표시하고 증거를 덮지 않는다.
+
+인수 절차: 승인 후 계정 교체·payload 수정·scope 철회·만료, 업로드 성공/제출 실패, 전송 직후 연결 유실을 주입한다. gate 재사용은 동일 범위에서만 가능하고 새 범위는 dispatch 0건이어야 한다. 공식 접수와 후속 처리 상태가 별도이며, 미확인 효과의 재전송은 0건이어야 한다. 독립 Task는 계속 진행해야 한다.
+
+##### UI 결정과 provider 응답 분리
+
+제품 결정은 `pending/deferred/authorized/denied/cancelled/expired/revoked`, provider 요청은 `pending/response-sent/resolved/cleared/unknown`으로 별도 기록한다. UI 닫기는 어느 결정 상태도 바꾸지 않는다.
+
+native 요청 키는 `engineProfileId,connectionGeneration,JSON-RPC request id,threadId,turnId,itemId`이며 제공된 `approvalId/elicitationId`도 보존한다. JSON-RPC 응답의 `id`는 받은 요청 ID를 그대로 사용한다.
+
+| native 요청 | 허용 / 거부 / 행동 취소 응답 | 해소·실행 증거 |
+|---|---|---|
+| `item/commandExecution/requestApproval` | `{decision:"accept"}` / `decline` / `cancel`; 지원 `availableDecisions` 준수 | `serverRequest/resolved`와 `item/completed` 별도. cancel은 provider turn도 interrupt할 수 있음 |
+| `item/fileChange/requestApproval` | `{decision:"accept"}` / `decline` / `cancel` | 해소 알림과 실제 file-change 결과·readback 별도 |
+| `item/permissions/requestApproval` | `{permissions:허용부분,scope:"turn"}` / `{permissions:{},scope:"turn"}` | 거부/취소 구분은 제품에 기록. 행동 취소 시 해당 실행 중지도 요청; boolean 허용으로 host 제한까지 생겼다고 보지 않음 |
+| `mcpServer/elicitation/request` | `{action:"accept",content:검증값}` / `{action:"decline",content:null}` / `{action:"cancel",content:null}` | `serverRequest/resolved`와 후속 tool 결과 별도 |
+| `item/tool/requestUserInput` | `{answers:{질문ID:{answers:[받은 선택값]}}}` | 실험적 schema에 맞게 변환. 없는 거부/취소 선택값을 발명하지 않고 gateway 차단·해당 실행 interrupt로 처리 |
+
+응답 형태는 고정 schema로 검증한다. [공식 승인 계약](https://learn.chatgpt.com/docs/app-server#approvals), [응답 타입](https://github.com/openai/codex/blob/d6489472f3c15e87d2d7763a5fde033545c530f8/codex-rs/app-server-protocol/src/protocol/v2/item.rs#L1609), [permission 응답](https://github.com/openai/codex/blob/d6489472f3c15e87d2d7763a5fde033545c530f8/codex-rs/app-server-protocol/src/protocol/v2/permissions.rs#L799).
+
+보류는 응답을 보내지 않고 checkpoint한다. native 요청이 종료되면 제품 intent는 보존하고 새 요청 ID에 재결합한다. 이미 사라진 ID로 응답하지 않는다. 응답 전송 뒤 유실은 outbox·요청 상태·item 결과를 대조하며, `resolved`만으로 허용 적용·실행 성공을 추정하지 않는다. 부작용 결과가 불명이면 재응답/재실행 대신 receipt 조회를 선행한다.
+
+유효 종료는 `min(제품 위임 종료,자원 grant 종료,명시 행동 deadline)`이다. provider session grant가 더 넓거나 오래가면 사용하지 않는다. 기본은 일회 승인/turn subset이며 turn보다 짧은 권한은 gateway에서 매 dispatch 재검사한다. 이를 집행하지 못하는 native 경로에는 grant를 주지 않는다. session 캐시 철회가 불가능하면 해당 세션의 새 실행을 fence하고 격리 세션을 종료·재결합한다. 다른 Run의 process를 함께 종료하지 않는다.
+
+인수: UI 닫기 시 provider 응답 0, 보류 후 cleared를 authorized로 판정 0, 중복 응답·유실 후 효과 재실행 0, 제품 만료 뒤 session 캐시 우회 0이어야 한다.
+
+<a id="impl-account-binding"></a>
+#### 계정·credential·콘텐츠 식별 — §14.1·3 확장
+
+**화면 연결**: [사용자 조작](../../docs/references/design-synthesis/egdesk-ux-realization-proposals.md#ux-detail-identity)
+
+Engine Profile별 App Server process/config/credential store를 격리한다. managed ChatGPT login을 사용하고 `account/login/completed` 이후 `account/read`의 실제 auth mode·계정·plan을 확인한다. quota는 별도 조회한다. 사이트·커넥터·OS 신원은 각 표면에서 검증하며 Engine 인증 결과를 복제하지 않는다. [공식 인증 경로](https://learn.chatgpt.com/docs/app-server#auth-endpoints).
+
+login transaction은 `loginId/engineProfileId/expectedIdentity/returnTarget/generation`을 가진다. 취소·세대 변경 뒤 도착한 callback은 현재 선택에 적용하지 않는다. secret은 Engine credential store 또는 OS 보안 저장소에만 두고 handle generation으로 참조한다. 계정 식별자가 공개되지 않았으면 임의 provider ID를 만들지 않는다.
+
+Browser target은 `hostId/browserInstanceId/profileId/containerId/tabId/frameId/documentRevision`을 사용한다. 컨테이너 cookie store와 사이트 계정 확인은 별개다. 다른 container로의 전환은 새 tab/view 생성 후 계정을 확인하며 기존 form은 유지한다. [Firefox container 지정](https://developer.mozilla.org/en-US/docs/Mozilla/Add-ons/WebExtensions/API/tabs/create).
+
+Resource는 provider의 tenant+안정 ID를 우선하고, 없으면 의미 있는 query를 보존한 locator와 관찰 revision을 사용한다. byte hash는 Content identity일 뿐 authority key가 아니다. 동일 content도 모든 SourceRef와 각각의 access context를 유지한다.
+
+보존·반출은 연결된 정책에 따른다. 참조 중심형은 사용·고정 중 payload를 유지하고, 기간형은 만료 시 payload만 정리하되 허용된 최소 lineage를 남긴다. 관리 자료 철회형은 이후 열람·재사용·반출을 막고, 개인 과거 사본 허용형은 기존 적법한 로컬 사본만 당시 자료로 남긴다. 어느 모드도 외부 전달 사본 회수를 보장하지 않는다. 삭제·export에는 선택 ID 집합·제외·성공/실패/미확인을 반환한다.
+
+인수 절차: 제품 A/Engine B/커넥터 C/Browser D/OS E 조합으로 각 신원을 따로 바꾼다. 다른 plane의 묵시 변경·secret export·무권한 중복 존재 노출은 0건이어야 한다. 인증 취소·callback 유실·교체 경쟁·부분 삭제는 같은 초안/대상으로 복귀해야 한다.
+
+##### 서비스 인증 transaction·handle binding
+
+서비스 연결은 Engine 로그인과 별도 `ServiceAuthTransaction`을 사용한다. 필드는 `txnId,kind,serviceId,connectorInstance,expectedSubject/tenant,requestedScopes,resourceIds,authorityGrantId,browserContext,nonce,generation,deadline,returnTarget`이다. 결과 단계는 `auth-observed→identity-verified→scope-verified→resource-verified→bound`다. 앞 단계 성공을 다음 단계 성공으로 대신하지 않는다.
+
+직접 OAuth adapter는 외부 인증 표면, Authorization Code+PKCE, issuer·redirect·state 검증을 사용한다. callback에는 secret을 기록하지 않는다. [RFC 8252](https://www.rfc-editor.org/rfc/rfc8252.html#section-6), [OAuth 보안 계약](https://www.rfc-editor.org/rfc/rfc9700.html).
+
+App Server 관리 MCP는 `mcpServer/oauth/login{name,threadId,scopes,timeoutSecs}`의 URL과 `mcpServer/oauthLogin/completed{name,threadId,success,error}`를 사용한다. 완료 event에 고유 login ID가 없으므로 동일 runtime/name/thread의 동시 인증을 허용하지 않는다. 성공 알림만으로 계정을 확정하지 않고 서비스 adapter의 identity·scope·Resource probe를 수행한다. [고정 MCP schema](https://github.com/openai/codex/blob/d6489472f3c15e87d2d7763a5fde033545c530f8/codex-rs/app-server-protocol/src/protocol/v2/mcp.rs#L268).
+
+MCP 취소에 Engine용 `account/login/cancel`을 사용하지 않는다. 취소 시 제품 binding generation을 무효화한다. provider grant가 남았는지는 별도 상태다. callback 상관관계가 불명확하면 자동 결합하지 않고, 독립 검증 후 `[검증된 기존 연결 사용]`이라는 명시적 경로만 제공한다.
+
+handle binding은 `handleId,generation,kind,subject,scope,expiresAt,bindingTargets,revision`을 가진다. 선택/교체는 frozen 대상·현재 generation을 조건부 갱신한다. 만료 후 재결합은 동일 subject·요청 scope를 다시 확인하고 새 generation을 기록한다. 서비스 probe가 실제 신원을 제공하지 못하면 `identity unknown`이며 신원 의존 쓰기는 차단한다. 권한 probe를 위한 시험쓰기를 하지 않는다.
+
+동일 콘텐츠 비교는 `Resource ID,SourceRefs,content revision,context ID,action,authorityEpoch,checkedAt`를 보존한다. focus/open 직전에 현재 권한을 재검증하고 변경되면 선택 화면으로 반환한다. 읽기 동등성이 행동 권한이나 출처 이력을 합치지 않는다.
+
+인수: 웹 A·커넥터 B 불일치, 만료/교체 경합, 취소된 늦은 callback, 권한 비교 후 철회, 닫힌 기존 View를 주입한다. 무권한 binding·선택 밖 교체·무검증 쓰기·출처 병합은 0건이어야 한다.
+
+<a id="impl-browser-operations"></a>
+#### Firefox 조작 adapter와 입력 인수 — §3·13 확장
+
+**화면 연결**: [사용자 조작](../../docs/references/design-synthesis/egdesk-ux-realization-proposals.md#ux-detail-browser)
+
+Firefox shell adapter는 검증된 tab→browser binding을 해소한 뒤 그 browser의 navigation interface를 호출한다. 현재 선택 탭에 위임하는 전역 호출을 background target 조작에 사용하지 않는다. 새 web tab은 web principal 경로를 사용하고, 뒤로/앞으로/reload/stop은 `nsIWebNavigation`에 연결한다. 모든 탭의 progress listener에서 대상별 URL·로딩·오류를 받는다. [gBrowser 계약](https://firefox-source-docs.mozilla.org/browser/components/tabbrowser/docs/api.html), [navigation interface](https://searchfox.org/firefox-main/source/docshell/base/nsIWebNavigation.idl).
+
+Agent 조작 입력은 target envelope·expected documentRevision·semantic locator·예상 event·postcondition·lease를 가진다. System은 행동 전후 관찰을 연결하고 모델은 그 의미를 해석한다. target revision이 바뀌면 재관찰하며 오래된 좌표를 재사용하지 않는다. human input은 해당 target의 Agent 입력만 양보시킨다. 모든 Agent 입력 중지는 즉시 lease를 회수하지만 이미 발생한 외부 효과를 취소했다고 표시하지 않는다.
+
+download adapter는 Firefox downloads API의 ID·cookieStoreId·진행·canResume·error를 저장한다. `pause/resume/cancel/search/show`를 연결하고 browser 완료 후 파일 존재·size/hash·판독을 별도로 검사한다. native 안전 정책과 원본 출처 metadata를 유지한다. [Downloads API](https://developer.mozilla.org/en-US/docs/Mozilla/Add-ons/WebExtensions/API/downloads), [DownloadItem](https://developer.mozilla.org/en-US/docs/Mozilla/Add-ons/WebExtensions/API/downloads/DownloadItem), [Firefox 출처 metadata](https://firefox-source-docs.mozilla.org/toolkit/components/downloads/index.html).
+
+미지원 uploader·OS 인증은 정확한 Task와 준비 파일을 연결한 사용자 handoff로 전환한다. 비간섭 입력이 검증되지 않으면 공용 입력 사용을 표시하고 자동 병렬 조작을 허용하지 않는다. Playwright의 브라우저 지원을 현재 제품 Firefox profile의 직접 제어 보장으로 사용하지 않는다.
+
+인수 절차는 두 탭 중 A에서 한글 조합, B에서 탐색·popup·download·upload를 수행하는 fixture다. 취소·reload·resize·계정 변경·단절과 조합 종료 직후 Enter를 포함한다. 잘못된 탭 조작·의도치 않은 전송·승인·focus 탈취는 0건이어야 한다. 탐색 복원은 인증·form 저장을 보장하지 않고, 다운로드 완료와 파일 판독을 따로 증명해야 한다. 실패 시 native 사용자 경로와 원 업무의 초안을 유지한다.
+
+상세/확인 화면은 returnTarget stack으로 복귀하며 modal에만 focus trap을 적용한다. compositionstart/end와 `isComposing`을 함께 사용하고 조합을 종료한 keyup까지 command 실행을 막는다. pointer·keyboard 각각 모든 제어 경로를 재현한다. [W3C 포커스 동작](https://www.w3.org/WAI/ARIA/apg/patterns/dialog-modal/), [IME 상태](https://developer.mozilla.org/en-US/docs/Web/API/KeyboardEvent/isComposing).
+
+##### 탐색 재전송 gate·기존 파일 재사용
+
+`NavigationIntent`는 `targetContext,historyEntry,method/bodyKnown,linkedActionIntent,authorityEpoch,returnTarget`를 기록한다. UI·단축키·script reload·history traversal·session restore 모두 같은 replay 검사를 통과한다. POST 여부나 미확인 효과를 해소할 수 없으면 네트워크 재요청 전에 차단한다. GET이라는 이유만으로 서비스의 부작용 없음까지 보장하지 않는다.
+
+Firefox 참조 commit `6762e79efb6111d51bb58951c1ebdbac886526e7`의 `nsDocShell::LoadHistoryEntry`는 POST reload에서 `ConfirmRepost`를 호출한다. 제안 adapter는 이 재전송 경계 앞에 intent 검사를 연결하고, 네이티브 확인창 수락 뒤 실제 dispatch 직전에도 epoch·일회 permit을 재검사한다. 이 hook의 집행이 검증되지 않은 빌드에서는 미확인 효과가 있는 대상의 자동 재탐색을 제공하지 않는다. [원천 재전송 경계](https://github.com/mozilla-firefox/firefox/blob/6762e79efb6111d51bb58951c1ebdbac886526e7/docshell/base/nsDocShell.cpp#L11456).
+
+네이티브 취소는 navigation 취소이지 업무 intent 취소가 아니다. `[읽기 전용 접수 조회]`는 저장된 POST history를 재사용하지 않는 서비스의 확인 경로를 사용한다. 미확인 intent와 연결되지 않은 새 재시도 ID로 중복 방지를 우회할 수 없다. 재시도 dispatch permit은 `서비스의 미접수 확정 증거 OR 같은 논리 행동의 유효한 멱등 보장`과 기존 권한·epoch 검사를 모두 만족할 때만 발급한다. 접수 성공 증거 자체는 재시도 permit이 아니며 기존 receipt 추적에만 사용한다.
+
+기존 파일 선택 결과는 `FileReuseResult`이며 `DownloadCompletion`과 다르다. `localResourceId,localHash,originalProvenance,requestedSourceRef,equivalenceStatus,evidenceRef`를 기록한다. 동등성은 같은 immutable source revision의 신뢰 가능한 digest 또는 별도로 검증한 실제 응답 byte 비교로만 확정한다. 이름·크기·로컬 hash 단독으로 확정하지 않는다. 새 다운로드의 취소 확인·부분 파일 처리는 별도 receipt다.
+
+인수: POST 응답 유실 뒤 reload/강제 reload/back/복원/native 재전송 수락을 순서대로 주입해 외부 접수 증가 0을 확인한다. `접수됨·처리 중·멱등성 없음`에서는 재시도 비활성·읽기 전용 상태 조회 가능·추가 접수 0을 확인한다. 같은 이름의 다른 byte·동일 byte지만 출처 불명·비교 불가·선택 직후 파일 교체를 검사한다. 재사용을 새 다운로드 완료로 표시하거나 기존 출처 metadata를 덮어쓰는 경우는 0건이어야 한다.
+
+### 17.D 파일·Terminal·저장·동등 입력
+
+<a id="impl-files"></a>
+#### 파일 adapter·형식 지원·조건부 저장
+
+**화면 연결**: [사용자 조작](../../docs/references/design-synthesis/egdesk-ux-realization-proposals.md#ux-detail-files)
+
+다음 기술·수치는 설계 기준선이며 실제 설치·성능·지원 완료의 증거가 아니다. 보존기간·출시 형식·최종 편집 약속은 기술 임곗값과 분리한다.
+
+Firefox privileged shell은 `[파일]`에서 OS 선택기를 직접 열고 파일/다중 파일/폴더/저장 mode·취소 결과를 각각 처리한다. renderer에는 임의 경로 권한 대신 범위 제한 resource handle을 전달한다. 공통 `[자료]`는 동일 resource/root registry를 사용한다. 추가 참조는 authority·runtime ownership을 변경하지 않는다. [Mozilla 선택기](https://searchfox.org/firefox-main/source/widget/nsIFilePicker.idl)
+
+선택 기준선은 텍스트 Monaco ESM, PDF PDF.js worker·페이지/text layer, 구조 추출 Apache Tika, 표 주소·수식·캐시값 SheetJS CE, Office 미리보기 격리 LibreOffice 변환→PDF.js다. OCR은 Tika의 Tesseract 연결 경로를 사용한다. reader/viewer는 허용된 로컬 origin에서 실행하며 임의 script·macro·외부 참조 실행·network를 차단한다. [Monaco](https://github.com/microsoft/monaco-editor), [PDF.js](https://mozilla.github.io/pdf.js/examples/), [Tika](https://tika.apache.org/3.2.2/formats.html), [SheetJS](https://docs.sheetjs.com/docs/csf/sheet/), [LibreOffice](https://help.libreoffice.org/latest/en-US/text/shared/guide/start_parameters.html)
+
+지원 record는 `format, firstSupportCapabilities, finalEditRequirement, currentAdapterCapabilities, verifiedFixtures`다. 내장 Office 분기는 Collabora editor/WOPI host를 시안 resource에 연결하고 callback은 시안만 저장한다. 정본 적용은 별도 조건부 저장이다. WOPI 계열이라는 이유로 lock 보장이 같다고 가정하지 않는다. 내부 완결 약속을 외부 fallback으로 통과 처리하지 않는다. [공식 통합 예제](https://github.com/CollaboraOnline/collabora-online-sdk-examples/blob/master/webapp/README.md)
+
+parser 출력은 `sourceHash, parserVersion, spanMap, extractedHash, coverage, warnings`다. 셀은 화면 행이 아니라 sheet 식별자·물리 주소·source revision에 연결한다. 수식 추출·캐시값을 재계산 검증으로 표시하지 않는다. 읽기 요청의 admission은 Contract §2를 따르고 Reader는 판독, 요청 담당 Agent는 업무 판단을 소유한다.
+
+이름·metadata를 먼저 색인하고 본문은 열기/검색/읽기 요청에 따라 처리한다. FTS5 unicode61/trigram을 기준으로 짧은 검색어는 범위 제한 scan으로 fallback한다. 초기값은 텍스트 8MiB 또는 100,000행 초과 시 256KiB 읽기 보기, PDF 현재±2페이지 렌더, parser 256MiB/30초 단위다. 초과 시 가능한 형식 분할→512MiB 격리 재시도 1회→외부 변환본 연결로 전환하며 미처리 coverage를 숨기지 않는다. [FTS5](https://www.sqlite.org/fts5.html)
+
+저장 입력은 `resourceId, expectedDiskRevision, bufferRevision, bytes, operationId`다. System은 아래 저장 capability를 먼저 확인한다. managedRevisionStore 또는 검증된 strongConditionalReplace에서만 원본 갱신하며, 그 adapter의 권한·잠금·revision·flush·교체·readback 계약을 사용한다. 저장 중 추가 입력은 다른 버퍼 revision으로 남는다. 모두 저장은 파일별 transaction이다. 앱 lease는 외부 앱 미저장 부재를 증명하지 않는다. 단독 쓰기·조건부 갱신이 불확실한 외부 정본은 텍스트와 binary 모두 관리 작업사본·create-only 반출·명시적 원본 앱 저장 경로로 제한한다.
+
+인수 절차: 한글 조합·저장 중 추가 입력·외부 rename/delete/write·잠금·읽기 전용·공간 부족을 주입한다. 버퍼 보존, 이전 파일 무손상, readback 일치, File-first focus를 확인한다. 보호/필터행 workbook의 세 셀 변경은 주소·서식·수식·기존 오류·재열기를 비교한다. 실패 시 정본 쓰기를 막고 사본·차이·재시도를 유지한다.
+
+##### 내부 Office 편집
+
+편집 세션은 `resourceId, mode, baseRevision, draftId, editorGeneration, leaseEpoch, adapterVersion`을 갖는다. System이 원본에서 편집 draft를 준비하고, Firefox는 editor UI를 연다. **editor 서버가 WOPI host의 CheckFileInfo/GetFile을 호출해 draft를 받고 PutFile로 저장한다.** 브라우저의 저장 알림은 저장 증거가 아니다.
+
+기본 배치는 같은 PC의 WOPI host와 로컬 editor engine이다. 지원 native package 또는 격리된 로컬 VM/container를 사용하며 host↔engine 경로를 loopback/vsock broker로 제한한다. VM 내부 캐시도 관리 저장물에 포함한다. 기존에 승인된 원격 engine은 별도 배치 adapter다. 로컬 engine 준비 실패가 외부 배포·업로드를 자동 승인하지 않는다.
+
+인증 token은 draft·editor 서버·세대·허용 operation·만료에 제한한다. host는 매 요청에서 현재 권한과 세대를 검사한다. iframe origin/source, discovery 목적지, callback 발신 engine을 검증한다. token을 URL 로그·event·bundle에 남기지 않는다.
+
+| 저장 profile | 집행 |
+|---|---|
+| Collabora timestamp profile | CheckFileInfo와 저장 응답에 revision에 대응하는 LastModifiedTime을 제공한다. PutFile의 `X-COOL-WOPI-Timestamp`를 현재 draft와 비교한다. 불일치는 409/1010이며 timestamp 없는 덮어쓰기는 자동 허용하지 않는다 |
+| 표준 WOPI lock profile | 실제 지원되는 Lock/RefreshLock/Unlock과 lock 만료를 구현한다. PutFile의 lock 불일치는 409와 규정된 lock 응답이다. Collabora에도 같은 lock 동작이 있다고 가정하지 않는다 |
+
+각 draft의 저장은 단일 writer queue에서 직렬화한다. `(세션, expectedDraftRevision, bodyHash)`로 중복을 판별하고, 검증한 byte와 새 draft revision·receipt를 함께 commit한 뒤 응답한다. 옛 세대·철회된 lease·서로 다른 writer의 요청은 저장하지 않는다. header 없는 충돌 덮어쓰기는 별도 비교 화면에서 새 draft로 해결한다. 상대 파일 생성은 기본 비활성화하고 다른 이름 저장은 System 경로로 처리한다. [Collabora 저장 profile](https://sdk.collaboraonline.com/24.04/CO-SDK-manual.pdf), [WOPI PutFile](https://learn.microsoft.com/en-us/microsoft-365/cloud-storage-partner-program/rest/files/putfile)
+
+형식별 record에 `firstCapabilities, finalRequirement, editModel, nativeWriter, preservedFeatures, unsupportedFeatures, fixtureSet`을 둔다. 채택 조건은 요청한 편집·부분 변경·원형 재저장·미변경 구조 보존의 fixture 통과다. 보기/parser 지원만으로 편집을 등록하지 않는다. OOXML/ODF는 Collabora와 구조화 편집 adapter를, 나머지는 동일 조건을 충족하는 native-format adapter를 선택한다. 지원하지 않는 기능은 명명한다.
+
+**미실행 인수 조건:** 정상 입력→PutFile→재열기, 중복·역순 요청, token 만료, 누락 timestamp, engine 중단을 검사한다. 원본 미승격·옛 callback 쓰기 0, 원형 구조 보존과 내부 대체 편집의 실제 변경·반출을 대조한다.
+
+##### 모든 형식의 저장 capability
+
+저장 adapter는 형식과 무관하게 다음 능력을 선언한다.
+
+| 능력 | 정상 저장 |
+|---|---|
+| `managedRevisionStore` | System만 갱신하는 논리 원본 head를 expected revision과 같은 transaction에서 변경 |
+| `strongConditionalReplace` | provider의 강한 revision 조건 또는 대상·경로 변경까지 배제하는 실제 exclusive operation으로 교체 |
+| `createOnly` | 기존 목적지를 교체하지 않는 새 파일 생성 |
+| `uncoordinatedExternal` | 원본 교체 금지; 관리 작업사본 저장과 명시적 새 파일 반출 제공 |
+
+앱 lease·advisory lock·hash 재검사·일반 rename은 임의의 비협조적 외부 writer에 대한 조건부 저장 보장이 아니다. external adapter의 능력은 backend·OS·filesystem별 계약과 경합 fixture로 등록한다. 능력이 없거나 상실되면 **모든 형식**에 동일한 안전 사본 경로를 적용한다.
+
+외부 변경 알림은 FSEvents/ReadDirectoryChangesW/inotify를 재조회 신호로 사용한다. 활성화·저장·재시도 때 handle identity와 revision을 다시 읽고, 알림 유실 시 주기적 stat 후 변경 의심 대상을 hash한다. 알림은 잠금이 아니다. 원본을 추적할 수 없으면 버퍼를 유지하고 위치 재연결을 제공한다.
+
+**미실행 인수 조건:** 모든 형식에서 검사 직후 외부 write/rename/delete를 주입한다. managed 저장은 정상 성공하고, 조건 없는 external 교체는 0건이며 사용자의 최신 버퍼가 남아야 한다.
+
+##### 저장 모드와 제어 의미
+
+| 편집 모드 | 저장/단축키의 대상 | 별도 수락 |
+|---|---|---|
+| 관리 원본 직접 편집 | `[저장]`, Cmd/Ctrl+S가 현재 원본 head를 조건부 갱신 | 없음 |
+| 제안·시안 | `[사본 저장]`, 같은 키가 draft revision 저장 | 원본에 선택 변경을 넣을 때만 |
+| 안전성이 확인된 외부 adapter | `[원본 저장]`, 같은 키가 해당 adapter 저장 | 일반 직접 편집에는 없음 |
+| 조건 없는 외부 파일 | `[작업사본 저장]`, 같은 키가 관리 사본 저장; 외부 원본 불변 | 사본 저장에는 없음 |
+
+`수락`은 선택 제안을 작업 버퍼/pending namespace에 적용하며 저장이나 실행 재개가 아니다. `저장` 자체도 검토 승인·사실 검증이 아니다.
+
+저장은 `dirty→saving(r)→saved(r)/failed(r)`이며 저장 중 새 입력은 r+1의 dirty 상태로 남긴다. 확인증은 mode·실제 대상·저장 revision/hash·원본 반영 여부를 표시한다. 모두 저장은 해당 File의 수정 버퍼와 pending operation만 고정하고 대상별 결과를 남긴다.
+
+다른 이름 저장은 새 resource 생성이며 기존 목적지에는 저장 capability를 다시 적용한다. OS 덮어쓰기 확인은 조건부 저장 증거가 아니다. 성공하면 활성 버퍼를 새 resource에 연결하되 원본 disk와 다른 버퍼는 변경하지 않는다.
+
+**미실행 인수 조건:** 네 모드에서 직접 입력→저장, 시안 저장→선택 수락→원본 저장, 저장 중 추가 입력·실패·IME·모두 저장 일부 실패를 검사한다. 일반 직접 저장의 불필요한 수락 0, 사본 저장의 원본 변경 0, 저장 revision 오표시 0이어야 한다.
+
+<a id="impl-changes"></a>
+#### 변경 적용과 검사 증거
+
+**화면 연결**: [사용자 조작](../../docs/references/design-synthesis/egdesk-ux-realization-proposals.md#ux-detail-changes)
+
+변경 집합은 `author, baseHash, currentBufferRevision, proposedHash, exactWriteSet, disposition, operationId`를 가진다. System은 3-way 비교와 적용 직전 expected revision 검사를 수행한다. 수락은 undo 가능한 버퍼 transaction, 거부는 미적용 제안 상태, 되돌리기는 최신 버퍼에 대조한 역변경이다. 이미 적용한 사람/Agent 변경을 이중 적용하지 않는다.
+
+검사 입력은 저장본/격리 사본의 닫힌 manifest, argv/cwd, PC·도구/환경·권한·기대 결과다. System이 실행·증거를 연결하며 모델은 요청된 검토·원인 추론만 수행한다. 결과에는 exit·로그 hash·위치·포함/제외·기존/새 실패·취소를 기록한다. 입력 hash 변경은 stale로 처리한다.
+
+필수 검사는 변경 유형에 연결한다. 코드에는 구문/정적 검사·영향 테스트, 경로 이관에는 move manifest·고정 경로·참조/build boundary, 문서/표에는 구조·렌더·지정 범위·업무 불변식을 적용한다. 검사 부재는 `저장 확인·기능 검증 없음`이지 전체 완료가 아니다. Git local/tracking/실제 remote branch SHA와 조회 시각을 구별하고 배포 결과로 확대하지 않는다. [Git 원격 조회](https://git-scm.com/docs/git-ls-remote)
+
+인수 절차: 세 묶음 중 하나 수락→다른 writer 수정→나머지 적용→역변경→저장 실패→재진입을 수행한다. 선택 밖 변경·이중 적용 0과 양쪽 내용 보존을 확인한다. 기존/새 실패 fixture와 검사 후 입력 수정에서 구분·stale 표시를 확인한다. 계산·적용 실패는 원 revision과 원문을 남기며 자동 덮어쓰지 않는다.
+
+##### 검사 baseline과 실패 분류
+
+`CheckSpec`은 argv/cwd, 입력·기준 manifest, 도구/환경 fingerprint, 기대 exit/assertion, 포함/제외, 위치 mapping을 가진다. System이 명세대로 실행·비교하고 Agent의 원인 해석은 별도 필드다.
+
+기존 실패는 동등 환경의 baseline 진단과 tool/rule code·source identity·범위 anchor·발생 수가 대응할 때만 판정한다. 경로 이동은 move manifest로 대응한다. baseline 부재·환경 변경·모호한 대응은 `신규 여부 미확인`이다. 기존 실패가 있다는 이유로 실제 실패 exit를 통과로 바꾸지 않는다.
+
+**미실행 인수 조건:** `새 실패 / 기존 실패 / 분류 불가 / 전체`를 제공하고 baseline revision·환경 차이를 펼칠 수 있게 한다. 기준 검사도 등록된 권한·명령 안에서 수행한다. 기존 syntax failure, 새 회귀, 이동된 동일 오류, 보호 workbook의 세 셀 변경·기존 오류를 검사한다. 선택 검사 성공을 전체 코드·업무 정확성이나 배포 완료로 확대하지 않는다.
+
+##### namespace 변경은 저장까지 pending
+
+`NamespaceOp(create/rename/delete)`는 source handle, 이전/새 경로, expected source/target/parent revision, 의존 operation, 작성자와 operation ID를 가진다.
+
+제안 수락은 `accepted-pending-save`, 직접 요청은 `direct-pending-save`다. 이 단계에서는 filesystem을 변경하지 않는다. 관리 namespace는 준비된 object와 논리 경로/head를 하나의 DB transaction에서 적용한다. 외부 namespace는 저장 capability 계약의 실제 조건부/exclusive capability를 사용하며 여러 filesystem 작업을 하나의 원자 transaction이라고 하지 않는다.
+
+cross-volume은 목적지 create-only→검증→조건부 원본 삭제 순서다. 원본 삭제 능력이 없거나 실패하면 `사본 생성됨·이동 미완료`다. 각 단계 receipt와 현재 상태로 재시도한다. 역변경도 현재 revision/경로 점유를 검사한 새 pending operation이다.
+
+**미실행 인수 조건:** 트리에 `이동 예정/삭제 예정/생성 예정`과 변경 수를 표시한다. `[저장]` 전 취소는 pending만 제거한다. 필요한 의존 항목은 범위를 먼저 보여 준다. 여러 root·경로 재점유·cross-volume·부분 실패·응답 유실에서 대상 밖 변경 0과 원본 보존을 검사한다.
+
+<a id="impl-terminal"></a>
+#### PTY 소유·역압력·재연결
+
+**화면 연결**: [사용자 조작](../../docs/references/design-synthesis/egdesk-ux-realization-proposals.md#ux-detail-terminal)
+
+기준선은 독립 supervisor+portable-pty, renderer xterm.js다. gateway·transport·renderer와 PTY master 수명을 분리한다. `readOutput/attach/claimInput/write/resize/detach/terminate`는 별도 operation이다. 선택·복사·관찰에는 write handler를 연결하지 않고 `disableStdin`과 서버 입력권 검사를 함께 적용한다. [portable-pty](https://docs.rs/portable-pty/latest/portable_pty/), [xterm 옵션](https://xtermjs.org/docs/api/terminal/interfaces/iterminaloptions/)
+
+`resourceReferences`와 `runtimeOwnerSet`은 별도 관계다. 참조 추가·View 생성·고정·관찰 attach는 owner set을 쓰지 않는다. 공동 유지가 허용된 정책의 명시적 operation만 owner를 추가한다. Agenda 닫기는 마지막 실제 owner 제거에 따라 종료하며 참조 수로 판단하지 않는다.
+
+실행 identity는 `deviceKeyId, bootId, supervisorEpoch, runtimeId, pid, processStartTime`이다. 인증된 supervisor·새 challenge·출력 sequence를 대조한 뒤에만 same-process를 표시한다. gateway가 죽어도 supervisor가 살아 있으면 재연결; PTY owner가 죽었으면 snapshot-only/unknown이다. 임의 PID를 새 helper에 붙인 것으로 복원을 주장하지 않는다.
+
+출력 정본은 sequence spool이다. 초기 frame 32KiB, renderer 미확인 출력 상한/재개 256/64KiB, spool 기록 queue 4/1MiB다. xterm write callback 뒤 ACK하며 느린/분리된 subscriber는 spool 재생으로 전환한다. renderer 부재만으로 process를 멈추지 않는다. 저장 queue에는 PTY 읽기 역압력을 적용하고 공간 부족은 출력 저장 대기로 표시한다. OSC clipboard·자동 링크 실행은 금지한다. [역압력](https://xtermjs.org/docs/guides/flowcontrol/)
+
+종료는 소유 범위의 process group에 요청하고 exit·마지막 sequence를 기록한다. 5초 미확인은 종료 미확인으로 남기며 강제 종료는 별도 확인이다. 늦은 출력은 중지 세대와 대조하고 새 실행을 만들지 않는다.
+
+Codex Agent는 Engine Profile별 격리 App Server를 사용한다. 로컬 stdio JSONL·`initialize/initialized`, ChatGPT managed login, `account/read`·plan·rate limits를 확인한다. 정상 조정은 `turn/steer`의 expectedTurnId로 전달하고 실제 다음 입력 반영을 별도 기록한다. active turn이 없으면 같은 업무의 다음 호출에 포함하며 forced pause/fork를 만들지 않는다. paid API SDK로 대체하지 않는다. Agent-room 관계와 provider thread·Run·PTY identity도 분리한다. [공식 App Server](https://learn.chatgpt.com/docs/app-server)
+
+인수 절차: 출력 폭주 중 선택/복사→renderer 닫기→gateway 재시작→동일 supervisor 연결→supervisor 종료→PID 재사용→원격 종료 응답 유실을 주입한다. stdin 0, sequence 누락/중복 식별, same/new/snapshot 구분, Canvas 발견 가능성을 확인한다. 다른 Agenda의 참조만 추가한 경우 원 owner 닫기가 종료를 막지 않아야 한다. 실패 시 입력 차단·읽기 전용 spool·새 세션 경로를 유지한다.
+
+##### process 집합과 detach
+
+`RuntimeProcessSet`은 runtime/boot/controller generation, 실제 OS, containment 종류, 소유 집합, process 식별·시작시각을 기록한다. PTY master와 집합 controller는 renderer/gateway 밖 supervisor가 소유한다.
+
+POSIX는 독립 session과 관리 process group을 생성하고 group별 guardian을 유지한다. 관리 분리 실행은 broker spawn으로 새 group과 소유 관계를 등록한다. Linux의 완전 containment는 전용 cgroup v2와 종료 시 cgroup kill을 사용한다. native session/group만으로 임의 daemon 탈출까지 보장하지 않는다. 그 보장이 필요한 OS-독립 작업은 준비된 로컬 전용 VM containment로 실행하고 실제 guest OS를 표시한다. native OS가 필수이면 조용히 VM으로 바꾸지 않는다.
+
+Windows는 suspended process 생성→Job Object 배정→resume 순서다. breakaway를 허용하지 않고 supervisor가 job handle과 KILL_ON_JOB_CLOSE를 소유한다. 종료는 정상 종료 요청 뒤 필요 시 TerminateJobObject, active process 수와 process exit를 재조회한다. 알림 부재를 종료 증거로 쓰지 않는다. [Job Object 계약](https://learn.microsoft.com/en-us/windows/win32/procthread/job-objects)
+
+View/transport detach는 controller·PTY·process 집합을 종료하지 않는다. 마지막 실제 owner 제거만 종료를 시작한다. 5초 미확인은 `종료 미확인`이며 강제 종료는 별도 행동이다. containment 밖 실행이 확인되거나 범위를 입증하지 못하면 관련 Canvas node와 닫기 대기를 남긴다.
+
+**미실행 인수 조건:** foreground·background·분리 child, supervisor/gateway 유실, Job 배정 실패, 두 owner 중 하나 닫기를 검사한다. 확인된 집합 전체 종료와 다른 owner 실행 보존을 각각 입증한다.
+
+##### 사람 View lease와 관찰 resize
+
+사람 입력 lease는 `viewId, deviceSession, runtimeGeneration, inputEpoch`에 결합하고 Agent 실행 lease와 분리한다. `[입력 시작]` 또는 허용된 인계 완료 전에는 stdin을 전송하지 않는다. Agent에서 사람으로의 인계는 이전 writer의 입력 중단 확인 후 새 epoch를 발급하며 Run 자체를 종료하지 않는다.
+
+View 닫기·detach는 사람 lease를 해제하고 로컬 송신을 즉시 차단한다. host는 현재 epoch를 매 입력에서 검사한다. 현재 입력 lease TTL을 넘긴 요청은 거부한다. 원격 해제 ACK가 없으면 `입력권 해제 미확인`이며 이미 접수된 입력의 취소를 주장하지 않는다.
+
+관찰 renderer의 fit/resize는 로컬 표시만 바꾼다. 실제 PTY 행/열 변경은 현재 제어 lease의 명시적 resize operation만 허용한다. 카메라 이동은 PTY를 바꾸지 않는다.
+
+**미실행 인수 조건:** 입력권 취득→닫기→늦은 입력, Agent 세션 관찰→복사→resize를 검사한다. 옛 epoch stdin과 관찰자 PTY 변경은 0이다.
+
+<a id="impl-storage"></a>
+#### SQLite/CAS·독립 보관 정책·초기화
+
+**화면 연결**: [사용자 조작](../../docs/references/design-synthesis/egdesk-ux-realization-proposals.md#ux-detail-reset)
+
+로컬 기준선은 SQLite WAL+SHA-256 CAS다. 같은 권한 영역의 같은 text/binary byte는 dedup하되 raw·실제 전달 packet·preview·artifact의 role/lineage를 합치지 않는다. 서로 다른 권한/암호화 영역에 전역 dedup을 적용해 존재를 노출하지 않는다.
+
+기록은 임시 object→length/hash·flush→CAS publish→SQLite manifest/event/reference transaction 순서다. object 없는 DB 참조를 만들지 않는다. crash orphan은 격리하고 누락 참조는 실패로 표시한다. filesystem 저장 intent journal은 교체 후 DB commit 전 crash에서 실제 hash로 완료/충돌을 판정한다.
+
+WAL은 로컬 디스크에서 사용한다. 초기 checkpoint는 1,000page 또는 WAL 64MiB에서 PASSIVE로 시도하며 장기 reader는 짧은 query로 나눈다. migration은 일관된 backup·object pin→격리 DB 변환→schema/foreign-key/integrity/대표 reference 검사→활성 포인터 전환이다. 실패하면 이전 DB/CAS를 유지한다. DB 파일만 복사해 완전한 backup이라고 하지 않는다. [WAL](https://www.sqlite.org/wal.html), [Backup API](https://www.sqlite.org/backup.html)
+
+초기 운용값은 preview/index cache 512MiB LRU, 비선택 renderer 60초 후 분리다. IME·미보존 버퍼·활성 입력권은 제외하고 Canvas 표현은 남긴다. object 10GiB에서 용량 안내, 여유 공간이 `max(1GiB, volume 5%)` 미만이면 큰 신규 수집을 제한한다. 이는 보존기간이나 제품 지원 상한의 결정이 아니다.
+
+GC는 활성 Run·Saved Agenda·Answer/Briefing·고정·export/migration·복구/백업 pin을 mark한다. 미참조여도 승인된 보존기한 뒤에만 sweep하고 정책 미정이면 자동 삭제하지 않는다. crash orphan은 최소 24시간 격리 후 재검사한다. 공유 hash의 다른 유효 참조가 남으면 물리 삭제 미완료를 표시한다. 가림은 파생본이며 기존 byte를 바꾸지 않는다. 명시 삭제·원문/packet 연동·권한 철회 후 열람은 해당 정책과 강제 조건을 따른다.
+
+`extraOriginalCapturePolicy, formRestorePolicy, bundleIncludePolicy, resetRecoveryPolicy, resetBackupPolicy`를 독립 저장한다. 추가 원문 수집은 고정 관계 집합·권한 revision에 묶으며 필수 과거 근거와 구별한다.
+
+form은 resource·origin/frame origin·업무 계정·form fingerprint·안정 필드 ID/type·허용값·revision에 연결한다. capture 전 allowlist/비밀 차단, 복원 전 현재값·계정·구조 대조를 수행한다. `autocomplete=off`를 credential 제외 보장으로 사용하지 않는다. 부수효과 없는 적용을 확인하지 못하면 값 복사로 fallback한다. [MDN autocomplete](https://developer.mozilla.org/en-US/docs/Web/HTML/Reference/Attributes/autocomplete)
+
+초기화는 frozen IDs·actionId·revision에 묶고 후속 입력 admission·로컬 인증 사용 차단→종속 실행 중지→기록·색인·Reader cache·참조 정리 순서다. provider 전달분 회수·철회는 별도 상태다. 최소 처리 기록에는 본문 대신 수량·상태·불투명 참조를 남긴다. 복구 scope·백업 scope·검증 확인증·live deletion write-set은 별도이며 자동 백업 실패 시 삭제 commit을 열지 않는다.
+
+인수 절차: CAS/DB 각 경계·migration 전환에 crash를 주입해 참조 무결성·이전 저장소 복귀·중복 event 0을 확인한다. 보관 2×bundle 2 조합에서 권한 밖 수집/반출 0과 정책 간 값 변경 0을 확인한다. 초기화 2×백업 2 조합에 부분 실패·만료·늦은 packet·오프라인 PC를 넣어 credential 복구 0, 새 입력 제외, 자동 백업 실패 시 삭제 0을 확인한다. form의 password/OTP/계정 변경/구조 변경/취소에는 비밀 보관·오적용·복원발 제출 0이어야 한다. 실패 저장소는 보존한 읽기 전용 복구 모드로 연다.
+
+##### CAS 게시와 GC
+
+관리 writer·GC·migration은 동일 `storageGate`와 store generation을 사용한다. 이 잠금은 관리 저장소 참여자 간 조정이며 외부 filesystem 공격까지 막는다는 뜻이 아니다.
+
+1. 등록된 staging에 기록하고 길이/hash를 검증한다.
+2. gate 안에서 operation별 pending pin을 durable하게 기록한다.
+3. 기존 hash는 byte를 검증해 재사용한다. 신규 hash는 **no-replace** 원자 게시를 사용한다.
+4. POSIX는 파일 fsync→게시→대상 부모 디렉터리 fsync를 완료한다. Windows는 FlushFileBuffers와 동일-volume no-replace/write-through 경로를 사용하되 namespace 내구성까지 제공하는 adapter에서만 durable 게시로 인정한다.
+5. 게시 증거 뒤 DB transaction에서 manifest·head·event·receipt를 commit하고 pending pin을 유효 참조로 전환한다.
+
+디렉터리 내구성 계약을 제공하지 못하는 backend는 `sqlite-chunk CAS`를 사용한다. 불변 payload를 4MiB 이하 chunk와 hash manifest로 저장하고 참조와 같은 SQLite transaction에서 commit한다. 이때 filesystem 사본은 정본이 아닌 등록된 cache다. 두 backend는 같은 object hash와 export 의미를 갖는다. [Windows 이동 계약](https://learn.microsoft.com/en-us/windows/win32/api/winbase/nf-winbase-movefileexw)
+
+GC는 mark 세대 이후 생성·갱신된 pin을 보호한다. sweep 직전 같은 gate에서 현재 참조·pending pin·read lease·삭제 정책을 재검사한다. 재사용되는 옛 hash도 새 pin을 먼저 얻는다. 삭제 의도→unlink→디렉터리 동기화→receipt 순으로 기록한다. crash orphan은 활성 참조로 노출하지 않는다.
+
+**미실행 인수 조건:** 동일 hash 재사용과 sweep, 게시 각 경계의 crash, fsync 실패, DB commit 실패를 교차한다. committed 참조의 byte 유실·이중 event 0, 이전 head 또는 검증된 새 head만 허용한다.
+
+##### 운영 저장물 삭제와 포렌식 구분
+
+삭제 manifest는 대상 DB 본문·검색 텍스트·FTS·CAS·WAL/임시 DB·관리형 복구 사본·등록 staging을 열거한다. 사용자 보호 백업·공유 참조·외부 원본의 포함 여부는 기존 정책과 명시 범위대로 표시한다.
+
+`fenced → rewriting → cleanupPending → managedEraseComplete`를 사용한다. 먼저 삭제 epoch를 복구 제어 기록에 남기고 대상의 읽기·새 입력·복제·복구를 차단한다. 살아남는 허용 행으로 새 DB를 구성하고 FTS는 해당 행에서 재생성한다. 이전 FTS shadow table과 freelist를 복사하지 않는다. 재작성 중 유효 변경은 cursor 이후 delta로 반영하고, 짧은 gate에서 최종 head를 맞춰 전환한다.
+
+이전 generation의 관리 read handle을 닫고 DB/WAL/임시 파일·무참조 CAS·대상 포함 복구 사본을 정리한다. 암호화 사본은 삭제 대상 없는 새 사본과 새 키로 재작성한 뒤 이전 key와 모든 관리 wrapping을 폐기한다. 공유 키 하나를 지워 무관한 자료까지 삭제하지 않는다.
+
+완료 조건은 **선택 범위의 관리 저장물에서 조회·재입력·복구가 불가능하고, 필요한 재작성·파일/키 정리 receipt가 모두 확인됨**이다. 유효 공유 참조나 보존 예외가 남으면 물리 정리 완료로 표시하지 않는다. 이것은 SSD 잔존 block, OS snapshot, 외부 backup의 포렌식 복구 불가능성 보장이 아니다.
+
+**미실행 인수 조건:** fixture 본문을 DB/WAL/FTS/CAS/각 관리 사본에 넣고 삭제·crash·복구를 수행한다. 남은 사본이 있으면 완료 0, 최신 삭제 epoch를 잃은 복원은 차단한다.
+
+##### 초기화 되돌리기
+
+기한부 복구는 삭제 전에 `RecoveryManifest(resetId, scopeIds, oldHeads, payloadPins, deletionEpoch, postResetVersions, expiresAt, authorityRef, exclusions)`를 만든다. credential·실행권·예약 활성 상태는 복구 내용에서 제외한다. 자동 보호 백업은 별도 manifest와 수명이다.
+
+Undo는 reset ID·현재 삭제 epoch·만료·권한을 transaction에서 확인한다. 이후 별도 삭제가 있거나 만료 판정이 불확실하면 적용하지 않는다. 현재 상태가 post-reset version과 같으면 같은 논리 ID에 **새 복구 revision**을 발행한다. 이후 변경이 있으면 현재 유지/선택 복구/허용된 새 사본으로 해결한다. 삭제 tombstone을 지우지 않고 이를 대상으로 한 명시적 복구 event를 기록한다.
+
+만료와 복구 commit은 같은 gate에서 단일 승자를 갖는다. 적용 전 취소는 무변경, 적용 뒤 중지는 미처리 항목만 대상으로 한다. 항목별 operation receipt로 재시도하며 이후 편집을 덮지 않는다.
+
+**미실행 인수 조건:** 정상 복구, 이후 편집·재삭제, 만료 경합, 일부 실패·응답 유실을 검사한다. credential·예약·실행 자동 활성화와 타인 후속 변경 손실은 0이다.
+
+<a id="impl-portable"></a>
+#### 안전한 bundle·transactional import·동기화
+
+**화면 연결**: [사용자 조작](../../docs/references/design-synthesis/egdesk-ux-realization-proposals.md#ux-detail-portable)
+
+컨테이너 기준선은 ZIP64이며 `manifest.json, events.jsonl, transcript/README, objects/<hash>`를 담는다. libarchive 순차 entry API로 허용 항목만 처리하고 경로를 그대로 추출하지 않는다. 절대경로·상위 탈출·link·중복 이름·특수 파일·중첩 자동 실행을 거부한다. 초기 예산은 100,000entry·펼친 크기 10GiB·압축비 100:1이다. 초과 정상 자료는 자원량을 표시한 큰 묶음 검사로 전환하되 staging은 여유 공간 절반 이내이며 안전 검사는 완화하지 않는다. [libarchive](https://github.com/libarchive/libarchive/wiki/Examples)
+
+암호화 기준선은 Argon2id v1.3·무작위 salt·64MiB/3회 KDF와 libsodium secretstream XChaCha20-Poly1305다. 1MiB chunk·인증된 version/KDF header·FINAL tag를 사용한다. import KDF 상한 256MiB/6회, 암호 사용 후 제거, 평문 bundle 선행 디스크 생성 금지를 적용한다. 자동 보호 사본도 준비된 보호 수단·목적지가 없으면 설정/재시도로 돌아간다. [키 도출](https://libsodium.gitbook.io/doc/password_hashing/default_phf), [secretstream](https://libsodium.gitbook.io/doc/secret-key_cryptography/secretstream)
+
+credential 저장소는 export schema 밖이다. Profile은 비밀 아닌 allowlist만, 경로는 portable root 별칭만 보낸다. 원문 속 비밀/민감 경로는 제외·허용된 가림본으로 처리하고 원 byte를 몰래 수정하지 않는다. 검출기 통과를 모든 비밀 부재의 증명으로 표시하지 않는다.
+
+export는 cache 전체가 아니라 root+포함 정책으로 집합을 계산하고 object pin·일관된 event 경계·hash 검사→생성·재검증→atomic publish한다. 보관 권한과 반출 권한을 따로 검사한다.
+
+import는 격리 staging→version/schema/hash/필수 object/권한 검사→conflict plan→transaction→대표 reference 재열기다. 같은 event ID의 다른 내용은 자동 병합하지 않는다. 새 사본은 ID remap/lineage, 병합은 base revision, 교체는 이전 revision을 보존한다. rollback은 import write-set의 현재 revision을 재확인한다. 알 수 없는 major/필수 feature는 무변경 거부하고 선택 metadata는 실행하지 않고 보존한다.
+
+승인된 동기화는 DB 파일이 아니라 event·manifest·암호화 object를 인증된 HTTPS로 전달한다. device/event ID로 중복 제거, base revision·조건부 쓰기로 충돌 검출, 다른 필드는 3-way merge, 같은 필드는 충돌로 남긴다. timestamp만으로 승자를 정하지 않는다. 기기 제거는 grant/키 세대를 갱신한다. credential·실행 명령·focus·임의 Browser 상태는 자동 재생하지 않는다. 정책 선택과 실제 endpoint·신원·비용·전송 집행 승인을 구별한다. [조건부 갱신](https://www.rfc-editor.org/rfc/rfc9110.html#name-if-match)
+
+인수 절차: 잘못된 암호·절단·누락 object·경로 탈출·용량 초과·새 major·import 중 crash를 주입한다. 원 Desk 무변경 또는 검증된 transaction만 허용하고 이후 편집을 rollback으로 지우지 않는다. 두 기기의 오프라인 수정·삭제·제거를 재연결해 충돌·재유입 차단·중복 실행 0을 확인한다. 실패 staging은 활성화하지 않고 원 묶음·이전 revision·정확한 재시도 범위를 유지한다.
+
+##### 동기화 envelope와 키 수명
+
+협업 계약의 현재 person/device 인증·grant·transport 위에서 `SyncEnvelopeV1`을 사용한다. envelope는 opaque object ID, scope, event/device sequence, base revision, grant/key epoch, cipher hash와 recipient 집합을 가진다. 원문 hash와 민감 metadata는 암호화 manifest 안에 둔다.
+
+객체마다 무작위 256-bit DEK와 secretstream XChaCha20-Poly1305를 사용하고, DEK는 허용 기기의 X25519 공개키별 sealed envelope로 감싼다. 송신 사건과 권위 manifest는 등록된 signing key로 서명한다. 개인키·token은 보호 저장소에만 둔다. 업무/AI 계정 credential을 envelope에 넣지 않는다. [secretstream](https://libsodium.gitbook.io/doc/secret-key_cryptography/secretstream)
+
+기기 제거는 grant epoch를 먼저 올리고 새 업로드·다운로드·key wrapping을 차단한다. 이후 객체/version은 새 epoch의 DEK를 사용하며 옛 DEK를 재사용하지 않는다. 이미 받은 키와 사본은 회수했다고 주장하지 않는다.
+
+키 복구는 현재 권한이 있는 기존 기기의 재wrapping 또는 사전에 구성한 암호화 recovery envelope만 사용한다. 둘 다 없으면 ciphertext를 보존하고 복호화 불가를 표시한다. 새 키 발급만으로 옛 데이터를 복구했다고 하지 않는다.
+
+오프라인 event는 재연결 후 현재 epoch와 base revision을 검사한다. 비충돌 변경만 병합하고 같은 필드는 기존 공동/소유자 해결 정책을 따른다. 삭제와 경합한 수정은 자동 부활시키지 않는다. migration은 envelope version별 변환·hash 검증·새 manifest commit이며 옛 epoch를 활성화하지 않는다.
+
+**미실행 인수 조건:** `동기화 대기 / 충돌 / 키 확인 필요 / 제거된 기기`와 `[현재 상태 확인] [키 복구] [허용된 로컬 작업 계속]`을 제공한다. 제거·오프라인 수정·키 유실·복원·ACK 유실에서 정상 기기 동기화, 옛 epoch 거부, 중복 commit/실행 0을 검사한다. 미승인 원격 분기만 대기한다.
+
+##### archive 예산과 취소
+
+기본 예산은 100,000 entry·10GiB 전개량·100:1 압축비·10분이다. 큰 묶음은 최대 1,000,000 entry·`min(100GiB, 시작 여유공간/2)`·1000:1·30분까지 명시적으로 조정한다. 두 경로 모두 worker RSS 512MiB, streaming 실제 byte 계수, 정수 overflow 검사와 독립 취소를 적용한다. 이는 검사 attempt 예산이지 Run 종료 한도가 아니다.
+
+경로 탈출·link/특수 파일·정규화 후 중복·자동 중첩 추출 금지는 완화하지 않는다. KDF는 기존 256MiB/6회 상한을 **할당 전** 검사하고 crypto header는 16KiB 이하, chunk는 1MiB로 제한한다. FINAL 및 전체 archive 검증 전에는 활성화하지 않는다. 자기 export가 압축비 한도를 넘으면 해당 entry를 비압축 저장한다.
+
+**미실행 인수 조건:** 초과 시 실제 사용량과 `[분할] [큰 묶음 검사] [취소]`를 표시한다. 확대는 `[큰 묶음 검사]→[검사 시작]` 2클릭이며 자동 승격하지 않는다. 취소는 worker 중지·등록 staging 정리 후 확인한다. 대량 작은 entry·과대 header·절단·취소/게시 경합에서 예산 우회와 부분 활성화 0을 검사한다.
+
+##### 암호화 staging registry
+
+모든 임시 복사본은 생성 전에 `opId, 목적, sourceRefs, 관리 위치, bytes, state, keyRef, lease/pin, cancel/deleteEpoch, deadline`으로 등록한다. import/export 임시물뿐 아니라 외부 편집 사본·editor cache·VM scratch도 포함한다. 원본 bundle과 완성 목적지는 임시물로 등록하지 않는다.
+
+staging은 선택한 최종 bundle의 평문/암호화 정책과 무관하게 암호화한다. 작업 key는 기본 메모리에만 두며 비밀을 event나 일반 DB에 저장하지 않는다. parser에는 bounded 메모리 stream을, 파일 접근이 필요한 editor에는 작업 전용 암호화 scratch volume을 제공한다. 기록 가능한 다른 cache 위치는 차단한다.
+
+`writing→validating→ready→committing→published→cleanup`을 사용한다. 실패·취소는 활성화하지 않고 정리한다. key 소실 시 원본에서 다시 검사하며 숨은 복구 사본을 만들지 않는다. 종료·취소 직후 정리를 시도하고 handle/삭제 실패는 `cleanupPending`으로 다음 시작과 주기적 reaper에서 재시도한다. 활성 attempt도 archive 검사 deadline을 넘겨 무기한 남지 않는다.
+
+publish와 취소 fence는 같은 gate에서 판정한다. publish가 먼저 완료됐으면 완성 파일을 취소로 삭제하지 않는다. 정리기는 검증된 registry 위치만 처리하고 원본·무관한 파일을 확장 탐색해 지우지 않는다.
+
+**미실행 인수 조건:** 암호화/평문 bundle 각각에서 실패·crash·취소·완료를 검사한다. staging의 검색·새 모델 입력·자동 backup 유입 0, 미등록 사본 0, 정리 실패의 가시성을 확인한다.
+
+<a id="impl-input"></a>
+#### 입력 소유권·focus·접근성 인수
+
+**화면 연결**: [사용자 조작](../../docs/references/design-synthesis/egdesk-ux-realization-proposals.md#ux-detail-input)
+
+pointer/keyboard는 같은 `actionId, targetId, expectedRevision, originControl, inputOwner`를 사용한다. System은 rendering/focus/persistence/상태 안내를, 모델은 명시 요청의 추론을 수행한다. focus 이동·자료 선택은 실행 요청이 아니다.
+
+Chat/Canvas의 두 손가락 입력은 [콘텐츠 활성 경계](#impl-view)를 따라 분배한다. pointer가 놓인 View, 배치 선택 또는 키보드 focus만으로 콘텐츠 활성·Agent lease를 덮어쓰지 않는다. UI의 활성 표시와 실제 입력 분배는 같은 상태를 사용하고, 이번 사용자 동작을 모델의 추가 판단이나 API 요청으로 바꾸지 않는다.
+
+focus-return stack은 업무/resource identity로 위치를 검증한다. modal의 이름·초기 focus·Tab 순환·취소, tree/grid의 focus/선택 분리를 적용한다. native 취소·늦은 callback은 요청 세대와 대조한다. resource 재마운트에 caret·selection·focus를 전달하지 않는다. [WAI dialog](https://www.w3.org/WAI/ARIA/apg/patterns/dialog-modal/), [tree](https://www.w3.org/WAI/ARIA/apg/patterns/treeview/), [grid](https://www.w3.org/WAI/ARIA/apg/patterns/grid/)
+
+IME는 compositionstart/end·isComposing·keydown/keyup 세대를 함께 추적한다. 조합 확정과 동일 키 동작에서는 전송하지 않고 다음 별도 입력을 요구한다. resource 전용 키는 소유 영역에서만 처리하고 비활성 행동은 사유·대체 경로를 제공한다. 진행 안내는 초당 최대 1회로 묶고 오류/입력권 변화는 별도 알리되 focus를 빼앗지 않는다. [IME 상태](https://developer.mozilla.org/en-US/docs/Web/API/KeyboardEvent/isComposing)
+
+지원 record는 OS/build/architecture·AT/version/mode·Firefox/renderer version·locale/IME·배율·trace·결과·fallback이다. VoiceOver/NVDA/Orca 공식 지원은 EG-Desk의 통과 증거가 아니다. [VoiceOver](https://support.apple.com/guide/voiceover/welcome/mac), [NVDA](https://download.nvaccess.org/documentation/en/userGuide.html), [Orca](https://help.gnome.org/orca/introduction.html)
+
+초기 시험 계획은 OS 조합당 AT 켬/끔 2×한국어/영어 2×기본/200%/320px reflow 3×핵심 흐름 6=72개 조합 경로다. 이는 실측 시간이나 통과 건수가 아니다. AA 목표는 해당 A/AA 기준·전체 과정·접근성 지원 방식까지 검사하며 일부 수치나 대표 화면만으로 선언하지 않는다. 비웹 shell의 WCAG2ICT는 해석 지침이지 인증 보장이 아니다. [WCAG](https://www.w3.org/TR/WCAG22/#conformance-reqs), [WCAG2ICT](https://www.w3.org/TR/wcag2ict-22/)
+
+인수 절차: Agenda 30개·자료 20개·활동 3개·경고 2개·긴 이름에서 여섯 흐름을 키보드와 드래그 없는 클릭으로 수행한다. IME 중 저장/전송/Esc, 원 target 삭제, native 취소, Terminal 선택, 확대·모션 감소를 포함한다. 오전송·다른 업무 focus·선택만으로 실행은 0이고 같은 대상·결과에 도달해야 한다. 실패 renderer는 같은 행동의 접근 가능한 대체 표면으로 전환한다. 읽기만 가능한 fallback으로 편집 약속을 통과 처리하지 않는다.
+
+##### 실제 편집 가능한 접근성 대체 표면
+
+기본 renderer와 대체 renderer는 동일 buffer·change-set·save/export action을 사용한다.
+
+| 대상 | 실제 대체 조작 |
+|---|---|
+| 텍스트/코드 | 이름 붙은 native textarea 또는 행 단위 편집기. 큰 파일은 encoding 경계가 검증된 범위 patch로 편집 |
+| CSV·표 | sheet/물리 주소·값·수식 필드를 가진 DOM 표/폼. 정렬된 화면 행을 쓰기 주소로 사용하지 않음 |
+| 문서·슬라이드 | 문단·표 셀·shape ID별 DOM 편집 폼. OOXML/ODF는 지정 node만 갱신하고 미변경 package 부분을 보존 |
+| diff | hunk별 기준/현재/제안, checkbox, 수락·거부·역변경·충돌 편집 버튼 |
+| Terminal | sequence·누락 표시가 있는 선택 가능한 출력 문서, 입력권, 줄 단위 명령 필드·보내기·제어키와 동일 PTY renderer 재연결 |
+
+Terminal 대체 입력은 `runtimeId, processGeneration, inputEpoch, inputSequence, operationId`를 일반 Terminal과 같은 gateway에 전달한다. 한 줄 명령은 검증된 encoding의 byte와 Enter에 해당하는 CR 한 번을 전송하고, 제어키는 선택한 단일 byte(Ctrl+C=0x03, Ctrl+D=0x04, Esc=0x1b)만 전송한다. 이는 키 입력이며 Ctrl+C 수신이나 중지 성공을 미리 단정하지 않는다. 입력 ACK 유실은 같은 sequence를 조회하며 명령을 재발송하지 않는다. 출력은 동일 PTY sequence를 이어 받아 접근 가능한 텍스트 projection으로 만들고 escape 제어열을 실행 가능한 HTML로 취급하지 않는다.
+
+줄 단위 입력 가능 여부와 비밀 입력 보호는 adapter의 확인된 capability·현재 terminal mode에 따른다. 미확인·전체 화면 TUI·보호 입력에는 대체 입력을 차단한다. renderer 재연결은 동일 runtime 세대의 screen checkpoint와 이후 output sequence를 사용하며 새 process를 만들지 않는다. 재연결 실패에도 Canvas에 실행 상태·종료 경로를 남긴다.
+
+**미실행 Terminal 인수 조건:** renderer 실패→동등 조작 화면→입력권 취득→명령 입력→출력 확인을 수행한다. 같은 processGeneration 유지·명령 1회 수신·출력 sequence 연속·다른 업무 입력 0을 대조한다. IME 확정·권한 회수·재접속·ACK 유실·제어키·지원하지 않는 TUI/비밀 입력에서 오발송과 자동 새 shell 생성은 0이어야 한다.
+
+원형 writer가 제공되는 형식은 선택한 저장 모드에 따라 직접 편집→native 저장 또는 제안 편집→부분 수락→native 저장을 수행하고 재열어 확인한다. 원형 writer가 실패하면 편집 가능한 delta와 원본을 `.egdesk`로, 표/문장을 CSV·텍스트로 반출할 수 있다. 이 결과는 `대체 형식 저장·원형 저장 미완료`이며 내부 원형 편집 완료가 아니다.
+
+Monaco의 screen-reader 모드와 이름을 설정한다. 대체 화면은 native form/button을 우선한다. `변경 2/5·시트 A·B7·미수락`처럼 대상·순서·상태를 이름에 연결하고 비활성 사유를 연결한다. 상태는 polite live region, 오류는 중복 억제한 별도 안내를 사용한다. 컨트롤은 reflow하며 자료 자체의 2차원 예외와 구분한다.
+
+**미실행 인수 조건:** 여섯 흐름은 파일 편집/검사, diff, Terminal, 초기화/복구, 반출입/원격 요청, Canvas 목록/Briefing/Ontology다. OS별 72 환경·흐름 조합에서 키보드와 드래그 없는 포인터를 각각 검사한다. 실제 편집·부분 수락·반출 결과가 같아야 하며 대표 경로만으로 AA 준수를 선언하지 않는다.
+
+### 17.E Ontology·협업·외부 조작면
+
+<a id="impl-e24-ontology-resolution"></a>
+
+#### 1. Ontology resolution·semantic 검증·승격
+
+**화면 연결**: [사용자 조작](../../docs/references/design-synthesis/egdesk-ux-realization-proposals.md#ux-detail-e24-ontology-inspect) · [사용자 조작](../../docs/references/design-synthesis/egdesk-ux-realization-proposals.md#ux-detail-e24-ontology-governance)
+
+SQLite 사건·관계 인덱스와 content-addressed 불변 payload를 사용한다. concept·occurrence·relation·constraint·evidence를 정규화하고 JSON Schema 2020-12로 검증한다. provenance는 entity·activity·책임 주체·derivation을 대응시킨다. RDF 서버를 필수화하지 않으며 RDF adapter가 필요할 때 SHACL을 추가한다. 구조 검증은 의미 판정을 대신하지 않는다. [JSON Schema](https://json-schema.org/draft/2020-12), [PROV-DM](https://www.w3.org/TR/prov-dm/), [SHACL](https://www.w3.org/TR/shacl/).
+
+System resolver는 조직·Desk·역할 정책, 현재 권한, 요청 범위, source revision으로 필요한 부분을 선택한다. inspector의 한 단계 표시 제한과 실행에 필수인 dependency closure를 구분한다. 큰 자료는 read-only Reader로 분할하고 필수 관계를 못 읽으면 해당 행동만 차단한다.
+
+호출별 receipt는 run/turn, 정책 revision, 사용 unit/hash, 출처, 선택 이유, 제약, ACL 확인, 제외·불명 범위를 기록한다. 현행 결정·정본·역사·절차 자료의 권위를 구분한다. 새 사실·교정·호환 변경은 같은 Run의 다음 context에 반영하고 과거 payload는 변경하지 않는다.
+
+후보는 stable unit ID·원문 구간을 가진 patch다. 조건·예외·안전·권한·행동·기대 결과별 structural/semantic finding과 disposition을 별도 저장한다. Agent는 의미 분석을 하고 parent 업무의 유효한 위임 또는 업무 책임자가 판단한다. 고정 Worker/Critic 조직이나 별도 사람을 강제하지 않는다.
+
+직접 권한자의 명시적 행동은 제공 범위∩현재 실제 권한∩governance capability∩정책 조건으로 검사한다. 위임받은 actor에게만 유효한 유형별 grant를 추가 교차한다. 위임은 주체·유형·범위·행동·종료 조건·검증 조건·정책 revision을 가진다. 검증은 후보 hash·기준본·시험·정책 revision에 결합한다. ACL API/dry-run을 우선하며 불가능하면 미검증이다. 업무 원본에 임의 시험쓰기를 하지 않는다.
+
+승격·활성화·롤백은 기준 revision·권한 epoch가 일치할 때 원자적으로 적용한다. 한 확인에서도 의미 수락·revision 생성·활성 참조 변경을 구분한다.
+
+**미실행 oracle:** 12개 의미 단위 중 안전 예외 1개 누락 시 구조 PASS와 별개로 실패; 제한 역할의 활성화 거부; 편집/활성화·유형별 위임 분리; 후보 변경 후 관련 verdict stale; 동시 활성화 단일 성공; 롤백 후 과거 hash 불변. 동일 task·tenant/profile·source revision의 paired 시험에서 경로·의미·근거·안전·시간을 따로 판정하고 ERP write 0·영향 재시험을 확인한다.
+
+##### 직접 권한과 위임 행사
+
+공통 허용 집합은 `제공 범위 ∩ 현재 실제 권한 ∩ governance capability ∩ 정책 조건`이다. 직접 권한자가 명시한 행동은 이 집합으로 검사하며 사전 위임 grant를 요구하지 않는다. 위임받은 actor의 행동에만 유효한 grant의 주체·유형·범위·행동·epoch를 추가 교차한다. System이 직접 사용자 행동을 집행하는 것은 새로운 Agent 위임이 아니다.
+
+사전 위임 없음은 Agent의 자율 조직 변경을 허용하지 않는다는 뜻이다. 직접 권한자의 처리와 기존 Task 위임 안의 읽기·의미 분석·finding 수정·재검토를 금지하지 않는다. 편집 제공 범위, 검토 역할, 유형별 위임은 별도 필드다.
+
+##### 직접 권한과 위임 행사 인수 조건
+
+직접 권한자+사전 위임 없음은 허용, 무권한자는 거부, 위임 actor는 허용 유형만 처리, grant 철회 후 변경 0, 일반 검토와 동일 Run 조정은 계속.
+
+##### 필수 지식 선택과 순회
+
+호출 resolver는 권한 확인된 일관된 ontology/index revision을 고정한다.
+
+| 단계 | 실행 규칙 |
+|---|---|
+| 시작점 | 현재 조직·Desk·역할의 활성 binding, 요청 action/type에 연결된 필수 제약, 명시 unit ID를 필수 seed로 삼는다. 당시 검사 모드는 해당 호출 receipt의 unit 집합에서 시작한다. |
+| 권위 필터 | 등록된 authority manifest의 현재 결정·정본만 운영 사실 후보로 사용한다. archive는 역사 증거, Skill은 절차로 분류한다. 문서 자체의 권위 주장·최신 timestamp만으로 승격하지 않는다. 같은 권위의 미해결 충돌은 해당 행동을 보류한다. |
+| 필수 순회 | schema에 지정된 requires/dependsOn/constrainedBy와 연결된 exceptionOf, 필수 evidence 관계를 순회한다. appliesTo는 요청 범위를 검사한다. 일반 relatedTo·배치/포함 관계는 필수 실행 의존성으로 자동 확장하지 않는다. |
+| 선택 검색 | 명시 ID 일치→정확 용어 일치→FTS5 BM25 오름차순→stable unit ID 순으로 정렬한다. 검색어·index revision을 기록한다. 권한 필터는 hit/count/snippet 생성 전에 적용한다. |
+| 종료 | `(unitId,revision)` 방문 집합으로 순환을 끊고 frontier가 비면 완료한다. 필수 closure는 hop/top-k로 자르지 않는다. 큰 원문은 read-only Reader로 나누며 누락·권한·용량 불명은 해당 의존 행동만 보류한다. 선택 참고자료만 남은 admission 예산에 맞는 정렬 prefix를 사용한다. |
+
+FTS5의 낮은 BM25 값을 우선하는 규칙을 사용한다. [FTS5 ranking](https://www.sqlite.org/fts5.html#the_bm25_function)
+
+receipt에는 seeds·순회 관계·필수/선택 unit·source/hash·권위/권한 revision·selector/index revision·선택/제외 이유·미확인 frontier를 남긴다. 비공개 unit의 이름·존재는 수신 권한 밖으로 내보내지 않는다. 호환 갱신은 같은 Run의 다음 호출에 반영하고 과거 receipt/payload는 유지한다.
+
+재색인은 shadow generation에서 unit manifest와 hash를 대조한 뒤 pointer를 교체한다. 후보 index는 평가 binding에만 연결한다. 원문 의미 단위별 disposition 없는 누락은 의미 보존 완료가 아니다. paired 평가는 동일 task·tenant/profile·source/test revision에서 입력을 격리하고 경로·의미·근거·안전·시간을 따로 판정한다. 미검사 범위는 UNKNOWN이다.
+
+##### 필수 지식 선택과 순회 인수 조건
+
+검색어에 없는 안전 예외도 필수 관계로 포함; 순환 종료; stale Skill의 운영 사실 우선 적용 0; 비공개 count 누출 0; shadow index 누락 시 활성화 0; 과거 v7 유지/다음 호출 v8; A/B의 ERP write 0·영향 재시험.
+
+<a id="impl-e24-collaboration-authority"></a>
+
+#### 2. 협업 identity·grant·동시성·소유권
+
+**화면 연결**: [사용자 조작](../../docs/references/design-synthesis/egdesk-ux-realization-proposals.md#ux-detail-e24-collaboration-invite) · [사용자 조작](../../docs/references/design-synthesis/egdesk-ux-realization-proposals.md#ux-detail-e24-collaboration-manage)
+
+person, device/session, Agent 실행체, AI Engine, 업무 서비스, OS principal을 분리한다. grant는 issuer·subject·scope·capability·종료 조건·위임 상한·epoch를 가진다. 읽기·쓰기·재접속마다 현재 권한을 확인한다. 업무 기간 grant, 지속 grant, 인증 세션, 입력 lease, 데이터 보존은 다른 수명이다.
+
+초대 nonce는 확인된 수신자에 묶는다. 수락·취소·만료를 원자적으로 처리하고 중복 수락은 같은 결과를 반환한다. 발송·전달·수락·접근 receipt를 분리한다. scope preview와 제외 목록에도 공개 필터를 적용한다.
+
+텍스트·구조화 필드는 3-way merge와 조건부 쓰기를 선택한다. 비충돌은 위임 범위에서 병합하고 겹친 의미는 보존·판단한다. strong ETag/If-Match 불일치는 쓰기를 거부한다. Browser·binary·외부 효과는 단일 writer와 대상 revision을 검사한다. 원자 저장/잠금이 보장되지 않으면 사본·provider 편집기로 전환한다. [RFC 9110](https://www.rfc-editor.org/rfc/rfc9110.html#name-if-match).
+
+타인 변경 수락·역변경 capability를 따로 검사한다. 역patch는 현재본에 적용하고 타인 후속 변경을 유지한다. 저장 결과 불명은 조회 후 재시도하며 전체 과거본 덮어쓰기로 대체하지 않는다.
+
+이전·복구 transaction은 owner-set revision, 요청 권한·수락/의결, 현재 복구 위임, 기존 grant 처리 집합을 검증한다. 종료형은 지정 grant를 종료하고 유지형은 새 소유자가 명시 수락한 항목만 새 revision에 연결한다. 무효한 계정 권한·옛 복구 위임은 복원하지 않는다.
+
+**미실행 oracle:** 수락/취소 단일 결과; 종료형/지속형 수명 분리; 수락만 가능한 주체의 역변경 거부; 자기 역변경 후 타인 변경 보존; owner 이전/복구 경합; 선택 유지·종료 정확성; 오프라인 옛 grant 비부활; 비공개 이름 누출 0; 두 PC pan과 실행 대상 독립성.
+
+##### 기기·세션별 권한 적용
+
+person key는 `(issuer,subject)`다. grant에는 devicePredicate/sessionPredicate를 추가한다. 수락 기기/세션 한정은 accept transaction에서 검증된 deviceId/sessionId에 한 번 결합한다. 정책 허용 세션은 현재 issuer/audience·인증 유효성·기기 등록/철회 상태를 매번 검사한다. 같은 이메일만으로 다른 principal을 합치지 않는다.
+
+미등록 수신자는 지정 주소의 인증된 소유 증명 후 principal에 결합한다. provider가 보증하지 않는 점·별칭·local-part 변환을 하지 않는다. nonce만 가진 전달받은 사람에게 권한을 열지 않는다.
+
+기기 회수는 해당 device/key epoch와 종속 lease·stream을, 세션 회수는 해당 session을, person grant 회수는 모든 종속 연결을 차단한다. 기존 P2P/SFU 차단과 receipt 분리를 그대로 적용한다. 다른 AI·업무·OS 계정 권한은 이전하거나 함께 회수하지 않는다.
+
+##### 기기·세션별 권한 적용 인수 조건
+
+수락 기기의 재진입 성공, 다른 기기 거부, 허용 기기 정책의 신규 등록 기기 접근, 세션 한정 만료, 단일 기기 회수 후 다른 유효 기기 유지, 전달 링크 오수락 0.
+
+##### 공동 소유·표결·복구
+
+요청은 `operationId, proposalRevision, ownerSetRevision, policyRevision, frozenVoters, candidateOwners, grantDispositionHash`에 결합한다. 의결 조건은 Owner가 선택한 전원 또는 유효 threshold를 평가하며 `1≤threshold≤voterCount`를 검증한다. 수신자의 소유권 수락은 의결과 별도 사실이다.
+
+표는 authenticated principal·현재 device key·요청 hash에 결합하고 voter당 한 현재 표만 유효하다. commit 전 표 변경/요청 취소는 revision을 갱신한다. owner/policy 집합이 바뀌면 이전 표를 새 요청에 전용하지 않는다. 원자 commit에서 현재 revision·의결·수락·grant 처리 집합을 재검사한다. 미지정 만료를 임의 시간으로 채우지 않는다.
+
+복구 위임 없음은 복구 권한을 만들지 않는다. 위임형은 명시된 증명 predicate·확인자 서명·재인증·현재 위임 epoch를 평가한다. 무응답이나 옛 위임은 증거가 아니다. 복구는 Desk 권한만 대상으로 하며 일반 업무는 계속한다.
+
+##### 공동 소유·표결·복구 인수 조건
+
+구성원 수가 다른 fixture, 표 중복/철회, owner 변경, 수락/취소·이전/복구 경합에서 단일 commit; 옛 표·옛 복구 grant 재사용 0; 기존 위임의 선택 유지/종료 정확성.
+
+##### 순차 편집의 대기·인계
+
+순차 lock은 resource와 안정 block/path 집합, actor/device/session, base revision, fencing epoch를 가진다. 중앙 transaction은 겹치는 active lock의 중복 발급을 거부한다. 상태는 `requested→queued→granted→draining→released/expired`다. 동순위 요청은 서버 접수 순서·operation ID로 정렬한다.
+
+모든 저장은 현재 lock epoch와 base revision을 검사한다. 만료·단절 뒤 옛 writer의 저장은 거부한다. 진행 중 쓰기의 결과가 불명이면 조회 전에 다음 writer를 시작하지 않는다. 안정 부분 범위를 표현할 수 없으면 명시적으로 선택한 문서 전체 lock 또는 사본/provider 편집기로 전환하며 부분 잠금 지원을 가장하지 않는다. 새 승인을 모든 병합에 추가하지 않는다.
+
+##### 순차 편집의 대기·인계 인수 조건
+
+두 writer의 겹침 거부, 대기 취소, 저장 직후 단절, 만료 뒤 늦은 저장, 인계 중 원본 변경; 초안 보존·타인 후속 변경 보존·독립 작업 계속.
+
+##### 수락 이후 첫 화면 실패
+
+accept는 invite revision·nonce·수신 principal·device/session predicate를 검증한 transaction에서 grant와 receipt를 함께 생성한다. 같은 operation 재시도는 같은 결과를 반환한다. frontend는 timeout 후 상태를 조회한다. 이미 accepted면 grant를 재생성하지 않고 현재 권한으로 projection만 다시 연다.
+
+미수락·유효 상태에서만 같은 accept를 재시도한다. 만료/철회는 새 초대 요청, identity mismatch는 올바른 인증으로 복귀한다. 송신 재전송은 기존 처리 상태 확인과 옛 nonce 무효화 후 수행한다. 채널 receipt에는 실제 provider ID/상태/시각을 기록하며 지원되지 않는 delivery/read 상태는 UNKNOWN이다.
+
+##### 수락 이후 첫 화면 실패 인수 조건
+
+accept commit 전후 단절, 중복 탭, 늦은 취소, 전달 링크·계정 변경, accepted 후 renderer 실패에서 grant 1개·잘못된 접근 0·재개방 성공·중복 발송 0.
+
+<a id="impl-e24-remote-transport"></a>
+
+#### 3. 원격 protocol·철회·동기화·보존·비용·exit
+
+**화면 연결**: [사용자 조작](../../docs/references/design-synthesis/egdesk-ux-realization-proposals.md#ux-detail-e24-computer-use-observe)
+
+**구조.** Firefox 셸, 로컬 coordinator, PC별 host bridge, 원격 권위 coordinator, 객체 저장, 미디어 adapter를 분리한다. 초기 권위 저장은 단일 writer SQLite WAL·불변 객체로 구성한다. coordinator 장애 시 임의의 두 번째 writer를 만들지 않는다. 기존 환경 배치 또는 조직 운영형/관리형 adapter는 구현 대안이며 공급자 구매를 전제하지 않는다.
+
+인증은 외부 브라우저 Authorization Code+PKCE, issuer·subject·audience·nonce 검증, 보호 저장소의 device key/token을 사용한다. 공개 client refresh token은 rotation 또는 sender constraint를 적용한다. 제어·중지 전용 WSS, 사건 WSS, 객체 HTTPS, 영상 WebRTC, 소실 가능한 커서 DataChannel을 분리한다. [RFC 8252](https://www.rfc-editor.org/info/rfc8252/), [RFC 9700](https://www.rfc-editor.org/info/rfc9700/), [RFC 8831](https://www.rfc-editor.org/rfc/rfc8831.html).
+
+P2P 실패는 승인된 TURN, 수신자 증가로 source 송신 한계를 넘으면 허용된 SFU adapter로 처리한다. 새로운 전송 주체·지역·비용 범위를 넘는 fallback은 하지 않는다. 경로가 없으면 원격 관찰 불가이며 독립 로컬 업무는 계속한다.
+
+명령에는 ID·run/task·target·device generation·observation revision·grant/lease epoch·deadline을 붙인다. 초기 시험값은 heartbeat 2초·host 단조시계 TTL 6초다. 이는 grant 기간 기본값이 아니다. cancel tombstone·epoch·host 입력 차단·진행 중 행동·ACK를 기록한다. 단절·TTL만으로 process 종료나 외부 효과 취소를 입증하지 않는다.
+
+**기존 관찰 연결 철회.** token 만료만 기다리지 않는다. grant epoch 변경 즉시 새 구독/갱신을 거부하고 P2P는 해당 peer 송신·연결을 종료한다. SFU는 해당 참가자/구독 제거와 트랙 차단을 실행한다. 송신자·relay는 구독별 현재 권한과 짧은 관찰 lease를 검증한다. 철회 적용을 확인할 수 없으면 영향받는 미디어 송신을 차단한다. 서버 결정·송신 차단·relay 적용·상대 수신 중단 확인은 별도 receipt다. 이미 전송된 버퍼/사본은 회수했다고 주장하지 않는다. 재연결은 현 epoch로 다시 인증한다. [기존 연결과 token 만료의 차이](https://docs.livekit.io/frontends/reference/tokens-grants/).
+
+재접속은 사건 cursor·권한·실행 동일성·외부 receipt를 대조한다. 취소된 실행을 늦은 결과로 재활성화하지 않는다. 외부 쓰기는 오프라인 queue하지 않는다. PC 인계 전 이전 writer와 외부 효과를 확인하며 임의 provider 전체의 exactly-once를 주장하지 않는다.
+
+**데이터·보존.** 전송 manifest에 scope·revision/hash·수신자·공개 분류·보존 정책을 연결한다. 선택형은 지정 참조 closure, Desk 전체형은 선언한 허용 범주를 투영한다. 동기화는 사건·객체 증분, 백업은 특정 사건 경계의 별도 manifest다. credential·process·미전송 입력은 제외한다.
+
+실시간 버퍼는 비저장 시 폐기한다. 기록·증거는 명시 기간 또는 권한자 삭제 정책을 따른다. 동기화 중지·관찰 철회·context 변경은 과거 payload 삭제 명령이 아니다. 명시 삭제 시 원본·파생물·replica·backup 참조와 잔존/만료 대기를 추적한다. 복원은 새 revision이며 현재 철회 사건을 우선하여 grant·lease·실행을 부활시키지 않는다.
+
+**비용 모델.** 영상 `V=0.45×Mbps×시간(h)` GB, 관찰 전송은 약 `V×평균 수신자 수`, 기록은 `V×기록 비율`이다. relay·재전송·overhead를 계측해 보정한다. 저장은 보존기간·복제·backup, 데이터 전송은 최초 seed+고유 변경+재전송으로 계산한다. 비용은 compute 시간·GB-month·전송 GB·요청/전달 건수·운영 작업의 단가 합이다. 가정 2Mbps·1시간은 기록 0.9GB, 수신자 3명은 약 2.7GB이며 가격·예산 승인이 아니다. 실제 환경·지역·운영 책임·견적이 정의될 때만 구체 집행 승인을 요청한다.
+
+**Exit.** `[설정] → [기기·원격 연결] → 환경 → [연결 종료·데이터 이동]`에서 새 행동 차단→lease/미디어 회수·기록 마감→허용 데이터·사건·hash 반출→목적지 읽기 전용 복원 검증→요청된 정확한 원격 사본 삭제→해당 token/device 연결 해제를 수행한다. 검증 전 원본을 자동 삭제하지 않는다. replica 미확인·backup 만료·남은 유료 자원을 표시하며 연결 종료를 과금 종료로 표시하지 않는다.
+
+**미실행 oracle:** 범위 외 전송 0·전체형 누락 검출; NAT/relay 장애의 무단 fallback 0; 기존 연결 철회 후 새 프레임 차단; ACK 유실 fail-closed; 재접속·늦은 결과 비부활; backup 복원 후 옛 권한 거부; 반출입 hash 일치; 삭제 미확인 사본 잔존 표시.
+
+##### 동기화와 백업의 독립 조합
+
+syncPolicy와 backupPolicy는 별도 revision이다. 동기화는 허용 event/object 증분이며 백업은 독립 root 집합과 일관된 event 경계의 manifest다. 동일 hash의 저장 중복 제거는 두 정책의 권한·보존기간을 합치지 않는다.
+
+백업은 `planned→copying→sealed→verified→available`로 전이한다. hash·필수 object 검증 전 복원 지점을 완료로 표시하지 않는다. 실패·취소는 기존 유효 복원 지점과 원 데이터를 유지한다. 백업 중지는 동기화 중지나 기존 백업 삭제가 아니다. 복원은 새 revision이고 현재 철회 사건을 우선해 grant·lease·실행을 부활시키지 않는다. 새 endpoint·전송 주체·비용 범위를 넘는 실행만 실제 승인에 종속된다.
+
+##### 동기화와 백업의 독립 조합 인수 조건
+
+네 조합 모두에서 정확한 전송/보관 집합 대조; backup-off 생성 0; 한 정책 변경으로 다른 정책 확대 0; 범위 밖 secret/process/미전송 입력 포함 0; 부분 백업의 완료 표시 0; 복원 후 옛 권한·실행 부활 0.
+
+<a id="impl-e24-computer-use"></a>
+
+#### 4. Firefox·OS adapter·capture·녹화·독립 검증
+
+**화면 연결**: [사용자 조작](../../docs/references/design-synthesis/egdesk-ux-realization-proposals.md#ux-detail-e24-computer-use-control) · [사용자 조작](../../docs/references/design-synthesis/egdesk-ux-realization-proposals.md#ux-detail-e24-computer-use-observe)
+
+Firefox web-content는 로컬 broker 뒤의 BiDi adapter를 사용하고 privileged shell/native OS는 별도 action namespace로 분리한다. Remote Agent에는 자체 인증·암호화가 없으므로 외부 포트로 노출하지 않는다. IPC는 OS principal·호출 capability를 검사한다. [Mozilla 보안 계약](https://firefox-source-docs.mozilla.org/remote/Security.html).
+
+행동 순서는 identity→권한→lease→관찰 revision→전제 검사→입력→event/readback→증거다. semantic→접근성→현재 프레임 좌표 순으로 fallback하되 권한 상승은 fallback이 아니다. 좌표는 frame·scale·viewport·modal generation 변경 시 폐기한다. 감시자는 추가 Agent 입력을 차단하되 대상 업무 앱을 강제 종료하지 않는다.
+
+macOS는 ScreenCaptureKit 선택 창 filter·AX action, Windows는 GraphicsCapturePicker/Windows.Graphics.Capture·지원 UI Automation pattern을 후보 adapter로 사용한다. AX 미지원/응답 실패, Windows UIPI 차단을 구분한다. API 호출이나 가상 디스플레이만으로 독립 OS 포커스를 주장하지 않는다. [Apple filter](https://developer.apple.com/documentation/screencapturekit/sccontentfilter), [AX action](https://developer.apple.com/documentation/applicationservices/1462091-axuielementperformaction), [Windows capture](https://learn.microsoft.com/en-us/windows/apps/develop/media-authoring-processing/screen-capture), [SendInput](https://learn.microsoft.com/en-us/windows/win32/api/winuser/nf-winuser-sendinput).
+
+Linux의 긍정 입력 경로는 아래 RemoteDesktop/EIS·Notify 계약을 따른다. 필수 adapter·격리·중지 조건을 확인하지 못하는 조합에서는 Agent 입력을 차단한다. 지원되는 XDG ScreenCast의 CreateSession→SelectSources→Start→PipeWire 관찰 또는 사용자 직접 인계만 제공한다. RemoteDesktop portal이 존재한다는 사실만으로 입력 지원을 선언하지 않는다. portal/backend·중지·identity가 검증되지 않으면 해당 기능을 비활성화하고 도구 설치·권한 우회를 하지 않는다. 출시 OS·보조기술 지원 약속은 지원 범위 결정/접근성 지원 범위 선택에 연결한다. [ScreenCast](https://flatpak.github.io/xdg-desktop-portal/docs/doc-org.freedesktop.portal.ScreenCast.html), [RemoteDesktop](https://flatpak.github.io/xdg-desktop-portal/docs/doc-org.freedesktop.portal.RemoteDesktop.html).
+
+capture→scope 검사→mask→encode 순서를 지킨다. 웹 fallback은 사용자 선택 후 실제 surface를 대조한다. 영구 캡처 동의나 임의 범위 확대를 가정하지 않는다. [W3C Screen Capture](https://www.w3.org/TR/screen-capture/).
+
+녹화는 마스킹된 MediaStream을 MediaRecorder·지원 WebM으로 기록하고 형식 지원과 실제 재생을 검사한다. 미지원이면 검증된 native encoder, 없으면 기록만 불가다. 구간별 hash·시간·mask revision·누락을 저장하며 timeslice의 정확한 길이를 보장하지 않는다. 녹화 node·owner·runtime을 먼저 영속화해야 관찰/앱 분리를 허용한다. 분리 후 live 동일성을 재검증하며 hidden-only 실행을 금지한다. [MediaStream Recording—Working Draft](https://www.w3.org/TR/mediastream-recording/).
+
+결과는 파일 재읽기·provider 조회·독립 관찰로 검증한다. 같은 Agent가 수행해도 자기 설명·입력 로그·녹화 존재를 성공 증거로 쓰지 않는다. 기술 성공·접수·현재 업무 반영을 분리하고 업무 의미는 parent의 유효한 판단 범위에 둔다.
+
+**미실행 oracle:** 잘못된 profile/tab/renderer 거부; pan 전후 target 불변·viewport 변경 시 좌표 폐기; IME 확정 전송 0/별도 전송 1; 인계·긴급 중지 후 추가 입력 0; 금지 프레임 전송 0; Linux 미검증 입력 불가·portal 취소 시 권한 없음; 관찰/앱 닫기 중 녹화 node·owner 유지; 소유 표현 불가 시 계속 기록 거부; Agenda 종료 후 owned recorder 종료 확인; 입력 성공·결과 불일치에서 완료 판정 금지.
+
+##### Linux 입력 지원 경로
+
+host bridge는 portal/backend 버전·AvailableDeviceTypes·실행 session·허용 source와 독립 중지 경로를 확인한다. `RemoteDesktop.CreateSession → SelectDevices(필요한 장치만) → 선택적 ScreenCast.SelectSources → RemoteDesktop.Start`를 수행한다. 성공 응답의 실제 devices/streams를 요청 범위와 대조하고 PipeWire 연결을 연다.
+
+EIS 지원 backend에서는 Start 이후 ConnectToEIS와 libei sender를 사용하며 stream mapping_id와 입력 region을 결합한다. EIS가 지원되지 않고 검증된 Notify adapter가 있는 경우에만, EIS 연결을 성립시키지 않은 session에서 Notify 계열을 사용한다. **한 session에서 혼합 주입하지 않는다.** EIS 연결 후 장애는 session 종료·상태 재확인으로 처리하며 같은 session의 Notify로 전환하지 않는다. 재시작에는 현재 동의·권한과 새 lease가 필요하다. [RemoteDesktop 계약](https://flatpak.github.io/xdg-desktop-portal/docs/doc-org.freedesktop.portal.RemoteDesktop.html)
+
+제어 seat의 독점성은 host/session·device 할당·접근 경로와 교차 seat 입력 시험으로 확인한다. 격리 상실·session 종료·중지 채널 상실은 입력 gate를 닫는다. Wayland portal에서 제공하지 않는 global-human-input listener를 만들었다고 간주하지 않는다.
+
+##### Linux 입력 지원 경로 인수 조건
+
+EIS 정상 입력·Notify 정상 입력 각각 readback 확인; 혼합 주입 0; portal 취소 후 입력 0; 잘못된 region 거부; 다른 seat의 입력 비간섭; 격리 상실 후 추가 업무 입력 0; 격리 없는 환경은 명시적 사람 처리.
+
+##### 입력 출처·감시자·긴급 중지
+
+제품의 모든 입력 adapter는 renderer·coordinator와 별도 프로세스인 host watchdog의 gate를 통과한다. watchdog이 입력을 직접 중개하거나 살아 있는 watchdog 연결을 확인한 injector만 입력한다. watchdog 사망·IPC 단절·lease 만료는 fail-closed다. 원격 heartbeat 2초/TTL 6초는 기존 시험값이며 Owner grant 기간이 아니다.
+
+| OS | 입력 출처와 대상 귀속 | 전역 긴급 중지 |
+|---|---|---|
+| macOS | session CGEventTap에서 source PID/state/userData, 대상 PID·포커스/창 관찰을 수집한다. 자체 주입은 broker의 미소비 dispatch 표식과 함께 대조한다. 나머지는 사람/외부/불명으로 취급하며 표식만으로 신뢰하지 않는다. | 독립 helper의 session event tap에서 실제 키맵의 Ctrl+Alt+Shift+`.`를 검출한다. modifier·keydown·반복 여부를 검사하고 해당 chord만 처리한다. tap 비활성·권한 상실·secure 입력 경계에서는 물리 입력 gate를 닫는다. |
+| Windows | Raw Input의 device 정보와 LL keyboard/mouse hook의 injected flags·dwExtraInfo를 자체 dispatch 기록에 대조한다. 키보드는 foreground window, pointer는 현재 위치/창을 함께 확인한다. 불명은 양보다. | watchdog 전용 message thread가 RegisterHotKey로 Ctrl+Alt+Shift+`.`를 등록하고 WM_HOTKEY를 처리한다. 등록 충돌·실패는 물리 입력 불가다. |
+| Linux | EIS/Notify 송신은 자체 command ID로 귀속한다. portal을 통해 사람의 전역 입력 출처를 관찰했다고 기록하지 않는다. 감지 불가 환경은 검증된 Linux 격리 seat 또는 사람 처리만 사용한다. | 독립 helper가 GlobalShortcuts CreateSession→BindShortcuts로 `egdesk-emergency-stop`을 등록하고 Activated를 처리한다. 현재 session의 실제 등록 ID와 trigger_description을 검사·표시한다. 빈 결과·필수 ID 누락·backend 미지원·거부·session 종료·등록 상태 미확인은 해당 자동 입력 모드 불가다. |
+
+macOS event 필드는 출처 단서이지 위조 불가능한 권한 증명이 아니다. Windows hook은 전용 thread에서 즉시 반환하며, timeout에 따른 무통보 제거 가능성 때문에 hook heartbeat만으로 감지 정상 판정을 내리지 않는다. Raw Input 등록·수신 경로와 injector echo를 함께 검사한다. [Apple event 필드](https://developer.apple.com/documentation/coregraphics/cgeventfield), [Raw Input](https://learn.microsoft.com/en-us/windows/win32/inputdev/about-raw-input), [주입 flags](https://learn.microsoft.com/en-us/windows/win32/api/winuser/ns-winuser-kbdllhookstruct), [hook 한계](https://learn.microsoft.com/en-us/windows/win32/winmsg/lowlevelkeyboardproc), [RegisterHotKey](https://learn.microsoft.com/en-us/windows/win32/api/winuser/nf-winuser-registerhotkey), [GlobalShortcuts](https://flatpak.github.io/xdg-desktop-portal/docs/doc-org.freedesktop.portal.GlobalShortcuts.html)
+
+Linux helper는 등록 전에 `ShortcutsChanged`를 구독한다. 등록 응답·변경 신호·재접속은 shortcut generation을 갱신하고 입력 gate를 닫은 뒤, Bind 완료된 현재 session의 `ListShortcuts`로 필수 ID·현재 trigger·session 유효성을 다시 확인한다. 이전 generation의 늦은 응답은 쓰지 않는다. 변경 신호를 등록 전체 목록으로 추정하지 않는다. 필수 키가 없거나 해제·미확인이면 준비된 미발송 input을 무효화하고 계속 차단한다. 유효하면 UI의 실제 trigger와 capability generation을 함께 갱신하며 기존 위임 범위에서만 다시 허용한다. 매 input dispatch는 이 generation을 검사한다. Portal 명세의 등록 결과는 빈 부분집합일 수 있고 단축키 정보 변경을 별도 신호로 제공한다. [등록·조회·변경 신호](https://flatpak.github.io/xdg-desktop-portal/docs/doc-org.freedesktop.portal.GlobalShortcuts.html)
+
+**미실행 긴급키 인수 조건:** 빈 Bind 결과, 필수 ID 누락, 등록 중 변경, session이 살아 있는 상태의 키 변경·해제, 오래된 조회 응답, session 종료를 주입한다. 유효 키 변경은 현재 표시와 같고, 불가·미확인 generation의 물리 입력은 0이어야 한다. 같은 session의 Activated만 긴급 중지에 연결하며 다른 session의 신호로 재개하지 않는다.
+
+stop은 epoch 증가→미발송 queue 폐기→추가 업무 입력 차단→자체 눌림 상태의 안전 해제→ACK 순서다. 안전 key/button-up은 별도 cleanup receipt로 기록한다. 이미 OS에 전달한 입력은 취소됐다고 표시하지 않는다. raw 문자·클립보드는 감지 로그에 저장하지 않는다.
+
+##### 입력 출처·감시자·긴급 중지 인수 조건
+
+자체 주입의 잘못된 사람 판정, 외부 주입의 자체 판정, 창 귀속 불명, helper/renderer/coordinator 정지, hook/tap 장애, 다른 앱·IME 중 긴급키를 검사한다. 차단 이후 업무 입력 0, 안전 해제 별도 귀속, 원격 미확인 은폐 0이어야 한다.
+
+##### 마스크 작성과 프레임 집행
+
+mask는 `sourceId, surfaceGeneration, geometryRevision, kind, selector/rectangle, interval, maskRevision`을 가진다. 의미 가림은 현재 DOM/AX/UIA 대상과 frame geometry가 일치할 때 사용한다. 사각 가림은 surface-local 좌표를 현재 frame에 변환하며 경계는 바깥 방향으로 반올림한다. 시간 조건은 capture 단조시계의 `[start,end)`에 결합한다.
+
+처리는 `capture scope 확인 → 필수 secure exclusion → 의미/사각/시간 가림 → 메타데이터 제거 → 표시/encode/기록`이다. 알려진 password·OTP·credential·보안 입력 단계, 원시 key/clipboard는 사용자 마스크로 재허용할 수 없다. 민감 영역을 정확히 특정하지 못하면 해당 surface 전체를 차단한다. OCR이나 selector 성공만으로 비밀 부재를 증명하지 않는다.
+
+popup·resize·source 교체로 generation이 바뀌면 이전 가림을 그대로 재사용하지 않는다. 재해소 전 프레임은 송신·녹화하지 않고 gap을 남긴다. 다중 source는 고정 출력 트랙의 compositor에서 허용 영역만 합성한다. 과거 기록의 가림 변경은 새 파생 revision이며 원 payload를 덮지 않는다.
+
+##### 마스크 작성과 프레임 집행 인수 조건
+
+이동·확대·popup·마스크 만료·selector 다중 일치·계정 전환·처리 지연을 주입한다. 금지 픽셀/메타데이터 전송·기록 0, 오래된 mask 오적용 0, 정상 허용 전환의 반복 승인 0, 취소 후 기존 revision 유지.
+
+##### 앱 종료와 독립 recorder 인계
+
+앱 내 기준선은 지원 확인된 MediaRecorder/WebM이다. 독립 host 기준선은 해당 OS capture adapter와 libavcodec/libavformat의 WebM/VP8 encoder다. build capability·필수 가림·샘플 encode/decode·중지 endpoint를 검증한 조합만 detach 가능하다. 준비된 host가 없으면 계속 기록 기능만 불가다. [FFmpeg codec 계약](https://ffmpeg.org/ffmpeg-codecs.html#libvpx)
+
+인계는 `prepare(handoffId, recordingId, owner, scope, maskRev, boundary) → native host 준비 → 첫 허용 구간 저장/검사 → Canvas node의 host binding 영속화 → host ACK → 기존 MediaRecorder 최종 dataavailable/stop 저장 → 앱 종료`다. ACK에는 host/process generation·source/mask revision·구간 hash·중지 가능 상태를 담는다. 기존 renderer 객체를 이전하거나 생존시켰다고 표시하지 않는다.
+
+구간별 실행체·시각·중복/누락을 보존하며 동일 논리 기록과 Task/Run에 연결한다. host 표시와 Canvas 녹화 node에 중지·재진입을 유지한다. ACK 유실은 같은 handoffId 조회로 복구하며 encoder를 중복 시작하지 않는다. Agenda 닫기는 그 Agenda만 소유한 detached recorder도 종료한다.
+
+##### 앱 종료와 독립 recorder 인계 인수 조건
+
+인계 각 단계의 crash/ACK 유실, 실제 Firefox 종료, 새 host 실패, Agenda 종료를 검사한다. renderer recorder 생존 주장 0, 중복 encoder 0, 구간 손실 은폐 0, 활성 녹화 node·host 중지 경로 유지.
