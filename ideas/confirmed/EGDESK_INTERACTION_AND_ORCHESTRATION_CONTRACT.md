@@ -1236,6 +1236,10 @@ Agenda는 `agendaId, title, metadataVersion, headRevision`과 불변 구성 revi
 
 업데이트 요청은 `operationId, agendaId, expectedHead, draftHash, includedMemberIds`다. 하나의 transaction에서 expectedHead를 비교하고 새 revision과 head를 함께 기록한다. 같은 operationId 재요청은 같은 결과를 반환한다. 불일치는 충돌이며 저장 성공으로 처리하지 않는다.
 
+확인된 저장 manifest의 같은 범위를 갱신하는 빠른 저장도 동일한 expectedHead·권한·원자성 검사를 사용한다. 구성원·보존 모드·공개/권한 범위가 달라지면 이전 manifest 확인을 재사용하지 않고 범위 미리보기로 전환한다. 빠른 저장은 일반 정책 기본값을 새로 결정하거나 저장 범위 밖의 변경을 포함하는 기능이 아니다.
+
+저장 확인은 요청의 draftHash·클라이언트 편집 revision에 연결한다. 확인이 도착하기 전에 생긴 새 배치·구성 변경은 현재 초안에 남겨 `저장됨 · 이후 변경 있음`으로 표시한다. 오래된 ACK가 현재 dirty 상태 전체를 지우거나 새 geometry를 되돌리지 않는다.
+
 3-way 비교는 기준·최신·초안을 사용한다. 서로 다른 필드의 변경과 겹치지 않는 구성원 추가는 병합 미리보기를 만들 수 있다. 같은 필드, 삭제/수정 충돌, 배치 부모의 충돌은 명시적 해결이 필요하다. 파일 본문·업무 의미를 이 저장 알고리즘으로 자동 병합하지 않는다. ‘덮어쓰기’도 최신 head의 후속 revision이며 기존 내용을 조용히 수정하지 않는다.
 
 저장 이력 정책이 최신만이면 과거 구성 복구는 제공하지 않되, 다른 Answer/Snapshot이 참조하는 불변 payload까지 삭제하지 않는다. 이력 복구는 과거 head로 시간을 되감는 대신 선택 구성을 새 revision으로 발행한다.
@@ -1298,6 +1302,8 @@ Codex는 기존 구독 인증 Engine Profile의 app-server 연결을 사용한�
 
 Camera transform, View logical rectangle, Browser viewport, page zoom, OS 창 모드를 독립 상태로 저장한다. 좌표 변환은 실제 표시 중인 matrix의 역변환을 사용하며 애니메이션의 목표 matrix를 대신 쓰지 않는다. 집중 배율은 `min(가용폭/View폭, 가용높이/View높이)`다. 집중 보기에서 logical rectangle이나 Browser width/height를 쓰지 않는다.
 
+미니맵·화면 목록은 같은 권한 필터를 거친 View registry를 사용한다. 제목·유형·PC·계정 구분자와 겹친 대상 목록은 해당 수신자가 볼 수 있는 항목만 투영한다. 지도 선택은 View ID와 현재 geometry를 다시 해소한 뒤 camera를 이동하고 복귀 시점을 기록한다. resource ID만으로 다른 세션을 선택하거나 runtime을 재개하지 않는다. 대상이 사라졌으면 지도·목록을 유지하고 현재 상태 확인을 제공한다. 작은 hit 영역의 대안은 같은 대상 목록이며 비공개 항목의 개수·이름을 노출하지 않는다.
+
 드래그는 shell handle에서 Pointer Capture로 시작하고 종료/취소 때 해제한다. 콘텐츠가 소유한 드래그·편집 입력을 Canvas 이동으로 바꾸지 않는다. 다만 Canvas 탐색 상태의 비활성 Chat 위 두 손가락 스크롤은 아래의 콘텐츠 활성 경계에 따라 Canvas가 처리한다. 실제 resize 전 해당 surface의 새 입력을 차단하고, 크기 변경 후 ResizeObserver·Browser 관찰에서 viewport와 document generation을 갱신한 뒤 stale action을 재검증한다. pan만으로 logical target을 바꾸지 않는다. [Pointer Capture](https://developer.mozilla.org/en-US/docs/Web/API/Element/setPointerCapture), [ResizeObserver](https://developer.mozilla.org/en-US/docs/Web/API/ResizeObserver).
 
 ##### Chat 콘텐츠 활성과 두 손가락 탐색의 입력 경계
@@ -1307,6 +1313,8 @@ Camera transform, View logical rectangle, Browser viewport, page zoom, OS 창 �
 활성 Chat 위의 두 손가락 스크롤은 Chat 내부에 전달하고 camera에 같은 입력을 중복 적용하지 않는다. Chat 내부의 scroll 끝에서도 Canvas로 이어서 전달하지 않는다. 빈 Canvas 클릭은 Chat 콘텐츠 활성을 해제하지만 click 자체로 camera·View geometry·대화·초안을 변경하지 않는다. 이후 비활성 Chat 위 hover는 콘텐츠 활성이나 입력권을 만들지 않는다. 이 상태의 modifier 없는 두 손가락 스크롤은 Canvas camera만 이동하고 Chat의 내부 scroll은 유지한다. 별도 Pan 도구 상태를 이 경로의 선행조건으로 검사하지 않는다.
 
 이 전환은 사람의 로컬 UI 입력 분배다. Agent의 작업 target·입력 lease, 다른 참가자의 상태, Browser viewport, Agenda 소속이나 runtime 생애를 덮어쓰지 않는다. native 입력·보안 확인·콘텐츠별 modifier·zoom·기존 키보드 대안은 별도의 입력 계약을 유지한다. 이벤트 수신·전달의 구현 방식은 이 상태 보장을 만족하는 Firefox shell/renderer 경계에서 선택한다.
+
+콘텐츠 활성의 변경은 남아 있는 wheel 묶음의 이전 소유자를 무효화한다. 해제 직후 같은 포인터에서 들어온 다음 입력을 시간 간격만으로 이전 Chat에 보내지 않는다. 시각 표시와 입력 라우팅은 같은 상태 revision을 사용한다. 반복 입력에서 초안·Chat scroll·다른 surface lease는 독립 상태로 유지한다.
 
 **미실행 인수 조건:** Chat 클릭 → 활성 표시와 작성기 커서 → Chat 위 내부 scroll → 빈 Canvas 클릭 → 활성 해제 → 포인터를 같은 Chat 위로 이동 → Canvas pan → Chat 재클릭의 각 상태를 확인한다. Canvas 탐색 단계의 Pan 버튼·보조키 요구 0, hover 재활성화 0, 한 입력의 Chat/Canvas 중복 적용 0, scroll 끝의 뜻하지 않은 camera 이동 0을 검사한다. 대화·초안·View geometry·Browser viewport·Agent target/lease가 보존되는지 대조한다. 시각 활성 표시와 실제 입력 대상의 불일치도 실패다. 이 조건은 새 규칙의 검증 계획이며 P0 재리허설이나 실제 Firefox 시험을 통과했다는 기록이 아니다.
 
@@ -1409,6 +1417,12 @@ Library 정책은 허용된 등록 대상 유형 집합으로 집행한다. 집�
 
 입력 계약은 `draftId/revision, requestId, conversationId, targetRunId?, actor, text, attachmentRefs, contextRevision, returnToken`이다. SQLite transaction으로 요청 event와 outbox를 함께 기록한 뒤 Engine adapter에 전달한다. `(requestId, revision)`은 고유하며 응답은 이 키에 귀속한다. 초안 저장 확인 전 성공 표시를 내지 않는다.
 
+작성기의 2–6줄 높이는 표시 상태이며 draft revision·수신자·대상 업무를 바꾸지 않는다. 늘어난 높이는 같은 View의 본문 예산에서 차감하고 고정 행동과 검토 내용의 최소 표시 영역을 남긴다. 첨부 이름 확인은 read-only projection이고 포함 범위 편집만 context revision을 바꾼다. 다른 View·업무를 관찰하는 행위는 초안의 targetRunId를 재지정하지 않는다. 명시적 대상 변경 시에만 새 binding을 만들며 원 초안과 returnToken을 보존한다. returnToken은 유효한 원 Chat·메시지 위치·Canvas 시점으로 해소하고 File caret이나 만료된 입력 lease를 복원하지 않는다.
+
+공유 대화의 일반 메시지와 Agent 위임 요청은 서로 다른 request kind다. 담당자 선택·요청 작성은 draft만 변경하고 최종 위임 접수 뒤에만 Run/Task를 예약한다. 같은 입력칸이라도 모드·수신자·대상 revision을 전송 시점에 검사하며 일반 메시지 저장을 Agent 실행으로 해석하지 않는다.
+
+Agent 요청 초안의 수신자는 선택 전 null일 수 있으며 문안 편집을 막지 않는다. 최종 위임 시에만 수신자·자료·권한·유효 설정을 필수 검증한다. 선택 전 타이핑이나 후보 목록 열기로 실제 수신자를 추정·dispatch하지 않는다.
+
 Codex 연결은 구독 인증된 App Server adapter를 재사용한다. JSON-RPC stdio, `initialize → initialized`, `turn/start`, 활성 turn의 `turn/steer(expectedTurnId)`, `turn/interrupt`를 사용한다. 인증은 managed ChatGPT login 후 `account/read`로 확인한다. 일반 유료 API SDK로 대체하지 않는다. [App Server 공식 계약](https://developers.openai.com/codex/app-server).
 
 Engine adapter는 product Run과 engine thread/turn/item ID를 따로 연결한다. `turn/steer` 응답은 수락 증거이지 per-inference 적용 증거가 아니다. `inputIds/contextRevision/payloadHash/inferenceRef`를 결합한 소비·전달 receipt가 있을 때만 반영 확인으로 승격한다. 관찰 기능이 없는 adapter는 `수락됨·반영 시점 확인 불가`를 반환한다. 일반 조정을 위해 interrupt/fork하지 않는다. turn 종료 경합은 상태 조회 후 같은 product Run의 다음 허용 turn에 연결한다.
@@ -1420,6 +1434,8 @@ Engine adapter는 product Run과 engine thread/turn/item ID를 따로 연결한�
 ##### 검토 배치·확정 범위 결합
 
 `enterReviewLayout/exitReviewLayout`은 viewId를 유지하고 이전 rect·view state·returnToken을 저장한다. 승인 확정은 선택 집합·payload·수신자·권한·비용의 `reviewedScopeHash`를 현재 값과 비교한다. 달라졌으면 바뀐 범위만 다시 표시하고 기존 확정을 적용하지 않는다. 이 hash는 검토 화면의 범위 결합이지 사람이 모든 문장을 이해했다는 증거가 아니다.
+
+브리핑 요청은 Answer ID/revision·보고 item 집합·허용 sourceRefs·실행 설정을 고정한 별도 요청이다. 동일한 진행 중 요청은 중복 dispatch하지 않는다. Agent가 만든 단계·대상·Focus Scope·설명은 참조 유효성·권한·형식을 검사한 뒤 게시한다. System이 단계 설명을 생성하거나 공개 범위를 넓히지 않는다. 생성 요청·준비 상태·게시 receipt·보기는 별도 상태이며, 보기·단계 이동은 요청 outbox를 생성하지 않는다. 기존 Answer나 과거 증거는 브리핑 준비·실패로 수정되지 않는다.
 
 미실행 인수조건: 두 NORMAL 크기, 두 검토 배치, 긴 승인 값에서 합계 치수·동시 가시성·초안 보존·복귀 일치·scope 변경 후 옛 승인 사용 0을 검사한다.
 
@@ -1610,6 +1626,10 @@ visual mark, Canvas Memo, Briefing Comment는 서로 다른 type을 갖는다. �
 
 Memo body revision과 reply event의 author는 분리한다. Agent reply에는 basedOnMemoRevision과 sourceRefs를 붙인다. 응답 trigger는 명시 질문 또는 유효한 assigned-scope grant다. 알림 dedupe는 `memoId + issueId + recipient`로 하며 답글·렌더·재접속을 새 쟁점으로 간주하지 않는다. 재촉은 만료·취소 가능한 별도 예약으로 처리한다.
 
+명시 질문의 초안에는 Memo ID/revision, 기존 업무가 있다면 그 업무 ID, 실제 수신 Agent ID, 담당 연결 revision을 결합한다. 유효한 담당자가 있으면 그 이름을 표시하고 재선택을 요구하지 않는다. 담당 연결이 없으면 명시적으로 고르며 공간적 근접성·최근 방을 수신자 근거로 쓰지 않는다. 전송 시 담당·권한이 바뀌었으면 초안을 유지한 채 차이를 반환한다. 다른 업무의 초안은 덮지 않는다.
+
+아직 기존 업무가 없는 질문 초안은 `새 업무 요청` 관계로 표시하고 수락 때 새 Task를 연결한다. 기존 업무 선택은 그 Task ID·담당·현재 권한을 검증한다. 초안 단계에서 존재하지 않는 Task ID를 기존 업무처럼 만들거나 최근 Task로 대신 채우지 않는다. 연결 변경 뒤에는 새 수신자·업무에 대한 명시적 재확인과 전송이 필요하며 취소는 원 초안을 보존한다.
+
 인수 절차: 50%/200% zoom에서 표식 이동, 메모 수정 중 늦은 답글, 대상 삭제, 동일 알림 재전달, 재시작을 수행한다. source-relative 위치 유지, 사용자 본문 무변경, 알림 1건, 마지막 위치와 초안 복원이 합격 조건이다. selector를 해소하지 못하면 마지막 위치의 경고 node와 수동 재연결을 사용한다.
 
 표식 mutation은 `author, targetRef, baseRevision, grantRef, applicationMode`를 포함한다. `applicationMode=direct`는 위임된 report 편집 범위 안에서 검증·저장되며 사람의 approval event를 생성하지 않는다. `applicationMode=proposal`은 적용 전 후보를 보존하고 권한 있는 행위자의 수락 또는 기각을 기록한다. 제안 수락으로 기존 위임 밖의 다른 자료·계정·행동까지 허용하지 않는다. 두 모드 모두 작성자와 근거를 보존하며 저장·채택을 사실 검증 상태와 분리한다.
@@ -1622,6 +1642,10 @@ Memo body revision과 reply event의 author는 분리한다. Agent reply에는 b
 **화면 연결**: [사용자 조작](../../docs/references/design-synthesis/egdesk-ux-realization-proposals.md#ux-detail-agent-profile)
 
 Profile record는 안정 ID, owner, visibility, activeRevision을 가진다. revision은 내용 hash·작성자·부모 revision·검사 결과를 가진 불변 record다. 활성화·대체·보관은 pointer와 lifecycle event를 원자적으로 변경한다. `expectedRevision`이 다른 쓰기는 충돌로 반환하며 초안을 보존한다. 참조 중 revision 삭제는 tombstone과 별도 payload 보존 정책을 적용한다. import는 새 비활성 ID로 만들고 credential·실행 권한을 가져오지 않는다.
+
+초안 저장 검사와 활성화 검사는 분리한다. 저장에는 비어 있지 않은 표시 이름·유효한 필드 형식·쓰기 권한·기준 revision이 필요하다. 나머지 지침·계정·모델·도구·제한의 미설정은 명시적 unresolved 값으로 보존한다. 미설정을 무제한·자동 선택·도구 없음으로 바꾸지 않는다. 상속으로 해소되는 값은 그 출처 revision을 표시한다. 활성화는 실제 유효 설정과 정책·가용성을 해소한 경우에만 가능하며 초안 저장으로 Run·시험 호출을 생성하지 않는다. 저장 receipt 유실은 같은 operation ID의 결과 조회를 먼저 사용한다.
+
+Chat의 비활성 초안 재진입은 저장된 Profile ID/revision에 연결한다. 활성 수신자 목록과 설정 중 초안 목록을 구별하되 두 목록의 권한 필터는 동일하게 적용한다. 저장 후 복귀가 초안을 숨기거나 새 ID를 만드는 경로가 되어서는 안 된다. 초안 행의 열람·이어서 설정은 Run을 생성하지 않는다.
 
 설정 존재, adapter discovery, bounded 호출 성공, 결과 전달은 서로 다른 검사 결과다. 자동 routing의 입력은 사용자 override, Profile 후보, 실제 availability, modality·privacy·예산·authority 조건이다. System이 후보를 필터링하고 우선순위 또는 위임된 모델 제안으로 선택하되 실제 결정·이유·대체 전후 값을 기록한다.
 
@@ -1745,7 +1769,7 @@ retry·resume·cancel·timeout·expiry·late result의 상태 전이는 이 중�
 
 #### 수정된 인수 조건
 
-- 420×600·320×420에서 설정과 승인 경로를 수행한다. 자동 확대 없이 작성기·업무 대상이 유지되고, 명시적 확장만 520×680을 사용해야 한다.
+- 420×600·320×420에서 설정과 승인 경로를 수행한다. 자동 확대 없이 작성기·업무 대상이 유지돼야 한다. 설정 비교의 `[넓게 보기]`는 520×680, 원문·승인 검토는 [별도 검토 치수](../../docs/references/design-synthesis/egdesk-ux-realization-proposals.md#ux-detail-review-geometry)를 사용하며 각각 명시적 진입과 원 rect 복귀를 검사한다.
 - 진행 중 Browser·Terminal 활동은 기존 Live ID로, 완료된 읽기·명령은 Snapshot으로 이동해야 한다. Live 미생성·연결 불명 상태에서 새 실행 생성은 0건이어야 한다.
 - 명시적 hard ceiling 없는 목표가 128k토큰·30분 fixture 경계를 넘어도 watchdog만으로 종료·취소되지 않아야 한다. 별도로 설정한 hard ceiling은 기록된 중앙 전이를 따라야 한다.
 - 용량 누락·fallback metadata에서는 엄격 admission 통과가 0건이어야 한다. 크기 초과 자료는 더 작은 단위·fresh Reader로 이어지고 미완료 coverage가 남아야 한다.
@@ -1839,6 +1863,8 @@ Task는 기존 여덟 상태를 사용한다. `terminalBlock`은 실패·취소�
 유효 행동은 `capability ∩ availability ∩ Profile ceiling ∩ Task delegation ∩ resource authority ∩ System/provider restrictions ∩ sandbox/network ∩ active approval ∩ execution limits`다. 승인이 불필요한 기존 위임에는 별도 승인 항목을 생성하지 않는다.
 
 ActionIntent는 요청자·실행자·계정·resource revision·payload hash·전송 대상·효과 유형·비용 상한·만료·idempotency 지원 여부를 가진다. gate fingerprint가 같은 요청만 묶되 같은 패키지의 서로 다른 행동은 별도 intent와 결정을 유지한다. 승인 시점과 실행 직전에 authority·payload를 다시 비교한다.
+
+검토 집합·상세 projection의 revision/hash와 최종 결정 이벤트를 결합한다. 정확한 범위를 제시한 상세에서 한 번의 최종 허용으로 authorized를 기록할 수 있으며, 같은 내용을 한 번 더 누르는 UI를 기술적 승인 요건으로 강제하지 않는다. 요약의 검토 진입은 결정이 아니다. 새 intent는 현재 선택에 자동 합류하지 않으며 payload·대상·계정·기간·비용이 바뀌면 새 상세와 결정이 필요하다. 표시됨이나 scroll 끝 도달은 사람이 내용을 이해했다는 증거가 아니다. 별도 확인이 필요한 명시 정책·provider 요구는 유지한다.
 
 제품의 허용·거부·행동 취소만 아래 메서드별 provider 응답으로 변환한다. 검토 닫기·Esc와 보류는 승인 응답을 보내지 않는다. `acceptForSession`이나 session permission grant는 명시된 지속 위임이 있을 때만 사용한다. UI 보류는 승인 응답이 아니며 provider 요청이 끝나도 제품 intent의 대기·만료 관계를 남긴다. [App Server 승인 프로토콜](https://learn.chatgpt.com/docs/app-server#approvals).
 
@@ -2251,6 +2277,16 @@ System resolver는 조직·Desk·역할 정책, 현재 권한, 요청 범위, so
 
 후보는 stable unit ID·원문 구간을 가진 patch다. 조건·예외·안전·권한·행동·기대 결과별 structural/semantic finding과 disposition을 별도 저장한다. Agent는 의미 분석을 하고 parent 업무의 유효한 위임 또는 업무 책임자가 판단한다. 고정 Worker/Critic 조직이나 별도 사람을 강제하지 않는다.
 
+비활성 초안 저장에는 대상 unit 참조·기준 revision·제안 문장이 필요하다. 조건·예외의 공란은 unresolved이며 기존 조건을 삭제하는 patch가 아니다. 분류·책임자·기간·근거 설명의 미정 상태도 보존할 수 있고 작성자·무기한을 기본값으로 대신 넣지 않는다. 검증 결과는 구조·링크, 의미, 권한·공개, 영향·회귀 각각의 `passed/issues/not-evaluated`와 입력 hash·검사 시각에 결합한다. 원문 접근 실패나 현재본 대조 부재는 그 검사만 not-evaluated로 남긴다. System의 형식 검사를 Agent의 의미 검토로 승격하지 않는다.
+
+후보 편집 진입 자체는 모델 호출이 아니다. 의미 검사는 유효한 원문을 받은 Agent에게 요청하며 그 결과를 수정 없이 근거와 함께 기록한다. 후보가 바뀌면 이전 결과를 stale로 표시한다. 검토 전달에는 저장 revision·수신 권한·공개 범위를 검사하고 미검증 항목도 전달한다. 전달 가능성과 승격·활성화 가능성은 별도 정책·권한 검사다. 활성화는 필요한 분류·책임·범위·기간과 정책상 검증이 해소되기 전 허용하지 않는다.
+
+근거 선택기는 기존 권한 필터된 자료 검색·파일 resolver를 사용한다. 선택 상태와 후보에 연결된 sourceRef는 별개이며 확정 시 후보 ID/revision·원문 ID/hash·범위·권한 epoch를 대조한다. 실패·취소는 기존 binding과 초안을 보존한다. 연결 성공은 그 원문·범위의 읽기 확인이지 의미 검증 성공이 아니다. 현재본 비교 역시 읽기 전용이며 명시적 후보 갱신 없이 baseRevision을 변경하지 않는다. 새 연결·후보 변경 후 의미 결과는 해당 새 입력 hash의 재검증 전까지 유효로 재사용하지 않는다.
+
+원문 연결·본문 편집은 draft revision을 갱신하며 저장된 후보 revision과 별개다. 검증은 요청 시 고정한 draftHash·sourceRefs에 결합한다. 같은 hash를 후보로 저장하면 그 검사와 저장 revision을 연결할 수 있지만, 이후 변경분에는 이전 판정을 적용하지 않는다. 검증 결과의 표시가 dirty 상태나 저장 ACK를 대신하지 않는다. 저장 ACK는 해당 초안 revision에만 적용하고 새 변경·의미 경고·미검증 항목은 유지한다.
+
+내 제안·받은 검토는 기존 candidate/request record를 수신자 권한으로 필터한 projection이다. 목록·검색 count에도 같은 필터를 적용한다. 검토 전달은 candidate revision/hash·수신자·공개할 sourceRefs·미검증 항목을 고정한다. 수신자가 열 때 현재 권한과 대상 revision을 다시 검사하고, 후보가 바뀌면 이전 요청을 현재 후보의 승인으로 쓰지 않는다. 판정은 해당 요청·후보 revision에 연결되며 원 요청 행으로 복귀한다.
+
 직접 권한자의 명시적 행동은 제공 범위∩현재 실제 권한∩governance capability∩정책 조건으로 검사한다. 위임받은 actor에게만 유효한 유형별 grant를 추가 교차한다. 위임은 주체·유형·범위·행동·종료 조건·검증 조건·정책 revision을 가진다. 검증은 후보 hash·기준본·시험·정책 revision에 결합한다. ACL API/dry-run을 우선하며 불가능하면 미검증이다. 업무 원본에 임의 시험쓰기를 하지 않는다.
 
 승격·활성화·롤백은 기준 revision·권한 epoch가 일치할 때 원자적으로 적용한다. 한 확인에서도 의미 수락·revision 생성·활성 참조 변경을 구분한다.
@@ -2296,6 +2332,8 @@ receipt에는 seeds·순회 관계·필수/선택 unit·source/hash·권위/권�
 **화면 연결**: [사용자 조작](../../docs/references/design-synthesis/egdesk-ux-realization-proposals.md#ux-detail-e24-collaboration-invite) · [사용자 조작](../../docs/references/design-synthesis/egdesk-ux-realization-proposals.md#ux-detail-e24-collaboration-manage)
 
 person, device/session, Agent 실행체, AI Engine, 업무 서비스, OS principal을 분리한다. grant는 issuer·subject·scope·capability·종료 조건·위임 상한·epoch를 가진다. 읽기·쓰기·재접속마다 현재 권한을 확인한다. 업무 기간 grant, 지속 grant, 인증 세션, 입력 lease, 데이터 보존은 다른 수명이다.
+
+공유 상태 UI의 카메라·focus·열린 상세는 참가자별 표시 상태다. 초대 수락·접근 receipt는 개시자의 같은 요청/자료 상세를 갱신할 뿐 그 표시 상태를 닫거나 수신자의 화면 위치로 옮기지 않는다. 자료에서 재진입한 공유 관리는 resourceRef에 해당하는 허용 grant만 조회한다. 회수 명령은 선택한 grant ID·범위·권한 epoch에 결합하며 다른 자료·사람의 grant에 확장하지 않는다.
 
 초대 nonce는 확인된 수신자에 묶는다. 수락·취소·만료를 원자적으로 처리하고 중복 수락은 같은 결과를 반환한다. 발송·전달·수락·접근 receipt를 분리한다. scope preview와 제외 목록에도 공개 필터를 적용한다.
 
