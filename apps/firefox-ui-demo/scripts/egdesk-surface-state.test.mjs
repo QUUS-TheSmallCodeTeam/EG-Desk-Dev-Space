@@ -731,3 +731,43 @@ test('an explicit null per-room owner never borrows a newer snapshot-global owne
   assert.equal(next.retainedNativeBinding.accountKey, null);
   assert.equal(Chat.canResumeNativeThread(next, authB), false);
 });
+
+test('known A then explicit unknown fresh submission captures null instead of a cached A key', () => {
+  const state = Chat.createChatProtocolState();
+  const cachedA = Chat.codexAccountKey(authA);
+  Chat.registerChatRequest(state, { requestId: 'known', clientThreadId: 'room-a' }, authA);
+  assert.equal(state.requests.known.accountKey, cachedA);
+  const unknown = { ...authA, identityStatus: 'unknown', identityBasis: null };
+  Chat.registerChatRequest(state, { requestId: 'unknown', clientThreadId: 'fresh-room', accountKey: cachedA }, unknown);
+  assert.equal(state.requests.unknown.accountKey, null);
+  const run = Chat.acceptChatRequest(state, { accepted: true, conversationId: 'fresh-cid', runId: 'fresh-turn' }, 'unknown');
+  assert.equal(run.accountKey, null);
+  assert.deepEqual(Chat.nativeBindingForRun({ conversationId: null, bindingAccountKey: cachedA, bindingState: 'verified' }, run), { bindingAccountKey: null, bindingState: 'live-unverified' });
+});
+
+test('later known identity and later response metadata cannot retroactively promote unknown submission ownership', () => {
+  const state = Chat.createChatProtocolState();
+  const auth = { ...authA, identityStatus: 'unknown', identityBasis: null };
+  Chat.registerChatRequest(state, { requestId: 'request-a', clientThreadId: 'ui-a' }, auth);
+  Object.assign(auth, authA);
+  const run = Chat.reduceChatEvent(state, envelope('run.started', 1));
+  Chat.acceptChatRequest(state, { accepted: true, conversationId: 'conversation-a', runId: 'turn-a', accountKey: Chat.codexAccountKey(auth) }, 'request-a');
+  assert.equal(run.accountKey, null);
+  assert.equal(run.submissionOwnerCaptured, true);
+  const thread = { id: 'ui-a', conversationId: run.conversationId, ...Chat.nativeBindingForRun({ conversationId: null }, run) };
+  assert.equal(Chat.reconcileNativeThread(thread, auth), thread);
+  assert.equal(thread.bindingAccountKey, null);
+  assert.equal(Chat.canResumeNativeThread(thread, auth), false);
+});
+
+test('unknown request cannot borrow an old verified owner for a different CID', () => {
+  const current = { conversationId: 'old-cid', bindingAccountKey: Chat.codexAccountKey(authA), bindingState: 'verified' };
+  assert.deepEqual(Chat.nativeBindingForRun(current, { conversationId: 'new-cid', accountKey: null }), { bindingAccountKey: null, bindingState: 'live-unverified' });
+});
+
+test('a transient unknown lookup retains existing ownership proof only for the same verified CID', () => {
+  const current = { conversationId: 'same-cid', bindingAccountKey: Chat.codexAccountKey(authA), bindingState: 'verified' };
+  assert.deepEqual(Chat.nativeBindingForRun(current, { conversationId: 'same-cid', accountKey: null }), { bindingAccountKey: current.bindingAccountKey, bindingState: 'verified' });
+  assert.equal(Chat.canResumeNativeThread(current, { ...authA, identityStatus: 'unknown' }), false);
+  assert.equal(Chat.canResumeNativeThread(current, authA), true);
+});

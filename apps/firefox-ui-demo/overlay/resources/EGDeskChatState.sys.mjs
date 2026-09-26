@@ -94,6 +94,13 @@ export function canResumeNativeThread(thread, authStatus) {
     && knownCodexAccountKey(thread.bindingAccountKey)
     && thread.bindingAccountKey === codexAccountKey(authStatus);
 }
+export function nativeBindingForRun(thread, run) {
+  const established = !!thread.conversationId && thread.conversationId === run.conversationId
+    && thread.bindingState === 'verified' && knownCodexAccountKey(thread.bindingAccountKey);
+  // Preserve proof for the same native conversation, never borrow it for a new CID.
+  const accountKey = established ? thread.bindingAccountKey : run.accountKey ?? null;
+  return { bindingAccountKey: accountKey, bindingState: knownCodexAccountKey(accountKey) ? 'verified' : 'live-unverified' };
+}
 export function submissionFailureStatus(error) {
   if (error?.resumeRequired === true) return 'unconfirmed';
   if (error?.accepted === false) return 'failed';
@@ -114,8 +121,8 @@ export function settleReconciledRequests(state, clientThreadId, snapshot) {
 function ensureStream(state, id) {
   return state.streams[id] ||= { seen: {}, checkpoints: {}, seq: -1, generation: ++state.streamGeneration };
 }
-export function registerChatRequest(state, request) {
-  state.requests[request.requestId] = { ...request, status: 'submitting' };
+export function registerChatRequest(state, request, authStatus) {
+  state.requests[request.requestId] = { ...request, accountKey: codexAccountKey(authStatus), status: 'submitting' };
 }
 export function buildChatRequest(thread, message, requestId, runtime = {}) {
   const body = { message, requestId, clientThreadId: clientThreadBinding(thread), profileEnabled: thread.profileEnabled === true };
@@ -137,8 +144,12 @@ function ensureRun(state, identity) {
     conversationId, runId, answerId: key, status: 'running', stopRequested: false,
     messages: [], activities: [], artifacts: [], pendingApprovals: [], error: null, summary: '',
   };
-  for (const field of ['requestId', 'clientThreadId', 'localThreadId', 'answerId', 'authorName', 'accountKey']) {
+  for (const field of ['requestId', 'clientThreadId', 'localThreadId', 'answerId', 'authorName']) {
     if (identity[field] || request?.[field]) run[field] = identity[field] || request[field];
+  }
+  if (request && !run.submissionOwnerCaptured) {
+    run.accountKey = request.accountKey;
+    run.submissionOwnerCaptured = true;
   }
   if (request) Object.assign(request, { conversationId, runId, answerId: run.answerId, status: 'accepted' });
   return run;

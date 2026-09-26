@@ -4809,8 +4809,7 @@
       run.localThreadId = threadId;
       const thread = updateThreadById(threadId, current => ({
         ...current, conversationId: run.conversationId, sendError: null,
-        bindingAccountKey: run.accountKey || current.bindingAccountKey || null,
-        bindingState: ChatState.knownCodexAccountKey(run.accountKey || current.bindingAccountKey) ? 'verified' : 'live-unverified',
+        ...ChatState.nativeBindingForRun(current, run),
         messages: ChatState.projectRunMessages(current.messages, run),
       }));
       for (const message of run.messages) bindMessageToThread(message.id, threadId);
@@ -5677,7 +5676,7 @@
         if (!activeThread || ChatState.nativeBindingHeld(activeThread) || !content || threadBusy(activeThread) || !state.codex.authStatus.isLoggedIn || !state.codex.connected) return;
         const token = epochScope.begin();
         const requestId = `request-${Date.now().toString(36)}-${Math.random().toString(36).slice(2)}`;
-        ChatState.registerChatRequest(protocol, { requestId, clientThreadId: ChatState.clientThreadBinding(activeThread), localThreadId: activeThread.id, conversationId: activeThread.conversationId, accountKey: state.codex.codexAccountKey || null, authorName: activeThread.profileEnabled ? codexThreadAgentProfile(activeThread).name : 'Codex' });
+        ChatState.registerChatRequest(protocol, { requestId, clientThreadId: ChatState.clientThreadBinding(activeThread), localThreadId: activeThread.id, conversationId: activeThread.conversationId, authorName: activeThread.profileEnabled ? codexThreadAgentProfile(activeThread).name : 'Codex' }, state.codex.authStatus);
         appendMessageToThread(activeThread.id, createCodexMessage('user', content, 'submitting', {
           readBy: [SELF_MEMBER], requestId,
         }), { countUnread: false });
@@ -5712,7 +5711,7 @@
           const request = protocol.requests[requestId];
           if (error.conversationId) {
             request.conversationId = error.conversationId;
-            updateThreadById(activeThread.id, thread => ({ ...thread, conversationId: error.conversationId, bindingAccountKey: request.accountKey || null, bindingState: ChatState.knownCodexAccountKey(request.accountKey) ? 'verified' : 'live-unverified' }));
+            updateThreadById(activeThread.id, thread => ({ ...thread, conversationId: error.conversationId, ...ChatState.nativeBindingForRun(thread, { conversationId: error.conversationId, accountKey: request.accountKey }) }));
           }
           // An event can prove acceptance before a failed/late HTTP response arrives.
           if (!request.runId) {
