@@ -8,6 +8,7 @@
 (function eg_desk_surface() {
   'use strict';
   const TAG = '[eg-desk-surface]';
+  const SurfaceState = ChromeUtils.importESModule('chrome://userchrome/content/EGDeskSurfaceState.sys.mjs');
   const BROWSER_AGENT_ACTOR_NAME = 'EGDeskBrowserAgentRuntime';
   const BROWSER_AGENT_HISTORY_LIMIT = 100;
   let browserAgentActorReady = false;
@@ -350,6 +351,8 @@
   }
 
   const state = {
+    surface: { mode: 'desk', browserCardId: null, restoring: false },
+    boards: { projections: {}, activeProjectionId: null },
     activeTool: 'arrow',
     hudOpen: false,
     hudApp: null,
@@ -652,6 +655,8 @@
   const ZOOM_SMOOTHING = 0.22;
   const WHEEL_SESSION_IDLE_MS = 140;
   const AGENDA_STORAGE_PREF = 'egdesk.agendaState.v1';
+  const SURFACE_LIFECYCLE_PREF = 'egdesk.surfaceLifecycle.v1';
+  const DESK_SESSION_PREF = 'egdesk.deskSession.v1';
   const ONTOLOGY_GRAPH_URL = 'chrome://userchrome/content/ontology/graph.json';
 
   function el(tag, props = {}, ...children) {
@@ -1037,6 +1042,8 @@
       return {
         uri: normalizeBrowserUri(card._browserState?.uri || card.querySelector('.egd-card-url')?.value || card._sourceRef?.uri || 'https://duckduckgo.com'),
         title: card._browserState?.title || '',
+        firstUseBrowser: card.classList.contains('egd-first-use-browser'),
+        fixedLogicalHeight: card._fixedLogicalHeight || null,
       };
     }
     if (type === 'chat') {
@@ -1053,6 +1060,7 @@
 
   function serializeCardState(card) {
     if (!card || !card.isConnected || card.dataset.codexRole === 'auth') return null;
+    if (card._savedBoardMember) return { ...cloneJson(card._savedBoardMember), id: card.id, geometry: persistentEntityGeometry(card) };
     const type = cardKindForPersistence(card);
     if (type === 'card') return null;
     return {
@@ -1082,7 +1090,7 @@
     };
   }
 
-  function serializeAgendaSnapshot() {
+  function serializeDeskSnapshot() {
     return {
       version: 1,
       savedAt: Date.now(),
@@ -1104,7 +1112,152 @@
       shapes: Array.from(document.querySelectorAll('.egd-canvas-shape'))
         .map(serializeShapeState)
         .filter(Boolean),
+      surface: { mode: state.surface.mode, browserCardId: state.surface.browserCardId },
+      boardProjections: cloneJson(state.boards),
     };
+  }
+
+  function boardNotice(message) {
+    let notice = document.getElementById('egd-board-notice');
+    if (!notice) {
+      notice = el('div', { id: 'egd-board-notice', role: 'status', class: 'egd-edge egd-frosted' });
+      document.documentElement.appendChild(notice);
+    }
+    notice.replaceChildren(document.createTextNode(message), el('button', {
+      'aria-label': 'Board 안내 닫기', onclick: () => notice.remove(),
+    }, '×'));
+  }
+
+  function activeBoardProjection() {
+    return state.boards.projections[state.boards.activeProjectionId] || null;
+  }
+
+  function serializeAgendaSnapshot(options = {}) {
+    const projection = !Array.isArray(options.memberIds) && state.boards.projections[options.projectionId || state.boards.activeProjectionId];
+    if (projection) {
+      const records = {};
+      for (const member of projection.members) {
+        const view = document.getElementById(member.viewId);
+        if (!view || view._savedBoardMember) continue;
+        const record = member.kind === 'shape' ? serializeShapeState(view) : serializeCardState(view);
+        if (record) {
+          record.geometry.x -= projection.offset?.x || 0;
+          record.geometry.y -= projection.offset?.y || 0;
+          records[member.viewId] = record;
+        }
+      }
+      return SurfaceState.snapshotBoardProjection(projection, records);
+    }
+    // A new Board requires an explicit member set, including an explicit empty set.
+    if (!Array.isArray(options.memberIds) || !options.agendaId) return null;
+    const views = [...new Set(options.memberIds)].map(id => document.getElementById(id)).filter(Boolean);
+    return {
+      version: 1, savedAt: Date.now(),
+      agenda: { id: options.agendaId, title: options.title || 'Board', memberCardIds: views.filter(v => v.classList.contains('egd-canvas-card')).map(v => v.id), contextBindings: cloneJson(options.contextBindings || []) },
+      cards: views.filter(v => v.classList.contains('egd-canvas-card')).map(serializeCardState).filter(Boolean),
+      shapes: views.filter(v => v.classList.contains('egd-canvas-shape')).map(serializeShapeState).filter(Boolean),
+    };
+  }
+
+  function mountBoardMember(projection, member) {
+    const record = cloneJson(member.record);
+    const geometry = { ...(record.geometry || { x: 40, y: 80, width: 340, height: 180 }) };
+    geometry.x = (geometry.x || 0) + (projection.offset?.x || 0);
+    geometry.y = (geometry.y || 0) + (projection.offset?.y || 0);
+    let view = null;
+    let reason = '이 구성원은 연결 상태를 확인한 뒤 열 수 있습니다.';
+    try {
+      if (member.kind === 'shape') view = restoreShapeFromState({ ...record, id: member.viewId, geometry });
+      else if (record.type === 'browser') {
+        const uri = record.runtimeState?.uri || record.sourceRef?.uri;
+        if (!uri) throw new Error('저장된 주소가 없습니다.');
+        if (/^file:/i.test(uri)) {
+          const file = servicesRef().io.newURI(uri).QueryInterface(Ci.nsIFileURL).file;
+          if (!file.exists()) throw new Error('파일을 찾을 수 없습니다. 원래 위치에 복구한 뒤 다시 확인하세요.');
+        }
+        view = spawnBrowserCard(uri, { openMode: 'new', sourceRef: record.sourceRef || {}, firstUse: !!record.runtimeState?.firstUseBrowser && state.surface.restoring, fixedLogicalHeight: record.runtimeState?.fixedLogicalHeight });
+      } else if (record.type === 'ontology') view = spawnOntologyMapCard(record.runtimeState || {});
+    } catch (error) { reason = error.message || reason; }
+    if (!view) {
+      view = el('div', {
+        id: member.viewId, class: 'egd-canvas-card egd-board-missing', role: 'region',
+        'aria-label': 'Board 구성원 연결 확인', data: { testid: 'board-missing-member' },
+      }, el('strong', {}, record.sourceRef?.path || record.sourceRef?.uri || record.type || '구성원'),
+      el('p', {}, reason),
+      el('button', { 'aria-label': '구성원 다시 확인', onclick: () => {
+        view.remove();
+        state.agenda.suppressDirty = true;
+        try { mountBoardMember(projection, member); } finally { state.agenda.suppressDirty = false; }
+        refreshBoardRegion(projection);
+      } }, '다시 확인'),
+      el('details', {}, el('summary', {}, '저장된 참조 보기'), el('pre', {}, JSON.stringify(record.sourceRef || { type: record.type, id: member.sourceId }, null, 2))));
+      view._savedBoardMember = record;
+      document.getElementById('egd-canvas-layer').appendChild(view);
+    }
+    retargetRestoredEntityId(view, member.viewId);
+    if (record.sourceRef) bindCardSourceRef(view, record.sourceRef);
+    applyPersistentEntityGeometry(view, geometry);
+    view.dataset.boardId = projection.boardId;
+    view.dataset.projectionId = projection.id;
+    view.dataset.memberId = member.sourceId;
+    view.addEventListener('mousedown', () => selectBoardProjection(projection.id), true);
+    return view;
+  }
+
+  function selectBoardProjection(projectionId) {
+    const projection = state.boards.projections[projectionId];
+    if (!projection) return false;
+    state.boards.activeProjectionId = projection.id;
+    state.agenda.activeAgendaId = projection.boardId;
+    state.agenda.activeTitle = projection.title;
+    state.agenda.dirty = !!projection.dirty;
+    state.agenda.hasSavedState = !!coerceAgendaStore().agendas[projection.boardId];
+    syncViewportAgendaRail();
+    return true;
+  }
+
+  function refreshBoardRegion(projection) {
+    let region = document.getElementById(projection.id);
+    if (!region) {
+      region = el('section', {
+        id: projection.id, class: 'egd-board-region', 'aria-label': `Board ${projection.title}`,
+        data: { boardId: projection.boardId, projectionId: projection.id, testid: 'board-projection' },
+      }, el('div', { class: 'egd-board-region-bar' },
+        el('button', { 'aria-label': `Board ${projection.title} 선택`, onclick: () => selectBoardProjection(projection.id) }, projection.title),
+        el('button', { 'aria-label': '이 Board 저장', data: { testid: 'board-save', projectionId: projection.id }, onclick: () => saveCurrentAgendaState({ projectionId: projection.id }) }, '저장')));
+      document.getElementById('egd-canvas-layer').prepend(region);
+    }
+    const rects = projection.members.map(m => document.getElementById(m.viewId)).filter(Boolean).map(persistentEntityGeometry);
+    const x = rects.length ? Math.min(...rects.map(r => r.x)) - 18 : projection.offset?.x || 40;
+    const y = rects.length ? Math.min(...rects.map(r => r.y)) - 48 : projection.offset?.y || 80;
+    const right = rects.length ? Math.max(...rects.map(r => r.x + r.width)) + 18 : x + 340;
+    const bottom = rects.length ? Math.max(...rects.map(r => r.y + r.height)) + 18 : y + 100;
+    Object.assign(region.style, { left: `${x}px`, top: `${y}px`, width: `${right - x}px`, height: `${bottom - y}px` });
+    return region;
+  }
+
+  function openBoardSnapshot(snapshot, options = {}) {
+    if (!snapshot?.agenda?.id) { boardNotice('저장된 Board를 읽을 수 없습니다.'); return false; }
+    let projection = Object.values(state.boards.projections).find(p => p.boardId === snapshot.agenda.id);
+    if (!projection) {
+      let projectionId;
+      do { projectionId = `egd-board-${++cardSeq}`; } while (document.getElementById(projectionId));
+      projection = SurfaceState.planBoardProjection(snapshot, projectionId);
+      const occupied = Array.from(document.querySelectorAll('.egd-canvas-card, .egd-canvas-shape')).map(persistentEntityGeometry);
+      const sourceMinX = Math.min(0, ...projection.members.map(m => m.record.geometry?.x || 0));
+      projection.offset = { x: occupied.length ? Math.max(...occupied.map(r => r.x + r.width)) + 64 - sourceMinX : 0, y: 0 };
+      state.boards.projections[projection.id] = projection;
+      state.agenda.suppressDirty = true;
+      try { for (const member of projection.members) mountBoardMember(projection, member); }
+      finally { state.agenda.suppressDirty = false; }
+    }
+    const region = refreshBoardRegion(projection);
+    selectBoardProjection(projection.id);
+    if (options.focus !== false) {
+      state.setCanvasPanTarget?.({ x: 36 - parsePxNumber(region.style.left) * state.zoomTarget, y: 100 - parsePxNumber(region.style.top) * state.zoomTarget }, { immediate: true });
+    }
+    scheduleDeskSessionSave();
+    return projection;
   }
 
   function retargetRestoredEntityId(entity, savedId) {
@@ -1175,13 +1328,33 @@
   }
 
   function restoreAgendaSnapshot(snapshot, options = {}) {
+    return openBoardSnapshot(snapshot, options);
+  }
+
+  function restoreDeskSession(snapshot) {
     if (!snapshot?.agenda?.id) return false;
+    if (document.querySelector('.egd-canvas-card, .egd-canvas-shape')) return false;
     state.agenda.restoreInProgress = true;
     state.agenda.suppressDirty = true;
     try {
-      clearCanvasEntitiesForRestore();
-      for (const cardState of snapshot.cards || []) restoreCardFromState(cardState);
+      // Automatic Desk restore uses its own snapshot, never a Saved Board as a substitute.
+      for (const cardState of snapshot.cards || []) {
+        const projection = { id: '', boardId: '', offset: { x: 0, y: 0 } };
+        mountBoardMember(projection, { sourceId: cardState.id, viewId: cardState.id, kind: 'card', record: cardState });
+      }
       for (const shapeState of snapshot.shapes || []) restoreShapeFromState(shapeState);
+      state.boards = snapshot.boardProjections || { projections: {}, activeProjectionId: null };
+      for (const projection of Object.values(state.boards.projections)) {
+        refreshBoardRegion(projection);
+        for (const member of projection.members) {
+          const view = document.getElementById(member.viewId);
+          if (!view) continue;
+          view.dataset.boardId = projection.boardId;
+          view.dataset.projectionId = projection.id;
+          view.dataset.memberId = member.sourceId;
+          view.addEventListener('mousedown', () => selectBoardProjection(projection.id), true);
+        }
+      }
       state.agenda.activeAgendaId = snapshot.agenda.id || state.agenda.activeAgendaId;
       state.agenda.activeTitle = snapshot.agenda.title || state.agenda.activeTitle || 'EG-Desk Agenda';
       state.agenda.hasSavedState = true;
@@ -1194,10 +1367,8 @@
       }
       const active = snapshot.desk?.activeCardId ? document.getElementById(snapshot.desk.activeCardId) : null;
       if (active) setActiveEntity(active);
-      if (options.markClean !== false) {
-        state.agenda.dirty = false;
-        state.agenda.dirtyReasons = [];
-      }
+      state.agenda.dirty = !!activeBoardProjection()?.dirty;
+      state.agenda.dirtyReasons = [];
       syncViewportAgendaRail();
       refreshDeskMinimap();
       return true;
@@ -1207,8 +1378,9 @@
     }
   }
 
-  function saveCurrentAgendaState() {
-    const snapshot = serializeAgendaSnapshot();
+  function saveCurrentAgendaState(options = {}) {
+    const snapshot = serializeAgendaSnapshot(options);
+    if (!snapshot) { boardNotice('저장할 Board를 선택하거나 새 Board의 포함 범위를 지정하세요.'); return null; }
     const store = coerceAgendaStore();
     const agendaId = snapshot.agenda.id;
     store.activeAgendaId = agendaId;
@@ -1222,17 +1394,28 @@
       closedAt: null,
     };
     if (!writeAgendaStoreAndSync(store)) return null;
+    const projection = !Array.isArray(options.memberIds) && state.boards.projections[options.projectionId || state.boards.activeProjectionId];
+    if (projection) {
+      projection.source = cloneJson(snapshot);
+      projection.dirty = false;
+      for (const member of projection.members) {
+        member.record = cloneJson([...(snapshot.cards || []), ...(snapshot.shapes || [])].find(record => record.id === member.sourceId) || member.record);
+      }
+    }
     state.agenda.dirty = false;
     state.agenda.dirtyReasons = [];
     state.agenda.hasSavedState = true;
     state.agenda.lastSavedAt = snapshot.savedAt;
+    if (projection) selectBoardProjection(projection.id);
+    else if (state.boards.activeProjectionId) selectBoardProjection(state.boards.activeProjectionId);
     syncViewportAgendaRail();
+    scheduleDeskSessionSave();
     return snapshot;
   }
 
   function restoreSavedAgendaState(options = {}) {
     const store = coerceAgendaStore();
-    const snapshot = activeAgendaSnapshotFromStore(store);
+    const snapshot = store.agendas[state.agenda.activeAgendaId] || null;
     if (!snapshot) return false;
     return restoreAgendaSnapshot(snapshot, { markClean: options.markClean !== false });
   }
@@ -1334,10 +1517,8 @@
   }
 
   function closeCurrentAgenda(options = {}) {
-    if (state.agenda.dirty && options.force !== true) return showAgendaCloseGuard();
-    markAgendaClosed();
-    clearCurrentAgendaView({ markClean: true });
-    return true;
+    boardNotice('Board 닫기와 실행 종료 범위는 아직 연결되지 않았습니다. 다른 Board는 그대로 열 수 있습니다.');
+    return false;
   }
 
   function agendaCardCountForSnapshot(snapshot) {
@@ -1397,6 +1578,12 @@
       store.agendas[agendaId] = snapshot;
     }
     if (agendaId === state.agenda.activeAgendaId) state.agenda.activeTitle = title;
+    for (const projection of Object.values(state.boards.projections)) {
+      if (projection.boardId !== agendaId) continue;
+      projection.title = title;
+      document.getElementById(projection.id)?.remove();
+      refreshBoardRegion(projection);
+    }
     const ok = writeAgendaStoreAndSync(store);
     syncViewportAgendaRail();
     return ok ? title : false;
@@ -1452,54 +1639,9 @@
     return newId;
   }
 
-  function deleteAgenda(agendaId = state.agenda.activeAgendaId, options = {}) {
-    if (!agendaId) return false;
-    const store = coerceAgendaStore();
-    const isActive = agendaId === state.agenda.activeAgendaId;
-    if (isActive && state.agenda.dirty && options.force !== true) {
-      return showAgendaTransitionGuard({
-        title: 'Agenda 삭제',
-        heading: 'Agenda를 삭제할까요?',
-        discardLabel: '버리고 삭제',
-        saveLabel: '저장 후 삭제',
-        onSave: () => {
-          deleteAgenda(agendaId, { force: true });
-        },
-        onDiscard: () => deleteAgenda(agendaId, { force: true }),
-      });
-    }
-    delete store.agendas[agendaId];
-    delete store.meta[agendaId];
-
-    if (isActive) {
-      const nextId = Object.keys(store.agendas || {})[0] || Object.keys(store.meta || {})[0] || null;
-      if (nextId) {
-        store.activeAgendaId = nextId;
-        writeAgendaStoreAndSync(store);
-        return switchAgenda(nextId, { force: true });
-      }
-      const freshId = newAgendaId();
-      store.activeAgendaId = freshId;
-      store.meta[freshId] = {
-        id: freshId,
-        title: 'EG-Desk Agenda',
-        createdAt: Date.now(),
-        updatedAt: Date.now(),
-        lastOpenedAt: Date.now(),
-        closedAt: null,
-      };
-      writeAgendaStoreAndSync(store);
-      state.agenda.activeAgendaId = freshId;
-      state.agenda.activeTitle = 'EG-Desk Agenda';
-      state.agenda.dirty = false;
-      state.agenda.dirtyReasons = [];
-      clearCurrentAgendaView({ markClean: true });
-    } else {
-      if (store.activeAgendaId === agendaId) store.activeAgendaId = state.agenda.activeAgendaId;
-      writeAgendaStoreAndSync(store);
-    }
-    syncViewportAgendaRail();
-    return true;
+  function deleteAgenda() {
+    boardNotice('Board 삭제와 복구 정책은 아직 연결되지 않았습니다. 저장된 Board는 유지됩니다.');
+    return false;
   }
 
   function agendaEntryStatus(entry) {
@@ -1533,8 +1675,6 @@
     const filter = options.filter ?? state.agenda.switcherFilter ?? 'all';
     const query = options.query ?? state.agenda.switcherQuery ?? '';
     const ids = new Set([
-      state.agenda.activeAgendaId,
-      store.activeAgendaId,
       ...Object.keys(store.meta || {}),
       ...Object.keys(store.agendas || {}),
     ].filter(Boolean));
@@ -2247,64 +2387,33 @@
   function switchAgenda(agendaId, options = {}) {
     const store = coerceAgendaStore();
     const snapshot = store.agendas?.[agendaId] || null;
-    const title = snapshot?.agenda?.title || store.meta?.[agendaId]?.title || 'Agenda';
-    if (state.agenda.dirty && options.force !== true) {
-      return showAgendaTransitionGuard({
-        title,
-        onSave: () => switchAgenda(agendaId, { force: true }),
-        onDiscard: () => switchAgenda(agendaId, { force: true }),
-      });
-    }
     closeAgendaSwitcher();
-    closeAgendaCloseGuard();
-    store.activeAgendaId = agendaId;
-    const meta = ensureAgendaMeta(store, agendaId, { title });
-    if (meta) {
-      meta.lastOpenedAt = Date.now();
-      meta.closedAt = null;
-    }
-    writeAgendaStoreAndSync(store);
-    if (snapshot) return restoreAgendaSnapshot(snapshot);
+    return openBoardSnapshot(snapshot, options);
+  }
 
-    state.agenda.activeAgendaId = agendaId;
-    state.agenda.activeTitle = title;
-    clearCurrentAgendaView({ markClean: true });
-    updateAgendaMetaFromStore(store);
-    syncViewportAgendaRail();
-    return true;
+  function showBoardScopeChooser() {
+    document.getElementById('egd-board-scope')?.remove();
+    const selectedIds = Array.from(document.querySelectorAll('.egd-entity-selected')).map(view => view.id);
+    const name = el('input', { 'aria-label': 'Board 이름', placeholder: 'Board 이름' });
+    const dialog = el('div', { id: 'egd-board-scope', class: 'egd-edge egd-frosted', role: 'dialog', 'aria-label': '새 Board 저장 범위' },
+      el('h3', {}, '새 Board'), name,
+      el('p', {}, '포함할 화면을 직접 선택하세요.'),
+      el('button', { 'aria-label': '빈 Board 저장', onclick: () => commitScope([]) }, '빈 Board 저장'),
+      el('button', { 'aria-label': '선택한 화면으로 Board 저장', disabled: selectedIds.length ? null : 'true', onclick: () => commitScope(selectedIds) }, `선택한 화면 ${selectedIds.length}개 저장`),
+      el('button', { onclick: () => dialog.remove() }, '취소'));
+    const commitScope = memberIds => {
+      if (!name.value.trim()) { name.focus(); name.setAttribute('aria-invalid', 'true'); return; }
+      const saved = saveCurrentAgendaState({ agendaId: newAgendaId(), title: name.value.trim(), memberIds });
+      if (saved) { dialog.remove(); boardNotice('Board를 저장했습니다. Board 목록에서 열 수 있습니다.'); }
+    };
+    document.documentElement.appendChild(dialog);
+    name.focus();
+    return dialog;
   }
 
   function createNewAgenda(options = {}) {
-    if (state.agenda.dirty && options.force !== true) {
-      return showAgendaTransitionGuard({
-        title: '새 Agenda',
-        onSave: () => createNewAgenda({ force: true }),
-        onDiscard: () => createNewAgenda({ force: true }),
-      });
-    }
-    const store = coerceAgendaStore();
-    const existingCount = Math.max(1, Object.keys(store.meta || {}).length + 1);
-    const id = `agenda-${Date.now().toString(36)}-${Math.random().toString(36).slice(2, 6)}`;
-    const title = `Agenda ${existingCount}`;
-    store.activeAgendaId = id;
-    store.meta[id] = {
-      id,
-      title,
-      createdAt: Date.now(),
-      updatedAt: Date.now(),
-      lastOpenedAt: Date.now(),
-      closedAt: null,
-    };
-    writeAgendaStoreAndSync(store);
-    state.agenda.activeAgendaId = id;
-    state.agenda.activeTitle = title;
-    state.agenda.dirty = false;
-    state.agenda.dirtyReasons = [];
-    closeAgendaSwitcher();
-    closeAgendaCloseGuard();
-    clearCurrentAgendaView({ markClean: true });
-    syncViewportAgendaRail();
-    return id;
+    if (!Array.isArray(options.memberIds)) return showBoardScopeChooser();
+    return saveCurrentAgendaState({ ...options, agendaId: options.agendaId || newAgendaId() });
   }
 
   function renderAgendaSwitcherPanel(panel) {
@@ -2327,17 +2436,18 @@
       class: 'egd-agenda-switch-row' + (entry.current ? ' egd-agenda-switch-row-current' : ''),
       role: 'button',
       tabindex: '0',
-      data: { agendaId: entry.id },
+      'aria-label': `Board ${entry.title} 열기`,
+      data: { agendaId: entry.id, boardId: entry.id, testid: 'board-open' },
       onclick: (ev) => {
         if (ev.target?.closest?.('.egd-agenda-switch-row-action')) return;
         ev.stopPropagation();
-        if (!entry.current) switchAgenda(entry.id);
+        switchAgenda(entry.id);
       },
       onkeydown: (ev) => {
         if (ev.key !== 'Enter' && ev.key !== ' ') return;
         ev.preventDefault();
         ev.stopPropagation();
-        if (!entry.current) switchAgenda(entry.id);
+        switchAgenda(entry.id);
       },
     },
       el('span', { class: 'egd-agenda-switch-row-dot' }),
@@ -2383,11 +2493,13 @@
     ));
     panel.replaceChildren(
       el('div', { class: 'egd-agenda-switch-head' },
-        el('div', { class: 'egd-agenda-switch-title' }, 'Agenda'),
+        el('div', { class: 'egd-agenda-switch-title' }, 'Board'),
         el('div', { class: 'egd-agenda-switch-actions' },
           el('button', {
             class: 'egd-agenda-switch-action',
-            title: '현재 Agenda 저장',
+            title: '선택한 Board 저장',
+            'aria-label': '선택한 Board 저장',
+            data: { testid: 'board-save' },
             onclick: (ev) => {
               ev.stopPropagation();
               saveCurrentAgendaState();
@@ -2396,7 +2508,8 @@
           }, '저장'),
           el('button', {
             class: 'egd-agenda-switch-action egd-agenda-switch-action-primary',
-            title: '새 Agenda',
+            title: '새 Board',
+            'aria-label': '새 Board',
             onclick: (ev) => {
               ev.stopPropagation();
               createNewAgenda();
@@ -2465,6 +2578,12 @@
 
   function markAgendaDirty(reason = 'canvas-change', entity = null) {
     if (state.agenda.suppressDirty || state.agenda.restoreInProgress) return;
+    scheduleDeskSessionSave();
+    const projection = entity?.dataset?.projectionId && state.boards.projections[entity.dataset.projectionId];
+    if (!projection) return;
+    projection.dirty = true;
+    refreshBoardRegion(projection);
+    if (projection.id !== state.boards.activeProjectionId) return;
     if (!state.agenda.dirty) state.agenda.dirtyReasons = [];
     state.agenda.dirty = true;
     state.agenda.dirtyRevision += 1;
@@ -3126,7 +3245,7 @@
     const left = el('div', { class: 'egd-rail-section egd-rail-left' },
       buildWindowControls(),
       el('span', { class: 'egd-rail-window-divider' }),
-      el('button', { class: 'egd-rail-switcher', title: 'Agenda 전환', onclick: toggleAgendaSwitcher },
+      el('button', { class: 'egd-rail-switcher', title: 'Board 목록', 'aria-label': 'Board 목록', onclick: toggleAgendaSwitcher },
         el('span', { class: 'egd-rail-desk-dot' }),
         el('span', { class: 'egd-rail-desk-name egd-rail-agenda-name' }, currentViewportAgendaLabel()),
         el('span', { class: 'egd-rail-dirty-badge', hidden: !state.agenda.dirty }, 'Unsaved'),
@@ -3162,7 +3281,9 @@
     const right = el('div', { class: 'egd-rail-section egd-rail-right' },
       el('button', {
         class: 'egd-rail-icon egd-rail-save-btn',
-        title: 'Agenda 저장',
+        title: '선택한 Board 저장',
+        'aria-label': '선택한 Board 저장',
+        data: { testid: 'board-save' },
         hidden: !state.agenda.dirty,
         onclick: (ev) => {
           ev.stopPropagation();
@@ -3171,7 +3292,8 @@
       }, '✓'),
       el('button', {
         class: 'egd-rail-icon egd-rail-restore-btn',
-        title: '저장된 Agenda 복원',
+        title: '저장된 Board 열기',
+        'aria-label': '저장된 Board 열기',
         hidden: !state.agenda.hasSavedState,
         onclick: (ev) => {
           ev.stopPropagation();
@@ -8187,8 +8309,8 @@
     }
 
     const id = `egd-browser-card-${++cardSeq}`;
-    const initialWidth = 720;
-    const initialHeight = cardHeightForWidth(initialWidth);
+    const initialWidth = options.firstUse ? window.innerWidth : 720;
+    const initialHeight = options.firstUse ? window.innerHeight : cardHeightForWidth(initialWidth);
     const offset = ((cardSeq - 1) % 6) * 24;
     const center = viewportToCanvasPoint(
       window.innerWidth / 2 + offset,
@@ -8208,8 +8330,8 @@
       moveDirtyReason: 'move-browser-card',
       resizeDirtyReason: 'resize-browser-card',
       style: {
-        top: Math.round(center.y - initialHeight / 2) + 'px',
-        left: Math.round(center.x - initialWidth / 2) + 'px',
+        top: (options.firstUse ? 0 : Math.round(center.y - initialHeight / 2)) + 'px',
+        left: (options.firstUse ? 0 : Math.round(center.x - initialWidth / 2)) + 'px',
         width: initialWidth + 'px',
         height: initialHeight + 'px',
         zIndex: String(++cardZ),
@@ -8220,8 +8342,11 @@
     const urlInput = el('input', {
       type: 'text',
       class: 'egd-card-url',
+      'aria-label': '주소 또는 검색어',
+      data: { testid: options.firstUse ? 'first-use-address' : 'browser-address' },
       value: normalizedUrl,
     });
+    if (options.fixedLogicalHeight) card._fixedLogicalHeight = options.fixedLogicalHeight;
     let xulBrowser = null;
     let browserLoadTimer = 0;
     let browserMenuPanel = null;
@@ -8326,6 +8451,17 @@
       duplicateButton,
       menuButton,
     );
+    if (options.firstUse) {
+      card.classList.add('egd-first-use-browser');
+      card.dataset.testid = 'first-use-root';
+      card.setAttribute('aria-label', 'EG-Desk 시작');
+      card.setAttribute('role', 'region');
+      urlInput.id = 'egd-first-use-address';
+      deskWindow.slots.toolbar.appendChild(el('button', {
+        id: 'egd-desk-entry', 'aria-label': 'Desk 시작', data: { testid: 'desk-entry' },
+        onclick: () => enterLocalDesk(),
+      }, 'Desk 시작'));
+    }
 
     // ---- Body → wrap (logical 1440×900) → XUL browser ----
     const wrap = el('div', { class: 'egd-card-wrap' });
@@ -9633,7 +9769,8 @@
       // Width 에 아주 작은 안전 여유를 두고 가운데 정렬해서 clipping 을 피한다.
       const safeBw = Math.max(1, bw - 2);
       const scale = safeBw / CARD_LOGICAL_W;
-      const logicalHeight = Math.max(1, Math.round(bh / scale));
+      const logicalHeight = card._fixedLogicalHeight || Math.max(1, Math.round(bh / scale));
+      if (options.firstUse && !card._fixedLogicalHeight) card._fixedLogicalHeight = logicalHeight;
       wrap.style.left = Math.max(0, Math.round((bw - safeBw) / 2)) + 'px';
       wrap.style.height = logicalHeight + 'px';
       wrap.style.transform = `scale(${scale})`;
@@ -10227,6 +10364,7 @@
     // - normal mode cmd+wheel pans; ctrl/pinch zooms
     // - card fullscreen mode cmd/ctrl+wheel zooms immediately
     document.addEventListener('wheel', (ev) => {
+      if (state.surface.mode === 'browser') return;
       if (ev.target instanceof Element && ev.target.closest('.egd-ontology-stage')) {
         return;
       }
@@ -10311,6 +10449,101 @@
     });
   }
 
+  function readSurfacePref(key) {
+    try {
+      const raw = servicesRef().prefs.getStringPref(key, '');
+      return raw ? JSON.parse(raw) : null;
+    } catch (error) {
+      // Corrupt existing data is evidence of a returning user, never a fresh-profile signal.
+      return { unreadable: true };
+    }
+  }
+
+  function writeSurfacePref(key, value) {
+    try { servicesRef().prefs.setStringPref(key, JSON.stringify(value)); return true; }
+    catch (error) { console.warn(TAG, 'surface state write failed', key, error); return false; }
+  }
+
+  let deskSaveTimer = null;
+  function persistDeskSession() {
+    if (state.surface.restoring || !document.getElementById('egd-canvas-layer')) return false;
+    return writeSurfacePref(DESK_SESSION_PREF, serializeDeskSnapshot());
+  }
+
+  function scheduleDeskSessionSave() {
+    if (state.surface.restoring) return;
+    if (deskSaveTimer) window.clearTimeout(deskSaveTimer);
+    deskSaveTimer = window.setTimeout(() => { deskSaveTimer = null; persistDeskSession(); }, 300);
+  }
+
+  function setSurfaceMode(mode) {
+    state.surface.mode = mode;
+    document.documentElement.dataset.egdSurfaceMode = mode;
+    document.getElementById('egd-canvas-viewport')?.setAttribute('data-presentation', mode === 'browser' ? 'hidden' : 'visible');
+    writeSurfacePref(SURFACE_LIFECYCLE_PREF, { version: 1, mode, browserCardId: state.surface.browserCardId });
+  }
+
+  function enterLocalDesk() {
+    const card = document.getElementById(state.surface.browserCardId);
+    if (!card || !card._xulBrowser) return false;
+    // Do not reparent, reload, recreate or resize the Browser target during this transition.
+    setSurfaceMode('desk');
+    card.dataset.testid = 'browser-card';
+    card.querySelector('#egd-desk-entry')?.setAttribute('hidden', 'true');
+    const width = parsePxNumber(card.style.width, window.innerWidth);
+    const height = parsePxNumber(card.style.height, window.innerHeight);
+    const zoom = Math.min(0.85, (window.innerWidth - 80) / width, (window.innerHeight - 160) / height);
+    state.setCanvasViewportTarget?.({ pan: { x: 40, y: 88 }, zoom }, { immediate: true });
+    setActiveEntity(card);
+    persistDeskSession();
+    return true;
+  }
+
+  function restoreSurfaceEntry(lifecycle, deskSession, legacyStore) {
+    state.surface.restoring = true;
+    try {
+      const mode = SurfaceState.initialSurfaceMode({ lifecycle, deskSession, legacyStore });
+      if (deskSession && !deskSession.unreadable) restoreDeskSession(deskSession);
+      state.surface.browserCardId = deskSession?.surface?.browserCardId || lifecycle?.browserCardId || null;
+      if (mode === 'browser') {
+        let card = document.getElementById(state.surface.browserCardId);
+        if (!card) card = spawnBrowserCard('chrome://userchrome/content/egdesk-start.html', { firstUse: true });
+        // A restored first-use Browser retains its identity and fixed logical viewport.
+        if (!card.querySelector('#egd-desk-entry')) {
+          card.classList.add('egd-first-use-browser');
+          card.dataset.testid = 'first-use-root';
+          card.setAttribute('aria-label', 'EG-Desk 시작');
+          const input = card.querySelector('.egd-card-url');
+          input.id = 'egd-first-use-address';
+          input.dataset.testid = 'first-use-address';
+          card.querySelector('.egd-card-toolbar').appendChild(el('button', {
+            id: 'egd-desk-entry', 'aria-label': 'Desk 시작', data: { testid: 'desk-entry' }, onclick: enterLocalDesk,
+          }, 'Desk 시작'));
+        }
+        state.surface.browserCardId = card.id;
+        setActiveEntity(card);
+        window.setTimeout(() => {
+          if (state.surface.mode !== 'browser') return;
+          const input = card.querySelector('.egd-card-url');
+          if (input.value === 'chrome://userchrome/content/egdesk-start.html') input.value = '';
+          input.placeholder = '주소 또는 검색어 입력';
+          input.focus();
+        }, 0);
+      }
+      setSurfaceMode(mode);
+      if (mode === 'desk') {
+        const card = document.getElementById(state.surface.browserCardId);
+        if (card) card.dataset.testid = 'browser-card';
+      }
+      if (deskSession?.unreadable) boardNotice('이전 Desk 기록을 읽지 못했습니다. 저장된 Board 목록은 별도로 사용할 수 있습니다.');
+    } finally { state.surface.restoring = false; }
+    // A single current Desk snapshot; Saved Board revisions are never updated by this path.
+    const observer = new MutationObserver(scheduleDeskSessionSave);
+    observer.observe(document.getElementById('egd-canvas-layer'), { childList: true, subtree: true, attributes: true, attributeFilter: ['style'] });
+    window.addEventListener('unload', persistDeskSession, { once: true });
+    persistDeskSession();
+  }
+
   function paintSurface() {
     const root = document.documentElement;
     root.style.setProperty('--egd-surface', '#F5F3EF');
@@ -10329,7 +10562,10 @@
   function boot() {
     try {
       if (document.getElementById('egd-desk-rail')) return;
-      const savedAgendaSnapshot = loadAgendaStoreMeta();
+      const lifecycle = readSurfacePref(SURFACE_LIFECYCLE_PREF);
+      const deskSession = readSurfacePref(DESK_SESSION_PREF);
+      const legacyStore = readSurfacePref(AGENDA_STORAGE_PREF);
+      loadAgendaStoreMeta();
       paintSurface();
       hideFirefoxChrome();
       const host = document.documentElement;
@@ -10421,13 +10657,27 @@
           markDirty: markAgendaDirty,
           storagePref: AGENDA_STORAGE_PREF,
         },
+        boards: {
+          open: (boardId, options = {}) => switchAgenda(boardId, options),
+          save: (projectionId) => saveCurrentAgendaState({ projectionId }),
+          projections: () => cloneJson(state.boards),
+        },
+        surface: {
+          enterDesk: enterLocalDesk,
+          snapshot: () => ({ ...state.surface, browser: browserCardState(state.surface.browserCardId) }),
+          lifecyclePref: SURFACE_LIFECYCLE_PREF,
+        },
+        deskSession: {
+          serialize: serializeDeskSnapshot, restore: restoreDeskSession,
+          persist: persistDeskSession, storagePref: DESK_SESSION_PREF,
+        },
       };
       host.appendChild(buildDeskRail());
       installRailSearchShortcut();
       host.appendChild(buildDock());
       host.appendChild(buildPresetBag());
       host.appendChild(buildHUD());
-      if (savedAgendaSnapshot) restoreAgendaSnapshot(savedAgendaSnapshot);
+      restoreSurfaceEntry(lifecycle, deskSession, legacyStore);
       window.addEventListener('resize', syncHudViewportFit);
       installPopupCapture();
       console.warn(TAG, 'ready ✅');

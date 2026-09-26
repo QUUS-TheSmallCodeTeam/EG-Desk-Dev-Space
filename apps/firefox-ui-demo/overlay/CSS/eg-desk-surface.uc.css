@@ -59,6 +59,35 @@
 }
 #egd-canvas-layer > * { cursor: default; }
 
+/* One Canvas and one Browser target; first-use changes presentation only. */
+:root[data-egd-surface-mode="browser"] #egd-canvas-viewport { visibility: hidden; }
+:root[data-egd-surface-mode="browser"] .egd-first-use-browser { visibility: visible; border-radius: 0; box-shadow: none; }
+:root[data-egd-surface-mode="browser"] #egd-desk-rail,
+:root[data-egd-surface-mode="browser"] #egd-dock,
+:root[data-egd-surface-mode="browser"] #egd-preset-bag,
+:root[data-egd-surface-mode="browser"] #egd-hud,
+:root[data-egd-surface-mode="browser"] #egd-zoom-indicator,
+:root[data-egd-surface-mode="browser"] #egd-desk-minimap,
+:root[data-egd-surface-mode="browser"] .egd-first-use-browser .egd-card-resize-hit { display: none !important; }
+.egd-first-use-browser .egd-card-topbar { display: none; }
+.egd-first-use-browser .egd-card-toolbar { min-height: 44px; }
+#egd-desk-entry { padding: 7px 18px; margin-right: 8px; border-radius: 6px; background: #2d5a7b; color: white; font: 600 13px system-ui; }
+#egd-desk-entry[hidden] { display: none; }
+:root[data-egd-surface-mode="desk"] #egd-desk-entry { display: none; }
+.egd-board-region { position: absolute; box-sizing: border-box; border: 1px dashed #a9b7c1; border-radius: 12px; pointer-events: none; }
+.egd-board-region-bar { display: flex; gap: 10px; padding: 8px 12px; pointer-events: auto; }
+.egd-board-region-bar button { font: 600 12px var(--egd-font); color: #2d5a7b; background: #f5f3ef; border-radius: 5px; padding: 3px 8px; }
+.egd-board-missing { box-sizing: border-box; padding: 18px; overflow: auto; background: #fffaf0; font: 13px/1.5 var(--egd-font); }
+.egd-board-missing strong { overflow-wrap: anywhere; }
+.egd-board-missing button { padding: 5px 12px; border: 1px solid #c8c3b9; border-radius: 5px; }
+.egd-board-missing pre { white-space: pre-wrap; overflow-wrap: anywhere; }
+#egd-board-notice, #egd-board-scope { position: fixed; z-index: 100100; background: #fff; border: 1px solid #d4d0ca; border-radius: 10px; padding: 18px; font: 13px/1.5 var(--egd-font); box-shadow: 0 8px 30px #0002; }
+#egd-board-notice { left: 50%; bottom: 90px; transform: translateX(-50%); max-width: 600px; }
+#egd-board-notice button { margin-left: 16px; }
+#egd-board-scope { left: 50%; top: 25%; transform: translateX(-50%); width: 350px; }
+#egd-board-scope input { padding: 8px; width: 90%; border: 1px solid #ccc; border-radius: 5px; }
+#egd-board-scope button { padding: 6px 10px; margin: 5px 5px 0 0; border: 1px solid #ccc; border-radius: 5px; }
+
 :root.egd-pan-ready #egd-canvas-viewport,
 :root.egd-pan-ready #egd-canvas-layer,
 :root.egd-pan-ready #egd-canvas-layer > *,
