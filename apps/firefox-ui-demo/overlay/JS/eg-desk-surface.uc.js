@@ -4496,7 +4496,7 @@
         }
         conversation.appendChild(messages);
         const run = codexCurrentRun(activeThread);
-        const pending = Object.values(codex.chatProtocol.requests).find(request => request.clientThreadId === activeThread.id && ['submitting', 'unconfirmed'].includes(request.status));
+        const pending = Object.values(codex.chatProtocol.requests).find(request => ChatState.requestBelongsToThread(request, activeThread) && ['submitting', 'unconfirmed'].includes(request.status));
         const status = activeThread.resuming ? 'restoring' : pending?.status || run?.status || 'ready';
         const statusText = activeThread.resuming ? '대화 상태 확인 중' : pending ? (pending.status === 'unconfirmed' ? '접수 상태 확인 필요' : '요청 보내는 중')
           : !run && codex.chatProtocol.unobservedPreviousRun ? '이전 연결의 실행 상태 미확인' : codexRunLabel(run);
@@ -4776,14 +4776,14 @@
 
     function threadBusy(thread) {
       return !!thread?.resuming || ChatState.runsForThread(protocol, thread).some(ChatState.isRunBusy)
-        || Object.values(protocol.requests).some(request => request.clientThreadId === thread?.id && ['submitting', 'unconfirmed'].includes(request.status));
+        || Object.values(protocol.requests).some(request => ChatState.requestBelongsToThread(request, thread) && ['submitting', 'unconfirmed'].includes(request.status));
     }
 
     function syncProtocolRun(run) {
       if (!run) return;
-      const threadId = run.clientThreadId || state.codex.threads.find(thread => thread.conversationId === run.conversationId)?.id;
+      const threadId = run.localThreadId || state.codex.threads.find(thread => ChatState.clientThreadBinding(thread) === run.clientThreadId || thread.conversationId === run.conversationId)?.id;
       if (!threadId || !getCodexThreadById(state.codex, threadId)) return;
-      run.clientThreadId = threadId;
+      run.localThreadId = threadId;
       const thread = updateThreadById(threadId, current => ({
         ...current, conversationId: run.conversationId, sendError: null,
         messages: ChatState.projectRunMessages(current.messages, run),
@@ -4801,10 +4801,10 @@
       emit();
       try {
         const snapshot = resume
-          ? await fetchJson('/chat/resume', { method: 'POST', signal: token.signal, body: JSON.stringify({ conversationId, clientThreadId: thread.id }) })
+          ? await fetchJson('/chat/resume', { method: 'POST', signal: token.signal, body: JSON.stringify({ conversationId, clientThreadId: ChatState.clientThreadBinding(thread) }) })
           : await fetchJson(`/chat/state?conversationId=${encodeURIComponent(conversationId)}`, { signal: token.signal });
         if (!epochScope.valid(token)) return null;
-        for (const run of ChatState.mergeChatSnapshot(protocol, snapshot, thread.id)) syncProtocolRun(run);
+        for (const run of ChatState.mergeChatSnapshot(protocol, snapshot, ChatState.clientThreadBinding(thread))) syncProtocolRun(run);
         if (resume && ChatState.settleReconciledRequests(protocol, thread.id, snapshot)) updateThreadById(thread.id, current => ({ ...current, sendError: '대화 기록을 다시 확인했습니다. 접수 미확인 메시지와 실제 기록을 확인한 뒤 다음 요청을 보내세요.' }));
         emit();
         return snapshot;
@@ -4995,6 +4995,7 @@
       source = null;
       state.codex.threads = state.codex.threads.map((thread) => ({
         ...thread,
+        clientBindingId: ChatState.freshClientThreadBinding(thread, window.crypto?.randomUUID?.() || `${Date.now().toString(36)}-${Math.random().toString(36).slice(2)}`),
         conversationId: null,
         messages: [],
         resuming: false,
@@ -5209,10 +5210,10 @@
         try {
           const snapshot = await fetchJson('/chat/state', { signal: token.signal });
           if (!epochScope.valid(token)) return null;
-          const requests = Object.values(protocol.requests).filter(request => request.clientThreadId === threadId);
+          const requests = Object.values(protocol.requests).filter(request => ChatState.requestBelongsToThread(request, thread));
           const matching = (snapshot.runs || []).filter(run => requests.some(request => request.requestId === run.requestId));
           for (const run of matching) {
-            for (const updated of ChatState.mergeChatSnapshot(protocol, { ...snapshot, conversationId: run.conversationId, runs: [run] }, threadId)) syncProtocolRun(updated);
+            for (const updated of ChatState.mergeChatSnapshot(protocol, { ...snapshot, conversationId: run.conversationId, runs: [run] }, ChatState.clientThreadBinding(thread))) syncProtocolRun(updated);
           }
           if (!matching.length) updateThreadById(threadId, current => ({ ...current, sendError: '서버에서 이 요청의 실행을 아직 확인하지 못했습니다. 자동으로 다시 보내지 않습니다.' }));
           emit();
@@ -5636,7 +5637,7 @@
         if (!activeThread || !content || threadBusy(activeThread) || !state.codex.authStatus.isLoggedIn || !state.codex.connected) return;
         const token = epochScope.begin();
         const requestId = `request-${Date.now().toString(36)}-${Math.random().toString(36).slice(2)}`;
-        ChatState.registerChatRequest(protocol, { requestId, clientThreadId: activeThread.id, conversationId: activeThread.conversationId, authorName: activeThread.profileEnabled ? codexThreadAgentProfile(activeThread).name : 'Codex' });
+        ChatState.registerChatRequest(protocol, { requestId, clientThreadId: ChatState.clientThreadBinding(activeThread), localThreadId: activeThread.id, conversationId: activeThread.conversationId, authorName: activeThread.profileEnabled ? codexThreadAgentProfile(activeThread).name : 'Codex' });
         appendMessageToThread(activeThread.id, createCodexMessage('user', content, 'submitting', {
           readBy: [SELF_MEMBER], requestId,
         }), { countUnread: false });

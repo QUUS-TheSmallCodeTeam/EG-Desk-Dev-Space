@@ -517,3 +517,31 @@ test('profile-on to ordinary Codex explicitly sends false on the same conversati
   assert.equal(off.conversationId, on.conversationId);
   assert.deepEqual(Object.keys(off).sort(), ['clientThreadId', 'conversationId', 'message', 'profileEnabled', 'requestId'].sort());
 });
+
+test('account reset rotates only the wire binding, avoiding a retained backend client-to-CID mapping', () => {
+  const thread = { id: 'local-room', title: 'User title', conversationId: 'old-native' };
+  const registeredBackend = new Map([[Chat.clientThreadBinding(thread), 'old-native']]);
+  const reset = { ...thread, conversationId: null, clientBindingId: Chat.freshClientThreadBinding(thread, 'next-account-generation') };
+  const request = Chat.buildChatRequest(reset, 'new request', 'new-request');
+  assert.equal(reset.id, thread.id);
+  assert.equal(reset.title, thread.title);
+  assert.notEqual(request.clientThreadId, thread.id);
+  assert.equal(registeredBackend.get(request.clientThreadId), undefined);
+  assert.equal(request.conversationId, undefined);
+  const state = Chat.createChatProtocolState();
+  assert.equal(Chat.canAdmitChatEvent(state, [reset], { conversationId: 'old-native', clientThreadId: thread.id }), false);
+});
+
+test('fresh wire IDs still correlate SSE-before-HTTP to the stable local room and reject old-binding events', () => {
+  const thread = { id: 'ui-a', clientBindingId: 'new-binding', conversationId: null };
+  const state = Chat.createChatProtocolState();
+  Chat.registerChatRequest(state, { requestId: 'request-a', clientThreadId: 'new-binding', localThreadId: 'ui-a' });
+  const next = envelope('run.started', 1, {}, { clientThreadId: 'new-binding' });
+  assert.equal(Chat.canAdmitChatEvent(state, [thread], next), true);
+  assert.equal(Chat.canAdmitChatEvent(state, [thread], { ...next, clientThreadId: 'old-binding' }), false);
+  const run = Chat.reduceChatEvent(state, next);
+  assert.equal(run.clientThreadId, 'new-binding');
+  assert.equal(run.localThreadId, 'ui-a');
+  assert.equal(Chat.runsForThread(state, thread)[0], run);
+  assert.deepEqual(Chat.runsForThread(state, null), []);
+});

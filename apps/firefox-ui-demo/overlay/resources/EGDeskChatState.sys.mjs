@@ -12,9 +12,14 @@ export function resetChatProtocol(state) {
   Object.assign(state, createChatProtocolState(), { unobservedPreviousRun: !!unobserved });
 }
 export function canAdmitChatEvent(state, threads, event) {
-  return !!(event?.requestId && state.requests[event.requestId])
+  const request = event?.requestId && state.requests[event.requestId];
+  if (request && event.clientThreadId && request.clientThreadId !== event.clientThreadId) return false;
+  return !!request
     || threads.some(thread => thread.conversationId && thread.conversationId === event?.conversationId);
 }
+export const clientThreadBinding = thread => thread?.clientBindingId || thread?.id || null;
+export const freshClientThreadBinding = (thread, nonce) => `${thread.id}-binding-${nonce}`;
+export const requestBelongsToThread = (request, thread) => !!thread && (request.localThreadId === thread.id || request.clientThreadId === clientThreadBinding(thread));
 export function createChatEpochScope({ makeController = () => new AbortController() } = {}) {
   let epoch = 0;
   const active = new Set();
@@ -41,7 +46,7 @@ export function settleReconciledRequests(state, clientThreadId, snapshot) {
   if (snapshot?.historyComplete !== true || snapshot.truncated === true) return 0;
   let count = 0;
   for (const request of Object.values(state.requests)) {
-    if (request.clientThreadId === clientThreadId && request.status === 'unconfirmed') {
+    if ((request.localThreadId === clientThreadId || request.clientThreadId === clientThreadId) && request.status === 'unconfirmed') {
       request.status = 'reconciled';
       count++;
     }
@@ -55,7 +60,7 @@ export function registerChatRequest(state, request) {
   state.requests[request.requestId] = { ...request, status: 'submitting' };
 }
 export function buildChatRequest(thread, message, requestId, runtime = {}) {
-  const body = { message, requestId, clientThreadId: thread.id, profileEnabled: thread.profileEnabled === true };
+  const body = { message, requestId, clientThreadId: clientThreadBinding(thread), profileEnabled: thread.profileEnabled === true };
   if (thread.conversationId) body.conversationId = thread.conversationId;
   for (const field of ['cwd', 'model', 'effort']) if (runtime[field]) body[field] = runtime[field];
   if (thread.profileEnabled === true) {
@@ -74,7 +79,7 @@ function ensureRun(state, identity) {
     conversationId, runId, answerId: key, status: 'running', stopRequested: false,
     messages: [], activities: [], artifacts: [], pendingApprovals: [], error: null, summary: '',
   };
-  for (const field of ['requestId', 'clientThreadId', 'answerId', 'authorName']) {
+  for (const field of ['requestId', 'clientThreadId', 'localThreadId', 'answerId', 'authorName']) {
     if (identity[field] || request?.[field]) run[field] = identity[field] || request[field];
   }
   if (request) Object.assign(request, { conversationId, runId, answerId: run.answerId, status: 'accepted' });
@@ -223,7 +228,8 @@ export function mergeChatSnapshot(state, snapshot, clientThreadId) {
 }
 
 export function runsForThread(state, thread) {
-  return Object.values(state.runs).filter(run => run.clientThreadId === thread?.id || (thread?.conversationId && run.conversationId === thread.conversationId));
+  if (!thread) return [];
+  return Object.values(state.runs).filter(run => run.localThreadId === thread?.id || run.clientThreadId === clientThreadBinding(thread) || (thread?.conversationId && run.conversationId === thread.conversationId));
 }
 
 export function approvalRequestFor(run, approvalId, decision) {
