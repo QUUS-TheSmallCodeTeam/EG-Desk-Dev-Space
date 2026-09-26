@@ -3,7 +3,7 @@ import assert from 'node:assert/strict';
 import { initialSurfaceMode, planBoardProjection, snapshotBoardProjection, remapMemberReferences, recoverDeskSnapshot, canPersistDeskSession, ownedProjectionMembers, missingProjectionMembers, fitSurfaceCamera } from '../overlay/resources/EGDeskSurfaceState.sys.mjs';
 import * as Chat from '../overlay/resources/EGDeskChatState.sys.mjs';
 import { createDeskRecoveryStore, missingDeskRecoveryViews } from '../overlay/resources/EGDeskRecoveryState.sys.mjs';
-import { createTerminalCloseController, terminalExitEvidence } from '../overlay/resources/EGDeskTerminalState.sys.mjs';
+import { createTerminalCloseController, terminalExitEvidence, terminalResponsePacket } from '../overlay/resources/EGDeskTerminalState.sys.mjs';
 
 test('onboarding considers lifecycle and independent Desk state, not just Board absence', () => {
   assert.equal(initialSurfaceMode({}), 'browser');
@@ -331,13 +331,17 @@ test('invalid restored grouping cannot poison the new working Desk before it is 
   assert.equal(store.get(result.backupKey).raw, JSON.stringify(broken));
 });
 
+const terminalAck = () => terminalResponsePacket({ ok: true, status: 'STOP_REQUESTED', stopRequested: true, exited: false, exitConfirmed: false }, 200);
+const terminalReceipt = (sessionId, extra = {}) => terminalResponsePacket({ status: 'EXITED', exited: true, exitConfirmed: true, sessionId, exitCode: 0, signal: null, exitedAt: 123, exitSource: 'process.exit', ...extra }, 200);
+const terminalRunning = () => terminalResponsePacket({ data: '', exited: false, exitConfirmed: false }, 200);
+
 test('terminal close observes after kill acknowledgement until native exit is confirmed', async () => {
   let reads = 0;
   let kills = 0;
   const phases = [];
   const controller = createTerminalCloseController({
-    requestKill: async id => { assert.equal(id, 'pty-a'); kills++; return { ok: true }; },
-    readStatus: async id => { assert.equal(id, 'pty-a'); return { exited: ++reads === 3, data: '' }; },
+    requestKill: async id => { assert.equal(id, 'pty-a'); kills++; return terminalAck(); },
+    readStatus: async id => { assert.equal(id, 'pty-a'); return ++reads === 3 ? terminalReceipt(id) : terminalRunning(); },
     wait: async () => {}, onState: state => phases.push(state.phase),
   });
   assert.equal(await controller.close('pty-a'), true);
@@ -348,11 +352,11 @@ test('terminal close observes after kill acknowledgement until native exit is co
 });
 
 test('missing terminal registry entry is unknown, not native exit evidence; retry can later observe actual exit', async () => {
-  assert.equal(terminalExitEvidence({ ok: true }), null);
-  assert.equal(terminalExitEvidence({ error: 'offline', exited: true }), null);
-  assert.equal(terminalExitEvidence({ error: 'Session not found', exited: true }), null);
+  assert.equal(terminalExitEvidence({ ok: true }, 'pty-gone'), null);
+  assert.equal(terminalExitEvidence({ error: 'offline', exited: true }, 'pty-gone'), null);
+  assert.equal(terminalExitEvidence({ error: 'Session not found', exited: true }, 'pty-gone'), null);
   let receipt = false;
-  const controller = createTerminalCloseController({ requestKill: async () => ({ ok: true }), readStatus: async () => receipt ? { exited: true, exitCode: 0 } : { error: 'Session not found', data: '', exited: true }, wait: async () => {} });
+  const controller = createTerminalCloseController({ requestKill: async () => terminalAck(), readStatus: async id => receipt ? terminalReceipt(id) : terminalResponsePacket({ status: 'UNKNOWN', code: 'UNKNOWN_SESSION', exited: null, exitConfirmed: false }, 404), wait: async () => {} });
   assert.equal(await controller.close('pty-gone'), false);
   assert.equal(controller.snapshot().phase, 'unknown');
   receipt = true;
@@ -365,8 +369,8 @@ test('terminal offline retry is bounded and re-observes the same PTY without spa
   let reads = 0;
   let kills = 0;
   const controller = createTerminalCloseController({
-    requestKill: async () => { kills++; return { ok: true }; },
-    readStatus: async id => { assert.equal(id, 'pty-offline'); reads++; if (offline) throw new Error('network unavailable'); return { exited: true }; },
+    requestKill: async () => { kills++; return terminalAck(); },
+    readStatus: async id => { assert.equal(id, 'pty-offline'); reads++; if (offline) throw new Error('network unavailable'); return terminalReceipt(id); },
     wait: async () => {}, maxFailures: 2,
   });
   assert.equal(await controller.close('pty-offline'), false);
@@ -381,7 +385,7 @@ test('terminal offline retry is bounded and re-observes the same PTY without spa
 test('terminal timeout does not claim closure and repeated close calls share one observation loop', async () => {
   let exited = false;
   let reads = 0;
-  const controller = createTerminalCloseController({ requestKill: async () => ({ ok: true }), readStatus: async () => { reads++; return { exited }; }, wait: async () => {}, maxAttempts: 2 });
+  const controller = createTerminalCloseController({ requestKill: async () => terminalAck(), readStatus: async id => { reads++; return exited ? terminalReceipt(id) : terminalRunning(); }, wait: async () => {}, maxAttempts: 2 });
   const first = controller.close('pty-slow');
   assert.equal(controller.close('pty-slow'), first);
   assert.equal(await first, false);
@@ -544,4 +548,56 @@ test('fresh wire IDs still correlate SSE-before-HTTP to the stable local room an
   assert.equal(run.localThreadId, 'ui-a');
   assert.equal(Chat.runsForThread(state, thread)[0], run);
   assert.deepEqual(Chat.runsForThread(state, null), []);
+});
+
+test('terminal exit proof requires the same session, native confirmation and HTTP 200 independently of body status', () => {
+  const receipt = terminalReceipt('pty-proof');
+  assert.equal(receipt.status, 'EXITED');
+  assert.equal(receipt.httpStatus, 200);
+  assert.equal(terminalExitEvidence(receipt, 'pty-proof'), 'native-exit');
+  for (const invalid of [
+    { exited: true },
+    { ...receipt, sessionId: 'another-pty' },
+    { ...receipt, exitConfirmed: false },
+    { ...receipt, exitConfirmed: undefined },
+    { ...receipt, httpStatus: 500 },
+    { ...receipt, httpStatus: 404 },
+    { ...receipt, status: 'UNKNOWN' },
+    { ...receipt, status: 'STOP_REQUESTED' },
+    terminalAck(),
+  ]) assert.equal(terminalExitEvidence(invalid, 'pty-proof'), null);
+});
+
+test('kill can return an already-observed exit receipt and finish without another read', async () => {
+  const receipt = terminalReceipt('pty-exited', { signal: 'SIGTERM', exitSource: 'pty.onExit' });
+  const controller = createTerminalCloseController({ requestKill: async () => receipt, readStatus: async () => assert.fail('exit receipt already proves termination'), wait: async () => {} });
+  assert.equal(await controller.close('pty-exited'), true);
+  assert.deepEqual(controller.snapshot().receipt, receipt);
+  assert.equal(controller.snapshot().lastKillResponse.status, 'EXITED');
+  assert.equal(controller.snapshot().lastKillResponse.httpStatus, 200);
+});
+
+test('KILL_FAILED and live read output retain response fields and never imply stopped', async () => {
+  const output = [];
+  const controller = createTerminalCloseController({
+    requestKill: async () => terminalResponsePacket({ ok: false, code: 'KILL_FAILED' }, 500),
+    readStatus: async () => terminalResponsePacket({ status: 'RUNNING', sessionId: 'pty-live', data: 'still running', exited: false, exitConfirmed: false, truncated: true }, 200),
+    onOutput: data => output.push(data), wait: async () => {}, maxAttempts: 2,
+  });
+  assert.equal(await controller.close('pty-live'), false);
+  assert.equal(controller.snapshot().phase, 'timeout');
+  assert.equal(controller.snapshot().killAccepted, false);
+  assert.equal(controller.snapshot().lastKillResponse.code, 'KILL_FAILED');
+  assert.equal(controller.snapshot().lastKillResponse.httpStatus, 500);
+  assert.equal(controller.snapshot().lastResponse.status, 'RUNNING');
+  assert.equal(controller.snapshot().lastResponse.truncated, true);
+  assert.deepEqual(output, ['still running', 'still running']);
+});
+
+test('an in-flight close for one PTY cannot confirm a different session', async () => {
+  const controller = createTerminalCloseController({ requestKill: async id => terminalReceipt(id), readStatus: async () => assert.fail('already exited'), wait: async () => {} });
+  const first = controller.close('pty-first');
+  assert.equal(await controller.close('pty-other'), false);
+  assert.equal(await first, true);
+  assert.equal(controller.snapshot().receipt.sessionId, 'pty-first');
 });
