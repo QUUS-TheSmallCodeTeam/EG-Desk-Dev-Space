@@ -601,3 +601,33 @@ test('an in-flight close for one PTY cannot confirm a different session', async 
   assert.equal(await first, true);
   assert.equal(controller.snapshot().receipt.sessionId, 'pty-first');
 });
+
+test('legacy provider-marker IDs cannot hide an A-to-B email account change', () => {
+  for (const accountId of ['chatgpt', 'ChatGPT', 'apikey', 'API_KEY', 'api-key', 'codex', 'openai']) {
+    const accountA = { isLoggedIn: true, provider: 'codex', authMode: 'chatgpt', accountId, accountEmail: 'a@example.test' };
+    const accountB = { ...accountA, accountEmail: 'b@example.test' };
+    assert.equal(Chat.codexAccountKey(accountA), 'codex:chatgpt:a@example.test');
+    assert.equal(Chat.codexAccountChanged(Chat.codexAccountKey(accountA), accountB), true);
+  }
+  const providerMarker = { isLoggedIn: true, provider: 'provider-marker', authMode: 'mode-marker', accountEmail: 'a@example.test' };
+  assert.equal(Chat.codexAccountKey({ ...providerMarker, accountId: 'provider-marker' }), 'codex:mode-marker:a@example.test');
+  assert.equal(Chat.codexAccountKey({ ...providerMarker, accountId: 'mode-marker' }), 'codex:mode-marker:a@example.test');
+});
+
+test('typed null account ID falls back to email while a real ID retains precedence', () => {
+  const accountA = { isLoggedIn: true, authMode: 'chatgpt', accountId: null, accountEmail: 'a@example.test' };
+  assert.equal(Chat.codexAccountChanged(Chat.codexAccountKey(accountA), { ...accountA, accountEmail: 'b@example.test' }), true);
+  assert.equal(Chat.codexAccountChanged(Chat.codexAccountKey(accountA), { ...accountA, accountEmail: ' A@EXAMPLE.TEST ' }), false);
+  const realId = { ...accountA, accountId: 'native-account-id' };
+  assert.equal(Chat.codexAccountKey(realId), 'codex:chatgpt:native-account-id');
+  assert.equal(Chat.codexAccountChanged(Chat.codexAccountKey(realId), { ...realId, accountEmail: 'changed-email@example.test' }), false);
+});
+
+test('unknown identity and transient account lookup failure do not manufacture identity or trigger reset', () => {
+  const knownKey = 'codex:chatgpt:a@example.test';
+  const unknown = { isLoggedIn: true, authMode: 'chatgpt', accountId: 'chatgpt', accountEmail: null };
+  assert.equal(Chat.codexAccountKey(unknown), null);
+  assert.equal(Chat.codexAccountChanged(knownKey, unknown), false);
+  assert.equal(Chat.codexAccountChanged(knownKey, { isLoggedIn: false, accountId: 'chatgpt', accountEmail: 'b@example.test', statusText: 'lookup failed' }), false);
+  assert.equal(Chat.codexAccountChanged('codex:chatgpt:chatgpt', { ...unknown, accountEmail: 'a@example.test' }), false);
+});

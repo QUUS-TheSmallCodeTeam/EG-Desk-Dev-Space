@@ -31,10 +31,28 @@ export function createChatEpochScope({ makeController = () => new AbortControlle
     reset: () => { epoch++; for (const token of active) token.controller.abort(); active.clear(); },
   };
 }
+const identityText = value => typeof value === 'string' ? value.trim() : '';
+const markerText = value => identityText(value).toLowerCase().replace(/[\s_-]+/g, '');
+function isProviderIdentity(value, ...providerNames) {
+  const markers = new Set(['chatgpt', 'apikey', 'api', 'codex', 'openai', 'oauth', 'oauth2', 'unknown', 'none', 'null', 'undefined', ...providerNames.map(markerText)]);
+  const candidate = markerText(value);
+  return !candidate || markers.has(candidate);
+}
 export function codexAccountKey(status) {
   if (!status?.isLoggedIn) return null;
-  const identity = status.accountId || status.accountEmail;
-  return identity ? `codex:${status.authMode || ''}:${identity}` : null;
+  const id = identityText(status.accountId);
+  const email = identityText(status.accountEmail).toLowerCase();
+  const identity = id && !isProviderIdentity(id, status.provider, status.authMode)
+    ? id : /^[^\s@]+@[^\s@]+$/.test(email) ? email : null;
+  return identity ? `codex:${identityText(status.authMode)}:${identity}` : null;
+}
+export function codexAccountChanged(previousKey, status) {
+  const nextKey = codexAccountKey(status);
+  if (!nextKey || typeof previousKey !== 'string' || !previousKey.startsWith('codex:')) return false;
+  const [, mode, ...identity] = previousKey.split(':');
+  // An old cached provider-only key never proved which account owned the session.
+  if (isProviderIdentity(identity.join(':'), mode)) return false;
+  return nextKey !== previousKey;
 }
 export function submissionFailureStatus(error) {
   if (error?.resumeRequired === true) return 'unconfirmed';

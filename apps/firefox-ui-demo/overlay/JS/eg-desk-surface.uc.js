@@ -4901,7 +4901,7 @@
     };
     const update = (patch) => {
       const accountKey = ChatState.codexAccountKey(patch.authStatus);
-      if (accountKey && state.codex.codexAccountKey && accountKey !== state.codex.codexAccountKey) resetThreadConversations();
+      if (ChatState.codexAccountChanged(state.codex.codexAccountKey, patch.authStatus)) resetThreadConversations();
       if (accountKey) state.codex.codexAccountKey = accountKey;
       Object.assign(state.codex, patch);
       emit();
