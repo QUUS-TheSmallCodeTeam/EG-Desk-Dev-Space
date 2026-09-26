@@ -1,9 +1,21 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
+import { readFileSync } from 'node:fs';
+import { compileFunction } from 'node:vm';
 import { initialSurfaceMode, planBoardProjection, snapshotBoardProjection, remapMemberReferences, recoverDeskSnapshot, canPersistDeskSession, ownedProjectionMembers, missingProjectionMembers, fitSurfaceCamera } from '../overlay/resources/EGDeskSurfaceState.sys.mjs';
 import * as Chat from '../overlay/resources/EGDeskChatState.sys.mjs';
 import { createDeskRecoveryStore, missingDeskRecoveryViews } from '../overlay/resources/EGDeskRecoveryState.sys.mjs';
 import { createTerminalCloseController, terminalExitEvidence, terminalResponsePacket } from '../overlay/resources/EGDeskTerminalState.sys.mjs';
+
+// Exercise the actual production runtime-config body, without executing the
+// Firefox overlay bootstrap, DOM handlers, bridge requests, or runtime code.
+const surfaceSource = readFileSync(new URL('../overlay/JS/eg-desk-surface.uc.js', import.meta.url), 'utf8');
+const runtimeConfigBody = surfaceSource.match(/  function codexThreadRuntimeConfig\(thread\) \{([\s\S]*?)\n  \}/)?.[1];
+assert.ok(runtimeConfigBody, 'production codexThreadRuntimeConfig must remain directly testable');
+const productionRuntimeConfig = compileFunction(runtimeConfigBody, ['thread', 'codexThreadAgentProfile', 'codexThreadToolMode', 'codexThreadSystemPrompt']);
+const runtimeFor = thread => productionRuntimeConfig(thread,
+  () => ({ id: 'test-profile', label: 'Test', name: 'Test', capabilities: [], cwd: '/not-a-thread-default' }),
+  () => 'test-tools', () => 'test instruction');
 
 test('onboarding considers lifecycle and independent Desk state, not just Board absence', () => {
   assert.equal(initialSurfaceMode({}), 'browser');
@@ -770,4 +782,43 @@ test('a transient unknown lookup retains existing ownership proof only for the s
   assert.deepEqual(Chat.nativeBindingForRun(current, { conversationId: 'same-cid', accountKey: null }), { bindingAccountKey: current.bindingAccountKey, bindingState: 'verified' });
   assert.equal(Chat.canResumeNativeThread(current, { ...authA, identityStatus: 'unknown' }), false);
   assert.equal(Chat.canResumeNativeThread(current, authA), true);
+});
+
+test('production runtime config forwards explicit thread cwd through ordinary Codex requests', () => {
+  for (const profileEnabled of [false, true]) {
+    const thread = { id: 'cwd-room', cwd: '/tmp/isolated-work-context', profileEnabled };
+    const runtime = runtimeFor(thread);
+    assert.equal(runtime.cwd, thread.cwd);
+    assert.equal(Object.hasOwn(runtime, 'cwd'), true);
+    const body = Chat.buildChatRequest(thread, 'work here', 'cwd-request', runtime);
+    assert.equal(JSON.parse(JSON.stringify(body)).cwd, thread.cwd);
+    assert.equal(body.profileEnabled, profileEnabled);
+    if (!profileEnabled) {
+      assert.equal(Object.hasOwn(body, 'agentProfile'), false);
+      assert.equal(Object.hasOwn(body, 'systemPrompt'), false);
+      assert.equal(Object.hasOwn(body, 'toolMode'), false);
+    }
+  }
+});
+
+test('unset cwd preserves omission and never inherits a persona cwd', () => {
+  for (const thread of [{ id: 'unset' }, { id: 'undefined', cwd: undefined }]) {
+    const runtime = runtimeFor(thread);
+    assert.equal(Object.hasOwn(runtime, 'cwd'), false);
+    assert.equal(Object.hasOwn(Chat.buildChatRequest(thread, 'hello', 'q', runtime), 'cwd'), false);
+  }
+  assert.equal(Chat.buildChatRequest({ id: 'direct', cwd: '/tmp/explicit-thread' }, 'hello', 'q').cwd, '/tmp/explicit-thread');
+});
+
+test('explicit invalid cwd is forwarded unchanged for backend validation rather than silently defaulted', () => {
+  for (const cwd of ['', null, false, 0, 'relative-directory', [], {}]) {
+    const thread = { id: 'invalid-cwd', cwd, profileEnabled: false };
+    const runtime = runtimeFor(thread);
+    assert.equal(runtime.cwd, cwd);
+    const wire = JSON.parse(JSON.stringify(Chat.buildChatRequest(thread, 'hello', 'q', runtime)));
+    assert.equal(Object.hasOwn(wire, 'cwd'), true);
+    assert.deepEqual(wire.cwd, cwd);
+  }
+  const body = Chat.buildChatRequest({ id: 'runtime-cwd', cwd: '/tmp/thread-value' }, 'hello', 'q', { cwd: '' });
+  assert.equal(body.cwd, '');
 });

@@ -238,6 +238,7 @@
       threadId: thread?.id || null,
       threadType: thread?.type || 'dm',
       threadTitle: thread?.title || '',
+      ...(thread?.cwd !== undefined ? { cwd: thread.cwd } : {}),
       agentProfile: {
         id: profile.id,
         label: profile.label,

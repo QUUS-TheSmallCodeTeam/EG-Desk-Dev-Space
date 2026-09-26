@@ -127,7 +127,9 @@ export function registerChatRequest(state, request, authStatus) {
 export function buildChatRequest(thread, message, requestId, runtime = {}) {
   const body = { message, requestId, clientThreadId: clientThreadBinding(thread), profileEnabled: thread.profileEnabled === true };
   if (thread.conversationId) body.conversationId = thread.conversationId;
-  for (const field of ['cwd', 'model', 'effort']) if (runtime[field]) body[field] = runtime[field];
+  const cwd = runtime.cwd !== undefined ? runtime.cwd : thread.cwd;
+  if (cwd !== undefined) body.cwd = cwd;
+  for (const field of ['model', 'effort']) if (runtime[field]) body[field] = runtime[field];
   if (thread.profileEnabled === true) {
     body.profileEnabled = true;
     for (const field of ['agentProfile', 'systemPrompt', 'toolMode']) if (runtime[field]) body[field] = runtime[field];
