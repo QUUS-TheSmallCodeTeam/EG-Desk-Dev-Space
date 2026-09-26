@@ -1,6 +1,6 @@
 import { createHash, randomUUID } from 'node:crypto'
 import path from 'node:path'
-import { chatError, explicitFileLinks, MAX_TEXT, publicError, publicText, verifyLocalFile } from './codex-chat-values.mjs'
+import { chatError, explicitFileLinks, MAX_TEXT, publicError, publicNetworkContext, publicText, verifyLocalFile } from './codex-chat-values.mjs'
 
 const TERMINAL = new Set(['completed', 'interrupted', 'failed'])
 const ITEM_STATUS = new Set(['inProgress', 'completed', 'failed', 'declined'])
@@ -239,12 +239,23 @@ export class CodexChatRuntime {
     const lock = conversationId || `client:${clientThreadId || 'legacy'}`
     if (this.locks.has(lock)) throw chatError('RUN_IN_PROGRESS', 'A request is already starting for this conversation', 409)
     if (this.locks.size >= MAX_RUNS) throw chatError('RUNTIME_BUSY', 'Too many pending requests', 429)
-    if (!conversationId && clientThreadId && [...this.threads.values()].some(t => t.clientThreadId === clientThreadId)) {
-      throw chatError('CONVERSATION_REQUIRED', 'Continue this conversation using its returned conversationId', 409)
+    const registered = !conversationId && clientThreadId ? [...this.threads.values()].find(t => t.clientThreadId === clientThreadId) : null
+    if (registered) {
+      throw Object.assign(chatError('CONVERSATION_REQUIRED', 'Continue this conversation using its returned conversationId', 409), {
+        conversationId: registered.id, requestId, resumeRequired: this.uncertainThreads.has(registered.id),
+      })
     }
     this.locks.add(lock)
+    const context = { requestId, clientThreadId, conversationId }
     const record = { fingerprint, settled: false, promise: null }
-    record.promise = this.startTurn(body, { requestId, clientThreadId, conversationId }).finally(() => {
+    record.promise = this.startTurn(body, context).catch(error => {
+      const failure = error instanceof Error ? error : new Error('Codex request failed')
+      failure.conversationId = context.conversationId || ''
+      failure.requestId = requestId
+      failure.resumeRequired = Boolean(context.conversationId && this.uncertainThreads.has(context.conversationId))
+      if (typeof failure.code === 'number' && !failure.httpStatus) failure.httpStatus = 400
+      throw failure
+    }).finally(() => {
       this.locks.delete(lock)
       record.settled = true
       while (this.requests.size > MAX_REQUESTS) {
@@ -284,12 +295,37 @@ export class CodexChatRuntime {
     let cid = context.conversationId
     if (cid) {
       if (this.uncertainThreads.has(cid)) throw chatError('RESUME_REQUIRED', 'Resume the conversation before retrying an uncertain turn', 409)
-      if (!this.loadedThreads.has(cid) || body.profileEnabled === true) await this.restoreThread(cid, context.clientThreadId, overrides)
+      if (!this.loadedThreads.has(cid)) await this.restoreThread(cid, context.clientThreadId)
+      if ([...this.runs.values()].some(run => run.conversationId === cid && !TERMINAL.has(run.status))) {
+        throw chatError('RUN_IN_PROGRESS', 'This conversation already has an active or unreconciled turn', 409)
+      }
+      if (body.profileEnabled === true || body.profileEnabled === false) {
+        if (body.profileEnabled === false) {
+          // Read only the effective ordinary instruction setting, never expose
+          // the config payload. Null/absent means an explicit empty override.
+          const config = await this.request('config/read', {
+            includeLayers: false,
+            cwd: overrides.cwd || this.threads.get(cid)?.cwd || null,
+          })
+          const ordinary = config?.config?.developer_instructions
+          if (!config?.config || (ordinary != null && typeof ordinary !== 'string')) throw chatError('PROFILE_CONFIG_UNAVAILABLE', 'Could not resolve ordinary Codex instructions', 502)
+          overrides.developerInstructions = ordinary ?? ''
+        }
+        if (epoch !== this.epoch) throw chatError('CONTEXT_CHANGED', 'Codex connection or account changed', 409)
+        // Reload an idle native thread with explicit instructions, keeping its
+        // ID and persisted history. Do not rely on an already-loaded resume to
+        // replace its effective settings. Both endpoints are in CLI 0.156.1.
+        const detached = await this.request('thread/unsubscribe', { threadId: cid })
+        this.loadedThreads.delete(cid)
+        if (!['unsubscribed', 'notLoaded'].includes(detached?.status)) throw chatError('PROFILE_TRANSITION_UNAVAILABLE', 'Could not detach this native thread for a profile change', 409)
+        await this.restoreThread(cid, context.clientThreadId, overrides)
+      }
     } else {
       const result = await this.request('thread/start', overrides)
       if (epoch !== this.epoch) throw chatError('ACCOUNT_CHANGED', 'Codex account changed', 409)
       cid = result?.thread?.id
       this.rememberThread(cid, result, context.clientThreadId)
+      context.conversationId = cid
     }
     if (epoch !== this.epoch) throw chatError('ACCOUNT_CHANGED', 'Codex account changed', 409)
     if ([...this.runs.values()].some(run => run.conversationId === cid && !TERMINAL.has(run.status))) {
@@ -434,6 +470,9 @@ export class CodexChatRuntime {
       method: 'approval', nativeMethod: message.method, rpcId: message.id,
       threadId: idText(p.threadId), turnId: idText(p.turnId), itemId: idText(p.itemId),
       reason: publicText(p.reason, 2000), command: publicText(p.command, 2000), cwd: publicText(p.cwd, 2000),
+      nativeKind: p.kind ?? 'command',
+      isNetworkApproval: p.networkApprovalContext != null,
+      networkApprovalContext: publicNetworkContext(p.networkApprovalContext),
       choices: Array.isArray(p.availableDecisions) ? p.availableDecisions.filter(value => ['accept', 'decline', 'cancel'].includes(value)) : ['accept', 'decline', 'cancel'],
     }
     return this.enqueue(event)
@@ -531,9 +570,27 @@ export class CodexChatRuntime {
     const activity = run.activities.find(a => a.id === event.itemId)
     const command = event.command || activity?.detail?.command
     const cwd = event.cwd || activity?.detail?.cwd
+    let acceptDisabledReason = null
+    if (event.isNetworkApproval && !event.networkApprovalContext) acceptDisabledReason = 'Network target or protocol is missing or unsupported.'
+    else if (kind === 'commandExecution' && event.nativeKind !== 'command') acceptDisabledReason = 'This terminal-input approval type is not supported.'
+    else if (kind === 'commandExecution' && !event.isNetworkApproval && !command) acceptDisabledReason = 'Command details are unavailable.'
+    const choices = acceptDisabledReason ? event.choices.filter(choice => choice !== 'accept') : event.choices
+    if (!choices.length) {
+      this.respond(event.rpcId, null, { code: -32601, message: 'Approval target cannot be safely displayed' })
+      run.error = publicError('Approval target is unavailable; no permission was granted', 'UNSUPPORTED_APPROVAL_TARGET')
+      this.emit(run, 'run.unavailable', { status: run.status, error: run.error })
+      return
+    }
+    const networkReason = event.networkApprovalContext
+      ? `Network access: ${event.networkApprovalContext.protocol} ${event.networkApprovalContext.host} (this request).`
+      : ''
     const pending = {
-      approvalId, kind, status: 'pending', choices: event.choices, itemId: event.itemId,
-      reason: event.reason, ...(command ? { command } : {}), ...(cwd ? { cwd } : {}),
+      approvalId, kind, status: 'pending', choices, itemId: event.itemId,
+      scope: 'request',
+      networkApprovalContext: event.networkApprovalContext,
+      ...(acceptDisabledReason ? { acceptDisabledReason } : {}),
+      reason: [networkReason, event.reason, acceptDisabledReason].filter(Boolean).join('\n'),
+      ...(command ? { command } : {}), ...(cwd ? { cwd } : {}),
       paths: activity?.detail?.changes?.map(change => change.path) || activity?.sourceRefs.map(ref => ref.target.path) || [],
     }
     this.pendingApprovals.set(approvalId, { ...pending, rpcId: event.rpcId, conversationId: run.conversationId, runId: run.runId })

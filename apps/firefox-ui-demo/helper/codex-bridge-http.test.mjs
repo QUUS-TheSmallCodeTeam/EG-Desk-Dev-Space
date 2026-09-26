@@ -2,6 +2,7 @@ import test from 'node:test'
 import assert from 'node:assert/strict'
 import { Readable } from 'node:stream'
 import { createChatHttpHandler, guardBridgeRequest, readJsonBody, setBridgeCors } from './codex-bridge-http.mjs'
+import { CodexChatRuntime } from './codex-chat-runtime.mjs'
 
 function request(body, headers = {}, url = '/chat/send') {
   const req = Readable.from([Buffer.from(body)])
@@ -64,4 +65,64 @@ test('state polling is bounded by runtime snapshot and does not call account API
   assert.equal(res.body.conversationId, 'existing')
   assert.equal(res.body.truncated, true)
   assert.equal(authCalls, 0)
+})
+
+test('HTTP failure after native thread creation returns the recoverable native ID and request ID', async () => {
+  const nativeCalls = []
+  const chat = new CodexChatRuntime({
+    request: async (method, params) => {
+      nativeCalls.push({ method, params })
+      if (method === 'thread/start') return { thread: { id: 'created-native-thread' } }
+      throw Object.assign(new Error('Turn rejected'), { code: -32602 })
+    }, respond: () => {},
+  })
+  chat.setConnection(true)
+  const handler = createChatHttpHandler(chat, async () => {})
+  const res = response()
+  await handler(request('{"message":"Hi","requestId":"ui-request","clientThreadId":"ui-thread"}'), res, new URL('http://localhost/chat/send'))
+  assert.equal(res.status, 400)
+  assert.equal(res.body.accepted, false)
+  assert.equal(res.body.conversationId, 'created-native-thread')
+  assert.equal(res.body.requestId, 'ui-request')
+  assert.equal(res.body.resumeRequired, false)
+  const retry = response()
+  await handler(request('{"message":"Retry","requestId":"new-request","clientThreadId":"ui-thread"}'), retry, new URL('http://localhost/chat/send'))
+  assert.equal(retry.status, 409)
+  assert.equal(retry.body.conversationId, 'created-native-thread')
+  assert.equal(nativeCalls.filter(call => call.method === 'thread/start').length, 1)
+})
+
+test('known Stop, decline and cancel work when auth refresh fails; accept still requires auth', async () => {
+  const native = [], replies = []
+  const chat = new CodexChatRuntime({
+    request: async (method, params) => {
+      native.push({ method, params })
+      if (method === 'thread/start') return { thread: { id: 'thread' } }
+      if (method === 'turn/start') return { turn: { id: 'turn', status: 'inProgress', items: [] } }
+      if (method === 'turn/interrupt') return {}
+      throw new Error('Unexpected native call')
+    }, respond: (...args) => replies.push(args),
+  })
+  chat.setConnection(true)
+  const run = await chat.send({ message: 'Work' })
+  let authCalls = 0
+  const handler = createChatHttpHandler(chat, async () => { authCalls++; throw Object.assign(new Error('Account lookup failed'), { httpStatus: 503 }) })
+  const stop = response()
+  await handler(request(JSON.stringify(run)), stop, new URL('http://localhost/chat/interrupt'))
+  assert.equal(stop.status, 200)
+  assert.equal(stop.body.stopRequested, true)
+  assert.equal(authCalls, 0)
+  for (const decision of ['decline', 'cancel', 'accept']) {
+    await chat.handleServerRequest({ id: decision, method: 'item/commandExecution/requestApproval', params: { threadId: run.conversationId, turnId: run.runId, itemId: decision, command: 'echo harmless' } })
+    const approvalId = chat.snapshot().runs[0].pendingApprovals.at(-1).approvalId
+    const res = response()
+    await handler(request(JSON.stringify({ ...run, approvalId, decision })), res, new URL('http://localhost/chat/approval'))
+    assert.equal(res.status, decision === 'accept' ? 503 : 200)
+  }
+  assert.equal(authCalls, 1)
+  assert.deepEqual(replies.map(reply => reply[1].decision), ['decline', 'cancel'])
+  const invalid = response()
+  await handler(request(JSON.stringify({ ...run, runId: 'wrong', approvalId: 'unknown', decision: 'decline' })), invalid, new URL('http://localhost/chat/approval'))
+  assert.equal(invalid.status, 409)
+  assert.equal(replies.length, 2)
 })

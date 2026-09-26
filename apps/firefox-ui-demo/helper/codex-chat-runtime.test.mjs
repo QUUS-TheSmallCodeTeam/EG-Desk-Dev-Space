@@ -376,3 +376,158 @@ test('exact text limit is complete; actual over-limit text is flagged', async ()
   assert.equal(h.chat.snapshot().truncated, true)
   assert.equal(h.chat.snapshot().runs[0].messages[1].text.length, 20000)
 })
+
+test('CLI credential arguments and authorization forms are redacted before activity, approval and history exposure', async () => {
+  const cases = [
+    ['tool --password hunter2 --verbose', 'hunter2'],
+    ['tool --password="hunter two" --verbose', 'hunter two'],
+    ["tool --client-secret 'secret words'", 'secret words'],
+    ['curl --user alice:secret https://example.com', 'alice:secret'],
+    ['tool --secret-access-key awsSecret --session-token temporarySecret', 'awsSecret'],
+    ['tool --secret-access-key awsSecret --session-token temporarySecret', 'temporarySecret'],
+    ['curl -u alice:shortSecret https://example.com', 'shortSecret'],
+    ['curl -ualice:attachedSecret https://example.com', 'attachedSecret'],
+    ['mysql -pmysqlSecret', 'mysqlSecret'],
+    ["curl -H 'Authorization: Basic YWxhZGRpbjpvcGVuc2VzYW1l' https://example.com", 'YWxhZGRpbjpvcGVuc2VzYW1l'],
+    ["curl -H 'Authorization: Bearer headerSecret' https://example.com", 'headerSecret'],
+    ["curl -H 'Cookie: sid=cookieOne; session=cookieTwo' https://example.com", 'cookieTwo'],
+    ['curl https://alice:urlSecret@example.com/data', 'urlSecret'],
+  ]
+  const h = harness()
+  const run = await h.chat.send({ message: 'Inspect' })
+  for (let index = 0; index < cases.length; index++) {
+    const [command, secret] = cases[index]
+    assert.ok(!publicText(command).includes(secret), command)
+    await h.item(run, { id: `cli-${index}`, type: 'commandExecution', status: 'inProgress', command }, false)
+    await h.chat.handleServerRequest({ id: `approval-${index}`, method: 'item/commandExecution/requestApproval', params: { threadId: run.conversationId, turnId: run.runId, itemId: `cli-${index}`, command } })
+  }
+  const exposed = JSON.stringify([h.events, h.chat.snapshot()])
+  for (const [, secret] of cases) assert.ok(!exposed.includes(secret), secret)
+  assert.ok(exposed.includes('example.com'))
+  const historical = harness({ request: async () => ({ thread: { id: 'history', turns: [{ id: 'turn', status: 'completed', items: [
+    { type: 'commandExecution', id: 'command', command: 'tool --password historySecret', status: 'completed' },
+  ] }] } }) })
+  assert.ok(!JSON.stringify(await historical.chat.resume({ conversationId: 'history' })).includes('historySecret'))
+})
+
+test('definite first-turn rejection exposes created thread ID and a same-thread retry does not create another thread', async () => {
+  let attempts = 0
+  const h = harness({ request: async (method, params, chat, defaults) => {
+    if (method === 'turn/start' && attempts++ === 0) throw Object.assign(new Error('Invalid model'), { code: -32602 })
+    return defaults(method, params)
+  } })
+  let rejected
+  try { await h.chat.send({ message: 'Hello', requestId: 'first-attempt', clientThreadId: 'ui-thread' }) } catch (error) { rejected = error }
+  assert.equal(rejected.conversationId, 'thread-1')
+  assert.equal(rejected.resumeRequired, false)
+  await assert.rejects(h.chat.send({ message: 'Retry', requestId: 'without-id', clientThreadId: 'ui-thread' }), error => error.code === 'CONVERSATION_REQUIRED' && error.conversationId === 'thread-1')
+  const retry = await h.chat.send({ message: 'Retry', requestId: 'second-attempt', clientThreadId: 'ui-thread', conversationId: rejected.conversationId })
+  assert.equal(retry.conversationId, 'thread-1')
+  assert.equal(h.calls.filter(call => call.method === 'thread/start').length, 1)
+})
+
+test('ambiguous first-turn failure exposes the thread and requires explicit resume before retry', async () => {
+  let attempts = 0
+  const h = harness({ request: async (method, params, chat, defaults) => {
+    if (method === 'turn/start' && attempts++ === 0) throw Object.assign(new Error('turn/start timed out'), { code: 'RPC_TIMEOUT' })
+    return defaults(method, params)
+  } })
+  await assert.rejects(h.chat.send({ message: 'Hello', requestId: 'first', clientThreadId: 'ui' }), error => error.conversationId === 'thread-1' && error.resumeRequired === true)
+  await assert.rejects(h.chat.send({ message: 'Retry', requestId: 'second', conversationId: 'thread-1' }), error => error.code === 'RESUME_REQUIRED')
+  await h.chat.resume({ conversationId: 'thread-1' })
+  assert.equal((await h.chat.send({ message: 'Retry', requestId: 'third', conversationId: 'thread-1' })).conversationId, 'thread-1')
+  assert.equal(h.calls.filter(call => call.method === 'thread/start').length, 1)
+})
+
+test('explicit profile disable reloads the same idle native thread with ordinary config instructions and retains history', async () => {
+  let effective = null
+  const seenByTurns = []
+  const h = harness({ request: async (method, params, chat, defaults) => {
+    if (method === 'config/read') {
+      assert.deepEqual(params, { includeLayers: false, cwd: '/work' })
+      return { config: { developer_instructions: 'Ordinary project instructions' } }
+    }
+    if (method === 'thread/unsubscribe') return { status: 'unsubscribed' }
+    if (method === 'thread/start' || method === 'thread/resume') {
+      if (Object.hasOwn(params, 'developerInstructions')) effective = params.developerInstructions
+    }
+    if (method === 'turn/start') seenByTurns.push(effective)
+    return defaults(method, params)
+  } })
+  const first = await h.chat.send({ message: 'First', profileEnabled: true, systemPrompt: 'Selected persona' })
+  await h.item(first, { type: 'agentMessage', id: 'old-answer', text: 'Old answer is retained.' })
+  await h.finish(first)
+  const next = await h.chat.send({ message: 'Next', conversationId: first.conversationId, profileEnabled: false })
+  assert.equal(next.conversationId, first.conversationId)
+  assert.deepEqual(seenByTurns, ['Selected persona', 'Ordinary project instructions'])
+  assert.ok(h.calls.find(call => call.method === 'thread/resume' && call.params.developerInstructions === 'Ordinary project instructions'))
+  assert.equal(h.calls.filter(call => call.method === 'thread/start').length, 1)
+  assert.equal(h.chat.snapshot().runs[0].messages[0].text, 'Old answer is retained.')
+})
+
+test('no ordinary developer instructions uses an explicit empty native override, never null/omission', async () => {
+  const h = harness({ request: async (method, params, chat, defaults) => {
+    if (method === 'config/read') return { config: { developer_instructions: null } }
+    if (method === 'thread/unsubscribe') return { status: 'unsubscribed' }
+    return defaults(method, params)
+  } })
+  const first = await h.chat.send({ message: 'First', profileEnabled: true, systemPrompt: 'Persona' })
+  await h.finish(first)
+  await h.chat.send({ message: 'Ordinary', conversationId: first.conversationId, profileEnabled: false })
+  const resume = h.calls.find(call => call.method === 'thread/resume')
+  assert.equal(resume.params.developerInstructions, '')
+  assert.equal(Object.hasOwn(resume.params, 'developerInstructions'), true)
+})
+
+test('profile transition is blocked while a turn is active', async () => {
+  const h = harness()
+  const run = await h.chat.send({ message: 'Work', profileEnabled: true, systemPrompt: 'Persona' })
+  await assert.rejects(h.chat.send({ message: 'Ordinary', conversationId: run.conversationId, profileEnabled: false }), error => error.code === 'RUN_IN_PROGRESS')
+  assert.equal(h.calls.some(call => call.method === 'config/read' || call.method === 'thread/unsubscribe'), false)
+})
+
+test('unresolved ordinary config aborts profile disable before detaching or starting another turn', async () => {
+  const h = harness({ request: async (method, params, chat, defaults) => {
+    if (method === 'config/read') throw new Error('Config unavailable')
+    return defaults(method, params)
+  } })
+  const first = await h.chat.send({ message: 'First', profileEnabled: true, systemPrompt: 'Persona' })
+  await h.finish(first)
+  await assert.rejects(h.chat.send({ message: 'Next', conversationId: first.conversationId, profileEnabled: false }), error => /Config unavailable/.test(error.message) && error.conversationId === first.conversationId)
+  assert.equal(h.calls.filter(call => call.method === 'turn/start').length, 1)
+  assert.equal(h.calls.some(call => call.method === 'thread/unsubscribe'), false)
+})
+
+test('network approvals preserve only public host/protocol and request scope, including a meaningful legacy reason', async () => {
+  const h = harness()
+  const run = await h.chat.send({ message: 'Network work' })
+  await h.chat.handleServerRequest({ id: 'net', method: 'item/commandExecution/requestApproval', params: {
+    threadId: run.conversationId, turnId: run.runId, itemId: 'network-item', command: null,
+    networkApprovalContext: { host: 'api.example.com', protocol: 'https', token: 'DO_NOT_EXPOSE' },
+  } })
+  const pending = h.chat.snapshot().runs[0].pendingApprovals[0]
+  assert.deepEqual(pending.networkApprovalContext, { host: 'api.example.com', protocol: 'https' })
+  assert.equal(pending.scope, 'request')
+  assert.ok(pending.reason.includes('api.example.com'))
+  assert.ok(pending.choices.includes('accept'))
+  assert.ok(!JSON.stringify([pending, h.events]).includes('DO_NOT_EXPOSE'))
+})
+
+test('unknown network target/protocol and absent command never offer blind accept', async () => {
+  const h = harness()
+  const run = await h.chat.send({ message: 'Work' })
+  const examples = [
+    { networkApprovalContext: { host: 'https://alice:secret@example.com/path', protocol: 'https' } },
+    { networkApprovalContext: { host: 'example.com', protocol: 'unknown' } },
+    {},
+    { kind: 'writeStdin', command: 'old command' },
+  ]
+  for (let i = 0; i < examples.length; i++) await h.chat.handleServerRequest({ id: `unknown-${i}`, method: 'item/commandExecution/requestApproval', params: { threadId: run.conversationId, turnId: run.runId, itemId: `item-${i}`, ...examples[i] } })
+  for (const approval of h.chat.snapshot().runs[0].pendingApprovals) {
+    assert.deepEqual(approval.choices, ['decline', 'cancel'])
+    assert.ok(approval.acceptDisabledReason)
+    await assert.rejects(h.chat.replyApproval({ ...run, approvalId: approval.approvalId, decision: 'accept' }), error => error.code === 'INVALID_DECISION')
+  }
+  assert.equal(h.replies.length, 0)
+  assert.ok(!JSON.stringify(h.events).includes('alice:secret'))
+})

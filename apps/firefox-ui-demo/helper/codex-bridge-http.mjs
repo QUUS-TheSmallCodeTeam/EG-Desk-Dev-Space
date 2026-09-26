@@ -57,15 +57,20 @@ export function createChatHttpHandler(chat, ensureAuth) {
     let body = {}
     try {
       body = await readJsonBody(req)
-      await ensureAuth()
+      // Existing correlated stop/denial is fail-safe even if account lookup is
+      // unavailable. Runtime methods still verify connection, turn and callback.
+      const isSafetyResponse = url.pathname === '/chat/interrupt'
+        || (url.pathname === '/chat/approval' && ['decline', 'cancel'].includes(body.decision))
+      if (!isSafetyResponse) await ensureAuth()
       const action = { '/chat/send': 'send', '/chat/resume': 'resume', '/chat/interrupt': 'interrupt', '/chat/approval': 'replyApproval' }[url.pathname]
       const result = await chat[action](body)
       sendJson(res, url.pathname === '/chat/send' ? 202 : 200, result)
     } catch (error) {
       sendJson(res, error.httpStatus || 500, {
         accepted: false,
-        conversationId: typeof body.conversationId === 'string' ? body.conversationId : '',
-        requestId: typeof body.requestId === 'string' ? body.requestId : null,
+        conversationId: typeof error.conversationId === 'string' ? error.conversationId : (typeof body.conversationId === 'string' ? body.conversationId : ''),
+        requestId: typeof error.requestId === 'string' ? error.requestId : (typeof body.requestId === 'string' ? body.requestId : null),
+        ...(typeof error.resumeRequired === 'boolean' ? { resumeRequired: error.resumeRequired } : {}),
         code: typeof error.code === 'string' ? error.code : 'CHAT_ERROR',
         error: publicText(error.message, 2000),
       })

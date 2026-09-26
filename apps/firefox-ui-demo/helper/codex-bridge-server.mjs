@@ -3,6 +3,7 @@ import { spawn } from 'node:child_process'
 import { AppServerRpc } from './codex-app-server-rpc.mjs'
 import { CodexChatRuntime } from './codex-chat-runtime.mjs'
 import { createChatHttpHandler, guardBridgeRequest, readJsonBody, sendJson, setBridgeCors } from './codex-bridge-http.mjs'
+import { BoundedSseClient } from './codex-bridge-sse.mjs'
 import { chatError, publicText } from './codex-chat-values.mjs'
 import { randomBytes } from 'node:crypto'
 import * as os from 'node:os'
@@ -43,16 +44,9 @@ const authState = {
 
 function broadcast(event, chatProtocol = 0) {
   const payload = `event: codex\ndata: ${JSON.stringify(event)}\n\n`
-  for (const res of clients) {
-    if (chatProtocol && res.chatProtocol !== chatProtocol) continue
-    try {
-      if (!res.write(payload)) {
-        clients.delete(res)
-        res.destroy()
-      }
-    } catch {
-      clients.delete(res)
-    }
+  for (const client of clients) {
+    if (chatProtocol && client.chatProtocol !== chatProtocol) continue
+    client.send(payload)
   }
 }
 
@@ -521,10 +515,12 @@ const bridgeServer = createServer(async (req, res) => {
       'Cache-Control': 'no-cache',
       Connection: 'keep-alive',
     })
-    res.write('event: ready\ndata: {"ok":true}\n\n')
-    res.chatProtocol = url.searchParams.get('chatProtocol') === '2' ? 2 : 1
-    clients.add(res)
-    req.on('close', () => clients.delete(res))
+    const client = new BoundedSseClient(res, {
+      chatProtocol: url.searchParams.get('chatProtocol') === '2' ? 2 : 1,
+      onClose: () => clients.delete(client),
+    })
+    clients.add(client)
+    client.send(`retry: 1000\nevent: ready\ndata: ${JSON.stringify({ ok: true, streamId: chat.streamId, seq: chat.seq, resyncRequired: true })}\n\n`)
     return
   }
 
