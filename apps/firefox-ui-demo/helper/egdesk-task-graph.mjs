@@ -358,7 +358,9 @@ class TaskGraphRuntime {
   #scheduling = null;
   #scheduleAgain = false;
   #listeners = new Set();
-  #dispatched = new Set();
+  // Only an attempt claimed by this live scheduler, but not handed to execute
+  // yet, can be proven never dispatched. Replayed running attempts are unknown.
+  #pendingDispatch = new Set();
 
   constructor({ events, store, maxConcurrency, execute, interrupt, requestApproval, verifyReceipt }) {
     this.#events = clone(events);
@@ -594,9 +596,15 @@ class TaskGraphRuntime {
     for (const task of current.tasks.values()) {
       if (task.state !== 'running') continue;
       const attemptId = task.attempts.at(-1).attemptId;
-      if (this.#dispatched.has(attemptId)) this.#launchInterrupt(current, task);
-      else await this.#append({ type: 'task-dispatch-skipped', graphId: graph.spec.graphId,
-        taskId: task.spec.taskId, attemptId });
+      if (this.#pendingDispatch.has(attemptId)) {
+        await this.#append({ type: 'task-dispatch-skipped', graphId: graph.spec.graphId,
+          taskId: task.spec.taskId, attemptId });
+        this.#pendingDispatch.delete(attemptId);
+      } else {
+        // Includes recovered attempts: an empty process-local set is not
+        // evidence that the native task never started.
+        this.#launchInterrupt(current, task);
+      }
     }
     return this.getGraph(graph.spec.graphId);
   }
@@ -665,8 +673,14 @@ class TaskGraphRuntime {
               this.#launchApproval(graph, task);
             } else {
               const attemptId = nextAttemptId(graph, task);
-              await this.#append({ type: 'task-started', graphId: graph.spec.graphId,
-                taskId: task.spec.taskId, attemptId });
+              this.#pendingDispatch.add(attemptId);
+              try {
+                await this.#append({ type: 'task-started', graphId: graph.spec.graphId,
+                  taskId: task.spec.taskId, attemptId });
+              } catch (cause) {
+                this.#pendingDispatch.delete(attemptId);
+                throw cause;
+              }
               this.#launchExecute(graph, task, attemptId);
             }
           } catch (cause) {
@@ -700,7 +714,7 @@ class TaskGraphRuntime {
     const context = this.#context(graph, task, attemptId);
     const current = this.#projection.graphs.get(graph.spec.graphId);
     if (current.cancelRequested) return;
-    this.#dispatched.add(attemptId);
+    this.#pendingDispatch.delete(attemptId);
     let nativeResult;
     try {
       nativeResult = this.#execute(context);

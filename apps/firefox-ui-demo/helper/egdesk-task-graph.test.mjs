@@ -320,3 +320,39 @@ test('cancel during a pending dispatch never starts after the cancel event', asy
   }
   assert.equal(native.starts.some((entry) => entry.binding.taskId === 'b'), false);
 });
+
+test('recovered running attempt cannot be cancelled as an undispatched local claim', async () => {
+  const directory = await mkdtemp(path.join(os.tmpdir(), 'egdesk-task-recovery-cancel-'));
+  try {
+    const firstNative = harness({ store: await openTaskStore(directory), maxConcurrency: 1 });
+    const first = await openTaskGraph(firstNative.callbacks);
+    const spec = graph([['a'], ['dependent', ['a']]], 'recovered');
+    await first.submitGraph(spec);
+    await first.activateGraph(scope(spec));
+    assert.equal(firstNative.starts.length, 1);
+
+    // Simulates reopening the journal while the native attempt may still live.
+    const recoveredNative = harness({ store: await openTaskStore(directory), maxConcurrency: 1 });
+    const recovered = await openTaskGraph(recoveredNative.callbacks);
+    await recovered.cancelGraph(scope(spec));
+    assert.equal(recoveredNative.interrupts.length, 1);
+    assert.deepEqual(recoveredNative.interrupts[0].binding, firstNative.starts[0].binding);
+    assert.equal(task(recovered, spec.graphId, 'a').status, 'running');
+    assert.equal(task(recovered, spec.graphId, 'dependent').status, 'cancelled');
+    assert.equal(recovered.getEvents().some((event) => event.type === 'task-dispatch-skipped'), false);
+    await assert.rejects(recovered.resumeGraph(scope(spec)), { code: 'E_TASK_RECONCILE' });
+
+    const unrelated = graph([['free']], 'unrelated');
+    await recovered.submitGraph(unrelated);
+    await recovered.activateGraph(scope(unrelated));
+    assert.equal(task(recovered, unrelated.graphId, 'free').status, 'ready');
+    assert.equal(recoveredNative.starts.length, 0, 'uncertain native attempt retains its slot');
+
+    const stopReceipt = recoveredNative.receipt(recoveredNative.interrupts[0], 'cancelled', ['native-stop']);
+    await recovered.confirmCancellation(stopReceipt);
+    assert.equal(task(recovered, spec.graphId, 'a').status, 'cancelled');
+    assert.deepEqual(recoveredNative.starts.map((entry) => entry.binding.taskId), ['free']);
+  } finally {
+    await rm(directory, { recursive: true, force: true });
+  }
+});
