@@ -29,6 +29,29 @@ test('loopback boundary rejects hostile Origin, Host, cross-site and nonlocal re
   assert.notEqual(res.headers['Access-Control-Allow-Origin'], '*')
 })
 
+test('opaque/null origins reject same-site and every unrecognized present Fetch Metadata value', () => {
+  for (const fetchSite of ['same-site', 'cross-site', 'unknown', '', 'Same-Origin', 'none, same-origin', null, undefined, ['same-origin']]) {
+    assert.equal(guardBridgeRequest(request('{}', { origin: 'null', 'sec-fetch-site': fetchSite })), false, String(fetchSite))
+  }
+  for (const origin of ['https://evil.example', 'http://localhost:8080', 'http://127.0.0.1:8080']) {
+    for (const fetchSite of ['none', 'same-origin']) {
+      assert.equal(guardBridgeRequest(request('{}', { origin, 'sec-fetch-site': fetchSite })), false)
+    }
+  }
+})
+
+test('trusted loopback/Chrome origins retain missing-header, none and same-origin compatibility', () => {
+  for (const origin of [undefined, 'null', 'chrome://browser', 'chrome://userchrome', 'http://127.0.0.1:39218', 'http://localhost:39218']) {
+    for (const fetchSite of [undefined, 'none', 'same-origin']) {
+      const headers = {}
+      if (origin !== undefined) headers.origin = origin
+      if (fetchSite !== undefined) headers['sec-fetch-site'] = fetchSite
+      assert.equal(guardBridgeRequest(request('{}', headers)), true)
+      assert.equal(guardBridgeRequest(request('{}', { ...headers, host: 'other.example:39218' })), false)
+    }
+  }
+})
+
 test('JSON reader rejects oversized bodies, non-JSON types and non-object data', async () => {
   assert.deepEqual(await readJsonBody(request('{"message":"hi"}')), { message: 'hi' })
   await assert.rejects(readJsonBody(request('[')), e => e.code === 'INVALID_JSON')

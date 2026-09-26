@@ -7,7 +7,10 @@ export function guardBridgeRequest(req, port = 39218) {
   const local = new Set(['127.0.0.1', '::1', '::ffff:127.0.0.1'])
   if (req.socket?.remoteAddress && !local.has(req.socket.remoteAddress)) return false
   if (![ `127.0.0.1:${port}`, `localhost:${port}`, `[::1]:${port}` ].includes(req.headers.host)) return false
-  if (req.headers['sec-fetch-site'] === 'cross-site') return false
+  const fetchSite = req.headers['sec-fetch-site']
+  // Opaque pages on another loopback port can be same-site. Present metadata
+  // must identify a trusted initiation context; omission remains valid for CLI.
+  if (Object.hasOwn(req.headers, 'sec-fetch-site') && !['none', 'same-origin'].includes(fetchSite)) return false
   const origin = req.headers.origin
   return origin === undefined || ['null', 'chrome://browser', 'chrome://userchrome', `http://127.0.0.1:${port}`, `http://localhost:${port}`, `http://[::1]:${port}`].includes(origin)
 }
