@@ -39,7 +39,7 @@ function isProviderIdentity(value, ...providerNames) {
   return !candidate || markers.has(candidate);
 }
 export function codexAccountKey(status) {
-  if (!status?.isLoggedIn) return null;
+  if (!status?.isLoggedIn || status.identityStatus === 'unknown') return null;
   const id = identityText(status.accountId);
   const email = identityText(status.accountEmail).toLowerCase();
   const identity = id && !isProviderIdentity(id, status.provider, status.authMode)

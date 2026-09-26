@@ -631,3 +631,17 @@ test('unknown identity and transient account lookup failure do not manufacture i
   assert.equal(Chat.codexAccountChanged(knownKey, { isLoggedIn: false, accountId: 'chatgpt', accountEmail: 'b@example.test', statusText: 'lookup failed' }), false);
   assert.equal(Chat.codexAccountChanged('codex:chatgpt:chatgpt', { ...unknown, accountEmail: 'a@example.test' }), false);
 });
+
+test('public known identity contract supports real ID and email basis without provider-marker identity', () => {
+  const emailIdentity = { isLoggedIn: true, authMode: 'chatgpt', accountId: null, accountEmail: 'a@example.test', identityStatus: 'known', identityBasis: 'email' };
+  assert.equal(Chat.codexAccountKey(emailIdentity), 'codex:chatgpt:a@example.test');
+  const idIdentity = { ...emailIdentity, accountId: 'real-account-a', identityBasis: 'accountId' };
+  assert.equal(Chat.codexAccountKey(idIdentity), 'codex:chatgpt:real-account-a');
+});
+
+test('explicit unknown identity cannot reset an account even if stale identity fields remain', () => {
+  const unknown = { isLoggedIn: true, authMode: 'chatgpt', accountId: 'stale-account-b', accountEmail: 'b@example.test', identityStatus: 'unknown', identityBasis: null };
+  assert.equal(Chat.codexAccountKey(unknown), null);
+  assert.equal(Chat.codexAccountChanged('codex:chatgpt:real-account-a', unknown), false);
+  assert.equal(Chat.codexAccountKey({ ...unknown, accountId: null, accountEmail: null }), null);
+});
