@@ -1,8 +1,7 @@
 // Production close loop, with injected transport and clock for deterministic tests.
 export function terminalExitEvidence(result) {
-  if (!result || result.exited !== true) return null;
+  if (!result || result.exited !== true || result.unknown === true || result.status === 'unknown') return null;
   if (!result.error) return 'native-exit';
-  if (result.error === 'Session not found') return 'session-gone';
   return null;
 }
 
@@ -30,6 +29,10 @@ export function createTerminalCloseController({ requestKill, readStatus, onState
           if (result?.data) onOutput(result.data);
           const evidence = terminalExitEvidence(result);
           if (evidence) { publish({ phase: 'confirmed', evidence, attempts: attempt, error: null }); return true; }
+          if (result?.error === 'Session not found' || result?.unknown === true || result?.status === 'unknown') {
+            publish({ phase: 'unknown', attempts: attempt, error: '세션이 조회되지 않지만 실행 종료는 확인되지 않았습니다.' });
+            return false;
+          }
           if (result?.error) throw new Error(result.error);
           failures = 0;
           publish({ attempts: attempt, error: null });

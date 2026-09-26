@@ -641,6 +641,11 @@
     const oldBody = panel.querySelector('.egd-codex-activity-body');
     const scrollTop = oldBody?.scrollTop || 0;
     const rows = [];
+    const history = state.codex.chatProtocol.histories[thread.conversationId];
+    const partialHistory = history?.truncated || history?.historyComplete === false
+      || codexRuns(thread).some(run => run.truncated || run.historyComplete === false);
+    if (partialHistory) rows.push(el('p', { role: 'status', data: { testid: 'chat-history-status', complete: 'false' } }, '일부 기록만 표시됩니다. 이전 활동이나 메시지가 빠져 있을 수 있습니다.'));
+    if (state.codex.chatProtocol.unobservedPreviousRun) rows.push(el('p', { role: 'status', data: { testid: 'chat-account-reset-status' } }, '이전 Codex 연결의 실행 종료는 확인되지 않았습니다. 로그아웃은 중지 확인이 아닙니다. 이전 계정에 다시 연결해 상태를 확인하세요.'));
     for (const run of codexRuns(thread)) {
       rows.push(el('h4', { data: { runId: run.runId } }, codexRunLabel(run)));
       if (run.summary) rows.push(el('p', { class: 'egd-codex-public-summary' }, run.summary));
@@ -675,11 +680,12 @@
           el('p', {}, approval.reason || '실행이 승인을 기다리고 있습니다.'),
           approval.command ? el('pre', {}, approval.command) : null,
           approval.cwd ? el('p', {}, `작업 위치: ${approval.cwd}`) : null,
+          approval.scope === 'request' ? el('p', {}, '승인 범위: 이번 요청') : null,
           ...(approval.paths || []).map(path => el('p', {}, `요청 대상: ${path}`)));
-        if (approval.networkContext !== undefined) {
-          block.appendChild(el('p', {}, `네트워크 대상: ${approval.networkContext?.protocol || '프로토콜 미확인'} · ${approval.networkContext?.host || '호스트 미확인'}`));
+        if (approval.networkApprovalContext != null) {
+          block.appendChild(el('p', {}, `네트워크 대상: ${approval.networkApprovalContext.protocol || '프로토콜 미확인'} · ${approval.networkApprovalContext.host || '호스트 미확인'} · 이번 요청`));
         }
-        if (!ChatState.approvalScopeKnown(approval)) block.appendChild(el('p', {}, '요청 범위를 확인하지 못해 허용할 수 없습니다. 거절하거나 취소할 수 있습니다.'));
+        if (!ChatState.approvalScopeKnown(approval)) block.appendChild(el('p', {}, approval.acceptDisabledReason || '요청 범위를 확인하지 못해 허용할 수 없습니다. 거절하거나 취소할 수 있습니다.'));
         for (const decision of approval.choices || []) {
           const label = { accept: '허용', decline: '거절', cancel: '취소' }[decision];
           if (!label) continue;
@@ -1173,6 +1179,8 @@
       boardProjections: cloneJson(state.boards),
       chat: {
         threads: cloneJson(state.codex.threads), activeThreadId: state.codex.activeThreadId,
+        codexAccountKey: state.codex.codexAccountKey || null,
+        unobservedPreviousRun: !!state.codex.chatProtocol.unobservedPreviousRun,
         threadDrafts: { ...state.codex.threadDrafts }, hudView: state.codex.hudView,
       },
     };
@@ -1411,6 +1419,8 @@
     try {
       // Automatic Desk restore uses its own snapshot, never a Saved Board as a substitute.
       if (!options.merge && Array.isArray(snapshot.chat?.threads)) {
+        state.codex.codexAccountKey = snapshot.chat.codexAccountKey || null;
+        state.codex.chatProtocol.unobservedPreviousRun ||= !!snapshot.chat.unobservedPreviousRun;
         state.codex.threads = snapshot.chat.threads.map(thread => ({ ...thread, resuming: !!thread.conversationId }));
         state.codex.activeThreadId = snapshot.chat.activeThreadId;
         state.codex.threadDrafts = { ...snapshot.chat.threadDrafts };
@@ -4447,11 +4457,14 @@
                 `egd-codex-bubble-${message.role}`,
                 groupedWithPrevious ? 'egd-codex-bubble-grouped-prev' : '',
                 groupedWithNext ? 'egd-codex-bubble-grouped-next' : '',
-                message.status === 'error' ? 'egd-codex-bubble-error' : '',
+                ['error', 'failed'].includes(message.status) ? 'egd-codex-bubble-error' : '',
               ].filter(Boolean).join(' '),
             },
             content,
             );
+            if (message.role === 'user' && ['submitting', 'unconfirmed', 'failed'].includes(message.status)) {
+              bubble.appendChild(el('span', { class: 'egd-codex-message-time', role: 'status' }, ({ submitting: '보내는 중', unconfirmed: '접수 미확인', failed: '전송 거절됨' })[message.status]));
+            }
             if (message.status === 'streaming' && message.role === 'assistant' && activeThread.profileEnabled === true) {
               bubble.appendChild(el('div', {
                 class: 'egd-codex-streaming',
@@ -4485,12 +4498,17 @@
         const run = codexCurrentRun(activeThread);
         const pending = Object.values(codex.chatProtocol.requests).find(request => request.clientThreadId === activeThread.id && ['submitting', 'unconfirmed'].includes(request.status));
         const status = activeThread.resuming ? 'restoring' : pending?.status || run?.status || 'ready';
-        const statusText = activeThread.resuming ? '대화 상태 확인 중' : pending ? (pending.status === 'unconfirmed' ? '접수 상태 확인 필요' : '요청 보내는 중') : codexRunLabel(run);
+        const statusText = activeThread.resuming ? '대화 상태 확인 중' : pending ? (pending.status === 'unconfirmed' ? '접수 상태 확인 필요' : '요청 보내는 중')
+          : !run && codex.chatProtocol.unobservedPreviousRun ? '이전 연결의 실행 상태 미확인' : codexRunLabel(run);
         conversation.appendChild(el('div', {
           class: 'egd-codex-run-status', role: 'status', 'aria-live': 'polite',
           data: { testid: 'chat-run-status', status, runId: run?.runId || '', stopConfirmed: String(run?.status === 'interrupted') },
         }, el('span', {}, statusText),
         el('button', { 'aria-label': '활동 기록 열기', data: { testid: 'chat-activity-open', threadId: activeThread.id }, onclick: () => codexBridge.openActivity(activeThread.id) }, run?.pendingApprovals?.length ? `활동 기록 · 승인 ${run.pendingApprovals.length}건` : '활동 기록')));
+        if (pending?.status === 'unconfirmed') conversation.appendChild(el('button', {
+          class: 'egd-codex-chip', 'aria-label': '요청 접수 상태 다시 확인', data: { testid: 'chat-reconcile' },
+          onclick: () => codexBridge.reconcileRequest(activeThread.id),
+        }, '접수 상태 다시 확인'));
         if (activeThread.sendError) conversation.appendChild(el('p', { class: 'egd-codex-error', role: 'alert' }, activeThread.sendError));
         if (!activeThread.messages.some(message => message.role === 'assistant' && message.runId === run?.runId)) {
           const chips = buildCodexResultChips(null, activeThread, run?.artifacts);
@@ -4751,7 +4769,8 @@
   function installCodexBridge() {
     const listeners = new Set();
     const protocol = state.codex.chatProtocol;
-    const refreshing = new Set();
+    const epochScope = ChatState.createChatEpochScope({ makeController: () => new window.AbortController() });
+    const refreshing = new Map();
     let source = null;
     let reconnectTimer = null;
 
@@ -4776,24 +4795,31 @@
     async function refreshConversation(thread, resume = false) {
       if (!thread?.conversationId || refreshing.has(thread.conversationId)) return null;
       const conversationId = thread.conversationId;
-      refreshing.add(conversationId);
+      const token = epochScope.begin();
+      refreshing.set(conversationId, token);
       updateThreadById(thread.id, current => ({ ...current, resuming: true }));
       emit();
       try {
         const snapshot = resume
-          ? await fetchJson('/chat/resume', { method: 'POST', body: JSON.stringify({ conversationId, clientThreadId: thread.id }) })
-          : await fetchJson(`/chat/state?conversationId=${encodeURIComponent(conversationId)}`);
+          ? await fetchJson('/chat/resume', { method: 'POST', signal: token.signal, body: JSON.stringify({ conversationId, clientThreadId: thread.id }) })
+          : await fetchJson(`/chat/state?conversationId=${encodeURIComponent(conversationId)}`, { signal: token.signal });
+        if (!epochScope.valid(token)) return null;
         for (const run of ChatState.mergeChatSnapshot(protocol, snapshot, thread.id)) syncProtocolRun(run);
+        if (resume && ChatState.settleReconciledRequests(protocol, thread.id, snapshot)) updateThreadById(thread.id, current => ({ ...current, sendError: '대화 기록을 다시 확인했습니다. 접수 미확인 메시지와 실제 기록을 확인한 뒤 다음 요청을 보내세요.' }));
         emit();
         return snapshot;
       } catch (error) {
+        if (!epochScope.valid(token)) return null;
         updateThreadById(thread.id, current => ({ ...current, sendError: `상태를 확인하지 못했습니다: ${error.message}` }));
         emit();
         return null;
       } finally {
-        refreshing.delete(conversationId);
-        updateThreadById(thread.id, current => ({ ...current, resuming: false }));
-        emit();
+        epochScope.finish(token);
+        if (refreshing.get(conversationId) === token) refreshing.delete(conversationId);
+        if (epochScope.valid(token)) {
+          updateThreadById(thread.id, current => ({ ...current, resuming: false }));
+          emit();
+        }
       }
     }
 
@@ -4874,6 +4900,9 @@
       scheduleDeskSessionSave();
     };
     const update = (patch) => {
+      const accountKey = ChatState.codexAccountKey(patch.authStatus);
+      if (accountKey && state.codex.codexAccountKey && accountKey !== state.codex.codexAccountKey) resetThreadConversations();
+      if (accountKey) state.codex.codexAccountKey = accountKey;
       Object.assign(state.codex, patch);
       emit();
     };
@@ -4959,10 +4988,17 @@
       };
     };
     const resetThreadConversations = () => {
+      epochScope.reset();
+      ChatState.resetChatProtocol(protocol);
+      refreshing.clear();
+      try { source?.close(); } catch {}
+      source = null;
       state.codex.threads = state.codex.threads.map((thread) => ({
         ...thread,
         conversationId: null,
         messages: [],
+        resuming: false,
+        sendError: null,
         unreadCount: 0,
         updatedAt: Date.now(),
       }));
@@ -4970,7 +5006,13 @@
       state.codex.messageThreadMap = {};
       state.codex.memberMenu = null;
       state.codex.threadMenu = null;
+      state.codex.activityThreadId = null;
+      state.codex.codexAccountKey = null;
+      state.codex.connected = false;
+      state.codex.loginLog = '';
+      state.codex.error = null;
       normalizeThreads();
+      scheduleReconnect();
     };
 
     const fetchJson = async (path, options = {}) => {
@@ -4990,6 +5032,8 @@
         error.status = response.status;
         error.code = payload?.code || null;
         error.conversationId = payload?.conversationId || null;
+        error.accepted = payload?.accepted;
+        error.resumeRequired = payload?.resumeRequired;
         throw error;
       }
       return response.json();
@@ -5048,6 +5092,7 @@
           return;
         case 'chat.event': {
           if (event.v === 2) {
+            if (!ChatState.canAdmitChatEvent(protocol, state.codex.threads, event)) return;
             const run = ChatState.reduceChatEvent(protocol, event);
             if (run) { syncProtocolRun(run); emit(); }
           }
@@ -5080,8 +5125,11 @@
     };
 
     const connect = async () => {
+      const token = epochScope.begin();
       try {
-        const bridgeState = await fetchJson('/v1/state');
+      try {
+        const bridgeState = await fetchJson('/v1/state', { signal: token.signal });
+        if (!epochScope.valid(token)) return;
         const status = bridgeState?.auth || state.codex.authStatus;
         if (
           status?.loginInProgress &&
@@ -5099,15 +5147,20 @@
           error: null,
         });
       } catch (error) {
+        if (!epochScope.valid(token)) return;
         try {
-          const status = await fetchJson('/auth/status');
+          const status = await fetchJson('/auth/status', { signal: token.signal });
+          if (!epochScope.valid(token)) return;
           update({ authStatus: status, isStartingLogin: Boolean(status.loginInProgress), connected: true, error: null });
         } catch (fallbackError) {
+          if (!epochScope.valid(token)) return;
           update({ connected: false, error: `코덱스 브리지에 연결할 수 없습니다: ${fallbackError.message}` });
           scheduleReconnect();
         }
       }
 
+      if (!epochScope.valid(token)) return;
+      const streamEpoch = epochScope.current();
       try {
         source = new EventSource('http://127.0.0.1:39218/events?chatProtocol=2');
       } catch (error) {
@@ -5115,12 +5168,15 @@
         return;
       }
 
-      source.addEventListener('ready', () => {
+      const connectionSource = source;
+      connectionSource.addEventListener('ready', () => {
+        if (!epochScope.valid(streamEpoch) || source !== connectionSource) return;
         update({ connected: true });
         for (const thread of state.codex.threads) if (thread.conversationId) void refreshConversation(thread, true);
       });
 
       const receive = (message) => {
+        if (!epochScope.valid(streamEpoch) || source !== connectionSource) return;
         try {
           handleEvent(JSON.parse(message.data));
         } catch (error) {
@@ -5131,18 +5187,41 @@
       source.addEventListener('message', receive);
       source.addEventListener('chat.event', receive);
 
-      source.onerror = () => {
-        try { source?.close(); } catch {}
+      connectionSource.onerror = () => {
+        if (!epochScope.valid(streamEpoch) || source !== connectionSource) return;
+        try { connectionSource.close(); } catch {}
         source = null;
         protocol.connection = 'offline';
         update({ connected: false });
         scheduleReconnect();
       };
+      } finally { epochScope.finish(token); }
     };
 
     connect();
 
     return {
+      async reconcileRequest(threadId = state.codex.activeThreadId) {
+        const thread = getCodexThreadById(state.codex, threadId);
+        if (!thread) return null;
+        if (thread.conversationId) return refreshConversation(thread, true);
+        const token = epochScope.begin();
+        try {
+          const snapshot = await fetchJson('/chat/state', { signal: token.signal });
+          if (!epochScope.valid(token)) return null;
+          const requests = Object.values(protocol.requests).filter(request => request.clientThreadId === threadId);
+          const matching = (snapshot.runs || []).filter(run => requests.some(request => request.requestId === run.requestId));
+          for (const run of matching) {
+            for (const updated of ChatState.mergeChatSnapshot(protocol, { ...snapshot, conversationId: run.conversationId, runs: [run] }, threadId)) syncProtocolRun(updated);
+          }
+          if (!matching.length) updateThreadById(threadId, current => ({ ...current, sendError: '서버에서 이 요청의 실행을 아직 확인하지 못했습니다. 자동으로 다시 보내지 않습니다.' }));
+          emit();
+          return snapshot;
+        } catch (error) {
+          if (epochScope.valid(token)) { updateThreadById(threadId, current => ({ ...current, sendError: error.message })); emit(); }
+          return null;
+        } finally { epochScope.finish(token); }
+      },
       refreshConversation(threadId = state.codex.activeThreadId) {
         return refreshConversation(getCodexThreadById(state.codex, threadId), true);
       },
@@ -5155,27 +5234,32 @@
         const approval = run?.pendingApprovals.find(item => (item.approvalId || item.id) === approvalId);
         const request = ChatState.approvalRequestFor(run, approvalId, decision);
         if (!request) return false;
+        const token = epochScope.begin();
         approval.replyPending = true;
         emit();
         try {
-          const result = await fetchJson('/chat/approval', { method: 'POST', body: JSON.stringify(request) });
+          const result = await fetchJson('/chat/approval', { method: 'POST', signal: token.signal, body: JSON.stringify(request) });
+          if (!epochScope.valid(token)) return false;
           ChatState.acknowledgeApprovalReply(run, result);
           return result;
         } catch (error) {
+          if (!epochScope.valid(token)) return false;
           const current = run.pendingApprovals.find(item => (item.approvalId || item.id) === approvalId) || approval;
           current.stale = error.code === 'STALE_APPROVAL' || error.status === 409;
           current.error = current.stale ? '이 승인은 더 이상 유효하지 않습니다. 현재 상태를 다시 확인해 주세요.' : `응답 전달 여부를 확인하지 못했습니다: ${error.message}`;
           return false;
-        } finally { approval.replyPending = false; emit(); }
+        } finally { epochScope.finish(token); if (epochScope.valid(token)) { approval.replyPending = false; emit(); } }
       },
       async interrupt(threadId = state.codex.activeThreadId) {
         const thread = getCodexThreadById(state.codex, threadId);
         const run = ChatState.runsForThread(protocol, thread).findLast(ChatState.isRunBusy);
         if (!run || run.stopPending || run.stopRequested) return false;
+        const token = epochScope.begin();
         run.stopPending = true;
         emit();
         try {
-          const result = await fetchJson('/chat/interrupt', { method: 'POST', body: JSON.stringify({ conversationId: run.conversationId, runId: run.runId }) });
+          const result = await fetchJson('/chat/interrupt', { method: 'POST', signal: token.signal, body: JSON.stringify({ conversationId: run.conversationId, runId: run.runId }) });
+          if (!epochScope.valid(token)) return false;
           if (result.accepted && result.stopRequested && ChatState.isRunBusy(run)) {
             run.stopRequested = true;
             run.status = 'stopping';
@@ -5184,9 +5268,10 @@
           }
           return result;
         } catch (error) {
+          if (!epochScope.valid(token)) return false;
           updateThreadById(threadId, current => ({ ...current, sendError: `중지 여부를 확인하지 못했습니다: ${error.message}` }));
           return false;
-        } finally { run.stopPending = false; emit(); }
+        } finally { epochScope.finish(token); if (epochScope.valid(token)) { run.stopPending = false; emit(); } }
       },
       subscribe(listener) {
         listeners.add(listener);
@@ -5486,8 +5571,10 @@
         emit();
       },
       async refreshAuthStatus() {
+        const token = epochScope.begin();
         try {
-          const bridgeState = await fetchJson('/v1/state');
+          const bridgeState = await fetchJson('/v1/state', { signal: token.signal });
+          if (!epochScope.valid(token)) return;
           const status = bridgeState?.auth || state.codex.authStatus;
           update({
             provider: bridgeState?.provider || state.codex.provider,
@@ -5497,18 +5584,23 @@
             error: null,
           });
         } catch (error) {
+          if (!epochScope.valid(token)) return;
           try {
-            const status = await fetchJson('/auth/status');
+            const status = await fetchJson('/auth/status', { signal: token.signal });
+            if (!epochScope.valid(token)) return;
             update({ authStatus: status, isStartingLogin: Boolean(status.loginInProgress), error: null });
           } catch (fallbackError) {
+            if (!epochScope.valid(token)) return;
             update({ error: fallbackError.message });
           }
-        }
+        } finally { epochScope.finish(token); }
       },
       async startLogin() {
+        const token = epochScope.begin();
         try {
           update({ error: null });
-          const result = await fetchJson('/auth/start', { method: 'POST' });
+          const result = await fetchJson('/auth/start', { method: 'POST', signal: token.signal });
+          if (!epochScope.valid(token)) return;
           if (!result.started) {
             update({
               isStartingLogin: Boolean(result.loginInProgress),
@@ -5517,12 +5609,14 @@
             await this.refreshAuthStatus();
           }
         } catch (error) {
-          update({ error: error.message });
-        }
+          if (epochScope.valid(token)) update({ error: error.message });
+        } finally { epochScope.finish(token); }
       },
       async signOut() {
+        const token = epochScope.begin();
         try {
-          const status = await fetchJson('/auth/signout', { method: 'POST' });
+          const status = await fetchJson('/auth/signout', { method: 'POST', signal: token.signal });
+          if (!epochScope.valid(token)) return;
           resetThreadConversations();
           update({
             authStatus: status,
@@ -5533,13 +5627,14 @@
             error: null,
           });
         } catch (error) {
-          update({ error: error.message });
-        }
+          if (epochScope.valid(token)) update({ error: error.message });
+        } finally { epochScope.finish(token); }
       },
       async sendMessage() {
         const activeThread = getActiveCodexThread(state.codex);
         const content = getCodexThreadDraft(state.codex, activeThread?.id || null).trim();
         if (!activeThread || !content || threadBusy(activeThread) || !state.codex.authStatus.isLoggedIn || !state.codex.connected) return;
+        const token = epochScope.begin();
         const requestId = `request-${Date.now().toString(36)}-${Math.random().toString(36).slice(2)}`;
         ChatState.registerChatRequest(protocol, { requestId, clientThreadId: activeThread.id, conversationId: activeThread.conversationId, authorName: activeThread.profileEnabled ? codexThreadAgentProfile(activeThread).name : 'Codex' });
         appendMessageToThread(activeThread.id, createCodexMessage('user', content, 'submitting', {
@@ -5557,17 +5652,22 @@
           const runtimeConfig = codexThreadRuntimeConfig(activeThread);
           const result = await fetchJson('/chat/send', {
             method: 'POST',
+            signal: token.signal,
             body: JSON.stringify(ChatState.buildChatRequest(activeThread, content, requestId, runtimeConfig)),
           });
+          if (!epochScope.valid(token)) return;
           const run = ChatState.acceptChatRequest(protocol, result, requestId);
           if (run) syncProtocolRun(run);
           else {
             const error = new Error(result.error || '실행 접수 상태를 확인하지 못했습니다.');
             error.status = result.accepted === false ? 400 : 0;
             error.conversationId = result.conversationId || null;
+            error.accepted = result.accepted;
+            error.resumeRequired = result.resumeRequired;
             throw error;
           }
         } catch (error) {
+          if (!epochScope.valid(token)) return;
           const request = protocol.requests[requestId];
           if (error.conversationId) {
             request.conversationId = error.conversationId;
@@ -5575,14 +5675,14 @@
           }
           // An event can prove acceptance before a failed/late HTTP response arrives.
           if (!request.runId) {
-            request.status = error.status >= 400 && error.status < 500 ? 'failed' : 'unconfirmed';
+            request.status = ChatState.submissionFailureStatus(error);
             updateThreadById(activeThread.id, thread => ({ ...thread,
               sendError: request.status === 'unconfirmed' ? `접수 여부를 확인하지 못했습니다. 자동으로 다시 보내지 않습니다. ${error.message}` : error.message,
               messages: thread.messages.map(message => message.requestId === requestId ? { ...message, status: request.status } : message),
             }));
             if (request.status === 'failed' && !getCodexThreadDraft(state.codex, activeThread.id)) state.codex.threadDrafts[activeThread.id] = content;
           }
-        } finally { emit(); }
+        } finally { epochScope.finish(token); if (epochScope.valid(token)) emit(); }
       },
     };
   }

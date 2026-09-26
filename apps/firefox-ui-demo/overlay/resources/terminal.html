@@ -112,8 +112,8 @@
           body: JSON.stringify(body || {}), ...(controller ? { signal: controller.signal } : {}),
         });
         const result = await response.json().catch(() => ({}));
-        if (options.allowGone && path === '/terminal/read' && [400, 404].includes(response.status)
-            && result.error === 'Session not found' && result.exited === true) return result;
+        if (options.allowMissing && path === '/terminal/read' && [400, 404].includes(response.status)
+            && result.error === 'Session not found') return result;
         if (!response.ok || result.error) throw new Error(result.error || `HTTP ${response.status}`);
         return result;
       } finally { if (timeout) clearTimeout(timeout); }
@@ -170,10 +170,11 @@
       statusEl.textContent = closeState.phase === 'confirmed'
         ? '터미널 세션 종료 확인됨'
         : closeState.phase === 'offline' ? '연결이 끊겨 종료 여부를 확인하지 못했습니다.'
+        : closeState.phase === 'unknown' ? '세션이 조회되지 않지만 실행 종료는 확인되지 않았습니다.'
         : closeState.phase === 'timeout' ? '아직 실행 종료가 확인되지 않았습니다.' : '터미널 종료 확인 중…';
       statusEl.style.pointerEvents = 'none';
       statusEl.onclick = null;
-      if (closeState.phase === 'offline' || closeState.phase === 'timeout') {
+      if (['offline', 'timeout', 'unknown'].includes(closeState.phase)) {
         const retry = document.createElement('button');
         retry.textContent = '종료 상태 다시 확인';
         retry.setAttribute('aria-label', '터미널 종료 상태 다시 확인');
@@ -186,7 +187,8 @@
 
     const terminalCloser = createTerminalCloseController({
       requestKill: sessionId => postTerminal('/terminal/kill', { sessionId }, { timeoutMs: 1500 }),
-      readStatus: sessionId => postTerminal('/terminal/read', { sessionId }, { timeoutMs: 1500, allowGone: true }),
+      readStatus: sessionId => postTerminal('/terminal/read', { sessionId }, { timeoutMs: 1500, allowMissing: true }),
+      wait: ms => new Promise(resolve => window.setTimeout(resolve, ms)),
       onOutput: data => term.write(data),
       onState: closeState => {
         renderCloseState(closeState);

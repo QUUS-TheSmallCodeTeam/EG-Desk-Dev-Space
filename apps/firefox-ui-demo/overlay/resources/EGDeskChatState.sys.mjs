@@ -3,7 +3,50 @@ const copy = value => value == null ? value : JSON.parse(JSON.stringify(value));
 export const isRunBusy = run => !!run && !['completed', 'interrupted', 'failed', 'cancelled', 'unavailable'].includes(run.status);
 export const runKey = (conversationId, runId) => `${conversationId}/${runId}`;
 export function createChatProtocolState() {
-  return { requests: {}, runs: {}, streams: {}, streamGeneration: 0, connection: 'offline' };
+  return { requests: {}, runs: {}, streams: {}, histories: {}, streamGeneration: 0, connection: 'offline', unobservedPreviousRun: false };
+}
+export function resetChatProtocol(state) {
+  const unobserved = state.unobservedPreviousRun || Object.values(state.runs).some(run => isRunBusy(run) || run.error?.code === 'RUNTIME_LOST')
+    || Object.values(state.requests).some(request => ['submitting', 'unconfirmed'].includes(request.status));
+  for (const key of Object.keys(state)) delete state[key];
+  Object.assign(state, createChatProtocolState(), { unobservedPreviousRun: !!unobserved });
+}
+export function canAdmitChatEvent(state, threads, event) {
+  return !!(event?.requestId && state.requests[event.requestId])
+    || threads.some(thread => thread.conversationId && thread.conversationId === event?.conversationId);
+}
+export function createChatEpochScope({ makeController = () => new AbortController() } = {}) {
+  let epoch = 0;
+  const active = new Set();
+  return {
+    current: () => epoch,
+    begin: () => { const controller = makeController(); const token = { epoch, controller, signal: controller.signal }; active.add(token); return token; },
+    valid: token => (typeof token === 'number' ? token : token.epoch) === epoch,
+    finish: token => active.delete(token),
+    reset: () => { epoch++; for (const token of active) token.controller.abort(); active.clear(); },
+  };
+}
+export function codexAccountKey(status) {
+  if (!status?.isLoggedIn) return null;
+  const identity = status.accountId || status.accountEmail;
+  return identity ? `codex:${status.authMode || ''}:${identity}` : null;
+}
+export function submissionFailureStatus(error) {
+  if (error?.resumeRequired === true) return 'unconfirmed';
+  if (error?.accepted === false) return 'failed';
+  if (error?.status >= 400 && error.status < 500 && error.status !== 408) return 'failed';
+  return 'unconfirmed';
+}
+export function settleReconciledRequests(state, clientThreadId, snapshot) {
+  if (snapshot?.historyComplete !== true || snapshot.truncated === true) return 0;
+  let count = 0;
+  for (const request of Object.values(state.requests)) {
+    if (request.clientThreadId === clientThreadId && request.status === 'unconfirmed') {
+      request.status = 'reconciled';
+      count++;
+    }
+  }
+  return count;
 }
 function ensureStream(state, id) {
   return state.streams[id] ||= { seen: {}, checkpoints: {}, seq: -1, generation: ++state.streamGeneration };
@@ -12,7 +55,7 @@ export function registerChatRequest(state, request) {
   state.requests[request.requestId] = { ...request, status: 'submitting' };
 }
 export function buildChatRequest(thread, message, requestId, runtime = {}) {
-  const body = { message, requestId, clientThreadId: thread.id };
+  const body = { message, requestId, clientThreadId: thread.id, profileEnabled: thread.profileEnabled === true };
   if (thread.conversationId) body.conversationId = thread.conversationId;
   for (const field of ['cwd', 'model', 'effort']) if (runtime[field]) body[field] = runtime[field];
   if (thread.profileEnabled === true) {
@@ -71,10 +114,14 @@ export function reduceChatEvent(state, event) {
     if (!message) { message = { id, role: 'assistant', content: '', status: 'streaming', createdAt: event.ts }; run.messages.push(message); }
     if (event.event === 'message.started' && !message.content && typeof details.text === 'string') message.content = details.text;
     if (details.phase) message.phase = details.phase;
-    if (event.event === 'message.delta' && message.status !== 'complete') message.content += details.delta || '';
+    if (event.event === 'message.delta' && message.completionConfirmed !== true) {
+      message.content += details.delta || '';
+      message.status = 'streaming';
+    }
     if (event.event === 'message.completed') {
       if (typeof details.text === 'string') message.content = details.text;
       message.status = 'complete';
+      message.completionConfirmed = true;
     }
     message.answerId = run.answerId;
     message.runId = run.runId;
@@ -103,7 +150,9 @@ export function reduceChatEvent(state, event) {
     run.status = details.status || 'completed';
     run.error = details.error || null;
     run.pendingApprovals = [];
-    for (const message of run.messages) if (message.status === 'streaming') message.status = run.status === 'completed' ? 'complete' : 'partial';
+    for (const message of run.messages) {
+      if (message.status === 'streaming') message.status = run.status === 'completed' ? 'complete' : 'partial';
+    }
   } else if (event.event === 'run.unavailable') {
     run.error = details.error || { code: 'RUNTIME_LOST', message: '실행 연결이 끊어졌습니다.' };
     if (run.error.code === 'RUNTIME_LOST') {
@@ -136,6 +185,13 @@ export function mergeChatSnapshot(state, snapshot, clientThreadId) {
   const stream = snapshot.streamId ? ensureStream(state, snapshot.streamId) : null;
   if (!stream || stream.generation === state.streamGeneration) state.connection = snapshot.connection || 'offline';
   const stale = stream && stream.seq > snapshot.seq;
+  const previousHistory = state.histories[snapshot.conversationId];
+  const historyCurrent = !previousHistory || !stream || (stream.generation > (state.streams[previousHistory.streamId]?.generation || 0))
+    || (previousHistory.streamId === snapshot.streamId && snapshot.seq >= previousHistory.seq);
+  if (historyCurrent) state.histories[snapshot.conversationId] = {
+    streamId: snapshot.streamId, seq: snapshot.seq,
+    truncated: snapshot.truncated === true, historyComplete: snapshot.historyComplete === true,
+  };
   const changed = [];
   for (const incoming of snapshot.runs || []) {
     const run = ensureRun(state, { ...incoming, conversationId: snapshot.conversationId, clientThreadId });
@@ -144,13 +200,16 @@ export function mergeChatSnapshot(state, snapshot, clientThreadId) {
       || (stream && run.streamId && state.streams[run.streamId]?.generation > stream.generation);
     for (const key of ['messages', 'activities', 'artifacts']) {
       const values = key === 'artifacts' ? (incoming[key] || []).filter(usableArtifact)
-        : key === 'messages' ? (incoming[key] || []).map(message => ({ ...message, content: message.text ?? message.content ?? '' })) : incoming[key];
+        : key === 'messages' ? (incoming[key] || []).map(message => ({
+          ...message, content: message.text ?? message.content ?? '',
+          completionConfirmed: message.completionConfirmed === true || run.messages.some(previous => previous.id === (message.id || message.messageId) && previous.completionConfirmed === true),
+        })) : incoming[key];
       run[key] = key === 'artifacts' && !preserve && !snapshot.truncated && !incoming.truncated
         ? copy(values) : mergeItems(run[key], values, preserve);
     }
     run.messages = run.messages.map(message => ({ ...message, content: message.content ?? message.text ?? '', status: message.status === 'completed' ? 'complete' : message.status, role: message.role || 'assistant', runId: run.runId, answerId: run.answerId }));
     if (!preserve) {
-      for (const key of ['status', 'stopRequested', 'error', 'summary', 'plan', 'pendingApprovals']) if (key in incoming) run[key] = copy(incoming[key]);
+      for (const key of ['status', 'stopRequested', 'error', 'summary', 'plan', 'pendingApprovals', 'truncated', 'historyComplete']) if (key in incoming) run[key] = copy(incoming[key]);
       run.pendingApprovals = (run.pendingApprovals || []).map(approval => ({ ...approval, id: approval.id || approval.approvalId }));
       if (stream) { run.streamId = snapshot.streamId; run.seq = snapshot.seq; }
     }
@@ -176,8 +235,9 @@ export function approvalRequestFor(run, approvalId, decision) {
 
 export function approvalScopeKnown(approval) {
   if (!['commandExecution', 'fileChange'].includes(approval?.kind)) return false;
-  if (approval.networkContext !== undefined) {
-    const context = approval.networkContext;
+  if (approval.acceptDisabledReason) return false;
+  if (approval.networkApprovalContext != null) {
+    const context = approval.networkApprovalContext;
     return !!context && typeof context.host === 'string' && !!context.host.trim()
       && typeof context.protocol === 'string' && !!context.protocol.trim();
   }

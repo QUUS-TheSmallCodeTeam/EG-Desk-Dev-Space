@@ -107,7 +107,7 @@ const artifact = { id: 'file-a', type: 'file', target: { path: '/tmp/existing.tx
 
 test('ordinary Codex omits persona fields even if legacy defaults remain on the thread', () => {
   const runtime = { agentProfile: { id: 'persona' }, systemPrompt: 'persona instruction', toolMode: 'custom' };
-  assert.deepEqual(Chat.buildChatRequest({ id: 'ui-a', agentProfileId: 'legacy' }, 'hello', 'request-a', runtime), { clientThreadId: 'ui-a', requestId: 'request-a', message: 'hello' });
+  assert.deepEqual(Chat.buildChatRequest({ id: 'ui-a', agentProfileId: 'legacy' }, 'hello', 'request-a', runtime), { clientThreadId: 'ui-a', requestId: 'request-a', message: 'hello', profileEnabled: false });
   const selected = Chat.buildChatRequest({ id: 'ui-a', profileEnabled: true }, 'hello', 'r2', runtime);
   assert.equal(selected.profileEnabled, true);
   assert.equal(selected.systemPrompt, 'persona instruction');
@@ -226,12 +226,12 @@ test('approval choices bind the exact run and replySent does not complete execut
 });
 
 test('unknown network scope blocks only accept and leaves explicit denial available', () => {
-  const approval = { approvalId: 'p', kind: 'commandExecution', status: 'pending', choices: ['accept', 'decline', 'cancel'], networkContext: { protocol: 'https' } };
+  const approval = { approvalId: 'p', kind: 'commandExecution', status: 'pending', choices: ['accept', 'decline', 'cancel'], scope: 'request', networkApprovalContext: { protocol: 'https' } };
   const run = { conversationId: 'c', runId: 'r', pendingApprovals: [approval] };
   assert.equal(Chat.approvalRequestFor(run, 'p', 'accept'), null);
   assert.equal(Chat.approvalRequestFor(run, 'p', 'decline').decision, 'decline');
   assert.equal(Chat.approvalRequestFor(run, 'p', 'cancel').decision, 'cancel');
-  approval.networkContext.host = 'example.test';
+  approval.networkApprovalContext.host = 'example.test';
   assert.equal(Chat.approvalRequestFor(run, 'p', 'accept').decision, 'accept');
   approval.stale = true;
   assert.equal(Chat.approvalRequestFor(run, 'p', 'decline'), null);
@@ -347,12 +347,17 @@ test('terminal close observes after kill acknowledgement until native exit is co
   assert.equal(phases.at(-1), 'confirmed');
 });
 
-test('terminal confirmed-gone response is distinct from a transport error or mere kill ack', async () => {
+test('missing terminal registry entry is unknown, not native exit evidence; retry can later observe actual exit', async () => {
   assert.equal(terminalExitEvidence({ ok: true }), null);
   assert.equal(terminalExitEvidence({ error: 'offline', exited: true }), null);
-  const controller = createTerminalCloseController({ requestKill: async () => ({ ok: true }), readStatus: async () => ({ error: 'Session not found', data: '', exited: true }), wait: async () => {} });
-  assert.equal(await controller.close('pty-gone'), true);
-  assert.equal(controller.snapshot().evidence, 'session-gone');
+  assert.equal(terminalExitEvidence({ error: 'Session not found', exited: true }), null);
+  let receipt = false;
+  const controller = createTerminalCloseController({ requestKill: async () => ({ ok: true }), readStatus: async () => receipt ? { exited: true, exitCode: 0 } : { error: 'Session not found', data: '', exited: true }, wait: async () => {} });
+  assert.equal(await controller.close('pty-gone'), false);
+  assert.equal(controller.snapshot().phase, 'unknown');
+  receipt = true;
+  assert.equal(await controller.retry(), true);
+  assert.equal(controller.snapshot().evidence, 'native-exit');
 });
 
 test('terminal offline retry is bounded and re-observes the same PTY without spawning or repeating accepted kill', async () => {
@@ -396,4 +401,119 @@ test('Desk entry camera fits the Browser outside rail/sidebar/dock without chang
   assert.ok(pan.x + browser.width * zoom <= usable.left + usable.width + .001);
   assert.ok(pan.y + browser.height * zoom <= usable.top + usable.height + .001);
   assert.deepEqual(browser, before);
+});
+
+test('account reset drops all correlated data without inventing a stopped run', () => {
+  const state = Chat.createChatProtocolState();
+  Chat.registerChatRequest(state, { requestId: 'request-a', clientThreadId: 'ui-a' });
+  Chat.reduceChatEvent(state, envelope('run.started', 1));
+  Chat.reduceChatEvent(state, envelope('artifact.available', 2, artifact));
+  Chat.reduceChatEvent(state, envelope('approval.required', 3, { approvalId: 'old-private-approval', kind: 'commandExecution', status: 'pending', choices: ['accept'] }));
+  state.histories['conversation-a'] = { truncated: true };
+  state.extraAccountCache = { private: 'old-account' };
+  Chat.resetChatProtocol(state);
+  assert.deepEqual(state.runs, {});
+  assert.deepEqual(state.requests, {});
+  assert.deepEqual(state.streams, {});
+  assert.deepEqual(state.histories, {});
+  assert.equal(state.connection, 'offline');
+  assert.equal(state.unobservedPreviousRun, true);
+  assert.equal(JSON.stringify(state).includes('old-private-approval'), false);
+  assert.equal(JSON.stringify(state).includes('/tmp/existing.txt'), false);
+  assert.equal(state.extraAccountCache, undefined);
+  assert.equal(Chat.canAdmitChatEvent(state, [{ id: 'ui-a', conversationId: null }], envelope('run.started', 4)), false);
+});
+
+test('account epoch aborts refresh and rejects late fixture responses after reset', async () => {
+  const state = Chat.createChatProtocolState();
+  const scope = Chat.createChatEpochScope();
+  const token = scope.begin();
+  const oldStreamEpoch = scope.current();
+  let finish;
+  const response = new Promise(resolve => { finish = resolve; });
+  const work = (async () => {
+    const snapshot = await response;
+    if (scope.valid(token)) Chat.mergeChatSnapshot(state, snapshot, 'old-ui');
+  })();
+  scope.reset();
+  Chat.resetChatProtocol(state);
+  finish({ conversationId: 'old-account', streamId: 'old-stream', seq: 9, runs: [{ runId: 'old-turn', messages: [], artifacts: [artifact] }] });
+  await work;
+  assert.equal(token.signal.aborted, true);
+  assert.equal(scope.valid(oldStreamEpoch), false);
+  assert.deepEqual(state.runs, {});
+  assert.equal(scope.valid(scope.begin()), true);
+});
+
+test('account read failure is not an account-reset identity signal', () => {
+  const known = { isLoggedIn: true, accountId: 'account-a', authMode: 'chatgpt' };
+  assert.equal(Chat.codexAccountKey(known), 'codex:chatgpt:account-a');
+  assert.equal(Chat.codexAccountKey({ isLoggedIn: false, statusText: 'lookup failed' }), null);
+  assert.notEqual(Chat.codexAccountKey({ ...known, accountId: 'account-b' }), Chat.codexAccountKey(known));
+});
+
+test('explicit 503 rejection releases pending state; ambiguous network and resume-required replies do not claim rejection', () => {
+  assert.equal(Chat.submissionFailureStatus({ accepted: false, status: 503, code: 'BRIDGE_OFFLINE' }), 'failed');
+  assert.equal(Chat.submissionFailureStatus({ accepted: false, status: 500, resumeRequired: true }), 'unconfirmed');
+  assert.equal(Chat.submissionFailureStatus(new Error('network failure')), 'unconfirmed');
+  assert.equal(Chat.submissionFailureStatus({ status: 403 }), 'failed');
+});
+
+test('successful explicit full-history reconciliation releases uncertainty without claiming acceptance or stop', () => {
+  const state = Chat.createChatProtocolState();
+  state.requests.q = { requestId: 'q', clientThreadId: 'ui-a', status: 'unconfirmed' };
+  assert.equal(Chat.settleReconciledRequests(state, 'ui-a', { historyComplete: false, truncated: true }), 0);
+  assert.equal(state.requests.q.status, 'unconfirmed');
+  assert.equal(Chat.settleReconciledRequests(state, 'ui-a', { historyComplete: true, truncated: false }), 1);
+  assert.equal(state.requests.q.status, 'reconciled');
+  assert.deepEqual(state.runs, {});
+});
+
+test('hydrated complete status is not item completion proof: live deltas continue until completionConfirmed', () => {
+  const state = Chat.createChatProtocolState();
+  const snapshot = { conversationId: 'conversation-a', streamId: 'stream-a', seq: 1, connection: 'ready', runs: [{ runId: 'turn-a', status: 'inProgress', messages: [{ id: 'm', role: 'assistant', text: 'part ', status: 'complete', completionConfirmed: false }] }] };
+  const [run] = Chat.mergeChatSnapshot(state, snapshot, 'ui-a');
+  Chat.reduceChatEvent(state, envelope('message.delta', 2, { messageId: 'm', delta: 'two' }));
+  assert.equal(run.messages[0].content, 'part two');
+  assert.equal(run.messages[0].status, 'streaming');
+  Chat.reduceChatEvent(state, envelope('run.completed', 3, { status: 'completed' }));
+  assert.notEqual(run.messages[0].completionConfirmed, true);
+  Chat.reduceChatEvent(state, envelope('message.completed', 4, { messageId: 'm', text: 'authoritative complete' }));
+  Chat.reduceChatEvent(state, envelope('message.delta', 5, { messageId: 'm', delta: 'ignored late delta' }));
+  assert.equal(run.messages[0].content, 'authoritative complete');
+  assert.equal(run.messages[0].completionConfirmed, true);
+});
+
+test('history completeness flags survive snapshots and stale snapshots cannot hide truncation', () => {
+  const state = Chat.createChatProtocolState();
+  Chat.mergeChatSnapshot(state, { conversationId: 'c', streamId: 's', seq: 5, truncated: true, historyComplete: false, runs: [{ runId: 'r', status: 'inProgress', messages: [], truncated: true, historyComplete: false }] }, 'ui');
+  Chat.mergeChatSnapshot(state, { conversationId: 'c', streamId: 's', seq: 3, truncated: false, historyComplete: true, runs: [] }, 'ui');
+  assert.equal(state.histories.c.truncated, true);
+  assert.equal(state.histories.c.historyComplete, false);
+  assert.equal(state.runs['c/r'].truncated, true);
+  Chat.mergeChatSnapshot(state, { conversationId: 'c', streamId: 's', seq: 6, truncated: false, historyComplete: true, runs: [{ runId: 'r', truncated: false, historyComplete: true }] }, 'ui');
+  assert.equal(state.histories.c.historyComplete, true);
+  assert.equal(state.runs['c/r'].truncated, false);
+});
+
+test('final network approval contract honors null/disabled scope and public host/protocol', () => {
+  const approval = { approvalId: 'p', kind: 'commandExecution', status: 'pending', choices: ['accept', 'decline'], scope: 'request', networkApprovalContext: null, acceptDisabledReason: 'Network target missing' };
+  const run = { conversationId: 'c', runId: 'r', pendingApprovals: [approval] };
+  assert.equal(Chat.approvalRequestFor(run, 'p', 'accept'), null);
+  assert.equal(Chat.approvalRequestFor(run, 'p', 'decline').decision, 'decline');
+  delete approval.acceptDisabledReason;
+  approval.networkApprovalContext = { host: 'example.test', protocol: 'https' };
+  assert.equal(Chat.approvalRequestFor(run, 'p', 'accept').decision, 'accept');
+});
+
+test('profile-on to ordinary Codex explicitly sends false on the same conversation', () => {
+  const thread = { id: 'ui', conversationId: 'native-thread', profileEnabled: true };
+  const persona = { agentProfile: { id: 'chosen' }, systemPrompt: 'chosen instruction', toolMode: 'custom' };
+  const on = Chat.buildChatRequest(thread, 'first', 'request-on', persona);
+  thread.profileEnabled = false;
+  const off = Chat.buildChatRequest(thread, 'next', 'request-off', persona);
+  assert.equal(on.profileEnabled, true);
+  assert.equal(off.profileEnabled, false);
+  assert.equal(off.conversationId, on.conversationId);
+  assert.deepEqual(Object.keys(off).sort(), ['clientThreadId', 'conversationId', 'message', 'profileEnabled', 'requestId'].sort());
 });
