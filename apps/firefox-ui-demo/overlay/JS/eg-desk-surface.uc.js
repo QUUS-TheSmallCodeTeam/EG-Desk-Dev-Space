@@ -378,7 +378,7 @@
       switcherOpen: false,
       switcherQuery: '',
       switcherFilter: 'all',
-      activeTitle: 'EG-Desk Agenda',
+      activeTitle: 'EG-Desk',
       savedAgendaIds: [],
     },
     sourceRefs: {
@@ -974,7 +974,7 @@
         meta: {
           [id]: {
             id,
-            title: raw.agenda.title || 'EG-Desk Agenda',
+            title: raw.agenda.title || 'Board',
             createdAt: raw.savedAt || Date.now(),
             updatedAt: raw.savedAt || Date.now(),
           },
@@ -993,7 +993,7 @@
     const activeSnapshot = store.agendas?.[activeId] || null;
     const activeMeta = store.meta?.[activeId] || null;
     state.agenda.activeAgendaId = activeId;
-    state.agenda.activeTitle = activeSnapshot?.agenda?.title || activeMeta?.title || state.agenda.activeTitle || 'EG-Desk Agenda';
+    state.agenda.activeTitle = activeSnapshot?.agenda?.title || activeMeta?.title || state.agenda.activeTitle || 'EG-Desk';
     state.agenda.savedAgendaIds = Object.keys(store.agendas || {});
     state.agenda.hasSavedState = !!activeSnapshot;
     state.agenda.lastSavedAt = activeSnapshot?.savedAt || activeMeta?.updatedAt || null;
@@ -1452,7 +1452,7 @@
       }
       if (!options.merge) {
         state.agenda.activeAgendaId = snapshot.agenda.id || state.agenda.activeAgendaId;
-        state.agenda.activeTitle = snapshot.agenda.title || state.agenda.activeTitle || 'EG-Desk Agenda';
+        state.agenda.activeTitle = snapshot.agenda.title || state.agenda.activeTitle || 'EG-Desk';
       }
       if (!options.merge) {
         state.agenda.hasSavedState = true;
@@ -1741,7 +1741,7 @@
 
   function renameAgendaWithPrompt(agendaId) {
     const entry = agendaListEntries().find((item) => item.id === agendaId);
-    const nextTitle = window.prompt('Agenda 이름', entry?.title || 'Agenda');
+    const nextTitle = window.prompt('Board 이름', entry?.title || 'Board');
     if (nextTitle == null) return false;
     return renameAgenda(agendaId, nextTitle);
   }
@@ -2664,7 +2664,7 @@
               ev.stopPropagation();
               createNewAgenda();
             },
-          }, '새 Agenda'),
+          }, '새 Board'),
         ),
       ),
       el('div', { class: 'egd-agenda-switch-search' },
@@ -2966,7 +2966,7 @@
   function currentViewportAgendaLabel() {
     if (state.agenda.activeTitle) return state.agenda.activeTitle;
     const groupThread = state.codex?.threads?.find((thread) => thread.type === 'group');
-    return groupThread?.title || 'EG-Desk Agenda';
+    return groupThread?.title || 'EG-Desk';
   }
 
   function cardLabelForViewportRail(card) {
@@ -3452,7 +3452,8 @@
       }, '↺'),
       el('button', {
         class: 'egd-rail-icon egd-rail-close-agenda-btn',
-        title: 'Agenda 닫기',
+        title: 'Board 닫기',
+        'aria-label': '선택한 Board 닫기',
         onclick: (ev) => {
           ev.stopPropagation();
           closeCurrentAgenda();
@@ -3460,11 +3461,8 @@
       }, '×'),
       el('button', { class: 'egd-rail-icon', title: '미니맵', onclick: toggleDeskMinimap }, '◱'),
       el('button', { id: 'egd-recovery-open', class: 'egd-rail-icon', 'aria-label': '복구 기록', title: '복구 기록', hidden: true, onclick: () => renderDeskRecoveryNotice(true) }, '↶'),
-      el('button', { class: 'egd-rail-icon', title: '알림' },
-        '!',
-        el('span', { class: 'egd-rail-badge' }, '3'),
-      ),
-      el('div', { class: 'egd-rail-avatar', title: '프로필' }, 'M'),
+      el('button', { class: 'egd-rail-icon', title: '알림 연결 전', 'aria-label': '알림 연결 전', disabled: 'true' }, '!'),
+      el('div', { class: 'egd-rail-avatar', title: '로컬 Desk', 'aria-label': '로컬 Desk' }, '○'),
     );
 
     rail.appendChild(left);
@@ -10713,10 +10711,8 @@
     setSurfaceMode('desk');
     card.dataset.testid = 'browser-card';
     card.querySelector('#egd-desk-entry')?.setAttribute('hidden', 'true');
-    const width = parsePxNumber(card.style.width, window.innerWidth);
-    const height = parsePxNumber(card.style.height, window.innerHeight);
-    const zoom = Math.min(0.85, (window.innerWidth - 80) / width, (window.innerHeight - 160) / height);
-    state.setCanvasViewportTarget?.({ pan: { x: 40, y: 88 }, zoom }, { immediate: true });
+    const camera = SurfaceState.fitSurfaceCamera(persistentEntityGeometry(card), safeViewportRect({ margin: 20 }));
+    state.setCanvasViewportTarget?.(camera, { immediate: true });
     setActiveEntity(card);
     persistDeskSession();
     return true;

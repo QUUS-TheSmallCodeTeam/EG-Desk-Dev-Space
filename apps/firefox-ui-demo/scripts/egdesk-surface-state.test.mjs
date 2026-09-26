@@ -1,6 +1,6 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { initialSurfaceMode, planBoardProjection, snapshotBoardProjection, remapMemberReferences, recoverDeskSnapshot, canPersistDeskSession, ownedProjectionMembers, missingProjectionMembers } from '../overlay/resources/EGDeskSurfaceState.sys.mjs';
+import { initialSurfaceMode, planBoardProjection, snapshotBoardProjection, remapMemberReferences, recoverDeskSnapshot, canPersistDeskSession, ownedProjectionMembers, missingProjectionMembers, fitSurfaceCamera } from '../overlay/resources/EGDeskSurfaceState.sys.mjs';
 import * as Chat from '../overlay/resources/EGDeskChatState.sys.mjs';
 import { createDeskRecoveryStore, missingDeskRecoveryViews } from '../overlay/resources/EGDeskRecoveryState.sys.mjs';
 import { createTerminalCloseController, terminalExitEvidence } from '../overlay/resources/EGDeskTerminalState.sys.mjs';
@@ -384,4 +384,16 @@ test('terminal timeout does not claim closure and repeated close calls share one
   assert.equal(reads, 2);
   exited = true;
   assert.equal(await controller.retry(), true);
+});
+
+test('Desk entry camera fits the Browser outside rail/sidebar/dock without changing its logical geometry', () => {
+  const browser = { x: 0, y: 0, width: 1600, height: 960 };
+  const before = { ...browser };
+  const usable = { left: 100, top: 90, width: 1460, height: 780 };
+  const { pan, zoom } = fitSurfaceCamera(browser, usable);
+  assert.ok(pan.x >= usable.left);
+  assert.ok(pan.y >= usable.top);
+  assert.ok(pan.x + browser.width * zoom <= usable.left + usable.width + .001);
+  assert.ok(pan.y + browser.height * zoom <= usable.top + usable.height + .001);
+  assert.deepEqual(browser, before);
 });

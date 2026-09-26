@@ -5,6 +5,17 @@ export function initialSurfaceMode({ lifecycle, deskSession, legacyStore, existi
   return 'browser';
 }
 
+export function fitSurfaceCamera(rect, available, maxZoom = 0.85) {
+  const zoom = Math.min(maxZoom, available.width / Math.max(1, rect.width), available.height / Math.max(1, rect.height));
+  return {
+    zoom,
+    pan: {
+      x: available.left + (available.width - rect.width * zoom) / 2 - rect.x * zoom,
+      y: available.top + (available.height - rect.height * zoom) / 2 - rect.y * zoom,
+    },
+  };
+}
+
 const copy = value => value == null ? value : JSON.parse(JSON.stringify(value));
 export function ownedProjectionMembers(projection, ownership) {
   return projection.members.map(member => member.viewId).filter(id => ownership[id] === projection.id);
