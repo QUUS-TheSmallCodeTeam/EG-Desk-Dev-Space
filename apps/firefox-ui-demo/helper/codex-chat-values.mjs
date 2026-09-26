@@ -12,7 +12,7 @@ export function publicText(value, limit = MAX_TEXT) {
     .replace(/\b(?:sk-[A-Za-z0-9_-]+|gh[pousr]_[A-Za-z0-9_]+|github_pat_[A-Za-z0-9_]+|xox[baprs]-[A-Za-z0-9-]+)\b/g, '[REDACTED]')
     .replace(/\beyJ[A-Za-z0-9_-]+\.[A-Za-z0-9_-]+\.[A-Za-z0-9_-]+\b/g, '[REDACTED]')
     .replace(/\b(Bearer\s+)\S+/gi, '$1[REDACTED]')
-    .replace(/((?:["']?[\w-]*(?:password|passwd|secret|api[_-]?key|token|cookie|authorization)[\w-]*["']?)\s*[:=]\s*)(?:"[^"\n]*"|'[^'\n]*'|[^\s,;}]+)/gi, '$1[REDACTED]')
+    .replace(/(?<![\w-])((?:["']?[\w-]*(?:password|passwd|secret|api[_-]?key|token|cookie|authorization)[\w-]*["']?)\s*[:=]\s*)(?:"[^"\n]*"|'[^'\n]*'|[^\s,;}]+)/gi, '$1[REDACTED]')
     .replace(/([?&](?:token|key|code|secret|access_token|api_key)=)[^&#\s]+/gi, '$1[REDACTED]')
     .slice(0, limit)
 }

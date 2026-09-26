@@ -18,8 +18,11 @@ function safeItem(item) {
   if (!item || !idText(item.id)) return null
   const base = { id: item.id, type: item.type }
   switch (item.type) {
-    case 'agentMessage': return { ...base, text: typeof item.text === 'string' ? item.text.slice(0, MAX_TEXT) : '', phase: ['commentary', 'final_answer'].includes(item.phase) ? item.phase : null }
-    case 'userMessage': return { ...base, text: publicText((Array.isArray(item.content) ? item.content : []).filter(part => part.type === 'text').map(part => part.text || '').join('\n')) }
+    case 'agentMessage': return { ...base, text: typeof item.text === 'string' ? item.text.slice(0, MAX_TEXT) : '', phase: ['commentary', 'final_answer'].includes(item.phase) ? item.phase : null, truncated: typeof item.text === 'string' && item.text.length > MAX_TEXT }
+    case 'userMessage': {
+      const text = (Array.isArray(item.content) ? item.content : []).filter(part => part.type === 'text').map(part => part.text || '').join('\n')
+      return { ...base, clientId: idText(item.clientId), text: publicText(text), truncated: text.length > MAX_TEXT }
+    }
     case 'reasoning': return { ...base, summary: Array.isArray(item.summary) ? item.summary.slice(0, 20).map(text => publicText(text, 4000)) : [] }
     case 'plan': return { ...base, text: publicText(item.text) }
     case 'commandExecution': return {
@@ -50,7 +53,10 @@ function safeTurn(turn) {
     status: TERMINAL.has(turn?.status) || turn?.status === 'inProgress' ? turn.status : 'unknown',
     items: Array.isArray(turn?.items) ? turn.items.slice(-MAX_ITEMS).map(safeItem).filter(Boolean) : [],
     error: turn?.error ? publicError(turn.error, 'TURN_FAILED', 'codex') : null,
-    truncated: (turn?.items?.length || 0) > MAX_ITEMS || (turn?.itemsView && turn.itemsView !== 'full'),
+    itemsView: ['notLoaded', 'summary', 'full'].includes(turn?.itemsView) ? turn.itemsView : 'full',
+    // Native completion notifications can intentionally omit their item array;
+    // those same items have already arrived in item events. This is not loss.
+    truncated: (turn?.items?.length || 0) > MAX_ITEMS,
   }
 }
 
@@ -91,6 +97,7 @@ export class CodexChatRuntime {
     this.requests = new Map()
     this.locks = new Set()
     this.uncertainThreads = new Set()
+    this.incompleteHistory = new Set()
     this.truncated = false
     this.queue = Promise.resolve()
   }
@@ -122,6 +129,7 @@ export class CodexChatRuntime {
     this.pendingResumes.clear()
     this.requests.clear()
     this.uncertainThreads.clear()
+    this.incompleteHistory.clear()
     this.truncated = false
   }
 
@@ -133,6 +141,7 @@ export class CodexChatRuntime {
     for (const run of this.runs.values()) {
       if (TERMINAL.has(run.status)) continue
       run.status = processLost ? 'failed' : 'unknown'
+      run.historyComplete = false
       run.error = publicError(processLost ? 'Local Codex process exited' : 'Codex connection lost; resume to reconcile', processLost ? 'RUNTIME_LOST' : 'CONNECTION_LOST')
       if (processLost) {
         for (const message of run.messages) if (message.status === 'streaming') message.status = 'error'
@@ -186,7 +195,7 @@ export class CodexChatRuntime {
       clientThreadId: context?.clientThreadId || this.threads.get(threadId).clientThreadId,
       status: 'inProgress', stopRequested: false, stopConfirmed: false,
       messages: [], activities: [], artifacts: [], pendingApprovals: [], error: null,
-      createdAt: this.now(), truncated: false,
+      createdAt: this.now(), truncated: false, historyComplete: true,
     }
     this.runs.set(key, run)
     this.trimRuns()
@@ -326,9 +335,12 @@ export class CodexChatRuntime {
       if (result?.thread?.id !== cid) throw chatError('THREAD_MISMATCH', 'Codex resumed a different thread', 502)
       this.rememberThread(cid, result, clientThreadId)
       const turns = Array.isArray(result.thread.turns) ? result.thread.turns : []
-      this.truncated ||= Boolean(result.turnsBackwardsCursor || result.itemsBackwardsCursor || turns.length > MAX_RUNS)
+      if (result.turnsBackwardsCursor || result.itemsBackwardsCursor) this.incompleteHistory.add(cid)
+      else this.incompleteHistory.delete(cid)
+      this.truncated ||= turns.length > MAX_RUNS
       for (const original of turns.slice(-MAX_RUNS)) {
         const turn = safeTurn(original)
+        const retainedComplete = this.runs.get(runKey(cid, turn.id))?.historyComplete === true
         const run = this.ensureRun(cid, turn.id, null, false)
         if (!run) continue
         run.clientThreadId = clientThreadId || run.clientThreadId
@@ -338,6 +350,7 @@ export class CodexChatRuntime {
         run.stopConfirmed = turn.status === 'interrupted'
         run.error = turn.error
         run.truncated ||= Boolean(turn.truncated)
+        run.historyComplete = retainedComplete || turn.itemsView === 'full'
       }
       // Live events/approval requests may be delivered before the resume result.
       // Hydrate first, then apply these newer events to the matching native run.
@@ -531,15 +544,16 @@ export class CodexChatRuntime {
   messageDelta(run, itemId, delta) {
     let message = run.messages.find(m => m.id === itemId)
     if (!message) {
-      message = { id: itemId, messageId: itemId, role: 'assistant', text: '', phase: null, status: 'streaming' }
+      message = { id: itemId, messageId: itemId, clientId: null, role: 'assistant', text: '', phase: null, status: 'streaming' }
       this.put(run, 'messages', message)
       this.emit(run, 'message.started', { ...message }, itemId)
     }
     message.status = 'streaming'
     const key = `${run.answerId}/${itemId}`
-    const raw = ((this.rawMessages.get(key) ?? message.text) + delta).slice(0, MAX_TEXT)
+    const combined = (this.rawMessages.get(key) ?? message.text) + delta
+    const raw = combined.slice(0, MAX_TEXT)
     this.rawMessages.set(key, raw)
-    if (raw.length >= MAX_TEXT) run.truncated = true
+    if (combined.length > MAX_TEXT) run.truncated = true
     // Retain an unfinished token across deltas so split credentials are redacted
     // before they reach SSE. Completed items flush their authoritative text.
     const safe = publicText(raw.replace(/\S+$/, ''))
@@ -553,11 +567,12 @@ export class CodexChatRuntime {
 
   async applyItem(run, item, completed, announce = true) {
     const epoch = this.epoch
+    run.truncated ||= Boolean(item.truncated)
     if (item.type === 'agentMessage' || item.type === 'userMessage') {
       const existing = run.messages.find(m => m.id === item.id)
       const assistant = item.type === 'agentMessage'
       const message = {
-        id: item.id, messageId: item.id, role: assistant ? 'assistant' : 'user',
+        id: item.id, messageId: item.id, clientId: assistant ? null : (item.clientId || null), role: assistant ? 'assistant' : 'user',
         text: publicText(item.text), phase: item.phase || null, status: completed ? 'complete' : 'streaming',
       }
       // item/started can arrive after the first delta; do not erase streamed text.
@@ -653,6 +668,7 @@ export class CodexChatRuntime {
       message.status = run.status === 'failed' ? 'error' : run.status === 'interrupted' ? 'interrupted' : 'complete'
     }
     run.truncated ||= Boolean(turn.truncated)
+    if (turn.itemsView === 'full') run.historyComplete = true
     for (const [id, approval] of this.pendingApprovals) if (approval.conversationId === run.conversationId && approval.runId === run.runId) this.pendingApprovals.delete(id)
     run.pendingApprovals = []
     for (const key of this.rawMessages.keys()) if (key.startsWith(`${run.answerId}/`)) this.rawMessages.delete(key)
@@ -667,7 +683,9 @@ export class CodexChatRuntime {
       protocolVersion: 2, streamId: this.streamId, seq: this.seq, lastSeq: this.seq,
       connection: this.connection, conversationId,
       runs, truncated: this.truncated || runs.some(run => run.truncated),
-      historyComplete: (!conversationId || this.threads.has(conversationId)) && !this.truncated && !runs.some(run => run.truncated),
+      historyComplete: (!conversationId || this.threads.has(conversationId)) && !this.truncated
+        && !(conversationId ? this.incompleteHistory.has(conversationId) : this.incompleteHistory.size)
+        && runs.every(run => run.historyComplete && !run.truncated),
     })
   }
 }

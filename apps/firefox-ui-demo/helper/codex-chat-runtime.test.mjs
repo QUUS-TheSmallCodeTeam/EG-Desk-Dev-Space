@@ -336,3 +336,43 @@ test('terminal interruption keeps received text when no item completion is deliv
   assert.equal(h.chat.snapshot().runs[0].status, 'interrupted')
   assert.equal(h.legacy.some(e => e.type === 'assistant-complete'), false)
 })
+
+test('metadata-only completion is not truncation when item events already delivered the two-message turn', async () => {
+  const h = harness()
+  const run = await h.chat.send({ message: 'Reply exactly EGDESK_BRIDGE_OK.', requestId: 'ui-request', clientThreadId: 'ui-thread' })
+  await h.item(run, { type: 'userMessage', id: 'native-user-id', clientId: 'ui-request', content: [{ type: 'text', text: 'Reply exactly EGDESK_BRIDGE_OK.' }] })
+  await h.item(run, { type: 'agentMessage', id: 'native-agent-id', phase: 'final_answer', text: 'EGDESK_BRIDGE_OK' })
+  await h.notify('turn/completed', { threadId: run.conversationId, turn: { id: run.runId, status: 'completed', items: [], itemsView: 'notLoaded' } })
+  const state = h.chat.snapshot(run.conversationId)
+  assert.equal(state.truncated, false)
+  assert.equal(state.historyComplete, true)
+  assert.equal(state.runs[0].truncated, false)
+  assert.deepEqual(state.runs[0].messages.map(({ messageId, role, clientId }) => ({ messageId, role, clientId })), [
+    { messageId: 'native-user-id', role: 'user', clientId: 'ui-request' },
+    { messageId: 'native-agent-id', role: 'assistant', clientId: null },
+  ])
+  assert.equal(state.runs[0].requestId, 'ui-request')
+})
+
+test('partial native history stays explicit without claiming the bridge dropped items', async () => {
+  const h = harness({ request: async () => ({ thread: { id: 'old', turns: [{ id: 'old-turn', status: 'completed', itemsView: 'summary', items: [
+    { id: 'native-user', type: 'userMessage', clientId: 'original-request', content: [{ type: 'text', text: 'Question' }] },
+    { id: 'native-answer', type: 'agentMessage', text: 'Answer' },
+  ] }] }, turnsBackwardsCursor: 'older-turns' }) })
+  const state = await h.chat.resume({ conversationId: 'old' })
+  assert.equal(state.truncated, false)
+  assert.equal(state.historyComplete, false)
+  assert.equal(state.runs[0].historyComplete, false)
+  assert.equal(state.runs[0].messages[0].clientId, 'original-request')
+  assert.equal(state.runs[0].requestId, null)
+})
+
+test('exact text limit is complete; actual over-limit text is flagged', async () => {
+  const h = harness()
+  const run = await h.chat.send({ message: 'Work' })
+  await h.item(run, { id: 'exact', type: 'agentMessage', text: 'a'.repeat(20000) })
+  assert.equal(h.chat.snapshot().truncated, false)
+  await h.item(run, { id: 'over', type: 'agentMessage', text: 'b'.repeat(20001) })
+  assert.equal(h.chat.snapshot().truncated, true)
+  assert.equal(h.chat.snapshot().runs[0].messages[1].text.length, 20000)
+})
