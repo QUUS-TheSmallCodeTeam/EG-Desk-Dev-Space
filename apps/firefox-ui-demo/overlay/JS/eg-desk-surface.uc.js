@@ -11,6 +11,7 @@
   const SurfaceState = ChromeUtils.importESModule('chrome://userchrome/content/EGDeskSurfaceState.sys.mjs');
   const RecoveryState = ChromeUtils.importESModule('chrome://userchrome/content/EGDeskRecoveryState.sys.mjs');
   const ChatState = ChromeUtils.importESModule('chrome://userchrome/content/EGDeskChatState.sys.mjs');
+  const Markdown = ChromeUtils.importESModule('chrome://userchrome/content/EGDeskMarkdown.sys.mjs');
   const BROWSER_AGENT_ACTOR_NAME = 'EGDeskBrowserAgentRuntime';
   const BROWSER_AGENT_HISTORY_LIMIT = 100;
   let browserAgentActorReady = false;
@@ -3748,76 +3749,21 @@
 
 
   function stripMarkdown(text) {
-    if (!text) return '';
-    return text.replace(/\*\*(.+?)\*\*/g, '$1')
-               .replace(/__(.+?)__/g, '$1')
-               .replace(/\*(.+?)\*/g, '$1')
-               .replace(/_(.+?)_/g, '$1')
-               .replace(/`(.+?)`/g, '$1')
-               .replace(/```[\s\S]*?```/g, '[code]')
-               .replace(/\n/g, ' ')
-               .trim();
+    return Markdown.plainMarkdownText(text);
   }
-  function appendRichText(container, text) {
-    if (!text) return;
-    // Split by code blocks first
-    const codeBlockRe = /```(\w*)\n?([\s\S]*?)```/g;
-    let lastIdx = 0;
-    for (const m of text.matchAll(codeBlockRe)) {
-      if (m.index > lastIdx) {
-        appendInlineMarkdown(container, text.slice(lastIdx, m.index));
-      }
-      const lang = m[1] || '';
-      const codeText = m[2].replace(/\n$/, '');
-      const pre = el('pre', { class: 'egd-codex-code-block' });
-      const codeEl = el('code', { class: lang ? `language-${lang}` : '' }, codeText);
-      pre.appendChild(codeEl);
-      container.appendChild(pre);
-      lastIdx = m.index + m[0].length;
-    }
-    if (lastIdx < text.length) {
-      appendInlineMarkdown(container, text.slice(lastIdx));
-    }
-  }
-  function appendInlineMarkdown(container, text) {
-    // Process inline markdown: **bold**, *italic*, `code`, links
-    const inlineRe = /(\*\*(.+?)\*\*|__(.+?)__|`(.+?)`|\*(.+?)\*|_(.+?)_|https?:\/\/[^\s]+)/g;
-    let lastIdx = 0;
-    for (const m of text.matchAll(inlineRe)) {
-      if (m.index > lastIdx) {
-        // Plain text - split by newlines
-        const plain = text.slice(lastIdx, m.index);
-        appendPlainWithBreaks(container, plain);
-      }
-      if (m[2] || m[3]) {
-        // **bold** or __bold__
-        container.appendChild(el('strong', {}, m[2] || m[3]));
-      } else if (m[4]) {
-        // `code`
-        container.appendChild(el('code', { class: 'egd-codex-inline-code' }, m[4]));
-      } else if (m[5] || m[6]) {
-        // *italic* or _italic_
-        container.appendChild(el('em', {}, m[5] || m[6]));
-      } else if (m[0].startsWith('http')) {
-        // URL
-        const { url, trailing } = trimLinkMatch(m[0]);
-        const anchor = el('a', { class: 'egd-codex-inline-link', href: url, title: url }, url);
-        anchor.addEventListener('click', (ev) => { ev.preventDefault(); ev.stopPropagation(); openUrlInBrowserCard(url); });
-        container.appendChild(anchor);
-        if (trailing) container.appendChild(document.createTextNode(trailing));
-      }
-      lastIdx = m.index + m[0].length;
-    }
-    if (lastIdx < text.length) {
-      appendPlainWithBreaks(container, text.slice(lastIdx));
-    }
-  }
-  function appendPlainWithBreaks(container, text) {
-    const lines = text.split('\n');
-    for (let i = 0; i < lines.length; i++) {
-      if (lines[i]) container.appendChild(document.createTextNode(lines[i]));
-      if (i < lines.length - 1) container.appendChild(document.createElement('br'));
-    }
+  function appendRichText(container, text, message, thread) {
+    const run = thread && codexRuns(thread).find(item => item.answerId === message?.answerId
+      && item.runId === message?.runId && item.conversationId === message?.conversationId);
+    Markdown.appendMarkdown(container, text, {
+      answerId: message?.answerId, runId: message?.runId, conversationId: message?.conversationId,
+      artifacts: ChatState.nativeBindingHeld(thread) ? [] : run?.artifacts || message?.artifacts || [],
+      openArtifact: artifact => {
+        const current = getCodexThreadById(state.codex, thread?.id);
+        if (current && !ChatState.nativeBindingHeld(current)) return openCodexResultLink(artifact);
+        return false;
+      },
+      openWeb: url => openUrlInBrowserCard(url),
+    });
   }
   function formatMessageTime(ts) {
     if (!ts) return '';
@@ -4465,7 +4411,7 @@
             const groupedWithNext = next?.role === message.role && codexMessageAuthorLabel(next) === author && nextDelta < 120000;
             const parts = extractCodexResultLinks(message);
             const content = el('div', { class: 'egd-codex-bubble-content egd-codex-richtext' });
-            appendRichText(content, parts.text || (message.status === 'streaming' ? '…' : ''));
+            appendRichText(content, parts.text || (message.status === 'streaming' ? '…' : ''), message, activeThread);
             const resultChips = buildCodexResultChips(message, activeThread, parts.links);
             const bubble = el('div', {
               class: [

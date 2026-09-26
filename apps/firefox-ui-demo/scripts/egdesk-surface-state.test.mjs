@@ -4,6 +4,7 @@ import { existsSync, readFileSync } from 'node:fs';
 import { compileFunction } from 'node:vm';
 import { initialSurfaceMode, planBoardProjection, snapshotBoardProjection, remapMemberReferences, recoverDeskSnapshot, canPersistDeskSession, ownedProjectionMembers, missingProjectionMembers, fitSurfaceCamera } from '../overlay/resources/EGDeskSurfaceState.sys.mjs';
 import * as Chat from '../overlay/resources/EGDeskChatState.sys.mjs';
+import * as Markdown from '../overlay/resources/EGDeskMarkdown.sys.mjs';
 import { createDeskRecoveryStore, missingDeskRecoveryViews } from '../overlay/resources/EGDeskRecoveryState.sys.mjs';
 import { createTerminalCloseController, terminalExitEvidence, terminalResponsePacket } from '../overlay/resources/EGDeskTerminalState.sys.mjs';
 
@@ -849,4 +850,158 @@ test('terminal production HTML bootstraps from existing chrome assets without ex
   }
   assert.equal(/\son\w+\s*=/i.test(html), false, 'no inline event handlers');
   assert.equal(html.includes('unsafe-inline'), false);
+});
+
+// Minimal inert DOM: execute the production renderer without Firefox or a
+// bridge. Any HTML-string sink fails, so untrusted text cannot become markup.
+function markdownDOM() {
+  const doc = {
+    createElement: tag => new Node(tag),
+    createTextNode: value => new Node('#text', value),
+  };
+  class Node {
+    constructor(tag, value = '') {
+      this.tag = tag; this.value = value; this.ownerDocument = doc;
+      this.children = []; this.attributes = {}; this.listeners = {};
+    }
+    appendChild(child) { this.children.push(child); return child; }
+    setAttribute(name, value) { this.attributes[name] = String(value); }
+    addEventListener(name, callback) { (this.listeners[name] ||= []).push(callback); }
+    set innerHTML(_) { throw new Error('production renderer must use safe DOM text'); }
+    get textContent() { return this.value + this.children.map(child => child.textContent).join(''); }
+    all(tag) { return this.children.flatMap(child => [...(child.tag === tag ? [child] : []), ...child.all(tag)]); }
+    dispatch(type, fields = {}) {
+      const event = { ...fields, prevented: false, stopped: false,
+        preventDefault() { this.prevented = true; }, stopPropagation() { this.stopped = true; } };
+      for (const callback of this.listeners[type] || []) callback(event);
+      return event;
+    }
+  }
+  return doc.createElement('div');
+}
+const markdownPath = '/private/var/folders/6__test_dir/T/qa_fixtures/real_turn/egdesk_real_file.txt';
+const markdownArtifact = () => ({ id: 'artifact-1', type: 'file', target: { path: markdownPath },
+  label: 'QA text file', status: 'available', conversationId: 'conversation-1', runId: 'turn-1',
+  answerId: 'conversation-1/turn-1', relation: 'referenced', verifiedAt: 1 });
+const markdownContext = artifact => ({ conversationId: artifact.conversationId, runId: artifact.runId,
+  answerId: artifact.answerId, artifacts: [artifact] });
+
+test('production Markdown renders A6-shaped file label and preserves inline-code underscores', () => {
+  const root = markdownDOM();
+  const source = `Created and verified [QA text file](${markdownPath}) with exactly \`EGDESK_REAL_UI_345aa46e5c1e\` followed by one newline.`;
+  Markdown.appendMarkdown(root, source);
+  assert.equal(root.textContent, 'Created and verified QA text file with exactly EGDESK_REAL_UI_345aa46e5c1e followed by one newline.');
+  assert.equal(root.all('code')[0].textContent, 'EGDESK_REAL_UI_345aa46e5c1e');
+  assert.equal(root.all('em').length, 0);
+  assert.equal(root.all('a').length, 0, 'unverified label must not invent a file/card');
+  assert.equal(root.all('span')[0].attributes['data-verification'], 'unverified');
+  assert.equal(Markdown.plainMarkdownText(source), root.textContent);
+});
+
+test('verified inline file opens only on click or Enter through the same-answer artifact', () => {
+  const root = markdownDOM(), artifact = markdownArtifact(), opened = [];
+  const context = { ...markdownContext(artifact), openArtifact: value => opened.push(value) };
+  Markdown.appendMarkdown(root, `[QA text file](${markdownPath})`, context);
+  assert.equal(opened.length, 0, 'rendering must not open a card or move Canvas');
+  const link = root.all('a')[0];
+  assert.equal(link.attributes.href, undefined, 'no default local-file navigation');
+  assert.equal(link.attributes.role, 'link');
+  assert.equal(link.attributes.tabindex, '0');
+  assert.equal(link.attributes['data-testid'], 'chat-inline-artifact');
+  assert.equal(link.attributes['data-answer-id'], artifact.answerId);
+  const clicked = link.dispatch('click');
+  assert.ok(clicked.prevented && clicked.stopped);
+  link.dispatch('keydown', { key: 'Enter' });
+  assert.equal(opened.length, 2);
+  assert.ok(opened.every(value => value === artifact), 'pass the verified object, not a parsed-path fabrication');
+  artifact.status = 'missing';
+  link.dispatch('click');
+  assert.equal(opened.length, 2, 'recheck artifact availability on activation');
+});
+
+test('local link matching requires path plus conversation, run and answer verification', () => {
+  const artifact = markdownArtifact();
+  for (const change of [
+    { answerId: 'other-answer' }, { runId: 'other-run' }, { conversationId: 'other-conversation' },
+    { answerId: null }, { artifacts: [{ ...artifact, verifiedAt: null }] },
+    { artifacts: [{ ...artifact, target: { path: '/different/path.txt' } }] },
+  ]) {
+    const root = markdownDOM();
+    Markdown.appendMarkdown(root, `[QA text file](${markdownPath})`, {
+      ...markdownContext(artifact), ...change, openArtifact() { assert.fail('unverified click'); },
+    });
+    assert.equal(root.textContent, 'QA text file');
+    assert.equal(root.all('a').length, 0);
+  }
+  const spaced = { ...artifact, target: { path: '/tmp/qa file_with_underscores.txt' } };
+  assert.equal(Markdown.verifiedFileLink('file:///tmp/qa%20file_with_underscores.txt', markdownContext(spaced)), spaced);
+  assert.equal(Markdown.verifiedFileLink('file://remote/tmp/qa%20file_with_underscores.txt', markdownContext(spaced)), null);
+});
+
+test('code and destinations are opaque before emphasis; ordinary emphasis still works', () => {
+  const root = markdownDOM();
+  Markdown.appendMarkdown(root, 'EGDESK_REAL_UI **bold** _italic_ *around `a_b_c`* [file](/tmp/a_b_c.txt)');
+  assert.equal(root.textContent, 'EGDESK_REAL_UI bold italic around a_b_c file');
+  assert.deepEqual(root.all('em').map(node => node.textContent), ['italic', 'around a_b_c']);
+  assert.equal(root.all('strong')[0].textContent, 'bold');
+  assert.equal(root.all('code')[0].textContent, 'a_b_c');
+});
+
+test('unsafe Markdown destinations render plain labels without navigation handlers', () => {
+  for (const destination of ['javascript:alert(1)', 'JaVaScRiPt:alert(1)', 'data:text/html,evil',
+    'chrome://browser/content/browser.xhtml', 'resource://gre/evil', '//remote/file', 'file:///tmp/unverified.txt']) {
+    const root = markdownDOM();
+    Markdown.appendMarkdown(root, `[safe label](${destination})`, {
+      openArtifact() { assert.fail('unexpected file open'); }, openWeb() { assert.fail('unsafe URL open'); },
+    });
+    assert.equal(root.textContent, 'safe label');
+    assert.equal(root.all('a').length, 0);
+    assert.equal(root.all('span')[0].attributes.href, undefined);
+    assert.deepEqual(root.all('span')[0].listeners, {});
+  }
+});
+
+test('untrusted HTML stays text in labels, inline code and fenced code', () => {
+  const root = markdownDOM();
+  const html = '<img src=x onerror=alert(1)>';
+  Markdown.appendMarkdown(root, `<script>alert(1)</script> [${html}](javascript:alert(1)) \`${html}\`\n\`\`\`html\n${html}\n\`\`\``);
+  assert.equal(root.all('script').length, 0);
+  assert.equal(root.all('img').length, 0);
+  assert.ok(root.textContent.includes('<script>alert(1)</script>'));
+  assert.deepEqual(root.all('code').map(node => node.textContent), [html, html]);
+  assert.equal(root.all('a').length, 0);
+});
+
+test('safe web Markdown and bare links retain the existing Browser-card callback', () => {
+  const root = markdownDOM(), opened = [];
+  Markdown.appendMarkdown(root, '[readable](https://example.test/a_b?q=c_d) https://example.test/x_y.', { openWeb: url => opened.push(url) });
+  assert.equal(root.textContent, 'readable https://example.test/x_y.');
+  assert.deepEqual(root.all('a').map(link => link.attributes.href), ['https://example.test/a_b?q=c_d', 'https://example.test/x_y']);
+  assert.equal(opened.length, 0);
+  root.all('a')[0].dispatch('click');
+  assert.deepEqual(opened, ['https://example.test/a_b?q=c_d']);
+});
+
+test('actual overlay rich-text path supplies the same-answer artifact scope and preserves held bindings', () => {
+  const body = surfaceSource.match(/  function appendRichText\(container, text, message, thread\) \{([\s\S]*?)\n  \}/)?.[1];
+  assert.ok(body);
+  const render = compileFunction(body, ['container', 'text', 'message', 'thread', 'codexRuns', 'Markdown', 'ChatState',
+    'getCodexThreadById', 'state', 'openCodexResultLink', 'openUrlInBrowserCard']);
+  const artifact = markdownArtifact(), opened = [];
+  let thread = { id: 'room-1', conversationId: artifact.conversationId };
+  const message = { role: 'assistant', answerId: artifact.answerId, runId: artifact.runId, conversationId: artifact.conversationId };
+  const run = { ...message, artifacts: [artifact] };
+  const root = markdownDOM();
+  const draw = target => render(target, `[QA text file](${markdownPath})`, message, thread, () => [run], Markdown, Chat,
+    () => thread, { codex: {} }, value => opened.push(value), () => assert.fail('local link must not use URL callback'));
+  draw(root);
+  root.all('a')[0].dispatch('click');
+  assert.deepEqual(opened, [artifact]);
+  thread = { ...thread, conversationId: null, retainedNativeBinding: { conversationId: artifact.conversationId } };
+  root.all('a')[0].dispatch('click');
+  assert.equal(opened.length, 1, 'previous DOM cannot open a newly held binding');
+  const held = markdownDOM();
+  draw(held);
+  assert.equal(held.all('a').length, 0);
+  assert.ok(surfaceSource.includes("appendRichText(content, parts.text || (message.status === 'streaming' ? '…' : ''), message, activeThread)"));
 });
