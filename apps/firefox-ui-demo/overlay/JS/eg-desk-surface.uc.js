@@ -9,6 +9,7 @@
   'use strict';
   const TAG = '[eg-desk-surface]';
   const SurfaceState = ChromeUtils.importESModule('chrome://userchrome/content/EGDeskSurfaceState.sys.mjs');
+  const RecoveryState = ChromeUtils.importESModule('chrome://userchrome/content/EGDeskRecoveryState.sys.mjs');
   const ChatState = ChromeUtils.importESModule('chrome://userchrome/content/EGDeskChatState.sys.mjs');
   const BROWSER_AGENT_ACTOR_NAME = 'EGDeskBrowserAgentRuntime';
   const BROWSER_AGENT_HISTORY_LIMIT = 100;
@@ -1168,7 +1169,7 @@
       shapes: Array.from(document.querySelectorAll('.egd-canvas-shape'))
         .map(serializeShapeState)
         .filter(Boolean),
-      surface: { mode: state.surface.mode, browserCardId: state.surface.browserCardId },
+      surface: { mode: state.surface.mode, browserCardId: state.surface.browserCardId, recoveryBackupKey: state.surface.recoveryBackupKey || null, recoveryAcknowledged: !!state.surface.recoveryAcknowledged },
       boardProjections: cloneJson(state.boards),
       chat: {
         threads: cloneJson(state.codex.threads), activeThreadId: state.codex.activeThreadId,
@@ -1402,21 +1403,24 @@
     return openBoardSnapshot(snapshot, options);
   }
 
-  function restoreDeskSession(snapshot) {
+  function restoreDeskSession(snapshot, options = {}) {
     if (!snapshot?.agenda?.id) return false;
-    if (document.querySelector('.egd-canvas-card, .egd-canvas-shape')) return false;
+    if (!options.merge && document.querySelector('.egd-canvas-card, .egd-canvas-shape')) return false;
     state.agenda.restoreInProgress = true;
     state.agenda.suppressDirty = true;
     try {
       // Automatic Desk restore uses its own snapshot, never a Saved Board as a substitute.
-      if (Array.isArray(snapshot.chat?.threads)) {
+      if (!options.merge && Array.isArray(snapshot.chat?.threads)) {
         state.codex.threads = snapshot.chat.threads.map(thread => ({ ...thread, resuming: !!thread.conversationId }));
         state.codex.activeThreadId = snapshot.chat.activeThreadId;
         state.codex.threadDrafts = { ...snapshot.chat.threadDrafts };
         state.codex.hudView = snapshot.chat.hudView || 'conversation';
       }
+      const records = options.merge ? RecoveryState.missingDeskRecoveryViews(snapshot,
+        Array.from(document.querySelectorAll('.egd-canvas-card, .egd-canvas-shape')).map(view => view.id)) : snapshot;
       const boardMemberIds = new Set(Object.values(snapshot.boardProjections?.projections || {}).flatMap(projection => projection.members.map(member => member.viewId)));
-      for (const cardState of snapshot.cards || []) {
+      for (const cardState of records.cards || []) {
+        if (options.merge && cardState.type === 'chat' && state.codex.chatCardEntityId) continue;
         if (cardState.type === 'chat' && !boardMemberIds.has(cardState.id)) {
           const card = spawnCodexChatCard();
           retargetRestoredEntityId(card, cardState.id);
@@ -1426,8 +1430,15 @@
         const projection = { id: '', boardId: '', offset: { x: 0, y: 0 } };
         mountBoardMember(projection, { sourceId: cardState.id, viewId: cardState.id, kind: 'card', record: cardState });
       }
-      for (const shapeState of snapshot.shapes || []) restoreShapeFromState(shapeState);
-      state.boards = snapshot.boardProjections || { projections: {}, activeProjectionId: null };
+      for (const shapeState of records.shapes || []) restoreShapeFromState(shapeState);
+      if (!options.merge) state.boards = snapshot.boardProjections || { projections: {}, activeProjectionId: null };
+      else {
+        for (const [id, projection] of Object.entries(snapshot.boardProjections?.projections || {})) {
+          if (!state.boards.projections[id] && !Object.values(state.boards.projections).some(current => current.boardId === projection.boardId)) {
+            state.boards.projections[id] = cloneJson(projection);
+          }
+        }
+      }
       for (const projection of Object.values(state.boards.projections)) {
         refreshBoardRegion(projection);
         for (const member of projection.members) {
@@ -1439,20 +1450,26 @@
           view.addEventListener('mousedown', () => selectBoardProjection(projection.id), true);
         }
       }
-      state.agenda.activeAgendaId = snapshot.agenda.id || state.agenda.activeAgendaId;
-      state.agenda.activeTitle = snapshot.agenda.title || state.agenda.activeTitle || 'EG-Desk Agenda';
-      state.agenda.hasSavedState = true;
-      state.agenda.lastSavedAt = snapshot.savedAt || Date.now();
-      if (snapshot.desk?.pan && typeof state.setCanvasViewportTarget === 'function') {
+      if (!options.merge) {
+        state.agenda.activeAgendaId = snapshot.agenda.id || state.agenda.activeAgendaId;
+        state.agenda.activeTitle = snapshot.agenda.title || state.agenda.activeTitle || 'EG-Desk Agenda';
+      }
+      if (!options.merge) {
+        state.agenda.hasSavedState = true;
+        state.agenda.lastSavedAt = snapshot.savedAt || Date.now();
+      }
+      if (!options.merge && snapshot.desk?.pan && typeof state.setCanvasViewportTarget === 'function') {
         state.setCanvasViewportTarget({
           pan: snapshot.desk.pan,
           zoom: Number.isFinite(snapshot.desk.zoom) ? snapshot.desk.zoom : state.zoomTarget,
         }, { immediate: true });
       }
       const active = snapshot.desk?.activeCardId ? document.getElementById(snapshot.desk.activeCardId) : null;
-      if (active) setActiveEntity(active);
-      state.agenda.dirty = !!activeBoardProjection()?.dirty;
-      state.agenda.dirtyReasons = [];
+      if (active && !options.merge) setActiveEntity(active);
+      if (!options.merge) {
+        state.agenda.dirty = !!activeBoardProjection()?.dirty;
+        state.agenda.dirtyReasons = [];
+      }
       syncViewportAgendaRail();
       refreshDeskMinimap();
       return true;
@@ -1524,7 +1541,18 @@
     refreshDeskMinimap();
   }
 
-  async function completeAgendaClose({ saveFirst = false, projectionId = state.boards.activeProjectionId } = {}) {
+  const boardCloseRequests = new Set();
+  const boardCloseInFlight = new Map();
+  function completeAgendaClose(options = {}) {
+    const projectionId = options.projectionId || state.boards.activeProjectionId;
+    if (boardCloseInFlight.has(projectionId)) return boardCloseInFlight.get(projectionId);
+    boardCloseRequests.add(projectionId);
+    const pending = finishAgendaClose({ ...options, projectionId }).finally(() => boardCloseInFlight.delete(projectionId));
+    boardCloseInFlight.set(projectionId, pending);
+    return pending;
+  }
+
+  async function finishAgendaClose({ saveFirst = false, projectionId = state.boards.activeProjectionId } = {}) {
     const projection = state.boards.projections[projectionId];
     if (!projection) return false;
     if (saveFirst && !saveCurrentAgendaState({ projectionId })) return false;
@@ -1551,6 +1579,7 @@
     }
     document.getElementById(projection.id)?.remove();
     delete state.boards.projections[projection.id];
+    boardCloseRequests.delete(projection.id);
     markAgendaClosed(projection.boardId);
     if (state.boards.activeProjectionId === projection.id) {
       state.boards.activeProjectionId = null;
@@ -3430,6 +3459,7 @@
         },
       }, '×'),
       el('button', { class: 'egd-rail-icon', title: '미니맵', onclick: toggleDeskMinimap }, '◱'),
+      el('button', { id: 'egd-recovery-open', class: 'egd-rail-icon', 'aria-label': '복구 기록', title: '복구 기록', hidden: true, onclick: () => renderDeskRecoveryNotice(true) }, '↶'),
       el('button', { class: 'egd-rail-icon', title: '알림' },
         '!',
         el('span', { class: 'egd-rail-badge' }, '3'),
@@ -10033,8 +10063,11 @@
     }, true);
     // 최초 연결 완료 시 자동 포커스 (terminal.html이 terminal-ready postMessage 발송)
     const onTerminalReady = (ev) => {
-      if (ev.data?.type === 'terminal-ready' && ev.source === termBrowser.contentWindow) {
-        focusTerminal();
+      if (ev.source !== termBrowser.contentWindow) return;
+      if (ev.data?.type === 'terminal-ready') focusTerminal();
+      if (['terminal-ready', 'terminal-exit-confirmed'].includes(ev.data?.type)
+          && boardCloseRequests.has(card.dataset.projectionId)) {
+        void completeAgendaClose({ projectionId: card.dataset.projectionId });
       }
     };
     window.addEventListener('message', onTerminalReady);
@@ -10589,6 +10622,71 @@
     catch (error) { console.warn(TAG, 'surface state write failed', key, error); return false; }
   }
 
+  let deskRecoveryStore = null;
+  function recoveryStore() {
+    if (!deskRecoveryStore) deskRecoveryStore = RecoveryState.createDeskRecoveryStore({
+      read: key => servicesRef().prefs.prefHasUserValue(key) ? servicesRef().prefs.getStringPref(key) : null,
+      write: (key, value) => servicesRef().prefs.setStringPref(key, value),
+      listKeys: prefix => servicesRef().prefs.getChildList(prefix),
+    });
+    return deskRecoveryStore;
+  }
+
+  function rawDeskRecord() {
+    return servicesRef().prefs.prefHasUserValue(DESK_SESSION_PREF) ? servicesRef().prefs.getStringPref(DESK_SESSION_PREF) : null;
+  }
+
+  function renderDeskRecoveryNotice(force = false) {
+    const records = recoveryStore().list();
+    const opener = document.getElementById('egd-recovery-open');
+    if (opener) opener.hidden = records.length === 0;
+    document.getElementById('egd-desk-recovery')?.remove();
+    if (!force && (!state.surface.recoveryBackupKey && !state.surface.recoveryProtected || state.surface.recoveryAcknowledged)) return;
+    const key = state.surface.recoveryBackupKey || records[0]?.key || null;
+    const panel = el('section', { id: 'egd-desk-recovery', role: 'region', 'aria-label': 'Desk 복구 기록', data: { testid: 'desk-recovery', backupKey: key || '' } },
+      el('strong', {}, '이전 Desk 복구 기록'),
+      el('p', {}, state.surface.recoveryProtected
+        ? '원본을 별도로 저장하지 못했습니다. 저장 공간을 확인한 뒤 다시 시도해 주세요.'
+        : '이전 기록 원본을 별도로 보존했습니다. 지금 열어 둔 작업은 자동으로 저장됩니다.'),
+      state.surface.recoveryReason ? el('p', {}, state.surface.recoveryReason) : null,
+      el('button', { 'aria-label': '이전 기록 복구 다시 시도', data: { testid: 'recovery-retry' }, onclick: () => retryDeskRecovery(key) }, '이전 기록 다시 시도'),
+      el('button', { 'aria-label': '원본을 보존하고 현재 작업 계속', data: { testid: 'recovery-continue' }, onclick: continueDeskRecovery }, '현재 작업 계속'));
+    document.documentElement.appendChild(panel);
+  }
+
+  function retryDeskRecovery(key = state.surface.recoveryBackupKey) {
+    const raw = key ? recoveryStore().get(key)?.raw : rawDeskRecord();
+    if (raw == null) { boardNotice('복구 기록을 찾지 못했습니다. 현재 작업은 유지됩니다.'); return false; }
+    const previousActiveId = state.activeEntityId;
+    state.surface.restoring = true;
+    let result;
+    try { result = recoveryStore().recover(raw, snapshot => restoreDeskSession(snapshot, { merge: true })); }
+    finally { state.surface.restoring = false; }
+    state.surface.recoveryProtected = result.recoveryProtected;
+    state.surface.recoveryBackupKey = key || result.backupKey;
+    state.surface.recoveryReason = result.restored ? '기존 작업을 유지하고 추가 가능한 화면을 복구했습니다.' : result.reason;
+    state.surface.recoveryAcknowledged = false;
+    if (previousActiveId) setActiveEntity(document.getElementById(previousActiveId));
+    persistDeskSession();
+    renderDeskRecoveryNotice(true);
+    return result.restored;
+  }
+
+  function continueDeskRecovery() {
+    if (state.surface.recoveryProtected) {
+      try {
+        const record = recoveryStore().preserve(rawDeskRecord(), state.surface.recoveryReason);
+        state.surface.recoveryBackupKey = record.key;
+        state.surface.recoveryProtected = false;
+      } catch (error) { state.surface.recoveryReason = error.message; renderDeskRecoveryNotice(true); return false; }
+    }
+    state.surface.recoveryAcknowledged = true;
+    const saved = persistDeskSession();
+    if (saved) document.getElementById('egd-desk-recovery')?.remove();
+    else { state.surface.recoveryAcknowledged = false; boardNotice('현재 작업을 저장하지 못했습니다. 다시 시도해 주세요.'); }
+    return saved;
+  }
+
   let deskSaveTimer = null;
   function persistDeskSession() {
     if (!SurfaceState.canPersistDeskSession(state.surface) || !document.getElementById('egd-canvas-layer')) return false;
@@ -10627,8 +10725,10 @@
   function restoreSurfaceEntry(lifecycle, deskSession, legacyStore) {
     state.surface.restoring = true;
     try {
-      const recovery = SurfaceState.recoverDeskSnapshot(deskSession, restoreDeskSession);
-      state.surface.recoveryProtected = recovery.protected;
+      const recovery = recoveryStore().recover(rawDeskRecord(), restoreDeskSession);
+      state.surface.recoveryProtected = recovery.recoveryProtected;
+      state.surface.recoveryBackupKey = recovery.backupKey || deskSession?.surface?.recoveryBackupKey || null;
+      state.surface.recoveryAcknowledged = recovery.backupKey ? false : !!deskSession?.surface?.recoveryAcknowledged;
       state.surface.recoveryReason = recovery.reason;
       const mode = recovery.protected ? 'desk' : SurfaceState.initialSurfaceMode({ lifecycle, deskSession, legacyStore });
       state.surface.browserCardId = deskSession?.surface?.browserCardId || lifecycle?.browserCardId || null;
@@ -10662,7 +10762,7 @@
         const card = document.getElementById(state.surface.browserCardId);
         if (card) card.dataset.testid = 'browser-card';
       }
-      if (recovery.protected) boardNotice(`${recovery.reason} 원본 기록은 보존되며 자동 저장은 보류됩니다. 저장된 Board 목록은 별도로 사용할 수 있습니다.`);
+      renderDeskRecoveryNotice();
     } finally { state.surface.restoring = false; }
     // A single current Desk snapshot; Saved Board revisions are never updated by this path.
     const observer = new MutationObserver(scheduleDeskSessionSave);
@@ -10798,6 +10898,8 @@
         deskSession: {
           serialize: serializeDeskSnapshot, restore: restoreDeskSession,
           persist: persistDeskSession, storagePref: DESK_SESSION_PREF,
+          retryRecovery: retryDeskRecovery, continueRecovery: continueDeskRecovery,
+          recoveryRecords: () => recoveryStore().list().map(({ key, savedAt, reason }) => ({ key, savedAt, reason })),
         },
       };
       host.appendChild(buildDeskRail());

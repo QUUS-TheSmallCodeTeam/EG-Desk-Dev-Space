@@ -42,7 +42,8 @@
   <script src="chrome://userchrome/content/vendor/addon-web-links.min.js"></script>
   <script>
   'use strict';
-  (() => {
+  (async () => {
+    const { createTerminalCloseController } = await import('chrome://userchrome/content/EGDeskTerminalState.sys.mjs');
     const HELPER_PORT = 39218;
     const HELPER_ORIGIN = `http://127.0.0.1:${HELPER_PORT}`;
     const statusEl = document.getElementById('status-overlay');
@@ -102,17 +103,20 @@
     let exitConfirmed = false;
     let closeRequested = false;
 
-    async function postTerminal(path, body) {
-      const response = await fetch(`${HELPER_ORIGIN}${path}`, {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify(body || {}),
-      });
-      const result = await response.json().catch(() => ({}));
-      if (!response.ok || result.error) {
-        throw new Error(result.error || `HTTP ${response.status}`);
-      }
-      return result;
+    async function postTerminal(path, body, options = {}) {
+      const controller = options.timeoutMs ? new AbortController() : null;
+      const timeout = controller ? setTimeout(() => controller.abort(), options.timeoutMs) : null;
+      try {
+        const response = await fetch(`${HELPER_ORIGIN}${path}`, {
+          method: 'POST', headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify(body || {}), ...(controller ? { signal: controller.signal } : {}),
+        });
+        const result = await response.json().catch(() => ({}));
+        if (options.allowGone && path === '/terminal/read' && [400, 404].includes(response.status)
+            && result.error === 'Session not found' && result.exited === true) return result;
+        if (!response.ok || result.error) throw new Error(result.error || `HTTP ${response.status}`);
+        return result;
+      } finally { if (timeout) clearTimeout(timeout); }
     }
 
     function stopPolling() {
@@ -123,6 +127,7 @@
     }
 
     function showDisconnected(message) {
+      if (closeRequested) { renderCloseState({ phase: 'offline', error: message }); return; }
       statusEl.textContent = message || 'Disconnected. Click to reconnect.';
       statusEl.classList.remove('hidden');
       statusEl.style.pointerEvents = 'auto';
@@ -146,23 +151,74 @@
           connected = false;
           ptyId = null;
           stopPolling();
+          notifyTerminalExit();
         }
       } catch (e) {
+        if (closeRequested) return; // The bounded close controller is still observing this same PTY.
         connected = false;
         stopPolling();
         showDisconnected(`Disconnected. ${e.message || 'Click to reconnect.'}`);
       }
     }
 
+    function notifyTerminalExit() {
+      try { window.parent.postMessage({ type: 'terminal-exit-confirmed' }, '*'); } catch {}
+    }
+
+    function renderCloseState(closeState) {
+      statusEl.classList.remove('hidden');
+      statusEl.textContent = closeState.phase === 'confirmed'
+        ? '터미널 세션 종료 확인됨'
+        : closeState.phase === 'offline' ? '연결이 끊겨 종료 여부를 확인하지 못했습니다.'
+        : closeState.phase === 'timeout' ? '아직 실행 종료가 확인되지 않았습니다.' : '터미널 종료 확인 중…';
+      statusEl.style.pointerEvents = 'none';
+      statusEl.onclick = null;
+      if (closeState.phase === 'offline' || closeState.phase === 'timeout') {
+        const retry = document.createElement('button');
+        retry.textContent = '종료 상태 다시 확인';
+        retry.setAttribute('aria-label', '터미널 종료 상태 다시 확인');
+        retry.dataset.testid = 'terminal-close-retry';
+        retry.style.cssText = 'display:block;margin:10px auto;padding:6px 10px;pointer-events:auto;';
+        retry.onclick = () => { void closeForBoard(); };
+        statusEl.appendChild(retry);
+      }
+    }
+
+    const terminalCloser = createTerminalCloseController({
+      requestKill: sessionId => postTerminal('/terminal/kill', { sessionId }, { timeoutMs: 1500 }),
+      readStatus: sessionId => postTerminal('/terminal/read', { sessionId }, { timeoutMs: 1500, allowGone: true }),
+      onOutput: data => term.write(data),
+      onState: closeState => {
+        renderCloseState(closeState);
+        if (closeState.phase === 'confirmed') {
+          exitConfirmed = true;
+          connected = false;
+          ptyId = null;
+          stopPolling();
+          notifyTerminalExit();
+        }
+      },
+    });
+
+    async function closeForBoard() {
+      if (exitConfirmed) return true;
+      if (!ptyId) return false;
+      closeRequested = true;
+      // Replace normal output polling with a bounded observation loop; a kill ACK
+      // alone never resolves the close. No spawn or command replay occurs on retry.
+      stopPolling();
+      return terminalCloser.close(ptyId);
+    }
+
     // 키 입력은 keystroke마다 개별 HTTP POST로 나가므로, 직렬화하지 않으면
     // 응답 순서에 따라 글자가 뒤섞인다 (빠른 연타 시 'pwd' → 'pw'+'d' 등 — 실측).
     let writeChain = Promise.resolve();
     function writeToTerminal(data) {
-      if (!ptyId || !connected) return Promise.resolve();
+      if (!ptyId || !connected || closeRequested) return Promise.resolve();
       const sessionAtEnqueue = ptyId;
       writeChain = writeChain
         .then(() => {
-          if (ptyId !== sessionAtEnqueue || !connected) return undefined;
+          if (ptyId !== sessionAtEnqueue || !connected || closeRequested) return undefined;
           return postTerminal('/terminal/write', { sessionId: ptyId, data });
         })
         .catch(() => {});
@@ -171,20 +227,8 @@
 
     function exposeTerminalApi() {
       window.terminalAPI = {
-        closeForBoard: async () => {
-          if (exitConfirmed) return true;
-          if (!ptyId || closeRequested) return false;
-          // The current helper's kill response acknowledges removal from its registry,
-          // not observed process exit. Keep this view visible until exit is confirmed.
-          await postTerminal('/terminal/kill', { sessionId: ptyId });
-          closeRequested = true;
-          connected = false;
-          stopPolling();
-          statusEl.textContent = '종료 요청은 수락됐지만 실행 종료는 확인되지 않았습니다.';
-          statusEl.classList.remove('hidden');
-          statusEl.style.pointerEvents = 'none';
-          return false;
-        },
+        closeForBoard,
+        closeState: () => terminalCloser.snapshot(),
         get ptyId() {
           return ptyId;
         },
@@ -236,6 +280,8 @@
         });
         ptyId = result.sessionId;
         connected = true;
+        closeRequested = false;
+        exitConfirmed = false;
         statusEl.classList.add('hidden');
         try {
           window.parent.postMessage({ type: 'terminal-ready', ptyId }, '*');

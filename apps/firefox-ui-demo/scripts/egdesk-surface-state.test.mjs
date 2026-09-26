@@ -2,6 +2,8 @@ import test from 'node:test';
 import assert from 'node:assert/strict';
 import { initialSurfaceMode, planBoardProjection, snapshotBoardProjection, remapMemberReferences, recoverDeskSnapshot, canPersistDeskSession, ownedProjectionMembers, missingProjectionMembers } from '../overlay/resources/EGDeskSurfaceState.sys.mjs';
 import * as Chat from '../overlay/resources/EGDeskChatState.sys.mjs';
+import { createDeskRecoveryStore, missingDeskRecoveryViews } from '../overlay/resources/EGDeskRecoveryState.sys.mjs';
+import { createTerminalCloseController, terminalExitEvidence } from '../overlay/resources/EGDeskTerminalState.sys.mjs';
 
 test('onboarding considers lifecycle and independent Desk state, not just Board absence', () => {
   assert.equal(initialSurfaceMode({}), 'browser');
@@ -59,7 +61,7 @@ test('binding remapping never rewrites opaque IDs, object keys, labels or URLs',
   assert.deepEqual(remapMemberReferences(projected, { 'p-member-0': 'a' }), binding);
 });
 
-test('corrupt recovery stays protected and cannot overwrite original bytes', () => {
+test('unarchived corrupt recovery cannot overwrite original bytes', () => {
   let bytes = '{broken original';
   let called = false;
   const recovery = recoverDeskSnapshot({ unreadable: true }, () => { called = true; });
@@ -70,7 +72,7 @@ test('corrupt recovery stays protected and cannot overwrite original bytes', () 
   assert.equal(recovery.protected, true);
 });
 
-test('partial and refused restoration preserve the prior snapshot and inhibit later saves', () => {
+test('unarchived partial and refused restoration preserve the prior snapshot', () => {
   const bytes = JSON.stringify(saved);
   for (const restore of [() => false, () => { throw new Error('second member failed'); }]) {
     let stored = bytes;
@@ -249,4 +251,137 @@ test('a nonterminal unsupported interaction leaves the run stoppable', () => {
   Chat.reduceChatEvent(state, envelope('run.unavailable', 2, { status: 'inProgress', error: { code: 'UNSUPPORTED_INTERACTION' } }));
   assert.equal(Chat.isRunBusy(run), true);
   assert.notEqual(run.status, 'interrupted');
+});
+
+function recoveryFixture(raw) {
+  const values = new Map([['current-desk', raw]]);
+  const writes = [];
+  let id = 0;
+  const store = createDeskRecoveryStore({
+    read: key => values.get(key) ?? null,
+    write: (key, value) => { writes.push(key); values.set(key, value); },
+    listKeys: prefix => [...values.keys()].filter(key => key.startsWith(prefix)),
+    makeId: () => String(++id), now: () => 1,
+  });
+  return { store, values, writes };
+}
+
+test('production recovery archives exact corrupt bytes and permits durable new work', () => {
+  const original = '{ broken 한글 original\n';
+  const { store, values, writes } = recoveryFixture(original);
+  const result = store.recover(values.get('current-desk'), () => assert.fail('corrupt JSON must not reach restore'));
+  assert.equal(result.recoveryProtected, false);
+  assert.equal(store.get(result.backupKey).raw, original);
+  assert.equal(values.get('current-desk'), original);
+  const current = { ...structuredClone(saved), cards: [{ id: 'new-work', type: 'browser', runtimeState: { uri: 'https://new.test/' } }] };
+  assert.equal(canPersistDeskSession({ restoring: false, recoveryProtected: result.recoveryProtected }), true);
+  values.set('current-desk', JSON.stringify(current));
+  assert.equal(store.recover(values.get('current-desk'), restored => restored.cards[0].id === 'new-work').restored, true);
+  assert.equal(store.get(result.backupKey).raw, original);
+  assert.equal(writes.length, 1);
+});
+
+test('production partial-restore retry adds absent views while preserving current edits and raw backup', () => {
+  const original = JSON.stringify(saved);
+  const { store, values } = recoveryFixture(original);
+  const live = new Map([['new-work', { edited: true }]]);
+  const failed = store.recover(original, snapshot => { live.set(snapshot.cards[0].id, { edited: true }); throw new Error('later view failed'); });
+  assert.equal(failed.recoveryProtected, false);
+  values.set('current-desk', JSON.stringify({ cards: [...live.keys()] }));
+  const retry = store.recover(store.get(failed.backupKey).raw, snapshot => {
+    const missing = missingDeskRecoveryViews(snapshot, [...live.keys()]);
+    assert.equal(missing.cards.length, 0);
+    for (const shape of missing.shapes) live.set(shape.id, shape);
+    return true;
+  });
+  assert.equal(retry.restored, true);
+  assert.deepEqual(live.get('browser'), { edited: true });
+  assert.deepEqual(live.get('new-work'), { edited: true });
+  assert.equal(live.has('shape'), true);
+  assert.equal(store.get(failed.backupKey).raw, original);
+  assert.equal(store.list().length, 1);
+});
+
+test('recovery never automatically deletes prior originals or duplicates identical backup bytes', () => {
+  const { store } = recoveryFixture('broken');
+  const a = store.preserve('broken', 'parse failed');
+  assert.equal(store.preserve('broken', 'retry').key, a.key);
+  const b = store.preserve('different broken bytes', 'another failure');
+  assert.notEqual(b.key, a.key);
+  assert.equal(store.get(a.key).raw, 'broken');
+  assert.equal(store.list().length, 2);
+});
+
+test('failed backup verification protects the primary record instead of silently losing it', () => {
+  const values = new Map([['current-desk', 'original']]);
+  const store = createDeskRecoveryStore({ read: key => values.get(key) ?? null, write: () => {}, listKeys: () => [], makeId: () => 'failed-write' });
+  const result = store.recover('original', () => false);
+  assert.equal(result.recoveryProtected, true);
+  assert.equal(values.get('current-desk'), 'original');
+  assert.equal(canPersistDeskSession({ restoring: false, recoveryProtected: result.recoveryProtected }), false);
+});
+
+test('invalid restored grouping cannot poison the new working Desk before it is archived', () => {
+  const broken = { ...structuredClone(saved), boardProjections: { projections: { broken: { members: null } } } };
+  const { store } = recoveryFixture(JSON.stringify(broken));
+  let restored = false;
+  const result = store.recover(JSON.stringify(broken), () => { restored = true; return true; });
+  assert.equal(restored, false);
+  assert.equal(result.recoveryProtected, false);
+  assert.equal(store.get(result.backupKey).raw, JSON.stringify(broken));
+});
+
+test('terminal close observes after kill acknowledgement until native exit is confirmed', async () => {
+  let reads = 0;
+  let kills = 0;
+  const phases = [];
+  const controller = createTerminalCloseController({
+    requestKill: async id => { assert.equal(id, 'pty-a'); kills++; return { ok: true }; },
+    readStatus: async id => { assert.equal(id, 'pty-a'); return { exited: ++reads === 3, data: '' }; },
+    wait: async () => {}, onState: state => phases.push(state.phase),
+  });
+  assert.equal(await controller.close('pty-a'), true);
+  assert.equal(kills, 1);
+  assert.equal(reads, 3);
+  assert.equal(controller.snapshot().evidence, 'native-exit');
+  assert.equal(phases.at(-1), 'confirmed');
+});
+
+test('terminal confirmed-gone response is distinct from a transport error or mere kill ack', async () => {
+  assert.equal(terminalExitEvidence({ ok: true }), null);
+  assert.equal(terminalExitEvidence({ error: 'offline', exited: true }), null);
+  const controller = createTerminalCloseController({ requestKill: async () => ({ ok: true }), readStatus: async () => ({ error: 'Session not found', data: '', exited: true }), wait: async () => {} });
+  assert.equal(await controller.close('pty-gone'), true);
+  assert.equal(controller.snapshot().evidence, 'session-gone');
+});
+
+test('terminal offline retry is bounded and re-observes the same PTY without spawning or repeating accepted kill', async () => {
+  let offline = true;
+  let reads = 0;
+  let kills = 0;
+  const controller = createTerminalCloseController({
+    requestKill: async () => { kills++; return { ok: true }; },
+    readStatus: async id => { assert.equal(id, 'pty-offline'); reads++; if (offline) throw new Error('network unavailable'); return { exited: true }; },
+    wait: async () => {}, maxFailures: 2,
+  });
+  assert.equal(await controller.close('pty-offline'), false);
+  assert.equal(reads, 2);
+  assert.equal(controller.snapshot().phase, 'offline');
+  offline = false;
+  assert.equal(await controller.retry(), true);
+  assert.equal(kills, 1);
+  assert.equal(reads, 3);
+});
+
+test('terminal timeout does not claim closure and repeated close calls share one observation loop', async () => {
+  let exited = false;
+  let reads = 0;
+  const controller = createTerminalCloseController({ requestKill: async () => ({ ok: true }), readStatus: async () => { reads++; return { exited }; }, wait: async () => {}, maxAttempts: 2 });
+  const first = controller.close('pty-slow');
+  assert.equal(controller.close('pty-slow'), first);
+  assert.equal(await first, false);
+  assert.equal(controller.snapshot().phase, 'timeout');
+  assert.equal(reads, 2);
+  exited = true;
+  assert.equal(await controller.retry(), true);
 });

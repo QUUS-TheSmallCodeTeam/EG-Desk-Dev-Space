@@ -30,6 +30,17 @@ export function recoverDeskSnapshot(snapshot, restore) {
       || !snapshot.cards.every(validRecord) || !snapshot.shapes.every(validRecord)) {
     return { restored: false, protected: true, reason: 'Desk 기록을 읽을 수 없습니다.' };
   }
+  const projections = snapshot.boardProjections?.projections;
+  if (snapshot.boardProjections && (!projections || typeof projections !== 'object' || Array.isArray(projections)
+      || Object.values(projections).some(projection => !projection?.id || !projection.boardId || !projection.source?.agenda?.id
+        || !projection.idMap || !Array.isArray(projection.members)
+        || projection.members.some(member => !member?.viewId || !member.sourceId || !member.record)))) {
+    return { restored: false, protected: true, reason: 'Desk의 Board 구성 기록을 읽을 수 없습니다.' };
+  }
+  if (snapshot.chat && (!Array.isArray(snapshot.chat.threads)
+      || snapshot.chat.threads.some(thread => !thread?.id || !Array.isArray(thread.messages)))) {
+    return { restored: false, protected: true, reason: 'Desk의 대화 기록을 읽을 수 없습니다.' };
+  }
   try {
     const restored = restore(snapshot) === true;
     return { restored, protected: !restored, reason: restored ? null : 'Desk 기록을 모두 복원하지 못했습니다.' };

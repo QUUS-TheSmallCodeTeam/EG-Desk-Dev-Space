@@ -87,6 +87,8 @@
 #egd-board-scope { left: 50%; top: 25%; transform: translateX(-50%); width: 350px; }
 #egd-board-scope input { padding: 8px; width: 90%; border: 1px solid #ccc; border-radius: 5px; }
 #egd-board-scope button { padding: 6px 10px; margin: 5px 5px 0 0; border: 1px solid #ccc; border-radius: 5px; }
+#egd-desk-recovery { position: fixed; z-index: 100110; left: 50%; bottom: 92px; transform: translateX(-50%); width: min(540px, calc(100vw - 40px)); padding: 18px; background: #fffaf0; border: 1px solid #dacb9b; border-radius: 10px; box-shadow: 0 8px 28px #0002; font: 13px/1.55 var(--egd-font); }
+#egd-desk-recovery button { margin: 10px 8px 0 0; padding: 7px 10px; border: 1px solid #c8bea6; border-radius: 6px; }
 
 :root.egd-pan-ready #egd-canvas-viewport,
 :root.egd-pan-ready #egd-canvas-layer,
