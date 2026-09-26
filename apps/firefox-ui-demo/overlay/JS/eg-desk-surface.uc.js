@@ -260,7 +260,12 @@
   }
 
   function codexThreadSessionLabel(thread) {
+    if (ChatState.nativeBindingHeld(thread)) return 'Local';
     return thread?.conversationId ? 'Resumed' : 'Fresh';
+  }
+
+  function chatBindingNonce() {
+    return window.crypto?.randomUUID?.() || `${Date.now().toString(36)}-${Math.random().toString(36).slice(2)}`;
   }
 
   function uniqueNames(list) {
@@ -591,6 +596,7 @@
   }
 
   function buildCodexResultChips(message, thread, links) {
+    if (ChatState.nativeBindingHeld(thread)) return null;
     const artifacts = (links || []).filter(ChatState.usableArtifact);
     if (!artifacts.length) return null;
     return el('div', { class: 'egd-codex-result-chips' }, ...artifacts.map(artifact => el('button', {
@@ -641,6 +647,14 @@
     const oldBody = panel.querySelector('.egd-codex-activity-body');
     const scrollTop = oldBody?.scrollTop || 0;
     const rows = [];
+    if (ChatState.nativeBindingHeld(thread)) {
+      const reference = thread.retainedNativeBinding;
+      rows.push(el('section', { data: { testid: 'chat-retained-binding' } },
+        el('p', {}, '이전 대화는 현재 계정에 연결하지 않았습니다. 로컬 기록과 이전 연결 참조는 보관됩니다.'),
+        el('details', {}, el('summary', {}, '보관된 연결 참조'),
+          reference.conversationId ? el('p', {}, `대화 참조: ${reference.conversationId}`) : null,
+          el('p', {}, `연결 참조: ${reference.clientThreadId || '없음'}`))));
+    }
     const history = state.codex.chatProtocol.histories[thread.conversationId];
     const partialHistory = history?.truncated || history?.historyComplete === false
       || codexRuns(thread).some(run => run.truncated || run.historyComplete === false);
@@ -1419,9 +1433,9 @@
     try {
       // Automatic Desk restore uses its own snapshot, never a Saved Board as a substitute.
       if (!options.merge && Array.isArray(snapshot.chat?.threads)) {
-        state.codex.codexAccountKey = snapshot.chat.codexAccountKey || null;
         state.codex.chatProtocol.unobservedPreviousRun ||= !!snapshot.chat.unobservedPreviousRun;
-        state.codex.threads = snapshot.chat.threads.map(thread => ({ ...thread, resuming: !!thread.conversationId }));
+        state.codex.threads = snapshot.chat.threads.map(thread => ChatState.reconcileNativeThread(
+          ChatState.detachNativeThread(thread, snapshot.chat.codexAccountKey || null, chatBindingNonce()), state.codex.authStatus));
         state.codex.activeThreadId = snapshot.chat.activeThreadId;
         state.codex.threadDrafts = { ...snapshot.chat.threadDrafts };
         state.codex.hudView = snapshot.chat.hudView || 'conversation';
@@ -1482,6 +1496,7 @@
       }
       syncViewportAgendaRail();
       refreshDeskMinimap();
+      if (!options.merge) queueMicrotask(() => state.codexBridge?.resumeVerifiedThreads?.());
       return true;
     } finally {
       state.agenda.restoreInProgress = false;
@@ -4465,7 +4480,7 @@
             if (message.role === 'user' && ['submitting', 'unconfirmed', 'failed'].includes(message.status)) {
               bubble.appendChild(el('span', { class: 'egd-codex-message-time', role: 'status' }, ({ submitting: '보내는 중', unconfirmed: '접수 미확인', failed: '전송 거절됨' })[message.status]));
             }
-            if (message.status === 'streaming' && message.role === 'assistant' && activeThread.profileEnabled === true) {
+            if (message.status === 'streaming' && message.role === 'assistant' && activeThread.profileEnabled === true && !ChatState.nativeBindingHeld(activeThread)) {
               bubble.appendChild(el('div', {
                 class: 'egd-codex-streaming',
                 role: 'status',
@@ -4495,10 +4510,15 @@
           });
         }
         conversation.appendChild(messages);
+        const bindingHeld = ChatState.nativeBindingHeld(activeThread);
+        if (bindingHeld) conversation.appendChild(el('div', {
+          class: 'egd-codex-error', role: 'status', data: { testid: 'chat-binding-held', bindingState: activeThread.bindingState },
+        }, '이전 대화의 계정 소유가 확인되지 않아 연결을 보류했습니다. 로컬 기록은 유지됩니다.',
+        el('button', { class: 'egd-codex-chip', 'aria-label': '새 Codex 대화 열기', data: { testid: 'chat-new-unbound-room' }, onclick: () => codexBridge.createThread('dm', { openConversation: true }) }, '새 Codex 대화')));
         const run = codexCurrentRun(activeThread);
         const pending = Object.values(codex.chatProtocol.requests).find(request => ChatState.requestBelongsToThread(request, activeThread) && ['submitting', 'unconfirmed'].includes(request.status));
         const status = activeThread.resuming ? 'restoring' : pending?.status || run?.status || 'ready';
-        const statusText = activeThread.resuming ? '대화 상태 확인 중' : pending ? (pending.status === 'unconfirmed' ? '접수 상태 확인 필요' : '요청 보내는 중')
+        const statusText = bindingHeld ? '로컬 기록 · 연결 확인 필요' : activeThread.resuming ? '대화 상태 확인 중' : pending ? (pending.status === 'unconfirmed' ? '접수 상태 확인 필요' : '요청 보내는 중')
           : !run && codex.chatProtocol.unobservedPreviousRun ? '이전 연결의 실행 상태 미확인' : codexRunLabel(run);
         conversation.appendChild(el('div', {
           class: 'egd-codex-run-status', role: 'status', 'aria-live': 'polite',
@@ -4594,8 +4614,8 @@
               const height = Math.min(144, Math.max(48, input.scrollHeight));
               input.style.height = `${height}px`;
               input.style.overflowY = input.scrollHeight > height ? 'auto' : 'hidden';
-              sendButton.disabled = codex.isSending || !input.value.trim() || !codex.authStatus.isLoggedIn || !codex.connected;
-              sendButton.title = !codex.authStatus.isLoggedIn ? 'Codex 연결 후 전송할 수 있습니다' : !codex.connected ? 'Codex 연결을 확인해 주세요' : '보내기';
+              sendButton.disabled = ChatState.nativeBindingHeld(activeThread) || codex.isSending || !input.value.trim() || !codex.authStatus.isLoggedIn || !codex.connected;
+              sendButton.title = ChatState.nativeBindingHeld(activeThread) ? '보관된 연결을 현재 계정에 자동 연결하지 않습니다' : !codex.authStatus.isLoggedIn ? 'Codex 연결 후 전송할 수 있습니다' : !codex.connected ? 'Codex 연결을 확인해 주세요' : '보내기';
             };
             input.addEventListener('input', () => {
               codexBridge.setDraft(input.value, activeThread.id);
@@ -4771,6 +4791,8 @@
     const protocol = state.codex.chatProtocol;
     const epochScope = ChatState.createChatEpochScope({ makeController: () => new window.AbortController() });
     const refreshing = new Map();
+    const resumedNativeBindings = new Set();
+    let streamReady = false;
     let source = null;
     let reconnectTimer = null;
 
@@ -4783,17 +4805,32 @@
       if (!run) return;
       const threadId = run.localThreadId || state.codex.threads.find(thread => ChatState.clientThreadBinding(thread) === run.clientThreadId || thread.conversationId === run.conversationId)?.id;
       if (!threadId || !getCodexThreadById(state.codex, threadId)) return;
+      if (ChatState.nativeBindingHeld(getCodexThreadById(state.codex, threadId))) return;
       run.localThreadId = threadId;
       const thread = updateThreadById(threadId, current => ({
         ...current, conversationId: run.conversationId, sendError: null,
+        bindingAccountKey: run.accountKey || current.bindingAccountKey || null,
+        bindingState: ChatState.knownCodexAccountKey(run.accountKey || current.bindingAccountKey) ? 'verified' : 'live-unverified',
         messages: ChatState.projectRunMessages(current.messages, run),
       }));
       for (const message of run.messages) bindMessageToThread(message.id, threadId);
       if (thread) markUserMessagesReadBy(threadId, thread.profileEnabled ? codexThreadAgentProfile(thread).name : 'Codex');
     }
 
+    function resumeVerifiedThreads() {
+      if (!streamReady) return;
+      for (const thread of state.codex.threads) {
+        if (!ChatState.canResumeNativeThread(thread, state.codex.authStatus) || refreshing.has(thread.conversationId)) continue;
+        const key = `${ChatState.clientThreadBinding(thread)}|${thread.conversationId}`;
+        if (resumedNativeBindings.has(key)) continue;
+        resumedNativeBindings.add(key);
+        void refreshConversation(thread, true);
+      }
+    }
+
     async function refreshConversation(thread, resume = false) {
       if (!thread?.conversationId || refreshing.has(thread.conversationId)) return null;
+      if (resume && !ChatState.canResumeNativeThread(thread, state.codex.authStatus)) return null;
       const conversationId = thread.conversationId;
       const token = epochScope.begin();
       refreshing.set(conversationId, token);
@@ -4804,6 +4841,7 @@
           ? await fetchJson('/chat/resume', { method: 'POST', signal: token.signal, body: JSON.stringify({ conversationId, clientThreadId: ChatState.clientThreadBinding(thread) }) })
           : await fetchJson(`/chat/state?conversationId=${encodeURIComponent(conversationId)}`, { signal: token.signal });
         if (!epochScope.valid(token)) return null;
+        if (snapshot.conversationId !== conversationId) throw new Error('요청한 대화와 다른 연결 응답입니다. 기존 기록은 유지됩니다.');
         for (const run of ChatState.mergeChatSnapshot(protocol, snapshot, ChatState.clientThreadBinding(thread))) syncProtocolRun(run);
         if (resume && ChatState.settleReconciledRequests(protocol, thread.id, snapshot)) updateThreadById(thread.id, current => ({ ...current, sendError: '대화 기록을 다시 확인했습니다. 접수 미확인 메시지와 실제 기록을 확인한 뒤 다음 요청을 보내세요.' }));
         emit();
@@ -4904,7 +4942,9 @@
       if (ChatState.codexAccountChanged(state.codex.codexAccountKey, patch.authStatus)) resetThreadConversations();
       if (accountKey) state.codex.codexAccountKey = accountKey;
       Object.assign(state.codex, patch);
+      state.codex.threads = state.codex.threads.map(thread => ChatState.reconcileNativeThread(thread, state.codex.authStatus));
       emit();
+      resumeVerifiedThreads();
     };
 
     const findThreadIndexById = (threadId) => state.codex.threads.findIndex((thread) => thread.id === threadId);
@@ -4991,17 +5031,12 @@
       epochScope.reset();
       ChatState.resetChatProtocol(protocol);
       refreshing.clear();
+      resumedNativeBindings.clear();
+      streamReady = false;
       try { source?.close(); } catch {}
       source = null;
-      state.codex.threads = state.codex.threads.map((thread) => ({
-        ...thread,
-        clientBindingId: ChatState.freshClientThreadBinding(thread, window.crypto?.randomUUID?.() || `${Date.now().toString(36)}-${Math.random().toString(36).slice(2)}`),
-        conversationId: null,
-        messages: [],
-        resuming: false,
-        sendError: null,
-        unreadCount: 0,
-        updatedAt: Date.now(),
+      state.codex.threads = state.codex.threads.map(thread => ({
+        ...ChatState.detachNativeThread(thread, state.codex.codexAccountKey, chatBindingNonce()), updatedAt: Date.now(),
       }));
       state.codex.pendingThreadId = null;
       state.codex.messageThreadMap = {};
@@ -5127,6 +5162,7 @@
 
     const connect = async () => {
       const token = epochScope.begin();
+      streamReady = false;
       try {
       try {
         const bridgeState = await fetchJson('/v1/state', { signal: token.signal });
@@ -5172,8 +5208,10 @@
       const connectionSource = source;
       connectionSource.addEventListener('ready', () => {
         if (!epochScope.valid(streamEpoch) || source !== connectionSource) return;
+        streamReady = true;
+        resumedNativeBindings.clear();
         update({ connected: true });
-        for (const thread of state.codex.threads) if (thread.conversationId) void refreshConversation(thread, true);
+        resumeVerifiedThreads();
       });
 
       const receive = (message) => {
@@ -5192,6 +5230,7 @@
         if (!epochScope.valid(streamEpoch) || source !== connectionSource) return;
         try { connectionSource.close(); } catch {}
         source = null;
+        streamReady = false;
         protocol.connection = 'offline';
         update({ connected: false });
         scheduleReconnect();
@@ -5202,6 +5241,7 @@
     connect();
 
     return {
+      resumeVerifiedThreads,
       async reconcileRequest(threadId = state.codex.activeThreadId) {
         const thread = getCodexThreadById(state.codex, threadId);
         if (!thread) return null;
@@ -5634,10 +5674,10 @@
       async sendMessage() {
         const activeThread = getActiveCodexThread(state.codex);
         const content = getCodexThreadDraft(state.codex, activeThread?.id || null).trim();
-        if (!activeThread || !content || threadBusy(activeThread) || !state.codex.authStatus.isLoggedIn || !state.codex.connected) return;
+        if (!activeThread || ChatState.nativeBindingHeld(activeThread) || !content || threadBusy(activeThread) || !state.codex.authStatus.isLoggedIn || !state.codex.connected) return;
         const token = epochScope.begin();
         const requestId = `request-${Date.now().toString(36)}-${Math.random().toString(36).slice(2)}`;
-        ChatState.registerChatRequest(protocol, { requestId, clientThreadId: ChatState.clientThreadBinding(activeThread), localThreadId: activeThread.id, conversationId: activeThread.conversationId, authorName: activeThread.profileEnabled ? codexThreadAgentProfile(activeThread).name : 'Codex' });
+        ChatState.registerChatRequest(protocol, { requestId, clientThreadId: ChatState.clientThreadBinding(activeThread), localThreadId: activeThread.id, conversationId: activeThread.conversationId, accountKey: state.codex.codexAccountKey || null, authorName: activeThread.profileEnabled ? codexThreadAgentProfile(activeThread).name : 'Codex' });
         appendMessageToThread(activeThread.id, createCodexMessage('user', content, 'submitting', {
           readBy: [SELF_MEMBER], requestId,
         }), { countUnread: false });
@@ -5672,7 +5712,7 @@
           const request = protocol.requests[requestId];
           if (error.conversationId) {
             request.conversationId = error.conversationId;
-            updateThreadById(activeThread.id, thread => ({ ...thread, conversationId: error.conversationId }));
+            updateThreadById(activeThread.id, thread => ({ ...thread, conversationId: error.conversationId, bindingAccountKey: request.accountKey || null, bindingState: ChatState.knownCodexAccountKey(request.accountKey) ? 'verified' : 'live-unverified' }));
           }
           // An event can prove acceptance before a failed/late HTTP response arrives.
           if (!request.runId) {

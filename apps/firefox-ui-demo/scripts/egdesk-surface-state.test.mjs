@@ -645,3 +645,89 @@ test('explicit unknown identity cannot reset an account even if stale identity f
   assert.equal(Chat.codexAccountChanged('codex:chatgpt:real-account-a', unknown), false);
   assert.equal(Chat.codexAccountKey({ ...unknown, accountId: null, accountEmail: null }), null);
 });
+
+const authA = { isLoggedIn: true, authMode: 'chatgpt', accountId: null, accountEmail: 'a@example.test', identityStatus: 'known', identityBasis: 'email' };
+const authB = { ...authA, accountEmail: 'b@example.test' };
+const savedNativeRoom = () => ({ id: 'kept-local-room', title: 'Kept title', conversationId: 'native-a', messages: [{ id: 'kept-message', role: 'assistant', content: 'local transcript A', artifacts: [artifact] }] });
+
+test('restored provider-only or missing ownership cannot adopt a saved CID under a newly observed account', () => {
+  for (const owner of ['codex:chatgpt:chatgpt', 'codex:apiKey:apikey', null, undefined]) {
+    const original = savedNativeRoom();
+    const detached = Chat.detachNativeThread(original, owner, 'restore');
+    const next = Chat.reconcileNativeThread(detached, authB);
+    assert.equal(next.id, original.id);
+    assert.deepEqual(next.messages, original.messages);
+    assert.equal(next.retainedNativeBinding.conversationId, 'native-a');
+    assert.equal(next.retainedNativeBinding.clientThreadId, original.id);
+    assert.equal(next.retainedNativeBinding.accountKey, owner || null);
+    assert.equal(next.conversationId, null);
+    assert.equal(next.bindingAccountKey, null);
+    assert.notEqual(Chat.clientThreadBinding(next), original.id);
+    assert.equal(Chat.nativeBindingHeld(next), true);
+    assert.equal(Chat.canResumeNativeThread(next, authB), false);
+    assert.equal(Chat.canAdmitChatEvent(Chat.createChatProtocolState(), [next], { conversationId: 'native-a', clientThreadId: original.id }), false);
+  }
+});
+
+test('quarantined ownership survives re-save under B without a current-account stamp', () => {
+  const held = Chat.reconcileNativeThread(Chat.detachNativeThread(savedNativeRoom(), null, 'first'), authB);
+  const roundTrip = JSON.parse(JSON.stringify(held));
+  const restored = Chat.reconcileNativeThread(Chat.detachNativeThread(roundTrip, Chat.codexAccountKey(authB), 'second'), authB);
+  assert.equal(restored.retainedNativeBinding.accountKey, null);
+  assert.equal(restored.retainedNativeBinding.conversationId, 'native-a');
+  assert.equal(restored.bindingAccountKey, null);
+  assert.equal(restored.conversationId, null);
+  assert.equal(Chat.canResumeNativeThread(restored, authB), false);
+  assert.deepEqual(restored.messages, held.messages);
+});
+
+test('verified matching ownership resumes; a mismatch retains the record without deleting it', () => {
+  const staged = Chat.detachNativeThread(savedNativeRoom(), Chat.codexAccountKey(authA), 'restore');
+  const match = Chat.reconcileNativeThread(staged, authA);
+  assert.equal(match.conversationId, 'native-a');
+  assert.equal(Chat.canResumeNativeThread(match, authA), true);
+  const mismatch = Chat.reconcileNativeThread(staged, authB);
+  assert.equal(mismatch.conversationId, null);
+  assert.equal(mismatch.bindingAccountKey, null);
+  assert.equal(Chat.canResumeNativeThread(mismatch, authB), false);
+  assert.deepEqual(mismatch.messages, savedNativeRoom().messages);
+  const verifiedReturn = Chat.reconcileNativeThread(mismatch, authA);
+  assert.equal(Chat.canResumeNativeThread(verifiedReturn, authA), true);
+});
+
+test('restore-before-auth and auth-before-restore require the same positive ownership match', () => {
+  const unknown = { isLoggedIn: false, identityStatus: 'unknown', identityBasis: null };
+  const before = Chat.detachNativeThread(savedNativeRoom(), Chat.codexAccountKey(authA), 'before');
+  const waiting = Chat.reconcileNativeThread(before, unknown);
+  assert.equal(waiting.conversationId, null);
+  assert.equal(Chat.canResumeNativeThread(waiting, unknown), false);
+  const afterReceipt = Chat.reconcileNativeThread(waiting, authA);
+  const alreadyKnown = Chat.reconcileNativeThread(Chat.detachNativeThread(savedNativeRoom(), Chat.codexAccountKey(authA), 'after'), authA);
+  assert.equal(afterReceipt.conversationId, alreadyKnown.conversationId);
+  assert.equal(Chat.canResumeNativeThread(afterReceipt, authA), true);
+  assert.equal(Chat.canResumeNativeThread(alreadyKnown, authA), true);
+  const unknownOwner = Chat.reconcileNativeThread(Chat.detachNativeThread(savedNativeRoom(), null, 'unknown-owner'), authA);
+  assert.equal(Chat.canResumeNativeThread(unknownOwner, authA), false);
+});
+
+test('fresh no-CID empty rooms remain usable and transient lookup failure does not detach a verified live binding', () => {
+  const fresh = Chat.reconcileNativeThread(Chat.detachNativeThread({ id: 'fresh', messages: [], conversationId: null }, null, 'new'), authB);
+  assert.equal(Chat.nativeBindingHeld(fresh), false);
+  assert.equal(Chat.buildChatRequest(fresh, 'new user request', 'new-request').conversationId, undefined);
+  assert.equal(Chat.buildChatRequest(fresh, 'new user request', 'new-request').profileEnabled, false);
+  const verified = Chat.reconcileNativeThread(Chat.detachNativeThread(savedNativeRoom(), Chat.codexAccountKey(authA), 'a'), authA);
+  const transient = { ...authA, identityStatus: 'unknown', identityBasis: null };
+  const unchanged = Chat.reconcileNativeThread(verified, transient);
+  assert.equal(unchanged, verified);
+  assert.equal(unchanged.conversationId, 'native-a');
+  assert.equal(Chat.canResumeNativeThread(unchanged, transient), false);
+  assert.equal(Chat.canResumeNativeThread(unchanged, authA), true);
+});
+
+test('an explicit null per-room owner never borrows a newer snapshot-global owner', () => {
+  const room = { ...savedNativeRoom(), bindingAccountKey: null };
+  const staged = Chat.detachNativeThread(room, Chat.codexAccountKey(authB), 'restore');
+  const next = Chat.reconcileNativeThread(staged, authB);
+  assert.equal(next.retainedNativeBinding.accountKey, null);
+  assert.equal(Chat.canResumeNativeThread(next, authB), false);
+});

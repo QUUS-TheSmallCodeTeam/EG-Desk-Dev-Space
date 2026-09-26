@@ -54,6 +54,46 @@ export function codexAccountChanged(previousKey, status) {
   if (isProviderIdentity(identity.join(':'), mode)) return false;
   return nextKey !== previousKey;
 }
+export function knownCodexAccountKey(key) {
+  if (typeof key !== 'string' || !key.startsWith('codex:')) return false;
+  const [, mode, ...identity] = key.split(':');
+  return !isProviderIdentity(identity.join(':'), mode);
+}
+export function detachNativeThread(thread, savedAccountKey, nonce) {
+  const prior = thread.retainedNativeBinding;
+  const activeId = thread.conversationId;
+  const conversationId = activeId || prior?.conversationId || null;
+  const accountKey = activeId || !prior
+    ? (Object.hasOwn(thread, 'bindingAccountKey') ? thread.bindingAccountKey : savedAccountKey)
+    : prior?.accountKey ?? null;
+  const retained = conversationId || prior || thread.messages?.length ? {
+    conversationId,
+    clientThreadId: activeId || !prior ? clientThreadBinding(thread) : prior.clientThreadId,
+    accountKey: accountKey || null,
+    reason: conversationId && knownCodexAccountKey(accountKey) ? 'awaiting-identity' : 'ownership-unverified',
+  } : null;
+  return {
+    ...thread, conversationId: null, clientBindingId: freshClientThreadBinding(thread, nonce),
+    bindingAccountKey: null, retainedNativeBinding: retained,
+    bindingState: retained ? retained.reason === 'awaiting-identity' ? 'awaiting-identity' : 'quarantined' : 'fresh',
+    resuming: false, sendError: null,
+  };
+}
+export function reconcileNativeThread(thread, authStatus) {
+  const key = codexAccountKey(authStatus);
+  const retained = thread.retainedNativeBinding;
+  if (!key || !retained || thread.conversationId) return thread;
+  if (typeof retained.conversationId === 'string' && retained.conversationId && knownCodexAccountKey(retained.accountKey) && retained.accountKey === key) {
+    return { ...thread, conversationId: retained.conversationId, bindingAccountKey: retained.accountKey, bindingState: 'verified' };
+  }
+  return { ...thread, bindingState: 'quarantined', retainedNativeBinding: { ...retained, reason: knownCodexAccountKey(retained.accountKey) ? 'identity-mismatch' : 'ownership-unverified' } };
+}
+export const nativeBindingHeld = thread => !!thread?.retainedNativeBinding && !thread.conversationId;
+export function canResumeNativeThread(thread, authStatus) {
+  return !!thread?.conversationId && thread.bindingState === 'verified'
+    && knownCodexAccountKey(thread.bindingAccountKey)
+    && thread.bindingAccountKey === codexAccountKey(authStatus);
+}
 export function submissionFailureStatus(error) {
   if (error?.resumeRequired === true) return 'unconfirmed';
   if (error?.accepted === false) return 'failed';
@@ -97,7 +137,7 @@ function ensureRun(state, identity) {
     conversationId, runId, answerId: key, status: 'running', stopRequested: false,
     messages: [], activities: [], artifacts: [], pendingApprovals: [], error: null, summary: '',
   };
-  for (const field of ['requestId', 'clientThreadId', 'localThreadId', 'answerId', 'authorName']) {
+  for (const field of ['requestId', 'clientThreadId', 'localThreadId', 'answerId', 'authorName', 'accountKey']) {
     if (identity[field] || request?.[field]) run[field] = identity[field] || request[field];
   }
   if (request) Object.assign(request, { conversationId, runId, answerId: run.answerId, status: 'accepted' });
