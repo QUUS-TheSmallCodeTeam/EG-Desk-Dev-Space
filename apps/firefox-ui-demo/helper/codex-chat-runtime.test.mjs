@@ -531,3 +531,46 @@ test('unknown network target/protocol and absent command never offer blind accep
   assert.equal(h.replies.length, 0)
   assert.ok(!JSON.stringify(h.events).includes('alice:secret'))
 })
+
+test('active-turn history restores a partial assistant item as streaming before more tokens arrive', async () => {
+  const h = harness({ request: async (method, params) => {
+    assert.equal(method, 'thread/resume')
+    return { thread: { id: params.threadId, turns: [{ id: 'active-turn', status: 'inProgress', itemsView: 'full', items: [
+      { id: 'partial', type: 'agentMessage', phase: 'final_answer', text: 'Hello' },
+    ] }] } }
+  } })
+  const resumed = await h.chat.resume({ conversationId: 'active-thread', clientThreadId: 'ui' })
+  assert.equal(resumed.runs[0].messages[0].status, 'streaming')
+  assert.equal(resumed.runs[0].messages[0].completionConfirmed, false)
+  await h.notify('item/agentMessage/delta', { threadId: 'active-thread', turnId: 'active-turn', itemId: 'partial', delta: ' world ' })
+  assert.equal(h.chat.snapshot().runs[0].messages[0].text, 'Hello world ')
+  assert.equal(h.chat.snapshot().runs[0].messages[0].status, 'streaming')
+  await h.item({ conversationId: 'active-thread', runId: 'active-turn' }, { id: 'partial', type: 'agentMessage', text: 'Hello world!' })
+  assert.equal(h.chat.snapshot().runs[0].messages[0].status, 'complete')
+  assert.equal(h.chat.snapshot().runs[0].messages[0].completionConfirmed, true)
+})
+
+test('active history preserves observed item completion and authoritative text, while another item keeps streaming', async () => {
+  const h = harness({ request: async (method, params, chat, defaults) => {
+    if (method !== 'thread/resume') return defaults(method, params)
+    return { thread: { id: params.threadId, turns: [{ id: 'turn-1', status: 'inProgress', items: [
+      { id: 'finished-item', type: 'agentMessage', text: 'Stale summary' },
+      { id: 'partial-item', type: 'agentMessage', text: 'Second' },
+    ] }] } }
+  } })
+  const run = await h.chat.send({ message: 'Work' })
+  await h.item(run, { id: 'finished-item', type: 'agentMessage', text: 'First item really completed.' })
+  await h.notify('item/agentMessage/delta', { threadId: run.conversationId, turnId: run.runId, itemId: 'partial-item', delta: 'Second ' })
+  const state = await h.chat.resume({ conversationId: run.conversationId })
+  const finished = state.runs[0].messages.find(message => message.id === 'finished-item')
+  const partial = state.runs[0].messages.find(message => message.id === 'partial-item')
+  assert.equal(finished.status, 'complete')
+  assert.equal(finished.completionConfirmed, true)
+  assert.equal(finished.text, 'First item really completed.')
+  assert.equal(partial.status, 'streaming')
+  assert.equal(partial.text, 'Second ')
+  await h.notify('item/agentMessage/delta', { threadId: run.conversationId, turnId: run.runId, itemId: 'partial-item', delta: 'message ' })
+  assert.equal(h.chat.snapshot().runs[0].messages.find(message => message.id === 'partial-item').text, 'Second message ')
+  await h.notify('item/agentMessage/delta', { threadId: run.conversationId, turnId: run.runId, itemId: 'finished-item', delta: 'late stale delta ' })
+  assert.equal(h.chat.snapshot().runs[0].messages.find(message => message.id === 'finished-item').text, finished.text)
+})

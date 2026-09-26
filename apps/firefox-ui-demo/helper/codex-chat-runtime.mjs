@@ -380,7 +380,16 @@ export class CodexChatRuntime {
         const run = this.ensureRun(cid, turn.id, null, false)
         if (!run) continue
         run.clientThreadId = clientThreadId || run.clientThreadId
-        for (const item of turn.items) await this.applyItem(run, item, true, false)
+        for (const item of turn.items) {
+          // An active turn's history carries text snapshots, not item-completed
+          // evidence. Preserve observed completions; otherwise keep accepting deltas.
+          const ended = item.type !== 'agentMessage' || TERMINAL.has(turn.status)
+          await this.applyItem(run, item, ended, false)
+          if (item.type === 'agentMessage' && ['failed', 'interrupted'].includes(turn.status)) {
+            const message = run.messages.find(message => message.id === item.id)
+            if (message && !message.completionConfirmed) message.status = turn.status === 'failed' ? 'error' : 'interrupted'
+          }
+        }
         if (epoch !== this.epoch) throw chatError('CONTEXT_CHANGED', 'Codex connection or account changed', 409)
         run.status = turn.status
         run.stopConfirmed = turn.status === 'interrupted'
@@ -523,7 +532,7 @@ export class CodexChatRuntime {
     switch (event.method) {
       case 'turn/started': return
       case 'item/started': return this.applyItem(run, event.item, false)
-      case 'item/completed': return this.applyItem(run, event.item, true)
+      case 'item/completed': return this.applyItem(run, { ...event.item, completionConfirmed: true }, true)
       case 'item/agentMessage/delta': return this.messageDelta(run, event.itemId, event.delta)
       case 'turn/plan/updated': {
         this.put(run, 'activities', { id: `${run.runId}:plan`, kind: 'plan', status: 'inProgress', title: 'Plan', detail: { explanation: event.explanation, plan: event.plan }, sourceRefs: [] })
@@ -600,8 +609,9 @@ export class CodexChatRuntime {
 
   messageDelta(run, itemId, delta) {
     let message = run.messages.find(m => m.id === itemId)
+    if (message?.completionConfirmed) return
     if (!message) {
-      message = { id: itemId, messageId: itemId, clientId: null, role: 'assistant', text: '', phase: null, status: 'streaming' }
+      message = { id: itemId, messageId: itemId, clientId: null, role: 'assistant', text: '', phase: null, status: 'streaming', completionConfirmed: false }
       this.put(run, 'messages', message)
       this.emit(run, 'message.started', { ...message }, itemId)
     }
@@ -624,16 +634,28 @@ export class CodexChatRuntime {
 
   async applyItem(run, item, completed, announce = true) {
     const epoch = this.epoch
-    run.truncated ||= Boolean(item.truncated)
     if (item.type === 'agentMessage' || item.type === 'userMessage') {
       const existing = run.messages.find(m => m.id === item.id)
       const assistant = item.type === 'agentMessage'
+      // Only the live item/completed handler can set this flag. safeItem strips
+      // arbitrary history fields, so history cannot manufacture completion proof.
+      if (assistant && existing?.completionConfirmed && !item.completionConfirmed) return
+      run.truncated ||= Boolean(item.truncated)
       const message = {
         id: item.id, messageId: item.id, clientId: assistant ? null : (item.clientId || null), role: assistant ? 'assistant' : 'user',
         text: publicText(item.text), phase: item.phase || null, status: completed ? 'complete' : 'streaming',
+        ...(assistant ? { completionConfirmed: item.completionConfirmed === true } : {}),
       }
-      // item/started can arrive after the first delta; do not erase streamed text.
-      if (!completed && existing?.text) message.text = existing.text
+      if (assistant && !completed) {
+        const key = `${run.answerId}/${item.id}`
+        const retained = this.rawMessages.get(key) ?? existing?.text ?? ''
+        const incoming = item.text || ''
+        // A newer partial snapshot can extend received text; an older/summary
+        // snapshot must not shorten or replace it. Seed the next delta's prefix.
+        const raw = incoming.startsWith(retained) ? incoming : retained
+        this.rawMessages.set(key, raw)
+        message.text = publicText(raw)
+      } else if (!completed && existing?.text) message.text = existing.text
       this.put(run, 'messages', message)
       if (assistant && announce) {
         if (!existing) this.emit(run, 'message.started', { ...message }, item.id)
@@ -653,6 +675,7 @@ export class CodexChatRuntime {
       }
       return
     }
+    run.truncated ||= Boolean(item.truncated)
     let activity = { id: item.id, kind: item.type, status: completed ? 'completed' : 'inProgress', title: item.type, detail: {}, sourceRefs: [] }
     if (item.type === 'commandExecution') {
       activity = { ...activity, status: item.status, title: item.command || 'Command', detail: { command: item.command, cwd: item.cwd, exitCode: item.exitCode, durationMs: item.durationMs } }
