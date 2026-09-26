@@ -2,13 +2,48 @@
 
 **Status**: Living source-of-truth index
 **Implementation path**: `apps/firefox-ui-demo/`
-**Last updated**: 2026-07-30
+**Last updated**: 2026-09-27
 
 This document tracks product decisions and development backlog items that came from active design/development discussion. It is not a marketing whitepaper. The public-facing whitepaper is [Production v8](../../docs/production/EG-DESK%20백서%20-%20Production_v8_한글.md), while this file keeps the current product/runtime direction and todo surface aligned.
 
 Board is the product term used here. Some current runtime identifiers and UI
 copy still say `Agenda`; checked backlog items describe the underlying behavior,
 not completion of the visible rename.
+
+## 구현 현황 — 2026-09-27
+
+검증은 2026-09-26(KST)에 시작해 9월 27일까지 이어졌다. 로컬 브랜치
+`codex/local-product-foundation`의 체크포인트는 `217482b`이다.
+최종 런타임 코드 기준은 `f88eeb5`이며 Markdown 표시 보정과 문자열
+`Origin: null` 거부를 포함한다. 선정한 로컬 기반의 구현·검증은 완료됐고
+원격 push는 없었다. 완료 범위는 Firefox Shell 프로토타입의 선정한 로컬
+기반이며 제품 전체와 Gecko 독립 배포·패키징은 포함하지 않는다.
+
+- 구현 범위: 브라우저 우선 진입, 독립적으로 투영·저장되는 Board, 일반 Codex
+  app-server 기반 Chat 스트림·활동 표시·중지·수동 승인·`artifactRefs`.
+  일반 런타임의 작업 디렉터리 전달과 잘못된 작업 디렉터리의 네이티브 RPC
+  이전 `400 INVALID_CWD` 거부도 코드에 반영됐다. Terminal 초기화는 CSP가
+  허용하는 외부 리소스로 옮겼으며 CSP와 보안 정책은 완화하지 않았다.
+  후속 Origin 검사는 문자열 `null`을 거부하고 헤더가 없는 정상 요청은 유지한다.
+  Markdown 표시 보정도 반영됐으며 CSP·principal 보안 경계를 완화하지 않았다.
+- 검증 범위: `f88eeb5` 기준 Node 통합 검사 184/184(UI 73, helper 79,
+  profile guard 9, QA 인프라 23)가 통과했다. 알려진 P1/P2 항목과 최종
+  Markdown·Origin 변경의 정적 검토도 통과했다. 실제 Firefox 첫 사용 8/8,
+  전체 Chat fixture 43/43, 기존 ChatGPT 인증의 실제 Chat UI artifact
+  16/16, 실제 네이티브 Terminal 11/11, 최종 완료 응답의 제어된 이어검사 16/16이
+  통과했다. 손상된 Desk는 제어된 이어가기 5/5와 같은 프로필 재시작 4/4,
+  부분 Desk는 최초 복구 5/5와 재시작 4/4에서 원본과 새 작업을 보존했다.
+  이전 `UI301`의 Board 4개 흐름도 통과했다. QA 인프라 23건은 앱 수용
+  건수와 구분한다. 검증 유형과 적용 범위는
+  [`PATH_1_5_STABILIZATION.md`](../../apps/firefox-ui-demo/docs/PATH_1_5_STABILIZATION.md)에 구분했다.
+- 최종 재표시: MCP 응답 확인 timeout 당시 이미 반영된 동작을 반복하지
+  않고 이어서 검사했다. 코드의 언더스코어 원문, 읽을 수 있는 로컬 파일 링크,
+  같은 응답의 artifact 열기를 확인했다. 신뢰된 HTTP/SSE는 200,
+  문자열 `Origin: null`은 403이었다. `POST /chat/send`는 0회였고
+  기존 네이티브 run 1개와 파일 해시는 유지됐다. 전용 검증 런타임 정리도
+  완료했다. 실제 사용자 계정 로그아웃과 새 OAuth는 시험하지 않았다.
+- Owner의 15개 질문은 열려 있다. Jev 초안은 채택되지 않았고 API 키나
+  네트워크 인프라 변경은 없었다.
 
 ## Current Product Frame
 
