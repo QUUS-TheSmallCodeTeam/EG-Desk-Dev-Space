@@ -1,0 +1,75 @@
+import { chatError, publicText } from './codex-chat-values.mjs'
+
+// Firefox privileged chrome fetches can have a missing or opaque Origin.
+// Ordinary web origins must match this loopback service; never echo arbitrary origins.
+export function guardBridgeRequest(req, port = 39218) {
+  if (typeof req.url !== 'string' || !req.url.startsWith('/') || req.url.startsWith('//')) return false
+  const local = new Set(['127.0.0.1', '::1', '::ffff:127.0.0.1'])
+  if (req.socket?.remoteAddress && !local.has(req.socket.remoteAddress)) return false
+  if (![ `127.0.0.1:${port}`, `localhost:${port}`, `[::1]:${port}` ].includes(req.headers.host)) return false
+  if (req.headers['sec-fetch-site'] === 'cross-site') return false
+  const origin = req.headers.origin
+  return origin === undefined || ['null', 'chrome://browser', 'chrome://userchrome', `http://127.0.0.1:${port}`, `http://localhost:${port}`, `http://[::1]:${port}`].includes(origin)
+}
+
+export function setBridgeCors(req, res) {
+  if (req.headers.origin) res.setHeader('Access-Control-Allow-Origin', req.headers.origin)
+  res.setHeader('Vary', 'Origin')
+}
+
+export async function readJsonBody(req) {
+  let size = 0
+  const chunks = []
+  for await (const chunk of req) {
+    size += chunk.length
+    if (size > 65536) throw chatError('BODY_TOO_LARGE', 'Request body exceeds 64 KiB', 413)
+    chunks.push(chunk)
+  }
+  if (!size) return {}
+  if (!/^application\/json(?:\s*;|$)/i.test(req.headers['content-type'] || '')) {
+    throw chatError('CONTENT_TYPE', 'Expected application/json', 415)
+  }
+  try {
+    const body = JSON.parse(Buffer.concat(chunks).toString('utf8'))
+    if (!body || typeof body !== 'object' || Array.isArray(body)) throw new Error()
+    return body
+  } catch { throw chatError('INVALID_JSON', 'Expected a JSON object') }
+}
+
+export function sendJson(res, statusCode, data) {
+  const body = JSON.stringify(data)
+  res.writeHead(statusCode, {
+    'Content-Type': 'application/json; charset=utf-8',
+    'Content-Length': Buffer.byteLength(body),
+    'Cache-Control': 'no-store',
+  })
+  res.end(body)
+}
+
+export function createChatHttpHandler(chat, ensureAuth) {
+  return async (req, res, url) => {
+    const routes = new Set(['/chat/send', '/chat/resume', '/chat/interrupt', '/chat/approval'])
+    if (req.method === 'GET' && url.pathname === '/chat/state') {
+      sendJson(res, 200, chat.snapshot(url.searchParams.get('conversationId')))
+      return true
+    }
+    if (req.method !== 'POST' || !routes.has(url.pathname)) return false
+    let body = {}
+    try {
+      body = await readJsonBody(req)
+      await ensureAuth()
+      const action = { '/chat/send': 'send', '/chat/resume': 'resume', '/chat/interrupt': 'interrupt', '/chat/approval': 'replyApproval' }[url.pathname]
+      const result = await chat[action](body)
+      sendJson(res, url.pathname === '/chat/send' ? 202 : 200, result)
+    } catch (error) {
+      sendJson(res, error.httpStatus || 500, {
+        accepted: false,
+        conversationId: typeof body.conversationId === 'string' ? body.conversationId : '',
+        requestId: typeof body.requestId === 'string' ? body.requestId : null,
+        code: typeof error.code === 'string' ? error.code : 'CHAT_ERROR',
+        error: publicText(error.message, 2000),
+      })
+    }
+    return true
+  }
+}
