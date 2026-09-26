@@ -4,6 +4,7 @@ import { AppServerRpc } from './codex-app-server-rpc.mjs'
 import { CodexChatRuntime } from './codex-chat-runtime.mjs'
 import { createChatHttpHandler, guardBridgeRequest, readJsonBody, sendJson, setBridgeCors } from './codex-bridge-http.mjs'
 import { BoundedSseClient } from './codex-bridge-sse.mjs'
+import { TerminalSessionRegistry, terminalResponseStatus } from './terminal-sessions.mjs'
 import { chatError, publicText } from './codex-chat-values.mjs'
 import { randomBytes } from 'node:crypto'
 import * as os from 'node:os'
@@ -347,7 +348,7 @@ async function startChatgptLogin() {
 }
 
 // ── Terminal PTY support ──
-const terminalSessions = new Map()
+const terminalRegistry = new TerminalSessionRegistry()
 
 // npm 설치 과정에서 node-pty spawn-helper의 실행 비트가 소실되는 경우가 있어
 // (posix_spawnp failed → 조용히 child_process fallback 강등) 기동 시 복구한다.
@@ -414,72 +415,30 @@ async function createTerminalSession(cols = 80, rows = 24, shell = null) {
     })
   }
 
-  const outputBuffer = []
-  let exited = false
-  let exitCode = null
-
-  if (usePty) {
-    ptyProcess.onData((data) => { outputBuffer.push(data) })
-    ptyProcess.onExit(({ exitCode: code }) => { exited = true; exitCode = code })
-  } else {
-    ptyProcess.stdout.on('data', (data) => { outputBuffer.push(data.toString()) })
-    ptyProcess.stderr.on('data', (data) => { outputBuffer.push(data.toString()) })
-    ptyProcess.on('exit', (code) => { exited = true; exitCode = code })
-    ptyProcess.on('error', (err) => { outputBuffer.push(`\r\nError: ${err.message}\r\n`); exited = true })
-  }
-
-  const session = {
+  return terminalRegistry.register({
     id: sessionId,
     process: ptyProcess,
     usePty,
-    outputBuffer,
-    exited: () => exited,
-    exitCode: () => exitCode,
     shell: defaultShell,
     cols,
     rows,
-    createdAt: Date.now(),
-  }
-  terminalSessions.set(sessionId, session)
-  return session
+  })
 }
 
 function writeToTerminal(sessionId, data) {
-  const session = terminalSessions.get(sessionId)
-  if (!session) return { error: 'Session not found' }
-  if (session.exited()) return { error: 'Session has exited' }
-  const proc = session.process
-  if (session.usePty) { proc.write(data) }
-  else if (proc.stdin) { proc.stdin.write(data) }
-  return { ok: true }
+  return terminalRegistry.write(sessionId, data)
 }
 
 function readFromTerminal(sessionId) {
-  const session = terminalSessions.get(sessionId)
-  if (!session) return { error: 'Session not found', data: '', exited: true }
-  const data = session.outputBuffer.splice(0).join('')
-  return { data, exited: session.exited(), exitCode: session.exitCode() }
+  return terminalRegistry.read(sessionId)
 }
 
 function resizeTerminal(sessionId, cols, rows) {
-  const session = terminalSessions.get(sessionId)
-  if (!session) return { error: 'Session not found' }
-  if (session.exited()) return { error: 'Session has exited' }
-  session.cols = cols
-  session.rows = rows
-  if (session.usePty && session.process.resize) { session.process.resize(cols, rows) }
-  return { ok: true }
+  return terminalRegistry.resize(sessionId, cols, rows)
 }
 
 function killTerminal(sessionId) {
-  const session = terminalSessions.get(sessionId)
-  if (!session) return { error: 'Session not found' }
-  try {
-    if (session.process.kill) session.process.kill()
-    else if (session.process.destroy) session.process.destroy()
-  } catch (e) { /* ignore */ }
-  terminalSessions.delete(sessionId)
-  return { ok: true }
+  return terminalRegistry.kill(sessionId)
 }
 
 const bridgeServer = createServer(async (req, res) => {
@@ -627,7 +586,8 @@ const bridgeServer = createServer(async (req, res) => {
     try {
       const body = await readJsonBody(req)
       const session = await createTerminalSession(body.cols, body.rows, body.shell)
-      sendJson(res, 200, { sessionId: session.id, shell: session.shell, cols: session.cols, rows: session.rows })
+      const result = terminalRegistry.snapshot(session.id)
+      sendJson(res, terminalResponseStatus(result), { ...result, shell: session.shell, cols: session.cols, rows: session.rows })
     } catch (error) {
       sendJson(res, 500, { error: publicText(error instanceof Error ? error.message : String(error), 2000) })
     }
@@ -637,7 +597,7 @@ const bridgeServer = createServer(async (req, res) => {
     try {
       const body = await readJsonBody(req)
       const result = writeToTerminal(body.sessionId, body.data)
-      sendJson(res, result.error ? 400 : 200, result)
+      sendJson(res, terminalResponseStatus(result), result)
     } catch (error) {
       sendJson(res, 500, { error: publicText(error instanceof Error ? error.message : String(error), 2000) })
     }
@@ -647,7 +607,7 @@ const bridgeServer = createServer(async (req, res) => {
     try {
       const body = await readJsonBody(req)
       const result = readFromTerminal(body.sessionId)
-      sendJson(res, result.error ? 400 : 200, result)
+      sendJson(res, terminalResponseStatus(result), result)
     } catch (error) {
       sendJson(res, 500, { error: publicText(error instanceof Error ? error.message : String(error), 2000) })
     }
@@ -657,7 +617,7 @@ const bridgeServer = createServer(async (req, res) => {
     try {
       const body = await readJsonBody(req)
       const result = resizeTerminal(body.sessionId, body.cols, body.rows)
-      sendJson(res, result.error ? 400 : 200, result)
+      sendJson(res, terminalResponseStatus(result), result)
     } catch (error) {
       sendJson(res, 500, { error: publicText(error instanceof Error ? error.message : String(error), 2000) })
     }
@@ -667,7 +627,7 @@ const bridgeServer = createServer(async (req, res) => {
     try {
       const body = await readJsonBody(req)
       const result = killTerminal(body.sessionId)
-      sendJson(res, 200, result)
+      sendJson(res, terminalResponseStatus(result), result)
     } catch (error) {
       sendJson(res, 500, { error: publicText(error instanceof Error ? error.message : String(error), 2000) })
     }
@@ -703,9 +663,5 @@ process.on('exit', () => {
   rpc?.close()
   try { appServerSocket?.close(); } catch {}
   try { appServerProcess?.kill(); } catch {}
-  // Cleanup terminal sessions
-  for (const [id, session] of terminalSessions) {
-    try { if (session.process.kill) session.process.kill() } catch {}
-  }
-  terminalSessions.clear()
+  terminalRegistry.requestStopAll()
 })
