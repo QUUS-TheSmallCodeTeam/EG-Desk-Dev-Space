@@ -119,7 +119,7 @@ expiry / stale condition
 
 ### Canvas 초대 후보 흐름
 
-1. Desk owner가 특정 Agenda 또는 Workroom/Task를 선택한다.
+1. Desk owner가 특정 Board 또는 Workroom/Task를 선택한다.
 2. System이 포함할 View·artifact·message·evidence와 제외될 private/local-only 상태를
    preview한다.
 3. collaborator의 role, 관찰·comment·edit·Agent delegation·control 권한을 각각 정한다.

@@ -1,9 +1,10 @@
-# Desk, Agenda, and Desk Window Runtime Model
+<a id="desk-agenda-and-desk-window-runtime-model"></a>
+# Desk, Board, and Desk Window Runtime Model
 
 **Date**: 2026-05-18
 **Updated**: 2026-07-19
 **Status**: Product/runtime architecture decision note
-**Scope**: EG-Desk Firefox shell, Desk canvas, Agenda state, Desk Window lifecycle, search, local index, input ownership
+**Scope**: EG-Desk Firefox shell, Desk canvas, Board state, Desk Window lifecycle, search, local index, input ownership
 
 ---
 
@@ -14,7 +15,7 @@ EG-Desk should not expose Codex-style "project = folder" as the primary user con
 ```text
 Library = long-term searchable catalog
 Desk    = computer-level live work surface
-Agenda  = work + execution environment pairing
+Board   = work + execution environment pairing
 Desk Window = movable/resizable interactive work surface on the Desk
 Card        = compact result, summary, snapshot, or collapsed representation
 ```
@@ -42,12 +43,13 @@ A browser profile is not a Desk. Browser profile, container, and account are run
 
 ---
 
-## Agenda Model
+<a id="agenda-model"></a>
+## Board Model
 
-Agenda is not a todo list and not a folder. It is the work boundary that pairs a task with the execution environment needed to do it.
+Board is not a todo list and not a folder. It is the work boundary that pairs a task with the execution environment needed to do it.
 
 ```text
-Agenda
+Board
   browser cards
   file cards
   chat cards
@@ -57,23 +59,24 @@ Agenda
   result cards
 ```
 
-Agenda can be nested, but the product should treat this as a work decomposition graph, not a folder tree. Deep nesting can exist in the data model, while the Desk UI shows the active slice.
+Board can be nested, but the product should treat this as a work decomposition graph, not a folder tree. Deep nesting can exist in the data model, while the Desk UI shows the active slice.
 
-On an infinite canvas, an Agenda is distinguished by:
+On an infinite canvas, a Board is distinguished by:
 
 ```text
-Agenda Header Card
-Agenda Region
+Board Header Card
+Board Region
 Member Cards
 Focus Mode
-Collapse/Expand to an Agenda Card
+Collapse/Expand to a Board Card
 ```
 
 ---
 
-## Saved Agenda, Automatic Desk Session, and Live Runtime
+<a id="saved-agenda-automatic-desk-session-and-live-runtime"></a>
+## Saved Board, Automatic Desk Session, and Live Runtime
 
-The Desk and the Agenda library are related but separate product surfaces.
+The Desk and the Board library are related but separate product surfaces.
 
 ```text
 actual Desk surface
@@ -81,32 +84,32 @@ actual Desk surface
   + currently mounted views
   + each view's live or reconstructed runtime state
 
-Sidebar Agenda section
-  separately listed saved Agendas
+Sidebar Board section
+  separately listed saved Boards
   + explicit open/create/update actions
 ```
 
 The automatic Desk session restores what the user left open even when the user
-never saved an Agenda. Persisting that session for restart recovery does not
-commit it to an Agenda. Normal startup should feel like browser session restore:
+never saved a Board. Persisting that session for restart recovery does not
+commit it to a Board. Normal startup should feel like browser session restore:
 the Desk opens directly and prior views reappear without a mandatory recovery
 mode, origin badge, or keep/discard wizard.
 
-An unsaved Agenda indicator applies only when the user has an Agenda open and
-has changed the state that will be retained by that Agenda. It must not label
-every automatically restored Desk view as an unsaved Agenda change.
+An unsaved Board indicator applies only when the user has a Board open and
+has changed the state that will be retained by that Board. It must not label
+every automatically restored Desk view as an unsaved Board change.
 
 ```text
 automatic Desk-session change
   opening, closing, moving, or resizing a Desk view
   -> recorded for local session continuity according to the decided restore scope
 
-Agenda change
-  adding/removing a member, changing an Agenda binding, or updating saved layout
-  -> marked unsaved until the Agenda update action is performed
+Board change
+  adding/removing a member, changing a Board binding, or updating saved layout
+  -> marked unsaved until the Board update action is performed
 ```
 
-When an Agenda with unsaved Agenda changes is closed or switched, the product
+When a Board with unsaved Board changes is closed or switched, the product
 may require an explicit guard:
 
 ```text
@@ -121,11 +124,11 @@ and gestures remain a UI contract and must not be replaced by abstract
 
 Current implementation drift:
 
-- startup restores the stored active Agenda snapshot, not an independent
+- startup restores the stored active Board snapshot, not an independent
   automatic Desk session;
 - general canvas changes feed one `state.agenda.dirty` flag;
-- the current Agenda selector is a top rail/popover, while the latest product
-  direction places saved Agendas in a Sidebar area.
+- the current selector, still labeled `Agenda`, is a top rail/popover, while
+  the latest product direction places saved Boards in a Sidebar area.
 
 These are implementation gaps, not evidence that the product lifecycles should
 be merged.
@@ -146,8 +149,8 @@ Reference patterns, not implementation proof:
 
 ## Desk, Viewport, and Card State
 
-Desk state below is an auto-recovery record for the work surface. It is not an
-Agenda revision merely because it is serialized.
+Desk state below is an auto-recovery record for the work surface. It is not a
+Board revision merely because it is serialized.
 
 ```ts
 type DeskState = {
@@ -159,7 +162,8 @@ type DeskState = {
 };
 ```
 
-Agenda stores committed work state.
+Board stores committed work state. The model sketches retain identifiers
+containing `agenda` for compatibility; Board is the product name.
 
 ```ts
 type AgendaState = {
@@ -212,7 +216,7 @@ Viewport state such as animation targets can exist at runtime but should not bec
 save:
   desk pan/zoom
   card x/y/width/height/zIndex
-  agenda membership
+  Board membership
   accepted annotations
 
 do not save as layout:
@@ -340,7 +344,7 @@ The shell owns behavior that must be identical across Desk Window kinds:
 - initial Desk placement and world-coordinate geometry;
 - focus, active state, z-order, header drag, resize, and safe-area maximize;
 - `sourceRef` registration and removal;
-- Agenda dirty-state marking for create, move, resize, and close;
+- Board dirty-state marking for create, move, resize, and close;
 - shell-state serialization and restore;
 - a cleanup registry that executes each registered cleanup exactly once;
 - window identity updates such as title, status, and loading/error state;
@@ -349,7 +353,7 @@ The shell owns behavior that must be identical across Desk Window kinds:
 The shell must be the only code that removes the Desk Window root. Adapters request a
 close through the shell and release their resources through the cleanup
 registry; they do not independently unregister the source, clear global focus,
-or mutate Agenda state.
+or mutate Board state.
 
 ### Adapter ownership
 
@@ -473,7 +477,7 @@ Restore order is fixed:
 
 ```text
 1. resolve adapter from persisted kind
-2. create shell without marking Agenda dirty
+2. create shell without marking Board dirty
 3. restore shell geometry and sourceRef
 4. mount adapter into shell slots
 5. restore adapter runtime state
@@ -527,13 +531,13 @@ Acceptance requires:
 - Browser navigation, browsing-context actors, and page input remain intact;
 - Ontology pan/zoom, time/layer clicks, minimap, and resize rerender remain
   intact;
-- Agenda serialization restores shell geometry and each adapter's semantic
-  state without marking the restored Agenda dirty;
+- Board serialization restores shell geometry and each adapter's semantic
+  state without marking the restored Board dirty;
 - existing adapter-specific CSS classes remain valid during the first migration.
 
 The implementation verification set should include Browser controls and agent
 observation, the current Ontology `*-card` and interaction checks, `sourceRef`,
-Agenda persistence, and viewport-layout checks. Add one cross-window shell verifier for
+Board persistence, and viewport-layout checks. Add one cross-window shell verifier for
 shared anatomy, eight resize handles, cleanup-once behavior, input-policy
 separation, and shell-plus-adapter restore.
 
@@ -705,13 +709,13 @@ Headless browser mode should not be treated as the model for EG-Desk background-
 
 ## Card Creation and Placement
 
-Default creation should search for empty space in the current viewport, then place the card on top of the active Agenda region as a dirty overlay change.
+Default creation should search for empty space in the current viewport, then place the card on top of the active Board region as a dirty overlay change.
 
 ```text
 create card
   -> inspect current viewport
   -> find empty space
-  -> prefer active Agenda region
+  -> prefer active Board region
   -> create as dirty overlay
 ```
 
@@ -786,7 +790,7 @@ Current canvas cards should also affect ranking and presentation, but do not nee
 Default ranking:
 
 ```text
-current Agenda
+current Board
 current Desk
 recently used
 whole Library
@@ -805,7 +809,9 @@ Codex thread     -> Chat Card
 
 ## Local Index and Storage Direction
 
-The first local search/index store should be SQLite.
+For a future local search/index store, SQLite is the proposed first choice.
+The following lists planned logical collections; it is not existing DDL or an
+implemented storage API.
 
 ```text
 egdesk_index.sqlite
@@ -813,7 +819,7 @@ egdesk_index.sqlite
   browser_history
   codex_threads
   chat_messages
-  agendas
+  boards
   cards
   FTS index
 ```
@@ -975,6 +981,6 @@ exit Card Fullscreen
   -> keep card active
 ```
 
-Card fullscreen is temporary viewport presentation state. It should not overwrite the committed Agenda/Card world layout.
+Card fullscreen is temporary viewport presentation state. It should not overwrite the committed Board/Card world layout.
 
-Viewport chrome behavior, safe area, maximize semantics, HUD hiding/peek/pinned behavior, and the top bar's Agenda-in-viewport role are specified in [`VIEWPORT_LAYOUT_INTERACTION_MODEL.md`](./VIEWPORT_LAYOUT_INTERACTION_MODEL.md).
+Viewport chrome behavior, safe area, maximize semantics, HUD hiding/peek/pinned behavior, and the top bar's Board-in-viewport role are specified in [`VIEWPORT_LAYOUT_INTERACTION_MODEL.md`](./VIEWPORT_LAYOUT_INTERACTION_MODEL.md).

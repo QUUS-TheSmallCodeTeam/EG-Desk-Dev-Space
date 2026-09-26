@@ -22,7 +22,7 @@ Present is the current executable state.
 
 It includes:
 
-- visible Desk, Agenda, and Card state
+- visible Desk, Board, and Card state
 - open browser profiles and pages
 - active terminal processes
 - current files and repo state

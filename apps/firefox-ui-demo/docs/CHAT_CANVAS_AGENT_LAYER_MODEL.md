@@ -69,13 +69,14 @@ durable.
 
 ---
 
-## Agenda Thread
+<a id="agenda-thread"></a>
+## Board Thread
 
-An Agenda Thread is a work-scoped shared conversation. Multiple agents, the
+A Board Thread is a work-scoped shared conversation. Multiple agents, the
 user, and later authorized collaborators may participate like a group chat.
-Messages, results, step comments, and run status share the Agenda context.
+Messages, results, step comments, and run status share the Board context.
 
-Moving work from Agent DM to an Agenda Thread must not expose an entire private
+Moving work from Agent DM to a Board Thread must not expose an entire private
 DM automatically. The system links or copies only the selected messages and
 resolved context needed for the shared work.
 
@@ -107,6 +108,9 @@ Result chip behavior:
 ```
 
 The result card keeps a binding back to the chat run that created it.
+
+The model sketches retain `agendaId` and `"agenda"` as identifier spellings;
+Board is the product label.
 
 ```ts
 Card = {
@@ -184,7 +188,7 @@ Clicking an agent profile should show:
 - role / agent type
 - model
 - provider
-- current Agenda binding
+- current Board binding
 - ontology/context bindings
 - enabled tools
 - recent runs
@@ -249,7 +253,7 @@ Actions
 ✓ Created deck.pptx
 
 Context
-- Agenda: 태화 5월 리포트
+- Board: 태화 5월 리포트
 - Model: ...
 - Ontology: ...
 ```

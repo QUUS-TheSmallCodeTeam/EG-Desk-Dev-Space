@@ -11,9 +11,10 @@
 
 ## 0. 제품 소유자 확인 목록
 
-현재 선택이 남은 정책 주제는 `OPEN`인 16개다. 하나의 주제 안에서도 각 선택은 독립적이다.
-HUM-DESK-001은 이미 결정됐고 HUM-READ-001은 별도 사용자 선택 없이 설계로 해소했다.
-두 항목의 앵커·이력은 기존 문서 연결을 위해 남긴다.
+현재 선택이 남은 정책 주제는 `OPEN`인 15개다. 하나의 주제 안에서도 각 선택은 독립적이다.
+HUM-DESK-001과 HUM-AGENT-001은 결정됐고 HUM-READ-001은 별도 사용자 선택 없이 설계로 해소했다.
+세 항목의 앵커·이력은 기존 문서 연결을 위해 남긴다. 기본 Codex를 먼저 제공한다는 결정은
+가입·계정 통합, 도구 권한, 기억·공유 정책까지 일괄 승인한 뜻이 아니다.
 결정되지 않은 항목은 연결된 범위만 `OPEN`으로 남으며, 각 항목의 `계속 가능한 작업`에서
 이미 작성한 조건별 흐름과 구현·검사 경로를 확인할 수 있다.
 
@@ -42,23 +43,27 @@ HUM-DESK-001은 이미 결정됐고 HUM-READ-001은 별도 사용자 선택 없�
 ### 0.1 결정된 경계와 남은 제품 선택
 
 <a id="hum-desk-001"></a>
-#### HUM-DESK-001 — Desk 수와 Agenda 열기 결과
+#### HUM-DESK-001 — Desk 수와 Board 열기 결과
 
-- **질문**: 추가로 남은 제품 선택은 없다. 하나의 Desk·Canvas와 여러 Agenda·PC의 관계는 아래 결정을 유지한다.
-- **결정**: 기본 제품 모델은 **하나의 Desk와 그 Desk에 속한 하나의 Canvas**다. 여러 Saved Agenda는 Sidebar에서 선택해 같은 Canvas에 서로 독립된 projection으로 동시에 열 수 있다. Agenda를 연다고 기존 Canvas 내용을 교체하거나 별도 Desk를 만들지 않는다. 다중 Desk는 메모리 최적화 수단으로 도입하지 않는다. 이 화면 관계는 물리 PC 한 대의 제한이 아니다. Canvas 기반 Agenda는 여러 PC의 자료·실행 자원을 연결하며 폴더 하나로 한정되지 않는다.
-- **결정 출처**: 제품 소유자 대화 결정, 2026-08-25–2026-08-30; 다중 PC·Canvas 기반 Agenda 방향 재확인, 2026-09-08.
+- **질문**: 추가로 남은 제품 선택은 없다. 하나의 Desk·Canvas와 여러 Board·PC의 관계는 아래 결정을 유지한다.
+- **결정**: 기본 제품 모델은 **하나의 Desk와 그 Desk에 속한 하나의 Canvas**다. 여러 Saved Board는 Sidebar에서 선택해 같은 Canvas에 서로 독립된 projection으로 동시에 열 수 있다. Board를 연다고 기존 Canvas 내용을 교체하거나 별도 Desk를 만들지 않는다. 다중 Desk는 메모리 최적화 수단으로 도입하지 않는다. 이 화면 관계는 물리 PC 한 대의 제한이 아니다. Canvas 기반 Board는 여러 PC의 자료·실행 자원을 연결하며 폴더 하나로 한정되지 않는다.
+- **결정 출처**: 제품 소유자 대화 결정, 2026-08-25–2026-08-30; 다중 PC·Canvas 기반 Board 방향 재확인, 2026-09-08.
+- **첫 사용 결정 — 2026-09-12–13**: 최초 사용자는 Canvas가 숨겨진 Browser 집중 화면의 시작 페이지에서 출발한다. 주소를 입력해 인터넷을 이용하거나 프로필 연결을 통해 Desk로 들어간다. 초기 연결·Codex 사용은 온라인을 전제로 한다. 재방문자의 기존 작업 복원과 첫 온보딩은 별도 흐름이며, 로그인 절차를 거쳤다는 이유로 이미 열어 둔 Browser를 복제하거나 새 Desk를 만들지 않는다. [첫 실행](../../ideas/confirmed/EGDESK_PRODUCT_INTERACTION_TRACE_ATLAS.md#atlas-first-use), [기술 경계](../../ideas/confirmed/EGDESK_INTERACTION_AND_ORCHESTRATION_CONTRACT.md#tech-first-use).
 - **왜 사용자 결정인가**: navigation·저장·복원 객체 수명주기가 달라진다.
 - **영향**: [Atlas AG-02](../../ideas/confirmed/EGDESK_PRODUCT_INTERACTION_TRACE_ATLAS.md#atlas-ag-02), [Contract §1](../../ideas/confirmed/EGDESK_INTERACTION_AND_ORCHESTRATION_CONTRACT.md#tech-desk-lifecycle)
-- **계속 가능한 작업**: [Agenda 배치·중복 열기·겹침 회피](../references/design-synthesis/egdesk-ux-realization-proposals.md#ux-detail-agenda)의 설계를 바탕으로 Agenda 열기·기존 화면 복귀를 구현하고 검사할 수 있다.
+- **계속 가능한 작업**: [Board 배치·중복 열기·겹침 회피](../references/design-synthesis/egdesk-ux-realization-proposals.md#ux-detail-agenda)의 설계를 바탕으로 Board 열기·기존 화면 복귀를 구현하고 검사할 수 있다.
 - **상태**: `DECIDED`
 
 <a id="hum-agenda-001"></a>
-#### HUM-AGENDA-001 — Agenda 저장 내용과 revision 수명주기
+<a id="hum-board-001"></a>
+#### HUM-AGENDA-001 — Board 저장 내용과 revision 수명주기
 
-- **추천·대안**: [Agenda 저장·공유 실행·닫기 비교](../references/design-synthesis/egdesk-ux-realization-proposals.md#decision-agenda), [저장된 Agenda 삭제·복구 흐름](../references/design-synthesis/egdesk-ux-realization-proposals.md#agenda-delete-recover)
-- **질문**: 기본 저장 내용, 닫은 뒤 미저장 편집의 복구 범위, 이전 저장 구성으로 되돌리기, 삭제된 Saved Agenda의 복구 가능 범위·기한을 각각 무엇으로 할 것인가? 저장본·편집 초안·휴지통은 독립된 선택이다.
-- **삭제에서 남은 선택**: Saved Agenda 자체를 휴지통에 보존할지, 보관 기한과 복구 범위를 어디까지 둘지다. 닫을 때의 예약 pause/삭제와는 독립된 선택이며, 저장본 복구가 과거 권한·실행·예약의 자동 복원을 뜻하지 않는다.
-- **관련 후보**: [저장 시점·현재 원본·동일 resource 재사용](../references/design-synthesis/egdesk-capability-scenario-connected-agent-work.md#needs-agenda-save). 미저장 편집이 있는 Agenda를 닫을 때 무엇을 복구 기록에 남길지도 함께 정한다.
+- **확정된 의미 — 2026-09-13**: 단순한 참고자료 목록이 아니라 특정 일을 바로 할 수 있게 자료·도구·대화·메모와 카드 배치·참조 연결을 갖춘 업무 구성이다. 이름을 바꾸더라도 명시적 구성 저장, 자동 Desk 복구, 실제 실행의 수명은 구별한다. [제품 의미](../../ideas/confirmed/EGDESK_PRODUCT_INTERACTION_TRACE_ATLAS.md#atlas-obj-005).
+- **표시 명칭 결정 — 2026-09-26**: 이 업무 구성의 현재 표시명은 영문 `Board`/`Boards`, 한글 `보드`다. 제품 소유자가 임시로 채택한 명칭이며, 당시 Agenda라는 이름 아래 정한 업무 구성 의미는 그대로 적용한다. 명칭 선택은 완료됐지만 기본 저장 내용·복구·공유·실행 수명 정책은 아래 질문으로 남는다. 기존 `HUM-AGENDA-001` ID와 연결은 호환을 위해 유지한다. [이전 후보 비교](../references/design-synthesis/egdesk-ux-realization-proposals.md#agenda-name-candidates)는 결정 전 검토 기록이다.
+- **추천·대안**: [Board 저장·공유 실행·닫기 비교](../references/design-synthesis/egdesk-ux-realization-proposals.md#decision-agenda), [저장된 Board 삭제·복구 흐름](../references/design-synthesis/egdesk-ux-realization-proposals.md#agenda-delete-recover)
+- **질문**: 기본 저장 내용, 닫은 뒤 미저장 편집의 복구 범위, 이전 저장 구성으로 되돌리기, 삭제된 Saved Board의 복구 가능 범위·기한을 각각 무엇으로 할 것인가? 저장본·편집 초안·휴지통은 독립된 선택이다.
+- **삭제에서 남은 선택**: Saved Board 자체를 휴지통에 보존할지, 보관 기한과 복구 범위를 어디까지 둘지다. 닫을 때의 예약 pause/삭제와는 독립된 선택이며, 저장본 복구가 과거 권한·실행·예약의 자동 복원을 뜻하지 않는다.
+- **관련 후보**: [저장 시점·현재 원본·동일 resource 재사용](../references/design-synthesis/egdesk-capability-scenario-connected-agent-work.md#needs-agenda-save). 미저장 편집이 있는 Board를 닫을 때 무엇을 복구 기록에 남길지도 함께 정한다.
 - **왜 사용자 결정인가**: 자동 Desk 세션과 명시적 저장의 경계를 바꾼다.
 - **영향**: [Atlas AG-01–04](../../ideas/confirmed/EGDESK_PRODUCT_INTERACTION_TRACE_ATLAS.md#atlas-ag-01), [Contract §1](../../ideas/confirmed/EGDESK_INTERACTION_AND_ORCHESTRATION_CONTRACT.md#tech-desk-lifecycle)
 - **계속 가능한 작업**: [저장 범위·리비전·삭제·복구의 조건별 경로](../references/design-synthesis/egdesk-ux-realization-proposals.md#ux-detail-agenda-lifecycle)의 설계를 바탕으로 선택할 보존 정책별 구현과 복구 검사를 진행할 수 있다.
@@ -67,11 +72,12 @@ HUM-DESK-001은 이미 결정됐고 HUM-READ-001은 별도 사용자 선택 없�
 <a id="hum-surface-001"></a>
 #### HUM-SURFACE-001 — Desk·Canvas·View·Library·Terminal의 사람용 화면 모델
 
-- **추천·대안**: [조작면 관찰·집중 보기](../references/design-synthesis/egdesk-ux-realization-proposals.md#flow-surface), [Agenda와 실행 소유권](../references/design-synthesis/egdesk-ux-realization-proposals.md#flow-agenda), [Library·그룹·live 재사용](../references/design-synthesis/egdesk-ux-realization-proposals.md#library-groups)
-- **질문**: 같은 live 자원을 기본 재사용할지 독립 사본·세션으로 열지, 여러 Agenda가 같은 실행의 유지를 명시적으로 함께 맡을 수 있게 할지, 선별 재사용 등록을 제공할지와 제공한다면 어떤 대상을 포함할지, 그룹 배치를 재시작·Agenda 저장에 어디까지 남길지 각각 선택한다.
+- **추천·대안**: [조작면 관찰·집중 보기](../references/design-synthesis/egdesk-ux-realization-proposals.md#flow-surface), [Board와 실행 소유권](../references/design-synthesis/egdesk-ux-realization-proposals.md#flow-agenda), [Library·그룹·live 재사용](../references/design-synthesis/egdesk-ux-realization-proposals.md#library-groups)
+- **질문**: 같은 live 자원을 기본 재사용할지 독립 사본·세션으로 열지, 여러 Board가 같은 실행의 유지를 명시적으로 함께 맡을 수 있게 할지, 선별 재사용 등록을 제공할지와 제공한다면 어떤 대상을 포함할지, 그룹 배치를 재시작·Board 저장에 어디까지 남길지 각각 선택한다.
 - **설계와 구분**: Library의 패널 형태·명칭, 중첩 그룹 표현, 검색·여닫기 컨트롤은 위임된 설계다. 선별 재사용 대상과 그룹 지속 범위만 위 질문에서 선택한다.
 - **관련 후보**: [shared runtime 닫기](../references/design-synthesis/egdesk-capability-scenario-connected-agent-work.md#needs-shared-lifecycle), [Canvas 밀도·보존](../references/design-synthesis/egdesk-capability-scenario-connected-agent-work.md#needs-canvas-density), [집중 보기·zoom·resize](../references/design-synthesis/egdesk-capability-scenario-connected-agent-work.md#needs-view-transform), [업로드·OS 승인 설명](../references/design-synthesis/egdesk-capability-scenario-connected-agent-work.md#needs-native-ui).
-- **확정된 부분**: Desk당 Canvas는 하나다. 사용자나 Agent의 의미 있는 활성 작업, sleeping 상태, historical snapshot은 Canvas에서 찾을 수 있는 표현을 가져야 한다. Canvas viewport 밖이라는 이유만으로 자동 종료하지 않으며, lifecycle은 Agenda 단위가 아니라 각 view와 그 runtime 단위로 판단한다. 무거운 renderer는 분리할 수 있지만 Canvas에는 가벼운 node·상태·snapshot 중 알맞은 표현이 남는다. Agenda를 닫으면 그 projection과 해당 Agenda만 소유한 runtime은 종료하고 Saved Agenda는 보존한다. File view 재진입에서는 scroll·보이는 위치를 복원할 수 있지만 active caret, keyboard focus, transient text selection은 복원하지 않는다.
+- **확정된 부분**: Desk당 Canvas는 하나다. 사용자나 Agent가 실제로 사용하는 작업 대상과 유지 중인 runtime은 Canvas에서 찾을 수 있는 표현을 가진다. Canvas viewport 밖이라는 이유만으로 자동 종료하지 않으며, lifecycle은 Board 단위가 아니라 각 view와 그 runtime 단위로 판단한다. 무거운 renderer는 분리할 수 있지만 Canvas에는 가벼운 node·상태·대체 화면 중 알맞은 표현이 남는다. Board를 닫으면 그 projection과 해당 Board만 소유한 runtime은 종료하고 Saved Board는 보존한다. File view 재진입에서는 scroll·보이는 위치를 복원할 수 있지만 active caret, keyboard focus, transient text selection은 복원하지 않는다.
+- **작업·생각 공간 결정 — 2026-09-12–13**: Canvas는 실제 작업 대상과 산출물의 공간이다. 사용자 생성 Agent의 읽기·도구 활동은 해당 작업 대상의 프로필 배지·윤곽으로 표시하며, 사람의 콘텐츠 활성 표시나 입력권과 혼동하지 않는다. 과거 읽기 Snapshot·작업 기록·공개 가능한 계획과 판단 요약의 기본 열람 위치는 Agent 생각 버블에서 여는 기록 패널이다. 도구 호출마다 과거 카드를 Canvas에 자동 누적하지 않는다. 보고에 선별한 근거·산출물·Answer Briefing은 Canvas에서 볼 수 있으며, 생각 버블을 연 사실이 Canvas 카메라 이동이나 새 추론을 뜻하지 않는다. 이 결정은 이전의 모든 historical snapshot에 독립 Canvas node를 요구하던 범위를 정정한다. [화면 상세](../references/design-synthesis/egdesk-ux-realization-proposals.md#ux-detail-reader-observation).
 - **추가 확정 — 2026-09-10, Chat/Canvas 입력**: Chat을 클릭해 콘텐츠를 활성화하고 활성 상태를 시각적으로 구별한다. 활성 Chat 위의 두 손가락 입력은 콘텐츠 scroll이다. 빈 Canvas를 클릭하면 콘텐츠 활성이 풀리고, 이후 비활성 Chat 위에서도 두 손가락으로 Canvas를 이동할 수 있다. hover는 재활성화가 아니며 별도 Pan 버튼은 이 기본 흐름의 필수 절차가 아니다. 출처와 대체 범위는 [사용자 결정 기록](./egdesk-product-documentation-governance.md#owner-chat-canvas-input-20260910)에 남긴다. 활성 표시의 구체 색·두께, 다른 입력 방식의 전면 개편·Agent 입력권 변경을 이 결정에 포함하지 않는다.
 - **왜 사용자 결정인가**: 단순한 레이블을 넘어 사용자가 리소스를 찾고 화면을 조직하고 닫을 때 무엇이 남는지 이해하는 전체 mental model을 바꾼다.
 - **영향**: [Atlas V-01–03](../../ideas/confirmed/EGDESK_PRODUCT_INTERACTION_TRACE_ATLAS.md#atlas-v-01), [DISC-01](../../ideas/confirmed/EGDESK_PRODUCT_INTERACTION_TRACE_ATLAS.md#atlas-disc-01), [CODE-01](../../ideas/confirmed/EGDESK_PRODUCT_INTERACTION_TRACE_ATLAS.md#atlas-code-01), [TERM-01](../../ideas/confirmed/EGDESK_PRODUCT_INTERACTION_TRACE_ATLAS.md#atlas-term-01), [Contract §4.1](../../ideas/confirmed/EGDESK_INTERACTION_AND_ORCHESTRATION_CONTRACT.md#tech-observation-fidelity), [§6–7](../../ideas/confirmed/EGDESK_INTERACTION_AND_ORCHESTRATION_CONTRACT.md#tech-coding-surface)
@@ -80,12 +86,13 @@ HUM-DESK-001은 이미 결정됐고 HUM-READ-001은 별도 사용자 선택 없�
 - **상태**: `OPEN`
 
 <a id="hum-conv-001"></a>
-#### HUM-CONV-001 — Agent 담당자 방, 공유 대화와 Agenda 관계
+#### HUM-CONV-001 — Agent 담당자 방, 공유 대화와 Board 관계
 
 - **추천·대안**: [담당자 방·업무 귀속·Memo 응답 비교](../references/design-synthesis/egdesk-ux-realization-proposals.md#decision-chat)
-- **질문**: Agenda 참여자에게 기본 공개할 업무 메시지·기여 범위는 어디까지인가? Memo는 명시 질문에만 응답하는가, 담당 범위에 연결된 메모에도 응답하는가? 필요한 후속 연락과 미응답 재촉의 기본값은 무엇인가? 대화의 화면상 펼침 깊이는 공개 권한과 별개다.
+- **질문**: Board 참여자에게 기본 공개할 업무 메시지·기여 범위는 어디까지인가? Memo는 명시 질문에만 응답하는가, 담당 범위에 연결된 메모에도 응답하는가? 필요한 후속 연락과 미응답 재촉의 기본값은 무엇인가? 대화의 화면상 펼침 깊이는 공개 권한과 별개다.
 - **관련 후보**: [추가 지시의 업무 대상](../references/design-synthesis/egdesk-capability-scenario-connected-agent-work.md#needs-conversation-target), [실제 참여자·위임 대화](../references/design-synthesis/egdesk-capability-scenario-connected-agent-work.md#needs-participants), [Memo의 먼저 말 걸기·중복·종료](../references/design-synthesis/egdesk-capability-scenario-connected-agent-work.md#needs-memo-initiation).
-- **확정된 부분**: 사람에게 보이는 기본 Chat 관계는 **Agent/persona별 담당자 방**이다. Agent Profile은 방의 상대 정체성이지만 실제 Run이나 모델 context와 동일하지 않다. Canvas Memo는 위치에 고정된 짧은 메모와 작성자별 짧은 답글을 제공하며, Agent가 사용자의 메모 본문을 고쳐 쓰거나 자동으로 긴 대화로 승격하지 않는다. 짧은 답만으로 오해할 위험이 있거나 정보가 부족하면 Agent는 메모 참조를 포함한 메시지·mention을 관련 Agent 방에 먼저 만들 수 있지만 사용자의 Canvas focus를 빼앗지 않는다.
+- **확정된 부분**: Agent를 생성하기 전에는 기본 Codex 대화를 사용한다. 사용자 생성 Agent와의 Chat 관계는 **Agent/persona별 담당자 방**이며, Agent Profile은 상대 정체성이지만 실제 Run이나 모델 context와 동일하지 않다. Agent 생성만으로 기본 Codex의 기존 대화를 이동하거나 새 Agent의 기억으로 상속하지 않는다. Canvas Memo는 위치에 고정된 짧은 메모와 작성자별 짧은 답글을 제공하며, Agent가 사용자의 메모 본문을 고쳐 쓰거나 자동으로 긴 대화로 승격하지 않는다. 짧은 답만으로 오해할 위험이 있거나 정보가 부족하면 Agent는 메모 참조를 포함한 메시지·mention을 관련 Agent 방에 먼저 만들 수 있지만 사용자의 Canvas focus를 빼앗지 않는다.
+- **연결된 선택**: 기본 Codex 대화를 새 Agent와 이어갈 때 전달할 대화·자료 범위, 공동 업무에서 생각 공간 기록을 공개할 대상과 범위는 이 항목의 공개·귀속 정책에서 결정한다. 작업 기록의 보존 기간·삭제는 HUM-SNAPSHOT-001을 따른다.
 - **왜 사용자 결정인가**: 개인정보, 공유 범위, 재진입 위치와 협업 mental model을 바꾼다.
 - **영향**: [Atlas CHAT-01](../../ideas/confirmed/EGDESK_PRODUCT_INTERACTION_TRACE_ATLAS.md#atlas-chat-01), [AI-03](../../ideas/confirmed/EGDESK_PRODUCT_INTERACTION_TRACE_ATLAS.md#atlas-ai-03), [CANVAS-01](../../ideas/confirmed/EGDESK_PRODUCT_INTERACTION_TRACE_ATLAS.md#atlas-canvas-01), [Contract §4](../../ideas/confirmed/EGDESK_INTERACTION_AND_ORCHESTRATION_CONTRACT.md#tech-answer-projection), [§5](../../ideas/confirmed/EGDESK_INTERACTION_AND_ORCHESTRATION_CONTRACT.md#tech-multi-agent-chat)
 - **계속 가능한 작업**: [담당자 방·여러 업무·공유 대화·Memo 응답](../references/design-synthesis/egdesk-ux-realization-proposals.md#ux-detail-chat-entry)의 설계를 바탕으로 선택할 공개·응답 정책별 구현과 대화 귀속 검사를 진행할 수 있다.
@@ -94,6 +101,7 @@ HUM-DESK-001은 이미 결정됐고 HUM-READ-001은 별도 사용자 선택 없�
 <a id="hum-answer-001"></a>
 #### HUM-ANSWER-001 — 요청·Result·논리적 Answer·Chat/Canvas 표현의 관계
 
+- **출력 문맥 결정 — 2026-09-12–13**: 사용자 지시와 내부 작업 메모는 산출물의 화자·독자·목적에 맞게 제약과 본문으로 구분한다. 고객용 문서에 작업 지시를 그대로 옮기지 않는다. 생각 공간의 기록 보존과 사용자용 보고 구성은 별개이며, 분리만으로 자동 정확성·자기개선을 보장하지 않는다. [문맥 경계](../../ideas/confirmed/EGDESK_INTERACTION_AND_ORCHESTRATION_CONTRACT.md#tech-output-situation).
 - **추천·대안**: [근거·결과 편집·설명 갱신 흐름](../references/design-synthesis/egdesk-ux-realization-proposals.md#flow-answer)
 - **질문**: 사용자가 답변의 내용·구성을 원 Agent 답변과 구별되는 지속 수정본으로 남길 수 있게 할 것인가, 주석과 새 설명 요청만 허용할 것인가? 수정 후 설명 갱신은 명시 요청형인가 자동형인가? Briefing 편집과 파일 원본 편집은 해당 항목에서 별도로 선택한다.
 - **확정된 부분**: 요청·Run·Task·기여·Result·artifact·Answer는 같은 객체가 아니다. 하나의 논리적 Answer를 Chat과 Canvas에서 매체에 맞게 표현하며, 화면 탐색만으로 새 분석을 실행하지 않는다. 이 동일성과 귀속을 보장하는 구조는 기술 계약에 따라 구체화한다.
@@ -140,6 +148,7 @@ HUM-DESK-001은 이미 결정됐고 HUM-READ-001은 별도 사용자 선택 없�
 
 - **추천·대안**: [첫 사용·실행 계정 비교](../references/design-synthesis/egdesk-ux-realization-proposals.md#decision-first-use), [실행 설정·사전 위임·적용 시점](../references/design-synthesis/egdesk-ux-realization-proposals.md#execution-settings), [협업 계정 비교](../references/design-synthesis/egdesk-ux-realization-proposals.md#decision-collaboration)
 - **질문**: 기본 AI 계정을 앱·Desk·방·이번 요청 중 어디에 기억할 것인가? 후속 실행의 계정 선택을 명시한 대상·기간·한도 안에서 미리 위임할 수 있는가, 전환마다 직접 선택하는가? 협업의 각자/공동 Engine 비용 귀속은 HUM-COLLAB-001과 한 번만 선택한다.
+- **온보딩에서 남은 선택**: 최초 Codex 로그인 성공을 이용해 기기 내 EG-Desk 브라우저 프로필을 자동 준비하는 방식을 채택할 것인가? 첫 로그인 전 이용하던 Browser의 자료·쿠키를 어떤 프로필에서 계속 사용할 것인가? 별도 EG-Desk 온라인 회원·협업 identity까지 연결할지는 HUM-REMOTE-001의 인프라·인증 범위와 함께 결정한다. [단일 로그인 후보와 한계](../references/design-synthesis/egdesk-ux-realization-proposals.md#onboarding-account-options). 이는 로그인 가능성 질문을 확정된 가입 정책으로 승격하지 않기 위한 구분이다.
 - **확정된 부분**: 실제 계정과 Run의 binding은 보존한다. 로그아웃·quota 소진을 이유로 진행 중 Run을 다른 계정으로 조용히 옮기지 않으며, 인증·권한·사용 한도 부족은 서로 다른 상태로 복구한다.
 - **관련 후보**: [Reader·Worker 전체 예산과 quota 소진](../references/design-synthesis/egdesk-capability-scenario-connected-agent-work.md#needs-reader-budget), [협업자가 사용할 실행 계정·quota](../references/design-synthesis/egdesk-capability-scenario-connected-agent-work.md#needs-collaboration-authority).
 - **왜 사용자 결정인가**: 사용 편의와 잘못된 계정 quota 사용 위험의 균형을 정한다.
@@ -148,15 +157,17 @@ HUM-DESK-001은 이미 결정됐고 HUM-READ-001은 별도 사용자 선택 없�
 - **상태**: `OPEN`
 
 <a id="hum-agent-001"></a>
-#### HUM-AGENT-001 — 즉시 사용 가능한 기본 Agent/Profile
+#### HUM-AGENT-001 — 기본 Codex 먼저 사용하고 Agent는 선택적으로 생성
 
-- **추천·대안**: [첫 사용·기본 Agent 비교](../references/design-synthesis/egdesk-ux-realization-proposals.md#decision-first-use)
-- **질문**: 처음부터 제한된 기본 Agent/Profile로 요청할 수 있게 할 것인가, 사용자가 Profile 설정을 마친 뒤에만 첫 요청을 보낼 수 있게 할 것인가?
+- **화면 연결**: [첫 사용·기본 Codex](../references/design-synthesis/egdesk-ux-realization-proposals.md#decision-first-use)
+- **질문**: Agent 생성 전에 요청할 수 있는지에 대한 선택은 끝났다. 계정·권한·기억·공유의 미결 정책은 HUM-ENGINE-001, HUM-RUN-001, HUM-CONV-001에서 각각 다룬다.
+- **결정**: 인터넷 연결과 Codex 인증을 갖추면 사용자 정의 Agent Profile 없이 기본 Codex로 Desk에서 대화·작업할 수 있다. 기본 모드는 별도 인격체·personality 설정·Agent 생각 버블을 먼저 만들거나 설정하도록 요구하지 않는다. 사용자가 Agent를 생성하면 담당자 정체성·역할·personality와 생각 공간이 추가된다. 기본 Codex에도 현재 실행 계정·모델·허용 도구·위임·승인·입력 기록의 공통 보장은 적용한다.
+- **결정 출처**: 제품 소유자 대화, 2026-09-12–13. ‘기본 Agent 제공 또는 설정 강제’라는 이전 양자 선택을 대체한다. 제품 의미의 결정이며 구현·시뮬레이션 완료 판정이 아니다.
 - **관련 후보**: [Engine·Agent·조직 지식 없는 최초 사용](../references/design-synthesis/egdesk-capability-scenario-connected-agent-work.md#needs-first-use). 조직 지식 미설정과 실제 읽기 실패는 다른 상태로 다룬다.
 - **왜 사용자 결정인가**: 최초 사용 난이도와 제품이 기본으로 부여하는 Agent 행동 범위·책임 기대가 달라진다.
-- **영향**: [Atlas 최초 설정](../../ideas/confirmed/EGDESK_PRODUCT_INTERACTION_TRACE_ATLAS.md#atlas-manual-start), [AGENT-01](../../ideas/confirmed/EGDESK_PRODUCT_INTERACTION_TRACE_ATLAS.md#atlas-agent-01)
-- **계속 가능한 작업**: [Profile 생성·활성화·중단·대체·기본값](../references/design-synthesis/egdesk-ux-realization-proposals.md#ux-detail-agent-profile)의 설계를 바탕으로 기본 제공/직접 설정 정책별 첫 요청 구현과 검사를 진행할 수 있다.
-- **상태**: `OPEN`
+- **영향**: [Atlas 최초 설정](../../ideas/confirmed/EGDESK_PRODUCT_INTERACTION_TRACE_ATLAS.md#atlas-first-use), [AGENT-01](../../ideas/confirmed/EGDESK_PRODUCT_INTERACTION_TRACE_ATLAS.md#atlas-agent-01), [기본 실행 기술 계약](../../ideas/confirmed/EGDESK_INTERACTION_AND_ORCHESTRATION_CONTRACT.md#tech-first-use)
+- **계속 가능한 작업**: 기본 Codex 첫 요청과 [선택적 Agent 생성·활성화](../references/design-synthesis/egdesk-ux-realization-proposals.md#ux-detail-agent-profile)를 독립적으로 구체화할 수 있다. 현재는 문서 반영 단계이며 새 흐름의 시뮬레이션·구현 검증은 남아 있다.
+- **상태**: `DECIDED`
 
 <a id="hum-run-001"></a>
 #### HUM-RUN-001 — Agent·Profile·Run·Task·Memory와 실행 수명주기
@@ -174,8 +185,8 @@ HUM-DESK-001은 이미 결정됐고 HUM-READ-001은 별도 사용자 선택 없�
 #### HUM-ORCH-001 — Task graph·dependency·approval·integration의 사용자 통제
 
 - **추천·대안**: [예약·닫기 정책 비교](../references/design-synthesis/egdesk-ux-realization-proposals.md#decision-agenda), [업무별 중지·기여 통합 흐름](../references/design-synthesis/egdesk-ux-realization-proposals.md#flow-chat)
-- **질문**: Agenda를 닫은 뒤 미래 예약을 일시정지 상태로 보존할 것인가, 함께 삭제할 것인가? 다른 열린 Agenda에서 계속 유지할 실행의 소유 범위는 HUM-SURFACE-001의 같은 선택이다. Task·교환의 화면상 표시 깊이는 별도 사용자 결정으로 남기지 않는다.
-- **관련 후보**: [Agenda 닫기와 미래 예약·의존 작업](../references/design-synthesis/egdesk-capability-scenario-connected-agent-work.md#needs-recurring-close), [현재 조정의 업무 대상](../references/design-synthesis/egdesk-capability-scenario-connected-agent-work.md#needs-conversation-target). 기존 위임 안의 일반 분할·검토·복구마다 사람 승인을 요구하지 않는다.
+- **질문**: Board를 닫은 뒤 미래 예약을 일시정지 상태로 보존할 것인가, 함께 삭제할 것인가? 다른 열린 Board에서 계속 유지할 실행의 소유 범위는 HUM-SURFACE-001의 같은 선택이다. Task·교환의 화면상 표시 깊이는 별도 사용자 결정으로 남기지 않는다.
+- **관련 후보**: [Board 닫기와 미래 예약·의존 작업](../references/design-synthesis/egdesk-capability-scenario-connected-agent-work.md#needs-recurring-close), [현재 조정의 업무 대상](../references/design-synthesis/egdesk-capability-scenario-connected-agent-work.md#needs-conversation-target). 기존 위임 안의 일반 분할·검토·복구마다 사람 승인을 요구하지 않는다.
 - **왜 사용자 결정인가**: 자동 실행의 자율성, 사용자 통제 시점, 승인으로 멈추는 범위와 여러 기여를 최종 결과로 묶는 책임이 달라진다.
 - **영향**: [Atlas AI-06–07](../../ideas/confirmed/EGDESK_PRODUCT_INTERACTION_TRACE_ATLAS.md#atlas-ai-06), [Contract §9](../../ideas/confirmed/EGDESK_INTERACTION_AND_ORCHESTRATION_CONTRACT.md#tech-dependency-orchestration), [§11](../../ideas/confirmed/EGDESK_INTERACTION_AND_ORCHESTRATION_CONTRACT.md#tech-parallel-agents)
 - **계속 가능한 작업**: [의존 작업·기여·실패·중지·승인과 복귀](../references/design-synthesis/egdesk-ux-realization-proposals.md#ux-detail-approval)의 설계를 바탕으로 선택할 예약 정책별 구현과 독립 작업·중복 실행 검사를 진행할 수 있다.

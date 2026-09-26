@@ -116,7 +116,7 @@ Run Bubble should answer:
 ## Default Flow
 
 ```text
-1. User asks in Agent DM or Agenda Thread
+1. User asks in Agent DM or Board Thread
 2. Agent replies with a compact chat bubble
 3. Chat bubble includes result chips
 4. User clicks [Result Walkthrough]
@@ -200,7 +200,7 @@ For a report run:
 
 ```text
 Step 1. Request interpretation
-  Focus: chat bubble + Agenda card
+  Focus: chat bubble + Board card
   Summary: "The task was interpreted as a management-facing May report draft."
 
 Step 2. Evidence collection

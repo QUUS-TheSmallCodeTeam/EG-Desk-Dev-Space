@@ -112,7 +112,7 @@ RWS의 업무명은 시나리오의 주어가 아니다. 예를 들어 세무·�
 
 | 순서 | System이 하는 일 | Agent 상태 | 남기는 기록 |
 |---:|---|---|---|
-| 1 | 새 업무인지 이전 업무 계속인지와 선택한 Agent·Agenda·자료를 포함해 Run request를 만든다 | 아직 호출되지 않음 | 원 요청, requester, Run ID, 새 업무/계속 의도 |
+| 1 | 새 업무인지 이전 업무 계속인지와 선택한 Agent·Board·자료를 포함해 Run request를 만든다 | 아직 호출되지 않음 | 원 요청, requester, Run ID, 새 업무/계속 의도 |
 | 2 | 계속 업무라면 이전 checkpoint·미완료 단계·결과·evidence를 찾고 현재 접근 가능성을 다시 확인한다 | 아직 호출되지 않음 | resume source, 이전 Run·Task ref, current availability |
 | 3 | Agent Profile, AI Engine account, 실제 model·tool availability와 authority를 resolve한다 | 아직 호출되지 않음 | resolved configuration과 관찰 시각 |
 | 4 | 조직·Agent의 Ontology binding policy에서 active ref를 찾고, 이번 요청에 필요한 부분을 retrieve한다 | 아직 호출되지 않음 | active ref, retrieved units, source revision, coverage·unknown |
@@ -218,7 +218,7 @@ ECS: 상황·목표·판단·상태 전환
 | # | 사용 상황·필요 | 사용자에게 필요한 정보 | 사용자 판단·행동 | System 책임 | Agent 책임 | 상태 전환·증거 | 예외·회복 |
 |---:|---|---|---|---|---|---|---|
 | 1 | EG-Desk를 새 UI/runtime 세션에서 연다 | 이전 Desk에 열려 있던 View와 각각의 복원 가능 상태 | 이어갈 업무를 찾는다 | Desk session 기록을 복원하되 Agent를 아직 호출하지 않는다 | 없음 | view restored/degraded와 확인 시각 | 복원 불가 View는 위치와 identity를 잃지 않은 대체 상태로 남음 |
-| 2 | 저장된 Agenda와 실제 진행 중이던 업무를 구분한다 | Agenda에 저장된 범위, 당시 열려 있던 임시 배치, Task·Run checkpoint | 이어갈 Task를 선택한다 | 선택한 Task의 이전 Run·checkpoint·결과·미완료 단계를 조회한다 | 없음 | resume source와 이전 실행 lineage | 과거 Chat만 보고 진행 단계를 추측하지 않음 |
+| 2 | 저장된 Board와 실제 진행 중이던 업무를 구분한다 | Board에 저장된 범위, 당시 열려 있던 임시 배치, Task·Run checkpoint | 이어갈 Task를 선택한다 | 선택한 Task의 이전 Run·checkpoint·결과·미완료 단계를 조회한다 | 없음 | resume source와 이전 실행 lineage | 과거 Chat만 보고 진행 단계를 추측하지 않음 |
 | 3 | 이전 작업 당시와 현재 환경을 비교한다 | 업무에 영향을 주는 account·tool·resource 차이; 과거 binding과 snapshot은 상세 검사 가능 | 필요한 차이만 검토하고 방향을 조정할 수 있다 | 현재 상태를 재확인한다. 호환 가능한 갱신은 자동 반영하고 선택이 필요한 차이만 제시한다 | 없음 | previous/current comparison | 정상 재진입에 모든 revision 비교·확인 절차를 요구하지 않음 |
 | 4 | 현재 세션에서 이어갈 조건을 정한다 | 사용할 Agent, 현재 가능한 Engine·tool, 기본 Ontology policy와 권한 차이 | 재개 범위와 필요한 변경을 확정한다 | 선택을 continuation request에 기록하고 첫 model call 전 binding을 resolve한다 | 없음 | continuation request·resolved configuration | account·authority 불일치는 해당 행동 범위만 제한 |
 | 5 | 필요한 과거 맥락을 복원한다 | 완료·미완료 단계, 결과·evidence, 원 source와 현재 source의 차이 | 추가로 포함하거나 제외할 맥락을 조정한다 | 관련 checkpoint·사건·자료만 Context Packet으로 조립한다 | 아직 호출되지 않음 | coverage·unknown·source revisions | 전체 과거 Chat을 무조건 주입하지 않음 |
@@ -516,19 +516,20 @@ ECS: 상황·목표·판단·상태 전환
   [Contract Answer projection](../../../ideas/confirmed/EGDESK_INTERACTION_AND_ORCHESTRATION_CONTRACT.md#tech-answer-projection),
   [Answer Briefing](../../../ideas/confirmed/EGDESK_INTERACTION_AND_ORCHESTRATION_CONTRACT.md#tech-answer-briefing).
 
-### CAP-09 — Desk·Agenda·Run checkpoint 재개
+<a id="cap-09--deskagendarun-checkpoint-재개"></a>
+### CAP-09 — Desk·Board·Run checkpoint 재개
 
-- **기술 목표**: 자동 Desk session, Saved Agenda, view/runtime/process와 Run checkpoint를 다른
+- **기술 목표**: 자동 Desk session, Saved Board, view/runtime/process와 Run checkpoint를 다른
   lifecycle로 복원한다. checkpoint는 Run 전체 context 사본이 아니라 Run policy, 최신 turn pointer,
   작업 사건 이력과 pending safety/action 상태를 가리킨다.
 - **주 설정**: persistence scope, checkpoint policy, runtime owner, external-effect replay 금지.
-- **connection**: `session + Agenda + checkpoint + event ledger → live validation + active Ontology resolve → next Turn Context Revision → resume | new | snapshot-only`.
-- **필요한 UX 행위**: 사용자는 Desk 복원과 Saved Agenda, 이전 Task의 완료·미완료 상태를 구분하고
+- **connection**: `session + Board + checkpoint + event ledger → live validation + active Ontology resolve → next Turn Context Revision → resume | new | snapshot-only`.
+- **필요한 UX 행위**: 사용자는 Desk 복원과 Saved Board, 이전 Task의 완료·미완료 상태를 구분하고
   현재 환경으로 계속할지 새 업무·snapshot-only로 열지 결정할 수 있어야 한다.
 - **System/Agent 경계**: System이 persistence·resource/runtime과 현재 active Ontology를 resolve한
   뒤 다음 turn context를 만든다. Agent는 같은 Run의 다음 turn에서 변화에 적응한다.
 - **fracture/recovery**: crash·lock·process loss·stale resource를 degraded 상태로 정확히 표시한다.
-- **완료 증거**: Desk 복원과 Agenda 목록 분리, checkpoint source, new Ontology Resolution Receipt,
+- **완료 증거**: Desk 복원과 Board 목록 분리, checkpoint source, new Ontology Resolution Receipt,
   Turn Context Revision과 runtime mode.
 - **evidence**: 보조 `RWS-0010`, `RWS-0012`, `RWS-0014`, `RWS-0019`, `RWS-0021`, `RWS-0029`, `RWS-0030`.
 - **정본 후보 연결**: [Atlas L-02](../../../ideas/confirmed/EGDESK_PRODUCT_INTERACTION_TRACE_ATLAS.md#atlas-l-02),
@@ -538,7 +539,7 @@ ECS: 상황·목표·판단·상태 전환
 
 ### CAP-10 — Cross-device·collaborator handoff
 
-- **기술 목표**: 기기·Desk 전체가 아니라 선택한 Agenda·View·artifact·evidence와 권한을 전달한다.
+- **기술 목표**: 기기·Desk 전체가 아니라 선택한 Board·View·artifact·evidence와 권한을 전달한다.
 - **주 설정**: receiver Profile, shared/excluded state, local-only dependency, authority, expiry,
   offline·conflict policy, credential 복제 금지.
 - **connection**: `source device → handoff packet → recipient preflight → shared projection → receipt`.
@@ -657,7 +658,7 @@ ECS: 상황·목표·판단·상태 전환
 1. CAP-01: AI Engine 로그인, account·plan·quota 확인, model resolution·fallback의 실제 end-to-end.
 2. CAP-02: Smart Read 자동 전환, budget meter와 coverage 수정 UI.
 3. CAP-06: 장기 PTY detach·same process reconnect·relaunch·snapshot-only 구분.
-4. CAP-09: Desk·Agenda·Run·여러 runtime이 함께 복원되는 실제 통합 사례.
+4. CAP-09: Desk·Board·Run·여러 runtime이 함께 복원되는 실제 통합 사례.
 5. CAP-10: 실제 collaborator 초대, offline conflict와 remote control revoke.
 6. CAP-11: subscription expiry, wake·escalation과 중복 catch-up.
 7. ECS 전반: Chat·Canvas·supervision·Answer Briefing의 실제 통합 UI runtime.
@@ -690,8 +691,8 @@ ECS·CAP의 구체 설계안은 제품 정본 승인 전까지 `PROPOSED`다.
 
 | 요구 묶음 | 현재 반영과 남은 범위 |
 |---|---|
-| Firefox 기반, 한 Desk·Canvas, 여러 Agenda | Contract §0–1과 Atlas L/AG에 반영. 저장·공유 runtime·예약 작업을 함께 닫는 상세 의미는 후보 5–7 |
-| Agenda 저장과 지난 화면 복원 분리 | 정상 시작은 이전 화면 복원이며 저장 목록은 독립. 모든 revision을 먼저 확인하는 절차가 되지 않도록 ECS-01을 정정 |
+| Firefox 기반, 한 Desk·Canvas, 여러 Board | Contract §0–1과 Atlas L/AG에 반영. 저장·공유 runtime·예약 작업을 함께 닫는 상세 의미는 후보 5–7 |
+| Board 저장과 지난 화면 복원 분리 | 정상 시작은 이전 화면 복원이며 저장 목록은 독립. 모든 revision을 먼저 확인하는 절차가 되지 않도록 ECS-01을 정정 |
 | 화면 밖 카드의 메모리와 렌더링 | view/runtime/renderer 분리와 Canvas 표현 유지 반영. 형식별 보존 품질·실제 화면 확대·탐색은 후보 8–9·15 |
 | 사용자와 Agent의 비간섭 입력 | 격리 실행·계정·제어권 경계 반영. 탭 내부 focus·좌표 관찰 시점·OS UI 동시 설명은 후보 9–10 |
 | 담당 Agent 중심 Chat, 업무 상태와 Canvas 연결 | 기본 관계와 경량 진행 상태 반영. 동시 업무·위임 대화·수정 지시 대상은 후보 1–2 |
@@ -742,33 +743,33 @@ ECS·CAP의 구체 설계안은 제품 정본 승인 전까지 `PROPOSED`다.
 - **검토 범위·연결**: 활동 진입의 기본 Live/Snapshot, 자동 follow 허용 여부와 사용자가 다른 곳으로 pan했을 때의 종료. 연결: CAP-05/08, [HUM-SNAPSHOT-001](../../codex/egdesk-product-interaction-trace-atlas-editorial-ledger.md#hum-snapshot-001), [HUM-CONV-001](../../codex/egdesk-product-interaction-trace-atlas-editorial-ledger.md#hum-conv-001).
 
 <a id="needs-agenda-save"></a>
-#### 5. Agenda가 저장하는 작업의 범위
+#### 5. Board가 저장하는 작업의 범위
 
-- **상황**: Browser·파일·메모·Chat을 배치해 Agenda로 저장하고 다음날 원본이 바뀐 상태에서 다시 연다.
+- **상황**: Browser·파일·메모·Chat을 배치해 Board로 저장하고 다음날 원본이 바뀐 상태에서 다시 연다.
 - **공백**: 배치·구성원·원본 참조·일부 snapshot·대화·진행 중 작업 중 무엇을 저장하는지 미정이다. 저장된 구성과 지금 열린 동일 resource의 재사용도 연결돼야 한다.
-- **후보**: 저장될 범위와 원본 참조/당시 내용의 차이를 확인하고, 기존 Agenda 갱신·새 사본·현재 열린 상태를 구분한다. 자동 Desk 복원과의 독립성은 유지한다.
-- **검토 범위·연결**: 기본 포함 범위, 저장 시점과 현재 원본의 관계, 이미 열린 Agenda·동일 resource의 재사용 규칙. 연결: CAP-09, [HUM-AGENDA-001](../../codex/egdesk-product-interaction-trace-atlas-editorial-ledger.md#hum-agenda-001).
+- **후보**: 저장될 범위와 원본 참조/당시 내용의 차이를 확인하고, 기존 Board 갱신·새 사본·현재 열린 상태를 구분한다. 자동 Desk 복원과의 독립성은 유지한다.
+- **검토 범위·연결**: 기본 포함 범위, 저장 시점과 현재 원본의 관계, 이미 열린 Board·동일 resource의 재사용 규칙. 연결: CAP-09, [HUM-AGENDA-001](../../codex/egdesk-product-interaction-trace-atlas-editorial-ledger.md#hum-agenda-001).
 
 <a id="needs-shared-lifecycle"></a>
-#### 6. 두 Agenda가 같은 자원을 쓰는 동안 하나를 닫기
+#### 6. 두 Board가 같은 자원을 쓰는 동안 하나를 닫기
 
-- **상황**: 두 Agenda가 같은 파일·Browser session·Terminal 또는 한 Agent의 작업을 함께 참조한다.
+- **상황**: 두 Board가 같은 파일·Browser session·Terminal 또는 한 Agent의 작업을 함께 참조한다.
 - **공백**: 화면에 연결했다는 사실과 실행을 소유한다는 사실이 아직 충분히 구별되지 않는다. 참조가 하나 남았다는 이유만으로 의도치 않은 작업이 계속되면 닫기의 의미가 바뀐다.
-- **후보**: 닫을 작업과 다른 Agenda에서 계속할 작업을 식별하고 남는 실행은 그 소유 Canvas 표현에서 찾게 한다. 단독 소유 작업은 종료가 확인될 때까지 종료 상태를 보여 준다.
+- **후보**: 닫을 작업과 다른 Board에서 계속할 작업을 식별하고 남는 실행은 그 소유 Canvas 표현에서 찾게 한다. 단독 소유 작업은 종료가 확인될 때까지 종료 상태를 보여 준다.
 - **검토 범위·연결**: 동일 resource의 공유 session/독립 instance 기본값, 마지막 실행 소유자를 닫을 때의 처리, 닫기 후 되돌리기의 범위. 연결: CAP-05/09, [HUM-SURFACE-001](../../codex/egdesk-product-interaction-trace-atlas-editorial-ledger.md#hum-surface-001).
 
 <a id="needs-recurring-close"></a>
-#### 7. Agenda 닫기와 예약·의존 작업의 관계
+#### 7. Board 닫기와 예약·의존 작업의 관계
 
-- **상황**: 내일 다시 실행될 업무 또는 다른 Agent의 결과를 기다리는 업무가 있는 Agenda를 닫는다.
-- **공백**: 지금 실행을 끝내는 것과 미래 예약을 취소하는 것이 같아야 하는지 미정이다. 닫힌 Agenda에서 다음날 몰래 재개되면 사용자의 닫기 기대와 충돌한다.
+- **상황**: 내일 다시 실행될 업무 또는 다른 Agent의 결과를 기다리는 업무가 있는 Board를 닫는다.
+- **공백**: 지금 실행을 끝내는 것과 미래 예약을 취소하는 것이 같아야 하는지 미정이다. 닫힌 Board에서 다음날 몰래 재개되면 사용자의 닫기 기대와 충돌한다.
 - **후보**: 현재 실행·대기 조건·미래 예약을 구별해 종료 영향을 알리고, 닫기 뒤에는 정해진 정책 없이 자동 재개하지 않게 한다. 반복 실행을 계속하려면 Canvas에서 찾을 수 있는 소유 표현이 필요하다.
-- **검토 범위·연결**: 예약도 함께 중지할지, Agenda에 계속 남기는 반복 업무 표현을 별도로 둘지, 다시 열 때 자동 재개할지. 연결: CAP-09/11, [HUM-ORCH-001](../../codex/egdesk-product-interaction-trace-atlas-editorial-ledger.md#hum-orch-001).
+- **검토 범위·연결**: 예약도 함께 중지할지, Board에 계속 남기는 반복 업무 표현을 별도로 둘지, 다시 열 때 자동 재개할지. 연결: CAP-09/11, [HUM-ORCH-001](../../codex/egdesk-product-interaction-trace-atlas-editorial-ledger.md#hum-orch-001).
 
 <a id="needs-canvas-density"></a>
 #### 8. Canvas 표현의 수와 원문·메모리 보존량을 따로 관리
 
-- **상황**: 30개 Agenda와 수백 개 읽기 결과·Snapshot이 쌓이고 일부 Browser에는 미완성 form이 있다.
+- **상황**: 30개 Board와 수백 개 읽기 결과·Snapshot이 쌓이고 일부 Browser에는 미완성 form이 있다.
 - **공백**: 모든 활동의 추적 가능성이 모든 과거 관찰마다 무거운 카드를 영구 전개한다는 뜻으로 읽힐 수 있다. Browser의 살아 있는 DOM, 가벼운 preview와 재로딩 가능한 상태도 다르다.
 - **후보**: 실행 중 작업은 찾아갈 수 있게 유지하고, 활동·근거를 묶어 펼치는 밀도와 실제 renderer·runtime·보존 데이터의 수명을 따로 설계한다. 폴더 확장·scroll 등 가벼운 상태는 유지할 수 있으며 화면 재진입마다 전체를 새로 읽을 필요는 없다.
 - **검토 범위·연결**: 닫힌 과거 기록의 재진입 방식, sleep 기준·저장 상한, 미완성 일반 form의 stale 상태를 어느 정도 보존할지. 비밀 필드를 임의 저장하는 결론은 포함하지 않는다. 연결: CAP-06/08/09, [HUM-SURFACE-001](../../codex/egdesk-product-interaction-trace-atlas-editorial-ledger.md#hum-surface-001), [HUM-SNAPSHOT-001](../../codex/egdesk-product-interaction-trace-atlas-editorial-ledger.md#hum-snapshot-001).
@@ -800,7 +801,7 @@ ECS·CAP의 구체 설계안은 제품 정본 승인 전까지 `PROPOSED`다.
 <a id="needs-portability"></a>
 #### 12. 한 파일로 옮긴 자료를 새 기기의 자원에 다시 연결
 
-- **상황**: Chat·Agenda·snapshot을 한 파일로 넘겼지만 수신 기기에는 같은 파일 경로·브라우저 로그인·PTY가 없다.
+- **상황**: Chat·Board·snapshot을 한 파일로 넘겼지만 수신 기기에는 같은 파일 경로·브라우저 로그인·PTY가 없다.
 - **공백**: 파일 transfer의 성공과 실제 작업 재개의 조건이 다르다. snapshot은 열려도 live 원본이 없거나 연결 계정이 다를 수 있다.
 - **후보**: 이동 가능한 자료는 바로 열고, 누락된 live 자원은 필요한 것만 새 위치·계정에 연결한다. 같은 파일 이름만으로 원본을 단정하지 않고 과거 snapshot과 새 live 참조를 유지한다. import가 Agent 실행·외부 행동을 자동 시작하지 않도록 흐름을 구분한다.
 - **검토 범위·연결**: 기본 포함·암호화·충돌 처리와 수신 후 재개 기본값. 연결: CAP-09/10, [HUM-EXPORT-001](../../codex/egdesk-product-interaction-trace-atlas-editorial-ledger.md#hum-export-001).
@@ -816,7 +817,7 @@ ECS·CAP의 구체 설계안은 제품 정본 승인 전까지 `PROPOSED`다.
 <a id="needs-first-use"></a>
 #### 14. 계정·Agent·조직 지식이 없는 최초 사용
 
-- **상황**: 앱을 처음 열었고 저장 Agenda, 선택 Agent, Engine 인증과 조직 Ontology가 아직 없다.
+- **상황**: 앱을 처음 열었고 저장 Board, 선택 Agent, Engine 인증과 조직 Ontology가 아직 없다.
 - **공백**: Desk는 바로 열려야 하지만 어떤 최소 설정 뒤에 첫 요청을 보낼 수 있는지, 조직 지식 없는 개인 사용이 무엇을 기본으로 삼는지가 미정이다.
 - **후보**: 기본 Desk 이용을 유지하면서 필요한 Engine 인증과 Agent 선택을 이어 주고, 첫 요청에 적용할 최소 정책을 제공한다. 지원되지 않는 tool이나 사용할 수 없는 quota는 인증 실패와 구분한다.
 - **검토 범위·연결**: 기본 Agent 제공 여부·이름·초기 역할·기억 범위, 기본 Ontology와 조직 지식 연결의 관계. 연결: CAP-01/12, [HUM-AGENT-001](../../codex/egdesk-product-interaction-trace-atlas-editorial-ledger.md#hum-agent-001), [HUM-RUN-001](../../codex/egdesk-product-interaction-trace-atlas-editorial-ledger.md#hum-run-001).

@@ -6,19 +6,23 @@
 
 This document tracks product decisions and development backlog items that came from active design/development discussion. It is not a marketing whitepaper. The public-facing whitepaper is [Production v8](../../docs/production/EG-DESK%20백서%20-%20Production_v8_한글.md), while this file keeps the current product/runtime direction and todo surface aligned.
 
+Board is the product term used here. Some current runtime identifiers and UI
+copy still say `Agenda`; checked backlog items describe the underlying behavior,
+not completion of the visible rename.
+
 ## Current Product Frame
 
-EG-Desk is a live work surface that organizes durable work through an Agenda
+EG-Desk is a live work surface that organizes durable work through a Board
 rather than reducing work to a folder. A Desk is the active computer-like
-surface and can contain transient unsaved work before it is retained in an
-Agenda. An Agenda pairs the work objective with browser cards, files, chat,
+surface and can contain transient unsaved work before it is retained in a
+Board. A Board pairs the work objective with browser cards, files, chat,
 agents, execution state, outputs, and context. Cards are views/runtime surfaces,
-not the Agenda itself.
+not the Board itself.
 
 Core principles:
 
 - Keep the first screen as the actual work surface, not a landing page.
-- Treat Agenda as the work boundary and Card as the view/runtime form.
+- Treat Board as the work boundary and Card as the view/runtime form.
 - Compose one answer across Chat and Canvas using each medium's own interaction grammar.
 - Put spatial, visual, interactive, artifact, and playback expressions on Canvas while keeping conversational explanation complete in Chat.
 - Let AI act on the same visible browser/canvas state the user can inspect.
@@ -33,7 +37,7 @@ Core principles:
 | Interaction trace and acceptance coverage (non-normative; not runtime evidence) | `ideas/confirmed/EGDESK_PRODUCT_INTERACTION_TRACE_ATLAS.md` |
 | Firefox shell strategy | `ideas/confirmed/FIREFOX_SHELL_STRATEGY.md` |
 | Firefox shell roadmap | `ideas/confirmed/FIREFOX_SHELL_ROADMAP.md` |
-| Desk/Agenda/Card runtime | `apps/firefox-ui-demo/docs/DESK_AGENDA_CARD_RUNTIME_MODEL.md` |
+| Desk/Board/Card runtime | `apps/firefox-ui-demo/docs/DESK_AGENDA_CARD_RUNTIME_MODEL.md` |
 | Chat/canvas/agent layer | `apps/firefox-ui-demo/docs/CHAT_CANVAS_AGENT_LAYER_MODEL.md` |
 | Chat visual grammar | `apps/firefox-ui-demo/docs/CHAT_DESIGN_GRAMMAR_V1.md` |
 | Viewport/HUD interaction | `apps/firefox-ui-demo/docs/VIEWPORT_LAYOUT_INTERACTION_MODEL.md` |
@@ -50,13 +54,14 @@ Core principles:
 
 Desk is closer to "computer / live work surface" than a browser profile or folder. One Desk can contain multiple browser profiles/accounts, files, chats, terminals, and cards. Switching Desk is closer to switching the working computer/work surface than changing a single project folder.
 
-Desk has an automatic local recovery lifecycle distinct from Agenda
+Desk has an automatic local recovery lifecycle distinct from Board
 persistence. An unsaved arrangement may be restored after restart without
-becoming a saved Agenda revision.
+becoming a saved Board revision.
 
-### Agenda
+<a id="agenda"></a>
+### Board
 
-Agenda is the reusable work pairing. It can contain browser cards, file cards, chat cards, terminal cards, agent context, outputs, and workflow state. Nested Agenda is allowed as a work decomposition graph, but the UI should show the active slice instead of an infinite tree.
+Board is the reusable work pairing. It can contain browser cards, file cards, chat cards, terminal cards, agent context, outputs, and workflow state. Nested Board is allowed as a work decomposition graph, but the UI should show the active slice instead of an infinite tree.
 
 ### Card
 
@@ -66,8 +71,8 @@ Card is a view/runtime form. "Show it as a card" should be a first-class output 
 
 There are two chat entry modes:
 
-- Agent DM: user talks to a specific agent profile. The agent can route work to an Agenda Thread when the work belongs there.
-- Agenda Thread: project/work-room chat attached to an Agenda. Multiple agents can participate like a group chat.
+- Agent DM: user talks to a specific agent profile. The agent can route work to a Board Thread when the work belongs there.
+- Board Thread: project/work-room chat attached to a Board. Multiple agents can participate like a group chat.
 
 Chat should remain conversationally complete and avoid pasting artifact bodies
 or raw execution traces. When Canvas carries the spatial/visual result, Chat
@@ -121,21 +126,21 @@ implementations, the local `references/` library, and verified license evidence.
 
 ### Viewport/HUD/Minimap
 
-Viewport HUD should reflect the Agenda or maximized card currently in view. When a card is maximized, HUD should hide and return only on specific user actions. The minimap is desk-level navigation: its viewport box must be draggable like RTS minimaps, and its world bounds should adapt to the sparsity of cards/agendas.
+Viewport HUD should reflect the Board or maximized card currently in view. When a card is maximized, HUD should hide and return only on specific user actions. The minimap is desk-level navigation: its viewport box must be draggable like RTS minimaps, and its world bounds should adapt to the sparsity of cards and Boards.
 
 ## Development Todo
 
 ### P0 - Active Stabilization
 
-- [x] Seed chat agent profiles and attach them to Agent DM / Agenda Thread runtime.
+- [x] Seed chat agent profiles and attach them to Agent DM / Board Thread runtime.
 - [x] Send chat profile/system prompt through the Codex bridge runtime-context envelope.
 - [x] Add profile chips/tool-mode chips to chat thread UI.
 - [x] Add Firefox MCP verification for chat profile payload, visible chips, HUD fit, and bubble overflow.
 - [x] Add browser agent observation and action history for browser cards.
 - [x] Add dynamic minimap viewport box and drag navigation.
-- [ ] Persist chat profile selection across browser restart and Agenda restore.
+- [ ] Persist chat profile selection across browser restart and Board restore.
 - [ ] Add UI for viewing/editing full agent profile/system prompt config in a canvas settings panel.
-- [ ] Add Agenda Thread routing affordance from Agent DM: move to thread, tag user in thread, or return to DM.
+- [ ] Add Board Thread routing affordance from Agent DM: move to thread, tag user in thread, or return to DM.
 - [ ] Add result-card creation from chat summary/result chips.
 - [ ] Add Prezi-like canvas run playback with step comments that can be inserted into the next chat message.
 - [ ] Add dependency graph/task state registry and automatic downstream start; model user-action awaits as one dependency-gate type.
@@ -156,25 +161,25 @@ Viewport HUD should reflect the Agenda or maximized card currently in view. When
 - [x] Shape tools: square, ellipse, line, arrow, pen.
 - [x] Card maximized/fullscreen behavior with HUD hiding.
 - [x] HUD viewport fit checks.
-- [ ] Agenda region visual distinction on infinite canvas.
-- [ ] Card placement policy: empty-space search, active Agenda placement, unsaved changes guard.
+- [ ] Board region visual distinction on infinite canvas.
+- [ ] Card placement policy: empty-space search, active Board placement, unsaved changes guard.
 - [ ] Canvas output follow-up mode: temporal/spatial steps, camera movement, annotations, and comment anchors.
 - [ ] AI canvas annotation mode: draw boxes/arrows/labels over cards or screenshots.
 
 ### P1 - Chat UX
 
 - [x] KakaoTalk-like message metadata outside bubbles.
-- [x] Agent DM / Agenda Thread split.
+- [x] Agent DM / Board Thread split.
 - [x] Profile and tool-mode badges.
 - [ ] Profile detail peek: plan/run/action/context layers from avatar/profile interaction.
 - [ ] Canvas-linked result chips for long outputs.
 - [ ] Thread/session badges: `Resumed`, `Fresh`, `Forked`, `Stateless`.
-- [ ] Multi-agent participant state in Agenda Thread.
+- [ ] Multi-agent participant state in Board Thread.
 
 ### P1 - Context, Recovery, and Coding UX
 
-- [ ] Separate saved Agenda revisions from the automatically journaled Desk recovery surface.
-- [ ] Resolve run context from explicit selection, best-matching Agenda, transient Desk grouping/layout, visible resources, and account/permission scope.
+- [ ] Separate saved Board revisions from the automatically journaled Desk recovery surface.
+- [ ] Resolve run context from explicit selection, best-matching Board, transient Desk grouping/layout, visible resources, and account/permission scope.
 - [ ] Make the selected run context inspectable and correctable without exposing the whole Desk by default.
 - [ ] Research current project/file/editor/diff/test-result frameworks and active implementations before selecting the coding-surface integration path.
 - [ ] Add user-facing project/folder, file tree/search, editor/viewer, diff, and run/test/review result surfaces; keep terminal as an optional expert/debug view and agent substrate.

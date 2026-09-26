@@ -10,13 +10,13 @@ canvas. Opening it must not hide the Desk rail, Dock, HUD, or other Desk
 Windows. Closing the last Ontology Window must leave the Desk usable.
 
 Ontology uses the shared Desk Window Shell for its frame, titlebar, window
-controls, focus, move, resize, maximize, `sourceRef`, Agenda persistence, and
+controls, focus, move, resize, maximize, `sourceRef`, Board persistence, and
 cleanup lifecycle. Its renderer remains an `adapter-owned` privileged
 chrome-DOM surface mounted directly in the shell content slot. It is not loaded
 as a website or appended into the Browser Adapter's remote XUL content
 document. Browser and Ontology share the window system, not the content-process
 boundary. The shell/adapter contract is defined in
-[`DESK_AGENDA_CARD_RUNTIME_MODEL.md`](./DESK_AGENDA_CARD_RUNTIME_MODEL.md#desk-window-shell-and-adapter-contract).
+[Desk/Board/Card runtime model](./DESK_AGENDA_CARD_RUNTIME_MODEL.md#desk-window-shell-and-adapter-contract).
 
 The current implementation names `.egd-ontology-card`,
 `spawnOntologyMapCard`, and card-oriented persistence helpers are compatibility

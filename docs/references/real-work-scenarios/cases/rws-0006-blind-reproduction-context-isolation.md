@@ -81,7 +81,7 @@
 ## EG-Desk 목표 시나리오
 
 ```text
-급여 Agenda
+급여 Board
   -> 실제 업무 owner가 대상 기간·원천·권한 확정
   -> System이 최소화한 immutable input snapshot 생성
   -> Worker: ERP 정답 없이 사전계산·근거·확인 필요 반환

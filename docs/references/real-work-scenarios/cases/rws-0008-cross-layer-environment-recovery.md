@@ -139,12 +139,12 @@ Handoff packet은 이전 PC의 “완료” 문장이 아니라 last verified ar
 - device handoff packet의 최소 revision·receipt 집합은 무엇인가?
 - DB·Git·deployment가 서로 다른 시점이면 어느 snapshot을 기준으로 비교하는가?
 - remote device가 offline일 때 local-only 변경 존재를 어떻게 표시하는가?
-- Canvas 초대 시 어느 device·Agenda·View evidence를 공유하고 무엇을 숨기는가?
+- Canvas 초대 시 어느 device·Board·View evidence를 공유하고 무엇을 숨기는가?
 - 배포 권한 없는 device에서 완료 조건을 어디까지 인정하는가?
 
 ## Privacy
 
 학생·계정·콘텐츠 원문, DB key, 배포 URL·계정, device 이름, 경로와 screenshot은 복제하지
-않았다. `PROPOSED`: shared Canvas에는 선택된 Agenda·artifact·evidence만 projection하고
+않았다. `PROPOSED`: shared Canvas에는 선택된 Board·artifact·evidence만 projection하고
 device의 credential·private Chat·local-only 파일과 raw desktop은 기본 제외하는 후보
 규칙을 둔다.

@@ -7,7 +7,7 @@
 > - 현재 안정화 gate: [`docs/PATH_1_5_STABILIZATION.md`](./docs/PATH_1_5_STABILIZATION.md)
 > - Chat design grammar: [`docs/CHAT_DESIGN_GRAMMAR_V1.md`](./docs/CHAT_DESIGN_GRAMMAR_V1.md)
 > - Chat/canvas/agent UX model: [`docs/CHAT_CANVAS_AGENT_LAYER_MODEL.md`](./docs/CHAT_CANVAS_AGENT_LAYER_MODEL.md)
-> - Desk/Agenda/Card runtime model: [`docs/DESK_AGENDA_CARD_RUNTIME_MODEL.md`](./docs/DESK_AGENDA_CARD_RUNTIME_MODEL.md)
+> - [Desk/Board/Card runtime model](./docs/DESK_AGENDA_CARD_RUNTIME_MODEL.md)
 > - AI canvas annotation layer: [`docs/AI_CANVAS_ANNOTATION_LAYER.md`](./docs/AI_CANVAS_ANNOTATION_LAYER.md)
 > - Legacy canvas Run Playback note (superseded by Answer Briefing in the Contract/Atlas): [`docs/CANVAS_RUN_PLAYBACK_MODEL.md`](./docs/CANVAS_RUN_PLAYBACK_MODEL.md)
 > - Viewport layout/interaction model: [`docs/VIEWPORT_LAYOUT_INTERACTION_MODEL.md`](./docs/VIEWPORT_LAYOUT_INTERACTION_MODEL.md)

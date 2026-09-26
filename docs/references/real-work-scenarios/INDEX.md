@@ -45,7 +45,7 @@ thread ID가 두 rollout에 존재한 로그 1개는 중복 제거했다. 저장
 
 | source corpus | 범위 | 상태 | 목적 |
 |---|---|---|---|
-| `SRC-EGDESK-MANUAL-THREAD` | thread `019f8d42-4886-7041-8421-c5e343d465e0`, 기준 범위 turns 1–106 | `CASE-DRAFTED` | 제품 개발·문서·Browser·Agenda·Chat·Git 운영 episode 29개 추출 |
+| `SRC-EGDESK-MANUAL-THREAD` | thread `019f8d42-4886-7041-8421-c5e343d465e0`, 기준 범위 turns 1–106 | `CASE-DRAFTED` | 제품 개발·문서·Browser·Board·Chat·Git 운영 episode 29개 추출 |
 | `SRC-EGDESK-SUBAGENT-LINEAGE` | 위 thread의 PM·WM·Worker·Explorer 자식 실행 | `CASE-DRAFTED` | 직접 자식·fresh session·child lifecycle·Main 보고 정확성 분석 완료 |
 | `SRC-GRAMMARON-LOCAL` | Grammar-ON user threads 3개 | `CASE-DRAFTED` | 8개 workflow packet과 multi-agent technique 분석 완료 |
 | `SRC-KUUS-LOCAL` | KUUS user threads 15개 | `CASE-DRAFTED` | 18개 workflow packet, Browser fracture와 technique 분석 완료 |
@@ -87,7 +87,7 @@ thread ID가 두 rollout에 존재한 로그 1개는 중복 제거했다. 저장
 | 71–77 | Canvas 밖 Browser focus·stale action | `CASE-PACKET` | `MERGED(RWS-0007)` |
 | 78–79 | Focus presentation·zoom·파일 권한 UX | `CASE-PACKET` | `MERGED(RWS-0007)` |
 | 80–82 | 제품 문서 열기와 HUM/Q 책임 구분 | `CASE-PACKET` | `PROMOTED(RWS-0012)` |
-| 83–86 | 하나의 Desk·여러 Agenda·View/Runtime 수명주기 | `CASE-PACKET` | `PROMOTED(RWS-0013)` |
+| 83–86 | 하나의 Desk·여러 Board·View/Runtime 수명주기 | `CASE-PACKET` | `PROMOTED(RWS-0013)` |
 | 86–88 | 담당 Agent 방·Canvas Memo·업무 감독 모델 | `CASE-PACKET` | `PROMOTED(RWS-0013)` |
 | 89–95 | 참고조사 없는 Chat 시안 폐기와 Agent Room 재설계 | `CASE-PACKET` | `DEFER-EVIDENCE` |
 | 96, 104–105 | UI보다 먼저 시나리오를 세우고 SourceRef로 재개 | `CASE-PACKET` | `DEFER-EVIDENCE` |
@@ -155,7 +155,7 @@ record + artifact revision`을 함께 사용한다.
 | packet | episode | packet 상태 | 2차 wave disposition |
 |---|---|---|---|
 | `TAEHWA-01` | 경영진·전사 AX 발표자료의 서사 설계와 재개 | `CASE-PACKET + FRACTURE + TECHNIQUE` | `PROMOTED(RWS-0022)` |
-| `TAEHWA-02` | AX Agenda·진행 대시보드와 공유 정본 운영 | `CASE-PACKET + FRACTURE + TECHNIQUE` | `PROMOTED(RWS-0018)` |
+| `TAEHWA-02` | AX Board·진행 대시보드와 공유 정본 운영 | `CASE-PACKET + FRACTURE + TECHNIQUE` | `PROMOTED(RWS-0018)` |
 | `TAEHWA-03` | 웹사이트 소스·문의·SSL·도메인·호스팅 전환 | `CASE-PACKET + FRACTURE + TECHNIQUE` | `PROMOTED(RWS-0023)` |
 | `TAEHWA-04` | GA4/GSC·문의 품질·고정 검색순위 보고 | `CASE-PACKET + FRACTURE + TECHNIQUE` | `PROMOTED(RWS-0024)` |
 | `TAEHWA-05` | AI 작업용 장비 조달과 원격운영 전환 | `CASE-PACKET + FRACTURE + TECHNIQUE` | `DEFER-EVIDENCE` |

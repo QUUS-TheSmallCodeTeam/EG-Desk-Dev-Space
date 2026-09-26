@@ -82,7 +82,7 @@ The annotation layer may be rendered above:
 - image cards
 - PDF/file preview cards
 - deck/report cards
-- whole Agenda regions
+- whole Board regions
 - the free canvas
 
 ---
@@ -225,7 +225,7 @@ type AnnotationEditHistory = {
 Default flow:
 
 ```text
-1. User asks in Chat / Agent DM / Agenda Thread
+1. User asks in Chat / Agent DM / Board Thread
 2. Agent identifies target card or current selection
 3. EG-Desk captures visual state for the target
 4. Multimodal model returns annotation spec
@@ -282,7 +282,7 @@ Minimum behavior:
 - Delete removes selected annotation.
 - Annotation selection should not focus the underlying browser/card unless explicitly requested.
 - Annotation hover can show label, confidence, and source run.
-- Annotation can be hidden/shown per card or per Agenda.
+- Annotation can be hidden/shown per card or per Board.
 
 Suggested controls:
 
@@ -301,14 +301,14 @@ The annotation layer should not block normal card interaction when hidden or dis
 
 ## Persistence
 
-Annotations are Agenda work objects when they explain or modify the work state.
+Annotations are Board work objects when they explain or modify the work state.
 
 ```text
 temporary annotation
   -> dirty overlay only
 
 accepted annotation
-  -> Agenda saved state
+  -> Board saved state
 
 dismissed annotation
   -> removed from visible canvas

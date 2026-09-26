@@ -16,7 +16,7 @@
 ```text
 Canvas is the infinite work world.
 Viewport is the user's current camera into that world.
-Agenda is the active work region visible through the viewport.
+Board is the active work region visible through the viewport.
 Cards and annotations are canvas entities.
 HUD, rail, dock, and bag are viewport chrome.
 ```
@@ -33,18 +33,18 @@ The top bar should not primarily display "Desk".
 
 The Desk is the computer-level work surface. It is too broad for the top viewport bar.
 
-The top bar should display the Agenda or Agenda slice currently in the viewport.
+The top bar should display the Board or Board slice currently in the viewport.
 
 Preferred product model:
 
 ```text
-Top bar = Viewport Agenda Rail
+Top bar = Viewport Board Rail
 ```
 
 It answers:
 
 ```text
-"What work room / Agenda am I currently looking at?"
+"What work room / Board am I currently looking at?"
 ```
 
 Not:
@@ -57,37 +57,38 @@ The Desk identity can exist in a lower-priority menu, settings surface, profile,
 
 ---
 
-## Viewport Agenda Detection
+<a id="viewport-agenda-detection"></a>
+## Viewport Board Detection
 
-When the viewport overlaps one or more Agenda regions, the top bar should resolve the visible Agenda context.
+When the viewport overlaps one or more Board regions, the top bar should resolve the visible Board context.
 
 Default ranking:
 
 ```text
 1. activeAgendaId if it is visible in the viewport
-2. Agenda region with largest viewport intersection
-3. Agenda containing the active card
-4. most recently focused Agenda
+2. Board region with largest viewport intersection
+3. Board containing the active card
+4. most recently focused Board
 5. Desk-level fallback
 ```
 
 Display examples:
 
 ```text
-EG-Desk Agenda
+EG-Desk Board
 태화 5월 리포트
 UI 리뷰 / 채팅 HUD
-3 Agendas in view
-No active Agenda
+3 Boards in view
+No active Board
 ```
 
-If multiple Agendas are visible, the top bar should show the primary one plus a compact indicator:
+If multiple Boards are visible, the top bar should show the primary one plus a compact indicator:
 
 ```text
 태화 5월 리포트 · +2
 ```
 
-Clicking the label should open an Agenda switcher, not a Desk selector by default.
+Clicking the label should open a Board switcher, not a Desk selector by default.
 
 ---
 
@@ -96,7 +97,7 @@ Clicking the label should open an Agenda switcher, not a Desk selector by defaul
 Viewport chrome is everything fixed to the screen rather than the canvas world:
 
 ```text
-Viewport Agenda Rail  // top bar
+Viewport Board Rail   // top bar
 Desk Minimap          // map of the wider canvas/Desk
 Dock                  // bottom command surface
 Preset Bag            // left quick-access surface
@@ -106,7 +107,7 @@ Zoom indicator        // debug/product status depending on mode
 Diagnostics panel     // developer/runtime inspection
 ```
 
-Chrome is presentation state. It should be independent from committed Card/Agenda layout.
+Chrome is presentation state. It should be independent from committed Card/Board layout.
 
 ---
 
@@ -114,10 +115,10 @@ Chrome is presentation state. It should be independent from committed Card/Agend
 
 The minimap is the user's map of the wider Desk/canvas.
 
-The Viewport Agenda Rail answers:
+The Viewport Board Rail answers:
 
 ```text
-"What Agenda am I looking at right now?"
+"What Board am I looking at right now?"
 ```
 
 The Desk Minimap answers:
@@ -129,7 +130,7 @@ The Desk Minimap answers:
 The minimap should show:
 
 - current viewport rectangle
-- Agenda regions
+- Board regions
 - card clusters
 - active card
 - maximized/focused card indicator
@@ -172,8 +173,8 @@ Minimap interaction:
 click minimap button
   -> open compact/expanded minimap
 
-click an Agenda region
-  -> pan/zoom to that Agenda
+click a Board region
+  -> pan/zoom to that Board
 
 drag viewport rectangle
   -> pan canvas
@@ -192,7 +193,7 @@ Safe area is the part of the viewport available for focused work.
 
 ```text
 viewport bounds
-- top Agenda Rail
+- top Board Rail
 - bottom Dock
 - left Preset Bag
 - visible HUD, if pinned
@@ -294,7 +295,7 @@ Policy:
 enter maximize
   -> save restoreRect and zIndex
   -> hide HUD by default
-  -> keep Agenda Rail / Dock / Preset Bag visible
+  -> keep Board Rail / Dock / Preset Bag visible
   -> fit card into safe area without HUD
   -> do not overwrite saved CardState geometry
 
@@ -310,8 +311,8 @@ Maximized state still needs a clear window/card indicator. Since the HUD is hidd
 Preferred behavior:
 
 ```text
-Viewport Agenda Rail
-  -> shows active Agenda
+Viewport Board Rail
+  -> shows active Board
   -> also shows maximized card title/type badge
   -> includes a compact "Maximized" state badge
 
@@ -329,7 +330,7 @@ Example:
 
 ```text
 태화 5월 리포트 / Report Card · Maximized
-EG-Desk Agenda / Terminal · Maximized
+EG-Desk Board / Terminal · Maximized
 ```
 
 ### Focus Fullscreen
@@ -341,7 +342,7 @@ Policy:
 ```text
 enter focus fullscreen
   -> save restoreRect and zIndex
-  -> hide HUD / Agenda Rail / Dock / Preset Bag
+  -> hide HUD / Board Rail / Dock / Preset Bag
   -> card covers full viewport
   -> show only essential escape affordance if needed
 
@@ -422,7 +423,7 @@ type ViewportChromeMode =
 
 Mode effects:
 
-| Mode | Agenda Rail | Minimap | Dock | Preset Bag | HUD |
+| Mode | Board Rail | Minimap | Dock | Preset Bag | HUD |
 |---|---|---|---|---|---|
 | `normal` | visible | compact | visible | visible | user state |
 | `maximizedCard` | visible | compact/off | visible | visible | hidden by default |
@@ -431,7 +432,7 @@ Mode effects:
 
 Run Playback may temporarily adjust chrome to keep the step target readable.
 
-When `ViewportChromeMode` is `maximizedCard`, the viewport should expose the active maximized card/window identity through a compact indicator in the Agenda Rail or an equivalent edge affordance.
+When `ViewportChromeMode` is `maximizedCard`, the viewport should expose the active maximized card/window identity through a compact indicator in the Board Rail or an equivalent edge affordance.
 
 ---
 
@@ -451,7 +452,7 @@ Do auto-place/reflow for:
 Do not auto-move:
 
 - ordinary user-placed cards
-- accepted Agenda layout
+- accepted Board layout
 - cards outside the active interaction
 - saved geometry just because HUD opens/closes
 
@@ -576,12 +577,12 @@ installNativeGestureHelperBridge()
   -> should stop creating always-visible helper status in product mode
 
 buildDeskRail()
-  -> should become Viewport Agenda Rail
+  -> should become Viewport Board Rail
   -> should indicate active maximized card/window when CardPresentationMode is maximized
   -> existing minimap button should open the Desk Minimap, not a generic panel
 ```
 
-The existing label `메인 데스크` should be treated as a temporary placeholder. The target behavior is Agenda-in-viewport display.
+The existing label `메인 데스크` should be treated as a temporary placeholder. The target behavior is Board-in-viewport display.
 
 ---
 
@@ -589,7 +590,7 @@ The existing label `메인 데스크` should be treated as a temporary placehold
 
 The model is aligned only if:
 
-- The top bar tells the user which Agenda they are looking at, not merely which Desk exists.
+- The top bar tells the user which Board they are looking at, not merely which Desk exists.
 - The minimap lets the user understand where the current viewport sits in the larger Desk.
 - Helper/bridge/MCP internals are hidden unless a feature is blocked or diagnostics are open.
 - Maximized cards hide HUD by default.

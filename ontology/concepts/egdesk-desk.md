@@ -32,7 +32,7 @@ Desk is not the same as:
 - a static canvas document
 - the generic `desktop` object handle
 
-The generic `desktop` handle can represent the visible operating plane. `egdesk.desk` is the product-level concept that gives that plane EG-Desk behavior, state, source refs, agenda membership, and runtime attachment rules.
+The generic `desktop` handle can represent the visible operating plane. `egdesk.desk` is the product-level concept that gives that plane EG-Desk behavior, state, source refs, Board membership, and runtime attachment rules.
 
 ## Stable Definition
 
@@ -40,5 +40,5 @@ The generic `desktop` handle can represent the visible operating plane. `egdesk.
 Desk = computer-level live work surface
 ```
 
-Desk contains Agendas and Cards. Its concrete runtime grouping may still be declared by relation maps.
+Desk contains Boards and Cards. Its concrete runtime grouping may still be declared by relation maps.
 

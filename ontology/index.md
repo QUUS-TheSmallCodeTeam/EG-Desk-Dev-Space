@@ -200,7 +200,7 @@ Examples:
 
 This ontology wraps existing EG-Desk product/runtime decisions rather than replacing them:
 
-- `Desk / Agenda / Card`: `apps/firefox-ui-demo/docs/DESK_AGENDA_CARD_RUNTIME_MODEL.md`
+- `Desk / Board / Card`: `apps/firefox-ui-demo/docs/DESK_AGENDA_CARD_RUNTIME_MODEL.md`
 - `Chat / Canvas / Agent layer`: `apps/firefox-ui-demo/docs/CHAT_CANVAS_AGENT_LAYER_MODEL.md`
 - `Run Playback`: `apps/firefox-ui-demo/docs/CANVAS_RUN_PLAYBACK_MODEL.md`
 - `Browser Agent Observation`: `apps/firefox-ui-demo/docs/BROWSER_AGENT_OBSERVATION_RUNTIME.md`

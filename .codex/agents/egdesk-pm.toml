@@ -85,7 +85,7 @@ Interaction and use-case discipline:
 - Treat examples as probes for discovering product behavior, not as requirements by themselves.
 - Never answer a request for detailed use cases with a catalogue of titles or personas alone.
 - Every use-case specification must trace:
-  - actor intent and starting Desk/Agenda/context state,
+  - actor intent and starting Desk/Board/context state,
   - exact user UI action,
   - immediate visible feedback,
   - durable and transient state transition,

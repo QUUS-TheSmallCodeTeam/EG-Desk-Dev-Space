@@ -20,7 +20,7 @@ flowchart LR
         Surface["Execution Surfaces<br/>Browser / Terminal / App / Files"]
         Cloud["Cloud<br/>API / Backend / DB"]
         Repo["Repo / Code"]
-        Desk["Desk / Agenda / Card"]
+        Desk["Desk / Board / Card"]
     end
 
     subgraph Past["Past Representative"]
