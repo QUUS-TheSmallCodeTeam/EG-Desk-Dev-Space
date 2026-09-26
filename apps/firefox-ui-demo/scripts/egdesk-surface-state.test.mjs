@@ -1,6 +1,6 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { readFileSync } from 'node:fs';
+import { existsSync, readFileSync } from 'node:fs';
 import { compileFunction } from 'node:vm';
 import { initialSurfaceMode, planBoardProjection, snapshotBoardProjection, remapMemberReferences, recoverDeskSnapshot, canPersistDeskSession, ownedProjectionMembers, missingProjectionMembers, fitSurfaceCamera } from '../overlay/resources/EGDeskSurfaceState.sys.mjs';
 import * as Chat from '../overlay/resources/EGDeskChatState.sys.mjs';
@@ -821,4 +821,32 @@ test('explicit invalid cwd is forwarded unchanged for backend validation rather 
   }
   const body = Chat.buildChatRequest({ id: 'runtime-cwd', cwd: '/tmp/thread-value' }, 'hello', 'q', { cwd: '' });
   assert.equal(body.cwd, '');
+});
+
+test('terminal production HTML bootstraps from existing chrome assets without executable inline script', () => {
+  const resources = new URL('../overlay/resources/', import.meta.url);
+  const html = readFileSync(new URL('terminal.html', resources), 'utf8');
+  const scripts = [...html.matchAll(/<script\b([^>]*)>([\s\S]*?)<\/script>/gi)];
+  const prefix = 'chrome://userchrome/content/';
+  const sources = scripts.map(([, attributes, body]) => {
+    assert.equal(body.trim(), '', 'existing CSP must not need executable inline script');
+    const src = attributes.match(/\bsrc\s*=\s*['"]([^'"]+)['"]/i)?.[1];
+    assert.ok(src?.startsWith(prefix), 'script must use the existing allowed chrome source');
+    const path = new URL(src.slice(prefix.length), resources);
+    assert.ok(path.href.startsWith(resources.href));
+    assert.ok(existsSync(path), `production script asset missing: ${src}`);
+    return src;
+  });
+  const initUrl = `${prefix}egdesk-terminal-init.js`;
+  assert.equal(sources.filter(src => src === initUrl).length, 1);
+  assert.equal(sources.at(-1), initUrl, 'vendor globals load before the initializer');
+  assert.ok(sources.includes(`${prefix}vendor/xterm.min.js`));
+  assert.ok(sources.includes(`${prefix}vendor/addon-fit.min.js`));
+  const initializer = readFileSync(new URL('egdesk-terminal-init.js', resources), 'utf8');
+  for (const [, dependency] of initializer.matchAll(/\bimport\(['"]([^'"]+)['"]\)/g)) {
+    assert.ok(dependency.startsWith(prefix));
+    assert.ok(existsSync(new URL(dependency.slice(prefix.length), resources)));
+  }
+  assert.equal(/\son\w+\s*=/i.test(html), false, 'no inline event handlers');
+  assert.equal(html.includes('unsafe-inline'), false);
 });
