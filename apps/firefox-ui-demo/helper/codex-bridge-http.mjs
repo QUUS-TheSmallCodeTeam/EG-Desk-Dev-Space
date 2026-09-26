@@ -1,6 +1,6 @@
 import { chatError, publicText, validateChatCwd } from './codex-chat-values.mjs'
 
-// Firefox privileged chrome fetches can have a missing or opaque Origin.
+// Verified Firefox chrome and local CLI callers can omit Origin.
 // Ordinary web origins must match this loopback service; never echo arbitrary origins.
 export function guardBridgeRequest(req, port = 39218) {
   if (typeof req.url !== 'string' || !req.url.startsWith('/') || req.url.startsWith('//')) return false
@@ -12,7 +12,7 @@ export function guardBridgeRequest(req, port = 39218) {
   // must identify a trusted initiation context; omission remains valid for CLI.
   if (Object.hasOwn(req.headers, 'sec-fetch-site') && !['none', 'same-origin'].includes(fetchSite)) return false
   const origin = req.headers.origin
-  return origin === undefined || ['null', 'chrome://browser', 'chrome://userchrome', `http://127.0.0.1:${port}`, `http://localhost:${port}`, `http://[::1]:${port}`].includes(origin)
+  return origin === undefined || ['chrome://browser', 'chrome://userchrome', `http://127.0.0.1:${port}`, `http://localhost:${port}`, `http://[::1]:${port}`].includes(origin)
 }
 
 export function setBridgeCors(req, res) {

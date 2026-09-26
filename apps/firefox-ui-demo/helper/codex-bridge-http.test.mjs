@@ -18,20 +18,21 @@ function response() {
 
 test('loopback boundary rejects hostile Origin, Host, cross-site and nonlocal requests', () => {
   assert.equal(guardBridgeRequest(request('{}')), true)
-  assert.equal(guardBridgeRequest(request('{}', { origin: 'null' })), true)
+  assert.equal(guardBridgeRequest(request('{}', { origin: 'null' })), false)
   assert.equal(guardBridgeRequest(request('{}', { origin: 'chrome://browser' })), true)
   for (const headers of [{ origin: 'https://evil.example' }, { host: 'evil.example:39218' }, { origin: 'http://localhost:8080' }, { origin: 'null', 'sec-fetch-site': 'cross-site' }]) assert.equal(guardBridgeRequest(request('{}', headers)), false)
   const remote = request('{}'); remote.socket.remoteAddress = '192.168.1.1'
   assert.equal(guardBridgeRequest(remote), false)
   assert.equal(guardBridgeRequest(request('{}', {}, 'http://evil.example/chat/send')), false)
-  const res = response(); setBridgeCors(request('{}', { origin: 'null' }), res)
-  assert.equal(res.headers['Access-Control-Allow-Origin'], 'null')
+  const res = response(); setBridgeCors(request('{}', { origin: 'http://127.0.0.1:39218' }), res)
+  assert.equal(res.headers['Access-Control-Allow-Origin'], 'http://127.0.0.1:39218')
   assert.notEqual(res.headers['Access-Control-Allow-Origin'], '*')
 })
 
-test('opaque/null origins reject same-site and every unrecognized present Fetch Metadata value', () => {
+test('absent or trusted origins still reject same-site and every unrecognized present Fetch Metadata value', () => {
   for (const fetchSite of ['same-site', 'cross-site', 'unknown', '', 'Same-Origin', 'none, same-origin', null, undefined, ['same-origin']]) {
-    assert.equal(guardBridgeRequest(request('{}', { origin: 'null', 'sec-fetch-site': fetchSite })), false, String(fetchSite))
+    assert.equal(guardBridgeRequest(request('{}', { 'sec-fetch-site': fetchSite })), false, String(fetchSite))
+    assert.equal(guardBridgeRequest(request('{}', { origin: 'chrome://browser', 'sec-fetch-site': fetchSite })), false, String(fetchSite))
   }
   for (const origin of ['https://evil.example', 'http://localhost:8080', 'http://127.0.0.1:8080']) {
     for (const fetchSite of ['none', 'same-origin']) {
@@ -41,7 +42,7 @@ test('opaque/null origins reject same-site and every unrecognized present Fetch 
 })
 
 test('trusted loopback/Chrome origins retain missing-header, none and same-origin compatibility', () => {
-  for (const origin of [undefined, 'null', 'chrome://browser', 'chrome://userchrome', 'http://127.0.0.1:39218', 'http://localhost:39218']) {
+  for (const origin of [undefined, 'chrome://browser', 'chrome://userchrome', 'http://127.0.0.1:39218', 'http://localhost:39218', 'http://[::1]:39218']) {
     for (const fetchSite of [undefined, 'none', 'same-origin']) {
       const headers = {}
       if (origin !== undefined) headers.origin = origin
@@ -49,6 +50,20 @@ test('trusted loopback/Chrome origins retain missing-header, none and same-origi
       assert.equal(guardBridgeRequest(request('{}', headers)), true)
       assert.equal(guardBridgeRequest(request('{}', { ...headers, host: 'other.example:39218' })), false)
     }
+  }
+})
+
+test('literal Origin null is rejected for absent, trusted and untrusted Fetch Metadata combinations', () => {
+  for (const fetchSite of [undefined, 'none', 'same-origin', 'same-site', 'cross-site', 'unknown', '', null]) {
+    const headers = { origin: 'null' }
+    if (fetchSite !== undefined) headers['sec-fetch-site'] = fetchSite
+    const req = request('{}', headers)
+    const res = response()
+    const allowed = guardBridgeRequest(req)
+    assert.equal(allowed, false, String(fetchSite))
+    // Production sets CORS only after the guard accepts the request.
+    if (allowed) setBridgeCors(req, res)
+    assert.equal(res.headers['Access-Control-Allow-Origin'], undefined)
   }
 })
 
