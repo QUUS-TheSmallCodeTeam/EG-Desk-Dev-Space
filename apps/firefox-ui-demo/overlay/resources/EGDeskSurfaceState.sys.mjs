@@ -6,11 +6,40 @@ export function initialSurfaceMode({ lifecycle, deskSession, legacyStore, existi
 }
 
 const copy = value => value == null ? value : JSON.parse(JSON.stringify(value));
-export function remapMemberReferences(value, ids) {
-  if (typeof value === 'string') return ids[value] || value;
-  if (Array.isArray(value)) return value.map(item => remapMemberReferences(item, ids));
+export function ownedProjectionMembers(projection, ownership) {
+  return projection.members.map(member => member.viewId).filter(id => ownership[id] === projection.id);
+}
+export function missingProjectionMembers(projection, existingIds) {
+  const present = new Set(existingIds);
+  return projection.members.filter(member => !present.has(member.viewId));
+}
+// These are view-reference fields in the Board binding payload. Resource identity,
+// labels, URLs and arbitrary object keys are opaque, even when they equal a view ID.
+const VIEW_FIELDS = new Set(['cardId', 'sourceCardId', 'targetCardId', 'viewId', 'sourceViewId', 'targetViewId', 'entityId', 'cardIds', 'viewIds', 'memberCardIds']);
+export function remapMemberReferences(value, ids, field = '') {
+  if (typeof value === 'string') return VIEW_FIELDS.has(field) ? ids[value] || value : value;
+  if (Array.isArray(value)) return value.map(item => remapMemberReferences(item, ids, field));
   if (!value || typeof value !== 'object') return value;
-  return Object.fromEntries(Object.entries(value).map(([key, item]) => [ids[key] || key, remapMemberReferences(item, ids)]));
+  return Object.fromEntries(Object.entries(value).map(([key, item]) => [key, remapMemberReferences(item, ids, key)]));
+}
+
+export function recoverDeskSnapshot(snapshot, restore) {
+  if (snapshot == null) return { restored: false, protected: false, reason: null };
+  const validRecord = record => record && typeof record.id === 'string' && typeof record.type === 'string';
+  if (snapshot.unreadable || !snapshot.agenda?.id || !Array.isArray(snapshot.cards) || !Array.isArray(snapshot.shapes)
+      || !snapshot.cards.every(validRecord) || !snapshot.shapes.every(validRecord)) {
+    return { restored: false, protected: true, reason: 'Desk 기록을 읽을 수 없습니다.' };
+  }
+  try {
+    const restored = restore(snapshot) === true;
+    return { restored, protected: !restored, reason: restored ? null : 'Desk 기록을 모두 복원하지 못했습니다.' };
+  } catch (error) {
+    return { restored: false, protected: true, reason: error.message || 'Desk 복원 중 오류가 발생했습니다.' };
+  }
+}
+
+export function canPersistDeskSession(surface) {
+  return !surface.restoring && !surface.recoveryProtected;
 }
 
 export function planBoardProjection(snapshot, projectionId) {

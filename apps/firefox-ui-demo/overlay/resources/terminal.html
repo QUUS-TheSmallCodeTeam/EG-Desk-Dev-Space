@@ -99,6 +99,8 @@
     let ptyId = null;
     let readTimer = null;
     let connected = false;
+    let exitConfirmed = false;
+    let closeRequested = false;
 
     async function postTerminal(path, body) {
       const response = await fetch(`${HELPER_ORIGIN}${path}`, {
@@ -139,6 +141,7 @@
         const result = await postTerminal('/terminal/read', { sessionId: ptyId });
         if (result.data) term.write(result.data);
         if (result.exited) {
+          exitConfirmed = true;
           term.write(`\r\n\x1b[90m[Process exited with code ${result.exitCode ?? ''}]\x1b[0m\r\n`);
           connected = false;
           ptyId = null;
@@ -168,6 +171,20 @@
 
     function exposeTerminalApi() {
       window.terminalAPI = {
+        closeForBoard: async () => {
+          if (exitConfirmed) return true;
+          if (!ptyId || closeRequested) return false;
+          // The current helper's kill response acknowledges removal from its registry,
+          // not observed process exit. Keep this view visible until exit is confirmed.
+          await postTerminal('/terminal/kill', { sessionId: ptyId });
+          closeRequested = true;
+          connected = false;
+          stopPolling();
+          statusEl.textContent = '종료 요청은 수락됐지만 실행 종료는 확인되지 않았습니다.';
+          statusEl.classList.remove('hidden');
+          statusEl.style.pointerEvents = 'none';
+          return false;
+        },
         get ptyId() {
           return ptyId;
         },

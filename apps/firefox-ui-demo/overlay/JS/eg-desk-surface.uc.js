@@ -1159,7 +1159,7 @@
     };
   }
 
-  function mountBoardMember(projection, member) {
+  function mountBoardMember(projection, member, options = {}) {
     const record = cloneJson(member.record);
     const geometry = { ...(record.geometry || { x: 40, y: 80, width: 340, height: 180 }) };
     geometry.x = (geometry.x || 0) + (projection.offset?.x || 0);
@@ -1177,25 +1177,30 @@
         }
         view = spawnBrowserCard(uri, { openMode: 'new', sourceRef: record.sourceRef || {}, firstUse: !!record.runtimeState?.firstUseBrowser && state.surface.restoring, fixedLogicalHeight: record.runtimeState?.fixedLogicalHeight });
       } else if (record.type === 'ontology') view = spawnOntologyMapCard(record.runtimeState || {});
+      else if (record.type === 'settings') view = spawnSettingsCard({ openMode: 'new' });
+      else if (record.type === 'terminal' && options.newTerminal === true) view = spawnTerminalCard();
     } catch (error) { reason = error.message || reason; }
     if (!view) {
+      const terminal = record.type === 'terminal';
+      if (terminal) reason = '저장된 터미널 배치입니다. 이전 PTY 연결은 확인되지 않았습니다. 새 세션을 직접 열 수 있으며 이전 명령은 재실행하지 않습니다.';
       view = el('div', {
         id: member.viewId, class: 'egd-canvas-card egd-board-missing', role: 'region',
         'aria-label': 'Board 구성원 연결 확인', data: { testid: 'board-missing-member' },
       }, el('strong', {}, record.sourceRef?.path || record.sourceRef?.uri || record.type || '구성원'),
       el('p', {}, reason),
-      el('button', { 'aria-label': '구성원 다시 확인', onclick: () => {
+      el('button', { 'aria-label': terminal ? '새 터미널 세션 열기' : '구성원 다시 확인', data: { testid: terminal ? 'board-new-terminal' : 'board-member-retry' }, onclick: () => {
         view.remove();
         state.agenda.suppressDirty = true;
-        try { mountBoardMember(projection, member); } finally { state.agenda.suppressDirty = false; }
+        try { mountBoardMember(projection, member, { newTerminal: terminal }); } finally { state.agenda.suppressDirty = false; }
         refreshBoardRegion(projection);
-      } }, '다시 확인'),
+      } }, terminal ? '새 터미널 세션 열기' : '다시 확인'),
       el('details', {}, el('summary', {}, '저장된 참조 보기'), el('pre', {}, JSON.stringify(record.sourceRef || { type: record.type, id: member.sourceId }, null, 2))));
       view._savedBoardMember = record;
       document.getElementById('egd-canvas-layer').appendChild(view);
     }
     retargetRestoredEntityId(view, member.viewId);
-    if (record.sourceRef) bindCardSourceRef(view, record.sourceRef);
+    if (record.sourceRef && !options.newTerminal) bindCardSourceRef(view, record.sourceRef);
+    if (options.newTerminal) { view.dataset.runtimeContinuity = 'new-session'; registerSourceRefCard(view); }
     applyPersistentEntityGeometry(view, geometry);
     view.dataset.boardId = projection.boardId;
     view.dataset.projectionId = projection.id;
@@ -1224,7 +1229,8 @@
         data: { boardId: projection.boardId, projectionId: projection.id, testid: 'board-projection' },
       }, el('div', { class: 'egd-board-region-bar' },
         el('button', { 'aria-label': `Board ${projection.title} 선택`, onclick: () => selectBoardProjection(projection.id) }, projection.title),
-        el('button', { 'aria-label': '이 Board 저장', data: { testid: 'board-save', projectionId: projection.id }, onclick: () => saveCurrentAgendaState({ projectionId: projection.id }) }, '저장')));
+        el('button', { 'aria-label': '이 Board 저장', data: { testid: 'board-save', projectionId: projection.id }, onclick: () => saveCurrentAgendaState({ projectionId: projection.id }) }, '저장'),
+        el('button', { 'aria-label': '이 Board 닫기', data: { testid: 'board-close', projectionId: projection.id }, onclick: () => closeCurrentAgenda({ projectionId: projection.id }) }, '닫기')));
       document.getElementById('egd-canvas-layer').prepend(region);
     }
     const rects = projection.members.map(m => document.getElementById(m.viewId)).filter(Boolean).map(persistentEntityGeometry);
@@ -1249,6 +1255,11 @@
       state.boards.projections[projection.id] = projection;
       state.agenda.suppressDirty = true;
       try { for (const member of projection.members) mountBoardMember(projection, member); }
+      finally { state.agenda.suppressDirty = false; }
+    } else {
+      const missing = SurfaceState.missingProjectionMembers(projection, projection.members.map(member => document.getElementById(member.viewId)?.id).filter(Boolean));
+      state.agenda.suppressDirty = true;
+      try { for (const member of missing) mountBoardMember(projection, member); }
       finally { state.agenda.suppressDirty = false; }
     }
     const region = refreshBoardRegion(projection);
@@ -1440,15 +1451,49 @@
     refreshDeskMinimap();
   }
 
-  function completeAgendaClose({ saveFirst = false } = {}) {
-    if (saveFirst && !saveCurrentAgendaState()) return false;
-    markAgendaClosed();
+  async function completeAgendaClose({ saveFirst = false, projectionId = state.boards.activeProjectionId } = {}) {
+    const projection = state.boards.projections[projectionId];
+    if (!projection) return false;
+    if (saveFirst && !saveCurrentAgendaState({ projectionId })) return false;
+    const ownedIds = SurfaceState.ownedProjectionMembers(projection, Object.fromEntries(
+      projection.members.map(member => [member.viewId, document.getElementById(member.viewId)?.dataset.projectionId])
+    ));
+    for (const id of ownedIds) {
+      const view = document.getElementById(id);
+      if (!view) continue;
+      try {
+        if (view._closeOwnedRuntime && !(await view._closeOwnedRuntime())) {
+          boardNotice('터미널 종료가 아직 확인되지 않았습니다. 해당 화면을 유지합니다.');
+          refreshBoardRegion(projection);
+          return false;
+        }
+        view._cleanup?.();
+        unregisterSourceRefCard(view);
+        view.remove();
+      } catch (error) {
+        boardNotice(`Board 구성원을 닫지 못했습니다: ${error.message}`);
+        refreshBoardRegion(projection);
+        return false;
+      }
+    }
+    document.getElementById(projection.id)?.remove();
+    delete state.boards.projections[projection.id];
+    markAgendaClosed(projection.boardId);
+    if (state.boards.activeProjectionId === projection.id) {
+      state.boards.activeProjectionId = null;
+      state.agenda.activeTitle = 'Desk';
+      state.agenda.dirty = false;
+      state.agenda.dirtyReasons = [];
+    }
+    if (!document.getElementById(state.activeEntityId)) setActiveEntity(null);
     closeAgendaCloseGuard();
-    clearCurrentAgendaView({ markClean: true });
+    syncViewportAgendaRail();
+    scheduleDeskSessionSave();
     return true;
   }
 
   function showAgendaCloseGuard() {
+    const projectionId = state.boards.activeProjectionId;
     const existing = document.getElementById('egd-agenda-close-guard');
     if (existing) {
       existing.querySelector('[data-action="continue"]')?.focus?.();
@@ -1480,7 +1525,7 @@
     },
       el('div', { class: 'egd-agenda-close-panel' },
         el('div', { class: 'egd-agenda-close-kicker' }, currentViewportAgendaLabel()),
-        el('div', { id: 'egd-agenda-close-title', class: 'egd-agenda-close-title' }, 'Agenda를 닫을까요?'),
+        el('div', { id: 'egd-agenda-close-title', class: 'egd-agenda-close-title' }, 'Board를 닫을까요?'),
         el('div', { class: 'egd-agenda-close-copy' }, dirtyText),
         el('div', { class: 'egd-agenda-close-actions' },
           el('button', {
@@ -1497,7 +1542,7 @@
             data: { action: 'discard' },
             onclick: (ev) => {
               ev.stopPropagation();
-              completeAgendaClose({ saveFirst: false });
+              completeAgendaClose({ saveFirst: false, projectionId });
             },
           }, '버리고 닫기'),
           el('button', {
@@ -1505,7 +1550,7 @@
             data: { action: 'save' },
             onclick: (ev) => {
               ev.stopPropagation();
-              completeAgendaClose({ saveFirst: true });
+              completeAgendaClose({ saveFirst: true, projectionId });
             },
           }, '저장 후 닫기'),
         ),
@@ -1517,8 +1562,11 @@
   }
 
   function closeCurrentAgenda(options = {}) {
-    boardNotice('Board 닫기와 실행 종료 범위는 아직 연결되지 않았습니다. 다른 Board는 그대로 열 수 있습니다.');
-    return false;
+    const projection = state.boards.projections[options.projectionId || state.boards.activeProjectionId];
+    if (!projection) return false;
+    selectBoardProjection(projection.id);
+    if (projection.dirty && options.force !== true) return showAgendaCloseGuard();
+    return completeAgendaClose({ projectionId: projection.id, saveFirst: options.saveFirst === true });
   }
 
   function agendaCardCountForSnapshot(snapshot) {
@@ -7946,9 +7994,9 @@
     return card;
   }
 
-  function spawnSettingsCard() {
+  function spawnSettingsCard(options = {}) {
     const sourceRef = singletonSourceRef('settings', { kind: 'settings-card' });
-    const existing = focusOpenSourceCard(sourceRef);
+    const existing = options.openMode === 'new' ? null : focusOpenSourceCard(sourceRef);
     if (existing) return existing;
 
     const id = `egd-settings-card-${++cardSeq}`;
@@ -10006,6 +10054,10 @@
     console.warn(TAG, 'terminal card spawned (chrome:// + node bridge :39218)', id);
     card._cleanup = cleanupCard;
     card._termBrowser = termBrowser;
+    card._closeOwnedRuntime = async () => {
+      const api = termBrowser.contentWindow?.terminalAPI;
+      return api?.closeForBoard ? api.closeForBoard() : false;
+    };
     return card;
   }
 
@@ -10466,12 +10518,12 @@
 
   let deskSaveTimer = null;
   function persistDeskSession() {
-    if (state.surface.restoring || !document.getElementById('egd-canvas-layer')) return false;
+    if (!SurfaceState.canPersistDeskSession(state.surface) || !document.getElementById('egd-canvas-layer')) return false;
     return writeSurfacePref(DESK_SESSION_PREF, serializeDeskSnapshot());
   }
 
   function scheduleDeskSessionSave() {
-    if (state.surface.restoring) return;
+    if (!SurfaceState.canPersistDeskSession(state.surface)) return;
     if (deskSaveTimer) window.clearTimeout(deskSaveTimer);
     deskSaveTimer = window.setTimeout(() => { deskSaveTimer = null; persistDeskSession(); }, 300);
   }
@@ -10480,7 +10532,7 @@
     state.surface.mode = mode;
     document.documentElement.dataset.egdSurfaceMode = mode;
     document.getElementById('egd-canvas-viewport')?.setAttribute('data-presentation', mode === 'browser' ? 'hidden' : 'visible');
-    writeSurfacePref(SURFACE_LIFECYCLE_PREF, { version: 1, mode, browserCardId: state.surface.browserCardId });
+    if (!state.surface.recoveryProtected) writeSurfacePref(SURFACE_LIFECYCLE_PREF, { version: 1, mode, browserCardId: state.surface.browserCardId });
   }
 
   function enterLocalDesk() {
@@ -10502,8 +10554,10 @@
   function restoreSurfaceEntry(lifecycle, deskSession, legacyStore) {
     state.surface.restoring = true;
     try {
-      const mode = SurfaceState.initialSurfaceMode({ lifecycle, deskSession, legacyStore });
-      if (deskSession && !deskSession.unreadable) restoreDeskSession(deskSession);
+      const recovery = SurfaceState.recoverDeskSnapshot(deskSession, restoreDeskSession);
+      state.surface.recoveryProtected = recovery.protected;
+      state.surface.recoveryReason = recovery.reason;
+      const mode = recovery.protected ? 'desk' : SurfaceState.initialSurfaceMode({ lifecycle, deskSession, legacyStore });
       state.surface.browserCardId = deskSession?.surface?.browserCardId || lifecycle?.browserCardId || null;
       if (mode === 'browser') {
         let card = document.getElementById(state.surface.browserCardId);
@@ -10535,7 +10589,7 @@
         const card = document.getElementById(state.surface.browserCardId);
         if (card) card.dataset.testid = 'browser-card';
       }
-      if (deskSession?.unreadable) boardNotice('이전 Desk 기록을 읽지 못했습니다. 저장된 Board 목록은 별도로 사용할 수 있습니다.');
+      if (recovery.protected) boardNotice(`${recovery.reason} 원본 기록은 보존되며 자동 저장은 보류됩니다. 저장된 Board 목록은 별도로 사용할 수 있습니다.`);
     } finally { state.surface.restoring = false; }
     // A single current Desk snapshot; Saved Board revisions are never updated by this path.
     const observer = new MutationObserver(scheduleDeskSessionSave);
@@ -10659,6 +10713,7 @@
         },
         boards: {
           open: (boardId, options = {}) => switchAgenda(boardId, options),
+          close: (projectionId, options = {}) => closeCurrentAgenda({ ...options, projectionId }),
           save: (projectionId) => saveCurrentAgendaState({ projectionId }),
           projections: () => cloneJson(state.boards),
         },
