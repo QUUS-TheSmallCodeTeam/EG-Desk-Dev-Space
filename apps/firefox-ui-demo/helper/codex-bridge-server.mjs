@@ -1,6 +1,7 @@
 import { createServer } from 'node:http'
 import { spawn } from 'node:child_process'
 import { AppServerRpc } from './codex-app-server-rpc.mjs'
+import { normalizeNativeAuth, publicAuthIdentityKey } from './codex-auth-state.mjs'
 import { CodexChatRuntime } from './codex-chat-runtime.mjs'
 import { createChatHttpHandler, guardBridgeRequest, readJsonBody, sendJson, setBridgeCors } from './codex-bridge-http.mjs'
 import { BoundedSseClient } from './codex-bridge-sse.mjs'
@@ -29,6 +30,8 @@ const authState = {
   authMode: null,
   accountId: null,
   accountEmail: null,
+  identityStatus: 'unknown',
+  identityBasis: null,
   lastRefresh: null,
   source: 'app-server',
   statusText: 'Login required',
@@ -142,18 +145,12 @@ async function refreshAccountState({ refreshToken = false } = {}) {
     appServerRequest('account/read', { refreshToken: false }),
   ])
 
-  const account = accountResult?.account ?? null
-  const isLoggedIn = authResult?.authMethod === 'chatgpt' || account?.type === 'chatgpt'
-  if (authState.isLoggedIn && (!isLoggedIn || authState.accountEmail !== (account?.email ?? null))) chat.reset()
+  const normalized = normalizeNativeAuth(authResult, accountResult)
+  if (authState.isLoggedIn && (!normalized.isLoggedIn || publicAuthIdentityKey(authState) !== publicAuthIdentityKey(normalized))) chat.reset()
   const nextSnapshot = {
     ...authState,
-    isLoggedIn,
-    loginInProgress: isLoggedIn ? false : authState.loginInProgress,
-    authMode: authResult?.authMethod ?? null,
-    accountId: account?.type === 'chatgpt' ? 'chatgpt' : null,
-    accountEmail: account?.type === 'chatgpt' ? account.email ?? null : null,
-    source: 'app-server',
-    requiresOpenaiAuth: authResult?.requiresOpenaiAuth ?? true,
+    ...normalized,
+    loginInProgress: normalized.isLoggedIn ? false : authState.loginInProgress,
   }
 
   updateAuthState({
