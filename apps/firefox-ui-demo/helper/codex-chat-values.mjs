@@ -46,6 +46,14 @@ export function chatError(code, message, httpStatus = 400) {
   return Object.assign(new Error(message), { code, httpStatus })
 }
 
+export function validateChatCwd(body) {
+  if (body.cwd === undefined) return undefined
+  if (typeof body.cwd !== 'string' || !path.isAbsolute(body.cwd) || body.cwd.includes('\0')) {
+    throw chatError('INVALID_CWD', 'cwd must be an absolute local path')
+  }
+  return body.cwd
+}
+
 const artifactExtensions = new Set(['.pdf', '.docx', '.xlsx', '.xls', '.pptx', '.csv', '.tsv', '.txt', '.md', '.png', '.jpg', '.jpeg', '.webp', '.gif'])
 const scriptExtensions = /\.(?:[cm]?js|jsx|tsx?|sh|bash|zsh|fish|py|rb|pl|php|ps1|bat|cmd|exe|app|html?|svg|wasm)$/i
 const sensitivePath = /(?:^|[/\\])(?:\.env(?:\.[^/\\]*)?|\.ssh|\.aws|\.gnupg|auth\.json|credentials(?:\.json)?|id_rsa|id_ed25519)(?:$|[/\\])|\.(?:pem|key|p12|pfx)$/i

@@ -574,3 +574,24 @@ test('active history preserves observed item completion and authoritative text, 
   await h.notify('item/agentMessage/delta', { threadId: run.conversationId, turnId: run.runId, itemId: 'finished-item', delta: 'late stale delta ' })
   assert.equal(h.chat.snapshot().runs[0].messages.find(message => message.id === 'finished-item').text, finished.text)
 })
+
+test('explicit invalid cwd is rejected before any native runtime RPC, independent of persona', async () => {
+  for (const cwd of [null, '', ' ', 'relative/path', 'file:///tmp/work', 0, [], {}, '/tmp/bad\0path']) {
+    for (const profileEnabled of [undefined, false, true]) {
+      const h = harness()
+      await assert.rejects(h.chat.send({ message: 'Hello', cwd, profileEnabled, systemPrompt: 'Optional persona' }), error => error.code === 'INVALID_CWD' && error.httpStatus === 400)
+      assert.equal(h.calls.length, 0)
+    }
+  }
+})
+
+test('omitted cwd inherits native defaults and an explicit absolute cwd is forwarded without a persona', async () => {
+  const omitted = harness()
+  await omitted.chat.send({ message: 'Hello' })
+  for (const call of omitted.calls) assert.equal(Object.hasOwn(call.params, 'cwd'), false)
+  const explicit = harness()
+  await explicit.chat.send({ message: 'Hello', cwd: '/fixture/manifest-workspace' })
+  assert.equal(explicit.calls.find(call => call.method === 'thread/start').params.cwd, '/fixture/manifest-workspace')
+  assert.equal(explicit.calls.find(call => call.method === 'turn/start').params.cwd, '/fixture/manifest-workspace')
+  assert.equal(Object.hasOwn(explicit.calls[0].params, 'developerInstructions'), false)
+})

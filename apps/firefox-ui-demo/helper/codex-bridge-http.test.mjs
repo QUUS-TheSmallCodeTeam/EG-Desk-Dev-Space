@@ -126,3 +126,19 @@ test('known Stop, decline and cancel work when auth refresh fails; accept still 
   assert.equal(invalid.status, 409)
   assert.equal(replies.length, 2)
 })
+
+test('HTTP explicit invalid cwd returns INVALID_CWD before auth lookup or a native runtime call', async () => {
+  let authCalls = 0, nativeCalls = 0
+  const chat = new CodexChatRuntime({ request: async () => { nativeCalls++; throw new Error('Must not run') }, respond: () => {} })
+  chat.setConnection(true)
+  const handler = createChatHttpHandler(chat, async () => { authCalls++; throw new Error('Must not run auth') })
+  for (const cwd of [null, '', ' ', 'relative/path', 'file:///tmp/work', 0, [], {}, '/tmp/bad\0path']) {
+    const res = response()
+    await handler(request(JSON.stringify({ message: 'Hello', cwd })), res, new URL('http://localhost/chat/send'))
+    assert.equal(res.status, 400)
+    assert.equal(res.body.code, 'INVALID_CWD')
+    assert.equal(res.body.accepted, false)
+  }
+  assert.equal(authCalls, 0)
+  assert.equal(nativeCalls, 0)
+})

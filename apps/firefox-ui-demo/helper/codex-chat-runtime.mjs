@@ -1,6 +1,6 @@
 import { createHash, randomUUID } from 'node:crypto'
 import path from 'node:path'
-import { chatError, explicitFileLinks, MAX_TEXT, publicError, publicNetworkContext, publicText, verifyLocalFile } from './codex-chat-values.mjs'
+import { chatError, explicitFileLinks, MAX_TEXT, publicError, publicNetworkContext, publicText, validateChatCwd, verifyLocalFile } from './codex-chat-values.mjs'
 
 const TERMINAL = new Set(['completed', 'interrupted', 'failed'])
 const ITEM_STATUS = new Set(['inProgress', 'completed', 'failed', 'declined'])
@@ -219,6 +219,7 @@ export class CodexChatRuntime {
   }
 
   async send(body) {
+    validateChatCwd(body)
     this.assertReady()
     if (typeof body.message !== 'string' || !body.message.trim()) throw chatError('EMPTY_MESSAGE', 'Message is required')
     if (body.message.length > MAX_TEXT) throw chatError('MESSAGE_TOO_LONG', `Message exceeds ${MAX_TEXT} characters`)
@@ -270,10 +271,8 @@ export class CodexChatRuntime {
 
   threadOverrides(body) {
     const options = {}
-    if (body.cwd !== undefined) {
-      if (typeof body.cwd !== 'string' || !path.isAbsolute(body.cwd) || body.cwd.includes('\0')) throw chatError('INVALID_CWD', 'cwd must be an absolute local path')
-      options.cwd = body.cwd
-    }
+    const cwd = validateChatCwd(body)
+    if (cwd !== undefined) options.cwd = cwd
     if (body.model !== undefined) {
       if (!idText(body.model) || !body.model.trim()) throw chatError('INVALID_MODEL', 'Invalid model')
       options.model = body.model

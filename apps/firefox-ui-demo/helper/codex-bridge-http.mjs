@@ -1,4 +1,4 @@
-import { chatError, publicText } from './codex-chat-values.mjs'
+import { chatError, publicText, validateChatCwd } from './codex-chat-values.mjs'
 
 // Firefox privileged chrome fetches can have a missing or opaque Origin.
 // Ordinary web origins must match this loopback service; never echo arbitrary origins.
@@ -57,6 +57,8 @@ export function createChatHttpHandler(chat, ensureAuth) {
     let body = {}
     try {
       body = await readJsonBody(req)
+      // Reject explicit invalid context before even the authentication RPCs.
+      if (url.pathname === '/chat/send') validateChatCwd(body)
       // Existing correlated stop/denial is fail-safe even if account lookup is
       // unavailable. Runtime methods still verify connection, turn and callback.
       const isSafetyResponse = url.pathname === '/chat/interrupt'
