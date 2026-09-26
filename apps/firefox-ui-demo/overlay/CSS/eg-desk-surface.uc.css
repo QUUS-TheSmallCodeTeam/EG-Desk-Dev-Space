@@ -3008,6 +3008,21 @@
   justify-content: flex-end;
 }
 
+.egd-codex-run-status { display: flex; align-items: center; justify-content: space-between; gap: 10px; padding: 8px 16px; color: var(--egd-on-surface-variant); font: 12px var(--egd-font); }
+.egd-codex-run-status button { color: var(--egd-primary); padding: 4px 7px; border-radius: 5px; }
+.egd-codex-stop { padding: 6px 9px; border: 1px solid var(--egd-outline); border-radius: 8px; font: 12px var(--egd-font); color: var(--egd-on-surface); }
+.egd-codex-stop:disabled { opacity: .55; }
+#egd-codex-activity-panel { position: fixed; z-index: 100090; right: 20px; top: 70px; bottom: 90px; width: min(420px, calc(100vw - 40px)); display: flex; flex-direction: column; overflow: hidden; background: var(--egd-surface-elevated); border: 1px solid var(--egd-outline); border-radius: 12px; box-shadow: 0 12px 36px #0002; font: 13px/1.55 var(--egd-font); color: var(--egd-on-surface); }
+#egd-codex-activity-panel header { display: flex; align-items: center; gap: 10px; padding: 14px; border-bottom: 1px solid var(--egd-outline-variant); }
+#egd-codex-activity-panel header strong { flex: 1; }
+#egd-codex-activity-panel button { padding: 5px 9px; border: 1px solid var(--egd-outline); border-radius: 6px; color: var(--egd-primary); }
+#egd-codex-activity-panel button:disabled { opacity: .5; }
+.egd-codex-activity-body { overflow: auto; padding: 14px; min-height: 0; overscroll-behavior: contain; }
+.egd-codex-activity-row, .egd-codex-approval-pending { display: flex; flex-direction: column; gap: 6px; padding: 12px 0; border-bottom: 1px solid var(--egd-outline-variant); }
+.egd-codex-activity-row pre, .egd-codex-approval-pending pre { white-space: pre-wrap; overflow-wrap: anywhere; font-size: 11px; margin: 0; }
+.egd-codex-activity-row button, .egd-codex-approval-pending p { overflow-wrap: anywhere; text-align: left; }
+.egd-codex-approval-pending { background: #fbf6e8; border: 1px solid #dacb9b; border-radius: 8px; padding: 12px; }
+
 .egd-codex-message-row-assistant,
 .egd-codex-message-row-system {
   justify-content: flex-start;

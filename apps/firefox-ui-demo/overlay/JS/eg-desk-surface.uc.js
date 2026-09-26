@@ -9,6 +9,7 @@
   'use strict';
   const TAG = '[eg-desk-surface]';
   const SurfaceState = ChromeUtils.importESModule('chrome://userchrome/content/EGDeskSurfaceState.sys.mjs');
+  const ChatState = ChromeUtils.importESModule('chrome://userchrome/content/EGDeskChatState.sys.mjs');
   const BROWSER_AGENT_ACTOR_NAME = 'EGDeskBrowserAgentRuntime';
   const BROWSER_AGENT_HISTORY_LIMIT = 100;
   let browserAgentActorReady = false;
@@ -80,10 +81,10 @@
   const SELF_MEMBER = '나';
   const THREAD_KIND_META = {
     dm: {
-      label: 'Agent',
-      longLabel: 'Agent DM',
-      createTitle: '새 Agent DM',
-      emptyPreview: '아직 Agent DM 메시지가 없습니다',
+      label: 'Codex',
+      longLabel: 'Codex 대화',
+      createTitle: '새 Codex 대화',
+      emptyPreview: '아직 메시지가 없습니다',
     },
     group: {
       label: 'Agenda',
@@ -217,6 +218,7 @@
   }
 
   function codexThreadAgentProfile(thread) {
+    if (thread?.profileEnabled !== true) return { id: null, label: 'Codex', name: 'Codex', category: 'conversation', summary: '', capabilities: [], systemPrompt: null, toolMode: null };
     return codexAgentProfile(thread?.agentProfileId || defaultCodexAgentProfileIdForThread(thread?.type, thread?.title));
   }
 
@@ -275,6 +277,7 @@
 
   function codexThreadHeaderSubtitle(thread) {
     if (!thread) return '';
+    if (thread.profileEnabled !== true) return `Codex · ${codexThreadSessionLabel(thread)}`;
     const kind = codexThreadLongLabel(thread.type);
     const session = codexThreadSessionLabel(thread);
     const profile = codexThreadAgentProfile(thread);
@@ -301,10 +304,11 @@
     if (type === 'group' && participants.includes('코덱스 어시스턴트') && participantRoles['코덱스 어시스턴트'] === 'member') {
       participantRoles['코덱스 어시스턴트'] = 'admin';
     }
-    const agentProfileId = normalizeCodexAgentProfileId(
+    const profileEnabled = options.profileEnabled === true;
+    const agentProfileId = profileEnabled ? normalizeCodexAgentProfileId(
       options.agentProfileId,
-      defaultCodexAgentProfileIdForThread(type, title)
-    );
+      DEFAULT_CODEX_AGENT_PROFILE_ID
+    ) : null;
     const agentProfile = codexAgentProfile(agentProfileId);
     const safeSubtitle = subtitle || buildThreadSubtitle(type, participants);
     return {
@@ -314,9 +318,10 @@
       subtitle: safeSubtitle,
       participants,
       participantRoles,
+      profileEnabled,
       agentProfileId,
-      toolMode: options.toolMode || agentProfile.toolMode,
-      systemPrompt: options.systemPrompt || agentProfile.systemPrompt,
+      toolMode: profileEnabled ? options.toolMode || agentProfile.toolMode : null,
+      systemPrompt: profileEnabled ? options.systemPrompt || agentProfile.systemPrompt : null,
       pinned: Boolean(options.pinned),
       conversationId: null,
       messages: [],
@@ -327,27 +332,7 @@
   }
 
   function defaultCodexThreads() {
-    return [
-      createCodexThread('dm', '코덱스 어시스턴트', '', {
-        participants: [SELF_MEMBER, '코덱스 어시스턴트'],
-        participantRoles: {
-          [SELF_MEMBER]: 'owner',
-          '코덱스 어시스턴트': 'member',
-        },
-        agentProfileId: 'conversational-coding',
-        pinned: true,
-      }),
-      createCodexThread('group', 'EG-Desk Agenda', '', {
-        participants: [SELF_MEMBER, '코덱스 어시스턴트', '미나', '디자이너'],
-        participantRoles: {
-          [SELF_MEMBER]: 'owner',
-          '코덱스 어시스턴트': 'admin',
-          미나: 'admin',
-          디자이너: 'member',
-        },
-        agentProfileId: 'coding-project-manager',
-      }),
-    ];
+    return [createCodexThread('dm', 'Codex', '', { participants: [SELF_MEMBER, 'Codex'], pinned: true })];
   }
 
   const state = {
@@ -427,7 +412,7 @@
       memberNonce: 0,
       threadQuery: '',
       threadFilter: 'all',
-      hudView: 'list',
+      hudView: 'conversation',
       memberMenu: null,
       threadMenu: null,
       draft: '',
@@ -439,6 +424,8 @@
       connected: false,
       lastBridgeLatency: null,
       showDiagnostics: false,
+      chatProtocol: ChatState.createChatProtocolState(),
+      activityThreadId: null,
       authCardEntityId: null,
       chatDockMode: 'hud',
       chatCardEntityId: null,
@@ -582,71 +569,140 @@
   }
 
   function extractCodexResultLinks(message) {
-    const explicit = Array.isArray(message?.resultLinks)
-      ? message.resultLinks.map((link) => ({
-          ...(typeof link === 'object' && link ? link : {}),
-          label: codexResultChipLabel(link),
-        })).filter((link) => link.label)
-      : [];
-
-    let text = String(message?.content || '');
-    const inferred = [];
-    text = text.replace(/\[([^\]\n]{2,40})\]/g, (raw, label) => {
-      const trimmed = label.trim();
-      if (!/(card|deck|report|evidence|notes|file|canvas|ppt|excel|run|plan|action|context)/i.test(trimmed)) {
-        return raw;
-      }
-      inferred.push({ label: trimmed });
-      return '';
-    });
-
-    return {
-      text: text.replace(/[ \t]+\n/g, '\n').replace(/\n{3,}/g, '\n\n').trim(),
-      links: [...explicit, ...inferred],
-    };
+    return { text: String(message?.content || ''), links: (message?.artifacts || []).filter(ChatState.usableArtifact) };
   }
 
-  function openCodexResultLink(link, message, thread) {
-    if (link?.cardId) {
-      const card = document.getElementById(link.cardId);
-      if (card) {
-        focusCanvasCard(card);
-        return;
-      }
-    }
-    if (link?.url) {
-      openUrlInBrowserCard(link.url);
-      return;
-    }
-    console.warn(TAG, 'result chip has no canvas binding yet', {
-      label: link?.label,
-      messageId: message?.id,
-      threadId: thread?.id,
-    });
+  function openChatFileReference(reference) {
+    const path = reference?.target?.path;
+    if (reference?.type !== 'file' || typeof path !== 'string' || !path.startsWith('/')) return false;
+    const file = railSearchNsFileFromPath(path);
+    try {
+      if (!file?.exists?.()) throw new Error('missing');
+    } catch { boardNotice('참조된 파일을 열 수 없습니다. 경로와 접근 권한을 확인해 주세요.'); return false; }
+    const card = spawnBrowserCard(railSearchPathToFileUrl(path), { openMode: 'focus-existing' });
+    focusCanvasCard(card);
+    return card;
+  }
+
+  function openCodexResultLink(link) {
+    if (!ChatState.usableArtifact(link)) return false;
+    return openChatFileReference(link);
   }
 
   function buildCodexResultChips(message, thread, links) {
-    if (!Array.isArray(links) || links.length === 0) return null;
-    return el('div', { class: 'egd-codex-result-chips' },
-      ...links.map((link) => {
-        const label = codexResultChipLabel(link);
-        const kind = codexResultChipKind(label);
-        const isBound = Boolean(link?.url || (link?.cardId && document.getElementById(link.cardId)));
-        return el('button', {
-          class: `egd-codex-result-chip egd-codex-result-chip-${kind}`,
-          type: 'button',
-          title: isBound ? '연결된 자료 보기' : '연결된 자료가 없습니다',
-          disabled: isBound ? null : 'true',
-          onclick: (ev) => {
-            ev.preventDefault();
-            ev.stopPropagation();
-            openCodexResultLink(link, message, thread);
-          },
-        }, el('span', { class: 'egd-codex-result-label' }, label),
-        isBound ? el('span', { 'aria-hidden': 'true', class: 'egd-codex-result-arrow' }, '↗') : null);
-      }),
-    );
+    const artifacts = (links || []).filter(ChatState.usableArtifact);
+    if (!artifacts.length) return null;
+    return el('div', { class: 'egd-codex-result-chips' }, ...artifacts.map(artifact => el('button', {
+      class: 'egd-codex-result-chip egd-codex-result-chip-file', type: 'button',
+      'aria-label': `참조된 파일 열기: ${artifact.label || artifact.target.path.split('/').pop()}`,
+      title: `참조된 기존 파일 · ${artifact.target.path}`,
+      data: { testid: 'chat-artifact', artifactId: artifact.id, answerId: artifact.answerId, runId: artifact.runId },
+      onclick: ev => { ev.preventDefault(); ev.stopPropagation(); openCodexResultLink(artifact); },
+    }, el('span', { class: 'egd-codex-result-label' }, artifact.label || artifact.target.path.split('/').pop()),
+    el('span', { 'aria-hidden': 'true', class: 'egd-codex-result-arrow' }, '↗'))));
   }
+
+  function codexRuns(thread) {
+    return ChatState.runsForThread(state.codex.chatProtocol, thread);
+  }
+
+  function codexCurrentRun(thread) {
+    const runs = codexRuns(thread);
+    return runs.findLast(ChatState.isRunBusy) || runs.at(-1) || null;
+  }
+
+  function codexRunLabel(run) {
+    if (!run) return '대화 준비';
+    if (ChatState.isRunBusy(run) && !state.codex.connected) return '연결 끊김 · 실행 상태 확인 필요';
+    if (run.status === 'interrupted') return '중지됨';
+    if (run.status === 'failed' || run.status === 'unavailable') return '실행 실패';
+    if (run.status === 'completed') return '완료';
+    if (run.stopRequested || run.status === 'stopping') return '중지 요청됨 · 확인 중';
+    if (run.pendingApprovals?.length) return '승인 대기';
+    return '응답 중';
+  }
+
+  function openCodexActivityPanel(threadId) {
+    state.codex.activityThreadId = threadId;
+    renderCodexActivityPanel();
+  }
+
+  function renderCodexActivityPanel() {
+    const thread = getCodexThreadById(state.codex, state.codex.activityThreadId);
+    if (!thread) { document.getElementById('egd-codex-activity-panel')?.remove(); return; }
+    let panel = document.getElementById('egd-codex-activity-panel');
+    if (!panel) {
+      panel = el('section', { id: 'egd-codex-activity-panel', role: 'region', 'aria-label': '활동 기록', data: { testid: 'chat-activity-panel' } });
+      panel.addEventListener('mousedown', ev => ev.stopPropagation());
+      document.documentElement.appendChild(panel);
+    }
+    panel.dataset.threadId = thread.id;
+    const oldBody = panel.querySelector('.egd-codex-activity-body');
+    const scrollTop = oldBody?.scrollTop || 0;
+    const rows = [];
+    for (const run of codexRuns(thread)) {
+      rows.push(el('h4', { data: { runId: run.runId } }, codexRunLabel(run)));
+      if (run.summary) rows.push(el('p', { class: 'egd-codex-public-summary' }, run.summary));
+      const steps = Array.isArray(run.plan) ? run.plan : run.plan?.steps;
+      if (Array.isArray(steps)) rows.push(el('ul', {}, ...steps.map(step => el('li', {}, `${step.step || step.title || ''} · ${step.status || ''}`))));
+      else if (run.plan?.text) rows.push(el('p', {}, run.plan.text));
+      for (const activity of run.activities || []) {
+        const row = el('article', { class: 'egd-codex-activity-row', data: { activityId: activity.id, status: activity.status } },
+          el('strong', {}, activity.title || activity.kind || '활동'),
+          el('span', {}, ({ inProgress: '진행 중', completed: '완료', failed: '실패', declined: '거절됨' })[activity.status] || activity.status || ''),
+          typeof activity.detail === 'string' ? el('pre', {}, activity.detail) : null);
+        if (activity.detail && typeof activity.detail === 'object') {
+          for (const key of ['text', 'command', 'cwd', 'exitCode', 'durationMs', 'server', 'tool']) {
+            const value = activity.detail[key];
+            if (value !== undefined && value !== null && value !== '') row.appendChild(el('pre', {}, `${key}: ${value}`));
+          }
+        }
+        for (const ref of activity.sourceRefs || []) {
+          if (ref.type !== 'file' || !ref.target?.path) continue;
+          row.appendChild(el('button', {
+            disabled: ref.status !== 'available' || !ref.openable ? 'true' : null,
+            'aria-label': `활동의 파일 열기: ${ref.target.path}`,
+            onclick: () => openChatFileReference(ref),
+          }, ref.target.path));
+        }
+        rows.push(row);
+      }
+      for (const approval of run.pendingApprovals || []) {
+        const approvalId = approval.approvalId || approval.id;
+        const block = el('section', { class: 'egd-codex-approval-pending', 'aria-label': '실행 승인', data: { testid: 'chat-approval', approvalId, runId: run.runId, status: approval.status } },
+          el('strong', {}, approval.status === 'replySent' ? '응답 전달됨 · 실행 상태 확인 중' : '승인 필요'),
+          el('p', {}, approval.reason || '실행이 승인을 기다리고 있습니다.'),
+          approval.command ? el('pre', {}, approval.command) : null,
+          approval.cwd ? el('p', {}, `작업 위치: ${approval.cwd}`) : null,
+          ...(approval.paths || []).map(path => el('p', {}, `요청 대상: ${path}`)));
+        if (approval.networkContext !== undefined) {
+          block.appendChild(el('p', {}, `네트워크 대상: ${approval.networkContext?.protocol || '프로토콜 미확인'} · ${approval.networkContext?.host || '호스트 미확인'}`));
+        }
+        if (!ChatState.approvalScopeKnown(approval)) block.appendChild(el('p', {}, '요청 범위를 확인하지 못해 허용할 수 없습니다. 거절하거나 취소할 수 있습니다.'));
+        for (const decision of approval.choices || []) {
+          const label = { accept: '허용', decline: '거절', cancel: '취소' }[decision];
+          if (!label) continue;
+          block.appendChild(el('button', {
+            'aria-label': `승인 요청 ${label}`, data: { testid: 'chat-approval-choice', decision, approvalId },
+            disabled: approval.status !== 'pending' || approval.replyPending || approval.stale || (decision === 'accept' && !ChatState.approvalScopeKnown(approval)) ? 'true' : null,
+            onclick: () => state.codexBridge.replyApproval({ approvalId, conversationId: run.conversationId, runId: run.runId, decision }),
+          }, label));
+        }
+        if (approval.error) block.appendChild(el('p', { role: 'alert' }, approval.error));
+        rows.push(block);
+      }
+      if (run.error) rows.push(el('p', { class: 'egd-codex-error' }, typeof run.error === 'string' ? run.error : run.error.message || run.error.code || '실행 오류'));
+    }
+    if (!rows.length) rows.push(el('p', {}, '기록된 활동이 없습니다.'));
+    const body = el('div', { class: 'egd-codex-activity-body' }, ...rows);
+    panel.replaceChildren(el('header', {}, el('strong', {}, '활동 기록'), el('button', {
+      'aria-label': '활동 상태 다시 확인', onclick: () => state.codexBridge.refreshConversation(thread.id),
+    }, '새로고침'), el('button', {
+      'aria-label': '활동 기록 닫기', onclick: () => { state.codex.activityThreadId = null; panel.remove(); },
+    }, '닫기')), body);
+    body.scrollTop = scrollTop;
+  }
+
   const ZOOM_MIN = 0.2;
   const ZOOM_MAX = 4.5;
   const WHEEL_PAN_SPEED = 1.15;
@@ -1114,6 +1170,10 @@
         .filter(Boolean),
       surface: { mode: state.surface.mode, browserCardId: state.surface.browserCardId },
       boardProjections: cloneJson(state.boards),
+      chat: {
+        threads: cloneJson(state.codex.threads), activeThreadId: state.codex.activeThreadId,
+        threadDrafts: { ...state.codex.threadDrafts }, hudView: state.codex.hudView,
+      },
     };
   }
 
@@ -1124,7 +1184,7 @@
       document.documentElement.appendChild(notice);
     }
     notice.replaceChildren(document.createTextNode(message), el('button', {
-      'aria-label': 'Board 안내 닫기', onclick: () => notice.remove(),
+      'aria-label': '안내 닫기', onclick: () => notice.remove(),
     }, '×'));
   }
 
@@ -1349,7 +1409,20 @@
     state.agenda.suppressDirty = true;
     try {
       // Automatic Desk restore uses its own snapshot, never a Saved Board as a substitute.
+      if (Array.isArray(snapshot.chat?.threads)) {
+        state.codex.threads = snapshot.chat.threads.map(thread => ({ ...thread, resuming: !!thread.conversationId }));
+        state.codex.activeThreadId = snapshot.chat.activeThreadId;
+        state.codex.threadDrafts = { ...snapshot.chat.threadDrafts };
+        state.codex.hudView = snapshot.chat.hudView || 'conversation';
+      }
+      const boardMemberIds = new Set(Object.values(snapshot.boardProjections?.projections || {}).flatMap(projection => projection.members.map(member => member.viewId)));
       for (const cardState of snapshot.cards || []) {
+        if (cardState.type === 'chat' && !boardMemberIds.has(cardState.id)) {
+          const card = spawnCodexChatCard();
+          retargetRestoredEntityId(card, cardState.id);
+          applyPersistentEntityGeometry(card, cardState.geometry);
+          continue;
+        }
         const projection = { id: '', boardId: '', offset: { x: 0, y: 0 } };
         mountBoardMember(projection, { sourceId: cardState.id, viewId: cardState.id, kind: 'card', record: cardState });
       }
@@ -3398,16 +3471,10 @@
                 spawnSettingsCard();
               } else if (item.id === 'ontology') {
                 spawnOntologyMapCard();
-              } else if (item.id === 'chat' && state.codex.chatDockMode === 'canvas' && state.codex.chatCardEntityId) {
-                const chatCard = document.getElementById(state.codex.chatCardEntityId);
-                if (chatCard) {
-                  chatCard.style.zIndex = String(++cardZ);
-                  setActiveEntity(chatCard);
-                } else {
-                  state.codex.chatDockMode = 'hud';
-                  state.codex.chatCardEntityId = null;
-                  toggleHUD(item.id, item.label);
-                }
+              } else if (item.id === 'chat') {
+                state.codex.hudView = 'conversation';
+                spawnCodexChatCard();
+                state.codexBridge?.selectThread(state.codex.activeThreadId, { openConversation: true });
               } else {
                 toggleHUD(item.id, item.label);
               }
@@ -3960,11 +4027,11 @@
             el('div', { class: 'egd-codex-thread-home-title' }, 'Chat'),
             el('button', {
               class: 'egd-codex-thread-home-new',
-              title: '새 Agent DM',
+              title: '새 Codex 대화',
               onclick: () => codexBridge.createThread('dm', { openConversation: true }),
             }, '+'),
           ),
-          el('div', { class: 'egd-codex-thread-home-sub' }, 'Agent DM · Agenda Thread'),
+          el('div', { class: 'egd-codex-thread-home-sub' }, 'Codex · 선택한 Agent'),
           el('div', { class: 'egd-codex-thread-home-status' }, `${codexBridgeSummary(codex)} · ${codexAuthSummary(codex)}`),
           el('div', { class: 'egd-codex-thread-session-summary' },
             el('div', { class: 'egd-codex-thread-session-pill' }, `Agent ${dmThreads.length}`),
@@ -4019,6 +4086,10 @@
             onclick: () => codexBridge.renameThread(thread.id),
           }, '채팅방 이름 변경'),
           el('div', { class: 'egd-codex-thread-menu-label' }, 'Agent profile'),
+          el('button', {
+            class: 'egd-codex-thread-menu-item', 'aria-label': '기본 Codex 선택',
+            onclick: () => codexBridge.setThreadAgentProfile(thread.id, null),
+          }, '기본 Codex'),
           ...CODEX_AGENT_PROFILE_DEFS.map((profile) => el('button', {
             class: `egd-codex-thread-menu-item egd-codex-thread-menu-profile${profile.id === activeProfile.id ? ' egd-codex-thread-menu-item-active' : ''}`,
             title: profile.summary,
@@ -4071,7 +4142,7 @@
           headChildren.push(el('button', {
             class: 'egd-codex-thread-add',
             title: codexThreadKindMeta(options.type).createTitle,
-            onclick: () => codexBridge.createThread(options.type, { openConversation: mode === 'hud' }),
+            onclick: () => codexBridge.createThread(options.type, { openConversation: true }),
           }, '+'));
         }
         const section = el('div', { class: 'egd-codex-thread-section' },
@@ -4088,7 +4159,7 @@
           const item = el('div', {
             class: `egd-codex-thread-item${activeThread && thread.id === activeThread.id ? ' egd-codex-thread-item-active' : ''}${threadMenuOpen ? ' egd-codex-thread-item-menu-open' : ''}`,
           });
-          item.addEventListener('click', () => codexBridge.selectThread(thread.id, { openConversation: mode === 'hud' }));
+          item.addEventListener('click', () => codexBridge.selectThread(thread.id, { openConversation: true }));
           const lastMsg = thread.messages && thread.messages.length > 0 ? thread.messages[thread.messages.length - 1] : null;
           const lastTime = lastMsg && lastMsg.createdAt ? formatRelativeTime(lastMsg.createdAt) : '';
           const kindMeta = codexThreadKindMeta(thread.type);
@@ -4330,6 +4401,7 @@
           messages.appendChild(el('div', { class: 'egd-codex-empty-state' }, ...emptyChildren));
         } else {
           activeThread.messages.forEach((message, index) => {
+            if (message.role === 'assistant' && message.status === 'streaming' && !message.content) return;
             const previous = activeThread.messages[index - 1] || null;
             const next = activeThread.messages[index + 1] || null;
             const previousDelta = message.createdAt && previous?.createdAt ? Math.abs(message.createdAt - previous.createdAt) : Infinity;
@@ -4352,7 +4424,7 @@
             },
             content,
             );
-            if (message.status === 'streaming' && message.role === 'assistant') {
+            if (message.status === 'streaming' && message.role === 'assistant' && activeThread.profileEnabled === true) {
               bubble.appendChild(el('div', {
                 class: 'egd-codex-streaming',
                 role: 'status',
@@ -4372,6 +4444,7 @@
                 }, groupedWithPrevious ? '' : author.slice(0, 1))
               : null;
             messages.appendChild(el('div', {
+              data: { messageId: message.id, runId: message.runId || '', testid: 'chat-message', role: message.role },
               class: [
                 'egd-codex-message-row',
                 `egd-codex-message-row-${message.role || 'assistant'}`,
@@ -4381,6 +4454,20 @@
           });
         }
         conversation.appendChild(messages);
+        const run = codexCurrentRun(activeThread);
+        const pending = Object.values(codex.chatProtocol.requests).find(request => request.clientThreadId === activeThread.id && ['submitting', 'unconfirmed'].includes(request.status));
+        const status = activeThread.resuming ? 'restoring' : pending?.status || run?.status || 'ready';
+        const statusText = activeThread.resuming ? '대화 상태 확인 중' : pending ? (pending.status === 'unconfirmed' ? '접수 상태 확인 필요' : '요청 보내는 중') : codexRunLabel(run);
+        conversation.appendChild(el('div', {
+          class: 'egd-codex-run-status', role: 'status', 'aria-live': 'polite',
+          data: { testid: 'chat-run-status', status, runId: run?.runId || '', stopConfirmed: String(run?.status === 'interrupted') },
+        }, el('span', {}, statusText),
+        el('button', { 'aria-label': '활동 기록 열기', data: { testid: 'chat-activity-open', threadId: activeThread.id }, onclick: () => codexBridge.openActivity(activeThread.id) }, run?.pendingApprovals?.length ? `활동 기록 · 승인 ${run.pendingApprovals.length}건` : '활동 기록')));
+        if (activeThread.sendError) conversation.appendChild(el('p', { class: 'egd-codex-error', role: 'alert' }, activeThread.sendError));
+        if (!activeThread.messages.some(message => message.role === 'assistant' && message.runId === run?.runId)) {
+          const chips = buildCodexResultChips(null, activeThread, run?.artifacts);
+          if (chips) conversation.appendChild(chips);
+        }
       }
 
       const hasDiagnostics = mode === 'hud' && hudView === 'conversation'
@@ -4436,7 +4523,7 @@
         }
       }
 
-      const allowComposer = Boolean(codex.authStatus.isLoggedIn && activeThread && isHudConversationView);
+      const allowComposer = Boolean(activeThread && isHudConversationView);
       const footer = allowComposer
         ? (() => {
             const input = el('textarea', {
@@ -4444,13 +4531,14 @@
               rows: '2',
               placeholder: '메시지 보내기',
               'aria-label': `${activeThread.title}에 보낼 메시지`,
-              data: { threadId: activeThread.id },
+              data: { threadId: activeThread.id, testid: 'chat-composer' },
             });
             const sendButton = el('button', {
               class: 'egd-codex-send',
               type: 'button',
               'aria-label': '메시지 보내기',
               title: '보내기',
+              data: { testid: 'chat-send' },
               onclick: () => { if (!compositionInProgress) void codexBridge.sendMessage(); },
             }, el('span', { 'aria-hidden': 'true' }, '↑'));
             input.value = getCodexThreadDraft(codex, activeThread.id);
@@ -4460,7 +4548,8 @@
               const height = Math.min(144, Math.max(48, input.scrollHeight));
               input.style.height = `${height}px`;
               input.style.overflowY = input.scrollHeight > height ? 'auto' : 'hidden';
-              sendButton.disabled = codex.isSending || !input.value.trim();
+              sendButton.disabled = codex.isSending || !input.value.trim() || !codex.authStatus.isLoggedIn || !codex.connected;
+              sendButton.title = !codex.authStatus.isLoggedIn ? 'Codex 연결 후 전송할 수 있습니다' : !codex.connected ? 'Codex 연결을 확인해 주세요' : '보내기';
             };
             input.addEventListener('input', () => {
               codexBridge.setDraft(input.value, activeThread.id);
@@ -4491,10 +4580,17 @@
             });
             composerObserver.observe(input);
             queueMicrotask(resizeComposer);
+            const run = codexCurrentRun(activeThread);
+            const stopButton = run && ChatState.isRunBusy(run) ? el('button', {
+              class: 'egd-codex-stop', type: 'button', 'aria-label': '이 업무 중지',
+              data: { testid: 'chat-stop', runId: run.runId, conversationId: run.conversationId },
+              disabled: run.stopPending || run.stopRequested ? 'true' : null,
+              onclick: () => codexBridge.interrupt(activeThread.id),
+            }, run.stopRequested ? '확인 중' : '중지') : null;
             return el('div', { class: 'egd-codex-footer' },
               el('div', { class: 'egd-codex-input-row' },
                 input,
-                el('div', { class: 'egd-codex-compose-actions' }, sendButton),
+                el('div', { class: 'egd-codex-compose-actions' }, stopButton, sendButton),
               ),
             );
           })()
@@ -4618,6 +4714,7 @@
       role,
       content,
       status,
+      requestId: options.requestId || null,
       readBy,
       createdAt: Date.now(),
     };
@@ -4625,8 +4722,52 @@
 
   function installCodexBridge() {
     const listeners = new Set();
+    const protocol = state.codex.chatProtocol;
+    const refreshing = new Set();
     let source = null;
     let reconnectTimer = null;
+
+    function threadBusy(thread) {
+      return !!thread?.resuming || ChatState.runsForThread(protocol, thread).some(ChatState.isRunBusy)
+        || Object.values(protocol.requests).some(request => request.clientThreadId === thread?.id && ['submitting', 'unconfirmed'].includes(request.status));
+    }
+
+    function syncProtocolRun(run) {
+      if (!run) return;
+      const threadId = run.clientThreadId || state.codex.threads.find(thread => thread.conversationId === run.conversationId)?.id;
+      if (!threadId || !getCodexThreadById(state.codex, threadId)) return;
+      run.clientThreadId = threadId;
+      const thread = updateThreadById(threadId, current => ({
+        ...current, conversationId: run.conversationId, sendError: null,
+        messages: ChatState.projectRunMessages(current.messages, run),
+      }));
+      for (const message of run.messages) bindMessageToThread(message.id, threadId);
+      if (thread) markUserMessagesReadBy(threadId, thread.profileEnabled ? codexThreadAgentProfile(thread).name : 'Codex');
+    }
+
+    async function refreshConversation(thread, resume = false) {
+      if (!thread?.conversationId || refreshing.has(thread.conversationId)) return null;
+      const conversationId = thread.conversationId;
+      refreshing.add(conversationId);
+      updateThreadById(thread.id, current => ({ ...current, resuming: true }));
+      emit();
+      try {
+        const snapshot = resume
+          ? await fetchJson('/chat/resume', { method: 'POST', body: JSON.stringify({ conversationId, clientThreadId: thread.id }) })
+          : await fetchJson(`/chat/state?conversationId=${encodeURIComponent(conversationId)}`);
+        for (const run of ChatState.mergeChatSnapshot(protocol, snapshot, thread.id)) syncProtocolRun(run);
+        emit();
+        return snapshot;
+      } catch (error) {
+        updateThreadById(thread.id, current => ({ ...current, sendError: `상태를 확인하지 못했습니다: ${error.message}` }));
+        emit();
+        return null;
+      } finally {
+        refreshing.delete(conversationId);
+        updateThreadById(thread.id, current => ({ ...current, resuming: false }));
+        emit();
+      }
+    }
 
     const normalizeThreads = () => {
       if (!Array.isArray(state.codex.threads) || state.codex.threads.length === 0) {
@@ -4653,18 +4794,19 @@
             participantRoles[member] = member === SELF_MEMBER ? 'owner' : 'member';
           }
         }
-        const agentProfileId = normalizeCodexAgentProfileId(
+        const agentProfileId = thread.profileEnabled === true ? normalizeCodexAgentProfileId(
           thread.agentProfileId,
-          defaultCodexAgentProfileIdForThread(thread.type, thread.title)
-        );
+          DEFAULT_CODEX_AGENT_PROFILE_ID
+        ) : null;
         const agentProfile = codexAgentProfile(agentProfileId);
         return {
           ...thread,
           participants,
           participantRoles,
+          profileEnabled: thread.profileEnabled === true,
           agentProfileId,
-          toolMode: thread.toolMode || agentProfile.toolMode,
-          systemPrompt: typeof thread.systemPrompt === 'string' && thread.systemPrompt.trim()
+          toolMode: thread.profileEnabled === true ? thread.toolMode || agentProfile.toolMode : null,
+          systemPrompt: thread.profileEnabled !== true ? null : typeof thread.systemPrompt === 'string' && thread.systemPrompt.trim()
             ? thread.systemPrompt
             : agentProfile.systemPrompt,
           pinned: Boolean(thread.pinned),
@@ -4692,6 +4834,7 @@
       const active = getActiveCodexThread(state.codex);
       state.codex.conversationId = active?.conversationId || null;
       state.codex.draft = getCodexThreadDraft(state.codex, active?.id || null);
+      state.codex.isSending = threadBusy(active);
     };
 
     const emit = () => {
@@ -4699,6 +4842,8 @@
       for (const listener of listeners) {
         try { listener(state.codex); } catch (error) { console.warn(TAG, 'codex listener failed', error); }
       }
+      renderCodexActivityPanel();
+      scheduleDeskSessionSave();
     };
     const update = (patch) => {
       Object.assign(state.codex, patch);
@@ -4785,95 +4930,6 @@
         [messageId]: threadId,
       };
     };
-    const resolveThreadId = ({ conversationId = null, messageId = null } = {}) => {
-      if (messageId && state.codex.messageThreadMap[messageId]) {
-        return state.codex.messageThreadMap[messageId];
-      }
-      const byConversationIndex = findThreadIndexByConversationId(conversationId);
-      if (byConversationIndex >= 0) {
-        return state.codex.threads[byConversationIndex].id;
-      }
-      if (state.codex.pendingThreadId && findThreadIndexById(state.codex.pendingThreadId) >= 0) {
-        return state.codex.pendingThreadId;
-      }
-      const active = getActiveCodexThread(state.codex);
-      return active?.id || null;
-    };
-    const setThreadConversationId = (threadId, conversationId) => {
-      if (!threadId || !conversationId) return;
-      updateThreadById(threadId, (thread) => ({ ...thread, conversationId }));
-    };
-    const handleAssistantStart = (details) => {
-      const threadId = resolveThreadId({
-        conversationId: details.conversationId || null,
-        messageId: details.messageId || null,
-      });
-      if (!threadId) return;
-      if (details.conversationId) {
-        setThreadConversationId(threadId, details.conversationId);
-      }
-      const messageId = details.messageId || createCodexMessage('assistant', '', 'streaming').id;
-      appendMessageToThread(threadId, {
-        id: messageId,
-        role: details.role || 'assistant',
-        content: '',
-        status: details.status || 'streaming',
-        readBy: [],
-        createdAt: Date.now(),
-      }, { countUnread: true });
-      bindMessageToThread(messageId, threadId);
-      const thread = getCodexThreadById(state.codex, threadId);
-      markUserMessagesReadBy(threadId, pickAutoReader(thread));
-      state.codex.pendingThreadId = threadId;
-      emit();
-    };
-    const handleAssistantDelta = (details) => {
-      const threadId = resolveThreadId({
-        conversationId: details.conversationId || null,
-        messageId: details.messageId || null,
-      });
-      if (!threadId || !details.messageId) return;
-      patchMessageInThread(threadId, details.messageId, (message) => ({
-        ...message,
-        content: `${message.content}${details.delta || ''}`,
-      }));
-      emit();
-    };
-    const handleAssistantComplete = (details) => {
-      const threadId = resolveThreadId({
-        conversationId: details.conversationId || null,
-        messageId: details.messageId || null,
-      });
-      if (!threadId || !details.messageId) return;
-      patchMessageInThread(threadId, details.messageId, (message) => ({ ...message, status: 'complete' }));
-      if (state.codex.pendingThreadId === threadId) {
-        state.codex.pendingThreadId = null;
-      }
-      if (threadId === state.codex.activeThreadId) {
-        markThreadRead(threadId);
-      }
-      state.codex.isSending = false;
-      emit();
-    };
-    const handleAssistantError = (details) => {
-      const threadId = resolveThreadId({
-        conversationId: details.conversationId || null,
-        messageId: details.messageId || null,
-      });
-      if (threadId && details.messageId) {
-        patchMessageInThread(threadId, details.messageId, (message) => ({
-          ...message,
-          content: details.error || message.content,
-          status: 'error',
-        }));
-      }
-      if (state.codex.pendingThreadId === threadId) {
-        state.codex.pendingThreadId = null;
-      }
-      state.codex.isSending = false;
-      state.codex.error = details.error || '응답 생성에 실패했습니다.';
-      emit();
-    };
     const resetThreadConversations = () => {
       state.codex.threads = state.codex.threads.map((thread) => ({
         ...thread,
@@ -4890,6 +4946,7 @@
     };
 
     const fetchJson = async (path, options = {}) => {
+      if (!path.startsWith('/') || path.startsWith('//')) throw new Error('Invalid bridge path');
       const response = await fetch(`http://127.0.0.1:39218${path}`, {
         ...options,
         headers: {
@@ -4899,7 +4956,13 @@
       });
       if (!response.ok) {
         const text = await response.text();
-        throw new Error(text || `${response.status} ${response.statusText}`);
+        let payload = null;
+        try { payload = JSON.parse(text); } catch {}
+        const error = new Error(payload?.error || text || `${response.status} ${response.statusText}`);
+        error.status = response.status;
+        error.code = payload?.code || null;
+        error.conversationId = payload?.conversationId || null;
+        throw error;
       }
       return response.json();
     };
@@ -4913,6 +4976,7 @@
     };
 
     const handleEvent = (event) => {
+      if (event?.type?.startsWith('assistant-')) return;
       switch (event.type) {
         case 'auth.status': {
           const status = event.status || state.codex.authStatus;
@@ -4955,22 +5019,9 @@
           }
           return;
         case 'chat.event': {
-          const details = event.details || {};
-          if (event.event === 'assistant_start') {
-            handleAssistantStart(details);
-            return;
-          }
-          if (event.event === 'assistant_delta') {
-            handleAssistantDelta(details);
-            return;
-          }
-          if (event.event === 'assistant_complete') {
-            handleAssistantComplete(details);
-            return;
-          }
-          if (event.event === 'assistant_error') {
-            handleAssistantError(details);
-            return;
+          if (event.v === 2) {
+            const run = ChatState.reduceChatEvent(protocol, event);
+            if (run) { syncProtocolRun(run); emit(); }
           }
           return;
         }
@@ -4995,41 +5046,6 @@
             isStartingLogin: Boolean(event.status.loginInProgress),
             authStatus: event.status,
             error: event.success ? null : '코덱스 로그인이 완료되지 않았습니다. 아래 인증 로그를 확인해 주세요.',
-          });
-          return;
-        case 'assistant-start':
-          handleAssistantStart({
-            conversationId: event.conversationId || null,
-            messageId: event.message?.id || null,
-            role: event.message?.role || 'assistant',
-            status: event.message?.status || 'streaming',
-          });
-          if (event.message?.content) {
-            handleAssistantDelta({
-              conversationId: event.conversationId || null,
-              messageId: event.message.id,
-              delta: event.message.content,
-            });
-          }
-          return;
-        case 'assistant-delta':
-          handleAssistantDelta({
-            conversationId: event.conversationId || null,
-            messageId: event.messageId,
-            delta: event.delta,
-          });
-          return;
-        case 'assistant-complete':
-          handleAssistantComplete({
-            conversationId: event.conversationId || null,
-            messageId: event.messageId,
-          });
-          return;
-        case 'assistant-error':
-          handleAssistantError({
-            conversationId: event.conversationId || null,
-            messageId: event.messageId,
-            error: event.error,
           });
           return;
       }
@@ -5065,7 +5081,7 @@
       }
 
       try {
-        source = new EventSource('http://127.0.0.1:39218/events');
+        source = new EventSource('http://127.0.0.1:39218/events?chatProtocol=2');
       } catch (error) {
         scheduleReconnect();
         return;
@@ -5073,19 +5089,24 @@
 
       source.addEventListener('ready', () => {
         update({ connected: true });
+        for (const thread of state.codex.threads) if (thread.conversationId) void refreshConversation(thread, true);
       });
 
-      source.addEventListener('codex', (message) => {
+      const receive = (message) => {
         try {
           handleEvent(JSON.parse(message.data));
         } catch (error) {
           console.warn(TAG, 'codex event parse failed', error);
         }
-      });
+      };
+      source.addEventListener('codex', receive);
+      source.addEventListener('message', receive);
+      source.addEventListener('chat.event', receive);
 
       source.onerror = () => {
         try { source?.close(); } catch {}
         source = null;
+        protocol.connection = 'offline';
         update({ connected: false });
         scheduleReconnect();
       };
@@ -5094,6 +5115,51 @@
     connect();
 
     return {
+      refreshConversation(threadId = state.codex.activeThreadId) {
+        return refreshConversation(getCodexThreadById(state.codex, threadId), true);
+      },
+      runState(threadId = state.codex.activeThreadId) {
+        return cloneJson(ChatState.runsForThread(protocol, getCodexThreadById(state.codex, threadId)));
+      },
+      openActivity(threadId = state.codex.activeThreadId) { openCodexActivityPanel(threadId); },
+      async replyApproval({ approvalId, conversationId, runId, decision }) {
+        const run = protocol.runs[ChatState.runKey(conversationId, runId)];
+        const approval = run?.pendingApprovals.find(item => (item.approvalId || item.id) === approvalId);
+        const request = ChatState.approvalRequestFor(run, approvalId, decision);
+        if (!request) return false;
+        approval.replyPending = true;
+        emit();
+        try {
+          const result = await fetchJson('/chat/approval', { method: 'POST', body: JSON.stringify(request) });
+          ChatState.acknowledgeApprovalReply(run, result);
+          return result;
+        } catch (error) {
+          const current = run.pendingApprovals.find(item => (item.approvalId || item.id) === approvalId) || approval;
+          current.stale = error.code === 'STALE_APPROVAL' || error.status === 409;
+          current.error = current.stale ? '이 승인은 더 이상 유효하지 않습니다. 현재 상태를 다시 확인해 주세요.' : `응답 전달 여부를 확인하지 못했습니다: ${error.message}`;
+          return false;
+        } finally { approval.replyPending = false; emit(); }
+      },
+      async interrupt(threadId = state.codex.activeThreadId) {
+        const thread = getCodexThreadById(state.codex, threadId);
+        const run = ChatState.runsForThread(protocol, thread).findLast(ChatState.isRunBusy);
+        if (!run || run.stopPending || run.stopRequested) return false;
+        run.stopPending = true;
+        emit();
+        try {
+          const result = await fetchJson('/chat/interrupt', { method: 'POST', body: JSON.stringify({ conversationId: run.conversationId, runId: run.runId }) });
+          if (result.accepted && result.stopRequested && ChatState.isRunBusy(run)) {
+            run.stopRequested = true;
+            run.status = 'stopping';
+          } else if (!result.accepted) {
+            updateThreadById(threadId, current => ({ ...current, sendError: '중지 요청이 수락되지 않았습니다. 상태를 다시 확인해 주세요.' }));
+          }
+          return result;
+        } catch (error) {
+          updateThreadById(threadId, current => ({ ...current, sendError: `중지 여부를 확인하지 못했습니다: ${error.message}` }));
+          return false;
+        } finally { run.stopPending = false; emit(); }
+      },
       subscribe(listener) {
         listeners.add(listener);
         normalizeThreads();
@@ -5113,6 +5179,7 @@
         if (threadId === state.codex.activeThreadId) {
           state.codex.draft = value;
         }
+        scheduleDeskSessionSave();
       },
       setThreadQuery(query) {
         state.codex.threadQuery = typeof query === 'string' ? query : '';
@@ -5135,9 +5202,10 @@
         const profile = codexAgentProfile(normalizedProfileId);
         updateThreadById(threadId, (thread) => ({
           ...thread,
-          agentProfileId: normalizedProfileId,
-          toolMode: profile.toolMode,
-          systemPrompt: profile.systemPrompt,
+          profileEnabled: !!profileId,
+          agentProfileId: profileId ? normalizedProfileId : null,
+          toolMode: profileId ? profile.toolMode : null,
+          systemPrompt: profileId ? profile.systemPrompt : null,
         }));
         state.codex.threadMenu = null;
         state.codex.memberMenu = null;
@@ -5213,10 +5281,12 @@
         state.codex.memberMenu = null;
         state.codex.threadMenu = null;
         const openConversation = options.openConversation !== false;
-        if (state.codex.chatDockMode === 'hud' && openConversation) {
+        if (openConversation) {
           state.codex.hudView = 'conversation';
         }
         state.codex.draft = getCodexThreadDraft(state.codex, threadId);
+        const selected = getCodexThreadById(state.codex, threadId);
+        if (selected?.conversationId) void refreshConversation(selected, true);
         emit();
       },
       toggleThreadPin(threadId) {
@@ -5295,13 +5365,14 @@
       createThread(type = 'dm', options = {}) {
         const normalizedType = type === 'group' ? 'group' : 'dm';
         const nextNonce = state.codex.threadNonce + 1;
-        const label = normalizedType === 'group' ? `Agenda ${nextNonce}` : `Agent ${nextNonce}`;
+        const label = normalizedType === 'group' ? `대화 ${nextNonce}` : `Codex ${nextNonce}`;
         const participants = normalizedType === 'group'
-          ? [SELF_MEMBER, '코덱스 어시스턴트', `멤버 ${nextNonce}`]
-          : [SELF_MEMBER, label];
+          ? [SELF_MEMBER, 'Codex']
+          : [SELF_MEMBER, 'Codex'];
         const thread = createCodexThread(normalizedType, label, '', {
           participants,
           agentProfileId: options.agentProfileId,
+          profileEnabled: options.profileEnabled === true,
         });
         state.codex.threadNonce = nextNonce;
         state.codex.threads = [thread, ...state.codex.threads];
@@ -5314,7 +5385,7 @@
           [thread.id]: '',
         };
         state.codex.draft = '';
-        if (state.codex.chatDockMode === 'hud' && options.openConversation !== false) {
+        if (options.openConversation !== false) {
           state.codex.hudView = 'conversation';
         }
         emit();
@@ -5440,13 +5511,14 @@
       async sendMessage() {
         const activeThread = getActiveCodexThread(state.codex);
         const content = getCodexThreadDraft(state.codex, activeThread?.id || null).trim();
-        if (!activeThread || !content || state.codex.isSending || !state.codex.authStatus.isLoggedIn) return;
-        appendMessageToThread(activeThread.id, createCodexMessage('user', content, 'complete', {
-          readBy: [SELF_MEMBER],
+        if (!activeThread || !content || threadBusy(activeThread) || !state.codex.authStatus.isLoggedIn || !state.codex.connected) return;
+        const requestId = `request-${Date.now().toString(36)}-${Math.random().toString(36).slice(2)}`;
+        ChatState.registerChatRequest(protocol, { requestId, clientThreadId: activeThread.id, conversationId: activeThread.conversationId, authorName: activeThread.profileEnabled ? codexThreadAgentProfile(activeThread).name : 'Codex' });
+        appendMessageToThread(activeThread.id, createCodexMessage('user', content, 'submitting', {
+          readBy: [SELF_MEMBER], requestId,
         }), { countUnread: false });
         state.codex.error = null;
-        state.codex.isSending = true;
-        state.codex.pendingThreadId = activeThread.id;
+        updateThreadById(activeThread.id, thread => ({ ...thread, sendError: null }));
         state.codex.threadDrafts = {
           ...(state.codex.threadDrafts || {}),
           [activeThread.id]: '',
@@ -5457,31 +5529,32 @@
           const runtimeConfig = codexThreadRuntimeConfig(activeThread);
           const result = await fetchJson('/chat/send', {
             method: 'POST',
-            body: JSON.stringify({
-              conversationId: activeThread.conversationId ?? undefined,
-              message: content,
-              systemPrompt: runtimeConfig.systemPrompt,
-              agentProfile: runtimeConfig.agentProfile,
-              toolMode: runtimeConfig.toolMode,
-              thread: {
-                id: runtimeConfig.threadId,
-                type: runtimeConfig.threadType,
-                title: runtimeConfig.threadTitle,
-              },
-            }),
+            body: JSON.stringify(ChatState.buildChatRequest(activeThread, content, requestId, runtimeConfig)),
           });
-          if (result.conversationId) {
-            setThreadConversationId(activeThread.id, result.conversationId);
-            state.codex.conversationId = result.conversationId;
-          }
-          if (!result.accepted && result.error) {
-            update({ isSending: false, error: result.error });
-          } else {
-            emit();
+          const run = ChatState.acceptChatRequest(protocol, result, requestId);
+          if (run) syncProtocolRun(run);
+          else {
+            const error = new Error(result.error || '실행 접수 상태를 확인하지 못했습니다.');
+            error.status = result.accepted === false ? 400 : 0;
+            error.conversationId = result.conversationId || null;
+            throw error;
           }
         } catch (error) {
-          update({ isSending: false, error: error.message });
-        }
+          const request = protocol.requests[requestId];
+          if (error.conversationId) {
+            request.conversationId = error.conversationId;
+            updateThreadById(activeThread.id, thread => ({ ...thread, conversationId: error.conversationId }));
+          }
+          // An event can prove acceptance before a failed/late HTTP response arrives.
+          if (!request.runId) {
+            request.status = error.status >= 400 && error.status < 500 ? 'failed' : 'unconfirmed';
+            updateThreadById(activeThread.id, thread => ({ ...thread,
+              sendError: request.status === 'unconfirmed' ? `접수 여부를 확인하지 못했습니다. 자동으로 다시 보내지 않습니다. ${error.message}` : error.message,
+              messages: thread.messages.map(message => message.requestId === requestId ? { ...message, status: request.status } : message),
+            }));
+            if (request.status === 'failed' && !getCodexThreadDraft(state.codex, activeThread.id)) state.codex.threadDrafts[activeThread.id] = content;
+          }
+        } finally { emit(); }
       },
     };
   }
@@ -10239,7 +10312,7 @@
     };
     const shouldAllowHudScroll = (target) => {
       if (!(target instanceof Element)) return false;
-      return !!target.closest('#egd-hud');
+      return !!target.closest('#egd-hud, #egd-codex-activity-panel');
     };
     const wheelSession = {
       owner: null,
