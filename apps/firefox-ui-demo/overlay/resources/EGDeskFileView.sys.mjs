@@ -18,13 +18,21 @@ export function createEGDeskFileServiceCallbacks({ request }) {
   }]))
 }
 
+export function suggestEGDeskCopyName(fileName) {
+  const name = typeof fileName === 'string' && fileName ? fileName : '파일.txt'
+  const extensionAt = name.lastIndexOf('.')
+  return extensionAt > 0 && extensionAt < name.length - 1
+    ? `${name.slice(0, extensionAt)} 사본${name.slice(extensionAt)}`
+    : `${name} 사본`
+}
+
 // Privileged Firefox requests omit Origin/Sec-Fetch-Site. The helper binds this
 // native channel to an ephemeral nonce; never persist it or synthesize Origin.
 export function createEGDeskNativeFilePickers({ service, pickDirectory, pickSaveFile }) {
   let channel = null
   async function channelOptions() {
     if (!channel || channel.expiresAt <= Date.now()) channel = await service.openPickerChannel({})
-    return { headers: { 'X-EGDesk-Picker-Channel': channel.token } }
+    return Object.freeze({ headers: Object.freeze({ 'X-EGDesk-Picker-Channel': channel.token }) })
   }
   async function select(purpose, picker) {
     if (typeof picker !== 'function') throw new Error('파일 선택기가 연결되지 않았습니다.')
@@ -37,12 +45,38 @@ export function createEGDeskNativeFilePickers({ service, pickDirectory, pickSave
       grant = await service.beginPicker({ purpose }, requestOptions)
     }
     let picked
-    try { picked = await picker() }
+    try {
+      const selection = await picker()
+      // Pin the native result before any renewal await. Neither a new default
+      // nor a mutable picker result may substitute another destination.
+      picked = selection && typeof selection === 'object'
+        ? Object.freeze({ parentPath: selection.parentPath, fileName: selection.fileName }) : selection
+    }
     catch (error) { await service.completePicker({ requestId: grant.requestId, cancelled: true }, requestOptions).catch(() => {}); throw error }
-    const completed = await service.completePicker({ requestId: grant.requestId, ...(picked ? { absolutePath: typeof picked === 'string' ? picked : picked.parentPath } : { cancelled: true }) }, requestOptions)
-    if (completed.cancelled) return null
-    const root = await service.registerRoot({ selectionId: completed.selectionId }, requestOptions)
-    return { root, picked }
+    const completeAndRegister = async currentGrant => {
+      const completed = await service.completePicker({ requestId: currentGrant.requestId, ...(picked ? { absolutePath: typeof picked === 'string' ? picked : picked.parentPath } : { cancelled: true }) }, requestOptions)
+      if (completed.cancelled) return null
+      const root = await service.registerRoot({ selectionId: completed.selectionId }, requestOptions)
+      return { root, picked }
+    }
+    try { return await completeAndRegister(grant) }
+    catch (error) {
+      if (!picked && ['PICKER_GRANT_EXPIRED', 'PICKER_CHANNEL_EXPIRED'].includes(error.code)) return null
+      try {
+        if (error.code !== 'PICKER_GRANT_EXPIRED') throw error
+        // One bounded renewal, using the original nonce and purpose. The server
+        // must still validate that channel; never bootstrap a new one here.
+        const renewed = await service.beginPicker({ purpose }, requestOptions)
+        return await completeAndRegister(renewed)
+      } catch (cause) {
+        if (picked) {
+          cause.pickerSelection = Object.freeze({ purpose, picked })
+          cause.selectionPreserved = true
+          if (['PICKER_GRANT_EXPIRED', 'PICKER_CHANNEL_EXPIRED'].includes(cause.code)) cause.message = '선택한 위치는 유지되었지만 연결 시간이 만료되었습니다. 연결을 다시 확인해 주세요.'
+        }
+        throw cause
+      }
+    }
   }
   return {
     chooseRoot: async () => (await select('folder', pickDirectory))?.root || null,
@@ -403,7 +437,7 @@ export function createEGDeskFileView({ document, service, chooseRoot, chooseSave
     await flush()
     const generation = operation
     const targetDraftId = draft.id
-    const target = await chooseSaveAs({ defaultName: readReceipt?.name || 'copy.txt', createOnly: true })
+    const target = await chooseSaveAs({ defaultName: suggestEGDeskCopyName(readReceipt?.name), createOnly: true })
     if (!present(generation) || draft?.id !== targetDraftId) return
     if (!target) { announce('다른 이름 저장을 취소했습니다.'); return }
     await flush()

@@ -5,7 +5,7 @@ import os from 'node:os'
 import path from 'node:path'
 import { createHash } from 'node:crypto'
 import { createEGDeskFileService } from './egdesk-file-service.mjs'
-import { createEGDeskFileView } from '../overlay/resources/EGDeskFileView.sys.mjs'
+import { createEGDeskFileView, suggestEGDeskCopyName } from '../overlay/resources/EGDeskFileView.sys.mjs'
 
 function draftStore() {
   const records = new Map()
@@ -209,7 +209,7 @@ const fakeDocument = () => {
   return document
 }
 const nextTurn = () => new Promise(resolve => setImmediate(resolve))
-function uiFixture(overrides = {}) {
+function uiFixture(overrides = {}, viewOptions = {}) {
   let current = { id: 'draft', fileId: 'file', name: 'source.txt', head: 'h0', text: 'start', baseText: 'start', bufferRevision: 0, savedRevision: 0, sourceHash: 'a'.repeat(64), sourceRevision: 'source-0' }
   const writes = []
   const service = {
@@ -222,7 +222,7 @@ function uiFixture(overrides = {}) {
     saveAs: async () => ({}), diffDraft: async () => ({ bufferRevision: current.bufferRevision, hunks: [] }), ...overrides,
   }
   const document = fakeDocument()
-  const view = createEGDeskFileView({ document, service })
+  const view = createEGDeskFileView({ document, service, ...viewOptions })
   document.body.append(view.element)
   return { view, document, writes }
 }
@@ -446,4 +446,22 @@ test('file transition cannot discard an in-progress composition in A', async t =
   assert.equal(editor.value, '한글 조합')
   editor.fire('compositionend')
   assert.equal(await view.close(), true)
+})
+
+test('Save As suggests a copy name with the original extension and retains create-only intent', async () => {
+  assert.equal(suggestEGDeskCopyName('보고서.txt'), '보고서 사본.txt')
+  assert.equal(suggestEGDeskCopyName('archive.tar.gz'), 'archive.tar 사본.gz')
+  assert.equal(suggestEGDeskCopyName('README'), 'README 사본')
+  assert.equal(suggestEGDeskCopyName('.env'), '.env 사본')
+  let options
+  const { view } = uiFixture({ createDraft: async () => ({ id: 'draft', fileId: 'file', head: 'h0', text: 'start', bufferRevision: 0, savedRevision: 0, saveAsAvailable: true }) }, {
+    chooseSaveAs: async requested => { options = requested; return null },
+  })
+  await view.openFile('file')
+  const saveAsButton = view.element.querySelector('.egdesk-file-save-as-button')
+  assert.equal(saveAsButton.disabled, false)
+  saveAsButton.click(); await nextTurn()
+  assert.deepEqual(options, { defaultName: 'source 사본.txt', createOnly: true })
+  assert.equal(view.snapshot().draftId, 'draft')
+  await view.close()
 })

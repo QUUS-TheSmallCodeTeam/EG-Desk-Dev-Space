@@ -171,3 +171,58 @@ test('native picker handoff binds absent-header native transport to a nonce and 
   assert.equal((await call('completePicker', { requestId: expiring.body.result.requestId, absolutePath: root }, nativeHeaders)).status, 409)
   assert.equal((await call('registerRoot', { absolutePath: root })).body.code, 'UNEXPECTED_FIELD')
 })
+
+test('expired picker grant renews once with the same native selection, channel and purpose', async t => {
+  const temp = await fs.mkdtemp(path.join(os.tmpdir(), 'egdesk-picker-renew-'))
+  const root = path.join(temp, 'selected'); await fs.mkdir(root)
+  let now = Date.now()
+  const adapter = createEGDeskFileHttpAdapter({ draftDirectory: path.join(temp, 'drafts'), now: () => now })
+  t.after(async () => { await adapter.close(); await fs.rm(temp, { recursive: true, force: true }) })
+  const calls = []
+  const service = createEGDeskFileServiceCallbacks({ request: async (route, body, options) => {
+    const headers = Object.fromEntries(Object.entries(options?.headers || {}).map(([key, value]) => [key.toLowerCase(), value]))
+    calls.push({ route, body, channel: headers['x-egdesk-picker-channel'] })
+    const res = response(); await adapter.handle(request(route, body, headers), res); return res.body
+  } })
+  let folderPickCount = 0
+  let savePickCount = 0
+  const pickers = createEGDeskNativeFilePickers({ service,
+    pickDirectory: async () => { folderPickCount++; now += 120_001; return root },
+    pickSaveFile: async () => { savePickCount++; now += 120_001; return { parentPath: root, fileName: 'user-chosen 사본.txt' } },
+  })
+  assert.equal((await pickers.chooseRoot()).displayPath, await fs.realpath(root))
+  const target = await pickers.chooseSaveAs({ defaultName: 'suggested 사본.txt', createOnly: true })
+  assert.equal(target.fileName, 'user-chosen 사본.txt')
+  assert.equal(folderPickCount, 1)
+  assert.equal(savePickCount, 1)
+  const begins = calls.filter(call => call.route === EGDESK_FILE_ENDPOINTS.beginPicker)
+  assert.deepEqual(begins.map(call => call.body.purpose), ['folder', 'folder', 'save-as-directory', 'save-as-directory'])
+  assert.equal(new Set(begins.map(call => call.channel)).size, 1)
+  const completions = calls.filter(call => call.route === EGDESK_FILE_ENDPOINTS.completePicker)
+  assert.equal(completions.length, 4)
+  assert.ok(completions.every(call => call.body.absolutePath === root))
+  assert.equal(calls.filter(call => call.route === EGDESK_FILE_ENDPOINTS.openPickerChannel).length, 1)
+})
+
+test('expired native channel preserves the returned selection without reopening the OS picker or rebinding authority', async t => {
+  const temp = await fs.mkdtemp(path.join(os.tmpdir(), 'egdesk-picker-channel-expired-'))
+  let now = Date.now()
+  const adapter = createEGDeskFileHttpAdapter({ draftDirectory: path.join(temp, 'drafts'), now: () => now })
+  t.after(async () => { await adapter.close(); await fs.rm(temp, { recursive: true, force: true }) })
+  let channels = 0
+  let nativeCalls = 0
+  const service = createEGDeskFileServiceCallbacks({ request: async (route, body, options) => {
+    if (route === EGDESK_FILE_ENDPOINTS.openPickerChannel) channels++
+    const headers = Object.fromEntries(Object.entries(options?.headers || {}).map(([key, value]) => [key.toLowerCase(), value]))
+    const res = response(); await adapter.handle(request(route, body, headers), res); return res.body
+  } })
+  const pickers = createEGDeskNativeFilePickers({ service, pickDirectory: async () => { nativeCalls++; now += 60 * 60_000 + 1; return temp } })
+  await assert.rejects(pickers.chooseRoot(), cause => {
+    assert.equal(cause.code, 'PICKER_CHANNEL_EXPIRED')
+    assert.equal(cause.selectionPreserved, true)
+    assert.deepEqual(cause.pickerSelection, { purpose: 'folder', picked: temp })
+    return true
+  })
+  assert.equal(nativeCalls, 1)
+  assert.equal(channels, 1)
+})
