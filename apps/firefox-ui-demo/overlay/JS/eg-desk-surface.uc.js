@@ -5718,22 +5718,23 @@
         if (!stored || state.codex.inputInspectNonce !== nonce) return;
         const snapshot = InputContext.storedSnapshotForView(stored, reference);
         openChatInputPanel(threadId, { snapshots: [snapshot] });
-        const starts = options.pageStarts || [];
+        const priorPages = options.pageRanges || [];
+        const currentPage = snapshot.range ? { startLine: snapshot.range.startLine, endLine: snapshot.range.endLine } : null;
         const nav = el('nav', { class: 'egd-codex-input-panel-footer', tabindex: '-1', 'aria-label': '저장된 입력 페이지', data: { testid: 'chat-input-pagination' } },
-          el('button', { disabled: starts.length ? null : 'true', 'aria-label': '이전 캡처 페이지', data: { testid: 'chat-input-previous' },
-            onclick: () => this.inspectInput(threadId, reference, { startLine: starts.at(-1), pageStarts: starts.slice(0, -1), packetId: options.packetId }) }, '이전'),
+          el('button', { disabled: priorPages.length ? null : 'true', 'aria-label': '이전 캡처 페이지', data: { testid: 'chat-input-previous' },
+            onclick: () => this.inspectInput(threadId, reference, { ...priorPages.at(-1), pageRanges: priorPages.slice(0, -1), packetId: options.packetId }) }, '이전'),
           el('span', { 'aria-live': 'polite' }, snapshot.range ? `${snapshot.range.startLine}–${snapshot.range.endLine} / ${snapshot.range.totalLines ?? '?'}행` : '바이너리 캡처'),
           el('button', { disabled: snapshot.nextLine == null ? 'true' : null, 'aria-label': '다음 캡처 페이지', data: { testid: 'chat-input-next' },
-            onclick: () => this.inspectInput(threadId, reference, { startLine: snapshot.nextLine, pageStarts: [...starts, snapshot.range?.startLine || 1], packetId: options.packetId }) }, '다음'));
+            onclick: () => this.inspectInput(threadId, reference, { startLine: snapshot.nextLine, pageRanges: [...priorPages, currentPage], packetId: options.packetId }) }, '다음'));
         document.getElementById('egd-codex-input-panel')?.appendChild(nav);
         const packet = el('input', { type: 'text', placeholder: '기록된 packetId', 'aria-label': '과거 전달 packet ID', data: { testid: 'chat-input-packet-id' } });
         packet.value = options.packetId || snapshot.delivered?.packetId || '';
         document.querySelector('#egd-codex-input-panel .egd-codex-input-panel-body')?.appendChild(el('details', { class: 'egd-input-snapshot-metadata' },
           el('summary', {}, '다른 전달 기록 찾기'), packet,
           el('button', { 'aria-label': '지정한 과거 전달본 조회', data: { testid: 'chat-input-packet-open' }, onclick: () => {
-            if (packet.value.trim()) void this.inspectInput(threadId, reference, { startLine: snapshot.range?.startLine || 1, packetId: packet.value.trim() });
+            if (packet.value.trim()) void this.inspectInput(threadId, reference, { ...(currentPage || { startLine: 1 }), packetId: packet.value.trim() });
           } }, '전달본 조회')));
-        if (options.pageStarts) nav.focus();
+        if (options.pageRanges) nav.focus();
       },
       async readInput(reference, options = {}) {
         if (!reference?.sourceId) return null;

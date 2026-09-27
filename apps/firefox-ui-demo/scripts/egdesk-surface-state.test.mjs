@@ -1740,4 +1740,28 @@ test('production inspector pagination is outside the sole scroll body and makes 
   const css = readFileSync(new URL('../overlay/CSS/eg-desk-surface.uc.css', import.meta.url), 'utf8');
   assert.match(css, /\.egd-codex-input-panel-footer \{[^}]*flex:\s*0 0 auto/);
   assert.match(css, /\.egd-input-snapshot pre \{[^}]*max-height:\s*none;\s*overflow:\s*visible/);
+
+  const requested = [];
+  const bridge = {
+    readInput: async (_reference, options) => {
+      requested.push({ startLine: options.startLine, endLine: options.endLine });
+      const startLine = options.startLine;
+      const endLine = options.endLine ?? startLine + 199;
+      return { ...response, source: { ...response.source,
+        range: { startLine, endLine, totalLines: 610 }, nextLine: endLine < 610 ? endLine + 1 : null } };
+    },
+    inspectInput(threadId, reference, options) {
+      return inspect.call(this, threadId, reference, options, () => ({ id: 'thread' }), { codex: {} }, InputContext,
+        () => { panel.children = []; body.children = []; panel.appendChild(body); }, el,
+        { getElementById: () => panel, querySelector: () => body });
+    },
+  };
+  const reference = { sourceId: 's', snapshotId: 's', hash: 'h' };
+  await bridge.inspectInput('thread', reference, { startLine: 201, endLine: 240 });
+  await panel.children.find(child => child.tag === 'nav').children[2].listeners.click[0]({});
+  await panel.children.find(child => child.tag === 'nav').children[0].listeners.click[0]({});
+  assert.deepEqual(requested, [
+    { startLine: 201, endLine: 240 }, { startLine: 241, endLine: undefined }, { startLine: 201, endLine: 240 },
+  ], 'Previous must re-read the exact explicit range, not the default 200-line page');
+  assert.match(panel.children.find(child => child.tag === 'nav').textContent, /201–240/);
 });
