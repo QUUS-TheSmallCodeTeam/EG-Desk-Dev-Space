@@ -3366,8 +3366,9 @@
   box-shadow: 0 8px 28px rgba(20, 30, 20, .16);
   font: 13px/1.5 sans-serif;
 }
-#egd-codex-input-panel header { display: flex; align-items: center; justify-content: space-between; padding: 12px 16px; }
-.egd-codex-input-panel-body { overflow: auto; padding: 0 16px 16px; min-height: 0; min-width: 0; max-width: 100%; box-sizing: border-box; }
+#egd-codex-input-panel header { display: flex; flex: 0 0 auto; align-items: center; justify-content: space-between; padding: 12px 16px; }
+.egd-codex-input-panel-body { flex: 1 1 auto; overflow: auto; padding: 0 16px 16px; min-height: 0; min-width: 0; max-width: 100%; box-sizing: border-box; }
+.egd-codex-input-panel-footer { display: flex; flex: 0 0 auto; align-items: center; justify-content: space-between; gap: 8px; padding: 8px 16px; border-top: 1px solid var(--egd-outline-variant); }
 .egd-input-source-choice { display: grid; grid-template-columns: 18px minmax(0, 1fr); align-items: start; gap: 8px; padding: 8px 0; cursor: pointer; width: 100%; min-width: 0; max-width: 100%; box-sizing: border-box; }
 .egd-input-source-choice > input[type="checkbox"] { width: 18px; min-width: 18px; max-width: 18px; height: 18px; min-height: 18px; margin: 2px 0 0; padding: 0; box-sizing: border-box; }
 .egd-input-source-choice > span { min-width: 0; max-width: 100%; white-space: normal; overflow-wrap: anywhere; word-break: break-word; }
@@ -3376,10 +3377,14 @@
 .egd-chat-input-tray button, #egd-codex-input-panel button { font: inherit; color: inherit; border: 1px solid rgba(70, 80, 65, .2); background: transparent; border-radius: 7px; padding: 4px 7px; cursor: pointer; }
 .egd-chat-input-chip { display: flex; max-width: 100%; align-items: center; }
 .egd-chat-input-chip button:first-child { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
-.egd-input-snapshot { border-top: 1px solid rgba(70, 80, 65, .16); padding: 8px 0; }
+.egd-input-snapshot { border-top: 1px solid rgba(70, 80, 65, .16); padding: 8px 0; min-width: 0; }
 .egd-input-snapshot h4 { margin: 4px 0; }
+.egd-input-snapshot-status { margin: 4px 0; font-size: 12px; color: var(--egd-on-surface-variant); }
+.egd-input-snapshot-metadata { margin: 6px 0; font-size: 12px; overflow-wrap: anywhere; white-space: normal; }
+.egd-input-snapshot summary, .egd-input-snapshot-metadata summary { cursor: pointer; white-space: normal; }
+.egd-input-snapshot-metadata input { max-width: 100%; box-sizing: border-box; }
 .egd-input-source-location { overflow-wrap: anywhere; }
-.egd-input-snapshot pre { white-space: pre-wrap; overflow-wrap: anywhere; max-height: 320px; overflow: auto; padding: 10px; background: rgba(80, 90, 70, .05); user-select: text; }
+.egd-input-snapshot pre { white-space: pre-wrap; overflow-wrap: anywhere; max-height: none; overflow: visible; padding: 10px; background: rgba(80, 90, 70, .05); user-select: text; }
 #egd-answer-briefing {
   position: fixed; bottom: 108px; left: 118px; z-index: 2147482900;
   width: min(440px, calc(100vw - 150px)); max-height: 48vh; overflow: auto;

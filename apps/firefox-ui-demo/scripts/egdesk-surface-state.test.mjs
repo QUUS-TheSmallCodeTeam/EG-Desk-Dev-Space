@@ -1149,8 +1149,8 @@ test('final GET separates paginated immutable source from exact delivered packet
   assert.equal(snapshot.content.coverage.completeDocument, false);
   const root = markdownDOM();
   root.appendChild(InputContext.inputSnapshotView(root.ownerDocument, snapshot));
-  assert.match(root.textContent, /원문 캡처 페이지/);
-  assert.match(root.textContent, /확인된 전달 payload가 없습니다/);
+  assert.match(root.textContent, /원문 캡처/);
+  assert.match(root.textContent, /전달 기록 없음/);
   assert.equal(root.all('a').length, 0);
   assert.equal(root.all('button').length, 0, 'read-only source display never reads or opens Live');
   assert.throws(() => InputContext.storedSnapshotForView({ ...stored, capture: { ...stored.capture, hash: 'changed' }, source: { ...stored.source, hash: 'changed' } }, reference), /다른 응답/);
@@ -1590,3 +1590,55 @@ test('public agenda.clearView retains live Terminal and session after failed ter
   }
 });
 // GLOBAL_CLEAR_TERMINAL_REGRESSIONS_END
+
+test('snapshot inspector keeps concise source/delivery labels and folds paths, hashes and caveats', () => {
+  const snapshot = { id: 'source', label: 'Report', capturedAt: 1, hash: 'whole-hash', rangeHash: 'page-hash', storedRole: 'source',
+    sourceRef: { path: '/private/long/source.txt' }, range: { startLine: 1, endLine: 200, totalLines: 610 },
+    content: { text: 'exact source\nbytes', truncated: true, boundary: 'declared capture scope' },
+    delivered: { packetId: 'packet', hash: 'delivered-hash', text: '{"exact":"payload"}', mode: 'reader', binding: { runId: 'run', answerId: 'answer' } } };
+  const root = markdownDOM();
+  const rendered = InputContext.inputSnapshotView(root.ownerDocument, snapshot);
+  const visibleParagraphs = rendered.children.filter(child => child.tag === 'p').map(child => child.textContent);
+  assert.deepEqual(visibleParagraphs, ['원문 캡처 · 1–200 / 610행 · 일부 캡처']);
+  const sourceDetails = rendered.all('details').find(child => child.attributes['data-testid'] === 'chat-input-source-details');
+  assert.equal(sourceDetails.attributes.open, undefined);
+  assert.ok(sourceDetails.textContent.includes('/private/long/source.txt'));
+  assert.ok(sourceDetails.textContent.includes('whole-hash'));
+  assert.ok(sourceDetails.textContent.includes('완독 여부는 별개'));
+  const delivery = rendered.all('details').find(child => child.attributes['data-testid'] === 'chat-input-delivery');
+  assert.equal(delivery.attributes.open, undefined);
+  assert.equal(delivery.children[0].textContent, '전달된 입력 보기');
+  assert.ok(rendered.all('pre').some(child => child.textContent === snapshot.content.text));
+  assert.ok(rendered.all('pre').some(child => child.textContent === snapshot.delivered.text));
+});
+
+test('production inspector pagination is outside the sole scroll body and makes no camera or model request', async () => {
+  const code = surfaceSource.match(/      async inspectInput\(threadId, reference, options = \{\}\) \{([\s\S]*?)\n      \},/)?.[1];
+  assert.ok(code);
+  const inspect = compileFunction(`return (async () => {${code}\n})();`, ['threadId', 'reference', 'options', 'getCodexThreadById', 'state', 'InputContext', 'openChatInputPanel', 'el', 'document']);
+  const panel = markdownDOM(), body = panel.ownerDocument.createElement('div');
+  const doc = panel.ownerDocument;
+  const el = (tag, props = {}, ...children) => {
+    const node = doc.createElement(tag); node.focus = () => {};
+    for (const [key, value] of Object.entries(props)) {
+      if (key === 'data') for (const [name, val] of Object.entries(value)) node.setAttribute(`data-${name}`, val);
+      else if (key === 'onclick') node.addEventListener('click', value);
+      else if (value != null) node.setAttribute(key, value);
+    }
+    for (const child of children) if (child != null) node.appendChild(typeof child === 'string' ? doc.createTextNode(child) : child);
+    return node;
+  };
+  const response = { capture: { sourceId: 's', hash: 'h', capturedAt: 1, sourceRef: {}, captureScope: { type: 'file' } },
+    source: { role: 'source', hash: 'h', rangeHash: 'r', mime: 'text/plain', text: 'immutable', range: { startLine: 1, endLine: 200, totalLines: 610 }, nextLine: 201 }, delivered: null, bindings: [] };
+  let reads = 0;
+  await inspect.call({ readInput: async () => { reads++; return response; } }, 'thread', { sourceId: 's', snapshotId: 's', hash: 'h' }, {},
+    () => ({ id: 'thread' }), { codex: {} }, InputContext, () => panel.appendChild(body), el,
+    { getElementById: () => panel, querySelector: () => body });
+  assert.equal(reads, 1);
+  assert.equal(panel.children.filter(child => child.tag === 'nav').length, 1);
+  assert.equal(body.children.some(child => child.tag === 'nav'), false);
+  assert.equal(body.children[0].tag, 'details', 'advanced packet lookup is folded');
+  const css = readFileSync(new URL('../overlay/CSS/eg-desk-surface.uc.css', import.meta.url), 'utf8');
+  assert.match(css, /\.egd-codex-input-panel-footer \{[^}]*flex:\s*0 0 auto/);
+  assert.match(css, /\.egd-input-snapshot pre \{[^}]*max-height:\s*none;\s*overflow:\s*visible/);
+});

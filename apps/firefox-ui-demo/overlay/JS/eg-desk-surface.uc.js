@@ -697,7 +697,6 @@
     const body = el('div', { class: 'egd-codex-input-panel-body' });
     panel.appendChild(body);
     if (snapshots) {
-      body.appendChild(el('p', {}, '과거 캡처입니다. 현재 열린 Browser나 파일을 다시 읽지 않습니다.'));
       for (const snapshot of snapshots) body.appendChild(InputContext.inputSnapshotView(document, snapshot));
     } else {
       body.appendChild(el('p', {}, '선택한 자료만 다음 메시지에 첨부합니다. 선택만으로 전송하거나 실행하지 않습니다.'));
@@ -5690,19 +5689,21 @@
         const snapshot = InputContext.storedSnapshotForView(stored, reference);
         openChatInputPanel(threadId, { snapshots: [snapshot] });
         const starts = options.pageStarts || [];
-        const nav = el('nav', { 'aria-label': '저장된 입력 페이지', data: { testid: 'chat-input-pagination' } },
+        const nav = el('nav', { class: 'egd-codex-input-panel-footer', tabindex: '-1', 'aria-label': '저장된 입력 페이지', data: { testid: 'chat-input-pagination' } },
           el('button', { disabled: starts.length ? null : 'true', 'aria-label': '이전 캡처 페이지', data: { testid: 'chat-input-previous' },
             onclick: () => this.inspectInput(threadId, reference, { startLine: starts.at(-1), pageStarts: starts.slice(0, -1), packetId: options.packetId }) }, '이전'),
-          el('span', {}, snapshot.range ? `${snapshot.range.startLine}–${snapshot.range.endLine}행` : '바이너리 캡처'),
+          el('span', { 'aria-live': 'polite' }, snapshot.range ? `${snapshot.range.startLine}–${snapshot.range.endLine} / ${snapshot.range.totalLines ?? '?'}행` : '바이너리 캡처'),
           el('button', { disabled: snapshot.nextLine == null ? 'true' : null, 'aria-label': '다음 캡처 페이지', data: { testid: 'chat-input-next' },
             onclick: () => this.inspectInput(threadId, reference, { startLine: snapshot.nextLine, pageStarts: [...starts, snapshot.range?.startLine || 1], packetId: options.packetId }) }, '다음'));
-        document.querySelector('#egd-codex-input-panel .egd-codex-input-panel-body')?.appendChild(nav);
+        document.getElementById('egd-codex-input-panel')?.appendChild(nav);
         const packet = el('input', { type: 'text', placeholder: '기록된 packetId', 'aria-label': '과거 전달 packet ID', data: { testid: 'chat-input-packet-id' } });
         packet.value = options.packetId || snapshot.delivered?.packetId || '';
-        document.querySelector('#egd-codex-input-panel .egd-codex-input-panel-body')?.appendChild(el('div', {}, packet,
+        document.querySelector('#egd-codex-input-panel .egd-codex-input-panel-body')?.appendChild(el('details', { class: 'egd-input-snapshot-metadata' },
+          el('summary', {}, '다른 전달 기록 찾기'), packet,
           el('button', { 'aria-label': '지정한 과거 전달본 조회', data: { testid: 'chat-input-packet-open' }, onclick: () => {
             if (packet.value.trim()) void this.inspectInput(threadId, reference, { startLine: snapshot.range?.startLine || 1, packetId: packet.value.trim() });
           } }, '전달본 조회')));
+        if (options.pageStarts) nav.focus();
       },
       async readInput(reference, options = {}) {
         if (!reference?.sourceId) return null;

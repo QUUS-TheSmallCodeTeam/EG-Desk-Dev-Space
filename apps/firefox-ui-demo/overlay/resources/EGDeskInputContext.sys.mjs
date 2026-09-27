@@ -189,25 +189,34 @@ export function inputSnapshotView(doc, snapshot, { includeDelivered = true } = {
   };
   const root = make('article', null, { class: 'egd-input-snapshot', 'data-testid': 'chat-input-snapshot', 'data-snapshot-id': snapshot.id });
   root.appendChild(make('h4', snapshot.label));
-  root.appendChild(make('p', `당시 캡처 · ${new Date(snapshot.capturedAt).toLocaleString()}`));
-  root.appendChild(make('p', inputSourceLocation(snapshot), { class: 'egd-input-source-location' }));
-  root.appendChild(make('p', snapshot.content.truncated ? '부분 캡처 — 전체 원문이 아닙니다.' : '명시된 범위의 캡처', { role: 'status' }));
-  root.appendChild(make('p', snapshot.content.boundary));
-  if (snapshot.storedRole === 'source') root.appendChild(make('p', '원문 캡처 페이지입니다. 모델에 전달된 자료·완독 여부와 구별합니다.', { 'data-testid': 'chat-input-source-label' }));
-  root.appendChild(make('p', snapshot.content.coverage?.completeDocument === true ? '원문 전체 범위' : '전체 문서를 읽었다는 의미는 아닙니다.'));
-  if (snapshot.content.text !== null) root.appendChild(make('pre', snapshot.content.text, { tabindex: '0', 'aria-label': '당시 캡처 본문' }));
+  const range = snapshot.range ? ` · ${snapshot.range.startLine}–${snapshot.range.endLine} / ${snapshot.range.totalLines ?? '?'}행` : '';
+  root.appendChild(make('p', `원문 캡처${range}${snapshot.content.truncated ? ' · 일부 캡처' : ''}${snapshot.binary ? ' · 텍스트 보기 없음' : ''}`,
+    { role: 'status', class: 'egd-input-snapshot-status', 'data-testid': 'chat-input-source-label' }));
   if (includeDelivered && snapshot.storedRole === 'source') {
-    if (!snapshot.delivered) root.appendChild(make('p', '이 조회에 확인된 전달 payload가 없습니다.', { 'data-testid': 'chat-input-delivery-status' }));
+    if (!snapshot.delivered) root.appendChild(make('p', '전달 기록 없음', { class: 'egd-input-snapshot-status', 'data-testid': 'chat-input-delivery-status' }));
     else {
       const delivery = snapshot.delivered;
       const details = make('details', null, { 'data-testid': 'chat-input-delivery', 'data-packet-id': delivery.packetId });
-      details.appendChild(make('summary', 'App Server로 전달된 입력 payload 보기'));
-      details.appendChild(make('p', '전달 요청 상태입니다. 모델의 수신·완독·작업 완료를 뜻하지 않습니다.'));
-      details.appendChild(make('p', `${delivery.mode || '입력'} · packet ${delivery.packetId} · hash ${delivery.hash}`));
-      details.appendChild(make('p', `Answer: ${delivery.binding?.answerId || '미확인'} · Run: ${delivery.binding?.runId || '미확인'}`));
+      details.appendChild(make('summary', '전달된 입력 보기'));
+      const metadata = make('details', null, { class: 'egd-input-snapshot-metadata', 'data-testid': 'chat-input-delivery-details' });
+      metadata.appendChild(make('summary', '전달 정보'));
+      metadata.appendChild(make('p', 'App Server 전달 기록입니다. 모델의 수신·완독·작업 완료를 뜻하지 않습니다.'));
+      metadata.appendChild(make('p', `${delivery.mode || '입력'} · packet ${delivery.packetId} · hash ${delivery.hash}`));
+      metadata.appendChild(make('p', `Answer: ${delivery.binding?.answerId || '미확인'} · Run: ${delivery.binding?.runId || '미확인'}`));
+      details.appendChild(metadata);
       details.appendChild(make('pre', delivery.text, { tabindex: '0', 'aria-label': '실제로 전달된 payload 원문' }));
       root.appendChild(details);
     }
   }
+  const metadata = make('details', null, { class: 'egd-input-snapshot-metadata', 'data-testid': 'chat-input-source-details' });
+  metadata.appendChild(make('summary', '출처 및 캡처 정보'));
+  metadata.appendChild(make('p', new Date(snapshot.capturedAt).toLocaleString()));
+  metadata.appendChild(make('p', inputSourceLocation(snapshot), { class: 'egd-input-source-location' }));
+  metadata.appendChild(make('p', snapshot.content.boundary));
+  if (snapshot.hash) metadata.appendChild(make('p', `캡처 hash: ${snapshot.hash}`));
+  if (snapshot.rangeHash) metadata.appendChild(make('p', `표시 범위 hash: ${snapshot.rangeHash}`));
+  metadata.appendChild(make('p', '명시된 원문 캡처 범위입니다. 전달된 입력과 모델의 완독 여부는 별개입니다.'));
+  root.appendChild(metadata);
+  if (snapshot.content.text !== null) root.appendChild(make('pre', snapshot.content.text, { tabindex: '0', 'aria-label': '당시 캡처 본문' }));
   return root;
 }
