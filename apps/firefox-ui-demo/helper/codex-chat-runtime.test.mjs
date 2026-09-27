@@ -20,6 +20,7 @@ function harness(override = {}) {
     request: async (method, params) => { calls.push({ method, params }); return (override.request || defaults)(method, params, chat, defaults) },
     respond: (...args) => replies.push(args), emit: event => events.push(event), emitLegacy: event => legacy.push(event),
     contexts: override.contexts,
+    expectedProcessConfiguration: override.expectedProcessConfiguration,
     verifyFile: override.verifyFile || (async () => null),
   })
   chat.setConnection(true)
@@ -77,6 +78,25 @@ test('native-reported turn settings take precedence over requested settings for 
   } })
   await h.chat.send({ message: 'Check', model: 'gpt-6-sol', effort: 'max' })
   assert.deepEqual(bound[0], { model: 'reported-model', effort: 'reported-effort', modelSource: 'native-turn', effortSource: 'native-turn' })
+})
+
+test('process-scoped config rejects a contrary native thread before any parent model turn', async () => {
+  for (const reported of [{ model: 'gpt-6-astra', reasoningEffort: 'max' }, { model: 'gpt-6-sol', reasoningEffort: 'high' }]) {
+    const h = harness({ expectedProcessConfiguration: { model: 'gpt-6-sol', effort: 'max' }, request: async (method, params, chat, defaults) => {
+      const result = await defaults(method, params)
+      return method === 'thread/start' ? { ...result, ...reported } : result
+    } })
+    await assert.rejects(h.chat.send({ message: 'Ordinary UI turn' }), e => e.code === 'NATIVE_CONFIGURATION_MISMATCH')
+    assert.equal(h.calls.filter(call => call.method === 'turn/start').length, 0)
+  }
+  const matching = harness({ expectedProcessConfiguration: { model: 'gpt-6-sol', effort: 'max' }, request: async (method, params, chat, defaults) => {
+    const result = await defaults(method, params)
+    return method === 'thread/start' ? { ...result, model: 'gpt-6-sol', reasoningEffort: 'max' } : result
+  } })
+  const accepted = await matching.chat.send({ message: 'Ordinary UI turn' })
+  assert.equal(matching.calls.find(call => call.method === 'thread/start').params.model, undefined)
+  assert.equal(matching.calls.find(call => call.method === 'turn/start').params.effort, undefined)
+  assert.deepEqual(matching.chat.snapshot(accepted.conversationId).runs[0].parentTurnConfiguration, { model: 'gpt-6-sol', effort: 'max', modelSource: 'native-thread', effortSource: 'native-thread' })
 })
 
 test('events received before turn/start response bind only to its actual turn and request', async () => {

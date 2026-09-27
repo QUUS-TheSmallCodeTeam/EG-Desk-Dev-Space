@@ -14,7 +14,7 @@ import { ImmutableContextStore, appDataDirectory } from './egdesk-context-store.
 import { NativeReaderClient } from './egdesk-native-reader.mjs'
 import { ContextRuntime } from './egdesk-context-runtime.mjs'
 import { createContextHttpHandler } from './egdesk-context-http.mjs'
-import { inspectNativeCapabilities, resolveCodexExecutable, NATIVE_SCHEMA_VERSION } from './egdesk-native-capabilities.mjs'
+import { buildCodexAppServerLaunch, inspectNativeCapabilities, resolveCodexExecutable, verifyCodexLaunchConfiguration, NATIVE_SCHEMA_VERSION } from './egdesk-native-capabilities.mjs'
 import { createEGDeskFileMount, requireEGDeskNodeRuntime } from './egdesk-file-mount.mjs'
 
 const nodeRuntime = requireEGDeskNodeRuntime()
@@ -22,6 +22,7 @@ const nodeRuntime = requireEGDeskNodeRuntime()
 const BRIDGE_PORT = 39218
 const APP_SERVER_PORT = 39219
 const APP_SERVER_WS_URL = `ws://127.0.0.1:${APP_SERVER_PORT}`
+const appServerLaunch = buildCodexAppServerLaunch({ env: process.env, listen: APP_SERVER_WS_URL })
 const BRIDGE_PROTOCOL_VERSION = 1
 const PROVIDER_ID = 'codex'
 
@@ -34,6 +35,12 @@ let reconnectTimer = null
 let loginPollTimer = null
 let rpc = null
 let nativeCapabilities = { executable: null, version: null, schemaVersion: NATIVE_SCHEMA_VERSION, schemaMatch: false, experimentalApi: true, dynamicTools: false, readerReadOnly: false }
+let launchConfigBlocked = false
+let nativePreflight = {
+  status: appServerLaunch.hasOverrides ? 'pending' : 'inherited',
+  configuredModel: appServerLaunch.configuredModel, configuredEffort: appServerLaunch.configuredEffort,
+  effectiveModel: null, effectiveEffort: null,
+}
 
 const authState = {
   isLoggedIn: false,
@@ -103,6 +110,7 @@ const chat = new CodexChatRuntime({
   request: (method, params) => appServerRequest(method, params),
   respond: nativeRespond,
   contexts,
+  expectedProcessConfiguration: { model: appServerLaunch.configuredModel, effort: appServerLaunch.configuredEffort },
   emit: event => broadcast(event, 2),
   emitLegacy: event => broadcast(event, 1),
 })
@@ -264,7 +272,7 @@ function startLoginPolling() {
 }
 
 function scheduleAppServerReconnect() {
-  if (reconnectTimer) return
+  if (reconnectTimer || launchConfigBlocked) return
   reconnectTimer = setTimeout(() => {
     reconnectTimer = null
     connectToAppServer()
@@ -275,9 +283,10 @@ function spawnAppServer() {
   if (appServerProcess && appServerProcess.exitCode == null && !appServerProcess.killed) return
   const executable = resolveCodexExecutable()
   nativeCapabilities = inspectNativeCapabilities({ executable })
-  const child = spawn(executable, ['app-server', '--listen', APP_SERVER_WS_URL], {
+  const child = spawn(executable, appServerLaunch.args, {
     cwd: process.cwd(),
     env: process.env,
+    shell: false,
     stdio: ['ignore', 'pipe', 'pipe'],
   })
   appServerProcess = child
@@ -324,6 +333,17 @@ async function connectToAppServer() {
     try {
       await connection.initialize()
       if (appServerSocket !== socket) return
+      if (appServerLaunch.hasOverrides) {
+        try {
+          const config = await connection.request('config/read', { includeLayers: false, cwd: process.cwd() })
+          if (appServerSocket !== socket) return
+          nativePreflight = verifyCodexLaunchConfiguration(appServerLaunch, config)
+        } catch (error) {
+          launchConfigBlocked = true
+          nativePreflight = { ...nativePreflight, status: 'blocked', effectiveModel: null, effectiveEffort: null, errorCode: error.code || 'CODEX_LAUNCH_CONFIG_UNVERIFIED' }
+          throw error
+        }
+      }
       appServerReady = true
       chat.setConnection(true)
       await refreshAccountState()
@@ -345,6 +365,7 @@ async function connectToAppServer() {
     if (appServerSocket !== socket) return
     appServerSocket = null
     appServerReady = false
+    if (!launchConfigBlocked && appServerLaunch.hasOverrides) nativePreflight = { ...nativePreflight, status: 'pending', effectiveModel: null, effectiveEffort: null }
     if (rpc === connection) rpc = null
     chat.setConnection(false)
     scheduleAppServerReconnect()
@@ -515,7 +536,7 @@ const bridgeServer = createServer(async (req, res) => {
   }
 
   if (req.method === 'GET' && route === '/health') {
-    sendJson(res, 200, { ok: true, port: BRIDGE_PORT, appServerReady, native: nativeCapabilities, node: nodeRuntime })
+    sendJson(res, 200, { ok: true, port: BRIDGE_PORT, appServerReady, native: nativeCapabilities, engineConfiguration: nativePreflight, node: nodeRuntime })
     return
   }
 
@@ -528,6 +549,7 @@ const bridgeServer = createServer(async (req, res) => {
       provider: PROVIDER_ID,
       appServerReady,
       native: nativeCapabilities,
+      engineConfiguration: nativePreflight,
       node: nodeRuntime,
       auth: authSnapshot(),
       chat: chat.snapshot(),

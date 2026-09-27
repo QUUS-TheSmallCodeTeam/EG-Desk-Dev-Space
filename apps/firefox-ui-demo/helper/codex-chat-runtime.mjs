@@ -83,8 +83,9 @@ function cleanNotification(method, p) {
 }
 
 export class CodexChatRuntime {
-  constructor({ request, respond, emit = () => {}, emitLegacy = () => {}, verifyFile = verifyLocalFile, now = Date.now, contexts = null }) {
+  constructor({ request, respond, emit = () => {}, emitLegacy = () => {}, verifyFile = verifyLocalFile, now = Date.now, contexts = null, expectedProcessConfiguration = null }) {
     Object.assign(this, { request, respond, emitEvent: emit, emitLegacy, verifyFile, now })
+    this.expectedProcessConfiguration = expectedProcessConfiguration
     this.contexts = contexts
     if (contexts) contexts.runtime = this
     this.streamId = randomUUID()
@@ -292,6 +293,17 @@ export class CodexChatRuntime {
     return options
   }
 
+  assertProcessConfiguration(thread, { model, effort } = {}) {
+    // An explicit per-turn selection is allowed to differ from the process
+    // default. Ordinary UI turns must not silently use a contrary native value.
+    if (!this.expectedProcessConfiguration || model !== undefined || effort !== undefined) return
+    const expected = this.expectedProcessConfiguration
+    if ((expected.model && thread?.model && thread.model !== expected.model) ||
+        (expected.effort && thread?.effort && thread.effort !== expected.effort)) {
+      throw chatError('NATIVE_CONFIGURATION_MISMATCH', 'Native thread settings differ from the process-scoped Codex configuration', 409)
+    }
+  }
+
   async startTurn(body, context) {
     const epoch = this.epoch
     const overrides = this.threadOverrides(body)
@@ -341,6 +353,7 @@ export class CodexChatRuntime {
       if (contextTools.length) await this.contexts.registerThread(cid)
     }
     if (epoch !== this.epoch) throw chatError('ACCOUNT_CHANGED', 'Codex account changed', 409)
+    this.assertProcessConfiguration(this.threads.get(cid), { model: body.model, effort })
     if ([...this.runs.values()].some(run => run.conversationId === cid && !TERMINAL.has(run.status))) {
       throw chatError('RUN_IN_PROGRESS', 'This conversation already has an active or unreconciled turn', 409)
     }
