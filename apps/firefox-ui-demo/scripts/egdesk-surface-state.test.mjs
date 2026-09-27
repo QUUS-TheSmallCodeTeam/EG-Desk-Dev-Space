@@ -1074,6 +1074,19 @@ test('batch attachment wire has one schema: file bytes are helper-owned, browser
   const fileWire = InputContext.captureAttachment(file, null, 100);
   assert.deepEqual(fileWire, { id: 'file', kind: 'file', label: 'File', capturedAt: 100,
     sourceRef: { kind: 'file', resourceId: '/tmp/file.txt', path: '/tmp/file.txt' }, captureScope: { type: 'file' } });
+  const working = { id: 'working', kind: 'file', label: 'Working copy',
+    sourceRef: { viewId: 'file-card', fileId: 'opaque-file', draftId: 'opaque-draft' } };
+  const managedFileView = { fileId: 'opaque-file', draftId: 'opaque-draft', head: 'opaque-head', revision: 3 };
+  assert.deepEqual(InputContext.captureAttachment(working, null, 100, managedFileView), {
+    id: 'working', kind: 'file', label: 'Working copy', capturedAt: 100,
+    sourceRef: { kind: 'file', resourceId: 'opaque-file', viewId: 'file-card' },
+    captureScope: { type: 'file' }, managedFileView,
+  });
+  assert.throws(() => InputContext.captureAttachment(working), /현재 내용/);
+  assert.throws(() => InputContext.captureAttachment(working, null, 100, { ...managedFileView, draftId: 'another' }), /고정 캡처/);
+  assert.throws(() => InputContext.captureAttachment({ ...working, sourceRef: { ...working.sourceRef, path: '/tmp/original.txt' } }, null, 100, managedFileView), /고정 캡처/);
+  assert.equal(InputContext.inputSourceLocation(working), '파일 작업 창 · 현재 작업사본');
+  assert.notEqual(InputContext.inputSourceKey(working), InputContext.inputSourceKey({ ...working, sourceRef: { ...working.sourceRef, draftId: 'next-draft' } }));
   const source = browserInput();
   assert.throws(() => InputContext.captureAttachment(source), /실제 캡처/);
   const snapshot = InputContext.inputSnapshot(source, { text: 'actual', url: source.sourceRef.uri, truncated: true,
@@ -1086,6 +1099,41 @@ test('batch attachment wire has one schema: file bytes are helper-owned, browser
   assert.equal(wire.sourceRef.viewId, 'browser-1');
   assert.equal(wire.executionContext, undefined);
   assert.equal(wire.systemPrompt, undefined);
+});
+
+test('File Card offers only its current managed draft as a Chat source', () => {
+  const body = surfaceSource.match(/  function chatInputSourceForView\(view\) \{([\s\S]*?)\n  \}/)?.[1];
+  assert.ok(body);
+  const sourceFor = compileFunction(body, ['view', 'chatBindingNonce', 'cardLabelForViewportRail', 'state']);
+  const view = { id: 'file-card', isConnected: true, dataset: {}, classList: { contains: name => name === 'egd-file-card' },
+    querySelector: () => ({ textContent: 'working.txt' }), _fileView: { snapshot: () => ({ fileId: 'file-a', draftId: 'draft-a' }) } };
+  const source = sourceFor(view, () => 'nonce', () => 'File', { boards: { projections: {} } });
+  assert.equal(source.kind, 'file');
+  assert.equal(source.label, 'working.txt · 작업사본');
+  assert.deepEqual(source.sourceRef, { viewId: 'file-card', boardId: null, fileId: 'file-a', draftId: 'draft-a' });
+  view._fileView.snapshot = () => ({ fileId: null, draftId: null });
+  assert.equal(sourceFor(view, () => 'nonce', () => 'File', { boards: { projections: {} } }), null);
+  assert.match(surfaceSource, /data: \{ testid: 'file-chat-attach' \}/);
+});
+
+test('File Card capture rejects a switched or closed draft instead of attaching a substitute', async () => {
+  const body = surfaceSource.match(/  async function captureManagedFileInput\(source\) \{([\s\S]*?)\n  \}/)?.[1];
+  assert.ok(body);
+  const capture = compileFunction(`return (async () => {${body}\n})();`, ['source', 'document']);
+  const source = { sourceRef: { viewId: 'file-card', fileId: 'file-a', draftId: 'draft-a' } };
+  const expected = { fileId: 'file-a', draftId: 'draft-a', head: 'head-a', revision: 2 };
+  let current = { fileId: 'file-a', draftId: 'draft-a' };
+  const card = { isConnected: true, classList: { contains: name => name === 'egd-file-card' }, _fileReady: Promise.resolve(),
+    _fileView: { snapshot: () => current, captureRef: async () => expected } };
+  const document = { getElementById: id => id === 'file-card' ? card : null };
+  assert.deepEqual(await capture(source, document), expected);
+  current = { fileId: 'file-b', draftId: 'draft-b' };
+  await assert.rejects(() => capture(source, document), /다른 작업사본/);
+  current = { fileId: 'file-a', draftId: 'draft-a' };
+  card._fileView.captureRef = async () => { current = { fileId: 'file-b', draftId: 'draft-b' }; return expected; };
+  await assert.rejects(() => capture(source, document), /캡처 중 바뀌/);
+  card.isConnected = false;
+  await assert.rejects(() => capture(source, document), /닫혔습니다/);
 });
 
 test('capture receipt preserves source mapping without treating it as resource authority', () => {
@@ -1184,8 +1232,10 @@ test('Briefing range matching uses immutable source/hash/range, never just the o
 test('production batch coordinator sends real content once and uses the rotated wire binding', async () => {
   const body = surfaceSource.match(/    async function captureThreadInputs\(thread, sources, token\) \{([\s\S]*?)\n    \}/)?.[1];
   assert.ok(body);
-  const run = compileFunction(`return (async () => {${body}\n})();`, ['thread', 'sources', 'token', 'epochScope', 'captureChatInputs', 'fetchJson', 'InputContext', 'ChatState']);
+  const run = compileFunction(`return (async () => {${body}\n})();`, ['thread', 'sources', 'token', 'epochScope', 'captureChatInputs', 'fetchJson', 'InputContext', 'ChatState', 'captureManagedFileInput']);
   const browser = browserInput(), file = { id: 'file-1', kind: 'file', label: 'File', sourceRef: { path: '/tmp/file.txt' } };
+  const working = { id: 'working-1', kind: 'file', label: 'Working copy', sourceRef: { viewId: 'file-card', fileId: 'opaque-file', draftId: 'opaque-draft' } };
+  const managedFileView = { fileId: 'opaque-file', draftId: 'opaque-draft', head: 'opaque-head', revision: 3 };
   const calls = [];
   const fetchJson = async (route, options) => {
     const payload = JSON.parse(options.body);
@@ -1193,23 +1243,28 @@ test('production batch coordinator sends real content once and uses the rotated 
     return { captures: payload.attachments.map(item => ({ id: item.id, sourceId: `stored-${item.id}`,
       snapshotId: `stored-${item.id}`, hash: `hash-${item.id}`, sourceRef: item.sourceRef, captureScope: item.captureScope })) };
   };
-  const references = await run({ id: 'local-room', clientBindingId: 'wire-after-reset' }, [browser, file], {}, { valid: () => true },
-    async ([source]) => [InputContext.inputSnapshot(source, { text: 'actual browser body', url: source.sourceRef.uri })], fetchJson, InputContext, Chat);
+  const references = await run({ id: 'local-room', clientBindingId: 'wire-after-reset' }, [browser, file, working], {}, { valid: () => true },
+    async ([source]) => [InputContext.inputSnapshot(source, { text: 'actual browser body', url: source.sourceRef.uri })], fetchJson, InputContext, Chat,
+    async source => { assert.equal(source.sourceRef.draftId, 'opaque-draft'); return managedFileView; });
   assert.equal(calls.length, 1);
   assert.equal(calls[0].route, '/context/captures');
   assert.equal(calls[0].payload.clientThreadId, 'wire-after-reset');
   assert.equal(calls[0].payload.attachments[0].content.text, 'actual browser body');
   assert.equal(calls[0].payload.attachments[1].content, undefined, 'helper reads actual file bytes');
-  assert.deepEqual(references.map(ref => ref.sourceId), ['stored-input-1', 'stored-file-1']);
+  assert.deepEqual(calls[0].payload.attachments[2].managedFileView, managedFileView);
+  assert.equal(calls[0].payload.attachments[2].sourceRef.resourceId, 'opaque-file');
+  assert.equal(calls[0].payload.attachments[2].sourceRef.path, undefined, 'working copy never aliases the external original');
+  assert.equal(calls[0].payload.attachments[2].content, undefined, 'managed bytes remain helper-owned');
+  assert.deepEqual(references.map(ref => ref.sourceId), ['stored-input-1', 'stored-file-1', 'stored-working-1']);
   const wire = Chat.buildChatRequest({ id: 'local-room', profileEnabled: false }, 'Inspect', 'request-1', {
     contextSnapshotIds: references.map(ref => ref.sourceId), contextCapabilities: { read: true, reader: true, publishBriefing: true }, systemPrompt: 'not ordinary Codex',
   });
-  assert.deepEqual(wire.contextSnapshotIds, ['stored-input-1', 'stored-file-1']);
+  assert.deepEqual(wire.contextSnapshotIds, ['stored-input-1', 'stored-file-1', 'stored-working-1']);
   assert.deepEqual(wire.contextCapabilities, { read: true, reader: true, publishBriefing: true });
   assert.equal(wire.profileEnabled, false);
   assert.equal(wire.systemPrompt, undefined);
   assert.equal(wire.attachments, undefined, 'Chat sends immutable IDs, not a second competing payload shape');
-  await assert.rejects(() => run({ id: 'room' }, [browser], {}, { valid: () => false }, () => assert.fail(), () => assert.fail(), InputContext, Chat), /연결이 바뀌/);
+  await assert.rejects(() => run({ id: 'room' }, [browser], {}, { valid: () => false }, () => assert.fail(), () => assert.fail(), InputContext, Chat, () => assert.fail()), /연결이 바뀌/);
 });
 
 test('context/Reader/Briefing events preserve answer provenance and never become chat tool spam', () => {

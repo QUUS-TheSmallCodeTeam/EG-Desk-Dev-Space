@@ -3403,6 +3403,8 @@
 .egd-file-card-mount { flex: 1; min-height: 0; overflow: hidden; }
 .egd-file-card-title { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .egd-file-card-state { opacity: .7; margin-left: 10px; font-size: 11px; }
+.egd-file-chat-attach { border: 1px solid rgba(70,80,65,.28); border-radius: 6px; padding: 2px 8px; background: transparent; color: inherit; font: 11px sans-serif; white-space: nowrap; cursor: pointer; }
+.egd-file-chat-attach:disabled { opacity: .45; cursor: default; }
 .egd-file-card-notice { padding: 8px 12px; font-size: 12px; background: #fff7df; color: #62531d; }
 .egd-file-card-notice[hidden] { display: none; }
 .egdesk-file-view { display: grid; height: 100%; min-height: 0; grid-template-columns: 220px minmax(0, 1fr); grid-template-rows: auto minmax(0, 1fr) auto auto; color: var(--egd-text, #28312d); background: var(--egd-surface, #faf9f5); font: 13px/1.5 sans-serif; }

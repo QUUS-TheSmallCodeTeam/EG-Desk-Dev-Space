@@ -645,6 +645,13 @@
     if (!view?.isConnected || view.dataset.codexRole === 'auth' || view.classList.contains('egd-chat-card')) return null;
     const base = { id: `input-${chatBindingNonce()}`, label: cardLabelForViewportRail(view) || view.id,
       sourceRef: { viewId: view.id, boardId: state.boards.projections[view.dataset.projectionId]?.boardId || null } };
+    if (view.classList.contains('egd-file-card')) {
+      const current = view._fileView?.snapshot?.();
+      if (!current?.fileId || !current?.draftId) return null;
+      const name = view.querySelector('.egdesk-file-title')?.textContent?.trim() || '파일';
+      return { ...base, kind: 'file', label: `${name} · 작업사본`,
+        sourceRef: { ...base.sourceRef, fileId: current.fileId, draftId: current.draftId } };
+    }
     if (view.classList.contains('egd-browser-card')) {
       const browser = browserCardState(view);
       if (!browser?.uri) return null;
@@ -662,6 +669,27 @@
 
   function chatInputSources(viewIds) {
     return (viewIds || []).map(id => chatInputSourceForView(document.getElementById(id))).filter(Boolean);
+  }
+
+  async function captureManagedFileInput(source) {
+    const { viewId, fileId, draftId } = source.sourceRef || {};
+    const card = viewId && document.getElementById(viewId);
+    if (!fileId || !draftId || !card?.isConnected || !card.classList.contains('egd-file-card')) {
+      throw new Error('첨부한 파일 작업 창이 닫혔습니다. 현재 작업사본을 다시 선택해 주세요.');
+    }
+    await card._fileReady;
+    const view = card._fileView;
+    const current = view?.snapshot?.();
+    if (!card.isConnected || typeof view?.captureRef !== 'function' || current?.fileId !== fileId || current?.draftId !== draftId) {
+      throw new Error('파일 작업 창에서 다른 작업사본을 열었습니다. 현재 파일을 다시 첨부해 주세요.');
+    }
+    const captureRef = await view.captureRef();
+    const after = view.snapshot();
+    if (!card.isConnected || after?.fileId !== fileId || after?.draftId !== draftId
+        || captureRef?.fileId !== fileId || captureRef?.draftId !== draftId) {
+      throw new Error('작업사본이 캡처 중 바뀌었습니다. 다시 첨부해 주세요.');
+    }
+    return captureRef;
   }
 
   function captureChatInputs(sources) {
@@ -701,7 +729,7 @@
     } else {
       body.appendChild(el('p', {}, '선택한 자료만 다음 메시지에 첨부합니다. 선택만으로 전송하거나 실행하지 않습니다.'));
       const selected = new Set(viewIds || Array.from(document.querySelectorAll('.egd-entity-selected')).map(view => view.id));
-      const sources = chatInputSources(Array.from(document.querySelectorAll('.egd-browser-card, .egd-canvas-shape')).map(view => view.id));
+      const sources = chatInputSources(Array.from(document.querySelectorAll('.egd-browser-card, .egd-canvas-shape, .egd-file-card')).map(view => view.id));
       const unavailable = [...selected].filter(id => !sources.some(source => source.sourceRef.viewId === id));
       if (unavailable.length) body.appendChild(el('p', { role: 'status' }, `선택한 요소 중 ${unavailable.length}개는 현재 캡처를 지원하지 않습니다. 아래에 표시된 자료만 첨부됩니다.`));
       const picked = new Map();
@@ -714,7 +742,7 @@
         body.appendChild(el('label', { class: 'egd-input-source-choice' }, input,
           el('span', {}, source.label, el('small', {}, InputContext.inputSourceLocation(source)))));
       }
-      if (!sources.length) body.appendChild(el('p', {}, '열린 Browser나 선택 가능한 Canvas 요소가 없습니다. 파일을 선택할 수 있습니다.'));
+      if (!sources.length) body.appendChild(el('p', {}, '열린 Browser, 작업사본 또는 선택 가능한 Canvas 요소가 없습니다. 파일을 선택할 수 있습니다.'));
       body.appendChild(el('button', { 'aria-label': '로컬 파일 선택', data: { testid: 'chat-attach-file' }, onclick: async () => {
         const picker = Cc['@mozilla.org/filepicker;1'].createInstance(Ci.nsIFilePicker);
         picker.init(window.browsingContext, 'Chat에 첨부할 파일', Ci.nsIFilePicker.modeOpenMultiple);
@@ -5115,8 +5143,10 @@
       for (const source of sources || []) {
         if (!epochScope.valid(token)) throw new Error('연결이 바뀌어 자료 캡처를 중단했습니다.');
         const snapshot = source.kind === 'file' ? null : (await captureChatInputs([source]))[0];
+        const managedFileView = source.kind === 'file' && source.sourceRef?.draftId
+          ? await captureManagedFileInput(source) : null;
         if (!epochScope.valid(token)) throw new Error('연결이 바뀌어 자료 캡처를 중단했습니다.');
-        attachments.push(InputContext.captureAttachment(source, snapshot));
+        attachments.push(InputContext.captureAttachment(source, snapshot, Date.now(), managedFileView));
       }
       const result = await fetchJson('/context/captures', { method: 'POST', signal: token.signal,
         body: JSON.stringify({ clientThreadId: ChatState.clientThreadBinding(thread), attachments }) });
@@ -8764,6 +8794,15 @@
     const title = el('strong', { class: 'egd-file-card-title' }, '파일');
     const badge = el('span', { class: 'egd-file-card-state', role: 'status', data: { testid: 'file-card-status' } }, '준비 중');
     shell.slots.identity.append(title, badge);
+    const attachButton = el('button', { type: 'button', class: 'egd-file-chat-attach', disabled: 'true',
+      'aria-label': '현재 작업사본을 Chat에 첨부', data: { testid: 'file-chat-attach' }, onclick: (event) => {
+        event.stopPropagation();
+        const threadId = state.codex.activeThreadId;
+        if (!threadId || !getCodexThreadById(state.codex, threadId)) { boardNotice('채팅방을 먼저 선택해 주세요.'); return; }
+        if (!chatInputSourceForView(card)) { boardNotice('첨부할 작업사본을 먼저 열어 주세요.'); return; }
+        openChatInputPanel(threadId, { viewIds: [card.id] });
+      } }, 'Chat에 첨부');
+    shell.slots.actions.appendChild(attachButton);
     const notice = el('div', { class: 'egd-file-card-notice', role: 'status', hidden: true, data: { testid: 'file-card-notice' } });
     const mount = el('div', { class: 'egd-file-card-mount' });
     shell.slots.content.append(notice, mount);
@@ -8782,6 +8821,7 @@
       }
       badge.textContent = failedOriginal ? '복구 확인 필요' : rootNeedsReconnect || snapshot.sourceConnection === 'reconnect-required' ? '보관 사본 · 원본 재연결 필요' : snapshot.dirty ? '작업사본 · 미저장' : '파일';
       title.textContent = rootHandle?.name || '파일';
+      attachButton.disabled = !snapshot.fileId || !snapshot.draftId;
       markAgendaDirty('file-view-state', card);
     };
     const ready = (async () => {

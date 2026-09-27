@@ -12,7 +12,8 @@ const freeze = value => {
 
 export function inputSourceKey(source) {
   const ref = source?.sourceRef || {};
-  return JSON.stringify([source?.kind, ref.viewId || null, ref.path || null, ref.uri || null, ref.boardId || null]);
+  return JSON.stringify([source?.kind, ref.viewId || null, ref.path || null, ref.uri || null,
+    ref.boardId || null, ref.fileId || null, ref.draftId || null]);
 }
 
 export function addInputSources(current = [], sources = []) {
@@ -28,15 +29,26 @@ export function addInputSources(current = [], sources = []) {
 
 export const removeInputSource = (sources, id) => (sources || []).filter(source => source.id !== id).map(clone);
 
-export function captureAttachment(source, snapshot = null, capturedAt = Date.now()) {
+export function captureAttachment(source, snapshot = null, capturedAt = Date.now(), managedFileView = null) {
   const ref = source.sourceRef;
   const kind = source.kind === 'board-element' ? 'board' : source.kind;
+  if (kind === 'file' && ref.draftId && !managedFileView) {
+    throw new Error('작업사본의 현재 내용을 확인한 뒤 첨부해 주세요.');
+  }
+  if (managedFileView && (kind !== 'file' || !ref.viewId || ref.path || ref.uri || ref.url
+      || managedFileView.fileId !== ref.fileId || managedFileView.draftId !== ref.draftId
+      || typeof managedFileView.head !== 'string' || !managedFileView.head
+      || !Number.isSafeInteger(managedFileView.revision) || managedFileView.revision < 0
+      || Object.keys(managedFileView).some(key => !['fileId', 'draftId', 'head', 'revision'].includes(key)))) {
+    throw new Error('선택한 작업사본의 고정 캡처를 확인하지 못했습니다. 다시 첨부해 주세요.');
+  }
   const attachment = { id: source.id, kind, label: source.label, capturedAt: snapshot?.capturedAt || capturedAt,
-    sourceRef: { kind, resourceId: ref.path || ref.uri || ref.viewId,
+    sourceRef: { kind, resourceId: managedFileView?.fileId || ref.path || ref.uri || ref.viewId,
       ...(ref.path ? { path: ref.path } : {}), ...(ref.uri ? { url: ref.uri } : {}),
       ...(ref.viewId ? { viewId: ref.viewId } : {}) },
     captureScope: { type: kind === 'file' ? 'file' : kind === 'browser' ? 'document-text' : 'board-selection' },
   };
+  if (managedFileView) attachment.managedFileView = clone(managedFileView);
   if (source.kind !== 'file') {
     if (!snapshot?.content || snapshot.sourceId !== source.id) throw new Error('선택한 자료의 실제 캡처가 필요합니다.');
     attachment.content = { text: snapshot.content.text, mime: snapshot.content.mime, truncated: snapshot.content.truncated };
@@ -132,6 +144,7 @@ export async function captureInputSources(sources, adapters, options = {}) {
 }
 
 export function inputSourceLocation(source) {
+  if (source?.kind === 'file' && source?.sourceRef?.draftId) return '파일 작업 창 · 현재 작업사본';
   return source?.sourceRef?.path || source?.sourceRef?.uri || source?.sourceRef?.url || source?.sourceRef?.viewId || '';
 }
 
