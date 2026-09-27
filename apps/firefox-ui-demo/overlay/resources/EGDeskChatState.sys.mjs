@@ -76,7 +76,7 @@ export function detachNativeThread(thread, savedAccountKey, nonce) {
     ...thread, conversationId: null, clientBindingId: freshClientThreadBinding(thread, nonce),
     bindingAccountKey: null, retainedNativeBinding: retained,
     bindingState: retained ? retained.reason === 'awaiting-identity' ? 'awaiting-identity' : 'quarantined' : 'fresh',
-    resuming: false, sendError: null,
+    resuming: false, preparingInput: false, sendError: null,
   };
 }
 export function reconcileNativeThread(thread, authStatus) {
@@ -130,11 +130,19 @@ export function buildChatRequest(thread, message, requestId, runtime = {}) {
   const cwd = runtime.cwd !== undefined ? runtime.cwd : thread.cwd;
   if (cwd !== undefined) body.cwd = cwd;
   for (const field of ['model', 'effort']) if (runtime[field]) body[field] = runtime[field];
+  if (Array.isArray(runtime.contextSnapshotIds)) body.contextSnapshotIds = [...new Set(runtime.contextSnapshotIds)];
+  if (runtime.contextCapabilities) body.contextCapabilities = { read: true, reader: true, publishBriefing: true };
   if (thread.profileEnabled === true) {
     body.profileEnabled = true;
     for (const field of ['agentProfile', 'systemPrompt', 'toolMode']) if (runtime[field]) body[field] = runtime[field];
   }
   return body;
+}
+export function contextCapabilitiesForRequest(thread, auth, sourceIds = []) {
+  // Plain legacy conversations must not require tools never registered on that
+  // native thread. An explicit context request never silently replaces it.
+  return sourceIds.length || (codexAccountKey(auth) && (!thread.conversationId || thread.contextToolsAvailable === true))
+    ? { read: true, reader: true, publishBriefing: true } : null;
 }
 function ensureRun(state, identity) {
   const request = state.requests[identity.requestId];
@@ -212,6 +220,13 @@ export function reduceChatEvent(state, event) {
   } else if (event.event === 'artifact.available') {
     const artifacts = Array.isArray(details.artifacts) ? details.artifacts : [details.artifact || details];
     for (const artifact of artifacts) if (usableArtifact(artifact)) upsert(run.artifacts, copy(artifact));
+  } else if (event.event === 'context.bound') {
+    run.contextCaptures = copy(details.captures || []);
+  } else if (/^(context\.read|reader)\.(started|completed|failed)$/.test(event.event)) {
+    run.contextEvents ||= [];
+    run.contextEvents.push({ id: `${event.streamId}:${event.seq}`, event: event.event, ts: event.ts, details: copy(details) });
+  } else if (event.event === 'briefing.published') {
+    run.briefing = copy(details.briefing);
   } else if (event.event === 'approval.required') {
     const approval = details.approval || details;
     const id = approval.id || approval.approvalId || event.itemId;
@@ -285,8 +300,13 @@ export function mergeChatSnapshot(state, snapshot, clientThreadId) {
     }
     run.messages = run.messages.map(message => ({ ...message, content: message.content ?? message.text ?? '', status: message.status === 'completed' ? 'complete' : message.status, role: message.role || 'assistant', runId: run.runId, answerId: run.answerId }));
     if (!preserve) {
-      for (const key of ['status', 'stopRequested', 'error', 'summary', 'plan', 'pendingApprovals', 'truncated', 'historyComplete']) if (key in incoming) run[key] = copy(incoming[key]);
+      for (const key of ['status', 'stopRequested', 'error', 'summary', 'plan', 'pendingApprovals', 'truncated', 'historyComplete', 'contextCaptures', 'contextEvents', 'briefing']) if (key in incoming) run[key] = copy(incoming[key]);
       run.pendingApprovals = (run.pendingApprovals || []).map(approval => ({ ...approval, id: approval.id || approval.approvalId }));
+      if (incoming.context) {
+        run.contextCaptures = copy(incoming.context.captures || []);
+        run.contextPackets = copy(incoming.context.packets || []);
+        if (incoming.context.briefings?.length) run.briefing = copy(incoming.context.briefings.at(-1));
+      }
       if (stream) { run.streamId = snapshot.streamId; run.seq = snapshot.seq; }
     }
     changed.push(run);
@@ -331,6 +351,8 @@ export function acknowledgeApprovalReply(run, reply) {
 // Correlate native items with the submitted request/turn, then preserve role order.
 // Matching by text alone would merge repeated prompts or messages in other turns.
 export function projectRunMessages(existing, run, now = Date.now()) {
+  const priorAnswer = existing.findLast(message => message.role === 'assistant'
+    && message.runId === run.runId && message.conversationId === run.conversationId);
   const messages = existing.map(message => run.requestId && message.requestId === run.requestId && message.role === 'user'
     ? { ...message, status: 'complete', conversationId: run.conversationId, runId: run.runId, answerId: run.answerId }
     : { ...message });
@@ -352,12 +374,18 @@ export function projectRunMessages(existing, run, now = Date.now()) {
       providerItemId: incoming.id, content: incoming.content ?? incoming.text ?? '',
       authorName: role === 'assistant' ? previous?.authorName || run.authorName || 'Codex' : previous?.authorName,
       createdAt: previous?.createdAt || incoming.createdAt || now,
-      conversationId: run.conversationId, runId: run.runId, answerId: run.answerId, artifacts: [],
+      conversationId: run.conversationId, runId: run.runId, answerId: run.answerId, artifacts: [], briefing: null, contextCaptures: [], contextEvents: [], contextPackets: [],
     };
     if (index < 0) messages.push(projected);
     else messages[index] = projected;
   }
   const last = messages.findLast(message => message.role === 'assistant' && message.runId === run.runId && message.conversationId === run.conversationId);
-  if (last) last.artifacts = (run.artifacts || []).filter(usableArtifact);
+  if (last) {
+    last.artifacts = (run.artifacts || []).filter(usableArtifact);
+    last.briefing = copy(run.briefing !== undefined ? run.briefing : priorAnswer?.briefing || null);
+    last.contextCaptures = copy(run.contextCaptures !== undefined ? run.contextCaptures : priorAnswer?.contextCaptures || []);
+    last.contextEvents = copy(run.contextEvents !== undefined ? run.contextEvents : priorAnswer?.contextEvents || []);
+    last.contextPackets = copy(run.contextPackets !== undefined ? run.contextPackets : priorAnswer?.contextPackets || []);
+  }
   return messages;
 }

@@ -5,6 +5,8 @@ import { compileFunction } from 'node:vm';
 import { initialSurfaceMode, planBoardProjection, snapshotBoardProjection, remapMemberReferences, recoverDeskSnapshot, canPersistDeskSession, ownedProjectionMembers, missingProjectionMembers, fitSurfaceCamera } from '../overlay/resources/EGDeskSurfaceState.sys.mjs';
 import * as Chat from '../overlay/resources/EGDeskChatState.sys.mjs';
 import * as Markdown from '../overlay/resources/EGDeskMarkdown.sys.mjs';
+import * as InputContext from '../overlay/resources/EGDeskInputContext.sys.mjs';
+import * as Briefing from '../overlay/resources/EGDeskBriefingState.sys.mjs';
 import { createDeskRecoveryStore, missingDeskRecoveryViews } from '../overlay/resources/EGDeskRecoveryState.sys.mjs';
 import { createTerminalCloseController, terminalExitEvidence, terminalResponsePacket } from '../overlay/resources/EGDeskTerminalState.sys.mjs';
 
@@ -1004,4 +1006,279 @@ test('actual overlay rich-text path supplies the same-answer artifact scope and 
   draw(held);
   assert.equal(held.all('a').length, 0);
   assert.ok(surfaceSource.includes("appendRichText(content, parts.text || (message.status === 'streaming' ? '…' : ''), message, activeThread)"));
+});
+
+const browserInput = () => ({ id: 'input-1', kind: 'browser', label: 'Page', sourceRef: { viewId: 'browser-1', uri: 'https://example.test/', boardId: 'board-1' } });
+test('explicit input selections deduplicate, remove independently and never mutate prior draft', () => {
+  const first = browserInput(), file = { id: 'file-1', kind: 'file', label: 'File', sourceRef: { path: '/tmp/file.txt' } };
+  const draft = InputContext.addInputSources([], [first, file, { ...first, id: 'duplicate' }]);
+  assert.equal(draft.length, 2);
+  first.label = 'Changed outside';
+  assert.equal(draft[0].label, 'Page');
+  assert.deepEqual(InputContext.removeInputSource(draft, 'input-1').map(item => item.id), ['file-1']);
+  assert.equal(draft.length, 2);
+});
+
+test('Browser capture preserves exact included text, excludes controls/hidden text and declares loaded-DOM coverage', () => {
+  const root = { tagName: 'BODY', parentElement: null, getAttribute() {}, style: { display: 'block', visibility: 'visible', opacity: '1' } };
+  const parent = (tagName, extra = {}) => ({ ...root, tagName, parentElement: root, ...extra });
+  const texts = [
+    { nodeValue: 'real  text\nwith_space', parentElement: parent('P') },
+    { nodeValue: 'do not read password', parentElement: parent('INPUT') },
+    { nodeValue: 'editable draft', parentElement: parent('DIV', { isContentEditable: true }) },
+    { nodeValue: 'hidden', parentElement: parent('DIV', { hidden: true }) },
+    { nodeValue: 'const secret = 1', parentElement: parent('SCRIPT') },
+    { nodeValue: 'last paragraph', parentElement: parent('P') },
+  ];
+  const doc = { body: root, title: 'Test', defaultView: {
+    location: { href: 'https://example.test/' }, NodeFilter: { SHOW_TEXT: 4, FILTER_ACCEPT: 1, FILTER_REJECT: 2 }, getComputedStyle: node => node.style,
+  }, createTreeWalker: (_root, _type, filter) => {
+    const accepted = texts.filter(node => filter.acceptNode(node) === 1);
+    let index = 0;
+    return { nextNode: () => accepted[index++] || null };
+  } };
+  const result = InputContext.captureDocumentText(doc);
+  assert.equal(result.text, 'real  text\nwith_space\nlast paragraph');
+  assert.equal(result.coverage.completeDocument, false);
+  assert.equal(result.coverage.completeWithinBoundary, true);
+  assert.ok(result.coverage.excluded.includes('child-frames'));
+  const partial = InputContext.captureDocumentText(doc, { maxChars: 6 });
+  assert.equal(partial.text, 'real  ');
+  assert.equal(partial.truncated, true);
+  assert.equal(partial.coverage.completeWithinBoundary, false);
+  texts[0].nodeValue = 'x'.repeat(80000);
+  const fullDefault = InputContext.captureDocumentText(doc);
+  assert.ok(fullDefault.text.startsWith(texts[0].nodeValue));
+  assert.equal(fullDefault.truncated, false, 'default loaded-DOM capture has no silent character cap');
+});
+
+test('input snapshots remain immutable and keep content separate from spatial context', async () => {
+  const source = browserInput();
+  const snapshots = await InputContext.captureInputSources([source], { browser: async () => ({
+    text: 'Actual source body', url: source.sourceRef.uri, executionContext: { geometry: { x: 1, y: 2 } },
+    coverage: { scope: 'loaded-dom-visible-text', completeDocument: false },
+  }) }, { nextId: () => 'capture-1', now: () => 100 });
+  source.sourceRef.uri = 'https://changed.test/';
+  assert.equal(snapshots[0].sourceRef.uri, 'https://example.test/');
+  assert.equal(snapshots[0].content.text, 'Actual source body');
+  assert.equal(snapshots[0].content.geometry, undefined);
+  assert.equal(snapshots[0].executionContext.geometry.x, 1);
+  assert.throws(() => { snapshots[0].content.text = 'mutated'; }, TypeError);
+  assert.throws(() => InputContext.inputSnapshot(source, { text: 'old', url: 'https://example.test/' }), /주소가 바뀌/);
+});
+
+test('batch attachment wire has one schema: file bytes are helper-owned, browser content and scope explicit', () => {
+  const file = { id: 'file', kind: 'file', label: 'File', sourceRef: { path: '/tmp/file.txt' } };
+  const fileWire = InputContext.captureAttachment(file, null, 100);
+  assert.deepEqual(fileWire, { id: 'file', kind: 'file', label: 'File', capturedAt: 100,
+    sourceRef: { kind: 'file', resourceId: '/tmp/file.txt', path: '/tmp/file.txt' }, captureScope: { type: 'file' } });
+  const source = browserInput();
+  assert.throws(() => InputContext.captureAttachment(source), /실제 캡처/);
+  const snapshot = InputContext.inputSnapshot(source, { text: 'actual', url: source.sourceRef.uri, truncated: true,
+    coverage: { scope: 'loaded-dom-visible-text', completeDocument: false } }, { id: 'capture' });
+  const wire = InputContext.captureAttachment(source, snapshot);
+  assert.equal(wire.content.text, 'actual');
+  assert.equal(wire.content.mime, 'text/plain');
+  assert.equal(wire.content.truncated, true);
+  assert.equal(wire.captureScope.type, 'document-text');
+  assert.equal(wire.sourceRef.viewId, 'browser-1');
+  assert.equal(wire.executionContext, undefined);
+  assert.equal(wire.systemPrompt, undefined);
+});
+
+test('capture receipt preserves source mapping without treating it as resource authority', () => {
+  const source = browserInput();
+  const receipt = { id: source.id, sourceId: 'snapshot', snapshotId: 'snapshot', hash: 'hash', capturedAt: 1, sourceRef: { kind: 'browser' }, shape: {} };
+  const reference = InputContext.capturedInputReference(source, receipt);
+  source.sourceRef.viewId = 'different';
+  assert.equal(reference.localSource.sourceRef.viewId, 'browser-1');
+  assert.equal(reference.sourceRef.permission, undefined);
+  assert.throws(() => InputContext.capturedInputReference(source, { snapshotId: 'fake' }), /저장 확인/);
+});
+
+const briefingFixture = () => ({ id: 'briefing-1', title: 'Answer', steps: [
+  { id: 'step-1', text: 'First source', target: { sourceId: 'snapshot-1' }, fallback: 'Inspect source' },
+  { id: 'step-2', text: 'Second source', target: { sourceId: 'snapshot-2' }, fallback: 'Inspect source' },
+] });
+test('Briefing requires explicit steps, bounds navigation, and retains the original view independently', () => {
+  assert.equal(Briefing.validBriefing({ id: 'invented', steps: [] }), false);
+  const viewport = { pan: { x: 10, y: 20 }, zoom: 0.8, activeEntityId: 'browser-1' };
+  const session = Briefing.beginBriefing(briefingFixture(), viewport);
+  viewport.pan.x = 999;
+  assert.equal(session.previousView.pan.x, 10);
+  assert.equal(Briefing.currentBriefingStep(session).id, 'step-1');
+  assert.equal(Briefing.selectBriefingStep(session, -1), session);
+  assert.equal(Briefing.currentBriefingStep(Briefing.selectBriefingStep(session, 1)).id, 'step-2');
+  assert.equal(session.index, 0);
+});
+
+test('Briefing target lookup never substitutes a different view for missing/stale sources', () => {
+  const step = briefingFixture().steps[0];
+  const reference = { sourceId: 'snapshot-1', hash: 'fixed', localSource: { sourceRef: { viewId: 'original' } } };
+  const other = { id: 'unrelated', sourceMatches: true, revisionMatches: true, geometry: { x: 1, y: 2, width: 3, height: 4 } };
+  assert.equal(Briefing.resolveBriefingTargets(step, { references: [reference], views: [other] })[0].status, 'missing');
+  const evidence = { ...other, id: 'pinned-evidence', sourceId: 'snapshot-1', hash: 'fixed', evidenceKey: InputContext.inputEvidenceKey(reference) };
+  const stale = Briefing.resolveBriefingTargets(step, { references: [reference], views: [{ ...evidence, revisionMatches: false }] });
+  assert.equal(stale[0].status, 'stale');
+  assert.equal(Briefing.briefingBounds(stale), null);
+  const current = Briefing.resolveBriefingTargets(step, { references: [reference], views: [evidence] });
+  assert.deepEqual(Briefing.briefingBounds(current), other.geometry);
+  assert.deepEqual(other.geometry, { x: 1, y: 2, width: 3, height: 4 });
+});
+
+test('Briefing comments prepare a visible draft and explicit source IDs without executing a turn', () => {
+  const session = Briefing.beginBriefing(briefingFixture(), { pan: { x: 0, y: 0 }, zoom: 1 });
+  const draft = Briefing.briefingCommentDraft(session, 'Compare this', [{ reference: { sourceId: 'snapshot-1' }, status: 'stale' }]);
+  assert.equal(draft.stepId, 'step-1');
+  assert.match(draft.text, /의견: Compare this/);
+  assert.deepEqual(draft.contextSnapshotIds, ['snapshot-1']);
+  assert.equal(draft.autoSend, undefined);
+});
+
+test('final GET separates paginated immutable source from exact delivered packet and never rereads Live', () => {
+  const reference = { sourceId: 'source-1', hash: 'hash-1', localSource: { label: 'Original' } };
+  const stored = { capture: { sourceId: 'source-1', hash: 'hash-1', capturedAt: 100,
+    sourceRef: { path: '/tmp/selected.txt' }, captureScope: { type: 'file' }, shape: {}, payloads: [], transformations: [] },
+    source: { role: 'source', mime: 'text/plain', hash: 'hash-1', rangeHash: 'range-1',
+      range: { startLine: 1, endLine: 200, totalLines: 600 }, text: 'saved data only', nextLine: 201 }, delivered: null, bindings: [] };
+  const snapshot = InputContext.storedSnapshotForView(stored, reference);
+  assert.equal(snapshot.content.text, 'saved data only');
+  assert.equal(snapshot.nextLine, 201);
+  assert.equal(snapshot.content.coverage.completeDocument, false);
+  const root = markdownDOM();
+  root.appendChild(InputContext.inputSnapshotView(root.ownerDocument, snapshot));
+  assert.match(root.textContent, /원문 캡처 페이지/);
+  assert.match(root.textContent, /확인된 전달 payload가 없습니다/);
+  assert.equal(root.all('a').length, 0);
+  assert.equal(root.all('button').length, 0, 'read-only source display never reads or opens Live');
+  assert.throws(() => InputContext.storedSnapshotForView({ ...stored, capture: { ...stored.capture, hash: 'changed' }, source: { ...stored.source, hash: 'changed' } }, reference), /다른 응답/);
+  assert.throws(() => InputContext.storedSnapshotForView({ ...stored, source: { ...stored.source, role: 'raw-reasoning' } }, reference), /원문 응답/);
+  const exactPacket = '{"packet":"what was sent","text":"source-derived payload"}';
+  const delivered = { role: 'agent_input', packetId: 'packet-1', mime: 'application/json', hash: 'packet-hash', text: exactPacket,
+    mode: 'reader', coverage: { complete: false }, deliveryStatus: 'sent-to-app-server', binding: { conversationId: 'c', runId: 'r', answerId: 'c/r' } };
+  const withDelivery = InputContext.storedSnapshotForView({ ...stored, delivered }, reference);
+  const inspector = markdownDOM();
+  inspector.appendChild(InputContext.inputSnapshotView(inspector.ownerDocument, withDelivery));
+  assert.ok(inspector.all('pre').some(node => node.textContent === exactPacket));
+  assert.match(inspector.textContent, /모델의 수신·완독·작업 완료를 뜻하지 않습니다/);
+  const evidence = markdownDOM();
+  evidence.appendChild(InputContext.inputSnapshotView(evidence.ownerDocument, withDelivery, { includeDelivered: false }));
+  assert.equal(evidence.textContent.includes(exactPacket), false, 'presentation exposes selected source, not private delivery records');
+});
+
+test('Briefing range matching uses immutable source/hash/range, never just the original live viewId', () => {
+  const ref = { sourceId: 'source', hash: 'fixed', localSource: { sourceRef: { viewId: 'live' } } };
+  const range = { startLine: 201, endLine: 240 };
+  const step = { id: 'step', text: 'Focus this range', target: { sourceId: 'source', viewId: 'live', range } };
+  const wrong = { id: 'live', sourceId: 'source', hash: 'fixed', sourceMatches: true, revisionMatches: true,
+    evidenceKey: InputContext.inputEvidenceKey(ref), geometry: { x: 10, y: 20, width: 640, height: 480 } };
+  assert.equal(Briefing.resolveBriefingTargets(step, { references: [ref], views: [wrong] })[0].status, 'missing');
+  const correct = { ...wrong, id: 'immutable-view', evidenceKey: InputContext.inputEvidenceKey({ ...ref, presentationRange: range }) };
+  assert.equal(Briefing.resolveBriefingTargets(step, { references: [ref], views: [correct] })[0].status, 'available');
+  assert.deepEqual(correct.geometry, wrong.geometry);
+  assert.throws(() => InputContext.projectionRange({ startLine: 1, endLine: 501 }), /최대 500행/);
+});
+
+test('production batch coordinator sends real content once and uses the rotated wire binding', async () => {
+  const body = surfaceSource.match(/    async function captureThreadInputs\(thread, sources, token\) \{([\s\S]*?)\n    \}/)?.[1];
+  assert.ok(body);
+  const run = compileFunction(`return (async () => {${body}\n})();`, ['thread', 'sources', 'token', 'epochScope', 'captureChatInputs', 'fetchJson', 'InputContext', 'ChatState']);
+  const browser = browserInput(), file = { id: 'file-1', kind: 'file', label: 'File', sourceRef: { path: '/tmp/file.txt' } };
+  const calls = [];
+  const fetchJson = async (route, options) => {
+    const payload = JSON.parse(options.body);
+    calls.push({ route, payload });
+    return { captures: payload.attachments.map(item => ({ id: item.id, sourceId: `stored-${item.id}`,
+      snapshotId: `stored-${item.id}`, hash: `hash-${item.id}`, sourceRef: item.sourceRef, captureScope: item.captureScope })) };
+  };
+  const references = await run({ id: 'local-room', clientBindingId: 'wire-after-reset' }, [browser, file], {}, { valid: () => true },
+    async ([source]) => [InputContext.inputSnapshot(source, { text: 'actual browser body', url: source.sourceRef.uri })], fetchJson, InputContext, Chat);
+  assert.equal(calls.length, 1);
+  assert.equal(calls[0].route, '/context/captures');
+  assert.equal(calls[0].payload.clientThreadId, 'wire-after-reset');
+  assert.equal(calls[0].payload.attachments[0].content.text, 'actual browser body');
+  assert.equal(calls[0].payload.attachments[1].content, undefined, 'helper reads actual file bytes');
+  assert.deepEqual(references.map(ref => ref.sourceId), ['stored-input-1', 'stored-file-1']);
+  const wire = Chat.buildChatRequest({ id: 'local-room', profileEnabled: false }, 'Inspect', 'request-1', {
+    contextSnapshotIds: references.map(ref => ref.sourceId), contextCapabilities: { read: true, reader: true, publishBriefing: true }, systemPrompt: 'not ordinary Codex',
+  });
+  assert.deepEqual(wire.contextSnapshotIds, ['stored-input-1', 'stored-file-1']);
+  assert.deepEqual(wire.contextCapabilities, { read: true, reader: true, publishBriefing: true });
+  assert.equal(wire.profileEnabled, false);
+  assert.equal(wire.systemPrompt, undefined);
+  assert.equal(wire.attachments, undefined, 'Chat sends immutable IDs, not a second competing payload shape');
+  await assert.rejects(() => run({ id: 'room' }, [browser], {}, { valid: () => false }, () => assert.fail(), () => assert.fail(), InputContext, Chat), /연결이 바뀌/);
+});
+
+test('context/Reader/Briefing events preserve answer provenance and never become chat tool spam', () => {
+  const state = Chat.createChatProtocolState();
+  Chat.registerChatRequest(state, { requestId: 'q', clientThreadId: 'thread' });
+  const envelope = { type: 'chat.event', v: 2, provider: 'codex', streamId: 'stream', conversationId: 'conversation', runId: 'turn',
+    answerId: 'conversation/turn', requestId: 'q', clientThreadId: 'thread', ts: 1 };
+  let seq = 0;
+  const event = (name, details) => Chat.reduceChatEvent(state, { ...envelope, event: name, seq: ++seq, details });
+  const capture = { id: 'input', sourceId: 'source-1', snapshotId: 'source-1', hash: 'fixed', sourceRef: {} };
+  event('context.bound', { captures: [capture] });
+  event('context.read.started', { sourceId: 'source-1' });
+  event('reader.completed', { sourceId: 'source-1' });
+  const run = event('briefing.published', { briefing: briefingFixture() });
+  assert.equal(run.messages.length, 0);
+  assert.equal(run.contextEvents.length, 2);
+  assert.equal(run.briefing.id, 'briefing-1');
+  event('message.completed', { messageId: 'assistant', text: 'Final answer' });
+  const projected = Chat.projectRunMessages([], run);
+  assert.equal(projected.length, 1);
+  assert.equal(projected[0].contextCaptures[0].hash, 'fixed');
+  assert.equal(projected[0].briefing.id, 'briefing-1');
+  const historyOnly = Chat.projectRunMessages(projected, { ...run, briefing: undefined, contextCaptures: undefined, contextEvents: undefined });
+  assert.equal(historyOnly[0].briefing.id, 'briefing-1', 'partial hydration cannot erase already-persisted publication');
+});
+
+test('native user hydration keeps the submitted immutable input references once', () => {
+  const reference = { sourceId: 'source-1', snapshotId: 'source-1', hash: 'fixed' };
+  const existing = [{ id: 'optimistic', requestId: 'q', role: 'user', content: 'Read', inputReferences: [reference] }];
+  const run = { conversationId: 'conversation', runId: 'turn', answerId: 'conversation/turn', requestId: 'q', messages: [{ id: 'native-user', role: 'user', content: 'Read', status: 'complete' }], artifacts: [] };
+  const projected = Chat.projectRunMessages(existing, run);
+  assert.equal(projected.length, 1);
+  assert.equal(projected[0].id, 'optimistic');
+  assert.deepEqual(projected[0].inputReferences, [reference]);
+  assert.equal(Chat.detachNativeThread({ id: 'room', preparingInput: true }, null, 'new').preparingInput, false);
+});
+
+test('ordinary legacy threads and unknown identity do not implicitly require unavailable context tools', () => {
+  const auth = { isLoggedIn: true, authMode: 'chatgpt', accountEmail: 'known@example.test', identityStatus: 'known' };
+  assert.equal(Chat.contextCapabilitiesForRequest({ conversationId: 'legacy' }, auth), null);
+  assert.equal(Chat.contextCapabilitiesForRequest({}, { ...auth, identityStatus: 'unknown' }), null);
+  assert.equal(Chat.contextCapabilitiesForRequest({}, auth).publishBriefing, true);
+  assert.equal(Chat.contextCapabilitiesForRequest({ conversationId: 'modern', contextToolsAvailable: true }, auth).read, true);
+  assert.equal(Chat.contextCapabilitiesForRequest({ conversationId: 'legacy' }, auth, ['explicit-source']).reader, true);
+});
+
+test('backend run.context hydration restores fixed input/output captures, packet receipts and published Briefing', () => {
+  const state = Chat.createChatProtocolState();
+  const capture = { sourceId: 'output-source', hash: 'output-hash', sourceRef: { resourceId: 'artifact-1' } };
+  const briefing = { ...briefingFixture(), steps: [{ id: 'result', text: 'Output', target: { sourceId: 'output-source', artifactId: 'artifact-1', hash: 'output-hash' }, fallback: 'Unavailable' }] };
+  const [run] = Chat.mergeChatSnapshot(state, { streamId: 'stream', seq: 1, conversationId: 'c', connection: 'ready', runs: [{ runId: 'r', status: 'completed',
+    messages: [{ id: 'a', role: 'assistant', text: 'Done', status: 'complete' }], context: { captures: [capture], packets: [{ packetId: 'packet' }], briefings: [briefing] } }] }, 'wire');
+  assert.equal(run.contextCaptures[0].sourceId, 'output-source');
+  assert.equal(run.contextPackets[0].packetId, 'packet');
+  assert.deepEqual(Chat.projectRunMessages([], run)[0].briefing, briefing);
+  assert.equal(Briefing.resolveBriefingTargets(briefing.steps[0], { references: [{ ...capture, hash: 'wrong' }] })[0].status, 'stale');
+});
+
+test('production immutable read omits a default endLine so short captures remain readable', async () => {
+  const body = surfaceSource.match(/      async readInput\(reference, options = \{\}\) \{([\s\S]*?)\n      \},/)?.[1];
+  assert.ok(body);
+  const run = compileFunction(`return (async () => {${body}\n})();`, ['reference', 'options', 'epochScope', 'fetchJson', 'InputContext', 'boardNotice']);
+  const scope = { begin: () => ({}), valid: () => true, finish() {} };
+  const reference = { sourceId: 'fixed', hash: 'hash' };
+  const response = { capture: { sourceId: 'fixed', hash: 'hash', sourceRef: {}, capturedAt: 100, captureScope: { type: 'file' } },
+    source: { role: 'source', mime: 'text/plain', hash: 'hash', rangeHash: 'range', text: 'one line', range: { startLine: 1, endLine: 1, totalLines: 1 }, nextLine: null }, delivered: null, bindings: [] };
+  const urls = [];
+  const returned = await run(reference, {}, scope, async url => { urls.push(url); return response; }, InputContext, () => assert.fail('short source should not error'));
+  assert.equal(urls[0], '/context/captures/fixed?startLine=1');
+  assert.equal(returned.source.text, 'one line');
+  const binary = InputContext.storedSnapshotForView({ ...response, source: { ...response.source, rangeHash: null, text: null, range: null, byteLength: 100 } }, reference);
+  assert.equal(binary.binary, true);
+  assert.equal(binary.content.text, null, 'binary source is not fabricated text');
 });

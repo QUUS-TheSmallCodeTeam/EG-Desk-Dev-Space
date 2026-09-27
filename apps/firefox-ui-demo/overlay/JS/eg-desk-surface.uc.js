@@ -12,6 +12,8 @@
   const RecoveryState = ChromeUtils.importESModule('chrome://userchrome/content/EGDeskRecoveryState.sys.mjs');
   const ChatState = ChromeUtils.importESModule('chrome://userchrome/content/EGDeskChatState.sys.mjs');
   const Markdown = ChromeUtils.importESModule('chrome://userchrome/content/EGDeskMarkdown.sys.mjs');
+  const InputContext = ChromeUtils.importESModule('chrome://userchrome/content/EGDeskInputContext.sys.mjs');
+  const BriefingState = ChromeUtils.importESModule('chrome://userchrome/content/EGDeskBriefingState.sys.mjs');
   const BROWSER_AGENT_ACTOR_NAME = 'EGDeskBrowserAgentRuntime';
   const BROWSER_AGENT_HISTORY_LIMIT = 100;
   let browserAgentActorReady = false;
@@ -636,6 +638,277 @@
     renderCodexActivityPanel();
   }
 
+  function chatInputSourceForView(view) {
+    if (!view?.isConnected || view.dataset.codexRole === 'auth' || view.classList.contains('egd-chat-card')) return null;
+    const base = { id: `input-${chatBindingNonce()}`, label: cardLabelForViewportRail(view) || view.id,
+      sourceRef: { viewId: view.id, boardId: state.boards.projections[view.dataset.projectionId]?.boardId || null } };
+    if (view.classList.contains('egd-browser-card')) {
+      const browser = browserCardState(view);
+      if (!browser?.uri) return null;
+      if (browser.uri.startsWith('file:')) {
+        try {
+          const file = servicesRef().io.newURI(browser.uri).QueryInterface(Ci.nsIFileURL).file;
+          return { ...base, kind: 'file', label: file.leafName, sourceRef: { ...base.sourceRef, path: file.path } };
+        } catch { return null; }
+      }
+      return { ...base, kind: 'browser', sourceRef: { ...base.sourceRef, uri: browser.uri } };
+    }
+    if (view.classList.contains('egd-canvas-shape')) return { ...base, kind: 'board-element' };
+    return null;
+  }
+
+  function chatInputSources(viewIds) {
+    return (viewIds || []).map(id => chatInputSourceForView(document.getElementById(id))).filter(Boolean);
+  }
+
+  function captureChatInputs(sources) {
+    return InputContext.captureInputSources(sources, {
+      browser: async source => {
+        // Do not use resolveBrowserCard's convenience fallback for a bound input.
+        const card = document.getElementById(source.sourceRef.viewId);
+        if (!card?.isConnected || !card._browserControls?.captureInput) throw new Error('첨부한 Browser가 닫혔습니다. 다시 연결하거나 제거해 주세요.');
+        const capture = await card._browserControls.captureInput();
+        return { ...capture, executionContext: { geometry: persistentEntityGeometry(card) } };
+      },
+      'board-element': source => {
+        const view = document.getElementById(source.sourceRef.viewId);
+        if (!view?.isConnected || !view.classList.contains('egd-canvas-shape')) throw new Error('첨부한 요소를 찾을 수 없습니다.');
+        const record = serializeShapeState(view);
+        return { text: JSON.stringify(record), mime: 'application/json', boundary: 'selected Canvas shape record',
+          executionContext: { geometry: persistentEntityGeometry(view) } };
+      },
+    }, { nextId: () => `capture-${chatBindingNonce()}` });
+  }
+
+  function openChatInputPanel(threadId, { viewIds = null, snapshots = null } = {}) {
+    const thread = getCodexThreadById(state.codex, threadId);
+    if (!thread) return;
+    document.getElementById('egd-codex-input-panel')?.remove();
+    const panel = el('section', { id: 'egd-codex-input-panel', role: 'dialog', 'aria-label': snapshots ? '당시 입력 캡처' : 'Chat에 자료 첨부',
+      data: { testid: 'chat-input-panel', threadId } });
+    const close = () => { state.codex.inputInspectNonce = (state.codex.inputInspectNonce || 0) + 1; panel.remove(); };
+    panel.addEventListener('mousedown', event => event.stopPropagation());
+    panel.addEventListener('keydown', event => { if (event.key === 'Escape') { event.stopPropagation(); close(); } });
+    panel.appendChild(el('header', {}, el('strong', {}, snapshots ? '당시 입력 캡처' : `${thread.title} · 자료 첨부`),
+      el('button', { 'aria-label': '첨부 패널 닫기', onclick: close }, '닫기')));
+    const body = el('div', { class: 'egd-codex-input-panel-body' });
+    panel.appendChild(body);
+    if (snapshots) {
+      body.appendChild(el('p', {}, '과거 캡처입니다. 현재 열린 Browser나 파일을 다시 읽지 않습니다.'));
+      for (const snapshot of snapshots) body.appendChild(InputContext.inputSnapshotView(document, snapshot));
+    } else {
+      body.appendChild(el('p', {}, '선택한 자료만 다음 메시지에 첨부합니다. 선택만으로 전송하거나 실행하지 않습니다.'));
+      const selected = new Set(viewIds || Array.from(document.querySelectorAll('.egd-entity-selected')).map(view => view.id));
+      const sources = chatInputSources(Array.from(document.querySelectorAll('.egd-browser-card, .egd-canvas-shape')).map(view => view.id));
+      const unavailable = [...selected].filter(id => !sources.some(source => source.sourceRef.viewId === id));
+      if (unavailable.length) body.appendChild(el('p', { role: 'status' }, `선택한 요소 중 ${unavailable.length}개는 현재 캡처를 지원하지 않습니다. 아래에 표시된 자료만 첨부됩니다.`));
+      const picked = new Map();
+      for (const source of sources) {
+        const checked = selected.has(source.sourceRef.viewId);
+        const input = el('input', { type: 'checkbox', 'aria-label': `첨부 선택: ${source.label}`, data: { testid: 'chat-attach-source', viewId: source.sourceRef.viewId } });
+        input.checked = checked;
+        if (checked) picked.set(source.id, source);
+        input.addEventListener('change', () => input.checked ? picked.set(source.id, source) : picked.delete(source.id));
+        body.appendChild(el('label', { class: 'egd-input-source-choice' }, input,
+          el('span', {}, source.label, el('small', {}, InputContext.inputSourceLocation(source)))));
+      }
+      if (!sources.length) body.appendChild(el('p', {}, '열린 Browser나 선택 가능한 Canvas 요소가 없습니다. 파일을 선택할 수 있습니다.'));
+      body.appendChild(el('button', { 'aria-label': '로컬 파일 선택', data: { testid: 'chat-attach-file' }, onclick: async () => {
+        const picker = Cc['@mozilla.org/filepicker;1'].createInstance(Ci.nsIFilePicker);
+        picker.init(window.browsingContext, 'Chat에 첨부할 파일', Ci.nsIFilePicker.modeOpenMultiple);
+        picker.appendFilters(Ci.nsIFilePicker.filterAll);
+        picker.open(result => {
+          if (result !== Ci.nsIFilePicker.returnOK || !panel.isConnected) return;
+          const files = picker.files;
+          const additions = [];
+          while (files.hasMoreElements()) {
+            const file = files.getNext().QueryInterface(Ci.nsIFile);
+            additions.push({ id: `input-${chatBindingNonce()}`, kind: 'file', label: file.leafName, sourceRef: { path: file.path }, size: file.fileSize });
+          }
+          state.codexBridge.addInputSources(threadId, additions);
+          close();
+        });
+      } }, '파일 선택…'));
+      body.appendChild(el('button', { 'aria-label': '선택한 자료를 Chat 초안에 첨부', data: { testid: 'chat-attach-confirm' }, onclick: () => {
+        state.codexBridge.addInputSources(threadId, [...picked.values()]); close();
+      } }, '선택 항목 첨부'));
+    }
+    document.documentElement.appendChild(panel);
+    panel.querySelector('button')?.focus();
+  }
+
+  function buildChatInputTray(thread, bridge) {
+    const tray = el('div', { class: 'egd-chat-input-tray', data: { testid: 'chat-attachments', threadId: thread.id } });
+    tray.appendChild(el('button', { type: 'button', 'aria-label': '자료 첨부', data: { testid: 'chat-attach-open' }, onclick: () => openChatInputPanel(thread.id) }, '＋ 첨부'));
+    for (const source of thread.inputSources || []) {
+      tray.appendChild(el('div', { class: 'egd-chat-input-chip', data: { testid: 'chat-attachment', sourceId: source.id } },
+        el('button', { type: 'button', title: InputContext.inputSourceLocation(source), 'aria-label': `첨부 내용 확인: ${source.label}`,
+          data: { testid: 'chat-attachment-inspect' }, onclick: async () => {
+            try {
+              const refs = await bridge.captureInputs(thread.id, [source]);
+              if (refs?.length) await bridge.inspectInput(thread.id, refs[0]);
+            }
+            catch (error) { boardNotice(error.message); }
+          } }, `${source.label} · 미전송`),
+        el('button', { type: 'button', 'aria-label': `첨부 제거: ${source.label}`, data: { testid: 'chat-attachment-remove' },
+          onclick: () => bridge.removeInputSource(thread.id, source.id) }, '×')));
+    }
+    for (const reference of thread.briefingInputs || []) {
+      tray.appendChild(el('div', { class: 'egd-chat-input-chip', data: { testid: 'chat-briefing-input', sourceId: reference.sourceId } },
+        el('button', { type: 'button', 'aria-label': '브리핑의 고정 근거 확인', onclick: () => bridge.inspectInput(thread.id, reference) }, '브리핑 근거 · 미전송'),
+        el('button', { type: 'button', 'aria-label': '브리핑 근거 첨부 제거', onclick: () => bridge.removeBriefingInput(thread.id, reference.sourceId) }, '×')));
+    }
+    return tray;
+  }
+
+  function briefingResolvedTargets(session, step = BriefingState.currentBriefingStep(session)) {
+    const views = Array.from(document.querySelectorAll('.egd-input-evidence-card')).map(card => ({
+      id: card.id, sourceId: card._inputReference?.sourceId, hash: card._inputReference?.hash,
+      evidenceKey: InputContext.inputEvidenceKey(card._inputReference),
+      geometry: persistentEntityGeometry(card), sourceMatches: !!card._inputEvidenceLoaded, revisionMatches: !!card._inputEvidenceLoaded,
+    }));
+    return BriefingState.resolveBriefingTargets(step, { references: session.references, artifacts: session.artifacts, views, identity: session.identity });
+  }
+
+  function fitBriefingTargets(resolved) {
+    const bounds = BriefingState.briefingBounds(resolved);
+    if (!bounds) return false;
+    const safe = safeViewportRect({ margin: 28 });
+    const panelTop = document.getElementById('egd-answer-briefing')?.getBoundingClientRect().top;
+    if (panelTop > safe.top + 180) { safe.bottom = Math.min(safe.bottom, panelTop - 20); safe.height = safe.bottom - safe.top; }
+    const camera = SurfaceState.fitSurfaceCamera(bounds, safe);
+    state.setCanvasViewportTarget?.(camera, { immediate: window.matchMedia?.('(prefers-reduced-motion: reduce)').matches });
+    focusCanvasCard(document.getElementById(resolved.find(item => item.status === 'available')?.view.id));
+    return true;
+  }
+
+  function closeAnswerBriefing(options = {}) {
+    const session = state.codex.briefingSession;
+    state.codex.briefingSession = null;
+    document.getElementById('egd-answer-briefing')?.remove();
+    if (!session || options.restore === false) return;
+    state.setCanvasViewportTarget?.(session.previousView, { immediate: true });
+    setActiveEntity(document.getElementById(session.previousView.activeEntityId));
+  }
+
+  async function openAnswerBriefing(thread, message) {
+    if (!BriefingState.validBriefing(message.briefing) || ChatState.nativeBindingHeld(thread)) return;
+    if (['conversationId', 'runId', 'answerId'].some(key => message.briefing[key] !== message[key])) {
+      boardNotice('이 답변에 속하는 브리핑 연결을 확인하지 못했습니다.'); return;
+    }
+    if (state.codex.briefingSession) closeAnswerBriefing();
+    const local = thread.messages.flatMap(item => item.inputReferences || []);
+    const session = state.codex.briefingSession = {
+      ...BriefingState.beginBriefing(message.briefing, { pan: { ...state.panTarget }, zoom: state.zoomTarget, activeEntityId: state.activeEntityId }),
+      threadId: thread.id, identity: { conversationId: message.conversationId, runId: message.runId, answerId: message.answerId },
+      references: (message.contextCaptures || []).map(reference => ({ ...reference,
+        localSource: local.find(item => item.sourceId === reference.sourceId)?.localSource || null })),
+      artifacts: message.artifacts || [],
+      presentationId: chatBindingNonce(), preparing: true,
+    };
+    renderAnswerBriefing();
+    const isCurrent = () => state.codex.briefingSession?.presentationId === session.presentationId;
+    const materialized = new Set();
+    for (const step of session.briefing.steps) {
+      const reference = session.references.find(item => item.sourceId === step.target?.sourceId);
+      if (!reference || !isCurrent()) continue;
+      if (step.target.hash && step.target.hash !== reference.hash) continue;
+      try {
+        const ranged = { ...reference, presentationRange: step.target.range };
+        const key = InputContext.inputEvidenceKey(ranged);
+        if (materialized.has(key)) continue;
+        materialized.add(key);
+        await state.codexBridge.openInputEvidence(thread.id, ranged, { isCurrent });
+      } catch (error) { if (isCurrent()) boardNotice(error.message); }
+    }
+    if (!isCurrent()) return;
+    state.codex.briefingSession.preparing = false;
+    renderAnswerBriefing();
+    fitBriefingTargets(briefingResolvedTargets(state.codex.briefingSession));
+  }
+
+  function renderAnswerBriefing() {
+    const session = state.codex.briefingSession;
+    if (!session) return;
+    document.getElementById('egd-answer-briefing')?.remove();
+    const step = BriefingState.currentBriefingStep(session);
+    const resolved = briefingResolvedTargets(session);
+    const panel = el('section', { id: 'egd-answer-briefing', role: 'region', 'aria-label': '답변 브리핑',
+      data: { testid: 'answer-briefing', briefingId: session.briefing.id, stepId: step.id } });
+    panel.addEventListener('mousedown', event => event.stopPropagation());
+    const go = index => {
+      state.codex.briefingSession = BriefingState.selectBriefingStep(session, index);
+      renderAnswerBriefing();
+      fitBriefingTargets(briefingResolvedTargets(state.codex.briefingSession));
+      document.querySelector('#egd-answer-briefing nav')?.focus();
+    };
+    const nav = el('nav', { tabindex: '0', 'aria-label': '브리핑 단계 탐색' },
+      el('button', { disabled: session.index === 0 ? 'true' : null, data: { testid: 'briefing-previous' }, onclick: () => go(session.index - 1) }, '이전'),
+      el('span', { 'aria-live': 'polite' }, `${session.index + 1} / ${session.briefing.steps.length}`),
+      el('button', { data: { testid: 'briefing-overview' }, onclick: () => fitBriefingTargets(session.briefing.steps.flatMap(item => briefingResolvedTargets(session, item))) }, '전체 보기'),
+      el('button', { disabled: session.index === session.briefing.steps.length - 1 ? 'true' : null, data: { testid: 'briefing-next' }, onclick: () => go(session.index + 1) }, '다음'),
+      el('button', { 'aria-label': '브리핑 종료하고 이전 보기로 복귀', data: { testid: 'briefing-exit' }, onclick: closeAnswerBriefing }, '종료'));
+    nav.addEventListener('keydown', event => {
+      if (event.key === 'ArrowLeft' || event.key === 'ArrowRight') { event.preventDefault(); event.stopPropagation(); go(session.index + (event.key === 'ArrowRight' ? 1 : -1)); }
+    });
+    panel.appendChild(el('strong', {}, session.briefing.title || '답변 브리핑'));
+    panel.appendChild(nav);
+    panel.appendChild(el('p', {}, step.text));
+    if (session.preparing) panel.appendChild(el('p', { role: 'status' }, '이 브리핑이 선택한 고정 근거를 준비하고 있습니다.'));
+    for (const target of resolved) {
+      if (target.status !== 'available') panel.appendChild(el('p', { role: 'status' }, target.reason || step.fallback || '대상을 확인할 수 없습니다.'));
+      if (target.reference) {
+        panel.appendChild(el('button', { data: { testid: 'briefing-inspect', sourceId: target.reference.sourceId },
+          onclick: () => state.codexBridge.inspectInput(session.threadId, target.reference, target.target.range || {}) }, '당시 입력 보기'));
+        if (target.status !== 'available' && !session.preparing) panel.appendChild(el('button', { data: { testid: 'briefing-show-evidence', sourceId: target.reference.sourceId },
+          onclick: async () => {
+            await state.codexBridge.openInputEvidence(session.threadId, { ...target.reference, presentationRange: target.target.range }, { isCurrent: () => state.codex.briefingSession === session });
+            if (state.codex.briefingSession !== session) return;
+            renderAnswerBriefing(); fitBriefingTargets(briefingResolvedTargets(session));
+          } }, '고정 근거 다시 열기'));
+      }
+    }
+    const comment = el('textarea', { rows: '2', 'aria-label': '현재 브리핑 단계 의견', placeholder: '이 단계에 대한 의견', data: { testid: 'briefing-comment' } });
+    session.commentDrafts ||= {};
+    comment.value = session.commentDrafts[step.id] || '';
+    comment.addEventListener('input', () => { session.commentDrafts[step.id] = comment.value; });
+    panel.appendChild(comment);
+    panel.appendChild(el('button', { data: { testid: 'briefing-comment-attach' }, onclick: () => {
+      try { state.codexBridge.attachBriefingComment(session.threadId, BriefingState.briefingCommentDraft(session, comment.value, resolved), session.references); }
+      catch (error) { boardNotice(error.message); }
+    } }, '다음 Chat 초안에 포함'));
+    panel.appendChild(el('details', {}, el('summary', {}, '단계 목록'), ...session.briefing.steps.map((item, index) => el('button', {
+      'aria-label': `${index + 1}단계로 이동`, onclick: () => go(index),
+    }, `${index + 1}. ${item.text}`))));
+    document.documentElement.appendChild(panel);
+  }
+
+  function spawnInputEvidence(reference, stored = null, options = {}) {
+    const existing = Array.from(document.querySelectorAll('.egd-input-evidence-card')).find(card =>
+      InputContext.inputEvidenceKey(card._inputReference) === InputContext.inputEvidenceKey(reference));
+    if (existing && !options.restore) {
+      if (stored && !existing._inputEvidenceLoaded) {
+        existing._deskWindowShell.slots.content.replaceChildren(InputContext.inputSnapshotView(document, InputContext.storedSnapshotForView(stored, reference), { includeDelivered: false }));
+        existing._inputEvidenceLoaded = true;
+      }
+      return existing;
+    }
+    const shell = spawnDeskWindowShell({ id: `egd-input-evidence-${++cardSeq}`, kind: 'input-evidence', className: 'egd-input-evidence-card',
+      sourceRef: { kind: 'context-snapshot', id: reference.sourceId, scope: 'immutable-input' },
+      style: { left: `${180 + document.querySelectorAll('.egd-input-evidence-card').length * 680}px`, top: '160px', width: '640px', height: '480px' } });
+    shell.root._inputReference = cloneJson(reference);
+    shell.root._inputEvidenceLoaded = !!stored;
+    shell.slots.identity.appendChild(el('strong', {}, '당시 입력 · 읽기 전용'));
+    if (stored) shell.slots.content.appendChild(InputContext.inputSnapshotView(document, InputContext.storedSnapshotForView(stored, reference), { includeDelivered: false }));
+    else shell.slots.content.appendChild(el('button', { 'aria-label': '저장된 당시 입력 불러오기', onclick: async () => {
+      const result = await state.codexBridge.readInput(reference);
+      if (!result || !shell.root.isConnected) return;
+      shell.slots.content.replaceChildren(InputContext.inputSnapshotView(document, InputContext.storedSnapshotForView(result, reference), { includeDelivered: false }));
+      shell.root._inputEvidenceLoaded = true;
+    } }, '당시 입력 불러오기'));
+    return shell.root;
+  }
+
   function renderCodexActivityPanel() {
     const thread = getCodexThreadById(state.codex, state.codex.activityThreadId);
     if (!thread) { document.getElementById('egd-codex-activity-panel')?.remove(); return; }
@@ -649,6 +922,14 @@
     const oldBody = panel.querySelector('.egd-codex-activity-body');
     const scrollTop = oldBody?.scrollTop || 0;
     const rows = [];
+    for (const message of thread.messages || []) {
+      if (!message.inputReferences?.length) continue;
+      rows.push(el('details', { data: { testid: 'chat-input-history', requestId: message.requestId || '', runId: message.runId || '' } },
+        el('summary', {}, `당시 첨부 입력 · ${message.inputReferences.length}개`),
+        ...message.inputReferences.map(reference => el('button', { 'aria-label': `당시 입력 확인: ${reference.localSource?.label || reference.sourceId}`,
+          data: { testid: 'chat-input-history-open', snapshotId: reference.snapshotId },
+          onclick: () => state.codexBridge.inspectInput(thread.id, reference) }, reference.localSource?.label || reference.sourceId))));
+    }
     if (ChatState.nativeBindingHeld(thread)) {
       const reference = thread.retainedNativeBinding;
       rows.push(el('section', { data: { testid: 'chat-retained-binding' } },
@@ -664,6 +945,21 @@
     if (state.codex.chatProtocol.unobservedPreviousRun) rows.push(el('p', { role: 'status', data: { testid: 'chat-account-reset-status' } }, '이전 Codex 연결의 실행 종료는 확인되지 않았습니다. 로그아웃은 중지 확인이 아닙니다. 이전 계정에 다시 연결해 상태를 확인하세요.'));
     for (const run of codexRuns(thread)) {
       rows.push(el('h4', { data: { runId: run.runId } }, codexRunLabel(run)));
+      for (const entry of run.contextEvents || []) {
+        const labels = { 'context.read.started': '자료 읽기 시작', 'context.read.completed': '요청 범위의 자료 읽기 완료',
+          'context.read.failed': '자료 읽기 실패', 'reader.started': 'Reader 처리 시작', 'reader.completed': 'Reader 처리 완료', 'reader.failed': 'Reader 처리 실패' };
+        rows.push(el('p', { data: { testid: 'chat-context-activity', event: entry.event, sourceId: entry.details.sourceId || '' } }, labels[entry.event] || entry.event));
+      }
+      const packets = [...new Map([...(run.contextPackets || []), ...(run.contextEvents || []).filter(entry => entry.event === 'context.read.completed').map(entry => entry.details)]
+        .filter(packet => packet.packetId).map(packet => [packet.packetId, packet])).values()];
+      for (const packet of packets) {
+        const reference = run.contextCaptures?.find(capture => capture.sourceId === packet.sourceId);
+        if (!reference) continue;
+        rows.push(el('button', { 'aria-label': '이 읽기에서 실제 전달한 payload 확인',
+          data: { testid: 'chat-delivered-input-open', packetId: packet.packetId, sourceId: packet.sourceId },
+          onclick: () => state.codexBridge.inspectInput(thread.id, reference, { packetId: packet.packetId }),
+        }, `${reference.label || '입력'} · 전달 payload 보기`));
+      }
       if (run.summary) rows.push(el('p', { class: 'egd-codex-public-summary' }, run.summary));
       const steps = Array.isArray(run.plan) ? run.plan : run.plan?.steps;
       if (Array.isArray(steps)) rows.push(el('ul', {}, ...steps.map(step => el('li', {}, `${step.step || step.title || ''} · ${step.status || ''}`))));
@@ -1113,10 +1409,12 @@
     if (card.classList.contains('egd-settings-card')) return 'settings';
     if (card.classList.contains('egd-ontology-card')) return 'ontology';
     if (card.classList.contains('egd-chat-card')) return 'chat';
+    if (card.classList.contains('egd-input-evidence-card')) return 'input-evidence';
     return 'card';
   }
 
   function runtimeStateForCard(card, type) {
+    if (type === 'input-evidence') return { reference: cloneJson(card._inputReference) };
     if (type === 'browser') {
       return {
         uri: normalizeBrowserUri(card._browserState?.uri || card.querySelector('.egd-card-url')?.value || card._sourceRef?.uri || 'https://duckduckgo.com'),
@@ -1262,6 +1560,7 @@
         }
         view = spawnBrowserCard(uri, { openMode: 'new', sourceRef: record.sourceRef || {}, firstUse: !!record.runtimeState?.firstUseBrowser && state.surface.restoring, fixedLogicalHeight: record.runtimeState?.fixedLogicalHeight });
       } else if (record.type === 'ontology') view = spawnOntologyMapCard(record.runtimeState || {});
+      else if (record.type === 'input-evidence' && record.runtimeState?.reference) view = spawnInputEvidence(record.runtimeState.reference, null, { restore: true });
       else if (record.type === 'settings') view = spawnSettingsCard({ openMode: 'new' });
       else if (record.type === 'terminal' && options.newTerminal === true) view = spawnTerminalCard();
     } catch (error) { reason = error.message || reason; }
@@ -1315,6 +1614,8 @@
       }, el('div', { class: 'egd-board-region-bar' },
         el('button', { 'aria-label': `Board ${projection.title} 선택`, onclick: () => selectBoardProjection(projection.id) }, projection.title),
         el('button', { 'aria-label': '이 Board 저장', data: { testid: 'board-save', projectionId: projection.id }, onclick: () => saveCurrentAgendaState({ projectionId: projection.id }) }, '저장'),
+        el('button', { 'aria-label': '이 Board의 요소를 Chat에 첨부', data: { testid: 'board-attach-chat', projectionId: projection.id },
+          onclick: () => openChatInputPanel(state.codex.activeThreadId, { viewIds: projection.members.map(member => member.viewId) }) }, 'Chat 첨부'),
         el('button', { 'aria-label': '이 Board 닫기', data: { testid: 'board-close', projectionId: projection.id }, onclick: () => closeCurrentAgenda({ projectionId: projection.id }) }, '닫기')));
       document.getElementById('egd-canvas-layer').prepend(region);
     }
@@ -4413,6 +4714,11 @@
             const content = el('div', { class: 'egd-codex-bubble-content egd-codex-richtext' });
             appendRichText(content, parts.text || (message.status === 'streaming' ? '…' : ''), message, activeThread);
             const resultChips = buildCodexResultChips(message, activeThread, parts.links);
+            const briefingControl = BriefingState.validBriefing(message.briefing) ? el('button', {
+              class: 'egd-codex-result-chip', data: { testid: 'briefing-open', answerId: message.answerId },
+              disabled: ChatState.nativeBindingHeld(activeThread) ? 'true' : null,
+              onclick: () => openAnswerBriefing(activeThread, message),
+            }, '브리핑 보기') : null;
             const bubble = el('div', {
               class: [
                 'egd-codex-bubble',
@@ -4439,7 +4745,11 @@
               : null;
             const meta = codexMessageTimeMeta(message, activeThread);
             const messageLine = el('div', { class: 'egd-codex-message-line' }, bubble);
-            const messageStack = el('div', { class: 'egd-codex-message-stack' }, roleLabel, messageLine, resultChips, meta);
+            const messageStack = el('div', { class: 'egd-codex-message-stack' }, roleLabel, messageLine, resultChips, briefingControl, meta);
+            if (message.inputReferences?.length) messageStack.appendChild(el('button', {
+              class: 'egd-codex-result-chip', data: { testid: 'chat-message-inputs', requestId: message.requestId || '' },
+              onclick: () => openCodexActivityPanel(activeThread.id),
+            }, `첨부 입력 ${message.inputReferences.length}개 · 기록 보기`));
             const avatar = message.role !== 'user'
               ? el('div', {
                   class: `egd-codex-message-avatar${groupedWithPrevious ? ' egd-codex-message-avatar-spacer' : ''}`,
@@ -4464,8 +4774,8 @@
         el('button', { class: 'egd-codex-chip', 'aria-label': '새 Codex 대화 열기', data: { testid: 'chat-new-unbound-room' }, onclick: () => codexBridge.createThread('dm', { openConversation: true }) }, '새 Codex 대화')));
         const run = codexCurrentRun(activeThread);
         const pending = Object.values(codex.chatProtocol.requests).find(request => ChatState.requestBelongsToThread(request, activeThread) && ['submitting', 'unconfirmed'].includes(request.status));
-        const status = activeThread.resuming ? 'restoring' : pending?.status || run?.status || 'ready';
-        const statusText = bindingHeld ? '로컬 기록 · 연결 확인 필요' : activeThread.resuming ? '대화 상태 확인 중' : pending ? (pending.status === 'unconfirmed' ? '접수 상태 확인 필요' : '요청 보내는 중')
+        const status = activeThread.preparingInput ? 'preparing-input' : activeThread.resuming ? 'restoring' : pending?.status || run?.status || 'ready';
+        const statusText = bindingHeld ? '로컬 기록 · 연결 확인 필요' : activeThread.preparingInput ? '첨부 캡처 준비 중 · 아직 전송하지 않음' : activeThread.resuming ? '대화 상태 확인 중' : pending ? (pending.status === 'unconfirmed' ? '접수 상태 확인 필요' : '요청 보내는 중')
           : !run && codex.chatProtocol.unobservedPreviousRun ? '이전 연결의 실행 상태 미확인' : codexRunLabel(run);
         conversation.appendChild(el('div', {
           class: 'egd-codex-run-status', role: 'status', 'aria-live': 'polite',
@@ -4561,7 +4871,7 @@
               const height = Math.min(144, Math.max(48, input.scrollHeight));
               input.style.height = `${height}px`;
               input.style.overflowY = input.scrollHeight > height ? 'auto' : 'hidden';
-              sendButton.disabled = ChatState.nativeBindingHeld(activeThread) || codex.isSending || !input.value.trim() || !codex.authStatus.isLoggedIn || !codex.connected;
+              sendButton.disabled = ChatState.nativeBindingHeld(activeThread) || activeThread.preparingInput || codex.isSending || !input.value.trim() || !codex.authStatus.isLoggedIn || !codex.connected;
               sendButton.title = ChatState.nativeBindingHeld(activeThread) ? '보관된 연결을 현재 계정에 자동 연결하지 않습니다' : !codex.authStatus.isLoggedIn ? 'Codex 연결 후 전송할 수 있습니다' : !codex.connected ? 'Codex 연결을 확인해 주세요' : '보내기';
             };
             input.addEventListener('input', () => {
@@ -4601,6 +4911,7 @@
               onclick: () => codexBridge.interrupt(activeThread.id),
             }, run.stopRequested ? '확인 중' : '중지') : null;
             return el('div', { class: 'egd-codex-footer' },
+              buildChatInputTray(activeThread, codexBridge),
               el('div', { class: 'egd-codex-input-row' },
                 input,
                 el('div', { class: 'egd-codex-compose-actions' }, stopButton, sendButton),
@@ -4728,6 +5039,7 @@
       content,
       status,
       requestId: options.requestId || null,
+      inputReferences: cloneJson(options.inputReferences || []),
       readBy,
       createdAt: Date.now(),
     };
@@ -4744,7 +5056,7 @@
     let reconnectTimer = null;
 
     function threadBusy(thread) {
-      return !!thread?.resuming || ChatState.runsForThread(protocol, thread).some(ChatState.isRunBusy)
+      return !!thread?.resuming || !!thread?.preparingInput || ChatState.runsForThread(protocol, thread).some(ChatState.isRunBusy)
         || Object.values(protocol.requests).some(request => ChatState.requestBelongsToThread(request, thread) && ['submitting', 'unconfirmed'].includes(request.status));
     }
 
@@ -4757,10 +5069,28 @@
       const thread = updateThreadById(threadId, current => ({
         ...current, conversationId: run.conversationId, sendError: null,
         ...ChatState.nativeBindingForRun(current, run),
+        contextToolsAvailable: current.contextToolsAvailable === true || Array.isArray(run.contextCaptures),
         messages: ChatState.projectRunMessages(current.messages, run),
       }));
       for (const message of run.messages) bindMessageToThread(message.id, threadId);
       if (thread) markUserMessagesReadBy(threadId, thread.profileEnabled ? codexThreadAgentProfile(thread).name : 'Codex');
+    }
+
+    async function captureThreadInputs(thread, sources, token) {
+      if (!sources?.length) return [];
+      if (sources.length > 16) throw new Error('한 요청에는 최대 16개 자료를 첨부할 수 있습니다. 첨부를 나누거나 제거해 주세요.');
+      const attachments = [];
+      for (const source of sources || []) {
+        if (!epochScope.valid(token)) throw new Error('연결이 바뀌어 자료 캡처를 중단했습니다.');
+        const snapshot = source.kind === 'file' ? null : (await captureChatInputs([source]))[0];
+        if (!epochScope.valid(token)) throw new Error('연결이 바뀌어 자료 캡처를 중단했습니다.');
+        attachments.push(InputContext.captureAttachment(source, snapshot));
+      }
+      const result = await fetchJson('/context/captures', { method: 'POST', signal: token.signal,
+        body: JSON.stringify({ clientThreadId: ChatState.clientThreadBinding(thread), attachments }) });
+      if (!epochScope.valid(token)) throw new Error('연결이 바뀌어 자료 캡처를 중단했습니다.');
+      if (!Array.isArray(result.captures) || result.captures.length !== sources.length) throw new Error('일부 첨부의 캡처 저장을 확인하지 못했습니다.');
+      return sources.map(source => InputContext.capturedInputReference(source, result.captures.find(capture => capture.id === source.id)));
     }
 
     function resumeVerifiedThreads() {
@@ -4989,6 +5319,8 @@
       state.codex.memberMenu = null;
       state.codex.threadMenu = null;
       state.codex.activityThreadId = null;
+      document.getElementById('egd-codex-input-panel')?.remove();
+      closeAnswerBriefing({ restore: false });
       state.codex.codexAccountKey = null;
       state.codex.connected = false;
       state.codex.loginLog = '';
@@ -5291,6 +5623,91 @@
       },
       agentProfiles() {
         return CODEX_AGENT_PROFILE_DEFS.map((profile) => ({ ...profile }));
+      },
+      addInputSources(threadId, sources) {
+        const thread = getCodexThreadById(state.codex, threadId);
+        if (!thread || thread.preparingInput) return;
+        updateThreadById(threadId, thread => ({ ...thread, inputSources: InputContext.addInputSources(thread.inputSources, sources) }));
+        state.codex.activeThreadId = threadId;
+        state.codex.hudView = 'conversation';
+        emit();
+        if (!state.hudOpen && state.codex.chatDockMode !== 'canvas') toggleHUD('chat', '채팅');
+      },
+      removeInputSource(threadId, sourceId) {
+        if (getCodexThreadById(state.codex, threadId)?.preparingInput) return;
+        updateThreadById(threadId, thread => ({ ...thread, inputSources: InputContext.removeInputSource(thread.inputSources, sourceId) }));
+        emit();
+      },
+      async captureInputs(threadId, sources) {
+        const thread = getCodexThreadById(state.codex, threadId);
+        if (!thread || ChatState.nativeBindingHeld(thread)) return null;
+        const token = epochScope.begin();
+        try { return await captureThreadInputs(thread, sources, token); }
+        finally { epochScope.finish(token); }
+      },
+      async inspectInput(threadId, reference, options = {}) {
+        const thread = getCodexThreadById(state.codex, threadId);
+        if (!thread || !reference?.snapshotId) return;
+        const nonce = state.codex.inputInspectNonce = (state.codex.inputInspectNonce || 0) + 1;
+        const stored = await this.readInput(reference, options);
+        if (!stored || state.codex.inputInspectNonce !== nonce) return;
+        const snapshot = InputContext.storedSnapshotForView(stored, reference);
+        openChatInputPanel(threadId, { snapshots: [snapshot] });
+        const starts = options.pageStarts || [];
+        const nav = el('nav', { 'aria-label': '저장된 입력 페이지', data: { testid: 'chat-input-pagination' } },
+          el('button', { disabled: starts.length ? null : 'true', 'aria-label': '이전 캡처 페이지', data: { testid: 'chat-input-previous' },
+            onclick: () => this.inspectInput(threadId, reference, { startLine: starts.at(-1), pageStarts: starts.slice(0, -1), packetId: options.packetId }) }, '이전'),
+          el('span', {}, snapshot.range ? `${snapshot.range.startLine}–${snapshot.range.endLine}행` : '바이너리 캡처'),
+          el('button', { disabled: snapshot.nextLine == null ? 'true' : null, 'aria-label': '다음 캡처 페이지', data: { testid: 'chat-input-next' },
+            onclick: () => this.inspectInput(threadId, reference, { startLine: snapshot.nextLine, pageStarts: [...starts, snapshot.range?.startLine || 1], packetId: options.packetId }) }, '다음'));
+        document.querySelector('#egd-codex-input-panel .egd-codex-input-panel-body')?.appendChild(nav);
+        const packet = el('input', { type: 'text', placeholder: '기록된 packetId', 'aria-label': '과거 전달 packet ID', data: { testid: 'chat-input-packet-id' } });
+        packet.value = options.packetId || snapshot.delivered?.packetId || '';
+        document.querySelector('#egd-codex-input-panel .egd-codex-input-panel-body')?.appendChild(el('div', {}, packet,
+          el('button', { 'aria-label': '지정한 과거 전달본 조회', data: { testid: 'chat-input-packet-open' }, onclick: () => {
+            if (packet.value.trim()) void this.inspectInput(threadId, reference, { startLine: snapshot.range?.startLine || 1, packetId: packet.value.trim() });
+          } }, '전달본 조회')));
+      },
+      async readInput(reference, options = {}) {
+        if (!reference?.sourceId) return null;
+        const token = epochScope.begin();
+        try {
+          const { startLine, endLine } = InputContext.projectionRange({ startLine: options.startLine, endLine: options.endLine });
+          const query = `?startLine=${startLine}${options.endLine !== undefined ? `&endLine=${endLine}` : ''}${options.packetId ? `&packetId=${encodeURIComponent(options.packetId)}` : ''}`;
+          const stored = await fetchJson(`/context/captures/${encodeURIComponent(reference.sourceId)}${query}`, { signal: token.signal });
+          if (!epochScope.valid(token)) return;
+          InputContext.storedSnapshotForView(stored, reference);
+          if (stored.source.range && stored.source.range.startLine !== startLine) throw new Error('요청한 캡처 페이지 범위가 반환되지 않았습니다.');
+          if (options.packetId && stored.delivered?.packetId !== options.packetId) throw new Error('지정한 과거 전달본이 반환되지 않았습니다.');
+          return stored;
+        } catch (error) { if (epochScope.valid(token)) boardNotice(`당시 입력을 열지 못했습니다: ${error.message}`); }
+        finally { epochScope.finish(token); }
+      },
+      async openInputEvidence(threadId, reference, options = {}) {
+        if (!getCodexThreadById(state.codex, threadId)) return null;
+        const stored = await this.readInput(reference, reference.presentationRange);
+        if (options.isCurrent && !options.isCurrent()) return null;
+        if (stored?.source.text === null) { boardNotice('이 고정 원문은 바이너리입니다. 당시 입력 inspector에서 형식·전달 기록을 확인할 수 있습니다.'); return null; }
+        return stored ? spawnInputEvidence(reference, stored) : null;
+      },
+      removeBriefingInput(threadId, sourceId) {
+        const thread = getCodexThreadById(state.codex, threadId);
+        if (!thread || thread.preparingInput) return;
+        updateThreadById(threadId, item => ({ ...item, briefingInputs: (item.briefingInputs || []).filter(reference => reference.sourceId !== sourceId) }));
+        emit();
+      },
+      attachBriefingComment(threadId, comment, references) {
+        const thread = getCodexThreadById(state.codex, threadId);
+        if (!thread || thread.preparingInput || ChatState.nativeBindingHeld(thread)) return;
+        const current = getCodexThreadDraft(state.codex, threadId);
+        state.codex.threadDrafts[threadId] = `${current ? `${current}\n\n` : ''}${comment.text}`;
+        updateThreadById(threadId, item => ({ ...item, briefingInputs: [...new Map([...(item.briefingInputs || []),
+          ...references.filter(reference => comment.contextSnapshotIds.includes(reference.sourceId))].map(reference => [reference.sourceId, reference])).values()] }));
+        state.codex.activeThreadId = threadId;
+        state.codex.hudView = 'conversation';
+        emit();
+        if (!state.hudOpen && state.codex.chatDockMode !== 'canvas') toggleHUD('chat', '채팅');
+        boardNotice('단계 의견을 Chat 초안에 넣었습니다. 전송 전에는 새 업무를 시작하지 않습니다.');
       },
       threadRuntimeConfig(threadId = state.codex.activeThreadId) {
         const thread = getCodexThreadById(state.codex, threadId) || getActiveCodexThread(state.codex);
@@ -5622,13 +6039,29 @@
         const content = getCodexThreadDraft(state.codex, activeThread?.id || null).trim();
         if (!activeThread || ChatState.nativeBindingHeld(activeThread) || !content || threadBusy(activeThread) || !state.codex.authStatus.isLoggedIn || !state.codex.connected) return;
         const token = epochScope.begin();
+        const selectedInputs = cloneJson(activeThread.inputSources || []);
+        let inputReferences;
+        updateThreadById(activeThread.id, thread => ({ ...thread, preparingInput: true, sendError: null }));
+        emit();
+        try {
+          inputReferences = [...await captureThreadInputs(activeThread, selectedInputs, token), ...(activeThread.briefingInputs || [])];
+          if (!epochScope.valid(token)) { epochScope.finish(token); return; }
+          const current = getCodexThreadById(state.codex, activeThread.id);
+          if (!current || ChatState.clientThreadBinding(current) !== ChatState.clientThreadBinding(activeThread)) throw new Error('대화 연결이 바뀌었습니다. 초안을 다시 확인해 주세요.');
+        } catch (error) {
+          if (epochScope.valid(token)) updateThreadById(activeThread.id, thread => ({ ...thread, sendError: `자료를 준비하지 못해 전송하지 않았습니다: ${error.message}` }));
+          epochScope.finish(token);
+          return;
+        } finally {
+          if (epochScope.valid(token)) { updateThreadById(activeThread.id, thread => ({ ...thread, preparingInput: false })); emit(); }
+        }
         const requestId = `request-${Date.now().toString(36)}-${Math.random().toString(36).slice(2)}`;
         ChatState.registerChatRequest(protocol, { requestId, clientThreadId: ChatState.clientThreadBinding(activeThread), localThreadId: activeThread.id, conversationId: activeThread.conversationId, authorName: activeThread.profileEnabled ? codexThreadAgentProfile(activeThread).name : 'Codex' }, state.codex.authStatus);
         appendMessageToThread(activeThread.id, createCodexMessage('user', content, 'submitting', {
-          readBy: [SELF_MEMBER], requestId,
+          readBy: [SELF_MEMBER], requestId, inputReferences,
         }), { countUnread: false });
         state.codex.error = null;
-        updateThreadById(activeThread.id, thread => ({ ...thread, sendError: null }));
+        updateThreadById(activeThread.id, thread => ({ ...thread, sendError: null, inputSources: [], briefingInputs: [] }));
         state.codex.threadDrafts = {
           ...(state.codex.threadDrafts || {}),
           [activeThread.id]: '',
@@ -5637,6 +6070,8 @@
         emit();
         try {
           const runtimeConfig = codexThreadRuntimeConfig(activeThread);
+          runtimeConfig.contextSnapshotIds = inputReferences.map(reference => reference.snapshotId);
+          runtimeConfig.contextCapabilities = ChatState.contextCapabilitiesForRequest(activeThread, state.codex.authStatus, runtimeConfig.contextSnapshotIds);
           const result = await fetchJson('/chat/send', {
             method: 'POST',
             signal: token.signal,
@@ -5667,7 +6102,10 @@
               sendError: request.status === 'unconfirmed' ? `접수 여부를 확인하지 못했습니다. 자동으로 다시 보내지 않습니다. ${error.message}` : error.message,
               messages: thread.messages.map(message => message.requestId === requestId ? { ...message, status: request.status } : message),
             }));
-            if (request.status === 'failed' && !getCodexThreadDraft(state.codex, activeThread.id)) state.codex.threadDrafts[activeThread.id] = content;
+            if (request.status === 'failed' && !getCodexThreadDraft(state.codex, activeThread.id)) {
+              state.codex.threadDrafts[activeThread.id] = content;
+              updateThreadById(activeThread.id, thread => ({ ...thread, inputSources: InputContext.addInputSources(thread.inputSources, selectedInputs), briefingInputs: activeThread.briefingInputs || [] }));
+            }
           }
         } finally { epochScope.finish(token); if (epochScope.valid(token)) emit(); }
       },
@@ -9886,6 +10324,10 @@
       },
         item('복제', '현재 URL을 새 Desk Window로 열기', duplicateBrowser),
         item('URL 복사', browserState.uri, () => copyTextToClipboard(browserState.uri)),
+        item('Chat에 첨부', '현재 페이지를 다음 Chat의 자료로 선택', () => {
+          const source = chatInputSourceForView(card);
+          if (source) state.codexBridge.addInputSources(state.codex.activeThreadId, [source]);
+        }),
         item('홈', browserState.homeUrl, () => navigateBrowser(browserState.homeUrl)),
         item(browserState.loading ? '중지' : '새로고침', browserState.loading ? '로드 중지' : '현재 페이지 새로고침', () => (browserState.loading ? stopBrowser() : reloadBrowser())),
         item(isCardFullscreen(card) ? '창 복귀' : '최대화', 'Desk Window 최대화 전환', () => toggleCardFullscreen(card)),
@@ -9915,6 +10357,10 @@
       menu: showBrowserMenu,
       closeMenu: closeBrowserMenu,
       agentSnapshot: browserAgentSnapshot,
+      captureInput: async (options = {}) => {
+        const doc = readBrowserDocument();
+        return doc ? InputContext.captureDocumentText(doc, options) : browserAgentActorRequest('captureInput', { options });
+      },
       agentAct: browserAgentAct,
       agentHistory: browserAgentHistory,
       agentNotifications: browserAgentNotifications,
@@ -10430,7 +10876,7 @@
     };
     const shouldAllowHudScroll = (target) => {
       if (!(target instanceof Element)) return false;
-      return !!target.closest('#egd-hud, #egd-codex-activity-panel');
+      return !!target.closest('#egd-hud, #egd-codex-activity-panel, #egd-codex-input-panel, #egd-answer-briefing');
     };
     const wheelSession = {
       owner: null,
