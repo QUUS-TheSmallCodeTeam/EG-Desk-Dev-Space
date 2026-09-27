@@ -378,3 +378,97 @@ test('unsupported candidate returned by UI is never treated as adapter-owned for
     assert.equal(fixture.record.retired, 0);
   }
 });
+
+test('cancel and stop retain failed staged cleanup until an explicit retry confirms disposal', async () => {
+  for (const action of ['cancel', 'stop']) {
+    const native = nativeFixture();
+    const fixture = cardFixture();
+    let watched;
+    const watching = new Promise(resolve => { watched = resolve; });
+    fixture.lifecycle.watchCandidate = () => { watched(); return { ready: new Promise(() => {}), dispose() {} }; };
+    let discardCalls = 0;
+    fixture.lifecycle.discardCandidate = async () => { discardCalls++; throw new Error('native disposal failed'); };
+    const adapter = createBrowserIdentityAdapter({ ...native, lifecycle: fixture.lifecycle });
+    const controller = new AbortController();
+    const switching = adapter.switchCardContext(switchRequest(fixture, { signal: controller.signal }));
+    await watching;
+    const stopping = action === 'stop' ? adapter.stop() : null;
+    if (action === 'cancel') controller.abort();
+    const result = await switching;
+    assert.equal(result.status, 'cleanup-required');
+    assert.equal(fixture.record.candidates[0].isConnected, true);
+    assert.equal(fixture.card.browser, fixture.original);
+    assert.equal(fixture.original.isConnected, true);
+    assert.equal(adapter.cleanupState().length, 1);
+    assert.equal(adapter.cleanupState()[0].id, result.cleanupId);
+    assert.match(adapter.cleanupState()[0].error, /native disposal failed/);
+    if (stopping) assert.equal((await stopping).status, 'cleanup-required');
+    assert.equal((await adapter.switchCardContext(switchRequest(fixture))).status, 'cleanup-required');
+    assert.equal(fixture.record.candidates.length, 1, 'do not pile up more hidden browsers on the same Card');
+    fixture.lifecycle.discardCandidate = async candidate => { discardCalls++; candidate.isConnected = false; return true; };
+    assert.equal((await adapter.retryCleanup({ cleanupId: result.cleanupId })).status, 'cleaned');
+    assert.equal(discardCalls, 2);
+    assert.deepEqual(adapter.cleanupState(), []);
+    assert.equal((await adapter.stop()).status, 'stopped');
+  }
+});
+
+test('a resolved discard that leaves the browser mounted is not cleanup success', async () => {
+  const native = nativeFixture();
+  const fixture = cardFixture();
+  fixture.lifecycle.watchCandidate = () => ({ ready: Promise.resolve(false), dispose() {} });
+  fixture.lifecycle.discardCandidate = () => true;
+  const adapter = createBrowserIdentityAdapter({ ...native, lifecycle: fixture.lifecycle });
+  const result = await adapter.switchCardContext(switchRequest(fixture));
+  assert.equal(result.status, 'cleanup-required');
+  assert.equal(adapter.cleanupState().length, 1);
+  let calls = 0, finish;
+  fixture.lifecycle.discardCandidate = candidate => {
+    calls++;
+    return new Promise(resolve => { finish = () => { candidate.isConnected = false; resolve(true); }; });
+  };
+  const first = adapter.retryCleanup({ cardId: fixture.card.cardId });
+  const second = adapter.retryCleanup({ cardId: fixture.card.cardId });
+  await Promise.resolve();
+  assert.equal(calls, 1, 'retry callers share the owned candidate disposal');
+  assert.equal(adapter.cleanupState()[0].status, 'cleaning');
+  finish();
+  assert.equal((await first).status, 'cleaned');
+  assert.equal((await second).status, 'cleaned');
+  assert.deepEqual(adapter.cleanupState(), []);
+});
+
+test('cleanup retry cannot discard a candidate that has become the current Card browser', async () => {
+  const native = nativeFixture();
+  const fixture = cardFixture();
+  fixture.lifecycle.watchCandidate = () => ({ ready: Promise.resolve(false), dispose() {} });
+  fixture.lifecycle.discardCandidate = () => { throw new Error('initial failure'); };
+  const adapter = createBrowserIdentityAdapter({ ...native, lifecycle: fixture.lifecycle });
+  await adapter.switchCardContext(switchRequest(fixture));
+  const candidate = fixture.record.candidates[0];
+  fixture.card.browser = candidate;
+  fixture.lifecycle.discardCandidate = () => assert.fail('active candidate must not be destroyed');
+  assert.equal((await adapter.retryCleanup()).status, 'cleanup-required');
+  assert.equal(candidate.isConnected, true);
+  assert.equal(adapter.cleanupState().length, 1);
+  assert.match(adapter.cleanupState()[0].error, /may be active/);
+  fixture.card.browser = fixture.original;
+  fixture.lifecycle.discardCandidate = browser => { browser.isConnected = false; return true; };
+  assert.equal((await adapter.retryCleanup()).status, 'cleaned');
+});
+
+test('even a detached candidate remains tracked when its disposal hook rejects', async () => {
+  const native = nativeFixture();
+  const fixture = cardFixture();
+  fixture.lifecycle.mountCandidate = () => { throw new Error('mount failed'); };
+  fixture.lifecycle.discardCandidate = () => { throw new Error('detached native resources not disposed'); };
+  const adapter = createBrowserIdentityAdapter({ ...native, lifecycle: fixture.lifecycle });
+  const result = await adapter.switchCardContext(switchRequest(fixture));
+  assert.equal(result.status, 'cleanup-required');
+  assert.equal(fixture.record.candidates[0].isConnected, false);
+  assert.equal(adapter.cleanupState().length, 1);
+  fixture.lifecycle.discardCandidate = () => false;
+  assert.equal((await adapter.retryCleanup()).status, 'cleanup-required');
+  fixture.lifecycle.discardCandidate = () => true;
+  assert.equal((await adapter.retryCleanup()).status, 'cleaned');
+});

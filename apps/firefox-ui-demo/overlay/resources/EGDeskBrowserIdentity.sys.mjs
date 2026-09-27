@@ -92,7 +92,10 @@ export function popupContextOptions(openerBrowser) {
  * stages it in the same private-window context without replacing original.
  * retireOriginal/discardCandidate destroy the owned old/staged browsing context;
  * retireOriginal resolves true after confirmed disposal. Await stop() on teardown
- * so in-flight candidates finish disposal before the UI is removed.
+ * and inspect its status before removing the UI. Failed staged disposal remains
+ * owned in cleanupState(); retryCleanup() retries only those owned candidates.
+ * discardCandidate must finish destruction and detach the browser; rejection,
+ * explicit false, or a still-connected candidate is not cleanup confirmation.
  * Native API reference (interface use only; no Mozilla implementation copied):
  * https://firefox-source-docs.mozilla.org/browser/components/tabbrowser/docs/opening-tabs.html
  */
@@ -108,6 +111,44 @@ export function createBrowserIdentityAdapter({ identityService, services, lifecy
   let epoch = 0;
   const switches = new Map();
   const pendingSwitches = new Set();
+  const pendingCleanup = new Map();
+  let cleanupSequence = 0;
+
+  function cleanupState() {
+    return [...pendingCleanup.values()].map(({ id, cardId, attempts, error, pending }) => ({
+      id, cardId, status: pending ? 'cleaning' : 'cleanup-required', attempts, error,
+    }));
+  }
+
+  function discardOwnedCandidate(record) {
+    if (record.pending) return record.pending;
+    record.pending = Promise.resolve().then(async () => {
+      try {
+        const current = lifecycle.snapshot(record.cardId);
+        if (current?.then || current?.browser === record.candidate) {
+          throw new Error('Candidate may be active; restore its Card binding before cleanup');
+        }
+        record.attempts++;
+        const receipt = await lifecycle.discardCandidate(record.candidate);
+        if (receipt === false || record.candidate.isConnected !== false) {
+          throw new Error('Candidate disposal is not confirmed');
+        }
+        pendingCleanup.delete(record.id);
+        return true;
+      } catch (error) {
+        record.error = String(error?.message || error).slice(0, 500);
+        return false;
+      } finally { record.pending = null; }
+    });
+    return record.pending;
+  }
+
+  async function retryCleanup({ cleanupId, cardId } = {}) {
+    const records = [...pendingCleanup.values()].filter(record =>
+      (!cleanupId || record.id === cleanupId) && (!cardId || record.cardId === cardId));
+    await Promise.all(records.map(discardOwnedCandidate));
+    return { status: pendingCleanup.size ? 'cleanup-required' : 'cleaned', pendingCleanup: cleanupState() };
+  }
 
   function supported() {
     try {
@@ -187,7 +228,9 @@ export function createBrowserIdentityAdapter({ identityService, services, lifecy
     }
     observing = false;
     onChange = null;
-    return Promise.all(pending.map((token) => token.done)).then(() => undefined);
+    return Promise.all(pending.map((token) => token.done)).then(() => ({
+      status: pendingCleanup.size ? 'cleanup-required' : 'stopped', pendingCleanup: cleanupState(),
+    }));
   }
 
   function createContainer({ name, icon, color, explicitUserRequest } = {}) {
@@ -220,6 +263,8 @@ export function createBrowserIdentityAdapter({ identityService, services, lifecy
   async function switchCardContext({ cardId, expectedBrowser, expectedRevision,
     targetUserContextId, explicitUserRequest, signal } = {}) {
     if (explicitUserRequest !== true) return { status: 'denied', reason: 'explicit-user-request-required' };
+    const remainingCleanup = cleanupState().filter(record => record.cardId === cardId);
+    if (remainingCleanup.length) return { status: 'cleanup-required', cardId, pendingCleanup: remainingCleanup };
     if (closed) return { status: 'unavailable' };
     if (!supported() || !requiredLifecycle() ||
         !listContainers().containers.some((item) => item.userContextId === targetUserContextId)) {
@@ -374,7 +419,14 @@ export function createBrowserIdentityAdapter({ identityService, services, lifecy
       } finally {
         try { watcher?.dispose(); } catch { /* disposal does not imply load success */ }
         if (candidateOwned && !committed) {
-          try { await lifecycle.discardCandidate(candidate); } catch { /* preserve original */ }
+          const record = { id: `candidate-cleanup-${++cleanupSequence}`, cardId, candidate,
+            attempts: 0, error: null, pending: null };
+          pendingCleanup.set(record.id, record);
+          if (!(await discardOwnedCandidate(record))) {
+            // Override cancelled/unavailable: the hidden runtime is still owned
+            // and must not disappear from tracking when this switch finishes.
+            return { status: 'cleanup-required', cardId, cleanupId: record.id, pendingCleanup: cleanupState() };
+          }
         }
       }
     } finally {
@@ -385,6 +437,6 @@ export function createBrowserIdentityAdapter({ identityService, services, lifecy
     }
   }
 
-  return { mode, supported, start, stop, listContainers, createContainer,
+  return { mode, supported, start, stop, cleanupState, retryCleanup, listContainers, createContainer,
     switchCardContext, configureBrowser, popupContextOptions };
 }
