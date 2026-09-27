@@ -49,28 +49,56 @@ export function extractLegacyChatRecords(deskSnapshot) {
   return records;
 }
 
-// A legacy room can be imported through the v2 snapshot route only when all
-// saved items already carry their original native IDs. Never invent a native
-// conversation/run/message ID for an optimistic or local-only item.
+const legacyLocalId = (kind, ...parts) => `legacy-${kind}:${parts.map(value => {
+  const part = String(value ?? '');
+  return `${part.length}:${part}`;
+}).join('')}`;
+
+// Every saved item gets a deterministic local identity. Native IDs are copied
+// only when the old record actually had them; local-only/optimistic items are
+// still importable, but cannot acquire native resume authority from this data.
 export function legacyPublicChatSnapshot(record) {
   const thread = record?.threadSnapshot;
-  const conversationId = thread?.conversationId || thread?.retainedNativeBinding?.conversationId;
-  if (!conversationId || !Array.isArray(thread.messages) || !thread.messages.length) return null;
+  const clientThreadId = record?.clientThreadId;
+  if (!clientThreadId || !Array.isArray(thread?.messages) || !thread.messages.length) return null;
+  const threadConversationId = thread.conversationId || thread.retainedNativeBinding?.conversationId || null;
+  const provenance = { scope: 'egdesk-local', source: 'firefox-pref', version: 1, importId: record.importId || null };
   const runs = new Map();
-  for (const message of thread.messages) {
-    const runId = message?.runId;
-    const messageId = message?.providerItemId || message?.messageId;
-    if (!['user', 'assistant'].includes(message?.role) || !runId || !messageId
-        || message.conversationId && message.conversationId !== conversationId) return null;
-    const run = runs.get(runId) || { conversationId, runId, answerId: message.answerId || runKey(conversationId, runId),
+  const seenMessages = new Set();
+  for (const [index, message] of thread.messages.entries()) {
+    if (!['user', 'assistant'].includes(message?.role)) continue;
+    const legacyMessageId = typeof message.id === 'string' && message.id ? message.id : `ordinal-${index}`;
+    const localMessageId = legacyLocalId('message', clientThreadId, legacyMessageId);
+    if (seenMessages.has(localMessageId)) continue;
+    seenMessages.add(localMessageId);
+    const runId = typeof message.runId === 'string' && message.runId ? message.runId : null;
+    const conversationId = typeof message.conversationId === 'string' && message.conversationId
+      ? message.conversationId : runId ? threadConversationId : null;
+    const messageId = typeof message.providerItemId === 'string' && message.providerItemId
+      ? message.providerItemId : typeof message.messageId === 'string' && message.messageId ? message.messageId : null;
+    const runSource = runId ? ['native', conversationId, runId]
+      : message.requestId ? ['request', message.requestId]
+        : message.answerId ? ['answer', message.answerId] : ['message', legacyMessageId];
+    const localRunId = legacyLocalId('run', clientThreadId, ...runSource);
+    const answerId = message.answerId || (conversationId && runId ? runKey(conversationId, runId) : null);
+    const run = runs.get(localRunId) || { localRunId, conversationId, runId, answerId,
       requestId: message.requestId || null, status: 'unavailable', messages: [], activities: [], artifacts: [],
-      pendingApprovals: [], historyComplete: false, truncated: true };
+      pendingApprovals: [], historyComplete: false, truncated: true, provenance: copy(provenance) };
     if (!run.requestId && message.requestId) run.requestId = message.requestId;
-    const item = { id: messageId, role: message.role, text: message.content ?? message.text ?? '',
-      status: message.status === 'completed' ? 'complete' : message.status || 'complete',
-      createdAt: message.createdAt || null, answerId: message.answerId || run.answerId };
+    if (!run.answerId && answerId) run.answerId = answerId;
+    const item = { id: messageId, messageId, localMessageId, localRunId,
+      conversationId, runId, answerId, requestId: message.requestId || null,
+      role: message.role, text: message.content ?? message.text ?? '',
+      status: message.status === 'completed' ? 'complete' : message.status || 'partial',
+      createdAt: message.createdAt || null, provenance: copy(provenance) };
     if (message.phase) item.phase = message.phase;
     if (message.inputReferences?.length) item.inputReferences = copy(message.inputReferences);
+    if (message.readBy?.length) item.readBy = copy(message.readBy);
+    if (message.briefing) item.briefing = copy(message.briefing);
+    if (message.contextCaptures?.length) item.contextCaptures = copy(message.contextCaptures);
+    if (message.contextEvents?.length) item.contextEvents = copy(message.contextEvents);
+    if (message.contextPackets?.length) item.contextPackets = copy(message.contextPackets);
+    if (message.artifacts?.length) item.artifacts = message.artifacts.filter(usableArtifact).map(copy);
     run.messages.push(item);
     if (message.role === 'assistant') {
       if (message.authorName) run.authorName = message.authorName;
@@ -80,8 +108,9 @@ export function legacyPublicChatSnapshot(record) {
       if (message.contextEvents?.length) run.contextEvents = copy(message.contextEvents);
       if (message.contextPackets?.length) run.contextPackets = copy(message.contextPackets);
     }
-    runs.set(runId, run);
+    runs.set(localRunId, run);
   }
+  if (!runs.size) return null;
   for (const run of runs.values()) {
     if (run.contextCaptures || run.contextPackets || run.briefing) run.context = {
       captures: copy(run.contextCaptures || []), packets: copy(run.contextPackets || []),
@@ -89,8 +118,13 @@ export function legacyPublicChatSnapshot(record) {
     };
     if (typeof thread.cwd === 'string') run.cwdPublic = thread.cwd;
   }
-  return { protocolVersion: 2, conversationId, streamId: `legacy-pref:${record.clientThreadId}`,
-    seq: 0, truncated: true, historyComplete: false, runs: [...runs.values()] };
+  const nativeConversationIds = new Set([...runs.values()].map(run => run.conversationId));
+  const conversationId = nativeConversationIds.size === 1 && !nativeConversationIds.has(null)
+    ? [...nativeConversationIds][0] : null;
+  return { protocolVersion: 2, conversationId, streamId: null, seq: 0,
+    truncated: true, historyComplete: false, provenance,
+    coverage: { scope: 'egdesk-local', status: 'partial', reasons: ['legacy-pref-import'], nativeHistoryComplete: false },
+    runs: [...runs.values()] };
 }
 
 function sameLocalMessage(a, b) {
@@ -156,6 +190,10 @@ export function hydrateLocalChatThread(current, history, options = {}) {
   if (current.localConversationId && history.localConversationId && current.localConversationId !== history.localConversationId) return current;
   const saved = history.threadSnapshot || {};
   const persistedMessages = Array.isArray(history.messages) ? history.messages : saved.messages;
+  const currentMessages = (current.messages || []).map((message, index) =>
+    message.localMessageId || message.localHistory === true || Number.isSafeInteger(message.liveRevision)
+      ? message : { ...message, localMessageId: legacyLocalId('message', clientThreadId,
+        typeof message.id === 'string' && message.id ? message.id : `ordinal-${index}`) });
   return {
     ...copy(saved), ...current,
     id: clientThreadId,
@@ -165,7 +203,7 @@ export function hydrateLocalChatThread(current, history, options = {}) {
     bindingAccountKey: current.bindingAccountKey || null,
     bindingState: current.bindingState || 'fresh',
     retainedNativeBinding: current.retainedNativeBinding || null,
-    messages: mergeLocalChatMessages(current.messages, persistedMessages, options),
+    messages: mergeLocalChatMessages(currentMessages, persistedMessages, options),
     localRuns: mergeLocalChatRuns(current.localRuns, history.runs),
     localHistoryCoverage: history.coverage || current.localHistoryCoverage || null,
   };
@@ -201,7 +239,7 @@ export function normalizeLocalHistoryPage(page, clientThreadId) {
     localMessageId: message.localMessageId || event.localMessageId || undefined,
     localRunId: message.localRunId || event.localRunId || undefined,
     messageId: message.messageId || event.messageId || undefined,
-    id: message.id || message.localMessageId || event.localMessageId || message.messageId || event.messageId,
+    id: message.localMessageId || event.localMessageId || message.id || message.messageId || event.messageId,
     providerItemId: message.providerItemId || message.messageId || event.messageId || undefined,
     content: message.content ?? message.text ?? '',
     localSeq: event.seq ?? message.localSeq,

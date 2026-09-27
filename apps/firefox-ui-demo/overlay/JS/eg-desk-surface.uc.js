@@ -5140,11 +5140,14 @@
     const epochScope = ChatState.createChatEpochScope({ makeController: () => new window.AbortController() });
     const refreshing = new Map();
     const resumedNativeBindings = new Set();
-    const attemptedLegacyImports = new Set();
+    const confirmedLegacyImports = new Set();
     const initialDefaultThreadId = state.codex.threads[0]?.id;
     let localLoadPromise = null;
     let lastLocalLoadAt = 0;
     let legacyHistoryRecords = initialLegacyRecords;
+    let localRetryTimer = null;
+    let localRetryBudget = 1;
+    let localAutoRetryEligible = false;
     let streamReady = false;
     let source = null;
     let reconnectTimer = null;
@@ -5536,12 +5539,22 @@
       }
     }
 
-    async function loadLocalHistory(legacyRecords = []) {
+    function queueLocalHistoryRetry() {
+      if (!localAutoRetryEligible || localRetryBudget <= 0 || localRetryTimer) return;
+      localRetryTimer = window.setTimeout(() => {
+        localRetryTimer = null;
+        if (state.codex.localHistoryStatus !== 'error' || localRetryBudget <= 0) return;
+        localRetryBudget--;
+        void loadLocalHistory([], { force: true });
+      }, 30000);
+    }
+
+    async function loadLocalHistory(legacyRecords = [], { force = false } = {}) {
       if (legacyRecords.length) legacyHistoryRecords = legacyRecords;
       if (!state.codex.localHistoryBootReady) return false;
       if (state.codex.localHistoryStatus === 'unsupported') return false;
       if (localLoadPromise) return localLoadPromise;
-      if (state.codex.localHistoryStatus === 'error' && Date.now() - lastLocalLoadAt < 30000) return false;
+      if (!force && state.codex.localHistoryStatus === 'error' && Date.now() - lastLocalLoadAt < 30000) return false;
       lastLocalLoadAt = Date.now();
       localLoadPromise = (async () => {
         state.codex.localHistoryStatus = 'loading';
@@ -5550,25 +5563,32 @@
         try {
           let summaries = await listLocalHistoryThreads();
           const existing = new Set(summaries.map(thread => thread.clientThreadId));
-          let imported = false;
+          const acknowledged = new Map();
           if (state.codex.legacyChatBackupKey) for (const record of legacyHistoryRecords) {
-            if (existing.has(record.clientThreadId) || attemptedLegacyImports.has(record.importId)) continue;
+            if (existing.has(record.clientThreadId) || confirmedLegacyImports.has(record.importId)) continue;
             const snapshot = ChatState.legacyPublicChatSnapshot(record);
-            if (!snapshot) continue; // Local-only/optimistic items remain in the backed-up pref.
-            attemptedLegacyImports.add(record.importId);
+            if (!snapshot) continue; // Empty rooms and unrecognized roles remain in the backed-up pref.
             stage = 'import';
             const result = await fetchJson('/chat/history/import', { method: 'POST', body: JSON.stringify({
               clientThreadId: record.clientThreadId, importId: record.importId, snapshot,
             }) });
             if (result.clientThreadId !== record.clientThreadId || !result.imported && !result.alreadyImported) throw new Error('로컬 기록 가져오기 확인에 실패했습니다.');
-            imported = true;
+            acknowledged.set(record.clientThreadId, record.importId);
           }
-          if (imported) { stage = 'list'; summaries = await listLocalHistoryThreads(); }
+          if (acknowledged.size) {
+            stage = 'list';
+            summaries = await listLocalHistoryThreads();
+            const visible = new Set(summaries.map(thread => thread.clientThreadId));
+            if ([...acknowledged.keys()].some(clientThreadId => !visible.has(clientThreadId))) throw new Error('가져온 로컬 기록을 목록에서 확인하지 못했습니다.');
+            for (const importId of acknowledged.values()) confirmedLegacyImports.add(importId);
+          }
           stage = 'history';
           for (const summary of summaries) await loadLocalHistoryThread(summary);
           const backupFailed = state.codex.legacyChatBackupRequired && !state.codex.legacyChatBackupKey;
           state.codex.localHistoryStatus = backupFailed ? 'error' : 'ready';
           state.codex.localHistoryError = backupFailed ? '기존 채팅 기록의 백업을 확인하지 못했습니다. 원본 저장값은 유지됩니다.' : null;
+          localAutoRetryEligible = false;
+          if (localRetryTimer) { window.clearTimeout(localRetryTimer); localRetryTimer = null; }
           emit();
           return true;
         } catch (error) {
@@ -5576,9 +5596,12 @@
             // Older fixture transports do not implement local history yet.
             state.codex.localHistoryStatus = 'unsupported';
             state.codex.localHistoryError = null;
+            localAutoRetryEligible = false;
           } else {
             state.codex.localHistoryStatus = 'error';
             state.codex.localHistoryError = '로컬 기록을 확인하지 못했습니다. 기존 채팅과 초안은 유지됩니다.';
+            localAutoRetryEligible = error.status == null || error.status >= 500;
+            queueLocalHistoryRetry();
             console.warn(TAG, 'local chat history load failed', error);
           }
           emit();
@@ -5725,7 +5748,13 @@
         streamReady = true;
         resumedNativeBindings.clear();
         update({ connected: true });
-        void loadLocalHistory();
+        if (state.codex.localHistoryStatus === 'error') {
+          if (localAutoRetryEligible && localRetryBudget > 0) {
+            localRetryBudget--;
+            if (localRetryTimer) { window.clearTimeout(localRetryTimer); localRetryTimer = null; }
+            void loadLocalHistory([], { force: true });
+          }
+        } else void loadLocalHistory();
       });
 
       const receive = (message) => {

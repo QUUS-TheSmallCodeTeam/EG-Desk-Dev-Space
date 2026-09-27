@@ -1431,7 +1431,7 @@ test('canonical event checkpoints supplement bounded projections without replayi
   assert.equal(Chat.normalizeLocalHistoryPage({ ...page, events: [{ seq: 1, details: {} }] }, 'room').knownGap, true);
 });
 
-test('legacy import uses original native item IDs only and retains public references', () => {
+test('legacy import keeps original native IDs and retains public references', () => {
   const record = { clientThreadId: 'room', threadSnapshot: { conversationId: 'native-c', cwd: '/working', messages: [
     { id: 'optimistic-user', providerItemId: 'native-u', role: 'user', conversationId: 'native-c', runId: 'native-r',
       requestId: 'request-a', content: 'Prompt', inputReferences: [{ sourceId: 'capture-a', hash: 'fixed' }] },
@@ -1446,8 +1446,199 @@ test('legacy import uses original native item IDs only and retains public refere
   assert.deepEqual(snapshot.runs[0].context.briefings, [{ id: 'brief-a' }]);
   assert.equal(snapshot.runs[0].cwdPublic, '/working');
   assert.equal(snapshot.historyComplete, false);
-  assert.equal(Chat.legacyPublicChatSnapshot({ ...record, threadSnapshot: { ...record.threadSnapshot,
-    messages: [{ ...record.threadSnapshot.messages[0], providerItemId: null }] } }), null);
+  assert.equal(snapshot.coverage.status, 'partial');
+  assert.equal(snapshot.runs[0].localRunId.startsWith('legacy-run:'), true);
+  assert.equal(snapshot.runs[0].messages[0].localMessageId.startsWith('legacy-message:'), true);
+  const withoutNativeItem = Chat.legacyPublicChatSnapshot({ ...record, threadSnapshot: { ...record.threadSnapshot,
+    messages: [{ ...record.threadSnapshot.messages[0], providerItemId: null }] } });
+  assert.equal(withoutNativeItem.runs[0].messages[0].id, null);
+  assert.equal(withoutNativeItem.runs[0].messages[0].messageId, null);
+  assert.equal(withoutNativeItem.runs[0].messages[0].localMessageId, snapshot.runs[0].messages[0].localMessageId);
+});
+
+test('legacy local-only messages import with stable local IDs and no invented native or resume authority', () => {
+  const reference = { sourceId: 'capture-a', snapshotId: 'capture-a', hash: 'fixed' };
+  const record = { clientThreadId: 'room', importId: 'firefox-pref:egdesk.deskSession.v1:room',
+    draft: 'newer unsent draft', savedAccountKey: 'codex:chatgpt:original@example.test',
+    threadSnapshot: { id: 'room', title: 'Old room', messages: [
+      { id: 'local-user', role: 'user', requestId: 'request-a', content: 'Unconfirmed prompt', status: 'unconfirmed',
+        inputReferences: [reference], createdAt: 10 },
+      { id: 'local-answer', role: 'assistant', requestId: 'request-a', content: 'Saved answer', status: 'partial',
+        briefing: { id: 'brief-a', steps: [{ id: 'step-a', target: { sourceId: 'capture-a' } }] },
+        contextCaptures: [reference], createdAt: 20 },
+    ] } };
+  const before = structuredClone(record);
+  const snapshot = Chat.legacyPublicChatSnapshot(record);
+  assert.deepEqual(Chat.legacyPublicChatSnapshot(record), snapshot, 'repeated import uses identical local identities and payload');
+  assert.deepEqual(record, before, 'building the import does not consume or edit the pref draft or references');
+  assert.equal(snapshot.conversationId, null);
+  assert.equal(snapshot.streamId, null);
+  assert.equal(snapshot.historyComplete, false);
+  assert.equal(snapshot.coverage.nativeHistoryComplete, false);
+  assert.deepEqual(snapshot.coverage.reasons, ['legacy-pref-import']);
+  assert.equal(snapshot.runs.length, 1, 'messages sharing the original request stay in one local run');
+  const [run] = snapshot.runs;
+  assert.equal(run.conversationId, null);
+  assert.equal(run.runId, null);
+  assert.equal(run.status, 'unavailable');
+  assert.equal(run.provenance.source, 'firefox-pref');
+  assert.deepEqual(run.messages.map(message => message.id), [null, null]);
+  assert.deepEqual(run.messages.map(message => message.messageId), [null, null]);
+  assert.equal(new Set(run.messages.map(message => message.localMessageId)).size, 2);
+  assert.ok(run.messages.every(message => message.localRunId === run.localRunId));
+  assert.deepEqual(run.messages[0].inputReferences, [reference]);
+  assert.deepEqual(run.context.captures, [reference]);
+  assert.equal(run.briefing.id, 'brief-a');
+  assert.equal(JSON.stringify(snapshot).includes('original@example.test'), false, 'saved account is not import resume proof');
+});
+
+test('mixed legacy history retains proven native IDs only on their own run', () => {
+  const record = { clientThreadId: 'room', threadSnapshot: { conversationId: 'native-c', messages: [
+    { id: 'old-native', providerItemId: 'native-m', role: 'assistant', conversationId: 'native-c', runId: 'native-r', content: 'Accepted' },
+    { id: 'local-after', role: 'user', requestId: 'new-request', content: 'Never confirmed' },
+  ] } };
+  const snapshot = Chat.legacyPublicChatSnapshot(record);
+  assert.equal(snapshot.conversationId, null, 'mixed local-only history must not bind the whole snapshot to a native CID');
+  assert.equal(snapshot.runs.length, 2);
+  assert.deepEqual(snapshot.runs.map(run => run.conversationId), ['native-c', null]);
+  assert.deepEqual(snapshot.runs.map(run => run.runId), ['native-r', null]);
+  assert.equal(snapshot.runs[1].messages[0].localMessageId.startsWith('legacy-message:'), true);
+});
+
+test('rehydration matches a legacy assistant with no native or request ID by its stable local ID', () => {
+  const legacy = { id: 'room', conversationId: null, messages: [
+    { id: 'old-local-answer', role: 'assistant', content: 'Partial answer', status: 'partial', createdAt: 10 },
+  ] };
+  const importSnapshot = Chat.legacyPublicChatSnapshot({ clientThreadId: 'room', threadSnapshot: legacy });
+  const stored = importSnapshot.runs[0].messages[0];
+  const history = { clientThreadId: 'room', localConversationId: 'local-room', messages: [
+    { localMessageId: stored.localMessageId, localRunId: stored.localRunId, role: 'assistant',
+      content: 'Final saved answer', status: 'complete', createdAt: 10 },
+  ], runs: [{ localRunId: stored.localRunId, localHistory: true, status: 'unavailable' }] };
+  const once = Chat.hydrateLocalChatThread(legacy, history);
+  const twice = Chat.hydrateLocalChatThread(once, history);
+  assert.equal(twice.messages.length, 1);
+  assert.equal(twice.messages[0].id, 'old-local-answer');
+  assert.equal(twice.messages[0].localMessageId, stored.localMessageId);
+  assert.equal(twice.messages[0].content, 'Final saved answer');
+  assert.equal(twice.messages[0].status, 'complete');
+  assert.equal(twice.conversationId, null);
+});
+
+function localHistoryLoaderHarness({ state, list, post, read = async () => {}, records = [] }) {
+  const retryBody = surfaceSource.match(/    function queueLocalHistoryRetry\(\) \{([\s\S]*?)\n    \}\n\n    async function loadLocalHistory/)?.[1];
+  const loadBody = surfaceSource.match(/    async function loadLocalHistory\(legacyRecords = \[\], \{ force = false \} = \{\}\) \{([\s\S]*?)\n    \}\n\n    const scheduleReconnect/)?.[1];
+  const readyBody = surfaceSource.match(/      connectionSource\.addEventListener\('ready', \(\) => \{([\s\S]*?)\n      \}\);/)?.[1];
+  assert.ok(retryBody && loadBody && readyBody, 'production local-history loader and ready retry stay testable');
+  const factory = compileFunction(`
+    let legacyHistoryRecords = initialRecords, localLoadPromise = null, lastLocalLoadAt = 0;
+    let localRetryTimer = null, localRetryBudget = 1, localAutoRetryEligible = false, streamReady = false;
+    const confirmedLegacyImports = new Set(), resumedNativeBindings = new Set();
+    const source = {}, connectionSource = source, streamEpoch = 0;
+    const epochScope = { valid: () => true };
+    const update = () => {};
+    function queueLocalHistoryRetry() {${retryBody}\n    }
+    async function loadLocalHistory(legacyRecords = [], { force = false } = {}) {${loadBody}\n    }
+    function onReady() {${readyBody}\n    }
+    return { loadLocalHistory, onReady, retryState: () => ({ localRetryBudget, localAutoRetryEligible, localRetryTimer, confirmed: [...confirmedLegacyImports] }) };
+  `, ['initialRecords', 'state', 'listLocalHistoryThreads', 'ChatState', 'fetchJson', 'loadLocalHistoryThread', 'emit', 'window', 'console', 'TAG']);
+  const timers = new Map();
+  let timerId = 0;
+  const window = {
+    setTimeout: fn => { timers.set(++timerId, fn); return timerId; },
+    clearTimeout: id => { timers.delete(id); },
+  };
+  const loader = factory(records, state, list, Chat, post, read, () => {}, window, { warn() {} }, 'test');
+  return { ...loader, timers };
+}
+
+test('history read before bridge startup gets one ready-transition retry without losing the old chat', async () => {
+  const oldThread = { id: 'room', messages: [{ id: 'legacy', role: 'user', content: 'Saved' }] };
+  const state = { codex: { localHistoryBootReady: true, localHistoryStatus: 'idle', localHistoryError: null,
+    legacyChatBackupKey: null, legacyChatBackupRequired: false, threads: [oldThread], threadDrafts: { room: 'new draft' } } };
+  let reads = 0;
+  const harness = localHistoryLoaderHarness({ state, list: async () => {
+    reads++;
+    if (reads === 1) throw new Error('bridge not started');
+    return [];
+  }, post: async () => assert.fail('no import is needed') });
+  assert.equal(await harness.loadLocalHistory(), false);
+  assert.equal(state.codex.localHistoryStatus, 'error');
+  assert.equal(harness.timers.size, 1);
+  harness.onReady();
+  await new Promise(resolve => setImmediate(resolve));
+  assert.equal(reads, 2);
+  assert.equal(state.codex.localHistoryStatus, 'ready');
+  assert.equal(harness.retryState().localRetryBudget, 0);
+  assert.equal(harness.timers.size, 0);
+  harness.onReady();
+  await new Promise(resolve => setImmediate(resolve));
+  assert.deepEqual(state.codex.threads, [oldThread]);
+  assert.equal(state.codex.threadDrafts.room, 'new draft');
+});
+
+test('failed local-only import is not acknowledged, does not report ready, and retries only explicitly', async () => {
+  const record = { clientThreadId: 'room', importId: 'legacy-room', threadSnapshot: { id: 'room', messages: [
+    { id: 'local-message', role: 'user', content: 'Unconfirmed', status: 'unconfirmed' },
+  ] } };
+  const state = { codex: { localHistoryBootReady: true, localHistoryStatus: 'idle', localHistoryError: null,
+    legacyChatBackupKey: 'verified-backup', legacyChatBackupRequired: true,
+    threads: [{ id: 'room', messages: [{ id: 'local-message', role: 'user', content: 'Unconfirmed' }] }],
+    threadDrafts: { room: 'new draft' } } };
+  let imports = 0;
+  let canonical = false;
+  const harness = localHistoryLoaderHarness({ state, records: [record],
+    list: async () => canonical ? [{ clientThreadId: 'room', localConversationId: 'local-room' }] : [],
+    post: async (path, options) => {
+      assert.equal(path, '/chat/history/import');
+      const body = JSON.parse(options.body);
+      assert.equal(body.snapshot.conversationId, null);
+      assert.equal(body.snapshot.runs[0].messages[0].id, null);
+      assert.ok(body.snapshot.runs[0].messages[0].localMessageId);
+      imports++;
+      if (imports === 1) throw Object.assign(new Error('not yet supported'), { status: 409 });
+      canonical = true;
+      return { imported: true, alreadyImported: false, clientThreadId: 'room', localConversationId: 'local-room' };
+    } });
+  assert.equal(await harness.loadLocalHistory([record]), false);
+  assert.equal(state.codex.localHistoryStatus, 'error');
+  assert.deepEqual(harness.retryState().confirmed, []);
+  assert.equal(harness.timers.size, 0, 'a conflict does not start a retry loop');
+  harness.onReady();
+  await new Promise(resolve => setImmediate(resolve));
+  assert.equal(imports, 1, 'ready events do not retry an import conflict');
+  assert.equal(state.codex.threadDrafts.room, 'new draft');
+  assert.equal(await harness.loadLocalHistory([], { force: true }), true);
+  assert.equal(imports, 2);
+  assert.deepEqual(harness.retryState().confirmed, ['legacy-room']);
+  assert.equal(state.codex.localHistoryStatus, 'ready');
+});
+
+test('404 on import is not mistaken for a successful legacy migration or a missing read route', async () => {
+  const record = { clientThreadId: 'room', importId: 'legacy-room-404', threadSnapshot: { id: 'room', messages: [
+    { id: 'old-local-message', role: 'user', content: 'Saved in pref' },
+  ] } };
+  const oldThread = { id: 'room', messages: [{ id: 'old-local-message', role: 'user', content: 'Saved in pref' }] };
+  const state = { codex: { localHistoryBootReady: true, localHistoryStatus: 'idle', localHistoryError: null,
+    legacyChatBackupKey: 'verified-backup', legacyChatBackupRequired: true, threads: [oldThread],
+    threadDrafts: { room: 'keep this draft' } } };
+  let importCalls = 0;
+  const harness = localHistoryLoaderHarness({ state, records: [record], list: async () => [], post: async () => {
+    importCalls++;
+    throw Object.assign(new Error('import route unavailable'), { status: 404 });
+  } });
+  assert.equal(await harness.loadLocalHistory([record]), false);
+  assert.equal(state.codex.localHistoryStatus, 'error');
+  assert.deepEqual(harness.retryState().confirmed, []);
+  assert.equal(harness.timers.size, 0);
+  harness.onReady();
+  await new Promise(resolve => setImmediate(resolve));
+  assert.equal(importCalls, 1);
+  assert.deepEqual(state.codex.threads, [oldThread]);
+  assert.equal(state.codex.threadDrafts.room, 'keep this draft');
+  assert.equal(await harness.loadLocalHistory([], { force: true }), false);
+  assert.equal(importCalls, 2, 'explicit retry must not silently skip an unacknowledged import');
+  assert.equal(state.codex.localHistoryStatus, 'error');
 });
 
 test('ordinary legacy threads and unknown identity do not implicitly require unavailable context tools', () => {
