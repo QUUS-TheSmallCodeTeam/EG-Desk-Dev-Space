@@ -6306,10 +6306,17 @@
     };
 
     const activateCard = () => {
+      if (state.panModifier) return;
       card.style.zIndex = String(++cardZ);
       setActiveEntity(card);
     };
     const focusCard = activateCard;
+    const startPanIfNeeded = (ev) => {
+      if (!state.panModifier || ev.button !== 0) return false;
+      if (typeof state.startCanvasPanDrag !== 'function') return false;
+      state.startCanvasPanDrag(ev);
+      return true;
+    };
     let drag = null;
     header.addEventListener('mousedown', (ev) => {
       if (startPanIfNeeded(ev)) return;

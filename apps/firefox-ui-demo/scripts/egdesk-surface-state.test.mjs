@@ -1460,6 +1460,32 @@ test('File UI transport preserves sanitized native partial-file warning details'
   });
 });
 
+test('Chat card header drag has its own pan handler and does not move the card while panning', () => {
+  const cardStart = surfaceSource.indexOf('  function spawnCodexChatCard(');
+  const interactionStart = surfaceSource.indexOf('    const activateCard = () => {', cardStart);
+  const interactionEnd = surfaceSource.indexOf('    installCardHeaderFullscreenToggle(card, header);', interactionStart);
+  assert.ok(cardStart >= 0 && interactionStart > cardStart && interactionEnd > interactionStart);
+  const build = compileFunction(`${surfaceSource.slice(interactionStart, interactionEnd)}\nreturn { get drag() { return drag; } };`,
+    ['header', 'card', 'state', 'setActiveEntity', 'isCardFullscreen', 'cardZ']);
+  const listeners = new Map();
+  const header = { addEventListener: (name, listener) => listeners.set(name, listener) };
+  const card = { id: 'chat-card', style: {}, offsetLeft: 20, offsetTop: 30 };
+  let activated = 0, pans = 0, prevented = 0;
+  const state = { panModifier: true, startCanvasPanDrag: () => pans++ };
+  const interaction = build(header, card, state, () => activated++, () => false, 1);
+  const event = { button: 0, clientX: 10, clientY: 15, target: { closest: () => null }, preventDefault: () => prevented++ };
+  assert.doesNotThrow(() => listeners.get('mousedown')(event));
+  assert.equal(pans, 1);
+  assert.equal(activated, 0);
+  assert.equal(interaction.drag, null);
+  state.panModifier = false;
+  listeners.get('mousedown')(event);
+  assert.equal(pans, 1);
+  assert.equal(activated, 1);
+  assert.equal(prevented, 1);
+  assert.deepEqual(interaction.drag, { x: 10, y: 15, left: 20, top: 30 });
+});
+
 test('production native File picker wrapper uses channel/begin/OS/complete/roots with one-shot IDs', async () => {
   const events = [];
   const service = createEGDeskFileServiceCallbacks({ request: async (path, body, options) => {
