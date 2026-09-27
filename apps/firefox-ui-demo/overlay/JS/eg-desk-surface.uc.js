@@ -348,7 +348,7 @@
   }
 
   const state = {
-    surface: { mode: 'desk', browserCardId: null, restoring: false },
+    surface: { mode: 'desk', browserCardId: null, initialBrowserFocus: false, restoring: false },
     boards: { projections: {}, activeProjectionId: null },
     activeTool: 'arrow',
     hudOpen: false,
@@ -1463,7 +1463,7 @@
       return {
         uri: normalizeBrowserUri(card._browserState?.uri || card.querySelector('.egd-card-url')?.value || card._sourceRef?.uri || 'https://duckduckgo.com'),
         title: card._browserState?.title || '',
-        firstUseBrowser: card.classList.contains('egd-first-use-browser'),
+        firstUseBrowser: false,
         fixedLogicalHeight: card._fixedLogicalHeight || null,
       };
     }
@@ -1533,7 +1533,9 @@
       shapes: Array.from(document.querySelectorAll('.egd-canvas-shape'))
         .map(serializeShapeState)
         .filter(Boolean),
-      surface: { mode: state.surface.mode, browserCardId: state.surface.browserCardId, recoveryBackupKey: state.surface.recoveryBackupKey || null, recoveryAcknowledged: !!state.surface.recoveryAcknowledged },
+      surface: { mode: state.surface.mode, browserCardId: state.surface.browserCardId,
+        initialBrowserFocus: !!state.surface.initialBrowserFocus,
+        recoveryBackupKey: state.surface.recoveryBackupKey || null, recoveryAcknowledged: !!state.surface.recoveryAcknowledged },
       boardProjections: cloneJson(state.boards),
       chat: {
         threads: cloneJson(state.codex.threads.map(({ localRuns, localHistoryCoverage, ...thread }) => ({
@@ -3245,9 +3247,12 @@
     const dock = document.getElementById('egd-dock');
     const bag = document.getElementById('egd-preset-bag');
     const hud = document.getElementById('egd-hud');
-    if (rail) top = Math.max(top, rail.getBoundingClientRect().bottom + margin);
-    if (dock) bottom = Math.min(bottom, dock.getBoundingClientRect().top - margin);
-    if (bag) left = Math.max(left, bag.getBoundingClientRect().right + margin);
+    const railRect = rail?.getBoundingClientRect();
+    const dockRect = dock?.getBoundingClientRect();
+    const bagRect = bag?.getBoundingClientRect();
+    if (railRect?.height > 0) top = Math.max(top, railRect.bottom + margin);
+    if (dockRect?.height > 0) bottom = Math.min(bottom, dockRect.top - margin);
+    if (bagRect?.width > 0) left = Math.max(left, bagRect.right + margin);
     if (options.avoidHud !== false && hud && !hud.classList.contains('egd-hud-hidden')) {
       right = Math.min(right, hud.getBoundingClientRect().left - margin);
     }
@@ -4934,7 +4939,7 @@
         ? (() => {
             const input = el('textarea', {
               class: 'egd-codex-input',
-              rows: '2',
+              rows: '1',
               placeholder: '메시지 보내기',
               'aria-label': `${activeThread.title}에 보낼 메시지`,
               data: { threadId: activeThread.id, testid: 'chat-composer' },
@@ -4951,7 +4956,7 @@
             const resizeComposer = () => {
               if (!input.isConnected) return;
               input.style.height = 'auto';
-              const height = Math.min(144, Math.max(48, input.scrollHeight));
+              const height = Math.min(240, Math.max(40, input.scrollHeight));
               input.style.height = `${height}px`;
               input.style.overflowY = input.scrollHeight > height ? 'auto' : 'hidden';
               const nativeSendHeld = activeThread.conversationId && !ChatState.canResumeNativeThread(activeThread, codex.authStatus);
@@ -6661,11 +6666,15 @@
     if (!card || !card.isConnected) {
       state.cardFullscreen = null;
       document.documentElement.classList.remove('egd-card-fullscreen-active');
+      if (state.surface.initialBrowserFocus) {
+        state.surface.initialBrowserFocus = false;
+        document.documentElement.classList.remove('egd-initial-browser-focus');
+      }
       syncViewportAgendaRail();
       return;
     }
     const zoom = canvasZoom();
-    const safe = safeViewportRect({ avoidHud: false, margin: 10 });
+    const safe = safeViewportRect({ avoidHud: false, margin: state.surface.initialBrowserFocus ? 0 : 10 });
     card.style.left = ((safe.left - state.pan.x) / zoom) + 'px';
     card.style.top = ((safe.top - state.pan.y) / zoom) + 'px';
     card.style.width = (safe.width / zoom) + 'px';
@@ -6703,6 +6712,11 @@
     const fullscreen = state.cardFullscreen;
     if (!fullscreen) return false;
     if (card && fullscreen.cardId !== card.id) return false;
+    const initialBrowserFocus = state.surface.initialBrowserFocus && fullscreen.cardId === state.surface.browserCardId;
+    if (initialBrowserFocus) {
+      state.surface.initialBrowserFocus = false;
+      document.documentElement.classList.remove('egd-initial-browser-focus');
+    }
     const fullscreenCard = document.getElementById(fullscreen.cardId);
     if (fullscreenCard) {
       fullscreenCard.classList.remove('egd-card-fullscreen');
@@ -6714,6 +6728,7 @@
     if (fullscreen.previousMinimapOpen) toggleDeskMinimap();
     if (fullscreenCard?.isConnected) setActiveEntity(fullscreenCard);
     syncViewportAgendaRail();
+    if (initialBrowserFocus) scheduleDeskSessionSave();
     return true;
   }
 
@@ -9599,17 +9614,7 @@
       duplicateButton,
       menuButton,
     );
-    if (options.firstUse) {
-      card.classList.add('egd-first-use-browser');
-      card.dataset.testid = 'first-use-root';
-      card.setAttribute('aria-label', 'EG-Desk 시작');
-      card.setAttribute('role', 'region');
-      urlInput.id = 'egd-first-use-address';
-      deskWindow.slots.toolbar.appendChild(el('button', {
-        id: 'egd-desk-entry', 'aria-label': 'Desk 시작', data: { testid: 'desk-entry' },
-        onclick: () => enterLocalDesk(),
-      }, 'Desk 시작'));
-    }
+    if (options.firstUse) card.dataset.testid = 'browser-card';
 
     // ---- Body → wrap (logical 1440×900) → XUL browser ----
     const wrap = el('div', { class: 'egd-card-wrap' });
@@ -11398,7 +11403,13 @@
       const factor = Math.exp(delta);
       const prevZoom = state.zoomTarget;
       const nextZoom = Math.max(ZOOM_MIN, Math.min(ZOOM_MAX, prevZoom * factor));
-      if (nextZoom === prevZoom) return;
+      // A restored oversized Card can begin at the camera's minimum zoom.
+      // An outward gesture must still uncover the Desk in that case.
+      if (nextZoom === prevZoom) {
+        if (state.surface.initialBrowserFocus && delta < 0) enterLocalDesk();
+        return;
+      }
+      if (state.surface.initialBrowserFocus && nextZoom < prevZoom) enterLocalDesk();
       const cx = ev.clientX;
       const cy = ev.clientY;
       const ratio = nextZoom / prevZoom;
@@ -11532,7 +11543,6 @@
     // - normal mode cmd+wheel pans; ctrl/pinch zooms
     // - card fullscreen mode cmd/ctrl+wheel zooms immediately
     document.addEventListener('wheel', (ev) => {
-      if (state.surface.mode === 'browser') return;
       if (ev.target instanceof Element && ev.target.closest('.egd-ontology-stage')) {
         return;
       }
@@ -11727,23 +11737,43 @@
   }
 
   function setSurfaceMode(mode) {
-    state.surface.mode = mode;
-    document.documentElement.dataset.egdSurfaceMode = mode;
-    document.getElementById('egd-canvas-viewport')?.setAttribute('data-presentation', mode === 'browser' ? 'hidden' : 'visible');
-    if (!state.surface.recoveryProtected) writeSurfacePref(SURFACE_LIFECYCLE_PREF, { version: 1, mode, browserCardId: state.surface.browserCardId });
+    // Legacy "browser" lifecycle records now resolve to a Desk camera pose.
+    state.surface.mode = 'desk';
+    document.documentElement.dataset.egdSurfaceMode = 'desk';
+    document.getElementById('egd-canvas-viewport')?.setAttribute('data-presentation', 'visible');
+    if (!state.surface.recoveryProtected) writeSurfacePref(SURFACE_LIFECYCLE_PREF, { version: 1, mode: 'desk', browserCardId: state.surface.browserCardId });
   }
 
-  function enterLocalDesk() {
-    const card = document.getElementById(state.surface.browserCardId);
-    if (!card || !card._xulBrowser) return false;
-    // Do not reparent, reload, recreate or resize the Browser target during this transition.
+  function focusInitialBrowserCard(card, { persist = false } = {}) {
+    if (!card) return false;
+    // Use the existing Card fullscreen presentation on the real Canvas. Its
+    // saved rect is restored on zoom-out; the live Browser target is not moved.
+    state.surface.browserCardId = card.id;
     setSurfaceMode('desk');
+    card.classList.remove('egd-first-use-browser');
     card.dataset.testid = 'browser-card';
-    card.querySelector('#egd-desk-entry')?.setAttribute('hidden', 'true');
-    const camera = SurfaceState.fitSurfaceCamera(persistentEntityGeometry(card), safeViewportRect({ margin: 20 }));
+    state.surface.initialBrowserFocus = true;
+    document.documentElement.classList.add('egd-initial-browser-focus');
+    const camera = SurfaceState.fitSurfaceCamera(persistentEntityGeometry(card), safeViewportRect({ margin: 0 }), 1);
     state.setCanvasViewportTarget?.(camera, { immediate: true });
-    setActiveEntity(card);
-    persistDeskSession();
+    enterCardFullscreen(card);
+    if (!isCardFullscreen(card)) {
+      state.surface.initialBrowserFocus = false;
+      document.documentElement.classList.remove('egd-initial-browser-focus');
+      return false;
+    }
+    if (persist) persistDeskSession();
+    return true;
+  }
+
+  // Retained for existing external callers; returning to Desk reveals the same
+  // Card and Canvas rather than constructing a second Browser surface.
+  function enterLocalDesk() {
+    if (!state.surface.initialBrowserFocus) return false;
+    if (state.cardFullscreen?.cardId === state.surface.browserCardId) return exitCardFullscreen();
+    state.surface.initialBrowserFocus = false;
+    document.documentElement.classList.remove('egd-initial-browser-focus');
+    scheduleDeskSessionSave();
     return true;
   }
 
@@ -11755,35 +11785,24 @@
       state.surface.recoveryBackupKey = recovery.backupKey || deskSession?.surface?.recoveryBackupKey || null;
       state.surface.recoveryAcknowledged = recovery.backupKey ? false : !!deskSession?.surface?.recoveryAcknowledged;
       state.surface.recoveryReason = recovery.reason;
-      const mode = recovery.protected ? 'desk' : SurfaceState.initialSurfaceMode({ lifecycle, deskSession, legacyStore });
+      const mode = SurfaceState.initialSurfaceMode({ lifecycle, deskSession, legacyStore });
+      const focusInitialBrowser = SurfaceState.shouldFocusInitialBrowser({ lifecycle, deskSession, legacyStore, recoveryProtected: recovery.protected });
       state.surface.browserCardId = deskSession?.surface?.browserCardId || lifecycle?.browserCardId || null;
-      if (mode === 'browser') {
-        let card = document.getElementById(state.surface.browserCardId);
+      if (focusInitialBrowser) {
+        let card = document.getElementById(state.surface.browserCardId) || document.querySelector('.egd-browser-card');
         if (!card) card = spawnBrowserCard('chrome://userchrome/content/egdesk-start.html', { firstUse: true });
-        // A restored first-use Browser retains its identity and fixed logical viewport.
-        if (!card.querySelector('#egd-desk-entry')) {
-          card.classList.add('egd-first-use-browser');
-          card.dataset.testid = 'first-use-root';
-          card.setAttribute('aria-label', 'EG-Desk 시작');
-          const input = card.querySelector('.egd-card-url');
-          input.id = 'egd-first-use-address';
-          input.dataset.testid = 'first-use-address';
-          card.querySelector('.egd-card-toolbar').appendChild(el('button', {
-            id: 'egd-desk-entry', 'aria-label': 'Desk 시작', data: { testid: 'desk-entry' }, onclick: enterLocalDesk,
-          }, 'Desk 시작'));
-        }
-        state.surface.browserCardId = card.id;
-        setActiveEntity(card);
+        focusInitialBrowserCard(card);
         window.setTimeout(() => {
-          if (state.surface.mode !== 'browser') return;
+          if (!card.isConnected || state.surface.browserCardId !== card.id) return;
           const input = card.querySelector('.egd-card-url');
+          if (!input) return;
           if (input.value === 'chrome://userchrome/content/egdesk-start.html') input.value = '';
           input.placeholder = '주소 또는 검색어 입력';
           input.focus();
         }, 0);
       }
-      setSurfaceMode(mode);
-      if (mode === 'desk') {
+      if (!focusInitialBrowser) {
+        setSurfaceMode(mode);
         const card = document.getElementById(state.surface.browserCardId);
         if (card) card.dataset.testid = 'browser-card';
       }

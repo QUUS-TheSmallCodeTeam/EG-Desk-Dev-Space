@@ -2,7 +2,7 @@ import test from 'node:test';
 import assert from 'node:assert/strict';
 import { existsSync, readFileSync } from 'node:fs';
 import { compileFunction } from 'node:vm';
-import { initialSurfaceMode, planBoardProjection, snapshotBoardProjection, remapMemberReferences, recoverDeskSnapshot, canPersistDeskSession, ownedProjectionMembers, missingProjectionMembers, fitSurfaceCamera } from '../overlay/resources/EGDeskSurfaceState.sys.mjs';
+import { initialSurfaceMode, shouldFocusInitialBrowser, planBoardProjection, snapshotBoardProjection, remapMemberReferences, recoverDeskSnapshot, canPersistDeskSession, ownedProjectionMembers, missingProjectionMembers, fitSurfaceCamera } from '../overlay/resources/EGDeskSurfaceState.sys.mjs';
 import * as Chat from '../overlay/resources/EGDeskChatState.sys.mjs';
 import * as Markdown from '../overlay/resources/EGDeskMarkdown.sys.mjs';
 import * as InputContext from '../overlay/resources/EGDeskInputContext.sys.mjs';
@@ -22,14 +22,21 @@ const runtimeFor = thread => productionRuntimeConfig(thread,
   () => ({ id: 'test-profile', label: 'Test', name: 'Test', capabilities: [], cwd: '/not-a-thread-default' }),
   () => 'test-tools', () => 'test instruction');
 
-test('onboarding considers lifecycle and independent Desk state, not just Board absence', () => {
-  assert.equal(initialSurfaceMode({}), 'browser');
+test('first launch and legacy browser lifecycle resolve to the actual Desk Canvas', () => {
+  assert.equal(initialSurfaceMode({}), 'desk');
   assert.equal(initialSurfaceMode({ lifecycle: { mode: 'desk' } }), 'desk');
   assert.equal(initialSurfaceMode({ deskSession: { cards: [] } }), 'desk');
   assert.equal(initialSurfaceMode({ legacyStore: { agendas: {} } }), 'desk');
   assert.equal(initialSurfaceMode({ legacyStore: { unreadable: true } }), 'desk');
   assert.equal(initialSurfaceMode({ lifecycle: { unreadable: true } }), 'desk');
-  assert.equal(initialSurfaceMode({ lifecycle: { mode: 'browser' }, deskSession: {} }), 'browser');
+  assert.equal(initialSurfaceMode({ lifecycle: { mode: 'browser' }, deskSession: {} }), 'desk');
+  assert.equal(shouldFocusInitialBrowser({}), true);
+  assert.equal(shouldFocusInitialBrowser({ lifecycle: { mode: 'browser' }, deskSession: {} }), true);
+  assert.equal(shouldFocusInitialBrowser({ deskSession: { surface: { mode: 'browser' } } }), true);
+  assert.equal(shouldFocusInitialBrowser({ lifecycle: { mode: 'desk' } }), true, 'crash before the first Card snapshot still focuses the Browser');
+  assert.equal(shouldFocusInitialBrowser({ lifecycle: { mode: 'desk' }, deskSession: { cards: [] } }), false);
+  assert.equal(shouldFocusInitialBrowser({ legacyStore: { unreadable: true } }), false);
+  assert.equal(shouldFocusInitialBrowser({ recoveryProtected: true }), false);
 });
 
 const saved = {
@@ -412,16 +419,211 @@ test('terminal timeout does not claim closure and repeated close calls share one
   assert.equal(await controller.retry(), true);
 });
 
-test('Desk entry camera fits the Browser outside rail/sidebar/dock without changing its logical geometry', () => {
+test('initial Desk camera can fill the viewport with the same Browser Card and zoom-out exposes Canvas', () => {
   const browser = { x: 0, y: 0, width: 1600, height: 960 };
   const before = { ...browser };
-  const usable = { left: 100, top: 90, width: 1460, height: 780 };
-  const { pan, zoom } = fitSurfaceCamera(browser, usable);
-  assert.ok(pan.x >= usable.left);
-  assert.ok(pan.y >= usable.top);
+  const usable = { left: 0, top: 0, width: 1600, height: 960 };
+  const { pan, zoom } = fitSurfaceCamera(browser, usable, 1);
+  assert.equal(zoom, 1);
+  assert.deepEqual(pan, { x: 0, y: 0 });
   assert.ok(pan.x + browser.width * zoom <= usable.left + usable.width + .001);
   assert.ok(pan.y + browser.height * zoom <= usable.top + usable.height + .001);
+  const zoomedOut = zoom * 0.5;
+  assert.ok(browser.width * zoomedOut < usable.width);
+  assert.ok(browser.height * zoomedOut < usable.height);
   assert.deepEqual(browser, before);
+});
+
+test('production first-use focus presents the live Browser Card with the existing fullscreen system', () => {
+  const body = surfaceSource.match(/  function focusInitialBrowserCard\(card, \{ persist = false \} = \{\}\) \{([\s\S]*?)\n  \}/)?.[1];
+  assert.ok(body);
+  const focus = compileFunction(`return function focusInitialBrowserCard(card, { persist = false } = {}) {${body}\n  }`,
+    ['state', 'setSurfaceMode', 'document', 'SurfaceState', 'persistentEntityGeometry', 'safeViewportRect', 'enterCardFullscreen', 'isCardFullscreen', 'persistDeskSession']);
+  const browser = { id: 'browser-view-a', _xulBrowser: { uri: 'https://example.test/' },
+    geometry: { x: 15, y: 20, width: 1200, height: 720 }, classList: { remove() {} }, dataset: {} };
+  const originalTarget = browser._xulBrowser;
+  const originalGeometry = structuredClone(browser.geometry);
+  const safe = { left: 0, top: 0, width: 1200, height: 720 };
+  const state = { surface: { mode: 'desk' }, setCanvasViewportTarget: viewport => { state.camera = viewport; } };
+  const classes = new Set();
+  const document = { documentElement: { classList: {
+    add: name => classes.add(name), remove: name => classes.delete(name),
+  } } };
+  let fullscreenCard = null, persisted = 0;
+  const run = focus(state, () => { state.surface.mode = 'desk'; }, document, { fitSurfaceCamera }, card => card.geometry,
+    () => { assert.ok(classes.has('egd-initial-browser-focus')); return safe; },
+    card => { fullscreenCard = card; state.cardFullscreen = { cardId: card.id }; },
+    card => state.cardFullscreen?.cardId === card.id, () => { persisted++; });
+  assert.equal(run(browser), true);
+  assert.equal(state.surface.browserCardId, browser.id);
+  assert.equal(state.surface.mode, 'desk');
+  assert.equal(fullscreenCard, browser);
+  assert.ok(classes.has('egd-initial-browser-focus'));
+  assert.equal(state.surface.initialBrowserFocus, true);
+  assert.equal(browser._xulBrowser, originalTarget);
+  assert.deepEqual(browser.geometry, originalGeometry);
+  assert.equal(state.camera.zoom, 1);
+  assert.equal(state.camera.pan.x, safe.left - browser.geometry.x);
+  assert.equal(browser.dataset.testid, 'browser-card');
+  assert.equal(persisted, 0);
+  assert.ok(browser.geometry.width * state.camera.zoom * 0.5 < safe.width);
+  assert.equal(browser.id, 'browser-view-a', 'zooming the camera never replaces the Browser view');
+});
+
+test('production fullscreen layout fills the actual Canvas viewport and keeps the prior Card rect for Desk', () => {
+  const enterBody = surfaceSource.match(/  function enterCardFullscreen\(card\) \{([\s\S]*?)\n  \}/)?.[1];
+  const layoutBody = surfaceSource.match(/  function syncCardFullscreenLayout\(\) \{([\s\S]*?)\n  \}/)?.[1];
+  assert.ok(enterBody && layoutBody);
+  const enter = compileFunction(`return function enterCardFullscreen(card) {${enterBody}\n  }`,
+    ['state', 'exitCardFullscreen', 'isCardFullscreen', 'document', 'getCardRect', 'cardZ', 'setActiveEntity', 'setHudPresentationHidden', 'closeDeskMinimap', 'syncCardFullscreenLayout', 'syncViewportAgendaRail']);
+  const layout = compileFunction(`return function syncCardFullscreenLayout() {${layoutBody}\n  }`,
+    ['state', 'document', 'canvasZoom', 'safeViewportRect', 'syncViewportAgendaRail']);
+  const target = { uri: 'https://example.test/', session: {} };
+  const card = { id: 'browser-view-a', isConnected: true, _xulBrowser: target,
+    style: { left: '45px', top: '60px', width: '900px', height: '620px', zIndex: '41000' },
+    classList: { add: name => { assert.equal(name, 'egd-card-fullscreen'); } } };
+  const prior = structuredClone(card.style);
+  const rootClasses = new Set();
+  const document = { documentElement: { classList: { add: name => rootClasses.add(name) } },
+    getElementById: id => id === card.id ? card : null };
+  const state = { surface: { initialBrowserFocus: true }, cardFullscreen: null,
+    pan: { x: 0, y: 0 }, zoom: 1 };
+  let safeOptions = null, activated = null;
+  const syncLayout = layout(state, document, () => 1, options => {
+    safeOptions = options;
+    return { left: 0, top: 0, width: 1600, height: 960 };
+  }, () => {});
+  const enterFullscreen = enter(state, () => assert.fail('no previous fullscreen Card'), () => false,
+    document, current => structuredClone(current.style), 42000, current => { activated = current; },
+    () => {}, () => assert.fail('no minimap is open'), syncLayout, () => {});
+  enterFullscreen(card);
+  assert.equal(activated, card);
+  assert.equal(state.cardFullscreen.cardId, card.id);
+  assert.deepEqual(state.cardFullscreen.rect, prior);
+  assert.deepEqual(card.style, { left: '0px', top: '0px', width: '1600px', height: '960px', zIndex: '42001' });
+  assert.deepEqual(safeOptions, { avoidHud: false, margin: 0 });
+  assert.ok(rootClasses.has('egd-card-fullscreen-active'));
+  assert.equal(card._xulBrowser, target);
+});
+
+test('zooming out or entering Desk restores the same Browser Card rect and leaves its live target intact', () => {
+  const exitBody = surfaceSource.match(/  function exitCardFullscreen\(card = null, options = \{\}\) \{([\s\S]*?)\n  \}/)?.[1];
+  const enterBody = surfaceSource.match(/  function enterLocalDesk\(\) \{([\s\S]*?)\n  \}/)?.[1];
+  const wheelBody = surfaceSource.match(/    const zoomCanvasByWheel = \(ev\) => \{([\s\S]*?)\n    \};\n\n    const beginCanvasPan/)?.[1];
+  assert.ok(exitBody && enterBody && wheelBody);
+  const exit = compileFunction(`return function exitCardFullscreen(card = null, options = {}) {${exitBody}\n  }`,
+    ['state', 'document', 'applyCardRect', 'setHudPresentationHidden', 'toggleDeskMinimap', 'setActiveEntity', 'syncViewportAgendaRail', 'scheduleDeskSessionSave']);
+  const enter = compileFunction(`return function enterLocalDesk() {${enterBody}\n  }`,
+    ['state', 'exitCardFullscreen', 'document', 'scheduleDeskSessionSave']);
+  const zoom = compileFunction(`return function zoomCanvasByWheel(ev) {${wheelBody}\n    }`,
+    ['state', 'normalizeWheelDelta', 'WHEEL_ZOOM_SPEED', 'ZOOM_MIN', 'ZOOM_MAX', 'enterLocalDesk', 'frame', 'window', 'apply', 'scheduleAnimate']);
+  const nativeBrowser = { uri: 'https://example.test/page', session: {} };
+  const rect = { left: '45px', top: '60px', width: '900px', height: '620px', zIndex: '41000' };
+  const browser = { id: 'browser-view-a', isConnected: true, _xulBrowser: nativeBrowser,
+    style: { left: '0px', top: '0px', width: '1600px', height: '960px', zIndex: '42000' },
+    classList: { remove: name => { assert.equal(name, 'egd-card-fullscreen'); } } };
+  const classes = new Set(['egd-initial-browser-focus', 'egd-card-fullscreen-active']);
+  const document = { documentElement: { classList: { remove: name => classes.delete(name) } },
+    getElementById: id => id === browser.id ? browser : null };
+  const state = { surface: { browserCardId: browser.id, initialBrowserFocus: true },
+    cardFullscreen: { cardId: browser.id, rect, previousHudHidden: false, previousMinimapOpen: false },
+    pan: { x: 0, y: 0 }, panTarget: { x: 0, y: 0 }, zoom: 1, zoomTarget: 1 };
+  let saved = 0, activated = null, animated = 0;
+  const exitFullscreen = exit(state, document, (card, prior) => Object.assign(card.style, prior),
+    () => {}, () => assert.fail('closed minimap should stay closed'), card => { activated = card; },
+    () => {}, () => { saved++; });
+  const enterDesk = enter(state, exitFullscreen, document, () => { saved++; });
+  const zoomOut = zoom(state, () => 1, .0044, .2, 4.5, enterDesk, 0,
+    { cancelAnimationFrame() {} }, () => {}, () => { animated++; });
+  zoomOut({ deltaY: 100, clientX: 800, clientY: 480 });
+  assert.equal(state.surface.initialBrowserFocus, false);
+  assert.equal(state.cardFullscreen, null);
+  assert.deepEqual(browser.style, rect);
+  assert.equal(browser._xulBrowser, nativeBrowser);
+  assert.equal(activated, browser);
+  assert.ok(!classes.has('egd-initial-browser-focus'));
+  assert.ok(!classes.has('egd-card-fullscreen-active'));
+  assert.ok(state.zoomTarget < 1);
+  assert.equal(animated, 1);
+  assert.equal(saved, 1);
+  assert.equal(enterDesk(), false, 'returning to Desk a second time must not refocus Browser');
+
+  // At the zoom clamp, the outward gesture still exits Browser focus.
+  state.surface.initialBrowserFocus = true;
+  state.cardFullscreen = { cardId: browser.id, rect, previousHudHidden: false, previousMinimapOpen: false };
+  state.zoom = state.zoomTarget = .2;
+  classes.add('egd-initial-browser-focus');
+  classes.add('egd-card-fullscreen-active');
+  zoomOut({ deltaY: 100, clientX: 800, clientY: 480 });
+  assert.equal(state.surface.initialBrowserFocus, false);
+  assert.equal(state.cardFullscreen, null);
+  assert.equal(saved, 2);
+  assert.equal(animated, 1, 'clamped zoom does not schedule a redundant animation');
+});
+
+test('main-window topbar is edge-attached while controls remain non-draggable, with no Desk Start prompt', () => {
+  const css = readFileSync(new URL('../overlay/CSS/eg-desk-surface.uc.css', import.meta.url), 'utf8');
+  const rail = css.match(/#egd-desk-rail \{([^}]+)\}/)?.[1];
+  assert.ok(rail);
+  for (const declaration of ['top: 0', 'left: 0', 'right: 0', 'width: 100%', 'border-radius: 0', '-moz-window-dragging: drag']) {
+    assert.ok(rail.includes(declaration), declaration);
+  }
+  for (const selector of ['#egd-window-controls', '.egd-rail-switcher', '.egd-rail-search', '.egd-rail-icon']) {
+    assert.match(css.match(new RegExp(`${selector.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')} \\{([^}]+)\\}`))?.[1] || '', /-moz-window-dragging:\s*no-drag/);
+  }
+  const startPage = readFileSync(new URL('../overlay/resources/egdesk-start.html', import.meta.url), 'utf8');
+  assert.doesNotMatch(startPage, /Desk 시작|누르세요/);
+  assert.doesNotMatch(surfaceSource, /id: 'egd-desk-entry'|if \(state\.surface\.mode === 'browser'\) return;/);
+});
+
+test('bounded visual hierarchy keeps Canvas chrome quiet and Browser and Chat content readable', () => {
+  const css = readFileSync(new URL('../overlay/CSS/eg-desk-surface.uc.css', import.meta.url), 'utf8');
+  const rule = selector => css.match(new RegExp(`^${selector.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')} \\{([^}]+)\\}`, 'm'))?.[1] || '';
+  const rail = rule('#egd-desk-rail');
+  assert.match(rail, /background:\s*#F8FAFB/);
+  assert.match(rail, /box-shadow:\s*none/);
+  assert.match(rule('.egd-rail-search'), /max-width:\s*580px/);
+  const dock = rule('#egd-dock');
+  assert.match(dock, /height:\s*46px/);
+  assert.match(dock, /border-radius:\s*11px/);
+  assert.match(rule('.egd-dock-btn'), /width:\s*36px;\s*height:\s*36px/);
+  const card = rule('.egd-canvas-card');
+  assert.doesNotMatch(card, /gradient/);
+  assert.match(rule('.egd-canvas-card.egd-entity-active::after'), /display:\s*none/);
+  assert.match(css, /:root\.egd-initial-browser-focus \.egd-browser-card\.egd-card-fullscreen \{\s*border:\s*0/);
+  assert.match(rule('.egd-card-page-title'), /font-size:\s*12px/);
+  assert.match(rule('.egd-card-url'), /font:\s*12px/);
+  assert.match(rule('.egd-codex-thread-item'), /background:\s*transparent/);
+  assert.match(rule('.egd-codex-thread-item-active'), /background:\s*#E8F0F4/);
+  assert.match(rule('.egd-codex-message-stack'), /max-width:\s*min\(86%, 640px\)/);
+  assert.match(rule('.egd-codex-bubble'), /font-size:\s*14\.5px;\s*line-height:\s*1\.48/);
+  assert.match(rule('.egd-codex-input'), /min-height:\s*40px;\s*max-height:\s*240px/);
+  assert.match(surfaceSource, /rows: '1'/);
+  assert.match(surfaceSource, /input\.addEventListener\('compositionstart'/);
+  assert.match(surfaceSource, /input\.addEventListener\('compositionend'/);
+});
+
+test('Chat composer starts compact but expands and scrolls for long requests', () => {
+  const body = surfaceSource.match(/            const resizeComposer = \(\) => \{([\s\S]*?)\n            \};\n            input\.addEventListener\('input'/)?.[1];
+  assert.ok(body);
+  const resize = compileFunction(`return function resizeComposer() {${body}\n            }`,
+    ['input', 'activeThread', 'ChatState', 'codex', 'sendButton']);
+  const input = { isConnected: true, scrollHeight: 30, style: {}, value: 'draft' };
+  const sendButton = { disabled: true, title: '' };
+  const activeThread = { id: 'thread-a', conversationId: null, preparingInput: false };
+  const codex = { authStatus: { isLoggedIn: true }, connected: true, isSending: false };
+  const run = resize(input, activeThread, { nativeBindingHeld: () => false }, codex, sendButton);
+  run();
+  assert.equal(input.style.height, '40px');
+  assert.equal(input.style.overflowY, 'hidden');
+  input.scrollHeight = 180;
+  run();
+  assert.equal(input.style.height, '180px');
+  input.scrollHeight = 500;
+  run();
+  assert.equal(input.style.height, '240px');
+  assert.equal(input.style.overflowY, 'auto');
+  assert.equal(sendButton.disabled, false);
 });
 
 test('account reset drops all correlated data without inventing a stopped run', () => {
@@ -1348,6 +1550,43 @@ test('local history adapter retains public run context and never replays histori
   assert.deepEqual(normalized.events, page.events);
   assert.equal(normalized.coverage.status, 'partial');
   assert.equal(page.runs[0].pendingApprovals[0].stale, undefined);
+});
+
+test('paged local run Briefing binds to its final assistant by run identity, not local message ID', () => {
+  const conversationId = 'qa-native-conversation-1150bb86da5e';
+  const runId = 'qa-native-run-1150bb86da5e';
+  const answerId = `${conversationId}/${runId}`;
+  const localRunId = 'qa-local-run-1150bb86da5e';
+  const briefing = { id: 'qa-briefing-1150bb86da5e', conversationId, runId, answerId,
+    steps: [{ id: 'step-a', text: 'Check saved source', target: { sourceId: 'source-a' } }] };
+  const thread = { clientThreadId: 'room', localConversationId: 'local-room' };
+  const messagePage = Chat.normalizeLocalHistoryPage({ protocolVersion: 1, thread, runs: [], events: [],
+    messages: [
+      { localMessageId: 'qa-user-1150bb86da5e', localRunId, role: 'user', content: 'Question' },
+      { localMessageId: 'qa-comment-1150bb86da5e', localRunId, role: 'assistant', phase: 'commentary', content: 'Working' },
+      { localMessageId: 'qa-answer-1150bb86da5e', localRunId, role: 'assistant', phase: 'final_answer', content: 'Answer' },
+    ], coverage: { scope: 'egdesk-local', status: 'partial', reasons: ['pagination-in-progress'], nativeHistoryComplete: null },
+    hasMore: true, nextCursor: 1, projectionTruncated: false }, 'room');
+  const beforeRun = Chat.hydrateLocalChatThread({ id: 'room', conversationId: null, messages: [] }, messagePage);
+  const runPage = Chat.normalizeLocalHistoryPage({ protocolVersion: 1, thread, messages: [], events: [],
+    runs: [{ localRunId, conversationId, runId, answerId, status: 'completed', messages: [], briefing,
+      context: { captures: [{ sourceId: 'source-a', snapshotId: 'source-a', hash: 'fixed' }], packets: [{ packetId: 'packet-a' }] } }],
+    coverage: { scope: 'egdesk-local', status: 'complete', reasons: [], nativeHistoryComplete: null },
+    hasMore: false, nextCursor: null, projectionTruncated: false }, 'room');
+  const restored = Chat.hydrateLocalChatThread(beforeRun, runPage);
+  assert.equal(restored.messages.length, 3);
+  assert.equal(restored.messages[1].briefing, undefined, 'commentary does not receive the final Answer Briefing');
+  const answer = restored.messages[2];
+  assert.equal(answer.id, 'qa-answer-1150bb86da5e');
+  assert.equal(answer.answerId, answerId);
+  assert.notEqual(answer.answerId, answer.id);
+  assert.equal(answer.conversationId, conversationId);
+  assert.equal(answer.runId, runId);
+  assert.equal(answer.briefing.id, briefing.id);
+  assert.equal(Briefing.validBriefing(answer.briefing), true);
+  assert.deepEqual(answer.contextCaptures, [{ sourceId: 'source-a', snapshotId: 'source-a', hash: 'fixed' }]);
+  assert.deepEqual(answer.contextPackets, [{ packetId: 'packet-a' }]);
+  assert.equal(Chat.hydrateLocalChatThread(restored, runPage).messages.length, 3, 'repeat page adds no duplicate');
 });
 
 test('late local hydration preserves newer composer, native gate, in-flight UI and stable message relations', () => {

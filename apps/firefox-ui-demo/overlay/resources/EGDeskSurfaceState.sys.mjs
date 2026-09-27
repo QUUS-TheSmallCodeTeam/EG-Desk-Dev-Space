@@ -1,8 +1,11 @@
 // Pure surface state. No browser, filesystem, network, or execution side effects.
-export function initialSurfaceMode({ lifecycle, deskSession, legacyStore, existingSurface = false }) {
-  if (lifecycle?.mode === 'browser' || lifecycle?.mode === 'desk') return lifecycle.mode;
-  if (lifecycle || deskSession || legacyStore || existingSurface) return 'desk';
-  return 'browser';
+// Browser-first is a camera pose on the actual Desk, not a second surface mode.
+export function initialSurfaceMode() { return 'desk'; }
+
+export function shouldFocusInitialBrowser({ lifecycle, deskSession, legacyStore, recoveryProtected = false } = {}) {
+  if (recoveryProtected) return false;
+  if (lifecycle?.mode === 'browser' || deskSession?.surface?.mode === 'browser' || deskSession?.surface?.initialBrowserFocus === true) return true;
+  return !deskSession && !legacyStore && (!lifecycle || lifecycle.mode === 'desk');
 }
 
 export function fitSurfaceCamera(rect, available, maxZoom = 0.85) {
