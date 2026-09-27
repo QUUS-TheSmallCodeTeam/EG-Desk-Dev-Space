@@ -346,3 +346,104 @@ test('opening a file does not cancel an independent directory expansion', async 
   assert.ok(folder.querySelector('[role="treeitem"]'))
   await view.close()
 })
+
+test('file transition preserves A edits during delayed B read, draft creation and final flush', async t => {
+  t.mock.timers.enable({ apis: ['setTimeout'] })
+  let finishReadB, finishDraftB, finishFirstWrite
+  const readB = new Promise(resolve => { finishReadB = resolve })
+  const draftB = new Promise(resolve => { finishDraftB = resolve })
+  const firstWrite = new Promise(resolve => { finishFirstWrite = resolve })
+  const records = new Map(['A', 'B'].map(fileId => [`draft-${fileId}`, { id: `draft-${fileId}`, fileId, head: `${fileId}-0`, text: fileId, bufferRevision: 0, savedRevision: 0 }]))
+  const writes = []
+  const info = fileId => ({ name: `${fileId}.txt`, size: 1, sha256: 'a'.repeat(64), diskRevision: fileId, kind: 'text' })
+  const { view } = uiFixture({
+    readFile: ({ fileId }) => fileId === 'B' ? readB : Promise.resolve(info(fileId)),
+    createDraft: ({ fileId }) => fileId === 'B' ? draftB : Promise.resolve({ ...records.get(`draft-${fileId}`) }),
+    readDraft: async ({ draftId }) => ({ ...records.get(draftId) }),
+    updateDraft: async ({ draftId, text }) => {
+      writes.push({ draftId, text })
+      if (writes.length === 1) await firstWrite
+      const updated = { ...records.get(draftId), text, head: `${draftId}-${writes.length}`, bufferRevision: writes.length }
+      records.set(draftId, updated)
+      return { ...updated }
+    },
+  })
+  await view.openFile('A')
+  const editor = view.element.querySelector('textarea')
+  const title = view.element.querySelector('.egdesk-file-title')
+  const openingB = view.openFile('B')
+  editor.value = 'A read-wait edits'; editor.fire('input')
+  assert.equal(title.textContent, 'A.txt')
+  assert.equal(view.snapshot().fileId, 'A')
+  finishReadB(info('B')); await nextTurn()
+  assert.equal(title.textContent, 'A.txt')
+  assert.equal(editor.value, 'A read-wait edits')
+  editor.value = 'A read/draft edits'; editor.fire('input')
+  finishDraftB({ ...records.get('draft-B') }); await nextTurn()
+  assert.deepEqual(writes, [{ draftId: 'draft-A', text: 'A read/draft edits' }])
+  assert.equal(title.textContent, 'A.txt')
+  assert.equal(view.snapshot().draftId, 'draft-A')
+  editor.value = 'A read/draft/flush edits'; editor.fire('input')
+  finishFirstWrite(); await openingB
+  assert.deepEqual(writes, [
+    { draftId: 'draft-A', text: 'A read/draft edits' },
+    { draftId: 'draft-A', text: 'A read/draft/flush edits' },
+  ])
+  assert.equal(records.get('draft-A').text, 'A read/draft/flush edits')
+  assert.equal(title.textContent, 'B.txt')
+  assert.equal(editor.value, 'B')
+  assert.equal(view.snapshot().draftId, 'draft-B')
+  await view.openFile('A')
+  assert.equal(editor.value, 'A read/draft/flush edits')
+  await view.close()
+})
+
+test('failed transition flush leaves A title, identity and latest text intact', async t => {
+  t.mock.timers.enable({ apis: ['setTimeout'] })
+  let finishB
+  let failWrite = true
+  const delayedB = new Promise(resolve => { finishB = resolve })
+  const info = fileId => ({ name: `${fileId}.txt`, size: 1, sha256: 'a'.repeat(64), diskRevision: fileId, kind: 'text' })
+  const { view } = uiFixture({
+    readFile: ({ fileId }) => fileId === 'B' ? delayedB : Promise.resolve(info(fileId)),
+    createDraft: async ({ fileId }) => ({ id: `draft-${fileId}`, fileId, head: 'h0', text: fileId, bufferRevision: 0, savedRevision: 0 }),
+    updateDraft: async ({ draftId, text }) => {
+      if (failWrite) throw new Error('Draft store unavailable')
+      return { id: draftId, fileId: 'A', head: 'h1', text, bufferRevision: 1, savedRevision: 0 }
+    },
+  })
+  await view.openFile('A')
+  const openingB = view.openFile('B')
+  const editor = view.element.querySelector('textarea')
+  editor.value = 'A newest unsaved text'; editor.fire('input')
+  finishB(info('B'))
+  await assert.rejects(openingB, /Draft store unavailable/)
+  assert.equal(view.element.querySelector('.egdesk-file-title').textContent, 'A.txt')
+  assert.equal(view.snapshot().fileId, 'A')
+  assert.equal(view.snapshot().draftId, 'draft-A')
+  assert.equal(editor.value, 'A newest unsaved text')
+  failWrite = false
+  assert.equal(await view.close(), true)
+})
+
+test('file transition cannot discard an in-progress composition in A', async t => {
+  t.mock.timers.enable({ apis: ['setTimeout'] })
+  let finishB
+  const delayedB = new Promise(resolve => { finishB = resolve })
+  const { view } = uiFixture({
+    readFile: ({ fileId }) => fileId === 'B' ? delayedB : Promise.resolve({ name: 'A.txt', kind: 'text', size: 1, sha256: 'a'.repeat(64) }),
+    createDraft: async ({ fileId }) => ({ id: `draft-${fileId}`, fileId, head: 'h0', text: fileId, bufferRevision: 0, savedRevision: 0 }),
+    updateDraft: async ({ draftId, text }) => ({ id: draftId, fileId: 'A', head: 'h1', text, bufferRevision: 1, savedRevision: 0 }),
+  })
+  await view.openFile('A')
+  const openingB = view.openFile('B')
+  const editor = view.element.querySelector('textarea')
+  editor.fire('compositionstart'); editor.value = '한글 조합'; editor.fire('input')
+  finishB({ name: 'B.txt', kind: 'text', size: 1, sha256: 'b'.repeat(64) })
+  await openingB
+  assert.equal(view.snapshot().fileId, 'A')
+  assert.equal(view.element.querySelector('.egdesk-file-title').textContent, 'A.txt')
+  assert.equal(editor.value, '한글 조합')
+  editor.fire('compositionend')
+  assert.equal(await view.close(), true)
+})

@@ -243,7 +243,6 @@ export function createEGDeskFileView({ document, service, chooseRoot, chooseSave
   }
 
   async function openFile(fileId, restoredDraftId = null, { focus = true } = {}) {
-    if (draft && editor.value !== draft.text) await flush()
     const generation = token()
     const restored = restoredDraftId && typeof service.readDraft === 'function' ? await service.readDraft({ draftId: restoredDraftId }) : null
     let read
@@ -255,6 +254,35 @@ export function createEGDeskFileView({ document, service, chooseRoot, chooseSave
       disconnected = true
     }
     if (!present(generation)) return
+    let nextDraft = null
+    if (read.kind === 'text') {
+      const prior = draftsByFile.get(fileId)
+      if (restoredDraftId && typeof service.readDraft !== 'function') throw new Error('작업사본 재열기 기능이 연결되지 않았습니다.')
+      nextDraft = restored || (restoredDraftId ? await service.readDraft({ draftId: restoredDraftId })
+        : prior && typeof service.readDraft === 'function' ? await service.readDraft({ draftId: prior.id })
+          : prior || await service.createDraft({ fileId }))
+      if (!present(generation)) return
+      if (nextDraft.fileId !== fileId) throw new Error('작업사본과 파일 대상이 일치하지 않습니다.')
+    }
+
+    // A remains the active visual/editing target while B is prepared. Preserve
+    // edits arriving during either read or draft creation, including additional
+    // typing while that preservation write is in flight, before adopting B.
+    while (draft) {
+      if (composing) { announce('입력을 마친 후 파일을 다시 여세요.'); return }
+      await flush()
+      if (!present(generation)) return
+      if (composing) { announce('입력을 마친 후 파일을 다시 여세요.'); return }
+      if (!draft || editor.value === draft.text) break
+    }
+    if (!present(generation)) return
+    // Reopening the same draft must use the freshly preserved revision, not the
+    // candidate read before the user's intervening input.
+    if (nextDraft && draft?.id === nextDraft.id) nextDraft = draft
+    if (timer) { clearTimeout(timer); timer = null }
+
+    // No asynchronous work occurs between changing the identity/title and its
+    // visible buffer. A failed load or preservation write leaves A intact.
     activeFileId = fileId
     sourceDisconnected = disconnected
     pendingReconnect = false
@@ -264,14 +292,7 @@ export function createEGDeskFileView({ document, service, chooseRoot, chooseSave
     reviewPanel.hidden = true
     checkPanel.hidden = true
     if (read.kind === 'text') {
-      const prior = draftsByFile.get(fileId)
-      if (restoredDraftId && typeof service.readDraft !== 'function') throw new Error('작업사본 재열기 기능이 연결되지 않았습니다.')
-      const nextDraft = restored || (restoredDraftId ? await service.readDraft({ draftId: restoredDraftId })
-        : prior && typeof service.readDraft === 'function' ? await service.readDraft({ draftId: prior.id })
-          : prior || await service.createDraft({ fileId }))
-      if (!present(generation)) return
       draft = nextDraft
-      if (draft.fileId !== fileId) throw new Error('작업사본과 파일 대상이 일치하지 않습니다.')
       draftsByFile.set(fileId, draft)
       editor.value = draft.text
       setEditable(true)
