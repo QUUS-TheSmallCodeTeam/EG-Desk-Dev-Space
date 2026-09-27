@@ -115,12 +115,15 @@ await runUiFlow(`context-briefing-fixture-${phase}`, async ({ harness, check, ca
     const browserUrl = `http://127.0.0.1:39218/__qa/browser-document/${nonce}`;
     const file = api.cardRuntime.openBrowserCard(fileUrl, { openMode: 'new' });
     const browser = api.cardRuntime.openBrowserCard(browserUrl, { openMode: 'new' });
+    const longText = Array.from({ length: 610 }, (_, index) => `QA_LONG_URL_${nonce}_line_${index + 1}`).join('\n');
+    const longUrl = `data:text/html;charset=utf-8,${encodeURIComponent(`<title>QA long URL ${nonce}</title><pre>${longText}</pre>`)}`;
+    const longBrowser = api.cardRuntime.openBrowserCard(longUrl, { openMode: 'new' });
     for (const [index, card] of [file, browser].entries()) {
       Object.assign(card.style, { left: `${160 + index * 720}px`, top: '160px', width: '640px', height: '420px' });
     }
     const boardId = `qa-context-board-${nonce}`, title = `QA context ${nonce}`;
     api.agenda.save({ agendaId: boardId, title, memberIds: [file.id, browser.id], contextBindings: [] });
-    return { boardId, title, originalIds: [file.id, browser.id] };
+    return { boardId, title, originalIds: [file.id, browser.id], longUrlViewId: longBrowser.id };
   }, { fileUrl: pathToFileURL(sourceFile).href, nonce });
   const thread = await newQaThread(harness, `QA context ${nonce}`);
   const moveToHud = (await harness.inspect('.egd-chat-card button[title="우측 패널로 이동"]'))[0];
@@ -142,6 +145,19 @@ await runUiFlow(`context-briefing-fixture-${phase}`, async ({ harness, check, ca
   await clickThen('Attach this Board selection to the current Chat', hook('board-attach-chat') + attributeSelector('data-projection-id', board.id), panel, value => value.exists);
   const selected = await chrome(harness, () => [...document.querySelectorAll('[data-testid="chat-attach-source"]')].filter(node => node.checked).map(node => node.dataset.viewId).sort());
   check('Board attach selects only its two actual member views', JSON.stringify(selected) === JSON.stringify([fileView, browserView].sort()));
+  const longSelector = hook('chat-attach-source') + attributeSelector('data-view-id', scene.longUrlViewId);
+  const longRow = await chrome(harness, selector => {
+    const input = document.querySelector(selector), row = input.closest('label'), rect = input.getBoundingClientRect();
+    return { locationLength: row.querySelector('small').textContent.length, width: rect.width, height: rect.height,
+      rowHeight: row.getBoundingClientRect().height, checked: input.checked };
+  }, longSelector);
+  result.longUrlRegression = longRow;
+  check('20KB source location keeps an actual checkbox-sized control and bounded row', longRow.locationLength > 16000 && longRow.width >= 16 && longRow.height >= 16 && longRow.rowHeight < 200 && !longRow.checked);
+  await clickThen('Select long-URL Browser through its actual checkbox', longSelector,
+    () => chrome(harness, selector => document.querySelector(selector).checked, longSelector), Boolean);
+  await clickThen('Deselect long-URL Browser without changing Board selection', longSelector,
+    () => chrome(harness, selector => document.querySelector(selector).checked, longSelector), value => !value);
+  await capture('long-url-checkbox-regression');
   await clickThen('Confirm selected attachments', hook('chat-attach-confirm'), roomState, value => value.sources.length === 2);
   let attached = await roomState();
   const fileInput = attached.sources.find(item => item.sourceRef.viewId === fileView);
@@ -183,6 +199,7 @@ await runUiFlow(`context-briefing-fixture-${phase}`, async ({ harness, check, ca
   await control('/__qa/context-config', { failNextCapture: true });
   await sendFromComposer(harness, draftA);
   const failed = await waitUntil(roomState, value => !value.preparing && !!value.error);
+  check('failure came from the intentionally configured fixture response, not broken Browser capture', (await fixtureState()).observed.contextCaptureFailures === 1);
   check('capture failure retains exact draft and attachments with zero sends', failed.draft === draftA && failed.sources.length === 2 && (await fixtureState()).observed.sends.length === 0);
   await control('/__qa/context-config', { holdNextCapture: true });
   await sendFromComposer(harness, draftA); // Explicit human retry after definite capture failure.

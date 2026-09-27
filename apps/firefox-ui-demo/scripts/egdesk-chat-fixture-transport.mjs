@@ -42,7 +42,7 @@ const fixtureTerminals = new Map();
 const clients = new Set();
 const runs = new Map();
 const failedStarts = new Map();
-const observed = { sends: [], interrupts: [], resumes: [], approvals: [], authWrites: [], events: [], reconnects: 0, replays: 0, heldResumes: 0, releasedResumes: 0 };
+const observed = { sends: [], interrupts: [], resumes: [], approvals: [], authWrites: [], events: [], reconnects: 0, replays: 0, heldResumes: 0, releasedResumes: 0, contextCaptureFailures: 0 };
 
 function json(res, status, value) {
   res.writeHead(status, { 'Content-Type': 'application/json; charset=utf-8',
@@ -273,7 +273,7 @@ const handler = async (req, res) => {
     }
     if (req.method === 'POST' && url.pathname === '/context/captures') {
       if (!authLoggedIn) return json(res, 403, { error: 'Fixture account is signed out' });
-      if (failNextCapture) { failNextCapture = false; return json(res, 503, { code: 'QA_CAPTURE_FAILED', error: 'Explicit fixture capture failure' }); }
+      if (failNextCapture) { failNextCapture = false; observed.contextCaptureFailures++; return json(res, 503, { code: 'QA_CAPTURE_FAILED', error: 'Explicit fixture capture failure' }); }
       const body = await bodyJson(req);
       const result = context.captureBatch(body, accountVariant);
       if (holdNextCapture) {

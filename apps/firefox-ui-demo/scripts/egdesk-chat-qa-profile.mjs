@@ -47,7 +47,8 @@ export function qaProfileSourceFingerprints(profilePath) {
     'resources/EGDeskSurfaceState.sys.mjs', 'resources/EGDeskRecoveryState.sys.mjs',
     'resources/EGDeskChatState.sys.mjs', 'resources/EGDeskTerminalState.sys.mjs', 'resources/terminal.html',
     'resources/egdesk-terminal-init.js', 'resources/EGDeskMarkdown.sys.mjs',
-    'resources/EGDeskInputContext.sys.mjs', 'resources/EGDeskBriefingState.sys.mjs'];
+    'resources/EGDeskInputContext.sys.mjs', 'resources/EGDeskBriefingState.sys.mjs',
+    'resources/EGDeskBrowserAgentRuntimeParent.sys.mjs', 'resources/EGDeskBrowserAgentRuntimeChild.sys.mjs'];
   return Object.fromEntries(names.map(name => {
     const file = path.join(profile, 'chrome', name);
     if (!fs.existsSync(file)) return [name, null];

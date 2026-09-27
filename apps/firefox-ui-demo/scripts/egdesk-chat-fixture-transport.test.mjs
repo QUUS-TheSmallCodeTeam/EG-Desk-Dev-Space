@@ -245,6 +245,7 @@ test('one configured fixture capture failure cannot create a send or silently re
   assert.equal((await request(handler, 'POST', '/context/captures', body)).status, 503);
   const first = (await request(handler, 'GET', '/__qa/state', null, TOKEN)).body;
   assert.equal(first.context.captureBatches, 0);
+  assert.equal(first.observed.contextCaptureFailures, 1);
   assert.equal(first.observed.sends.length, 0);
   assert.equal((await request(handler, 'POST', '/context/captures', body)).status, 200);
   assert.equal((await request(handler, 'GET', '/__qa/state', null, TOKEN)).body.context.captureBatches, 1);
