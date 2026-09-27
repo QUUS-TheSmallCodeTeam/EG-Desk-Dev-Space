@@ -19,6 +19,7 @@ function harness(override = {}) {
   const chat = new CodexChatRuntime({
     request: async (method, params) => { calls.push({ method, params }); return (override.request || defaults)(method, params, chat, defaults) },
     respond: (...args) => replies.push(args), emit: event => events.push(event), emitLegacy: event => legacy.push(event),
+    contexts: override.contexts,
     verifyFile: override.verifyFile || (async () => null),
   })
   chat.setConnection(true)
@@ -38,6 +39,7 @@ test('ordinary Codex does not inject a default profile, model, sandbox or approv
   assert.equal(h.calls[1].params.model, undefined)
   assert.equal(run.answerId, `${run.conversationId}/${run.runId}`)
   assert.equal(h.chat.snapshot(run.conversationId).runs[0].clientThreadId, 'ui-1')
+  assert.deepEqual(h.chat.snapshot(run.conversationId).runs[0].parentTurnConfiguration, { model: 'configured-model', effort: null, modelSource: 'native-thread', effortSource: 'native-thread' })
 })
 
 test('explicit profile and model/effort are opt-in native fields', async () => {
@@ -47,6 +49,34 @@ test('explicit profile and model/effort are opt-in native fields', async () => {
   assert.equal(h.calls[1].params.model, 'user-selected')
   assert.equal(h.calls[1].params.effort, 'max')
   assert.equal(h.calls[1].params.input[0].text, 'Hi')
+})
+
+test('accepted parent-turn Reader configuration preserves explicit overrides and native thread defaults', async () => {
+  const bound = []
+  const contexts = { prepare: async () => null, specs: () => [], requireThread: async () => {}, cancelRun: () => {}, bindRun: async (run, prepared, configuration) => bound.push({ runId: run.runId, configuration }) }
+  const h = harness({ contexts, request: async (method, params, chat, defaults) => {
+    const result = await defaults(method, params)
+    return method === 'thread/start' ? { ...result, reasoningEffort: 'high' } : result
+  } })
+  const first = await h.chat.send({ message: 'First', requestId: 'parent-default' })
+  assert.deepEqual(bound[0].configuration, { model: 'configured-model', effort: 'high', modelSource: 'native-thread', effortSource: 'native-thread' })
+  assert.deepEqual(h.chat.snapshot(first.conversationId).runs[0].parentTurnConfiguration, bound[0].configuration)
+  await h.finish(first)
+  await h.chat.send({ message: 'Second', requestId: 'parent-sol-max', conversationId: first.conversationId, model: 'gpt-6-sol', effort: 'max' })
+  assert.deepEqual(bound[1].configuration, { model: 'gpt-6-sol', effort: 'max', modelSource: 'turn-request', effortSource: 'turn-request' })
+  assert.deepEqual(h.chat.snapshot(first.conversationId).runs.at(-1).parentTurnConfiguration, bound[1].configuration)
+  assert.deepEqual({ model: h.calls.at(-1).params.model, effort: h.calls.at(-1).params.effort }, { model: 'gpt-6-sol', effort: 'max' })
+})
+
+test('native-reported turn settings take precedence over requested settings for Reader gating', async () => {
+  const bound = []
+  const contexts = { prepare: async () => null, specs: () => [], bindRun: async (run, prepared, configuration) => bound.push(configuration) }
+  const h = harness({ contexts, request: async (method, params, chat, defaults) => {
+    const result = await defaults(method, params)
+    return method === 'turn/start' ? { ...result, model: 'reported-model', reasoningEffort: 'reported-effort' } : result
+  } })
+  await h.chat.send({ message: 'Check', model: 'gpt-6-sol', effort: 'max' })
+  assert.deepEqual(bound[0], { model: 'reported-model', effort: 'reported-effort', modelSource: 'native-turn', effortSource: 'native-turn' })
 })
 
 test('events received before turn/start response bind only to its actual turn and request', async () => {

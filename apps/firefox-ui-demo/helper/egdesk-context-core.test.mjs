@@ -34,7 +34,7 @@ async function harness(t, options = {}) {
   })
   chat.setConnection(true)
   const capture = async (text = 'Original selected text', extra = {}) => (await contexts.capture({ clientThreadId: 'ui', attachments: [{ id: 'attachment', kind: 'browser', label: 'Selected page', sourceRef: { viewId: 'view-1', resourceId: 'page-1', url: 'https://example.com/page?token=private' }, capturedAt: 10, captureScope: { type: 'dom-range', locator: '#selected' }, content: { mime: 'text/plain', text, truncated: false }, ...extra }] })).captures[0]
-  const start = async ids => chat.send({ message: 'Use selected sources', requestId: `req-${nativeSeq}`, clientThreadId: 'ui', cwd, contextSnapshotIds: ids, contextCapabilities: { read: true, reader: true, publishBriefing: true } })
+  const start = async (ids, settings = {}) => chat.send({ message: 'Use selected sources', requestId: `req-${nativeSeq}`, clientThreadId: 'ui', cwd, contextSnapshotIds: ids, contextCapabilities: { read: true, reader: true, publishBriefing: true }, ...settings })
   const tool = async (run, name, args, id = `call-${replies.length}`) => {
     await chat.handleServerRequest({ id, method: 'item/tool/call', params: { threadId: run.conversationId, turnId: run.runId, callId: id, tool: name, arguments: args } })
     await contexts.calls.get(`${run.answerId}/${id}`)
@@ -391,26 +391,47 @@ test('overflow dynamic tool is wired through the native Reader adapter to an exa
   } })
   const h = await harness(t, { reader })
   const capture = await h.capture('Selected immutable text for source reading.\n'.repeat(350))
-  const run = await h.start([capture.sourceId])
+  const run = await h.start([capture.sourceId], { model: 'gpt-6-sol', effort: 'max' })
+  const binding = h.contexts.bindings.get(run.answerId)
+  assert.deepEqual(binding.readerConfiguration, { model: 'gpt-6-sol', effort: 'max', modelSource: 'turn-request', effortSource: 'turn-request' })
+  assert.deepEqual(h.chat.snapshot(run.conversationId).runs[0].context.readerConfiguration, binding.readerConfiguration)
+  assert.deepEqual((await h.store.getRecord('email:a@example.com', 'bindings', binding.bindingId)).readerConfiguration, binding.readerConfiguration)
   const reply = await h.tool(run, 'egdesk_read_source', { snapshotId: capture.sourceId, intent: 'Review selected source facts only' }, 'native-read')
   assert.equal(reply.result.success, true)
   const packet = JSON.parse(reply.result.contentItems[0].text)
   assert.equal(packet.mode, 'reader')
+  const childStart = readerCalls.find(call => call.method === 'thread/start').params
+  const childTurn = readerCalls.find(call => call.method === 'turn/start').params
+  assert.equal(childStart.model, 'gpt-6-sol')
+  assert.deepEqual({ model: childTurn.model, effort: childTurn.effort }, { model: 'gpt-6-sol', effort: 'max' })
   assert.equal(packet.coverage.complete, true)
   const inspected = await h.store.inspect('email:a@example.com', capture.sourceId, { packetId: packet.packetId })
   assert.equal(inspected.delivered.text, reply.result.contentItems[0].text)
   const records = await h.store.listRecords('email:a@example.com', 'readers', record => record.stage === 'source-fragment')
   assert.ok(records.length >= 2)
   assert.ok(records.every(record => record.inputPayload.hash === hashContent(record.inputPayload.text)))
+  assert.ok(records.every(record => record.result.readerConfiguration.model === 'gpt-6-sol' && record.result.readerConfiguration.effort === 'max'))
   assert.ok(readerCalls.filter(call => call.method === 'turn/start').every(call => call.params.sandboxPolicy.networkAccess === false))
   assert.equal(h.events.find(event => event.event === 'reader.completed').details.deliveryStatus, 'prepared')
   assert.equal(h.events.find(event => event.event === 'context.read.completed').details.deliveryStatus, 'sent-to-app-server')
 })
 
+test('unknown parent reasoning effort cannot silently start a default Reader child', async t => {
+  const nativeCalls = []
+  const reader = new NativeReaderClient({ getOwnerKey: () => 'email:a@example.com', respond: () => {}, request: async (method, params) => { nativeCalls.push({ method, params }); throw new Error('No Reader RPC should start') } })
+  const h = await harness(t, { reader })
+  const capture = await h.capture('Long source evidence.\n'.repeat(350))
+  const run = await h.start([capture.sourceId])
+  const reply = await h.tool(run, 'egdesk_read_source', { snapshotId: capture.sourceId, intent: 'Read the selected source' }, 'missing-effort')
+  assert.equal(reply.result.success, false)
+  assert.equal(JSON.parse(reply.result.contentItems[0].text).error.code, 'READER_CONFIGURATION_REQUIRED')
+  assert.equal(nativeCalls.length, 0)
+})
+
 test('context resume restores exact delivered references and immutable briefing without re-reading live sources', async t => {
   const h = await harness(t)
   const capture = await h.capture('Original selected evidence')
-  const accepted = await h.start([capture.sourceId])
+  const accepted = await h.start([capture.sourceId], { model: 'gpt-6-sol', effort: 'max' })
   await h.tool(accepted, 'egdesk_read_source', { snapshotId: capture.sourceId, intent: 'Read' }, 'history-read')
   await h.tool(accepted, 'egdesk_publish_briefing', { title: 'Evidence', steps: [{ id: 'source', text: 'Evidence', target: { sourceId: capture.sourceId }, fallback: 'Show immutable source' }] }, 'history-briefing')
   const run = h.chat.runs.get(accepted.answerId)
@@ -419,6 +440,9 @@ test('context resume restores exact delivered references and immutable briefing 
   delete run.context
   const calls = h.calls.length
   await h.contexts.restoreRun(run)
+  assert.equal(h.contexts.bindings.get(run.answerId).readerConfiguration.model, 'gpt-6-sol')
+  assert.equal(h.contexts.bindings.get(run.answerId).readerConfiguration.effort, 'max')
+  assert.equal(run.context.readerConfiguration.effort, 'max')
   assert.deepEqual(run.context.packets, original.packets)
   assert.deepEqual(run.context.briefings, original.briefings)
   assert.equal(run.context.captures[0].hash, capture.hash)

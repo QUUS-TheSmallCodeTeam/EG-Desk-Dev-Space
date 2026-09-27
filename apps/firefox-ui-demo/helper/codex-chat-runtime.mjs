@@ -360,7 +360,17 @@ export class CodexChatRuntime {
       if (epoch !== this.epoch) throw chatError('ACCOUNT_CHANGED', 'Codex account changed', 409)
       const run = this.ensureRun(cid, result?.turn?.id, context)
       if (!run) throw chatError('INVALID_TURN_RESPONSE', 'Codex did not return a turn ID', 502)
-      await this.contexts?.bindRun(run, preparedContext)
+      const threadConfiguration = this.threads.get(cid)
+      const nativeTurnModel = idText(result?.model) || idText(result?.turn?.model)
+      const nativeTurnEffort = idText(result?.reasoningEffort) || idText(result?.turn?.reasoningEffort)
+      const readerConfiguration = {
+        model: nativeTurnModel || overrides.model || threadConfiguration?.model || null,
+        effort: nativeTurnEffort || effort || threadConfiguration?.effort || null,
+        modelSource: nativeTurnModel ? 'native-turn' : overrides.model ? 'turn-request' : 'native-thread',
+        effortSource: nativeTurnEffort ? 'native-turn' : effort !== undefined ? 'turn-request' : 'native-thread',
+      }
+      run.parentTurnConfiguration = readerConfiguration
+      await this.contexts?.bindRun(run, preparedContext, readerConfiguration)
       if (epoch !== this.epoch) throw chatError('ACCOUNT_CHANGED', 'Codex account or connection changed', 409)
       // Notifications can precede the RPC response. Only the returned turn ID
       // may inherit this request's correlation; other turns remain unclaimed.

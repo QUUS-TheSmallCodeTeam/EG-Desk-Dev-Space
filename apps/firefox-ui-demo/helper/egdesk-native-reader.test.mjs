@@ -7,12 +7,12 @@ function nativeHarness(options = {}) {
   const calls = [], replies = []
   let thread = 0, turn = 0, owner = 'owner-a'
   const reader = new NativeReaderClient({
-    getOwnerKey: () => owner, timeoutMs: options.timeoutMs || 1000,
+    getOwnerKey: () => owner, timeoutMs: options.timeoutMs || 1000, readerPolicy: options.readerPolicy || null,
     respond: (...reply) => replies.push(reply),
     request: async (method, params) => {
       calls.push({ method, params })
       if (method === 'mcpServerStatus/list') return { data: params.threadId === 'parent' ? [{ name: 'external', pluginId: 'plugin@example', tools: { write: {} } }] : options.externalTools ? [{ name: 'unwanted', tools: { write: {} } }] : [], nextCursor: null }
-      if (method === 'thread/start') return { thread: { id: `reader-${++thread}` }, sandbox: { type: options.unsafeSandbox ? 'workspaceWrite' : 'readOnly' } }
+      if (method === 'thread/start') return { thread: { id: `reader-${++thread}` }, sandbox: { type: options.unsafeSandbox ? 'workspaceWrite' : 'readOnly' }, ...(options.mismatchedThreadModel ? { model: 'another-model' } : {}) }
       if (method === 'thread/unsubscribe') return { status: 'unsubscribed' }
       if (method === 'turn/interrupt') return {}
       if (method !== 'turn/start') throw new Error(method)
@@ -22,10 +22,10 @@ function nativeHarness(options = {}) {
       reader.handleNotification({ method: 'item/reasoning/textDelta', params: { threadId: params.threadId, turnId: id, delta: 'RAW_CHAIN_NOT_ALLOWED' } })
       reader.handleNotification({ method: 'item/completed', params: { threadId: params.threadId, turnId: id, item: { type: 'agentMessage', text: JSON.stringify({ summary: 'A source-reading result.', quotes: [options.badQuote ? 'not-in-source' : input.sourceText.slice(0, 12)], structure: ['Visible content'] }) } } })
       reader.handleNotification({ method: 'turn/completed', params: { threadId: params.threadId, turn: { id, status: options.failed ? 'failed' : 'completed' } } })
-      return { turn: { id, status: 'inProgress', items: [] } }
+      return { turn: { id, status: 'inProgress', items: [] }, ...(options.mismatchedTurnEffort ? { reasoningEffort: 'low' } : {}) }
     },
   })
-  const input = { ownerKey: owner, parentThreadId: 'parent', readerSessionId: 'logical-reader', sourceId: 'source', sourceHash: hashContent('Original source evidence.'), cwd: '/readonly-scratch', intent: 'Read source facts only', text: 'Original source evidence.', range: { startOffset: 0, endOffset: 25 }, maxOutputChars: 1000 }
+  const input = { ownerKey: owner, parentThreadId: 'parent', readerSessionId: 'logical-reader', sourceId: 'source', sourceHash: hashContent('Original source evidence.'), cwd: '/readonly-scratch', model: 'gpt-6-sol', effort: 'max', intent: 'Read source facts only', text: 'Original source evidence.', range: { startOffset: 0, endOffset: 25 }, maxOutputChars: 1000 }
   return { reader, calls, replies, input, changeOwner: next => { owner = next } }
 }
 
@@ -36,6 +36,7 @@ test('actual native Reader adapter requests read-only/no-network/no tools and ha
   assert.equal(start.ephemeral, true)
   assert.equal(start.sandbox, 'read-only')
   assert.equal(start.approvalPolicy, 'never')
+  assert.equal(start.model, 'gpt-6-sol')
   assert.equal(start.config.features.apps, false)
   assert.equal(start.config.features.shell_tool, false)
   assert.equal(start.config.features.hooks, false)
@@ -43,11 +44,45 @@ test('actual native Reader adapter requests read-only/no-network/no tools and ha
   assert.equal(start.config.mcp_servers.external.enabled, false)
   assert.deepEqual(start.dynamicTools, [])
   const turn = h.calls.find(call => call.method === 'turn/start').params
+  assert.equal(turn.model, 'gpt-6-sol')
+  assert.equal(turn.effort, 'max')
   assert.deepEqual(turn.sandboxPolicy, { type: 'readOnly', networkAccess: false })
   assert.equal(result.inputPayload.text, turn.input[0].text)
   assert.equal(result.inputPayload.hash, hashContent(turn.input[0].text))
   assert.equal(result.nativeTurnId, 'reader-turn-1')
+  assert.deepEqual(result.readerConfiguration, { model: 'gpt-6-sol', effort: 'max', source: 'parent-turn' })
   assert.ok(!JSON.stringify(result).includes('RAW_CHAIN_NOT_ALLOWED'))
+})
+
+test('Reader refuses an implicit global model or effort before any native request', async () => {
+  const h = nativeHarness()
+  await assert.rejects(h.reader.read({ ...h.input, model: null }), e => e.code === 'READER_CONFIGURATION_REQUIRED')
+  await assert.rejects(h.reader.read({ ...h.input, effort: null }), e => e.code === 'READER_CONFIGURATION_REQUIRED')
+  assert.equal(h.calls.length, 0)
+})
+
+test('configured Reader policy may intentionally select a different explicit pair', async () => {
+  const h = nativeHarness({ readerPolicy: { model: 'reader-policy-model', effort: 'high' } })
+  const result = await h.reader.read(h.input)
+  assert.equal(h.calls.find(call => call.method === 'thread/start').params.model, 'reader-policy-model')
+  const turn = h.calls.find(call => call.method === 'turn/start').params
+  assert.deepEqual({ model: turn.model, effort: turn.effort }, { model: 'reader-policy-model', effort: 'high' })
+  assert.deepEqual(result.readerConfiguration, { model: 'reader-policy-model', effort: 'high', source: 'reader-policy' })
+})
+
+test('Reader changes native child when a later parent turn changes model or effort', async () => {
+  const h = nativeHarness()
+  const first = await h.reader.read(h.input)
+  const second = await h.reader.read({ ...h.input, model: 'other-model', effort: 'high' })
+  assert.notEqual(first.nativeThreadId, second.nativeThreadId)
+  assert.deepEqual(h.calls.filter(call => call.method === 'turn/start').map(call => [call.params.model, call.params.effort]), [['gpt-6-sol', 'max'], ['other-model', 'high']])
+})
+
+test('native-reported Reader configuration mismatch fails without a successful read', async () => {
+  for (const mismatch of [{ mismatchedThreadModel: true }, { mismatchedTurnEffort: true }]) {
+    const h = nativeHarness(mismatch)
+    await assert.rejects(h.reader.read(h.input), e => e.code === 'READER_CONFIGURATION_MISMATCH')
+  }
 })
 
 test('Reader refinement reuses a bounded session and re-enters original source, not only previous summaries', async () => {

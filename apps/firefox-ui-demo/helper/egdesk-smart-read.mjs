@@ -72,7 +72,7 @@ export class SmartReadEngine {
     this.sessions = new Map()
   }
 
-  async read({ ownerKey, run, sourceId, intent, query, range, readerSessionId, usage, model, cwd, signal, assertActive, emit = () => {} }) {
+  async read({ ownerKey, run, sourceId, intent, query, range, readerSessionId, usage, model, effort, cwd, signal, assertActive, emit = () => {} }) {
     if (typeof intent !== 'string' || !intent.trim() || intent.length > 2000 || (query != null && (typeof query !== 'string' || query.length > 1000))) throw chatError('INVALID_READ', 'A bounded read intent and optional literal query are required')
     if (range && query) throw chatError('INVALID_READ', 'Choose an explicit line range or a literal query, not both')
     assertActive()
@@ -114,7 +114,7 @@ export class SmartReadEngine {
       session.busy = true
       readSession = session
       const maxOutputChars = Math.max(160, Math.min(1000, Math.floor((admission.availableTokens - 600) * 0.7)))
-      const base = { ownerKey, parentThreadId: run.conversationId, readerSessionId: session.id, sourceId, sourceHash: manifest.hash, intent, query, cwd, model, signal, maxOutputChars, onLifecycle: details => emit('reader.started', { ...details, sourceId }) }
+      const base = { ownerKey, parentThreadId: run.conversationId, readerSessionId: session.id, sourceId, sourceHash: manifest.hash, intent, query, cwd, model, effort, signal, maxOutputChars, onLifecycle: details => emit('reader.started', { ...details, sourceId }) }
       const merge = async nodes => {
         const notes = JSON.stringify(nodes.map(node => ({ summary: node.summary, sourceQuotes: node.selectedSpans.map(span => span.quote) })))
         const assigned = { ...base, text: notes, range: { startOffset: 0, endOffset: notes.length }, intent: `Integrate these already-covered source-reading notes for this read intent: ${intent}. Preserve uncertainty. This is a reading transformation, not the user's final business answer.` }

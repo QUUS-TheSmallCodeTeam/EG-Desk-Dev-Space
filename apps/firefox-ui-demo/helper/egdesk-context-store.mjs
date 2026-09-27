@@ -292,10 +292,10 @@ export class ImmutableContextStore {
     return { capture: this.publicManifest(manifest), source: { role: 'source', mime: manifest.shape.mime, hash: manifest.hash, rangeHash: hashContent(rangeText), text: rangeText, range: { startLine, endLine: end, totalLines: lines.length }, nextLine: end < lines.length ? end + 1 : null }, delivered, bindings }
   }
 
-  async bind(ownerKey, run, sourceIds, capabilities) {
+  async bind(ownerKey, run, sourceIds, capabilities, readerConfiguration) {
     const captures = []
     for (const id of sourceIds) captures.push(await this.getCapture(ownerKey, id))
-    const binding = { conversationId: run.conversationId, runId: run.runId, answerId: run.answerId, clientThreadId: run.clientThreadId, sourceIds: [...sourceIds], capabilities: { read: capabilities.read === true, reader: capabilities.reader === true, publishBriefing: capabilities.publishBriefing === true }, capturedAt: this.now() }
+    const binding = { conversationId: run.conversationId, runId: run.runId, answerId: run.answerId, clientThreadId: run.clientThreadId, sourceIds: [...sourceIds], capabilities: { read: capabilities.read === true, reader: capabilities.reader === true, publishBriefing: capabilities.publishBriefing === true }, readerConfiguration, capturedAt: this.now() }
     const id = await this.putRecord(ownerKey, 'bindings', binding)
     return { bindingId: id, ...binding, captures }
   }
