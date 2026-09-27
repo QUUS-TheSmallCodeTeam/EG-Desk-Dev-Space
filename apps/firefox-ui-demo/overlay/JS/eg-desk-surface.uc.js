@@ -17,6 +17,7 @@
   const FileCardState = ChromeUtils.importESModule('chrome://userchrome/content/EGDeskFileCardState.sys.mjs');
   const BROWSER_AGENT_ACTOR_NAME = 'EGDeskBrowserAgentRuntime';
   const BROWSER_AGENT_HISTORY_LIMIT = 100;
+  const EGDESK_START_URI = 'chrome://userchrome/content/egdesk-start.html';
   let browserAgentActorReady = false;
   console.warn(TAG, 'loaded, readyState =', document.readyState);
 
@@ -1135,6 +1136,7 @@
   }
 
   function browserDisplayHost(url) {
+    if (String(url || '') === EGDESK_START_URI) return 'EG-Desk';
     try {
       const parsed = new URL(String(url || ''));
       if (parsed.protocol === 'file:') return parsed.pathname.split('/').filter(Boolean).pop() || 'Local file';
@@ -1144,6 +1146,10 @@
     } catch {
       return String(url || 'Browser');
     }
+  }
+
+  function browserVisibleAddress(url) {
+    return String(url || '') === EGDESK_START_URI ? '' : String(url || '');
   }
 
   function browserSecurityLabel(url) {
@@ -9507,7 +9513,8 @@
       class: 'egd-card-url',
       'aria-label': '주소 또는 검색어',
       data: { testid: options.firstUse ? 'first-use-address' : 'browser-address' },
-      value: normalizedUrl,
+      value: browserVisibleAddress(normalizedUrl),
+      placeholder: '주소 또는 검색어 입력',
     });
     if (options.fixedLogicalHeight) card._fixedLogicalHeight = options.fixedLogicalHeight;
     let xulBrowser = null;
@@ -9706,6 +9713,7 @@
       return '';
     };
     const readBrowserTitle = () => {
+      if (browserState.uri === EGDESK_START_URI) return 'EG-Desk';
       try {
         const title = xulBrowser?.contentTitle || xulBrowser?.contentDocument?.title;
         if (title) return String(title).trim();
@@ -10633,15 +10641,18 @@
     };
     const syncBrowserChrome = () => {
       updateHistoryFlags();
+      const isStartPage = browserState.uri === EGDESK_START_URI;
       card.classList.toggle('egd-browser-loading', !!browserState.loading);
       card.dataset.browserLoading = browserState.loading ? 'true' : 'false';
       pageTitle.textContent = browserState.title || browserDisplayHost(browserState.uri);
       pageTitle.title = browserState.title || browserState.uri;
-      pageStatus.textContent = browserState.loading ? 'Loading' : browserState.security;
-      pageStatus.title = browserState.uri;
+      pageStatus.hidden = isStartPage;
+      pageStatus.textContent = isStartPage ? '' : browserState.loading ? 'Loading' : browserState.security;
+      pageStatus.title = isStartPage ? '' : browserState.uri;
+      securityIcon.hidden = isStartPage;
       securityIcon.textContent = browserSecurityGlyph(browserState.uri);
-      securityIcon.title = browserState.security;
-      if (document.activeElement !== urlInput) urlInput.value = browserState.uri;
+      securityIcon.title = isStartPage ? '' : browserState.security;
+      if (document.activeElement !== urlInput) urlInput.value = browserVisibleAddress(browserState.uri);
       backButton.disabled = !browserState.canGoBack;
       forwardButton.disabled = !browserState.canGoForward;
       reloadButton.textContent = browserState.loading ? '×' : '↻';
@@ -10698,7 +10709,7 @@
       browserState.uri = url;
       browserState.security = browserSecurityLabel(url);
       browserState.title = browserDisplayHost(url);
-      urlInput.value = url;
+      urlInput.value = browserVisibleAddress(url);
       pushBrowserHistory(url, { replace: navOptions.replaceHistory });
       bindCardSourceRef(card, browserSourceRef(url, navOptions.sourceRef || {}));
       setBrowserLoading(true);
@@ -10714,7 +10725,7 @@
         browserState.uri = url;
         browserState.security = browserSecurityLabel(url);
         browserState.title = browserDisplayHost(url);
-        urlInput.value = url;
+        urlInput.value = browserVisibleAddress(url);
         bindCardSourceRef(card, browserSourceRef(url));
         setBrowserLoading(true);
         loadBrowserUri(url);
@@ -10739,7 +10750,7 @@
         browserState.uri = url;
         browserState.security = browserSecurityLabel(url);
         browserState.title = browserDisplayHost(url);
-        urlInput.value = url;
+        urlInput.value = browserVisibleAddress(url);
         bindCardSourceRef(card, browserSourceRef(url));
         setBrowserLoading(true);
         loadBrowserUri(url);
@@ -10903,7 +10914,7 @@
 
     urlInput.addEventListener('keydown', (ev) => {
       if (ev.key === 'Escape') {
-        urlInput.value = browserState.uri;
+        urlInput.value = browserVisibleAddress(browserState.uri);
         urlInput.blur();
         ev.preventDefault();
         ev.stopPropagation();
@@ -10914,7 +10925,7 @@
       ev.stopPropagation();
       const url = urlInput.value.trim();
       if (!url) {
-        urlInput.value = browserState.uri;
+        urlInput.value = browserVisibleAddress(browserState.uri);
         return;
       }
       navigateBrowser(url);
@@ -10923,7 +10934,7 @@
       window.setTimeout(() => urlInput.select?.(), 0);
     });
     urlInput.addEventListener('blur', () => {
-      if (!urlInput.value.trim()) urlInput.value = browserState.uri;
+      if (!urlInput.value.trim()) urlInput.value = browserVisibleAddress(browserState.uri);
     });
 
     // ---- Fit-to-card scaling: width 기준 scale, height 는 logical viewport 로 흡수 ----
@@ -11397,21 +11408,16 @@
         resetWheelSession();
       }
     };
-    const zoomCanvasByWheel = (ev) => {
-      const unit = normalizeWheelDelta(ev);
-      const delta = -ev.deltaY * unit * WHEEL_ZOOM_SPEED;
-      const factor = Math.exp(delta);
+    const zoomCanvasByFactor = (factor, cx, cy) => {
       const prevZoom = state.zoomTarget;
       const nextZoom = Math.max(ZOOM_MIN, Math.min(ZOOM_MAX, prevZoom * factor));
       // A restored oversized Card can begin at the camera's minimum zoom.
       // An outward gesture must still uncover the Desk in that case.
       if (nextZoom === prevZoom) {
-        if (state.surface.initialBrowserFocus && delta < 0) enterLocalDesk();
+        if (state.surface.initialBrowserFocus && factor < 1) enterLocalDesk();
         return;
       }
       if (state.surface.initialBrowserFocus && nextZoom < prevZoom) enterLocalDesk();
-      const cx = ev.clientX;
-      const cy = ev.clientY;
       const ratio = nextZoom / prevZoom;
       state.panTarget.x = cx - (cx - state.panTarget.x) * ratio;
       state.panTarget.y = cy - (cy - state.panTarget.y) * ratio;
@@ -11428,6 +11434,10 @@
         return;
       }
       scheduleAnimate();
+    };
+    const zoomCanvasByWheel = (ev) => {
+      const unit = normalizeWheelDelta(ev);
+      zoomCanvasByFactor(Math.exp(-ev.deltaY * unit * WHEEL_ZOOM_SPEED), ev.clientX, ev.clientY);
     };
 
     const beginCanvasPan = (ev) => {
@@ -11595,10 +11605,19 @@
       ev.stopPropagation();
     }, { passive: false, capture: true });
 
-    // 리셋 단축키: Ctrl+0
-    // (팬 modifier로 Space는 쓰지 않는다 — 터미널/브라우저 카드 안의
-    //  스페이스 입력과 충돌. Cmd+드래그가 팬 제스처)
-    window.addEventListener('keydown', (ev) => {
+    // Canvas zoom uses the same camera whether the URL field or another
+    // in-chrome control has focus. Capture before Firefox's page-zoom keyset.
+    const handleCanvasZoomKeydown = (ev) => {
+      if ((ev.ctrlKey || ev.metaKey) && !ev.altKey && !ev.isComposing && ev.keyCode !== 229) {
+        const zoomOut = ev.key === '-' || ev.key === '_' || ev.code === 'NumpadSubtract';
+        const zoomIn = ev.key === '+' || ev.key === '=' || ev.code === 'NumpadAdd';
+        if (zoomOut || zoomIn) {
+          zoomCanvasByFactor(zoomOut ? 1 / 1.2 : 1.2, window.innerWidth / 2, window.innerHeight / 2);
+          ev.preventDefault();
+          ev.stopImmediatePropagation();
+          return;
+        }
+      }
       if (ev.key === 'Shift') {
         state.panModifier = true;
         syncPanModeCursor();
@@ -11609,7 +11628,11 @@
         scheduleAnimate();
         ev.preventDefault();
       }
-    });
+    };
+    // 리셋 단축키: Ctrl/⌘+0
+    // (팬 modifier로 Space는 쓰지 않는다 — 터미널/브라우저 카드 안의
+    //  스페이스 입력과 충돌. Cmd+드래그가 팬 제스처)
+    window.addEventListener('keydown', handleCanvasZoomKeydown, true);
     window.addEventListener('keyup', (ev) => {
       if (ev.key !== 'Shift') return;
       state.panModifier = false;
@@ -11790,13 +11813,13 @@
       state.surface.browserCardId = deskSession?.surface?.browserCardId || lifecycle?.browserCardId || null;
       if (focusInitialBrowser) {
         let card = document.getElementById(state.surface.browserCardId) || document.querySelector('.egd-browser-card');
-        if (!card) card = spawnBrowserCard('chrome://userchrome/content/egdesk-start.html', { firstUse: true });
+        if (!card) card = spawnBrowserCard(EGDESK_START_URI, { firstUse: true });
         focusInitialBrowserCard(card);
         window.setTimeout(() => {
           if (!card.isConnected || state.surface.browserCardId !== card.id) return;
           const input = card.querySelector('.egd-card-url');
           if (!input) return;
-          if (input.value === 'chrome://userchrome/content/egdesk-start.html') input.value = '';
+          if (input.value === EGDESK_START_URI) input.value = '';
           input.placeholder = '주소 또는 검색어 입력';
           input.focus();
         }, 0);

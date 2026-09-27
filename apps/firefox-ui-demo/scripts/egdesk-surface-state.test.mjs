@@ -506,17 +506,24 @@ test('production fullscreen layout fills the actual Canvas viewport and keeps th
   assert.equal(card._xulBrowser, target);
 });
 
-test('zooming out or entering Desk restores the same Browser Card rect and leaves its live target intact', () => {
+test('wheel or focused-URL keyboard zoom exits actual fullscreen and restores the same live Browser Card', () => {
   const exitBody = surfaceSource.match(/  function exitCardFullscreen\(card = null, options = \{\}\) \{([\s\S]*?)\n  \}/)?.[1];
   const enterBody = surfaceSource.match(/  function enterLocalDesk\(\) \{([\s\S]*?)\n  \}/)?.[1];
+  const factorBody = surfaceSource.match(/    const zoomCanvasByFactor = \(factor, cx, cy\) => \{([\s\S]*?)\n    \};\n    const zoomCanvasByWheel/)?.[1];
   const wheelBody = surfaceSource.match(/    const zoomCanvasByWheel = \(ev\) => \{([\s\S]*?)\n    \};\n\n    const beginCanvasPan/)?.[1];
-  assert.ok(exitBody && enterBody && wheelBody);
+  const keyBody = surfaceSource.match(/    const handleCanvasZoomKeydown = \(ev\) => \{([\s\S]*?)\n    \};\n    \/\/ 리셋/)?.[1];
+  assert.ok(exitBody && enterBody && factorBody && wheelBody && keyBody);
+  assert.match(surfaceSource, /window\.addEventListener\('keydown', handleCanvasZoomKeydown, true\)/);
   const exit = compileFunction(`return function exitCardFullscreen(card = null, options = {}) {${exitBody}\n  }`,
     ['state', 'document', 'applyCardRect', 'setHudPresentationHidden', 'toggleDeskMinimap', 'setActiveEntity', 'syncViewportAgendaRail', 'scheduleDeskSessionSave']);
   const enter = compileFunction(`return function enterLocalDesk() {${enterBody}\n  }`,
     ['state', 'exitCardFullscreen', 'document', 'scheduleDeskSessionSave']);
+  const zoomFactor = compileFunction(`return function zoomCanvasByFactor(factor, cx, cy) {${factorBody}\n    }`,
+    ['state', 'ZOOM_MIN', 'ZOOM_MAX', 'enterLocalDesk', 'frame', 'window', 'apply', 'scheduleAnimate']);
   const zoom = compileFunction(`return function zoomCanvasByWheel(ev) {${wheelBody}\n    }`,
-    ['state', 'normalizeWheelDelta', 'WHEEL_ZOOM_SPEED', 'ZOOM_MIN', 'ZOOM_MAX', 'enterLocalDesk', 'frame', 'window', 'apply', 'scheduleAnimate']);
+    ['normalizeWheelDelta', 'zoomCanvasByFactor', 'WHEEL_ZOOM_SPEED']);
+  const keydown = compileFunction(`return function handleCanvasZoomKeydown(ev) {${keyBody}\n    }`,
+    ['state', 'syncPanModeCursor', 'zoomCanvasByFactor', 'window', 'scheduleAnimate']);
   const nativeBrowser = { uri: 'https://example.test/page', session: {} };
   const rect = { left: '45px', top: '60px', width: '900px', height: '620px', zIndex: '41000' };
   const browser = { id: 'browser-view-a', isConnected: true, _xulBrowser: nativeBrowser,
@@ -533,8 +540,9 @@ test('zooming out or entering Desk restores the same Browser Card rect and leave
     () => {}, () => assert.fail('closed minimap should stay closed'), card => { activated = card; },
     () => {}, () => { saved++; });
   const enterDesk = enter(state, exitFullscreen, document, () => { saved++; });
-  const zoomOut = zoom(state, () => 1, .0044, .2, 4.5, enterDesk, 0,
+  const applyFactor = zoomFactor(state, .2, 4.5, enterDesk, 0,
     { cancelAnimationFrame() {} }, () => {}, () => { animated++; });
+  const zoomOut = zoom(() => 1, applyFactor, .0044);
   zoomOut({ deltaY: 100, clientX: 800, clientY: 480 });
   assert.equal(state.surface.initialBrowserFocus, false);
   assert.equal(state.cardFullscreen, null);
@@ -559,6 +567,42 @@ test('zooming out or entering Desk restores the same Browser Card rect and leave
   assert.equal(state.cardFullscreen, null);
   assert.equal(saved, 2);
   assert.equal(animated, 1, 'clamped zoom does not schedule a redundant animation');
+
+  // Invoke the production key handler directly with a focused URL input.
+  // This tests the handler, not native OS key delivery or a synthetic DOM event.
+  state.surface.initialBrowserFocus = true;
+  state.cardFullscreen = { cardId: browser.id, rect, previousHudHidden: false, previousMinimapOpen: false };
+  state.zoom = state.zoomTarget = 1;
+  state.pan = { x: 0, y: 0 };
+  state.panTarget = { x: 0, y: 0 };
+  Object.assign(browser.style, { left: '0px', top: '0px', width: '1600px', height: '960px', zIndex: '42000' });
+  classes.add('egd-initial-browser-focus');
+  classes.add('egd-card-fullscreen-active');
+  const handleKey = keydown(state, () => {}, applyFactor, { innerWidth: 1600, innerHeight: 960 }, () => { animated++; });
+  let prevented = 0, stopped = 0;
+  const urlKey = { target: { className: 'egd-card-url' }, key: '-', code: 'Minus', ctrlKey: true,
+    metaKey: false, altKey: false, isComposing: false, keyCode: 189,
+    preventDefault: () => { prevented++; }, stopImmediatePropagation: () => { stopped++; } };
+  handleKey({ ...urlKey, ctrlKey: false });
+  handleKey({ ...urlKey, isComposing: true });
+  assert.equal(state.surface.initialBrowserFocus, true, 'plain typing and IME must not zoom the Desk');
+  assert.equal(prevented, 0);
+  handleKey(urlKey);
+  assert.equal(prevented, 1);
+  assert.equal(stopped, 1);
+  assert.equal(state.surface.initialBrowserFocus, false);
+  assert.equal(state.cardFullscreen, null);
+  assert.deepEqual(browser.style, rect);
+  assert.equal(browser._xulBrowser, nativeBrowser);
+  assert.ok(state.zoomTarget < 1);
+  assert.equal(saved, 3);
+  assert.equal(animated, 2);
+  const zoomedOut = state.zoomTarget;
+  handleKey({ ...urlKey, key: '+', code: 'Equal', ctrlKey: false, metaKey: true, shiftKey: true });
+  assert.ok(state.zoomTarget > zoomedOut, '⌘+plus uses the same Desk camera');
+  assert.equal(browser._xulBrowser, nativeBrowser);
+  assert.equal(prevented, 2);
+  assert.equal(stopped, 2);
 });
 
 test('main-window topbar is edge-attached while controls remain non-draggable, with no Desk Start prompt', () => {
