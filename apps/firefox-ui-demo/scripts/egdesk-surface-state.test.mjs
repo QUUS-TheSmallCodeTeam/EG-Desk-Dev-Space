@@ -1442,6 +1442,24 @@ test('File UI transport forwards only the real picker nonce, not Engine identity
   await assert.rejects(() => request('/v1/files/roots', {}, { headers: { Origin: 'null' } }, window, fetch), /허용되지 않은 파일 채널/);
 });
 
+test('File UI transport preserves sanitized native partial-file warning details', async () => {
+  const body = surfaceSource.match(/  async function requestLocalFilePacket\(path, body, requestOptions = \{\}\) \{([\s\S]*?)\n  \}/)?.[1];
+  assert.ok(body);
+  const request = compileFunction(`return (async () => {${body}\n})();`, ['path', 'body', 'requestOptions', 'window', 'fetch']);
+  const window = { AbortController, setTimeout: () => 1, clearTimeout() {} };
+  const details = JSON.parse('{"warnings":[{"kind":"native-partial-file","name":"draft.txt"}],"__proto__":{"unsafe":true},"constructor":"unsafe"}');
+  const fetch = async () => ({ ok: false, status: 409, json: async () => ({
+    ok: false, code: 'NATIVE_PARTIAL_FILE', error: 'Partial native file remains', details,
+  }) });
+  await assert.rejects(() => request('/v1/files/save-as', {}, {}, window, fetch), error => {
+    assert.equal(error.code, 'NATIVE_PARTIAL_FILE');
+    assert.equal(error.status, 409);
+    assert.deepEqual(error.details, { warnings: [{ kind: 'native-partial-file', name: 'draft.txt' }] });
+    assert.equal(Object.hasOwn(error.details, '__proto__'), false);
+    return true;
+  });
+});
+
 test('production native File picker wrapper uses channel/begin/OS/complete/roots with one-shot IDs', async () => {
   const events = [];
   const service = createEGDeskFileServiceCallbacks({ request: async (path, body, options) => {

@@ -8686,7 +8686,24 @@
       const response = await fetch(`http://127.0.0.1:39218${path}`, { method: 'POST', signal: controller.signal,
         headers, body: JSON.stringify(body) });
       const packet = await response.json();
-      if (!response.ok || packet?.ok !== true) throw Object.assign(new Error(packet?.error || '파일 요청을 완료하지 못했습니다.'), { code: packet?.code, status: response.status });
+      if (!response.ok || packet?.ok !== true) {
+        // Preserve helper warnings without passing arbitrary response properties
+        // onto the Error object or accepting prototype keys from JSON.
+        const sanitizeDetails = (value, depth = 0) => {
+          if (value === null || typeof value === 'boolean') return value;
+          if (typeof value === 'string') return value.slice(0, 4096);
+          if (typeof value === 'number') return Number.isFinite(value) ? value : undefined;
+          if (depth >= 6 || !value || typeof value !== 'object') return undefined;
+          if (Array.isArray(value)) return value.slice(0, 128).map(item => sanitizeDetails(item, depth + 1));
+          return Object.fromEntries(Object.entries(value).slice(0, 64)
+            .filter(([key]) => !['__proto__', 'constructor', 'prototype'].includes(key))
+            .map(([key, item]) => [key, sanitizeDetails(item, depth + 1)]));
+        };
+        const details = packet?.details && typeof packet.details === 'object' && !Array.isArray(packet.details)
+          ? sanitizeDetails(packet.details) : undefined;
+        throw Object.assign(new Error(packet?.error || '파일 요청을 완료하지 못했습니다.'),
+          { code: packet?.code, status: response.status, ...(details ? { details } : {}) });
+      }
       return packet;
     } catch (error) {
       if (error.name === 'AbortError') throw new Error('파일 요청의 완료를 확인하지 못했습니다. 편집 내용을 유지하고 상태를 다시 확인하세요.');
