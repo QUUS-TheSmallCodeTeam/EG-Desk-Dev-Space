@@ -339,7 +339,7 @@ export function openChatStore({ dataDir, ownerScope } = {}) {
       const message = messages[index]
       const nativeKey = typeof message.id === 'string' ? message.id : typeof message.messageId === 'string' ? message.messageId : String(index)
       const localMessageId = typeof message.localMessageId === 'string' ? message.localMessageId : `lm-${digest(`${localRunId}\0${nativeKey}`).slice(0, 32)}`
-      const messageId = typeof message.messageId === 'string' ? message.messageId : typeof message.id === 'string' ? message.id : null
+      const messageId = typeof message.messageId === 'string' && message.messageId.trim() ? message.messageId : null
       appendCore(row, { eventKey: `${eventKey}:message:${index}`, ts, event: 'message.checkpoint', requestId, localRunId, localMessageId, runId: runCheckpoint.runId ?? null, messageId, details: {}, message, refs: references(message), project })
     }
   }
@@ -460,7 +460,7 @@ export function openChatStore({ dataDir, ownerScope } = {}) {
       const localRunId = input.localRunId === undefined ? null : identifier(input.localRunId, 'localRunId')
       const requestId = input.requestId === undefined ? null : identifier(input.requestId, 'requestId')
       const message = parse(publicJson(input.message, 'public message'))
-      const messageId = typeof message.messageId === 'string' ? message.messageId : typeof message.id === 'string' ? message.id : null
+      const messageId = typeof message.messageId === 'string' && message.messageId.trim() ? message.messageId : null
       return tx(() => {
         appendCore(row, { eventKey, ts: time(input.ts), event: 'message.updated', requestId, localRunId, localMessageId, messageId, details: {}, message, refs: combineReferences(input, message) })
         return parse(q.message.get(row.local_conversation_id, localMessageId).public_json)
@@ -545,7 +545,9 @@ export function openChatStore({ dataDir, ownerScope } = {}) {
           const run = snapshot.runs[index]
           const nativeRunId = typeof run.runId === 'string' ? run.runId : null
           const mapped = nativeRunId ? db.prepare('SELECT local_run_id FROM native_runs WHERE local_conversation_id=? AND run_id=?').get(row.local_conversation_id, nativeRunId) : null
-          const localRunId = mapped?.local_run_id ?? `lr-${digest(`${row.local_conversation_id}\0${nativeRunId ?? `${importId}:${index}`}`).slice(0, 32)}`
+          const suppliedLocalRunId = run.localRunId == null ? null : identifier(run.localRunId, 'localRunId')
+          if (mapped && suppliedLocalRunId && mapped.local_run_id !== suppliedLocalRunId) fail('NATIVE_MAPPING_CONFLICT', 'Imported local run ID disagrees with existing native mapping', 409)
+          const localRunId = suppliedLocalRunId ?? mapped?.local_run_id ?? `lr-${digest(`${row.local_conversation_id}\0${nativeRunId ?? `${importId}:${index}`}`).slice(0, 32)}`
           if (q.run.get(row.local_conversation_id, localRunId)) continue // Preserve canonical captured run.
           const eventKey = `import:${importId}:run:${index}`
           appendCore(row, { eventKey, ts, event: 'run.imported', requestId: run.requestId ?? null, localRunId, runId: nativeRunId, details: {}, runCheckpoint: run, refs: references(run) })

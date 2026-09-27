@@ -248,12 +248,47 @@ test('first-write legacy import retains exact public v2 runs and paged canonical
   assert.equal(events.hasMore, true)
   const runEvent = events.events[1]
   assert.equal(runEvent.details.run.messages[1].text, exactText)
+  assert.equal(store.listEvents('import-client').events.find(event => event.event === 'message.checkpoint' && event.details.message.role === 'assistant').messageId, 'native-assistant-1')
   assert.equal(store.importSnapshot({ clientThreadId: 'import-client', importId: 'legacy-1', snapshot }).alreadyImported, true)
   store.close()
   const reopened = openChatStore({ dataDir, ownerScope: 'desktop/profile-a' })
   t.after(() => reopened.close())
   assert.equal(reopened.getLatestRun('import-client').messages[1].text, exactText)
   assert.equal(reopened.listEvents('import-client', { limit: 2 }).events[1].details.run.messages[1].text, exactText)
+})
+
+test('local-only public v2 import keeps supplied local IDs and never promotes UI IDs to native', t => {
+  const { dataDir, store } = opened(t)
+  const localRun = {
+    localRunId: 'local-run-from-prefs', conversationId: null, runId: null,
+    requestId: null, clientThreadId: 'local-only-client', status: 'interrupted',
+    messages: [
+      { id: 'ui-user-1', messageId: null, localMessageId: 'local-user-1', role: 'user', text: 'Local user text', status: 'complete' },
+      { id: 'ui-answer-1', messageId: null, localMessageId: 'local-answer-1', role: 'assistant', text: 'Local partial answer', status: 'interrupted' },
+    ], activities: [], artifacts: [], historyComplete: false, truncated: false,
+  }
+  const snapshot = { protocolVersion: 2, conversationId: null, streamId: 'local-only', seq: 0, truncated: false, historyComplete: false, runs: [localRun] }
+  const result = store.importSnapshot({ clientThreadId: 'local-only-client', importId: 'local-import-1', snapshot })
+  assert.equal(result.imported, true)
+  assert.equal(result.coverage.status, 'partial')
+  assert.equal(store.getConversation('local-only-client').conversationId, null)
+  assert.equal(store.getLatestRun('local-only-client').localRunId, 'local-run-from-prefs')
+  assert.equal(store.getLatestRun('local-only-client').runId, null)
+  const messages = store.listMessages('local-only-client').messages
+  assert.deepEqual(messages.map(message => message.localMessageId), ['local-user-1', 'local-answer-1'])
+  assert.deepEqual(messages.map(message => message.messageId), [null, null])
+  assert.deepEqual(messages.map(message => message.id), ['ui-user-1', 'ui-answer-1'])
+  const messageEvents = store.listEvents('local-only-client').events.filter(event => event.event === 'message.checkpoint')
+  assert.deepEqual(messageEvents.map(event => event.messageId), [null, null])
+  assert.deepEqual(messageEvents.map(event => event.localMessageId), ['local-user-1', 'local-answer-1'])
+  const appended = store.appendMessage({ clientThreadId: 'local-only-client', eventKey: 'local-ui-followup', ts: T + 30, localMessageId: 'local-followup-1', message: { id: 'ui-followup-1', messageId: null, role: 'user', text: 'Follow-up text', status: 'complete' } })
+  assert.equal(appended.id, 'ui-followup-1')
+  assert.equal(store.listEvents('local-only-client').events.at(-1).messageId, null)
+  store.close()
+  const reopened = openChatStore({ dataDir, ownerScope: 'desktop/profile-a' })
+  t.after(() => reopened.close())
+  assert.equal(reopened.getLatestRun('local-only-client').localRunId, 'local-run-from-prefs')
+  assert.deepEqual(reopened.listEvents('local-only-client').events.filter(event => event.event === 'message.checkpoint').map(event => event.messageId), [null, null])
 })
 
 test('oversized public content returns 413 without partial accepted request or import', t => {
