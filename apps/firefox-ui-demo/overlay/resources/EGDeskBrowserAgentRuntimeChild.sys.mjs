@@ -8,7 +8,7 @@ export class EGDeskBrowserAgentRuntimeChild extends JSWindowActorChild {
     this.refSeq = 0;
   }
 
-  receiveMessage(message) {
+  async receiveMessage(message) {
     const data = message.data || {};
     if (message.name === "snapshot") return this.snapshot(data.options || {});
     if (message.name === "captureInput") return captureDocumentText(this.document, data.options || {});

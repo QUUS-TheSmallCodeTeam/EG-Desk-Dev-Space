@@ -31,12 +31,13 @@
           },
           child: {
             esModuleURI: 'chrome://userchrome/content/EGDeskBrowserAgentRuntimeChild.sys.mjs',
-            events: {
-              DOMWindowCreated: {},
-              DOMContentLoaded: {},
-            },
           },
           allFrames: false,
+          // Remote types match prefixes: web includes Fission's webIsolated=…
+          // and webCOOP+COEP family. The parent exposes no child-call handlers;
+          // queries originate only from the selected Card's WindowGlobal.
+          remoteTypes: ['web', 'file'],
+          safeForUntrustedWebProcess: true,
         },
       });
       browserAgentActorReady = true;
@@ -9341,6 +9342,7 @@
       xulBrowser.setAttribute('maychangeremoteness', 'true');
       xulBrowser.setAttribute('disableglobalhistory', 'true');
       xulBrowser.setAttribute('flex', '1');
+      ensureBrowserAgentActor();
       xulBrowser.style.cssText = 'width:100%; height:100%; background:#fff; display:block;';
       wrap.appendChild(xulBrowser);
       xulBrowser.setAttribute('src', normalizedUrl);
@@ -9427,10 +9429,6 @@
       } catch {}
       try {
         const doc = xulBrowser?.browsingContext?.currentWindowGlobal?.document;
-        if (doc?.documentElement) return doc;
-      } catch {}
-      try {
-        const doc = xulBrowser?.ownerGlobal?.gBrowser?.selectedBrowser?.contentDocument;
         if (doc?.documentElement) return doc;
       } catch {}
       return null;
@@ -9643,9 +9641,17 @@
       };
     };
     const browserAgentActorRequest = async (method, payload = {}) => {
-      const actor = browserAgentActor();
+      if (!ensureBrowserAgentActor()) throw new Error('Browser actor registration failed');
+      const context = xulBrowser?.browsingContext;
+      const windowGlobal = context?.currentWindowGlobal;
+      if (!windowGlobal?.getActor) throw new Error('Browser document is not ready for capture');
+      // Do not swallow remote-type/import errors or fall back to another page.
+      const actor = windowGlobal.getActor(BROWSER_AGENT_ACTOR_NAME);
       if (!actor?.sendQuery) throw new Error('Browser agent JSActor unavailable');
-      return actor.sendQuery(method, payload);
+      const result = await actor.sendQuery(method, payload);
+      if (method === 'captureInput' && (!card.isConnected || xulBrowser.browsingContext !== context
+          || context.currentWindowGlobal !== windowGlobal)) throw new Error('Browser changed during capture; attach the current page again');
+      return result;
     };
     const cloneBrowserAgentPayload = (value) => {
       if (value == null) return value;

@@ -1474,3 +1474,74 @@ test('native Save As callback cancels replacement instead of authorizing overwri
   result = 0;
   assert.deepEqual(await choose('copy.txt', Cc, Ci, {}), { parentPath: '/fixture/selected', fileName: 'copy.txt' });
 });
+
+test('20KB attachment URLs retain exact source data while the picker constrains row and checkbox sizing', () => {
+  const url = `https://example.test/long?payload=${'a_b'.repeat(7000)}`;
+  const source = { ...browserInput(), sourceRef: { viewId: 'long-page', uri: url } };
+  const snapshot = InputContext.inputSnapshot(source, { url, text: 'actual page content' });
+  assert.equal(InputContext.inputSourceLocation(source), url);
+  assert.equal(InputContext.captureAttachment(source, snapshot).sourceRef.url, url);
+  const css = readFileSync(new URL('../overlay/CSS/eg-desk-surface.uc.css', import.meta.url), 'utf8');
+  const row = css.match(/\.egd-input-source-choice \{([^}]+)\}/)?.[1];
+  const checkbox = css.match(/\.egd-input-source-choice > input\[type="checkbox"\] \{([^}]+)\}/)?.[1];
+  assert.match(row, /grid-template-columns:\s*18px minmax\(0, 1fr\)/);
+  assert.match(row, /min-width:\s*0/);
+  assert.match(checkbox, /min-width:\s*18px/);
+  assert.match(css, /\.egd-input-source-choice small \{[^}]*white-space:\s*normal/);
+});
+
+test('production Browser actor registration admits Fission webIsolated and web/file families without privileged chrome scope', () => {
+  const body = surfaceSource.match(/  function ensureBrowserAgentActor\(\) \{([\s\S]*?)\n  \}/)?.[1];
+  assert.ok(body);
+  let registration;
+  const ensure = compileFunction(body, ['browserAgentActorReady', 'ChromeUtils', 'BROWSER_AGENT_ACTOR_NAME', 'console', 'TAG']);
+  const api = { importESModule: () => ({ ActorManagerParent: { addJSWindowActors: value => { registration = value; } } }) };
+  assert.equal(ensure(false, api, 'EGDeskBrowserAgentRuntime', { warn() {} }, 'test'), true);
+  const options = registration.EGDeskBrowserAgentRuntime;
+  assert.deepEqual(options.remoteTypes, ['web', 'file']);
+  assert.equal(options.safeForUntrustedWebProcess, true);
+  assert.equal(options.allFrames, false);
+  assert.notEqual(options.includeChrome, true);
+  assert.equal(options.child.events, undefined, 'explicit Card queries, not unnecessary automatic page events');
+  for (const remoteType of ['web', 'webIsolated=http://127.0.0.1', 'webIsolated=https://example.test', 'webCOOP+COEP=https://example.test', 'file']) {
+    assert.ok(options.remoteTypes.some(prefix => remoteType.startsWith(prefix)), remoteType);
+  }
+  for (const remoteType of ['parent', 'privilegedabout', 'extension']) assert.equal(options.remoteTypes.some(prefix => remoteType.startsWith(prefix)), false);
+  assert.equal(surfaceSource.includes('dom.jsipc.check_safeForUntrustedWebProcess'), false, 'never disable the process safety preference');
+});
+
+test('production capture queries the bound WindowGlobal and surfaces type errors or mid-capture navigation', async () => {
+  const body = surfaceSource.match(/    const browserAgentActorRequest = async \(method, payload = \{\}\) => \{([\s\S]*?)\n    \};/)?.[1];
+  assert.ok(body);
+  const request = compileFunction(`return (async () => {${body}\n})();`, ['method', 'payload', 'ensureBrowserAgentActor', 'xulBrowser', 'BROWSER_AGENT_ACTOR_NAME', 'card']);
+  const card = { isConnected: true }, browser = { browsingContext: {} };
+  const calls = [];
+  const global = { getActor: name => ({ sendQuery: async (method, payload) => { calls.push({ name, method, payload }); return { text: 'real declared capture' }; } }) };
+  browser.browsingContext.currentWindowGlobal = global;
+  const result = await request('captureInput', { options: {} }, () => true, browser, 'EGDeskBrowserAgentRuntime', card);
+  assert.equal(result.text, 'real declared capture');
+  assert.deepEqual(calls, [{ name: 'EGDeskBrowserAgentRuntime', method: 'captureInput', payload: { options: {} } }]);
+  global.getActor = () => { throw new Error("Window protocol doesn't match remote type 'webIsolated=http://127.0.0.1'"); };
+  await assert.rejects(() => request('captureInput', {}, () => true, browser, 'Actor', card), /webIsolated/);
+  global.getActor = () => ({ sendQuery: async () => { browser.browsingContext.currentWindowGlobal = {}; return { text: 'old page' }; } });
+  await assert.rejects(() => request('captureInput', {}, () => true, browser, 'Actor', card), /changed during capture/);
+  const readBody = surfaceSource.match(/    const readBrowserDocument = \(\) => \{([\s\S]*?)\n    \};/)?.[1];
+  assert.ok(readBody);
+  assert.equal(readBody.includes('selectedBrowser'), false, 'capture cannot silently read the globally selected native tab');
+});
+
+test('Browser child actor query handlers return promises for native sendQuery', async () => {
+  const previous = globalThis.JSWindowActorChild;
+  try {
+    globalThis.JSWindowActorChild = class {};
+    const { EGDeskBrowserAgentRuntimeChild } = await import('../overlay/resources/EGDeskBrowserAgentRuntimeChild.sys.mjs');
+    const actor = new EGDeskBrowserAgentRuntimeChild();
+    actor.snapshot = () => ({ text: ['scoped document'] });
+    const query = actor.receiveMessage({ name: 'snapshot', data: { options: {} } });
+    assert.ok(query instanceof Promise);
+    assert.deepEqual(await query, { text: ['scoped document'] });
+  } finally {
+    if (previous === undefined) delete globalThis.JSWindowActorChild;
+    else globalThis.JSWindowActorChild = previous;
+  }
+});
