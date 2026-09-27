@@ -194,9 +194,18 @@ export function createEGDeskFileView({ document, service, chooseRoot, chooseSave
   const present = generation => !disposed && generation === operation
   const announce = message => { status.textContent = message; onState(snapshot()) }
   const showError = cause => {
-    error.textContent = cause?.message || String(cause)
+    const details = cause?.details
+    if (details?.fileMayExist === true) {
+      const target = typeof details.targetName === 'string' && !/[\\/\u0000-\u001f\u007f]/.test(details.targetName) ? details.targetName : '새 파일'
+      error.textContent = details.created === true
+        ? `‘${target}’ 파일은 만들어졌지만 저장을 완료하지 못했습니다. 파일을 확인한 뒤 다른 이름으로 저장하세요. 작업사본은 유지됩니다.`
+        : `‘${target}’ 파일이 만들어졌는지 확인되지 않았습니다. 다시 저장하기 전에 파일을 확인하세요. 작업사본은 유지됩니다.`
+    } else if (cause?.code === 'TARGET_EXISTS') error.textContent = '같은 이름의 파일이 있습니다. 다른 이름을 선택하세요.'
+    else if (cause?.code === 'SAVE_AS_UNAVAILABLE') error.textContent = '새 파일 저장 기능을 사용할 수 없습니다. 작업사본은 유지됩니다.'
+    else if (cause?.code === 'SAVE_AS_FAILED') error.textContent = '새 파일을 만들지 못했습니다. 저장 위치를 확인하세요. 작업사본은 유지됩니다.'
+    else error.textContent = cause?.message || String(cause)
     error.hidden = false
-    announce('작업에 실패했습니다. 편집 중인 내용은 그대로 남아 있습니다.')
+    announce(details?.fileMayExist === true ? '새 파일 확인 필요 · 작업사본 유지' : '작업에 실패했습니다. 편집 중인 내용은 그대로 남아 있습니다.')
   }
   const clearError = () => { error.textContent = ''; error.hidden = true }
   const setEditable = enabled => {

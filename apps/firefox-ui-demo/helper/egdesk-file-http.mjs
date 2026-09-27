@@ -46,8 +46,9 @@ function responseError(cause) {
   const conflicts = new Set(['DRAFT_CONFLICT', 'BUFFER_CONFLICT', 'TARGET_EXISTS', 'ROOT_CHANGED', 'RESOURCE_CHANGED', 'DRAFT_EXISTS', 'SOURCE_RECONNECT_CONFLICT'])
   const missing = new Set(['UNKNOWN_ROOT', 'UNKNOWN_RESOURCE', 'UNKNOWN_DRAFT', 'RESOURCE_UNAVAILABLE', 'ROOT_UNAVAILABLE'])
   const large = new Set(['FILE_TOO_LARGE', 'DIRECTORY_TOO_LARGE', 'BODY_TOO_LARGE'])
+  const saveFailures = new Set(['SAVE_AS_INCOMPLETE', 'SAVE_AS_UNCERTAIN', 'SAVE_AS_FAILED'])
   const known = cause instanceof FileSurfaceError || cause?.httpStatus || conflicts.has(code) || missing.has(code) || large.has(code)
-  const status = cause?.httpStatus || (conflicts.has(code) ? 409 : missing.has(code) ? 404 : large.has(code) ? 413 : code === 'SAVE_AS_UNAVAILABLE' ? 503 : code === 'UNSUPPORTED_EDIT' ? 415 : cause instanceof FileSurfaceError ? 400 : 500)
+  const status = cause?.httpStatus || (conflicts.has(code) ? 409 : missing.has(code) ? 404 : large.has(code) ? 413 : code === 'SAVE_AS_UNAVAILABLE' ? 503 : saveFailures.has(code) ? 500 : code === 'UNSUPPORTED_EDIT' ? 415 : cause instanceof FileSurfaceError ? 400 : 500)
   return { status, body: { ok: false, code: known ? code : 'FILE_SERVICE_ERROR', error: known ? cause.message : 'The file operation could not be completed', ...(cause instanceof FileSurfaceError ? { details: cause.details } : {}) } }
 }
 

@@ -6,9 +6,10 @@ import path from 'node:path'
 import { Readable } from 'node:stream'
 import { createHash } from 'node:crypto'
 import { createEGDeskFileHttpAdapter, EGDESK_FILE_ENDPOINTS, handleEGDeskFiles } from './egdesk-file-http.mjs'
+import { createEGDeskNativeCreateOnlyAdapter } from './egdesk-file-native.mjs'
 import { createEGDeskFileServiceCallbacks, createEGDeskNativeFilePickers, EGDESK_FILE_CLIENT_ENDPOINTS } from '../overlay/resources/EGDeskFileView.sys.mjs'
 
-async function fixture(t) {
+async function fixture(t, options = {}) {
   const temp = await fs.mkdtemp(path.join(os.tmpdir(), 'egdesk-file-http-'))
   const root = path.join(temp, 'root')
   const draftDirectory = path.join(temp, 'drafts')
@@ -20,7 +21,7 @@ async function fixture(t) {
   }
   // Provider contract fixture only; native descriptor prevention has its own
   // platform tests and is never replaced with this fixture in production.
-  const createOnlyAdapter = { capability: 'descriptor-relative-create-only', async createFile({ rootPath, relativeDirectory, fileName, bytes }) {
+  const createOnlyAdapter = options.createOnlyAdapter || { capability: 'descriptor-relative-create-only', async createFile({ rootPath, relativeDirectory, fileName, bytes }) {
     const file = await fs.open(path.join(rootPath, relativeDirectory, fileName), 'wx', 0o600)
     try { await file.writeFile(bytes); await file.sync(); const stat = await file.stat({ bigint: true }); return { created: true, sha256: createHash('sha256').update(bytes).digest('hex'), size: bytes.length, dev: String(stat.dev), ino: String(stat.ino) } }
     finally { await file.close() }
@@ -31,6 +32,9 @@ async function fixture(t) {
   const client = createEGDeskFileServiceCallbacks({ request: async (pathname, body) => (await adapter.dispatch({ method: 'POST', pathname, body, ownerScope: 'owner-a' })).body })
   return { root, draftDirectory, resolveRootSelection, adapter, dispatch, client }
 }
+
+const nativeBinary = process.env.EGDESK_NATIVE_CREATE_BINARY
+const nativeTest = nativeBinary ? test : test.skip
 
 const request = (route, body, headers = {}) => Object.assign(Readable.from([Buffer.from(JSON.stringify(body))]), {
   method: 'POST', url: route, headers: { host: '127.0.0.1:39218', 'content-type': 'application/json', ...headers }, socket: { remoteAddress: '127.0.0.1' },
@@ -225,4 +229,87 @@ test('expired native channel preserves the returned selection without reopening 
   })
   assert.equal(nativeCalls, 1)
   assert.equal(channels, 1)
+})
+
+nativeTest('actual native adapter through service and HTTP maps existing target to 409', async t => {
+  const { root, client, dispatch } = await fixture(t, { createOnlyAdapter: createEGDeskNativeCreateOnlyAdapter({ executable: nativeBinary }) })
+  const authorized = await client.registerRoot({ selectionId: 'selected-owner-a' })
+  const listed = await client.listDirectory({ directoryId: authorized.directoryId })
+  const draft = await client.createDraft({ fileId: listed.entries.find(entry => entry.name === 'source.txt').id })
+  const input = { draftId: draft.id, expectedHead: draft.head, directoryId: authorized.directoryId, fileName: 'source.txt', operationId: 'native-collision' }
+  const collision = await dispatch('saveAs', input)
+  assert.equal(collision.status, 409)
+  assert.equal(collision.body.code, 'TARGET_EXISTS')
+  assert.deepEqual(collision.body.details, { targetName: 'source.txt', created: false, fileMayExist: false, originalUpdated: false, nativeCode: 'EGDESK_NATIVE_REFUSED', nativeStatus: 5, targetExists: true, recovery: 'choose-new-target' })
+  assert.equal(await fs.readFile(path.join(root, 'source.txt'), 'utf8'), 'external original\n')
+  const created = await dispatch('saveAs', { ...input, fileName: 'native 사본.txt', operationId: 'native-success' })
+  assert.equal(created.status, 200)
+  assert.equal(await fs.readFile(path.join(root, 'native 사본.txt'), 'utf8'), 'external original\n')
+})
+
+nativeTest('actual bounded native write failure preserves partial-file details through HTTP and UI callback', async t => {
+  const wrapperDirectory = await fs.mkdtemp(path.join(os.tmpdir(), 'egdesk-http-native-limit-'))
+  t.after(() => fs.rm(wrapperDirectory, { recursive: true, force: true }))
+  const executable = path.join(wrapperDirectory, 'limited-native')
+  await fs.writeFile(executable, '#!/bin/sh\nulimit -f 1\ntrap \'\' XFSZ\nexec "$EGDESK_NATIVE_CREATE_BINARY"\n', { mode: 0o700 })
+  const { root, client, dispatch } = await fixture(t, { createOnlyAdapter: createEGDeskNativeCreateOnlyAdapter({ executable }) })
+  const authorized = await client.registerRoot({ selectionId: 'selected-owner-a' })
+  const listed = await client.listDirectory({ directoryId: authorized.directoryId })
+  const draft = await client.createDraft({ fileId: listed.entries.find(entry => entry.name === 'source.txt').id })
+  const text = 'Z'.repeat(4096)
+  const changed = await client.updateDraft({ draftId: draft.id, expectedHead: draft.head, text, operationId: 'native-edit' })
+  const input = { draftId: draft.id, expectedHead: changed.head, directoryId: authorized.directoryId, fileName: 'partial 사본.txt', operationId: 'native-partial' }
+  const failed = await dispatch('saveAs', input)
+  assert.equal(failed.status, 500)
+  assert.equal(failed.body.code, 'SAVE_AS_INCOMPLETE')
+  assert.deepEqual(failed.body.details, { targetName: 'partial 사본.txt', created: true, fileMayExist: true, originalUpdated: false, nativeCode: 'EGDESK_NATIVE_REFUSED', nativeStatus: 8, recovery: 'inspect-target-before-retry' })
+  const partial = await fs.readFile(path.join(root, 'partial 사본.txt'))
+  assert.ok(partial.length < Buffer.byteLength(text))
+  assert.equal((await client.readDraft({ draftId: draft.id })).text, text)
+  assert.equal(await fs.readFile(path.join(root, 'source.txt'), 'utf8'), 'external original\n')
+  const packet = JSON.stringify(failed.body)
+  for (const sensitive of [root, executable, nativeBinary, text]) assert.equal(packet.includes(sensitive), false)
+  const ui = createEGDeskFileServiceCallbacks({ request: async () => failed.body })
+  await assert.rejects(ui.saveAs(input), cause => {
+    assert.equal(cause.code, 'SAVE_AS_INCOMPLETE')
+    assert.deepEqual(cause.details, failed.body.details)
+    return true
+  })
+  const retry = await dispatch('saveAs', { ...input, operationId: 'native-partial-retry' })
+  assert.equal(retry.status, 409)
+  assert.equal(retry.body.code, 'TARGET_EXISTS')
+  assert.deepEqual(await fs.readFile(path.join(root, 'partial 사본.txt')), partial)
+})
+
+test('actual unavailable native adapter maps to 503 with no new-file claim or executable path leak', async t => {
+  const missingDirectory = await fs.mkdtemp(path.join(os.tmpdir(), 'egdesk-http-native-missing-'))
+  t.after(() => fs.rm(missingDirectory, { recursive: true, force: true }))
+  const executable = path.join(missingDirectory, 'missing-executable')
+  const { root, client, dispatch } = await fixture(t, { createOnlyAdapter: createEGDeskNativeCreateOnlyAdapter({ executable }) })
+  const authorized = await client.registerRoot({ selectionId: 'selected-owner-a' })
+  const listed = await client.listDirectory({ directoryId: authorized.directoryId })
+  const draft = await client.createDraft({ fileId: listed.entries.find(entry => entry.name === 'source.txt').id })
+  const failed = await dispatch('saveAs', { draftId: draft.id, expectedHead: draft.head, directoryId: authorized.directoryId, fileName: 'missing 사본.txt', operationId: 'native-unavailable' })
+  assert.equal(failed.status, 503)
+  assert.equal(failed.body.code, 'SAVE_AS_UNAVAILABLE')
+  assert.equal(failed.body.details.created, false)
+  assert.equal(failed.body.details.fileMayExist, false)
+  assert.equal(failed.body.details.recovery, 'retry-when-available')
+  assert.equal(JSON.stringify(failed.body).includes(executable), false)
+  await assert.rejects(fs.stat(path.join(root, 'missing 사본.txt')), { code: 'ENOENT' })
+})
+
+test('uncertain native failure exposes only allowlisted outcome metadata', async t => {
+  const createOnlyAdapter = { capability: 'descriptor-relative-create-only', async createFile() {
+    throw Object.assign(new Error('secret-token /private/raw/native/path'), { code: 'EGDESK_NATIVE_TIMEOUT', created: null, fileMayExist: true, rawPath: '/private/raw/native/path', stderr: 'secret-token', dev: '123', ino: '456' })
+  } }
+  const { client, dispatch } = await fixture(t, { createOnlyAdapter })
+  const authorized = await client.registerRoot({ selectionId: 'selected-owner-a' })
+  const listed = await client.listDirectory({ directoryId: authorized.directoryId })
+  const draft = await client.createDraft({ fileId: listed.entries.find(entry => entry.name === 'source.txt').id })
+  const failed = await dispatch('saveAs', { draftId: draft.id, expectedHead: draft.head, directoryId: authorized.directoryId, fileName: 'uncertain.txt', operationId: 'uncertain' })
+  assert.equal(failed.status, 500)
+  assert.equal(failed.body.code, 'SAVE_AS_UNCERTAIN')
+  assert.deepEqual(failed.body.details, { targetName: 'uncertain.txt', created: null, fileMayExist: true, originalUpdated: false, nativeCode: 'EGDESK_NATIVE_TIMEOUT', recovery: 'inspect-target-before-retry' })
+  for (const sensitive of ['secret-token', '/private/raw/native/path', 'stderr', '123', '456']) assert.equal(JSON.stringify(failed.body).includes(sensitive), false)
 })

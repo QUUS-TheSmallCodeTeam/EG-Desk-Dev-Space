@@ -465,3 +465,27 @@ test('Save As suggests a copy name with the original extension and retains creat
   assert.equal(view.snapshot().draftId, 'draft')
   await view.close()
 })
+
+test('Save As partial or uncertain result warns about the target and keeps the draft without automatic retry', async () => {
+  for (const created of [true, null]) {
+    let calls = 0
+    const { view } = uiFixture({
+      createDraft: async () => ({ id: 'draft', fileId: 'file', head: 'h0', text: 'start', bufferRevision: 0, savedRevision: 0, saveAsAvailable: true }),
+      saveAs: async () => {
+        calls++
+        throw Object.assign(new Error('raw secret /private/native/path'), { code: created ? 'SAVE_AS_INCOMPLETE' : 'SAVE_AS_UNCERTAIN', details: { targetName: 'partial 사본.txt', created, fileMayExist: true, recovery: 'inspect-target-before-retry' } })
+      },
+    }, { chooseSaveAs: async () => ({ directoryId: 'directory', fileName: 'partial 사본.txt' }) })
+    await view.openFile('file')
+    view.element.querySelector('.egdesk-file-save-as-button').click(); await nextTurn()
+    const warning = view.element.querySelector('.egdesk-file-error').textContent
+    assert.match(warning, /partial 사본\.txt/)
+    assert.match(warning, created ? /확인한 뒤 다른 이름/ : /다시 저장하기 전에 파일을 확인/)
+    assert.equal(warning.includes('raw secret'), false)
+    assert.equal(warning.includes('/private/native/path'), false)
+    assert.equal(calls, 1)
+    assert.equal(view.snapshot().draftId, 'draft')
+    assert.equal(view.element.querySelector('textarea').value, 'start')
+    await view.close()
+  }
+})

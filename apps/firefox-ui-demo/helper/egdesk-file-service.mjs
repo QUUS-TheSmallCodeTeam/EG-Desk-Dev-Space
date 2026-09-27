@@ -34,6 +34,33 @@ const inside = (root, candidate) => {
 const sameIdentity = (a, b) => a.dev === b.dev && a.ino === b.ino
 const sizeNumber = stat => Number(stat.size)
 const revisionFor = (stat, digest) => `${stat.dev}:${stat.ino}:${digest}`
+const NATIVE_SAVE_ERROR_CODES = new Set(['EGDESK_NATIVE_REFUSED', 'EGDESK_NATIVE_UNAVAILABLE', 'EGDESK_NATIVE_PROTOCOL', 'EGDESK_NATIVE_READBACK_MISMATCH', 'EGDESK_NATIVE_TIMEOUT', 'EGDESK_NATIVE_OUTPUT_LIMIT'])
+
+function saveAsFailure(cause, fileName) {
+  const reportedCreated = cause?.created ?? cause?.details?.created
+  const created = reportedCreated === true ? true : reportedCreated === false ? false : null
+  const fileMayExist = cause?.fileMayExist === true || cause?.details?.fileMayExist === true || created !== false
+  const nativeCode = NATIVE_SAVE_ERROR_CODES.has(cause?.code) ? cause.code : null
+  const nativeStatus = nativeCode && Number.isInteger(cause.nativeStatus) && cause.nativeStatus >= 1 && cause.nativeStatus <= 11 ? cause.nativeStatus : null
+  // Only the validated leaf name and explicit outcome fields cross into HTTP.
+  // Native messages, stderr, filesystem paths and device/inode are never copied.
+  const targetName = typeof fileName === 'string' && !/[\\/\0]/.test(fileName)
+    ? fileName.replace(/[\u0001-\u001f\u007f]/g, '\ufffd').slice(0, 255) : null
+  const details = { ...(targetName ? { targetName } : {}), created, fileMayExist, originalUpdated: false,
+    ...(nativeCode ? { nativeCode } : {}), ...(nativeStatus == null ? {} : { nativeStatus }) }
+  if ((cause?.code === 'EEXIST' || cause?.code === 'TARGET_EXISTS' || nativeCode === 'EGDESK_NATIVE_REFUSED' && nativeStatus === 5) && created !== true && cause?.fileMayExist !== true && cause?.details?.fileMayExist !== true) {
+    return new FileSurfaceError('TARGET_EXISTS', 'A file with this name already exists; choose a new name', { ...details, created: false, fileMayExist: false, targetExists: true, recovery: 'choose-new-target' })
+  }
+  if (nativeCode === 'EGDESK_NATIVE_UNAVAILABLE' || cause?.code === 'SAVE_AS_UNAVAILABLE') {
+    return new FileSurfaceError('SAVE_AS_UNAVAILABLE', 'Create-only file storage is unavailable', { ...details, recovery: fileMayExist ? 'inspect-target-before-retry' : 'retry-when-available' })
+  }
+  if (fileMayExist) {
+    return new FileSurfaceError(created === true ? 'SAVE_AS_INCOMPLETE' : 'SAVE_AS_UNCERTAIN',
+      created === true ? 'The new file was created but its completed contents were not verified' : 'The new file outcome could not be verified',
+      { ...details, recovery: 'inspect-target-before-retry' })
+  }
+  return new FileSurfaceError('SAVE_AS_FAILED', 'The new file could not be created', { ...details, recovery: 'reselect-location' })
+}
 
 function validLeaf(name) {
   if (typeof name !== 'string' || !name || name === '.' || name === '..' || name.includes('/') || name.includes('\\') || name.includes('\0') || path.basename(name) !== name) {
@@ -272,7 +299,7 @@ export function createEGDeskFileService({ draftStore, createOnlyAdapter, makeId 
   }
 
   async function saveAs({ draftId, expectedHead, directoryId, fileName, operationId }) {
-    if (!saveAsAvailable) fail('SAVE_AS_UNAVAILABLE', 'Descriptor-relative create-only storage is not connected')
+    if (!saveAsAvailable) throw saveAsFailure({ code: 'SAVE_AS_UNAVAILABLE', created: false, fileMayExist: false }, fileName)
     const draft = await requireDraft(draftId)
     if (expectedHead !== draft.head) fail('DRAFT_CONFLICT', 'Draft head changed; create-only export was not attempted')
     if (typeof operationId !== 'string' || !operationId) fail('OPERATION_ID_REQUIRED', 'Operation ID is required')
@@ -287,12 +314,11 @@ export function createEGDeskFileService({ draftStore, createOnlyAdapter, makeId 
         directoryIdentity: { dev: String(directoryStat.dev), ino: String(directoryStat.ino) },
         fileName, bytes, operationId,
       })
-      if (receipt?.created !== true || receipt.sha256 !== hash(bytes) || receipt.size !== bytes.length || !/^\d+$/.test(receipt.dev) || !/^\d+$/.test(receipt.ino)) fail('READBACK_FAILED', 'Native create-only receipt did not match the draft')
+      if (receipt?.created !== true || receipt.sha256 !== hash(bytes) || receipt.size !== bytes.length || !/^\d+$/.test(receipt.dev) || !/^\d+$/.test(receipt.ino)) fail('READBACK_FAILED', 'Native create-only receipt did not match the draft', { created: receipt?.created === true ? true : null, fileMayExist: true })
       const identity = { dev: BigInt(receipt.dev), ino: BigInt(receipt.ino) }
       return { mode: 'create-only-save-as', targetName: fileName, resourceId: handle(directoryResource.rootId, path.join(directoryResource.relativePath, fileName), 'file', identity), sha256: receipt.sha256, size: receipt.size, originalUpdated: false }
     } catch (error) {
-      if (error?.code === 'EEXIST') fail('TARGET_EXISTS', 'Save As never overwrites an existing file')
-      throw error
+      throw saveAsFailure(error, fileName)
     }
   }
 
