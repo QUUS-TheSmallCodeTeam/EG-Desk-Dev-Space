@@ -4,6 +4,7 @@ import { mkdtemp, writeFile, chmod, symlink, rm, realpath } from 'node:fs/promis
 import os from 'node:os'
 import path from 'node:path'
 import { CodexChatRuntime } from './codex-chat-runtime.mjs'
+import { openChatStore } from './egdesk-chat-store.mjs'
 import { explicitFileLinks, publicText, verifyLocalFile } from './codex-chat-values.mjs'
 
 function harness(override = {}) {
@@ -404,6 +405,18 @@ test('metadata-only completion is not truncation when item events already delive
   assert.equal(state.runs[0].requestId, 'ui-request')
 })
 
+test('late authoritative item completion is retained after terminal turn metadata without another turn', async () => {
+  const h = harness()
+  const run = await h.chat.send({ message: 'Answer', clientThreadId: 'ui-late' })
+  await h.notify('turn/completed', { threadId: run.conversationId, turn: { id: run.runId, status: 'completed', items: [], itemsView: 'notLoaded' } })
+  await h.item(run, { id: 'late-final', type: 'agentMessage', phase: 'final_answer', text: 'Authoritative late answer' })
+  const state = h.chat.snapshot(run.conversationId)
+  assert.equal(state.runs[0].status, 'completed')
+  assert.equal(state.runs[0].messages[0].text, 'Authoritative late answer')
+  assert.equal(state.runs[0].messages[0].completionConfirmed, true)
+  assert.equal(h.calls.filter(call => call.method === 'turn/start').length, 1)
+})
+
 test('partial native history stays explicit without claiming the bridge dropped items', async () => {
   const h = harness({ request: async () => ({ thread: { id: 'old', turns: [{ id: 'old-turn', status: 'completed', itemsView: 'summary', items: [
     { id: 'native-user', type: 'userMessage', clientId: 'original-request', content: [{ type: 'text', text: 'Question' }] },
@@ -644,4 +657,191 @@ test('omitted cwd inherits native defaults and an explicit absolute cwd is forwa
   assert.equal(explicit.calls.find(call => call.method === 'thread/start').params.cwd, '/fixture/manifest-workspace')
   assert.equal(explicit.calls.find(call => call.method === 'turn/start').params.cwd, '/fixture/manifest-workspace')
   assert.equal(Object.hasOwn(explicit.calls[0].params, 'developerInstructions'), false)
+})
+
+test('durable acceptance and dispatch intent precede every native start; store failures start no turn', async () => {
+  const calls = []
+  const store = {
+    getConversation: () => null,
+    createConversation: () => ({ clientThreadId: 'client-1', localConversationId: 'local-1' }),
+    acceptRequest: record => { calls.push(['accept', record]); return { accepted: true, message: record.message, request: { requestId: record.requestId, outcome: null } } },
+    appendEvent: event => { calls.push(['event', event]); return event },
+    recordRequestOutcome: () => {},
+    bindNative: () => {},
+  }
+  const chat = new CodexChatRuntime({
+    store, getOwnerKey: () => 'codex:chatgpt:account-1',
+    request: async (method, params) => {
+      calls.push(['native', method])
+      if (method === 'thread/start') return { thread: { id: 'native-thread-1' } }
+      if (method === 'turn/start') return { turn: { id: 'native-turn-1', status: 'inProgress', items: [] } }
+      throw new Error('Unexpected native call')
+    }, respond: () => {},
+  })
+  chat.setConnection(true)
+  const reply = await chat.send({ message: 'Keep this', clientThreadId: 'client-1', requestId: 'request-1' })
+  assert.equal(reply.accepted, true)
+  assert.equal(reply.durable, true)
+  assert.equal(reply.conversationId, 'native-thread-1')
+  assert.equal(reply.runId, 'native-turn-1')
+  assert.equal(reply.localConversationId, 'local-1')
+  assert.match(reply.localRunId, /^run-[\da-f]{32}$/)
+  assert.deepEqual(calls.map(call => call[0] === 'event' ? call[1].event : call[0] === 'native' ? call[1] : 'accept'), [
+    'accept', 'run.dispatching', 'thread/start', 'native.thread.bound', 'turn/start', 'run.started', 'run.configuration',
+  ])
+  assert.equal(calls[0][1].message.text, 'Keep this')
+  assert.equal(calls[0][1].requestId, 'request-1')
+  const failedStore = new CodexChatRuntime({
+    store: { getConversation: () => null, createConversation: () => ({ localConversationId: 'local-1' }), acceptRequest: () => { throw new Error('Disk unavailable') } },
+    getOwnerKey: () => 'codex:chatgpt:account-1',
+    request: async () => { throw new Error('Native must not be called') }, respond: () => {},
+  })
+  failedStore.setConnection(true)
+  await assert.rejects(failedStore.send({ message: 'Do not send', clientThreadId: 'client-2' }), error => error.code === 'CHAT_STORE_UNAVAILABLE')
+  const failedDispatch = new CodexChatRuntime({
+    store: {
+      getConversation: () => null,
+      createConversation: () => ({ localConversationId: 'local-1' }),
+      acceptRequest: record => ({ accepted: true, message: record.message, request: { requestId: record.requestId } }),
+      appendEvent: () => { throw new Error('Disk unavailable') },
+    },
+    getOwnerKey: () => 'codex:chatgpt:account-1',
+    request: async () => { throw new Error('Native must not be called') }, respond: () => {},
+  })
+  failedDispatch.setConnection(true)
+  await assert.rejects(failedDispatch.send({ message: 'Do not send', clientThreadId: 'client-1' }), error => error.code === 'CHAT_STORE_UNAVAILABLE')
+})
+
+test('persisted request replay returns the same local IDs without native dispatch', async () => {
+  const chat = new CodexChatRuntime({
+    store: {
+      getConversation: () => ({ clientThreadId: 'client-1', localConversationId: 'local-1' }),
+      getRequest: () => null,
+      acceptRequest: record => ({
+        accepted: false, message: record.message,
+        request: { requestId: record.requestId, outcome: { accepted: false, dispatchStatus: 'unknown' } },
+      }),
+    },
+    getOwnerKey: () => 'codex:chatgpt:account-1',
+    request: async () => { throw new Error('Duplicate must not reach native') }, respond: () => {},
+  })
+  chat.setConnection(true)
+  const result = await chat.send({ message: 'Previously sent', clientThreadId: 'client-1', requestId: 'request-1' })
+  assert.equal(result.accepted, false)
+  assert.equal(result.duplicate, true)
+  assert.equal(result.dispatchStatus, 'unknown')
+  assert.match(result.localRunId, /^run-[\da-f]{32}$/)
+})
+
+test('local history returns full public projections and paged events with native runtime offline', () => {
+  const publicRun = {
+    localRunId: 'run-local', requestId: 'request-local', conversationId: 'native-1', runId: 'turn-1',
+    status: 'completed', messages: [{ id: 'assistant-1', role: 'assistant', text: 'Answer' }],
+    activities: [{ id: 'tool-1', kind: 'mcpToolCall', detail: { server: 'public-server', tool: 'public-tool' } }],
+    artifacts: [{ id: 'artifact-1', relation: 'referenced' }], context: { packets: [{ packetId: 'packet-1' }] },
+    briefing: { briefingId: 'briefing-1' }, cwdPublic: '/safe/work', accountIdentity: { ownerHash: 'hash' },
+  }
+  const chat = new CodexChatRuntime({
+    store: {
+      getConversation: () => ({ clientThreadId: 'client-1', localConversationId: 'local-1', conversationId: 'native-1', coverage: { scope: 'egdesk-local', status: 'complete', reasons: [], nativeHistoryComplete: true } }),
+      listRuns: () => ({ runs: [publicRun], nextCursor: null, hasMore: false }),
+      listMessages: () => ({ messages: [{ localMessageId: 'message-local', requestId: 'request-local', role: 'user', text: 'Question' }], nextCursor: null, hasMore: false }),
+      listEvents: () => ({ events: [{ seq: 7, eventId: 'event-7', event: 'message.completed', details: { message: { text: 'Answer' } } }], nextCursor: 7, hasMore: true }),
+      getRequest: () => ({ acceptedAt: 1234 }),
+      listConversations: () => ({ threads: [{ clientThreadId: 'client-1', localConversationId: 'local-1' }], nextCursor: null, hasMore: false }),
+    },
+    request: async () => { throw new Error('History must not query native') }, respond: () => {},
+  })
+  const page = chat.getLocalHistory({ clientThreadId: 'client-1', afterSeq: 6, limit: 1 })
+  assert.equal(chat.connection, 'offline')
+  assert.equal(page.runs[0].activities[0].detail.tool, 'public-tool')
+  assert.equal(page.runs[0].context.packets[0].packetId, 'packet-1')
+  assert.equal(page.messages[0].createdAt, 1234)
+  assert.equal(page.events[0].details.message.text, 'Answer')
+  assert.equal(page.nextCursor, 7)
+  assert.equal(page.coverage.status, 'complete')
+  assert.equal(chat.listLocalThreads({ limit: 10 }).threads.length, 1)
+})
+
+test('restart marks active local run unknown without a provider call or rerun', () => {
+  const events = []
+  const chat = new CodexChatRuntime({
+    store: {
+      listConversations: () => ({ threads: [{ clientThreadId: 'client-1' }], nextCursor: null, hasMore: false }),
+      listRuns: () => ({ runs: [{ localRunId: 'run-1', requestId: 'request-1', runId: 'turn-1', conversationId: 'native-1', status: 'inProgress', messages: [{ id: 'part', role: 'assistant', text: 'Partial', status: 'streaming' }] }], nextCursor: null, hasMore: false }),
+      appendEvent: event => { events.push(event) },
+      getRequest: () => ({ requestId: 'request-1' }),
+      recordRequestOutcome: () => {},
+    },
+    request: async () => { throw new Error('Recovery must not call provider') }, respond: () => {},
+  })
+  assert.equal(chat.recoverInterruptedRuns(), 1)
+  assert.equal(events[0].event, 'run.recovery_unknown')
+  assert.equal(events[0].runCheckpoint.status, 'unknown')
+  assert.equal(events[0].runCheckpoint.messages[0].status, 'partial')
+})
+
+test('stored native owner mismatch blocks resume before any provider call', async () => {
+  const chat = new CodexChatRuntime({
+    store: {
+      getConversation: () => ({ clientThreadId: 'client-1', localConversationId: 'local-1', conversationId: 'native-1' }),
+      getRequest: () => null,
+      listEvents: () => ({ events: [{ event: 'native.thread.bound', details: { conversationId: 'native-1', ownerHash: 'different-owner' } }], nextCursor: null, hasMore: false }),
+    },
+    getOwnerKey: () => 'codex:chatgpt:current-account',
+    request: async () => { throw new Error('Mismatched account must not reach provider') }, respond: () => {},
+  })
+  chat.setConnection(true)
+  await assert.rejects(chat.resume({ clientThreadId: 'client-1', conversationId: 'native-1' }), error => error.code === 'NATIVE_ACCOUNT_MISMATCH')
+  await assert.rejects(chat.send({ clientThreadId: 'client-1', conversationId: 'native-1', message: 'Continue' }), error => error.code === 'NATIVE_ACCOUNT_MISMATCH')
+})
+
+test('real SQLite store captures a full turn, serves offline history and dedupes send after reopen', async () => {
+  const dataDir = await mkdtemp(path.join(os.tmpdir(), 'egdesk-runtime-store-'))
+  let store = null
+  try {
+    store = openChatStore({ dataDir, ownerScope: 'local-desktop-test' })
+    const nativeCalls = []
+    const chat = new CodexChatRuntime({
+      store, requireStore: true, getOwnerKey: () => 'codex:chatgpt:account-1',
+      request: async method => {
+        nativeCalls.push(method)
+        if (method === 'thread/start') return { thread: { id: 'native-1' }, cwd: '/safe/work' }
+        if (method === 'turn/start') return { turn: { id: 'turn-1', status: 'inProgress', items: [] } }
+        throw new Error(`Unexpected native call: ${method}`)
+      }, respond: () => {},
+    })
+    chat.setConnection(true)
+    const body = { message: 'Stored question', clientThreadId: 'ui-1', requestId: 'req-1' }
+    const accepted = await chat.send(body)
+    assert.equal(accepted.accepted, true)
+    assert.equal(accepted.durable, true)
+    await chat.handleNotification({ method: 'item/agentMessage/delta', params: { threadId: 'native-1', turnId: 'turn-1', itemId: 'answer-1', delta: 'Partial ' } })
+    await chat.handleNotification({ method: 'item/completed', params: { threadId: 'native-1', turnId: 'turn-1', item: { id: 'answer-1', type: 'agentMessage', text: 'Partial final answer', phase: 'final_answer' } } })
+    await chat.handleNotification({ method: 'turn/completed', params: { threadId: 'native-1', turn: { id: 'turn-1', status: 'completed', items: [], itemsView: 'notLoaded' } } })
+    const before = chat.getLocalHistory({ clientThreadId: 'ui-1', limit: 500 })
+    assert.equal(before.thread.conversationId, 'native-1')
+    assert.equal(before.runs[0].runId, 'turn-1')
+    assert.equal(before.runs[0].status, 'completed')
+    assert.ok(before.messages.some(message => message.role === 'assistant' && message.text === 'Partial final answer'))
+    assert.ok(before.events.some(event => event.event === 'message.completed' && event.details.text === 'Partial final answer'))
+    assert.deepEqual(nativeCalls, ['thread/start', 'turn/start'])
+    store.close(); store = null
+    const reopened = openChatStore({ dataDir, ownerScope: 'local-desktop-test' })
+    store = reopened
+    const offline = new CodexChatRuntime({
+      store: reopened, requireStore: true, getOwnerKey: () => 'codex:chatgpt:account-1',
+      request: async () => { throw new Error('Offline history must not query native') }, respond: () => {},
+    })
+    assert.equal(offline.recoverInterruptedRuns(), 0)
+    assert.equal(offline.getLocalHistory({ clientThreadId: 'ui-1', limit: 500 }).messages.at(-1).text, 'Partial final answer')
+    offline.setConnection(true)
+    const replay = await offline.send(body)
+    assert.equal(replay.duplicate, true)
+    assert.equal(replay.runId, 'turn-1')
+    assert.equal(replay.localRunId, accepted.localRunId)
+  } finally {
+    try { store?.close() } catch {}
+    await rm(dataDir, { recursive: true, force: true })
+  }
 })

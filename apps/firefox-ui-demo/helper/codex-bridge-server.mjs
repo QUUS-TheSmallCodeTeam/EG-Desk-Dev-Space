@@ -11,6 +11,7 @@ import { randomBytes } from 'node:crypto'
 import * as os from 'node:os'
 import path from 'node:path'
 import { ImmutableContextStore, appDataDirectory } from './egdesk-context-store.mjs'
+import { openChatStore } from './egdesk-chat-store.mjs'
 import { NativeReaderClient } from './egdesk-native-reader.mjs'
 import { ContextRuntime } from './egdesk-context-runtime.mjs'
 import { createContextHttpHandler } from './egdesk-context-http.mjs'
@@ -98,6 +99,14 @@ const nativeRespond = (id, result, error) => {
   rpc.respond(id, result, error)
 }
 const dataDir = appDataDirectory()
+let chatStore = null
+let chatStoreError = null
+try {
+  chatStore = openChatStore({ dataDir: path.join(dataDir, 'chat'), ownerScope: 'local-desktop-v1' })
+} catch (error) {
+  chatStoreError = publicText(error?.message || 'Local chat storage failed to open', 1000)
+  console.error('[egdesk-codex-bridge] local chat storage unavailable:', chatStoreError)
+}
 const localFiles = createEGDeskFileMount({ dataDir, port: BRIDGE_PORT })
 const contextStore = new ImmutableContextStore({
   dataDir,
@@ -110,10 +119,20 @@ const chat = new CodexChatRuntime({
   request: (method, params) => appServerRequest(method, params),
   respond: nativeRespond,
   contexts,
+  store: chatStore,
+  requireStore: true,
+  getOwnerKey: () => publicAuthIdentityKey(authState),
   expectedProcessConfiguration: { model: appServerLaunch.configuredModel, effort: appServerLaunch.configuredEffort },
   emit: event => broadcast(event, 2),
   emitLegacy: event => broadcast(event, 1),
 })
+if (chatStore) {
+  try { chat.recoverInterruptedRuns() }
+  catch (error) {
+    chatStoreError = publicText(error?.message || 'Local chat recovery failed', 1000)
+    console.error('[egdesk-codex-bridge] local chat recovery unavailable:', chatStoreError)
+  }
+}
 const ensureChatAuth = async () => {
   chat.assertReady()
   await refreshAccountState()
@@ -536,7 +555,7 @@ const bridgeServer = createServer(async (req, res) => {
   }
 
   if (req.method === 'GET' && route === '/health') {
-    sendJson(res, 200, { ok: true, port: BRIDGE_PORT, appServerReady, native: nativeCapabilities, engineConfiguration: nativePreflight, node: nodeRuntime })
+    sendJson(res, 200, { ok: true, port: BRIDGE_PORT, appServerReady, chatStorageReady: Boolean(chatStore && chat.storeHealthy), chatStorageError: chatStoreError, native: nativeCapabilities, engineConfiguration: nativePreflight, node: nodeRuntime })
     return
   }
 
@@ -548,6 +567,7 @@ const bridgeServer = createServer(async (req, res) => {
       protocolVersion: BRIDGE_PROTOCOL_VERSION,
       provider: PROVIDER_ID,
       appServerReady,
+      chatStorageReady: Boolean(chatStore && chat.storeHealthy),
       native: nativeCapabilities,
       engineConfiguration: nativePreflight,
       node: nodeRuntime,
@@ -555,7 +575,7 @@ const bridgeServer = createServer(async (req, res) => {
       chat: chat.snapshot(),
       capabilities: {
         auth: ['status', 'start', 'cancel', 'signout'],
-        chat: ['send', 'stream', 'resume', 'interrupt', 'approvals', 'typed-activity', 'artifact-refs'],
+        chat: chatStore && chat.storeHealthy ? ['send', 'stream', 'resume', 'interrupt', 'approvals', 'typed-activity', 'artifact-refs', 'local-history', 'legacy-import'] : ['local-history-unavailable'],
         context: nativeCapabilities.schemaMatch ? ['capture', 'immutable-inspect', 'native-dynamic-tools', 'smart-read', 'read-only-reader', 'answer-briefing'] : ['capture', 'immutable-inspect'],
         files: ['native-picker', 'scoped-read', 'managed-drafts', 'create-only-save-as'],
       },
@@ -723,6 +743,8 @@ async function shutdown() {
   bridgeServer.close()
   try { await localFiles.close() }
   catch { console.error('[egdesk-codex-bridge] managed file store did not close cleanly') }
+  try { chatStore?.close() }
+  catch { console.error('[egdesk-codex-bridge] local chat store did not close cleanly') }
   process.exit(0)
 }
 process.on('SIGINT', shutdown)

@@ -105,6 +105,57 @@ test('state polling is bounded by runtime snapshot and does not call account API
   assert.equal(authCalls, 0)
 })
 
+test('local history reads and legacy imports bypass native auth and preserve paged response shapes', async () => {
+  let authCalls = 0
+  const calls = []
+  const history = {
+    listLocalThreads: async options => { calls.push(['threads', options]); return { protocolVersion: 1, threads: [], nextCursor: null, hasMore: false } },
+    getLocalHistory: async options => { calls.push(['history', options]); return { protocolVersion: 1, thread: { clientThreadId: options.clientThreadId }, runs: [], messages: [], events: [], nextCursor: null, hasMore: false, projectionTruncated: false, coverage: { scope: 'egdesk-local', status: 'unknown', reasons: [], nativeHistoryComplete: null } } },
+    importLocalHistory: async body => { calls.push(['import', body]); return { imported: true, alreadyImported: false, clientThreadId: body.clientThreadId, localConversationId: 'local-1', coverage: { scope: 'egdesk-local', status: 'partial', reasons: ['legacy-truncated'], nativeHistoryComplete: false } } },
+  }
+  const handler = createChatHttpHandler({}, async () => { authCalls++; throw new Error('Native unavailable') }, history)
+  const threadsReq = request(''); threadsReq.method = 'GET'
+  const threadsRes = response()
+  await handler(threadsReq, threadsRes, new URL('http://localhost/chat/history/threads?limit=10'))
+  assert.equal(threadsRes.status, 200)
+  const historyReq = request(''); historyReq.method = 'GET'
+  const historyRes = response()
+  await handler(historyReq, historyRes, new URL('http://localhost/chat/history?clientThreadId=client-1&afterSeq=4&limit=25'))
+  assert.equal(historyRes.status, 200)
+  assert.deepEqual(historyRes.body.events, [])
+  const snapshot = { protocolVersion: 2, conversationId: 'native-1', streamId: 'stream-1', seq: 8, truncated: true, historyComplete: false, runs: [] }
+  const importRes = response()
+  await handler(request(JSON.stringify({ clientThreadId: 'client-1', importId: 'import-1', snapshot })), importRes, new URL('http://localhost/chat/history/import'))
+  assert.equal(importRes.status, 201)
+  assert.deepEqual(calls, [
+    ['threads', { cursor: null, limit: 10 }],
+    ['history', { clientThreadId: 'client-1', afterSeq: 4, limit: 25 }],
+    ['import', { clientThreadId: 'client-1', importId: 'import-1', snapshot }],
+  ])
+  assert.equal(authCalls, 0)
+})
+
+test('history endpoints reject invalid cursors, limits and imports before store calls', async () => {
+  let called = false
+  const history = { listLocalThreads: () => { called = true }, getLocalHistory: () => { called = true }, importLocalHistory: () => { called = true } }
+  const handler = createChatHttpHandler({}, async () => {}, history)
+  for (const path of ['/chat/history?clientThreadId=x&afterSeq=-1', '/chat/history?clientThreadId=x&limit=501', '/chat/history?afterSeq=0', '/chat/history/threads?limit=0']) {
+    const req = request(''); req.method = 'GET'
+    const res = response()
+    await handler(req, res, new URL(`http://localhost${path}`))
+    assert.equal(res.status, 400, path)
+  }
+  const invalid = response()
+  await handler(request(JSON.stringify({ clientThreadId: 'x', importId: 'one', snapshot: { protocolVersion: 1, runs: [] } })), invalid, new URL('http://localhost/chat/history/import'))
+  assert.equal(invalid.status, 400)
+  const oversized = response()
+  const largeReq = Readable.from([Buffer.alloc(64 * 1024 * 1024 + 1)])
+  largeReq.method = 'POST'; largeReq.url = '/chat/history/import'; largeReq.headers = { host: '127.0.0.1:39218', 'content-type': 'application/json' }; largeReq.socket = { remoteAddress: '127.0.0.1' }
+  await handler(largeReq, oversized, new URL('http://localhost/chat/history/import'))
+  assert.equal(oversized.status, 413)
+  assert.equal(called, false)
+})
+
 test('HTTP failure after native thread creation returns the recoverable native ID and request ID', async () => {
   const nativeCalls = []
   const chat = new CodexChatRuntime({
