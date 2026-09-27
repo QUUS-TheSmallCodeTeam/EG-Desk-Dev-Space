@@ -801,6 +801,14 @@ test('real SQLite store captures a full turn, serves offline history and dedupes
   let store = null
   try {
     store = openChatStore({ dataDir, ownerScope: 'local-desktop-test' })
+    const storageFaults = []
+    for (const method of ['appendEvent', 'bindNative', 'recordRequestOutcome']) {
+      const original = store[method].bind(store)
+      store[method] = input => {
+        try { return original(input) }
+        catch (error) { storageFaults.push({ method, event: input.event, code: error.code, message: error.message }); throw error }
+      }
+    }
     const nativeCalls = []
     const chat = new CodexChatRuntime({
       store, requireStore: true, getOwnerKey: () => 'codex:chatgpt:account-1',
@@ -816,14 +824,24 @@ test('real SQLite store captures a full turn, serves offline history and dedupes
     const accepted = await chat.send(body)
     assert.equal(accepted.accepted, true)
     assert.equal(accepted.durable, true)
+    const pendingUser = store.listMessages('ui-1', { limit: 100 }).messages.find(message => message.role === 'user')
+    assert.equal(pendingUser.localMessageId, accepted.localMessageId)
+    assert.equal(pendingUser.messageId, null)
+    await chat.handleNotification({ method: 'item/completed', params: { threadId: 'native-1', turnId: 'turn-1', item: { id: 'native-user-1', type: 'userMessage', clientId: 'req-1', content: [{ type: 'text', text: 'Stored question' }] } } })
     await chat.handleNotification({ method: 'item/agentMessage/delta', params: { threadId: 'native-1', turnId: 'turn-1', itemId: 'answer-1', delta: 'Partial ' } })
     await chat.handleNotification({ method: 'item/completed', params: { threadId: 'native-1', turnId: 'turn-1', item: { id: 'answer-1', type: 'agentMessage', text: 'Partial final answer', phase: 'final_answer' } } })
     await chat.handleNotification({ method: 'turn/completed', params: { threadId: 'native-1', turn: { id: 'turn-1', status: 'completed', items: [], itemsView: 'notLoaded' } } })
+    assert.deepEqual(storageFaults, [])
     const before = chat.getLocalHistory({ clientThreadId: 'ui-1', limit: 500 })
     assert.equal(before.thread.conversationId, 'native-1')
     assert.equal(before.runs[0].runId, 'turn-1')
     assert.equal(before.runs[0].status, 'completed')
+    const boundUser = before.messages.find(message => message.role === 'user')
+    assert.equal(boundUser.localMessageId, accepted.localMessageId)
+    assert.equal(boundUser.messageId, 'native-user-1')
+    assert.ok(before.events.some(event => event.event === 'message.checkpoint' && event.localMessageId === accepted.localMessageId && event.messageId === 'native-user-1'))
     assert.ok(before.messages.some(message => message.role === 'assistant' && message.text === 'Partial final answer'))
+    assert.ok(before.messages.some(message => message.role === 'assistant' && message.messageId === 'answer-1'))
     assert.ok(before.events.some(event => event.event === 'message.completed' && event.details.text === 'Partial final answer'))
     assert.deepEqual(nativeCalls, ['thread/start', 'turn/start'])
     store.close(); store = null

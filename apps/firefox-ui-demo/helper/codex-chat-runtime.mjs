@@ -367,6 +367,7 @@ export class CodexChatRuntime {
           clientThreadId, localConversationId: thread.localConversationId,
           localRunId: prior?.localRunId || localId('run', clientThreadId, turnId),
           requestId: prior?.requestId || null,
+          localMessageId: prior?.requestId ? this.store.getRequest({ clientThreadId, requestId: prior.requestId })?.localMessageId || null : null,
         }
         if (prior) this.persistedRunStates.set(runKey(threadId, turnId), { status: prior.status, historyComplete: prior.historyComplete })
       }
@@ -377,6 +378,7 @@ export class CodexChatRuntime {
       clientThreadId: context?.clientThreadId || this.threads.get(threadId).clientThreadId,
       localConversationId: context?.localConversationId || null,
       localRunId: context?.localRunId || null,
+      localMessageId: context?.localMessageId || null,
       status: 'inProgress', stopRequested: false, stopConfirmed: false,
       messages: [], activities: [], artifacts: [], pendingApprovals: [], error: null,
       createdAt: this.now(), truncated: false, historyComplete: true,
