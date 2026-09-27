@@ -194,6 +194,7 @@ export function hydrateLocalChatThread(current, history, options = {}) {
     message.localMessageId || message.localHistory === true || Number.isSafeInteger(message.liveRevision)
       ? message : { ...message, localMessageId: legacyLocalId('message', clientThreadId,
         typeof message.id === 'string' && message.id ? message.id : `ordinal-${index}`) });
+  const localRuns = mergeLocalChatRuns(current.localRuns, history.runs);
   return {
     ...copy(saved), ...current,
     id: clientThreadId,
@@ -203,10 +204,49 @@ export function hydrateLocalChatThread(current, history, options = {}) {
     bindingAccountKey: current.bindingAccountKey || null,
     bindingState: current.bindingState || 'fresh',
     retainedNativeBinding: current.retainedNativeBinding || null,
-    messages: mergeLocalChatMessages(currentMessages, persistedMessages, options),
-    localRuns: mergeLocalChatRuns(current.localRuns, history.runs),
+    messages: projectLocalRunRelations(mergeLocalChatMessages(currentMessages, persistedMessages, options), localRuns),
+    localRuns,
     localHistoryCoverage: history.coverage || current.localHistoryCoverage || null,
   };
+}
+
+// Historical run projections can carry a published Briefing even when the
+// bounded message projection does not. Bind by run identity, never by the
+// visible/local message ID (Answer ID is the native conversation/run pair).
+export function projectLocalRunRelations(messages, runs) {
+  const projected = (messages || []).map(copy);
+  for (const run of runs || []) {
+    const briefing = run.briefing || run.context?.briefings?.at(-1);
+    if (!briefing) continue;
+    const identity = {
+      conversationId: run.conversationId || briefing.conversationId || null,
+      runId: run.runId || briefing.runId || null,
+      answerId: run.answerId || briefing.answerId || null,
+    };
+    if (['conversationId', 'runId', 'answerId'].some(key => run[key] && briefing[key] && run[key] !== briefing[key])) continue;
+    const candidates = projected.map((message, index) => ({ message, index })).filter(({ message }) => {
+      if (message.role !== 'assistant') return false;
+      const localMatch = !!run.localRunId && message.localRunId === run.localRunId;
+      const nativeMatch = !!run.conversationId && !!run.runId
+        && message.conversationId === run.conversationId && message.runId === run.runId;
+      if (!localMatch && !nativeMatch) return false;
+      return ['conversationId', 'runId', 'answerId'].every(key => !message[key] || !identity[key] || message[key] === identity[key]);
+    });
+    const target = candidates.findLast(({ message }) => message.phase === 'final_answer') || candidates.at(-1);
+    if (!target) continue;
+    const next = { ...target.message };
+    for (const key of ['conversationId', 'runId', 'answerId']) if (!next[key] && identity[key]) next[key] = identity[key];
+    next.briefing = copy(briefing);
+    for (const [key, fallback] of [
+      ['contextCaptures', run.context?.captures], ['contextPackets', run.context?.packets],
+      ['artifacts', run.artifacts],
+    ]) {
+      const value = run[key] || fallback;
+      if ((!Array.isArray(next[key]) || !next[key].length) && Array.isArray(value) && value.length) next[key] = copy(value);
+    }
+    projected[target.index] = next;
+  }
+  return projected;
 }
 
 export function mergeLocalChatRuns(current = [], persisted = []) {
