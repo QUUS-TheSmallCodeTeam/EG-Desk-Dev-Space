@@ -1,8 +1,12 @@
 import test from 'node:test'
 import assert from 'node:assert/strict'
 import { Readable } from 'node:stream'
+import { mkdtemp, rm } from 'node:fs/promises'
+import os from 'node:os'
+import path from 'node:path'
 import { createChatHttpHandler, guardBridgeRequest, readJsonBody, setBridgeCors } from './codex-bridge-http.mjs'
 import { CodexChatRuntime } from './codex-chat-runtime.mjs'
+import { openChatStore } from './egdesk-chat-store.mjs'
 
 function request(body, headers = {}, url = '/chat/send') {
   const req = Readable.from([Buffer.from(body)])
@@ -230,4 +234,59 @@ test('HTTP explicit invalid cwd returns INVALID_CWD before auth lookup or a nati
   }
   assert.equal(authCalls, 0)
   assert.equal(nativeCalls, 0)
+})
+
+test('real-store HTTP imports and reads local-only legacy text without native auth or IDs', async () => {
+  const dataDir = await mkdtemp(path.join(os.tmpdir(), 'egdesk-local-history-http-'))
+  let store = null
+  try {
+    store = openChatStore({ dataDir, ownerScope: 'local-http-test' })
+    let authCalls = 0, nativeCalls = 0
+    const chat = new CodexChatRuntime({
+      store, requireStore: true,
+      request: async () => { nativeCalls++; throw new Error('Native runtime must stay offline') },
+      respond: () => {},
+    })
+    const handler = createChatHttpHandler(chat, async () => { authCalls++; throw new Error('Native auth must not be checked') })
+    const snapshot = {
+      protocolVersion: 2, conversationId: null, streamId: 'legacy-local', seq: 1,
+      truncated: false, historyComplete: false,
+      runs: [{
+        localRunId: 'local-legacy-run', conversationId: null, runId: null,
+        status: 'unknown', messages: [{
+          id: 'ui-old', messageId: null, localMessageId: 'local-old',
+          role: 'user', text: 'legacy', status: 'complete',
+        }], activities: [], artifacts: [], pendingApprovals: [],
+      }],
+    }
+    const body = { clientThreadId: 'legacy-client', importId: 'legacy-import-1', snapshot }
+    const imported = response()
+    const importReq = request(JSON.stringify(body), {}, '/chat/history/import')
+    assert.equal(guardBridgeRequest(importReq), true)
+    await handler(importReq, imported, new URL('http://localhost/chat/history/import'))
+    assert.equal(imported.status, 201)
+    assert.equal(imported.body.imported, true)
+    assert.equal(imported.body.coverage.status, 'partial')
+    const historyReq = request(''); historyReq.method = 'GET'; historyReq.url = '/chat/history?clientThreadId=legacy-client&afterSeq=0&limit=100'
+    const history = response()
+    await handler(historyReq, history, new URL('http://localhost/chat/history?clientThreadId=legacy-client&afterSeq=0&limit=100'))
+    assert.equal(history.status, 200)
+    assert.equal(history.body.thread.conversationId, null)
+    assert.equal(history.body.runs[0].localRunId, 'local-legacy-run')
+    assert.equal(history.body.runs[0].runId, null)
+    const message = history.body.messages.find(value => value.localMessageId === 'local-old')
+    assert.equal(message.text, 'legacy')
+    assert.equal(message.id, 'ui-old')
+    assert.equal(message.messageId, null)
+    assert.ok(history.body.events.some(event => event.event === 'message.checkpoint' && event.details.message.text === 'legacy' && event.messageId === null))
+    const repeated = response()
+    await handler(request(JSON.stringify(body), {}, '/chat/history/import'), repeated, new URL('http://localhost/chat/history/import'))
+    assert.equal(repeated.status, 200)
+    assert.equal(repeated.body.alreadyImported, true)
+    assert.equal(authCalls, 0)
+    assert.equal(nativeCalls, 0)
+  } finally {
+    try { store?.close() } catch {}
+    await rm(dataDir, { recursive: true, force: true })
+  }
 })
