@@ -14,6 +14,7 @@
   const Markdown = ChromeUtils.importESModule('chrome://userchrome/content/EGDeskMarkdown.sys.mjs');
   const InputContext = ChromeUtils.importESModule('chrome://userchrome/content/EGDeskInputContext.sys.mjs');
   const BriefingState = ChromeUtils.importESModule('chrome://userchrome/content/EGDeskBriefingState.sys.mjs');
+  const FileCardState = ChromeUtils.importESModule('chrome://userchrome/content/EGDeskFileCardState.sys.mjs');
   const BROWSER_AGENT_ACTOR_NAME = 'EGDeskBrowserAgentRuntime';
   const BROWSER_AGENT_HISTORY_LIMIT = 100;
   let browserAgentActorReady = false;
@@ -62,7 +63,7 @@
     // 아이콘 규칙: 모노크롬 텍스트 글리프. 이모지 기본표시(컬러) 코드포인트는
     // ︎(VS15)로 텍스트 표시 강제 — macOS Firefox chrome에서 렌더 실측 완료.
     { id: 'chat',     label: '채팅',    icon: '🗨︎' },
-    { id: 'shelf',    label: '서재',    icon: '▤' },
+    { id: 'shelf',    label: '파일',    icon: '▤' },
     { id: 'ontology', label: '온톨로지', icon: '❖' },
     { id: 'browser',  label: '브라우저', icon: '🌐︎' },
     { id: 'ide',      label: 'IDE',     icon: '<>' },
@@ -1415,10 +1416,12 @@
     if (card.classList.contains('egd-ontology-card')) return 'ontology';
     if (card.classList.contains('egd-chat-card')) return 'chat';
     if (card.classList.contains('egd-input-evidence-card')) return 'input-evidence';
+    if (card.classList.contains('egd-file-card')) return 'file';
     return 'card';
   }
 
   function runtimeStateForCard(card, type) {
+    if (type === 'file') return cloneJson(card._fileRecord || { version: 1 });
     if (type === 'input-evidence') return { reference: cloneJson(card._inputReference) };
     if (type === 'browser') {
       return {
@@ -1567,6 +1570,7 @@
       } else if (record.type === 'ontology') view = spawnOntologyMapCard(record.runtimeState || {});
       else if (record.type === 'input-evidence' && record.runtimeState?.reference) view = spawnInputEvidence(record.runtimeState.reference, null, { restore: true });
       else if (record.type === 'settings') view = spawnSettingsCard({ openMode: 'new' });
+      else if (record.type === 'file') view = spawnFileCard({ openMode: 'new', restore: true, record: record.runtimeState });
       else if (record.type === 'terminal' && options.newTerminal === true) view = spawnTerminalCard();
     } catch (error) { reason = error.message || reason; }
     if (!view) {
@@ -1673,13 +1677,14 @@
     if (entity.classList.contains('egd-chat-card')) state.codex.chatCardEntityId = entity.id;
   }
 
-  function clearCanvasEntitiesForRestore() {
-    if (state.cardFullscreen) exitCardFullscreen(null, { restoreRect: false });
+  async function clearCanvasEntitiesForRestore() {
     for (const card of Array.from(document.querySelectorAll('.egd-canvas-card'))) {
+      if (card._beforeClose && !(await card._beforeClose())) return false;
       unregisterSourceRefCard(card);
       try { if (typeof card._cleanup === 'function') card._cleanup(); } catch {}
       card.remove();
     }
+    if (state.cardFullscreen) exitCardFullscreen(null, { restoreRect: false });
     for (const shape of Array.from(document.querySelectorAll('.egd-canvas-shape'))) {
       try { if (typeof shape._cleanup === 'function') shape._cleanup(); } catch {}
       shape.remove();
@@ -1688,6 +1693,7 @@
     state.activeEntityId = null;
     state.codex.chatCardEntityId = null;
     state.codex.chatDockMode = 'hud';
+    return true;
   }
 
   function restoreCardFromState(cardState) {
@@ -1859,10 +1865,10 @@
     state.agenda.closeGuardOpen = false;
   }
 
-  function clearCurrentAgendaView(options = {}) {
+  async function clearCurrentAgendaView(options = {}) {
     state.agenda.suppressDirty = true;
     try {
-      clearCanvasEntitiesForRestore();
+      if (!(await clearCanvasEntitiesForRestore())) return false;
       if (options.markClean !== false) {
         state.agenda.dirty = false;
         state.agenda.dirtyReasons = [];
@@ -1872,6 +1878,7 @@
     }
     syncViewportAgendaRail();
     refreshDeskMinimap();
+    return true;
   }
 
   const boardCloseRequests = new Set();
@@ -1896,6 +1903,11 @@
       const view = document.getElementById(id);
       if (!view) continue;
       try {
+        if (view._beforeClose && !(await view._beforeClose())) {
+          boardNotice('파일 변경을 기록하지 못해 Board를 유지했습니다. 파일 창의 상태를 확인한 뒤 다시 닫아 주세요.');
+          refreshBoardRegion(projection);
+          return false;
+        }
         if (view._closeOwnedRuntime && !(await view._closeOwnedRuntime())) {
           boardNotice('터미널 종료가 아직 확인되지 않았습니다. 해당 화면을 유지합니다.');
           refreshBoardRegion(projection);
@@ -3307,6 +3319,7 @@
     if (card.classList.contains('egd-terminal-card')) return 'Terminal';
     if (card.classList.contains('egd-settings-card')) return 'Settings';
     if (card.classList.contains('egd-ontology-card')) return 'Ontology';
+    if (card.classList.contains('egd-file-card')) return card._fileRecord?.root?.name || '파일';
     if (card.classList.contains('egd-chat-card')) {
       return card.querySelector('.egd-chat-card-title')?.textContent?.trim() || 'Chat';
     }
@@ -3815,7 +3828,8 @@
         const btn = el('button', {
           class: 'egd-dock-btn' + (kind === 'center' && state.activeTool === item.id ? ' egd-dock-btn-active' : ''),
           title: item.label,
-          data: { id: item.id, kind },
+          data: { id: item.id, kind, ...(item.id === 'shelf' ? { testid: 'file-dock-open' } : {}) },
+          'aria-label': item.label,
           onclick: () => {
             if (kind === 'center') {
               state.activeTool = item.id;
@@ -3830,6 +3844,8 @@
                 spawnTerminalCard();
               } else if (item.id === 'settings') {
                 spawnSettingsCard();
+              } else if (item.id === 'shelf') {
+                spawnFileCard();
               } else if (item.id === 'ontology') {
                 spawnOntologyMapCard();
               } else if (item.id === 'chat') {
@@ -3864,6 +3880,8 @@
     const bag = el('div', { id: 'egd-preset-bag', class: 'egd-edge egd-frosted' });
 
     bag.appendChild(el('div', { class: 'egd-bag-header', title: '프리셋 가방' }, '▦'));
+    bag.appendChild(el('button', { class: 'egd-bag-chip', title: '파일 작업 열기', 'aria-label': '파일 작업 열기',
+      data: { testid: 'file-sidebar-open' }, onclick: () => spawnFileCard() }, '파일'));
 
     const list = el('div', { class: 'egd-bag-list' });
     for (const preset of PRESETS) {
@@ -6457,7 +6475,14 @@
   }
 
   function closeCanvasCard(card, cleanup) {
-    if (!card) return;
+    if (!card) return false;
+    if (card._beforeClose && !card._closeApproved) {
+      return Promise.resolve().then(() => card._beforeClose()).then(confirmed => {
+        if (confirmed !== true) return false;
+        card._closeApproved = true;
+        return closeCanvasCard(card, cleanup);
+      }).catch(error => { boardNotice(`파일 창을 유지했습니다: ${error.message}`); return false; });
+    }
     if (isCardFullscreen(card)) exitCardFullscreen(card, { restoreRect: false });
     unregisterSourceRefCard(card);
     try {
@@ -6470,6 +6495,7 @@
     card.remove();
     syncOntologyPresentationState();
     markAgendaDirty('close-card', card);
+    return true;
   }
 
   function installCardHeaderFullscreenToggle(card, header) {
@@ -6537,7 +6563,9 @@
     const requestClose = () => {
       if (closing || !root.isConnected) return;
       closing = true;
-      closeCanvasCard(root);
+      const result = closeCanvasCard(root);
+      if (result?.then) void result.finally(() => { closing = false; });
+      else closing = false;
     };
 
     const closeControl = el('span', {
@@ -6607,7 +6635,7 @@
     host.appendChild(root);
     if (options.sourceRef) bindCardSourceRef(root, options.sourceRef);
     markAgendaDirty(options.createDirtyReason || `create-${kind}-window`, root);
-    setActiveEntity(root);
+    if (options.activate !== false) setActiveEntity(root);
 
     const startPanIfNeeded = (ev) => {
       if (!state.panModifier || ev.button !== 0) return false;
@@ -8631,6 +8659,152 @@
         stage.appendChild(el('div', { class: 'egd-ontology-error' }, `온톨로지 그래프 로드 실패: ${error.message || String(error)}`));
       });
 
+    return card;
+  }
+
+  async function requestLocalFilePacket(path, body, requestOptions = {}) {
+    if (!/^\/v1\/files\//.test(path)) throw new Error('허용되지 않은 파일 서비스 경로입니다.');
+    const headers = { 'Content-Type': 'application/json' };
+    for (const [name, value] of Object.entries(requestOptions.headers || {})) {
+      if (name.toLowerCase() !== 'x-egdesk-picker-channel' || typeof value !== 'string') throw new Error('허용되지 않은 파일 채널 헤더입니다.');
+      headers['X-EGDesk-Picker-Channel'] = value;
+    }
+    const controller = new window.AbortController();
+    const timer = window.setTimeout(() => controller.abort(), 15000);
+    try {
+      const response = await fetch(`http://127.0.0.1:39218${path}`, { method: 'POST', signal: controller.signal,
+        headers, body: JSON.stringify(body) });
+      const packet = await response.json();
+      if (!response.ok || packet?.ok !== true) throw Object.assign(new Error(packet?.error || '파일 요청을 완료하지 못했습니다.'), { code: packet?.code, status: response.status });
+      return packet;
+    } catch (error) {
+      if (error.name === 'AbortError') throw new Error('파일 요청의 완료를 확인하지 못했습니다. 편집 내용을 유지하고 상태를 다시 확인하세요.');
+      throw error;
+    } finally { window.clearTimeout(timer); }
+  }
+
+  function pickNativeFileDirectory() {
+    return new Promise((resolve, reject) => {
+      try {
+        const picker = Cc['@mozilla.org/filepicker;1'].createInstance(Ci.nsIFilePicker);
+        picker.init(window.browsingContext, 'EG-Desk에 연결할 폴더', Ci.nsIFilePicker.modeGetFolder);
+        picker.open(result => {
+          try { resolve(result === Ci.nsIFilePicker.returnOK ? picker.file.path : null); }
+          catch (error) { reject(error); }
+        });
+      } catch (error) { reject(error); }
+    });
+  }
+
+  function pickNativeFileSaveFile({ defaultName = 'copy.txt' } = {}) {
+    return new Promise((resolve, reject) => {
+      try {
+        const picker = Cc['@mozilla.org/filepicker;1'].createInstance(Ci.nsIFilePicker);
+        picker.init(window.browsingContext, '작업사본을 새 파일로 저장', Ci.nsIFilePicker.modeSave);
+        picker.defaultString = defaultName;
+        picker.appendFilters(Ci.nsIFilePicker.filterAll);
+        picker.open(result => {
+          try {
+            if (result === Ci.nsIFilePicker.returnCancel) { resolve(null); return; }
+            if (result === Ci.nsIFilePicker.returnReplace || picker.file.exists()) throw new Error('기존 파일은 덮어쓰지 않습니다. 다른 이름을 선택해 주세요.');
+            if (result !== Ci.nsIFilePicker.returnOK) throw new Error('저장 위치 선택을 확인하지 못했습니다.');
+            resolve({ parentPath: picker.file.parent.path, fileName: picker.file.leafName });
+          } catch (error) { reject(error); }
+        });
+      } catch (error) { reject(error); }
+    });
+  }
+
+  function spawnFileCard(options = {}) {
+    if (options.openMode !== 'new' && !options.restore) {
+      const existing = document.querySelector('.egd-file-card');
+      if (existing) { focusCanvasCard(existing); return existing; }
+    }
+    const shell = spawnDeskWindowShell({ id: `egd-file-card-${++cardSeq}`, kind: 'file', className: 'egd-file-card',
+      activate: !options.restore, sourceRef: { kind: 'file-surface', id: `file-view-${chatBindingNonce()}`, scope: 'local-files' },
+      style: { left: '180px', top: '140px', width: '960px', height: '650px' } });
+    const card = shell.root;
+    card.dataset.testid = 'file-card';
+    card.setAttribute('aria-label', '파일 작업 창');
+    const title = el('strong', { class: 'egd-file-card-title' }, '파일');
+    const badge = el('span', { class: 'egd-file-card-state', role: 'status', data: { testid: 'file-card-status' } }, '준비 중');
+    shell.slots.identity.append(title, badge);
+    const notice = el('div', { class: 'egd-file-card-notice', role: 'status', hidden: true, data: { testid: 'file-card-notice' } });
+    const mount = el('div', { class: 'egd-file-card-mount' });
+    shell.slots.content.append(notice, mount);
+    let rootHandle = options.record?.root || null;
+    let view = null;
+    let restoring = !!options.record;
+    let preserveRestoreRecord = false;
+    let rootNeedsReconnect = false;
+    card._fileRecord = cloneJson(options.record || FileCardState.fileCardRecord(null));
+    const publish = snapshot => {
+      if (!card.isConnected || restoring) return;
+      const failedOriginal = preserveRestoreRecord && (!snapshot.fileId || (snapshot.fileId === options.record?.fileId && options.record?.draftId && !snapshot.draftId));
+      if (!failedOriginal) {
+        card._fileRecord = FileCardState.fileCardRecord(rootHandle, snapshot);
+        preserveRestoreRecord = false;
+      }
+      badge.textContent = failedOriginal ? '복구 확인 필요' : rootNeedsReconnect || snapshot.sourceConnection === 'reconnect-required' ? '보관 사본 · 원본 재연결 필요' : snapshot.dirty ? '작업사본 · 미저장' : '파일';
+      title.textContent = rootHandle?.name || '파일';
+      markAgendaDirty('file-view-state', card);
+    };
+    const ready = (async () => {
+      try {
+        const fileModule = ChromeUtils.importESModule('chrome://userchrome/content/EGDeskFileView.sys.mjs');
+        const service = fileModule.createEGDeskFileServiceCallbacks({ request: requestLocalFilePacket });
+        const pickers = fileModule.createEGDeskNativeFilePickers({ service, pickDirectory: pickNativeFileDirectory, pickSaveFile: pickNativeFileSaveFile });
+        view = fileModule.createEGDeskFileView({ document, service,
+          chooseRoot: async () => {
+            const selected = await pickers.chooseRoot();
+            if (selected) { rootHandle = selected; rootNeedsReconnect = false; notice.hidden = true; }
+            return selected;
+          },
+          chooseSaveAs: options => pickers.chooseSaveAs(options),
+          onState: publish,
+        });
+        card._fileView = view;
+        view.element.inert = !!options.record;
+        view.element.setAttribute('aria-busy', String(!!options.record));
+        mount.appendChild(view.element);
+        view.element.dataset.testid = 'file-view';
+        for (const [selector, testid] of Object.entries({
+          '.egdesk-file-connect': 'file-connect-root', '.egdesk-file-tree': 'file-tree', '.egdesk-file-search-input': 'file-search',
+          '.egdesk-file-editor': 'file-editor', '.egdesk-file-review-button': 'file-review',
+          '.egdesk-file-save-button': 'file-save-copy', '.egdesk-file-save-as-button': 'file-save-as', '.egdesk-file-reconnect-button': 'file-reconnect-source',
+        })) view.element.querySelector(selector)?.setAttribute('data-testid', testid);
+        if (options.record) {
+          const result = await FileCardState.restoreFileCard(view, options.record);
+          preserveRestoreRecord = !result.draftRestored && !result.fileRestored && !!(options.record.fileId || options.record.draftId);
+          rootNeedsReconnect = result.errors.some(error => error.scope === 'root');
+          if (result.errors.length) {
+            notice.hidden = false;
+            notice.textContent = result.draftRestored
+              ? '보관된 작업사본을 열었습니다. 원본 폴더는 다시 연결해야 합니다. 원본 권한을 자동으로 복원하지 않았습니다.'
+              : `이전 연결을 확인하지 못했습니다. 폴더를 다시 연결해 주세요. ${result.errors.map(error => error.message).join(' ')}`;
+          }
+          const scroller = view.element.querySelector('.egdesk-file-editor-label:not([hidden]) .egdesk-file-editor, .egdesk-file-viewer:not([hidden])');
+          if (scroller) scroller.scrollTop = options.record.scrollTop || 0;
+          card.dataset.restored = 'true';
+        }
+        restoring = false;
+        publish(view.snapshot());
+      } catch (error) {
+        restoring = false;
+        notice.hidden = false;
+        notice.textContent = `파일 화면을 준비하지 못했습니다: ${error.message}`;
+        badge.textContent = '연결 확인 필요';
+      } finally { if (view) { view.element.inert = false; view.element.setAttribute('aria-busy', 'false'); } }
+    })();
+    const closeGate = FileCardState.createFileCloseGate({
+      dispose: async () => { await ready; return view ? view.close() : true; },
+      onState: status => {
+        card.dataset.closeState = status.status;
+        if (status.status !== 'closed') { notice.hidden = false; notice.textContent = status.message; }
+      },
+    });
+    card._beforeClose = () => closeGate.requestClose();
+    card._fileReady = ready;
     return card;
   }
 
@@ -11355,6 +11529,7 @@
           openBrowserCard: spawnBrowserCard,
           openUrl: openUrlInBrowserCard,
           openSettingsCard: spawnSettingsCard,
+          openFileCard: spawnFileCard,
           openOntologyMapCard: spawnOntologyMapCard,
           openTerminalCard: spawnTerminalCard,
           toggleFullscreen: toggleCardFullscreen,

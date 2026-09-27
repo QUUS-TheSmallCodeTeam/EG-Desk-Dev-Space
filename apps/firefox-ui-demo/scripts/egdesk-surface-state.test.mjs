@@ -7,6 +7,8 @@ import * as Chat from '../overlay/resources/EGDeskChatState.sys.mjs';
 import * as Markdown from '../overlay/resources/EGDeskMarkdown.sys.mjs';
 import * as InputContext from '../overlay/resources/EGDeskInputContext.sys.mjs';
 import * as Briefing from '../overlay/resources/EGDeskBriefingState.sys.mjs';
+import * as FileCard from '../overlay/resources/EGDeskFileCardState.sys.mjs';
+import { createEGDeskFileServiceCallbacks, createEGDeskNativeFilePickers } from '../overlay/resources/EGDeskFileView.sys.mjs';
 import { createDeskRecoveryStore, missingDeskRecoveryViews } from '../overlay/resources/EGDeskRecoveryState.sys.mjs';
 import { createTerminalCloseController, terminalExitEvidence, terminalResponsePacket } from '../overlay/resources/EGDeskTerminalState.sys.mjs';
 
@@ -1350,3 +1352,125 @@ test('production evidence restore requests and verifies the saved range before m
   assert.throws(() => InputContext.inputEvidenceSnapshot(stored, reference), /요청 행 범위/);
 });
 // CORE_REVIEW_REGRESSIONS_END
+
+test('File Card persistence retains opaque root/draft IDs but never caret, credentials or editor text', () => {
+  const record = FileCard.fileCardRecord({ rootId: 'root', directoryId: 'dir', name: 'Selected', displayPath: '/private/path', selectionId: 'one-shot' }, {
+    fileId: 'file', draftId: 'draft', bufferRevision: 2, savedRevision: 1, scrollTop: 50,
+    text: 'do not put managed content in preferences', selectionStart: 4, active: true, password: 'never',
+  });
+  assert.deepEqual(record.root, { rootId: 'root', directoryId: 'dir', name: 'Selected' });
+  assert.equal(record.draftId, 'draft');
+  assert.equal(record.scrollTop, 50);
+  for (const key of ['text', 'selectionStart', 'active', 'password', 'selectionId']) assert.equal(record[key], undefined);
+});
+
+test('File Card can restore managed draft without silently granting an expired folder handle', async () => {
+  const calls = [];
+  const view = {
+    openRoot: async root => { calls.push(['root', root]); throw Object.assign(new Error('Reconnect folder'), { code: 'UNKNOWN_ROOT' }); },
+    restoreDraft: async ids => { calls.push(['draft', ids]); },
+    openFile: () => assert.fail('managed draft restoration must use its no-focus factory path'),
+  };
+  const record = { root: { rootId: 'old-root', directoryId: 'old-dir' }, fileId: 'old-file', draftId: 'saved-draft' };
+  const result = await FileCard.restoreFileCard(view, record);
+  assert.equal(result.rootRestored, false);
+  assert.equal(result.draftRestored, true);
+  assert.equal(result.errors[0].code, 'UNKNOWN_ROOT');
+  assert.deepEqual(calls[1], ['draft', { draftId: 'saved-draft' }]);
+  assert.deepEqual(record.root, { rootId: 'old-root', directoryId: 'old-dir' });
+});
+
+test('File close waits for the factory flush/dispose, coalesces clicks, and exposes a retry on failure', async () => {
+  let complete, attempts = 0;
+  const states = [];
+  const gate = FileCard.createFileCloseGate({ dispose: () => { attempts++; return new Promise(resolve => { complete = resolve; }); }, onState: state => states.push(state) });
+  const first = gate.requestClose(), second = gate.requestClose();
+  assert.equal(first, second);
+  await Promise.resolve();
+  assert.equal(attempts, 1);
+  assert.equal(states.at(-1).status, 'closing');
+  complete(false);
+  assert.equal(await first, false);
+  assert.equal(states.at(-1).status, 'blocked');
+  const retry = gate.requestClose();
+  await Promise.resolve();
+  assert.equal(attempts, 2);
+  complete(true);
+  assert.equal(await retry, true);
+  assert.equal(await gate.requestClose(), true);
+  assert.equal(attempts, 2);
+});
+
+test('File close synchronous failures also release the gate for a working retry', async () => {
+  let fail = true;
+  const gate = FileCard.createFileCloseGate({ dispose: () => { if (fail) throw new Error('write failed'); return true; } });
+  assert.equal(await gate.requestClose(), false);
+  fail = false;
+  assert.equal(await gate.requestClose(), true);
+});
+
+test('actual outer Card close leaves the window and cleanup intact until file flush succeeds', async () => {
+  const body = surfaceSource.match(/  function closeCanvasCard\(card, cleanup\) \{([\s\S]*?)\n  \}/)?.[1];
+  assert.ok(body);
+  const close = compileFunction(body, ['card', 'cleanup', 'closeCanvasCard', 'isCardFullscreen', 'exitCardFullscreen', 'unregisterSourceRefCard', 'state', 'setActiveEntity', 'syncOntologyPresentationState', 'markAgendaDirty', 'boardNotice', 'console', 'TAG']);
+  let removed = 0, cleaned = 0, allowed = false;
+  const card = { id: 'file-card', _beforeClose: async () => allowed, _cleanup: () => cleaned++, remove: () => removed++ };
+  const state = { activeEntityId: card.id };
+  const run = (target, cleanup) => close(target, cleanup, run, () => false, () => {}, () => {}, state, () => {}, () => {}, () => {}, () => {}, { warn() {} }, 'test');
+  assert.equal(await run(card), false);
+  assert.equal(removed, 0);
+  assert.equal(cleaned, 0);
+  allowed = true;
+  assert.equal(await run(card), true);
+  assert.equal(removed, 1);
+  assert.equal(cleaned, 1);
+});
+
+test('File UI transport forwards only the real picker nonce, not Engine identity or origin overrides', async () => {
+  const body = surfaceSource.match(/  async function requestLocalFilePacket\(path, body, requestOptions = \{\}\) \{([\s\S]*?)\n  \}/)?.[1];
+  assert.ok(body);
+  const request = compileFunction(`return (async () => {${body}\n})();`, ['path', 'body', 'requestOptions', 'window', 'fetch']);
+  const window = { AbortController, setTimeout: () => 1, clearTimeout() {} };
+  const calls = [];
+  const fetch = async (url, options) => { calls.push({ url, options }); return { ok: true, status: 200, json: async () => ({ ok: true, result: { rootId: 'opaque' } }) }; };
+  const result = await request('/v1/files/roots', { selectionId: 'selected-by-helper' }, { headers: { 'X-EGDesk-Picker-Channel': 'actual-nonce' } }, window, fetch);
+  assert.equal(result.result.rootId, 'opaque');
+  assert.equal(calls[0].options.headers['X-EGDesk-Picker-Channel'], 'actual-nonce');
+  assert.equal(calls[0].options.headers.Origin, undefined);
+  assert.equal(calls[0].options.headers['Sec-Fetch-Site'], undefined);
+  assert.equal(JSON.parse(calls[0].options.body).ownerScope, undefined);
+  await assert.rejects(() => request('/v1/files/roots', {}, { headers: { Origin: 'null' } }, window, fetch), /허용되지 않은 파일 채널/);
+});
+
+test('production native File picker wrapper uses channel/begin/OS/complete/roots with one-shot IDs', async () => {
+  const events = [];
+  const service = createEGDeskFileServiceCallbacks({ request: async (path, body, options) => {
+    events.push({ path, body, headers: options?.headers });
+    if (path.endsWith('/channel')) return { ok: true, result: { token: 'channel-from-helper', expiresAt: Date.now() + 10000 } };
+    assert.equal(options.headers['X-EGDesk-Picker-Channel'], 'channel-from-helper');
+    if (path.endsWith('/begin')) return { ok: true, result: { requestId: 'request-from-helper' } };
+    if (path.endsWith('/complete')) return { ok: true, result: { selectionId: 'selection-from-helper' } };
+    assert.equal(path, '/v1/files/roots');
+    assert.deepEqual(body, { selectionId: 'selection-from-helper' });
+    return { ok: true, result: { rootId: 'root', directoryId: 'directory', name: 'Fixture' } };
+  } });
+  const picker = createEGDeskNativeFilePickers({ service, pickDirectory: async () => { events.push({ nativePicker: true }); return '/fixture/selected'; } });
+  assert.deepEqual(await picker.chooseRoot(), { rootId: 'root', directoryId: 'directory', name: 'Fixture' });
+  assert.deepEqual(events.map(event => event.path || 'native-picker'), ['/v1/files/picker/channel', '/v1/files/picker/begin', 'native-picker', '/v1/files/picker/complete', '/v1/files/roots']);
+  assert.deepEqual(events[3].body, { requestId: 'request-from-helper', absolutePath: '/fixture/selected' });
+});
+
+test('native Save As callback cancels replacement instead of authorizing overwrite', async () => {
+  const body = surfaceSource.match(/  function pickNativeFileSaveFile\(\{ defaultName = 'copy.txt' \} = \{\}\) \{([\s\S]*?)\n  \}/)?.[1];
+  assert.ok(body);
+  const choose = compileFunction(body, ['defaultName', 'Cc', 'Ci', 'window']);
+  let result = 2;
+  const picker = { init() {}, appendFilters() {}, file: { exists: () => result === 2, parent: { path: '/fixture/selected' }, leafName: 'copy.txt' }, open: callback => callback(result) };
+  const Cc = { '@mozilla.org/filepicker;1': { createInstance: () => picker } };
+  const Ci = { nsIFilePicker: { returnOK: 0, returnCancel: 1, returnReplace: 2, modeSave: 1, filterAll: 1 } };
+  await assert.rejects(() => choose('copy.txt', Cc, Ci, {}), /기존 파일은 덮어쓰지 않습니다/);
+  result = 1;
+  assert.equal(await choose('copy.txt', Cc, Ci, {}), null);
+  result = 0;
+  assert.deepEqual(await choose('copy.txt', Cc, Ci, {}), { parentPath: '/fixture/selected', fileName: 'copy.txt' });
+});
