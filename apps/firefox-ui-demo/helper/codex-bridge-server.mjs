@@ -9,6 +9,12 @@ import { TerminalSessionRegistry, terminalResponseStatus } from './terminal-sess
 import { chatError, publicText } from './codex-chat-values.mjs'
 import { randomBytes } from 'node:crypto'
 import * as os from 'node:os'
+import path from 'node:path'
+import { ImmutableContextStore, appDataDirectory } from './egdesk-context-store.mjs'
+import { NativeReaderClient } from './egdesk-native-reader.mjs'
+import { ContextRuntime } from './egdesk-context-runtime.mjs'
+import { createContextHttpHandler } from './egdesk-context-http.mjs'
+import { inspectNativeCapabilities, resolveCodexExecutable, NATIVE_SCHEMA_VERSION } from './egdesk-native-capabilities.mjs'
 
 const BRIDGE_PORT = 39218
 const APP_SERVER_PORT = 39219
@@ -24,6 +30,7 @@ let appServerReady = false
 let reconnectTimer = null
 let loginPollTimer = null
 let rpc = null
+let nativeCapabilities = { executable: null, version: null, schemaVersion: NATIVE_SCHEMA_VERSION, schemaMatch: false, experimentalApi: true, dynamicTools: false, readerReadOnly: false }
 
 const authState = {
   isLoggedIn: false,
@@ -76,20 +83,30 @@ function emitAuthLifecycle(phase, details = {}) {
   })
 }
 
+const nativeRespond = (id, result, error) => {
+  if (!rpc) throw chatError('BRIDGE_OFFLINE', 'Codex app-server is offline', 503)
+  rpc.respond(id, result, error)
+}
+const contextStore = new ImmutableContextStore({
+  dataDir: appDataDirectory(),
+  allowedRoots: process.env.EGDESK_CONTEXT_ROOTS ? process.env.EGDESK_CONTEXT_ROOTS.split(path.delimiter).filter(Boolean) : [process.cwd()],
+})
+const nativeReader = new NativeReaderClient({ request: (method, params) => appServerRequest(method, params), respond: nativeRespond, getOwnerKey: () => publicAuthIdentityKey(authState) })
+const contexts = new ContextRuntime({ store: contextStore, reader: nativeReader, getOwnerKey: () => publicAuthIdentityKey(authState), schemaReady: () => nativeCapabilities.schemaMatch && appServerReady })
 const chat = new CodexChatRuntime({
   request: (method, params) => appServerRequest(method, params),
-  respond: (id, result, error) => {
-    if (!rpc) throw chatError('BRIDGE_OFFLINE', 'Codex app-server is offline', 503)
-    rpc.respond(id, result, error)
-  },
+  respond: nativeRespond,
+  contexts,
   emit: event => broadcast(event, 2),
   emitLegacy: event => broadcast(event, 1),
 })
-const handleChatHttp = createChatHttpHandler(chat, async () => {
+const ensureChatAuth = async () => {
   chat.assertReady()
   await refreshAccountState()
   if (!authState.isLoggedIn) throw chatError('LOGIN_REQUIRED', 'Codex ChatGPT login is required', 401)
-})
+}
+const handleChatHttp = createChatHttpHandler(chat, ensureChatAuth)
+const handleContextHttp = createContextHttpHandler(contexts, ensureChatAuth)
 
 function authSnapshot() {
   return {
@@ -250,7 +267,9 @@ function scheduleAppServerReconnect() {
 
 function spawnAppServer() {
   if (appServerProcess && appServerProcess.exitCode == null && !appServerProcess.killed) return
-  const child = spawn(process.env.EGDESK_CODEX_BIN || 'codex', ['app-server', '--listen', APP_SERVER_WS_URL], {
+  const executable = resolveCodexExecutable()
+  nativeCapabilities = inspectNativeCapabilities({ executable })
+  const child = spawn(executable, ['app-server', '--listen', APP_SERVER_WS_URL], {
     cwd: process.cwd(),
     env: process.env,
     stdio: ['ignore', 'pipe', 'pipe'],
@@ -274,7 +293,11 @@ function spawnAppServer() {
 
 async function connectToAppServer() {
   if (appServerSocket && [WebSocket.OPEN, WebSocket.CONNECTING].includes(appServerSocket.readyState)) return
-  spawnAppServer()
+  try { spawnAppServer() } catch (error) {
+    updateAuthState({ statusText: publicText(error.message, 1000) })
+    scheduleAppServerReconnect()
+    return
+  }
   let socket
   try { socket = new WebSocket(APP_SERVER_WS_URL) } catch {
     scheduleAppServerReconnect()
@@ -283,11 +306,12 @@ async function connectToAppServer() {
   appServerSocket = socket
   const connection = new AppServerRpc({
     send: payload => socket.send(payload),
+    experimentalApi: true,
     onNotification: message => {
       handleAppServerNotification(message)
-      void chat.handleNotification(message)
+      if (!nativeReader.handleNotification(message)) void chat.handleNotification(message)
     },
-    onRequest: message => { void chat.handleServerRequest(message) },
+    onRequest: message => { if (!nativeReader.handleServerRequest(message)) void chat.handleServerRequest(message) },
   })
   rpc = connection
   socket.onopen = async () => {
@@ -481,7 +505,7 @@ const bridgeServer = createServer(async (req, res) => {
   }
 
   if (req.method === 'GET' && route === '/health') {
-    sendJson(res, 200, { ok: true, port: BRIDGE_PORT, appServerReady })
+    sendJson(res, 200, { ok: true, port: BRIDGE_PORT, appServerReady, native: nativeCapabilities })
     return
   }
 
@@ -493,11 +517,13 @@ const bridgeServer = createServer(async (req, res) => {
       protocolVersion: BRIDGE_PROTOCOL_VERSION,
       provider: PROVIDER_ID,
       appServerReady,
+      native: nativeCapabilities,
       auth: authSnapshot(),
       chat: chat.snapshot(),
       capabilities: {
         auth: ['status', 'start', 'cancel', 'signout'],
         chat: ['send', 'stream', 'resume', 'interrupt', 'approvals', 'typed-activity', 'artifact-refs'],
+        context: nativeCapabilities.schemaMatch ? ['capture', 'immutable-inspect', 'native-dynamic-tools', 'smart-read', 'read-only-reader', 'answer-briefing'] : ['capture', 'immutable-inspect'],
       },
     })
     return
@@ -576,6 +602,7 @@ const bridgeServer = createServer(async (req, res) => {
     return
   }
 
+  if (await handleContextHttp(req, res, url)) return
   if (await handleChatHttp(req, res, url)) return
 
   // ── Terminal endpoints ──

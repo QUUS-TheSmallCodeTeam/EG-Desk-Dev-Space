@@ -43,6 +43,7 @@ function safeItem(item) {
       server: publicText(item.server, 120), tool: publicText(item.tool, 120),
       durationMs: Number.isFinite(item.durationMs) ? item.durationMs : null,
     }
+    case 'dynamicToolCall': return { ...base, status: ITEM_STATUS.has(item.status) ? item.status : 'inProgress', tool: publicText(item.tool, 120) }
     default: return null
   }
 }
@@ -76,13 +77,16 @@ function cleanNotification(method, p) {
     plan: Array.isArray(p.plan) ? p.plan.slice(0, 40).map(step => ({ step: publicText(step.step, 1000), status: ['pending', 'inProgress', 'completed'].includes(step.status) ? step.status : 'pending' })) : [],
   }
   if (method === 'error') return { ...base, error: publicError(p.error, 'TURN_ERROR', 'codex'), willRetry: p.willRetry === true }
+  if (method === 'thread/tokenUsage/updated') return { ...base, usage: { modelContextWindow: Number.isFinite(p.tokenUsage?.modelContextWindow) ? p.tokenUsage.modelContextWindow : null, usedTokens: Number.isFinite(p.tokenUsage?.last?.totalTokens) ? p.tokenUsage.last.totalTokens : null } }
   if (method === 'serverRequest/resolved') return { ...base, requestId: p.requestId }
   return null
 }
 
 export class CodexChatRuntime {
-  constructor({ request, respond, emit = () => {}, emitLegacy = () => {}, verifyFile = verifyLocalFile, now = Date.now }) {
+  constructor({ request, respond, emit = () => {}, emitLegacy = () => {}, verifyFile = verifyLocalFile, now = Date.now, contexts = null }) {
     Object.assign(this, { request, respond, emitEvent: emit, emitLegacy, verifyFile, now })
+    this.contexts = contexts
+    if (contexts) contexts.runtime = this
     this.streamId = randomUUID()
     this.seq = 0
     this.connection = 'offline'
@@ -117,6 +121,7 @@ export class CodexChatRuntime {
   }
 
   reset() {
+    this.contexts?.reset()
     this.epoch++
     this.streamId = randomUUID()
     this.seq = 0
@@ -136,6 +141,7 @@ export class CodexChatRuntime {
   setConnection(ready, { processLost = false } = {}) {
     this.connection = ready ? 'ready' : 'offline'
     if (ready) return
+    this.contexts?.disconnect?.({ processLost })
     this.epoch++
     this.loadedThreads.clear()
     for (const run of this.runs.values()) {
@@ -228,6 +234,7 @@ export class CodexChatRuntime {
       message: body.message, conversationId: body.conversationId, clientThreadId: body.clientThreadId || body.thread?.id,
       cwd: body.cwd, model: body.model, effort: body.effort, profileEnabled: body.profileEnabled === true,
       systemPrompt: body.profileEnabled === true ? body.systemPrompt : undefined,
+      contextSnapshotIds: body.contextSnapshotIds, contextCapabilities: body.contextCapabilities, attachments: body.attachments,
     })).digest('hex')
     const previous = this.requests.get(requestId)
     if (previous) {
@@ -288,11 +295,15 @@ export class CodexChatRuntime {
   async startTurn(body, context) {
     const epoch = this.epoch
     const overrides = this.threadOverrides(body)
+    const preparedContext = await this.contexts?.prepare(body)
+    if (epoch !== this.epoch) throw chatError('ACCOUNT_CHANGED', 'Codex account or connection changed', 409)
     const effort = body.effort
     // CLI 0.156.1 defines ReasoningEffort as a non-empty model-advertised string.
     if (effort !== undefined && (!idText(effort) || !effort.trim())) throw chatError('INVALID_EFFORT', 'Invalid reasoning effort')
     let cid = context.conversationId
     if (cid) {
+      await this.contexts?.requireThread(cid, preparedContext)
+      if (epoch !== this.epoch) throw chatError('ACCOUNT_CHANGED', 'Codex account or connection changed', 409)
       if (this.uncertainThreads.has(cid)) throw chatError('RESUME_REQUIRED', 'Resume the conversation before retrying an uncertain turn', 409)
       if (!this.loadedThreads.has(cid)) await this.restoreThread(cid, context.clientThreadId)
       if ([...this.runs.values()].some(run => run.conversationId === cid && !TERMINAL.has(run.status))) {
@@ -320,11 +331,14 @@ export class CodexChatRuntime {
         await this.restoreThread(cid, context.clientThreadId, overrides)
       }
     } else {
+      const contextTools = this.contexts?.specs() || []
+      if (contextTools.length) overrides.dynamicTools = contextTools
       const result = await this.request('thread/start', overrides)
       if (epoch !== this.epoch) throw chatError('ACCOUNT_CHANGED', 'Codex account changed', 409)
       cid = result?.thread?.id
       this.rememberThread(cid, result, context.clientThreadId)
       context.conversationId = cid
+      if (contextTools.length) await this.contexts.registerThread(cid)
     }
     if (epoch !== this.epoch) throw chatError('ACCOUNT_CHANGED', 'Codex account changed', 409)
     if ([...this.runs.values()].some(run => run.conversationId === cid && !TERMINAL.has(run.status))) {
@@ -338,6 +352,7 @@ export class CodexChatRuntime {
         threadId: cid,
         input: [{ type: 'text', text: body.message, text_elements: [] }],
         clientUserMessageId: context.requestId,
+        ...(preparedContext ? { additionalContext: this.contexts.additionalContext(preparedContext) } : {}),
         ...(overrides.cwd ? { cwd: overrides.cwd } : {}),
         ...(overrides.model ? { model: overrides.model } : {}),
         ...(effort !== undefined ? { effort } : {}),
@@ -345,6 +360,8 @@ export class CodexChatRuntime {
       if (epoch !== this.epoch) throw chatError('ACCOUNT_CHANGED', 'Codex account changed', 409)
       const run = this.ensureRun(cid, result?.turn?.id, context)
       if (!run) throw chatError('INVALID_TURN_RESPONSE', 'Codex did not return a turn ID', 502)
+      await this.contexts?.bindRun(run, preparedContext)
+      if (epoch !== this.epoch) throw chatError('ACCOUNT_CHANGED', 'Codex account or connection changed', 409)
       // Notifications can precede the RPC response. Only the returned turn ID
       // may inherit this request's correlation; other turns remain unclaimed.
       while (pending.buffer.length) await this.apply(pending.buffer.shift())
@@ -395,6 +412,8 @@ export class CodexChatRuntime {
         run.error = turn.error
         run.truncated ||= Boolean(turn.truncated)
         run.historyComplete = retainedComplete || turn.itemsView === 'full'
+        await this.contexts?.restoreRun(run)
+        if (epoch !== this.epoch) throw chatError('CONTEXT_CHANGED', 'Codex connection or account changed', 409)
       }
       // Live events/approval requests may be delivered before the resume result.
       // Hydrate first, then apply these newer events to the matching native run.
@@ -438,6 +457,7 @@ export class CodexChatRuntime {
     this.assertReady()
     const run = this.findRun(body)
     if (TERMINAL.has(run.status)) return { accepted: false, alreadyTerminal: true, conversationId: run.conversationId, runId: run.runId, status: run.status }
+    this.contexts?.cancelRun(run)
     if (run.stopRequested) return { accepted: true, stopRequested: true, conversationId: run.conversationId, runId: run.runId }
     await this.request('turn/interrupt', { threadId: run.conversationId, turnId: run.runId })
     run.stopRequested = true
@@ -474,6 +494,13 @@ export class CodexChatRuntime {
 
   handleServerRequest(message) {
     const p = message.params || {}
+    if (message.method === 'item/tool/call') {
+      if (typeof p.tool !== 'string' || typeof p.callId !== 'string' || JSON.stringify(p.arguments ?? {}).length > 65536) {
+        this.respond(message.id, null, { code: -32602, message: 'Invalid dynamic tool request' })
+        return Promise.resolve()
+      }
+      return this.enqueue({ method: 'dynamic', rpcId: message.id, threadId: idText(p.threadId), turnId: idText(p.turnId), callId: p.callId, tool: p.tool, namespace: p.namespace || null, arguments: p.arguments })
+    }
     const event = {
       method: 'approval', nativeMethod: message.method, rpcId: message.id,
       threadId: idText(p.threadId), turnId: idText(p.turnId), itemId: idText(p.itemId),
@@ -496,7 +523,7 @@ export class CodexChatRuntime {
           const expendable = pending.buffer.findIndex(entry => entry.method.endsWith('/delta'))
           pending.buffer.splice(expendable < 0 ? 0 : expendable, 1)
           pending.buffer.push(event)
-        } else if (event.method === 'approval') this.respond(event.rpcId, null, { code: -32000, message: 'Bridge event buffer is full' })
+        } else if (event.method === 'approval' || event.method === 'dynamic') this.respond(event.rpcId, null, { code: -32000, message: 'Bridge event buffer is full' })
       }
       return Promise.resolve()
     }
@@ -522,14 +549,20 @@ export class CodexChatRuntime {
     }
     const run = this.ensureRun(event.threadId, event.turnId)
     if (!run) {
-      if (event.method === 'approval') this.respond(event.rpcId, null, { code: -32601, message: 'No matching EG-Desk run' })
+      if (event.method === 'approval' || event.method === 'dynamic') this.respond(event.rpcId, null, { code: -32601, message: 'No matching EG-Desk run' })
       return
     }
     if (event.method === 'approval') return this.receiveApproval(run, event)
+    if (event.method === 'dynamic') {
+      if (!this.contexts || event.namespace) this.respond(event.rpcId, null, { code: -32601, message: 'Unsupported dynamic tool namespace' })
+      else void this.contexts.dispatch(run, event) // Never block the notification queue on a child Reader.
+      return
+    }
     if (event.method === 'turn/completed') return this.finish(run, event.turn)
     if (TERMINAL.has(run.status)) return
     switch (event.method) {
       case 'turn/started': return
+      case 'thread/tokenUsage/updated': run.contextUsage = { ...event.usage, deliveryDebt: 0 }; this.seq++; return
       case 'item/started': return this.applyItem(run, event.item, false)
       case 'item/completed': return this.applyItem(run, { ...event.item, completionConfirmed: true }, true)
       case 'item/agentMessage/delta': return this.messageDelta(run, event.itemId, event.delta)
@@ -695,6 +728,10 @@ export class CodexChatRuntime {
       activity.status = item.status
       activity.title = `${item.server} / ${item.tool}`
       activity.detail = { server: item.server, tool: item.tool, durationMs: item.durationMs }
+    } else if (item.type === 'dynamicToolCall') {
+      activity.status = item.status
+      activity.title = item.tool
+      activity.detail = { tool: item.tool }
     } else if (item.type === 'reasoning') {
       activity.kind = 'summary'
       activity.title = 'Summary'
@@ -741,6 +778,7 @@ export class CodexChatRuntime {
     }
     if (epoch !== this.epoch) return
     run.status = turn.status
+    this.contexts?.cancelRun(run)
     run.stopConfirmed = turn.status === 'interrupted'
     run.error = turn.error
     for (const message of run.messages) if (message.status === 'streaming') {

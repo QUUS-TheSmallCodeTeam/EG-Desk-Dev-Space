@@ -20,12 +20,12 @@ export function setBridgeCors(req, res) {
   res.setHeader('Vary', 'Origin')
 }
 
-export async function readJsonBody(req) {
+export async function readJsonBody(req, { maxBytes = 65536 } = {}) {
   let size = 0
   const chunks = []
   for await (const chunk of req) {
     size += chunk.length
-    if (size > 65536) throw chatError('BODY_TOO_LARGE', 'Request body exceeds 64 KiB', 413)
+    if (size > maxBytes) throw chatError('BODY_TOO_LARGE', `Request body exceeds ${maxBytes} bytes`, 413)
     chunks.push(chunk)
   }
   if (!size) return {}
@@ -59,7 +59,7 @@ export function createChatHttpHandler(chat, ensureAuth) {
     if (req.method !== 'POST' || !routes.has(url.pathname)) return false
     let body = {}
     try {
-      body = await readJsonBody(req)
+      body = await readJsonBody(req, { maxBytes: url.pathname === '/chat/send' ? 2 * 1024 * 1024 : 65536 })
       // Reject explicit invalid context before even the authentication RPCs.
       if (url.pathname === '/chat/send') validateChatCwd(body)
       // Existing correlated stop/denial is fail-safe even if account lookup is

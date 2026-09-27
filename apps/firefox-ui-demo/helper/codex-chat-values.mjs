@@ -8,19 +8,20 @@ export const MAX_TEXT = 20000
 const argumentValue = String.raw`(?:(?:"(?:\\.|[^"\\])*(?:"|$)|'[^']*(?:'|$)|\\[\s\S]|[^\s;&|"']+)+)`
 const credentialArgument = new RegExp(String.raw`(^|[\s(])((?:--(?:password|passwd|pwd|password-file|token|access[-_]token|refresh[-_]token|session[-_]token|bearer[-_]token|private[-_]token|api[-_]?key|secret|client[-_]secret|secret[-_]access[-_]key|access[-_]key(?:[-_]id)?|authorization|auth|user|proxy-user|cookie)|-[uUp])(?:\s*=\s*|\s+))${argumentValue}`, 'gi')
 const attachedCredentialArgument = new RegExp(String.raw`(^|[\s(])(-[uUp])(${argumentValue})`, 'g')
+const masked = (match, prefix = '', label = '[REDACTED]') => prefix + label + (match.slice(prefix.length).match(/\r\n|\r|\n/g) || []).join('')
 
 // No raw tool arguments/results, diffs, environment or reasoning enter public state.
 // Text that is intentionally public still gets common credential patterns redacted.
 export function publicText(value, limit = MAX_TEXT) {
   if (typeof value !== 'string') return ''
   return value
-    .replace(credentialArgument, '$1$2[REDACTED]')
-    .replace(attachedCredentialArgument, '$1$2[REDACTED]')
+    .replace(credentialArgument, (match, lead, flag) => masked(match, lead + flag))
+    .replace(attachedCredentialArgument, (match, lead, flag) => masked(match, lead + flag))
     .replace(/(?<![a-z0-9+.-])([a-z][a-z0-9+.-]*:\/\/)[^\s/@]+:[^\s/@]+@/gi, '$1[REDACTED]@')
-    .replace(/(\b(?:proxy-)?authorization\s*[:=]\s*)Digest\s+[^"'\r\n]*/gi, '$1[REDACTED]')
-    .replace(/(\b(?:proxy-)?authorization\s*[:=]\s*)(?:(?:basic|bearer|token|negotiate)\s+)?(?:"[^"\n]*"|'[^'\n]*'|[^\s"']+)/gi, '$1[REDACTED]')
+    .replace(/(\b(?:proxy-)?authorization\s*[:=]\s*)Digest\s+[^"'\r\n]*/gi, (match, prefix) => masked(match, prefix))
+    .replace(/(\b(?:proxy-)?authorization\s*[:=]\s*)(?:(?:basic|bearer|token|negotiate)\s+)?(?:"[^"\n]*"|'[^'\n]*'|[^\s"']+)/gi, (match, prefix) => masked(match, prefix))
     .replace(/(\b(?:set-cookie|cookie)\s*:\s*)[^"'\r\n]*/gi, '$1[REDACTED]')
-    .replace(/-----BEGIN [^-]*PRIVATE KEY-----[\s\S]*?(?:-----END [^-]*PRIVATE KEY-----|$)/g, '[REDACTED PRIVATE KEY]')
+    .replace(/-----BEGIN [^-]*PRIVATE KEY-----[\s\S]*?(?:-----END [^-]*PRIVATE KEY-----|$)/g, match => masked(match, '', '[REDACTED PRIVATE KEY]'))
     .replace(/\b(?:sk-[A-Za-z0-9_-]+|gh[pousr]_[A-Za-z0-9_]+|github_pat_[A-Za-z0-9_]+|xox[baprs]-[A-Za-z0-9-]+)\b/g, '[REDACTED]')
     .replace(/\beyJ[A-Za-z0-9_-]+\.[A-Za-z0-9_-]+\.[A-Za-z0-9_-]+\b/g, '[REDACTED]')
     .replace(/\b(Bearer\s+)\S+/gi, '$1[REDACTED]')

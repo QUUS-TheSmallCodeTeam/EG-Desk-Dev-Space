@@ -1,10 +1,11 @@
 // Transport-independent JSON-RPC. Importing this module never starts Codex.
 export class AppServerRpc {
-  constructor({ send, onNotification = () => {}, onRequest = () => {}, timeoutMs = 30000 }) {
+  constructor({ send, onNotification = () => {}, onRequest = () => {}, timeoutMs = 30000, experimentalApi = false }) {
     this.send = send
     this.onNotification = onNotification
     this.onRequest = onRequest
     this.timeoutMs = timeoutMs
+    this.experimentalApi = experimentalApi
     this.pending = new Map()
     this.nextId = 1
     this.ready = false
@@ -14,7 +15,7 @@ export class AppServerRpc {
   async initialize() {
     await this.request('initialize', {
       clientInfo: { name: 'egdesk-firefox-bridge', version: '0.2.0' },
-      capabilities: { experimentalApi: false },
+      capabilities: { experimentalApi: this.experimentalApi },
     }, true)
     if (this.closed) throw new Error('Codex app-server disconnected')
     this.send(JSON.stringify({ method: 'initialized', params: {} }))

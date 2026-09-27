@@ -1,0 +1,143 @@
+import test from 'node:test'
+import assert from 'node:assert/strict'
+import { NativeReaderClient } from './egdesk-native-reader.mjs'
+import { hashContent } from './egdesk-context-store.mjs'
+
+function nativeHarness(options = {}) {
+  const calls = [], replies = []
+  let thread = 0, turn = 0, owner = 'owner-a'
+  const reader = new NativeReaderClient({
+    getOwnerKey: () => owner, timeoutMs: options.timeoutMs || 1000,
+    respond: (...reply) => replies.push(reply),
+    request: async (method, params) => {
+      calls.push({ method, params })
+      if (method === 'mcpServerStatus/list') return { data: params.threadId === 'parent' ? [{ name: 'external', pluginId: 'plugin@example', tools: { write: {} } }] : options.externalTools ? [{ name: 'unwanted', tools: { write: {} } }] : [], nextCursor: null }
+      if (method === 'thread/start') return { thread: { id: `reader-${++thread}` }, sandbox: { type: options.unsafeSandbox ? 'workspaceWrite' : 'readOnly' } }
+      if (method === 'thread/unsubscribe') return { status: 'unsubscribed' }
+      if (method === 'turn/interrupt') return {}
+      if (method !== 'turn/start') throw new Error(method)
+      const id = `reader-turn-${++turn}`
+      if (options.start) return options.start({ reader, method, params, id })
+      const input = JSON.parse(params.input[0].text)
+      reader.handleNotification({ method: 'item/reasoning/textDelta', params: { threadId: params.threadId, turnId: id, delta: 'RAW_CHAIN_NOT_ALLOWED' } })
+      reader.handleNotification({ method: 'item/completed', params: { threadId: params.threadId, turnId: id, item: { type: 'agentMessage', text: JSON.stringify({ summary: 'A source-reading result.', quotes: [options.badQuote ? 'not-in-source' : input.sourceText.slice(0, 12)], structure: ['Visible content'] }) } } })
+      reader.handleNotification({ method: 'turn/completed', params: { threadId: params.threadId, turn: { id, status: options.failed ? 'failed' : 'completed' } } })
+      return { turn: { id, status: 'inProgress', items: [] } }
+    },
+  })
+  const input = { ownerKey: owner, parentThreadId: 'parent', readerSessionId: 'logical-reader', sourceId: 'source', sourceHash: hashContent('Original source evidence.'), cwd: '/readonly-scratch', intent: 'Read source facts only', text: 'Original source evidence.', range: { startOffset: 0, endOffset: 25 }, maxOutputChars: 1000 }
+  return { reader, calls, replies, input, changeOwner: next => { owner = next } }
+}
+
+test('actual native Reader adapter requests read-only/no-network/no tools and handles events before RPC acknowledgement', async () => {
+  const h = nativeHarness()
+  const result = await h.reader.read(h.input)
+  const start = h.calls.find(call => call.method === 'thread/start').params
+  assert.equal(start.ephemeral, true)
+  assert.equal(start.sandbox, 'read-only')
+  assert.equal(start.approvalPolicy, 'never')
+  assert.equal(start.config.features.apps, false)
+  assert.equal(start.config.features.shell_tool, false)
+  assert.equal(start.config.features.hooks, false)
+  assert.equal(start.config.features.multi_agent, false)
+  assert.equal(start.config.mcp_servers.external.enabled, false)
+  assert.deepEqual(start.dynamicTools, [])
+  const turn = h.calls.find(call => call.method === 'turn/start').params
+  assert.deepEqual(turn.sandboxPolicy, { type: 'readOnly', networkAccess: false })
+  assert.equal(result.inputPayload.text, turn.input[0].text)
+  assert.equal(result.inputPayload.hash, hashContent(turn.input[0].text))
+  assert.equal(result.nativeTurnId, 'reader-turn-1')
+  assert.ok(!JSON.stringify(result).includes('RAW_CHAIN_NOT_ALLOWED'))
+})
+
+test('Reader refinement reuses a bounded session and re-enters original source, not only previous summaries', async () => {
+  const h = nativeHarness()
+  const first = await h.reader.read(h.input)
+  const second = await h.reader.read({ ...h.input, intent: 'Read the same source from another angle' })
+  assert.equal(first.nativeThreadId, second.nativeThreadId)
+  const turns = h.calls.filter(call => call.method === 'turn/start')
+  assert.equal(JSON.parse(turns[1].params.input[0].text).sourceText, h.input.text)
+  const third = await h.reader.read(h.input)
+  assert.notEqual(third.nativeThreadId, first.nativeThreadId)
+})
+
+test('Reader cannot start a model turn when native isolation is unverifiable', async () => {
+  for (const options of [{ externalTools: true }, { unsafeSandbox: true }]) {
+    const h = nativeHarness(options)
+    await assert.rejects(h.reader.read(h.input), e => e.code === 'READER_ISOLATION_UNAVAILABLE')
+    assert.equal(h.calls.some(call => call.method === 'turn/start'), false)
+  }
+})
+
+test('failed Reader and fabricated source quotes never become successful packets', async () => {
+  const failed = nativeHarness({ failed: true })
+  await assert.rejects(failed.reader.read(failed.input), e => e.code === 'READER_FAILED')
+  const invalid = nativeHarness({ badQuote: true })
+  await assert.rejects(invalid.reader.read(invalid.input), e => e.code === 'READER_INVALID_CITATION')
+})
+
+test('cancel while native turn is starting interrupts the exact returned child ID and returns no result', async () => {
+  let release, started
+  const ready = new Promise(resolve => { started = resolve })
+  const h = nativeHarness({ start: ({ id }) => { started(); return new Promise(resolve => { release = () => resolve({ turn: { id, status: 'inProgress' } }) }) } })
+  const controller = new AbortController()
+  const pending = h.reader.read({ ...h.input, signal: controller.signal })
+  pending.catch(() => {})
+  await ready
+  controller.abort()
+  release()
+  await assert.rejects(pending, e => e.code === 'READ_CANCELLED')
+  assert.ok(h.calls.some(call => call.method === 'turn/interrupt' && call.params.threadId === 'reader-1' && call.params.turnId === 'reader-turn-1'))
+})
+
+test('Reader rejects account changes before any native work', async () => {
+  const h = nativeHarness()
+  h.changeOwner('owner-b')
+  await assert.rejects(h.reader.read(h.input), e => e.code === 'ACCOUNT_CHANGED')
+  assert.equal(h.calls.length, 0)
+})
+
+test('unexpected Reader tool execution is interrupted, not approved or mislabeled as reading success', async () => {
+  const h = nativeHarness({ start: ({ reader, params, id }) => {
+    reader.handleNotification({ method: 'item/started', params: { threadId: params.threadId, turnId: id, item: { type: 'commandExecution' } } })
+    return { turn: { id, status: 'inProgress' } }
+  } })
+  await assert.rejects(h.reader.read(h.input), e => e.code === 'READER_SCOPE_VIOLATION')
+  assert.ok(h.calls.some(call => call.method === 'turn/interrupt'))
+  assert.equal(h.replies.length, 0)
+})
+
+test('aborted Reader is quarantined until actual native terminal receipt; interrupt acknowledgement alone is insufficient', async () => {
+  let ready
+  const started = new Promise(resolve => { ready = resolve })
+  let first = true
+  const h = nativeHarness({ start: ({ reader, params, id }) => {
+    if (first) { first = false; ready(); return { turn: { id, status: 'inProgress' } } }
+    const source = JSON.parse(params.input[0].text).sourceText
+    reader.handleNotification({ method: 'item/completed', params: { threadId: params.threadId, turnId: id, item: { type: 'agentMessage', text: JSON.stringify({ summary: 'Reread complete.', quotes: [source.slice(0, 10)], structure: [] }) } } })
+    reader.handleNotification({ method: 'turn/completed', params: { threadId: params.threadId, turn: { id, status: 'completed' } } })
+    return { turn: { id, status: 'inProgress' } }
+  } })
+  const controller = new AbortController()
+  const pending = h.reader.read({ ...h.input, signal: controller.signal })
+  pending.catch(() => {})
+  await started
+  controller.abort()
+  await assert.rejects(pending, e => e.code === 'READ_CANCELLED')
+  const beforeRetry = h.calls.length
+  await assert.rejects(h.reader.read(h.input), e => e.code === 'READER_STOP_PENDING')
+  assert.equal(h.calls.length, beforeRetry)
+  h.reader.handleNotification({ method: 'turn/completed', params: { threadId: 'reader-1', turn: { id: 'reader-turn-1', status: 'interrupted' } } })
+  const retried = await h.reader.read(h.input)
+  assert.equal(retried.nativeThreadId, 'reader-2')
+})
+
+test('timed-out Reader also remains quarantined without native completion proof', async () => {
+  const h = nativeHarness({ timeoutMs: 5, start: ({ id }) => ({ turn: { id, status: 'inProgress' } }) })
+  const keeper = setTimeout(() => {}, 100)
+  try {
+    await assert.rejects(h.reader.read(h.input), e => e.code === 'READER_TIMEOUT')
+    await assert.rejects(h.reader.read(h.input), e => e.code === 'READER_STOP_PENDING')
+    assert.equal(h.calls.filter(call => call.method === 'thread/start').length, 1)
+  } finally { clearTimeout(keeper) }
+})
