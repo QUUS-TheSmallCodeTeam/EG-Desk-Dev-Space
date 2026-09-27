@@ -365,6 +365,16 @@ function validateManifest(manifest) {
     if (!node || !ROOT_TYPES.has(node.type) || node.scopeRootId !== root) fail('INVALID_GRAPH', 'Selected root is absent or not portable')
   }
   for (const node of manifest.nodes) for (const ref of node.refs) if (!nodeIds.has(ref)) fail('INVALID_GRAPH', 'Reference graph is not closed')
+  const byId = new Map(manifest.nodes.map(node => [node.id, node]))
+  const reachable = new Set()
+  const pending = [...roots]
+  while (pending.length) {
+    const id = pending.pop()
+    if (reachable.has(id)) continue
+    reachable.add(id)
+    pending.push(...byId.get(id).refs)
+  }
+  if (reachable.size !== nodeIds.size) fail('UNSELECTED_NODE', 'Bundle contains nodes outside the selected reference graph')
   const objectHashes = new Set()
   let total = 0
   for (const object of manifest.objects) {
@@ -467,6 +477,7 @@ export function createEGDeskPortableBundle({ objectProvider, importStore, codec,
         if (seen.size > 100_000) fail('ARCHIVE_BUDGET', 'Reference graph exceeds policy')
         const source = await snapshot.getNode(id)
         if (!source) fail('MISSING_NODE', 'Selected graph contains a missing reference')
+        if (source.id !== id) fail('NODE_IDENTITY', 'Export provider returned a different node identity')
         const node = portableNode(source, selected)
         if (!node) { excludedCount++; continue }
         if (selected.has(id) && (!ROOT_TYPES.has(node.type) || node.scopeRootId !== id)) fail('INVALID_ROOT_SELECTION', 'Selected root has the wrong type or scope')
@@ -505,6 +516,7 @@ export function createEGDeskPortableBundle({ objectProvider, importStore, codec,
         objects.push({ sha256: objectHash, size })
       }
       const manifest = canonicalManifest({ roots: rootIds, nodes, objects, eventsSha256: sha256(eventsBytes), transcriptSha256: sha256(transcriptBytes), excludedCount })
+      validateManifest(manifest)
       const manifestBytes = Buffer.from(JSON.stringify(manifest))
       if (manifestBytes.length > MAX_MANIFEST) fail('ARCHIVE_BUDGET', 'Manifest exceeds policy')
       const planId = makeId()

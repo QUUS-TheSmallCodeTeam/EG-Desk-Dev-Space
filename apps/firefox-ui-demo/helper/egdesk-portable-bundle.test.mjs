@@ -96,6 +96,23 @@ test('ZIP producer, lazy-provider and declared-length errors reject the output s
   await assert.rejects(collect(dependencies.codec.encode([...base, { name, size: 5, open: () => Readable.from([Buffer.from('ab')]) }])), /unexpected number of bytes/)
 })
 
+test('ZIP reader rejects duplicate names, links, excessive compression and entry budgets', { skip: !dependencies }, async () => {
+  const { ZipFile } = require('yazl')
+  const rawZip = async extras => {
+    const zip = new ZipFile()
+    for (const [name, bytes, options] of [['manifest.json', Buffer.from('{}'), {}], ['events.jsonl', Buffer.alloc(0), {}], ['transcript.md', Buffer.from('summary'), {}], ...extras]) zip.addBuffer(bytes, name, options)
+    zip.end({ forceZip64Format: true })
+    return collect(zip.outputStream)
+  }
+  const objectName = `objects/${'a'.repeat(64)}`
+  const read = source => dependencies.codec.read(source, async part => { await collect(part.bytes()) })
+  await assert.rejects(read(await rawZip([['transcript.md', Buffer.from('duplicate'), {}]])), { code: 'DUPLICATE_ENTRY' })
+  await assert.rejects(read(await rawZip([[objectName, Buffer.from('link target'), { mode: 0o120777 }]])), { code: 'UNSAFE_ENTRY_TYPE' })
+  await assert.rejects(read(await rawZip([[objectName, Buffer.alloc(8192, 65), { compress: true }]])), { code: 'ARCHIVE_RATIO' })
+  const four = await rawZip([[objectName, Buffer.from('data'), { compress: false }]])
+  await assert.rejects(dependencies.codec.read(four, async part => { await collect(part.bytes()) }, { budget: { maxEntries: 3, maxUncompressedBytes: 1024, maxRatio: 100 } }), { code: 'ARCHIVE_BUDGET' })
+})
+
 test('encrypted envelope authenticates header, every frame and FINAL; wrong password and truncation fail', { skip: !dependencies }, async () => {
   const { envelope } = dependencies
   const plain = Buffer.alloc(1024 * 1024 + 7, 65)
@@ -211,6 +228,29 @@ test('tampered object hash rejects import before commit and aborts stage', { ski
   await assert.rejects(service.inspectImport({ source: tampered }), /size|hash/i)
   assert.equal(committed.length, 0)
   assert.equal(aborted.length, 1)
+})
+
+test('import rejects disconnected nodes, credential metadata and unknown major before staging', { skip: !dependencies }, async () => {
+  const { service, committed, aborted } = fixture()
+  const plan = await service.planExport({ rootIds: ['board-1'] })
+  const sink = memorySink()
+  await service.exportPlan({ planId: plan.planId, sink })
+  const parts = []
+  await dependencies.codec.read(sink.bytes(), async part => parts.push({ name: part.name, bytes: await collect(part.bytes()) }))
+  for (const [code, mutate] of [
+    ['UNSELECTED_NODE', content => content.nodes.push({ id: 'orphan', type: 'source', scopeRootId: 'board-1', title: 'Unselected', summary: '', rootAlias: null, refs: [], objects: [] })],
+    ['INVALID_SCHEMA', content => { content.nodes[0].credential = 'must not restore' }],
+    ['UNSUPPORTED_VERSION', content => { content.version.major = 2 }],
+    ['UNSAFE_METADATA', content => { content.nodes[0].title = '/etc/local-file' }],
+  ]) {
+    const { contentSha256, ...content } = JSON.parse(parts[0].bytes.toString('utf8'))
+    mutate(content)
+    const manifest = { ...content, contentSha256: digest(Buffer.from(JSON.stringify(content))) }
+    const altered = [entry('manifest.json', Buffer.from(JSON.stringify(manifest))), ...parts.slice(1).map(part => entry(part.name, part.bytes))]
+    await assert.rejects(service.inspectImport({ source: await collect(dependencies.codec.encode(altered)) }), { code })
+  }
+  assert.equal(committed.length, 0)
+  assert.equal(aborted.length, 0)
 })
 
 test('portable UI state separates preview, explicit publish, validated import and commit without retaining passwords', async () => {

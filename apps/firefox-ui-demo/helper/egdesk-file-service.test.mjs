@@ -313,3 +313,36 @@ test('restored working copy stays editable with a stale handle and reconnect pre
   assert.equal(view.element.querySelector('textarea').value, 'retained edits')
   await view.close()
 })
+
+test('late source reconnect cannot replace a newly active draft', async () => {
+  let finishReconnect
+  const { view } = uiFixture({
+    readFile: async ({ fileId }) => ({ name: `${fileId}.txt`, size: 1, sha256: 'a'.repeat(64), diskRevision: fileId, kind: 'text' }),
+    createDraft: async ({ fileId }) => ({ id: `draft-${fileId}`, fileId, head: 'h0', text: fileId, bufferRevision: 0, savedRevision: 0 }),
+    reconnectDraft: () => new Promise(resolve => { finishReconnect = resolve }),
+  })
+  await view.openFile('A')
+  const reconnecting = view.reconnectSource('new-A')
+  await nextTurn()
+  await view.openFile('B')
+  finishReconnect({ draft: { id: 'draft-A', fileId: 'new-A', text: 'A', head: 'a1', bufferRevision: 0, savedRevision: 0 }, source: { fileId: 'new-A', name: 'A.txt', size: 1, sha256: 'a'.repeat(64) } })
+  await reconnecting
+  assert.equal(view.snapshot().draftId, 'draft-B')
+  assert.equal(view.element.querySelector('textarea').value, 'B')
+  await view.close()
+})
+
+test('opening a file does not cancel an independent directory expansion', async () => {
+  let finishDirectory
+  const { view } = uiFixture({ listDirectory: ({ directoryId }) => directoryId === 'root-dir'
+    ? Promise.resolve({ entries: [{ id: 'sub-dir', name: 'folder', kind: 'directory' }], nextCursor: null })
+    : new Promise(resolve => { finishDirectory = resolve }) })
+  await view.openRoot({ rootId: 'root', directoryId: 'root-dir', name: 'Project' })
+  const folder = view.element.querySelector('[role="treeitem"]')
+  folder.click(); await nextTurn()
+  await view.openFile('file')
+  finishDirectory({ entries: [{ id: 'file', name: 'source.txt', kind: 'file' }], nextCursor: null })
+  await nextTurn()
+  assert.ok(folder.querySelector('[role="treeitem"]'))
+  await view.close()
+})

@@ -147,6 +147,7 @@ export function createEGDeskFileView({ document, service, chooseRoot, chooseSave
   let sourceDisconnected = false
   let pendingReconnect = false
   let operation = 0
+  let treeGeneration = 0
   let disposed = false
   let composing = false
   let compositionEndedAt = 0
@@ -192,9 +193,9 @@ export function createEGDeskFileView({ document, service, chooseRoot, chooseSave
     } else if (event.key === 'Enter' || event.key === ' ') { event.preventDefault(); item.click() }
   })
 
-  async function appendDirectory(directoryId, group, cursor = 0, generation = operation) {
+  async function appendDirectory(directoryId, group, cursor = 0, generation = treeGeneration) {
     const result = await service.listDirectory({ directoryId, cursor, limit: 100 })
-    if (!present(generation)) return
+    if (disposed || generation !== treeGeneration) return
     for (const entry of result.entries) {
       const item = el('li', `egdesk-file-tree-item egdesk-file-${entry.kind}`, entry.name)
       item.setAttribute('role', 'treeitem')
@@ -210,7 +211,7 @@ export function createEGDeskFileView({ document, service, chooseRoot, chooseSave
           const expanded = item.getAttribute('aria-expanded') === 'true'
           item.setAttribute('aria-expanded', expanded ? 'false' : 'true')
           let children = item.querySelector('[role="group"]')
-          if (!children) { children = el('ul', 'egdesk-file-tree-group'); children.setAttribute('role', 'group'); item.append(children); await appendDirectory(entry.id, children, 0, operation) }
+          if (!children) { children = el('ul', 'egdesk-file-tree-group'); children.setAttribute('role', 'group'); item.append(children); await appendDirectory(entry.id, children, 0, treeGeneration) }
           children.hidden = expanded
         }) })
       } else {
@@ -231,12 +232,13 @@ export function createEGDeskFileView({ document, service, chooseRoot, chooseSave
     if (!rootHandle?.rootId || !rootHandle?.directoryId) throw new Error('허용된 폴더 핸들이 없습니다.')
     if (draft && editor.value !== draft.text) await flush()
     const generation = token()
+    treeGeneration++
     activeRoot = rootHandle
     if (!preserveDraft) { activeFileId = null; draft = null; readReceipt = null; sourceDisconnected = false; pendingReconnect = false }
     tree.replaceChildren()
     searchResults.replaceChildren()
     if (!preserveDraft) { title.textContent = rootHandle.name || '연결된 폴더'; setEditable(false); viewer.textContent = '트리에서 파일을 선택하세요.' }
-    await appendDirectory(rootHandle.directoryId, tree, 0, generation)
+    await appendDirectory(rootHandle.directoryId, tree, 0, treeGeneration)
     if (present(generation)) { tree.querySelector('[role="treeitem"]')?.setAttribute('tabindex', '0'); announce('폴더가 연결되었습니다.') }
   }
 
@@ -297,10 +299,13 @@ export function createEGDeskFileView({ document, service, chooseRoot, chooseSave
   async function reconnectSource(fileId) {
     if (!draft || typeof service.reconnectDraft !== 'function') return
     await flush()
+    const generation = operation
+    const targetDraftId = draft.id
     const previousFileId = activeFileId
     const reconnected = await service.reconnectDraft({ draftId: draft.id, expectedHead: draft.head, fileId, operationId: operationId('file-reconnect') })
+    draftsByFile.delete(previousFileId); draftsByFile.set(fileId, reconnected.draft)
+    if (!present(generation) || draft?.id !== targetDraftId) return
     draft = reconnected.draft; activeFileId = fileId; readReceipt = reconnected.source
-    draftsByFile.delete(previousFileId); draftsByFile.set(fileId, draft)
     sourceDisconnected = false; pendingReconnect = false
     title.textContent = reconnected.source.name
     meta.textContent = `${reconnected.source.size} byte · SHA-256 ${reconnected.source.sha256}`
@@ -311,7 +316,8 @@ export function createEGDeskFileView({ document, service, chooseRoot, chooseSave
   async function flush() {
     if (!draft || composing) return
     if (savePromise) await savePromise
-    if (flushPromise) { await flushPromise; if (editor.value !== draft.text) return flush(); return }
+    if (!draft || disposed) return
+    if (flushPromise) { await flushPromise; if (draft && editor.value !== draft.text) return flush(); return }
     if (editor.value === draft.text) return
     const text = editor.value
     const currentDraft = draft
@@ -336,7 +342,10 @@ export function createEGDeskFileView({ document, service, chooseRoot, chooseSave
   async function review() {
     if (!draft) return
     await flush()
-    const diff = await service.diffDraft({ draftId: draft.id })
+    const generation = operation
+    const targetDraftId = draft.id
+    const diff = await service.diffDraft({ draftId: targetDraftId })
+    if (!present(generation) || draft?.id !== targetDraftId) return
     reviewPanel.replaceChildren()
     const heading = el('h3', 'egdesk-file-review-heading', `변경 비교 · 버퍼 ${diff.bufferRevision}`)
     reviewPanel.append(heading)
@@ -359,22 +368,27 @@ export function createEGDeskFileView({ document, service, chooseRoot, chooseSave
     if (!draft) return
     await flush()
     const target = draft
+    const generation = operation
     savePromise = service.saveDraft({ draftId: target.id, expectedHead: target.head, bufferRevision: target.bufferRevision, operationId: operationId('file-save') })
     try {
       const result = await savePromise
       if (draft?.id === target.id) { draft = result.draft; draftsByFile.set(activeFileId, draft) }
-      announce(editor.value === target.text ? '작업사본 저장됨 · 원본 유지' : '작업사본 저장됨 · 새 변경 있음')
+      if (present(generation) && draft?.id === target.id) announce(editor.value === target.text ? '작업사본 저장됨 · 원본 유지' : '작업사본 저장됨 · 새 변경 있음')
     } finally { savePromise = null }
   }
 
   async function saveAs() {
     if (!draft || !chooseSaveAs) return
     await flush()
+    const generation = operation
+    const targetDraftId = draft.id
     const target = await chooseSaveAs({ defaultName: readReceipt?.name || 'copy.txt', createOnly: true })
+    if (!present(generation) || draft?.id !== targetDraftId) return
     if (!target) { announce('다른 이름 저장을 취소했습니다.'); return }
     await flush()
     const sentText = draft.text
     const result = await service.saveAs({ draftId: draft.id, expectedHead: draft.head, directoryId: target.directoryId, fileName: target.fileName, operationId: operationId('file-save-as') })
+    if (!present(generation) || draft?.id !== targetDraftId) return
     const latestText = editor.value
     await openFile(result.resourceId)
     if (latestText !== sentText) { editor.value = latestText; localRevision++; await flush() }
@@ -386,7 +400,10 @@ export function createEGDeskFileView({ document, service, chooseRoot, chooseSave
     await flush()
     if (draft.bufferRevision !== draft.savedRevision) { announce('검사 전에 현재 작업사본을 저장하세요.'); return }
     const targetRevision = draft.savedRevision
+    const generation = operation
+    const targetDraftId = draft.id
     const checked = await runCheck({ draftId: draft.id, revision: targetRevision, sha256: draft.savedHash })
+    if (!present(generation) || draft?.id !== targetDraftId) return
     checkPanel.replaceChildren(el('h3', 'egdesk-file-check-heading', '검사 결과'), el('pre', 'egdesk-file-check-body', checked?.summary || '검사 결과를 확인할 수 없습니다.'))
     checkPanel.hidden = false
     announce(`검사 결과 · 작업사본 ${targetRevision}${draft.bufferRevision !== targetRevision ? ' · 이후 변경 있음' : ''}`)
@@ -419,7 +436,7 @@ export function createEGDeskFileView({ document, service, chooseRoot, chooseSave
     if (timer) { clearTimeout(timer); timer = null }
     try { await flush() }
     catch (cause) { showError(cause); return false }
-    disposed = true; token(); root.remove(); return true
+    disposed = true; token(); treeGeneration++; root.remove(); return true
   }
   return { element: root, openRoot, openFile, reconnectSource, restoreDraft: async ({ fileId, draftId }) => {
     const saved = fileId ? null : await service.readDraft({ draftId })
