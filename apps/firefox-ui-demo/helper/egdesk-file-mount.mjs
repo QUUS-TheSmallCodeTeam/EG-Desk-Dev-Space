@@ -45,8 +45,15 @@ export function createEGDeskFileMount({ dataDir, port = 39218, nativeExecutable,
     },
   }
   const adapter = createHttpAdapter({ draftDirectory: path.join(dataDir, 'file-drafts'), localOwnerScope: 'egdesk-local', createOnlyAdapter, port })
+  // Backend-only bridge from local file authority into immutable context.
+  // Renderer bodies provide opaque references, never bytes, paths or an owner.
+  const managedFileView = Object.freeze({
+    ownerScope: 'egdesk-local',
+    resolveCaptureSource: ({ captureRef, assertActive }) => adapter.resolveCaptureSource({ ownerScope: 'egdesk-local', captureRef, assertActive }),
+  })
   return {
     runtime,
+    managedFileView,
     handle: (req, res, url) => adapter.handle(req, res, { url }),
     close: () => adapter.close(),
   }

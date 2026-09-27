@@ -5,6 +5,9 @@ import path from 'node:path'
 import os from 'node:os'
 import { Readable } from 'node:stream'
 import { createEGDeskFileMount, requireEGDeskNodeRuntime } from './egdesk-file-mount.mjs'
+import { ImmutableContextStore } from './egdesk-context-store.mjs'
+import { ContextRuntime } from './egdesk-context-runtime.mjs'
+import { createContextHttpHandler } from './egdesk-context-http.mjs'
 
 const request = (route, body, headers = {}) => Object.assign(Readable.from([Buffer.from(JSON.stringify(body))]), {
   method: 'POST', url: route, headers: { host: '127.0.0.1:39218', 'content-type': 'application/json', ...headers }, socket: { remoteAddress: '127.0.0.1' },
@@ -23,11 +26,11 @@ test('unsupported Node and missing SQLite fail clearly before adapter or storage
 })
 
 test('production mount uses fixed local ownership and adapter-owned request reading, never an AI account', async () => {
-  let configuration, forwarded, closed = false, selectedNative
+  let configuration, forwarded, resolved, closed = false, selectedNative
   const mount = createEGDeskFileMount({
     dataDir: '/app-owned-data', nativeExecutable: '/verified-native-binary',
     createNativeAdapter: options => { selectedNative = options; return { capability: 'descriptor-relative-create-only', createFile() {} } },
-    createHttpAdapter: options => { configuration = options; return { handle: (...args) => { forwarded = args; return true }, close: () => { closed = true } } },
+    createHttpAdapter: options => { configuration = options; return { handle: (...args) => { forwarded = args; return true }, resolveCaptureSource: async options => { resolved = options; return { bytes: Buffer.from('managed') } }, close: () => { closed = true } } },
   })
   assert.equal(configuration.draftDirectory, '/app-owned-data/file-drafts')
   assert.equal(configuration.localOwnerScope, 'egdesk-local')
@@ -36,6 +39,10 @@ test('production mount uses fixed local ownership and adapter-owned request read
   const req = request('/v1/files/drafts/read', { draftId: 'local' }), res = response(), url = new URL('http://127.0.0.1:39218/v1/files/drafts/read')
   assert.equal(await mount.handle(req, res, url), true)
   assert.deepEqual(forwarded, [req, res, { url }])
+  const captureRef = { fileId: 'file', draftId: 'draft', head: 'head', revision: 0 }
+  const assertActive = () => {}
+  await mount.managedFileView.resolveCaptureSource({ captureRef, assertActive })
+  assert.deepEqual(resolved, { ownerScope: 'egdesk-local', captureRef, assertActive })
   await mount.close()
   assert.equal(closed, true)
 })
@@ -79,8 +86,75 @@ async function fixture(t, mountOptions = {}) {
   const fileId = listing.body.result.entries.find(entry => entry.name === 'source.txt').id
   const created = await call('drafts/create', { fileId })
   assert.equal(created.status, 200)
-  return { root, call, directoryId, draft: created.body.result, restart: async () => { await mount.close(); mount = createEGDeskFileMount(options) }, getMount: () => mount }
+  return { root, call, fileId, directoryId, draft: created.body.result, restart: async () => { await mount.close(); mount = createEGDeskFileMount(options) }, getMount: () => mount }
 }
+
+test('managed file view reads only local-owner, exact-head working-copy bytes', async t => {
+  const h = await fixture(t)
+  const view = h.getMount().managedFileView
+  const selected = { fileId: h.fileId, draftId: h.draft.id, head: h.draft.head, revision: h.draft.bufferRevision }
+  const resolve = captureRef => view.resolveCaptureSource({ captureRef, assertActive: () => {} })
+  const first = await resolve(selected)
+  assert.equal(first.bytes.toString(), 'external original\n')
+  assert.equal(view.ownerScope, 'egdesk-local')
+  assert.equal(first.mime, 'text/plain')
+  await assert.rejects(resolve({ ...selected, ownerScope: 'another-account' }), e => e.code === 'INVALID_CAPTURE_REF')
+  await assert.rejects(resolve({ ...selected, fileId: 'unselected-handle' }), e => e.code === 'CAPTURE_STALE')
+  const updated = await h.call('drafts/update', { draftId: h.draft.id, expectedHead: h.draft.head, text: 'edited working copy', operationId: 'capture-head-test' })
+  await assert.rejects(resolve(selected), e => e.code === 'CAPTURE_STALE')
+  await assert.rejects(resolve({ ...selected, head: updated.body.result.head }), e => e.code === 'CAPTURE_STALE')
+  const nextRef = { ...selected, head: updated.body.result.head, revision: updated.body.result.bufferRevision }
+  const next = await resolve(nextRef)
+  assert.equal(next.bytes.toString(), 'edited working copy')
+  await h.restart()
+  const restored = await h.getMount().managedFileView.resolveCaptureSource({ captureRef: nextRef, assertActive: () => {} })
+  assert.equal(restored.bytes.toString(), 'edited working copy')
+  assert.equal(await readFile(path.join(h.root, 'source.txt'), 'utf8'), 'external original\n')
+})
+
+test('mounted working copy enters batch context capture as immutable, account-owned evidence', async t => {
+  const h = await fixture(t)
+  const store = new ImmutableContextStore({ dataDir: path.join(path.dirname(h.root), 'context-data'), allowedRoots: [h.root], managedFileView: h.getMount().managedFileView })
+  let owner = 'email:first@example.com'
+  const context = new ContextRuntime({ store, reader: null, getOwnerKey: () => owner })
+  const handle = createContextHttpHandler(context, async () => {})
+  const post = async captureRef => {
+    const res = response()
+    const body = { clientThreadId: 'ui', attachments: [{ id: 'selected-file', kind: 'file', managedFileView: captureRef, captureScope: { type: 'file' } }] }
+    await handle(request('/context/captures', body), res, new URL('http://127.0.0.1:39218/context/captures'))
+    return res
+  }
+  const inspect = async sourceId => {
+    const res = response()
+    await handle({ method: 'GET' }, res, new URL(`http://127.0.0.1:39218/context/captures/${sourceId}`))
+    return res
+  }
+  const initialRef = { fileId: h.fileId, draftId: h.draft.id, head: h.draft.head, revision: h.draft.bufferRevision }
+  const first = await post(initialRef)
+  assert.equal(first.status, 201)
+  const original = first.body.captures[0]
+  assert.equal(original.capture.coverage.provenance, 'managed-working-copy')
+  assert.equal(original.sourceRef.revision, '0')
+  assert.equal(original.sourceRef.path, undefined)
+  assert.equal((await inspect(original.sourceId)).body.source.text, 'external original\n')
+  const editedText = 'managed edit '.repeat(6000)
+  assert.ok(Buffer.byteLength(editedText) > 64 * 1024)
+  const updated = await h.call('drafts/update', { draftId: h.draft.id, expectedHead: h.draft.head, text: editedText, operationId: 'context-capture-edit' })
+  const stale = await post(initialRef)
+  assert.equal(stale.status, 409)
+  assert.equal(stale.body.code, 'CAPTURE_STALE')
+  const second = await post({ ...initialRef, head: updated.body.result.head, revision: updated.body.result.bufferRevision })
+  assert.equal(second.status, 201)
+  assert.equal(second.body.captures[0].sourceRef.revision, '1')
+  assert.notEqual(second.body.captures[0].hash, original.hash)
+  const oldView = await inspect(original.sourceId)
+  assert.deepEqual(Object.keys(oldView.body).sort(), ['bindings', 'capture', 'delivered', 'source'])
+  assert.equal(oldView.body.source.text, 'external original\n')
+  assert.equal(oldView.body.delivered, null)
+  assert.equal((await inspect(second.body.captures[0].sourceId)).body.source.text, editedText)
+  owner = 'email:second@example.com'
+  assert.equal((await inspect(original.sourceId)).status, 404)
+})
 
 test('mounted Save As returns a definitive 409 collision without file uncertainty', async t => {
   const nativeFailure = Object.assign(new Error('target already exists'), { code: 'EGDESK_NATIVE_REFUSED', nativeStatus: 5, created: false, fileMayExist: false })

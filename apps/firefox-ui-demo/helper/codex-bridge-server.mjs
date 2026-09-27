@@ -94,6 +94,7 @@ const dataDir = appDataDirectory()
 const localFiles = createEGDeskFileMount({ dataDir, port: BRIDGE_PORT })
 const contextStore = new ImmutableContextStore({
   dataDir,
+  managedFileView: localFiles.managedFileView,
   allowedRoots: process.env.EGDESK_CONTEXT_ROOTS ? process.env.EGDESK_CONTEXT_ROOTS.split(path.delimiter).filter(Boolean) : [process.cwd()],
 })
 const nativeReader = new NativeReaderClient({ request: (method, params) => appServerRequest(method, params), respond: nativeRespond, getOwnerKey: () => publicAuthIdentityKey(authState) })

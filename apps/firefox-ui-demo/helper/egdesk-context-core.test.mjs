@@ -15,7 +15,7 @@ async function harness(t, options = {}) {
   t.after(() => rm(dir, { recursive: true, force: true }))
   const cwd = path.join(dir, 'workspace'); await mkdir(cwd)
   let owner = 'email:a@example.com', nativeSeq = 0
-  const store = new ImmutableContextStore({ dataDir: path.join(dir, 'state'), allowedRoots: [cwd] })
+  const store = new ImmutableContextStore({ dataDir: path.join(dir, 'state'), allowedRoots: [cwd], managedFileView: options.managedFileView })
   const contexts = new ContextRuntime({ store, reader: options.reader || null, getOwnerKey: () => owner, schemaReady: () => options.schemaReady !== false })
   const calls = [], replies = [], events = []
   const chat = new CodexChatRuntime({
@@ -63,6 +63,82 @@ test('file capture is immutable, root scoped, and new bytes require a new source
   assert.notEqual(first.hash, second.hash)
   const outside = path.join(h.dir, 'outside.txt'); await writeFile(outside, 'outside')
   await assert.rejects(h.contexts.capture({ ...request, attachments: [{ ...request.attachments[0], sourceRef: { path: outside } }] }), e => e.code === 'SOURCE_OUTSIDE_ROOT')
+})
+
+test('managed working-copy capture uses opaque local file identity and preserves old immutable history', async t => {
+  const state = { head: 'head-1', revision: 0, text: 'First working copy\n' }
+  const managedFileView = {
+    resolveCaptureSource: async ({ captureRef, assertActive }) => {
+      assertActive()
+      if (captureRef.fileId !== 'file-1' || captureRef.draftId !== 'draft-1' || captureRef.head !== state.head || captureRef.revision !== state.revision) throw Object.assign(new Error('stale draft'), { code: 'CAPTURE_STALE' })
+      const bytes = Buffer.from(state.text)
+      return { captureRef: { ...captureRef }, name: 'work.md', mime: 'text/plain', bytes, sha256: hashContent(bytes) }
+    },
+  }
+  const h = await harness(t, { managedFileView })
+  const attachment = (head, revision) => ({ id: 'file-ui', kind: 'file', managedFileView: { fileId: 'file-1', draftId: 'draft-1', head, revision }, captureScope: { type: 'file' } })
+  const capture = async (head, revision) => (await h.contexts.capture({ clientThreadId: 'ui', attachments: [attachment(head, revision)] })).captures[0]
+  const first = await capture(state.head, state.revision)
+  assert.equal(first.sourceRef.managedFileView.draftId, 'draft-1')
+  assert.equal(first.sourceRef.revision, '0')
+  assert.equal(first.capture.coverage.provenance, 'managed-working-copy')
+  assert.equal(first.shape.format, 'text')
+  assert.equal(first.sourceRef.path, undefined)
+  state.head = 'head-2'; state.revision = 1; state.text = 'Second working copy\n'
+  await assert.rejects(capture('head-1', 0), e => e.code === 'CAPTURE_STALE')
+  await assert.rejects(capture('head-2', 0), e => e.code === 'CAPTURE_STALE')
+  const second = await capture('head-2', 1)
+  assert.notEqual(first.sourceId, second.sourceId)
+  assert.notEqual(first.hash, second.hash)
+  assert.equal((await h.store.inspect('email:a@example.com', first.sourceId)).source.text, 'First working copy\n')
+  assert.equal((await h.store.inspect('email:a@example.com', second.sourceId)).source.text, 'Second working copy\n')
+  await assert.rejects(h.contexts.capture({ clientThreadId: 'ui', attachments: [{ ...attachment('head-2', 1), sourceRef: { path: '/not-an-authority' } }] }), e => e.code === 'INVALID_CAPTURE_REF')
+})
+
+test('managed working-copy capture rejects a head change during snapshot storage', async t => {
+  const state = { head: 'h1', revision: 0, text: 'Old bytes' }
+  const h = await harness(t, { managedFileView: {
+    resolveCaptureSource: async ({ captureRef, assertActive }) => {
+      assertActive()
+      if (captureRef.head !== state.head || captureRef.revision !== state.revision) throw Object.assign(new Error('draft changed'), { code: 'CAPTURE_STALE' })
+      const bytes = Buffer.from(state.text)
+      return { captureRef: { ...captureRef }, name: 'source.txt', mime: 'text/plain', bytes, sha256: hashContent(bytes) }
+    },
+  } })
+  let entered, release
+  const paused = new Promise(resolve => { entered = resolve })
+  const blob = h.store.blob.bind(h.store)
+  let pausedOnce = false
+  h.store.blob = async (...args) => {
+    const result = await blob(...args)
+    if (!pausedOnce) { pausedOnce = true; entered(); await new Promise(resolve => { release = resolve }) }
+    return result
+  }
+  const pending = h.contexts.capture({ clientThreadId: 'ui', attachments: [{ kind: 'file', managedFileView: { fileId: 'file', draftId: 'draft', head: 'h1', revision: 0 }, captureScope: { type: 'file' } }] })
+  await paused
+  state.head = 'h2'; state.revision = 1; state.text = 'New bytes'
+  release()
+  await assert.rejects(pending, e => e.code === 'CAPTURE_STALE')
+  assert.equal((await h.store.listRecords('email:a@example.com', 'sources')).length, 0)
+})
+
+test('managed working-copy capture cannot publish after an account or engine generation switch', async t => {
+  let entered, release
+  const paused = new Promise(resolve => { entered = resolve })
+  const h = await harness(t, { managedFileView: {
+    resolveCaptureSource: async ({ captureRef, assertActive }) => {
+      entered(); await new Promise(resolve => { release = resolve }); assertActive()
+      const bytes = Buffer.from('old account')
+      return { captureRef: { ...captureRef }, name: 'source.txt', mime: 'text/plain', bytes, sha256: hashContent(bytes) }
+    },
+  } })
+  const pending = h.contexts.capture({ clientThreadId: 'ui', attachments: [{ kind: 'file', managedFileView: { fileId: 'file', draftId: 'draft', head: 'h1', revision: 0 }, captureScope: { type: 'file' } }] })
+  await paused
+  h.changeOwner('email:b@example.com')
+  h.chat.reset()
+  release()
+  await assert.rejects(pending, e => e.code === 'ACCOUNT_CHANGED')
+  assert.equal((await h.store.listRecords('email:a@example.com', 'sources')).length, 0)
 })
 
 test('DOM capture preserves explicit scope and truncation; source and delivered roles are distinct', async t => {
@@ -211,6 +287,27 @@ test('pinOutput rechecks generation after the second binding await before mutati
   assert.equal(run.context.captures.length, 1)
   assert.equal(h.contexts.bindings.size, 0)
   assert.equal(h.replies.some(reply => reply.id === 'pin-race' && reply.result?.success), false)
+})
+
+test('pinOutput stops before persisting output after a generation change during capture', async t => {
+  const h = await harness(t)
+  const source = await h.capture()
+  const accepted = await h.start([source.sourceId])
+  const run = h.chat.runs.get(accepted.answerId)
+  const output = path.join(h.cwd, 'output.md'); await writeFile(output, 'Old-account output')
+  run.artifacts.push({ id: 'out', type: 'file', target: { path: output }, label: 'Output', conversationId: run.conversationId, runId: run.runId, answerId: run.answerId })
+  let entered, release
+  const paused = new Promise(resolve => { entered = resolve })
+  const blob = h.store.blob.bind(h.store)
+  h.store.blob = async (...args) => { entered(); await new Promise(resolve => { release = resolve }); return blob(...args) }
+  const pending = h.tool(accepted, 'egdesk_capture_output', { artifactId: 'out' }, 'pin-during-capture')
+  await paused
+  h.changeOwner('email:b@example.com')
+  h.chat.reset()
+  release()
+  await pending
+  assert.equal((await h.store.listRecords('email:a@example.com', 'sources')).length, 1)
+  assert.equal(h.replies.some(reply => reply.id === 'pin-during-capture' && reply.result?.success), false)
 })
 
 test('multiline redaction preserves line coordinates across read_source, source inspection and Briefing', async t => {

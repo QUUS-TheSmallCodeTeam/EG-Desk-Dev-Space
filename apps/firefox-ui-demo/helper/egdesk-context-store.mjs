@@ -46,11 +46,12 @@ export function sourceShape(text, mime = 'text/plain', filename = '') {
 }
 
 export class ImmutableContextStore {
-  constructor({ dataDir, now = Date.now, maxCaptureBytes = 32 * 1024 * 1024, allowedRoots = [process.cwd()] } = {}) {
+  constructor({ dataDir, now = Date.now, maxCaptureBytes = 32 * 1024 * 1024, allowedRoots = [process.cwd()], managedFileView = null } = {}) {
     if (!dataDir || !path.isAbsolute(dataDir)) fail('INVALID_DATA_DIR', 'An absolute app-owned data directory is required')
     this.root = path.join(dataDir, 'context')
     this.now = now
     this.maxCaptureBytes = maxCaptureBytes
+    this.managedFileView = managedFileView
     if (!Array.isArray(allowedRoots) || !allowedRoots.length || allowedRoots.some(root => typeof root !== 'string' || !path.isAbsolute(root))) fail('INVALID_CONTEXT_ROOTS', 'Context file roots must be configured absolute directories')
     this.allowedRoots = allowedRoots
   }
@@ -124,14 +125,19 @@ export class ImmutableContextStore {
     try { const record = await this.getRecord(ownerKey, 'threads', id); return record.conversationId === conversationId && record.toolsVersion === 1 } catch (error) { if (error.code === 'CONTEXT_NOT_FOUND') return false; throw error }
   }
 
-  async captureAttachments(ownerKey, { clientThreadId, attachments }) {
+  async captureAttachments(ownerKey, { clientThreadId, attachments }, { assertActive = () => {} } = {}) {
     if (!small(clientThreadId) || !Array.isArray(attachments) || !attachments.length || attachments.length > 16) fail('INVALID_CAPTURE', 'Provide a clientThreadId and 1–16 selected attachments')
     const captures = []
-    for (const attachment of attachments) captures.push(await this.capture(ownerKey, clientThreadId, attachment))
+    for (const attachment of attachments) {
+      assertActive()
+      captures.push(await this.capture(ownerKey, clientThreadId, attachment, { assertActive }))
+    }
+    assertActive()
     return captures
   }
 
-  async capture(ownerKey, clientThreadId, attachment, { scopedRoot = null } = {}) {
+  async capture(ownerKey, clientThreadId, attachment, { scopedRoot = null, assertActive = () => {} } = {}) {
+    assertActive()
     const kind = attachment?.kind
     if (!['file', 'browser', 'board'].includes(kind)) fail('INVALID_CAPTURE', 'Unsupported attachment kind')
     const sourceRef = attachment.sourceRef || attachment.source || {}
@@ -146,25 +152,69 @@ export class ImmutableContextStore {
     if ((kind === 'file') !== (scope.type === 'file')) fail('INVALID_CAPTURE_SCOPE', 'File byte captures and UI selection captures must retain their actual scope')
     const coverage = attachment.capture?.coverage || {}
     let bytes, text, mime = attachment.content?.mime || 'text/plain', truncated = false
+    let fileName = '', provenance = kind === 'file' ? 'local-file-bytes' : 'explicit-ui-capture'
+    let managedCheck = null
     if (kind === 'file') {
-      const requestedPath = sourceRef.path
-      const canonical = await verifyLocalFile(requestedPath)
-      if (!canonical) fail('SOURCE_UNAVAILABLE', 'Selected local file is unavailable or protected', 403)
-      const roots = await Promise.all((scopedRoot ? [scopedRoot] : this.allowedRoots).map(root => realpath(root)))
-      if (!roots.some(root => canonical.startsWith(`${root}${path.sep}`))) fail('SOURCE_OUTSIDE_ROOT', 'Selected file is outside configured context roots', 403)
-      const handle = await open(canonical, constants.O_RDONLY | (constants.O_NOFOLLOW || 0))
-      try {
-        const before = await handle.stat()
-        if (!before.isFile()) fail('INVALID_SOURCE', 'Only regular selected files can be captured')
-        if (before.size > this.maxCaptureBytes) fail('CAPTURE_LIMIT', 'This source exceeds the local capture byte limit; no clipped capture was created', 413)
-        bytes = await handle.readFile()
-        const after = await handle.stat()
-        if (before.size !== after.size || before.mtimeMs !== after.mtimeMs || bytes.length !== before.size) fail('SOURCE_CHANGED', 'File changed during capture; retry capture', 409)
-        source.path = canonical
-      } finally { await handle.close() }
-      if (/\.json$/i.test(canonical)) mime = 'application/json'
-      if (/\.csv$/i.test(canonical)) mime = 'text/csv'
-      if (/\.tsv$/i.test(canonical)) mime = 'text/tab-separated-values'
+      if (attachment.managedFileView !== undefined) {
+        if (sourceRef.path || scopedRoot || !this.managedFileView?.resolveCaptureSource) fail('INVALID_CAPTURE_REF', 'Managed working-copy captures require an available local file owner and no path', 400)
+        const resolve = async captureRef => {
+          try { return await this.managedFileView.resolveCaptureSource({ captureRef, assertActive }) }
+          catch (error) {
+            const statuses = { INVALID_CAPTURE_REF: 400, CAPTURE_STALE: 409, UNKNOWN_DRAFT: 404, FILE_TOO_LARGE: 413, OWNER_SCOPE_MISMATCH: 403, INVALID_DRAFT: 409, STORE_CLOSED: 503 }
+            if (Object.hasOwn(statuses, error.code)) fail(error.code, 'Managed working-copy capture is unavailable or stale', statuses[error.code])
+            throw error
+          }
+        }
+        const selected = await resolve(attachment.managedFileView)
+        assertActive()
+        const ref = selected.captureRef
+        if (!Buffer.isBuffer(selected.bytes) || selected.sha256 !== hashContent(selected.bytes) ||
+            !ref || !['fileId', 'draftId', 'head', 'revision'].every(key => ref[key] === attachment.managedFileView?.[key]) ||
+            !Number.isSafeInteger(ref.revision) || ref.revision < 0 ||
+            (sourceRef.resourceId && sourceRef.resourceId !== ref.fileId) || (sourceRef.revision && sourceRef.revision !== String(ref.revision))) fail('SOURCE_CHANGED', 'Managed working-copy identity changed during capture', 409)
+        bytes = selected.bytes
+        fileName = selected.name
+        mime = selected.mime
+        source.resourceId = ref.fileId
+        source.revision = String(ref.revision)
+        source.managedFileView = { ...ref }
+        if (!attachment.label) source.title = publicText(selected.name || kind, 300)
+        provenance = 'managed-working-copy'
+        const expectedHash = selected.sha256
+        managedCheck = async () => {
+          const current = await resolve(ref)
+          assertActive()
+          if (!Buffer.isBuffer(current.bytes) || current.sha256 !== expectedHash || hashContent(current.bytes) !== expectedHash) fail('SOURCE_CHANGED', 'Managed working-copy bytes changed under the selected head', 409)
+        }
+      } else {
+        const canonical = await verifyLocalFile(sourceRef.path)
+        assertActive()
+        if (!canonical) fail('SOURCE_UNAVAILABLE', 'Selected local file is unavailable or protected', 403)
+        const roots = await Promise.all((scopedRoot ? [scopedRoot] : this.allowedRoots).map(root => realpath(root)))
+        assertActive()
+        if (!roots.some(root => canonical.startsWith(`${root}${path.sep}`))) fail('SOURCE_OUTSIDE_ROOT', 'Selected file is outside configured context roots', 403)
+        const handle = await open(canonical, constants.O_RDONLY | (constants.O_NOFOLLOW || 0))
+        try {
+          const before = await handle.stat()
+          assertActive()
+          if (!before.isFile()) fail('INVALID_SOURCE', 'Only regular selected files can be captured')
+          if (before.size > this.maxCaptureBytes) fail('CAPTURE_LIMIT', 'This source exceeds the local capture byte limit; no clipped capture was created', 413)
+          bytes = await handle.readFile()
+          assertActive()
+          const after = await handle.stat()
+          assertActive()
+          if (before.size !== after.size || before.mtimeMs !== after.mtimeMs || bytes.length !== before.size) fail('SOURCE_CHANGED', 'File changed during capture; retry capture', 409)
+          source.path = canonical
+          fileName = canonical
+        } finally { await handle.close() }
+        assertActive()
+      }
+      if (!managedCheck) {
+        mime = 'text/plain'
+        if (/\.json$/i.test(fileName)) mime = 'application/json'
+        if (/\.csv$/i.test(fileName)) mime = 'text/csv'
+        if (/\.tsv$/i.test(fileName)) mime = 'text/tab-separated-values'
+      }
       try { text = new TextDecoder('utf-8', { fatal: true, ignoreBOM: true }).decode(bytes); if (text.includes('\0')) text = null } catch { text = null }
       if (text === null && mime === 'text/plain') mime = 'application/octet-stream'
     } else {
@@ -174,21 +224,33 @@ export class ImmutableContextStore {
       truncated = attachment.content.truncated
     }
     if (bytes.length > this.maxCaptureBytes) fail('CAPTURE_LIMIT', 'Captured content exceeds the byte limit; no silent clipping is permitted', 413)
+    assertActive()
     const rawHash = await this.blob(ownerKey, bytes)
+    assertActive()
     const deliveredText = text === null ? null : publicText(text, Infinity)
     const projectionHash = deliveredText === null ? null : await this.blob(ownerKey, Buffer.from(deliveredText))
+    assertActive()
+    if (managedCheck) {
+      await managedCheck()
+      assertActive()
+    }
     const sourceId = randomUUID()
     const manifest = {
       version: 1, sourceId, snapshotId: sourceId, id: sourceId, uiId: small(attachment.id), clientThreadId,
       hash: rawHash, revision: rawHash, capturedAt: kind !== 'file' && Number.isFinite(attachment.capturedAt) ? attachment.capturedAt : this.now(), storedAt: this.now(),
       kind, label: source.title, source, sourceRef: { ...source },
       captureScope: { type: scope.type, locator: small(scope.locator, 2000) }, truncated,
-      capture: { coverage: { scope: scope.type, complete: !truncated, limits: small(coverage.limits, 2000), description: small(coverage.description, 2000), provenance: kind === 'file' ? 'local-file-bytes' : 'explicit-ui-capture' } },
-      shape: sourceShape(deliveredText, mime, source.path || ''),
+      capture: { coverage: { scope: scope.type, complete: !truncated, limits: small(coverage.limits, 2000), description: small(coverage.description, 2000), provenance } },
+      shape: sourceShape(deliveredText, mime, fileName),
       payloads: { source: { hash: rawHash, byteLength: bytes.length }, projection: projectionHash ? { hash: projectionHash, byteLength: Buffer.byteLength(deliveredText) } : null },
       transformations: projectionHash && projectionHash !== rawHash ? [{ type: 'credential-redaction', fromHash: rawHash, toHash: projectionHash }] : [],
     }
     await this.putRecord(ownerKey, 'sources', manifest, sourceId)
+    assertActive()
+    if (managedCheck) {
+      await managedCheck()
+      assertActive()
+    }
     return this.publicManifest(manifest)
   }
 
@@ -238,12 +300,15 @@ export class ImmutableContextStore {
     return { bindingId: id, ...binding, captures }
   }
 
-  async captureOutput(ownerKey, run, artifact, cwd) {
+  async captureOutput(ownerKey, run, artifact, cwd, { assertActive = () => {} } = {}) {
+    assertActive()
     if (!artifact || artifact.runId !== run.runId || artifact.answerId !== run.answerId || artifact.conversationId !== run.conversationId || artifact.type !== 'file') fail('INVALID_ARTIFACT_TARGET', 'Output must be an existing file artifact of this run', 403)
     if (!cwd || !path.isAbsolute(cwd)) fail('OUTPUT_CWD_REQUIRED', 'An explicit run cwd is required to capture an output')
     const root = await realpath(cwd)
+    assertActive()
     const file = await verifyLocalFile(artifact.target?.path, { artifact: true })
+    assertActive()
     if (!file || (file !== root && !file.startsWith(`${root}${path.sep}`))) fail('OUTPUT_OUTSIDE_CWD', 'Output artifact is outside the run cwd or unavailable', 403)
-    return this.capture(ownerKey, run.clientThreadId || run.conversationId, { id: artifact.id, kind: 'file', label: artifact.label, sourceRef: { path: file, resourceId: artifact.id }, captureScope: { type: 'file' } }, { scopedRoot: root })
+    return this.capture(ownerKey, run.clientThreadId || run.conversationId, { id: artifact.id, kind: 'file', label: artifact.label, sourceRef: { path: file, resourceId: artifact.id }, captureScope: { type: 'file' } }, { scopedRoot: root, assertActive })
   }
 }

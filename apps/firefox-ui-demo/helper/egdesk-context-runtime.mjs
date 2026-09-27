@@ -39,8 +39,11 @@ export class ContextRuntime {
 
   async capture(body) {
     const owner = this.owner(), epoch = this.runtime?.epoch
-    const captures = await this.store.captureAttachments(owner, body)
-    if (this.owner() !== owner || this.runtime?.epoch !== epoch) reject('ACCOUNT_CHANGED', 'Account or connection changed during capture')
+    const assertActive = () => {
+      if (this.getOwnerKey() !== owner || this.runtime?.epoch !== epoch) reject('ACCOUNT_CHANGED', 'Account or connection changed during capture')
+    }
+    const captures = await this.store.captureAttachments(owner, body, { assertActive })
+    assertActive()
     return { captures }
   }
 
@@ -140,7 +143,7 @@ export class ContextRuntime {
     const previous = binding.captures.find(capture => capture.source.resourceId === artifactId)
     if (previous) return previous
     const cwd = this.runtime.threads.get(run.conversationId)?.cwd
-    const capture = await this.store.captureOutput(binding.ownerKey, run, artifact, cwd)
+    const capture = await this.store.captureOutput(binding.ownerKey, run, artifact, cwd, { assertActive })
     assertActive()
     this.assertBound(run, 'publishBriefing')
     await this.store.bind(binding.ownerKey, run, [capture.sourceId], binding.capabilities)
