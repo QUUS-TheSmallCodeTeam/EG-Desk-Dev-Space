@@ -1680,7 +1680,16 @@
 
   async function clearCanvasEntitiesForRestore() {
     for (const card of Array.from(document.querySelectorAll('.egd-canvas-card'))) {
-      if (card._beforeClose && !(await card._beforeClose())) return false;
+      try {
+        if (card._beforeClose && await card._beforeClose() !== true) return false;
+        if (card._closeOwnedRuntime && await card._closeOwnedRuntime() !== true) {
+          boardNotice('터미널 종료를 확인하지 못해 화면을 유지했습니다. 상태를 확인한 뒤 다시 닫아 주세요.');
+          return false;
+        }
+      } catch (error) {
+        boardNotice(`화면을 유지했습니다: ${error.message}`);
+        return false;
+      }
       unregisterSourceRefCard(card);
       try { if (typeof card._cleanup === 'function') card._cleanup(); } catch {}
       card.remove();
@@ -1876,9 +1885,9 @@
       }
     } finally {
       state.agenda.suppressDirty = false;
+      syncViewportAgendaRail();
+      refreshDeskMinimap();
     }
-    syncViewportAgendaRail();
-    refreshDeskMinimap();
     return true;
   }
 

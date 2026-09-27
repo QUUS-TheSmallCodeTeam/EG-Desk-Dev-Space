@@ -1545,3 +1545,48 @@ test('Browser child actor query handlers return promises for native sendQuery', 
     else globalThis.JSWindowActorChild = previous;
   }
 });
+
+// GLOBAL_CLEAR_TERMINAL_REGRESSIONS_BEGIN
+test('public agenda.clearView retains live Terminal and session after failed termination, then retries confirmed close', async () => {
+  const clearCanvas = surfaceSource.match(/  async function clearCanvasEntitiesForRestore\(\) \{([\s\S]*?)\n  \}/)?.[1];
+  const clearView = surfaceSource.match(/  async function clearCurrentAgendaView\(options = \{\}\) \{([\s\S]*?)\n  \}/)?.[1];
+  assert.ok(clearCanvas && clearView);
+  assert.ok(surfaceSource.includes('clearView: clearCurrentAgendaView'));
+  const bindPublicApi = compileFunction(`async function clearCanvasEntitiesForRestore() {${clearCanvas}\n}\nasync function clearCurrentAgendaView(options = {}) {${clearView}\n}\nreturn {clearView:clearCurrentAgendaView};`,
+    ['state', 'document', 'unregisterSourceRefCard', 'exitCardFullscreen', 'syncViewportAgendaRail', 'refreshDeskMinimap', 'boardNotice']);
+  for (const failure of [false, new Error('KILL_FAILED'), { exited: true, exitConfirmed: false }]) {
+    let confirmed = false, cleanupCalls = 0, closeCalls = 0, removed = false, refreshes = 0;
+    let sessionId = 'actual-session-fixture';
+    const terminal = { id: 'terminal', _closeOwnedRuntime: async () => {
+      closeCalls++;
+      if (confirmed) return true;
+      if (failure instanceof Error) throw failure;
+      return failure;
+    }, _cleanup: () => { cleanupCalls++; sessionId = null; }, remove: () => { removed = true; } };
+    const state = { cardFullscreen: { cardId: 'terminal' }, sourceRefs: { cardsByKey: { terminal: 'terminal' } }, activeEntityId: 'terminal',
+      codex: { chatCardEntityId: null, chatDockMode: 'hud' }, agenda: { suppressDirty: false, dirty: true, dirtyReasons: ['work'] } };
+    const notices = [];
+    const api = bindPublicApi(state, { querySelectorAll: selector => selector === '.egd-canvas-card' && !removed ? [terminal] : [] },
+      card => { delete state.sourceRefs.cardsByKey[card.id]; }, () => { state.cardFullscreen = null; }, () => { refreshes++; }, () => {}, message => notices.push(message));
+    assert.equal(await api.clearView(), false);
+    assert.equal(removed, false);
+    assert.equal(cleanupCalls, 0, 'cleanup must not clear the session reference or issue an unconfirmed kill');
+    assert.equal(sessionId, 'actual-session-fixture');
+    assert.equal(state.sourceRefs.cardsByKey.terminal, 'terminal');
+    assert.equal(state.activeEntityId, 'terminal');
+    assert.equal(state.cardFullscreen.cardId, 'terminal');
+    assert.equal(state.agenda.dirty, true);
+    assert.equal(state.agenda.suppressDirty, false);
+    assert.ok(notices.length);
+    confirmed = true;
+    assert.equal(await api.clearView(), true);
+    assert.equal(closeCalls, 2);
+    assert.equal(cleanupCalls, 1);
+    assert.equal(removed, true);
+    assert.equal(sessionId, null);
+    assert.equal(state.activeEntityId, null);
+    assert.equal(state.agenda.dirty, false);
+    assert.equal(refreshes, 2);
+  }
+});
+// GLOBAL_CLEAR_TERMINAL_REGRESSIONS_END
