@@ -4,16 +4,16 @@
 <meta name="viewport" content="width=device-width, initial-scale=1">
 <title>EG-Desk</title>
 <style>
-  body { margin: 0; min-height: 100vh; display: grid; place-items: center; background: #f5f3ef; color: #26333d; font: 20px/1.65 system-ui, sans-serif; }
-  main { max-width: 680px; padding: 48px; }
-  h1 { font-size: 44px; letter-spacing: -.04em; }
-  p { color: #586873; }
-  small { display: block; margin-top: 40px; font-size: 15px; }
+  body { margin: 0; min-height: 100vh; display: grid; place-items: center; background: #f7f9fa; color: #26333d; font-family: system-ui, sans-serif; }
+  main { box-sizing: border-box; width: min(100%, 640px); padding: 40px; }
+  h1 { margin: 0 0 18px; font-size: clamp(44px, 5vw, 48px); line-height: 1.1; letter-spacing: -.04em; }
+  p { margin: 0; color: #586873; }
+  .lead { font-size: 19px; line-height: 1.5; }
+  .secondary { margin-top: 9px; font-size: 15px; line-height: 1.5; }
 </style>
 <main>
-  <h1>EG-Desk</h1>
-  <p>이 브라우저는 Desk Canvas 위에 있습니다. 위 주소창에서 웹을 이용하세요.</p>
-  <p>주변 Desk를 보려면 트랙패드 핀치나 Ctrl+스크롤로 Canvas를 축소하세요. 보고 있는 페이지는 같은 Browser Card에 그대로 남습니다.</p>
-  <small>웹사이트 로그인과 Codex 연결은 각각 관리됩니다. Codex는 Desk의 Chat에서 연결할 수 있습니다.</small>
+  <h1>웹에서 시작하세요</h1>
+  <p class="lead">위 주소창에 주소나 검색어를 입력하세요.</p>
+  <p class="secondary">화면을 축소하면 주변 작업 공간이 보입니다. 열어 둔 웹페이지는 그대로 남습니다.</p>
 </main>
 </html>

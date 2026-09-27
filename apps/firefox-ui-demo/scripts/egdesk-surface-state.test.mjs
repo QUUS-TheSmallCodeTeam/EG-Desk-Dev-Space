@@ -620,6 +620,58 @@ test('main-window topbar is edge-attached while controls remain non-draggable, w
   assert.doesNotMatch(surfaceSource, /id: 'egd-desk-entry'|if \(state\.surface\.mode === 'browser'\) return;/);
 });
 
+test('internal start page has plain-language copy and only its own chrome badge is hidden', () => {
+  const startUri = 'chrome://userchrome/content/egdesk-start.html';
+  const startPage = readFileSync(new URL('../overlay/resources/egdesk-start.html', import.meta.url), 'utf8');
+  assert.match(startPage, /<h1>웹에서 시작하세요<\/h1>/);
+  assert.match(startPage, /위 주소창에 주소나 검색어를 입력하세요\./);
+  assert.match(startPage, /화면을 축소하면 주변 작업 공간이 보입니다\. 열어 둔 웹페이지는 그대로 남습니다\./);
+  assert.doesNotMatch(startPage, /Desk Canvas|Browser Card|Ctrl\+|⌘|계정|Codex/);
+  assert.match(startPage, /font-size: clamp\(44px, 5vw, 48px\)/);
+  assert.match(startPage, /\.lead \{[^}]*font-size: 19px/);
+  assert.match(startPage, /\.secondary \{[^}]*font-size: 15px/);
+
+  const hostBody = surfaceSource.match(/  function browserDisplayHost\(url\) \{([\s\S]*?)\n  \}/)?.[1];
+  const addressBody = surfaceSource.match(/  function browserVisibleAddress\(url\) \{([\s\S]*?)\n  \}/)?.[1];
+  const chromeBody = surfaceSource.match(/    const syncBrowserChrome = \(\) => \{([\s\S]*?)\n    \};\n    const setBrowserLoading/)?.[1];
+  assert.ok(hostBody && addressBody && chromeBody);
+  const host = compileFunction(`return function browserDisplayHost(url) {${hostBody}\n  }`, ['EGDESK_START_URI', 'URL'])(startUri, URL);
+  const visibleAddress = compileFunction(`return function browserVisibleAddress(url) {${addressBody}\n  }`, ['EGDESK_START_URI'])(startUri);
+  assert.equal(host(startUri), 'EG-Desk');
+  assert.equal(visibleAddress(startUri), '');
+  assert.equal(host('https://www.example.test/path'), 'example.test');
+  assert.equal(visibleAddress('https://example.test/path'), 'https://example.test/path');
+  const sync = compileFunction(`return function syncBrowserChrome() {${chromeBody}\n    }`,
+    ['updateHistoryFlags', 'card', 'browserState', 'pageTitle', 'browserDisplayHost', 'pageStatus', 'EGDESK_START_URI',
+      'securityIcon', 'browserSecurityGlyph', 'document', 'urlInput', 'browserVisibleAddress', 'backButton', 'forwardButton', 'reloadButton']);
+  const card = { classList: { toggle() {} }, dataset: {} };
+  const browserState = { uri: startUri, title: 'EG-Desk', security: 'chrome', loading: false,
+    canGoBack: false, canGoForward: false };
+  const pageTitle = { textContent: '', title: '' }, pageStatus = { hidden: false, textContent: '', title: '' };
+  const securityIcon = { hidden: false, textContent: '', title: '' }, urlInput = { value: startUri };
+  const document = { activeElement: null };
+  const render = sync(() => {}, card, browserState, pageTitle, host, pageStatus, startUri,
+    securityIcon, () => '✓', document, urlInput, visibleAddress, {}, {}, {});
+  render();
+  assert.equal(pageTitle.textContent, 'EG-Desk');
+  assert.equal(pageStatus.hidden, true);
+  assert.equal(pageStatus.textContent, '');
+  assert.equal(securityIcon.hidden, true);
+  assert.equal(urlInput.value, '');
+
+  browserState.uri = 'https://example.test/path';
+  browserState.title = 'Example site';
+  browserState.security = 'Secure';
+  render();
+  assert.equal(pageTitle.textContent, 'Example site');
+  assert.equal(pageStatus.hidden, false);
+  assert.equal(pageStatus.textContent, 'Secure');
+  assert.equal(pageStatus.title, browserState.uri);
+  assert.equal(securityIcon.hidden, false);
+  assert.equal(securityIcon.title, 'Secure');
+  assert.equal(urlInput.value, browserState.uri);
+});
+
 test('bounded visual hierarchy keeps Canvas chrome quiet and Browser and Chat content readable', () => {
   const css = readFileSync(new URL('../overlay/CSS/eg-desk-surface.uc.css', import.meta.url), 'utf8');
   const rule = selector => css.match(new RegExp(`^${selector.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')} \\{([^}]+)\\}`, 'm'))?.[1] || '';
