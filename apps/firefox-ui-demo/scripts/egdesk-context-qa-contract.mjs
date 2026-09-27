@@ -49,7 +49,9 @@ function captureMetadata(capture) {
   record(capture.sourceRef, 'Capture sourceRef');
   return { id: capture.id, sourceId: capture.sourceId, snapshotId: capture.snapshotId,
     hash: capture.hash, capturedAt: capture.capturedAt, captureScope: capture.captureScope,
-    truncated: capture.truncated, shape: capture.shape, sourceRef: capture.sourceRef };
+    truncated: capture.truncated, shape: capture.shape, sourceRef: capture.sourceRef,
+    ...(capture.payloads === undefined ? {} : { payloads: capture.payloads }),
+    ...(capture.transformations === undefined ? {} : { transformations: capture.transformations }) };
 }
 
 function frozenCopy(value) {
@@ -95,11 +97,81 @@ export function observeQaFixtureFile(profile, candidate) {
   } finally { fs.closeSync(fd); }
 }
 
-// Adapters select the declared GET projection and supply its exact delivered
-// bytes. This does not guess the pending GET response body/projection schema.
-// hash remains the server's opaque value; sha256 below is QA evidence.
-export function captureContextReadEvidence(capture, deliveredBytes) {
-  return frozenCopy({ capture: captureMetadata(capture), delivered: fingerprintQaBytes(deliveredBytes) });
+function assertRunBinding(binding) {
+  record(binding, 'Run binding');
+  text(binding.conversationId, 'conversationId');
+  text(binding.runId, 'runId');
+  assert.equal(binding.answerId, `${binding.conversationId}/${binding.runId}`, 'Run binding answerId is inconsistent');
+}
+
+function assertAgentPacket(packet) {
+  assert.equal(packet?.role, 'agent_input', 'A stored agent_input packet is required');
+  text(packet.packetId, 'Stored packetId');
+  assert.equal(packet.mime, 'application/json', 'Agent input must retain its JSON MIME');
+  assert.equal(typeof packet.text, 'string', 'Exact returned tool text is required');
+  JSON.parse(packet.text);
+  assert.equal(packet.hash, fingerprintQaBytes(packet.text).sha256, 'Stored tool packet hash differs from its exact text');
+  text(packet.mode, 'Recorded delivery mode');
+  record(packet.coverage, 'Recorded delivery coverage');
+  assert.equal(packet.deliveryStatus, 'sent-to-app-server', 'Packet was not handed to the native app-server');
+  assertRunBinding(packet.binding);
+}
+
+// Only the final GET wire shape is accepted. A paged source is never relabeled
+// as model-delivered input; delivered stays null until a real handoff is recorded.
+export function captureContextReadEvidence(response) {
+  const capture = captureMetadata(response?.capture);
+  const source = response.source;
+  assert.equal(source?.role, 'source', 'Final inspector source.role must be source');
+  text(source.mime, 'Captured source MIME');
+  assert.equal(source.hash, capture.hash, 'Source whole-capture hash changed');
+  const { startLine, endLine, totalLines } = source.range || {};
+  assert.ok(Number.isSafeInteger(startLine) && Number.isSafeInteger(endLine)
+    && Number.isSafeInteger(totalLines) && startLine >= 1 && endLine >= startLine
+    && endLine <= totalLines && endLine - startLine < 500, 'Invalid captured source range or 500-line limit');
+  assert.equal(typeof source.text, 'string', 'Captured range text must be explicit');
+  assert.equal(source.text.split('\n').length, endLine - startLine + 1, 'Captured range line count differs from its text');
+  assert.equal(source.rangeHash, fingerprintQaBytes(source.text).sha256, 'Captured range hash differs from exact text');
+  assert.equal(source.nextLine, endLine < totalLines ? endLine + 1 : null, 'Source nextLine must advance without gaps');
+  assert.ok(Array.isArray(response.bindings), 'Stored bindings must be explicit');
+  for (const binding of response.bindings) { text(binding.bindingId, 'bindingId'); assertRunBinding(binding); }
+  assert.ok(Object.hasOwn(response, 'delivered'), 'Delivered must be explicitly null or a stored packet');
+  if (response.delivered !== null) {
+    assertAgentPacket(response.delivered);
+    assert.ok(response.bindings.some(binding => ['conversationId', 'runId', 'answerId']
+      .every(field => binding[field] === response.delivered.binding[field])), 'Delivered packet has no matching stored binding');
+  }
+  return frozenCopy({ capture, source, delivered: response.delivered, bindings: response.bindings });
+}
+
+// Exactly one explicit GET per invocation. No capture, retry, or automatic
+// next-page/full-source fetch. UI Next/Previous actions drive subsequent calls.
+export async function readContextInspectionPage(readGet, { sourceId, startLine = 1, endLine, packetId }) {
+  text(sourceId, 'Stored sourceId');
+  assert.ok(Number.isSafeInteger(startLine) && startLine >= 1, 'startLine must be positive');
+  if (endLine !== undefined) assert.ok(Number.isSafeInteger(endLine) && endLine >= startLine
+    && endLine - startLine < 500, 'Explicit range must contain at most 500 lines');
+  const params = new URLSearchParams({ startLine: String(startLine) });
+  if (endLine !== undefined) params.set('endLine', String(endLine));
+  if (packetId !== undefined) params.set('packetId', text(packetId, 'Requested packetId'));
+  const observed = captureContextReadEvidence(await readGet(`/context/captures/${encodeURIComponent(sourceId)}?${params}`));
+  assert.equal(observed.capture.sourceId, sourceId, 'Inspection returned a different immutable source');
+  assert.equal(observed.source.range.startLine, startLine, 'Inspection returned a different startLine');
+  if (endLine !== undefined) assert.ok(observed.source.range.endLine <= endLine, 'Inspection exceeded the requested range');
+  if (packetId !== undefined) assert.equal(observed.delivered?.packetId, packetId, 'Inspection returned a different historical packet');
+  return observed;
+}
+
+// expectedToolText must come from the observed named tool result in a native
+// test, not from GET source text or a reconstructed/summarized packet.
+export function assertStoredAgentDelivery(packet, { packetId, binding, expectedToolText }) {
+  assertAgentPacket(packet);
+  assertRunBinding(binding);
+  assert.equal(packet.packetId, packetId, 'Stored delivery packetId differs from the observed handoff');
+  assert.deepEqual(packet.binding, binding, 'Stored delivery belongs to a different native answer');
+  assert.equal(typeof expectedToolText, 'string', 'Observed named tool result text is required');
+  assert.equal(packet.text, expectedToolText, 'Stored delivery bytes differ from the exact named tool response');
+  return true;
 }
 
 // Capture receipts correlate to attachment IDs, not inferred response ordering.
@@ -143,23 +215,26 @@ export function assertContextSendBindings(body, { clientThreadId, sourceIds }) {
 export function assertImmutableContextRead(before, after) {
   assert.ok(before?.capture?.sourceId, 'A captured before-observation is required');
   captureMetadata(before.capture);
-  assertFingerprint(before.delivered, 'Captured projection');
-  assert.deepEqual(after, before, 'Immutable capture metadata or delivered projection bytes changed');
+  captureContextReadEvidence(before);
+  captureContextReadEvidence(after);
+  assert.deepEqual(after.capture, before.capture, 'Immutable capture metadata changed');
+  assert.deepEqual(after.source, before.source, 'Immutable captured source range changed');
   return true;
 }
 
-// Full-file, byte-preserving projection scenario only. Other Browser/Board or
-// ranged projections use their declared adapter plus assertImmutableContextRead.
-export function assertFrozenFileReadAfterMutation({ snapshotBefore, snapshotAfter, liveBefore, liveAfter }) {
+// Verifies original file bytes and the exact requested stored source range.
+// A delivered tool packet is independent and is checked separately above.
+export function assertFrozenFileReadAfterMutation({ snapshotBefore, snapshotAfter, liveBefore, liveAfter, expectedSourceText }) {
   assertImmutableContextRead(snapshotBefore, snapshotAfter);
   assertFingerprint(liveBefore, 'Original file');
   assertFingerprint(liveAfter, 'Changed live file');
   assert.equal(snapshotBefore.capture.captureScope.type, 'file', 'Expected a full file capture scope');
-  assert.equal(snapshotBefore.capture.truncated, false, 'Full-file proof cannot use a truncated capture');
+  assert.equal(snapshotBefore.capture.truncated, false, 'Full capture proof cannot use a truncated source');
   assert.equal(snapshotBefore.capture.sourceRef.path, liveBefore.path, 'Snapshot was captured from a different file');
   assert.equal(liveAfter.path, liveBefore.path, 'Live mutation must target the same original file');
-  assert.deepEqual(snapshotBefore.delivered, { sha256: liveBefore.sha256, byteLength: liveBefore.byteLength },
-    'The captured projection did not match the original full file');
+  assert.equal(snapshotBefore.capture.hash, liveBefore.sha256, 'Capture hash did not match the original file bytes');
+  assert.equal(typeof expectedSourceText, 'string', 'Expected captured range text is required separately');
+  assert.equal(snapshotBefore.source.text, expectedSourceText, 'Captured range differs from its exact expected bytes');
   assert.notEqual(liveAfter.sha256, liveBefore.sha256, 'Live original was not actually changed');
   return true;
 }

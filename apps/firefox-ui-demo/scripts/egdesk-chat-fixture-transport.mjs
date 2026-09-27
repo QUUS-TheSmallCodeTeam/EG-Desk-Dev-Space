@@ -8,6 +8,7 @@ import { fileURLToPath } from 'node:url';
 import { randomUUID } from 'node:crypto';
 import { assertQaFixtureManifest } from './egdesk-chat-qa-profile.mjs';
 import { assertOrdinarySend } from './egdesk-chat-qa-contract.sys.mjs';
+import { createQaContextFixture } from './egdesk-context-qa-fixture.mjs';
 
 const PORT = 39218;
 const HOST = '127.0.0.1';
@@ -20,6 +21,10 @@ const fixture = assertQaFixtureManifest(profilePath);
 const profile = fixture.profile;
 const artifactRoot = fixture.root;
 const artifactPath = fixture.artifactPath;
+const context = createQaContextFixture(profile);
+let failNextCapture = false;
+let holdNextCapture = false;
+const heldCaptures = [];
 
 const streamId = randomUUID();
 let seq = 0;
@@ -82,7 +87,45 @@ function runState(run) {
   return { runId: run.runId, answerId: run.answerId, status: run.status,
     stopRequested: run.stopRequested, messages: [...run.messages.values()],
     activities: [...run.activities.values()], artifacts: [...run.artifacts],
-    pendingApprovals: [...run.pendingApprovals], error: run.error };
+    pendingApprovals: [...run.pendingApprovals], error: run.error,
+    ...(run.contextCaptures ? { contextCaptures: run.contextCaptures, contextEvents: run.contextEvents || [], briefing: run.briefing || null } : {}) };
+}
+
+function contextPhase(run, phase) {
+  if (run.scenario !== 'CONTEXT') throw new Error('Not a scoped context fixture run');
+  if (phase === 'read' && run.fixtureStage === 'context-bound') {
+    run.contextPackets = [];
+    for (const capture of run.contextCaptures) {
+      const details = { sourceId: capture.sourceId, toolName: 'egdesk_read_source', fixtureOnly: true };
+      envelope(run, 'context.read.started', details);
+      const packet = context.deliver(capture.sourceId, run, run.fixtureOwner);
+      run.contextPackets.push(packet);
+      const complete = { ...details, packetId: packet.packetId, hash: packet.hash };
+      envelope(run, 'context.read.completed', complete);
+      run.contextEvents.push({ event: 'context.read.completed', details: complete });
+    }
+    run.fixtureStage = 'context-read';
+    return;
+  }
+  if (phase === 'briefing' && run.fixtureStage === 'context-read') {
+    const messageId = `${run.runId}-message`;
+    const text = 'QA fixture answer: captured inputs remain separate from the changed live original.';
+    run.messages.set(messageId, { id: messageId, role: 'assistant', status: 'completed', text });
+    envelope(run, 'message.started', { messageId, phase: 'answer' }, messageId);
+    envelope(run, 'message.completed', { messageId, text, phase: 'answer' }, messageId);
+    run.briefing = { id: `qa-briefing-${run.runId}`, title: 'QA captured-input briefing', steps: run.contextCaptures.slice(0, 2).map((capture, index) => ({
+      id: `qa-step-${index + 1}`, text: `Captured input ${index + 1}; original version`,
+      target: { sourceId: capture.sourceId, range: index === 1 && capture.shape.lineCount >= 240
+        ? { startLine: 201, endLine: 240 } : { startLine: 1, endLine: Math.min(20, capture.shape.lineCount) } },
+      fallback: 'Preserved input is unavailable; do not replace it with a live source.',
+    })) };
+    envelope(run, 'briefing.published', { briefing: run.briefing });
+    run.status = 'completed';
+    envelope(run, 'run.completed', { status: 'completed' });
+    run.fixtureStage = 'terminal';
+    return;
+  }
+  throw new Error('Context release phase does not match current fixture state');
 }
 
 function conversationState(conversationId) {
@@ -188,15 +231,56 @@ const handler = async (req, res) => {
         '/chat/send', '/chat/interrupt', '/chat/approval', '/__qa/state', '/__qa/release',
         '/__qa/auth-refresh', '/__qa/reconnect', '/__qa/replay', '/auth/signout', '/__qa/hold-resume',
         '/__qa/release-resume', '/__qa/history', '/__qa/delta', '/__qa/auth-diagnostics', '/__qa/runtime-ready',
-        '/__qa/account-change', '/__qa/terminal-mode', '/terminal/spawn', '/terminal/read', '/terminal/kill', '/terminal/resize'];
-      return json(res, paths.includes(url.pathname) ? 204 : 404, {});
+        '/__qa/account-change', '/__qa/terminal-mode', '/terminal/spawn', '/terminal/read', '/terminal/kill', '/terminal/resize',
+        '/context/captures', '/__qa/context-config', '/__qa/context-release'];
+      return json(res, paths.includes(url.pathname) || /^\/context\/captures\/[\da-f-]{36}$/i.test(url.pathname) ? 204 : 404, {});
     }
     if (req.method === 'GET' && url.pathname === '/__qa/state') {
       if (req.headers['x-egdesk-qa-token'] !== token) return json(res, 403, { error: 'Fixture token required' });
       return json(res, 200, { fixture: true, profile, artifactRoot, artifactPath,
-        streamId, seq, clients: clients.size, observed,
+        streamId, seq, clients: clients.size, observed, context: context.stats, pendingContextCaptures: heldCaptures.length,
         runs: [...runs.values()].map((run) => ({ ...runState(run), conversationId: run.conversationId,
           requestId: run.requestId, clientThreadId: run.clientThreadId, fixtureStage: run.fixtureStage || null })) });
+    }
+    if (req.method === 'POST' && ['/__qa/context-config', '/__qa/context-release'].includes(url.pathname)) {
+      if (req.headers['x-egdesk-qa-token'] !== token) return json(res, 403, { error: 'Fixture token required' });
+      const body = await bodyJson(req);
+      if (url.pathname === '/__qa/context-config') {
+        failNextCapture = body.failNextCapture === true;
+        holdNextCapture = body.holdNextCapture === true;
+      }
+      else if (body.phase === 'capture') {
+        const index = heldCaptures.findIndex(item => item.clientThreadId === body.clientThreadId);
+        if (index < 0) return json(res, 409, { error: 'No held capture for that fixture wire thread' });
+        const pending = heldCaptures.splice(index, 1)[0];
+        json(pending.res, 200, pending.result);
+      }
+      else {
+        const run = runs.get(body.runId);
+        if (!run) return json(res, 404, { error: 'Unknown fixture run' });
+        contextPhase(run, body.phase);
+      }
+      return json(res, 200, { ok: true, fixtureOnly: true });
+    }
+    if (req.method === 'POST' && url.pathname === '/context/captures') {
+      if (!authLoggedIn) return json(res, 403, { error: 'Fixture account is signed out' });
+      if (failNextCapture) { failNextCapture = false; return json(res, 503, { code: 'QA_CAPTURE_FAILED', error: 'Explicit fixture capture failure' }); }
+      const body = await bodyJson(req);
+      const result = context.captureBatch(body, accountVariant);
+      if (holdNextCapture) {
+        holdNextCapture = false;
+        heldCaptures.push({ res, result, clientThreadId: body.clientThreadId });
+        return;
+      }
+      return json(res, 200, result);
+    }
+    const captureRoute = url.pathname.match(/^\/context\/captures\/([\da-f-]{36})$/i);
+    if (req.method === 'GET' && captureRoute) {
+      if (!authLoggedIn) return json(res, 403, { error: 'Fixture account is signed out' });
+      if ([...url.searchParams.keys()].some(key => !['startLine', 'endLine', 'packetId'].includes(key))) return json(res, 400, { error: 'Unknown inspector query field' });
+      const options = Object.fromEntries(['startLine', 'endLine'].filter(key => url.searchParams.has(key)).map(key => [key, Number(url.searchParams.get(key))]));
+      if (url.searchParams.has('packetId')) options.packetId = url.searchParams.get('packetId');
+      return json(res, 200, context.inspect(captureRoute[1], options, accountVariant));
     }
     if (req.method === 'POST' && url.pathname === '/__qa/release') {
       if (req.headers['x-egdesk-qa-token'] !== token) return json(res, 403, { error: 'Fixture token required' });
@@ -313,10 +397,10 @@ const handler = async (req, res) => {
     if (req.method === 'POST' && url.pathname === '/chat/send') {
       const body = await bodyJson(req);
       assertOrdinarySend(body);
-      if (!/^EGDESK_QA_(COMPLETE|TEXT_ONLY|STOP|APPROVAL|LOST|START_FAIL|REJECT|AMBIGUOUS)\b/.test(body.message)) {
+      if (!/^EGDESK_QA_(COMPLETE|TEXT_ONLY|STOP|APPROVAL|LOST|START_FAIL|REJECT|AMBIGUOUS|CONTEXT)\b/.test(body.message)) {
         return json(res, 400, { error: 'Fixture accepts only explicit EGDESK_QA_* messages' });
       }
-      let scenario = body.message.match(/^EGDESK_QA_(COMPLETE|TEXT_ONLY|STOP|APPROVAL|LOST|START_FAIL|REJECT|AMBIGUOUS)\b/)[1];
+      let scenario = body.message.match(/^EGDESK_QA_(COMPLETE|TEXT_ONLY|STOP|APPROVAL|LOST|START_FAIL|REJECT|AMBIGUOUS|CONTEXT)\b/)[1];
       if (scenario === 'REJECT' || scenario === 'AMBIGUOUS') {
         observed.sends.push({ ...body, scenario, outcome: scenario === 'REJECT' ? 'definite-rejection' : 'ambiguous-no-run' });
         if (scenario === 'REJECT') return json(res, 503, { accepted: false, code: 'BRIDGE_OFFLINE', error: 'QA definite rejection', conversationId: body.conversationId || null });
@@ -346,10 +430,19 @@ const handler = async (req, res) => {
         messages: new Map([[`${runId}-native-user`, { id: `${runId}-native-user`, role: 'user',
           text: body.message, content: body.message, status: 'completed', createdAt: Date.now() }]]),
         activities: new Map(), artifacts: [], pendingApprovals: [], error: null };
+      if (scenario === 'CONTEXT') {
+        if (Object.keys(body.contextCapabilities || {}).length !== 3
+            || !['read', 'reader', 'publishBriefing'].every(key => body.contextCapabilities[key] === true)) throw new Error('Explicit context capabilities required');
+        run.fixtureOwner = accountVariant;
+        run.contextCaptures = context.bind(body.contextSnapshotIds, run, accountVariant);
+        run.contextEvents = [];
+        run.fixtureStage = 'context-bound';
+      }
       runs.set(runId, run);
       const observedSend = { ...body, scenario, runId, acceptedAt: Date.now() };
       observed.sends.push(observedSend);
       envelope(run, 'run.started'); // Deliberately before the POST response.
+      if (scenario === 'CONTEXT') envelope(run, 'context.bound', { captures: run.contextCaptures });
       setTimeout(() => {
         json(res, 202, { accepted: true, conversationId, requestId, runId, answerId: run.answerId });
         observedSend.respondedAt = Date.now();
@@ -357,7 +450,7 @@ const handler = async (req, res) => {
         else if (scenario === 'TEXT_ONLY') textOnlyScenario(run);
         else if (scenario === 'STOP') stopScenario(run);
         else if (scenario === 'APPROVAL') approvalScenario(run);
-        else unavailableScenario(run);
+        else if (scenario !== 'CONTEXT') unavailableScenario(run);
       }, 80);
       return;
     }
@@ -410,7 +503,7 @@ const handler = async (req, res) => {
     }
     return json(res, 404, { error: 'Fixture route not found' });
   } catch (error) {
-    return json(res, 400, { error: error.message });
+    return json(res, error.httpStatus || 400, { error: error.message, ...(error.code ? { code: error.code } : {}) });
   }
 };
 return { handler, info: { kind: 'egdesk-qa-fixture-ready', host: HOST, port: PORT,

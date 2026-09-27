@@ -4,7 +4,7 @@ import path from 'node:path';
 import test from 'node:test';
 import { assertQaProfile, bootstrapQaProfile, canonicalTempRoot,
   assertQaFixtureManifest, LOADER_FILES, QA_MARKER_BYTES, QA_MARKER_NAME,
-  QA_FIXTURE_DIRECTORY, QA_FIXTURE_FILE, QA_FIXTURE_MANIFEST, QA_REAL_TURN_DIRECTORY, deskRecoveryFixture } from './egdesk-chat-qa-profile.mjs';
+  QA_FIXTURE_DIRECTORY, QA_FIXTURE_FILE, QA_FIXTURE_MANIFEST, QA_REAL_TURN_DIRECTORY, QA_BACKEND_DATA_DIRECTORY, deskRecoveryFixture } from './egdesk-chat-qa-profile.mjs';
 import { assertQaEvidenceDirectory, chooseNativeScrollKey, contextIdFromList, createQaEvidenceDirectory, firstSnapshotUid,
   decodeQaEvaluationResult, FirefoxMcpChatHarness, mcpResultText, parseMcpJson } from './firefox-mcp-chat-harness.mjs';
 import { assertQaFixtureArtifact } from './egdesk-chat-qa-contract.sys.mjs';
@@ -29,9 +29,11 @@ test('bootstrap copies only allowlisted loader utilities into a guarded mkdtemp 
   assert.deepEqual(fs.readdirSync(path.join(result.profile, 'chrome', 'utils')).sort(), [...LOADER_FILES].sort());
   assert.deepEqual(fs.readFileSync(path.join(result.profile, QA_MARKER_NAME)), QA_MARKER_BYTES);
   assert.deepEqual(fs.readdirSync(path.join(result.profile, QA_FIXTURE_DIRECTORY)).sort(),
-    [QA_FIXTURE_FILE, QA_FIXTURE_MANIFEST, QA_REAL_TURN_DIRECTORY].sort());
+    [QA_FIXTURE_FILE, QA_FIXTURE_MANIFEST, QA_REAL_TURN_DIRECTORY, QA_BACKEND_DATA_DIRECTORY].sort());
   assert.equal(assertQaFixtureManifest(result.profile).realTurnCwd, result.realTurnCwd);
   assert.deepEqual(fs.readdirSync(result.realTurnCwd), []);
+  assert.equal(assertQaFixtureManifest(result.profile).backendDataDir, result.backendDataDir);
+  assert.deepEqual(fs.readdirSync(result.backendDataDir), []);
   assert.equal(assertQaFixtureManifest(result.profile).artifactPath, result.fixtureArtifact);
   for (const name of LOADER_FILES) {
     assert.equal(fs.readFileSync(path.join(result.profile, 'chrome', 'utils', name), 'utf8'), `loader fixture: ${name}\n`);
@@ -44,6 +46,9 @@ test('bootstrap copies only allowlisted loader utilities into a guarded mkdtemp 
     { ...artifact, target: { path: path.join(source, LOADER_FILES[0]) } }), /manifest-bound/);
   const manifestPath = path.join(result.profile, QA_FIXTURE_DIRECTORY, QA_FIXTURE_MANIFEST);
   const originalManifest = fs.readFileSync(manifestPath, 'utf8');
+  fs.writeFileSync(manifestPath, JSON.stringify({ ...JSON.parse(originalManifest), backendDataDir: '/tmp/not-the-bound-directory' }));
+  assert.throws(() => assertQaFixtureManifest(result.profile), /backend data directory/);
+  fs.writeFileSync(manifestPath, originalManifest);
   fs.writeFileSync(manifestPath, JSON.stringify({ ...JSON.parse(originalManifest), artifactPath: '/tmp/unbound.txt' }));
   assert.throws(() => assertQaFixtureManifest(result.profile), /not bound/);
   fs.writeFileSync(manifestPath, originalManifest);

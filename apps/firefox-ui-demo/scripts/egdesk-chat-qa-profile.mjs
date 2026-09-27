@@ -12,6 +12,7 @@ export const QA_FIXTURE_DIRECTORY = 'qa-fixtures';
 export const QA_FIXTURE_FILE = 'fixture-reference.txt';
 export const QA_FIXTURE_MANIFEST = 'manifest.json';
 export const QA_REAL_TURN_DIRECTORY = 'real-turn';
+export const QA_BACKEND_DATA_DIRECTORY = 'backend-data';
 export const LOADER_FILES = Object.freeze([
   'boot.sys.mjs',
   'chrome.manifest',
@@ -44,7 +45,9 @@ export function qaProfileSourceFingerprints(profilePath) {
   const profile = assertQaProfile(profilePath);
   const names = ['JS/eg-desk-surface.uc.js', 'CSS/eg-desk-surface.uc.css',
     'resources/EGDeskSurfaceState.sys.mjs', 'resources/EGDeskRecoveryState.sys.mjs',
-    'resources/EGDeskChatState.sys.mjs', 'resources/EGDeskTerminalState.sys.mjs', 'resources/terminal.html'];
+    'resources/EGDeskChatState.sys.mjs', 'resources/EGDeskTerminalState.sys.mjs', 'resources/terminal.html',
+    'resources/egdesk-terminal-init.js', 'resources/EGDeskMarkdown.sys.mjs',
+    'resources/EGDeskInputContext.sys.mjs', 'resources/EGDeskBriefingState.sys.mjs'];
   return Object.fromEntries(names.map(name => {
     const file = path.join(profile, 'chrome', name);
     if (!fs.existsSync(file)) return [name, null];
@@ -151,9 +154,11 @@ export function bootstrapQaProfile({ loaderSource = DEFAULT_LOADER_SOURCE, deskR
       { flag: 'wx', mode: 0o600 });
     const realTurnCwd = path.join(fixtureRoot, QA_REAL_TURN_DIRECTORY);
     fs.mkdirSync(realTurnCwd, { mode: 0o700 });
+    const backendDataDir = path.join(fixtureRoot, QA_BACKEND_DATA_DIRECTORY);
+    fs.mkdirSync(backendDataDir, { mode: 0o700 });
     fs.writeFileSync(path.join(fixtureRoot, QA_FIXTURE_MANIFEST),
       `${JSON.stringify({ kind: 'egdesk-chat-qa-fixture-v1', profile,
-        artifactPath: fixtureArtifact, realTurnCwd, ...(recovery ? { deskRecovery: recovery } : {}) })}\n`, { flag: 'wx', mode: 0o600 });
+        artifactPath: fixtureArtifact, realTurnCwd, backendDataDir, ...(recovery ? { deskRecovery: recovery } : {}) })}\n`, { flag: 'wx', mode: 0o600 });
     if (recovery) {
       // Seed once in this newly created profile. Using prefs.js lets an explicit
       // recovery decision persist normally on later startups; user.js would
@@ -164,7 +169,7 @@ export function bootstrapQaProfile({ loaderSource = DEFAULT_LOADER_SOURCE, deskR
     }
     assertQaProfile(profile);
     assertQaFixtureManifest(profile);
-    return { profile, loaderFiles: [...LOADER_FILES], fixtureArtifact, realTurnCwd, ...(recovery ? { deskRecovery: recovery.kind } : {}) };
+    return { profile, loaderFiles: [...LOADER_FILES], fixtureArtifact, realTurnCwd, backendDataDir, ...(recovery ? { deskRecovery: recovery.kind } : {}) };
   } catch (error) {
     // Preserve the exact temporary directory for inspection rather than
     // recursively deleting a path after a partial safety failure.
@@ -207,5 +212,14 @@ export function assertQaFixtureManifest(profilePath) {
       refuse('real-turn cwd must be bound to the manifest fixture root');
     }
   }
-  return { profile, root, manifestPath, artifactPath, realTurnCwd, deskRecovery: manifest.deskRecovery || null };
+  let backendDataDir = null;
+  if (manifest.backendDataDir) {
+    backendDataDir = path.join(root, QA_BACKEND_DATA_DIRECTORY);
+    const info = fs.lstatSync(backendDataDir);
+    if (manifest.backendDataDir !== backendDataDir || !info.isDirectory() || info.isSymbolicLink()
+        || info.uid !== process.getuid() || (info.mode & 0o022) !== 0 || fs.realpathSync.native(backendDataDir) !== backendDataDir) {
+      refuse('backend data directory must be bound to the manifest fixture root');
+    }
+  }
+  return { profile, root, manifestPath, artifactPath, realTurnCwd, backendDataDir, deskRecovery: manifest.deskRecovery || null };
 }

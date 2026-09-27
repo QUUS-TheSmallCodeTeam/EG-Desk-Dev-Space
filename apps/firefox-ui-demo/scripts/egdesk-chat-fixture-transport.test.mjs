@@ -6,6 +6,8 @@ import test from 'node:test';
 import { bootstrapQaProfile, canonicalTempRoot, LOADER_FILES } from './egdesk-chat-qa-profile.mjs';
 import { createQaFixtureTransport } from './egdesk-chat-fixture-transport.mjs';
 import { assertNativeTerminalExit } from './egdesk-chat-qa-contract.sys.mjs';
+import { assertBriefingTargets, assertContextCaptureBatch, assertStoredAgentDelivery,
+  captureContextReadEvidence, fingerprintQaBytes } from './egdesk-context-qa-contract.mjs';
 
 const TOKEN = 'unit-fixture-token-no-credentials';
 
@@ -134,4 +136,117 @@ test('Terminal fixture is explicit and missing-session output never becomes nati
   assert.equal(missing.body.exitConfirmed, false);
   assert.throws(() => assertNativeTerminalExit(killed.body, sessionId));
   assert.throws(() => assertNativeTerminalExit(missing.body, sessionId));
+});
+
+const attachment = (id, sourceRef, kind = 'file', text = '') => ({ id, kind, label: `QA ${id}`, sourceRef,
+  capturedAt: 1700000000000, captureScope: { type: kind === 'file' ? 'file' : kind === 'browser' ? 'document-text' : 'board-selection' },
+  ...(kind === 'file' ? {} : { content: { mime: 'text/plain', text, truncated: false } }) });
+
+test('final fixture GET paginates immutable source bytes without live rereads or claimed delivery', async t => {
+  const { handler, info } = setup(t);
+  const file = path.join(info.profile, 'qa-fixtures', 'context-original.txt');
+  const lines = Array.from({ length: 610 }, (_, index) => `QA_OLD_${index + 1}`);
+  const original = lines.join('\n');
+  fs.writeFileSync(file, original, { flag: 'wx', mode: 0o600 });
+  const body = { clientThreadId: 'wire-A', attachments: [{ ...attachment('file-A', { path: file }),
+    content: { mime: 'text/plain', text: 'must not replace actual file bytes', truncated: false } }] };
+  const capture = await request(handler, 'POST', '/context/captures', body);
+  assert.equal(capture.status, 200);
+  assert.equal(assertContextCaptureBatch(body, capture.body), true);
+  const ref = capture.body.captures[0];
+  assert.equal(ref.hash, fingerprintQaBytes(original).sha256);
+  const first = await request(handler, 'GET', `/context/captures/${ref.sourceId}`);
+  assert.equal(first.status, 200);
+  assert.equal(captureContextReadEvidence(first.body).source.text, lines.slice(0, 200).join('\n'));
+  assert.equal(first.body.source.nextLine, 201);
+  assert.equal(first.body.delivered, null);
+  assert.deepEqual(first.body.bindings, []);
+  fs.writeFileSync(file, 'QA_NEW_LIVE_CONTENT\n');
+  const page = await request(handler, 'GET', `/context/captures/${ref.sourceId}?startLine=201&endLine=240`);
+  assert.equal(captureContextReadEvidence(page.body).source.text, lines.slice(200, 240).join('\n'));
+  assert.equal(page.body.source.hash, ref.hash);
+  assert.equal(page.body.source.rangeHash, fingerprintQaBytes(lines.slice(200, 240).join('\n')).sha256);
+  assert.equal((await request(handler, 'GET', `/context/captures/${ref.sourceId}?startLine=1&endLine=501`)).status, 400);
+  assert.equal((await request(handler, 'GET', `/context/captures/${ref.sourceId}?unknown=true`)).status, 400);
+  const final = await request(handler, 'GET', `/context/captures/${ref.sourceId}?startLine=601`);
+  assert.equal(final.body.source.nextLine, null);
+  const stats = (await request(handler, 'GET', '/__qa/state', null, TOKEN)).body;
+  assert.equal(stats.context.captureBatches, 1);
+  assert.equal(stats.context.fileCaptureOperations, 1);
+  assert.equal(stats.context.inspectorReads.length, 3);
+  assert.equal(stats.context.deliveries.length, 0);
+  assert.equal(stats.observed.sends.length, 0);
+});
+
+test('fixture capture rejects out-of-root files and remains isolated across synthetic accounts', async t => {
+  const fetchSpy = t.mock.method(globalThis, 'fetch', () => { throw new Error('Fixture must not forward HTTP'); });
+  const { handler, info } = setup(t);
+  assert.equal((await request(handler, 'POST', '/context/captures', { clientThreadId: 'wire-A', attachments: [attachment('outside', { path: '/etc/hosts' })] })).status, 400);
+  const alias = path.join(info.profile, 'qa-fixtures', 'outside-link');
+  fs.symlinkSync('/etc/hosts', alias);
+  assert.equal((await request(handler, 'POST', '/context/captures', { clientThreadId: 'wire-A', attachments: [attachment('alias', { path: alias })] })).status, 400);
+  const body = { clientThreadId: 'wire-A', attachments: [attachment('browser', { url: 'https://example.invalid/qa', viewId: 'qa-browser' }, 'browser', 'Visible QA text'),
+    attachment('board', { viewId: 'qa-shape' }, 'board', 'Selected QA Board element')] };
+  const result = await request(handler, 'POST', '/context/captures', body);
+  assert.equal(assertContextCaptureBatch(body, result.body), true);
+  await request(handler, 'POST', '/__qa/account-change', { variant: 'b' }, TOKEN);
+  assert.equal((await request(handler, 'GET', `/context/captures/${result.body.captures[0].sourceId}`)).status, 404);
+  assert.equal(fetchSpy.mock.callCount(), 0);
+});
+
+test('fixture context handoff records separate exact packets and same-answer Briefing only after explicit release', async t => {
+  const { handler } = setup(t);
+  const body = { clientThreadId: 'wire-A', attachments: [attachment('A', { viewId: 'qa-A' }, 'browser', 'First captured source'),
+    attachment('B', { viewId: 'qa-B' }, 'board', 'Second captured source')] };
+  const captures = (await request(handler, 'POST', '/context/captures', body)).body.captures;
+  const sent = await request(handler, 'POST', '/chat/send', { message: 'EGDESK_QA_CONTEXT unit', profileEnabled: false,
+    clientThreadId: 'wire-A', requestId: 'request-A', contextSnapshotIds: captures.map(c => c.sourceId),
+    contextCapabilities: { publishBriefing: true, read: true, reader: true } });
+  assert.equal(sent.status, 202);
+  const identity = sent.body;
+  const first = await request(handler, 'GET', `/context/captures/${captures[0].sourceId}`);
+  assert.equal(first.body.delivered, null);
+  assert.equal(first.body.bindings[0].answerId, identity.answerId);
+  assert.equal((await request(handler, 'POST', '/__qa/context-release', { runId: identity.runId, phase: 'read' })).status, 403);
+  await request(handler, 'POST', '/__qa/context-release', { runId: identity.runId, phase: 'read' }, TOKEN);
+  const state = (await request(handler, 'GET', '/__qa/state', null, TOKEN)).body;
+  const observed = state.context.deliveries[0];
+  const inspected = captureContextReadEvidence((await request(handler, 'GET', `/context/captures/${captures[0].sourceId}?packetId=${observed.packet.packetId}`)).body);
+  assert.equal(assertStoredAgentDelivery(inspected.delivered, { packetId: observed.packet.packetId,
+    binding: { conversationId: identity.conversationId, runId: identity.runId, answerId: identity.answerId }, expectedToolText: observed.packet.text }), true);
+  assert.notEqual(inspected.source.text, inspected.delivered.text);
+  assert.equal(observed.fixtureOnly, true); // Never a real native-tool assertion.
+  assert.equal((await request(handler, 'GET', `/context/captures/${captures[0].sourceId}?packetId=missing`)).status, 404);
+  await request(handler, 'POST', '/__qa/context-release', { runId: identity.runId, phase: 'briefing' }, TOKEN);
+  const run = (await request(handler, 'GET', `/chat/state?conversationId=${identity.conversationId}`)).body.runs[0];
+  assert.equal(run.status, 'completed');
+  assert.equal(assertBriefingTargets(run.briefing, { sourceIds: captures.map(c => c.sourceId) }), true);
+  assert.equal((await request(handler, 'GET', '/__qa/state', null, TOKEN)).body.observed.sends.length, 1);
+});
+
+test('one configured fixture capture failure cannot create a send or silently retry capture', async t => {
+  const { handler } = setup(t);
+  await request(handler, 'POST', '/__qa/context-config', { failNextCapture: true }, TOKEN);
+  const body = { clientThreadId: 'wire-A', attachments: [attachment('A', { viewId: 'qa-A' }, 'browser', 'QA')] };
+  assert.equal((await request(handler, 'POST', '/context/captures', body)).status, 503);
+  const first = (await request(handler, 'GET', '/__qa/state', null, TOKEN)).body;
+  assert.equal(first.context.captureBatches, 0);
+  assert.equal(first.observed.sends.length, 0);
+  assert.equal((await request(handler, 'POST', '/context/captures', body)).status, 200);
+  assert.equal((await request(handler, 'GET', '/__qa/state', null, TOKEN)).body.context.captureBatches, 1);
+});
+
+test('delayed capture fixture releases only the selected wire thread and never creates a model send', async t => {
+  const { handler } = setup(t);
+  await request(handler, 'POST', '/__qa/context-config', { holdNextCapture: true }, TOKEN);
+  const body = { clientThreadId: 'wire-A', attachments: [attachment('A', { viewId: 'qa-A' }, 'browser', 'QA held')] };
+  const pending = request(handler, 'POST', '/context/captures', body);
+  await new Promise(resolve => setImmediate(resolve));
+  assert.equal((await request(handler, 'GET', '/__qa/state', null, TOKEN)).body.pendingContextCaptures, 1);
+  assert.equal((await request(handler, 'POST', '/__qa/context-release', { phase: 'capture', clientThreadId: 'wire-B' }, TOKEN)).status, 409);
+  assert.equal((await request(handler, 'POST', '/__qa/context-release', { phase: 'capture', clientThreadId: 'wire-A' }, TOKEN)).status, 200);
+  assert.equal((await pending).status, 200);
+  const state = (await request(handler, 'GET', '/__qa/state', null, TOKEN)).body;
+  assert.equal(state.pendingContextCaptures, 0);
+  assert.equal(state.observed.sends.length, 0);
 });

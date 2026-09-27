@@ -4,7 +4,7 @@ import path from 'node:path';
 import test from 'node:test';
 import { assertBriefingTargets, assertContextCaptureBatch, assertContextEventIdentity, assertContextSendBindings,
   assertFrozenFileReadAfterMutation, assertImmutableContextRead, captureContextReadEvidence,
-  fingerprintQaBytes, observeQaFixtureFile } from './egdesk-context-qa-contract.mjs';
+  assertStoredAgentDelivery, fingerprintQaBytes, observeQaFixtureFile, readContextInspectionPage } from './egdesk-context-qa-contract.mjs';
 import { bootstrapQaProfile, canonicalTempRoot, LOADER_FILES } from './egdesk-chat-qa-profile.mjs';
 
 // Synthetic metadata tests QA oracles only, never production capture/tool handling.
@@ -12,6 +12,15 @@ const metadata = (file = '/unused/qa.txt') => ({ id: 'attachment-A', sourceId: '
   hash: 'server-opaque-hash', capturedAt: 1700000000000, captureScope: { type: 'file' }, truncated: false,
   sourceRef: { kind: 'file', resourceId: 'resource-A', path: file, revision: 1 },
   shape: { mime: 'text/plain', coverage: 'full' } });
+
+function inspection(capture, text, { startLine = 1, totalLines = text.split('\n').length, delivered = null, bindings = [] } = {}) {
+  const endLine = startLine + text.split('\n').length - 1;
+  return { capture, source: { role: 'source', mime: 'text/plain', hash: capture.hash,
+    rangeHash: fingerprintQaBytes(text).sha256, text, range: { startLine, endLine, totalLines },
+    nextLine: endLine < totalLines ? endLine + 1 : null }, delivered, bindings };
+}
+
+const evidence = (capture, text) => captureContextReadEvidence(inspection(capture, text));
 
 function fixture(t) {
   const source = fs.mkdtempSync(path.join(canonicalTempRoot(), 'egdesk-loader-fixture-'));
@@ -62,15 +71,16 @@ test('file evidence is bound to the guarded manifest, not caller-selected roots 
 
 test('capture observations copy metadata and keep server hashes distinct from QA byte hashes', () => {
   const input = metadata();
-  const evidence = captureContextReadEvidence(input, 'original\n');
+  const observed = evidence(input, 'original\n');
   input.sourceRef.revision = 2;
-  assert.equal(evidence.capture.sourceRef.revision, 1);
-  assert.equal(evidence.capture.hash, 'server-opaque-hash');
-  assert.equal(evidence.delivered.sha256, fingerprintQaBytes('original\n').sha256);
-  assert.throws(() => { evidence.capture.sourceRef.revision = 2; }, TypeError);
-  assert.throws(() => captureContextReadEvidence({ ...metadata(), snapshotId: '' }, 'x'), /snapshotId/);
-  assert.throws(() => captureContextReadEvidence({ ...metadata(), captureScope: { type: 'guessed' } }, 'x'), /Unknown capture/);
-  assert.throws(() => captureContextReadEvidence({ snapshotId: 'legacy', contentHash: 'legacy', source: {} }, 'x'), /attachment id/);
+  assert.equal(observed.capture.sourceRef.revision, 1);
+  assert.equal(observed.capture.hash, 'server-opaque-hash');
+  assert.equal(observed.source.rangeHash, fingerprintQaBytes('original\n').sha256);
+  assert.equal(observed.delivered, null);
+  assert.throws(() => { observed.capture.sourceRef.revision = 2; }, TypeError);
+  assert.throws(() => evidence({ ...metadata(), snapshotId: '' }, 'x'), /snapshotId/);
+  assert.throws(() => evidence({ ...metadata(), captureScope: { type: 'guessed' } }, 'x'), /Unknown capture/);
+  assert.throws(() => evidence({ snapshotId: 'legacy', contentHash: 'legacy', source: {} }, 'x'), /attachment id/);
 });
 
 test('batch v1 receipts correlate attachment IDs and reject the superseded single-source request', () => {
@@ -106,25 +116,81 @@ test('old full-file read evidence remains fixed while the same live fixture actu
   const original = 'QA_OLD_INPUT\n';
   fs.writeFileSync(file, original, { mode: 0o600 });
   const liveBefore = observeQaFixtureFile(profile, file);
-  const snapshotBefore = captureContextReadEvidence(metadata(file), original);
+  const capture = { ...metadata(file), hash: liveBefore.sha256 };
+  const snapshotBefore = evidence(capture, original);
   fs.writeFileSync(file, 'QA_CHANGED_LIVE\n'); // Deliberate unit fixture mutation, not a provider/tool operation.
   const liveAfter = observeQaFixtureFile(profile, file);
-  const snapshotAfter = captureContextReadEvidence(metadata(file), original);
-  assert.equal(assertFrozenFileReadAfterMutation({ snapshotBefore, snapshotAfter, liveBefore, liveAfter }), true);
+  const snapshotAfter = evidence(capture, original);
+  assert.equal(assertFrozenFileReadAfterMutation({ snapshotBefore, snapshotAfter, liveBefore, liveAfter, expectedSourceText: original }), true);
   assert.equal(fs.readFileSync(file, 'utf8'), 'QA_CHANGED_LIVE\n');
 });
 
 test('stale snapshot oracle rejects live rereads, rewritten metadata and unchanged mutation controls', () => {
-  const snapshotBefore = captureContextReadEvidence(metadata(), 'old\n');
+  const capture = { ...metadata(), hash: fingerprintQaBytes('old\n').sha256 };
+  const snapshotBefore = evidence(capture, 'old\n');
   const liveBefore = { path: '/unused/qa.txt', ...fingerprintQaBytes('old\n') };
   const liveAfter = { path: liveBefore.path, ...fingerprintQaBytes('changed\n') };
-  const values = { snapshotBefore, snapshotAfter: snapshotBefore, liveBefore, liveAfter };
-  assert.throws(() => assertImmutableContextRead(snapshotBefore, captureContextReadEvidence(metadata(), 'changed\n')), /Immutable/);
-  assert.throws(() => assertImmutableContextRead(snapshotBefore, captureContextReadEvidence({ ...metadata(), hash: 'rewritten' }, 'old\n')), /Immutable/);
+  const values = { snapshotBefore, snapshotAfter: snapshotBefore, liveBefore, liveAfter, expectedSourceText: 'old\n' };
+  assert.throws(() => assertImmutableContextRead(snapshotBefore, evidence(capture, 'changed\n')), /Immutable/);
+  assert.throws(() => assertImmutableContextRead(snapshotBefore, evidence({ ...capture, hash: 'rewritten' }, 'old\n')), /Immutable/);
   assert.throws(() => assertFrozenFileReadAfterMutation({ ...values, liveAfter: liveBefore }), /not actually changed/);
   assert.throws(() => assertFrozenFileReadAfterMutation({ ...values, liveAfter: { path: liveBefore.path } }), /observed SHA-256/);
   assert.throws(() => assertFrozenFileReadAfterMutation({ ...values, liveAfter: { ...liveAfter, path: '/unused/other.txt' } }), /same original/);
   assert.throws(() => assertFrozenFileReadAfterMutation({ ...values, liveBefore: { ...liveBefore, ...fingerprintQaBytes('wrong original') } }), /did not match/);
+});
+
+test('final inspector rejects interim projection-only responses and altered range bytes', () => {
+  const valid = inspection(metadata(), 'line one\nline two');
+  assert.equal(captureContextReadEvidence(valid).source.role, 'source');
+  assert.throws(() => captureContextReadEvidence({ capture: metadata(), role: 'projection', text: 'old shape' }), /source.role/);
+  assert.throws(() => captureContextReadEvidence({ ...valid, source: { ...valid.source, rangeHash: 'wrong' } }), /range hash/);
+  assert.throws(() => captureContextReadEvidence({ ...valid, source: { ...valid.source, nextLine: 1 } }), /nextLine/);
+  assert.throws(() => captureContextReadEvidence({ ...valid, delivered: undefined }), /agent_input/);
+});
+
+test('source pagination is one explicit GET at a time, never an automatic full-source read', async () => {
+  const lines = Array.from({ length: 610 }, (_, index) => `captured line ${index + 1}`);
+  const capture = { ...metadata(), hash: fingerprintQaBytes(lines.join('\n')).sha256 };
+  const calls = [];
+  const readGet = async route => {
+    calls.push(route);
+    const url = new URL(route, 'http://qa.invalid');
+    assert.equal(url.pathname, '/context/captures/source-A');
+    const startLine = Number(url.searchParams.get('startLine') || 1);
+    const endLine = Number(url.searchParams.get('endLine') || Math.min(lines.length, startLine + 199));
+    return inspection(capture, lines.slice(startLine - 1, endLine).join('\n'), { startLine, totalLines: lines.length });
+  };
+  const first = await readContextInspectionPage(readGet, { sourceId: 'source-A' });
+  assert.equal(calls.length, 1);
+  assert.equal(first.source.nextLine, 201);
+  assert.equal(first.source.range.endLine, 200);
+  const second = await readContextInspectionPage(readGet, { sourceId: 'source-A', startLine: 201, endLine: 240 });
+  assert.equal(calls.length, 2);
+  assert.equal(second.source.text, lines.slice(200, 240).join('\n'));
+  assert.equal(second.source.range.totalLines, 610);
+  await assert.rejects(readContextInspectionPage(readGet, { sourceId: 'source-A', startLine: 1, endLine: 501 }), /500 lines/);
+  assert.equal(calls.length, 2);
+});
+
+test('stored agent packet evidence is distinct from captured source and requires exact observed tool text', async () => {
+  const binding = { conversationId: 'conversation-A', runId: 'run-A', answerId: 'conversation-A/run-A' };
+  const expectedToolText = JSON.stringify({ fixtureOnly: true, sourceId: 'source-A', selected: 'one bounded excerpt' });
+  const packet = { role: 'agent_input', packetId: 'packet-A', mime: 'application/json',
+    hash: fingerprintQaBytes(expectedToolText).sha256, text: expectedToolText, mode: 'fixture-only',
+    coverage: { sourceId: 'source-A', startLine: 1, endLine: 1 }, deliveryStatus: 'sent-to-app-server', binding };
+  const before = evidence(metadata(), 'full captured source\n');
+  const after = captureContextReadEvidence(inspection(metadata(), 'full captured source\n', {
+    delivered: packet, bindings: [{ bindingId: 'binding-A', ...binding }],
+  }));
+  assert.equal(assertImmutableContextRead(before, after), true);
+  assert.notEqual(after.source.text, after.delivered.text);
+  assert.equal(assertStoredAgentDelivery(after.delivered, { packetId: 'packet-A', binding, expectedToolText }), true);
+  assert.throws(() => assertStoredAgentDelivery(after.delivered, { packetId: 'packet-A', binding, expectedToolText: after.source.text }), /exact named tool response/);
+  assert.throws(() => assertStoredAgentDelivery(null, { packetId: 'packet-A', binding, expectedToolText }), /agent_input/);
+  assert.throws(() => captureContextReadEvidence({ ...after, delivered: { ...packet, hash: 'changed' } }), /packet hash/);
+  assert.throws(() => captureContextReadEvidence({ ...after, bindings: [] }), /matching stored binding/);
+  assert.equal((await readContextInspectionPage(async () => after, { sourceId: 'source-A', packetId: 'packet-A' })).delivered.packetId, 'packet-A');
+  await assert.rejects(readContextInspectionPage(async () => after, { sourceId: 'source-A', packetId: 'packet-B' }), /historical packet/);
 });
 
 test('all context/reader/Briefing phases retain the actual conversation/run/answer identity', () => {
