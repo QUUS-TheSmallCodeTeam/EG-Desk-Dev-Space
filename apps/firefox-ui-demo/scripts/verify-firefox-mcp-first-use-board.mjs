@@ -5,10 +5,10 @@ import { assertNativeTerminalExit, recoveryMarkerMatches } from './egdesk-chat-q
 import { attributeSelector, chrome, loopbackJson, option, runUiFlow, selectorForId, visible, waitUntil } from './egdesk-qa-ui-flow.mjs';
 
 const scenario = option('--case', 'first-use');
-const known = ['first-use', 'board-open', 'board-reopen', 'board-close', 'board-collision', 'supported-views',
+const known = ['first-use', 'first-use-zoomout', 'board-open', 'board-reopen', 'board-close', 'board-collision', 'supported-views',
   'terminal-real-exit', 'terminal-unknown', 'recovery', 'recovery-restored'];
 if (!known.includes(scenario)) throw new Error(`--case must be one of: ${known.join(', ')}`);
-if (scenario !== 'first-use' && process.env.EGDESK_QA_STATE_FIXTURES !== '1') {
+if (!['first-use', 'first-use-zoomout'].includes(scenario) && process.env.EGDESK_QA_STATE_FIXTURES !== '1') {
   throw new Error('Board/recovery fixtures require EGDESK_QA_STATE_FIXTURES=1');
 }
 if (scenario === 'terminal-real-exit' && process.env.EGDESK_QA_REAL_TERMINAL !== '1') {
@@ -73,7 +73,7 @@ async function boardObservation(harness, boardId) {
 
 await runUiFlow(`rendered-ui-${scenario}`, async ({ harness, check, capture, result }) => {
   const manifest = assertQaFixtureManifest(harness.profile);
-  result.fixtureMode = scenario === 'first-use' ? 'fresh-profile' : 'explicit-temp-state';
+  result.fixtureMode = ['first-use', 'first-use-zoomout'].includes(scenario) ? 'fresh-profile' : 'explicit-temp-state';
   if (scenario === 'recovery' || scenario === 'recovery-restored') {
     check('bootstrap contains an intentional recovery fixture', !!manifest.deskRecovery);
     const marker = `qa-recovery-new-${manifest.deskRecovery.kind}`;
@@ -132,59 +132,89 @@ await runUiFlow(`rendered-ui-${scenario}`, async ({ harness, check, capture, res
   }
   check('profile has no recovery fixture for normal UI cases', !manifest.deskRecovery);
 
-  if (scenario === 'first-use') {
-    await visible(harness, '[data-testid="first-use-root"]');
-    await waitUntil(() => chrome(harness, () => document.activeElement === document.getElementById('egd-first-use-address')), Boolean);
-    check('first-use address bar receives initial keyboard focus', true);
-    const initialChrome = await harness.inspect('#egd-canvas-viewport, #egd-desk-rail, #egd-preset-bag, #egd-dock');
-    check('first-use Browser hides Canvas chrome, top bar, sidebar and dock',
-      initialChrome.length === 4 && initialChrome.every((node) => !node.visible));
-    await waitUntil(() => chrome(harness, () => {
-      const api = window.__egdesk;
-      const card = document.getElementById(api.surface.snapshot().browserCardId);
-      return Number.isFinite(card?._fixedLogicalHeight) && card._fixedLogicalHeight > 0 && card?._xulBrowser?.clientWidth > 0;
-    }), Boolean);
-    const initial = await chrome(harness, () => {
+  if (scenario === 'first-use' || scenario === 'first-use-zoomout') {
+    const observe = () => chrome(harness, () => {
       const api = window.__egdesk;
       const snapshot = api.surface.snapshot();
-      const card = document.getElementById(snapshot.browserCardId);
-      window.__egdeskFirstUseQa = { card, browser: card?._xulBrowser, fixedHeight: card?._fixedLogicalHeight,
-        cardWidth: card?.clientWidth, browserWidth: card?._xulBrowser?.clientWidth, browserHeight: card?._xulBrowser?.clientHeight };
-      return { mode: snapshot.mode, cardId: card?.id, browser: !!card?._xulBrowser,
-        logicalWidth: card?._xulBrowser?.clientWidth, logicalHeight: card?._xulBrowser?.clientHeight };
-    });
-    check('first use begins with a real Browser view', initial.mode === 'browser' && initial.browser);
-    await capture('first-use-browser');
-    await harness.fill('#egd-first-use-address', 'about:blank');
-    await harness.press('Enter', '#egd-first-use-address');
-    await waitUntil(() => chrome(harness, () => {
-      const api = window.__egdesk;
-      return api.browserRuntime.state(api.surface.snapshot().browserCardId)?.uri;
-    }), (uri) => uri === 'about:blank');
-    await harness.click('#egd-desk-entry');
-    const after = await chrome(harness, () => {
-      const api = window.__egdesk;
+      const card = document.getElementById(snapshot.browserCardId) || document.querySelector('.egd-browser-card');
+      const browser = card?._xulBrowser;
+      const rect = card?.getBoundingClientRect();
+      const viewport = document.getElementById('egd-canvas-viewport')?.getBoundingClientRect();
       const identity = window.__egdeskFirstUseQa;
-      const snapshot = api.surface.snapshot();
-      const card = document.getElementById(snapshot.browserCardId);
-      return { mode: snapshot.mode, cardId: card?.id, sameNode: card === identity.card,
-        sameBrowser: card?._xulBrowser === identity.browser, sameHeight: card?._fixedLogicalHeight === identity.fixedHeight,
-        sameLogicalWidth: card?.clientWidth === identity.cardWidth && card?._xulBrowser?.clientWidth === identity.browserWidth,
-        sameLogicalHeight: card?._xulBrowser?.clientHeight === identity.browserHeight,
-        logicalWidth: card?._xulBrowser?.clientWidth, logicalHeight: card?._xulBrowser?.clientHeight,
-        uri: api.browserRuntime.state(card.id)?.uri };
+      const visible = node => {
+        if (!node) return false;
+        const bounds = node.getBoundingClientRect(), style = getComputedStyle(node);
+        return bounds.width > 0 && bounds.height > 0 && style.display !== 'none' && style.visibility !== 'hidden';
+      };
+      return { mode: snapshot.mode, cardId: card?.id || null, browser: !!browser,
+        sameCardNode: identity ? card === identity.card : null,
+        sameBrowserObject: identity ? browser === identity.browser : null,
+        uri: card && (api.browserRuntime.state(card.id)?.uri || browser?.currentURI?.spec || null),
+        logicalWidth: browser?.clientWidth || 0, logicalHeight: browser?.clientHeight || 0,
+        fixedLogicalHeight: card?._fixedLogicalHeight ?? null,
+        zoom: api.state.zoomTarget, activeEntityId: api.state.activeEntityId,
+        focusedCardId: api.state.cardFullscreen?.cardId || api.state.activeEntityId || null,
+        cardRect: rect && { left: rect.left, top: rect.top, right: rect.right, bottom: rect.bottom,
+          width: rect.width, height: rect.height },
+        viewportRect: viewport && { left: viewport.left, top: viewport.top, width: viewport.width, height: viewport.height },
+        windowSize: { width: window.innerWidth, height: window.innerHeight },
+        canvasVisible: !!viewport && viewport.width > 0 && viewport.height > 0,
+        shellVisible: ['egd-desk-rail', 'egd-preset-bag', 'egd-dock'].map(id => visible(document.getElementById(id))),
+        separateFirstUse: !!document.querySelector('[data-testid="first-use-root"]'),
+        mandatoryDeskEntry: !!document.getElementById('egd-desk-entry') };
     });
-    check('Desk transition preserves Browser object, identity, URL and logical height',
-      after.mode === 'desk' && after.cardId === initial.cardId && after.sameNode && after.sameBrowser && after.sameHeight && after.uri === 'about:blank');
-    check('Desk transition preserves unscaled Browser width and height',
-      after.sameLogicalWidth && after.sameLogicalHeight && initial.logicalWidth > 0 && initial.logicalHeight > 0,
-      { before: { width: initial.logicalWidth, height: initial.logicalHeight }, after: { width: after.logicalWidth, height: after.logicalHeight } });
-    const deskChrome = await harness.inspect('#egd-canvas-viewport, #egd-desk-rail, #egd-preset-bag, #egd-dock');
-    check('Desk exposes Canvas, top bar, sidebar and dock', deskChrome.length === 4 && deskChrome.every((node) => node.visible));
-    await harness.click('#egd-first-use-address');
-    check('the same Browser address remains keyboard-focusable on Desk',
-      await chrome(harness, () => document.activeElement === document.getElementById('egd-first-use-address')));
-    await capture('first-use-entered-desk');
+    if (scenario === 'first-use') {
+      await visible(harness, '#egd-canvas-viewport');
+      const initial = await waitUntil(observe, value => value.mode === 'desk' && value.browser
+        && value.logicalWidth > 0 && value.logicalHeight > 0 && !!value.uri);
+      check('first launch is the actual live Desk Canvas, not a separate start screen',
+        initial.canvasVisible && !initial.separateFirstUse && !initial.mandatoryDeskEntry);
+      check('one Browser card starts in an immersive focus, not a crowded Desk overview',
+        !!initial.cardId && initial.focusedCardId === initial.cardId
+          && initial.cardRect.left >= -12 && initial.cardRect.left <= initial.windowSize.width * 0.03
+          && initial.cardRect.top >= -12 && initial.cardRect.top <= initial.windowSize.height * 0.03
+          && initial.cardRect.right >= initial.windowSize.width * 0.97
+          && initial.cardRect.right <= initial.windowSize.width + 12
+          && initial.cardRect.bottom >= initial.windowSize.height * 0.97
+          && initial.cardRect.bottom <= initial.windowSize.height + 12
+          && initial.shellVisible.every(value => !value),
+        { card: initial.cardRect, window: initial.windowSize,
+          focusedCardId: initial.focusedCardId, shellVisible: initial.shellVisible });
+      await chrome(harness, () => {
+        const api = window.__egdesk;
+        const card = document.getElementById(api.surface.snapshot().browserCardId) || document.querySelector('.egd-browser-card');
+        window.__egdeskFirstUseQa = { card, browser: card._xulBrowser,
+          uri: api.browserRuntime.state(card.id)?.uri || card._xulBrowser?.currentURI?.spec || null,
+          logicalWidth: card._xulBrowser?.clientWidth, logicalHeight: card._xulBrowser?.clientHeight,
+          fixedLogicalHeight: card._fixedLogicalHeight ?? null,
+          cardWidth: card.getBoundingClientRect().width, zoom: api.state.zoomTarget };
+      });
+      result.nextStep = 'Main performs a normal native Ctrl+wheel/pinch zoom-out without restarting Firefox, then runs --case first-use-zoomout.';
+      await capture('first-use-live-browser-focused');
+      return;
+    }
+    const after = await observe();
+    const before = await chrome(harness, () => {
+      const identity = window.__egdeskFirstUseQa;
+      return identity && { cardId: identity.card?.id, uri: identity.uri,
+        logicalWidth: identity.logicalWidth, logicalHeight: identity.logicalHeight,
+        fixedLogicalHeight: identity.fixedLogicalHeight, cardWidth: identity.cardWidth, zoom: identity.zoom };
+    });
+    check('the same first-use Browser session is still held in this Firefox window', !!before);
+    check('normal Desk zoom-out reveals surrounding Canvas without a mode transition',
+      after.mode === 'desk' && after.canvasVisible && !after.separateFirstUse && !after.mandatoryDeskEntry
+        && after.shellVisible.every(Boolean)
+        && after.zoom < before.zoom - 0.001
+        && after.cardRect.width < before.cardWidth - 80
+        && after.cardRect.height < after.windowSize.height - 80,
+      { before: { zoom: before.zoom, cardWidth: before.cardWidth },
+        after: { zoom: after.zoom, card: after.cardRect, shellVisible: after.shellVisible } });
+    check('zoom-out retains the exact Browser card, browsing object, URL and logical viewport',
+      after.cardId === before.cardId && after.sameCardNode && after.sameBrowserObject
+        && after.uri === before.uri && after.logicalWidth === before.logicalWidth
+        && after.logicalHeight === before.logicalHeight && after.fixedLogicalHeight === before.fixedLogicalHeight,
+      { before, after });
+    await capture('first-use-same-browser-after-zoomout');
     await chrome(harness, () => { delete window.__egdeskFirstUseQa; return true; });
     return;
   }

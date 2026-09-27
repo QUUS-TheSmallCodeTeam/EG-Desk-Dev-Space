@@ -75,7 +75,8 @@ await runUiFlow(`context-briefing-fixture-${phase}`, async ({ harness, check, ca
         node._inputReference?.sourceId === sourceId && node._inputReference?.presentationRange?.startLine === 201);
       return card && { id: card.id, reference: card._inputReference, loaded: !!card._inputEvidenceLoaded };
     }, saved.rangeSourceId);
-    check('restored card retains its immutable 201–240 reference', target?.reference.presentationRange.endLine === 240);
+    check('restored card retains its immutable 201–240 reference',
+      target?.reference?.presentationRange?.startLine === 201 && target.reference.presentationRange.endLine === 240);
     if (await chrome(harness, () => window.__egdesk.state.hudOpen)) {
       await clickThen('Close the overlapping side panel', '#egd-hud .egd-hud-close',
         () => chrome(harness, () => window.__egdesk.state.hudOpen), value => !value);
@@ -89,8 +90,27 @@ await runUiFlow(`context-briefing-fixture-${phase}`, async ({ harness, check, ca
     const after = await fixtureState();
     const relevant = after.context.inspectorReads.filter(item => item.sourceId === saved.rangeSourceId);
     check('the observed GET requested the saved actual range', relevant.at(-1)?.startLine === 201 && relevant.at(-1)?.endLine === 240);
-    check('restoration created no capture or send', after.context.captureBatches === before.context.captureBatches && after.observed.sends.length === before.observed.sends.length);
-    await capture('restored-evidence-201-240');
+    const pastPacket = captureContextReadEvidence(await loopbackJson(
+      `/context/captures/${saved.packetSourceId}?packetId=${encodeURIComponent(saved.packetId)}`));
+    assertStoredAgentDelivery(pastPacket.delivered, { packetId: saved.packetId,
+      binding: saved.fixtureIdentity, expectedToolText: saved.packetText });
+    await selectQaThread(harness, saved.thread);
+    await clickThen('Open restored input history', hook('chat-activity-open'),
+      () => harness.inspect(hook('chat-input-history')), value => value.length > 0);
+    const history = hook('chat-input-history') + attributeSelector('data-run-id', saved.fixtureIdentity.runId);
+    await harness.click(`${history} summary`);
+    await clickThen('Inspect the restored historical input',
+      `${history} ${hook('chat-input-history-open')}${attributeSelector('data-snapshot-id', saved.packetSourceId)}`,
+      panel, value => value.sourceId === saved.packetSourceId && value.sourceText === saved.packetSourceText
+        && value.packetId === saved.packetId);
+    await harness.click(`#egd-codex-input-panel ${hook('chat-input-delivery')} > summary`);
+    const renderedPacket = await chrome(harness, () =>
+      document.querySelector('#egd-codex-input-panel [aria-label="실제로 전달된 payload 원문"]')?.textContent);
+    check('restored history renders the exact past packet, not a new projection', renderedPacket === saved.packetText);
+    const finalState = await fixtureState();
+    check('restoration created no capture or send', finalState.context.captureBatches === before.context.captureBatches
+      && finalState.observed.sends.length === before.observed.sends.length);
+    await capture('restored-evidence-201-240-and-past-packet');
     return;
   }
 
@@ -126,6 +146,22 @@ await runUiFlow(`context-briefing-fixture-${phase}`, async ({ harness, check, ca
     return { boardId, title, originalIds: [file.id, browser.id], longUrlViewId: longBrowser.id };
   }, { fileUrl: pathToFileURL(sourceFile).href, nonce });
   const thread = await newQaThread(harness, `QA context ${nonce}`);
+  await visible(harness, '.egd-chat-card .egd-chat-card-title');
+  await chrome(harness, () => {
+    window.__egdeskQaHeaderErrors = [];
+    window.__egdeskQaHeaderListener = event => window.__egdeskQaHeaderErrors.push(String(event.message));
+    window.addEventListener('error', window.__egdeskQaHeaderListener, true);
+  });
+  await harness.click('.egd-chat-card .egd-chat-card-title');
+  const headerErrors = await chrome(harness, () => {
+    window.removeEventListener('error', window.__egdeskQaHeaderListener, true);
+    const errors = [...window.__egdeskQaHeaderErrors];
+    delete window.__egdeskQaHeaderListener;
+    delete window.__egdeskQaHeaderErrors;
+    return errors;
+  });
+  check('native Chat card header click does not raise the missing pan helper error',
+    !headerErrors.some(message => message.includes('startPanIfNeeded')));
   const moveToHud = (await harness.inspect('.egd-chat-card button[title="우측 패널로 이동"]'))[0];
   if (moveToHud?.visible) {
     await clickThen('Dock existing Chat in the side panel', '.egd-chat-card button[title="우측 패널로 이동"]',
@@ -212,6 +248,13 @@ await runUiFlow(`context-briefing-fixture-${phase}`, async ({ harness, check, ca
   result.fixtureIdentity = { conversationId: run.conversationId, runId: run.runId, answerId: run.answerId };
   assertContextSendBindings(sent, { clientThreadId: thread.wireClientThreadId, sourceIds: run.contextCaptures.map(item => item.sourceId) });
   check('delayed A sends once and never clears newer composer B', sent.message === draftA && (await roomState()).draft === draftB);
+  const browserCapture = run.contextCaptures.find(item => item.sourceRef.viewId === browserView);
+  const browserRead = captureContextReadEvidence(await loopbackJson(`/context/captures/${browserCapture.sourceId}`));
+  check('Fission Browser capture contains the exact 610 loaded DOM lines from the selected view',
+    browserCapture.sourceRef.url === `http://127.0.0.1:39218/__qa/browser-document/${nonce}`
+    && browserCapture.shape.lineCount === 610
+    && browserCapture.hash === fingerprintQaBytes(browserText).sha256
+    && browserRead.source.text === browserText.split('\n').slice(0, 200).join('\n'));
   const fileCapture = run.contextCaptures.find(item => item.sourceRef.path === sourceFile);
   const inputBefore = captureContextReadEvidence(await loopbackJson(`/context/captures/${fileCapture.sourceId}`));
   check('send-time capture records V1, not the older preview V0', fileCapture.hash === changedFile.sha256 && inputBefore.source.text === changedLines.slice(0, 200).join('\n'));
@@ -232,8 +275,8 @@ await runUiFlow(`context-briefing-fixture-${phase}`, async ({ harness, check, ca
   await harness.click(`${history} summary`);
   await clickThen('Inspect the bound historical input', `${history} ${hook('chat-input-history-open')}${attributeSelector('data-snapshot-id', fileCapture.sourceId)}`,
     panel, value => value.sourceId === fileCapture.sourceId && value.sourceText === changedLines.slice(0, 200).join('\n'));
-  await harness.click(`${hook('chat-input-delivery')} summary`);
-  const packetText = await chrome(harness, () => document.querySelector('[aria-label="실제로 전달된 payload 원문"]')?.textContent);
+  await harness.click(`#egd-codex-input-panel ${hook('chat-input-delivery')} > summary`);
+  const packetText = await chrome(harness, () => document.querySelector('#egd-codex-input-panel [aria-label="실제로 전달된 payload 원문"]')?.textContent);
   check('history displays the exact stored packet separately from source text', packetText === delivery.packet.text && (await panel()).sourceLabel);
   await capture('context-source-and-exact-fixture-packet');
   await closePanel();
@@ -296,7 +339,9 @@ await runUiFlow(`context-briefing-fixture-${phase}`, async ({ harness, check, ca
       && card.runtimeState.reference.presentationRange?.endLine === 240);
   }, second.sourceId), Boolean);
   fs.writeFileSync(checkpoint, JSON.stringify({ kind: 'egdesk-context-qa-restart-v1', profile: harness.profile,
-    rangeSourceId: second.sourceId, rangeText, fixtureIdentity: result.fixtureIdentity }), { flag: 'wx', mode: 0o600 });
+    thread, rangeSourceId: second.sourceId, rangeText, fixtureIdentity: result.fixtureIdentity,
+    packetSourceId: fileCapture.sourceId, packetSourceText: changedLines.slice(0, 200).join('\n'),
+    packetId: delivery.packet.packetId, packetText: delivery.packet.text }), { flag: 'wx', mode: 0o600 });
   result.restartCheck = { phase: 'restored-range', profile: harness.profile,
     instruction: 'Main may restart only this same disposable Firefox, keeping the explicit fixture server. Then run --phase restored-range.' };
   result.pendingLiveAcceptance = 'This script has not proven a native read/Reader/publishBriefing call. Use the separate coordinated Sol/max native stage.';
