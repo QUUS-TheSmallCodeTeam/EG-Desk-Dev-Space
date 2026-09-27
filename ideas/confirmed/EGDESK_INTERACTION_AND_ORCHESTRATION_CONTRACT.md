@@ -133,16 +133,26 @@ Board는 특정 업무를 진행할 수 있게 자료·도구·대화·배치·�
 **화면 연결**: [최초 시작](./EGDESK_PRODUCT_INTERACTION_TRACE_ATLAS.md#atlas-first-use),
 [첫 사용 상세](../../docs/references/design-synthesis/egdesk-ux-realization-proposals.md#flow-first-use).
 
-앱 준비, 첫 온보딩, 기존 세션 복원, EG-Desk 프로필 준비, Codex 인증은 각각 식별한다.
-최초 실행은 Browser 집중 표시와 시작 페이지를 제공한다. 주소 탐색은 허용하고
-Canvas·Sidebar·Dock 표시만 보류한다. 초기 프로필 연결과 구독 Codex 호출은 인터넷을
-전제로 하되, 네트워크 장애를 로컬 저장물 삭제나 강제 새 프로필 생성의 근거로 쓰지 않는다.
+앱 준비, Browser 안의 선택적 첫 사용 안내, 기존 세션 복원, EG-Desk 프로필 준비,
+Codex 인증은 각각 식별한다.
+최초 실행에는 이미 있는 Desk·Canvas의 동일 live Browser View를 카메라로 화면에
+맞춰 보여 준다. 별도 앱 시작 관문이나 `[Desk 시작]` 단계는 없다. Browser 안의 주소
+입력을 돕는 시작 페이지는 이 View의 콘텐츠로 허용한다. 주소 탐색은 바로 가능하며 주변
+Canvas·Sidebar·Dock만 집중 표시 동안 가린다. Desk를 보여 주기 위해 Engine 인증이나
+새 Browser·EG-Desk 프로필 생성을 강제하지 않는다. 초기 프로필 연결과 구독 Codex 호출은
+인터넷을 전제로 하되 Desk 표시와 별개로 다룬다. Codex 호출처럼 실제 연결이 필요한
+기능에서만 해당 계정·가용성을 확인한다. 네트워크 장애를 로컬 저장물 삭제나 강제 새
+프로필 생성의 근거로 쓰지 않는다.
 
-Desk 진입 요청은 현재 Browser identity·페이지·프로필과 연결 요청 ID를 유지한다.
-완료·취소·늦은 인증 응답을 같은 요청에 결합하며, 연결 화면을 닫은 뒤 도착한 응답이
-다른 프로필이나 현재 화면을 바꾸지 못한다. 필요한 연결이 검증되면 같은 Desk의 Canvas
-표시를 열고 기존 Browser를 이어 쓴다. 카메라 전환만으로 Browser 내부 viewport·페이지를
-새로 만들지 않는다. 최초 사용 여부를 저장된 Board 유무만으로 추론하지 않는다.
+일반 Canvas 줌아웃 입력은 Browser 집중·주소 입력 상태에서도 사용할 수 있어야 하며,
+Browser의 page zoom이 아닌 같은 Desk의 camera transform만 바꿔 주변 Canvas를 점차
+드러낸다. 첫 사용에는 이전 일반 시점이 없어도 기본 Canvas 시점으로 축소할 수 있고,
+저장된 일반 시점이 있으면 복귀·재방문에 활용할 수 있다. Browser에 다시 집중해도 View
+identity·URL·세션·Browser logical viewport·page zoom을 유지한다. 카메라 fit은 View의
+logical rectangle에 맞추며 Browser renderer나 내부 viewport의 실제 resize를 일으키지
+않는다. 인증 화면이 별도로 열렸다면 완료·취소·늦은 응답은 해당 연결 요청 ID에만 결합하고
+다른 프로필이나 현재 Desk 시점을 바꾸지 못한다. 최초 사용 여부를 저장된 Board 유무만으로
+추론하지 않는다.
 
 기본 Codex는 사용자 정의 Agent Profile 없이 실행할 수 있다. Engine 인증·실행 계정·
 모델·도구 가용성·위임·승인·입력 기록은 필수지만, personality·담당자 정체성·Agent 생각
@@ -1264,9 +1274,11 @@ UI가 존재하는 것만으로 기능 완료가 성립하지 않는다. accepta
 
 셸 준비·Board 목록·Engine 연결은 독립 상태다. 종료는 로컬 새 dispatch 차단 → 확정 입력 기록 → 로컬 전용 runtime 종료 확인 → 최종 세션 commit → 셸 종료 순으로 수행한다. 정상 종료도 열린 Board 구성 자체를 삭제하지 않는다. 원격 runtime은 별도 소유·상태를 유지한다. 강제 종료·전원 손실에는 종료 handler 실행을 전제로 하지 않는다.
 
-최초 준비의 표시 목표는 Browser 시작 페이지이며 재방문은 마지막 집중/Canvas 상태 복원이다.
-`frame-visible`만으로 프로필·Codex 연결까지 완료됐다고 하지 않는다. 사용자 생성 Agent가
-없는 경우는 셸·기본 Codex 오류가 아니며 [최초 사용 계약](#tech-first-use)에 따라 분기한다.
+최초 준비의 표시 목표는 기존 Desk·Canvas 위 live Browser View의 화면 맞춤 집중 보기이며,
+재방문은 마지막 집중/일반 Desk 카메라 상태 복원이다. 앱 상단 바는 창 위쪽 가장자리에
+붙이되 기존 창 이동 영역과 주소·입력 컨트롤을 유지한다. 빈 Canvas 드래그를 새 창 이동
+모드로 만들지 않는다. `frame-visible`만으로 프로필·Codex 연결까지 완료됐다고 하지 않는다.
+사용자 생성 Agent가 없는 경우는 셸·기본 Codex 오류가 아니며 [최초 사용 계약](#tech-first-use)에 따라 분기한다.
 
 **인수 절차:** 각 OS 진입, 반복 실행, 파일 연결 실행에 대해 실행 파일 누락·잘못된 준비 nonce·10초 지연·bridge 실패를 주입한다. 셸 없는 상태에서 복구 행동을 실행할 수 있고, 정상 경로는 Desk 하나이며 Engine 실패 중 파일 열기가 가능해야 한다. 종료 중 쓰기 지연·process 종료 거부를 주입해 취소/강제 종료의 대상·미기록 범위를 대조한다. 실패 fallback은 독립 복구 진입점이며 사용자 profile·credential을 지우지 않는다.
 
@@ -1401,11 +1413,11 @@ Codex는 기존 구독 인증 Engine Profile의 app-server 연결을 사용한�
 
 **화면 연결**: [사용자 조작](../../docs/references/design-synthesis/egdesk-ux-realization-proposals.md#ux-detail-view)
 
-Camera transform, View logical rectangle, Browser viewport, page zoom, OS 창 모드를 독립 상태로 저장한다. 좌표 변환은 실제 표시 중인 matrix의 역변환을 사용하며 애니메이션의 목표 matrix를 대신 쓰지 않는다. 집중 배율은 `min(가용폭/View폭, 가용높이/View높이)`다. 집중 보기에서 logical rectangle이나 Browser width/height를 쓰지 않는다.
+Camera transform, View logical rectangle, Browser viewport, page zoom, OS 창 모드를 독립 상태로 저장한다. 좌표 변환은 실제 표시 중인 matrix의 역변환을 사용하며 애니메이션의 목표 matrix를 대신 쓰지 않는다. 최초 Browser 집중도 이미 존재하는 live Browser View에 대한 camera fit이며 집중 배율은 `min(가용폭/View폭, 가용높이/View높이)`다. 일반 Canvas 줌아웃은 같은 camera transform을 연속적으로 축소해 주변 View를 드러낸다. 최초에는 기본 Canvas 시점을 사용하고, 저장된 일반 시점은 있을 때만 복귀 기준으로 쓴다. 집중·줌아웃 왕복에서 View logical rectangle·Browser logical viewport·URL·세션·page zoom·renderer identity를 유지하고, 실제 Browser resize만 별도 경로로 처리한다. 집중 보기에서 logical rectangle이나 Browser width/height를 쓰지 않는다.
 
 미니맵·화면 목록은 같은 권한 필터를 거친 View registry를 사용한다. 제목·유형·PC·계정 구분자와 겹친 대상 목록은 해당 수신자가 볼 수 있는 항목만 투영한다. 지도 선택은 View ID와 현재 geometry를 다시 해소한 뒤 camera를 이동하고 복귀 시점을 기록한다. resource ID만으로 다른 세션을 선택하거나 runtime을 재개하지 않는다. 대상이 사라졌으면 지도·목록을 유지하고 현재 상태 확인을 제공한다. 작은 hit 영역의 대안은 같은 대상 목록이며 비공개 항목의 개수·이름을 노출하지 않는다.
 
-드래그는 shell handle에서 Pointer Capture로 시작하고 종료/취소 때 해제한다. 콘텐츠가 소유한 드래그·편집 입력을 Canvas 이동으로 바꾸지 않는다. 다만 Canvas 탐색 상태의 비활성 Chat 위 두 손가락 스크롤은 아래의 콘텐츠 활성 경계에 따라 Canvas가 처리한다. 실제 resize 전 해당 surface의 새 입력을 차단하고, 크기 변경 후 ResizeObserver·Browser 관찰에서 viewport와 document generation을 갱신한 뒤 stale action을 재검증한다. pan만으로 logical target을 바꾸지 않는다. [Pointer Capture](https://developer.mozilla.org/en-US/docs/Web/API/Element/setPointerCapture), [ResizeObserver](https://developer.mozilla.org/en-US/docs/Web/API/ResizeObserver).
+드래그는 기존 shell handle에서 Pointer Capture로 시작하고 종료/취소 때 해제한다. 상단 바를 창 위쪽 가장자리에 붙여도 기존 창 이동·입력 소유 경계를 유지하며, 빈 Canvas 드래그를 창 이동이나 새 pan 모드로 바꾸지 않는다. 콘텐츠가 소유한 드래그·편집 입력을 Canvas 이동으로 바꾸지 않는다. 다만 Canvas 탐색 상태의 비활성 Chat 위 두 손가락 스크롤은 아래의 콘텐츠 활성 경계에 따라 Canvas가 처리한다. 실제 resize 전 해당 surface의 새 입력을 차단하고, 크기 변경 후 ResizeObserver·Browser 관찰에서 viewport와 document generation을 갱신한 뒤 stale action을 재검증한다. pan만으로 logical target을 바꾸지 않는다. [Pointer Capture](https://developer.mozilla.org/en-US/docs/Web/API/Element/setPointerCapture), [ResizeObserver](https://developer.mozilla.org/en-US/docs/Web/API/ResizeObserver).
 
 ##### Chat 콘텐츠 활성과 두 손가락 탐색의 입력 경계
 

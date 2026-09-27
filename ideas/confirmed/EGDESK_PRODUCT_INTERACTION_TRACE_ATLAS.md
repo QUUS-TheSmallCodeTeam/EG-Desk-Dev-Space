@@ -22,8 +22,8 @@
 
 ### 0.1 한 화면 mental model
 
-Desk에 들어오면 아래처럼 자료와 도구를 함께 펼쳐 놓고 일한다. 최초 실행은
-[브라우저 시작 페이지](#atlas-first-use)에서 출발하며, 아래 구성은 Desk 진입 후의 화면이다.
+EG-Desk를 처음 열면 이미 있는 Desk·Canvas의 Browser가 화면에 맞춰 집중 표시된다.
+아래는 Canvas를 줌아웃해 같은 공간의 다른 자료와 도구를 드러낸 화면이다.
 
 ```text
  +--------------------------------------------------------------------------+
@@ -53,6 +53,8 @@ Agent Runtime --request/tool intent--> System --validated UI/state change--> Des
 
 - **Desk**는 사용자가 지금 일하는 표면이다.
 - **Canvas**는 View, artifact, 주석과 단계별 설명을 공간적으로 배치·탐색하는 영역이다.
+- 처음의 Browser 집중 표시와 일반 Desk는 별도 시작 화면이나 다른 Desk가 아니라
+  같은 Canvas의 카메라 시점이다. 줌아웃하면 Browser를 둔 채 주변 배치가 드러난다.
 - 기본 제품 모델에는 하나의 Desk와 그 Desk에 속한 하나의 Canvas가 있다. 여러
   Saved Board를 같은 Canvas에 서로 독립된 projection으로 동시에 열 수 있으며,
   Board를 연다고 기존 내용을 교체하거나 새 Desk를 만들지 않는다.
@@ -72,6 +74,8 @@ Agent Runtime --request/tool intent--> System --validated UI/state change--> Des
   과거 읽기·도구 기록은 생각 버블의 기록 패널에서 확인하며 도구 호출마다 Canvas에
   새 카드를 쌓지 않는다. 보고용으로 선별한 근거는 Canvas에 펼칠 수 있다.
   Canvas viewport 밖으로 pan됐다는 사실만으로 닫히거나 suspend되지는 않는다.
+- 앱 상단 바는 창의 위쪽 가장자리에 붙어 있다. 기존 창 이동·주소 입력 등 상단
+  컨트롤은 그대로 쓰며, 빈 Canvas 드래그를 새 창 이동 조작으로 사용하지 않는다.
 
 ### 0.2 사용설명서의 입력 표기법
 
@@ -99,38 +103,40 @@ Terminal 코드 블록 안의 `git status`처럼 쓰면 **셸 명령**이다. �
 <a id="atlas-first-use"></a>
 ### 0.3 처음 시작하기와 다시 열기
 
-처음 EG-Desk를 실행하면 Browser 집중 화면이 열린다. Canvas·Sidebar·Dock은
-숨겨져 있고, 상단 주소창과 EG-Desk 시작 페이지가 보인다. 주소창에 포커스가 있어
-바로 URL을 입력할 수 있다. 빈 페이지 대신 인터넷 이용 안내와 `[Desk 시작]`이 있다.
+처음 EG-Desk를 실행하면 이미 있는 Canvas의 Browser가 화면에 맞춰 집중 표시되고
+상단 주소창에 포커스가 있다. Sidebar·Dock과 주변 Canvas는 집중 표시 동안 보이지
+않지만 같은 Desk에 있다. 별도 앱 시작 관문이나 `[Desk 시작]` 단계 없이 바로 주소를
+입력할 수 있다. Browser 안에는 주소 입력을 돕는 시작 페이지가 표시될 수 있다.
+
+Browser 카드 안에 안내 시작 페이지가 있는 경우의 예:
 
 ```text
 +------------------------------------------------------------------+
-| EG-Desk     [주소 또는 검색어 입력                      ] [Desk]   |
+| EG-Desk     [주소 또는 검색어 입력                              ] |
 |------------------------------------------------------------------|
 |                                                                  |
-|                    EG-Desk 시작                                   |
-|       인터넷을 이용하려면 위 주소창에 주소를 입력하세요.           |
-|       자료와 도구를 책상에 펼쳐 일하려면 프로필을 연결하세요.       |
-|                                                                  |
-|                       [Desk 시작]                                |
+|                         웹 탐색 시작                              |
+|       위 주소창에 주소 또는 검색어를 입력하세요.                   |
 |                                                                  |
 +------------------------------------------------------------------+
 ```
 
 - 주소 입력 후 `Return`을 누르면 같은 Browser에서 웹페이지를 연다.
-- `[Desk 시작]`을 누르면 현재 페이지를 보존한 채 프로필·Codex 연결 화면을 연다.
-  초기 프로필 연결과 Codex 사용에는 인터넷 연결이 필요하다. 연결 대상과 완료 상태를
-  확인하면 Desk가 드러나며 같은 Browser를 그대로 이어서 사용한다.
+- Canvas 줌아웃 제스처(`pinch`)나 기존 `[−]`로 배율을 낮추면 같은 Browser를 둔 채
+  주변 Canvas·Sidebar·Dock이 드러난다. Browser에 다시 집중해도 같은 페이지를 쓴다.
+  줌아웃에 프로필 생성이나 Codex 인증을 먼저 요구하지 않는다.
 - 프로필 로그인과 Codex 연결을 한 절차로 묶는 정책은
   [계정 연결 선택](../../docs/codex/egdesk-product-interaction-trace-atlas-editorial-ledger.md#hum-engine-001)을 따른다.
-  브라우저 프로필 생성, Codex 인증, 각 웹사이트 로그인은 서로 다른 상태다.
-- 재방문자는 첫 가입 화면을 반복하지 않는다. 이전 집중/Canvas 표시 상태와 열린
+  브라우저 프로필 생성, Codex 인증, 각 웹사이트 로그인은 서로 다른 상태이며
+  필요한 기능을 사용할 때 각각 안내한다.
+- 재방문자는 별도 시작 절차를 반복하지 않는다. 이전 집중/Canvas 표시 상태와 열린
   View·배치를 복원하며, 필요한 재인증은 해당 연결에만 안내한다. 저장된 Board의
   Sidebar 목록과 마지막에 열어 둔 화면은 별도로 복원한다.
 
-Browser 집중 상태에서 Desk로 나오는 것은 Canvas 카메라·표시 전환이다. 기존 Browser를
-복제하거나 주소를 다시 여는 동작이 아니며, 그 전환만으로 페이지 내부 viewport 크기를
-바꾸지 않는다. 상세: [첫 사용 화면](../../docs/references/design-synthesis/egdesk-ux-realization-proposals.md#flow-first-use),
+Browser 집중 상태와 일반 Desk를 오갈 때 바뀌는 것은 Canvas 카메라 시점이다.
+기존 Browser의 View·URL·세션·논리 viewport·페이지 zoom은 유지되며, Browser를
+복제하거나 주소를 다시 열지 않는다. 상단 바는 창 위쪽 가장자리에 붙고 기존
+창 이동·입력 컨트롤을 유지한다. 상세: [첫 사용 화면](../../docs/references/design-synthesis/egdesk-ux-realization-proposals.md#flow-first-use),
 [시작·연결 기술 계약](./EGDESK_INTERACTION_AND_ORCHESTRATION_CONTRACT.md#tech-first-use).
 
 ### 0.4 기본 Codex와 선택적 Agent
@@ -271,18 +277,18 @@ System 처리 → Agent 처리 → 상태 변화 → 실패 후 다음 UI 입력
 ### 1.1 처음 켠 순간부터 다시 켤 때까지 한 바퀴
 
 **상황**: 처음 설치했고 저장된 Board·자동 Desk 복원 기록·사용자 생성 Agent가 없다.
-사용자는 먼저 웹페이지를 보고, 온라인 프로필·Codex 연결을 마친 뒤 기본 Codex로 자료를
-요약한다. 필요하면 활동 기록과 답변 브리핑을 확인하고 업무 구성을 저장한다.
+사용자는 같은 Canvas의 Browser로 먼저 웹페이지를 보고, 필요한 Codex 연결을 확인한 뒤
+기본 Codex로 자료를 요약한다. 필요하면 활동 기록과 답변 브리핑을 확인하고 업무 구성을 저장한다.
 Agent 생성은 이 한 바퀴에 필요하지 않다. 계정 연결 절차의 통합 여부는
 [HUM-ENGINE-001](../../docs/codex/egdesk-product-interaction-trace-atlas-editorial-ledger.md#hum-engine-001)의 조건을 따른다.
 
 | # | 제품 사용자 입력과 포커스 | 즉시 보이는 화면 | System 처리 | Agent 처리 | 다음 단계·경계 |
 |---:|---|---|---|---|---|
-| 1 | Dock/Applications에서 `Click [EG-Desk]`, 또는 `⌘ Space` → `Type "EG-Desk"` → `Return`을 사용한다. | EG-Desk 창에 Browser 집중 화면의 시작 페이지가 열리고 상단 주소창에 포커스가 있다. 인터넷 이용 안내와 `[Desk 시작]`이 보이며 Canvas·Sidebar·Dock은 숨겨져 있다. | 앱·브라우저 runtime을 시작하고 최초 사용임을 확인한다. | 없음 | 시작 실패는 `[다시 시도] [진단 정보] [종료]`. 상세: `L-01`. |
-| 2 | 주소창에 `Type "https://…"` → `Press [Return]`한다. | 같은 Browser에 웹페이지가 열린다. 앱 상단의 `[Desk]` 진입점은 계속 보인다. | URL을 탐색하고 이 Browser의 프로필·상태를 유지한다. | 없음 | 일반 인터넷 이용은 Agent 생성이나 Codex 요청을 시작하지 않는다. |
-| 3 | 상단 `[Desk]` 또는 시작 페이지의 `[Desk 시작]`을 클릭한다. | Browser 위 연결 화면에 `EG-Desk 프로필`과 `Codex 연결` 상태·연결 행동·`[닫기]`가 보인다. 기존 페이지는 유지된다. | 현재 프로필·인증·네트워크 상태를 확인한다. | 없음 | `[닫기]`는 같은 Browser로 돌아간다. 가입·프로필 자동 생성 방식의 미결 선택은 연결된 계정 정책에 따른다. |
-| 4 | 필요한 `[프로필 연결]`·`[Codex 연결]`을 선택하고 인증 화면에서 사용할 계정을 확인해 로그인한다. | 인증 중에도 원 연결 화면이 남는다. 완료한 항목만 계정 식별 정보와 연결됨 상태로 바뀐다. | Codex는 ChatGPT 구독 인증을 사용하고 완료 알림 뒤 실제 계정·가용성을 조회한다. Browser 계정과 별도로 연결한다. | 없음 | 한 번의 로그인으로 두 항목을 준비하는 후보와 독립 연결은 같은 상태 검사로 구분한다. 비밀번호를 Chat에 입력하지 않는다. 상세: `ENGINE-01`, `A-AUTH-01`. |
-| 5 | `Observe` — 필요한 연결 완료 후 화면을 확인한다. | 연결 화면이 닫히고 Canvas·Sidebar·Dock이 드러난다. 2번에서 보던 Browser가 같은 페이지로 남는다. | 같은 Browser identity를 유지하며 집중 표시에서 Desk 표시로 전환한다. | 없음 | Agent 생성·새 대화 전송·기존 페이지 재탐색은 발생하지 않는다. |
+| 1 | Dock/Applications에서 `Click [EG-Desk]`, 또는 `⌘ Space` → `Type "EG-Desk"` → `Return`을 사용한다. | 이미 있는 Canvas의 Browser가 화면에 맞춰 집중 표시되고 상단 주소창에 포커스가 있다. Browser 안의 안내 시작 페이지에서 주소 입력 방법을 볼 수 있다. 주변 Canvas·Sidebar·Dock은 보이지 않는다. | 앱·Browser를 시작하고 같은 Desk의 첫 카메라 시점을 맞춘다. | 없음 | 별도 앱 시작 관문·`[Desk 시작]`·프로필 생성 없이 주소를 입력할 수 있다. 시작 실패는 `[다시 시도] [진단 정보] [종료]`. 상세: `L-01`. |
+| 2 | 주소창에 `Type "https://…"` → `Press [Return]`한다. | 같은 Browser에 웹페이지가 열린다. | URL을 탐색하고 이 Browser의 프로필·상태를 유지한다. | 없음 | 일반 인터넷 이용은 Agent 생성이나 Codex 요청을 시작하지 않는다. |
+| 3 | Canvas 줌아웃 제스처(`pinch`) 또는 기존 `[−]`로 배율을 낮춘다. | Browser는 같은 페이지에 남고 주변 Canvas·Sidebar·Dock이 점차 드러난다. | Browser View·URL·세션·논리 viewport를 둔 채 Canvas 카메라만 축소한다. | 없음 | Desk를 보려고 프로필·Codex 연결을 먼저 마칠 필요가 없다. 첫 사용에 복원할 이전 일반 시점이 없어도 주변 공간이 드러난다. |
+| 4 | 기본 Codex를 쓸 계획이라면 상단 `[설정]`에서 연결 상태를 확인한다. | 현재 연결 상태와 필요한 경우의 연결 행동이 보인다. Browser와 Desk 배치는 그대로다. | 계정·가용성을 조회하며 Browser 프로필과 Codex 인증을 구별한다. | 없음 | 연결이 이미 준비됐거나 지금 필요하지 않으면 건너뛴다. 비밀번호를 Chat에 입력하지 않는다. 상세: `ENGINE-01`, `A-AUTH-01`. |
+| 5 | 필요한 경우 `[Codex 연결]`을 선택하고 인증 화면에서 사용할 계정을 확인한다. | 완료한 연결의 계정 식별 정보가 갱신되고 이전 Desk 시점과 Browser가 유지된다. | 실제 인증·가용성을 확인한다. | 없음 | 연결은 Codex 기능을 쓸 때 필요하며 Desk 표시의 선행조건이 아니다. Agent 생성·기존 페이지 재탐색은 발생하지 않는다. |
 | 6 | 기존 Browser 주소창을 클릭하고 요약할 웹 자료의 주소를 입력해 `Return`을 누른다. | 해당 페이지가 기존 Browser에 보인다. | 현재 URL·프로필·가능 행동과 페이지 내용을 구분해 유지한다. | 없음 | 필요할 때만 Dock에서 별도 Browser를 연다. 상세: `V-01`, `BROWSER-01`. |
 | 7 | Dock `[Chat]`을 클릭한다. | `Codex` 제목의 기본 대화와 작성기가 열리고 입력 포커스가 있다. 새 업무가 필요하면 `[새 업무]`를 누른다. | 기본 Codex 대화·Engine 연결과 요청 초안을 준비한다. | 없음 | Agent Profile이 없다는 이유로 전송을 막지 않는다. 인증·도구 권한이 부족하면 그 이유와 해당 연결 행동만 표시한다. |
 | 8 | 잘못 포함된 자료의 `[× 제거]`를 클릭한다. 범위를 바꾸려면 자료 항목 → `[포함 범위 편집]` → 선택 변경 → `[적용]`을 누른다. | 자료 목록만 갱신되고 작성 중인 요청은 남는다. | 초안 context revision만 갱신한다. | 없음 | 전송 전에는 자료를 모델에게 전달하지 않는다. 상세: `AI-02`. |
@@ -294,7 +300,7 @@ Agent 생성은 이 한 바퀴에 필요하지 않다. 계정 연결 절차의 �
 | 14 | `[의견]`에 내용을 입력해 `[저장]`한 뒤 `[다음 Chat에 포함]`을 누른다. | 의견과 대상 revision이 미전송 초안에 붙는다. | 같은 의견의 중복 첨부를 막고 기존 초안을 보존한다. | 없음 | 실제 전송 전에는 다음 실행이 시작되지 않는다. |
 | 15 | `[현재 작업을 Board로 저장]` → 제목에 `"자료 비교"` 입력 → `[저장]`을 누른다. | 자료·도구·대화·배치의 저장 범위와 성공한 저장본이 보인다. | 사용자가 확인한 업무 구성을 저장한다. | 없음 | 명시적 저장과 자동 Desk 복구 기록은 별개다. 상세: `AG-01`. |
 | 16 | 앱 메뉴 `[EG-Desk 종료]` 또는 `⌘ Q`를 사용한다. | 필요한 저장을 마치고 창이 닫힌다. | 세션·초안의 마지막 유효 저장을 마무리하며 Saved Board를 암묵적으로 갱신하지 않는다. | 없음 | 종료·강제 종료·크래시는 `L-03`의 서로 다른 경로다. |
-| 17 | EG-Desk를 다시 실행한다. | 이전 Browser·Chat과 Canvas 배치가 복원된다. 마지막에 집중 화면을 썼다면 그 표시 상태를 복원한다. 첫 가입 화면은 반복되지 않는다. | 세션과 Saved Board 목록을 별도로 읽는다. | 없음 | 저장본 목록에 있다는 이유로 Board를 추가로 열지 않는다. 상세: `L-02`. |
+| 17 | EG-Desk를 다시 실행한다. | 이전 Browser·Chat과 Canvas 배치가 복원된다. 마지막에 Browser 집중 보기를 썼다면 같은 View의 집중 카메라 시점을 복원한다. 별도 시작 화면은 반복되지 않는다. | 세션과 Saved Board 목록을 별도로 읽는다. | 없음 | 저장본 목록에 있다는 이유로 Board를 추가로 열지 않는다. 상세: `L-02`. |
 
 **한 바퀴의 완료 증거**: 사용자는 Agent 생성 없이 기본 Codex로 첫 요청을 보낸다.
 보고의 과거 근거와 현재 원본을 구별하고, 업무 구성 저장과 재실행 시 화면 복원을
@@ -303,24 +309,24 @@ Agent 생성은 이 한 바퀴에 필요하지 않다. 계정 연결 절차의 �
 ### 1.2 실행과 Desk 연속성
 
 <a id="atlas-l-01"></a>
-#### L-01. 최초 실행과 온라인 Desk 진입
+#### L-01. 최초 실행과 Browser·Desk 전환
 
 **상세 조작**: [첫 사용](../../docs/references/design-synthesis/egdesk-ux-realization-proposals.md#flow-first-use) · [shell](../../docs/references/design-synthesis/egdesk-ux-realization-proposals.md#ux-detail-shell)<br>
 **기술 참조**: [시작·연결](./EGDESK_INTERACTION_AND_ORCHESTRATION_CONTRACT.md#tech-first-use)
 
-**제품 전제**: 최초 화면은 Browser 집중 상태의 시작 페이지다.<br>
-**시작 상태**: 새 설치이며 자동 Desk 세션과 사용자 생성 Agent가 없다. 프로필·Codex 연결은 온라인에서 진행한다.
+**제품 전제**: 최초 화면은 이미 있는 Desk·Canvas의 Browser에 카메라를 맞춘 집중 보기다. Browser 안의 안내 시작 페이지는 가능하지만 별도 앱 시작 관문은 없다.<br>
+**시작 상태**: 새 설치이며 자동 Desk 세션과 사용자 생성 Agent가 없다. Desk 사용에 프로필 생성이나 Codex 인증을 먼저 요구하지 않는다.
 
 | # | 제품 사용자 UI 행동 | 즉시 보이는 반응 | System 처리 | Agent 처리 | 상태 변화 | 경계 및 다음 UI 행동 |
 |---:|---|---|---|---|---|---|
-| 1 | 앱 아이콘을 클릭하거나 OS 검색에서 EG-Desk를 선택해 `Return`을 누른다. | 시작 페이지·주소창·`[Desk 시작]`이 보이고 주소창에 포커스가 있다. Canvas는 숨겨져 있다. | EG-Desk와 Browser를 시작한다. | 없음 | 최초 사용 화면 | 시작 실패는 `[다시 시도] [진단 정보] [종료]`. |
-| 2 | 인터넷부터 이용하려면 주소를 입력하고 `Return`을 누른다. | 같은 Browser에 웹페이지가 열린다. 상단 `[Desk]`는 남는다. | 해당 Browser로 탐색한다. | 없음 | 현재 Browser 위치 변경 | Desk 진입을 원하면 상단 `[Desk]`를 누른다. |
-| 3 | `[Desk 시작]` 또는 상단 `[Desk]`를 클릭한다. | 프로필·Codex의 연결 상태와 필요한 연결 행동, `[닫기]`가 보인다. | 필요한 연결과 인터넷 상태를 확인한다. | 없음 | 연결 화면 열림 | 연결 실패는 같은 화면의 `[다시 연결]`; `[닫기]`는 기존 Browser로 복귀한다. |
-| 4 | 필요한 프로필·Codex 연결 행동을 누르고 인증 화면에서 계정을 확인해 로그인한다. | 완료된 연결의 계정 식별 정보가 보인다. 준비가 끝나면 같은 Browser를 유지한 Desk 화면으로 이어진다. | 실제 인증·프로필 가용성을 확인하고 표시 상태를 전환한다. | 없음 | Desk 사용 가능 | 가입 통합·자동 프로필 생성은 HUM-ENGINE-001의 선택을 따른다. Agent Profile 생성은 요구하지 않는다. |
-| 5 | Dock `[Chat]`을 클릭한다. | 기본 Codex 대화와 입력 가능한 작성기가 보인다. | 현재 Engine 연결과 기본 실행 설정을 준비한다. | 없음 | 기본 Codex 초안 | 요청은 `CHAT-01`·`AI-01`, 선택적 Agent 생성은 `AGENT-01`로 이어진다. |
+| 1 | 앱 아이콘을 클릭하거나 OS 검색에서 EG-Desk를 선택해 `Return`을 누른다. | 같은 Canvas의 Browser가 화면에 맞춰 보이고 주소창에 포커스가 있다. Browser 안에 안내 시작 페이지가 있으면 주소 입력을 돕고 주변 Canvas는 보이지 않는다. | EG-Desk와 Browser를 시작해 Browser View에 카메라를 맞춘다. | 없음 | Browser 집중 시점 | 시작 실패는 `[다시 시도] [진단 정보] [종료]`. |
+| 2 | 인터넷부터 이용하려면 주소를 입력하고 `Return`을 누른다. | 같은 Browser에 웹페이지가 열린다. | 해당 Browser로 탐색한다. | 없음 | 현재 Browser 위치 변경 | 주변 Desk를 보려면 Canvas 배율을 낮춘다. |
+| 3 | Canvas 줌아웃 제스처(`pinch`) 또는 기존 `[−]`로 배율을 낮춘다. | Browser가 같은 URL·세션으로 Canvas에 남고 주변 View·Sidebar·Dock이 드러난다. | Browser의 논리 viewport를 바꾸지 않고 Canvas 카메라를 축소한다. | 없음 | 일반 Desk가 보이는 시점 | 프로필·Codex 연결 화면 없이 바로 주변 Desk를 본다. 다시 집중해도 같은 Browser View다. |
+| 4 | Dock `[Chat]`을 클릭한다. | 기본 Codex 대화와 작성기 또는 필요한 Codex 연결 안내가 보인다. | 현재 Engine 연결과 기본 실행 설정을 확인한다. | 없음 | 기본 Codex 초안 또는 연결 필요 상태 | Agent Profile 생성은 요구하지 않는다. 요청은 `CHAT-01`·`AI-01`로 이어진다. |
+| 5 | 연결 안내가 필요한 경우 `[Codex 연결]`을 누르고 인증 화면에서 계정을 확인한다. | 연결 후 기본 Codex 작성기가 보이며 Browser·Canvas 배치는 그대로다. | 실제 인증·가용성을 확인한다. | 없음 | Codex 사용 준비 | 연결이 이미 준비됐으면 건너뛴다. Browser 프로필·웹사이트 로그인과 구별한다. |
 
-**완료 증거**: 최초에는 웹을 바로 이용할 수 있고, Desk 진입을 선택하면 연결 상태를 확인한 뒤
-기본 Codex를 사용할 수 있다. 첫 사용과 기존 사용자 화면 복원을 구별한다.
+**완료 증거**: 최초에는 같은 Browser로 웹을 바로 이용하고 줌아웃으로 주변 Canvas를
+드러낼 수 있다. 기본 Codex 연결은 해당 기능을 사용할 때 확인하며 화면 전환의 조건이 아니다.
 
 <a id="atlas-l-02"></a>
 #### L-02. 일반 실행과 자동 Desk 복원
@@ -1346,28 +1352,31 @@ Agent의 진행·오류 알림은 사용자가 입력 중인 곳의 focus를 옮
 
 ### M1. EG-Desk 실행 → Desk / Canvas / Sidebar
 
-시작은 운영체제의 실행 행동이고, 끝은 사용할 수 있는 실제 Desk와 그 두 기본 표면이다.
+시작은 운영체제의 실행 행동이고, 첫 화면부터 같은 Desk·Canvas의 Browser가
+집중 표시된다. 줌아웃하면 새 Desk로 넘어가지 않고 주변 Canvas·Sidebar가 드러난다.
 
 ~~~mermaid
 flowchart LR
   m1_start["시작: 운영체제 실행 진입점"]
   m1_shell["EG-Desk 앱"]
-  m1_first["최초: Browser 집중 시작 페이지"]
-  m1_connect["사용자가 선택한 온라인 Desk 연결"]
   m1_desk["Desk"]
   m1_canvas["Canvas"]
+  m1_first["최초: 같은 Canvas의 live Browser 집중 표시"]
+  m1_regular["일반 Desk: 주변 Canvas 표시"]
   m1_canvas_rule["Canvas 소속·개수 규칙"]
   m1_sidebar["Sidebar"]
   m1_end["끝: 저장된 Board 목록 또는 빈 상태"]
 
   m1_start -. "Q-LIFE-01 · Q-LIFE-02 · Q-LIFE-03" .-> m1_shell
-  m1_shell -->|최초| m1_first
-  m1_first -->|Desk 시작| m1_connect
-  m1_connect --> m1_desk
-  m1_shell -->|재방문: 이전 표시 상태 복원| m1_desk
+  m1_shell -->|최초| m1_desk
+  m1_shell -->|재방문: 마지막 집중/일반 상태 복원| m1_desk
   m1_desk --> m1_canvas
+  m1_canvas -->|첫 실행·복원된 집중 상태| m1_first
+  m1_canvas -->|복원된 일반 상태| m1_regular
+  m1_first -->|Canvas 줌아웃| m1_regular
+  m1_regular -->|Browser 집중 · 같은 View| m1_first
   m1_canvas -. "Q-OBJ-02" .-> m1_canvas_rule
-  m1_desk --> m1_sidebar
+  m1_regular --> m1_sidebar
   m1_sidebar -. "Q-LIFE-04" .-> m1_end
 ~~~
 
@@ -2926,10 +2935,12 @@ account authority와 dependency condition을 각각 다시 검증한다. 화면�
 
 1. **Firefox/Gecko 방향**: 제품은 Firefox/Gecko 기반의 독립 EG-Desk 앱을 지향한다.
    현재 Firefox-shell POC와 최종 배포 형태를 구분하며 소스 fork·Gecko patch를 필수로 단정하지 않는다.
-2. **최초 Browser 진입과 재방문 복원은 다르다**: 최초에는 Canvas를 숨긴 Browser 집중
-   시작 페이지와 주소 입력·Desk 진입 행동을 제공한다. 온라인 연결 뒤 같은 Browser를
-   유지한 Desk로 이어지며, 재방문자는 이전 집중/Canvas 표시 상태를 복원한다. 하나의 Desk와
-   Canvas에 여러 Saved Board를 열 수 있고 기존 내용을 교체하거나 새 Desk를 만들지 않는다.
+2. **최초 Browser 집중과 재방문 복원은 다르다**: 최초에는 이미 있는 Desk·Canvas의
+   live Browser View를 화면에 맞춰 보여 주고 바로 주소를 입력할 수 있다. Browser 안의
+   안내 시작 페이지는 가능하지만 별도 앱 시작 관문은 없다. Canvas 줌아웃으로 연결 화면을
+   거치지 않고 주변 공간을 드러내며, 첫 사용에 이전 일반 시점이 있을 필요는 없다. 이 왕복에서
+   Browser View·URL·세션·논리 viewport를 유지하며 재방문자는 마지막 표시 상태를 복원한다.
+   하나의 Desk와 Canvas에 여러 Saved Board를 열 수 있고 기존 내용을 교체하거나 새 Desk를 만들지 않는다.
 3. **저장된 Board와 자동 Desk 복원은 별개**: 저장된 Board는 사용자가
    의도적으로 보관한 작업 결합이고, 자동 Desk 세션은 열어 둔 상태의 로컬
    연속성 기록이다. 어느 한쪽을 읽거나 쓰는 일이 다른 쪽을 생성·갱신하지 않는다.
