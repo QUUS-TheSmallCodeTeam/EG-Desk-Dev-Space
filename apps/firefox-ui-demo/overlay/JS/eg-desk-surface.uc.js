@@ -427,6 +427,7 @@
       threadMenu: null,
       draft: '',
       threadDrafts: {},
+      threadDraftRevisions: {},
       loginLog: '',
       error: null,
       isSending: false,
@@ -884,11 +885,12 @@
   }
 
   function spawnInputEvidence(reference, stored = null, options = {}) {
+    const evidenceSnapshot = stored ? InputContext.inputEvidenceSnapshot(stored, reference) : null;
     const existing = Array.from(document.querySelectorAll('.egd-input-evidence-card')).find(card =>
       InputContext.inputEvidenceKey(card._inputReference) === InputContext.inputEvidenceKey(reference));
     if (existing && !options.restore) {
       if (stored && !existing._inputEvidenceLoaded) {
-        existing._deskWindowShell.slots.content.replaceChildren(InputContext.inputSnapshotView(document, InputContext.storedSnapshotForView(stored, reference), { includeDelivered: false }));
+        existing._deskWindowShell.slots.content.replaceChildren(InputContext.inputSnapshotView(document, evidenceSnapshot, { includeDelivered: false }));
         existing._inputEvidenceLoaded = true;
       }
       return existing;
@@ -897,14 +899,17 @@
       sourceRef: { kind: 'context-snapshot', id: reference.sourceId, scope: 'immutable-input' },
       style: { left: `${180 + document.querySelectorAll('.egd-input-evidence-card').length * 680}px`, top: '160px', width: '640px', height: '480px' } });
     shell.root._inputReference = cloneJson(reference);
-    shell.root._inputEvidenceLoaded = !!stored;
+    shell.root._inputEvidenceLoaded = !!evidenceSnapshot;
     shell.slots.identity.appendChild(el('strong', {}, '당시 입력 · 읽기 전용'));
-    if (stored) shell.slots.content.appendChild(InputContext.inputSnapshotView(document, InputContext.storedSnapshotForView(stored, reference), { includeDelivered: false }));
+    if (stored) shell.slots.content.appendChild(InputContext.inputSnapshotView(document, evidenceSnapshot, { includeDelivered: false }));
     else shell.slots.content.appendChild(el('button', { 'aria-label': '저장된 당시 입력 불러오기', onclick: async () => {
-      const result = await state.codexBridge.readInput(reference);
+      const result = await state.codexBridge.readInput(reference, reference.presentationRange);
       if (!result || !shell.root.isConnected) return;
-      shell.slots.content.replaceChildren(InputContext.inputSnapshotView(document, InputContext.storedSnapshotForView(result, reference), { includeDelivered: false }));
-      shell.root._inputEvidenceLoaded = true;
+      try {
+        const snapshot = InputContext.inputEvidenceSnapshot(result, reference);
+        shell.slots.content.replaceChildren(InputContext.inputSnapshotView(document, snapshot, { includeDelivered: false }));
+        shell.root._inputEvidenceLoaded = true;
+      } catch (error) { boardNotice(error.message); }
     } }, '당시 입력 불러오기'));
     return shell.root;
   }
@@ -5604,6 +5609,9 @@
           state.codex.draft = value;
           return;
         }
+        if (getCodexThreadDraft(state.codex, threadId) !== value) {
+          state.codex.threadDraftRevisions[threadId] = (state.codex.threadDraftRevisions[threadId] || 0) + 1;
+        }
         state.codex.threadDrafts = {
           ...(state.codex.threadDrafts || {}),
           [threadId]: value,
@@ -5700,7 +5708,7 @@
         const thread = getCodexThreadById(state.codex, threadId);
         if (!thread || thread.preparingInput || ChatState.nativeBindingHeld(thread)) return;
         const current = getCodexThreadDraft(state.codex, threadId);
-        state.codex.threadDrafts[threadId] = `${current ? `${current}\n\n` : ''}${comment.text}`;
+        this.setDraft(`${current ? `${current}\n\n` : ''}${comment.text}`, threadId);
         updateThreadById(threadId, item => ({ ...item, briefingInputs: [...new Map([...(item.briefingInputs || []),
           ...references.filter(reference => comment.contextSnapshotIds.includes(reference.sourceId))].map(reference => [reference.sourceId, reference])).values()] }));
         state.codex.activeThreadId = threadId;
@@ -6036,15 +6044,18 @@
       },
       async sendMessage() {
         const activeThread = getActiveCodexThread(state.codex);
-        const content = getCodexThreadDraft(state.codex, activeThread?.id || null).trim();
+        const draftText = getCodexThreadDraft(state.codex, activeThread?.id || null);
+        const content = draftText.trim();
         if (!activeThread || ChatState.nativeBindingHeld(activeThread) || !content || threadBusy(activeThread) || !state.codex.authStatus.isLoggedIn || !state.codex.connected) return;
         const token = epochScope.begin();
-        const selectedInputs = cloneJson(activeThread.inputSources || []);
+        const submittedDraft = ChatState.snapshotChatDraft(activeThread, draftText, state.codex.threadDraftRevisions[activeThread.id] || 0);
+        const selectedInputs = submittedDraft.inputSources;
+        let submittedWasCleared = false;
         let inputReferences;
         updateThreadById(activeThread.id, thread => ({ ...thread, preparingInput: true, sendError: null }));
         emit();
         try {
-          inputReferences = [...await captureThreadInputs(activeThread, selectedInputs, token), ...(activeThread.briefingInputs || [])];
+          inputReferences = [...await captureThreadInputs(activeThread, selectedInputs, token), ...submittedDraft.briefingInputs];
           if (!epochScope.valid(token)) { epochScope.finish(token); return; }
           const current = getCodexThreadById(state.codex, activeThread.id);
           if (!current || ChatState.clientThreadBinding(current) !== ChatState.clientThreadBinding(activeThread)) throw new Error('대화 연결이 바뀌었습니다. 초안을 다시 확인해 주세요.');
@@ -6061,12 +6072,13 @@
           readBy: [SELF_MEMBER], requestId, inputReferences,
         }), { countUnread: false });
         state.codex.error = null;
-        updateThreadById(activeThread.id, thread => ({ ...thread, sendError: null, inputSources: [], briefingInputs: [] }));
-        state.codex.threadDrafts = {
-          ...(state.codex.threadDrafts || {}),
-          [activeThread.id]: '',
-        };
-        state.codex.draft = '';
+        const currentComposer = getCodexThreadById(state.codex, activeThread.id);
+        submittedWasCleared = ChatState.chatDraftMatches(currentComposer, getCodexThreadDraft(state.codex, activeThread.id), state.codex.threadDraftRevisions[activeThread.id] || 0, submittedDraft);
+        if (submittedWasCleared) {
+          updateThreadById(activeThread.id, thread => ({ ...thread, sendError: null, inputSources: [], briefingInputs: [] }));
+          state.codex.threadDrafts = { ...state.codex.threadDrafts, [activeThread.id]: '' };
+        }
+        state.codex.draft = getCodexThreadDraft(state.codex, state.codex.activeThreadId);
         emit();
         try {
           const runtimeConfig = codexThreadRuntimeConfig(activeThread);
@@ -6102,9 +6114,11 @@
               sendError: request.status === 'unconfirmed' ? `접수 여부를 확인하지 못했습니다. 자동으로 다시 보내지 않습니다. ${error.message}` : error.message,
               messages: thread.messages.map(message => message.requestId === requestId ? { ...message, status: request.status } : message),
             }));
-            if (request.status === 'failed' && !getCodexThreadDraft(state.codex, activeThread.id)) {
-              state.codex.threadDrafts[activeThread.id] = content;
-              updateThreadById(activeThread.id, thread => ({ ...thread, inputSources: InputContext.addInputSources(thread.inputSources, selectedInputs), briefingInputs: activeThread.briefingInputs || [] }));
+            if (request.status === 'failed' && submittedWasCleared
+                && ChatState.chatDraftMatches(getCodexThreadById(state.codex, activeThread.id), getCodexThreadDraft(state.codex, activeThread.id), state.codex.threadDraftRevisions[activeThread.id] || 0,
+                  { text: '', revision: submittedDraft.revision, inputSources: [], briefingInputs: [] })) {
+              state.codex.threadDrafts[activeThread.id] = submittedDraft.text;
+              updateThreadById(activeThread.id, thread => ({ ...thread, inputSources: InputContext.addInputSources(thread.inputSources, selectedInputs), briefingInputs: submittedDraft.briefingInputs }));
             }
           }
         } finally { epochScope.finish(token); if (epochScope.valid(token)) emit(); }

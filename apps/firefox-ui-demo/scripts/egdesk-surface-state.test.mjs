@@ -1282,3 +1282,71 @@ test('production immutable read omits a default endLine so short captures remain
   assert.equal(binary.binary, true);
   assert.equal(binary.content.text, null, 'binary source is not fabricated text');
 });
+
+// CORE_REVIEW_REGRESSIONS_BEGIN
+test('submitted draft matching includes user revision, exact text and both attachment sets', () => {
+  const thread = { inputSources: [{ id: 'a', sourceRef: { path: '/a' } }], briefingInputs: [{ sourceId: 'fixed' }] };
+  const submitted = Chat.snapshotChatDraft(thread, ' A ', 2);
+  assert.equal(Chat.chatDraftMatches(thread, ' A ', 2, submitted), true);
+  assert.equal(Chat.chatDraftMatches(thread, 'B', 3, submitted), false);
+  assert.equal(Chat.chatDraftMatches(thread, ' A ', 4, submitted), false, 'A → B → A is newer user intent');
+  assert.equal(Chat.chatDraftMatches({ ...thread, inputSources: [] }, ' A ', 2, submitted), false);
+  assert.equal(Chat.chatDraftMatches({ ...thread, briefingInputs: [] }, ' A ', 2, submitted), false);
+  thread.inputSources[0].sourceRef.path = '/new';
+  assert.equal(submitted.inputSources[0].sourceRef.path, '/a');
+});
+
+test('actual send path preserves draft B and new attachments typed during delayed capture of draft A', async () => {
+  const body = surfaceSource.match(/      async sendMessage\(\) \{([\s\S]*?)\n      \},/)?.[1];
+  assert.ok(body);
+  const deps = ['state', 'getActiveCodexThread', 'getCodexThreadDraft', 'ChatState', 'threadBusy', 'epochScope', 'updateThreadById', 'emit',
+    'captureThreadInputs', 'getCodexThreadById', 'protocol', 'codexThreadAgentProfile', 'appendMessageToThread', 'createCodexMessage', 'SELF_MEMBER', 'codexThreadRuntimeConfig', 'fetchJson', 'syncProtocolRun'];
+  const send = compileFunction(`return (async () => {${body}\n})();`, deps);
+  const initial = { id: 'room', inputSources: [{ id: 'a' }], briefingInputs: [], messages: [], profileEnabled: false };
+  const state = { codex: { activeThreadId: 'room', threads: [initial], threadDrafts: { room: 'A' }, threadDraftRevisions: { room: 1 },
+    authStatus: { isLoggedIn: true, authMode: 'chatgpt', accountEmail: 'known@example.test', identityStatus: 'known' }, connected: true } };
+  let release;
+  const delayed = new Promise(resolve => { release = resolve; });
+  const getThread = (_codex, id = 'room') => state.codex.threads.find(thread => thread.id === id);
+  const update = (id, fn) => { const index = state.codex.threads.findIndex(thread => thread.id === id); state.codex.threads[index] = fn(state.codex.threads[index]); };
+  let payload;
+  const running = send(state, () => getThread(null), (codex, id) => codex.threadDrafts[id] || '', Chat, () => false,
+    { begin: () => ({}), valid: () => true, finish() {} }, update, () => {}, () => delayed, getThread, Chat.createChatProtocolState(), () => ({}),
+    (id, message) => update(id, thread => ({ ...thread, messages: [...thread.messages, message] })),
+    (role, content, status, options) => ({ role, content, status, ...options }), 'self', () => ({}),
+    async (_url, request) => { payload = JSON.parse(request.body); return { accepted: true, conversationId: 'c', runId: 'r', answerId: 'c/r' }; }, () => {});
+  state.codex.threadDrafts.room = 'B';
+  state.codex.threadDraftRevisions.room = 2;
+  update('room', thread => ({ ...thread, inputSources: [...thread.inputSources, { id: 'b' }] }));
+  release([{ sourceId: 'captured-a', snapshotId: 'captured-a' }]);
+  await running;
+  assert.equal(payload.message, 'A');
+  assert.deepEqual(payload.contextSnapshotIds, ['captured-a']);
+  assert.equal(state.codex.threadDrafts.room, 'B');
+  assert.deepEqual(getThread(null).inputSources.map(input => input.id), ['a', 'b']);
+  assert.equal(getThread(null).messages[0].content, 'A');
+});
+
+test('production evidence restore requests and verifies the saved range before marking loaded', async () => {
+  const body = surfaceSource.match(/else shell\.slots\.content\.appendChild\(el\('button', \{ 'aria-label': '저장된 당시 입력 불러오기', onclick: async \(\) => \{([\s\S]*?)\n    \} \}, '당시 입력 불러오기'\)\);/)?.[1];
+  assert.ok(body);
+  const restore = compileFunction(`return (async () => {${body}\n})();`, ['state', 'reference', 'shell', 'InputContext', 'document', 'boardNotice']);
+  const reference = { sourceId: 'source', hash: 'fixed', presentationRange: { startLine: 201, endLine: 240 } };
+  const stored = { capture: { sourceId: 'source', hash: 'fixed', capturedAt: 1, sourceRef: {}, captureScope: { type: 'file' } },
+    source: { role: 'source', mime: 'text/plain', hash: 'fixed', rangeHash: 'range', text: '201–240', range: { startLine: 201, endLine: 240, totalLines: 300 }, nextLine: 241 }, delivered: null, bindings: [] };
+  const shell = { root: { isConnected: true, _inputEvidenceLoaded: false }, slots: { content: { replaceChildren() {} } } };
+  let requested;
+  const state = { codexBridge: { readInput: async (_ref, range) => { requested = range; return stored; } } };
+  await restore(state, reference, shell, InputContext, markdownDOM().ownerDocument, () => assert.fail('valid range'));
+  assert.deepEqual(requested, reference.presentationRange);
+  assert.equal(shell.root._inputEvidenceLoaded, true);
+  shell.root._inputEvidenceLoaded = false;
+  stored.source.range = { startLine: 1, endLine: 200, totalLines: 300 };
+  let error;
+  await restore(state, reference, shell, InputContext, markdownDOM().ownerDocument, value => { error = value; });
+  assert.equal(shell.root._inputEvidenceLoaded, false);
+  assert.match(error, /요청 행 범위/);
+  stored.source.range = { startLine: 201, endLine: 239, totalLines: 300 };
+  assert.throws(() => InputContext.inputEvidenceSnapshot(stored, reference), /요청 행 범위/);
+});
+// CORE_REVIEW_REGRESSIONS_END

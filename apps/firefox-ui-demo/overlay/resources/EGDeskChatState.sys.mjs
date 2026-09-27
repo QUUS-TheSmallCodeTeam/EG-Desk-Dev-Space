@@ -124,6 +124,14 @@ function ensureStream(state, id) {
 export function registerChatRequest(state, request, authStatus) {
   state.requests[request.requestId] = { ...request, accountKey: codexAccountKey(authStatus), status: 'submitting' };
 }
+export function snapshotChatDraft(thread, text, revision = 0) {
+  return { text, revision, inputSources: copy(thread?.inputSources || []), briefingInputs: copy(thread?.briefingInputs || []) };
+}
+export function chatDraftMatches(thread, text, revision, submitted) {
+  return text === submitted.text && revision === submitted.revision
+    && JSON.stringify(thread?.inputSources || []) === JSON.stringify(submitted.inputSources)
+    && JSON.stringify(thread?.briefingInputs || []) === JSON.stringify(submitted.briefingInputs);
+}
 export function buildChatRequest(thread, message, requestId, runtime = {}) {
   const body = { message, requestId, clientThreadId: clientThreadBinding(thread), profileEnabled: thread.profileEnabled === true };
   if (thread.conversationId) body.conversationId = thread.conversationId;

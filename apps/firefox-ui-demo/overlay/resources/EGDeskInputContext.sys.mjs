@@ -164,6 +164,16 @@ export function projectionRange(range = {}) {
       || Object.keys(range).some(key => !['startLine', 'endLine'].includes(key))) throw new Error('지원하지 않는 캡처 행 범위입니다. 한 페이지는 최대 500행입니다.');
   return { startLine, endLine };
 }
+export function inputEvidenceSnapshot(stored, reference) {
+  const snapshot = storedSnapshotForView(stored, reference);
+  if (snapshot.binary) throw new Error('이 원문은 텍스트 근거로 표시할 수 없습니다.');
+  const requested = reference.presentationRange || {};
+  const { startLine, endLine } = projectionRange(requested);
+  if (snapshot.range.startLine !== startLine || (requested.endLine !== undefined && snapshot.range.endLine !== endLine)) {
+    throw new Error('저장된 근거의 요청 행 범위와 응답이 달라 로드하지 않았습니다.');
+  }
+  return snapshot;
+}
 export const inputEvidenceKey = reference => {
   const range = projectionRange(reference.presentationRange);
   return JSON.stringify([reference.sourceId, reference.hash, range.startLine, range.endLine]);
