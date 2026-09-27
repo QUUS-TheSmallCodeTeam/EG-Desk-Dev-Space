@@ -15,6 +15,9 @@ import { NativeReaderClient } from './egdesk-native-reader.mjs'
 import { ContextRuntime } from './egdesk-context-runtime.mjs'
 import { createContextHttpHandler } from './egdesk-context-http.mjs'
 import { inspectNativeCapabilities, resolveCodexExecutable, NATIVE_SCHEMA_VERSION } from './egdesk-native-capabilities.mjs'
+import { createEGDeskFileMount, requireEGDeskNodeRuntime } from './egdesk-file-mount.mjs'
+
+const nodeRuntime = requireEGDeskNodeRuntime()
 
 const BRIDGE_PORT = 39218
 const APP_SERVER_PORT = 39219
@@ -87,8 +90,10 @@ const nativeRespond = (id, result, error) => {
   if (!rpc) throw chatError('BRIDGE_OFFLINE', 'Codex app-server is offline', 503)
   rpc.respond(id, result, error)
 }
+const dataDir = appDataDirectory()
+const localFiles = createEGDeskFileMount({ dataDir, port: BRIDGE_PORT })
 const contextStore = new ImmutableContextStore({
-  dataDir: appDataDirectory(),
+  dataDir,
   allowedRoots: process.env.EGDESK_CONTEXT_ROOTS ? process.env.EGDESK_CONTEXT_ROOTS.split(path.delimiter).filter(Boolean) : [process.cwd()],
 })
 const nativeReader = new NativeReaderClient({ request: (method, params) => appServerRequest(method, params), respond: nativeRespond, getOwnerKey: () => publicAuthIdentityKey(authState) })
@@ -489,6 +494,10 @@ const bridgeServer = createServer(async (req, res) => {
     return
   }
 
+  // File routes have their own bounded 18 MiB draft reader and local owner.
+  // Dispatch before any generic body reader or Codex/account authentication.
+  if (await localFiles.handle(req, res, url)) return
+
   if (req.method === 'GET' && route === '/events') {
     res.writeHead(200, {
       'Content-Type': 'text/event-stream',
@@ -505,7 +514,7 @@ const bridgeServer = createServer(async (req, res) => {
   }
 
   if (req.method === 'GET' && route === '/health') {
-    sendJson(res, 200, { ok: true, port: BRIDGE_PORT, appServerReady, native: nativeCapabilities })
+    sendJson(res, 200, { ok: true, port: BRIDGE_PORT, appServerReady, native: nativeCapabilities, node: nodeRuntime })
     return
   }
 
@@ -518,12 +527,14 @@ const bridgeServer = createServer(async (req, res) => {
       provider: PROVIDER_ID,
       appServerReady,
       native: nativeCapabilities,
+      node: nodeRuntime,
       auth: authSnapshot(),
       chat: chat.snapshot(),
       capabilities: {
         auth: ['status', 'start', 'cancel', 'signout'],
         chat: ['send', 'stream', 'resume', 'interrupt', 'approvals', 'typed-activity', 'artifact-refs'],
         context: nativeCapabilities.schemaMatch ? ['capture', 'immutable-inspect', 'native-dynamic-tools', 'smart-read', 'read-only-reader', 'answer-briefing'] : ['capture', 'immutable-inspect'],
+        files: ['native-picker', 'scoped-read', 'managed-drafts', 'create-only-save-as'],
       },
     })
     return
@@ -672,6 +683,7 @@ bridgeServer.on('error', (error) => {
 
 bridgeServer.listen(BRIDGE_PORT, '127.0.0.1', () => {
   console.log(`[egdesk-codex-bridge] listening on http://127.0.0.1:${BRIDGE_PORT}`)
+  console.log(`[egdesk-codex-bridge] Node.js ${nodeRuntime.version}; requires ${nodeRuntime.minimumVersion}+, integration baseline ${nodeRuntime.integrationBaseline}; node:sqlite available`)
   broadcast({
     type: 'bridge.ready',
     v: BRIDGE_PROTOCOL_VERSION,
@@ -681,8 +693,17 @@ bridgeServer.listen(BRIDGE_PORT, '127.0.0.1', () => {
   void connectToAppServer()
 })
 
-process.on('SIGINT', () => process.exit(0))
-process.on('SIGTERM', () => process.exit(0))
+let shuttingDown = false
+async function shutdown() {
+  if (shuttingDown) return
+  shuttingDown = true
+  bridgeServer.close()
+  try { await localFiles.close() }
+  catch { console.error('[egdesk-codex-bridge] managed file store did not close cleanly') }
+  process.exit(0)
+}
+process.on('SIGINT', shutdown)
+process.on('SIGTERM', shutdown)
 process.on('exit', () => {
   rpc?.close()
   try { appServerSocket?.close(); } catch {}
