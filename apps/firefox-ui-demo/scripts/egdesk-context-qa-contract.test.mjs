@@ -4,7 +4,7 @@ import path from 'node:path';
 import test from 'node:test';
 import { assertBriefingTargets, assertContextCaptureBatch, assertContextEventIdentity, assertContextSendBindings,
   assertFrozenFileReadAfterMutation, assertImmutableContextRead, captureContextReadEvidence,
-  assertStoredAgentDelivery, fingerprintQaBytes, observeQaFixtureFile, readContextInspectionPage } from './egdesk-context-qa-contract.mjs';
+  assertPublishedBriefing, assertStoredAgentDelivery, fingerprintQaBytes, observeQaFixtureFile, readContextInspectionPage } from './egdesk-context-qa-contract.mjs';
 import { bootstrapQaProfile, canonicalTempRoot, LOADER_FILES } from './egdesk-chat-qa-profile.mjs';
 
 // Synthetic metadata tests QA oracles only, never production capture/tool handling.
@@ -221,4 +221,19 @@ test('Briefing steps cannot point at unrelated snapshots or silently omit a fall
   assert.throws(() => assertBriefingTargets({ ...briefing, steps: [{ id: 'old', description: 'legacy', targets: [] }] }, scope), /Step text/);
   assert.throws(() => assertBriefingTargets({ ...briefing, steps: [{ id: 'empty', text: 'Missing', target: {} }] }, scope), /fallback/);
   assert.equal(assertBriefingTargets({ ...briefing, steps: [{ id: 'fallback', text: 'Unavailable target', target: {}, fallback: 'Preserved captured text' }] }, scope), true);
+});
+
+test('published Briefing requires native-answer identity and verified target hashes', () => {
+  const identity = { conversationId: 'conversation', runId: 'run', answerId: 'conversation/run' };
+  const capture = metadata();
+  const briefing = { id: 'briefing', title: 'Captured input', ...identity, presentationStatus: 'proposed',
+    steps: [{ id: 'step', text: 'Show the original', target: { sourceId: capture.sourceId, hash: capture.hash }, fallback: 'Unavailable' }] };
+  const scope = { identity, captures: [capture] };
+  assert.equal(assertPublishedBriefing(briefing, scope), true);
+  for (const field of ['conversationId', 'runId', 'answerId']) {
+    const missing = { ...briefing }; delete missing[field];
+    assert.throws(() => assertPublishedBriefing(missing, scope), /crossed or omitted/);
+  }
+  assert.throws(() => assertPublishedBriefing({ ...briefing, steps: [{ ...briefing.steps[0], target: { sourceId: capture.sourceId } }] }, scope), /immutable hash/);
+  assert.throws(() => assertPublishedBriefing({ ...briefing, presentationStatus: 'open-now' }, scope), /not an instruction/);
 });

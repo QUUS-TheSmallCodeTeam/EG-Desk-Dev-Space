@@ -6,7 +6,7 @@ import path from 'node:path';
 import { pathToFileURL } from 'node:url';
 import { randomBytes } from 'node:crypto';
 import { assertQaFixtureManifest } from './egdesk-chat-qa-profile.mjs';
-import { assertBriefingTargets, assertContextSendBindings, assertFrozenFileReadAfterMutation,
+import { assertPublishedBriefing, assertContextSendBindings, assertFrozenFileReadAfterMutation,
   assertStoredAgentDelivery, captureContextReadEvidence, fingerprintQaBytes, observeQaFixtureFile } from './egdesk-context-qa-contract.mjs';
 import { attributeSelector, chrome, loopbackJson, newQaThread, option, runUiFlow,
   selectQaThread, selectorForId, sendFromComposer, visible, waitUntil } from './egdesk-qa-ui-flow.mjs';
@@ -244,7 +244,7 @@ await runUiFlow(`context-briefing-fixture-${phase}`, async ({ harness, check, ca
   await control('/__qa/context-release', { runId: run.runId, phase: 'briefing' });
   const completed = await waitUntil(fixtureState, value => value.runs.find(item => item.runId === run.runId)?.status === 'completed');
   const briefing = completed.runs.find(item => item.runId === run.runId).briefing;
-  assertBriefingTargets(briefing, { sourceIds: run.contextCaptures.map(item => item.sourceId) });
+  assertPublishedBriefing(briefing, { identity: result.fixtureIdentity, captures: run.contextCaptures });
   await visible(harness, hook('briefing-open'));
   check('publishing a Briefing does not auto-open cards or move the camera', (await harness.inspect('.egd-input-evidence-card')).length === evidenceBefore && sameCamera(previousCamera, await camera(harness)));
   const briefingState = () => chrome(harness, () => {

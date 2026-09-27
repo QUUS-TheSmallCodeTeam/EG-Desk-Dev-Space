@@ -6,7 +6,7 @@ import test from 'node:test';
 import { bootstrapQaProfile, canonicalTempRoot, LOADER_FILES } from './egdesk-chat-qa-profile.mjs';
 import { createQaFixtureTransport } from './egdesk-chat-fixture-transport.mjs';
 import { assertNativeTerminalExit } from './egdesk-chat-qa-contract.sys.mjs';
-import { assertBriefingTargets, assertContextCaptureBatch, assertStoredAgentDelivery,
+import { assertPublishedBriefing, assertContextCaptureBatch, assertStoredAgentDelivery,
   captureContextReadEvidence, fingerprintQaBytes } from './egdesk-context-qa-contract.mjs';
 
 const TOKEN = 'unit-fixture-token-no-credentials';
@@ -234,7 +234,7 @@ test('fixture context handoff records separate exact packets and same-answer Bri
   await request(handler, 'POST', '/__qa/context-release', { runId: identity.runId, phase: 'briefing' }, TOKEN);
   const run = (await request(handler, 'GET', `/chat/state?conversationId=${identity.conversationId}`)).body.runs[0];
   assert.equal(run.status, 'completed');
-  assert.equal(assertBriefingTargets(run.briefing, { sourceIds: captures.map(c => c.sourceId) }), true);
+  assert.equal(assertPublishedBriefing(run.briefing, { identity, captures }), true);
   assert.equal((await request(handler, 'GET', '/__qa/state', null, TOKEN)).body.observed.sends.length, 1);
 });
 

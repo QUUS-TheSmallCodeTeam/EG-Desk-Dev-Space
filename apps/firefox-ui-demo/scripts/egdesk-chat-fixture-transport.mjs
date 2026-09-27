@@ -114,9 +114,11 @@ function contextPhase(run, phase) {
     run.messages.set(messageId, { id: messageId, role: 'assistant', status: 'completed', text });
     envelope(run, 'message.started', { messageId, phase: 'answer' }, messageId);
     envelope(run, 'message.completed', { messageId, text, phase: 'answer' }, messageId);
-    run.briefing = { id: `qa-briefing-${run.runId}`, title: 'QA captured-input briefing', steps: run.contextCaptures.slice(0, 2).map((capture, index) => ({
+    run.briefing = { id: `qa-briefing-${run.runId}`, title: 'QA captured-input briefing',
+      conversationId: run.conversationId, runId: run.runId, answerId: run.answerId,
+      createdAt: Date.now(), presentationStatus: 'proposed', steps: run.contextCaptures.slice(0, 2).map((capture, index) => ({
       id: `qa-step-${index + 1}`, text: `Captured input ${index + 1}; original version`,
-      target: { sourceId: capture.sourceId, range: index === 1 && capture.shape.lineCount >= 240
+      target: { sourceId: capture.sourceId, hash: capture.hash, range: index === 1 && capture.shape.lineCount >= 240
         ? { startLine: 201, endLine: 240 } : { startLine: 1, endLine: Math.min(20, capture.shape.lineCount) } },
       fallback: 'Preserved input is unavailable; do not replace it with a live source.',
     })) };

@@ -266,8 +266,9 @@ export function assertBriefingTargets(briefing, { sourceIds, artifactIds = [], v
     record(step.target, 'Singular Briefing target');
     assert.ok(!Object.hasOwn(step, 'targets') && !Object.hasOwn(step, 'description'), 'Legacy Briefing shape is not accepted');
     assert.ok(Object.hasOwn(step, 'fallback'), 'Step must declare fallback');
-    assert.ok(Object.keys(step.target).every(key => ['sourceId', 'artifactId', 'viewId', 'range'].includes(key)),
+    assert.ok(Object.keys(step.target).every(key => ['sourceId', 'artifactId', 'viewId', 'range', 'hash'].includes(key)),
       'Briefing cannot use raw-path or other unbound target fallbacks');
+    if (step.target.hash !== undefined) { text(step.target.sourceId, 'Hashed immutable sourceId'); text(step.target.hash, 'Immutable target hash'); }
     let references = 0;
     for (const [field, ids] of Object.entries(allowed)) {
       if (step.target[field] === undefined) continue;
@@ -275,6 +276,22 @@ export function assertBriefingTargets(briefing, { sourceIds, artifactIds = [], v
       references++;
     }
     if (!references) assert.ok(step.fallback, 'Targetless step requires an explicit fallback');
+  }
+  return true;
+}
+
+// Published DTOs are enriched by egdesk-context-runtime.publish after validation;
+// these server-bound fields are not caller-supplied publication authority.
+export function assertPublishedBriefing(briefing, { identity, captures, artifactIds = [], viewIds = [] }) {
+  assertRunBinding(identity);
+  for (const field of ['conversationId', 'runId', 'answerId']) {
+    assert.equal(briefing[field], identity[field], `Published Briefing crossed or omitted ${field}`);
+  }
+  assert.equal(briefing.presentationStatus, 'proposed', 'Publishing is not an instruction to navigate automatically');
+  assertBriefingTargets(briefing, { sourceIds: captures.map(item => item.sourceId), artifactIds, viewIds });
+  for (const step of briefing.steps) {
+    const capture = captures.find(item => item.sourceId === step.target.sourceId);
+    assert.ok(capture && step.target.hash === capture.hash, 'Published target lacks its verified immutable hash');
   }
   return true;
 }
