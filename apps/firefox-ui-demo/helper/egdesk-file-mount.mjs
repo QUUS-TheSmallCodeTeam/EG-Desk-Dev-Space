@@ -31,8 +31,8 @@ export function createEGDeskFileMount({ dataDir, port = 39218, nativeExecutable,
     async createFile(args) {
       try { return await native.createFile(args) }
       catch (cause) {
-        if (cause?.code === 'EGDESK_NATIVE_REFUSED' && cause.nativeStatus === 5 && cause.created === false) {
-          throw new FileSurfaceError('TARGET_EXISTS', 'Save As never overwrites an existing file', { created: false, fileMayExist: true })
+        if (cause?.code === 'EGDESK_NATIVE_REFUSED' && cause.nativeStatus === 5 && cause.created === false && cause.fileMayExist !== true) {
+          throw new FileSurfaceError('TARGET_EXISTS', 'Save As never overwrites an existing file', { created: false, fileMayExist: false })
         }
         if (!/^EGDESK_NATIVE_[A-Z_]+$/.test(cause?.code || '')) throw cause
         const failure = new FileSurfaceError(cause.code, cause.message, {

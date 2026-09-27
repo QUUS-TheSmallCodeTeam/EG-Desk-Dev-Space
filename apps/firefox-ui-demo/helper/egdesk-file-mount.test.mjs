@@ -44,18 +44,20 @@ test('native create failures preserve collision and partial-file semantics throu
   let adapter
   let failure = Object.assign(new Error('existing file'), { code: 'EGDESK_NATIVE_REFUSED', nativeStatus: 5, created: false })
   createEGDeskFileMount({ dataDir: '/unused', createNativeAdapter: () => ({ capability: 'descriptor-relative-create-only', createFile: async () => { throw failure } }), createHttpAdapter: options => { adapter = options.createOnlyAdapter; return {} } })
-  await assert.rejects(adapter.createFile({}), e => e.code === 'TARGET_EXISTS' && e.details.created === false)
+  await assert.rejects(adapter.createFile({}), e => e.code === 'TARGET_EXISTS' && e.details.created === false && e.details.fileMayExist === false)
+  failure = Object.assign(new Error('reported collision but outcome is uncertain'), { code: 'EGDESK_NATIVE_REFUSED', nativeStatus: 5, created: false, fileMayExist: true })
+  await assert.rejects(adapter.createFile({}), e => e.code === 'EGDESK_NATIVE_REFUSED' && e.details.fileMayExist === true)
   failure = Object.assign(new Error('A partial new file may remain'), { code: 'EGDESK_NATIVE_TIMEOUT', created: null, fileMayExist: true })
   await assert.rejects(adapter.createFile({}), e => e.httpStatus === 504 && e.details.fileMayExist === true && e.details.created === null)
   failure = Object.assign(new Error('Native executable is unavailable'), { code: 'EGDESK_NATIVE_UNAVAILABLE', created: false, fileMayExist: false })
   await assert.rejects(adapter.createFile({}), e => e.httpStatus === 503 && e.details.created === false && e.details.fileMayExist === false)
 })
 
-async function fixture(t) {
+async function fixture(t, mountOptions = {}) {
   const temp = await mkdtemp(path.join(os.tmpdir(), 'egdesk-file-mount-test-'))
   const root = path.join(temp, 'selected'); await mkdir(root)
   await writeFile(path.join(root, 'source.txt'), 'external original\n')
-  const options = { dataDir: path.join(temp, 'app-data'), nativeExecutable: process.env.EGDESK_NATIVE_CREATE_BINARY }
+  const options = { dataDir: path.join(temp, 'app-data'), nativeExecutable: process.env.EGDESK_NATIVE_CREATE_BINARY, ...mountOptions }
   let mount = createEGDeskFileMount(options)
   t.after(async () => { await mount.close(); await rm(temp, { recursive: true, force: true }) })
   const call = async (operation, body = {}, headers = {}) => {
@@ -79,6 +81,18 @@ async function fixture(t) {
   assert.equal(created.status, 200)
   return { root, call, directoryId, draft: created.body.result, restart: async () => { await mount.close(); mount = createEGDeskFileMount(options) }, getMount: () => mount }
 }
+
+test('mounted Save As returns a definitive 409 collision without file uncertainty', async t => {
+  const nativeFailure = Object.assign(new Error('target already exists'), { code: 'EGDESK_NATIVE_REFUSED', nativeStatus: 5, created: false, fileMayExist: false })
+  const h = await fixture(t, { createNativeAdapter: () => ({ capability: 'descriptor-relative-create-only', createFile: async () => { throw nativeFailure } }) })
+  const result = await h.call('save-as', { draftId: h.draft.id, expectedHead: h.draft.head, directoryId: h.directoryId, fileName: 'source.txt', operationId: 'mounted-collision' })
+  assert.equal(result.status, 409)
+  assert.equal(result.body.code, 'TARGET_EXISTS')
+  assert.equal(result.body.details.created, false)
+  assert.equal(result.body.details.fileMayExist, false)
+  assert.equal(result.body.details.originalUpdated, false)
+  assert.equal(await readFile(path.join(h.root, 'source.txt'), 'utf8'), 'external original\n')
+})
 
 test('mounted file routes work offline, allow bounded large drafts, preserve local drafts across restart and retain origin guards', async t => {
   const h = await fixture(t)
