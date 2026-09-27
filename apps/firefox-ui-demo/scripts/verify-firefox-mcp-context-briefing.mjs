@@ -101,13 +101,17 @@ await runUiFlow(`context-briefing-fixture-${phase}`, async ({ harness, check, ca
   const nonce = randomBytes(5).toString('hex');
   const originalLines = Array.from({ length: 610 }, (_, index) => `QA_FILE_V0_${nonce}_line_${index + 1}`);
   const changedLines = Array.from({ length: 610 }, (_, index) => `QA_FILE_V1_${nonce}_line_${index + 1}`);
-  const browserLines = Array.from({ length: 610 }, (_, index) => `QA_BROWSER_${nonce}_line_${index + 1}`);
   const sourceFile = path.join(manifest.root, `context-source-${nonce}.txt`);
   fs.writeFileSync(sourceFile, originalLines.join('\n'), { flag: 'wx', mode: 0o600 });
   result.fixtureSource = sourceFile;
   const originalFile = observeQaFixtureFile(harness.profile, sourceFile);
-  const scene = await chrome(harness, ({ fileUrl, browserUrl, nonce }) => {
+  const scene = await chrome(harness, ({ fileUrl, nonce }) => {
     const api = window.__egdesk;
+    // Pass only a short seed across MCP's 16 KiB evaluation boundary. The
+    // controlled fixture document itself is built here, not supplied as a huge
+    // serialized argument. No product code or transport is replaced.
+    const browserText = Array.from({ length: 610 }, (_, index) => `QA_BROWSER_${nonce}_line_${index + 1}`).join('\n');
+    const browserUrl = `data:text/html;charset=utf-8,${encodeURIComponent(`<title>QA Browser ${nonce}</title><pre>${browserText}</pre>`)}`;
     const file = api.cardRuntime.openBrowserCard(fileUrl, { openMode: 'new' });
     const browser = api.cardRuntime.openBrowserCard(browserUrl, { openMode: 'new' });
     for (const [index, card] of [file, browser].entries()) {
@@ -116,8 +120,7 @@ await runUiFlow(`context-briefing-fixture-${phase}`, async ({ harness, check, ca
     const boardId = `qa-context-board-${nonce}`, title = `QA context ${nonce}`;
     api.agenda.save({ agendaId: boardId, title, memberIds: [file.id, browser.id], contextBindings: [] });
     return { boardId, title, originalIds: [file.id, browser.id] };
-  }, { fileUrl: pathToFileURL(sourceFile).href,
-    browserUrl: `data:text/html;charset=utf-8,${encodeURIComponent(`<title>QA Browser ${nonce}</title><pre>${browserLines.join('\n')}</pre>`)}`, nonce });
+  }, { fileUrl: pathToFileURL(sourceFile).href, nonce });
   const thread = await newQaThread(harness, `QA context ${nonce}`);
   const moveToHud = (await harness.inspect('.egd-chat-card button[title="우측 패널로 이동"]'))[0];
   if (moveToHud?.visible) {
