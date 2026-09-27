@@ -9,6 +9,7 @@ import { randomUUID } from 'node:crypto';
 import { assertQaFixtureManifest } from './egdesk-chat-qa-profile.mjs';
 import { assertOrdinarySend } from './egdesk-chat-qa-contract.sys.mjs';
 import { createQaContextFixture } from './egdesk-context-qa-fixture.mjs';
+import { observeQaFixtureFile } from './egdesk-context-qa-contract.mjs';
 
 const PORT = 39218;
 const HOST = '127.0.0.1';
@@ -226,6 +227,14 @@ const handler = async (req, res) => {
   try {
     const url = new URL(req.url, `http://${HOST}:${PORT}`);
     if (url.origin !== `http://${HOST}:${PORT}`) return json(res, 400, { error: 'Fixture accepts only its loopback origin' });
+    const browserDocument = url.pathname.match(/^\/__qa\/browser-document\/([0-9a-f]{10})$/);
+    if (req.method === 'GET' && browserDocument) {
+      const file = path.join(artifactRoot, `context-browser-${browserDocument[1]}.html`);
+      observeQaFixtureFile(profile, file);
+      res.writeHead(200, { 'Content-Type': 'text/html; charset=utf-8', 'Cache-Control': 'no-store' });
+      res.end(fs.readFileSync(file, 'utf8'));
+      return;
+    }
     if (req.method === 'OPTIONS') {
       const paths = ['/health', '/v1/state', '/auth/status', '/events', '/chat/state', '/chat/resume',
         '/chat/send', '/chat/interrupt', '/chat/approval', '/__qa/state', '/__qa/release',

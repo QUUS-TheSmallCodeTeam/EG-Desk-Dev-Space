@@ -34,11 +34,12 @@ async function request(handler, method, url, body = null, token = null) {
   const req = Readable.from(body === null ? [] : [JSON.stringify(body)]);
   Object.assign(req, { method, url, headers: token ? { 'x-egdesk-qa-token': token } : {} });
   let status;
+  let headers = {};
   let resolve;
   const completed = new Promise((done) => { resolve = done; });
   const res = {
-    writeHead(value) { status = value; },
-    end(value = '') { resolve({ status, body: value ? JSON.parse(value) : null }); },
+    writeHead(value, nextHeaders = {}) { status = value; headers = nextHeaders; },
+    end(value = '') { resolve({ status, body: value ? (/application\/json/.test(headers['Content-Type'] || '') ? JSON.parse(value) : value) : null }); },
     write() { return true; },
   };
   await handler(req, res);
@@ -141,6 +142,19 @@ test('Terminal fixture is explicit and missing-session output never becomes nati
 const attachment = (id, sourceRef, kind = 'file', text = '') => ({ id, kind, label: `QA ${id}`, sourceRef,
   capturedAt: 1700000000000, captureScope: { type: kind === 'file' ? 'file' : kind === 'browser' ? 'document-text' : 'board-selection' },
   ...(kind === 'file' ? {} : { content: { mime: 'text/plain', text, truncated: false } }) });
+
+test('short Browser fixture URL serves only the canonical document in this marked profile', async t => {
+  const { handler, info } = setup(t);
+  const document = path.join(info.profile, 'qa-fixtures', 'context-browser-012345abcd.html');
+  const html = '<title>QA source</title><pre>same long content lives here</pre>';
+  fs.writeFileSync(document, html, { flag: 'wx', mode: 0o600 });
+  const loaded = await request(handler, 'GET', '/__qa/browser-document/012345abcd');
+  assert.equal(loaded.status, 200);
+  assert.equal(loaded.body, html);
+  assert.equal((await request(handler, 'GET', '/__qa/browser-document/not-an-id')).status, 404);
+  fs.unlinkSync(document); fs.symlinkSync('/etc/hosts', document);
+  assert.equal((await request(handler, 'GET', '/__qa/browser-document/012345abcd')).status, 400);
+});
 
 test('final fixture GET paginates immutable source bytes without live rereads or claimed delivery', async t => {
   const { handler, info } = setup(t);

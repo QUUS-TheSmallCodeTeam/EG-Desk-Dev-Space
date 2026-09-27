@@ -103,15 +103,16 @@ await runUiFlow(`context-briefing-fixture-${phase}`, async ({ harness, check, ca
   const changedLines = Array.from({ length: 610 }, (_, index) => `QA_FILE_V1_${nonce}_line_${index + 1}`);
   const sourceFile = path.join(manifest.root, `context-source-${nonce}.txt`);
   fs.writeFileSync(sourceFile, originalLines.join('\n'), { flag: 'wx', mode: 0o600 });
+  const browserFile = path.join(manifest.root, `context-browser-${nonce}.html`);
+  const browserText = Array.from({ length: 610 }, (_, index) => `QA_BROWSER_${nonce}_line_${index + 1}`).join('\n');
+  fs.writeFileSync(browserFile, `<title>QA Browser ${nonce}</title><pre>${browserText}</pre>`, { flag: 'wx', mode: 0o600 });
   result.fixtureSource = sourceFile;
   const originalFile = observeQaFixtureFile(harness.profile, sourceFile);
   const scene = await chrome(harness, ({ fileUrl, nonce }) => {
     const api = window.__egdesk;
-    // Pass only a short seed across MCP's 16 KiB evaluation boundary. The
-    // controlled fixture document itself is built here, not supplied as a huge
-    // serialized argument. No product code or transport is replaced.
-    const browserText = Array.from({ length: 610 }, (_, index) => `QA_BROWSER_${nonce}_line_${index + 1}`).join('\n');
-    const browserUrl = `data:text/html;charset=utf-8,${encodeURIComponent(`<title>QA Browser ${nonce}</title><pre>${browserText}</pre>`)}`;
+    // A short, fixture-only URL keeps the full 610-line content out of both
+    // MCP's evaluation input and the source-location label in the picker.
+    const browserUrl = `http://127.0.0.1:39218/__qa/browser-document/${nonce}`;
     const file = api.cardRuntime.openBrowserCard(fileUrl, { openMode: 'new' });
     const browser = api.cardRuntime.openBrowserCard(browserUrl, { openMode: 'new' });
     for (const [index, card] of [file, browser].entries()) {
@@ -149,7 +150,13 @@ await runUiFlow(`context-briefing-fixture-${phase}`, async ({ harness, check, ca
   const chip = id => hook('chat-attachment') + attributeSelector('data-source-id', id);
   await clickThen('Remove one attachment without replacing the other', `${chip(browserInput.id)} ${hook('chat-attachment-remove')}`, roomState, value => value.sources.length === 1);
   await clickThen('Open attachment picker', hook('chat-attach-open'), panel, value => value.exists);
-  await harness.click(hook('chat-attach-source') + attributeSelector('data-view-id', browserView));
+  const choices = await chrome(harness, () => [...document.querySelectorAll('[data-testid="chat-attach-source"]')]
+    .map(node => ({ viewId: node.dataset.viewId, checked: node.checked })));
+  for (const choice of choices) {
+    if (choice.checked !== (choice.viewId === browserView)) {
+      await harness.click(hook('chat-attach-source') + attributeSelector('data-view-id', choice.viewId));
+    }
+  }
   await clickThen('Add the Browser back through its real checkbox', hook('chat-attach-confirm'), roomState, value => value.sources.length === 2);
   check('attachment selection alone creates no capture or send', (await fixtureState()).context.captureBatches === 0 && (await fixtureState()).observed.sends.length === 0);
 
