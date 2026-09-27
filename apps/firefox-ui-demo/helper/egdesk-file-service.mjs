@@ -34,6 +34,9 @@ const inside = (root, candidate) => {
 const sameIdentity = (a, b) => a.dev === b.dev && a.ino === b.ino
 const sizeNumber = stat => Number(stat.size)
 const revisionFor = (stat, digest) => `${stat.dev}:${stat.ino}:${digest}`
+const captureMime = name => name.toLowerCase().endsWith('.json') ? 'application/json'
+  : name.toLowerCase().endsWith('.csv') ? 'text/csv'
+    : name.toLowerCase().endsWith('.tsv') ? 'text/tab-separated-values' : 'text/plain'
 const NATIVE_SAVE_ERROR_CODES = new Set(['EGDESK_NATIVE_REFUSED', 'EGDESK_NATIVE_UNAVAILABLE', 'EGDESK_NATIVE_PROTOCOL', 'EGDESK_NATIVE_READBACK_MISMATCH', 'EGDESK_NATIVE_TIMEOUT', 'EGDESK_NATIVE_OUTPUT_LIMIT'])
 
 function saveAsFailure(cause, fileName) {
@@ -247,6 +250,29 @@ export function createEGDeskFileService({ draftStore, createOnlyAdapter, makeId 
 
   async function readDraft({ draftId }) { return publicDraft(await requireDraft(draftId)) }
 
+  // Internal context-capture source. A renderer may carry this opaque reference,
+  // but only the owner-bound adapter may resolve it to bytes. Never consult the
+  // external original here: it may have changed, moved, or been disconnected.
+  async function resolveCaptureSource(captureRef) {
+    const keys = ['fileId', 'draftId', 'head', 'revision']
+    if (!captureRef || typeof captureRef !== 'object' || Array.isArray(captureRef) ||
+      Object.keys(captureRef).some(key => !keys.includes(key)) ||
+      keys.slice(0, 3).some(key => typeof captureRef[key] !== 'string' || !captureRef[key] || captureRef[key].length > 512) ||
+      !Number.isSafeInteger(captureRef.revision) || captureRef.revision < 0) {
+      fail('INVALID_CAPTURE_REF', 'An exact managed working-copy reference is required')
+    }
+    const draft = await requireDraft(captureRef.draftId)
+    if (draft.fileId !== captureRef.fileId || draft.head !== captureRef.head || draft.bufferRevision !== captureRef.revision) {
+      fail('CAPTURE_STALE', 'Working copy changed; select the current revision again')
+    }
+    if (typeof draft.text !== 'string' || typeof draft.name !== 'string' || !draft.name ||
+      path.basename(draft.name) !== draft.name || draft.name.includes('\0') ||
+      draft.text.includes('\0') || !draft.text.isWellFormed()) fail('INVALID_DRAFT', 'Managed working copy is invalid')
+    const bytes = Buffer.from(draft.text, 'utf8')
+    if (bytes.length > MAX_READ_BYTES) fail('FILE_TOO_LARGE', 'Managed working copy exceeds the 8 MiB capture limit')
+    return { bytes, mime: captureMime(draft.name), name: draft.name, sha256: hash(bytes), captureRef: { ...captureRef } }
+  }
+
   async function swapDraft(draft, expectedHead, next, operationId) {
     if (typeof expectedHead !== 'string' || expectedHead !== draft.head) fail('DRAFT_CONFLICT', 'Draft head changed; refresh before saving', { currentHead: draft.head })
     if (typeof operationId !== 'string' || !operationId) fail('OPERATION_ID_REQUIRED', 'Operation ID is required')
@@ -322,5 +348,5 @@ export function createEGDeskFileService({ draftStore, createOnlyAdapter, makeId 
     }
   }
 
-  return { registerRoot, listDirectory, search, readFile, createDraft, readDraft, updateDraft, saveDraft, diffDraft, sourceStatus, reconnectDraft, saveAs }
+  return { registerRoot, listDirectory, search, readFile, createDraft, readDraft, resolveCaptureSource, updateDraft, saveDraft, diffDraft, sourceStatus, reconnectDraft, saveAs }
 }

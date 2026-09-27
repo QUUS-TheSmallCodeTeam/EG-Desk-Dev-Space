@@ -124,6 +124,31 @@ test('managed expected-head save and diff never overwrite the external original'
   assert.equal((await service.readDraft({ draftId: opened.id })).text, 'first\nchanged\nthird\n')
 })
 
+test('capture source resolves exact edited working-copy bytes without reading the original', async t => {
+  const { root, service, rootHandle } = await fixture(t)
+  const original = path.join(root, 'data.json')
+  await fs.writeFile(original, '{"version":1}\n')
+  const id = await fileId(service, rootHandle.directoryId, 'data.json')
+  const opened = await service.createDraft({ fileId: id })
+  const edited = await service.updateDraft({ draftId: opened.id, expectedHead: opened.head, text: '{"version":2}\n', operationId: 'edit-v2' })
+  const ref = { fileId: id, draftId: edited.id, head: edited.head, revision: edited.bufferRevision }
+  const captured = await service.resolveCaptureSource(ref)
+  assert.deepEqual(captured.bytes, Buffer.from('{"version":2}\n'))
+  assert.equal(captured.mime, 'application/json')
+  assert.equal(captured.name, 'data.json')
+  assert.equal(captured.sha256, createHash('sha256').update(captured.bytes).digest('hex'))
+  assert.deepEqual(captured.captureRef, ref)
+  assert.equal(await fs.readFile(original, 'utf8'), '{"version":1}\n')
+  await fs.rm(original)
+  assert.deepEqual((await service.resolveCaptureSource(ref)).bytes, captured.bytes)
+  await assert.rejects(service.resolveCaptureSource({ ...ref, path: original }), { code: 'INVALID_CAPTURE_REF' })
+  await assert.rejects(service.resolveCaptureSource({ ...ref, fileId: 'other-file' }), { code: 'CAPTURE_STALE' })
+  await assert.rejects(service.resolveCaptureSource({ ...ref, revision: ref.revision - 1 }), { code: 'CAPTURE_STALE' })
+  const next = await service.updateDraft({ draftId: edited.id, expectedHead: edited.head, text: '{"version":3}\n', operationId: 'edit-v3' })
+  await assert.rejects(service.resolveCaptureSource(ref), { code: 'CAPTURE_STALE' })
+  assert.deepEqual((await service.resolveCaptureSource({ ...ref, head: next.head, revision: next.bufferRevision })).bytes, Buffer.from('{"version":3}\n'))
+})
+
 test('Save As delegates to the native provider contract and a collision retains the draft', async t => {
   const { root, service, rootHandle } = await fixture(t, { createOnlyAdapter: createOnlyFixture })
   await fs.writeFile(path.join(root, 'work.txt'), 'original')
@@ -271,6 +296,56 @@ test('failed close keeps the editor and newest local text available', async () =
   assert.equal(editor.value, 'keep the newest characters')
   failWrite = false
   assert.equal(await view.close(), true)
+})
+
+test('FileView capture reference flushes latest unsaved text, but never captures active IME composition', async () => {
+  const { view, writes } = uiFixture()
+  await view.openFile('file')
+  const editor = view.element.querySelector('textarea')
+  editor.value = '최신 작업사본'; editor.fire('input')
+  const ref = await view.captureRef()
+  assert.deepEqual(ref, { fileId: 'file', draftId: 'draft', head: 'h1', revision: 1 })
+  assert.deepEqual(writes, ['최신 작업사본'])
+  assert.equal(view.snapshot().savedRevision, 0)
+  editor.fire('compositionstart'); editor.value = '최신 작업사본 + 조합'; editor.fire('input')
+  await assert.rejects(view.captureRef(), { code: 'CAPTURE_COMPOSING' })
+  assert.deepEqual(writes, ['최신 작업사본'])
+  assert.equal(editor.value, '최신 작업사본 + 조합')
+  editor.fire('compositionend')
+  assert.deepEqual(await view.captureRef(), { fileId: 'file', draftId: 'draft', head: 'h2', revision: 2 })
+  await view.close()
+})
+
+test('FileView capture rejects intervening typing and a stale store head without discarding text', async t => {
+  t.mock.timers.enable({ apis: ['setTimeout'] })
+  let releaseWrite
+  const writePending = new Promise(resolve => { releaseWrite = resolve })
+  let writes = 0
+  let record = { id: 'draft', fileId: 'file', head: 'h0', text: 'start', bufferRevision: 0, savedRevision: 0 }
+  const { view } = uiFixture({
+    createDraft: async () => ({ ...record }),
+    readDraft: async () => ({ ...record }),
+    updateDraft: async ({ text }) => {
+      writes++
+      if (writes === 1) await writePending
+      record = { ...record, text, head: `h${writes}`, bufferRevision: writes }
+      return { ...record }
+    },
+  })
+  await view.openFile('file')
+  const editor = view.element.querySelector('textarea')
+  editor.value = 'typed first'; editor.fire('input')
+  const capturing = view.captureRef()
+  editor.value = 'typed latest'; editor.fire('input')
+  releaseWrite()
+  await assert.rejects(capturing, { code: 'CAPTURE_STALE' })
+  assert.equal(editor.value, 'typed latest')
+  assert.equal(record.text, 'typed latest')
+  assert.deepEqual(await view.captureRef(), { fileId: 'file', draftId: 'draft', head: 'h2', revision: 2 })
+  record = { ...record, head: 'external-head' }
+  await assert.rejects(view.captureRef(), { code: 'CAPTURE_STALE' })
+  assert.equal(editor.value, 'typed latest')
+  await view.close()
 })
 
 test('reordered draft responses cannot redirect a B edit to A', async () => {

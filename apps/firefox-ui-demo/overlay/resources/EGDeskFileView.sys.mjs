@@ -473,6 +473,28 @@ export function createEGDeskFileView({ document, service, chooseRoot, chooseSave
     announce(`검사 결과 · 작업사본 ${targetRevision}${draft.bufferRevision !== targetRevision ? ' · 이후 변경 있음' : ''}`)
   }
 
+  async function captureRef() {
+    const reject = (code, message) => { throw Object.assign(new Error(message), { code }) }
+    if (disposed || !draft || !activeFileId || typeof service.readDraft !== 'function') reject('CAPTURE_UNAVAILABLE', '읽을 수 있는 작업사본을 먼저 여세요.')
+    if (composing) reject('CAPTURE_COMPOSING', '한글 입력을 마친 뒤 다시 첨부하세요.')
+    const generation = operation
+    const fileId = activeFileId
+    const draftId = draft.id
+    const revision = localRevision
+    await flush()
+    if (composing) reject('CAPTURE_COMPOSING', '한글 입력을 마친 뒤 다시 첨부하세요.')
+    if (!present(generation) || activeFileId !== fileId || draft?.id !== draftId ||
+      localRevision !== revision || editor.value !== draft.text) reject('CAPTURE_STALE', '작업사본이 바뀌었습니다. 다시 첨부하세요.')
+    const current = await service.readDraft({ draftId })
+    if (composing) reject('CAPTURE_COMPOSING', '한글 입력을 마친 뒤 다시 첨부하세요.')
+    if (!present(generation) || activeFileId !== fileId || draft?.id !== draftId ||
+      localRevision !== revision || editor.value !== draft.text ||
+      current.fileId !== fileId || current.head !== draft.head || current.bufferRevision !== draft.bufferRevision) {
+      reject('CAPTURE_STALE', '작업사본이 바뀌었습니다. 다시 첨부하세요.')
+    }
+    return Object.freeze({ fileId, draftId, head: draft.head, revision: draft.bufferRevision })
+  }
+
   searchForm.addEventListener('submit', event => { event.preventDefault(); act(async () => {
     if (!activeRoot) { announce('먼저 폴더를 연결하세요.'); return }
     const query = searchInput.value.trim()
@@ -502,7 +524,7 @@ export function createEGDeskFileView({ document, service, chooseRoot, chooseSave
     catch (cause) { showError(cause); return false }
     disposed = true; token(); treeGeneration++; root.remove(); return true
   }
-  return { element: root, openRoot, openFile, reconnectSource, restoreDraft: async ({ fileId, draftId }) => {
+  return { element: root, openRoot, openFile, reconnectSource, captureRef, restoreDraft: async ({ fileId, draftId }) => {
     const saved = fileId ? null : await service.readDraft({ draftId })
     return openFile(fileId || saved.fileId, draftId, { focus: false })
   }, snapshot, flush, close, dispose: close }

@@ -78,6 +78,29 @@ test('owner-scoped roots and drafts reject cross-owner IDs and renderer paths', 
   assert.equal(await adapter.dispatch({ method: 'POST', pathname: '/chat/send', ownerScope: 'owner-a' }), null)
 })
 
+test('internal capture resolver enforces local owner and exact head without a public byte route', async t => {
+  const { root, adapter, client, dispatch } = await fixture(t)
+  const authorized = await client.registerRoot({ selectionId: 'selected-owner-a' })
+  const listed = await client.listDirectory({ directoryId: authorized.directoryId })
+  const fileId = listed.entries.find(entry => entry.name === 'source.txt').id
+  const draft = await client.createDraft({ fileId })
+  const edited = await client.updateDraft({ draftId: draft.id, expectedHead: draft.head, text: 'edited, not saved\n', operationId: 'capture-edit' })
+  const captureRef = { fileId, draftId: draft.id, head: edited.head, revision: edited.bufferRevision }
+  let guards = 0
+  const source = await adapter.resolveCaptureSource({ ownerScope: 'owner-a', captureRef, assertActive: () => { guards++ } })
+  assert.equal(guards, 3)
+  assert.deepEqual(source.bytes, Buffer.from('edited, not saved\n'))
+  assert.equal(source.mime, 'text/plain')
+  assert.equal(source.name, 'source.txt')
+  assert.equal(source.captureRef.head, edited.head)
+  assert.equal(await fs.readFile(path.join(root, 'source.txt'), 'utf8'), 'external original\n')
+  await assert.rejects(adapter.resolveCaptureSource({ ownerScope: 'owner-b', captureRef }), { code: 'OWNER_SCOPE_MISMATCH' })
+  await assert.rejects(adapter.resolveCaptureSource({ captureRef }), { code: 'OWNER_SCOPE_MISMATCH' })
+  await assert.rejects(adapter.resolveCaptureSource({ ownerScope: 'owner-a', captureRef: { ...captureRef, head: draft.head } }), { code: 'CAPTURE_STALE' })
+  assert.equal((await adapter.dispatch({ method: 'POST', pathname: '/v1/files/drafts/capture', body: captureRef, ownerScope: 'owner-a' })).status, 404)
+  assert.equal((await dispatch('readDraft', { draftId: draft.id })).body.result.text, 'edited, not saved\n')
+})
+
 test('HTTP handler preserves loopback guard and accepts bounded text beyond the generic bridge limit', async t => {
   const { adapter, client } = await fixture(t)
   const authorized = await client.registerRoot({ selectionId: 'selected-owner-a' })

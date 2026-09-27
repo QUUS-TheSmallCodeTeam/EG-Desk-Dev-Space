@@ -212,6 +212,21 @@ export function createEGDeskFileHttpAdapter({ draftDirectory, localOwnerScope = 
     return service.registerRoot(absolutePath)
   }
 
+  async function resolveCaptureSource({ ownerScope, captureRef, assertActive = () => {} } = {}) {
+    // Backend-only byte handoff for /context/captures. The local file owner is
+    // stable across AI account changes; the caller separately guards its
+    // account/epoch through assertActive before and after the async lookup.
+    if (ownerScope !== localOwner) throw error('OWNER_SCOPE_MISMATCH', 'Capture requires the configured local EG-Desk owner', 403)
+    const owner = boundOwner(ownerScope)
+    if (typeof assertActive !== 'function') throw error('INVALID_CAPTURE_REF', 'Capture guard must be a function')
+    assertActive()
+    const { service } = await entryForOwner(owner)
+    assertActive()
+    const source = await service.resolveCaptureSource(captureRef)
+    assertActive()
+    return source
+  }
+
   async function close() {
     closed = true
     const settled = await Promise.allSettled(owners.values())
@@ -219,7 +234,7 @@ export function createEGDeskFileHttpAdapter({ draftDirectory, localOwnerScope = 
     owners.clear()
     pickerRequests.clear(); pickerSelections.clear(); pickerChannels.clear()
   }
-  return { dispatch, handle, registerAuthorizedRoot, close, endpoints: EGDESK_FILE_ENDPOINTS }
+  return { dispatch, handle, registerAuthorizedRoot, resolveCaptureSource, close, endpoints: EGDESK_FILE_ENDPOINTS }
 }
 
 export async function handleEGDeskFiles(req, res, { adapter, ...context } = {}) {
