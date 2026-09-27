@@ -1,6 +1,6 @@
 // Pure reducer for the additive Codex chat protocol v2.
 const copy = value => value == null ? value : JSON.parse(JSON.stringify(value));
-export const isRunBusy = run => !!run && !['completed', 'interrupted', 'failed', 'cancelled', 'unavailable'].includes(run.status);
+export const isRunBusy = run => !!run && run.localHistory !== true && !['completed', 'interrupted', 'failed', 'cancelled', 'unavailable'].includes(run.status);
 export const runKey = (conversationId, runId) => `${conversationId}/${runId}`;
 export function createChatProtocolState() {
   return { requests: {}, runs: {}, streams: {}, histories: {}, streamGeneration: 0, connection: 'offline', unobservedPreviousRun: false };
@@ -20,6 +20,225 @@ export function canAdmitChatEvent(state, threads, event) {
 export const clientThreadBinding = thread => thread?.clientBindingId || thread?.id || null;
 export const freshClientThreadBinding = (thread, nonce) => `${thread.id}-binding-${nonce}`;
 export const requestBelongsToThread = (request, thread) => !!thread && (request.localThreadId === thread.id || request.clientThreadId === clientThreadBinding(thread));
+
+// The durable local key is the UI room ID. Native client bindings may rotate on
+// restore or account change, and must never become the history lookup key.
+export const localClientThreadId = thread => typeof thread?.id === 'string' && thread.id.trim() ? thread.id : null;
+
+// Extract the old Desk-pref shape without deleting it or inferring any native
+// ownership from the account currently signed in. The HTTP adapter can map
+// these records to its import payload once the runtime response is fixed.
+export function extractLegacyChatRecords(deskSnapshot) {
+  const chat = deskSnapshot?.chat;
+  if (!Array.isArray(chat?.threads)) return [];
+  const seen = new Set();
+  const records = [];
+  for (const thread of chat.threads) {
+    const clientThreadId = localClientThreadId(thread);
+    if (!clientThreadId || seen.has(clientThreadId)) continue;
+    seen.add(clientThreadId);
+    records.push({
+      clientThreadId,
+      importId: `firefox-pref:egdesk.deskSession.v1:${clientThreadId}`,
+      threadSnapshot: copy(thread),
+      draft: typeof chat.threadDrafts?.[clientThreadId] === 'string' ? chat.threadDrafts[clientThreadId] : '',
+      savedAccountKey: chat.codexAccountKey || null,
+      savedAt: deskSnapshot.savedAt ?? null,
+    });
+  }
+  return records;
+}
+
+// A legacy room can be imported through the v2 snapshot route only when all
+// saved items already carry their original native IDs. Never invent a native
+// conversation/run/message ID for an optimistic or local-only item.
+export function legacyPublicChatSnapshot(record) {
+  const thread = record?.threadSnapshot;
+  const conversationId = thread?.conversationId || thread?.retainedNativeBinding?.conversationId;
+  if (!conversationId || !Array.isArray(thread.messages) || !thread.messages.length) return null;
+  const runs = new Map();
+  for (const message of thread.messages) {
+    const runId = message?.runId;
+    const messageId = message?.providerItemId || message?.messageId;
+    if (!['user', 'assistant'].includes(message?.role) || !runId || !messageId
+        || message.conversationId && message.conversationId !== conversationId) return null;
+    const run = runs.get(runId) || { conversationId, runId, answerId: message.answerId || runKey(conversationId, runId),
+      requestId: message.requestId || null, status: 'unavailable', messages: [], activities: [], artifacts: [],
+      pendingApprovals: [], historyComplete: false, truncated: true };
+    if (!run.requestId && message.requestId) run.requestId = message.requestId;
+    const item = { id: messageId, role: message.role, text: message.content ?? message.text ?? '',
+      status: message.status === 'completed' ? 'complete' : message.status || 'complete',
+      createdAt: message.createdAt || null, answerId: message.answerId || run.answerId };
+    if (message.phase) item.phase = message.phase;
+    if (message.inputReferences?.length) item.inputReferences = copy(message.inputReferences);
+    run.messages.push(item);
+    if (message.role === 'assistant') {
+      if (message.authorName) run.authorName = message.authorName;
+      if (message.artifacts?.length) run.artifacts = message.artifacts.filter(usableArtifact).map(copy);
+      if (message.briefing) run.briefing = copy(message.briefing);
+      if (message.contextCaptures?.length) run.contextCaptures = copy(message.contextCaptures);
+      if (message.contextEvents?.length) run.contextEvents = copy(message.contextEvents);
+      if (message.contextPackets?.length) run.contextPackets = copy(message.contextPackets);
+    }
+    runs.set(runId, run);
+  }
+  for (const run of runs.values()) {
+    if (run.contextCaptures || run.contextPackets || run.briefing) run.context = {
+      captures: copy(run.contextCaptures || []), packets: copy(run.contextPackets || []),
+      briefings: run.briefing ? [copy(run.briefing)] : [],
+    };
+    if (typeof thread.cwd === 'string') run.cwdPublic = thread.cwd;
+  }
+  return { protocolVersion: 2, conversationId, streamId: `legacy-pref:${record.clientThreadId}`,
+    seq: 0, truncated: true, historyComplete: false, runs: [...runs.values()] };
+}
+
+function sameLocalMessage(a, b) {
+  if (!a || !b || (a.role || 'assistant') !== (b.role || 'assistant')) return false;
+  for (const field of ['conversationId', 'runId']) {
+    if (a[field] && b[field] && a[field] !== b[field]) return false;
+  }
+  if (a.localMessageId && b.localMessageId && a.localMessageId === b.localMessageId) return true;
+  if (a.id && b.id && a.id === b.id) return true;
+  const nativeA = a.providerItemId || a.messageId;
+  const nativeB = b.providerItemId || b.messageId;
+  if (nativeA && nativeB && nativeA === nativeB) return true;
+  return a.role === 'user' && !!a.requestId && a.requestId === b.requestId;
+}
+
+// DB pages may arrive after a newer live event or optimistic send. Prefer the
+// current UI copy of a correlated message, and never match merely by text.
+export function mergeLocalChatMessages(current = [], persisted = [], { liveFenceRevision = 0 } = {}) {
+  const messages = [];
+  for (const stored of Array.isArray(persisted) ? persisted : []) {
+    if (!stored || typeof stored !== 'object') continue;
+    const index = messages.findIndex(message => sameLocalMessage(message, stored));
+    if (index < 0) messages.push(copy(stored));
+    else messages[index] = { ...messages[index], ...copy(stored) };
+  }
+  for (const live of Array.isArray(current) ? current : []) {
+    if (!live || typeof live !== 'object') continue;
+    const index = messages.findIndex(message => sameLocalMessage(message, live));
+    if (index < 0) messages.push(copy(live));
+    else {
+      const stored = messages[index];
+      const liveChangedDuringRead = Number.isSafeInteger(live.liveRevision) && live.liveRevision > liveFenceRevision;
+      const ordered = Number.isSafeInteger(stored.localSeq) && Number.isSafeInteger(live.localSeq)
+        && stored.localSeq !== live.localSeq;
+      const storedNewer = ordered ? stored.localSeq > live.localSeq
+        : ['complete', 'completed'].includes(stored.status) && !['complete', 'completed'].includes(live.status);
+      const liveNewer = ordered ? live.localSeq > stored.localSeq
+        : ['complete', 'completed'].includes(live.status) && !['complete', 'completed'].includes(stored.status);
+      const preferLive = liveChangedDuringRead || liveNewer || !storedNewer;
+      const merged = preferLive ? { ...stored, ...copy(live) } : { ...copy(live), ...stored };
+      merged.id = live.id || stored.id;
+      if (live.createdAt) merged.createdAt = live.createdAt;
+      messages[index] = merged;
+    }
+  }
+  return messages.map((message, index) => ({ message, index })).sort((a, b) => {
+    const seqA = a.message.localSeq, seqB = b.message.localSeq;
+    if (Number.isSafeInteger(seqA) && Number.isSafeInteger(seqB) && seqA !== seqB) return seqA - seqB;
+    const timeA = a.message.createdAt, timeB = b.message.createdAt;
+    if (typeof timeA === 'number' && typeof timeB === 'number' && timeA !== timeB) return timeA - timeB;
+    return a.index - b.index;
+  }).map(({ message }) => message);
+}
+
+// `history` is the single normalized adapter boundary for local DB responses:
+// { clientThreadId, localConversationId, threadSnapshot?, messages? }.
+// The caller supplies a detached/restored current room; a read never promotes
+// a persisted native conversation or replaces a live composer/attachment set.
+export function hydrateLocalChatThread(current, history, options = {}) {
+  const clientThreadId = localClientThreadId(current);
+  if (!clientThreadId || history?.clientThreadId !== clientThreadId) return current;
+  if (history.threadSnapshot?.id && history.threadSnapshot.id !== clientThreadId) return current;
+  if (current.localConversationId && history.localConversationId && current.localConversationId !== history.localConversationId) return current;
+  const saved = history.threadSnapshot || {};
+  const persistedMessages = Array.isArray(history.messages) ? history.messages : saved.messages;
+  return {
+    ...copy(saved), ...current,
+    id: clientThreadId,
+    localConversationId: history.localConversationId || current.localConversationId || saved.localConversationId || null,
+    conversationId: current.conversationId || null,
+    clientBindingId: current.clientBindingId || null,
+    bindingAccountKey: current.bindingAccountKey || null,
+    bindingState: current.bindingState || 'fresh',
+    retainedNativeBinding: current.retainedNativeBinding || null,
+    messages: mergeLocalChatMessages(current.messages, persistedMessages, options),
+    localRuns: mergeLocalChatRuns(current.localRuns, history.runs),
+    localHistoryCoverage: history.coverage || current.localHistoryCoverage || null,
+  };
+}
+
+export function mergeLocalChatRuns(current = [], persisted = []) {
+  const runs = (Array.isArray(current) ? current : []).map(copy);
+  for (const incoming of Array.isArray(persisted) ? persisted : []) {
+    if (!incoming?.localRunId && !(incoming?.conversationId && incoming?.runId)) continue;
+    const index = runs.findIndex(run => incoming.localRunId && run.localRunId === incoming.localRunId
+      || incoming.conversationId && incoming.runId && run.conversationId === incoming.conversationId && run.runId === incoming.runId);
+    if (index < 0) runs.push(copy(incoming));
+    else {
+      const previous = runs[index];
+      const ordered = Number.isSafeInteger(previous.localSeq) && Number.isSafeInteger(incoming.localSeq);
+      const previousNewer = ordered ? previous.localSeq > incoming.localSeq
+        : ['completed', 'failed', 'interrupted', 'cancelled'].includes(previous.status)
+          && !['completed', 'failed', 'interrupted', 'cancelled'].includes(incoming.status);
+      runs[index] = previousNewer ? { ...copy(incoming), ...previous } : { ...previous, ...copy(incoming) };
+    }
+  }
+  return runs;
+}
+
+// This is the only v1 HTTP-to-UI adapter. Historical events are retained as
+// data, never dispatched through reduceChatEvent (which would replay effects).
+export function normalizeLocalHistoryPage(page, clientThreadId) {
+  if (page?.protocolVersion !== 1 || !page.thread || page.thread.clientThreadId !== clientThreadId) return null;
+  const localConversationId = page.thread.localConversationId;
+  if (typeof localConversationId !== 'string' || !localConversationId) return null;
+  const asMessage = (message, event = {}) => ({
+    ...copy(message),
+    localMessageId: message.localMessageId || event.localMessageId || undefined,
+    localRunId: message.localRunId || event.localRunId || undefined,
+    messageId: message.messageId || event.messageId || undefined,
+    id: message.id || message.localMessageId || event.localMessageId || message.messageId || event.messageId,
+    providerItemId: message.providerItemId || message.messageId || event.messageId || undefined,
+    content: message.content ?? message.text ?? '',
+    localSeq: event.seq ?? message.localSeq,
+    localHistory: true,
+  });
+  const asRun = (run, event = {}) => ({
+    ...copy(run), localRunId: run.localRunId || event.localRunId || undefined,
+    runId: run.runId || event.runId || undefined,
+    localSeq: event.seq ?? run.localSeq,
+    localHistory: true, localThreadId: clientThreadId, localConversationId,
+    pendingApprovals: (run.pendingApprovals || []).map(approval => ({ ...approval, stale: true })),
+  });
+  const events = copy(Array.isArray(page.events) ? page.events : []);
+  const eventMessages = [];
+  const eventRuns = [];
+  for (const event of events) {
+    if (event.details?.message) {
+      const item = asMessage(event.details.message, event);
+      const index = eventMessages.findIndex(previous => sameLocalMessage(previous, item));
+      if (index < 0) eventMessages.push(item);
+      else eventMessages[index] = { ...eventMessages[index], ...item };
+    }
+    if (event.details?.run) eventRuns.push(asRun(event.details.run, event));
+  }
+  const messages = mergeLocalChatMessages(eventMessages,
+    (Array.isArray(page.messages) ? page.messages : []).map(message => asMessage(message)).filter(message => !!message.id));
+  const runs = mergeLocalChatRuns((Array.isArray(page.runs) ? page.runs : []).map(run => asRun(run)), eventRuns);
+  const coverage = copy(page.coverage || null);
+  const missingCheckpoint = page.projectionTruncated === true && events.some(event => !event.details?.message && !event.details?.run);
+  return {
+    clientThreadId, localConversationId, threadSnapshot: { ...copy(page.thread), id: clientThreadId },
+    messages, runs, events,
+    coverage, nextCursor: page.nextCursor ?? null,
+    hasMore: page.hasMore === true, projectionTruncated: page.projectionTruncated === true,
+    knownGap: missingCheckpoint || page.projectionTruncated === true && events.length === 0,
+  };
+}
 export function createChatEpochScope({ makeController = () => new AbortController() } = {}) {
   let epoch = 0;
   const active = new Set();
@@ -328,10 +547,14 @@ export function mergeChatSnapshot(state, snapshot, clientThreadId) {
 
 export function runsForThread(state, thread) {
   if (!thread) return [];
-  return Object.values(state.runs).filter(run => run.localThreadId === thread?.id || run.clientThreadId === clientThreadBinding(thread) || (thread?.conversationId && run.conversationId === thread.conversationId));
+  const live = Object.values(state.runs).filter(run => run.localThreadId === thread.id || run.clientThreadId === clientThreadBinding(thread) || (thread.conversationId && run.conversationId === thread.conversationId));
+  const stored = (thread.localRuns || []).filter(run => !live.some(current => current.localRunId && current.localRunId === run.localRunId
+    || current.conversationId && current.runId && current.conversationId === run.conversationId && current.runId === run.runId));
+  return [...stored, ...live];
 }
 
 export function approvalRequestFor(run, approvalId, decision) {
+  if (run?.localHistory === true) return null;
   const approval = run?.pendingApprovals.find(item => (item.approvalId || item.id) === approvalId);
   if (!approval || approval.status !== 'pending' || approval.replyPending || approval.stale || !approval.choices?.includes(decision)) return null;
   if (decision === 'accept' && !approvalScopeKnown(approval)) return null;

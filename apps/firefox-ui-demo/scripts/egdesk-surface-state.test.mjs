@@ -1302,6 +1302,154 @@ test('native user hydration keeps the submitted immutable input references once'
   assert.equal(Chat.detachNativeThread({ id: 'room', preparingInput: true }, null, 'new').preparingInput, false);
 });
 
+test('legacy chat extraction keeps stable local IDs and exact original references without changing the pref', () => {
+  const input = { sourceId: 'capture-a', snapshotId: 'capture-a', hash: 'fixed' };
+  const briefing = { id: 'brief-a', conversationId: 'native-a', runId: 'run-a', answerId: 'native-a/run-a', steps: [{ id: 'step-a', target: { sourceId: 'capture-a' } }] };
+  const desk = { savedAt: 123, chat: { codexAccountKey: 'codex:chatgpt:original@example.test', threadDrafts: { room: 'newer draft' }, threads: [
+    { id: 'room', clientBindingId: 'room-binding-rotating', conversationId: 'native-a', title: 'Saved room', messages: [
+      { id: 'user-a', role: 'user', requestId: 'request-a', inputReferences: [input] },
+      { id: 'answer-a', role: 'assistant', conversationId: 'native-a', runId: 'run-a', answerId: 'native-a/run-a', briefing },
+    ] },
+    { id: 'room', messages: [{ id: 'duplicate-room' }] },
+  ] } };
+  const before = structuredClone(desk);
+  const [record] = Chat.extractLegacyChatRecords(desk);
+  assert.equal(Chat.extractLegacyChatRecords(desk).length, 1);
+  assert.equal(record.clientThreadId, 'room');
+  assert.equal(record.importId, 'firefox-pref:egdesk.deskSession.v1:room');
+  assert.equal(record.draft, 'newer draft');
+  assert.equal(record.savedAccountKey, desk.chat.codexAccountKey);
+  assert.deepEqual(record.threadSnapshot.messages[0].inputReferences, [input]);
+  assert.deepEqual(record.threadSnapshot.messages[1].briefing, briefing);
+  record.threadSnapshot.messages[0].inputReferences[0].hash = 'changed copy';
+  assert.deepEqual(desk, before);
+});
+
+test('local history adapter retains public run context and never replays historical events', () => {
+  const page = { protocolVersion: 1, thread: { localConversationId: 'local-a', clientThreadId: 'room', conversationId: 'native-a', title: 'Saved room' },
+    runs: [{ localRunId: 'local-run-a', conversationId: 'native-a', runId: 'run-a', status: 'running',
+      messages: [{ id: 'native-answer', role: 'assistant', text: 'Answer' }], activities: [{ id: 'activity-a', title: 'Read' }],
+      artifacts: [{ id: 'artifact-a' }], context: { captures: [{ sourceId: 'capture-a' }], briefings: [{ id: 'brief-a' }] },
+      pendingApprovals: [{ id: 'approval-a', status: 'pending', choices: ['accept'] }] }],
+    messages: [{ localMessageId: 'local-message-a', messageId: 'native-answer', role: 'assistant', text: 'Answer',
+      conversationId: 'native-a', runId: 'run-a', answerId: 'native-a/run-a', briefing: { id: 'brief-a' } }],
+    events: [{ seq: 1, eventId: 'event-a', event: 'message.completed', details: { text: 'Answer' } }],
+    coverage: { scope: 'egdesk-local', status: 'partial', reasons: ['older-run-unavailable'], nativeHistoryComplete: null },
+    nextCursor: 1, hasMore: true, projectionTruncated: false };
+  const normalized = Chat.normalizeLocalHistoryPage(page, 'room');
+  assert.equal(Chat.normalizeLocalHistoryPage(page, 'other'), null);
+  assert.equal(normalized.messages[0].id, 'local-message-a');
+  assert.equal(normalized.messages[0].providerItemId, 'native-answer');
+  assert.deepEqual(normalized.messages[0].briefing, { id: 'brief-a' });
+  assert.deepEqual(normalized.runs[0].context, page.runs[0].context);
+  assert.equal(normalized.runs[0].pendingApprovals[0].stale, true);
+  assert.equal(Chat.approvalRequestFor(normalized.runs[0], 'approval-a', 'accept'), null);
+  assert.equal(Chat.isRunBusy(normalized.runs[0]), false);
+  assert.deepEqual(normalized.events, page.events);
+  assert.equal(normalized.coverage.status, 'partial');
+  assert.equal(page.runs[0].pendingApprovals[0].stale, undefined);
+});
+
+test('late local hydration preserves newer composer, native gate, in-flight UI and stable message relations', () => {
+  const current = { id: 'room', conversationId: null, clientBindingId: 'fresh-binding', bindingAccountKey: null,
+    bindingState: 'quarantined', retainedNativeBinding: { conversationId: 'native-a', accountKey: 'codex:chatgpt:original@example.test' },
+    inputSources: [{ id: 'new-input' }], briefingInputs: [{ sourceId: 'new-briefing-input' }], preparingInput: true,
+    messages: [{ id: 'optimistic-user', role: 'user', requestId: 'request-a', status: 'submitting', content: 'draft A', createdAt: 10,
+      liveRevision: 2, localHistory: false,
+      inputReferences: [{ sourceId: 'capture-a' }] }, { id: 'new-message', role: 'user', requestId: 'request-b', content: 'draft B', createdAt: 30 }] };
+  const history = { clientThreadId: 'room', localConversationId: 'local-a',
+    threadSnapshot: { id: 'room', conversationId: 'native-a', bindingAccountKey: 'codex:chatgpt:other@example.test',
+      inputSources: [], briefingInputs: [], messages: [{ id: 'stored-user', role: 'user', requestId: 'request-a', status: 'complete', content: 'draft A', createdAt: 10 }] },
+    messages: [{ id: 'stored-user', localMessageId: 'local-user', role: 'user', requestId: 'request-a', status: 'complete', content: 'draft A', createdAt: 10 },
+      { id: 'answer-a', localMessageId: 'local-answer', role: 'assistant', content: 'Answer', conversationId: 'native-a', runId: 'run-a', answerId: 'native-a/run-a', createdAt: 20,
+        briefing: { id: 'brief-a' } }],
+    runs: [{ localRunId: 'local-run-a', localHistory: true, conversationId: 'native-a', runId: 'run-a', status: 'completed' }] };
+  const once = Chat.hydrateLocalChatThread(current, history, { liveFenceRevision: 1 });
+  const twice = Chat.hydrateLocalChatThread(once, history, { liveFenceRevision: 1 });
+  assert.equal(twice.localConversationId, 'local-a');
+  assert.equal(twice.conversationId, null);
+  assert.equal(twice.clientBindingId, 'fresh-binding');
+  assert.equal(twice.bindingAccountKey, null);
+  assert.equal(twice.retainedNativeBinding.accountKey, current.retainedNativeBinding.accountKey);
+  assert.deepEqual(twice.inputSources, current.inputSources);
+  assert.deepEqual(twice.briefingInputs, current.briefingInputs);
+  assert.equal(twice.preparingInput, true);
+  assert.deepEqual(twice.messages.map(message => message.id), ['optimistic-user', 'answer-a', 'new-message']);
+  assert.equal(twice.messages[0].status, 'submitting');
+  assert.deepEqual(twice.messages[0].inputReferences, current.messages[0].inputReferences);
+  assert.equal(twice.messages[1].answerId, 'native-a/run-a');
+  assert.deepEqual(twice.messages[1].briefing, { id: 'brief-a' });
+  assert.equal(twice.localRuns.length, 1);
+  assert.equal(Chat.hydrateLocalChatThread(current, { ...history, clientThreadId: 'other' }), current);
+  assert.equal(Chat.hydrateLocalChatThread(twice, { ...history, localConversationId: 'other-local' }), twice);
+});
+
+test('canonical final history supersedes an old pref partial, but a live update after the read fence wins', () => {
+  const oldPref = { id: 'optimistic-a', role: 'assistant', providerItemId: 'native-a', conversationId: 'c', runId: 'r',
+    content: 'old partial', status: 'streaming', createdAt: 10 };
+  const canonical = { id: 'local-a', localMessageId: 'local-a', providerItemId: 'native-a', role: 'assistant',
+    conversationId: 'c', runId: 'r', content: 'final answer', status: 'complete', localSeq: 9, localHistory: true };
+  const merged = Chat.mergeLocalChatMessages([oldPref], [canonical]);
+  assert.equal(merged.length, 1);
+  assert.equal(merged[0].id, 'optimistic-a');
+  assert.equal(merged[0].content, 'final answer');
+  assert.equal(merged[0].status, 'complete');
+  const liveFinal = { ...oldPref, content: 'newer live final', status: 'complete', liveRevision: 6, localHistory: false };
+  const staleDb = { ...canonical, content: 'stale DB partial', status: 'streaming', localSeq: 2 };
+  assert.equal(Chat.mergeLocalChatMessages([liveFinal], [staleDb], { liveFenceRevision: 5 })[0].content, 'newer live final');
+  assert.equal(Chat.mergeLocalChatMessages([oldPref], [canonical], { liveFenceRevision: 20 })[0].status, 'complete',
+    'a legacy copy is not a new live event merely because it is in current UI state');
+});
+
+test('paged run checkpoints keep the newer completed run while allowing genuinely newer revisions', () => {
+  const complete = { localRunId: 'local-r', conversationId: 'c', runId: 'r', status: 'completed', localSeq: 12,
+    messages: [{ id: 'native-a', text: 'final' }] };
+  const older = { localRunId: 'local-r', conversationId: 'c', runId: 'r', status: 'running', localSeq: 3,
+    messages: [{ id: 'native-a', text: 'partial' }] };
+  const preserved = Chat.mergeLocalChatRuns([complete], [older]);
+  assert.equal(preserved.length, 1);
+  assert.equal(preserved[0].status, 'completed');
+  assert.equal(preserved[0].messages[0].text, 'final');
+  const revised = Chat.mergeLocalChatRuns(preserved, [{ ...older, localSeq: 13, status: 'failed', messages: [{ id: 'native-a', text: 'later correction' }] }]);
+  assert.equal(revised[0].status, 'failed');
+  assert.equal(revised[0].messages[0].text, 'later correction');
+});
+
+test('canonical event checkpoints supplement bounded projections without replaying events', () => {
+  const page = { protocolVersion: 1, thread: { clientThreadId: 'room', localConversationId: 'local-room' },
+    runs: [{ localRunId: 'local-r', runId: 'r', conversationId: 'c', status: 'running', messages: [] }], messages: [],
+    events: [{ seq: 1, eventId: 'e1', event: 'message.completed', localRunId: 'local-r', localMessageId: 'local-m',
+      runId: 'r', messageId: 'native-m', details: { message: { role: 'assistant', content: 'final', status: 'complete' },
+        run: { localRunId: 'local-r', conversationId: 'c', runId: 'r', status: 'completed', messages: [{ id: 'native-m', text: 'final' }] } } }],
+    projectionTruncated: true, coverage: { scope: 'egdesk-local', status: 'complete', reasons: [], nativeHistoryComplete: null },
+    nextCursor: null, hasMore: false };
+  const normalized = Chat.normalizeLocalHistoryPage(page, 'room');
+  assert.equal(normalized.messages[0].id, 'local-m');
+  assert.equal(normalized.messages[0].content, 'final');
+  assert.equal(normalized.runs[0].status, 'completed');
+  assert.equal(normalized.knownGap, false);
+  assert.equal(Chat.normalizeLocalHistoryPage({ ...page, events: [{ seq: 1, details: {} }] }, 'room').knownGap, true);
+});
+
+test('legacy import uses original native item IDs only and retains public references', () => {
+  const record = { clientThreadId: 'room', threadSnapshot: { conversationId: 'native-c', cwd: '/working', messages: [
+    { id: 'optimistic-user', providerItemId: 'native-u', role: 'user', conversationId: 'native-c', runId: 'native-r',
+      requestId: 'request-a', content: 'Prompt', inputReferences: [{ sourceId: 'capture-a', hash: 'fixed' }] },
+    { id: 'local-answer', providerItemId: 'native-a', role: 'assistant', conversationId: 'native-c', runId: 'native-r',
+      answerId: 'native-c/native-r', content: 'Answer', briefing: { id: 'brief-a' }, contextCaptures: [{ sourceId: 'capture-a' }] },
+  ] } };
+  const snapshot = Chat.legacyPublicChatSnapshot(record);
+  assert.equal(snapshot.protocolVersion, 2);
+  assert.equal(snapshot.conversationId, 'native-c');
+  assert.deepEqual(snapshot.runs[0].messages.map(message => message.id), ['native-u', 'native-a']);
+  assert.deepEqual(snapshot.runs[0].messages[0].inputReferences, [{ sourceId: 'capture-a', hash: 'fixed' }]);
+  assert.deepEqual(snapshot.runs[0].context.briefings, [{ id: 'brief-a' }]);
+  assert.equal(snapshot.runs[0].cwdPublic, '/working');
+  assert.equal(snapshot.historyComplete, false);
+  assert.equal(Chat.legacyPublicChatSnapshot({ ...record, threadSnapshot: { ...record.threadSnapshot,
+    messages: [{ ...record.threadSnapshot.messages[0], providerItemId: null }] } }), null);
+});
+
 test('ordinary legacy threads and unknown identity do not implicitly require unavailable context tools', () => {
   const auth = { isLoggedIn: true, authMode: 'chatgpt', accountEmail: 'known@example.test', identityStatus: 'known' };
   assert.equal(Chat.contextCapabilitiesForRequest({ conversationId: 'legacy' }, auth), null);
@@ -1356,7 +1504,7 @@ test('submitted draft matching includes user revision, exact text and both attac
 test('actual send path preserves draft B and new attachments typed during delayed capture of draft A', async () => {
   const body = surfaceSource.match(/      async sendMessage\(\) \{([\s\S]*?)\n      \},/)?.[1];
   assert.ok(body);
-  const deps = ['state', 'getActiveCodexThread', 'getCodexThreadDraft', 'ChatState', 'threadBusy', 'epochScope', 'updateThreadById', 'emit',
+  const deps = ['state', 'getActiveCodexThread', 'getCodexThreadDraft', 'ChatState', 'threadBusy', 'epochScope', 'ensureNativeReadyForSend', 'updateThreadById', 'emit',
     'captureThreadInputs', 'getCodexThreadById', 'protocol', 'codexThreadAgentProfile', 'appendMessageToThread', 'createCodexMessage', 'SELF_MEMBER', 'codexThreadRuntimeConfig', 'fetchJson', 'syncProtocolRun'];
   const send = compileFunction(`return (async () => {${body}\n})();`, deps);
   const initial = { id: 'room', inputSources: [{ id: 'a' }], briefingInputs: [], messages: [], profileEnabled: false };
@@ -1368,7 +1516,7 @@ test('actual send path preserves draft B and new attachments typed during delaye
   const update = (id, fn) => { const index = state.codex.threads.findIndex(thread => thread.id === id); state.codex.threads[index] = fn(state.codex.threads[index]); };
   let payload;
   const running = send(state, () => getThread(null), (codex, id) => codex.threadDrafts[id] || '', Chat, () => false,
-    { begin: () => ({}), valid: () => true, finish() {} }, update, () => {}, () => delayed, getThread, Chat.createChatProtocolState(), () => ({}),
+    { begin: () => ({}), valid: () => true, finish() {} }, async () => true, update, () => {}, () => delayed, getThread, Chat.createChatProtocolState(), () => ({}),
     (id, message) => update(id, thread => ({ ...thread, messages: [...thread.messages, message] })),
     (role, content, status, options) => ({ role, content, status, ...options }), 'self', () => ({}),
     async (_url, request) => { payload = JSON.parse(request.body); return { accepted: true, conversationId: 'c', runId: 'r', answerId: 'c/r' }; }, () => {});

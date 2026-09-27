@@ -430,6 +430,7 @@
       draft: '',
       threadDrafts: {},
       threadDraftRevisions: {},
+      liveRevision: 0,
       loginLog: '',
       error: null,
       isSending: false,
@@ -438,6 +439,11 @@
       lastBridgeLatency: null,
       showDiagnostics: false,
       chatProtocol: ChatState.createChatProtocolState(),
+      localHistoryStatus: 'idle',
+      localHistoryError: null,
+      localHistoryBootReady: false,
+      legacyChatBackupKey: null,
+      legacyChatBackupRequired: false,
       activityThreadId: null,
       authCardEntityId: null,
       chatDockMode: 'hud',
@@ -627,6 +633,7 @@
 
   function codexRunLabel(run) {
     if (!run) return '대화 준비';
+    if (run.localHistory === true && !['completed', 'interrupted', 'failed', 'cancelled', 'unavailable'].includes(run.status)) return '지난 실행 · 현재 상태 미확인';
     if (ChatState.isRunBusy(run) && !state.codex.connected) return '연결 끊김 · 실행 상태 확인 필요';
     if (run.status === 'interrupted') return '중지됨';
     if (run.status === 'failed' || run.status === 'unavailable') return '실행 실패';
@@ -822,7 +829,7 @@
   }
 
   async function openAnswerBriefing(thread, message) {
-    if (!BriefingState.validBriefing(message.briefing) || ChatState.nativeBindingHeld(thread)) return;
+    if (!BriefingState.validBriefing(message.briefing)) return;
     if (['conversationId', 'runId', 'answerId'].some(key => message.briefing[key] !== message[key])) {
       boardNotice('이 답변에 속하는 브리핑 연결을 확인하지 못했습니다.'); return;
     }
@@ -973,7 +980,8 @@
           el('p', {}, `연결 참조: ${reference.clientThreadId || '없음'}`))));
     }
     const history = state.codex.chatProtocol.histories[thread.conversationId];
-    const partialHistory = history?.truncated || history?.historyComplete === false
+    const partialHistory = thread.localHistoryCoverage?.status === 'partial' || thread.localHistoryCoverage?.status === 'unknown'
+      || history?.truncated || history?.historyComplete === false
       || codexRuns(thread).some(run => run.truncated || run.historyComplete === false);
     if (partialHistory) rows.push(el('p', { role: 'status', data: { testid: 'chat-history-status', complete: 'false' } }, '일부 기록만 표시됩니다. 이전 활동이나 메시지가 빠져 있을 수 있습니다.'));
     if (state.codex.chatProtocol.unobservedPreviousRun) rows.push(el('p', { role: 'status', data: { testid: 'chat-account-reset-status' } }, '이전 Codex 연결의 실행 종료는 확인되지 않았습니다. 로그아웃은 중지 확인이 아닙니다. 이전 계정에 다시 연결해 상태를 확인하세요.'));
@@ -1528,10 +1536,14 @@
       surface: { mode: state.surface.mode, browserCardId: state.surface.browserCardId, recoveryBackupKey: state.surface.recoveryBackupKey || null, recoveryAcknowledged: !!state.surface.recoveryAcknowledged },
       boardProjections: cloneJson(state.boards),
       chat: {
-        threads: cloneJson(state.codex.threads), activeThreadId: state.codex.activeThreadId,
+        threads: cloneJson(state.codex.threads.map(({ localRuns, localHistoryCoverage, ...thread }) => ({
+          ...thread, messages: (thread.messages || []).map(({ liveRevision, localHistory, localSeq, ...message }) => message),
+        }))),
+        activeThreadId: state.codex.activeThreadId,
         codexAccountKey: state.codex.codexAccountKey || null,
         unobservedPreviousRun: !!state.codex.chatProtocol.unobservedPreviousRun,
         threadDrafts: { ...state.codex.threadDrafts }, hudView: state.codex.hudView,
+        localHistoryBackupKey: state.codex.legacyChatBackupKey || null,
       },
     };
   }
@@ -4271,6 +4283,12 @@
         lastUserMessageId: oldMessages.dataset.lastUserMessageId,
         top: oldMessages.scrollTop,
         atBottom: oldMessages.scrollHeight - oldMessages.scrollTop - oldMessages.clientHeight < 24,
+        anchor: (() => {
+          const top = oldMessages.getBoundingClientRect();
+          const row = Array.from(oldMessages.querySelectorAll('[data-testid="chat-message"]'))
+            .find(item => item.getBoundingClientRect().bottom > top.top);
+          return row ? { id: row.dataset.messageId, offset: row.getBoundingClientRect().top - top.top } : null;
+        })(),
       } : null;
       composerObserver?.disconnect();
       composerObserver = null;
@@ -4776,7 +4794,6 @@
             const resultChips = buildCodexResultChips(message, activeThread, parts.links);
             const briefingControl = BriefingState.validBriefing(message.briefing) ? el('button', {
               class: 'egd-codex-result-chip', data: { testid: 'briefing-open', answerId: message.answerId },
-              disabled: ChatState.nativeBindingHeld(activeThread) ? 'true' : null,
               onclick: () => openAnswerBriefing(activeThread, message),
             }, '브리핑 보기') : null;
             const bubble = el('div', {
@@ -4827,6 +4844,12 @@
           });
         }
         conversation.appendChild(messages);
+        if (activeThread.localHistoryCoverage && activeThread.localHistoryCoverage.status !== 'complete') conversation.appendChild(el('p', {
+          class: 'egd-codex-run-status', role: 'status', data: { testid: 'chat-local-history-coverage' },
+        }, '로컬 기록 일부를 확인하지 못했습니다. 표시된 대화는 유지됩니다.'));
+        if (codex.localHistoryStatus === 'error' && codex.localHistoryError) conversation.appendChild(el('p', {
+          class: 'egd-codex-error', role: 'status', data: { testid: 'chat-local-history-error' },
+        }, codex.localHistoryError));
         const bindingHeld = ChatState.nativeBindingHeld(activeThread);
         if (bindingHeld) conversation.appendChild(el('div', {
           class: 'egd-codex-error', role: 'status', data: { testid: 'chat-binding-held', bindingState: activeThread.bindingState },
@@ -4931,8 +4954,9 @@
               const height = Math.min(144, Math.max(48, input.scrollHeight));
               input.style.height = `${height}px`;
               input.style.overflowY = input.scrollHeight > height ? 'auto' : 'hidden';
-              sendButton.disabled = ChatState.nativeBindingHeld(activeThread) || activeThread.preparingInput || codex.isSending || !input.value.trim() || !codex.authStatus.isLoggedIn || !codex.connected;
-              sendButton.title = ChatState.nativeBindingHeld(activeThread) ? '보관된 연결을 현재 계정에 자동 연결하지 않습니다' : !codex.authStatus.isLoggedIn ? 'Codex 연결 후 전송할 수 있습니다' : !codex.connected ? 'Codex 연결을 확인해 주세요' : '보내기';
+              const nativeSendHeld = activeThread.conversationId && !ChatState.canResumeNativeThread(activeThread, codex.authStatus);
+              sendButton.disabled = ChatState.nativeBindingHeld(activeThread) || nativeSendHeld || activeThread.preparingInput || codex.isSending || !input.value.trim() || !codex.authStatus.isLoggedIn || !codex.connected;
+              sendButton.title = ChatState.nativeBindingHeld(activeThread) || nativeSendHeld ? '보관된 연결을 현재 계정에 자동 연결하지 않습니다' : !codex.authStatus.isLoggedIn ? 'Codex 연결 후 전송할 수 있습니다' : !codex.connected ? 'Codex 연결을 확인해 주세요' : '보내기';
             };
             input.addEventListener('input', () => {
               codexBridge.setDraft(input.value, activeThread.id);
@@ -5008,8 +5032,13 @@
       if (msgEl) requestAnimationFrame(() => {
         if (!msgEl.isConnected) return;
         const sentNewMessage = msgEl.dataset.lastUserMessageId !== messageState?.lastUserMessageId;
-        msgEl.scrollTop = messageState?.threadId === activeThread?.id && !messageState.atBottom && !sentNewMessage
-          ? messageState.top : msgEl.scrollHeight;
+        if (messageState?.threadId === activeThread?.id && !messageState.atBottom && !sentNewMessage) {
+          const anchor = messageState.anchor && Array.from(msgEl.querySelectorAll('[data-testid="chat-message"]'))
+            .find(item => item.dataset.messageId === messageState.anchor.id);
+          msgEl.scrollTop = anchor
+            ? msgEl.scrollTop + anchor.getBoundingClientRect().top - msgEl.getBoundingClientRect().top - messageState.anchor.offset
+            : messageState.top;
+        } else msgEl.scrollTop = msgEl.scrollHeight;
       });
       const newInput = body.querySelector('.egd-codex-input');
       if (newInput && inputState?.threadId === activeThread?.id && inputState.focused) {
@@ -5105,12 +5134,17 @@
     };
   }
 
-  function installCodexBridge() {
+  function installCodexBridge(initialLegacyRecords = []) {
     const listeners = new Set();
     const protocol = state.codex.chatProtocol;
     const epochScope = ChatState.createChatEpochScope({ makeController: () => new window.AbortController() });
     const refreshing = new Map();
     const resumedNativeBindings = new Set();
+    const attemptedLegacyImports = new Set();
+    const initialDefaultThreadId = state.codex.threads[0]?.id;
+    let localLoadPromise = null;
+    let lastLocalLoadAt = 0;
+    let legacyHistoryRecords = initialLegacyRecords;
     let streamReady = false;
     let source = null;
     let reconnectTimer = null;
@@ -5120,17 +5154,21 @@
         || Object.values(protocol.requests).some(request => ChatState.requestBelongsToThread(request, thread) && ['submitting', 'unconfirmed'].includes(request.status));
     }
 
-    function syncProtocolRun(run) {
+    function syncProtocolRun(run, { liveEvent = true } = {}) {
       if (!run) return;
       const threadId = run.localThreadId || state.codex.threads.find(thread => ChatState.clientThreadBinding(thread) === run.clientThreadId || thread.conversationId === run.conversationId)?.id;
       if (!threadId || !getCodexThreadById(state.codex, threadId)) return;
       if (ChatState.nativeBindingHeld(getCodexThreadById(state.codex, threadId))) return;
       run.localThreadId = threadId;
+      const liveRevision = liveEvent ? ++state.codex.liveRevision : null;
       const thread = updateThreadById(threadId, current => ({
         ...current, conversationId: run.conversationId, sendError: null,
         ...ChatState.nativeBindingForRun(current, run),
         contextToolsAvailable: current.contextToolsAvailable === true || Array.isArray(run.contextCaptures),
-        messages: ChatState.projectRunMessages(current.messages, run),
+        messages: (liveEvent ? ChatState.projectRunMessages(current.messages, run)
+          : ChatState.mergeLocalChatMessages(current.messages, ChatState.projectRunMessages(current.messages, run))).map(message =>
+          liveEvent && message.runId === run.runId && message.conversationId === run.conversationId
+            ? { ...message, liveRevision, localHistory: false } : message),
       }));
       for (const message of run.messages) bindMessageToThread(message.id, threadId);
       if (thread) markUserMessagesReadBy(threadId, thread.profileEnabled ? codexThreadAgentProfile(thread).name : 'Codex');
@@ -5155,15 +5193,15 @@
       return sources.map(source => InputContext.capturedInputReference(source, result.captures.find(capture => capture.id === source.id)));
     }
 
-    function resumeVerifiedThreads() {
-      if (!streamReady) return;
-      for (const thread of state.codex.threads) {
-        if (!ChatState.canResumeNativeThread(thread, state.codex.authStatus) || refreshing.has(thread.conversationId)) continue;
-        const key = `${ChatState.clientThreadBinding(thread)}|${thread.conversationId}`;
-        if (resumedNativeBindings.has(key)) continue;
-        resumedNativeBindings.add(key);
-        void refreshConversation(thread, true);
-      }
+    async function ensureNativeReadyForSend(thread) {
+      if (!thread?.conversationId) return true;
+      if (!ChatState.canResumeNativeThread(thread, state.codex.authStatus)) return false;
+      const key = `${ChatState.clientThreadBinding(thread)}|${thread.conversationId}`;
+      if (resumedNativeBindings.has(key)) return true;
+      const snapshot = await refreshConversation(thread, true);
+      if (!snapshot) return false;
+      resumedNativeBindings.add(key);
+      return true;
     }
 
     async function refreshConversation(thread, resume = false) {
@@ -5180,7 +5218,7 @@
           : await fetchJson(`/chat/state?conversationId=${encodeURIComponent(conversationId)}`, { signal: token.signal });
         if (!epochScope.valid(token)) return null;
         if (snapshot.conversationId !== conversationId) throw new Error('요청한 대화와 다른 연결 응답입니다. 기존 기록은 유지됩니다.');
-        for (const run of ChatState.mergeChatSnapshot(protocol, snapshot, ChatState.clientThreadBinding(thread))) syncProtocolRun(run);
+        for (const run of ChatState.mergeChatSnapshot(protocol, snapshot, ChatState.clientThreadBinding(thread))) syncProtocolRun(run, { liveEvent: false });
         if (resume && ChatState.settleReconciledRequests(protocol, thread.id, snapshot)) updateThreadById(thread.id, current => ({ ...current, sendError: '대화 기록을 다시 확인했습니다. 접수 미확인 메시지와 실제 기록을 확인한 뒤 다음 요청을 보내세요.' }));
         emit();
         return snapshot;
@@ -5282,7 +5320,6 @@
       Object.assign(state.codex, patch);
       state.codex.threads = state.codex.threads.map(thread => ChatState.reconcileNativeThread(thread, state.codex.authStatus));
       emit();
-      resumeVerifiedThreads();
     };
 
     const findThreadIndexById = (threadId) => state.codex.threads.findIndex((thread) => thread.id === threadId);
@@ -5342,19 +5379,21 @@
       return next;
     };
     const appendMessageToThread = (threadId, message, { countUnread = false } = {}) => {
+      const liveRevision = ++state.codex.liveRevision;
       return updateThreadById(threadId, (thread) => ({
         ...thread,
         unreadCount: countUnread && thread.id !== state.codex.activeThreadId
           ? thread.unreadCount + 1
           : thread.unreadCount,
-        messages: [...thread.messages, message],
+        messages: [...thread.messages, { ...message, liveRevision, localHistory: false }],
       }));
     };
     const patchMessageInThread = (threadId, messageId, updater) => {
+      const liveRevision = ++state.codex.liveRevision;
       return updateThreadById(threadId, (thread) => ({
         ...thread,
         messages: thread.messages.map((message) =>
-          message.id === messageId ? updater(message) : message
+          message.id === messageId ? { ...updater(message), liveRevision, localHistory: false } : message
         ),
       }));
     };
@@ -5414,6 +5453,141 @@
       }
       return response.json();
     };
+
+    async function listLocalHistoryThreads() {
+      const threads = [];
+      const seenIds = new Set();
+      const seenCursors = new Set();
+      let cursor = null;
+      while (true) {
+        const query = cursor == null ? '?limit=100' : `?cursor=${encodeURIComponent(cursor)}&limit=100`;
+        const page = await fetchJson(`/chat/history/threads${query}`);
+        if (page?.protocolVersion !== 1 || !Array.isArray(page.threads)) throw new Error('로컬 기록 목록 형식이 올바르지 않습니다.');
+        for (const thread of page.threads) {
+          if (typeof thread?.clientThreadId !== 'string' || !thread.clientThreadId || seenIds.has(thread.clientThreadId)) continue;
+          seenIds.add(thread.clientThreadId);
+          threads.push(thread);
+        }
+        if (page.hasMore !== true) return threads;
+        if (page.nextCursor == null || seenCursors.has(String(page.nextCursor))) throw new Error('로컬 기록 목록 페이지 연결을 확인하지 못했습니다.');
+        cursor = page.nextCursor;
+        seenCursors.add(String(cursor));
+      }
+    }
+
+    function ensureLocalHistoryThread(summary, detail = {}) {
+      const clientThreadId = summary.clientThreadId;
+      if (getCodexThreadById(state.codex, clientThreadId)) return;
+      const type = detail.type === 'group' ? 'group' : 'dm';
+      const title = detail.title || summary.title || 'Codex';
+      const base = createCodexThread(type, title, detail.subtitle || '', {
+        participants: detail.participants, participantRoles: detail.participantRoles,
+        profileEnabled: detail.profileEnabled === true, agentProfileId: detail.agentProfileId,
+      });
+      const recordedAccountKey = detail.bindingAccountKey || detail.retainedNativeBinding?.accountKey;
+      const originalAccountKey = ChatState.knownCodexAccountKey(recordedAccountKey) ? recordedAccountKey : null;
+      const restored = ChatState.reconcileNativeThread(ChatState.detachNativeThread({ ...base, id: clientThreadId,
+        createdAt: summary.createdAt || base.createdAt, updatedAt: summary.updatedAt || base.updatedAt,
+        conversationId: detail.conversationId || summary.conversationId || null,
+        localConversationId: summary.localConversationId,
+        bindingAccountKey: originalAccountKey,
+        retainedNativeBinding: detail.retainedNativeBinding || null,
+      }, null, chatBindingNonce()), state.codex.authStatus);
+      const placeholder = state.codex.threads.find(thread => thread.id === initialDefaultThreadId);
+      if (placeholder && state.codex.threads.length === 1 && !placeholder.messages.length && !placeholder.conversationId
+          && !placeholder.localConversationId && !placeholder.inputSources?.length && !placeholder.briefingInputs?.length
+          && !getCodexThreadDraft(state.codex, placeholder.id)) {
+        state.codex.threads = [restored];
+        if (state.codex.activeThreadId === placeholder.id) state.codex.activeThreadId = restored.id;
+      } else state.codex.threads = [...state.codex.threads, restored];
+      emit();
+    }
+
+    async function loadLocalHistoryThread(summary) {
+      const clientThreadId = summary.clientThreadId;
+      let afterSeq = 0;
+      const seenCursors = new Set();
+      let knownGap = false;
+      while (true) {
+        const liveFenceRevision = state.codex.liveRevision;
+        const page = await fetchJson(`/chat/history?clientThreadId=${encodeURIComponent(clientThreadId)}&afterSeq=${encodeURIComponent(afterSeq)}&limit=100`);
+        const normalized = ChatState.normalizeLocalHistoryPage({ ...page,
+          thread: { ...summary, ...(page.thread || {}) },
+        }, clientThreadId);
+        if (!normalized || normalized.localConversationId !== summary.localConversationId) throw new Error('로컬 기록의 채팅방 연결을 확인하지 못했습니다.');
+        const seqs = normalized.events.map(event => event.seq);
+        if (seqs.some((seq, index) => !Number.isSafeInteger(seq) || seq <= Number(afterSeq)
+            || index > 0 && seq <= seqs[index - 1])) knownGap = true;
+        if (normalized.knownGap || normalized.hasMore && !seqs.length) knownGap = true;
+        const coverage = normalized.coverage || summary.coverage || { scope: 'egdesk-local', status: 'unknown', reasons: [], nativeHistoryComplete: null };
+        if (knownGap || normalized.hasMore) normalized.coverage = { ...coverage, status: 'partial', reasons: [
+          ...(coverage.reasons || []), knownGap ? 'local-event-gap' : 'pagination-in-progress',
+        ] };
+        ensureLocalHistoryThread(summary, normalized.threadSnapshot);
+        const current = getCodexThreadById(state.codex, clientThreadId);
+        if (current?.localConversationId && current.localConversationId !== normalized.localConversationId) throw new Error('로컬 기록의 채팅방 식별자가 바뀌었습니다.');
+        updateThreadById(clientThreadId, current => ChatState.hydrateLocalChatThread(current, normalized, { liveFenceRevision }));
+        emit();
+        if (!normalized.hasMore) return;
+        const nextSeq = Number(normalized.nextCursor);
+        if (!Number.isSafeInteger(nextSeq) || nextSeq <= Number(afterSeq) || seenCursors.has(String(nextSeq))) throw new Error('로컬 기록 페이지 연결을 확인하지 못했습니다.');
+        afterSeq = nextSeq;
+        seenCursors.add(String(afterSeq));
+      }
+    }
+
+    async function loadLocalHistory(legacyRecords = []) {
+      if (legacyRecords.length) legacyHistoryRecords = legacyRecords;
+      if (!state.codex.localHistoryBootReady) return false;
+      if (state.codex.localHistoryStatus === 'unsupported') return false;
+      if (localLoadPromise) return localLoadPromise;
+      if (state.codex.localHistoryStatus === 'error' && Date.now() - lastLocalLoadAt < 30000) return false;
+      lastLocalLoadAt = Date.now();
+      localLoadPromise = (async () => {
+        state.codex.localHistoryStatus = 'loading';
+        emit();
+        let stage = 'list';
+        try {
+          let summaries = await listLocalHistoryThreads();
+          const existing = new Set(summaries.map(thread => thread.clientThreadId));
+          let imported = false;
+          if (state.codex.legacyChatBackupKey) for (const record of legacyHistoryRecords) {
+            if (existing.has(record.clientThreadId) || attemptedLegacyImports.has(record.importId)) continue;
+            const snapshot = ChatState.legacyPublicChatSnapshot(record);
+            if (!snapshot) continue; // Local-only/optimistic items remain in the backed-up pref.
+            attemptedLegacyImports.add(record.importId);
+            stage = 'import';
+            const result = await fetchJson('/chat/history/import', { method: 'POST', body: JSON.stringify({
+              clientThreadId: record.clientThreadId, importId: record.importId, snapshot,
+            }) });
+            if (result.clientThreadId !== record.clientThreadId || !result.imported && !result.alreadyImported) throw new Error('로컬 기록 가져오기 확인에 실패했습니다.');
+            imported = true;
+          }
+          if (imported) { stage = 'list'; summaries = await listLocalHistoryThreads(); }
+          stage = 'history';
+          for (const summary of summaries) await loadLocalHistoryThread(summary);
+          const backupFailed = state.codex.legacyChatBackupRequired && !state.codex.legacyChatBackupKey;
+          state.codex.localHistoryStatus = backupFailed ? 'error' : 'ready';
+          state.codex.localHistoryError = backupFailed ? '기존 채팅 기록의 백업을 확인하지 못했습니다. 원본 저장값은 유지됩니다.' : null;
+          emit();
+          return true;
+        } catch (error) {
+          if (error.status === 404 && stage === 'list') {
+            // Older fixture transports do not implement local history yet.
+            state.codex.localHistoryStatus = 'unsupported';
+            state.codex.localHistoryError = null;
+          } else {
+            state.codex.localHistoryStatus = 'error';
+            state.codex.localHistoryError = '로컬 기록을 확인하지 못했습니다. 기존 채팅과 초안은 유지됩니다.';
+            console.warn(TAG, 'local chat history load failed', error);
+          }
+          emit();
+          return false;
+        }
+      })();
+      try { return await localLoadPromise; }
+      finally { localLoadPromise = null; }
+    }
 
     const scheduleReconnect = () => {
       if (reconnectTimer) return;
@@ -5551,7 +5725,7 @@
         streamReady = true;
         resumedNativeBindings.clear();
         update({ connected: true });
-        resumeVerifiedThreads();
+        void loadLocalHistory();
       });
 
       const receive = (message) => {
@@ -5581,11 +5755,11 @@
     connect();
 
     return {
-      resumeVerifiedThreads,
+      loadLocalHistory,
       async reconcileRequest(threadId = state.codex.activeThreadId) {
         const thread = getCodexThreadById(state.codex, threadId);
         if (!thread) return null;
-        if (thread.conversationId) return refreshConversation(thread, true);
+        if (thread.conversationId) return refreshConversation(thread, false);
         const token = epochScope.begin();
         try {
           const snapshot = await fetchJson('/chat/state', { signal: token.signal });
@@ -5593,7 +5767,7 @@
           const requests = Object.values(protocol.requests).filter(request => ChatState.requestBelongsToThread(request, thread));
           const matching = (snapshot.runs || []).filter(run => requests.some(request => request.requestId === run.requestId));
           for (const run of matching) {
-            for (const updated of ChatState.mergeChatSnapshot(protocol, { ...snapshot, conversationId: run.conversationId, runs: [run] }, ChatState.clientThreadBinding(thread))) syncProtocolRun(updated);
+            for (const updated of ChatState.mergeChatSnapshot(protocol, { ...snapshot, conversationId: run.conversationId, runs: [run] }, ChatState.clientThreadBinding(thread))) syncProtocolRun(updated, { liveEvent: false });
           }
           if (!matching.length) updateThreadById(threadId, current => ({ ...current, sendError: '서버에서 이 요청의 실행을 아직 확인하지 못했습니다. 자동으로 다시 보내지 않습니다.' }));
           emit();
@@ -5604,7 +5778,7 @@
         } finally { epochScope.finish(token); }
       },
       refreshConversation(threadId = state.codex.activeThreadId) {
-        return refreshConversation(getCodexThreadById(state.codex, threadId), true);
+        return refreshConversation(getCodexThreadById(state.codex, threadId), false);
       },
       runState(threadId = state.codex.activeThreadId) {
         return cloneJson(ChatState.runsForThread(protocol, getCodexThreadById(state.codex, threadId)));
@@ -6107,12 +6281,17 @@
         const activeThread = getActiveCodexThread(state.codex);
         const draftText = getCodexThreadDraft(state.codex, activeThread?.id || null);
         const content = draftText.trim();
-        if (!activeThread || ChatState.nativeBindingHeld(activeThread) || !content || threadBusy(activeThread) || !state.codex.authStatus.isLoggedIn || !state.codex.connected) return;
+        if (!activeThread || ChatState.nativeBindingHeld(activeThread) || !content || threadBusy(activeThread) || !state.codex.authStatus.isLoggedIn || !state.codex.connected
+            || (activeThread.conversationId && !ChatState.canResumeNativeThread(activeThread, state.codex.authStatus))) return;
         const token = epochScope.begin();
         const submittedDraft = ChatState.snapshotChatDraft(activeThread, draftText, state.codex.threadDraftRevisions[activeThread.id] || 0);
         const selectedInputs = submittedDraft.inputSources;
         let submittedWasCleared = false;
         let inputReferences;
+        if (!await ensureNativeReadyForSend(activeThread) || !epochScope.valid(token)) { epochScope.finish(token); return; }
+        const resumedThread = getCodexThreadById(state.codex, activeThread.id);
+        if (!resumedThread || ChatState.clientThreadBinding(resumedThread) !== ChatState.clientThreadBinding(activeThread)
+            || resumedThread.conversationId !== activeThread.conversationId || threadBusy(resumedThread)) { epochScope.finish(token); return; }
         updateThreadById(activeThread.id, thread => ({ ...thread, preparingInput: true, sendError: null }));
         emit();
         try {
@@ -6171,9 +6350,10 @@
           // An event can prove acceptance before a failed/late HTTP response arrives.
           if (!request.runId) {
             request.status = ChatState.submissionFailureStatus(error);
+            const liveRevision = ++state.codex.liveRevision;
             updateThreadById(activeThread.id, thread => ({ ...thread,
               sendError: request.status === 'unconfirmed' ? `접수 여부를 확인하지 못했습니다. 자동으로 다시 보내지 않습니다. ${error.message}` : error.message,
-              messages: thread.messages.map(message => message.requestId === requestId ? { ...message, status: request.status } : message),
+              messages: thread.messages.map(message => message.requestId === requestId ? { ...message, status: request.status, liveRevision, localHistory: false } : message),
             }));
             if (request.status === 'failed' && submittedWasCleared
                 && ChatState.chatDraftMatches(getCodexThreadById(state.codex, activeThread.id), getCodexThreadDraft(state.codex, activeThread.id), state.codex.threadDraftRevisions[activeThread.id] || 0,
@@ -11437,6 +11617,22 @@
     return servicesRef().prefs.prefHasUserValue(DESK_SESSION_PREF) ? servicesRef().prefs.getStringPref(DESK_SESSION_PREF) : null;
   }
 
+  function prepareLegacyChatBackup(deskSession, raw) {
+    const records = ChatState.extractLegacyChatRecords(deskSession);
+    if (!records.length || typeof raw !== 'string') return records;
+    state.codex.legacyChatBackupRequired = true;
+    const existing = recoveryStore().get(deskSession.chat?.localHistoryBackupKey);
+    try {
+      const backup = existing || recoveryStore().preserve(raw, 'local-chat-history-before-import');
+      state.codex.legacyChatBackupKey = backup.key;
+      state.codex.localHistoryError = null;
+    } catch (error) {
+      state.codex.localHistoryError = '기존 채팅 기록의 백업을 확인하지 못했습니다. 원본 저장값은 유지됩니다.';
+      console.warn(TAG, 'legacy chat backup failed', error);
+    }
+    return records;
+  }
+
   function renderDeskRecoveryNotice(force = false) {
     const records = recoveryStore().list();
     const opener = document.getElementById('egd-recovery-open');
@@ -11490,7 +11686,8 @@
 
   let deskSaveTimer = null;
   function persistDeskSession() {
-    if (!SurfaceState.canPersistDeskSession(state.surface) || !document.getElementById('egd-canvas-layer')) return false;
+    if (!SurfaceState.canPersistDeskSession(state.surface) || !document.getElementById('egd-canvas-layer')
+        || (state.codex.legacyChatBackupRequired && !state.codex.legacyChatBackupKey)) return false;
     return writeSurfacePref(DESK_SESSION_PREF, serializeDeskSnapshot());
   }
 
@@ -11590,6 +11787,7 @@
       if (document.getElementById('egd-desk-rail')) return;
       const lifecycle = readSurfacePref(SURFACE_LIFECYCLE_PREF);
       const deskSession = readSurfacePref(DESK_SESSION_PREF);
+      const legacyChatRecords = prepareLegacyChatBackup(deskSession, rawDeskRecord());
       const legacyStore = readSurfacePref(AGENDA_STORAGE_PREF);
       loadAgendaStoreMeta();
       paintSurface();
@@ -11601,7 +11799,7 @@
       host.appendChild(canvasViewport);
       installCanvasPanZoom(canvasViewport, canvasLayer);
       installNativeGestureHelperBridge();
-      state.codexBridge = installCodexBridge();
+      state.codexBridge = installCodexBridge(legacyChatRecords);
       window.__egdesk = {
         state,
         codexBridge: state.codexBridge,
@@ -11708,6 +11906,9 @@
       host.appendChild(buildPresetBag());
       host.appendChild(buildHUD());
       restoreSurfaceEntry(lifecycle, deskSession, legacyStore);
+      state.codex.localHistoryBootReady = true;
+      if (state.codex.legacyChatBackupRequired && !state.codex.legacyChatBackupKey) boardNotice(state.codex.localHistoryError);
+      void state.codexBridge.loadLocalHistory(legacyChatRecords);
       window.addEventListener('resize', syncHudViewportFit);
       installPopupCapture();
       console.warn(TAG, 'ready ✅');
