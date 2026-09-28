@@ -105,6 +105,7 @@ export const OBSERVE = `() => {
         proxyFocused: proxy === document.activeElement } : null,
       browser: browser ? { sameNode: browser === original?.browser,
         browsingContextId: browser.browsingContext?.id || null,
+        innerWindowId: browser.browsingContext?.currentWindowGlobal?.innerWindowId || null,
         uri: browser.currentURI?.spec || card._browserState?.uri || null,
         viewport: { clientWidth: browser.clientWidth, clientHeight: browser.clientHeight,
           styleWidth: browser.style.width, styleHeight: browser.style.height },
@@ -154,6 +155,8 @@ function assertStable(observation, baseline, ids) {
     if (first.browser) {
       assert.equal(card.browser.sameNode, true, `${id} Browser node was remounted`);
       assert.equal(card.browser.browsingContextId, first.browser.browsingContextId, `${id} browsing context changed`);
+      assert.equal(card.browser.innerWindowId, first.browser.innerWindowId,
+        `${id} inner document was reloaded within the same browsing context`);
       assert.equal(card.browser.uri, first.browser.uri, `${id} URI changed`);
       assert.deepEqual(card.browser.viewport, first.browser.viewport, `${id} Browser viewport changed`);
       if (first.browser.scroll && card.browser.scroll) {
@@ -220,10 +223,9 @@ async function main() {
       observation.browserActor = await harness.evaluateChrome(`async () => {
         const snapshot = await window.__egdesk.browserRuntime.agentSnapshot(${JSON.stringify(dataBrowserId)},
           { textLimit: 24, elementLimit: 24 });
-        const sentinel = (snapshot?.text || []).find(text => text.startsWith('EGD_DOC_')) || null;
         const input = (snapshot?.interactiveElements || []).find(item => item.tag === 'input' && item.label === 'QA field');
         return { source: snapshot?.inaccessible ? 'inaccessible' : 'browser-actor',
-          url: snapshot?.url || null, sentinel, inputValue: input?.value ?? null };
+          url: snapshot?.url || null, inputValue: input?.value ?? null };
       }`);
     }
     const screenshot = await screenshotInto(harness, outputDir, name);
@@ -261,7 +263,7 @@ async function main() {
       window.__egdeskSemanticQa = qa;
       const pages = [
         'about:blank',
-        'data:text/html;charset=utf-8,' + encodeURIComponent('<!doctype html><title>EGD semantic QA</title><body style="height:5000px"><label>QA field <input id="qa-input" aria-label="QA field"></label><div id="qa-sentinel"></div><script>document.getElementById("qa-sentinel").textContent="EGD_DOC_"+Math.random().toString(36).slice(2)</script></body>'),
+        'data:text/html;charset=utf-8,' + encodeURIComponent('<!doctype html><title>EGD semantic QA</title><body style="height:5000px"><label>QA field <input id="qa-input" aria-label="QA field"></label><p>Local Browser QA fixture</p></body>'),
         'about:blank',
       ];
       const coords = [[6000, 3000], [6750, 3000], [11000, 3000]];
@@ -296,10 +298,13 @@ async function main() {
     const readyDocument = await waitUntil(() => harness.evaluateChrome(`async () => {
       const snapshot = await window.__egdesk.browserRuntime.agentSnapshot(${JSON.stringify(dataBrowserId)},
         { textLimit: 24, elementLimit: 24 });
-      return { url: snapshot?.url || null,
-        sentinel: (snapshot?.text || []).find(text => text.startsWith('EGD_DOC_')) || null,
+      const browser = document.getElementById(${JSON.stringify(dataBrowserId)})?._xulBrowser;
+      return { url: snapshot?.url || null, readyState: snapshot?.readyState || null,
+        innerWindowId: browser?.browsingContext?.currentWindowGlobal?.innerWindowId || null,
         inputPresent: (snapshot?.interactiveElements || []).some(item => item.tag === 'input' && item.label === 'QA field') };
-    }`), value => value.url?.startsWith('data:') && value.sentinel && value.inputPresent,
+    }`), value => value.url?.startsWith('data:') && value.readyState === 'complete'
+      && Number.isSafeInteger(value.innerWindowId)
+      && value.innerWindowId > 0 && value.inputPresent,
     { timeoutMs: 15000, intervalMs: 150 });
     result.fixtureDocument = readyDocument;
     const fill = await harness.evaluateChrome(`async () => {
@@ -321,7 +326,12 @@ async function main() {
     { timeoutMs: 15000, intervalMs: 100 });
     baseline = await capture('semantic-full-initial');
     assert.equal(baseline.browserActor?.source, 'browser-actor');
-    assert.equal(baseline.browserActor?.sentinel, readyDocument.sentinel);
+    assert.equal(baseline.browserActor?.url, readyDocument.url);
+    assert.ok(Number.isSafeInteger(owned(baseline, dataBrowserId).browser.innerWindowId)
+      && owned(baseline, dataBrowserId).browser.innerWindowId > 0,
+    'Browser inner document identity must be a positive integer');
+    assert.equal(owned(baseline, dataBrowserId).browser.innerWindowId, readyDocument.innerWindowId,
+      'fixture inner document changed before baseline');
     assert.equal(baseline.browserActor?.inputValue, 'semantic-input-preserved');
     assertLevel(baseline, ids, 'detail');
     for (const id of ids) assert.notEqual(owned(baseline, id).accessibility.ariaHidden, 'true');
@@ -473,6 +483,7 @@ async function main() {
       const focusedWorld = owned(proxyClick, id).semantic.world;
       assert.equal(after.sameNode, true);
       assert.equal(after.browsingContextId, before.browsingContextId);
+      assert.equal(after.innerWindowId, before.innerWindowId);
       assert.equal(after.uri, before.uri);
       assert.deepEqual(after.viewport, before.viewport);
       assert.deepEqual(focusedWorld, originalWorld, `${id} world geometry changed on proxy focus`);
@@ -485,6 +496,8 @@ async function main() {
     assert.deepEqual(keyboardZoom.browserActor, baseline.browserActor,
       'focused URL keyboard zoom changed the live Browser document');
     assert.equal(owned(keyboardZoom, ids[0]).browser.sameNode, true);
+    assert.equal(owned(keyboardZoom, dataBrowserId).browser.innerWindowId,
+      owned(baseline, dataBrowserId).browser.innerWindowId);
     // Synthetic wheel routing probes the real chrome handlers; native touchpad
     // fidelity remains a Main visual/manual QA item, not a claim of this test.
     const wheel = await harness.evaluateChrome(`() => {
@@ -533,6 +546,8 @@ async function main() {
       'background Chat runtime body was replaced during mixed LOD');
     assert.deepEqual(mixedLod.browserActor, baseline.browserActor,
       'foreground Browser inner document changed during mixed LOD');
+    assert.equal(owned(mixedLod, dataBrowserId).browser.innerWindowId,
+      owned(baseline, dataBrowserId).browser.innerWindowId);
     const overlap = await harness.evaluateChrome(`() => {
       const qa = window.__egdeskSemanticQa;
       const front = qa.nodes.get(${JSON.stringify(ids[1])}).card;
