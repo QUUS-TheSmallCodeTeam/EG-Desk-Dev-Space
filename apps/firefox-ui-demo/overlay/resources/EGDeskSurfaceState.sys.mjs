@@ -19,6 +19,61 @@ export function fitSurfaceCamera(rect, available, maxZoom = 0.85) {
   };
 }
 
+// Inputs are projected CSS pixels, not world dimensions. Only presentation
+// changes at these boundaries; the View and its runtime keep their identity.
+export function surfaceSemanticLevel({
+  width, height, fontPx, previous = null,
+  detailWidth = 240, detailHeight = 180,
+  outlineWidth = 88, outlineHeight = 52,
+} = {}) {
+  if (![width, height, fontPx].every(value => Number.isFinite(value) && value > 0)) return 'marker';
+  const detailEnter = fontPx >= 10.5 && width >= detailWidth && height >= detailHeight;
+  const detailStay = previous === 'detail' && fontPx >= 9
+    && width >= detailWidth * 0.88 && height >= detailHeight * 0.88;
+  if (detailEnter || detailStay) return 'detail';
+  const outlineEnter = width >= outlineWidth && height >= outlineHeight;
+  const outlineStay = previous === 'outline' && width >= outlineWidth * 0.88
+    && height >= outlineHeight * 0.88;
+  return outlineEnter || outlineStay ? 'outline' : 'marker';
+}
+
+// Connected components, not a single global count: a chain of nearby markers
+// forms one local region, while unrelated markers remain independent.
+export function surfaceProximityClusters(items, distance = 42) {
+  if (!Array.isArray(items)) return [];
+  const threshold = Number.isFinite(distance) && distance > 0 ? distance : 42;
+  const valid = items.filter(item => item && item.id != null
+    && Number.isFinite(item.cx) && Number.isFinite(item.cy)
+    && (item.width == null || (Number.isFinite(item.width) && item.width > 0))
+    && (item.height == null || (Number.isFinite(item.height) && item.height > 0)));
+  const seen = new Set();
+  const groups = [];
+  const near = (a, b) => {
+    const dx = Math.abs(a.cx - b.cx);
+    const dy = Math.abs(a.cy - b.cy);
+    const overlap = dx <= ((a.width || 0) + (b.width || 0)) / 2
+      && dy <= ((a.height || 0) + (b.height || 0)) / 2;
+    return overlap || Math.hypot(dx, dy) < threshold;
+  };
+  for (let index = 0; index < valid.length; index += 1) {
+    if (seen.has(index)) continue;
+    const queue = [index];
+    const members = [];
+    seen.add(index);
+    for (let head = 0; head < queue.length; head += 1) {
+      const current = queue[head];
+      members.push(valid[current].id);
+      for (let next = 0; next < valid.length; next += 1) {
+        if (seen.has(next) || !near(valid[current], valid[next])) continue;
+        seen.add(next);
+        queue.push(next);
+      }
+    }
+    if (members.length > 1) groups.push(members);
+  }
+  return groups;
+}
+
 const copy = value => value == null ? value : JSON.parse(JSON.stringify(value));
 export function ownedProjectionMembers(projection, ownership) {
   return projection.members.map(member => member.viewId).filter(id => ownership[id] === projection.id);

@@ -1065,8 +1065,8 @@
     body.scrollTop = scrollTop;
   }
 
-  const ZOOM_MIN = 0.2;
-  const ZOOM_MAX = 4.5;
+  const ZOOM_MIN = 0.01;
+  const ZOOM_MAX = 4;
   const WHEEL_PAN_SPEED = 1.15;
   const WHEEL_ZOOM_SPEED = 0.0044;
   const PAN_SMOOTHING = 0.24;
@@ -11077,6 +11077,8 @@
     // 키 이벤트가 서브문서(xterm)로 라우팅된다. xterm의 in-frame focus만으로는
     // 프레임 경계를 못 넘으므로 부모 쪽에서 명시적으로 핸드오프한다.
     const focusTerminal = () => {
+      if (card.hidden || card.style.display === 'none'
+        || (card.dataset.egdSemanticLevel && card.dataset.egdSemanticLevel !== 'detail')) return;
       try {
         termBrowser.focus();
         termBrowser.contentWindow?.terminalAPI?.focus?.();
@@ -11267,6 +11269,406 @@
   }
 
   // ============ Canvas Pan / Zoom ============
+  function installSemanticZoom(viewport, layer) {
+    // A projection stays inside its original View's stacking context. The
+    // Browser/PTY/Chat nodes remain mounted in their original wrapper.
+    viewport.setAttribute('tabindex', '-1');
+    viewport.setAttribute('aria-label', 'Canvas');
+    const entries = new Map();
+    const clusterButtons = new Map();
+    const coarsePointer = window.matchMedia?.('(pointer: coarse)');
+    const detailWidth = 240;
+    const detailHeight = 180;
+    const icons = { browser: '🌐︎', chat: '🗨︎', file: '▤', terminal: '>_', settings: '⚙', ontology: '❖', 'input-evidence': '◈' };
+    const titles = {
+      browser: '.egd-card-page-title', chat: '.egd-chat-card-title', file: '.egd-file-card-title',
+      terminal: '.egd-terminal-title', settings: '.egd-settings-title', ontology: '.egd-ontology-title',
+      'input-evidence': '.egd-desk-window-identity strong',
+    };
+    let scheduled = 0;
+    const request = () => {
+      if (!scheduled) scheduled = window.requestAnimationFrame(() => { scheduled = 0; render(); });
+    };
+    const kindFor = card => card.dataset.deskWindowKind
+      || (card.classList.contains('egd-chat-card') ? 'chat'
+        : card.classList.contains('egd-terminal-card') ? 'terminal'
+          : card.classList.contains('egd-settings-card') ? 'settings' : 'view');
+    const titleFor = entry => {
+      const node = entry.titleNode;
+      return (node?.textContent || entry.card.getAttribute('aria-label') || entry.card._sourceRef?.path
+        || entry.kind).trim() || entry.kind;
+    };
+    const screenRect = (card, zoom, pan) => {
+      // Card creation, movement, resize, and fullscreen all write inline world
+      // geometry. Reading it avoids forced layout during camera animation.
+      const x = parsePxNumber(card.style.left, 0);
+      const y = parsePxNumber(card.style.top, 0);
+      const width = Math.max(1, parsePxNumber(card.style.width, 1));
+      const height = Math.max(1, parsePxNumber(card.style.height, 1));
+      return {
+        world: { x, y, width, height },
+        x: pan.x + x * zoom, y: pan.y + y * zoom,
+        width: width * zoom, height: height * zoom,
+      };
+    };
+    const place = (node, screenX, screenY, width, height, originX, originY, zoom) => {
+      // The parent world layer supplies camera scale. Cancel that scale only
+      // for the projection; its box and controls stay in screen CSS pixels.
+      const x = (screenX - originX) / zoom;
+      const y = (screenY - originY) / zoom;
+      const inverse = 1 / zoom;
+      const next = `${x.toFixed(2)},${y.toFixed(2)},${width.toFixed(2)},${height.toFixed(2)},${inverse.toFixed(6)}`;
+      if (node._egdSemanticPlacement === next) return;
+      node._egdSemanticPlacement = next;
+      node.style.left = x + 'px';
+      node.style.top = y + 'px';
+      node.style.width = width + 'px';
+      node.style.height = height + 'px';
+      node.style.transform = `scale(${inverse})`;
+    };
+    const authorVisible = entry => {
+      if (!entry.visibilityDirty) return entry.authorVisible;
+      entry.visibilityDirty = false;
+      const { card } = entry;
+      const computed = window.getComputedStyle(card);
+      entry.authorVisible = !card.hidden && !card.closest('[hidden]')
+        && card.style.display !== 'none' && card.style.visibility !== 'hidden' && card.style.opacity !== '0'
+        && computed.display !== 'none' && computed.visibility !== 'hidden' && computed.visibility !== 'collapse'
+        && card.getAttribute('aria-hidden') !== 'true' && card.getClientRects().length > 0;
+      return entry.authorVisible;
+    };
+    const focusProjection = entry => {
+      if (!entry?.card.isConnected) return;
+      entry.visibilityDirty = true;
+      if (!authorVisible(entry)) return;
+      const world = screenRect(entry.card, state.zoom, state.pan).world;
+      const safe = safeViewportRect();
+      const fitted = SurfaceState.fitSurfaceCamera(world, safe, 0.85);
+      // An unusually large View can be cropped, but must become readable
+      // without changing its saved dimensions or internal Browser viewport.
+      const zoom = Math.min(ZOOM_MAX, Math.max(
+        entry.kind === 'browser' ? 0.83 : 0.76, 10.6 / entry.bodyFontPx,
+        (detailWidth + 1) / world.width, (detailHeight + 1) / world.height,
+        fitted.zoom,
+      ));
+      const pan = {
+        x: safe.left + (safe.width - world.width * zoom) / 2 - world.x * zoom,
+        y: safe.top + (safe.height - world.height * zoom) / 2 - world.y * zoom,
+      };
+      focusCanvasCard(entry.card);
+      state.setCanvasViewportTarget?.({ pan, zoom });
+    };
+    const focusCluster = memberIds => {
+      const members = memberIds.map(id => Array.from(entries.values()).find(entry => entry.card.id === id))
+        .filter(entry => {
+          if (!entry?.card.isConnected) return false;
+          entry.visibilityDirty = true;
+          return authorVisible(entry);
+        });
+      if (!members.length) return;
+      const rects = members.map(entry => screenRect(entry.card, state.zoom, state.pan).world);
+      const left = Math.min(...rects.map(rect => rect.x));
+      const top = Math.min(...rects.map(rect => rect.y));
+      const right = Math.max(...rects.map(rect => rect.x + rect.width));
+      const bottom = Math.max(...rects.map(rect => rect.y + rect.height));
+      const camera = SurfaceState.fitSurfaceCamera({ x: left, y: top, width: right - left, height: bottom - top }, safeViewportRect(), 0.9);
+      // If all members truly overlap, fitting may not advance the camera.
+      camera.zoom = Math.max(ZOOM_MIN, Math.min(ZOOM_MAX, Math.max(camera.zoom, state.zoomTarget * 1.5)));
+      const safe = safeViewportRect();
+      camera.pan = {
+        x: safe.left + (safe.width - (right - left) * camera.zoom) / 2 - left * camera.zoom,
+        y: safe.top + (safe.height - (bottom - top) * camera.zoom) / 2 - top * camera.zoom,
+      };
+      state.setCanvasViewportTarget?.(camera);
+      viewport.focus({ preventScroll: true });
+    };
+    const tabStopSelector = 'a[href], area[href], button, input, select, textarea, iframe, browser, [tabindex], [contenteditable="true"]';
+    const hideOriginalAccessibility = entry => {
+      if (!entry.compact) return;
+      for (const child of entry.card.children) {
+        if (child === entry.proxy) continue;
+        if (!entry.ariaChildren.has(child)) entry.ariaChildren.set(child, child.getAttribute('aria-hidden'));
+        if (child.getAttribute('aria-hidden') !== 'true') child.setAttribute('aria-hidden', 'true');
+      }
+    };
+    const suppressTabStops = entry => {
+      if (!entry.compact) return;
+      for (const node of entry.tabStops.keys()) {
+        if (!entry.card.contains(node)) entry.tabStops.delete(node);
+      }
+      for (const node of entry.card.querySelectorAll(tabStopSelector)) {
+        if (entry.proxy.contains(node)) continue;
+        if (!entry.tabStops.has(node)) entry.tabStops.set(node, node.getAttribute('tabindex'));
+        if (node.getAttribute('tabindex') !== '-1') node.setAttribute('tabindex', '-1');
+      }
+      entry.tabStopsDirty = false;
+    };
+    const restoreProjectionAccessibility = (entry, allowFocusRestore = false) => {
+      if (!entry.compact) return;
+      entry.accessibilityObserver?.disconnect();
+      for (const [node, previous] of entry.tabStops) {
+        if (node.getAttribute('tabindex') !== '-1') continue;
+        if (previous == null) node.removeAttribute('tabindex');
+        else node.setAttribute('tabindex', previous);
+      }
+      entry.tabStops.clear();
+      for (const [child, previous] of entry.ariaChildren) {
+        if (child.getAttribute('aria-hidden') !== 'true') continue;
+        if (previous == null) child.removeAttribute('aria-hidden');
+        else child.setAttribute('aria-hidden', previous);
+      }
+      entry.ariaChildren.clear();
+      entry.compact = false;
+      const focusWasOnProxy = entry.wasProxyFocused || document.activeElement === entry.proxy;
+      if (allowFocusRestore && entry.card.isConnected && focusWasOnProxy) {
+        const previous = entry.focusBeforeCompact;
+        const target = previous?.isConnected && entry.card.contains(previous) ? previous
+          : entry.card.querySelector('.egd-card-url, .egd-card-header button, .egd-chat-card-header button, input, button, [tabindex]');
+        try { target?.focus({ preventScroll: true }); } catch {}
+        if (document.activeElement === entry.proxy) viewport.focus({ preventScroll: true });
+      } else if (focusWasOnProxy) viewport.focus({ preventScroll: true });
+      entry.focusBeforeCompact = null;
+      entry.wasProxyFocused = false;
+    };
+    const syncProjectionAccessibility = (entry, compact, focusTarget) => {
+      if (!compact) { restoreProjectionAccessibility(entry, entry.level === 'detail'); return; }
+      if (entry.compact) {
+        if (document.activeElement === entry.proxy && entry.proxy.hidden) focusTarget.focus({ preventScroll: true });
+        if (entry.tabStopsDirty) {
+          hideOriginalAccessibility(entry);
+          suppressTabStops(entry);
+        }
+        return;
+      }
+      const active = document.activeElement;
+      entry.focusBeforeCompact = active !== entry.proxy && entry.card.contains(active) ? active : null;
+      if (entry.focusBeforeCompact) focusTarget.focus({ preventScroll: true });
+      entry.compact = true;
+      entry.tabStops = new Map();
+      entry.ariaChildren = new Map();
+      hideOriginalAccessibility(entry);
+      suppressTabStops(entry);
+      const accessibilityObserver = new MutationObserver(records => {
+        for (const record of records) {
+          if (record.type === 'attributes' && record.attributeName === 'tabindex'
+            && entry.tabStops.has(record.target) && record.target.getAttribute('tabindex') !== '-1') {
+            entry.tabStops.set(record.target, record.target.getAttribute('tabindex'));
+          }
+          if (record.type === 'attributes' && record.attributeName === 'aria-hidden'
+            && record.target.parentNode === entry.card && record.target !== entry.proxy
+            && record.target.getAttribute('aria-hidden') !== 'true') {
+            entry.ariaChildren.set(record.target, record.target.getAttribute('aria-hidden'));
+          }
+        }
+        if (records.some(record => record.type === 'attributes'
+          || Array.from(record.addedNodes).some(node => node.nodeType === Node.ELEMENT_NODE))) {
+          entry.tabStopsDirty = true;
+          request();
+        }
+      });
+      accessibilityObserver.observe(entry.card, {
+        subtree: true, childList: true, attributes: true,
+        attributeFilter: ['tabindex', 'contenteditable', 'href', 'aria-hidden'],
+      });
+      entry.accessibilityObserver = accessibilityObserver;
+    };
+    const add = card => {
+      if (!card.id || card.dataset.codexRole === 'auth' || entries.has(card)) return;
+      const kind = kindFor(card);
+      const label = el('span', { class: 'egd-semantic-label' });
+      const icon = el('span', { class: 'egd-semantic-icon', 'aria-hidden': 'true' }, icons[kind] || '□');
+      const proxy = el('button', {
+        type: 'button', class: 'egd-semantic-proxy', data: { kind, lod: 'outline', viewId: card.id },
+        onclick: ev => { ev.stopPropagation(); focusProjection(entries.get(card)); },
+      }, label, icon);
+      proxy.hidden = true;
+      proxy.style.position = 'absolute';
+      proxy.style.transformOrigin = 'top left';
+      proxy.style.zIndex = '1';
+      card.appendChild(proxy);
+      const titleNode = card.querySelector(titles[kind] || '.egd-desk-window-identity, .egd-card-title, strong');
+      const body = card.querySelector('.egd-card-body, .egd-chat-card-body, .egd-settings-content') || card;
+      const bodyFontPx = Math.max(1, parsePxNumber(window.getComputedStyle(body).fontSize, 14));
+      const entry = {
+        card, proxy, label, kind, titleNode, bodyFontPx, level: null, rect: null,
+        authorVisible: true, visibilityDirty: true, compact: false,
+        visualStyle: [card.style.display, card.style.visibility, card.style.opacity].join('|'),
+      };
+      const geometryObserver = new MutationObserver(records => {
+        const visualStyle = [card.style.display, card.style.visibility, card.style.opacity].join('|');
+        if (records.some(record => record.attributeName === 'class' || record.attributeName === 'hidden'
+          || record.attributeName === 'aria-hidden') || visualStyle !== entry.visualStyle) {
+          entry.visibilityDirty = true;
+        }
+        entry.visualStyle = visualStyle;
+        request();
+      });
+      geometryObserver.observe(card, { attributes: true, attributeFilter: ['style', 'class', 'hidden', 'aria-hidden'] });
+      entry.geometryObserver = geometryObserver;
+      if (titleNode) {
+        const titleObserver = new MutationObserver(request);
+        titleObserver.observe(titleNode, { childList: true, characterData: true, subtree: true });
+        entry.titleObserver = titleObserver;
+      }
+      entries.set(card, entry);
+    };
+    const remove = card => {
+      const entry = entries.get(card);
+      if (!entry) return;
+      entry.geometryObserver.disconnect();
+      entry.titleObserver?.disconnect();
+      restoreProjectionAccessibility(entry);
+      entry.proxy.remove();
+      delete card.dataset.egdSemanticLevel;
+      entries.delete(card);
+    };
+    const syncEntries = () => {
+      const current = new Set(Array.from(layer.children).filter(node => node.classList?.contains('egd-canvas-card')));
+      for (const card of entries.keys()) if (!current.has(card) || !card.isConnected) remove(card);
+      for (const card of current) add(card);
+    };
+    const layerObserver = new MutationObserver(() => { syncEntries(); request(); });
+    layerObserver.observe(layer, { childList: true });
+    const ancestorVisibilityObserver = new MutationObserver(() => {
+      for (const entry of entries.values()) entry.visibilityDirty = true;
+      request();
+    });
+    for (const node of [document.documentElement, viewport, layer]) {
+      ancestorVisibilityObserver.observe(node, { attributes: true, attributeFilter: ['class', 'hidden'] });
+    }
+    coarsePointer?.addEventListener?.('change', request);
+    const render = () => {
+      syncEntries();
+      const zoom = state.zoom;
+      const pan = state.pan;
+      const coarse = coarsePointer?.matches || false;
+      const markerSize = coarse ? 44 : 36;
+      const visibleMarkers = [];
+      const entryById = new Map(Array.from(entries.values()).map(entry => [entry.card.id, entry]));
+      for (const entry of entries.values()) {
+        const { card, proxy } = entry;
+        if (!card.isConnected) continue;
+        if (!authorVisible(entry)) {
+          entry.inView = false;
+          entry.level = null;
+          if (!proxy.hidden) proxy.hidden = true;
+          if (card.hasAttribute('data-egd-semantic-level')) delete card.dataset.egdSemanticLevel;
+          continue;
+        }
+        const rect = screenRect(card, zoom, pan);
+        entry.rect = rect;
+        const projectedFont = entry.bodyFontPx * zoom;
+        let level = isCardFullscreen(card) ? 'detail' : SurfaceState.surfaceSemanticLevel({
+          width: rect.width, height: rect.height, fontPx: projectedFont, previous: entry.level,
+          detailWidth, detailHeight,
+        });
+        // Browser's two control rows need a tighter readable band than a
+        // generic View; keep a small enter/exit gap rather than flickering.
+        if (entry.kind === 'browser' && !isCardFullscreen(card) && level === 'detail'
+          && zoom < (entry.level === 'detail' ? 0.76 : 0.82)) {
+          level = SurfaceState.surfaceSemanticLevel({
+            width: rect.width, height: rect.height, fontPx: 0.1,
+            previous: entry.level === 'outline' ? 'outline' : null,
+            detailWidth, detailHeight,
+          });
+        }
+        if (level !== entry.level) {
+          entry.level = level;
+          card.dataset.egdSemanticLevel = level;
+          proxy.dataset.lod = level;
+        }
+        const title = titleFor(entry);
+        if (entry.label.textContent !== title) entry.label.textContent = title;
+        const accessible = `${title} · ${entry.kind} 화면으로 이동`;
+        if (proxy.getAttribute('aria-label') !== accessible) proxy.setAttribute('aria-label', accessible);
+        if (level === 'detail') {
+          entry.wasProxyFocused = document.activeElement === proxy;
+          if (!proxy.hidden) proxy.hidden = true;
+          continue;
+        }
+        const cx = rect.x + rect.width / 2;
+        const cy = rect.y + rect.height / 2;
+        const px = level === 'marker' ? cx - markerSize / 2 : rect.x;
+        const py = level === 'marker' ? cy - markerSize / 2 : rect.y;
+        const pw = level === 'marker' ? markerSize : rect.width;
+        const ph = level === 'marker' ? markerSize : rect.height;
+        const inView = px + pw >= 0 && py + ph >= 0 && px <= window.innerWidth && py <= window.innerHeight;
+        entry.inView = inView;
+        if (level === 'outline' && proxy.hidden === inView) proxy.hidden = !inView;
+        if (!inView) continue;
+        place(proxy, px, py, pw, ph, rect.x, rect.y, zoom);
+        if (level === 'marker') visibleMarkers.push({ id: card.id, cx, cy, width: markerSize, height: markerSize });
+      }
+      const clustered = new Set();
+      const currentClusters = new Set();
+      for (const memberIds of SurfaceState.surfaceProximityClusters(visibleMarkers, coarse ? 56 : 42)) {
+        const key = [...memberIds].sort().join('|');
+        currentClusters.add(key);
+        memberIds.forEach(id => clustered.add(id));
+        let button = clusterButtons.get(key);
+        if (!button) {
+          button = el('button', { type: 'button', class: 'egd-semantic-cluster', onclick: ev => {
+            ev.stopPropagation();
+            focusCluster(button._egdMembers || []);
+          } }, el('span', { class: 'egd-semantic-count' }));
+          button.style.position = 'absolute';
+          button.style.transformOrigin = 'top left';
+          layer.appendChild(button);
+          clusterButtons.set(key, button);
+        }
+        button._egdMembers = memberIds;
+        const memberList = memberIds.join(',');
+        if (button.dataset.memberIds !== memberList) button.dataset.memberIds = memberList;
+        if (button.dataset.count !== String(memberIds.length)) button.dataset.count = String(memberIds.length);
+        if (button.firstChild.textContent !== `${memberIds.length}개`) button.firstChild.textContent = `${memberIds.length}개`;
+        const names = memberIds.map(id => entryById.get(id)?.label.textContent || id);
+        const accessible = `${names.join(', ')} · ${memberIds.length}개 화면 영역으로 이동`;
+        if (button.getAttribute('aria-label') !== accessible) button.setAttribute('aria-label', accessible);
+        const clusterZ = String(Math.max(...memberIds.map(id => parsePxNumber(entryById.get(id)?.card.style.zIndex, 0))));
+        if (button.style.zIndex !== clusterZ) button.style.zIndex = clusterZ;
+        const points = visibleMarkers.filter(marker => memberIds.includes(marker.id));
+        const cx = points.reduce((sum, point) => sum + point.cx, 0) / points.length;
+        const cy = points.reduce((sum, point) => sum + point.cy, 0) / points.length;
+        const clusterWidth = coarse ? 52 : 48;
+        const clusterHeight = coarse ? 48 : 44;
+        place(button, cx - clusterWidth / 2, cy - clusterHeight / 2,
+          clusterWidth, clusterHeight, pan.x, pan.y, zoom);
+      }
+      for (const [key, button] of clusterButtons) {
+        if (currentClusters.has(key)) continue;
+        if (document.activeElement === button) viewport.focus({ preventScroll: true });
+        button.remove();
+        clusterButtons.delete(key);
+      }
+      for (const entry of entries.values()) {
+        if (entry.level !== 'marker') continue;
+        const hidden = !entry.inView || clustered.has(entry.card.id);
+        if (entry.proxy.hidden !== hidden) entry.proxy.hidden = hidden;
+      }
+      for (const entry of entries.values()) {
+        const cluster = Array.from(clusterButtons.values()).find(button => button._egdMembers?.includes(entry.card.id));
+        const focusTarget = !entry.proxy.hidden ? entry.proxy : cluster || viewport;
+        syncProjectionAccessibility(entry, entry.level === 'outline' || entry.level === 'marker', focusTarget);
+      }
+    };
+    syncEntries();
+    state.renderSemanticProjections = render;
+    state.refreshSemanticProjections = request;
+    return {
+      refresh: request,
+      snapshot: () => ({
+        cards: Array.from(entries.values()).map(entry => ({
+          id: entry.card.id, kind: entry.kind, level: entry.level,
+          world: entry.rect?.world || null,
+          screen: entry.rect && { x: entry.rect.x, y: entry.rect.y, width: entry.rect.width, height: entry.rect.height },
+        })),
+        clusters: Array.from(clusterButtons.values()).map(button => ({
+          memberIds: [...(button._egdMembers || [])], count: Number(button.dataset.count),
+        })),
+      }),
+    };
+  }
+
   function installCanvasPanZoom(viewport, layer) {
     const indicator = el('div', { id: 'egd-zoom-indicator' }, '100%');
     const marquee = el('div', { id: 'egd-selection-marquee' });
@@ -11285,6 +11687,11 @@
       layer.style.transform = `translate(${state.pan.x}px, ${state.pan.y}px) scale(${state.zoom})`;
       indicator.textContent = Math.round(state.zoom * 100) + '%';
       syncCardFullscreenLayout();
+      viewport.style.setProperty('--egd-camera-pan-x', state.pan.x + 'px');
+      viewport.style.setProperty('--egd-camera-pan-y', state.pan.y + 'px');
+      viewport.style.setProperty('--egd-camera-zoom', String(state.zoom));
+      viewport.style.setProperty('--egd-wood-opacity', String(Math.max(0, Math.min(1, (state.zoom * 100 - 2) / 10))));
+      state.renderSemanticProjections?.();
       refreshDeskMinimap();
     }
     let frame = 0;
@@ -11298,7 +11705,8 @@
       state.pan.y += panDy * PAN_SMOOTHING;
       state.zoom += zoomDelta * ZOOM_SMOOTHING;
 
-      const settled = Math.abs(panDx) < 0.25 && Math.abs(panDy) < 0.25 && Math.abs(zoomDelta) < 0.0015;
+      const zoomTolerance = Math.min(0.0015, state.zoomTarget * 0.01);
+      const settled = Math.abs(panDx) < 0.25 && Math.abs(panDy) < 0.25 && Math.abs(zoomDelta) < zoomTolerance;
       if (settled) {
         state.pan.x = state.panTarget.x;
         state.pan.y = state.panTarget.y;
@@ -11647,6 +12055,7 @@
     });
     window.addEventListener('resize', () => {
       syncCardFullscreenLayout();
+      state.refreshSemanticProjections?.();
     });
   }
 
@@ -11868,11 +12277,13 @@
       const canvasLayer = el('div', { id: 'egd-canvas-layer' });
       canvasViewport.appendChild(canvasLayer);
       host.appendChild(canvasViewport);
+      const semantic = installSemanticZoom(canvasViewport, canvasLayer);
       installCanvasPanZoom(canvasViewport, canvasLayer);
       installNativeGestureHelperBridge();
       state.codexBridge = installCodexBridge(legacyChatRecords);
       window.__egdesk = {
         state,
+        semantic,
         codexBridge: state.codexBridge,
         cardRuntime: {
           focusCard: focusCanvasCard,
