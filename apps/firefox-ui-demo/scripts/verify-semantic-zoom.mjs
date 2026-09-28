@@ -250,8 +250,11 @@ async function main() {
         throw new Error('QA requires the new profile Desk, not an unresolved fullscreen Card');
       }
       const existing = [...document.querySelectorAll('.egd-canvas-card')];
-      if (existing.length > 1 || existing.some(card => !card.classList.contains('egd-browser-card')
-          || !/^(chrome:\/\/userchrome\/|about:blank)/.test(card._browserState?.uri || ''))) {
+      if (existing.length > 1 || existing.some(card => {
+        const uri = card._browserState?.uri || '';
+        return !card.classList.contains('egd-browser-card')
+          || (!uri.startsWith('chrome://userchrome/') && uri !== 'about:blank');
+      })) {
         throw new Error('QA refuses a non-fresh profile with existing Canvas work');
       }
       const qa = { ids: [], nodes: new Map(), initialIds: existing.map(node => node.id) };
@@ -396,7 +399,8 @@ async function main() {
     assert.ok(Math.abs(Number(woodAnchor[2]) - cluster.camera.pan.y) < 1);
     const loadedWood = await harness.evaluateChrome(`async () => {
       const value = getComputedStyle(document.getElementById('egd-canvas-viewport'), '::before').backgroundImage;
-      const url = value.match(/url\\(["']?([^"')]+)/)?.[1];
+      const token = value.split('url(').at(-1)?.split(')')[0]?.trim();
+      const url = token?.startsWith('"') || token?.startsWith("'") ? token.slice(1, -1) : token;
       if (!url || !/^(chrome|resource|file):/.test(url)) throw new Error('Wood URL is not a local Firefox resource');
       const img = new Image();
       img.src = url;
