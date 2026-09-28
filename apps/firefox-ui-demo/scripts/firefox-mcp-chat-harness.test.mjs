@@ -1,4 +1,5 @@
 import assert from 'node:assert/strict';
+import { spawnSync } from 'node:child_process';
 import fs from 'node:fs';
 import path from 'node:path';
 import test from 'node:test';
@@ -6,7 +7,8 @@ import { assertQaProfile, bootstrapQaProfile, canonicalTempRoot,
   assertQaFixtureManifest, LOADER_FILES, QA_MARKER_BYTES, QA_MARKER_NAME,
   QA_FIXTURE_DIRECTORY, QA_FIXTURE_FILE, QA_FIXTURE_MANIFEST, QA_REAL_TURN_DIRECTORY, QA_BACKEND_DATA_DIRECTORY, deskRecoveryFixture } from './egdesk-chat-qa-profile.mjs';
 import { assertQaEvidenceDirectory, chooseNativeScrollKey, contextIdFromList, createQaEvidenceDirectory, firstSnapshotUid,
-  decodeQaEvaluationResult, FirefoxMcpChatHarness, mcpResultText, parseMcpJson } from './firefox-mcp-chat-harness.mjs';
+  decodeQaEvaluationResult, FirefoxMcpChatHarness, mcpResultText, parseMcpJson,
+  resolveQaMarionettePort } from './firefox-mcp-chat-harness.mjs';
 import { assertQaFixtureArtifact } from './egdesk-chat-qa-contract.sys.mjs';
 import { chooseQaThreadRow, composerIsReady } from './egdesk-qa-ui-flow.mjs';
 
@@ -109,6 +111,43 @@ test('MCP parsing and evidence setup are pure of Firefox and never need npx', (t
   assert.equal(FirefoxMcpChatHarness.prototype.call, undefined);
   assert.equal(FirefoxMcpChatHarness.prototype.request, undefined);
   assert.equal(typeof FirefoxMcpChatHarness.prototype.evaluateChrome, 'function');
+});
+
+test('QA port policy retains 2829 by default and permits only explicit 2828 or 2829', () => {
+  assert.equal(resolveQaMarionettePort(2829), 2829);
+  assert.equal(resolveQaMarionettePort('2829'), 2829);
+  assert.equal(resolveQaMarionettePort(2828), 2828);
+  assert.equal(resolveQaMarionettePort('2828'), 2828);
+  for (const value of [0, 6000, 2830, '2828;exit', '02828', null, NaN]) {
+    assert.throws(() => resolveQaMarionettePort(value), /refuses Marionette port/);
+  }
+});
+
+test('normal Firefox launch prepares the current overlay after profile guard without enabling automation', () => {
+  const source = fs.readFileSync(new URL('./run-firefox-mcp-target.sh', import.meta.url), 'utf8');
+  const guarded = source.indexOf('validate-firefox-profile.mjs');
+  const copied = source.indexOf('cp "$REPO_ROOT"/overlay/JS/*.uc.js');
+  const normal = source.indexOf('if [[ "$LAUNCH_MODE" == normal ]]');
+  assert.ok(guarded >= 0 && copied > guarded && normal > copied,
+    'guarded preparation must run for both normal and automation launches');
+  assert.match(source, /exec env -u MOZ_REMOTE_ALLOW_SYSTEM_ACCESS -u MOZ_MARIONETTE/);
+  assert.match(source, /rm -rf "\$PROFILE\/startupCache"/);
+});
+
+test('semantic verifier refuses reserved 2829 before any MCP connection', (t) => {
+  const source = fs.mkdtempSync(path.join(canonicalTempRoot(), 'egdesk-loader-fixture-'));
+  t.after(() => removeCreatedTemp(source, 'egdesk-loader-fixture-'));
+  for (const name of LOADER_FILES) fs.writeFileSync(path.join(source, name), `loader fixture: ${name}\n`);
+  const { profile } = bootstrapQaProfile({ loaderSource: source });
+  t.after(() => removeCreatedTemp(profile, 'egdesk-chat-test-'));
+  const outputDir = createQaEvidenceDirectory();
+  t.after(() => removeCreatedTemp(outputDir, 'egdesk-chat-evidence-'));
+  const verifier = new URL('./verify-semantic-zoom.mjs', import.meta.url);
+  const result = spawnSync(process.execPath, [verifier.pathname, '--profile', profile,
+    '--port', '2829', '--output-dir', outputDir], { encoding: 'utf8' });
+  assert.notEqual(result.status, 0);
+  assert.match(result.stderr, /2829 is reserved/);
+  assert.deepEqual(fs.readdirSync(outputDir), [], 'rejected attach cannot create QA evidence or alter the old target');
 });
 
 test('QA result transport preserves shared Board records as JSON and retains thrown errors', () => {

@@ -2,7 +2,7 @@ import test from 'node:test';
 import assert from 'node:assert/strict';
 import { existsSync, readFileSync } from 'node:fs';
 import { compileFunction } from 'node:vm';
-import { initialSurfaceMode, shouldFocusInitialBrowser, planBoardProjection, snapshotBoardProjection, remapMemberReferences, recoverDeskSnapshot, canPersistDeskSession, ownedProjectionMembers, missingProjectionMembers, fitSurfaceCamera } from '../overlay/resources/EGDeskSurfaceState.sys.mjs';
+import { initialSurfaceMode, shouldFocusInitialBrowser, planBoardProjection, snapshotBoardProjection, remapMemberReferences, recoverDeskSnapshot, canPersistDeskSession, ownedProjectionMembers, missingProjectionMembers, fitSurfaceCamera, surfaceSemanticLevel, surfaceProximityClusters } from '../overlay/resources/EGDeskSurfaceState.sys.mjs';
 import * as Chat from '../overlay/resources/EGDeskChatState.sys.mjs';
 import * as Markdown from '../overlay/resources/EGDeskMarkdown.sys.mjs';
 import * as InputContext from '../overlay/resources/EGDeskInputContext.sys.mjs';
@@ -434,6 +434,68 @@ test('initial Desk camera can fill the viewport with the same Browser Card and z
   assert.deepEqual(browser, before);
 });
 
+test('semantic zoom uses the canonical 1–400% camera range without changing Card records', () => {
+  assert.match(surfaceSource, /\bconst ZOOM_MIN = 0\.01\s*;/);
+  assert.match(surfaceSource, /\bconst ZOOM_MAX = 4(?:\.0)?\s*;/);
+  const card = { id: 'qa-browser', type: 'browser', geometry: { x: 40, y: 80, width: 720, height: 500 },
+    sourceRef: { kind: 'browser-url', uri: 'about:blank' }, runtimeState: { uri: 'about:blank' } };
+  const before = structuredClone(card);
+  for (const zoom of [1, .7, .6, .07, .01, 4]) {
+    surfaceSemanticLevel({ width: card.geometry.width * zoom,
+      height: card.geometry.height * zoom, fontPx: 14 * zoom });
+  }
+  assert.deepEqual(card, before, 'LOD decisions must not edit identity, world geometry, or persisted data');
+});
+
+test('semantic zoom uses per-Card projected geometry and font with stable hysteresis', () => {
+  const projected = (zoom, previous) => surfaceSemanticLevel({
+    width: 720 * zoom, height: 500 * zoom, fontPx: 14 * zoom, previous,
+  });
+  assert.equal(projected(1), 'detail');
+  assert.equal(projected(.7, 'detail'), 'detail', '100→70 holds readable detail');
+  assert.equal(projected(.6, 'detail'), 'outline');
+  assert.equal(projected(.7, 'outline'), 'outline', '60→70 stays compact');
+  assert.equal(projected(.8, 'outline'), 'detail');
+  assert.equal(surfaceSemanticLevel({ width: 1600 * .07, height: 900 * .07, fontPx: 14 * .07 }), 'outline');
+  assert.equal(surfaceSemanticLevel({ width: 720 * .07, height: 500 * .07, fontPx: 14 * .07 }), 'marker');
+  assert.equal(surfaceSemanticLevel({ width: 720, height: 500, fontPx: 14 }), 'detail');
+  assert.equal(surfaceSemanticLevel({ width: 200, height: 140, fontPx: 14 }), 'outline',
+    'same-camera foreground Detail and background compact View can coexist');
+  assert.equal(surfaceSemanticLevel({ width: 78, height: 46, fontPx: 1, previous: 'outline' }), 'outline');
+  assert.equal(surfaceSemanticLevel({ width: 70, height: 40, fontPx: 1, previous: 'outline' }), 'marker');
+});
+
+test('semantic zoom rejects degenerate and non-finite projections safely', () => {
+  for (const bad of [0, -1, NaN, Infinity, -Infinity]) {
+    for (const field of ['width', 'height', 'fontPx']) {
+      assert.equal(surfaceSemanticLevel({ width: 720, height: 500, fontPx: 14, [field]: bad }),
+        'marker', `${field}=${bad} cannot produce a visible detail proxy`);
+    }
+  }
+  assert.equal(surfaceSemanticLevel(), 'marker');
+});
+
+test('semantic zoom counts connected local marker regions, never every Canvas Card', () => {
+  const markers = [
+    { id: 'a', cx: 0, cy: 0 }, { id: 'b', cx: 30, cy: 0 }, { id: 'c', cx: 60, cy: 0 },
+    { id: 'far-1', cx: 500, cy: 0 }, { id: 'far-2', cx: 530, cy: 0 },
+    { id: 'unrelated', cx: 1000, cy: 0 },
+  ];
+  const original = structuredClone(markers);
+  assert.deepEqual(surfaceProximityClusters(markers), [['a', 'b', 'c'], ['far-1', 'far-2']]);
+  assert.deepEqual(surfaceProximityClusters(markers.filter(item => item.id !== 'b')),
+    [['far-1', 'far-2']], 'removal cannot leave a stale count or bridge');
+  assert.deepEqual(surfaceProximityClusters(markers.filter(item => !item.id.startsWith('far-'))),
+    [['a', 'b', 'c']], 'closing a region does not absorb unrelated Cards');
+  assert.deepEqual(markers, original);
+  assert.deepEqual(surfaceProximityClusters([
+    { id: 'overlap-a', cx: 200, cy: 100, width: 80, height: 20 },
+    { id: 'overlap-b', cx: 250, cy: 100, width: 80, height: 20 },
+    { id: 'invalid', cx: NaN, cy: 100 }, { id: 'degenerate', cx: 200, cy: 100, width: 0 },
+  ]), [['overlap-a', 'overlap-b']]);
+  assert.deepEqual(surfaceProximityClusters(null), []);
+});
+
 test('production first-use focus presents the live Browser Card with the existing fullscreen system', () => {
   const body = surfaceSource.match(/  function focusInitialBrowserCard\(card, \{ persist = false \} = \{\}\) \{([\s\S]*?)\n  \}/)?.[1];
   assert.ok(body);
@@ -540,7 +602,7 @@ test('wheel or focused-URL keyboard zoom exits actual fullscreen and restores th
     () => {}, () => assert.fail('closed minimap should stay closed'), card => { activated = card; },
     () => {}, () => { saved++; });
   const enterDesk = enter(state, exitFullscreen, document, () => { saved++; });
-  const applyFactor = zoomFactor(state, .2, 4.5, enterDesk, 0,
+  const applyFactor = zoomFactor(state, .01, 4, enterDesk, 0,
     { cancelAnimationFrame() {} }, () => {}, () => { animated++; });
   const zoomOut = zoom(() => 1, applyFactor, .0044);
   zoomOut({ deltaY: 100, clientX: 800, clientY: 480 });
@@ -559,7 +621,7 @@ test('wheel or focused-URL keyboard zoom exits actual fullscreen and restores th
   // At the zoom clamp, the outward gesture still exits Browser focus.
   state.surface.initialBrowserFocus = true;
   state.cardFullscreen = { cardId: browser.id, rect, previousHudHidden: false, previousMinimapOpen: false };
-  state.zoom = state.zoomTarget = .2;
+  state.zoom = state.zoomTarget = .01;
   classes.add('egd-initial-browser-focus');
   classes.add('egd-card-fullscreen-active');
   zoomOut({ deltaY: 100, clientX: 800, clientY: 480 });

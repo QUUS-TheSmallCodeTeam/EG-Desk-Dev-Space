@@ -9,6 +9,15 @@ export const CACHED_MCP_ENTRY = '/Users/minsoocha/.npm/_npx/96bbc051a9e217ad/nod
 export const CACHED_GECKODRIVER = '/Users/minsoocha/.cache/selenium/geckodriver/mac-arm64/0.37.0/geckodriver';
 export const QA_MARIONETTE_PORT = 2829;
 
+// 2829 remains the chat QA default. Main may explicitly select the separately
+// launched 2828 target, but arbitrary ports are never accepted by this harness.
+export function resolveQaMarionettePort(value = process.env.EGDESK_MARIONETTE_PORT || QA_MARIONETTE_PORT) {
+  if (value !== 2828 && value !== 2829 && value !== '2828' && value !== '2829') {
+    throw new Error(`QA harness refuses Marionette port ${value}; expected 2828 or 2829`);
+  }
+  return Number(value);
+}
+
 export function mcpResultText(result) {
   return (result?.content || []).filter((part) => part.type === 'text').map((part) => part.text).join('\n');
 }
@@ -93,12 +102,9 @@ export class FirefoxMcpChatHarness {
   #tools = new Set();
   #evidenceDir;
 
-  constructor({ profile, marionettePort = Number(process.env.EGDESK_MARIONETTE_PORT || QA_MARIONETTE_PORT) }) {
+  constructor({ profile, marionettePort = resolveQaMarionettePort() }) {
     this.#profile = assertQaProfile(profile);
-    if (marionettePort !== QA_MARIONETTE_PORT) {
-      throw new Error(`QA harness refuses Marionette port ${marionettePort}; expected ${QA_MARIONETTE_PORT}`);
-    }
-    this.#port = marionettePort;
+    this.#port = resolveQaMarionettePort(marionettePort);
     const info = fs.statSync(CACHED_MCP_ENTRY);
     if (!info.isFile()) throw new Error('Cached Firefox MCP entry is not a file');
     if (!fs.statSync(CACHED_GECKODRIVER).isFile()) throw new Error('Cached geckodriver is missing; downloads are disabled');
@@ -107,6 +113,7 @@ export class FirefoxMcpChatHarness {
   }
 
   get profile() { return this.#profile; }
+  get marionettePort() { return this.#port; }
   get evidenceDir() { return this.#evidenceDir; }
   get stderrTail() { return this.#stderr; }
 
