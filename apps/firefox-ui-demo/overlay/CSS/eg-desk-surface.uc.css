@@ -62,7 +62,7 @@
   background-image:
     linear-gradient(light-dark(rgba(245, 243, 239, 0.72), rgba(36, 42, 40, 0.87)),
                     light-dark(rgba(245, 243, 239, 0.72), rgba(36, 42, 40, 0.87))),
-    url("../resources/egdesk-desk-woodgrain.jpg");
+    url("chrome://userchrome/content/egdesk-desk-woodgrain.jpg");
   background-repeat: no-repeat, repeat;
   background-position: 0 0, var(--egd-camera-pan-x, 0px) var(--egd-camera-pan-y, 0px);
   background-size: 100% 100%,
@@ -161,6 +161,11 @@
   line-height: 14px;
   text-overflow: ellipsis;
   white-space: nowrap;
+}
+
+.egd-semantic-proxy[data-lod="outline"] > .egd-semantic-label {
+  position: absolute;
+  inset: 0 0 auto;
 }
 
 .egd-semantic-icon {
