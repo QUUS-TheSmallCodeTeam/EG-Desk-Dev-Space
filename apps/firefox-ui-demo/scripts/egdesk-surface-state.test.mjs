@@ -543,7 +543,10 @@ test('production fullscreen layout fills the actual Canvas viewport and keeps th
   const target = { uri: 'https://example.test/', session: {} };
   const card = { id: 'browser-view-a', isConnected: true, _xulBrowser: target,
     style: { left: '45px', top: '60px', width: '900px', height: '620px', zIndex: '41000' },
-    classList: { add: name => { assert.equal(name, 'egd-card-fullscreen'); } } };
+    classList: {
+      contains: name => name === 'egd-browser-card',
+      add: name => { assert.equal(name, 'egd-card-fullscreen'); },
+    } };
   const prior = structuredClone(card.style);
   const rootClasses = new Set();
   const document = { documentElement: { classList: { add: name => rootClasses.add(name) } },
@@ -565,7 +568,181 @@ test('production fullscreen layout fills the actual Canvas viewport and keeps th
   assert.deepEqual(card.style, { left: '0px', top: '0px', width: '1600px', height: '960px', zIndex: '42001' });
   assert.deepEqual(safeOptions, { avoidHud: false, margin: 0 });
   assert.ok(rootClasses.has('egd-card-fullscreen-active'));
+  assert.ok(rootClasses.has('egd-browser-fullscreen-active'));
   assert.equal(card._xulBrowser, target);
+});
+
+function createFullscreenHarness({ hudInitiallyHidden = false, minimapInitiallyOpen = true } = {}) {
+  const body = signature => {
+    const header = `  function ${signature} {`;
+    const start = surfaceSource.indexOf(header);
+    if (start < 0) return null;
+    const end = surfaceSource.indexOf('\n  }', start + header.length);
+    return end < 0 ? null : surfaceSource.slice(start + header.length, end);
+  };
+  const compile = (signature, dependencies) => {
+    const source = body(signature);
+    assert.ok(source, `production ${signature} must remain testable`);
+    return compileFunction(`return function ${signature} {${source}\n  }`, dependencies);
+  };
+  const rootClasses = new Set();
+  const hudClasses = new Set(hudInitiallyHidden ? ['egd-hud-hidden'] : []);
+  const cards = new Map();
+  const viewport = { innerWidth: 1280, innerHeight: 774 };
+  let minimapOpen = minimapInitiallyOpen;
+  let hudFitCount = 0;
+  let saved = 0;
+  const minimap = { remove: () => { minimapOpen = false; } };
+  const hud = { classList: {
+    contains: name => hudClasses.has(name),
+    toggle: (name, enabled) => enabled ? hudClasses.add(name) : hudClasses.delete(name),
+  } };
+  const document = {
+    documentElement: { classList: {
+      add: name => rootClasses.add(name),
+      remove: name => rootClasses.delete(name),
+    } },
+    getElementById: id => id === 'egd-hud' ? hud
+      : id === 'egd-desk-minimap' ? (minimapOpen ? minimap : null)
+        : cards.get(id) || null,
+  };
+  const state = { surface: { initialBrowserFocus: false, browserCardId: 'browser-view-a' },
+    cardFullscreen: null, activeEntityId: null, pan: { x: 100, y: 50 }, zoom: 2 };
+  const safeCalls = [];
+  const safe = compile('safeViewportRect(options = {})', ['window', 'document'])(viewport, document);
+  const setHud = compile('setHudPresentationHidden(hidden)', ['document', 'syncHudViewportFit'])(document, () => { hudFitCount++; });
+  const getRect = compile('getCardRect(card)', [])();
+  const applyRect = compile('applyCardRect(card, rect)', [])();
+  const isFullscreen = compile('isCardFullscreen(card)', ['state'])(state);
+  const layout = compile('syncCardFullscreenLayout()', ['state', 'document', 'canvasZoom', 'safeViewportRect', 'syncViewportAgendaRail'])(
+    state, document, () => Math.max(0.001, state.zoom || 1), options => {
+      safeCalls.push(options);
+      return safe(options);
+    }, () => {});
+  const exit = compile('exitCardFullscreen(card = null, options = {})',
+    ['state', 'document', 'applyCardRect', 'setHudPresentationHidden', 'toggleDeskMinimap', 'setActiveEntity', 'syncViewportAgendaRail', 'scheduleDeskSessionSave'])(
+    state, document, applyRect, setHud, () => {
+      assert.equal(state.cardFullscreen, null, 'minimap reopens after fullscreen state clears');
+      minimapOpen = !minimapOpen;
+    }, card => { state.activeEntityId = card?.id || null; }, () => {}, () => { saved++; });
+  const enter = compile('enterCardFullscreen(card)',
+    ['state', 'exitCardFullscreen', 'isCardFullscreen', 'document', 'getCardRect', 'cardZ', 'setActiveEntity', 'setHudPresentationHidden', 'closeDeskMinimap', 'syncCardFullscreenLayout', 'syncViewportAgendaRail'])(
+    state, exit, isFullscreen, document, getRect, 40000,
+    card => { state.activeEntityId = card?.id || null; }, setHud,
+    () => document.getElementById('egd-desk-minimap')?.remove(), layout, () => {});
+  const makeCard = (id, kind, rect) => {
+    const classes = new Set(['egd-canvas-card', kind]);
+    const card = { id, isConnected: true, style: { ...rect }, classList: {
+      contains: name => classes.has(name),
+      add: name => classes.add(name),
+      remove: name => classes.delete(name),
+    }, remove() { this.isConnected = false; cards.delete(id); } };
+    cards.set(id, card);
+    return card;
+  };
+  const browserRect = { left: '45px', top: '60px', width: '900px', height: '620px', zIndex: '41000' };
+  const browser = makeCard('browser-view-a', 'egd-browser-card', browserRect);
+  const chatRect = { left: '70px', top: '80px', width: '640px', height: '450px', zIndex: '41001' };
+  const chat = makeCard('chat-view-a', 'egd-chat-card', chatRect);
+  return { browser, browserRect, chat, chatRect, cards, document, state, rootClasses, hudClasses,
+    safeCalls, enter, exit, layout, isFullscreen,
+    get minimapOpen() { return minimapOpen; },
+    get hudFitCount() { return hudFitCount; },
+    get saved() { return saved; } };
+}
+
+test('ordinary Browser fullscreen uses the viewport edges, hides Desk chrome, and restores prior geometry', () => {
+  const h = createFullscreenHarness();
+  h.enter(h.browser);
+  assert.equal(h.state.cardFullscreen.cardId, h.browser.id);
+  assert.deepEqual(h.safeCalls.at(-1), { avoidHud: false, margin: 0 });
+  assert.deepEqual(h.browser.style, { left: '-50px', top: '-25px', width: '640px', height: '387px', zIndex: '40001' });
+  assert.ok(h.rootClasses.has('egd-browser-fullscreen-active'));
+  assert.ok(h.rootClasses.has('egd-card-fullscreen-active'));
+  assert.ok(h.hudClasses.has('egd-hud-hidden'));
+  assert.equal(h.minimapOpen, false);
+  assert.equal(h.exit(h.browser), true);
+  assert.deepEqual(h.browser.style, h.browserRect);
+  assert.ok(!h.rootClasses.has('egd-browser-fullscreen-active'));
+  assert.ok(!h.rootClasses.has('egd-card-fullscreen-active'));
+  assert.ok(!h.hudClasses.has('egd-hud-hidden'));
+  assert.equal(h.minimapOpen, true);
+  assert.equal(h.hudFitCount, 1);
+
+  const previouslyHidden = createFullscreenHarness({ hudInitiallyHidden: true, minimapInitiallyOpen: false });
+  previouslyHidden.enter(previouslyHidden.browser);
+  previouslyHidden.exit(previouslyHidden.browser);
+  assert.ok(previouslyHidden.hudClasses.has('egd-hud-hidden'));
+  assert.equal(previouslyHidden.minimapOpen, false);
+});
+
+test('switching from Browser to non-Browser fullscreen clears Browser chrome mode and preserves restoration', () => {
+  const h = createFullscreenHarness();
+  h.enter(h.browser);
+  h.enter(h.chat);
+  assert.equal(h.state.cardFullscreen.cardId, h.chat.id);
+  assert.deepEqual(h.browser.style, h.browserRect);
+  assert.ok(!h.browser.classList.contains('egd-card-fullscreen'));
+  assert.ok(!h.rootClasses.has('egd-browser-fullscreen-active'));
+  assert.ok(h.rootClasses.has('egd-card-fullscreen-active'));
+  assert.deepEqual(h.safeCalls.at(-1), { avoidHud: false, margin: 10 });
+  assert.deepEqual(h.chat.style, { left: '-45px', top: '-20px', width: '630px', height: '377px', zIndex: '40002' });
+  assert.ok(h.hudClasses.has('egd-hud-hidden'));
+  assert.equal(h.minimapOpen, false);
+  assert.equal(h.exit(h.chat), true);
+  assert.deepEqual(h.chat.style, h.chatRect);
+  assert.ok(!h.hudClasses.has('egd-hud-hidden'));
+  assert.equal(h.minimapOpen, true);
+});
+
+test('closing a fullscreen Browser clears presentation state without restoring a Card about to be removed', () => {
+  const h = createFullscreenHarness();
+  h.enter(h.browser);
+  const body = surfaceSource.match(/  function closeCanvasCard\(card, cleanup\) \{([\s\S]*?)\n  \}/)?.[1];
+  assert.ok(body);
+  const close = compileFunction(`return function closeCanvasCard(card, cleanup) {${body}\n  }`,
+    ['isCardFullscreen', 'exitCardFullscreen', 'unregisterSourceRefCard', 'state', 'setActiveEntity', 'syncOntologyPresentationState', 'markAgendaDirty', 'boardNotice', 'console', 'TAG'])(
+    h.isFullscreen, h.exit, () => {}, h.state, card => { h.state.activeEntityId = card?.id || null; }, () => {}, () => {}, () => {}, { warn() {} }, 'test');
+  let cleaned = 0;
+  h.browser._cleanup = () => { cleaned++; };
+  assert.equal(close(h.browser), true);
+  assert.equal(cleaned, 1);
+  assert.equal(h.browser.isConnected, false);
+  assert.equal(h.state.cardFullscreen, null);
+  assert.equal(h.state.activeEntityId, null);
+  assert.ok(!h.rootClasses.has('egd-browser-fullscreen-active'));
+  assert.ok(!h.rootClasses.has('egd-card-fullscreen-active'));
+  assert.ok(!h.hudClasses.has('egd-hud-hidden'));
+  assert.equal(h.minimapOpen, true);
+  assert.equal(h.browser.style.width, '640px', 'close must not rewrite geometry before removal');
+});
+
+test('missing fullscreen Browser removes both root presentation classes on layout sync', () => {
+  const h = createFullscreenHarness();
+  h.state.surface.initialBrowserFocus = true;
+  h.rootClasses.add('egd-initial-browser-focus');
+  h.enter(h.browser);
+  h.browser.remove();
+  h.layout();
+  assert.equal(h.state.cardFullscreen, null);
+  assert.equal(h.state.surface.initialBrowserFocus, false);
+  assert.ok(!h.rootClasses.has('egd-initial-browser-focus'));
+  assert.ok(!h.rootClasses.has('egd-card-fullscreen-active'));
+  assert.ok(!h.rootClasses.has('egd-browser-fullscreen-active'));
+});
+
+test('Browser fullscreen CSS hides Desk chrome and removes outer Card decoration', () => {
+  const css = readFileSync(new URL('../overlay/CSS/eg-desk-surface.uc.css', import.meta.url), 'utf8');
+  const hidden = css.match(/:root\.egd-browser-fullscreen-active #egd-desk-rail,([\s\S]*?)\{([^}]+)\}/);
+  assert.ok(hidden);
+  for (const id of ['egd-dock', 'egd-preset-bag', 'egd-hud', 'egd-zoom-indicator', 'egd-desk-minimap']) {
+    assert.match(hidden[1], new RegExp(`#${id}\\b`));
+  }
+  assert.match(hidden[2], /display:\s*none\s*!important/);
+  const card = css.match(/:root\.egd-browser-fullscreen-active \.egd-browser-card\.egd-card-fullscreen \{([^}]+)\}/)?.[1];
+  assert.ok(card);
+  for (const declaration of [/border:\s*0/, /border-radius:\s*0/, /box-shadow:\s*none/]) assert.match(card, declaration);
+  assert.match(css, /:root\.egd-browser-fullscreen-active \.egd-browser-card\.egd-card-fullscreen \.egd-card-header \{\s*border-radius:\s*0/);
 });
 
 test('wheel or focused-URL keyboard zoom exits actual fullscreen and restores the same live Browser Card', () => {
