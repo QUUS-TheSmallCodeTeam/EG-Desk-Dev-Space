@@ -506,6 +506,8 @@ Canvas에는 해당 view를 다시 찾고 상태를 식별할 수 있는 가벼�
 
 View bar 더블클릭 또는 `[⋯] → [집중 보기]`는 기존 비율을 유지해 카메라만 맞춘다. Browser 내부 viewport와 저장된 크기는 바꾸지 않는다. `[집중 보기 종료]` 또는 셸 bar의 Esc는 이전 시점으로 돌아간다. 실제 resize·페이지 zoom·OS 전체 화면은 별도 동작이며 Canvas 탐색은 Agent의 작업 대상을 바꾸지 않는다. 관련: `Q-VIEW-06`, `Q-VIEW-12`.
 
+Browser View를 읽을 수 있을 만큼 확대하면 View에 붙은 얇은 2행 bar가 보인다. 윗줄에는 제목, 아랫줄에는 주소·이동 등 읽고 누를 수 있는 Browser 조작이 있다. 이는 Canvas 전체의 공통 도구줄이 아니며, 다른 유형의 전체 View는 각자의 조작면을 유지한다.
+
 | 작업 | 제품 사용자 UI 행동 | 보이는 반응 | System 처리 | Agent 처리 | 상태 변화 | 경계 / 다음 행동 |
 | --- | --- | --- | --- | --- | --- | --- |
 | 이동 | View bar를 드래그하거나 `[⋯] → [이동]`에서 좌표·이동 버튼을 사용하고 `[적용]`한다. | 뷰가 포인터를 따라가고 최종 Canvas 위치에 자리 잡는다 | System이 활성 뷰/세션 지오메트리를 업데이트한다. | 없음 | Board는 명시적으로 저장/업데이트한 경우에만 변경됨 | 충돌, 스냅, Canvas 밖, 키보드 대안: `Q-VIEW-04` |
@@ -522,7 +524,7 @@ View bar 더블클릭 또는 `[⋯] → [집중 보기]`는 기존 비율을 유
 <a id="atlas-v-03"></a>
 #### V-03. Canvas 탐색 및 열려 있는 항목 찾기
 
-**상세 조작**: [view](../../docs/references/design-synthesis/egdesk-ux-realization-proposals.md#ux-detail-view) · [discovery](../../docs/references/design-synthesis/egdesk-ux-realization-proposals.md#ux-detail-discovery) · [input](../../docs/references/design-synthesis/egdesk-ux-realization-proposals.md#ux-detail-input)
+**상세 조작**: [view](../../docs/references/design-synthesis/egdesk-ux-realization-proposals.md#ux-detail-view) · [semantic zoom](../../docs/references/design-synthesis/egdesk-ux-realization-proposals.md#ux-detail-semantic-zoom-visual-baseline) · [discovery](../../docs/references/design-synthesis/egdesk-ux-realization-proposals.md#ux-detail-discovery) · [input](../../docs/references/design-synthesis/egdesk-ux-realization-proposals.md#ux-detail-input)
 
 **기술 참조**: [기술 계층 지도](./EGDESK_INTERACTION_AND_ORCHESTRATION_CONTRACT.md#tech-layer-map), [접근성](./EGDESK_INTERACTION_AND_ORCHESTRATION_CONTRACT.md#tech-accessibility)
 
@@ -540,7 +542,9 @@ View bar 더블클릭 또는 `[⋯] → [집중 보기]`는 기존 비율을 유
 | 5 | 상단 `[찾기]`·`[명령]`, Sidebar `[Board 찾기]` 또는 `[화면 목록]`을 열고 검색어를 입력한다. | 쿼리, 범위, 진행 상황 및 결과 목록이 `Q-DISC-02`에 따라 나타난다 | System은 결정된 로컬 index와 화면을 검색한다. | 의미 기반 검색을 명시적으로 요청한 경우에만 검색을 보조하며, 그 외에는 없음. | 임시 쿼리 | 유효하지 않음/결과 없음 상태에서도 구체적인 편집/닫기 행동이 유지된다 |
 | 6 | 결과 이름을 클릭하거나 방향키로 선택한 뒤 Enter를 누른다. `[상세]`는 열기 없이 출처·권한을 검사한다. | Canvas가 `Q-DISC-02`에 따라 대상으로 이동하거나 대상을 연다 | System은 결과를 기존 뷰, 저장된 Board, Library 항목 또는 리소스로 해석한다 | 없음 | 뷰포트/포커스 또는 활성 뷰 상태가 변경됨 | 현재 기준/대상과 불일치하는 결과의 피드백과 다음 행동: `Q-DISC-02` |
 
-pinch 또는 `[+]`·`[−]`는 Canvas 배율을 바꾼다. 보조 드래그는 빈 Canvas의 `⌘/Ctrl+드래그`, 키보드는 보조 `[Pan]` 도구와 Canvas 배경 포커스에서 방향키를 사용한다. 미니맵은 `[미니맵]` → 지점 클릭으로 이동한다. 이 보조 경로들은 위의 두 손가락 pan을 시작하기 위한 필수 단계가 아니다. [입력 활성·탐색 상세](../../docs/references/design-synthesis/egdesk-ux-realization-proposals.md#ux-detail-chat-canvas-input).
+pinch 또는 `[+]`·`[−]`로 Canvas를 1–400% 범위에서 확대·축소한다. 중간까지 축소하면 각 뷰는 원래 Canvas 위치·차지하는 자리·비율을 유지한 윤곽 카드가 되고, 위쪽 제목과 정확히 중앙의 유형 아이콘으로 찾을 수 있다. 더 멀리 축소하면 작은 표식이 되며, 화면에서 겹치거나 간격이 좁아진 표식만 영역별 임시 개수 표식으로 묶인다. 단일 표식을 누르면 같은 카드를 읽을 수 있는 크기로, 개수 표식을 누르면 그 구성원들이 있는 영역으로 이동한다. 그 영역 밖 표식은 각자의 표현을 유지한다. 다시 확대하면 상세 화면과 Browser의 2행 bar가 돌아온다. 옅은 나뭇결은 Canvas 배경에서 화면 이동·배율을 따라가며 멀리 축소하면 흐려진다.
+
+보조 드래그는 빈 Canvas의 `⌘/Ctrl+드래그`, 키보드는 보조 `[Pan]` 도구와 Canvas 배경 포커스에서 방향키를 사용한다. 미니맵은 `[미니맵]` → 지점 클릭으로 이동한다. 이 보조 경로들은 위의 두 손가락 pan을 시작하기 위한 필수 단계가 아니다. [입력 활성·탐색 상세](../../docs/references/design-synthesis/egdesk-ux-realization-proposals.md#ux-detail-chat-canvas-input).
 
 **완료 증거**: 이름이 지정된 대상이 포커스되거나 열리고 계속
 키보드로 접근할 수 있다; 현재 기준/상태와 불일치하거나 누락된 대상이 있어도 쿼리는 편집 가능한 상태로 유지되며

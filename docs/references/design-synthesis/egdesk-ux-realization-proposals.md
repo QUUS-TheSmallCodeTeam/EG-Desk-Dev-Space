@@ -1623,6 +1623,8 @@ bar 드래그는 위치만, 가장자리 핸들은 실제 크기만 바꾼다. �
 
 실제 resize는 Browser responsive layout을 바꿀 수 있고, 페이지 zoom은 사이트 글자·layout 배율이다. 앱 전체 화면은 OS 창 모드, 사이트 전체 화면은 Browser 소유 기능이다. 이 네 동작을 `확대` 하나로 합치지 않는다. 집중 중에도 앱 상단·Sidebar 접근·종료 버튼은 남는다.
 
+읽기 배율의 Browser View는 View에 붙은 얇은 2행 bar를 쓴다. 윗줄은 제목, 아랫줄은 주소·탐색 조작이며 글자와 컨트롤을 읽고 누를 수 있어야 한다. Canvas 전체의 공통 도구줄로 올리지 않는다. 다른 유형의 전체 View는 각자의 UI를 유지한다.
+
 Canvas의 두 손가락 pan은 별도 `[Pan]` 버튼을 켜지 않고 사용할 수 있다. Chat과 Canvas 사이의 조작 대상은 아래의 [클릭 활성·해제 규칙](#ux-detail-chat-canvas-input)으로 구별하며, 포인터 위치만으로 정하지 않는다. 빈 Canvas의 두 손가락 스크롤은 pan, pinch는 Canvas zoom이다. 미니맵은 기본 접힘이며 지점을 누르면 이동한다. `[전체 보기]`는 개요, `[돌아가기]`는 마지막 명시적 이동 전 시점이다. 모션 감소에서는 즉시 이동하고 `[화면 목록]`으로도 같은 대상을 찾는다.
 
 <a id="ux-detail-minimap-targets"></a>
@@ -1684,9 +1686,20 @@ Browser의 사이트·native picker는 Browser/OS가, File 내용은 해당 편�
 
 보조 `[Pan]` 도구는 하단 Canvas 도구줄의 `[미니맵]` 다음에 두고, 켜짐 상태를 표시하며 F6→Tab→Enter로 접근한다. 빈 Canvas의 `⌘/Ctrl+드래그`와 Pan 도구의 드래그 경로는 유지한다. 보조 Pan 모드의 Canvas 배경 포커스에서는 방향키 16 화면 px, Shift+방향키 128 화면 px로 이동한다. Space는 pan에 사용하지 않는다. [Chat 활성 해제 뒤 두 손가락으로 이동하는 기본 경로](#ux-detail-chat-canvas-input)는 이 도구를 켜거나 modifier를 누를 필요가 없다.
 
-Canvas zoom 기준 범위는 5–400%다. `[+] [−]`는 1.25배/역배율이며 끝값에서 제한한다. 배율 입력은 범위 밖이면 오류로 남긴다. pinch와 빈 Canvas의 ⌘/Ctrl+wheel은 포인터 중심, 버튼·배율 입력은 보이는 Canvas 중심을 기준으로 한다. 콘텐츠 내 zoom·modifier 입력은 해당 콘텐츠의 규칙을 유지한다. modifier 없는 두 손가락 스크롤의 Chat/Canvas 귀속은 [콘텐츠 활성 상태](#ux-detail-chat-canvas-input)를 따른다.
+Canvas zoom 기준 범위는 1–400%다. 프로토타입의 125% 최대값은 제품 상한이 아니다. `[+] [−]`는 1.25배/역배율이며 끝값에서 제한한다. 배율 입력은 범위 밖이면 오류로 남긴다. pinch와 빈 Canvas의 ⌘/Ctrl+wheel은 포인터 중심, 버튼·배율 입력은 보이는 Canvas 중심을 기준으로 한다. 콘텐츠 내 zoom·modifier 입력은 해당 콘텐츠의 규칙을 유지한다. modifier 없는 두 손가락 스크롤의 Chat/Canvas 귀속은 [콘텐츠 활성 상태](#ux-detail-chat-canvas-input)를 따른다.
 
 포인터 배치의 격자는 24 논리 px, 안내선 허용 거리는 8 화면 px다. Option/Alt를 누르는 동안 맞춤을 해제하며 선택 도구줄의 `[맞춤]`으로도 끌 수 있다. 숫자·방향키 이동은 지정 값 그대로 적용한다. 보조 Pan 도구에서 Esc는 진행 중 pan을 시작 카메라로 취소하고, 진행 중 pan이 없으면 해당 도구 모드만 해제한다.
+
+<a id="ux-detail-semantic-zoom-visual-baseline"></a>
+##### Canvas 의미 확대의 선택 시각 기준
+
+각 객체의 투영된 CSS 크기, 본문 글자의 읽기 가능성, 표식 사이 거리를 함께 보고 `상세 → 윤곽 카드 → 작은 표식 → 임시 개수`로 표현만 전환한다. 경계에는 진입·이탈 문턱을 달리하는 hysteresis를 두어 배율 근처에서 표시가 깜박이지 않게 한다. 읽기 배율로 돌아오면 Browser의 얇은 2행 bar를 포함한 각 유형의 상세 표현이 다시 나타난다.
+
+중간 축소의 기본형은 아이콘 chip이나 mini-view가 아닌 **윤곽 카드**다. 각 View의 world 위치·footprint·종횡비를 유지하고, 제목은 위쪽 가장자리, 유형 아이콘은 카드의 정확한 중앙에 둔다. 멀리 축소한 작은 아이콘·표식은 이 윤곽형의 다음 단계이지 다른 기본안이 아니다. 화면에서 겹치거나 간격이 좁아진 표식만 영역별 임시 개수 표식으로 묶고, 그 영역 밖 표식은 각자의 표현을 유지한다. 단일 표식을 누르면 같은 카드의 읽기 배율로, 개수를 누르면 해당 구성원들의 영역으로 카메라를 이동한다.
+
+옅은 나뭇결은 Canvas 배경에만 두고 world pan·scale을 따른다. 먼 축소에서 결이 흐려지며 bar·카드에는 목재 질감을 입히지 않는다. 프로토타입의 본문 글자 기준 상세 진입 10.5px·이탈 약 9px, 표식 근접 거리 42px(포인터)/56px(터치), Canvas 배율 2–12% 구간의 나뭇결 강도 보간은 구현 조정을 위한 시작값이지 보편적 인간 가독성 한계가 아니다. 구현에서 실제 가독성에 맞춰 조정하되 진입·이탈 차이는 유지한다. 색·반경·그림자를 일괄 고정하지 않는다.
+
+이 단계 변화는 표현에 한정한다. 내용·View 동일성·runtime·Browser 내부 viewport·권한·Board 그룹은 바뀌지 않는다. 기존 pan 경로와 콘텐츠별 입력 소유권도 프로토타입 이벤트 동작으로 대체하지 않는다. [결정 범위](../../codex/egdesk-product-interaction-trace-atlas-editorial-ledger.md#hum-surface-001-visual-baseline-20260928).
 
 <a id="ux-detail-discovery"></a>
 #### 찾기, 명령과 재사용 자료
