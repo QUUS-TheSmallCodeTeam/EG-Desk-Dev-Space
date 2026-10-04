@@ -6672,6 +6672,7 @@
     if (!card || !card.isConnected) {
       state.cardFullscreen = null;
       document.documentElement.classList.remove('egd-card-fullscreen-active');
+      document.documentElement.classList.remove('egd-browser-fullscreen-active');
       if (state.surface.initialBrowserFocus) {
         state.surface.initialBrowserFocus = false;
         document.documentElement.classList.remove('egd-initial-browser-focus');
@@ -6680,7 +6681,8 @@
       return;
     }
     const zoom = canvasZoom();
-    const safe = safeViewportRect({ avoidHud: false, margin: state.surface.initialBrowserFocus ? 0 : 10 });
+    const isBrowserFullscreen = card.classList.contains('egd-browser-card');
+    const safe = safeViewportRect({ avoidHud: false, margin: (state.surface.initialBrowserFocus || isBrowserFullscreen) ? 0 : 10 });
     card.style.left = ((safe.left - state.pan.x) / zoom) + 'px';
     card.style.top = ((safe.top - state.pan.y) / zoom) + 'px';
     card.style.width = (safe.width / zoom) + 'px';
@@ -6708,6 +6710,10 @@
     setActiveEntity(card);
     card.classList.add('egd-card-fullscreen');
     document.documentElement.classList.add('egd-card-fullscreen-active');
+    // Browser cards go Chrome-like: hide Desk chrome, edge-to-edge browser area.
+    if (card.classList.contains('egd-browser-card')) {
+      document.documentElement.classList.add('egd-browser-fullscreen-active');
+    }
     setHudPresentationHidden(true);
     if (previousMinimapOpen) closeDeskMinimap();
     syncCardFullscreenLayout();
@@ -6729,6 +6735,7 @@
       if (options.restoreRect !== false) applyCardRect(fullscreenCard, fullscreen.rect);
     }
     document.documentElement.classList.remove('egd-card-fullscreen-active');
+    document.documentElement.classList.remove('egd-browser-fullscreen-active');
     state.cardFullscreen = null;
     setHudPresentationHidden(fullscreen.previousHudHidden);
     if (fullscreen.previousMinimapOpen) toggleDeskMinimap();
