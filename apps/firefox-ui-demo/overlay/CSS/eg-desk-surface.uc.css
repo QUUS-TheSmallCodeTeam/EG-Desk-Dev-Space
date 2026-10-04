@@ -258,6 +258,21 @@
 :root.egd-initial-browser-focus .egd-browser-card.egd-card-fullscreen .egd-card-header {
   border-radius: 0;
 }
+/* Browser card fullscreen is Chrome-like: Desk chrome hidden, edge-to-edge browser area. */
+:root.egd-browser-fullscreen-active #egd-desk-rail,
+:root.egd-browser-fullscreen-active #egd-dock,
+:root.egd-browser-fullscreen-active #egd-preset-bag,
+:root.egd-browser-fullscreen-active #egd-hud,
+:root.egd-browser-fullscreen-active #egd-zoom-indicator,
+:root.egd-browser-fullscreen-active #egd-desk-minimap { display: none !important; }
+:root.egd-browser-fullscreen-active .egd-browser-card.egd-card-fullscreen {
+  border: 0;
+  border-radius: 0;
+  box-shadow: none;
+}
+:root.egd-browser-fullscreen-active .egd-browser-card.egd-card-fullscreen .egd-card-header {
+  border-radius: 0;
+}
 .egd-board-region { position: absolute; box-sizing: border-box; border: 1px dashed #a9b7c1; border-radius: 12px; pointer-events: none; }
 .egd-board-region-bar { display: flex; gap: 10px; padding: 8px 12px; pointer-events: auto; }
 .egd-board-region-bar button { font: 600 12px var(--egd-font); color: #2d5a7b; background: #f5f3ef; border-radius: 5px; padding: 3px 8px; }
