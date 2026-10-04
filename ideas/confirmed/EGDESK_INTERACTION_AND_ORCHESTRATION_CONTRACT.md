@@ -62,7 +62,7 @@ process 배치를 불변조건으로 만들지 않는다. 권한·입력 충실�
 
 UI view, live resource, Agent Run, snapshot, 저장 record는 서로 같은 객체가 아니다.
 개별 화면을 닫은 뒤에도 다른 Canvas 표현이 소유하는 runtime과 보존된 snapshot은
-남을 수 있다. Agenda 닫기의 종료 범위는 [§1](#tech-desk-lifecycle)을 따른다.
+남을 수 있다. Board 닫기의 종료 범위는 [§1](#tech-desk-lifecycle)을 따른다.
 화면이 보인다는 사실만으로 외부 행동 성공·영구 저장·Agent 전달이 증명되지는 않는다.
 
 <a id="tech-stack-baseline"></a>
@@ -80,7 +80,7 @@ UI view, live resource, Agent Run, snapshot, 저장 record는 서로 같은 객�
 | snapshot payload | `FIXED-PRINCIPLE` + `SELECTED-BASELINE` | 불변 byte payload는 content-addressed object store에 저장하고 SQLite는 hash·manifest·lineage를 가리킨다. 텍스트와 binary 모두 같은 무결성 규칙을 쓴다. |
 | 로컬 내보내기 | `SELECTED-BASELINE` | 사람이 옮길 수 있는 단일 `.egdesk` bundle을 제공한다. manifest, JSONL event, 읽기 쉬운 Markdown, 필요한 object payload를 포함하고 token·cookie·기기 절대경로는 제외한다. container 세부 형식은 `IMPLEMENTATION-DISCRETION`이다. |
 | helper/bridge/runtime 언어 | `IMPLEMENTATION-DISCRETION` | Rust, JavaScript 또는 다른 선택은 session 동일성, cancellation, stream backpressure, crash recovery를 측정해 결정한다. 언어 선택만으로 연결 지속성을 주장하지 않는다. |
-| 다중 PC의 업무 실행 | `FIXED-PRINCIPLE` | 하나의 Canvas 기반 Agenda가 여러 PC의 자료·실행 자원을 연결할 수 있다. 화면을 보는 PC와 실행하는 PC를 구별하며 실제 실행 위치·계정·권한·결과를 연결한다. 단일 PC 또는 폴더 하나를 Agenda의 경계로 고정하지 않는다. |
+| 다중 PC의 업무 실행 | `FIXED-PRINCIPLE` | 하나의 Canvas 기반 Board가 여러 PC의 자료·실행 자원을 연결할 수 있다. 화면을 보는 PC와 실행하는 PC를 구별하며 실제 실행 위치·계정·권한·결과를 연결한다. 단일 PC 또는 폴더 하나를 Board의 경계로 고정하지 않는다. |
 | 동기화·원격 협업의 실제 인프라 | `OWNER-APPROVAL-REQUIRED` | 다중 PC 제품 방향과 별도로 서버, 원격 저장, 외부 전송, 비용 발생의 실제 구성을 승인받는다. 자원·권한·연결 끊김·충돌·복구 설계와 로컬 검증은 계속할 수 있다. |
 | 검증 도구 | `IMPLEMENTATION-DISCRETION` | unit·integration·UI/runtime 검증을 조합하되 Atlas의 정확한 입력과 완료 증거를 재현해야 한다. |
 
@@ -96,7 +96,7 @@ App Server 관련 세부사항은 변동 가능한 외부 인터페이스다. �
 
 | 사용자 매뉴얼에서 시작 | 기술 계약 | 되돌아갈 대표 trace |
 |---|---|---|
-| 실행·Desk 복원·Agenda | [§1 저장 수명주기](#tech-desk-lifecycle) | [L-01–L-03](./EGDESK_PRODUCT_INTERACTION_TRACE_ATLAS.md#atlas-l-01), [AG-01](./EGDESK_PRODUCT_INTERACTION_TRACE_ATLAS.md#atlas-ag-01) |
+| 실행·Desk 복원·Board | [§1 저장 수명주기](#tech-desk-lifecycle) | [L-01–L-03](./EGDESK_PRODUCT_INTERACTION_TRACE_ATLAS.md#atlas-l-01), [AG-01](./EGDESK_PRODUCT_INTERACTION_TRACE_ATLAS.md#atlas-ag-01) |
 | 요청 context·큰 파일 읽기 | [§2 context 조립](#tech-context-assembly), [§2.1 Smart Read](#tech-smart-read), [§2.2 Reader Session](#tech-reader-session), [§2.3 내부 분할](#tech-reader-orchestration), [§2.4 recovery](#tech-read-recovery) | [READ-01–03](./EGDESK_PRODUCT_INTERACTION_TRACE_ATLAS.md#atlas-read-01), [AI-01](./EGDESK_PRODUCT_INTERACTION_TRACE_ATLAS.md#atlas-ai-01) |
 | 출처·계정·권한 | [§3 identity 분리](#tech-resource-identity), [§14.1 Engine Profile](#tech-engine-profile) | [TOOL-01](./EGDESK_PRODUCT_INTERACTION_TRACE_ATLAS.md#atlas-tool-01), [BROWSER-02](./EGDESK_PRODUCT_INTERACTION_TRACE_ATLAS.md#atlas-browser-02) |
 | Chat·활동 표시·Snapshot/Live | [§4 Answer projection](#tech-answer-projection), [§4.1 관찰 보존](#tech-observation-fidelity) | [CHAT-01](./EGDESK_PRODUCT_INTERACTION_TRACE_ATLAS.md#atlas-chat-01), [AI-04](./EGDESK_PRODUCT_INTERACTION_TRACE_ATLAS.md#atlas-ai-04) |
@@ -112,22 +112,72 @@ App Server 관련 세부사항은 변동 가능한 외부 인터페이스다. �
 
 <a id="tech-desk-lifecycle"></a>
 
-## 1. 저장된 Agenda와 자동 Desk session 복원
+## 1. 저장된 Board와 자동 Desk session 복원
 
-저장된 Agenda, 자동 Desk session 복원, live runtime 연속성은 서로 다른
+저장된 Board, 자동 Desk session 복원, live runtime 연속성은 서로 다른
 수명주기를 가진다.
 
+Board는 특정 업무를 진행할 수 있게 자료·도구·대화·배치·참조 연결을 갖춘 구성이다.
+저장 payload는 그 구성을 재구성할 참조와 배치를 보존한다. 이름만 붙인 자료 목록으로
+축소하지 않으며, Canvas 전체나 Kanban형 메모판으로도 취급하지 않는다. runtime
+프로세스 자체나 현재 권한을 복사한 것으로도 취급하지 않는다.
+
+<a id="tech-first-use"></a>
+### 1.0 최초 Browser 진입과 기본 Codex
+
+최종 제품은 Firefox/Gecko 기반의 독립 EG-Desk 배포를 목표로 한다. 현재 Firefox에 UI를
+주입하는 POC는 검증 단계이며 사용자 매뉴얼의 영구 설치 전제가 아니다. Firefox 바이너리
+번들과 자체 UI의 배포, 필요시 소스 fork·Gecko patch를 구별한다. fork의 필수화는 하지 않는다.
+[배포 경로](./FIREFOX_SHELL_ROADMAP.md).
+
+**화면 연결**: [최초 시작](./EGDESK_PRODUCT_INTERACTION_TRACE_ATLAS.md#atlas-first-use),
+[첫 사용 상세](../../docs/references/design-synthesis/egdesk-ux-realization-proposals.md#flow-first-use).
+
+앱 준비, Browser 안의 선택적 첫 사용 안내, 기존 세션 복원, EG-Desk 프로필 준비,
+Codex 인증은 각각 식별한다.
+최초 실행에는 이미 있는 Desk·Canvas의 동일 live Browser View를 카메라로 화면에
+맞춰 보여 준다. 별도 앱 시작 관문이나 `[Desk 시작]` 단계는 없다. Browser 안의 주소
+입력을 돕는 시작 페이지는 이 View의 콘텐츠로 허용한다. 주소 탐색은 바로 가능하며 주변
+Canvas·Sidebar·Dock만 집중 표시 동안 가린다. Desk를 보여 주기 위해 Engine 인증이나
+새 Browser·EG-Desk 프로필 생성을 강제하지 않는다. 초기 프로필 연결과 구독 Codex 호출은
+인터넷을 전제로 하되 Desk 표시와 별개로 다룬다. Codex 호출처럼 실제 연결이 필요한
+기능에서만 해당 계정·가용성을 확인한다. 네트워크 장애를 로컬 저장물 삭제나 강제 새
+프로필 생성의 근거로 쓰지 않는다.
+
+일반 Canvas 줌아웃 입력은 Browser 집중·주소 입력 상태에서도 사용할 수 있어야 하며,
+Browser의 page zoom이 아닌 같은 Desk의 camera transform만 바꿔 주변 Canvas를 점차
+드러낸다. 첫 사용에는 이전 일반 시점이 없어도 기본 Canvas 시점으로 축소할 수 있고,
+저장된 일반 시점이 있으면 복귀·재방문에 활용할 수 있다. Browser에 다시 집중해도 View
+identity·URL·세션·Browser logical viewport·page zoom을 유지한다. 카메라 fit은 View의
+logical rectangle에 맞추며 Browser renderer나 내부 viewport의 실제 resize를 일으키지
+않는다. 인증 화면이 별도로 열렸다면 완료·취소·늦은 응답은 해당 연결 요청 ID에만 결합하고
+다른 프로필이나 현재 Desk 시점을 바꾸지 못한다. 최초 사용 여부를 저장된 Board 유무만으로
+추론하지 않는다.
+
+기본 Codex는 사용자 정의 Agent Profile 없이 실행할 수 있다. Engine 인증·실행 계정·
+모델·도구 가용성·위임·승인·입력 기록은 필수지만, personality·담당자 정체성·Agent 생각
+버블을 만드는 것은 첫 요청 조건이 아니다. 사용자 생성 Agent를 선택하면 해당 Profile과
+생각 공간이 추가된다. 기본 Codex 실행을 `Profile 없음` 오류로 막거나, 이를 피하려고
+숨은 사용자 인격체를 자동 생성하지 않는다. [실행 binding](#tech-agent-run-binding).
+
+Codex 로그인 뒤 기기 내 Browser 프로필을 자동 준비하는 방식은 연결 후보이며,
+EG-Desk 온라인 회원 인증이 자동 성립한다는 뜻은 아니다. 채택 여부와 첫 Browser 자료의
+귀속은 [HUM-ENGINE-001](../../docs/codex/egdesk-product-interaction-trace-atlas-editorial-ledger.md#hum-engine-001)에 둔다.
+실제 서버·identity 공급자 도입은 별도 승인 경계를 유지한다.
+
+### 1.1 저장·화면·실행의 독립 수명
+
 ```text
-저장된 Agenda
+저장된 Board
   사용자가 명시적으로 저장하고 다시 열 수 있는 재사용 가능한 작업 결합
-  자동으로 mount되지 않은 채 Sidebar의 Agenda 영역에 목록으로 표시
+  자동으로 mount되지 않은 채 Sidebar의 Board 영역에 목록으로 표시
   정확한 구성원·필수 field·저장 범위는 HUM-AGENDA-001·Q-AG-02·Q-AG-08에서 미결정
-  Agenda 열기는 시작 전제조건이 아니라 사용자 행동
+  Board 열기는 시작 전제조건이 아니라 사용자 행동
 
 자동 Desk session
   Desk에 열어 둔 상태를 보존하는 로컬 기록
   열린 view·위치·크기·grouping과 그 밖에 결정된 session 세부
-  사용자가 Agenda를 한 번도 저장하지 않았어도 존재 가능
+  사용자가 Board를 한 번도 저장하지 않았어도 존재 가능
 
 live view/runtime 상태
   mount된 Browser·File·Chat·Terminal view
@@ -140,60 +190,60 @@ live view/runtime 상태
 EG-Desk app session
   -> Desk [1]
      -> Canvas [1]
-        -> Agenda projection [0..n]
-        -> Agenda에 속하지 않은 자동 복원 view [0..n]
+        -> Board projection [0..n]
+        -> Board에 속하지 않은 자동 복원 view [0..n]
 ```
 
-여러 Saved Agenda는 같은 Canvas에 동시에 열 수 있다. Agenda를 연다는 이유로 기존
-Canvas projection을 교체하거나 새 Desk를 만들지 않는다. 이미 열린 Agenda는 그
+여러 Saved Board는 같은 Canvas에 동시에 열 수 있다. Board를 연다는 이유로 기존
+Canvas projection을 교체하거나 새 Desk를 만들지 않는다. 이미 열린 Board는 그
 projection을 재사용해 focus하고, 닫혀 있으면 새 projection을 같은 Canvas에 만든다.
 정확한 초기 위치·겹침 회피·활성 표시만 세부 UI 결정으로 남는다. 다중 Desk는
-Agenda 분리나 메모리 최적화 수단이 아니다.
+Board 분리나 메모리 최적화 수단이 아니다.
 
 위 topology는 사용자가 보는 작업 공간의 관계이며 물리 PC 한 대의 제한이 아니다.
-Agenda는 여러 PC에 있는 자료와 실행 자원을 연결할 수 있고 폴더는 그중 하나의 자원이다.
+Board는 여러 PC에 있는 자료와 실행 자원을 연결할 수 있고 폴더는 그중 하나의 자원이다.
 같은 Canvas에서 본다는 이유만으로 PC별 파일 경로·업무 계정·실행 권한·live session을
 공유하거나 복제하지 않는다. 실행 위치와 연속성은 [§12](#tech-collaboration-computer-use)를 따른다.
 
-Agenda의 제품 의미는 [HUM-AGENDA-001](../../docs/codex/egdesk-product-interaction-trace-atlas-editorial-ledger.md#hum-agenda-001),
+Board의 제품 의미는 [HUM-AGENDA-001](../../docs/codex/egdesk-product-interaction-trace-atlas-editorial-ledger.md#hum-agenda-001),
 연결된 세부 항목은 [Q-AG-02](../../docs/codex/egdesk-product-documentation-governance.md#atlas-q-ag-02)와
 [Q-AG-08](../../docs/codex/egdesk-product-documentation-governance.md#atlas-q-ag-08)에서 추적한다.
 
-자동 Desk session을 영속화해도 저장된 Agenda가 생성되거나 갱신되지 않는다. 데이터
+자동 Desk session을 영속화해도 저장된 Board가 생성되거나 갱신되지 않는다. 데이터
 모델은 두 수명주기를 분리해야 한다. 다만 정상 시작에 recovery wizard, 항목별 출처
-badge 또는 눈에 보이는 “Agenda revision 대 recovery journal” 검사 단계가 필요한 것은
+badge 또는 눈에 보이는 “Board revision 대 recovery journal” 검사 단계가 필요한 것은
 아니다.
 
 예상 재실행 흐름은 다음과 같다.
 
 ```text
 운영체제의 app 진입점에서 EG-Desk 실행
--> 실제 Desk를 첫 제품 표면으로 표시
+-> 이전 Desk의 집중/Canvas 표시 상태를 복원 (최초 온보딩과 구별)
 -> 완료 순서를 강제하지 않는 두 독립 projection 시작
    자동 Desk session
      -> 브라우저 tab/session restore처럼 이전 Desk session에 열어 둔 view 재구성
-   저장된 Agenda 영역
-     -> Agenda를 mount하지 않고 Sidebar Agenda 목록 채우기
+   저장된 Board 영역
+     -> Board를 mount하지 않고 Sidebar Board 목록 채우기
 -> 각 하위 resource를 자체 수명주기에 따라 복원
 -> 필수 복원 확인 절차 없이 사용자가 계속 작업할 수 있게 함
 ```
 
 내부 시작 작업의 완료 순서는 제품 우선순위를 뜻하지 않는다. 목록에 나타났다는
-이유만으로 저장된 Agenda를 mount해서는 안 된다. 이미 복원된 Desk에서 Agenda를
-클릭하면 같은 Canvas에 Agenda projection을 추가하거나 이미 열린 projection을 focus한다.
-자동 복원 view와 다른 Agenda projection은 교체하지 않는다.
+이유만으로 저장된 Board를 mount해서는 안 된다. 이미 복원된 Desk에서 Board를
+클릭하면 같은 Canvas에 Board projection을 추가하거나 이미 열린 projection을 focus한다.
+자동 복원 view와 다른 Board projection은 교체하지 않는다.
 
-Agenda 닫기는 단순히 UI만 숨기는 background 전환이 아니다. System은 다음 순서를
+Board 닫기는 단순히 UI만 숨기는 background 전환이 아니다. System은 다음 순서를
 하나의 수명주기 전이로 처리한다.
 
 ```text
-Agenda close
-  -> 닫을 Agenda projection과 영향받는 runtime ownership을 먼저 식별
-  -> 도달 가능한 제어 경계에서 해당 Agenda만 소유한 runtime의 새 행동·자동 재개를 막고 종료 요청
+Board close
+  -> 닫을 Board projection과 영향받는 runtime ownership을 먼저 식별
+  -> 도달 가능한 제어 경계에서 해당 Board만 소유한 runtime의 새 행동·자동 재개를 막고 종료 요청
   -> 종료 확인까지 해당 작업의 Canvas 표현과 종료 진행 상태 유지
-  -> 종료가 확인된 Agenda projection 제거
+  -> 종료가 확인된 Board projection 제거
   -> 다른 Canvas projection이 소유·표현하는 shared runtime은 유지
-  -> Saved Agenda와 저장된 revision은 유지
+  -> Saved Board와 저장된 revision은 유지
 ```
 
 사용자 또는 Agent의 의미 있는 작업을 Canvas에서 지운 채 hidden registry에서만 계속
@@ -201,7 +251,7 @@ Agenda close
 다른 Canvas projection이 그 작업의 소유·상태를 계속 표현해야 한다.
 종료 실패나 완료 여부를 확인할 수 없는 작업을 이미 닫혔다고 표시하지 않는다.
 원격 제어 경계에 도달하지 못하면 종료 요청과 마지막 확인 상태를 보존한다.
-이미 외부로 dispatch한 요청은 접수·완료 여부가 미확인인 경우까지 포함해 로컬 Agenda
+이미 외부로 dispatch한 요청은 접수·완료 여부가 미확인인 경우까지 포함해 로컬 Board
 닫기로 취소됐다고 간주하지 않는다. 요청과 마지막 확인 상태를 기록한다. shared runtime의 소유 범위와 재개·예약 실행의
 세부 종료 의미는 [HUM-SURFACE-001](../../docs/codex/egdesk-product-interaction-trace-atlas-editorial-ledger.md#hum-surface-001),
 [HUM-ORCH-001](../../docs/codex/egdesk-product-interaction-trace-atlas-editorial-ledger.md#hum-orch-001)에 남는다.
@@ -211,7 +261,7 @@ Browser view 재구성과 Terminal 연속성은 다르다. Browser view는 이�
 session identity가 검증된 경우에만 재연결됐다고 표현할 수 있다. 새 process 시작은
 reconnect가 아니라 revive/relaunch이고, live process 없이 출력만 복원하면 snapshot이다.
 
-Agenda 열기, 복원된 view 닫기, Desk view를 Agenda에 연결하기, Agenda 갱신하기의
+Board 열기, 복원된 view 닫기, Desk view를 Board에 연결하기, Board 갱신하기의
 정확한 control에는 실제 영역·component·label·gesture와 보이는 상태 전이가
 필요하다. 아직 결정되지 않은 control은 포괄적인 “유지”, “폐기”, “저장” 단계로
 간주하지 않고 연결된 `Q-*` 상태를 유지한다.
@@ -220,14 +270,14 @@ Agenda 열기, 복원된 view 닫기, Desk view를 Agenda에 연결하기, Agend
 
 ## 2. Context 조립
 
-Agent Run은 명시적으로 선택된 Agenda만 사용해서도, Desk 전체를 말없이 주입해서도
+기본 Codex와 사용자 생성 Agent의 Run은 명시적으로 선택된 Board만 사용해서도, Desk 전체를 말없이 주입해서도
 안 된다.
 
 context resolver는 다음을 조합한다.
 
 ```text
 명시적으로 선택한 대화·Task·사용자 선택 항목
-가장 잘 맞는 저장된 Agenda
+가장 잘 맞는 저장된 Board
 일시적인 Desk grouping과 공간 layout
 현재 보이거나 focus된 resource
 최근의 관련 상호작용 상태
@@ -237,7 +287,7 @@ account·permission·execution scope
 context resolver는 System service다. 허용된 제품·runtime 상태를 읽고 범위가 제한된
 context snapshot을 만든다. 첫 모델 호출 전에는 현재 정책과 자료를 결합하고, 이후
 모델 호출 전에는 관련 도구 결과·사용자 조정·새 관찰을 다음 context revision에 포함한다. 이 과정을
-Agent가 암묵적인 API 호출로 Desk·Agenda store·layout·account registry를 직접 읽는
+Agent가 암묵적인 API 호출로 Desk·Board store·layout·account registry를 직접 읽는
 것처럼 서술하지 않는다.
 
 공간 grouping·거리·focus·layout은 relevance signal이지 그 자체로 영속 사실이나
@@ -246,12 +296,35 @@ context를 검사하거나 수정할 수 있게 한다.
 
 Agent 담당자 방은 비공개 관계로 남을 수 있다. 작업이 공유 작업 context에 속하면
 선택한 메시지·Canvas Memo reference와 그 context만 아직 결정되지 않은 workroom·
-Thread·Agenda 관계가 채택한 공유 대화 형태에 연결하거나 옮길 수 있다. 담당자 방
+Thread·Board 관계가 채택한 공유 대화 형태에 연결하거나 옮길 수 있다. 담당자 방
 전체 history를 하나의 모델 context나 공유 범위로 취급하지 않는다.
+
+<a id="tech-output-situation"></a>
+### 2.0 작업 지시·생각 공간·산출물의 문맥 경계
+
+작업 제약, 참고자료, 내부 작업 메모·공개 가능한 계획/판단 요약, 사용자 설명,
+고객에게 전달할 산출물 본문은 역할을 구분해 결합한다. 읽기 권한이 있거나 같은 기록
+패널에서 보인다는 사실만으로 모든 내용을 산출물 작성 입력이나 공유 범위에 넣지 않는다.
+
+산출물 쓰기·게시 요청에서는 화자, 독자/수신자, 목적, 출력 위치, 포함할 내용·출처 범위와
+적용할 제약을 식별할 수 있어야 한다. 사용자 지시를 그대로 본문으로 옮기는 대신 해당
+출력 상황의 제약으로 적용한다. 내부 수정 메모나 작업 계획은 별도 설명 요청·공개 범위가
+없는 한 고객용 본문에 자동 포함하지 않는다. 구체 필드명·구현 모듈은 이 경계를 만족하는
+범위에서 선택한다. [사용자 화면의 구분](./EGDESK_PRODUCT_INTERACTION_TRACE_ATLAS.md#atlas-output-situation).
+
+출력 경로는 본문과 작업 기록의 자동 혼합을 막고, 전달 대상과 내용의 일치 여부를 검사할
+근거를 남긴다. UI 패널 분리나 자동 검사만으로 모든 문장·판단의 정확성을 보장하지 않는다.
+요청·읽기 근거·산출물·사용자 교정의 연결은 사후 개선의 자료가 되지만, 보존했다는 이유로
+새 장기 기억·학습·외부 전송을 자동 실행하지 않는다. 기억·공유 정책은 기존 HUM을 따른다.
 
 <a id="tech-smart-read"></a>
 
 ### 2.1 Context admission과 Smart Read
+
+Smart Read는 읽기·편집·전달 방법이고 immutable source는 당시 원문을 바뀌지 않는 자료로
+보존하는 원칙이다. 서로 같은 기능이 아니며, 보존 위치가 Canvas인지 생각 공간인지와도
+독립적이다. 같은 원문을 다른 관점으로 다시 읽을 때는 원문 참조를 유지하고 새 전달 결과를
+만든다. 최신 원문을 읽는 경우에는 새 원문 revision을 연결하며 과거 답변 근거를 덮지 않는다.
 
 **지원 UI trace**: [READ-01](./EGDESK_PRODUCT_INTERACTION_TRACE_ATLAS.md#atlas-read-01), [READ-02](./EGDESK_PRODUCT_INTERACTION_TRACE_ATLAS.md#atlas-read-02), [AI-01](./EGDESK_PRODUCT_INTERACTION_TRACE_ATLAS.md#atlas-ai-01)
 
@@ -454,11 +527,18 @@ Chat은 Answer를 유지하고 다시 rendering할 수 있게 한다. Chat rende
 
 ### 4.1 실시간 Agent 활동, 관찰 충실도와 Answer materialization
 
-사용자가 메시지를 전송하면 Agent가 다음 중간 또는 최종 대화 메시지를 보낼 때까지
-Chat에 애니메이션 ellipsis와 접근 가능한 `Agent 작업 중` label을 표시한다. 이 표시는
-navigation affordance이지 영속 domain object도, 숨은 chain-of-thought 표시도 아니다.
+사용자 생성 Agent가 응답을 준비하는 동안 Chat에는 작은 ellipsis 생각 버블과 접근 가능한
+`Agent 작업 중` label을 표시한다. 기본 Codex는 일반 대화의 진행·기록 진입점을 사용한다.
+도구 호출마다 대화 메시지나 Canvas 카드를 자동 추가하지 않는다. 생각 버블은 숨은
+chain-of-thought나 별도 실행체가 아니라 공개 가능한 기록의 진입점이다.
 
-사용자가 이 표시를 선택하면 Canvas는 현재 공개 가능한 Agent 활동에 focus한다.
+사용자가 생각 버블을 선택하면 해당 Agent·업무의 기록 패널을 연다. 기본 Codex의 기록도
+동일한 저장·권한 경계를 따른다. 기록 열기만으로 Canvas 카메라·입력권·대화 스크롤을 바꾸지
+않고 새 모델 호출을 만들지 않는다. `[현재 작업 화면]` 등 명시적 대상 이동만 Canvas를
+focus한다. 현재 작업 대상에는 실제 resource·operation에 연결한 Agent 배지·윤곽을 표시하되
+사용자의 콘텐츠 활성 표시와 구별한다. 과거 원문을 읽는 동안 현재 Live가 같은 내용인 것처럼
+표시하지 않는다. 대상 없는 계산·메모에 가짜 Browser·Terminal을 생성하지 않는다.
+
 resource 또는 session binding만으로는 충분하지 않다. 연결된 파일·페이지·terminal·
 API response·desktop은 Agent가 사용한 뒤 바뀔 수 있다. 따라서 EG-Desk는 과거
 관찰과 현재 live state를 분리한다.
@@ -515,7 +595,7 @@ raw capture·transformation·Agent-delivery metadata는 상태와 audit에서 �
 Live View 두 종류이며, 둘이 다를 때 Snapshot View 안에서 `[원본 캡처]`,
 `[이 Agent에게 전달된 내용]`, `[변환 관계]`를 보여 줄 수 있다.
 
-Canvas가 제공하는 content mode는 두 가지다.
+기록 패널과 필요한 Canvas 보고 표현은 다음 두 content mode를 재사용할 수 있다.
 
 - **Snapshot View**는 읽기 전용이며 과거 observation manifest에 고정된다. capture
   시각, Run/tool/Reader identity, source revision, payload role, coverage와 명확한
@@ -530,11 +610,12 @@ Canvas가 제공하는 content mode는 두 가지다.
   필요한 경우 현재 account·session·revision 상태를 보여 준다. 사용자가 명시적으로
   열며 Snapshot View를 대체하지 않는다.
 
-두 mode가 같은 viewer 구현을 재사용할 수는 있지만 view identity는 서로 다르고 같은
-Canvas에 공존할 수 있다. `현재 열기`는 Live View를 만들거나 focus하고, `비교`는
-의미 있는 비교가 가능할 때 둘을 함께 보여 준다. Answer Briefing은 Snapshot View와
-고정 artifact revision을 대상으로 하며, 사람이 직접 다루는 Browser/File view는
-Live View로 남는다.
+두 mode가 viewer 구현을 재사용해도 identity는 서로 다르다. 과거 읽기·명령의 Snapshot은
+기본적으로 기록 패널에서 열고, 실제 작업 대상은 Canvas에 유지한다. 사용자가 현재 원본으로
+이동하거나 보고에 선별한 근거를 펼친 경우에만 해당 Canvas 표현을 만들거나 재사용한다.
+의미 있는 비교에서는 두 시점을 함께 제공하되 전체 도구 이력을 Canvas로 복사하지 않는다.
+Answer Briefing은 선별한 Snapshot과 고정 artifact revision을 대상으로 하며 현재 Live로
+과거 설명을 덮어쓰지 않는다. 패널을 닫아도 승인된 보존 기록과 실제 작업은 별도 수명으로 남는다.
 
 같은 불변조건을 유지하면서 tool별 mapping은 다음처럼 달라진다.
 
@@ -560,10 +641,27 @@ browser 또는 computer-use 관찰
   -> 해당 경계에서 전달된 이름 붙은 전체 결과의 Snapshot View
 ```
 
-Canvas 배치, viewer rendering, 상호작용 가능한 runtime session은 서로 다른
-수명주기다. 사용자 또는 Agent의 의미 있는 active·sleeping·historical-snapshot 작업에는
-observation·provenance와 선택적인 resource/session reference를 가진, Canvas에서 다시
-찾을 수 있는 node가 항상 있어야 한다. 숨은 registry에만 작업을 남겨서는 안 된다.
+Snapshot은 사진이라는 뜻이나 Canvas 객체 종류가 아니라 시점을 고정한 자료다.
+
+| 대상 | 보존 가능한 원형·표현 | 재현 경계 |
+|---|---|---|
+| 텍스트·코드·검색/API 결과 | 원문 bytes·범위·구조화된 반환 데이터 | 전체 원문, 선택 범위, 파생 요약과 실제 전달값을 구별 |
+| PDF·Office·이미지 | 당시 파일 bytes와 필요한 페이지/추출 표현 | 추출 결과만으로 원본 전체를 보존했다고 하지 않음 |
+| Browser | 전달된 screenshot·DOM/접근성 구조·텍스트 및 필요 리소스 | HTML만으로 모든 렌더링·JS 실행 상태를 복원할 수 있다고 하지 않음 |
+| Terminal·TUI | 순서 있는 출력, 문자 셀·색/속성·크기·buffer/mode·화면 checkpoint | TUI가 반드시 PNG인 것은 아님. 실제 이미지가 전달됐다면 그 이미지를 유지 |
+| Computer-use | 실제 관찰 이미지·필요 구간 기록 | 사후 재렌더링 이미지를 당시 관찰 이미지로 대체하지 않음 |
+
+TUI의 기록 재생은 읽기 전용 표시이며 명령·입력·clipboard 동작 재실행이 아니다.
+문자 화면의 직렬화는 [xterm.js의 serialize 계열](https://github.com/xtermjs/xterm.js/tree/master/addons/addon-serialize)처럼
+기존 기술을 검토할 수 있으나 지원 모드·그래픽 확장·완전성은 별도로 검증한다. 이 예시는
+새 저장 stack 확정이 아니다. manifest는 payload 형식과 원문/전달/preview 역할을 식별하고,
+모든 자료를 JSON 문자열이나 screenshot 한 형식으로 강제하지 않는다.
+
+Canvas 배치, viewer rendering, 상호작용 가능한 runtime session은 서로 다른 수명주기다.
+실제 active·sleeping 작업 대상과 유지 중인 runtime은 Canvas에서 찾을 수 있는 표현을 가진다.
+종료된 읽기·관찰 기록은 허용된 생각/작업 기록에서 재탐색 가능하면 되며, 기록 하나마다
+독립 Canvas node를 요구하지 않는다. 기록 패널로 옮겼다는 이유로 계속 실행 중인 작업까지
+Canvas에서 지우는 `close-but-background` 상태를 만들지 않는다.
 
 ```text
 Canvas projection state
@@ -608,14 +706,14 @@ report set은 전체 tool trace의 복사본이 아니지만, 선별 과정에�
 
 ## 5. 여러 Agent가 참여하는 공유 대화 context
 
-사람에게 보이는 기본 Chat 관계는 Agent/persona별 담당자 방이다. 방의 상대 정체성은
-Agent Profile이 제공하지만, 방 history·Profile revision·실제 Agent Runtime·Run과 모델
+기본 Codex 대화와 사용자 생성 Agent의 담당자 방을 구분한다. 선택적 담당자 방의 상대
+정체성은 Agent Profile이 제공하지만, 방 history·Profile revision·실제 Agent Runtime·Run과 모델
 context는 서로 다른 identity와 수명주기를 가진다. 같은 담당자에게 여러 업무를 맡길 때
 history를 어떤 section·filter·업무 reference로 구분할지는 미결정 UI다.
 
 EG-Desk에는 이 기본 관계와 별도로 group chat 또는 thread와 비슷한 상호작용 형태를
 가지되 명시적인 EG-Desk context의 지배를 받는 작업 범위 공유 대화 기능이 필요하다.
-최종 제품에서 이를 workroom, 일반 Thread, Agenda 연결 대화 또는 다른 Chat relation 중
+최종 제품에서 이를 workroom, 일반 Thread, Board 연결 대화 또는 다른 Chat relation 중
 무엇으로 표현할지는 이 계약이 고정할 객체가 아니라 미결정 object/UI 결정이다.
 
 선택된 형태는 권한이 허용할 때 다음을 표현할 수 있어야 한다.
@@ -700,8 +798,8 @@ detachable runtime의 보이는 Desk Window를 닫거나 분리해도 process를
 안 된다. process termination은 실행 전 대상과 영향이 보이는 별도의 파괴적 action이다.
 다만 process를 유지한다면 Canvas에는 그 process의 소유자·상태·재연결 행동을 나타내는
 다른 projection이 반드시 남아야 한다. 보이는 Terminal만 제거한 채 hidden registry에서
-process를 계속 돌리지 않는다. Agenda 전체를 닫을 때는 §1의 ownership 규칙에 따라 그
-Agenda만 소유한 process를 종료하고, 다른 projection이 함께 소유한 process만 유지한다.
+process를 계속 돌리지 않는다. Board 전체를 닫을 때는 §1의 ownership 규칙에 따라 그
+Board만 소유한 process를 종료하고, 다른 projection이 함께 소유한 process만 유지한다.
 revive/relaunch가 새 shell·working directory·environment·이전 output snapshot을
 복원할 수는 있지만, 이전의 임의 foreground command를 자동 재실행해서는 안 된다.
 선언된 idempotent Task 재개는 Terminal view 복원이 아니라 scheduler policy에 속한다.
@@ -874,14 +972,14 @@ desktop handoff는 owner가 통제하고 collaborator control에는 별도의 �
 control을 revoke하면 observation grant까지 따로 revoke하지 않는 한 그 참가자는
 observer-only 상태로 돌아간다.
 
-### 12.1 여러 PC의 작업을 같은 Agenda에서 다루기
+### 12.1 여러 PC의 작업을 같은 Board에서 다루기
 
 화면을 보는 PC, 작업을 실행하는 PC, 자료가 있는 위치와 실제 업무 계정을 구별한다.
 각 Task·도구 실행과 결과는 실제 실행 위치에 결합되어야 하며, 동일한 파일명이나 경로
 문자열만으로 다른 PC의 자료를 같은 자원으로 대체하지 않는다. 참가자를 초대하거나
 PC를 연결했다는 사실만으로 그 PC의 모든 파일·프로그램·계정을 사용할 권한이 생기지 않는다.
 
-- 같은 Agenda의 작업이 여러 PC에서 진행되어도 각 작업의 대상·실행 위치·마지막 확인
+- 같은 Board의 작업이 여러 PC에서 진행되어도 각 작업의 대상·실행 위치·마지막 확인
   상태·산출물은 Canvas의 해당 작업에서 찾을 수 있어야 한다. 사용자의 카메라 이동은
   작업 배치나 실행 PC를 바꾸지 않는다.
 - 통신 단절은 원격 process 종료나 외부 행동 취소의 증거가 아니다. 마지막 관찰과
@@ -931,6 +1029,12 @@ UI는 다음 관찰 상태를 구별해 표시한다. 구체 레이블·배치�
 
 ## 14. Agent Profile·Runtime·Effective Run Binding
 
+기본 Codex와 사용자 생성 Agent를 구별한다. 기본 Codex는 유효한 Engine 연결과 기본 실행
+구성이 있으면 사용자 정의 Agent Profile 없이 Run을 시작한다. 이 경우에도 실제 지침·모델·
+도구·정책·위임·권한·입력·출력의 연결을 보존한다. 선택적 personality와 생각 버블은 기본
+Codex 실행의 필수 조건이 아니다. Agent를 생성하거나 선택했을 때만 해당 Profile revision을
+추가 결합한다. 아래 Profile 관련 조작은 그 선택적 구성에 적용한다.
+
 Agent Profile은 재사용 가능하고 version이 있는 configuration이다. display identity·
 personality·instructions·provider/model policy·candidate tool과 capability ceiling·
 context와 memory policy·credential-handle policy·Ontology policy·execution limit·
@@ -942,7 +1046,7 @@ System은 Run의 시작 조건과 각 모델 호출에 실제 전달한 구성�
 
 ```text
 Run identity와 출발 조건
-  최초 요청 또는 parent-Task delegation, 선택한 Profile·Engine,
+  최초 요청 또는 parent-Task delegation, Engine과 선택한 경우의 Agent Profile,
   instructions·policy, budget·sandbox·network·time·delegation 상한
 
 모델 호출별 실제 입력과 구성
@@ -1001,7 +1105,7 @@ EG-Desk는 최소한 다음 identity plane을 서로 분리한다.
 
 | identity plane | 예시 | 부여하는 범위 |
 |---|---|---|
-| EG-Desk product identity | local owner, 향후 collaborator | Desk·Agenda·local sharing scope |
+| EG-Desk product identity | local owner, 향후 collaborator | Desk·Board·local sharing scope |
 | AI Engine identity | ChatGPT/Codex 구독 account, API project, 다른 provider account | model access·plan/quota·engine-side history와 policy |
 | connected-service identity | email·Drive·GitHub·database·MCP service | 해당 service의 data와 action |
 | Browser authority context | Firefox profile/container, 로그인된 website account | page별 visibility와 browser action |
@@ -1073,7 +1177,7 @@ encoding·logical role·lineage는 hash algorithm이 아니라 manifest에 속�
 
 snapshot 하나는 필수 JSON blob 하나가 아니라 manifest와 하나 이상의 불변 payload
 role로 구성된다. 작은 manifest와 선택한 text는 SQLite에, 큰 native/binary body는
-object store에 둘 수 있다. reference 기반 retention은 Saved Agenda·Answer Briefing·
+object store에 둘 수 있다. reference 기반 retention은 Saved Board·Answer Briefing·
 pinned snapshot·active Run object를 유지한다. 참조되지 않는 object는 사용자에게 보이는
 retention policy와 garbage collection 대상이 된다. redaction은 derived payload를 만들며
 같은 hash 뒤의 original object를 변경하지 않는다.
@@ -1107,7 +1211,7 @@ absolute path·transient cache·선택하지 않은 private scope는 제외한�
 Import는 parse 성공만으로 data를 연결하지 않는다. format version·manifest·hash·필수
 object·permission을 검증하고, 생성하거나 merge할 정확한 root를 보여 주고, identity/
 revision collision을 preview하고, transactional staging scope에 적용한 뒤 대표 Chat·
-Canvas·Snapshot·Agenda reference를 다시 여는 것으로 완료를 증명한다. 원격 backup 또는
+Canvas·Snapshot·Board reference를 다시 여는 것으로 완료를 증명한다. 원격 backup 또는
 sync는 별도의 owner-approval boundary로 남는다.
 
 최종 포함 기본값·encryption UX·conflict policy·retention 선택은 다음에서 추적한다.
@@ -1157,7 +1261,7 @@ UI가 존재하는 것만으로 기능 완료가 성립하지 않는다. accepta
 
 다음은 기존 기술 경계를 구현하는 선택 기준선이다. 새로운 제품 권한을 부여하거나 이미 실행된 구현을 뜻하지 않는다. 버전·측정·호환성 결과로 동등한 구현을 선택할 수 있지만 입력·저장·권한·완료의 의미는 유지한다. 정책 선택에 종속된 값은 해당 조건 아래에서 동작한다.
 
-### 17.A 셸·Agenda·탐색
+### 17.A 셸·Board·탐색
 
 <a id="impl-shell"></a>
 #### 셸 준비와 독립 복구 경계
@@ -1168,13 +1272,19 @@ UI가 존재하는 것만으로 기능 완료가 성립하지 않는다. accepta
 
 실행기 오류 UI는 macOS NSAlert, Windows TaskDialogIndirect를 사용한다. Linux GUI 복구 의존성이 없거나 실패하면 `Terminal=true`인 독립 복구 진입점으로 같은 상태·행동을 제공한다. OS 오류와 사용자 취소는 시작 성공이 아니다. [Apple NSAlert](https://developer.apple.com/documentation/appkit/nsalert), [Windows TaskDialogIndirect](https://learn.microsoft.com/en-us/windows/win32/api/commctrl/nf-commctrl-taskdialogindirect), [Desktop Entry 규약](https://specifications.freedesktop.org/desktop-entry/latest/recognized-keys.html).
 
-셸 준비·Agenda 목록·Engine 연결은 독립 상태다. 종료는 로컬 새 dispatch 차단 → 확정 입력 기록 → 로컬 전용 runtime 종료 확인 → 최종 세션 commit → 셸 종료 순으로 수행한다. 정상 종료도 열린 Agenda 구성 자체를 삭제하지 않는다. 원격 runtime은 별도 소유·상태를 유지한다. 강제 종료·전원 손실에는 종료 handler 실행을 전제로 하지 않는다.
+셸 준비·Board 목록·Engine 연결은 독립 상태다. 종료는 로컬 새 dispatch 차단 → 확정 입력 기록 → 로컬 전용 runtime 종료 확인 → 최종 세션 commit → 셸 종료 순으로 수행한다. 정상 종료도 열린 Board 구성 자체를 삭제하지 않는다. 원격 runtime은 별도 소유·상태를 유지한다. 강제 종료·전원 손실에는 종료 handler 실행을 전제로 하지 않는다.
+
+최초 준비의 표시 목표는 기존 Desk·Canvas 위 live Browser View의 화면 맞춤 집중 보기이며,
+재방문은 마지막 집중/일반 Desk 카메라 상태 복원이다. 앱 상단 바는 창 위쪽 가장자리에
+붙이되 기존 창 이동 영역과 주소·입력 컨트롤을 유지한다. 빈 Canvas 드래그를 새 창 이동
+모드로 만들지 않는다. `frame-visible`만으로 프로필·Codex 연결까지 완료됐다고 하지 않는다.
+사용자 생성 Agent가 없는 경우는 셸·기본 Codex 오류가 아니며 [최초 사용 계약](#tech-first-use)에 따라 분기한다.
 
 **인수 절차:** 각 OS 진입, 반복 실행, 파일 연결 실행에 대해 실행 파일 누락·잘못된 준비 nonce·10초 지연·bridge 실패를 주입한다. 셸 없는 상태에서 복구 행동을 실행할 수 있고, 정상 경로는 Desk 하나이며 Engine 실패 중 파일 열기가 가능해야 한다. 종료 중 쓰기 지연·process 종료 거부를 주입해 취소/강제 종료의 대상·미기록 범위를 대조한다. 실패 fallback은 독립 복구 진입점이며 사용자 profile·credential을 지우지 않는다.
 
 ##### 인계가 확인된 recorder의 종료 예외
 
-정상 종료의 로컬 runtime 종료 대상에서 제외할 수 있는 recorder는 독립 host 인계의 source·mask·구간 저장·Canvas 소유·중지 endpoint를 확인하고 host ACK를 받은 경우뿐이다. 앱 내부 MediaRecorder는 종료 대상에서 제외하지 않는다. 인계 실패·미확인은 앱을 유지하거나 기록을 종료하는 경로로 돌아간다. Agenda 닫기는 detached recorder도 기존 소유 규칙에 따라 종료한다.
+정상 종료의 로컬 runtime 종료 대상에서 제외할 수 있는 recorder는 독립 host 인계의 source·mask·구간 저장·Canvas 소유·중지 endpoint를 확인하고 host ACK를 받은 경우뿐이다. 앱 내부 MediaRecorder는 종료 대상에서 제외하지 않는다. 인계 실패·미확인은 앱을 유지하거나 기록을 종료하는 경로로 돌아간다. Board 닫기는 detached recorder도 기존 소유 규칙에 따라 종료한다.
 
 ##### 10초 이전 준비 상태
 
@@ -1194,7 +1304,7 @@ UI가 존재하는 것만으로 기능 완료가 성립하지 않는다. accepta
 
 앱 종료는 `prepare→flush→stop-owned→commit-session→quit`와 단일 quit operation을 사용한다. 새 로컬 dispatch를 먼저 차단하고 종료 전 열린 구성 및 대상 집합을 고정한다. 취소는 미발송 종료 요청만 제거한다. 이미 발송한 요청은 조회로 판정하며, 미발송·권한 유효 대상만 다시 dispatch 가능하게 한다. 진행 중 commit 결과도 확인한 뒤 종료 취소를 완료한다. 강제 종료는 명시한 로컬 범위만 처리하며 마지막 유효 세션을 남긴다.
 
-앱 종료 후 녹화 계속은 기존 recorder 호스트 인계 계약의 유효 소유자·지속 실행·Canvas 표시 인계 receipt가 있는 대상만 예외다. 인계 불가이면 기록 중지 후 종료하거나 종료를 취소한다. 이 예외를 일반 runtime의 background 유지로 확대하지 않으며, Agenda 닫기는 여전히 전용 recorder를 종료한다.
+앱 종료 후 녹화 계속은 기존 recorder 호스트 인계 계약의 유효 소유자·지속 실행·Canvas 표시 인계 receipt가 있는 대상만 예외다. 인계 불가이면 기록 중지 후 종료하거나 종료를 취소한다. 이 예외를 일반 runtime의 background 유지로 확대하지 않으며, Board 닫기는 여전히 전용 recorder를 종료한다.
 
 **미실행 인수 조건:** 부분 저장·부분 종료·응답 유실·취소·강제 종료에서 숨은 실행과 자동 부활이 없고, recorder 인계 실패가 계속 기록 허용으로 바뀌지 않아야 한다.
 
@@ -1217,7 +1327,7 @@ View 열기·닫기 확정·그룹 변경·소유 변경은 즉시 commit 대상
 
 복원 요청은 `restoreEpoch`와 View version을 가진다. 사용자 변경 이후 도착한 결과는 해당 View를 덮지 않으며 닫기 tombstone을 존중한다. Browser는 허용된 native 상태/URL, 파일은 원본 revision+초안, Chat은 기존 event 참조, Terminal은 검증된 process 또는 출력 Snapshot으로 복원한다. 재연결 자체는 모델 호출이 아니다.
 
-**인수 절차:** payload publish 전후·DB COMMIT 전후·backup 중에 강제 종료를 주입한다. 마지막 유효 generation 또는 명시된 보존본만 복원되고 부분 구성 혼합이 없어야 한다. 목록 읽기를 지연시킨 동안 새 View를 열고 기존 View를 닫아 늦은 복원이 되돌리지 않는지 확인한다. 파일 누락·권한 철회·DB 손상·미저장 보존 두 정책을 각각 대조한다. fallback에서도 Saved Agenda와 손상 증거는 유지한다.
+**인수 절차:** payload publish 전후·DB COMMIT 전후·backup 중에 강제 종료를 주입한다. 마지막 유효 generation 또는 명시된 보존본만 복원되고 부분 구성 혼합이 없어야 한다. 목록 읽기를 지연시킨 동안 새 View를 열고 기존 View를 닫아 늦은 복원이 되돌리지 않는지 확인한다. 파일 누락·권한 철회·DB 손상·미저장 보존 두 정책을 각각 대조한다. fallback에서도 Saved Board와 손상 증거는 유지한다.
 
 정상 DB 보존본은 online backup API로 만들고 무결성 확인 뒤 최근 두 사본을 교대 유지한다. 변경이 있으면 60초 간격과 정상 종료에 시도한다. 이 사본은 **제품이 관리하는 제한된 crash-recovery 저장물**이며, 사용자 초기화의 선택형 자동 보호 백업을 켜거나 대신하지 않는다. 두 기능의 목적·수명·상태·포함 범위를 분리한다. 사본 생성 실패를 원 DB 손상으로 표시하지 않는다.
 
@@ -1228,11 +1338,13 @@ View 열기·닫기 확정·그룹 변경·소유 변경은 즉시 commit 대상
 복구 가능한 대상 데이터가 사본에 남거나 키 폐기·정리 결과가 미확인이면 `deletionPending`을 유지한다. 보존 제한이나 사용자에게 명시된 보관 정책 때문에 즉시 정리할 수 없는 경우에는 대상·이유·기한을 표시하며 숨은 보존 예외를 만들지 않는다. **인수 절차:** 삭제 직후·사본 재작성 중·키 폐기 전후에 충돌을 주입하고 각 관리형 사본으로 복구를 시도한다. 삭제한 기록이 재등장하지 않고, 남은 사본이 있는 동안 완료 표시가 나오지 않아야 한다. 사용자가 선택적으로 만든 보호 백업은 별도 정책·영향 목록으로 대조한다.
 
 <a id="impl-agenda"></a>
+<a id="impl-board"></a>
 #### 저장 구성, 충돌과 정본 revision
 
 **화면 연결**: [사용자 조작](../../docs/references/design-synthesis/egdesk-ux-realization-proposals.md#ux-detail-agenda)
 
-Agenda는 `agendaId, title, metadataVersion, headRevision`과 불변 구성 revision을 가진다. 구성 revision에는 포함 목록·resource/context 참조·선택 배치·허용 payload·checkpoint 참조·parent revision을 기록한다. 이름 변경은 metadataVersion만 갱신한다. 저장 범위에 없는 파일 내용·credential·runtime을 복제하지 않는다.
+Board는 `agendaId, title, metadataVersion, headRevision`과 불변 구성 revision을 가진다. 구성 revision에는 포함 목록·resource/context 참조·선택 배치·허용 payload·checkpoint 참조·parent revision을 기록한다. 이름 변경은 metadataVersion만 갱신한다. 저장 범위에 없는 파일 내용·credential·runtime을 복제하지 않는다.
+제품 표시명 Board와 기존 `agendaId` 등 wire·storage 식별자는 다른 층위다. 표시명 변경만으로 저장 스키마나 기존 데이터의 identity를 바꾸지 않는다.
 
 업데이트 요청은 `operationId, agendaId, expectedHead, draftHash, includedMemberIds`다. 하나의 transaction에서 expectedHead를 비교하고 새 revision과 head를 함께 기록한다. 같은 operationId 재요청은 같은 결과를 반환한다. 불일치는 충돌이며 저장 성공으로 처리하지 않는다.
 
@@ -1246,13 +1358,13 @@ Agenda는 `agendaId, title, metadataVersion, headRevision`과 불변 구성 revi
 
 다른 PC에 정본 authority가 있으면 동일 expectedHead protocol과 operation receipt를 사용한다. offline 초안은 `로컬 보관·업데이트 미전달`이며 정본 성공이 아니다. 실제 원격 transport·identity·비용의 승인과 무관하게 동일 protocol의 로컬 다중 client 검사는 가능하다.
 
-**인수 절차:** 두 client가 r7에서 서로 다른 필드와 같은 필드를 각각 변경하고 저장한다. 비충돌 병합 미리보기, 충돌별 값 선택, 비교 도중 r9 도착, 응답 유실 후 동일 operationId 재시도를 검사한다. 초안 보존·단일 성공 revision·범위 밖 변경 0건이 acceptance다. 한글 80자/81자·조합 Enter·동명이름·쓰기 실패·최신만/전체 이력 복구도 확인한다. fallback은 원 초안과 새 Agenda 저장이며 강제 덮어쓰기가 아니다.
+**인수 절차:** 두 client가 r7에서 서로 다른 필드와 같은 필드를 각각 변경하고 저장한다. 비충돌 병합 미리보기, 충돌별 값 선택, 비교 도중 r9 도착, 응답 유실 후 동일 operationId 재시도를 검사한다. 초안 보존·단일 성공 revision·범위 밖 변경 0건이 acceptance다. 한글 80자/81자·조합 Enter·동명이름·쓰기 실패·최신만/전체 이력 복구도 확인한다. fallback은 원 초안과 새 Board 저장이며 강제 덮어쓰기가 아니다.
 
 ##### 생성 재시도와 projection identity
 
 최초 전송 전에 `createOperationId, newAgendaId, initialRevisionId, draftHash, sourceProjectionId?`를 로컬 outbox에 기록한다. 생성 revision·head·operation 결과를 원자적으로 저장하며 같은 operation 재요청은 같은 ID와 결과를 반환한다. 같은 operation의 다른 hash는 거부한다. 응답 유실은 operation 조회 후 재시도한다. 로컬 의도 기록 실패 시 외부 전송하지 않고 메모리 초안을 유지하며 `아직 기록되지 않음`을 표시한다. 영속화되지 않은 초안의 앱 재시작 복구는 약속하지 않는다.
 
-**미실행 인수 조건:** 생성·다른 이름 저장의 응답 유실과 반복 클릭에서 Agenda/projection 중복 0건, 원 A의 identity·변경 상태 유지 여부를 검사한다.
+**미실행 인수 조건:** 생성·다른 이름 저장의 응답 유실과 반복 클릭에서 Board/projection 중복 0건, 원 A의 identity·변경 상태 유지 여부를 검사한다.
 
 ##### 구성원 유효성과 직렬화
 
@@ -1261,6 +1373,7 @@ Agenda는 `agendaId, title, metadataVersion, headRevision`과 불변 구성 revi
 **미실행 인수 조건:** 이름 경계값·IME·선택 후 권한 철회·offline·중복 View에서 잘못된 포함·조용한 누락·권한 확대가 없는지 검사한다.
 
 <a id="impl-agenda-lifecycle"></a>
+<a id="impl-board-lifecycle"></a>
 #### 소유권에 따른 닫기와 삭제
 
 **화면 연결**: [사용자 조작](../../docs/references/design-synthesis/egdesk-ux-realization-proposals.md#ux-detail-agenda-lifecycle)
@@ -1273,13 +1386,13 @@ Codex는 기존 구독 인증 Engine Profile의 app-server 연결을 사용한�
 
 통신 단절은 종료 확인이 아니다. 재접속하면 동일 기기·process 세대·thread·계정·operation을 대조한다. 외부 효과가 미확인이면 현재 상태/receipt를 조회하기 전 재발송하지 않는다. 성공한 독립 작업과 늦은 결과는 보존하되 중지된 작업의 새 행동을 만들지 않는다.
 
-삭제는 확인한 Agenda revision과 소유 version에 결합한다. 종료 미확인은 삭제 대기다. 휴지통 이동은 복구 정책·만료·구성 참조를 원자적으로 기록한다. 복구는 현재 권한을 다시 검사한다. 영구 삭제는 선택 참조 제거와 미참조 payload 정리의 결과를 따로 기록하며 공유 참조·원본 파일·방·credential은 제외한다. 처리 중 권한 철회는 미실행 단계만 중지한다.
+삭제는 확인한 Board revision과 소유 version에 결합한다. 종료 미확인은 삭제 대기다. 휴지통 이동은 복구 정책·만료·구성 참조를 원자적으로 기록한다. 복구는 현재 권한을 다시 검사한다. 영구 삭제는 선택 참조 제거와 미참조 payload 정리의 결과를 따로 기록하며 공유 참조·원본 파일·방·credential은 제외한다. 처리 중 권한 철회는 미실행 단계만 중지한다.
 
 **인수 절차:** 공동 소유/단일 소유 각각에서 A 닫기, B 참조 유지, 소유 이전 경합, 원격 종료 응답 유실을 재현한다. 전용 종료 확인 전 Canvas 표현이 남고 공유 실행이 유지되어야 한다. 이어 동시 저장·휴지통 이동 실패·복구 실패·권한 철회·영구 삭제 일부 실패를 주입한다. 실패 대상만 재시도하며 이미 종료/삭제한 항목을 복구됐다고 표시하지 않아야 한다. 재열기 후 모델 호출·예약 재개·catch-up 자동 실행은 0건이어야 한다.
 
-##### Agenda 구성 변경과 파일 편집을 분리한다
+##### Board 구성 변경과 파일 편집을 분리한다
 
-닫기 의도에 `projectionId, configDraftVersion, baseAgendaRevision, fileBufferVersions, 선택한 처리, operationId`를 고정한다. 선택 검증→선택한 파일 저장/초안 처리→그 결과 revision에 결합된 Agenda 저장→전용 실행 종료 확인→projection 제거 순서다. 각 완료 receipt를 보존하고 재시도는 미완료 단계만 수행한다. 앱 종료의 자동 세션 기록은 이 명시적 Agenda 닫기와 다르며 Saved Agenda를 갱신하지 않는다.
+닫기 의도에 `projectionId, configDraftVersion, baseAgendaRevision, fileBufferVersions, 선택한 처리, operationId`를 고정한다. 선택 검증→선택한 파일 저장/초안 처리→그 결과 revision에 결합된 Board 저장→전용 실행 종료 확인→projection 제거 순서다. 각 완료 receipt를 보존하고 재시도는 미완료 단계만 수행한다. 앱 종료의 자동 세션 기록은 이 명시적 Board 닫기와 다르며 Saved Board를 갱신하지 않는다.
 
 **미실행 인수 조건:** 네 변경 조합에 저장 실패·충돌·취소를 주입하여 구성과 파일의 상호 폐기 0건, 저장 확인 전 projection 제거 0건을 검사한다.
 
@@ -1300,11 +1413,11 @@ Codex는 기존 구독 인증 Engine Profile의 app-server 연결을 사용한�
 
 **화면 연결**: [사용자 조작](../../docs/references/design-synthesis/egdesk-ux-realization-proposals.md#ux-detail-view)
 
-Camera transform, View logical rectangle, Browser viewport, page zoom, OS 창 모드를 독립 상태로 저장한다. 좌표 변환은 실제 표시 중인 matrix의 역변환을 사용하며 애니메이션의 목표 matrix를 대신 쓰지 않는다. 집중 배율은 `min(가용폭/View폭, 가용높이/View높이)`다. 집중 보기에서 logical rectangle이나 Browser width/height를 쓰지 않는다.
+Camera transform, View logical rectangle, Browser viewport, page zoom, OS 창 모드를 독립 상태로 저장한다. 좌표 변환은 실제 표시 중인 matrix의 역변환을 사용하며 애니메이션의 목표 matrix를 대신 쓰지 않는다. 최초 Browser 집중도 이미 존재하는 live Browser View에 대한 camera fit이며 집중 배율은 `min(가용폭/View폭, 가용높이/View높이)`다. 일반 Canvas 줌아웃은 같은 camera transform을 연속적으로 축소해 주변 View를 드러낸다. 최초에는 기본 Canvas 시점을 사용하고, 저장된 일반 시점은 있을 때만 복귀 기준으로 쓴다. 집중·줌아웃 왕복에서 View logical rectangle·Browser logical viewport·URL·세션·page zoom·renderer identity를 유지하고, 실제 Browser resize만 별도 경로로 처리한다. 집중 보기에서 logical rectangle이나 Browser width/height를 쓰지 않는다.
 
 미니맵·화면 목록은 같은 권한 필터를 거친 View registry를 사용한다. 제목·유형·PC·계정 구분자와 겹친 대상 목록은 해당 수신자가 볼 수 있는 항목만 투영한다. 지도 선택은 View ID와 현재 geometry를 다시 해소한 뒤 camera를 이동하고 복귀 시점을 기록한다. resource ID만으로 다른 세션을 선택하거나 runtime을 재개하지 않는다. 대상이 사라졌으면 지도·목록을 유지하고 현재 상태 확인을 제공한다. 작은 hit 영역의 대안은 같은 대상 목록이며 비공개 항목의 개수·이름을 노출하지 않는다.
 
-드래그는 shell handle에서 Pointer Capture로 시작하고 종료/취소 때 해제한다. 콘텐츠가 소유한 드래그·편집 입력을 Canvas 이동으로 바꾸지 않는다. 다만 Canvas 탐색 상태의 비활성 Chat 위 두 손가락 스크롤은 아래의 콘텐츠 활성 경계에 따라 Canvas가 처리한다. 실제 resize 전 해당 surface의 새 입력을 차단하고, 크기 변경 후 ResizeObserver·Browser 관찰에서 viewport와 document generation을 갱신한 뒤 stale action을 재검증한다. pan만으로 logical target을 바꾸지 않는다. [Pointer Capture](https://developer.mozilla.org/en-US/docs/Web/API/Element/setPointerCapture), [ResizeObserver](https://developer.mozilla.org/en-US/docs/Web/API/ResizeObserver).
+드래그는 기존 shell handle에서 Pointer Capture로 시작하고 종료/취소 때 해제한다. 상단 바를 창 위쪽 가장자리에 붙여도 기존 창 이동·입력 소유 경계를 유지하며, 빈 Canvas 드래그를 창 이동이나 새 pan 모드로 바꾸지 않는다. 콘텐츠가 소유한 드래그·편집 입력을 Canvas 이동으로 바꾸지 않는다. 다만 Canvas 탐색 상태의 비활성 Chat 위 두 손가락 스크롤은 아래의 콘텐츠 활성 경계에 따라 Canvas가 처리한다. 실제 resize 전 해당 surface의 새 입력을 차단하고, 크기 변경 후 ResizeObserver·Browser 관찰에서 viewport와 document generation을 갱신한 뒤 stale action을 재검증한다. pan만으로 logical target을 바꾸지 않는다. [Pointer Capture](https://developer.mozilla.org/en-US/docs/Web/API/Element/setPointerCapture), [ResizeObserver](https://developer.mozilla.org/en-US/docs/Web/API/ResizeObserver).
 
 ##### Chat 콘텐츠 활성과 두 손가락 탐색의 입력 경계
 
@@ -1312,7 +1425,7 @@ Camera transform, View logical rectangle, Browser viewport, page zoom, OS 창 �
 
 활성 Chat 위의 두 손가락 스크롤은 Chat 내부에 전달하고 camera에 같은 입력을 중복 적용하지 않는다. Chat 내부의 scroll 끝에서도 Canvas로 이어서 전달하지 않는다. 빈 Canvas 클릭은 Chat 콘텐츠 활성을 해제하지만 click 자체로 camera·View geometry·대화·초안을 변경하지 않는다. 이후 비활성 Chat 위 hover는 콘텐츠 활성이나 입력권을 만들지 않는다. 이 상태의 modifier 없는 두 손가락 스크롤은 Canvas camera만 이동하고 Chat의 내부 scroll은 유지한다. 별도 Pan 도구 상태를 이 경로의 선행조건으로 검사하지 않는다.
 
-이 전환은 사람의 로컬 UI 입력 분배다. Agent의 작업 target·입력 lease, 다른 참가자의 상태, Browser viewport, Agenda 소속이나 runtime 생애를 덮어쓰지 않는다. native 입력·보안 확인·콘텐츠별 modifier·zoom·기존 키보드 대안은 별도의 입력 계약을 유지한다. 이벤트 수신·전달의 구현 방식은 이 상태 보장을 만족하는 Firefox shell/renderer 경계에서 선택한다.
+이 전환은 사람의 로컬 UI 입력 분배다. Agent의 작업 target·입력 lease, 다른 참가자의 상태, Browser viewport, Board 소속이나 runtime 생애를 덮어쓰지 않는다. native 입력·보안 확인·콘텐츠별 modifier·zoom·기존 키보드 대안은 별도의 입력 계약을 유지한다. 이벤트 수신·전달의 구현 방식은 이 상태 보장을 만족하는 Firefox shell/renderer 경계에서 선택한다.
 
 콘텐츠 활성의 변경은 남아 있는 wheel 묶음의 이전 소유자를 무효화한다. 해제 직후 같은 포인터에서 들어온 다음 입력을 시간 간격만으로 이전 Chat에 보내지 않는다. 시각 표시와 입력 라우팅은 같은 상태 revision을 사용한다. 반복 입력에서 초안·Chat scroll·다른 surface lease는 독립 상태로 유지한다.
 
@@ -1326,9 +1439,9 @@ focus token은 surface·View·control role·목록 위치를 가리킨다. 닫�
 
 **인수 절차:** 동일 Browser를 pan·zoom·집중 보기 왕복한 전후의 내부 viewport, page zoom, target ID를 대조한다. 실제 960→1280px resize에서는 responsive 변화와 observation revision 증가를 확인하고 이전 좌표 행동을 차단한다. 한글 입력 중 다른 surface 탐색, native modal 취소, 사이트 전체 화면, 대상 닫힘, 모션 감소, 키보드·숫자 입력·그룹 중첩/해제를 검사한다. 변환된 live renderer가 이를 만족하지 못하면 집중 진입을 되돌리고 원 크기 View·명시적 resize 경로를 유지한다. Snapshot을 Live처럼 대신 보여 주지 않는다.
 
-Canvas geometry와 renderer attachment는 `viewId`에 결합하고 Agenda 소속은 별도 membership 관계로 유지한다. 동일 View가 여러 Agenda에 속해도 물리적 위치·크기·renderer attachment는 한 벌이다. Agenda를 추가로 열 때 기존 View의 geometry를 저장된 좌표로 덮거나 renderer를 새 영역으로 재부모화하지 않는다. 새 View 생성에만 해당 projection의 저장 위치를 적용한다. 서로 다른 `viewId`가 같은 `resourceId`를 참조하는 경우에는 별도 geometry를 유지하며, resource 일치만으로 View나 runtime을 병합하지 않는다.
+Canvas geometry와 renderer attachment는 `viewId`에 결합하고 Board 소속은 별도 membership 관계로 유지한다. 동일 View가 여러 Board에 속해도 물리적 위치·크기·renderer attachment는 한 벌이다. Board를 추가로 열 때 기존 View의 geometry를 저장된 좌표로 덮거나 renderer를 새 영역으로 재부모화하지 않는다. 새 View 생성에만 해당 projection의 저장 위치를 적용한다. 서로 다른 `viewId`가 같은 `resourceId`를 참조하는 경우에는 별도 geometry를 유지하며, resource 일치만으로 View나 runtime을 병합하지 않는다.
 
-보조 드래그 pan은 셸 Canvas의 빈 영역 또는 명시적 Pan 도구에서 시작한 ⌘/Ctrl 드래그로 처리한다. 해당 드래그 시작 조건이 충족된 뒤 Pointer Capture를 획득하고 종료·취소 때 해제한다. 이 보조 경로의 조건을 앞서 정의한 비활성 Chat 위 두 손가락 pan에 추가하지 않는다. Space 기본 pan 경로를 추가하지 않는다. 콘텐츠가 소유한 드래그·텍스트 선택·편집·modifier 입력은 해당 콘텐츠 소유로 남긴다. **인수 절차:** 같은 View를 포함하는 다른 Agenda를 연 전후의 위치·크기·attachment identity를 비교하고, 같은 Resource의 별도 View 두 개는 각각 유지되는지 확인한다. 사이트 안의 ⌘/Ctrl 드래그·텍스트 선택·편집 입력이 Canvas pan으로 전환되지 않아야 한다.
+보조 드래그 pan은 셸 Canvas의 빈 영역 또는 명시적 Pan 도구에서 시작한 ⌘/Ctrl 드래그로 처리한다. 해당 드래그 시작 조건이 충족된 뒤 Pointer Capture를 획득하고 종료·취소 때 해제한다. 이 보조 경로의 조건을 앞서 정의한 비활성 Chat 위 두 손가락 pan에 추가하지 않는다. Space 기본 pan 경로를 추가하지 않는다. 콘텐츠가 소유한 드래그·텍스트 선택·편집·modifier 입력은 해당 콘텐츠 소유로 남긴다. **인수 절차:** 같은 View를 포함하는 다른 Board를 연 전후의 위치·크기·attachment identity를 비교하고, 같은 Resource의 별도 View 두 개는 각각 유지되는지 확인한다. 사이트 안의 ⌘/Ctrl 드래그·텍스트 선택·편집 입력이 Canvas pan으로 전환되지 않아야 한다.
 
 ##### View별 최소 rect 검사
 
@@ -1356,9 +1469,9 @@ geometry와 그룹 관계에 단조 증가 version 및 변경 operation/actor를
 
 **미실행 인수 조건:** Chat 320×419 거부·320×420 허용, 경계값 복원, 숫자/드래그 결과 일치와 작성기 보존을 검사한다.
 
-##### 제거 대상과 활성 Agenda를 고정한다
+##### 제거 대상과 활성 Board를 고정한다
 
-제외 입력은 `projectionId, viewId, expectedMembershipVersion, operationId`다. 해당 membership만 변경하고 Saved Agenda 갱신은 명시적 저장 때 수행한다. geometry·runtime ownership·다른 membership은 유지한다. 마지막 소속을 제거해도 살아 있는 runtime의 View/node는 Agenda 밖 Canvas에 남고 `실행 유지: A`처럼 실제 소유자를 표시한다.
+제외 입력은 `projectionId, viewId, expectedMembershipVersion, operationId`다. 해당 membership만 변경하고 Saved Board 갱신은 명시적 저장 때 수행한다. geometry·runtime ownership·다른 membership은 유지한다. 마지막 소속을 제거해도 살아 있는 runtime의 View/node는 Board 밖 Canvas에 남고 `실행 유지: A`처럼 실제 소유자를 표시한다.
 
 **미실행 인수 조건:** A/B 공유 View에서 B 제외 도중 카메라·활성 선택을 바꾸어도 A 제외·runtime 종료·View 복제가 발생하지 않아야 한다.
 
@@ -1368,7 +1481,7 @@ geometry와 그룹 관계에 단조 증가 version 및 변경 operation/actor를
 
 한 UI 처리 단위에서 64후보, 총 4096후보 후에도 실패하면 전체 점유영역 오른쪽 끝+24px 위치를 검사한다. 유효한 배치를 얻지 못하면 무변경 실패다. commit은 Canvas layout version을 비교한다. 정리는 선택 순서의 최상위 객체에 같은 알고리즘을 적용하며 미선택 객체와 이미 배치한 선택 객체를 장애물로 사용한다. 세 번의 version 경합 후 사용자 재시도로 전환한다.
 
-**미실행 인수 조건:** 30 Agenda·200 View·공유 View·음수 좌표에서 결정적 배치, 신규 겹침 회피, 미선택 geometry 불변을 검사한다.
+**미실행 인수 조건:** 30 Board·200 View·공유 View·음수 좌표에서 결정적 배치, 신규 겹침 회피, 미선택 geometry 불변을 검사한다.
 
 ##### Canvas 배치 실행 취소
 
@@ -1378,7 +1491,7 @@ geometry와 그룹 관계에 단조 증가 version 및 변경 operation/actor를
 
 ##### Pan 위치·zoom 경계·스냅 해제
 
-확대 기준점의 world 좌표를 `M⁻¹(p)`로 고정한 채 새 camera translation을 계산한다. 음수 좌표 pan을 허용하고 비유한 값은 이전 카메라를 유지하며 거부한다. 전체 보기는 같은 zoom 범위에서 맞추며 전부 담을 수 없으면 그 사실과 미니맵·화면 목록을 제공한다. 탐색은 활성 Agenda·실행 대상·Browser viewport를 바꾸지 않는다.
+확대 기준점의 world 좌표를 `M⁻¹(p)`로 고정한 채 새 camera translation을 계산한다. 음수 좌표 pan을 허용하고 비유한 값은 이전 카메라를 유지하며 거부한다. 전체 보기는 같은 zoom 범위에서 맞추며 전부 담을 수 없으면 그 사실과 미니맵·화면 목록을 제공한다. 탐색은 활성 Board·실행 대상·Browser viewport를 바꾸지 않는다.
 
 **미실행 인수 조건:** 배율 끝값·서로 다른 pivot·스냅 해제·모션 감소·사이트 modifier 입력에서 좌표 오귀속과 Space pan이 없는지 검사한다. 같은 포인터 위치에서도 Chat 콘텐츠 활성/해제 상태에 따라 내부 scroll과 Canvas pan이 구별되고, 어느 경로도 Browser viewport·Agent 실행 대상을 바꾸지 않는지 앞의 입력 전환 인수 조건과 함께 검사한다.
 
@@ -1395,7 +1508,7 @@ geometry와 그룹 관계에 단조 증가 version 및 변경 operation/actor를
 
 index 실패 시 canonical metadata의 제목 검색으로 fallback한다. `[색인 다시 만들기]`는 파생 index만 재구성하며 자료·대화·Snapshot을 삭제하지 않는다. 명령 팔레트는 권한·focus 범위를 가진 명시적 command 목록이며 사이트 입력에서 전역 단축키를 강제 포획하지 않는다.
 
-Library 정책은 허용된 등록 대상 유형 집합으로 집행한다. 집합이 비어 있으면 Library UI·등록 쓰기가 없으며 일반 resource index와 Saved Agenda 검색은 계속 제공한다. 등록은 참조 생성이지 원문 캡처·실행 소유 추가가 아니다.
+Library 정책은 허용된 등록 대상 유형 집합으로 집행한다. 집합이 비어 있으면 Library UI·등록 쓰기가 없으며 일반 resource index와 Saved Board 검색은 계속 제공한다. 등록은 참조 생성이지 원문 캡처·실행 소유 추가가 아니다.
 
 **인수 절차:** 한글 1·2·3자, 조합 중 Enter, 긴 동명이름 30개, Canvas View 200개, 권한 철회, offline 대상, 검색 응답 역전을 검사한다. 정확한 범위·action·focus 복귀가 유지되고 권한 밖 제목/snippet 노출과 원치 않은 모델·웹 요청은 0건이어야 한다. Library의 전체 유형/자료만/없음 분기에서 등록 메뉴·저장 결과를 대조한다. index 실패에도 제목 검색과 원 작업 복귀가 가능해야 한다.
 
@@ -1445,7 +1558,7 @@ Engine adapter는 product Run과 engine thread/turn/item ID를 따로 연결한�
 
 **화면 연결**: [사용자 조작](../../docs/references/design-synthesis/egdesk-ux-realization-proposals.md#ux-detail-context-share)
 
-resolver 입력은 명시 선택, 업무 binding, 허용된 Agenda·layout signal, 현재 정책과 source descriptor다. 출력 item은 `sourceRef, revision/hash, range, payloadRole, include/exclude, reason, authorityRef, recipientScope`를 갖는다. relevance 판단과 권한 판단은 다른 필드다.
+resolver 입력은 명시 선택, 업무 binding, 허용된 Board·layout signal, 현재 정책과 source descriptor다. 출력 item은 `sourceRef, revision/hash, range, payloadRole, include/exclude, reason, authorityRef, recipientScope`를 갖는다. relevance 판단과 권한 판단은 다른 필드다.
 
 위임 가능한 행동은 Profile ceiling ∩ 현재 capability ∩ Task 위임 ∩ resource authority ∩ 승인 ∩ 실행 상한의 교집합이다. child에게 이 집합보다 큰 grant를 발급하지 않는다. 공유 대화 참여·Agent mention은 Engine 사용권·업무 계정·OS 권한을 부여하지 않는다.
 
@@ -1476,7 +1589,7 @@ resolver 입력은 명시 선택, 업무 binding, 허용된 Agenda·layout signa
 
 ##### 경로 설정과 상속
 
-경로 record는 `scopeType/scopeId, agentRef/profileRef, revision, author, delegationRef`다. CRUD는 expected revision과 operationId로 기록한다. 우선순위는 명시 요청→업무 binding→방→routing Agenda→앱이다. 미설정은 상속하지만 설정된 Agent의 이용 불가는 조용히 건너뛰지 않는다. 사전 위임 목록 안의 대체만 허용하고, 그 밖에는 `[허용된 다른 담당 선택] [설정 유지·대기]`를 제공한다. Engine 계정 기본값은 별도 record다.
+경로 record는 `scopeType/scopeId, agentRef/profileRef, revision, author, delegationRef`다. CRUD는 expected revision과 operationId로 기록한다. 우선순위는 명시 요청→업무 binding→방→routing Board→앱이다. 미설정은 상속하지만 설정된 Agent의 이용 불가는 조용히 건너뛰지 않는다. 사전 위임 목록 안의 대체만 허용하고, 그 밖에는 `[허용된 다른 담당 선택] [설정 유지·대기]`를 제공한다. Engine 계정 기본값은 별도 record다.
 
 각 범위의 저장·해제·재시작·충돌, Agent 이용 불가에서 적용 출처 일치·기존 업무 오변경 0·방 identity 변경 0을 검사한다.
 
@@ -1512,7 +1625,13 @@ Task 상태는 scheduler의 정본 event로 투영한다. 중지 확인 뒤 canc
 
 인수 절차: 41행 direct 결과, 분할 원문 중 1개 누락, OCR 실패, 원문 교체, 권한 철회, 중지 뒤 packet 도착을 주입한다. 정확한 payload hash, 미판독 표시, 새 원문 coverage 초기화, 취소 후 후속 실행 0건을 확인한다. 복구 불가는 원문 보기·대체 자료·명시적 범위 축소로 fallback한다.
 
-활동 navigation resolver는 `activityKind, taskStatus, liveBinding, observationRef, lastConfirmedAt`을 입력으로 사용한다. 실행 중인 interactive Browser/Terminal에 유효한 liveBinding이 있으면 기존 viewId·runtime identity를 반환한다. renderer가 detached라면 같은 View에 다시 부착하며 runtime을 재실행하지 않는다. 완료된 command/file-read에는 정확한 observationRef를 반환한다. Live 부재·연결 미확인은 기존 Canvas 논리 node와 선택적인 마지막 Snapshot을 반환한다. 명시적인 `[당시 관찰]`·`[현재 조작면]` 입력은 이 기본 경로와 독립적으로 각각의 identity를 해소한다.
+활동 resolver는 Agent/기본 Codex 모드, 업무·행동·권한과 `activityKind, taskStatus,
+liveBinding, observationRef, lastConfirmedAt`을 함께 확인한다. 기본 열기는 기록 패널을
+반환하며 과거 관찰은 정확한 observationRef로 해소한다. 명시적인 현재 작업 화면 이동만
+검증된 viewId·runtime identity를 반환한다. renderer가 detached이면 같은 View에 다시
+부착하되 실행을 재시작하지 않는다. 유지 중인 runtime의 Live 부재는 기존 Canvas 작업 표현에
+남기고, 종료된 과거 관찰마다 Canvas node를 새로 만들지 않는다. 패널 열기와 Canvas 이동은
+별도 사용자 행동으로 기록한다.
 
 ##### 역할별 가림의 원자적 접근 제한
 
@@ -1640,6 +1759,9 @@ Memo body revision과 reply event의 author는 분리한다. Agent reply에는 b
 #### Profile revision과 Engine adapter — §14 확장
 
 **화면 연결**: [사용자 조작](../../docs/references/design-synthesis/egdesk-ux-realization-proposals.md#ux-detail-agent-profile)
+
+아래 record·생성·활성화 규칙은 사용자가 선택한 Agent Profile에 적용한다. 기본 Codex는
+유효한 Engine과 기본 실행 설정으로 동작하며 Profile record 생성·활성화를 요구하지 않는다.
 
 Profile record는 안정 ID, owner, visibility, activeRevision을 가진다. revision은 내용 hash·작성자·부모 revision·검사 결과를 가진 불변 record다. 활성화·대체·보관은 pointer와 lifecycle event를 원자적으로 변경한다. `expectedRevision`이 다른 쓰기는 충돌로 반환하며 초안을 보존한다. 참조 중 revision 삭제는 tombstone과 별도 payload 보존 정책을 적용한다. import는 새 비활성 ID로 만들고 credential·실행 권한을 가져오지 않는다.
 
@@ -1786,7 +1908,7 @@ child 권한은 parent 위임·Profile 상한·계정 권한의 교집합이다.
 
 health는 host nonce 응답, process generation/exit, adapter handshake, bounded `thread/read`, 계정·도구 상태를 독립 조회한다. catalog 응답을 추론 성공으로 취급하지 않는다. 활성 상태는 10초 간격, 30초 무응답이면 `미확인`; 재연결은 1/2/4/8/16/30초와 ±20% jitter로 제한한다. 이는 검사 정책이지 장애 확정 기준이 아니다. process 교체는 새 identity이며, Engine process가 다른 Run도 소유하면 전체 process를 종료하지 않는다.
 
-인수는 정상·취소·부분 완료·단절·재접속·중복·늦은 결과를 바꾼 6개 순서 fixture를 각각 30회 수행한다. 1/2/12 Task와 1/30 Agenda를 조합하고 동일 revision에 대한 의미 결과·권한·receipt를 비교한다. 초기 목표는 오귀속·중복 외부 실행·독립 결과 유실 0건이다. 시간·용량은 p50/p95/max와 환경·version·확인 시각을 기록하며 아직 측정값은 없다. 실패하면 해당 adapter 기능을 차단하고 checkpoint·Snapshot·독립 작업을 유지한다.
+인수는 정상·취소·부분 완료·단절·재접속·중복·늦은 결과를 바꾼 6개 순서 fixture를 각각 30회 수행한다. 1/2/12 Task와 1/30 Board를 조합하고 동일 revision에 대한 의미 결과·권한·receipt를 비교한다. 초기 목표는 오귀속·중복 외부 실행·독립 결과 유실 0건이다. 시간·용량은 p50/p95/max와 환경·version·확인 시각을 기록하며 아직 측정값은 없다. 실패하면 해당 adapter 기능을 차단하고 checkpoint·Snapshot·독립 작업을 유지한다.
 
 ##### 결과 완전성의 별도 축
 
@@ -2070,7 +2192,7 @@ cross-volume은 목적지 create-only→검증→조건부 원본 삭제 순서�
 
 기준선은 독립 supervisor+portable-pty, renderer xterm.js다. gateway·transport·renderer와 PTY master 수명을 분리한다. `readOutput/attach/claimInput/write/resize/detach/terminate`는 별도 operation이다. 선택·복사·관찰에는 write handler를 연결하지 않고 `disableStdin`과 서버 입력권 검사를 함께 적용한다. [portable-pty](https://docs.rs/portable-pty/latest/portable_pty/), [xterm 옵션](https://xtermjs.org/docs/api/terminal/interfaces/iterminaloptions/)
 
-`resourceReferences`와 `runtimeOwnerSet`은 별도 관계다. 참조 추가·View 생성·고정·관찰 attach는 owner set을 쓰지 않는다. 공동 유지가 허용된 정책의 명시적 operation만 owner를 추가한다. Agenda 닫기는 마지막 실제 owner 제거에 따라 종료하며 참조 수로 판단하지 않는다.
+`resourceReferences`와 `runtimeOwnerSet`은 별도 관계다. 참조 추가·View 생성·고정·관찰 attach는 owner set을 쓰지 않는다. 공동 유지가 허용된 정책의 명시적 operation만 owner를 추가한다. Board 닫기는 마지막 실제 owner 제거에 따라 종료하며 참조 수로 판단하지 않는다.
 
 실행 identity는 `deviceKeyId, bootId, supervisorEpoch, runtimeId, pid, processStartTime`이다. 인증된 supervisor·새 challenge·출력 sequence를 대조한 뒤에만 same-process를 표시한다. gateway가 죽어도 supervisor가 살아 있으면 재연결; PTY owner가 죽었으면 snapshot-only/unknown이다. 임의 PID를 새 helper에 붙인 것으로 복원을 주장하지 않는다.
 
@@ -2080,7 +2202,7 @@ cross-volume은 목적지 create-only→검증→조건부 원본 삭제 순서�
 
 Codex Agent는 Engine Profile별 격리 App Server를 사용한다. 로컬 stdio JSONL·`initialize/initialized`, ChatGPT managed login, `account/read`·plan·rate limits를 확인한다. 정상 조정은 `turn/steer`의 expectedTurnId로 전달하고 실제 다음 입력 반영을 별도 기록한다. active turn이 없으면 같은 업무의 다음 호출에 포함하며 forced pause/fork를 만들지 않는다. paid API SDK로 대체하지 않는다. Agent-room 관계와 provider thread·Run·PTY identity도 분리한다. [공식 App Server](https://learn.chatgpt.com/docs/app-server)
 
-인수 절차: 출력 폭주 중 선택/복사→renderer 닫기→gateway 재시작→동일 supervisor 연결→supervisor 종료→PID 재사용→원격 종료 응답 유실을 주입한다. stdin 0, sequence 누락/중복 식별, same/new/snapshot 구분, Canvas 발견 가능성을 확인한다. 다른 Agenda의 참조만 추가한 경우 원 owner 닫기가 종료를 막지 않아야 한다. 실패 시 입력 차단·읽기 전용 spool·새 세션 경로를 유지한다.
+인수 절차: 출력 폭주 중 선택/복사→renderer 닫기→gateway 재시작→동일 supervisor 연결→supervisor 종료→PID 재사용→원격 종료 응답 유실을 주입한다. stdin 0, sequence 누락/중복 식별, same/new/snapshot 구분, Canvas 발견 가능성을 확인한다. 다른 Board의 참조만 추가한 경우 원 owner 닫기가 종료를 막지 않아야 한다. 실패 시 입력 차단·읽기 전용 spool·새 세션 경로를 유지한다.
 
 ##### process 집합과 detach
 
@@ -2117,7 +2239,7 @@ WAL은 로컬 디스크에서 사용한다. 초기 checkpoint는 1,000page 또�
 
 초기 운용값은 preview/index cache 512MiB LRU, 비선택 renderer 60초 후 분리다. IME·미보존 버퍼·활성 입력권은 제외하고 Canvas 표현은 남긴다. object 10GiB에서 용량 안내, 여유 공간이 `max(1GiB, volume 5%)` 미만이면 큰 신규 수집을 제한한다. 이는 보존기간이나 제품 지원 상한의 결정이 아니다.
 
-GC는 활성 Run·Saved Agenda·Answer/Briefing·고정·export/migration·복구/백업 pin을 mark한다. 미참조여도 승인된 보존기한 뒤에만 sweep하고 정책 미정이면 자동 삭제하지 않는다. crash orphan은 최소 24시간 격리 후 재검사한다. 공유 hash의 다른 유효 참조가 남으면 물리 삭제 미완료를 표시한다. 가림은 파생본이며 기존 byte를 바꾸지 않는다. 명시 삭제·원문/packet 연동·권한 철회 후 열람은 해당 정책과 강제 조건을 따른다.
+GC는 활성 Run·Saved Board·Answer/Briefing·고정·export/migration·복구/백업 pin을 mark한다. 미참조여도 승인된 보존기한 뒤에만 sweep하고 정책 미정이면 자동 삭제하지 않는다. crash orphan은 최소 24시간 격리 후 재검사한다. 공유 hash의 다른 유효 참조가 남으면 물리 삭제 미완료를 표시한다. 가림은 파생본이며 기존 byte를 바꾸지 않는다. 명시 삭제·원문/packet 연동·권한 철회 후 열람은 해당 정책과 강제 조건을 따른다.
 
 `extraOriginalCapturePolicy, formRestorePolicy, bundleIncludePolicy, resetRecoveryPolicy, resetBackupPolicy`를 독립 저장한다. 추가 원문 수집은 고정 관계 집합·권한 revision에 묶으며 필수 과거 근거와 구별한다.
 
@@ -2235,7 +2357,7 @@ IME는 compositionstart/end·isComposing·keydown/keyup 세대를 함께 추적�
 
 초기 시험 계획은 OS 조합당 AT 켬/끔 2×한국어/영어 2×기본/200%/320px reflow 3×핵심 흐름 6=72개 조합 경로다. 이는 실측 시간이나 통과 건수가 아니다. AA 목표는 해당 A/AA 기준·전체 과정·접근성 지원 방식까지 검사하며 일부 수치나 대표 화면만으로 선언하지 않는다. 비웹 shell의 WCAG2ICT는 해석 지침이지 인증 보장이 아니다. [WCAG](https://www.w3.org/TR/WCAG22/#conformance-reqs), [WCAG2ICT](https://www.w3.org/TR/wcag2ict-22/)
 
-인수 절차: Agenda 30개·자료 20개·활동 3개·경고 2개·긴 이름에서 여섯 흐름을 키보드와 드래그 없는 클릭으로 수행한다. IME 중 저장/전송/Esc, 원 target 삭제, native 취소, Terminal 선택, 확대·모션 감소를 포함한다. 오전송·다른 업무 focus·선택만으로 실행은 0이고 같은 대상·결과에 도달해야 한다. 실패 renderer는 같은 행동의 접근 가능한 대체 표면으로 전환한다. 읽기만 가능한 fallback으로 편집 약속을 통과 처리하지 않는다.
+인수 절차: Board 30개·자료 20개·활동 3개·경고 2개·긴 이름에서 여섯 흐름을 키보드와 드래그 없는 클릭으로 수행한다. IME 중 저장/전송/Esc, 원 target 삭제, native 취소, Terminal 선택, 확대·모션 감소를 포함한다. 오전송·다른 업무 focus·선택만으로 실행은 0이고 같은 대상·결과에 도달해야 한다. 실패 renderer는 같은 행동의 접근 가능한 대체 표면으로 전환한다. 읽기만 가능한 fallback으로 편집 약속을 통과 처리하지 않는다.
 
 ##### 실제 편집 가능한 접근성 대체 표면
 
@@ -2447,7 +2569,7 @@ capture→scope 검사→mask→encode 순서를 지킨다. 웹 fallback은 사�
 
 결과는 파일 재읽기·provider 조회·독립 관찰로 검증한다. 같은 Agent가 수행해도 자기 설명·입력 로그·녹화 존재를 성공 증거로 쓰지 않는다. 기술 성공·접수·현재 업무 반영을 분리하고 업무 의미는 parent의 유효한 판단 범위에 둔다.
 
-**미실행 oracle:** 잘못된 profile/tab/renderer 거부; pan 전후 target 불변·viewport 변경 시 좌표 폐기; IME 확정 전송 0/별도 전송 1; 인계·긴급 중지 후 추가 입력 0; 금지 프레임 전송 0; Linux 미검증 입력 불가·portal 취소 시 권한 없음; 관찰/앱 닫기 중 녹화 node·owner 유지; 소유 표현 불가 시 계속 기록 거부; Agenda 종료 후 owned recorder 종료 확인; 입력 성공·결과 불일치에서 완료 판정 금지.
+**미실행 oracle:** 잘못된 profile/tab/renderer 거부; pan 전후 target 불변·viewport 변경 시 좌표 폐기; IME 확정 전송 0/별도 전송 1; 인계·긴급 중지 후 추가 입력 0; 금지 프레임 전송 0; Linux 미검증 입력 불가·portal 취소 시 권한 없음; 관찰/앱 닫기 중 녹화 node·owner 유지; 소유 표현 불가 시 계속 기록 거부; Board 종료 후 owned recorder 종료 확인; 입력 성공·결과 불일치에서 완료 판정 금지.
 
 ##### Linux 입력 지원 경로
 
@@ -2501,8 +2623,8 @@ popup·resize·source 교체로 generation이 바뀌면 이전 가림을 그대�
 
 인계는 `prepare(handoffId, recordingId, owner, scope, maskRev, boundary) → native host 준비 → 첫 허용 구간 저장/검사 → Canvas node의 host binding 영속화 → host ACK → 기존 MediaRecorder 최종 dataavailable/stop 저장 → 앱 종료`다. ACK에는 host/process generation·source/mask revision·구간 hash·중지 가능 상태를 담는다. 기존 renderer 객체를 이전하거나 생존시켰다고 표시하지 않는다.
 
-구간별 실행체·시각·중복/누락을 보존하며 동일 논리 기록과 Task/Run에 연결한다. host 표시와 Canvas 녹화 node에 중지·재진입을 유지한다. ACK 유실은 같은 handoffId 조회로 복구하며 encoder를 중복 시작하지 않는다. Agenda 닫기는 그 Agenda만 소유한 detached recorder도 종료한다.
+구간별 실행체·시각·중복/누락을 보존하며 동일 논리 기록과 Task/Run에 연결한다. host 표시와 Canvas 녹화 node에 중지·재진입을 유지한다. ACK 유실은 같은 handoffId 조회로 복구하며 encoder를 중복 시작하지 않는다. Board 닫기는 그 Board만 소유한 detached recorder도 종료한다.
 
 ##### 앱 종료와 독립 recorder 인계 인수 조건
 
-인계 각 단계의 crash/ACK 유실, 실제 Firefox 종료, 새 host 실패, Agenda 종료를 검사한다. renderer recorder 생존 주장 0, 중복 encoder 0, 구간 손실 은폐 0, 활성 녹화 node·host 중지 경로 유지.
+인계 각 단계의 crash/ACK 유실, 실제 Firefox 종료, 새 host 실패, Board 종료를 검사한다. renderer recorder 생존 주장 0, 중복 encoder 0, 구간 손실 은폐 0, 활성 녹화 node·host 중지 경로 유지.

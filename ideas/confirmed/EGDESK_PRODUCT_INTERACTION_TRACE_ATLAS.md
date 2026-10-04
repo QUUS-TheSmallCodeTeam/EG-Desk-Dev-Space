@@ -22,19 +22,18 @@
 
 ### 0.1 한 화면 mental model
 
-아래 ASCII는 픽셀 위치나 최종 스타일을 정하는 wireframe이 아니다. `어떤 화면이
-어떤 제품 표면 안에 존재하고`, `Agent 실행체가 어디에 보이며 어디에 실제로
-존재하지 않는지`를 먼저 이해하기 위한 관계 배치다.
+EG-Desk를 처음 열면 이미 있는 Desk·Canvas의 Browser가 화면에 맞춰 집중 표시된다.
+아래는 Canvas를 줌아웃해 같은 공간의 다른 자료와 도구를 드러낸 화면이다.
 
 ```text
  +--------------------------------------------------------------------------+
- | EG-Desk / Firefox shell                                                  |
+ | EG-Desk                                                                  |
  | +----------------+-----------------------------------------------------+ |
  | | Sidebar        | Desk / Canvas                                       | |
  | |                | +-------------------------------------------------+ | |
- | | Saved Agendas  | | Canvas                                          | | |
- | | - Agenda A     | |                                                 | | |
- | | - Agenda B     | |  +-------------+   +-------------------------+ | | |
+ | | Saved Boards  | | Canvas                                          | | |
+ | | - Board A     | |                                                 | | |
+ | | - Board B     | |  +-------------+   +-------------------------+ | | |
  | |                | |  | Browser     |   | Chat                    | | | |
  | |                | |  | View        |   | View                    | | | |
  | |                | |  +-------------+   +-------------------------+ | | |
@@ -43,7 +42,7 @@
  | |                | |  | File/View   |   | Result / Artifact       | | | |
  | |                | |  +-------------+   +-------------------------+ | | |
  | |                | |                                                 | | |
- | |                | |  [Agent activity: status / scope / evidence]   | | |
+ | |                | |  [작업 대상의 Agent 배지]  Chat의 […] → 기록   | | |
  | |                | +-------------------------------------------------+ | |
  | +----------------+-----------------------------------------------------+ |
  +--------------------------------------------------------------------------+
@@ -54,22 +53,29 @@ Agent Runtime --request/tool intent--> System --validated UI/state change--> Des
 
 - **Desk**는 사용자가 지금 일하는 표면이다.
 - **Canvas**는 View, artifact, 주석과 단계별 설명을 공간적으로 배치·탐색하는 영역이다.
+- 처음의 Browser 집중 표시와 일반 Desk는 별도 시작 화면이나 다른 Desk가 아니라
+  같은 Canvas의 카메라 시점이다. 줌아웃하면 Browser를 둔 채 주변 배치가 드러난다.
 - 기본 제품 모델에는 하나의 Desk와 그 Desk에 속한 하나의 Canvas가 있다. 여러
-  Saved Agenda를 같은 Canvas에 서로 독립된 projection으로 동시에 열 수 있으며,
-  Agenda를 연다고 기존 내용을 교체하거나 새 Desk를 만들지 않는다.
-- 하나의 Desk·Canvas는 물리 PC 한 대를 뜻하지 않는다. 같은 Agenda에서 여러 PC의
+  Saved Board를 같은 Canvas에 서로 독립된 projection으로 동시에 열 수 있으며,
+  Board를 연다고 기존 내용을 교체하거나 새 Desk를 만들지 않는다.
+- 하나의 Desk·Canvas는 물리 PC 한 대를 뜻하지 않는다. 같은 Board에서 여러 PC의
   자료와 실행을 연결할 수 있으며, 폴더는 그중 하나의 자료 위치다. 각 작업에서는
   실행하는 PC·대상·계정·마지막 확인 상태를 구별할 수 있다.
 - **Chat, Browser, File/View**는 Canvas 위에 놓일 수 있는 제품 요소다. Chat이
   특정 Agent/persona와 관계를 이어 가는 방으로 보일 수 있지만, Agent 실행체가
   Chat 안에 살거나 대화 기록 전체가 모델 context라는 뜻은 아니다.
-- **Saved Agenda**는 Sidebar에서 다시 열 수 있는 사용자가 저장한 작업 결합이다.
-  앱을 다시 켰을 때 Canvas에 이전 뷰가 자동 복원되는 것과 별개다.
+- **Board**는 특정 일을 바로 할 수 있게 자료·도구·대화·메모와 배치·참조 연결을
+  갖춘 업무 구성이다. **Saved Board**는 사용자가 그 구성을 명시적으로 저장한 것이다.
+  Canvas 자체나 Kanban식 메모판이 아니고, 참고자료 목록·폴더와도 다르다.
+  앱 재실행 시 이전 뷰를 자동 복원하는 기록과도 별개다.
 - **Agent activity**는 실행체 자체가 아니라 System이 Desk에 투영한 상태·범위·증거다.
   Agent Runtime은 위임과 권한을 받은 뒤 System을 통해서만 Desk 요소에 행동한다.
-- 사용자나 Agent의 의미 있는 활성 작업, sleeping 상태, historical snapshot은
-  Canvas에서 찾을 수 있는 표현을 가진다. Canvas viewport 밖으로 pan됐다는 사실만으로
-  닫히거나 suspend되지는 않으며, 무거운 renderer만 필요에 따라 분리될 수 있다.
+- 실제 작업 대상과 유지 중인 runtime은 Canvas에서 찾을 수 있는 표현을 가진다.
+  과거 읽기·도구 기록은 생각 버블의 기록 패널에서 확인하며 도구 호출마다 Canvas에
+  새 카드를 쌓지 않는다. 보고용으로 선별한 근거는 Canvas에 펼칠 수 있다.
+  Canvas viewport 밖으로 pan됐다는 사실만으로 닫히거나 suspend되지는 않는다.
+- 앱 상단 바는 창의 위쪽 가장자리에 붙어 있다. 기존 창 이동·주소 입력 등 상단
+  컨트롤은 그대로 쓰며, 빈 Canvas 드래그를 새 창 이동 조작으로 사용하지 않는다.
 
 ### 0.2 사용설명서의 입력 표기법
 
@@ -94,37 +100,57 @@ Terminal 코드 블록 안의 `git status`처럼 쓰면 **셸 명령**이다. �
 
 `Q-ID`는 세부 항목의 식별자다. 화면·메뉴·키보드·복구 경로는 각 흐름의 상세 조작에 연결된다. 정책에 따라 달라지는 동작은 조건부 기준선이며, 연결된 사용자 선택의 승인을 뜻하지 않는다.
 
-### 0.3 EG-Desk 정상 실행 직후
+<a id="atlas-first-use"></a>
+### 0.3 처음 시작하기와 다시 열기
 
-정상 실행은 랜딩 페이지나 복구 선택 화면에서 시작하지 않는다.
+처음 EG-Desk를 실행하면 이미 있는 Canvas의 Browser가 화면에 맞춰 집중 표시되고
+상단 주소창에 포커스가 있다. Sidebar·Dock과 주변 Canvas는 집중 표시 동안 보이지
+않지만 같은 Desk에 있다. 별도 앱 시작 관문이나 `[Desk 시작]` 단계 없이 바로 주소를
+입력할 수 있다. Browser 안에는 주소 입력을 돕는 시작 페이지가 표시될 수 있다.
+
+Browser 카드 안에 안내 시작 페이지가 있는 경우의 예:
 
 ```text
-User action                    Visible result                    Processing owner
-----------------------------  --------------------------------  -------------------------
-Click EG-Desk app icon        Actual Desk appears               System starts shell
-or launch from OS keyboard    Canvas begins restoring views     System hydrates Desk state
-                              Saved Agenda rows appear Sidebar  System loads Agenda metadata
-                              No AI response starts             Agent: none
++------------------------------------------------------------------+
+| EG-Desk     [주소 또는 검색어 입력                              ] |
+|------------------------------------------------------------------|
+|                                                                  |
+|                         웹 탐색 시작                              |
+|       위 주소창에 주소 또는 검색어를 입력하세요.                   |
+|                                                                  |
++------------------------------------------------------------------+
 ```
 
-자동 Desk 복원은 브라우저 탭 복원처럼 이전에 열려 있던 view와 배치를 다시 보여
-주는 연속성 기능이다. 저장된 Agenda는 사용자가 명시적으로 저장한 작업 결합이므로
-Sidebar에 나타나더라도 자동으로 열리지 않는다. 어느 쪽이 먼저 화면에 그려지는지는
-중요도 순서가 아니며, 각각 독립적으로 준비되는 화면 상태다.
+- 주소 입력 후 `Return`을 누르면 같은 Browser에서 웹페이지를 연다.
+- Canvas 줌아웃 제스처(`pinch`)나 기존 `[−]`로 배율을 낮추면 같은 Browser를 둔 채
+  주변 Canvas·Sidebar·Dock이 드러난다. Browser에 다시 집중해도 같은 페이지를 쓴다.
+  줌아웃에 프로필 생성이나 Codex 인증을 먼저 요구하지 않는다.
+- 프로필 로그인과 Codex 연결을 한 절차로 묶는 정책은
+  [계정 연결 선택](../../docs/codex/egdesk-product-interaction-trace-atlas-editorial-ledger.md#hum-engine-001)을 따른다.
+  브라우저 프로필 생성, Codex 인증, 각 웹사이트 로그인은 서로 다른 상태이며
+  필요한 기능을 사용할 때 각각 안내한다.
+- 재방문자는 별도 시작 절차를 반복하지 않는다. 이전 집중/Canvas 표시 상태와 열린
+  View·배치를 복원하며, 필요한 재인증은 해당 연결에만 안내한다. 저장된 Board의
+  Sidebar 목록과 마지막에 열어 둔 화면은 별도로 복원한다.
 
-### 0.4 최초 설정과 Chat 화면
+Browser 집중 상태와 일반 Desk를 오갈 때 바뀌는 것은 Canvas 카메라 시점이다.
+기존 Browser의 View·URL·세션·논리 viewport·페이지 zoom은 유지되며, Browser를
+복제하거나 주소를 다시 열지 않는다. 상단 바는 창 위쪽 가장자리에 붙고 기존
+창 이동·입력 컨트롤을 유지한다. 상세: [첫 사용 화면](../../docs/references/design-synthesis/egdesk-ux-realization-proposals.md#flow-first-use),
+[시작·연결 기술 계약](./EGDESK_INTERACTION_AND_ORCHESTRATION_CONTRACT.md#tech-first-use).
 
-Dock의 Chat 아이콘을 클릭하면 먼저 **Agent/persona별 담당자 방인 Chat view가
-Canvas에 열린다**. 사용할 수 있는 Agent Profile이 있으면 최근 사용했거나 사용자가
-고른 Agent의 avatar·이름이 상대 정체성으로 header와 message bubble에 나타난다.
-Agent가 아직 설정되지 않았다는 이유로 Chat 바깥의 별도 마법사로 보내지는 않는다.
-사용할 수 있는 Profile이 없으면 같은 Chat view 안에 `[Agent 설정]` 행동을 보여 주며
-작성기와 `[전송]`을 사용할 수 없는 이유를 함께 표시한다.
+### 0.4 기본 Codex와 선택적 Agent
 
-제품에 기본 제공 Agent/Profile을 포함할지는 아직 `Q-AGENT-02`의 결정 사항이다.
-기본 Agent/Profile의 제공 여부는 `Q-AGENT-02`가 정한다. 유효한 기본 Profile이
-있으면 설정 단계를 건너뛰고 header에 그 Profile이 선택되어 나타난다. 없으면 다음
-추천 경로가 나타난다.
+Desk에서 Dock의 `[Chat]`을 처음 누르면 기본 **Codex** 대화가 Canvas에 열린다.
+Codex 연결이 유효하면 작성기에 바로 입력할 수 있다. Agent를 만들거나 성격·역할을
+설정하는 절차는 첫 요청의 필수 단계가 아니다. 기본 Codex에는 사용자 생성 Agent의
+인격체 설정이나 생각 버블을 먼저 붙이지 않으며, 일반 대화·진행·결과 표시를 제공한다.
+연결이 만료됐으면 같은 화면에 `[Codex 다시 연결]`과 전송 제한 이유를 표시한다.
+
+사용자가 Agent를 만들면 이름·역할·personality를 가진 담당자 방과 생각 공간이 추가된다.
+`[방 목록]`에서 기본 Codex와 만든 Agent의 방을 구별해 고른다. Agent 생성 자체는
+기존 Codex 대화를 이동하거나 그 대화 전체를 새 Agent에게 전달하지 않는다.
+기본 Codex와 Agent의 실행 계정·허용 도구·승인 검사는 공통 기술 계약을 따른다.
 
 ```text
 Desk / Canvas
@@ -147,7 +173,9 @@ EG-Desk Dock: [Browser] [파일] [Chat]    상단: [설정]    [명령]: Termina
 
 Chat header의 `[방 목록]`에서 담당자 방과 공유 대화를 찾는다. 같은 방의 `[활동 N건]`은 업무 목록을, `[업무별 보기]`는 대화 필터를 연다. 업무마다 새 방을 만들지 않는다. 공유 대화는 `[방 목록] → [공유 대화] → [새 대화]`에서 만들며 공개 범위를 따로 확인한다. `[⋯] → [담당자 설정]`은 같은 본문에서 열고 작성기를 유지한다. 상세: [담당자 방](../../docs/references/design-synthesis/egdesk-ux-realization-proposals.md#ux-detail-chat-entry), [공유 대화](../../docs/references/design-synthesis/egdesk-ux-realization-proposals.md#ux-detail-context-share). 관련: `Q-CHAT-01`, `Q-OBJ-06`, `Q-AI-12`, `Q-AI-13`.
 
-최초 Agent 설정은 같은 Chat의 설정·Profile 관리에서 진행한다. 기본 제공 여부와 편집 권한은 선택된 정책을 따른다. 관련: `Q-DATA-06`, `Q-AGENT-01`, `Q-AGENT-02`.
+위 담당자 방 배치와 아래 Agent 설정은 사용자가 Agent를 만들기로 한 경우의 흐름이다.
+기본 Codex 사용 중에는 이 설정을 건너뛴다. 편집 권한·공유 범위는 선택된 정책을 따른다.
+관련: `Q-DATA-06`, `Q-AGENT-01`, `Q-AGENT-02`.
 
 ```text
 Click [방 목록] -> Click [Profile 관리] -> Click [새 Profile]
@@ -169,14 +197,30 @@ runtime을 가리키는 별도 설정이다. EG-Desk 로그인, AI Engine 구독
 승인·실행 제한을 다시 결합한다. 기술 원리:
 [Engine Profile과 identity plane](./EGDESK_INTERACTION_AND_ORCHESTRATION_CONTRACT.md#tech-engine-profile).
 
-**요청 담당 Agent**는 현재 사용자 요청과 사용자 대상 Answer를 책임지는
-Run-level 실행 역할이며, 별도 영속 제품 객체나 대화 참가자 이름이 아니다.
+**요청 담당 Agent**는 기본 Codex 또는 사용자 생성 Agent에서 현재 사용자 요청과
+Answer를 책임지는 Run-level 실행 역할이다. 이 기술 역할이 있다는 이유로 기본 Codex에
+새 인격체·Agent Profile이 생성되는 것은 아니다.
 여러 Agent가 기여하는 요청에서는 integration 기능이
 이 역할을 이어받아 하나의 논리적 Answer를 구성할 수 있다.
 
-`[ · · · ]`는 공개 가능한 활동의 진입점이며 숨은 사고 과정이 아니다. 실행 중인 상호작용 Browser·Terminal은 그 작업의 동일 Live View로, 완료된 읽기·명령은 해당 호출의 불변 Snapshot으로 이동한다. Live가 없거나 연결을 확인하지 못하면 논리 작업 node에 준비·미확인 상태를 남기며 관찰을 위해 새 실행을 만들지 않는다.
+<a id="atlas-agent-thought-space"></a>
+사용자 생성 Agent가 응답을 준비하는 동안 작은 `[ · · · ]` 생각 버블이 움직인다.
+읽기·도구 호출마다 대화 메시지를 추가하지 않는다. 실제 작업 대상에는 해당 Agent의 작은
+프로필 배지·윤곽이 나타나며, 이는 사용자가 클릭해 활성화한 표시와 구별된다. 읽기 표시만으로
+입력권이나 Canvas 카메라는 바뀌지 않는다.
 
-`[당시 관찰]`과 `[현재 조작면]`으로 두 시점을 고르고 `[비교]`로 함께 본다. 직접 읽기는 명명 결과 전체를, Smart Read는 `[원본 캡처] [이 Agent에게 전달된 내용] [변환 관계]`와 coverage를 구분한다. Snapshot에서 `[현재 열기]`를 누르면 검증된 기존 Live를 우선 찾되 Snapshot identity는 유지한다. 현재 내용을 과거 관찰로 대체하거나 일회성 명령을 지속 Terminal로 가장하지 않는다. 상세: [활동과 관찰](../../docs/references/design-synthesis/egdesk-ux-realization-proposals.md#ux-detail-reader-observation), [실행 상태 계약](./EGDESK_INTERACTION_AND_ORCHESTRATION_CONTRACT.md#impl-run-orchestration).
+사용자가 버블을 클릭하면 그 Agent·업무의 기록 패널이 Chat 옆에 열린다. 패널에서 읽은 자료,
+도구 결과, 공개 가능한 계획·판단 요약을 펼친다. 과거 자료는 `[당시 읽은 내용]`으로 이 패널
+안에서 확인하고, `[현재 작업 화면]`을 누른 경우에만 해당 Canvas 대상으로 이동한다.
+답변이 끝나도 메시지의 `[작업 기록]`으로 다시 열 수 있다. 패널의 `[×]` 또는 `Esc`는 이전
+대화 위치·작성기와 Canvas 배치를 유지한 채 닫는다. 기본 Codex는 Agent 전용 버블 대신
+일반 대화의 진행·기록 진입점을 사용하며, 보존 자료의 동일성은 같은 계약을 따른다.
+
+직접 읽기는 명명 결과 전체를, Smart Read는 `[원본 캡처] [이 Agent에게 전달된 내용]
+[변환 관계]`로 구분한다. 현재 내용을 과거 관찰 대신 보여 주지 않는다. 보고에 필요한
+근거를 Canvas에 펼치는 것은 전체 작업 기록의 자동 노출과 별개다. 상세:
+[활동과 관찰](../../docs/references/design-synthesis/egdesk-ux-realization-proposals.md#ux-detail-reader-observation),
+[실행 상태 계약](./EGDESK_INTERACTION_AND_ORCHESTRATION_CONTRACT.md#impl-run-orchestration).
 
 ### 0.5 Answer Briefing — 기존 `Playback` 명칭을 대체하는 제품 개념
 
@@ -213,9 +257,9 @@ Chat에서 보내는 후속 요청에 남겨 둔다.
 
 | 장 | 시작 장면 | 끝 장면 | 대표 흐름 |
 |---|---|---|---|
-| **1.1 처음부터 다시 켤 때까지 한 바퀴** | 새 로컬 설치 | 요청·브리핑·Agenda 저장 뒤 재실행 복원을 구분함 | 핵심 흐름 연결 경로 |
+| **1.1 처음부터 다시 켤 때까지 한 바퀴** | 새 로컬 설치 | 요청·브리핑·Board 저장 뒤 재실행 복원을 구분함 | 핵심 흐름 연결 경로 |
 | **1.2 실행과 Desk 연속성** | EG-Desk가 닫혀 있음 | 실제 Desk가 보이고 복원 상태를 구분함 | `L-01`–`L-03` |
-| **1.3 Agenda로 작업 보관·재개** | 현재 Desk 또는 저장된 Agenda 행 | 의도한 작업 결합을 저장·열기·갱신함 | `AG-01`–`AG-04` |
+| **1.3 Board로 작업 보관·재개** | 현재 Desk 또는 저장된 Board 행 | 의도한 작업 결합을 저장·열기·갱신함 | `AG-01`–`AG-04` |
 | **1.4 Canvas·Browser·파일 사용** | 실제 Desk | 리소스를 열고 배치·탐색·검증함 | `V-*`, `DISC-*`, `TOOL-*`, `BROWSER-*` |
 | **1.5 Chat·Agent·Smart Read·Answer Briefing** | Chat 입력 또는 기존 Answer | 계정·읽기 범위·Agent 활동을 확인하고 Chat과 Canvas 답으로 이어감 | `CHAT-*`, `AGENT-*`, `ENGINE-*`, `READ-*`, `AI-*`, `AUTH-*` |
 | **1.6 사람 중심 코딩과 Terminal** | 프로젝트·폴더 또는 선택적 Terminal | 변경과 검증 결과를 사람이 확인함 | `CODE-*`, `TERM-*` |
@@ -232,93 +276,79 @@ System 처리 → Agent 처리 → 상태 변화 → 실패 후 다음 UI 입력
 
 ### 1.1 처음 켠 순간부터 다시 켤 때까지 한 바퀴
 
-다음은 화면·입력·System·Agent·저장 경계를 연결한 최초 사용 예다. 대괄호 레이블과 키 조합은 상세 조작의 기준선이며, 정책에 따라 달라지는 단계는 해당 조건에서만 적용된다. `Q-*`는 관련 상세 항목이다.
-
-**상황**: 새 로컬 설치이고 저장된 Agenda와 자동 Desk 세션 기록이 없다. 사용할 수
-있는 기본 Agent Profile도 아직 없다고 가정한다. 사용자는 Agent를 한 번 설정하고,
-웹 자료를 열어 요약·비교를 요청하고, 실행 중 도구 활동과 최종 Answer Briefing을
-검토한 뒤 현재 작업을 Agenda로 저장하고 EG-Desk를 다시 실행한다. 유효한 기본
-Agent Profile이 이미 있으면 3–5번 설정 단계만 건너뛴다.
+**상황**: 처음 설치했고 저장된 Board·자동 Desk 복원 기록·사용자 생성 Agent가 없다.
+사용자는 같은 Canvas의 Browser로 먼저 웹페이지를 보고, 필요한 Codex 연결을 확인한 뒤
+기본 Codex로 자료를 요약한다. 필요하면 활동 기록과 답변 브리핑을 확인하고 업무 구성을 저장한다.
+Agent 생성은 이 한 바퀴에 필요하지 않다. 계정 연결 절차의 통합 여부는
+[HUM-ENGINE-001](../../docs/codex/egdesk-product-interaction-trace-atlas-editorial-ledger.md#hum-engine-001)의 조건을 따른다.
 
 | # | 제품 사용자 입력과 포커스 | 즉시 보이는 화면 | System 처리 | Agent 처리 | 다음 단계·경계 |
 |---:|---|---|---|---|---|
-| 1 | Dock/Applications에서 `Click [EG-Desk]`, 또는 `Press [⌘ Space]` → `Type "EG-Desk"` → `Press [Return]`을 사용한다. 최종 OS 진입 계약은 `Q-LIFE-01`이다. | Firefox shell의 실제 Desk가 첫 화면으로 열리고 EG-Desk 창이 입력 포커스를 받는다. | shell·Desk·Canvas를 시작하고 최초 로컬 상태를 확인한다. | 없음 | 랜딩·복구 마법사·Agenda 선택 화면을 먼저 열지 않는다. 시작 실패 시 추천 기본안 `[다시 시도] [진단 정보] [종료]`; `Q-LIFE-03`. |
-| 2 | `Observe` — 별도 입력 없이 초기 Desk를 확인한다. | Sidebar에는 빈 Saved Agenda 상태와 추천 기본안 `[새 Agenda] [가져오기]`, Canvas에는 추천 기본안 `[Browser 열기] [파일 열기] [Chat 열기]`, Dock에는 리소스·Chat·설정 진입 아이콘이 보인다. 초기 포커스는 Canvas의 첫 행동 또는 결정된 접근성 시작점이다. | 저장된 Agenda와 복원할 Desk 세션이 없는 최초 화면을 투영한다. | 없음 | 제품 사용자는 Canvas 또는 Dock에서 다음 행동을 직접 선택한다. 상세: `L-01`, `Q-LIFE-02`, `Q-LIFE-04`. |
-| 3 | Dock `[Chat]`을 열고 같은 Chat의 `[Agent 설정]` 또는 `[방 목록] → [Profile 관리] → [새 Profile]`로 들어간다. | 같은 본문에 Profile 초안과 표시 이름·지침·모델 정책·도구·제한 필드가 보이고 작성기를 유지한다. | 기존 정의와 가용성을 읽어 비활성 초안을 만든다. | 없음 | 기본 제공 여부는 연결된 정책을 따른다. 초안 생성은 Run 시작이 아니다. 관련: `Q-AGENT-02`, `Q-DATA-06`. |
-| 4 | 표시 이름을 `Type`하고 provider/model policy를 선택한다. `[AI Engine Profile]`에서 사용할 구독/API 계정을 고른다. 새 계정이 필요하면 `Click [AI Engine 계정 연결]` 후 전용 인증 탭의 provider 화면에서 의도한 계정을 선택·완료한다. | 원래 설정 화면은 연결 중 상태를 유지하고, 전용 인증 탭이 열린다. 완료 뒤 설정 화면으로 포커스가 돌아오며 Engine Profile에는 확인된 계정 식별 정보, auth mode, plan/quota 상태가 보인다. 일반 Browser·메일 계정과 다른 identity임을 구분한다. | 비밀값을 Profile 본문에 넣지 않고 Engine Profile별 credential store에 보관한다. callback 완료 알림만 믿지 않고 실제 active account·plan을 다시 확인한다. | 없음 | 새 외부 계정 연결은 `A-AUTH-01`. 계정 선택 기본 범위와 전환 영향은 [HUM-ENGINE-001](../../docs/codex/egdesk-product-interaction-trace-atlas-editorial-ledger.md#hum-engine-001). 상세: `ENGINE-01`, `AGENT-01`. |
-| 5 | `[초안 저장] → [차이 보기] → [활성화]` 후 `[새 Chat 기본값]`의 적용 범위를 확인하고 `[대화로 돌아가기]`를 누른다. | 저장된 초안·활성 revision·기본값 적용 결과가 구분되어 보인다. | 검증된 revision을 활성화하고 확인한 기본값만 저장한다. | 없음 | 초안 저장만으로 선택 가능한 Profile이 되지 않는다. 이후 요청마다 가용성·권한·승인을 다시 확인한다. 상세: `AGENT-01`, `AGENT-02`. |
-| 6 | `Click [Browser 열기]` → 주소 필드에 `Type "https://…"` → `Press [Return]`을 사용한다. 포인터 없는 진입과 최종 레이블은 `Q-VIEW-01`, `Q-BROWSER-01`에서 확정한다. | Canvas에 Browser view가 열리고 입력한 URL의 페이지가 view 안에 나타난다. | view 인스턴스, URL locator, Browser 계정·프로필의 권한·가능 행동 컨텍스트와 페이지 콘텐츠를 분리해 유지한다. | 사용자가 Browser 열기·탐색을 위임하지 않은 이 예에서는 없음. | 현재 Browser view가 Chat 요청의 context 후보가 될 수 있다. 상세: `V-01`, `BROWSER-01`, `TOOL-01`. |
-| 7 | Dock `[Chat]`으로 담당자 방을 열고 `[새 업무]`를 누른다. | header의 `[방 목록]`·담당자 이름, 대화, 활동, 업무 대상, 컨텍스트, 작성기·`[전송]`이 구분된다. 작성기에 포커스가 간다. | 기존 방 identity를 유지하고 새 업무 초안과 허용된 컨텍스트 후보만 준비한다. | 없음 | Browser를 열었다는 이유만으로 본문을 자동 수집하지 않는다. 사용할 Profile이 없으면 같은 Chat에서 설정 행동과 전송 제한 사유를 보인다. 상세: `CHAT-01`, `AGENT-01`. |
-| 8 | context item이 잘못 포함되었으면 제품 사용자가 해당 행의 `Click [× 제거]`를 한다. 포함 범위를 바꾸려면 `Click [현재 Browser · https://…]` → context 검사 화면에서 항목별 `Click [이 요청에서 포함/제외]` → `Click [적용]` 한다. | 제거한 item은 요청 컨텍스트 영역에서 사라지고, 수정한 item은 포함 상태·선택 이유·적용 범위가 갱신된다. 작성기 포커스는 유지되거나 `[Esc]` 후 작성기로 돌아간다. | draft context revision만 다시 계산하고 아직 Agent에게 전달하지 않는다. | 없음 — 전송 전에는 시작하지 않는다. | **제거·수정의 행위자는 제품 사용자**이고 System은 draft만 갱신한다. 상세: `AI-02`, `Q-AI-11`. |
-| 9 | 작성기에 `Type "이 자료의 핵심과 근거를 비교해줘"` → 추천 기본안 `Click [전송]` 한다. 키보드 전송은 `Q-AI-02`에서 정한 조합을 사용한다. | 사용자의 메시지가 timeline에 붙고 그 아래에 접근성 레이블 `Agent 작업 중`을 가진 애니메이션 `[ · · · ]` 활동 표시가 나타난다. `[중지]`는 실행 중 표시와 함께 접근 가능하다. | 요청·draft context·Profile·권한·도구 가용성·Ontology·제한을 검증해 Run snapshot을 고정하고 모델/도구 lifecycle event를 수집하기 시작한다. | 고정된 위임 범위에서만 응답 생성과 도구 행동을 시작한다. | 활동 표시는 raw reasoning이나 chain-of-thought가 아니라 공개 가능한 실행 상태의 진입점이다. 상세: `AI-01`, `AGENT-02`, `OBJ-052`. |
-| 10 | `Observe` — Chat의 `[ · · · ]` 애니메이션과 짧은 상태 변화를 본다. | Agent가 응답을 준비하거나 도구를 사용하는 동안 같은 활동 표시가 이어진다. 큰 첨부가 Reader로 전환되면 짧은 상태 `자료 읽는 중 · 전체 검토` 또는 `자료 읽는 중 · 지정 범위`와 source 수가 보이지만 내부 subagent 토론은 노출하지 않는다. | System은 호출 전에 요청 담당 Agent의 context admission을 계산한다. 직접 read이면 완전한 명명 결과를 그 Agent에 전달한다. Smart Read이면 immutable source를 Reader Session에 결합하고 coverage가 있는 Context Packet만 그 Agent에 전달한다. raw capture, packet, 전달 대상과 변환 관계를 각각 보존한다. | 요청 담당 Agent는 비교·판단·최종 답변을 계속 소유한다. Reader는 file-read 내부에서 원문을 검토하고 source-anchored packet을 반환한다. | 직접 read와 Smart Read를 같은 것으로 표시하지 않는다. 상세: `READ-01`, `READ-02`; 기술: [Smart Read](./EGDESK_INTERACTION_AND_ORCHESTRATION_CONTRACT.md#tech-smart-read). |
-| 11 | 실행 중 `[ · · · ]`를 누르고, 여러 활동이면 대상 행을 고른다. | 실행 중 상호작용 Browser·Terminal은 동일 Live로, 완료된 읽기·명령은 Snapshot으로 이동한다. `[당시 관찰] [현재 조작면] [비교]`와 읽기의 raw·packet·coverage를 구분한다. | 활동 identity와 현재 연결을 검증해 기존 표현을 연다. Live 미확인은 논리 node에 표시하고 과거 내용은 불변 manifest로 연다. | 기존 Run을 계속하며 관찰 열기만으로 도구를 재실행하지 않는다. | Snapshot과 Live는 별도 identity다. 상세: [활동과 관찰](../../docs/references/design-synthesis/egdesk-ux-realization-proposals.md#ux-detail-reader-observation). |
-| 12 | `Observe` — 최종 메시지와 Canvas 결과를 확인한다. | Chat에는 대화적으로 완결된 최종 메시지가, Canvas에는 비교·근거·표·원자료 등 매체에 맞는 report set가 나타난다. 원자료·Context Packet은 `[스냅샷]`, 가공 항목은 `[파생됨]`과 출처 동작으로 표시되며 제품 사용자의 `[라이브]` 뷰와 공존할 수 있다. | 각 report item을 `Agent가 실제 받은 payload/Context Packet → raw capture/source revision` lineage에 연결한다. Answer Briefing은 고정된 payload와 파생 산출물을 target으로 삼아 Live 변경으로 과거 답변을 덮어쓰지 않는다. | 최종 Answer와 함께 근거 snapshot 후보, Canvas 구성과 필요한 Briefing 구성을 제안한다. | report set는 raw trace 전체 복사본일 필요는 없지만 선별·가공 때문에 실제 입력과 source의 provenance가 끊겨서는 안 된다. 상세: `AI-04`, `OBJ-052`. |
-| 13 | 추천 기본안 `Click [브리핑 보기]` → `[다음]` 또는 `Press [→]` → 필요 시 `[전체 보기]`를 사용한다. | `1 / N`, Briefing Step 제목·설명, 집중 target set와 Focus Scope가 보이고 범위 밖 맥락은 정책에 따라 약화·숨김된다. | 각 target·권한·최신 상태를 검증하고 사용자의 입력마다 viewport·zoom·강조·가림·포커스를 전환한다. | briefing set·순서·Focus Scope를 제안했더라도 단계 이동 중에는 다시 실행되지 않는다. | `다음`은 System 화면 전환이지 Run 재생이나 새 Run이 아니다. 상세: `AI-05`, `OBJ-038`. |
-| 14 | `[의견]`에서 `이 근거를 먼저 설명해줘`를 입력해 `[저장]`한 뒤 `[다음 Chat에 포함]`을 누른다. | 저장된 댓글·단계·대상 revision이 Chat 초안에 붙는다. 기존 업무 초안과 다르면 별도 답장 초안이 열린다. | 권한과 참조를 검증하고 같은 댓글의 첨부를 중복 생성하지 않는다. | 없음 — 첨부만으로 실행하지 않는다. | 실제 전송 뒤 해당 업무의 후속 실행으로 이어진다. 상세: `AI-05`, `Q-MEDIA-05`, `Q-MEDIA-07`. |
-| 15 | 추천 기본안 `Click [현재 작업을 Agenda로 저장]` → 제목 필드에 `Type "자료 비교"` → `Click [저장]` 한다. | 저장 범위 미리보기, 유효성 검사, 저장 중·성공 상태와 Sidebar의 새 Saved Agenda 행이 보인다. | 제품 사용자가 확정한 범위만 Agenda revision으로 저장한다. 자동 Desk 세션과는 별개다. | 없음 | 이 첫 한 바퀴는 정상 저장 경로만 추적하며 실패·복구 UI는 `AG-01`, `AG-03`에서 별도로 다룬다. |
-| 16 | 앱 메뉴에서 `Click [EG-Desk 종료]` 또는 추천 기본안 `Press [⌘ Q]`를 사용한다. 최종 종료 계약은 `Q-LIFE-05`다. | 연속성 기록이 필요한 경우 그 진행 상태가 보인 뒤 창이 닫힌다. | 열어 둔 view·배치의 마지막 검증 상태를 자동 Desk 세션 기록에 반영한다. Saved Agenda를 암묵적으로 수정하지 않는다. | 없음 | 종료 실패·강제 종료·크래시 경로는 `L-03`에서 별도로 다룬다. |
-| 17 | 1번과 같은 방식으로 EG-Desk를 다시 실행한다. | 실제 Desk가 먼저 나타나고, 이전 Browser·Chat·Canvas view는 자동 Desk 세션에서 복원된다. `자료 비교` Agenda 행은 Sidebar에 나타나지만 자동으로 열리지 않는다. | 자동 Desk 세션과 Saved Agenda 메타데이터를 독립적으로 하이드레이션한다. | 없음 | Browser URL/view 복원과 Terminal process 생존·재부착은 같은 의미가 아니다. 상세: `L-02`. |
+| 1 | Dock/Applications에서 `Click [EG-Desk]`, 또는 `⌘ Space` → `Type "EG-Desk"` → `Return`을 사용한다. | 이미 있는 Canvas의 Browser가 화면에 맞춰 집중 표시되고 상단 주소창에 포커스가 있다. Browser 안의 안내 시작 페이지에서 주소 입력 방법을 볼 수 있다. 주변 Canvas·Sidebar·Dock은 보이지 않는다. | 앱·Browser를 시작하고 같은 Desk의 첫 카메라 시점을 맞춘다. | 없음 | 별도 앱 시작 관문·`[Desk 시작]`·프로필 생성 없이 주소를 입력할 수 있다. 시작 실패는 `[다시 시도] [진단 정보] [종료]`. 상세: `L-01`. |
+| 2 | 주소창에 `Type "https://…"` → `Press [Return]`한다. | 같은 Browser에 웹페이지가 열린다. | URL을 탐색하고 이 Browser의 프로필·상태를 유지한다. | 없음 | 일반 인터넷 이용은 Agent 생성이나 Codex 요청을 시작하지 않는다. |
+| 3 | Canvas 줌아웃 제스처(`pinch`) 또는 기존 `[−]`로 배율을 낮춘다. | Browser는 같은 페이지에 남고 주변 Canvas·Sidebar·Dock이 점차 드러난다. | Browser View·URL·세션·논리 viewport를 둔 채 Canvas 카메라만 축소한다. | 없음 | Desk를 보려고 프로필·Codex 연결을 먼저 마칠 필요가 없다. 첫 사용에 복원할 이전 일반 시점이 없어도 주변 공간이 드러난다. |
+| 4 | 기본 Codex를 쓸 계획이라면 상단 `[설정]`에서 연결 상태를 확인한다. | 현재 연결 상태와 필요한 경우의 연결 행동이 보인다. Browser와 Desk 배치는 그대로다. | 계정·가용성을 조회하며 Browser 프로필과 Codex 인증을 구별한다. | 없음 | 연결이 이미 준비됐거나 지금 필요하지 않으면 건너뛴다. 비밀번호를 Chat에 입력하지 않는다. 상세: `ENGINE-01`, `A-AUTH-01`. |
+| 5 | 필요한 경우 `[Codex 연결]`을 선택하고 인증 화면에서 사용할 계정을 확인한다. | 완료한 연결의 계정 식별 정보가 갱신되고 이전 Desk 시점과 Browser가 유지된다. | 실제 인증·가용성을 확인한다. | 없음 | 연결은 Codex 기능을 쓸 때 필요하며 Desk 표시의 선행조건이 아니다. Agent 생성·기존 페이지 재탐색은 발생하지 않는다. |
+| 6 | 기존 Browser 주소창을 클릭하고 요약할 웹 자료의 주소를 입력해 `Return`을 누른다. | 해당 페이지가 기존 Browser에 보인다. | 현재 URL·프로필·가능 행동과 페이지 내용을 구분해 유지한다. | 없음 | 필요할 때만 Dock에서 별도 Browser를 연다. 상세: `V-01`, `BROWSER-01`. |
+| 7 | Dock `[Chat]`을 클릭한다. | `Codex` 제목의 기본 대화와 작성기가 열리고 입력 포커스가 있다. 새 업무가 필요하면 `[새 업무]`를 누른다. | 기본 Codex 대화·Engine 연결과 요청 초안을 준비한다. | 없음 | Agent Profile이 없다는 이유로 전송을 막지 않는다. 인증·도구 권한이 부족하면 그 이유와 해당 연결 행동만 표시한다. |
+| 8 | 잘못 포함된 자료의 `[× 제거]`를 클릭한다. 범위를 바꾸려면 자료 항목 → `[포함 범위 편집]` → 선택 변경 → `[적용]`을 누른다. | 자료 목록만 갱신되고 작성 중인 요청은 남는다. | 초안 context revision만 갱신한다. | 없음 | 전송 전에는 자료를 모델에게 전달하지 않는다. 상세: `AI-02`. |
+| 9 | 작성기에 `Type "이 자료의 핵심과 근거를 비교해줘"` → `Click [전송]`한다. | 내 메시지가 오른쪽에 붙고 기본 Codex 진행 표시와 `[중지]`가 나타난다. | 실행 계정·모델·위임·권한·자료·제한을 검증하고 Run 입력을 기록한다. 선택적 Agent Profile이 없는 기본 실행을 허용한다. | 기본 Codex가 위임 범위에서 자료 읽기와 답변 작성을 시작한다. | 기본 모드에 사용자 생성 Agent의 personality·생각 버블을 임의로 추가하지 않는다. |
+| 10 | `Observe` — 필요하면 짧은 진행 상태를 본다. | 작업 중인 대상이 표시된다. 읽기·도구 호출마다 Chat에 긴 로그가 쌓이지 않는다. | 직접 읽기 또는 Smart Read를 판단하고 불변 원문·전달 결과·변환 연결을 보존한다. | 요청 담당 실행이 비교·판단·답변을 맡고 Reader는 필요한 읽기를 수행한다. | 사용자 생성 Agent를 선택한 경우에는 해당 대상의 프로필 배지와 작은 생각 버블로 표현한다. |
+| 11 | 대화의 `[작업 기록]`을 열고 자료 행의 `[당시 읽은 내용]`을 클릭한다. | 기록 패널 안에 당시 자료가 열린다. `[원본 캡처] [이 실행에 전달된 내용] [변환 관계]`를 구분한다. | 허용된 기록을 조회하며 Canvas 카메라·대화 스크롤·초안을 유지한다. | 없음 — 기록 열람만으로 재실행하지 않는다. | `[현재 작업 화면]`을 눌렀을 때만 실제 Canvas 대상으로 이동한다. `[×]` 또는 `Esc`로 닫는다. |
+| 12 | `Observe` — 최종 메시지와 Canvas 결과를 확인한다. | Chat에는 완결된 답변, Canvas에는 보고에 선별한 표·비교·근거가 보인다. 당시 근거와 현재 원본은 구별된다. | 각 보고 항목을 실제 전달 자료와 원문 revision에 연결한다. | 답변·보고 구성과 필요한 브리핑을 작성한다. | 작업 지시나 내부 메모를 고객용 산출물 본문으로 복사하지 않는다. 전체 도구 기록의 자동 Canvas 배치와 보고 구성을 구별한다. |
+| 13 | `[브리핑 보기]` → `[다음]` 또는 `→` → 필요하면 `[전체 보기]`를 누른다. | 단계 제목·설명과 해당 Canvas 범위가 보인다. | 고정된 보고 항목을 검증하고 사용자 입력에 따라 화면 범위를 바꾼다. | 없음 — 단계 이동은 새 분석이 아니다. | 기본 Codex와 사용자 생성 Agent의 보고 모두 같은 자료·출처 경계를 따른다. 상세: `AI-05`. |
+| 14 | `[의견]`에 내용을 입력해 `[저장]`한 뒤 `[다음 Chat에 포함]`을 누른다. | 의견과 대상 revision이 미전송 초안에 붙는다. | 같은 의견의 중복 첨부를 막고 기존 초안을 보존한다. | 없음 | 실제 전송 전에는 다음 실행이 시작되지 않는다. |
+| 15 | `[현재 작업을 Board로 저장]` → 제목에 `"자료 비교"` 입력 → `[저장]`을 누른다. | 자료·도구·대화·배치의 저장 범위와 성공한 저장본이 보인다. | 사용자가 확인한 업무 구성을 저장한다. | 없음 | 명시적 저장과 자동 Desk 복구 기록은 별개다. 상세: `AG-01`. |
+| 16 | 앱 메뉴 `[EG-Desk 종료]` 또는 `⌘ Q`를 사용한다. | 필요한 저장을 마치고 창이 닫힌다. | 세션·초안의 마지막 유효 저장을 마무리하며 Saved Board를 암묵적으로 갱신하지 않는다. | 없음 | 종료·강제 종료·크래시는 `L-03`의 서로 다른 경로다. |
+| 17 | EG-Desk를 다시 실행한다. | 이전 Browser·Chat과 Canvas 배치가 복원된다. 마지막에 Browser 집중 보기를 썼다면 같은 View의 집중 카메라 시점을 복원한다. 별도 시작 화면은 반복되지 않는다. | 세션과 Saved Board 목록을 별도로 읽는다. | 없음 | 저장본 목록에 있다는 이유로 Board를 추가로 열지 않는다. 상세: `L-02`. |
 
-**이 흐름의 기술 계약**: 숨겨진 Canvas 영역에 모든 도구 UI를 미리 렌더링하지 않는다.
-사용자가 보게 되는 것은 과거 snapshot과 현재 live view의 구분, raw capture와 실제 Agent
-전달 payload의 관계, 그리고 Answer에 쓰인 근거 lineage다. 저장·lazy rendering·content
-addressing의 세부 원리는 이 매뉴얼에서 중복 설명하지 않고
-[관찰 보존 계약](./EGDESK_INTERACTION_AND_ORCHESTRATION_CONTRACT.md#tech-observation-fidelity)과
-[로컬 저장 계약](./EGDESK_INTERACTION_AND_ORCHESTRATION_CONTRACT.md#tech-storage-export)을 따른다.
-
-**한 바퀴의 완료 증거**: 사용자는 실제 Desk에서 Agent를 설정하고 리소스를 열며,
-Chat 화면에서 요청 컨텍스트를 직접 고친 뒤 요청을 전송한다. 실행 중 활동 표시를
-통해 도구 호출 당시의 `[스냅샷]`을 열고, 필요하면 별도 `[라이브]` 뷰와 차이를
-구분해 본다. 선별된 report set와 각 항목의 snapshot provenance가 연결된 하나의
-Answer를 Chat·Canvas와 Answer Briefing으로 검토하며 현재 작업용 live view도 함께 다룬다. 그 뒤 명시적으로 Agenda를
-저장하고, 재실행 시 자동 Desk 복원과 Sidebar의 Saved Agenda가 서로 다른 경로로
-돌아오는 것을 구분할 수 있다.
+**한 바퀴의 완료 증거**: 사용자는 Agent 생성 없이 기본 Codex로 첫 요청을 보낸다.
+보고의 과거 근거와 현재 원본을 구별하고, 업무 구성 저장과 재실행 시 화면 복원을
+각각 확인할 수 있다. 관찰 보존은 [기술 계약](./EGDESK_INTERACTION_AND_ORCHESTRATION_CONTRACT.md#tech-observation-fidelity)을 따른다.
 
 ### 1.2 실행과 Desk 연속성
 
 <a id="atlas-l-01"></a>
-#### L-01. 최초 로컬 실행
+#### L-01. 최초 실행과 Browser·Desk 전환
 
-**상세 조작**: [shell](../../docs/references/design-synthesis/egdesk-ux-realization-proposals.md#ux-detail-shell)
+**상세 조작**: [첫 사용](../../docs/references/design-synthesis/egdesk-ux-realization-proposals.md#flow-first-use) · [shell](../../docs/references/design-synthesis/egdesk-ux-realization-proposals.md#ux-detail-shell)<br>
+**기술 참조**: [시작·연결](./EGDESK_INTERACTION_AND_ORCHESTRATION_CONTRACT.md#tech-first-use)
 
-**기술 참조**: [Desk 수명주기](./EGDESK_INTERACTION_AND_ORCHESTRATION_CONTRACT.md#tech-desk-lifecycle)
-
-**제품 전제**: 실제 Desk는 최초의 제품 화면이다  
-**명세 상태**: 상세 조작·기술 설계 있음; 남은 정책은 연결된 사용자 선택에 따름<br>
-**시작 상태**: 새 로컬 설치/프로필에는 자동 Desk 세션 기록도 저장된
-Agenda도 없다. 가져오기/마이그레이션은 별도의
-`DATA-01` 경로이다.
+**제품 전제**: 최초 화면은 이미 있는 Desk·Canvas의 Browser에 카메라를 맞춘 집중 보기다. Browser 안의 안내 시작 페이지는 가능하지만 별도 앱 시작 관문은 없다.<br>
+**시작 상태**: 새 설치이며 자동 Desk 세션과 사용자 생성 Agent가 없다. Desk 사용에 프로필 생성이나 Codex 인증을 먼저 요구하지 않는다.
 
 | # | 제품 사용자 UI 행동 | 즉시 보이는 반응 | System 처리 | Agent 처리 | 상태 변화 | 경계 및 다음 UI 행동 |
-| ---: | --- | --- | --- | --- | --- | --- |
-| 1 | macOS Dock의 EG-Desk 아이콘을 클릭하거나 응용프로그램의 아이콘을 더블클릭한다. 검색으로 열려면 `⌘ Space` → `EG-Desk` 입력 → `Return`을 누른다. | Firefox shell의 실제 Desk와 Canvas가 첫 화면으로 나타나고 EG-Desk 창이 입력 포커스를 받는다; 초기 포커스·비시각적 안내는 `Q-LIFE-02`, `Q-LIFE-04`에서 확정한다 | System이 Firefox 셸 런타임을 시작한다. | 없음 | 새로운 활성 Desk 세션이 시작됨 | 시작 실패 시 추천 기본안 `[다시 시도] [진단 정보] [종료]`를 보여 주고 실패 원인을 확정하지 않은 채 활성화한 OS 진입점 또는 첫 오류 행동으로 포커스를 돌린다; 최종 계약은 `Q-LIFE-03` |
-| 2 | 없음 — 자동 | Sidebar에 빈 Saved Agenda 상태와 추천 기본안 `[새 Agenda] [가져오기]`가 표시된다; 최종 레이블·키보드 순서는 `Q-LIFE-04`에서 확정한다 | System은 저장된 Agenda가 없음을 확인한다. | 없음 | Agenda가 존재하지 않음 | `Tab`으로 빈 상태 행동을 순회하고 `Enter`로 선택하는 것을 접근성 기본안으로 하며, 생성·가져오기·도움말과 포커스 복귀의 최종 행동은 `Q-LIFE-04`에서 확정한다 |
-| 3 | 없음 — 자동 | Canvas에 추천 기본안 `[Browser 열기] [파일 열기] [Chat 열기]`가 표시되고, 결정된 첫 행동 또는 Canvas 자체에 초기 포커스가 있음을 식별할 수 있다; 최종 콘텐츠·순서는 `Q-LIFE-04`에서 확정한다 | System은 이전 Desk 세션이 없음을 확인하고 초기 화면을 구성한다 | 없음 | Agenda가 생성되지 않음 | 제품 사용자는 추천 기본 행동 중 하나를 클릭하거나 키보드로 선택해 `V-01` 또는 `CHAT-01`로 이어 간다; 빈 화면만 남는 경로는 허용하지 않으며 최종 제어는 `Q-LIFE-04`에서 확정한다 |
+|---:|---|---|---|---|---|---|
+| 1 | 앱 아이콘을 클릭하거나 OS 검색에서 EG-Desk를 선택해 `Return`을 누른다. | 같은 Canvas의 Browser가 화면에 맞춰 보이고 주소창에 포커스가 있다. Browser 안에 안내 시작 페이지가 있으면 주소 입력을 돕고 주변 Canvas는 보이지 않는다. | EG-Desk와 Browser를 시작해 Browser View에 카메라를 맞춘다. | 없음 | Browser 집중 시점 | 시작 실패는 `[다시 시도] [진단 정보] [종료]`. |
+| 2 | 인터넷부터 이용하려면 주소를 입력하고 `Return`을 누른다. | 같은 Browser에 웹페이지가 열린다. | 해당 Browser로 탐색한다. | 없음 | 현재 Browser 위치 변경 | 주변 Desk를 보려면 Canvas 배율을 낮춘다. |
+| 3 | Canvas 줌아웃 제스처(`pinch`) 또는 기존 `[−]`로 배율을 낮춘다. | Browser가 같은 URL·세션으로 Canvas에 남고 주변 View·Sidebar·Dock이 드러난다. | Browser의 논리 viewport를 바꾸지 않고 Canvas 카메라를 축소한다. | 없음 | 일반 Desk가 보이는 시점 | 프로필·Codex 연결 화면 없이 바로 주변 Desk를 본다. 다시 집중해도 같은 Browser View다. |
+| 4 | Dock `[Chat]`을 클릭한다. | 기본 Codex 대화와 작성기 또는 필요한 Codex 연결 안내가 보인다. | 현재 Engine 연결과 기본 실행 설정을 확인한다. | 없음 | 기본 Codex 초안 또는 연결 필요 상태 | Agent Profile 생성은 요구하지 않는다. 요청은 `CHAT-01`·`AI-01`로 이어진다. |
+| 5 | 연결 안내가 필요한 경우 `[Codex 연결]`을 누르고 인증 화면에서 계정을 확인한다. | 연결 후 기본 Codex 작성기가 보이며 Browser·Canvas 배치는 그대로다. | 실제 인증·가용성을 확인한다. | 없음 | Codex 사용 준비 | 연결이 이미 준비됐으면 건너뛴다. Browser 프로필·웹사이트 로그인과 구별한다. |
 
-**완료 증거**: 실제 Desk를 사용할 수 있고 초기 포커스와 다음 행동을 식별할 수 있으며, 복구 마법사나 자동 Agenda 마운트가 나타나지 않는다.
+**완료 증거**: 최초에는 같은 Browser로 웹을 바로 이용하고 줌아웃으로 주변 Canvas를
+드러낼 수 있다. 기본 Codex 연결은 해당 기능을 사용할 때 확인하며 화면 전환의 조건이 아니다.
 
 <a id="atlas-l-02"></a>
 #### L-02. 일반 실행과 자동 Desk 복원
 
 **상세 조작**: [restore](../../docs/references/design-synthesis/egdesk-ux-realization-proposals.md#ux-detail-restore) · [view](../../docs/references/design-synthesis/egdesk-ux-realization-proposals.md#ux-detail-view)
 
-**기술 참조**: [Desk·Agenda·runtime 분리](./EGDESK_INTERACTION_AND_ORCHESTRATION_CONTRACT.md#tech-desk-lifecycle), [Terminal runtime](./EGDESK_INTERACTION_AND_ORCHESTRATION_CONTRACT.md#tech-terminal-runtime)
+**기술 참조**: [Desk·Board·runtime 분리](./EGDESK_INTERACTION_AND_ORCHESTRATION_CONTRACT.md#tech-desk-lifecycle), [Terminal runtime](./EGDESK_INTERACTION_AND_ORCHESTRATION_CONTRACT.md#tech-terminal-runtime)
 
-**제품 전제**: 저장된 Agenda와 자동 Desk 복원은 서로 독립적이다  
+**제품 전제**: 저장된 Board와 자동 Desk 복원은 서로 독립적이다<br>
 **명세 상태**: 상세 조작·기술 설계 있음; 남은 정책은 연결된 사용자 선택에 따름<br>
-**시작 상태**: 이전 Desk 세션과 0개 이상의 저장된 Agenda가 서로 독립적으로 존재할 수 있다.
+**시작 상태**: 이전 Desk 세션과 0개 이상의 저장된 Board가 서로 독립적으로 존재할 수 있다.
 
 | # | 제품 사용자 UI 행동 | 즉시 보이는 반응 | System 처리 | Agent 처리 | 상태 변화 | 경계 및 다음 UI 행동 |
 | ---: | --- | --- | --- | --- | --- | --- |
-| 1 | Dock/Applications에서 `[EG-Desk]`를 클릭하거나 OS 검색에서 EG-Desk를 고르고 Enter를 누른다. | 실제 Desk가 나타난다; 정확한 로딩/순서 피드백은 `Q-RESTORE-01`에 정의되어 있으며, 저장된 Agenda가 Desk 연속성보다 더 중요하다는 인상을 주어서는 안 된다 | System은 완료 순서를 제품 우선순위로 사용하지 않고 두 개의 독립적인 상태 평면을 읽는다. | 없음 | 영속적 변경 없음 | 정확한 동시 처리/로딩 표현: `Q-RESTORE-01` |
-| 2 | 없음 — 자동 | 열려 있던 뷰가 Browser 세션 탭처럼 돌아온다; 복원 범위는 `Q-RESTORE-02`에 정의되어 있다. File view는 이전 scroll·보이는 위치를 복원할 수 있지만 active caret·keyboard focus·transient text selection을 복원하지 않는다 | System이 Desk 세션 기록에서 뷰 인스턴스를 재구성하고 File view의 일시 입력 상태를 제거한다. | 없음 | 활성 뷰/세션 상태가 재구성되며, 저장된 Agenda 상태는 변경되지 않음 | 뷰 복원 실패와 다음 컨트롤: `Q-RESTORE-03`; 명시적으로 고정한 annotation/range는 별도 저장 정책을 따른다 |
-| 3 | 없음 — 자동 | 저장된 Agenda 행이 열리지 않은 채 Sidebar에 나타난다 | System이 저장된 Agenda 메타데이터를 투영한다. | 없음 | 저장된 Agenda 상태가 변경되지 않음 | Agenda 목록 읽기 실패와 다음 컨트롤: `Q-RESTORE-06` |
+| 1 | Dock/Applications에서 `[EG-Desk]`를 클릭하거나 OS 검색에서 EG-Desk를 고르고 Enter를 누른다. | 실제 Desk가 나타난다; 정확한 로딩/순서 피드백은 `Q-RESTORE-01`에 정의되어 있으며, 저장된 Board가 Desk 연속성보다 더 중요하다는 인상을 주어서는 안 된다 | System은 완료 순서를 제품 우선순위로 사용하지 않고 두 개의 독립적인 상태 평면을 읽는다. | 없음 | 영속적 변경 없음 | 정확한 동시 처리/로딩 표현: `Q-RESTORE-01` |
+| 2 | 없음 — 자동 | 열려 있던 뷰가 Browser 세션 탭처럼 돌아온다; 복원 범위는 `Q-RESTORE-02`에 정의되어 있다. File view는 이전 scroll·보이는 위치를 복원할 수 있지만 active caret·keyboard focus·transient text selection을 복원하지 않는다 | System이 Desk 세션 기록에서 뷰 인스턴스를 재구성하고 File view의 일시 입력 상태를 제거한다. | 없음 | 활성 뷰/세션 상태가 재구성되며, 저장된 Board 상태는 변경되지 않음 | 뷰 복원 실패와 다음 컨트롤: `Q-RESTORE-03`; 명시적으로 고정한 annotation/range는 별도 저장 정책을 따른다 |
+| 3 | 없음 — 자동 | 저장된 Board 행이 열리지 않은 채 Sidebar에 나타난다 | System이 저장된 Board 메타데이터를 투영한다. | 없음 | 저장된 Board 상태가 변경되지 않음 | Board 목록 읽기 실패와 다음 컨트롤: `Q-RESTORE-06` |
 | 4 | 없음 — 자동 | Browser 뷰는 이전 URL/세션 상태를 재구성한다; Terminal 뷰는 프로세스 신원이 검증되지 않으면 재연결되었다고 주장하지 않는다 | System은 각 리소스를 해당 수명주기에 따라 복원한다. | 없음 | Browser, Terminal, 파일 및 Chat 런타임은 서로 다를 수 있음 | Terminal 및 그 밖의 Browser 외 리소스 연속성: `Q-RESTORE-04` |
 
 정상 종료는 마지막 기록 완료를 기다린다. 충돌·강제 종료·OS 재시작은 마지막 유효 commit을 사용하고 손실 가능 구간을 표시한다. 손상 기록은 보존하며 `[유효한 보존본으로 복원] [빈 Desk에서 계속] [진단 정보]`를 제공한다. 관련: `Q-RESTORE-05`.
 
-**완료 증거**: 이전에 열려 있던 뷰와 저장된 Agenda 행을 각각의 독립적인
+**완료 증거**: 이전에 열려 있던 뷰와 저장된 Board 행을 각각의 독립적인
 상태 경로를 통해 사용할 수 있다; 실패한 각 리소스는 Desk 전체를 막는 대신
 자체적인 다음 행동과 함께 실패 상태가 가시적으로 유지된다.
 
@@ -332,113 +362,113 @@ Agenda도 없다. 가져오기/마이그레이션은 별도의
 **제품 전제**: 확정된 View·소유 변경은 기록하고 연속적인 배치·스크롤 변경은 묶어 기록한다. 정상 종료는 기록 완료를 기다리며 충돌 뒤에는 마지막 유효 기록으로 복원한다. 기록 실패는 미기록 범위와 함께 표시한다.<br>
 **명세 상태**: 상세 조작·기술 설계 있음; 남은 정책은 연결된 사용자 선택에 따름
 **시작 상태**: Desk가 실행 중이고 자동 Desk 세션 기록이
-없거나 마지막으로 검증된 상태를 담고 있다; 저장된 Agenda의 영속성은 별개이다.
+없거나 마지막으로 검증된 상태를 담고 있다; 저장된 Board의 영속성은 별개이다.
 
 | # | 제품 사용자 UI 행동 | 즉시 보이는 반응 | System 처리 | Agent 처리 | 상태 변화 | 경계 및 다음 UI 행동 |
 | ---: | --- | --- | --- | --- | --- | --- |
-| 1 | Dock `[Browser]`·`[파일]`·`[Chat]`으로 열고 View bar의 `[×]`, 드래그, 크기 handle 또는 `[⋯] → [이동]·[크기]·[그룹으로 묶기]`를 사용한다. | 일반적인 뷰 피드백이 나타난다; 연속성 저장 상태를 표시할지는 `Q-RESTORE-07`에 정의되어 있다 | System은 `Q-RESTORE-07`의 주기와 트랜잭션 경계에서 결정된 세션 필드를 기록한다. | 없음 | 자동 Desk 세션 기록이 변경되며, 저장된 Agenda는 변경되지 않음 | 쓰기 실패를 연속성 기록 성공으로 보고할 수 없다 |
+| 1 | Dock `[Browser]`·`[파일]`·`[Chat]`으로 열고 View bar의 `[×]`, 드래그, 크기 handle 또는 `[⋯] → [이동]·[크기]·[그룹으로 묶기]`를 사용한다. | 일반적인 뷰 피드백이 나타난다; 연속성 저장 상태를 표시할지는 `Q-RESTORE-07`에 정의되어 있다 | System은 `Q-RESTORE-07`의 주기와 트랜잭션 경계에서 결정된 세션 필드를 기록한다. | 없음 | 자동 Desk 세션 기록이 변경되며, 저장된 Board는 변경되지 않음 | 쓰기 실패를 연속성 기록 성공으로 보고할 수 없다 |
 | 2 | 앱 메뉴 `[EG-Desk 종료]`, macOS `⌘Q`, Windows/Linux `Alt+F4` 또는 마지막 Desk 창의 닫기를 사용한다. OS 충돌·전원 종료에는 별도 입력이 없다. | 정상 종료, 쓰기 대기, 크래시 및 강제 종료 피드백은 `Q-RESTORE-05`와 `Q-RESTORE-08`에서 정의한다 | System은 결정된 경계에 따라 연속성 기록을 플러시하거나 복구한다. | 없음 | 마지막으로 검증된 기록이 다음 시작의 입력이 됨 | 손상되거나 불완전한 기록을 처리할 때도 사용 가능한 Desk 경로를 보존해야 한다 |
 | 3 | OS의 EG-Desk 아이콘이나 검색 결과로 다시 실행한다. | L-02는 마지막으로 검증된 기록만 사용하며, 화면별 질문을 통해 기능이 저하된 복구를 식별한다 | System은 재구성 전에 검증한다 | 없음 | 검증된 상태에서 새로운 활성 세션이 시작됨 | 사용자는 영향받지 않은 뷰와 구체적인 복구 행동을 통해 계속할 수 있다 |
 
 **완료 증거**: 재진입 후 마지막으로 검증된 자동
 Desk 세션 상태가 재현되거나 기능 저하 경계가 식별되며,
-저장된 Agenda가 묵시적으로 생성되거나 다시 작성되지 않는다.
+저장된 Board가 묵시적으로 생성되거나 다시 작성되지 않는다.
 
-### 1.3 Agenda로 작업 보관·재개
+### 1.3 Board로 작업 보관·재개
 
 <a id="atlas-ag-01"></a>
-#### AG-01. Agenda 생성 및 최초 저장
+#### AG-01. Board 생성 및 최초 저장
 
-**상세 조작**: [agenda](../../docs/references/design-synthesis/egdesk-ux-realization-proposals.md#ux-detail-agenda)
+**상세 조작**: [board](../../docs/references/design-synthesis/egdesk-ux-realization-proposals.md#ux-detail-agenda)
 
-**기술 참조**: [Saved Agenda와 자동 Desk 세션](./EGDESK_INTERACTION_AND_ORCHESTRATION_CONTRACT.md#tech-desk-lifecycle)
+**기술 참조**: [Saved Board와 자동 Desk 세션](./EGDESK_INTERACTION_AND_ORCHESTRATION_CONTRACT.md#tech-desk-lifecycle)
 
-**제품 전제**: Agenda는 재사용 가능한 작업/실행 결합이다  
+**제품 전제**: Board는 재사용 가능한 작업/실행 결합이다<br>
 **명세 상태**: 상세 조작·기술 설계 있음; 남은 정책은 연결된 사용자 선택에 따름
 **시작 상태**: 사용 가능한 Desk가 존재하고 사용자는 새로 저장되는
-Agenda를 생성하려 한다; 이 상태에 도달했다는 이유만으로 영속적인 Agenda가 생성되지는 않는다.
+Board를 생성하려 한다; 이 상태에 도달했다는 이유만으로 영속적인 Board가 생성되지는 않는다.
 
 | # | 제품 사용자 UI 행동 | 즉시 보이는 반응 | System 처리 | Agent 처리 | 상태 변화 | 경계 및 다음 UI 행동 |
 | ---: | --- | --- | --- | --- | --- | --- |
-| 1 | Sidebar의 `[+ 새 Agenda]`를 누른다. 선택한 화면으로 시작하려면 다중 선택 후 `[Agenda로 저장]`을 누른다. | 생성 화면과 포커스 동작: `Q-AG-10`; 현재 Desk 선택 항목에서 시작할지 빈 범위에서 시작할지는 `Q-AG-01`을 따른다 | System은 결정된 초기 범위만으로 임시 Agenda 입력을 연다. | 없음 | 아직 영속적인 Agenda 없음 | 취소 및 돌아가기 동작: `Q-AG-10` |
-| 2 | 이름을 입력하고 `[빈 Agenda]`·`[선택한 화면]`·`[항목 추가]`로 구성 목록의 포함 체크를 조정한다. | 포함되는 작업/실행 결합, 제외된 항목, 유효성 검사 및 포커스 상태가 `Q-AG-10`에 따라 보인다 | System은 결정된 필수 필드만 검증한다. | 없음 | 임시 초안 | 유효성 검사 실패 상태에서도 편집할 수 있다; 정확한 피드백: `Q-AG-10` |
-| 3 | `[저장]`을 누른다. 입력 오류가 있으면 표시된 필드를 고치며 `[취소]`는 생성 전 초안으로 돌아간다. | 저장된 Agenda 행이 Sidebar에 나타난다; 성공 피드백: `Q-AG-10` | System은 Agenda를 영속화하고 목록을 새로 고친다. | 없음 | 새로운 영속적 Agenda; Desk 세션은 별도로 유지됨 | 영속화 실패 시 초안이 보존된다; 재시도/취소 UI: `Q-AG-10` |
+| 1 | Sidebar의 `[+ 새 Board]`를 누른다. 선택한 화면으로 시작하려면 다중 선택 후 `[Board로 저장]`을 누른다. | 생성 화면과 포커스 동작: `Q-AG-10`; 현재 Desk 선택 항목에서 시작할지 빈 범위에서 시작할지는 `Q-AG-01`을 따른다 | System은 결정된 초기 범위만으로 임시 Board 입력을 연다. | 없음 | 아직 영속적인 Board 없음 | 취소 및 돌아가기 동작: `Q-AG-10` |
+| 2 | 이름을 입력하고 `[빈 Board]`·`[선택한 화면]`·`[항목 추가]`로 구성 목록의 포함 체크를 조정한다. | 포함되는 작업/실행 결합, 제외된 항목, 유효성 검사 및 포커스 상태가 `Q-AG-10`에 따라 보인다 | System은 결정된 필수 필드만 검증한다. | 없음 | 임시 초안 | 유효성 검사 실패 상태에서도 편집할 수 있다; 정확한 피드백: `Q-AG-10` |
+| 3 | `[저장]`을 누른다. 입력 오류가 있으면 표시된 필드를 고치며 `[취소]`는 생성 전 초안으로 돌아간다. | 저장된 Board 행이 Sidebar에 나타난다; 성공 피드백: `Q-AG-10` | System은 Board를 영속화하고 목록을 새로 고친다. | 없음 | 새로운 영속적 Board; Desk 세션은 별도로 유지됨 | 영속화 실패 시 초안이 보존된다; 재시도/취소 UI: `Q-AG-10` |
 
-**완료 증거**: 다시 열 수 있는 저장된 Agenda가 현재의
+**완료 증거**: 다시 열 수 있는 저장된 Board가 현재의
 자동 Desk 세션 기록과 독립적으로 존재한다.
 
 <a id="atlas-ag-02"></a>
-#### AG-02. 저장된 Agenda 열기
+#### AG-02. 저장된 Board 열기
 
-**상세 조작**: [agenda](../../docs/references/design-synthesis/egdesk-ux-realization-proposals.md#ux-detail-agenda) · [restore](../../docs/references/design-synthesis/egdesk-ux-realization-proposals.md#ux-detail-restore)
+**상세 조작**: [board](../../docs/references/design-synthesis/egdesk-ux-realization-proposals.md#ux-detail-agenda) · [restore](../../docs/references/design-synthesis/egdesk-ux-realization-proposals.md#ux-detail-restore)
 
-**기술 참조**: [Saved Agenda와 자동 Desk 세션](./EGDESK_INTERACTION_AND_ORCHESTRATION_CONTRACT.md#tech-desk-lifecycle), [HUM-DESK-001](../../docs/codex/egdesk-product-interaction-trace-atlas-editorial-ledger.md#hum-desk-001)
+**기술 참조**: [Saved Board와 자동 Desk 세션](./EGDESK_INTERACTION_AND_ORCHESTRATION_CONTRACT.md#tech-desk-lifecycle), [HUM-DESK-001](../../docs/codex/egdesk-product-interaction-trace-atlas-editorial-ledger.md#hum-desk-001)
 
-**제품 전제**: 저장된 Agenda를 클릭하는 것은 사용자 행동이다. 하나의 Desk·Canvas에
-여러 Agenda projection을 동시에 열 수 있으며 기존 Canvas 내용을 교체하거나 새 Desk를 만들지 않는다.
+**제품 전제**: 저장된 Board를 클릭하는 것은 사용자 행동이다. 하나의 Desk·Canvas에
+여러 Board projection을 동시에 열 수 있으며 기존 Canvas 내용을 교체하거나 새 Desk를 만들지 않는다.
 **명세 상태**: 상세 조작·기술 설계 있음; 남은 정책은 연결된 사용자 선택에 따름
-**시작 상태**: 유효한 저장된 Agenda 행이 하나 이상 Sidebar에 보인다;
+**시작 상태**: 유효한 저장된 Board 행이 하나 이상 Sidebar에 보인다;
 현재 Desk에는 자동으로 복원된 작업이나 새 작업이 독립적으로 포함되어 있을 수 있다.
 
 | # | 제품 사용자 UI 행동 | 즉시 보이는 반응 | System 처리 | Agent 처리 | 상태 변화 | 경계 및 다음 UI 행동 |
 | ---: | --- | --- | --- | --- | --- | --- |
-| 1 | Sidebar의 저장한 Agenda 행을 클릭하거나, 방향키로 해당 행에 포커스를 둔 뒤 `Enter`를 누른다. | 클릭한 행의 대기/선택 피드백: `Q-AG-04` | System이 선택한 Agenda와 이미 열린 projection 여부를 읽는다. | 없음 | 영속적 Agenda가 변경되지 않음 | 누락되거나 손상된 Agenda의 피드백과 다음 행동: `Q-AG-05` |
-| 2 | 없음 — 행 활성화 후 자동 | 같은 Canvas에 해당 Agenda의 영역과 구성 view가 나타나거나, 이미 열려 있으면 그 영역이 식별되어 포커스된다. 기존 자동 복원 view와 다른 Agenda projection은 그대로 남는다 | System은 새 Desk를 만들지 않고 Agenda projection을 같은 Canvas에 추가하거나 기존 projection을 재사용한다 | 없음 | 열린 Agenda projection 집합과 Canvas focus가 변경될 수 있음 | 초기 위치·겹침 회피·활성 표시: `Q-OBJ-04`, `Q-AG-04`; Workspace는 생성되지 않음 |
-| 3 | 없음 — 자동 | 사용 가능한 리소스가 나타난다; 사용할 수 없는 리소스에는 `Q-AG-05`에서 정의한 조치 가능한 경계가 표시된다 | System은 허용된 view/runtime를 각자의 수명주기로 재구성하고 Agenda projection에 연결한다. | 없음 | 현재 뷰/런타임이 변경되며, 저장된 Agenda 리비전은 다시 작성되지 않음 | 부분 열기 완료 피드백: `Q-AG-04` |
+| 1 | Sidebar의 저장한 Board 행을 클릭하거나, 방향키로 해당 행에 포커스를 둔 뒤 `Enter`를 누른다. | 클릭한 행의 대기/선택 피드백: `Q-AG-04` | System이 선택한 Board와 이미 열린 projection 여부를 읽는다. | 없음 | 영속적 Board가 변경되지 않음 | 누락되거나 손상된 Board의 피드백과 다음 행동: `Q-AG-05` |
+| 2 | 없음 — 행 활성화 후 자동 | 같은 Canvas에 해당 Board의 영역과 구성 view가 나타나거나, 이미 열려 있으면 그 영역이 식별되어 포커스된다. 기존 자동 복원 view와 다른 Board projection은 그대로 남는다 | System은 새 Desk를 만들지 않고 Board projection을 같은 Canvas에 추가하거나 기존 projection을 재사용한다 | 없음 | 열린 Board projection 집합과 Canvas focus가 변경될 수 있음 | 초기 위치·겹침 회피·활성 표시: `Q-OBJ-04`, `Q-AG-04`; Workspace는 생성되지 않음 |
+| 3 | 없음 — 자동 | 사용 가능한 리소스가 나타난다; 사용할 수 없는 리소스에는 `Q-AG-05`에서 정의한 조치 가능한 경계가 표시된다 | System은 허용된 view/runtime를 각자의 수명주기로 재구성하고 Board projection에 연결한다. | 없음 | 현재 뷰/런타임이 변경되며, 저장된 Board 리비전은 다시 작성되지 않음 | 부분 열기 완료 피드백: `Q-AG-04` |
 
-**완료 증거**: 선택한 Agenda의 projection이 같은 Canvas에서 식별되고, 기존 Desk
-상태와 다른 열린 Agenda projection은 교체되지 않으며, 사용할 수 없는 구성원은
+**완료 증거**: 선택한 Board의 projection이 같은 Canvas에서 식별되고, 기존 Desk
+상태와 다른 열린 Board projection은 교체되지 않으며, 사용할 수 없는 구성원은
 해당 projection 안에서 조치 가능한 상태로 보인다.
 
 <a id="atlas-ag-03"></a>
-#### AG-03. 현재 작업에서 Agenda 저장 또는 업데이트
+#### AG-03. 현재 작업에서 Board 저장 또는 업데이트
 
-**상세 조작**: [agenda](../../docs/references/design-synthesis/egdesk-ux-realization-proposals.md#ux-detail-agenda)
+**상세 조작**: [board](../../docs/references/design-synthesis/egdesk-ux-realization-proposals.md#ux-detail-agenda)
 
-**기술 참조**: [Desk·Agenda 수명주기](./EGDESK_INTERACTION_AND_ORCHESTRATION_CONTRACT.md#tech-desk-lifecycle), [로컬 저장](./EGDESK_INTERACTION_AND_ORCHESTRATION_CONTRACT.md#tech-storage-export)
+**기술 참조**: [Desk·Board 수명주기](./EGDESK_INTERACTION_AND_ORCHESTRATION_CONTRACT.md#tech-desk-lifecycle), [로컬 저장](./EGDESK_INTERACTION_AND_ORCHESTRATION_CONTRACT.md#tech-storage-export)
 
-**제품 전제**: 저장된 Agenda 영속성과 자동 Desk 영속성은 계속 분리된다  
+**제품 전제**: 저장된 Board 영속성과 자동 Desk 영속성은 계속 분리된다<br>
 **명세 상태**: 상세 조작·기술 설계 있음; 남은 정책은 연결된 사용자 선택에 따름
-**시작 상태**: Desk에 새 Agenda나 기존 Agenda의 대상이 될 수 있는 작업이
+**시작 상태**: Desk에 새 Board나 기존 Board의 대상이 될 수 있는 작업이
 포함되어 있고, 대상/범위는 아직 저장 확정되지 않았다.
 
 | # | 제품 사용자 UI 행동 | 즉시 보이는 반응 | System 처리 | Agent 처리 | 상태 변화 | 경계 및 다음 UI 행동 |
 | ---: | --- | --- | --- | --- | --- | --- |
-| 1 | Agenda bar `[저장]`에서 포함 범위를 확인하고 `[업데이트]` 또는 `[다른 이름으로 저장]`을 선택한다. | 선택한 동작은 `Q-AG-07`을 따르고, 제안된 영속성 범위는 `Q-AG-08`에 따라 보인다 | System은 해당 범위에 따라 어떤 뷰, 바인딩, 레이아웃, 산출물 및 워크플로 상태가 대상이 되는지만 판단한다. | 없음 | 대기 중인 Agenda 작업; Desk 세션은 변경되지 않음 | 모호한 대상/범위는 `Q-AG-14`를 통해 계속 편집할 수 있다 |
-| 2 | `[저장]`을 누른다. 충돌이면 `[기준/최신/내 변경]`에서 값을 고르고 `[병합 저장]`, `[새 Agenda로 저장]` 또는 `[취소]`를 누른다. | 저장/업데이트 피드백과 대상 리비전이 `Q-AG-14`와 `Q-AG-17`에 따라 나타난다 | System은 결정된 Agenda 범위만 영속화한다 | 없음 | 영속적 Agenda가 변경되며, 자동 Desk 세션은 계속 다른 기록으로 유지됨 | 리비전/충돌 의미론: `Q-AG-16`; 정확한 충돌/취소/재시도 UI: `Q-AG-17` |
-| 3 | 저장 뒤 Dock에서 자료를 열거나 View bar를 드래그하고, `[⋯] → [크기]`에서 크기를 변경한다. | 나중에 발생한, 저장되지 않은 Agenda 관련 변경은 `Q-AG-15`에 따라 저장된 리비전과 구분된다 | System은 자동 Desk 세션 기록을 별도로 계속한다 | 없음 | 이후 세션 변경이 Agenda를 묵시적으로 업데이트하지 않음 | 정확한 다시 저장/나가기/보호 행동: `Q-AG-15` |
+| 1 | Board bar `[저장]`에서 포함 범위를 확인하고 `[업데이트]` 또는 `[다른 이름으로 저장]`을 선택한다. | 선택한 동작은 `Q-AG-07`을 따르고, 제안된 영속성 범위는 `Q-AG-08`에 따라 보인다 | System은 해당 범위에 따라 어떤 뷰, 바인딩, 레이아웃, 산출물 및 워크플로 상태가 대상이 되는지만 판단한다. | 없음 | 대기 중인 Board 작업; Desk 세션은 변경되지 않음 | 모호한 대상/범위는 `Q-AG-14`를 통해 계속 편집할 수 있다 |
+| 2 | `[저장]`을 누른다. 충돌이면 `[기준/최신/내 변경]`에서 값을 고르고 `[병합 저장]`, `[새 Board로 저장]` 또는 `[취소]`를 누른다. | 저장/업데이트 피드백과 대상 리비전이 `Q-AG-14`와 `Q-AG-17`에 따라 나타난다 | System은 결정된 Board 범위만 영속화한다 | 없음 | 영속적 Board가 변경되며, 자동 Desk 세션은 계속 다른 기록으로 유지됨 | 리비전/충돌 의미론: `Q-AG-16`; 정확한 충돌/취소/재시도 UI: `Q-AG-17` |
+| 3 | 저장 뒤 Dock에서 자료를 열거나 View bar를 드래그하고, `[⋯] → [크기]`에서 크기를 변경한다. | 나중에 발생한, 저장되지 않은 Board 관련 변경은 `Q-AG-15`에 따라 저장된 리비전과 구분된다 | System은 자동 Desk 세션 기록을 별도로 계속한다 | 없음 | 이후 세션 변경이 Board를 묵시적으로 업데이트하지 않음 | 정확한 다시 저장/나가기/보호 행동: `Q-AG-15` |
 
-**완료 증거**: 저장된 리비전을 다시 열 수 있으며, 해당 Agenda에
+**완료 증거**: 저장된 리비전을 다시 열 수 있으며, 해당 Board에
 저장되지 않은 이후의 자동 Desk 세션 변경과 가시적으로 구분된다.
 
 <a id="atlas-ag-04"></a>
-#### AG-04. Agenda 이름 변경, 보관/닫기, 삭제 및 복구
+#### AG-04. Board 이름 변경, 보관/닫기, 삭제 및 복구
 
-**상세 조작**: [agenda](../../docs/references/design-synthesis/egdesk-ux-realization-proposals.md#ux-detail-agenda) · [input](../../docs/references/design-synthesis/egdesk-ux-realization-proposals.md#ux-detail-input) · [agenda-lifecycle](../../docs/references/design-synthesis/egdesk-ux-realization-proposals.md#ux-detail-agenda-lifecycle)
+**상세 조작**: [board](../../docs/references/design-synthesis/egdesk-ux-realization-proposals.md#ux-detail-agenda) · [input](../../docs/references/design-synthesis/egdesk-ux-realization-proposals.md#ux-detail-input) · [board-lifecycle](../../docs/references/design-synthesis/egdesk-ux-realization-proposals.md#ux-detail-agenda-lifecycle)
 
-**기술 참조**: [Desk·Agenda 수명주기](./EGDESK_INTERACTION_AND_ORCHESTRATION_CONTRACT.md#tech-desk-lifecycle), [로컬 저장](./EGDESK_INTERACTION_AND_ORCHESTRATION_CONTRACT.md#tech-storage-export)
+**기술 참조**: [Desk·Board 수명주기](./EGDESK_INTERACTION_AND_ORCHESTRATION_CONTRACT.md#tech-desk-lifecycle), [로컬 저장](./EGDESK_INTERACTION_AND_ORCHESTRATION_CONTRACT.md#tech-storage-export)
 
-**제품 전제**: Agenda 닫기는 전용 runtime의 종료를 확인한 뒤 projection을 제거하며 Saved Agenda를 보존한다. 이름 변경·보관·삭제·복구 경로는 상세 조작을 따르고, 휴지통 여부·보존 기간·복구 이력 범위는 연결된 사용자 선택에 따른다.
+**제품 전제**: Board 닫기는 전용 runtime의 종료를 확인한 뒤 projection을 제거하며 Saved Board를 보존한다. 이름 변경·보관·삭제·복구 경로는 상세 조작을 따르고, 휴지통 여부·보존 기간·복구 이력 범위는 연결된 사용자 선택에 따른다.
 **명세 상태**: 상세 조작·기술 설계 있음; 남은 정책은 연결된 사용자 선택에 따름
-**시작 상태**: 영속적인 저장된 Agenda 행이 존재한다. 해당 Agenda projection은
+**시작 상태**: 영속적인 저장된 Board 행이 존재한다. 해당 Board projection은
 현재 Canvas에 열려 있을 수도 있고 Sidebar에만 저장된 상태일 수도 있다.
 
 | # | 제품 사용자 UI 행동 | 즉시 보이는 반응 | System 처리 | Agent 처리 | 상태 변화 | 경계 및 다음 UI 행동 |
 | ---: | --- | --- | --- | --- | --- | --- |
-| 1 | 저장한 Agenda 행의 `[⋯]`를 클릭하거나, 해당 행에 포커스를 두고 `Shift+F10`을 누른다. | 사용 가능한 수명주기 행동과 사용할 수 없는 이유: `Q-AG-09` | System이 Agenda를 식별한다. | 없음 | 변경 없음 | 메뉴 닫기/포커스 복귀: `Q-UX-02` |
-| 2 | 행의 `[⋯] → [이름 변경]` 또는 F2를 누르고 이름을 입력한 뒤 `[확인]`·Enter 또는 `[취소]`·Esc를 사용한다. | 인라인 편집기 또는 대화상자, 유효성 검사 및 저장된 이름 피드백은 `Q-AG-09`에서 정의한다 | System은 Agenda 메타데이터만 업데이트한다. | 없음 | Agenda의 동일성은 유지되며, 제목은 변경될 수 있음 | 실패 시 이전 제목과 편집 가능한 입력이 유지된다 |
-| 3 | 행 메뉴의 `[Agenda 닫기]`, `[보관함으로 이동]` 또는 `[열기/영역으로 이동]`을 선택한다. 보관은 목록 분류만 바꾼다. | 전용·공유 runtime의 영향을 확인할 수 있다. 닫는 동안에는 종료 진행 상태가 남고, 종료가 확인되면 해당 Agenda 영역이 사라지며 Saved Agenda 행은 Sidebar에 남는다 | 전용 runtime의 새 행동·자동 재개를 막고 종료한다. 종료 확인 후 projection을 제거하고 다른 Agenda나 view가 소유하는 shared runtime은 그 표현과 함께 유지한다. 보관은 별도 정책을 따른다 | 전용 작업에 더 이상 새 행동을 요청하지 않는다 | 전용 runtime 종료가 확인돼야 닫힘이 된다. 종료 실패·상태 불명은 표시를 유지한다 | 이미 외부에 접수된 행동이 닫기로 취소되지는 않는다. 정확한 영향·실패·포커스·다시 열기 UI는 `Q-AG-11`, `Q-AG-19` |
-| 4 | `[저장한 Agenda 삭제]`에서 대상·실행 영향을 보고 정책에 따른 `[휴지통으로 이동]` 또는 `[영구 삭제]`를 누르거나 `[취소]`한다. | 범위, 유지되는 기반 리소스, 참조 및 영구성이 명시된다 | System은 확인 성공 후 결정된 Agenda 기록만 삭제한다 | 없음 | 영속적 Agenda가 제거될 수 있음 | 취소/실패/복구 경로: `Q-AG-20` |
-| 5 | 복구 가능한 항목은 `[휴지통] → 항목 → [복구]`로 되돌린 뒤 별도로 `[복구한 Agenda 열기]`를 누른다. | 복원된 행과 완료 피드백이 나타난다 | System은 유지된 Agenda 기록을 복원한다. | 없음 | 영속적 상태가 복원됨 | 복구를 지원하지 않는 경우 삭제 전에 파괴 작업의 영구성을 명시한다 |
+| 1 | 저장한 Board 행의 `[⋯]`를 클릭하거나, 해당 행에 포커스를 두고 `Shift+F10`을 누른다. | 사용 가능한 수명주기 행동과 사용할 수 없는 이유: `Q-AG-09` | System이 Board를 식별한다. | 없음 | 변경 없음 | 메뉴 닫기/포커스 복귀: `Q-UX-02` |
+| 2 | 행의 `[⋯] → [이름 변경]` 또는 F2를 누르고 이름을 입력한 뒤 `[확인]`·Enter 또는 `[취소]`·Esc를 사용한다. | 인라인 편집기 또는 대화상자, 유효성 검사 및 저장된 이름 피드백은 `Q-AG-09`에서 정의한다 | System은 Board 메타데이터만 업데이트한다. | 없음 | Board의 동일성은 유지되며, 제목은 변경될 수 있음 | 실패 시 이전 제목과 편집 가능한 입력이 유지된다 |
+| 3 | 행 메뉴의 `[Board 닫기]`, `[보관함으로 이동]` 또는 `[열기/영역으로 이동]`을 선택한다. 보관은 목록 분류만 바꾼다. | 전용·공유 runtime의 영향을 확인할 수 있다. 닫는 동안에는 종료 진행 상태가 남고, 종료가 확인되면 해당 Board 영역이 사라지며 Saved Board 행은 Sidebar에 남는다 | 전용 runtime의 새 행동·자동 재개를 막고 종료한다. 종료 확인 후 projection을 제거하고 다른 Board나 view가 소유하는 shared runtime은 그 표현과 함께 유지한다. 보관은 별도 정책을 따른다 | 전용 작업에 더 이상 새 행동을 요청하지 않는다 | 전용 runtime 종료가 확인돼야 닫힘이 된다. 종료 실패·상태 불명은 표시를 유지한다 | 이미 외부에 접수된 행동이 닫기로 취소되지는 않는다. 정확한 영향·실패·포커스·다시 열기 UI는 `Q-AG-11`, `Q-AG-19` |
+| 4 | `[저장한 Board 삭제]`에서 대상·실행 영향을 보고 정책에 따른 `[휴지통으로 이동]` 또는 `[영구 삭제]`를 누르거나 `[취소]`한다. | 범위, 유지되는 기반 리소스, 참조 및 영구성이 명시된다 | System은 확인 성공 후 결정된 Board 기록만 삭제한다 | 없음 | 영속적 Board가 제거될 수 있음 | 취소/실패/복구 경로: `Q-AG-20` |
+| 5 | 복구 가능한 항목은 `[휴지통] → 항목 → [복구]`로 되돌린 뒤 별도로 `[복구한 Board 열기]`를 누른다. | 복원된 행과 완료 피드백이 나타난다 | System은 유지된 Board 기록을 복원한다. | 없음 | 영속적 상태가 복원됨 | 복구를 지원하지 않는 경우 삭제 전에 파괴 작업의 영구성을 명시한다 |
 
-**완료 증거**: Saved Agenda, 열린 projection, 유지되는 runtime과 복구 가능성이 선택한 행동을 반영한다. 부분 실패는 완료·남음·미확인을 나누어 표시하고 미완료 대상만 재시도한다. 이미 저장·종료·삭제된 항목이 취소로 되돌아왔다고 표시하지 않는다.
+**완료 증거**: Saved Board, 열린 projection, 유지되는 runtime과 복구 가능성이 선택한 행동을 반영한다. 부분 실패는 완료·남음·미확인을 나누어 표시하고 미완료 대상만 재시도한다. 이미 저장·종료·삭제된 항목이 취소로 되돌아왔다고 표시하지 않는다.
 
 ### 1.4 Canvas·Browser·파일 사용
 
 <a id="atlas-v-01"></a>
 #### V-01. Desk 뷰로 리소스 열기
 
-**상세 조작**: [agenda](../../docs/references/design-synthesis/egdesk-ux-realization-proposals.md#ux-detail-agenda) · [view](../../docs/references/design-synthesis/egdesk-ux-realization-proposals.md#ux-detail-view) · [discovery](../../docs/references/design-synthesis/egdesk-ux-realization-proposals.md#ux-detail-discovery) · [restore](../../docs/references/design-synthesis/egdesk-ux-realization-proposals.md#ux-detail-restore) · [shell](../../docs/references/design-synthesis/egdesk-ux-realization-proposals.md#ux-detail-shell)
+**상세 조작**: [board](../../docs/references/design-synthesis/egdesk-ux-realization-proposals.md#ux-detail-agenda) · [view](../../docs/references/design-synthesis/egdesk-ux-realization-proposals.md#ux-detail-view) · [discovery](../../docs/references/design-synthesis/egdesk-ux-realization-proposals.md#ux-detail-discovery) · [restore](../../docs/references/design-synthesis/egdesk-ux-realization-proposals.md#ux-detail-restore) · [shell](../../docs/references/design-synthesis/egdesk-ux-realization-proposals.md#ux-detail-shell)
 
 **기술 참조**: [Resource·View·Authority](./EGDESK_INTERACTION_AND_ORCHESTRATION_CONTRACT.md#tech-resource-identity)
 **사용자 결정 참조**: [HUM-SURFACE-001](../../docs/codex/egdesk-product-interaction-trace-atlas-editorial-ledger.md#hum-surface-001)
@@ -451,7 +481,7 @@ Agenda를 생성하려 한다; 이 상태에 도달했다는 이유만으로 영
 | # | 제품 사용자 UI 행동 | 즉시 보이는 반응 | System 처리 | Agent 처리 | 상태 변화 | 경계 및 다음 UI 행동 |
 | ---: | --- | --- | --- | --- | --- | --- |
 | 1 | Dock의 Browser·파일·Chat, 상단 `[자료]`·`[찾기]`, Canvas 파일 드롭 또는 Chat의 자료 링크로 대상을 고른다. | 대상과 의도한 열기/포커스 행동이 `Q-VIEW-02`와 `Q-VIEW-11`에 따라 보인다 | System은 리소스 locator와 접근 context를 해석한다. | 제품 사용자가 리소스 열기를 위임한 경우에만 그 요청을 제출하며, 그 외에는 없음. | 리소스 변경 없음 | 누락/미지원/권한 없음 피드백: `Q-VIEW-03` |
-| 2 | 결과의 이름·`[열기]`를 누른다. 중복 안내에서는 `[기존으로 이동]` 또는 `[새 View 열기]`를 고른다. | Browser View·File View·Chat View처럼 유형이 표시된 View가 열리거나 기존 View로 이동한다. | identity·권한·mode를 확인해 기존 View를 재사용하거나 허용된 새 View를 연결한다. | 없음 | 활성 View·자동 세션만 변경되며 Saved Agenda는 변경되지 않는다. | 별도 View가 원본 사본·독립 runtime을 뜻하지 않는다. 관련: `Q-OBJ-03`, `Q-VIEW-02`, `Q-VIEW-11`. |
+| 2 | 결과의 이름·`[열기]`를 누른다. 중복 안내에서는 `[기존으로 이동]` 또는 `[새 View 열기]`를 고른다. | Browser View·File View·Chat View처럼 유형이 표시된 View가 열리거나 기존 View로 이동한다. | identity·권한·mode를 확인해 기존 View를 재사용하거나 허용된 새 View를 연결한다. | 없음 | 활성 View·자동 세션만 변경되며 Saved Board는 변경되지 않는다. | 별도 View가 원본 사본·독립 runtime을 뜻하지 않는다. 관련: `Q-OBJ-03`, `Q-VIEW-02`, `Q-VIEW-11`. |
 | 3 | Browser의 주소/탐색 bar, File의 편집·`[저장]`, Terminal의 `[입력 시작]` 등 해당 유형의 컨트롤을 사용한다. | 해당 리소스 흐름에서 정의한 네이티브 또는 조정된 리소스 피드백이 나타난다 | System은 입력을 해당 리소스 또는 runtime 소유자에게 전달한다. | 제품 사용자가 이 행동을 위임한 경우에만 수행하며, 그 외에는 없음. | 런타임/리소스는 해당 도구에 따라 변경될 수 있음 | 저장/외부 효과 증거는 리소스별 흐름에 속한다 |
 
 **완료 증거**: 의도한 리소스가 올바른 위치와 올바른 권한·가능 행동 컨텍스트를 갖춘 상태로 보이며,
@@ -461,14 +491,14 @@ Agenda를 생성하려 한다; 이 상태에 도달했다는 이유만으로 영
 <a id="atlas-v-02"></a>
 #### V-02. 뷰 이동, 크기 조절, 그룹화, 포커스, 최대화 및 닫기
 
-**상세 조작**: [view](../../docs/references/design-synthesis/egdesk-ux-realization-proposals.md#ux-detail-view) · [agenda-lifecycle](../../docs/references/design-synthesis/egdesk-ux-realization-proposals.md#ux-detail-agenda-lifecycle)
+**상세 조작**: [view](../../docs/references/design-synthesis/egdesk-ux-realization-proposals.md#ux-detail-view) · [board-lifecycle](../../docs/references/design-synthesis/egdesk-ux-realization-proposals.md#ux-detail-agenda-lifecycle)
 
 **기술 참조**: [기술 계층 지도](./EGDESK_INTERACTION_AND_ORCHESTRATION_CONTRACT.md#tech-layer-map), [관찰·renderer 수명주기](./EGDESK_INTERACTION_AND_ORCHESTRATION_CONTRACT.md#tech-observation-fidelity)
 
-**제품 전제**: View bar·메뉴·숫자 입력·키보드로 이동·크기·그룹·집중 보기·닫기를 조작한다. 그룹의 세션·Agenda 보존 여부는 연결된 사용자 선택에 따른다.<br>
+**제품 전제**: View bar·메뉴·숫자 입력·키보드로 이동·크기·그룹·집중 보기·닫기를 조작한다. 그룹의 세션·Board 보존 여부는 연결된 사용자 선택에 따른다.<br>
 **명세 상태**: 상세 조작·기술 설계 있음; 남은 정책은 연결된 사용자 선택에 따름
 **시작 상태**: 하나 이상의 활성 뷰가 Canvas에 있으며, 현재의
-뷰, 리소스/런타임, 자동 세션 및 Agenda 상태를 서로 구분할 수 있다.
+뷰, 리소스/런타임, 자동 세션 및 Board 상태를 서로 구분할 수 있다.
 
 Canvas viewport 밖으로 pan된 뷰는 닫힘이나 sleep 상태가 아니다. 각 view/runtime의
 lifecycle은 가시성만으로 결정하지 않으며, 무거운 renderer를 분리하는 경우에도
@@ -476,23 +506,25 @@ Canvas에는 해당 view를 다시 찾고 상태를 식별할 수 있는 가벼�
 
 View bar 더블클릭 또는 `[⋯] → [집중 보기]`는 기존 비율을 유지해 카메라만 맞춘다. Browser 내부 viewport와 저장된 크기는 바꾸지 않는다. `[집중 보기 종료]` 또는 셸 bar의 Esc는 이전 시점으로 돌아간다. 실제 resize·페이지 zoom·OS 전체 화면은 별도 동작이며 Canvas 탐색은 Agent의 작업 대상을 바꾸지 않는다. 관련: `Q-VIEW-06`, `Q-VIEW-12`.
 
+Browser View를 읽을 수 있을 만큼 확대하면 View에 붙은 얇은 2행 bar가 보인다. 윗줄에는 제목, 아랫줄에는 주소·이동 등 읽고 누를 수 있는 Browser 조작이 있다. 이는 Canvas 전체의 공통 도구줄이 아니며, 다른 유형의 전체 View는 각자의 조작면을 유지한다.
+
 | 작업 | 제품 사용자 UI 행동 | 보이는 반응 | System 처리 | Agent 처리 | 상태 변화 | 경계 / 다음 행동 |
 | --- | --- | --- | --- | --- | --- | --- |
-| 이동 | View bar를 드래그하거나 `[⋯] → [이동]`에서 좌표·이동 버튼을 사용하고 `[적용]`한다. | 뷰가 포인터를 따라가고 최종 Canvas 위치에 자리 잡는다 | System이 활성 뷰/세션 지오메트리를 업데이트한다. | 없음 | Agenda는 명시적으로 저장/업데이트한 경우에만 변경됨 | 충돌, 스냅, Canvas 밖, 키보드 대안: `Q-VIEW-04` |
-| 크기 조절 | 가장자리 handle을 드래그하거나 `[⋯] → [크기]`에서 폭·높이를 입력해 `[적용]`한다. | 크기 미리보기와 최종 경계가 나타난다 | System이 활성 뷰/세션 지오메트리를 업데이트한다. | 없음 | Agenda는 변경되지 않음 | 최소/최대/종횡비 동작: `Q-VIEW-04` |
-| 그룹화 | Shift+View bar 클릭 또는 `[화면 목록]` 체크박스로 선택한 뒤 `[그룹으로 묶기]`·`[그룹 해제]`·`[상위 그룹]`을 사용한다. | 중첩 그룹과 내부 목록이 보인다. 해제해도 자식의 Canvas 절대 위치는 유지된다. | 그룹 순환을 막고 배치 관계만 변경한다. | 없음 | 세션 복원·Agenda 저장에 그룹을 포함할지는 각각의 보존 정책을 따른다. 소속·권한·실행 소유는 바뀌지 않는다. | 실패에는 `[다시 기록]`, 자기 배치 변경에는 `[배치 실행 취소]`를 제공한다. 관련: `Q-VIEW-05`, `Q-VIEW-10`. |
+| 이동 | View bar를 드래그하거나 `[⋯] → [이동]`에서 좌표·이동 버튼을 사용하고 `[적용]`한다. | 뷰가 포인터를 따라가고 최종 Canvas 위치에 자리 잡는다 | System이 활성 뷰/세션 지오메트리를 업데이트한다. | 없음 | Board는 명시적으로 저장/업데이트한 경우에만 변경됨 | 충돌, 스냅, Canvas 밖, 키보드 대안: `Q-VIEW-04` |
+| 크기 조절 | 가장자리 handle을 드래그하거나 `[⋯] → [크기]`에서 폭·높이를 입력해 `[적용]`한다. | 크기 미리보기와 최종 경계가 나타난다 | System이 활성 뷰/세션 지오메트리를 업데이트한다. | 없음 | Board는 변경되지 않음 | 최소/최대/종횡비 동작: `Q-VIEW-04` |
+| 그룹화 | Shift+View bar 클릭 또는 `[화면 목록]` 체크박스로 선택한 뒤 `[그룹으로 묶기]`·`[그룹 해제]`·`[상위 그룹]`을 사용한다. | 중첩 그룹과 내부 목록이 보인다. 해제해도 자식의 Canvas 절대 위치는 유지된다. | 그룹 순환을 막고 배치 관계만 변경한다. | 없음 | 세션 복원·Board 저장에 그룹을 포함할지는 각각의 보존 정책을 따른다. 소속·권한·실행 소유는 바뀌지 않는다. | 실패에는 `[다시 기록]`, 자기 배치 변경에는 `[배치 실행 취소]`를 제공한다. 관련: `Q-VIEW-05`, `Q-VIEW-10`. |
 | 포커스 | View bar를 클릭하거나 F6로 셸에 나온 뒤 `[화면 목록]`에서 방향키로 대상을 고르고 Enter를 누른다. | 키보드 포커스, 콘텐츠 활성, 배치용 선택과 입력권 표시가 서로 구분된다 | System이 해당 control에 포커스를 전달하고 기존 입력권을 확인한다. | 없음 | 대상 control의 포커스가 변경됨 | Chat 콘텐츠 클릭·Canvas 클릭에 따른 활성 전환은 [V-03](#atlas-v-03), Browser/편집기/Terminal 단축키 소유권은 `Q-VIEW-04` |
 | 집중 보기·최대화 | View bar를 더블클릭하거나 `[⋯] → [집중 보기]`를 누른다. `[집중 보기 종료]` 또는 셸 bar의 Esc로 돌아간다. | 대상이 기존 비율을 유지하며 확대된다. 원래 시점으로 돌아갈 수 있고, 다른 전체 화면 모드와의 관계는 `Q-VIEW-06`을 따른다 | System은 기존 프레젠테이션 지오메트리를 보존하고 집중 보기의 확대를 적용한다 | 없음 | 프레젠테이션 상태가 변경되며 저장된 지오메트리는 복구 가능함 | Browser 내부 viewport·layout 영향과 유지되는 UI는 `Q-VIEW-06`; 복귀·키보드 경로는 `Q-VIEW-12` |
-| 닫기 | bar의 `[× View 닫기]`를 누른다. 미저장 내용이 있으면 원본 저장·허용된 초안 보존·저장하지 않기·취소 중 표시된 행동을 고른다. | renderer가 닫혀도 살아 있는 작업은 같은 View identity·위치의 접힌 node에 소유자·상태·`[다시 열기] [실행 종료…]`를 남긴다. | 미저장 처리와 안전한 detach를 확인하고 표현 상태를 기록한다. | 없음 | 원본·Saved Agenda·실행을 자동 삭제하거나 종료하지 않는다. | 닫기 실패는 기존 표시와 사유를 유지한다. 관련: `Q-VIEW-07`, `Q-VIEW-13`. |
+| 닫기 | bar의 `[× View 닫기]`를 누른다. 미저장 내용이 있으면 원본 저장·허용된 초안 보존·저장하지 않기·취소 중 표시된 행동을 고른다. | renderer가 닫혀도 살아 있는 작업은 같은 View identity·위치의 접힌 node에 소유자·상태·`[다시 열기] [실행 종료…]`를 남긴다. | 미저장 처리와 안전한 detach를 확인하고 표현 상태를 기록한다. | 없음 | 원본·Saved Board·실행을 자동 삭제하거나 종료하지 않는다. | 닫기 실패는 기존 표시와 사유를 유지한다. 관련: `Q-VIEW-07`, `Q-VIEW-13`. |
 
 **완료 증거**: 최종 뷰 지오메트리, 그룹화, 포커스, 최대화 또는
-닫힘 상태가 보이며, Agenda 구성 관계나 기반 리소스를
+닫힘 상태가 보이며, Board 구성 관계나 기반 리소스를
 묵시적으로 변경하지 않은 채 자동 세션 기록과 일치한다.
 
 <a id="atlas-v-03"></a>
 #### V-03. Canvas 탐색 및 열려 있는 항목 찾기
 
-**상세 조작**: [view](../../docs/references/design-synthesis/egdesk-ux-realization-proposals.md#ux-detail-view) · [discovery](../../docs/references/design-synthesis/egdesk-ux-realization-proposals.md#ux-detail-discovery) · [input](../../docs/references/design-synthesis/egdesk-ux-realization-proposals.md#ux-detail-input)
+**상세 조작**: [view](../../docs/references/design-synthesis/egdesk-ux-realization-proposals.md#ux-detail-view) · [semantic zoom](../../docs/references/design-synthesis/egdesk-ux-realization-proposals.md#ux-detail-semantic-zoom-visual-baseline) · [discovery](../../docs/references/design-synthesis/egdesk-ux-realization-proposals.md#ux-detail-discovery) · [input](../../docs/references/design-synthesis/egdesk-ux-realization-proposals.md#ux-detail-input)
 
 **기술 참조**: [기술 계층 지도](./EGDESK_INTERACTION_AND_ORCHESTRATION_CONTRACT.md#tech-layer-map), [접근성](./EGDESK_INTERACTION_AND_ORCHESTRATION_CONTRACT.md#tech-accessibility)
 
@@ -507,10 +539,12 @@ View bar 더블클릭 또는 `[⋯] → [집중 보기]`는 기존 비율을 유
 | 2 | 활성 Chat 위에서 두 손가락으로 스크롤한다. | 대화 또는 작성기 내부가 스크롤되고 Canvas는 움직이지 않는다. | 활성 Chat에 스크롤을 전달한다. | 없음 | Chat 내부 scroll 위치만 변경된다. | 끝까지 스크롤해도 Canvas pan으로 넘어가지 않는다. |
 | 3 | 빈 Canvas를 클릭한다. | Chat 콘텐츠 활성 표시가 풀리고 기존 대화·초안·배치는 남는다. | 콘텐츠 활성을 해제하고 Canvas 탐색 상태로 전환한다. | 없음 | 클릭 자체는 카메라를 이동하지 않는다. | 별도 Pan 버튼을 누를 필요가 없다. |
 | 4 | 포인터를 비활성 Chat 위로 옮긴 뒤 두 손가락으로 민다. | Chat은 비활성인 채 Canvas 화면이 이동한다. Chat 내부의 대화 위치는 유지된다. | hover로 재활성화하지 않고 Canvas camera에 pan을 적용한다. | 없음 | 뷰포트만 바뀌며 객체 배치·Browser viewport·실행 대상은 유지된다. | 다시 Chat을 조작하려면 본문 또는 작성기를 클릭한다. 경계·모션 감소·키보드 대안은 `Q-VIEW-08`, `Q-UX-03`. |
-| 5 | 상단 `[찾기]`·`[명령]`, Sidebar `[Agenda 찾기]` 또는 `[화면 목록]`을 열고 검색어를 입력한다. | 쿼리, 범위, 진행 상황 및 결과 목록이 `Q-DISC-02`에 따라 나타난다 | System은 결정된 로컬 index와 화면을 검색한다. | 의미 기반 검색을 명시적으로 요청한 경우에만 검색을 보조하며, 그 외에는 없음. | 임시 쿼리 | 유효하지 않음/결과 없음 상태에서도 구체적인 편집/닫기 행동이 유지된다 |
-| 6 | 결과 이름을 클릭하거나 방향키로 선택한 뒤 Enter를 누른다. `[상세]`는 열기 없이 출처·권한을 검사한다. | Canvas가 `Q-DISC-02`에 따라 대상으로 이동하거나 대상을 연다 | System은 결과를 기존 뷰, 저장된 Agenda, Library 항목 또는 리소스로 해석한다 | 없음 | 뷰포트/포커스 또는 활성 뷰 상태가 변경됨 | 현재 기준/대상과 불일치하는 결과의 피드백과 다음 행동: `Q-DISC-02` |
+| 5 | 상단 `[찾기]`·`[명령]`, Sidebar `[Board 찾기]` 또는 `[화면 목록]`을 열고 검색어를 입력한다. | 쿼리, 범위, 진행 상황 및 결과 목록이 `Q-DISC-02`에 따라 나타난다 | System은 결정된 로컬 index와 화면을 검색한다. | 의미 기반 검색을 명시적으로 요청한 경우에만 검색을 보조하며, 그 외에는 없음. | 임시 쿼리 | 유효하지 않음/결과 없음 상태에서도 구체적인 편집/닫기 행동이 유지된다 |
+| 6 | 결과 이름을 클릭하거나 방향키로 선택한 뒤 Enter를 누른다. `[상세]`는 열기 없이 출처·권한을 검사한다. | Canvas가 `Q-DISC-02`에 따라 대상으로 이동하거나 대상을 연다 | System은 결과를 기존 뷰, 저장된 Board, Library 항목 또는 리소스로 해석한다 | 없음 | 뷰포트/포커스 또는 활성 뷰 상태가 변경됨 | 현재 기준/대상과 불일치하는 결과의 피드백과 다음 행동: `Q-DISC-02` |
 
-pinch 또는 `[+]`·`[−]`는 Canvas 배율을 바꾼다. 보조 드래그는 빈 Canvas의 `⌘/Ctrl+드래그`, 키보드는 보조 `[Pan]` 도구와 Canvas 배경 포커스에서 방향키를 사용한다. 미니맵은 `[미니맵]` → 지점 클릭으로 이동한다. 이 보조 경로들은 위의 두 손가락 pan을 시작하기 위한 필수 단계가 아니다. [입력 활성·탐색 상세](../../docs/references/design-synthesis/egdesk-ux-realization-proposals.md#ux-detail-chat-canvas-input).
+pinch 또는 `[+]`·`[−]`로 Canvas를 1–400% 범위에서 확대·축소한다. 중간까지 축소하면 각 뷰는 원래 Canvas 위치·차지하는 자리·비율을 유지한 윤곽 카드가 되고, 위쪽 제목과 정확히 중앙의 유형 아이콘으로 찾을 수 있다. 더 멀리 축소하면 작은 표식이 되며, 화면에서 겹치거나 간격이 좁아진 표식만 영역별 임시 개수 표식으로 묶인다. 단일 표식을 누르면 같은 카드를 읽을 수 있는 크기로, 개수 표식을 누르면 그 구성원들이 있는 영역으로 이동한다. 그 영역 밖 표식은 각자의 표현을 유지한다. 다시 확대하면 상세 화면과 Browser의 2행 bar가 돌아온다. 옅은 나뭇결은 Canvas 배경에서 화면 이동·배율을 따라가며 멀리 축소하면 흐려진다.
+
+보조 드래그는 빈 Canvas의 `⌘/Ctrl+드래그`, 키보드는 보조 `[Pan]` 도구와 Canvas 배경 포커스에서 방향키를 사용한다. 미니맵은 `[미니맵]` → 지점 클릭으로 이동한다. 이 보조 경로들은 위의 두 손가락 pan을 시작하기 위한 필수 단계가 아니다. [입력 활성·탐색 상세](../../docs/references/design-synthesis/egdesk-ux-realization-proposals.md#ux-detail-chat-canvas-input).
 
 **완료 증거**: 이름이 지정된 대상이 포커스되거나 열리고 계속
 키보드로 접근할 수 있다; 현재 기준/상태와 불일치하거나 누락된 대상이 있어도 쿼리는 편집 가능한 상태로 유지되며
@@ -523,15 +557,15 @@ pinch 또는 `[+]`·`[−]`는 Canvas 배율을 바꾼다. 보조 드래그는 �
 
 **기술 참조**: [Resource identity](./EGDESK_INTERACTION_AND_ORCHESTRATION_CONTRACT.md#tech-resource-identity), [로컬 index](./EGDESK_INTERACTION_AND_ORCHESTRATION_CONTRACT.md#tech-storage-export)
 
-**제품 전제**: Library는 명시적으로 선별한 참조 목록이다. 자료·Agenda·결과·Snapshot 제공형, 자료만 제공형, 독립 큐레이션 미제공형의 상세 경로가 있으며 어느 범위를 제공할지는 연결된 사용자 선택에 따른다.<br>
+**제품 전제**: Library는 명시적으로 선별한 참조 목록이다. 자료·Board·결과·Snapshot 제공형, 자료만 제공형, 독립 큐레이션 미제공형의 상세 경로가 있으며 어느 범위를 제공할지는 연결된 사용자 선택에 따른다.<br>
 **명세 상태**: 상세 조작·기술 설계 있음; 남은 정책은 연결된 사용자 선택에 따름
-**시작 상태**: Library 제공 정책이면 Sidebar `[Library]`에서 시작한다. 미제공 정책이면 `[찾기]` 또는 참고용 Saved Agenda를 사용하며 숨은 수집 목록을 만들지 않는다. 관련: `Q-OBJ-05`.
+**시작 상태**: Library 제공 정책이면 Sidebar `[Library]`에서 시작한다. 미제공 정책이면 `[찾기]` 또는 참고용 Saved Board를 사용하며 숨은 수집 목록을 만들지 않는다. 관련: `Q-OBJ-05`.
 
 | # | 제품 사용자 UI 행동 | 즉시 보이는 반응 | System 처리 | Agent 처리 | 상태 변화 | 경계 및 다음 UI 행동 |
 | ---: | --- | --- | --- | --- | --- | --- |
-| 1 | 재사용 등록을 제공하는 정책이면 Sidebar `[Library]`를 누른다. 제공하지 않으면 `[찾기]`나 참고용 Saved Agenda를 연다. | Library 범위, 현재 위치 및 검색 가능한 범주가 `Q-OBJ-05`와 `Q-LIB-01`에 따라 나타난다 | System은 결정된 로컬 카탈로그만 불러온다. | 없음 | 열람 상태 | `Q-OBJ-05`가 결정되기 전까지 `Q-LIB-01`은 Library UI를 생성하지 않는다 |
-| 2 | 검색어를 입력하고 `[범위]`·유형·PC·상태 필터를 고른다. `[지우기]`는 검색어만 지운다. | 일치하는 리소스, 저장된 Agenda 또는 산출물이 유형/출처별로 구분된다 | System은 결정된 index를 조회한다. | 의미 기반 검색을 별도로 요청한 경우에만 검색을 보조하며, 그 외에는 없음. | 임시 쿼리 | 결과 없음, 최신 상태가 아닌 결과, 접근이 거부된 결과 및 오프라인 결과에도 편집/닫기 행동이 유지된다 |
-| 3 | 항목의 `[열기]`, `[현재 Agenda에 참조 추가]` 또는 Saved Agenda의 `[Agenda 열기]`를 누른다. | 열기는 대상 View·Agenda로 이동하고 참조 추가는 Library 목록에 `추가됨`을 표시한다. | 대상 identity·권한과 고정된 추가 대상 Agenda를 검증한다. | 없음 | 열기·참조 추가·등록 상태를 각각 변경한다. | 허용 유형의 자료 메뉴 `[Library에 추가] → [등록]`은 참조만 등록한다. `[Library에서 제거]`는 등록만 해제하고 원본은 유지한다. 관련: `Q-OBJ-05`. |
+| 1 | 재사용 등록을 제공하는 정책이면 Sidebar `[Library]`를 누른다. 제공하지 않으면 `[찾기]`나 참고용 Saved Board를 연다. | Library 범위, 현재 위치 및 검색 가능한 범주가 `Q-OBJ-05`와 `Q-LIB-01`에 따라 나타난다 | System은 결정된 로컬 카탈로그만 불러온다. | 없음 | 열람 상태 | `Q-OBJ-05`가 결정되기 전까지 `Q-LIB-01`은 Library UI를 생성하지 않는다 |
+| 2 | 검색어를 입력하고 `[범위]`·유형·PC·상태 필터를 고른다. `[지우기]`는 검색어만 지운다. | 일치하는 리소스, 저장된 Board 또는 산출물이 유형/출처별로 구분된다 | System은 결정된 index를 조회한다. | 의미 기반 검색을 별도로 요청한 경우에만 검색을 보조하며, 그 외에는 없음. | 임시 쿼리 | 결과 없음, 최신 상태가 아닌 결과, 접근이 거부된 결과 및 오프라인 결과에도 편집/닫기 행동이 유지된다 |
+| 3 | 항목의 `[열기]`, `[현재 Board에 참조 추가]` 또는 Saved Board의 `[Board 열기]`를 누른다. | 열기는 대상 View·Board로 이동하고 참조 추가는 Library 목록에 `추가됨`을 표시한다. | 대상 identity·권한과 고정된 추가 대상 Board를 검증한다. | 없음 | 열기·참조 추가·등록 상태를 각각 변경한다. | 허용 유형의 자료 메뉴 `[Library에 추가] → [등록]`은 참조만 등록한다. `[Library에서 제거]`는 등록만 해제하고 원본은 유지한다. 관련: `Q-OBJ-05`. |
 
 **완료 증거**: Library가 승인된 경우 선택한 카탈로그 항목이
 출처가 보이는 상태로 식별된 리소스를 열거나 포커스한다; 그 결정 전에는
@@ -665,7 +699,7 @@ Firefox 로딩/오류 상태 및 사용 가능한 페이지가 서로 일치한�
 | # | 제품 사용자 UI 행동 | 즉시 보이는 반응 | System 처리 | Agent 처리 | 상태 변화 | 경계 및 다음 UI 행동 |
 | ---: | --- | --- | --- | --- | --- | --- |
 | 1 | Dock `[파일]`로 OS 파일을 고르거나 `[파일▾] → [폴더 연결]`·`[여러 위치·프로젝트]`, 트리 행, 최근 항목 또는 파일 드롭을 사용한다. | 선택된 경로/리소스, 프로젝트 관계 및 권한 상태가 나타난다 | System은 접근 가능 여부를 확인하고 적절한 뷰어/편집기를 연다. | 없음 | 활성 뷰/세션 상태 | 누락, 이동됨, 미지원 또는 거부된 파일 피드백: `Q-CODE-02` 및 `Q-CODE-07` |
-| 2 | 편집기 본문에 직접 입력하거나 `[요청]`·`[선택 내용으로 요청]`으로 작성기를 열어 Agent 변경 요청을 전송한다. | 저장되지 않은 상태와 변경된 범위가 보인다 | System/편집기는 사람의 편집을 적용한다. | 위임된 범위 내에서만 편집할 수 있다 | 파일 콘텐츠가 변경될 수 있다; Agenda는 명시적으로 업데이트해야만 변경된다 | 충돌, 읽기 전용, 외부 변경, 실행 취소/다시 실행 및 미저장 변경 상태 동작: `Q-CODE-02` 및 `Q-CODE-06` |
+| 2 | 편집기 본문에 직접 입력하거나 `[요청]`·`[선택 내용으로 요청]`으로 작성기를 열어 Agent 변경 요청을 전송한다. | 저장되지 않은 상태와 변경된 범위가 보인다 | System/편집기는 사람의 편집을 적용한다. | 위임된 범위 내에서만 편집할 수 있다 | 파일 콘텐츠가 변경될 수 있다; Board는 명시적으로 업데이트해야만 변경된다 | 충돌, 읽기 전용, 외부 변경, 실행 취소/다시 실행 및 미저장 변경 상태 동작: `Q-CODE-02` 및 `Q-CODE-06` |
 | 3 | `[저장]` 또는 `⌘/Ctrl+S`로 저장한다. `[변경 N]`에서 비교하고 `[검사] → 검사 유형 → [실행]`으로 같은 revision의 결과를 확인한다. | 저장 확인증, 변경 비교에서 선택한 파일/변경 묶음, 결과 대상/리비전 및 검증 상태가 각각 별도로 나타난다 | System은 저장에 성공한 경우에만 영속화하고 동일한 리비전에 대한 검증 증거를 계산하거나 로드한다 | 없음 | 저장에 성공한 경우에만 파일 변경이 영구 반영된다; 검토 및 결과 보기 상태는 서로 분리된 상태로 유지된다 | 저장 실패: `Q-CODE-05`; 기준보다 뒤처졌거나 충돌하는 변경 비교 상태, 적용 실패 및 변경 비교 재진입: `Q-CODE-09`; 결과 실행/실패/탐색/재진입: `Q-CODE-08`; 보이는 편집기 상태만으로는 저장 증거가 되지 않는다 |
 
 **완료 증거**: 파일 시스템 리비전, 보이는 편집기 상태, 변경 비교
@@ -681,14 +715,14 @@ Firefox 로딩/오류 상태 및 사용 가능한 페이지가 서로 일치한�
 
 **기술 참조**: [Context assembly](./EGDESK_INTERACTION_AND_ORCHESTRATION_CONTRACT.md#tech-context-assembly), [Chat·Canvas Answer](./EGDESK_INTERACTION_AND_ORCHESTRATION_CONTRACT.md#tech-answer-projection)
 
-**제품 전제**: 기본 Chat은 안정적인 Agent identity에 연결된 담당자 방이다. Profile revision은 별도 실행 설정이며 교체해도 방·기억·업무를 합치지 않는다. 공유 대화는 별도 identity·참여자·공유 범위를 갖고 원본 방 전체를 자동 공유하지 않는다.
+**제품 전제**: 기본 Codex 대화와 선택한 Agent의 담당자 방을 구분한다. 담당자 방의 Profile revision은 별도 실행 설정이며 교체해도 방·기억·업무를 합치지 않는다. 공유 대화는 별도 identity·참여자·공유 범위를 갖고 원본 방 전체를 자동 공유하지 않는다.
 **명세 상태**: 상세 조작·기술 설계 있음; 남은 정책은 연결된 사용자 선택에 따름
 **시작 상태**: Chat에 접근할 수 있고 기존 대화가 전혀 없거나 하나 이상 존재할 수 있다.
 Chat이나 대화를 열었다는 이유만으로 Agent 작업이 시작되지는 않는다.
 
 | # | 제품 사용자 UI 행동 | 즉시 보이는 반응 | System 처리 | Agent 처리 | 상태 변화 | 경계 및 다음 UI 행동 |
 | ---: | --- | --- | --- | --- | --- | --- |
-| 1 | EG-Desk Dock의 `[Chat]`을 클릭한다. 다른 담당자는 Chat의 `[방 목록]` → `[담당자]` 탭 → 이름·avatar로 구별되는 방 행을 클릭한다. | Canvas에 최근 사용한 Agent 방 또는 선택 화면이 열리고, 방 안에는 상대 Agent의 avatar·이름, message timeline, 요청 컨텍스트 영역, 작성기와 `[전송]`이 구분되어 보인다. 사용할 수 있는 Agent Profile이 없으면 같은 view에 `[Agent 설정]`과 작성기 비활성 사유가 나타난다 | System은 선택한 Agent 관계와 권한 있는 대화 projection을 불러온다. | 없음 | Chat view와 Agent 방 선택/초안 표시만 | Chat을 열어도 Run은 시작되지 않는다. 기본 제공 Agent/Profile 여부는 `Q-AGENT-02`; 같은 Agent 방의 업무 구분·정확한 레이아웃·포커스·재진입은 `Q-CHAT-01`–`Q-CHAT-03` |
+| 1 | EG-Desk Dock의 `[Chat]`을 클릭한다. 만든 Agent를 쓰려면 `[방 목록]`에서 이름·avatar로 구별되는 담당자 방을 고른다. | 처음에는 기본 Codex 대화와 작성기가 열린다. 기존 대화가 있으면 선택한 대화를 복원한다. Agent를 고른 경우에만 해당 담당자의 정체성과 생각 버블을 사용한다. | System은 대화 모드·Engine 연결·권한을 확인하며 사용자 정의 Profile이 없는 기본 Codex도 준비한다. | 없음 | 대화·초안 표시 | 연결 만료에는 `[Codex 다시 연결]`을 제공한다. Agent Profile이 없다는 이유로 기본 전송을 막지 않는다. 관련: `Q-AGENT-02`, `Q-CHAT-01`–`Q-CHAT-03`. |
 | 2 | Chat 작성기를 클릭해 요청을 입력한 뒤 `[전송]`을 클릭하거나, 한글 조합을 끝낸 뒤 별도로 `⌘/Ctrl+Enter`를 누른다. | 작성기 클릭 때 Chat 콘텐츠 활성 표시와 입력 커서가 나타난다. 전송 뒤 제출된 메시지와 범위가 한정된 컨텍스트/작업 상태가 보인다 | System은 메시지를 기록하고 작업 컨텍스트를 결합한다. | 결합된 후에만 응답한다 | 대화 및 작업 상태가 변경된다 | 전송 실패 시 `Q-CHAT-02`에 따라 초안/메시지를 복구 가능한 상태로 유지한다 |
 | 3 | 같은 대화의 작성기에 후속 내용을 입력한다. 필요하면 컨텍스트 항목을 클릭해 포함 여부·범위를 수정하고 `[적용]`한다. 작성기의 `[전송]`을 클릭한다. | 후속 내용이 이전 대화 및 자체 컨텍스트 개정과 관련되어 있음이 명확히 보인다 | System은 권한이 부여된 이전 컨텍스트와 새로 선택한 항목만 결합한다. | 그 범위 안에서 응답한다 | 새 메시지/작업 상태 | 이전 대화가 Desk 전체에 대한 접근 권한을 의미하지는 않는다 |
 | 4 | 활동 옆 `[이 업무 중지]`, 실패의 `[실패 부분 재시도]`, 미수락 요청의 `[초안으로 복구]`·`[상태 다시 확인]`을 해당 상태에 맞게 사용한다. | 중지됨, 실패, 재시도 중, 중복 및 완료 상태가 서로 구분된 채 유지된다 | System은 선택한 전환을 기록한다. | 결정된 작업 범위만 중지하거나 다시 실행한다 | 작업 상태가 변경되며 이전 메시지는 유지된다 | 재시도는 외부 효과를 암묵적으로 중복 발생시키지 않는다 |
@@ -708,14 +742,17 @@ Chat이나 대화를 열었다는 이유만으로 Agent 작업이 시작되지�
 
 **제품 전제**: Chat에 보이는 Agent 이름·상태와 실제 실행 구성은 연결되지만 같은 것은 아니다. Profile을 열어 보거나 편집하는 것만으로 Run이 시작되거나 권한이 넓어지지 않는다.  
 **명세 상태**: 상세 조작·기술 설계 있음; 남은 정책은 연결된 사용자 선택에 따름<br>
-**시작 상태**: EG-Desk에 0개 이상의 Agent Profile revision이 존재할 수 있다. 기본 제공 또는 예시 Profile을 최종 제품 카탈로그로 취급할지는 `Q-AGENT-02`가 정한다. Profile이 0개여도 Dock의 Chat은 열리지만, 같은 Chat view 안에 `[Agent 설정]`과 작성기·전송을 사용할 수 없는 이유가 보인다.
+**시작 상태**: 사용자가 선택적으로 Agent를 만들거나 기존 담당자의 설정을 확인한다.
+Agent Profile이 0개여도 기본 Codex 대화·전송은 Engine·권한 조건에 따라 사용할 수 있다.
+아래 설정은 기본 Codex 첫 요청의 선행 조건이 아니다. Profile의 소유·공유·편집 수명주기는
+`Q-AGENT-02`와 연결된 정책을 따른다.
 
 | # | 제품 사용자 UI 행동 | 즉시 보이는 반응 | System 처리 | Agent 처리 | 상태 변화 | 경계 및 다음 UI 행동 |
 |---:|---|---|---|---|---|---|
 | 1 | Chat header의 `[⋯]` → `[담당자 설정]`을 클릭한다. Profile 관리는 `[방 목록]` → `[Profile 관리]`를 클릭한다. | 선택한 Agent의 표시 정체성, Profile revision, 적용 범위, model/provider, tool capability, memory/context 정책, 권한 상한, 현재 가용성 상태가 서로 구분되어 나타난다. Profile이 없으면 `[새 Agent Profile]`이 첫 행동으로 보인다 | System은 저장된 Profile과 현재 가용성·권한 정보를 읽어 투영한다 | 없음 | 검사 화면과 포커스만 변경된다 | 원문 system instruction이나 비밀 credential 값을 반드시 노출한다고 가정하지 않는다. 표시 범위는 `Q-AGENT-08`, `Q-AGENT-12`, `Q-AGENT-13` |
 | 2 | `[새 Agent Profile]`, 선택·복제·편집 중 하나로 Profile 초안을 열고 표시 이름, 허용된 personality/instruction, provider/model policy, tool 후보와 실행 제한을 수정하거나 `[취소]`한다. 외부 계정 또는 credential이 필요하면 별도의 `[계정 또는 API credential 연결]`을 제품 사용자가 실행한다 | 변경 전 revision과 초안, 각 필드의 출처·적용 범위, provider/model/tool 가용성, credential 연결 상태, 유효성 검사, `[저장] [취소]` 가능 여부가 보인다 | System은 `Q-AGENT-02`, `Q-AGENT-03`, `Q-AGENT-05`, `Q-AGENT-07`, `Q-AGENT-09`, `Q-AGENT-10`, `Q-AGENT-13`의 범위와 우선순위 규칙으로 초안을 검증한다 | 없음 | 아직 저장된 Profile이나 Run은 변경되지 않는다 | Personality, instruction, model, tool capability는 권한을 확대하지 않는다. 외부 계정·credential 연결은 `A-AUTH-01` |
 | 3 | Profile 편집의 `[초안 저장]` 후 `[차이 보기]`·`[활성화]`를 사용한다. 저장과 활성화는 별도 결과로 확인한다. | 저장된 새 revision, 이전 revision과의 차이, 다음 Run에 적용되는 범위, 진행 중 Run에 미치는 영향이 표시된다 | System은 검증된 새 revision을 원자적으로 저장하고 이전 revision을 보존한다 | 없음 | Profile revision이 하나 추가되거나 명시된 메타데이터만 변경된다 | 진행 중 Run을 조용히 변경하지 않는다. 활성 Run 영향과 rollback은 `Q-AGENT-14`, `Q-AGENT-16` |
-| 4 | 작성 중인 업무의 `[업무 ⋯]` → `[실행 설정]` → `[Agent 경로]`에서 `[추가]`·`[변경]`으로 Agent/Profile revision을 선택하고 `[저장]` → `[이번 업무에 적용]`을 클릭한다. 자동 경로는 `[자동 선택 내역]`에서 확인하고 필요하면 `[이번 업무에 고정]`을 클릭한다. 전송 전에는 초안 설정만 바뀐다. | 다음 요청에 선택된 표시 정체성, Profile revision, 경로 지정 범위와 fallback 정책이 보인다 | System은 선택을 정해진 앱/제품 사용자/Desk/Agenda/대화/요청 범위에만 기록한다 | 없음 | 다음 Run의 입력 설정만 바뀐다 | 정확한 소유·지속 범위는 `Q-AGENT-01`, `Q-AGENT-02`; provider/model fallback은 `Q-AGENT-03`, `Q-AGENT-04` |
+| 4 | 작성 중인 업무의 `[업무 ⋯]` → `[실행 설정]` → `[Agent 경로]`에서 `[추가]`·`[변경]`으로 Agent/Profile revision을 선택하고 `[저장]` → `[이번 업무에 적용]`을 클릭한다. 자동 경로는 `[자동 선택 내역]`에서 확인하고 필요하면 `[이번 업무에 고정]`을 클릭한다. 전송 전에는 초안 설정만 바뀐다. | 다음 요청에 선택된 표시 정체성, Profile revision, 경로 지정 범위와 fallback 정책이 보인다 | System은 선택을 정해진 앱/제품 사용자/Desk/Board/대화/요청 범위에만 기록한다 | 없음 | 다음 Run의 입력 설정만 바뀐다 | 정확한 소유·지속 범위는 `Q-AGENT-01`, `Q-AGENT-02`; provider/model fallback은 `Q-AGENT-03`, `Q-AGENT-04` |
 | 5 | Profile 행 `[⋯]`에서 `[사용 중단]`·`[보관]`·`[이전 revision으로 적용]`·`[삭제]`·`[내보내기]`를 선택하고 대상·영향을 확인하거나 취소한다. | 영향받는 기본값, 과거 Run 참조, 공유 범위, 복구 가능성, migration 결과가 실행 전에 보인다 | System은 `Q-AGENT-02`의 수명주기 규칙과 데이터 경계를 검증한 뒤 확정된 행동만 적용한다 | 없음 | 성공한 경우에만 Profile lifecycle 상태가 바뀐다 | 과거 Run의 configuration snapshot과 감사 연결은 보존한다. 원격 공유/동기화는 `A-INFRA-01` 또는 `A-INFRA-03` |
 
 **완료 증거**: 제품 사용자는 어떤 Agent 표시가 어떤 Profile revision과 연결되는지, 다음 Run에 무엇이 적용되는지, 무엇이 단지 가용 capability이고 무엇이 실제 권한인지 구분할 수 있다. 저장/선택 실패 시 이전 revision과 요청 초안은 그대로 남고 재시도 또는 취소할 수 있다.
@@ -810,7 +847,7 @@ Agent/제공자 표시 방식, 경로 지정의 지속/재정의 및 위임 권�
 | ---: | --- | --- | --- | --- | --- | --- |
 | 1 | 담당자 방 `[새 업무]`, 자료의 `[Agent에게 요청]`, 결과의 `[후속 질문]` 등으로 공통 작성기를 열고 질문·첨부·대상을 편집한다. | 초안 텍스트와 선택한 대상/컨텍스트 힌트가 보인다 | System은 초안만 유지한다 | 없음 | 요청 초안과 포커스만 변경되며 Run은 아직 없음 | 정확한 입력 및 포커스 동작: `Q-AI-10` |
 | 2 | 작성기의 `[전송]`을 클릭하거나, 작성기에 포커스를 두고 한글 조합을 끝낸 뒤 별도로 `⌘/Ctrl+Enter`를 누른다. | 수락된 요청과 범위가 한정된 컨텍스트 상태가 `Q-AI-03`에 따라 나타난다 | System은 권한이 부여된 작업 범위와 컨텍스트 스냅샷을 확정한다 | Agent는 범위가 한정된 컨텍스트를 사용할 수 있게 된 후에만 시작한다 | 수락된 요청, 고정된 context revision과 Run/Task 후보가 생성됨 | 범위가 승인 대상 영역으로 확장되는 경우에만 별도의 승인이 필요하다 |
-| 3 | `[ · · · ]`로 활동을 열거나 `[이 업무 중지]`를 누른다. 여러 활동이면 목록에서 대상을 고른다. | 실행 중 상호작용 Browser·Terminal은 동일 Live, 완료된 읽기·명령은 Snapshot을 연다. Live 미확인은 논리 node에 남긴다. `[당시 관찰] [현재 조작면] [비교]`로 시점을 구별한다. | 활동·호출·resource identity를 검증한다. direct 결과·raw capture·Reader packet·실제 전달 내용을 별도 manifest로 연결하고 관찰 열기로 재실행하지 않는다. | 요청 담당 Agent는 업무 판단을 유지하고 Reader는 읽기만 수행한다. | Run 실행 상태, Task의 정본 여덟 상태, Result.completeness를 분리한다. | 숨은 추론을 노출하거나 현재 내용을 과거로 대체하지 않는다. 관련: `Q-AI-02`, `Q-AI-04`, `READ-01`–`READ-03`. |
+| 3 | 기본 Codex의 `[작업 기록]` 또는 사용자 생성 Agent의 `[ · · · ]`를 클릭한다. 중지는 별도의 `[이 업무 중지]`를 누른다. | 해당 업무의 기록 패널이 열리고 `[당시 읽은 내용]`은 패널 안의 Snapshot을 보여 준다. `[현재 작업 화면]`을 눌러야 동일 Live의 Canvas 위치로 이동한다. | 활동·호출·자료 identity와 권한을 검증하고 실제 전달 내용을 연결한다. 기록 열람에서는 카메라·대화 위치를 유지한다. | 요청 담당 실행은 기존 업무를 계속하며 Reader는 읽기만 수행한다. | 기록 표시와 Run/Task 실행 상태를 구분한다. | 기록 열람으로 재실행하거나 현재 내용을 과거로 대체하지 않는다. 사용자 조치가 필요한 상태는 버블 안에만 숨기지 않는다. 관련: `Q-AI-02`, `Q-AI-04`, `READ-01`–`READ-03`. |
 
 **완료 증거**: 수락된 요청, 범위가 한정된 컨텍스트 개정, Agent 작업 상태 및
 최종 결과/실패/중지 상태가 서로 연결된다. 직접 호출의 명명된 결과 또는 Smart
@@ -825,7 +862,7 @@ Read의 raw capture·Context Packet·실제 Agent 전달 payload가 각자의 �
 
 **기술 참조**: [Context assembly](./EGDESK_INTERACTION_AND_ORCHESTRATION_CONTRACT.md#tech-context-assembly), [Reader Session](./EGDESK_INTERACTION_AND_ORCHESTRATION_CONTRACT.md#tech-reader-session)
 
-**제품 전제**: System은 thread/task, 명시적 선택, 관련 Agenda, 일시적 그룹·배치, visible/focused resource, 최근 관련 상태, 계정·권한·실행 범위를 결합한다. 공간적 근접성은 관련성 후보일 뿐 사실이나 증거가 아니며, 이것이 Desk 전체 수집을 의미하지는 않는다  
+**제품 전제**: System은 thread/task, 명시적 선택, 관련 Board, 일시적 그룹·배치, visible/focused resource, 최근 관련 상태, 계정·권한·실행 범위를 결합한다. 공간적 근접성은 관련성 후보일 뿐 사실이나 증거가 아니며, 이것이 Desk 전체 수집을 의미하지는 않는다<br>
 **명세 상태**: 상세 조작·기술 설계 있음; 남은 정책은 연결된 사용자 선택에 따름
 **시작 상태**: 요청 초안 또는 수락된 작업에는 System이 결합한 컨텍스트 후보가
 있으며, 정확히 어떤 입력이 포함되고 제외되었는지 여전히 검사할 수 있다.
@@ -833,11 +870,11 @@ Read의 raw capture·Context Packet·실제 Agent 전달 payload가 각자의 �
 | # | 제품 사용자 UI 행동 | 즉시 보이는 반응 | System 처리 | Agent 처리 | 상태 변화 | 경계 및 다음 UI 행동 |
 | ---: | --- | --- | --- | --- | --- | --- |
 | 1 | Chat의 자료 이름 또는 `[자료 N개 보기]`로 전체 이름·범위·포함 이유를 읽는다. 포함을 바꾸려면 `[포함 범위 편집]`, 초안에서 바로 빼려면 `[× 제거]`를 누른다. | 열람에는 읽기 전용 정보와 `[닫기]`가 보인다. 편집을 열었을 때만 포함/제외·대상 추가·`[적용] [취소]`가 나타난다. 직접 제거 뒤에는 `[되돌리기]`가 남는다. | 열람은 제한된 projection만 공개하고 변경하지 않는다. 명시적 제거·적용에만 초안 context revision을 갱신한다. | 없음 | 이름 확인과 초안 변경은 별개다. | 열람 닫기·Esc는 원 작성기에, 편집 취소는 이전 포함 상태에 돌아간다. 접근 불가 항목을 암묵적으로 추가하지 않는다. |
-| 2 | 제품 사용자가 context item별 `[이 요청에서 포함/제외]`를 바꾸거나 `[대상 추가]`, Agenda 연결 변경, 권한 축소를 실행한 뒤 `Click [적용]` 또는 `Click [취소]` 한다 | `[적용]`하면 요청 컨텍스트 영역의 item·선택 이유·범위가 갱신된다. 실행 중이면 조정 수신·반영 상태를 확인할 수 있고, `[취소]`하면 편집 전 draft와 작성기 포커스가 유지된다 | System은 범위를 다시 검증한다. 실행 중 변경은 같은 Run의 다음 모델 호출에 연결하고 이미 전달된 입력은 이력으로 보존한다 | 다음 호출에서 새 범위를 사용해 후속 행동을 조정한다 | 같은 Run 안에 새 context revision이 추가된다 | 제외는 과거 전달 취소가 아니다. 앞으로의 사용을 제한하고 권한·진행 중 행동 충돌이 있으면 해당 행동만 재검증한다. 세부 표시는 `Q-AI-05` |
+| 2 | 제품 사용자가 context item별 `[이 요청에서 포함/제외]`를 바꾸거나 `[대상 추가]`, Board 연결 변경, 권한 축소를 실행한 뒤 `Click [적용]` 또는 `Click [취소]` 한다 | `[적용]`하면 요청 컨텍스트 영역의 item·선택 이유·범위가 갱신된다. 실행 중이면 조정 수신·반영 상태를 확인할 수 있고, `[취소]`하면 편집 전 draft와 작성기 포커스가 유지된다 | System은 범위를 다시 검증한다. 실행 중 변경은 같은 Run의 다음 모델 호출에 연결하고 이미 전달된 입력은 이력으로 보존한다 | 다음 호출에서 새 범위를 사용해 후속 행동을 조정한다 | 같은 Run 안에 새 context revision이 추가된다 | 제외는 과거 전달 취소가 아니다. 앞으로의 사용을 제한하고 권한·진행 중 행동 충돌이 있으면 해당 행동만 재검증한다. 세부 표시는 `Q-AI-05` |
 | 3 | 진행 중인 업무에 연결된 Chat 작성기에 추가 지시를 입력하고 `[전송]`을 클릭한다. | 추가 메시지와 그 업무에 대한 조정 수신 여부가 나타나고, 반영 후에는 어떤 지시를 적용했는지 확인할 수 있다 | System은 가능한 가장 이른 다음 모델 호출에 조정을 넣는다. 이미 진행 중인 모델 호출이 새 메시지를 받았다고 표시하지 않는다 | 같은 Run의 다음 호출에서 새 지시를 반영해 계획·행동을 조정한다 | 새 Run이나 attempt 없이 호출별 입력과 결과 연결이 추가된다 | 의도적인 새 업무·분기와 실제 재시도는 별도 행동이다. 정확한 수신·반영 표시는 `Q-AI-05`, `Q-AGENT-18` |
 
 **완료 증거**: 결과 작업/답변에서 Agent가 사용한 정확한 컨텍스트 개정을
-검사할 수 있으며, 여기에는 어떤 Agenda, 일시적 레이아웃/그룹, 보이는 리소스
+검사할 수 있으며, 여기에는 어떤 Board, 일시적 레이아웃/그룹, 보이는 리소스
 및 명시적 선택이 기여했는지가 포함된다.
 
 <a id="atlas-read-01"></a>
@@ -855,7 +892,7 @@ Read의 raw capture·Context Packet·실제 Agent 전달 payload가 각자의 �
 |---:|---|---|---|---|---|---|
 | 1 | 작성기의 추천 기본안 `Click [첨부]` → 파일 선택기에서 대상을 선택 → `Click [열기]` 한다. 이어서 `Type "전부 읽고 핵심을 요약해줘"` 한다. | 작성기 위 context 영역에 파일별 이름·형식·크기·현재 revision과 `[× 제거]`가 보인다. 아직 `읽음`이나 `Agent에게 전달됨`으로 표시되지 않는다. | 선택 시점의 source identity와 접근 가능성을 검사해 요청 초안에만 결합한다. | 없음 — 전송 전에는 읽기나 요약을 시작하지 않는다. | 요청 초안만 변경된다. | 첨부 제거·교체·실패는 `Q-AI-10`, context 검사는 `AI-02`를 따른다. |
 | 2 | 추천 기본안 `Click [전송]` 한다. | 사용자 메시지와 `[ · · · ]`가 나타나고, 접근성 텍스트에 추천 기본안 `자료 읽는 중 · 전체 검토 · 3개 source`처럼 읽기 범위가 보인다. 내부 Reader 수나 대화는 노출하지 않는다. | 첨부 수·형식·예상 token/vision 비용·요청 담당 Agent의 남은 context와 답변 여유를 함께 계산한다. 직접 전달이 안전하면 그 Agent의 input을 만들고, 그렇지 않으면 source snapshot에 결합된 Reader Session을 시작한다. | 요청 담당 Agent는 최종 업무를 계속 소유한다. Reader가 선택되면 원문 전체 coverage를 검사해 source-anchored Context Packet을 그 Agent에게 반환한다. | 직접 read 또는 Reader mode, source snapshot, read intent와 context revision이 기록된다. | mode 선택은 파일 크기 하나만으로 결정하지 않는다. 어떤 mode였는지는 세부정보에서 확인할 수 있다. |
-| 3 | 필요하면 `[ · · · ]`에서 읽기 활동을 고르고 `[읽기 상세]`를 누른다. | Canvas의 읽기 상태에는 `직접 읽기` 또는 `Reader Session`, 전체 검토/지정 범위, source별 coverage, packet revision과 `[원문 스냅샷 열기]`가 보인다. | 공개 가능한 manifest와 coverage를 Snapshot View에 projection한다. | 클릭 때문에 다시 읽지 않고 현재 작업을 계속한다. | 화면 projection만 바뀐다. | Reader를 일반 업무 담당자로 표시하지 않는다. 기본/상세 표시와 개입은 읽기 상세 경로를 따르며 일반 읽기·분할·재호출에 별도 승인이 없다. |
+| 3 | 기본 Codex의 `[작업 기록]` 또는 Agent의 `[ · · · ]`에서 읽기 활동 → `[읽기 상세]`를 누른다. | 기록 패널에 직접 읽기/Reader, 전체 검토/지정 범위, source별 읽기 범위와 packet revision이 보인다. `[당시 읽은 내용]`은 패널 안에서 원문을 연다. | 공개 가능한 manifest·읽기 범위·전달 자료를 조회하며 Canvas는 유지한다. | 클릭 때문에 다시 읽지 않고 현재 작업을 계속한다. | 기록 표시만 변경 | Reader를 별도 사용자 담당자로 만들지 않는다. 일반 읽기·분할·재호출마다 승인을 요구하지 않는다. |
 | 4 | `Observe` — 최종 답변을 확인한다. | Chat 답변과 Canvas 근거에서 어떤 source가 직접 입력 또는 Context Packet으로 쓰였는지 확인할 수 있다. | 최종 Answer를 요청 담당 Agent에게 실제 전달된 input revision과 source snapshot lineage에 연결한다. | 요청 담당 Agent가 원 요청의 요약·판단·답변을 생성한다. | Run과 Reader Session 결과가 완료 또는 명시적 오류 상태가 된다. | Reader를 사용했다는 사실만으로 전체 검토 완료라 하지 않고 모든 assigned coverage가 성공해야 한다. |
 
 **완료 증거**: 요청 담당 Agent가 직접 받은 payload 또는 Reader Context Packet, 전체 source
@@ -925,7 +962,7 @@ Chat·SQLite·snapshot·export에 노출되지 않는다.
 
 **기술 참조**: [Shared multi-Agent conversation](./EGDESK_INTERACTION_AND_ORCHESTRATION_CONTRACT.md#tech-multi-agent-chat), [Parallel Agents](./EGDESK_INTERACTION_AND_ORCHESTRATION_CONTRACT.md#tech-parallel-agents)
 
-**제품 전제**: 담당자 방과 공유 대화는 별도 대화 관계다. 공유 대화는 고유 identity·참여자·공유 소유 범위를 가지며 Agenda는 0개 이상의 탐색 참조로 연결된다. 별도 workroom이나 Task별 Thread는 필요하지 않다. 선택 공개형·업무 공개형의 기본 정책은 연결된 사용자 선택에 따른다.
+**제품 전제**: 담당자 방과 공유 대화는 별도 대화 관계다. 공유 대화는 고유 identity·참여자·공유 소유 범위를 가지며 Board는 0개 이상의 탐색 참조로 연결된다. 별도 workroom이나 Task별 Thread는 필요하지 않다. 선택 공개형·업무 공개형의 기본 정책은 연결된 사용자 선택에 따른다.
 **명세 상태**: 상세 조작·기술 설계 있음; 남은 정책은 연결된 사용자 선택에 따름
 **시작 상태**: Agent 담당자 방 하나 이상을 사용할 수 있다. 공유 작업 대화 개념은
 `Q-OBJ-06`에서 승인된 범위까지만 사용할 수 있으며, 원본 방 기록, 대상, 참여자 및
@@ -933,7 +970,7 @@ Chat·SQLite·snapshot·export에 노출되지 않는다.
 
 | # | 제품 사용자 UI 행동 | 즉시 보이는 반응 | System 처리 | Agent 처리 | 상태 변화 | 경계 및 다음 UI 행동 |
 | ---: | --- | --- | --- | --- | --- | --- |
-| 1 | 담당자 방에서 요청을 전송한다. 공유 대화는 `[방 목록] → [공유 대화] → [새 대화]`에서 제목·참여자·공유 범위·선택 Agenda를 입력해 `[만들기]`하거나 기존 행을 연다. | 담당자 identity 또는 공유 대화의 참여자·공개 범위·Agenda 참조가 보인다. | 대화 identity와 허용 범위를 기록한다. 생성·열기만으로 실행하지 않는다. | 명시적인 Agent 요청이 접수된 경우에만 응답한다. | 대화 상태와 Agent 실행 상태를 분리한다. | 일반 공유 메시지 전송은 Agent 호출이 아니다. 관련: `Q-OBJ-06`, `Q-AI-12`. |
+| 1 | 담당자 방에서 요청을 전송한다. 공유 대화는 `[방 목록] → [공유 대화] → [새 대화]`에서 제목·참여자·공유 범위·선택 Board를 입력해 `[만들기]`하거나 기존 행을 연다. | 담당자 identity 또는 공유 대화의 참여자·공개 범위·Board 참조가 보인다. | 대화 identity와 허용 범위를 기록한다. 생성·열기만으로 실행하지 않는다. | 명시적인 Agent 요청이 접수된 경우에만 응답한다. | 대화 상태와 Agent 실행 상태를 분리한다. | 일반 공유 메시지 전송은 Agent 호출이 아니다. 관련: `Q-OBJ-06`, `Q-AI-12`. |
 | 2 | 메시지·기여·Memo의 `[⋯] → [공유 대화에 연결]`에서 대상 대화·참여자·공유할 본문·첨부를 고른다. | 공유할 정확한 메시지, 컨텍스트 및 참여자가 미리 표시된다 | System은 `Q-OBJ-06`에 따라 결정된 링크 또는 사본만 준비한다. | 없음 | 대화/컨텍스트 관계가 보류 중이다 | 취소, 중복, 개인정보 보호 및 실행 취소: `Q-AI-13` |
 | 3 | 공개·제외 범위를 확인하고 `[공유]` 또는 `[취소]`를 누른다. | 선택된 공유 작업 화면에는 수락된 컨텍스트와 참여자만 표시되거나, 취소 후 변경되지 않은 상태로 돌아간다 | System은 성공한 경우에만 관계를 저장한다. | 없음 | 대화/컨텍스트 관계가 변경될 수 있다 | 컨텍스트 공유만으로는 새 작업에 권한을 부여하지 않는다 |
 | 4 | 공유 대화의 `[Agent에게 요청]`에서 담당자를 고른 뒤 열린 작성기에 요청과 자료를 입력·편집하고 최종 `[위임]`을 누른다. 일반 사람 간 대화는 일반 작성기의 `[전송]`으로 보낸다. | 작성 중에는 수신자·대상 업무·첨부와 아직 실행하지 않은 초안이 보인다. 위임 접수 뒤에만 해당 요청의 작업 상태가 나타난다. | 담당자 선택은 초안만 연결한다. 최종 위임의 권한·대상·입력을 확인한 뒤 작업을 예약하고 Chat과 Canvas 상태를 연결한다. | 위임 요청이 접수된 뒤 허용된 업무를 수행한다. | 초안·일반 메시지·Agent 실행을 구별한다. | 취소는 초안을 보존한 채 일반 대화로 돌아간다. 완료 후 개별 기여와 종합 결과는 [대화 상세](../../docs/references/design-synthesis/egdesk-ux-realization-proposals.md#ux-detail-context-share)에서 구분한다. |
@@ -1207,7 +1244,7 @@ Ontology 버전, 검증된 전환, 수락된 증거, Agent 출력,
 
 | # | 제품 사용자 UI 행동 | 즉시 보이는 반응 | System 처리 | Agent 처리 | 상태 변화 | 경계 및 다음 UI 행동 |
 | ---: | --- | --- | --- | --- | --- | --- |
-| 1 | 권한 있는 공유 개시자가 Agenda의 `[⋯]` → `[공유]`를 클릭해 수신자·공유 범위·권한·기간을 선택한다. 전송하지 않고 돌아가려면 `[취소]`를 클릭한다. | 사람, 역할, 공유되는 Desk/Agenda/뷰/데이터, 기간, 접근 거부 영역이 `Q-COL-01`과 `Q-COL-08`에 따라 보인다 | System은 승인된 신원 체계/네트워크 인프라를 통해 초대 초안만 준비한다 | 없음 | 초대 초안; 아직 권한 부여 없음 | 인프라 게이트: `A-INFRA-01`; 역할 권한: `Q-COL-06`; 정확한 초안 UI: `Q-COL-08` |
+| 1 | 권한 있는 공유 개시자가 Board의 `[⋯]` → `[공유]`를 클릭해 수신자·공유 범위·권한·기간을 선택한다. 전송하지 않고 돌아가려면 `[취소]`를 클릭한다. | 사람, 역할, 공유되는 Desk/Board/뷰/데이터, 기간, 접근 거부 영역이 `Q-COL-01`과 `Q-COL-08`에 따라 보인다 | System은 승인된 신원 체계/네트워크 인프라를 통해 초대 초안만 준비한다 | 없음 | 초대 초안; 아직 권한 부여 없음 | 인프라 게이트: `A-INFRA-01`; 역할 권한: `Q-COL-06`; 정확한 초안 UI: `Q-COL-08` |
 | 2 | 권한 있는 공유 개시자가 `[미리보기]`에서 수신자·범위·권한·기간을 확인한 뒤 `[보내기]`를 클릭한다. | 수신자, 전달 채널, 대기/전송됨/전달 상태, 만료, 취소/재전송 행동이 보인다 | System은 승인된 인프라를 통해 전달을 시도하고 이용 가능한 전달 증거만 기록한다 | 없음 | 초대 전달 상태; 접근 권한은 아직 증명되지 않는다 | 수신자를 찾을 수 없음, 전송 실패, 만료된 링크, 재전송, 취소: `Q-COL-07` |
 | 3 | 초대받은 사람이 `[초대 내용 보기]`에서 신원·범위·역할·기간을 확인한다. 계정이 다를 때만 `[다른 계정으로 참여]`로 전환한다. 올바른 계정이 확인되면 같은 계정으로 시작한 경우에도 `[수락하고 참여]`를 클릭한다. | 초대받은 사람에게는 권한상 허용된 화면만 보인다; 공유하는 쪽에는 `Q-COL-03`에 따라 참여 상태가 보인다 | System은 승인된 인프라를 통해 인증, 권한 부여, 동기화를 수행한다 | 없음 | 수락이 성공한 경우에만 협업 권한과 공유 세션 상태가 생긴다 | 실패, 만료, 권한 회수, 재진입: `Q-COL-02`, `Q-COL-04`, `Q-COL-07` |
 | 4 | 허용된 공유 View의 bar·가장자리 핸들을 드래그해 위치·크기를 바꾸고, 편집 권한이 있으면 내용 입력란을 클릭해 입력한다. 충돌 시 `[변경 비교]`에서 `[현재본 유지]`·`[내 초안 보존]` 또는 변경 선택 → `[선택 변경 적용]`을 클릭한다. 수락 권한이 없으면 `[수락 요청]`을 클릭한다. | 행위자, 포커스/제어 소유권, 변경 사항, 충돌이 `Q-COL-05`와 `Q-COL-10`에 따라 표현된다 | System은 결정된 동시성/충돌 모델을 적용한다 | 없음 | 리소스 행동이나 해결이 성공한 경우에만 공유 데이터/세션이 변경된다 | 비공개 상태가 유출되지 않는다; 정확한 충돌/병합/실행 취소 UI: `Q-COL-10` |
@@ -1260,16 +1297,16 @@ Ontology 버전, 검증된 전환, 수락된 증거, Agent 출력,
 
 | # | 제품 사용자 UI 행동 | 즉시 보이는 반응 | System 처리 | Agent 처리 | 상태 변화 | 경계 및 다음 UI 행동 |
 | ---: | --- | --- | --- | --- | --- | --- |
-| 1 | 앱 `[설정] → [데이터와 초기화]`를 열고 대상 PC·저장 범주를 고른다. | 앱, Desk, Agenda, 계정/프로필, Agent 또는 기기 등 각 설정의 범위가 `Q-DATA-01`에 따라 보인다 | System은 로컬 설정을 읽는다. | 없음 | 명시적인 행동 전에는 변경 없음 | 초기화/기본값 동작: `Q-DATA-01`과 `Q-DATA-04` |
-| 2 | Agenda의 `[⋯]` → `[내보내기]`에서 포함·제외 항목과 암호화 설정을 확인·조정한다. 암호화 켬이면 암호·확인을 입력하고, 끔이 허용된 경우 평문 노출을 확인한다. `[목적지 선택]` → OS 저장 위치 선택 → `[내보내기 시작]`을 클릭한다. | `.egdesk` 한 파일에 포함할 root, 연결 object 수·예상 크기, 제외되는 token·cookie·기기 전용 경로·비공개 scope, 암호화 상태가 먼저 보인다. 진행 중에는 취소 가능 범위와 현재 검증 단계가 나타난다. | 선택 root의 closed reference graph를 만들고 manifest·event·사람이 읽는 transcript·필요 payload를 staging한 뒤 모든 hash를 검증하고 한 파일로 원자적으로 게시한다. | 없음 | 검증된 로컬 `.egdesk` bundle이 생성될 수 있다. | 파일이 생긴 사실만으로 import 성공을 주장하지 않는다. 기본 포함·암호화는 `HUM-EXPORT-001`. |
-| 3 | 가져올 PC의 EG-Desk에서 `[파일▾]` → `[가져오기]` → `.egdesk` 파일을 선택하고, 암호화 파일이면 암호를 입력한다. 미리보기에서 허용된 `[새 사본]`·`[병합]`·`[현재 구성 교체]` 중 방식을 고른다. 충돌이 있으면 `[현재 유지]`·`[가져온 내용 사용]`·`[둘 다 보존]` 중 선택한 뒤 `[가져오기 실행]`을 클릭한다. | format/version/hash/필수 object 검증, Chat·Canvas·Snapshot·Agenda 미리보기, 충돌과 credential 제외 상태가 보인다. 적용 전에는 현재 Desk가 바뀌지 않는다. | 격리된 staging 범위에서 bundle을 검증하고 충돌 선택을 적용한다. 성공 후 대표 Chat·Canvas·Snapshot·Agenda reference를 실제로 다시 열어 연결 무결성을 검사한다. | 없음 | 검증이 끝난 경우에만 로컬 영구 상태에 새 root/revision이 추가된다. | parse 성공만 완료가 아니다. 실패하면 원 상태를 유지하고 어느 object가 실패했는지·재시도/파일 교체를 보여 준다. |
+| 1 | 앱 `[설정] → [데이터와 초기화]`를 열고 대상 PC·저장 범주를 고른다. | 앱, Desk, Board, 계정/프로필, Agent 또는 기기 등 각 설정의 범위가 `Q-DATA-01`에 따라 보인다 | System은 로컬 설정을 읽는다. | 없음 | 명시적인 행동 전에는 변경 없음 | 초기화/기본값 동작: `Q-DATA-01`과 `Q-DATA-04` |
+| 2 | Board의 `[⋯]` → `[내보내기]`에서 포함·제외 항목과 암호화 설정을 확인·조정한다. 암호화 켬이면 암호·확인을 입력하고, 끔이 허용된 경우 평문 노출을 확인한다. `[목적지 선택]` → OS 저장 위치 선택 → `[내보내기 시작]`을 클릭한다. | `.egdesk` 한 파일에 포함할 root, 연결 object 수·예상 크기, 제외되는 token·cookie·기기 전용 경로·비공개 scope, 암호화 상태가 먼저 보인다. 진행 중에는 취소 가능 범위와 현재 검증 단계가 나타난다. | 선택 root의 closed reference graph를 만들고 manifest·event·사람이 읽는 transcript·필요 payload를 staging한 뒤 모든 hash를 검증하고 한 파일로 원자적으로 게시한다. | 없음 | 검증된 로컬 `.egdesk` bundle이 생성될 수 있다. | 파일이 생긴 사실만으로 import 성공을 주장하지 않는다. 기본 포함·암호화는 `HUM-EXPORT-001`. |
+| 3 | 가져올 PC의 EG-Desk에서 `[파일▾]` → `[가져오기]` → `.egdesk` 파일을 선택하고, 암호화 파일이면 암호를 입력한다. 미리보기에서 허용된 `[새 사본]`·`[병합]`·`[현재 구성 교체]` 중 방식을 고른다. 충돌이 있으면 `[현재 유지]`·`[가져온 내용 사용]`·`[둘 다 보존]` 중 선택한 뒤 `[가져오기 실행]`을 클릭한다. | format/version/hash/필수 object 검증, Chat·Canvas·Snapshot·Board 미리보기, 충돌과 credential 제외 상태가 보인다. 적용 전에는 현재 Desk가 바뀌지 않는다. | 격리된 staging 범위에서 bundle을 검증하고 충돌 선택을 적용한다. 성공 후 대표 Chat·Canvas·Snapshot·Board reference를 실제로 다시 열어 연결 무결성을 검사한다. | 없음 | 검증이 끝난 경우에만 로컬 영구 상태에 새 root/revision이 추가된다. | parse 성공만 완료가 아니다. 실패하면 원 상태를 유지하고 어느 object가 실패했는지·재시도/파일 교체를 보여 준다. |
 | 4 | `[설정] → [기기·원격 연결]` 또는 데이터 설정의 `[원격 백업·동기화]`에서 대상 데이터·환경·비용·보존을 확인하고 `[승인 요청]` 또는 `[나중에]`를 누른다. | 승인 안건에 `Q-DATA-05`의 데이터 흐름, 신원, 보안, 비용, 제공자, 마이그레이션 영향이 표시된다 | 승인 없이 외부 프로비저닝은 이루어지지 않는다 | 없음 | 실행 전에는 원격 상태 없음 | 인프라 게이트: `A-INFRA-03` |
 
 `[설정] → [데이터와 초기화]`에서 선택 범위의 보존·삭제·초기화 영향을 확인한다. 동기화와 백업은 `[기기·원격 연결]`에서 독립 설정하며 기록 제거·복구 기간·보호 백업·동기화 범위는 연결된 사용자 선택에 따른다. 관련: `Q-DATA-04`, `Q-DATA-05`.
 
 **완료 증거**: 로컬 내보내기는 하나의 `.egdesk` 파일, manifest/object hash 검증,
 credential 제외 내역을 가진다. 가져오기는 구문 분석 성공이 아니라 대표 Chat·Canvas·
-Snapshot·Agenda가 같은 lineage로 다시 열리는 상태를 증명한다. 승인과 성공적인 실행
+Snapshot·Board가 같은 lineage로 다시 열리는 상태를 증명한다. 승인과 성공적인 실행
 증거가 생기기 전에는 원격 데이터나 인프라가 존재하지 않는다.
 
 <a id="atlas-ux-01"></a>
@@ -1311,7 +1348,7 @@ Agent의 진행·오류 알림은 사용자가 입력 중인 곳의 focus를 옮
 - 굵은 화살표(⇒)는 외부 인프라·자격 증명·비용·배포·데이터 이동·확장 권한의 승인 게이트이며, 반드시 A-ID를 붙인다.
 - 기능 선언, 현재 가용성, 위임된 권한, 승인 기록, 실행 상태, 성공 증거는 서로 다른 노드나 상태로 유지한다.
 - Chat은 입력 및 답변 투영 화면이다. System이 요청·컨텍스트·권한을 Run에 결합한 뒤 Agent runtime을 시작하며, Chat이 Agent runtime을 담지 않는다.
-- 저장된 Agenda, 자동 Desk 세션 기록, 보이는 view, 리소스 runtime/process는 서로 독립적인 상태 평면이다.
+- 저장된 Board, 자동 Desk 세션 기록, 보이는 view, 리소스 runtime/process는 서로 독립적인 상태 평면이다.
 - 활성 화면은 View(뷰)로 부른다. Card는 간결한 View·결과 표현 형식이며 Desk Window는 이전 화면 명칭이다. 이 이름들은 별도의 리소스·실행 수명을 만들지 않는다.
 - 금지된 제품 객체는 지도 노드로 만들지 않는다.
 
@@ -1319,29 +1356,37 @@ Agent의 진행·오류 알림은 사용자가 입력 중인 곳의 focus를 옮
 
 ### M1. EG-Desk 실행 → Desk / Canvas / Sidebar
 
-시작은 운영체제의 실행 행동이고, 끝은 사용할 수 있는 실제 Desk와 그 두 기본 표면이다.
+시작은 운영체제의 실행 행동이고, 첫 화면부터 같은 Desk·Canvas의 Browser가
+집중 표시된다. 줌아웃하면 새 Desk로 넘어가지 않고 주변 Canvas·Sidebar가 드러난다.
 
 ~~~mermaid
 flowchart LR
   m1_start["시작: 운영체제 실행 진입점"]
-  m1_shell["EG-Desk Firefox 셸"]
+  m1_shell["EG-Desk 앱"]
   m1_desk["Desk"]
   m1_canvas["Canvas"]
+  m1_first["최초: 같은 Canvas의 live Browser 집중 표시"]
+  m1_regular["일반 Desk: 주변 Canvas 표시"]
   m1_canvas_rule["Canvas 소속·개수 규칙"]
   m1_sidebar["Sidebar"]
-  m1_end["끝: 저장된 Agenda 목록 또는 빈 상태"]
+  m1_end["끝: 저장된 Board 목록 또는 빈 상태"]
 
   m1_start -. "Q-LIFE-01 · Q-LIFE-02 · Q-LIFE-03" .-> m1_shell
-  m1_shell --> m1_desk
+  m1_shell -->|최초| m1_desk
+  m1_shell -->|재방문: 마지막 집중/일반 상태 복원| m1_desk
   m1_desk --> m1_canvas
+  m1_canvas -->|첫 실행·복원된 집중 상태| m1_first
+  m1_canvas -->|복원된 일반 상태| m1_regular
+  m1_first -->|Canvas 줌아웃| m1_regular
+  m1_regular -->|Browser 집중 · 같은 View| m1_first
   m1_canvas -. "Q-OBJ-02" .-> m1_canvas_rule
-  m1_desk --> m1_sidebar
+  m1_regular --> m1_sidebar
   m1_sidebar -. "Q-LIFE-04" .-> m1_end
 ~~~
 
 ### M2. 종료 → 자동 Desk 세션 → 재실행 복원
 
-자동 Desk 세션과 저장된 Agenda는 나란히 읽히는 독립 평면이다. 둘 사이에는 생성·갱신 edge가 없다.
+자동 Desk 세션과 저장된 Board는 나란히 읽히는 독립 평면이다. 둘 사이에는 생성·갱신 edge가 없다.
 
 ~~~mermaid
 flowchart LR
@@ -1352,8 +1397,8 @@ flowchart LR
   m2_restart["재실행"]
   m2_validate["마지막 유효 기록 검증"]
   m2_desk["끝 A: Desk와 view 인스턴스 복원"]
-  m2_agenda["저장된 Agenda 지속성"]
-  m2_sidebar["끝 B: Sidebar의 저장된 Agenda 행"]
+  m2_agenda["저장된 Board 지속성"]
+  m2_sidebar["끝 B: Sidebar의 저장된 Board 행"]
 
   m2_start --> m2_change
   m2_change -. "Q-RESTORE-07" .-> m2_session
@@ -1392,7 +1437,7 @@ flowchart LR
   m3_runtime -. "Q-VIEW-09 · Q-CODE-02" .-> m3_end
 ~~~
 
-### M4. Browser content / locator / account authority / evidence → Agenda
+### M4. Browser content / locator / account authority / evidence → Board
 
 콘텐츠 동일성, 위치, 계정 권한, 가능한 행동, 외부 효과 상태, 검증 증거를 하나의 식별자로 합치지 않는다.
 
@@ -1406,7 +1451,7 @@ flowchart LR
   m4_lineage["SourceRef·증거 계보"]
   m4_effect["위임 범위 안 외부 효과 실행 상태"]
   m4_verify["독립 외부 검증"]
-  m4_end["끝: Agenda 구성 후보"]
+  m4_end["끝: Board 구성 후보"]
 
   m4_start --> m4_content
   m4_start --> m4_locator
@@ -1448,13 +1493,14 @@ flowchart LR
 ~~~
 
 <a id="atlas-m5-f"></a>
-### M5-F. Tool observation → Snapshot/Live Canvas
+### M5-F. Tool observation → 생각/작업 기록과 Canvas
 
 같은 path·URL·session binding은 같은 시점의 내용을 뜻하지 않는다. 정상 경로에서는
 명명된 direct tool 결과 뒤에서 반환값을 말없이 자르지 않는다. Smart Read에서는
 immutable raw/source capture와 Reader가 만든 Context Packet, 실제 Agent 전달 payload가
-다를 수 있으며 그 관계를 Snapshot manifest에 보존한다. Canvas는 이 역사적 기록과
-현재 resource를 서로 다른 view로 보여 주며 현재 상태가 과거 관찰을 덮어쓰지 않는다.
+다를 수 있으며 그 관계를 Snapshot manifest에 보존한다. 역사적 기록은 기본적으로
+생각/작업 기록 패널에서 확인하고 현재 작업 대상은 Canvas에 둔다. 보고에 선별한 근거는
+별도로 Canvas에 펼칠 수 있다. 현재 상태가 과거 관찰을 덮어쓰지 않는다.
 
 ~~~mermaid
 flowchart LR
@@ -1462,7 +1508,7 @@ flowchart LR
   m5f_capture["불변 raw capture / 명명된 결과"]
   m5f_mode["direct 전달 또는 Reader 변환"]
   m5f_agent["Agent에게 실제 전달된 payload"]
-  m5f_historical["Canvas: Snapshot View<br/>capture·payload·lineage"]
+  m5f_historical["기록 패널: Snapshot View<br/>capture·payload·lineage"]
   m5f_source_now["현재 source/runtime"]
   m5f_current["Canvas: 상호작용 가능한 Live View"]
   m5f_diff["명시적 차이 비교"]
@@ -1480,7 +1526,8 @@ flowchart LR
 Direct File read가 40–80행을 명명된 결과로 반환했다면 같은 40–80행이 snapshot과
 해당 Agent input에 존재한다. Smart Read라면 전체 source snapshot과 더 작은 Context
 Packet이 함께 보존되고 packet의 coverage·변환 이유가 나타난다. Snapshot View와 Live
-View는 같은 renderer를 재사용할 수 있지만 별도 view identity로 Canvas에 공존한다.
+View는 같은 renderer를 재사용할 수 있지만 identity와 기본 표시 위치를 구별한다.
+기록 열람만으로 Canvas를 이동하거나 모든 Snapshot을 카드로 추가하지 않는다.
 Live View의 편집·새로고침이나 report set 재배치는 과거 snapshot을 바꾸지 않는다.
 현재 상태를 다음 Agent에 전달하려면 새 context revision 또는 도구 호출로 새 관찰을 만든다.
 기술 상세: [Smart Read](./EGDESK_INTERACTION_AND_ORCHESTRATION_CONTRACT.md#tech-smart-read),
@@ -1492,7 +1539,7 @@ Agent의 기능 선언과 지금 실행 가능한지는 다르며, 위임 권한
 
 ~~~mermaid
 flowchart LR
-  m6_profile["Agent Profile revision<br/>기능 선언·구성"]
+  m6_profile["선택한 경우의 Agent Profile revision<br/>기본 Codex는 기본 실행 구성"]
   m6_request["request"]
   m6_context["context revision"]
   m6_available["현재 availability"]
@@ -1720,17 +1767,17 @@ flowchart LR
   m13_remote_execute --> m13_remote_evidence
 ~~~
 
-### M14. Agenda 생성·열기·갱신·수명주기
+### M14. Board 생성·열기·갱신·수명주기
 
-Agenda의 의도적 영속화만 저장된 Agenda를 만든다. 단순 view 열기나 자동 세션 기록은 이 map에 쓰기 edge를 갖지 않는다.
+Board의 의도적 영속화만 저장된 Board를 만든다. 단순 view 열기나 자동 세션 기록은 이 map에 쓰기 edge를 갖지 않는다.
 
 ~~~mermaid
 flowchart LR
   m14_start["시작: Desk의 작업 의도·명시적 선택"]
-  m14_draft["Agenda draft"]
-  m14_saved["saved Agenda revision"]
-  m14_row["Sidebar Agenda row"]
-  m14_open["열린 Agenda projection"]
+  m14_draft["Board draft"]
+  m14_saved["Saved Board revision"]
+  m14_row["Sidebar Board row"]
+  m14_open["열린 Board projection"]
   m14_update["다른 이름으로 저장 / 업데이트"]
   m14_archive["archive·close 상태"]
   m14_delete["delete 확인·제거"]
@@ -1790,7 +1837,7 @@ flowchart LR
   m16_agent["Agent work"]
   m16_answer["Answer projection"]
   m16_reentry["끝 A: persisted·re-entered conversation"]
-  m16_thread["끝 B: 공유 대화<br/>참여자·공개 범위·선택 Agenda 참조"]
+  m16_thread["끝 B: 공유 대화<br/>참여자·공개 범위·선택 Board 참조"]
 
   m16_start -. "Q-CHAT-01 · Q-CHAT-02" .-> m16_conversation
   m16_conversation --> m16_draft
@@ -1877,7 +1924,7 @@ flowchart LR
 | 행위자 | 제품에서 하는 일 | 하지 않는 일 |
 |---|---|---|
 | **제품 사용자** | Desk에서 보고, 입력하고, 요청하고, 범위를 수정하고, 결과와 증거를 검토하며, 필요한 외부 권한 확대를 승인·거부·보류한다. | 모든 내부 실행마다 승인하지 않는다. 화면에 보인 상태만으로 저장·전송·완료를 추정할 책임을 지지 않는다. |
-| **System** | Firefox 셸을 시작하고, Desk와 저장 상태를 하이드레이션하며, 컨텍스트를 결합하고, 권한과 정책을 강제하고, Agent를 스케줄링하며, 화면 투영·지속성·복구·감사를 관리한다. | 추론하는 Agent로 가장하지 않는다. 로딩, 복원, 렌더링, 상태 전환 또는 권한 확인을 Agent 작업으로 기록하지 않는다. |
+| **System** | EG-Desk를 시작하고 최초 Browser 진입·기존 Desk 복원을 구분하며, context·권한·정책·실행·화면 표시·지속성·복구를 관리한다. | 추론하는 Agent로 가장하지 않는다. 로딩, 복원, 렌더링, 상태 전환 또는 권한 확인을 Agent 작업으로 기록하지 않는다. |
 | **Agent 실행체** | 특정 Run에 결합된 프로필, 컨텍스트 리비전, 위임, 실제 계정·리소스 권한, 승인 및 실행 제한 안에서 추론하고 도구를 사용하며 결과와 증거를 반환한다. | Profile만으로 권한을 얻지 않는다. Desk 전체를 암묵적으로 읽지 않으며, 자신의 출력으로 실행 성공이나 외부 사실을 스스로 인증하지 않는다. |
 
 제품 사용자는 사람을 뜻한다. 협업 참가자도 제품 사용자가 될 수 있지만, 공유된
@@ -1904,7 +1951,7 @@ flowchart LR
 - **제품 사용자가 보는·하는 것**: 앱을 실행하면 실제 Desk에서 작업을 시작하고, 리소스를 열고, 대화하고, 결과와 증거를 검토한다.
 - **System 책임**: 셸 시작, 상태 하이드레이션, 입력·포커스 전달, 지속성, 복구, 권한 강제와 화면 투영을 담당한다.
 - **Agent 관계**: Agent는 EG-Desk 안에서 Run 단위로 호출되지만 제품 셸 자체가 Agent는 아니다.
-- **수명주기·복구**: 실행, 사용 가능, 기능 저하, 종료와 재진입을 구분하며, 셸 실패가 저장된 Agenda나 로컬 데이터를 삭제하지 않는다.
+- **수명주기·복구**: 실행, 사용 가능, 기능 저하, 종료와 재진입을 구분하며, 셸 실패가 저장된 Board나 로컬 데이터를 삭제하지 않는다.
 - **관련 trace / question**: `L-01`–`L-03`, `UX-01`; `Q-LIFE-01`–`Q-LIFE-05`, `Q-UX-01`–`Q-UX-04`.
 
 <a id="atlas-obj-002"></a>
@@ -1912,55 +1959,55 @@ flowchart LR
 
 - **ID**: `OBJ-002`
 - **제품 상태**: `확정`
-- **무엇인가 / 아닌가**: 현재 실행 중인 하나의 작업 표면이다. Agenda, 프로젝트, Browser 프로필, 폴더, `Workspace` 또는 여러 작업을 나누기 위한 복수 인스턴스가 아니다.
+- **무엇인가 / 아닌가**: 현재 실행 중인 하나의 작업 표면이다. Board, 프로젝트, Browser 프로필, 폴더, `Workspace` 또는 여러 작업을 나누기 위한 복수 인스턴스가 아니다.
 - **제품 사용자가 보는·하는 것**: Canvas와 Sidebar를 통해 열린 뷰를 배치·탐색하고 현재 작업을 계속한다.
-- **System 책임**: 실제 Desk를 첫 화면으로 만들고 하나의 Canvas를 제공하며, 자동 세션에서 표현 상태를 복원하고 리소스별 기능 저하를 격리한다.
+- **System 책임**: 최초 Browser 집중 시작과 기존 세션 복원을 구분하고, Desk 진입 뒤 하나의 Canvas를 제공한다. 표현 상태 복원과 리소스별 기능 저하를 분리한다.
 - **Agent 관계**: Agent는 명시적으로 결합된 Desk 컨텍스트만 사용한다. Desk 전체가 기본 컨텍스트나 권한이 되지 않는다.
-- **수명주기·복구**: 실행 중 활성 상태와 자동 복구 상태를 가지며 저장된 Agenda 수명주기와 분리된다. 여러 Saved Agenda를 같은 Canvas에 열어도 Desk가 추가되지 않는다.
+- **수명주기·복구**: 실행 중 활성 상태와 자동 복구 상태를 가지며 저장된 Board 수명주기와 분리된다. 여러 Saved Board를 같은 Canvas에 열어도 Desk가 추가되지 않는다.
 - **관련 trace / question**: `L-01`–`L-03`, `AG-02`, `V-01`–`V-03`; `Q-OBJ-01`, `Q-AG-06`, `Q-RESTORE-01`–`Q-RESTORE-08`.
 
 <a id="atlas-obj-003"></a>
 #### OBJ-003 — Canvas
 
 - **ID**: `OBJ-003`
-- **제품 상태**: `상세 설계 기준선` — Desk당 하나의 Canvas와 표현 복원이 정의되어 있다. 그룹의 세션·Agenda 보존 정책은 연결된 사용자 선택에 따른다.
-- **무엇인가 / 아닌가**: 하나의 Desk에 하나씩 속하며 뷰, 여러 Agenda projection, 시각 표현, 주석과 Answer Briefing을 공간적으로 다루는 작업 영역이다. Answer 자체, Ontology 모델 또는 단순 이미지 배경이 아니다.
+- **제품 상태**: `상세 설계 기준선` — Desk당 하나의 Canvas와 표현 복원이 정의되어 있다. 그룹의 세션·Board 보존 정책은 연결된 사용자 선택에 따른다.
+- **무엇인가 / 아닌가**: 하나의 Desk에 하나씩 속하며 뷰, 여러 Board projection, 시각 표현, 주석과 Answer Briefing을 공간적으로 다루는 작업 영역이다. Answer 자체, Ontology 모델 또는 단순 이미지 배경이 아니다.
 - **제품 사용자가 보는·하는 것**: 뷰를 이동·크기 조절·그룹화하고, 패닝·확대·축소하며, 결과와 주석을 탐색한다.
-- **System 책임**: 지오메트리, 뷰포트, 포커스, 선택, Agenda·view projection과 접근 가능한 대체 표현을 관리한다. 의미 있는 활성·sleeping·snapshot 작업마다 다시 찾을 수 있는 표현을 유지한다.
+- **System 책임**: 지오메트리, 뷰포트, 포커스, 선택, Board·view projection과 접근 가능한 대체 표현을 관리한다. 의미 있는 활성·sleeping·snapshot 작업마다 다시 찾을 수 있는 표현을 유지한다.
 - **Agent 관계**: Agent는 요청받은 Canvas 표현이나 시각 주석을 제안할 수 있지만 포커스·하이드레이션·렌더링은 System 작업이다.
-- **수명주기·복구**: Canvas·View·runtime 수명은 별개다. viewport 밖 이동은 종료·sleep이 아니며 renderer를 분리해도 다시 찾을 표현은 남는다. 카메라는 기기별로 복원하고 Agenda에는 선택한 구성·배치를 저장한다. 그룹 보존과 당시 자료 포함은 각각의 정책을 따른다.
+- **수명주기·복구**: Canvas·View·runtime 수명은 별개다. viewport 밖 이동은 종료·sleep이 아니며 renderer를 분리해도 다시 찾을 표현은 남는다. 카메라는 기기별로 복원하고 Board에는 선택한 구성·배치를 저장한다. 그룹 보존과 당시 자료 포함은 각각의 정책을 따른다.
 - **관련 trace / question**: `V-02`, `V-03`, `AI-04`, `AI-05`, `CANVAS-01`; `Q-OBJ-02`, `Q-VIEW-04`–`Q-VIEW-08`, `Q-MEDIA-01`–`Q-MEDIA-13`.
 
 <a id="atlas-obj-004"></a>
 #### OBJ-004 — Sidebar
 
 - **ID**: `OBJ-004`
-- **제품 상태**: `상세 설계 기준선` — Saved Agenda 목록·찾기·보관함·휴지통과 좁은 창의 서랍 경로가 있다. Library 제공 여부는 연결된 사용자 선택에 따른다.
-- **무엇인가 / 아닌가**: 저장된 Agenda 목록을 제공하는 Desk의 영역이다. 모든 리소스의 정본 카탈로그나 `Workspace` 트리가 아니다.
-- **제품 사용자가 보는·하는 것**: 저장된 Agenda 행을 찾고 열며, 허용된 수명주기 행동에 진입한다.
-- **System 책임**: Agenda 메타데이터를 Agent 없이 불러오고, 읽기 실패를 Desk 전체 실패와 분리해 표시한다.
-- **Agent 관계**: Sidebar를 표시하거나 Agenda 행을 선택하는 일은 Agent 작업을 시작하지 않는다.
-- **수명주기·복구**: 앱 재진입 시 저장된 Agenda 행을 열지 않은 상태로 다시 보여 준다. 목록 실패에는 재시도와 계속 가능한 Desk 경로가 필요하다.
+- **제품 상태**: `상세 설계 기준선` — Saved Board 목록·찾기·보관함·휴지통과 좁은 창의 서랍 경로가 있다. Library 제공 여부는 연결된 사용자 선택에 따른다.
+- **무엇인가 / 아닌가**: 저장된 Board 목록을 제공하는 Desk의 영역이다. 모든 리소스의 정본 카탈로그나 `Workspace` 트리가 아니다.
+- **제품 사용자가 보는·하는 것**: 저장된 Board 행을 찾고 열며, 허용된 수명주기 행동에 진입한다.
+- **System 책임**: Board 메타데이터를 Agent 없이 불러오고, 읽기 실패를 Desk 전체 실패와 분리해 표시한다.
+- **Agent 관계**: Sidebar를 표시하거나 Board 행을 선택하는 일은 Agent 작업을 시작하지 않는다.
+- **수명주기·복구**: 앱 재진입 시 저장된 Board 행을 열지 않은 상태로 다시 보여 준다. 목록 실패에는 재시도와 계속 가능한 Desk 경로가 필요하다.
 - **관련 trace / question**: `L-01`, `L-02`, `AG-02`, `AG-04`; `Q-LIFE-04`, `Q-RESTORE-06`, `Q-AG-03`, `Q-AG-04`, `Q-AG-09`, `Q-AG-19`, `Q-AG-20`.
 
 <a id="atlas-obj-005"></a>
-#### OBJ-005 — Agenda
+#### OBJ-005 — Board
 
 - **ID**: `OBJ-005`
 - **제품 상태**: `상세 설계 기준선` — 명시적 구성 저장·다중 projection·revision·충돌 경로가 있다. 당시 자료 포함·이력 복구·실행 유지 정책은 연결된 사용자 선택에 따른다.
-- **무엇인가 / 아닌가**: 이름과 명시적으로 선택한 자료·대화 범위·Memo·결과·annotation·실행 환경 참조를 저장하는 재사용 가능한 작업 결합이다. 빈 구성도 가능하며 당시 원문 사본 포함은 정책과 권한을 따른다. credential·살아 있는 process·임의 명령은 저장 payload가 아니다. 폴더·Chat방·자동 복구 기록과 다르다. 관련: `Q-AG-02`, `Q-AG-08`.
-- **제품 사용자가 보는·하는 것**: Agenda를 생성하고 범위를 확인해 저장하며, 열고, 업데이트하고, 이름 변경·보관·삭제·복구한다.
+- **무엇인가 / 아닌가**: 특정 일을 바로 할 수 있게 자료·도구·대화·메모·결과와 카드 배치·참조 연결을 갖춘 업무 구성이다. 명시적 저장은 선택한 구성과 실행 환경 참조를 재사용할 수 있게 남긴다. Canvas 자체나 Kanban식 메모판, 단순 참고자료 목록·자료 보관함·폴더·Chat방·자동 복구 기록이 아니다. 빈 구성에서 준비를 시작할 수 있으며 당시 원문 사본 포함은 정책과 권한을 따른다. credential·살아 있는 process·임의 명령을 저장하거나 열기만으로 실행하지 않는다. 관련: `Q-AG-02`, `Q-AG-08`.
+- **제품 사용자가 보는·하는 것**: Board를 생성하고 범위를 확인해 저장하며, 열고, 업데이트하고, 이름 변경·보관·삭제·복구한다.
 - **System 책임**: 이름·선택 집합·revision·권한을 검증하고 명시적 저장으로만 구성 revision을 만든다. 열기는 같은 Canvas의 기존 projection을 찾거나 새 projection을 추가하며 실행을 자동 재개하지 않는다. 관련: `Q-AG-02`, `Q-AG-08`.
-- **Agent 관계**: Agenda는 Agent 컨텍스트의 한 입력이 될 수 있지만 Agent를 자동 실행하거나 계정·리소스 권한을 부여하지 않는다.
+- **Agent 관계**: Board는 Agent 컨텍스트의 한 입력이 될 수 있지만 Agent를 자동 실행하거나 계정·리소스 권한을 부여하지 않는다.
 - **수명주기·복구**: 업데이트는 같은 ID의 새 revision, 다른 이름 저장은 새 ID다. 닫기는 전용 실행의 종료 확인 뒤 projection을 제거하고 저장본을 유지한다. 보관은 목록 분류만 바꾼다. 삭제·복구는 선택된 보존 정책을 따르며 권한·예약·실행을 자동 복원하지 않는다.
 - **관련 trace / question**: `AG-01`–`AG-04`; `Q-OBJ-04`, `Q-AG-01`–`Q-AG-17`, `Q-AG-19`, `Q-AG-20`.
 
 <a id="atlas-obj-006"></a>
-#### OBJ-006 — 저장된 Agenda
+#### OBJ-006 — 저장된 Board
 
 - **ID**: `OBJ-006`
-- **제품 상태**: `상세 설계 기준선` — Agenda의 저장 상태이며 독립 객체 유형이 아니다. 보관·삭제·revision 경로가 있고 보존·복구 범위는 연결된 사용자 선택에 따른다.
-- **무엇인가 / 아닌가**: 사용자가 의도적으로 영속화해 Sidebar에 나열되는 Agenda다. Agenda와 별개의 새 객체 유형이나 자동 Desk 세션의 별칭이 아니다.
+- **제품 상태**: `상세 설계 기준선` — Board의 저장 상태이며 독립 객체 유형이 아니다. 보관·삭제·revision 경로가 있고 보존·복구 범위는 연결된 사용자 선택에 따른다.
+- **무엇인가 / 아닌가**: 사용자가 의도적으로 영속화해 Sidebar에 나열되는 Board다. Board와 별개의 새 객체 유형이나 자동 Desk 세션의 별칭이 아니다.
 - **제품 사용자가 보는·하는 것**: 행을 열고, 저장된 범위와 이후 미저장 변경을 구분하며, 수명주기 행동을 수행한다.
 - **System 책임**: 메타데이터와 리비전을 보존하고, 명시적 열기 전에는 Desk에 자동 마운트하지 않는다.
 - **Agent 관계**: 행이 보이거나 선택되었다는 사실만으로 Agent가 시작되거나 그 내용을 읽을 수 없다.
@@ -1972,11 +2019,11 @@ flowchart LR
 
 - **ID**: `OBJ-007`
 - **제품 상태**: `런타임 내부`
-- **무엇인가 / 아닌가**: 열어 둔 뷰와 결정된 표현 상태를 다음 실행에 재구성하기 위한 로컬 연속성 기록이다. Agenda, 사용자 저장, 정본 작업 리비전 또는 정상 시작용 복구 목록이 아니다.
+- **무엇인가 / 아닌가**: 열어 둔 뷰와 결정된 표현 상태를 다음 실행에 재구성하기 위한 로컬 연속성 기록이다. Board, 사용자 저장, 정본 작업 리비전 또는 정상 시작용 복구 목록이 아니다.
 - **제품 사용자가 보는·하는 것**: 보통 기록 자체를 조작하지 않고, 재실행 후 복원된 Desk와 리소스별 실패 상태를 본다.
 - **System 책임**: 캡처 주기와 트랜잭션 경계에서 검증 가능한 기록을 쓰고, 재시작 전에 유효성을 검사한다.
 - **Agent 관계**: 캡처, 플러시, 검증과 복원에 Agent가 관여하지 않는다.
-- **수명주기·복구**: 생성·갱신·플러시·검증·대체·폐기될 수 있다. 마지막 유효 기록만 복원 입력이 되며 손상은 저장된 Agenda에 전파되지 않는다.
+- **수명주기·복구**: 생성·갱신·플러시·검증·대체·폐기될 수 있다. 마지막 유효 기록만 복원 입력이 되며 손상은 저장된 Board에 전파되지 않는다.
 - **관련 trace / question**: `L-02`, `L-03`; `Q-RESTORE-01`–`Q-RESTORE-08`.
 
 <a id="atlas-obj-008"></a>
@@ -1984,7 +2031,7 @@ flowchart LR
 
 - **ID**: `OBJ-008`
 - **제품 상태**: `화면 설계 기준선` — 이동 가능한 활성 화면의 공통 명칭은 View(뷰)다.
-- **무엇인가 / 아닌가**: 리소스를 한 위치와 권한 컨텍스트에서 마운트해 보여 주는 하나의 표현 인스턴스다. 기반 리소스, 런타임, 프로세스 또는 Agenda 구성원 자체가 아니다.
+- **무엇인가 / 아닌가**: 리소스를 한 위치와 권한 컨텍스트에서 마운트해 보여 주는 하나의 표현 인스턴스다. 기반 리소스, 런타임, 프로세스 또는 Board 구성원 자체가 아니다.
 - **제품 사용자가 보는·하는 것**: 열고, 포커스하고, 이동·크기 조절·그룹화·최대화·닫기를 수행한다.
 - **System 책임**: 인스턴스를 생성·재사용·포커스하고 리소스 런타임과 연결하며 지오메트리와 입력 소유권을 관리한다. viewport 가시성과 별도로 view·runtime lifecycle을 판단하고 무거운 renderer를 분리할 때도 다시 찾을 수 있는 Canvas 표현을 남긴다.
 - **Agent 관계**: 사용자가 Agent 요청을 하지 않는 한 뷰 조작에 Agent가 관여하지 않는다.
@@ -1996,7 +2043,7 @@ flowchart LR
 
 - **ID**: `OBJ-009`
 - **제품 상태**: `표현 형식 기준선` — 간결한 View·결과 표현이며 별도 제품 객체 수명을 만들지 않는다.
-- **무엇인가 / 아닌가**: View나 결과·스냅샷을 간결하게 표시하는 표현 형식이다. 접힌 View에만 한정하지 않으며 별도의 리소스·저장·실행 identity나 Agenda를 뜻하지 않는다.
+- **무엇인가 / 아닌가**: View나 결과·스냅샷을 간결하게 표시하는 표현 형식이다. 접힌 View에만 한정하지 않으며 별도의 리소스·저장·실행 identity나 Board를 뜻하지 않는다.
 - **제품 사용자가 보는·하는 것**: 작은 표현을 열어 연결된 View·결과를 확인하고 원 위치로 돌아온다.
 - **System 책임**: 이름과 무관하게 뷰 인스턴스·리소스·런타임의 식별을 분리한다.
 - **Agent 관계**: Agent는 위임된 답변 구성에서 간결한 표현을 제안하며 System이 실제 View·Answer·산출물에 연결한다.
@@ -2034,7 +2081,7 @@ flowchart LR
 
 - **ID**: `OBJ-012`
 - **제품 상태**: `런타임 내부`
-- **무엇인가 / 아닌가**: Resource를 실제로 작동시키는 bridge, helper, transport, provider conversation, process와 이를 보여 주는 view의 개별 상태다. 이 계층들은 서로의 별칭이 아니며 저장된 Agenda가 아니다.
+- **무엇인가 / 아닌가**: Resource를 실제로 작동시키는 bridge, helper, transport, provider conversation, process와 이를 보여 주는 view의 개별 상태다. 이 계층들은 서로의 별칭이 아니며 저장된 Board가 아니다.
 - **제품 사용자가 보는·하는 것**: 필요한 경우 연결됨, 재구성됨, 새로 실행됨, 스냅샷 전용, 사용 불가 같은 정직한 상태와 마지막 확인 시각, 다음 행동을 본다.
 - **System 책임**: 각 계층의 식별자와 health를 따로 검증하고 연결·재연결·재실행·종료를 구분한다. 장애 원인은 증거가 생기기 전까지 미확정으로 두고 관찰 사실, 후보 원인과 `last checked`를 분리한다.
 - **Agent 관계**: Agent가 도구를 사용하는 동안 이 계층을 사용할 수 있지만, 수명주기 소유자는 System과 해당 리소스 런타임이다.
@@ -2108,7 +2155,7 @@ flowchart LR
 
 - **ID**: `OBJ-018`
 - **제품 상태**: `상세 설계 기준선` — 남은 정책은 연결된 사용자 선택에 따른다.
-- **무엇인가 / 아닌가**: 사람이 작업 대상의 파일 구조와 범위를 탐색하는 프로젝트·폴더 화면이다. Agenda, Desk, `Workspace` 또는 권한을 자동 부여하는 경계가 아니다.
+- **무엇인가 / 아닌가**: 사람이 작업 대상의 파일 구조와 범위를 탐색하는 프로젝트·폴더 화면이다. Board, Desk, `Workspace` 또는 권한을 자동 부여하는 경계가 아니다.
 - **제품 사용자가 보는·하는 것**: `[파일▾] → [폴더 연결]`과 `[루트 추가]`로 허용된 위치를 연결하고 트리·검색에서 파일을 찾는다. 여러 PC·폴더를 포함할 수 있으며 각 root의 위치·권한을 구분한다.
 - **System 책임**: 경로, 프로젝트 관계, 실제 파일 권한, 이동·삭제·외부 변경 상태를 읽어 투영한다.
 - **Agent 관계**: Agent는 작업 위임과 실제 파일 권한이 겹치는 선택된 범위에서만 탐색·편집한다.
@@ -2120,7 +2167,7 @@ flowchart LR
 
 - **ID**: `OBJ-019`
 - **제품 상태**: `상세 설계 기준선` — 남은 정책은 연결된 사용자 선택에 따른다.
-- **무엇인가 / 아닌가**: 로컬 또는 허용된 외부 저장소에 있는 콘텐츠 리소스와 특정 리비전이다. 편집기 버퍼, 뷰, 저장 성공 표시 또는 Agenda 자체가 아니다.
+- **무엇인가 / 아닌가**: 로컬 또는 허용된 외부 저장소에 있는 콘텐츠 리소스와 특정 리비전이다. 편집기 버퍼, 뷰, 저장 성공 표시 또는 Board 자체가 아니다.
 - **제품 사용자가 보는·하는 것**: 파일을 열고 읽거나 편집하며, 미저장·저장 중·저장됨·충돌 상태를 확인한다.
 - **System 책임**: 파일 시스템 리비전, 권한, 외부 변경과 편집기 상태를 대조하고 성공한 저장만 영속 상태로 기록한다.
 - **Agent 관계**: Agent 편집은 제안 또는 작업 파일 변경일 수 있으며, 사용자 검토·저장·검증 의미와 분리된다.
@@ -2168,7 +2215,7 @@ flowchart LR
 
 - **ID**: `OBJ-023`
 - **제품 상태**: `상세 설계 기준선` — OS 선택·취소·권한·포커스 복귀를 가진 일시적 진입 UI다.
-- **무엇인가 / 아닌가**: 파일·폴더·프로젝트 대상을 선택해 여는 일시적 UI다. 영속 카탈로그, 프로젝트 객체, Agenda, Library 또는 `Workspace`가 아니다.
+- **무엇인가 / 아닌가**: 파일·폴더·프로젝트 대상을 선택해 여는 일시적 UI다. 영속 카탈로그, 프로젝트 객체, Board, Library 또는 `Workspace`가 아니다.
 - **제품 사용자가 보는·하는 것**: 위치와 대상을 탐색하고 선택·취소하며 필요한 권한 요청과 열기 결과를 확인한다.
 - **System 책임**: 운영체제 또는 제품 선택기에서 반환된 대상을 검증하고, 취소와 권한 거부를 변경 없음으로 처리한다.
 - **Agent 관계**: 사용자가 명시적으로 위임하지 않는 한 Agent가 선택기를 대신 조작하거나 주변 파일을 수집하지 않는다.
@@ -2182,9 +2229,9 @@ flowchart LR
 
 - **ID**: `OBJ-024`
 - **제품 상태**: `상세 설계 기준선` — 담당자 방 안의 업무 목록·필터와 별도 공유 대화 경로가 있다. 기본 공개 정책은 연결된 사용자 선택에 따른다.
-- **무엇인가 / 아닌가**: 특정 Agent/persona와 관계를 이어 가며 대화 입력과 Answer의 대화적으로 완결된 투영을 제공하는 화면이다. Agent Runtime, 전체 컨텍스트 저장소, Profile 설정 화면, 단순 완료 알림 또는 Canvas의 긴 본문 복제본이 아니다.
-- **제품 사용자가 보는·하는 것**: Dock `[Chat]`에서 담당자·실제 작성자·업무 대상·컨텍스트·작성기를 구분한다. `[활동 N건]`에서 업무를 고르고 컨텍스트 항목으로 포함 범위를 고친다. 활동 열기는 실행 중 Browser·Terminal의 동일 Live 또는 완료된 읽기·명령의 Snapshot으로 이동한다. `[당시 관찰] [현재 조작면] [비교]`로 시점을 구분한다.
-- **System 책임**: Agent 관계, 대화 투영과 초안, 메시지, Answer·Result·Task 연결을 불러오고 요청 전송 시에만 컨텍스트를 결합한다. 사용할 수 있는 Agent Profile이 없으면 같은 Chat view에서 설정 행동과 작성기 비활성 사유를 표시하며 Chat을 여는 행동 자체를 Agent Run으로 만들지 않는다. Chat의 상태 표시는 Canvas 정본을 복제하지 않고 reference한다.
+- **무엇인가 / 아닌가**: 기본 Codex 또는 선택한 Agent/persona와 대화하고 Answer의 완결된 설명을 받는 화면이다. Agent Runtime, 전체 context 저장소, Profile 설정 화면, 단순 완료 알림 또는 Canvas의 긴 본문 복제본이 아니다.
+- **제품 사용자가 보는·하는 것**: Dock `[Chat]`에서 기본 Codex와 만든 Agent의 담당자 방을 구분한다. 실제 작성자·업무 대상·컨텍스트·작성기가 보이며 활동 기록은 패널에서 펼친다. 과거 자료 열람과 `[현재 작업 화면]`의 Canvas 이동은 별도 동작이다.
+- **System 책임**: 대화·초안·메시지와 Answer·Result·Task 연결을 불러오고 전송할 때만 context를 결합한다. 기본 Codex는 사용자 정의 Agent Profile 없이 사용할 수 있다. 인증·권한 부족은 해당 이유와 연결 행동으로 알리고 Chat 열기만으로 Run을 만들지 않는다.
 - **Agent 관계**: Agent는 전송 뒤 Run 안에서 응답한다. Chat 표시만으로 Agent가 존재하거나 계속 실행 중이라고 추정하지 않는다.
 - **수명주기·복구**: 대화·초안·첨부 참조·포함 설정·업무 연결·결과와 메시지 기준 스크롤을 복원한다. 첨부 byte는 허용된 보존본만 복원하고 없으면 다시 연결한다. IME 조합·일시 선택·입력 포커스는 복원하지 않으며 Chat 닫기는 실행 중지가 아니다.
 - **관련 trace / question**: `CHAT-01`, `AI-01`–`AI-05`; `Q-CHAT-01`–`Q-CHAT-03`, `Q-AI-01`–`Q-AI-05`, `Q-MEDIA-01`–`Q-MEDIA-03`.
@@ -2194,9 +2241,9 @@ flowchart LR
 
 - **ID**: `OBJ-025`
 - **제품 상태**: `상세 설계 기준선` — 남은 정책은 연결된 사용자 선택에 따른다.
-- **무엇인가 / 아닌가**: 여러 메시지를 엮는 대화 패턴을 가리키는 용어다. 현재 화면 경로는 담당자 방과 공유 대화이며, 모든 Chat·Run·Agenda 또는 Task마다 별도 Thread 객체를 만들지 않는다.
+- **무엇인가 / 아닌가**: 여러 메시지를 엮는 대화 패턴을 가리키는 용어다. 현재 화면 경로는 담당자 방과 공유 대화이며, 모든 Chat·Run·Board 또는 Task마다 별도 Thread 객체를 만들지 않는다.
 - **제품 사용자가 보는·하는 것**: `[방 목록]`에서 담당자 방·공유 대화를 열고 업무·참여자·공개 범위를 확인한다. 일반 공유 메시지의 `[전송]`과 `[Agent에게 요청]`을 구분한다.
-- **System 책임**: 대화 식별자, 참여자, 개인정보 보호, Agenda 관계와 지속성을 명시적으로 관리한다.
+- **System 책임**: 대화 식별자, 참여자, 개인정보 보호, Board 관계와 지속성을 명시적으로 관리한다.
 - **Agent 관계**: Agent가 Thread에 참여할 수 있으나 참여 자체가 새 작업 권한이나 전체 대화 공유를 의미하지 않는다.
 - **수명주기·복구**: 연결된 대화의 기록·초안·참조·재진입을 따르며 독립 Thread 수명주기를 추가하지 않는다. 화면 닫기·대화 기록 제거·Run 중지는 별도 행동이다.
 - **관련 trace / question**: `AI-03`, `COL-01`; `Q-OBJ-06`, `Q-CHAT-01`, `Q-AI-06`, `Q-AI-12`, `Q-AI-13`.
@@ -2206,11 +2253,11 @@ flowchart LR
 
 - **ID**: `OBJ-026`
 - **제품 상태**: `상세 설계 기준선` — 안정적인 담당자 identity, 같은 방의 여러 업무, 초안·기록 재진입이 정의되어 있다.
-- **무엇인가 / 아닌가**: 안정적인 Agent ID와 지속적인 담당자 관계로 대화하는 기본 Chat 패턴이다. Profile은 별도 설정 참조이며 교체·재사용해도 방 identity를 합치지 않는다. Runtime·영구 모델 context·권한 원천이 아니다.
+- **무엇인가 / 아닌가**: 사용자가 만든 Agent의 안정 ID와 지속적인 담당자 관계로 대화하는 Chat 패턴이다. 기본 Codex의 선행 객체가 아니다. Profile은 별도 설정 참조이며 교체·재사용해도 방 identity를 합치지 않는다. Runtime·영구 모델 context·권한 원천이 아니다.
 - **제품 사용자가 보는·하는 것**: 담당자 이름과 업무 대상을 확인해 요청한다. 메시지·기여·Memo의 `[⋯] → [공유 대화에 연결]`에서 대상 대화·참여자·본문·첨부 범위를 확인해 공유한다. 관련: `Q-OBJ-06`.
 - **System 책임**: Agent identity·Profile revision·대화·업무 binding을 분리한다. `[활동 N건]`과 `[업무별 보기]`로 같은 방의 업무를 구분하며 방 전체를 모델 입력이나 공유 대화에 자동 복사하지 않는다. 관련: `Q-CHAT-01`.
 - **Agent 관계**: 선택한 Profile을 사용하는 Run이 전송 뒤 생성될 수 있다. Profile 선택만으로 Agent가 실행되지는 않는다.
-- **수명주기·복구**: 방·대화·업무 연결·초안을 다시 열 수 있다. Profile 중단·보관은 새 사용을 제한하지만 방·과거 Run을 삭제하지 않는다. Agenda 참조 변경·화면 닫기·업무 기록 삭제는 각각 별도다.
+- **수명주기·복구**: 방·대화·업무 연결·초안을 다시 열 수 있다. Profile 중단·보관은 새 사용을 제한하지만 방·과거 Run을 삭제하지 않는다. Board 참조 변경·화면 닫기·업무 기록 삭제는 각각 별도다.
 - **관련 trace / question**: `AI-03`, `CHAT-01`; `Q-OBJ-06`, `Q-AI-06`–`Q-AI-08`, `Q-AI-12`, `Q-AI-13`, `Q-AGENT-01`.
 
 <a id="atlas-obj-027"></a>
@@ -2218,7 +2265,7 @@ flowchart LR
 
 - **ID**: `OBJ-027`
 - **제품 상태**: `상세 설계 기준선` — 남은 정책은 연결된 사용자 선택에 따른다.
-- **무엇인가 / 아닌가**: 고유 conversation identity·참여자·공유 범위를 가진 `공유 대화`다. Agenda는 0개 이상의 탐색 참조이며 추가해도 소유·참여·실행 권한이 늘지 않는다. 개인 방의 자동 합본이나 별도 workroom·Task별 Thread가 아니다. 관련: `Q-OBJ-06`.
+- **무엇인가 / 아닌가**: 고유 conversation identity·참여자·공유 범위를 가진 `공유 대화`다. Board는 0개 이상의 탐색 참조이며 추가해도 소유·참여·실행 권한이 늘지 않는다. 개인 방의 자동 합본이나 별도 workroom·Task별 Thread가 아니다. 관련: `Q-OBJ-06`.
 - **제품 사용자가 보는·하는 것**: `[방 목록] → [공유 대화]`에서 열거나 생성한다. 일반 `[전송]`은 사람 간 메시지이며 Agent 실행은 `[Agent에게 요청] → 담당자 → [위임]`으로 시작한다.
 - **System 책임**: 공유된 메시지·컨텍스트와 작업 경계를 명시적으로 저장하고, DM이나 비공개 상태를 자동 유입하지 않는다.
 - **Agent 관계**: 여러 Agent가 각자의 Run과 위임 범위에서 기여하며, 종합 결과와 개별 출처를 구분한다.
@@ -2302,7 +2349,7 @@ flowchart LR
 
 - **ID**: `OBJ-034`
 - **제품 상태**: `런타임 내부` — 사용자에게 검사 가능한 요약 투영이 필요하다.
-- **무엇인가 / 아닌가**: Run 또는 실행 시도에 포함·제외된 thread/task, 명시적 선택, 관련 Agenda, 임시 group/layout, visible/focused Resource, 최근 관련 상태, account/authority/execution scope와 각 리비전을 고정한 버전이다. Desk 전체 복사, 메모리 전체, 권한 부여 또는 공간 근접성에 의한 사실 추론이 아니다.
+- **무엇인가 / 아닌가**: Run 또는 실행 시도에 포함·제외된 thread/task, 명시적 선택, 관련 Board, 임시 group/layout, visible/focused Resource, 최근 관련 상태, account/authority/execution scope와 각 리비전을 고정한 버전이다. Desk 전체 복사, 메모리 전체, 권한 부여 또는 공간 근접성에 의한 사실 추론이 아니다.
 - **제품 사용자가 보는·하는 것**: `[업무 ⋯] → [입력·적용 기준]`에서 포함·제외 이유와 권한·실행 범위를 확인한다. 실행 전·중 범위를 조정하고 `[적용 내역]`에서 실제 반영된 호출 revision을 검사한다.
 - **System 책임**: 승인된 source 집합에서 의미·명시 선택·권한으로 최소 snapshot을 결합하고 민감 범위를 제외하며 변경 시 새 리비전을 만든다. Canvas에서 가까운 배치를 관련 사실이나 evidence로 승격하지 않는다.
 - **Agent 관계**: Agent는 호출별로 실제 전달된 context revision을 사용한다. 일반 수정은 같은 Run의 가능한 가장 이른 다음 호출에 반영하며 과거 입력을 바꾸거나 재시작·포크를 요구하지 않는다.
@@ -2448,11 +2495,11 @@ flowchart LR
 
 - **ID**: `OBJ-045`
 - **제품 상태**: `상세 설계 기준선` — 남은 정책은 연결된 사용자 선택에 따른다.
-- **무엇인가 / 아닌가**: 사용자가 선별한 참조를 찾는 조건부 Library다. 자료·Agenda·결과·Snapshot, 자료만, 미제공의 세 정책 분기가 있으며 파일 원본·출력 저장소나 모든 Sidebar 항목의 자동 합본이 아니다.
-- **제품 사용자가 보는·하는 것**: 제공 정책이면 Sidebar `[Library]`에서 검색·필터·열기·현재 Agenda 참조 추가를 사용한다. 허용 유형의 자료 메뉴 `[Library에 추가] → [등록]`으로 등록하고 `[Library에서 제거]`로 참조만 해제한다. 미제공이면 전체 검색·참고용 Saved Agenda를 사용한다.
+- **무엇인가 / 아닌가**: 사용자가 선별한 참조를 찾는 조건부 Library다. 자료·Board·결과·Snapshot, 자료만, 미제공의 세 정책 분기가 있으며 파일 원본·출력 저장소나 모든 Sidebar 항목의 자동 합본이 아니다.
+- **제품 사용자가 보는·하는 것**: 제공 정책이면 Sidebar `[Library]`에서 검색·필터·열기·현재 Board 참조 추가를 사용한다. 허용 유형의 자료 메뉴 `[Library에 추가] → [등록]`으로 등록하고 `[Library에서 제거]`로 참조만 해제한다. 미제공이면 전체 검색·참고용 Saved Board를 사용한다.
 - **System 책임**: 승인된 로컬 인덱스와 항목 유형·출처·최신성·접근 상태를 투영한다.
 - **Agent 관계**: 명시적 의미 검색 요청이 없으면 Library 탐색은 System 검색이며 Agent 작업이 아니다.
-- **수명주기·복구**: 등록·제거는 원본과 별개다. 실패 시 입력을 유지하고 `[등록 다시 시도]`를 제공한다. 취소는 원 목록·시점으로, 열기는 대상 View·Agenda로 이동한다. 미제공 정책에는 등록 상태가 없으며 원격 동기화는 별도 승인 범위를 따른다.
+- **수명주기·복구**: 등록·제거는 원본과 별개다. 실패 시 입력을 유지하고 `[등록 다시 시도]`를 제공한다. 취소는 원 목록·시점으로, 열기는 대상 View·Board로 이동한다. 미제공 정책에는 등록 상태가 없으며 원격 동기화는 별도 승인 범위를 따른다.
 - **관련 trace / question**: `DISC-01`, `V-03`; `Q-OBJ-05`, `Q-DISC-01`–`Q-DISC-03`, `Q-LIB-01`.
 
 ### 4.6 협업, Desk 외부 활동과 데이터
@@ -2474,7 +2521,7 @@ flowchart LR
 
 - **ID**: `OBJ-047`
 - **제품 상태**: `상세 설계 기준선` — 남은 정책은 연결된 사용자 선택에 따른다.
-- **무엇인가 / 아닌가**: 협업자에게 명시적으로 공개된 Desk·Agenda·선택 View·공유 대화·artifact와 허용 행동의 집합이다. Desk 전체·계정·OS 제어권을 자동 공유하지 않는다.
+- **무엇인가 / 아닌가**: 협업자에게 명시적으로 공개된 Desk·Board·선택 View·공유 대화·artifact와 허용 행동의 집합이다. Desk 전체·계정·OS 제어권을 자동 공유하지 않는다.
 - **제품 사용자가 보는·하는 것**: 공유 대상, 제외 영역, 역할, 기간과 관찰·편집·제어 차이를 미리 보고 초대·변경·철회한다.
 - **System 책임**: 최소 범위를 강제하고 비공개 상태를 필터링하며 충돌·병합과 권한 변경을 감사한다.
 - **Agent 관계**: 공유된 상태라도 Agent 작업 위임과 account/resource authority가 별도로 필요하다.
@@ -2498,7 +2545,7 @@ flowchart LR
 
 - **ID**: `OBJ-049`
 - **제품 상태**: `상세 설계 기준선` — 남은 정책은 연결된 사용자 선택에 따른다.
-- **무엇인가 / 아닌가**: 로컬 설정, 저장된 Agenda, 자동 Desk 세션, 대화, Profile, Run 감사, artifact, 인덱스·캐시 등 제품이 기기에서 보존하는 결정된 데이터다. 원격 백업, 동기화 계정 또는 자격 증명 원문 전체가 아니다.
+- **무엇인가 / 아닌가**: 로컬 설정, 저장된 Board, 자동 Desk 세션, 대화, Profile, Run 감사, artifact, 인덱스·캐시 등 제품이 기기에서 보존하는 결정된 데이터다. 원격 백업, 동기화 계정 또는 자격 증명 원문 전체가 아니다.
 - **제품 사용자가 보는·하는 것**: 범위별 설정, 보존·삭제·초기화와 내보내기·백업·가져오기·복원 내용을 미리 보고 실행한다.
 - **System 책임**: 데이터 범위와 민감도를 구분하고, 자격 증명을 기본 내보내기에서 제외하며, 백업 생성과 실제 복원 성공을 따로 검증한다.
 - **Agent 관계**: Agent는 위임된 로컬 데이터만 처리하며 데이터 보존 정책이나 삭제 권한을 Profile로 획득하지 않는다.
@@ -2524,7 +2571,7 @@ flowchart LR
 
 - **ID**: `OBJ-051`
 - **제품 상태**: `확정`
-- **무엇인가 / 아닌가**: Desk, Agenda, Resource, thread/task, Agent, Run, Answer, Result와 evidence 사이의 제품 의미 관계를 표현하는 모델이다. 특정 module, framework, class, database schema, service 배치, process 그래프 또는 Runtime topology가 아니다.
+- **무엇인가 / 아닌가**: Desk, Board, Resource, thread/task, Agent, Run, Answer, Result와 evidence 사이의 제품 의미 관계를 표현하는 모델이다. 특정 module, framework, class, database schema, service 배치, process 그래프 또는 Runtime topology가 아니다.
 - **제품 사용자가 보는·하는 것**: 제품 객체가 왜 연결됐고 어떤 범위·리비전·권한에서 유효한지 검사하며, 허용된 경우 관계 변경을 별도 거버넌스 경로로 제안한다.
 - **System 책임**: 제품 의미 ID와 관계를 구현 위치에서 분리하고, 구현체를 교체하거나 topology를 재배치해도 의미·버전·evidence 연결을 보존한다.
 - **Agent 관계**: Agent는 relation map을 context와 제약으로 사용할 수 있지만 공간 근접성이나 코드 의존 그래프를 제품 사실 관계로 자동 승격하지 않는다.
@@ -2537,10 +2584,10 @@ flowchart LR
 - **ID**: `OBJ-052`
 - **제품 상태**: `확정`
 - **무엇인가 / 아닌가**: Agent가 제어하는 Task·tool·Browser·Terminal·file·computer-use 활동과 그 판단에 실제로 전달된 관찰을 Desk에서 검사할 수 있게 만드는 projection이다. 불변 raw/source capture, direct tool result 또는 Reader Context Packet, Agent-delivered payload, 읽기 전용 **Snapshot View**, 현재 resource/runtime의 **Live View**를 구분한다. raw Agent chatter, hidden chain-of-thought, 항상 렌더링되는 숨은 Desktop이 아니다.
-- **제품 사용자가 보는·하는 것**: `[ · · · ]`에서 활동을 고른다. 실행 중 상호작용 Browser·Terminal은 동일 Live, 완료된 읽기·명령은 Snapshot으로 열린다. `[당시 관찰] [현재 조작면] [비교]`로 시점을 구분하고 raw·실제 전달 packet·변환 관계를 검사한다. Live 미확인은 node에 표시하며 관찰을 위해 새 세션을 만들지 않는다.
-- **System 책임**: 모든 의미 있는 Agent 활동이 active, sleeping 또는 historical snapshot 어느 상태이든 Canvas에서 찾을 수 있는 projection을 유지한다. model/tool/Reader lifecycle에서 call/session identity, source revision, capture time, payload role, coverage, content hash와 transformation lineage를 수집한다. direct File read가 40–80행을 명명된 결과로 반환하면 그 전체가 해당 Agent input과 일치해야 한다. Smart Read에서는 전체 source/raw hit와 더 작은 Context Packet을 모두 보존하고 실제 전달 범위를 표시한다. 현재 path·URL·session으로 과거를 재구성하지 않으며 Snapshot View와 Live View를 별도 identity로 관리한다. renderer mount 전략은 기술 계약의 구현 재량이다.
+- **제품 사용자가 보는·하는 것**: 실제 작업 대상의 Agent 배지·윤곽을 보고, 생각 버블에서 해당 Agent·업무 기록을 연다. 과거 읽기·명령은 패널 안의 Snapshot으로 확인한다. `[현재 작업 화면]`을 누른 경우에만 Canvas 대상으로 이동한다. 기본 Codex는 일반 진행·기록 진입점을 사용한다. 원문·실제 전달 내용·변환 관계를 구분하며 기록 열람 자체로 새 세션을 만들지 않는다.
+- **System 책임**: 실제 active·sleeping 작업과 유지 중인 runtime은 Canvas에서 찾을 수 있게 하고, 과거 읽기·도구 이력은 허용된 기록 패널에서 다시 찾을 수 있게 한다. 매 호출마다 Canvas node를 생성하지 않는다. call/session identity, source revision, 시각, payload role, 범위·hash·변환 연결을 보존한다. 직접 읽기의 명명 결과와 Smart Read의 원문·전달 packet을 구분하며, 현재 URL·path·session으로 과거 내용을 대신하지 않는다. 사용자 활성·입력권과 Agent 활동 강조도 별도로 관리한다.
 - **Agent 관계**: 요청 담당 Agent는 실제로 전달된 direct result 또는 Reader Context Packet을 판단에 사용한다. Reader는 file-read 내부에서만 source-anchored packet을 만든다. 어떤 항목이 report set에 들어갈지는 System 계약과 제품 사용자 재정의를 따르며, report item은 `Agent-delivered payload → raw/source capture → source/runtime revision` provenance를 유지한다.
-- **수명주기·복구**: Agent Observation Snapshot, Snapshot View node/renderer, Live View와 Browser·PTY 같은 상호작용 session은 서로 다른 수명주기를 가진다. Canvas viewport 밖이라는 이유만으로 활동을 종료하지 않는다. offscreen renderer는 unmount할 수 있고 live session은 종료될 수 있지만 가벼운 상태 node나 snapshot이 활동의 위치·상태를 계속 나타내며 보존된 snapshot 동일성과 출처 관계는 바뀌지 않는다. 동일 콘텐츠는 저장 계층에서 중복 제거·chunk·압축할 수 있지만 논리적 전체 내용은 유지한다. 정확한 보존 기간·암호화·redaction 정책 때문에 snapshot이 제거되는 경우, UI는 `snapshot 없음`을 명시하고 현재 resource를 역사적 관찰처럼 대체하지 않는다.
+- **수명주기·복구**: 관찰 자료, 패널 renderer, Canvas 작업 표현, Browser·PTY runtime은 서로 다른 수명을 가진다. 패널 닫기는 기록 삭제나 실행 종료가 아니며, Canvas viewport 밖이라는 이유만으로 runtime을 종료하지 않는다. 살아 있는 작업을 숨은 기록으로만 남기지는 않는다. 종료된 관찰은 매번 Canvas 위치를 보존할 필요가 없고 허용된 기록으로 재진입한다. 중복 제거·압축 뒤에도 과거 내용의 동일성과 출처를 유지한다. 삭제·권한·보존 정책으로 원문이 없으면 그 상태를 알리고 현재 자료를 과거 자료처럼 보여 주지 않는다.
 - **관련 trace / question**: `AI-01`, `AI-03`, `AI-04`, `AI-06`, `AI-07`, `CODE-01`, `TERM-01`, `CU-01`; `Q-AI-04`, `Q-MEDIA-01`, `Q-ORCH-01`, `Q-CU-08`, `Q-AGENT-12`, `Q-AGENT-18`.
 
 <a id="atlas-obj-053"></a>
@@ -2621,7 +2668,7 @@ Agent Profile은 다음 필드를 버전으로 구분한다. `[방 목록] → [
 | **policy / system prompt binding** | 제품·제공자 정책과 런타임 지침 묶음의 버전 또는 해시 | 원문 전체를 Chat에 노출한다고 가정하지 않는다. Profile에는 안전한 요약과 식별 정보가 필요하다. |
 | **provider / model policy** | 선호 provider, model 계열, 정확한 version 선택 규칙과 허용된 fallback 체인 | 현재 availability와 다르며 fallback이 도구·데이터·네트워크·권한을 넓히지 않는다. |
 | **tools / capability ceiling** | 사용할 수 있다고 선언한 도구 종류, 작업 유형과 최대 위임 범위 | 실제 tool availability, account/resource authority 또는 approval이 아니다. |
-| **context defaults** | 명시적 선택, Agenda, 대화, 보이는 Resource 중 어떤 후보를 우선 검토할지 | Desk 전체 자동 수집 규칙이 아니며 Run마다 검사·축소할 수 있어야 한다. |
+| **context defaults** | 명시적 선택, Board, 대화, 보이는 Resource 중 어떤 후보를 우선 검토할지 | Desk 전체 자동 수집 규칙이 아니며 Run마다 검사·축소할 수 있어야 한다. |
 | **memory policy** | 허용된 메모리 종류, 범위, 기록 조건, 보존·삭제 기본값 | 메모리 내용 자체나 권한이 아니다. 정확한 범위는 `Q-AGENT-07`이 정한다. |
 | **credential-handle policy** | 어떤 종류의 불투명 credential handle을 요청할 수 있는지 | secret 값, 계정 소유권 또는 사용 승인이 아니다. |
 | **Ontology binding policy** | 기본 Ontology 선택 규칙, 요구 버전·제약·evidence 스키마 | System이 첫 호출 전 실제 내용을 조회하고, 호출마다 사용한 binding을 별도로 기록한다. |
@@ -2680,7 +2727,7 @@ System은 각 모델 호출 전에 다음 후보와 새 사용자 조정·도구
 
 - 현재 thread와 실행할 task의 범위·요구·선행 상태;
 - 사용자가 명시적으로 선택하거나 첨부한 대상;
-- 관련 Agenda의 허용된 구성원;
+- 관련 Board의 허용된 구성원;
 - 임시 Desk group/layout 가운데 요청 의미에 직접 관련된 관계;
 - visible 또는 focused Resource 가운데 요청에 필요한 대상;
 - 최근 상태 중 task와 직접 관련되고 최신성이 확인된 상태;
@@ -2700,7 +2747,7 @@ Resource를 자동으로 진실 관계에 연결하거나 권한 범위에 추�
 
 #### Memory
 
-Memory는 대화 임시·Agenda·선택 Agent·개인·조직 범위를 구분하며 사람 또는 관리 범위가 소유한다. Profile은 기억 본문을 소유하지 않는다. `[입력·적용 기준] → [기억]`에서 편집·재사용 중지·삭제·만료·이동·공유·내보내기를 다룬다. 명시 저장형과 사전 동의 범위의 자동 축적형은 연결된 사용자 선택을 따른다. 관련: `Q-AGENT-07`, `Q-DATA-04`.
+Memory는 대화 임시·Board·선택 Agent·개인·조직 범위를 구분하며 사람 또는 관리 범위가 소유한다. Profile은 기억 본문을 소유하지 않는다. `[입력·적용 기준] → [기억]`에서 편집·재사용 중지·삭제·만료·이동·공유·내보내기를 다룬다. 명시 저장형과 사전 동의 범위의 자동 축적형은 연결된 사용자 선택을 따른다. 관련: `Q-AGENT-07`, `Q-DATA-04`.
 
 Chat 기록은 곧 Memory가 아니며, Memory는 account/resource authority가 아니다.
 Memory를 context revision에 포함하려면 출처, 범위, 최신성, 포함 이유와 권한을
@@ -2763,9 +2810,9 @@ revision이 사용될 수 있다. 최소 필드는 다음과 같다.
 |---|---|
 | **run identity** | Run ID, 생성 시각, 부모 Run과 시도·포크 관계 |
 | **request binding** | 제품 사용자가 전송하거나 상위 Task가 위임한 요청 ID·revision·입력 범위와 생성 행위자 |
-| **effective instruction binding** | 해당 Run에 실제 적용된 제품 사용자 요청, 대화 context, Profile instructions·personality, System·provider policy의 revision·hash·해소된 우선순위 |
+| **effective instruction binding** | 실제 적용된 요청·대화 context·기본 실행 지침, 선택한 경우의 Profile instructions·personality, System·provider policy의 revision·hash·해소된 우선순위 |
 | **task graph** | Task ID, 담당 Agent, 선행 조건, 완료 조건과 `queued`·`waiting-on-dependency`·`ready`·`running`·`approval-required`·`completed`·`failed`·`cancelled` 상태 |
-| **profile binding** | Profile ID, version, hash, 활성 시점 |
+| **profile binding** | 사용자 생성 Agent를 선택한 경우의 Profile ID·version·hash·활성 시점. 기본 Codex는 `사용자 정의 Profile 없음`을 기록하고 기본 실행 구성·Engine binding으로 해소 |
 | **engine binding** | AI Engine Profile ID, 격리된 runtime/config revision, 검증된 account·auth mode·plan/quota 상태; token 제외 |
 | **runtime resolution** | Runtime version, adapter, 현재 health와 기능 저하 사유 |
 | **provider/model resolution** | 요청값, 실제 provider·model·version, fallback 사건과 이유 |
@@ -2783,7 +2830,20 @@ revision이 사용될 수 있다. 최소 필드는 다음과 같다.
 
 과거 호출 snapshot은 수정하지 않는다. 자료·모델·Profile·PC 조정은 같은 Run의 다음 context/config revision에 연결한다. 실패 재실행만 attempt를 늘리고 의도적 분기만 새 Run을 만든다. 계정 전환에 새 Run이 필요한 adapter에서도 같은 업무·최초 요청·방·Task lineage를 유지하고 credential·승인을 다시 검증한다. 관련: `Q-OBJ-07`, `Q-AGENT-14`.
 
-### 5.8 Chat·Canvas 투영과 system prompt 가시성
+<a id="atlas-output-situation"></a>
+### 5.8 작업 기록·답변·산출물의 화자와 표시
+
+Chat에는 사용자에게 하는 설명이, Canvas의 문서·보고서에는 그 산출물의 독자를 위한
+본문이 보인다. 생각 공간에는 해당 업무의 읽기 근거와 공개 가능한 계획·판단 요약이 있다.
+같은 업무에 연결돼 있어도 이 세 내용은 자동으로 서로의 본문이 되지 않는다.
+
+사용자가 준 작성 제한은 결과에 적용할 조건이다. System은 쓰기 요청의 화자·독자·목적·
+출력 위치와 제약/본문을 구별해 전달하고, Agent는 그 상황에 맞는 글을 작성한다.
+사용자 지시나 내부 수정 메모를 고객용 페이지에 그대로 옮기지 않는다. 결과와 사용자 교정의
+연결은 개선 근거가 될 수 있지만, 기록 저장이 자동 학습이나 정확성 보장을 뜻하지 않는다.
+상세: [문맥·출력 계약](./EGDESK_INTERACTION_AND_ORCHESTRATION_CONTRACT.md#tech-output-situation).
+
+#### 실행 설정과 공개 설명
 
 Chat과 Canvas는 Run의 사람이 읽을 수 있는 projection이다. 제품은 다음을 안전한
 수준으로 보여 줄 수 있어야 한다.
@@ -2877,18 +2937,19 @@ account authority와 dependency condition을 각각 다시 검증한다. 화면�
 
 ## 6. 구현이 어기면 안 되는 제품 불변조건
 
-1. **Firefox 방향**: EG-Desk의 제품 방향은 Firefox 셸과 Firefox 기반 Browser다.
-   다른 셸이나 범용 웹앱을 기본 제품으로 간주하지 않는다.
-2. **실제 Desk가 첫 화면**: 최초 실행과 일반 실행 모두 실제 작업 가능한 Desk로
-   들어간다. 랜딩 페이지, 프로젝트 선택기, 복구 마법사 또는 유지/폐기 목록이
-   정상 시작의 선행 화면이 되어서는 안 된다. 기본 제품 모델은 하나의 Desk와
-   그 Desk에 속한 하나의 Canvas이며, 여러 Saved Agenda는 같은 Canvas에 projection으로
-   동시에 열 수 있다. Agenda 열기가 기존 내용을 교체하거나 새 Desk를 만들지 않는다.
-3. **저장된 Agenda와 자동 Desk 복원은 별개**: 저장된 Agenda는 사용자가
+1. **Firefox/Gecko 방향**: 제품은 Firefox/Gecko 기반의 독립 EG-Desk 앱을 지향한다.
+   현재 Firefox-shell POC와 최종 배포 형태를 구분하며 소스 fork·Gecko patch를 필수로 단정하지 않는다.
+2. **최초 Browser 집중과 재방문 복원은 다르다**: 최초에는 이미 있는 Desk·Canvas의
+   live Browser View를 화면에 맞춰 보여 주고 바로 주소를 입력할 수 있다. Browser 안의
+   안내 시작 페이지는 가능하지만 별도 앱 시작 관문은 없다. Canvas 줌아웃으로 연결 화면을
+   거치지 않고 주변 공간을 드러내며, 첫 사용에 이전 일반 시점이 있을 필요는 없다. 이 왕복에서
+   Browser View·URL·세션·논리 viewport를 유지하며 재방문자는 마지막 표시 상태를 복원한다.
+   하나의 Desk와 Canvas에 여러 Saved Board를 열 수 있고 기존 내용을 교체하거나 새 Desk를 만들지 않는다.
+3. **저장된 Board와 자동 Desk 복원은 별개**: 저장된 Board는 사용자가
    의도적으로 보관한 작업 결합이고, 자동 Desk 세션은 열어 둔 상태의 로컬
    연속성 기록이다. 어느 한쪽을 읽거나 쓰는 일이 다른 쪽을 생성·갱신하지 않는다.
-   Agenda 닫기는 Canvas projection과 그 Agenda만 소유한 runtime을 종료하지만
-   Saved Agenda를 삭제하거나 보관하지 않는다.
+   Board 닫기는 Canvas projection과 그 Board만 소유한 runtime을 종료하지만
+   Saved Board를 삭제하거나 보관하지 않는다.
 4. **표현과 기반 실행은 별개**: 보이는 뷰, 리소스, 런타임, 프로세스, 전송 연결은
    서로 다른 상태다. Canvas viewport 밖 이동은 닫기·sleep·suspend가 아니며 lifecycle은
    view/runtime별로 판단한다. 뷰 복원은 동일 프로세스나 세션 재연결을 증명하지 않는다.
@@ -2896,11 +2957,11 @@ account authority와 dependency condition을 각각 다시 검증한다. 화면�
 5. **System 하이드레이션은 Agent 작업이 아니다**: 시작, 저장 상태 읽기,
    컨텍스트 결합, 권한 확인, 스케줄링, 렌더링, 포커스, 복구는 System 책임이다.
    사용자 요청이나 위임이 결합된 뒤에만 Agent 작업이 시작된다.
-6. **Chat은 Agent 관계 표면이지 실행체가 아니다**: 사람에게 보이는 기본 Chat은
-   Agent/persona별 담당자 방으로 대화 입력과 답변 표현을 보여 주지만 Agent Runtime,
-   전체 컨텍스트, 메모리, 자격 증명 또는 도구 세션을 담는 컨테이너가 아니다.
+6. **기본 Codex와 선택적 Agent는 실행체 그 자체가 아니다**: 기본 Codex는 사용자 정의
+   Agent Profile 없이 사용하고, 만든 Agent는 담당자 방·personality·생각 공간을 추가한다.
+   어느 Chat도 전체 context·기억·credential·도구 session과 동일한 컨테이너가 아니다.
    Chat 뷰를 닫아도 Run이 남는 경우에는 다른 Canvas 표현에서 그 실행을 찾을 수 있어야 한다.
-   Agenda 닫기는 3번의 종료 규칙을 따른다.
+   Board 닫기는 3번의 종료 규칙을 따른다.
 7. **하나의 Answer, 여러 투영**: 하나의 논리적 Answer는 Chat의 대화형 표현과
    Canvas의 공간·시각·상호작용·산출물 표현을 함께 가질 수 있다. 어느 투영도
    다른 투영을 복제하거나 대체할 의무가 없고, 하나의 실패가 Answer 전체를
@@ -2929,11 +2990,11 @@ account authority와 dependency condition을 각각 다시 검증한다. 화면�
     확인할 수 있는 제공자 확인증 또는 독립 검증을 필요로 한다.
 15. **식별 계층을 합치지 않는다**: 콘텐츠 동일성, source/evidence, 리소스
     로케이터, Browser 계정·프로필 권한, 보이는 뷰 인스턴스는 별개의 식별자다.
-16. **Workspace는 없다**: `Workspace`를 Desk, Agenda, 프로젝트, 폴더 또는
+16. **Workspace는 없다**: `Workspace`를 Desk, Board, 프로젝트, 폴더 또는
     공유 범위를 포괄하는 제품 노드로 도입하지 않는다. 필요한 관계는 각각의
     승인된 객체로 직접 설명한다.
 17. **파일 선택기는 진입 UI다**: 파일·폴더 선택기는 대상을 고르는 일시적
-    화면이며 프로젝트, Library, Agenda 또는 영속 객체가 아니다.
+    화면이며 프로젝트, Library, Board 또는 영속 객체가 아니다.
 18. **외부 computer-use는 비충돌이어야 한다**: 사람과 Agent가 같은 물리 입력
     채널을 경쟁하지 않도록 입력을 격리하거나 해당 채널의 소유권을 인계한다.
     다른 격리 실행면의 Agent 작업이 사용자 카메라·입력 focus를 빼앗지 않는다.
@@ -2957,7 +3018,7 @@ account authority와 dependency condition을 각각 다시 검증한다. 화면�
     relation map은 특정 module, framework, class, service, process 배치나 Runtime
     topology를 강제하지 않는다. 구현을 바꿔도 제품 관계 의미는 보존되어야 한다.
 24. **context snapshot은 의미와 권한으로 선택한다**: snapshot 후보는
-    thread/task, 명시적 선택, 관련 Agenda, 임시 group/layout, visible/focused
+    thread/task, 명시적 선택, 관련 Board, 임시 group/layout, visible/focused
     Resource, 최근 관련 상태, account/authority/execution scope다. Canvas에서
     가깝게 놓였다는 공간 근접성만으로 관련 사실이나 evidence를 만들지 않는다.
 25. **Chat과 Canvas는 보완하며 중복하지 않는다**: 한 Answer의 두 projection에
@@ -2970,12 +3031,10 @@ account authority와 dependency condition을 각각 다시 검증한다. 화면�
 28. **Terminal 효과를 분리한다**: Terminal view close, transport detach, process
     termination, snapshot은 서로 다른 행동이다. view close는 별도 확인·정책 없이
     process를 조용히 종료하지 않는다.
-29. **모든 의미 있는 작업 상태는 Canvas에서 찾을 수 있다**: 사용자나 Agent가
-    제어하는 Task, tool, Browser, Terminal, file, computer-use 활동은 active,
-    sleeping 또는 historical snapshot 상태일 때도 Canvas에서 찾을 수 있는 projection을
-    가져야 한다. 무거운 renderer는 분리할 수 있지만 숨은 registry에서만 실행해서는
-    안 된다. raw Agent chatter나 chain-of-thought 대신 contributor, status, scope,
-    evidence와 integration result를 표현한다.
+29. **실제 작업과 과거 기록의 위치를 구별한다**: active·sleeping 작업 대상과 유지 중인
+    runtime은 Canvas에서 찾을 수 있어야 한다. 과거 읽기·도구 이력은 생각/작업 기록 패널에서
+    다시 열 수 있게 하며 매 호출 Canvas node를 요구하지 않는다. 보고에 선별한 근거·산출물은
+    Canvas에 둘 수 있다. 기록 패널로 옮겼다는 이유로 실행 중 작업을 숨겨 계속하지 않는다.
 30. **장애 원인은 증거 전까지 미확정이다**: bridge, helper, transport, provider
     conversation, process, view 중 하나가 실패해도 인접 계층을 원인으로 단정하지
     않는다. 관찰 상태, 가능한 원인과 `last checked` 시각을 분리해 기록한다.
@@ -2990,7 +3049,8 @@ account authority와 dependency condition을 각각 다시 검증한다. 화면�
 33. **과거 Snapshot View와 현재 Live View를 합치지 않는다**: Snapshot View는 도구
     호출 당시의 `Agent Observation Snapshot`을 읽기 전용으로 보여 주고, Live View는
     현재 resource/runtime를 상호작용 가능하게 보여 준다. 같은 renderer 구현을 재사용할
-    수 있지만 둘은 별도 view identity로 Canvas에 공존한다. live resource의 변경,
+    수 있지만 둘의 identity와 표시 목적은 다르다. 과거 기록의 기본 위치는 기록 패널이고
+    명시적으로 펼친 보고 근거는 Canvas에 둘 수 있다. live resource의 변경,
     snapshot renderer의 unmount, Answer report set의 재배치는 과거 snapshot을 바꾸지
     않는다. 현재 상태를 다음 Agent 요청에 쓰려면 새 context revision이나 도구 호출을
     통해 새로운 관찰을 만든다.
@@ -3011,12 +3071,12 @@ account authority와 dependency condition을 각각 다시 검증한다. 화면�
 | # | Trace | 시작 → 완료 경계 | 주 map |
 |---:|---|---|---|
 | 1 | L-01 최초 로컬 실행 | 새 로컬 설치/프로필 → 사용할 수 있는 실제 Desk | M1 |
-| 2 | L-02 일반 실행과 자동 Desk 복원 | 이전 세션·독립 saved Agenda → 복원된 view와 Sidebar 행 | M2, M17 |
+| 2 | L-02 일반 실행과 자동 Desk 복원 | 이전 세션·독립 Saved Board → 복원된 view와 Sidebar 행 | M2, M17 |
 | 3 | L-03 런타임 및 종료 경계에서 Desk 연속성 기록 | 실행 중 Desk → 마지막 유효 기록 기반 재진입 | M2 |
-| 4 | AG-01 Agenda 생성 및 최초 저장 | 사용할 수 있는 Desk → 독립 saved Agenda | M14 |
-| 5 | AG-02 저장된 Agenda 열기 | Sidebar의 유효 Agenda 행 → 결정된 Desk 관계 안의 Agenda projection | M14, M2 |
-| 6 | AG-03 현재 작업에서 Agenda 저장 또는 업데이트 | 커밋 전 작업 범위 → 구분 가능한 saved revision | M14, M2 |
-| 7 | AG-04 Agenda 이름 변경, 보관/닫기, 삭제 및 복구 | saved Agenda 행 → 선택한 수명주기 상태 | M14 |
+| 4 | AG-01 Board 생성 및 최초 저장 | 사용할 수 있는 Desk → 독립 Saved Board | M14 |
+| 5 | AG-02 저장된 Board 열기 | Sidebar의 유효 Board 행 → 결정된 Desk 관계 안의 Board projection | M14, M2 |
+| 6 | AG-03 현재 작업에서 Board 저장 또는 업데이트 | 커밋 전 작업 범위 → 구분 가능한 saved revision | M14, M2 |
+| 7 | AG-04 Board 이름 변경, 보관/닫기, 삭제 및 복구 | Saved Board 행 → 선택한 수명주기 상태 | M14 |
 | 8 | V-01 Desk 뷰로 리소스 열기 | 승인된 resource entry → 올바른 locator·권한의 view/runtime | M3, M15 |
 | 9 | V-02 뷰 이동, 크기 조절, 그룹화, 포커스, 최대화 및 닫기 | Canvas의 active view → 일치하는 표현·세션 상태 | M15, M2 |
 | 10 | V-03 Canvas 탐색 및 열려 있는 항목 찾기 | Canvas viewport → 이름 붙은 target focus/open | M15, M19 |

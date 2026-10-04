@@ -41,11 +41,11 @@ PM이 많은 유스케이스와 높은 감사 점수를 만들었지만, Main이
 
 1. 신규 PM에게 가능한 많은 EG-Desk 사용자 사례를 요청했다.
 2. PM은 상세 여정·추가 사례·실패 사례를 대량 생성했다.
-3. 사용자가 Agenda·Desk·SourceRef·Terminal·Chat/Canvas·Playback·Await·Ontology 등에서
+3. 사용자가 Board·Desk·SourceRef·Terminal·Chat/Canvas·Playback·Await·Ontology 등에서
    근본적인 의미 오독을 지적했다.
 4. 사례 수를 늘리는 대신 사용자의 UI 행동과 상태 전이를 추적하는 Atlas로 전환했다.
 5. PM 편집과 여러 독립 감사가 반복됐고 구조 count와 높은 점수가 보고됐다.
-6. 저장된 Agenda 열기 선택지에 Main이 사용한 `새 Workspace`가 제품 객체처럼 남았다.
+6. 저장된 Board 열기 선택지에 Main이 사용한 `새 Workspace`가 제품 객체처럼 남았다.
 7. 사용자가 Workspace의 실제 기능·Desk와의 관계·근거를 연속 질문했다.
 8. 기록을 추적한 결과 최초 제품 모델에는 Workspace가 없고 Main의 표현이 PM 문서로
    전파된 사실을 확인했다.

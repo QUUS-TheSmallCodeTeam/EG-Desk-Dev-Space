@@ -10,7 +10,7 @@
       <div class="surface-label">present · selected stack</div>
       <div class="node selected virtual" style="left:18%;top:24%"><em></em><strong>Chat session</strong><small>virtual · current</small></div>
       <div class="node virtual" style="left:39%;top:42%"><em></em><strong>Context binding</strong><small>virtual relation</small></div>
-      <div class="node virtual" style="left:68%;top:26%"><em></em><strong>Agenda</strong><small>virtual object</small></div>
+      <div class="node virtual" style="left:68%;top:26%"><em></em><strong>Board</strong><small>virtual object</small></div>
       <div class="node info" style="left:30%;top:62%"><em></em><strong>Terminal</strong><small>information · runtime</small></div>
       <div class="node info" style="left:57%;top:62%"><em></em><strong>Session file</strong><small>information · storage</small></div>
       <svg class="routes" viewBox="0 0 1000 520" preserveAspectRatio="none">
@@ -20,5 +20,5 @@
       </svg>
     </div>
   </section>
-  <aside class="lens"><h2>Lens</h2><div class="selected-card"><small>selected object</small><strong>Chat session</strong><p>Current semantic object projected onto runtime information and physical substrate.</p></div><div class="metric"><span>time</span><b>present</b></div><div class="metric"><span>stratum</span><b>virtual</b></div><div class="path"><span>Context binding</span><b>→</b><span>Goal</span></div><h3>Related</h3><div class="chips"><span>Agenda</span><span>Card</span><span>Terminal</span></div></aside>
+  <aside class="lens"><h2>Lens</h2><div class="selected-card"><small>selected object</small><strong>Chat session</strong><p>Current semantic object projected onto runtime information and physical substrate.</p></div><div class="metric"><span>time</span><b>present</b></div><div class="metric"><span>stratum</span><b>virtual</b></div><div class="path"><span>Context binding</span><b>→</b><span>Goal</span></div><h3>Related</h3><div class="chips"><span>Board</span><span>Card</span><span>Terminal</span></div></aside>
 </main></div><div class="note">Bright canvas direction. Best for direct-manipulation and object-on-surface readability.</div><script>document.querySelectorAll('.node').forEach(n=>n.addEventListener('click',()=>{document.querySelectorAll('.node').forEach(x=>x.classList.remove('selected'));n.classList.add('selected');document.querySelector('.selected-card strong').textContent=n.querySelector('strong').textContent;}));</script></body></html>

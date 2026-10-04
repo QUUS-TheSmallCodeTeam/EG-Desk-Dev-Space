@@ -3,6 +3,30 @@ set -euo pipefail
 
 PROFILE="${EGDESK_FIREFOX_PROFILE:-$HOME/Library/Application Support/Firefox/Profiles/egtc3irr.egdesk.default-release}"
 FIREFOX="${EGDESK_FIREFOX_BIN:-$HOME/Applications/Firefox.app/Contents/MacOS/firefox}"
+LAUNCH_MODE="${EGDESK_FIREFOX_MODE:-automation}"
+MARIONETTE_PORT="${EGDESK_FIREFOX_MARIONETTE_PORT-2828}"
+REMOTE_AGENT_PORT="${EGDESK_FIREFOX_REMOTE_AGENT_PORT-6000}"
+validate_port() {
+  local value="$1" name="$2"
+  if [[ ! "$value" =~ ^[1-9][0-9]{0,4}$ ]] || (( value > 65535 )); then
+    echo "[ERROR] $name must be an integer from 1 to 65535" >&2
+    exit 1
+  fi
+}
+validate_port "$MARIONETTE_PORT" EGDESK_FIREFOX_MARIONETTE_PORT
+validate_port "$REMOTE_AGENT_PORT" EGDESK_FIREFOX_REMOTE_AGENT_PORT
+if [[ "$MARIONETTE_PORT" == "$REMOTE_AGENT_PORT" ]]; then
+  echo "[ERROR] Firefox automation ports must differ" >&2
+  exit 1
+fi
+case "${1:-}" in
+  --normal) LAUNCH_MODE=normal; shift ;;
+  --automation) LAUNCH_MODE=automation; shift ;;
+esac
+case "$LAUNCH_MODE" in
+  normal|automation) ;;
+  *) echo "[ERROR] EGDESK_FIREFOX_MODE must be normal or automation" >&2; exit 1 ;;
+esac
 START_URL="${1:-about:blank}"
 
 if [[ ! -x "$FIREFOX" ]]; then
@@ -17,8 +41,17 @@ fi
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 REPO_ROOT="$(dirname "$SCRIPT_DIR")"
-"$SCRIPT_DIR/write-userjs.sh"
+# Validate before the writer, overlay copy, or startup-cache cleanup can touch
+# any profile. The writer repeats this check for direct invocations.
+PROFILE="$(node "$SCRIPT_DIR/validate-firefox-profile.mjs" "$PROFILE")"
+EGDESK_FIREFOX_PROFILE="$PROFILE" EGDESK_FIREFOX_MODE="$LAUNCH_MODE" \
+EGDESK_FIREFOX_MARIONETTE_PORT="$MARIONETTE_PORT" \
+EGDESK_FIREFOX_REMOTE_AGENT_PORT="$REMOTE_AGENT_PORT" \
+  "$SCRIPT_DIR/write-userjs.sh"
 
+# Both modes install the same current overlay into the already-validated
+# dedicated profile. Normal mode still disables Marionette/remote debugging
+# below; installing the UI must not require an automation launch.
 mkdir -p "$PROFILE/chrome/JS" "$PROFILE/chrome/CSS" "$PROFILE/chrome/resources"
 cp "$REPO_ROOT"/overlay/JS/*.uc.js "$PROFILE/chrome/JS/"
 cp "$REPO_ROOT"/overlay/CSS/*.uc.css "$PROFILE/chrome/CSS/"
@@ -45,15 +78,22 @@ fi
 
 echo "[info] Firefox: $FIREFOX"
 echo "[info] Profile: $PROFILE"
-echo "[info] Marionette: 127.0.0.1:2828"
-echo "[info] Remote Agent: 127.0.0.1:6000"
+echo "[info] Mode: $LAUNCH_MODE"
 echo "[info] Start URL: $START_URL"
 
+if [[ "$LAUNCH_MODE" == normal ]]; then
+  echo "[info] Browser automation disabled; current overlay installed and session data retained"
+  exec env -u MOZ_REMOTE_ALLOW_SYSTEM_ACCESS -u MOZ_MARIONETTE \
+    "$FIREFOX" -profile "$PROFILE" --no-remote "$START_URL"
+fi
+
+echo "[info] Marionette: 127.0.0.1:$MARIONETTE_PORT"
+echo "[info] Remote Agent: 127.0.0.1:$REMOTE_AGENT_PORT"
 MOZ_REMOTE_ALLOW_SYSTEM_ACCESS=1 \
   "$FIREFOX" \
   -profile "$PROFILE" \
   --no-remote \
   --marionette \
-  --remote-debugging-port 6000 \
+  --remote-debugging-port "$REMOTE_AGENT_PORT" \
   --remote-allow-hosts localhost \
   "$START_URL"

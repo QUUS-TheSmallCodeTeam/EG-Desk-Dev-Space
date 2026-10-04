@@ -25,7 +25,7 @@
 | S3 | 두 첨부를 읽고, 실패한 자료를 복구해 보고·브리핑·주석 확인 | RWS-0003, RWS-0006, RWS-0022 | 판독 실패 후 복구, Agent의 실제 읽기·답변·4단계 브리핑 생성, 당시 근거 열람, 단계 의견 저장→미전송 Chat 초안 포함까지 확인 |
 | S4 | 다른 View에서 일하는 동안 Browser 조작 관찰·개입·복귀 | RWS-0007, RWS-0008 | 사용자 관찰·입력권 반환 대기·Agent에게 반환·원 초안 복귀 확인. 별도 Agent relay에서 pan만 있으면 1회 적용, 페이지 변경에는 stale 1회 거부 후 재관찰·1회 적용 |
 | S5 | 병렬 작업의 의존 상태와 필요한 외부 행동만 승인 | RWS-0002, RWS-0009, RWS-0029 | 정확한 1건 허용→접수 불명→읽기 전용 재조회→후속 작업 시작과 독립 작업 유지의 모형 경로 확인. 실제 전송·서버 실행 아님 |
-| S6 | Agenda를 저장·닫기·재열고 파일·Terminal의 수명을 구별 | RWS-0010, RWS-0018 | 저장·전용 실행 종료·공동 유지 실행 보존·재열기와 동일 실행/보존 출력 구분 확인. 같은 저장 범위의 빠른 저장을 재실행 |
+| S6 | Board를 저장·닫기·재열고 파일·Terminal의 수명을 구별 | RWS-0010, RWS-0018 | 저장·전용 실행 종료·공동 유지 실행 보존·재열기와 동일 실행/보존 출력 구분 확인. 같은 저장 범위의 빠른 저장을 재실행 |
 | S7 | 다른 PC에서 자료 재연결·한정 공유·철회 | RWS-0010, RWS-0029 | 사본 가져오기·현재 원본 재연결과 과거 Snapshot 보존 확인. 별도 수신자 역할의 초대 수락·읽기·회수 후 개인 화면 복귀 확인. 원격 인프라·응답은 명시적 가정 |
 | S8 | 현재 업무의 적용 기준 확인·교정·비활성 조직 후보 보존 | RWS-0026, RWS-0027 | 후보 작성·원문 연결·독립 의미 검토·저장 상태/의미 경고 구분·후보 목록 복귀 확인. 후보의 의미 경고를 통과나 활성화로 바꾸지 않음 |
 
@@ -39,7 +39,7 @@
 | 미니맵의 대상 표시·명시적 집중 보기·Chat 활성/해제 | [미니맵](egdesk-ux-realization-proposals.md#ux-detail-minimap-targets), [입력 전환](egdesk-ux-realization-proposals.md#ux-detail-chat-canvas-input) | S2-PAN에서 내부 scroll과 Canvas pan 분리. 마지막 추가 gesture는 통제 검사로 별도 해석 |
 | Memo의 사전 연결 유지·공유 대화 작성기 즉시 노출 | [Memo](egdesk-ux-realization-proposals.md#ux-detail-canvas-annotation), [공통 작성기](egdesk-ux-realization-proposals.md#ux-detail-chat-entry) | Rio/업무A를 다시 선택하지 않고 초안 확인. 공유 대화는 일반 전송으로 실행 0, 최종 위임에만 dispatch 1의 모형 상태 확인 |
 | 동일 범위의 중복 승인 확인 제거 | [승인](egdesk-ux-realization-proposals.md#ux-detail-approval) | S5에서 선택한 1건만 최종 허용하고 접수 재조회·원 초안 복귀 |
-| 같은 Agenda 저장 범위의 빠른 저장·늦은 ACK 이후 변경 보존 | [Agenda](egdesk-ux-realization-proposals.md#ux-detail-agenda) | S6R에서 저장 1클릭 뒤 저장됨 확인. 늦은 ACK 경계는 기술 계약 보완이며 실행 시험 아님 |
+| 같은 Board 저장 범위의 빠른 저장·늦은 ACK 이후 변경 보존 | [Board](egdesk-ux-realization-proposals.md#ux-detail-agenda) | S6R에서 저장 1클릭 뒤 저장됨 확인. 늦은 ACK 경계는 기술 계약 보완이며 실행 시험 아님 |
 | 누락 파일 하나는 선택기로 바로 연결 | [반출입](egdesk-ux-realization-proposals.md#ux-detail-portable) | S7R에서 중간 자원 목록을 생략하고 이전/현재 파일 비교는 유지 |
 | Browser 인계 대기·복귀와 오래된 관찰 처리 | [입력 제어](egdesk-ux-realization-proposals.md#ux-detail-e24-computer-use-control) | S4의 사용자 역할과 별도 Browser Agent relay로 확인. 실제 Firefox 조작 증거 아님 |
 | 브리핑의 없음/요청/보기와 단계 의견 진입 구분 | [브리핑](egdesk-ux-realization-proposals.md#ux-detail-briefing-comment) | S3d/e에서 요청 1회→Agent 4단계 생성→단계 이동→의견 저장→미전송 초안 포함 |

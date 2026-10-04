@@ -172,9 +172,10 @@ resume_guard:
   never_replay_from_ui_memory: true
 ```
 
-## Canvas·Agenda 초대 후보 흐름
+<a id="canvasagenda-초대-후보-흐름"></a>
+## Canvas·Board 초대 후보 흐름
 
-1. owner가 device나 Desk 전체가 아니라 특정 Agenda와 projection을 선택한다.
+1. owner가 device나 Desk 전체가 아니라 특정 Board와 projection을 선택한다.
 2. System은 공유될 View·artifact·message·evidence와 남을 local-only 상태를 preview한다.
 3. participant별 `observe`, `comment`, `propose`, `edit`, `Agent delegation`, `control` 권한을
    각각 설정한다.
@@ -188,7 +189,7 @@ resume_guard:
 | 표면 | 공유 후보 | 자동 공유 금지 |
 |---|---|---|
 | Canvas | 선택 결과, redacted snapshot, 상태·receipt | 전체 desktop·숨은 창·local file tree |
-| Agenda | 목표·제약·선택 Context·기준 revision·미해결 질문 | 전체 Chat history·관련 없는 project context |
+| Board | 목표·제약·선택 Context·기준 revision·미해결 질문 | 전체 Chat history·관련 없는 project context |
 | View | 특정 문서 범위·tab semantic state·안전한 renderer | 전체 Browser profile·다른 tab·raw process |
 | supervision capability 후보 | participant·handoff·진행·evidence·receipt | private Agent Room·숨은 tool chatter |
 | Agent Room | 사용자가 선택해 옮긴 요약·결정 | 방 전체 자동 복제 |

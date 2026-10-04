@@ -15,6 +15,8 @@ episode를 찾는다.
 [Documentation Governance](../../codex/egdesk-product-documentation-governance.md)가 각각
 소유한다.
 
+원문을 직접 인용한 부분에 남은 `Agenda` 표기는 현재 제품 용어인 `Board`를 가리킨다.
+
 ## 사례집이 보존하는 것
 
 각 사례는 다음을 분리해 기록한다.
@@ -146,7 +148,7 @@ revision, Browser session, Run/Task, local-only state와 마지막 외부 receip
 전달·제외 대상, 남은 행동, 권한, idempotency key와 재확인 조건을 둔다.
 
 `PROPOSED`: Canvas 초대는 전체 device나 Desk를 암묵적으로 공유하지 않고, 선택된
-Agenda, View, Workroom, artifact와 evidence만 shared projection으로 만드는 후보
+Board, View, Workroom, artifact와 evidence만 shared projection으로 만드는 후보
 규칙이다. local-only 파일·credential·비공개 Chat·raw desktop·process 상태·입력 제어는
 각각 별도 동의·권한 후보로 남긴다. 원격 관찰과 원격 제어, collaborator 편집과 Agent
 실행 권한을 서로 다른 상태로 분리하는 것 역시 제품 정본 승격 전 제안이다.

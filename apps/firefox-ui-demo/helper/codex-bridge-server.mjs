@@ -1,12 +1,29 @@
 import { createServer } from 'node:http'
-import { spawn, spawnSync } from 'node:child_process'
-import { Codex } from '@openai/codex-sdk'
+import { spawn } from 'node:child_process'
+import { AppServerRpc } from './codex-app-server-rpc.mjs'
+import { normalizeNativeAuth, publicAuthIdentityKey } from './codex-auth-state.mjs'
+import { CodexChatRuntime } from './codex-chat-runtime.mjs'
+import { createChatHttpHandler, guardBridgeRequest, readJsonBody, sendJson, setBridgeCors } from './codex-bridge-http.mjs'
+import { BoundedSseClient } from './codex-bridge-sse.mjs'
+import { TerminalSessionRegistry, terminalResponseStatus } from './terminal-sessions.mjs'
+import { chatError, publicText } from './codex-chat-values.mjs'
 import { randomBytes } from 'node:crypto'
 import * as os from 'node:os'
+import path from 'node:path'
+import { ImmutableContextStore, appDataDirectory } from './egdesk-context-store.mjs'
+import { openChatStore } from './egdesk-chat-store.mjs'
+import { NativeReaderClient } from './egdesk-native-reader.mjs'
+import { ContextRuntime } from './egdesk-context-runtime.mjs'
+import { createContextHttpHandler } from './egdesk-context-http.mjs'
+import { buildCodexAppServerLaunch, inspectNativeCapabilities, resolveCodexExecutable, verifyCodexLaunchConfiguration, NATIVE_SCHEMA_VERSION } from './egdesk-native-capabilities.mjs'
+import { createEGDeskFileMount, requireEGDeskNodeRuntime } from './egdesk-file-mount.mjs'
+
+const nodeRuntime = requireEGDeskNodeRuntime()
 
 const BRIDGE_PORT = 39218
 const APP_SERVER_PORT = 39219
 const APP_SERVER_WS_URL = `ws://127.0.0.1:${APP_SERVER_PORT}`
+const appServerLaunch = buildCodexAppServerLaunch({ env: process.env, listen: APP_SERVER_WS_URL })
 const BRIDGE_PROTOCOL_VERSION = 1
 const PROVIDER_ID = 'codex'
 
@@ -17,18 +34,22 @@ let appServerSocket = null
 let appServerReady = false
 let reconnectTimer = null
 let loginPollTimer = null
-let nextRequestId = 1
-const pendingRequests = new Map()
-
-// ── Codex SDK (chat) ──
-let codexSdk = null
-const sdkThreads = new Map() // conversationId → Thread
+let rpc = null
+let nativeCapabilities = { executable: null, version: null, schemaVersion: NATIVE_SCHEMA_VERSION, schemaMatch: false, experimentalApi: true, dynamicTools: false, readerReadOnly: false }
+let launchConfigBlocked = false
+let nativePreflight = {
+  status: appServerLaunch.hasOverrides ? 'pending' : 'inherited',
+  configuredModel: appServerLaunch.configuredModel, configuredEffort: appServerLaunch.configuredEffort,
+  effectiveModel: null, effectiveEffort: null,
+}
 
 const authState = {
   isLoggedIn: false,
   authMode: null,
   accountId: null,
   accountEmail: null,
+  identityStatus: 'unknown',
+  identityBasis: null,
   lastRefresh: null,
   source: 'app-server',
   statusText: 'Login required',
@@ -43,18 +64,11 @@ const authState = {
   loginError: null,
 }
 
-function createMessageId(prefix) {
-  return `${prefix}-${Date.now().toString(36)}-${Math.random().toString(36).slice(2, 8)}`
-}
-
-function broadcast(event) {
+function broadcast(event, chatProtocol = 0) {
   const payload = `event: codex\ndata: ${JSON.stringify(event)}\n\n`
-  for (const res of clients) {
-    try {
-      res.write(payload)
-    } catch {
-      clients.delete(res)
-    }
+  for (const client of clients) {
+    if (chatProtocol && client.chatProtocol !== chatProtocol) continue
+    client.send(payload)
   }
 }
 
@@ -80,61 +94,52 @@ function emitAuthLifecycle(phase, details = {}) {
   })
 }
 
-function emitChatEvent(event, details = {}) {
-  broadcast({
-    type: 'chat.event',
-    v: BRIDGE_PROTOCOL_VERSION,
-    provider: PROVIDER_ID,
-    event,
-    details,
-    ts: Date.now(),
-  })
+const nativeRespond = (id, result, error) => {
+  if (!rpc) throw chatError('BRIDGE_OFFLINE', 'Codex app-server is offline', 503)
+  rpc.respond(id, result, error)
 }
-
-function boundedText(value, maxLength = 6000) {
-  if (typeof value !== 'string') return ''
-  const trimmed = value.trim()
-  return trimmed.length > maxLength ? `${trimmed.slice(0, maxLength)}\n[truncated]` : trimmed
+const dataDir = appDataDirectory()
+let chatStore = null
+let chatStoreError = null
+try {
+  chatStore = openChatStore({ dataDir: path.join(dataDir, 'chat'), ownerScope: 'local-desktop-v1' })
+} catch (error) {
+  chatStoreError = publicText(error?.message || 'Local chat storage failed to open', 1000)
+  console.error('[egdesk-codex-bridge] local chat storage unavailable:', chatStoreError)
 }
-
-function compactObject(value) {
-  if (!value || typeof value !== 'object') return {}
-  return Object.fromEntries(
-    Object.entries(value)
-      .filter(([, entryValue]) => entryValue !== undefined && entryValue !== null && entryValue !== '')
-  )
-}
-
-function buildAgentInput(body) {
-  const userMessage = boundedText(body.message, 20000)
-  const systemPrompt = boundedText(body.systemPrompt, 8000)
-  const agentProfile = compactObject(body.agentProfile)
-  const threadInfo = compactObject(body.thread)
-  const toolMode = boundedText(body.toolMode, 200)
-
-  if (!systemPrompt && Object.keys(agentProfile).length === 0 && Object.keys(threadInfo).length === 0 && !toolMode) {
-    return userMessage
+const localFiles = createEGDeskFileMount({ dataDir, port: BRIDGE_PORT })
+const contextStore = new ImmutableContextStore({
+  dataDir,
+  managedFileView: localFiles.managedFileView,
+  allowedRoots: process.env.EGDESK_CONTEXT_ROOTS ? process.env.EGDESK_CONTEXT_ROOTS.split(path.delimiter).filter(Boolean) : [process.cwd()],
+})
+const nativeReader = new NativeReaderClient({ request: (method, params) => appServerRequest(method, params), respond: nativeRespond, getOwnerKey: () => publicAuthIdentityKey(authState) })
+const contexts = new ContextRuntime({ store: contextStore, reader: nativeReader, getOwnerKey: () => publicAuthIdentityKey(authState), schemaReady: () => nativeCapabilities.schemaMatch && appServerReady })
+const chat = new CodexChatRuntime({
+  request: (method, params) => appServerRequest(method, params),
+  respond: nativeRespond,
+  contexts,
+  store: chatStore,
+  requireStore: true,
+  getOwnerKey: () => publicAuthIdentityKey(authState),
+  expectedProcessConfiguration: { model: appServerLaunch.configuredModel, effort: appServerLaunch.configuredEffort },
+  emit: event => broadcast(event, 2),
+  emitLegacy: event => broadcast(event, 1),
+})
+if (chatStore) {
+  try { chat.recoverInterruptedRuns() }
+  catch (error) {
+    chatStoreError = publicText(error?.message || 'Local chat recovery failed', 1000)
+    console.error('[egdesk-codex-bridge] local chat recovery unavailable:', chatStoreError)
   }
-
-  const runtimeContext = {
-    thread: threadInfo,
-    agentProfile,
-    toolMode,
-    systemPrompt,
-  }
-
-  return [
-    '<egdesk-runtime-context>',
-    'This block is application runtime context, not user-authored content.',
-    'Follow it as the EG-Desk chat system prompt. Do not quote this block unless the user explicitly asks for runtime configuration.',
-    JSON.stringify(runtimeContext, null, 2),
-    '</egdesk-runtime-context>',
-    '',
-    '<user-message>',
-    userMessage,
-    '</user-message>',
-  ].join('\n')
 }
+const ensureChatAuth = async () => {
+  chat.assertReady()
+  await refreshAccountState()
+  if (!authState.isLoggedIn) throw chatError('LOGIN_REQUIRED', 'Codex ChatGPT login is required', 401)
+}
+const handleChatHttp = createChatHttpHandler(chat, ensureChatAuth)
+const handleContextHttp = createContextHttpHandler(contexts, ensureChatAuth)
 
 function authSnapshot() {
   return {
@@ -180,20 +185,8 @@ function resetLoginState() {
 }
 
 function appServerRequest(method, params) {
-  return new Promise((resolve, reject) => {
-    if (!appServerSocket || appServerSocket.readyState !== WebSocket.OPEN || !appServerReady) {
-      reject(new Error('Codex app-server is not connected'))
-      return
-    }
-    const id = nextRequestId++
-    pendingRequests.set(id, { resolve, reject, method })
-    appServerSocket.send(JSON.stringify({
-      jsonrpc: '2.0',
-      id,
-      method,
-      params,
-    }))
-  })
+  if (!appServerReady || !rpc) return Promise.reject(chatError('BRIDGE_OFFLINE', 'Codex app-server is offline', 503))
+  return rpc.request(method, params)
 }
 
 async function refreshAccountState({ refreshToken = false } = {}) {
@@ -202,17 +195,12 @@ async function refreshAccountState({ refreshToken = false } = {}) {
     appServerRequest('account/read', { refreshToken: false }),
   ])
 
-  const account = accountResult?.account ?? null
-  const isLoggedIn = authResult?.authMethod === 'chatgpt' || account?.type === 'chatgpt'
+  const normalized = normalizeNativeAuth(authResult, accountResult)
+  if (authState.isLoggedIn && (!normalized.isLoggedIn || publicAuthIdentityKey(authState) !== publicAuthIdentityKey(normalized))) chat.reset()
   const nextSnapshot = {
     ...authState,
-    isLoggedIn,
-    loginInProgress: isLoggedIn ? false : authState.loginInProgress,
-    authMode: authResult?.authMethod ?? null,
-    accountId: account?.type === 'chatgpt' ? 'chatgpt' : null,
-    accountEmail: account?.type === 'chatgpt' ? account.email ?? null : null,
-    source: 'app-server',
-    requiresOpenaiAuth: authResult?.requiresOpenaiAuth ?? true,
+    ...normalized,
+    loginInProgress: normalized.isLoggedIn ? false : authState.loginInProgress,
   }
 
   updateAuthState({
@@ -231,7 +219,7 @@ function handleAppServerNotification(message) {
           authMode: message.params?.authMode ?? null,
         }),
       })
-      void refreshAccountState()
+      void refreshAccountState().catch(() => {})
       return
     case 'account/login/completed': {
       if (loginPollTimer) {
@@ -239,7 +227,7 @@ function handleAppServerNotification(message) {
         loginPollTimer = null
       }
       const success = message.params?.success === true
-      const error = typeof message.params?.error === 'string' ? message.params.error : null
+      const error = typeof message.params?.error === 'string' ? publicText(message.params.error, 2000) : null
       const nextSnapshot = {
         ...authState,
         loginInProgress: false,
@@ -250,7 +238,7 @@ function handleAppServerNotification(message) {
         statusText: success ? authStatusTextFor(nextSnapshot) : (error || 'Login did not complete'),
       }, { broadcastStatus: false })
       if (success) {
-        void refreshAccountState({ refreshToken: true })
+        void refreshAccountState({ refreshToken: true }).catch(() => {})
       } else {
         updateAuthState({
           statusText: error || 'Login did not complete',
@@ -302,40 +290,8 @@ function startLoginPolling() {
   }, 1000)
 }
 
-function handleAppServerMessage(raw) {
-  let message
-  try {
-    message = JSON.parse(raw)
-  } catch {
-    return
-  }
-
-  if (Object.prototype.hasOwnProperty.call(message, 'id')) {
-    const pending = pendingRequests.get(message.id)
-    if (!pending) return
-    pendingRequests.delete(message.id)
-    if (message.error) {
-      pending.reject(new Error(message.error?.message || `${pending.method} failed`))
-    } else {
-      pending.resolve(message.result)
-    }
-    return
-  }
-
-  if (message.method) {
-    handleAppServerNotification(message)
-  }
-}
-
-function rejectPendingRequests(error) {
-  for (const pending of pendingRequests.values()) {
-    pending.reject(error)
-  }
-  pendingRequests.clear()
-}
-
 function scheduleAppServerReconnect() {
-  if (reconnectTimer) return
+  if (reconnectTimer || launchConfigBlocked) return
   reconnectTimer = setTimeout(() => {
     reconnectTimer = null
     connectToAppServer()
@@ -343,86 +299,95 @@ function scheduleAppServerReconnect() {
 }
 
 function spawnAppServer() {
-  if (appServerProcess && appServerProcess.exitCode == null) return
-  appServerProcess = spawn('codex', ['app-server', '--listen', APP_SERVER_WS_URL], {
+  if (appServerProcess && appServerProcess.exitCode == null && !appServerProcess.killed) return
+  const executable = resolveCodexExecutable()
+  nativeCapabilities = inspectNativeCapabilities({ executable })
+  const child = spawn(executable, appServerLaunch.args, {
     cwd: process.cwd(),
     env: process.env,
+    shell: false,
     stdio: ['ignore', 'pipe', 'pipe'],
   })
-
-  appServerProcess.stdout.on('data', (chunk) => {
-    const text = chunk.toString().trim()
-    if (text) console.log(text)
-  })
-  appServerProcess.stderr.on('data', (chunk) => {
-    const text = chunk.toString().trim()
-    if (text) console.error(text)
-  })
-  appServerProcess.on('error', (error) => {
-    // PATH에 codex CLI가 없으면(launchd/non-login shell 등) spawn ENOENT가
-    // 'error' 이벤트로 온다 — 핸들러가 없으면 브리지 프로세스 전체가 크래시.
+  appServerProcess = child
+  child.stdout.on('data', chunk => { const text = publicText(chunk.toString(), 4000).trim(); if (text) console.log(text) })
+  child.stderr.on('data', chunk => { const text = publicText(chunk.toString(), 4000).trim(); if (text) console.error(text) })
+  const lost = () => {
+    if (appServerProcess !== child) return
+    appServerProcess = null
     appServerReady = false
-    updateAuthState({
-      statusText: `codex CLI spawn failed (${error?.code || error?.message || 'unknown'}) — check PATH`,
-      loginInProgress: false,
-    })
+    rpc?.close(new Error('Local Codex app-server exited'))
+    chat.setConnection(false, { processLost: true })
+    try { appServerSocket?.close() } catch {}
+    updateAuthState({ statusText: 'Codex app-server offline', loginInProgress: false })
     scheduleAppServerReconnect()
-  })
-  appServerProcess.on('close', () => {
-    appServerReady = false
-    appServerSocket = null
-    rejectPendingRequests(new Error('Codex app-server closed'))
-    updateAuthState({
-      statusText: 'Codex app-server disconnected',
-      loginInProgress: false,
-    })
-    scheduleAppServerReconnect()
-  })
+  }
+  child.on('error', lost)
+  child.on('close', lost)
 }
 
 async function connectToAppServer() {
-  spawnAppServer()
-  const socket = new WebSocket(APP_SERVER_WS_URL)
+  if (appServerSocket && [WebSocket.OPEN, WebSocket.CONNECTING].includes(appServerSocket.readyState)) return
+  try { spawnAppServer() } catch (error) {
+    updateAuthState({ statusText: publicText(error.message, 1000) })
+    scheduleAppServerReconnect()
+    return
+  }
+  let socket
+  try { socket = new WebSocket(APP_SERVER_WS_URL) } catch {
+    scheduleAppServerReconnect()
+    return
+  }
   appServerSocket = socket
-
+  const connection = new AppServerRpc({
+    send: payload => socket.send(payload),
+    experimentalApi: true,
+    onNotification: message => {
+      handleAppServerNotification(message)
+      if (!nativeReader.handleNotification(message)) void chat.handleNotification(message)
+    },
+    onRequest: message => { if (!nativeReader.handleServerRequest(message)) void chat.handleServerRequest(message) },
+  })
+  rpc = connection
   socket.onopen = async () => {
     try {
-      await new Promise((resolve, reject) => {
-        const id = nextRequestId++
-        pendingRequests.set(id, { resolve, reject, method: 'initialize' })
-        socket.send(JSON.stringify({
-          jsonrpc: '2.0',
-          id,
-          method: 'initialize',
-          params: {
-            clientInfo: { name: 'egdesk-firefox-bridge', version: '0.1.0' },
-            capabilities: null,
-          },
-        }))
-      })
+      await connection.initialize()
+      if (appServerSocket !== socket) return
+      if (appServerLaunch.hasOverrides) {
+        try {
+          const config = await connection.request('config/read', { includeLayers: false, cwd: process.cwd() })
+          if (appServerSocket !== socket) return
+          nativePreflight = verifyCodexLaunchConfiguration(appServerLaunch, config)
+        } catch (error) {
+          launchConfigBlocked = true
+          nativePreflight = { ...nativePreflight, status: 'blocked', effectiveModel: null, effectiveEffort: null, errorCode: error.code || 'CODEX_LAUNCH_CONFIG_UNVERIFIED' }
+          throw error
+        }
+      }
       appServerReady = true
+      chat.setConnection(true)
       await refreshAccountState()
     } catch (error) {
-      console.error('[egdesk-codex-bridge] app-server init failed', error)
+      console.error('[egdesk-codex-bridge] initialization failed:', publicText(error.message, 1000))
       socket.close()
     }
   }
-
-  socket.onmessage = (event) => {
-    handleAppServerMessage(event.data.toString())
+  socket.onmessage = event => {
+    if (appServerSocket === socket) connection.receive(event.data.toString())
   }
-
   socket.onerror = () => {
+    if (appServerSocket !== socket) return
     appServerReady = false
+    chat.setConnection(false)
   }
-
   socket.onclose = () => {
-    if (appServerSocket === socket) {
-      appServerSocket = null
-      appServerReady = false
-      rejectPendingRequests(new Error('Codex app-server websocket closed'))
-      scheduleAppServerReconnect()
-    }
+    connection.close()
+    if (appServerSocket !== socket) return
+    appServerSocket = null
+    appServerReady = false
+    if (!launchConfigBlocked && appServerLaunch.hasOverrides) nativePreflight = { ...nativePreflight, status: 'pending', effectiveModel: null, effectiveEffort: null }
+    if (rpc === connection) rpc = null
+    chat.setConnection(false)
+    scheduleAppServerReconnect()
   }
 }
 
@@ -449,263 +414,8 @@ async function startChatgptLogin() {
   return result
 }
 
-// macOS XProtect가 SDK 번들 codex(0.130.0)를 악성코드로 오탐 → 격리 →
-// 'Codex Exec exited with signal SIGKILL' (2026-07-05 실사용 발생).
-// auth(app-server)와 같은 PATH의 codex CLI를 채팅 실행에도 사용한다 —
-// XProtect 통과 검증된 바이너리 + auth/chat 버전 스큐(0.130 vs 0.142)도 해소.
-function resolveCodexBinary() {
-  if (process.env.EGDESK_CODEX_BIN) return process.env.EGDESK_CODEX_BIN
-  try {
-    const result = spawnSync('/usr/bin/which', ['codex'], { env: process.env, encoding: 'utf8' })
-    const found = (result.stdout || '').trim()
-    if (found) return found
-  } catch {}
-  return null // fallback: SDK 번들 바이너리
-}
-
-function ensureCodexSdk() {
-  if (!codexSdk) {
-    const codexPathOverride = resolveCodexBinary()
-    if (codexPathOverride) console.log(`[chat] codex binary: ${codexPathOverride}`)
-    else console.warn('[chat] PATH에 codex 없음 — SDK 번들 바이너리 사용 (XProtect 격리 위험)')
-    codexSdk = new Codex({
-      ...(codexPathOverride ? { codexPathOverride } : {}),
-      // 유저 config.toml의 실험 기능(chronicle 등) 경고문을 SDK가 치명 에러로
-      // 오해해 채팅이 전부 assistant-error가 됨 — 브리지 스코프에서만 억제
-      // (유저 전역 ~/.codex/config.toml은 건드리지 않는다)
-      config: { suppress_unstable_features_warning: true },
-    })
-  }
-  return codexSdk
-}
-
-async function handleChatSend(body) {
-  await refreshAccountState()
-  const fallbackConversationId = body.conversationId ?? createMessageId('conversation')
-
-  if (!authState.isLoggedIn) {
-    const messageId = createMessageId('assistant')
-    broadcast({
-      type: 'assistant-start',
-      conversationId: fallbackConversationId,
-      message: {
-        id: messageId,
-        role: 'assistant',
-        content: '',
-        status: 'streaming',
-        createdAt: Date.now()
-      }
-    })
-    // emitChatEvent('assistant_start', {
-    // conversationId: fallbackConversationId,
-    // messageId,
-    // role: 'assistant',
-    // status: 'streaming',
-    // })
-    broadcast({
-      type: 'assistant-error',
-      conversationId: fallbackConversationId,
-      messageId,
-      error: 'Codex login is required before sending messages.'
-    })
-    // emitChatEvent('assistant_error', {
-    // conversationId: fallbackConversationId,
-    // messageId,
-    // error: 'Codex login is required before sending messages.',
-    // })
-    return {
-      accepted: false,
-      conversationId: fallbackConversationId,
-      error: 'Codex login is required before sending messages.'
-    }
-  }
-
-  const codex = ensureCodexSdk()
-  const messageId = createMessageId('assistant')
-  let conversationId = body.conversationId ?? ''
-  let started = false
-  let sawAgentMessage = false
-
-  const ensureStarted = (cid) => {
-    if (started) return
-    started = true
-    broadcast({
-      type: 'assistant-start',
-      conversationId: cid,
-      message: {
-        id: messageId,
-        role: 'assistant',
-        content: '',
-        status: 'streaming',
-        createdAt: Date.now()
-      }
-    })
-    // emitChatEvent('assistant_start', {
-    // conversationId: cid,
-    // messageId,
-    // role: 'assistant',
-    // status: 'streaming',
-    // })
-  }
-
-  try {
-    // 기존 스레드 재개 또는 새 스레드 생성
-    let thread = conversationId ? sdkThreads.get(conversationId) : null
-    if (!thread && conversationId) {
-      thread = codex.resumeThread(conversationId)
-      sdkThreads.set(conversationId, thread)
-    }
-    if (!thread) {
-      thread = codex.startThread({ skipGitRepoCheck: true })
-    }
-
-    if (conversationId) ensureStarted(conversationId)
-
-    // SDK 스트리밍으로 응답 수신
-    const { events } = await thread.runStreamed(buildAgentInput(body))
-    let fullResponse = ''
-
-    for await (const event of events) {
-      // 스레드 ID 확보
-      if (thread.id && !conversationId) {
-        conversationId = thread.id
-        sdkThreads.set(conversationId, thread)
-        ensureStarted(conversationId)
-      }
-
-      const cid = conversationId || fallbackConversationId
-
-      switch (event.type) {
-        case 'item.completed': {
-          const item = event.item
-          if (item && item.type === 'agent_message' && typeof item.text === 'string') {
-            ensureStarted(cid)
-            sawAgentMessage = true
-            fullResponse += item.text
-            broadcast({
-              type: 'assistant-delta',
-              conversationId: cid,
-              messageId,
-              delta: item.text
-            })
-            // emitChatEvent('assistant_delta', {
-            // conversationId: cid,
-            // messageId,
-            // delta: item.text,
-            // })
-            broadcast({
-              type: 'assistant-complete',
-              conversationId: cid,
-              messageId
-            })
-            // emitChatEvent('assistant_complete', {
-            // conversationId: cid,
-            // messageId,
-            // })
-          }
-          if (item && item.type === 'error' && typeof item.message === 'string' && !item.message.includes('[features].collab')) {
-            ensureStarted(cid)
-            broadcast({
-              type: 'assistant-error',
-              conversationId: cid,
-              messageId,
-              error: item.message
-            })
-            // emitChatEvent('assistant_error', {
-            // conversationId: cid,
-            // messageId,
-            // error: item.message,
-            // })
-          }
-          break
-        }
-        case 'turn.completed': {
-          // 턴 완료 - usage 정보 포함
-          if (event.usage) {
-            // emitChatEvent('turn_completed', {
-            // conversationId: cid,
-            // messageId,
-            // usage: event.usage,
-            // })
-          }
-          break
-        }
-      }
-    }
-
-    const finalConversationId = conversationId || fallbackConversationId
-    if (!sawAgentMessage) {
-      ensureStarted(finalConversationId)
-      broadcast({
-        type: 'assistant-error',
-        conversationId: finalConversationId,
-        messageId,
-        error: 'Codex did not return a chat response.'
-      })
-      // emitChatEvent('assistant_error', {
-      // conversationId: finalConversationId,
-      // messageId,
-      // error: 'Codex did not return a chat response.',
-      // })
-    }
-
-    return {
-      accepted: sawAgentMessage,
-      conversationId: finalConversationId,
-      error: sawAgentMessage ? undefined : 'Codex did not return a chat response.'
-    }
-  } catch (error) {
-    const cid = conversationId || fallbackConversationId
-    ensureStarted(cid)
-    broadcast({
-      type: 'assistant-error',
-      conversationId: cid,
-      messageId,
-      error: `Codex SDK error: ${error.message}`
-    })
-    // emitChatEvent('assistant_error', {
-    // conversationId: cid,
-    // messageId,
-    // error: `Codex SDK error: ${error.message}`,
-    // })
-    return {
-      accepted: false,
-      conversationId: cid,
-      error: error.message
-    }
-  }
-}
-
-function readJsonBody(req) {
-  return new Promise((resolve, reject) => {
-    let raw = ''
-    req.on('data', (chunk) => {
-      raw += chunk.toString()
-    })
-    req.on('end', () => {
-      try {
-        resolve(raw ? JSON.parse(raw) : {})
-      } catch (error) {
-        reject(error)
-      }
-    })
-    req.on('error', reject)
-  })
-}
-
-function sendJson(res, statusCode, data) {
-  const body = JSON.stringify(data)
-  res.writeHead(statusCode, {
-    'Content-Type': 'application/json; charset=utf-8',
-    'Content-Length': Buffer.byteLength(body),
-    'Access-Control-Allow-Origin': '*'
-  })
-  res.end(body)
-}
-
-
 // ── Terminal PTY support ──
-const terminalSessions = new Map()
+const terminalRegistry = new TerminalSessionRegistry()
 
 // npm 설치 과정에서 node-pty spawn-helper의 실행 비트가 소실되는 경우가 있어
 // (posix_spawnp failed → 조용히 child_process fallback 강등) 기동 시 복구한다.
@@ -772,72 +482,30 @@ async function createTerminalSession(cols = 80, rows = 24, shell = null) {
     })
   }
 
-  const outputBuffer = []
-  let exited = false
-  let exitCode = null
-
-  if (usePty) {
-    ptyProcess.onData((data) => { outputBuffer.push(data) })
-    ptyProcess.onExit(({ exitCode: code }) => { exited = true; exitCode = code })
-  } else {
-    ptyProcess.stdout.on('data', (data) => { outputBuffer.push(data.toString()) })
-    ptyProcess.stderr.on('data', (data) => { outputBuffer.push(data.toString()) })
-    ptyProcess.on('exit', (code) => { exited = true; exitCode = code })
-    ptyProcess.on('error', (err) => { outputBuffer.push(`\r\nError: ${err.message}\r\n`); exited = true })
-  }
-
-  const session = {
+  return terminalRegistry.register({
     id: sessionId,
     process: ptyProcess,
     usePty,
-    outputBuffer,
-    exited: () => exited,
-    exitCode: () => exitCode,
     shell: defaultShell,
     cols,
     rows,
-    createdAt: Date.now(),
-  }
-  terminalSessions.set(sessionId, session)
-  return session
+  })
 }
 
 function writeToTerminal(sessionId, data) {
-  const session = terminalSessions.get(sessionId)
-  if (!session) return { error: 'Session not found' }
-  if (session.exited()) return { error: 'Session has exited' }
-  const proc = session.process
-  if (session.usePty) { proc.write(data) }
-  else if (proc.stdin) { proc.stdin.write(data) }
-  return { ok: true }
+  return terminalRegistry.write(sessionId, data)
 }
 
 function readFromTerminal(sessionId) {
-  const session = terminalSessions.get(sessionId)
-  if (!session) return { error: 'Session not found', data: '', exited: true }
-  const data = session.outputBuffer.splice(0).join('')
-  return { data, exited: session.exited(), exitCode: session.exitCode() }
+  return terminalRegistry.read(sessionId)
 }
 
 function resizeTerminal(sessionId, cols, rows) {
-  const session = terminalSessions.get(sessionId)
-  if (!session) return { error: 'Session not found' }
-  if (session.exited()) return { error: 'Session has exited' }
-  session.cols = cols
-  session.rows = rows
-  if (session.usePty && session.process.resize) { session.process.resize(cols, rows) }
-  return { ok: true }
+  return terminalRegistry.resize(sessionId, cols, rows)
 }
 
 function killTerminal(sessionId) {
-  const session = terminalSessions.get(sessionId)
-  if (!session) return { error: 'Session not found' }
-  try {
-    if (session.process.kill) session.process.kill()
-    else if (session.process.destroy) session.process.destroy()
-  } catch (e) { /* ignore */ }
-  terminalSessions.delete(sessionId)
-  return { ok: true }
+  return terminalRegistry.kill(sessionId)
 }
 
 const bridgeServer = createServer(async (req, res) => {
@@ -846,9 +514,20 @@ const bridgeServer = createServer(async (req, res) => {
     return
   }
 
+  if (!guardBridgeRequest(req, BRIDGE_PORT)) {
+    sendJson(res, 403, { error: 'Loopback origin required' })
+    return
+  }
+  setBridgeCors(req, res)
+  let url
+  try { url = new URL(req.url, `http://127.0.0.1:${BRIDGE_PORT}`) } catch {
+    sendJson(res, 400, { error: 'Invalid request URL' })
+    return
+  }
+  const route = url.pathname
+
   if (req.method === 'OPTIONS') {
     res.writeHead(204, {
-      'Access-Control-Allow-Origin': '*',
       'Access-Control-Allow-Headers': 'Content-Type',
       'Access-Control-Allow-Methods': 'GET,POST,OPTIONS'
     })
@@ -856,25 +535,31 @@ const bridgeServer = createServer(async (req, res) => {
     return
   }
 
-  if (req.method === 'GET' && req.url === '/events') {
+  // File routes have their own bounded 18 MiB draft reader and local owner.
+  // Dispatch before any generic body reader or Codex/account authentication.
+  if (await localFiles.handle(req, res, url)) return
+
+  if (req.method === 'GET' && route === '/events') {
     res.writeHead(200, {
       'Content-Type': 'text/event-stream',
       'Cache-Control': 'no-cache',
       Connection: 'keep-alive',
-      'Access-Control-Allow-Origin': '*'
     })
-    res.write('event: ready\ndata: {"ok":true}\n\n')
-    clients.add(res)
-    req.on('close', () => clients.delete(res))
+    const client = new BoundedSseClient(res, {
+      chatProtocol: url.searchParams.get('chatProtocol') === '2' ? 2 : 1,
+      onClose: () => clients.delete(client),
+    })
+    clients.add(client)
+    client.send(`retry: 1000\nevent: ready\ndata: ${JSON.stringify({ ok: true, streamId: chat.streamId, seq: chat.seq, resyncRequired: true })}\n\n`)
     return
   }
 
-  if (req.method === 'GET' && req.url === '/health') {
-    sendJson(res, 200, { ok: true, port: BRIDGE_PORT, appServerReady })
+  if (req.method === 'GET' && route === '/health') {
+    sendJson(res, 200, { ok: true, port: BRIDGE_PORT, appServerReady, chatStorageReady: Boolean(chatStore && chat.storeHealthy), chatStorageError: chatStoreError, native: nativeCapabilities, engineConfiguration: nativePreflight, node: nodeRuntime })
     return
   }
 
-  if (req.method === 'GET' && req.url === '/v1/state') {
+  if (req.method === 'GET' && route === '/v1/state') {
     try {
       await refreshAccountState()
     } catch {}
@@ -882,16 +567,23 @@ const bridgeServer = createServer(async (req, res) => {
       protocolVersion: BRIDGE_PROTOCOL_VERSION,
       provider: PROVIDER_ID,
       appServerReady,
+      chatStorageReady: Boolean(chatStore && chat.storeHealthy),
+      native: nativeCapabilities,
+      engineConfiguration: nativePreflight,
+      node: nodeRuntime,
       auth: authSnapshot(),
+      chat: chat.snapshot(),
       capabilities: {
         auth: ['status', 'start', 'cancel', 'signout'],
-        chat: ['send', 'stream'],
+        chat: chatStore && chat.storeHealthy ? ['send', 'stream', 'resume', 'interrupt', 'approvals', 'typed-activity', 'artifact-refs', 'local-history', 'legacy-import'] : ['local-history-unavailable'],
+        context: nativeCapabilities.schemaMatch ? ['capture', 'immutable-inspect', 'native-dynamic-tools', 'smart-read', 'read-only-reader', 'answer-briefing'] : ['capture', 'immutable-inspect'],
+        files: ['native-picker', 'scoped-read', 'managed-drafts', 'create-only-save-as'],
       },
     })
     return
   }
 
-  if (req.method === 'GET' && req.url === '/auth/status') {
+  if (req.method === 'GET' && route === '/auth/status') {
     try {
       await refreshAccountState()
     } catch {}
@@ -899,7 +591,7 @@ const bridgeServer = createServer(async (req, res) => {
     return
   }
 
-  if (req.method === 'POST' && req.url === '/auth/start') {
+  if (req.method === 'POST' && route === '/auth/start') {
     try {
       await refreshAccountState()
       if (authState.isLoggedIn) {
@@ -926,16 +618,16 @@ const bridgeServer = createServer(async (req, res) => {
         authUrl: result.authUrl,
       })
     } catch (error) {
-      emitAuthLifecycle('failed', { error: error instanceof Error ? error.message : String(error) })
+      emitAuthLifecycle('failed', { error: publicText(error instanceof Error ? error.message : String(error), 2000) })
       sendJson(res, 500, {
         started: false,
-        message: error instanceof Error ? error.message : String(error),
+        message: publicText(error instanceof Error ? error.message : String(error), 2000),
       })
     }
     return
   }
 
-  if (req.method === 'POST' && req.url === '/auth/cancel') {
+  if (req.method === 'POST' && route === '/auth/cancel') {
     try {
       if (!authState.authSessionId) {
         sendJson(res, 200, { status: 'notFound' })
@@ -946,82 +638,76 @@ const bridgeServer = createServer(async (req, res) => {
       updateAuthState({ statusText: 'Login cancelled' })
       sendJson(res, 200, result)
     } catch (error) {
-      sendJson(res, 500, { error: error instanceof Error ? error.message : String(error) })
+      sendJson(res, 500, { error: publicText(error instanceof Error ? error.message : String(error), 2000) })
     }
     return
   }
 
-  if (req.method === 'POST' && req.url === '/auth/signout') {
+  if (req.method === 'POST' && route === '/auth/signout') {
     try {
       await appServerRequest('account/logout', undefined)
+      chat.reset()
       resetLoginState()
       await refreshAccountState()
       sendJson(res, 200, authSnapshot())
     } catch (error) {
-      sendJson(res, 500, { error: error instanceof Error ? error.message : String(error) })
+      sendJson(res, 500, { error: publicText(error instanceof Error ? error.message : String(error), 2000) })
     }
     return
   }
 
-  if (req.method === 'POST' && req.url === '/chat/send') {
-    try {
-      const body = await readJsonBody(req)
-      const result = await handleChatSend(body)
-      sendJson(res, result.accepted ? 202 : 400, result)
-    } catch (error) {
-      sendJson(res, 500, { accepted: false, conversationId: '', error: error instanceof Error ? error.message : String(error) })
-    }
-    return
-  }
+  if (await handleContextHttp(req, res, url)) return
+  if (await handleChatHttp(req, res, url)) return
 
   // ── Terminal endpoints ──
-  if (req.method === 'POST' && req.url === '/terminal/spawn') {
+  if (req.method === 'POST' && route === '/terminal/spawn') {
     try {
       const body = await readJsonBody(req)
       const session = await createTerminalSession(body.cols, body.rows, body.shell)
-      sendJson(res, 200, { sessionId: session.id, shell: session.shell, cols: session.cols, rows: session.rows })
+      const result = terminalRegistry.snapshot(session.id)
+      sendJson(res, terminalResponseStatus(result), { ...result, shell: session.shell, cols: session.cols, rows: session.rows })
     } catch (error) {
-      sendJson(res, 500, { error: error instanceof Error ? error.message : String(error) })
+      sendJson(res, 500, { error: publicText(error instanceof Error ? error.message : String(error), 2000) })
     }
     return
   }
-  if (req.method === 'POST' && req.url === '/terminal/write') {
+  if (req.method === 'POST' && route === '/terminal/write') {
     try {
       const body = await readJsonBody(req)
       const result = writeToTerminal(body.sessionId, body.data)
-      sendJson(res, result.error ? 400 : 200, result)
+      sendJson(res, terminalResponseStatus(result), result)
     } catch (error) {
-      sendJson(res, 500, { error: error instanceof Error ? error.message : String(error) })
+      sendJson(res, 500, { error: publicText(error instanceof Error ? error.message : String(error), 2000) })
     }
     return
   }
-  if (req.method === 'POST' && req.url === '/terminal/read') {
+  if (req.method === 'POST' && route === '/terminal/read') {
     try {
       const body = await readJsonBody(req)
       const result = readFromTerminal(body.sessionId)
-      sendJson(res, result.error ? 400 : 200, result)
+      sendJson(res, terminalResponseStatus(result), result)
     } catch (error) {
-      sendJson(res, 500, { error: error instanceof Error ? error.message : String(error) })
+      sendJson(res, 500, { error: publicText(error instanceof Error ? error.message : String(error), 2000) })
     }
     return
   }
-  if (req.method === 'POST' && req.url === '/terminal/resize') {
+  if (req.method === 'POST' && route === '/terminal/resize') {
     try {
       const body = await readJsonBody(req)
       const result = resizeTerminal(body.sessionId, body.cols, body.rows)
-      sendJson(res, result.error ? 400 : 200, result)
+      sendJson(res, terminalResponseStatus(result), result)
     } catch (error) {
-      sendJson(res, 500, { error: error instanceof Error ? error.message : String(error) })
+      sendJson(res, 500, { error: publicText(error instanceof Error ? error.message : String(error), 2000) })
     }
     return
   }
-  if (req.method === 'POST' && req.url === '/terminal/kill') {
+  if (req.method === 'POST' && route === '/terminal/kill') {
     try {
       const body = await readJsonBody(req)
       const result = killTerminal(body.sessionId)
-      sendJson(res, 200, result)
+      sendJson(res, terminalResponseStatus(result), result)
     } catch (error) {
-      sendJson(res, 500, { error: error instanceof Error ? error.message : String(error) })
+      sendJson(res, 500, { error: publicText(error instanceof Error ? error.message : String(error), 2000) })
     }
     return
   }
@@ -1040,6 +726,7 @@ bridgeServer.on('error', (error) => {
 
 bridgeServer.listen(BRIDGE_PORT, '127.0.0.1', () => {
   console.log(`[egdesk-codex-bridge] listening on http://127.0.0.1:${BRIDGE_PORT}`)
+  console.log(`[egdesk-codex-bridge] Node.js ${nodeRuntime.version}; requires ${nodeRuntime.minimumVersion}+, integration baseline ${nodeRuntime.integrationBaseline}; node:sqlite available`)
   broadcast({
     type: 'bridge.ready',
     v: BRIDGE_PROTOCOL_VERSION,
@@ -1049,14 +736,22 @@ bridgeServer.listen(BRIDGE_PORT, '127.0.0.1', () => {
   void connectToAppServer()
 })
 
-process.on('SIGINT', () => process.exit(0))
-process.on('SIGTERM', () => process.exit(0))
+let shuttingDown = false
+async function shutdown() {
+  if (shuttingDown) return
+  shuttingDown = true
+  bridgeServer.close()
+  try { await localFiles.close() }
+  catch { console.error('[egdesk-codex-bridge] managed file store did not close cleanly') }
+  try { chatStore?.close() }
+  catch { console.error('[egdesk-codex-bridge] local chat store did not close cleanly') }
+  process.exit(0)
+}
+process.on('SIGINT', shutdown)
+process.on('SIGTERM', shutdown)
 process.on('exit', () => {
+  rpc?.close()
   try { appServerSocket?.close(); } catch {}
   try { appServerProcess?.kill(); } catch {}
-  // Cleanup terminal sessions
-  for (const [id, session] of terminalSessions) {
-    try { if (session.process.kill) session.process.kill() } catch {}
-  }
-  terminalSessions.clear()
+  terminalRegistry.requestStopAll()
 })

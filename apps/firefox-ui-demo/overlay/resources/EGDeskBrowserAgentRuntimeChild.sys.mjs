@@ -1,3 +1,5 @@
+import { captureDocumentText } from './EGDeskInputContext.sys.mjs';
+
 export class EGDeskBrowserAgentRuntimeChild extends JSWindowActorChild {
   constructor() {
     super();
@@ -6,9 +8,10 @@ export class EGDeskBrowserAgentRuntimeChild extends JSWindowActorChild {
     this.refSeq = 0;
   }
 
-  receiveMessage(message) {
+  async receiveMessage(message) {
     const data = message.data || {};
     if (message.name === "snapshot") return this.snapshot(data.options || {});
+    if (message.name === "captureInput") return captureDocumentText(this.document, data.options || {});
     if (message.name === "act") return this.act(data.action || {}, data.options || {});
     throw new Error(`Unsupported browser agent actor message: ${message.name}`);
   }

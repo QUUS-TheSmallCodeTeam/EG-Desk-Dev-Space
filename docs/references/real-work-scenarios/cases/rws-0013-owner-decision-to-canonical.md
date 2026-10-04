@@ -27,8 +27,8 @@
 ### Claims
 
 - [OBSERVED] `RWS-0013-C01`: 모호한 `Current Desk` 표현이 다중 Desk를 확정한 것처럼 읽혔다.
-- [VERIFIED-AS-OF] `RWS-0013-C02`: 하나의 Desk·Canvas와 복수 Saved Agenda의 경계가 owner 결정으로 분리됐다.
-- [VERIFIED-AS-OF] `RWS-0013-C03`: Agenda 종료·Chat·Memo 등은 확정 경계와 남은 OPEN 질문으로 나뉘었다.
+- [VERIFIED-AS-OF] `RWS-0013-C02`: 하나의 Desk·Canvas와 복수 Saved Board의 경계가 owner 결정으로 분리됐다.
+- [VERIFIED-AS-OF] `RWS-0013-C03`: Board 종료·Chat·Memo 등은 확정 경계와 남은 OPEN 질문으로 나뉘었다.
 - [OBSERVED] `RWS-0013-C04`: workroom과 정확한 UI 등 assistant·PM 제안은 owner decision으로 승격되지 않았다.
 - [VERIFIED-AS-OF] `RWS-0013-C05`: 정본 대조가 완전 반영·부분 반영·미반영·OPEN을 구분했다.
 - [UNKNOWN] `RWS-0013-C06`: 문서에 반영된 제품 동작의 runtime 구현은 증명되지 않았다.

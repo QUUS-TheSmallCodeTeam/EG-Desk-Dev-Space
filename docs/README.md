@@ -10,7 +10,7 @@
 
 | 읽을 목적 | 문서 | 담긴 내용 |
 |---|---|---|
-| 사용 흐름과 설계안을 검토 | [사용 흐름·UI 추천안](references/design-synthesis/egdesk-ux-realization-proposals.md#ux-proposals-top) | 9개 구체 흐름과 추천·대안. 아직 미승인 제안 |
+| 사용 흐름과 설계안을 검토 | [사용 흐름·UI 추천안](references/design-synthesis/egdesk-ux-realization-proposals.md#ux-proposals-top) | 9개 구체 흐름과 추천·대안. 남은 정책 제안은 미승인 |
 | 사용자처럼 한 동작씩 진행한 기록 확인 | [사용자 행동 리허설](references/design-synthesis/egdesk-user-action-rehearsal-log.md#results) | 8개 여정·9개 회차의 기록. 목표 도달·사용감·미도달·모형 공백을 구분 |
 | 선택지의 차이를 비교 | [정책 추천안 7묶음](references/design-synthesis/egdesk-ux-realization-proposals.md#ux-policy-options) | 같은 UI 추천안 문서의 비교 절 |
 | 결정된 것과 남은 선택 확인 | [사용자 확인 원장](codex/egdesk-product-interaction-trace-atlas-editorial-ledger.md#gap-owner-queue) | 질문·결정·현재 상태를 관리하는 한 곳 |
@@ -19,6 +19,8 @@
 
 UI 추천안의 새 기본값은 승인 전까지 제품 기준을 바꾸지 않습니다. 정본에 적힌 설계와
 실제 구현·검증 상태도 별개입니다.
+현재 업무 구성의 제품 표기는 Board/Boards·보드입니다. Saved Board와 자동 Desk 복원은 별개이며,
+Board가 새 Desk나 Canvas 자체를 뜻하지는 않습니다. 저장·공유·실행 수명 정책은 사용자 확인 원장에서 계속 구별합니다.
 
 <a id="설명용-capability-시나리오"></a>
 
@@ -46,7 +48,7 @@ UI 추천안의 새 기본값은 승인 전까지 제품 기준을 바꾸지 않
 
 각 문서의 작성 시점·상태를 확인하며, 제품 의미는 위 Atlas·기술 계약과 연결해 읽습니다.
 
-- [Desk/Agenda/Card 런타임 모델](../apps/firefox-ui-demo/docs/DESK_AGENDA_CARD_RUNTIME_MODEL.md)
+- [Desk/Board/Card 런타임 모델 — 구 파일명](../apps/firefox-ui-demo/docs/DESK_AGENDA_CARD_RUNTIME_MODEL.md)
 - [Chat 디자인 문법](../apps/firefox-ui-demo/docs/CHAT_DESIGN_GRAMMAR_V1.md)
 - [AI 캔버스 주석 레이어](../apps/firefox-ui-demo/docs/AI_CANVAS_ANNOTATION_LAYER.md)
 - Answer Briefing: [기술 기준](../ideas/confirmed/EGDESK_INTERACTION_AND_ORCHESTRATION_CONTRACT.md#tech-answer-briefing), [제품 개념](../ideas/confirmed/EGDESK_PRODUCT_INTERACTION_TRACE_ATLAS.md#atlas-obj-038)

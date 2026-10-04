@@ -4,8 +4,8 @@ type: product_concept
 layer: runtime
 summary: EG-Desk work boundary pairing a task or objective with the execution environment needed to do it.
 aliases:
-  - Agenda
-  - agenda thread
+  - Board
+  - board thread
 relations:
   operates_inside:
     - egdesk.desk
@@ -19,13 +19,15 @@ relations:
     - time.present
 ---
 
-# Agenda
+<a id="agenda"></a>
 
-Agenda is an EG-Desk product concept, not a generic todo list or folder.
+# Board
 
-An Agenda is the work boundary that pairs a task, objective, or project slice with the execution environment needed to do it.
+Board is an EG-Desk product concept, not a generic todo list or folder.
 
-An Agenda can include:
+A Board is the work boundary that pairs a task, objective, or project slice with the execution environment needed to do it. On one Desk/Canvas, it composes materials, tools, conversations, groups, layout, and bindings; it does not create another Desk or workspace.
+
+A Board can include:
 
 - browser cards
 - file cards
@@ -36,14 +38,14 @@ An Agenda can include:
 - result cards
 - run bubbles and run playback
 
-Agenda nesting is a work decomposition graph, not a folder tree. Deep structure can exist in data, while the Desk UI shows the active slice.
+Board nesting is a work decomposition graph, not a folder tree. Deep structure can exist in data, while the Desk UI shows the active slice.
 
-An Agenda is explicitly retained reusable work state. Automatically recovered
-Desk layout, transient grouping, and open views may be associated with an
-Agenda without becoming part of its saved revision.
+A Saved Board is explicitly retained reusable work state. Automatically recovered
+Desk layout, transient grouping, and open views may be associated with a
+Board without becoming part of its saved revision.
 
 ## Stable Definition
 
 ```text
-Agenda = work + execution environment pairing
+Board = work + execution environment pairing
 ```
