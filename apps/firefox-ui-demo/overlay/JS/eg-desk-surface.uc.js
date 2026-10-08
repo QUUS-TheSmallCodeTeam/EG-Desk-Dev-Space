@@ -9609,6 +9609,8 @@
   const browserToolPendingBindings = new Map();
   const browserToolUserSelections = new Map();
   const browserToolCancelledRuns = new Map();
+  // Stop must also cover a first bind still in transit, before any Card key exists.
+  const browserToolStoppedRuns = new Set();
   const browserToolRequestReceipts = new Map();
   const browserToolCardLeases = new Map();
   const browserToolActionLeases = new Map();
@@ -9617,6 +9619,7 @@
     const runId = run?.runId;
     const clientThreadId = run?.clientThreadId || ChatState.clientThreadBinding(thread);
     if (typeof runId !== 'string' || !runId || !clientThreadId) return 0;
+    browserToolStoppedRuns.add(JSON.stringify([runId, clientThreadId]));
     const prefix = `${runId}\u0000`;
     const revoked = new Set();
     for (const [key, bound] of browserToolRunBindings) {
@@ -9708,7 +9711,9 @@
     if (!lease || lease.authorized || lease.requestId !== requestId || lease.deadlineMs !== deadlineMs ||
         Date.now() >= deadlineMs || browser !== lease.browser || browsingContext !== lease.browsingContext ||
         windowGlobal !== lease.windowGlobal || browserToolRunBindings.get(lease.key) !== lease.bound ||
-        browserToolCancelledRuns.has(lease.key) || browserToolCardLeases.get(lease.cardEpoch) !== requestId ||
+        browserToolCancelledRuns.has(lease.key) ||
+        browserToolStoppedRuns.has(JSON.stringify([lease.runId, lease.bound.clientThreadId])) ||
+        browserToolCardLeases.get(lease.cardEpoch) !== requestId ||
         !lease.card.isConnected || lease.card._browserControls?.toolBrowser?.() !== browser ||
         lease.bound.permission !== 'interact' ||
         browserToolUserSelections.get(lease.bound.selectionToken)?.usedRunId !== lease.runId ||
@@ -9754,6 +9759,9 @@
         browserToolCancelledRuns.set(key, request.deadlineMs);
         return { requestId, status: 'cancelled' };
       }
+      if (browserToolStoppedRuns.has(JSON.stringify([request.runId, request.clientThreadId]))) {
+        throw new Error('Browser run was stopped');
+      }
       if (browserToolCancelledRuns.has(key)) throw new Error('Browser run was cancelled');
       const card = document.getElementById(request.cardId);
       if (!card?.isConnected || !card.classList?.contains('egd-browser-card') ||
@@ -9784,6 +9792,7 @@
         try {
           const live = await card._browserControls.toolObserve(current, { textLimit: 1, elementLimit: 1 });
           if (!browserToolSameUrl(live.url, selection.selectedUrl) || browserToolCancelledRuns.has(key) ||
+              browserToolStoppedRuns.has(JSON.stringify([request.runId, request.clientThreadId])) ||
               browserToolPendingBindings.get(key) !== pending ||
               browserToolUserSelections.get(selection.selectionToken) !== selectedByUser || selectedByUser.usedRunId ||
               request.deadlineMs <= Date.now()) throw new Error('Selected Browser document changed before binding');
@@ -9853,6 +9862,9 @@
     const id = request?.requestId;
     if (typeof id !== 'string' || !id || id.length > 160) return browserToolDispatchOnce(request);
     const key = `${request.runId}\u0000${request.cardId}\u0000${request.targetCardEpoch}`;
+    if (request.kind !== 'cancel' && browserToolStoppedRuns.has(JSON.stringify([request.runId, request.clientThreadId]))) {
+      return Promise.resolve({ requestId: id, status: 'rejected', error: 'Browser run was stopped' });
+    }
     if (request.kind !== 'cancel' && browserToolCancelledRuns.has(key)) return Promise.resolve({
       requestId: id, status: 'rejected', error: 'Browser run was cancelled',
     });

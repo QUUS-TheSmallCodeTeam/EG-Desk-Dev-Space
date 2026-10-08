@@ -133,7 +133,7 @@ test('read-only Browser attachment remains available when actor binding is unava
 
 function fixture() {
   const runBindings = new Map(), pendingBindings = new Map(), cancelled = new Map(), receipts = new Map(), leases = new Map()
-  const userSelections = new Map(), actionLeases = new Map()
+  const userSelections = new Map(), actionLeases = new Map(), stoppedRuns = new Set()
   const current = { cardId: 'browser-a', cardEpoch: 'card-generation-a', profileId: 'firefox-default',
     accountId: 'account-a', accountStatus: 'selected-metadata-unverified', userContextId: 0,
     engineAccountKey: 'codex:chatgpt:fixture@example.test', authorityEpoch: 2, url: 'https://example.test/local' }
@@ -166,9 +166,10 @@ function fixture() {
   let nonce = 0
   const transport = new Function('document', 'ChatState', 'browserToolRunBindings', 'browserToolCancelledRuns',
     'browserToolRequestReceipts', 'browserToolCardLeases', 'browserToolUserSelections', 'browserToolPendingBindings',
-    'browserToolActionLeases', 'chatBindingNonce', 'Date', `${dispatchSource}\nreturn {browserToolDispatch,browserToolAuthorizePhysicalAction}`)(doc,
+    'browserToolActionLeases', 'browserToolStoppedRuns', 'chatBindingNonce', 'Date',
+    `${dispatchSource}\nreturn {browserToolDispatch,browserToolAuthorizePhysicalAction}`)(doc,
     { knownCodexAccountKey: key => typeof key === 'string' && key.startsWith('codex:') },
-    runBindings, cancelled, receipts, leases, userSelections, pendingBindings, actionLeases,
+    runBindings, cancelled, receipts, leases, userSelections, pendingBindings, actionLeases, stoppedRuns,
     () => `lease-${++nonce}`, { now: () => clockMs })
   authorizePhysicalAction = transport.browserToolAuthorizePhysicalAction
   let sequence = 0
@@ -186,7 +187,7 @@ function fixture() {
     return value
   }
   return { dispatch: transport.browserToolDispatch, req, selection, current, card, browser,
-    runBindings, pendingBindings, cancelled, userSelections, actionLeases,
+    runBindings, pendingBindings, cancelled, stoppedRuns, userSelections, actionLeases,
     get actionCalls() { return actionCalls }, get domEffects() { return domEffects },
     hold(promise) { holdAction = promise }, advance(ms) { clockMs += ms } }
 }
@@ -345,20 +346,12 @@ test('account change or deadline expiry while actor pending leaves DOM unchanged
   }
 })
 
-test('human Stop revokes Browser actor authority synchronously before interrupt HTTP resolves', async () => {
-  const f = fixture()
-  const bound = await f.dispatch(f.req('bind', { selection: f.selection('interact') }))
-  let releaseActor
-  f.hold(new Promise(resolve => { releaseActor = resolve }))
-  const action = f.dispatch(f.req('act', { binding: bound.binding,
-    guard: { documentId: 'doc-1', revision: 2 }, action: { type: 'click', ref: 'el_1' } }))
-  await Promise.resolve()
-  assert.equal(f.actionLeases.size, 1)
-
+function productionStopHarness(f) {
   const revoke = new Function('browserToolRunBindings', 'browserToolPendingBindings',
-    'browserToolActionLeases', 'browserToolCancelledRuns', 'browserToolUserSelections', 'ChatState',
+    'browserToolActionLeases', 'browserToolCancelledRuns', 'browserToolStoppedRuns',
+    'browserToolUserSelections', 'ChatState',
     `${stopRevokeSource}\nreturn revokeBrowserToolRunImmediately`)(
-    f.runBindings, f.pendingBindings, f.actionLeases, f.cancelled, f.userSelections,
+    f.runBindings, f.pendingBindings, f.actionLeases, f.cancelled, f.stoppedRuns, f.userSelections,
     { clientThreadBinding: thread => thread.clientBindingId })
   const run = { runId: 'run-a', clientThreadId: 'thread-a', conversationId: 'conversation-a',
     status: 'inProgress', stopPending: false }
@@ -376,16 +369,64 @@ test('human Stop revokes Browser actor authority synchronously before interrupt 
       assert.deepEqual(JSON.parse(options.body), { conversationId: run.conversationId, runId: run.runId })
       return new Promise(resolve => { releaseHttp = resolve })
     }, () => {})
+  return { run, interrupt, get releaseHttp() { return releaseHttp } }
+}
 
-  const stopping = interrupt()
-  assert.equal(typeof releaseHttp, 'function')
-  assert.equal(run.stopPending, true)
+test('human Stop revokes Browser actor authority synchronously before interrupt HTTP resolves', async () => {
+  const f = fixture()
+  const bound = await f.dispatch(f.req('bind', { selection: f.selection('interact') }))
+  let releaseActor
+  f.hold(new Promise(resolve => { releaseActor = resolve }))
+  const action = f.dispatch(f.req('act', { binding: bound.binding,
+    guard: { documentId: 'doc-1', revision: 2 }, action: { type: 'click', ref: 'el_1' } }))
+  await Promise.resolve()
+  assert.equal(f.actionLeases.size, 1)
+  const stop = productionStopHarness(f)
+
+  const stopping = stop.interrupt()
+  assert.equal(typeof stop.releaseHttp, 'function')
+  assert.equal(stop.run.stopPending, true)
   assert.equal(f.runBindings.size, 0, 'UI binding is revoked before the first HTTP await')
   assert.equal(f.actionLeases.size, 0, 'Parent approval has no live action lease after Stop')
   releaseActor()
   assert.equal((await action).status, 'rejected')
   assert.equal(f.domEffects, 0, 'Stop before physical approval must produce zero DOM effects')
-  releaseHttp({ accepted: true, stopRequested: true })
+  stop.releaseHttp({ accepted: true, stopRequested: true })
+  await stopping
+})
+
+test('human Stop tombstones run before delayed first UI bind arrives', async () => {
+  const f = fixture()
+  const selection = f.selection('interact')
+  const delayedFirstBind = f.req('bind', { selection })
+  assert.equal(f.runBindings.size, 0)
+  assert.equal(f.pendingBindings.size, 0)
+  const stop = productionStopHarness(f)
+
+  const stopping = stop.interrupt()
+  assert.equal(typeof stop.releaseHttp, 'function')
+  assert.equal(stop.run.stopPending, true)
+  assert(f.stoppedRuns.has(JSON.stringify(['run-a', 'thread-a'])),
+    'Stop must record run/client-thread authority even with no Card binding to revoke')
+  assert.equal(f.cancelled.size, 0, 'no per-Card tombstone exists before first bind')
+  assert.equal(f.userSelections.has(selection.selectionToken), true,
+    'the delayed request still carries a valid one-time selection token')
+
+  const late = await f.dispatch(delayedFirstBind)
+  assert.equal(late.status, 'rejected')
+  assert.match(late.error, /stopped/)
+  const attemptedAct = await f.dispatch(f.req('act', { binding: { ...f.current },
+    guard: { documentId: 'doc-1', revision: 2 }, action: { type: 'click', ref: 'el_1' } }))
+  assert.equal(attemptedAct.status, 'rejected')
+  assert.equal(f.runBindings.size, 0)
+  assert.equal(f.pendingBindings.size, 0)
+  assert.equal(f.actionCalls, 0)
+  assert.equal(f.domEffects, 0, 'Stop before first bind must leave the DOM unchanged')
+  f.current.authorityEpoch++
+  const staleEpoch = await f.dispatch(f.req('bind', { runId: 'run-b', selection }))
+  assert.equal(staleEpoch.status, 'rejected', 'a new run cannot use the prior authority epoch')
+  assert.match(staleEpoch.error, /changed/)
+  stop.releaseHttp({ accepted: true, stopRequested: true })
   await stopping
 })
 
