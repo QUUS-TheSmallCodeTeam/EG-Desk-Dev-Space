@@ -15,7 +15,7 @@ import {
   assertFreshBrowserRootSse,
   assertNativeAuthorityChain, assertPendingReadOnlyNoSideEffect,
   assertNativeFileAndCommand, assertSourceRead, assertBrowserToolFlow,
-  browserToolReceipts, assertBrowserPositiveFlow,
+  browserToolReceipts, assertBrowserPositiveFlow, assertBrowserFocusOwnership,
   assertPublicBrowserSseBindings,
   assertBrowserSameChatAddition, assertBrowserNegativeGuards,
   assertBrowserFixtureConfig, browserFixtureHtml, createBrowserFixtureHandler,
@@ -516,25 +516,37 @@ test('Browser positive maps actual A SSE/native items to one local observe-click
     run: { ...value, status: 'inProgress' } };
   const emitted = { contextSnapshotIds: ['capture-positive'],
     selectedSources: [{ sourceId: selection.sourceId,
-      cardEpoch: selection.cardEpoch, uri: fixture.url }] };
+      cardEpoch: selection.cardEpoch, uri: fixture.url }],
+    focusAtOriginalFetch: { sampledAtMs: 1200,
+      activeEntityId: 'chat-card-positive', chatCardEntityId: 'chat-card-positive',
+      focusedBrowserCardId: null, focusedChatCardId: 'chat-card-positive',
+      activeElementId: 'chat-send', activeElementTag: 'button',
+      pan: { x: 0, y: 0 }, zoom: 1 } };
+  const preSendFocus = { sampledAtMs: 1100,
+    activeEntityId: selection.cardId, chatCardEntityId: 'chat-card-positive',
+    focusedBrowserCardId: null, focusedChatCardId: null,
+    activeElementId: 'egd-canvas-viewport', activeElementTag: 'div',
+    pan: { x: 0, y: 0 }, zoom: 1 };
   const before = { targetUrl: fixture.url, targetProfileId: selection.profileId,
     targetCardEpoch: selection.cardEpoch, targetAccountId: '',
     targetDocumentId: 'document-positive', targetRevision: 2,
     targetViewport: { width: 800, height: 600, devicePixelRatio: 1 },
+    sampledAtMs: 1000,
     targetSegments: [fixture.marker, 'Waiting for QA action'],
     targetText: 'Waiting for QA action', targetInteractive: [
       { label: 'Reveal QA details', tag: 'button' }, { label: 'QA note', tag: 'input' }],
     inputValue: '', targetInputFocused: false, focusedCardId: null,
     controlText: '', controlInputValue: '', controlCardId: 'control-positive',
-    camera: { pan: { x: 0, y: 0 }, zoom: 1, activeEntityId: null },
+    camera: { pan: { x: 0, y: 0 }, zoom: 1, activeEntityId: selection.cardId },
     cards: ['card-positive', 'control-positive'] };
   const after = { ...before,
+    sampledAtMs: 1300,
     targetRevision: 3,
     targetSegments: [fixture.marker, 'Changed by QA click', 'Newly revealed node'],
     targetText: 'Changed by QA click\nNewly revealed node',
     inputValue: 'harmless QA input', targetInputFocused: false, focusedCardId: null,
-    camera: { ...before.camera, activeEntityId: selection.cardId } };
-  const input = { run: value, events, active, emitted, cwd, selection, fixture,
+    camera: { ...before.camera, activeEntityId: 'chat-card-positive' } };
+  const input = { run: value, events, active, emitted, preSendFocus, cwd, selection, fixture,
     target: { cardId: selection.cardId, profileId: selection.profileId,
       fillValue: 'harmless QA input' }, control: { cardId: 'control-positive' }, before, after };
   assert.deepEqual(browserToolReceipts(value, events).map(call => call.itemId), ids);
@@ -544,6 +556,9 @@ test('Browser positive maps actual A SSE/native items to one local observe-click
   assert.equal(proof.independentActorDocumentRevisionVerified, true);
   assert.equal(proof.modelActionGuardRevisionPubliclyVerified, false);
   assert.equal(proof.inputFocusedAfter, false);
+  assert.equal(proof.focusOwnershipVerified, true);
+  assert.equal(proof.humanSendFocusTransition, 'chat-card-activated');
+  assert.equal(proof.humanTypingProbeVerified, false);
   assert.equal(proof.negativeGuardsVerified, false);
   assert.throws(() => assertBrowserPositiveFlow({ ...input,
     events: events.map(item => item.itemId === 'fill-1'
@@ -557,9 +572,36 @@ test('Browser positive maps actual A SSE/native items to one local observe-click
   assert.throws(() => assertBrowserPositiveFlow({ ...input,
     after: { ...after, targetViewport: { ...after.targetViewport, width: 700 } } }), /viewport changed/);
   assert.throws(() => assertBrowserPositiveFlow({ ...input,
-    after: { ...after, camera: { ...after.camera, pan: { x: 2, y: 0 } } } }), /moved Canvas camera/);
+    after: { ...after, camera: { ...after.camera, pan: { x: 2, y: 0 } } } }), /changed Canvas pan or zoom/);
   assert.throws(() => assertBrowserPositiveFlow({ ...input,
-    after: { ...after, focusedCardId: 'control-positive' } }), /other than the selected target/);
+    after: { ...after, focusedCardId: 'control-positive' } }), /changed human Browser keyboard-focus/);
+  assert.throws(() => assertBrowserPositiveFlow({ ...input,
+    after: { ...after, camera: { ...after.camera,
+      activeEntityId: 'control-positive' } } }), /changed the human-selected Canvas entity/);
+  assert.throws(() => assertBrowserPositiveFlow({ ...input,
+    emitted: { ...emitted, focusAtOriginalFetch: null } }), /do not bracket/);
+});
+
+test('Browser focus witness preserves a preexisting human control-Card focus without attributing Chat Send to the model', () => {
+  const before = { sampledAtMs: 1000, focusedCardId: 'control-card',
+    camera: { activeEntityId: 'control-card', pan: { x: 0, y: 0 }, zoom: 1 } };
+  const preSendFocus = { sampledAtMs: 1100, activeEntityId: 'control-card',
+    chatCardEntityId: 'chat-card', focusedBrowserCardId: 'control-card',
+    pan: { x: 0, y: 0 }, zoom: 1 };
+  const atFetch = { sampledAtMs: 1200, activeEntityId: 'control-card',
+    chatCardEntityId: 'chat-card', focusedBrowserCardId: 'control-card',
+    pan: { x: 0, y: 0 }, zoom: 1 };
+  const after = { sampledAtMs: 1300, focusedCardId: 'control-card',
+    camera: { activeEntityId: 'control-card', pan: { x: 0, y: 0 }, zoom: 1 } };
+  const input = { before, preSendFocus, atFetch, after };
+  assert.equal(assertBrowserFocusOwnership(input).humanSendFocusTransition, 'unchanged');
+  assert.throws(() => assertBrowserFocusOwnership({ ...input,
+    atFetch: { ...atFetch, activeEntityId: 'another-card' } }), /other than the Chat Card/);
+  assert.throws(() => assertBrowserFocusOwnership({ ...input,
+    after: { ...after, camera: { ...after.camera, activeEntityId: 'another-card' } } }),
+  /changed the human-selected Canvas entity/);
+  assert.throws(() => assertBrowserFocusOwnership({ ...input,
+    after: { ...after, focusedCardId: null } }), /changed human Browser keyboard-focus/);
 });
 
 test('Browser proof is tied to real model tool activities, card/profile/revisions, stale rejection and independent DOM', () => {
