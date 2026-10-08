@@ -1045,6 +1045,47 @@ test('bounded visual hierarchy keeps Canvas chrome quiet and Browser and Chat co
   assert.match(surfaceSource, /input\.addEventListener\('compositionend'/);
 });
 
+test('passive Board status stays off the lower Chat composer while its close control remains clickable', () => {
+  const css = readFileSync(new URL('../overlay/CSS/eg-desk-surface.uc.css', import.meta.url), 'utf8');
+  const noticeStyle = css.match(/^#egd-board-notice \{([\s\S]*?)^\}/m)?.[1];
+  const closeStyle = css.match(/^#egd-board-notice button \{([\s\S]*?)^\}/m)?.[1];
+  assert.ok(noticeStyle && closeStyle);
+  assert.match(noticeStyle, /top:\s*64px/);
+  assert.match(noticeStyle, /right:\s*16px/);
+  assert.match(noticeStyle, /bottom:\s*auto/);
+  assert.match(noticeStyle, /left:\s*auto/);
+  assert.match(noticeStyle, /pointer-events:\s*none/);
+  assert.doesNotMatch(noticeStyle, /translateX/);
+  assert.match(closeStyle, /pointer-events:\s*auto/);
+  assert.match(closeStyle, /min-width:\s*24px/);
+  assert.match(closeStyle, /min-height:\s*24px/);
+
+  const body = surfaceSource.match(/  function boardNotice\(message\) \{([\s\S]*?)\n  \}\n\n  function activeBoardProjection/)?.[1];
+  assert.ok(body, 'exercise the production Board notice, not a test-only substitute');
+  let notice = null;
+  const document = {
+    getElementById: id => id === 'egd-board-notice' ? notice : null,
+    documentElement: { appendChild(node) { notice = node; } },
+    createTextNode: value => ({ textContent: value }),
+  };
+  const el = (tagName, properties = {}, ...children) => ({ tagName, ...properties, children,
+    replaceChildren(...next) { this.children = next; },
+    remove() { notice = null; },
+  });
+  const showNotice = compileFunction(`return function boardNotice(message) {${body}\n  }`, ['document', 'el'])(document, el);
+  showNotice('작업 결과를 확인해 주세요.');
+  assert.equal(notice.role, 'status');
+  assert.match(notice.class, /egd-edge egd-frosted/);
+  assert.equal(notice.children[0].textContent, '작업 결과를 확인해 주세요.');
+  assert.equal(notice.children[1]['aria-label'], '안내 닫기');
+  const original = notice;
+  showNotice('새 안내');
+  assert.equal(notice, original, 'a new status updates the same notice without covering another area');
+  assert.equal(notice.children[0].textContent, '새 안내');
+  notice.children[1].onclick();
+  assert.equal(notice, null, 'the close button still dismisses the notice');
+});
+
 test('empty logged-in Chat uses plain first-message guidance while keeping title and auth fallback', () => {
   const body = surfaceSource.match(/          const emptyChildren = \[([\s\S]*?)\n          \];/)?.[1];
   assert.ok(body);
