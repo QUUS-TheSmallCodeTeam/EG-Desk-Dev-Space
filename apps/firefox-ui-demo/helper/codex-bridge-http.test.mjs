@@ -90,6 +90,19 @@ test('HTTP send preserves accepted/conversationId and adds run IDs without liste
   assert.deepEqual(received, { message: 'hi' })
 })
 
+test('bounded QA output markers and policy traverse the ordinary EG-Desk /chat/send handler', async () => {
+  let received
+  const policy = { mode: 'readOnlyQa' }
+  const markers = ['EGDESK_FILE_NONCE_7f41ad982b', 'EGDESK_COMMAND_TAG_9c62ab71']
+  const handler = createChatHttpHandler({ send: async body => { received = body; return { accepted: true, conversationId: 'native-thread', runId: 'native-turn', executionPolicy: { mode: 'readOnlyQa', status: 'native-thread-verified' } } } }, async () => {})
+  const res = response()
+  await handler(request(JSON.stringify({ message: 'Read the public fixture', clientThreadId: 'ui-thread', requestId: 'qa-request', executionPolicy: policy, qaOutputMarkers: markers })), res, new URL('http://localhost/chat/send'))
+  assert.equal(res.status, 202)
+  assert.deepEqual(received.executionPolicy, policy)
+  assert.deepEqual(received.qaOutputMarkers, markers)
+  assert.equal(res.body.runId, 'native-turn')
+})
+
 test('HTTP approval conflict returns explicit failure, never success', async () => {
   const handler = createChatHttpHandler({ replyApproval: async () => { throw Object.assign(new Error('Stale'), { httpStatus: 409, code: 'STALE_APPROVAL' }) } }, async () => {})
   const res = response()
