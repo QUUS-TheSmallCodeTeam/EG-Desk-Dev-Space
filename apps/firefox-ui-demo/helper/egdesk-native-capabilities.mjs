@@ -14,13 +14,13 @@ const QA_POLICY_CONTRACT_VERSIONS = new Set(['0.160.1'])
 const MODEL_ID = /^[A-Za-z0-9][A-Za-z0-9._:/-]{0,127}$/
 const REASONING_EFFORTS = new Set(['none', 'minimal', 'low', 'medium', 'high', 'xhigh', 'max', 'ultra'])
 
-// These two process-local overrides are the entire allowlist. Their values are
-// quoted as TOML strings inside separate argv entries; no shell or config file
-// is changed. With both variables unset, argv is byte-for-byte the old launch.
+// These process-local overrides are an exact allowlist. No shell or config
+// file is changed. With all variables unset, argv is the old launch.
 export function buildCodexAppServerLaunch({ env = process.env, listen } = {}) {
   if (typeof listen !== 'string' || !listen) throw new TypeError('An app-server listen URL is required')
   const hasModel = Object.hasOwn(env, 'EGDESK_CODEX_MODEL')
   const hasEffort = Object.hasOwn(env, 'EGDESK_CODEX_EFFORT')
+  const disableMemories = Object.hasOwn(env, 'EGDESK_CODEX_DISABLE_MEMORIES')
   const model = hasModel ? env.EGDESK_CODEX_MODEL : null
   const effort = hasEffort ? env.EGDESK_CODEX_EFFORT : null
   if (hasModel && (typeof model !== 'string' || !MODEL_ID.test(model))) {
@@ -29,11 +29,39 @@ export function buildCodexAppServerLaunch({ env = process.env, listen } = {}) {
   if (hasEffort && (typeof effort !== 'string' || !REASONING_EFFORTS.has(effort))) {
     throw Object.assign(new Error('EGDESK_CODEX_EFFORT must be a supported reasoning effort'), { code: 'INVALID_CODEX_EFFORT_OVERRIDE' })
   }
+  if (disableMemories && env.EGDESK_CODEX_DISABLE_MEMORIES !== '1') {
+    throw Object.assign(new Error('EGDESK_CODEX_DISABLE_MEMORIES accepts only 1'), { code: 'INVALID_CODEX_MEMORY_OVERRIDE' })
+  }
   const args = ['app-server']
   if (hasModel) args.push('-c', `model=${JSON.stringify(model)}`)
   if (hasEffort) args.push('-c', `model_reasoning_effort=${JSON.stringify(effort)}`)
+  if (disableMemories) args.push('-c', 'features.memories=false')
   args.push('--listen', listen)
-  return { args, configuredModel: model, configuredEffort: effort, hasOverrides: hasModel || hasEffort }
+  return { args, configuredModel: model, configuredEffort: effort, hasOverrides: hasModel || hasEffort, disableMemories }
+}
+
+export async function verifyCodexMemoryFeatureDisabled(request) {
+  const seen = new Set()
+  let cursor = null, found = false
+  const unavailable = () => Object.assign(new Error('Owned App Server did not confirm Memories disabled'), { code: 'CODEX_MEMORY_ISOLATION_UNVERIFIED' })
+  for (let page = 0; page < 8; page++) {
+    let result
+    try { result = await request('experimentalFeature/list', { limit: 100, ...(cursor ? { cursor } : {}) }) }
+    catch { throw unavailable() }
+    if (!Array.isArray(result?.data)) throw unavailable()
+    for (const feature of result.data) if (feature?.name === 'memories') {
+      if (found || feature.enabled !== false) throw unavailable()
+      found = true
+    }
+    if (result.nextCursor == null) {
+      if (!found) throw unavailable()
+      return { status: 'verified-disabled', feature: 'memories' }
+    }
+    if (typeof result.nextCursor !== 'string' || !result.nextCursor || seen.has(result.nextCursor)) throw unavailable()
+    seen.add(result.nextCursor)
+    cursor = result.nextCursor
+  }
+  throw unavailable()
 }
 
 export function verifyCodexLaunchConfiguration(launch, result) {

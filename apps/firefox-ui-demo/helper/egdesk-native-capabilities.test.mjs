@@ -4,7 +4,7 @@ import { readFile, writeFile, mkdtemp, rm } from 'node:fs/promises'
 import { spawnSync } from 'node:child_process'
 import os from 'node:os'
 import path from 'node:path'
-import { buildCodexAppServerLaunch, inspectNativeCapabilities, resolveCodexExecutable, verifyCodexLaunchConfiguration } from './egdesk-native-capabilities.mjs'
+import { buildCodexAppServerLaunch, inspectNativeCapabilities, resolveCodexExecutable, verifyCodexLaunchConfiguration, verifyCodexMemoryFeatureDisabled } from './egdesk-native-capabilities.mjs'
 import { fingerprintNativeExecutable, verifyNativeSchemaDirectory } from './codex-native-schema-probe.mjs'
 import { AppServerRpc } from './codex-app-server-rpc.mjs'
 
@@ -90,7 +90,7 @@ test('an unrecognized executable wrapper is not accepted on a version banner alo
   } finally { await rm(dir, { recursive: true, force: true }) }
 })
 
-test('process-scoped launch uses only fixed TOML model/effort argv keys and leaves unset behavior unchanged', () => {
+test('process-scoped launch uses only fixed model/effort and explicit memory-disable argv keys', () => {
   const listen = 'ws://127.0.0.1:39219'
   assert.deepEqual(buildCodexAppServerLaunch({ env: {}, listen }).args, ['app-server', '--listen', listen])
   const launch = buildCodexAppServerLaunch({ env: {
@@ -99,11 +99,47 @@ test('process-scoped launch uses only fixed TOML model/effort argv keys and leav
   assert.deepEqual(launch.args, ['app-server', '-c', 'model="gpt-6-sol"', '-c', 'model_reasoning_effort="max"', '--listen', listen])
   assert.deepEqual([launch.configuredModel, launch.configuredEffort, launch.hasOverrides], ['gpt-6-sol', 'max', true])
   assert.deepEqual(buildCodexAppServerLaunch({ env: { EGDESK_CODEX_MODEL: 'gpt-6-sol' }, listen }).args, ['app-server', '-c', 'model="gpt-6-sol"', '--listen', listen])
+  const isolated = buildCodexAppServerLaunch({ env: { EGDESK_CODEX_DISABLE_MEMORIES: '1' }, listen })
+  assert.deepEqual(isolated.args, ['app-server', '-c', 'features.memories=false', '--listen', listen])
+  assert.equal(isolated.disableMemories, true)
+  assert.equal(isolated.hasOverrides, false)
+  assert.deepEqual(buildCodexAppServerLaunch({ env: { EGDESK_CODEX_MODEL: 'gpt-6-sol', EGDESK_CODEX_EFFORT: 'max', EGDESK_CODEX_DISABLE_MEMORIES: '1' }, listen }).args,
+    ['app-server', '-c', 'model="gpt-6-sol"', '-c', 'model_reasoning_effort="max"', '-c', 'features.memories=false', '--listen', listen])
   for (const value of [null, '', 'gpt-6-sol -c sandbox_mode="danger-full-access"', 'gpt-6-sol\n--profile hidden']) {
     assert.throws(() => buildCodexAppServerLaunch({ env: { EGDESK_CODEX_MODEL: value }, listen }), e => e.code === 'INVALID_CODEX_MODEL_OVERRIDE')
   }
   for (const value of [null, '', 'max --sandbox danger-full-access', 'MAX']) {
     assert.throws(() => buildCodexAppServerLaunch({ env: { EGDESK_CODEX_EFFORT: value }, listen }), e => e.code === 'INVALID_CODEX_EFFORT_OVERRIDE')
+  }
+  for (const value of [null, '', '0', 'true', 1, '1 -c sandbox_mode="danger-full-access"']) {
+    assert.throws(() => buildCodexAppServerLaunch({ env: { EGDESK_CODEX_DISABLE_MEMORIES: value }, listen }), e => e.code === 'INVALID_CODEX_MEMORY_OVERRIDE')
+  }
+})
+
+test('owned App Server memory isolation requires native effective memories=false before readiness', async () => {
+  const calls = []
+  const verified = await verifyCodexMemoryFeatureDisabled(async (method, params) => {
+    calls.push([method, params])
+    return params.cursor ? { data: [{ name: 'memories', enabled: false }], nextCursor: null }
+      : { data: [{ name: 'other', enabled: true }], nextCursor: 'page-two' }
+  })
+  assert.deepEqual(verified, { status: 'verified-disabled', feature: 'memories' })
+  assert.deepEqual(calls, [
+    ['experimentalFeature/list', { limit: 100 }],
+    ['experimentalFeature/list', { limit: 100, cursor: 'page-two' }],
+  ])
+  const sentinel = 'PRIVATE_MEMORY_JOB_SENTINEL'
+  for (const request of [
+    async () => { throw new Error(sentinel) },
+    async () => ({ data: [], nextCursor: null }),
+    async () => ({ data: [{ name: 'memories', enabled: true }], nextCursor: null }),
+    async () => ({ data: [{ name: 'memories', enabled: false }, { name: 'memories', enabled: false }], nextCursor: null }),
+    async () => ({ data: [], nextCursor: '' }),
+    async () => ({ data: [], nextCursor: 7 }),
+    async () => ({ data: [], nextCursor: 'same' }),
+  ]) {
+    await assert.rejects(verifyCodexMemoryFeatureDisabled(request), error =>
+      error.code === 'CODEX_MEMORY_ISOLATION_UNVERIFIED' && !error.message.includes(sentinel))
   }
 })
 
@@ -124,6 +160,11 @@ test('production spawn uses the validated argv without a shell and proves config
   const proof = source.indexOf('nativePreflight = verifyCodexLaunchConfiguration(appServerLaunch, config)')
   assert.ok(proof > source.indexOf("connection.request('config/read'"))
   assert.ok(proof < source.indexOf('appServerReady = true', proof))
+  const memoryProof = source.indexOf('memoryIsolation = verified')
+  assert.ok(memoryProof > source.indexOf('const verified = await verifyCodexMemoryFeatureDisabled'))
+  assert.ok(memoryProof < source.indexOf('appServerReady = true', memoryProof))
+  assert.ok(source.includes("appServerProcess.kill('SIGTERM')"))
+  assert.ok(source.includes('memoryIsolation, node: nodeRuntime'))
 })
 
 test('dynamic tool transport explicitly opts into experimental API before native requests', async () => {

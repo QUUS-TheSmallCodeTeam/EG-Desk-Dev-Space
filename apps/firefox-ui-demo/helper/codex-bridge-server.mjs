@@ -19,7 +19,7 @@ import { openChatStore } from './egdesk-chat-store.mjs'
 import { NativeReaderClient } from './egdesk-native-reader.mjs'
 import { ContextRuntime } from './egdesk-context-runtime.mjs'
 import { createContextHttpHandler } from './egdesk-context-http.mjs'
-import { buildCodexAppServerLaunch, inspectNativeCapabilities, resolveCodexExecutable, verifyCodexLaunchConfiguration, NATIVE_SCHEMA_VERSION } from './egdesk-native-capabilities.mjs'
+import { buildCodexAppServerLaunch, inspectNativeCapabilities, resolveCodexExecutable, verifyCodexLaunchConfiguration, verifyCodexMemoryFeatureDisabled, NATIVE_SCHEMA_VERSION } from './egdesk-native-capabilities.mjs'
 import { createEGDeskFileMount, requireEGDeskNodeRuntime } from './egdesk-file-mount.mjs'
 
 const nodeRuntime = requireEGDeskNodeRuntime()
@@ -46,6 +46,7 @@ let nativePreflight = {
   configuredModel: appServerLaunch.configuredModel, configuredEffort: appServerLaunch.configuredEffort,
   effectiveModel: null, effectiveEffort: null,
 }
+let memoryIsolation = { status: appServerLaunch.disableMemories ? 'pending' : 'not-requested', feature: 'memories' }
 
 const authState = {
   isLoggedIn: false,
@@ -309,6 +310,7 @@ function scheduleAppServerReconnect() {
 
 function spawnAppServer() {
   if (appServerProcess && appServerProcess.exitCode == null && !appServerProcess.killed) return
+  if (appServerLaunch.disableMemories) memoryIsolation = { status: 'pending', feature: 'memories' }
   const executable = resolveCodexExecutable()
   nativeCapabilities = inspectNativeCapabilities({ executable })
   const child = spawn(executable, appServerLaunch.args, {
@@ -372,6 +374,21 @@ async function connectToAppServer() {
           throw error
         }
       }
+      if (appServerLaunch.disableMemories) {
+        try {
+          const verified = await verifyCodexMemoryFeatureDisabled((method, params) => connection.request(method, params))
+          if (appServerSocket !== socket) return
+          memoryIsolation = verified
+        } catch (error) {
+          if (appServerSocket !== socket) return
+          launchConfigBlocked = true
+          memoryIsolation = { status: 'blocked', feature: 'memories', errorCode: error.code || 'CODEX_MEMORY_ISOLATION_UNVERIFIED' }
+          // This is only the child spawned by this bridge. Do not leave an
+          // unverified process alive to run unrelated background memory jobs.
+          if (appServerProcess && appServerProcess.exitCode == null && !appServerProcess.killed) appServerProcess.kill('SIGTERM')
+          throw error
+        }
+      }
       appServerReady = true
       chat.setConnection(true)
       await refreshAccountState()
@@ -396,6 +413,7 @@ async function connectToAppServer() {
     if (!launchConfigBlocked && appServerLaunch.hasOverrides) nativePreflight = { ...nativePreflight, status: 'pending', effectiveModel: null, effectiveEffort: null }
     if (rpc === connection) rpc = null
     chat.setConnection(false)
+    if (appServerLaunch.disableMemories && !launchConfigBlocked) memoryIsolation = { status: 'pending', feature: 'memories' }
     scheduleAppServerReconnect()
   }
 }
@@ -577,7 +595,7 @@ const bridgeServer = createServer(async (req, res) => {
   }
 
   if (req.method === 'GET' && route === '/health') {
-    sendJson(res, 200, { ok: true, port: BRIDGE_PORT, appServerReady, chatStorageReady: Boolean(chatStore && chat.storeHealthy), chatStorageError: chatStoreError, native: nativeCapabilities, engineConfiguration: nativePreflight, node: nodeRuntime })
+    sendJson(res, 200, { ok: true, port: BRIDGE_PORT, appServerReady, chatStorageReady: Boolean(chatStore && chat.storeHealthy), chatStorageError: chatStoreError, native: nativeCapabilities, engineConfiguration: nativePreflight, memoryIsolation, node: nodeRuntime })
     return
   }
 
@@ -592,6 +610,7 @@ const bridgeServer = createServer(async (req, res) => {
       chatStorageReady: Boolean(chatStore && chat.storeHealthy),
       native: nativeCapabilities,
       engineConfiguration: nativePreflight,
+      memoryIsolation,
       node: nodeRuntime,
       auth: authSnapshot(),
       chat: chat.snapshot(),
