@@ -177,6 +177,7 @@ HUM-DESK-001과 HUM-AGENT-001은 결정됐고 HUM-READ-001은 별도 사용자 �
 
 - **추천·대안**: [지속 기억·조직 규칙 비교](../references/design-synthesis/egdesk-ux-realization-proposals.md#decision-memory), [강제 제한·기본값·이번 지시](../references/design-synthesis/egdesk-ux-realization-proposals.md#policy-conflicts), [실행 설정·전환 시점](../references/design-synthesis/egdesk-ux-realization-proposals.md#execution-settings), [업무 귀속·조정 전달 흐름](../references/design-synthesis/egdesk-ux-realization-proposals.md#flow-chat)
 - **질문**: 기억을 명시 저장할지 사전 동의 범위에서 자동 축적할지, 개인/선택 Agent의 재사용 범위와 Profile 공유 기본값은 무엇인지, 지속 Profile·Desk·조직 설정의 편집을 설정 소유자만 할지 변경 유형별 수임자에게 허용할지 선택한다. 허용된 기본 정책 간 우선순위와 범위 내 Profile·모델 자동 조정의 위임도 별도 선택이다.
+- **권한 수명 후보 — `BROWSER-CARD-GRANT-01` (`PROPOSED`, 제품 소유자 미확정)**: 일반 Browser 카드의 Agent 접근은 기본 관찰(`observe`)로 두고, 카드별 상호작용 권한은 한 Run에만 부여하는 방식을 추천한다. 이 권한은 Run 종료, 대상 Card 또는 계정 변경, 명시적 철회 시 만료한다. 대안은 철회 전까지 유지하는 지속 권한이다. 일반 상호작용의 최종 활성화는 제품 소유자 선택을 기다리며, 제한된 fixture QA와 UI 준비는 계속할 수 있다. 위임 기간과 관찰·제어권의 관계는 [HUM-COLLAB-001](#hum-collab-001)과 함께 판단한다.
 - **설계와 구분**: 이미 정한 같은 Run 조정, 실제 적용 시점 표시, 구성 병합·검사·미지원 전환의 복구는 위임된 설계다. 기술 인터페이스가 허용하는 시점과 실제 적용 증거를 제공하며, 반영 시점 자체를 재승인받지 않는다.
 - **확정된 부분**: 첫 모델 호출 전에 System이 적용되는 조직·Desk·Agent 정책에서 현재 Ontology와 필요한 자료를 조회·결합한다. 사용자에게 revision 번호 입력을 요구하지 않는다. 새 도구 관찰·사용자 조정·관련 Ontology 변화는 같은 Run의 가능한 가장 이른 다음 모델 호출에 반영한다. 이전 호출의 실제 입력은 보존하며, 일반적인 조정에는 일시 중지·새 attempt·fork를 요구하지 않는다. 실행 권한·승인 대상·동시 쓰기 조건이 깨진 행동만 재검증한다.
 - **왜 사용자 결정인가**: 사용자가 누구에게 무엇을 위임했고 어떤 설정·기억·권한으로 실행됐는지 이해하고 통제하는 제품 책임 모델을 정한다.
