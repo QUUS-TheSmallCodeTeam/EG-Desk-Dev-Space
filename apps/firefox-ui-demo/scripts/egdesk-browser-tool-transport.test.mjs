@@ -3,6 +3,10 @@ import { readFileSync } from 'node:fs'
 import { test } from 'node:test'
 import * as ChatState from '../overlay/resources/EGDeskChatState.sys.mjs'
 
+globalThis.JSWindowActorParent ||= class {}
+const { EGDeskBrowserAgentRuntimeParent, registerBrowserActionAuthorizer } =
+  await import('../overlay/resources/EGDeskBrowserAgentRuntimeParent.sys.mjs')
+
 const source = readFileSync(new URL('../overlay/JS/eg-desk-surface.uc.js', import.meta.url), 'utf8')
 const between = (start, end) => {
   const first = source.indexOf(start)
@@ -17,6 +21,7 @@ const selectedSources = between('  function registerBrowserToolSelection(threadI
 const menuSelection = between('    const selectBrowserForChat = (permission) => {', '    const showBrowserMenu = (anchor = menuButton) => {')
 const stopRevokeSource = between('  function revokeBrowserToolRunImmediately(run, thread) {', '  function registerBrowserToolSelection(')
 const toolActSource = between('    const browserToolAct = async (expected, action, guard, lease) => {', '    card._browserControls = {')
+const toolBindingSource = between('    const browserToolBinding = () => {', '    const assertBrowserToolBinding = (expected) => {')
 const interruptBody = between('      async interrupt(threadId = state.codex.activeThreadId) {', '      },\n      subscribe(listener) {')
   .slice('      async interrupt(threadId = state.codex.activeThreadId) {'.length)
 const clearTransportBody = between('    const clearBrowserToolTransport = ({ revoke = false } = {}) => {', '    };\n\n    // Read-only, sampled at call time')
@@ -138,8 +143,8 @@ function fixture() {
   const current = { cardId: 'browser-a', cardEpoch: 'card-generation-a', profileId: 'firefox-default',
     accountId: 'account-a', accountStatus: 'selected-metadata-unverified', userContextId: 0,
     engineAccountKey: 'codex:chatgpt:fixture@example.test', authorityEpoch: 2, url: 'https://example.test/local' }
-  const windowGlobal = { id: 'window-global-a' }
-  const browser = { browsingContext: { currentWindowGlobal: windowGlobal } }
+  const windowGlobal = { innerWindowId: 201 }
+  const browser = { browsingContext: { id: 101, currentWindowGlobal: windowGlobal } }
   let actionCalls = 0, domEffects = 0
   let clockMs = Date.now()
   let holdAction = null
@@ -163,13 +168,19 @@ function fixture() {
           after: { cardId: 'browser-a', text: ['Count: 1'] } }
       },
     } }
+  const ownerDocument = { nodePrincipal: { isSystemPrincipal: true } }
+  const ownerWindow = { document: ownerDocument, addEventListener() {}, removeEventListener() {} }
+  ownerDocument.defaultView = ownerWindow
+  Object.assign(browser, { localName: 'browser', isConnected: true, ownerDocument,
+    closest: selector => selector === '.egd-browser-card' ? card : null,
+    isSameNode: other => other === browser })
   const other = { ...card, id: 'browser-b' }
   const doc = { getElementById: id => id === 'browser-a' ? card : id === 'browser-b' ? other : null }
   let nonce = 0
   const transport = new Function('document', 'ChatState', 'browserToolRunBindings', 'browserToolCancelledRuns',
     'browserToolRequestReceipts', 'browserToolCardLeases', 'browserToolUserSelections', 'browserToolPendingBindings',
     'browserToolActionLeases', 'browserToolStoppedRuns', 'chatBindingNonce', 'Date',
-    `let browserToolFixtureLastAction = null;\n${dispatchSource}\n` +
+    `let browserToolFixtureLastAction = null;\nconst browserToolFixtureAuthorizationByCard = new Map();\n${dispatchSource}\n` +
     'return {browserToolDispatch,browserToolAuthorizePhysicalAction,browserToolFixtureActionDiagnostic}')(doc,
     { knownCodexAccountKey: key => typeof key === 'string' && key.startsWith('codex:') },
     runBindings, cancelled, receipts, leases, userSelections, pendingBindings, actionLeases, stoppedRuns,
@@ -189,12 +200,132 @@ function fixture() {
       threadId: value.clientThreadId, usedRunId: null })
     return value
   }
-  return { dispatch: transport.browserToolDispatch, fixtureActionDiagnostic: transport.browserToolFixtureActionDiagnostic,
-    req, selection, current, card, browser,
+  return { dispatch: transport.browserToolDispatch, authorize: transport.browserToolAuthorizePhysicalAction,
+    fixtureActionDiagnostic: transport.browserToolFixtureActionDiagnostic,
+    req, selection, current, card, browser, ownerWindow,
     runBindings, pendingBindings, cancelled, stoppedRuns, userSelections, actionLeases,
     get actionCalls() { return actionCalls }, get domEffects() { return domEffects },
     hold(promise) { holdAction = promise }, advance(ms) { clockMs += ms } }
 }
+
+test('native-shaped Parent actor preserves exact authority across Gecko wrappers', async () => {
+  for (const variant of ['exact', 'same-native-wrappers', 'other-browser', 'other-context',
+    'other-window-global', 'stale-window-global', 'other-action-ref']) {
+    const f = fixture()
+    f.current.url = 'http://127.0.0.1:39220/egdesk-qa/QA_URL_0123456789abcdef'
+    f.current.accountId = ''
+    const context = f.browser.browsingContext
+    const currentWindowGlobal = context.currentWindowGlobal
+    context.top = context
+    context.embedderElement = f.browser
+    currentWindowGlobal.browsingContext = context
+    const unregister = registerBrowserActionAuthorizer(f.browser, f.ownerWindow, f.authorize)
+    const parent = new EGDeskBrowserAgentRuntimeParent()
+    parent.browsingContext = context
+    parent.manager = variant === 'other-window-global'
+      ? { innerWindowId: 999, browsingContext: context } : currentWindowGlobal
+    if (variant === 'same-native-wrappers') {
+      const wrappedWindowGlobal = { innerWindowId: currentWindowGlobal.innerWindowId,
+        isClosed: false, isCurrentGlobal: true }
+      const wrappedContext = { id: context.id, currentWindowGlobal: wrappedWindowGlobal }
+      const wrappedBrowser = { browsingContext: wrappedContext,
+        isSameNode: other => other === f.browser }
+      f.browser.isSameNode = other => other === wrappedBrowser
+      wrappedContext.top = wrappedContext
+      wrappedContext.embedderElement = wrappedBrowser
+      wrappedWindowGlobal.browsingContext = wrappedContext
+      parent.browsingContext = wrappedContext
+      parent.manager = wrappedWindowGlobal
+      assert.notEqual(parent.browsingContext, context)
+      assert.notEqual(parent.manager, currentWindowGlobal)
+      assert.notEqual(wrappedBrowser, f.browser)
+    }
+    if (variant === 'other-browser') context.embedderElement = {
+      browsingContext: { id: 999 },
+    }
+    if (variant === 'other-context') parent.browsingContext = {
+      id: 999, top: { embedderElement: f.browser }, currentWindowGlobal,
+    }
+    let physicalEffects = 0
+    f.card._browserControls.toolAct = async (_binding, action, _guard, lease) => {
+      if (variant === 'stale-window-global') context.currentWindowGlobal = { innerWindowId: 998,
+        browsingContext: context, isCurrentGlobal: true }
+      const authorization = parent.receiveMessage({ name: 'authorizeAct', data: {
+        leaseId: lease.leaseId, requestId: lease.requestId, deadlineMs: lease.deadlineMs,
+        actionType: action.type, actionRef: variant === 'other-action-ref' ? 'el_other' : action.ref,
+        actionUrl: null,
+      } })
+      if (!authorization.authorized) throw new Error(
+        `Browser action authority was revoked before input [${authorization.reason}]`)
+      physicalEffects++
+      return { dispatchReceipt: { actor: 'JSWindowActor' }, after: { cardId: 'browser-a' } }
+    }
+    const bound = await f.dispatch(f.req('bind', { selection: f.selection('interact') }))
+    assert.equal(bound.status, 'bound')
+    const result = await f.dispatch(f.req('act', { binding: bound.binding,
+      guard: { documentId: 'doc-1', revision: 2 }, action: { type: 'click', ref: 'el_1' } }))
+    const shouldAct = ['exact', 'same-native-wrappers'].includes(variant)
+    assert.equal(result.status, shouldAct ? 'acted' : 'rejected', variant)
+    assert.equal(physicalEffects, shouldAct ? 1 : 0, variant)
+    assert.equal(f.fixtureActionDiagnostic('browser-a')?.authorizationReason, {
+      exact: 'approved', 'same-native-wrappers': 'approved',
+      'other-browser': null,
+      'other-context': null,
+      'other-window-global': 'window-global-identity-mismatch',
+      'stale-window-global': 'window-global-not-current',
+      'other-action-ref': 'action-ref-mismatch',
+    }[variant], variant)
+    assert.equal(f.fixtureActionDiagnostic('browser-a')?.parentReason,
+      shouldAct ? null : ['other-browser', 'other-context'].includes(variant)
+        ? 'missing-authorizer' : 'ui-denied', variant)
+    unregister()
+  }
+})
+
+test('production Card binding registers and disposes its exact chrome Browser controller', () => {
+  const ownerDocument = { nodePrincipal: { isSystemPrincipal: true } }
+  const listeners = new Map()
+  const ownerWindow = { document: ownerDocument,
+    addEventListener(name, fn) { listeners.set(name, fn) },
+    removeEventListener(name, fn) { if (listeners.get(name) === fn) listeners.delete(name) },
+  }
+  ownerDocument.defaultView = ownerWindow
+  const card = { id: 'browser-a', isConnected: true,
+    _sourceRef: { profileId: 'firefox-default', accountId: '' } }
+  const windowGlobal = { innerWindowId: 201 }
+  const context = { id: 101, currentWindowGlobal: windowGlobal,
+    originAttributes: { userContextId: 0 } }
+  context.top = context
+  windowGlobal.browsingContext = context
+  const xulBrowser = { localName: 'browser', isConnected: true, ownerDocument,
+    browsingContext: context, closest: selector => selector === '.egd-browser-card' ? card : null,
+    getAttribute: () => '' }
+  context.embedderElement = xulBrowser
+  const controller = request => request.browser === xulBrowser && request.leaseId === 'exact-lease'
+  const install = new Function('card', 'xulBrowser', 'window', 'ChromeUtils', 'ensureBrowserAgentActor',
+    'browserToolAuthorizePhysicalAction', 'state', 'ChatState', 'browserToolAuthorityEpoch',
+    'agentBridgeId', 'browserCardState', `let unregisterBrowserAuthorizer = null;\n${toolBindingSource}\n` +
+    'return {browserToolBinding, dispose: () => unregisterBrowserAuthorizer?.()};')(
+    card, xulBrowser, ownerWindow, { importESModule(uri) {
+      assert.equal(uri, 'chrome://userchrome/content/EGDeskBrowserAgentRuntimeParent.sys.mjs')
+      return { registerBrowserActionAuthorizer }
+    } }, () => true, controller,
+    { sourceRefs: { defaultProfileId: 'firefox-default' }, codex: {} },
+    { codexAccountKey: () => 'codex:chatgpt:fixture@example.test' }, 2,
+    'card-epoch-a', () => ({ uri: 'http://127.0.0.1:39220/egdesk-qa/QA_URL_0123456789abcdef' }))
+  assert.equal(install.browserToolBinding().cardId, 'browser-a')
+  assert.equal(install.browserToolBinding().cardEpoch, 'card-epoch-a')
+  assert.equal(listeners.size, 1, 'repeated observation must not register a second controller')
+  const parent = new EGDeskBrowserAgentRuntimeParent()
+  parent.browsingContext = context
+  parent.manager = windowGlobal
+  assert.deepEqual(parent.receiveMessage({ name: 'authorizeAct', data: { leaseId: 'exact-lease' } }),
+    { authorized: true, reason: 'approved' })
+  install.dispose()
+  assert.equal(listeners.size, 0)
+  assert.equal(parent.receiveMessage({ name: 'authorizeAct', data: { leaseId: 'exact-lease' } }).authorized, false)
+  assert.match(source, /const cleanupCard = \(\) => \{\s*try \{ unregisterBrowserAuthorizer\?\.\(\)/)
+})
 
 test('UI dispatch binds only exact Card/profile/account/epoch and deduplicates one action request', async () => {
   const f = fixture()
@@ -570,6 +701,7 @@ test('normal root Chat ready SSE attaches Browser transport, posts correlated re
       browserTransportSource = null, browserTransportAbort = null,
       detachBrowserToolTransport = null, browserToolAuthorityEpoch = 0;
     let browserToolFixtureLastAction = { status: 'acted' };
+    const browserToolFixtureAuthorizationByCard = new Map([['browser-a', { reason: 'approved' }]]);
     let localAutoRetryEligible = false, localRetryBudget = 1, localRetryTimer = null;
     let reconnects = 0;
     const update = patch => Object.assign(state.codex, patch);
@@ -580,7 +712,8 @@ test('normal root Chat ready SSE attaches Browser transport, posts correlated re
     const onReady = event => {${readyTransportBody}\n    };
     const onError = () => {${errorTransportBody}\n    };
     return { onReady, onError, rootSseReady, state: () => ({ streamReady, browserTransportId, source,
-      browserToolAuthorityEpoch, browserToolFixtureLastAction, reconnects, protocol }) };
+      browserToolAuthorityEpoch, browserToolFixtureLastAction,
+      authorizationCount: browserToolFixtureAuthorizationByCard.size, reconnects, protocol }) };
   `)({ state, source: sseSource, fetchJson, attachBrowserToolTransport: attach,
     browserToolRunBindings: runBindings, browserToolPendingBindings: pendingBindings,
     browserToolActionLeases: actionLeases,
@@ -616,6 +749,7 @@ test('normal root Chat ready SSE attaches Browser transport, posts correlated re
   assert.equal(harness.rootSseReady().browserTransportId, null)
   assert.equal(harness.state().browserToolAuthorityEpoch, 1)
   assert.equal(harness.state().browserToolFixtureLastAction, null)
+  assert.equal(harness.state().authorizationCount, 0)
   assert.equal(harness.state().reconnects, 1)
   assert.equal(runBindings.size, 0)
   assert.equal(actionLeases.size, 0)
