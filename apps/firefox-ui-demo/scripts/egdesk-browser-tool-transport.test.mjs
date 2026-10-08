@@ -15,6 +15,14 @@ const attachSource = between('  function attachBrowserToolTransport({ source, re
 const sourceSelection = between('  function chatInputSourceForView(view) {', '  function chatInputSources(')
 const selectedSources = between('  function registerBrowserToolSelection(threadId, source, permission) {', '  function browserToolSafeNavigationUrl(value) {')
 const menuSelection = between('    const selectBrowserForChat = (permission) => {', '    const showBrowserMenu = (anchor = menuButton) => {')
+const clearTransportBody = between('    const clearBrowserToolTransport = ({ revoke = false } = {}) => {', '    };\n\n    // Read-only, sampled at call time')
+  .slice('    const clearBrowserToolTransport = ({ revoke = false } = {}) => {'.length)
+const rootSseReadyBody = between('    const rootSseReady = () => {', '    };\n\n    function threadBusy(')
+  .slice('    const rootSseReady = () => {'.length)
+const readyTransportBody = between("      connectionSource.addEventListener('ready', (event) => {", '      });\n\n      const receive =')
+  .slice("      connectionSource.addEventListener('ready', (event) => {".length)
+const errorTransportBody = between('      connectionSource.onerror = () => {', '      };\n      } finally')
+  .slice('      connectionSource.onerror = () => {'.length)
 
 test('legacy Browser frame-script snapshot fallback retains valid syntax and sensitive-control masks', () => {
   const body = between('    const browserAgentFrameScriptSource = () => `', '`;\n    const browserAgentMessageManager')
@@ -352,4 +360,93 @@ test('event-source transport returns correlated UI receipts without Chat transcr
   assert.deepEqual(responses, [{ requestId: 'correlation-1', status: 'observed' }])
   detach()
   assert.equal(listeners.size, 0)
+})
+
+test('normal root Chat ready SSE attaches Browser transport, posts correlated receipt, and revokes on disconnect', async () => {
+  assert.match(source, /browserAgentTools:\s*\{[\s\S]*?rootSseReady: \(\) => state\.codexBridge\?\.rootSseReady\?\.\(\)/,
+    'public Browser diagnostics must delegate to the current root Chat closure');
+  const listeners = new Map(), posts = [], grants = new Map([['selected', {}]])
+  const runBindings = new Map([['run-a', {}]]), actionLeases = new Map([['lease-a', {}]])
+  const sseSource = { closed: false, readyState: 1, addEventListener(name, listener) { listeners.set(name, listener) },
+    removeEventListener(name, listener) { if (listeners.get(name) === listener) listeners.delete(name) },
+    close() { this.closed = true; this.readyState = 2 },
+    emit(name, data) { return listeners.get(name)?.({ data: JSON.stringify(data) }) } }
+  const card = { _browserControls: { toolBinding: () => ({ cardEpoch: 'card-epoch-a' }) } }
+  const doc = { getElementById: id => id === 'browser-a' ? card : null }
+  const directAttach = new Function('browserToolDispatch', 'console', 'TAG', 'document',
+    'browserToolRunBindings', 'browserToolCancelledRuns', `${attachSource}\nreturn attachBrowserToolTransport`)(
+    async request => ({ requestId: request.requestId, status: 'observed' }), { warn() {} }, '[test]',
+    doc, runBindings, new Map())
+  let attached = 0, boundRespond
+  const attach = options => { attached++; boundRespond = options.respond; return directAttach(options) }
+  const state = { codex: { localHistoryStatus: 'ready', threads: [{ inputSources: [{ kind: 'browser',
+    browserToolPermission: 'interact', browserToolSelection: { token: 'selected' } }] }] } }
+  const fetchJson = async (path, options) => {
+    assert.equal(path, '/browser-tool/respond')
+    const payload = JSON.parse(options.body)
+    posts.push(payload)
+    return { accepted: true, requestId: payload.response.requestId }
+  }
+  const harness = new Function('deps', `
+    const { state, source: initialSource, fetchJson, attachBrowserToolTransport,
+      browserToolRunBindings, browserToolActionLeases, browserToolUserSelections } = deps;
+    const window = { AbortController, EventSource: { OPEN: 1 } };
+    const epochScope = { valid: () => true };
+    const resumedNativeBindings = new Set();
+    const protocol = { connection: 'online' };
+    const connectionSource = initialSource, streamEpoch = 0;
+    let source = initialSource, streamReady = false, browserTransportId = null,
+      browserTransportSource = null, browserTransportAbort = null,
+      detachBrowserToolTransport = null, browserToolAuthorityEpoch = 0;
+    let localAutoRetryEligible = false, localRetryBudget = 1, localRetryTimer = null;
+    let reconnects = 0;
+    const update = patch => Object.assign(state.codex, patch);
+    const loadLocalHistory = async () => {};
+    const scheduleReconnect = () => { reconnects++ };
+    const clearBrowserToolTransport = ({ revoke = false } = {}) => {${clearTransportBody}\n    };
+    const rootSseReady = () => {${rootSseReadyBody}\n    };
+    const onReady = event => {${readyTransportBody}\n    };
+    const onError = () => {${errorTransportBody}\n    };
+    return { onReady, onError, rootSseReady, state: () => ({ streamReady, browserTransportId, source,
+      browserToolAuthorityEpoch, reconnects, protocol }) };
+  `)({ state, source: sseSource, fetchJson, attachBrowserToolTransport: attach,
+    browserToolRunBindings: runBindings, browserToolActionLeases: actionLeases,
+    browserToolUserSelections: grants })
+
+  assert.deepEqual(Object.keys(harness.rootSseReady()).sort(),
+    ['browserTransportId', 'eventSourceReadyState', 'sampledAtMs', 'sourceReady', 'stable'].sort())
+  assert.equal(harness.rootSseReady().sourceReady, false, 'OPEN alone is not a bound Browser stream')
+  harness.onReady({ data: JSON.stringify({ ok: true, browserTransportId: 'transport-a' }) })
+  harness.onReady({ data: JSON.stringify({ ok: true, browserTransportId: 'transport-a' }) })
+  assert.equal(attached, 1, 'duplicate ready must not attach another Browser listener')
+  assert.equal(harness.state().browserTransportId, 'transport-a')
+  const sampledAt = Date.now()
+  const ready = harness.rootSseReady()
+  assert.equal(ready.sourceReady, true)
+  assert.equal(ready.stable, true)
+  assert.equal(ready.eventSourceReadyState, 1)
+  assert.equal(ready.browserTransportId, 'transport-a')
+  assert(ready.sampledAtMs >= sampledAt && ready.sampledAtMs <= Date.now())
+  sseSource.readyState = 0
+  assert.equal(harness.rootSseReady().sourceReady, false, 'current CONNECTING state overrides an earlier ready event')
+  assert.equal(harness.rootSseReady().browserTransportId, null)
+  sseSource.readyState = 1
+  assert.equal(harness.rootSseReady().sourceReady, true)
+  await sseSource.emit('browser-tool-request', { requestId: 'request-a', runId: 'run-a',
+    cardId: 'browser-a', targetCardEpoch: 'card-epoch-a' })
+  assert.deepEqual(posts, [{ browserTransportId: 'transport-a',
+    response: { requestId: 'request-a', status: 'observed' } }])
+  harness.onError()
+  assert.equal(sseSource.closed, true)
+  assert.equal(harness.state().browserTransportId, null)
+  assert.equal(harness.rootSseReady().sourceReady, false)
+  assert.equal(harness.rootSseReady().browserTransportId, null)
+  assert.equal(harness.state().browserToolAuthorityEpoch, 1)
+  assert.equal(harness.state().reconnects, 1)
+  assert.equal(runBindings.size, 0)
+  assert.equal(actionLeases.size, 0)
+  assert.equal(grants.size, 0)
+  assert.equal(state.codex.threads[0].inputSources[0].browserToolPermission, 'observe')
+  await assert.rejects(boundRespond({ requestId: 'late-request', status: 'observed' }), /stream changed/)
+  assert.equal(posts.length, 1, 'late responses must not post through a replacement Chat stream')
 })

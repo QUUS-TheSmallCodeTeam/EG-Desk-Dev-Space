@@ -3934,8 +3934,12 @@
                 spawnOntologyMapCard();
               } else if (item.id === 'chat') {
                 state.codex.hudView = 'conversation';
-                spawnCodexChatCard();
+                const chatCard = spawnCodexChatCard();
                 state.codexBridge?.selectThread(state.codex.activeThreadId, { openConversation: true });
+                // The human Dock intent is already to open Chat. If the
+                // settled camera would show only its semantic proxy, use the
+                // proxy's existing focus-to-readable path without another click.
+                state.focusChatDockIfCompact?.(chatCard);
               } else {
                 toggleHUD(item.id, item.label);
               }
@@ -5186,6 +5190,47 @@
     let streamReady = false;
     let source = null;
     let reconnectTimer = null;
+    let browserTransportId = null;
+    let browserTransportSource = null;
+    let detachBrowserToolTransport = null;
+    let browserTransportAbort = null;
+
+    const clearBrowserToolTransport = ({ revoke = false } = {}) => {
+      const hadTransport = !!browserTransportId;
+      try { detachBrowserToolTransport?.(); } catch {}
+      detachBrowserToolTransport = null;
+      try { browserTransportAbort?.abort(); } catch {}
+      browserTransportAbort = null;
+      browserTransportId = null;
+      browserTransportSource = null;
+      if (revoke && hadTransport) {
+        browserToolAuthorityEpoch++;
+        browserToolRunBindings.clear();
+        browserToolActionLeases.clear();
+        browserToolUserSelections.clear();
+        state.codex.threads = state.codex.threads.map(thread => ({ ...thread,
+          inputSources: (thread.inputSources || []).map(input => input.kind === 'browser' &&
+            input.browserToolPermission === 'interact'
+            ? { ...input, browserToolPermission: 'observe', browserToolSelection: null,
+              browserToolIdentity: null }
+            : input),
+        }));
+      }
+    };
+
+    // Read-only, sampled at call time. A ready event from an older stream is
+    // never evidence that the current root Chat SSE can carry Browser tools.
+    const rootSseReady = () => {
+      let eventSourceReadyState = null;
+      try { if (Number.isSafeInteger(source?.readyState)) eventSourceReadyState = source.readyState; } catch {}
+      const stable = !!(source && browserTransportSource === source && streamReady &&
+        eventSourceReadyState === (window.EventSource?.OPEN ?? 1) &&
+        typeof detachBrowserToolTransport === 'function' &&
+        browserTransportAbort && !browserTransportAbort.signal.aborted &&
+        typeof browserTransportId === 'string' && browserTransportId);
+      return { sourceReady: stable, stable, eventSourceReadyState,
+        browserTransportId: stable ? browserTransportId : null, sampledAtMs: Date.now() };
+    };
 
     function threadBusy(thread) {
       return !!thread?.resuming || !!thread?.preparingInput || ChatState.runsForThread(protocol, thread).some(ChatState.isRunBusy)
@@ -5444,6 +5489,7 @@
     };
     const resetThreadConversations = () => {
       epochScope.reset();
+      clearBrowserToolTransport();
       browserToolAuthorityEpoch++;
       browserToolRunBindings.clear();
       browserToolUserSelections.clear();
@@ -5782,8 +5828,35 @@
       }
 
       const connectionSource = source;
-      connectionSource.addEventListener('ready', () => {
+      connectionSource.addEventListener('ready', (event) => {
         if (!epochScope.valid(streamEpoch) || source !== connectionSource) return;
+        let ready = null;
+        try { ready = JSON.parse(event.data); } catch {}
+        const nextTransportId = ready?.browserTransportId;
+        const sameTransport = browserTransportId === nextTransportId &&
+          browserTransportSource === connectionSource && !!detachBrowserToolTransport;
+        if (!sameTransport && browserTransportId) {
+          clearBrowserToolTransport({ revoke: true });
+        } else if (!sameTransport) clearBrowserToolTransport();
+        if (!sameTransport && typeof nextTransportId === 'string' &&
+            nextTransportId.length > 0 && nextTransportId.length <= 160) {
+          const transportId = nextTransportId;
+          browserTransportId = transportId;
+          browserTransportSource = connectionSource;
+          browserTransportAbort = new window.AbortController();
+          const responseSignal = browserTransportAbort.signal;
+          detachBrowserToolTransport = attachBrowserToolTransport({ source: connectionSource, respond: async response => {
+            if (!epochScope.valid(streamEpoch) || source !== connectionSource ||
+                browserTransportId !== transportId || browserTransportSource !== connectionSource) {
+              throw new Error('Browser tool UI stream changed before response');
+            }
+            const receipt = await fetchJson('/browser-tool/respond', { method: 'POST', signal: responseSignal,
+              body: JSON.stringify({ browserTransportId: transportId, response }) });
+            if (receipt?.accepted !== true || receipt.requestId !== response.requestId) {
+              throw new Error('Browser tool response was not accepted by the bound stream');
+            }
+          } });
+        }
         streamReady = true;
         resumedNativeBindings.clear();
         update({ connected: true });
@@ -5810,6 +5883,7 @@
 
       connectionSource.onerror = () => {
         if (!epochScope.valid(streamEpoch) || source !== connectionSource) return;
+        clearBrowserToolTransport({ revoke: true });
         try { connectionSource.close(); } catch {}
         source = null;
         streamReady = false;
@@ -5824,6 +5898,7 @@
 
     return {
       loadLocalHistory,
+      rootSseReady,
       async reconcileRequest(threadId = state.codex.activeThreadId) {
         const thread = getCodexThreadById(state.codex, threadId);
         if (!thread) return null;
@@ -6378,6 +6453,21 @@
         }
         const requestId = `request-${Date.now().toString(36)}-${Math.random().toString(36).slice(2)}`;
         const selectedBrowserSources = browserToolSelectedSources(activeThread.id, selectedInputs);
+        const requestedBrowserInteraction = selectedInputs.some(input => input.kind === 'browser' &&
+          input.selectedByUser === true && input.browserToolPermission === 'interact');
+        if (requestedBrowserInteraction && !selectedBrowserSources.some(input => input.browserToolPermission === 'interact')) {
+          updateThreadById(activeThread.id, thread => ({ ...thread,
+            sendError: '선택한 Browser 조작 권한이 만료됐습니다. 현재 Browser에서 다시 선택해 주세요.' }));
+          epochScope.finish(token);
+          return;
+        }
+        const selectedBrowserTransportId = browserTransportId;
+        if (selectedBrowserSources.length && (!streamReady || !selectedBrowserTransportId || browserTransportSource !== source)) {
+          updateThreadById(activeThread.id, thread => ({ ...thread,
+            sendError: '선택한 Browser 연결이 바뀌었습니다. Browser를 다시 선택한 뒤 전송해 주세요.' }));
+          epochScope.finish(token);
+          return;
+        }
         ChatState.registerChatRequest(protocol, { requestId, clientThreadId: ChatState.clientThreadBinding(activeThread), localThreadId: activeThread.id, conversationId: activeThread.conversationId, authorName: activeThread.profileEnabled ? codexThreadAgentProfile(activeThread).name : 'Codex' }, state.codex.authStatus);
         appendMessageToThread(activeThread.id, createCodexMessage('user', content, 'submitting', {
           readBy: [SELF_MEMBER], requestId, inputReferences,
@@ -6396,7 +6486,10 @@
           runtimeConfig.contextSnapshotIds = inputReferences.map(reference => reference.snapshotId);
           runtimeConfig.contextCapabilities = ChatState.contextCapabilitiesForRequest(activeThread, state.codex.authStatus, runtimeConfig.contextSnapshotIds);
           const chatRequest = ChatState.buildChatRequest(activeThread, content, requestId, runtimeConfig);
-          if (selectedBrowserSources.length) chatRequest.selectedSources = selectedBrowserSources;
+          if (selectedBrowserSources.length) {
+            chatRequest.selectedSources = selectedBrowserSources;
+            chatRequest.browserTransportId = selectedBrowserTransportId;
+          }
           const result = await fetchJson('/chat/send', {
             method: 'POST',
             signal: token.signal,
@@ -11968,6 +12061,68 @@
       for (const card of entries.keys()) if (!current.has(card) || !card.isConnected) remove(card);
       for (const card of current) add(card);
     };
+    let cancelPendingChatComposerFocus = () => {};
+    const focusChatDockIfCompact = card => {
+      cancelPendingChatComposerFocus();
+      if (!card?.isConnected || !card.classList?.contains('egd-chat-card') || state.panModifier) return false;
+      syncEntries();
+      const entry = entries.get(card);
+      if (!entry) return false;
+      entry.visibilityDirty = true;
+      if (!authorVisible(entry)) return false;
+      const zoom = Number.isFinite(state.zoomTarget) ? state.zoomTarget : state.zoom;
+      const rect = screenRect(card, zoom, state.panTarget || state.pan);
+      const level = SurfaceState.surfaceSemanticLevel({
+        width: rect.width, height: rect.height, fontPx: entry.bodyFontPx * zoom,
+        previous: entry.level, detailWidth, detailHeight,
+      });
+      if (level === 'detail') return false;
+      focusProjection(entry);
+      const target = { zoom: state.zoomTarget, pan: { ...state.panTarget } };
+      const initialFocus = document.activeElement;
+      let frame = 0, checks = 0, stopped = false;
+      const cancel = () => {
+        if (stopped) return;
+        stopped = true;
+        if (frame) window.cancelAnimationFrame(frame);
+        document.removeEventListener('mousedown', onOtherInput, true);
+      };
+      const onOtherInput = event => {
+        if (!card.contains(event.target)) cancel();
+      };
+      const check = () => {
+        frame = 0;
+        if (stopped) return;
+        if (!card.isConnected || state.activeEntityId !== card.id || state.panModifier ||
+            state.codex.chatCardEntityId !== card.id || state.codex.chatDockMode !== 'canvas' ||
+            Math.abs(state.zoomTarget - target.zoom) > 0.001 ||
+            Math.abs(state.panTarget.x - target.pan.x) > 0.25 ||
+            Math.abs(state.panTarget.y - target.pan.y) > 0.25) { cancel(); return; }
+        const settled = Math.abs(state.zoom - target.zoom) < 0.0015 &&
+          Math.abs(state.pan.x - target.pan.x) < 0.25 &&
+          Math.abs(state.pan.y - target.pan.y) < 0.25;
+        if (settled && entry.level === 'detail') {
+          const composer = card.querySelector('.egd-codex-input');
+          const active = document.activeElement;
+          const humanFocusMovedElsewhere = active && active !== initialFocus &&
+            active !== viewport && !card.contains(active);
+          if (composer?.isConnected && !composer.disabled &&
+              !humanFocusMovedElsewhere &&
+              (!card.contains(active) || active === composer || active === entry.proxy)) {
+            composer.focus({ preventScroll: true });
+          }
+          cancel();
+          return;
+        }
+        if (++checks >= 180) { cancel(); return; }
+        frame = window.requestAnimationFrame(check);
+      };
+      document.addEventListener('mousedown', onOtherInput, true);
+      cancelPendingChatComposerFocus = cancel;
+      frame = window.requestAnimationFrame(check);
+      return true;
+    };
+    state.focusChatDockIfCompact = focusChatDockIfCompact;
     const layerObserver = new MutationObserver(() => { syncEntries(); request(); });
     layerObserver.observe(layer, { childList: true });
     const ancestorVisibilityObserver = new MutationObserver(() => {
@@ -12097,6 +12252,7 @@
     state.refreshSemanticProjections = request;
     return {
       refresh: request,
+      focusChatDockIfCompact,
       snapshot: () => ({
         cards: Array.from(entries.values()).map(entry => ({
           id: entry.card.id, kind: entry.kind, level: entry.level,
@@ -12769,6 +12925,10 @@
           dispatch: browserToolDispatch,
           attachTransport: attachBrowserToolTransport,
           authorizePhysicalAction: browserToolAuthorizePhysicalAction,
+          rootSseReady: () => state.codexBridge?.rootSseReady?.() || {
+            sourceReady: false, stable: false, eventSourceReadyState: null,
+            browserTransportId: null, sampledAtMs: Date.now(),
+          },
         },
         sourceRefs: {
           keyFor: sourceRefKey,
