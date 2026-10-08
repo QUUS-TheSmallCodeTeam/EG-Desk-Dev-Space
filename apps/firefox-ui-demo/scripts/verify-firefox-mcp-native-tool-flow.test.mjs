@@ -4,16 +4,23 @@ import { spawnSync } from 'node:child_process';
 import { createHash } from 'node:crypto';
 import {
   parseDeadlineUtc, assertBeforeDeadline, assertTurnTimeBudget, parseCases, scenarioCoverage,
+  parseResumeEmptyThreadId, assertResumeEmptyThreadState,
+  parseResumeSourceOptions, assertPreparedSourceResumeEvidence,
   chooseChatProxyTarget,
   harmlessPrintfCommand, nativeReadCommand, nativeZshWrappedCommand,
   assertHiddenMarkerOutsideModelAdmission,
-  assertRealTransport, assertNativeQaCapabilityBeforeTurn, assertEffectiveReadOnly,
+  assertRealTransport, assertMemoryIsolationBeforeTurn,
+  assertNativeQaCapabilityBeforeTurn, assertEffectiveReadOnly,
   assertOrdinaryUiBaseline, assertUiQaRequest, assertBrowserUiRequest,
   assertFreshBrowserRootSse,
   assertNativeAuthorityChain, assertPendingReadOnlyNoSideEffect,
   assertNativeFileAndCommand, assertSourceRead, assertBrowserToolFlow,
+  browserToolReceipts, assertBrowserPositiveFlow,
+  assertPublicBrowserSseBindings,
   assertBrowserSameChatAddition, assertBrowserNegativeGuards,
-  assertBrowserFixtureConfig, assertNoFixtureWrites,
+  assertBrowserFixtureConfig, browserFixtureHtml, createBrowserFixtureHandler,
+  assertBrowserFixtureServerReady,
+  assertNoFixtureWrites,
 } from './verify-firefox-mcp-native-tool-flow.mjs';
 
 const cwd = '/private/var/folders/qa/egdesk-chat-test-unit/qa-fixtures/real-turn';
@@ -44,9 +51,18 @@ const inventory = Object.freeze({
 
 test('real transport and effective native read-only policy are hard pre-turn gates', () => {
   const transport = { realTurn: '1', fixtureTransport: undefined,
-    health: { ok: true, appServerReady: true, fixture: false },
+    health: { ok: true, appServerReady: true, fixture: false,
+      memoryIsolation: { feature: 'memories', status: 'verified-disabled' } },
     auth: { isLoggedIn: true, loginInProgress: false }, fixtureEndpointStatus: 404 };
   assert.equal(assertRealTransport(transport), true);
+  assert.equal(assertMemoryIsolationBeforeTurn(transport.health), true);
+  for (const receipt of [undefined,
+    { feature: 'memories', status: 'not-requested' },
+    { feature: 'memories', status: 'blocked' },
+    { feature: 'other', status: 'verified-disabled' }]) {
+    assert.throws(() => assertRealTransport({ ...transport,
+      health: { ...transport.health, memoryIsolation: receipt } }), /memories.*isolation/);
+  }
   assert.throws(() => assertRealTransport({ ...transport, health: { ...transport.health, fixture: true } }), /fixture/);
   assert.throws(() => assertRealTransport({ ...transport, fixtureEndpointStatus: 200 }), /fixture control/);
   assert.throws(() => assertRealTransport({ ...transport, auth: { isLoggedIn: false } }), /authentication/);
@@ -121,12 +137,97 @@ test('explicit case selection verifies partial work without claiming full-scenar
   assert.deepEqual(scenarioCoverage(['native', 'source'], ['native', 'source']), {
     selectedCasesVerified: true, fullScenarioVerified: false, coverage: 'partial' });
   assert.deepEqual(scenarioCoverage(['native', 'source', 'browser'], ['native', 'source', 'browser']), {
+    selectedCasesVerified: true, fullScenarioVerified: false, coverage: 'partial' });
+  assert.deepEqual(scenarioCoverage(['native', 'source', 'browser', 'browser-negative'],
+    ['native', 'source', 'browser', 'browser-negative']), {
     selectedCasesVerified: true, fullScenarioVerified: true, coverage: 'full' });
   assert.deepEqual(scenarioCoverage(['native', 'source'], ['native']), {
     selectedCasesVerified: false, fullScenarioVerified: false, coverage: 'partial' });
   for (const invalid of [undefined, '', 'native,source,unknown', 'native,native', 'native, source']) {
     assert.throws(() => parseCases(invalid));
   }
+});
+
+test('source-only resume accepts one already active empty ordinary room and rejects uncertain reuse', () => {
+  const id = 'thread-dm-mqpbdbw';
+  assert.equal(parseResumeEmptyThreadId(id, ['source']), id);
+  assert.equal(parseResumeEmptyThreadId(null, ['source']), null);
+  assert.throws(() => parseResumeEmptyThreadId(id, ['native', 'source']), /only with --cases source/);
+  assert.throws(() => parseResumeEmptyThreadId('thread-dm-other', ['source']), /generated DM thread/);
+  const observed = { activeThreadId: id,
+    thread: { id, title: 'Codex 3', conversationId: null, localConversationId: null,
+      profileEnabled: false, bindingState: 'fresh', bindingAccountKey: null,
+      nativeBindingHeld: false, messagesCount: 0, inputSourcesCount: 0,
+      briefingInputsCount: 0, preparingInput: false, resuming: false, sendError: null },
+    nativeRunCount: 0, visibleInputCount: 1, composerVisible: true,
+    inputThreadId: id, inputValue: '', draftText: '', wireClientThreadId: id };
+  assert.equal(assertResumeEmptyThreadState(observed, id), true);
+  assert.throws(() => assertResumeEmptyThreadState({ ...observed,
+    thread: { ...observed.thread, messagesCount: 1 } }, id), /already has messages/);
+  assert.throws(() => assertResumeEmptyThreadState({ ...observed,
+    thread: { ...observed.thread, nativeBindingHeld: true } }, id), /retains a native binding/);
+  assert.throws(() => assertResumeEmptyThreadState({ ...observed,
+    briefingInputsCount: 1, thread: { ...observed.thread, briefingInputsCount: 1 } }, id), /briefing inputs/);
+  assert.throws(() => assertResumeEmptyThreadState({ ...observed,
+    inputThreadId: 'other-room' }, id), /composer belongs/);
+  assert.throws(() => assertResumeEmptyThreadState({ ...observed,
+    draftText: 'unsent' }, id), /saved draft/);
+});
+
+test('prepared source resume preserves the exact unsent draft, old snapshot and changed live file', () => {
+  const threadId = 'thread-dm-mqpbdbw';
+  const root = `${cwd}/lane-c-LRmCLl`;
+  const sourceId = '6bf7d32f-cbc0-455c-9918-b9dcf1f146eb';
+  const sourceFile = `${root}/source-read.txt`;
+  const originalNonce = `QA_SOURCE_ORIGINAL_${'a'.repeat(24)}`;
+  const changedNonce = `QA_SOURCE_LIVE_${'b'.repeat(24)}`;
+  const originalText = `Public EG-Desk source QA fixture.\n${originalNonce}\n`;
+  const liveText = `Public EG-Desk changed live QA source.\n${changedNonce}\n`;
+  const originalHash = createHash('sha256').update(originalText).digest('hex');
+  const prompt = 'Use the attached immutable public QA source with egdesk_read_source. Report its original marker exactly. Do not read the current live file, write files, use network, or perform other work.';
+  const expected = parseResumeSourceOptions({ threadId, root, sourceId, originalHash }, ['source']);
+  assert.deepEqual(expected, { threadId, root, sourceId, originalHash });
+  assert.equal(parseResumeSourceOptions({ threadId: null, root: null, sourceId: null,
+    originalHash: null }, ['source']), null);
+  assert.throws(() => parseResumeSourceOptions({ threadId, root, sourceId, originalHash },
+    ['native', 'source']), /only with --cases source/);
+  assert.throws(() => parseResumeSourceOptions({ threadId, root, sourceId, originalHash },
+    ['source'], threadId), /cannot also resume/);
+  assert.throws(() => parseResumeSourceOptions({ threadId, root, sourceId,
+    originalHash: 'a'.repeat(16) }, ['source']), /prior capture receipt hash/);
+  const reference = { sourceId, snapshotId: sourceId, hash: originalHash,
+    sourceRef: { path: sourceFile }, localSource: { sourceRef: { path: sourceFile } } };
+  const observed = { activeThreadId: threadId, wireClientThreadId: clientThreadId,
+    thread: { id: threadId, title: 'QA immutable source read', cwd: root,
+      conversationId: null, localConversationId: null, profileEnabled: false,
+      bindingState: 'fresh', bindingAccountKey: null, nativeBindingHeld: false,
+      messagesCount: 0, inputSourcesCount: 0, briefingInputsCount: 1,
+      preparingInput: false, resuming: false, sendError: null },
+    reference, nativeRunCount: 0, composerVisible: true, visibleInputCount: 1,
+    inputThreadId: threadId, inputValue: prompt, draftText: prompt,
+    sendButtonVisible: true, sendButtonEnabled: true, sendButtonUnobscured: true };
+  const stored = { capture: { sourceId, clientThreadId, hash: originalHash,
+    sourceRef: { path: sourceFile } }, source: { text: originalText },
+    delivered: null, bindings: [] };
+  const input = { observed, expected, stored, originalHash, liveText, sourceFile, prompt };
+  assert.deepEqual(assertPreparedSourceResumeEvidence(input), { reference, originalNonce,
+    changedNonce, originalHash, currentHash: createHash('sha256').update(liveText).digest('hex') });
+  assert.throws(() => assertPreparedSourceResumeEvidence({ ...input,
+    observed: { ...observed, thread: { ...observed.thread, messagesCount: 1 } } }), /has messages/);
+  assert.throws(() => assertPreparedSourceResumeEvidence({ ...input,
+    observed: { ...observed, sendButtonUnobscured: false } }), /obscured/);
+  assert.throws(() => assertPreparedSourceResumeEvidence({ ...input,
+    observed: { ...observed, reference: { ...reference, sourceId: 'other' } } }), /source ID changed/);
+  assert.throws(() => assertPreparedSourceResumeEvidence({ ...input,
+    stored: { ...stored, delivered: { packetId: 'prior' } } }), /earlier delivered/);
+  assert.throws(() => assertPreparedSourceResumeEvidence({ ...input,
+    stored: { ...stored, bindings: [{ runId: 'prior' }] } }), /already bound/);
+  assert.throws(() => assertPreparedSourceResumeEvidence({ ...input,
+    liveText: originalText }), /expected changed text/);
+  const leakedPrompt = `${prompt} ${originalNonce}`;
+  assert.throws(() => assertPreparedSourceResumeEvidence({ ...input, prompt: leakedPrompt,
+    observed: { ...observed, inputValue: leakedPrompt, draftText: leakedPrompt } }),
+  /marker leaked/);
 });
 
 test('compact Chat proxy is selected by observed active Card and never by an ambiguous fallback', () => {
@@ -139,14 +240,18 @@ test('compact Chat proxy is selected by observed active Card and never by an amb
 });
 
 test('Browser preflight reflects exact selected Card, one-time token binding and bounded native policy', () => {
+  const fixtureUrl = 'http://127.0.0.1:39220/egdesk-qa/QA_URL_0123456789abcdef';
   const selection = { cardId: 'card-qa', profileId: 'profile-qa',
-    sourceId: 'source-qa', cardEpoch: 'card-epoch-1' };
+    sourceId: 'source-qa', cardEpoch: 'card-epoch-1', uri: fixtureUrl, accountId: '' };
   const reflection = { cwd, profileEnabled: false, personaFields: [], conversationId: null,
     route: 'http://127.0.0.1:39218/chat/send', forwardedToOriginalFetch: true,
     requestId: 'request-browser', clientThreadId, messageMatched: true,
     executionPolicy: { mode: 'fixtureBrowserQa' }, browserTransportId: 'root-sse-qa-1',
+    rootSseStable: true, rootSseReadyState: 1,
+    rootSseSampledAtMs: 1001, rootSseCheckedAtMs: 1002,
     selectedSources: [{ kind: 'browser', sourceId: selection.sourceId,
       cardId: selection.cardId, profileId: selection.profileId,
+      uri: fixtureUrl, accountId: '',
       permission: 'interact', selectedByUser: true, cardEpoch: selection.cardEpoch,
       hasOneTimeToken: true, tokenThreadId: clientThreadId }] };
   const input = { cwd, clientThreadId, conversationId: null, selection };
@@ -165,15 +270,19 @@ test('Browser preflight reflects exact selected Card, one-time token binding and
     browserTransportId: null }, input), /transport binding/);
   assert.equal(assertBrowserUiRequest({ ...reflection, conversationId: 'conversation-1' },
     { ...input, conversationId: 'conversation-1' }), true);
-  const ready = { sourceReady: true, eventSourceReadyState: 1,
-    browserTransportId: 'root-sse-qa-1', observedAt: 1000 };
+  const ready = { sourceReady: true, stable: true, eventSourceReadyState: 1,
+    browserTransportId: 'root-sse-qa-1', sampledAtMs: 1000 };
   assert.equal(assertFreshBrowserRootSse({ ready, emitted: reflection, now: 1001 }), true);
   assert.throws(() => assertFreshBrowserRootSse({ ready: { ...ready, sourceReady: false },
     emitted: reflection, now: 1001 }), /not received/);
-  assert.throws(() => assertFreshBrowserRootSse({ ready, emitted: reflection,
-    now: 7001 }), /stale/);
+  assert.throws(() => assertFreshBrowserRootSse({ ready: { ...ready, stable: false },
+    emitted: reflection, now: 1001 }), /current listener/);
+  assert.equal(assertFreshBrowserRootSse({ ready, emitted: reflection, now: 7001 }), true);
+  assert.throws(() => assertFreshBrowserRootSse({ ready, now: 7001 }), /stale/);
   assert.throws(() => assertFreshBrowserRootSse({ ready, emitted: { ...reflection,
     browserTransportId: 'other-root' }, now: 1001 }), /did not use/);
+  assert.throws(() => assertFreshBrowserRootSse({ ready, emitted: { ...reflection,
+    rootSseStable: false }, now: 1001 }), /not stable/);
 });
 
 test('C correlates original SSE provider, active snapshot stream epoch and native policy before completion', () => {
@@ -311,30 +420,146 @@ test('source proof needs named native tool call, original snapshot binding and d
     detail: { tool: 'egdesk_read_source' } }];
   value.context = { captures: [{ sourceId: 'source-1', hash: 'original-hash' }],
     packets: [{ sourceId: 'source-1', packetId: 'packet-1', receiptId: 'delivery-1',
-      mode: 'direct', coverage: { sourceTruncated: false } }] };
+      mode: 'direct', coverage: { sourceTruncated: false },
+      deliveryStatus: 'sent-to-app-server' }] };
   const reference = { sourceId: 'source-1', snapshotId: 'source-1', hash: 'original-hash' };
   const stored = { capture: { sourceId: 'source-1', hash: 'original-hash' },
     source: { text: 'QA_SOURCE_earlier' },
-    delivered: { packetId: 'packet-1', deliveryStatus: 'sent-to-app-server' } };
-  const events = [...life(value), event(value, 'context.read.completed', {
+    delivered: { packetId: 'packet-1', deliveryStatus: 'sent-to-app-server',
+      binding: { conversationId: value.conversationId, runId: value.runId,
+        answerId: value.answerId } } };
+  const lifecycle = life(value);
+  const events = [...lifecycle.slice(0, 2), { ...event(value, 'context.read.completed', {
     sourceId: 'source-1', packetId: 'packet-1', receiptId: 'delivery-1',
-    mode: 'direct', deliveryStatus: 'sent-to-app-server' }, 'call-source-1')];
+    mode: 'direct', deliveryStatus: 'sent-to-app-server' }, 'call-source-1'), seq: 3 },
+  { ...lifecycle[2], seq: 5 }];
   const input = { run: value, events, reference, originalNonce: 'QA_SOURCE_earlier',
     changedNonce: 'QA_SOURCE_later', originalHash: 'original-hash', currentHash: 'changed-hash',
     stored, beforeFiles: inventory, afterFiles: structuredClone(inventory),
     changedFile: sourceFile };
   assert.deepEqual(assertSourceRead(input), { sourceId: 'source-1', nativeCallId: 'call-source-1',
-    packetId: 'packet-1', readMode: 'direct' });
+    packetId: 'packet-1', readMode: 'direct', readCount: 1 });
   assert.throws(() => assertSourceRead({ ...input, events: life(value) }), /named native/);
   assert.throws(() => assertSourceRead({ ...input, events: events.map(item => item.event === 'context.read.completed'
-    ? { ...item, itemId: 'other' } : item) }), /named native/);
+    ? { ...item, itemId: 'other' } : item) }), /uniquely bound/);
   assert.throws(() => assertSourceRead({ ...input, run: { ...value, activities: [] } }), /named native/);
   assert.throws(() => assertSourceRead({ ...input, stored: { ...stored, source: { text: 'QA_SOURCE_later' } } }), /original nonce/);
-  assert.throws(() => assertSourceRead({ ...input, run: { ...value, context: { ...value.context, captures: [] } } }), /binding/);
+  assert.throws(() => assertSourceRead({ ...input, run: { ...value, context: { ...value.context, captures: [] } } }), /exactly one capture/);
   assert.throws(() => assertSourceRead({ ...input, run: { ...value,
     activities: [...value.activities, { id: 'native-read', kind: 'commandExecution' }] } }), /not distinct/);
   assert.throws(() => assertSourceRead({ ...input, run: { ...value, context: { ...value.context,
     packets: [{ ...value.context.packets[0], coverage: { sourceTruncated: true } }] } } }), /SmartRead/);
+  const secondPacket = { sourceId: 'source-1', packetId: 'packet-2', receiptId: 'delivery-2',
+    mode: 'reader', coverage: { sourceTruncated: false }, deliveryStatus: 'sent-to-app-server' };
+  const secondRead = { ...event(value, 'context.read.completed', {
+    sourceId: 'source-1', packetId: 'packet-2', receiptId: 'delivery-2',
+    mode: 'reader', deliveryStatus: 'sent-to-app-server' }, 'call-source-2'), seq: 4 };
+  const twoRun = { ...value, activities: [...value.activities,
+    { id: 'call-source-2', kind: 'dynamicToolCall', status: 'completed',
+      detail: { tool: 'egdesk_read_source' } }],
+    context: { ...value.context, packets: [...value.context.packets, secondPacket] } };
+  const twoEvents = [...events.slice(0, -1), secondRead, events.at(-1)];
+  const twoStored = { ...stored, delivered: { ...stored.delivered, packetId: 'packet-2' } };
+  const twoInput = { ...input, run: twoRun, events: twoEvents, stored: twoStored };
+  assert.deepEqual(assertSourceRead(twoInput), { sourceId: 'source-1',
+    nativeCallId: 'call-source-2', packetId: 'packet-2', readMode: 'reader', readCount: 2 });
+  assert.throws(() => assertSourceRead({ ...twoInput, stored }), /latest delivered packet/);
+  assert.throws(() => assertSourceRead({ ...twoInput,
+    stored: { ...twoStored, delivered: { ...twoStored.delivered,
+      binding: { ...twoStored.delivered.binding, runId: 'another-run' } } } }), /another run/);
+  assert.throws(() => assertSourceRead({ ...twoInput, events: events }), /incomplete/);
+  assert.throws(() => assertSourceRead({ ...twoInput,
+    run: { ...twoRun, context: { ...twoRun.context,
+      packets: [...twoRun.context.packets].reverse() } } }), /SSE delivery order/);
+  assert.throws(() => assertSourceRead({ ...twoInput,
+    run: { ...twoRun, activities: twoRun.activities.filter(item => item.id !== 'call-source-2') } }), /incomplete/);
+  assert.throws(() => assertSourceRead({ ...twoInput,
+    run: { ...twoRun, context: { ...twoRun.context,
+      packets: [twoRun.context.packets[0], { ...secondPacket, coverage: { sourceTruncated: true } }] } } }), /SmartRead/);
+});
+
+test('Browser positive maps actual A SSE/native items to one local observe-click-observe-fill run', () => {
+  const value = run('turn-browser-positive');
+  value.executionPolicy = { mode: 'fixtureBrowserQa', status: 'native-thread-verified',
+    sandbox: 'readOnly', networkAccess: false, approvalPolicy: 'never',
+    externalMcpCatalog: 'empty', inspectedMcpServers: 0,
+    browserEffects: 'attested-local-fixture-only' };
+  const fixture = { url: 'http://127.0.0.1:39220/egdesk-qa/QA_URL_0123456789abcdef',
+    marker: 'QA_DOM_0123456789abcdef' };
+  const selection = { selectedByUser: true, permission: 'interact',
+    cardId: 'card-positive', profileId: 'profile-positive', uri: fixture.url,
+    accountId: '', sourceId: 'source-positive', cardEpoch: 'card-epoch-positive' };
+  value.messages = [{ role: 'assistant', text: `Observed ${fixture.marker} and filled the harmless field.` }];
+  value.context = { captures: [{ sourceId: 'capture-positive' }] };
+  value.browserBinding = { cards: [{ cardId: selection.cardId, permission: 'interact',
+    sourceId: selection.sourceId, cardEpoch: selection.cardEpoch }] };
+  const ids = ['observe-1', 'click-1', 'observe-2', 'fill-1'];
+  const names = ['egdesk_browser_observe', 'egdesk_browser_click',
+    'egdesk_browser_observe', 'egdesk_browser_fill'];
+  value.activities = ids.map((id, index) => ({ id, kind: 'dynamicToolCall', status: 'completed',
+    detail: { tool: names[index] } }));
+  const events = life(value);
+  events[2] = { ...events[2], seq: 9 };
+  events.splice(2, 0,
+    { ...event(value, 'context.bound', { captures: value.context.captures }), seq: 3 },
+    { ...event(value, 'browser.bound', value.browserBinding), seq: 4 },
+    ...ids.map((id, index) => ({ ...event(value, 'browser.tool.completed', {
+      callId: id, cardId: selection.cardId, sourceId: selection.sourceId,
+      targetCardEpoch: selection.cardEpoch, bridgeEpoch: 7,
+      originalProviderId: 'egdesk-browser', namespace: null,
+      status: [0, 2].includes(index) ? 'observed' : 'postcondition-observed',
+      ...([0, 2].includes(index) ? { observationId: `obs-${index}` }
+        : { action: index === 1 ? 'click' : 'fill', postconditionMatched: true }),
+      externalEffectVerified: false,
+    }, id), seq: 5 + index })));
+  const active = { snapshot: { streamId: 'stream-unit', seq: 2 },
+    run: { ...value, status: 'inProgress' } };
+  const emitted = { contextSnapshotIds: ['capture-positive'],
+    selectedSources: [{ sourceId: selection.sourceId,
+      cardEpoch: selection.cardEpoch, uri: fixture.url }] };
+  const before = { targetUrl: fixture.url, targetProfileId: selection.profileId,
+    targetCardEpoch: selection.cardEpoch, targetAccountId: '',
+    targetDocumentId: 'document-positive', targetRevision: 2,
+    targetViewport: { width: 800, height: 600, devicePixelRatio: 1 },
+    targetSegments: [fixture.marker, 'Waiting for QA action'],
+    targetText: 'Waiting for QA action', targetInteractive: [
+      { label: 'Reveal QA details', tag: 'button' }, { label: 'QA note', tag: 'input' }],
+    inputValue: '', targetInputFocused: false, focusedCardId: null,
+    controlText: '', controlInputValue: '', controlCardId: 'control-positive',
+    camera: { pan: { x: 0, y: 0 }, zoom: 1, activeEntityId: null },
+    cards: ['card-positive', 'control-positive'] };
+  const after = { ...before,
+    targetRevision: 3,
+    targetSegments: [fixture.marker, 'Changed by QA click', 'Newly revealed node'],
+    targetText: 'Changed by QA click\nNewly revealed node',
+    inputValue: 'harmless QA input', targetInputFocused: false, focusedCardId: null,
+    camera: { ...before.camera, activeEntityId: selection.cardId } };
+  const input = { run: value, events, active, emitted, cwd, selection, fixture,
+    target: { cardId: selection.cardId, profileId: selection.profileId,
+      fillValue: 'harmless QA input' }, control: { cardId: 'control-positive' }, before, after };
+  assert.deepEqual(browserToolReceipts(value, events).map(call => call.itemId), ids);
+  const proof = assertBrowserPositiveFlow(input);
+  assert.equal(proof.publicModelToolReceiptsVerified, true);
+  assert.equal(proof.independentLocalDomVerified, true);
+  assert.equal(proof.independentActorDocumentRevisionVerified, true);
+  assert.equal(proof.modelActionGuardRevisionPubliclyVerified, false);
+  assert.equal(proof.inputFocusedAfter, false);
+  assert.equal(proof.negativeGuardsVerified, false);
+  assert.throws(() => assertBrowserPositiveFlow({ ...input,
+    events: events.map(item => item.itemId === 'fill-1'
+      ? { ...item, details: { ...item.details, postconditionMatched: false } } : item) }), /fill postcondition/);
+  assert.throws(() => assertBrowserPositiveFlow({ ...input,
+    after: { ...after, targetSegments: ['Changed by QA click'] } }), /fixture marker/);
+  assert.throws(() => assertBrowserPositiveFlow({ ...input,
+    after: { ...after, targetDocumentId: 'other-document' } }), /document identities/);
+  assert.throws(() => assertBrowserPositiveFlow({ ...input,
+    after: { ...after, targetRevision: before.targetRevision } }), /revision did not advance/);
+  assert.throws(() => assertBrowserPositiveFlow({ ...input,
+    after: { ...after, targetViewport: { ...after.targetViewport, width: 700 } } }), /viewport changed/);
+  assert.throws(() => assertBrowserPositiveFlow({ ...input,
+    after: { ...after, camera: { ...after.camera, pan: { x: 2, y: 0 } } } }), /moved Canvas camera/);
+  assert.throws(() => assertBrowserPositiveFlow({ ...input,
+    after: { ...after, focusedCardId: 'control-positive' } }), /other than the selected target/);
 });
 
 test('Browser proof is tied to real model tool activities, card/profile/revisions, stale rejection and independent DOM', () => {
@@ -384,11 +609,20 @@ test('Browser proof is tied to real model tool activities, card/profile/revision
   events.splice(2, 0, { ...event(value, 'browser.bound', value.browserBinding), seq: 3 },
     ...calls.map((item, index) => ({ ...event(value,
       item.status === 'rejected' ? 'browser.tool.failed' : 'browser.tool.completed',
-      { originalProviderId: 'egdesk-browser', cardId: target.cardId,
+      { callId: item.itemId, originalProviderId: 'egdesk-browser', namespace: null,
+        cardId: target.cardId,
         sourceId: selection.sourceId, targetCardEpoch: selection.cardEpoch,
-        bridgeEpoch: item.bridgeEpoch }, item.itemId), seq: 4 + index })));
+        bridgeEpoch: item.bridgeEpoch,
+        ...(item.status === 'rejected' ? { code: item.code } : {
+          status: item.kind === 'observe' ? 'observed' : 'postcondition-observed',
+          ...(item.kind !== 'observe' ? { action: item.kind, postconditionMatched: true } : {}),
+        }) }, item.itemId), seq: 4 + index })));
   const input = { run: value, events, active, calls, selection, target,
     control: { cardId: 'card-control' }, before, after };
+  assert.equal(assertPublicBrowserSseBindings(input).publicEventBindingVerified, true);
+  assert.throws(() => assertPublicBrowserSseBindings({ ...input,
+    events: events.map(item => item.event === 'browser.tool.completed'
+      ? { ...item, details: { ...item.details, originalProviderId: 'other' } } : item) }), /another tool provider/);
   assert.equal(assertBrowserToolFlow(input).staleItemId, 'stale-1');
   assert.throws(() => assertBrowserToolFlow({ ...input, calls: calls.map(item => ({ ...item, origin: 'fixture' })) }), /native model/);
   assert.throws(() => assertBrowserToolFlow({ ...input, calls: calls.map(item => ({ ...item, toolName: 'other_tool' })) }), /B native tools/);
@@ -406,7 +640,8 @@ test('Browser proof is tied to real model tool activities, card/profile/revision
   assert.throws(() => assertBrowserToolFlow({ ...input, after: { ...after, targetText: before.targetText } }), /changed node/);
   assert.throws(() => assertBrowserToolFlow({ ...input, after: { ...after, camera: { pan: { x: 1, y: 0 }, zoom: 1 } } }), /pan\/zoom/);
   assert.throws(() => assertBrowserToolFlow({ ...input, after: { ...after, controlText: 'wrong card changed' } }), /wrong-card/);
-  assert.throws(() => assertBrowserToolFlow({ ...input, after: { ...after, targetInputFocused: false } }), /focus/);
+  assert.equal(assertBrowserToolFlow({ ...input,
+    after: { ...after, targetInputFocused: false } }).inputFocusedAfter, false);
 });
 
 test('later target is a distinct card selected for a new turn in the same Chat', () => {
@@ -481,6 +716,58 @@ test('C rejects Browser cancel-before-act, forbidden schemes and permission esca
   assert.throws(() => assertBrowserNegativeGuards({ ...data,
     guards: guards.map(item => item.case === 'permission-escalation' ? { ...item,
       errorCode: 'BROWSER_ACTION_UNVERIFIED' } : item) }), /permission boundary/);
+});
+
+test('owned Browser fixture handler serves only one exact loopback GET with a persistent DOM marker', () => {
+  const pathMarker = 'QA_URL_0123456789abcdef';
+  const marker = 'QA_DOM_0123456789abcdef';
+  const fixture = createBrowserFixtureHandler({ port: 39220, pathMarker, marker });
+  assert.equal(fixture.url, `http://127.0.0.1:39220/egdesk-qa/${pathMarker}`);
+  const html = browserFixtureHtml(marker);
+  assert.ok(html.includes(`<p id="fixture-marker">${marker}</p>`));
+  assert.ok(html.includes('Reveal QA details') && html.includes('QA note'));
+  assert.equal(html.includes('<form'), false);
+  const response = () => ({ status: null, headers: null, body: null,
+    writeHead(status, headers) { this.status = status; this.headers = headers; },
+    end(body) { this.body = body; } });
+  const accepted = response();
+  fixture.handle({ method: 'GET', url: `/egdesk-qa/${pathMarker}`,
+    headers: { host: '127.0.0.1:39220' } }, accepted);
+  assert.equal(accepted.status, 200);
+  assert.equal(accepted.body, html);
+  for (const request of [
+    { method: 'GET', url: `/egdesk-qa/${pathMarker}?x=1`, headers: { host: '127.0.0.1:39220' } },
+    { method: 'GET', url: `/egdesk-qa/${pathMarker}`, headers: { host: 'localhost:39220' } },
+  ]) {
+    const denied = response(); fixture.handle(request, denied);
+    assert.equal(denied.status, 404);
+  }
+  const post = response();
+  fixture.handle({ method: 'POST', url: `/egdesk-qa/${pathMarker}`,
+    headers: { host: '127.0.0.1:39220' } }, post);
+  assert.equal(post.status, 405);
+  assert.throws(() => createBrowserFixtureHandler({ port: 39218, pathMarker, marker }), /separately leased/);
+});
+
+test('Browser fixture preflight accepts only the exact owned HTTP document before any model turn', async () => {
+  const fixture = { url: 'http://127.0.0.1:39220/egdesk-qa/QA_URL_0123456789abcdef',
+    marker: 'QA_DOM_0123456789abcdef' };
+  const response = overrides => ({ status: 200, url: fixture.url,
+    headers: { get: () => 'text/html; charset=utf-8' },
+    text: async () => browserFixtureHtml(fixture.marker), ...overrides });
+  const fetchImpl = async (url, options) => {
+    assert.equal(url, fixture.url);
+    assert.equal(options.method, 'GET');
+    assert.equal(options.redirect, 'error');
+    return response();
+  };
+  assert.equal(await assertBrowserFixtureServerReady(fixture, fetchImpl), true);
+  await assert.rejects(assertBrowserFixtureServerReady(fixture,
+    async () => response({ status: 302 })), /did not return 200/);
+  await assert.rejects(assertBrowserFixtureServerReady(fixture,
+    async () => response({ url: 'http://example.com/' })), /changed URL/);
+  await assert.rejects(assertBrowserFixtureServerReady(fixture,
+    async () => response({ text: async () => '<html>lookalike</html>' })), /differs/);
 });
 
 test('independent fixture recheck catches added, removed and same-content rewritten files', () => {

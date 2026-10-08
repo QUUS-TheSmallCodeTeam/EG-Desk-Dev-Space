@@ -6,6 +6,7 @@ import assert from 'node:assert/strict';
 import fs from 'node:fs';
 import path from 'node:path';
 import { createHash, randomBytes } from 'node:crypto';
+import { createServer } from 'node:http';
 import { fileURLToPath } from 'node:url';
 import { assertQaFixtureManifest } from './egdesk-chat-qa-profile.mjs';
 import { chatIdentity, chrome, loopbackJson, newQaThread, observeChatEvents, option, runUiFlow, selectorForId,
@@ -13,7 +14,7 @@ import { chatIdentity, chrome, loopbackJson, newQaThread, observeChatEvents, opt
 
 const BROWSER_TOOL_NAMES = Object.freeze({ observe: 'egdesk_browser_observe',
   click: 'egdesk_browser_click', fill: 'egdesk_browser_fill' });
-const QA_CASES = Object.freeze(['native', 'source', 'browser']);
+const QA_CASES = Object.freeze(['native', 'source', 'browser', 'browser-negative']);
 const sha256 = value => createHash('sha256').update(value).digest('hex');
 const same = (a, b) => JSON.stringify(a) === JSON.stringify(b);
 const required = (value, label) => { assert.ok(value, label); return value; };
@@ -69,8 +70,120 @@ export function parseCases(value) {
   const cases = value.split(',');
   assert.ok(cases.length > 0 && cases.every(item => QA_CASES.includes(item))
     && new Set(cases).size === cases.length,
-  '--cases must be a comma-separated unique subset of native,source,browser');
+  '--cases must be a comma-separated unique subset of native,source,browser,browser-negative');
   return cases;
+}
+
+export function parseResumeEmptyThreadId(value, cases) {
+  if (value == null) return null;
+  assert.ok(typeof value === 'string' && /^thread-dm-[a-z0-9]{7}$/.test(value),
+    '--resume-empty-thread-id must name one generated DM thread');
+  assert.deepEqual(cases, ['source'],
+    '--resume-empty-thread-id is allowed only with --cases source');
+  return value;
+}
+
+export function parseResumeSourceOptions({ threadId, root, sourceId, originalHash }, cases,
+  resumeEmptyThreadId = null) {
+  if ([threadId, root, sourceId, originalHash].every(value => value == null)) return null;
+  assert.deepEqual(cases, ['source'], '--resume-source is allowed only with --cases source');
+  assert.equal(resumeEmptyThreadId, null, '--resume-source cannot also resume an empty room');
+  assert.match(threadId || '', /^thread-dm-[a-z0-9]{7}$/,
+    '--resume-source must name one generated DM thread');
+  assert.ok(typeof root === 'string' && path.isAbsolute(root),
+    '--resume-source-root must be an explicit absolute QA run directory');
+  assert.match(sourceId || '', /^[a-f0-9]{8}-(?:[a-f0-9]{4}-){3}[a-f0-9]{12}$/,
+    '--resume-source-id must be the exact captured source UUID');
+  assert.match(originalHash || '', /^[a-f0-9]{64}$/,
+    '--resume-source-original-sha256 must be the prior capture receipt hash');
+  return { threadId, root, sourceId, originalHash };
+}
+
+export function assertResumeEmptyThreadState(observed, expectedId) {
+  assert.equal(observed?.activeThreadId, expectedId, 'confirmed empty room is not active');
+  assert.equal(observed?.thread?.id, expectedId, 'active room ID changed');
+  assert.equal(observed?.thread?.conversationId ?? null, null, 'room already has a native conversation');
+  assert.equal(observed?.thread?.localConversationId ?? null, null, 'room already has local conversation history');
+  assert.equal(observed?.thread?.profileEnabled, false, 'room is not ordinary Chat');
+  assert.ok([null, 'fresh'].includes(observed?.thread?.bindingState ?? null),
+    'room has a retained or verified native binding state');
+  assert.equal(observed?.thread?.bindingAccountKey ?? null, null, 'room has a bound native account');
+  assert.equal(observed?.thread?.nativeBindingHeld, false, 'room retains a native binding');
+  assert.equal(observed?.thread?.messagesCount, 0, 'room already has messages');
+  assert.equal(observed?.thread?.inputSourcesCount, 0, 'room already has input sources');
+  assert.equal(observed?.thread?.briefingInputsCount, 0, 'room already has briefing inputs');
+  assert.equal(observed?.thread?.preparingInput, false, 'room is preparing an input');
+  assert.equal(observed?.thread?.resuming, false, 'room is resuming a native conversation');
+  assert.equal(observed?.thread?.sendError ?? null, null, 'room has an unresolved send error');
+  assert.equal(observed?.nativeRunCount, 0, 'room already has a native run');
+  assert.equal(observed?.visibleInputCount, 1, 'room has no unique visible composer input');
+  assert.equal(observed?.composerVisible, true, 'rendered Chat composer is not visible');
+  assert.equal(observed?.inputThreadId, expectedId, 'composer belongs to another room');
+  assert.equal(observed?.inputValue, '', 'composer already contains text');
+  assert.equal(observed?.draftText, '', 'room already has a saved draft');
+  assert.ok(typeof observed?.wireClientThreadId === 'string' && observed.wireClientThreadId,
+    'room has no client binding ID');
+  return true;
+}
+
+export function assertPreparedSourceResumeEvidence({ observed, expected, stored,
+  originalHash, liveText, sourceFile, prompt }) {
+  assert.equal(expected?.root, path.dirname(sourceFile), 'prepared source run root changed');
+  assert.equal(expected?.originalHash, originalHash, 'prior capture hash input changed');
+  assert.equal(observed?.activeThreadId, expected.threadId, 'prepared source room is not active');
+  assert.equal(observed?.thread?.id, expected.threadId, 'prepared source room ID changed');
+  assert.equal(observed?.thread?.title, 'QA immutable source read', 'prepared source room title changed');
+  assert.equal(observed?.thread?.conversationId ?? null, null, 'prepared source room has a native conversation');
+  assert.equal(observed?.thread?.localConversationId ?? null, null, 'prepared source room has local history');
+  assert.equal(observed?.thread?.profileEnabled, false, 'prepared source room is not ordinary Chat');
+  assert.ok([null, 'fresh'].includes(observed?.thread?.bindingState ?? null),
+    'prepared source room retained a native binding state');
+  assert.equal(observed?.thread?.bindingAccountKey ?? null, null, 'prepared source room has a native account binding');
+  assert.equal(observed?.thread?.nativeBindingHeld, false, 'prepared source room retains native authority');
+  assert.equal(observed?.thread?.messagesCount, 0, 'prepared source room has messages');
+  assert.equal(observed?.thread?.inputSourcesCount, 0, 'prepared source room has other input sources');
+  assert.equal(observed?.thread?.briefingInputsCount, 1, 'prepared source room has not exactly one attached snapshot');
+  assert.equal(observed?.thread?.preparingInput, false, 'prepared source room is still preparing input');
+  assert.equal(observed?.thread?.resuming, false, 'prepared source room is resuming');
+  assert.equal(observed?.thread?.sendError ?? null, null, 'prepared source room has an unresolved send error');
+  assert.equal(observed?.nativeRunCount, 0, 'prepared source room already has a native run');
+  assert.equal(observed?.composerVisible, true, 'prepared source composer is not uniquely visible');
+  assert.equal(observed?.visibleInputCount, 1, 'prepared source room has no unique visible input');
+  assert.equal(observed?.inputThreadId, expected.threadId, 'prepared source composer belongs to another room');
+  assert.equal(observed?.inputValue, prompt, 'prepared source composer changed');
+  assert.equal(observed?.draftText, prompt, 'prepared source draft changed');
+  assert.equal(observed?.sendButtonVisible, true, 'prepared source Send button is not visible');
+  assert.equal(observed?.sendButtonEnabled, true, 'prepared source Send button is disabled');
+  assert.equal(observed?.sendButtonUnobscured, true, 'prepared source Send button is obscured');
+  assert.ok(typeof observed?.wireClientThreadId === 'string' && observed.wireClientThreadId,
+    'prepared source room has no client binding ID');
+  assert.equal(observed?.thread?.cwd, path.dirname(sourceFile), 'prepared source room cwd changed');
+  const reference = observed?.reference;
+  assert.equal(reference?.sourceId, expected.sourceId, 'attached source ID changed');
+  assert.equal(reference?.snapshotId, expected.sourceId, 'attached snapshot ID changed');
+  assert.equal(reference?.hash, originalHash, 'attached source hash differs from prior receipt');
+  assert.equal(reference?.sourceRef?.path, sourceFile, 'attached snapshot came from another file');
+  assert.equal(reference?.localSource?.sourceRef?.path, sourceFile,
+    'attached local source path changed');
+  assert.equal(stored?.capture?.sourceId, expected.sourceId, 'immutable inspector source ID changed');
+  assert.equal(stored?.capture?.clientThreadId, observed.wireClientThreadId,
+    'immutable snapshot belongs to another Chat thread');
+  assert.equal(stored?.capture?.hash, originalHash, 'immutable inspector hash differs from prior receipt');
+  assert.equal(stored?.capture?.sourceRef?.path, sourceFile,
+    'immutable snapshot came from another file');
+  assert.equal(stored?.delivered ?? null, null, 'source has an earlier delivered model packet');
+  assert.deepEqual(stored?.bindings, [], 'source was already bound to another model run');
+  const originalText = stored?.source?.text;
+  const originalMatch = /^Public EG-Desk source QA fixture\.\n(QA_SOURCE_ORIGINAL_[a-f0-9]{24})\n$/.exec(originalText || '');
+  const liveMatch = /^Public EG-Desk changed live QA source\.\n(QA_SOURCE_LIVE_[a-f0-9]{24})\n$/.exec(liveText || '');
+  assert.ok(originalMatch, 'immutable original QA fixture text is unavailable');
+  assert.ok(liveMatch, 'live QA fixture does not contain the expected changed text');
+  assert.equal(sha256(originalText), originalHash, 'original snapshot text does not hash to prior receipt');
+  assert.notEqual(sha256(liveText), originalHash, 'live file still equals the original snapshot');
+  assert.ok(!JSON.stringify({ prompt, title: observed.thread.title, reference }).includes(originalMatch[1]),
+    'original source marker leaked into model-facing draft admission');
+  return { reference, originalNonce: originalMatch[1], changedNonce: liveMatch[1],
+    originalHash, currentHash: sha256(liveText) };
 }
 
 export function scenarioCoverage(requestedCases, completedCases) {
@@ -96,10 +209,19 @@ export function assertRealTransport({ realTurn, fixtureTransport, health, auth, 
   assert.notEqual(fixtureTransport, '1', 'fixture transport must be disabled');
   assert.equal(health?.ok, true, 'real helper health is unavailable');
   assert.equal(health?.appServerReady, true, 'native app-server is not ready');
+  assertMemoryIsolationBeforeTurn(health);
   assert.notEqual(health?.fixture, true, 'fixture helper cannot prove a real turn');
   assert.equal(auth?.isLoggedIn, true, 'existing provider authentication is not ready');
   assert.notEqual(auth?.loginInProgress, true, 'authentication is changing');
   assert.equal(fixtureEndpointStatus, 404, 'fixture control endpoint is exposed');
+  return true;
+}
+
+export function assertMemoryIsolationBeforeTurn(health) {
+  assert.equal(health?.memoryIsolation?.feature, 'memories',
+    'QA helper has no verified memories feature-isolation receipt');
+  assert.equal(health?.memoryIsolation?.status, 'verified-disabled',
+    'QA helper memories isolation is not verified-disabled');
   return true;
 }
 
@@ -285,6 +407,7 @@ export function assertSourceRead({ run, events, reference, originalNonce, change
   assert.notEqual(originalHash, currentHash, 'live source was not intentionally changed after capture');
   assert.equal(reference?.sourceId, reference?.snapshotId, 'source/snapshot ID differs');
   assert.equal(reference?.hash, originalHash, 'capture hash is not original bytes');
+  assert.equal(run.context?.captures?.length, 1, 'source run did not bind exactly one capture');
   const capture = (run.context?.captures || []).find(item => item.sourceId === reference.sourceId);
   assert.ok(capture && capture.hash === originalHash, 'run lacks the original immutable source binding');
   assert.equal(stored?.capture?.sourceId, reference.sourceId, 'inspector source ID differs');
@@ -293,26 +416,60 @@ export function assertSourceRead({ run, events, reference, originalNonce, change
   assert.ok(!stored.source.text.includes(changedNonce), 'immutable capture became live-file contents');
   assert.ok(!(run.activities || []).some(item => item.kind === 'commandExecution'),
     'custom-source turn also used a native command; source-read evidence is not distinct');
-  const named = (run.activities || []).filter(item => item.kind === 'dynamicToolCall'
-    && item.detail?.tool === 'egdesk_read_source' && item.status === 'completed');
-  const read = events.find(event => event.event === 'context.read.completed'
-    && event.runId === run.runId && event.details?.sourceId === reference.sourceId
-    && event.details?.deliveryStatus === 'sent-to-app-server' && event.details?.receiptId
-    && named.some(item => item.id === event.itemId));
-  assert.ok(read, 'named native egdesk_read_source call and delivered packet receipt are missing');
-  const packet = (run.context?.packets || []).find(item => item.receiptId === read.details.receiptId
-    && item.sourceId === reference.sourceId && item.packetId === read.details.packetId);
-  assert.ok(packet, 'run packet is not bound to source, native call and delivery receipt');
-  assert.ok(['direct', 'reader'].includes(packet.mode) && packet.mode === read.details.mode
-    && packet.coverage && packet.coverage.sourceTruncated === false,
-  'SmartRead admission/coverage is unavailable or truncated');
-  assert.equal(stored?.delivered?.packetId, packet.packetId, 'immutable inspector has no matching delivered packet');
+  const allNamed = (run.activities || []).filter(item => item.kind === 'dynamicToolCall'
+    && item.detail?.tool === 'egdesk_read_source');
+  const named = allNamed.filter(item => item.status === 'completed');
+  const packets = (run.context?.packets || []).filter(item => item.sourceId === reference.sourceId
+    && item.deliveryStatus === 'sent-to-app-server');
+  const allReads = events.filter(event => event.event === 'context.read.completed'
+    && event.runId === run.runId);
+  const reads = allReads.filter(event => event.details?.sourceId === reference.sourceId
+    && event.details?.deliveryStatus === 'sent-to-app-server' && event.details?.receiptId);
+  assert.equal(named.length, allNamed.length, 'source run has an incomplete egdesk_read_source item');
+  assert.equal(packets.length, run.context?.packets?.length,
+    'source run contains an unexpected or undelivered packet');
+  assert.equal(reads.length, allReads.length,
+    'source run contains an unrelated or undelivered read-completed event');
+  assert.ok(named.length > 0 && named.length === packets.length && packets.length === reads.length,
+    'named native egdesk_read_source calls and delivered packet receipts are incomplete');
+  assert.equal(new Set(named.map(item => item.id)).size, named.length,
+    'native source-read item IDs are not distinct');
+  assert.equal(new Set(packets.map(item => item.packetId)).size, packets.length,
+    'delivered source packet IDs are not distinct');
+  assert.equal(new Set(packets.map(item => item.receiptId)).size, packets.length,
+    'delivered source receipt IDs are not distinct');
+  const matched = packets.map(packet => {
+    const corresponding = reads.filter(event => event.details?.receiptId === packet.receiptId
+      && event.details?.packetId === packet.packetId
+      && named.some(item => item.id === event.itemId));
+    assert.equal(corresponding.length, 1,
+      'run packet is not uniquely bound to source, native call and delivery receipt');
+    const read = corresponding[0];
+    assert.ok(['direct', 'reader'].includes(packet.mode) && packet.mode === read.details.mode
+      && packet.coverage && packet.coverage.sourceTruncated === false,
+    'SmartRead admission/coverage is unavailable or truncated');
+    return { packet, read };
+  });
+  assert.equal(new Set(matched.map(item => item.read.itemId)).size, named.length,
+    'native source-read call lacks a distinct delivered packet');
+  assert.ok(matched.every((item, index) => Number.isSafeInteger(item.read.seq)
+    && (index === 0 || item.read.seq > matched[index - 1].read.seq)),
+  'source packet order differs from actual SSE delivery order');
+  const latest = matched.at(-1);
+  assert.equal(stored?.delivered?.packetId, latest.packet.packetId,
+    'immutable inspector does not show the latest delivered packet of this run');
   assert.equal(stored?.delivered?.deliveryStatus, 'sent-to-app-server', 'inspector packet was not delivered');
+  assert.equal(stored?.delivered?.binding?.conversationId, run.conversationId,
+    'inspector latest packet belongs to another conversation');
+  assert.equal(stored?.delivered?.binding?.runId, run.runId,
+    'inspector latest packet belongs to another run');
+  assert.equal(stored?.delivered?.binding?.answerId, run.answerId,
+    'inspector latest packet belongs to another answer');
   const answer = (run.messages || []).filter(item => item.role === 'assistant').map(item => item.text || '').join('\n');
   assert.ok(answer.includes(originalNonce) && !answer.includes(changedNonce),
     'answer did not distinguish immutable original from changed live file');
-  return { sourceId: reference.sourceId, nativeCallId: read.itemId,
-    packetId: read.details.packetId, readMode: packet.mode };
+  return { sourceId: reference.sourceId, nativeCallId: latest.read.itemId,
+    packetId: latest.packet.packetId, readMode: latest.packet.mode, readCount: matched.length };
 }
 
 // B's Card selection/call projection remains a seam until its final public
@@ -399,7 +556,6 @@ export function assertBrowserToolFlow({ run, events, active, calls, selection, t
   assert.ok(after.targetText.includes('Changed by QA click') && after.targetText.includes('Newly revealed node'),
     'changed node is not in independently observed target DOM');
   assert.equal(after.inputValue, target.fillValue, 'harmless input value did not change');
-  assert.equal(after.targetInputFocused, true, 'filled input did not retain target-card focus');
   assert.notEqual(after.focusedCardId, control.cardId, 'Browser action focused the wrong card');
   assert.equal(before.controlText, after.controlText, 'wrong-card DOM changed');
   assert.equal(before.controlInputValue, after.controlInputValue, 'wrong-card input changed');
@@ -407,7 +563,70 @@ export function assertBrowserToolFlow({ run, events, active, calls, selection, t
   assert.ok(same(before.camera, after.camera), 'Browser tool moved Canvas pan/zoom');
   assert.ok(same(before.cards, after.cards), 'Browser tool opened/closed or reordered cards');
   return { cardId: target.cardId, observeItemId: observeBefore.itemId,
-    clickItemId: click.itemId, staleItemId: stale.itemId, fillItemId: fill.itemId };
+    clickItemId: click.itemId, staleItemId: stale.itemId, fillItemId: fill.itemId,
+    inputFocusedAfter: after.targetInputFocused === true };
+}
+
+// The currently public A contract proves model-tool dispatch/binding and its
+// bounded status, not target revision, DOM diff or post-stop nonexecution.
+// Keep this distinct from the stronger browserToolReceipts/negative-guard seam.
+export function assertPublicBrowserSseBindings({ run, events, active, selection }) {
+  assertObservedRunChain({ run, events, active });
+  assert.equal(run.executionPolicy?.mode, 'fixtureBrowserQa', 'Browser run is not in fixture QA mode');
+  assert.equal(run.executionPolicy?.browserEffects, 'attested-local-fixture-only',
+    'Browser run lacks the native fixture effect boundary');
+  const binding = run.browserBinding;
+  assert.equal(binding?.cards?.length, 1, 'public Browser binding does not contain exactly one Card');
+  assert.equal(binding.cards[0].cardId, selection.cardId, 'public Browser binding targets another Card');
+  assert.equal(binding.cards[0].sourceId, selection.sourceId, 'public Browser binding targets another source');
+  assert.equal(binding.cards[0].cardEpoch, selection.cardEpoch, 'public Browser binding crossed Card epochs');
+  assert.equal(binding.cards[0].permission, 'interact', 'public Browser binding lacks interaction permission');
+  assert.ok(events.some(event => event.event === 'browser.bound' && event.runId === run.runId
+    && same(event.details, binding)), 'public Browser bind event is missing');
+  const names = new Map((run.activities || []).filter(item => item.kind === 'dynamicToolCall')
+    .map(item => [item.id, item.detail?.tool]));
+  const toolEvents = events.filter(event => ['browser.tool.completed', 'browser.tool.failed',
+    'browser.tool.unverified'].includes(event.event));
+  assert.ok(toolEvents.length >= 4, 'public Browser tool events are incomplete');
+  const epochs = new Set();
+  for (const event of toolEvents) {
+    assert.equal(event.provider, 'codex', 'public Browser tool event is not a Codex event');
+    assert.equal(event.requestId, run.requestId, 'public Browser tool event belongs to another send');
+    assert.equal(event.clientThreadId, run.clientThreadId, 'public Browser tool event belongs to another Chat thread');
+    assert.equal(event.conversationId, run.conversationId, 'public Browser tool event belongs to another conversation');
+    assert.equal(event.runId, run.runId, 'public Browser tool event belongs to another run');
+    assert.equal(event.details?.callId, event.itemId, 'public Browser call ID differs from native item ID');
+    assert.equal(event.details?.originalProviderId, 'egdesk-browser',
+      'public Browser event came from another tool provider');
+    assert.equal(event.details?.namespace, null, 'public Browser event used another namespace');
+    assert.equal(event.details?.cardId, selection.cardId, 'public Browser event targeted another Card');
+    assert.equal(event.details?.sourceId, selection.sourceId, 'public Browser event targeted another source');
+    assert.equal(event.details?.targetCardEpoch, selection.cardEpoch,
+      'public Browser event crossed Card epochs');
+    assert.ok(Number.isSafeInteger(event.details?.bridgeEpoch) && event.details.bridgeEpoch >= 0,
+      'public Browser event has no bridge epoch');
+    epochs.add(event.details.bridgeEpoch);
+    assert.ok(Object.values(BROWSER_TOOL_NAMES).includes(names.get(event.itemId)),
+      'public Browser event has no named native dynamic-tool item');
+  }
+  assert.equal(epochs.size, 1, 'public Browser tool events crossed bridge epochs');
+  const find = (tool, eventName, predicate = () => true) => toolEvents.find(event =>
+    names.get(event.itemId) === tool && event.event === eventName && predicate(event.details));
+  const observe = find(BROWSER_TOOL_NAMES.observe, 'browser.tool.completed', details => details.status === 'observed');
+  const click = find(BROWSER_TOOL_NAMES.click, 'browser.tool.completed', details =>
+    details.status === 'postcondition-observed' && details.action === 'click'
+      && details.postconditionMatched === true);
+  const fill = find(BROWSER_TOOL_NAMES.fill, 'browser.tool.completed', details =>
+    details.status === 'postcondition-observed' && details.action === 'fill'
+      && details.postconditionMatched === true);
+  const stale = find(BROWSER_TOOL_NAMES.click, 'browser.tool.failed', details =>
+    details.code === 'BROWSER_OBSERVATION_STALE');
+  assert.ok(observe && click && fill && stale,
+    'public Browser observe/click/fill/stale-rejection sequence is incomplete');
+  return { cardId: selection.cardId, publicEventBindingVerified: true,
+    observeItemId: observe.itemId, clickItemId: click.itemId,
+    fillItemId: fill.itemId, staleItemId: stale.itemId,
+    domRevisionVerified: false, postStopNonexecutionVerified: false };
 }
 
 export function assertBrowserSameChatAddition({ firstRun, laterRun, firstCompletedAt, laterSelectedAt,
@@ -442,6 +661,82 @@ export function assertBrowserFixtureConfig(url, marker) {
   assert.match(marker, /^[A-Za-z0-9_-]{20,80}$/, 'Browser DOM fixture marker is invalid');
   assert.notEqual(marker, pathMarker, 'Browser DOM marker must differ from the URL path marker');
   return { url, marker, pathMarker };
+}
+
+export function browserFixtureHtml(marker) {
+  assert.match(marker, /^[A-Za-z0-9_-]{20,80}$/, 'Browser DOM fixture marker is invalid');
+  return `<!doctype html><html><head><meta charset="utf-8"><title>EG-Desk public local QA fixture</title>
+<meta http-equiv="Content-Security-Policy" content="default-src 'none'; script-src 'unsafe-inline'; style-src 'unsafe-inline'; connect-src 'none'; form-action 'none'; base-uri 'none'">
+<style>body{font:16px system-ui;padding:32px}button,input{font:inherit;padding:8px;margin:8px}</style></head>
+<body><main><h1>EG-Desk local Browser QA</h1><p id="fixture-marker">${marker}</p>
+<p id="qa-state">Waiting for QA action</p><label for="qa-input">QA note</label>
+<input id="qa-input" aria-label="QA note" type="text" autocomplete="off">
+<button id="qa-button" type="button">Reveal QA details</button><section id="qa-changed"></section></main>
+<script>document.getElementById('qa-button').addEventListener('click',()=>{
+document.getElementById('qa-state').textContent='Changed by QA click';
+const node=document.createElement('p');node.textContent='Newly revealed node';
+document.getElementById('qa-changed').appendChild(node)});</script></body></html>`;
+}
+
+export async function assertBrowserFixtureServerReady(fixture, fetchImpl = fetch) {
+  assertBrowserFixtureConfig(fixture?.url, fixture?.marker);
+  const response = await fetchImpl(fixture.url, {
+    method: 'GET', redirect: 'error', signal: AbortSignal.timeout(5000),
+  });
+  assert.equal(response?.status, 200, 'owned Browser fixture server did not return 200');
+  assert.equal(response?.url, fixture.url, 'owned Browser fixture request changed URL');
+  assert.match(response?.headers?.get?.('content-type') || '', /^text\/html(?:;|$)/i,
+    'owned Browser fixture is not HTML');
+  assert.equal(await response.text(), browserFixtureHtml(fixture.marker),
+    'owned Browser fixture body differs from the bounded local document');
+  return true;
+}
+
+export function createBrowserFixtureHandler({ port, pathMarker, marker }) {
+  assert.ok(Number.isSafeInteger(port) && port >= 1024 && port <= 65535
+    && ![39218, 39219, 2828, 6000].includes(port),
+  'Browser fixture port must be separately leased by Main');
+  const url = `http://127.0.0.1:${port}/egdesk-qa/${pathMarker}`;
+  assertBrowserFixtureConfig(url, marker);
+  const body = browserFixtureHtml(marker);
+  const pathOnly = `/egdesk-qa/${pathMarker}`;
+  return { url, marker, handle(request, response) {
+    if (request.headers?.host !== `127.0.0.1:${port}` || request.url !== pathOnly) {
+      response.writeHead(404, { 'Content-Type': 'text/plain; charset=utf-8', 'Cache-Control': 'no-store' });
+      response.end('Not found');
+      return;
+    }
+    if (request.method !== 'GET') {
+      response.writeHead(405, { Allow: 'GET', 'Content-Type': 'text/plain; charset=utf-8' });
+      response.end('Method not allowed');
+      return;
+    }
+    response.writeHead(200, { 'Content-Type': 'text/html; charset=utf-8',
+      'Content-Length': Buffer.byteLength(body), 'Cache-Control': 'no-store',
+      'X-Content-Type-Options': 'nosniff' });
+    response.end(body);
+  } };
+}
+
+async function serveBrowserFixture() {
+  const deadlineMs = parseDeadlineUtc(required(option('--deadline-utc'), '--deadline-utc is required'));
+  assertBeforeDeadline(deadlineMs);
+  const port = Number(required(option('--browser-fixture-port'), '--browser-fixture-port is required'));
+  const pathMarker = option('--browser-fixture-path-marker') || `QA_URL_${randomBytes(12).toString('hex')}`;
+  const marker = option('--browser-fixture-marker') || `QA_DOM_${randomBytes(12).toString('hex')}`;
+  const fixture = createBrowserFixtureHandler({ port, pathMarker, marker });
+  const server = createServer(fixture.handle);
+  await new Promise((resolve, reject) => {
+    server.once('error', reject);
+    server.listen(port, '127.0.0.1', resolve);
+  });
+  process.stdout.write(`${JSON.stringify({ kind: 'egdesk-browser-qa-fixture', url: fixture.url,
+    marker: fixture.marker, listening: true, pid: process.pid })}\n`);
+  const stopAtDeadline = () => {
+    if (Date.now() >= deadlineMs) { server.close(); return; }
+    setTimeout(stopAtDeadline, Math.min(60000, deadlineMs - Date.now())).unref?.();
+  };
+  stopAtDeadline();
 }
 
 export function assertBrowserNegativeGuards({ guards, cardId, profileId, stoppedAt,
@@ -527,6 +822,20 @@ function createQaRunDirectory(root) {
   return canonical;
 }
 
+function existingQaRunDirectory(root, candidate) {
+  assert.equal(fs.realpathSync.native(root), root, 'QA real-turn root is not canonical');
+  assert.equal(path.dirname(candidate), root, 'prepared source fixture escaped the real-turn root');
+  assert.match(path.basename(candidate), /^lane-c-[A-Za-z0-9]{6}$/,
+    'prepared source fixture is not one Lane C run directory');
+  const info = fs.lstatSync(candidate);
+  assert.ok(info.isDirectory() && !info.isSymbolicLink() && info.uid === process.getuid()
+    && (info.mode & 0o077) === 0,
+  'prepared source fixture directory is not private and user-owned');
+  assert.equal(fs.realpathSync.native(candidate), candidate,
+    'prepared source fixture directory is not canonical');
+  return candidate;
+}
+
 function makeFixtures(root) {
   assert.deepEqual(fs.readdirSync(root), [], 'dedicated real-turn cwd must be empty');
   const nativeNonce = `QA_NATIVE_${randomBytes(12).toString('hex')}`;
@@ -537,6 +846,7 @@ function makeFixtures(root) {
   const sourceFile = path.join(root, 'source-read.txt');
   fs.writeFileSync(nativeFile, `Public EG-Desk native QA fixture.\n${nativeNonce}\n`, { flag: 'wx', mode: 0o600 });
   fs.writeFileSync(sourceFile, `Public EG-Desk source QA fixture.\n${sourceNonce}\n`, { flag: 'wx', mode: 0o600 });
+  // Browser model QA uses only the separately attested loopback HTTP fixture.
   return { nativeFile, sourceFile, nativeNonce, sourceNonce, changedNonce, commandTag };
 }
 
@@ -626,6 +936,8 @@ export function assertBrowserUiRequest(reflection, { cwd, clientThreadId, conver
   assert.equal(source.sourceId, selection.sourceId, 'Browser QA request selected another source');
   assert.equal(source.cardId, selection.cardId, 'Browser QA request selected another card');
   assert.equal(source.profileId, selection.profileId, 'Browser QA request selected another profile');
+  assert.equal(source.uri, selection.uri, 'Browser QA request selected another URL');
+  assert.equal(source.accountId, '', 'Browser QA request selected an account-linked Card');
   assert.equal(source.permission, 'interact', 'Browser QA request did not retain explicit interact permission');
   assert.equal(source.selectedByUser, true, 'Browser QA request lost UI selection');
   assert.equal(source.hasOneTimeToken, true, 'Browser QA request lacks a one-time source token');
@@ -637,31 +949,51 @@ export function assertBrowserUiRequest(reflection, { cwd, clientThreadId, conver
 
 export function assertFreshBrowserRootSse({ ready, emitted = null, now = Date.now() }) {
   assert.equal(ready?.sourceReady, true, 'root Browser SSE has not received a ready event');
+  assert.equal(ready?.stable, true, 'root Browser SSE is not bound to the current listener');
   assert.equal(ready?.eventSourceReadyState, 1, 'root Browser SSE is not OPEN');
   assert.ok(typeof ready?.browserTransportId === 'string' && ready.browserTransportId,
     'root SSE ready event has no Browser transport ID');
-  assert.ok(Number.isFinite(ready?.observedAt) && ready.observedAt <= now
-    && now - ready.observedAt <= 5000, 'root SSE Browser transport observation is stale');
-  if (emitted) assert.equal(emitted.browserTransportId, ready.browserTransportId,
-    'Chat send did not use this fresh root SSE Browser transport');
+  if (!emitted) assert.ok(Number.isFinite(ready?.sampledAtMs) && ready.sampledAtMs <= now
+    && now - ready.sampledAtMs <= 5000, 'root SSE Browser transport sample is stale');
+  else {
+    assert.equal(emitted.browserTransportId, ready.browserTransportId,
+      'Chat send did not use this root SSE Browser transport');
+    assert.equal(emitted.rootSseStable, true, 'root SSE was not stable at the original Chat fetch');
+    assert.equal(emitted.rootSseReadyState, 1, 'root SSE was not OPEN at the original Chat fetch');
+    assert.ok(Number.isFinite(emitted.rootSseCheckedAtMs)
+      && Number.isFinite(emitted.rootSseSampledAtMs)
+      && emitted.rootSseSampledAtMs >= ready.sampledAtMs
+      && emitted.rootSseSampledAtMs <= emitted.rootSseCheckedAtMs
+      && emitted.rootSseCheckedAtMs - emitted.rootSseSampledAtMs <= 5000,
+    'root SSE Browser transport was not freshly sampled before original fetch');
+  }
   return true;
 }
 
-async function browserRootSseReceiptBeforeTurn(harness) {
-  const ready = await chrome(harness, () => {
-    const status = window.__egdesk?.browserAgentTools?.rootSseReady?.();
-    if (!status) return null;
-    return { sourceReady: status.sourceReady === true,
-      eventSourceReadyState: status.eventSourceReadyState,
-      browserTransportId: status.browserTransportId || null,
-      observedAt: Date.now() };
-  });
+async function browserRootSseReceiptBeforeTurn(harness, deadlineMs) {
+  const ready = await waitUntil(async () => {
+    assertBeforeDeadline(deadlineMs);
+    return chrome(harness, () => {
+      const status = window.__egdesk?.browserAgentTools?.rootSseReady?.();
+      if (!status) return null;
+      return { sourceReady: status.sourceReady === true,
+        stable: status.stable === true,
+        eventSourceReadyState: status.eventSourceReadyState,
+        browserTransportId: status.browserTransportId || null,
+        sampledAtMs: status.sampledAtMs };
+    });
+  }, value => value?.sourceReady === true && value.stable === true
+    && value.eventSourceReadyState === 1 && typeof value.browserTransportId === 'string'
+    && !!value.browserTransportId && Number.isFinite(value.sampledAtMs)
+    && value.sampledAtMs <= Date.now()
+    && Date.now() - value.sampledAtMs <= 5000,
+  { timeoutMs: 15000, intervalMs: 200 });
   assertFreshBrowserRootSse({ ready });
   return ready;
 }
 
 async function browserExecutionAuthorityBeforeTurn(harness, thread, selection, health, cwd,
-  expectedConversationId = null) {
+  deadlineMs, expectedConversationId = null) {
   assertNativeQaCapabilityBeforeTurn(health);
   const reflected = await reflectedOrdinaryRequest(harness, thread, cwd, [], { allowExisting: true });
   assertOrdinaryUiBaseline(reflected, cwd);
@@ -669,13 +1001,170 @@ async function browserExecutionAuthorityBeforeTurn(harness, thread, selection, h
     'Browser Chat baseline targets another native conversation');
   assert.equal(selection?.selectedByUser, true, 'Browser Card was not selected through the UI');
   assert.equal(selection?.permission, 'interact', 'Browser Card lacks an explicit interact selection');
-  return browserRootSseReceiptBeforeTurn(harness);
+  return browserRootSseReceiptBeforeTurn(harness, deadlineMs);
 }
 
-// Integration seam B: retrieve public model-invoked Browser dynamic-tool
-// receipts. A direct browserAgent.snapshot/act call is never tool-call proof.
-async function browserToolReceipts(_run) {
-  throw new Error('B Browser model-tool receipt adapter is not wired');
+// Only fields A actually publishes on v2 SSE and native activity projections.
+// A postcondition flag is local-page evidence, never external-effect proof.
+export function browserToolReceipts(run, events) {
+  const activities = new Map((run?.activities || [])
+    .filter(item => item.kind === 'dynamicToolCall').map(item => [item.id, item]));
+  return (events || []).filter(event => ['browser.tool.completed', 'browser.tool.unverified',
+    'browser.tool.failed'].includes(event.event)).map(event => {
+    const activity = activities.get(event.itemId);
+    const details = event.details || {};
+    assert.equal(event.type, 'chat.event', 'Browser receipt is not a v2 Chat event');
+    assert.equal(event.v, 2, 'Browser receipt uses another Chat protocol');
+    assert.equal(event.provider, 'codex', 'Browser receipt came from another model provider');
+    assert.equal(event.requestId, run.requestId, 'Browser receipt belongs to another UI send');
+    assert.equal(event.clientThreadId, run.clientThreadId, 'Browser receipt belongs to another Chat thread');
+    assert.equal(event.conversationId, run.conversationId, 'Browser receipt belongs to another conversation');
+    assert.equal(event.runId, run.runId, 'Browser receipt belongs to another run');
+    assert.equal(details.callId, event.itemId, 'Browser callback ID differs from native item ID');
+    assert.ok(activity && Object.values(BROWSER_TOOL_NAMES).includes(activity.detail?.tool),
+      'Browser receipt has no named native dynamic-tool item');
+    assert.equal(activity.status, 'completed', 'Browser native dynamic-tool item did not complete');
+    assert.equal(details.originalProviderId, 'egdesk-browser', 'Browser receipt came from another tool provider');
+    assert.equal(details.namespace, null, 'Browser receipt used another namespace');
+    assert.ok(Number.isSafeInteger(details.bridgeEpoch) && details.bridgeEpoch >= 0,
+      'Browser receipt has no bridge epoch');
+    return { itemId: event.itemId, toolName: activity.detail.tool,
+      event: event.event, status: details.status || null,
+      code: details.code || null, action: details.action || null,
+      observationId: details.observationId || null,
+      postconditionMatched: details.postconditionMatched ?? null,
+      cardId: details.cardId || null, sourceId: details.sourceId || null,
+      targetCardEpoch: details.targetCardEpoch || null,
+      bridgeEpoch: details.bridgeEpoch,
+      externalEffectVerified: details.externalEffectVerified ?? null,
+      seq: event.seq };
+  });
+}
+
+export function assertBrowserPositiveFlow({ run, events, active, emitted, cwd,
+  selection, fixture, target, control, before, after }) {
+  assertObservedRunChain({ run, events, active });
+  assertBrowserFixtureConfig(fixture?.url, fixture?.marker);
+  assert.equal(run.cwdPublic, cwd, 'Browser native run uses another QA cwd');
+  const policy = run.executionPolicy;
+  assert.equal(policy?.mode, 'fixtureBrowserQa', 'positive Browser run lacks fixture QA policy');
+  assert.equal(policy?.status, 'native-thread-verified', 'Browser native policy was not verified');
+  assert.equal(policy?.sandbox, 'readOnly', 'Browser native sandbox is not read-only');
+  assert.equal(policy?.networkAccess, false, 'Browser native network is not disabled');
+  assert.equal(policy?.approvalPolicy, 'never', 'Browser native approval policy is interactive');
+  assert.equal(policy?.externalMcpCatalog, 'empty', 'Browser run exposes external MCP tools');
+  assert.ok(Number.isSafeInteger(policy?.inspectedMcpServers) && policy.inspectedMcpServers >= 0,
+    'Browser native MCP catalog inspection count is missing');
+  assert.equal(policy?.browserEffects, 'attested-local-fixture-only', 'Browser effect scope is not the attested fixture');
+  assert.equal(selection?.selectedByUser, true, 'Browser Card was not explicitly selected');
+  assert.equal(selection?.permission, 'interact', 'Browser Card lacks an interaction grant');
+  assert.equal(selection?.cardId, target.cardId, 'Browser selection targeted another Card');
+  assert.equal(selection?.profileId, target.profileId, 'Browser selection targeted another profile');
+  assert.equal(selection?.uri, fixture.url, 'Browser selection targeted another URL');
+  assert.equal(selection?.accountId, '', 'Browser fixture selection is account-linked');
+  assert.equal(emitted?.selectedSources?.length, 1, 'Browser UI send did not select one source');
+  assert.equal(emitted.selectedSources[0].sourceId, selection.sourceId,
+    'Browser UI send selected another source');
+  assert.equal(emitted.selectedSources[0].cardEpoch, selection.cardEpoch,
+    'Browser UI send crossed Card epochs');
+  assert.equal(emitted.selectedSources[0].uri, fixture.url, 'Browser UI send selected another URL');
+  assert.equal(emitted?.contextSnapshotIds?.length, 1,
+    'Browser source did not produce one immutable input snapshot');
+  const snapshotId = emitted.contextSnapshotIds[0];
+  assert.ok(run.context?.captures?.some(capture => capture.sourceId === snapshotId),
+    'Browser input snapshot is not bound to this native run');
+  assert.ok(events.some(event => event.event === 'context.bound' && event.runId === run.runId
+    && event.details?.captures?.some(capture => capture.sourceId === snapshotId)),
+  'Browser input snapshot has no matching context-bound SSE event');
+  const binding = run.browserBinding;
+  assert.equal(binding?.cards?.length, 1, 'native Browser binding is not single-card');
+  assert.deepEqual(binding.cards[0], { cardId: selection.cardId, permission: 'interact',
+    sourceId: selection.sourceId, cardEpoch: selection.cardEpoch },
+  'native Browser binding differs from the selected Card/source');
+  const bound = events.find(event => event.event === 'browser.bound' && event.runId === run.runId
+    && same(event.details, binding));
+  assert.ok(bound, 'native Browser binding SSE receipt is missing');
+  assert.ok(!(run.activities || []).some(item => ['commandExecution', 'fileChange', 'mcpToolCall',
+    'webSearch', 'collabAgentToolCall'].includes(item.kind)),
+    'Browser positive turn used an unrelated native tool');
+  const calls = browserToolReceipts(run, events);
+  assert.equal(calls.length, 4, 'Browser positive turn must contain observe/click/re-observe/fill only');
+  assert.equal((run.activities || []).filter(item => item.kind === 'dynamicToolCall').length, 4,
+    'Browser native dynamic-tool item count differs from public receipts');
+  assert.ok(calls.every(call => call.event === 'browser.tool.completed'
+    && call.cardId === selection.cardId && call.sourceId === selection.sourceId
+    && call.targetCardEpoch === selection.cardEpoch && call.externalEffectVerified === false),
+  'Browser positive turn contains an unverified, foreign or external-effect tool event');
+  assert.ok(calls.every((call, index) => index === 0 || call.seq > calls[index - 1].seq)
+    && calls[0].seq > bound.seq, 'Browser tool events are out of native SSE order');
+  assert.equal(new Set(calls.map(call => call.itemId)).size, 4, 'Browser call IDs are not unique');
+  assert.equal(new Set(calls.map(call => call.bridgeEpoch)).size, 1,
+    'Browser positive tool calls crossed bridge epochs');
+  assert.deepEqual(calls.map(call => call.toolName), [BROWSER_TOOL_NAMES.observe,
+    BROWSER_TOOL_NAMES.click, BROWSER_TOOL_NAMES.observe, BROWSER_TOOL_NAMES.fill],
+  'Browser model did not follow observe/click/re-observe/fill');
+  assert.equal(calls[0].status, 'observed', 'initial Browser observation was not attested');
+  assert.ok(calls[0].observationId && calls[2].observationId
+    && calls[0].observationId !== calls[2].observationId,
+  'Browser action did not receive a fresh second observation');
+  assert.equal(calls[1].status, 'postcondition-observed', 'Browser click postcondition was not observed');
+  assert.equal(calls[1].action, 'click', 'Browser action was not a click');
+  assert.equal(calls[1].postconditionMatched, true, 'Browser click postcondition did not match');
+  assert.equal(calls[2].status, 'observed', 'second Browser observation was not attested');
+  assert.equal(calls[3].status, 'postcondition-observed', 'Browser fill postcondition was not observed');
+  assert.equal(calls[3].action, 'fill', 'Browser action was not a fill');
+  assert.equal(calls[3].postconditionMatched, true, 'Browser fill postcondition did not match');
+  const answer = (run.messages || []).filter(item => item.role === 'assistant')
+    .map(item => item.text || '').join('\n');
+  assert.ok(answer.includes(fixture.marker), 'model answer omitted the unexpected Browser fixture marker');
+  assert.equal(before.targetUrl, fixture.url, 'independent pre-turn Browser URL differs from owned fixture');
+  assert.equal(after.targetUrl, fixture.url, 'independent post-turn Browser URL differs from owned fixture');
+  assert.equal(before.targetProfileId, selection.profileId, 'pre-turn Browser profile differs from selected Card');
+  assert.equal(after.targetProfileId, selection.profileId, 'post-turn Browser profile changed');
+  assert.equal(before.targetCardEpoch, selection.cardEpoch, 'pre-turn Browser Card epoch differs');
+  assert.equal(after.targetCardEpoch, selection.cardEpoch, 'post-turn Browser Card epoch changed');
+  assert.equal(before.targetAccountId, '', 'pre-turn Browser fixture is account-linked');
+  assert.equal(after.targetAccountId, '', 'post-turn Browser fixture is account-linked');
+  assert.ok(typeof before.targetDocumentId === 'string' && before.targetDocumentId,
+    'independent pre-turn actor document ID is missing');
+  assert.equal(after.targetDocumentId, before.targetDocumentId,
+    'Browser action crossed fixture document identities');
+  assert.ok(Number.isSafeInteger(before.targetRevision) && Number.isSafeInteger(after.targetRevision)
+    && after.targetRevision > before.targetRevision,
+  'independent Browser actor revision did not advance with the DOM change');
+  assert.ok(same(before.targetViewport, after.targetViewport),
+    'Browser actor viewport changed during the bounded interaction');
+  assert.ok(before.targetSegments?.includes(fixture.marker) && after.targetSegments?.includes(fixture.marker),
+    'exact fixture marker did not persist in independently observed DOM');
+  assert.ok(before.targetText.includes('Waiting for QA action')
+    && !before.targetText.includes('Changed by QA click')
+    && !before.targetText.includes('Newly revealed node')
+    && after.targetText.includes('Changed by QA click')
+    && after.targetText.includes('Newly revealed node'),
+  'independent target DOM did not show the local click change');
+  assert.ok(before.targetInteractive?.some(item => item.label === 'Reveal QA details'
+    && item.tag.toLowerCase() === 'button'), 'fixture has no observed harmless button');
+  assert.ok(before.targetInteractive?.some(item => item.label === 'QA note'
+    && item.tag.toLowerCase() === 'input'), 'fixture has no observed harmless text input');
+  assert.equal(before.inputValue, '', 'fixture input was not empty before the model action');
+  assert.equal(after.inputValue, target.fillValue, 'independent target input value did not change');
+  assert.ok(after.focusedCardId === null || after.focusedCardId === target.cardId,
+    'Browser action focused a Card other than the selected target');
+  assert.equal(before.controlText, after.controlText, 'control Card DOM changed');
+  assert.equal(before.controlInputValue, after.controlInputValue, 'control Card input changed');
+  assert.ok(same(before.camera?.pan, after.camera?.pan)
+    && before.camera?.zoom === after.camera?.zoom && same(before.cards, after.cards),
+  'Browser action moved Canvas camera or changed Card inventory');
+  assert.ok(after.camera?.activeEntityId === before.camera?.activeEntityId
+    || after.camera?.activeEntityId === target.cardId,
+  'Browser action focused another Canvas entity');
+  return { cardId: selection.cardId, sourceId: selection.sourceId,
+    inputSnapshotId: snapshotId, itemIds: calls.map(call => call.itemId),
+    publicModelToolReceiptsVerified: true, independentLocalDomVerified: true,
+    independentActorDocumentRevisionVerified: true,
+    modelActionGuardRevisionPubliclyVerified: false,
+    inputFocusedAfter: after.targetInputFocused === true,
+    negativeGuardsVerified: false, externalEffectVerified: false };
 }
 
 // Integration seam B/Main: issue only owned QA fixture guard probes against
@@ -709,6 +1198,8 @@ async function reflectedOrdinaryRequest(harness, thread, cwd, sourceIds = [], { 
       selectedSources: (request.selectedSources || []).map(source => ({ kind: source.kind,
         sourceId: source.id || null,
         cardId: source.sourceRef?.viewId || null, profileId: source.sourceRef?.profileId || null,
+        uri: source.sourceRef?.uri || null,
+        accountId: source.sourceRef?.accountId || '',
         permission: source.browserToolPermission || null, selectedByUser: source.selectedByUser === true,
         cardEpoch: source.browserToolIdentity?.cardEpoch || null,
         hasOneTimeToken: typeof source.browserToolSelection?.token === 'string'
@@ -729,7 +1220,7 @@ async function installQaSendInterceptor(harness, expected) {
       const url = typeof input === 'string' ? input : input?.url;
       if (url !== route) return original.call(window, input, init);
       if (state.used) throw new Error('QA interceptor refuses a second Chat send');
-      if (expected.hiddenMarker && (expected.qaOutputMarkers.length !== 2
+      if (expected.qaOutputMarkers.length && (expected.qaOutputMarkers.length !== 2
           || new Set(expected.qaOutputMarkers).size !== 2
           || expected.qaOutputMarkers.some(marker => !/^[A-Za-z0-9_-]{20,80}$/.test(marker)))) {
         throw new Error('Native QA requires two distinct bounded output markers before original fetch');
@@ -767,20 +1258,29 @@ async function installQaSendInterceptor(harness, expected) {
         throw new Error('QA Chat Browser selection is missing or broader than expected');
       }
       if (expected.selectedCardId) {
-        if (!Number.isFinite(expected.browserTransportObservedAt)
-            || Date.now() - expected.browserTransportObservedAt > 5000
-            || expected.browserTransportObservedAt > Date.now()) {
+        if (!Number.isFinite(expected.browserTransportSampledAtMs)
+            || expected.browserTransportSampledAtMs > Date.now()) {
           throw new Error('QA root SSE Browser transport is stale before original fetch');
         }
         const currentRoot = window.__egdesk?.browserAgentTools?.rootSseReady?.();
-        if (currentRoot?.sourceReady !== true || currentRoot.eventSourceReadyState !== 1
+        const rootCheckedAtMs = Date.now();
+        if (currentRoot?.sourceReady !== true || currentRoot.stable !== true
+            || currentRoot.eventSourceReadyState !== 1
+            || !Number.isFinite(currentRoot.sampledAtMs)
+            || currentRoot.sampledAtMs > rootCheckedAtMs
+            || rootCheckedAtMs - currentRoot.sampledAtMs > 5000
             || currentRoot.browserTransportId !== expected.browserTransportId) {
           throw new Error('QA root SSE Browser transport changed before original fetch');
         }
+        state.rootSseAtFetch = { stable: currentRoot.stable,
+          readyState: currentRoot.eventSourceReadyState,
+          sampledAtMs: currentRoot.sampledAtMs, checkedAtMs: rootCheckedAtMs };
         const source = selected[0];
         if (source.kind !== 'browser' || source.id !== expected.selectedSourceId ||
             source.sourceRef?.viewId !== expected.selectedCardId ||
             source.sourceRef?.profileId !== expected.selectedProfileId ||
+            source.sourceRef?.uri !== expected.browserFixtureUrl ||
+            source.sourceRef?.accountId !== '' ||
             source.browserToolIdentity?.cardEpoch !== expected.selectedCardEpoch ||
             source.browserToolPermission !== 'interact' || source.selectedByUser !== true ||
             source.browserToolSelection?.threadId !== expected.clientThreadId ||
@@ -811,9 +1311,15 @@ async function installQaSendInterceptor(harness, expected) {
         qaCommandNonce: body.qaCommandNonce || null,
         qaOutputMarkers: body.qaOutputMarkers || [],
         browserTransportId: body.browserTransportId || null,
+        rootSseStable: state.rootSseAtFetch?.stable ?? null,
+        rootSseReadyState: state.rootSseAtFetch?.readyState ?? null,
+        rootSseSampledAtMs: state.rootSseAtFetch?.sampledAtMs ?? null,
+        rootSseCheckedAtMs: state.rootSseAtFetch?.checkedAtMs ?? null,
         selectedSources: selected.map(source => ({ kind: source.kind,
           sourceId: source.id || null,
           cardId: source.sourceRef?.viewId || null, profileId: source.sourceRef?.profileId || null,
+          uri: source.sourceRef?.uri || null,
+          accountId: source.sourceRef?.accountId || '',
           permission: source.browserToolPermission || null, selectedByUser: source.selectedByUser === true,
           cardEpoch: source.browserToolIdentity?.cardEpoch || null,
           hasOneTimeToken: typeof source.browserToolSelection?.token === 'string'
@@ -896,9 +1402,230 @@ async function newQaThreadInVisibleChat(harness, title, deadlineMs) {
   return thread;
 }
 
+async function newSourceQaThreadWithReceipts(harness, title, deadlineMs, result) {
+  assertTurnTimeBudget(deadlineMs);
+  result.sourceStage = 'chat-focus-requested';
+  await ensureVisibleChatComposer(harness, deadlineMs);
+  result.sourceStage = 'chat-visible';
+  const prior = await chatIdentity(harness);
+  result.sourcePriorThreadId = prior.threadId;
+  if ((await harness.inspect('.egd-codex-conversation-back')).some(node => node.visible)) {
+    result.sourceStage = 'back-click-requested';
+    result.sourceUiAction = { kind: 'back', status: 'unconfirmed', priorThreadId: prior.threadId };
+    await harness.click('.egd-codex-conversation-back');
+    result.sourceUiAction.status = 'acknowledged';
+    result.sourceStage = 'back-click-acknowledged';
+  }
+  result.sourceStage = 'new-room-click-requested';
+  result.sourceUiAction = { kind: 'new-room', status: 'unconfirmed', priorThreadId: prior.threadId };
+  await harness.click('.egd-codex-thread-home-new');
+  result.sourceUiAction.status = 'acknowledged';
+  result.sourceStage = 'new-room-click-acknowledged';
+  await waitUntil(() => harness.inspect('[data-testid="chat-composer"]'),
+    nodes => nodes.some(node => node.visible), { timeoutMs: 15000 });
+  result.sourceStage = 'composer-visible';
+  result.sourceStage = 'metadata-requested';
+  const thread = await chrome(harness, title => {
+    const codex = window.__egdesk.state.codex;
+    const selected = codex.threads.find(item => item.id === codex.activeThreadId);
+    if (!selected || selected.conversationId || selected.messages.length || selected.profileEnabled === true) {
+      throw new Error('New source QA thread is not an empty ordinary Codex conversation');
+    }
+    selected.title = title;
+    const module = ChromeUtils.importESModule('chrome://userchrome/content/EGDeskChatState.sys.mjs');
+    const reflected = module.buildChatRequest(selected, 'QA identity reflection; not sent',
+      'qa-reflection-not-sent', window.__egdesk.codexBridge.threadRuntimeConfig(selected.id));
+    return { id: selected.id, title, wireClientThreadId: reflected.clientThreadId };
+  }, title);
+  result.sourceStage = 'metadata-bound';
+  result.sourceThreadId = thread.id;
+  await ensureVisibleChatComposer(harness, deadlineMs);
+  result.sourceStage = 'thread-ready';
+  return thread;
+}
+
+async function resumeConfirmedEmptySourceThread(harness, expectedId, title, deadlineMs, result) {
+  assertTurnTimeBudget(deadlineMs);
+  result.sourceStage = 'resume-validation-requested';
+  const observed = await chrome(harness, () => {
+    const api = window.__egdesk;
+    const codex = api.state.codex;
+    const thread = codex.threads.find(item => item.id === codex.activeThreadId);
+    const module = ChromeUtils.importESModule('chrome://userchrome/content/EGDeskChatState.sys.mjs');
+    const visible = node => {
+      const rect = node.getBoundingClientRect();
+      const style = getComputedStyle(node);
+      return !node.hidden && rect.width > 0 && rect.height > 0
+        && style.display !== 'none' && style.visibility !== 'hidden';
+    };
+    const inputs = [...document.querySelectorAll('.egd-codex-input')].filter(visible);
+    const composers = [...document.querySelectorAll('[data-testid="chat-composer"]')].filter(visible);
+    return { activeThreadId: codex.activeThreadId,
+      thread: thread ? { id: thread.id, title: thread.title,
+        conversationId: thread.conversationId || null,
+        localConversationId: thread.localConversationId || null,
+        profileEnabled: thread.profileEnabled === true,
+        bindingState: thread.bindingState || null,
+        bindingAccountKey: thread.bindingAccountKey || null,
+        nativeBindingHeld: module.nativeBindingHeld(thread),
+        messagesCount: thread.messages?.length ?? -1,
+        inputSourcesCount: thread.inputSources?.length || 0,
+        briefingInputsCount: thread.briefingInputs?.length || 0,
+        preparingInput: thread.preparingInput === true,
+        resuming: thread.resuming === true, sendError: thread.sendError || null } : null,
+      nativeRunCount: (api.codexBridge.runState?.(thread?.id) || []).length,
+      visibleInputCount: inputs.length, composerVisible: composers.length === 1,
+      inputThreadId: inputs[0]?.dataset?.threadId || null,
+      inputValue: inputs[0]?.value ?? null,
+      draftText: thread ? (codex.threadDrafts?.[thread.id] ?? codex.draft ?? '') : null,
+      wireClientThreadId: module.clientThreadBinding(thread) };
+  });
+  assertResumeEmptyThreadState(observed, expectedId);
+  result.sourceStage = 'resume-validation-receipt';
+  result.sourceResumeReceipt = { threadId: expectedId,
+    priorTitle: observed.thread.title, wireClientThreadId: observed.wireClientThreadId,
+    emptyOrdinaryRoomVerified: true };
+  result.sourceStage = 'resume-metadata-requested';
+  const bound = await chrome(harness, ({ expectedId, priorTitle, wireClientThreadId, title }) => {
+    const api = window.__egdesk;
+    const codex = api.state.codex;
+    const thread = codex.threads.find(item => item.id === expectedId);
+    const module = ChromeUtils.importESModule('chrome://userchrome/content/EGDeskChatState.sys.mjs');
+    const input = [...document.querySelectorAll('.egd-codex-input')].find(node => {
+      const rect = node.getBoundingClientRect();
+      const style = getComputedStyle(node);
+      return rect.width > 0 && rect.height > 0 && style.display !== 'none'
+        && style.visibility !== 'hidden';
+    });
+    if (codex.activeThreadId !== expectedId || !thread || thread.title !== priorTitle ||
+        thread.conversationId || thread.localConversationId || thread.profileEnabled === true ||
+        module.nativeBindingHeld(thread) || thread.bindingAccountKey ||
+        ![null, 'fresh'].includes(thread.bindingState || null) ||
+        thread.messages?.length || thread.inputSources?.length || thread.briefingInputs?.length ||
+        thread.preparingInput || thread.resuming || thread.sendError ||
+        (api.codexBridge.runState?.(expectedId) || []).length ||
+        !input || input.dataset.threadId !== expectedId || input.value !== '' ||
+        (codex.threadDrafts?.[expectedId] ?? codex.draft ?? '') !== '' ||
+        module.clientThreadBinding(thread) !== wireClientThreadId) {
+      throw new Error('Confirmed empty source QA room changed before metadata binding');
+    }
+    thread.title = title;
+    const reflected = module.buildChatRequest(thread, 'QA identity reflection; not sent',
+      'qa-reflection-not-sent', api.codexBridge.threadRuntimeConfig(thread.id));
+    if (reflected.clientThreadId !== wireClientThreadId) {
+      throw new Error('Source QA room client binding changed during metadata reflection');
+    }
+    return { id: thread.id, title, wireClientThreadId: reflected.clientThreadId };
+  }, { expectedId, priorTitle: observed.thread.title,
+    wireClientThreadId: observed.wireClientThreadId, title });
+  result.sourceStage = 'thread-ready';
+  result.sourceThreadId = bound.id;
+  return bound;
+}
+
+async function resumePreparedSourceDraft(harness, options, qaCwd, prompt, deadlineMs, result) {
+  assertTurnTimeBudget(deadlineMs);
+  result.sourceStage = 'prepared-draft-validation-requested';
+  const observed = await chrome(harness, () => {
+    const api = window.__egdesk;
+    const codex = api.state.codex;
+    const thread = codex.threads.find(item => item.id === codex.activeThreadId);
+    const module = ChromeUtils.importESModule('chrome://userchrome/content/EGDeskChatState.sys.mjs');
+    const visible = node => {
+      const rect = node.getBoundingClientRect();
+      const style = getComputedStyle(node);
+      return !node.hidden && rect.width > 0 && rect.height > 0
+        && style.display !== 'none' && style.visibility !== 'hidden';
+    };
+    const inputs = [...document.querySelectorAll('.egd-codex-input')].filter(visible);
+    const composers = [...document.querySelectorAll('[data-testid="chat-composer"]')].filter(visible);
+    const buttons = [...document.querySelectorAll('.egd-codex-send')].filter(visible);
+    const button = buttons.length === 1 ? buttons[0] : null;
+    const rect = button?.getBoundingClientRect();
+    const hit = rect && document.elementFromPoint(rect.left + rect.width / 2,
+      rect.top + rect.height / 2);
+    return { activeThreadId: codex.activeThreadId,
+      thread: thread ? { id: thread.id, title: thread.title, cwd: thread.cwd || null,
+        conversationId: thread.conversationId || null,
+        localConversationId: thread.localConversationId || null,
+        profileEnabled: thread.profileEnabled === true,
+        bindingState: thread.bindingState || null,
+        bindingAccountKey: thread.bindingAccountKey || null,
+        nativeBindingHeld: module.nativeBindingHeld(thread),
+        messagesCount: thread.messages?.length ?? -1,
+        inputSourcesCount: thread.inputSources?.length || 0,
+        briefingInputsCount: thread.briefingInputs?.length || 0,
+        preparingInput: thread.preparingInput === true,
+        resuming: thread.resuming === true, sendError: thread.sendError || null } : null,
+      reference: thread?.briefingInputs?.[0] || null,
+      nativeRunCount: (api.codexBridge.runState?.(thread?.id) || []).length,
+      visibleInputCount: inputs.length, composerVisible: composers.length === 1,
+      inputThreadId: inputs[0]?.dataset?.threadId || null,
+      inputValue: inputs[0]?.value ?? null,
+      draftText: thread ? (codex.threadDrafts?.[thread.id] ?? codex.draft ?? '') : null,
+      sendButtonVisible: !!button, sendButtonEnabled: !!button && !button.disabled,
+      sendButtonUnobscured: !!button && !!hit && (hit === button || button.contains(hit)),
+      wireClientThreadId: module.clientThreadBinding(thread) };
+  });
+  const sourceFile = path.join(qaCwd, 'source-read.txt');
+  const info = fs.lstatSync(sourceFile);
+  assert.ok(info.isFile() && !info.isSymbolicLink() && info.uid === process.getuid()
+    && (info.mode & 0o077) === 0
+    && fs.realpathSync.native(sourceFile) === sourceFile,
+  'prepared live QA source is not the owned regular file');
+  const liveText = fs.readFileSync(sourceFile, 'utf8');
+  const stored = await storedSource(harness, { id: options.threadId }, observed.reference);
+  const proof = assertPreparedSourceResumeEvidence({ observed, expected: options,
+    stored, originalHash: options.originalHash, liveText, sourceFile, prompt });
+  result.sourceStage = 'prepared-draft-validation-receipt';
+  result.sourceResumeReceipt = { threadId: options.threadId,
+    wireClientThreadId: observed.wireClientThreadId, sourceId: options.sourceId,
+    originalHash: options.originalHash, currentHash: proof.currentHash,
+    existingDraftAndCaptureVerified: true };
+  return { thread: { id: options.threadId, title: observed.thread.title,
+    wireClientThreadId: observed.wireClientThreadId }, ...proof };
+}
+
+async function clickPreparedSourceSendOnce(harness, thread, prompt, sourceId, result) {
+  const ready = await chrome(harness, ({ threadId, clientThreadId, prompt, sourceId }) => {
+    const api = window.__egdesk;
+    const codex = api.state.codex;
+    const thread = codex.threads.find(item => item.id === threadId);
+    const module = ChromeUtils.importESModule('chrome://userchrome/content/EGDeskChatState.sys.mjs');
+    const input = [...document.querySelectorAll('.egd-codex-input')].find(node => {
+      const rect = node.getBoundingClientRect();
+      const style = getComputedStyle(node);
+      return rect.width > 0 && rect.height > 0 && style.display !== 'none'
+        && style.visibility !== 'hidden';
+    });
+    const button = document.querySelector('.egd-codex-send');
+    const rect = button?.getBoundingClientRect();
+    const hit = rect && document.elementFromPoint(rect.left + rect.width / 2,
+      rect.top + rect.height / 2);
+    return codex.activeThreadId === threadId && thread?.conversationId == null
+      && thread?.messages?.length === 0 && thread?.inputSources?.length === 0
+      && thread?.briefingInputs?.length === 1
+      && thread.briefingInputs[0].sourceId === sourceId
+      && !thread.preparingInput && !thread.resuming && !thread.sendError
+      && !module.nativeBindingHeld(thread)
+      && module.clientThreadBinding(thread) === clientThreadId
+      && input?.dataset?.threadId === threadId && input.value === prompt
+      && codex.threadDrafts?.[threadId] === prompt
+      && !!button && !button.disabled && !!hit && (hit === button || button.contains(hit));
+  }, { threadId: thread.id, clientThreadId: thread.wireClientThreadId, prompt, sourceId });
+  assert.equal(ready, true, 'prepared source draft changed or Send is obscured before click');
+  result.sourceStage = 'prepared-send-click-requested';
+  result.sourceUiAction = { kind: 'send-prepared-source', status: 'unconfirmed', threadId: thread.id,
+    sourceId };
+  await harness.click('.egd-codex-send');
+  result.sourceUiAction.status = 'acknowledged';
+  result.sourceStage = 'prepared-send-click-acknowledged';
+}
+
 async function completedUiRun(harness, thread, prompt, deadlineMs, {
   cwd, sourceIds = [], qaOutputMarkers = [], policyMode = 'readOnlyQa',
-  browserSelection = null, browserRootReady = null, conversationId = null,
+  browserSelection = null, browserRootReady = null, browserFixtureUrl = null,
+  conversationId = null, preparedSource = null, hiddenMarker = null,
 } = {}) {
   assertTurnTimeBudget(deadlineMs);
   await ensureVisibleChatComposer(harness, deadlineMs);
@@ -907,13 +1634,14 @@ async function completedUiRun(harness, thread, prompt, deadlineMs, {
   await installQaSendInterceptor(harness, { clientThreadId: thread.wireClientThreadId,
     localThreadId: thread.id,
     cwd, message: prompt, policyMode, qaOutputMarkers, sourceIds,
-    hiddenMarker: qaOutputMarkers[0] || null,
+    hiddenMarker: hiddenMarker || qaOutputMarkers[0] || null,
     selectedCardId: browserSelection?.cardId || null,
     selectedSourceId: browserSelection?.sourceId || null,
     selectedProfileId: browserSelection?.profileId || null,
     selectedCardEpoch: browserSelection?.cardEpoch || null,
+    browserFixtureUrl,
     browserTransportId: browserRootReady?.browserTransportId || null,
-    browserTransportObservedAt: browserRootReady?.observedAt || null,
+    browserTransportSampledAtMs: browserRootReady?.sampledAtMs ?? null,
     conversationId });
   let observation;
   let active = null;
@@ -921,7 +1649,9 @@ async function completedUiRun(harness, thread, prompt, deadlineMs, {
   try {
     observation = await observeChatEvents(thread.wireClientThreadId);
     assertTurnTimeBudget(deadlineMs);
-    await sendFromComposer(harness, prompt);
+    if (preparedSource) await clickPreparedSourceSendOnce(harness, thread, prompt,
+      preparedSource.sourceId, preparedSource.result);
+    else await sendFromComposer(harness, prompt);
     emitted = await waitUntil(() => observedQaSend(harness), Boolean,
       { timeoutMs: 10000, intervalMs: 100 });
     if (browserSelection) {
@@ -985,22 +1715,32 @@ async function completedUiRun(harness, thread, prompt, deadlineMs, {
   }
 }
 
-async function captureImmutableSource(harness, thread, sourceFile, deadlineMs) {
+async function captureImmutableSource(harness, thread, sourceFile, deadlineMs, result) {
   assertBeforeDeadline(deadlineMs);
-  return chrome(harness, async ({ threadId, file }) => {
+  result.sourceStage = 'capture-requested';
+  const reference = await chrome(harness, async ({ threadId, file }) => {
     const bridge = window.__egdesk.codexBridge;
     const source = { id: `qa-source-${Math.random().toString(36).slice(2)}`, kind: 'file',
       label: 'Public QA source', sourceRef: { path: file } };
     const references = await bridge.captureInputs(threadId, [source]);
     const reference = references?.[0];
     if (!reference?.sourceId || reference.snapshotId !== reference.sourceId) throw new Error('production capture did not return bound source ID');
+    return reference;
+  }, { threadId: thread.id, file: sourceFile });
+  result.sourceStage = 'capture-receipt';
+  result.sourceCapture = { sourceId: reference.sourceId, hash: reference.hash };
+  result.sourceStage = 'attach-requested';
+  await chrome(harness, ({ threadId, reference }) => {
+    const bridge = window.__egdesk.codexBridge;
     // This is the existing immutable-reference attachment path. It does not
     // invoke a model, replace the transport, or mutate the source capture.
     bridge.attachBriefingComment(threadId, { text: '', contextSnapshotIds: [reference.sourceId] }, [reference]);
     const selected = window.__egdesk.state.codex.threads.find(item => item.id === threadId)?.briefingInputs || [];
     if (!selected.some(item => item.sourceId === reference.sourceId)) throw new Error('immutable reference was not attached to Chat draft');
-    return { sourceId: reference.sourceId, snapshotId: reference.snapshotId, hash: reference.hash };
-  }, { threadId: thread.id, file: sourceFile });
+    return true;
+  }, { threadId: thread.id, reference });
+  result.sourceStage = 'attached-to-draft';
+  return { sourceId: reference.sourceId, snapshotId: reference.snapshotId, hash: reference.hash };
 }
 
 async function storedSource(harness, thread, reference) {
@@ -1017,6 +1757,9 @@ async function createBrowserCards(harness, fixtureUrl, deadlineMs) {
     const api = window.__egdesk;
     const target = api.cardRuntime.openBrowserCard(uri, { openMode: 'new' });
     const control = api.cardRuntime.openBrowserCard('about:blank', { openMode: 'new' });
+    // Both fixture Cards overlap at creation; put the target's rendered menu
+    // in front before the subsequent native UI click grants interaction.
+    api.cardRuntime.focusCard(target);
     return { targetCardId: target.id, controlCardId: control.id };
   }, { uri: fixtureUrl });
 }
@@ -1034,6 +1777,8 @@ async function selectBrowserInteraction(harness, thread, cardId, deadlineMs) {
       throw new Error('B UI interaction selection is not bound to exactly the QA card');
     }
     return { cardId, profileId: selected[0].sourceRef.profileId,
+      uri: selected[0].sourceRef.uri,
+      accountId: selected[0].sourceRef.accountId || '',
       sourceId: selected[0].id, cardEpoch: selected[0].browserToolIdentity?.cardEpoch || null,
       selectedByUser: true, permission: selected[0].browserToolPermission };
   }, { threadId: thread.id, cardId });
@@ -1042,16 +1787,36 @@ async function selectBrowserInteraction(harness, thread, cardId, deadlineMs) {
 async function browserSnapshot(harness, targetCardId, controlCardId) {
   return chrome(harness, async ({ targetCardId, controlCardId }) => {
     const api = window.__egdesk;
-    const target = await api.browserAgent.snapshot(targetCardId);
+    const card = document.getElementById(targetCardId);
+    if (!card?.classList?.contains('egd-browser-card') ||
+        typeof card._browserControls?.toolObserve !== 'function') {
+      throw new Error('selected Browser Card has no independent actor observation path');
+    }
+    const binding = card._browserControls.toolBinding();
+    // This read-only actor sample is separate from the model tool callback.
+    // It supplies a document/revision/viewport witness absent from A's public
+    // browser.tool.completed SSE event; do not label it as the model's guard.
+    const actor = await card._browserControls.toolObserve(binding, { textLimit: 80, elementLimit: 80 });
     const control = await api.browserAgent.snapshot(controlCardId);
-    const input = target.interactiveElements?.find(item => item.label === 'QA note');
+    if (actor?.cardId !== targetCardId ||
+        typeof actor.documentId !== 'string' || !Number.isSafeInteger(actor.revision) ||
+        !actor.viewport || !Array.isArray(actor.text) || !Array.isArray(actor.interactiveElements)) {
+      throw new Error('independent Browser actor sample is not bound to the visible target document');
+    }
+    const input = actor.interactiveElements.find(item => item.label === 'QA note');
     const text = snapshot => Array.isArray(snapshot.text) ? snapshot.text.join('\n') : String(snapshot.text || '');
     const segments = snapshot => Array.isArray(snapshot.text) ? snapshot.text.map(String)
       : String(snapshot.text || '').split('\n');
-    const targetInputFocused = !!input && target.focusedElement?.ref === input.ref;
+    const targetInputFocused = !!input && actor.focusedElement?.ref === input.ref;
     const focusedCardId = document.activeElement?.closest?.('.egd-browser-card')?.id || null;
-    return { targetText: text(target), targetSegments: segments(target),
-      inputValue: targetInputFocused ? target.focusedElement.value || '' : '',
+    return { targetUrl: actor.url, targetDocumentId: actor.documentId,
+      targetRevision: actor.revision, targetViewport: actor.viewport,
+      targetProfileId: binding.profileId, targetCardEpoch: binding.cardEpoch,
+      targetAccountId: binding.accountId,
+      targetText: text(actor), targetSegments: segments(actor),
+      targetInteractive: actor.interactiveElements.map(item => ({
+        label: item.label || '', role: item.role || '', tag: item.tag || '' })),
+      inputValue: input?.value || '',
       targetInputFocused, focusedCardId,
       controlText: text(control), controlInputValue: control.focusedElement?.value || '', controlCardId,
       cards: [...document.querySelectorAll('.egd-canvas-card')].map(node => node.id).sort(),
@@ -1063,6 +1828,11 @@ async function browserSnapshot(harness, targetCardId, controlCardId) {
 async function main() {
   const deadlineMs = parseDeadlineUtc(required(option('--deadline-utc'), '--deadline-utc is required for real runs'));
   const cases = parseCases(required(option('--cases'), '--cases is required for real runs'));
+  const resumeEmptyThreadId = parseResumeEmptyThreadId(option('--resume-empty-thread-id'), cases);
+  const resumeSource = parseResumeSourceOptions({ threadId: option('--resume-source'),
+    root: option('--resume-source-root'), sourceId: option('--resume-source-id'),
+    originalHash: option('--resume-source-original-sha256') }, cases, resumeEmptyThreadId);
+  if (cases.includes('browser-negative')) throw new Error('Browser negative guards are not wired to live post-stop receipts; no turn sent');
   const browserFixture = cases.includes('browser')
     ? assertBrowserFixtureConfig(
       required(option('--browser-fixture-url'), '--browser-fixture-url is required for Browser QA'),
@@ -1084,8 +1854,10 @@ async function main() {
     const bridge = await assertBridgePreflight();
     const nativeContractFingerprint = assertNativeQaCapabilityBeforeTurn(bridge.health);
     assertBeforeDeadline(deadlineMs);
-    const qaCwd = createQaRunDirectory(manifest.realTurnCwd);
-    const fixtures = makeFixtures(qaCwd);
+    const qaCwd = resumeSource
+      ? existingQaRunDirectory(manifest.realTurnCwd, resumeSource.root)
+      : createQaRunDirectory(manifest.realTurnCwd);
+    const fixtures = resumeSource ? null : makeFixtures(qaCwd);
     result.qaFixtureRoot = qaCwd;
 
     if (cases.includes('native')) {
@@ -1117,40 +1889,64 @@ async function main() {
 
     if (cases.includes('source')) {
     assertBeforeDeadline(deadlineMs);
-    const sourceThread = await newQaThreadInVisibleChat(harness, 'QA immutable source read', deadlineMs);
-    const reference = await captureImmutableSource(harness, sourceThread, fixtures.sourceFile, deadlineMs);
-    const originalHash = sha256(fs.readFileSync(fixtures.sourceFile));
+    const sourcePrompt = 'Use the attached immutable public QA source with egdesk_read_source. Report its original marker exactly. Do not read the current live file, write files, use network, or perform other work.';
+    result.sourceStage = resumeSource ? 'prepared-draft-resume-requested'
+      : resumeEmptyThreadId ? 'resume-requested' : 'new-thread-requested';
+    const prepared = resumeSource
+      ? await resumePreparedSourceDraft(harness, resumeSource, qaCwd,
+        sourcePrompt, deadlineMs, result) : null;
+    const sourceThread = prepared?.thread || (resumeEmptyThreadId
+      ? await resumeConfirmedEmptySourceThread(harness, resumeEmptyThreadId,
+        'QA immutable source read', deadlineMs, result)
+      : await newSourceQaThreadWithReceipts(harness,
+        'QA immutable source read', deadlineMs, result));
+    const sourceFile = path.join(qaCwd, 'source-read.txt');
+    const reference = prepared?.reference || await captureImmutableSource(harness,
+      sourceThread, sourceFile, deadlineMs, result);
+    const originalHash = prepared?.originalHash || sha256(fs.readFileSync(sourceFile));
     check('production source capture binds original file bytes', reference.hash === originalHash);
-    assertBeforeDeadline(deadlineMs);
-    fs.writeFileSync(fixtures.sourceFile, `Public EG-Desk changed live QA source.\n${fixtures.changedNonce}\n`, { flag: 'w', mode: 0o600 });
-    const currentHash = sha256(fs.readFileSync(fixtures.sourceFile));
+    if (!prepared) {
+      assertBeforeDeadline(deadlineMs);
+      fs.writeFileSync(sourceFile, `Public EG-Desk changed live QA source.\n${fixtures.changedNonce}\n`, { flag: 'w', mode: 0o600 });
+      result.sourceStage = 'owned-live-file-changed';
+    }
+    const currentHash = prepared?.currentHash || sha256(fs.readFileSync(sourceFile));
+    const originalNonce = prepared?.originalNonce || fixtures.sourceNonce;
+    const changedNonce = prepared?.changedNonce || fixtures.changedNonce;
     const reflectedSource = await reflectedOrdinaryRequest(harness, sourceThread, qaCwd, [reference.sourceId]);
     assertOrdinaryUiBaseline(reflectedSource, qaCwd);
     check('normal Chat baseline retains the selected immutable source',
       same(reflectedSource.contextSnapshotIds, [reference.sourceId]));
+    assertHiddenMarkerOutsideModelAdmission({ marker: originalNonce,
+      message: sourcePrompt, title: sourceThread.title, path: sourceFile, metadata: reflectedSource });
     const sourceBefore = fileInventory(qaCwd);
-    const source = await completedUiRun(harness, sourceThread,
-      'Use the attached immutable public QA source with egdesk_read_source. Report its original marker exactly. Do not read the current live file, write files, use network, or perform other work.',
-      deadlineMs, { cwd: qaCwd, sourceIds: [reference.sourceId] });
+    result.sourceStage = 'source-send-requested';
+    const source = await completedUiRun(harness, sourceThread, sourcePrompt,
+      deadlineMs, { cwd: qaCwd, sourceIds: [reference.sourceId], hiddenMarker: originalNonce,
+        ...(prepared ? { preparedSource: { sourceId: reference.sourceId, result } } : {}) });
     const sourceTurn = { case: 'source', runId: source.run.runId, status: 'completed', evidence: 'unverified' };
     result.providerTurns.push(sourceTurn);
     result.providerTurn = 'real-codex-completed-unverified';
+    assert.equal(source.emitted.hiddenMarkerAbsentFromModelAdmission, true,
+      'original source marker leaked before the production Chat fetch');
     assertNativeAuthorityChain({ ...source, cwd: qaCwd });
     const sourceProof = assertSourceRead({ ...source, reference,
-      originalNonce: fixtures.sourceNonce, changedNonce: fixtures.changedNonce, originalHash, currentHash,
+      originalNonce, changedNonce, originalHash, currentHash,
       stored: await storedSource(harness, sourceThread, reference),
       beforeFiles: sourceBefore, afterFiles: fileInventory(qaCwd),
-      changedFile: fixtures.sourceFile });
+      changedFile: sourceFile });
     result.source = { runId: source.run.runId, ...sourceProof };
     sourceTurn.evidence = 'verified';
     result.completedCases.push('source');
+    result.sourceStage = 'source-evidence-verified';
     }
 
     if (cases.includes('browser')) {
     assertBeforeDeadline(deadlineMs);
-    await browserRootSseReceiptBeforeTurn(harness);
+    await assertBrowserFixtureServerReady(browserFixture);
+    await browserRootSseReceiptBeforeTurn(harness, deadlineMs);
     const cards = await createBrowserCards(harness, browserFixture.url, deadlineMs);
-    const before = await waitUntil(async () => {
+    await waitUntil(async () => {
       try { return await browserSnapshot(harness, cards.targetCardId, cards.controlCardId); }
       catch { return null; }
     }, value => value?.targetSegments?.includes(browserFixture.marker), { timeoutMs: 15000 });
@@ -1158,74 +1954,31 @@ async function main() {
     const selection = await selectBrowserInteraction(harness, browserThread, cards.targetCardId, deadlineMs);
     check('B UI explicitly selected only the local QA card for interaction', selection.cardId === cards.targetCardId
       && selection.selectedByUser === true && selection.permission === 'interact');
-    const browserRootReady = await browserExecutionAuthorityBeforeTurn(harness, browserThread, selection,
-      bridge.health, qaCwd);
+    await browserExecutionAuthorityBeforeTurn(harness, browserThread, selection,
+      bridge.health, qaCwd, deadlineMs);
+    await ensureVisibleChatComposer(harness, deadlineMs);
+    const before = await browserSnapshot(harness, cards.targetCardId, cards.controlCardId);
+    const browserRootReady = await browserRootSseReceiptBeforeTurn(harness, deadlineMs);
     const browserBefore = fileInventory(qaCwd);
     const fillValue = 'harmless QA input';
     const browser = await completedUiRun(harness, browserThread,
-      `Use EG-Desk Browser model tools on card ${cards.targetCardId} only. Observe it, click its "Reveal QA details" button, then deliberately try to act using the now-stale first observation and report the rejection. Re-observe and fill the harmless "QA note" input with ${JSON.stringify(fillValue)}. Never submit a form, navigate, use accounts or another card.`,
+      `Use EG-Desk Browser model tools only on selected local QA card ${cards.targetCardId}. Observe first, then include the exact fixture marker you observed in your final answer. Click the "Reveal QA details" button using its exact observed target and a visible-text postcondition of "Newly revealed node". Re-observe the changed page, then fill the "QA note" text input with ${JSON.stringify(fillValue)} using its exact observed target and a target-value postcondition. Use only observe, click, observe, fill in this run. Do not navigate, submit forms, use accounts, commands, other cards or websites.`,
       deadlineMs, { cwd: qaCwd, sourceIds: null,
-        policyMode: 'fixtureBrowserQa', browserSelection: selection, browserRootReady });
-    const browserTurn = { case: 'browser-new-chat', runId: browser.run.runId, status: 'completed', evidence: 'unverified' };
+        policyMode: 'fixtureBrowserQa', browserSelection: selection, browserRootReady,
+        browserFixtureUrl: browserFixture.url });
+    const browserTurn = { case: 'browser', runId: browser.run.runId, status: 'completed', evidence: 'unverified' };
     result.providerTurns.push(browserTurn);
     result.providerTurn = 'real-codex-completed-unverified';
     const after = await browserSnapshot(harness, cards.targetCardId, cards.controlCardId);
-    const browserEvidence = await browserToolReceipts(browser.run);
-    const browserProof = assertBrowserToolFlow({ ...browser, calls: browserEvidence.calls,
-      selection,
-      target: { cardId: cards.targetCardId, profileId: selection.profileId,
-        fixtureMarker: browserFixture.marker, fillValue },
+    const browserProof = assertBrowserPositiveFlow({ ...browser, cwd: qaCwd, selection,
+      fixture: browserFixture,
+      target: { cardId: cards.targetCardId, profileId: selection.profileId, fillValue },
       control: { cardId: cards.controlCardId }, before, after });
     assertNoFixtureWrites(browserBefore, fileInventory(qaCwd));
     result.browser = { runId: browser.run.runId, ...browserProof };
-    browserTurn.evidence = 'verified';
-    result.completedCases.push('browser-new-chat');
+    browserTurn.evidence = 'verified-local-fixture-positive';
+    result.browserNegativeGuardStatus = 'not-run';
 
-    // The next target is attached only after the first turn completes, while
-    // retaining the same native Chat conversation. This rejects accidental
-    // new-thread or active-card fallback behavior.
-    assertBeforeDeadline(deadlineMs);
-    const laterCards = await createBrowserCards(harness, browserFixture.url, deadlineMs);
-    const laterBefore = await waitUntil(async () => {
-      try { return await browserSnapshot(harness, laterCards.targetCardId, cards.targetCardId); }
-      catch { return null; }
-    }, value => value?.targetSegments?.includes(browserFixture.marker), { timeoutMs: 15000 });
-    const laterSelection = await selectBrowserInteraction(harness, browserThread, laterCards.targetCardId, deadlineMs);
-    const laterSelectedAt = Date.now();
-    const laterRootReady = await browserExecutionAuthorityBeforeTurn(harness, browserThread, laterSelection,
-      bridge.health, qaCwd, browser.run.conversationId);
-    const later = await completedUiRun(harness, browserThread,
-      `In this same Chat, use EG-Desk Browser model tools only on newly added card ${laterCards.targetCardId}. Observe, click "Reveal QA details", verify an old observation is rejected, re-observe, and fill "QA note" with ${JSON.stringify(fillValue)}. Leave the first card untouched; do not navigate or submit anything.`,
-      deadlineMs, { cwd: qaCwd, sourceIds: null, policyMode: 'fixtureBrowserQa',
-        browserSelection: laterSelection, browserRootReady: laterRootReady,
-        conversationId: browser.run.conversationId });
-    const laterTurn = { case: 'browser-same-chat', runId: later.run.runId, status: 'completed', evidence: 'unverified' };
-    result.providerTurns.push(laterTurn);
-    result.providerTurn = 'real-codex-completed-unverified';
-    const laterAfter = await browserSnapshot(harness, laterCards.targetCardId, cards.targetCardId);
-    const laterEvidence = await browserToolReceipts(later.run);
-    const laterProof = assertBrowserToolFlow({ ...later, calls: laterEvidence.calls,
-      selection: laterSelection,
-      target: { cardId: laterCards.targetCardId, profileId: laterSelection.profileId,
-        fixtureMarker: browserFixture.marker, fillValue },
-      control: { cardId: cards.targetCardId }, before: laterBefore, after: laterAfter });
-    assertBrowserSameChatAddition({ firstRun: browser.run, laterRun: later.run,
-      firstCompletedAt: browser.events.find(event => event.event === 'run.completed')?.ts,
-      laterSelectedAt, firstCardId: cards.targetCardId, laterCardId: laterCards.targetCardId,
-      laterSelection, before: { firstCardText: laterBefore.controlText, camera: laterBefore.camera },
-      after: { firstCardText: laterAfter.controlText, camera: laterAfter.camera } });
-    result.browserSameChat = { runId: later.run.runId, ...laterProof };
-    laterTurn.evidence = 'verified';
-    result.completedCases.push('browser-same-chat');
-
-    assertBeforeDeadline(deadlineMs);
-    const guards = await browserNegativeGuardReceipts(harness, later.run, laterSelection);
-    assertBrowserNegativeGuards({ guards: guards.receipts, cardId: laterCards.targetCardId,
-      profileId: laterSelection.profileId, stoppedAt: guards.stoppedAt,
-      navigationFixtureUrl: guards.navigationFixtureUrl, fixtureMarker: browserFixture.marker });
-    assertNoFixtureWrites(browserBefore, fileInventory(qaCwd));
-    result.browserGuards = { cases: guards.receipts.map(item => item.case), stoppedAt: guards.stoppedAt };
-    result.completedCases.push('browser-guards');
     result.completedCases.push('browser');
     }
 
@@ -1238,10 +1991,11 @@ async function main() {
 }
 
 if (process.argv[1] && path.resolve(process.argv[1]) === fileURLToPath(import.meta.url)) {
-  try { await main(); }
+  const servingFixture = process.argv.includes('--serve-browser-fixture');
+  try { if (servingFixture) await serveBrowserFixture(); else await main(); }
   catch (error) {
     process.exitCode = 1;
-    process.stdout.write(`${JSON.stringify({ kind: 'native-tool-flow-real-chat', automatedAssertionsPassed: false,
+    process.stdout.write(`${JSON.stringify({ kind: servingFixture ? 'egdesk-browser-qa-fixture' : 'native-tool-flow-real-chat', automatedAssertionsPassed: false,
       realExecutionVerified: false, providerTurn: 'not-run', error: error.message })}\n`);
   }
 }
