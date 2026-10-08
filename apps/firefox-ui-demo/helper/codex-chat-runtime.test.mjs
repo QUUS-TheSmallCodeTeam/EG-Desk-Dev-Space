@@ -5,6 +5,7 @@ import os from 'node:os'
 import path from 'node:path'
 import { createHash } from 'node:crypto'
 import { CodexChatRuntime } from './codex-chat-runtime.mjs'
+import { createCodexBrowserToolProvider } from './codex-browser-tool-provider.mjs'
 import { ContextRuntime } from './egdesk-context-runtime.mjs'
 import { inspectNativeCapabilities } from './egdesk-native-capabilities.mjs'
 import { openChatStore } from './egdesk-chat-store.mjs'
@@ -128,6 +129,55 @@ test('actual ContextRuntime attachment capture and dynamic read specs remain ava
   const context = JSON.parse(h.calls.find(call => call.method === 'turn/start').params.additionalContext.egdesk_context.value)
   assert.equal(context.captures[0].sourceId, captured.sourceId)
   assert.equal(accepted.executionPolicy.mode, 'readOnlyQa')
+})
+
+test('ordinary Browser attachment keeps immutable Context read without live Browser binding or native policy changes', async () => {
+  const owner = 'codex:chatgpt:fixture-owner'
+  const captured = { sourceId: 'browser-snapshot-1', hash: 'browser-hash', label: 'Selected Browser snapshot',
+    captureScope: 'visible', truncated: false, shape: { kind: 'browser' } }
+  const contextCalls = [], browserCalls = []
+  const contexts = new ContextRuntime({ getOwnerKey: () => owner, schemaReady: () => true, reader: null, store: {
+    captureAttachments: async (key, body) => { contextCalls.push(['capture', key, body.attachments.length]); return [captured] },
+    getCapture: async (key, id) => { contextCalls.push(['read-capture', key, id]); return captured },
+    markNativeThread: async (key, id) => contextCalls.push(['register', key, id]),
+    bind: async (key, run, ids, capabilities) => {
+      contextCalls.push(['bind', key, run.runId, ids])
+      return { bindingId: 'context-binding-1', capabilities, readerConfiguration: null, captures: [captured] }
+    },
+  } })
+  const transport = { runs: new Map(), hasClient: () => false, bindRun: () => browserCalls.push('transport-bind'),
+    unbindRun: () => browserCalls.push('transport-unbind'), reset: () => browserCalls.push('transport-reset') }
+  const service = { prepare: () => { browserCalls.push('prepare'); throw new Error('ordinary Chat must not prepare live Browser') },
+    bind: async () => browserCalls.push('bind'), dispatch: async () => browserCalls.push('dispatch'),
+    cancelRun: async () => browserCalls.push('cancel'), reset: async () => [] }
+  const browser = createCodexBrowserToolProvider({ transport, service, getOwnerKey: () => owner })
+  const h = harness({ contexts, toolProviders: [browser], getOwnerKey: () => owner })
+  const capture = await contexts.capture({ clientThreadId: 'ui-browser-chat', attachments: [{ kind: 'browser', sourceId: captured.sourceId }] })
+  assert.equal(capture.captures[0].sourceId, captured.sourceId)
+  const run = await h.chat.send({ message: 'Read the selected Browser snapshot', clientThreadId: 'ui-browser-chat',
+    contextSnapshotIds: [captured.sourceId], contextCapabilities: { read: true },
+    selectedSources: [{ id: 'source-1', kind: 'browser', selectedByUser: true, browserToolPermission: 'interact',
+      browserToolSelection: { token: 'one-time-token', threadId: 'ui-browser-chat' },
+      sourceRef: { viewId: 'card-1', profileId: 'firefox-default', accountId: '', uri: 'https://example.test/fixture' } }],
+  })
+  assert.equal(run.accepted, true)
+  assert.equal(Object.hasOwn(run, 'executionPolicy'), false)
+  const start = h.calls.find(call => call.method === 'thread/start').params
+  assert.equal(Object.hasOwn(start, 'sandbox'), false)
+  assert.equal(Object.hasOwn(start, 'approvalPolicy'), false)
+  assert.deepEqual(start.dynamicTools.map(spec => spec.name).filter(name => name.startsWith('egdesk_browser_')), [])
+  assert.ok(start.dynamicTools.some(spec => spec.name === 'egdesk_read_source'))
+  const turn = h.calls.find(call => call.method === 'turn/start').params
+  assert.equal(Object.hasOwn(turn, 'sandboxPolicy'), false)
+  assert.deepEqual(JSON.parse(turn.additionalContext.egdesk_context.value).captures.map(source => source.sourceId), [captured.sourceId])
+  assert.equal(h.chat.snapshot(run.conversationId).runs[0].context.capabilities.read, true)
+  assert.deepEqual(contextCalls.map(call => call[0]), ['capture', 'read-capture', 'register', 'bind'])
+  assert.deepEqual(browserCalls, [])
+  await h.chat.handleServerRequest({ id: 'forbidden-browser-call', method: 'item/tool/call', params: {
+    threadId: run.conversationId, turnId: run.runId, callId: 'call-1', tool: 'egdesk_browser_observe', arguments: { cardId: 'card-1' },
+  } })
+  assert.equal(h.replies[0][2].code, -32601)
+  assert.deepEqual(browserCalls, [])
 })
 
 test('invalid QA policy and unavailable native contract reject before provider turn or local acceptance', async () => {
@@ -319,10 +369,10 @@ test('Browser specs are pre-registered so a later selected Card uses the same na
     dispatch: async () => ({ success: true, contentItems: [{ type: 'inputText', text: '{"status":"postcondition-observed"}' }] }),
   }
   const h = qaHarness({ toolProviders: [browser] })
-  const first = await h.chat.send({ message: 'ordinary first' })
-  assert.deepEqual(h.calls.find(call => call.method === 'thread/start').params.dynamicTools.map(spec => spec.name), browser.specs().map(spec => spec.name))
+  const first = await h.chat.send({ message: 'Start bounded Browser chat', executionPolicy: { mode: 'browserBounded' } })
+  assert.deepEqual(h.calls.find(call => call.method === 'thread/start').params.dynamicTools.map(spec => spec.name), ['egdesk_browser_observe'])
   await h.finish(first)
-  const second = await h.chat.send({ message: 'Observe selected Card', conversationId: first.conversationId, executionPolicy: { mode: 'browserBounded' }, selectedSources: [{ cardId: 'card-1', permission: 'observe' }], browserTransportId: 'ui-1' })
+  const second = await h.chat.send({ message: 'Observe selected Card', conversationId: first.conversationId, selectedSources: [{ cardId: 'card-1', permission: 'observe' }], browserTransportId: 'ui-1' })
   assert.equal(second.conversationId, first.conversationId)
   assert.equal(second.executionPolicy.mode, 'browserBounded')
   assert.equal(second.executionPolicy.browserEffects, 'observe-only-selected-card')
@@ -333,6 +383,34 @@ test('Browser specs are pre-registered so a later selected Card uses the same na
   assert.equal(h.replies[0][1].success, true)
   await h.chat.handleServerRequest({ id: 'browser-click-forbidden', method: 'item/tool/call', params: { threadId: second.conversationId, turnId: second.runId, callId: 'call-2', tool: 'egdesk_browser_click', arguments: { cardId: 'card-1' } } })
   assert.equal(h.replies[1][2].code, -32601)
+})
+
+test('older ordinary thread with a persisted Browser catalog keeps history but never grants a live actor', async () => {
+  const browserCalls = []
+  const browser = { providerId: 'egdesk-browser',
+    specs: () => [{ type: 'function', name: 'egdesk_browser_observe', description: 'Legacy Browser tool', inputSchema: {} }],
+    prepare: async () => { browserCalls.push('prepare'); throw new Error('ordinary Browser must not bind') },
+    bindRun: async () => browserCalls.push('bind'), dispatch: async () => browserCalls.push('dispatch'),
+    registerThread(threadId) { this.runtime.browserRegisteredThreads.add(threadId) },
+  }
+  const h = harness({ toolProviders: [browser] })
+  const currentCatalog = h.chat.collectToolSpecs.bind(h.chat)
+  h.chat.collectToolSpecs = (policy, options) => currentCatalog(policy, policy === null ? { forManifest: true } : options)
+  const older = await h.chat.send({ message: 'Earlier ordinary Browser conversation' })
+  assert.ok(h.calls.find(call => call.method === 'thread/start').params.dynamicTools.some(spec => spec.name === 'egdesk_browser_observe'))
+  await h.finish(older)
+  h.chat.collectToolSpecs = currentCatalog
+  await h.chat.resume({ conversationId: older.conversationId })
+  assert.equal(h.chat.threadToolManifestStatus.get(older.conversationId), 'verified')
+  const continued = await h.chat.send({ message: 'Continue with immutable context only', conversationId: older.conversationId,
+    selectedSources: [{ id: 'browser-source', kind: 'browser', browserToolPermission: 'observe' }] })
+  assert.equal(continued.conversationId, older.conversationId)
+  assert.deepEqual(browserCalls, [])
+  await h.chat.handleServerRequest({ id: 'legacy-browser-call', method: 'item/tool/call', params: {
+    threadId: continued.conversationId, turnId: continued.runId, callId: 'call-1', tool: 'egdesk_browser_observe', arguments: {},
+  } })
+  assert.equal(h.replies[0][2].code, -32601)
+  assert.deepEqual(browserCalls, [])
 })
 
 test('QA Browser catalog and dispatch remain observe-only despite an interaction-capable provider', async () => {
@@ -476,7 +554,7 @@ test('Browser registration survives a bridge restart, while pre-Browser native h
       return chat
     }
     let chat = create(true)
-    const first = await chat.send({ message: 'ordinary first', clientThreadId: 'with-browser', requestId: 'request-1' })
+    const first = await chat.send({ message: 'bounded first', clientThreadId: 'with-browser', requestId: 'request-1', executionPolicy: { mode: 'browserBounded' } })
     await chat.handleNotification({ method: 'turn/completed', params: { threadId: first.conversationId, turn: { id: first.runId, status: 'completed', items: [] } } })
     chat = create(false)
     const legacy = await chat.send({ message: 'older chat', clientThreadId: 'without-browser', requestId: 'request-2' })
@@ -484,7 +562,7 @@ test('Browser registration survives a bridge restart, while pre-Browser native h
     store.close()
     store = openChatStore({ dataDir, ownerScope: 'browser-registration-test' })
     chat = create(true)
-    const later = await chat.send({ message: 'attach Card later', clientThreadId: 'with-browser', conversationId: first.conversationId, requestId: 'request-3', executionPolicy: { mode: 'browserBounded' }, selectedSources: [{ cardId: 'card-1' }] })
+    const later = await chat.send({ message: 'attach Card later', clientThreadId: 'with-browser', conversationId: first.conversationId, requestId: 'request-3', selectedSources: [{ cardId: 'card-1' }] })
     assert.equal(later.conversationId, first.conversationId)
     assert.equal(later.executionPolicy.mode, 'browserBounded')
     assert.equal(calls.filter(call => call.method === 'thread/start').length, 2)
