@@ -5,14 +5,21 @@ import { hashContent } from './egdesk-context-store.mjs'
 
 function nativeHarness(options = {}) {
   const calls = [], replies = []
-  let thread = 0, turn = 0, owner = 'owner-a'
+  let thread = 0, turn = 0, owner = 'owner-a', readerInventory = 0
   const reader = new NativeReaderClient({
     getOwnerKey: () => owner, timeoutMs: options.timeoutMs || 1000, readerPolicy: options.readerPolicy || null,
     respond: (...reply) => replies.push(reply),
     request: async (method, params) => {
       calls.push({ method, params })
-      if (method === 'mcpServerStatus/list') return { data: params.threadId === 'parent' ? [{ name: 'external', pluginId: 'plugin@example', tools: { write: {} } }] : options.externalTools ? [{ name: 'unwanted', tools: { write: {} } }] : [], nextCursor: null }
-      if (method === 'thread/start') return { thread: { id: `reader-${++thread}` }, sandbox: { type: options.unsafeSandbox ? 'workspaceWrite' : 'readOnly' }, ...(options.mismatchedThreadModel ? { model: 'another-model' } : {}) }
+      if (method === 'mcpServerStatus/list') {
+        if (params.threadId !== 'parent') readerInventory++
+        return { data: params.threadId === 'parent'
+        ? [{ name: 'external', pluginId: 'plugin@example', tools: { write: {} }, resources: [], resourceTemplates: [], toolsError: null }]
+        : options.externalTools || options.externalResources || options.externalTemplates || options.toolsError || (options.toolsOnReuse && readerInventory > 1)
+          ? [{ name: 'unwanted', tools: options.externalTools || (options.toolsOnReuse && readerInventory > 1) ? { write: {} } : {}, resources: options.externalResources ? [{ uri: 'private' }] : [], resourceTemplates: options.externalTemplates ? [{ uriTemplate: 'private' }] : [], toolsError: options.toolsError ? 'unknown' : null }]
+          : [], nextCursor: null }
+      }
+      if (method === 'thread/start') return { thread: { id: `reader-${++thread}` }, sandbox: { type: options.unsafeSandbox ? 'workspaceWrite' : 'readOnly', networkAccess: options.unsafeNetwork === true }, approvalPolicy: options.unsafeApproval ? 'on-request' : 'never', ...(options.mismatchedThreadModel ? { model: 'another-model' } : {}) }
       if (method === 'thread/unsubscribe') return { status: 'unsubscribed' }
       if (method === 'turn/interrupt') return {}
       if (method !== 'turn/start') throw new Error(method)
@@ -96,8 +103,15 @@ test('Reader refinement reuses a bounded session and re-enters original source, 
   assert.notEqual(third.nativeThreadId, first.nativeThreadId)
 })
 
+test('reused Reader checks MCP isolation again before its next provider turn', async () => {
+  const h = nativeHarness({ toolsOnReuse: true })
+  await h.reader.read(h.input)
+  await assert.rejects(h.reader.read({ ...h.input, intent: 'Refine the reading' }), error => error.code === 'READER_ISOLATION_UNAVAILABLE')
+  assert.equal(h.calls.filter(call => call.method === 'turn/start').length, 1)
+})
+
 test('Reader cannot start a model turn when native isolation is unverifiable', async () => {
-  for (const options of [{ externalTools: true }, { unsafeSandbox: true }]) {
+  for (const options of [{ externalTools: true }, { externalResources: true }, { externalTemplates: true }, { toolsError: true }, { unsafeSandbox: true }, { unsafeNetwork: true }, { unsafeApproval: true }]) {
     const h = nativeHarness(options)
     await assert.rejects(h.reader.read(h.input), e => e.code === 'READER_ISOLATION_UNAVAILABLE')
     assert.equal(h.calls.some(call => call.method === 'turn/start'), false)

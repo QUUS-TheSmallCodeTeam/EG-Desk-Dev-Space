@@ -3,6 +3,9 @@ import { spawn } from 'node:child_process'
 import { AppServerRpc } from './codex-app-server-rpc.mjs'
 import { normalizeNativeAuth, publicAuthIdentityKey } from './codex-auth-state.mjs'
 import { CodexChatRuntime } from './codex-chat-runtime.mjs'
+import { BrowserToolTransport } from './codex-browser-tool-transport.mjs'
+import { createCodexBrowserToolProvider } from './codex-browser-tool-provider.mjs'
+import { classifyPublicToolError } from './codex-tool-errors.mjs'
 import { createChatHttpHandler, guardBridgeRequest, readJsonBody, sendJson, setBridgeCors } from './codex-bridge-http.mjs'
 import { BoundedSseClient } from './codex-bridge-sse.mjs'
 import { TerminalSessionRegistry, terminalResponseStatus } from './terminal-sessions.mjs'
@@ -115,15 +118,19 @@ const contextStore = new ImmutableContextStore({
 })
 const nativeReader = new NativeReaderClient({ request: (method, params) => appServerRequest(method, params), respond: nativeRespond, getOwnerKey: () => publicAuthIdentityKey(authState) })
 const contexts = new ContextRuntime({ store: contextStore, reader: nativeReader, getOwnerKey: () => publicAuthIdentityKey(authState), schemaReady: () => nativeCapabilities.schemaMatch && appServerReady })
+const browserTransport = new BrowserToolTransport({ getOwnerKey: () => publicAuthIdentityKey(authState) })
+const browserProvider = createCodexBrowserToolProvider({ transport: browserTransport, getOwnerKey: () => publicAuthIdentityKey(authState), schemaReady: () => nativeCapabilities.qaReadOnly && appServerReady })
 const chat = new CodexChatRuntime({
   request: (method, params) => appServerRequest(method, params),
   respond: nativeRespond,
   contexts,
+  toolProviders: [browserProvider],
   store: chatStore,
   requireStore: true,
   getOwnerKey: () => publicAuthIdentityKey(authState),
   expectedProcessConfiguration: { model: appServerLaunch.configuredModel, effort: appServerLaunch.configuredEffort },
   qaReady: () => nativeCapabilities.qaReadOnly && appServerReady,
+  getNativeContractFingerprint: () => nativeCapabilities.contractFingerprint,
   emit: event => broadcast(event, 2),
   emitLegacy: event => broadcast(event, 1),
 })
@@ -546,12 +553,25 @@ const bridgeServer = createServer(async (req, res) => {
       'Cache-Control': 'no-cache',
       Connection: 'keep-alive',
     })
+    let browserTransportId = null
     const client = new BoundedSseClient(res, {
       chatProtocol: url.searchParams.get('chatProtocol') === '2' ? 2 : 1,
-      onClose: () => clients.delete(client),
+      onClose: () => { clients.delete(client); if (browserTransportId) browserTransport.closeClient(browserTransportId) },
     })
     clients.add(client)
-    client.send(`retry: 1000\nevent: ready\ndata: ${JSON.stringify({ ok: true, streamId: chat.streamId, seq: chat.seq, resyncRequired: true })}\n\n`)
+    if (client.chatProtocol === 2) browserTransportId = browserTransport.registerClient(client)
+    client.send(`retry: 1000\nevent: ready\ndata: ${JSON.stringify({ ok: true, streamId: chat.streamId, seq: chat.seq, resyncRequired: true, ...(browserTransportId ? { browserTransportId } : {}) })}\n\n`)
+    return
+  }
+
+  if (req.method === 'POST' && route === '/browser-tool/respond') {
+    try {
+      const body = await readJsonBody(req, { maxBytes: 190000 })
+      sendJson(res, 200, browserTransport.receive(body.browserTransportId, body.response))
+    } catch (error) {
+      const failure = classifyPublicToolError(error, { browser: true })
+      sendJson(res, error.httpStatus || 409, { accepted: false, code: failure.code, error: failure.message })
+    }
     return
   }
 

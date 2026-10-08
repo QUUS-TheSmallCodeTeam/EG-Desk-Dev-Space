@@ -42,6 +42,15 @@ export class NativeReaderClient {
     throw fail('READER_ISOLATION_UNAVAILABLE', 'MCP inventory exceeds the isolation verification limit')
   }
 
+  async assertMcpIsolation(threadId) {
+    const inventory = await this.mcpInventory(threadId)
+    if (inventory.some(server => !server?.tools || typeof server.tools !== 'object' || Array.isArray(server.tools) ||
+        !Array.isArray(server.resources) || !Array.isArray(server.resourceTemplates) ||
+        Object.keys(server.tools).length || server.resources.length || server.resourceTemplates.length || server.toolsError != null)) {
+      throw fail('READER_ISOLATION_UNAVAILABLE', 'Reader still exposes external MCP capabilities or has an unverifiable catalog')
+    }
+  }
+
   async startChild(options, configuration) {
     this.assertOwner(options.ownerKey, options.signal)
     const servers = await this.mcpInventory(options.parentThreadId)
@@ -64,13 +73,15 @@ export class NativeReaderClient {
     this.children.set(id, child)
     try {
       this.assertOwner(options.ownerKey, options.signal)
-      if (started.sandbox?.type !== 'readOnly') throw fail('READER_ISOLATION_UNAVAILABLE', 'Reader did not receive the required read-only sandbox')
+      if (started.sandbox?.type !== 'readOnly' || started.sandbox.networkAccess !== false || started.approvalPolicy !== 'never') {
+        throw fail('READER_ISOLATION_UNAVAILABLE', 'Reader did not confirm read-only, offline and never-approval policy')
+      }
       if (typeof started.model === 'string' && started.model !== configuration.model) throw fail('READER_CONFIGURATION_MISMATCH', 'Native Reader thread reported a different model')
-      const inventory = await this.mcpInventory(id)
-      if (inventory.some(server => Object.keys(server.tools || {}).length || server.toolsError)) throw fail('READER_ISOLATION_UNAVAILABLE', 'Reader still exposes external tools or has an unverifiable tool catalog')
+      await this.assertMcpIsolation(id)
       return child
     } catch (error) {
       await this.request('thread/unsubscribe', { threadId: id }).catch(() => {})
+      this.children.delete(id)
       throw error
     }
   }
@@ -91,6 +102,11 @@ export class NativeReaderClient {
       this.sessions.set(options.readerSessionId, child)
     }
     this.assertOwner(options.ownerKey, options.signal)
+    if (child.turns > 0) {
+      try { await this.assertMcpIsolation(child.id) }
+      catch (error) { child.reusable = false; throw error }
+      this.assertOwner(options.ownerKey, options.signal)
+    }
     let resolve, reject
     const done = new Promise((yes, no) => { resolve = yes; reject = no })
     // Rejection may precede the turn/start RPC response.

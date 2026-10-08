@@ -1,14 +1,15 @@
 import { chatError } from './codex-chat-values.mjs'
 
 export const READ_ONLY_QA = 'readOnlyQa'
+export const BROWSER_BOUNDED = 'browserBounded'
 
 export function requestedExecutionPolicy(value) {
   if (value === undefined) return null
   if (!value || typeof value !== 'object' || Array.isArray(value) ||
-      Object.keys(value).length !== 1 || value.mode !== READ_ONLY_QA) {
-    throw chatError('INVALID_EXECUTION_POLICY', 'Only executionPolicy: { mode: "readOnlyQa" } is supported', 400)
+      Object.keys(value).length !== 1 || ![READ_ONLY_QA, BROWSER_BOUNDED].includes(value.mode)) {
+    throw chatError('INVALID_EXECUTION_POLICY', 'Use executionPolicy mode readOnlyQa or browserBounded', 400)
   }
-  return READ_ONLY_QA
+  return value.mode
 }
 
 export async function listNativeMcpServers(request, threadId = null) {
@@ -53,14 +54,15 @@ export function qaThreadOverrides(servers) {
   }
 }
 
-export function verifyQaNativeThread(result) {
+export function verifyQaNativeThread(result, mode = READ_ONLY_QA) {
   if (result?.sandbox?.type !== 'readOnly' || result.sandbox.networkAccess !== false || result.approvalPolicy !== 'never') {
     throw chatError('QA_POLICY_UNVERIFIED', 'Native thread did not confirm read-only, offline, never-approval policy; no turn was started', 502)
   }
   return {
-    mode: READ_ONLY_QA, status: 'native-thread-verified',
+    mode, status: 'native-thread-verified',
     sandbox: 'readOnly', networkAccess: false, approvalPolicy: 'never',
     externalMcpCatalog: 'pending',
+    ...(mode === BROWSER_BOUNDED ? { browserEffects: 'per-run-selected-card' } : {}),
   }
 }
 

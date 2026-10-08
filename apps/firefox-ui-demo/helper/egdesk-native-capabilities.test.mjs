@@ -1,15 +1,18 @@
 import test from 'node:test'
 import assert from 'node:assert/strict'
-import { readFile, mkdtemp, rm } from 'node:fs/promises'
+import { readFile, writeFile, mkdtemp, rm } from 'node:fs/promises'
 import { spawnSync } from 'node:child_process'
 import os from 'node:os'
 import path from 'node:path'
-import { buildCodexAppServerLaunch, inspectNativeCapabilities, verifyCodexLaunchConfiguration } from './egdesk-native-capabilities.mjs'
+import { buildCodexAppServerLaunch, inspectNativeCapabilities, resolveCodexExecutable, verifyCodexLaunchConfiguration } from './egdesk-native-capabilities.mjs'
+import { fingerprintNativeExecutable, verifyNativeSchemaDirectory } from './codex-native-schema-probe.mjs'
 import { AppServerRpc } from './codex-app-server-rpc.mjs'
 
 test('version proof uses the exact executable later selected for app-server, not an SDK fallback', () => {
   const executable = '/configured/native/codex'
-  const proof = inspectNativeCapabilities({ executable, run: (program, args) => { assert.equal(program, executable); assert.deepEqual(args, ['--version']); return { status: 0, stdout: 'codex-cli 0.157.1\n' } } })
+  const probe = ({ executable: selected }) => { assert.equal(selected, executable); return { contextContract: true, qaContract: true, schemaFingerprint: 'a'.repeat(64) } }
+  const fingerprint = selected => { assert.equal(selected, executable); return 'b'.repeat(64) }
+  const proof = inspectNativeCapabilities({ executable, probe, fingerprint, run: (program, args) => { assert.equal(program, executable); assert.deepEqual(args, ['--version']); return { status: 0, stdout: 'codex-cli 0.157.1\n' } } })
   assert.equal(proof.schemaMatch, true)
   assert.equal(proof.dynamicTools, true)
   assert.equal(proof.executable, executable)
@@ -17,13 +20,17 @@ test('version proof uses the exact executable later selected for app-server, not
   assert.equal(old.schemaMatch, false)
   assert.equal(old.dynamicTools, false)
   assert.equal(old.qaReadOnly, false)
-  const current = inspectNativeCapabilities({ executable, run: () => ({ status: 0, stdout: 'codex-cli 0.160.1\n' }) })
+  const current = inspectNativeCapabilities({ executable, probe, fingerprint, run: () => ({ status: 0, stdout: 'codex-cli 0.160.1\n' }) })
   assert.equal(current.schemaMatch, true)
   assert.equal(current.dynamicTools, true)
   assert.equal(current.readerReadOnly, true)
   assert.equal(current.qaReadOnly, true)
+  assert.match(current.contractFingerprint, /^[a-f0-9]{64}$/)
   assert.equal(proof.qaReadOnly, false)
   assert.equal(inspectNativeCapabilities({ executable, run: () => ({ status: 0, stdout: 'codex-cli 0.160.2\n' }) }).schemaMatch, false)
+  assert.equal(inspectNativeCapabilities({ executable, run: () => ({ status: 0, stdout: 'codex-cli 0.160.1\n' }), probe: () => null, fingerprint }).schemaMatch, false)
+  assert.equal(inspectNativeCapabilities({ executable, run: () => ({ status: 0, stdout: 'codex-cli 0.160.1\n' }), probe: () => ({ contextContract: true, qaContract: true, schemaFingerprint: 'bad' }), fingerprint }).qaReadOnly, false)
+  assert.equal(inspectNativeCapabilities({ executable, run: () => ({ status: 0, stdout: 'codex-cli 0.160.1\n' }), probe, fingerprint: () => { throw new Error('Unreadable selected binary') } }).dynamicTools, false)
 })
 
 test('installed 0.160.1 generated experimental schema has the exact native contracts used by context, Reader and read-only QA', async t => {
@@ -33,6 +40,11 @@ test('installed 0.160.1 generated experimental schema has the exact native contr
   try {
     const generated = spawnSync('codex', ['app-server', 'generate-json-schema', '--experimental', '--out', dir], { encoding: 'utf8', timeout: 10000 })
     assert.equal(generated.status, 0, generated.stderr)
+    assert.deepEqual({ contextContract: verifyNativeSchemaDirectory(dir)?.contextContract, qaContract: verifyNativeSchemaDirectory(dir)?.qaContract }, { contextContract: true, qaContract: true })
+    const actual = inspectNativeCapabilities({ executable: resolveCodexExecutable() })
+    assert.equal(actual.schemaMatch, true)
+    assert.equal(actual.qaReadOnly, true)
+    assert.match(actual.contractFingerprint, /^[a-f0-9]{64}$/)
     const schema = async name => JSON.parse(await readFile(path.join(dir, name), 'utf8'))
     const start = await schema('v2/ThreadStartParams.json')
     const startResponse = await schema('v2/ThreadStartResponse.json')
@@ -61,6 +73,20 @@ test('installed 0.160.1 generated experimental schema has the exact native contr
     for (const key of ['id', 'model', 'defaultReasoningEffort', 'supportedReasoningEfforts']) assert.ok(models.definitions.Model.properties[key], `model/list ${key}`)
     assert.equal(models.definitions.ReasoningEffort.type, 'string')
     for (const key of ['name', 'pluginId', 'tools', 'toolsError']) assert.ok(mcp.definitions.McpServerStatus.properties[key], `MCP status ${key}`)
+    const callPath = path.join(dir, 'DynamicToolCallParams.json')
+    const damaged = JSON.parse(await readFile(callPath, 'utf8'))
+    delete damaged.properties.callId
+    await writeFile(callPath, JSON.stringify(damaged))
+    assert.equal(verifyNativeSchemaDirectory(dir)?.contextContract, false, 'missing required native call field must close the gate')
+  } finally { await rm(dir, { recursive: true, force: true }) }
+})
+
+test('an unrecognized executable wrapper is not accepted on a version banner alone', async () => {
+  const dir = await mkdtemp(path.join(os.tmpdir(), 'egdesk-unknown-codex-wrapper-'))
+  try {
+    const wrapper = path.join(dir, 'codex-wrapper')
+    await writeFile(wrapper, '#!/bin/sh\nprintf "codex-cli 0.160.1\\n"\n')
+    assert.throws(() => fingerprintNativeExecutable(wrapper), /Unrecognized Codex launcher/)
   } finally { await rm(dir, { recursive: true, force: true }) }
 })
 

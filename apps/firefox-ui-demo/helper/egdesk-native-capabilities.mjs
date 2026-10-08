@@ -1,6 +1,8 @@
 import { accessSync, constants, realpathSync } from 'node:fs'
 import { spawnSync } from 'node:child_process'
+import { createHash } from 'node:crypto'
 import path from 'node:path'
+import { fingerprintNativeExecutable, probeGeneratedNativeSchema } from './codex-native-schema-probe.mjs'
 
 // 0.157.1 is the existing pinned Context/Reader baseline. 0.160.1 was checked
 // against this CLI's generated experimental schemas and the public App Server
@@ -54,14 +56,26 @@ export function resolveCodexExecutable(env = process.env) {
   throw new Error('Configured Codex executable is unavailable; set EGDESK_CODEX_BIN to an existing absolute executable path')
 }
 
-export function inspectNativeCapabilities({ executable, env = process.env, cwd = process.cwd(), run = spawnSync }) {
+export function inspectNativeCapabilities({ executable, env = process.env, cwd = process.cwd(), run = spawnSync, probe = probeGeneratedNativeSchema, fingerprint = fingerprintNativeExecutable }) {
   const result = run(executable, ['--version'], { env, cwd, encoding: 'utf8', timeout: 5000, maxBuffer: 4096, stdio: ['ignore', 'pipe', 'pipe'] })
   const version = result.status === 0 ? String(result.stdout || '').trim().match(/^codex-cli (\d+\.\d+\.\d+)$/)?.[1] || null : null
-  const contextContract = CONTEXT_CONTRACT_VERSIONS.has(version)
+  let proof = null, binaryFingerprint = null
+  if (CONTEXT_CONTRACT_VERSIONS.has(version)) {
+    try {
+      proof = probe({ executable, env, cwd, run })
+      if (proof?.contextContract && /^[a-f0-9]{64}$/.test(proof.schemaFingerprint || '')) binaryFingerprint = fingerprint(executable)
+    } catch { proof = null; binaryFingerprint = null }
+  }
+  const contextContract = CONTEXT_CONTRACT_VERSIONS.has(version) && proof?.contextContract === true && /^[a-f0-9]{64}$/.test(binaryFingerprint || '')
+  const qaContract = contextContract && QA_POLICY_CONTRACT_VERSIONS.has(version) && proof.qaContract === true
+  const contractFingerprint = contextContract ? createHash('sha256').update(`${version}\0${binaryFingerprint}\0${proof.schemaFingerprint}`).digest('hex') : null
   return {
     executable, version, schemaVersion: NATIVE_SCHEMA_VERSION,
     schemaMatch: contextContract, experimentalApi: true,
     dynamicTools: contextContract, readerReadOnly: contextContract,
-    qaReadOnly: QA_POLICY_CONTRACT_VERSIONS.has(version),
+    qaReadOnly: qaContract,
+    binaryFingerprint: contextContract ? binaryFingerprint : null,
+    schemaFingerprint: contextContract ? proof.schemaFingerprint : null,
+    contractFingerprint,
   }
 }
