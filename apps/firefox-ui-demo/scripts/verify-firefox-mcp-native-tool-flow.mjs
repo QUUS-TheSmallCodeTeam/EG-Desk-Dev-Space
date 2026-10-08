@@ -1041,7 +1041,53 @@ export function browserToolReceipts(run, events) {
   });
 }
 
-export function assertBrowserPositiveFlow({ run, events, active, emitted, cwd,
+// The rendered human Send click can activate the Chat Card before the model
+// runs. Attribute only changes after that original-fetch boundary to the
+// Browser model action; keep pan/zoom and Browser keyboard-focus ownership
+// stable across both phases.
+export function assertBrowserFocusOwnership({ before, preSendFocus, atFetch, after }) {
+  assert.ok(Number.isFinite(before?.sampledAtMs)
+    && Number.isFinite(preSendFocus?.sampledAtMs)
+    && Number.isFinite(atFetch?.sampledAtMs)
+    && Number.isFinite(after?.sampledAtMs)
+    && before.sampledAtMs <= preSendFocus.sampledAtMs
+    && preSendFocus.sampledAtMs <= atFetch.sampledAtMs
+    && atFetch.sampledAtMs <= after.sampledAtMs,
+  'Browser focus samples do not bracket human Send and model completion');
+  assert.equal(preSendFocus.activeEntityId, before.camera?.activeEntityId,
+    'Canvas active entity changed before human Send');
+  assert.equal(preSendFocus.focusedBrowserCardId, before.focusedCardId,
+    'Browser keyboard focus changed before human Send');
+  assert.equal(preSendFocus.chatCardEntityId, atFetch.chatCardEntityId,
+    'Chat Card identity changed during the original send');
+  if (atFetch.activeEntityId !== preSendFocus.activeEntityId) {
+    assert.ok(typeof atFetch.chatCardEntityId === 'string' && atFetch.chatCardEntityId,
+      'human Send has no identified Chat Card');
+    assert.equal(atFetch.activeEntityId, atFetch.chatCardEntityId,
+      'human Send activated an entity other than the Chat Card');
+  }
+  assert.ok(atFetch.focusedBrowserCardId === preSendFocus.focusedBrowserCardId
+    || atFetch.focusedBrowserCardId === null,
+  'human Send transferred keyboard focus to another Browser Card');
+  assert.ok(same(before.camera?.pan, preSendFocus.pan)
+    && same(preSendFocus.pan, atFetch.pan)
+    && same(atFetch.pan, after.camera?.pan)
+    && before.camera?.zoom === preSendFocus.zoom
+    && preSendFocus.zoom === atFetch.zoom
+    && atFetch.zoom === after.camera?.zoom,
+  'Browser QA changed Canvas pan or zoom across the human-send/model boundary');
+  assert.equal(after.camera?.activeEntityId, atFetch.activeEntityId,
+    'Browser model action changed the human-selected Canvas entity');
+  assert.equal(after.focusedCardId, atFetch.focusedBrowserCardId,
+    'Browser model action changed human Browser keyboard-focus ownership');
+  return { focusOwnershipVerified: true,
+    humanSendFocusTransition: atFetch.activeEntityId === preSendFocus.activeEntityId
+      ? 'unchanged' : 'chat-card-activated',
+    activeEntityAtOriginalFetch: atFetch.activeEntityId,
+    focusedBrowserCardAtOriginalFetch: atFetch.focusedBrowserCardId };
+}
+
+export function assertBrowserPositiveFlow({ run, events, active, emitted, preSendFocus, cwd,
   selection, fixture, target, control, before, after }) {
   assertObservedRunChain({ run, events, active });
   assertBrowserFixtureConfig(fixture?.url, fixture?.marker);
@@ -1148,22 +1194,19 @@ export function assertBrowserPositiveFlow({ run, events, active, emitted, cwd,
     && item.tag.toLowerCase() === 'input'), 'fixture has no observed harmless text input');
   assert.equal(before.inputValue, '', 'fixture input was not empty before the model action');
   assert.equal(after.inputValue, target.fillValue, 'independent target input value did not change');
-  assert.ok(after.focusedCardId === null || after.focusedCardId === target.cardId,
-    'Browser action focused a Card other than the selected target');
   assert.equal(before.controlText, after.controlText, 'control Card DOM changed');
   assert.equal(before.controlInputValue, after.controlInputValue, 'control Card input changed');
-  assert.ok(same(before.camera?.pan, after.camera?.pan)
-    && before.camera?.zoom === after.camera?.zoom && same(before.cards, after.cards),
-  'Browser action moved Canvas camera or changed Card inventory');
-  assert.ok(after.camera?.activeEntityId === before.camera?.activeEntityId
-    || after.camera?.activeEntityId === target.cardId,
-  'Browser action focused another Canvas entity');
+  assert.ok(same(before.cards, after.cards),
+    'Browser action changed Card inventory');
+  const focusProof = assertBrowserFocusOwnership({ before, preSendFocus,
+    atFetch: emitted.focusAtOriginalFetch, after });
   return { cardId: selection.cardId, sourceId: selection.sourceId,
     inputSnapshotId: snapshotId, itemIds: calls.map(call => call.itemId),
     publicModelToolReceiptsVerified: true, independentLocalDomVerified: true,
     independentActorDocumentRevisionVerified: true,
     modelActionGuardRevisionPubliclyVerified: false,
     inputFocusedAfter: after.targetInputFocused === true,
+    ...focusProof, humanTypingProbeVerified: false,
     negativeGuardsVerified: false, externalEffectVerified: false };
 }
 
@@ -1288,6 +1331,18 @@ async function installQaSendInterceptor(harness, expected) {
             body.browserTransportId !== expected.browserTransportId) {
           throw new Error('QA Chat Browser source token/transport is not bound to this Card and thread');
         }
+        const ui = window.__egdesk.state;
+        const activeElement = document.activeElement;
+        state.focusAtOriginalFetch = {
+          sampledAtMs: Date.now(),
+          activeEntityId: ui.activeEntityId || null,
+          chatCardEntityId: ui.codex?.chatCardEntityId || null,
+          focusedBrowserCardId: activeElement?.closest?.('.egd-browser-card')?.id || null,
+          focusedChatCardId: activeElement?.closest?.('.egd-chat-card')?.id || null,
+          activeElementId: activeElement?.id || null,
+          activeElementTag: activeElement?.tagName?.toLowerCase?.() || null,
+          pan: { ...ui.panTarget }, zoom: ui.zoomTarget,
+        };
       }
       if (body.executionPolicy && body.executionPolicy.mode !== expected.policyMode) {
         throw new Error('QA Chat request has a conflicting execution policy');
@@ -1315,6 +1370,7 @@ async function installQaSendInterceptor(harness, expected) {
         rootSseReadyState: state.rootSseAtFetch?.readyState ?? null,
         rootSseSampledAtMs: state.rootSseAtFetch?.sampledAtMs ?? null,
         rootSseCheckedAtMs: state.rootSseAtFetch?.checkedAtMs ?? null,
+        focusAtOriginalFetch: state.focusAtOriginalFetch || null,
         selectedSources: selected.map(source => ({ kind: source.kind,
           sourceId: source.id || null,
           cardId: source.sourceRef?.viewId || null, profileId: source.sourceRef?.profileId || null,
@@ -1622,6 +1678,21 @@ async function clickPreparedSourceSendOnce(harness, thread, prompt, sourceId, re
   result.sourceStage = 'prepared-send-click-acknowledged';
 }
 
+async function browserFocusSnapshot(harness) {
+  return chrome(harness, () => {
+    const ui = window.__egdesk.state;
+    const activeElement = document.activeElement;
+    return { sampledAtMs: Date.now(),
+      activeEntityId: ui.activeEntityId || null,
+      chatCardEntityId: ui.codex?.chatCardEntityId || null,
+      focusedBrowserCardId: activeElement?.closest?.('.egd-browser-card')?.id || null,
+      focusedChatCardId: activeElement?.closest?.('.egd-chat-card')?.id || null,
+      activeElementId: activeElement?.id || null,
+      activeElementTag: activeElement?.tagName?.toLowerCase?.() || null,
+      pan: { ...ui.panTarget }, zoom: ui.zoomTarget };
+  });
+}
+
 async function completedUiRun(harness, thread, prompt, deadlineMs, {
   cwd, sourceIds = [], qaOutputMarkers = [], policyMode = 'readOnlyQa',
   browserSelection = null, browserRootReady = null, browserFixtureUrl = null,
@@ -1646,9 +1717,11 @@ async function completedUiRun(harness, thread, prompt, deadlineMs, {
   let observation;
   let active = null;
   let emitted = null;
+  let preSendFocus = null;
   try {
     observation = await observeChatEvents(thread.wireClientThreadId);
     assertTurnTimeBudget(deadlineMs);
+    if (browserSelection) preSendFocus = await browserFocusSnapshot(harness);
     if (preparedSource) await clickPreparedSourceSendOnce(harness, thread, prompt,
       preparedSource.sourceId, preparedSource.result);
     else await sendFromComposer(harness, prompt);
@@ -1708,7 +1781,7 @@ async function completedUiRun(harness, thread, prompt, deadlineMs, {
     assertRunIdentity(state.run, observation.events, thread.wireClientThreadId);
     assert.equal(state.run.requestId, emitted.requestId,
       'backend native run does not match the original composer fetch');
-    return { run: state.run, events: [...observation.events], active, emitted };
+    return { run: state.run, events: [...observation.events], active, emitted, preSendFocus };
   } finally {
     try { await observation?.close(); }
     finally { await removeQaSendInterceptor(harness); }
@@ -1808,8 +1881,10 @@ async function browserSnapshot(harness, targetCardId, controlCardId) {
     const segments = snapshot => Array.isArray(snapshot.text) ? snapshot.text.map(String)
       : String(snapshot.text || '').split('\n');
     const targetInputFocused = !!input && actor.focusedElement?.ref === input.ref;
-    const focusedCardId = document.activeElement?.closest?.('.egd-browser-card')?.id || null;
+    const activeElement = document.activeElement;
+    const focusedCardId = activeElement?.closest?.('.egd-browser-card')?.id || null;
     return { targetUrl: actor.url, targetDocumentId: actor.documentId,
+      sampledAtMs: Date.now(),
       targetRevision: actor.revision, targetViewport: actor.viewport,
       targetProfileId: binding.profileId, targetCardEpoch: binding.cardEpoch,
       targetAccountId: binding.accountId,
@@ -1818,6 +1893,8 @@ async function browserSnapshot(harness, targetCardId, controlCardId) {
         label: item.label || '', role: item.role || '', tag: item.tag || '' })),
       inputValue: input?.value || '',
       targetInputFocused, focusedCardId,
+      activeElementId: activeElement?.id || null,
+      activeElementTag: activeElement?.tagName?.toLowerCase?.() || null,
       controlText: text(control), controlInputValue: control.focusedElement?.value || '', controlCardId,
       cards: [...document.querySelectorAll('.egd-canvas-card')].map(node => node.id).sort(),
       camera: { pan: { ...api.state.panTarget }, zoom: api.state.zoomTarget,
@@ -1970,6 +2047,20 @@ async function main() {
     result.providerTurns.push(browserTurn);
     result.providerTurn = 'real-codex-completed-unverified';
     const after = await browserSnapshot(harness, cards.targetCardId, cards.controlCardId);
+    result.browserFocusTrace = {
+      beforeCardSnapshot: { sampledAtMs: before.sampledAtMs,
+        activeEntityId: before.camera.activeEntityId, focusedBrowserCardId: before.focusedCardId },
+      beforeSend: { sampledAtMs: browser.preSendFocus?.sampledAtMs ?? null,
+        activeEntityId: browser.preSendFocus?.activeEntityId ?? null,
+        focusedBrowserCardId: browser.preSendFocus?.focusedBrowserCardId ?? null },
+      originalFetch: { sampledAtMs: browser.emitted.focusAtOriginalFetch?.sampledAtMs ?? null,
+        activeEntityId: browser.emitted.focusAtOriginalFetch?.activeEntityId ?? null,
+        chatCardEntityId: browser.emitted.focusAtOriginalFetch?.chatCardEntityId ?? null,
+        focusedBrowserCardId: browser.emitted.focusAtOriginalFetch?.focusedBrowserCardId ?? null },
+      afterModel: { sampledAtMs: after.sampledAtMs,
+        activeEntityId: after.camera.activeEntityId, focusedBrowserCardId: after.focusedCardId,
+        activeElementId: after.activeElementId, activeElementTag: after.activeElementTag },
+    };
     const browserProof = assertBrowserPositiveFlow({ ...browser, cwd: qaCwd, selection,
       fixture: browserFixture,
       target: { cardId: cards.targetCardId, profileId: selection.profileId, fillValue },
