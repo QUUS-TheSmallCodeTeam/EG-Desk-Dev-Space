@@ -1,6 +1,7 @@
 import { createHash, randomUUID } from 'node:crypto'
 import path from 'node:path'
 import { chatError, explicitFileLinks, MAX_TEXT, publicError, publicNetworkContext, publicText, validateChatCwd, verifyLocalFile } from './codex-chat-values.mjs'
+import { READ_ONLY_QA, requestedExecutionPolicy, listNativeMcpServers, qaThreadOverrides, verifyQaNativeThread, verifyQaMcpIsolation, QA_TURN_OVERRIDES } from './codex-chat-execution-policy.mjs'
 
 const TERMINAL = new Set(['completed', 'interrupted', 'failed'])
 const ITEM_STATUS = new Set(['inProgress', 'completed', 'failed', 'declined'])
@@ -16,6 +17,7 @@ const localId = (kind, clientThreadId, requestId) => `${kind}-${createHash('sha2
 const ownerHash = ownerKey => typeof ownerKey === 'string' && ownerKey
   ? createHash('sha256').update(ownerKey).digest('hex') : null
 const unknownCoverage = () => ({ scope: 'egdesk-local', status: 'unknown', reasons: [], nativeHistoryComplete: null })
+const toolKey = (namespace, name) => `${namespace || ''}\0${name}`
 
 // Shared by live events and history. In particular, reasoning.content, raw tool
 // input/results, diffs and shell output never enter the retained state or SSE.
@@ -88,15 +90,18 @@ function cleanNotification(method, p) {
 }
 
 export class CodexChatRuntime {
-  constructor({ request, respond, emit = () => {}, emitLegacy = () => {}, verifyFile = verifyLocalFile, now = Date.now, contexts = null, expectedProcessConfiguration = null, store = null, requireStore = false, getOwnerKey = () => null }) {
+  constructor({ request, respond, emit = () => {}, emitLegacy = () => {}, verifyFile = verifyLocalFile, now = Date.now, contexts = null, toolProviders = [], expectedProcessConfiguration = null, store = null, requireStore = false, getOwnerKey = () => null, qaReady = () => true }) {
     Object.assign(this, { request, respond, emitEvent: emit, emitLegacy, verifyFile, now })
     this.store = store
     this.requireStore = requireStore
     this.getOwnerKey = getOwnerKey
+    this.qaReady = qaReady
     this.storeHealthy = true
     this.expectedProcessConfiguration = expectedProcessConfiguration
     this.contexts = contexts
-    if (contexts) contexts.runtime = this
+    this.toolProviders = [...(contexts ? [contexts] : []), ...toolProviders]
+    for (const provider of this.toolProviders) provider.runtime = this
+    this.threadToolOwners = new Map()
     this.streamId = randomUUID()
     this.seq = 0
     this.connection = 'offline'
@@ -125,6 +130,65 @@ export class CodexChatRuntime {
   assertStore() {
     if (!this.store || !this.storeHealthy) throw chatError('CHAT_STORE_UNAVAILABLE', 'Local chat history is unavailable; no Codex turn can start', 503)
     return this.store
+  }
+
+  collectToolSpecs(qa = false) {
+    const specs = [], owners = new Map(), selected = []
+    for (const provider of this.toolProviders) {
+      if (qa && provider !== this.contexts) continue
+      const offered = provider.specs?.() || []
+      if (!Array.isArray(offered)) throw chatError('INVALID_TOOL_PROVIDER', 'Tool provider returned an invalid native catalog', 500)
+      for (const spec of offered) {
+        // The QA policy exposes only two read-only EG-Desk context tools.
+        if (qa && (provider !== this.contexts || !['egdesk_list_context', 'egdesk_read_source'].includes(spec?.name))) continue
+        const names = spec?.type === 'function' && typeof spec.name === 'string' ? [toolKey(null, spec.name)]
+          : spec?.type === 'namespace' && typeof spec.name === 'string' && Array.isArray(spec.tools)
+            ? spec.tools.map(tool => tool?.type === 'function' && typeof tool.name === 'string' ? toolKey(spec.name, tool.name) : null)
+            : null
+        if (!names?.length || names.some(name => !name || owners.has(name))) throw chatError('INVALID_TOOL_PROVIDER', 'Tool provider has an invalid or conflicting native tool name', 500)
+        for (const name of names) owners.set(name, provider)
+        specs.push(spec)
+        if (!selected.includes(provider)) selected.push(provider)
+      }
+    }
+    return { specs, owners, selected }
+  }
+
+  additionalToolContext(preparedProviders) {
+    const context = {}
+    for (const [provider, prepared] of preparedProviders) {
+      if (!prepared) continue
+      const entries = provider.additionalContext?.(prepared)
+      if (entries == null) continue
+      if (typeof entries !== 'object' || Array.isArray(entries)) throw chatError('INVALID_TOOL_PROVIDER', 'Tool provider returned invalid native context', 500)
+      for (const [key, value] of Object.entries(entries)) {
+        if (Object.hasOwn(context, key)) throw chatError('INVALID_TOOL_PROVIDER', 'Tool providers returned conflicting native context keys', 500)
+        context[key] = value
+      }
+    }
+    return Object.keys(context).length ? context : null
+  }
+
+  dispatchToolProvider(provider, run, event) {
+    // ContextRuntime replies through runtime.respond itself. Other providers
+    // may instead return a native DynamicToolCallResponse. Neither path may
+    // block the ordered native notification queue.
+    void Promise.resolve().then(() => provider.dispatch(run, event)).then(response => {
+      if (response == null) return
+      const valid = typeof response.success === 'boolean' && Array.isArray(response.contentItems) && response.contentItems.length <= 16 &&
+        response.contentItems.every(item => item && typeof item === 'object' && (
+          (item.type === 'inputText' && typeof item.text === 'string') ||
+          (item.type === 'inputImage' && typeof item.imageUrl === 'string') ||
+          (item.type === 'inputAudio' && typeof item.audioUrl === 'string')
+        )) && JSON.stringify(response).length <= 8 * 1024 * 1024
+      if (!valid) throw chatError('INVALID_TOOL_RESPONSE', 'Tool provider returned an invalid native response', 500)
+      this.respond(event.rpcId, response)
+    }).catch(error => {
+      const message = publicText(error?.message || 'Tool provider failed', 1000)
+      try { this.respond(event.rpcId, { success: false, contentItems: [{ type: 'inputText', text: JSON.stringify({ error: { code: 'TOOL_PROVIDER_FAILED', message } }) }] }) } catch {}
+      run.error = publicError(message, 'TOOL_PROVIDER_FAILED')
+      this.emit(run, 'run.unavailable', { status: run.status, error: run.error })
+    })
   }
 
   recoverInterruptedRuns() {
@@ -271,11 +335,12 @@ export class CodexChatRuntime {
   }
 
   reset() {
-    this.contexts?.reset()
+    for (const provider of this.toolProviders) provider.reset?.()
     this.epoch++
     this.streamId = randomUUID()
     this.seq = 0
     this.threads.clear()
+    this.threadToolOwners.clear()
     this.loadedThreads.clear()
     this.runs.clear()
     this.rawMessages.clear()
@@ -293,7 +358,7 @@ export class CodexChatRuntime {
   setConnection(ready, { processLost = false } = {}) {
     this.connection = ready ? 'ready' : 'offline'
     if (ready) return
-    this.contexts?.disconnect?.({ processLost })
+    for (const provider of this.toolProviders) provider.disconnect?.({ processLost })
     this.epoch++
     this.loadedThreads.clear()
     for (const run of this.runs.values()) {
@@ -337,6 +402,8 @@ export class CodexChatRuntime {
       model: typeof result.model === 'string' ? result.model : (old.model || null),
       effort: typeof result.reasoningEffort === 'string' ? result.reasoningEffort : (old.effort || null),
       clientThreadId: clientThreadId || old.clientThreadId || null,
+      executionPolicy: old.executionPolicy || null,
+      qaReceipt: old.qaReceipt || null,
     })
     this.loadedThreads.add(id)
     if (this.threads.size > MAX_THREADS) {
@@ -413,6 +480,8 @@ export class CodexChatRuntime {
     if (typeof body.message !== 'string' || !body.message.trim()) throw chatError('EMPTY_MESSAGE', 'Message is required')
     if (body.message.length > MAX_TEXT) throw chatError('MESSAGE_TOO_LONG', `Message exceeds ${MAX_TEXT} characters`)
     this.threadOverrides(body)
+    const requestedPolicy = requestedExecutionPolicy(body.executionPolicy)
+    if (requestedPolicy && !this.qaReady()) throw chatError('QA_POLICY_UNAVAILABLE', 'Read-only QA requires a verified native policy contract', 503)
     if (body.effort !== undefined && (!idText(body.effort) || !body.effort.trim())) throw chatError('INVALID_EFFORT', 'Invalid reasoning effort')
     const requestId = idText(body.requestId) || randomUUID()
     const fingerprint = createHash('sha256').update(JSON.stringify({
@@ -422,6 +491,7 @@ export class CodexChatRuntime {
       cwd: body.cwd, model: body.model, effort: body.effort, profileEnabled: body.profileEnabled === true,
       systemPrompt: body.profileEnabled === true ? body.systemPrompt : undefined,
       contextSnapshotIds: body.contextSnapshotIds, contextCapabilities: body.contextCapabilities, attachments: body.attachments,
+      executionPolicy: body.executionPolicy,
     })).digest('hex')
     const previous = this.requests.get(requestId)
     if (previous) {
@@ -461,6 +531,7 @@ export class CodexChatRuntime {
       })
     }
     let acceptedLocal = null
+    let boundPolicy = this.threads.get(conversationId)?.executionPolicy || null
     if (this.store) {
       if (!this.storeHealthy) throw chatError('CHAT_STORE_UNAVAILABLE', 'Local chat history cannot accept this message', 503)
       try {
@@ -471,7 +542,7 @@ export class CodexChatRuntime {
           })
         }
         if (conversationId && (!thread || thread.conversationId !== conversationId)) throw chatError('NATIVE_BINDING_MISMATCH', 'Native conversation is not bound to this local chat', 409)
-        if (conversationId) this.assertNativeAccount(clientThreadId, conversationId)
+        if (conversationId) boundPolicy = this.assertNativeAccount(clientThreadId, conversationId)
         if (!thread) thread = this.store.createConversation({ clientThreadId, createdAt: this.now() })
         const localRunId = localId('run', clientThreadId, requestId)
         const localMessageId = localId('msg', clientThreadId, requestId)
@@ -516,10 +587,20 @@ export class CodexChatRuntime {
       localRunId: acceptedLocal?.localRunId || null,
       localMessageId: acceptedLocal?.localMessageId || null,
       ownerHash: requestOwnerHash,
+      executionPolicy: requestedPolicy || boundPolicy,
+      policyUpgrade: Boolean(conversationId && requestedPolicy && !boundPolicy),
     }
     const record = { fingerprint, settled: false, promise: null }
     record.promise = this.startTurn(body, context).catch(error => {
       const failure = error instanceof Error ? error : new Error('Codex request failed')
+      if (this.store && acceptedLocal && !context.turnStartAttempted && ['QA_POLICY_UNVERIFIED', 'QA_TOOL_ISOLATION_UNVERIFIED', 'QA_POLICY_UNAVAILABLE'].includes(failure.code)) {
+        try {
+          this.store.recordRequestOutcome({
+            clientThreadId: context.clientThreadId, requestId, ts: this.now(),
+            outcome: { accepted: false, dispatchStatus: 'rejected', conversationId: context.conversationId || null, localRunId: context.localRunId, error: publicError(failure, 'QA_POLICY_UNVERIFIED') },
+          })
+        } catch { this.storeHealthy = false }
+      }
       failure.conversationId = context.conversationId || ''
       failure.requestId = requestId
       failure.resumeRequired = Boolean(context.conversationId && this.uncertainThreads.has(context.conversationId))
@@ -573,15 +654,19 @@ export class CodexChatRuntime {
   }
 
   assertNativeAccount(clientThreadId, conversationId) {
-    if (!this.store) return
+    if (!this.store) return this.threads.get(conversationId)?.executionPolicy || null
     const expected = ownerHash(this.getOwnerKey())
     if (!expected) throw chatError('NATIVE_ACCOUNT_UNVERIFIED', 'Current Codex account identity is unavailable', 403)
     let afterSeq = 0
     let recorded = null
+    let executionPolicy = null
     for (let page = 0; page < 1000; page++) {
       const result = this.store.listEvents(clientThreadId, { afterSeq, limit: 500 })
       for (const event of result.events || []) if (event.event === 'native.thread.bound' && event.details?.conversationId === conversationId) {
         recorded = event.details.ownerHash || null
+        executionPolicy = event.details.executionPolicy || null
+      } else if (event.event === 'native.executionPolicy.bound' && event.details?.conversationId === conversationId) {
+        executionPolicy = event.details.executionPolicy
       }
       if (!result.hasMore) break
       if (!Number.isSafeInteger(result.nextCursor) || result.nextCursor <= afterSeq) throw chatError('NATIVE_ACCOUNT_UNVERIFIED', 'Native account checkpoint is incomplete', 409)
@@ -590,6 +675,8 @@ export class CodexChatRuntime {
     }
     if (!recorded) throw chatError('NATIVE_ACCOUNT_UNVERIFIED', 'Native account ownership was not recorded', 409)
     if (recorded !== expected) throw chatError('NATIVE_ACCOUNT_MISMATCH', 'This native conversation belongs to a different Codex account', 403)
+    if (executionPolicy !== null && executionPolicy !== READ_ONLY_QA) throw chatError('QA_POLICY_UNVERIFIED', 'Stored native execution policy is unknown', 409)
+    return executionPolicy
   }
 
   persistNativeBinding(context, conversationId) {
@@ -601,7 +688,7 @@ export class CodexChatRuntime {
         eventKey: `native-thread:${context.requestId}`, clientThreadId: context.clientThreadId,
         requestId: context.requestId,
         localRunId: context.localRunId, event: 'native.thread.bound',
-        details: { conversationId, ownerHash: identityHash }, ts: this.now(),
+        details: { conversationId, ownerHash: identityHash, executionPolicy: context.executionPolicy || null }, ts: this.now(),
       })
       this.store.bindNative({ clientThreadId: context.clientThreadId, conversationId })
     } catch {
@@ -610,10 +697,32 @@ export class CodexChatRuntime {
     }
   }
 
+  persistExecutionPolicy(context, conversationId) {
+    if (!this.store || !context.policyUpgrade) return
+    if (ownerHash(this.getOwnerKey()) !== context.ownerHash) throw chatError('ACCOUNT_CHANGED', 'Codex account changed before policy binding', 409)
+    try {
+      this.store.appendEvent({
+        eventKey: `native-policy:${context.requestId}`, clientThreadId: context.clientThreadId,
+        requestId: context.requestId, localRunId: context.localRunId,
+        event: 'native.executionPolicy.bound',
+        details: { conversationId, executionPolicy: READ_ONLY_QA }, ts: this.now(),
+      })
+    } catch {
+      this.storeHealthy = false
+      throw chatError('CHAT_STORE_UNAVAILABLE', 'Read-only policy binding could not be saved; no Codex turn was started', 503)
+    }
+  }
+
   async startTurn(body, context) {
     const epoch = this.epoch
     const overrides = this.threadOverrides(body)
-    const preparedContext = await this.contexts?.prepare(body)
+    const qa = context.executionPolicy === READ_ONLY_QA
+    const preparedProviders = new Map()
+    for (const provider of this.toolProviders) if (!qa || provider === this.contexts) preparedProviders.set(provider, await provider.prepare?.(body) || null)
+    const additionalContext = this.additionalToolContext(preparedProviders)
+    if (epoch !== this.epoch) throw chatError('ACCOUNT_CHANGED', 'Codex account or connection changed', 409)
+    if (qa && !this.qaReady()) throw chatError('QA_POLICY_UNAVAILABLE', 'Read-only QA requires a verified native policy contract', 503)
+    const qaOverrides = qa ? qaThreadOverrides(await listNativeMcpServers(this.request, context.conversationId && this.loadedThreads.has(context.conversationId) ? context.conversationId : null)) : null
     if (epoch !== this.epoch) throw chatError('ACCOUNT_CHANGED', 'Codex account or connection changed', 409)
     const effort = body.effort
     // CLI 0.156.1 defines ReasoningEffort as a non-empty model-advertised string.
@@ -637,10 +746,23 @@ export class CodexChatRuntime {
     }
     let cid = context.conversationId
     if (cid) {
-      await this.contexts?.requireThread(cid, preparedContext)
+      if (context.policyUpgrade) {
+        // thread/resume cannot replace a thread's persisted dynamicTools. Do
+        // not claim a clean QA catalog if an older ordinary thread could still
+        // advertise write-capable EG-Desk or Browser tools to the model.
+        const registered = this.threadToolOwners.get(cid)
+        const readOnlyNames = new Set([toolKey(null, 'egdesk_list_context'), toolKey(null, 'egdesk_read_source')])
+        if (!registered || [...registered.keys()].some(name => !readOnlyNames.has(name))) {
+          throw chatError('QA_REQUIRES_NEW_CONVERSATION', 'This thread has unknown or broader dynamic tools; start a new read-only QA conversation', 409)
+        }
+      }
+      for (const provider of preparedProviders.keys()) await provider.requireThread?.(cid, preparedProviders.get(provider))
       if (epoch !== this.epoch) throw chatError('ACCOUNT_CHANGED', 'Codex account or connection changed', 409)
       if (this.uncertainThreads.has(cid)) throw chatError('RESUME_REQUIRED', 'Resume the conversation before retrying an uncertain turn', 409)
-      if (!this.loadedThreads.has(cid)) await this.restoreThread(cid, context.clientThreadId)
+      // Hydrate native history before deciding whether a new turn is safe.
+      // This also supplies the historical cwd for profile-off config/read.
+      const justRestored = !this.loadedThreads.has(cid)
+      if (justRestored) await this.restoreThread(cid, context.clientThreadId, qaOverrides || {}, { qa })
       if ([...this.runs.values()].some(run => run.conversationId === cid && !TERMINAL.has(run.status))) {
         throw chatError('RUN_IN_PROGRESS', 'This conversation already has an active or unreconciled turn', 409)
       }
@@ -657,24 +779,38 @@ export class CodexChatRuntime {
           overrides.developerInstructions = ordinary ?? ''
         }
         if (epoch !== this.epoch) throw chatError('CONTEXT_CHANGED', 'Codex connection or account changed', 409)
-        // Reload an idle native thread with explicit instructions, keeping its
-        // ID and persisted history. Do not rely on an already-loaded resume to
-        // replace its effective settings. Both endpoints are in CLI 0.156.1.
+      }
+      // Read-only QA re-asserts and verifies its effective native thread policy
+      // before *every* provider turn, including after reconnect or a profile
+      // change. A loaded thread must be detached first so resume overrides take.
+      const mustReload = (qa && !justRestored) || body.profileEnabled === true || body.profileEnabled === false
+      if (mustReload && this.loadedThreads.has(cid)) {
         const detached = await this.request('thread/unsubscribe', { threadId: cid })
         this.loadedThreads.delete(cid)
         if (!['unsubscribed', 'notLoaded'].includes(detached?.status)) throw chatError('PROFILE_TRANSITION_UNAVAILABLE', 'Could not detach this native thread for a profile change', 409)
-        await this.restoreThread(cid, context.clientThreadId, overrides)
       }
+      if (!this.loadedThreads.has(cid)) await this.restoreThread(cid, context.clientThreadId, { ...overrides, ...(qaOverrides || {}) }, { qa })
+      if (qa) this.persistExecutionPolicy(context, cid)
     } else {
-      const contextTools = this.contexts?.specs() || []
-      if (contextTools.length) overrides.dynamicTools = contextTools
+      const nativeTools = this.collectToolSpecs(qa)
+      if (nativeTools.specs.length) overrides.dynamicTools = nativeTools.specs
+      if (qa) Object.assign(overrides, qaOverrides)
       const result = await this.request('thread/start', overrides)
       if (epoch !== this.epoch) throw chatError('ACCOUNT_CHANGED', 'Codex account changed', 409)
       cid = result?.thread?.id
+      if (!idText(cid)) throw chatError('INVALID_THREAD_RESPONSE', 'Codex did not return a thread ID', 502)
+      let qaReceipt = null
+      if (qa) {
+        qaReceipt = verifyQaNativeThread(result)
+        qaReceipt = await verifyQaMcpIsolation(this.request, cid, qaReceipt)
+      }
+      if (epoch !== this.epoch) throw chatError('ACCOUNT_CHANGED', 'Codex account changed', 409)
       this.rememberThread(cid, result, context.clientThreadId)
+      this.threadToolOwners.set(cid, nativeTools.owners)
+      if (qa) Object.assign(this.threads.get(cid), { executionPolicy: READ_ONLY_QA, qaReceipt })
       context.conversationId = cid
       if (this.store) this.persistNativeBinding(context, cid)
-      if (contextTools.length) await this.contexts.registerThread(cid)
+      for (const provider of nativeTools.selected) await provider.registerThread?.(cid)
     }
     if (epoch !== this.epoch) throw chatError('ACCOUNT_CHANGED', 'Codex account changed', 409)
     this.assertProcessConfiguration(this.threads.get(cid), { model: body.model, effort })
@@ -686,12 +822,13 @@ export class CodexChatRuntime {
     this.pendingStarts.set(cid, pending)
     let turnStartAttempted = false
     try {
-      turnStartAttempted = true
+      turnStartAttempted = context.turnStartAttempted = true
       const result = await this.request('turn/start', {
         threadId: cid,
         input: [{ type: 'text', text: body.message, text_elements: [] }],
         clientUserMessageId: context.requestId,
-        ...(preparedContext ? { additionalContext: this.contexts.additionalContext(preparedContext) } : {}),
+        ...(qa ? QA_TURN_OVERRIDES : {}),
+        ...(additionalContext ? { additionalContext } : {}),
         ...(overrides.cwd ? { cwd: overrides.cwd } : {}),
         ...(overrides.model ? { model: overrides.model } : {}),
         ...(effort !== undefined ? { effort } : {}),
@@ -708,6 +845,11 @@ export class CodexChatRuntime {
       }
       const run = this.ensureRun(cid, result?.turn?.id, context)
       if (!run) throw chatError('INVALID_TURN_RESPONSE', 'Codex did not return a turn ID', 502)
+      if (qa) {
+        run.executionPolicy = this.threads.get(cid)?.qaReceipt || null
+        if (!run.executionPolicy) throw chatError('QA_POLICY_UNVERIFIED', 'Verified read-only policy receipt was lost', 502)
+        this.emit(run, 'run.executionPolicy', { executionPolicy: run.executionPolicy })
+      }
       const threadConfiguration = this.threads.get(cid)
       const nativeTurnModel = idText(result?.model) || idText(result?.turn?.model)
       const nativeTurnEffort = idText(result?.reasoningEffort) || idText(result?.turn?.reasoningEffort)
@@ -719,7 +861,7 @@ export class CodexChatRuntime {
       }
       run.parentTurnConfiguration = readerConfiguration
       this.emit(run, 'run.configuration', { configuration: readerConfiguration })
-      await this.contexts?.bindRun(run, preparedContext, readerConfiguration)
+      for (const provider of preparedProviders.keys()) await provider.bindRun?.(run, preparedProviders.get(provider), readerConfiguration)
       if (epoch !== this.epoch) throw chatError('ACCOUNT_CHANGED', 'Codex account or connection changed', 409)
       // Notifications can precede the RPC response. Only the returned turn ID
       // may inherit this request's correlation; other turns remain unclaimed.
@@ -730,6 +872,7 @@ export class CodexChatRuntime {
         conversationId: cid, requestId: context.requestId, runId: run.runId, answerId: run.answerId,
         clientThreadId: context.clientThreadId, localConversationId: context.localConversationId,
         localRunId: context.localRunId, localMessageId: context.localMessageId,
+        ...(qa ? { executionPolicy: run.executionPolicy } : {}),
       }
     } catch (error) {
       // A native JSON-RPC error is a definite rejection. A lost/ambiguous reply
@@ -751,7 +894,7 @@ export class CodexChatRuntime {
     } finally { if (this.pendingStarts.get(cid) === pending) this.pendingStarts.delete(cid) }
   }
 
-  async restoreThread(cid, clientThreadId, overrides = {}) {
+  async restoreThread(cid, clientThreadId, overrides = {}, { qa = false } = {}) {
     const epoch = this.epoch
     const pending = { buffer: [] }
     this.pendingResumes.set(cid, pending)
@@ -761,7 +904,15 @@ export class CodexChatRuntime {
       const result = await this.request('thread/resume', { threadId: cid, ...overrides })
       if (epoch !== this.epoch) throw chatError('CONTEXT_CHANGED', 'Codex connection or account changed', 409)
       if (result?.thread?.id !== cid) throw chatError('THREAD_MISMATCH', 'Codex resumed a different thread', 502)
+      let qaReceipt = null
+      if (qa) {
+        qaReceipt = verifyQaNativeThread(result)
+        qaReceipt = await verifyQaMcpIsolation(this.request, cid, qaReceipt)
+      }
+      if (epoch !== this.epoch) throw chatError('CONTEXT_CHANGED', 'Codex connection or account changed', 409)
       this.rememberThread(cid, result, clientThreadId)
+      this.threadToolOwners.set(cid, this.collectToolSpecs(qa).owners)
+      if (qa) Object.assign(this.threads.get(cid), { executionPolicy: READ_ONLY_QA, qaReceipt })
       const turns = Array.isArray(result.thread.turns) ? result.thread.turns : []
       if (result.turnsBackwardsCursor || result.itemsBackwardsCursor) this.incompleteHistory.add(cid)
       else this.incompleteHistory.delete(cid)
@@ -788,7 +939,7 @@ export class CodexChatRuntime {
         run.error = turn.error
         run.truncated ||= Boolean(turn.truncated)
         run.historyComplete = retainedComplete || turn.itemsView === 'full'
-        await this.contexts?.restoreRun(run)
+        for (const provider of this.toolProviders) await provider.restoreRun?.(run)
         if (epoch !== this.epoch) throw chatError('CONTEXT_CHANGED', 'Codex connection or account changed', 409)
         const persisted = this.persistedRunStates.get(runKey(cid, turn.id))
         if (this.store && persisted && (persisted.status !== run.status || persisted.historyComplete !== run.historyComplete)) {
@@ -820,17 +971,26 @@ export class CodexChatRuntime {
     const epoch = this.epoch
     const cid = idText(body.conversationId)
     if (!cid) throw chatError('MISSING_THREAD_ID', 'conversationId is required')
+    let boundPolicy = this.threads.get(cid)?.executionPolicy || null
     if (this.store) {
       const clientThreadId = idText(body.clientThreadId)
       if (!clientThreadId) throw chatError('INVALID_CLIENT_THREAD_ID', 'clientThreadId is required to resume a durable chat', 400)
       const thread = this.store.getConversation(clientThreadId)
       if (!thread || thread.conversationId !== cid) throw chatError('NATIVE_BINDING_MISMATCH', 'Native conversation is not bound to this local chat', 409)
-      this.assertNativeAccount(clientThreadId, cid)
+      boundPolicy = this.assertNativeAccount(clientThreadId, cid)
     }
     if (this.locks.has(cid) || this.pendingStarts.has(cid)) throw chatError('RUN_STARTING', 'Conversation request is still starting', 409)
     this.locks.add(cid)
     try {
-      await this.restoreThread(cid, idText(body.clientThreadId))
+      const qa = boundPolicy === READ_ONLY_QA
+      if (qa && !this.qaReady()) throw chatError('QA_POLICY_UNAVAILABLE', 'Read-only QA requires a verified native policy contract', 503)
+      const qaOverrides = qa ? qaThreadOverrides(await listNativeMcpServers(this.request, this.loadedThreads.has(cid) ? cid : null)) : {}
+      if (qa && this.loadedThreads.has(cid)) {
+        const detached = await this.request('thread/unsubscribe', { threadId: cid })
+        this.loadedThreads.delete(cid)
+        if (!['unsubscribed', 'notLoaded'].includes(detached?.status)) throw chatError('QA_POLICY_UNVERIFIED', 'Could not detach native QA thread before policy verification', 409)
+      }
+      await this.restoreThread(cid, idText(body.clientThreadId), qaOverrides, { qa })
       await this.queue
       // Revalidate previously retained links without claiming files were generated.
       for (const run of this.runs.values()) if (run.conversationId === cid) {
@@ -854,7 +1014,7 @@ export class CodexChatRuntime {
     this.assertReady()
     const run = this.findRun(body)
     if (TERMINAL.has(run.status)) return { accepted: false, alreadyTerminal: true, conversationId: run.conversationId, runId: run.runId, status: run.status }
-    this.contexts?.cancelRun(run)
+    for (const provider of this.toolProviders) provider.cancelRun?.(run)
     if (run.stopRequested) return { accepted: true, stopRequested: true, conversationId: run.conversationId, runId: run.runId }
     await this.request('turn/interrupt', { threadId: run.conversationId, turnId: run.runId })
     run.stopRequested = true
@@ -951,8 +1111,13 @@ export class CodexChatRuntime {
     }
     if (event.method === 'approval') return this.receiveApproval(run, event)
     if (event.method === 'dynamic') {
-      if (!this.contexts || event.namespace) this.respond(event.rpcId, null, { code: -32601, message: 'Unsupported dynamic tool namespace' })
-      else void this.contexts.dispatch(run, event) // Never block the notification queue on a child Reader.
+      if (run.executionPolicy?.mode === READ_ONLY_QA && (event.namespace || !['egdesk_list_context', 'egdesk_read_source'].includes(event.tool))) {
+        this.respond(event.rpcId, null, { code: -32601, message: 'Read-only QA does not expose this dynamic tool' })
+        return
+      }
+      const provider = this.threadToolOwners.get(run.conversationId)?.get(toolKey(event.namespace, event.tool))
+      if (!provider?.dispatch) this.respond(event.rpcId, null, { code: -32601, message: 'Unsupported dynamic tool' })
+      else this.dispatchToolProvider(provider, run, event)
       return
     }
     if (event.method === 'turn/completed') return this.finish(run, event.turn)
@@ -993,6 +1158,17 @@ export class CodexChatRuntime {
   }
 
   receiveApproval(run, event) {
+    if (run.executionPolicy?.mode === READ_ONLY_QA) {
+      // A QA turn never grants an interactive escalation, even if native
+      // unexpectedly asks despite approvalPolicy=never.
+      const supported = ['item/commandExecution/requestApproval', 'item/fileChange/requestApproval'].includes(event.nativeMethod)
+      if (supported) this.respond(event.rpcId, { decision: 'decline' })
+      else this.respond(event.rpcId, null, { code: -32601, message: 'Read-only QA has no interactive approval capability' })
+      run.error = publicError('Native read-only QA requested an approval; it was declined', 'QA_SCOPE_VIOLATION')
+      this.emit(run, 'run.unavailable', { status: run.status, error: run.error })
+      void this.request('turn/interrupt', { threadId: run.conversationId, turnId: run.runId }).catch(() => {})
+      return
+    }
     const kinds = { 'item/commandExecution/requestApproval': 'commandExecution', 'item/fileChange/requestApproval': 'fileChange' }
     const kind = kinds[event.nativeMethod]
     if (!kind || !event.choices.length || TERMINAL.has(run.status)) {
@@ -1190,7 +1366,7 @@ export class CodexChatRuntime {
     }
     if (epoch !== this.epoch) return
     run.status = turn.status
-    this.contexts?.cancelRun(run)
+    for (const provider of this.toolProviders) provider.cancelRun?.(run)
     run.stopConfirmed = turn.status === 'interrupted'
     run.error = turn.error
     for (const message of run.messages) if (message.status === 'streaming') {

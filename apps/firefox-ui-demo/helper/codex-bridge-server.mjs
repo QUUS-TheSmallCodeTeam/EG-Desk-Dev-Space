@@ -35,7 +35,7 @@ let appServerReady = false
 let reconnectTimer = null
 let loginPollTimer = null
 let rpc = null
-let nativeCapabilities = { executable: null, version: null, schemaVersion: NATIVE_SCHEMA_VERSION, schemaMatch: false, experimentalApi: true, dynamicTools: false, readerReadOnly: false }
+let nativeCapabilities = { executable: null, version: null, schemaVersion: NATIVE_SCHEMA_VERSION, schemaMatch: false, experimentalApi: true, dynamicTools: false, readerReadOnly: false, qaReadOnly: false }
 let launchConfigBlocked = false
 let nativePreflight = {
   status: appServerLaunch.hasOverrides ? 'pending' : 'inherited',
@@ -123,6 +123,7 @@ const chat = new CodexChatRuntime({
   requireStore: true,
   getOwnerKey: () => publicAuthIdentityKey(authState),
   expectedProcessConfiguration: { model: appServerLaunch.configuredModel, effort: appServerLaunch.configuredEffort },
+  qaReady: () => nativeCapabilities.qaReadOnly && appServerReady,
   emit: event => broadcast(event, 2),
   emitLegacy: event => broadcast(event, 1),
 })
@@ -575,7 +576,7 @@ const bridgeServer = createServer(async (req, res) => {
       chat: chat.snapshot(),
       capabilities: {
         auth: ['status', 'start', 'cancel', 'signout'],
-        chat: chatStore && chat.storeHealthy ? ['send', 'stream', 'resume', 'interrupt', 'approvals', 'typed-activity', 'artifact-refs', 'local-history', 'legacy-import'] : ['local-history-unavailable'],
+        chat: chatStore && chat.storeHealthy ? ['send', 'stream', 'resume', 'interrupt', 'approvals', 'typed-activity', 'artifact-refs', 'local-history', 'legacy-import', ...(nativeCapabilities.qaReadOnly ? ['read-only-qa'] : [])] : ['local-history-unavailable'],
         context: nativeCapabilities.schemaMatch ? ['capture', 'immutable-inspect', 'native-dynamic-tools', 'smart-read', 'read-only-reader', 'answer-briefing'] : ['capture', 'immutable-inspect'],
         files: ['native-picker', 'scoped-read', 'managed-drafts', 'create-only-save-as'],
       },
