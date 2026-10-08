@@ -2270,28 +2270,50 @@ test('actual send path preserves draft B and new attachments typed during delaye
   const body = surfaceSource.match(/      async sendMessage\(\) \{([\s\S]*?)\n      \},/)?.[1];
   assert.ok(body);
   const deps = ['state', 'getActiveCodexThread', 'getCodexThreadDraft', 'ChatState', 'threadBusy', 'epochScope', 'ensureNativeReadyForSend', 'updateThreadById', 'emit',
-    'captureThreadInputs', 'getCodexThreadById', 'protocol', 'codexThreadAgentProfile', 'appendMessageToThread', 'createCodexMessage', 'SELF_MEMBER', 'codexThreadRuntimeConfig', 'fetchJson', 'syncProtocolRun'];
+    'captureThreadInputs', 'getCodexThreadById', 'protocol', 'codexThreadAgentProfile', 'appendMessageToThread', 'createCodexMessage', 'SELF_MEMBER', 'codexThreadRuntimeConfig', 'fetchJson', 'syncProtocolRun', 'browserToolSelectedSources'];
   const send = compileFunction(`return (async () => {${body}\n})();`, deps);
-  const initial = { id: 'room', inputSources: [{ id: 'a' }], briefingInputs: [], messages: [], profileEnabled: false };
+  const selectedBody = surfaceSource.match(/  function browserToolSelectedSources\(threadId, candidates = null\) \{([\s\S]*?)\n  \}/)?.[1];
+  assert.ok(selectedBody, 'test the production selected-source filter rather than inventing a permissive selector');
+  const initial = { id: 'room', clientBindingId: 'wire-room', inputSources: [{ id: 'a', kind: 'browser', selectedByUser: true,
+    browserToolPermission: 'observe', browserToolSelection: { token: 'selected-a', threadId: 'wire-room' },
+    browserToolIdentity: { cardEpoch: 'card-epoch-a', userContextId: 0,
+      engineAccountKey: 'codex:chatgpt:known@example.test', authorityEpoch: 1 },
+    sourceRef: { viewId: 'browser-a', uri: 'https://example.test/local', profileId: 'firefox-default', accountId: '' } }],
+    briefingInputs: [], messages: [], profileEnabled: false };
   const state = { codex: { activeThreadId: 'room', threads: [initial], threadDrafts: { room: 'A' }, threadDraftRevisions: { room: 1 },
     authStatus: { isLoggedIn: true, authMode: 'chatgpt', accountEmail: 'known@example.test', identityStatus: 'known' }, connected: true } };
   let release;
   const delayed = new Promise(resolve => { release = resolve; });
   const getThread = (_codex, id = 'room') => state.codex.threads.find(thread => thread.id === id);
   const update = (id, fn) => { const index = state.codex.threads.findIndex(thread => thread.id === id); state.codex.threads[index] = fn(state.codex.threads[index]); };
+  const binding = { url: 'https://example.test/local', profileId: 'firefox-default', accountId: '',
+    cardEpoch: 'card-epoch-a', userContextId: 0, engineAccountKey: 'codex:chatgpt:known@example.test', authorityEpoch: 1 };
+  const selectedCard = { isConnected: true, classList: { contains: name => name === 'egd-browser-card' },
+    _browserControls: { toolBinding: () => binding } };
+  const grants = new Map([['selected-a', { token: 'selected-a', localThreadId: 'room', threadId: 'wire-room',
+    sourceId: 'a', permission: 'observe', usedRunId: null }]]);
+  const actualSelectedSources = compileFunction(`return function browserToolSelectedSources(threadId, candidates = null) {${selectedBody}\n  }`,
+    ['state', 'getCodexThreadById', 'ChatState', 'browserToolUserSelections', 'document', 'browserToolSameUrl', 'structuredClone'])(
+    state, getThread, Chat, grants, { getElementById: id => id === 'browser-a' ? selectedCard : null },
+    (left, right) => new URL(left).href === new URL(right).href, structuredClone);
   let payload;
   const running = send(state, () => getThread(null), (codex, id) => codex.threadDrafts[id] || '', Chat, () => false,
     { begin: () => ({}), valid: () => true, finish() {} }, async () => true, update, () => {}, () => delayed, getThread, Chat.createChatProtocolState(), () => ({}),
     (id, message) => update(id, thread => ({ ...thread, messages: [...thread.messages, message] })),
     (role, content, status, options) => ({ role, content, status, ...options }), 'self', () => ({}),
-    async (_url, request) => { payload = JSON.parse(request.body); return { accepted: true, conversationId: 'c', runId: 'r', answerId: 'c/r' }; }, () => {});
+    async (_url, request) => { payload = JSON.parse(request.body); return { accepted: true, conversationId: 'c', runId: 'r', answerId: 'c/r' }; }, () => {},
+    actualSelectedSources);
   state.codex.threadDrafts.room = 'B';
   state.codex.threadDraftRevisions.room = 2;
   update('room', thread => ({ ...thread, inputSources: [...thread.inputSources, { id: 'b' }] }));
   release([{ sourceId: 'captured-a', snapshotId: 'captured-a' }]);
   await running;
   assert.equal(payload.message, 'A');
+  assert.equal(payload.clientThreadId, 'wire-room');
   assert.deepEqual(payload.contextSnapshotIds, ['captured-a']);
+  assert.deepEqual(payload.selectedSources.map(source => source.id), ['a'],
+    'Browser tool selection from submitted draft A must be forwarded before attachments are cleared, not from later draft B');
+  assert.equal(payload.selectedSources[0].browserToolSelection.threadId, payload.clientThreadId);
   assert.equal(state.codex.threadDrafts.room, 'B');
   assert.deepEqual(getThread(null).inputSources.map(input => input.id), ['a', 'b']);
   assert.equal(getThread(null).messages[0].content, 'A');
