@@ -169,10 +169,14 @@ export class CodexChatRuntime {
     catch (error) { throw this.providerFailure(error, provider) }
   }
 
-  collectToolSpecs(policy = null) {
+  collectToolSpecs(policy = null, { forManifest = false } = {}) {
     const specs = [], owners = new Map(), selected = [], manifest = []
     for (const [index, provider] of this.toolProviders.entries()) {
       const providerId = provider === this.contexts ? 'egdesk-context-v1' : provider.providerId
+      // Ordinary Browser attachments are immutable Context sources, not live
+      // actor grants. Keep older persisted Browser manifests verifiable without
+      // advertising new uncallable Browser tools on ordinary native threads.
+      if (policy === null && providerId === 'egdesk-browser' && !forManifest) continue
       if (this.store && provider.specs && (typeof providerId !== 'string' || !providerId)) throw chatError('INVALID_TOOL_PROVIDER', 'Durable tool providers require a stable identity', 500)
       let offered
       try { offered = provider.specs?.() || [] }
@@ -819,7 +823,8 @@ export class CodexChatRuntime {
     const qa = policy === READ_ONLY_QA
     const bounded = qa || policy === BROWSER_BOUNDED || policy === FIXTURE_BROWSER_QA
     const preparedProviders = new Map()
-    for (const provider of this.toolProviders) if (!bounded || provider === this.contexts || provider.providerId === 'egdesk-browser') {
+    for (const provider of this.toolProviders) if ((!bounded && provider.providerId !== 'egdesk-browser') ||
+        (bounded && (provider === this.contexts || provider.providerId === 'egdesk-browser'))) {
       preparedProviders.set(provider, await this.callProvider(provider, 'prepare', { ...body, effectiveExecutionPolicy: policy }) || null)
     }
     const additionalContext = this.additionalToolContext(preparedProviders)
@@ -1043,7 +1048,7 @@ export class CodexChatRuntime {
       }
       if (epoch !== this.epoch) throw chatError('CONTEXT_CHANGED', 'Codex connection or account changed', 409)
       this.rememberThread(cid, result, clientThreadId)
-      const currentCatalog = this.collectToolSpecs(null)
+      const currentCatalog = this.collectToolSpecs(null, { forManifest: true })
       const verifiedTools = verifiedManifestOwners(this.threadToolManifests.get(cid), currentCatalog.manifest, currentCatalog.owners)
       this.threadToolOwners.set(cid, verifiedTools.owners)
       this.threadToolManifestStatus.set(cid, verifiedTools.status)
