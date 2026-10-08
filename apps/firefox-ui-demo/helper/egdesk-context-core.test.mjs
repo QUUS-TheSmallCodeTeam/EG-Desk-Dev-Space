@@ -381,6 +381,7 @@ test('overflow dynamic tool is wired through the native Reader adapter to an exa
   const reader = new NativeReaderClient({ getOwnerKey: () => 'email:a@example.com', respond: () => { throw new Error('Unexpected Reader approval') }, request: async (method, params) => {
     readerCalls.push({ method, params })
     if (method === 'mcpServerStatus/list') return { data: [], nextCursor: null }
+    if (method === 'config/read') return { config: {}, layers: [{ name: { type: 'user' }, config: {} }] }
     if (method === 'thread/start') return { thread: { id: `child-${++seq}` }, sandbox: { type: 'readOnly', networkAccess: false }, approvalPolicy: 'never' }
     if (method === 'thread/resume') return { thread: { id: params.threadId }, sandbox: { type: 'readOnly', networkAccess: false }, approvalPolicy: 'never' }
     if (method === 'thread/unsubscribe') return { status: 'unsubscribed' }

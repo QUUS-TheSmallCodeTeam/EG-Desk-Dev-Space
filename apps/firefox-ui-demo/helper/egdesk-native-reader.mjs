@@ -1,4 +1,5 @@
 import { chatError, publicText } from './codex-chat-values.mjs'
+import { disabledNativeMcpConfig, readNativeDirectMcpServerIds } from './codex-chat-execution-policy.mjs'
 import { createHash } from 'node:crypto'
 
 const fail = (code, message) => chatError(code, message, 409)
@@ -66,11 +67,16 @@ export class NativeReaderClient {
     this.assertOwner(options.ownerKey, options.signal)
     const servers = await this.mcpInventory(options.parentThreadId)
     this.assertOwner(options.ownerKey, options.signal)
+    let mcpIsolation
+    try {
+      const directIds = await readNativeDirectMcpServerIds(this.request, options.cwd)
+      mcpIsolation = disabledNativeMcpConfig(servers, directIds)
+    } catch { throw fail('READER_ISOLATION_UNAVAILABLE', 'Reader cannot classify native MCP configuration') }
+    this.assertOwner(options.ownerKey, options.signal)
     const config = {
-      features: { shell_tool: false, apps: false, hooks: false, multi_agent: false, goals: false, remote_plugin: false, skill_mcp_dependency_install: false, code_mode: { enabled: false } },
+      features: { shell_tool: false, apps: false, hooks: false, multi_agent: false, goals: false, plugins: false, remote_plugin: false, skill_mcp_dependency_install: false, code_mode: { enabled: false } },
       web_search: 'disabled', tools: { view_image: false },
-      mcp_servers: Object.fromEntries(servers.map(server => [server.name, { enabled: false }])),
-      plugins: Object.fromEntries(servers.filter(server => server.pluginId).map(server => [server.pluginId, { enabled: false }])),
+      ...mcpIsolation,
     }
     const started = await this.request('thread/start', {
       ephemeral: true, cwd: options.cwd, sandbox: 'read-only', approvalPolicy: 'never',
