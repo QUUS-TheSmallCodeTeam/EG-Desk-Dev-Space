@@ -44,9 +44,14 @@ function qaHarness(override = {}) {
       const custom = await override.request(method, params, chat, defaults)
       if (custom !== undefined) return custom
     }
-    if (method === 'mcpServerStatus/list') return { data: params.threadId ? [{ name: 'account-tools', pluginId: 'account-plugin', tools: {}, resources: [], resourceTemplates: [], toolsError: null }] : [{ name: 'account-tools', pluginId: 'account-plugin', tools: { write: {} }, resources: [], resourceTemplates: [], toolsError: null }], nextCursor: null }
+    if (method === 'mcpServerStatus/list') return { data: [
+      { name: 'account-tools', pluginId: 'account-plugin', tools: params.threadId ? {} : { write: {} }, resources: [], resourceTemplates: [], toolsError: null },
+      { name: 'configured-tools', tools: params.threadId ? {} : { read: {} }, resources: [], resourceTemplates: [], toolsError: null },
+      { name: 'app-provided-tools', tools: params.threadId ? {} : { ambient: {} }, resources: [], resourceTemplates: [], toolsError: null },
+    ], nextCursor: null }
     if (method === 'thread/unsubscribe') return { status: 'unsubscribed' }
-    if (method === 'config/read') return { config: { developer_instructions: 'Ordinary instructions' } }
+    if (method === 'config/read') return { config: { developer_instructions: 'Ordinary instructions' },
+      layers: [{ name: { type: 'user' }, config: { mcp_servers: { 'configured-tools': { command: 'fixture-mcp' } } } }] }
     const result = await defaults(method, params)
     if (method === 'thread/start' || method === 'thread/resume') return { ...result, sandbox: { type: 'readOnly', networkAccess: false }, approvalPolicy: 'never' }
     return result
@@ -68,8 +73,12 @@ test('read-only QA is explicit, verifies native thread and MCP isolation before 
   const turn = h.calls.find(call => call.method === 'turn/start').params
   assert.equal(start.sandbox, 'read-only')
   assert.equal(start.approvalPolicy, 'never')
-  assert.deepEqual(start.config.mcp_servers['account-tools'], { enabled: false })
+  assert.equal(Object.hasOwn(start.config.mcp_servers, 'account-tools'), false)
+  assert.equal(Object.hasOwn(start.config.mcp_servers, 'app-provided-tools'), false)
+  assert.deepEqual(start.config.mcp_servers['configured-tools'], { enabled: false })
   assert.deepEqual(start.config.plugins['account-plugin'], { enabled: false })
+  assert.equal(start.config.features.plugins, false)
+  assert.deepEqual(h.calls.find(call => call.method === 'config/read').params, { includeLayers: true, cwd: null })
   assert.equal(start.config.web_search, 'disabled')
   assert.deepEqual(start.dynamicTools.map(tool => tool.name), ['egdesk_list_context', 'egdesk_read_source'])
   assert.deepEqual(turn.additionalContext, { egdesk_context: { kind: 'application', value: 'fixture-source' } })
@@ -81,6 +90,20 @@ test('read-only QA is explicit, verifies native thread and MCP isolation before 
   assert.deepEqual(bound, [accepted.runId])
   assert.ok(h.events.some(event => event.event === 'run.executionPolicy' && event.details.executionPolicy.mode === 'readOnlyQa'))
   assert.ok(h.calls.findIndex(call => call.method === 'mcpServerStatus/list' && call.params.threadId === accepted.conversationId) < h.calls.findIndex(call => call.method === 'turn/start'))
+})
+
+test('bounded QA refuses missing direct-MCP layer evidence before native thread/start', async () => {
+  const h = qaHarness({ request: async method => method === 'config/read' ? { config: {}, layers: null } : undefined })
+  await assert.rejects(h.chat.send({ message: 'Do not run without origin evidence', executionPolicy: { mode: 'readOnlyQa' } }),
+    error => error.code === 'QA_TOOL_ISOLATION_UNVERIFIED')
+  assert.equal(h.calls.some(call => call.method === 'thread/start' || call.method === 'turn/start'), false)
+})
+
+test('ordinary Chat does not apply QA MCP or plugin overrides to its native thread', async () => {
+  const h = qaHarness()
+  await h.chat.send({ message: 'Ordinary work retains its existing native configuration' })
+  assert.equal(h.calls.some(call => call.method === 'config/read' || call.method === 'mcpServerStatus/list'), false)
+  assert.equal(Object.hasOwn(h.calls.find(call => call.method === 'thread/start').params, 'config'), false)
 })
 
 test('actual ContextRuntime attachment capture and dynamic read specs remain available under the validated 0.160.1 gate', async () => {
@@ -359,6 +382,7 @@ test('durable QA policy survives a fresh runtime and is reverified before its ne
     let turn = 0
     const request = async (method, params) => {
       calls.push({ method, params })
+      if (method === 'config/read') return { config: {}, layers: [{ name: { type: 'user' }, config: {} }] }
       if (method === 'mcpServerStatus/list') return { data: [], nextCursor: null }
       if (method === 'thread/start') return { thread: { id: 'native-qa' }, sandbox: { type: 'readOnly', networkAccess: false }, approvalPolicy: 'never', model: 'configured-model' }
       if (method === 'thread/resume') return { thread: { id: 'native-qa', turns: [] }, sandbox: { type: 'readOnly', networkAccess: false }, approvalPolicy: 'never', model: 'configured-model' }
@@ -393,6 +417,7 @@ test('durably owned active QA turn rehydrates its restrictive guard and declines
   try {
     store = openChatStore({ dataDir, ownerScope: 'active-qa-test' })
     const request = async (method, params) => {
+      if (method === 'config/read') return { config: {}, layers: [{ name: { type: 'user' }, config: {} }] }
       if (method === 'mcpServerStatus/list') return { data: [], nextCursor: null }
       if (method === 'thread/start') return { thread: { id: 'native-active-qa' }, sandbox: { type: 'readOnly', networkAccess: false }, approvalPolicy: 'never' }
       if (method === 'turn/start') return { turn: { id: 'native-active-turn', status: 'inProgress', items: [] } }
@@ -432,6 +457,7 @@ test('Browser registration survives a bridge restart, while pre-Browser native h
     const calls = []
     const request = async (method, params) => {
       calls.push({ method, params })
+      if (method === 'config/read') return { config: {}, layers: [{ name: { type: 'user' }, config: {} }] }
       if (method === 'mcpServerStatus/list') return { data: [], nextCursor: null }
       if (method === 'thread/start') return { thread: { id: `native-${++threadCount}` }, cwd: '/public-fixture', sandbox: { type: 'readOnly', networkAccess: false }, approvalPolicy: 'never' }
       if (method === 'thread/resume') return { thread: { id: params.threadId, turns: [] }, cwd: '/public-fixture', sandbox: { type: 'readOnly', networkAccess: false }, approvalPolicy: 'never' }

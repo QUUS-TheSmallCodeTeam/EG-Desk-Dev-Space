@@ -11,10 +11,14 @@ function nativeHarness(options = {}) {
     respond: (...reply) => replies.push(reply),
     request: async (method, params) => {
       calls.push({ method, params })
+      if (method === 'config/read') return options.configLayersMissing ? { config: {}, layers: null } :
+        { config: {}, layers: [{ name: { type: 'user' }, config: { mcp_servers: { declared: { command: 'fixture-mcp' } } } }] }
       if (method === 'mcpServerStatus/list') {
         if (params.threadId !== 'parent') readerInventory++
         return { data: params.threadId === 'parent'
-        ? [{ name: 'external', pluginId: 'plugin@example', tools: { write: {} }, resources: [], resourceTemplates: [], toolsError: null }]
+        ? [{ name: 'external', pluginId: 'plugin@example', tools: { write: {} }, resources: [], resourceTemplates: [], toolsError: null },
+          { name: 'declared', tools: { read: {} }, resources: [], resourceTemplates: [], toolsError: null },
+          { name: 'app-injected', tools: { ambient: {} }, resources: [], resourceTemplates: [], toolsError: null }]
         : options.externalTools || options.externalResources || options.externalTemplates || options.toolsError || (options.toolsOnReuse && readerInventory > 1)
           ? [{ name: 'unwanted', tools: options.externalTools || (options.toolsOnReuse && readerInventory > 1) ? { write: {} } : {}, resources: options.externalResources ? [{ uri: 'private' }] : [], resourceTemplates: options.externalTemplates ? [{ uriTemplate: 'private' }] : [], toolsError: options.toolsError ? 'unknown' : null }]
           : [], nextCursor: null }
@@ -49,10 +53,15 @@ test('actual native Reader adapter requests read-only/no-network/no tools and ha
   assert.equal(start.approvalPolicy, 'never')
   assert.equal(start.model, 'gpt-6-sol')
   assert.equal(start.config.features.apps, false)
+  assert.equal(start.config.features.plugins, false)
   assert.equal(start.config.features.shell_tool, false)
   assert.equal(start.config.features.hooks, false)
   assert.equal(start.config.features.multi_agent, false)
-  assert.equal(start.config.mcp_servers.external.enabled, false)
+  assert.equal(Object.hasOwn(start.config.mcp_servers, 'external'), false)
+  assert.equal(Object.hasOwn(start.config.mcp_servers, 'app-injected'), false)
+  assert.equal(start.config.mcp_servers.declared.enabled, false)
+  assert.equal(start.config.plugins['plugin@example'].enabled, false)
+  assert.deepEqual(h.calls.find(call => call.method === 'config/read').params, { includeLayers: true, cwd: '/readonly-scratch' })
   assert.deepEqual(start.dynamicTools, [])
   const turn = h.calls.find(call => call.method === 'turn/start').params
   assert.equal(turn.model, 'gpt-6-sol')
@@ -70,6 +79,12 @@ test('Reader refuses an implicit global model or effort before any native reques
   await assert.rejects(h.reader.read({ ...h.input, model: null }), e => e.code === 'READER_CONFIGURATION_REQUIRED')
   await assert.rejects(h.reader.read({ ...h.input, effort: null }), e => e.code === 'READER_CONFIGURATION_REQUIRED')
   assert.equal(h.calls.length, 0)
+})
+
+test('Reader refuses an unclassified MCP origin before creating its native child', async () => {
+  const h = nativeHarness({ configLayersMissing: true })
+  await assert.rejects(h.reader.read(h.input), error => error.code === 'READER_ISOLATION_UNAVAILABLE')
+  assert.equal(h.calls.some(call => call.method === 'thread/start' || call.method === 'turn/start'), false)
 })
 
 test('configured Reader policy may intentionally select a different explicit pair', async () => {

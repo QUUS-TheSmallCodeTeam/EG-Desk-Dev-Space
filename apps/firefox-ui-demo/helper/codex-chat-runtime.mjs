@@ -1,7 +1,7 @@
 import { createHash, randomUUID } from 'node:crypto'
 import path from 'node:path'
 import { chatError, explicitFileLinks, MAX_TEXT, publicError, publicNetworkContext, publicText, validateChatCwd, verifyLocalFile } from './codex-chat-values.mjs'
-import { READ_ONLY_QA, BROWSER_BOUNDED, FIXTURE_BROWSER_QA, requestedExecutionPolicy, listNativeMcpServers, qaThreadOverrides, verifyQaNativeThread, verifyQaMcpIsolation, QA_TURN_OVERRIDES } from './codex-chat-execution-policy.mjs'
+import { READ_ONLY_QA, BROWSER_BOUNDED, FIXTURE_BROWSER_QA, requestedExecutionPolicy, loadQaThreadOverrides, verifyQaNativeThread, verifyQaMcpIsolation, QA_TURN_OVERRIDES } from './codex-chat-execution-policy.mjs'
 import { classifyPublicToolError } from './codex-tool-errors.mjs'
 import { specManifestEntries, verifiedManifestOwners } from './codex-native-tool-manifest.mjs'
 import { nativeQaCommandReceipt, validateQaCommandNonce, validateQaOutputMarkers } from './codex-qa-command-receipt.mjs'
@@ -825,7 +825,10 @@ export class CodexChatRuntime {
     const additionalContext = this.additionalToolContext(preparedProviders)
     if (epoch !== this.epoch) throw chatError('ACCOUNT_CHANGED', 'Codex account or connection changed', 409)
     if (bounded && !this.qaReady()) throw chatError('QA_POLICY_UNAVAILABLE', 'Bounded execution requires a verified native policy contract', 503)
-    const qaOverrides = bounded ? qaThreadOverrides(await listNativeMcpServers(this.request, context.conversationId && this.loadedThreads.has(context.conversationId) ? context.conversationId : null)) : null
+    const qaOverrides = bounded ? await loadQaThreadOverrides(this.request, {
+      threadId: context.conversationId && this.loadedThreads.has(context.conversationId) ? context.conversationId : null,
+      cwd: overrides.cwd || this.threads.get(context.conversationId)?.cwd || null,
+    }) : null
     if (epoch !== this.epoch) throw chatError('ACCOUNT_CHANGED', 'Codex account or connection changed', 409)
     const effort = body.effort
     // CLI 0.156.1 defines ReasoningEffort as a non-empty model-advertised string.
@@ -1122,7 +1125,10 @@ export class CodexChatRuntime {
     try {
       const bounded = [READ_ONLY_QA, BROWSER_BOUNDED, FIXTURE_BROWSER_QA].includes(boundPolicy)
       if (bounded && !this.qaReady()) throw chatError('QA_POLICY_UNAVAILABLE', 'Bounded execution requires a verified native policy contract', 503)
-      const qaOverrides = bounded ? qaThreadOverrides(await listNativeMcpServers(this.request, this.loadedThreads.has(cid) ? cid : null)) : {}
+      const qaOverrides = bounded ? await loadQaThreadOverrides(this.request, {
+        threadId: this.loadedThreads.has(cid) ? cid : null,
+        cwd: this.threads.get(cid)?.cwd || null,
+      }) : {}
       if (bounded && this.loadedThreads.has(cid)) {
         const detached = await this.request('thread/unsubscribe', { threadId: cid })
         this.loadedThreads.delete(cid)
