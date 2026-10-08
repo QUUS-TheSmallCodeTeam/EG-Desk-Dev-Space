@@ -6,6 +6,11 @@ export class EGDeskBrowserAgentRuntimeChild extends JSWindowActorChild {
     this.refByNode = new WeakMap();
     this.nodeByRef = new Map();
     this.refSeq = 0;
+    this.documentId = globalThis.crypto?.randomUUID?.() || `${Date.now()}-${Math.random()}`;
+    this.revision = 1;
+    this.observedDocument = null;
+    this.observer = null;
+    this.lastViewport = null;
   }
 
   async receiveMessage(message) {
@@ -89,6 +94,7 @@ export class EGDeskBrowserAgentRuntimeChild extends JSWindowActorChild {
 
   valueFor(node) {
     const tag = String(node.tagName || "").toLowerCase();
+    if (tag === "input" && String(node.type || "").toLowerCase() === "password") return "";
     if (tag === "select") return this.compact(node.selectedOptions?.[0]?.textContent || node.value || "", 120);
     if (tag === "textarea" || tag === "input") return this.compact(node.value || "", 120);
     if (node.isContentEditable) return this.compact(node.innerText || node.textContent || "", 120);
@@ -159,9 +165,38 @@ export class EGDeskBrowserAgentRuntimeChild extends JSWindowActorChild {
     };
   }
 
+  observationState() {
+    const doc = this.document;
+    if (doc !== this.observedDocument) {
+      if (this.observedDocument) this.documentId = globalThis.crypto?.randomUUID?.() || `${Date.now()}-${Math.random()}`;
+      this.observer?.disconnect?.();
+      this.observedDocument = doc;
+      this.observer = null;
+      this.revision++;
+      if (doc?.documentElement && this.contentWindow.MutationObserver) {
+        this.observer = new this.contentWindow.MutationObserver(() => { this.revision++; });
+        this.observer.observe(doc.documentElement, {
+          subtree: true, childList: true, attributes: true, characterData: true,
+        });
+      }
+    }
+    if (this.observer?.takeRecords().length) this.revision++;
+    const viewport = {
+      width: Math.round(this.contentWindow.innerWidth || 0),
+      height: Math.round(this.contentWindow.innerHeight || 0),
+      devicePixelRatio: Math.round((this.contentWindow.devicePixelRatio || 1) * 1000) / 1000,
+    };
+    if (this.lastViewport && (viewport.width !== this.lastViewport.width || viewport.height !== this.lastViewport.height ||
+        viewport.devicePixelRatio !== this.lastViewport.devicePixelRatio)) this.revision++;
+    this.lastViewport = viewport;
+    return { documentId: this.documentId, revision: this.revision, viewport,
+      coordinateSpace: "browser-viewport-local" };
+  }
+
   snapshot(options = {}) {
     const doc = this.document;
     return {
+      ...this.observationState(),
       url: this.contentWindow.location.href,
       title: doc.title || "",
       readyState: doc.readyState || "",
@@ -208,9 +243,51 @@ export class EGDeskBrowserAgentRuntimeChild extends JSWindowActorChild {
     return null;
   }
 
-  clickTarget(target) {
-    target.focus?.();
+  assertGuard(action, guard) {
+    if (!guard || typeof guard !== "object") throw new Error("Guarded Browser action requires observed state");
+    const current = this.observationState();
+    if (guard.documentId !== current.documentId || guard.revision !== current.revision
+        || guard.viewport?.width !== current.viewport.width || guard.viewport?.height !== current.viewport.height
+        || guard.viewport?.devicePixelRatio !== current.viewport.devicePixelRatio
+        || guard.focusedRef !== (this.focusedElement(this.document)?.ref || null)
+        || guard.url !== this.contentWindow.location.href) {
+      throw new Error("Browser observation is stale; observe the current page again");
+    }
+    if (action.type === "navigate") return;
+    if (!action.ref || action.selector || !guard.target || guard.target.ref !== action.ref) {
+      throw new Error("Browser action requires an observed element reference");
+    }
+    const target = this.nodeForRef(action.ref);
+    if (!target || !this.isVisible(target) || target.disabled || target.getAttribute?.("aria-disabled") === "true") {
+      throw new Error("Browser target is unavailable; observe again");
+    }
+    if (("value" in target && String(target.value || "").length > 120) ||
+        (target.isContentEditable && String(target.textContent || "").length > 120)) {
+      throw new Error("Browser target value exceeds the bounded observation; use the native user path");
+    }
+    const live = this.interactiveElements(this.document, 500).find(item => item.ref === action.ref);
+    if (!live || ["role", "label", "href", "value", "tag"].some(key => live[key] !== guard.target[key])) {
+      throw new Error("Browser target changed; observe again");
+    }
+    if (action.type === "click") {
+      const rect = target.getBoundingClientRect();
+      const hit = this.document.elementFromPoint?.(rect.left + rect.width / 2, rect.top + rect.height / 2);
+      if (!hit || (hit !== target && !target.contains?.(hit))) {
+        throw new Error("Browser target is obscured; observe again");
+      }
+    }
+    if (action.type === "fill" && (live.tag === "input" && String(target.type || "").toLowerCase() === "password")) {
+      throw new Error("Password fields require the native user path");
+    }
+  }
+
+  clickTarget(target, { avoidFocus = false } = {}) {
+    if (!avoidFocus) target.focus?.();
     const rect = target.getBoundingClientRect();
+    const hit = this.document.elementFromPoint?.(rect.left + rect.width / 2, rect.top + rect.height / 2);
+    if (avoidFocus && (!hit || (hit !== target && !target.contains?.(hit)))) {
+      throw new Error("Browser target became obscured before click; observe again");
+    }
     const x = Math.round(rect.left + rect.width / 2);
     const y = Math.round(rect.top + rect.height / 2);
     const utils = this.contentWindow.windowUtils;
@@ -221,7 +298,7 @@ export class EGDeskBrowserAgentRuntimeChild extends JSWindowActorChild {
       utils.sendMouseEvent("mouseup", x, y, 0, 1, 0);
       return { usedWindowUtils: true, x, y };
     }
-    for (const eventName of ["pointerdown", "mousedown", "pointerup", "mouseup", "click"]) {
+    for (const eventName of ["pointerdown", "mousedown", "pointerup", "mouseup"]) {
       const Ctor = eventName.startsWith("pointer") && this.contentWindow.PointerEvent
         ? this.contentWindow.PointerEvent
         : this.contentWindow.MouseEvent;
@@ -236,11 +313,13 @@ export class EGDeskBrowserAgentRuntimeChild extends JSWindowActorChild {
         })),
       });
     }
+    // HTMLElement.click supplies the single click event; dispatching a second
+    // synthetic click here can duplicate form submission or other effects.
     target.click?.();
     return { usedWindowUtils: false, x, y, eventResults };
   }
 
-  perform(action = {}) {
+  perform(action = {}, options = {}) {
     const type = action.type || action.action || "snapshot";
     if (type === "navigate") {
       this.contentWindow.location.href = String(action.url || action.value || this.contentWindow.location.href);
@@ -260,12 +339,12 @@ export class EGDeskBrowserAgentRuntimeChild extends JSWindowActorChild {
       return {
         ok: true,
         ref: action.ref || this.elementRef(target),
-        clickDiagnostics: this.clickTarget(target),
+        clickDiagnostics: this.clickTarget(target, { avoidFocus: !!options.guard }),
       };
     }
 
     if (type === "fill" || type === "type") {
-      target.focus?.();
+      if (!options.guard) target.focus?.();
       const value = String(action.text ?? action.value ?? "");
       if ("value" in target) {
         target.value = type === "type" ? String(target.value || "") + value : value;
@@ -291,8 +370,9 @@ export class EGDeskBrowserAgentRuntimeChild extends JSWindowActorChild {
   }
 
   async act(action = {}, options = {}) {
+    if (options.guard) this.assertGuard(action, options.guard);
     const before = this.snapshot(options.snapshot || {});
-    const result = this.perform(action);
+    const result = this.perform(action, options);
     const settleMs = Number.isFinite(options.settleMs) ? options.settleMs : 250;
     await new Promise((resolve) => this.contentWindow.setTimeout(resolve, Math.max(0, settleMs)));
     const after = this.snapshot(options.snapshot || {});

@@ -669,7 +669,18 @@
           return { ...base, kind: 'file', label: file.leafName, sourceRef: { ...base.sourceRef, path: file.path } };
         } catch { return null; }
       }
-      return { ...base, kind: 'browser', sourceRef: { ...base.sourceRef, uri: browser.uri } };
+      let browserToolIdentity = null;
+      try {
+        const binding = view._browserControls?.toolBinding?.();
+        if (binding) browserToolIdentity = {
+          cardEpoch: binding.cardEpoch, userContextId: binding.userContextId,
+          engineAccountKey: binding.engineAccountKey, authorityEpoch: binding.authorityEpoch,
+        };
+      } catch {}
+      return { ...base, kind: 'browser', browserToolPermission: 'observe', browserToolIdentity,
+        sourceRef: { ...base.sourceRef, uri: browser.uri,
+          profileId: view._sourceRef?.profileId || state.sourceRefs.defaultProfileId,
+          accountId: view._sourceRef?.accountId || '' } };
     }
     if (view.classList.contains('egd-canvas-shape')) return { ...base, kind: 'board-element' };
     return null;
@@ -743,12 +754,16 @@
       const picked = new Map();
       for (const source of sources) {
         const checked = selected.has(source.sourceRef.viewId);
+        const existingPermission = thread.inputSources?.find(item => item.kind === 'browser' &&
+          item.sourceRef?.viewId === source.sourceRef.viewId)?.browserToolPermission;
         const input = el('input', { type: 'checkbox', 'aria-label': `첨부 선택: ${source.label}`, data: { testid: 'chat-attach-source', viewId: source.sourceRef.viewId } });
         input.checked = checked;
         if (checked) picked.set(source.id, source);
         input.addEventListener('change', () => input.checked ? picked.set(source.id, source) : picked.delete(source.id));
         body.appendChild(el('label', { class: 'egd-input-source-choice' }, input,
-          el('span', {}, source.label, el('small', {}, InputContext.inputSourceLocation(source)))));
+          el('span', {}, source.label,
+            existingPermission === 'interact' ? el('small', {}, '이번 Chat 조작 허용 중') : null,
+            el('small', {}, InputContext.inputSourceLocation(source)))));
       }
       if (!sources.length) body.appendChild(el('p', {}, '열린 Browser, 작업사본 또는 선택 가능한 Canvas 요소가 없습니다. 파일을 선택할 수 있습니다.'));
       body.appendChild(el('button', { 'aria-label': '로컬 파일 선택', data: { testid: 'chat-attach-file' }, onclick: async () => {
@@ -768,7 +783,8 @@
         });
       } }, '파일 선택…'));
       body.appendChild(el('button', { 'aria-label': '선택한 자료를 Chat 초안에 첨부', data: { testid: 'chat-attach-confirm' }, onclick: () => {
-        state.codexBridge.addInputSources(threadId, [...picked.values()]); close();
+        state.codexBridge.addInputSources(threadId, [...picked.values()].map(source =>
+          source.kind === 'browser' ? { ...source, selectedByUser: true, browserToolPermission: 'observe' } : source)); close();
       } }, '선택 항목 첨부'));
     }
     document.documentElement.appendChild(panel);
@@ -787,7 +803,7 @@
               if (refs?.length) await bridge.inspectInput(thread.id, refs[0]);
             }
             catch (error) { boardNotice(error.message); }
-          } }, `${source.label} · 미전송`),
+          } }, `${source.label}${source.kind === 'browser' && source.browserToolPermission === 'interact' ? ' · 이번 Chat 조작 허용' : ''} · 미전송`),
         el('button', { type: 'button', 'aria-label': `첨부 제거: ${source.label}`, data: { testid: 'chat-attachment-remove' },
           onclick: () => bridge.removeInputSource(thread.id, source.id) }, '×')));
     }
@@ -5420,6 +5436,8 @@
     };
     const resetThreadConversations = () => {
       epochScope.reset();
+      browserToolAuthorityEpoch++;
+      browserToolRunBindings.clear();
       ChatState.resetChatProtocol(protocol);
       refreshing.clear();
       resumedNativeBindings.clear();
@@ -9474,6 +9492,151 @@
     return controls[command](...args);
   }
 
+  // This is the privileged-UI end of the Browser model-tool transport. It
+  // deliberately never uses resolveBrowserCard's active/first-card fallback.
+  const browserToolRunBindings = new Map();
+  const browserToolCancelledRuns = new Map();
+  const browserToolRequestReceipts = new Map();
+  const browserToolCardLeases = new Map();
+  let browserToolAuthorityEpoch = 0;
+  function browserToolSelectedSources(threadId) {
+    const thread = getCodexThreadById(state.codex, threadId);
+    return (thread?.inputSources || []).filter(source => {
+      if (source.kind !== 'browser' || source.selectedByUser !== true ||
+          !['observe', 'interact'].includes(source.browserToolPermission)) return false;
+      const card = document.getElementById(source.sourceRef?.viewId);
+      if (!card?.isConnected || !card.classList?.contains('egd-browser-card')) return false;
+      try {
+        const current = card._browserControls?.toolBinding?.();
+        return current && current.url === source.sourceRef.uri &&
+          current.profileId === source.sourceRef.profileId && current.accountId === source.sourceRef.accountId &&
+          current.cardEpoch === source.browserToolIdentity?.cardEpoch &&
+          current.userContextId === source.browserToolIdentity?.userContextId &&
+          current.engineAccountKey === source.browserToolIdentity?.engineAccountKey &&
+          current.authorityEpoch === source.browserToolIdentity?.authorityEpoch;
+      } catch { return false; }
+    }).map(source => structuredClone(source));
+  }
+  async function browserToolDispatchOnce(request) {
+    const requestId = request?.requestId;
+    const fail = (error) => ({ requestId, status: 'rejected',
+      error: String(error?.message || error || 'Browser request rejected').slice(0, 500) });
+    try {
+      if (request?.version !== 1 || typeof requestId !== 'string' || !requestId ||
+          typeof request.runId !== 'string' || !request.runId ||
+          typeof request.cardId !== 'string' || !request.cardId ||
+          typeof request.targetCardEpoch !== 'string' || !request.targetCardEpoch ||
+          !Number.isSafeInteger(request.deadlineMs) || request.deadlineMs <= Date.now() ||
+          request.deadlineMs > Date.now() + 60000) throw new Error('Invalid or expired Browser tool request');
+      const key = `${request.runId}\u0000${request.cardId}\u0000${request.targetCardEpoch}`;
+      for (const [cancelledKey, deadline] of browserToolCancelledRuns) {
+        if (deadline < Date.now()) browserToolCancelledRuns.delete(cancelledKey);
+      }
+      if (request.kind === 'cancel') {
+        browserToolRunBindings.delete(key);
+        browserToolCancelledRuns.set(key, request.deadlineMs);
+        return { requestId, status: 'cancelled' };
+      }
+      if (browserToolCancelledRuns.has(key)) throw new Error('Browser run was cancelled');
+      const card = document.getElementById(request.cardId);
+      if (!card?.isConnected || !card.classList?.contains('egd-browser-card') ||
+          !card._browserControls?.toolBinding) throw new Error('Selected Browser Card is closed');
+      if (card._browserControls.toolBinding().cardEpoch !== request.targetCardEpoch) {
+        throw new Error('Browser request belongs to a different Card generation');
+      }
+      if (request.kind === 'bind') {
+        const selection = request.selection;
+        const current = card._browserControls.toolBinding();
+        if (browserToolRunBindings.has(key)) throw new Error('Browser run is already bound');
+        if (!ChatState.knownCodexAccountKey(current.engineAccountKey)) throw new Error('Current Engine account is unverified');
+        if (!selection || selection.cardId !== card.id || selection.profileId !== current.profileId ||
+            selection.accountId !== current.accountId || selection.selectedUrl !== current.url ||
+            selection.cardEpoch !== current.cardEpoch || selection.userContextId !== current.userContextId ||
+            selection.engineAccountKey !== current.engineAccountKey || selection.authorityEpoch !== current.authorityEpoch ||
+            !['observe', 'interact'].includes(selection.permission)) {
+          throw new Error('Selected Browser Card, profile, account or URL changed');
+        }
+        const live = await card._browserControls.toolObserve(current, { textLimit: 1, elementLimit: 1 });
+        if (live.url !== selection.selectedUrl || browserToolCancelledRuns.has(key) ||
+            request.deadlineMs <= Date.now()) throw new Error('Selected Browser document changed before binding');
+        browserToolRunBindings.set(key, { binding: current, permission: selection.permission });
+        return { requestId, status: 'bound', binding: current };
+      }
+      const authorized = browserToolRunBindings.get(key);
+      if (!authorized || !request.binding ||
+          ['cardId', 'cardEpoch', 'profileId', 'accountId', 'userContextId', 'engineAccountKey', 'authorityEpoch'].some(field =>
+            authorized.binding[field] !== request.binding[field])) throw new Error('Browser run binding is missing or changed');
+      const current = card._browserControls.toolBinding();
+      if (['cardId', 'cardEpoch', 'profileId', 'accountId', 'userContextId', 'engineAccountKey', 'authorityEpoch'].some(field =>
+        authorized.binding[field] !== current[field])) {
+        browserToolRunBindings.delete(key);
+        throw new Error('Browser profile or account epoch changed');
+      }
+      if (request.kind === 'observe') {
+        if (browserToolCardLeases.has(request.targetCardEpoch)) throw new Error('Browser Card is being operated; observe after it settles');
+        const snapshot = await card._browserControls.toolObserve(authorized.binding, request.options || {});
+        if (browserToolRunBindings.get(key) !== authorized) throw new Error('Browser run was cancelled during observation');
+        return { requestId, status: 'observed', snapshot };
+      }
+      if (request.kind !== 'act' || authorized.permission !== 'interact') throw new Error('Browser interaction was not selected');
+      if (!['navigate', 'click', 'fill'].includes(request.action?.type) || !request.guard ||
+          (request.action.type !== 'navigate' && (!request.action.ref || request.action.selector))) {
+        throw new Error('Unsupported or unguarded Browser action');
+      }
+      if (browserToolCardLeases.has(request.targetCardEpoch)) throw new Error('Browser Card is already being operated');
+      browserToolCardLeases.set(request.targetCardEpoch, requestId);
+      let receipt;
+      try { receipt = await card._browserControls.toolAct(authorized.binding, request.action, request.guard); }
+      finally {
+        if (browserToolCardLeases.get(request.targetCardEpoch) === requestId) {
+          browserToolCardLeases.delete(request.targetCardEpoch);
+        }
+      }
+      if (browserToolRunBindings.get(key) !== authorized) throw new Error('Browser run was cancelled after dispatch; outcome is unknown');
+      return { requestId, status: 'acted', receipt };
+    } catch (error) { return fail(error); }
+  }
+  function browserToolDispatch(request) {
+    const id = request?.requestId;
+    if (typeof id !== 'string' || !id || id.length > 160) return browserToolDispatchOnce(request);
+    let fingerprint;
+    try { fingerprint = JSON.stringify(request); } catch { return browserToolDispatchOnce(null); }
+    if (fingerprint.length > 24000) return Promise.resolve({ requestId: id, status: 'rejected', error: 'Browser request exceeds size limit' });
+    const previous = browserToolRequestReceipts.get(id);
+    if (previous) return previous.fingerprint === fingerprint ? previous.result :
+      Promise.resolve({ requestId: id, status: 'rejected', error: 'Browser request ID reused with different payload' });
+    if (browserToolRequestReceipts.size >= 512) {
+      for (const [oldId, item] of browserToolRequestReceipts) {
+        if (item.deadline < Date.now()) browserToolRequestReceipts.delete(oldId);
+      }
+      if (browserToolRequestReceipts.size >= 512) return Promise.resolve({
+        requestId: id, status: 'rejected', error: 'Browser request queue is full',
+      });
+    }
+    const result = browserToolDispatchOnce(request);
+    browserToolRequestReceipts.set(id, { fingerprint, result, deadline: request.deadlineMs });
+    return result;
+  }
+  function attachBrowserToolTransport({ source, respond }) {
+    if (typeof source?.addEventListener !== 'function' || typeof source?.removeEventListener !== 'function' ||
+        typeof respond !== 'function') throw new TypeError('Browser tool transport requires event source and response sender');
+    const onRequest = async (event) => {
+      let request;
+      try { request = JSON.parse(event.data); } catch { return; }
+      const key = `${request?.runId}\u0000${request?.cardId}\u0000${request?.targetCardEpoch}`;
+      const card = document.getElementById(request?.cardId);
+      if (card?._browserControls?.toolBinding) {
+        try {
+          if (card._browserControls.toolBinding().cardEpoch !== request.targetCardEpoch) return;
+        } catch { if (!browserToolRunBindings.has(key)) return; }
+      } else if (!browserToolRunBindings.has(key) && !browserToolCancelledRuns.has(key)) return;
+      const response = await browserToolDispatch(request);
+      try { await respond(response); } catch (error) { console.warn(TAG, 'Browser tool response transport failed', error); }
+    };
+    source.addEventListener('browser-tool-request', onRequest);
+    return () => source.removeEventListener('browser-tool-request', onRequest);
+  }
+
 
   function spawnBrowserCard(initialUrl = 'https://duckduckgo.com', options = {}) {
     const normalizedUrl = normalizeBrowserUri(initialUrl);
@@ -9556,6 +9719,17 @@
 
     const pageTitle = el('div', { class: 'egd-card-page-title' }, browserState.title);
     const pageStatus = el('div', { class: 'egd-card-page-status' }, 'Loading');
+    const agentActivity = el('span', { class: 'egd-browser-agent-activity', role: 'status',
+      style: { fontSize: '11px', opacity: '0.8', whiteSpace: 'nowrap', maxWidth: '140px',
+        overflow: 'hidden', textOverflow: 'ellipsis', flexShrink: '1' } }, '');
+    agentActivity.hidden = true;
+    let agentActivityTimer = 0;
+    const showAgentActivity = (message) => {
+      if (agentActivityTimer) window.clearTimeout(agentActivityTimer);
+      agentActivity.textContent = message;
+      agentActivity.hidden = !message;
+      if (message) agentActivityTimer = window.setTimeout(() => { agentActivity.hidden = true; agentActivityTimer = 0; }, 4000);
+    };
     const securityIcon = el('span', {
       class: 'egd-card-omnibox-icon egd-card-security',
       title: browserState.security,
@@ -9613,7 +9787,7 @@
 
     const header = deskWindow.slots.header;
     deskWindow.slots.identity.classList.add('egd-card-page-meta');
-    deskWindow.slots.identity.append(pageTitle, pageStatus);
+    deskWindow.slots.identity.append(pageTitle, pageStatus, agentActivity);
     deskWindow.slots.toolbar.append(
       el('div', { class: 'egd-card-nav' },
         backButton,
@@ -10801,13 +10975,25 @@
       browserMenuPanel.remove();
       browserMenuPanel = null;
     };
+    const selectBrowserForChat = (permission) => {
+      const threadId = state.codex.activeThreadId;
+      const source = chatInputSourceForView(card);
+      if (!threadId || !source || source.kind !== 'browser') return;
+      const existing = getCodexThreadById(state.codex, threadId)?.inputSources?.find(item =>
+        item.kind === 'browser' && item.sourceRef?.viewId === card.id);
+      if (existing) state.codexBridge.removeInputSource(threadId, existing.id);
+      state.codexBridge.addInputSources(threadId,
+        [{ ...source, selectedByUser: true, browserToolPermission: permission }]);
+      showAgentActivity(permission === 'interact'
+        ? '이번 Chat 조작 대상으로 선택됨' : '이번 Chat 읽기 자료로 선택됨');
+    };
     const showBrowserMenu = (anchor = menuButton) => {
       if (browserMenuPanel?.isConnected) {
         closeBrowserMenu();
         return null;
       }
       const anchorRect = anchor.getBoundingClientRect();
-      const pos = resolveFloatingMenuPlacement(anchorRect, 166, 190);
+      const pos = resolveFloatingMenuPlacement(anchorRect, 166, 224);
       const item = (label, title, action) => el('button', {
         class: 'egd-browser-menu-item',
         title,
@@ -10826,10 +11012,10 @@
       },
         item('복제', '현재 URL을 새 Desk Window로 열기', duplicateBrowser),
         item('URL 복사', browserState.uri, () => copyTextToClipboard(browserState.uri)),
-        item('Chat에 첨부', '현재 페이지를 다음 Chat의 자료로 선택', () => {
-          const source = chatInputSourceForView(card);
-          if (source) state.codexBridge.addInputSources(state.codex.activeThreadId, [source]);
-        }),
+        item('Chat에 읽기 첨부', '현재 Browser의 읽기 자료만 다음 Chat에 선택합니다. 기존 조작 허용이 있으면 읽기 전용으로 바뀝니다.',
+          () => selectBrowserForChat('observe')),
+        item('Chat 조작 허용', `이 Browser만 이번 Chat 실행의 관찰·조작 대상으로 선택합니다. 사이트 계정: ${card._sourceRef?.accountId || '미확인'}(선택 메타데이터, 로그인 증거 아님). 외부 효과는 별도 확인이 필요합니다.`,
+          () => selectBrowserForChat('interact')),
         item('홈', browserState.homeUrl, () => navigateBrowser(browserState.homeUrl)),
         item(browserState.loading ? '중지' : '새로고침', browserState.loading ? '로드 중지' : '현재 페이지 새로고침', () => (browserState.loading ? stopBrowser() : reloadBrowser())),
         item(isCardFullscreen(card) ? '창 복귀' : '최대화', 'Desk Window 최대화 전환', () => toggleCardFullscreen(card)),
@@ -10845,6 +11031,67 @@
       return browserMenuPanel;
     };
     card._browserState = browserState;
+    const browserToolBinding = () => {
+      if (!card.isConnected || !xulBrowser?.isConnected || !xulBrowser?.browsingContext?.currentWindowGlobal) {
+        throw new Error('Selected Browser Card is unavailable');
+      }
+      const profileId = card._sourceRef?.profileId || state.sourceRefs.defaultProfileId;
+      const accountId = card._sourceRef?.accountId || '';
+      const rawContextId = xulBrowser.getAttribute?.('usercontextid');
+      const userContextId = rawContextId == null || rawContextId === '' ? 0 : Number(rawContextId);
+      const nativeContextId = xulBrowser.browsingContext.originAttributes?.userContextId;
+      if (!Number.isSafeInteger(userContextId) || userContextId < 0 ||
+          !Number.isSafeInteger(nativeContextId) || nativeContextId !== userContextId) {
+        throw new Error('Browser profile container is unverified');
+      }
+      return { cardId: card.id, cardEpoch: agentBridgeId, profileId, accountId,
+        engineAccountKey: ChatState.codexAccountKey(state.codex.authStatus) || null,
+        authorityEpoch: browserToolAuthorityEpoch,
+        accountStatus: accountId ? 'selected-metadata-unverified' : 'unverified', userContextId,
+        url: browserCardState(card)?.uri || '' };
+    };
+    const assertBrowserToolBinding = (expected) => {
+      const current = browserToolBinding();
+      if (!expected || ['cardId', 'cardEpoch', 'profileId', 'accountId', 'userContextId', 'engineAccountKey', 'authorityEpoch']
+        .some(key => current[key] !== expected[key])) throw new Error('Browser Card, profile or account context changed');
+      return current;
+    };
+    const browserToolObserve = async (expected, options = {}) => {
+      assertBrowserToolBinding(expected);
+      const context = xulBrowser.browsingContext;
+      const windowGlobal = context.currentWindowGlobal;
+      showAgentActivity('Agent가 이 Browser를 관찰 중');
+      let snapshot;
+      try { snapshot = await browserAgentActorRequest('snapshot', { options }); }
+      catch (error) { showAgentActivity('Browser 관찰 불가 · 다시 확인 필요'); throw error; }
+      assertBrowserToolBinding(expected);
+      if (xulBrowser.browsingContext !== context || context.currentWindowGlobal !== windowGlobal) {
+        throw new Error('Browser document changed during observation');
+      }
+      showAgentActivity('이 Browser 관찰 완료');
+      return { cardId: card.id, ...snapshot };
+    };
+    const browserToolAct = async (expected, action, guard) => {
+      assertBrowserToolBinding(expected);
+      const context = xulBrowser.browsingContext;
+      const windowGlobal = context.currentWindowGlobal;
+      showAgentActivity('Agent가 이 Browser에서 조작 중');
+      // Guarded model input is JSWindowActor-only: the legacy frame-script and
+      // chrome-document fallbacks do not enforce document/target revisions.
+      let result;
+      try {
+        result = await browserAgentActorRequest('act', {
+          action, options: { guard, settleMs: 150, snapshot: { textLimit: 60, elementLimit: 80 } },
+        });
+      } catch (error) { showAgentActivity('조작 결과 미확인 · 다시 관찰 필요'); throw error; }
+      assertBrowserToolBinding(expected);
+      const documentStillCurrent = xulBrowser.browsingContext === context && context.currentWindowGlobal === windowGlobal;
+      showAgentActivity(documentStillCurrent && result?.observation?.visibleTextChanged
+        ? '이 Browser의 화면 변화 관찰' : '조작 요청 후 결과 확인 필요');
+      return { dispatchReceipt: { actor: 'JSWindowActor', eventDispatched: result?.ok === true,
+        documentStillCurrent }, after: documentStillCurrent ? { cardId: card.id, ...result.after } : null,
+        observation: documentStillCurrent ? result.observation : null };
+    };
     card._browserControls = {
       getState: () => getBrowserStateSnapshot(),
       sync: () => syncBrowserStateFromBrowser({ markDirtyOnLocationChange: false }),
@@ -10868,6 +11115,9 @@
       agentNotifications: browserAgentNotifications,
       agentClearHistory: clearBrowserAgentHistory,
       agentDebug: browserAgentDebug,
+      toolBinding: browserToolBinding,
+      toolObserve: browserToolObserve,
+      toolAct: browserToolAct,
     };
     const onBrowserLoadStart = () => setBrowserLoading(true);
     const onBrowserLoadDone = () => {
@@ -12329,6 +12579,11 @@
           notifications: (cardOrId, options = {}) => browserCardControl(cardOrId, 'agentNotifications', options),
           clearHistory: (cardOrId) => browserCardControl(cardOrId, 'agentClearHistory'),
           debug: (cardOrId) => browserCardControl(cardOrId, 'agentDebug'),
+        },
+        browserAgentTools: {
+          selectedSources: browserToolSelectedSources,
+          dispatch: browserToolDispatch,
+          attachTransport: attachBrowserToolTransport,
         },
         sourceRefs: {
           keyFor: sourceRefKey,
