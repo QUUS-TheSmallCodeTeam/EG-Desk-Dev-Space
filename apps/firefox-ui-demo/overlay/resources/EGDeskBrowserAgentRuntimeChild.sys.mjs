@@ -427,7 +427,10 @@ export class EGDeskBrowserAgentRuntimeChild extends JSWindowActorChild {
         actionType: action.type, actionRef: action.ref || null, actionUrl: action.url || null,
       });
       if (authorization?.authorized !== true || this.nowMs() >= lease.deadlineMs) {
-        throw new Error("Browser action authority was revoked before input");
+        const reason = this.nowMs() >= lease.deadlineMs ? "deadline-expired-after-approval" :
+          /^(?:missing-browsing-context|missing-embedder|missing-authorizer|ui-denied|parent-callback-error)$/.test(authorization?.reason)
+            ? authorization.reason : "unknown";
+        throw new Error(`Browser action authority was revoked before input [${reason}]`);
       }
       // The parent checked the current run/Card/account authority after the
       // asynchronous actor hop. Recheck live page state immediately before I/O.

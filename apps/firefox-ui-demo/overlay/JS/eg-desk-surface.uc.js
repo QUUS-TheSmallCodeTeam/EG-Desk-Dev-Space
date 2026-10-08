@@ -35,8 +35,8 @@
           },
           allFrames: false,
           // Remote types match prefixes: web includes Fission's webIsolated=…
-          // and webCOOP+COEP family. The parent exposes no child-call handlers;
-          // queries originate only from the selected Card's WindowGlobal.
+          // and webCOOP+COEP family. Parent authorization resolves only a
+          // chrome-registered Browser Card and its live UI lease.
           remoteTypes: ['web', 'file'],
           safeForUntrustedWebProcess: true,
         },
@@ -5205,6 +5205,7 @@
       if (revoke && hadTransport) {
         browserToolAuthorityEpoch++;
         browserToolFixtureLastAction = null;
+        browserToolFixtureAuthorizationByCard.clear();
         browserToolRunBindings.clear();
         browserToolPendingBindings.clear();
         browserToolActionLeases.clear();
@@ -5493,6 +5494,7 @@
       clearBrowserToolTransport();
       browserToolAuthorityEpoch++;
       browserToolFixtureLastAction = null;
+      browserToolFixtureAuthorizationByCard.clear();
       browserToolRunBindings.clear();
       browserToolPendingBindings.clear();
       browserToolUserSelections.clear();
@@ -9616,6 +9618,7 @@
   const browserToolRequestReceipts = new Map();
   const browserToolCardLeases = new Map();
   const browserToolActionLeases = new Map();
+  const browserToolFixtureAuthorizationByCard = new Map();
   let browserToolFixtureLastAction = null;
   let browserToolAuthorityEpoch = 0;
   function revokeBrowserToolRunImmediately(run, thread) {
@@ -9731,34 +9734,93 @@
     if (error?.name === 'TypeError' || /TypeError/.test(message)) return 'actor-type-error';
     return phase === 'actor' ? 'actor-exception' : 'ui-rejected';
   }
+  function browserToolRecordFixtureAuthorization(lease, reason) {
+    const cardId = lease?.card?.id;
+    const binding = cardId && browserToolFixtureIdentity(cardId);
+    if (binding) browserToolFixtureAuthorizationByCard.set(cardId, {
+      requestId: lease.requestId, cardEpoch: binding.cardEpoch,
+      authorityEpoch: binding.authorityEpoch, reason,
+    });
+  }
+  // The actor module and chrome overlay can see different JS wrappers for the
+  // same Gecko native objects. Require native Node identity and the exact
+  // BrowsingContext/document IDs; never accept only a matching Card label.
+  function browserToolSameNativeBrowser(left, right) {
+    if (!left || !right) return false;
+    if (left === right) return true;
+    try { return left.isSameNode?.(right) === true && right.isSameNode?.(left) === true; }
+    catch { return false; }
+  }
+  function browserToolSameNativeContext(left, right) {
+    if (!left || !right) return false;
+    if (left === right) return true;
+    const id = left?.id;
+    const innerWindowId = left?.currentWindowGlobal?.innerWindowId;
+    return Number.isSafeInteger(id) && id > 0 && id === right?.id &&
+      Number.isSafeInteger(innerWindowId) && innerWindowId > 0 &&
+      innerWindowId === right?.currentWindowGlobal?.innerWindowId;
+  }
+  function browserToolSameNativeWindowGlobal(left, right) {
+    if (!left || !right || left.isClosed === true || right.isClosed === true ||
+        left.isCurrentGlobal === false || right.isCurrentGlobal === false) return false;
+    if (left === right) return true;
+    const id = left?.innerWindowId;
+    return Number.isSafeInteger(id) && id > 0 && id === right?.innerWindowId &&
+      !!left.browsingContext && !!right.browsingContext &&
+      browserToolSameNativeContext(left?.browsingContext, right?.browsingContext);
+  }
   function browserToolFixtureActionDiagnostic(cardId) {
     const binding = browserToolFixtureIdentity(cardId);
     const recorded = browserToolFixtureLastAction;
     if (!binding || !recorded || recorded.cardId !== cardId ||
         recorded.cardEpoch !== binding.cardEpoch || recorded.authorityEpoch !== binding.authorityEpoch) return null;
+    const authorization = browserToolFixtureAuthorizationByCard.get(cardId);
     return { cardId, actionType: recorded.actionType, phase: recorded.phase,
       status: recorded.status, reason: recorded.reason, inputRoute: recorded.inputRoute,
+      authorizationReason: authorization?.requestId === recorded.requestId &&
+        authorization.cardEpoch === binding.cardEpoch && authorization.authorityEpoch === binding.authorityEpoch
+        ? authorization.reason : null,
+      parentReason: recorded.parentReason,
       geckoError: recorded.geckoError, sampledAtMs: recorded.sampledAtMs };
   }
   function browserToolAuthorizePhysicalAction({ browser, browsingContext, windowGlobal,
     leaseId, requestId, deadlineMs, actionType, actionRef, actionUrl }) {
     const lease = browserToolActionLeases.get(leaseId);
-    if (!lease || lease.authorized || lease.requestId !== requestId || lease.deadlineMs !== deadlineMs ||
-        Date.now() >= deadlineMs || browser !== lease.browser || browsingContext !== lease.browsingContext ||
-        windowGlobal !== lease.windowGlobal || browserToolRunBindings.get(lease.key) !== lease.bound ||
-        browserToolCancelledRuns.has(lease.key) ||
-        browserToolStoppedRuns.has(JSON.stringify([lease.runId, lease.bound.clientThreadId])) ||
-        browserToolCardLeases.get(lease.cardEpoch) !== requestId ||
-        !lease.card.isConnected || lease.card._browserControls?.toolBrowser?.() !== browser ||
-        lease.bound.permission !== 'interact' ||
-        browserToolUserSelections.get(lease.bound.selectionToken)?.usedRunId !== lease.runId ||
-        actionType !== lease.actionType || actionRef !== lease.actionRef || actionUrl !== lease.actionUrl) return false;
+    if (!lease) return false;
+    const deny = reason => { browserToolRecordFixtureAuthorization(lease, reason); return false; };
+    if (lease.authorized) return deny('lease-already-used');
+    if (lease.requestId !== requestId) return deny('request-id-mismatch');
+    if (lease.deadlineMs !== deadlineMs) return deny('deadline-mismatch');
+    if (Date.now() >= deadlineMs) return deny('deadline-expired');
+    if (!browserToolSameNativeBrowser(browser, lease.browser)) return deny('browser-identity-mismatch');
+    if (!browserToolSameNativeContext(browsingContext, lease.browsingContext)) return deny('browsing-context-identity-mismatch');
+    if (!browserToolSameNativeWindowGlobal(windowGlobal, lease.windowGlobal)) return deny('window-global-identity-mismatch');
+    if (!browserToolSameNativeWindowGlobal(browsingContext?.currentWindowGlobal, windowGlobal) ||
+        !browserToolSameNativeWindowGlobal(lease.browsingContext?.currentWindowGlobal, lease.windowGlobal)) {
+      return deny('window-global-not-current');
+    }
+    if (browserToolRunBindings.get(lease.key) !== lease.bound) return deny('run-binding-changed');
+    if (browserToolCancelledRuns.has(lease.key)) return deny('run-cancelled');
+    if (browserToolStoppedRuns.has(JSON.stringify([lease.runId, lease.bound.clientThreadId]))) return deny('run-stopped');
+    if (browserToolCardLeases.get(lease.cardEpoch) !== requestId) return deny('card-lease-changed');
+    if (!lease.card.isConnected) return deny('card-closed');
+    if (!browserToolSameNativeBrowser(lease.card._browserControls?.toolBrowser?.(), browser)) {
+      return deny('card-browser-mismatch');
+    }
+    if (lease.bound.permission !== 'interact') return deny('interaction-not-granted');
+    if (browserToolUserSelections.get(lease.bound.selectionToken)?.usedRunId !== lease.runId) {
+      return deny('selection-run-mismatch');
+    }
+    if (actionType !== lease.actionType) return deny('action-type-mismatch');
+    if (actionRef !== lease.actionRef) return deny('action-ref-mismatch');
+    if (actionUrl !== lease.actionUrl) return deny('action-url-mismatch');
     try {
       const current = lease.card._browserControls.toolBinding();
       if (['cardId', 'cardEpoch', 'profileId', 'accountId', 'userContextId', 'engineAccountKey', 'authorityEpoch']
-        .some(field => current[field] !== lease.bound.binding[field])) return false;
-    } catch { return false; }
+        .some(field => current[field] !== lease.bound.binding[field])) return deny('live-binding-changed');
+    } catch { return deny('live-binding-unavailable'); }
     lease.authorized = true;
+    browserToolRecordFixtureAuthorization(lease, 'approved');
     return true;
   }
   async function browserToolDispatchOnce(request) {
@@ -9768,9 +9830,10 @@
       const message = String(error?.message || error || 'Browser request rejected').slice(0, 500);
       const binding = request?.kind === 'act' && browserToolFixtureIdentity(request.cardId);
       if (binding) browserToolFixtureLastAction = {
-        cardId: request.cardId, cardEpoch: binding.cardEpoch, authorityEpoch: binding.authorityEpoch,
+        requestId, cardId: request.cardId, cardEpoch: binding.cardEpoch, authorityEpoch: binding.authorityEpoch,
         actionType: request.action?.type || null, phase: diagnosticPhase, status: 'rejected',
         reason: browserToolFixtureReason(error, diagnosticPhase), inputRoute: null,
+        parentReason: message.match(/authority was revoked before input \[([a-z-]+)\]/)?.[1] || null,
         geckoError: message.match(/\bNS_ERROR_[A-Z_]+\b/)?.[0] || null,
         sampledAtMs: Date.now(),
       };
@@ -9884,6 +9947,7 @@
         throw new Error('Browser actor binding is unavailable');
       }
       const leaseId = chatBindingNonce();
+      browserToolFixtureAuthorizationByCard.delete(request.cardId);
       browserToolActionLeases.set(leaseId, { key, bound: authorized, card, browser,
         browsingContext, windowGlobal, leaseId, requestId, runId: request.runId,
         cardEpoch: request.targetCardEpoch, deadlineMs: request.deadlineMs,
@@ -9905,9 +9969,10 @@
       if (browserToolRunBindings.get(key) !== authorized) throw new Error('Browser run was cancelled after dispatch; outcome is unknown');
       const fixture = browserToolFixtureIdentity(request.cardId);
       if (fixture) browserToolFixtureLastAction = {
-        cardId: request.cardId, cardEpoch: fixture.cardEpoch, authorityEpoch: fixture.authorityEpoch,
+        requestId, cardId: request.cardId, cardEpoch: fixture.cardEpoch, authorityEpoch: fixture.authorityEpoch,
         actionType: request.action.type, phase: 'post-actor', status: 'acted', reason: 'none',
-        inputRoute: receipt?.dispatchReceipt?.clickInputRoute || null, geckoError: null,
+        inputRoute: receipt?.dispatchReceipt?.clickInputRoute || null,
+        parentReason: null, geckoError: null,
         sampledAtMs: Date.now(),
       };
       return { requestId, status: 'acted', receipt };
@@ -10012,6 +10077,7 @@
     });
     if (options.fixedLogicalHeight) card._fixedLogicalHeight = options.fixedLogicalHeight;
     let xulBrowser = null;
+    let unregisterBrowserAuthorizer = null;
     let browserLoadTimer = 0;
     let browserMenuPanel = null;
     const agentRefByNode = new WeakMap();
@@ -11419,6 +11485,13 @@
       if (!card.isConnected || !xulBrowser?.isConnected || !xulBrowser?.browsingContext?.currentWindowGlobal) {
         throw new Error('Selected Browser Card is unavailable');
       }
+      if (!unregisterBrowserAuthorizer) {
+        if (!ensureBrowserAgentActor()) throw new Error('Browser actor registration failed');
+        const { registerBrowserActionAuthorizer } = ChromeUtils.importESModule(
+          'chrome://userchrome/content/EGDeskBrowserAgentRuntimeParent.sys.mjs');
+        unregisterBrowserAuthorizer = registerBrowserActionAuthorizer(
+          xulBrowser, window, browserToolAuthorizePhysicalAction);
+      }
       const profileId = card._sourceRef?.profileId || state.sourceRefs.defaultProfileId;
       const accountId = card._sourceRef?.accountId || '';
       const rawContextId = xulBrowser.getAttribute?.('usercontextid');
@@ -11600,6 +11673,8 @@
     deskWindow.onResize(updateFitScale);
 
     const cleanupCard = () => {
+      try { unregisterBrowserAuthorizer?.(); } catch {}
+      unregisterBrowserAuthorizer = null;
       if (state.codex.authCardEntityId === card.id) {
         state.codex.authCardEntityId = null;
       }

@@ -4,7 +4,8 @@ import { test } from 'node:test'
 globalThis.JSWindowActorChild ||= class {}
 globalThis.JSWindowActorParent ||= class {}
 const { EGDeskBrowserAgentRuntimeChild } = await import('../overlay/resources/EGDeskBrowserAgentRuntimeChild.sys.mjs')
-const { EGDeskBrowserAgentRuntimeParent } = await import('../overlay/resources/EGDeskBrowserAgentRuntimeParent.sys.mjs')
+const { EGDeskBrowserAgentRuntimeParent, registerBrowserActionAuthorizer } =
+  await import('../overlay/resources/EGDeskBrowserAgentRuntimeParent.sys.mjs')
 
 function localDocumentFixture() {
   const actor = new EGDeskBrowserAgentRuntimeChild()
@@ -325,13 +326,36 @@ test('actor rechecks live parent authority and deadline after delayed query, bef
 
 test('parent actor delegates only its exact embedded Browser to privileged UI authority', () => {
   const parent = new EGDeskBrowserAgentRuntimeParent()
-  const browser = { ownerGlobal: { __egdesk: { browserAgentTools: {
-    authorizePhysicalAction: request => request.browser === browser && request.leaseId === 'lease-a',
-  } } } }
+  const ownerDocument = { nodePrincipal: { isSystemPrincipal: true } }
+  let unload
+  const ownerWindow = { document: ownerDocument,
+    addEventListener(name, fn) { if (name === 'unload') unload = fn },
+    removeEventListener(name, fn) { if (name === 'unload' && unload === fn) unload = null },
+  }
+  ownerDocument.defaultView = ownerWindow
+  const card = { isConnected: true }
+  const browser = { localName: 'browser', isConnected: true, ownerDocument,
+    browsingContext: { id: 101 }, closest: selector => selector === '.egd-browser-card' ? card : null }
+  const unregister = registerBrowserActionAuthorizer(browser, ownerWindow,
+    request => request.browser === browser && request.leaseId === 'lease-a')
   parent.browsingContext = { top: { embedderElement: browser } }
+  parent.browsingContext.id = 101
   parent.manager = { id: 'window-global-a' }
   assert.deepEqual(parent.receiveMessage({ name: 'authorizeAct', data: { leaseId: 'lease-a' } }),
-    { authorized: true })
+    { authorized: true, reason: 'approved' })
   assert.deepEqual(parent.receiveMessage({ name: 'authorizeAct', data: { leaseId: 'other' } }),
-    { authorized: false })
+    { authorized: false, reason: 'ui-denied' })
+  unload()
+  unregister()
+  browser.ownerGlobal = { __egdesk: { browserAgentTools: {
+    authorizePhysicalAction: () => true,
+  } } }
+  assert.deepEqual(parent.receiveMessage({ name: 'authorizeAct', data: { leaseId: 'lease-a' } }),
+    { authorized: false, reason: 'missing-authorizer' },
+    'an expando is never an authority fallback after exact chrome registration ends')
+  const webDocument = { nodePrincipal: { isSystemPrincipal: false } }
+  const webWindow = { document: webDocument, addEventListener() {}, removeEventListener() {} }
+  webDocument.defaultView = webWindow
+  assert.throws(() => registerBrowserActionAuthorizer({ ...browser,
+    ownerDocument: webDocument }, webWindow, () => true), /chrome-owned Browser Card/)
 })
