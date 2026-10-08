@@ -5204,6 +5204,7 @@
       browserTransportSource = null;
       if (revoke && hadTransport) {
         browserToolAuthorityEpoch++;
+        browserToolFixtureLastAction = null;
         browserToolRunBindings.clear();
         browserToolPendingBindings.clear();
         browserToolActionLeases.clear();
@@ -5491,6 +5492,7 @@
       epochScope.reset();
       clearBrowserToolTransport();
       browserToolAuthorityEpoch++;
+      browserToolFixtureLastAction = null;
       browserToolRunBindings.clear();
       browserToolPendingBindings.clear();
       browserToolUserSelections.clear();
@@ -9614,6 +9616,7 @@
   const browserToolRequestReceipts = new Map();
   const browserToolCardLeases = new Map();
   const browserToolActionLeases = new Map();
+  let browserToolFixtureLastAction = null;
   let browserToolAuthorityEpoch = 0;
   function revokeBrowserToolRunImmediately(run, thread) {
     const runId = run?.runId;
@@ -9705,6 +9708,38 @@
       return ['http:', 'https:'].includes(parsed.protocol) && !parsed.username && !parsed.password;
     } catch { return false; }
   }
+  function browserToolFixtureIdentity(cardId) {
+    const card = document.getElementById(cardId);
+    if (!card?.isConnected || !card.classList?.contains('egd-browser-card')) return null;
+    try {
+      const binding = card._browserControls?.toolBinding?.();
+      return binding?.accountId === '' &&
+        /^http:\/\/127\.0\.0\.1:\d+\/egdesk-qa\/[A-Za-z0-9_-]{20,80}$/.test(binding.url)
+        ? binding : null;
+    } catch { return null; }
+  }
+  function browserToolFixtureReason(error, phase) {
+    const message = String(error?.message || error || '');
+    if (/observation is stale|document changed/i.test(message)) return 'stale-observation';
+    if (/target.*obscured/i.test(message)) return 'target-obscured';
+    if (/target.*(?:changed|unavailable|not found)/i.test(message)) return 'target-changed';
+    if (/authority was revoked|lease is missing or expired/i.test(message)) return 'authority-denied';
+    if (/already being operated|being operated/i.test(message)) return 'card-busy';
+    if (/run was (?:stopped|cancelled)|run binding is missing/i.test(message)) return 'run-ended';
+    if (/profile|account epoch|Card generation|context changed/i.test(message)) return 'identity-changed';
+    if (/NS_ERROR_[A-Z_]+/.test(message)) return 'gecko-error';
+    if (error?.name === 'TypeError' || /TypeError/.test(message)) return 'actor-type-error';
+    return phase === 'actor' ? 'actor-exception' : 'ui-rejected';
+  }
+  function browserToolFixtureActionDiagnostic(cardId) {
+    const binding = browserToolFixtureIdentity(cardId);
+    const recorded = browserToolFixtureLastAction;
+    if (!binding || !recorded || recorded.cardId !== cardId ||
+        recorded.cardEpoch !== binding.cardEpoch || recorded.authorityEpoch !== binding.authorityEpoch) return null;
+    return { cardId, actionType: recorded.actionType, phase: recorded.phase,
+      status: recorded.status, reason: recorded.reason, inputRoute: recorded.inputRoute,
+      geckoError: recorded.geckoError, sampledAtMs: recorded.sampledAtMs };
+  }
   function browserToolAuthorizePhysicalAction({ browser, browsingContext, windowGlobal,
     leaseId, requestId, deadlineMs, actionType, actionRef, actionUrl }) {
     const lease = browserToolActionLeases.get(leaseId);
@@ -9728,8 +9763,19 @@
   }
   async function browserToolDispatchOnce(request) {
     const requestId = request?.requestId;
-    const fail = (error) => ({ requestId, status: 'rejected',
-      error: String(error?.message || error || 'Browser request rejected').slice(0, 500) });
+    let diagnosticPhase = 'preflight';
+    const fail = (error) => {
+      const message = String(error?.message || error || 'Browser request rejected').slice(0, 500);
+      const binding = request?.kind === 'act' && browserToolFixtureIdentity(request.cardId);
+      if (binding) browserToolFixtureLastAction = {
+        cardId: request.cardId, cardEpoch: binding.cardEpoch, authorityEpoch: binding.authorityEpoch,
+        actionType: request.action?.type || null, phase: diagnosticPhase, status: 'rejected',
+        reason: browserToolFixtureReason(error, diagnosticPhase), inputRoute: null,
+        geckoError: message.match(/\bNS_ERROR_[A-Z_]+\b/)?.[0] || null,
+        sampledAtMs: Date.now(),
+      };
+      return { requestId, status: 'rejected', error: message };
+    };
     try {
       if (request?.version !== 1 || typeof requestId !== 'string' || !requestId ||
           typeof request.runId !== 'string' || !request.runId ||
@@ -9845,6 +9891,7 @@
         actionUrl: request.action.url || null, authorized: false });
       let receipt;
       try {
+        diagnosticPhase = 'actor';
         receipt = await card._browserControls.toolAct(authorized.binding, request.action, request.guard,
           { leaseId, requestId, deadlineMs: request.deadlineMs });
       }
@@ -9854,7 +9901,15 @@
           browserToolCardLeases.delete(request.targetCardEpoch);
         }
       }
+      diagnosticPhase = 'post-actor';
       if (browserToolRunBindings.get(key) !== authorized) throw new Error('Browser run was cancelled after dispatch; outcome is unknown');
+      const fixture = browserToolFixtureIdentity(request.cardId);
+      if (fixture) browserToolFixtureLastAction = {
+        cardId: request.cardId, cardEpoch: fixture.cardEpoch, authorityEpoch: fixture.authorityEpoch,
+        actionType: request.action.type, phase: 'post-actor', status: 'acted', reason: 'none',
+        inputRoute: receipt?.dispatchReceipt?.clickInputRoute || null, geckoError: null,
+        sampledAtMs: Date.now(),
+      };
       return { requestId, status: 'acted', receipt };
     } catch (error) { return fail(error); }
   }
@@ -11418,7 +11473,10 @@
       showAgentActivity(documentStillCurrent && result?.observation?.visibleTextChanged
         ? '이 Browser의 화면 변화 관찰' : '조작 요청 후 결과 확인 필요');
       return { dispatchReceipt: { actor: 'JSWindowActor', eventDispatched: result?.ok === true,
-        documentStillCurrent }, after: documentStillCurrent ? { cardId: card.id, ...result.after } : null,
+        documentStillCurrent,
+        ...(action.type === 'click' && result?.result?.clickDiagnostics?.dispatchScope
+          ? { clickInputRoute: result.result.clickDiagnostics.dispatchScope } : {}) },
+        after: documentStillCurrent ? { cardId: card.id, ...result.after } : null,
         observation: documentStillCurrent ? result.observation : null };
     };
     card._browserControls = {
@@ -12978,6 +13036,7 @@
           dispatch: browserToolDispatch,
           attachTransport: attachBrowserToolTransport,
           authorizePhysicalAction: browserToolAuthorizePhysicalAction,
+          fixtureActionDiagnostic: browserToolFixtureActionDiagnostic,
           rootSseReady: () => state.codexBridge?.rootSseReady?.() || {
             sourceReady: false, stable: false, eventSourceReadyState: null,
             browserTransportId: null, sampledAtMs: Date.now(),

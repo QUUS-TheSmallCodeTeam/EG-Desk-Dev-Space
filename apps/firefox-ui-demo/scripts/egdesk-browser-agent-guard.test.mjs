@@ -81,8 +81,78 @@ test('guarded native Browser actor changes isolated local DOM exactly once and r
     guarded(guardFrom(observedAgain, input)))
   assert.equal(f.input.value, 'local note')
   assert.equal(filled.after.interactiveElements.find(item => item.ref === input.ref).value, 'local note')
+  assert.equal(filled.after.revision, observedAgain.revision,
+    'a property-only input value change need not produce a MutationObserver revision')
   assert.equal(f.inputEvents, 2)
   assert.equal(f.focusCalls, 0)
+})
+
+test('guarded click dispatches inside its document window, never through top-level hit testing', async () => {
+  const f = localDocumentFixture()
+  const targeted = [], topLevel = []
+  f.win.windowUtils = {
+    sendMouseEventToWindow(...args) {
+      targeted.push(args)
+      if (args[0] === 'mouseup') f.button.click()
+    },
+    sendMouseEvent(...args) { topLevel.push(args) },
+  }
+  const before = f.actor.snapshot()
+  const button = before.interactiveElements.find(item => item.role === 'button')
+  const result = await f.actor.act({ type: 'click', ref: button.ref },
+    guarded(guardFrom(before, button)))
+  assert.deepEqual(targeted.map(event => event[0]), ['mousemove', 'mousedown', 'mouseup'])
+  assert.equal(topLevel.length, 0, 'overlapping Cards must not receive top-level widget input')
+  assert.equal(result.result.clickDiagnostics.dispatchScope, 'document-window')
+  assert.equal(result.after.text[0], 'Count: 1')
+  assert.equal(f.focusCalls, 0)
+})
+
+test('missing per-window API uses the single DOM fallback, not a top-level mouse event', async () => {
+  const f = localDocumentFixture()
+  let topLevelCalls = 0
+  f.win.windowUtils = { sendMouseEvent() { topLevelCalls++ } }
+  const before = f.actor.snapshot()
+  const button = before.interactiveElements.find(item => item.role === 'button')
+  const result = await f.actor.act({ type: 'click', ref: button.ref },
+    guarded(guardFrom(before, button)))
+  assert.equal(topLevelCalls, 0)
+  assert.equal(f.clicks, 1)
+  assert.equal(result.result.clickDiagnostics.dispatchScope, 'dom-fallback')
+  assert.equal(f.focusCalls, 0)
+})
+
+test('diagnostic repro: even a per-window mouse path can complete without a page click', async () => {
+  const f = localDocumentFixture()
+  const mouseEvents = []
+  f.win.windowUtils = { sendMouseEventToWindow: (...args) => { mouseEvents.push(args) } }
+  const before = f.actor.snapshot()
+  const button = before.interactiveElements.find(item => item.role === 'button')
+  const result = await f.actor.act({ type: 'click', ref: button.ref },
+    guarded(guardFrom(before, button)))
+  assert.deepEqual(mouseEvents.map(event => event[0]), ['mousemove', 'mousedown', 'mouseup'])
+  assert.equal(result.result.clickDiagnostics.usedWindowUtils, true)
+  assert.equal(result.result.clickDiagnostics.dispatchScope, 'document-window')
+  assert.equal(result.ok, true, 'the actor completed its synthetic mouse calls')
+  assert.equal(f.clicks, 0, 'the mocked widget delivered no page click')
+  assert.equal(result.after.text[0], 'Count: 0')
+  assert.equal(result.observation.visibleTextChanged, false,
+    'an actor completion is not evidence that the click reached the page')
+})
+
+test('expired-lease diagnostic checks the live target guard without physical input', async () => {
+  const f = localDocumentFixture()
+  const before = f.actor.snapshot()
+  const button = before.interactiveElements.find(item => item.role === 'button')
+  const expired = { guard: guardFrom(before, button), lease: {
+    leaseId: 'qa-expired-probe', requestId: 'qa-expired-probe', deadlineMs: 0,
+  }, settleMs: 0 }
+  await assert.rejects(f.actor.act({ type: 'click', ref: button.ref }, expired), /lease is missing or expired/)
+  assert.equal(f.clicks, 0)
+  assert.equal(f.focusCalls, 0)
+  f.pendingMutations.push({})
+  await assert.rejects(f.actor.act({ type: 'click', ref: button.ref }, expired), /observation is stale/)
+  assert.equal(f.clicks, 0, 'the stale-guard branch also precedes all physical input')
 })
 
 test('document mutation, real viewport resize, target change and occlusion reject old actions', async () => {
