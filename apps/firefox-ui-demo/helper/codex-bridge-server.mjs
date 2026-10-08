@@ -19,7 +19,7 @@ import { openChatStore } from './egdesk-chat-store.mjs'
 import { NativeReaderClient } from './egdesk-native-reader.mjs'
 import { ContextRuntime } from './egdesk-context-runtime.mjs'
 import { createContextHttpHandler } from './egdesk-context-http.mjs'
-import { buildCodexAppServerLaunch, inspectNativeCapabilities, resolveCodexExecutable, verifyCodexLaunchConfiguration, verifyCodexMemoryFeatureDisabled, NATIVE_SCHEMA_VERSION } from './egdesk-native-capabilities.mjs'
+import { buildCodexAppServerLaunch, inspectNativeCapabilities, preflightOwnedAppServer, resolveCodexExecutable, NATIVE_SCHEMA_VERSION } from './egdesk-native-capabilities.mjs'
 import { createEGDeskFileMount, requireEGDeskNodeRuntime } from './egdesk-file-mount.mjs'
 
 const nodeRuntime = requireEGDeskNodeRuntime()
@@ -363,31 +363,27 @@ async function connectToAppServer() {
     try {
       await connection.initialize()
       if (appServerSocket !== socket) return
-      if (appServerLaunch.hasOverrides) {
-        try {
-          const config = await connection.request('config/read', { includeLayers: false, cwd: process.cwd() })
-          if (appServerSocket !== socket) return
-          nativePreflight = verifyCodexLaunchConfiguration(appServerLaunch, config)
-        } catch (error) {
+      const preflight = await preflightOwnedAppServer({
+        launch: appServerLaunch, cwd: process.cwd(),
+        request: (method, params) => connection.request(method, params),
+        isCurrent: () => appServerSocket === socket,
+        stopOwnedChild: () => {
+          // Only this bridge's spawned child may be stopped; never signal a
+          // user daemon or another App Server merely sharing the endpoint.
+          // Fence reconnect before SIGTERM can trigger the child's exit event.
           launchConfigBlocked = true
-          nativePreflight = { ...nativePreflight, status: 'blocked', effectiveModel: null, effectiveEffort: null, errorCode: error.code || 'CODEX_LAUNCH_CONFIG_UNVERIFIED' }
-          throw error
-        }
-      }
-      if (appServerLaunch.disableMemories) {
-        try {
-          const verified = await verifyCodexMemoryFeatureDisabled((method, params) => connection.request(method, params))
-          if (appServerSocket !== socket) return
-          memoryIsolation = verified
-        } catch (error) {
-          if (appServerSocket !== socket) return
-          launchConfigBlocked = true
-          memoryIsolation = { status: 'blocked', feature: 'memories', errorCode: error.code || 'CODEX_MEMORY_ISOLATION_UNVERIFIED' }
-          // This is only the child spawned by this bridge. Do not leave an
-          // unverified process alive to run unrelated background memory jobs.
+          appServerReady = false
           if (appServerProcess && appServerProcess.exitCode == null && !appServerProcess.killed) appServerProcess.kill('SIGTERM')
-          throw error
-        }
+        },
+      })
+      if (preflight.stale) return
+      if (preflight.modelProof) nativePreflight = preflight.modelProof
+      if (preflight.memoryProof) memoryIsolation = preflight.memoryProof
+      if (!preflight.ready) {
+        launchConfigBlocked = preflight.reconnectBlocked
+        if (preflight.failedStage === 'model') nativePreflight = { ...nativePreflight, status: 'blocked', effectiveModel: null, effectiveEffort: null, errorCode: preflight.error.code || 'CODEX_LAUNCH_CONFIG_UNVERIFIED' }
+        if (appServerLaunch.disableMemories) memoryIsolation = { status: 'blocked', feature: 'memories', errorCode: preflight.error.code || 'CODEX_MEMORY_ISOLATION_UNVERIFIED' }
+        throw preflight.error
       }
       appServerReady = true
       chat.setConnection(true)

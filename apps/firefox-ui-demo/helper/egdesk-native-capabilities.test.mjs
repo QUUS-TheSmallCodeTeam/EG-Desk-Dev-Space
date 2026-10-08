@@ -4,7 +4,7 @@ import { readFile, writeFile, mkdtemp, rm } from 'node:fs/promises'
 import { spawnSync } from 'node:child_process'
 import os from 'node:os'
 import path from 'node:path'
-import { buildCodexAppServerLaunch, inspectNativeCapabilities, resolveCodexExecutable, verifyCodexLaunchConfiguration, verifyCodexMemoryFeatureDisabled } from './egdesk-native-capabilities.mjs'
+import { buildCodexAppServerLaunch, inspectNativeCapabilities, preflightOwnedAppServer, resolveCodexExecutable, verifyCodexLaunchConfiguration, verifyCodexMemoryFeatureDisabled } from './egdesk-native-capabilities.mjs'
 import { fingerprintNativeExecutable, verifyNativeSchemaDirectory } from './codex-native-schema-probe.mjs'
 import { AppServerRpc } from './codex-app-server-rpc.mjs'
 
@@ -152,17 +152,74 @@ test('config/read preflight proves both effective overrides and rejects missing 
   assert.throws(() => verifyCodexLaunchConfiguration(launch, { config: { model: 'gpt-6-sol' } }), e => e.code === 'CODEX_LAUNCH_CONFIG_UNVERIFIED')
 })
 
+test('combined memory-disable and model mismatch blocks startup and stops only the owned child before memory RPC', async () => {
+  const launch = buildCodexAppServerLaunch({ env: {
+    EGDESK_CODEX_MODEL: 'gpt-6-sol', EGDESK_CODEX_EFFORT: 'max', EGDESK_CODEX_DISABLE_MEMORIES: '1',
+  }, listen: 'ws://127.0.0.1:39219' })
+  let reconnectBlocked = false
+  const ownedChild = { killed: false, kill(signal) { assert.equal(signal, 'SIGTERM'); assert.equal(reconnectBlocked, true); this.killed = true } }
+  let stopped = 0, memoryChecks = 0
+  const request = async method => {
+    if (method === 'config/read') return { config: { model: 'gpt-6-astra', model_reasoning_effort: 'max' } }
+    if (method === 'experimentalFeature/list') { memoryChecks++; return { data: [{ name: 'memories', enabled: false }], nextCursor: null } }
+    throw new Error(`Unexpected metadata method ${method}`)
+  }
+  const result = await preflightOwnedAppServer({ launch, request, cwd: '/fixture', stopOwnedChild: () => { reconnectBlocked = true; stopped++; ownedChild.kill('SIGTERM') } })
+  assert.equal(result.ready, false)
+  assert.equal(result.reconnectBlocked, true)
+  assert.equal(reconnectBlocked, true)
+  assert.equal(result.failedStage, 'model')
+  assert.equal(result.error.code, 'CODEX_LAUNCH_CONFIG_MISMATCH')
+  assert.equal(result.modelProof, null)
+  assert.equal(result.memoryProof, null)
+  assert.equal(memoryChecks, 0)
+  assert.equal(stopped, 1)
+  assert.equal(ownedChild.killed, true)
+  const stale = await preflightOwnedAppServer({ launch, request, cwd: '/fixture', isCurrent: () => false,
+    stopOwnedChild: () => { stopped++ } })
+  assert.deepEqual(stale, { stale: true })
+  assert.equal(stopped, 1)
+})
+
+test('combined startup reaches readiness only with both model and memory proofs', async () => {
+  const launch = buildCodexAppServerLaunch({ env: {
+    EGDESK_CODEX_MODEL: 'gpt-6-sol', EGDESK_CODEX_EFFORT: 'max', EGDESK_CODEX_DISABLE_MEMORIES: '1',
+  }, listen: 'ws://127.0.0.1:39219' })
+  let stopped = 0
+  const request = enabled => async method => method === 'config/read'
+    ? { config: { model: 'gpt-6-sol', model_reasoning_effort: 'max' } }
+    : { data: [{ name: 'memories', enabled }], nextCursor: null }
+  const healthy = await preflightOwnedAppServer({ launch, cwd: '/fixture', request: request(false), stopOwnedChild: () => { stopped++ } })
+  assert.equal(healthy.ready, true)
+  assert.equal(healthy.reconnectBlocked, false)
+  assert.equal(healthy.modelProof.status, 'verified')
+  assert.equal(healthy.memoryProof.status, 'verified-disabled')
+  assert.equal(stopped, 0)
+  const unsafe = await preflightOwnedAppServer({ launch, cwd: '/fixture', request: request(true), stopOwnedChild: () => { stopped++ } })
+  assert.equal(unsafe.ready, false)
+  assert.equal(unsafe.reconnectBlocked, true)
+  assert.equal(unsafe.failedStage, 'memories')
+  assert.equal(unsafe.modelProof.status, 'verified')
+  assert.equal(stopped, 1)
+})
+
 test('production spawn uses the validated argv without a shell and proves config before chat readiness', async () => {
   const source = await readFile(new URL('./codex-bridge-server.mjs', import.meta.url), 'utf8')
   assert.ok(source.includes('spawn(executable, appServerLaunch.args, {'))
   assert.ok(source.includes('shell: false'))
   assert.ok(source.includes('qaReady: () => nativeCapabilities.qaReadOnly && appServerReady'))
-  const proof = source.indexOf('nativePreflight = verifyCodexLaunchConfiguration(appServerLaunch, config)')
-  assert.ok(proof > source.indexOf("connection.request('config/read'"))
+  const proof = source.indexOf('const preflight = await preflightOwnedAppServer')
+  assert.ok(proof > source.indexOf('await connection.initialize()'))
   assert.ok(proof < source.indexOf('appServerReady = true', proof))
-  const memoryProof = source.indexOf('memoryIsolation = verified')
-  assert.ok(memoryProof > source.indexOf('const verified = await verifyCodexMemoryFeatureDisabled'))
-  assert.ok(memoryProof < source.indexOf('appServerReady = true', memoryProof))
+  assert.ok(source.includes('launchConfigBlocked = preflight.reconnectBlocked'))
+  assert.ok(source.includes('if (!preflight.ready)'))
+  assert.ok(source.includes('stopOwnedChild: () => {'))
+  const stopStart = source.indexOf('stopOwnedChild: () => {')
+  const reconnectFence = source.indexOf('launchConfigBlocked = true', stopStart)
+  const readinessFence = source.indexOf('appServerReady = false', stopStart)
+  const childSignal = source.indexOf("appServerProcess.kill('SIGTERM')", stopStart)
+  assert.ok(stopStart < reconnectFence && reconnectFence < childSignal)
+  assert.ok(stopStart < readinessFence && readinessFence < childSignal)
   assert.ok(source.includes("appServerProcess.kill('SIGTERM')"))
   assert.ok(source.includes('memoryIsolation, node: nodeRuntime'))
 })
