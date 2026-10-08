@@ -5,7 +5,8 @@ import { createHash } from 'node:crypto';
 import {
   parseDeadlineUtc, assertBeforeDeadline, assertTurnTimeBudget, parseCases, scenarioCoverage,
   chooseChatProxyTarget,
-  harmlessPrintfCommand, nativeReadCommand, assertHiddenMarkerOutsideModelAdmission,
+  harmlessPrintfCommand, nativeReadCommand, nativeZshWrappedCommand,
+  assertHiddenMarkerOutsideModelAdmission,
   assertRealTransport, assertNativeQaCapabilityBeforeTurn, assertEffectiveReadOnly,
   assertOrdinaryUiBaseline, assertUiQaRequest, assertBrowserUiRequest,
   assertFreshBrowserRootSse,
@@ -96,6 +97,15 @@ test('constructed harmless printf actually emits one newline in the local shell'
   assert.equal(child.stdout, `${token}\n`);
   assert.equal(child.stdout.includes('\\n'), false);
   assert.equal(nativeReadCommand(nativeFile), `sed -n '1,2p' '${nativeFile}'`);
+  assert.equal(nativeZshWrappedCommand(nativeReadCommand(nativeFile)),
+    `/bin/zsh -lc "sed -n '1,2p' '${nativeFile}'"`);
+  assert.equal(nativeZshWrappedCommand(command),
+    String.raw`/bin/zsh -lc "printf '%s\\n' 'QA_COMMAND_0123456789abcdef'"`);
+  const wrapped = spawnSync('/bin/sh', ['-c', nativeZshWrappedCommand(command)],
+    { encoding: 'utf8', timeout: 1000 });
+  assert.equal(wrapped.status, 0);
+  assert.equal(wrapped.stderr, '');
+  assert.equal(wrapped.stdout, `${token}\n`);
   const marker = 'QA_NATIVE_0123456789abcdef01234567';
   assert.equal(assertHiddenMarkerOutsideModelAdmission({ marker, message: 'read the fixture',
     title: 'QA native read', path: nativeFile, metadata: { sourceIds: [] } }), true);
@@ -213,12 +223,16 @@ test('two distinct native items need independent A aggregate-output marker recei
   const fileNonce = 'QA_NATIVE_0123456789abcdef01234567';
   const commandTag = 'QA_COMMAND_tag_0123456789';
   const digest = text => createHash('sha256').update(text).digest('hex');
+  const readPayload = nativeReadCommand(nativeFile);
+  const readNative = nativeZshWrappedCommand(readPayload);
+  const printfNative = nativeZshWrappedCommand(harmlessPrintfCommand(commandTag));
+  assert.notEqual(digest(readNative), digest(readPayload), 'receipt must hash the full native wrapper');
   value.messages = [{ role: 'assistant', text: `${fileNonce} and ${commandTag}` }];
   value.activities = [
     { id: 'read-1', kind: 'commandExecution', status: 'completed',
-      detail: { command: nativeReadCommand(nativeFile), cwd, exitCode: 0 } },
+      detail: { command: readNative, cwd, exitCode: 0 } },
     { id: 'cmd-2', kind: 'commandExecution', status: 'completed',
-      detail: { command: harmlessPrintfCommand(commandTag), cwd, exitCode: 0 } },
+      detail: { command: printfNative, cwd, exitCode: 0 } },
   ];
   const baseReceipt = { nativeItemType: 'commandExecution',
     origin: 'codex-app-server.item/completed', originalProviderId: 'codex-native',
@@ -227,9 +241,9 @@ test('two distinct native items need independent A aggregate-output marker recei
     commandHashBasis: 'sanitized-native-item-command', bridgeEpoch: 7,
     contractFingerprint: nativeContractFingerprint };
   const readReceipt = { ...baseReceipt, nativeItemId: 'read-1', markerLines: [fileNonce],
-    commandSha256: digest(nativeReadCommand(nativeFile)) };
+    commandSha256: digest(readNative) };
   const commandReceipt = { ...baseReceipt, nativeItemId: 'cmd-2', markerLines: [commandTag],
-    commandSha256: digest(harmlessPrintfCommand(commandTag)) };
+    commandSha256: digest(printfNative) };
   value.qaCommandReceipts = [readReceipt, commandReceipt];
   const events = life(value);
   events.splice(2, 0,
@@ -237,7 +251,7 @@ test('two distinct native items need independent A aggregate-output marker recei
     { ...event(value, 'qa.command.receipt', commandReceipt, 'cmd-2'), seq: 4, ts: 240 });
   events[4] = { ...events[4], seq: 5 };
   const input = { run: value, events, nativeFile,
-    readCommand: nativeReadCommand(nativeFile),
+    readCommand: readPayload,
     nonce: fileNonce, commandTag, nativeContractFingerprint,
     beforeFiles: inventory, afterFiles: structuredClone(inventory) };
   assert.deepEqual(assertNativeFileAndCommand(input), { readItemId: 'read-1', commandItemId: 'cmd-2',
@@ -274,6 +288,18 @@ test('two distinct native items need independent A aggregate-output marker recei
     { id: 'write', kind: 'fileChange' }] } }), /file changes/);
   assert.throws(() => assertNativeFileAndCommand({ ...input, run: { ...value, activities: [...value.activities,
     { id: 'extra', kind: 'commandExecution', status: 'completed', detail: { exitCode: 0 } }] } }), /two scoped commands/);
+  assert.throws(() => assertNativeFileAndCommand({ ...input, run: { ...value,
+    activities: value.activities.map(item => item.id === 'read-1'
+      ? { ...item, detail: { ...item.detail, command: `${readNative}; pwd` } } : item) } }), /file-read command item is missing/);
+  assert.throws(() => assertNativeFileAndCommand({ ...input, run: { ...value,
+    activities: value.activities.map(item => item.id === 'read-1'
+      ? { ...item, detail: { ...item.detail,
+        command: nativeZshWrappedCommand(nativeReadCommand(`${cwd}/other.txt`)) } } : item) } }), /file-read command item is missing/);
+  assert.throws(() => assertNativeFileAndCommand({ ...input, run: { ...value,
+    activities: value.activities.map(item => item.id === 'cmd-2'
+      ? { ...item, detail: { ...item.detail, cwd: `${cwd}/other` } } : item) } }), /harmless native command item is missing/);
+  assert.throws(() => assertNativeFileAndCommand({ ...input, run: { ...value,
+    activities: [...value.activities, { id: 'extra-tool', kind: 'dynamicToolCall' }] } }), /unrequested tool action/);
   assert.throws(() => assertNativeFileAndCommand({ ...input, run: { ...value,
     executionPolicy: { ...policyReceipt, externalMcpCatalog: 'pending' } } }), /MCP catalog/);
 });

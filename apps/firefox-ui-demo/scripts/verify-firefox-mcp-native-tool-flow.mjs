@@ -36,6 +36,14 @@ export function nativeReadCommand(file) {
   return `sed -n '1,2p' '${file}'`;
 }
 
+export function nativeZshWrappedCommand(payload) {
+  assert.ok(typeof payload === 'string' && payload, 'native shell payload is required');
+  return `/bin/zsh -lc ${JSON.stringify(payload)}`;
+}
+
+const exactNativeCommand = (actual, payload) => actual === payload
+  || actual === nativeZshWrappedCommand(payload);
+
 export function parseDeadlineUtc(value) {
   assert.ok(typeof value === 'string' && /^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}(?:\.\d{3})?Z$/.test(value),
     '--deadline-utc must be an explicit ISO-8601 UTC timestamp ending in Z');
@@ -220,12 +228,16 @@ export function assertNativeFileAndCommand({ run, events, nativeFile, nonce, com
   assertNoFixtureWrites(beforeFiles, afterFiles);
   const allCommands = (run.activities || []).filter(item => item.kind === 'commandExecution');
   assert.equal(allCommands.length, 2, 'native QA turn used more or fewer than the two scoped commands');
+  assert.ok(!(run.activities || []).some(item => ['fileChange', 'mcpToolCall', 'dynamicToolCall',
+    'webSearch', 'collabAgentToolCall'].includes(item.kind)),
+  'native QA turn used an unrequested tool action');
   const commands = allCommands.filter(item => item.kind === 'commandExecution'
     && item.status === 'completed' && item.detail?.exitCode === 0 && item.id);
-  const read = commands.find(item => item.detail.command === readCommand
+  const read = commands.find(item => exactNativeCommand(item.detail.command, readCommand)
     && item.detail.cwd === path.dirname(nativeFile));
   const harmless = commands.find(item => item.id !== read?.id
-    && item.detail.command === harmlessPrintfCommand(commandTag));
+    && exactNativeCommand(item.detail.command, harmlessPrintfCommand(commandTag))
+    && item.detail.cwd === path.dirname(nativeFile));
   assert.ok(read, 'native file-read command item is missing');
   assert.ok(harmless, 'distinct harmless native command item is missing');
   const receipts = run.qaCommandReceipts;
