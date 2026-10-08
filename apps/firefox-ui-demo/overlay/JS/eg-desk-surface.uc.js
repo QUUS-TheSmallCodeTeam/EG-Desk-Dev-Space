@@ -4794,12 +4794,11 @@
           },
         });
         if (!hasConversation) {
-          const activeKindLabel = codexThreadLongLabel(activeThread.type);
           const emptyChildren = [
             el('div', { class: 'egd-codex-empty-title' }, codex.authStatus.isLoggedIn ? '아직 메시지가 없습니다' : '로그인 후 대화할 수 있습니다'),
             el('div', { class: 'egd-codex-empty-sub' },
               codex.authStatus.isLoggedIn
-                ? `${activeKindLabel} · ${codexThreadSessionLabel(activeThread)} · ${codexThreadAgentProfile(activeThread).name}`
+                ? '메시지를 보내 대화를 시작하세요'
                 : 'Codex 로그인이 필요합니다.',
             ),
           ];
@@ -5206,6 +5205,7 @@
       if (revoke && hadTransport) {
         browserToolAuthorityEpoch++;
         browserToolRunBindings.clear();
+        browserToolPendingBindings.clear();
         browserToolActionLeases.clear();
         browserToolUserSelections.clear();
         state.codex.threads = state.codex.threads.map(thread => ({ ...thread,
@@ -5492,6 +5492,7 @@
       clearBrowserToolTransport();
       browserToolAuthorityEpoch++;
       browserToolRunBindings.clear();
+      browserToolPendingBindings.clear();
       browserToolUserSelections.clear();
       browserToolActionLeases.clear();
       ChatState.resetChatProtocol(protocol);
@@ -5954,6 +5955,7 @@
         if (!run || run.stopPending || run.stopRequested) return false;
         const token = epochScope.begin();
         run.stopPending = true;
+        revokeBrowserToolRunImmediately(run, thread);
         emit();
         try {
           const result = await fetchJson('/chat/interrupt', { method: 'POST', signal: token.signal, body: JSON.stringify({ conversationId: run.conversationId, runId: run.runId }) });
@@ -6461,8 +6463,9 @@
           epochScope.finish(token);
           return;
         }
-        const selectedBrowserTransportId = browserTransportId;
-        if (selectedBrowserSources.length && (!streamReady || !selectedBrowserTransportId || browserTransportSource !== source)) {
+        const browserSseStatus = rootSseReady();
+        const selectedBrowserTransportId = browserSseStatus.browserTransportId;
+        if (selectedBrowserSources.length && !browserSseStatus.sourceReady) {
           updateThreadById(activeThread.id, thread => ({ ...thread,
             sendError: '선택한 Browser 연결이 바뀌었습니다. Browser를 다시 선택한 뒤 전송해 주세요.' }));
           epochScope.finish(token);
@@ -9603,12 +9606,38 @@
   // This is the privileged-UI end of the Browser model-tool transport. It
   // deliberately never uses resolveBrowserCard's active/first-card fallback.
   const browserToolRunBindings = new Map();
+  const browserToolPendingBindings = new Map();
   const browserToolUserSelections = new Map();
   const browserToolCancelledRuns = new Map();
   const browserToolRequestReceipts = new Map();
   const browserToolCardLeases = new Map();
   const browserToolActionLeases = new Map();
   let browserToolAuthorityEpoch = 0;
+  function revokeBrowserToolRunImmediately(run, thread) {
+    const runId = run?.runId;
+    const clientThreadId = run?.clientThreadId || ChatState.clientThreadBinding(thread);
+    if (typeof runId !== 'string' || !runId || !clientThreadId) return 0;
+    const prefix = `${runId}\u0000`;
+    const revoked = new Set();
+    for (const [key, bound] of browserToolRunBindings) {
+      if (!key.startsWith(prefix) || bound.clientThreadId !== clientThreadId) continue;
+      browserToolRunBindings.delete(key);
+      if (bound.selectionToken) browserToolUserSelections.delete(bound.selectionToken);
+      revoked.add(key);
+    }
+    for (const [key, pending] of browserToolPendingBindings) {
+      if (!key.startsWith(prefix) || pending.clientThreadId !== clientThreadId) continue;
+      browserToolPendingBindings.delete(key);
+      if (pending.selectionToken) browserToolUserSelections.delete(pending.selectionToken);
+      revoked.add(key);
+    }
+    for (const [leaseId, lease] of browserToolActionLeases) {
+      if (revoked.has(lease.key)) browserToolActionLeases.delete(leaseId);
+    }
+    const expiresAt = Date.now() + 60000;
+    for (const key of revoked) browserToolCancelledRuns.set(key, expiresAt);
+    return revoked.size;
+  }
   function registerBrowserToolSelection(threadId, source, permission) {
     const thread = getCodexThreadById(state.codex, threadId);
     const clientThreadId = thread && ChatState.clientThreadBinding(thread);
@@ -9712,6 +9741,7 @@
         const bound = browserToolRunBindings.get(key);
         if (bound && bound.clientThreadId !== request.clientThreadId) throw new Error('Browser cancel belongs to another Chat');
         browserToolRunBindings.delete(key);
+        browserToolPendingBindings.delete(key);
         for (const [leaseId, lease] of browserToolActionLeases) {
           if (lease.key === key) browserToolActionLeases.delete(leaseId);
         }
@@ -9749,14 +9779,21 @@
               selectedByUser[field] !== selection[field])) {
           throw new Error('Selected Browser Card, profile, account or URL changed');
         }
-        const live = await card._browserControls.toolObserve(current, { textLimit: 1, elementLimit: 1 });
-        if (!browserToolSameUrl(live.url, selection.selectedUrl) || browserToolCancelledRuns.has(key) ||
-            browserToolUserSelections.get(selection.selectionToken) !== selectedByUser || selectedByUser.usedRunId ||
-            request.deadlineMs <= Date.now()) throw new Error('Selected Browser document changed before binding');
-        selectedByUser.usedRunId = request.runId;
-        browserToolRunBindings.set(key, { binding: current, permission: selection.permission,
-          clientThreadId: request.clientThreadId, selectionToken: selection.selectionToken });
-        return { requestId, status: 'bound', binding: current };
+        const pending = { clientThreadId: request.clientThreadId, selectionToken: selection.selectionToken };
+        browserToolPendingBindings.set(key, pending);
+        try {
+          const live = await card._browserControls.toolObserve(current, { textLimit: 1, elementLimit: 1 });
+          if (!browserToolSameUrl(live.url, selection.selectedUrl) || browserToolCancelledRuns.has(key) ||
+              browserToolPendingBindings.get(key) !== pending ||
+              browserToolUserSelections.get(selection.selectionToken) !== selectedByUser || selectedByUser.usedRunId ||
+              request.deadlineMs <= Date.now()) throw new Error('Selected Browser document changed before binding');
+          selectedByUser.usedRunId = request.runId;
+          browserToolRunBindings.set(key, { binding: current, permission: selection.permission,
+            clientThreadId: request.clientThreadId, selectionToken: selection.selectionToken });
+          return { requestId, status: 'bound', binding: current };
+        } finally {
+          if (browserToolPendingBindings.get(key) === pending) browserToolPendingBindings.delete(key);
+        }
       }
       const authorized = browserToolRunBindings.get(key);
       if (!authorized || authorized.clientThreadId !== request.clientThreadId || !request.binding ||
@@ -9815,6 +9852,10 @@
   function browserToolDispatch(request) {
     const id = request?.requestId;
     if (typeof id !== 'string' || !id || id.length > 160) return browserToolDispatchOnce(request);
+    const key = `${request.runId}\u0000${request.cardId}\u0000${request.targetCardEpoch}`;
+    if (request.kind !== 'cancel' && browserToolCancelledRuns.has(key)) return Promise.resolve({
+      requestId: id, status: 'rejected', error: 'Browser run was cancelled',
+    });
     let fingerprint;
     try { fingerprint = JSON.stringify(request); } catch { return browserToolDispatchOnce(null); }
     if (fingerprint.length > 24000) return Promise.resolve({ requestId: id, status: 'rejected', error: 'Browser request exceeds size limit' });
