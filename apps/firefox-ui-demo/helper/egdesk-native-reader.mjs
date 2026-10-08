@@ -31,13 +31,17 @@ export class NativeReaderClient {
   }
 
   async mcpInventory(threadId) {
-    const servers = []
-    let cursor
+    const servers = [], seen = new Set()
+    let cursor = null
     for (let page = 0; page < 8; page++) {
       const result = await this.request('mcpServerStatus/list', { threadId, limit: 100, ...(cursor ? { cursor } : {}) })
       if (!Array.isArray(result?.data)) throw fail('READER_ISOLATION_UNAVAILABLE', 'Cannot verify Reader tool isolation')
       servers.push(...result.data)
-      if (!result.nextCursor) return servers
+      if (result.nextCursor == null) return servers
+      if (typeof result.nextCursor !== 'string' || !result.nextCursor || seen.has(result.nextCursor)) {
+        throw fail('READER_ISOLATION_UNAVAILABLE', 'Reader MCP inventory cursor did not advance')
+      }
+      seen.add(result.nextCursor)
       cursor = result.nextCursor
     }
     throw fail('READER_ISOLATION_UNAVAILABLE', 'MCP inventory exceeds the isolation verification limit')
