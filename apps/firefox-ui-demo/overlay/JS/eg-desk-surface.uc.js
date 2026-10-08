@@ -783,8 +783,16 @@
         });
       } }, '파일 선택…'));
       body.appendChild(el('button', { 'aria-label': '선택한 자료를 Chat 초안에 첨부', data: { testid: 'chat-attach-confirm' }, onclick: () => {
-        state.codexBridge.addInputSources(threadId, [...picked.values()].map(source =>
-          source.kind === 'browser' ? { ...source, selectedByUser: true, browserToolPermission: 'observe' } : source)); close();
+        const additions = [];
+        for (const source of picked.values()) {
+          if (source.kind !== 'browser') { additions.push(source); continue; }
+          const existing = getCodexThreadById(state.codex, threadId)?.inputSources?.find(item =>
+            item.kind === 'browser' && item.sourceRef?.viewId === source.sourceRef.viewId);
+          if (existing) state.codexBridge.removeInputSource(threadId, existing.id);
+          const selectedSource = registerBrowserToolSelection(threadId, source, 'observe');
+          additions.push(selectedSource || { ...source, selectedByUser: true, browserToolPermission: 'observe' });
+        }
+        state.codexBridge.addInputSources(threadId, additions); close();
       } }, '선택 항목 첨부'));
     }
     document.documentElement.appendChild(panel);
@@ -5438,6 +5446,8 @@
       epochScope.reset();
       browserToolAuthorityEpoch++;
       browserToolRunBindings.clear();
+      browserToolUserSelections.clear();
+      browserToolActionLeases.clear();
       ChatState.resetChatProtocol(protocol);
       refreshing.clear();
       resumedNativeBindings.clear();
@@ -5932,6 +5942,8 @@
       },
       removeInputSource(threadId, sourceId) {
         if (getCodexThreadById(state.codex, threadId)?.preparingInput) return;
+        const source = getCodexThreadById(state.codex, threadId)?.inputSources?.find(item => item.id === sourceId);
+        if (source?.browserToolSelection?.token) browserToolUserSelections.delete(source.browserToolSelection.token);
         updateThreadById(threadId, thread => ({ ...thread, inputSources: InputContext.removeInputSource(thread.inputSources, sourceId) }));
         emit();
       },
@@ -6365,6 +6377,7 @@
           if (epochScope.valid(token)) { updateThreadById(activeThread.id, thread => ({ ...thread, preparingInput: false })); emit(); }
         }
         const requestId = `request-${Date.now().toString(36)}-${Math.random().toString(36).slice(2)}`;
+        const selectedBrowserSources = browserToolSelectedSources(activeThread.id, selectedInputs);
         ChatState.registerChatRequest(protocol, { requestId, clientThreadId: ChatState.clientThreadBinding(activeThread), localThreadId: activeThread.id, conversationId: activeThread.conversationId, authorName: activeThread.profileEnabled ? codexThreadAgentProfile(activeThread).name : 'Codex' }, state.codex.authStatus);
         appendMessageToThread(activeThread.id, createCodexMessage('user', content, 'submitting', {
           readBy: [SELF_MEMBER], requestId, inputReferences,
@@ -6382,10 +6395,12 @@
           const runtimeConfig = codexThreadRuntimeConfig(activeThread);
           runtimeConfig.contextSnapshotIds = inputReferences.map(reference => reference.snapshotId);
           runtimeConfig.contextCapabilities = ChatState.contextCapabilitiesForRequest(activeThread, state.codex.authStatus, runtimeConfig.contextSnapshotIds);
+          const chatRequest = ChatState.buildChatRequest(activeThread, content, requestId, runtimeConfig);
+          if (selectedBrowserSources.length) chatRequest.selectedSources = selectedBrowserSources;
           const result = await fetchJson('/chat/send', {
             method: 'POST',
             signal: token.signal,
-            body: JSON.stringify(ChatState.buildChatRequest(activeThread, content, requestId, runtimeConfig)),
+            body: JSON.stringify(chatRequest),
           });
           if (!epochScope.valid(token)) return;
           const run = ChatState.acceptChatRequest(protocol, result, requestId);
@@ -9495,20 +9510,57 @@
   // This is the privileged-UI end of the Browser model-tool transport. It
   // deliberately never uses resolveBrowserCard's active/first-card fallback.
   const browserToolRunBindings = new Map();
+  const browserToolUserSelections = new Map();
   const browserToolCancelledRuns = new Map();
   const browserToolRequestReceipts = new Map();
   const browserToolCardLeases = new Map();
+  const browserToolActionLeases = new Map();
   let browserToolAuthorityEpoch = 0;
-  function browserToolSelectedSources(threadId) {
+  function registerBrowserToolSelection(threadId, source, permission) {
     const thread = getCodexThreadById(state.codex, threadId);
-    return (thread?.inputSources || []).filter(source => {
+    const clientThreadId = thread && ChatState.clientThreadBinding(thread);
+    if (!['observe', 'interact'].includes(permission) || !source?.browserToolIdentity ||
+        !clientThreadId || browserToolUserSelections.size >= 256) return null;
+    const card = document.getElementById(source.sourceRef?.viewId);
+    if (!card?.isConnected || !card.classList?.contains('egd-browser-card')) return null;
+    try {
+      const current = card._browserControls?.toolBinding?.();
+      if (!current || !browserToolSameUrl(current.url, source.sourceRef.uri) ||
+          current.profileId !== source.sourceRef.profileId || current.accountId !== source.sourceRef.accountId ||
+          ['cardEpoch', 'userContextId', 'engineAccountKey', 'authorityEpoch'].some(field =>
+            current[field] !== source.browserToolIdentity[field])) return null;
+    } catch { return null; }
+    const token = chatBindingNonce();
+    const selected = { ...source, selectedByUser: true, browserToolPermission: permission,
+      browserToolSelection: { token, threadId: clientThreadId } };
+    browserToolUserSelections.set(token, {
+      token, threadId: clientThreadId, localThreadId: threadId,
+      sourceId: selected.id, cardId: selected.sourceRef.viewId,
+      cardEpoch: selected.browserToolIdentity.cardEpoch,
+      profileId: selected.sourceRef.profileId, accountId: selected.sourceRef.accountId,
+      selectedUrl: selected.sourceRef.uri, userContextId: selected.browserToolIdentity.userContextId,
+      engineAccountKey: selected.browserToolIdentity.engineAccountKey,
+      authorityEpoch: selected.browserToolIdentity.authorityEpoch,
+      permission, usedRunId: null,
+    });
+    return selected;
+  }
+  function browserToolSelectedSources(threadId, candidates = null) {
+    const thread = getCodexThreadById(state.codex, threadId);
+    const clientThreadId = thread && ChatState.clientThreadBinding(thread);
+    return (candidates || thread?.inputSources || []).filter(source => {
       if (source.kind !== 'browser' || source.selectedByUser !== true ||
           !['observe', 'interact'].includes(source.browserToolPermission)) return false;
+      const selection = browserToolUserSelections.get(source.browserToolSelection?.token);
+      if (!selection || !clientThreadId || selection.localThreadId !== threadId ||
+          selection.threadId !== clientThreadId || source.browserToolSelection?.threadId !== clientThreadId ||
+          selection.usedRunId ||
+          selection.sourceId !== source.id || selection.permission !== source.browserToolPermission) return false;
       const card = document.getElementById(source.sourceRef?.viewId);
       if (!card?.isConnected || !card.classList?.contains('egd-browser-card')) return false;
       try {
         const current = card._browserControls?.toolBinding?.();
-        return current && current.url === source.sourceRef.uri &&
+        return current && browserToolSameUrl(current.url, source.sourceRef.uri) &&
           current.profileId === source.sourceRef.profileId && current.accountId === source.sourceRef.accountId &&
           current.cardEpoch === source.browserToolIdentity?.cardEpoch &&
           current.userContextId === source.browserToolIdentity?.userContextId &&
@@ -9517,6 +9569,36 @@
       } catch { return false; }
     }).map(source => structuredClone(source));
   }
+  function browserToolSameUrl(left, right) {
+    try { return new URL(left).href === new URL(right).href }
+    catch { return false; }
+  }
+  function browserToolSafeNavigationUrl(value) {
+    if (typeof value !== 'string' || !value || value.length > 2048 || /[\u0000-\u0020\u007f]/.test(value)) return false;
+    try {
+      const parsed = new URL(value);
+      return ['http:', 'https:'].includes(parsed.protocol) && !parsed.username && !parsed.password;
+    } catch { return false; }
+  }
+  function browserToolAuthorizePhysicalAction({ browser, browsingContext, windowGlobal,
+    leaseId, requestId, deadlineMs, actionType, actionRef, actionUrl }) {
+    const lease = browserToolActionLeases.get(leaseId);
+    if (!lease || lease.authorized || lease.requestId !== requestId || lease.deadlineMs !== deadlineMs ||
+        Date.now() >= deadlineMs || browser !== lease.browser || browsingContext !== lease.browsingContext ||
+        windowGlobal !== lease.windowGlobal || browserToolRunBindings.get(lease.key) !== lease.bound ||
+        browserToolCancelledRuns.has(lease.key) || browserToolCardLeases.get(lease.cardEpoch) !== requestId ||
+        !lease.card.isConnected || lease.card._browserControls?.toolBrowser?.() !== browser ||
+        lease.bound.permission !== 'interact' ||
+        browserToolUserSelections.get(lease.bound.selectionToken)?.usedRunId !== lease.runId ||
+        actionType !== lease.actionType || actionRef !== lease.actionRef || actionUrl !== lease.actionUrl) return false;
+    try {
+      const current = lease.card._browserControls.toolBinding();
+      if (['cardId', 'cardEpoch', 'profileId', 'accountId', 'userContextId', 'engineAccountKey', 'authorityEpoch']
+        .some(field => current[field] !== lease.bound.binding[field])) return false;
+    } catch { return false; }
+    lease.authorized = true;
+    return true;
+  }
   async function browserToolDispatchOnce(request) {
     const requestId = request?.requestId;
     const fail = (error) => ({ requestId, status: 'rejected',
@@ -9524,6 +9606,7 @@
     try {
       if (request?.version !== 1 || typeof requestId !== 'string' || !requestId ||
           typeof request.runId !== 'string' || !request.runId ||
+          typeof request.clientThreadId !== 'string' || !request.clientThreadId ||
           typeof request.cardId !== 'string' || !request.cardId ||
           typeof request.targetCardEpoch !== 'string' || !request.targetCardEpoch ||
           !Number.isSafeInteger(request.deadlineMs) || request.deadlineMs <= Date.now() ||
@@ -9533,7 +9616,18 @@
         if (deadline < Date.now()) browserToolCancelledRuns.delete(cancelledKey);
       }
       if (request.kind === 'cancel') {
+        const bound = browserToolRunBindings.get(key);
+        if (bound && bound.clientThreadId !== request.clientThreadId) throw new Error('Browser cancel belongs to another Chat');
         browserToolRunBindings.delete(key);
+        for (const [leaseId, lease] of browserToolActionLeases) {
+          if (lease.key === key) browserToolActionLeases.delete(leaseId);
+        }
+        if (bound?.selectionToken) browserToolUserSelections.delete(bound.selectionToken);
+        const pendingSelection = browserToolUserSelections.get(request.selectionToken);
+        if (pendingSelection?.threadId === request.clientThreadId &&
+            pendingSelection.cardId === request.cardId && pendingSelection.cardEpoch === request.targetCardEpoch) {
+          browserToolUserSelections.delete(request.selectionToken);
+        }
         browserToolCancelledRuns.set(key, request.deadlineMs);
         return { requestId, status: 'cancelled' };
       }
@@ -9547,23 +9641,32 @@
       if (request.kind === 'bind') {
         const selection = request.selection;
         const current = card._browserControls.toolBinding();
+        const selectedByUser = browserToolUserSelections.get(selection?.selectionToken);
         if (browserToolRunBindings.has(key)) throw new Error('Browser run is already bound');
         if (!ChatState.knownCodexAccountKey(current.engineAccountKey)) throw new Error('Current Engine account is unverified');
         if (!selection || selection.cardId !== card.id || selection.profileId !== current.profileId ||
-            selection.accountId !== current.accountId || selection.selectedUrl !== current.url ||
+            selection.accountId !== current.accountId || !browserToolSameUrl(selection.selectedUrl, current.url) ||
             selection.cardEpoch !== current.cardEpoch || selection.userContextId !== current.userContextId ||
             selection.engineAccountKey !== current.engineAccountKey || selection.authorityEpoch !== current.authorityEpoch ||
-            !['observe', 'interact'].includes(selection.permission)) {
+            !['observe', 'interact'].includes(selection.permission) || !selectedByUser ||
+            selectedByUser.usedRunId || selectedByUser.threadId !== request.clientThreadId ||
+            selection.clientThreadId !== request.clientThreadId ||
+            ['cardId', 'cardEpoch', 'profileId', 'accountId', 'selectedUrl', 'userContextId',
+              'engineAccountKey', 'authorityEpoch', 'permission', 'sourceId'].some(field =>
+              selectedByUser[field] !== selection[field])) {
           throw new Error('Selected Browser Card, profile, account or URL changed');
         }
         const live = await card._browserControls.toolObserve(current, { textLimit: 1, elementLimit: 1 });
-        if (live.url !== selection.selectedUrl || browserToolCancelledRuns.has(key) ||
+        if (!browserToolSameUrl(live.url, selection.selectedUrl) || browserToolCancelledRuns.has(key) ||
+            browserToolUserSelections.get(selection.selectionToken) !== selectedByUser || selectedByUser.usedRunId ||
             request.deadlineMs <= Date.now()) throw new Error('Selected Browser document changed before binding');
-        browserToolRunBindings.set(key, { binding: current, permission: selection.permission });
+        selectedByUser.usedRunId = request.runId;
+        browserToolRunBindings.set(key, { binding: current, permission: selection.permission,
+          clientThreadId: request.clientThreadId, selectionToken: selection.selectionToken });
         return { requestId, status: 'bound', binding: current };
       }
       const authorized = browserToolRunBindings.get(key);
-      if (!authorized || !request.binding ||
+      if (!authorized || authorized.clientThreadId !== request.clientThreadId || !request.binding ||
           ['cardId', 'cardEpoch', 'profileId', 'accountId', 'userContextId', 'engineAccountKey', 'authorityEpoch'].some(field =>
             authorized.binding[field] !== request.binding[field])) throw new Error('Browser run binding is missing or changed');
       const current = card._browserControls.toolBinding();
@@ -9583,11 +9686,31 @@
           (request.action.type !== 'navigate' && (!request.action.ref || request.action.selector))) {
         throw new Error('Unsupported or unguarded Browser action');
       }
+      if (request.action.type === 'navigate' && !browserToolSafeNavigationUrl(request.action.url)) {
+        throw new Error('Browser navigation requires an absolute http(s) URL without credentials');
+      }
       if (browserToolCardLeases.has(request.targetCardEpoch)) throw new Error('Browser Card is already being operated');
       browserToolCardLeases.set(request.targetCardEpoch, requestId);
+      const browser = card._browserControls.toolBrowser?.();
+      const browsingContext = browser?.browsingContext;
+      const windowGlobal = browsingContext?.currentWindowGlobal;
+      if (!browser || !browsingContext || !windowGlobal) {
+        browserToolCardLeases.delete(request.targetCardEpoch);
+        throw new Error('Browser actor binding is unavailable');
+      }
+      const leaseId = chatBindingNonce();
+      browserToolActionLeases.set(leaseId, { key, bound: authorized, card, browser,
+        browsingContext, windowGlobal, leaseId, requestId, runId: request.runId,
+        cardEpoch: request.targetCardEpoch, deadlineMs: request.deadlineMs,
+        actionType: request.action.type, actionRef: request.action.ref || null,
+        actionUrl: request.action.url || null, authorized: false });
       let receipt;
-      try { receipt = await card._browserControls.toolAct(authorized.binding, request.action, request.guard); }
+      try {
+        receipt = await card._browserControls.toolAct(authorized.binding, request.action, request.guard,
+          { leaseId, requestId, deadlineMs: request.deadlineMs });
+      }
       finally {
+        browserToolActionLeases.delete(leaseId);
         if (browserToolCardLeases.get(request.targetCardEpoch) === requestId) {
           browserToolCardLeases.delete(request.targetCardEpoch);
         }
@@ -9929,15 +10052,42 @@
       const node = agentNodeByRef.get(ref);
       return node?.isConnected ? node : null;
     };
+    const agentComposedParent = (node) => node?.parentElement || node?.getRootNode?.()?.host || null;
     const isAgentVisibleElement = (node) => {
       if (!node?.getBoundingClientRect) return false;
       const rect = node.getBoundingClientRect();
       if (rect.width <= 0 || rect.height <= 0) return false;
-      try {
-        const style = node.ownerDocument?.defaultView?.getComputedStyle?.(node);
-        if (style?.display === 'none' || style?.visibility === 'hidden' || Number(style?.opacity) === 0) return false;
-      } catch {}
+      for (let current = node; current; current = agentComposedParent(current)) {
+        if (current.hidden || current.inert || current.getAttribute?.('aria-hidden') === 'true') return false;
+        try {
+          const style = current.ownerDocument?.defaultView?.getComputedStyle?.(current);
+          if (!style) return false;
+          if (style?.display === 'none' || ['hidden', 'collapse'].includes(style?.visibility) || Number(style?.opacity) === 0) return false;
+        } catch { return false; }
+      }
       return true;
+    };
+    const isAgentSensitiveControl = (node) => {
+      if (node?.isContentEditable) return true;
+      const tag = String(node?.tagName || '').toLowerCase();
+      if (!['input', 'textarea', 'select'].includes(tag)) return false;
+      const type = String(node.type || node.getAttribute?.('type') || '').toLowerCase();
+      const sensitiveFlag = node.getAttribute?.('data-sensitive');
+      const privateFlag = node.getAttribute?.('data-private');
+      if (['password', 'hidden'].includes(type) ||
+          (sensitiveFlag != null && sensitiveFlag !== 'false') ||
+          (privateFlag != null && privateFlag !== 'false')) return true;
+      const hints = ['autocomplete', 'name', 'id', 'aria-label', 'placeholder'].map(key =>
+        String(node.getAttribute?.(key) || (key === 'id' ? node.id : '') || '')
+          .replace(/([a-z0-9])([A-Z])/g, '$1 $2').toLowerCase()).join(' ');
+      if (/password|passwd|passphrase|secret|token|otp|cvv|cvc/.test(hints)) return true;
+      return /(?:^|[\s_-])(?:password|passwd|pwd|passphrase|secret|token|otp|pin|ssn|pan|social[\s_-]?security(?:[\s_-]?number)?|primary[\s_-]?account[\s_-]?number|api[\s_-]?key|access[\s_-]?key|private[\s_-]?key|client[\s_-]?secret|one[\s_-]?time|verification[\s_-]?code|auth[\s_-]?code|security[\s_-]?answer|cc[\s_-]?(?:number|csc|exp)|credit[\s_-]?card(?:[\s_-]?number)?|card[\s_-]?number|cvv|cvc)(?:$|[\s_-])/.test(hints);
+    };
+    const isAgentSensitiveText = (node) => {
+      for (let parent = agentComposedParent(node); parent; parent = agentComposedParent(parent)) {
+        if (parent.isContentEditable || isAgentSensitiveControl(parent)) return true;
+      }
+      return false;
     };
     const agentElementRole = (node) => {
       const explicitRole = node.getAttribute?.('role');
@@ -9957,6 +10107,7 @@
       return tag || 'element';
     };
     const agentElementLabel = (node) => {
+      if (isAgentSensitiveControl(node)) return 'Sensitive field';
       const doc = node.ownerDocument;
       const ariaLabelledBy = node.getAttribute?.('aria-labelledby');
       if (ariaLabelledBy && doc) {
@@ -9971,11 +10122,11 @@
         || node.textContent
         || node.getAttribute?.('name')
         || node.getAttribute?.('id')
-        || node.value
         || '';
       return compactAgentText(label, 120);
     };
     const agentElementValue = (node) => {
+      if (isAgentSensitiveControl(node)) return '';
       const tag = String(node.tagName || '').toLowerCase();
       if (tag === 'select') return compactAgentText(node.selectedOptions?.[0]?.textContent || node.value || '', 120);
       if (tag === 'textarea' || tag === 'input') return compactAgentText(node.value || '', 120);
@@ -9997,7 +10148,7 @@
           const text = compactAgentText(node.nodeValue, 180);
           if (!text || text.length < 2) return nodeFilter.FILTER_REJECT;
           const parent = node.parentElement;
-          if (!parent || !isAgentVisibleElement(parent)) return nodeFilter.FILTER_REJECT;
+          if (!parent || !isAgentVisibleElement(parent) || isAgentSensitiveText(node)) return nodeFilter.FILTER_REJECT;
           return nodeFilter.FILTER_ACCEPT;
         },
       });
@@ -10351,12 +10502,39 @@
           const node = nodeByRef.get(ref);
           return node && node.isConnected ? node : null;
         };
+        const composedParent = (node) => node?.parentElement || node?.getRootNode?.()?.host || null;
         const isVisible = (node) => {
           if (!node || !node.getBoundingClientRect) return false;
           const rect = node.getBoundingClientRect();
           if (rect.width <= 0 || rect.height <= 0) return false;
-          const style = content.getComputedStyle(node);
-          return style.display !== 'none' && style.visibility !== 'hidden' && Number(style.opacity) !== 0;
+          for (let current = node; current; current = composedParent(current)) {
+            if (current.hidden || current.inert || current.getAttribute?.('aria-hidden') === 'true') return false;
+            const style = content.getComputedStyle(current);
+            if (style.display === 'none' || ['hidden', 'collapse'].includes(style.visibility) || Number(style.opacity) === 0) return false;
+          }
+          return true;
+        };
+        const isSensitive = (node) => {
+          if (node?.isContentEditable) return true;
+          const tag = String(node?.tagName || '').toLowerCase();
+          if (!['input', 'textarea', 'select'].includes(tag)) return false;
+          const type = String(node.type || node.getAttribute?.('type') || '').toLowerCase();
+          const sensitiveFlag = node.getAttribute?.('data-sensitive');
+          const privateFlag = node.getAttribute?.('data-private');
+          if (['password', 'hidden'].includes(type) ||
+              (sensitiveFlag != null && sensitiveFlag !== 'false') ||
+              (privateFlag != null && privateFlag !== 'false')) return true;
+          const hints = ['autocomplete', 'name', 'id', 'aria-label', 'placeholder'].map(key =>
+            String(node.getAttribute?.(key) || (key === 'id' ? node.id : '') || '')
+              .replace(/([a-z0-9])([A-Z])/g, '$1 $2').toLowerCase()).join(' ');
+          if (/password|passwd|passphrase|secret|token|otp|cvv|cvc/.test(hints)) return true;
+          return /(?:^|[\\s_-])(?:password|passwd|pwd|passphrase|secret|token|otp|pin|ssn|pan|social[\\s_-]?security(?:[\\s_-]?number)?|primary[\\s_-]?account[\\s_-]?number|api[\\s_-]?key|access[\\s_-]?key|private[\\s_-]?key|client[\\s_-]?secret|one[\\s_-]?time|verification[\\s_-]?code|auth[\\s_-]?code|security[\\s_-]?answer|cc[\\s_-]?(?:number|csc|exp)|credit[\\s_-]?card(?:[\\s_-]?number)?|card[\\s_-]?number|cvv|cvc)(?:$|[\\s_-])/.test(hints);
+        };
+        const isSensitiveText = (node) => {
+          for (let parent = composedParent(node); parent; parent = composedParent(parent)) {
+            if (parent.isContentEditable || isSensitive(parent)) return true;
+          }
+          return false;
         };
         const roleFor = (node) => {
           const explicit = node.getAttribute?.('role');
@@ -10376,6 +10554,7 @@
           return tag || 'element';
         };
         const labelFor = (node) => {
+          if (isSensitive(node)) return 'Sensitive field';
           const doc = node.ownerDocument;
           const labelledBy = node.getAttribute?.('aria-labelledby');
           if (labelledBy) {
@@ -10395,12 +10574,12 @@
               || node.textContent
               || node.getAttribute?.('name')
               || node.getAttribute?.('id')
-              || node.value
               || '',
             120,
           );
         };
         const valueFor = (node) => {
+          if (isSensitive(node)) return '';
           const tag = String(node.tagName || '').toLowerCase();
           if (tag === 'select') return compact(node.selectedOptions?.[0]?.textContent || node.value || '', 120);
           if (tag === 'textarea' || tag === 'input') return compact(node.value || '', 120);
@@ -10417,7 +10596,7 @@
               const text = compact(node.nodeValue, 180);
               if (!text || text.length < 2) return filter.FILTER_REJECT;
               const parent = node.parentElement;
-              if (!parent || !isVisible(parent)) return filter.FILTER_REJECT;
+              if (!parent || !isVisible(parent) || isSensitiveText(node)) return filter.FILTER_REJECT;
               return filter.FILTER_ACCEPT;
             },
           });
@@ -10979,11 +11158,15 @@
       const threadId = state.codex.activeThreadId;
       const source = chatInputSourceForView(card);
       if (!threadId || !source || source.kind !== 'browser') return;
+      const selectedSource = registerBrowserToolSelection(threadId, source, permission);
+      if (!selectedSource && permission === 'interact') {
+        boardNotice('Browser 조작 대상을 확인하지 못했습니다. 현재 페이지에서 다시 선택해 주세요.'); return;
+      }
       const existing = getCodexThreadById(state.codex, threadId)?.inputSources?.find(item =>
         item.kind === 'browser' && item.sourceRef?.viewId === card.id);
       if (existing) state.codexBridge.removeInputSource(threadId, existing.id);
       state.codexBridge.addInputSources(threadId,
-        [{ ...source, selectedByUser: true, browserToolPermission: permission }]);
+        [selectedSource || { ...source, selectedByUser: true, browserToolPermission: 'observe' }]);
       showAgentActivity(permission === 'interact'
         ? '이번 Chat 조작 대상으로 선택됨' : '이번 Chat 읽기 자료로 선택됨');
     };
@@ -11071,7 +11254,7 @@
       showAgentActivity('이 Browser 관찰 완료');
       return { cardId: card.id, ...snapshot };
     };
-    const browserToolAct = async (expected, action, guard) => {
+    const browserToolAct = async (expected, action, guard, lease) => {
       assertBrowserToolBinding(expected);
       const context = xulBrowser.browsingContext;
       const windowGlobal = context.currentWindowGlobal;
@@ -11081,7 +11264,7 @@
       let result;
       try {
         result = await browserAgentActorRequest('act', {
-          action, options: { guard, settleMs: 150, snapshot: { textLimit: 60, elementLimit: 80 } },
+          action, options: { guard, lease, settleMs: 150, snapshot: { textLimit: 60, elementLimit: 80 } },
         });
       } catch (error) { showAgentActivity('조작 결과 미확인 · 다시 관찰 필요'); throw error; }
       assertBrowserToolBinding(expected);
@@ -11116,6 +11299,7 @@
       agentClearHistory: clearBrowserAgentHistory,
       agentDebug: browserAgentDebug,
       toolBinding: browserToolBinding,
+      toolBrowser: () => xulBrowser,
       toolObserve: browserToolObserve,
       toolAct: browserToolAct,
     };
@@ -12584,6 +12768,7 @@
           selectedSources: browserToolSelectedSources,
           dispatch: browserToolDispatch,
           attachTransport: attachBrowserToolTransport,
+          authorizePhysicalAction: browserToolAuthorizePhysicalAction,
         },
         sourceRefs: {
           keyFor: sourceRefKey,

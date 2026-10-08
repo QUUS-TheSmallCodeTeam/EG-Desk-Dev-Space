@@ -2,9 +2,10 @@ import assert from 'node:assert/strict'
 import { test } from 'node:test'
 import { BROWSER_TOOL_SPECS, createBrowserToolService } from './egdesk-browser-tool-runtime.mjs'
 
-const run = { answerId: 'answer-1', runId: 'run-1', status: 'inProgress' }
+const run = { answerId: 'answer-1', runId: 'run-1', clientThreadId: 'thread-a', status: 'inProgress' }
 function source(permission = 'interact', cardId = 'browser-1') {
-  return { kind: 'browser', selectedByUser: true, browserToolPermission: permission,
+  return { id: `selected-${cardId}`, kind: 'browser', selectedByUser: true,
+    browserToolPermission: permission, browserToolSelection: { token: `grant-${cardId}`, threadId: 'thread-a' },
     browserToolIdentity: { cardEpoch: 'card-epoch-1', userContextId: 0,
       engineAccountKey: 'codex:chatgpt:fixture@example.test', authorityEpoch: 0 },
     sourceRef: { viewId: cardId, profileId: 'firefox-default', accountId: 'fixture-account', uri: 'https://example.test/local' } }
@@ -20,6 +21,8 @@ function fixture(permission = 'interact') {
   let owner = 'engine-account-1'
   let current = snapshot()
   let actionCalls = 0
+  let navigationAfterNull = false
+  let clickNavigationUrl = null
   const requests = []
   const sendToUi = async request => {
     requests.push(request)
@@ -32,13 +35,20 @@ function fixture(permission = 'interact') {
       actionCalls++
       assert.equal(request.guard.documentId, current.documentId)
       assert.equal(request.guard.revision, current.revision)
-      if (request.action.type === 'click') current = snapshot(4, { text: ['Count: 1'] })
+      if (request.action.type === 'click') current = clickNavigationUrl
+        ? snapshot(4, { url: new URL(clickNavigationUrl).href, documentId: 'document-2',
+          readyState: 'complete', text: ['Arrived'] })
+        : snapshot(4, { text: ['Count: 1'] })
       if (request.action.type === 'fill') current = snapshot(4, { interactiveElements: [
         { ...current.interactiveElements[0], value: request.action.text, role: 'textbox', tag: 'input' }] })
-      if (request.action.type === 'navigate') current = snapshot(4, { url: request.action.url })
+      if (request.action.type === 'navigate') current = snapshot(4, {
+        url: new URL(request.action.url).href, documentId: 'document-2', readyState: 'complete',
+      })
       return { requestId: request.requestId, status: 'acted',
         receipt: { dispatchReceipt: { actor: 'JSWindowActor', eventDispatched: true },
-          after: current, observation: { visibleTextChanged: request.action.type === 'click' } } }
+          after: (navigationAfterNull && request.action.type === 'navigate') ||
+            (clickNavigationUrl && request.action.type === 'click') ? null : current,
+          observation: { visibleTextChanged: request.action.type === 'click' } } }
     }
     throw new Error('unexpected UI request')
   }
@@ -48,6 +58,8 @@ function fixture(permission = 'interact') {
   service.dispatch = (boundRun, event) => nativeDispatch(boundRun,
     { ...event, callId: event.callId || `fixture-call-${++callSequence}` })
   return { service, requests, setOwner: value => { owner = value }, setSnapshot: value => { current = value },
+    setNavigationAfterNull: value => { navigationAfterNull = value },
+    setClickNavigation: value => { clickNavigationUrl = value },
     get actionCalls() { return actionCalls }, permission }
 }
 
@@ -55,6 +67,8 @@ test('only explicitly selected Browser sources expose tools; read-only never gra
   const f = fixture('observe')
   assert.equal(f.service.specs().length, 0)
   assert.throws(() => f.service.prepare({ selectedSources: [{ ...source('observe'), selectedByUser: false }] }),
+    { code: 'INVALID_BROWSER_SELECTION' })
+  assert.throws(() => f.service.prepare({ selectedSources: [{ ...source('observe'), browserToolSelection: null }] }),
     { code: 'INVALID_BROWSER_SELECTION' })
   const prepared = f.service.prepare({ selectedSources: [source('observe')] })
   assert.deepEqual(f.service.specs(prepared).map(item => item.name), ['egdesk_browser_observe'])
@@ -108,6 +122,24 @@ test('duplicate native call IDs share one action receipt and cannot change paylo
   assert.equal(f.actionCalls, 1)
 })
 
+test('cached native call result is inaccessible after cancellation or Engine account switch', async () => {
+  for (const invalidation of ['cancel', 'account']) {
+    const f = fixture()
+    await f.service.bind(run, f.service.prepare({ selectedSources: [source()] }))
+    const observed = await f.service.dispatch(run, { tool: 'egdesk_browser_observe', arguments: { cardId: 'browser-1' } })
+    const event = { callId: 'same-native-call', tool: 'egdesk_browser_click', arguments: {
+      cardId: 'browser-1', observationId: observed.observationId, expectedRevision: 3,
+      ref: 'el_1', expectedTarget: observed.snapshot.interactiveElements[0],
+      postcondition: { kind: 'visible-text', value: 'Count: 1' },
+    } }
+    assert.equal((await f.service.dispatch(run, event)).status, 'postcondition-observed')
+    if (invalidation === 'cancel') await f.service.cancelRun(run)
+    else f.setOwner('engine-account-2')
+    await assert.rejects(f.service.dispatch(run, event), { code: 'BROWSER_RUN_ENDED' })
+    assert.equal(f.actionCalls, 1)
+  }
+})
+
 test('wrong Card, target mismatch, stale revision and malformed URL never reach UI action', async () => {
   const f = fixture()
   await f.service.bind(run, f.service.prepare({ selectedSources: [source()] }))
@@ -146,6 +178,59 @@ test('account change and cancellation invalidate pending or later Browser action
     { code: 'BROWSER_RUN_ENDED' })
 })
 
+test('cancel during pending UI bind sends tombstone and forbids late bind, observe and rebind', async () => {
+  const requests = []
+  let releaseBind
+  const service = createBrowserToolService({ getOwnerKey: () => 'engine-account-1', sendToUi: request => {
+    requests.push(request)
+    if (request.kind === 'bind') return new Promise(resolve => { releaseBind = resolve })
+    return { requestId: request.requestId, status: 'cancelled' }
+  } })
+  const prepared = service.prepare({ selectedSources: [source()] })
+  const binding = service.bind(run, prepared)
+  await Promise.resolve(); await Promise.resolve()
+  assert.equal(typeof releaseBind, 'function')
+  await service.cancelRun(run)
+  assert(requests.some(request => request.kind === 'cancel' &&
+    request.selectionToken === 'grant-browser-1'), 'cancel must tombstone the selected Card even before binding is stored')
+  const original = requests.find(request => request.kind === 'bind')
+  releaseBind({ requestId: original.requestId, status: 'bound', binding: {
+    cardId: 'browser-1', cardEpoch: 'card-epoch-1', profileId: 'firefox-default',
+    accountId: 'fixture-account', userContextId: 0, url: 'https://example.test/local',
+    engineAccountKey: 'codex:chatgpt:fixture@example.test', authorityEpoch: 0,
+  } })
+  await assert.rejects(binding, { code: 'BROWSER_RUN_ENDED' })
+  await assert.rejects(service.dispatch(run, { tool: 'egdesk_browser_observe', callId: 'later-call',
+    arguments: { cardId: 'browser-1' } }), { code: 'BROWSER_RUN_ENDED' })
+  await assert.rejects(service.bind(run, prepared), { code: 'BROWSER_RUN_ENDED' })
+  assert.equal(requests.filter(request => request.kind === 'bind').length, 1)
+})
+
+test('Engine owner switch during pending bind sends UI cancel and never stores binding', async () => {
+  let owner = 'engine-account-1', releaseBind
+  const requests = []
+  const service = createBrowserToolService({ getOwnerKey: () => owner, sendToUi: request => {
+    requests.push(request)
+    if (request.kind === 'bind') return new Promise(resolve => { releaseBind = resolve })
+    return { requestId: request.requestId, status: 'cancelled' }
+  } })
+  const prepared = service.prepare({ selectedSources: [source()] })
+  const pending = service.bind(run, prepared)
+  await Promise.resolve(); await Promise.resolve()
+  owner = 'engine-account-2'
+  releaseBind({ requestId: requests[0].requestId, status: 'bound', binding: {
+    cardId: 'browser-1', cardEpoch: 'card-epoch-1', profileId: 'firefox-default',
+    accountId: 'fixture-account', userContextId: 0, url: 'https://example.test/local',
+    engineAccountKey: 'codex:chatgpt:fixture@example.test', authorityEpoch: 0,
+  } })
+  await assert.rejects(pending, { code: 'BROWSER_OWNER_CHANGED' })
+  assert(requests.some(request => request.kind === 'cancel'))
+  await assert.rejects(service.dispatch(run, { tool: 'egdesk_browser_observe', callId: 'later-call',
+    arguments: { cardId: 'browser-1' } }), { code: 'BROWSER_RUN_ENDED' })
+  owner = 'engine-account-1'
+  await assert.rejects(service.bind(run, prepared), { code: 'BROWSER_RUN_ENDED' })
+})
+
 test('navigate and fill return scoped receipts and force a fresh observation for each action', async () => {
   const navigating = fixture()
   await navigating.service.bind(run, navigating.service.prepare({ selectedSources: [source()] }))
@@ -173,6 +258,19 @@ test('navigate and fill return scoped receipts and force a fresh observation for
   assert.equal(filled.after.interactiveElements[0].value, 'local note')
 })
 
+test('URL postcondition compares canonical browser URLs including normalized trailing slash', async () => {
+  const f = fixture()
+  await f.service.bind(run, f.service.prepare({ selectedSources: [source()] }))
+  const before = await f.service.dispatch(run, { tool: 'egdesk_browser_observe', arguments: { cardId: 'browser-1' } })
+  const result = await f.service.dispatch(run, { tool: 'egdesk_browser_navigate', arguments: {
+    cardId: 'browser-1', observationId: before.observationId, expectedRevision: 3,
+    url: 'https://example.com', postcondition: { kind: 'url', value: 'https://example.com' },
+  } })
+  assert.equal(result.status, 'postcondition-observed')
+  assert.equal(result.after.url, 'https://example.com/')
+  assert.equal(result.externalEffectVerified, false)
+})
+
 test('unmet postcondition permits read-only re-observation but blocks blind retry', async () => {
   const f = fixture()
   await f.service.bind(run, f.service.prepare({ selectedSources: [source()] }))
@@ -188,4 +286,76 @@ test('unmet postcondition permits read-only re-observation but blocks blind retr
     expectedTarget: reobserved.snapshot.interactiveElements[0],
   } }), { code: 'BROWSER_OUTCOME_UNKNOWN' })
   assert.equal(f.actionCalls, 1)
+})
+
+test('new-document re-observation resolves navigation uncertainty without external-effect claim', async () => {
+  const f = fixture()
+  f.setNavigationAfterNull(true)
+  await f.service.bind(run, f.service.prepare({ selectedSources: [source()] }))
+  const before = await f.service.dispatch(run, { tool: 'egdesk_browser_observe', arguments: { cardId: 'browser-1' } })
+  const destination = 'http://127.0.0.1:18181/next'
+  const navigation = await f.service.dispatch(run, { tool: 'egdesk_browser_navigate', arguments: {
+    cardId: 'browser-1', observationId: before.observationId, expectedRevision: 3,
+    url: destination, postcondition: { kind: 'url', value: destination },
+  } })
+  assert.equal(navigation.status, 'postcondition-unverified')
+  assert.equal(navigation.pageLoadVerified, false)
+  const after = await f.service.dispatch(run, { tool: 'egdesk_browser_observe', arguments: { cardId: 'browser-1' } })
+  assert.equal(after.navigationPostconditionReobserved, true)
+  assert.equal(after.snapshot.documentId, 'document-2')
+  assert.equal(after.snapshot.url, destination)
+  assert.equal(after.externalEffectVerified, false)
+  const click = await f.service.dispatch(run, { tool: 'egdesk_browser_click', arguments: {
+    cardId: 'browser-1', observationId: after.observationId, expectedRevision: 4,
+    ref: 'el_1', expectedTarget: after.snapshot.interactiveElements[0],
+    postcondition: { kind: 'visible-text', value: 'Count: 1' },
+  } })
+  assert.equal(click.status, 'postcondition-observed', 'fresh re-observation restores a safe action path')
+  assert.equal(click.externalEffectVerified, false)
+})
+
+test('click-caused full document navigation recovers from after:null on fresh canonical URL observation', async () => {
+  const f = fixture()
+  f.setClickNavigation('https://example.com')
+  await f.service.bind(run, f.service.prepare({ selectedSources: [source()] }))
+  const before = await f.service.dispatch(run, { tool: 'egdesk_browser_observe', arguments: { cardId: 'browser-1' } })
+  const click = await f.service.dispatch(run, { tool: 'egdesk_browser_click', arguments: {
+    cardId: 'browser-1', observationId: before.observationId, expectedRevision: 3,
+    ref: 'el_1', expectedTarget: before.snapshot.interactiveElements[0],
+    postcondition: { kind: 'url', value: 'https://example.com' },
+  } })
+  assert.equal(click.status, 'postcondition-unverified')
+  assert.equal(click.after, null)
+  const after = await f.service.dispatch(run, { tool: 'egdesk_browser_observe', arguments: { cardId: 'browser-1' } })
+  assert.equal(after.snapshot.url, 'https://example.com/')
+  assert.equal(after.documentTransitionPostconditionReobserved, true)
+  assert.equal(after.navigationPostconditionReobserved, false)
+  assert.equal(after.externalEffectVerified, false)
+  const next = await f.service.dispatch(run, { tool: 'egdesk_browser_navigate', arguments: {
+    cardId: 'browser-1', observationId: after.observationId, expectedRevision: 4,
+    url: 'https://example.com/next', postcondition: { kind: 'url', value: 'https://example.com/next' },
+  } })
+  assert.equal(next.status, 'postcondition-observed')
+  assert.equal(next.externalEffectVerified, false)
+})
+
+test('navigation to a different final URL remains interaction-uncertain after observation', async () => {
+  const f = fixture()
+  f.setNavigationAfterNull(true)
+  await f.service.bind(run, f.service.prepare({ selectedSources: [source()] }))
+  const before = await f.service.dispatch(run, { tool: 'egdesk_browser_observe', arguments: { cardId: 'browser-1' } })
+  const destination = 'http://127.0.0.1:18181/expected'
+  await f.service.dispatch(run, { tool: 'egdesk_browser_navigate', arguments: {
+    cardId: 'browser-1', observationId: before.observationId, expectedRevision: 3,
+    url: destination, postcondition: { kind: 'url', value: destination },
+  } })
+  f.setSnapshot(snapshot(4, { documentId: 'document-2', readyState: 'complete',
+    url: 'http://127.0.0.1:18181/unexpected' }))
+  const observed = await f.service.dispatch(run, { tool: 'egdesk_browser_observe', arguments: { cardId: 'browser-1' } })
+  assert.equal(observed.navigationPostconditionReobserved, false)
+  await assert.rejects(f.service.dispatch(run, { tool: 'egdesk_browser_click', arguments: {
+    cardId: 'browser-1', observationId: observed.observationId, expectedRevision: 4,
+    ref: 'el_1', expectedTarget: observed.snapshot.interactiveElements[0],
+    postcondition: { kind: 'visible-text', value: 'Count: 1' },
+  } }), { code: 'BROWSER_OUTCOME_UNKNOWN' })
 })
