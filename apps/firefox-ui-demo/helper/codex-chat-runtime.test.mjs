@@ -151,7 +151,7 @@ test('same EG-Desk QA Run publishes only an exact nonce line from native command
   assert.equal(proof.runId, run.runId)
   assert.equal(proof.details.nativeItemId, 'native-command-1')
   assert.equal(proof.details.exitCode, 0)
-  assert.equal(proof.details.status, 'verified')
+  assert.equal(proof.details.status, 'marker-witness')
   assert.deepEqual(proof.details.markerLines, [nonce])
   assert.equal(proof.details.outputStream, 'aggregated-stdout-stderr')
   assert.equal(proof.details.originalProviderId, 'codex-native')
@@ -176,7 +176,7 @@ test('two explicit QA markers map to distinct actual native command items in one
   for (const item of commands) await h.item(run, item)
   const receipts = h.events.filter(event => event.event === 'qa.command.receipt')
   assert.equal(receipts.length, 2)
-  assert.ok(receipts.every(event => event.runId === run.runId && event.requestId === run.requestId && event.details.status === 'verified'))
+  assert.ok(receipts.every(event => event.runId === run.runId && event.requestId === run.requestId && event.details.status === 'marker-witness'))
   assert.deepEqual(receipts.map(event => [event.details.nativeItemId, event.details.markerLines]), [
     ['native-read-item', [fileNonce]], ['native-harmless-item', [commandTag]],
   ])
@@ -208,6 +208,7 @@ test('early or foreign native command output cannot fabricate a QA receipt', asy
   const invalid = qaHarness()
   await assert.rejects(invalid.chat.send({ message: 'Duplicate markers', executionPolicy: { mode: 'readOnlyQa' }, qaOutputMarkers: [nonce, nonce] }), error => error.code === 'INVALID_QA_OUTPUT_MARKERS')
   await assert.rejects(invalid.chat.send({ message: 'Conflicting contracts', executionPolicy: { mode: 'readOnlyQa' }, qaOutputMarkers: [nonce], qaCommandNonce: nonce }), error => error.code === 'INVALID_QA_OUTPUT_MARKERS')
+  await assert.rejects(invalid.chat.send({ message: `Spoiled private fixture ${nonce}`, executionPolicy: { mode: 'readOnlyQa' }, qaOutputMarkers: [nonce, 'EGDESK_COMMAND_TAG_89ac5217'] }), error => error.code === 'QA_PRIVATE_MARKER_SPOILED')
   assert.deepEqual(invalid.calls, [])
 })
 
@@ -298,15 +299,17 @@ test('Browser specs are pre-registered so a later selected Card uses the same na
   const first = await h.chat.send({ message: 'ordinary first' })
   assert.deepEqual(h.calls.find(call => call.method === 'thread/start').params.dynamicTools.map(spec => spec.name), browser.specs().map(spec => spec.name))
   await h.finish(first)
-  const second = await h.chat.send({ message: 'Use selected Card', conversationId: first.conversationId, executionPolicy: { mode: 'browserBounded' }, selectedSources: [{ cardId: 'card-1', permission: 'interact' }], browserTransportId: 'ui-1' })
+  const second = await h.chat.send({ message: 'Observe selected Card', conversationId: first.conversationId, executionPolicy: { mode: 'browserBounded' }, selectedSources: [{ cardId: 'card-1', permission: 'observe' }], browserTransportId: 'ui-1' })
   assert.equal(second.conversationId, first.conversationId)
   assert.equal(second.executionPolicy.mode, 'browserBounded')
-  assert.equal(second.executionPolicy.browserEffects, 'per-run-selected-card')
+  assert.equal(second.executionPolicy.browserEffects, 'observe-only-selected-card')
   assert.equal(h.calls.find(call => call.method === 'thread/resume').params.sandbox, 'read-only')
   assert.deepEqual(h.calls.filter(call => call.method === 'turn/start')[1].params.sandboxPolicy, { type: 'readOnly', networkAccess: false })
-  assert.equal(h.chat.snapshot(second.conversationId).runs.at(-1).browserBinding.cards[0].permission, 'interact')
-  await h.chat.handleServerRequest({ id: 'browser-call', method: 'item/tool/call', params: { threadId: second.conversationId, turnId: second.runId, callId: 'call-1', tool: 'egdesk_browser_click', arguments: { cardId: 'card-1' } } })
+  assert.equal(h.chat.snapshot(second.conversationId).runs.at(-1).browserBinding.cards[0].permission, 'observe')
+  await h.chat.handleServerRequest({ id: 'browser-call', method: 'item/tool/call', params: { threadId: second.conversationId, turnId: second.runId, callId: 'call-1', tool: 'egdesk_browser_observe', arguments: { cardId: 'card-1' } } })
   assert.equal(h.replies[0][1].success, true)
+  await h.chat.handleServerRequest({ id: 'browser-click-forbidden', method: 'item/tool/call', params: { threadId: second.conversationId, turnId: second.runId, callId: 'call-2', tool: 'egdesk_browser_click', arguments: { cardId: 'card-1' } } })
+  assert.equal(h.replies[1][2].code, -32601)
 })
 
 test('QA Browser catalog and dispatch remain observe-only despite an interaction-capable provider', async () => {
@@ -320,6 +323,31 @@ test('QA Browser catalog and dispatch remain observe-only despite an interaction
   assert.deepEqual(h.calls.find(call => call.method === 'thread/start').params.dynamicTools.map(spec => spec.name), ['egdesk_browser_observe'])
   await h.chat.handleServerRequest({ id: 'click', method: 'item/tool/call', params: { threadId: run.conversationId, turnId: run.runId, callId: 'call-click', tool: 'egdesk_browser_click', arguments: {} } })
   assert.equal(h.replies[0][2].code, -32601)
+})
+
+test('fixtureBrowserQa starts a new narrowed native catalog and never exposes navigate or output-publish tools', async () => {
+  const contexts = { specs: () => ['egdesk_list_context', 'egdesk_read_source', 'egdesk_capture_output', 'egdesk_publish_briefing'].map(name => ({ type: 'function', name, description: name, inputSchema: {} })), prepare: async () => null }
+  const browser = { providerId: 'egdesk-browser', specs: () => ['egdesk_browser_observe', 'egdesk_browser_navigate', 'egdesk_browser_click', 'egdesk_browser_fill'].map(name => ({ type: 'function', name, description: name, inputSchema: {} })),
+    prepare: async body => body.selectedSources?.length ? { selected: true } : null,
+    dispatch: async () => ({ success: true, contentItems: [{ type: 'inputText', text: 'fixture' }] }) }
+  const h = qaHarness({ contexts, toolProviders: [browser] })
+  const run = await h.chat.send({ message: 'Use only the owned local QA fixture', executionPolicy: { mode: 'fixtureBrowserQa' }, selectedSources: [{ id: 'source-1' }], clientThreadId: 'ui-fixture' })
+  assert.deepEqual(h.calls.find(call => call.method === 'thread/start').params.dynamicTools.map(spec => spec.name), [
+    'egdesk_list_context', 'egdesk_read_source', 'egdesk_browser_observe', 'egdesk_browser_click', 'egdesk_browser_fill',
+  ])
+  assert.equal(run.executionPolicy.browserEffects, 'attested-local-fixture-only')
+  assert.deepEqual(h.calls.find(call => call.method === 'turn/start').params.sandboxPolicy, { type: 'readOnly', networkAccess: false })
+  await h.chat.handleServerRequest({ id: 'forbidden-navigate', method: 'item/tool/call', params: { threadId: run.conversationId, turnId: run.runId, callId: 'call-nav', tool: 'egdesk_browser_navigate', arguments: {} } })
+  assert.equal(h.replies[0][2].code, -32601)
+})
+
+test('fixtureBrowserQa cannot upgrade an ordinary native thread with a broader persisted tool catalog', async () => {
+  const h = qaHarness()
+  const ordinary = await h.chat.send({ message: 'ordinary' })
+  await h.finish(ordinary)
+  const before = h.calls.filter(call => call.method === 'turn/start').length
+  await assert.rejects(h.chat.send({ message: 'fixture', conversationId: ordinary.conversationId, executionPolicy: { mode: 'fixtureBrowserQa' } }), error => error.code === 'FIXTURE_QA_NEW_CONVERSATION_REQUIRED')
+  assert.equal(h.calls.filter(call => call.method === 'turn/start').length, before)
 })
 
 test('durable QA policy survives a fresh runtime and is reverified before its next provider turn', async () => {
@@ -991,6 +1019,19 @@ test('foreign turn/completed and tool calls on an owned thread cannot create or 
   assert.equal(state.runs[0].status, 'inProgress')
   assert.equal(JSON.stringify({ state, events: h.events }).includes('foreign-answer'), false)
   assert.equal(h.replies[0][2].code, -32601)
+})
+
+test('late dynamic call on a completed owned Run gets an immediate RPC error and no pending callback', async () => {
+  let dispatched = 0
+  const provider = { specs: () => [{ type: 'function', name: 'egdesk_late_tool', description: 'late', inputSchema: {} }], dispatch: async () => { dispatched++; return { success: true, contentItems: [] } } }
+  const h = harness({ toolProviders: [provider] })
+  const run = await h.chat.send({ message: 'Finish first' })
+  await h.finish(run)
+  await h.chat.handleServerRequest({ id: 'late-rpc', method: 'item/tool/call', params: { threadId: run.conversationId, turnId: run.runId, callId: 'late-call', tool: 'egdesk_late_tool', arguments: {} } })
+  assert.equal(h.replies[0][0], 'late-rpc')
+  assert.equal(h.replies[0][2].code, -32601)
+  assert.equal(h.chat.dynamicRequestProviders.size, 0)
+  assert.equal(dispatched, 0)
 })
 
 test('pending approval IDs become stale after disconnect and are never replay-approved', async () => {

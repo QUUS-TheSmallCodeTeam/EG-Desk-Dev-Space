@@ -5,6 +5,7 @@ import { normalizeNativeAuth, publicAuthIdentityKey } from './codex-auth-state.m
 import { CodexChatRuntime } from './codex-chat-runtime.mjs'
 import { BrowserToolTransport } from './codex-browser-tool-transport.mjs'
 import { createCodexBrowserToolProvider } from './codex-browser-tool-provider.mjs'
+import { fixtureBrowserQaFromEnv } from './codex-browser-fixture-qa.mjs'
 import { classifyPublicToolError } from './codex-tool-errors.mjs'
 import { createChatHttpHandler, guardBridgeRequest, readJsonBody, sendJson, setBridgeCors } from './codex-bridge-http.mjs'
 import { BoundedSseClient } from './codex-bridge-sse.mjs'
@@ -119,7 +120,7 @@ const contextStore = new ImmutableContextStore({
 const nativeReader = new NativeReaderClient({ request: (method, params) => appServerRequest(method, params), respond: nativeRespond, getOwnerKey: () => publicAuthIdentityKey(authState) })
 const contexts = new ContextRuntime({ store: contextStore, reader: nativeReader, getOwnerKey: () => publicAuthIdentityKey(authState), schemaReady: () => nativeCapabilities.schemaMatch && appServerReady })
 const browserTransport = new BrowserToolTransport({ getOwnerKey: () => publicAuthIdentityKey(authState) })
-const browserProvider = createCodexBrowserToolProvider({ transport: browserTransport, getOwnerKey: () => publicAuthIdentityKey(authState), schemaReady: () => nativeCapabilities.qaReadOnly && appServerReady })
+const browserProvider = createCodexBrowserToolProvider({ transport: browserTransport, getOwnerKey: () => publicAuthIdentityKey(authState), schemaReady: () => nativeCapabilities.qaReadOnly && appServerReady, fixtureQa: fixtureBrowserQaFromEnv(process.env) })
 const chat = new CodexChatRuntime({
   request: (method, params) => appServerRequest(method, params),
   respond: nativeRespond,

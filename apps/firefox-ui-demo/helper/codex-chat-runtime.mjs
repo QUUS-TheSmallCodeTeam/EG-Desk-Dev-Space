@@ -1,7 +1,7 @@
 import { createHash, randomUUID } from 'node:crypto'
 import path from 'node:path'
 import { chatError, explicitFileLinks, MAX_TEXT, publicError, publicNetworkContext, publicText, validateChatCwd, verifyLocalFile } from './codex-chat-values.mjs'
-import { READ_ONLY_QA, BROWSER_BOUNDED, requestedExecutionPolicy, listNativeMcpServers, qaThreadOverrides, verifyQaNativeThread, verifyQaMcpIsolation, QA_TURN_OVERRIDES } from './codex-chat-execution-policy.mjs'
+import { READ_ONLY_QA, BROWSER_BOUNDED, FIXTURE_BROWSER_QA, requestedExecutionPolicy, listNativeMcpServers, qaThreadOverrides, verifyQaNativeThread, verifyQaMcpIsolation, QA_TURN_OVERRIDES } from './codex-chat-execution-policy.mjs'
 import { classifyPublicToolError } from './codex-tool-errors.mjs'
 import { specManifestEntries, verifiedManifestOwners } from './codex-native-tool-manifest.mjs'
 import { nativeQaCommandReceipt, validateQaCommandNonce, validateQaOutputMarkers } from './codex-qa-command-receipt.mjs'
@@ -182,7 +182,8 @@ export class CodexChatRuntime {
         const contextRead = provider === this.contexts && ['egdesk_list_context', 'egdesk_read_source'].includes(spec?.name)
         const browser = provider.providerId === 'egdesk-browser' && spec?.name?.startsWith('egdesk_browser_')
         if (policy === READ_ONLY_QA && !contextRead && !(browser && spec.name === 'egdesk_browser_observe')) continue
-        if (policy === BROWSER_BOUNDED && !contextRead && !browser) continue
+        if (policy === BROWSER_BOUNDED && !contextRead && !(browser && spec.name === 'egdesk_browser_observe')) continue
+        if (policy === FIXTURE_BROWSER_QA && !contextRead && !(browser && ['egdesk_browser_observe', 'egdesk_browser_click', 'egdesk_browser_fill'].includes(spec.name))) continue
         const names = spec?.type === 'function' && typeof spec.name === 'string' ? [toolKey(null, spec.name)]
           : spec?.type === 'namespace' && typeof spec.name === 'string' && Array.isArray(spec.tools)
             ? spec.tools.map(tool => tool?.type === 'function' && typeof tool.name === 'string' ? toolKey(spec.name, tool.name) : null)
@@ -554,6 +555,10 @@ export class CodexChatRuntime {
     const qaOutputMarkers = validateQaOutputMarkers(body.qaOutputMarkers)
     if (legacyQaNonce && qaOutputMarkers) throw chatError('INVALID_QA_OUTPUT_MARKERS', 'Choose one QA marker contract per request', 400)
     const qaMarkers = qaOutputMarkers || (legacyQaNonce ? [legacyQaNonce] : null)
+    if (qaOutputMarkers && (body.message.includes(qaOutputMarkers[0]) ||
+        (body.profileEnabled === true && typeof body.systemPrompt === 'string' && body.systemPrompt.includes(qaOutputMarkers[0])))) {
+      throw chatError('QA_PRIVATE_MARKER_SPOILED', 'The first QA fixture marker must be absent from model-visible request text', 400)
+    }
     if (requestedPolicy && !this.qaReady()) throw chatError('QA_POLICY_UNAVAILABLE', 'Bounded execution requires a verified native policy contract', 503)
     if (qaMarkers && requestedPolicy && requestedPolicy !== READ_ONLY_QA) throw chatError('QA_COMMAND_POLICY_REQUIRED', 'Native QA command receipt requires readOnlyQa policy', 400)
     if (body.effort !== undefined && (!idText(body.effort) || !body.effort.trim())) throw chatError('INVALID_EFFORT', 'Invalid reasoning effort')
@@ -609,6 +614,7 @@ export class CodexChatRuntime {
     let acceptedLocal = null
     let boundPolicy = this.threads.get(conversationId)?.executionPolicy || null
     if (!this.store && requestedPolicy && boundPolicy && requestedPolicy !== boundPolicy) throw chatError('POLICY_TRANSITION_FORBIDDEN', 'Start an explicit new conversation to change bounded execution modes', 409)
+    if (!this.store && conversationId && requestedPolicy === FIXTURE_BROWSER_QA && !boundPolicy) throw chatError('FIXTURE_QA_NEW_CONVERSATION_REQUIRED', 'Start an explicit new fixture QA conversation with its narrowed native tool catalog', 409)
     if (!this.store && qaMarkers && (requestedPolicy || boundPolicy) !== READ_ONLY_QA) throw chatError('QA_COMMAND_POLICY_REQUIRED', 'Native QA command receipt requires readOnlyQa policy', 400)
     if (this.store) {
       if (!this.storeHealthy) throw chatError('CHAT_STORE_UNAVAILABLE', 'Local chat history cannot accept this message', 503)
@@ -622,6 +628,7 @@ export class CodexChatRuntime {
         if (conversationId && (!thread || thread.conversationId !== conversationId)) throw chatError('NATIVE_BINDING_MISMATCH', 'Native conversation is not bound to this local chat', 409)
         if (conversationId) boundPolicy = this.assertNativeAccount(clientThreadId, conversationId)
         if (requestedPolicy && boundPolicy && requestedPolicy !== boundPolicy) throw chatError('POLICY_TRANSITION_FORBIDDEN', 'Start an explicit new conversation to change bounded execution modes', 409)
+        if (conversationId && requestedPolicy === FIXTURE_BROWSER_QA && !boundPolicy) throw chatError('FIXTURE_QA_NEW_CONVERSATION_REQUIRED', 'Start an explicit new fixture QA conversation with its narrowed native tool catalog', 409)
         if (qaMarkers && (requestedPolicy || boundPolicy) !== READ_ONLY_QA) throw chatError('QA_COMMAND_POLICY_REQUIRED', 'Native QA command receipt requires readOnlyQa policy', 400)
         if (!thread) thread = this.store.createConversation({ clientThreadId, createdAt: this.now() })
         const localRunId = localId('run', clientThreadId, requestId)
@@ -639,7 +646,7 @@ export class CodexChatRuntime {
           localRunId, localMessageId,
         }
       } catch (error) {
-        if (['REQUEST_CONFLICT', 'CONVERSATION_REQUIRED', 'NATIVE_BINDING_MISMATCH', 'NATIVE_ACCOUNT_MISMATCH', 'NATIVE_ACCOUNT_UNVERIFIED', 'POLICY_TRANSITION_FORBIDDEN', 'QA_COMMAND_POLICY_REQUIRED'].includes(error?.code)) throw error
+        if (['REQUEST_CONFLICT', 'CONVERSATION_REQUIRED', 'NATIVE_BINDING_MISMATCH', 'NATIVE_ACCOUNT_MISMATCH', 'NATIVE_ACCOUNT_UNVERIFIED', 'POLICY_TRANSITION_FORBIDDEN', 'FIXTURE_QA_NEW_CONVERSATION_REQUIRED', 'QA_COMMAND_POLICY_REQUIRED'].includes(error?.code)) throw error
         this.storeHealthy = false
         throw chatError('CHAT_STORE_UNAVAILABLE', 'Local chat history could not save the message; no Codex turn was started', 503)
       }
@@ -764,7 +771,7 @@ export class CodexChatRuntime {
     }
     if (!recorded) throw chatError('NATIVE_ACCOUNT_UNVERIFIED', 'Native account ownership was not recorded', 409)
     if (recorded !== expected) throw chatError('NATIVE_ACCOUNT_MISMATCH', 'This native conversation belongs to a different Codex account', 403)
-    if (executionPolicy !== null && ![READ_ONLY_QA, BROWSER_BOUNDED].includes(executionPolicy)) throw chatError('QA_POLICY_UNVERIFIED', 'Stored native execution policy is unknown', 409)
+    if (executionPolicy !== null && ![READ_ONLY_QA, BROWSER_BOUNDED, FIXTURE_BROWSER_QA].includes(executionPolicy)) throw chatError('QA_POLICY_UNVERIFIED', 'Stored native execution policy is unknown', 409)
     if (browserToolsRegistered) this.browserRegisteredThreads.add(conversationId)
     else this.browserRegisteredThreads.delete(conversationId)
     this.threadToolManifests.set(conversationId, toolManifest)
@@ -810,7 +817,7 @@ export class CodexChatRuntime {
     const overrides = this.threadOverrides(body)
     const policy = context.executionPolicy
     const qa = policy === READ_ONLY_QA
-    const bounded = qa || policy === BROWSER_BOUNDED
+    const bounded = qa || policy === BROWSER_BOUNDED || policy === FIXTURE_BROWSER_QA
     const preparedProviders = new Map()
     for (const provider of this.toolProviders) if (!bounded || provider === this.contexts || provider.providerId === 'egdesk-browser') {
       preparedProviders.set(provider, await this.callProvider(provider, 'prepare', { ...body, effectiveExecutionPolicy: policy }) || null)
@@ -851,7 +858,7 @@ export class CodexChatRuntime {
         if (qa && (!registered || [...registered.keys()].some(name => !readOnlyNames.has(name)))) {
           throw chatError('QA_REQUIRES_NEW_CONVERSATION', 'This thread has unknown or broader dynamic tools; start a new read-only QA conversation', 409)
         }
-        if (policy === BROWSER_BOUNDED && !this.browserRegisteredThreads.has(cid)) throw chatError('BROWSER_TOOLS_UNAVAILABLE', 'This native thread predates Browser tools; keep its history and choose an explicit new conversation', 409)
+        if ([BROWSER_BOUNDED, FIXTURE_BROWSER_QA].includes(policy) && !this.browserRegisteredThreads.has(cid)) throw chatError('BROWSER_TOOLS_UNAVAILABLE', 'This native thread predates Browser tools; keep its history and choose an explicit new conversation', 409)
       }
       for (const provider of preparedProviders.keys()) await this.callProvider(provider, 'requireThread', cid, preparedProviders.get(provider))
       if (epoch !== this.epoch) throw chatError('ACCOUNT_CHANGED', 'Codex account or connection changed', 409)
@@ -1113,7 +1120,7 @@ export class CodexChatRuntime {
     if (this.locks.has(cid) || this.pendingStarts.has(cid)) throw chatError('RUN_STARTING', 'Conversation request is still starting', 409)
     this.locks.add(cid)
     try {
-      const bounded = [READ_ONLY_QA, BROWSER_BOUNDED].includes(boundPolicy)
+      const bounded = [READ_ONLY_QA, BROWSER_BOUNDED, FIXTURE_BROWSER_QA].includes(boundPolicy)
       if (bounded && !this.qaReady()) throw chatError('QA_POLICY_UNAVAILABLE', 'Bounded execution requires a verified native policy contract', 503)
       const qaOverrides = bounded ? qaThreadOverrides(await listNativeMcpServers(this.request, this.loadedThreads.has(cid) ? cid : null)) : {}
       if (bounded && this.loadedThreads.has(cid)) {
@@ -1163,8 +1170,8 @@ export class CodexChatRuntime {
     const run = this.findRun(body)
     if (TERMINAL.has(run.status)) throw chatError('STALE_APPROVAL', 'Run has ended', 409)
     if (body.decision === 'accept' && !this.ownedRuns.has(run)) throw chatError('NATIVE_RUN_UNBOUND', 'This native run has no verified EG-Desk dispatch binding', 409)
-    if (body.decision === 'accept' && ([READ_ONLY_QA, BROWSER_BOUNDED].includes(run.executionPolicy?.mode) ||
-        [READ_ONLY_QA, BROWSER_BOUNDED].includes(this.threads.get(run.conversationId)?.executionPolicy))) {
+    if (body.decision === 'accept' && ([READ_ONLY_QA, BROWSER_BOUNDED, FIXTURE_BROWSER_QA].includes(run.executionPolicy?.mode) ||
+        [READ_ONLY_QA, BROWSER_BOUNDED, FIXTURE_BROWSER_QA].includes(this.threads.get(run.conversationId)?.executionPolicy))) {
       throw chatError('BOUNDED_APPROVAL_FORBIDDEN', 'Bounded execution never grants an interactive approval', 403)
     }
     // Mark before sending: a synchronous resolved event must not be overwritten.
@@ -1257,11 +1264,16 @@ export class CodexChatRuntime {
     }
     if (event.method === 'approval') return this.receiveApproval(run, event)
     if (event.method === 'dynamic') {
+      if (run.status !== 'inProgress' || this.connection !== 'ready') {
+        this.respond(event.rpcId, null, { code: -32601, message: 'EG-Desk run is no longer active' })
+        return
+      }
       const mode = run.executionPolicy?.mode || null
       const contextRead = !event.namespace && ['egdesk_list_context', 'egdesk_read_source'].includes(event.tool)
       const browser = !event.namespace && typeof event.tool === 'string' && event.tool.startsWith('egdesk_browser_')
       if ((mode === READ_ONLY_QA && !contextRead && !(browser && event.tool === 'egdesk_browser_observe')) ||
-          (mode === BROWSER_BOUNDED && !contextRead && !browser) ||
+          (mode === BROWSER_BOUNDED && !contextRead && !(browser && event.tool === 'egdesk_browser_observe')) ||
+          (mode === FIXTURE_BROWSER_QA && !contextRead && !(browser && ['egdesk_browser_observe', 'egdesk_browser_click', 'egdesk_browser_fill'].includes(event.tool))) ||
           (!mode && browser)) {
         this.respond(event.rpcId, null, { code: -32601, message: 'This run does not authorize the requested dynamic tool' })
         return
@@ -1326,8 +1338,8 @@ export class CodexChatRuntime {
   }
 
   receiveApproval(run, event) {
-    if ([READ_ONLY_QA, BROWSER_BOUNDED].includes(run.executionPolicy?.mode) ||
-        [READ_ONLY_QA, BROWSER_BOUNDED].includes(this.threads.get(run.conversationId)?.executionPolicy)) {
+    if ([READ_ONLY_QA, BROWSER_BOUNDED, FIXTURE_BROWSER_QA].includes(run.executionPolicy?.mode) ||
+        [READ_ONLY_QA, BROWSER_BOUNDED, FIXTURE_BROWSER_QA].includes(this.threads.get(run.conversationId)?.executionPolicy)) {
       // A QA turn never grants an interactive escalation, even if native
       // unexpectedly asks despite approvalPolicy=never.
       const supported = ['item/commandExecution/requestApproval', 'item/fileChange/requestApproval'].includes(event.nativeMethod)

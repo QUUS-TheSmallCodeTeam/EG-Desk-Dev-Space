@@ -13,7 +13,8 @@ test('only an exact line in an authoritative native command item yields a bounde
   assert.equal(receipt.origin, 'codex-app-server.item/completed')
   assert.equal(receipt.outputStream, 'aggregated-stdout-stderr')
   assert.equal(receipt.exitCode, 0)
-  assert.equal(receipt.status, 'verified')
+  assert.equal(receipt.status, 'marker-witness')
+  assert.equal(receipt.receiptScope, 'single-native-command-item')
   assert.deepEqual(receipt.markerLines, [nonce])
   assert.match(receipt.commandSha256, /^[a-f0-9]{64}$/)
   assert.equal(receipt.commandHashBasis, 'sanitized-native-item-command')
@@ -22,8 +23,8 @@ test('only an exact line in an authoritative native command item yields a bounde
 
 test('substring, failed exit, missing output and malformed nonce never become proof', () => {
   const item = { id: 'command-item-1', type: 'commandExecution', status: 'completed', exitCode: 0, aggregatedOutput: `spoiled-${nonce}-suffix\n` }
-  assert.equal(nativeQaCommandReceipt(item, nonce).status, 'not-verified')
-  assert.equal(nativeQaCommandReceipt({ ...item, aggregatedOutput: `${nonce}\n`, exitCode: 1 }, nonce).status, 'not-verified')
+  assert.equal(nativeQaCommandReceipt(item, nonce).status, 'no-marker-witness')
+  assert.equal(nativeQaCommandReceipt({ ...item, aggregatedOutput: `${nonce}\n`, exitCode: 1 }, nonce).status, 'no-marker-witness')
   assert.deepEqual(nativeQaCommandReceipt({ ...item, aggregatedOutput: null }, nonce).markerLines, [])
   assert.equal(nativeQaCommandReceipt({ ...item, type: 'agentMessage' }, nonce), null)
   assert.equal(validateQaCommandNonce(nonce), nonce)

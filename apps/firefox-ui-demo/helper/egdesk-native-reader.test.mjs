@@ -20,6 +20,10 @@ function nativeHarness(options = {}) {
           : [], nextCursor: null }
       }
       if (method === 'thread/start') return { thread: { id: `reader-${++thread}` }, sandbox: { type: options.unsafeSandbox ? 'workspaceWrite' : 'readOnly', networkAccess: options.unsafeNetwork === true }, approvalPolicy: options.unsafeApproval ? 'on-request' : 'never', ...(options.mismatchedThreadModel ? { model: 'another-model' } : {}) }
+      if (method === 'thread/resume') return { thread: { id: options.wrongReuseThread ? 'other-reader' : params.threadId },
+        sandbox: { type: options.unsafeReuseSandbox ? 'workspaceWrite' : 'readOnly', networkAccess: options.unsafeReuseNetwork === true },
+        approvalPolicy: options.unsafeReuseApproval ? 'on-request' : 'never',
+        ...(options.mismatchedReuseModel ? { model: 'another-model' } : {}) }
       if (method === 'thread/unsubscribe') return { status: 'unsubscribed' }
       if (method === 'turn/interrupt') return {}
       if (method !== 'turn/start') throw new Error(method)
@@ -98,6 +102,7 @@ test('Reader refinement reuses a bounded session and re-enters original source, 
   const second = await h.reader.read({ ...h.input, intent: 'Read the same source from another angle' })
   assert.equal(first.nativeThreadId, second.nativeThreadId)
   const turns = h.calls.filter(call => call.method === 'turn/start')
+  assert.equal(h.calls.filter(call => call.method === 'thread/resume').length, 1)
   assert.equal(JSON.parse(turns[1].params.input[0].text).sourceText, h.input.text)
   const third = await h.reader.read(h.input)
   assert.notEqual(third.nativeThreadId, first.nativeThreadId)
@@ -108,6 +113,17 @@ test('reused Reader checks MCP isolation again before its next provider turn', a
   await h.reader.read(h.input)
   await assert.rejects(h.reader.read({ ...h.input, intent: 'Refine the reading' }), error => error.code === 'READER_ISOLATION_UNAVAILABLE')
   assert.equal(h.calls.filter(call => call.method === 'turn/start').length, 1)
+})
+
+test('reused Reader rechecks effective native policy before the second child turn', async () => {
+  for (const options of [{ unsafeReuseSandbox: true }, { unsafeReuseNetwork: true }, { unsafeReuseApproval: true }, { wrongReuseThread: true }, { mismatchedReuseModel: true }]) {
+    const h = nativeHarness(options)
+    await h.reader.read(h.input)
+    await assert.rejects(h.reader.read({ ...h.input, intent: 'Refine source reading' }), error =>
+      ['READER_ISOLATION_UNAVAILABLE', 'READER_CONFIGURATION_MISMATCH'].includes(error.code))
+    assert.equal(h.calls.filter(call => call.method === 'turn/start').length, 1)
+    assert.equal(h.calls.filter(call => call.method === 'thread/resume').length, 1)
+  }
 })
 
 test('Reader cannot start a model turn when native isolation is unverifiable', async () => {
