@@ -15,6 +15,9 @@ const attachSource = between('  function attachBrowserToolTransport({ source, re
 const sourceSelection = between('  function chatInputSourceForView(view) {', '  function chatInputSources(')
 const selectedSources = between('  function registerBrowserToolSelection(threadId, source, permission) {', '  function browserToolSafeNavigationUrl(value) {')
 const menuSelection = between('    const selectBrowserForChat = (permission) => {', '    const showBrowserMenu = (anchor = menuButton) => {')
+const stopRevokeSource = between('  function revokeBrowserToolRunImmediately(run, thread) {', '  function registerBrowserToolSelection(')
+const interruptBody = between('      async interrupt(threadId = state.codex.activeThreadId) {', '      },\n      subscribe(listener) {')
+  .slice('      async interrupt(threadId = state.codex.activeThreadId) {'.length)
 const clearTransportBody = between('    const clearBrowserToolTransport = ({ revoke = false } = {}) => {', '    };\n\n    // Read-only, sampled at call time')
   .slice('    const clearBrowserToolTransport = ({ revoke = false } = {}) => {'.length)
 const rootSseReadyBody = between('    const rootSseReady = () => {', '    };\n\n    function threadBusy(')
@@ -129,7 +132,7 @@ test('read-only Browser attachment remains available when actor binding is unava
 })
 
 function fixture() {
-  const runBindings = new Map(), cancelled = new Map(), receipts = new Map(), leases = new Map()
+  const runBindings = new Map(), pendingBindings = new Map(), cancelled = new Map(), receipts = new Map(), leases = new Map()
   const userSelections = new Map(), actionLeases = new Map()
   const current = { cardId: 'browser-a', cardEpoch: 'card-generation-a', profileId: 'firefox-default',
     accountId: 'account-a', accountStatus: 'selected-metadata-unverified', userContextId: 0,
@@ -162,10 +165,10 @@ function fixture() {
   const doc = { getElementById: id => id === 'browser-a' ? card : id === 'browser-b' ? other : null }
   let nonce = 0
   const transport = new Function('document', 'ChatState', 'browserToolRunBindings', 'browserToolCancelledRuns',
-    'browserToolRequestReceipts', 'browserToolCardLeases', 'browserToolUserSelections',
+    'browserToolRequestReceipts', 'browserToolCardLeases', 'browserToolUserSelections', 'browserToolPendingBindings',
     'browserToolActionLeases', 'chatBindingNonce', 'Date', `${dispatchSource}\nreturn {browserToolDispatch,browserToolAuthorizePhysicalAction}`)(doc,
     { knownCodexAccountKey: key => typeof key === 'string' && key.startsWith('codex:') },
-    runBindings, cancelled, receipts, leases, userSelections, actionLeases,
+    runBindings, cancelled, receipts, leases, userSelections, pendingBindings, actionLeases,
     () => `lease-${++nonce}`, { now: () => clockMs })
   authorizePhysicalAction = transport.browserToolAuthorizePhysicalAction
   let sequence = 0
@@ -183,7 +186,7 @@ function fixture() {
     return value
   }
   return { dispatch: transport.browserToolDispatch, req, selection, current, card, browser,
-    runBindings, userSelections, actionLeases,
+    runBindings, pendingBindings, cancelled, userSelections, actionLeases,
     get actionCalls() { return actionCalls }, get domEffects() { return domEffects },
     hold(promise) { holdAction = promise }, advance(ms) { clockMs += ms } }
 }
@@ -342,6 +345,50 @@ test('account change or deadline expiry while actor pending leaves DOM unchanged
   }
 })
 
+test('human Stop revokes Browser actor authority synchronously before interrupt HTTP resolves', async () => {
+  const f = fixture()
+  const bound = await f.dispatch(f.req('bind', { selection: f.selection('interact') }))
+  let releaseActor
+  f.hold(new Promise(resolve => { releaseActor = resolve }))
+  const action = f.dispatch(f.req('act', { binding: bound.binding,
+    guard: { documentId: 'doc-1', revision: 2 }, action: { type: 'click', ref: 'el_1' } }))
+  await Promise.resolve()
+  assert.equal(f.actionLeases.size, 1)
+
+  const revoke = new Function('browserToolRunBindings', 'browserToolPendingBindings',
+    'browserToolActionLeases', 'browserToolCancelledRuns', 'browserToolUserSelections', 'ChatState',
+    `${stopRevokeSource}\nreturn revokeBrowserToolRunImmediately`)(
+    f.runBindings, f.pendingBindings, f.actionLeases, f.cancelled, f.userSelections,
+    { clientThreadBinding: thread => thread.clientBindingId })
+  const run = { runId: 'run-a', clientThreadId: 'thread-a', conversationId: 'conversation-a',
+    status: 'inProgress', stopPending: false }
+  const thread = { id: 'local-room', clientBindingId: 'thread-a' }
+  const state = { codex: { activeThreadId: thread.id } }
+  let releaseHttp
+  const interrupt = new Function('state', 'getCodexThreadById', 'ChatState', 'protocol',
+    'epochScope', 'revokeBrowserToolRunImmediately', 'emit', 'fetchJson', 'updateThreadById',
+    `return async function interrupt(threadId = state.codex.activeThreadId) {${interruptBody}\n      }`)(
+    state, (_codex, id) => id === thread.id ? thread : null,
+    { runsForThread: () => [run], isRunBusy: candidate => candidate.status === 'inProgress' }, {},
+    { begin: () => ({ signal: {} }), valid: () => true, finish() {} }, revoke, () => {},
+    async (path, options) => {
+      assert.equal(path, '/chat/interrupt')
+      assert.deepEqual(JSON.parse(options.body), { conversationId: run.conversationId, runId: run.runId })
+      return new Promise(resolve => { releaseHttp = resolve })
+    }, () => {})
+
+  const stopping = interrupt()
+  assert.equal(typeof releaseHttp, 'function')
+  assert.equal(run.stopPending, true)
+  assert.equal(f.runBindings.size, 0, 'UI binding is revoked before the first HTTP await')
+  assert.equal(f.actionLeases.size, 0, 'Parent approval has no live action lease after Stop')
+  releaseActor()
+  assert.equal((await action).status, 'rejected')
+  assert.equal(f.domEffects, 0, 'Stop before physical approval must produce zero DOM effects')
+  releaseHttp({ accepted: true, stopRequested: true })
+  await stopping
+})
+
 test('event-source transport returns correlated UI receipts without Chat transcript mutation', async () => {
   const listeners = new Map(), responses = []
   const source = { addEventListener(name, fn) { listeners.set(name, fn) },
@@ -366,7 +413,7 @@ test('normal root Chat ready SSE attaches Browser transport, posts correlated re
   assert.match(source, /browserAgentTools:\s*\{[\s\S]*?rootSseReady: \(\) => state\.codexBridge\?\.rootSseReady\?\.\(\)/,
     'public Browser diagnostics must delegate to the current root Chat closure');
   const listeners = new Map(), posts = [], grants = new Map([['selected', {}]])
-  const runBindings = new Map([['run-a', {}]]), actionLeases = new Map([['lease-a', {}]])
+  const runBindings = new Map([['run-a', {}]]), pendingBindings = new Map(), actionLeases = new Map([['lease-a', {}]])
   const sseSource = { closed: false, readyState: 1, addEventListener(name, listener) { listeners.set(name, listener) },
     removeEventListener(name, listener) { if (listeners.get(name) === listener) listeners.delete(name) },
     close() { this.closed = true; this.readyState = 2 },
@@ -389,7 +436,7 @@ test('normal root Chat ready SSE attaches Browser transport, posts correlated re
   }
   const harness = new Function('deps', `
     const { state, source: initialSource, fetchJson, attachBrowserToolTransport,
-      browserToolRunBindings, browserToolActionLeases, browserToolUserSelections } = deps;
+      browserToolRunBindings, browserToolPendingBindings, browserToolActionLeases, browserToolUserSelections } = deps;
     const window = { AbortController, EventSource: { OPEN: 1 } };
     const epochScope = { valid: () => true };
     const resumedNativeBindings = new Set();
@@ -410,7 +457,8 @@ test('normal root Chat ready SSE attaches Browser transport, posts correlated re
     return { onReady, onError, rootSseReady, state: () => ({ streamReady, browserTransportId, source,
       browserToolAuthorityEpoch, reconnects, protocol }) };
   `)({ state, source: sseSource, fetchJson, attachBrowserToolTransport: attach,
-    browserToolRunBindings: runBindings, browserToolActionLeases: actionLeases,
+    browserToolRunBindings: runBindings, browserToolPendingBindings: pendingBindings,
+    browserToolActionLeases: actionLeases,
     browserToolUserSelections: grants })
 
   assert.deepEqual(Object.keys(harness.rootSseReady()).sort(),

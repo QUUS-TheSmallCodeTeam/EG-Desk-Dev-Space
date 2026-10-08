@@ -1045,6 +1045,23 @@ test('bounded visual hierarchy keeps Canvas chrome quiet and Browser and Chat co
   assert.match(surfaceSource, /input\.addEventListener\('compositionend'/);
 });
 
+test('empty logged-in Chat uses plain first-message guidance while keeping title and auth fallback', () => {
+  const body = surfaceSource.match(/          const emptyChildren = \[([\s\S]*?)\n          \];/)?.[1];
+  assert.ok(body);
+  const renderEmpty = compileFunction(`return function renderEmpty(codex, activeThread) {
+    const emptyChildren = [${body}\n    ]; return emptyChildren;
+  }`, ['el'])((tag, props, ...children) => ({ tag, className: props.class, children }));
+  const thread = { title: 'Codex', type: 'dm' };
+  const loggedIn = renderEmpty({ authStatus: { isLoggedIn: true } }, thread);
+  assert.equal(loggedIn[0].children[0], '아직 메시지가 없습니다');
+  assert.equal(loggedIn[1].children[0], '메시지를 보내 대화를 시작하세요');
+  assert.doesNotMatch(loggedIn[1].children[0], /Fresh|Codex 대화|· Codex/);
+  const loggedOut = renderEmpty({ authStatus: { isLoggedIn: false } }, thread);
+  assert.equal(loggedOut[0].children[0], '로그인 후 대화할 수 있습니다');
+  assert.equal(loggedOut[1].children[0], 'Codex 로그인이 필요합니다.');
+  assert.match(surfaceSource, /class: 'egd-codex-thread-active-title' \}, activeThread\.title/);
+});
+
 test('Chat composer starts compact but expands and scrolls for long requests', () => {
   const body = surfaceSource.match(/            const resizeComposer = \(\) => \{([\s\S]*?)\n            \};\n            input\.addEventListener\('input'/)?.[1];
   assert.ok(body);
@@ -2388,7 +2405,7 @@ test('actual send path preserves draft B and new attachments typed during delaye
   assert.ok(body);
   const deps = ['state', 'getActiveCodexThread', 'getCodexThreadDraft', 'ChatState', 'threadBusy', 'epochScope', 'ensureNativeReadyForSend', 'updateThreadById', 'emit',
     'captureThreadInputs', 'getCodexThreadById', 'protocol', 'codexThreadAgentProfile', 'appendMessageToThread', 'createCodexMessage', 'SELF_MEMBER', 'codexThreadRuntimeConfig', 'fetchJson', 'syncProtocolRun', 'browserToolSelectedSources',
-    'browserTransportId', 'streamReady', 'browserTransportSource', 'source'];
+    'rootSseReady'];
   const send = compileFunction(`return (async () => {${body}\n})();`, deps);
   const selectedBody = surfaceSource.match(/  function browserToolSelectedSources\(threadId, candidates = null\) \{([\s\S]*?)\n  \}/)?.[1];
   assert.ok(selectedBody, 'test the production selected-source filter rather than inventing a permissive selector');
@@ -2415,13 +2432,12 @@ test('actual send path preserves draft B and new attachments typed during delaye
     state, getThread, Chat, grants, { getElementById: id => id === 'browser-a' ? selectedCard : null },
     (left, right) => new URL(left).href === new URL(right).href, structuredClone);
   let payload, sendCount = 0;
-  const chatStream = { id: 'normal-root-chat-sse' };
   const running = send(state, () => getThread(null), (codex, id) => codex.threadDrafts[id] || '', Chat, () => false,
     { begin: () => ({}), valid: () => true, finish() {} }, async () => true, update, () => {}, () => delayed, getThread, Chat.createChatProtocolState(), () => ({}),
     (id, message) => update(id, thread => ({ ...thread, messages: [...thread.messages, message] })),
     (role, content, status, options) => ({ role, content, status, ...options }), 'self', () => ({}),
     async (_url, request) => { sendCount++; payload = JSON.parse(request.body); return { accepted: true, conversationId: 'c', runId: 'r', answerId: 'c/r' }; }, () => {},
-    actualSelectedSources, 'ui-stream-1', true, chatStream, chatStream);
+    actualSelectedSources, () => ({ sourceReady: true, eventSourceReadyState: 1, browserTransportId: 'ui-stream-1' }));
   state.codex.threadDrafts.room = 'B';
   state.codex.threadDraftRevisions.room = 2;
   update('room', thread => ({ ...thread, inputSources: [...thread.inputSources, { id: 'b' }] }));
@@ -2438,13 +2454,22 @@ test('actual send path preserves draft B and new attachments typed during delaye
   assert.equal(state.codex.threadDrafts.room, 'B');
   assert.deepEqual(getThread(null).inputSources.map(input => input.id), ['a', 'b']);
   assert.equal(getThread(null).messages[0].content, 'A');
+  const rootReadyBody = surfaceSource.match(/    const rootSseReady = \(\) => \{([\s\S]*?)\n    \};/)?.[1];
+  assert.ok(rootReadyBody);
+  const connectingSource = { readyState: 0 };
+  const connectingStatus = compileFunction(`return () => {${rootReadyBody}\n    }`,
+    ['source', 'browserTransportSource', 'streamReady', 'window', 'detachBrowserToolTransport',
+      'browserTransportAbort', 'browserTransportId'])(connectingSource, connectingSource, true,
+    { EventSource: { OPEN: 1 } }, () => {}, { signal: { aborted: false } }, 'ui-stream-1');
+  assert.equal(connectingStatus().eventSourceReadyState, 0);
+  assert.equal(connectingStatus().sourceReady, false, 'a prior ready event does not authorize CONNECTING');
   payload = null;
   await send(state, () => getThread(null), (codex, id) => codex.threadDrafts[id] || '', Chat, () => false,
     { begin: () => ({}), valid: () => true, finish() {} }, async () => true, update, () => {}, () => delayed, getThread, Chat.createChatProtocolState(), () => ({}),
     (id, message) => update(id, thread => ({ ...thread, messages: [...thread.messages, message] })),
     (role, content, status, options) => ({ role, content, status, ...options }), 'self', () => ({}),
     async () => { assert.fail('a selected Browser must not submit without its ready SSE transport ID'); }, () => {},
-    actualSelectedSources, null, false, null, null);
+    actualSelectedSources, connectingStatus);
   assert.equal(payload, null);
   assert.equal(sendCount, 1);
   assert.equal(state.codex.threadDrafts.room, 'B');
@@ -2458,7 +2483,7 @@ test('actual send path preserves draft B and new attachments typed during delaye
     (id, message) => update(id, thread => ({ ...thread, messages: [...thread.messages, message] })),
     (role, content, status, options) => ({ role, content, status, ...options }), 'self', () => ({}),
     async () => { assert.fail('stale interaction authority must not degrade silently to a normal read-only send'); }, () => {},
-    actualSelectedSources, 'ui-stream-1', true, chatStream, chatStream);
+    actualSelectedSources, () => ({ sourceReady: true, eventSourceReadyState: 1, browserTransportId: 'ui-stream-1' }));
   assert.equal(sendCount, 1);
   assert.equal(getThread(null).messages.length, 1);
   assert.equal(state.codex.threadDrafts.room, 'B');
