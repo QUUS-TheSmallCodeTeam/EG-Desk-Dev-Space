@@ -16,6 +16,7 @@ const sourceSelection = between('  function chatInputSourceForView(view) {', '  
 const selectedSources = between('  function registerBrowserToolSelection(threadId, source, permission) {', '  function browserToolSafeNavigationUrl(value) {')
 const menuSelection = between('    const selectBrowserForChat = (permission) => {', '    const showBrowserMenu = (anchor = menuButton) => {')
 const stopRevokeSource = between('  function revokeBrowserToolRunImmediately(run, thread) {', '  function registerBrowserToolSelection(')
+const toolActSource = between('    const browserToolAct = async (expected, action, guard, lease) => {', '    card._browserControls = {')
 const interruptBody = between('      async interrupt(threadId = state.codex.activeThreadId) {', '      },\n      subscribe(listener) {')
   .slice('      async interrupt(threadId = state.codex.activeThreadId) {'.length)
 const clearTransportBody = between('    const clearBrowserToolTransport = ({ revoke = false } = {}) => {', '    };\n\n    // Read-only, sampled at call time')
@@ -158,7 +159,8 @@ function fixture() {
           actionRef: action.ref || null, actionUrl: action.url || null })
         if (!permitted) throw new Error('Browser action authority was revoked before input')
         domEffects++
-        return { dispatchReceipt: { eventDispatched: true }, after: { cardId: 'browser-a', text: ['Count: 1'] } }
+        return { dispatchReceipt: { eventDispatched: true, clickInputRoute: 'document-window' },
+          after: { cardId: 'browser-a', text: ['Count: 1'] } }
       },
     } }
   const other = { ...card, id: 'browser-b' }
@@ -167,7 +169,8 @@ function fixture() {
   const transport = new Function('document', 'ChatState', 'browserToolRunBindings', 'browserToolCancelledRuns',
     'browserToolRequestReceipts', 'browserToolCardLeases', 'browserToolUserSelections', 'browserToolPendingBindings',
     'browserToolActionLeases', 'browserToolStoppedRuns', 'chatBindingNonce', 'Date',
-    `${dispatchSource}\nreturn {browserToolDispatch,browserToolAuthorizePhysicalAction}`)(doc,
+    `let browserToolFixtureLastAction = null;\n${dispatchSource}\n` +
+    'return {browserToolDispatch,browserToolAuthorizePhysicalAction,browserToolFixtureActionDiagnostic}')(doc,
     { knownCodexAccountKey: key => typeof key === 'string' && key.startsWith('codex:') },
     runBindings, cancelled, receipts, leases, userSelections, pendingBindings, actionLeases, stoppedRuns,
     () => `lease-${++nonce}`, { now: () => clockMs })
@@ -186,7 +189,8 @@ function fixture() {
       threadId: value.clientThreadId, usedRunId: null })
     return value
   }
-  return { dispatch: transport.browserToolDispatch, req, selection, current, card, browser,
+  return { dispatch: transport.browserToolDispatch, fixtureActionDiagnostic: transport.browserToolFixtureActionDiagnostic,
+    req, selection, current, card, browser,
     runBindings, pendingBindings, cancelled, stoppedRuns, userSelections, actionLeases,
     get actionCalls() { return actionCalls }, get domEffects() { return domEffects },
     hold(promise) { holdAction = promise }, advance(ms) { clockMs += ms } }
@@ -304,6 +308,85 @@ test('UI denies non-http navigation even with a bound interaction selection', as
   }
   assert.equal(f.actionCalls, 0)
   assert.equal(f.domEffects, 0)
+})
+
+test('owned local fixture exposes only a bounded action phase and safe failure enum', async () => {
+  const f = fixture()
+  f.current.url = 'http://127.0.0.1:39220/egdesk-qa/QA_URL_0123456789abcdef'
+  f.current.accountId = ''
+  const bound = await f.dispatch(f.req('bind', { selection: f.selection('interact') }))
+  assert.equal(bound.status, 'bound')
+  f.card._browserControls.toolAct = async () => { throw new Error('Browser action authority was revoked before input') }
+  const denied = await f.dispatch(f.req('act', { binding: bound.binding,
+    guard: { documentId: 'doc-1', revision: 2 }, action: { type: 'click', ref: 'el_1' } }))
+  assert.equal(denied.status, 'rejected')
+  assert.deepEqual({ phase: f.fixtureActionDiagnostic('browser-a')?.phase,
+    status: f.fixtureActionDiagnostic('browser-a')?.status,
+    reason: f.fixtureActionDiagnostic('browser-a')?.reason },
+  { phase: 'actor', status: 'rejected', reason: 'authority-denied' })
+  assert.equal(f.fixtureActionDiagnostic('browser-a').error, undefined,
+    'fixture diagnostics must not publish raw actor messages')
+  assert.equal(f.domEffects, 0)
+  f.current.accountId = 'site-account'
+  assert.equal(f.fixtureActionDiagnostic('browser-a'), null,
+    'the diagnostic is unavailable outside the exact account-free fixture')
+  assert.match(source, /fixtureActionDiagnostic: browserToolFixtureActionDiagnostic/)
+})
+
+test('fixture diagnostics distinguish Gecko rejection from a routed actor receipt', async () => {
+  const fixtureUrl = 'http://127.0.0.1:39220/egdesk-qa/QA_URL_0123456789abcdef'
+  const rejected = fixture()
+  rejected.current.url = fixtureUrl
+  rejected.current.accountId = ''
+  const first = await rejected.dispatch(rejected.req('bind', { selection: rejected.selection('interact') }))
+  rejected.card._browserControls.toolAct = async () => { throw new Error('NS_ERROR_FAILURE: widget dispatch') }
+  assert.equal((await rejected.dispatch(rejected.req('act', { binding: first.binding,
+    guard: { documentId: 'doc-1', revision: 2 }, action: { type: 'click', ref: 'el_1' } }))).status, 'rejected')
+  const denied = rejected.fixtureActionDiagnostic('browser-a')
+  assert.equal(denied.reason, 'gecko-error')
+  assert.equal(denied.geckoError, 'NS_ERROR_FAILURE')
+  assert.equal(denied.inputRoute, null)
+  assert.equal(denied.error, undefined)
+
+  const acted = fixture()
+  acted.current.url = fixtureUrl
+  acted.current.accountId = ''
+  const second = await acted.dispatch(acted.req('bind', { selection: acted.selection('interact') }))
+  assert.equal((await acted.dispatch(acted.req('act', { binding: second.binding,
+    guard: { documentId: 'doc-1', revision: 2 }, action: { type: 'click', ref: 'el_1' } }))).status, 'acted')
+  assert.equal(acted.domEffects, 1)
+  assert.deepEqual({ status: acted.fixtureActionDiagnostic('browser-a')?.status,
+    reason: acted.fixtureActionDiagnostic('browser-a')?.reason,
+    inputRoute: acted.fixtureActionDiagnostic('browser-a')?.inputRoute },
+  { status: 'acted', reason: 'none', inputRoute: 'document-window' })
+  acted.current.authorityEpoch++
+  assert.equal(acted.fixtureActionDiagnostic('browser-a'), null)
+})
+
+test('production Browser Card receipt carries only the bounded click route, not actor internals', async () => {
+  const binding = { cardId: 'browser-a' }
+  const windowGlobal = { id: 'window-global-a' }
+  const context = { currentWindowGlobal: windowGlobal }
+  const xulBrowser = { browsingContext: context }
+  const card = { id: 'browser-a' }
+  const actorResult = { ok: true, result: { clickDiagnostics: {
+    dispatchScope: 'document-window', x: 442, y: 218,
+  } }, after: { documentId: 'doc-a' }, observation: { visibleTextChanged: true } }
+  const toolAct = new Function('assertBrowserToolBinding', 'xulBrowser', 'showAgentActivity',
+    'browserAgentActorRequest', 'card', `${toolActSource}\nreturn browserToolAct`)(
+    expected => assert.equal(expected, binding), xulBrowser, () => {},
+    async (method, payload) => {
+      assert.equal(method, 'act')
+      assert.deepEqual(payload.action, { type: 'click', ref: 'el_2' })
+      return actorResult
+    }, card)
+  const receipt = await toolAct(binding, { type: 'click', ref: 'el_2' }, { revision: 2 }, {
+    leaseId: 'lease-a', requestId: 'request-a', deadlineMs: Date.now() + 5000,
+  })
+  assert.equal(receipt.dispatchReceipt.clickInputRoute, 'document-window')
+  assert.equal(receipt.dispatchReceipt.x, undefined)
+  assert.equal(receipt.dispatchReceipt.y, undefined)
+  assert.equal(receipt.after.documentId, 'doc-a')
 })
 
 test('cancellation during an in-flight actor action reports unknown rather than confirmed completion', async () => {
@@ -486,6 +569,7 @@ test('normal root Chat ready SSE attaches Browser transport, posts correlated re
     let source = initialSource, streamReady = false, browserTransportId = null,
       browserTransportSource = null, browserTransportAbort = null,
       detachBrowserToolTransport = null, browserToolAuthorityEpoch = 0;
+    let browserToolFixtureLastAction = { status: 'acted' };
     let localAutoRetryEligible = false, localRetryBudget = 1, localRetryTimer = null;
     let reconnects = 0;
     const update = patch => Object.assign(state.codex, patch);
@@ -496,7 +580,7 @@ test('normal root Chat ready SSE attaches Browser transport, posts correlated re
     const onReady = event => {${readyTransportBody}\n    };
     const onError = () => {${errorTransportBody}\n    };
     return { onReady, onError, rootSseReady, state: () => ({ streamReady, browserTransportId, source,
-      browserToolAuthorityEpoch, reconnects, protocol }) };
+      browserToolAuthorityEpoch, browserToolFixtureLastAction, reconnects, protocol }) };
   `)({ state, source: sseSource, fetchJson, attachBrowserToolTransport: attach,
     browserToolRunBindings: runBindings, browserToolPendingBindings: pendingBindings,
     browserToolActionLeases: actionLeases,
@@ -531,6 +615,7 @@ test('normal root Chat ready SSE attaches Browser transport, posts correlated re
   assert.equal(harness.rootSseReady().sourceReady, false)
   assert.equal(harness.rootSseReady().browserTransportId, null)
   assert.equal(harness.state().browserToolAuthorityEpoch, 1)
+  assert.equal(harness.state().browserToolFixtureLastAction, null)
   assert.equal(harness.state().reconnects, 1)
   assert.equal(runBindings.size, 0)
   assert.equal(actionLeases.size, 0)

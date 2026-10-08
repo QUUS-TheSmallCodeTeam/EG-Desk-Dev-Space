@@ -332,11 +332,13 @@ export class EGDeskBrowserAgentRuntimeChild extends JSWindowActorChild {
     const y = Math.round(rect.top + rect.height / 2);
     const utils = this.contentWindow.windowUtils;
     const eventResults = [];
-    if (utils?.sendMouseEvent) {
-      utils.sendMouseEvent("mousemove", x, y, 0, 0, 0);
-      utils.sendMouseEvent("mousedown", x, y, 0, 1, 0);
-      utils.sendMouseEvent("mouseup", x, y, 0, 1, 0);
-      return { usedWindowUtils: true, x, y };
+    // sendMouseEvent routes through the top-level widget and can hit another
+    // overlapping Desk Card. Keep model coordinates in this Browser document.
+    if (typeof utils?.sendMouseEventToWindow === "function") {
+      utils.sendMouseEventToWindow("mousemove", x, y, 0, 0, 0);
+      utils.sendMouseEventToWindow("mousedown", x, y, 0, 1, 0);
+      utils.sendMouseEventToWindow("mouseup", x, y, 0, 1, 0);
+      return { usedWindowUtils: true, dispatchScope: "document-window", x, y };
     }
     for (const eventName of ["pointerdown", "mousedown", "pointerup", "mouseup"]) {
       const Ctor = eventName.startsWith("pointer") && this.contentWindow.PointerEvent
@@ -356,7 +358,7 @@ export class EGDeskBrowserAgentRuntimeChild extends JSWindowActorChild {
     // HTMLElement.click supplies the single click event; dispatching a second
     // synthetic click here can duplicate form submission or other effects.
     target.click?.();
-    return { usedWindowUtils: false, x, y, eventResults };
+    return { usedWindowUtils: false, dispatchScope: "dom-fallback", x, y, eventResults };
   }
 
   perform(action = {}, options = {}) {
