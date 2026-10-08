@@ -2,12 +2,13 @@ import { chatError } from './codex-chat-values.mjs'
 
 export const READ_ONLY_QA = 'readOnlyQa'
 export const BROWSER_BOUNDED = 'browserBounded'
+export const FIXTURE_BROWSER_QA = 'fixtureBrowserQa'
 
 export function requestedExecutionPolicy(value) {
   if (value === undefined) return null
   if (!value || typeof value !== 'object' || Array.isArray(value) ||
-      Object.keys(value).length !== 1 || ![READ_ONLY_QA, BROWSER_BOUNDED].includes(value.mode)) {
-    throw chatError('INVALID_EXECUTION_POLICY', 'Use executionPolicy mode readOnlyQa or browserBounded', 400)
+      Object.keys(value).length !== 1 || ![READ_ONLY_QA, BROWSER_BOUNDED, FIXTURE_BROWSER_QA].includes(value.mode)) {
+    throw chatError('INVALID_EXECUTION_POLICY', 'Use an explicitly supported bounded execution mode', 400)
   }
   return value.mode
 }
@@ -62,7 +63,8 @@ export function verifyQaNativeThread(result, mode = READ_ONLY_QA) {
     mode, status: 'native-thread-verified',
     sandbox: 'readOnly', networkAccess: false, approvalPolicy: 'never',
     externalMcpCatalog: 'pending',
-    ...(mode === BROWSER_BOUNDED ? { browserEffects: 'per-run-selected-card' } : {}),
+    ...(mode === BROWSER_BOUNDED ? { browserEffects: 'observe-only-selected-card' } : {}),
+    ...(mode === FIXTURE_BROWSER_QA ? { browserEffects: 'attested-local-fixture-only' } : {}),
   }
 }
 

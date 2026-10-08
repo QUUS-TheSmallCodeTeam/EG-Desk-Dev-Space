@@ -1,23 +1,27 @@
 import { BROWSER_TOOL_SPECS, createBrowserToolService } from './egdesk-browser-tool-runtime.mjs'
 import { chatError } from './codex-chat-values.mjs'
 import { classifyPublicToolError } from './codex-tool-errors.mjs'
+import { fixtureSnapshotMatches } from './codex-browser-fixture-qa.mjs'
 
 const BROWSER_BOUNDED = 'browserBounded'
 const READ_ONLY_QA = 'readOnlyQa'
+const FIXTURE_BROWSER_QA = 'fixtureBrowserQa'
 
-export function createCodexBrowserToolProvider({ transport, getOwnerKey, schemaReady = () => true, service = createBrowserToolService({ sendToUi: request => transport.sendToUi(request), getOwnerKey }) }) {
+export function createCodexBrowserToolProvider({ transport, getOwnerKey, schemaReady = () => true, fixtureQa = null, service = createBrowserToolService({ sendToUi: request => transport.sendToUi(request), getOwnerKey }) }) {
   if (!transport || typeof transport.hasClient !== 'function' || typeof getOwnerKey !== 'function') throw new TypeError('Browser provider requires a bounded UI transport and account identity')
   let resetting = 0
+  const fixtureAttestations = new Map()
   const provider = {
     providerId: 'egdesk-browser',
     prepare(body) {
       const selectedSources = body.selectedSources ?? []
       if (!Array.isArray(selectedSources)) throw chatError('INVALID_BROWSER_SELECTION', 'Browser selection must be an array', 400)
+      if (body.effectiveExecutionPolicy === FIXTURE_BROWSER_QA && !selectedSources.length) throw chatError('BROWSER_FIXTURE_REQUIRED', 'Fixture Browser QA requires one selected local Card', 400)
       if (!selectedSources.length) return null
       if (!schemaReady()) throw chatError('BROWSER_TOOLS_UNAVAILABLE', 'Native Browser tool contract is not verified', 503)
       if (resetting) throw chatError('BROWSER_RESET_PENDING', 'Browser authority is still being revoked', 409)
       const policy = body.effectiveExecutionPolicy
-      if (![READ_ONLY_QA, BROWSER_BOUNDED].includes(policy)) throw chatError('BROWSER_POLICY_REQUIRED', 'Browser tools require an explicit bounded native execution policy', 409)
+      if (![READ_ONLY_QA, BROWSER_BOUNDED, FIXTURE_BROWSER_QA].includes(policy)) throw chatError('BROWSER_POLICY_REQUIRED', 'Browser tools require an explicit bounded native execution policy', 409)
       const transportId = body.browserTransportId
       if (!transport.hasClient(transportId)) throw chatError('BROWSER_UI_UNAVAILABLE', 'The selected Browser UI stream is unavailable', 409)
       if (selectedSources.some(source => typeof source?.id !== 'string' || !source.id ||
@@ -25,8 +29,14 @@ export function createCodexBrowserToolProvider({ transport, getOwnerKey, schemaR
           source.browserToolSelection.threadId !== body.clientThreadId)) {
         throw chatError('INVALID_BROWSER_SELECTION', 'Browser selection must retain its one-time source token and exact Chat binding', 400)
       }
-      if (policy === READ_ONLY_QA && selectedSources.some(source => source.browserToolPermission !== 'observe')) {
-        throw chatError('BROWSER_INTERACTION_NOT_GRANTED', 'Read-only QA accepts only a Browser observe selection', 403)
+      if ([READ_ONLY_QA, BROWSER_BOUNDED].includes(policy) && selectedSources.some(source => source.browserToolPermission !== 'observe')) {
+        throw chatError('BROWSER_INTERACTION_NOT_GRANTED', 'This mode accepts only a Browser observe selection', 403)
+      }
+      if (policy === FIXTURE_BROWSER_QA && (!fixtureQa || selectedSources.length !== 1 ||
+          selectedSources[0].browserToolPermission !== 'interact' ||
+          selectedSources[0].sourceRef?.uri !== fixtureQa.url ||
+          selectedSources[0].sourceRef?.accountId !== '')) {
+        throw chatError('BROWSER_FIXTURE_UNAVAILABLE', 'Fixture Browser QA requires the exact opted-in local fixture and an interaction selection', 403)
       }
       let selection
       try { selection = service.prepare({ selectedSources, ownerKey: getOwnerKey() }) }
@@ -64,7 +74,40 @@ export function createCodexBrowserToolProvider({ transport, getOwnerKey, schemaR
     },
     async dispatch(run, event) {
       try {
+        const fixtureMode = run.executionPolicy?.mode === FIXTURE_BROWSER_QA
+        if (fixtureMode) {
+          if (!fixtureQa || !['egdesk_browser_observe', 'egdesk_browser_click', 'egdesk_browser_fill'].includes(event.tool)) {
+            throw chatError('BROWSER_FIXTURE_SCOPE', 'Fixture QA does not authorize this Browser tool', 403)
+          }
+          if (event.tool !== 'egdesk_browser_observe' && !fixtureAttestations.get(run.answerId)?.has(event.arguments?.cardId)) {
+            throw chatError('BROWSER_FIXTURE_ATTESTATION_FAILED', 'Observe and attest the selected fixture Card before interaction', 403)
+          }
+          if (event.tool === 'egdesk_browser_click' && (event.arguments?.expectedTarget?.tag?.toLowerCase() !== 'button' ||
+              event.arguments?.expectedTarget?.href || event.arguments?.postcondition?.kind !== 'visible-text')) {
+            throw chatError('BROWSER_FIXTURE_SCOPE', 'Fixture QA click is limited to a local button with visible-text postcondition', 403)
+          }
+          if (event.tool === 'egdesk_browser_fill' && (!['input', 'textarea'].includes(event.arguments?.expectedTarget?.tag?.toLowerCase()) ||
+              event.arguments?.postcondition?.kind !== 'target-value')) {
+            throw chatError('BROWSER_FIXTURE_SCOPE', 'Fixture QA fill is limited to a local text field with value postcondition', 403)
+          }
+        }
         const result = await service.dispatch(run, event)
+        if (fixtureMode && event.tool === 'egdesk_browser_observe') {
+          if (!fixtureSnapshotMatches(result.snapshot, fixtureQa)) {
+            fixtureAttestations.delete(run.answerId)
+            void service.cancelRun(run).catch(() => {})
+            throw chatError('BROWSER_FIXTURE_ATTESTATION_FAILED', 'Live Browser observation did not match the owned QA fixture', 403)
+          }
+          const cards = fixtureAttestations.get(run.answerId) || new Set()
+          cards.add(result.cardId)
+          fixtureAttestations.set(run.answerId, cards)
+        }
+        if (fixtureMode && event.tool !== 'egdesk_browser_observe' &&
+            (!fixtureSnapshotMatches(result.after, fixtureQa) || result.status !== 'postcondition-observed')) {
+          fixtureAttestations.delete(run.answerId)
+          void service.cancelRun(run).catch(() => {})
+          throw chatError('BROWSER_FIXTURE_ATTESTATION_FAILED', 'Fixture action did not retain the exact local page and postcondition', 403)
+        }
         const success = ['observed', 'postcondition-observed'].includes(result.status)
         const selected = run.browserBinding?.cards?.find(card => card.cardId === result.cardId)
         this.runtime.emit(run, success ? 'browser.tool.completed' : 'browser.tool.unverified', {
@@ -80,6 +123,7 @@ export function createCodexBrowserToolProvider({ transport, getOwnerKey, schemaR
         }, event.callId)
         return { success, contentItems: [{ type: 'inputText', text: JSON.stringify(result) }] }
       } catch (error) {
+        if (run.executionPolicy?.mode === FIXTURE_BROWSER_QA) fixtureAttestations.delete(run.answerId)
         const failure = classifyPublicToolError(error, { browser: true })
         const selected = run.browserBinding?.cards?.find(card => card.cardId === event.arguments?.cardId)
         this.runtime.emit(run, 'browser.tool.failed', { callId: event.callId, code: failure.code, cardId: selected?.cardId || null,
@@ -91,6 +135,7 @@ export function createCodexBrowserToolProvider({ transport, getOwnerKey, schemaR
       }
     },
     async cancelRun(run) {
+      fixtureAttestations.delete(run.answerId)
       if (run.browserBinding?.cards?.length) this.runtime.emit(run, 'browser.cancel.requested', {
         originalProviderId: this.providerId, namespace: null, bridgeEpoch: this.runtime.currentEpoch?.() ?? null,
         cards: run.browserBinding.cards.map(({ cardId, sourceId, cardEpoch }) => ({ cardId,
@@ -101,11 +146,13 @@ export function createCodexBrowserToolProvider({ transport, getOwnerKey, schemaR
       finally { transport.unbindRun(run.runId) }
     },
     disconnect() {
+      fixtureAttestations.clear()
       resetting++
       const operation = service.reset()
       void Promise.resolve(operation).catch(() => {}).finally(() => { for (const runId of transport.runs.keys()) transport.unbindRun(runId); resetting-- })
     },
     reset() {
+      fixtureAttestations.clear()
       resetting++
       const operation = service.reset()
       void Promise.resolve(operation).catch(() => {}).finally(() => { transport.reset(); resetting-- })

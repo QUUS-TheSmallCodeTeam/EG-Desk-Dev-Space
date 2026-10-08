@@ -32,7 +32,7 @@ export function nativeQaCommandReceipt(item, markers) {
     nativeItemId: item.id, nativeItemType: 'commandExecution',
     origin: 'codex-app-server.item/completed', outputStream: 'aggregated-stdout-stderr',
     nativeItemStatus: ['completed', 'failed', 'declined', 'inProgress'].includes(item.status) ? item.status : 'unknown',
-    exitCode, status: 'not-verified', markerLines: [],
+    exitCode, status: 'no-marker-witness', receiptScope: 'single-native-command-item', markerLines: [],
     commandSha256: publicCommand ? createHash('sha256').update(publicCommand).digest('hex') : null,
     commandHashBasis: 'sanitized-native-item-command',
   }
@@ -41,6 +41,6 @@ export function nativeQaCommandReceipt(item, markers) {
   const markerLines = expected.filter(marker => lines.has(marker))
   return {
     ...base, markerLines,
-    status: markerLines.length && exitCode === 0 && item.status === 'completed' ? 'verified' : 'not-verified',
+    status: markerLines.length && exitCode === 0 && item.status === 'completed' ? 'marker-witness' : 'no-marker-witness',
   }
 }
