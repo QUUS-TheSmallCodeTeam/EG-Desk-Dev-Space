@@ -2,7 +2,9 @@ import assert from 'node:assert/strict'
 import { test } from 'node:test'
 
 globalThis.JSWindowActorChild ||= class {}
+globalThis.JSWindowActorParent ||= class {}
 const { EGDeskBrowserAgentRuntimeChild } = await import('../overlay/resources/EGDeskBrowserAgentRuntimeChild.sys.mjs')
+const { EGDeskBrowserAgentRuntimeParent } = await import('../overlay/resources/EGDeskBrowserAgentRuntimeParent.sys.mjs')
 
 function localDocumentFixture() {
   const actor = new EGDeskBrowserAgentRuntimeChild()
@@ -37,7 +39,7 @@ function localDocumentFixture() {
   }
   const win = {
     location: { href: 'data:text/html,isolated-fixture' }, innerWidth: 720, innerHeight: 480, devicePixelRatio: 1,
-    getComputedStyle() { return { display: 'block', visibility: 'visible', opacity: '1' } },
+    getComputedStyle(node) { return { display: 'block', visibility: 'visible', opacity: node?.opacity ?? '1' } },
     NodeFilter: { SHOW_TEXT: 4, FILTER_ACCEPT: 1, FILTER_REJECT: 2 },
     MutationObserver: class { observe() {} disconnect() {} takeRecords() { return pendingMutations.splice(0) } },
     Event: class { constructor(name) { this.name = name } },
@@ -47,6 +49,7 @@ function localDocumentFixture() {
   }
   actor.document = doc
   actor.contentWindow = win
+  actor.sendQuery = async () => ({ authorized: true })
   return { actor, button, input, win, pendingMutations, get clicks() { return clicks },
     get inputEvents() { return inputEvents }, get focusCalls() { return focusCalls } }
 }
@@ -57,13 +60,16 @@ function guardFrom(snapshot, target = null) {
     focusedRef: snapshot.focusedElement?.ref || null, target }
 }
 
+const guarded = guard => ({ guard, lease: { leaseId: 'lease-local', requestId: 'request-local',
+  deadlineMs: Date.now() + 10000 }, settleMs: 0 })
+
 test('guarded native Browser actor changes isolated local DOM exactly once and returns post-observation', async () => {
   const f = localDocumentFixture()
   const before = f.actor.snapshot()
   assert.equal(before.coordinateSpace, 'browser-viewport-local')
   const button = before.interactiveElements.find(item => item.role === 'button')
   const clicked = await f.actor.act({ type: 'click', ref: button.ref },
-    { guard: guardFrom(before, button), settleMs: 0 })
+    guarded(guardFrom(before, button)))
   assert.equal(f.clicks, 1, 'one model click must never dispatch duplicate click effects')
   assert.equal(clicked.after.text[0], 'Count: 1')
   assert.equal(clicked.observation.newVisibleText[0], 'Count: 1')
@@ -72,7 +78,7 @@ test('guarded native Browser actor changes isolated local DOM exactly once and r
   const observedAgain = f.actor.snapshot()
   const input = observedAgain.interactiveElements.find(item => item.tag === 'input')
   const filled = await f.actor.act({ type: 'fill', ref: input.ref, text: 'local note' },
-    { guard: guardFrom(observedAgain, input), settleMs: 0 })
+    guarded(guardFrom(observedAgain, input)))
   assert.equal(f.input.value, 'local note')
   assert.equal(filled.after.interactiveElements.find(item => item.ref === input.ref).value, 'local note')
   assert.equal(f.inputEvents, 2)
@@ -85,7 +91,7 @@ test('document mutation, real viewport resize, target change and occlusion rejec
   const button = before.interactiveElements[0]
   f.pendingMutations.push({})
   await assert.rejects(f.actor.act({ type: 'click', ref: button.ref },
-    { guard: guardFrom(before, button), settleMs: 0 }), /stale/)
+    guarded(guardFrom(before, button))), /stale/)
   assert.equal(f.clicks, 0)
   const afterMutation = f.actor.snapshot()
   f.win.canvasCameraScale = 0.5
@@ -93,16 +99,16 @@ test('document mutation, real viewport resize, target change and occlusion rejec
     'Canvas camera movement must not change Browser document or viewport revision')
   f.win.innerWidth = 1280
   await assert.rejects(f.actor.act({ type: 'click', ref: button.ref },
-    { guard: guardFrom(afterMutation, button), settleMs: 0 }), /stale/)
+    guarded(guardFrom(afterMutation, button))), /stale/)
   const afterResize = f.actor.snapshot()
   f.button.innerText = 'Different action'
   await assert.rejects(f.actor.act({ type: 'click', ref: button.ref },
-    { guard: guardFrom(afterResize, button), settleMs: 0 }), /target changed/)
+    guarded(guardFrom(afterResize, button))), /target changed/)
   f.button.innerText = 'Increment'
   const current = f.actor.snapshot()
   f.actor.document.elementFromPoint = () => f.input
   await assert.rejects(f.actor.act({ type: 'click', ref: button.ref },
-    { guard: guardFrom(current, button), settleMs: 0 }), /obscured/)
+    guarded(guardFrom(current, button))), /obscured/)
   assert.equal(f.clicks, 0)
 })
 
@@ -123,7 +129,139 @@ test('human focus change invalidates a model action without taking focus back', 
   const button = before.interactiveElements[0]
   f.actor.document.activeElement = f.input
   await assert.rejects(f.actor.act({ type: 'click', ref: button.ref },
-    { guard: guardFrom(before, button), settleMs: 0 }), /stale/)
+    guarded(guardFrom(before, button))), /stale/)
   assert.equal(f.clicks, 0)
   assert.equal(f.focusCalls, 0)
+})
+
+test('password, token and editable controls redact every snapshot label, value, focus and text path', () => {
+  const f = localDocumentFixture()
+  const password = 'PASSWORD_CANARY_DO_NOT_EXPOSE'
+  f.input.type = 'password'
+  f.input.value = password
+  f.input.getAttribute = name => name === 'type' ? 'password' : name === 'aria-label' ? password : null
+  f.actor.document.activeElement = f.input
+  let seen = f.actor.snapshot()
+  const field = seen.interactiveElements.find(item => item.tag === 'input')
+  assert.equal(field.label, 'Sensitive field')
+  assert.equal(field.value, '')
+  assert.equal(seen.focusedElement.label, 'Sensitive field')
+  assert.equal(seen.focusedElement.value, '')
+  assert(!JSON.stringify(seen).includes(password))
+  assert.throws(() => f.actor.assertGuard({ type: 'fill', ref: field.ref }, guardFrom(seen, field)),
+    /Sensitive fields/)
+  assert.equal(f.input.value, password)
+
+  const token = 'TOKEN_CANARY_DO_NOT_EXPOSE'
+  f.input.type = 'text'
+  f.input.value = token
+  f.input.getAttribute = name => name === 'type' ? 'text' : name === 'name' ? 'sessionToken' :
+    name === 'aria-label' ? token : null
+  seen = f.actor.snapshot()
+  assert(!JSON.stringify(seen).includes(token))
+
+  for (const name of ['creditCardNumber', 'ssn', 'PAN', 'socialSecurityNumber']) {
+    const canary = `SENSITIVE_${name}_CANARY`
+    f.input.value = canary
+    f.input.getAttribute = key => key === 'type' ? 'text' : key === 'name' ? name : null
+    seen = f.actor.snapshot()
+    assert.equal(seen.interactiveElements.find(item => item.tag === 'input').label, 'Sensitive field')
+    assert(!JSON.stringify(seen).includes(canary), `${name} value must be masked`)
+  }
+
+  const editable = { isContentEditable: true, tagName: 'DIV', parentElement: f.actor.document.body,
+    ownerDocument: f.actor.document, isConnected: true,
+    innerText: 'EDITABLE_CANARY_DO_NOT_EXPOSE', textContent: 'EDITABLE_CANARY_DO_NOT_EXPOSE',
+    getAttribute() { return null },
+    getBoundingClientRect() { return { width: 100, height: 20 } } }
+  f.actor.document.querySelectorAll = () => [f.button, f.input, editable]
+  const secretText = { nodeValue: 'EDITABLE_CANARY_DO_NOT_EXPOSE', parentElement: editable }
+  const visibleText = { nodeValue: 'Public count', parentElement: f.button }
+  f.actor.document.createTreeWalker = (_root, _what, filter) => {
+    const nodes = [secretText, visibleText]
+    return { nextNode() {
+      while (nodes.length) {
+        const node = nodes.shift()
+        if (filter.acceptNode(node) === 1) return node
+      }
+      return null
+    } }
+  }
+  seen = f.actor.snapshot()
+  assert(!JSON.stringify(seen).includes('EDITABLE_CANARY_DO_NOT_EXPOSE'))
+  const editableControl = seen.interactiveElements.find(item => item.tag === 'div')
+  assert.equal(editableControl.label, 'Sensitive field')
+  assert.equal(editableControl.value, '')
+  assert(seen.text.includes('Public count'))
+})
+
+test('opacity-zero ordinary and composed-shadow ancestors hide text without hiding normal text', () => {
+  const f = localDocumentFixture()
+  const hiddenParent = { opacity: '0', parentElement: f.actor.document.body,
+    getBoundingClientRect() { return { width: 100, height: 20 } } }
+  const shadowHost = { opacity: '0', parentElement: f.actor.document.body,
+    getBoundingClientRect() { return { width: 100, height: 20 } } }
+  const shadowChild = { parentElement: null, getRootNode: () => ({ host: shadowHost }),
+    getBoundingClientRect() { return { width: 100, height: 20 } } }
+  const nodes = [
+    { nodeValue: 'HIDDEN_PARENT_CANARY', parentElement: hiddenParent },
+    { nodeValue: 'HIDDEN_SHADOW_CANARY', parentElement: shadowChild },
+    { nodeValue: 'Normal visible text', parentElement: f.button },
+  ]
+  f.actor.document.createTreeWalker = (_root, _what, filter) => {
+    const remaining = [...nodes]
+    return { nextNode() {
+      while (remaining.length) {
+        const node = remaining.shift()
+        if (filter.acceptNode(node) === 1) return node
+      }
+      return null
+    } }
+  }
+  const seen = f.actor.snapshot()
+  assert.deepEqual(seen.text, ['Normal visible text'])
+  assert.equal(f.actor.isVisible(shadowChild), false)
+})
+
+test('actor rejects javascript/data/file navigation and accepts only absolute http(s)', () => {
+  const f = localDocumentFixture()
+  for (const url of ['javascript:alert(1)', 'data:text/html,fixture', 'file:///tmp/fixture.html']) {
+    assert.throws(() => f.actor.perform({ type: 'navigate', url }), /http\(s\)/)
+  }
+  assert.deepEqual(f.actor.perform({ type: 'navigate', url: 'http://127.0.0.1:18181/fixture' }), { ok: true })
+  assert.equal(f.win.location.href, 'http://127.0.0.1:18181/fixture')
+})
+
+test('actor rechecks live parent authority and deadline after delayed query, before physical input', async () => {
+  for (const invalidation of ['cancelled', 'account-changed', 'deadline']) {
+    const f = localDocumentFixture()
+    const before = f.actor.snapshot()
+    const button = before.interactiveElements[0]
+    let release
+    f.actor.sendQuery = () => new Promise(resolve => { release = resolve })
+    let clockMs = Date.now()
+    f.actor.nowMs = () => clockMs
+    const options = { guard: guardFrom(before, button), lease: { leaseId: 'lease-pending',
+      requestId: 'request-pending', deadlineMs: clockMs + 1000 }, settleMs: 0 }
+    const action = f.actor.act({ type: 'click', ref: button.ref }, options)
+    await Promise.resolve()
+    assert.equal(typeof release, 'function')
+    if (invalidation === 'deadline') clockMs += 1001
+    release({ authorized: invalidation === 'deadline' })
+    await assert.rejects(action, /authority was revoked/)
+    assert.equal(f.clicks, 0)
+  }
+})
+
+test('parent actor delegates only its exact embedded Browser to privileged UI authority', () => {
+  const parent = new EGDeskBrowserAgentRuntimeParent()
+  const browser = { ownerGlobal: { __egdesk: { browserAgentTools: {
+    authorizePhysicalAction: request => request.browser === browser && request.leaseId === 'lease-a',
+  } } } }
+  parent.browsingContext = { top: { embedderElement: browser } }
+  parent.manager = { id: 'window-global-a' }
+  assert.deepEqual(parent.receiveMessage({ name: 'authorizeAct', data: { leaseId: 'lease-a' } }),
+    { authorized: true })
+  assert.deepEqual(parent.receiveMessage({ name: 'authorizeAct', data: { leaseId: 'other' } }),
+    { authorized: false })
 })

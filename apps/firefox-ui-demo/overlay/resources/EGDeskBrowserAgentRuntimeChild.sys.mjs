@@ -44,8 +44,12 @@ export class EGDeskBrowserAgentRuntimeChild extends JSWindowActorChild {
     if (!node || !node.getBoundingClientRect) return false;
     const rect = node.getBoundingClientRect();
     if (rect.width <= 0 || rect.height <= 0) return false;
-    const style = this.contentWindow.getComputedStyle(node);
-    return style.display !== "none" && style.visibility !== "hidden" && Number(style.opacity) !== 0;
+    for (let current = node; current; current = this.composedParent(current)) {
+      if (current.hidden || current.inert || current.getAttribute?.("aria-hidden") === "true") return false;
+      const style = this.contentWindow.getComputedStyle(current);
+      if (style.display === "none" || ["hidden", "collapse"].includes(style.visibility) || Number(style.opacity) === 0) return false;
+    }
+    return true;
   }
 
   roleFor(node) {
@@ -66,7 +70,46 @@ export class EGDeskBrowserAgentRuntimeChild extends JSWindowActorChild {
     return tag || "element";
   }
 
+  isSensitiveControl(node) {
+    if (!node) return false;
+    if (node.isContentEditable) return true;
+    const tag = String(node.tagName || "").toLowerCase();
+    if (!["input", "textarea", "select"].includes(tag)) return false;
+    const type = String(node.type || node.getAttribute?.("type") || "").toLowerCase();
+    if (["password", "hidden"].includes(type)) return true;
+    const sensitiveFlag = node.getAttribute?.("data-sensitive");
+    const privateFlag = node.getAttribute?.("data-private");
+    if ((sensitiveFlag != null && sensitiveFlag !== "false") || (privateFlag != null && privateFlag !== "false")) return true;
+    const hints = ["autocomplete", "name", "id", "aria-label", "placeholder"].map(key =>
+      String(node.getAttribute?.(key) || (key === "id" ? node.id : "") || "")
+        .replace(/([a-z0-9])([A-Z])/g, "$1 $2").toLowerCase()).join(" ");
+    if (/password|passwd|passphrase|secret|token|otp|cvv|cvc/.test(hints)) return true;
+    return /(?:^|[\s_-])(?:password|passwd|pwd|passphrase|secret|token|otp|pin|ssn|pan|social[\s_-]?security(?:[\s_-]?number)?|primary[\s_-]?account[\s_-]?number|api[\s_-]?key|access[\s_-]?key|private[\s_-]?key|client[\s_-]?secret|one[\s_-]?time|verification[\s_-]?code|auth[\s_-]?code|security[\s_-]?answer|cc[\s_-]?(?:number|csc|exp)|credit[\s_-]?card(?:[\s_-]?number)?|card[\s_-]?number|cvv|cvc)(?:$|[\s_-])/.test(hints);
+  }
+
+  isSensitiveText(node) {
+    for (let parent = this.composedParent(node); parent; parent = this.composedParent(parent)) {
+      if (parent.isContentEditable || this.isSensitiveControl(parent)) return true;
+    }
+    return false;
+  }
+
+  composedParent(node) {
+    return node?.parentElement || node?.getRootNode?.()?.host || null;
+  }
+
+  safeNavigationUrl(value) {
+    if (typeof value !== "string" || !value || value.length > 2048 || /[\u0000-\u0020\u007f]/.test(value)) return null;
+    try {
+      const parsed = new URL(value);
+      return ["http:", "https:"].includes(parsed.protocol) && !parsed.username && !parsed.password ? parsed.href : null;
+    } catch { return null; }
+  }
+
+  nowMs() { return Date.now(); }
+
   labelFor(node) {
+    if (this.isSensitiveControl(node)) return "Sensitive field";
     const doc = node.ownerDocument;
     const labelledBy = node.getAttribute?.("aria-labelledby");
     if (labelledBy) {
@@ -86,15 +129,14 @@ export class EGDeskBrowserAgentRuntimeChild extends JSWindowActorChild {
         || node.textContent
         || node.getAttribute?.("name")
         || node.getAttribute?.("id")
-        || node.value
         || "",
       120,
     );
   }
 
   valueFor(node) {
+    if (this.isSensitiveControl(node)) return "";
     const tag = String(node.tagName || "").toLowerCase();
-    if (tag === "input" && String(node.type || "").toLowerCase() === "password") return "";
     if (tag === "select") return this.compact(node.selectedOptions?.[0]?.textContent || node.value || "", 120);
     if (tag === "textarea" || tag === "input") return this.compact(node.value || "", 120);
     if (node.isContentEditable) return this.compact(node.innerText || node.textContent || "", 120);
@@ -114,7 +156,7 @@ export class EGDeskBrowserAgentRuntimeChild extends JSWindowActorChild {
         const text = this.compact(node.nodeValue, 180);
         if (!text || text.length < 2) return filter.FILTER_REJECT;
         const parent = node.parentElement;
-        if (!parent || !this.isVisible(parent)) return filter.FILTER_REJECT;
+        if (!parent || !this.isVisible(parent) || this.isSensitiveText(node)) return filter.FILTER_REJECT;
         return filter.FILTER_ACCEPT;
       },
     });
@@ -261,6 +303,7 @@ export class EGDeskBrowserAgentRuntimeChild extends JSWindowActorChild {
     if (!target || !this.isVisible(target) || target.disabled || target.getAttribute?.("aria-disabled") === "true") {
       throw new Error("Browser target is unavailable; observe again");
     }
+    if (this.isSensitiveControl(target)) throw new Error("Sensitive fields require the native user path");
     if (("value" in target && String(target.value || "").length > 120) ||
         (target.isContentEditable && String(target.textContent || "").length > 120)) {
       throw new Error("Browser target value exceeds the bounded observation; use the native user path");
@@ -275,9 +318,6 @@ export class EGDeskBrowserAgentRuntimeChild extends JSWindowActorChild {
       if (!hit || (hit !== target && !target.contains?.(hit))) {
         throw new Error("Browser target is obscured; observe again");
       }
-    }
-    if (action.type === "fill" && (live.tag === "input" && String(target.type || "").toLowerCase() === "password")) {
-      throw new Error("Password fields require the native user path");
     }
   }
 
@@ -322,7 +362,9 @@ export class EGDeskBrowserAgentRuntimeChild extends JSWindowActorChild {
   perform(action = {}, options = {}) {
     const type = action.type || action.action || "snapshot";
     if (type === "navigate") {
-      this.contentWindow.location.href = String(action.url || action.value || this.contentWindow.location.href);
+      const url = this.safeNavigationUrl(action.url || action.value);
+      if (!url) throw new Error("Browser navigation requires an absolute http(s) URL without credentials");
+      this.contentWindow.location.href = url;
       return { ok: true };
     }
     if (type === "scroll") {
@@ -372,6 +414,23 @@ export class EGDeskBrowserAgentRuntimeChild extends JSWindowActorChild {
   async act(action = {}, options = {}) {
     if (options.guard) this.assertGuard(action, options.guard);
     const before = this.snapshot(options.snapshot || {});
+    if (options.guard) {
+      const lease = options.lease;
+      if (!lease || typeof lease.leaseId !== "string" || !lease.leaseId ||
+          typeof lease.requestId !== "string" || !lease.requestId ||
+          !Number.isSafeInteger(lease.deadlineMs) || this.nowMs() >= lease.deadlineMs ||
+          typeof this.sendQuery !== "function") throw new Error("Browser action lease is missing or expired");
+      const authorization = await this.sendQuery("authorizeAct", {
+        leaseId: lease.leaseId, requestId: lease.requestId, deadlineMs: lease.deadlineMs,
+        actionType: action.type, actionRef: action.ref || null, actionUrl: action.url || null,
+      });
+      if (authorization?.authorized !== true || this.nowMs() >= lease.deadlineMs) {
+        throw new Error("Browser action authority was revoked before input");
+      }
+      // The parent checked the current run/Card/account authority after the
+      // asynchronous actor hop. Recheck live page state immediately before I/O.
+      this.assertGuard(action, options.guard);
+    }
     const result = this.perform(action, options);
     const settleMs = Number.isFinite(options.settleMs) ? options.settleMs : 250;
     await new Promise((resolve) => this.contentWindow.setTimeout(resolve, Math.max(0, settleMs)));

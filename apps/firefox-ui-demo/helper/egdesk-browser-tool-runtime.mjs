@@ -1,8 +1,8 @@
 import { createHash, randomUUID } from 'node:crypto'
 
-// Lane A/native adapter: selectedSources = chrome
-// window.__egdesk.browserAgentTools.selectedSources(threadId), captured before
-// clearing the submitted Chat draft. prepare({selectedSources}) -> specs(prepared)
+// Lane A/native adapter: chrome /chat/send includes selectedSources from the
+// submitted Chat draft before it is cleared. Never infer action authority from
+// immutable read-only attachments. prepare({selectedSources}) -> specs(prepared)
 // -> bind(run, prepared) -> dispatch(run, {tool, arguments, callId}).
 // sendToUi(request) must correlate requestId to a single response from the
 // chrome UI's browserAgentTools.attachTransport({source, respond}) listener for
@@ -47,6 +47,10 @@ function safeUrl(value) {
   try { const url = new URL(value); return ['http:', 'https:'].includes(url.protocol) && !url.username && !url.password }
   catch { return false }
 }
+function sameUrl(left, right) {
+  try { return new URL(left).href === new URL(right).href }
+  catch { return false }
+}
 function validateArgs(tool, args) {
   const schema = SPEC_BY_NAME.get(tool)?.inputSchema
   if (!schema || !record(args)) reject('INVALID_BROWSER_TOOL', 'Unsupported Browser tool or argument object')
@@ -58,6 +62,7 @@ function validateArgs(tool, args) {
       !record(args.postcondition) || !['visible-text', 'url', 'target-value'].includes(args.postcondition.kind) ||
       typeof args.postcondition.value !== 'string' || args.postcondition.value.length > 512 ||
       (args.postcondition.kind !== 'target-value' && !args.postcondition.value) ||
+      (args.postcondition.kind === 'url' && !safeUrl(args.postcondition.value)) ||
       Object.keys(args.postcondition).some(key => !['kind', 'value'].includes(key))) reject('INVALID_BROWSER_TOOL', 'Fresh observation and postcondition are required')
   if (tool === 'egdesk_browser_navigate') {
     if (!safeUrl(args.url) || args.postcondition.kind !== 'url') reject('INVALID_BROWSER_TOOL', 'Navigation requires an explicit safe URL and URL postcondition')
@@ -84,7 +89,7 @@ function observationFrom(response, cardId) {
 }
 function checkPostcondition(condition, snapshot, ref) {
   if (!snapshot || !condition) return false
-  if (condition.kind === 'url') return snapshot.url === condition.value
+  if (condition.kind === 'url') return sameUrl(snapshot.url, condition.value)
   if (condition.kind === 'visible-text') return snapshot.text.some(text => String(text).includes(condition.value))
   if (condition.kind === 'target-value') return snapshot.interactiveElements.some(item => item.ref === ref && item.value === condition.value)
   return false
@@ -96,7 +101,16 @@ export function createBrowserToolService({ sendToUi, getOwnerKey, timeoutMs = 15
     throw new TypeError('Browser tool service requires UI transport, current account provider and bounded timeout')
   }
   const bindings = new Map()
+  const pendingBindings = new Map()
+  const closedRuns = new Set()
   const preparedRuns = new WeakSet()
+
+  function cancelCards(binding) {
+    return Promise.allSettled(binding.selectedCards.map(card => requestUi({ kind: 'cancel',
+      runId: binding.runId, clientThreadId: binding.clientThreadId, cardId: card.cardId,
+      cardEpoch: card.cardEpoch, selectionToken: card.selectionToken,
+    })))
+  }
 
   async function requestUi(payload) {
     const requestId = randomUUID()
@@ -123,16 +137,19 @@ export function createBrowserToolService({ sendToUi, getOwnerKey, timeoutMs = 15
     for (const source of selectedSources) {
       const ref = source?.sourceRef
       const identity = source?.browserToolIdentity
-      if (source?.kind !== 'browser' || source.selectedByUser !== true ||
+      const selection = source?.browserToolSelection
+      if (source?.kind !== 'browser' || !short(source.id, 160) || source.selectedByUser !== true ||
           !['observe', 'interact'].includes(source.browserToolPermission) || !record(ref) ||
           !short(ref.viewId, 160) || !short(ref.profileId, 160) || typeof ref.accountId !== 'string' ||
           ref.accountId.length > 160 || !short(ref.uri, 2048) || cards.has(ref.viewId) ||
           !record(identity) || !short(identity.cardEpoch, 160) || !short(identity.engineAccountKey, 256) ||
-          !Number.isSafeInteger(identity.authorityEpoch) || !Number.isSafeInteger(identity.userContextId)) {
+          !Number.isSafeInteger(identity.authorityEpoch) || !Number.isSafeInteger(identity.userContextId) ||
+          !record(selection) || !short(selection.token, 160) || !short(selection.threadId, 160)) {
         reject('INVALID_BROWSER_SELECTION', 'Browser tool source must be explicitly selected with a bound Card, profile and permission')
       }
       cards.set(ref.viewId, { cardId: ref.viewId, profileId: ref.profileId, accountId: ref.accountId,
-        selectedUrl: ref.uri, permission: source.browserToolPermission, ...identity })
+        selectedUrl: ref.uri, permission: source.browserToolPermission,
+        selectionToken: selection.token, clientThreadId: selection.threadId, sourceId: source.id, ...identity })
     }
     const value = { ownerKey, cards, preparedAt: now() }
     preparedRuns.add(value)
@@ -147,34 +164,50 @@ export function createBrowserToolService({ sendToUi, getOwnerKey, timeoutMs = 15
   }
 
   async function bind(run, prepared) {
-    if (!short(run?.answerId, 160) || !preparedRuns.has(prepared) || prepared.ownerKey !== getOwnerKey()) reject('BROWSER_BINDING_FORBIDDEN', 'Browser run binding is unavailable for this account')
-    if (bindings.has(run.answerId)) reject('BROWSER_BINDING_EXISTS', 'Browser run is already bound')
+    if (!short(run?.answerId, 160) || !short(run?.clientThreadId, 160) ||
+        !preparedRuns.has(prepared) || prepared.ownerKey !== getOwnerKey()) reject('BROWSER_BINDING_FORBIDDEN', 'Browser run binding is unavailable for this account')
+    if (closedRuns.has(run.answerId)) reject('BROWSER_RUN_ENDED', 'Cancelled Browser run cannot be rebound')
+    if (bindings.has(run.answerId) || pendingBindings.has(run.answerId)) reject('BROWSER_BINDING_EXISTS', 'Browser run is already bound or binding')
     const binding = { ownerKey: prepared.ownerKey, runId: run.runId || run.answerId,
+      clientThreadId: run.clientThreadId, selectedCards: [...prepared.cards.values()],
       cards: new Map(), pending: new Set(), calls: new Map(), closed: false }
+    pendingBindings.set(run.answerId, binding)
     try {
       for (const card of prepared.cards.values()) {
-        const response = await requestUi({ kind: 'bind', runId: binding.runId, cardId: card.cardId, selection: card })
+        if (binding.closed || closedRuns.has(run.answerId) || prepared.ownerKey !== getOwnerKey() || run.status !== 'inProgress') {
+          reject('BROWSER_RUN_ENDED', 'Browser run or account ended during binding')
+        }
+        if (card.clientThreadId !== binding.clientThreadId) reject('BROWSER_BINDING_FORBIDDEN', 'Browser selection belongs to another Chat thread')
+        const response = await requestUi({ kind: 'bind', runId: binding.runId,
+          clientThreadId: binding.clientThreadId, cardId: card.cardId, selection: card })
         if (response.status !== 'bound' || !record(response.binding) || response.binding.cardId !== card.cardId ||
             response.binding.profileId !== card.profileId || response.binding.accountId !== card.accountId ||
             !short(response.binding.cardEpoch, 160) || !Number.isSafeInteger(response.binding.userContextId) ||
-            response.binding.url !== card.selectedUrl || response.binding.cardEpoch !== card.cardEpoch ||
+            !sameUrl(response.binding.url, card.selectedUrl) || response.binding.cardEpoch !== card.cardEpoch ||
             response.binding.userContextId !== card.userContextId ||
             response.binding.engineAccountKey !== card.engineAccountKey ||
             response.binding.authorityEpoch !== card.authorityEpoch) reject('BROWSER_BINDING_STALE', 'Selected Browser identity changed before binding')
+        if (binding.closed || closedRuns.has(run.answerId) || run.status !== 'inProgress') reject('BROWSER_RUN_ENDED', 'Browser run ended during binding')
         if (prepared.ownerKey !== getOwnerKey()) reject('BROWSER_OWNER_CHANGED', 'Engine account changed during Browser binding')
-        binding.cards.set(card.cardId, { ...card, ui: response.binding, observation: null, busy: false, uncertain: false })
+        binding.cards.set(card.cardId, { ...card, ui: response.binding, observation: null,
+          busy: false, uncertain: false, pendingTransition: null })
       }
+      if (binding.closed || closedRuns.has(run.answerId) || prepared.ownerKey !== getOwnerKey() || run.status !== 'inProgress') {
+        reject('BROWSER_RUN_ENDED', 'Browser run or account ended before binding completed')
+      }
+      bindings.set(run.answerId, binding)
+      return { cards: [...binding.cards.values()].map(({ cardId, profileId, accountId, permission, ui }) =>
+        ({ cardId, profileId, accountId, permission, userContextId: ui.userContextId, accountStatus: ui.accountStatus || 'unverified' })) }
     } catch (error) {
       // Cancel even the card whose bind response was lost; UI tombstones the
       // run/Card key so a delayed bind cannot resurrect authority.
-      await Promise.allSettled([...prepared.cards.values()].map(card => requestUi({
-        kind: 'cancel', runId: binding.runId, cardId: card.cardId, cardEpoch: card.cardEpoch,
-      })))
+      binding.closed = true
+      closedRuns.add(run.answerId)
+      await cancelCards(binding)
       throw error
+    } finally {
+      if (pendingBindings.get(run.answerId) === binding) pendingBindings.delete(run.answerId)
     }
-    bindings.set(run.answerId, binding)
-    return { cards: [...binding.cards.values()].map(({ cardId, profileId, accountId, permission, ui }) =>
-      ({ cardId, profileId, accountId, permission, userContextId: ui.userContextId, accountStatus: ui.accountStatus || 'unverified' })) }
   }
 
   async function executeDispatch(run, event) {
@@ -182,23 +215,31 @@ export function createBrowserToolService({ sendToUi, getOwnerKey, timeoutMs = 15
     const tool = event?.tool
     validateArgs(tool, args)
     const binding = bindings.get(run?.answerId)
-    if (!binding || binding.closed || binding.ownerKey !== getOwnerKey() || run?.status !== 'inProgress') reject('BROWSER_RUN_ENDED', 'Browser tool run or account is no longer active')
+    if (!binding || binding.closed || closedRuns.has(run?.answerId) || binding.ownerKey !== getOwnerKey() || run?.status !== 'inProgress') reject('BROWSER_RUN_ENDED', 'Browser tool run or account is no longer active')
     const card = binding.cards.get(args.cardId)
     if (!card) reject('BROWSER_CARD_NOT_SELECTED', 'Browser Card was not selected for this run')
     if (card.busy) reject('BROWSER_CARD_BUSY', 'Wait for the current Browser request to finish')
     if (tool !== 'egdesk_browser_observe' && card.permission !== 'interact') reject('BROWSER_INTERACTION_NOT_GRANTED', 'Read-only Browser context does not authorize interaction')
     if (tool === 'egdesk_browser_observe') {
       card.busy = true
-      const pending = requestUi({ kind: 'observe', runId: binding.runId, cardId: card.cardId, binding: card.ui,
+      const pending = requestUi({ kind: 'observe', runId: binding.runId,
+        clientThreadId: binding.clientThreadId, cardId: card.cardId, binding: card.ui,
         options: { textLimit: 60, elementLimit: 80 } })
       binding.pending.add(pending)
       let response
       try { response = await pending } finally { binding.pending.delete(pending); card.busy = false }
       if (binding.closed || binding.ownerKey !== getOwnerKey()) reject('BROWSER_RUN_ENDED', 'Browser run ended during observation')
       const snapshot = observationFrom(response, card.cardId)
+      const transition = card.pendingTransition
+      const transitionRecovered = !!(transition &&
+        snapshot.documentId !== transition.priorDocumentId &&
+        ['interactive', 'complete'].includes(snapshot.readyState) &&
+        !transition.wasAlreadyTrue && checkPostcondition(transition.condition, snapshot, transition.ref))
+      if (transitionRecovered) { card.uncertain = false; card.pendingTransition = null }
       card.observation = { id: randomUUID(), snapshot }
       return { status: 'observed', cardId: card.cardId, observationId: card.observation.id,
-        snapshot, externalEffectVerified: false }
+        snapshot, navigationPostconditionReobserved: transitionRecovered && transition.actionType === 'navigate',
+        documentTransitionPostconditionReobserved: transitionRecovered, externalEffectVerified: false }
     }
     if (card.uncertain) reject('BROWSER_OUTCOME_UNKNOWN', 'A prior Browser action has an unknown outcome; select the context again')
     const observed = card.observation
@@ -214,26 +255,35 @@ export function createBrowserToolService({ sendToUi, getOwnerKey, timeoutMs = 15
     const action = tool === 'egdesk_browser_navigate' ? { type: 'navigate', url: args.url } :
       tool === 'egdesk_browser_click' ? { type: 'click', ref: args.ref } :
       { type: 'fill', ref: args.ref, text: args.text }
+    const wasAlreadyTrue = checkPostcondition(args.postcondition, observed.snapshot, args.ref)
+    const markUnknown = () => {
+      card.uncertain = true
+      if (action.type === 'navigate' ||
+          (action.type === 'click' && ['url', 'visible-text'].includes(args.postcondition.kind))) {
+        card.pendingTransition = { condition: args.postcondition, ref: args.ref || null,
+          priorDocumentId: observed.snapshot.documentId, actionType: action.type, wasAlreadyTrue }
+      }
+    }
     const guard = { documentId: observed.snapshot.documentId, revision: observed.snapshot.revision,
       viewport: observed.snapshot.viewport, url: observed.snapshot.url,
       focusedRef: observed.snapshot.focusedElement?.ref || null,
       ...(args.expectedTarget ? { target: args.expectedTarget } : {}) }
-    const pending = requestUi({ kind: 'act', runId: binding.runId, cardId: card.cardId, binding: card.ui,
+    const pending = requestUi({ kind: 'act', runId: binding.runId,
+      clientThreadId: binding.clientThreadId, cardId: card.cardId, binding: card.ui,
       action, guard, postcondition: args.postcondition })
     binding.pending.add(pending)
     let response
     try { response = await pending }
-    catch (error) { card.uncertain = true; throw error }
+    catch (error) { markUnknown(); throw error }
     finally { binding.pending.delete(pending); card.busy = false }
     if (binding.closed || binding.ownerKey !== getOwnerKey()) reject('BROWSER_RUN_ENDED', 'Browser run ended during action; effect is unknown')
     if (response.status !== 'acted' || !record(response.receipt)) {
-      card.uncertain = true
+      markUnknown()
       reject('BROWSER_ACTION_UNVERIFIED', response.error || 'Browser action was not confirmed; do not retry blindly')
     }
     const after = response.receipt.after
-    const wasAlreadyTrue = checkPostcondition(args.postcondition, observed.snapshot, args.ref)
     const matched = !wasAlreadyTrue && checkPostcondition(args.postcondition, after, args.ref)
-    if (!matched) card.uncertain = true
+    if (!matched) markUnknown()
     return { status: matched ? 'postcondition-observed' : 'postcondition-unverified',
       cardId: card.cardId, action: action.type, dispatchReceipt: response.receipt.dispatchReceipt || null,
       postcondition: { ...args.postcondition, matched, wasAlreadyTrue }, after: after || null,
@@ -245,7 +295,9 @@ export function createBrowserToolService({ sendToUi, getOwnerKey, timeoutMs = 15
     const tool = event?.tool
     validateArgs(tool, event?.arguments)
     const binding = bindings.get(run?.answerId)
-    if (!binding) reject('BROWSER_RUN_ENDED', 'Browser tool run is not bound')
+    if (!binding || binding.closed || closedRuns.has(run?.answerId) || binding.ownerKey !== getOwnerKey() || run?.status !== 'inProgress') {
+      reject('BROWSER_RUN_ENDED', 'Browser tool run or account is no longer active')
+    }
     const callId = event?.callId
     if (tool !== 'egdesk_browser_observe' && !short(callId, 160)) {
       reject('BROWSER_CALL_ID_REQUIRED', 'Native Browser actions require a stable call ID')
@@ -264,21 +316,21 @@ export function createBrowserToolService({ sendToUi, getOwnerKey, timeoutMs = 15
   }
 
   async function cancelRun(run) {
-    const binding = bindings.get(run?.answerId)
+    if (short(run?.answerId, 160)) closedRuns.add(run.answerId)
+    const binding = bindings.get(run?.answerId) || pendingBindings.get(run?.answerId)
     if (!binding) return []
     binding.closed = true
     for (const card of binding.cards.values()) card.observation = null
-    return Promise.allSettled([...binding.cards.values()].map(card => requestUi({
-      kind: 'cancel', runId: binding.runId, cardId: card.cardId, cardEpoch: card.cardEpoch,
-    })))
+    return cancelCards(binding)
   }
   function reset() {
-    const pending = [...bindings.values()].flatMap(binding => {
+    const pending = [...new Set([...bindings.values(), ...pendingBindings.values()])].flatMap(binding => {
       binding.closed = true
-      return [...binding.cards.values()].map(card => requestUi({ kind: 'cancel', runId: binding.runId,
-        cardId: card.cardId, cardEpoch: card.cardEpoch }))
+      return [cancelCards(binding)]
     })
+    for (const answerId of [...bindings.keys(), ...pendingBindings.keys()]) closedRuns.add(answerId)
     bindings.clear()
+    pendingBindings.clear()
     return Promise.allSettled(pending)
   }
   return { prepare, specs, bind, dispatch, cancelRun, reset }
