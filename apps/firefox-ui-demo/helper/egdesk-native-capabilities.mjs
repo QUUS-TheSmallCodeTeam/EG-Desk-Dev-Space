@@ -2,7 +2,12 @@ import { accessSync, constants, realpathSync } from 'node:fs'
 import { spawnSync } from 'node:child_process'
 import path from 'node:path'
 
-export const NATIVE_SCHEMA_VERSION = '0.157.1'
+// 0.157.1 is the existing pinned Context/Reader baseline. 0.160.1 was checked
+// against this CLI's generated experimental schemas and the public App Server
+// contract. Unknown versions remain closed until their protocol is reviewed.
+export const NATIVE_SCHEMA_VERSION = '0.160.1'
+const CONTEXT_CONTRACT_VERSIONS = new Set(['0.157.1', '0.160.1'])
+const QA_POLICY_CONTRACT_VERSIONS = new Set(['0.160.1'])
 
 const MODEL_ID = /^[A-Za-z0-9][A-Za-z0-9._:/-]{0,127}$/
 const REASONING_EFFORTS = new Set(['none', 'minimal', 'low', 'medium', 'high', 'xhigh', 'max', 'ultra'])
@@ -52,5 +57,11 @@ export function resolveCodexExecutable(env = process.env) {
 export function inspectNativeCapabilities({ executable, env = process.env, cwd = process.cwd(), run = spawnSync }) {
   const result = run(executable, ['--version'], { env, cwd, encoding: 'utf8', timeout: 5000, maxBuffer: 4096, stdio: ['ignore', 'pipe', 'pipe'] })
   const version = result.status === 0 ? String(result.stdout || '').trim().match(/^codex-cli (\d+\.\d+\.\d+)$/)?.[1] || null : null
-  return { executable, version, schemaVersion: NATIVE_SCHEMA_VERSION, schemaMatch: version === NATIVE_SCHEMA_VERSION, experimentalApi: true, dynamicTools: version === NATIVE_SCHEMA_VERSION, readerReadOnly: version === NATIVE_SCHEMA_VERSION }
+  const contextContract = CONTEXT_CONTRACT_VERSIONS.has(version)
+  return {
+    executable, version, schemaVersion: NATIVE_SCHEMA_VERSION,
+    schemaMatch: contextContract, experimentalApi: true,
+    dynamicTools: contextContract, readerReadOnly: contextContract,
+    qaReadOnly: QA_POLICY_CONTRACT_VERSIONS.has(version),
+  }
 }
