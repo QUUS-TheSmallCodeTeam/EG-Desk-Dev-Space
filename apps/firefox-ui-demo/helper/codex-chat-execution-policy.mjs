@@ -17,9 +17,14 @@ export async function listNativeMcpServers(request, threadId = null) {
   const servers = [], seen = new Set()
   let cursor = null
   for (let page = 0; page < 8; page++) {
-    const result = await request('mcpServerStatus/list', {
-      limit: 100, ...(threadId ? { threadId } : {}), ...(cursor ? { cursor } : {}),
-    })
+    let result
+    try {
+      result = await request('mcpServerStatus/list', {
+        limit: 100, ...(threadId ? { threadId } : {}), ...(cursor ? { cursor } : {}),
+      })
+    } catch {
+      throw chatError('QA_TOOL_ISOLATION_UNVERIFIED', 'Native MCP inventory is unavailable', 502)
+    }
     if (!Array.isArray(result?.data)) throw chatError('QA_TOOL_ISOLATION_UNVERIFIED', 'Native MCP inventory is unavailable', 502)
     for (const server of result.data) {
       if (typeof server?.name !== 'string' || !server.name || !server.tools || typeof server.tools !== 'object' || Array.isArray(server.tools) ||

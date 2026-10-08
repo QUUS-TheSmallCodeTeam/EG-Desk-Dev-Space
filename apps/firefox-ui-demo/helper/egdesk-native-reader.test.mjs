@@ -15,6 +15,9 @@ function nativeHarness(options = {}) {
         { config: {}, layers: [{ name: { type: 'user' }, config: { mcp_servers: { declared: { command: 'fixture-mcp' } } } }] }
       if (method === 'mcpServerStatus/list') {
         if (params.threadId !== 'parent') readerInventory++
+        if (params.threadId !== 'parent' && readerInventory > 1 && options.badReuseCursor !== undefined) {
+          return { data: [], nextCursor: options.badReuseCursor === 'repeat' ? 'cursor-again' : options.badReuseCursor }
+        }
         return { data: params.threadId === 'parent'
         ? [{ name: 'external', pluginId: 'plugin@example', tools: { write: {} }, resources: [], resourceTemplates: [], toolsError: null },
           { name: 'declared', tools: { read: {} }, resources: [], resourceTemplates: [], toolsError: null },
@@ -128,6 +131,20 @@ test('reused Reader checks MCP isolation again before its next provider turn', a
   await h.reader.read(h.input)
   await assert.rejects(h.reader.read({ ...h.input, intent: 'Refine the reading' }), error => error.code === 'READER_ISOLATION_UNAVAILABLE')
   assert.equal(h.calls.filter(call => call.method === 'turn/start').length, 1)
+})
+
+test('reused Reader rejects empty, wrong-type and repeated MCP cursors without starting another child turn', async () => {
+  for (const badReuseCursor of ['', 7, { token: 'opaque' }, 'repeat']) {
+    const h = nativeHarness({ badReuseCursor })
+    await h.reader.read(h.input)
+    await assert.rejects(h.reader.read({ ...h.input, intent: 'Refine source reading' }),
+      error => error.code === 'READER_ISOLATION_UNAVAILABLE')
+    assert.equal(h.calls.filter(call => call.method === 'turn/start').length, 1)
+    assert.equal(h.reader.sessions.get(h.input.readerSessionId).reusable, false)
+    if (badReuseCursor === 'repeat') {
+      assert.ok(h.calls.some(call => call.method === 'mcpServerStatus/list' && call.params.cursor === 'cursor-again'))
+    }
+  }
 })
 
 test('reused Reader rechecks effective native policy before the second child turn', async () => {
