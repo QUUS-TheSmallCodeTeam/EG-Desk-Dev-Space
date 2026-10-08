@@ -75,6 +75,33 @@ export function verifyCodexLaunchConfiguration(launch, result) {
   return { status: 'verified', configuredModel: launch.configuredModel, configuredEffort: launch.configuredEffort, effectiveModel, effectiveEffort }
 }
 
+// Run the same ordered metadata preflight used by the bridge before making
+// Chat ready. If Memories isolation was requested, *any* failed preflight
+// stops only the App Server child owned by that bridge, including a model or
+// effort mismatch that happens before the Memories feature check.
+export async function preflightOwnedAppServer({ launch, request, cwd, isCurrent = () => true, stopOwnedChild = () => {} }) {
+  let modelProof = null, memoryProof = null, stage = 'model'
+  try {
+    if (launch.hasOverrides) {
+      const config = await request('config/read', { includeLayers: false, cwd })
+      if (!isCurrent()) return { stale: true }
+      modelProof = verifyCodexLaunchConfiguration(launch, config)
+    }
+    stage = 'memories'
+    if (launch.disableMemories) {
+      memoryProof = await verifyCodexMemoryFeatureDisabled(request)
+      if (!isCurrent()) return { stale: true }
+    }
+    return { stale: false, ready: true, reconnectBlocked: false, modelProof, memoryProof }
+  } catch (error) {
+    if (!isCurrent()) return { stale: true }
+    if (launch.disableMemories) {
+      try { stopOwnedChild() } catch {}
+    }
+    return { stale: false, ready: false, reconnectBlocked: true, failedStage: stage, error, modelProof, memoryProof }
+  }
+}
+
 export function resolveCodexExecutable(env = process.env) {
   const selected = env.EGDESK_CODEX_BIN || 'codex'
   const candidates = path.isAbsolute(selected) ? [selected] : selected.includes(path.sep) ? [] : (env.PATH || '').split(path.delimiter).filter(Boolean).map(dir => path.join(dir, selected))
