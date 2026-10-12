@@ -189,7 +189,10 @@ export function assertPreparedSourceResumeEvidence({ observed, expected, stored,
 export function scenarioCoverage(requestedCases, completedCases) {
   assert.ok(Array.isArray(requestedCases) && Array.isArray(completedCases), 'case coverage needs explicit lists');
   const selectedCasesVerified = requestedCases.every(item => completedCases.includes(item));
-  const fullScenarioVerified = selectedCasesVerified && QA_CASES.every(item => requestedCases.includes(item));
+  // Browser negative probes are explicitly test-only, never native-model proof.
+  const fullScenarioVerified = selectedCasesVerified
+    && QA_CASES.every(item => requestedCases.includes(item))
+    && !requestedCases.includes('browser-negative');
   return { selectedCasesVerified, fullScenarioVerified,
     coverage: fullScenarioVerified ? 'full' : 'partial' };
 }
@@ -1902,6 +1905,487 @@ async function browserSnapshot(harness, targetCardId, controlCardId) {
   }, { targetCardId, controlCardId });
 }
 
+const NEGATIVE_PROBE_NAMES = Object.freeze([
+  'stale-revision-before-ui', 'forbidden-scheme-before-ui',
+  'stale-dom-at-actor', 'resized-viewport-at-actor',
+  'observe-only-interaction-denied', 'stop-before-first-bind-accept',
+]);
+
+export function assertBrowserNegativeProbeResults(proof) {
+  assert.equal(proof?.simulatorOnly, true, 'negative probes must be marked test-only');
+  assert.equal(proof?.nativeModelOriginVerified, false,
+    'synthetic Browser probes cannot claim native-model origin');
+  assert.equal(proof?.providerTurns, 0, 'synthetic Browser probes started a provider turn');
+  assert.equal(proof?.actorPhysicalDispatchCounterVerified, false,
+    'negative probes cannot claim an unpublished physical-dispatch counter');
+  assert.deepEqual((proof?.probes || []).map(item => item.name), NEGATIVE_PROBE_NAMES,
+    'bounded Browser negative probes are incomplete');
+  assert.ok(proof.probes.every(item => item.denied === true
+    && item.ownedFixtureContentUnchangedAfterDeniedAction === true
+    && item.cardId === proof.cardId && item.simulatorOnly === true
+    && typeof item.sourceId === 'string' && !!item.sourceId
+    && typeof item.cardEpoch === 'string' && !!item.cardEpoch
+    && typeof item.syntheticRunId === 'string'
+    && item.syntheticRunId.startsWith('qa-browser-simulator-')),
+  'Browser negative probe lacks an owned-Card denial and independent no-effect check');
+  const [revision, scheme, dom, resize, permission, stop] = proof.probes;
+  assert.ok(revision.code === 'BROWSER_OBSERVATION_STALE' && revision.uiActRequests === 0
+    && scheme.code === 'INVALID_BROWSER_TOOL' && scheme.serviceActRequests === 0
+    && scheme.uiProtocolDenied === true
+    && dom.code === 'BROWSER_ACTION_UNVERIFIED' && dom.uiActRequests === 1
+    && resize.code === 'BROWSER_ACTION_UNVERIFIED' && resize.uiActRequests === 1
+    && permission.code === 'BROWSER_INTERACTION_NOT_GRANTED'
+    && permission.serviceActRequests === 0 && permission.uiProtocolDenied === true
+    && ['BROWSER_BINDING_STALE', 'BROWSER_RUN_ENDED'].includes(stop.code)
+    && stop.cancelledBeforeBindAccepted === true && stop.uiActRequests === 0,
+  'Browser negative probe receipts do not match the scoped B/UI guard outcomes');
+  assert.equal(proof.requestsScopedToOwnedCard, true,
+    'negative probes targeted a Card other than the newly owned fixture');
+  assert.equal(proof.preexistingBrowserCardStylesUnchanged, true,
+    'negative probes changed a preexisting Browser Card inline style');
+  assert.equal(proof.canvasPanZoomUnchanged, true,
+    'negative probes moved the Canvas camera');
+  return true;
+}
+
+const probeId = prefix => `${prefix}-${randomBytes(8).toString('hex')}`;
+
+async function ownedNegativeBrowserSnapshot(harness, cardId, ownerTag, fixture) {
+  const observed = await chrome(harness, async ({ cardId, ownerTag }) => {
+    const card = document.getElementById(cardId);
+    if (!card?.isConnected || !card.classList?.contains('egd-browser-card')
+        || card.dataset.egdeskQaNegativeOwner !== ownerTag) {
+      throw new Error('negative probe Card is not the newly owned QA fixture');
+    }
+    const binding = card._browserControls.toolBinding();
+    const snapshot = await card._browserControls.toolObserve(binding,
+      { textLimit: 80, elementLimit: 80 });
+    return { binding, snapshot,
+      inputValue: snapshot.interactiveElements?.find(item => item.label === 'QA note')?.value || '',
+      cardStyle: { width: card.style.width, height: card.style.height } };
+  }, { cardId, ownerTag });
+  assert.equal(observed.binding?.cardId, cardId, 'negative probe Card binding changed');
+  assert.equal(observed.binding?.accountId, '', 'negative probe Card is account-linked');
+  assert.equal(observed.snapshot?.cardId, cardId, 'negative probe actor observed another Card');
+  assert.equal(observed.snapshot?.url, fixture.url, 'negative probe navigated from the owned fixture');
+  assert.ok(observed.snapshot.text?.includes(fixture.marker),
+    'negative probe actor did not observe the exact local fixture marker');
+  assert.ok(Number.isSafeInteger(observed.snapshot.revision)
+    && typeof observed.snapshot.documentId === 'string' && observed.snapshot.documentId
+    && observed.snapshot.viewport, 'negative probe actor lacks document/revision/viewport evidence');
+  return observed;
+}
+
+function assertNegativeNoEffect(before, after, label) {
+  assert.equal(after.snapshot.url, before.snapshot.url, `${label} changed the fixture URL`);
+  assert.equal(after.snapshot.documentId, before.snapshot.documentId,
+    `${label} changed the fixture document`);
+  assert.deepEqual(after.snapshot.text, before.snapshot.text,
+    `${label} changed the fixture visible DOM`);
+  assert.equal(after.inputValue, before.inputValue, `${label} changed the harmless fixture input`);
+  return true;
+}
+
+async function selectOwnedProbeSource(harness, thread, cardId, ownerTag, permission, fixture) {
+  assert.ok(['observe', 'interact'].includes(permission), 'negative probe permission is invalid');
+  await chrome(harness, ({ cardId, ownerTag }) => {
+    const card = document.getElementById(cardId);
+    if (!card?.isConnected || card.dataset.egdeskQaNegativeOwner !== ownerTag)
+      throw new Error('negative probe focus escaped the owned fixture Card');
+    window.__egdesk.cardRuntime.focusCard(card);
+    return true;
+  }, { cardId, ownerTag });
+  await harness.click(`${selectorForId(cardId)} .egd-card-menu`);
+  await harness.click(permission === 'interact'
+    ? '.egd-browser-menu-item[title^="이 Browser만 이번 Chat"]'
+    : '.egd-browser-menu-item[title^="현재 Browser의 읽기 자료만"]');
+  const source = await chrome(harness, ({ threadId, cardId, ownerTag }) => {
+    const card = document.getElementById(cardId);
+    if (!card?.isConnected || card.dataset.egdeskQaNegativeOwner !== ownerTag)
+      throw new Error('Browser probe selection escaped the owned fixture Card');
+    const selected = window.__egdesk.browserAgentTools.selectedSources(threadId);
+    if (selected.length !== 1 || selected[0].sourceRef?.viewId !== cardId)
+      throw new Error('negative probe selected more than the owned Browser Card');
+    return selected[0];
+  }, { threadId: thread.id, cardId, ownerTag });
+  assert.equal(source.browserToolPermission, permission,
+    'negative probe UI permission differs from the selected menu action');
+  assert.equal(source.selectedByUser, true, 'negative probe lacks the rendered UI selection');
+  assert.equal(source.sourceRef?.uri, fixture.url, 'negative probe selected another URL');
+  assert.equal(source.sourceRef?.accountId, '', 'negative probe selected an account-linked Card');
+  assert.equal(source.browserToolSelection?.threadId, thread.wireClientThreadId,
+    'negative probe source token belongs to another Chat thread');
+  return source;
+}
+
+async function newNegativeService(harness, thread, cardId, source, deadlineMs,
+  { holdFirstBind = false } = {}) {
+  // This B service instance uses a synthetic run and direct test-only UI
+  // dispatcher. It never registers with A or claims model/native origin.
+  const { createBrowserToolService } = await import('../helper/egdesk-browser-tool-runtime.mjs');
+  const ownerKey = source.browserToolIdentity?.engineAccountKey;
+  assert.ok(typeof ownerKey === 'string' && ownerKey,
+    'negative probe has no current Engine owner binding');
+  const trace = { requests: [], heldBindRequest: null, releaseBind: null, binding: null };
+  const uiDispatch = async request => {
+    assertBeforeDeadline(deadlineMs);
+    assert.equal(request.cardId, cardId, 'negative probe requested another Card');
+    assert.equal(request.clientThreadId, thread.wireClientThreadId,
+      'negative probe requested another Chat thread');
+    assert.equal(request.targetCardEpoch, source.browserToolIdentity.cardEpoch,
+      'negative probe crossed Card epochs');
+    const response = await chrome(harness,
+      request => window.__egdesk.browserAgentTools.dispatch(request), request);
+    trace.requests.push({ kind: request.kind, requestId: request.requestId,
+      status: response?.status || null, error: String(response?.error || '').slice(0, 200) });
+    if (request.kind === 'bind' && response?.binding) trace.binding = response.binding;
+    return response;
+  };
+  const sendToUi = request => {
+    if (holdFirstBind && request.kind === 'bind' && !trace.heldBindRequest) {
+      trace.heldBindRequest = request;
+      return new Promise(resolve => { trace.releaseBind = () => resolve(uiDispatch(request)); });
+    }
+    return uiDispatch(request);
+  };
+  const service = createBrowserToolService({ sendToUi, getOwnerKey: () => ownerKey });
+  const prepared = service.prepare({ selectedSources: [source], ownerKey });
+  const runId = probeId('qa-browser-simulator');
+  const run = { answerId: `qa-browser-simulator/${runId}`, runId,
+    clientThreadId: thread.wireClientThreadId, status: 'inProgress' };
+  return { service, prepared, run, trace, uiDispatch };
+}
+
+async function expectNegativeCode(operation, codes, label) {
+  try { await operation; assert.fail(`${label} unexpectedly succeeded`); }
+  catch (error) {
+    assert.ok(codes.includes(error?.code),
+      `${label} returned ${error?.code || error?.message || 'unknown'} instead of ${codes.join('/')}`);
+    return error.code;
+  }
+}
+
+async function runBrowserNegativeProbes(harness, fixture, deadlineMs, result) {
+  assertTurnTimeBudget(deadlineMs);
+  result.browserNegativeStage = 'fixture-preflight';
+  const bService = await import('../helper/egdesk-browser-tool-runtime.mjs');
+  assert.equal(typeof bService.createBrowserToolService, 'function',
+    'current B Browser tool service is unavailable; no UI probes started');
+  await assertBrowserFixtureServerReady(fixture);
+  const initial = await chrome(harness, () => ({
+    cards: [...document.querySelectorAll('.egd-browser-card')].map(card =>
+      ({ id: card.id, style: card.style.cssText })).sort((a, b) => a.id.localeCompare(b.id)),
+  }));
+  const ownerTag = probeId('lane-c-negative-owner');
+  const cardId = await chrome(harness, ({ url, ownerTag }) => {
+    const card = window.__egdesk.cardRuntime.openBrowserCard(url, { openMode: 'new' });
+    card.dataset.egdeskQaNegativeOwner = ownerTag;
+    return card.id;
+  }, { url: fixture.url, ownerTag });
+  result.browserNegativeOwnedCardId = cardId;
+  result.browserNegativeStage = 'owned-card-actor-ready';
+  await waitUntil(async () => {
+    try { return await ownedNegativeBrowserSnapshot(harness, cardId, ownerTag, fixture); }
+    catch { return null; }
+  }, value => value?.snapshot?.text?.includes(fixture.marker),
+  { timeoutMs: 15000, intervalMs: 200 });
+  const thread = await newQaThreadInVisibleChat(harness, 'QA Browser negative simulator', deadlineMs);
+  const initialChat = await chatIdentity(harness);
+  assert.equal(initialChat.threadId, thread.id, 'negative probe Chat focus changed');
+  assert.equal(initialChat.conversationId, null, 'negative probe room already has a native conversation');
+  assert.deepEqual(initialChat.runs, [], 'negative probe room already contains a provider run');
+  const probeCameraBaseline = await chrome(harness, () => ({
+    pan: { ...window.__egdesk.state.panTarget }, zoom: window.__egdesk.state.zoomTarget,
+  }));
+  const probes = [];
+  result.browserNegativeProbeReceipts = probes;
+  const bound = async permission => {
+    assertBeforeDeadline(deadlineMs);
+    const source = await selectOwnedProbeSource(harness, thread, cardId, ownerTag,
+      permission, fixture);
+    const unit = await newNegativeService(harness, thread, cardId, source, deadlineMs);
+    assert.deepEqual(unit.service.specs(unit.prepared).map(item => item.name),
+      permission === 'observe' ? [BROWSER_TOOL_NAMES.observe]
+        : [BROWSER_TOOL_NAMES.observe, 'egdesk_browser_navigate',
+          BROWSER_TOOL_NAMES.click, BROWSER_TOOL_NAMES.fill],
+    'test-only B service exposed the wrong permission-bound catalog');
+    const receipt = await unit.service.bind(unit.run, unit.prepared);
+    assert.equal(receipt.cards?.length, 1, 'test-only B service did not bind one Card');
+    assert.equal(receipt.cards[0].cardId, cardId, 'test-only B service bound another Card');
+    assert.equal(unit.trace.binding?.cardEpoch, source.browserToolIdentity.cardEpoch,
+      'test-only UI binding crossed Card epochs');
+    return { ...unit, source };
+  };
+  const cancel = async unit => {
+    const receipts = await unit.service.cancelRun(unit.run);
+    assert.ok(receipts.some(item => item.status === 'fulfilled'
+      && item.value?.status === 'cancelled'),
+    'test-only B run did not receive the UI cancel tombstone');
+  };
+  const observe = async unit => {
+    const receipt = await unit.service.dispatch(unit.run, {
+      tool: BROWSER_TOOL_NAMES.observe, callId: probeId('qa-observe'),
+      arguments: { cardId },
+    });
+    assert.equal(receipt.status, 'observed', 'test-only B service observation is unavailable');
+    assert.equal(receipt.cardId, cardId, 'test-only B service observed another Card');
+    assert.equal(receipt.snapshot?.url, fixture.url, 'test-only B service observed another URL');
+    assert.ok(receipt.snapshot?.text?.includes(fixture.marker),
+      'test-only B service observation lost the fixture marker');
+    assert.ok(typeof receipt.snapshot.documentId === 'string'
+      && Number.isSafeInteger(receipt.snapshot.revision) && receipt.snapshot.viewport,
+    'test-only B service observation lacks actor document metadata');
+    return receipt;
+  };
+  const fillArgs = (observed, text) => {
+    const target = observed.snapshot.interactiveElements.find(item => item.label === 'QA note');
+    assert.ok(target && target.tag === 'input' && target.value === '',
+      'owned QA fixture has no empty harmless input');
+    return { cardId, observationId: observed.observationId,
+      expectedRevision: observed.snapshot.revision,
+      ref: target.ref, expectedTarget: target, text,
+      postcondition: { kind: 'target-value', value: text } };
+  };
+  const actCount = unit => unit.trace.requests.filter(item => item.kind === 'act').length;
+  const directUiAct = (unit, action, guard) => unit.uiDispatch({
+    version: 1, requestId: probeId('qa-ui-negative'),
+    runId: unit.run.runId, clientThreadId: unit.run.clientThreadId,
+    cardId, targetCardEpoch: unit.source.browserToolIdentity.cardEpoch,
+    deadlineMs: Date.now() + 15000, kind: 'act', binding: unit.trace.binding,
+    action, guard,
+  });
+  const actorDenial = unit => {
+    const denied = unit.trace.requests.filter(item => item.kind === 'act').at(-1);
+    assert.equal(denied?.status, 'rejected', 'stale actor action was not rejected by the UI');
+    assert.match(denied.error, /stale|changed|viewport/i,
+      'UI actor rejection did not identify a stale document or viewport');
+    return denied;
+  };
+  const record = (name, code, unit, extra = {}) => probes.push({ name, code,
+    cardId, sourceId: unit.source.id,
+    cardEpoch: unit.source.browserToolIdentity.cardEpoch,
+    syntheticRunId: unit.run.runId,
+    denied: true, ownedFixtureContentUnchangedAfterDeniedAction: true,
+    simulatorOnly: true, ...extra });
+
+  // These first two requests are denied by B before any UI act request.
+  result.browserNegativeStage = 'service-pre-act-denials';
+  let unit = await bound('interact');
+  try {
+    const observed = await observe(unit);
+    assert.equal(observed.status, 'observed', 'test-only B observe was not attested');
+    const baseline = await ownedNegativeBrowserSnapshot(harness, cardId, ownerTag, fixture);
+    const args = fillArgs(observed, 'QA_STALE_REVISION_MUST_NOT_FILL');
+    const beforeActs = actCount(unit);
+    const code = await expectNegativeCode(unit.service.dispatch(unit.run, {
+      tool: BROWSER_TOOL_NAMES.fill, callId: probeId('qa-stale-revision'),
+      arguments: { ...args, expectedRevision: args.expectedRevision + 1 },
+    }), ['BROWSER_OBSERVATION_STALE'], 'stale-revision probe');
+    assert.equal(actCount(unit), beforeActs, 'stale revision reached the UI actor');
+    assertNegativeNoEffect(baseline,
+      await ownedNegativeBrowserSnapshot(harness, cardId, ownerTag, fixture), 'stale revision');
+    record('stale-revision-before-ui', code, unit, { uiActRequests: 0,
+      observedRevision: observed.snapshot.revision });
+
+    for (const url of ['javascript:alert(1)', 'data:text/html,qa', 'file:///qa-denied']) {
+      const deniedCode = await expectNegativeCode(unit.service.dispatch(unit.run, {
+        tool: 'egdesk_browser_navigate', callId: probeId('qa-scheme'),
+        arguments: { cardId, observationId: observed.observationId,
+          expectedRevision: observed.snapshot.revision,
+          url, postcondition: { kind: 'url', value: url } },
+      }), ['INVALID_BROWSER_TOOL'], 'forbidden-scheme probe');
+      assert.equal(deniedCode, 'INVALID_BROWSER_TOOL');
+    }
+    assert.equal(actCount(unit), beforeActs, 'forbidden schemes reached the UI actor');
+    const uiScheme = await directUiAct(unit,
+      { type: 'navigate', url: 'data:text/html,QA_DENIED' },
+      { documentId: observed.snapshot.documentId,
+        revision: observed.snapshot.revision, viewport: observed.snapshot.viewport,
+        url: observed.snapshot.url,
+        focusedRef: observed.snapshot.focusedElement?.ref || null });
+    assert.equal(uiScheme?.status, 'rejected', 'actual UI accepted a forbidden navigation scheme');
+    assert.match(String(uiScheme.error || ''), /http|navigation/i,
+      'actual UI scheme denial has no bounded reason');
+    assertNegativeNoEffect(baseline,
+      await ownedNegativeBrowserSnapshot(harness, cardId, ownerTag, fixture), 'forbidden schemes');
+    record('forbidden-scheme-before-ui', 'INVALID_BROWSER_TOOL', unit,
+      { serviceActRequests: 0, uiProtocolActRequests: 1, uiProtocolDenied: true,
+        deniedSchemes: ['javascript:', 'data:', 'file:'] });
+  } finally { await cancel(unit); }
+
+  // A controlled click changes only the newly owned fixture DOM. Reusing the
+  // older B observation must fail in the real JSWindowActor before fill input.
+  result.browserNegativeStage = 'actor-stale-dom';
+  unit = await bound('interact');
+  try {
+    const observed = await observe(unit);
+    const inputArgs = fillArgs(observed, 'QA_STALE_DOM_MUST_NOT_FILL');
+    const button = observed.snapshot.interactiveElements.find(item => item.label === 'Reveal QA details');
+    assert.ok(button?.ref && button.tag === 'button', 'owned fixture button was not observed');
+    const setup = await chrome(harness, ({ cardId, ownerTag, ref }) => {
+      const card = document.getElementById(cardId);
+      if (!card?.isConnected || card.dataset.egdeskQaNegativeOwner !== ownerTag)
+        throw new Error('test setup escaped the owned fixture Card');
+      return window.__egdesk.browserAgent.act(cardId, { type: 'click', ref }, { settleMs: 150 });
+    }, { cardId, ownerTag, ref: button.ref });
+    assert.equal(setup?.ok, true, 'controlled fixture-only DOM mutation did not execute');
+    const changed = await ownedNegativeBrowserSnapshot(harness, cardId, ownerTag, fixture);
+    assert.ok(changed.snapshot.revision > observed.snapshot.revision
+      && changed.snapshot.text.includes('Newly revealed node'),
+    'controlled fixture DOM mutation did not invalidate the prior observation');
+    assert.ok(changed.snapshot.documentId === observed.snapshot.documentId
+      && same(changed.snapshot.viewport, observed.snapshot.viewport),
+    'stale-DOM setup also changed document or viewport');
+    const code = await expectNegativeCode(unit.service.dispatch(unit.run, {
+      tool: BROWSER_TOOL_NAMES.fill, callId: probeId('qa-stale-dom'), arguments: inputArgs,
+    }), ['BROWSER_ACTION_UNVERIFIED'], 'stale-DOM actor probe');
+    const denied = actorDenial(unit);
+    assertNegativeNoEffect(changed,
+      await ownedNegativeBrowserSnapshot(harness, cardId, ownerTag, fixture), 'stale DOM');
+    record('stale-dom-at-actor', code, unit, { uiActRequests: 1,
+      observedRevision: observed.snapshot.revision,
+      changedRevision: changed.snapshot.revision,
+      setupAlsoChangedFocusedRef: (changed.snapshot.focusedElement?.ref || null)
+        !== (observed.snapshot.focusedElement?.ref || null),
+      uiStatus: denied.status, uiReason: denied.error });
+  } finally { await cancel(unit); }
+
+  result.browserNegativeStage = 'actor-resized-viewport';
+  unit = await bound('interact');
+  let originalCardStyle = null;
+  try {
+    const observed = await observe(unit);
+    const inputArgs = fillArgs(observed, 'QA_RESIZE_MUST_NOT_FILL');
+    originalCardStyle = await chrome(harness, ({ cardId, ownerTag }) => {
+      const card = document.getElementById(cardId);
+      if (!card?.isConnected || card.dataset.egdeskQaNegativeOwner !== ownerTag)
+        throw new Error('resize escaped the owned fixture Card');
+      const original = { width: card.style.width, height: card.style.height };
+      const width = Math.max(340, Math.round(card.getBoundingClientRect().width) - 93);
+      card.style.width = `${width}px`;
+      return original;
+    }, { cardId, ownerTag });
+    const resized = await waitUntil(async () =>
+      ownedNegativeBrowserSnapshot(harness, cardId, ownerTag, fixture),
+    value => value?.snapshot?.viewport?.width !== observed.snapshot.viewport.width,
+    { timeoutMs: 10000, intervalMs: 200 });
+    assert.ok(resized.snapshot.documentId === observed.snapshot.documentId
+      && same(resized.snapshot.text, observed.snapshot.text)
+      && (resized.snapshot.focusedElement?.ref || null)
+        === (observed.snapshot.focusedElement?.ref || null),
+    'resize setup also changed document, DOM text or keyboard focus');
+    const code = await expectNegativeCode(unit.service.dispatch(unit.run, {
+      tool: BROWSER_TOOL_NAMES.fill, callId: probeId('qa-resize'), arguments: inputArgs,
+    }), ['BROWSER_ACTION_UNVERIFIED'], 'resized-viewport actor probe');
+    const denied = actorDenial(unit);
+    assertNegativeNoEffect(resized,
+      await ownedNegativeBrowserSnapshot(harness, cardId, ownerTag, fixture), 'resized viewport');
+    record('resized-viewport-at-actor', code, unit, { uiActRequests: 1,
+      observedViewport: observed.snapshot.viewport, resizedViewport: resized.snapshot.viewport,
+      uiStatus: denied.status, uiReason: denied.error });
+  } finally {
+    await cancel(unit);
+    if (originalCardStyle) await chrome(harness, ({ cardId, ownerTag, original }) => {
+      const card = document.getElementById(cardId);
+      if (!card?.isConnected || card.dataset.egdeskQaNegativeOwner !== ownerTag)
+        throw new Error('resize restore escaped the owned fixture Card');
+      card.style.width = original.width; card.style.height = original.height;
+      return true;
+    }, { cardId, ownerTag, original: originalCardStyle });
+  }
+
+  result.browserNegativeStage = 'observe-permission-denial';
+  unit = await bound('observe');
+  try {
+    const observed = await observe(unit);
+    const baseline = await ownedNegativeBrowserSnapshot(harness, cardId, ownerTag, fixture);
+    const button = observed.snapshot.interactiveElements.find(item => item.label === 'Reveal QA details');
+    assert.ok(button?.ref && button.tag === 'button', 'observe-only fixture button is unavailable');
+    const beforeActs = actCount(unit);
+    const code = await expectNegativeCode(unit.service.dispatch(unit.run, {
+      tool: BROWSER_TOOL_NAMES.click, callId: probeId('qa-escalation'),
+      arguments: { cardId, observationId: observed.observationId,
+        expectedRevision: observed.snapshot.revision, ref: button.ref,
+        expectedTarget: button, postcondition: { kind: 'visible-text', value: 'Newly revealed node' } },
+    }), ['BROWSER_INTERACTION_NOT_GRANTED'], 'observe-to-interact escalation');
+    assert.equal(actCount(unit), beforeActs, 'observe-only escalation reached the UI actor');
+    const uiEscalation = await directUiAct(unit,
+      { type: 'click', ref: button.ref },
+      { documentId: observed.snapshot.documentId,
+        revision: observed.snapshot.revision, viewport: observed.snapshot.viewport,
+        url: observed.snapshot.url, focusedRef: observed.snapshot.focusedElement?.ref || null,
+        target: button });
+    assert.equal(uiEscalation?.status, 'rejected',
+      'actual UI accepted an observe-only interaction escalation');
+    assert.match(String(uiEscalation.error || ''), /interaction was not selected/i,
+      'actual UI permission denial has no bounded reason');
+    assertNegativeNoEffect(baseline,
+      await ownedNegativeBrowserSnapshot(harness, cardId, ownerTag, fixture), 'observe-only escalation');
+    record('observe-only-interaction-denied', code, unit, { serviceActRequests: 0,
+      uiProtocolActRequests: 1, uiProtocolDenied: true, selectedPermission: 'observe' });
+  } finally { await cancel(unit); }
+
+  result.browserNegativeStage = 'stop-before-first-bind';
+  const stopSource = await selectOwnedProbeSource(harness, thread, cardId, ownerTag,
+    'interact', fixture);
+  unit = await newNegativeService(harness, thread, cardId, stopSource, deadlineMs,
+    { holdFirstBind: true });
+  unit.source = stopSource;
+  const stoppedBaseline = await ownedNegativeBrowserSnapshot(harness, cardId, ownerTag, fixture);
+  const binding = unit.service.bind(unit.run, unit.prepared);
+  try {
+    await waitUntil(() => unit.trace.heldBindRequest, Boolean,
+      { timeoutMs: 5000, intervalMs: 50 });
+    const cancelled = await unit.service.cancelRun(unit.run);
+    assert.ok(cancelled.some(item => item.status === 'fulfilled'
+      && item.value?.status === 'cancelled'),
+    'stop-before-bind did not install the actual UI cancel tombstone');
+    unit.trace.releaseBind();
+    const code = await expectNegativeCode(binding,
+      ['BROWSER_BINDING_STALE', 'BROWSER_RUN_ENDED'], 'late first bind');
+    assert.ok(unit.trace.requests.some(item => item.kind === 'bind' && item.status === 'rejected'),
+      'late first bind was not denied by the actual UI protocol');
+    const requestsBeforeAfterStop = unit.trace.requests.length;
+    await expectNegativeCode(unit.service.dispatch(unit.run, {
+      tool: BROWSER_TOOL_NAMES.observe, callId: probeId('qa-after-stop'),
+      arguments: { cardId },
+    }), ['BROWSER_RUN_ENDED'], 'observe after stop');
+    assert.equal(unit.trace.requests.length, requestsBeforeAfterStop,
+      'stopped synthetic run sent a new UI request');
+    assertNegativeNoEffect(stoppedBaseline,
+      await ownedNegativeBrowserSnapshot(harness, cardId, ownerTag, fixture), 'stop-before-bind');
+    record('stop-before-first-bind-accept', code, unit,
+      { uiActRequests: 0, cancelledBeforeBindAccepted: true });
+  } finally {
+    try { await unit.service.cancelRun(unit.run); } finally { unit.trace.releaseBind?.(); }
+  }
+
+  const final = await chrome(harness, initialCards => ({
+    cards: initialCards.map(item => {
+      const card = document.getElementById(item.id);
+      return { id: item.id, style: card?.style.cssText ?? null };
+    }),
+    pan: { ...window.__egdesk.state.panTarget }, zoom: window.__egdesk.state.zoomTarget,
+  }), initial.cards);
+  assert.deepEqual(final.cards, initial.cards,
+    'test-only Browser probes changed a preexisting Browser Card');
+  assert.ok(same(final.pan, probeCameraBaseline.pan)
+    && final.zoom === probeCameraBaseline.zoom,
+    'test-only Browser probes moved the Canvas camera');
+  const finalChat = await chatIdentity(harness);
+  assert.equal(finalChat.threadId, thread.id, 'negative probe switched Chat threads');
+  assert.equal(finalChat.conversationId, null, 'negative probe created a native conversation');
+  assert.deepEqual(finalChat.runs, [], 'negative probe started a native provider run');
+  const proof = { simulatorOnly: true, nativeModelOriginVerified: false,
+    providerTurns: 0, actorPhysicalDispatchCounterVerified: false,
+    cardId, probes,
+    requestsScopedToOwnedCard: true,
+    preexistingBrowserCardStylesUnchanged: true, canvasPanZoomUnchanged: true };
+  assertBrowserNegativeProbeResults(proof);
+  result.browserNegativeStage = 'all-denials-verified-test-only';
+  return proof;
+}
+
 async function main() {
   const deadlineMs = parseDeadlineUtc(required(option('--deadline-utc'), '--deadline-utc is required for real runs'));
   const cases = parseCases(required(option('--cases'), '--cases is required for real runs'));
@@ -1909,8 +2393,9 @@ async function main() {
   const resumeSource = parseResumeSourceOptions({ threadId: option('--resume-source'),
     root: option('--resume-source-root'), sourceId: option('--resume-source-id'),
     originalHash: option('--resume-source-original-sha256') }, cases, resumeEmptyThreadId);
-  if (cases.includes('browser-negative')) throw new Error('Browser negative guards are not wired to live post-stop receipts; no turn sent');
-  const browserFixture = cases.includes('browser')
+  if (cases.includes('browser-negative')) assert.deepEqual(cases, ['browser-negative'],
+    'Browser simulator probes must run separately from provider cases');
+  const browserFixture = cases.includes('browser') || cases.includes('browser-negative')
     ? assertBrowserFixtureConfig(
       required(option('--browser-fixture-url'), '--browser-fixture-url is required for Browser QA'),
       required(option('--browser-fixture-marker'), '--browser-fixture-marker is required for Browser QA'))
@@ -1931,6 +2416,18 @@ async function main() {
     const bridge = await assertBridgePreflight();
     const nativeContractFingerprint = assertNativeQaCapabilityBeforeTurn(bridge.health);
     assertBeforeDeadline(deadlineMs);
+    if (cases.includes('browser-negative')) {
+      result.kind = 'browser-negative-test-only-simulator';
+      result.browserNegativeAuthority = 'test-only-synthetic-B-service-and-owned-UI';
+      result.nativeModelOriginVerified = false;
+      result.providerTurn = 'not-run-test-only-simulator';
+      result.browserNegative = await runBrowserNegativeProbes(harness, browserFixture, deadlineMs, result);
+      result.completedCases.push('browser-negative');
+      Object.assign(result, scenarioCoverage(cases, result.completedCases));
+      result.realExecutionVerified = false;
+      result.providerTurn = 'not-run-test-only-simulator';
+      return;
+    }
     const qaCwd = resumeSource
       ? existingQaRunDirectory(manifest.realTurnCwd, resumeSource.root)
       : createQaRunDirectory(manifest.realTurnCwd);
