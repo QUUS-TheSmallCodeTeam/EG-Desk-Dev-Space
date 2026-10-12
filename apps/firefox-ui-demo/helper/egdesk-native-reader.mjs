@@ -1,4 +1,5 @@
 import { chatError, publicText } from './codex-chat-values.mjs'
+import { disabledNativeMcpConfig, readNativeDirectMcpServerIds } from './codex-chat-execution-policy.mjs'
 import { createHash } from 'node:crypto'
 
 const fail = (code, message) => chatError(code, message, 409)
@@ -30,27 +31,56 @@ export class NativeReaderClient {
   }
 
   async mcpInventory(threadId) {
-    const servers = []
-    let cursor
+    const servers = [], seen = new Set()
+    let cursor = null
     for (let page = 0; page < 8; page++) {
       const result = await this.request('mcpServerStatus/list', { threadId, limit: 100, ...(cursor ? { cursor } : {}) })
       if (!Array.isArray(result?.data)) throw fail('READER_ISOLATION_UNAVAILABLE', 'Cannot verify Reader tool isolation')
       servers.push(...result.data)
-      if (!result.nextCursor) return servers
+      if (result.nextCursor == null) return servers
+      if (typeof result.nextCursor !== 'string' || !result.nextCursor || seen.has(result.nextCursor)) {
+        throw fail('READER_ISOLATION_UNAVAILABLE', 'Reader MCP inventory cursor did not advance')
+      }
+      seen.add(result.nextCursor)
       cursor = result.nextCursor
     }
     throw fail('READER_ISOLATION_UNAVAILABLE', 'MCP inventory exceeds the isolation verification limit')
+  }
+
+  async assertMcpIsolation(threadId) {
+    const inventory = await this.mcpInventory(threadId)
+    if (inventory.some(server => !server?.tools || typeof server.tools !== 'object' || Array.isArray(server.tools) ||
+        !Array.isArray(server.resources) || !Array.isArray(server.resourceTemplates) ||
+        Object.keys(server.tools).length || server.resources.length || server.resourceTemplates.length || server.toolsError != null)) {
+      throw fail('READER_ISOLATION_UNAVAILABLE', 'Reader still exposes external MCP capabilities or has an unverifiable catalog')
+    }
+  }
+
+  assertEffectivePolicy(response, expectedThreadId, configuration) {
+    if (response?.thread?.id !== expectedThreadId || response.sandbox?.type !== 'readOnly' ||
+        response.sandbox.networkAccess !== false || response.approvalPolicy !== 'never') {
+      throw fail('READER_ISOLATION_UNAVAILABLE', 'Reader did not confirm the same read-only, offline and never-approval thread')
+    }
+    if ((typeof response.model === 'string' && response.model !== configuration.model) ||
+        (typeof response.reasoningEffort === 'string' && response.reasoningEffort !== configuration.effort)) {
+      throw fail('READER_CONFIGURATION_MISMATCH', 'Native Reader reported a different model or reasoning effort')
+    }
   }
 
   async startChild(options, configuration) {
     this.assertOwner(options.ownerKey, options.signal)
     const servers = await this.mcpInventory(options.parentThreadId)
     this.assertOwner(options.ownerKey, options.signal)
+    let mcpIsolation
+    try {
+      const directIds = await readNativeDirectMcpServerIds(this.request, options.cwd)
+      mcpIsolation = disabledNativeMcpConfig(servers, directIds)
+    } catch { throw fail('READER_ISOLATION_UNAVAILABLE', 'Reader cannot classify native MCP configuration') }
+    this.assertOwner(options.ownerKey, options.signal)
     const config = {
-      features: { shell_tool: false, apps: false, hooks: false, multi_agent: false, goals: false, remote_plugin: false, skill_mcp_dependency_install: false, code_mode: { enabled: false } },
+      features: { shell_tool: false, apps: false, hooks: false, multi_agent: false, goals: false, plugins: false, remote_plugin: false, skill_mcp_dependency_install: false, code_mode: { enabled: false } },
       web_search: 'disabled', tools: { view_image: false },
-      mcp_servers: Object.fromEntries(servers.map(server => [server.name, { enabled: false }])),
-      plugins: Object.fromEntries(servers.filter(server => server.pluginId).map(server => [server.pluginId, { enabled: false }])),
+      ...mcpIsolation,
     }
     const started = await this.request('thread/start', {
       ephemeral: true, cwd: options.cwd, sandbox: 'read-only', approvalPolicy: 'never',
@@ -60,17 +90,17 @@ export class NativeReaderClient {
     })
     const id = started?.thread?.id
     if (typeof id !== 'string') throw fail('READER_START_FAILED', 'Reader did not return a native thread ID')
-    const child = { id, ownerKey: options.ownerKey, sessionId: options.readerSessionId, configuration, task: null, turns: 0, lastStatus: 'idle', reusable: true, activeTurnId: null, starting: false, unknownStart: false, terminalReceipts: new Set() }
+    const child = { id, ownerKey: options.ownerKey, sessionId: options.readerSessionId, configuration, isolationConfig: config,
+      task: null, turns: 0, lastStatus: 'idle', reusable: true, activeTurnId: null, starting: false, unknownStart: false, terminalReceipts: new Set() }
     this.children.set(id, child)
     try {
       this.assertOwner(options.ownerKey, options.signal)
-      if (started.sandbox?.type !== 'readOnly') throw fail('READER_ISOLATION_UNAVAILABLE', 'Reader did not receive the required read-only sandbox')
-      if (typeof started.model === 'string' && started.model !== configuration.model) throw fail('READER_CONFIGURATION_MISMATCH', 'Native Reader thread reported a different model')
-      const inventory = await this.mcpInventory(id)
-      if (inventory.some(server => Object.keys(server.tools || {}).length || server.toolsError)) throw fail('READER_ISOLATION_UNAVAILABLE', 'Reader still exposes external tools or has an unverifiable tool catalog')
+      this.assertEffectivePolicy(started, id, configuration)
+      await this.assertMcpIsolation(id)
       return child
     } catch (error) {
       await this.request('thread/unsubscribe', { threadId: id }).catch(() => {})
+      this.children.delete(id)
       throw error
     }
   }
@@ -91,6 +121,16 @@ export class NativeReaderClient {
       this.sessions.set(options.readerSessionId, child)
     }
     this.assertOwner(options.ownerKey, options.signal)
+    if (child.turns > 0) {
+      try {
+        const resumed = await this.request('thread/resume', { threadId: child.id, sandbox: 'read-only', approvalPolicy: 'never', model: configuration.model, config: child.isolationConfig })
+        this.assertOwner(options.ownerKey, options.signal)
+        this.assertEffectivePolicy(resumed, child.id, configuration)
+        await this.assertMcpIsolation(child.id)
+      }
+      catch (error) { child.reusable = false; throw error }
+      this.assertOwner(options.ownerKey, options.signal)
+    }
     let resolve, reject
     const done = new Promise((yes, no) => { resolve = yes; reject = no })
     // Rejection may precede the turn/start RPC response.

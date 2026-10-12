@@ -532,6 +532,113 @@ test('production first-use focus presents the live Browser Card with the existin
   assert.equal(browser.id, 'browser-view-a', 'zooming the camera never replaces the Browser view');
 });
 
+test('human Chat Dock open after initial Browser focus and zoom-out focuses only a compact Chat to readable detail', () => {
+  const projectionBody = surfaceSource.match(/    const focusProjection = entry => \{([\s\S]*?)\n    \};/)?.[1];
+  const compactBody = surfaceSource.match(/    const focusChatDockIfCompact = card => \{([\s\S]*?)\n    \};/)?.[1];
+  const dockStart = surfaceSource.indexOf('  function buildDock() {');
+  const dockEnd = surfaceSource.indexOf('    const divider =', dockStart);
+  const dockBody = surfaceSource.slice(dockStart, dockEnd).match(/          onclick: \(\) => \{([\s\S]*?)\n          \},\n        \}, el\('span', \{ class: 'egd-dock-icon' \}, item.icon\)\);/)?.[1];
+  assert.ok(projectionBody && compactBody && dockBody, 'use the production Dock and semantic-projection paths');
+
+  const safe = { left: 0, top: 0, width: 1200, height: 800 };
+  const browser = { x: 15, y: 20, width: 1200, height: 720 };
+  const initial = fitSurfaceCamera(browser, safe, 1);
+  const cameraTargets = [], focused = [];
+  const frames = new Map(), listeners = new Map();
+  let nextFrame = 0, composerFocuses = 0;
+  const window = { requestAnimationFrame: fn => { frames.set(++nextFrame, fn); return nextFrame; },
+    cancelAnimationFrame: id => frames.delete(id) };
+  const viewport = { id: 'canvas-viewport' };
+  const document = { activeElement: { id: 'dock-button' },
+    addEventListener: (name, fn) => listeners.set(name, fn),
+    removeEventListener: (name, fn) => { if (listeners.get(name) === fn) listeners.delete(name) },
+    emit: (name, target) => listeners.get(name)?.({ target }) };
+  const flushFrames = () => { const pending = [...frames.values()]; frames.clear(); pending.forEach(fn => fn()) };
+  const state = { panModifier: false, zoom: initial.zoom, zoomTarget: initial.zoom,
+    pan: initial.pan, panTarget: initial.pan, codex: { activeThreadId: 'room', hudView: 'list',
+      chatCardEntityId: null, chatDockMode: 'hud',
+      threadDrafts: { room: 'unsent human draft' } },
+    setCanvasViewportTarget: target => { cameraTargets.push(target); state.zoomTarget = target.zoom; state.panTarget = target.pan; },
+    codexBridge: { selectThread: (id, options) => { assert.equal(id, 'room'); assert.deepEqual(options, { openConversation: true }); } } };
+  assert.equal(state.zoom, 1, 'initial Browser focus is the starting camera');
+  state.zoom = state.zoomTarget = 0.83;
+
+  const composer = { isConnected: true, disabled: false,
+    focus: () => { composerFocuses++; document.activeElement = composer } };
+  const card = { id: 'chat-card', isConnected: true,
+    style: { left: '100px', top: '90px', width: '440px', height: '680px' },
+    classList: { contains: name => name === 'egd-chat-card' },
+    contains: node => node === composer,
+    querySelector: selector => selector === '.egd-codex-input' ? composer : null };
+  const entries = new Map();
+  const syncEntries = () => { if (!entries.has(card)) entries.set(card, {
+    card, kind: 'chat', bodyFontPx: 11, level: null, visibilityDirty: false,
+  }); };
+  const screenRect = (target, zoom) => {
+    const world = { x: parseFloat(target.style.left), y: parseFloat(target.style.top),
+      width: parseFloat(target.style.width), height: parseFloat(target.style.height) };
+    return { world, width: world.width * zoom, height: world.height * zoom };
+  };
+  const surface = { surfaceSemanticLevel, fitSurfaceCamera };
+  const focusProjection = compileFunction(`return entry => {${projectionBody}\n    }`,
+    ['state', 'authorVisible', 'screenRect', 'safeViewportRect', 'SurfaceState', 'ZOOM_MAX',
+      'detailWidth', 'detailHeight', 'focusCanvasCard'])(state, () => true, screenRect, () => safe,
+    surface, 4, 240, 180, target => focused.push(target));
+  state.focusChatDockIfCompact = compileFunction(`let cancelPendingChatComposerFocus = () => {};\nreturn card => {${compactBody}\n    }`,
+    ['state', 'syncEntries', 'entries', 'authorVisible', 'screenRect', 'SurfaceState',
+      'detailWidth', 'detailHeight', 'focusProjection', 'window', 'document', 'viewport'])(state, syncEntries, entries, () => true,
+    screenRect, surface, 240, 180, focusProjection, window, document, viewport);
+  let spawned = 0;
+  const dockClick = compileFunction(`return () => {${dockBody}\n          }`,
+    ['kind', 'item', 'state', 'spawnCodexChatCard', 'toggleHUD'])(
+    'left', { id: 'chat', label: '채팅' }, state, () => {
+      spawned++; state.activeEntityId = card.id; state.codex.chatCardEntityId = card.id;
+      state.codex.chatDockMode = 'canvas'; return card;
+    },
+    () => assert.fail('Chat Dock must not toggle a visible Chat off'));
+
+  dockClick();
+  assert.equal(spawned, 1);
+  assert.equal(cameraTargets.length, 1, 'compact Chat opens with its existing focus projection');
+  assert(Math.abs(cameraTargets[0].zoom - 10.6 / 11) < 0.001);
+  assert.equal(focused[0], card);
+  assert.equal(state.codex.hudView, 'conversation');
+  assert.equal(state.codex.threadDrafts.room, 'unsent human draft');
+  assert.equal(composerFocuses, 0, 'camera target alone is not an immediate keyboard focus');
+  state.zoom = cameraTargets[0].zoom;
+  state.pan = { ...cameraTargets[0].pan };
+  entries.get(card).level = 'detail';
+  document.activeElement = viewport; // semantic restoration may move focus here during animation
+  flushFrames();
+  assert.equal(composerFocuses, 1, 'composer receives keyboard focus after readable animation settles');
+  assert.equal(state.focusChatDockIfCompact({ ...card,
+    classList: { contains: name => name === 'egd-browser-card' } }), false,
+  'this human Dock repair must not change Browser or other View LOD/camera');
+  assert.equal(cameraTargets.length, 1);
+
+  state.zoom = state.zoomTarget = 0.83;
+  entries.get(card).level = 'outline';
+  dockClick();
+  assert.equal(cameraTargets.length, 2);
+  const otherCard = { id: 'other-card' };
+  document.activeElement = otherCard;
+  state.activeEntityId = otherCard.id;
+  document.emit('mousedown', otherCard);
+  state.zoom = cameraTargets[1].zoom;
+  state.pan = { ...cameraTargets[1].pan };
+  entries.get(card).level = 'detail';
+  flushFrames();
+  assert.equal(composerFocuses, 1, 'another human Card click cancels the pending Chat keyboard focus');
+
+  state.zoom = state.zoomTarget = 1;
+  entries.get(card).level = 'detail';
+  dockClick();
+  assert.equal(spawned, 3, 'the existing Chat Card is reused, not closed');
+  assert.equal(cameraTargets.length, 2, 'normal readable zoom keeps the human camera unchanged');
+  assert.equal(composerFocuses, 1, 'normal visible Chat keeps its existing input ownership');
+  assert.equal(state.codex.threadDrafts.room, 'unsent human draft');
+});
+
 test('production fullscreen layout fills the actual Canvas viewport and keeps the prior Card rect for Desk', () => {
   const enterBody = surfaceSource.match(/  function enterCardFullscreen\(card\) \{([\s\S]*?)\n  \}/)?.[1];
   const layoutBody = surfaceSource.match(/  function syncCardFullscreenLayout\(\) \{([\s\S]*?)\n  \}/)?.[1];
@@ -936,6 +1043,64 @@ test('bounded visual hierarchy keeps Canvas chrome quiet and Browser and Chat co
   assert.match(surfaceSource, /rows: '1'/);
   assert.match(surfaceSource, /input\.addEventListener\('compositionstart'/);
   assert.match(surfaceSource, /input\.addEventListener\('compositionend'/);
+});
+
+test('passive Board status stays off the lower Chat composer while its close control remains clickable', () => {
+  const css = readFileSync(new URL('../overlay/CSS/eg-desk-surface.uc.css', import.meta.url), 'utf8');
+  const noticeStyle = css.match(/^#egd-board-notice \{([\s\S]*?)^\}/m)?.[1];
+  const closeStyle = css.match(/^#egd-board-notice button \{([\s\S]*?)^\}/m)?.[1];
+  assert.ok(noticeStyle && closeStyle);
+  assert.match(noticeStyle, /top:\s*64px/);
+  assert.match(noticeStyle, /right:\s*16px/);
+  assert.match(noticeStyle, /bottom:\s*auto/);
+  assert.match(noticeStyle, /left:\s*auto/);
+  assert.match(noticeStyle, /pointer-events:\s*none/);
+  assert.doesNotMatch(noticeStyle, /translateX/);
+  assert.match(closeStyle, /pointer-events:\s*auto/);
+  assert.match(closeStyle, /min-width:\s*24px/);
+  assert.match(closeStyle, /min-height:\s*24px/);
+
+  const body = surfaceSource.match(/  function boardNotice\(message\) \{([\s\S]*?)\n  \}\n\n  function activeBoardProjection/)?.[1];
+  assert.ok(body, 'exercise the production Board notice, not a test-only substitute');
+  let notice = null;
+  const document = {
+    getElementById: id => id === 'egd-board-notice' ? notice : null,
+    documentElement: { appendChild(node) { notice = node; } },
+    createTextNode: value => ({ textContent: value }),
+  };
+  const el = (tagName, properties = {}, ...children) => ({ tagName, ...properties, children,
+    replaceChildren(...next) { this.children = next; },
+    remove() { notice = null; },
+  });
+  const showNotice = compileFunction(`return function boardNotice(message) {${body}\n  }`, ['document', 'el'])(document, el);
+  showNotice('작업 결과를 확인해 주세요.');
+  assert.equal(notice.role, 'status');
+  assert.match(notice.class, /egd-edge egd-frosted/);
+  assert.equal(notice.children[0].textContent, '작업 결과를 확인해 주세요.');
+  assert.equal(notice.children[1]['aria-label'], '안내 닫기');
+  const original = notice;
+  showNotice('새 안내');
+  assert.equal(notice, original, 'a new status updates the same notice without covering another area');
+  assert.equal(notice.children[0].textContent, '새 안내');
+  notice.children[1].onclick();
+  assert.equal(notice, null, 'the close button still dismisses the notice');
+});
+
+test('empty logged-in Chat uses plain first-message guidance while keeping title and auth fallback', () => {
+  const body = surfaceSource.match(/          const emptyChildren = \[([\s\S]*?)\n          \];/)?.[1];
+  assert.ok(body);
+  const renderEmpty = compileFunction(`return function renderEmpty(codex, activeThread) {
+    const emptyChildren = [${body}\n    ]; return emptyChildren;
+  }`, ['el'])((tag, props, ...children) => ({ tag, className: props.class, children }));
+  const thread = { title: 'Codex', type: 'dm' };
+  const loggedIn = renderEmpty({ authStatus: { isLoggedIn: true } }, thread);
+  assert.equal(loggedIn[0].children[0], '아직 메시지가 없습니다');
+  assert.equal(loggedIn[1].children[0], '메시지를 보내 대화를 시작하세요');
+  assert.doesNotMatch(loggedIn[1].children[0], /Fresh|Codex 대화|· Codex/);
+  const loggedOut = renderEmpty({ authStatus: { isLoggedIn: false } }, thread);
+  assert.equal(loggedOut[0].children[0], '로그인 후 대화할 수 있습니다');
+  assert.equal(loggedOut[1].children[0], 'Codex 로그인이 필요합니다.');
+  assert.match(surfaceSource, /class: 'egd-codex-thread-active-title' \}, activeThread\.title/);
 });
 
 test('Chat composer starts compact but expands and scrolls for long requests', () => {
@@ -2102,23 +2267,32 @@ test('rehydration matches a legacy assistant with no native or request ID by its
 function localHistoryLoaderHarness({ state, list, post, read = async () => {}, records = [] }) {
   const retryBody = surfaceSource.match(/    function queueLocalHistoryRetry\(\) \{([\s\S]*?)\n    \}\n\n    async function loadLocalHistory/)?.[1];
   const loadBody = surfaceSource.match(/    async function loadLocalHistory\(legacyRecords = \[\], \{ force = false \} = \{\}\) \{([\s\S]*?)\n    \}\n\n    const scheduleReconnect/)?.[1];
-  const readyBody = surfaceSource.match(/      connectionSource\.addEventListener\('ready', \(\) => \{([\s\S]*?)\n      \}\);/)?.[1];
+  const readyBody = surfaceSource.match(/      connectionSource\.addEventListener\('ready', \(event\) => \{([\s\S]*?)\n      \}\);/)?.[1];
   assert.ok(retryBody && loadBody && readyBody, 'production local-history loader and ready retry stay testable');
   const factory = compileFunction(`
     let legacyHistoryRecords = initialRecords, localLoadPromise = null, lastLocalLoadAt = 0;
     let localRetryTimer = null, localRetryBudget = 1, localAutoRetryEligible = false, streamReady = false;
+    let browserTransportId = null, browserTransportSource = null, browserTransportAbort = null, detachBrowserToolTransport = null;
     const confirmedLegacyImports = new Set(), resumedNativeBindings = new Set();
     const source = {}, connectionSource = source, streamEpoch = 0;
     const epochScope = { valid: () => true };
     const update = () => {};
+    const clearBrowserToolTransport = () => {
+      detachBrowserToolTransport?.(); detachBrowserToolTransport = null;
+      browserTransportAbort?.abort(); browserTransportAbort = null;
+      browserTransportId = null; browserTransportSource = null;
+    };
+    const attachBrowserToolTransport = () => () => {};
     function queueLocalHistoryRetry() {${retryBody}\n    }
     async function loadLocalHistory(legacyRecords = [], { force = false } = {}) {${loadBody}\n    }
-    function onReady() {${readyBody}\n    }
-    return { loadLocalHistory, onReady, retryState: () => ({ localRetryBudget, localAutoRetryEligible, localRetryTimer, confirmed: [...confirmedLegacyImports] }) };
+    function onReady(event = { data: '{}' }) {${readyBody}\n    }
+    return { loadLocalHistory, onReady, browserTransportState: () => browserTransportId,
+      retryState: () => ({ localRetryBudget, localAutoRetryEligible, localRetryTimer, confirmed: [...confirmedLegacyImports] }) };
   `, ['initialRecords', 'state', 'listLocalHistoryThreads', 'ChatState', 'fetchJson', 'loadLocalHistoryThread', 'emit', 'window', 'console', 'TAG']);
   const timers = new Map();
   let timerId = 0;
   const window = {
+    AbortController,
     setTimeout: fn => { timers.set(++timerId, fn); return timerId; },
     clearTimeout: id => { timers.delete(id); },
   };
@@ -2139,8 +2313,9 @@ test('history read before bridge startup gets one ready-transition retry without
   assert.equal(await harness.loadLocalHistory(), false);
   assert.equal(state.codex.localHistoryStatus, 'error');
   assert.equal(harness.timers.size, 1);
-  harness.onReady();
+  harness.onReady({ data: JSON.stringify({ browserTransportId: 'ui-stream-1' }) });
   await new Promise(resolve => setImmediate(resolve));
+  assert.equal(harness.browserTransportState(), 'ui-stream-1');
   assert.equal(reads, 2);
   assert.equal(state.codex.localHistoryStatus, 'ready');
   assert.equal(harness.retryState().localRetryBudget, 0);
@@ -2270,31 +2445,90 @@ test('actual send path preserves draft B and new attachments typed during delaye
   const body = surfaceSource.match(/      async sendMessage\(\) \{([\s\S]*?)\n      \},/)?.[1];
   assert.ok(body);
   const deps = ['state', 'getActiveCodexThread', 'getCodexThreadDraft', 'ChatState', 'threadBusy', 'epochScope', 'ensureNativeReadyForSend', 'updateThreadById', 'emit',
-    'captureThreadInputs', 'getCodexThreadById', 'protocol', 'codexThreadAgentProfile', 'appendMessageToThread', 'createCodexMessage', 'SELF_MEMBER', 'codexThreadRuntimeConfig', 'fetchJson', 'syncProtocolRun'];
+    'captureThreadInputs', 'getCodexThreadById', 'protocol', 'codexThreadAgentProfile', 'appendMessageToThread', 'createCodexMessage', 'SELF_MEMBER', 'codexThreadRuntimeConfig', 'fetchJson', 'syncProtocolRun', 'browserToolSelectedSources',
+    'rootSseReady'];
   const send = compileFunction(`return (async () => {${body}\n})();`, deps);
-  const initial = { id: 'room', inputSources: [{ id: 'a' }], briefingInputs: [], messages: [], profileEnabled: false };
+  const selectedBody = surfaceSource.match(/  function browserToolSelectedSources\(threadId, candidates = null\) \{([\s\S]*?)\n  \}/)?.[1];
+  assert.ok(selectedBody, 'test the production selected-source filter rather than inventing a permissive selector');
+  const initial = { id: 'room', clientBindingId: 'wire-room', inputSources: [{ id: 'a', kind: 'browser', selectedByUser: true,
+    browserToolPermission: 'observe', browserToolSelection: { token: 'selected-a', threadId: 'wire-room' },
+    browserToolIdentity: { cardEpoch: 'card-epoch-a', userContextId: 0,
+      engineAccountKey: 'codex:chatgpt:known@example.test', authorityEpoch: 1 },
+    sourceRef: { viewId: 'browser-a', uri: 'https://example.test/local', profileId: 'firefox-default', accountId: '' } }],
+    briefingInputs: [], messages: [], profileEnabled: false };
   const state = { codex: { activeThreadId: 'room', threads: [initial], threadDrafts: { room: 'A' }, threadDraftRevisions: { room: 1 },
     authStatus: { isLoggedIn: true, authMode: 'chatgpt', accountEmail: 'known@example.test', identityStatus: 'known' }, connected: true } };
   let release;
   const delayed = new Promise(resolve => { release = resolve; });
   const getThread = (_codex, id = 'room') => state.codex.threads.find(thread => thread.id === id);
   const update = (id, fn) => { const index = state.codex.threads.findIndex(thread => thread.id === id); state.codex.threads[index] = fn(state.codex.threads[index]); };
-  let payload;
+  const binding = { url: 'https://example.test/local', profileId: 'firefox-default', accountId: '',
+    cardEpoch: 'card-epoch-a', userContextId: 0, engineAccountKey: 'codex:chatgpt:known@example.test', authorityEpoch: 1 };
+  const selectedCard = { isConnected: true, classList: { contains: name => name === 'egd-browser-card' },
+    _browserControls: { toolBinding: () => binding } };
+  const grants = new Map([['selected-a', { token: 'selected-a', localThreadId: 'room', threadId: 'wire-room',
+    sourceId: 'a', permission: 'observe', usedRunId: null }]]);
+  const actualSelectedSources = compileFunction(`return function browserToolSelectedSources(threadId, candidates = null) {${selectedBody}\n  }`,
+    ['state', 'getCodexThreadById', 'ChatState', 'browserToolUserSelections', 'document', 'browserToolSameUrl', 'structuredClone'])(
+    state, getThread, Chat, grants, { getElementById: id => id === 'browser-a' ? selectedCard : null },
+    (left, right) => new URL(left).href === new URL(right).href, structuredClone);
+  let payload, sendCount = 0;
   const running = send(state, () => getThread(null), (codex, id) => codex.threadDrafts[id] || '', Chat, () => false,
     { begin: () => ({}), valid: () => true, finish() {} }, async () => true, update, () => {}, () => delayed, getThread, Chat.createChatProtocolState(), () => ({}),
     (id, message) => update(id, thread => ({ ...thread, messages: [...thread.messages, message] })),
     (role, content, status, options) => ({ role, content, status, ...options }), 'self', () => ({}),
-    async (_url, request) => { payload = JSON.parse(request.body); return { accepted: true, conversationId: 'c', runId: 'r', answerId: 'c/r' }; }, () => {});
+    async (_url, request) => { sendCount++; payload = JSON.parse(request.body); return { accepted: true, conversationId: 'c', runId: 'r', answerId: 'c/r' }; }, () => {},
+    actualSelectedSources, () => ({ sourceReady: true, eventSourceReadyState: 1, browserTransportId: 'ui-stream-1' }));
   state.codex.threadDrafts.room = 'B';
   state.codex.threadDraftRevisions.room = 2;
   update('room', thread => ({ ...thread, inputSources: [...thread.inputSources, { id: 'b' }] }));
   release([{ sourceId: 'captured-a', snapshotId: 'captured-a' }]);
   await running;
   assert.equal(payload.message, 'A');
+  assert.equal(payload.clientThreadId, 'wire-room');
   assert.deepEqual(payload.contextSnapshotIds, ['captured-a']);
+  assert.deepEqual(payload.selectedSources.map(source => source.id), ['a'],
+    'Browser tool selection from submitted draft A must be forwarded before attachments are cleared, not from later draft B');
+  assert.equal(payload.selectedSources[0].browserToolSelection.threadId, payload.clientThreadId);
+  assert.equal(payload.browserTransportId, 'ui-stream-1');
+  assert.equal(payload.executionPolicy, undefined, 'normal Chat UI must not synthesize a QA policy');
   assert.equal(state.codex.threadDrafts.room, 'B');
   assert.deepEqual(getThread(null).inputSources.map(input => input.id), ['a', 'b']);
   assert.equal(getThread(null).messages[0].content, 'A');
+  const rootReadyBody = surfaceSource.match(/    const rootSseReady = \(\) => \{([\s\S]*?)\n    \};/)?.[1];
+  assert.ok(rootReadyBody);
+  const connectingSource = { readyState: 0 };
+  const connectingStatus = compileFunction(`return () => {${rootReadyBody}\n    }`,
+    ['source', 'browserTransportSource', 'streamReady', 'window', 'detachBrowserToolTransport',
+      'browserTransportAbort', 'browserTransportId'])(connectingSource, connectingSource, true,
+    { EventSource: { OPEN: 1 } }, () => {}, { signal: { aborted: false } }, 'ui-stream-1');
+  assert.equal(connectingStatus().eventSourceReadyState, 0);
+  assert.equal(connectingStatus().sourceReady, false, 'a prior ready event does not authorize CONNECTING');
+  payload = null;
+  await send(state, () => getThread(null), (codex, id) => codex.threadDrafts[id] || '', Chat, () => false,
+    { begin: () => ({}), valid: () => true, finish() {} }, async () => true, update, () => {}, () => delayed, getThread, Chat.createChatProtocolState(), () => ({}),
+    (id, message) => update(id, thread => ({ ...thread, messages: [...thread.messages, message] })),
+    (role, content, status, options) => ({ role, content, status, ...options }), 'self', () => ({}),
+    async () => { assert.fail('a selected Browser must not submit without its ready SSE transport ID'); }, () => {},
+    actualSelectedSources, connectingStatus);
+  assert.equal(payload, null);
+  assert.equal(sendCount, 1);
+  assert.equal(state.codex.threadDrafts.room, 'B');
+  assert.deepEqual(getThread(null).inputSources.map(input => input.id), ['a', 'b']);
+  assert.equal(getThread(null).messages.length, 1);
+  assert.match(getThread(null).sendError, /Browser 연결/);
+  update('room', thread => ({ ...thread, inputSources: thread.inputSources.map(input =>
+    input.id === 'a' ? { ...input, browserToolPermission: 'interact' } : input) }));
+  await send(state, () => getThread(null), (codex, id) => codex.threadDrafts[id] || '', Chat, () => false,
+    { begin: () => ({}), valid: () => true, finish() {} }, async () => true, update, () => {}, () => delayed, getThread, Chat.createChatProtocolState(), () => ({}),
+    (id, message) => update(id, thread => ({ ...thread, messages: [...thread.messages, message] })),
+    (role, content, status, options) => ({ role, content, status, ...options }), 'self', () => ({}),
+    async () => { assert.fail('stale interaction authority must not degrade silently to a normal read-only send'); }, () => {},
+    actualSelectedSources, () => ({ sourceReady: true, eventSourceReadyState: 1, browserTransportId: 'ui-stream-1' }));
+  assert.equal(sendCount, 1);
+  assert.equal(getThread(null).messages.length, 1);
+  assert.equal(state.codex.threadDrafts.room, 'B');
+  assert.match(getThread(null).sendError, /조작 권한이 만료/);
 });
 
 test('production evidence restore requests and verifies the saved range before marking loaded', async () => {

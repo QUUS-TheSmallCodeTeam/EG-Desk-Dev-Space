@@ -1,0 +1,110 @@
+import { randomUUID } from 'node:crypto'
+
+const fail = (code, message, httpStatus = 409) => Object.assign(new Error(message), { code, httpStatus })
+const short = (value, max = 160) => typeof value === 'string' && value.length > 0 && value.length <= max
+
+// One SSE client, one run and one native Browser request are bound together.
+// A response from another window or a stale stream cannot satisfy the call.
+export class BrowserToolTransport {
+  constructor({ getOwnerKey, now = Date.now, setTimer = setTimeout, clearTimer = clearTimeout } = {}) {
+    if (typeof getOwnerKey !== 'function') throw new TypeError('Current owner key is required')
+    Object.assign(this, { getOwnerKey, now, setTimer, clearTimer })
+    this.clients = new Map()
+    this.runs = new Map()
+    this.pending = new Map()
+  }
+
+  registerClient(client) {
+    if (!client || typeof client.send !== 'function' || client.chatProtocol !== 2) throw new TypeError('Browser transport requires a v2 SSE client')
+    const transportId = randomUUID()
+    this.clients.set(transportId, client)
+    return transportId
+  }
+
+  hasClient(transportId) { return short(transportId) && this.clients.has(transportId) && !this.clients.get(transportId).closed }
+
+  closeClient(transportId) {
+    this.clients.delete(transportId)
+    for (const [requestId, entry] of this.pending) if (entry.transportId === transportId) {
+      this.clearTimer(entry.timer)
+      this.pending.delete(requestId)
+      entry.reject(fail('BROWSER_UI_DISCONNECTED', 'Selected Browser UI stream disconnected'))
+    }
+    for (const [runId, entry] of this.runs) if (entry.transportId === transportId) this.runs.delete(runId)
+  }
+
+  bindRun(runId, clientThreadId, transportId) {
+    const ownerKey = this.getOwnerKey()
+    if (!short(runId, 300) || !short(clientThreadId) || !short(ownerKey, 256) || !this.hasClient(transportId)) {
+      throw fail('BROWSER_UI_UNAVAILABLE', 'A selected, connected Browser UI stream is required')
+    }
+    if (this.runs.has(runId)) throw fail('BROWSER_RUN_BOUND', 'Browser run already has a UI stream')
+    this.runs.set(runId, { transportId, clientThreadId, ownerKey })
+  }
+
+  unbindRun(runId) { this.runs.delete(runId) }
+
+  async sendToUi(request) {
+    if (!request || typeof request !== 'object' || !short(request.requestId) || !short(request.runId, 300) ||
+        !short(request.clientThreadId) ||
+        !short(request.cardId) || !short(request.targetCardEpoch) || !Number.isSafeInteger(request.deadlineMs) ||
+        request.deadlineMs <= this.now() || request.deadlineMs > this.now() + 60000) {
+      throw fail('BROWSER_UI_PROTOCOL', 'Browser UI request has invalid correlation, target or deadline', 400)
+    }
+    const bound = this.runs.get(request.runId)
+    const client = bound && this.clients.get(bound.transportId)
+    if (!client || client.closed || bound.ownerKey !== this.getOwnerKey() || bound.clientThreadId !== request.clientThreadId) {
+      throw fail('BROWSER_UI_UNAVAILABLE', 'Bound Browser UI stream, Chat thread or account is unavailable')
+    }
+    if (this.pending.has(request.requestId) || this.pending.size >= 64) throw fail('BROWSER_UI_BUSY', 'Browser UI request channel is busy')
+    const data = JSON.stringify(request)
+    if (data.length > 48000) throw fail('BROWSER_UI_PROTOCOL', 'Browser UI request exceeds the bounded transport size', 413)
+    return new Promise((resolve, reject) => {
+      const timer = this.setTimer(() => {
+        this.pending.delete(request.requestId)
+        reject(fail('BROWSER_UI_TIMEOUT', 'Browser UI response deadline passed; outcome is unknown'))
+      }, Math.max(1, request.deadlineMs - this.now()))
+      timer?.unref?.()
+      this.pending.set(request.requestId, { transportId: bound.transportId, ownerKey: bound.ownerKey, deadlineMs: request.deadlineMs, resolve, reject, timer })
+      if (!client.send(`event: browser-tool-request\ndata: ${data}\n\n`)) {
+        this.clearTimer(timer)
+        this.pending.delete(request.requestId)
+        reject(fail('BROWSER_UI_DISCONNECTED', 'Browser UI stream could not accept the request'))
+      }
+    })
+  }
+
+  receive(transportId, response) {
+    const requestId = response?.requestId
+    const entry = this.pending.get(requestId)
+    if (!short(transportId) || !short(requestId) || !entry || entry.transportId !== transportId ||
+        !this.hasClient(transportId) || entry.ownerKey !== this.getOwnerKey()) {
+      throw fail('BROWSER_UI_RESPONSE_STALE', 'No matching Browser request is awaiting this UI response')
+    }
+    if (this.now() >= entry.deadlineMs) {
+      this.pending.delete(requestId)
+      this.clearTimer(entry.timer)
+      entry.reject(fail('BROWSER_UI_TIMEOUT', 'Browser UI response arrived after its deadline'))
+      throw fail('BROWSER_UI_RESPONSE_STALE', 'Browser UI response arrived after its deadline')
+    }
+    if (!response || typeof response !== 'object' || Array.isArray(response) || JSON.stringify(response).length > 180000) {
+      throw fail('BROWSER_UI_PROTOCOL', 'Browser UI response exceeds the bounded contract', 400)
+    }
+    this.pending.delete(requestId)
+    this.clearTimer(entry.timer)
+    entry.resolve(response)
+    return { accepted: true, requestId }
+  }
+
+  reset({ dropClients = false } = {}) {
+    for (const [requestId, entry] of this.pending) {
+      this.clearTimer(entry.timer)
+      entry.reject(fail('BROWSER_UI_DISCONNECTED', 'Browser transport was reset'))
+      this.pending.delete(requestId)
+    }
+    this.runs.clear()
+    // The SSE connection belongs to the visible UI, not to the native
+    // account. Its next run must still pass a fresh owner/Card binding.
+    if (dropClients) this.clients.clear()
+  }
+}

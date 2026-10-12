@@ -35,8 +35,8 @@
           },
           allFrames: false,
           // Remote types match prefixes: web includes Fission's webIsolated=…
-          // and webCOOP+COEP family. The parent exposes no child-call handlers;
-          // queries originate only from the selected Card's WindowGlobal.
+          // and webCOOP+COEP family. Parent authorization resolves only a
+          // chrome-registered Browser Card and its live UI lease.
           remoteTypes: ['web', 'file'],
           safeForUntrustedWebProcess: true,
         },
@@ -669,7 +669,18 @@
           return { ...base, kind: 'file', label: file.leafName, sourceRef: { ...base.sourceRef, path: file.path } };
         } catch { return null; }
       }
-      return { ...base, kind: 'browser', sourceRef: { ...base.sourceRef, uri: browser.uri } };
+      let browserToolIdentity = null;
+      try {
+        const binding = view._browserControls?.toolBinding?.();
+        if (binding) browserToolIdentity = {
+          cardEpoch: binding.cardEpoch, userContextId: binding.userContextId,
+          engineAccountKey: binding.engineAccountKey, authorityEpoch: binding.authorityEpoch,
+        };
+      } catch {}
+      return { ...base, kind: 'browser', browserToolPermission: 'observe', browserToolIdentity,
+        sourceRef: { ...base.sourceRef, uri: browser.uri,
+          profileId: view._sourceRef?.profileId || state.sourceRefs.defaultProfileId,
+          accountId: view._sourceRef?.accountId || '' } };
     }
     if (view.classList.contains('egd-canvas-shape')) return { ...base, kind: 'board-element' };
     return null;
@@ -743,12 +754,16 @@
       const picked = new Map();
       for (const source of sources) {
         const checked = selected.has(source.sourceRef.viewId);
+        const existingPermission = thread.inputSources?.find(item => item.kind === 'browser' &&
+          item.sourceRef?.viewId === source.sourceRef.viewId)?.browserToolPermission;
         const input = el('input', { type: 'checkbox', 'aria-label': `첨부 선택: ${source.label}`, data: { testid: 'chat-attach-source', viewId: source.sourceRef.viewId } });
         input.checked = checked;
         if (checked) picked.set(source.id, source);
         input.addEventListener('change', () => input.checked ? picked.set(source.id, source) : picked.delete(source.id));
         body.appendChild(el('label', { class: 'egd-input-source-choice' }, input,
-          el('span', {}, source.label, el('small', {}, InputContext.inputSourceLocation(source)))));
+          el('span', {}, source.label,
+            existingPermission === 'interact' ? el('small', {}, '이번 Chat 조작 허용 중') : null,
+            el('small', {}, InputContext.inputSourceLocation(source)))));
       }
       if (!sources.length) body.appendChild(el('p', {}, '열린 Browser, 작업사본 또는 선택 가능한 Canvas 요소가 없습니다. 파일을 선택할 수 있습니다.'));
       body.appendChild(el('button', { 'aria-label': '로컬 파일 선택', data: { testid: 'chat-attach-file' }, onclick: async () => {
@@ -768,7 +783,16 @@
         });
       } }, '파일 선택…'));
       body.appendChild(el('button', { 'aria-label': '선택한 자료를 Chat 초안에 첨부', data: { testid: 'chat-attach-confirm' }, onclick: () => {
-        state.codexBridge.addInputSources(threadId, [...picked.values()]); close();
+        const additions = [];
+        for (const source of picked.values()) {
+          if (source.kind !== 'browser') { additions.push(source); continue; }
+          const existing = getCodexThreadById(state.codex, threadId)?.inputSources?.find(item =>
+            item.kind === 'browser' && item.sourceRef?.viewId === source.sourceRef.viewId);
+          if (existing) state.codexBridge.removeInputSource(threadId, existing.id);
+          const selectedSource = registerBrowserToolSelection(threadId, source, 'observe');
+          additions.push(selectedSource || { ...source, selectedByUser: true, browserToolPermission: 'observe' });
+        }
+        state.codexBridge.addInputSources(threadId, additions); close();
       } }, '선택 항목 첨부'));
     }
     document.documentElement.appendChild(panel);
@@ -787,7 +811,7 @@
               if (refs?.length) await bridge.inspectInput(thread.id, refs[0]);
             }
             catch (error) { boardNotice(error.message); }
-          } }, `${source.label} · 미전송`),
+          } }, `${source.label}${source.kind === 'browser' && source.browserToolPermission === 'interact' ? ' · 이번 Chat 조작 허용' : ''} · 미전송`),
         el('button', { type: 'button', 'aria-label': `첨부 제거: ${source.label}`, data: { testid: 'chat-attachment-remove' },
           onclick: () => bridge.removeInputSource(thread.id, source.id) }, '×')));
     }
@@ -3910,8 +3934,12 @@
                 spawnOntologyMapCard();
               } else if (item.id === 'chat') {
                 state.codex.hudView = 'conversation';
-                spawnCodexChatCard();
+                const chatCard = spawnCodexChatCard();
                 state.codexBridge?.selectThread(state.codex.activeThreadId, { openConversation: true });
+                // The human Dock intent is already to open Chat. If the
+                // settled camera would show only its semantic proxy, use the
+                // proxy's existing focus-to-readable path without another click.
+                state.focusChatDockIfCompact?.(chatCard);
               } else {
                 toggleHUD(item.id, item.label);
               }
@@ -4766,12 +4794,11 @@
           },
         });
         if (!hasConversation) {
-          const activeKindLabel = codexThreadLongLabel(activeThread.type);
           const emptyChildren = [
             el('div', { class: 'egd-codex-empty-title' }, codex.authStatus.isLoggedIn ? '아직 메시지가 없습니다' : '로그인 후 대화할 수 있습니다'),
             el('div', { class: 'egd-codex-empty-sub' },
               codex.authStatus.isLoggedIn
-                ? `${activeKindLabel} · ${codexThreadSessionLabel(activeThread)} · ${codexThreadAgentProfile(activeThread).name}`
+                ? '메시지를 보내 대화를 시작하세요'
                 : 'Codex 로그인이 필요합니다.',
             ),
           ];
@@ -5162,6 +5189,50 @@
     let streamReady = false;
     let source = null;
     let reconnectTimer = null;
+    let browserTransportId = null;
+    let browserTransportSource = null;
+    let detachBrowserToolTransport = null;
+    let browserTransportAbort = null;
+
+    const clearBrowserToolTransport = ({ revoke = false } = {}) => {
+      const hadTransport = !!browserTransportId;
+      try { detachBrowserToolTransport?.(); } catch {}
+      detachBrowserToolTransport = null;
+      try { browserTransportAbort?.abort(); } catch {}
+      browserTransportAbort = null;
+      browserTransportId = null;
+      browserTransportSource = null;
+      if (revoke && hadTransport) {
+        browserToolAuthorityEpoch++;
+        browserToolFixtureLastAction = null;
+        browserToolFixtureAuthorizationByCard.clear();
+        browserToolRunBindings.clear();
+        browserToolPendingBindings.clear();
+        browserToolActionLeases.clear();
+        browserToolUserSelections.clear();
+        state.codex.threads = state.codex.threads.map(thread => ({ ...thread,
+          inputSources: (thread.inputSources || []).map(input => input.kind === 'browser' &&
+            input.browserToolPermission === 'interact'
+            ? { ...input, browserToolPermission: 'observe', browserToolSelection: null,
+              browserToolIdentity: null }
+            : input),
+        }));
+      }
+    };
+
+    // Read-only, sampled at call time. A ready event from an older stream is
+    // never evidence that the current root Chat SSE can carry Browser tools.
+    const rootSseReady = () => {
+      let eventSourceReadyState = null;
+      try { if (Number.isSafeInteger(source?.readyState)) eventSourceReadyState = source.readyState; } catch {}
+      const stable = !!(source && browserTransportSource === source && streamReady &&
+        eventSourceReadyState === (window.EventSource?.OPEN ?? 1) &&
+        typeof detachBrowserToolTransport === 'function' &&
+        browserTransportAbort && !browserTransportAbort.signal.aborted &&
+        typeof browserTransportId === 'string' && browserTransportId);
+      return { sourceReady: stable, stable, eventSourceReadyState,
+        browserTransportId: stable ? browserTransportId : null, sampledAtMs: Date.now() };
+    };
 
     function threadBusy(thread) {
       return !!thread?.resuming || !!thread?.preparingInput || ChatState.runsForThread(protocol, thread).some(ChatState.isRunBusy)
@@ -5420,6 +5491,14 @@
     };
     const resetThreadConversations = () => {
       epochScope.reset();
+      clearBrowserToolTransport();
+      browserToolAuthorityEpoch++;
+      browserToolFixtureLastAction = null;
+      browserToolFixtureAuthorizationByCard.clear();
+      browserToolRunBindings.clear();
+      browserToolPendingBindings.clear();
+      browserToolUserSelections.clear();
+      browserToolActionLeases.clear();
       ChatState.resetChatProtocol(protocol);
       refreshing.clear();
       resumedNativeBindings.clear();
@@ -5754,8 +5833,35 @@
       }
 
       const connectionSource = source;
-      connectionSource.addEventListener('ready', () => {
+      connectionSource.addEventListener('ready', (event) => {
         if (!epochScope.valid(streamEpoch) || source !== connectionSource) return;
+        let ready = null;
+        try { ready = JSON.parse(event.data); } catch {}
+        const nextTransportId = ready?.browserTransportId;
+        const sameTransport = browserTransportId === nextTransportId &&
+          browserTransportSource === connectionSource && !!detachBrowserToolTransport;
+        if (!sameTransport && browserTransportId) {
+          clearBrowserToolTransport({ revoke: true });
+        } else if (!sameTransport) clearBrowserToolTransport();
+        if (!sameTransport && typeof nextTransportId === 'string' &&
+            nextTransportId.length > 0 && nextTransportId.length <= 160) {
+          const transportId = nextTransportId;
+          browserTransportId = transportId;
+          browserTransportSource = connectionSource;
+          browserTransportAbort = new window.AbortController();
+          const responseSignal = browserTransportAbort.signal;
+          detachBrowserToolTransport = attachBrowserToolTransport({ source: connectionSource, respond: async response => {
+            if (!epochScope.valid(streamEpoch) || source !== connectionSource ||
+                browserTransportId !== transportId || browserTransportSource !== connectionSource) {
+              throw new Error('Browser tool UI stream changed before response');
+            }
+            const receipt = await fetchJson('/browser-tool/respond', { method: 'POST', signal: responseSignal,
+              body: JSON.stringify({ browserTransportId: transportId, response }) });
+            if (receipt?.accepted !== true || receipt.requestId !== response.requestId) {
+              throw new Error('Browser tool response was not accepted by the bound stream');
+            }
+          } });
+        }
         streamReady = true;
         resumedNativeBindings.clear();
         update({ connected: true });
@@ -5782,6 +5888,7 @@
 
       connectionSource.onerror = () => {
         if (!epochScope.valid(streamEpoch) || source !== connectionSource) return;
+        clearBrowserToolTransport({ revoke: true });
         try { connectionSource.close(); } catch {}
         source = null;
         streamReady = false;
@@ -5796,6 +5903,7 @@
 
     return {
       loadLocalHistory,
+      rootSseReady,
       async reconcileRequest(threadId = state.codex.activeThreadId) {
         const thread = getCodexThreadById(state.codex, threadId);
         if (!thread) return null;
@@ -5851,6 +5959,7 @@
         if (!run || run.stopPending || run.stopRequested) return false;
         const token = epochScope.begin();
         run.stopPending = true;
+        revokeBrowserToolRunImmediately(run, thread);
         emit();
         try {
           const result = await fetchJson('/chat/interrupt', { method: 'POST', signal: token.signal, body: JSON.stringify({ conversationId: run.conversationId, runId: run.runId }) });
@@ -5914,6 +6023,8 @@
       },
       removeInputSource(threadId, sourceId) {
         if (getCodexThreadById(state.codex, threadId)?.preparingInput) return;
+        const source = getCodexThreadById(state.codex, threadId)?.inputSources?.find(item => item.id === sourceId);
+        if (source?.browserToolSelection?.token) browserToolUserSelections.delete(source.browserToolSelection.token);
         updateThreadById(threadId, thread => ({ ...thread, inputSources: InputContext.removeInputSource(thread.inputSources, sourceId) }));
         emit();
       },
@@ -6347,6 +6458,23 @@
           if (epochScope.valid(token)) { updateThreadById(activeThread.id, thread => ({ ...thread, preparingInput: false })); emit(); }
         }
         const requestId = `request-${Date.now().toString(36)}-${Math.random().toString(36).slice(2)}`;
+        const selectedBrowserSources = browserToolSelectedSources(activeThread.id, selectedInputs);
+        const requestedBrowserInteraction = selectedInputs.some(input => input.kind === 'browser' &&
+          input.selectedByUser === true && input.browserToolPermission === 'interact');
+        if (requestedBrowserInteraction && !selectedBrowserSources.some(input => input.browserToolPermission === 'interact')) {
+          updateThreadById(activeThread.id, thread => ({ ...thread,
+            sendError: '선택한 Browser 조작 권한이 만료됐습니다. 현재 Browser에서 다시 선택해 주세요.' }));
+          epochScope.finish(token);
+          return;
+        }
+        const browserSseStatus = rootSseReady();
+        const selectedBrowserTransportId = browserSseStatus.browserTransportId;
+        if (selectedBrowserSources.length && !browserSseStatus.sourceReady) {
+          updateThreadById(activeThread.id, thread => ({ ...thread,
+            sendError: '선택한 Browser 연결이 바뀌었습니다. Browser를 다시 선택한 뒤 전송해 주세요.' }));
+          epochScope.finish(token);
+          return;
+        }
         ChatState.registerChatRequest(protocol, { requestId, clientThreadId: ChatState.clientThreadBinding(activeThread), localThreadId: activeThread.id, conversationId: activeThread.conversationId, authorName: activeThread.profileEnabled ? codexThreadAgentProfile(activeThread).name : 'Codex' }, state.codex.authStatus);
         appendMessageToThread(activeThread.id, createCodexMessage('user', content, 'submitting', {
           readBy: [SELF_MEMBER], requestId, inputReferences,
@@ -6364,10 +6492,15 @@
           const runtimeConfig = codexThreadRuntimeConfig(activeThread);
           runtimeConfig.contextSnapshotIds = inputReferences.map(reference => reference.snapshotId);
           runtimeConfig.contextCapabilities = ChatState.contextCapabilitiesForRequest(activeThread, state.codex.authStatus, runtimeConfig.contextSnapshotIds);
+          const chatRequest = ChatState.buildChatRequest(activeThread, content, requestId, runtimeConfig);
+          if (selectedBrowserSources.length) {
+            chatRequest.selectedSources = selectedBrowserSources;
+            chatRequest.browserTransportId = selectedBrowserTransportId;
+          }
           const result = await fetchJson('/chat/send', {
             method: 'POST',
             signal: token.signal,
-            body: JSON.stringify(ChatState.buildChatRequest(activeThread, content, requestId, runtimeConfig)),
+            body: JSON.stringify(chatRequest),
           });
           if (!epochScope.valid(token)) return;
           const run = ChatState.acceptChatRequest(protocol, result, requestId);
@@ -9474,6 +9607,425 @@
     return controls[command](...args);
   }
 
+  // This is the privileged-UI end of the Browser model-tool transport. It
+  // deliberately never uses resolveBrowserCard's active/first-card fallback.
+  const browserToolRunBindings = new Map();
+  const browserToolPendingBindings = new Map();
+  const browserToolUserSelections = new Map();
+  const browserToolCancelledRuns = new Map();
+  // Stop must also cover a first bind still in transit, before any Card key exists.
+  const browserToolStoppedRuns = new Set();
+  const browserToolRequestReceipts = new Map();
+  const browserToolCardLeases = new Map();
+  const browserToolActionLeases = new Map();
+  const browserToolFixtureAuthorizationByCard = new Map();
+  let browserToolFixtureLastAction = null;
+  let browserToolAuthorityEpoch = 0;
+  function revokeBrowserToolRunImmediately(run, thread) {
+    const runId = run?.runId;
+    const clientThreadId = run?.clientThreadId || ChatState.clientThreadBinding(thread);
+    if (typeof runId !== 'string' || !runId || !clientThreadId) return 0;
+    browserToolStoppedRuns.add(JSON.stringify([runId, clientThreadId]));
+    const prefix = `${runId}\u0000`;
+    const revoked = new Set();
+    for (const [key, bound] of browserToolRunBindings) {
+      if (!key.startsWith(prefix) || bound.clientThreadId !== clientThreadId) continue;
+      browserToolRunBindings.delete(key);
+      if (bound.selectionToken) browserToolUserSelections.delete(bound.selectionToken);
+      revoked.add(key);
+    }
+    for (const [key, pending] of browserToolPendingBindings) {
+      if (!key.startsWith(prefix) || pending.clientThreadId !== clientThreadId) continue;
+      browserToolPendingBindings.delete(key);
+      if (pending.selectionToken) browserToolUserSelections.delete(pending.selectionToken);
+      revoked.add(key);
+    }
+    for (const [leaseId, lease] of browserToolActionLeases) {
+      if (revoked.has(lease.key)) browserToolActionLeases.delete(leaseId);
+    }
+    const expiresAt = Date.now() + 60000;
+    for (const key of revoked) browserToolCancelledRuns.set(key, expiresAt);
+    return revoked.size;
+  }
+  function registerBrowserToolSelection(threadId, source, permission) {
+    const thread = getCodexThreadById(state.codex, threadId);
+    const clientThreadId = thread && ChatState.clientThreadBinding(thread);
+    if (!['observe', 'interact'].includes(permission) || !source?.browserToolIdentity ||
+        !clientThreadId || browserToolUserSelections.size >= 256) return null;
+    const card = document.getElementById(source.sourceRef?.viewId);
+    if (!card?.isConnected || !card.classList?.contains('egd-browser-card')) return null;
+    try {
+      const current = card._browserControls?.toolBinding?.();
+      if (!current || !browserToolSameUrl(current.url, source.sourceRef.uri) ||
+          current.profileId !== source.sourceRef.profileId || current.accountId !== source.sourceRef.accountId ||
+          ['cardEpoch', 'userContextId', 'engineAccountKey', 'authorityEpoch'].some(field =>
+            current[field] !== source.browserToolIdentity[field])) return null;
+    } catch { return null; }
+    const token = chatBindingNonce();
+    const selected = { ...source, selectedByUser: true, browserToolPermission: permission,
+      browserToolSelection: { token, threadId: clientThreadId } };
+    browserToolUserSelections.set(token, {
+      token, threadId: clientThreadId, localThreadId: threadId,
+      sourceId: selected.id, cardId: selected.sourceRef.viewId,
+      cardEpoch: selected.browserToolIdentity.cardEpoch,
+      profileId: selected.sourceRef.profileId, accountId: selected.sourceRef.accountId,
+      selectedUrl: selected.sourceRef.uri, userContextId: selected.browserToolIdentity.userContextId,
+      engineAccountKey: selected.browserToolIdentity.engineAccountKey,
+      authorityEpoch: selected.browserToolIdentity.authorityEpoch,
+      permission, usedRunId: null,
+    });
+    return selected;
+  }
+  function browserToolSelectedSources(threadId, candidates = null) {
+    const thread = getCodexThreadById(state.codex, threadId);
+    const clientThreadId = thread && ChatState.clientThreadBinding(thread);
+    return (candidates || thread?.inputSources || []).filter(source => {
+      if (source.kind !== 'browser' || source.selectedByUser !== true ||
+          !['observe', 'interact'].includes(source.browserToolPermission)) return false;
+      const selection = browserToolUserSelections.get(source.browserToolSelection?.token);
+      if (!selection || !clientThreadId || selection.localThreadId !== threadId ||
+          selection.threadId !== clientThreadId || source.browserToolSelection?.threadId !== clientThreadId ||
+          selection.usedRunId ||
+          selection.sourceId !== source.id || selection.permission !== source.browserToolPermission) return false;
+      const card = document.getElementById(source.sourceRef?.viewId);
+      if (!card?.isConnected || !card.classList?.contains('egd-browser-card')) return false;
+      try {
+        const current = card._browserControls?.toolBinding?.();
+        return current && browserToolSameUrl(current.url, source.sourceRef.uri) &&
+          current.profileId === source.sourceRef.profileId && current.accountId === source.sourceRef.accountId &&
+          current.cardEpoch === source.browserToolIdentity?.cardEpoch &&
+          current.userContextId === source.browserToolIdentity?.userContextId &&
+          current.engineAccountKey === source.browserToolIdentity?.engineAccountKey &&
+          current.authorityEpoch === source.browserToolIdentity?.authorityEpoch;
+      } catch { return false; }
+    }).map(source => structuredClone(source));
+  }
+  function browserToolSameUrl(left, right) {
+    try { return new URL(left).href === new URL(right).href }
+    catch { return false; }
+  }
+  function browserToolSafeNavigationUrl(value) {
+    if (typeof value !== 'string' || !value || value.length > 2048 || /[\u0000-\u0020\u007f]/.test(value)) return false;
+    try {
+      const parsed = new URL(value);
+      return ['http:', 'https:'].includes(parsed.protocol) && !parsed.username && !parsed.password;
+    } catch { return false; }
+  }
+  function browserToolFixtureIdentity(cardId) {
+    const card = document.getElementById(cardId);
+    if (!card?.isConnected || !card.classList?.contains('egd-browser-card')) return null;
+    try {
+      const binding = card._browserControls?.toolBinding?.();
+      return binding?.accountId === '' &&
+        /^http:\/\/127\.0\.0\.1:\d+\/egdesk-qa\/[A-Za-z0-9_-]{20,80}$/.test(binding.url)
+        ? binding : null;
+    } catch { return null; }
+  }
+  function browserToolFixtureReason(error, phase) {
+    const message = String(error?.message || error || '');
+    if (/observation is stale|document changed/i.test(message)) return 'stale-observation';
+    if (/target.*obscured/i.test(message)) return 'target-obscured';
+    if (/target.*(?:changed|unavailable|not found)/i.test(message)) return 'target-changed';
+    if (/authority was revoked|lease is missing or expired/i.test(message)) return 'authority-denied';
+    if (/already being operated|being operated/i.test(message)) return 'card-busy';
+    if (/run was (?:stopped|cancelled)|run binding is missing/i.test(message)) return 'run-ended';
+    if (/profile|account epoch|Card generation|context changed/i.test(message)) return 'identity-changed';
+    if (/NS_ERROR_[A-Z_]+/.test(message)) return 'gecko-error';
+    if (error?.name === 'TypeError' || /TypeError/.test(message)) return 'actor-type-error';
+    return phase === 'actor' ? 'actor-exception' : 'ui-rejected';
+  }
+  function browserToolRecordFixtureAuthorization(lease, reason) {
+    const cardId = lease?.card?.id;
+    const binding = cardId && browserToolFixtureIdentity(cardId);
+    if (binding) browserToolFixtureAuthorizationByCard.set(cardId, {
+      requestId: lease.requestId, cardEpoch: binding.cardEpoch,
+      authorityEpoch: binding.authorityEpoch, reason,
+    });
+  }
+  // The actor module and chrome overlay can see different JS wrappers for the
+  // same Gecko native objects. Require native Node identity and the exact
+  // BrowsingContext/document IDs; never accept only a matching Card label.
+  function browserToolSameNativeBrowser(left, right) {
+    if (!left || !right) return false;
+    if (left === right) return true;
+    try { return left.isSameNode?.(right) === true && right.isSameNode?.(left) === true; }
+    catch { return false; }
+  }
+  function browserToolSameNativeContext(left, right) {
+    if (!left || !right) return false;
+    if (left === right) return true;
+    const id = left?.id;
+    const innerWindowId = left?.currentWindowGlobal?.innerWindowId;
+    return Number.isSafeInteger(id) && id > 0 && id === right?.id &&
+      Number.isSafeInteger(innerWindowId) && innerWindowId > 0 &&
+      innerWindowId === right?.currentWindowGlobal?.innerWindowId;
+  }
+  function browserToolSameNativeWindowGlobal(left, right) {
+    if (!left || !right || left.isClosed === true || right.isClosed === true ||
+        left.isCurrentGlobal === false || right.isCurrentGlobal === false) return false;
+    if (left === right) return true;
+    const id = left?.innerWindowId;
+    return Number.isSafeInteger(id) && id > 0 && id === right?.innerWindowId &&
+      !!left.browsingContext && !!right.browsingContext &&
+      browserToolSameNativeContext(left?.browsingContext, right?.browsingContext);
+  }
+  function browserToolFixtureActionDiagnostic(cardId) {
+    const binding = browserToolFixtureIdentity(cardId);
+    const recorded = browserToolFixtureLastAction;
+    if (!binding || !recorded || recorded.cardId !== cardId ||
+        recorded.cardEpoch !== binding.cardEpoch || recorded.authorityEpoch !== binding.authorityEpoch) return null;
+    const authorization = browserToolFixtureAuthorizationByCard.get(cardId);
+    return { cardId, actionType: recorded.actionType, phase: recorded.phase,
+      status: recorded.status, reason: recorded.reason, inputRoute: recorded.inputRoute,
+      authorizationReason: authorization?.requestId === recorded.requestId &&
+        authorization.cardEpoch === binding.cardEpoch && authorization.authorityEpoch === binding.authorityEpoch
+        ? authorization.reason : null,
+      parentReason: recorded.parentReason,
+      geckoError: recorded.geckoError, sampledAtMs: recorded.sampledAtMs };
+  }
+  function browserToolAuthorizePhysicalAction({ browser, browsingContext, windowGlobal,
+    leaseId, requestId, deadlineMs, actionType, actionRef, actionUrl }) {
+    const lease = browserToolActionLeases.get(leaseId);
+    if (!lease) return false;
+    const deny = reason => { browserToolRecordFixtureAuthorization(lease, reason); return false; };
+    if (lease.authorized) return deny('lease-already-used');
+    if (lease.requestId !== requestId) return deny('request-id-mismatch');
+    if (lease.deadlineMs !== deadlineMs) return deny('deadline-mismatch');
+    if (Date.now() >= deadlineMs) return deny('deadline-expired');
+    if (!browserToolSameNativeBrowser(browser, lease.browser)) return deny('browser-identity-mismatch');
+    if (!browserToolSameNativeContext(browsingContext, lease.browsingContext)) return deny('browsing-context-identity-mismatch');
+    if (!browserToolSameNativeWindowGlobal(windowGlobal, lease.windowGlobal)) return deny('window-global-identity-mismatch');
+    if (!browserToolSameNativeWindowGlobal(browsingContext?.currentWindowGlobal, windowGlobal) ||
+        !browserToolSameNativeWindowGlobal(lease.browsingContext?.currentWindowGlobal, lease.windowGlobal)) {
+      return deny('window-global-not-current');
+    }
+    if (browserToolRunBindings.get(lease.key) !== lease.bound) return deny('run-binding-changed');
+    if (browserToolCancelledRuns.has(lease.key)) return deny('run-cancelled');
+    if (browserToolStoppedRuns.has(JSON.stringify([lease.runId, lease.bound.clientThreadId]))) return deny('run-stopped');
+    if (browserToolCardLeases.get(lease.cardEpoch) !== requestId) return deny('card-lease-changed');
+    if (!lease.card.isConnected) return deny('card-closed');
+    if (!browserToolSameNativeBrowser(lease.card._browserControls?.toolBrowser?.(), browser)) {
+      return deny('card-browser-mismatch');
+    }
+    if (lease.bound.permission !== 'interact') return deny('interaction-not-granted');
+    if (browserToolUserSelections.get(lease.bound.selectionToken)?.usedRunId !== lease.runId) {
+      return deny('selection-run-mismatch');
+    }
+    if (actionType !== lease.actionType) return deny('action-type-mismatch');
+    if (actionRef !== lease.actionRef) return deny('action-ref-mismatch');
+    if (actionUrl !== lease.actionUrl) return deny('action-url-mismatch');
+    try {
+      const current = lease.card._browserControls.toolBinding();
+      if (['cardId', 'cardEpoch', 'profileId', 'accountId', 'userContextId', 'engineAccountKey', 'authorityEpoch']
+        .some(field => current[field] !== lease.bound.binding[field])) return deny('live-binding-changed');
+    } catch { return deny('live-binding-unavailable'); }
+    lease.authorized = true;
+    browserToolRecordFixtureAuthorization(lease, 'approved');
+    return true;
+  }
+  async function browserToolDispatchOnce(request) {
+    const requestId = request?.requestId;
+    let diagnosticPhase = 'preflight';
+    const fail = (error) => {
+      const message = String(error?.message || error || 'Browser request rejected').slice(0, 500);
+      const binding = request?.kind === 'act' && browserToolFixtureIdentity(request.cardId);
+      if (binding) browserToolFixtureLastAction = {
+        requestId, cardId: request.cardId, cardEpoch: binding.cardEpoch, authorityEpoch: binding.authorityEpoch,
+        actionType: request.action?.type || null, phase: diagnosticPhase, status: 'rejected',
+        reason: browserToolFixtureReason(error, diagnosticPhase), inputRoute: null,
+        parentReason: message.match(/authority was revoked before input \[([a-z-]+)\]/)?.[1] || null,
+        geckoError: message.match(/\bNS_ERROR_[A-Z_]+\b/)?.[0] || null,
+        sampledAtMs: Date.now(),
+      };
+      return { requestId, status: 'rejected', error: message };
+    };
+    try {
+      if (request?.version !== 1 || typeof requestId !== 'string' || !requestId ||
+          typeof request.runId !== 'string' || !request.runId ||
+          typeof request.clientThreadId !== 'string' || !request.clientThreadId ||
+          typeof request.cardId !== 'string' || !request.cardId ||
+          typeof request.targetCardEpoch !== 'string' || !request.targetCardEpoch ||
+          !Number.isSafeInteger(request.deadlineMs) || request.deadlineMs <= Date.now() ||
+          request.deadlineMs > Date.now() + 60000) throw new Error('Invalid or expired Browser tool request');
+      const key = `${request.runId}\u0000${request.cardId}\u0000${request.targetCardEpoch}`;
+      for (const [cancelledKey, deadline] of browserToolCancelledRuns) {
+        if (deadline < Date.now()) browserToolCancelledRuns.delete(cancelledKey);
+      }
+      if (request.kind === 'cancel') {
+        const bound = browserToolRunBindings.get(key);
+        if (bound && bound.clientThreadId !== request.clientThreadId) throw new Error('Browser cancel belongs to another Chat');
+        browserToolRunBindings.delete(key);
+        browserToolPendingBindings.delete(key);
+        for (const [leaseId, lease] of browserToolActionLeases) {
+          if (lease.key === key) browserToolActionLeases.delete(leaseId);
+        }
+        if (bound?.selectionToken) browserToolUserSelections.delete(bound.selectionToken);
+        const pendingSelection = browserToolUserSelections.get(request.selectionToken);
+        if (pendingSelection?.threadId === request.clientThreadId &&
+            pendingSelection.cardId === request.cardId && pendingSelection.cardEpoch === request.targetCardEpoch) {
+          browserToolUserSelections.delete(request.selectionToken);
+        }
+        browserToolCancelledRuns.set(key, request.deadlineMs);
+        return { requestId, status: 'cancelled' };
+      }
+      if (browserToolStoppedRuns.has(JSON.stringify([request.runId, request.clientThreadId]))) {
+        throw new Error('Browser run was stopped');
+      }
+      if (browserToolCancelledRuns.has(key)) throw new Error('Browser run was cancelled');
+      const card = document.getElementById(request.cardId);
+      if (!card?.isConnected || !card.classList?.contains('egd-browser-card') ||
+          !card._browserControls?.toolBinding) throw new Error('Selected Browser Card is closed');
+      if (card._browserControls.toolBinding().cardEpoch !== request.targetCardEpoch) {
+        throw new Error('Browser request belongs to a different Card generation');
+      }
+      if (request.kind === 'bind') {
+        const selection = request.selection;
+        const current = card._browserControls.toolBinding();
+        const selectedByUser = browserToolUserSelections.get(selection?.selectionToken);
+        if (browserToolRunBindings.has(key)) throw new Error('Browser run is already bound');
+        if (!ChatState.knownCodexAccountKey(current.engineAccountKey)) throw new Error('Current Engine account is unverified');
+        if (!selection || selection.cardId !== card.id || selection.profileId !== current.profileId ||
+            selection.accountId !== current.accountId || !browserToolSameUrl(selection.selectedUrl, current.url) ||
+            selection.cardEpoch !== current.cardEpoch || selection.userContextId !== current.userContextId ||
+            selection.engineAccountKey !== current.engineAccountKey || selection.authorityEpoch !== current.authorityEpoch ||
+            !['observe', 'interact'].includes(selection.permission) || !selectedByUser ||
+            selectedByUser.usedRunId || selectedByUser.threadId !== request.clientThreadId ||
+            selection.clientThreadId !== request.clientThreadId ||
+            ['cardId', 'cardEpoch', 'profileId', 'accountId', 'selectedUrl', 'userContextId',
+              'engineAccountKey', 'authorityEpoch', 'permission', 'sourceId'].some(field =>
+              selectedByUser[field] !== selection[field])) {
+          throw new Error('Selected Browser Card, profile, account or URL changed');
+        }
+        const pending = { clientThreadId: request.clientThreadId, selectionToken: selection.selectionToken };
+        browserToolPendingBindings.set(key, pending);
+        try {
+          const live = await card._browserControls.toolObserve(current, { textLimit: 1, elementLimit: 1 });
+          if (!browserToolSameUrl(live.url, selection.selectedUrl) || browserToolCancelledRuns.has(key) ||
+              browserToolStoppedRuns.has(JSON.stringify([request.runId, request.clientThreadId])) ||
+              browserToolPendingBindings.get(key) !== pending ||
+              browserToolUserSelections.get(selection.selectionToken) !== selectedByUser || selectedByUser.usedRunId ||
+              request.deadlineMs <= Date.now()) throw new Error('Selected Browser document changed before binding');
+          selectedByUser.usedRunId = request.runId;
+          browserToolRunBindings.set(key, { binding: current, permission: selection.permission,
+            clientThreadId: request.clientThreadId, selectionToken: selection.selectionToken });
+          return { requestId, status: 'bound', binding: current };
+        } finally {
+          if (browserToolPendingBindings.get(key) === pending) browserToolPendingBindings.delete(key);
+        }
+      }
+      const authorized = browserToolRunBindings.get(key);
+      if (!authorized || authorized.clientThreadId !== request.clientThreadId || !request.binding ||
+          ['cardId', 'cardEpoch', 'profileId', 'accountId', 'userContextId', 'engineAccountKey', 'authorityEpoch'].some(field =>
+            authorized.binding[field] !== request.binding[field])) throw new Error('Browser run binding is missing or changed');
+      const current = card._browserControls.toolBinding();
+      if (['cardId', 'cardEpoch', 'profileId', 'accountId', 'userContextId', 'engineAccountKey', 'authorityEpoch'].some(field =>
+        authorized.binding[field] !== current[field])) {
+        browserToolRunBindings.delete(key);
+        throw new Error('Browser profile or account epoch changed');
+      }
+      if (request.kind === 'observe') {
+        if (browserToolCardLeases.has(request.targetCardEpoch)) throw new Error('Browser Card is being operated; observe after it settles');
+        const snapshot = await card._browserControls.toolObserve(authorized.binding, request.options || {});
+        if (browserToolRunBindings.get(key) !== authorized) throw new Error('Browser run was cancelled during observation');
+        return { requestId, status: 'observed', snapshot };
+      }
+      if (request.kind !== 'act' || authorized.permission !== 'interact') throw new Error('Browser interaction was not selected');
+      if (!['navigate', 'click', 'fill'].includes(request.action?.type) || !request.guard ||
+          (request.action.type !== 'navigate' && (!request.action.ref || request.action.selector))) {
+        throw new Error('Unsupported or unguarded Browser action');
+      }
+      if (request.action.type === 'navigate' && !browserToolSafeNavigationUrl(request.action.url)) {
+        throw new Error('Browser navigation requires an absolute http(s) URL without credentials');
+      }
+      if (browserToolCardLeases.has(request.targetCardEpoch)) throw new Error('Browser Card is already being operated');
+      browserToolCardLeases.set(request.targetCardEpoch, requestId);
+      const browser = card._browserControls.toolBrowser?.();
+      const browsingContext = browser?.browsingContext;
+      const windowGlobal = browsingContext?.currentWindowGlobal;
+      if (!browser || !browsingContext || !windowGlobal) {
+        browserToolCardLeases.delete(request.targetCardEpoch);
+        throw new Error('Browser actor binding is unavailable');
+      }
+      const leaseId = chatBindingNonce();
+      browserToolFixtureAuthorizationByCard.delete(request.cardId);
+      browserToolActionLeases.set(leaseId, { key, bound: authorized, card, browser,
+        browsingContext, windowGlobal, leaseId, requestId, runId: request.runId,
+        cardEpoch: request.targetCardEpoch, deadlineMs: request.deadlineMs,
+        actionType: request.action.type, actionRef: request.action.ref || null,
+        actionUrl: request.action.url || null, authorized: false });
+      let receipt;
+      try {
+        diagnosticPhase = 'actor';
+        receipt = await card._browserControls.toolAct(authorized.binding, request.action, request.guard,
+          { leaseId, requestId, deadlineMs: request.deadlineMs });
+      }
+      finally {
+        browserToolActionLeases.delete(leaseId);
+        if (browserToolCardLeases.get(request.targetCardEpoch) === requestId) {
+          browserToolCardLeases.delete(request.targetCardEpoch);
+        }
+      }
+      diagnosticPhase = 'post-actor';
+      if (browserToolRunBindings.get(key) !== authorized) throw new Error('Browser run was cancelled after dispatch; outcome is unknown');
+      const fixture = browserToolFixtureIdentity(request.cardId);
+      if (fixture) browserToolFixtureLastAction = {
+        requestId, cardId: request.cardId, cardEpoch: fixture.cardEpoch, authorityEpoch: fixture.authorityEpoch,
+        actionType: request.action.type, phase: 'post-actor', status: 'acted', reason: 'none',
+        inputRoute: receipt?.dispatchReceipt?.clickInputRoute || null,
+        parentReason: null, geckoError: null,
+        sampledAtMs: Date.now(),
+      };
+      return { requestId, status: 'acted', receipt };
+    } catch (error) { return fail(error); }
+  }
+  function browserToolDispatch(request) {
+    const id = request?.requestId;
+    if (typeof id !== 'string' || !id || id.length > 160) return browserToolDispatchOnce(request);
+    const key = `${request.runId}\u0000${request.cardId}\u0000${request.targetCardEpoch}`;
+    if (request.kind !== 'cancel' && browserToolStoppedRuns.has(JSON.stringify([request.runId, request.clientThreadId]))) {
+      return Promise.resolve({ requestId: id, status: 'rejected', error: 'Browser run was stopped' });
+    }
+    if (request.kind !== 'cancel' && browserToolCancelledRuns.has(key)) return Promise.resolve({
+      requestId: id, status: 'rejected', error: 'Browser run was cancelled',
+    });
+    let fingerprint;
+    try { fingerprint = JSON.stringify(request); } catch { return browserToolDispatchOnce(null); }
+    if (fingerprint.length > 24000) return Promise.resolve({ requestId: id, status: 'rejected', error: 'Browser request exceeds size limit' });
+    const previous = browserToolRequestReceipts.get(id);
+    if (previous) return previous.fingerprint === fingerprint ? previous.result :
+      Promise.resolve({ requestId: id, status: 'rejected', error: 'Browser request ID reused with different payload' });
+    if (browserToolRequestReceipts.size >= 512) {
+      for (const [oldId, item] of browserToolRequestReceipts) {
+        if (item.deadline < Date.now()) browserToolRequestReceipts.delete(oldId);
+      }
+      if (browserToolRequestReceipts.size >= 512) return Promise.resolve({
+        requestId: id, status: 'rejected', error: 'Browser request queue is full',
+      });
+    }
+    const result = browserToolDispatchOnce(request);
+    browserToolRequestReceipts.set(id, { fingerprint, result, deadline: request.deadlineMs });
+    return result;
+  }
+  function attachBrowserToolTransport({ source, respond }) {
+    if (typeof source?.addEventListener !== 'function' || typeof source?.removeEventListener !== 'function' ||
+        typeof respond !== 'function') throw new TypeError('Browser tool transport requires event source and response sender');
+    const onRequest = async (event) => {
+      let request;
+      try { request = JSON.parse(event.data); } catch { return; }
+      const key = `${request?.runId}\u0000${request?.cardId}\u0000${request?.targetCardEpoch}`;
+      const card = document.getElementById(request?.cardId);
+      if (card?._browserControls?.toolBinding) {
+        try {
+          if (card._browserControls.toolBinding().cardEpoch !== request.targetCardEpoch) return;
+        } catch { if (!browserToolRunBindings.has(key)) return; }
+      } else if (!browserToolRunBindings.has(key) && !browserToolCancelledRuns.has(key)) return;
+      const response = await browserToolDispatch(request);
+      try { await respond(response); } catch (error) { console.warn(TAG, 'Browser tool response transport failed', error); }
+    };
+    source.addEventListener('browser-tool-request', onRequest);
+    return () => source.removeEventListener('browser-tool-request', onRequest);
+  }
+
 
   function spawnBrowserCard(initialUrl = 'https://duckduckgo.com', options = {}) {
     const normalizedUrl = normalizeBrowserUri(initialUrl);
@@ -9525,6 +10077,7 @@
     });
     if (options.fixedLogicalHeight) card._fixedLogicalHeight = options.fixedLogicalHeight;
     let xulBrowser = null;
+    let unregisterBrowserAuthorizer = null;
     let browserLoadTimer = 0;
     let browserMenuPanel = null;
     const agentRefByNode = new WeakMap();
@@ -9556,6 +10109,17 @@
 
     const pageTitle = el('div', { class: 'egd-card-page-title' }, browserState.title);
     const pageStatus = el('div', { class: 'egd-card-page-status' }, 'Loading');
+    const agentActivity = el('span', { class: 'egd-browser-agent-activity', role: 'status',
+      style: { fontSize: '11px', opacity: '0.8', whiteSpace: 'nowrap', maxWidth: '140px',
+        overflow: 'hidden', textOverflow: 'ellipsis', flexShrink: '1' } }, '');
+    agentActivity.hidden = true;
+    let agentActivityTimer = 0;
+    const showAgentActivity = (message) => {
+      if (agentActivityTimer) window.clearTimeout(agentActivityTimer);
+      agentActivity.textContent = message;
+      agentActivity.hidden = !message;
+      if (message) agentActivityTimer = window.setTimeout(() => { agentActivity.hidden = true; agentActivityTimer = 0; }, 4000);
+    };
     const securityIcon = el('span', {
       class: 'egd-card-omnibox-icon egd-card-security',
       title: browserState.security,
@@ -9613,7 +10177,7 @@
 
     const header = deskWindow.slots.header;
     deskWindow.slots.identity.classList.add('egd-card-page-meta');
-    deskWindow.slots.identity.append(pageTitle, pageStatus);
+    deskWindow.slots.identity.append(pageTitle, pageStatus, agentActivity);
     deskWindow.slots.toolbar.append(
       el('div', { class: 'egd-card-nav' },
         backButton,
@@ -9755,15 +10319,42 @@
       const node = agentNodeByRef.get(ref);
       return node?.isConnected ? node : null;
     };
+    const agentComposedParent = (node) => node?.parentElement || node?.getRootNode?.()?.host || null;
     const isAgentVisibleElement = (node) => {
       if (!node?.getBoundingClientRect) return false;
       const rect = node.getBoundingClientRect();
       if (rect.width <= 0 || rect.height <= 0) return false;
-      try {
-        const style = node.ownerDocument?.defaultView?.getComputedStyle?.(node);
-        if (style?.display === 'none' || style?.visibility === 'hidden' || Number(style?.opacity) === 0) return false;
-      } catch {}
+      for (let current = node; current; current = agentComposedParent(current)) {
+        if (current.hidden || current.inert || current.getAttribute?.('aria-hidden') === 'true') return false;
+        try {
+          const style = current.ownerDocument?.defaultView?.getComputedStyle?.(current);
+          if (!style) return false;
+          if (style?.display === 'none' || ['hidden', 'collapse'].includes(style?.visibility) || Number(style?.opacity) === 0) return false;
+        } catch { return false; }
+      }
       return true;
+    };
+    const isAgentSensitiveControl = (node) => {
+      if (node?.isContentEditable) return true;
+      const tag = String(node?.tagName || '').toLowerCase();
+      if (!['input', 'textarea', 'select'].includes(tag)) return false;
+      const type = String(node.type || node.getAttribute?.('type') || '').toLowerCase();
+      const sensitiveFlag = node.getAttribute?.('data-sensitive');
+      const privateFlag = node.getAttribute?.('data-private');
+      if (['password', 'hidden'].includes(type) ||
+          (sensitiveFlag != null && sensitiveFlag !== 'false') ||
+          (privateFlag != null && privateFlag !== 'false')) return true;
+      const hints = ['autocomplete', 'name', 'id', 'aria-label', 'placeholder'].map(key =>
+        String(node.getAttribute?.(key) || (key === 'id' ? node.id : '') || '')
+          .replace(/([a-z0-9])([A-Z])/g, '$1 $2').toLowerCase()).join(' ');
+      if (/password|passwd|passphrase|secret|token|otp|cvv|cvc/.test(hints)) return true;
+      return /(?:^|[\s_-])(?:password|passwd|pwd|passphrase|secret|token|otp|pin|ssn|pan|social[\s_-]?security(?:[\s_-]?number)?|primary[\s_-]?account[\s_-]?number|api[\s_-]?key|access[\s_-]?key|private[\s_-]?key|client[\s_-]?secret|one[\s_-]?time|verification[\s_-]?code|auth[\s_-]?code|security[\s_-]?answer|cc[\s_-]?(?:number|csc|exp)|credit[\s_-]?card(?:[\s_-]?number)?|card[\s_-]?number|cvv|cvc)(?:$|[\s_-])/.test(hints);
+    };
+    const isAgentSensitiveText = (node) => {
+      for (let parent = agentComposedParent(node); parent; parent = agentComposedParent(parent)) {
+        if (parent.isContentEditable || isAgentSensitiveControl(parent)) return true;
+      }
+      return false;
     };
     const agentElementRole = (node) => {
       const explicitRole = node.getAttribute?.('role');
@@ -9783,6 +10374,7 @@
       return tag || 'element';
     };
     const agentElementLabel = (node) => {
+      if (isAgentSensitiveControl(node)) return 'Sensitive field';
       const doc = node.ownerDocument;
       const ariaLabelledBy = node.getAttribute?.('aria-labelledby');
       if (ariaLabelledBy && doc) {
@@ -9797,11 +10389,11 @@
         || node.textContent
         || node.getAttribute?.('name')
         || node.getAttribute?.('id')
-        || node.value
         || '';
       return compactAgentText(label, 120);
     };
     const agentElementValue = (node) => {
+      if (isAgentSensitiveControl(node)) return '';
       const tag = String(node.tagName || '').toLowerCase();
       if (tag === 'select') return compactAgentText(node.selectedOptions?.[0]?.textContent || node.value || '', 120);
       if (tag === 'textarea' || tag === 'input') return compactAgentText(node.value || '', 120);
@@ -9823,7 +10415,7 @@
           const text = compactAgentText(node.nodeValue, 180);
           if (!text || text.length < 2) return nodeFilter.FILTER_REJECT;
           const parent = node.parentElement;
-          if (!parent || !isAgentVisibleElement(parent)) return nodeFilter.FILTER_REJECT;
+          if (!parent || !isAgentVisibleElement(parent) || isAgentSensitiveText(node)) return nodeFilter.FILTER_REJECT;
           return nodeFilter.FILTER_ACCEPT;
         },
       });
@@ -10177,12 +10769,39 @@
           const node = nodeByRef.get(ref);
           return node && node.isConnected ? node : null;
         };
+        const composedParent = (node) => node?.parentElement || node?.getRootNode?.()?.host || null;
         const isVisible = (node) => {
           if (!node || !node.getBoundingClientRect) return false;
           const rect = node.getBoundingClientRect();
           if (rect.width <= 0 || rect.height <= 0) return false;
-          const style = content.getComputedStyle(node);
-          return style.display !== 'none' && style.visibility !== 'hidden' && Number(style.opacity) !== 0;
+          for (let current = node; current; current = composedParent(current)) {
+            if (current.hidden || current.inert || current.getAttribute?.('aria-hidden') === 'true') return false;
+            const style = content.getComputedStyle(current);
+            if (style.display === 'none' || ['hidden', 'collapse'].includes(style.visibility) || Number(style.opacity) === 0) return false;
+          }
+          return true;
+        };
+        const isSensitive = (node) => {
+          if (node?.isContentEditable) return true;
+          const tag = String(node?.tagName || '').toLowerCase();
+          if (!['input', 'textarea', 'select'].includes(tag)) return false;
+          const type = String(node.type || node.getAttribute?.('type') || '').toLowerCase();
+          const sensitiveFlag = node.getAttribute?.('data-sensitive');
+          const privateFlag = node.getAttribute?.('data-private');
+          if (['password', 'hidden'].includes(type) ||
+              (sensitiveFlag != null && sensitiveFlag !== 'false') ||
+              (privateFlag != null && privateFlag !== 'false')) return true;
+          const hints = ['autocomplete', 'name', 'id', 'aria-label', 'placeholder'].map(key =>
+            String(node.getAttribute?.(key) || (key === 'id' ? node.id : '') || '')
+              .replace(/([a-z0-9])([A-Z])/g, '$1 $2').toLowerCase()).join(' ');
+          if (/password|passwd|passphrase|secret|token|otp|cvv|cvc/.test(hints)) return true;
+          return /(?:^|[\\s_-])(?:password|passwd|pwd|passphrase|secret|token|otp|pin|ssn|pan|social[\\s_-]?security(?:[\\s_-]?number)?|primary[\\s_-]?account[\\s_-]?number|api[\\s_-]?key|access[\\s_-]?key|private[\\s_-]?key|client[\\s_-]?secret|one[\\s_-]?time|verification[\\s_-]?code|auth[\\s_-]?code|security[\\s_-]?answer|cc[\\s_-]?(?:number|csc|exp)|credit[\\s_-]?card(?:[\\s_-]?number)?|card[\\s_-]?number|cvv|cvc)(?:$|[\\s_-])/.test(hints);
+        };
+        const isSensitiveText = (node) => {
+          for (let parent = composedParent(node); parent; parent = composedParent(parent)) {
+            if (parent.isContentEditable || isSensitive(parent)) return true;
+          }
+          return false;
         };
         const roleFor = (node) => {
           const explicit = node.getAttribute?.('role');
@@ -10202,6 +10821,7 @@
           return tag || 'element';
         };
         const labelFor = (node) => {
+          if (isSensitive(node)) return 'Sensitive field';
           const doc = node.ownerDocument;
           const labelledBy = node.getAttribute?.('aria-labelledby');
           if (labelledBy) {
@@ -10221,12 +10841,12 @@
               || node.textContent
               || node.getAttribute?.('name')
               || node.getAttribute?.('id')
-              || node.value
               || '',
             120,
           );
         };
         const valueFor = (node) => {
+          if (isSensitive(node)) return '';
           const tag = String(node.tagName || '').toLowerCase();
           if (tag === 'select') return compact(node.selectedOptions?.[0]?.textContent || node.value || '', 120);
           if (tag === 'textarea' || tag === 'input') return compact(node.value || '', 120);
@@ -10243,7 +10863,7 @@
               const text = compact(node.nodeValue, 180);
               if (!text || text.length < 2) return filter.FILTER_REJECT;
               const parent = node.parentElement;
-              if (!parent || !isVisible(parent)) return filter.FILTER_REJECT;
+              if (!parent || !isVisible(parent) || isSensitiveText(node)) return filter.FILTER_REJECT;
               return filter.FILTER_ACCEPT;
             },
           });
@@ -10801,13 +11421,29 @@
       browserMenuPanel.remove();
       browserMenuPanel = null;
     };
+    const selectBrowserForChat = (permission) => {
+      const threadId = state.codex.activeThreadId;
+      const source = chatInputSourceForView(card);
+      if (!threadId || !source || source.kind !== 'browser') return;
+      const selectedSource = registerBrowserToolSelection(threadId, source, permission);
+      if (!selectedSource && permission === 'interact') {
+        boardNotice('Browser 조작 대상을 확인하지 못했습니다. 현재 페이지에서 다시 선택해 주세요.'); return;
+      }
+      const existing = getCodexThreadById(state.codex, threadId)?.inputSources?.find(item =>
+        item.kind === 'browser' && item.sourceRef?.viewId === card.id);
+      if (existing) state.codexBridge.removeInputSource(threadId, existing.id);
+      state.codexBridge.addInputSources(threadId,
+        [selectedSource || { ...source, selectedByUser: true, browserToolPermission: 'observe' }]);
+      showAgentActivity(permission === 'interact'
+        ? '이번 Chat 조작 대상으로 선택됨' : '이번 Chat 읽기 자료로 선택됨');
+    };
     const showBrowserMenu = (anchor = menuButton) => {
       if (browserMenuPanel?.isConnected) {
         closeBrowserMenu();
         return null;
       }
       const anchorRect = anchor.getBoundingClientRect();
-      const pos = resolveFloatingMenuPlacement(anchorRect, 166, 190);
+      const pos = resolveFloatingMenuPlacement(anchorRect, 166, 224);
       const item = (label, title, action) => el('button', {
         class: 'egd-browser-menu-item',
         title,
@@ -10826,10 +11462,10 @@
       },
         item('복제', '현재 URL을 새 Desk Window로 열기', duplicateBrowser),
         item('URL 복사', browserState.uri, () => copyTextToClipboard(browserState.uri)),
-        item('Chat에 첨부', '현재 페이지를 다음 Chat의 자료로 선택', () => {
-          const source = chatInputSourceForView(card);
-          if (source) state.codexBridge.addInputSources(state.codex.activeThreadId, [source]);
-        }),
+        item('Chat에 읽기 첨부', '현재 Browser의 읽기 자료만 다음 Chat에 선택합니다. 기존 조작 허용이 있으면 읽기 전용으로 바뀝니다.',
+          () => selectBrowserForChat('observe')),
+        item('Chat 조작 허용', `이 Browser만 이번 Chat 실행의 관찰·조작 대상으로 선택합니다. 사이트 계정: ${card._sourceRef?.accountId || '미확인'}(선택 메타데이터, 로그인 증거 아님). 외부 효과는 별도 확인이 필요합니다.`,
+          () => selectBrowserForChat('interact')),
         item('홈', browserState.homeUrl, () => navigateBrowser(browserState.homeUrl)),
         item(browserState.loading ? '중지' : '새로고침', browserState.loading ? '로드 중지' : '현재 페이지 새로고침', () => (browserState.loading ? stopBrowser() : reloadBrowser())),
         item(isCardFullscreen(card) ? '창 복귀' : '최대화', 'Desk Window 최대화 전환', () => toggleCardFullscreen(card)),
@@ -10845,6 +11481,77 @@
       return browserMenuPanel;
     };
     card._browserState = browserState;
+    const browserToolBinding = () => {
+      if (!card.isConnected || !xulBrowser?.isConnected || !xulBrowser?.browsingContext?.currentWindowGlobal) {
+        throw new Error('Selected Browser Card is unavailable');
+      }
+      if (!unregisterBrowserAuthorizer) {
+        if (!ensureBrowserAgentActor()) throw new Error('Browser actor registration failed');
+        const { registerBrowserActionAuthorizer } = ChromeUtils.importESModule(
+          'chrome://userchrome/content/EGDeskBrowserAgentRuntimeParent.sys.mjs');
+        unregisterBrowserAuthorizer = registerBrowserActionAuthorizer(
+          xulBrowser, window, browserToolAuthorizePhysicalAction);
+      }
+      const profileId = card._sourceRef?.profileId || state.sourceRefs.defaultProfileId;
+      const accountId = card._sourceRef?.accountId || '';
+      const rawContextId = xulBrowser.getAttribute?.('usercontextid');
+      const userContextId = rawContextId == null || rawContextId === '' ? 0 : Number(rawContextId);
+      const nativeContextId = xulBrowser.browsingContext.originAttributes?.userContextId;
+      if (!Number.isSafeInteger(userContextId) || userContextId < 0 ||
+          !Number.isSafeInteger(nativeContextId) || nativeContextId !== userContextId) {
+        throw new Error('Browser profile container is unverified');
+      }
+      return { cardId: card.id, cardEpoch: agentBridgeId, profileId, accountId,
+        engineAccountKey: ChatState.codexAccountKey(state.codex.authStatus) || null,
+        authorityEpoch: browserToolAuthorityEpoch,
+        accountStatus: accountId ? 'selected-metadata-unverified' : 'unverified', userContextId,
+        url: browserCardState(card)?.uri || '' };
+    };
+    const assertBrowserToolBinding = (expected) => {
+      const current = browserToolBinding();
+      if (!expected || ['cardId', 'cardEpoch', 'profileId', 'accountId', 'userContextId', 'engineAccountKey', 'authorityEpoch']
+        .some(key => current[key] !== expected[key])) throw new Error('Browser Card, profile or account context changed');
+      return current;
+    };
+    const browserToolObserve = async (expected, options = {}) => {
+      assertBrowserToolBinding(expected);
+      const context = xulBrowser.browsingContext;
+      const windowGlobal = context.currentWindowGlobal;
+      showAgentActivity('Agent가 이 Browser를 관찰 중');
+      let snapshot;
+      try { snapshot = await browserAgentActorRequest('snapshot', { options }); }
+      catch (error) { showAgentActivity('Browser 관찰 불가 · 다시 확인 필요'); throw error; }
+      assertBrowserToolBinding(expected);
+      if (xulBrowser.browsingContext !== context || context.currentWindowGlobal !== windowGlobal) {
+        throw new Error('Browser document changed during observation');
+      }
+      showAgentActivity('이 Browser 관찰 완료');
+      return { cardId: card.id, ...snapshot };
+    };
+    const browserToolAct = async (expected, action, guard, lease) => {
+      assertBrowserToolBinding(expected);
+      const context = xulBrowser.browsingContext;
+      const windowGlobal = context.currentWindowGlobal;
+      showAgentActivity('Agent가 이 Browser에서 조작 중');
+      // Guarded model input is JSWindowActor-only: the legacy frame-script and
+      // chrome-document fallbacks do not enforce document/target revisions.
+      let result;
+      try {
+        result = await browserAgentActorRequest('act', {
+          action, options: { guard, lease, settleMs: 150, snapshot: { textLimit: 60, elementLimit: 80 } },
+        });
+      } catch (error) { showAgentActivity('조작 결과 미확인 · 다시 관찰 필요'); throw error; }
+      assertBrowserToolBinding(expected);
+      const documentStillCurrent = xulBrowser.browsingContext === context && context.currentWindowGlobal === windowGlobal;
+      showAgentActivity(documentStillCurrent && result?.observation?.visibleTextChanged
+        ? '이 Browser의 화면 변화 관찰' : '조작 요청 후 결과 확인 필요');
+      return { dispatchReceipt: { actor: 'JSWindowActor', eventDispatched: result?.ok === true,
+        documentStillCurrent,
+        ...(action.type === 'click' && result?.result?.clickDiagnostics?.dispatchScope
+          ? { clickInputRoute: result.result.clickDiagnostics.dispatchScope } : {}) },
+        after: documentStillCurrent ? { cardId: card.id, ...result.after } : null,
+        observation: documentStillCurrent ? result.observation : null };
+    };
     card._browserControls = {
       getState: () => getBrowserStateSnapshot(),
       sync: () => syncBrowserStateFromBrowser({ markDirtyOnLocationChange: false }),
@@ -10868,6 +11575,10 @@
       agentNotifications: browserAgentNotifications,
       agentClearHistory: clearBrowserAgentHistory,
       agentDebug: browserAgentDebug,
+      toolBinding: browserToolBinding,
+      toolBrowser: () => xulBrowser,
+      toolObserve: browserToolObserve,
+      toolAct: browserToolAct,
     };
     const onBrowserLoadStart = () => setBrowserLoading(true);
     const onBrowserLoadDone = () => {
@@ -10962,6 +11673,8 @@
     deskWindow.onResize(updateFitScale);
 
     const cleanupCard = () => {
+      try { unregisterBrowserAuthorizer?.(); } catch {}
+      unregisterBrowserAuthorizer = null;
       if (state.codex.authCardEntityId === card.id) {
         state.codex.authCardEntityId = null;
       }
@@ -11534,6 +12247,68 @@
       for (const card of entries.keys()) if (!current.has(card) || !card.isConnected) remove(card);
       for (const card of current) add(card);
     };
+    let cancelPendingChatComposerFocus = () => {};
+    const focusChatDockIfCompact = card => {
+      cancelPendingChatComposerFocus();
+      if (!card?.isConnected || !card.classList?.contains('egd-chat-card') || state.panModifier) return false;
+      syncEntries();
+      const entry = entries.get(card);
+      if (!entry) return false;
+      entry.visibilityDirty = true;
+      if (!authorVisible(entry)) return false;
+      const zoom = Number.isFinite(state.zoomTarget) ? state.zoomTarget : state.zoom;
+      const rect = screenRect(card, zoom, state.panTarget || state.pan);
+      const level = SurfaceState.surfaceSemanticLevel({
+        width: rect.width, height: rect.height, fontPx: entry.bodyFontPx * zoom,
+        previous: entry.level, detailWidth, detailHeight,
+      });
+      if (level === 'detail') return false;
+      focusProjection(entry);
+      const target = { zoom: state.zoomTarget, pan: { ...state.panTarget } };
+      const initialFocus = document.activeElement;
+      let frame = 0, checks = 0, stopped = false;
+      const cancel = () => {
+        if (stopped) return;
+        stopped = true;
+        if (frame) window.cancelAnimationFrame(frame);
+        document.removeEventListener('mousedown', onOtherInput, true);
+      };
+      const onOtherInput = event => {
+        if (!card.contains(event.target)) cancel();
+      };
+      const check = () => {
+        frame = 0;
+        if (stopped) return;
+        if (!card.isConnected || state.activeEntityId !== card.id || state.panModifier ||
+            state.codex.chatCardEntityId !== card.id || state.codex.chatDockMode !== 'canvas' ||
+            Math.abs(state.zoomTarget - target.zoom) > 0.001 ||
+            Math.abs(state.panTarget.x - target.pan.x) > 0.25 ||
+            Math.abs(state.panTarget.y - target.pan.y) > 0.25) { cancel(); return; }
+        const settled = Math.abs(state.zoom - target.zoom) < 0.0015 &&
+          Math.abs(state.pan.x - target.pan.x) < 0.25 &&
+          Math.abs(state.pan.y - target.pan.y) < 0.25;
+        if (settled && entry.level === 'detail') {
+          const composer = card.querySelector('.egd-codex-input');
+          const active = document.activeElement;
+          const humanFocusMovedElsewhere = active && active !== initialFocus &&
+            active !== viewport && !card.contains(active);
+          if (composer?.isConnected && !composer.disabled &&
+              !humanFocusMovedElsewhere &&
+              (!card.contains(active) || active === composer || active === entry.proxy)) {
+            composer.focus({ preventScroll: true });
+          }
+          cancel();
+          return;
+        }
+        if (++checks >= 180) { cancel(); return; }
+        frame = window.requestAnimationFrame(check);
+      };
+      document.addEventListener('mousedown', onOtherInput, true);
+      cancelPendingChatComposerFocus = cancel;
+      frame = window.requestAnimationFrame(check);
+      return true;
+    };
+    state.focusChatDockIfCompact = focusChatDockIfCompact;
     const layerObserver = new MutationObserver(() => { syncEntries(); request(); });
     layerObserver.observe(layer, { childList: true });
     const ancestorVisibilityObserver = new MutationObserver(() => {
@@ -11663,6 +12438,7 @@
     state.refreshSemanticProjections = request;
     return {
       refresh: request,
+      focusChatDockIfCompact,
       snapshot: () => ({
         cards: Array.from(entries.values()).map(entry => ({
           id: entry.card.id, kind: entry.kind, level: entry.level,
@@ -12329,6 +13105,17 @@
           notifications: (cardOrId, options = {}) => browserCardControl(cardOrId, 'agentNotifications', options),
           clearHistory: (cardOrId) => browserCardControl(cardOrId, 'agentClearHistory'),
           debug: (cardOrId) => browserCardControl(cardOrId, 'agentDebug'),
+        },
+        browserAgentTools: {
+          selectedSources: browserToolSelectedSources,
+          dispatch: browserToolDispatch,
+          attachTransport: attachBrowserToolTransport,
+          authorizePhysicalAction: browserToolAuthorizePhysicalAction,
+          fixtureActionDiagnostic: browserToolFixtureActionDiagnostic,
+          rootSseReady: () => state.codexBridge?.rootSseReady?.() || {
+            sourceReady: false, stable: false, eventSourceReadyState: null,
+            browserTransportId: null, sampledAtMs: Date.now(),
+          },
         },
         sourceRefs: {
           keyFor: sourceRefKey,

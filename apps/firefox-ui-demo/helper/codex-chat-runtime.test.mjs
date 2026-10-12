@@ -3,7 +3,11 @@ import assert from 'node:assert/strict'
 import { mkdtemp, writeFile, chmod, symlink, rm, realpath } from 'node:fs/promises'
 import os from 'node:os'
 import path from 'node:path'
+import { createHash } from 'node:crypto'
 import { CodexChatRuntime } from './codex-chat-runtime.mjs'
+import { createCodexBrowserToolProvider } from './codex-browser-tool-provider.mjs'
+import { ContextRuntime } from './egdesk-context-runtime.mjs'
+import { inspectNativeCapabilities } from './egdesk-native-capabilities.mjs'
 import { openChatStore } from './egdesk-chat-store.mjs'
 import { explicitFileLinks, publicText, verifyLocalFile } from './codex-chat-values.mjs'
 
@@ -21,6 +25,10 @@ function harness(override = {}) {
     request: async (method, params) => { calls.push({ method, params }); return (override.request || defaults)(method, params, chat, defaults) },
     respond: (...args) => replies.push(args), emit: event => events.push(event), emitLegacy: event => legacy.push(event),
     contexts: override.contexts,
+    toolProviders: override.toolProviders,
+    getOwnerKey: override.getOwnerKey,
+    qaReady: override.qaReady,
+    getNativeContractFingerprint: override.getNativeContractFingerprint,
     expectedProcessConfiguration: override.expectedProcessConfiguration,
     verifyFile: override.verifyFile || (async () => null),
   })
@@ -30,6 +38,777 @@ function harness(override = {}) {
   const finish = (run, status = 'completed', items = []) => notify('turn/completed', { threadId: run.conversationId, turn: { id: run.runId, status, items } })
   return { chat, calls, events, legacy, replies, notify, item, finish }
 }
+
+function qaHarness(override = {}) {
+  return harness({ ...override, request: async (method, params, chat, defaults) => {
+    if (override.request) {
+      const custom = await override.request(method, params, chat, defaults)
+      if (custom !== undefined) return custom
+    }
+    if (method === 'mcpServerStatus/list') return { data: [
+      { name: 'account-tools', pluginId: 'account-plugin', tools: params.threadId ? {} : { write: {} }, resources: [], resourceTemplates: [], toolsError: null },
+      { name: 'configured-tools', tools: params.threadId ? {} : { read: {} }, resources: [], resourceTemplates: [], toolsError: null },
+      { name: 'app-provided-tools', tools: params.threadId ? {} : { ambient: {} }, resources: [], resourceTemplates: [], toolsError: null },
+    ], nextCursor: null }
+    if (method === 'thread/unsubscribe') return { status: 'unsubscribed' }
+    if (method === 'config/read') return { config: { developer_instructions: 'Ordinary instructions' },
+      layers: [{ name: { type: 'user' }, config: { mcp_servers: { 'configured-tools': { command: 'fixture-mcp' } } } }] }
+    const result = await defaults(method, params)
+    if (method === 'thread/start' || method === 'thread/resume') return { ...result, sandbox: { type: 'readOnly', networkAccess: false }, approvalPolicy: 'never' }
+    return result
+  } })
+}
+
+test('read-only QA is explicit, verifies native thread and MCP isolation before a same-path turn, and preserves context reads', async () => {
+  const registered = [], bound = []
+  const contexts = {
+    prepare: async () => ({ sourceIds: ['fixture-source'] }),
+    specs: () => ['egdesk_list_context', 'egdesk_read_source', 'egdesk_capture_output', 'egdesk_publish_briefing'].map(name => ({ type: 'function', name, inputSchema: { type: 'object' }, description: name })),
+    additionalContext: () => ({ egdesk_context: { kind: 'application', value: 'fixture-source' } }),
+    registerThread: async id => registered.push(id),
+    bindRun: async run => bound.push(run.runId),
+  }
+  const h = qaHarness({ contexts })
+  const accepted = await h.chat.send({ message: 'Read fixture and run a safe nonce command', requestId: 'qa-1', executionPolicy: { mode: 'readOnlyQa' }, attachments: [{ name: 'fixture' }], contextCapabilities: { read: true } })
+  const start = h.calls.find(call => call.method === 'thread/start').params
+  const turn = h.calls.find(call => call.method === 'turn/start').params
+  assert.equal(start.sandbox, 'read-only')
+  assert.equal(start.approvalPolicy, 'never')
+  assert.equal(Object.hasOwn(start.config.mcp_servers, 'account-tools'), false)
+  assert.equal(Object.hasOwn(start.config.mcp_servers, 'app-provided-tools'), false)
+  assert.deepEqual(start.config.mcp_servers['configured-tools'], { enabled: false })
+  assert.deepEqual(start.config.plugins['account-plugin'], { enabled: false })
+  assert.equal(start.config.features.plugins, false)
+  assert.deepEqual(h.calls.find(call => call.method === 'config/read').params, { includeLayers: true, cwd: null })
+  assert.equal(start.config.web_search, 'disabled')
+  assert.deepEqual(start.dynamicTools.map(tool => tool.name), ['egdesk_list_context', 'egdesk_read_source'])
+  assert.deepEqual(turn.additionalContext, { egdesk_context: { kind: 'application', value: 'fixture-source' } })
+  assert.deepEqual(turn.sandboxPolicy, { type: 'readOnly', networkAccess: false })
+  assert.equal(turn.approvalPolicy, 'never')
+  assert.equal(accepted.executionPolicy.status, 'native-thread-verified')
+  assert.equal(accepted.executionPolicy.externalMcpCatalog, 'empty')
+  assert.deepEqual(registered, [accepted.conversationId])
+  assert.deepEqual(bound, [accepted.runId])
+  assert.ok(h.events.some(event => event.event === 'run.executionPolicy' && event.details.executionPolicy.mode === 'readOnlyQa'))
+  assert.ok(h.calls.findIndex(call => call.method === 'mcpServerStatus/list' && call.params.threadId === accepted.conversationId) < h.calls.findIndex(call => call.method === 'turn/start'))
+})
+
+test('bounded QA refuses missing direct-MCP layer evidence before native thread/start', async () => {
+  const h = qaHarness({ request: async method => method === 'config/read' ? { config: {}, layers: null } : undefined })
+  await assert.rejects(h.chat.send({ message: 'Do not run without origin evidence', executionPolicy: { mode: 'readOnlyQa' } }),
+    error => error.code === 'QA_TOOL_ISOLATION_UNVERIFIED')
+  assert.equal(h.calls.some(call => call.method === 'thread/start' || call.method === 'turn/start'), false)
+})
+
+test('ordinary Chat does not apply QA MCP or plugin overrides to its native thread', async () => {
+  const h = qaHarness()
+  await h.chat.send({ message: 'Ordinary work retains its existing native configuration' })
+  assert.equal(h.calls.some(call => call.method === 'config/read' || call.method === 'mcpServerStatus/list'), false)
+  assert.equal(Object.hasOwn(h.calls.find(call => call.method === 'thread/start').params, 'config'), false)
+})
+
+test('actual ContextRuntime attachment capture and dynamic read specs remain available under the validated 0.160.1 gate', async () => {
+  const native = inspectNativeCapabilities({ executable: '/native/codex', run: () => ({ status: 0, stdout: 'codex-cli 0.160.1\n' }),
+    probe: () => ({ contextContract: true, qaContract: true, schemaFingerprint: 'a'.repeat(64) }), fingerprint: () => 'b'.repeat(64) })
+  const captured = { sourceId: 'fixture-source', hash: 'fixture-hash', label: 'Public fixture', captureScope: 'full', truncated: false, shape: { kind: 'text' } }
+  const observations = []
+  const store = {
+    captureAttachments: async (owner, body) => { observations.push(['capture', owner, body.attachments.length]); return [captured] },
+    getCapture: async (owner, id) => { assert.equal(id, captured.sourceId); return captured },
+    markNativeThread: async (owner, id) => observations.push(['registered', owner, id]),
+    bind: async (owner, run, ids, capabilities, readerConfiguration) => {
+      observations.push(['bound', owner, run.runId, ids])
+      return { bindingId: 'binding-1', capabilities, readerConfiguration, captures: [captured] }
+    },
+  }
+  const contexts = new ContextRuntime({ store, reader: null, getOwnerKey: () => 'qa-account', schemaReady: () => native.schemaMatch })
+  const h = qaHarness({ contexts, getOwnerKey: () => 'qa-account' })
+  const accepted = await h.chat.send({ message: 'Read the attached public fixture', clientThreadId: 'fixture-chat', attachments: [{ kind: 'public-fixture' }], contextCapabilities: { read: true }, executionPolicy: { mode: 'readOnlyQa' } })
+  assert.deepEqual(observations.map(row => row[0]), ['capture', 'registered', 'bound'])
+  assert.deepEqual(h.calls.find(call => call.method === 'thread/start').params.dynamicTools.map(tool => tool.name), ['egdesk_list_context', 'egdesk_read_source'])
+  const context = JSON.parse(h.calls.find(call => call.method === 'turn/start').params.additionalContext.egdesk_context.value)
+  assert.equal(context.captures[0].sourceId, captured.sourceId)
+  assert.equal(accepted.executionPolicy.mode, 'readOnlyQa')
+})
+
+test('ordinary Browser attachment keeps immutable Context read without live Browser binding or native policy changes', async () => {
+  const owner = 'codex:chatgpt:fixture-owner'
+  const captured = { sourceId: 'browser-snapshot-1', hash: 'browser-hash', label: 'Selected Browser snapshot',
+    captureScope: 'visible', truncated: false, shape: { kind: 'browser' } }
+  const contextCalls = [], browserCalls = []
+  const contexts = new ContextRuntime({ getOwnerKey: () => owner, schemaReady: () => true, reader: null, store: {
+    captureAttachments: async (key, body) => { contextCalls.push(['capture', key, body.attachments.length]); return [captured] },
+    getCapture: async (key, id) => { contextCalls.push(['read-capture', key, id]); return captured },
+    markNativeThread: async (key, id) => contextCalls.push(['register', key, id]),
+    bind: async (key, run, ids, capabilities) => {
+      contextCalls.push(['bind', key, run.runId, ids])
+      return { bindingId: 'context-binding-1', capabilities, readerConfiguration: null, captures: [captured] }
+    },
+  } })
+  const transport = { runs: new Map(), hasClient: () => false, bindRun: () => browserCalls.push('transport-bind'),
+    unbindRun: () => browserCalls.push('transport-unbind'), reset: () => browserCalls.push('transport-reset') }
+  const service = { prepare: () => { browserCalls.push('prepare'); throw new Error('ordinary Chat must not prepare live Browser') },
+    bind: async () => browserCalls.push('bind'), dispatch: async () => browserCalls.push('dispatch'),
+    cancelRun: async () => browserCalls.push('cancel'), reset: async () => [] }
+  const browser = createCodexBrowserToolProvider({ transport, service, getOwnerKey: () => owner })
+  const h = harness({ contexts, toolProviders: [browser], getOwnerKey: () => owner })
+  const capture = await contexts.capture({ clientThreadId: 'ui-browser-chat', attachments: [{ kind: 'browser', sourceId: captured.sourceId }] })
+  assert.equal(capture.captures[0].sourceId, captured.sourceId)
+  const run = await h.chat.send({ message: 'Read the selected Browser snapshot', clientThreadId: 'ui-browser-chat',
+    contextSnapshotIds: [captured.sourceId], contextCapabilities: { read: true },
+    selectedSources: [{ id: 'source-1', kind: 'browser', selectedByUser: true, browserToolPermission: 'interact',
+      browserToolSelection: { token: 'one-time-token', threadId: 'ui-browser-chat' },
+      sourceRef: { viewId: 'card-1', profileId: 'firefox-default', accountId: '', uri: 'https://example.test/fixture' } }],
+  })
+  assert.equal(run.accepted, true)
+  assert.equal(Object.hasOwn(run, 'executionPolicy'), false)
+  const start = h.calls.find(call => call.method === 'thread/start').params
+  assert.equal(Object.hasOwn(start, 'sandbox'), false)
+  assert.equal(Object.hasOwn(start, 'approvalPolicy'), false)
+  assert.deepEqual(start.dynamicTools.map(spec => spec.name).filter(name => name.startsWith('egdesk_browser_')), [])
+  assert.ok(start.dynamicTools.some(spec => spec.name === 'egdesk_read_source'))
+  const turn = h.calls.find(call => call.method === 'turn/start').params
+  assert.equal(Object.hasOwn(turn, 'sandboxPolicy'), false)
+  assert.deepEqual(JSON.parse(turn.additionalContext.egdesk_context.value).captures.map(source => source.sourceId), [captured.sourceId])
+  assert.equal(h.chat.snapshot(run.conversationId).runs[0].context.capabilities.read, true)
+  assert.deepEqual(contextCalls.map(call => call[0]), ['capture', 'read-capture', 'register', 'bind'])
+  assert.deepEqual(browserCalls, [])
+  await h.chat.handleServerRequest({ id: 'forbidden-browser-call', method: 'item/tool/call', params: {
+    threadId: run.conversationId, turnId: run.runId, callId: 'call-1', tool: 'egdesk_browser_observe', arguments: { cardId: 'card-1' },
+  } })
+  assert.equal(h.replies[0][2].code, -32601)
+  assert.deepEqual(browserCalls, [])
+})
+
+test('invalid QA policy and unavailable native contract reject before provider turn or local acceptance', async () => {
+  for (const executionPolicy of [null, 'readOnlyQa', {}, { mode: 'readOnlyQa', sandbox: 'dangerFullAccess' }, { mode: 'write' }]) {
+    const h = qaHarness()
+    await assert.rejects(h.chat.send({ message: 'test', executionPolicy }), error => error.code === 'INVALID_EXECUTION_POLICY')
+    assert.deepEqual(h.calls, [])
+  }
+  const unavailable = qaHarness({ qaReady: () => false })
+  await assert.rejects(unavailable.chat.send({ message: 'test', executionPolicy: { mode: 'readOnlyQa' } }), error => error.code === 'QA_POLICY_UNAVAILABLE')
+  assert.deepEqual(unavailable.calls, [])
+})
+
+test('native read-only, offline and never-approval response fields are all mandatory before provider turn', async () => {
+  const bad = [
+    { sandbox: { type: 'workspaceWrite', networkAccess: false }, approvalPolicy: 'never' },
+    { sandbox: { type: 'readOnly', networkAccess: true }, approvalPolicy: 'never' },
+    { sandbox: { type: 'readOnly' }, approvalPolicy: 'never' },
+    { sandbox: { type: 'readOnly', networkAccess: false }, approvalPolicy: 'on-request' },
+  ]
+  for (const receipt of bad) {
+    const h = qaHarness({ request: async (method, params, chat, defaults) => method === 'thread/start' ? { ...(await defaults(method, params)), ...receipt } : undefined })
+    await assert.rejects(h.chat.send({ message: 'test', executionPolicy: { mode: 'readOnlyQa' } }), error => error.code === 'QA_POLICY_UNVERIFIED')
+    assert.equal(h.calls.filter(call => call.method === 'turn/start').length, 0)
+    assert.ok(!h.events.some(event => event.event === 'run.executionPolicy'))
+  }
+})
+
+test('QA blocks provider turn when effective MCP catalog has tools, resources or discovery errors', async () => {
+  for (const exposure of [{ tools: { send: {} } }, { resources: [{ uri: 'private' }] }, { toolsError: 'unknown' }]) {
+    const h = qaHarness({ request: async (method, params) => method === 'mcpServerStatus/list' && params.threadId ? { data: [{ name: 'account-tools', tools: {}, resources: [], resourceTemplates: [], ...exposure }], nextCursor: null } : undefined })
+    await assert.rejects(h.chat.send({ message: 'test', executionPolicy: { mode: 'readOnlyQa' } }), error => error.code === 'QA_TOOL_ISOLATION_UNVERIFIED')
+    assert.equal(h.calls.filter(call => call.method === 'turn/start').length, 0)
+  }
+})
+
+test('same EG-Desk QA Run publishes only an exact nonce line from native command item/completed', async () => {
+  const nonce = 'EGDESK_PUBLIC_QA_7f41ad982b'
+  const h = qaHarness({ getNativeContractFingerprint: () => 'a'.repeat(64) })
+  const run = await h.chat.send({ message: 'Read the disposable public fixture and print its line', executionPolicy: { mode: 'readOnlyQa' }, qaCommandNonce: nonce })
+  await h.item(run, { id: 'native-command-1', type: 'commandExecution', status: 'completed', command: 'cat /public-fixture/nonce.txt', cwd: '/public-fixture', exitCode: 0, aggregatedOutput: `unrelated private line\n${nonce}\n` })
+  const proof = h.events.find(event => event.event === 'qa.command.receipt')
+  assert.equal(proof.requestId, run.requestId)
+  assert.equal(proof.runId, run.runId)
+  assert.equal(proof.details.nativeItemId, 'native-command-1')
+  assert.equal(proof.details.exitCode, 0)
+  assert.equal(proof.details.status, 'marker-witness')
+  assert.deepEqual(proof.details.markerLines, [nonce])
+  assert.equal(proof.details.outputStream, 'aggregated-stdout-stderr')
+  assert.equal(proof.details.originalProviderId, 'codex-native')
+  assert.equal(proof.details.contractFingerprint, 'a'.repeat(64))
+  assert.equal(h.chat.snapshot(run.conversationId).runs[0].qaCommandReceipts[0].nativeItemId, 'native-command-1')
+  assert.equal(JSON.stringify({ events: h.events, state: h.chat.snapshot() }).includes('unrelated private line'), false)
+  await h.item(run, { id: 'native-command-1', type: 'commandExecution', status: 'completed', command: 'cat /public-fixture/nonce.txt', exitCode: 0, aggregatedOutput: `${nonce}\n` })
+  assert.equal(h.events.filter(event => event.event === 'qa.command.receipt').length, 1)
+})
+
+test('two explicit QA markers map to distinct actual native command items in one Run', async () => {
+  const fileNonce = 'EGDESK_FILE_NONCE_13b49a72'
+  const commandTag = 'EGDESK_COMMAND_TAG_98f0c231'
+  const h = qaHarness()
+  const message = `Read the public fixture, then run a harmless command that prints ${commandTag}`
+  assert.equal(message.includes(fileNonce), false)
+  const run = await h.chat.send({ message, executionPolicy: { mode: 'readOnlyQa' }, qaOutputMarkers: [fileNonce, commandTag] })
+  const commands = [
+    { id: 'native-read-item', type: 'commandExecution', status: 'completed', command: 'cat /public/fixture/nonce.txt', cwd: '/public/fixture', exitCode: 0, aggregatedOutput: `${fileNonce}\n` },
+    { id: 'native-harmless-item', type: 'commandExecution', status: 'completed', command: `printf '%s\\n' ${commandTag}`, cwd: '/public/fixture', exitCode: 0, aggregatedOutput: `${commandTag}\n` },
+  ]
+  for (const item of commands) await h.item(run, item)
+  const receipts = h.events.filter(event => event.event === 'qa.command.receipt')
+  assert.equal(receipts.length, 2)
+  assert.ok(receipts.every(event => event.runId === run.runId && event.requestId === run.requestId && event.details.status === 'marker-witness'))
+  assert.deepEqual(receipts.map(event => [event.details.nativeItemId, event.details.markerLines]), [
+    ['native-read-item', [fileNonce]], ['native-harmless-item', [commandTag]],
+  ])
+  for (const receipt of receipts) {
+    const activity = h.chat.snapshot(run.conversationId).runs[0].activities.find(item => item.id === receipt.details.nativeItemId)
+    assert.equal(receipt.details.commandSha256, createHash('sha256').update(activity.detail.command).digest('hex'))
+    assert.equal(activity.detail.exitCode, 0)
+    assert.equal(receipt.details.nativeItemStatus, 'completed')
+    assert.equal(receipt.details.outputStream, 'aggregated-stdout-stderr')
+  }
+  assert.equal(h.chat.snapshot(run.conversationId).runs[0].qaCommandReceipts.length, 2)
+})
+
+test('early or foreign native command output cannot fabricate a QA receipt', async () => {
+  const nonce = 'EGDESK_PUBLIC_QA_4cd671ae92'
+  const h = qaHarness({ request: async (method, params, chat) => {
+    if (method !== 'turn/start') return undefined
+    await chat.handleNotification({ method: 'item/completed', params: { threadId: params.threadId, turnId: 'foreign-turn', item: { id: 'foreign-command', type: 'commandExecution', status: 'completed', command: 'cat fixture', exitCode: 0, aggregatedOutput: `${nonce}\n` } } })
+    await chat.handleNotification({ method: 'item/completed', params: { threadId: params.threadId, turnId: 'owned-turn', item: { id: 'owned-command', type: 'commandExecution', status: 'completed', command: 'cat fixture', exitCode: 0, aggregatedOutput: `${nonce}\n` } } })
+    return { turn: { id: 'owned-turn', status: 'inProgress', items: [] } }
+  } })
+  const run = await h.chat.send({ message: 'Read fixture', executionPolicy: { mode: 'readOnlyQa' }, qaCommandNonce: nonce })
+  assert.equal(h.events.filter(event => event.event === 'qa.command.receipt').length, 1)
+  assert.equal(h.events.find(event => event.event === 'qa.command.receipt').details.nativeItemId, 'owned-command')
+  assert.equal(h.chat.snapshot(run.conversationId).runs.length, 1)
+  const ordinary = qaHarness()
+  await assert.rejects(ordinary.chat.send({ message: 'No policy', qaCommandNonce: nonce }), error => error.code === 'QA_COMMAND_POLICY_REQUIRED')
+  assert.deepEqual(ordinary.calls, [])
+  const invalid = qaHarness()
+  await assert.rejects(invalid.chat.send({ message: 'Duplicate markers', executionPolicy: { mode: 'readOnlyQa' }, qaOutputMarkers: [nonce, nonce] }), error => error.code === 'INVALID_QA_OUTPUT_MARKERS')
+  await assert.rejects(invalid.chat.send({ message: 'Conflicting contracts', executionPolicy: { mode: 'readOnlyQa' }, qaOutputMarkers: [nonce], qaCommandNonce: nonce }), error => error.code === 'INVALID_QA_OUTPUT_MARKERS')
+  await assert.rejects(invalid.chat.send({ message: `Spoiled private fixture ${nonce}`, executionPolicy: { mode: 'readOnlyQa' }, qaOutputMarkers: [nonce, 'EGDESK_COMMAND_TAG_89ac5217'] }), error => error.code === 'QA_PRIVATE_MARKER_SPOILED')
+  assert.deepEqual(invalid.calls, [])
+})
+
+test('QA policy persists across ordinary continuation, profile change and explicit resume', async () => {
+  const h = qaHarness()
+  const first = await h.chat.send({ message: 'first', executionPolicy: { mode: 'readOnlyQa' } })
+  await h.finish(first)
+  const second = await h.chat.send({ message: 'second', conversationId: first.conversationId, profileEnabled: false })
+  assert.equal(second.executionPolicy.mode, 'readOnlyQa')
+  assert.equal(h.calls.filter(call => call.method === 'thread/resume').length, 1)
+  assert.equal(h.calls.find(call => call.method === 'thread/resume').params.developerInstructions, 'Ordinary instructions')
+  assert.equal(h.calls.filter(call => call.method === 'turn/start')[1].params.approvalPolicy, 'never')
+  await h.finish(second)
+  await h.chat.resume({ conversationId: first.conversationId })
+  assert.equal(h.calls.filter(call => call.method === 'thread/resume').length, 2)
+  assert.equal(h.chat.threads.get(first.conversationId).executionPolicy, 'readOnlyQa')
+})
+
+test('a changed native resume policy blocks the next QA turn rather than trusting a prior receipt', async () => {
+  const h = qaHarness({ request: async (method, params, chat, defaults) => method === 'thread/resume'
+    ? { ...(await defaults(method, params)), sandbox: { type: 'workspaceWrite', networkAccess: false }, approvalPolicy: 'never' }
+    : undefined })
+  const first = await h.chat.send({ message: 'first', executionPolicy: { mode: 'readOnlyQa' } })
+  await h.finish(first)
+  await assert.rejects(h.chat.send({ message: 'second', conversationId: first.conversationId }), error => error.code === 'QA_POLICY_UNVERIFIED')
+  assert.equal(h.calls.filter(call => call.method === 'turn/start').length, 1)
+})
+
+test('resumed active QA run has a deny-all approval guard even without a recoverable turn receipt', async () => {
+  const h = qaHarness({ request: async (method, params, chat, defaults) => method === 'thread/resume'
+    ? { ...(await defaults(method, params)), thread: { id: params.threadId, turns: [{ id: 'active-turn', status: 'inProgress', items: [] }] }, sandbox: { type: 'readOnly', networkAccess: false }, approvalPolicy: 'never' }
+    : undefined })
+  h.chat.threads.set('qa-thread', { id: 'qa-thread', cwd: '/work', model: 'configured-model', clientThreadId: 'ui-qa', executionPolicy: 'readOnlyQa' })
+  await h.chat.resume({ conversationId: 'qa-thread' })
+  const run = h.chat.snapshot('qa-thread').runs[0]
+  assert.equal(run.executionPolicy.status, 'recovered-active-guard')
+  await h.chat.handleServerRequest({ id: 'native-approval', method: 'item/commandExecution/requestApproval', params: { threadId: 'qa-thread', turnId: 'active-turn', itemId: 'command', command: 'touch forbidden', availableDecisions: ['accept', 'decline'] } })
+  assert.equal(h.replies[0][0], 'native-approval')
+  assert.equal(h.replies[0][2].code, -32601)
+  assert.deepEqual(h.chat.snapshot('qa-thread').runs[0].pendingApprovals, [])
+  h.chat.pendingApprovals.set('stale-ui-approval', { approvalId: 'stale-ui-approval', conversationId: 'qa-thread', runId: 'active-turn', status: 'pending', choices: ['accept'], rpcId: 'old-rpc' })
+  await assert.rejects(h.chat.replyApproval({ conversationId: 'qa-thread', runId: 'active-turn', approvalId: 'stale-ui-approval', decision: 'accept' }), error => error.code === 'NATIVE_RUN_UNBOUND')
+  assert.equal(h.replies.length, 1)
+})
+
+test('unloaded native history is checked for an active turn before profile or new-turn dispatch', async () => {
+  const h = harness({ request: async (method, params) => {
+    if (method === 'thread/resume') return { thread: { id: params.threadId, turns: [{ id: 'active-native', status: 'inProgress', items: [] }] }, cwd: '/historical' }
+    throw new Error(`No other native call allowed: ${method}`)
+  } })
+  await assert.rejects(h.chat.send({ message: 'must wait', conversationId: 'old-thread', profileEnabled: false }), error => error.code === 'RUN_IN_PROGRESS')
+  assert.deepEqual(h.calls.map(call => call.method), ['thread/resume'])
+})
+
+test('an existing ordinary thread can opt into QA, but a later omitted policy does not widen it', async () => {
+  const h = qaHarness()
+  const ordinary = await h.chat.send({ message: 'ordinary' })
+  assert.equal(h.calls.find(call => call.method === 'thread/start').params.sandbox, undefined)
+  await h.finish(ordinary)
+  const qa = await h.chat.send({ message: 'qa', conversationId: ordinary.conversationId, executionPolicy: { mode: 'readOnlyQa' } })
+  assert.equal(qa.executionPolicy.mode, 'readOnlyQa')
+  assert.equal(h.calls.find(call => call.method === 'thread/resume').params.sandbox, 'read-only')
+  await h.finish(qa)
+  const continued = await h.chat.send({ message: 'still qa', conversationId: ordinary.conversationId })
+  assert.equal(continued.executionPolicy.mode, 'readOnlyQa')
+  assert.equal(h.calls.filter(call => call.method === 'turn/start').at(-1).params.approvalPolicy, 'never')
+})
+
+test('ordinary threads with persisted broader dynamic tools cannot be relabeled read-only QA', async () => {
+  const contexts = { specs: () => [{ type: 'function', name: 'egdesk_capture_output', description: 'writes capture', inputSchema: {} }], prepare: async () => null, registerThread: async () => {} }
+  const h = qaHarness({ contexts })
+  const ordinary = await h.chat.send({ message: 'ordinary' })
+  await h.finish(ordinary)
+  await assert.rejects(h.chat.send({ message: 'qa', conversationId: ordinary.conversationId, executionPolicy: { mode: 'readOnlyQa' } }), error => error.code === 'QA_REQUIRES_NEW_CONVERSATION')
+  assert.equal(h.calls.filter(call => call.method === 'turn/start').length, 1)
+})
+
+test('Browser specs are pre-registered so a later selected Card uses the same native thread under browserBounded policy', async () => {
+  const browser = {
+    providerId: 'egdesk-browser',
+    specs: () => ['egdesk_browser_observe', 'egdesk_browser_navigate', 'egdesk_browser_click', 'egdesk_browser_fill'].map(name => ({ type: 'function', name, description: name, inputSchema: { type: 'object' } })),
+    prepare: async body => body.selectedSources?.length ? { cards: body.selectedSources } : null,
+    requireThread(threadId, prepared) { if (prepared && !this.runtime.browserRegisteredThreads.has(threadId)) throw Object.assign(new Error('Older thread'), { code: 'BROWSER_TOOLS_UNAVAILABLE' }) },
+    bindRun: async (run, prepared) => { if (prepared) run.browserBinding = { cards: prepared.cards } },
+    dispatch: async () => ({ success: true, contentItems: [{ type: 'inputText', text: '{"status":"postcondition-observed"}' }] }),
+  }
+  const h = qaHarness({ toolProviders: [browser] })
+  const first = await h.chat.send({ message: 'Start bounded Browser chat', executionPolicy: { mode: 'browserBounded' } })
+  assert.deepEqual(h.calls.find(call => call.method === 'thread/start').params.dynamicTools.map(spec => spec.name), ['egdesk_browser_observe'])
+  await h.finish(first)
+  const second = await h.chat.send({ message: 'Observe selected Card', conversationId: first.conversationId, selectedSources: [{ cardId: 'card-1', permission: 'observe' }], browserTransportId: 'ui-1' })
+  assert.equal(second.conversationId, first.conversationId)
+  assert.equal(second.executionPolicy.mode, 'browserBounded')
+  assert.equal(second.executionPolicy.browserEffects, 'observe-only-selected-card')
+  assert.equal(h.calls.find(call => call.method === 'thread/resume').params.sandbox, 'read-only')
+  assert.deepEqual(h.calls.filter(call => call.method === 'turn/start')[1].params.sandboxPolicy, { type: 'readOnly', networkAccess: false })
+  assert.equal(h.chat.snapshot(second.conversationId).runs.at(-1).browserBinding.cards[0].permission, 'observe')
+  await h.chat.handleServerRequest({ id: 'browser-call', method: 'item/tool/call', params: { threadId: second.conversationId, turnId: second.runId, callId: 'call-1', tool: 'egdesk_browser_observe', arguments: { cardId: 'card-1' } } })
+  assert.equal(h.replies[0][1].success, true)
+  await h.chat.handleServerRequest({ id: 'browser-click-forbidden', method: 'item/tool/call', params: { threadId: second.conversationId, turnId: second.runId, callId: 'call-2', tool: 'egdesk_browser_click', arguments: { cardId: 'card-1' } } })
+  assert.equal(h.replies[1][2].code, -32601)
+})
+
+test('older ordinary thread with a persisted Browser catalog keeps history but never grants a live actor', async () => {
+  const browserCalls = []
+  const browser = { providerId: 'egdesk-browser',
+    specs: () => [{ type: 'function', name: 'egdesk_browser_observe', description: 'Legacy Browser tool', inputSchema: {} }],
+    prepare: async () => { browserCalls.push('prepare'); throw new Error('ordinary Browser must not bind') },
+    bindRun: async () => browserCalls.push('bind'), dispatch: async () => browserCalls.push('dispatch'),
+    registerThread(threadId) { this.runtime.browserRegisteredThreads.add(threadId) },
+  }
+  const h = harness({ toolProviders: [browser] })
+  const currentCatalog = h.chat.collectToolSpecs.bind(h.chat)
+  h.chat.collectToolSpecs = (policy, options) => currentCatalog(policy, policy === null ? { forManifest: true } : options)
+  const older = await h.chat.send({ message: 'Earlier ordinary Browser conversation' })
+  assert.ok(h.calls.find(call => call.method === 'thread/start').params.dynamicTools.some(spec => spec.name === 'egdesk_browser_observe'))
+  await h.finish(older)
+  h.chat.collectToolSpecs = currentCatalog
+  await h.chat.resume({ conversationId: older.conversationId })
+  assert.equal(h.chat.threadToolManifestStatus.get(older.conversationId), 'verified')
+  const continued = await h.chat.send({ message: 'Continue with immutable context only', conversationId: older.conversationId,
+    selectedSources: [{ id: 'browser-source', kind: 'browser', browserToolPermission: 'observe' }] })
+  assert.equal(continued.conversationId, older.conversationId)
+  assert.deepEqual(browserCalls, [])
+  await h.chat.handleServerRequest({ id: 'legacy-browser-call', method: 'item/tool/call', params: {
+    threadId: continued.conversationId, turnId: continued.runId, callId: 'call-1', tool: 'egdesk_browser_observe', arguments: {},
+  } })
+  assert.equal(h.replies[0][2].code, -32601)
+  assert.deepEqual(browserCalls, [])
+})
+
+test('QA Browser catalog and dispatch remain observe-only despite an interaction-capable provider', async () => {
+  const browser = {
+    providerId: 'egdesk-browser',
+    specs: () => ['egdesk_browser_observe', 'egdesk_browser_click'].map(name => ({ type: 'function', name, description: name, inputSchema: {} })),
+    dispatch: async () => ({ success: true, contentItems: [] }),
+  }
+  const h = qaHarness({ toolProviders: [browser] })
+  const run = await h.chat.send({ message: 'Observe only', executionPolicy: { mode: 'readOnlyQa' } })
+  assert.deepEqual(h.calls.find(call => call.method === 'thread/start').params.dynamicTools.map(spec => spec.name), ['egdesk_browser_observe'])
+  await h.chat.handleServerRequest({ id: 'click', method: 'item/tool/call', params: { threadId: run.conversationId, turnId: run.runId, callId: 'call-click', tool: 'egdesk_browser_click', arguments: {} } })
+  assert.equal(h.replies[0][2].code, -32601)
+})
+
+test('fixtureBrowserQa starts a new narrowed native catalog and never exposes navigate or output-publish tools', async () => {
+  const contexts = { specs: () => ['egdesk_list_context', 'egdesk_read_source', 'egdesk_capture_output', 'egdesk_publish_briefing'].map(name => ({ type: 'function', name, description: name, inputSchema: {} })), prepare: async () => null }
+  const browser = { providerId: 'egdesk-browser', specs: () => ['egdesk_browser_observe', 'egdesk_browser_navigate', 'egdesk_browser_click', 'egdesk_browser_fill'].map(name => ({ type: 'function', name, description: name, inputSchema: {} })),
+    prepare: async body => body.selectedSources?.length ? { selected: true } : null,
+    dispatch: async () => ({ success: true, contentItems: [{ type: 'inputText', text: 'fixture' }] }) }
+  const h = qaHarness({ contexts, toolProviders: [browser] })
+  const run = await h.chat.send({ message: 'Use only the owned local QA fixture', executionPolicy: { mode: 'fixtureBrowserQa' }, selectedSources: [{ id: 'source-1' }], clientThreadId: 'ui-fixture' })
+  assert.deepEqual(h.calls.find(call => call.method === 'thread/start').params.dynamicTools.map(spec => spec.name), [
+    'egdesk_list_context', 'egdesk_read_source', 'egdesk_browser_observe', 'egdesk_browser_click', 'egdesk_browser_fill',
+  ])
+  assert.equal(run.executionPolicy.browserEffects, 'attested-local-fixture-only')
+  assert.deepEqual(h.calls.find(call => call.method === 'turn/start').params.sandboxPolicy, { type: 'readOnly', networkAccess: false })
+  await h.chat.handleServerRequest({ id: 'forbidden-navigate', method: 'item/tool/call', params: { threadId: run.conversationId, turnId: run.runId, callId: 'call-nav', tool: 'egdesk_browser_navigate', arguments: {} } })
+  assert.equal(h.replies[0][2].code, -32601)
+})
+
+test('fixtureBrowserQa cannot upgrade an ordinary native thread with a broader persisted tool catalog', async () => {
+  const h = qaHarness()
+  const ordinary = await h.chat.send({ message: 'ordinary' })
+  await h.finish(ordinary)
+  const before = h.calls.filter(call => call.method === 'turn/start').length
+  await assert.rejects(h.chat.send({ message: 'fixture', conversationId: ordinary.conversationId, executionPolicy: { mode: 'fixtureBrowserQa' } }), error => error.code === 'FIXTURE_QA_NEW_CONVERSATION_REQUIRED')
+  assert.equal(h.calls.filter(call => call.method === 'turn/start').length, before)
+})
+
+test('durable QA policy survives a fresh runtime and is reverified before its next provider turn', async () => {
+  const dataDir = await mkdtemp(path.join(os.tmpdir(), 'egdesk-qa-policy-store-'))
+  let store = null
+  try {
+    store = openChatStore({ dataDir, ownerScope: 'local-desktop-qa-test' })
+    const calls = []
+    let turn = 0
+    const request = async (method, params) => {
+      calls.push({ method, params })
+      if (method === 'config/read') return { config: {}, layers: [{ name: { type: 'user' }, config: {} }] }
+      if (method === 'mcpServerStatus/list') return { data: [], nextCursor: null }
+      if (method === 'thread/start') return { thread: { id: 'native-qa' }, sandbox: { type: 'readOnly', networkAccess: false }, approvalPolicy: 'never', model: 'configured-model' }
+      if (method === 'thread/resume') return { thread: { id: 'native-qa', turns: [] }, sandbox: { type: 'readOnly', networkAccess: false }, approvalPolicy: 'never', model: 'configured-model' }
+      if (method === 'turn/start') return { turn: { id: `turn-${++turn}`, status: 'inProgress', items: [] } }
+      throw new Error(`Unexpected native call ${method}`)
+    }
+    const create = () => {
+      const chat = new CodexChatRuntime({ store, requireStore: true, getOwnerKey: () => 'codex:chatgpt:qa-account', request, respond: () => {} })
+      chat.setConnection(true)
+      return chat
+    }
+    let chat = create()
+    const first = await chat.send({ message: 'first', clientThreadId: 'local-qa', requestId: 'req-1', executionPolicy: { mode: 'readOnlyQa' } })
+    assert.equal(first.executionPolicy.status, 'native-thread-verified')
+    await chat.handleNotification({ method: 'turn/completed', params: { threadId: first.conversationId, turn: { id: first.runId, status: 'completed', items: [] } } })
+    store.close()
+    store = openChatStore({ dataDir, ownerScope: 'local-desktop-qa-test' })
+    chat = create()
+    const next = await chat.send({ message: 'continue', clientThreadId: 'local-qa', conversationId: 'native-qa', requestId: 'req-2' })
+    assert.equal(next.executionPolicy.mode, 'readOnlyQa')
+    assert.equal(calls.filter(call => call.method === 'thread/resume').length, 1)
+    assert.equal(calls.filter(call => call.method === 'turn/start').at(-1).params.sandboxPolicy.type, 'readOnly')
+  } finally {
+    try { store?.close() } catch {}
+    await rm(dataDir, { recursive: true, force: true })
+  }
+})
+
+test('durably owned active QA turn rehydrates its restrictive guard and declines native approval after restart', async () => {
+  const dataDir = await mkdtemp(path.join(os.tmpdir(), 'egdesk-active-qa-guard-'))
+  let store = null
+  try {
+    store = openChatStore({ dataDir, ownerScope: 'active-qa-test' })
+    const request = async (method, params) => {
+      if (method === 'config/read') return { config: {}, layers: [{ name: { type: 'user' }, config: {} }] }
+      if (method === 'mcpServerStatus/list') return { data: [], nextCursor: null }
+      if (method === 'thread/start') return { thread: { id: 'native-active-qa' }, sandbox: { type: 'readOnly', networkAccess: false }, approvalPolicy: 'never' }
+      if (method === 'turn/start') return { turn: { id: 'native-active-turn', status: 'inProgress', items: [] } }
+      if (method === 'thread/resume') return { thread: { id: params.threadId, turns: [{ id: 'native-active-turn', status: 'inProgress', items: [] }] }, sandbox: { type: 'readOnly', networkAccess: false }, approvalPolicy: 'never' }
+      throw new Error(`Unexpected native call ${method}`)
+    }
+    const make = replies => {
+      const chat = new CodexChatRuntime({ store, requireStore: true, getOwnerKey: () => 'codex:chatgpt:qa-owner', request, respond: (...args) => replies.push(args) })
+      chat.setConnection(true)
+      return chat
+    }
+    let chat = make([])
+    const started = await chat.send({ message: 'Read-only QA', clientThreadId: 'ui-active-qa', requestId: 'request-active-qa', executionPolicy: { mode: 'readOnlyQa' } })
+    assert.equal(started.runId, 'native-active-turn')
+    store.close()
+    store = openChatStore({ dataDir, ownerScope: 'active-qa-test' })
+    const replies = []
+    chat = make(replies)
+    chat.recoverInterruptedRuns()
+    const resumed = await chat.resume({ clientThreadId: 'ui-active-qa', conversationId: 'native-active-qa' })
+    assert.equal(resumed.runs[0].executionPolicy.status, 'recovered-active-guard')
+    await chat.handleServerRequest({ id: 'approval-after-restart', method: 'item/commandExecution/requestApproval', params: { threadId: 'native-active-qa', turnId: 'native-active-turn', itemId: 'cmd', command: 'touch forbidden', availableDecisions: ['accept', 'decline'] } })
+    assert.deepEqual(replies[0], ['approval-after-restart', { decision: 'decline' }])
+    assert.deepEqual(chat.snapshot('native-active-qa').runs[0].pendingApprovals, [])
+  } finally {
+    try { store?.close() } catch {}
+    await rm(dataDir, { recursive: true, force: true })
+  }
+})
+
+test('Browser registration survives a bridge restart, while pre-Browser native history is not silently replaced', async () => {
+  const dataDir = await mkdtemp(path.join(os.tmpdir(), 'egdesk-browser-registration-'))
+  let store = null
+  try {
+    store = openChatStore({ dataDir, ownerScope: 'browser-registration-test' })
+    let turnCount = 0, threadCount = 0
+    const calls = []
+    const request = async (method, params) => {
+      calls.push({ method, params })
+      if (method === 'config/read') return { config: {}, layers: [{ name: { type: 'user' }, config: {} }] }
+      if (method === 'mcpServerStatus/list') return { data: [], nextCursor: null }
+      if (method === 'thread/start') return { thread: { id: `native-${++threadCount}` }, cwd: '/public-fixture', sandbox: { type: 'readOnly', networkAccess: false }, approvalPolicy: 'never' }
+      if (method === 'thread/resume') return { thread: { id: params.threadId, turns: [] }, cwd: '/public-fixture', sandbox: { type: 'readOnly', networkAccess: false }, approvalPolicy: 'never' }
+      if (method === 'turn/start') return { turn: { id: `turn-${++turnCount}`, status: 'inProgress', items: [] } }
+      throw new Error(`Unexpected native call: ${method}`)
+    }
+    const browser = () => ({
+      providerId: 'egdesk-browser', specs: () => [{ type: 'function', name: 'egdesk_browser_observe', description: 'observe', inputSchema: {} }],
+      prepare: async body => body.selectedSources?.length ? { cards: body.selectedSources } : null,
+      requireThread(threadId, prepared) { if (prepared && !this.runtime.browserRegisteredThreads.has(threadId)) throw Object.assign(new Error('Older thread'), { code: 'BROWSER_TOOLS_UNAVAILABLE' }) },
+      bindRun: async () => {}, registerThread(threadId) { this.runtime.browserRegisteredThreads.add(threadId) },
+    })
+    const create = withBrowser => {
+      const chat = new CodexChatRuntime({ store, requireStore: true, getOwnerKey: () => 'codex:chatgpt:account-1', request, respond: () => {}, toolProviders: withBrowser ? [browser()] : [] })
+      chat.setConnection(true)
+      return chat
+    }
+    let chat = create(true)
+    const first = await chat.send({ message: 'bounded first', clientThreadId: 'with-browser', requestId: 'request-1', executionPolicy: { mode: 'browserBounded' } })
+    await chat.handleNotification({ method: 'turn/completed', params: { threadId: first.conversationId, turn: { id: first.runId, status: 'completed', items: [] } } })
+    chat = create(false)
+    const legacy = await chat.send({ message: 'older chat', clientThreadId: 'without-browser', requestId: 'request-2' })
+    await chat.handleNotification({ method: 'turn/completed', params: { threadId: legacy.conversationId, turn: { id: legacy.runId, status: 'completed', items: [] } } })
+    store.close()
+    store = openChatStore({ dataDir, ownerScope: 'browser-registration-test' })
+    chat = create(true)
+    const later = await chat.send({ message: 'attach Card later', clientThreadId: 'with-browser', conversationId: first.conversationId, requestId: 'request-3', selectedSources: [{ cardId: 'card-1' }] })
+    assert.equal(later.conversationId, first.conversationId)
+    assert.equal(later.executionPolicy.mode, 'browserBounded')
+    assert.equal(calls.filter(call => call.method === 'thread/start').length, 2)
+    const turnsBefore = calls.filter(call => call.method === 'turn/start').length
+    await assert.rejects(chat.send({ message: 'cannot attach silently', clientThreadId: 'without-browser', conversationId: legacy.conversationId, requestId: 'request-4', executionPolicy: { mode: 'browserBounded' }, selectedSources: [{ cardId: 'card-1' }] }), error => error.code === 'BROWSER_TOOLS_UNAVAILABLE')
+    assert.equal(calls.filter(call => call.method === 'turn/start').length, turnsBefore)
+    assert.equal(calls.filter(call => call.method === 'thread/start').length, 2)
+  } finally {
+    try { store?.close() } catch {}
+    await rm(dataDir, { recursive: true, force: true })
+  }
+})
+
+test('restored native tool name cannot be reassigned to a different provider identity', async () => {
+  const dataDir = await mkdtemp(path.join(os.tmpdir(), 'egdesk-tool-owner-manifest-'))
+  let store = null
+  try {
+    store = openChatStore({ dataDir, ownerScope: 'tool-owner-test' })
+    const calls = []
+    const request = async (method, params) => {
+      calls.push({ method, params })
+      if (method === 'thread/start') return { thread: { id: 'native-owner-thread' } }
+      if (method === 'turn/start') return { turn: { id: 'native-owner-turn', status: 'inProgress', items: [] } }
+      if (method === 'thread/resume') return { thread: { id: params.threadId, turns: [{ id: 'native-owner-turn', status: 'completed', items: [] }] } }
+      throw new Error(`Unexpected native call ${method}`)
+    }
+    const provider = providerId => ({ providerId, specs: () => [{ type: 'function', name: 'shared_native_name', description: 'shared', inputSchema: { type: 'object' } }], prepare: async body => body.selectedSources ? { selected: true } : null, dispatch: async () => { throw new Error('Remapped provider must not dispatch') } })
+    const make = (providerId, replies) => {
+      const chat = new CodexChatRuntime({ store, requireStore: true, getOwnerKey: () => 'codex:chatgpt:owner', request, respond: (...args) => replies.push(args), toolProviders: [provider(providerId)] })
+      chat.setConnection(true)
+      return chat
+    }
+    let chat = make('original-provider', [])
+    const first = await chat.send({ message: 'First', clientThreadId: 'ui-owner', requestId: 'request-owner' })
+    await chat.handleNotification({ method: 'turn/completed', params: { threadId: first.conversationId, turn: { id: first.runId, status: 'completed', items: [] } } })
+    store.close()
+    store = openChatStore({ dataDir, ownerScope: 'tool-owner-test' })
+    const replies = []
+    chat = make('replacement-provider', replies)
+    await chat.resume({ clientThreadId: 'ui-owner', conversationId: first.conversationId })
+    assert.equal(chat.threadToolManifestStatus.get(first.conversationId), 'mismatch')
+    assert.equal(chat.threadToolOwners.get(first.conversationId).size, 0)
+    await chat.handleServerRequest({ id: 'remapped-call', method: 'item/tool/call', params: { threadId: first.conversationId, turnId: first.runId, callId: 'call-1', tool: 'shared_native_name', arguments: {} } })
+    assert.equal(replies[0][2].code, -32601)
+    const before = calls.filter(call => call.method === 'turn/start').length
+    await assert.rejects(chat.send({ message: 'Selected tool', clientThreadId: 'ui-owner', conversationId: first.conversationId, requestId: 'request-selected', selectedSources: [{ selected: true }] }), error => error.code === 'NATIVE_TOOL_MANIFEST_UNVERIFIED')
+    assert.equal(calls.filter(call => call.method === 'turn/start').length, before)
+  } finally {
+    try { store?.close() } catch {}
+    await rm(dataDir, { recursive: true, force: true })
+  }
+})
+
+test('legacy native thread without an original tool manifest cannot gain selected tool authority', async () => {
+  const provider = { providerId: 'egdesk-selected', specs: () => [{ type: 'function', name: 'selected_tool', description: 'selected', inputSchema: {} }],
+    prepare: async body => body.selectedSources?.length ? { selected: true } : null }
+  const h = harness({ toolProviders: [provider], request: async (method, params) => {
+    if (method === 'thread/resume') return { thread: { id: params.threadId, turns: [] } }
+    throw new Error(`No provider turn expected: ${method}`)
+  } })
+  await assert.rejects(h.chat.send({ message: 'Use old tool', conversationId: 'legacy-thread', selectedSources: [{ selected: true }] }), error => error.code === 'NATIVE_TOOL_MANIFEST_UNVERIFIED')
+  assert.deepEqual(h.calls.map(call => call.method), ['thread/resume'])
+  assert.equal(h.chat.threadToolManifestStatus.get('legacy-thread'), 'legacy-unverified')
+})
+
+test('QA never offers approval and rejects a disallowed dynamic write tool', async () => {
+  const h = qaHarness()
+  const run = await h.chat.send({ message: 'qa', executionPolicy: { mode: 'readOnlyQa' } })
+  await h.chat.handleServerRequest({ id: 7, method: 'item/commandExecution/requestApproval', params: { threadId: run.conversationId, turnId: run.runId, itemId: 'cmd', command: 'touch forbidden', availableDecisions: ['accept', 'decline'] } })
+  assert.deepEqual(h.replies[0], [7, { decision: 'decline' }])
+  assert.deepEqual(h.chat.snapshot(run.conversationId).runs[0].pendingApprovals, [])
+  assert.ok(h.calls.some(call => call.method === 'turn/interrupt'))
+  await h.chat.handleServerRequest({ id: 8, method: 'item/tool/call', params: { threadId: run.conversationId, turnId: run.runId, callId: 'call-1', tool: 'egdesk_capture_output', arguments: {} } })
+  assert.equal(h.replies[1][2].code, -32601)
+})
+
+test('independent tool providers compose native specs, exact namespace dispatch and per-run cancellation', async () => {
+  const lifecycle = []
+  const browser = {
+    specs: () => [{ type: 'namespace', name: 'egdesk_browser', description: 'bounded browser', tools: [{ type: 'function', name: 'observe', description: 'observe', inputSchema: { type: 'object' } }] }],
+    prepare: async body => ({ cardId: body.cardId }),
+    registerThread: async id => lifecycle.push(['registered', id]),
+    bindRun: async (run, prepared) => lifecycle.push(['bound', run.runId, prepared.cardId]),
+    dispatch(run, event) {
+      lifecycle.push(['call', run.runId, event.namespace, event.tool, event.arguments.cardId])
+      return { success: true, contentItems: [{ type: 'inputText', text: JSON.stringify({ receipt: 'observed', cardId: event.arguments.cardId }) }] }
+    },
+    cancelRun: run => lifecycle.push(['cancel', run.runId]),
+    disconnect: () => lifecycle.push(['disconnect']),
+    reset: () => lifecycle.push(['reset']),
+  }
+  const contexts = { specs: () => [{ type: 'function', name: 'egdesk_list_context', description: 'list', inputSchema: { type: 'object' } }], prepare: async () => null, registerThread: async id => lifecycle.push(['context-registered', id]) }
+  const h = harness({ contexts, toolProviders: [browser] })
+  assert.equal(browser.runtime.respond, undefined)
+  const run = await h.chat.send({ message: 'Observe the card', cardId: 'card-7' })
+  assert.deepEqual(h.calls[0].params.dynamicTools.map(tool => tool.name), ['egdesk_list_context', 'egdesk_browser'])
+  assert.ok(lifecycle.some(entry => entry[0] === 'bound' && entry[2] === 'card-7'))
+  await h.chat.handleServerRequest({ id: 'tool-1', method: 'item/tool/call', params: { threadId: run.conversationId, turnId: run.runId, callId: 'call-1', namespace: 'egdesk_browser', tool: 'observe', arguments: { cardId: 'card-7' } } })
+  assert.equal(JSON.parse(h.replies[0][1].contentItems[0].text).receipt, 'observed')
+  await h.chat.handleServerRequest({ id: 'tool-2', method: 'item/tool/call', params: { threadId: run.conversationId, turnId: run.runId, callId: 'call-2', namespace: 'wrong', tool: 'observe', arguments: { cardId: 'card-7' } } })
+  assert.equal(h.replies[1][2].code, -32601)
+  await h.finish(run)
+  assert.ok(lifecycle.some(entry => entry[0] === 'cancel' && entry[1] === run.runId))
+  h.chat.setConnection(false)
+  assert.ok(lifecycle.some(entry => entry[0] === 'disconnect'))
+  h.chat.reset()
+  assert.ok(lifecycle.some(entry => entry[0] === 'reset'))
+})
+
+test('provider name collisions reject before native thread/start rather than choosing a handler', async () => {
+  const contexts = { specs: () => [{ type: 'function', name: 'same_name', description: 'context', inputSchema: {} }] }
+  const duplicate = { specs: () => [{ type: 'function', name: 'same_name', description: 'browser', inputSchema: {} }] }
+  const h = harness({ contexts, toolProviders: [duplicate] })
+  await assert.rejects(h.chat.send({ message: 'Do not choose a duplicate provider' }), error => error.code === 'INVALID_TOOL_PROVIDER')
+  assert.ok(!h.calls.some(call => call.method === 'thread/start' || call.method === 'turn/start'))
+})
+
+test('a provider may return a bounded native receipt; invalid output fails the tool call without inventing success', async () => {
+  const provider = {
+    specs: () => [{ type: 'function', name: 'egdesk_receipt', description: 'receipt', inputSchema: { type: 'object' } }],
+    dispatch: async (run, event) => event.callId === 'good'
+      ? { success: true, contentItems: [{ type: 'inputText', text: JSON.stringify({ runId: run.runId, receipt: 'ok' }) }] }
+      : { success: true, contentItems: [{ type: 'unknown', text: 'not native' }] },
+  }
+  const h = harness({ toolProviders: [provider] })
+  const run = await h.chat.send({ message: 'Receipts' })
+  for (const callId of ['good', 'bad']) await h.chat.handleServerRequest({ id: callId, method: 'item/tool/call', params: { threadId: run.conversationId, turnId: run.runId, callId, tool: 'egdesk_receipt', arguments: {} } })
+  await h.chat.queue
+  assert.equal(JSON.parse(h.replies[0][1].contentItems[0].text).receipt, 'ok')
+  assert.equal(h.replies[1][1].success, false)
+  assert.equal(h.chat.snapshot(run.conversationId).runs[0].error.code, 'TOOL_PROVIDER_FAILED')
+})
+
+test('unknown provider diagnostics never reach native response, UI events or retained history', async () => {
+  const sentinel = 'RAW_PROVIDER_SENTINEL_7f41'
+  const provider = {
+    providerId: 'unknown-provider',
+    specs: () => [{ type: 'function', name: 'egdesk_private_probe', description: 'probe', inputSchema: {} }],
+    dispatch: async () => { throw Object.assign(new Error(sentinel), { code: `${sentinel}_CODE` }) },
+  }
+  const h = harness({ toolProviders: [provider] })
+  const run = await h.chat.send({ message: 'Probe' })
+  await h.chat.handleServerRequest({ id: 'tool-error', method: 'item/tool/call', params: { threadId: run.conversationId, turnId: run.runId, callId: 'call-1', tool: 'egdesk_private_probe', arguments: {} } })
+  await h.chat.queue
+  assert.equal(h.replies[0][1].success, false)
+  assert.equal(JSON.parse(h.replies[0][1].contentItems[0].text).error.code, 'TOOL_PROVIDER_FAILED')
+  assert.equal(JSON.stringify({ replies: h.replies, events: h.events, snapshot: h.chat.snapshot() }).includes(sentinel), false)
+  const preparing = harness({ toolProviders: [{ providerId: 'unknown-provider', prepare: async () => { throw new Error(sentinel) } }] })
+  await assert.rejects(preparing.chat.send({ message: 'Prepare' }), error => error.code === 'TOOL_PROVIDER_FAILED' && !error.message.includes(sentinel))
+  assert.equal(JSON.stringify(preparing.events).includes(sentinel), false)
+})
+
+test('failed provider envelopes and legacy ContextRuntime self-responses cannot publish raw diagnostics', async () => {
+  const sentinel = 'RAW_CONTEXT_SENTINEL_52ac'
+  const provider = { specs: () => [{ type: 'function', name: 'egdesk_failed_envelope', description: 'failed', inputSchema: {} }],
+    dispatch: async () => ({ success: false, contentItems: [{ type: 'inputText', text: JSON.stringify({ error: { code: sentinel, message: sentinel } }) }] }) }
+  const h = harness({ toolProviders: [provider] })
+  const run = await h.chat.send({ message: 'Provider failure' })
+  await h.chat.handleServerRequest({ id: 'failed-envelope', method: 'item/tool/call', params: { threadId: run.conversationId, turnId: run.runId, callId: 'call-1', tool: 'egdesk_failed_envelope', arguments: {} } })
+  assert.equal(h.replies[0][1].success, false)
+  assert.equal(JSON.parse(h.replies[0][1].contentItems[0].text).error.code, 'TOOL_PROVIDER_FAILED')
+  assert.equal(JSON.stringify({ replies: h.replies, events: h.events }).includes(sentinel), false)
+
+  const contexts = {
+    specs: () => [{ type: 'function', name: 'egdesk_read_source', description: 'read', inputSchema: {} }],
+    dispatch(run, event) {
+      this.runtime.respond(event.rpcId, { success: false, contentItems: [{ type: 'inputText', text: JSON.stringify({ error: { code: sentinel, message: sentinel } }) }] })
+      this.runtime.emit(run, 'context.read.failed', { code: sentinel, message: sentinel, callId: event.callId }, event.callId)
+    },
+  }
+  const c = harness({ contexts })
+  const contextRun = await c.chat.send({ message: 'Context failure' })
+  await c.chat.handleServerRequest({ id: 'context-failed', method: 'item/tool/call', params: { threadId: contextRun.conversationId, turnId: contextRun.runId, callId: 'call-2', tool: 'egdesk_read_source', arguments: {} } })
+  assert.equal(c.replies[0][1].success, false)
+  assert.equal(JSON.parse(c.replies[0][1].contentItems[0].text).error.code, 'TOOL_PROVIDER_FAILED')
+  assert.equal(JSON.stringify({ replies: c.replies, events: c.events, snapshot: c.chat.snapshot() }).includes(sentinel), false)
+})
+
+test('late provider result after disconnect and epoch replacement cannot answer a newer native RPC', async () => {
+  let release, entered
+  const started = new Promise(resolve => { entered = resolve })
+  const pending = new Promise(resolve => { release = resolve })
+  const provider = {
+    specs: () => [{ type: 'function', name: 'egdesk_slow_tool', description: 'slow', inputSchema: {} }],
+    dispatch: async () => { entered(); return pending },
+  }
+  const h = harness({ toolProviders: [provider] })
+  const run = await h.chat.send({ message: 'Slow tool' })
+  await h.chat.handleServerRequest({ id: 17, method: 'item/tool/call', params: { threadId: run.conversationId, turnId: run.runId, callId: 'old-call', tool: 'egdesk_slow_tool', arguments: {} } })
+  await started
+  h.chat.setConnection(false)
+  h.chat.setConnection(true)
+  release({ success: true, contentItems: [{ type: 'inputText', text: 'STALE_PROVIDER_RESULT' }] })
+  await new Promise(resolve => setImmediate(resolve))
+  assert.deepEqual(h.replies, [])
+  assert.equal(JSON.stringify(h.events).includes('STALE_PROVIDER_RESULT'), false)
+})
+
+test('an early native tool request is failed and the exact turn interrupted when run binding fails', async () => {
+  const provider = {
+    specs: () => [{ type: 'function', name: 'egdesk_bound_tool', description: 'requires binding', inputSchema: { type: 'object' } }],
+    prepare: async () => ({ selected: true }),
+    bindRun: async () => { throw Object.assign(new Error('Selected Card epoch changed'), { code: 'BROWSER_BINDING_STALE' }) },
+    cancelRun: () => {},
+    dispatch: () => { throw new Error('Unbound tool must not dispatch') },
+  }
+  const h = harness({ toolProviders: [provider], request: async (method, params, chat, defaults) => {
+    if (method === 'turn/start') {
+      await chat.handleServerRequest({ id: 'early-tool', method: 'item/tool/call', params: { threadId: params.threadId, turnId: 'native-turn-1', callId: 'call-1', tool: 'egdesk_bound_tool', arguments: {} } })
+      return { turn: { id: 'native-turn-1', status: 'inProgress', items: [] } }
+    }
+    return defaults(method, params)
+  } })
+  await assert.rejects(h.chat.send({ message: 'Observe Card' }), error => error.code === 'TOOL_PROVIDER_FAILED' && error.resumeRequired === true && !error.message.includes('Selected Card epoch changed'))
+  assert.equal(h.replies[0][0], 'early-tool')
+  assert.equal(h.replies[0][2].code, -32000)
+  assert.deepEqual(h.calls.filter(call => call.method === 'turn/interrupt').map(call => call.params), [{ threadId: 'thread-1', turnId: 'native-turn-1' }])
+  assert.equal(h.chat.snapshot('thread-1').runs[0].status, 'unknown')
+})
+
+test('an early native tool request waits for successful per-run provider binding', async () => {
+  const order = []
+  let release
+  const binding = new Promise(resolve => { release = resolve })
+  const provider = {
+    specs: () => [{ type: 'function', name: 'egdesk_bound_tool', description: 'bounded', inputSchema: {} }],
+    bindRun: async () => { order.push('bind-start'); await binding; order.push('bind-complete') },
+    dispatch: async () => { order.push('dispatch'); return { success: true, contentItems: [{ type: 'inputText', text: 'bound' }] } },
+  }
+  const h = harness({ toolProviders: [provider], request: async (method, params, chat, defaults) => {
+    if (method === 'turn/start') {
+      await chat.handleServerRequest({ id: 'early-tool', method: 'item/tool/call', params: { threadId: params.threadId, turnId: 'native-turn-1', callId: 'call-1', tool: 'egdesk_bound_tool', arguments: {} } })
+      return { turn: { id: 'native-turn-1', status: 'inProgress', items: [] } }
+    }
+    return defaults(method, params)
+  } })
+  const sending = h.chat.send({ message: 'Use bound tool' })
+  for (let step = 0; step < 20 && !order.length; step++) await Promise.resolve()
+  assert.deepEqual(order, ['bind-start'])
+  assert.deepEqual(h.replies, [])
+  release()
+  await sending
+  await h.chat.queue
+  assert.deepEqual(order, ['bind-start', 'bind-complete', 'dispatch'])
+  assert.equal(h.replies[0][1].contentItems[0].text, 'bound')
+})
 
 test('ordinary Codex does not inject a default profile, model, sandbox or approval override', async () => {
   const h = harness()
@@ -309,17 +1088,16 @@ test('public text redacts credential assignments and private keys', () => {
   for (const secret of ['secret-token', 'hidden-value', 'xyz']) assert.ok(!redacted.includes(secret))
 })
 
-test('resume buffers live approval requests and newer terminal events until history is hydrated', async () => {
+test('unowned resumed history never gains an approval callback merely from a native event', async () => {
   const h = harness({ request: async (method, params, chat) => {
     assert.equal(method, 'thread/resume')
     await chat.handleServerRequest({ id: 'resume-approval', method: 'item/fileChange/requestApproval', params: { threadId: params.threadId, turnId: 'live-turn', itemId: 'edit', reason: 'Edit file' } })
     return { thread: { id: params.threadId, turns: [{ id: 'live-turn', status: 'inProgress', items: [] }] } }
   } })
   const state = await h.chat.resume({ conversationId: 'resume-thread', clientThreadId: 'resume-ui' })
-  assert.equal(state.runs[0].pendingApprovals.length, 1)
-  assert.equal(h.replies.length, 0)
-  assert.equal(h.events[0].clientThreadId, 'resume-ui')
-  assert.equal(h.events[0].runId, 'live-turn')
+  assert.equal(state.runs[0].pendingApprovals.length, 0)
+  assert.equal(h.replies[0][2].code, -32601)
+  assert.equal(h.events.some(event => event.event === 'approval.required'), false)
 })
 
 test('early events for a different native turn never inherit the pending request ID', async () => {
@@ -330,8 +1108,34 @@ test('early events for a different native turn never inherit the pending request
   } })
   await h.chat.send({ message: 'Requested', requestId: 'requested-id', clientThreadId: 'ui' })
   const other = h.events.find(e => e.itemId === 'other-message')
-  assert.equal(other.requestId, null)
-  assert.equal(other.answerId, `${other.conversationId}/other-turn`)
+  assert.equal(other, undefined)
+  assert.equal(h.chat.snapshot().runs.length, 1)
+})
+
+test('foreign turn/completed and tool calls on an owned thread cannot create or finish an EG-Desk run', async () => {
+  const h = harness()
+  const own = await h.chat.send({ message: 'Owned turn', requestId: 'request-owned', clientThreadId: 'ui-owned' })
+  await h.notify('turn/completed', { threadId: own.conversationId, turn: { id: 'foreign-turn', status: 'completed', items: [{ id: 'foreign-answer', type: 'agentMessage', text: 'foreign' }] } })
+  await h.chat.handleServerRequest({ id: 'foreign-call', method: 'item/tool/call', params: { threadId: own.conversationId, turnId: 'foreign-turn', callId: 'foreign-call-1', tool: 'egdesk_browser_click', arguments: {} } })
+  const state = h.chat.snapshot(own.conversationId)
+  assert.equal(state.runs.length, 1)
+  assert.equal(state.runs[0].runId, own.runId)
+  assert.equal(state.runs[0].status, 'inProgress')
+  assert.equal(JSON.stringify({ state, events: h.events }).includes('foreign-answer'), false)
+  assert.equal(h.replies[0][2].code, -32601)
+})
+
+test('late dynamic call on a completed owned Run gets an immediate RPC error and no pending callback', async () => {
+  let dispatched = 0
+  const provider = { specs: () => [{ type: 'function', name: 'egdesk_late_tool', description: 'late', inputSchema: {} }], dispatch: async () => { dispatched++; return { success: true, contentItems: [] } } }
+  const h = harness({ toolProviders: [provider] })
+  const run = await h.chat.send({ message: 'Finish first' })
+  await h.finish(run)
+  await h.chat.handleServerRequest({ id: 'late-rpc', method: 'item/tool/call', params: { threadId: run.conversationId, turnId: run.runId, callId: 'late-call', tool: 'egdesk_late_tool', arguments: {} } })
+  assert.equal(h.replies[0][0], 'late-rpc')
+  assert.equal(h.replies[0][2].code, -32601)
+  assert.equal(h.chat.dynamicRequestProviders.size, 0)
+  assert.equal(dispatched, 0)
 })
 
 test('pending approval IDs become stale after disconnect and are never replay-approved', async () => {
@@ -595,7 +1399,7 @@ test('unknown network target/protocol and absent command never offer blind accep
   assert.ok(!JSON.stringify(h.events).includes('alice:secret'))
 })
 
-test('active-turn history restores a partial assistant item as streaming before more tokens arrive', async () => {
+test('unowned active history remains a partial snapshot and does not accept later native deltas', async () => {
   const h = harness({ request: async (method, params) => {
     assert.equal(method, 'thread/resume')
     return { thread: { id: params.threadId, turns: [{ id: 'active-turn', status: 'inProgress', itemsView: 'full', items: [
@@ -606,11 +1410,11 @@ test('active-turn history restores a partial assistant item as streaming before 
   assert.equal(resumed.runs[0].messages[0].status, 'streaming')
   assert.equal(resumed.runs[0].messages[0].completionConfirmed, false)
   await h.notify('item/agentMessage/delta', { threadId: 'active-thread', turnId: 'active-turn', itemId: 'partial', delta: ' world ' })
-  assert.equal(h.chat.snapshot().runs[0].messages[0].text, 'Hello world ')
+  assert.equal(h.chat.snapshot().runs[0].messages[0].text, 'Hello')
   assert.equal(h.chat.snapshot().runs[0].messages[0].status, 'streaming')
   await h.item({ conversationId: 'active-thread', runId: 'active-turn' }, { id: 'partial', type: 'agentMessage', text: 'Hello world!' })
-  assert.equal(h.chat.snapshot().runs[0].messages[0].status, 'complete')
-  assert.equal(h.chat.snapshot().runs[0].messages[0].completionConfirmed, true)
+  assert.equal(h.chat.snapshot().runs[0].messages[0].status, 'streaming')
+  assert.equal(h.chat.snapshot().runs[0].messages[0].completionConfirmed, false)
 })
 
 test('active history preserves observed item completion and authoritative text, while another item keeps streaming', async () => {

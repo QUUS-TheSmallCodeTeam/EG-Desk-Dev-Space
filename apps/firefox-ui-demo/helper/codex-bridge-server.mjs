@@ -3,6 +3,10 @@ import { spawn } from 'node:child_process'
 import { AppServerRpc } from './codex-app-server-rpc.mjs'
 import { normalizeNativeAuth, publicAuthIdentityKey } from './codex-auth-state.mjs'
 import { CodexChatRuntime } from './codex-chat-runtime.mjs'
+import { BrowserToolTransport } from './codex-browser-tool-transport.mjs'
+import { createCodexBrowserToolProvider } from './codex-browser-tool-provider.mjs'
+import { fixtureBrowserQaFromEnv } from './codex-browser-fixture-qa.mjs'
+import { classifyPublicToolError } from './codex-tool-errors.mjs'
 import { createChatHttpHandler, guardBridgeRequest, readJsonBody, sendJson, setBridgeCors } from './codex-bridge-http.mjs'
 import { BoundedSseClient } from './codex-bridge-sse.mjs'
 import { TerminalSessionRegistry, terminalResponseStatus } from './terminal-sessions.mjs'
@@ -15,7 +19,7 @@ import { openChatStore } from './egdesk-chat-store.mjs'
 import { NativeReaderClient } from './egdesk-native-reader.mjs'
 import { ContextRuntime } from './egdesk-context-runtime.mjs'
 import { createContextHttpHandler } from './egdesk-context-http.mjs'
-import { buildCodexAppServerLaunch, inspectNativeCapabilities, resolveCodexExecutable, verifyCodexLaunchConfiguration, NATIVE_SCHEMA_VERSION } from './egdesk-native-capabilities.mjs'
+import { buildCodexAppServerLaunch, inspectNativeCapabilities, preflightOwnedAppServer, resolveCodexExecutable, NATIVE_SCHEMA_VERSION } from './egdesk-native-capabilities.mjs'
 import { createEGDeskFileMount, requireEGDeskNodeRuntime } from './egdesk-file-mount.mjs'
 
 const nodeRuntime = requireEGDeskNodeRuntime()
@@ -35,13 +39,14 @@ let appServerReady = false
 let reconnectTimer = null
 let loginPollTimer = null
 let rpc = null
-let nativeCapabilities = { executable: null, version: null, schemaVersion: NATIVE_SCHEMA_VERSION, schemaMatch: false, experimentalApi: true, dynamicTools: false, readerReadOnly: false }
+let nativeCapabilities = { executable: null, version: null, schemaVersion: NATIVE_SCHEMA_VERSION, schemaMatch: false, experimentalApi: true, dynamicTools: false, readerReadOnly: false, qaReadOnly: false }
 let launchConfigBlocked = false
 let nativePreflight = {
   status: appServerLaunch.hasOverrides ? 'pending' : 'inherited',
   configuredModel: appServerLaunch.configuredModel, configuredEffort: appServerLaunch.configuredEffort,
   effectiveModel: null, effectiveEffort: null,
 }
+let memoryIsolation = { status: appServerLaunch.disableMemories ? 'pending' : 'not-requested', feature: 'memories' }
 
 const authState = {
   isLoggedIn: false,
@@ -115,14 +120,19 @@ const contextStore = new ImmutableContextStore({
 })
 const nativeReader = new NativeReaderClient({ request: (method, params) => appServerRequest(method, params), respond: nativeRespond, getOwnerKey: () => publicAuthIdentityKey(authState) })
 const contexts = new ContextRuntime({ store: contextStore, reader: nativeReader, getOwnerKey: () => publicAuthIdentityKey(authState), schemaReady: () => nativeCapabilities.schemaMatch && appServerReady })
+const browserTransport = new BrowserToolTransport({ getOwnerKey: () => publicAuthIdentityKey(authState) })
+const browserProvider = createCodexBrowserToolProvider({ transport: browserTransport, getOwnerKey: () => publicAuthIdentityKey(authState), schemaReady: () => nativeCapabilities.qaReadOnly && appServerReady, fixtureQa: fixtureBrowserQaFromEnv(process.env) })
 const chat = new CodexChatRuntime({
   request: (method, params) => appServerRequest(method, params),
   respond: nativeRespond,
   contexts,
+  toolProviders: [browserProvider],
   store: chatStore,
   requireStore: true,
   getOwnerKey: () => publicAuthIdentityKey(authState),
   expectedProcessConfiguration: { model: appServerLaunch.configuredModel, effort: appServerLaunch.configuredEffort },
+  qaReady: () => nativeCapabilities.qaReadOnly && appServerReady,
+  getNativeContractFingerprint: () => nativeCapabilities.contractFingerprint,
   emit: event => broadcast(event, 2),
   emitLegacy: event => broadcast(event, 1),
 })
@@ -300,6 +310,7 @@ function scheduleAppServerReconnect() {
 
 function spawnAppServer() {
   if (appServerProcess && appServerProcess.exitCode == null && !appServerProcess.killed) return
+  if (appServerLaunch.disableMemories) memoryIsolation = { status: 'pending', feature: 'memories' }
   const executable = resolveCodexExecutable()
   nativeCapabilities = inspectNativeCapabilities({ executable })
   const child = spawn(executable, appServerLaunch.args, {
@@ -352,16 +363,27 @@ async function connectToAppServer() {
     try {
       await connection.initialize()
       if (appServerSocket !== socket) return
-      if (appServerLaunch.hasOverrides) {
-        try {
-          const config = await connection.request('config/read', { includeLayers: false, cwd: process.cwd() })
-          if (appServerSocket !== socket) return
-          nativePreflight = verifyCodexLaunchConfiguration(appServerLaunch, config)
-        } catch (error) {
+      const preflight = await preflightOwnedAppServer({
+        launch: appServerLaunch, cwd: process.cwd(),
+        request: (method, params) => connection.request(method, params),
+        isCurrent: () => appServerSocket === socket,
+        stopOwnedChild: () => {
+          // Only this bridge's spawned child may be stopped; never signal a
+          // user daemon or another App Server merely sharing the endpoint.
+          // Fence reconnect before SIGTERM can trigger the child's exit event.
           launchConfigBlocked = true
-          nativePreflight = { ...nativePreflight, status: 'blocked', effectiveModel: null, effectiveEffort: null, errorCode: error.code || 'CODEX_LAUNCH_CONFIG_UNVERIFIED' }
-          throw error
-        }
+          appServerReady = false
+          if (appServerProcess && appServerProcess.exitCode == null && !appServerProcess.killed) appServerProcess.kill('SIGTERM')
+        },
+      })
+      if (preflight.stale) return
+      if (preflight.modelProof) nativePreflight = preflight.modelProof
+      if (preflight.memoryProof) memoryIsolation = preflight.memoryProof
+      if (!preflight.ready) {
+        launchConfigBlocked = preflight.reconnectBlocked
+        if (preflight.failedStage === 'model') nativePreflight = { ...nativePreflight, status: 'blocked', effectiveModel: null, effectiveEffort: null, errorCode: preflight.error.code || 'CODEX_LAUNCH_CONFIG_UNVERIFIED' }
+        if (appServerLaunch.disableMemories) memoryIsolation = { status: 'blocked', feature: 'memories', errorCode: preflight.error.code || 'CODEX_MEMORY_ISOLATION_UNVERIFIED' }
+        throw preflight.error
       }
       appServerReady = true
       chat.setConnection(true)
@@ -387,6 +409,7 @@ async function connectToAppServer() {
     if (!launchConfigBlocked && appServerLaunch.hasOverrides) nativePreflight = { ...nativePreflight, status: 'pending', effectiveModel: null, effectiveEffort: null }
     if (rpc === connection) rpc = null
     chat.setConnection(false)
+    if (appServerLaunch.disableMemories && !launchConfigBlocked) memoryIsolation = { status: 'pending', feature: 'memories' }
     scheduleAppServerReconnect()
   }
 }
@@ -545,17 +568,30 @@ const bridgeServer = createServer(async (req, res) => {
       'Cache-Control': 'no-cache',
       Connection: 'keep-alive',
     })
+    let browserTransportId = null
     const client = new BoundedSseClient(res, {
       chatProtocol: url.searchParams.get('chatProtocol') === '2' ? 2 : 1,
-      onClose: () => clients.delete(client),
+      onClose: () => { clients.delete(client); if (browserTransportId) browserTransport.closeClient(browserTransportId) },
     })
     clients.add(client)
-    client.send(`retry: 1000\nevent: ready\ndata: ${JSON.stringify({ ok: true, streamId: chat.streamId, seq: chat.seq, resyncRequired: true })}\n\n`)
+    if (client.chatProtocol === 2) browserTransportId = browserTransport.registerClient(client)
+    client.send(`retry: 1000\nevent: ready\ndata: ${JSON.stringify({ ok: true, streamId: chat.streamId, seq: chat.seq, resyncRequired: true, ...(browserTransportId ? { browserTransportId } : {}) })}\n\n`)
+    return
+  }
+
+  if (req.method === 'POST' && route === '/browser-tool/respond') {
+    try {
+      const body = await readJsonBody(req, { maxBytes: 190000 })
+      sendJson(res, 200, browserTransport.receive(body.browserTransportId, body.response))
+    } catch (error) {
+      const failure = classifyPublicToolError(error, { browser: true })
+      sendJson(res, error.httpStatus || 409, { accepted: false, code: failure.code, error: failure.message })
+    }
     return
   }
 
   if (req.method === 'GET' && route === '/health') {
-    sendJson(res, 200, { ok: true, port: BRIDGE_PORT, appServerReady, chatStorageReady: Boolean(chatStore && chat.storeHealthy), chatStorageError: chatStoreError, native: nativeCapabilities, engineConfiguration: nativePreflight, node: nodeRuntime })
+    sendJson(res, 200, { ok: true, port: BRIDGE_PORT, appServerReady, chatStorageReady: Boolean(chatStore && chat.storeHealthy), chatStorageError: chatStoreError, native: nativeCapabilities, engineConfiguration: nativePreflight, memoryIsolation, node: nodeRuntime })
     return
   }
 
@@ -570,12 +606,13 @@ const bridgeServer = createServer(async (req, res) => {
       chatStorageReady: Boolean(chatStore && chat.storeHealthy),
       native: nativeCapabilities,
       engineConfiguration: nativePreflight,
+      memoryIsolation,
       node: nodeRuntime,
       auth: authSnapshot(),
       chat: chat.snapshot(),
       capabilities: {
         auth: ['status', 'start', 'cancel', 'signout'],
-        chat: chatStore && chat.storeHealthy ? ['send', 'stream', 'resume', 'interrupt', 'approvals', 'typed-activity', 'artifact-refs', 'local-history', 'legacy-import'] : ['local-history-unavailable'],
+        chat: chatStore && chat.storeHealthy ? ['send', 'stream', 'resume', 'interrupt', 'approvals', 'typed-activity', 'artifact-refs', 'local-history', 'legacy-import', ...(nativeCapabilities.qaReadOnly ? ['read-only-qa'] : [])] : ['local-history-unavailable'],
         context: nativeCapabilities.schemaMatch ? ['capture', 'immutable-inspect', 'native-dynamic-tools', 'smart-read', 'read-only-reader', 'answer-briefing'] : ['capture', 'immutable-inspect'],
         files: ['native-picker', 'scoped-read', 'managed-drafts', 'create-only-save-as'],
       },

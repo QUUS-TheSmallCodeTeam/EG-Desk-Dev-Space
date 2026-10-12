@@ -281,8 +281,26 @@
 .egd-board-missing button { padding: 5px 12px; border: 1px solid #c8c3b9; border-radius: 5px; }
 .egd-board-missing pre { white-space: pre-wrap; overflow-wrap: anywhere; }
 #egd-board-notice, #egd-board-scope { position: fixed; z-index: 100100; background: #fff; border: 1px solid #d4d0ca; border-radius: 10px; padding: 18px; font: 13px/1.5 var(--egd-font); box-shadow: 0 8px 30px #0002; }
-#egd-board-notice { left: 50%; bottom: 90px; transform: translateX(-50%); max-width: 600px; }
-#egd-board-notice button { margin-left: 16px; }
+#egd-board-notice {
+  /* Keep passive status text away from the lower Chat composer and Dock. */
+  top: 64px;
+  right: 16px;
+  left: auto;
+  bottom: auto;
+  transform: none;
+  width: max-content;
+  max-width: min(480px, calc(100vw - 32px));
+  max-height: 160px;
+  overflow: auto;
+  overflow-wrap: anywhere;
+  pointer-events: none;
+}
+#egd-board-notice button {
+  margin-left: 16px;
+  min-width: 24px;
+  min-height: 24px;
+  pointer-events: auto;
+}
 #egd-board-scope { left: 50%; top: 25%; transform: translateX(-50%); width: 350px; }
 #egd-board-scope input { padding: 8px; width: 90%; border: 1px solid #ccc; border-radius: 5px; }
 #egd-board-scope button { padding: 6px 10px; margin: 5px 5px 0 0; border: 1px solid #ccc; border-radius: 5px; }

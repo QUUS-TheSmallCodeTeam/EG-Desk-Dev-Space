@@ -90,6 +90,65 @@ test('HTTP send preserves accepted/conversationId and adds run IDs without liste
   assert.deepEqual(received, { message: 'hi' })
 })
 
+test('bounded QA output markers and policy traverse the ordinary EG-Desk /chat/send handler', async () => {
+  let received
+  const policy = { mode: 'readOnlyQa' }
+  const markers = ['EGDESK_FILE_NONCE_7f41ad982b', 'EGDESK_COMMAND_TAG_9c62ab71']
+  const handler = createChatHttpHandler({ send: async body => { received = body; return { accepted: true, conversationId: 'native-thread', runId: 'native-turn', executionPolicy: { mode: 'readOnlyQa', status: 'native-thread-verified' } } } }, async () => {})
+  const res = response()
+  await handler(request(JSON.stringify({ message: 'Read the public fixture', clientThreadId: 'ui-thread', requestId: 'qa-request', executionPolicy: policy, qaOutputMarkers: markers })), res, new URL('http://localhost/chat/send'))
+  assert.equal(res.status, 202)
+  assert.deepEqual(received.executionPolicy, policy)
+  assert.deepEqual(received.qaOutputMarkers, markers)
+  assert.equal(res.body.runId, 'native-turn')
+})
+
+test('native MCP inventory RPC diagnostics never escape QA HTTP, events or durable history, before or after thread/start', async () => {
+  const sentinel = 'PRIVATE_MCP_RPC_SENTINEL_7f41ad98'
+  for (const stage of ['before-thread', 'after-thread']) {
+    const dataDir = await mkdtemp(path.join(os.tmpdir(), 'egdesk-mcp-rpc-error-'))
+    let store = null
+    try {
+      store = openChatStore({ dataDir, ownerScope: `mcp-rpc-${stage}` })
+      const nativeCalls = [], events = []
+      const chat = new CodexChatRuntime({ store, requireStore: true,
+        getOwnerKey: () => 'codex:chatgpt:qa-fixture-owner', qaReady: () => true,
+        request: async (method, params) => {
+          nativeCalls.push({ method, params })
+          if (method === 'config/read') return { config: {}, layers: [{ name: { type: 'user' }, config: {} }] }
+          if (method === 'mcpServerStatus/list') {
+            if ((stage === 'before-thread' && !params.threadId) || (stage === 'after-thread' && params.threadId)) {
+              throw Object.assign(new Error(sentinel), { code: sentinel })
+            }
+            return { data: [], nextCursor: null }
+          }
+          if (method === 'thread/start') return { thread: { id: `native-${stage}` }, sandbox: { type: 'readOnly', networkAccess: false }, approvalPolicy: 'never' }
+          throw new Error(`Unexpected native method ${method}`)
+        }, respond: () => {}, emit: event => events.push(event),
+      })
+      chat.setConnection(true)
+      const handler = createChatHttpHandler(chat, async () => {})
+      const clientThreadId = `client-${stage}`
+      const sent = response()
+      await handler(request(JSON.stringify({ message: 'Bounded fixture read', requestId: `request-${stage}`, clientThreadId,
+        executionPolicy: { mode: 'readOnlyQa' } })), sent, new URL('http://localhost/chat/send'))
+      assert.equal(sent.status, 502)
+      assert.equal(sent.body.code, 'QA_TOOL_ISOLATION_UNVERIFIED')
+      assert.equal(nativeCalls.some(call => call.method === 'turn/start'), false)
+      assert.equal(nativeCalls.filter(call => call.method === 'thread/start').length, stage === 'after-thread' ? 1 : 0)
+      const historyReq = request('')
+      historyReq.method = 'GET'
+      const history = response()
+      await handler(historyReq, history, new URL(`http://localhost/chat/history?clientThreadId=${clientThreadId}&afterSeq=0&limit=100`))
+      assert.equal(history.status, 200)
+      assert.equal(JSON.stringify({ sent: sent.body, events, snapshot: chat.snapshot(), history: history.body }).includes(sentinel), false)
+    } finally {
+      try { store?.close() } catch {}
+      await rm(dataDir, { recursive: true, force: true })
+    }
+  }
+})
+
 test('HTTP approval conflict returns explicit failure, never success', async () => {
   const handler = createChatHttpHandler({ replyApproval: async () => { throw Object.assign(new Error('Stale'), { httpStatus: 409, code: 'STALE_APPROVAL' }) } }, async () => {})
   const res = response()
