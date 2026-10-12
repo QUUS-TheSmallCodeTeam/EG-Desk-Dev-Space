@@ -266,6 +266,7 @@ export class EGDeskBrowserAgentRuntimeChild extends JSWindowActorChild {
       title: after?.title || "",
       newVisibleText,
       removedVisibleText,
+      focusedElementChanged: (before?.focusedElement?.ref || null) !== (after?.focusedElement?.ref || null),
       focusedElement: after?.focusedElement || null,
       newInteractiveElements,
       removedInteractiveElements,
@@ -322,18 +323,31 @@ export class EGDeskBrowserAgentRuntimeChild extends JSWindowActorChild {
   }
 
   clickTarget(target, { avoidFocus = false } = {}) {
-    if (!avoidFocus) target.focus?.();
     const rect = target.getBoundingClientRect();
     const hit = this.document.elementFromPoint?.(rect.left + rect.width / 2, rect.top + rect.height / 2);
     if (avoidFocus && (!hit || (hit !== target && !target.contains?.(hit)))) {
       throw new Error("Browser target became obscured before click; observe again");
     }
+    if (avoidFocus) {
+      if (typeof target.click !== "function") {
+        throw new Error("Browser target has no focus-safe DOM click; use the native user path");
+      }
+      // A DOM click has activation behavior without Gecko's mousedown focus
+      // default. A site click handler may still focus another element itself.
+      let targetClickObserved = false;
+      const onClick = () => { targetClickObserved = true; };
+      target.addEventListener?.("click", onClick, true);
+      try { target.click(); }
+      finally { target.removeEventListener?.("click", onClick, true); }
+      return { usedWindowUtils: false, dispatchScope: "dom-click-no-pointerdown", targetClickObserved };
+    }
+    target.focus?.();
     const x = Math.round(rect.left + rect.width / 2);
     const y = Math.round(rect.top + rect.height / 2);
     const utils = this.contentWindow.windowUtils;
     const eventResults = [];
-    // sendMouseEvent routes through the top-level widget and can hit another
-    // overlapping Desk Card. Keep model coordinates in this Browser document.
+    // The legacy unguarded path stays inside this Browser document too;
+    // guarded model clicks above never send a mousedown at all.
     if (typeof utils?.sendMouseEventToWindow === "function") {
       utils.sendMouseEventToWindow("mousemove", x, y, 0, 0, 0);
       utils.sendMouseEventToWindow("mousedown", x, y, 0, 1, 0);

@@ -27,7 +27,7 @@ export const BROWSER_TOOL_SPECS = [
     { cardId: base.cardId }, ['cardId']),
   spec('egdesk_browser_navigate', 'Request navigation in the bound Browser Card, then observe. A dispatched request does not prove load or an external effect.',
     { ...base, url: { type: 'string' }, postcondition }, ['cardId', 'observationId', 'expectedRevision', 'url', 'postcondition']),
-  spec('egdesk_browser_click', 'Click an observed element in the bound Browser Card. Requires a fresh observation, exact target precondition and a testable DOM postcondition. An interaction grant is not proof of external authorization or submission success.',
+  spec('egdesk_browser_click', 'Request one guarded DOM click on an observed element without pointerdown or a focus step. A site may ignore synthetic clicks or focus another element itself. Requires a fresh observation, exact target precondition and testable DOM postcondition; an interaction grant is not proof of external authorization or submission success.',
     { ...base, ref: { type: 'string' }, expectedTarget: target, postcondition },
     ['cardId', 'observationId', 'expectedRevision', 'ref', 'expectedTarget', 'postcondition']),
   spec('egdesk_browser_fill', 'Fill an observed non-password field in the bound Browser Card. Requires a fresh observation, exact target precondition and a testable DOM postcondition.',

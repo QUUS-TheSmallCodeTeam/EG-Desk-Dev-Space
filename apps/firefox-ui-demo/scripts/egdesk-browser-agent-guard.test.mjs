@@ -12,13 +12,19 @@ function localDocumentFixture() {
   const pendingMutations = []
   const countNode = { nodeValue: 'Count: 0' }
   let clicks = 0, inputEvents = 0, focusCalls = 0
+  const buttonClickListeners = new Set(), inputClickListeners = new Set()
   const doc = { title: 'Isolated local document', readyState: 'complete' }
   const rect = { left: 20, top: 30, width: 100, height: 32 }
   const button = {
     ownerDocument: doc, isConnected: true, tagName: 'BUTTON', innerText: 'Increment', disabled: false,
     getAttribute() { return null }, getBoundingClientRect() { return rect },
     dispatchEvent() { return true }, focus() { focusCalls++ },
-    scrollIntoView() {}, click() { clicks++; countNode.nodeValue = `Count: ${clicks}`; pendingMutations.push({}) },
+    addEventListener(name, fn) { if (name === 'click') buttonClickListeners.add(fn) },
+    removeEventListener(name, fn) { if (name === 'click') buttonClickListeners.delete(fn) },
+    scrollIntoView() {}, click() {
+      for (const listener of buttonClickListeners) listener({ target: this })
+      clicks++; countNode.nodeValue = `Count: ${clicks}`; pendingMutations.push({})
+    },
     contains(node) { return node === this },
   }
   const input = {
@@ -27,6 +33,9 @@ function localDocumentFixture() {
     getBoundingClientRect() { return { left: 20, top: 80, width: 160, height: 30 } },
     dispatchEvent(event) { if (event.name === 'input' || event.name === 'change') inputEvents++; return true },
     focus() { focusCalls++ }, scrollIntoView() {}, contains(node) { return node === this },
+    addEventListener(name, fn) { if (name === 'click') inputClickListeners.add(fn) },
+    removeEventListener(name, fn) { if (name === 'click') inputClickListeners.delete(fn) },
+    click() { for (const listener of inputClickListeners) listener({ target: this }) },
   }
   countNode.parentElement = button
   doc.body = { getBoundingClientRect() { return { width: 720, height: 480 } } }
@@ -72,6 +81,7 @@ test('guarded native Browser actor changes isolated local DOM exactly once and r
   const clicked = await f.actor.act({ type: 'click', ref: button.ref },
     guarded(guardFrom(before, button)))
   assert.equal(f.clicks, 1, 'one model click must never dispatch duplicate click effects')
+  assert.equal(clicked.result.clickDiagnostics.targetClickObserved, true)
   assert.equal(clicked.after.text[0], 'Count: 1')
   assert.equal(clicked.observation.newVisibleText[0], 'Count: 1')
   assert.equal(f.focusCalls, 0, 'guarded action does not call global or content focus')
@@ -88,57 +98,93 @@ test('guarded native Browser actor changes isolated local DOM exactly once and r
   assert.equal(f.focusCalls, 0)
 })
 
-test('guarded click dispatches inside its document window, never through top-level hit testing', async () => {
+test('guarded click uses one DOM activation without Gecko mousedown or focus', async () => {
   const f = localDocumentFixture()
   const targeted = [], topLevel = []
   f.win.windowUtils = {
-    sendMouseEventToWindow(...args) {
-      targeted.push(args)
-      if (args[0] === 'mouseup') f.button.click()
-    },
+    sendMouseEventToWindow(...args) { targeted.push(args) },
     sendMouseEvent(...args) { topLevel.push(args) },
   }
   const before = f.actor.snapshot()
   const button = before.interactiveElements.find(item => item.role === 'button')
   const result = await f.actor.act({ type: 'click', ref: button.ref },
     guarded(guardFrom(before, button)))
-  assert.deepEqual(targeted.map(event => event[0]), ['mousemove', 'mousedown', 'mouseup'])
+  assert.equal(targeted.length, 0, 'guarded model input never sends Gecko mousedown')
   assert.equal(topLevel.length, 0, 'overlapping Cards must not receive top-level widget input')
-  assert.equal(result.result.clickDiagnostics.dispatchScope, 'document-window')
+  assert.equal(f.clicks, 1)
+  assert.equal(result.result.clickDiagnostics.dispatchScope, 'dom-click-no-pointerdown')
   assert.equal(result.after.text[0], 'Count: 1')
   assert.equal(f.focusCalls, 0)
 })
 
-test('missing per-window API uses the single DOM fallback, not a top-level mouse event', async () => {
+test('unguarded internal click retains its existing single DOM fallback', () => {
   const f = localDocumentFixture()
   let topLevelCalls = 0
   f.win.windowUtils = { sendMouseEvent() { topLevelCalls++ } }
   const before = f.actor.snapshot()
   const button = before.interactiveElements.find(item => item.role === 'button')
-  const result = await f.actor.act({ type: 'click', ref: button.ref },
-    guarded(guardFrom(before, button)))
+  const result = f.actor.perform({ type: 'click', ref: button.ref })
   assert.equal(topLevelCalls, 0)
   assert.equal(f.clicks, 1)
-  assert.equal(result.result.clickDiagnostics.dispatchScope, 'dom-fallback')
-  assert.equal(f.focusCalls, 0)
+  assert.equal(result.clickDiagnostics.dispatchScope, 'dom-fallback')
+  assert.equal(f.focusCalls, 1, 'the legacy unguarded route remains distinct from model input')
 })
 
-test('diagnostic repro: even a per-window mouse path can complete without a page click', async () => {
+test('unguarded per-window mouse completion alone is not DOM change evidence', () => {
   const f = localDocumentFixture()
   const mouseEvents = []
   f.win.windowUtils = { sendMouseEventToWindow: (...args) => { mouseEvents.push(args) } }
   const before = f.actor.snapshot()
   const button = before.interactiveElements.find(item => item.role === 'button')
+  const result = f.actor.perform({ type: 'click', ref: button.ref })
+  assert.deepEqual(mouseEvents.map(event => event[0]), ['mousemove', 'mousedown', 'mouseup'])
+  assert.equal(result.clickDiagnostics.usedWindowUtils, true)
+  assert.equal(result.clickDiagnostics.dispatchScope, 'document-window')
+  assert.equal(f.clicks, 0, 'the mocked widget delivered no page click')
+  assert.equal(f.actor.snapshot().text[0], 'Count: 0')
+})
+
+test('guarded click on a standard input leaves a simulated Chat composer as keyboard recipient', async () => {
+  const f = localDocumentFixture()
+  const composer = { focused: true, value: 'draft', blurCount: 0 }
+  f.input.focus = () => { composer.focused = false; composer.blurCount++ }
+  f.win.windowUtils = { sendMouseEventToWindow() { composer.focused = false; composer.blurCount++ } }
+  const before = f.actor.snapshot()
+  const input = before.interactiveElements.find(item => item.tag === 'input')
+  const result = await f.actor.act({ type: 'click', ref: input.ref },
+    guarded(guardFrom(before, input)))
+  assert.equal(result.result.clickDiagnostics.targetClickObserved, true)
+  assert.equal(result.after.interactiveElements.find(item => item.ref === input.ref)?.value, '')
+  assert.equal(composer.focused, true)
+  assert.equal(composer.blurCount, 0)
+  if (composer.focused) composer.value += 'x'
+  assert.equal(composer.value, 'draftx', 'this is a pure routing repro, not real Firefox focus proof')
+})
+
+test('guarded click without a DOM activation method fails closed and never uses mouse fallback', async () => {
+  const f = localDocumentFixture()
+  let mouseEvents = 0
+  f.win.windowUtils = { sendMouseEventToWindow() { mouseEvents++ } }
+  const before = f.actor.snapshot()
+  const button = before.interactiveElements.find(item => item.role === 'button')
+  f.button.click = undefined
+  await assert.rejects(f.actor.act({ type: 'click', ref: button.ref },
+    guarded(guardFrom(before, button))), /no focus-safe DOM click/)
+  assert.equal(mouseEvents, 0)
+  assert.equal(f.focusCalls, 0)
+})
+
+test('site-script focus during DOM activation remains visible as an exception', async () => {
+  const f = localDocumentFixture()
+  const before = f.actor.snapshot()
+  const button = before.interactiveElements.find(item => item.role === 'button')
+  const originalClick = f.button.click
+  f.button.click = () => { originalClick(); f.actor.document.activeElement = f.input }
   const result = await f.actor.act({ type: 'click', ref: button.ref },
     guarded(guardFrom(before, button)))
-  assert.deepEqual(mouseEvents.map(event => event[0]), ['mousemove', 'mousedown', 'mouseup'])
-  assert.equal(result.result.clickDiagnostics.usedWindowUtils, true)
-  assert.equal(result.result.clickDiagnostics.dispatchScope, 'document-window')
-  assert.equal(result.ok, true, 'the actor completed its synthetic mouse calls')
-  assert.equal(f.clicks, 0, 'the mocked widget delivered no page click')
-  assert.equal(result.after.text[0], 'Count: 0')
-  assert.equal(result.observation.visibleTextChanged, false,
-    'an actor completion is not evidence that the click reached the page')
+  assert.equal(result.after.text[0], 'Count: 1')
+  assert.equal(result.observation.focusedElementChanged, true)
+  assert.equal(result.after.focusedElement?.role, 'textbox')
 })
 
 test('expired-lease diagnostic checks the live target guard without physical input', async () => {

@@ -2,6 +2,13 @@ import assert from 'node:assert/strict'
 import { test } from 'node:test'
 import { BROWSER_TOOL_SPECS, createBrowserToolService } from './egdesk-browser-tool-runtime.mjs'
 
+test('click tool advertises the focus-safe DOM route and still requires a postcondition', () => {
+  const click = BROWSER_TOOL_SPECS.find(item => item.name === 'egdesk_browser_click')
+  assert.match(click.description, /without pointerdown or a focus step/)
+  assert.match(click.description, /site may ignore synthetic clicks or focus another element/)
+  assert(click.inputSchema.required.includes('postcondition'))
+})
+
 const run = { answerId: 'answer-1', runId: 'run-1', clientThreadId: 'thread-a', status: 'inProgress' }
 function source(permission = 'interact', cardId = 'browser-1') {
   return { id: `selected-${cardId}`, kind: 'browser', selectedByUser: true,

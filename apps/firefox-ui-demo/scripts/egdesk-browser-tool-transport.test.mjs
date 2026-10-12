@@ -164,7 +164,8 @@ function fixture() {
           actionRef: action.ref || null, actionUrl: action.url || null })
         if (!permitted) throw new Error('Browser action authority was revoked before input')
         domEffects++
-        return { dispatchReceipt: { eventDispatched: true, clickInputRoute: 'document-window' },
+        return { dispatchReceipt: { eventDispatched: true,
+          clickInputRoute: 'dom-click-no-pointerdown', targetClickObserved: true },
           after: { cardId: 'browser-a', text: ['Count: 1'] } }
       },
     } }
@@ -488,8 +489,9 @@ test('fixture diagnostics distinguish Gecko rejection from a routed actor receip
   assert.equal(acted.domEffects, 1)
   assert.deepEqual({ status: acted.fixtureActionDiagnostic('browser-a')?.status,
     reason: acted.fixtureActionDiagnostic('browser-a')?.reason,
-    inputRoute: acted.fixtureActionDiagnostic('browser-a')?.inputRoute },
-  { status: 'acted', reason: 'none', inputRoute: 'document-window' })
+    inputRoute: acted.fixtureActionDiagnostic('browser-a')?.inputRoute,
+    targetClickObserved: acted.fixtureActionDiagnostic('browser-a')?.targetClickObserved },
+  { status: 'acted', reason: 'none', inputRoute: 'dom-click-no-pointerdown', targetClickObserved: true })
   acted.current.authorityEpoch++
   assert.equal(acted.fixtureActionDiagnostic('browser-a'), null)
 })
@@ -501,7 +503,7 @@ test('production Browser Card receipt carries only the bounded click route, not 
   const xulBrowser = { browsingContext: context }
   const card = { id: 'browser-a' }
   const actorResult = { ok: true, result: { clickDiagnostics: {
-    dispatchScope: 'document-window', x: 442, y: 218,
+    dispatchScope: 'dom-click-no-pointerdown', targetClickObserved: true, x: 442, y: 218,
   } }, after: { documentId: 'doc-a' }, observation: { visibleTextChanged: true } }
   const toolAct = new Function('assertBrowserToolBinding', 'xulBrowser', 'showAgentActivity',
     'browserAgentActorRequest', 'card', `${toolActSource}\nreturn browserToolAct`)(
@@ -514,7 +516,8 @@ test('production Browser Card receipt carries only the bounded click route, not 
   const receipt = await toolAct(binding, { type: 'click', ref: 'el_2' }, { revision: 2 }, {
     leaseId: 'lease-a', requestId: 'request-a', deadlineMs: Date.now() + 5000,
   })
-  assert.equal(receipt.dispatchReceipt.clickInputRoute, 'document-window')
+  assert.equal(receipt.dispatchReceipt.clickInputRoute, 'dom-click-no-pointerdown')
+  assert.equal(receipt.dispatchReceipt.targetClickObserved, true)
   assert.equal(receipt.dispatchReceipt.x, undefined)
   assert.equal(receipt.dispatchReceipt.y, undefined)
   assert.equal(receipt.after.documentId, 'doc-a')

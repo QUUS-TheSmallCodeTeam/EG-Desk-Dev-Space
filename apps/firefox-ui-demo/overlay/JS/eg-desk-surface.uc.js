@@ -9777,6 +9777,7 @@
     const authorization = browserToolFixtureAuthorizationByCard.get(cardId);
     return { cardId, actionType: recorded.actionType, phase: recorded.phase,
       status: recorded.status, reason: recorded.reason, inputRoute: recorded.inputRoute,
+      targetClickObserved: recorded.targetClickObserved,
       authorizationReason: authorization?.requestId === recorded.requestId &&
         authorization.cardEpoch === binding.cardEpoch && authorization.authorityEpoch === binding.authorityEpoch
         ? authorization.reason : null,
@@ -9833,6 +9834,7 @@
         requestId, cardId: request.cardId, cardEpoch: binding.cardEpoch, authorityEpoch: binding.authorityEpoch,
         actionType: request.action?.type || null, phase: diagnosticPhase, status: 'rejected',
         reason: browserToolFixtureReason(error, diagnosticPhase), inputRoute: null,
+        targetClickObserved: null,
         parentReason: message.match(/authority was revoked before input \[([a-z-]+)\]/)?.[1] || null,
         geckoError: message.match(/\bNS_ERROR_[A-Z_]+\b/)?.[0] || null,
         sampledAtMs: Date.now(),
@@ -9972,6 +9974,7 @@
         requestId, cardId: request.cardId, cardEpoch: fixture.cardEpoch, authorityEpoch: fixture.authorityEpoch,
         actionType: request.action.type, phase: 'post-actor', status: 'acted', reason: 'none',
         inputRoute: receipt?.dispatchReceipt?.clickInputRoute || null,
+        targetClickObserved: receipt?.dispatchReceipt?.targetClickObserved ?? null,
         parentReason: null, geckoError: null,
         sampledAtMs: Date.now(),
       };
@@ -11548,7 +11551,8 @@
       return { dispatchReceipt: { actor: 'JSWindowActor', eventDispatched: result?.ok === true,
         documentStillCurrent,
         ...(action.type === 'click' && result?.result?.clickDiagnostics?.dispatchScope
-          ? { clickInputRoute: result.result.clickDiagnostics.dispatchScope } : {}) },
+          ? { clickInputRoute: result.result.clickDiagnostics.dispatchScope,
+            targetClickObserved: result.result.clickDiagnostics.targetClickObserved === true } : {}) },
         after: documentStillCurrent ? { cardId: card.id, ...result.after } : null,
         observation: documentStillCurrent ? result.observation : null };
     };
