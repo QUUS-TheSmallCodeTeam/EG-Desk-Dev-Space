@@ -18,6 +18,7 @@ import {
   browserToolReceipts, assertBrowserPositiveFlow, assertBrowserFocusOwnership,
   assertPublicBrowserSseBindings,
   assertBrowserSameChatAddition, assertBrowserNegativeGuards,
+  assertBrowserNegativeProbeResults,
   assertBrowserFixtureConfig, browserFixtureHtml, createBrowserFixtureHandler,
   assertBrowserFixtureServerReady,
   assertNoFixtureWrites,
@@ -140,7 +141,8 @@ test('explicit case selection verifies partial work without claiming full-scenar
     selectedCasesVerified: true, fullScenarioVerified: false, coverage: 'partial' });
   assert.deepEqual(scenarioCoverage(['native', 'source', 'browser', 'browser-negative'],
     ['native', 'source', 'browser', 'browser-negative']), {
-    selectedCasesVerified: true, fullScenarioVerified: true, coverage: 'full' });
+    selectedCasesVerified: true, fullScenarioVerified: false, coverage: 'partial' });
+  assert.deepEqual(parseCases('browser-negative'), ['browser-negative']);
   assert.deepEqual(scenarioCoverage(['native', 'source'], ['native']), {
     selectedCasesVerified: false, fullScenarioVerified: false, coverage: 'partial' });
   for (const invalid of [undefined, '', 'native,source,unknown', 'native,native', 'native, source']) {
@@ -758,6 +760,44 @@ test('C rejects Browser cancel-before-act, forbidden schemes and permission esca
   assert.throws(() => assertBrowserNegativeGuards({ ...data,
     guards: guards.map(item => item.case === 'permission-escalation' ? { ...item,
       errorCode: 'BROWSER_ACTION_UNVERIFIED' } : item) }), /permission boundary/);
+});
+
+test('actual negative-probe result cannot claim a native model turn or skip an owned no-effect denial', () => {
+  const names = ['stale-revision-before-ui', 'forbidden-scheme-before-ui',
+    'stale-dom-at-actor', 'resized-viewport-at-actor',
+    'observe-only-interaction-denied', 'stop-before-first-bind-accept'];
+  const receipts = [
+    { code: 'BROWSER_OBSERVATION_STALE', uiActRequests: 0 },
+    { code: 'INVALID_BROWSER_TOOL', serviceActRequests: 0, uiProtocolDenied: true },
+    { code: 'BROWSER_ACTION_UNVERIFIED', uiActRequests: 1 },
+    { code: 'BROWSER_ACTION_UNVERIFIED', uiActRequests: 1 },
+    { code: 'BROWSER_INTERACTION_NOT_GRANTED', serviceActRequests: 0,
+      uiProtocolDenied: true },
+    { code: 'BROWSER_BINDING_STALE', cancelledBeforeBindAccepted: true,
+      uiActRequests: 0 },
+  ];
+  const proof = { simulatorOnly: true, nativeModelOriginVerified: false,
+    actorPhysicalDispatchCounterVerified: false,
+    providerTurns: 0, cardId: 'owned-local-card',
+    probes: names.map((name, index) => ({ name, cardId: 'owned-local-card', denied: true,
+      ownedFixtureContentUnchangedAfterDeniedAction: true, simulatorOnly: true,
+      sourceId: `qa-source-${index}`, cardEpoch: 'card-epoch-owned',
+      syntheticRunId: `qa-browser-simulator-${index}`,
+      ...receipts[index] })),
+    requestsScopedToOwnedCard: true, preexistingBrowserCardStylesUnchanged: true,
+    canvasPanZoomUnchanged: true };
+  assert.equal(assertBrowserNegativeProbeResults(proof), true);
+  assert.throws(() => assertBrowserNegativeProbeResults({ ...proof,
+    nativeModelOriginVerified: true }), /cannot claim native-model origin/);
+  assert.throws(() => assertBrowserNegativeProbeResults({ ...proof,
+    actorPhysicalDispatchCounterVerified: true }), /unpublished physical-dispatch counter/);
+  assert.throws(() => assertBrowserNegativeProbeResults({ ...proof,
+    probes: proof.probes.slice(1) }), /incomplete/);
+  assert.throws(() => assertBrowserNegativeProbeResults({ ...proof,
+    probes: proof.probes.map((item, index) => index === 3
+      ? { ...item, ownedFixtureContentUnchangedAfterDeniedAction: false } : item) }), /no-effect/);
+  assert.throws(() => assertBrowserNegativeProbeResults({ ...proof,
+    preexistingBrowserCardStylesUnchanged: false }), /preexisting Browser Card/);
 });
 
 test('owned Browser fixture handler serves only one exact loopback GET with a persistent DOM marker', () => {
