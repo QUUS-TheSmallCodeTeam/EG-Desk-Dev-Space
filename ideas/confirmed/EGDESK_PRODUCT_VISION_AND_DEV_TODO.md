@@ -200,6 +200,7 @@ Viewport HUD should reflect the Board or maximized card currently in view. When 
 - [ ] Card placement policy: empty-space search, active Board placement, unsaved changes guard.
 - [ ] Canvas output follow-up mode: temporal/spatial steps, camera movement, annotations, and comment anchors.
 - [ ] AI canvas annotation mode: draw boxes/arrows/labels over cards or screenshots.
+- [ ] Add quiet, always-available CPU/RAM/disk/network monitoring with small circular indicators in EG-Desk; distinguish host/app scope, meaningful units, and stale/unavailable samples. [UX proposal](../../docs/references/design-synthesis/egdesk-ux-realization-proposals.md#ux-resource-monitor) · [Technical contract](./EGDESK_INTERACTION_AND_ORCHESTRATION_CONTRACT.md#impl-resource-monitor). Placement, default scope, sampling cadence, thresholds, and history retention remain unselected; not implemented.
 
 ### P1 - Chat UX
 

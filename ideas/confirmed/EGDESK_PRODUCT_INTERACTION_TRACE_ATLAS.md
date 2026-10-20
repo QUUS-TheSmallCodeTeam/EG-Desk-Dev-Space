@@ -76,6 +76,12 @@ Agent Runtime --request/tool intent--> System --validated UI/state change--> Des
   Canvas viewport 밖으로 pan됐다는 사실만으로 닫히거나 suspend되지는 않는다.
 - 앱 상단 바는 창의 위쪽 가장자리에 붙어 있다. 기존 창 이동·주소 입력 등 상단
   컨트롤은 그대로 쓰며, 빈 Canvas 드래그를 새 창 이동 조작으로 사용하지 않는다.
+- **자원 사용량 표시**는 CPU·RAM·디스크·네트워크의 상태를 작고 차분한 원형 지표로
+  화면에서 상시 확인할 수 있는 표시다. 작업 카드나 채팅 메시지와 구별되며, Canvas를 pan하거나
+  Browser 집중 보기로 전환해도 해당 작업의 화면을 떠날 필요 없이 확인할 수 있다.
+  원형 표시는 로딩 스피너가 아니며, 각 값의 측정 대상과 단위를 구별할 수 있어야 한다.
+  상세 조회와 배치 후보는 [자원 사용량 표시](../../docs/references/design-synthesis/egdesk-ux-realization-proposals.md#ux-resource-monitor),
+  측정의 의미는 [기술 계약](./EGDESK_INTERACTION_AND_ORCHESTRATION_CONTRACT.md#impl-resource-monitor)을 따른다.
 
 ### 0.2 사용설명서의 입력 표기법
 
