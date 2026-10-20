@@ -214,13 +214,23 @@ test('mounted HTTP Save As uses the actual native binary, preserves the original
   assert.equal(await readFile(path.join(h.root, 'native-copy.txt'), 'utf8'), text)
 })
 
-test('server mounts local file handler before generic/auth routes and checks Node before app state initialization', async () => {
+test('server mounts local file handler before generic/auth/context/chat/terminal routes and checks Node before app state initialization', async () => {
   const source = await readFile(new URL('./codex-bridge-server.mjs', import.meta.url), 'utf8')
-  const mount = source.indexOf('if (await localFiles.handle(req, res, url)) return')
-  assert.ok(mount > source.indexOf('if (!guardBridgeRequest(req, BRIDGE_PORT))'))
-  assert.ok(mount < source.indexOf("route === '/auth/start'"))
-  assert.ok(mount < source.indexOf('if (await handleContextHttp'))
-  assert.ok(mount < source.indexOf('if (await handleChatHttp'))
-  assert.ok(mount < source.indexOf('await readJsonBody(req)'))
-  assert.ok(source.indexOf('const nodeRuntime = requireEGDeskNodeRuntime()') < source.indexOf('const dataDir = appDataDirectory()'))
+  const marker = text => {
+    const index = source.indexOf(text)
+    assert.notEqual(index, -1, `missing server marker: ${text}`)
+    return index
+  }
+  const mount = marker('if (await localFiles.handle(req, res, url)) return')
+  assert.ok(marker('if (!guardBridgeRequest(req, BRIDGE_PORT))') < mount)
+  for (const route of [
+    'await readJsonBody(req,',
+    "route === '/auth/start'",
+    'if (await handleContextHttp(req, res, url)) return',
+    'if (await handleChatHttp(req, res, url)) return',
+    'if (await handleTerminalHttp(req, res, url)) return',
+  ]) {
+    assert.ok(mount < marker(route), `local file mount must precede ${route}`)
+  }
+  assert.ok(marker('const nodeRuntime = requireEGDeskNodeRuntime()') < marker('const dataDir = appDataDirectory()'))
 })

@@ -1,6 +1,6 @@
 import test from 'node:test'
 import assert from 'node:assert/strict'
-import { readFile, writeFile, mkdtemp, rm } from 'node:fs/promises'
+import { readFile, writeFile, mkdtemp, realpath, rm } from 'node:fs/promises'
 import { spawnSync } from 'node:child_process'
 import os from 'node:os'
 import path from 'node:path'
@@ -14,8 +14,9 @@ test('Windows native executable discovery respects Path and selects the executab
     const executable = path.join(dir, 'codex.exe')
     await writeFile(executable, 'public executable fixture', { mode: 0o700 })
     await writeFile(path.join(dir, 'codex.cmd'), 'not selected', { mode: 0o700 })
-    assert.equal(resolveCodexExecutable({ Path: dir }, { platform: 'win32' }), executable)
-    assert.equal(resolveCodexExecutable({ EGDESK_CODEX_BIN: executable, Path: '' }, { platform: 'win32' }), executable)
+    const canonicalExecutable = await realpath(executable)
+    assert.equal(resolveCodexExecutable({ Path: dir }, { platform: 'win32' }), canonicalExecutable)
+    assert.equal(resolveCodexExecutable({ EGDESK_CODEX_BIN: executable, Path: '' }, { platform: 'win32' }), canonicalExecutable)
     assert.throws(() => resolveCodexExecutable({ EGDESK_CODEX_BIN: 'relative/codex', Path: dir }, { platform: 'win32' }), /unavailable/)
   } finally {
     assert.equal(path.dirname(dir), os.tmpdir())
