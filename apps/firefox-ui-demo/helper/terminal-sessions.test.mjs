@@ -169,3 +169,38 @@ test('retained output is bounded and reports actual truncation', () => {
   assert.equal(result.outputTruncated, true)
   assert.equal(result.data, '3456')
 })
+
+test('stop acceptance fences later input and resize without inventing native exit', () => {
+  const registry = new TerminalSessionRegistry()
+  const process = register(registry)
+  let writes = 0, sizes = 0
+  process.write = () => { writes++ }
+  process.resize = () => { sizes++ }
+  registry.kill('terminal-1')
+  for (const result of [registry.write('terminal-1', 'must not run\r'), registry.resize('terminal-1', 100, 30)]) {
+    assert.equal(result.ok, false)
+    assert.equal(result.code, 'SESSION_STOPPING')
+    assert.equal(terminalResponseStatus(result), 409)
+    assert.equal(result.exitConfirmed, false)
+  }
+  assert.equal(writes, 0)
+  assert.equal(sizes, 0)
+  assert.equal(registry.active.size, 1)
+  process.exit(0)
+  assert.equal(registry.snapshot('terminal-1').exitConfirmed, true)
+})
+
+test('unknown native error cannot report successful later input or resize', () => {
+  const registry = new TerminalSessionRegistry()
+  const process = register(registry, new ChildProcess(), 'error-terminal', false)
+  let writes = 0
+  process.stdin.write = () => { writes++ }
+  process.emit('error', new Error('native process unavailable'))
+  for (const result of [registry.write('error-terminal', 'must not run'), registry.resize('error-terminal', 100, 30)]) {
+    assert.equal(result.ok, false)
+    assert.equal(result.status, 'UNKNOWN')
+    assert.equal(result.code, 'PROCESS_ERROR')
+    assert.equal(result.exitConfirmed, false)
+  }
+  assert.equal(writes, 0)
+})

@@ -1,12 +1,11 @@
 import test from 'node:test'
 import assert from 'node:assert/strict'
 import { Readable } from 'node:stream'
-import { mkdtemp, rm } from 'node:fs/promises'
-import os from 'node:os'
-import path from 'node:path'
+import { rm } from 'node:fs/promises'
 import { createChatHttpHandler, guardBridgeRequest, readJsonBody, setBridgeCors } from './codex-bridge-http.mjs'
 import { CodexChatRuntime } from './codex-chat-runtime.mjs'
 import { openChatStore } from './egdesk-chat-store.mjs'
+import { createPrivateQaTempDirectory } from '../scripts/egdesk-qa-platform.mjs'
 
 function request(body, headers = {}, url = '/chat/send') {
   const req = Readable.from([Buffer.from(body)])
@@ -106,7 +105,7 @@ test('bounded QA output markers and policy traverse the ordinary EG-Desk /chat/s
 test('native MCP inventory RPC diagnostics never escape QA HTTP, events or durable history, before or after thread/start', async () => {
   const sentinel = 'PRIVATE_MCP_RPC_SENTINEL_7f41ad98'
   for (const stage of ['before-thread', 'after-thread']) {
-    const dataDir = await mkdtemp(path.join(os.tmpdir(), 'egdesk-mcp-rpc-error-'))
+    const dataDir = createPrivateQaTempDirectory('egdesk-mcp-rpc-error-')
     let store = null
     try {
       store = openChatStore({ dataDir, ownerScope: `mcp-rpc-${stage}` })
@@ -296,7 +295,7 @@ test('HTTP explicit invalid cwd returns INVALID_CWD before auth lookup or a nati
 })
 
 test('real-store HTTP imports and reads local-only legacy text without native auth or IDs', async () => {
-  const dataDir = await mkdtemp(path.join(os.tmpdir(), 'egdesk-local-history-http-'))
+  const dataDir = createPrivateQaTempDirectory('egdesk-local-history-http-')
   let store = null
   try {
     store = openChatStore({ dataDir, ownerScope: 'local-http-test' })

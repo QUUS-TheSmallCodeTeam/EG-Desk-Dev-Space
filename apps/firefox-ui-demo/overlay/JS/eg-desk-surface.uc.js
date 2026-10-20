@@ -11787,7 +11787,9 @@
   const EGDESK_HELPER_PORT = 39218;
   const TERMINAL_HTML_URL = 'chrome://userchrome/content/terminal.html';
 
-  function spawnTerminalCard() {
+  function spawnTerminalCard(options = {}) {
+    const requestedShellId = typeof options?.shellId === 'string'
+      && /^[a-z][a-z0-9-]{0,31}$/.test(options.shellId) ? options.shellId : null;
     const id = `egd-terminal-card-${++cardSeq}`;
     const sourceRef = makeSourceRef('terminal-session', {
       id,
@@ -11856,7 +11858,7 @@
 
     // ---- Use iframe for terminal.html to isolate keyboard events ----
     const termBrowser = el('iframe', {
-      src: TERMINAL_HTML_URL,
+      src: requestedShellId ? TERMINAL_HTML_URL + '?shellId=' + encodeURIComponent(requestedShellId) : TERMINAL_HTML_URL,
       style: { width: '100%', height: '100%', border: '0', background: '#1a1a2e', display: 'block' },
     });
     body.appendChild(termBrowser);
@@ -11897,8 +11899,17 @@
     // 최초 연결 완료 시 자동 포커스 (terminal.html이 terminal-ready postMessage 발송)
     const onTerminalReady = (ev) => {
       if (ev.source !== termBrowser.contentWindow) return;
-      if (ev.data?.type === 'terminal-ready') focusTerminal();
-      if (['terminal-ready', 'terminal-exit-confirmed'].includes(ev.data?.type)
+      if (ev.data?.type === 'terminal-new-session') {
+        const shellId = ev.data.shellId;
+        if (typeof shellId === 'string' && /^[a-z][a-z0-9-]{0,31}$/.test(shellId)) spawnTerminalCard({ shellId });
+        return;
+      }
+      if (ev.data?.type === 'terminal-ready') {
+        const label = ev.data.shellLabel;
+        if (typeof label === 'string' && label.length <= 80) header.querySelector('.egd-terminal-title').textContent = '>_ ' + label;
+        focusTerminal();
+      }
+      if (['terminal-ready', 'terminal-exit-confirmed', 'terminal-no-session'].includes(ev.data?.type)
           && boardCloseRequests.has(card.dataset.projectionId)) {
         void completeAgendaClose({ projectionId: card.dataset.projectionId });
       }
@@ -11983,7 +11994,9 @@
       try {
         const contentWin = termBrowser.contentWindow || termBrowser.contentDocument?.defaultView;
         if (contentWin && contentWin.terminalAPI) {
-          contentWin.terminalAPI.kill();
+          void contentWin.terminalAPI.kill().catch(error => {
+            console.warn(TAG, 'terminal cleanup was not confirmed:', error);
+          });
         }
       } catch (e) {
         console.warn(TAG, 'terminal cleanup error:', e);

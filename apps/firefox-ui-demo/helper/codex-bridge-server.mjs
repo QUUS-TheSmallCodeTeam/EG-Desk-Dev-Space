@@ -9,7 +9,9 @@ import { fixtureBrowserQaFromEnv } from './codex-browser-fixture-qa.mjs'
 import { classifyPublicToolError } from './codex-tool-errors.mjs'
 import { createChatHttpHandler, guardBridgeRequest, readJsonBody, sendJson, setBridgeCors } from './codex-bridge-http.mjs'
 import { BoundedSseClient } from './codex-bridge-sse.mjs'
-import { TerminalSessionRegistry, terminalResponseStatus } from './terminal-sessions.mjs'
+import { TerminalSessionRegistry } from './terminal-sessions.mjs'
+import { createTerminalSessionFactory } from './terminal-platform.mjs'
+import { createTerminalHttpHandler } from './terminal-http.mjs'
 import { chatError, publicText } from './codex-chat-values.mjs'
 import { randomBytes } from 'node:crypto'
 import * as os from 'node:os'
@@ -453,83 +455,8 @@ try {
   }
 } catch {}
 
-async function createTerminalSession(cols = 80, rows = 24, shell = null) {
-  const sessionId = `term-${randomBytes(6).toString('hex')}`
-  const defaultShell = shell || process.env.SHELL || (os.platform() === 'darwin' ? '/bin/zsh' : '/bin/bash')
-
-  // 브리지가 GUI/백그라운드에서 뜨면 LANG/LC_*가 비어 PTY가 C 로케일이 된다 —
-  // zsh ZLE가 한글 등 멀티바이트 입력을 <0084> 식 바이트 조각으로 렌더링.
-  // UTF-8 로케일을 보장한다 (기존 UTF-8 설정은 존중).
-  const isUtf8 = (v) => typeof v === 'string' && /utf-?8/i.test(v)
-  const localeEnv = {
-    LANG: isUtf8(process.env.LANG) ? process.env.LANG : 'ko_KR.UTF-8',
-    LC_CTYPE: isUtf8(process.env.LC_CTYPE) ? process.env.LC_CTYPE
-      : (isUtf8(process.env.LANG) ? process.env.LANG : 'ko_KR.UTF-8'),
-  }
-
-  let ptyProcess = null
-  let usePty = false
-
-  try {
-    const nodePty = await import('node-pty')
-    ptyProcess = nodePty.default.spawn(defaultShell, [], {
-      name: 'xterm-256color',
-      cols,
-      rows,
-      cwd: os.homedir(),
-      env: {
-        ...process.env,
-        ...localeEnv,
-        TERM: 'xterm-256color',
-        COLORTERM: 'truecolor',
-      },
-    })
-    usePty = true
-  } catch (e) {
-    // Fallback: use child_process — 프롬프트/에코 없는 강등 모드이므로 반드시 원인 로깅
-    console.warn(`[terminal] node-pty not available, using child_process fallback: ${e?.message || e}`)
-    ptyProcess = spawn(defaultShell, [], {
-      cwd: os.homedir(),
-      env: {
-        ...process.env,
-        ...localeEnv,
-        TERM: 'dumb',
-        COLUMNS: String(cols),
-        LINES: String(rows),
-        ZDOTDIR: '/tmp/egdesk-zsh',
-        PS1: '\\n$ ',
-        PROMPT: '\\n$ ',
-      },
-      stdio: ['pipe', 'pipe', 'pipe'],
-      shell: false,
-    })
-  }
-
-  return terminalRegistry.register({
-    id: sessionId,
-    process: ptyProcess,
-    usePty,
-    shell: defaultShell,
-    cols,
-    rows,
-  })
-}
-
-function writeToTerminal(sessionId, data) {
-  return terminalRegistry.write(sessionId, data)
-}
-
-function readFromTerminal(sessionId) {
-  return terminalRegistry.read(sessionId)
-}
-
-function resizeTerminal(sessionId, cols, rows) {
-  return terminalRegistry.resize(sessionId, cols, rows)
-}
-
-function killTerminal(sessionId) {
-  return terminalRegistry.kill(sessionId)
-}
+const terminalFactory = createTerminalSessionFactory({ registry: terminalRegistry })
+const handleTerminalHttp = createTerminalHttpHandler({ registry: terminalRegistry, factory: terminalFactory, port: BRIDGE_PORT })
 
 const bridgeServer = createServer(async (req, res) => {
   if (!req.url) {
@@ -697,57 +624,7 @@ const bridgeServer = createServer(async (req, res) => {
   if (await handleChatHttp(req, res, url)) return
 
   // ── Terminal endpoints ──
-  if (req.method === 'POST' && route === '/terminal/spawn') {
-    try {
-      const body = await readJsonBody(req)
-      const session = await createTerminalSession(body.cols, body.rows, body.shell)
-      const result = terminalRegistry.snapshot(session.id)
-      sendJson(res, terminalResponseStatus(result), { ...result, shell: session.shell, cols: session.cols, rows: session.rows })
-    } catch (error) {
-      sendJson(res, 500, { error: publicText(error instanceof Error ? error.message : String(error), 2000) })
-    }
-    return
-  }
-  if (req.method === 'POST' && route === '/terminal/write') {
-    try {
-      const body = await readJsonBody(req)
-      const result = writeToTerminal(body.sessionId, body.data)
-      sendJson(res, terminalResponseStatus(result), result)
-    } catch (error) {
-      sendJson(res, 500, { error: publicText(error instanceof Error ? error.message : String(error), 2000) })
-    }
-    return
-  }
-  if (req.method === 'POST' && route === '/terminal/read') {
-    try {
-      const body = await readJsonBody(req)
-      const result = readFromTerminal(body.sessionId)
-      sendJson(res, terminalResponseStatus(result), result)
-    } catch (error) {
-      sendJson(res, 500, { error: publicText(error instanceof Error ? error.message : String(error), 2000) })
-    }
-    return
-  }
-  if (req.method === 'POST' && route === '/terminal/resize') {
-    try {
-      const body = await readJsonBody(req)
-      const result = resizeTerminal(body.sessionId, body.cols, body.rows)
-      sendJson(res, terminalResponseStatus(result), result)
-    } catch (error) {
-      sendJson(res, 500, { error: publicText(error instanceof Error ? error.message : String(error), 2000) })
-    }
-    return
-  }
-  if (req.method === 'POST' && route === '/terminal/kill') {
-    try {
-      const body = await readJsonBody(req)
-      const result = killTerminal(body.sessionId)
-      sendJson(res, terminalResponseStatus(result), result)
-    } catch (error) {
-      sendJson(res, 500, { error: publicText(error instanceof Error ? error.message : String(error), 2000) })
-    }
-    return
-  }
+  if (await handleTerminalHttp(req, res, url)) return
   sendJson(res, 404, { error: 'Not found' })
 })
 

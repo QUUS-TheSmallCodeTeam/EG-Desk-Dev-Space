@@ -23,6 +23,8 @@ This phase is not for expanding the product surface. It is for making the curren
 | Surface styles | `overlay/CSS/eg-desk-surface.uc.css` |
 | Codex bridge | `helper/codex-bridge-server.mjs` |
 | Terminal iframe | `overlay/resources/terminal.html` |
+| Terminal shell selection / HTTP contract | `helper/terminal-platform.mjs`, `helper/terminal-http.mjs` |
+| Windows per-session ConPTY driver | `helper/terminal-windows-process.mjs`, `helper/terminal-pty-worker.mjs` |
 | Rust helper candidate (not the active terminal route) | `helper-rust/` |
 | Repeatable scripts | `scripts/` |
 | Chat/canvas/agent UX model | `docs/CHAT_CANVAS_AGENT_LAYER_MODEL.md` |
@@ -133,8 +135,13 @@ Acceptance criteria:
 ### 3. Terminal / Helper Path
 
 The current local POC route is `terminal.html` through the Node bridge HTTP
-endpoints on `127.0.0.1:39218`, using `node-pty` when available and a
-`child_process` pipe fallback otherwise. The Rust/WebSocket `39300` route is
+endpoints on `127.0.0.1:39218`. On Windows, Node 24 and `node-pty` 1.1.0 use
+ConPTY in an owned per-session worker process; PowerShell is the default and
+CMD is selectable. Windows fails explicitly if ConPTY is unavailable rather
+than returning a limited pipe session as a successful terminal. POSIX retains
+the native PTY route with an explicitly limited `child_process` pipe fallback.
+Windows exit confirmation requires both a native shell `onExit` receipt and
+clean termination of that session's worker. The Rust/WebSocket `39300` route is
 historical candidate material, not an equal active product route. The Codex
 app-server on `127.0.0.1:39219` is a separate loopback dependency.
 
@@ -358,3 +365,50 @@ Observed on Windows / Firefox 158.0 / Node 24.19.0:
   account operations, navigation, submissions or the nine-case native negative
   acceptance. The existing `fullScenarioVerified` result must remain false while
   that negative adapter is unavailable.
+
+## Windows Terminal strengthening — 2026-10-20 (KST)
+
+- Windows selects normally installed PowerShell 7, otherwise OS Windows
+  PowerShell 5.1; CMD is an independent selectable Card. Shell commands retain
+  their own syntax. The developer tool's private bundled `pwsh` is not selected
+  just because it happens to precede system shells on PATH.
+- The active route remains Node HTTP plus `node-pty`/ConPTY, not Rust.
+  Each Windows terminal owns a separate Node worker so native driver residue
+  cannot accumulate in the long-lived Chat/HTTP bridge. Only native `onExit`
+  plus a clean worker close publishes `EXITED`; missing evidence stays unknown.
+- Windows PowerShell and CMD rebuild their child-only `PSModulePath`, avoiding
+  inherited PowerShell 7 module collisions through an intermediate Node host.
+  This follows Microsoft's [intermediate-process guidance](https://learn.microsoft.com/en-us/powershell/module/microsoft.powershell.core/about/about_psmodulepath).
+  No registry, persistent environment or execution-policy setting is changed.
+- UI input is serialized without replay, reconnect retains the known session,
+  and composition handling waits for native xterm input before a bounded fallback.
+  Definite rejection is separate from ambiguous startup; the latter cannot
+  silently spawn again or invent an empty-session close receipt.
+- The explicit `scripts/verify-windows-terminal.mjs --run` fixture passed on
+  this PC (Windows build 26200, Node 24.19.0, `node-pty` 1.1.0), using the actual
+  product HTTP handler/factory on an owned ephemeral loopback port. PowerShell
+  and CMD both executed constructed bare output markers, default-codepage Korean
+  text, DEL character deletion, native BS8 previous-word deletion and multiline
+  input. Actual Console dimensions changed from 80×24 to 103×31. Ctrl+C interrupted
+  a 30-second child operation and the same shell continued within one second.
+  Explicit `exit 0` and requested termination were independently verified for
+  each shell: four native/worker exit receipts, zero remaining owned sessions,
+  closed test HTTP server and natural verifier process exit code 0.
+- The PowerShell fixture sets no-save history at an owned path before interactive
+  input; those QA initialization arguments differ from the ordinary product
+  defaults. It does not start the normal bridge, invoke a model or touch the
+  running Firefox profile. Physical Windows keyboard/IME/clipboard input and
+  rendered Firefox Terminal Card verification remain unverified by this fixture.
+- Final relevant regression: 246 passed, zero failed/skipped (38 Terminal backend,
+  188 Terminal/surface frontend, 16 existing Chat HTTP, four proof-contract tests).
+  A follow-up OS process inventory found zero scoped Terminal worker or
+  `node-pty` console-list agent processes. One passing rerun emitted upstream
+  `AttachConsole failed` diagnostics from the library's console-list agents
+  during explicit termination; native shell exit and clean worker closure were
+  still independently observed. This intermittent diagnostic is retained as an
+  upstream stabilization limitation, not hidden or converted into exit evidence.
+- The running app/helper were not restarted. The normal Windows launcher copies
+  current overlay resources when its profile is closed, but reuses an existing
+  owned bridge without comparing source hashes. Applying this backend requires
+  safely restarting the dedicated bridge as well as the EG-Desk Firefox instance;
+  no new installation is needed.
