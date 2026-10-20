@@ -5,14 +5,23 @@ import { bootstrapQaProfile } from './egdesk-chat-qa-profile.mjs';
 try {
   const args = process.argv.slice(2);
   let deskRecovery = null;
-  if (args.length) {
-    if (args.length !== 2 || args[0] !== '--desk-recovery' || !['corrupt', 'partial'].includes(args[1])) {
-      throw new Error('Usage: node bootstrap-egdesk-chat-test-profile.mjs [--desk-recovery corrupt|partial]');
+  let loaderSource = process.env.EGDESK_QA_LOADER_SOURCE;
+  const seen = new Set();
+  for (let i = 0; i < args.length; i += 2) {
+    const name = args[i], value = args[i + 1];
+    if (!['--loader-source', '--desk-recovery'].includes(name) || !value || seen.has(name)) {
+      throw new Error('Usage: node bootstrap-egdesk-chat-test-profile.mjs [--loader-source absolute-directory] [--desk-recovery corrupt|partial]');
     }
-    if (process.env.EGDESK_QA_STATE_FIXTURES !== '1') throw new Error('Recovery fixtures require EGDESK_QA_STATE_FIXTURES=1');
-    deskRecovery = args[1];
+    seen.add(name);
+    if (name === '--loader-source') loaderSource = value;
+    else {
+      if (!['corrupt', 'partial'].includes(value)) throw new Error('Unknown recovery fixture');
+      if (process.env.EGDESK_QA_STATE_FIXTURES !== '1') throw new Error('Recovery fixtures require EGDESK_QA_STATE_FIXTURES=1');
+      deskRecovery = value;
+    }
   }
-  const result = bootstrapQaProfile({ deskRecovery });
+  if (process.platform === 'win32' && !loaderSource) throw new Error('Windows QA requires --loader-source or EGDESK_QA_LOADER_SOURCE');
+  const result = bootstrapQaProfile({ deskRecovery, ...(loaderSource ? { loaderSource } : {}) });
   process.stdout.write(`${JSON.stringify(result)}\n`);
 } catch (error) {
   console.error(error.message);

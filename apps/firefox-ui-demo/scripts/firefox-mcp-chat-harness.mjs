@@ -2,11 +2,14 @@ import fs from 'node:fs';
 import path from 'node:path';
 import { spawn } from 'node:child_process';
 import { assertQaProfile, canonicalTempRoot } from './egdesk-chat-qa-profile.mjs';
+import { createPrivateQaTempDirectory, isOwnedAndPrivate } from './egdesk-qa-platform.mjs';
 
 // Fixed, already-cached executable: no npx, install, or package resolution.
 // Main starts and stops Firefox and the bridge separately.
-export const CACHED_MCP_ENTRY = '/Users/minsoocha/.npm/_npx/96bbc051a9e217ad/node_modules/@mozilla/firefox-devtools-mcp-moz/dist.moz/index.js';
-export const CACHED_GECKODRIVER = '/Users/minsoocha/.cache/selenium/geckodriver/mac-arm64/0.37.0/geckodriver';
+export const CACHED_MCP_ENTRY = process.env.EGDESK_QA_MCP_ENTRY || (process.platform === 'darwin'
+  ? '/Users/minsoocha/.npm/_npx/96bbc051a9e217ad/node_modules/@mozilla/firefox-devtools-mcp-moz/dist.moz/index.js' : null);
+export const CACHED_GECKODRIVER = process.env.EGDESK_QA_GECKODRIVER || (process.platform === 'darwin'
+  ? '/Users/minsoocha/.cache/selenium/geckodriver/mac-arm64/0.37.0/geckodriver' : null);
 export const QA_MARIONETTE_PORT = 2829;
 
 // 2829 remains the chat QA default. Main may explicitly select the separately
@@ -56,12 +59,7 @@ export function chooseNativeScrollKey({ scrollTop, scrollHeight, clientHeight })
 }
 
 export function createQaEvidenceDirectory() {
-  const created = fs.mkdtempSync(path.join(canonicalTempRoot(), 'egdesk-chat-evidence-'));
-  const canonical = fs.realpathSync.native(created);
-  if (canonical !== created || path.dirname(canonical) !== canonicalTempRoot()) {
-    throw new Error('QA evidence directory is not a canonical temp child');
-  }
-  fs.chmodSync(canonical, 0o700);
+  const canonical = createPrivateQaTempDirectory('egdesk-chat-evidence-');
   return assertQaEvidenceDirectory(canonical);
 }
 
@@ -70,8 +68,8 @@ export function assertQaEvidenceDirectory(directory) {
     throw new Error('QA evidence directory must be absolute');
   }
   const info = fs.lstatSync(directory);
-  if (!info.isDirectory() || info.isSymbolicLink() || info.uid !== process.getuid() ||
-      (info.mode & 0o022) !== 0 || fs.realpathSync.native(directory) !== directory ||
+  if (!info.isDirectory() || info.isSymbolicLink() || !isOwnedAndPrivate(directory, info) ||
+      fs.realpathSync.native(directory) !== directory ||
       path.dirname(directory) !== canonicalTempRoot() ||
       !path.basename(directory).startsWith('egdesk-chat-evidence-')) {
     throw new Error('QA evidence directory must be a safe canonical temp directory');
@@ -105,9 +103,17 @@ export class FirefoxMcpChatHarness {
   constructor({ profile, marionettePort = resolveQaMarionettePort() }) {
     this.#profile = assertQaProfile(profile);
     this.#port = resolveQaMarionettePort(marionettePort);
-    const info = fs.statSync(CACHED_MCP_ENTRY);
-    if (!info.isFile()) throw new Error('Cached Firefox MCP entry is not a file');
-    if (!fs.statSync(CACHED_GECKODRIVER).isFile()) throw new Error('Cached geckodriver is missing; downloads are disabled');
+    for (const [file, label] of [[CACHED_MCP_ENTRY, 'EGDESK_QA_MCP_ENTRY'],
+      [CACHED_GECKODRIVER, 'EGDESK_QA_GECKODRIVER']]) {
+      if (typeof file !== 'string' || !path.isAbsolute(file) || /[\r\n]/.test(file)
+          || !fs.lstatSync(file).isFile() || fs.lstatSync(file).isSymbolicLink()
+          || fs.realpathSync.native(file) !== file) {
+        throw new Error(`${label} must name an explicit canonical installed file; automatic downloads are disabled`);
+      }
+    }
+    if (path.basename(CACHED_GECKODRIVER) !== (process.platform === 'win32' ? 'geckodriver.exe' : 'geckodriver')) {
+      throw new Error('Installed geckodriver has an unexpected executable name');
+    }
     fs.accessSync(CACHED_GECKODRIVER, fs.constants.X_OK);
     this.#evidenceDir = createQaEvidenceDirectory();
   }
@@ -121,12 +127,17 @@ export class FirefoxMcpChatHarness {
     if (this.#proc) throw new Error('MCP transport already connected');
     assertQaProfile(this.#profile);
     assertQaEvidenceDirectory(this.#evidenceDir);
+    const childEnv = { ...process.env };
+    const pathKeys = Object.keys(childEnv).filter(key => key.toUpperCase() === 'PATH');
+    const inheritedPath = childEnv[pathKeys[0]] || '';
+    for (const key of pathKeys) delete childEnv[key];
+    childEnv.PATH = `${path.dirname(CACHED_GECKODRIVER)}${path.delimiter}${inheritedPath}`;
     this.#proc = spawn(process.execPath, [
       CACHED_MCP_ENTRY, '--connectExisting', '--marionettePort', String(this.#port),
       '--enablePrivilegedContext', '--enableScript',
-    ], { cwd: this.#evidenceDir, stdio: ['pipe', 'pipe', 'pipe'],
+    ], { cwd: this.#evidenceDir, stdio: ['pipe', 'pipe', 'pipe'], windowsHide: true,
       // The cached MCP otherwise downloads geckodriver when discovery fails.
-      env: { ...process.env, PATH: `${path.dirname(CACHED_GECKODRIVER)}${path.delimiter}${process.env.PATH || ''}` },
+      env: childEnv,
     });
     this.#proc.stdout.on('data', (chunk) => this.#handleOutput(chunk));
     this.#proc.stderr.on('data', (chunk) => { this.#stderr = (this.#stderr + chunk).slice(-8000); });
@@ -332,7 +343,7 @@ export class FirefoxMcpChatHarness {
     // The cached MCP permits that without --unrestricted-save-paths.
     await this.#call('screenshot_page', { saveTo: `${name}.png` }, 45000);
     const info = fs.lstatSync(target);
-    if (!info.isFile() || info.isSymbolicLink() || info.uid !== process.getuid() ||
+    if (!info.isFile() || info.isSymbolicLink() || !isOwnedAndPrivate(target, info) ||
         fs.realpathSync.native(target) !== target) throw new Error('Screenshot is not a canonical owned file');
     const header = Buffer.alloc(8);
     const descriptor = fs.openSync(target, 'r');

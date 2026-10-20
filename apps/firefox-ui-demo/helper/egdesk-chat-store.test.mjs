@@ -1,12 +1,21 @@
 import test from 'node:test'
 import assert from 'node:assert/strict'
-import { mkdtempSync, readdirSync, readFileSync, rmSync, statSync, writeFileSync } from 'node:fs'
+import { chmodSync, mkdtempSync, readdirSync, readFileSync, realpathSync, rmSync, statSync, writeFileSync } from 'node:fs'
+import { execFileSync } from 'node:child_process'
 import os from 'node:os'
 import path from 'node:path'
 import { DatabaseSync } from 'node:sqlite'
-import { openChatStore } from './egdesk-chat-store.mjs'
+import { openChatStore as openNativeChatStore } from './egdesk-chat-store.mjs'
+import { createPrivateQaTempDirectory } from '../scripts/egdesk-qa-platform.mjs'
+import { isOwnedAndPrivate } from './egdesk-private-files.mjs'
 
 const T = 1_800_000_000_000
+const fixtureStores = new Map()
+function openChatStore(options) {
+  const store = openNativeChatStore(options)
+  fixtureStores.get(options.dataDir)?.push(store)
+  return store
+}
 const userMessage = (text = 'Hello') => ({ id: 'native-user-1', messageId: 'native-user-1', role: 'user', text, phase: null, status: 'complete', clientId: 'request-1', contextRefs: ['ctx-1'] })
 const assistantMessage = (text, status = 'streaming') => ({ id: 'native-assistant-1', messageId: 'native-assistant-1', role: 'assistant', text, phase: null, status, completionConfirmed: status === 'complete', sourceRefs: [{ packetId: 'packet-1' }] })
 const publicRun = (text, status = 'inProgress') => ({
@@ -21,8 +30,18 @@ const publicRun = (text, status = 'inProgress') => ({
 })
 
 function fixture(t) {
-  const dataDir = mkdtempSync(path.join(os.tmpdir(), 'egdesk-chat-test-'))
-  t.after(() => rmSync(dataDir, { recursive: true, force: true }))
+  const dataDir = createPrivateQaTempDirectory('egdesk-chat-store-test-')
+  const handles = []
+  fixtureStores.set(dataDir, handles)
+  t.after(() => {
+    // Windows cannot remove a live SQLite database. Close every fixture handle
+    // (including reopen tests) before removing this exact owned directory.
+    for (const store of handles) store.close()
+    fixtureStores.delete(dataDir)
+    assert.equal(realpathSync.native(dataDir), dataDir)
+    assert.match(path.basename(dataDir), /^egdesk-chat-store-test-/)
+    rmSync(dataDir, { recursive: true, force: true })
+  })
   return dataDir
 }
 function opened(t, scope = 'desktop/profile-a') {
@@ -61,11 +80,25 @@ test('accepted user message and request fingerprint commit together and survive 
   assert.throws(() => store.listEvents('client-1'), { code: 'STORE_CLOSED' })
   const filename = readdirSync(dataDir).find(name => name.endsWith('.sqlite'))
   assert.ok(filename.startsWith('chat-') && !filename.includes('profile-a'))
-  assert.equal(statSync(path.join(dataDir, filename)).mode & 0o077, 0)
+  assert.equal(isOwnedAndPrivate(path.join(dataDir, filename), statSync(path.join(dataDir, filename)), 0o077), true)
   const raw = new DatabaseSync(path.join(dataDir, filename))
   assert.equal(raw.prepare('PRAGMA journal_mode').get().journal_mode, 'wal')
   assert.equal(raw.prepare('PRAGMA user_version').get().user_version, 1)
   raw.close()
+})
+
+test('an unsafe existing database is refused without tightening permissions or changing content', t => {
+  const { dataDir, store } = opened(t)
+  conversation(store)
+  store.close()
+  const filename = path.join(dataDir, readdirSync(dataDir).find(name => name.endsWith('.sqlite')))
+  const before = readFileSync(filename)
+  if (process.platform === 'win32') execFileSync('icacls.exe', [filename, '/grant', '*S-1-5-32-545:(W)'], { windowsHide: true, stdio: 'pipe' })
+  else chmodSync(filename, 0o666)
+  assert.equal(isOwnedAndPrivate(filename, statSync(filename), 0o077), false)
+  assert.throws(() => openChatStore({ dataDir, ownerScope: 'desktop/profile-a' }), { code: 'INVALID_STORE_SCOPE' })
+  assert.equal(isOwnedAndPrivate(filename, statSync(filename), 0o077), false)
+  assert.deepEqual(readFileSync(filename), before)
 })
 
 test('full public run checkpoint projects ordered messages, preserves partial/final text and indexed refs', t => {

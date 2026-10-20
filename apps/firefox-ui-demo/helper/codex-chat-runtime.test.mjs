@@ -1,6 +1,6 @@
 import test from 'node:test'
 import assert from 'node:assert/strict'
-import { mkdtemp, writeFile, chmod, symlink, rm, realpath } from 'node:fs/promises'
+import { mkdtemp, writeFile, chmod, symlink, rm, realpath, mkdir } from 'node:fs/promises'
 import os from 'node:os'
 import path from 'node:path'
 import { createHash } from 'node:crypto'
@@ -10,6 +10,7 @@ import { ContextRuntime } from './egdesk-context-runtime.mjs'
 import { inspectNativeCapabilities } from './egdesk-native-capabilities.mjs'
 import { openChatStore } from './egdesk-chat-store.mjs'
 import { explicitFileLinks, publicText, verifyLocalFile } from './codex-chat-values.mjs'
+import { createPrivateQaTempDirectory } from '../scripts/egdesk-qa-platform.mjs'
 
 function harness(override = {}) {
   const calls = [], events = [], legacy = [], replies = []
@@ -385,6 +386,73 @@ test('Browser specs are pre-registered so a later selected Card uses the same na
   assert.equal(h.replies[1][2].code, -32601)
 })
 
+function selectedBrowserTurnFixture() {
+  const actions = []
+  const transport = { runs: new Map(), hasClient: id => id === 'selected-ui',
+    bindRun() {}, unbindRun() {}, reset() {} }
+  const service = {
+    prepare: ({ selectedSources }) => ({ cards: new Map(selectedSources.map(source => [source.sourceRef.viewId,
+      { cardId: source.sourceRef.viewId, sourceId: source.id, cardEpoch: source.browserToolIdentity.cardEpoch,
+        permission: source.browserToolPermission }])) }),
+    bind: async (_run, prepared) => ({ cards: [...prepared.cards.values()] }),
+    dispatch: async (run, event) => { actions.push({ runId: run.runId, tool: event.tool });
+      return { status: 'postcondition-observed', cardId: 'selected-card', action: 'click',
+        postcondition: { matched: true }, externalEffectVerified: false } },
+    cancelRun: async () => [], reset: async () => [],
+  }
+  const provider = createCodexBrowserToolProvider({ transport, service, getOwnerKey: () => 'codex:account-selected' })
+  const source = { id: 'selected-source', kind: 'browser', selectedByUser: true, browserToolPermission: 'interact',
+    sourceRef: { viewId: 'selected-card', uri: 'https://example.test/owned-page' },
+    browserToolIdentity: { cardEpoch: 'selected-epoch' },
+    browserToolSelection: { token: 'one-time-selected-token', threadId: 'selected-chat' } }
+  return { provider, source, actions }
+}
+
+test('selected Browser interaction belongs to one native run despite inherited safe thread policy', async () => {
+  const f = selectedBrowserTurnFixture(), h = qaHarness({ toolProviders: [f.provider] })
+  const first = await h.chat.send({ message: 'Click only this selected Card', clientThreadId: 'selected-chat',
+    executionPolicy: { mode: 'browserBounded' }, selectedSources: [f.source], browserTransportId: 'selected-ui' })
+  assert.deepEqual(h.calls.find(call => call.method === 'thread/start').params.dynamicTools.map(spec => spec.name),
+    ['egdesk_browser_observe', 'egdesk_browser_click', 'egdesk_browser_fill'])
+  assert.equal(first.executionPolicy.browserEffects, 'selected-card-observe-click-fill-this-run')
+  assert.equal(h.chat.threads.get(first.conversationId).qaReceipt.browserEffects, 'observe-only-selected-card')
+  assert.deepEqual(h.calls.find(call => call.method === 'turn/start').params.sandboxPolicy,
+    { type: 'readOnly', networkAccess: false })
+  await h.chat.handleServerRequest({ id: 'selected-click', method: 'item/tool/call', params: {
+    threadId: first.conversationId, turnId: first.runId, callId: 'click-1', tool: 'egdesk_browser_click',
+    arguments: { cardId: 'selected-card' } } })
+  assert.equal(h.replies.at(-1)[1].success, true)
+  assert.equal(f.actions.length, 1)
+  await h.finish(first)
+  const later = await h.chat.send({ message: 'Continue without selecting a Browser',
+    clientThreadId: 'selected-chat', conversationId: first.conversationId })
+  assert.equal(later.executionPolicy.mode, 'browserBounded')
+  assert.equal(later.executionPolicy.browserEffects, 'observe-only-selected-card')
+  assert.equal(h.chat.snapshot(later.conversationId).runs.at(-1).browserBinding, undefined)
+  for (const tool of ['egdesk_browser_observe', 'egdesk_browser_click', 'egdesk_browser_fill', 'egdesk_browser_navigate']) {
+    await h.chat.handleServerRequest({ id: `later-${tool}`, method: 'item/tool/call', params: {
+      threadId: later.conversationId, turnId: later.runId, callId: `call-${tool}`, tool,
+      arguments: { cardId: 'selected-card' } } })
+    assert.equal(h.replies.at(-1)[2].code, -32601)
+  }
+  assert.equal(f.actions.length, 1)
+})
+
+test('an observe-only native catalog cannot silently gain click/fill through a later UI selection', async () => {
+  const f = selectedBrowserTurnFixture(), h = qaHarness({ toolProviders: [f.provider] })
+  const first = await h.chat.send({ message: 'Start an observe-only native catalog',
+    clientThreadId: 'selected-chat', executionPolicy: { mode: 'browserBounded' } })
+  assert.deepEqual(h.calls.find(call => call.method === 'thread/start').params.dynamicTools.map(spec => spec.name),
+    ['egdesk_browser_observe'])
+  await h.finish(first)
+  const count = h.calls.filter(call => call.method === 'turn/start').length
+  await assert.rejects(h.chat.send({ message: 'Try to add interaction later', clientThreadId: 'selected-chat',
+    conversationId: first.conversationId, selectedSources: [f.source], browserTransportId: 'selected-ui' }),
+  error => error.code === 'BROWSER_TOOLS_UNAVAILABLE' && /explicit new Chat/.test(error.message))
+  assert.equal(h.calls.filter(call => call.method === 'turn/start').length, count)
+  assert.equal(f.actions.length, 0)
+})
+
 test('older ordinary thread with a persisted Browser catalog keeps history but never grants a live actor', async () => {
   const browserCalls = []
   const browser = { providerId: 'egdesk-browser',
@@ -452,7 +520,7 @@ test('fixtureBrowserQa cannot upgrade an ordinary native thread with a broader p
 })
 
 test('durable QA policy survives a fresh runtime and is reverified before its next provider turn', async () => {
-  const dataDir = await mkdtemp(path.join(os.tmpdir(), 'egdesk-qa-policy-store-'))
+  const dataDir = createPrivateQaTempDirectory('egdesk-qa-policy-store-')
   let store = null
   try {
     store = openChatStore({ dataDir, ownerScope: 'local-desktop-qa-test' })
@@ -490,7 +558,7 @@ test('durable QA policy survives a fresh runtime and is reverified before its ne
 })
 
 test('durably owned active QA turn rehydrates its restrictive guard and declines native approval after restart', async () => {
-  const dataDir = await mkdtemp(path.join(os.tmpdir(), 'egdesk-active-qa-guard-'))
+  const dataDir = createPrivateQaTempDirectory('egdesk-active-qa-guard-')
   let store = null
   try {
     store = openChatStore({ dataDir, ownerScope: 'active-qa-test' })
@@ -527,7 +595,7 @@ test('durably owned active QA turn rehydrates its restrictive guard and declines
 })
 
 test('Browser registration survives a bridge restart, while pre-Browser native history is not silently replaced', async () => {
-  const dataDir = await mkdtemp(path.join(os.tmpdir(), 'egdesk-browser-registration-'))
+  const dataDir = createPrivateQaTempDirectory('egdesk-browser-registration-')
   let store = null
   try {
     store = openChatStore({ dataDir, ownerScope: 'browser-registration-test' })
@@ -577,7 +645,7 @@ test('Browser registration survives a bridge restart, while pre-Browser native h
 })
 
 test('restored native tool name cannot be reassigned to a different provider identity', async () => {
-  const dataDir = await mkdtemp(path.join(os.tmpdir(), 'egdesk-tool-owner-manifest-'))
+  const dataDir = createPrivateQaTempDirectory('egdesk-tool-owner-manifest-')
   let store = null
   try {
     store = openChatStore({ dataDir, ownerScope: 'tool-owner-test' })
@@ -1063,7 +1131,7 @@ test('file-change events are activities, not automatic deliverable cards', async
   const h = harness({ verifyFile: async file => file })
   const run = await h.chat.send({ message: 'Work' })
   await h.item(run, { id: 'file', type: 'fileChange', status: 'completed', changes: [{ path: 'src/main.mjs', kind: { type: 'update' }, diff: 'do not expose' }] })
-  assert.equal(h.chat.snapshot().runs[0].activities[0].sourceRefs[0].target.path, '/work/src/main.mjs')
+  assert.equal(h.chat.snapshot().runs[0].activities[0].sourceRefs[0].target.path, path.resolve('/work/src/main.mjs'))
   assert.deepEqual(h.chat.snapshot().runs[0].artifacts, [])
 })
 
@@ -1072,12 +1140,26 @@ test('artifact path verification rejects URLs, scripts, executable files, secret
   t.after(() => rm(directory, { recursive: true, force: true }))
   const report = path.join(directory, 'report.txt')
   const script = path.join(directory, 'run.sh')
-  const executable = path.join(directory, 'executable.txt')
+  // Windows executable identity is extension-based; POSIX also checks mode bits.
+  const executable = path.join(directory, process.platform === 'win32' ? 'executable.exe' : 'executable.txt')
   const secret = path.join(directory, '.env')
-  const alias = path.join(directory, 'alias.txt')
+  let alias = path.join(directory, 'alias.txt')
   await Promise.all([writeFile(report, 'report'), writeFile(script, 'echo secret'), writeFile(executable, 'data'), writeFile(secret, 'secret')])
-  await chmod(executable, 0o755)
-  await symlink(script, alias)
+  if (process.platform !== 'win32') await chmod(executable, 0o755)
+  try {
+    await symlink(script, alias)
+  } catch (error) {
+    if (process.platform !== 'win32' || error.code !== 'EPERM') throw error
+    // Directory junctions do not require Developer Mode. A safe-looking path
+    // resolving into a protected directory must still fail canonical validation.
+    const sensitive = path.join(directory, '.ssh')
+    const junction = path.join(directory, 'linked-source')
+    await mkdir(sensitive)
+    await writeFile(path.join(sensitive, 'notes.txt'), 'private fixture')
+    await symlink(sensitive, junction, 'junction')
+    alias = path.join(junction, 'notes.txt')
+    t.diagnostic('File symlink privilege unavailable; unsafe target checked through a Windows junction')
+  }
   assert.equal(await verifyLocalFile(report, { artifact: true }), await realpath(report))
   for (const file of [script, executable, secret, alias, 'https://example.com/a.txt', 'file:///tmp/a.txt', '//host/a.txt', 'relative.txt', directory]) assert.equal(await verifyLocalFile(file, { artifact: true }), null, file)
   assert.deepEqual(explicitFileLinks('plain /tmp/a.txt [label] [url](file:///tmp/a.txt)'), [])
@@ -1177,7 +1259,7 @@ test('file approval shows proposed new paths without presenting them as existing
   await h.item(run, { id: 'new-file', type: 'fileChange', status: 'inProgress', changes: [{ path: 'new-report.md', kind: { type: 'add' }, diff: 'private diff' }] }, false)
   await h.chat.handleServerRequest({ id: 'file-approval', method: 'item/fileChange/requestApproval', params: { threadId: run.conversationId, turnId: run.runId, itemId: 'new-file' } })
   const state = h.chat.snapshot().runs[0]
-  assert.deepEqual(state.pendingApprovals[0].paths, ['/work/new-report.md'])
+  assert.deepEqual(state.pendingApprovals[0].paths, [path.resolve('/work/new-report.md')])
   assert.deepEqual(state.activities[0].sourceRefs, [])
   assert.deepEqual(state.artifacts, [])
 })
@@ -1601,7 +1683,7 @@ test('stored native owner mismatch blocks resume before any provider call', asyn
 })
 
 test('real SQLite store captures a full turn, serves offline history and dedupes send after reopen', async () => {
-  const dataDir = await mkdtemp(path.join(os.tmpdir(), 'egdesk-runtime-store-'))
+  const dataDir = createPrivateQaTempDirectory('egdesk-runtime-store-')
   let store = null
   try {
     store = openChatStore({ dataDir, ownerScope: 'local-desktop-test' })

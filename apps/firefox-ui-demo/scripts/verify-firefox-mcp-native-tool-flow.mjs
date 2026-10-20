@@ -74,6 +74,32 @@ export function parseCases(value) {
   return cases;
 }
 
+export function assertQaExecutionMode(cases, env = process.env) {
+  if (cases.includes('browser-negative')) {
+    assert.deepEqual(cases, ['browser-negative'], 'Browser simulator probes must run separately from provider cases');
+    assert.equal(env.EGDESK_QA_BROWSER_NEGATIVE, '1', 'explicit EGDESK_QA_BROWSER_NEGATIVE=1 is required');
+    assert.equal(env.EGDESK_QA_FIXTURE_TRANSPORT, '1', 'model-free Browser probes require the explicit fixture backend');
+    assert.ok(typeof env.EGDESK_QA_FIXTURE_TOKEN === 'string' && env.EGDESK_QA_FIXTURE_TOKEN.length >= 16,
+      'a fixture backend token is required');
+  } else {
+    assert.equal(env.EGDESK_QA_REAL_TURN, '1', 'explicit real-turn gate is required');
+    assert.notEqual(env.EGDESK_QA_FIXTURE_TRANSPORT, '1', 'fixture transport is forbidden for provider cases');
+  }
+}
+
+export function assertNegativeFixtureBackend(profile, health, state) {
+  assert.equal(health?.ok, true, 'Browser probe fixture backend is unavailable');
+  assert.equal(health?.fixture, true, 'model-free probes refuse a production backend');
+  assert.equal(state?.fixture, true, 'Browser probes lack authenticated fixture control evidence');
+  assert.equal(state?.profile, profile, 'fixture backend belongs to another Firefox profile');
+  for (const key of ['sends', 'authWrites']) {
+    assert.ok(Array.isArray(state.observed?.[key]) && state.observed[key].length === 0,
+      `model-free Browser probes require zero fixture ${key}`);
+  }
+  assert.ok(Array.isArray(state.runs) && state.runs.length === 0, 'model-free Browser probes created a Chat run');
+  return { fixture: true, profile, sends: 0, authWrites: 0, runs: 0, providerTurns: 0 };
+}
+
 export function parseResumeEmptyThreadId(value, cases) {
   if (value == null) return null;
   assert.ok(typeof value === 'string' && /^thread-dm-[a-z0-9]{7}$/.test(value),
@@ -189,12 +215,15 @@ export function assertPreparedSourceResumeEvidence({ observed, expected, stored,
 export function scenarioCoverage(requestedCases, completedCases) {
   assert.ok(Array.isArray(requestedCases) && Array.isArray(completedCases), 'case coverage needs explicit lists');
   const selectedCasesVerified = requestedCases.every(item => completedCases.includes(item));
-  // Browser negative probes are explicitly test-only, never native-model proof.
-  const fullScenarioVerified = selectedCasesVerified
-    && QA_CASES.every(item => requestedCases.includes(item))
-    && !requestedCases.includes('browser-negative');
+  // A separately selected synthetic Browser probe is not native-model proof.
+  // The stronger native-model Browser negative adapter is still unavailable,
+  // so even all three positive model cases leave that explicit evidence gap.
+  const missingEvidence = QA_CASES.filter(item => item !== 'browser-negative'
+    && !completedCases.includes(item)).map(item => `native-model-${item}`);
+  missingEvidence.push('native-model-browser-negative');
+  const fullScenarioVerified = selectedCasesVerified && missingEvidence.length === 0;
   return { selectedCasesVerified, fullScenarioVerified,
-    coverage: fullScenarioVerified ? 'full' : 'partial' };
+    coverage: fullScenarioVerified ? 'full' : 'partial', missingEvidence };
 }
 
 export function chooseChatProxyTarget(proxies, activeCardId = null) {
@@ -914,7 +943,9 @@ export function assertUiQaRequest(emitted, { cwd, clientThreadId, conversationId
 
 // This is request reflection, not a permission grant. A/B's final UI routing
 // must put these exact bounded fields on the ordinary rendered Chat send.
-export function assertBrowserUiRequest(reflection, { cwd, clientThreadId, conversationId = null, selection }) {
+export function assertBrowserUiRequest(reflection, { cwd, clientThreadId, conversationId = null, selection,
+  expectedPolicyMode = 'fixtureBrowserQa' }) {
+  assert.ok(['fixtureBrowserQa', 'browserBounded'].includes(expectedPolicyMode), 'unsupported Browser proof policy');
   assert.equal(reflection?.forwardedToOriginalFetch, true,
     'Browser request was not forwarded through the original Chat fetch');
   assert.equal(reflection?.route, 'http://127.0.0.1:39218/chat/send',
@@ -929,8 +960,16 @@ export function assertBrowserUiRequest(reflection, { cwd, clientThreadId, conver
   assert.deepEqual(reflection?.personaFields, [], 'Browser QA request includes persona fields');
   assert.equal(reflection?.conversationId || null, conversationId,
     'Browser QA request targets another native conversation');
-  assert.equal(reflection?.executionPolicy?.mode, 'fixtureBrowserQa',
+  assert.equal(reflection?.executionPolicy?.mode, expectedPolicyMode,
     'Browser write action lacks A bounded native execution policy');
+  if (expectedPolicyMode === 'browserBounded') {
+    assert.deepEqual(reflection.executionPolicy, { mode: 'browserBounded' },
+      'ordinary Browser UI did not emit its exact bounded policy');
+    assert.equal(reflection.requestBodyUnmodified, true,
+      'ordinary Browser proof requires an unmodified original fetch body');
+    assert.equal(reflection.qaCommandNonce || null, null, 'ordinary Browser request used a QA command nonce');
+    assert.deepEqual(reflection.qaOutputMarkers || [], [], 'ordinary Browser request used QA output markers');
+  }
   assert.ok(typeof reflection?.browserTransportId === 'string' && reflection.browserTransportId,
     'Browser QA request has no live UI transport binding');
   assert.equal(reflection?.selectedSources?.length, 1, 'Browser QA request must select exactly one card');
@@ -983,15 +1022,18 @@ async function browserRootSseReceiptBeforeTurn(harness, deadlineMs) {
         stable: status.stable === true,
         eventSourceReadyState: status.eventSourceReadyState,
         browserTransportId: status.browserTransportId || null,
-        sampledAtMs: status.sampledAtMs };
+        sampledAtMs: status.sampledAtMs, checkedAtMs: Date.now() };
     });
   }, value => value?.sourceReady === true && value.stable === true
     && value.eventSourceReadyState === 1 && typeof value.browserTransportId === 'string'
     && !!value.browserTransportId && Number.isFinite(value.sampledAtMs)
-    && value.sampledAtMs <= Date.now()
-    && Date.now() - value.sampledAtMs <= 5000,
-  { timeoutMs: 15000, intervalMs: 200 });
-  assertFreshBrowserRootSse({ ready });
+    && Number.isFinite(value.checkedAtMs) && value.checkedAtMs <= Date.now()
+    && value.sampledAtMs <= value.checkedAtMs
+    && value.checkedAtMs - value.sampledAtMs <= 5000,
+  { timeoutMs: 30000, intervalMs: 200 });
+  // Compare clocks at the observation, not after Windows ACL/MCP round trips.
+  // The original product fetch independently rechecks freshness and identity.
+  assertFreshBrowserRootSse({ ready, now: ready.checkedAtMs });
   return ready;
 }
 
@@ -1091,12 +1133,13 @@ export function assertBrowserFocusOwnership({ before, preSendFocus, atFetch, aft
 }
 
 export function assertBrowserPositiveFlow({ run, events, active, emitted, preSendFocus, cwd,
-  selection, fixture, target, control, before, after }) {
+  selection, fixture, target, control, before, after, expectedPolicyMode = 'fixtureBrowserQa' }) {
+  assert.ok(['fixtureBrowserQa', 'browserBounded'].includes(expectedPolicyMode), 'unsupported Browser proof policy');
   assertObservedRunChain({ run, events, active });
   assertBrowserFixtureConfig(fixture?.url, fixture?.marker);
   assert.equal(run.cwdPublic, cwd, 'Browser native run uses another QA cwd');
   const policy = run.executionPolicy;
-  assert.equal(policy?.mode, 'fixtureBrowserQa', 'positive Browser run lacks fixture QA policy');
+  assert.equal(policy?.mode, expectedPolicyMode, 'positive Browser run lacks the expected bounded policy');
   assert.equal(policy?.status, 'native-thread-verified', 'Browser native policy was not verified');
   assert.equal(policy?.sandbox, 'readOnly', 'Browser native sandbox is not read-only');
   assert.equal(policy?.networkAccess, false, 'Browser native network is not disabled');
@@ -1104,7 +1147,16 @@ export function assertBrowserPositiveFlow({ run, events, active, emitted, preSen
   assert.equal(policy?.externalMcpCatalog, 'empty', 'Browser run exposes external MCP tools');
   assert.ok(Number.isSafeInteger(policy?.inspectedMcpServers) && policy.inspectedMcpServers >= 0,
     'Browser native MCP catalog inspection count is missing');
-  assert.equal(policy?.browserEffects, 'attested-local-fixture-only', 'Browser effect scope is not the attested fixture');
+  if (expectedPolicyMode === 'browserBounded') {
+    assert.equal(policy.browserEffects, 'selected-card-observe-click-fill-this-run',
+      'ordinary Browser effect scope is not the selected one-run grant');
+    assert.deepEqual(emitted?.executionPolicy, { mode: 'browserBounded' },
+      'ordinary Browser UI did not emit its exact bounded policy');
+    assert.equal(emitted?.requestBodyUnmodified, true,
+      'ordinary Browser proof requires an unmodified original fetch body');
+  } else {
+    assert.equal(policy?.browserEffects, 'attested-local-fixture-only', 'Browser effect scope is not the attested fixture');
+  }
   assert.equal(selection?.selectedByUser, true, 'Browser Card was not explicitly selected');
   assert.equal(selection?.permission, 'interact', 'Browser Card lacks an interaction grant');
   assert.equal(selection?.cardId, target.cardId, 'Browser selection targeted another Card');
@@ -1206,6 +1258,10 @@ export function assertBrowserPositiveFlow({ run, events, active, emitted, preSen
   return { cardId: selection.cardId, sourceId: selection.sourceId,
     inputSnapshotId: snapshotId, itemIds: calls.map(call => call.itemId),
     publicModelToolReceiptsVerified: true, independentLocalDomVerified: true,
+    expectedPolicyMode, requestBodyUnmodified: expectedPolicyMode === 'browserBounded'
+      && emitted.requestBodyUnmodified === true,
+    ordinaryUiRequestUnmodified: expectedPolicyMode === 'browserBounded'
+      && emitted.requestBodyUnmodified === true,
     independentActorDocumentRevisionVerified: true,
     modelActionGuardRevisionPubliclyVerified: false,
     inputFocusedAfter: after.targetInputFocused === true,
@@ -1213,13 +1269,67 @@ export function assertBrowserPositiveFlow({ run, events, active, emitted, preSen
     negativeGuardsVerified: false, externalEffectVerified: false };
 }
 
-// Integration seam B/Main: issue only owned QA fixture guard probes against
-// the selected Card after its native run is stopped/cancelled. Capture live UI
-// request IDs, status, actor-dispatch counter and before/after DOM. B's pure
-// tests do not substitute for these live receipts.
-async function browserNegativeGuardReceipts(_harness, _run, _selection) {
-  throw new Error('live B DOM/viewport/expiry/cancel guard receipt adapter is not wired');
+export function assertBrowserRenderedAnswer({ run, rendered, threadId, fixture }) {
+  assert.equal(run?.status, 'completed', 'rendered Browser answer has no completed native run');
+  const candidates = (run.messages || []).filter(message => message.role === 'assistant'
+    && message.status === 'complete' && typeof message.text === 'string' && message.text.trim());
+  const final = candidates.filter(message => message.phase === 'final_answer').at(-1) || candidates.at(-1);
+  assert.ok(typeof final?.id === 'string' && final.id, 'completed native Browser answer has no item ID');
+  assert.ok(final.text.includes(fixture.marker), 'completed native Browser answer omitted the fixture marker');
+  assert.equal(rendered?.activeThreadId, threadId, 'rendered Browser answer is in another Chat thread');
+  assert.equal(rendered?.conversationId, run.conversationId, 'rendered Browser answer is in another conversation');
+  const row = rendered.rows?.find(item => item.role === 'assistant'
+    && item.runId === run.runId && item.nativeItemId === final.id);
+  assert.ok(row, 'native final Browser answer has no run-bound rendered Chat row');
+  assert.equal(row.status, 'complete', 'rendered Browser answer is still incomplete');
+  assert.equal(row.stateText, final.text, 'rendered Browser answer state differs from the native final item');
+  assert.equal(row.visible, true, 'native Browser answer is not visible in the rendered Chat');
+  assert.ok(typeof row.text === 'string' && row.text.includes(fixture.marker),
+    'visible Browser answer omitted the fixture marker');
+  return { renderedFinalAnswerVerified: true, finalNativeItemId: final.id,
+    renderedMessageId: row.messageId, renderedThreadId: threadId,
+    renderedConversationId: run.conversationId };
 }
+
+async function renderedBrowserAnswer(harness, thread, run, fixture, deadlineMs) {
+  const sample = await waitUntil(async () => {
+    assertBeforeDeadline(deadlineMs);
+    return chrome(harness, ({ threadId, runId }) => {
+      const codex = window.__egdesk?.state?.codex;
+      const current = codex?.threads?.find(item => item.id === threadId);
+      const log = [...document.querySelectorAll('.egd-codex-messages')]
+        .find(node => node.dataset.threadId === threadId);
+      const intersects = (a, b) => a.width > 0 && a.height > 0 && b.width > 0 && b.height > 0
+        && a.left < b.right && a.right > b.left && a.top < b.bottom && a.bottom > b.top;
+      const viewport = { left: 0, top: 0, right: window.innerWidth, bottom: window.innerHeight,
+        width: window.innerWidth, height: window.innerHeight };
+      const rows = log ? [...log.querySelectorAll('[data-testid="chat-message"][data-role="assistant"]')]
+        .filter(row => row.dataset.runId === runId).map(row => {
+          const local = current?.messages?.find(message => message.id === row.dataset.messageId);
+          const content = row.querySelector('.egd-codex-bubble-content');
+          const rowRect = row.getBoundingClientRect(), logRect = log.getBoundingClientRect();
+          const style = getComputedStyle(row);
+          return { messageId: row.dataset.messageId, runId: row.dataset.runId,
+            nativeItemId: local?.providerItemId || local?.messageId || local?.id || null,
+            role: row.dataset.role, status: local?.status || null,
+            stateText: local?.content ?? local?.text ?? null,
+            text: content?.innerText || '',
+            visible: row.isConnected && !row.hidden && style.display !== 'none'
+              && style.visibility !== 'hidden' && intersects(rowRect, logRect) && intersects(rowRect, viewport) };
+        }) : [];
+      return { activeThreadId: codex?.activeThreadId || null,
+        conversationId: current?.conversationId || null, rows };
+    }, { threadId: thread.id, runId: run.runId });
+  }, value => {
+    try { assertBrowserRenderedAnswer({ run, rendered: value, threadId: thread.id, fixture }); return true; }
+    catch { return false; }
+  }, { timeoutMs: 15000, intervalMs: 200 });
+  return assertBrowserRenderedAnswer({ run, rendered: sample, threadId: thread.id, fixture });
+}
+
+// Native-model negative-guard receipts are not wired. The separately selected
+// browser-negative scenario exercises synthetic B runs against the owned live
+// UI/actor; it cannot satisfy assertBrowserNegativeGuards or native coverage.
 
 async function reflectedOrdinaryRequest(harness, thread, cwd, sourceIds = [], { allowExisting = false } = {}) {
   return chrome(harness, ({ threadId, cwd, sourceIds, allowExisting }) => {
@@ -1255,8 +1365,9 @@ async function reflectedOrdinaryRequest(harness, thread, cwd, sourceIds = [], { 
   }, { threadId: thread.id, cwd, sourceIds, allowExisting });
 }
 
-async function installQaSendInterceptor(harness, expected) {
-  return chrome(harness, expected => {
+// Self-contained for chrome() serialization and a fake-window unit check of
+// original fetch argument identity. This exports QA code, not a product API.
+export function installQaSendWitness(expected) {
     if (window.__egdeskQaSendInterceptor) throw new Error('QA Chat fetch interceptor is already installed');
     const route = 'http://127.0.0.1:39218/chat/send';
     const original = window.fetch;
@@ -1272,6 +1383,8 @@ async function installQaSendInterceptor(harness, expected) {
         throw new Error('Native QA requires two distinct bounded output markers before original fetch');
       }
       if (init?.method !== 'POST' || typeof init.body !== 'string') throw new Error('QA Chat send has an unknown request shape');
+      const originalBody = init.body;
+      const unmodifiedBrowserWitness = expected.policyMode === 'browserBounded';
       let body;
       try { body = JSON.parse(init.body); } catch { throw new Error('QA Chat send body is not JSON'); }
       if (!body || typeof body !== 'object' || Array.isArray(body) ||
@@ -1357,9 +1470,24 @@ async function installQaSendInterceptor(harness, expected) {
           && JSON.stringify(body.qaOutputMarkers) !== JSON.stringify(expected.qaOutputMarkers)) {
         throw new Error('QA Chat request has conflicting output markers');
       }
-      body.executionPolicy = { mode: expected.policyMode };
-      if (expected.qaOutputMarkers.length) body.qaOutputMarkers = [...expected.qaOutputMarkers];
+      if (unmodifiedBrowserWitness) {
+        if (!expected.selectedCardId || expected.qaOutputMarkers.length
+            || Object.hasOwn(body, 'qaCommandNonce') || Object.hasOwn(body, 'qaOutputMarkers')) {
+          throw new Error('Ordinary Browser witness requires one selected Card and no QA receipt fields');
+        }
+        if (!body.executionPolicy || Object.keys(body.executionPolicy).length !== 1
+            || body.executionPolicy.mode !== 'browserBounded') {
+          throw new Error('Ordinary Browser UI must emit browserBounded before original fetch; witness will not inject it');
+        }
+        if (init.body !== originalBody) throw new Error('Ordinary Browser request body changed during observation');
+      } else {
+        // Native/source QA retains the existing explicit bounded-policy
+        // instrumentation. It must not be counted as an ordinary UI witness.
+        body.executionPolicy = { mode: expected.policyMode };
+        if (expected.qaOutputMarkers.length) body.qaOutputMarkers = [...expected.qaOutputMarkers];
+      }
       const snapshot = { route, forwardedToOriginalFetch: true, requestId: body.requestId,
+        requestBodyUnmodified: unmodifiedBrowserWitness && init.body === originalBody,
         clientThreadId: body.clientThreadId, conversationId: body.conversationId || null,
         cwd: body.cwd, profileEnabled: body.profileEnabled, personaFields: [],
         messageMatched: body.message === expected.message,
@@ -1386,6 +1514,7 @@ async function installQaSendInterceptor(harness, expected) {
           tokenThreadId: source.browserToolSelection?.threadId || null })) };
       state.used = true;
       state.snapshot = snapshot;
+      if (unmodifiedBrowserWitness) return original.call(window, input, init);
       return original.call(window, input, { ...init, body: JSON.stringify(body) });
     };
     state.wrapper = wrapper;
@@ -1396,7 +1525,10 @@ async function installQaSendInterceptor(harness, expected) {
       throw new Error('QA Chat fetch could not be instrumented');
     }
     return true;
-  }, expected);
+}
+
+async function installQaSendInterceptor(harness, expected) {
+  return chrome(harness, installQaSendWitness, expected);
 }
 
 const observedQaSend = harness => chrome(harness, () => window.__egdeskQaSendInterceptor?.snapshot || null);
@@ -1428,6 +1560,15 @@ async function observedChatProxies(harness) {
 
 async function ensureVisibleChatComposer(harness, deadlineMs) {
   assertBeforeDeadline(deadlineMs);
+  // A nonzero rectangle does not mean a Card is clickable: Browser fixtures
+  // may overlap Chat. Raise the owned Chat Card before native UI interaction.
+  // This is setup only, before the model's focus-preservation baseline.
+  await chrome(harness, () => {
+    const api = window.__egdesk;
+    const card = document.getElementById(api?.state?.codex?.chatCardEntityId);
+    if (card?.classList.contains('egd-chat-card')) api.cardRuntime.focusCard(card);
+    return true;
+  });
   const visibleInput = async () => (await harness.inspect('.egd-codex-input'))
     .some(item => item.visible);
   if (await visibleInput()) return;
@@ -1732,7 +1873,8 @@ async function completedUiRun(harness, thread, prompt, deadlineMs, {
       { timeoutMs: 10000, intervalMs: 100 });
     if (browserSelection) {
       assertBrowserUiRequest(emitted, { cwd,
-        clientThreadId: thread.wireClientThreadId, conversationId, selection: browserSelection });
+        clientThreadId: thread.wireClientThreadId, conversationId, selection: browserSelection,
+        expectedPolicyMode: policyMode });
       assertFreshBrowserRootSse({ ready: browserRootReady, emitted });
     }
     else assertUiQaRequest(emitted, { cwd, clientThreadId: thread.wireClientThreadId,
@@ -1842,6 +1984,14 @@ async function createBrowserCards(harness, fixtureUrl, deadlineMs) {
 
 async function selectBrowserInteraction(harness, thread, cardId, deadlineMs) {
   assertBeforeDeadline(deadlineMs);
+  // Opening Chat can cover the fixture Card again. Foreground only the owned
+  // target before using its real menu; never click through an overlapping view.
+  await chrome(harness, cardId => {
+    const card = document.getElementById(cardId);
+    if (!card?.classList.contains('egd-browser-card')) throw new Error('QA Browser target is unavailable');
+    window.__egdesk.cardRuntime.focusCard(card);
+    return true;
+  }, cardId);
   // B's UI menu is the explicit client permission path. Direct mutation of
   // inputSources or a helper request cannot substitute for this selection.
   await harness.click(`${selectorForId(cardId)} .egd-card-menu`);
@@ -1909,6 +2059,7 @@ const NEGATIVE_PROBE_NAMES = Object.freeze([
   'stale-revision-before-ui', 'forbidden-scheme-before-ui',
   'stale-dom-at-actor', 'resized-viewport-at-actor',
   'observe-only-interaction-denied', 'stop-before-first-bind-accept',
+  'expired-request-before-actor', 'cancel-before-act',
 ]);
 
 export function assertBrowserNegativeProbeResults(proof) {
@@ -1918,6 +2069,11 @@ export function assertBrowserNegativeProbeResults(proof) {
   assert.equal(proof?.providerTurns, 0, 'synthetic Browser probes started a provider turn');
   assert.equal(proof?.actorPhysicalDispatchCounterVerified, false,
     'negative probes cannot claim an unpublished physical-dispatch counter');
+  assert.equal(proof?.actorPerformCounterVerified, true, 'live actor perform-entry counter was not verified');
+  const control = proof.actorPerformPositiveControl;
+  assert.ok(control?.cardId === proof.cardId && typeof control.actorDocumentId === 'string'
+    && Number.isSafeInteger(control.before) && control.before >= 0 && control.after === control.before + 1,
+  'live actor counter lacks its controlled positive action');
   assert.deepEqual((proof?.probes || []).map(item => item.name), NEGATIVE_PROBE_NAMES,
     'bounded Browser negative probes are incomplete');
   assert.ok(proof.probes.every(item => item.denied === true
@@ -1928,7 +2084,36 @@ export function assertBrowserNegativeProbeResults(proof) {
     && typeof item.syntheticRunId === 'string'
     && item.syntheticRunId.startsWith('qa-browser-simulator-')),
   'Browser negative probe lacks an owned-Card denial and independent no-effect check');
-  const [revision, scheme, dom, resize, permission, stop] = proof.probes;
+  for (const item of proof.probes) {
+    assert.equal(item.actorDocumentId, control.actorDocumentId, `${item.name} crossed actor documents`);
+    assert.ok(Number.isSafeInteger(item.actorPerformCallsBefore) && item.actorPerformCallsBefore >= 0,
+      `${item.name} has no live before counter`);
+    assert.equal(item.actorPerformCallsAfter, item.actorPerformCallsBefore, `${item.name} entered the actor perform dispatcher`);
+    assert.ok(item.beforeAttempt && item.afterAttempt, `${item.name} lacks independent fixture observations`);
+    assert.equal(item.beforeAttempt.documentId, item.actorDocumentId, `${item.name} before observation crossed documents`);
+    assert.equal(item.afterAttempt.documentId, item.actorDocumentId, `${item.name} after observation crossed documents`);
+    assert.equal(item.beforeAttempt.actorPerformCalls, item.actorPerformCallsBefore, `${item.name} before counter differs from the observation`);
+    assert.equal(item.afterAttempt.actorPerformCalls, item.actorPerformCallsAfter, `${item.name} after counter differs from the observation`);
+    assert.deepEqual(item.afterAttempt, item.beforeAttempt, `${item.name} changed the independently observed fixture`);
+    assert.ok(Array.isArray(item.uiRequests) && item.uiRequests.length > 0, `${item.name} has no live UI protocol receipts`);
+    for (const request of item.uiRequests) {
+      assert.ok(typeof request.requestId === 'string' && request.requestId
+        && request.responseRequestId === request.requestId
+        && request.runId === item.syntheticRunId && request.cardId === proof.cardId
+        && request.targetCardEpoch === item.cardEpoch
+        && Number.isFinite(request.attemptedAt) && request.respondedAt >= request.attemptedAt
+        && ['bound', 'observed', 'rejected', 'cancelled'].includes(request.status),
+      `${item.name} UI receipt lost request/run/Card correlation`);
+    }
+    const acts = item.uiRequests.filter(request => request.kind === 'act');
+    const expectedActs = item.uiProtocolActRequests ?? item.uiActRequests ?? 0;
+    assert.equal(acts.length, expectedActs, `${item.name} UI act receipt count differs from its claim`);
+    assert.ok(acts.every(request => request.status === 'rejected' && typeof request.error === 'string' && request.error),
+      `${item.name} has no actual rejected UI act receipt`);
+    if (item.uiRequestId) assert.ok(acts.some(request => request.requestId === item.uiRequestId),
+      `${item.name} rejected UI request ID is not in its trace`);
+  }
+  const [revision, scheme, dom, resize, permission, stop, expired, cancelled] = proof.probes;
   assert.ok(revision.code === 'BROWSER_OBSERVATION_STALE' && revision.uiActRequests === 0
     && scheme.code === 'INVALID_BROWSER_TOOL' && scheme.serviceActRequests === 0
     && scheme.uiProtocolDenied === true
@@ -1939,6 +2124,21 @@ export function assertBrowserNegativeProbeResults(proof) {
     && ['BROWSER_BINDING_STALE', 'BROWSER_RUN_ENDED'].includes(stop.code)
     && stop.cancelledBeforeBindAccepted === true && stop.uiActRequests === 0,
   'Browser negative probe receipts do not match the scoped B/UI guard outcomes');
+  assert.ok(expired.code === null && expired.uiStatus === 'rejected'
+    && /expired/i.test(expired.uiReason) && expired.requestDeadlineMs <= expired.attemptedAt
+    && expired.uiRequests.some(item => item.requestId === expired.uiRequestId && item.status === 'rejected'
+      && item.kind === 'act' && item.deadlineMs === expired.requestDeadlineMs),
+  'expired request lacks a correlated actual UI denial');
+  assert.ok(cancelled.code === 'BROWSER_RUN_ENDED' && cancelled.uiStatus === 'rejected'
+    && /cancelled/i.test(cancelled.uiReason) && cancelled.serviceActRequestsAfterCancel === 0
+    && cancelled.cancelReceipt?.status === 'cancelled'
+    && cancelled.cancelReceipt.runId === cancelled.syntheticRunId && cancelled.cancelReceipt.cardId === proof.cardId
+    && cancelled.cancelReceipt.at <= cancelled.attemptedAt
+    && cancelled.uiRequests.some(item => item.kind === 'cancel' && item.requestId === cancelled.cancelReceipt.requestId
+      && item.status === 'cancelled' && item.respondedAt === cancelled.cancelReceipt.at)
+    && cancelled.uiRequests.some(item => item.requestId === cancelled.uiRequestId && item.status === 'rejected'
+      && item.kind === 'act' && item.deadlineMs > item.attemptedAt),
+  'cancelled request lacks its earlier owned cancellation and actual UI denial');
   assert.equal(proof.requestsScopedToOwnedCard, true,
     'negative probes targeted a Card other than the newly owned fixture');
   assert.equal(proof.preexistingBrowserCardStylesUnchanged, true,
@@ -1950,8 +2150,12 @@ export function assertBrowserNegativeProbeResults(proof) {
 
 const probeId = prefix => `${prefix}-${randomBytes(8).toString('hex')}`;
 
+export function browserViewportChanged(before, after) {
+  return Boolean(before && after && ['width', 'height', 'devicePixelRatio'].some(key => before[key] !== after[key]));
+}
+
 async function ownedNegativeBrowserSnapshot(harness, cardId, ownerTag, fixture) {
-  const observed = await chrome(harness, async ({ cardId, ownerTag }) => {
+  const observed = await chrome(harness, async ({ cardId, ownerTag, fixture }) => {
     const card = document.getElementById(cardId);
     if (!card?.isConnected || !card.classList?.contains('egd-browser-card')
         || card.dataset.egdeskQaNegativeOwner !== ownerTag) {
@@ -1959,11 +2163,12 @@ async function ownedNegativeBrowserSnapshot(harness, cardId, ownerTag, fixture) 
     }
     const binding = card._browserControls.toolBinding();
     const snapshot = await card._browserControls.toolObserve(binding,
-      { textLimit: 80, elementLimit: 80 });
+      { textLimit: 80, elementLimit: 80,
+        qaDiagnostics: { fixtureUrl: fixture.url, fixtureMarker: fixture.marker } });
     return { binding, snapshot,
       inputValue: snapshot.interactiveElements?.find(item => item.label === 'QA note')?.value || '',
       cardStyle: { width: card.style.width, height: card.style.height } };
-  }, { cardId, ownerTag });
+  }, { cardId, ownerTag, fixture });
   assert.equal(observed.binding?.cardId, cardId, 'negative probe Card binding changed');
   assert.equal(observed.binding?.accountId, '', 'negative probe Card is account-linked');
   assert.equal(observed.snapshot?.cardId, cardId, 'negative probe actor observed another Card');
@@ -1973,6 +2178,11 @@ async function ownedNegativeBrowserSnapshot(harness, cardId, ownerTag, fixture) 
   assert.ok(Number.isSafeInteger(observed.snapshot.revision)
     && typeof observed.snapshot.documentId === 'string' && observed.snapshot.documentId
     && observed.snapshot.viewport, 'negative probe actor lacks document/revision/viewport evidence');
+  const diagnostic = observed.snapshot.qaDiagnostics;
+  assert.equal(diagnostic?.kind, 'actor-perform-entry', 'owned fixture lacks the live actor perform-entry diagnostic');
+  assert.equal(diagnostic.actorDocumentId, observed.snapshot.documentId, 'actor diagnostic belongs to another document');
+  assert.ok(Number.isSafeInteger(diagnostic.performCalls) && diagnostic.performCalls >= 0,
+    'invalid actor perform-entry counter');
   return observed;
 }
 
@@ -1983,7 +2193,20 @@ function assertNegativeNoEffect(before, after, label) {
   assert.deepEqual(after.snapshot.text, before.snapshot.text,
     `${label} changed the fixture visible DOM`);
   assert.equal(after.inputValue, before.inputValue, `${label} changed the harmless fixture input`);
-  return true;
+  const oldCounter = before.snapshot.qaDiagnostics, newCounter = after.snapshot.qaDiagnostics;
+  assert.equal(oldCounter?.kind, 'actor-perform-entry', `${label} has no before actor counter`);
+  assert.equal(newCounter?.kind, 'actor-perform-entry', `${label} has no after actor counter`);
+  assert.equal(oldCounter.actorDocumentId, before.snapshot.documentId, `${label} before diagnostic crossed documents`);
+  assert.equal(newCounter.actorDocumentId, after.snapshot.documentId, `${label} after diagnostic crossed documents`);
+  assert.ok(Number.isSafeInteger(oldCounter.performCalls) && oldCounter.performCalls >= 0, `${label} before counter is invalid`);
+  assert.equal(newCounter.performCalls, oldCounter.performCalls, `${label} entered the actor perform dispatcher`);
+  const observed = value => ({ url: value.snapshot.url, documentId: value.snapshot.documentId,
+    revision: value.snapshot.revision, viewport: value.snapshot.viewport, text: value.snapshot.text,
+    inputValue: value.inputValue, actorPerformCalls: value.snapshot.qaDiagnostics.performCalls });
+  const beforeAttempt = observed(before), afterAttempt = observed(after);
+  assert.deepEqual(afterAttempt, beforeAttempt, `${label} changed the independently observed fixture`);
+  return { beforeAttempt, afterAttempt, actorDocumentId: oldCounter.actorDocumentId,
+    actorPerformCallsBefore: oldCounter.performCalls, actorPerformCallsAfter: newCounter.performCalls };
 }
 
 async function selectOwnedProbeSource(harness, thread, cardId, ownerTag, permission, fixture) {
@@ -2034,9 +2257,18 @@ async function newNegativeService(harness, thread, cardId, source, deadlineMs,
       'negative probe requested another Chat thread');
     assert.equal(request.targetCardEpoch, source.browserToolIdentity.cardEpoch,
       'negative probe crossed Card epochs');
-    const response = await chrome(harness,
-      request => window.__egdesk.browserAgentTools.dispatch(request), request);
+    const sampled = await chrome(harness, async request => {
+      const attemptedAt = Date.now();
+      const response = await window.__egdesk.browserAgentTools.dispatch(request);
+      return { attemptedAt, respondedAt: Date.now(), response };
+    }, request);
+    const response = sampled.response;
+    assert.equal(response?.requestId, request.requestId, 'negative UI response belongs to another request');
     trace.requests.push({ kind: request.kind, requestId: request.requestId,
+      responseRequestId: response.requestId, runId: request.runId,
+      clientThreadId: request.clientThreadId, cardId: request.cardId,
+      targetCardEpoch: request.targetCardEpoch, deadlineMs: request.deadlineMs,
+      attemptedAt: sampled.attemptedAt, respondedAt: sampled.respondedAt,
       status: response?.status || null, error: String(response?.error || '').slice(0, 200) });
     if (request.kind === 'bind' && response?.binding) trace.binding = response.binding;
     return response;
@@ -2072,6 +2304,12 @@ async function runBrowserNegativeProbes(harness, fixture, deadlineMs, result) {
   assert.equal(typeof bService.createBrowserToolService, 'function',
     'current B Browser tool service is unavailable; no UI probes started');
   await assertBrowserFixtureServerReady(fixture);
+  // Explicit fixture setup before the camera baseline. The first-use focused
+  // Browser intentionally hides the Desk dock; this is not a model action.
+  result.browserNegativeDeskSetup = await chrome(harness, () => ({
+    enteredDesk: window.__egdesk.surface.enterDesk(),
+    initialBrowserFocus: window.__egdesk.state.surface.initialBrowserFocus,
+  }));
   const initial = await chrome(harness, () => ({
     cards: [...document.querySelectorAll('.egd-browser-card')].map(card =>
       ({ id: card.id, style: card.style.cssText })).sort((a, b) => a.id.localeCompare(b.id)),
@@ -2098,6 +2336,7 @@ async function runBrowserNegativeProbes(harness, fixture, deadlineMs, result) {
     pan: { ...window.__egdesk.state.panTarget }, zoom: window.__egdesk.state.zoomTarget,
   }));
   const probes = [];
+  let actorPerformPositiveControl = null;
   result.browserNegativeProbeReceipts = probes;
   const bound = async permission => {
     assertBeforeDeadline(deadlineMs);
@@ -2147,12 +2386,17 @@ async function runBrowserNegativeProbes(harness, fixture, deadlineMs, result) {
       postcondition: { kind: 'target-value', value: text } };
   };
   const actCount = unit => unit.trace.requests.filter(item => item.kind === 'act').length;
-  const directUiAct = (unit, action, guard) => unit.uiDispatch({
+  const directUiAct = (unit, action, guard, { deadlineMs = Date.now() + 15000 } = {}) => unit.uiDispatch({
     version: 1, requestId: probeId('qa-ui-negative'),
     runId: unit.run.runId, clientThreadId: unit.run.clientThreadId,
     cardId, targetCardEpoch: unit.source.browserToolIdentity.cardEpoch,
-    deadlineMs: Date.now() + 15000, kind: 'act', binding: unit.trace.binding,
+    deadlineMs, kind: 'act', binding: unit.trace.binding,
     action, guard,
+  });
+  const guardFromObserved = (observed, target) => ({
+    documentId: observed.snapshot.documentId, revision: observed.snapshot.revision,
+    viewport: observed.snapshot.viewport, url: observed.snapshot.url,
+    focusedRef: observed.snapshot.focusedElement?.ref || null, ...(target ? { target } : {}),
   });
   const actorDenial = unit => {
     const denied = unit.trace.requests.filter(item => item.kind === 'act').at(-1);
@@ -2165,6 +2409,7 @@ async function runBrowserNegativeProbes(harness, fixture, deadlineMs, result) {
     cardId, sourceId: unit.source.id,
     cardEpoch: unit.source.browserToolIdentity.cardEpoch,
     syntheticRunId: unit.run.runId,
+    uiRequests: unit.trace.requests.map(item => ({ ...item })),
     denied: true, ownedFixtureContentUnchangedAfterDeniedAction: true,
     simulatorOnly: true, ...extra });
 
@@ -2182,9 +2427,9 @@ async function runBrowserNegativeProbes(harness, fixture, deadlineMs, result) {
       arguments: { ...args, expectedRevision: args.expectedRevision + 1 },
     }), ['BROWSER_OBSERVATION_STALE'], 'stale-revision probe');
     assert.equal(actCount(unit), beforeActs, 'stale revision reached the UI actor');
-    assertNegativeNoEffect(baseline,
+    const revisionUnchanged = assertNegativeNoEffect(baseline,
       await ownedNegativeBrowserSnapshot(harness, cardId, ownerTag, fixture), 'stale revision');
-    record('stale-revision-before-ui', code, unit, { uiActRequests: 0,
+    record('stale-revision-before-ui', code, unit, { ...revisionUnchanged, uiActRequests: 0,
       observedRevision: observed.snapshot.revision });
 
     for (const url of ['javascript:alert(1)', 'data:text/html,qa', 'file:///qa-denied']) {
@@ -2206,10 +2451,10 @@ async function runBrowserNegativeProbes(harness, fixture, deadlineMs, result) {
     assert.equal(uiScheme?.status, 'rejected', 'actual UI accepted a forbidden navigation scheme');
     assert.match(String(uiScheme.error || ''), /http|navigation/i,
       'actual UI scheme denial has no bounded reason');
-    assertNegativeNoEffect(baseline,
+    const schemeUnchanged = assertNegativeNoEffect(baseline,
       await ownedNegativeBrowserSnapshot(harness, cardId, ownerTag, fixture), 'forbidden schemes');
     record('forbidden-scheme-before-ui', 'INVALID_BROWSER_TOOL', unit,
-      { serviceActRequests: 0, uiProtocolActRequests: 1, uiProtocolDenied: true,
+      { ...schemeUnchanged, serviceActRequests: 0, uiProtocolActRequests: 1, uiProtocolDenied: true,
         deniedSchemes: ['javascript:', 'data:', 'file:'] });
   } finally { await cancel(unit); }
 
@@ -2222,6 +2467,7 @@ async function runBrowserNegativeProbes(harness, fixture, deadlineMs, result) {
     const inputArgs = fillArgs(observed, 'QA_STALE_DOM_MUST_NOT_FILL');
     const button = observed.snapshot.interactiveElements.find(item => item.label === 'Reveal QA details');
     assert.ok(button?.ref && button.tag === 'button', 'owned fixture button was not observed');
+    const setupBefore = await ownedNegativeBrowserSnapshot(harness, cardId, ownerTag, fixture);
     const setup = await chrome(harness, ({ cardId, ownerTag, ref }) => {
       const card = document.getElementById(cardId);
       if (!card?.isConnected || card.dataset.egdeskQaNegativeOwner !== ownerTag)
@@ -2230,6 +2476,11 @@ async function runBrowserNegativeProbes(harness, fixture, deadlineMs, result) {
     }, { cardId, ownerTag, ref: button.ref });
     assert.equal(setup?.ok, true, 'controlled fixture-only DOM mutation did not execute');
     const changed = await ownedNegativeBrowserSnapshot(harness, cardId, ownerTag, fixture);
+    assert.equal(setupBefore.snapshot.documentId, changed.snapshot.documentId, 'positive control crossed actor documents');
+    assert.equal(changed.snapshot.qaDiagnostics.performCalls, setupBefore.snapshot.qaDiagnostics.performCalls + 1,
+      'controlled actor click did not advance the live perform-entry counter exactly once');
+    actorPerformPositiveControl = { cardId, actorDocumentId: changed.snapshot.documentId,
+      before: setupBefore.snapshot.qaDiagnostics.performCalls, after: changed.snapshot.qaDiagnostics.performCalls };
     assert.ok(changed.snapshot.revision > observed.snapshot.revision
       && changed.snapshot.text.includes('Newly revealed node'),
     'controlled fixture DOM mutation did not invalidate the prior observation');
@@ -2240,14 +2491,14 @@ async function runBrowserNegativeProbes(harness, fixture, deadlineMs, result) {
       tool: BROWSER_TOOL_NAMES.fill, callId: probeId('qa-stale-dom'), arguments: inputArgs,
     }), ['BROWSER_ACTION_UNVERIFIED'], 'stale-DOM actor probe');
     const denied = actorDenial(unit);
-    assertNegativeNoEffect(changed,
+    const unchanged = assertNegativeNoEffect(changed,
       await ownedNegativeBrowserSnapshot(harness, cardId, ownerTag, fixture), 'stale DOM');
-    record('stale-dom-at-actor', code, unit, { uiActRequests: 1,
+    record('stale-dom-at-actor', code, unit, { ...unchanged, uiActRequests: 1,
       observedRevision: observed.snapshot.revision,
       changedRevision: changed.snapshot.revision,
       setupAlsoChangedFocusedRef: (changed.snapshot.focusedElement?.ref || null)
         !== (observed.snapshot.focusedElement?.ref || null),
-      uiStatus: denied.status, uiReason: denied.error });
+      uiStatus: denied.status, uiReason: denied.error, uiRequestId: denied.requestId });
   } finally { await cancel(unit); }
 
   result.browserNegativeStage = 'actor-resized-viewport';
@@ -2267,7 +2518,7 @@ async function runBrowserNegativeProbes(harness, fixture, deadlineMs, result) {
     }, { cardId, ownerTag });
     const resized = await waitUntil(async () =>
       ownedNegativeBrowserSnapshot(harness, cardId, ownerTag, fixture),
-    value => value?.snapshot?.viewport?.width !== observed.snapshot.viewport.width,
+    value => browserViewportChanged(observed.snapshot.viewport, value?.snapshot?.viewport),
     { timeoutMs: 10000, intervalMs: 200 });
     assert.ok(resized.snapshot.documentId === observed.snapshot.documentId
       && same(resized.snapshot.text, observed.snapshot.text)
@@ -2278,11 +2529,11 @@ async function runBrowserNegativeProbes(harness, fixture, deadlineMs, result) {
       tool: BROWSER_TOOL_NAMES.fill, callId: probeId('qa-resize'), arguments: inputArgs,
     }), ['BROWSER_ACTION_UNVERIFIED'], 'resized-viewport actor probe');
     const denied = actorDenial(unit);
-    assertNegativeNoEffect(resized,
+    const unchanged = assertNegativeNoEffect(resized,
       await ownedNegativeBrowserSnapshot(harness, cardId, ownerTag, fixture), 'resized viewport');
-    record('resized-viewport-at-actor', code, unit, { uiActRequests: 1,
+    record('resized-viewport-at-actor', code, unit, { ...unchanged, uiActRequests: 1,
       observedViewport: observed.snapshot.viewport, resizedViewport: resized.snapshot.viewport,
-      uiStatus: denied.status, uiReason: denied.error });
+      uiStatus: denied.status, uiReason: denied.error, uiRequestId: denied.requestId });
   } finally {
     await cancel(unit);
     if (originalCardStyle) await chrome(harness, ({ cardId, ownerTag, original }) => {
@@ -2319,9 +2570,9 @@ async function runBrowserNegativeProbes(harness, fixture, deadlineMs, result) {
       'actual UI accepted an observe-only interaction escalation');
     assert.match(String(uiEscalation.error || ''), /interaction was not selected/i,
       'actual UI permission denial has no bounded reason');
-    assertNegativeNoEffect(baseline,
+    const unchanged = assertNegativeNoEffect(baseline,
       await ownedNegativeBrowserSnapshot(harness, cardId, ownerTag, fixture), 'observe-only escalation');
-    record('observe-only-interaction-denied', code, unit, { serviceActRequests: 0,
+    record('observe-only-interaction-denied', code, unit, { ...unchanged, serviceActRequests: 0,
       uiProtocolActRequests: 1, uiProtocolDenied: true, selectedPermission: 'observe' });
   } finally { await cancel(unit); }
 
@@ -2352,13 +2603,61 @@ async function runBrowserNegativeProbes(harness, fixture, deadlineMs, result) {
     }), ['BROWSER_RUN_ENDED'], 'observe after stop');
     assert.equal(unit.trace.requests.length, requestsBeforeAfterStop,
       'stopped synthetic run sent a new UI request');
-    assertNegativeNoEffect(stoppedBaseline,
+    const unchanged = assertNegativeNoEffect(stoppedBaseline,
       await ownedNegativeBrowserSnapshot(harness, cardId, ownerTag, fixture), 'stop-before-bind');
     record('stop-before-first-bind-accept', code, unit,
-      { uiActRequests: 0, cancelledBeforeBindAccepted: true });
+      { ...unchanged, uiActRequests: 0, cancelledBeforeBindAccepted: true });
   } finally {
     try { await unit.service.cancelRun(unit.run); } finally { unit.trace.releaseBind?.(); }
   }
+
+  result.browserNegativeStage = 'expired-request-before-actor';
+  unit = await bound('interact');
+  try {
+    const observed = await observe(unit);
+    const args = fillArgs(observed, 'QA_EXPIRED_MUST_NOT_FILL');
+    const baseline = await ownedNegativeBrowserSnapshot(harness, cardId, ownerTag, fixture);
+    const response = await directUiAct(unit, { type: 'fill', ref: args.ref, text: args.text },
+      guardFromObserved(observed, args.expectedTarget), { deadlineMs: Date.now() - 1 });
+    assert.equal(response?.status, 'rejected', 'actual UI accepted an expired request');
+    assert.match(String(response.error || ''), /expired/i, 'expired request lacks the actual UI denial reason');
+    const denied = unit.trace.requests.at(-1);
+    assert.ok(denied.kind === 'act' && denied.deadlineMs <= denied.attemptedAt, 'probe was not expired at the UI');
+    const unchanged = assertNegativeNoEffect(baseline,
+      await ownedNegativeBrowserSnapshot(harness, cardId, ownerTag, fixture), 'expired request');
+    record('expired-request-before-actor', null, unit, { ...unchanged, uiActRequests: 1,
+      uiStatus: response.status, uiReason: denied.error, uiRequestId: denied.requestId,
+      requestDeadlineMs: denied.deadlineMs, attemptedAt: denied.attemptedAt });
+  } finally { await cancel(unit); }
+
+  result.browserNegativeStage = 'cancel-before-act';
+  unit = await bound('interact');
+  try {
+    const observed = await observe(unit);
+    const args = fillArgs(observed, 'QA_CANCELLED_MUST_NOT_FILL');
+    const baseline = await ownedNegativeBrowserSnapshot(harness, cardId, ownerTag, fixture);
+    await cancel(unit);
+    const cancelReceipt = unit.trace.requests.filter(item => item.kind === 'cancel').at(-1);
+    assert.equal(cancelReceipt?.status, 'cancelled', 'owned UI cancel tombstone was not observed');
+    const response = await directUiAct(unit, { type: 'fill', ref: args.ref, text: args.text },
+      guardFromObserved(observed, args.expectedTarget));
+    assert.equal(response?.status, 'rejected', 'actual UI accepted a cancelled request');
+    assert.match(String(response.error || ''), /cancelled/i, 'cancelled request lacks the actual UI denial reason');
+    const denied = unit.trace.requests.at(-1);
+    assert.ok(cancelReceipt.respondedAt <= denied.attemptedAt, 'action preceded its cancellation acknowledgement');
+    const requestsBeforeService = unit.trace.requests.length;
+    const code = await expectNegativeCode(unit.service.dispatch(unit.run, {
+      tool: BROWSER_TOOL_NAMES.fill, callId: probeId('qa-cancelled-service'), arguments: args,
+    }), ['BROWSER_RUN_ENDED'], 'service action after cancellation');
+    assert.equal(unit.trace.requests.length, requestsBeforeService, 'cancelled B service dispatched a new UI request');
+    const unchanged = assertNegativeNoEffect(baseline,
+      await ownedNegativeBrowserSnapshot(harness, cardId, ownerTag, fixture), 'cancel before act');
+    record('cancel-before-act', code, unit, { ...unchanged, uiActRequests: 1,
+      serviceActRequestsAfterCancel: 0, uiStatus: response.status, uiReason: denied.error,
+      uiRequestId: denied.requestId, attemptedAt: denied.attemptedAt,
+      cancelReceipt: { requestId: cancelReceipt.requestId, runId: cancelReceipt.runId,
+        cardId: cancelReceipt.cardId, status: cancelReceipt.status, at: cancelReceipt.respondedAt } });
+  } finally { await cancel(unit); }
 
   const final = await chrome(harness, initialCards => ({
     cards: initialCards.map(item => {
@@ -2378,6 +2677,7 @@ async function runBrowserNegativeProbes(harness, fixture, deadlineMs, result) {
   assert.deepEqual(finalChat.runs, [], 'negative probe started a native provider run');
   const proof = { simulatorOnly: true, nativeModelOriginVerified: false,
     providerTurns: 0, actorPhysicalDispatchCounterVerified: false,
+    actorPerformCounterVerified: true, actorPerformPositiveControl,
     cardId, probes,
     requestsScopedToOwnedCard: true,
     preexistingBrowserCardStylesUnchanged: true, canvasPanZoomUnchanged: true };
@@ -2403,31 +2703,39 @@ async function main() {
   const profile = required(option('--profile', process.env.EGDESK_FIREFOX_PROFILE), '--profile is required');
   assertBeforeDeadline(deadlineMs);
   assert.equal(process.env.EGDESK_MARIONETTE_PORT, '2828', 'Lane C attaches only Main-leased QA Firefox Marionette port 2828');
-  assert.equal(process.env.EGDESK_QA_REAL_TURN, '1', 'explicit real-turn gate is required');
-  assert.notEqual(process.env.EGDESK_QA_FIXTURE_TRANSPORT, '1', 'fixture transport is forbidden');
+  assertQaExecutionMode(cases);
   await runUiFlow('native-tool-flow-real-chat', async ({ harness, check, result }) => {
     result.realExecutionVerified = false;
+    result.selectedRealExecutionVerified = false;
     result.requestedCases = cases;
     result.completedCases = [];
     result.providerTurns = [];
     assertBeforeDeadline(deadlineMs);
     const manifest = assertQaFixtureManifest(profile);
     check('dedicated real-turn fixture cwd exists', !!manifest.realTurnCwd);
-    const bridge = await assertBridgePreflight();
-    const nativeContractFingerprint = assertNativeQaCapabilityBeforeTurn(bridge.health);
     assertBeforeDeadline(deadlineMs);
     if (cases.includes('browser-negative')) {
       result.kind = 'browser-negative-test-only-simulator';
       result.browserNegativeAuthority = 'test-only-synthetic-B-service-and-owned-UI';
       result.nativeModelOriginVerified = false;
       result.providerTurn = 'not-run-test-only-simulator';
-      result.browserNegative = await runBrowserNegativeProbes(harness, browserFixture, deadlineMs, result);
+      const health = await loopbackJson('/health');
+      const state = () => loopbackJson('/__qa/state', { token: process.env.EGDESK_QA_FIXTURE_TOKEN });
+      result.browserNegativeBackendBefore = assertNegativeFixtureBackend(profile, health, await state());
+      try {
+        result.browserNegative = await runBrowserNegativeProbes(harness, browserFixture, deadlineMs, result);
+        result.screenshots.push(await harness.screenshot('browser-guards-verified'));
+      } finally {
+        result.browserNegativeBackendAfter = assertNegativeFixtureBackend(profile, await loopbackJson('/health'), await state());
+      }
       result.completedCases.push('browser-negative');
       Object.assign(result, scenarioCoverage(cases, result.completedCases));
       result.realExecutionVerified = false;
       result.providerTurn = 'not-run-test-only-simulator';
       return;
     }
+    const bridge = await assertBridgePreflight();
+    const nativeContractFingerprint = assertNativeQaCapabilityBeforeTurn(bridge.health);
     const qaCwd = resumeSource
       ? existingQaRunDirectory(manifest.realTurnCwd, resumeSource.root)
       : createQaRunDirectory(manifest.realTurnCwd);
@@ -2538,7 +2846,7 @@ async function main() {
     const browser = await completedUiRun(harness, browserThread,
       `Use EG-Desk Browser model tools only on selected local QA card ${cards.targetCardId}. Observe first, then include the exact fixture marker you observed in your final answer. Click the "Reveal QA details" button using its exact observed target and a visible-text postcondition of "Newly revealed node". Re-observe the changed page, then fill the "QA note" text input with ${JSON.stringify(fillValue)} using its exact observed target and a target-value postcondition. Use only observe, click, observe, fill in this run. Do not navigate, submit forms, use accounts, commands, other cards or websites.`,
       deadlineMs, { cwd: qaCwd, sourceIds: null,
-        policyMode: 'fixtureBrowserQa', browserSelection: selection, browserRootReady,
+        policyMode: 'browserBounded', browserSelection: selection, browserRootReady,
         browserFixtureUrl: browserFixture.url });
     const browserTurn = { case: 'browser', runId: browser.run.runId, status: 'completed', evidence: 'unverified' };
     result.providerTurns.push(browserTurn);
@@ -2559,20 +2867,32 @@ async function main() {
         activeElementId: after.activeElementId, activeElementTag: after.activeElementTag },
     };
     const browserProof = assertBrowserPositiveFlow({ ...browser, cwd: qaCwd, selection,
+      expectedPolicyMode: 'browserBounded',
       fixture: browserFixture,
       target: { cardId: cards.targetCardId, profileId: selection.profileId, fillValue },
       control: { cardId: cards.controlCardId }, before, after });
     assertNoFixtureWrites(browserBefore, fileInventory(qaCwd));
-    result.browser = { runId: browser.run.runId, ...browserProof };
+    const renderedProof = await renderedBrowserAnswer(harness, browserThread,
+      browser.run, browserFixture, deadlineMs);
+    result.screenshots.push(await harness.screenshot('browser-model-final-chat'));
+    result.browser = { runId: browser.run.runId, ...browserProof, ...renderedProof };
     browserTurn.evidence = 'verified-local-fixture-positive';
     result.browserNegativeGuardStatus = 'not-run';
+    result.browserNegativeGuardReason = 'native-model-negative-adapter-unavailable';
 
     result.completedCases.push('browser');
     }
 
     const coverage = scenarioCoverage(cases, result.completedCases);
     Object.assign(result, coverage);
-    result.realExecutionVerified = coverage.fullScenarioVerified;
+    // This flag is scoped to the explicitly selected real-provider cases.
+    // fullScenarioVerified remains false while the native-negative adapter
+    // is absent; browser-negative never reaches this provider-only branch.
+    result.selectedRealExecutionVerified = coverage.selectedCasesVerified;
+    result.realExecutionVerified = result.selectedRealExecutionVerified;
+    result.realExecutionScope = 'selected-cases';
+    result.verifiedRealCases = [...result.completedCases];
+    result.nativeModelOriginVerified = result.selectedRealExecutionVerified;
     result.providerTurn = coverage.fullScenarioVerified
       ? 'full-scenario-evidence-verified' : 'selected-cases-evidence-verified-partial';
   });

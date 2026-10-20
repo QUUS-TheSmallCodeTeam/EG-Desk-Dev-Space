@@ -169,7 +169,7 @@ export class CodexChatRuntime {
     catch (error) { throw this.providerFailure(error, provider) }
   }
 
-  collectToolSpecs(policy = null, { forManifest = false } = {}) {
+  collectToolSpecs(policy = null, { forManifest = false, browserInteraction = false } = {}) {
     const specs = [], owners = new Map(), selected = [], manifest = []
     for (const [index, provider] of this.toolProviders.entries()) {
       const providerId = provider === this.contexts ? 'egdesk-context-v1' : provider.providerId
@@ -186,7 +186,8 @@ export class CodexChatRuntime {
         const contextRead = provider === this.contexts && ['egdesk_list_context', 'egdesk_read_source'].includes(spec?.name)
         const browser = provider.providerId === 'egdesk-browser' && spec?.name?.startsWith('egdesk_browser_')
         if (policy === READ_ONLY_QA && !contextRead && !(browser && spec.name === 'egdesk_browser_observe')) continue
-        if (policy === BROWSER_BOUNDED && !contextRead && !(browser && spec.name === 'egdesk_browser_observe')) continue
+        if (policy === BROWSER_BOUNDED && !contextRead && !(browser && (spec.name === 'egdesk_browser_observe'
+          || (browserInteraction && ['egdesk_browser_click', 'egdesk_browser_fill'].includes(spec.name))))) continue
         if (policy === FIXTURE_BROWSER_QA && !contextRead && !(browser && ['egdesk_browser_observe', 'egdesk_browser_click', 'egdesk_browser_fill'].includes(spec.name))) continue
         const names = spec?.type === 'function' && typeof spec.name === 'string' ? [toolKey(null, spec.name)]
           : spec?.type === 'namespace' && typeof spec.name === 'string' && Array.isArray(spec.tools)
@@ -827,6 +828,8 @@ export class CodexChatRuntime {
         (bounded && (provider === this.contexts || provider.providerId === 'egdesk-browser'))) {
       preparedProviders.set(provider, await this.callProvider(provider, 'prepare', { ...body, effectiveExecutionPolicy: policy }) || null)
     }
+    const browserInteractionRequested = policy === BROWSER_BOUNDED && [...preparedProviders]
+      .some(([provider, prepared]) => provider.providerId === 'egdesk-browser' && prepared?.interactionRequested === true)
     const additionalContext = this.additionalToolContext(preparedProviders)
     if (epoch !== this.epoch) throw chatError('ACCOUNT_CHANGED', 'Codex account or connection changed', 409)
     if (bounded && !this.qaReady()) throw chatError('QA_POLICY_UNAVAILABLE', 'Bounded execution requires a verified native policy contract', 503)
@@ -904,7 +907,7 @@ export class CodexChatRuntime {
       if (!this.loadedThreads.has(cid)) await this.restoreThread(cid, context.clientThreadId, { ...overrides, ...(qaOverrides || {}) }, { policy })
       if (bounded) this.persistExecutionPolicy(context, cid)
     } else {
-      const nativeTools = this.collectToolSpecs(policy)
+      const nativeTools = this.collectToolSpecs(policy, { browserInteraction: browserInteractionRequested })
       if (nativeTools.specs.length) overrides.dynamicTools = nativeTools.specs
       if (bounded) Object.assign(overrides, qaOverrides)
       const result = await this.request('thread/start', overrides)
@@ -930,6 +933,10 @@ export class CodexChatRuntime {
       for (const provider of nativeTools.selected) await this.callProvider(provider, 'registerThread', cid)
     }
     if (epoch !== this.epoch) throw chatError('ACCOUNT_CHANGED', 'Codex account changed', 409)
+    if (browserInteractionRequested && !['egdesk_browser_observe', 'egdesk_browser_click', 'egdesk_browser_fill']
+      .every(name => this.threadToolOwners.get(cid)?.has(toolKey(null, name)))) {
+      throw chatError('BROWSER_TOOLS_UNAVAILABLE', 'This native conversation has no original click/fill catalog; keep its history, start an explicit new Chat and reselect the Browser', 409)
+    }
     if ([...preparedProviders.values()].some(Boolean) && this.threadToolManifestStatus.get(cid) !== 'verified') {
       throw chatError('NATIVE_TOOL_MANIFEST_UNVERIFIED', 'This native thread has no verified original tool ownership; keep its history and choose an explicit new conversation', 409)
     }
@@ -938,7 +945,12 @@ export class CodexChatRuntime {
       throw chatError('RUN_IN_PROGRESS', 'This conversation already has an active or unreconciled turn', 409)
     }
     if ([...this.runs.values()].filter(run => !TERMINAL.has(run.status)).length >= MAX_RUNS) throw chatError('RUNTIME_BUSY', 'Too many active turns', 429)
-    const verifiedPolicyReceipt = bounded ? this.threads.get(cid)?.qaReceipt : null
+    const nativePolicyReceipt = bounded ? this.threads.get(cid)?.qaReceipt : null
+    // This copy belongs only to the current run. Do not store it on the
+    // native thread or persist it as a policy binding for following sends.
+    const verifiedPolicyReceipt = nativePolicyReceipt && browserInteractionRequested
+      ? { ...nativePolicyReceipt, browserEffects: 'selected-card-observe-click-fill-this-run' }
+      : nativePolicyReceipt
     if (bounded && !verifiedPolicyReceipt) throw chatError('QA_POLICY_UNVERIFIED', 'Verified bounded policy receipt was lost before turn/start', 502)
     const pending = { ...context, conversationId: cid, buffer: [] }
     this.pendingStarts.set(cid, pending)
@@ -1282,8 +1294,12 @@ export class CodexChatRuntime {
       const mode = run.executionPolicy?.mode || null
       const contextRead = !event.namespace && ['egdesk_list_context', 'egdesk_read_source'].includes(event.tool)
       const browser = !event.namespace && typeof event.tool === 'string' && event.tool.startsWith('egdesk_browser_')
+      const selectedBrowser = browser && run.browserBinding?.cards?.find(card => card.cardId === event.arguments?.cardId)
+      const boundedBrowser = selectedBrowser && ['observe', 'interact'].includes(selectedBrowser.permission)
+        && (event.tool === 'egdesk_browser_observe' || (selectedBrowser.permission === 'interact'
+          && ['egdesk_browser_click', 'egdesk_browser_fill'].includes(event.tool)))
       if ((mode === READ_ONLY_QA && !contextRead && !(browser && event.tool === 'egdesk_browser_observe')) ||
-          (mode === BROWSER_BOUNDED && !contextRead && !(browser && event.tool === 'egdesk_browser_observe')) ||
+          (mode === BROWSER_BOUNDED && !contextRead && !boundedBrowser) ||
           (mode === FIXTURE_BROWSER_QA && !contextRead && !(browser && ['egdesk_browser_observe', 'egdesk_browser_click', 'egdesk_browser_fill'].includes(event.tool))) ||
           (!mode && browser)) {
         this.respond(event.rpcId, null, { code: -32601, message: 'This run does not authorize the requested dynamic tool' })

@@ -2,6 +2,7 @@
 import fs from 'node:fs';
 import path from 'node:path';
 import { assertQaFixtureManifest } from './egdesk-chat-qa-profile.mjs';
+import { isOwnedAndPrivate } from './egdesk-qa-platform.mjs';
 
 const TERMINAL = new Set(['completed', 'interrupted', 'failed']);
 const PERSONA_FIELDS = ['agentProfile', 'systemPrompt', 'toolMode'];
@@ -61,7 +62,7 @@ function assertReferencedArtifactAtRoot(artifact, root, expectedPath = null) {
     throw new Error('artifact escapes the dedicated test root or uses a symlink');
   }
   const info = fs.statSync(file);
-  if (!info.isFile() || info.uid !== process.getuid()) throw new Error('artifact is not a user-owned regular file');
+  if (!info.isFile() || !isOwnedAndPrivate(file, info)) throw new Error('artifact is not a user-owned regular file');
   return file;
 }
 

@@ -1,8 +1,10 @@
 import assert from 'node:assert/strict';
-import { spawnSync } from 'node:child_process';
+import { spawnSync, execFileSync } from 'node:child_process';
 import fs from 'node:fs';
 import path from 'node:path';
 import test from 'node:test';
+import { fileURLToPath } from 'node:url';
+import { createPrivateQaTempDirectory } from './egdesk-qa-platform.mjs';
 import { assertQaProfile, bootstrapQaProfile, canonicalTempRoot,
   assertQaFixtureManifest, LOADER_FILES, QA_MARKER_BYTES, QA_MARKER_NAME,
   QA_FIXTURE_DIRECTORY, QA_FIXTURE_FILE, QA_FIXTURE_MANIFEST, QA_REAL_TURN_DIRECTORY, QA_BACKEND_DATA_DIRECTORY, deskRecoveryFixture } from './egdesk-chat-qa-profile.mjs';
@@ -17,6 +19,13 @@ function removeCreatedTemp(directory, prefix) {
     throw new Error(`Refusing test cleanup outside owned temp prefix: ${directory}`);
   }
   fs.rmSync(directory, { recursive: true, force: false });
+}
+
+function otherWritable(target, writable, privateMode = 0o600) {
+  if (process.platform === 'win32') {
+    execFileSync('icacls.exe', [target, ...(writable ? ['/grant', '*S-1-5-32-545:(W)']
+      : ['/remove:g', '*S-1-5-32-545'])], { windowsHide: true, stdio: 'pipe' });
+  } else fs.chmodSync(target, writable ? privateMode | 0o022 : privateMode);
 }
 
 test('bootstrap copies only allowlisted loader utilities into a guarded mkdtemp profile', (t) => {
@@ -55,12 +64,17 @@ test('bootstrap copies only allowlisted loader utilities into a guarded mkdtemp 
   assert.throws(() => assertQaFixtureManifest(result.profile), /not bound/);
   fs.writeFileSync(manifestPath, originalManifest);
   fs.unlinkSync(result.fixtureArtifact);
-  fs.symlinkSync(path.join(source, LOADER_FILES[0]), result.fixtureArtifact);
-  assert.throws(() => assertQaFixtureManifest(result.profile), /regular files/);
+  try {
+    fs.symlinkSync(path.join(source, LOADER_FILES[0]), result.fixtureArtifact);
+    assert.throws(() => assertQaFixtureManifest(result.profile), /regular files/);
+  } catch (error) {
+    if (process.platform !== 'win32' || error.code !== 'EPERM') throw error;
+    t.diagnostic('File symlink creation needs Windows Developer Mode; directory junction denial is tested separately');
+  }
 });
 
 test('QA profile guard rejects bad marker bytes, writable marker, and symlink alias', (t) => {
-  const profile = fs.mkdtempSync(path.join(canonicalTempRoot(), 'egdesk-chat-test-'));
+  const profile = createPrivateQaTempDirectory('egdesk-chat-test-');
   const alias = path.join(canonicalTempRoot(), `egdesk-chat-test-link-${process.pid}-${Date.now()}`);
   t.after(() => {
     if (fs.existsSync(alias)) fs.unlinkSync(alias);
@@ -72,10 +86,10 @@ test('QA profile guard rejects bad marker bytes, writable marker, and symlink al
   fs.writeFileSync(marker, 'wrong\n');
   assert.throws(() => assertQaProfile(profile), /exact V1 bytes/);
   fs.writeFileSync(marker, QA_MARKER_BYTES);
-  fs.chmodSync(marker, 0o622);
+  otherWritable(marker, true);
   assert.throws(() => assertQaProfile(profile), /user-owned regular file/);
-  fs.chmodSync(marker, 0o600);
-  fs.symlinkSync(profile, alias);
+  otherWritable(marker, false);
+  fs.symlinkSync(profile, alias, process.platform === 'win32' ? 'junction' : 'dir');
   assert.throws(() => assertQaProfile(alias), /real directory/);
 });
 
@@ -105,9 +119,9 @@ test('MCP parsing and evidence setup are pure of Firefox and never need npx', (t
   t.after(() => removeCreatedTemp(evidence, 'egdesk-chat-evidence-'));
   assert.equal(path.dirname(evidence), canonicalTempRoot());
   assert.equal(assertQaEvidenceDirectory(evidence), evidence);
-  fs.chmodSync(evidence, 0o722);
+  otherWritable(evidence, true, 0o700);
   assert.throws(() => assertQaEvidenceDirectory(evidence), /safe canonical/);
-  fs.chmodSync(evidence, 0o700);
+  otherWritable(evidence, false, 0o700);
   assert.equal(FirefoxMcpChatHarness.prototype.call, undefined);
   assert.equal(FirefoxMcpChatHarness.prototype.request, undefined);
   assert.equal(typeof FirefoxMcpChatHarness.prototype.evaluateChrome, 'function');
@@ -143,7 +157,7 @@ test('semantic verifier refuses reserved 2829 before any MCP connection', (t) =>
   const outputDir = createQaEvidenceDirectory();
   t.after(() => removeCreatedTemp(outputDir, 'egdesk-chat-evidence-'));
   const verifier = new URL('./verify-semantic-zoom.mjs', import.meta.url);
-  const result = spawnSync(process.execPath, [verifier.pathname, '--profile', profile,
+  const result = spawnSync(process.execPath, [fileURLToPath(verifier), '--profile', profile,
     '--port', '2829', '--output-dir', outputDir], { encoding: 'utf8' });
   assert.notEqual(result.status, 0);
   assert.match(result.stderr, /2829 is reserved/);

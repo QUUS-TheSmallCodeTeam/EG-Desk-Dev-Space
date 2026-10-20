@@ -29,8 +29,24 @@ export function createCodexBrowserToolProvider({ transport, getOwnerKey, schemaR
           source.browserToolSelection.threadId !== body.clientThreadId)) {
         throw chatError('INVALID_BROWSER_SELECTION', 'Browser selection must retain its one-time source token and exact Chat binding', 400)
       }
-      if ([READ_ONLY_QA, BROWSER_BOUNDED].includes(policy) && selectedSources.some(source => source.browserToolPermission !== 'observe')) {
+      if (policy === READ_ONLY_QA && selectedSources.some(source => source.browserToolPermission !== 'observe')) {
         throw chatError('BROWSER_INTERACTION_NOT_GRANTED', 'This mode accepts only a Browser observe selection', 403)
+      }
+      // BrowserBounded is the existing native safety envelope. Interaction
+      // comes only from this request's explicit UI selection, never from a
+      // thread policy, prior run, retained snapshot or catalog registration.
+      const interactionRequested = policy === BROWSER_BOUNDED
+        && selectedSources.some(source => source.browserToolPermission === 'interact')
+      if (interactionRequested) {
+        if (selectedSources.length !== 1 || selectedSources[0].selectedByUser !== true) {
+          throw chatError('INVALID_BROWSER_SELECTION', 'Select exactly one Browser Card for this run', 400)
+        }
+        let selectedUrl
+        try { selectedUrl = new URL(selectedSources[0].sourceRef?.uri) } catch {}
+        if (!selectedUrl || !['http:', 'https:'].includes(selectedUrl.protocol)
+          || selectedUrl.username || selectedUrl.password) {
+          throw chatError('INVALID_BROWSER_SELECTION', 'This run requires one selected HTTP(S) Browser Card', 400)
+        }
       }
       if (policy === FIXTURE_BROWSER_QA && (!fixtureQa || selectedSources.length !== 1 ||
           selectedSources[0].browserToolPermission !== 'interact' ||
@@ -41,11 +57,11 @@ export function createCodexBrowserToolProvider({ transport, getOwnerKey, schemaR
       let selection
       try { selection = service.prepare({ selectedSources, ownerKey: getOwnerKey() }) }
       catch (error) { const failure = classifyPublicToolError(error, { browser: true }); throw chatError(failure.code, failure.message, 400) }
-      return { selection, transportId, policy }
+      return { selection, transportId, policy, interactionRequested }
     },
-    // Register the complete stable catalog when a native thread is created.
-    // Per-run selection, native policy and the service binding are the actual
-    // authority; this lets a user attach a Card later without changing threads.
+    // Advertise available specs; runtime narrows the original native catalog
+    // using its safety envelope and first explicit selection. A later send
+    // cannot expand that catalog. Per-run UI binding remains actual authority.
     specs() { return schemaReady() ? BROWSER_TOOL_SPECS : [] },
     requireThread(threadId, prepared) {
       if (prepared && !this.runtime.browserRegisteredThreads.has(threadId)) {
@@ -74,6 +90,14 @@ export function createCodexBrowserToolProvider({ transport, getOwnerKey, schemaR
     },
     async dispatch(run, event) {
       try {
+        if (run.executionPolicy?.mode === BROWSER_BOUNDED) {
+          const card = run.browserBinding?.cards?.find(item => item.cardId === event.arguments?.cardId)
+          if (!card) throw chatError('BROWSER_CARD_NOT_SELECTED', 'This run has no grant for that Browser Card', 403)
+          if (!['egdesk_browser_observe', 'egdesk_browser_click', 'egdesk_browser_fill'].includes(event.tool)
+            || (event.tool !== 'egdesk_browser_observe' && card.permission !== 'interact')) {
+            throw chatError('BROWSER_INTERACTION_NOT_GRANTED', 'This run permits only its selected Browser observation or granted click/fill', 403)
+          }
+        }
         const fixtureMode = run.executionPolicy?.mode === FIXTURE_BROWSER_QA
         if (fixtureMode) {
           if (!fixtureQa || !['egdesk_browser_observe', 'egdesk_browser_click', 'egdesk_browser_fill'].includes(event.tool)) {

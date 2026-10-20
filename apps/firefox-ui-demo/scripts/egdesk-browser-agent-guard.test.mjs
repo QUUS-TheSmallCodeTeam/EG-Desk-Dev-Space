@@ -64,6 +64,47 @@ function localDocumentFixture() {
     get inputEvents() { return inputEvents }, get focusCalls() { return focusCalls } }
 }
 
+function qaCounterOptions(f) {
+  const fixtureUrl = 'http://127.0.0.1:39220/egdesk-qa/QA_URL_0123456789abcdef';
+  const fixtureMarker = 'QA_DOM_0123456789abcdef';
+  f.win.location.href = fixtureUrl;
+  f.actor.document.getElementById = id => id === 'fixture-marker' ? { textContent: fixtureMarker } : null;
+  return { qaDiagnostics: { fixtureUrl, fixtureMarker } };
+}
+
+test('perform-entry diagnostic is opt-in, exact-fixture scoped, and advances for actual actions', async () => {
+  const f = localDocumentFixture(), qa = qaCounterOptions(f);
+  assert.equal(f.actor.snapshot().qaDiagnostics, undefined);
+  for (const changed of [{ fixtureMarker: 'QA_DOM_wrong0123456789abcdef' },
+    { fixtureUrl: qa.qaDiagnostics.fixtureUrl + '?changed=1' }]) {
+    assert.equal(f.actor.snapshot({ qaDiagnostics: { ...qa.qaDiagnostics, ...changed } }).qaDiagnostics, undefined);
+  }
+  const before = f.actor.snapshot(qa);
+  assert.deepEqual(before.qaDiagnostics, { kind: 'actor-perform-entry', actorDocumentId: before.documentId, performCalls: 0 });
+  const button = before.interactiveElements.find(item => item.role === 'button');
+  await f.actor.act({ type: 'click', ref: button.ref }, guarded(guardFrom(before, button)));
+  assert.equal(f.clicks, 1);
+  assert.equal(f.actor.snapshot(qa).qaDiagnostics.performCalls, 1);
+  f.win.location.href = 'https://example.invalid/egdesk-qa/QA_URL_0123456789abcdef';
+  assert.equal(f.actor.snapshot(qa).qaDiagnostics, undefined);
+});
+
+test('DOM, viewport, expiry and revoked authority denials never enter perform', async () => {
+  for (const reason of ['dom', 'viewport', 'expiry', 'authority']) {
+    const f = localDocumentFixture(), qa = qaCounterOptions(f), before = f.actor.snapshot(qa);
+    const button = before.interactiveElements.find(item => item.role === 'button');
+    const options = guarded(guardFrom(before, button));
+    if (reason === 'dom') f.pendingMutations.push({});
+    if (reason === 'viewport') f.win.innerWidth++;
+    if (reason === 'expiry') options.lease.deadlineMs = 0;
+    if (reason === 'authority') f.actor.sendQuery = async () => ({ authorized: false, reason: 'ui-denied' });
+    await assert.rejects(f.actor.act({ type: 'click', ref: button.ref }, options), /stale|expired|revoked/i);
+    assert.equal(f.actor.snapshot(qa).qaDiagnostics.performCalls, before.qaDiagnostics.performCalls, reason);
+    assert.equal(f.clicks, 0, reason);
+    assert.equal(f.inputEvents, 0, reason);
+  }
+});
+
 function guardFrom(snapshot, target = null) {
   return { documentId: snapshot.documentId, revision: snapshot.revision,
     viewport: snapshot.viewport, url: snapshot.url,

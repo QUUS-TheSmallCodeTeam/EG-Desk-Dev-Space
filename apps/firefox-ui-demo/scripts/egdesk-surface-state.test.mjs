@@ -14,7 +14,8 @@ import { createTerminalCloseController, terminalExitEvidence, terminalResponsePa
 
 // Exercise the actual production runtime-config body, without executing the
 // Firefox overlay bootstrap, DOM handlers, bridge requests, or runtime code.
-const surfaceSource = readFileSync(new URL('../overlay/JS/eg-desk-surface.uc.js', import.meta.url), 'utf8');
+// Source-body boundaries are identical for LF and Windows CRLF checkouts.
+const surfaceSource = readFileSync(new URL('../overlay/JS/eg-desk-surface.uc.js', import.meta.url), 'utf8').replace(/\r\n/g, '\n');
 const runtimeConfigBody = surfaceSource.match(/  function codexThreadRuntimeConfig\(thread\) \{([\s\S]*?)\n  \}/)?.[1];
 assert.ok(runtimeConfigBody, 'production codexThreadRuntimeConfig must remain directly testable');
 const productionRuntimeConfig = compileFunction(runtimeConfigBody, ['thread', 'codexThreadAgentProfile', 'codexThreadToolMode', 'codexThreadSystemPrompt']);
@@ -1094,12 +1095,17 @@ test('empty logged-in Chat uses plain first-message guidance while keeping title
   }`, ['el'])((tag, props, ...children) => ({ tag, className: props.class, children }));
   const thread = { title: 'Codex', type: 'dm' };
   const loggedIn = renderEmpty({ authStatus: { isLoggedIn: true } }, thread);
-  assert.equal(loggedIn[0].children[0], '아직 메시지가 없습니다');
-  assert.equal(loggedIn[1].children[0], '메시지를 보내 대화를 시작하세요');
-  assert.doesNotMatch(loggedIn[1].children[0], /Fresh|Codex 대화|· Codex/);
+  const emptyClasses = ['egd-codex-empty-eyebrow', 'egd-codex-empty-title', 'egd-codex-empty-sub'];
+  assert.deepEqual(loggedIn.map(node => node.className), emptyClasses);
+  assert.deepEqual(loggedIn.map(node => node.children[0]), [
+    '새 대화', '어떤 일을 함께할까요?', '질문을 하거나 자료를 첨부해 대화를 시작하세요.',
+  ]);
+  assert.doesNotMatch(loggedIn[2].children[0], /Fresh|Codex 대화|· Codex/);
   const loggedOut = renderEmpty({ authStatus: { isLoggedIn: false } }, thread);
-  assert.equal(loggedOut[0].children[0], '로그인 후 대화할 수 있습니다');
-  assert.equal(loggedOut[1].children[0], 'Codex 로그인이 필요합니다.');
+  assert.deepEqual(loggedOut.map(node => node.className), emptyClasses);
+  assert.deepEqual(loggedOut.map(node => node.children[0]), [
+    'Codex 연결', '로그인 후 대화할 수 있습니다', 'Codex 로그인이 필요합니다.',
+  ]);
   assert.match(surfaceSource, /class: 'egd-codex-thread-active-title' \}, activeThread\.title/);
 });
 
@@ -2491,7 +2497,10 @@ test('actual send path preserves draft B and new attachments typed during delaye
     'Browser tool selection from submitted draft A must be forwarded before attachments are cleared, not from later draft B');
   assert.equal(payload.selectedSources[0].browserToolSelection.threadId, payload.clientThreadId);
   assert.equal(payload.browserTransportId, 'ui-stream-1');
-  assert.equal(payload.executionPolicy, undefined, 'normal Chat UI must not synthesize a QA policy');
+  assert.deepEqual(payload.executionPolicy, { mode: 'browserBounded' },
+    'selected Browser sources use the ordinary per-run bounded policy');
+  assert.ok(!['readOnlyQa', 'fixtureBrowserQa'].includes(payload.executionPolicy.mode),
+    'normal Chat UI must not synthesize a QA policy');
   assert.equal(state.codex.threadDrafts.room, 'B');
   assert.deepEqual(getThread(null).inputSources.map(input => input.id), ['a', 'b']);
   assert.equal(getThread(null).messages[0].content, 'A');
@@ -2911,4 +2920,312 @@ test('production inspector pagination is outside the sole scroll body and makes 
     { startLine: 201, endLine: 240 }, { startLine: 241, endLine: undefined }, { startLine: 201, endLine: 240 },
   ], 'Previous must re-read the exact explicit range, not the default 200-line page');
   assert.match(panel.children.find(child => child.tag === 'nav').textContent, /201–240/);
+});
+
+test('unknown local history coverage is not presented as a failed history load', () => {
+  const render = surfaceSource.match(/        if \(activeThread\.localHistoryCoverage && activeThread\.localHistoryCoverage\.status !== 'complete'\)[\s\S]*?(?=\n        if \(codex\.localHistoryStatus)/)?.[0];
+  assert.ok(render, 'production history coverage presentation remains directly testable');
+  const present = compileFunction(`const rows=[]; const conversation={appendChild: node => rows.push(node)}; ${render}; return rows;`,
+    ['activeThread', 'el']);
+  const show = coverage => present({ localHistoryCoverage: coverage }, (_tag, props, text) => ({ props, text }));
+  assert.deepEqual(show({ status: 'complete' }), []);
+  assert.match(show({ status: 'unknown', reasons: [] })[0].text, /전체 대화 범위 미확인/);
+  assert.doesNotMatch(show({ status: 'unknown', reasons: [] })[0].text, /확인하지 못했습니다/);
+  for (const coverage of [{ status: 'partial', reasons: [] }, { status: 'unknown', reasons: ['seq-gap'] }]) {
+    assert.match(show(coverage)[0].text, /로컬 기록 일부를 확인하지 못했습니다/);
+    assert.equal(show(coverage)[0].props.data.testid, 'chat-local-history-coverage');
+  }
+});
+
+test('Chat pending scroll intent preserves the rendered viewport across SSE rerenders', async (t) => {
+  // Use the existing LF-normalized production source, not a second implementation
+  // of the scroll policy. The fake log models geometry; Firefox layout is separate QA.
+  const mount = surfaceSource.match(/  function mountCodexHUD\(body, codexBridge, options = \{\}\) \{([\s\S]*?)\n  \}/)?.[1];
+  assert.ok(mount, 'production Chat mount remains directly testable');
+  const declaration = mount.match(/    let pendingMessageScroll = null;/)?.[0];
+  const gesture = mount.match(/    const onMessageScrollGesture = \(ev\) => \{[\s\S]*?\n    \};/)?.[0];
+  const snapshot = mount.match(/      const oldInput = body\.querySelector\('\.egd-codex-input'\);[\s\S]*?(?=\n      composerObserver\?\.disconnect\(\);)/)?.[0];
+  const restore = mount.match(/      const msgEl = body\.querySelector\("\.egd-codex-messages"\);[\s\S]*?(?=\n      const newInput = body\.querySelector)/)?.[0];
+  const cleanup = mount.match(/    body\._codexCleanup = \(\) => \{([\s\S]*?)\n    \};?/)?.[1];
+  assert.ok(declaration, 'production pending intent declaration must remain testable');
+  assert.ok(gesture, 'production scroll gesture handler must remain testable');
+  assert.ok(snapshot, 'production viewport snapshot must remain testable');
+  assert.ok(restore, 'production viewport restore must remain testable');
+  assert.ok(cleanup, 'production mount cleanup must remain testable');
+
+  class ChatScrollElement {}
+  class ChatScrollLog extends ChatScrollElement {
+    constructor({ thread = 'A', last = 'u1', height = 1800, viewport = 300, top = 0,
+      rows = [{ id: 'middle', offset: 220, height: 40 }] } = {}) {
+      super();
+      this.dataset = { threadId: thread, lastUserMessageId: last };
+      this.scrollHeight = height;
+      this.clientHeight = viewport;
+      this._top = top;
+      this.rows = rows;
+      this.isConnected = true;
+    }
+    get scrollTop() { return this._top; }
+    set scrollTop(value) { this._top = Math.max(0, Math.min(value, this.scrollHeight - this.clientHeight)); }
+    getBoundingClientRect() { return { top: 0, bottom: this.clientHeight }; }
+    querySelectorAll() {
+      return this.rows.map(row => ({
+        dataset: { messageId: row.id },
+        getBoundingClientRect: () => ({ top: row.offset - this.scrollTop, bottom: row.offset + row.height - this.scrollTop }),
+      }));
+    }
+    closest(selector) { return selector === '.egd-codex-messages' ? this : null; }
+  }
+
+  const bind = compileFunction([
+    declaration,
+    'let activeThread = null;',
+    gesture,
+    'const render = next => {',
+    snapshot,
+    'if (body.log) body.log.isConnected = false;',
+    'body.log = next;',
+    'activeThread = { id: next.dataset.threadId };',
+    restore,
+    'return messageState;',
+    '};',
+    'const unsubscribe = () => {};',
+    'const composerObserver = null;',
+    'let compositionInProgress = false, deferredCodex = null;',
+    'const onDocumentMouseDown = () => {}, onViewportMutate = () => {};',
+    'const cleanup = () => {',
+    cleanup,
+    '};',
+    'return { render, gesture: onMessageScrollGesture, cleanup };',
+  ].join('\n'), ['body', 'document', 'Element', 'requestAnimationFrame', 'window']);
+
+  const harness = (initial = new ChatScrollLog({ last: '', height: 100, rows: [] })) => {
+    const frames = [], removed = [];
+    const body = {
+      log: initial,
+      querySelector(selector) { return selector === '.egd-codex-messages' ? this.log : null; },
+      contains(node) { return this.log === node; },
+      removeEventListener(type) { removed.push('body:' + type); },
+    };
+    const api = bind(body,
+      { activeElement: null, removeEventListener(type) { removed.push('document:' + type); } },
+      ChatScrollElement, callback => frames.push(callback),
+      { removeEventListener(type) { removed.push('window:' + type); } });
+    return {
+      render: api.render,
+      gesture: event => api.gesture({ target: body.log, ...event }),
+      cleanup: api.cleanup,
+      flush() { while (frames.length) frames.shift()(); },
+      get log() { return body.log; },
+      removed,
+    };
+  };
+
+  await t.test('long user send plus multiple SSE renders before rAF keeps bottom intent', () => {
+    const h = harness();
+    h.render(new ChatScrollLog({ height: 1200 }));
+    const inherited = h.render(new ChatScrollLog({ height: 1450 }));
+    h.render(new ChatScrollLog({ height: 1800 }));
+    h.flush();
+    assert.equal(inherited.atBottom, true, 'unpainted scrollTop=0 must not be interpreted as reader intent');
+    assert.equal(h.log.scrollTop, 1500, 'only the latest log receives the pending bottom restore');
+  });
+
+  await t.test('reader anchor survives multiple pre-frame rerenders at the same visible offset', () => {
+    const h = harness(new ChatScrollLog({ top: 200 }));
+    h.render(new ChatScrollLog({ height: 2000, rows: [{ id: 'middle', offset: 260, height: 40 }] }));
+    const inherited = h.render(new ChatScrollLog({ height: 2200, rows: [{ id: 'middle', offset: 310, height: 40 }] }));
+    h.flush();
+    assert.equal(inherited.atBottom, false);
+    assert.deepEqual(inherited.anchor, { id: 'middle', offset: 20 });
+    assert.equal(h.log.scrollTop, 290, 'the original visible row remains 20px below the log top');
+  });
+
+  await t.test('missing reader anchor falls back to the preserved absolute scroll position', () => {
+    const h = harness(new ChatScrollLog({ top: 150, rows: [{ id: 'gone', offset: 170, height: 40 }] }));
+    h.render(new ChatScrollLog({ height: 2000, rows: [] }));
+    h.flush();
+    assert.equal(h.log.scrollTop, 150);
+  });
+
+  await t.test('new user send follows bottom even when the previous transcript was scrolled up', () => {
+    const h = harness(new ChatScrollLog({ top: 200 }));
+    h.render(new ChatScrollLog({ last: 'u2', height: 2400 }));
+    h.flush();
+    assert.equal(h.log.scrollTop, 2100);
+  });
+
+  await t.test('thread switch cannot inherit a different thread reader anchor', () => {
+    const h = harness(new ChatScrollLog({ top: 100 }));
+    h.render(new ChatScrollLog({ thread: 'B', height: 700 }));
+    h.flush();
+    assert.equal(h.log.scrollTop, 400);
+  });
+
+  await t.test('explicit PageUp cancels an unpainted automatic bottom restore', () => {
+    const h = harness();
+    h.render(new ChatScrollLog({ height: 1300 }));
+    h.gesture({ type: 'keydown', key: 'PageUp' });
+    h.log.scrollTop = 350;
+    h.flush();
+    assert.equal(h.log.scrollTop, 350);
+  });
+
+  await t.test('copy shortcut does not cancel pending bottom follow', () => {
+    const h = harness();
+    h.render(new ChatScrollLog({ height: 1400 }));
+    h.gesture({ type: 'keydown', key: 'c', ctrlKey: true });
+    h.flush();
+    assert.equal(h.log.scrollTop, 1100);
+  });
+
+  await t.test('explicit vertical wheel gesture cancels pending bottom follow', () => {
+    const h = harness();
+    h.render(new ChatScrollLog({ height: 1500 }));
+    h.gesture({ type: 'wheel', deltaY: -100 });
+    h.log.scrollTop = 280;
+    h.flush();
+    assert.equal(h.log.scrollTop, 280);
+  });
+
+  await t.test('Ctrl+wheel zoom is not mistaken for transcript scrolling', () => {
+    const h = harness();
+    h.render(new ChatScrollLog({ height: 1600 }));
+    h.gesture({ type: 'wheel', deltaY: -100, ctrlKey: true });
+    h.flush();
+    assert.equal(h.log.scrollTop, 1300);
+  });
+
+  await t.test('mount cleanup cancels pending rAF work and removes gesture listeners', () => {
+    const h = harness();
+    h.render(new ChatScrollLog({ height: 1700 }));
+    h.cleanup();
+    h.log.scrollTop = 80;
+    h.flush();
+    assert.equal(h.log.scrollTop, 80);
+    assert.deepEqual(h.removed.sort(), [
+      'body:keydown', 'body:pointerdown', 'document:mousedown', 'document:wheel', 'window:resize',
+    ]);
+  });
+});
+
+test('Chat composer reserves title, status and log space on compact cards', async (t) => {
+  const resizeBody = surfaceSource.match(/            const resizeComposer = \(\) => \{([\s\S]*?)\n            \};\n            input\.addEventListener\('input'/)?.[1];
+  const observerBody = surfaceSource.match(/            let composerWidth = 0;[\s\S]*?            composerObserver\.observe\(body\);/)?.[0];
+  assert.ok(resizeBody && observerBody, 'production composer resizing remains directly testable');
+  const bindResize = compileFunction('return function resizeComposer() {' + resizeBody + '\n}', [
+    'input', 'activeThread', 'ChatState', 'codex', 'sendButton',
+  ]);
+  const layout = ({ viewport = 385, notice = 26, noticeMargin = 0 } = {}) => {
+    const compact = () => main.dataset.compactComposer === 'true';
+    const ownerDocument = { defaultView: { getComputedStyle: node => ({
+      marginTop: String(node.marginTop || 0), marginBottom: String(node.marginBottom || 0),
+      paddingTop: node === messages ? (compact() ? '12px' : '24px') : '0px',
+      paddingBottom: node === messages ? (compact() ? '12px' : '28px') : '0px',
+      borderTopWidth: '0px', borderBottomWidth: '0px',
+    }) } };
+    const box = (height, extra = {}) => ({ offsetHeight: height, ownerDocument, ...extra });
+    const input = {
+      isConnected: true, style: {}, value: 'unsent draft', scrollHeight: 800, clientWidth: 380,
+      get offsetHeight() { return this.style.height === 'auto' ? 40 : parseFloat(this.style.height) || 40; },
+      closest(selector) { return selector === '.egd-codex-chat-main' ? main : selector === '.egd-codex-footer' ? footer : null; },
+    };
+    const messages = box(0);
+    const header = { ownerDocument, get offsetHeight() { return compact() ? 48 : 58; } }, status = box(44);
+    const warning = box(notice, { marginTop: noticeMargin, marginBottom: noticeMargin });
+    const pane = box(0, { children: [header, messages, warning, status],
+      querySelector: selector => selector === '.egd-codex-messages' ? messages : null });
+    const footer = { ownerDocument, get offsetHeight() { return (compact() ? 106 : 128) + input.offsetHeight; } };
+    const main = { dataset: {}, clientHeight: viewport, children: [pane, footer],
+      querySelector: selector => selector === '.egd-codex-conversation-pane' ? pane : null };
+    const sendButton = { disabled: true, title: '' };
+    const resize = bindResize(input, { conversationId: null, preparingInput: false },
+      { nativeBindingHeld: () => false }, { authStatus: { isLoggedIn: true }, connected: true, isSending: false }, sendButton);
+    return { input, main, resize, sendButton,
+      remainingLogContentHeight: () => main.clientHeight - header.offsetHeight - 44 - notice
+        - noticeMargin * 2 - (compact() ? 106 : 128) - input.offsetHeight - (compact() ? 24 : 52) };
+  };
+
+  await t.test('420px card preserves at least 80px of readable log content, excluding padding', () => {
+    const h = layout();
+    h.resize();
+    assert.equal(h.main.dataset.compactComposer, 'true');
+    assert.equal(h.input.style.height, '57px');
+    assert.equal(h.input.style.overflowY, 'auto');
+    assert.ok(h.remainingLogContentHeight() >= 80);
+    assert.equal(h.input.value, 'unsent draft');
+    assert.equal(h.sendButton.disabled, false);
+  });
+
+  await t.test('notice margins are reserved rather than clipping title or status', () => {
+    const h = layout({ noticeMargin: 6 });
+    h.resize();
+    assert.equal(h.input.style.height, '45px');
+    assert.ok(h.remainingLogContentHeight() >= 80);
+  });
+
+  await t.test('680px card retains 240px maximum and shrinks back to one compact draft', () => {
+    const h = layout({ viewport: 645 });
+    h.resize();
+    assert.equal(h.main.dataset.compactComposer, 'false');
+    assert.equal(h.input.style.height, '240px');
+    assert.equal(h.input.style.overflowY, 'auto');
+    h.main.clientHeight = 385;
+    h.resize();
+    assert.equal(h.input.style.height, '57px');
+    h.main.clientHeight = 645;
+    h.resize();
+    assert.equal(h.input.style.height, '240px');
+    h.input.scrollHeight = 30;
+    h.resize();
+    assert.equal(h.input.style.height, '40px');
+    assert.equal(h.input.style.overflowY, 'hidden');
+  });
+
+  await t.test('minimum composer stays usable without geometry and detached inputs are untouched', () => {
+    const h = layout({ viewport: 0 });
+    h.resize();
+    assert.equal(h.input.style.height, '240px', 'pre-layout and existing minimal test stubs retain the normal cap');
+    h.input.isConnected = false;
+    h.input.style.height = '80px';
+    h.resize();
+    assert.equal(h.input.style.height, '80px');
+  });
+
+  await t.test('body-height changes resize the composer while input-only height changes do not loop', () => {
+    let callback, resizeCalls = 0;
+    const observed = [];
+    const input = { clientWidth: 380, clientHeight: 40 };
+    const body = { clientHeight: 646 };
+    class ComposerResizeObserver {
+      constructor(fn) { callback = fn; }
+      observe(node) { observed.push(node); }
+    }
+    compileFunction('let composerObserver;\n' + observerBody, [
+      'input', 'body', 'ResizeObserver', 'resizeComposer',
+    ])(input, body, ComposerResizeObserver, () => { resizeCalls++; });
+    assert.deepEqual(observed, [input, body]);
+    callback();
+    assert.equal(resizeCalls, 1);
+    input.clientHeight = 240;
+    callback();
+    assert.equal(resizeCalls, 1, 'the composer height written by resizeComposer is not a new sizing trigger');
+    body.clientHeight = 386;
+    callback();
+    assert.equal(resizeCalls, 2, 'vertical-only card resize must recalculate the cap');
+    callback();
+    assert.equal(resizeCalls, 2);
+    input.clientWidth = 340;
+    callback();
+    assert.equal(resizeCalls, 3);
+  });
+  await t.test('compact CSS separates notice typography from controls and removes wasted vertical chrome', () => {
+    const css = readFileSync(new URL('../overlay/CSS/eg-desk-surface.uc.css', import.meta.url), 'utf8');
+    assert.match(css, /\.egd-codex-conversation-pane > p\.egd-codex-run-status \{[^}]*min-height: 0;[^}]*padding: 4px 16px;/);
+    assert.match(css, /\[data-compact-composer="true"\] \.egd-codex-messages \{ padding: 12px 16px; \}/);
+    assert.match(css, /\[data-compact-composer="true"\] \.egd-codex-footer \{ padding: 0 12px 12px; \}/);
+    assert.match(css, /\[data-compact-composer="true"\] \.egd-codex-input-row \{ padding: 8px 10px; gap: 4px; \}/);
+    assert.match(css, /\.egd-codex-run-status \{[^}]*flex: 0 0 auto;[^}]*min-height: 44px;/);
+    assert.match(css, /\.egd-codex-send \{ width: 32px; height: 32px;/);
+  });
 });

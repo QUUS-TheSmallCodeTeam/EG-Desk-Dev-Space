@@ -178,3 +178,183 @@ These are intentionally out of Path 1.5:
 - Multi-provider expansion beyond Codex
 - Mini-app marketplace
 - WASM acceleration
+
+## Windows Browser guard QA — 2026-10-19 follow-up
+
+This Windows path is isolated fixture QA. It does not enable ordinary-site
+interaction, accept the proposed Browser grant lifetime, or prove a native
+model turn. The earlier macOS acceptance results above remain separate.
+
+Prerequisites:
+
+- Node 24+ for the application/helper tests; Firefox installed locally with the
+  existing fx-autoconfig bootstrap. The QA launcher does not install or replace
+  Firefox's application-wide bootstrap.
+- An explicit `chrome/utils` source containing exactly the six allowlisted
+  loader utilities. It is read only; no existing user profile is modified.
+- An explicitly installed [Firefox MCP moz 0.10.4](https://github.com/mozilla/firefox-devtools-mcp/tree/v0.10.4) entry and
+  Windows x64 [geckodriver 0.37.0](https://github.com/mozilla/geckodriver/releases/tag/v0.37.0). The harness does not run npx or download tools.
+  The official geckodriver ZIP SHA256 is
+  `9ae5cb90ea9364cd385bb8313b57699e090bbec7c92af4bd65a79d6d8bbc3036`.
+  Local tool installations may live under ignored `.tmp/windows-browser-qa-tools/`.
+
+From the repository root, prepare one dedicated profile:
+
+```powershell
+# Select an installed Node 24+ executable and a dedicated loader source.
+$qaNode = '<absolute path to node.exe>'
+$qaLoader = '<absolute path to the six-file chrome/utils directory>'
+$qa = (& $qaNode apps/firefox-ui-demo/scripts/bootstrap-egdesk-chat-test-profile.mjs --loader-source $qaLoader) | ConvertFrom-Json
+$qaProfile = $qa.profile
+$env:EGDESK_QA_MCP_ENTRY = '<canonical installed path to dist.moz/index.js>'
+$env:EGDESK_QA_GECKODRIVER = '<canonical installed path to geckodriver.exe>'
+$env:EGDESK_MARIONETTE_PORT = '2828'
+$env:EGDESK_QA_BROWSER_NEGATIVE = '1'
+$env:EGDESK_QA_FIXTURE_TRANSPORT = '1'
+$env:EGDESK_QA_FIXTURE_TOKEN = 'QA_' + [guid]::NewGuid().ToString('N')
+```
+
+The profile and evidence directories are direct canonical children of the OS
+temp directory. Windows ownership uses SID/DACL validation, not POSIX uid/mode.
+Only newly created QA directories have inheritance removed and access restricted
+to the current user, SYSTEM and Administrators. The user's temp parent is not
+re-permissioned. Existing writable or linked targets are refused.
+
+Start the following in separate terminals carrying the same explicit profile
+and environment values. Do not attach to an existing production bridge on
+39218. No existing process is automatically stopped.
+
+```powershell
+& $qaNode apps/firefox-ui-demo/scripts/egdesk-chat-fixture-transport.mjs --profile $qaProfile
+& $qaNode apps/firefox-ui-demo/scripts/run-firefox-mcp-target.mjs --profile $qaProfile --mode automation --marionette-port 2828 --remote-agent-port 6000
+# Use a short execution timeout, independent of any scheduled development round.
+$qaDeadline = [DateTime]::UtcNow.AddMinutes(20).ToString('yyyy-MM-ddTHH:mm:ss.fffZ')
+& $qaNode apps/firefox-ui-demo/scripts/verify-firefox-mcp-native-tool-flow.mjs --serve-browser-fixture --browser-fixture-port 39220 --deadline-utc $qaDeadline
+# Copy the exact URL and marker printed by that owned fixture server.
+& $qaNode apps/firefox-ui-demo/scripts/verify-firefox-mcp-native-tool-flow.mjs --cases browser-negative --profile $qaProfile --browser-fixture-url '<fixture URL>' --browser-fixture-marker '<fixture marker>' --deadline-utc $qaDeadline
+```
+
+Automation mode suppresses the Firefox first-run notification with [Mozilla's
+test preference](https://github.com/mozilla-firefox/firefox/blob/main/remote/shared/RecommendedPreferences.sys.mjs)
+`termsofuse.bypassNotification`; it never sets accepted terms
+version/date or installs an enterprise acceptance policy. Normal mode disables
+remote automation and removes that notification bypass. Windows's persistent
+`parent.lock` is checked with an exclusive open-existing handle before writing.
+
+Expected evidence consists of eight scoped B/UI/actor denials, exact request/run/
+Card correlation, independent before/after DOM and viewport, and an unchanged
+actor `perform` entry count. A controlled fixture click must first advance that
+count exactly once. This is not a physical-input counter. The fixture backend
+must remain bound to the same profile with zero sends, auth writes and Chat runs
+before and after. Results and screenshots are retained in the dedicated
+`egdesk-chat-evidence-*` directory; the result prints its `evidenceFile` path.
+
+Native/source/browser model cases still require the real-provider, authentication,
+native schema, read-only policy and Memories-isolation gates. Their negative-model
+adapter remains unavailable. Native/source command receipts are still POSIX-only.
+Windows native descriptor-relative Save As is unavailable; managed drafts and
+reading remain available without advertising that unsupported capability.
+
+Observed on 2026-10-19, Windows / Firefox 158.0:
+
+- The owned live Firefox fixture passed all eight B/UI/actor denial cases.
+  The positive control advanced the actor perform-entry counter from 0 to 1;
+  every denied action left it unchanged, together with the independent fixture
+  DOM/input observations. A height-only viewport change (1440×870 → 1440×997)
+  was observed and its old action was rejected.
+- Before and after: fixture Chat sends 0, auth writes 0, Chat runs 0; native
+  provider turns 0. `nativeModelOriginVerified=false`,
+  `actorPhysicalDispatchCounterVerified=false`, `fullScenarioVerified=false`.
+- Related regression suite: 123 passed, 0 failed, 2 skipped (the POSIX shell
+  receipt and actual POSIX native Save As binary). A file-symlink test branch
+  requires Windows Developer Mode; directory junction denial and real DACL
+  write-permission tampering were checked on this host.
+- Regression Node was 24.19.0; the standalone live fixture runner used 22.23.2.
+  The installed Windows Codex 0.160.1 executable also passed its generated-schema
+  checks without starting a model turn. The screenshot was inspected separately;
+  the automated runner's `visualReview` field remains `pending`.
+- This is not the nine-case native-model negative E2E acceptance. Initial live
+  attempts exposed first-run notification/Desk entry and width-only resize-wait
+  problems, which were corrected before the complete passing run.
+
+## Windows native Browser execution and Chat polish — 2026-10-20
+
+The ordinary Chat send now forwards its explicit Browser selection with the
+existing `browserBounded` native safety envelope. A fresh native conversation
+registers observe/click/fill only when its first request has an explicit single
+HTTP(S) Card interaction selection. Actual authority comes from that run's UI
+token binding, not from its native catalog, saved policy or history. An omitted
+selection on a following send grants no Browser action. A previously registered
+observe-only conversation cannot silently gain click/fill: the UI asks for an
+explicit new Chat while retaining the old history and draft. Navigation is not
+exposed by this path. No permanent/default Browser grant policy was adopted.
+
+The native policy remains verified read-only/offline/never-approval with an empty
+external MCP catalog. UI token binding completes before Browser callback dispatch;
+it is not a pre-native-turn reservation. A failed bind declines buffered tool
+callbacks, revokes authority and interrupts the owned native turn.
+
+For the ordinary UI path, create an explicit new Chat before its first native
+turn, choose `Chat 조작 허용` from the intended Browser Card menu, then send the
+page-local request from Chat. The menu describes this Card and this Chat execution
+only. Re-select the Card for a later run; the previous selection is not renewed
+by continuing the conversation. No QA fixture environment or policy interceptor
+is required for this path.
+
+Windows startup now accepts the exact installed `0.163.0-alpha.10.2` prerelease
+only with its generated experimental schema and executable fingerprint proof;
+other prereleases are not implicitly enabled. Windows Chat storage uses actual
+owner SID/DACL checks shared with QA, refusing unsafe existing files without
+changing their permissions. The current installed native binary was used rather
+than running an older binary against the shared native account/state directory.
+
+Chat styling now uses a calmer neutral palette, a clearer header/message/input
+hierarchy, readable auxiliary controls, and a compact attachment/composer layout.
+Stop, errors, approvals, activity records, diagnostics and existing selectors are
+retained. Pending scroll intent survives rapid SSE rerenders before the next
+animation frame; user scrolling and message anchors still win. Unknown history
+coverage is presented as an unconfirmed range, not as a failed history fetch.
+
+Observed on Windows / Firefox 158.0 / Node 24.19.0:
+
+- An actual native model completed observe/click/observe/fill on the owned local
+  fixture, with four correlated native tool items and independent DOM/input
+  changes. Its first acceptance run correctly failed the stronger final-answer
+  visibility check, exposing the rapid-rerender scroll bug fixed above.
+- Updated Chat screenshots were inspected at 440×680 Card size. The persisted
+  actual final answer and fixture marker were visible after reload; the activity
+  and composer controls remained available. This screenshot is not a new model
+  execution receipt.
+- The actual completed run's activity drawer showed all four completed tool
+  records. Opening and closing that drawer preserved a long unsent draft. A
+  separate 420×420 layout probe exposed an over-tall composer; the compact
+  composer follow-up retained the title, run status and transcript space.
+- Runtime/provider/UI/real-proof regression suite: 277 passed, zero failed,
+  one skipped POSIX command receipt. A subsequent history-copy test also passed.
+- The ordinary unmodified-request Browser acceptance passed on the second real
+  model run: `browserBounded`, four native tool items, exact single-Card binding,
+  independent DOM/input change, unchanged focus/Canvas/control Card, and a visible
+  final Chat answer linked to its actual native item. The request witness forwarded
+  the exact original fetch input/init/body; the bridge had no fixture-transport or
+  fixture-Browser opt-in environment. `ordinaryUiRequestUnmodified=true`,
+  `renderedFinalAnswerVerified=true`, `nativeModelOriginVerified=true` and
+  `selectedRealExecutionVerified=true` were observed. Evidence was retained under
+  `egdesk-chat-evidence-1fcb8657edd12e3d/result.json` in the OS temp directory.
+- Two non-overlapping Windows regression groups subsequently passed: 229 and
+  149 tests, zero failures; three inapplicable checks were skipped (old 0.160.1
+  native discovery, POSIX shell receipt, actual POSIX native Save As).
+- The compact-composer follow-up added six geometry/observer/style regression
+  cases; the full surface-state suite then passed 163/163. The textarea budget accounts
+  for real title/status/notices and composer chrome, reserves transcript space,
+  and observes vertical Card resizing without a self-triggering height loop.
+- The final actual Windows 420×420 interior probe measured input height 57px,
+  scrollable long draft, log height 104px and readable content height 80px after
+  subtracting padding. Title, run status, Send and log all remained inside the
+  Card. The long draft was preserved; no model turn was started by this probe.
+  Screenshot: OS temp `egdesk-chat-evidence-7c712f1263f03168/`.
+- Final non-overlapping regression totals after the compact follow-up: 385 passed,
+  zero failed, three skipped across the same two groups (236 + 149 passed).
+- Local-fixture success is not proof of arbitrary-site workflows,
+  account operations, navigation, submissions or the nine-case native negative
+  acceptance. The existing `fullScenarioVerified` result must remain false while
+  that negative adapter is unavailable.

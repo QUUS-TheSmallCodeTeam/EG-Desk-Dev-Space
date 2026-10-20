@@ -4,6 +4,7 @@
 import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
+import { isOwnedAndPrivate } from './egdesk-qa-platform.mjs';
 
 const markerName = '.egdesk-dedicated-firefox-profile';
 const markerContents = 'EGDESK_DEDICATED_FIREFOX_PROFILE_V1\n';
@@ -27,7 +28,7 @@ try {
   if (!stat.isDirectory() || stat.isSymbolicLink()) {
     reject('profile must be a real directory, not a symlink');
   }
-  if (stat.uid !== process.getuid() || (stat.mode & 0o022) !== 0) {
+  if (!isOwnedAndPrivate(profile, stat)) {
     reject('profile must be owned by this user and not group/world writable');
   }
   if (fs.realpathSync.native(profile) !== profile) {
@@ -54,7 +55,7 @@ try {
     }
     const markerStat = fs.lstatSync(marker);
     if (!markerStat.isFile() || markerStat.isSymbolicLink() ||
-        markerStat.uid !== process.getuid() || (markerStat.mode & 0o022) !== 0 ||
+        !isOwnedAndPrivate(marker, markerStat) ||
         fs.readFileSync(marker, 'utf8') !== markerContents) {
       reject(`alternate profile needs a user-owned ${markerName} with the exact V1 marker`);
     }

@@ -8,6 +8,22 @@ import { buildCodexAppServerLaunch, inspectNativeCapabilities, preflightOwnedApp
 import { fingerprintNativeExecutable, verifyNativeSchemaDirectory } from './codex-native-schema-probe.mjs'
 import { AppServerRpc } from './codex-app-server-rpc.mjs'
 
+test('Windows native executable discovery respects Path and selects the executable rather than a shell wrapper', async () => {
+  const dir = await mkdtemp(path.join(os.tmpdir(), 'egdesk-exe-resolver-'))
+  try {
+    const executable = path.join(dir, 'codex.exe')
+    await writeFile(executable, 'public executable fixture', { mode: 0o700 })
+    await writeFile(path.join(dir, 'codex.cmd'), 'not selected', { mode: 0o700 })
+    assert.equal(resolveCodexExecutable({ Path: dir }, { platform: 'win32' }), executable)
+    assert.equal(resolveCodexExecutable({ EGDESK_CODEX_BIN: executable, Path: '' }, { platform: 'win32' }), executable)
+    assert.throws(() => resolveCodexExecutable({ EGDESK_CODEX_BIN: 'relative/codex', Path: dir }, { platform: 'win32' }), /unavailable/)
+  } finally {
+    assert.equal(path.dirname(dir), os.tmpdir())
+    assert.match(path.basename(dir), /^egdesk-exe-resolver-/)
+    await rm(dir, { recursive: true })
+  }
+})
+
 test('version proof uses the exact executable later selected for app-server, not an SDK fallback', () => {
   const executable = '/configured/native/codex'
   const probe = ({ executable: selected }) => { assert.equal(selected, executable); return { contextContract: true, qaContract: true, schemaFingerprint: 'a'.repeat(64) } }
@@ -31,6 +47,24 @@ test('version proof uses the exact executable later selected for app-server, not
   assert.equal(inspectNativeCapabilities({ executable, run: () => ({ status: 0, stdout: 'codex-cli 0.160.1\n' }), probe: () => null, fingerprint }).schemaMatch, false)
   assert.equal(inspectNativeCapabilities({ executable, run: () => ({ status: 0, stdout: 'codex-cli 0.160.1\n' }), probe: () => ({ contextContract: true, qaContract: true, schemaFingerprint: 'bad' }), fingerprint }).qaReadOnly, false)
   assert.equal(inspectNativeCapabilities({ executable, run: () => ({ status: 0, stdout: 'codex-cli 0.160.1\n' }), probe, fingerprint: () => { throw new Error('Unreadable selected binary') } }).dynamicTools, false)
+})
+
+test('only the schema-verified Windows prerelease can expose native QA tools', () => {
+  const inspect = (version, options = {}) => inspectNativeCapabilities({ executable: '/selected/native',
+    run: () => ({ status: 0, stdout: `codex-cli ${version}\n` }),
+    probe: () => ({ contextContract: true, qaContract: true, schemaFingerprint: 'a'.repeat(64) }),
+    fingerprint: () => 'b'.repeat(64), ...options })
+  const proof = inspect('0.163.0-alpha.10.2')
+  assert.equal(proof.version, '0.163.0-alpha.10.2')
+  assert.equal(proof.qaReadOnly, true)
+  assert.match(proof.contractFingerprint, /^[a-f0-9]{64}$/)
+  for (const version of ['0.163.0-alpha.10.3', '0.163.0-alpha.10.1', '0.163.0', '0.164.0']) {
+    assert.equal(inspect(version).schemaMatch, false)
+  }
+  assert.equal(inspect('0.163.0-alpha.10.2', { probe: () => null }).qaReadOnly, false)
+  assert.equal(inspect('0.163.0-alpha.10.2', { fingerprint: () => 'bad' }).qaReadOnly, false)
+  assert.equal(inspect('0.163.0-alpha.10.2', { probe: () => ({ contextContract: true,
+    qaContract: false, schemaFingerprint: 'a'.repeat(64) }) }).qaReadOnly, false)
 })
 
 test('installed 0.160.1 generated experimental schema has the exact native contracts used by context, Reader and read-only QA', async t => {

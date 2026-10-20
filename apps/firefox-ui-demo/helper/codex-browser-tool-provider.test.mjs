@@ -66,12 +66,31 @@ test('QA Browser preparation requires an original observe selection and a live U
   assert.equal(JSON.stringify(f.events).includes('one-time-token'), false)
 })
 
-test('BrowserBounded remains observe-only and does not expand ordinary-site interaction authority', async () => {
+test('BrowserBounded accepts a single explicit current-turn interaction selection, not a thread-wide grant', async () => {
   const f = fixture()
-  assert.throws(() => f.provider.prepare({ selectedSources: selected('interact'), clientThreadId: 'ui-thread-1', effectiveExecutionPolicy: 'browserBounded', browserTransportId: 'ui-stream-1' }), error => error.code === 'BROWSER_INTERACTION_NOT_GRANTED')
+  assert.throws(() => f.provider.prepare({ selectedSources: selected('interact'), clientThreadId: 'ui-thread-1', effectiveExecutionPolicy: 'browserBounded', browserTransportId: 'ui-stream-1' }), error => error.code === 'INVALID_BROWSER_SELECTION')
   const prepared = f.provider.prepare({ selectedSources: selected('observe'), clientThreadId: 'ui-thread-1', effectiveExecutionPolicy: 'browserBounded', browserTransportId: 'ui-stream-1' })
   assert.equal(prepared.selection.selectedSources[0].browserToolPermission, 'observe')
+  assert.equal(prepared.interactionRequested, false)
   assert.equal(f.provider.prepare({ effectiveExecutionPolicy: 'browserBounded' }), null)
+  const source = { ...selected('interact')[0], sourceRef: { viewId: 'card-1', uri: 'https://example.test/owned-page' } }
+  assert.throws(() => f.provider.prepare({ selectedSources: [source, { ...source, id: 'source-2' }], clientThreadId: 'ui-thread-1', effectiveExecutionPolicy: 'browserBounded', browserTransportId: 'ui-stream-1' }), error => error.code === 'INVALID_BROWSER_SELECTION')
+  const interacting = f.provider.prepare({ selectedSources: [source], clientThreadId: 'ui-thread-1', effectiveExecutionPolicy: 'browserBounded', browserTransportId: 'ui-stream-1' })
+  assert.equal(interacting.interactionRequested, true)
+  const run = { answerId: 'native/turn-1', runId: 'turn-1', clientThreadId: 'ui-thread-1', status: 'inProgress', executionPolicy: { mode: 'browserBounded' } }
+  await f.provider.bindRun(run, interacting)
+  await f.provider.dispatch(run, { tool: 'egdesk_browser_click', callId: 'click', arguments: { cardId: 'card-1' } })
+  assert.ok(f.calls.some(call => call[0] === 'dispatch' && call[1] === 'turn-1' && call[2] === 'egdesk_browser_click'))
+  const before = f.calls.filter(call => call[0] === 'dispatch').length
+  const navigate = await f.provider.dispatch(run, { tool: 'egdesk_browser_navigate', callId: 'navigate', arguments: { cardId: 'card-1' } })
+  const foreign = await f.provider.dispatch(run, { tool: 'egdesk_browser_fill', callId: 'foreign', arguments: { cardId: 'card-other' } })
+  const later = { ...run, answerId: 'native/turn-2', runId: 'turn-2', browserBinding: undefined }
+  await f.provider.bindRun(later, null)
+  const inherited = await f.provider.dispatch(later, { tool: 'egdesk_browser_click', callId: 'inherited', arguments: { cardId: 'card-1' } })
+  assert.equal(navigate.success, false)
+  assert.equal(foreign.success, false)
+  assert.equal(inherited.success, false)
+  assert.equal(f.calls.filter(call => call[0] === 'dispatch').length, before)
 })
 
 test('unverified native dynamic-tool schema exposes no Browser specs or selected Card authority', () => {

@@ -4,6 +4,7 @@ import { spawnSync } from 'node:child_process';
 import { createHash } from 'node:crypto';
 import {
   parseDeadlineUtc, assertBeforeDeadline, assertTurnTimeBudget, parseCases, scenarioCoverage,
+  assertQaExecutionMode, assertNegativeFixtureBackend,
   parseResumeEmptyThreadId, assertResumeEmptyThreadState,
   parseResumeSourceOptions, assertPreparedSourceResumeEvidence,
   chooseChatProxyTarget,
@@ -15,10 +16,12 @@ import {
   assertFreshBrowserRootSse,
   assertNativeAuthorityChain, assertPendingReadOnlyNoSideEffect,
   assertNativeFileAndCommand, assertSourceRead, assertBrowserToolFlow,
-  browserToolReceipts, assertBrowserPositiveFlow, assertBrowserFocusOwnership,
+  browserToolReceipts, assertBrowserPositiveFlow, assertBrowserFocusOwnership, assertBrowserRenderedAnswer,
+  installQaSendWitness,
   assertPublicBrowserSseBindings,
   assertBrowserSameChatAddition, assertBrowserNegativeGuards,
   assertBrowserNegativeProbeResults,
+  browserViewportChanged,
   assertBrowserFixtureConfig, browserFixtureHtml, createBrowserFixtureHandler,
   assertBrowserFixtureServerReady,
   assertNoFixtureWrites,
@@ -105,7 +108,8 @@ test('real transport and effective native read-only policy are hard pre-turn gat
   }
 });
 
-test('constructed harmless printf actually emits one newline in the local shell', () => {
+test('constructed POSIX printf actually emits one newline in the local shell',
+  { skip: process.platform === 'win32' ? 'POSIX native command receipts; Windows Browser QA uses no shell commands' : false }, () => {
   const token = 'QA_COMMAND_0123456789abcdef';
   const command = harmlessPrintfCommand(token);
   const child = spawnSync('/bin/sh', ['-c', command], { encoding: 'utf8', timeout: 1000 });
@@ -136,18 +140,65 @@ test('constructed harmless printf actually emits one newline in the local shell'
 test('explicit case selection verifies partial work without claiming full-scenario PASS', () => {
   assert.deepEqual(parseCases('native,source'), ['native', 'source']);
   assert.deepEqual(scenarioCoverage(['native', 'source'], ['native', 'source']), {
-    selectedCasesVerified: true, fullScenarioVerified: false, coverage: 'partial' });
+    selectedCasesVerified: true, fullScenarioVerified: false, coverage: 'partial',
+    missingEvidence: ['native-model-browser', 'native-model-browser-negative'] });
   assert.deepEqual(scenarioCoverage(['native', 'source', 'browser'], ['native', 'source', 'browser']), {
-    selectedCasesVerified: true, fullScenarioVerified: false, coverage: 'partial' });
+    selectedCasesVerified: true, fullScenarioVerified: false, coverage: 'partial',
+    missingEvidence: ['native-model-browser-negative'] });
   assert.deepEqual(scenarioCoverage(['native', 'source', 'browser', 'browser-negative'],
     ['native', 'source', 'browser', 'browser-negative']), {
-    selectedCasesVerified: true, fullScenarioVerified: false, coverage: 'partial' });
+    selectedCasesVerified: true, fullScenarioVerified: false, coverage: 'partial',
+    missingEvidence: ['native-model-browser-negative'] });
   assert.deepEqual(parseCases('browser-negative'), ['browser-negative']);
   assert.deepEqual(scenarioCoverage(['native', 'source'], ['native']), {
-    selectedCasesVerified: false, fullScenarioVerified: false, coverage: 'partial' });
+    selectedCasesVerified: false, fullScenarioVerified: false, coverage: 'partial',
+    missingEvidence: ['native-model-source', 'native-model-browser', 'native-model-browser-negative'] });
+  assert.deepEqual(scenarioCoverage(['browser'], ['browser']), {
+    selectedCasesVerified: true, fullScenarioVerified: false, coverage: 'partial',
+    missingEvidence: ['native-model-native', 'native-model-source', 'native-model-browser-negative'] });
   for (const invalid of [undefined, '', 'native,source,unknown', 'native,native', 'native, source']) {
     assert.throws(() => parseCases(invalid));
   }
+});
+
+test('real Browser final answer must reach its native-item-bound visible Chat row', () => {
+  const fixture = { marker: 'QA_DOM_0123456789abcdef' };
+  const value = { status: 'completed', runId: 'browser-run', conversationId: 'browser-conversation',
+    messages: [{ id: 'native-final', role: 'assistant', phase: 'final_answer', status: 'complete',
+      text: `Observed ${fixture.marker}` }] };
+  const row = { messageId: 'local-final', nativeItemId: 'native-final', role: 'assistant',
+    runId: value.runId, status: 'complete', stateText: value.messages[0].text,
+    visible: true, text: value.messages[0].text };
+  const rendered = { activeThreadId: 'local-thread', conversationId: value.conversationId, rows: [row] };
+  const input = { run: value, rendered, threadId: 'local-thread', fixture };
+  assert.equal(assertBrowserRenderedAnswer(input).renderedFinalAnswerVerified, true);
+  for (const changed of [{ nativeItemId: 'another-native-item' }, { runId: 'another-run' }]) {
+    assert.throws(() => assertBrowserRenderedAnswer({ ...input,
+      rendered: { ...rendered, rows: [{ ...row, ...changed }] } }), /run-bound rendered/);
+  }
+  assert.throws(() => assertBrowserRenderedAnswer({ ...input,
+    rendered: { ...rendered, rows: [{ ...row, visible: false }] } }), /not visible/);
+  assert.throws(() => assertBrowserRenderedAnswer({ ...input,
+    rendered: { ...rendered, rows: [{ ...row, stateText: 'different answer' }] } }), /differs/);
+  assert.throws(() => assertBrowserRenderedAnswer({ ...input,
+    rendered: { ...rendered, activeThreadId: 'another-thread' } }), /another Chat thread/);
+});
+
+test('model-free Browser probes require their own gate and exact untouched fixture backend', () => {
+  const env = { EGDESK_QA_BROWSER_NEGATIVE: '1', EGDESK_QA_FIXTURE_TRANSPORT: '1', EGDESK_QA_FIXTURE_TOKEN: 'QA_PUBLIC_TOKEN_0123456789' };
+  assert.doesNotThrow(() => assertQaExecutionMode(['browser-negative'], env));
+  assert.throws(() => assertQaExecutionMode(['browser-negative'], { ...env, EGDESK_QA_BROWSER_NEGATIVE: '0' }), /NEGATIVE/);
+  assert.throws(() => assertQaExecutionMode(['browser-negative'], { ...env, EGDESK_QA_FIXTURE_TRANSPORT: '0' }), /fixture/);
+  assert.throws(() => assertQaExecutionMode(['browser'], env), /real-turn/);
+  assert.throws(() => assertQaExecutionMode(['browser'], { ...env, EGDESK_QA_REAL_TURN: '1' }), /forbidden/);
+  const state = { fixture: true, profile: 'owned-profile', observed: { sends: [], authWrites: [] }, runs: [] };
+  const health = { ok: true, fixture: true };
+  assert.equal(assertNegativeFixtureBackend('owned-profile', health, state).providerTurns, 0);
+  assert.throws(() => assertNegativeFixtureBackend('other-profile', health, state), /another Firefox/);
+  assert.throws(() => assertNegativeFixtureBackend('owned-profile', { ...health, fixture: false }, state), /production/);
+  for (const key of ['sends', 'authWrites']) assert.throws(() => assertNegativeFixtureBackend('owned-profile', health,
+    { ...state, observed: { ...state.observed, [key]: [{}] } }), /zero fixture/);
+  assert.throws(() => assertNegativeFixtureBackend('owned-profile', health, { ...state, runs: [{}] }), /Chat run/);
 });
 
 test('source-only resume accepts one already active empty ordinary room and rejects uncertain reuse', () => {
@@ -258,6 +309,14 @@ test('Browser preflight reflects exact selected Card, one-time token binding and
       hasOneTimeToken: true, tokenThreadId: clientThreadId }] };
   const input = { cwd, clientThreadId, conversationId: null, selection };
   assert.equal(assertBrowserUiRequest(reflection, input), true);
+  const ordinary = { ...reflection, executionPolicy: { mode: 'browserBounded' }, requestBodyUnmodified: true };
+  const ordinaryInput = { ...input, expectedPolicyMode: 'browserBounded' };
+  assert.equal(assertBrowserUiRequest(ordinary, ordinaryInput), true);
+  for (const requestBodyUnmodified of [false, undefined]) assert.throws(() => assertBrowserUiRequest({
+    ...ordinary, requestBodyUnmodified }, ordinaryInput), /unmodified original fetch body/);
+  assert.throws(() => assertBrowserUiRequest({ ...ordinary, executionPolicy: undefined }, ordinaryInput), /bounded native/);
+  assert.throws(() => assertBrowserUiRequest({ ...ordinary,
+    executionPolicy: { mode: 'browserBounded', extra: true } }, ordinaryInput), /exact bounded policy/);
   assert.throws(() => assertBrowserUiRequest({ ...reflection,
     executionPolicy: { mode: 'readOnlyQa' } }, input), /bounded native/);
   assert.throws(() => assertBrowserUiRequest({ ...reflection,
@@ -285,6 +344,74 @@ test('Browser preflight reflects exact selected Card, one-time token binding and
     browserTransportId: 'other-root' }, now: 1001 }), /did not use/);
   assert.throws(() => assertFreshBrowserRootSse({ ready, emitted: { ...reflection,
     rootSseStable: false }, now: 1001 }), /not stable/);
+});
+
+test('ordinary Browser witness forwards exact original fetch arguments and never injects policy', async () => {
+  const hadWindow = Object.hasOwn(globalThis, 'window'), oldWindow = globalThis.window;
+  const hadDocument = Object.hasOwn(globalThis, 'document'), oldDocument = globalThis.document;
+  const make = (policyMode = 'browserBounded') => {
+    const selected = policyMode === 'browserBounded';
+    const source = { id: 'source-witness', kind: 'browser', selectedByUser: true,
+      browserToolPermission: 'interact', browserToolSelection: { token: 'token-witness', threadId: 'client-witness' },
+      browserToolIdentity: { cardEpoch: 'epoch-witness' },
+      sourceRef: { viewId: 'card-witness', profileId: 'profile-witness', accountId: '',
+        uri: 'http://127.0.0.1:39220/egdesk-qa/QA_URL_0123456789abcdef' } };
+    const expected = { clientThreadId: 'client-witness', localThreadId: 'local-witness',
+      cwd: '/owned-qa', message: 'Use the explicitly selected Browser', policyMode,
+      qaOutputMarkers: [], sourceIds: selected ? null : [], hiddenMarker: null, conversationId: null,
+      selectedCardId: selected ? source.sourceRef.viewId : null,
+      selectedSourceId: source.id, selectedProfileId: source.sourceRef.profileId,
+      selectedCardEpoch: source.browserToolIdentity.cardEpoch, browserFixtureUrl: source.sourceRef.uri,
+      browserTransportId: 'transport-witness', browserTransportSampledAtMs: Date.now() };
+    const calls = [];
+    const fake = { fetch(input, init) { calls.push({ input, init, body: init.body, receiver: this }); return Promise.resolve({ ok: true }); },
+      __egdesk: { state: { activeEntityId: 'chat-card-witness', panTarget: { x: 0, y: 0 }, zoomTarget: 1,
+        codex: { activeThreadId: 'local-witness', chatCardEntityId: 'chat-card-witness',
+          threads: [{ id: 'local-witness', title: 'QA witness', inputSources: selected ? [source] : [], briefingInputs: [] }] } },
+      browserAgentTools: { rootSseReady: () => ({ sourceReady: true, stable: true, eventSourceReadyState: 1,
+        browserTransportId: 'transport-witness', sampledAtMs: Date.now() }) } } };
+    const body = { requestId: 'request-witness', clientThreadId: expected.clientThreadId,
+      message: expected.message, cwd: expected.cwd, profileEnabled: false,
+      contextSnapshotIds: selected ? ['capture-witness'] : [],
+      ...(selected ? { executionPolicy: { mode: 'browserBounded' }, selectedSources: [source],
+        browserTransportId: 'transport-witness' } : {}) };
+    globalThis.window = fake;
+    globalThis.document = { activeElement: null };
+    installQaSendWitness(expected);
+    return { fake, expected, calls, body };
+  };
+  try {
+    const good = make();
+    const route = 'http://127.0.0.1:39218/chat/send';
+    const init = { method: 'POST', body: JSON.stringify(good.body), headers: { 'Content-Type': 'application/json' } };
+    const originalBody = init.body;
+    await good.fake.fetch(route, init);
+    assert.equal(good.calls.length, 1);
+    assert.equal(good.calls[0].input, route);
+    assert.equal(good.calls[0].init, init);
+    assert.equal(good.calls[0].body, originalBody);
+    assert.equal(good.calls[0].receiver, good.fake);
+    assert.equal(good.fake.__egdeskQaSendInterceptor.snapshot.requestBodyUnmodified, true);
+    for (const change of [body => { delete body.executionPolicy; },
+      body => { body.executionPolicy = { mode: 'fixtureBrowserQa' }; },
+      body => { body.executionPolicy.extra = true; },
+      body => { body.qaOutputMarkers = []; }]) {
+      const bad = make(); change(bad.body);
+      assert.throws(() => bad.fake.fetch(route, { method: 'POST', body: JSON.stringify(bad.body) }),
+        /policy|receipt fields|must emit browserBounded/);
+      assert.equal(bad.calls.length, 0);
+      assert.equal(bad.fake.__egdeskQaSendInterceptor.snapshot, null);
+    }
+    const native = make('readOnlyQa');
+    const nativeInit = { method: 'POST', body: JSON.stringify(native.body) };
+    await native.fake.fetch(route, nativeInit);
+    assert.notEqual(native.calls[0].init, nativeInit);
+    assert.deepEqual(JSON.parse(native.calls[0].body).executionPolicy, { mode: 'readOnlyQa' });
+    assert.equal(native.fake.__egdeskQaSendInterceptor.snapshot.requestBodyUnmodified, false);
+  } finally {
+    if (hadWindow) globalThis.window = oldWindow; else delete globalThis.window;
+    if (hadDocument) globalThis.document = oldDocument; else delete globalThis.document;
+  }
 });
 
 test('C correlates original SSE provider, active snapshot stream epoch and native policy before completion', () => {
@@ -562,6 +689,22 @@ test('Browser positive maps actual A SSE/native items to one local observe-click
   assert.equal(proof.humanSendFocusTransition, 'chat-card-activated');
   assert.equal(proof.humanTypingProbeVerified, false);
   assert.equal(proof.negativeGuardsVerified, false);
+  const ordinaryPolicy = { ...value.executionPolicy, mode: 'browserBounded',
+    browserEffects: 'selected-card-observe-click-fill-this-run' };
+  const ordinaryInput = { ...input, expectedPolicyMode: 'browserBounded',
+    run: { ...value, executionPolicy: ordinaryPolicy },
+    active: { ...active, run: { ...active.run, executionPolicy: ordinaryPolicy } },
+    events: events.map(event => event.event === 'run.executionPolicy'
+      ? { ...event, details: { executionPolicy: ordinaryPolicy } } : event),
+    emitted: { ...emitted, executionPolicy: { mode: 'browserBounded' }, requestBodyUnmodified: true } };
+  const ordinaryProof = assertBrowserPositiveFlow(ordinaryInput);
+  assert.equal(ordinaryProof.expectedPolicyMode, 'browserBounded');
+  assert.equal(ordinaryProof.requestBodyUnmodified, true);
+  assert.equal(ordinaryProof.ordinaryUiRequestUnmodified, true);
+  for (const requestBodyUnmodified of [false, undefined]) assert.throws(() => assertBrowserPositiveFlow({
+    ...ordinaryInput, emitted: { ...ordinaryInput.emitted, requestBodyUnmodified } }), /unmodified original fetch body/);
+  assert.throws(() => assertBrowserPositiveFlow({ ...ordinaryInput,
+    emitted: { ...ordinaryInput.emitted, executionPolicy: undefined } }), /exact bounded policy/);
   assert.throws(() => assertBrowserPositiveFlow({ ...input,
     events: events.map(item => item.itemId === 'fill-1'
       ? { ...item, details: { ...item.details, postconditionMatched: false } } : item) }), /fill postcondition/);
@@ -765,28 +908,58 @@ test('C rejects Browser cancel-before-act, forbidden schemes and permission esca
 test('actual negative-probe result cannot claim a native model turn or skip an owned no-effect denial', () => {
   const names = ['stale-revision-before-ui', 'forbidden-scheme-before-ui',
     'stale-dom-at-actor', 'resized-viewport-at-actor',
-    'observe-only-interaction-denied', 'stop-before-first-bind-accept'];
+    'observe-only-interaction-denied', 'stop-before-first-bind-accept',
+    'expired-request-before-actor', 'cancel-before-act'];
   const receipts = [
     { code: 'BROWSER_OBSERVATION_STALE', uiActRequests: 0 },
-    { code: 'INVALID_BROWSER_TOOL', serviceActRequests: 0, uiProtocolDenied: true },
+    { code: 'INVALID_BROWSER_TOOL', serviceActRequests: 0, uiProtocolDenied: true, uiProtocolActRequests: 1 },
     { code: 'BROWSER_ACTION_UNVERIFIED', uiActRequests: 1 },
     { code: 'BROWSER_ACTION_UNVERIFIED', uiActRequests: 1 },
     { code: 'BROWSER_INTERACTION_NOT_GRANTED', serviceActRequests: 0,
-      uiProtocolDenied: true },
+      uiProtocolDenied: true, uiProtocolActRequests: 1 },
     { code: 'BROWSER_BINDING_STALE', cancelledBeforeBindAccepted: true,
       uiActRequests: 0 },
+    { code: null, uiStatus: 'rejected', uiReason: 'request expired', requestDeadlineMs: 90, uiActRequests: 1,
+      attemptedAt: 100, uiRequestId: 'act-6' },
+    { code: 'BROWSER_RUN_ENDED', uiStatus: 'rejected', uiReason: 'run cancelled', serviceActRequestsAfterCancel: 0, uiActRequests: 1,
+      attemptedAt: 102, uiRequestId: 'act-7', cancelReceipt: { requestId: 'cancel-7', runId: 'qa-browser-simulator-7',
+        cardId: 'owned-local-card', status: 'cancelled', at: 101 } },
   ];
   const proof = { simulatorOnly: true, nativeModelOriginVerified: false,
     actorPhysicalDispatchCounterVerified: false,
+    actorPerformCounterVerified: true, actorPerformPositiveControl: { cardId: 'owned-local-card',
+      actorDocumentId: 'actor-owned', before: 0, after: 1 },
     providerTurns: 0, cardId: 'owned-local-card',
     probes: names.map((name, index) => ({ name, cardId: 'owned-local-card', denied: true,
       ownedFixtureContentUnchangedAfterDeniedAction: true, simulatorOnly: true,
       sourceId: `qa-source-${index}`, cardEpoch: 'card-epoch-owned',
       syntheticRunId: `qa-browser-simulator-${index}`,
+      actorDocumentId: 'actor-owned', actorPerformCallsBefore: 1, actorPerformCallsAfter: 1,
+      beforeAttempt: { documentId: 'actor-owned', actorPerformCalls: 1, text: 'unchanged' },
+      afterAttempt: { documentId: 'actor-owned', actorPerformCalls: 1, text: 'unchanged' },
+      uiRequests: [
+        ...(index === 7 ? [{ kind: 'cancel', requestId: 'cancel-7', responseRequestId: 'cancel-7',
+          runId: 'qa-browser-simulator-7', cardId: 'owned-local-card', targetCardEpoch: 'card-epoch-owned',
+          deadlineMs: 1000, attemptedAt: 100, respondedAt: 101, status: 'cancelled' }] : []),
+        { kind: [0, 5].includes(index) ? 'bind' : 'act', requestId: `act-${index}`, responseRequestId: `act-${index}`,
+          runId: `qa-browser-simulator-${index}`, cardId: 'owned-local-card', targetCardEpoch: 'card-epoch-owned',
+          deadlineMs: index === 6 ? 90 : 1000, attemptedAt: index === 7 ? 102 : 100,
+          respondedAt: 103, status: [0, 5].includes(index) ? 'bound' : 'rejected', error: 'owned UI guard denied action' }],
       ...receipts[index] })),
     requestsScopedToOwnedCard: true, preexistingBrowserCardStylesUnchanged: true,
     canvasPanZoomUnchanged: true };
   assert.equal(assertBrowserNegativeProbeResults(proof), true);
+  assert.throws(() => assertBrowserNegativeProbeResults({ ...proof, actorPerformCounterVerified: false }), /perform-entry counter/);
+  assert.throws(() => assertBrowserNegativeProbeResults({ ...proof,
+    actorPerformPositiveControl: { ...proof.actorPerformPositiveControl, after: 0 } }), /positive action/);
+  assert.throws(() => assertBrowserNegativeProbeResults({ ...proof,
+    probes: proof.probes.map((item, index) => index === 2 ? { ...item, actorPerformCallsAfter: 2 } : item) }), /perform dispatcher/);
+  assert.throws(() => assertBrowserNegativeProbeResults({ ...proof,
+    probes: proof.probes.map((item, index) => index === 3 ? { ...item,
+      uiRequests: item.uiRequests.map(request => ({ ...request, responseRequestId: 'other-request' })) } : item) }), /correlation/);
+  assert.throws(() => assertBrowserNegativeProbeResults({ ...proof,
+    probes: proof.probes.map((item, index) => index === 2 ? { ...item,
+      uiRequests: item.uiRequests.map(request => ({ ...request, kind: 'bind', status: 'bound' })) } : item) }), /act receipt count/);
   assert.throws(() => assertBrowserNegativeProbeResults({ ...proof,
     nativeModelOriginVerified: true }), /cannot claim native-model origin/);
   assert.throws(() => assertBrowserNegativeProbeResults({ ...proof,
@@ -798,6 +971,15 @@ test('actual negative-probe result cannot claim a native model turn or skip an o
       ? { ...item, ownedFixtureContentUnchangedAfterDeniedAction: false } : item) }), /no-effect/);
   assert.throws(() => assertBrowserNegativeProbeResults({ ...proof,
     preexistingBrowserCardStylesUnchanged: false }), /preexisting Browser Card/);
+});
+
+test('Browser resize observes height-only and device-scale changes even when Windows keeps the same inner width', () => {
+  const before = { width: 1440, height: 870, devicePixelRatio: 1 };
+  assert.equal(browserViewportChanged(before, { ...before }), false);
+  assert.equal(browserViewportChanged(before, { ...before, height: 997 }), true);
+  assert.equal(browserViewportChanged(before, { ...before, width: 1320 }), true);
+  assert.equal(browserViewportChanged(before, { ...before, devicePixelRatio: 1.25 }), true);
+  assert.equal(browserViewportChanged(before, null), false);
 });
 
 test('owned Browser fixture handler serves only one exact loopback GET with a persistent DOM marker', () => {

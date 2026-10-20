@@ -4,6 +4,7 @@ import path from 'node:path';
 import { execFileSync } from 'node:child_process';
 import { fileURLToPath } from 'node:url';
 import { createHash } from 'node:crypto';
+import { createPrivateQaTempDirectory, isOwnedAndPrivate } from './egdesk-qa-platform.mjs';
 
 export const QA_PROFILE_PREFIX = 'egdesk-chat-test-';
 export const QA_MARKER_NAME = '.egdesk-dedicated-firefox-profile';
@@ -86,7 +87,7 @@ export function assertQaProfile(profilePath) {
   if (path.resolve(profilePath) !== profilePath) refuse('path must be normalized');
   const info = fs.lstatSync(profilePath);
   if (!info.isDirectory() || info.isSymbolicLink()) refuse('profile must be a real directory');
-  if (info.uid !== process.getuid() || (info.mode & 0o022) !== 0) {
+  if (!isOwnedAndPrivate(profilePath, info)) {
     refuse('profile must be user-owned and not group/world writable');
   }
   const canonical = fs.realpathSync.native(profilePath);
@@ -101,7 +102,7 @@ export function assertQaProfile(profilePath) {
   const markerPath = path.join(canonical, QA_MARKER_NAME);
   const markerInfo = fs.lstatSync(markerPath);
   if (!markerInfo.isFile() || markerInfo.isSymbolicLink() ||
-      markerInfo.uid !== process.getuid() || (markerInfo.mode & 0o022) !== 0 ||
+      !isOwnedAndPrivate(markerPath, markerInfo) ||
       !fs.readFileSync(markerPath).equals(QA_MARKER_BYTES)) {
     refuse('marker must be a user-owned regular file with the exact V1 bytes');
   }
@@ -134,8 +135,7 @@ export function bootstrapQaProfile({ loaderSource = DEFAULT_LOADER_SOURCE, deskR
 
   // mkdtemp can return a /var path on macOS while its canonical path begins
   // /private/var. Resolve before the guard or launcher sees this path.
-  const created = fs.mkdtempSync(path.join(canonicalTempRoot(), QA_PROFILE_PREFIX));
-  const profile = fs.realpathSync.native(created);
+  const profile = createPrivateQaTempDirectory(QA_PROFILE_PREFIX);
   try {
     fs.chmodSync(profile, 0o700);
     fs.writeFileSync(path.join(profile, QA_MARKER_NAME), QA_MARKER_BYTES, { flag: 'wx', mode: 0o600 });
@@ -182,16 +182,16 @@ export function assertQaFixtureManifest(profilePath) {
   const profile = assertQaProfile(profilePath);
   const root = path.join(profile, QA_FIXTURE_DIRECTORY);
   const rootInfo = fs.lstatSync(root);
-  if (!rootInfo.isDirectory() || rootInfo.isSymbolicLink() || rootInfo.uid !== process.getuid() ||
-      (rootInfo.mode & 0o022) !== 0 || fs.realpathSync.native(root) !== root) {
+  if (!rootInfo.isDirectory() || rootInfo.isSymbolicLink() || !isOwnedAndPrivate(root, rootInfo) ||
+      fs.realpathSync.native(root) !== root) {
     refuse('fixture root must be a canonical user-owned directory inside the QA profile');
   }
   const manifestPath = path.join(root, QA_FIXTURE_MANIFEST);
   const artifactPath = path.join(root, QA_FIXTURE_FILE);
   for (const file of [manifestPath, artifactPath]) {
     const info = fs.lstatSync(file);
-    if (!info.isFile() || info.isSymbolicLink() || info.uid !== process.getuid() ||
-        (info.mode & 0o022) !== 0 || fs.realpathSync.native(file) !== file) {
+    if (!info.isFile() || info.isSymbolicLink() || !isOwnedAndPrivate(file, info) ||
+        fs.realpathSync.native(file) !== file) {
       refuse('fixture manifest and artifact must be canonical user-owned regular files');
     }
   }
@@ -209,7 +209,7 @@ export function assertQaFixtureManifest(profilePath) {
     realTurnCwd = path.join(root, QA_REAL_TURN_DIRECTORY);
     const info = fs.lstatSync(realTurnCwd);
     if (manifest.realTurnCwd !== realTurnCwd || !info.isDirectory() || info.isSymbolicLink() ||
-        info.uid !== process.getuid() || (info.mode & 0o022) !== 0 || fs.realpathSync.native(realTurnCwd) !== realTurnCwd) {
+        !isOwnedAndPrivate(realTurnCwd, info) || fs.realpathSync.native(realTurnCwd) !== realTurnCwd) {
       refuse('real-turn cwd must be bound to the manifest fixture root');
     }
   }
@@ -218,7 +218,7 @@ export function assertQaFixtureManifest(profilePath) {
     backendDataDir = path.join(root, QA_BACKEND_DATA_DIRECTORY);
     const info = fs.lstatSync(backendDataDir);
     if (manifest.backendDataDir !== backendDataDir || !info.isDirectory() || info.isSymbolicLink()
-        || info.uid !== process.getuid() || (info.mode & 0o022) !== 0 || fs.realpathSync.native(backendDataDir) !== backendDataDir) {
+        || !isOwnedAndPrivate(backendDataDir, info) || fs.realpathSync.native(backendDataDir) !== backendDataDir) {
       refuse('backend data directory must be bound to the manifest fixture root');
     }
   }

@@ -11,6 +11,8 @@ export class EGDeskBrowserAgentRuntimeChild extends JSWindowActorChild {
     this.observedDocument = null;
     this.observer = null;
     this.lastViewport = null;
+    // Entry into the side-effecting dispatcher, not physical input events.
+    this.actorPerformCalls = 0;
   }
 
   async receiveMessage(message) {
@@ -235,10 +237,29 @@ export class EGDeskBrowserAgentRuntimeChild extends JSWindowActorChild {
       coordinateSpace: "browser-viewport-local" };
   }
 
+  qaPerformDiagnostics(options = {}) {
+    const expected = options.qaDiagnostics;
+    if (!expected || typeof expected !== "object" ||
+        typeof expected.fixtureUrl !== "string" ||
+        !/^[A-Za-z0-9_-]{20,80}$/.test(expected.fixtureMarker || "")) return {};
+    const actualUrl = this.contentWindow.location.href;
+    let parsed;
+    try { parsed = new URL(actualUrl); } catch { return {}; }
+    if (actualUrl !== expected.fixtureUrl || actualUrl !== parsed.href ||
+        parsed.protocol !== "http:" || parsed.hostname !== "127.0.0.1" ||
+        Number(parsed.port) < 1024 || Number(parsed.port) > 65535 ||
+        !parsed.port || parsed.username || parsed.password || parsed.search || parsed.hash ||
+        !/^\/egdesk-qa\/[A-Za-z0-9_-]{20,80}$/.test(parsed.pathname) ||
+        this.document.getElementById?.("fixture-marker")?.textContent !== expected.fixtureMarker) return {};
+    return { qaDiagnostics: { kind: "actor-perform-entry",
+      actorDocumentId: this.documentId, performCalls: this.actorPerformCalls } };
+  }
+
   snapshot(options = {}) {
     const doc = this.document;
     return {
       ...this.observationState(),
+      ...this.qaPerformDiagnostics(options),
       url: this.contentWindow.location.href,
       title: doc.title || "",
       readyState: doc.readyState || "",
@@ -450,6 +471,9 @@ export class EGDeskBrowserAgentRuntimeChild extends JSWindowActorChild {
       // asynchronous actor hop. Recheck live page state immediately before I/O.
       this.assertGuard(action, options.guard);
     }
+    // Failed perform calls also count. An unchanged count proves this actor
+    // never entered perform; it does not count physical events or successes.
+    this.actorPerformCalls++;
     const result = this.perform(action, options);
     const settleMs = Number.isFinite(options.settleMs) ? options.settleMs : 250;
     await new Promise((resolve) => this.contentWindow.setTimeout(resolve, Math.max(0, settleMs)));

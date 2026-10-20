@@ -22,10 +22,17 @@ export function requireEGDeskNodeRuntime({ version = process.versions.node, hasS
 
 // Product-local file authority is intentionally not derived from Codex auth,
 // HTTP body fields, or the subscription account. The adapter owns body bounds.
-export function createEGDeskFileMount({ dataDir, port = 39218, nativeExecutable, nodeRuntime = {}, createHttpAdapter = createEGDeskFileHttpAdapter, createNativeAdapter = createEGDeskNativeCreateOnlyAdapter } = {}) {
+export function createEGDeskFileMount({ dataDir, port = 39218, nativeExecutable, nodeRuntime = {}, platform = process.platform, createHttpAdapter = createEGDeskFileHttpAdapter, createNativeAdapter = createEGDeskNativeCreateOnlyAdapter } = {}) {
   const runtime = requireEGDeskNodeRuntime(nodeRuntime)
   if (typeof dataDir !== 'string' || !path.isAbsolute(dataDir)) throw new TypeError('File dataDir must be an absolute app-owned path')
-  const native = createNativeAdapter(nativeExecutable === undefined ? {} : { executable: nativeExecutable })
+  // The descriptor-relative helper currently implements POSIX only. Keep
+  // managed drafts/reading available on Windows without advertising Save As.
+  const native = platform === 'win32' && createNativeAdapter === createEGDeskNativeCreateOnlyAdapter
+    ? { capability: 'unavailable', async createFile() {
+      throw Object.assign(new Error('Descriptor-relative native Save As is unavailable on Windows'),
+        { code: 'EGDESK_NATIVE_UNAVAILABLE', created: false, fileMayExist: false })
+    } }
+    : createNativeAdapter(nativeExecutable === undefined ? {} : { executable: nativeExecutable })
   const createOnlyAdapter = {
     capability: native.capability,
     async createFile(args) {

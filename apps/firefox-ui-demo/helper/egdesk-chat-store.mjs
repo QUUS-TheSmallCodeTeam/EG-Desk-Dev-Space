@@ -1,7 +1,8 @@
 import { createHash, randomUUID } from 'node:crypto'
-import { constants, chmodSync, closeSync, lstatSync, mkdirSync, openSync } from 'node:fs'
+import { constants, closeSync, lstatSync, mkdirSync, openSync, realpathSync } from 'node:fs'
 import path from 'node:path'
 import { DatabaseSync } from 'node:sqlite'
+import { isOwnedAndPrivate } from './egdesk-private-files.mjs'
 
 const VERSION = 1
 const MAX_RECORD_BYTES = 16 * 1024 * 1024
@@ -222,15 +223,19 @@ export function openChatStore({ dataDir, ownerScope } = {}) {
   if (typeof dataDir !== 'string' || !path.isAbsolute(dataDir) || typeof ownerScope !== 'string' || !ownerScope.trim() || ownerScope.length > 512) fail('INVALID_STORE_SCOPE', 'Absolute dataDir and local desktop/profile ownerScope are required')
   mkdirSync(dataDir, { recursive: true, mode: 0o700 })
   const stat = lstatSync(dataDir)
-  if (!stat.isDirectory() || stat.isSymbolicLink() || (stat.mode & 0o077) !== 0) fail('INVALID_STORE_SCOPE', 'Chat directory must be private and not a symlink')
-  const filename = path.join(dataDir, `chat-${digest(ownerScope)}.sqlite`)
+  // Resolve parent aliases (for example macOS /var) but reject a linked store itself.
+  const canonical = realpathSync.native(dataDir)
+  if (!stat.isDirectory() || stat.isSymbolicLink() || !isOwnedAndPrivate(canonical, stat, 0o077)) fail('INVALID_STORE_SCOPE', 'Chat directory must be private and not a symlink')
+  const filename = path.join(canonical, `chat-${digest(ownerScope)}.sqlite`)
+  const privateDatabase = info => info.isFile() && !info.isSymbolicLink() && info.nlink === 1 && isOwnedAndPrivate(filename, info, 0o077)
   try {
-    const existing = lstatSync(filename)
-    if (!existing.isFile() || existing.isSymbolicLink()) fail('INVALID_STORE_SCOPE', 'Chat database must be a regular file')
+    if (!privateDatabase(lstatSync(filename))) fail('INVALID_STORE_SCOPE', 'Chat database must be a private, unlinked regular file')
   } catch (error) { if (error.code !== 'ENOENT') throw error }
   const descriptor = openSync(filename, constants.O_CREAT | constants.O_RDWR | (constants.O_NOFOLLOW || 0), 0o600)
   closeSync(descriptor)
-  chmodSync(filename, 0o600)
+  // Windows ignores POSIX modes; inherited DACLs must actually be private.
+  // Reject an unsafe existing file rather than changing its permissions in place.
+  if (!privateDatabase(lstatSync(filename))) fail('INVALID_STORE_SCOPE', 'Chat database must be a private, unlinked regular file')
   let db
   try { db = new DatabaseSync(filename); initialize(db) }
   catch (error) {

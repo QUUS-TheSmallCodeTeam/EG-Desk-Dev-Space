@@ -4283,24 +4283,41 @@
     let composerObserver = null;
     let compositionInProgress = false;
     let deferredCodex = null;
+    let pendingMessageScroll = null;
     const mode = options.mode || 'hud';
     const closeFloatingMenus = () => {
       codexBridge.closeMemberMenu();
       codexBridge.closeThreadMenu();
     };
+    const onMessageScrollGesture = (ev) => {
+      const target = ev.target;
+      if (!(target instanceof Element)) return;
+      const log = target.closest('.egd-codex-messages');
+      if (!log || !body.contains(log)) return;
+      if (ev.type === 'keydown' && !['ArrowUp', 'ArrowDown', 'PageUp', 'PageDown', 'Home', 'End', ' ', 'Spacebar'].includes(ev.key)) return;
+      if (ev.type === 'wheel' && (!ev.deltaY || ev.ctrlKey)) return;
+      // A deliberate log interaction wins over an unpainted automatic restore.
+      pendingMessageScroll = null;
+    };
     const onDocumentMouseDown = (ev) => {
       const target = ev.target;
       if (!(target instanceof Element)) return;
+      onMessageScrollGesture(ev);
       if (target.closest('.egd-codex-thread-member-menu')) return;
       if (target.closest('.egd-codex-thread-member-clickable')) return;
       if (target.closest('.egd-codex-thread-menu')) return;
       if (target.closest('.egd-codex-thread-menu-trigger')) return;
       closeFloatingMenus();
     };
-    const onViewportMutate = () => closeFloatingMenus();
+    const onViewportMutate = (ev) => {
+      if (ev.type === 'wheel') onMessageScrollGesture(ev);
+      closeFloatingMenus();
+    };
     document.addEventListener('mousedown', onDocumentMouseDown, true);
     document.addEventListener('wheel', onViewportMutate, { capture: true, passive: true });
     window.addEventListener('resize', onViewportMutate);
+    body.addEventListener('keydown', onMessageScrollGesture, true);
+    body.addEventListener('pointerdown', onMessageScrollGesture, true);
 
     const render = (codex) => {
       if (compositionInProgress) {
@@ -4317,7 +4334,11 @@
         direction: oldInput.selectionDirection,
         scrollTop: oldInput.scrollTop,
       } : null;
-      const messageState = oldMessages ? {
+      // Repeated SSE renders can replace this log before its rAF restore runs.
+      // Carry the intended viewport instead of sampling its temporary scrollTop=0.
+      const messageState = pendingMessageScroll?.element === oldMessages
+        ? pendingMessageScroll.state
+        : oldMessages ? {
         threadId: oldMessages.dataset.threadId,
         lastUserMessageId: oldMessages.dataset.lastUserMessageId,
         top: oldMessages.scrollTop,
@@ -4329,6 +4350,7 @@
           return row ? { id: row.dataset.messageId, offset: row.getBoundingClientRect().top - top.top } : null;
         })(),
       } : null;
+      pendingMessageScroll = null;
       composerObserver?.disconnect();
       composerObserver = null;
       body.textContent = '';
@@ -4795,10 +4817,11 @@
         });
         if (!hasConversation) {
           const emptyChildren = [
-            el('div', { class: 'egd-codex-empty-title' }, codex.authStatus.isLoggedIn ? '아직 메시지가 없습니다' : '로그인 후 대화할 수 있습니다'),
+            el('div', { class: 'egd-codex-empty-eyebrow' }, codex.authStatus.isLoggedIn ? '새 대화' : 'Codex 연결'),
+            el('div', { class: 'egd-codex-empty-title' }, codex.authStatus.isLoggedIn ? '어떤 일을 함께할까요?' : '로그인 후 대화할 수 있습니다'),
             el('div', { class: 'egd-codex-empty-sub' },
               codex.authStatus.isLoggedIn
-                ? '메시지를 보내 대화를 시작하세요'
+                ? '질문을 하거나 자료를 첨부해 대화를 시작하세요.'
                 : 'Codex 로그인이 필요합니다.',
             ),
           ];
@@ -4884,7 +4907,9 @@
         conversation.appendChild(messages);
         if (activeThread.localHistoryCoverage && activeThread.localHistoryCoverage.status !== 'complete') conversation.appendChild(el('p', {
           class: 'egd-codex-run-status', role: 'status', data: { testid: 'chat-local-history-coverage' },
-        }, '로컬 기록 일부를 확인하지 못했습니다. 표시된 대화는 유지됩니다.'));
+        }, activeThread.localHistoryCoverage.status === 'unknown' && !activeThread.localHistoryCoverage.reasons?.length
+          ? '이 기기에 저장된 기록 · 전체 대화 범위 미확인'
+          : '로컬 기록 일부를 확인하지 못했습니다. 표시된 대화는 유지됩니다.'));
         if (codex.localHistoryStatus === 'error' && codex.localHistoryError) conversation.appendChild(el('p', {
           class: 'egd-codex-error', role: 'status', data: { testid: 'chat-local-history-error' },
         }, codex.localHistoryError));
@@ -4921,6 +4946,7 @@
       if (diagnostics) {
         const diagnosticsHeader = el('button', {
           class: 'egd-codex-diagnostics-toggle',
+          'aria-expanded': String(state.codex.showDiagnostics),
           onclick: () => {
             state.codex.showDiagnostics = !state.codex.showDiagnostics;
             render(state.codex);
@@ -4989,7 +5015,30 @@
             const resizeComposer = () => {
               if (!input.isConnected) return;
               input.style.height = 'auto';
-              const height = Math.min(240, Math.max(40, input.scrollHeight));
+              const main = input.closest?.('.egd-codex-chat-main');
+              const footer = input.closest?.('.egd-codex-footer');
+              const pane = main?.querySelector('.egd-codex-conversation-pane');
+              const messages = pane?.querySelector('.egd-codex-messages');
+              let heightLimit = 240;
+              if (main?.clientHeight > 0 && footer && pane && messages) {
+                main.dataset.compactComposer = String(main.clientHeight < 480);
+                const outerHeight = (node) => {
+                  const style = node.ownerDocument.defaultView.getComputedStyle(node);
+                  return node.offsetHeight + (parseFloat(style.marginTop) || 0) + (parseFloat(style.marginBottom) || 0);
+                };
+                const otherChildrenHeight = (parent, excluded) => Array.from(parent.children)
+                  .filter(child => !excluded.includes(child)).reduce((total, child) => total + outerHeight(child), 0);
+                // Reserve 80px of readable log content in addition to its padding
+                // and borders. The compact styles must apply before measuring.
+                const logStyle = messages.ownerDocument.defaultView.getComputedStyle(messages);
+                const logReserve = 80 + ['paddingTop', 'paddingBottom', 'borderTopWidth', 'borderBottomWidth']
+                  .reduce((total, key) => total + (parseFloat(logStyle[key]) || 0), 0);
+                const chromeHeight = otherChildrenHeight(main, [pane, footer])
+                  + otherChildrenHeight(pane, [messages]) + outerHeight(footer) - input.offsetHeight;
+                heightLimit = Math.max(40, Math.min(240, Math.floor(main.clientHeight - chromeHeight - logReserve)));
+                if (main.clientHeight < 480) heightLimit = Math.min(80, heightLimit);
+              }
+              const height = Math.min(heightLimit, Math.max(40, input.scrollHeight));
               input.style.height = `${height}px`;
               input.style.overflowY = input.scrollHeight > height ? 'auto' : 'hidden';
               const nativeSendHeld = activeThread.conversationId && !ChatState.canResumeNativeThread(activeThread, codex.authStatus);
@@ -5018,12 +5067,15 @@
               }
             });
             let composerWidth = 0;
+            let composerBodyHeight = 0;
             composerObserver = new ResizeObserver(() => {
-              if (input.clientWidth === composerWidth) return;
+              if (input.clientWidth === composerWidth && body.clientHeight === composerBodyHeight) return;
               composerWidth = input.clientWidth;
+              composerBodyHeight = body.clientHeight;
               resizeComposer();
             });
             composerObserver.observe(input);
+            composerObserver.observe(body);
             queueMicrotask(resizeComposer);
             const run = codexCurrentRun(activeThread);
             const stopButton = run && ChatState.isRunBusy(run) ? el('button', {
@@ -5033,10 +5085,14 @@
               onclick: () => codexBridge.interrupt(activeThread.id),
             }, run.stopRequested ? '확인 중' : '중지') : null;
             return el('div', { class: 'egd-codex-footer' },
-              buildChatInputTray(activeThread, codexBridge),
               el('div', { class: 'egd-codex-input-row' },
+                buildChatInputTray(activeThread, codexBridge),
                 input,
-                el('div', { class: 'egd-codex-compose-actions' }, stopButton, sendButton),
+                el('div', { class: 'egd-codex-compose-actions' },
+                  el('span', { class: 'egd-codex-compose-hint', 'aria-hidden': 'true' }, 'Enter 줄바꿈 · Ctrl/⌘ Enter 전송'),
+                  stopButton,
+                  sendButton,
+                ),
               ),
             );
           })()
@@ -5067,17 +5123,33 @@
       }
       body.appendChild(el('div', { class: shellClasses }, ...contentChildren));
       const msgEl = body.querySelector(".egd-codex-messages");
-      if (msgEl) requestAnimationFrame(() => {
-        if (!msgEl.isConnected) return;
+      if (msgEl) {
         const sentNewMessage = msgEl.dataset.lastUserMessageId !== messageState?.lastUserMessageId;
-        if (messageState?.threadId === activeThread?.id && !messageState.atBottom && !sentNewMessage) {
-          const anchor = messageState.anchor && Array.from(msgEl.querySelectorAll('[data-testid="chat-message"]'))
-            .find(item => item.dataset.messageId === messageState.anchor.id);
-          msgEl.scrollTop = anchor
-            ? msgEl.scrollTop + anchor.getBoundingClientRect().top - msgEl.getBoundingClientRect().top - messageState.anchor.offset
-            : messageState.top;
-        } else msgEl.scrollTop = msgEl.scrollHeight;
-      });
+        const preserveAnchor = messageState?.threadId === activeThread?.id && !messageState.atBottom && !sentNewMessage;
+        const scrollIntent = {
+          element: msgEl,
+          state: {
+            threadId: msgEl.dataset.threadId,
+            lastUserMessageId: msgEl.dataset.lastUserMessageId,
+            atBottom: !preserveAnchor,
+            top: preserveAnchor ? messageState.top : 0,
+            anchor: preserveAnchor ? messageState.anchor : null,
+          },
+        };
+        pendingMessageScroll = scrollIntent;
+        requestAnimationFrame(() => {
+          if (!msgEl.isConnected || pendingMessageScroll !== scrollIntent) return;
+          const target = scrollIntent.state;
+          if (!target.atBottom) {
+            const anchor = target.anchor && Array.from(msgEl.querySelectorAll('[data-testid="chat-message"]'))
+              .find(item => item.dataset.messageId === target.anchor.id);
+            msgEl.scrollTop = anchor
+              ? msgEl.scrollTop + anchor.getBoundingClientRect().top - msgEl.getBoundingClientRect().top - target.anchor.offset
+              : target.top;
+          } else msgEl.scrollTop = msgEl.scrollHeight;
+          pendingMessageScroll = null;
+        });
+      }
       const newInput = body.querySelector('.egd-codex-input');
       if (newInput && inputState?.threadId === activeThread?.id && inputState.focused) {
         newInput.focus({ preventScroll: true });
@@ -5092,6 +5164,9 @@
       composerObserver?.disconnect();
       compositionInProgress = false;
       deferredCodex = null;
+      pendingMessageScroll = null;
+      body.removeEventListener('keydown', onMessageScrollGesture, true);
+      body.removeEventListener('pointerdown', onMessageScrollGesture, true);
       document.removeEventListener('mousedown', onDocumentMouseDown, true);
       document.removeEventListener('wheel', onViewportMutate, true);
       window.removeEventListener('resize', onViewportMutate);
@@ -6496,6 +6571,9 @@
           if (selectedBrowserSources.length) {
             chatRequest.selectedSources = selectedBrowserSources;
             chatRequest.browserTransportId = selectedBrowserTransportId;
+            // The one-time UI selection belongs to this send. The native
+            // envelope cannot create or renew a Browser interaction grant.
+            chatRequest.executionPolicy = { mode: 'browserBounded' };
           }
           const result = await fetchJson('/chat/send', {
             method: 'POST',
@@ -6516,6 +6594,9 @@
         } catch (error) {
           if (!epochScope.valid(token)) return;
           const request = protocol.requests[requestId];
+          if (error.code === 'BROWSER_TOOLS_UNAVAILABLE') {
+            error.message = '이 대화는 Browser 조작 도구가 등록되기 전에 만들어졌습니다. 기존 기록과 초안은 유지됩니다. 새 Chat을 만든 뒤 Browser에서 이번 실행의 조작 대상을 다시 선택해 주세요.';
+          }
           if (error.conversationId) {
             request.conversationId = error.conversationId;
             updateThreadById(activeThread.id, thread => ({ ...thread, conversationId: error.conversationId, ...ChatState.nativeBindingForRun(thread, { conversationId: error.conversationId, accountKey: request.accountKey }) }));

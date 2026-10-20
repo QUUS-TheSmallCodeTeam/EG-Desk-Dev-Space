@@ -5209,3 +5209,202 @@
 .egd-ontology-error {
   color: #8E3A2E;
 }
+
+/* Chat interior refinement. Append after existing chat rules.
+   No state, selector, tool, or permission contracts are changed. */
+.egd-chat-card,
+#egd-hud[data-app="chat"] {
+  --egd-chat-room: #FAFBFC;
+  --egd-chat-paper: #FFFFFF;
+  --egd-chat-mine: #EAF0F5;
+  --egd-chat-tint: #F3F6F8;
+  --egd-chat-frame: #A8BBCB;
+  --egd-chat-avatar: #E7EEF4;
+  --egd-chat-outline: #DDE4EA;
+  --egd-chat-outline-soft: #E8EDF1;
+  --egd-on-surface: #243342;
+  --egd-on-surface-variant: #647585;
+}
+
+.egd-codex-chat-shell {
+  font-family: var(--egd-font, "Segoe UI", system-ui, sans-serif);
+  font-size: 13px;
+  line-height: 1.5;
+  color: var(--egd-on-surface);
+}
+.egd-codex-chat-shell button { appearance: none; font-family: inherit; cursor: pointer; }
+.egd-codex-chat-shell button:disabled { cursor: default; }
+.egd-codex-chat-shell button:focus-visible,
+.egd-codex-messages:focus-visible {
+  outline: 2px solid #6589A6;
+  outline-offset: 2px;
+}
+
+/* A quiet window strip; the conversation itself owns the main title. */
+.egd-chat-card-header { background: #F2F5F7; border-bottom-color: #E1E7EC; }
+.egd-chat-card.egd-entity-active .egd-chat-card-header { background: #F2F5F7; }
+.egd-chat-card-title { font-size: 11px; letter-spacing: .01em; }
+.egd-chat-card-action { font-size: 11px; border-radius: 6px; }
+.egd-codex-conversation-hud-head,
+.egd-codex-thread-active-head {
+  grid-template-columns: 32px minmax(0, 1fr) 32px;
+  min-height: 58px;
+  padding: 10px 16px;
+  gap: 10px;
+  background: var(--egd-chat-paper);
+  border-bottom: 1px solid var(--egd-chat-outline-soft);
+}
+.egd-codex-conversation-hud-center { align-items: flex-start; gap: 3px; }
+.egd-codex-conversation-hud-title { text-align: left; font-size: 14px; font-weight: 650; line-height: 1.4; }
+.egd-codex-conversation-hud-sub { text-align: left; font-size: 11px; }
+.egd-codex-conversation-back,
+.egd-codex-conversation-menu-trigger {
+  width: 32px;
+  height: 32px;
+  border-radius: 8px;
+  background: transparent;
+  color: #627585;
+  font-size: 16px;
+}
+.egd-codex-conversation-back:hover,
+.egd-codex-conversation-menu-trigger:hover { background: #EFF3F6; border-color: transparent; }
+
+/* Readable measure, generous turn rhythm, and restrained author chrome. */
+.egd-codex-messages { gap: 26px; padding: 24px 20px 28px; scrollbar-color: #CBD5DD transparent; }
+.egd-codex-message-row { max-width: 760px; margin-inline: auto; gap: 10px; flex-shrink: 0; }
+.egd-codex-message-row-grouped { margin-top: -18px; }
+.egd-codex-message-avatar {
+  width: 28px; height: 28px; min-width: 28px; margin-top: 0;
+  border-radius: 9px; color: #3A5C77; font-size: 12px; font-weight: 650;
+}
+.egd-codex-message-stack { gap: 5px; }
+.egd-codex-message-row-assistant .egd-codex-message-stack,
+.egd-codex-message-row-system .egd-codex-message-stack { max-width: calc(100% - 38px); }
+.egd-codex-message-row-user .egd-codex-message-stack { max-width: min(88%, 640px); }
+.egd-codex-message-role { padding: 3px 0 0; font-size: 12px; font-weight: 650; color: #3B5062; line-height: 1.5; }
+.egd-codex-bubble { padding: 11px 14px; font-size: 14px; line-height: 1.75; border-radius: 14px; }
+.egd-codex-bubble-user { background: var(--egd-chat-mine); border-radius: 14px 14px 4px 14px; }
+.egd-codex-bubble-assistant,
+.egd-codex-bubble-system { background: transparent; padding: 0 0 2px; border-radius: 0; }
+.egd-codex-bubble-error { background: #FCEFED; color: #913E36; padding: 10px 12px; border-radius: 10px; }
+.egd-codex-message-meta { font-size: 11px; line-height: 1.5; color: #617687; padding: 0 2px; }
+.egd-codex-message-time { font-size: 11px; }
+.egd-codex-streaming { margin-top: 9px; }
+.egd-codex-typing-dots span { width: 4px; height: 4px; background: #7892A7; }
+.egd-codex-result-chips { gap: 5px 12px; margin-top: 3px; }
+.egd-codex-result-chip { font-size: 12px !important; min-height: 32px !important; font-weight: 500 !important; }
+.egd-codex-inline-code,
+.egd-codex-bubble-user .egd-codex-inline-code { color: #354F65; background: #E5EBF1; font-size: .9em; padding: 2px 5px; }
+.egd-codex-code-block { background: #F0F3F6; color: #2B4053; border: 1px solid #DEE6ED; border-radius: 10px; padding: 12px; font-size: 12px; line-height: 1.65; }
+
+/* A real empty conversation, not a success/connection claim. */
+.egd-codex-messages:has(> .egd-codex-empty-state) { justify-content: center; padding: 24px 28px 44px; }
+.egd-codex-empty-state { width: 100%; max-width: 340px; align-self: center; padding: 0; }
+.egd-codex-empty-eyebrow { margin-bottom: 10px; color: #607688; font-size: 11px; font-weight: 600; letter-spacing: .03em; }
+.egd-codex-empty-title { font-size: 21px; font-weight: 650; line-height: 1.4; letter-spacing: -.025em; }
+.egd-codex-empty-sub { max-width: 290px; margin-top: 9px; color: #607688; font-size: 13px; line-height: 1.75; word-break: keep-all; }
+.egd-codex-empty-actions { gap: 8px; margin-top: 18px; }
+.egd-codex-chip { min-height: 32px; border-radius: 7px; font-size: 12px; background: #FFFFFF; }
+.egd-codex-chip-primary { background: var(--egd-primary); }
+.egd-codex-chip-subtle { background: #F4F7F9; }
+
+/* The lower state row stays factual and distinct from the input surface. */
+.egd-codex-run-status {
+  flex: 0 0 auto;
+  min-height: 44px;
+  margin: 0;
+  padding: 6px 18px;
+  gap: 10px;
+  font: 12px/1.5 var(--egd-font, system-ui);
+  color: #607688;
+}
+.egd-codex-run-status > span { min-width: 0; overflow-wrap: anywhere; }
+.egd-codex-run-status button { flex: 0 0 auto; min-height: 32px; padding: 4px 7px; border: 1px solid transparent; border-radius: 6px; font-size: 12px; background: transparent; color: #4F6E86; }
+.egd-codex-run-status button:hover { background: #EAF0F4; }
+.egd-codex-run-status[data-status="submitting"],
+.egd-codex-run-status[data-status="preparing-input"],
+.egd-codex-run-status[data-status="restoring"] { color: #355E7D; }
+.egd-codex-run-status[data-status="unconfirmed"],
+.egd-codex-run-status[data-status="stopping"] { background: #FAF5E9; color: #806735; }
+.egd-codex-run-status[data-status="failed"],
+.egd-codex-run-status[data-status="unavailable"] { background: #FCF0EE; color: #974B42; }
+.egd-codex-error { flex-shrink: 0; margin: 4px 16px 10px; padding: 10px 12px; border: 1px solid #F0D6D1; border-radius: 9px; font-size: 12px; line-height: 1.65; background: #FCF1EF; color: #914A42; }
+.egd-codex-error[data-testid="chat-binding-held"] { margin: 4px 16px 10px; padding: 10px 12px; background: #FAF5E9; border-color: #E9DDBE; color: #796239; font-size: 12px; }
+
+/* One composed input surface: selected inputs, draft, and explicit actions. */
+.egd-codex-footer { padding: 2px 16px 16px; gap: 0; }
+.egd-codex-input-row { gap: 8px; padding: 10px 12px 10px; border: 1px solid #D3DEE7; border-radius: 14px; box-shadow: 0 2px 6px #24334205; background: #FFFFFF; }
+.egd-codex-input-row:focus-within { border-color: #86A4BA; box-shadow: 0 0 0 3px #2D5A7B10; }
+.egd-codex-input { font-size: 15px; line-height: 24px; min-height: 40px; padding: 3px 2px 0; color: #243342; }
+.egd-codex-input::placeholder { color: #607688; }
+.egd-codex-compose-actions { align-items: center; gap: 8px; min-height: 32px; }
+.egd-codex-compose-hint { margin-right: auto; color: #607688; font-size: 11px; line-height: 1.5; }
+.egd-codex-send { width: 32px; height: 32px; min-width: 32px; min-height: 32px; border-radius: 9px; background: #2D5A7B; font-size: 21px; }
+.egd-codex-send:disabled { background: #E8EDF1; color: #93A1AD; opacity: 1; }
+.egd-codex-send:not(:disabled):hover { background: #254D6A; filter: none; }
+.egd-codex-stop { min-height: 32px; padding: 0 11px; border: 1px solid #CCD9E3; border-radius: 8px; background: #F6F8FA; color: #385870; font-size: 12px; }
+.egd-codex-stop:hover { background: #EDF2F6; }
+.egd-codex-stop:disabled { opacity: .6; }
+.egd-codex-footer .egd-chat-input-tray { gap: 6px; max-height: 88px; padding: 0 0 7px; border-bottom: 1px solid #EFF3F6; }
+.egd-codex-footer .egd-chat-input-tray button { min-height: 32px; padding: 3px 8px; border-color: #E0E7ED; border-radius: 6px; background: #F6F8FA; color: #526A7E; font-size: 12px; line-height: 1.5; }
+.egd-codex-footer .egd-chat-input-tray button:hover { background: #EDF2F6; border-color: #CBD9E3; }
+.egd-codex-footer [data-testid="chat-attach-open"] { background: transparent; border-color: transparent; padding-inline: 3px; color: #60798C; }
+.egd-codex-footer .egd-chat-input-chip { min-width: 0; border: 1px solid #DCE5ED; border-radius: 6px; background: #F3F6F9; }
+.egd-codex-footer .egd-chat-input-chip button { border: 0; border-radius: 5px; background: transparent; }
+.egd-codex-footer .egd-chat-input-chip button:last-child { flex: 0 0 32px; padding-inline: 5px; color: #6C8090; }
+
+/* Diagnostics remain available, with a bounded, readable detail area. */
+.egd-codex-diagnostics-shell { flex-shrink: 0; gap: 6px; margin: 0 16px 10px; padding-top: 0; }
+.egd-codex-diagnostics-toggle { min-height: 32px; padding: 0 8px; border-radius: 6px; background: #F2F5F8; color: #657C8E; font-size: 12px; }
+.egd-codex-diagnostics { max-height: 180px; overflow-y: auto; padding: 10px; border-radius: 8px; background: #F3F6F8; box-shadow: none; }
+.egd-codex-diagnostics .egd-codex-error { margin: 0; }
+.egd-codex-log { margin: 0; background: #FFFFFF; font-size: 11px; line-height: 1.6; }
+#egd-codex-activity-panel { background: #FFFFFF; border-color: #DCE4EB; color: #243342; border-radius: 14px; box-shadow: 0 12px 40px #25384B24; }
+#egd-codex-activity-panel header { min-height: 57px; padding: 12px 18px; background: #FAFBFC; border-color: #E7EDF2; }
+#egd-codex-activity-panel button { min-height: 32px; border-color: #D9E3EB; background: #F8FAFB; color: #375B76; border-radius: 7px; font: 12px/1.5 var(--egd-font, system-ui); }
+.egd-codex-activity-body { padding: 6px 18px 18px; }
+.egd-codex-activity-row { gap: 8px; padding: 16px 0; border-color: #E7EDF2; font-size: 12px; }
+.egd-codex-activity-row pre,
+.egd-codex-approval-pending pre { padding: 10px; background: #F3F6F8; border-radius: 7px; color: #4D6477; font-size: 11px; line-height: 1.7; }
+.egd-codex-approval-pending { margin: 12px 0; padding: 14px; border-color: #E3D7B6; background: #FBF7ED; border-radius: 10px; }
+
+/* List mode is the same product, with fewer pill-shaped nested surfaces. */
+.egd-codex-chat-shell .egd-codex-chat-main-list,
+#egd-hud[data-app="chat"] .egd-codex-chat-main-list { padding: 12px 14px 14px; }
+.egd-codex-thread-home-head { gap: 8px; padding: 6px 4px 8px; }
+.egd-codex-thread-home-title { font-size: 19px; font-weight: 650; letter-spacing: -.02em; }
+.egd-codex-thread-home-sub,
+.egd-codex-thread-home-status { font-size: 11px; line-height: 1.5; }
+.egd-codex-thread-search { height: 35px; border-radius: 8px; background: #F4F7F9; font-weight: 400; }
+.egd-codex-thread-filter-chip { min-height: 28px; border-radius: 7px; font-size: 11px; background: transparent; }
+.egd-codex-thread-filter-chip-active { background: #EAF0F5; border-color: #D3DFE8; }
+.egd-codex-thread-section { gap: 4px; }
+.egd-codex-thread-section-head { padding: 8px 4px 3px; }
+.egd-codex-thread-section-title { font-size: 11px; font-weight: 600; color: #718493; }
+.egd-codex-thread-item { padding: 11px 10px; border-radius: 9px; }
+.egd-codex-thread-avatar { width: 32px; height: 32px; min-width: 32px; border-radius: 10px; font-size: 12px; }
+.egd-codex-thread-time { font-size: 10px; opacity: 1; color: #81909C; }
+.egd-codex-system-chip { font-size: 10px; border-radius: 5px; }
+
+@media (prefers-reduced-motion: reduce) {
+  .egd-codex-typing-dots span { animation: none; opacity: .65; }
+}
+
+/* Provenance is readable notice text, not a second 44px action toolbar. */
+.egd-codex-conversation-pane > p.egd-codex-run-status {
+  display: block;
+  min-height: 0;
+  padding: 4px 16px;
+  line-height: 1.5;
+}
+
+/* Compact interiors retain 32px controls while reserving actual log content. */
+.egd-codex-chat-main[data-compact-composer="true"] .egd-codex-conversation-hud-head,
+.egd-codex-chat-main[data-compact-composer="true"] .egd-codex-thread-active-head {
+  min-height: 48px;
+  padding: 6px 12px;
+}
+.egd-codex-chat-main[data-compact-composer="true"] .egd-codex-messages { padding: 12px 16px; }
+.egd-codex-chat-main[data-compact-composer="true"] .egd-codex-footer { padding: 0 12px 12px; }
+.egd-codex-chat-main[data-compact-composer="true"] .egd-codex-input-row { padding: 8px 10px; gap: 4px; }
+.egd-codex-chat-main[data-compact-composer="true"] .egd-codex-footer .egd-chat-input-tray { padding-bottom: 3px; }

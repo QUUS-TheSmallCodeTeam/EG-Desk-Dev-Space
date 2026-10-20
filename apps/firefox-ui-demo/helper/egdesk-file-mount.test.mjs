@@ -14,6 +14,15 @@ const request = (route, body, headers = {}) => Object.assign(Readable.from([Buff
 })
 const response = () => ({ writeHead(status) { this.status = status }, end(text) { this.body = JSON.parse(text) } })
 
+test('Windows starts managed files without advertising the unavailable POSIX Save As helper', async () => {
+  let configuration
+  createEGDeskFileMount({ dataDir: path.resolve('qa-not-created'), platform: 'win32',
+    createHttpAdapter: options => { configuration = options; return {} } })
+  assert.equal(configuration.createOnlyAdapter.capability, 'unavailable')
+  await assert.rejects(configuration.createOnlyAdapter.createFile({}), error => error.code === 'EGDESK_NATIVE_UNAVAILABLE'
+    && error.httpStatus === 503 && error.details.created === false && error.details.fileMayExist === false)
+})
+
 test('unsupported Node and missing SQLite fail clearly before adapter or storage construction', () => {
   for (const version of ['18.20.8', '20.19.0', '22.19.0', 'unknown']) {
     assert.throws(() => createEGDeskFileMount({ dataDir: '/unused', nodeRuntime: { version, hasSqlite: true }, createNativeAdapter: () => assert.fail('native adapter must not be created') }), e => e.code === 'EGDESK_NODE_VERSION_REQUIRED' && e.message.includes('24.11.1'))
@@ -32,7 +41,7 @@ test('production mount uses fixed local ownership and adapter-owned request read
     createNativeAdapter: options => { selectedNative = options; return { capability: 'descriptor-relative-create-only', createFile() {} } },
     createHttpAdapter: options => { configuration = options; return { handle: (...args) => { forwarded = args; return true }, resolveCaptureSource: async options => { resolved = options; return { bytes: Buffer.from('managed') } }, close: () => { closed = true } } },
   })
-  assert.equal(configuration.draftDirectory, '/app-owned-data/file-drafts')
+  assert.equal(configuration.draftDirectory, path.join('/app-owned-data', 'file-drafts'))
   assert.equal(configuration.localOwnerScope, 'egdesk-local')
   assert.equal(configuration.createOnlyAdapter.capability, 'descriptor-relative-create-only')
   assert.deepEqual(selectedNative, { executable: '/verified-native-binary' })

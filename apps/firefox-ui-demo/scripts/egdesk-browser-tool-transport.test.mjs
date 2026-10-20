@@ -7,7 +7,7 @@ globalThis.JSWindowActorParent ||= class {}
 const { EGDeskBrowserAgentRuntimeParent, registerBrowserActionAuthorizer } =
   await import('../overlay/resources/EGDeskBrowserAgentRuntimeParent.sys.mjs')
 
-const source = readFileSync(new URL('../overlay/JS/eg-desk-surface.uc.js', import.meta.url), 'utf8')
+const source = readFileSync(new URL('../overlay/JS/eg-desk-surface.uc.js', import.meta.url), 'utf8').replace(/\r\n/g, '\n')
 const between = (start, end) => {
   const first = source.indexOf(start)
   const last = source.indexOf(end, first)

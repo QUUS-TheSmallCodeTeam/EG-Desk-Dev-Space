@@ -1,4 +1,6 @@
 import assert from 'node:assert/strict';
+import fs from 'node:fs';
+import path from 'node:path';
 import { FirefoxMcpChatHarness, waitUntil } from './firefox-mcp-chat-harness.mjs';
 import { qaProfileSourceFingerprints } from './egdesk-chat-qa-profile.mjs';
 
@@ -63,7 +65,12 @@ export async function runUiFlow(kind, callback) {
     for (const fn of cleanup.reverse()) {
       try { await fn(); } catch (error) { result.automatedAssertionsPassed = false; result.cleanupError = error.message; process.exitCode = 1; }
     }
-    await harness?.close();
+    try { await harness?.close(); }
+    catch (error) { result.automatedAssertionsPassed = false; result.cleanupError = error.message; process.exitCode = 1; }
+    if (harness?.evidenceDir) {
+      result.evidenceFile = path.join(harness.evidenceDir, 'result.json');
+      fs.writeFileSync(result.evidenceFile, `${JSON.stringify(result, null, 2)}\n`, { flag: 'wx', mode: 0o600 });
+    }
     process.stdout.write(`${JSON.stringify(result)}\n`);
   }
 }
@@ -128,11 +135,23 @@ export async function sendFromComposer(harness, message) {
   const { threadId } = await chatIdentity(harness);
   await harness.fill(composer, message);
   let stableSamples = 0;
-  await waitUntil(async () => ({ input: (await harness.inspect(composer))[0], button: (await harness.inspect('.egd-codex-send'))[0] }),
+  // Sample both controls in the same profile-bound evaluation. Two separate
+  // MCP/ACL round trips can exceed the old five-second budget on Windows.
+  await waitUntil(() => chrome(harness, () => {
+    const input = document.querySelector('.egd-codex-input');
+    const button = document.querySelector('.egd-codex-send');
+    const shown = node => {
+      if (!node) return false;
+      const rect = node.getBoundingClientRect(), style = getComputedStyle(node);
+      return rect.width > 0 && rect.height > 0 && style.display !== 'none' && style.visibility !== 'hidden';
+    };
+    return { input: input && { visible: shown(input), value: input.value, dataset: { threadId: input.dataset.threadId } },
+      button: button && { visible: shown(button), disabled: button.disabled } };
+  }),
     ({ input, button }) => {
       stableSamples = composerIsReady(input, button, message, threadId) ? stableSamples + 1 : 0;
       return stableSamples >= 2;
-    }, { timeoutMs: 5000, intervalMs: 50 });
+    }, { timeoutMs: 20000, intervalMs: 50 });
   await harness.click('.egd-codex-send');
 }
 
