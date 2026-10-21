@@ -23,6 +23,7 @@ import { ContextRuntime } from './egdesk-context-runtime.mjs'
 import { createContextHttpHandler } from './egdesk-context-http.mjs'
 import { buildCodexAppServerLaunch, inspectNativeCapabilities, preflightOwnedAppServer, resolveCodexExecutable, NATIVE_SCHEMA_VERSION } from './egdesk-native-capabilities.mjs'
 import { createEGDeskFileMount, requireEGDeskNodeRuntime } from './egdesk-file-mount.mjs'
+import { createSystemResourceMonitor } from './system-resource-monitor.mjs'
 
 const nodeRuntime = requireEGDeskNodeRuntime()
 
@@ -106,6 +107,7 @@ const nativeRespond = (id, result, error) => {
   rpc.respond(id, result, error)
 }
 const dataDir = appDataDirectory()
+const systemResourceMonitor = createSystemResourceMonitor({ profilePath: dataDir })
 let chatStore = null
 let chatStoreError = null
 try {
@@ -522,6 +524,17 @@ const bridgeServer = createServer(async (req, res) => {
     return
   }
 
+  if (req.method === 'GET' && route === '/system/resources') {
+    try {
+      // The bridge's loopback/Origin/Fetch Metadata guard above is the local
+      // caller boundary. Host metrics must work before any AI account login.
+      sendJson(res, 200, await systemResourceMonitor.sample())
+    } catch (error) {
+      sendJson(res, 503, { code: 'RESOURCE_MONITOR_UNAVAILABLE', error: 'System resource monitor unavailable' })
+    }
+    return
+  }
+
   if (req.method === 'GET' && route === '/v1/state') {
     try {
       await refreshAccountState()
@@ -655,6 +668,7 @@ async function shutdown() {
   if (shuttingDown) return
   shuttingDown = true
   bridgeServer.close()
+  systemResourceMonitor.close()
   try { await localFiles.close() }
   catch { console.error('[egdesk-codex-bridge] managed file store did not close cleanly') }
   try { chatStore?.close() }
@@ -664,6 +678,7 @@ async function shutdown() {
 process.on('SIGINT', shutdown)
 process.on('SIGTERM', shutdown)
 process.on('exit', () => {
+  systemResourceMonitor.close()
   rpc?.close()
   try { appServerSocket?.close(); } catch {}
   try { appServerProcess?.kill(); } catch {}

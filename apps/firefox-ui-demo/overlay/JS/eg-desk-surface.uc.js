@@ -1,8 +1,7 @@
 // ==UserScript==
 // @name           EG-Desk Surface (4-Edge Framework)
 // @description    Firefox chrome 을 EG-Desk Surface 로 재구성. Top Desk Rail + Bottom Dock
-//                 + Left Preset Bag + Right Contextual HUD. Light mode warm palette,
-//                 frosted glass, Inter typography. Spec: DESIGN_SYSTEM_SPEC.md
+//                 + Left Preset Bag + Right Contextual HUD. Approved warm desktop style.
 // @include        main
 // ==/UserScript==
 (function eg_desk_surface() {
@@ -62,27 +61,25 @@
   ];
 
   const DOCK_LEFT = [
-    // 아이콘 규칙: 모노크롬 텍스트 글리프. 이모지 기본표시(컬러) 코드포인트는
-    // ︎(VS15)로 텍스트 표시 강제 — macOS Firefox chrome에서 렌더 실측 완료.
-    { id: 'chat',     label: '채팅',    icon: '🗨︎' },
-    { id: 'shelf',    label: '파일',    icon: '▤' },
-    { id: 'ontology', label: '온톨로지', icon: '❖' },
-    { id: 'browser',  label: '브라우저', icon: '🌐︎' },
-    { id: 'ide',      label: 'IDE',     icon: '<>' },
-    { id: 'terminal', label: '터미널',  icon: '>_' },
-    { id: 'settings', label: '설정',   icon: '⚙' },
-    { id: 'create',   label: '추가',      icon: '+' },
+    { id: 'chat',     label: '채팅',    icon: 'chat' },
+    { id: 'shelf',    label: '파일',    icon: 'file' },
+    { id: 'ontology', label: '온톨로지', icon: 'ontology' },
+    { id: 'browser',  label: '브라우저', icon: 'browser' },
+    { id: 'ide',      label: 'IDE',     icon: 'ide' },
+    { id: 'terminal', label: '터미널',  icon: 'terminal' },
+    { id: 'settings', label: '설정',   icon: 'settings' },
+    { id: 'create',   label: '추가',    icon: 'plus' },
   ];
   const DOCK_CENTER = [
-    { id: 'pencil',   label: '펜',  icon: '✎' },
-    { id: 'hand',     label: '손',    icon: '✥' },
-    { id: 'square',   label: '사각형',  icon: '□' },
-    { id: 'ellipse',  label: '원',      icon: '○' },
-    { id: 'line',     label: '선',      icon: '╱' },
-    { id: 'arrow',    label: '선택',   icon: '↖', active: true },
+    { id: 'pencil',   label: '펜',     icon: 'pencil' },
+    { id: 'hand',     label: '손',     icon: 'move' },
+    { id: 'square',   label: '사각형', icon: 'square' },
+    { id: 'ellipse',  label: '원',     icon: 'ellipse' },
+    { id: 'line',     label: '선',     icon: 'line' },
+    { id: 'arrow',    label: '선택',   icon: 'pointer', active: true },
   ];
   const DOCK_RIGHT = [
-    { id: 'trash',    label: '휴지통',   icon: '🗑︎' },
+    { id: 'trash',    label: '휴지통', icon: 'trash' },
   ];
 
   const SELF_MEMBER = '나';
@@ -1135,6 +1132,61 @@
     return node;
   }
 
+  // Local, original 24-unit outline geometry shared by Desk chrome, live
+  // windows, and semantic projections. No remote icon font or copied asset.
+  const DESK_ICON_SHAPES = {
+    chat: [['path', { d: 'M5 4.5h14a2 2 0 0 1 2 2v9a2 2 0 0 1-2 2H10l-5 3v-3H5a2 2 0 0 1-2-2v-9a2 2 0 0 1 2-2Z' }]],
+    file: [['path', { d: 'M6 2.5h8l4 4v15H6a2 2 0 0 1-2-2v-15a2 2 0 0 1 2-2Z' }], ['path', { d: 'M14 2.5v4h4M8 11h8M8 15h8' }]],
+    folder: [['path', { d: 'M3 7a2 2 0 0 1 2-2h5l2 2h7a2 2 0 0 1 2 2v10a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2Z' }]],
+    ontology: [['circle', { cx: '12', cy: '4', r: '2' }], ['circle', { cx: '5', cy: '18', r: '2' }], ['circle', { cx: '19', cy: '18', r: '2' }], ['path', { d: 'm11 6-5 10m7-10 5 10M7 18h10' }]],
+    browser: [['circle', { cx: '12', cy: '12', r: '9' }], ['path', { d: 'M3 12h18M12 3c-2.7 2.5-4 5.5-4 9s1.3 6.5 4 9c2.7-2.5 4-5.5 4-9s-1.3-6.5-4-9Z' }]],
+    ide: [['path', { d: 'm8 6-5 6 5 6m8-12 5 6-5 6m-3-13-2 14' }]],
+    terminal: [['path', { d: 'm4 6 6 6-6 6m9 0h7' }]],
+    settings: [['circle', { cx: '12', cy: '12', r: '3.3' }], ['path', { d: 'M12 2v3m0 14v3M2 12h3m14 0h3M4.9 4.9 7 7m10 10 2.1 2.1m0-14.2L17 7M7 17l-2.1 2.1' }]],
+    plus: [['path', { d: 'M12 5v14M5 12h14' }]],
+    pencil: [['path', { d: 'm4 17 12-12 3 3-12 12-4 1 1-4Zm10-10 3 3' }]],
+    move: [['path', { d: 'M12 2v20M2 12h20m-13-7 3-3 3 3M9 19l3 3 3-3M5 9l-3 3 3 3m14-6 3 3-3 3' }]],
+    square: [['rect', { x: '4', y: '4', width: '16', height: '16', rx: '2' }]],
+    ellipse: [['circle', { cx: '12', cy: '12', r: '8' }]],
+    line: [['path', { d: 'M5 19 19 5' }]],
+    pointer: [['path', { d: 'M4 3v17l5-5 3.3 6 2.4-1.3-3.3-6L19 12 4 3Z' }]],
+    trash: [['path', { d: 'M4 6h16M9 6V4h6v2m-9 0 1 15h10l1-15M10 10v7m4-7v7' }]],
+    desk: [['rect', { x: '3', y: '3', width: '18', height: '18', rx: '2' }], ['path', { d: 'M12 3v18M3 12h18' }]],
+    users: [['circle', { cx: '9', cy: '8', r: '3' }], ['path', { d: 'M3.5 20v-2a5.5 5.5 0 0 1 11 0v2M16 5a3 3 0 0 1 0 6m1 4a5 5 0 0 1 3.5 5' }]],
+    search: [['circle', { cx: '10.5', cy: '10.5', r: '6.5' }], ['path', { d: 'm15.5 15.5 5 5' }]],
+    back: [['path', { d: 'm11 5-7 7 7 7M4 12h16' }]],
+    forward: [['path', { d: 'm13 5 7 7-7 7M20 12H4' }]],
+    reload: [['path', { d: 'M20 9a8 8 0 1 0 0 6m0-10v4h-4' }]],
+    stop: [['rect', { x: '5', y: '5', width: '14', height: '14', rx: '1.5' }]],
+    home: [['path', { d: 'm3 11 9-8 9 8M5 10v11h14V10m-10 11v-7h6v7' }]],
+    duplicate: [['rect', { x: '8', y: '8', width: '12', height: '12', rx: '1' }], ['path', { d: 'M16 8V4H4v12h4' }]],
+    menu: [['circle', { cx: '5', cy: '12', r: '1' }], ['circle', { cx: '12', cy: '12', r: '1' }], ['circle', { cx: '19', cy: '12', r: '1' }]],
+    grip: [['circle', { cx: '8', cy: '6', r: '1' }], ['circle', { cx: '16', cy: '6', r: '1' }], ['circle', { cx: '8', cy: '12', r: '1' }], ['circle', { cx: '16', cy: '12', r: '1' }], ['circle', { cx: '8', cy: '18', r: '1' }], ['circle', { cx: '16', cy: '18', r: '1' }]],
+    lock: [['rect', { x: '5', y: '10', width: '14', height: '11', rx: '2' }], ['path', { d: 'M8 10V7a4 4 0 0 1 8 0v3' }]],
+    close: [['path', { d: 'M5 5 19 19M19 5 5 19' }]],
+    minimize: [['path', { d: 'M5 12h14' }]],
+    fit: [['path', { d: 'M9 4H4v5m11-5h5v5M4 15v5h5m11-5v5h-5' }]],
+    chevron: [['path', { d: 'm6 9 6 6 6-6' }]],
+    alert: [['path', { d: 'M12 3 2.8 20h18.4L12 3Zm0 6v5m0 3v.2' }]],
+    recovery: [['path', { d: 'M4 7v5h5m-5 0a8 8 0 1 1 2 6' }]],
+    minimap: [['rect', { x: '3', y: '4', width: '18', height: '16', rx: '2' }], ['path', { d: 'M7 8h6v5H7zM15 15h3' }]],
+    check: [['path', { d: 'm4 12 5 5L20 6' }]],
+    account: [['circle', { cx: '12', cy: '8', r: '3' }], ['path', { d: 'M5.5 20a6.5 6.5 0 0 1 13 0' }]],
+  };
+
+  function deskIcon(name, className = 'egd-ui-icon') {
+    const icon = svgEl('svg', {
+      class: className, viewBox: '0 0 24 24', width: '18', height: '18',
+      fill: 'none', stroke: 'currentColor', 'stroke-width': '1.7',
+      'stroke-linecap': 'round', 'stroke-linejoin': 'round',
+      'aria-hidden': 'true', focusable: 'false',
+    });
+    for (const [tag, props] of DESK_ICON_SHAPES[name] || DESK_ICON_SHAPES.square) {
+      icon.appendChild(svgEl(tag, props));
+    }
+    return icon;
+  }
+
   function normalizeSourcePart(value) {
     return encodeURIComponent(String(value ?? '').trim());
   }
@@ -1191,11 +1243,10 @@
 
   function browserSecurityGlyph(url) {
     const label = browserSecurityLabel(url);
-    if (label === 'Secure') return '✓';
-    if (label === 'Not secure') return '!';
-    if (label === 'Local') return 'F';
-    if (label === 'Firefox') return 'Fx';
-    return 'W';
+    if (label === 'Secure') return deskIcon('lock');
+    if (label === 'Not secure') return deskIcon('alert');
+    if (label === 'Local') return deskIcon('file');
+    return deskIcon('browser');
   }
 
   function copyTextToClipboard(text) {
@@ -1761,6 +1812,7 @@
         boardNotice(`화면을 유지했습니다: ${error.message}`);
         return false;
       }
+      if (isCardFullscreen(card)) exitCardFullscreen(card, { restoreRect: false });
       unregisterSourceRefCard(card);
       try { if (typeof card._cleanup === 'function') card._cleanup(); } catch {}
       card.remove();
@@ -1994,6 +2046,7 @@
           refreshBoardRegion(projection);
           return false;
         }
+        if (isCardFullscreen(view)) exitCardFullscreen(view, { restoreRect: false });
         view._cleanup?.();
         unregisterSourceRefCard(view);
         view.remove();
@@ -3210,10 +3263,12 @@
     const active = activeEntity && valid.includes(activeEntity) ? activeEntity : valid[0] || null;
     if (!active) {
       state.activeEntityId = null;
+      syncViewportAgendaRail();
       return;
     }
     active.classList.add('egd-entity-active');
     state.activeEntityId = active.id || null;
+    syncViewportAgendaRail();
   }
 
   function viewportToCanvasPoint(clientX, clientY) {
@@ -3415,6 +3470,25 @@
   }
 
   function syncViewportAgendaRail() {
+    // The focused Browser can be removed before this sync; retain the single
+    // gadget node so its poller and controls can return to the rail intact.
+    const gadget = resourceGadget;
+    const fullscreenCard = state.cardFullscreen?.cardId
+      ? document.getElementById(state.cardFullscreen.cardId) : null;
+    const focusedBrowserToolbar = fullscreenCard?.classList.contains('egd-browser-card')
+      ? fullscreenCard.querySelector('.egd-desk-window-toolbar') : null;
+    if (gadget && focusedBrowserToolbar) {
+      const duplicate = focusedBrowserToolbar.querySelector('.egd-card-duplicate');
+      if (duplicate && (gadget.parentElement !== focusedBrowserToolbar || gadget.nextElementSibling !== duplicate)) {
+        focusedBrowserToolbar.insertBefore(gadget, duplicate);
+      }
+    } else if (gadget) {
+      const railRight = document.querySelector('#egd-desk-rail .egd-rail-right');
+      const avatar = railRight?.querySelector('.egd-rail-avatar');
+      if (avatar && (gadget.parentElement !== railRight || gadget.nextElementSibling !== avatar)) {
+        railRight.insertBefore(gadget, avatar);
+      }
+    }
     const agendaName = document.querySelector('.egd-rail-agenda-name');
     if (agendaName) agendaName.textContent = currentViewportAgendaLabel();
     const switcher = document.querySelector('.egd-rail-switcher');
@@ -3430,6 +3504,15 @@
     if (saveBtn) saveBtn.hidden = !state.agenda.dirty;
     const restoreBtn = document.querySelector('.egd-rail-restore-btn');
     if (restoreBtn) restoreBtn.hidden = !state.agenda.hasSavedState;
+    const focusedFile = Boolean(state.activeEntityId
+      && document.getElementById(state.activeEntityId)?.classList.contains('egd-file-card'));
+    const fileRailItem = document.querySelector('#egd-preset-bag .egd-bag-file');
+    fileRailItem?.classList.toggle('egd-bag-chip-active', focusedFile);
+    if (fileRailItem) {
+      if (focusedFile) fileRailItem.setAttribute('aria-current', 'page');
+      else fileRailItem.removeAttribute('aria-current');
+    }
+    document.querySelector('#egd-preset-bag .egd-bag-header')?.classList.toggle('egd-bag-header-muted', focusedFile);
 
     const badge = document.querySelector('.egd-rail-card-badge');
     if (badge) {
@@ -3811,6 +3894,201 @@
     );
   }
 
+  // Four quiet host-resource marks live in viewport chrome, never in Canvas or Chat.
+  // Values come only from the protected local bridge; unavailable is not zero.
+  let resourceGadget = null;
+  function buildResourceGadget() {
+    if (resourceGadget) return resourceGadget;
+    const specs = [
+      { id: 'cpu', label: 'CPU' },
+      { id: 'memory', label: '메모리' },
+      { id: 'disk', label: '디스크' },
+      { id: 'network', label: '네트워크' },
+    ];
+    const gadget = el('div', { class: 'egd-resource-gadget', role: 'group', 'aria-label': '이 컴퓨터의 자원 사용량' });
+    resourceGadget = gadget;
+    const detail = el('section', {
+      class: 'egd-resource-detail', id: 'egd-resource-detail', role: 'group',
+      'aria-label': '자원 사용량 상세', hidden: true,
+    });
+    let snapshot = null;
+    let opened = null;
+    let pending = null;
+    let timer = null;
+    let disposed = false;
+    let refreshOnResume = false;
+    const pollMs = 5000;
+    const staleMs = 15000;
+    const requestTimeoutMs = 4000;
+    const buttons = new Map();
+    const metricReady = (metric) => metric?.status === 'ok';
+    const numeric = (value) => typeof value === 'number' && Number.isFinite(value) && value >= 0;
+    const size = (bytes) => {
+      if (!numeric(bytes)) return '—';
+      if (bytes >= 1024 ** 3) return `${(bytes / 1024 ** 3).toFixed(1)} GiB`;
+      if (bytes >= 1024 ** 2) return `${(bytes / 1024 ** 2).toFixed(1)} MiB`;
+      if (bytes < 1024) return `${Math.round(bytes)} B`;
+      return `${Math.round(bytes / 1024)} KiB`;
+    };
+    const rate = (bytes) => numeric(bytes) ? `${size(bytes)}/s` : '—';
+    const percent = (metric) => metricReady(metric) && numeric(metric.percent)
+      ? `${Math.round(metric.percent)}%` : '—';
+    const title = (id) => id === 'memory' ? '메모리 사용(캐시 포함)' : specs.find(spec => spec.id === id)?.label || id;
+    const rows = (id, metric) => {
+      if (!metricReady(metric)) return [['상태', metric?.status === 'warming' ? '측정 준비 중' : '측정할 수 없음']];
+      if (id === 'cpu') return [
+        ['사용률', percent(metric)],
+        ['기준', metric.basis === 'all-logical-cores' ? '전체 논리 코어' : '기준 미확인'],
+        ['측정 구간', numeric(metric.intervalMs) ? `${Math.round(metric.intervalMs)} ms` : '—'],
+      ];
+      if (id === 'memory') return [
+        ['사용량(캐시 포함)', size(metric.usedBytes)],
+        ['전체', size(metric.totalBytes)],
+        ['사용률', percent(metric)],
+        ['기준', metric.basis === 'total-minus-os-free' ? '전체 − OS 여유 메모리 (캐시 포함)' : '기준 미확인'],
+      ];
+      if (id === 'disk') return [
+        ['저장 공간', `${size(metric.usedBytes)} / ${size(metric.totalBytes)}`],
+        ['사용률', percent(metric)],
+        ['대상', metric.target === 'profile-volume' ? 'EG-Desk 데이터 저장 볼륨' : '대상 미확인'],
+      ];
+      return [
+        ['수신', rate(metric.rxBytesPerSecond)],
+        ['송신', rate(metric.txBytesPerSecond)],
+        ['인터페이스', typeof metric.interface === 'string' && metric.interface ? metric.interface : '미확인'],
+        ['측정 구간', numeric(metric.intervalMs) ? `${Math.round(metric.intervalMs)} ms` : '—'],
+      ];
+    };
+    const discardStale = () => {
+      if (!snapshot) return;
+      const sampleTime = Date.parse(snapshot.sampledAt);
+      const age = Date.now() - sampleTime;
+      if (!Number.isFinite(sampleTime) || age > staleMs || age < -2000) snapshot = null;
+    };
+    const renderDetail = () => {
+      if (!opened) return;
+      const metric = snapshot?.[opened];
+      const sampledAt = snapshot?.sampledAt && !Number.isNaN(Date.parse(snapshot.sampledAt))
+        ? new Date(snapshot.sampledAt).toLocaleTimeString('ko-KR') : '측정 시각 미확인';
+      detail.replaceChildren(
+        el('div', { class: 'egd-resource-detail-title' }, title(opened)),
+        el('p', { class: 'egd-resource-detail-scope' }, `${opened === 'network' ? '기본 네트워크 연결' : '이 컴퓨터'} · ${sampledAt}`),
+        el('dl', {}, ...rows(opened, metric).map(([label, value]) =>
+          el('div', { class: 'egd-resource-detail-row' }, el('dt', {}, label), el('dd', {}, value)))),
+      );
+    };
+    const render = () => {
+      discardStale();
+      for (const spec of specs) {
+        const button = buttons.get(spec.id);
+        const metric = snapshot?.[spec.id];
+        const value = spec.id === 'network'
+          ? metricReady(metric) ? `수신 ${rate(metric.rxBytesPerSecond)}, 송신 ${rate(metric.txBytesPerSecond)}` : '측정 대기'
+          : percent(metric);
+        const label = spec.id === 'memory' ? '메모리 사용(캐시 포함)' : spec.label;
+        button.setAttribute('aria-label', `${label} ${value}, 상세 보기`);
+        button.title = `${label} · ${value}`;
+        const ring = button.querySelector('.egd-resource-ring');
+        if (spec.id !== 'network') {
+          const measured = metricReady(metric) && numeric(metric.percent);
+          ring.style.setProperty('--egd-resource-fill', measured ? `${Math.min(100, metric.percent)}%` : '0%');
+          ring.classList.toggle('egd-resource-unmeasured', !measured);
+        } else ring.classList.toggle('egd-resource-unmeasured', !metricReady(metric));
+      }
+      renderDetail();
+    };
+    const close = (restoreFocus = false) => {
+      if (!opened) return;
+      const prior = buttons.get(opened);
+      opened = null;
+      detail.hidden = true;
+      for (const button of buttons.values()) button.setAttribute('aria-expanded', 'false');
+      if (restoreFocus) prior?.focus();
+    };
+    for (const spec of specs) {
+      const ring = el('span', { class: `egd-resource-ring egd-resource-${spec.id} egd-resource-unmeasured`, 'aria-hidden': 'true' },
+        spec.id === 'network' ? '↕' : null);
+      const button = el('button', {
+        type: 'button', class: 'egd-resource-button', title: `${title(spec.id)} · 측정 대기`,
+        'aria-label': `${title(spec.id)} 측정 대기, 상세 보기`,
+        'aria-controls': 'egd-resource-detail', 'aria-expanded': 'false',
+        onclick: (event) => {
+          event.stopPropagation();
+          if (opened === spec.id) { close(); return; }
+          opened = spec.id;
+          detail.hidden = false;
+          for (const [id, control] of buttons) control.setAttribute('aria-expanded', String(id === opened));
+          render();
+        },
+      }, ring);
+      buttons.set(spec.id, button);
+      gadget.appendChild(button);
+    }
+    gadget.appendChild(detail);
+    const onOutside = (event) => { if (opened && !gadget.contains(event.target)) close(); };
+    const onKeydown = (event) => { if (opened && event.key === 'Escape') { event.stopPropagation(); close(true); } };
+    document.addEventListener('mousedown', onOutside, true);
+    document.addEventListener('keydown', onKeydown, true);
+    const refresh = async () => {
+      if (disposed || document.hidden || pending) return;
+      const controller = new AbortController();
+      pending = controller;
+      const timeout = window.setTimeout(() => controller.abort(), requestTimeoutMs);
+      try {
+        const response = await fetch('http://127.0.0.1:39218/system/resources', {
+          method: 'GET', cache: 'no-store', signal: controller.signal,
+        });
+        if (!response.ok) throw new Error(`resource status ${response.status}`);
+        const payload = await response.json();
+        snapshot = payload?.version === 1 && payload.scope === 'host' ? payload : null;
+      } catch {
+        if (!disposed) snapshot = null;
+      } finally {
+        window.clearTimeout(timeout);
+        if (pending === controller) pending = null;
+        if (!disposed) {
+          render();
+          if (!document.hidden) {
+            timer = window.setTimeout(refresh, refreshOnResume ? 0 : pollMs);
+            refreshOnResume = false;
+          }
+        }
+      }
+    };
+    const onWake = () => {
+      if (disposed) return;
+      if (document.hidden) {
+        if (timer) window.clearTimeout(timer);
+        timer = null;
+        if (pending) {
+          refreshOnResume = true;
+          pending.abort();
+        }
+        return;
+      }
+      render();
+      if (!pending) {
+        if (timer) window.clearTimeout(timer);
+        timer = null;
+        refreshOnResume = false;
+        void refresh();
+      }
+    };
+    document.addEventListener('visibilitychange', onWake);
+    window.addEventListener('focus', onWake);
+    window.addEventListener('unload', () => {
+      disposed = true;
+      if (timer) window.clearTimeout(timer);
+      pending?.abort();
+      document.removeEventListener('mousedown', onOutside, true);
+      document.removeEventListener('keydown', onKeydown, true);
+      document.removeEventListener('visibilitychange', onWake);
+      window.removeEventListener('focus', onWake);
+    }, { once: true });
+    void refresh();
+    return gadget;
+  }
+
   // ============ Top: Viewport Agenda Rail ============
   function buildDeskRail() {
     const rail = el('div', { id: 'egd-desk-rail', class: 'egd-edge egd-frosted' });
@@ -3830,7 +4108,7 @@
         el('span', { class: 'egd-rail-desk-name egd-rail-agenda-name' }, currentViewportAgendaLabel()),
         el('span', { class: 'egd-rail-dirty-badge', hidden: !state.agenda.dirty }, 'Unsaved'),
         el('span', { class: 'egd-rail-card-badge', hidden: true }),
-        el('span', { class: 'egd-rail-chevron' }, '▾'),
+        el('span', { class: 'egd-rail-chevron' }, deskIcon('chevron')),
       ),
     );
 
@@ -3852,7 +4130,7 @@
 
     const center = el('div', { class: 'egd-rail-section egd-rail-center' },
       el('div', { class: 'egd-rail-search' },
-        el('span', { class: 'egd-rail-search-icon' }, '⌕'),
+        el('span', { class: 'egd-rail-search-icon' }, deskIcon('search')),
         searchInput,
         el('span', { class: 'egd-rail-kbd' }, '⌘K'),
       ),
@@ -3869,7 +4147,7 @@
           ev.stopPropagation();
           saveCurrentAgendaState();
         },
-      }, '✓'),
+      }, deskIcon('check')),
       el('button', {
         class: 'egd-rail-icon egd-rail-restore-btn',
         title: '저장된 Board 열기',
@@ -3879,7 +4157,7 @@
           ev.stopPropagation();
           restoreSavedAgendaState();
         },
-      }, '↺'),
+      }, deskIcon('recovery')),
       el('button', {
         class: 'egd-rail-icon egd-rail-close-agenda-btn',
         title: 'Board 닫기',
@@ -3888,11 +4166,12 @@
           ev.stopPropagation();
           closeCurrentAgenda();
         },
-      }, '×'),
-      el('button', { class: 'egd-rail-icon', title: '미니맵', onclick: toggleDeskMinimap }, '◱'),
-      el('button', { id: 'egd-recovery-open', class: 'egd-rail-icon', 'aria-label': '복구 기록', title: '복구 기록', hidden: true, onclick: () => renderDeskRecoveryNotice(true) }, '↶'),
-      el('button', { class: 'egd-rail-icon', title: '알림 연결 전', 'aria-label': '알림 연결 전', disabled: 'true' }, '!'),
-      el('div', { class: 'egd-rail-avatar', title: '로컬 Desk', 'aria-label': '로컬 Desk' }, '○'),
+      }, deskIcon('close')),
+      el('button', { class: 'egd-rail-icon', title: '미니맵', 'aria-label': '미니맵', onclick: toggleDeskMinimap }, deskIcon('minimap')),
+      el('button', { id: 'egd-recovery-open', class: 'egd-rail-icon', 'aria-label': '복구 기록', title: '복구 기록', hidden: true, onclick: () => renderDeskRecoveryNotice(true) }, deskIcon('recovery')),
+      el('button', { class: 'egd-rail-icon', title: '알림 연결 전', 'aria-label': '알림 연결 전', disabled: 'true' }, deskIcon('alert')),
+      buildResourceGadget(),
+      el('div', { class: 'egd-rail-avatar', title: '로컬 Desk', 'aria-label': '로컬 Desk' }, deskIcon('account')),
     );
 
     rail.appendChild(left);
@@ -3904,7 +4183,13 @@
 
   // ============ Bottom: Dock ============
   function buildDock() {
-    const dock = el('div', { id: 'egd-dock', class: 'egd-edge egd-frosted' });
+    const dock = el('div', {
+      id: 'egd-dock',
+      class: 'egd-edge egd-frosted',
+      role: 'region',
+      'aria-label': 'Desk 도구 모음',
+      tabindex: '0',
+    });
 
     const makeGroup = (items, kind) => {
       const g = el('div', { class: `egd-dock-group egd-dock-${kind}` });
@@ -3947,7 +4232,7 @@
               deleteSelectedEntities();
             }
           },
-        }, el('span', { class: 'egd-dock-icon' }, item.icon));
+        }, el('span', { class: 'egd-dock-icon' }, deskIcon(item.icon)));
         g.appendChild(btn);
       }
       return g;
@@ -3967,9 +4252,11 @@
   function buildPresetBag() {
     const bag = el('div', { id: 'egd-preset-bag', class: 'egd-edge egd-frosted' });
 
-    bag.appendChild(el('div', { class: 'egd-bag-header', title: '프리셋 가방' }, '▦'));
-    bag.appendChild(el('button', { class: 'egd-bag-chip', title: '파일 작업 열기', 'aria-label': '파일 작업 열기',
-      data: { testid: 'file-sidebar-open' }, onclick: () => spawnFileCard() }, '파일'));
+    bag.appendChild(el('div', { class: 'egd-bag-header', title: 'Desk 도구' },
+      deskIcon('desk'), el('span', {}, 'Desk')));
+    bag.appendChild(el('span', { class: 'egd-bag-divider', 'aria-hidden': 'true' }));
+    bag.appendChild(el('button', { class: 'egd-bag-chip egd-bag-file', title: '파일 작업 열기', 'aria-label': '파일 작업 열기',
+      data: { testid: 'file-sidebar-open' }, onclick: () => spawnFileCard() }, deskIcon('folder'), el('span', {}, '파일')));
 
     const list = el('div', { class: 'egd-bag-list' });
     for (const preset of PRESETS) {
@@ -3977,10 +4264,10 @@
         class: 'egd-bag-chip',
         title: `${preset.name} · ${preset.count}개 항목`,
         data: { id: preset.id },
-      }, preset.label);
+      }, deskIcon({ 'react-dev': 'ide', meeting: 'users', research: 'search', writing: 'pencil' }[preset.id] || 'desk'), el('span', {}, preset.label));
       list.appendChild(chip);
     }
-    list.appendChild(el('button', { class: 'egd-bag-add', title: '새 프리셋' }, '+'));
+    list.appendChild(el('button', { class: 'egd-bag-add', title: '새 프리셋', 'aria-label': '새 프리셋' }, deskIcon('plus')));
     bag.appendChild(list);
 
     return bag;
@@ -4697,7 +4984,7 @@
               title: '목록 홈으로',
               'aria-label': '대화 목록으로 돌아가기',
               onclick: () => codexBridge.setHudView('list'),
-            }, '←'),
+            }, deskIcon('back')),
             el('div', { class: 'egd-codex-conversation-hud-center' },
               el('div', { class: 'egd-codex-conversation-hud-title' }, activeThread.title),
               activeThread.type === 'group'
@@ -4712,7 +4999,7 @@
                 ev.stopPropagation();
                 codexBridge.toggleThreadMenu(activeThread.id, ev.currentTarget);
               },
-            }, '⋯'),
+            }, deskIcon('menu')),
           ));
           if (threadMenuOpen) {
             conversation.appendChild(renderThreadMenu(activeThread));
@@ -4790,7 +5077,7 @@
               class: 'egd-codex-conversation-back',
               'aria-label': '대화 목록으로 돌아가기',
               onclick: () => codexBridge.setHudView('list'),
-            }, '←'),
+            }, deskIcon('back')),
             el('div', { class: 'egd-codex-thread-active-title' }, activeThread.title),
             el('button', {
               class: 'egd-codex-conversation-menu-trigger',
@@ -4799,7 +5086,7 @@
                 ev.stopPropagation();
                 codexBridge.toggleThreadMenu(activeThread.id, ev.currentTarget);
               },
-            }, '⋯'),
+            }, deskIcon('menu')),
             memberRowWrap,
           ));
           if (codex.threadMenu?.threadId === activeThread.id) conversation.appendChild(renderThreadMenu(activeThread));
@@ -4818,13 +5105,11 @@
         if (!hasConversation) {
           const emptyChildren = [
             el('div', { class: 'egd-codex-empty-eyebrow' }, codex.authStatus.isLoggedIn ? '새 대화' : 'Codex 연결'),
-            el('div', { class: 'egd-codex-empty-title' }, codex.authStatus.isLoggedIn ? '어떤 일을 함께할까요?' : '로그인 후 대화할 수 있습니다'),
-            el('div', { class: 'egd-codex-empty-sub' },
-              codex.authStatus.isLoggedIn
-                ? '질문을 하거나 자료를 첨부해 대화를 시작하세요.'
-                : 'Codex 로그인이 필요합니다.',
-            ),
+            el('div', { class: 'egd-codex-empty-title' }, codex.authStatus.isLoggedIn ? '어떤 일을 함께할까요?' : '로그인 필요'),
           ];
+          if (codex.authStatus.isLoggedIn) {
+            emptyChildren.push(el('div', { class: 'egd-codex-empty-sub' }, '질문을 하거나 자료를 첨부해 대화를 시작하세요.'));
+          }
           if (!codex.authStatus.isLoggedIn) {
             emptyChildren.push(el('div', { class: 'egd-codex-empty-actions' },
               el('button', {
@@ -5001,6 +5286,8 @@
               rows: '1',
               placeholder: '메시지 보내기',
               'aria-label': `${activeThread.title}에 보낼 메시지`,
+              'aria-description': 'Enter로 줄바꿈, Ctrl 또는 Command와 Enter로 전송',
+              title: 'Enter 줄바꿈 · Ctrl/⌘ Enter 전송',
               data: { threadId: activeThread.id, testid: 'chat-composer' },
             });
             const sendButton = el('button', {
@@ -5019,7 +5306,8 @@
               const footer = input.closest?.('.egd-codex-footer');
               const pane = main?.querySelector('.egd-codex-conversation-pane');
               const messages = pane?.querySelector('.egd-codex-messages');
-              let heightLimit = 240;
+              const cssMaxHeight = Number.parseFloat(input.ownerDocument.defaultView.getComputedStyle(input).maxHeight);
+              let heightLimit = Number.isFinite(cssMaxHeight) ? Math.min(240, cssMaxHeight) : 240;
               if (main?.clientHeight > 0 && footer && pane && messages) {
                 main.dataset.compactComposer = String(main.clientHeight < 480);
                 const outerHeight = (node) => {
@@ -5035,7 +5323,7 @@
                   .reduce((total, key) => total + (parseFloat(logStyle[key]) || 0), 0);
                 const chromeHeight = otherChildrenHeight(main, [pane, footer])
                   + otherChildrenHeight(pane, [messages]) + outerHeight(footer) - input.offsetHeight;
-                heightLimit = Math.max(40, Math.min(240, Math.floor(main.clientHeight - chromeHeight - logReserve)));
+                heightLimit = Math.max(40, Math.min(heightLimit, Math.floor(main.clientHeight - chromeHeight - logReserve)));
                 if (main.clientHeight < 480) heightLimit = Math.min(80, heightLimit);
               }
               const height = Math.min(heightLimit, Math.max(40, input.scrollHeight));
@@ -6621,7 +6909,7 @@
     };
   }
 
-  function toggleHUD(appId, appLabel) {
+  function toggleHUD(appId, appLabel, options = {}) {
     const hud = document.getElementById('egd-hud');
     if (!hud) return;
     const body = document.getElementById('egd-hud-body');
@@ -6651,7 +6939,11 @@
     syncHudViewportFit();
     body.textContent = '';
     if (appId === 'chat' && state.codexBridge) {
-      state.codexBridge.openHudHome?.();
+      if (options.preserveConversation && getCodexThreadById(state.codex, state.codex.activeThreadId)) {
+        state.codex.hudView = 'conversation';
+      } else {
+        state.codexBridge.openHudHome?.();
+      }
       mountCodexHUD(body, state.codexBridge, {
         mode: 'hud',
         onMoveToCanvas: () => detachCodexChatFromHud(),
@@ -6681,7 +6973,7 @@
     }
     state.codex.chatDockMode = 'hud';
     state.codex.chatCardEntityId = null;
-    toggleHUD('chat', '채팅');
+    toggleHUD('chat', '채팅', { preserveConversation: true });
   }
 
   function spawnCodexChatCard(anchorClientX = Math.round(window.innerWidth * 0.64), anchorClientY = Math.round(window.innerHeight * 0.53)) {
@@ -6716,7 +7008,11 @@
     });
 
     const header = el('div', { class: 'egd-chat-card-header' },
-      el('div', { class: 'egd-chat-card-title' }, '채팅'),
+      el('div', { class: 'egd-chat-card-title-group' },
+        el('span', { class: 'egd-window-grip', 'aria-hidden': 'true' }, deskIcon('grip')),
+        deskIcon('chat', 'egd-ui-icon egd-window-kind-icon'),
+        el('div', { class: 'egd-chat-card-title' }, '채팅'),
+      ),
       el('div', { class: 'egd-chat-card-actions' },
         el('button', {
           class: 'egd-chat-card-action',
@@ -6733,7 +7029,7 @@
             ev.stopPropagation();
             closeCanvasCard(card, cleanup);
           },
-        }, '×'),
+        }, deskIcon('close')),
       ),
     );
     const body = el('div', { class: 'egd-chat-card-body' });
@@ -7097,11 +7393,13 @@
     }
 
     const identity = el('div', { class: 'egd-desk-window-identity' });
+    identity.appendChild(deskIcon({ browser: 'browser', ontology: 'ontology', file: 'file', 'input-evidence': 'file' }[kind] || 'square', 'egd-ui-icon egd-window-kind-icon'));
     const actions = el('div', { class: 'egd-desk-window-actions' });
     const topbar = el('div', { class: 'egd-card-topbar egd-desk-window-titlebar' },
       el('div', { class: 'egd-card-dots-shell' },
         el('div', { class: 'egd-card-dots' }, closeControl, minimizeControl, maximizeControl),
       ),
+      el('span', { class: 'egd-window-grip', 'aria-hidden': 'true' }, deskIcon('grip')),
       identity,
       actions,
     );
@@ -10216,7 +10514,7 @@
         ev.stopPropagation();
         browserCardControl(card, 'back');
       },
-    }, '←');
+    }, deskIcon('back'));
     const forwardButton = el('button', {
       class: 'egd-card-nav-btn',
       title: '앞으로',
@@ -10225,15 +10523,18 @@
         ev.stopPropagation();
         browserCardControl(card, 'forward');
       },
-    }, '→');
+    }, deskIcon('forward'));
     const reloadButton = el('button', {
       class: 'egd-card-nav-btn egd-card-reload',
       title: '새로고침',
+      'aria-label': '새로고침',
+      'aria-busy': 'false',
+      data: { icon: 'reload' },
       onclick: (ev) => {
         ev.stopPropagation();
         browserCardControl(card, browserState.loading ? 'stop' : 'reload');
       },
-    }, '↻');
+    }, deskIcon('reload'));
     const homeButton = el('button', {
       class: 'egd-card-nav-btn',
       title: '홈',
@@ -10241,15 +10542,15 @@
         ev.stopPropagation();
         browserCardControl(card, 'home');
       },
-    }, '⌂');
+    }, deskIcon('home'));
     const duplicateButton = el('button', {
-      class: 'egd-card-nav-btn',
+      class: 'egd-card-nav-btn egd-card-duplicate',
       title: '복제',
       onclick: (ev) => {
         ev.stopPropagation();
         browserCardControl(card, 'duplicate');
       },
-    }, '⧉');
+    }, deskIcon('duplicate'));
     const menuButton = el('button', {
       class: 'egd-card-menu',
       title: '더보기',
@@ -10257,7 +10558,7 @@
         ev.stopPropagation();
         browserCardControl(card, 'menu', menuButton);
       },
-    }, '⋮');
+    }, deskIcon('menu'));
 
     const header = deskWindow.slots.header;
     deskWindow.slots.identity.classList.add('egd-card-page-meta');
@@ -11361,13 +11662,19 @@
       pageStatus.textContent = isStartPage ? '' : browserState.loading ? 'Loading' : browserState.security;
       pageStatus.title = isStartPage ? '' : browserState.uri;
       securityIcon.hidden = isStartPage;
-      securityIcon.textContent = browserSecurityGlyph(browserState.uri);
+      securityIcon.replaceChildren(browserSecurityGlyph(browserState.uri));
       securityIcon.title = isStartPage ? '' : browserState.security;
       if (document.activeElement !== urlInput) urlInput.value = browserVisibleAddress(browserState.uri);
       backButton.disabled = !browserState.canGoBack;
       forwardButton.disabled = !browserState.canGoForward;
-      reloadButton.textContent = browserState.loading ? '×' : '↻';
+      const reloadAction = browserState.loading ? 'stop' : 'reload';
+      if (reloadButton.dataset.icon !== reloadAction) {
+        reloadButton.replaceChildren(deskIcon(reloadAction));
+        reloadButton.dataset.icon = reloadAction;
+      }
       reloadButton.title = browserState.loading ? '중지' : '새로고침';
+      reloadButton.setAttribute('aria-label', reloadButton.title);
+      reloadButton.setAttribute('aria-busy', String(!!browserState.loading));
     };
     const setBrowserLoading = (loading) => {
       browserState.loading = !!loading;
@@ -12097,7 +12404,8 @@
     const coarsePointer = window.matchMedia?.('(pointer: coarse)');
     const detailWidth = 240;
     const detailHeight = 180;
-    const icons = { browser: '🌐︎', chat: '🗨︎', file: '▤', terminal: '>_', settings: '⚙', ontology: '❖', 'input-evidence': '◈' };
+    const icons = { browser: 'browser', chat: 'chat', file: 'file', terminal: 'terminal', settings: 'settings', ontology: 'ontology', 'input-evidence': 'file' };
+    const typeLabels = { browser: '브라우저', chat: '대화', file: '파일', terminal: '터미널', settings: '설정', ontology: '온톨로지', 'input-evidence': '자료' };
     const titles = {
       browser: '.egd-card-page-title', chat: '.egd-chat-card-title', file: '.egd-file-card-title',
       terminal: '.egd-terminal-title', settings: '.egd-settings-title', ontology: '.egd-ontology-title',
@@ -12294,11 +12602,18 @@
       if (!card.id || card.dataset.codexRole === 'auth' || entries.has(card)) return;
       const kind = kindFor(card);
       const label = el('span', { class: 'egd-semantic-label' });
-      const icon = el('span', { class: 'egd-semantic-icon', 'aria-hidden': 'true' }, icons[kind] || '□');
+      const source = el('span', { class: 'egd-semantic-source', hidden: true });
+      const icon = el('span', { class: 'egd-semantic-icon', 'aria-hidden': 'true' }, deskIcon(icons[kind] || 'square'));
+      const center = el('span', { class: 'egd-semantic-center' },
+        icon,
+        el('span', { class: 'egd-semantic-type' }, typeLabels[kind] || '화면'),
+        label,
+        source,
+      );
       const proxy = el('button', {
         type: 'button', class: 'egd-semantic-proxy', data: { kind, lod: 'outline', viewId: card.id },
         onclick: ev => { ev.stopPropagation(); focusProjection(entries.get(card)); },
-      }, label, icon);
+      }, center);
       proxy.hidden = true;
       proxy.style.position = 'absolute';
       proxy.style.transformOrigin = 'top left';
@@ -12308,7 +12623,7 @@
       const body = card.querySelector('.egd-card-body, .egd-chat-card-body, .egd-settings-content') || card;
       const bodyFontPx = Math.max(1, parsePxNumber(window.getComputedStyle(body).fontSize, 14));
       const entry = {
-        card, proxy, label, kind, titleNode, bodyFontPx, level: null, rect: null,
+        card, proxy, label, source, kind, titleNode, bodyFontPx, level: null, rect: null,
         authorVisible: true, visibilityDirty: true, compact: false,
         visualStyle: [card.style.display, card.style.visibility, card.style.opacity].join('|'),
       };
@@ -12459,7 +12774,11 @@
         }
         const title = titleFor(entry);
         if (entry.label.textContent !== title) entry.label.textContent = title;
-        const accessible = `${title} · ${entry.kind} 화면으로 이동`;
+        const sourceText = entry.kind === 'browser' && card._browserState?.uri
+          ? browserDisplayHost(card._browserState.uri) : '';
+        if (entry.source.textContent !== sourceText) entry.source.textContent = sourceText;
+        entry.source.hidden = !sourceText || sourceText === title;
+        const accessible = `${title}${sourceText && sourceText !== title ? ` · ${sourceText}` : ''} · ${typeLabels[entry.kind] || '화면'}으로 이동`;
         if (proxy.getAttribute('aria-label') !== accessible) proxy.setAttribute('aria-label', accessible);
         if (level === 'detail') {
           entry.wasProxyFocused = document.activeElement === proxy;
@@ -12551,7 +12870,18 @@
   }
 
   function installCanvasPanZoom(viewport, layer) {
-    const indicator = el('div', { id: 'egd-zoom-indicator' }, '100%');
+    const zoomValue = el('span', { class: 'egd-zoom-value', 'aria-live': 'off' }, '100%');
+    const zoomOutButton = el('button', { type: 'button', class: 'egd-zoom-button', 'aria-label': 'Canvas 축소', title: 'Canvas 축소' }, deskIcon('minimize'));
+    const zoomInButton = el('button', { type: 'button', class: 'egd-zoom-button', 'aria-label': 'Canvas 확대', title: 'Canvas 확대' }, deskIcon('plus'));
+    const zoomFitButton = el('button', { type: 'button', class: 'egd-zoom-button', 'aria-label': '열린 창 전체 보기', title: '열린 창 전체 보기' }, deskIcon('fit'));
+    const indicator = el('div', { id: 'egd-zoom-indicator', role: 'group', 'aria-label': 'Canvas 보기', data: { noPan: 'true' } },
+      zoomOutButton, zoomValue, zoomInButton, el('span', { class: 'egd-zoom-divider', 'aria-hidden': 'true' }), zoomFitButton);
+    for (const eventName of ['mousedown', 'pointerdown', 'wheel']) {
+      indicator.addEventListener(eventName, event => {
+        event.stopPropagation();
+        if (eventName === 'wheel') event.preventDefault();
+      }, { passive: false });
+    }
     const marquee = el('div', { id: 'egd-selection-marquee' });
     document.documentElement.appendChild(indicator);
     document.documentElement.appendChild(marquee);
@@ -12566,7 +12896,7 @@
 
     function apply() {
       layer.style.transform = `translate(${state.pan.x}px, ${state.pan.y}px) scale(${state.zoom})`;
-      indicator.textContent = Math.round(state.zoom * 100) + '%';
+      zoomValue.textContent = Math.round(state.zoom * 100) + '%';
       syncCardFullscreenLayout();
       viewport.style.setProperty('--egd-camera-pan-x', state.pan.x + 'px');
       viewport.style.setProperty('--egd-camera-pan-y', state.pan.y + 'px');
@@ -12660,7 +12990,7 @@
     };
     const shouldAllowHudScroll = (target) => {
       if (!(target instanceof Element)) return false;
-      return !!target.closest('#egd-hud, #egd-codex-activity-panel, #egd-codex-input-panel, #egd-answer-briefing');
+      return !!target.closest('#egd-hud, #egd-codex-activity-panel, #egd-codex-input-panel, #egd-answer-briefing, #egd-zoom-indicator, #egd-dock, #egd-preset-bag, #egd-desk-rail');
     };
     const wheelSession = {
       owner: null,
@@ -12728,6 +13058,31 @@
       const unit = normalizeWheelDelta(ev);
       zoomCanvasByFactor(Math.exp(-ev.deltaY * unit * WHEEL_ZOOM_SPEED), ev.clientX, ev.clientY);
     };
+
+    const zoomAtSafeCenter = factor => {
+      const safe = safeViewportRect();
+      zoomCanvasByFactor(factor, safe.left + safe.width / 2, safe.top + safe.height / 2);
+    };
+    zoomOutButton.addEventListener('click', () => zoomAtSafeCenter(1 / 1.2));
+    zoomInButton.addEventListener('click', () => zoomAtSafeCenter(1.2));
+    zoomFitButton.addEventListener('click', () => {
+      const cards = Array.from(layer.querySelectorAll(':scope > .egd-canvas-card'))
+        .filter(card => card.isConnected && !card.hidden && card.getClientRects().length
+          && window.getComputedStyle(card).visibility === 'visible');
+      if (!cards.length) {
+        setCanvasViewportTarget({ pan: { x: 0, y: 0 }, zoom: 1 });
+        return;
+      }
+      const rects = cards.map(persistentEntityGeometry);
+      const left = Math.min(...rects.map(rect => rect.x));
+      const top = Math.min(...rects.map(rect => rect.y));
+      const right = Math.max(...rects.map(rect => rect.x + rect.width));
+      const bottom = Math.max(...rects.map(rect => rect.y + rect.height));
+      setCanvasViewportTarget(SurfaceState.fitSurfaceCamera(
+        { x: left, y: top, width: right - left, height: bottom - top },
+        safeViewportRect({ margin: 32 }), 0.9,
+      ));
+    });
 
     const beginCanvasPan = (ev) => {
       setActiveEntity(null);
@@ -13129,18 +13484,8 @@
   }
 
   function paintSurface() {
-    const root = document.documentElement;
-    root.style.setProperty('--egd-surface', '#F5F3EF');
-    root.style.setProperty('--egd-surface-elevated', '#FFFFFF');
-    root.style.setProperty('--egd-primary', '#2D5A7B');
-    root.style.setProperty('--egd-primary-container', '#E3EEF5');
-    root.style.setProperty('--egd-secondary', '#6B7B8D');
-    root.style.setProperty('--egd-outline', '#D4D0CA');
-    root.style.setProperty('--egd-outline-variant', '#E8E4DE');
-    root.style.setProperty('--egd-on-surface', '#1A1A1A');
-    root.style.setProperty('--egd-on-surface-variant', '#5A5A5A');
     syncActiveToolMode();
-    document.body.style.background = '#F5F3EF';
+    document.body.style.background = 'var(--egd-wood)';
   }
 
   function boot() {

@@ -6,6 +6,17 @@
 **Status**: Product/runtime architecture decision note
 **Scope**: EG-Desk Firefox shell, Desk canvas, Board state, Desk Window lifecycle, search, local index, input ownership
 
+**Approved visual reference (2026-10-20):** [desktop screenshot](./egdesk-approved-desktop-style.jpg)
+and [interactive HTML proposal](./egdesk-approved-desktop-style.html). They
+establish the warm wood Desk, off-white window material, compact corners,
+quiet separators, and two attached Browser chrome rows. The proposal's
+example messages, resources, and window coordinates are not runtime data or
+new domain rules. Runtime token owner:
+`overlay/CSS/eg-desk-surface.uc.css` (`--egd-*`); this document mirrors intent,
+not a separate token implementation. Current user-approved style supersedes
+older blue/frosted visual values below where they conflict, but the Desk
+Window lifecycle and adapter boundaries still govern behavior.
+
 ---
 
 ## Core Vocabulary
@@ -279,20 +290,32 @@ content color.
 
 | Part | Target contract |
 |---|---|
-| outer frame | 8 px radius, 1 px neutral border, clipped body corners |
-| titlebar | 32 px common height and one alignment grid |
+| outer frame | 9 px radius, 1 px `#DEDFD8` neutral border, clipped body corners |
+| titlebar | 32 px shared default; the approved Browser variant is 29 px over its own 35 px toolbar, with controls retained on the shared alignment grid |
 | window controls | 10 px dots, 8 px gap, fixed left inset |
-| adapter toolbar | optional 30-34 px row below the titlebar |
+| adapter toolbar | optional row below titlebar; Browser's accepted thin row is 35 px and does not rebuild the live page on camera movement |
 | content viewport | fills remaining window space; no shell padding by default |
 | resize targets | the same eight edge/corner hit zones on every resizable Desk Window |
-| inactive state | quiet border and low elevation |
-| active state | shared outline/focus ring and elevated shadow, independent of adapter theme |
+| inactive state | quiet border and low `0 4px 16px rgba(29,44,55,.12)` elevation |
+| active state | shared subtle `0 7px 21px rgba(29,44,55,.15)` elevation, independent of adapter theme |
 | maximized state | same safe-area fit, restore geometry, and hidden resize targets |
 
-An adapter may choose a neutral or dark surface palette, but it must not move the
-window controls, invent a different titlebar height, or replace the active and
-maximized state grammar. Terminal can remain dark; Ontology can remain warm and
-light; both still use the same frame metrics and lifecycle affordances.
+The approved visual parity pass uses one local outline-icon renderer for the
+floating rail, full Dock, topbar actions, Desk Window type identity, Browser
+navigation/security, and semantic outline proxy. Its simple SVG geometry is
+authored in the Firefox surface JS; it does not fetch a third-party icon
+library or copy proposal fixtures. A small visual grip precedes the type icon
+and title in the shared Desk Window titlebar; the existing close/minimize/
+maximize controls and titlebar drag region retain their behavior. Browser
+continues to have its own 29px title row and attached 35px navigation row.
+The outline proxy shows title/source from the live View only, while its click
+focuses that same View and leaves Browser page and world geometry intact.
+
+An adapter may choose a neutral or dark surface palette, but it must not move
+the window controls or replace the active and maximized state grammar. The
+Browser's documented 29 + 35 px variant is intentional; it does not force a
+Browser toolbar onto Ontology or Terminal. Terminal can remain dark and
+Ontology warm and light while sharing the shell lifecycle affordances.
 
 The target titlebar profiles are concrete:
 

@@ -14,6 +14,7 @@ Responsibility:
 
 Context and references:
 - Start from the bounded brief and WM source plan supplied by Main. Ask Main for source routing when a missing fact would materially change the design; do not explore the whole repository by default.
+- Before EG-Desk visual work, read `docs/codex/project-context.md`'s current approved visual baseline and inspect its linked HTML, JPG, and Chat/common-frame/viewport documents. Compare a current app screenshot with the approved reference; preserve the established Desk layout, navigation, and interaction feel unless the owner explicitly changes them.
 - Read the relevant scenario and requirements yourself. Carry only context that can change the next visual decision. Do not inherit a long PM conversation as a substitute for a useful design brief.
 - Inspect reference images and prior screenshots with image tools. Text summaries of a reference are not a substitute for looking at it.
 - Distinguish approved visual references, exploration candidates, rejected examples, and legacy material. Agreement with a feature or sentence is not approval of its appearance.

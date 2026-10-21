@@ -9,6 +9,15 @@
 > Briefing under Contract §8 and Atlas `OBJ-038` / `AI-05`; viewport guidance is
 > retained only where it implements the selected Briefing Step's Focus Scope.
 
+**Approved desktop style (2026-10-20):** [screenshot](./egdesk-approved-desktop-style.jpg)
+and [interactive HTML proposal](./egdesk-approved-desktop-style.html).
+Preserve its *style* and recognisable shell roles, not its example content as
+product truth. The Firefox runtime CSS owns the accepted `--egd-*` colors and
+surfaces: wood `#E8E2D7` with restrained photographic grain, topbar
+`#F9F8F4`, opaque window `#FFFEFA`, text `#252A26`/`#646A61`, sage
+`#49634F`, fine borders `#DEDFD8`/`#EAEAE4`. Avoid mechanical HUD grids,
+floating bottom content tabs, and always-on metric numbers.
+
 ---
 
 ## Core Sentence
@@ -29,31 +38,32 @@ It must not rewrite the saved canvas layout unless the user explicitly commits a
 
 ## Top Bar Meaning
 
-The top bar should not primarily display "Desk".
+The approved shell keeps a flush, full-width 52 px topbar: macOS window
+controls and a compact EG-Desk/Board entry at left, working search in the
+center, and account plus a tiny four-mark resource gadget at right. The Board
+entry answers which work region is selected; the brand is not a profile hero
+or a replacement for Board context. This newer visual decision supersedes the
+older suggestion to make the entire topbar a large Board heading.
 
-The Desk is the computer-level work surface. It is too broad for the top viewport bar.
+The resource gadget is viewport chrome, so Canvas pan/zoom never moves it or
+changes focus when detail opens. Its real protected bridge values are scoped:
+CPU across logical cores, memory as total minus OS-free **including reclaimable
+cache**, disk storage of the EG-Desk data volume, and network receive/transmit
+rates of the reported interface. No network percentage, no fabricated zero
+while unavailable, and no login requirement for local host metrics. Details
+appear on demand below the four quiet rings and close on Escape/outside
+interaction. A sample older than 15 seconds is unmeasured, not a held value.
 
-The top bar should display the Board or Board slice currently in the viewport.
-
-Preferred product model:
-
-```text
-Top bar = Viewport Board Rail
-```
-
-It answers:
-
-```text
-"What work room / Board am I currently looking at?"
-```
-
-Not:
-
-```text
-"Which computer/Desk is this?"
-```
-
-The Desk identity can exist in a lower-priority menu, settings surface, profile, or environment switcher. It should not be the first large label in the active working viewport.
+The left preset rail stays a narrow floating 64px surface over the Desk, with
+line icon over 11px label and a distinct current Desk/file hierarchy. It is
+not a fixed full-height sidebar. Preserve the actual preset entries and their
+current behaviors; the proposal's smaller list is not a replacement catalog.
+The bottom Dock retains **all** real tool groups and actions, but its icons
+share one restrained outline grammar with the rail, topbar, and window headers.
+The lower-left camera control is a 35px `− / percent / + / fit` group. Buttons
+use the existing Canvas camera math, native keyboard activation, and do not
+start a Canvas pan gesture. Fit only changes the camera to encompass current
+visible Desk Windows; it does not rewrite their saved world coordinates.
 
 ---
 
@@ -88,7 +98,9 @@ If multiple Boards are visible, the top bar should show the primary one plus a c
 태화 5월 리포트 · +2
 ```
 
-Clicking the label should open a Board switcher, not a Desk selector by default.
+Clicking the compact Board entry should open a Board switcher, not a Desk
+selector by default. Selecting a Board changes the viewport camera into the
+same Desk world; it does not remove other Boards or Chat views.
 
 ---
 
@@ -269,6 +281,11 @@ The always-visible helper reconnect pill should move behind diagnostics or be hi
 ## Card Presentation Modes
 
 Card presentation is viewport state, not saved card layout.
+
+At semantic outline size, a live View remains mounted at the same world
+geometry. Its screen-space proxy uses a centered type glyph plus a modest
+readable title and source when known; clicking still focuses the original live
+View. This visual treatment does not change the detail/outline/marker thresholds.
 
 ```ts
 type CardPresentationMode =

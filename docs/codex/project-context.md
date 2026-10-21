@@ -17,6 +17,11 @@ This document contains project reference context for Codex. It is not the Main a
 - Product outcomes and authority boundaries should be explicit; implementation structure, refactoring, task decomposition, and technical method remain flexible unless they change an approved product outcome or risk boundary.
 - Prefer current external standards, official documentation, mature open-source work, and the local `references/` library before custom implementation. Reuse must follow the current license policy and verified evidence.
 
+### Current approved visual baseline
+- For EG-Desk visual work, inspect the owner-approved desktop [HTML reference](../../apps/firefox-ui-demo/docs/egdesk-approved-desktop-style.html) and [rendered JPG](../../apps/firefox-ui-demo/docs/egdesk-approved-desktop-style.jpg) together. These are visual references, not evidence that the running app already matches them.
+- Read the existing [Chat design grammar](../../apps/firefox-ui-demo/docs/CHAT_DESIGN_GRAMMAR_V1.md), [Desk Window common-frame contract](../../apps/firefox-ui-demo/docs/DESK_AGENDA_CARD_RUNTIME_MODEL.md#desk-window-shell-and-adapter-contract), and [viewport interaction model](../../apps/firefox-ui-demo/docs/VIEWPORT_LAYOUT_INTERACTION_MODEL.md). Preserve the established EG-Desk layout and operating model while applying the approved visual feel and refining details; do not treat the reference as permission to replace the UI/UX philosophy.
+- Compare an actual current-app screenshot with the approved JPG when assessing or implementing changes. A prose description or static mock alone does not verify the live shell, Chat, dock, cards, or viewport behavior.
+
 ## Codex Product Management
 - `.codex/agents/egdesk-pm.toml` is the active Codex-native EG-Desk PM profile.
 - PM owns product interpretation, final-capability baselines, roadmap and PRD coherence, research framing, external-reference product fit, decision drift, and approval-candidate preparation.

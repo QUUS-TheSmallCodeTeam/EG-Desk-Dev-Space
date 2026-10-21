@@ -1,41 +1,61 @@
 /* ============================================================
    EG-Desk Surface — 4-Edge Framework overlay for Firefox chrome
    Spec: ideas/brainstorming/DESIGN_SYSTEM_SPEC.md
-   Light mode only. No gradients, no neon, no pure black.
+   Approved desktop baseline: quiet warm materials and restrained chrome.
    ============================================================ */
 
 @namespace url("http://www.w3.org/1999/xhtml");
 
 :root {
-  --egd-surface: #F5F3EF;
-  --egd-surface-elevated: #FFFFFF;
-  --egd-primary: #2D5A7B;
-  --egd-primary-container: #E3EEF5;
-  --egd-secondary: #6B7B8D;
-  --egd-outline: #D4D0CA;
-  --egd-outline-variant: #E8E4DE;
-  --egd-on-surface: #1A1A1A;
-  --egd-on-surface-variant: #5A5A5A;
+  --egd-surface: #F4F3EE;
+  --egd-surface-elevated: #FFFEFA;
+  --egd-primary: #49634F;
+  --egd-primary-container: #E1E8DF;
+  --egd-secondary: #646A61;
+  --egd-outline: #DEDFD8;
+  --egd-outline-variant: #EAEAE4;
+  --egd-on-surface: #252A26;
+  --egd-on-surface-variant: #646A61;
+  --egd-wood: #E8E2D7;
+  --egd-topbar: #F9F8F4;
+  --egd-window-alt: #F9F9F6;
+  --egd-hover: #E8EAE3;
+  --egd-user-bubble: #E6EBE3;
+  --egd-focus-border: #A9B5A5;
+  --egd-avatar-bg: #DCE5DA;
+  --egd-chat-mine: var(--egd-user-bubble);
+  --egd-note: #F5F0DF;
+  --egd-shadow: 0 12px 30px rgba(50, 45, 34, .13);
+  --egd-chrome-shadow: 0 3px 14px rgba(31, 47, 52, .09);
 
-  --egd-frosted-bg: rgba(255, 255, 255, 0.74);
-  --egd-frosted-border: 1px solid rgba(255, 255, 255, 0.4);
-  --egd-frosted-shadow: 0 1px 2px rgba(28, 30, 34, 0.04), 0 10px 28px rgba(28, 30, 34, 0.09);
-  --egd-card-topband-bg: #DFE7EB;
-  --egd-card-toolbar-bg: #EFF3F5;
-  --egd-card-toolbar-bg-2: #EFF3F5;
-  --egd-card-hover-bg: #E3EEF5;
-  --egd-card-focus-ring: rgba(45, 90, 123, 0.16);
-  --egd-chat-panel-bg: rgba(246, 243, 238, 0.82);
-  --egd-chat-panel-bg-strong: rgba(242, 238, 233, 0.90);
-  --egd-chat-layer-soft: rgba(253, 251, 247, 0.64);
-  --egd-chat-layer-elevated: rgba(255, 253, 249, 0.78);
-  --egd-chat-outline: rgba(210, 203, 194, 0.90);
-  --egd-chat-outline-soft: rgba(224, 218, 210, 0.88);
-  --egd-chat-accent-soft: rgba(45, 90, 123, 0.10);
-  --egd-chat-accent-strong: rgba(45, 90, 123, 0.22);
-  --egd-chat-shadow-soft: 0 8px 24px rgba(35, 42, 50, 0.08);
+  --egd-frosted-bg: rgba(255, 254, 250, .98);
+  --egd-frosted-border: 1px solid var(--egd-outline);
+  --egd-frosted-shadow: 0 3px 14px rgba(31, 47, 52, .09);
+  --egd-card-topband-bg: #FFFEFA;
+  --egd-card-toolbar-bg: #F9F9F6;
+  --egd-card-toolbar-bg-2: #F9F9F6;
+  --egd-card-hover-bg: #E8EAE3;
+  --egd-card-focus-ring: rgba(73, 99, 79, .15);
+  --egd-chat-panel-bg: #FFFEFA;
+  --egd-chat-panel-bg-strong: #FFFEFA;
+  --egd-chat-layer-soft: #F9F9F6;
+  --egd-chat-layer-elevated: #FFFEFA;
+  --egd-chat-outline: #DEDFD8;
+  --egd-chat-outline-soft: #EAEAE4;
+  --egd-chat-accent-soft: rgba(73, 99, 79, .10);
+  --egd-chat-accent-strong: rgba(73, 99, 79, .22);
+  --egd-chat-shadow-soft: 0 4px 16px rgba(29, 44, 55, .12);
 
-  --egd-font: "Inter", -apple-system, "Segoe UI", system-ui, sans-serif;
+  --egd-font: -apple-system, BlinkMacSystemFont, "Apple SD Gothic Neo", "Malgun Gothic", sans-serif;
+}
+
+.egd-ui-icon {
+  display: block;
+  flex: none;
+  width: 17px;
+  height: 17px;
+  stroke: currentColor;
+  vertical-align: middle;
 }
 
 /* Fixed viewport wrapper + transformed inner layer */
@@ -58,10 +78,9 @@
   inset: 0;
   z-index: 0;
   pointer-events: none;
-  background-color: light-dark(#F5F3EF, #242A28);
+  background-color: var(--egd-wood);
   background-image:
-    linear-gradient(light-dark(rgba(245, 243, 239, 0.72), rgba(36, 42, 40, 0.87)),
-                    light-dark(rgba(245, 243, 239, 0.72), rgba(36, 42, 40, 0.87))),
+    linear-gradient(rgba(245, 243, 239, .68), rgba(245, 243, 239, .68)),
     url("chrome://userchrome/content/egdesk-desk-woodgrain.jpg");
   background-repeat: no-repeat, repeat;
   background-position: 0 0, var(--egd-camera-pan-x, 0px) var(--egd-camera-pan-y, 0px);
@@ -112,10 +131,10 @@
   position: absolute;
   box-sizing: border-box;
   margin: 0;
-  border: 1px solid rgba(172, 176, 171, 0.86);
-  background: rgba(255, 254, 252, 0.94);
-  color: #26343B;
-  box-shadow: 0 2px 10px rgba(30, 42, 43, 0.10);
+  border: 1px solid var(--egd-outline);
+  background: rgba(255, 254, 250, .96);
+  color: var(--egd-on-surface);
+  box-shadow: 0 2px 10px rgba(49, 43, 34, .08);
   font-family: var(--egd-font, system-ui);
   text-align: left;
   cursor: pointer;
@@ -124,13 +143,13 @@
 
 .egd-semantic-proxy:hover,
 .egd-semantic-cluster:hover {
-  border-color: #7995A1;
-  background: #F5F8F7;
+  border-color: var(--egd-focus-border);
+  background: var(--egd-window-alt);
 }
 
 .egd-semantic-proxy:focus-visible,
 .egd-semantic-cluster:focus-visible {
-  outline: 2px solid #4B7287;
+  outline: 2px solid var(--egd-primary);
   outline-offset: 2px;
 }
 
@@ -145,65 +164,70 @@
   content: "";
   position: absolute;
   inset: 0 0 auto;
-  height: 3px;
-  background: #5D8193;
+  height: 2px;
+  background: #B8C7B6;
 }
 
 .egd-semantic-label {
   display: block;
-  box-sizing: border-box;
   max-width: 100%;
-  padding: 10px 10px 0;
   overflow: hidden;
-  color: #34434B;
-  font-size: 11px;
-  font-weight: 600;
-  line-height: 14px;
+  color: var(--egd-on-surface);
+  font-size: 14px;
+  font-weight: 650;
+  line-height: 1.3;
   text-overflow: ellipsis;
   white-space: nowrap;
 }
 
-.egd-semantic-proxy[data-lod="outline"] > .egd-semantic-label {
+.egd-semantic-center {
   position: absolute;
-  inset: 0 0 auto;
+  inset: 0;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
+  gap: 5px;
+  min-width: 0;
+  padding: 8px;
+  text-align: center;
 }
 
 .egd-semantic-icon {
-  position: absolute;
-  top: 50%;
-  left: 50%;
   display: grid;
   place-items: center;
-  width: 22px;
-  height: 22px;
-  color: #476F83;
-  font-size: 19px;
-  line-height: 1;
-  transform: translate(-50%, -50%);
+  width: 32px;
+  height: 32px;
+  color: var(--egd-on-surface-variant);
 }
+.egd-semantic-icon .egd-ui-icon { width: 28px; height: 28px; }
+.egd-semantic-type,
+.egd-semantic-source {
+  display: block;
+  max-width: 100%;
+  overflow: hidden;
+  color: var(--egd-on-surface-variant);
+  font-size: 11px;
+  line-height: 1.25;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.egd-semantic-source[hidden] { display: none; }
 
 /* Short outline frames keep their footprint while separating the title from
    the icon. The icon stays centered, including at the tightest outline size. */
 @container egd-outline (max-height: 70px) {
-  .egd-semantic-label {
-    padding-top: 3px;
-    font-size: 11px;
-    line-height: 12px;
-  }
-
-  .egd-semantic-icon {
-    width: 18px;
-    height: 18px;
-    font-size: 16px;
-  }
+  .egd-semantic-center { gap: 2px; }
+  .egd-semantic-icon { width: 20px; height: 20px; }
+  .egd-semantic-icon .egd-ui-icon { width: 19px; height: 19px; }
+  .egd-semantic-label { font-size: 11px; }
+  .egd-semantic-type, .egd-semantic-source { display: none; }
 }
 
 @container egd-outline (max-height: 50px) {
-  .egd-semantic-icon {
-    width: 14px;
-    height: 14px;
-    font-size: 14px;
-  }
+  .egd-semantic-label { display: none; }
+  .egd-semantic-icon { width: 18px; height: 18px; }
+  .egd-semantic-icon .egd-ui-icon { width: 17px; height: 17px; }
 }
 
 .egd-semantic-proxy[data-lod="marker"] {
@@ -215,11 +239,14 @@
   border-radius: 8px;
 }
 
-.egd-semantic-proxy[data-lod="marker"] .egd-semantic-label { display: none; }
+.egd-semantic-proxy[data-lod="marker"] .egd-semantic-label,
+.egd-semantic-proxy[data-lod="marker"] .egd-semantic-type,
+.egd-semantic-proxy[data-lod="marker"] .egd-semantic-source { display: none; }
 .egd-semantic-proxy[data-lod="marker"] .egd-semantic-icon {
-  position: static;
-  transform: none;
+  width: 22px;
+  height: 22px;
 }
+.egd-semantic-proxy[data-lod="marker"] .egd-semantic-icon .egd-ui-icon { width: 22px; height: 22px; }
 
 .egd-semantic-cluster {
   display: grid;
@@ -362,24 +389,45 @@
   cursor: crosshair;
 }
 
-/* Zoom indicator — bottom left, small pill */
+/* Camera controls stay in viewport chrome, never in the transformed world. */
 #egd-zoom-indicator {
   position: fixed;
-  left: 12px;
-  bottom: 12px;
+  left: 15px;
+  bottom: 14px;
   z-index: 99999;
-  padding: 4px 10px;
-  background: var(--egd-frosted-bg, rgba(255,255,255,0.6));
-  backdrop-filter: blur(20px) saturate(180%);
-  -webkit-backdrop-filter: blur(20px) saturate(180%);
-  border: var(--egd-frosted-border, 1px solid rgba(255,255,255,0.4));
-  border-radius: 16px;
-  box-shadow: var(--egd-frosted-shadow, 0 2px 8px rgba(0,0,0,0.05));
-  font: 500 11px var(--egd-font, system-ui);
-  color: var(--egd-on-surface-variant, #5A5A5A);
-  pointer-events: none;
+  display: flex;
+  align-items: center;
+  gap: 2px;
+  height: 35px;
+  padding: 2px 4px;
+  background: var(--egd-surface-elevated);
+  border: 1px solid var(--egd-outline);
+  border-radius: 9px;
+  box-shadow: var(--egd-chrome-shadow);
+  font: 500 11px var(--egd-font);
+  color: var(--egd-on-surface);
+  pointer-events: auto;
   user-select: none;
+  -moz-window-dragging: no-drag;
 }
+.egd-zoom-button {
+  appearance: none;
+  display: grid;
+  place-items: center;
+  width: 28px;
+  height: 28px;
+  padding: 0;
+  border: 0;
+  border-radius: 6px;
+  background: transparent;
+  color: var(--egd-on-surface-variant);
+  cursor: pointer;
+}
+.egd-zoom-button:hover { background: var(--egd-hover); color: var(--egd-on-surface); }
+.egd-zoom-button:focus-visible { outline: 2px solid var(--egd-primary); outline-offset: 1px; }
+.egd-zoom-button .egd-ui-icon { width: 14px; height: 14px; }
+.egd-zoom-value { min-width: 45px; text-align: center; font-variant-numeric: tabular-nums; }
+.egd-zoom-divider { width: 1px; height: 18px; background: var(--egd-outline-variant); margin: 0 2px; }
 
 #egd-input-helper-status {
   position: fixed;
@@ -411,9 +459,9 @@
   min-width: 320px;
   min-height: 250px;
   background: var(--egd-surface-elevated, #FFFFFF);
-  border: 1px solid rgba(190, 184, 176, 0.72);
-  border-radius: 8px;
-  box-shadow: 0 5px 16px rgba(29, 44, 55, 0.09);
+  border: 1px solid var(--egd-outline);
+  border-radius: 9px;
+  box-shadow: 0 4px 16px rgba(29, 44, 55, .12);
   display: flex;
   flex-direction: column;
   overflow: visible;
@@ -424,21 +472,18 @@
 
 .egd-chat-card,
 #egd-hud[data-app="chat"] {
-  --egd-chat-room: #F7F9FA;
-  --egd-chat-paper: #FFFFFF;
-  --egd-chat-mine: #E5EEF3;
-  --egd-chat-accent: #2D5A7B;
-  --egd-chat-accent-ink: #FFFFFF;
-  --egd-chat-tint: #F0F4F6;
-  --egd-chat-frame: #A8BBC5;
-  --egd-chat-avatar: #DCE8ED;
-  --egd-on-surface: #26333D;
-  --egd-on-surface-variant: #63727B;
-  --egd-chat-outline: #DCE3E6;
-  --egd-chat-outline-soft: var(--egd-chat-outline);
+  --egd-chat-room: var(--egd-surface-elevated);
+  --egd-chat-paper: var(--egd-surface-elevated);
+  --egd-chat-mine: var(--egd-user-bubble);
+  --egd-chat-accent: var(--egd-primary);
+  --egd-chat-accent-ink: var(--egd-surface-elevated);
+  --egd-chat-tint: var(--egd-window-alt);
+  --egd-chat-frame: var(--egd-focus-border);
+  --egd-chat-avatar: var(--egd-avatar-bg);
+  --egd-chat-outline: var(--egd-outline);
+  --egd-chat-outline-soft: var(--egd-outline-variant);
   --egd-chat-layer-elevated: var(--egd-chat-paper);
   --egd-chat-layer-soft: var(--egd-chat-room);
-  --egd-primary: var(--egd-chat-accent);
 }
 
 .egd-chat-card {
@@ -450,23 +495,30 @@
 }
 
 .egd-chat-card-header {
-  height: 34px;
+  height: 32px;
   display: flex;
   align-items: center;
   justify-content: space-between;
   gap: 10px;
   padding: 0 12px 0 13px;
   border-bottom: 1px solid var(--egd-chat-outline);
-  background: var(--egd-chat-tint);
+  background: var(--egd-chat-paper);
   cursor: move;
   user-select: none;
   flex-shrink: 0;
 }
 
+.egd-chat-card-title-group {
+  display: inline-flex;
+  align-items: center;
+  min-width: 0;
+  gap: 7px;
+}
+
 .egd-chat-card-title {
   font-size: 11px;
   font-weight: 600;
-  color: var(--egd-on-surface);
+  color: var(--egd-on-surface-variant);
 }
 
 .egd-chat-card-actions {
@@ -494,6 +546,7 @@
   background: var(--egd-chat-layer-elevated);
   color: var(--egd-on-surface);
 }
+.egd-chat-card-action .egd-ui-icon { width: 13px; height: 13px; }
 
 .egd-chat-card-body {
   flex: 1;
@@ -505,8 +558,8 @@
 }
 
 .egd-canvas-card.egd-entity-active {
-  border-color: rgba(45, 90, 123, 0.50);
-  box-shadow: 0 0 0 1px rgba(45, 90, 123, 0.32);
+  border-color: var(--egd-outline);
+  box-shadow: 0 7px 21px rgba(29, 44, 55, .15);
 }
 
 .egd-chat-card.egd-entity-active {
@@ -519,8 +572,8 @@
 }
 
 .egd-canvas-card.egd-entity-selected:not(.egd-entity-active) {
-  border-color: rgba(45, 90, 123, 0.38);
-  box-shadow: 0 0 0 1px rgba(45, 90, 123, 0.14);
+  border-color: var(--egd-focus-border);
+  box-shadow: 0 0 0 1px rgba(73, 99, 79, .12);
 }
 
 .egd-canvas-card.egd-entity-active::after {
@@ -669,7 +722,20 @@
   height: 32px;
   min-height: 32px;
   padding: 0 12px;
+  background: var(--egd-surface-elevated);
 }
+
+.egd-window-grip {
+  display: inline-grid;
+  flex: none;
+  place-items: center;
+  width: 16px;
+  height: 22px;
+  color: var(--egd-on-surface-variant);
+  opacity: .7;
+}
+.egd-window-grip .egd-ui-icon { width: 14px; height: 14px; }
+.egd-window-kind-icon { width: 15px; height: 15px; color: var(--egd-on-surface-variant); }
 
 .egd-desk-window-identity {
   display: flex;
@@ -762,7 +828,7 @@
   height: 34px;
   min-width: 0;
   padding: 0 14px;
-  background: var(--egd-card-toolbar-bg, #EFF3F5);
+  background: var(--egd-card-toolbar-bg, var(--egd-window-alt));
   border-top: 0;
   box-sizing: border-box;
 }
@@ -789,6 +855,8 @@
   cursor: pointer;
   flex-shrink: 0;
 }
+.egd-card-nav-btn .egd-ui-icon,
+.egd-card-menu .egd-ui-icon { width: 15px; height: 15px; }
 
 .egd-card-nav-btn:hover,
 .egd-card-menu:hover {
@@ -831,6 +899,7 @@
   color: var(--egd-on-surface-variant, #5A5A5A);
   font-size: 12px;
 }
+.egd-card-omnibox-icon .egd-ui-icon { width: 13px; height: 13px; }
 
 .egd-card-security {
   min-width: 14px;
@@ -859,33 +928,34 @@
 /* Browser detail keeps the existing two attached rows and the same total
    header height: 32+32 becomes 29+35, leaving the body geometry untouched. */
 .egd-browser-card {
-  --egd-card-topband-bg: #E9EDEA;
-  --egd-card-toolbar-bg: #F7F8F6;
-  --egd-card-hover-bg: #E9EFEC;
-  --egd-card-focus-ring: rgba(73, 112, 130, 0.16);
-  border-color: rgba(175, 181, 176, 0.86);
-  box-shadow: 0 4px 16px rgba(31, 43, 45, 0.11);
+  --egd-card-topband-bg: var(--egd-surface-elevated);
+  --egd-card-toolbar-bg: var(--egd-window-alt);
+  --egd-card-hover-bg: var(--egd-hover);
+  --egd-card-focus-ring: rgba(73, 99, 79, .15);
+  border-color: var(--egd-outline);
+  box-shadow: 0 4px 16px rgba(29, 44, 55, .12);
 }
 
 .egd-browser-card.egd-entity-active {
-  border-color: #94A9AC;
-  box-shadow: 0 0 0 1px rgba(91, 126, 137, 0.26), 0 5px 17px rgba(31, 43, 45, 0.11);
+  border-color: var(--egd-outline);
+  box-shadow: 0 7px 21px rgba(29, 44, 55, .15);
 }
 
 .egd-browser-card.egd-entity-selected:not(.egd-entity-active) {
-  border-color: #B0C0BE;
-  box-shadow: 0 0 0 1px rgba(91, 126, 137, 0.12), 0 4px 16px rgba(31, 43, 45, 0.09);
+  border-color: var(--egd-focus-border);
+  box-shadow: 0 0 0 1px rgba(73, 99, 79, .12), 0 4px 16px rgba(29, 44, 55, .09);
 }
 
 .egd-browser-card .egd-card-header {
-  border-bottom-color: #D9DFDA;
+  border-bottom-color: var(--egd-outline-variant);
 }
 
 .egd-browser-card .egd-desk-window-titlebar {
   height: 29px;
   min-height: 29px;
   padding: 0 9px;
-  border-bottom: 1px solid #DBE1DC;
+  border-bottom: 1px solid var(--egd-outline-variant);
+  background: var(--egd-surface-elevated);
 }
 
 .egd-browser-card .egd-card-dots { gap: 1px; }
@@ -898,7 +968,7 @@
 }
 
 .egd-browser-card .egd-desk-window-control:focus-visible {
-  outline: 2px solid #4B7287;
+  outline: 2px solid var(--egd-primary);
   outline-offset: 1px;
 }
 
@@ -907,12 +977,13 @@
   font-weight: 600;
 }
 
-.egd-browser-card .egd-card-page-status { font-size: 10px; }
+.egd-browser-card .egd-card-page-status { font-size: 11px; }
 
 .egd-browser-card .egd-desk-window-toolbar {
   height: 35px;
   gap: 6px;
   padding: 0 9px;
+  background: var(--egd-window-alt);
 }
 
 .egd-browser-card .egd-card-nav { gap: 2px; }
@@ -925,15 +996,16 @@
 
 .egd-browser-card .egd-card-nav-btn:focus-visible,
 .egd-browser-card .egd-card-menu:focus-visible {
-  outline: 2px solid #4B7287;
+  outline: 2px solid var(--egd-primary);
   outline-offset: 1px;
 }
 
 .egd-browser-card .egd-card-omnibox {
   height: 30px;
   padding: 0 9px;
-  border-color: #D6DDD8;
+  border-color: var(--egd-outline-variant);
   border-radius: 6px;
+  background: var(--egd-surface-elevated);
 }
 
 .egd-browser-card .egd-card-url {
@@ -1113,6 +1185,7 @@
 /* ============ Main-window topbar ============
    Flush with the OS window edge; only its existing blank chrome is draggable. */
 #egd-desk-rail {
+  z-index: 100001;
   top: 0;
   left: 0;
   right: 0;
@@ -1127,8 +1200,9 @@
   border-top: 0;
   border-left: 0;
   border-right: 0;
-  border-bottom: 1px solid #D8E0E4;
-  background: #F8FAFB;
+  border-bottom: 1px solid var(--egd-outline);
+  background: var(--egd-topbar);
+  color: var(--egd-on-surface);
   backdrop-filter: none;
   -webkit-backdrop-filter: none;
   box-shadow: none;
@@ -1158,16 +1232,16 @@
   max-width: 340px;
   padding: 5px 10px;
   border-radius: 8px;
-  font-size: 13px;
+  font-size: 12px;
   font-weight: 500;
   color: var(--egd-on-surface);
   cursor: pointer;
   transition: background 0.15s;
   -moz-window-dragging: no-drag;
 }
-.egd-rail-switcher:hover { background: var(--egd-outline-variant); }
+.egd-rail-switcher:hover { background: var(--egd-hover); }
 .egd-rail-switcher-open {
-  background: var(--egd-outline-variant);
+  background: var(--egd-hover);
 }
 .egd-rail-desk-dot {
   width: 8px;
@@ -1192,7 +1266,7 @@
   border: 1px solid rgba(161, 98, 7, 0.18);
   background: rgba(251, 191, 36, 0.13);
   color: #8A5A00;
-  font-size: 9px;
+  font-size: 11px;
   font-weight: 700;
   line-height: 1;
   overflow: hidden;
@@ -1209,10 +1283,10 @@
   align-items: center;
   padding: 0 7px;
   border-radius: 999px;
-  border: 1px solid rgba(45, 90, 123, 0.16);
-  background: rgba(45, 90, 123, 0.10);
+  border: 1px solid #D1DDCF;
+  background: var(--egd-primary-container);
   color: var(--egd-primary);
-  font-size: 10px;
+  font-size: 11px;
   font-weight: 650;
   line-height: 1;
   overflow: hidden;
@@ -1224,20 +1298,20 @@
 }
 .egd-rail-chevron {
   color: var(--egd-on-surface-variant);
-  font-size: 10px;
 }
+.egd-rail-chevron .egd-ui-icon { width: 12px; height: 12px; }
 
 .egd-rail-search {
   display: flex;
   align-items: center;
   gap: 8px;
   width: 100%;
-  max-width: 580px;
+  max-width: 420px;
   height: 30px;
   padding: 0 10px;
-  background: #FFFFFF;
-  border: 1px solid #D8E0E4;
-  border-radius: 8px;
+  background: var(--egd-surface-elevated);
+  border: 1px solid var(--egd-outline);
+  border-radius: 7px;
   box-shadow: none;
   transition: border-color 0.15s;
   -moz-window-dragging: no-drag;
@@ -1246,21 +1320,21 @@
 .egd-rail-search-open { border-color: var(--egd-primary); }
 .egd-rail-search-icon {
   color: var(--egd-on-surface-variant);
-  font-size: 14px;
 }
+.egd-rail-search-icon .egd-ui-icon { width: 14px; height: 14px; }
 .egd-rail-search-input {
   flex: 1;
   background: transparent;
   border: none;
   outline: none;
   font-family: inherit;
-  font-size: 13px;
+  font-size: 12px;
   color: var(--egd-on-surface);
 }
 .egd-rail-search-input::placeholder { color: var(--egd-on-surface-variant); }
 .egd-rail-kbd {
   padding: 2px 6px;
-  font-size: 10px;
+  font-size: 11px;
   color: var(--egd-on-surface-variant);
   background: var(--egd-outline-variant);
   border-radius: 4px;
@@ -1289,7 +1363,7 @@
 .egd-rail-search-section {
   padding: 8px 8px 5px;
   color: var(--egd-on-surface-variant);
-  font-size: 10px;
+  font-size: 11px;
   font-weight: 720;
   line-height: 1;
   text-transform: uppercase;
@@ -1325,7 +1399,7 @@
   border-radius: 6px;
   background: var(--egd-outline-variant);
   color: var(--egd-on-surface-variant);
-  font-size: 9px;
+  font-size: 11px;
   font-weight: 760;
   line-height: 1;
   text-transform: uppercase;
@@ -1381,7 +1455,7 @@
 .egd-rail-search-subtitle {
   overflow: hidden;
   color: var(--egd-on-surface-variant);
-  font-size: 10px;
+  font-size: 11px;
   line-height: 1.2;
   text-overflow: ellipsis;
   white-space: nowrap;
@@ -1415,7 +1489,6 @@
   align-items: center;
   justify-content: center;
   font-size: 14px;
-  font-weight: 700;
   line-height: 1;
   border-radius: 8px;
   color: var(--egd-on-surface-variant);
@@ -1423,7 +1496,11 @@
   -moz-window-dragging: no-drag;
 }
 .egd-rail-icon[hidden] { display: none; }
-.egd-rail-icon:hover { background: var(--egd-outline-variant); color: var(--egd-on-surface); }
+.egd-rail-icon:hover { background: var(--egd-hover); color: var(--egd-on-surface); }
+.egd-rail-icon .egd-ui-icon { width: 15px; height: 15px; }
+.egd-rail-icon:disabled { opacity: .5; cursor: default; }
+.egd-rail-icon:focus-visible,
+.egd-rail-switcher:focus-visible { outline: 2px solid var(--egd-primary); outline-offset: 1px; }
 .egd-rail-badge {
   position: absolute;
   top: 2px;
@@ -1778,6 +1855,7 @@
   justify-content: center;
   -moz-window-dragging: no-drag;
 }
+.egd-rail-avatar .egd-ui-icon { width: 18px; height: 18px; }
 
 #egd-desk-minimap {
   position: fixed;
@@ -1948,22 +2026,22 @@
 /* ============ Bottom: Dock ============
    compact bottom dock, centered, content-aware width */
 #egd-dock {
-  bottom: 14px;
+  bottom: 12px;
   left: 50%;
   transform: translateX(-50%);
   height: 46px;
   min-width: 160px;
   max-width: min(95vw, 960px);
-  border-radius: 11px;
+  border-radius: 10px;
   display: flex;
   align-items: center;
-  gap: 12px;
-  padding: 0 12px;
-  background: rgba(250, 251, 251, 0.97);
-  border-color: #D8E0E4;
+  gap: 6px;
+  padding: 0 9px;
+  background: var(--egd-surface-elevated);
+  border-color: var(--egd-outline);
   backdrop-filter: none;
   -webkit-backdrop-filter: none;
-  box-shadow: 0 2px 10px rgba(29, 44, 55, 0.07);
+  box-shadow: var(--egd-chrome-shadow);
 }
 
 .egd-dock-group {
@@ -1974,67 +2052,70 @@
 
 .egd-dock-divider {
   width: 1px;
-  height: 28px;
+  height: 23px;
   background: var(--egd-outline-variant);
   flex-shrink: 0;
 }
 
 .egd-dock-btn {
-  width: 36px;
-  height: 36px;
+  width: 32px;
+  height: 32px;
   display: inline-flex;
   align-items: center;
   justify-content: center;
-  border-radius: 8px;
+  border-radius: 6px;
   color: var(--egd-on-surface-variant);
   font-size: 15px;
   line-height: 1;
   transition: background 0.15s, color 0.15s;
 }
-.egd-dock-btn:hover { background: var(--egd-outline-variant); color: var(--egd-on-surface); }
+.egd-dock-btn:hover { background: var(--egd-hover); color: var(--egd-on-surface); }
 .egd-dock-btn-active {
   background: var(--egd-primary-container);
-  color: var(--egd-primary);
+  color: var(--egd-on-surface);
 }
+.egd-dock-btn:focus-visible { outline: 2px solid var(--egd-primary); outline-offset: 1px; }
 .egd-dock-icon {
-  font-size: 16px;
-  font-weight: 500;
-  line-height: 1;
-  min-width: 18px;
-  text-align: center;
+  display: grid;
+  place-items: center;
+  width: 18px;
+  height: 18px;
 }
+.egd-dock-icon .egd-ui-icon { width: 17px; height: 17px; }
 
 /* ============ Left: Preset Bag ============
    compact preset rail, left 12, content-sized */
 #egd-preset-bag {
-  top: 80px;
-  left: 12px;
-  width: 52px;
+  top: 79px;
+  left: 14px;
+  width: 64px;
   height: auto;
   max-height: calc(100vh - 160px);
-  border-radius: 12px;
-  padding: 10px 7px;
+  border-radius: 11px;
+  padding: 10px 6px;
   display: flex;
   flex-direction: column;
   gap: 9px;
   align-items: center;
-  border-color: rgba(210, 203, 194, 0.72);
+  border-color: var(--egd-outline);
+  background: var(--egd-surface-elevated);
+  box-shadow: var(--egd-chrome-shadow);
 }
 
 .egd-bag-header {
-  width: 36px;
-  height: 36px;
-  display: inline-flex;
+  width: 50px;
+  min-height: 46px;
+  display: flex;
+  flex-direction: column;
   align-items: center;
   justify-content: center;
-  font-size: 17px;
-  font-weight: 700;
-  line-height: 1;
-  color: var(--egd-on-surface-variant);
-  border-bottom: 1px solid var(--egd-outline-variant);
-  padding-bottom: 10px;
-  margin-bottom: 4px;
+  gap: 3px;
+  color: var(--egd-on-surface);
+  font: 600 11px/1.1 var(--egd-font);
 }
+.egd-bag-header .egd-ui-icon { width: 16px; height: 16px; }
+.egd-bag-header-muted { color: var(--egd-on-surface-variant); }
+.egd-bag-divider { width: 43px; height: 1px; background: var(--egd-outline); }
 
 .egd-bag-list {
   flex: 0 1 auto;
@@ -2047,37 +2128,45 @@
 }
 
 .egd-bag-chip {
-  width: 36px;
-  height: 36px;
-  border-radius: 8px;
-  background: var(--egd-primary);
-  color: #fff;
+  width: 50px;
+  min-height: 46px;
+  padding: 0;
+  flex-direction: column;
+  gap: 3px;
+  border-radius: 6px;
+  background: transparent;
+  color: var(--egd-on-surface-variant);
   font-size: 11px;
-  font-weight: 600;
-  letter-spacing: 0.3px;
+  font-weight: 500;
+  line-height: 1.1;
   display: inline-flex;
   align-items: center;
   justify-content: center;
-  transition: transform 0.12s, box-shadow 0.15s;
+  transition: background .15s, color .15s;
 }
 .egd-bag-chip:hover {
-  transform: translateY(-1px);
-  box-shadow: 0 1px 3px rgba(0, 0, 0, 0.08), 0 1px 2px rgba(0, 0, 0, 0.06);
+  background: var(--egd-hover);
+  color: var(--egd-on-surface);
 }
+.egd-bag-chip .egd-ui-icon { width: 16px; height: 16px; }
+.egd-bag-chip-active { background: var(--egd-primary-container); color: var(--egd-on-surface); }
+.egd-bag-chip:focus-visible,
+.egd-bag-add:focus-visible { outline: 2px solid var(--egd-primary); outline-offset: 1px; }
 
 .egd-bag-add {
-  width: 36px;
-  height: 36px;
+  width: 48px;
+  height: 40px;
   border-radius: 8px;
   border: 1px dashed var(--egd-outline) !important;
   color: var(--egd-on-surface-variant);
-  font-size: 18px;
+  background: transparent;
   display: inline-flex;
   align-items: center;
   justify-content: center;
   transition: border-color 0.15s, color 0.15s;
 }
 .egd-bag-add:hover { border-color: var(--egd-primary) !important; color: var(--egd-primary); }
+.egd-bag-add .egd-ui-icon { width: 16px; height: 16px; }
 
 /* ============ Right: Contextual HUD ============
    responsive width, right-docked, full interaction panel */
@@ -2120,6 +2209,12 @@
 }
 #egd-hud[data-app="chat"] .egd-hud-header {
   cursor: grab;
+  min-height: 30px;
+}
+#egd-hud[data-app="chat"] .egd-hud-title {
+  color: var(--egd-on-surface-variant);
+  font-size: 11px;
+  font-weight: 600;
 }
 #egd-hud[data-app="chat"] .egd-hud-header.egd-hud-header-dragging {
   cursor: grabbing;
@@ -5210,21 +5305,8 @@
   color: #8E3A2E;
 }
 
-/* Chat interior refinement. Append after existing chat rules.
-   No state, selector, tool, or permission contracts are changed. */
-.egd-chat-card,
-#egd-hud[data-app="chat"] {
-  --egd-chat-room: #FAFBFC;
-  --egd-chat-paper: #FFFFFF;
-  --egd-chat-mine: #EAF0F5;
-  --egd-chat-tint: #F3F6F8;
-  --egd-chat-frame: #A8BBCB;
-  --egd-chat-avatar: #E7EEF4;
-  --egd-chat-outline: #DDE4EA;
-  --egd-chat-outline-soft: #E8EDF1;
-  --egd-on-surface: #243342;
-  --egd-on-surface-variant: #647585;
-}
+/* Existing Chat controls and state remain; their palette resolves through
+   the canonical :root tokens and the aliases at the Chat shell above. */
 
 .egd-codex-chat-shell {
   font-family: var(--egd-font, "Segoe UI", system-ui, sans-serif);
@@ -5408,3 +5490,261 @@
 .egd-codex-chat-main[data-compact-composer="true"] .egd-codex-footer { padding: 0 12px 12px; }
 .egd-codex-chat-main[data-compact-composer="true"] .egd-codex-input-row { padding: 8px 10px; gap: 4px; }
 .egd-codex-chat-main[data-compact-composer="true"] .egd-codex-footer .egd-chat-input-tray { padding-bottom: 3px; }
+
+/* Existing Chat-specific layers below keep their own density and runtime state. */
+#egd-hud,
+#egd-hud[data-app="chat"] {
+  border-radius: 9px;
+  background: var(--egd-surface-elevated);
+  border-color: var(--egd-outline);
+  box-shadow: 0 4px 16px rgba(29, 44, 55, .12);
+}
+.egd-chat-card { border-radius: 9px; }
+.egd-chat-card.egd-entity-active { border-color: var(--egd-outline); box-shadow: 0 7px 21px rgba(29, 44, 55, .15); }
+.egd-chat-card-header,
+.egd-chat-card.egd-entity-active .egd-chat-card-header {
+  height: 32px;
+  background: var(--egd-chat-paper);
+  border-bottom-color: var(--egd-chat-outline-soft);
+}
+.egd-chat-card-title { font-size: 11px; font-weight: 600; color: var(--egd-on-surface-variant); }
+.egd-chat-card-action { border-radius: 6px; font-size: 11px; }
+.egd-codex-chat-shell { font-size: 13px; line-height: 1.45; }
+.egd-codex-chat-shell button:focus-visible,
+.egd-codex-messages:focus-visible { outline-color: var(--egd-primary); }
+.egd-codex-conversation-hud-head,
+.egd-codex-thread-active-head {
+  min-height: 48px;
+  padding: 7px 12px;
+  background: var(--egd-chat-paper);
+  border-bottom-color: var(--egd-chat-outline-soft);
+}
+.egd-chat-card .egd-codex-conversation-hud-head,
+.egd-chat-card .egd-codex-thread-active-head { min-height: 44px; padding: 5px 12px; }
+.egd-codex-conversation-hud-title { font-size: 13px; }
+.egd-codex-conversation-back,
+.egd-codex-conversation-menu-trigger { color: var(--egd-on-surface-variant); }
+.egd-codex-conversation-back .egd-ui-icon,
+.egd-codex-conversation-menu-trigger .egd-ui-icon { width: 16px; height: 16px; }
+.egd-codex-conversation-back:hover,
+.egd-codex-conversation-menu-trigger:hover { background: var(--egd-hover); }
+.egd-codex-messages { gap: 14px; padding: 17px 16px 14px; scrollbar-color: var(--egd-outline) transparent; }
+.egd-codex-message-row { gap: 8px; }
+.egd-codex-message-row-grouped { margin-top: -7px; }
+.egd-codex-message-avatar {
+  width: 24px; height: 24px; min-width: 24px;
+  margin-top: 16px; border-radius: 50%;
+  background: var(--egd-chat-avatar); color: var(--egd-primary);
+  font-size: 11px;
+}
+.egd-codex-message-stack { gap: 5px; }
+.egd-codex-message-row-assistant .egd-codex-message-stack,
+.egd-codex-message-row-system .egd-codex-message-stack { max-width: calc(100% - 32px); }
+.egd-codex-message-row-user .egd-codex-message-stack { max-width: 85%; }
+.egd-codex-message-role { padding: 0 0 0 2px; font-size: 11px; color: var(--egd-on-surface-variant); }
+.egd-codex-bubble { padding: 9px 11px; font-size: 12px; line-height: 1.52; border-radius: 10px; word-break: keep-all; }
+.egd-codex-bubble-user { background: var(--egd-chat-mine); border-radius: 10px 10px 3px 10px; }
+.egd-codex-bubble-assistant,
+.egd-codex-bubble-system { padding: 9px 11px; background: var(--egd-window-alt); border: 1px solid var(--egd-chat-outline-soft); border-radius: 10px 10px 10px 3px; }
+.egd-codex-message-meta,
+.egd-codex-message-time { font-size: 11px; color: var(--egd-on-surface-variant); }
+.egd-codex-result-chips { gap: 6px; margin-top: 8px; }
+/* The legacy chip recipe above is already !important; match its specificity
+   only here so real result/briefing actions keep the approved attached-card look. */
+.egd-codex-result-chip { min-height: 32px !important; padding: 6px 9px !important; border: 1px solid var(--egd-outline) !important; border-radius: 7px !important; background: var(--egd-chat-paper) !important; color: var(--egd-on-surface) !important; font-size: 11.5px !important; font-weight: 600 !important; }
+.egd-codex-result-chip:hover { background: var(--egd-hover) !important; border-color: var(--egd-primary) !important; }
+.egd-codex-empty-eyebrow,
+.egd-codex-empty-sub,
+.egd-codex-compose-hint { color: var(--egd-on-surface-variant); }
+.egd-codex-messages:has(> .egd-codex-empty-state) {
+  justify-content: flex-start;
+  padding: 34px 24px 24px;
+}
+.egd-codex-empty-state { max-width: 300px; align-self: flex-start; }
+.egd-codex-empty-eyebrow { margin-bottom: 5px; font-size: 11px; }
+.egd-codex-empty-title { font-size: 16px; line-height: 1.35; }
+.egd-codex-empty-sub { max-width: 300px; margin-top: 5px; font-size: 11.5px; line-height: 1.5; }
+.egd-codex-empty-actions { margin-top: 13px; }
+.egd-codex-chip-primary,
+.egd-codex-send { background: var(--egd-primary); color: var(--egd-surface-elevated); }
+.egd-codex-send:not(:disabled):hover { background: #3D5543; }
+.egd-codex-footer { padding: 2px 11px 10px; }
+.egd-codex-input-row { padding: 8px 9px; border-color: var(--egd-outline); border-radius: 8px; background: var(--egd-window-alt); box-shadow: none; }
+.egd-codex-input-row:focus-within { border-color: var(--egd-primary); box-shadow: 0 0 0 2px rgba(73, 99, 79, .12); }
+.egd-codex-input { max-height: 144px; color: var(--egd-on-surface); }
+.egd-codex-input::placeholder { color: var(--egd-on-surface-variant); }
+.egd-codex-run-status { color: var(--egd-on-surface-variant); }
+.egd-codex-diagnostics-toggle { background: var(--egd-window-alt); color: var(--egd-on-surface-variant); }
+.egd-codex-diagnostics { background: var(--egd-window-alt); }
+
+/* A quiet one-line composer by default; selected attachments retain their own
+   row, and the existing textarea autosize grows only with the draft. */
+.egd-codex-chat-shell .egd-codex-input-row {
+  display: grid;
+  grid-template-columns: auto minmax(0, 1fr) auto;
+  grid-template-areas: "attachments draft actions";
+  align-items: end;
+  gap: 6px;
+  padding: 5px 7px;
+}
+.egd-codex-chat-shell .egd-codex-footer .egd-chat-input-tray {
+  grid-area: attachments;
+  align-self: end;
+  min-width: 0;
+  max-width: 100%;
+  padding: 0;
+  border-bottom: 0;
+}
+.egd-codex-chat-shell .egd-codex-input { grid-area: draft; }
+.egd-codex-chat-shell .egd-codex-compose-actions {
+  grid-area: actions;
+  width: auto;
+  min-height: 32px;
+  gap: 4px;
+  align-self: end;
+}
+.egd-codex-chat-shell .egd-codex-compose-hint { display: none; }
+.egd-codex-chat-shell .egd-codex-input-row:has(.egd-chat-input-chip) {
+  grid-template-areas: "attachments attachments attachments" "draft draft actions";
+}
+.egd-codex-chat-shell .egd-codex-run-status { min-height: 36px; padding: 3px 12px; }
+
+/* Local host resources: four small marks, details only on activation. */
+.egd-resource-gadget {
+  position: relative;
+  box-sizing: border-box;
+  flex: 0 0 auto;
+  width: 118px;
+  height: 39px;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  gap: 2px;
+  padding: 3px;
+  border: 1px solid var(--egd-outline);
+  border-radius: 10px;
+  background: var(--egd-surface-elevated);
+  box-shadow: 0 2px 8px rgba(47, 42, 32, .06);
+  -moz-window-dragging: no-drag;
+}
+/* The focused Browser keeps Desk chrome hidden; the same gadget sits in its
+   existing address toolbar, with detail above the page rather than clipped. */
+.egd-browser-card.egd-card-fullscreen .egd-card-header {
+  position: relative;
+  z-index: 2;
+  overflow: visible;
+}
+.egd-browser-card .egd-desk-window-toolbar .egd-resource-gadget {
+  height: 30px;
+  padding: 0 3px;
+  border-radius: 7px;
+}
+.egd-browser-card .egd-desk-window-toolbar .egd-resource-button {
+  appearance: none;
+  border: 0;
+  padding: 0;
+  background: transparent;
+  box-shadow: none;
+  font: inherit;
+  cursor: pointer;
+}
+.egd-browser-card .egd-desk-window-toolbar .egd-resource-button:is(:hover, [aria-expanded="true"]) {
+  background: var(--egd-hover);
+}
+.egd-browser-card .egd-resource-detail { top: 34px; }
+.egd-resource-button {
+  flex: 0 0 26px;
+  width: 26px;
+  height: 28px;
+  display: grid;
+  place-items: center;
+  border-radius: 6px;
+  color: var(--egd-on-surface-variant);
+}
+.egd-resource-button:hover,
+.egd-resource-button[aria-expanded="true"] { background: var(--egd-hover); }
+.egd-resource-button:focus-visible { outline: 2px solid var(--egd-primary); outline-offset: 2px; }
+.egd-resource-ring {
+  position: relative;
+  display: grid;
+  place-items: center;
+  width: 22px;
+  height: 22px;
+  border-radius: 50%;
+  background: conic-gradient(var(--egd-on-surface-variant) var(--egd-resource-fill, 0%), var(--egd-outline) 0);
+}
+.egd-resource-ring::after {
+  content: "";
+  position: absolute;
+  inset: 2px;
+  border-radius: 50%;
+  background: var(--egd-surface-elevated);
+}
+.egd-resource-ring.egd-resource-unmeasured { background: var(--egd-outline); }
+.egd-resource-network {
+  width: 20px;
+  height: 20px;
+  border: 2px solid var(--egd-outline);
+  background: transparent;
+  font: 600 12px/1 var(--egd-font);
+}
+.egd-resource-network::after { display: none; }
+.egd-resource-detail {
+  position: absolute;
+  box-sizing: border-box;
+  top: 43px;
+  right: 0;
+  z-index: 1;
+  width: 246px;
+  padding: 15px 16px 14px;
+  border: 1px solid var(--egd-outline);
+  border-radius: 11px;
+  background: var(--egd-surface-elevated);
+  color: var(--egd-on-surface);
+  box-shadow: var(--egd-shadow);
+  font: 11.5px/1.45 var(--egd-font);
+  -moz-window-dragging: no-drag;
+}
+.egd-resource-detail[hidden] { display: none; }
+.egd-resource-detail-title { font-size: 13px; font-weight: 650; }
+.egd-resource-detail-scope { margin: 2px 0 0; color: var(--egd-on-surface-variant); }
+.egd-resource-detail dl { margin: 13px 0 0; border-top: 1px solid var(--egd-outline-variant); }
+.egd-resource-detail-row { display: flex; justify-content: space-between; gap: 10px; padding: 7px 0; border-bottom: 1px solid var(--egd-outline-variant); }
+.egd-resource-detail-row dt { color: var(--egd-on-surface-variant); }
+.egd-resource-detail-row dd { margin: 0; text-align: right; font-variant-numeric: tabular-nums; font-weight: 550; }
+
+@media (max-width: 700px) {
+  #egd-preset-bag { left: 10px; width: 58px; padding-inline: 4px; }
+  .egd-bag-header, .egd-bag-chip { width: 48px; }
+  #egd-dock {
+    box-sizing: border-box;
+    width: max-content;
+    min-width: 0;
+    max-width: calc(100vw - 16px);
+    gap: 3px;
+    padding-inline: 6px;
+    overflow-x: auto;
+    overflow-y: hidden;
+    justify-content: flex-start;
+    overscroll-behavior-x: contain;
+    scroll-padding-inline: 8px;
+    scrollbar-width: thin;
+    scrollbar-color: var(--egd-on-surface-variant) transparent;
+  }
+  #egd-dock:focus-visible {
+    outline: 2px solid var(--egd-primary);
+    outline-offset: 2px;
+  }
+  #egd-dock::-webkit-scrollbar { height: 5px; }
+  #egd-dock::-webkit-scrollbar-thumb {
+    background: var(--egd-on-surface-variant);
+    border-radius: 5px;
+  }
+  .egd-dock-group { gap: 2px; flex: none; }
+  .egd-dock-btn { width: 30px; height: 30px; flex: none; }
+  .egd-rail-right { gap: 3px; }
+  .egd-rail-search { min-width: 0; }
+  .egd-rail-search-input { min-width: 0; }
+  .egd-rail-kbd { display: none; }
+  .egd-rail-agenda-name { max-width: 90px; }
+}

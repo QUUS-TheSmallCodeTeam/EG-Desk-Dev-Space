@@ -538,7 +538,7 @@ test('human Chat Dock open after initial Browser focus and zoom-out focuses only
   const compactBody = surfaceSource.match(/    const focusChatDockIfCompact = card => \{([\s\S]*?)\n    \};/)?.[1];
   const dockStart = surfaceSource.indexOf('  function buildDock() {');
   const dockEnd = surfaceSource.indexOf('    const divider =', dockStart);
-  const dockBody = surfaceSource.slice(dockStart, dockEnd).match(/          onclick: \(\) => \{([\s\S]*?)\n          \},\n        \}, el\('span', \{ class: 'egd-dock-icon' \}, item.icon\)\);/)?.[1];
+  const dockBody = surfaceSource.slice(dockStart, dockEnd).match(/onclick: \(\) => \{([\s\S]*?)\n\s*\},\n\s*\}, el\('span', \{ class: 'egd-dock-icon' \}/)?.[1];
   assert.ok(projectionBody && compactBody && dockBody, 'use the production Dock and semantic-projection paths');
 
   const safe = { left: 0, top: 0, width: 1200, height: 800 };
@@ -857,7 +857,7 @@ test('wheel or focused-URL keyboard zoom exits actual fullscreen and restores th
   const exitBody = surfaceSource.match(/  function exitCardFullscreen\(card = null, options = \{\}\) \{([\s\S]*?)\n  \}/)?.[1];
   const enterBody = surfaceSource.match(/  function enterLocalDesk\(\) \{([\s\S]*?)\n  \}/)?.[1];
   const factorBody = surfaceSource.match(/    const zoomCanvasByFactor = \(factor, cx, cy\) => \{([\s\S]*?)\n    \};\n    const zoomCanvasByWheel/)?.[1];
-  const wheelBody = surfaceSource.match(/    const zoomCanvasByWheel = \(ev\) => \{([\s\S]*?)\n    \};\n\n    const beginCanvasPan/)?.[1];
+  const wheelBody = surfaceSource.match(/    const zoomCanvasByWheel = \(ev\) => \{([\s\S]*?)\n    \};\n\n    const zoomAtSafeCenter/)?.[1];
   const keyBody = surfaceSource.match(/    const handleCanvasZoomKeydown = \(ev\) => \{([\s\S]*?)\n    \};\n    \/\/ 리셋/)?.[1];
   assert.ok(exitBody && enterBody && factorBody && wheelBody && keyBody);
   assert.match(surfaceSource, /window\.addEventListener\('keydown', handleCanvasZoomKeydown, true\)/);
@@ -995,10 +995,11 @@ test('internal start page has plain-language copy and only its own chrome badge 
   const browserState = { uri: startUri, title: 'EG-Desk', security: 'chrome', loading: false,
     canGoBack: false, canGoForward: false };
   const pageTitle = { textContent: '', title: '' }, pageStatus = { hidden: false, textContent: '', title: '' };
-  const securityIcon = { hidden: false, textContent: '', title: '' }, urlInput = { value: startUri };
+  const securityIcon = { hidden: false, textContent: '', title: '', replaceChildren() {} }, urlInput = { value: startUri };
+  const reloadButton = { dataset: { icon: 'reload' }, title: '', disabled: false, setAttribute() {} };
   const document = { activeElement: null };
   const render = sync(() => {}, card, browserState, pageTitle, host, pageStatus, startUri,
-    securityIcon, () => '✓', document, urlInput, visibleAddress, {}, {}, {});
+    securityIcon, () => '✓', document, urlInput, visibleAddress, {}, {}, reloadButton);
   render();
   assert.equal(pageTitle.textContent, 'EG-Desk');
   assert.equal(pageStatus.hidden, true);
@@ -1023,13 +1024,14 @@ test('bounded visual hierarchy keeps Canvas chrome quiet and Browser and Chat co
   const css = readFileSync(new URL('../overlay/CSS/eg-desk-surface.uc.css', import.meta.url), 'utf8');
   const rule = selector => css.match(new RegExp(`^${selector.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')} \\{([^}]+)\\}`, 'm'))?.[1] || '';
   const rail = rule('#egd-desk-rail');
-  assert.match(rail, /background:\s*#F8FAFB/);
+  assert.match(rail, /background:\s*var\(--egd-topbar\)/);
+  assert.match(css, /--egd-topbar:\s*#F9F8F4/);
   assert.match(rail, /box-shadow:\s*none/);
-  assert.match(rule('.egd-rail-search'), /max-width:\s*580px/);
+  assert.match(rule('.egd-rail-search'), /max-width:\s*420px/);
   const dock = rule('#egd-dock');
   assert.match(dock, /height:\s*46px/);
-  assert.match(dock, /border-radius:\s*11px/);
-  assert.match(rule('.egd-dock-btn'), /width:\s*36px;\s*height:\s*36px/);
+  assert.match(dock, /border-radius:\s*10px/);
+  assert.match(rule('.egd-dock-btn'), /width:\s*32px;\s*height:\s*32px/);
   const card = rule('.egd-canvas-card');
   assert.doesNotMatch(card, /gradient/);
   assert.match(rule('.egd-canvas-card.egd-entity-active::after'), /display:\s*none/);
@@ -1040,7 +1042,10 @@ test('bounded visual hierarchy keeps Canvas chrome quiet and Browser and Chat co
   assert.match(rule('.egd-codex-thread-item-active'), /background:\s*#E8F0F4/);
   assert.match(rule('.egd-codex-message-stack'), /max-width:\s*min\(86%, 640px\)/);
   assert.match(rule('.egd-codex-bubble'), /font-size:\s*14\.5px;\s*line-height:\s*1\.48/);
-  assert.match(rule('.egd-codex-input'), /min-height:\s*40px;\s*max-height:\s*240px/);
+  assert.match(rule('.egd-codex-input'), /min-height:\s*40px/);
+  const composerOverrides = [...css.matchAll(/^\.egd-codex-input \{([^}]+)\}/gm)];
+  assert.match(composerOverrides.at(-1)?.[1] || '', /max-height:\s*144px/,
+    'the approved final composer rule caps layout at 144px');
   assert.match(surfaceSource, /rows: '1'/);
   assert.match(surfaceSource, /input\.addEventListener\('compositionstart'/);
   assert.match(surfaceSource, /input\.addEventListener\('compositionend'/);
@@ -1088,24 +1093,45 @@ test('passive Board status stays off the lower Chat composer while its close con
 });
 
 test('empty logged-in Chat uses plain first-message guidance while keeping title and auth fallback', () => {
-  const body = surfaceSource.match(/          const emptyChildren = \[([\s\S]*?)\n          \];/)?.[1];
-  assert.ok(body);
-  const renderEmpty = compileFunction(`return function renderEmpty(codex, activeThread) {
-    const emptyChildren = [${body}\n    ]; return emptyChildren;
-  }`, ['el'])((tag, props, ...children) => ({ tag, className: props.class, children }));
-  const thread = { title: 'Codex', type: 'dm' };
-  const loggedIn = renderEmpty({ authStatus: { isLoggedIn: true } }, thread);
+  const body = surfaceSource.match(/          (const emptyChildren = \[[\s\S]*?)\n          messages\.appendChild\(el\('div', \{ class: 'egd-codex-empty-state' \}, \.\.\.emptyChildren\)\);/)?.[1];
+  assert.ok(body, 'exercise the production empty-state branches');
+  const calls = [];
+  const renderEmpty = compileFunction(`return function renderEmpty(codex) {
+    ${body}\n    return emptyChildren;
+  }`, ['el', 'codexBridge'])((tag, props, ...children) => ({ tag, props, className: props.class, children }), {
+    startLogin: () => calls.push('login'),
+    refreshAuthStatus: () => calls.push('refresh'),
+  });
+  const loggedIn = renderEmpty({ authStatus: { isLoggedIn: true } });
   const emptyClasses = ['egd-codex-empty-eyebrow', 'egd-codex-empty-title', 'egd-codex-empty-sub'];
   assert.deepEqual(loggedIn.map(node => node.className), emptyClasses);
   assert.deepEqual(loggedIn.map(node => node.children[0]), [
     '새 대화', '어떤 일을 함께할까요?', '질문을 하거나 자료를 첨부해 대화를 시작하세요.',
   ]);
   assert.doesNotMatch(loggedIn[2].children[0], /Fresh|Codex 대화|· Codex/);
-  const loggedOut = renderEmpty({ authStatus: { isLoggedIn: false } }, thread);
-  assert.deepEqual(loggedOut.map(node => node.className), emptyClasses);
-  assert.deepEqual(loggedOut.map(node => node.children[0]), [
-    'Codex 연결', '로그인 후 대화할 수 있습니다', 'Codex 로그인이 필요합니다.',
+  const loggedOut = renderEmpty({ authStatus: { isLoggedIn: false } });
+  assert.deepEqual(loggedOut.map(node => node.className), [
+    'egd-codex-empty-eyebrow', 'egd-codex-empty-title', 'egd-codex-empty-actions',
   ]);
+  assert.deepEqual(loggedOut.slice(0, 2).map(node => node.children[0]), ['Codex 연결', '로그인 필요']);
+  const actions = loggedOut[2].children;
+  assert.deepEqual(actions.map(node => node.children[0]), ['로그인', '상태 새로고침']);
+  assert.deepEqual(actions.map(node => node.className), [
+    'egd-codex-chip egd-codex-chip-primary', 'egd-codex-chip egd-codex-chip-subtle',
+  ]);
+  assert.equal(actions[0].props.disabled, null);
+  actions[0].props.onclick();
+  actions[1].props.onclick();
+  assert.deepEqual(calls, ['login', 'refresh']);
+  for (const pending of [
+    { authStatus: { isLoggedIn: false }, isStartingLogin: true },
+    { authStatus: { isLoggedIn: false, loginInProgress: true } },
+  ]) {
+    const pendingActions = renderEmpty(pending)[2].children;
+    assert.equal(pendingActions[0].children[0], '로그인 중…');
+    assert.equal(pendingActions[0].props.disabled, 'true');
+    assert.equal(pendingActions[1].children[0], '상태 새로고침');
+  }
   assert.match(surfaceSource, /class: 'egd-codex-thread-active-title' \}, activeThread\.title/);
 });
 
@@ -1114,7 +1140,8 @@ test('Chat composer starts compact but expands and scrolls for long requests', (
   assert.ok(body);
   const resize = compileFunction(`return function resizeComposer() {${body}\n            }`,
     ['input', 'activeThread', 'ChatState', 'codex', 'sendButton']);
-  const input = { isConnected: true, scrollHeight: 30, style: {}, value: 'draft' };
+  const input = { isConnected: true, scrollHeight: 30, style: {}, value: 'draft',
+    ownerDocument: { defaultView: { getComputedStyle: () => ({ maxHeight: '144px' }) } } };
   const sendButton = { disabled: true, title: '' };
   const activeThread = { id: 'thread-a', conversationId: null, preparingInput: false };
   const codex = { authStatus: { isLoggedIn: true }, connected: true, isSending: false };
@@ -1122,12 +1149,12 @@ test('Chat composer starts compact but expands and scrolls for long requests', (
   run();
   assert.equal(input.style.height, '40px');
   assert.equal(input.style.overflowY, 'hidden');
-  input.scrollHeight = 180;
+  input.scrollHeight = 120;
   run();
-  assert.equal(input.style.height, '180px');
+  assert.equal(input.style.height, '120px');
   input.scrollHeight = 500;
   run();
-  assert.equal(input.style.height, '240px');
+  assert.equal(input.style.height, '144px');
   assert.equal(input.style.overflowY, 'auto');
   assert.equal(sendButton.disabled, false);
 });
@@ -2808,7 +2835,7 @@ test('public agenda.clearView retains live Terminal and session after failed ter
   assert.ok(clearCanvas && clearView);
   assert.ok(surfaceSource.includes('clearView: clearCurrentAgendaView'));
   const bindPublicApi = compileFunction(`async function clearCanvasEntitiesForRestore() {${clearCanvas}\n}\nasync function clearCurrentAgendaView(options = {}) {${clearView}\n}\nreturn {clearView:clearCurrentAgendaView};`,
-    ['state', 'document', 'unregisterSourceRefCard', 'exitCardFullscreen', 'syncViewportAgendaRail', 'refreshDeskMinimap', 'boardNotice']);
+    ['state', 'document', 'unregisterSourceRefCard', 'isCardFullscreen', 'exitCardFullscreen', 'syncViewportAgendaRail', 'refreshDeskMinimap', 'boardNotice']);
   for (const failure of [false, new Error('KILL_FAILED'), { exited: true, exitConfirmed: false }]) {
     let confirmed = false, cleanupCalls = 0, closeCalls = 0, removed = false, refreshes = 0;
     let sessionId = 'actual-session-fixture';
@@ -2822,7 +2849,8 @@ test('public agenda.clearView retains live Terminal and session after failed ter
       codex: { chatCardEntityId: null, chatDockMode: 'hud' }, agenda: { suppressDirty: false, dirty: true, dirtyReasons: ['work'] } };
     const notices = [];
     const api = bindPublicApi(state, { querySelectorAll: selector => selector === '.egd-canvas-card' && !removed ? [terminal] : [] },
-      card => { delete state.sourceRefs.cardsByKey[card.id]; }, () => { state.cardFullscreen = null; }, () => { refreshes++; }, () => {}, message => notices.push(message));
+      card => { delete state.sourceRefs.cardsByKey[card.id]; }, card => !!card && state.cardFullscreen?.cardId === card.id,
+      () => { state.cardFullscreen = null; }, () => { refreshes++; }, () => {}, message => notices.push(message));
     assert.equal(await api.clearView(), false);
     assert.equal(removed, false);
     assert.equal(cleanupCalls, 0, 'cleanup must not clear the session reference or issue an unconfirmed kill');
@@ -3123,10 +3151,11 @@ test('Chat composer reserves title, status and log space on compact cards', asyn
       paddingTop: node === messages ? (compact() ? '12px' : '24px') : '0px',
       paddingBottom: node === messages ? (compact() ? '12px' : '28px') : '0px',
       borderTopWidth: '0px', borderBottomWidth: '0px',
+      maxHeight: node === input ? '144px' : 'none',
     }) } };
     const box = (height, extra = {}) => ({ offsetHeight: height, ownerDocument, ...extra });
     const input = {
-      isConnected: true, style: {}, value: 'unsent draft', scrollHeight: 800, clientWidth: 380,
+      isConnected: true, style: {}, value: 'unsent draft', scrollHeight: 800, clientWidth: 380, ownerDocument,
       get offsetHeight() { return this.style.height === 'auto' ? 40 : parseFloat(this.style.height) || 40; },
       closest(selector) { return selector === '.egd-codex-chat-main' ? main : selector === '.egd-codex-footer' ? footer : null; },
     };
@@ -3164,18 +3193,18 @@ test('Chat composer reserves title, status and log space on compact cards', asyn
     assert.ok(h.remainingLogContentHeight() >= 80);
   });
 
-  await t.test('680px card retains 240px maximum and shrinks back to one compact draft', () => {
+  await t.test('680px card retains 144px maximum and shrinks back to one compact draft', () => {
     const h = layout({ viewport: 645 });
     h.resize();
     assert.equal(h.main.dataset.compactComposer, 'false');
-    assert.equal(h.input.style.height, '240px');
+    assert.equal(h.input.style.height, '144px');
     assert.equal(h.input.style.overflowY, 'auto');
     h.main.clientHeight = 385;
     h.resize();
     assert.equal(h.input.style.height, '57px');
     h.main.clientHeight = 645;
     h.resize();
-    assert.equal(h.input.style.height, '240px');
+    assert.equal(h.input.style.height, '144px');
     h.input.scrollHeight = 30;
     h.resize();
     assert.equal(h.input.style.height, '40px');
@@ -3185,7 +3214,7 @@ test('Chat composer reserves title, status and log space on compact cards', asyn
   await t.test('minimum composer stays usable without geometry and detached inputs are untouched', () => {
     const h = layout({ viewport: 0 });
     h.resize();
-    assert.equal(h.input.style.height, '240px', 'pre-layout and existing minimal test stubs retain the normal cap');
+    assert.equal(h.input.style.height, '144px', 'pre-layout sizing still honors the approved CSS cap');
     h.input.isConnected = false;
     h.input.style.height = '80px';
     h.resize();
@@ -3207,7 +3236,7 @@ test('Chat composer reserves title, status and log space on compact cards', asyn
     assert.deepEqual(observed, [input, body]);
     callback();
     assert.equal(resizeCalls, 1);
-    input.clientHeight = 240;
+    input.clientHeight = 144;
     callback();
     assert.equal(resizeCalls, 1, 'the composer height written by resizeComposer is not a new sizing trigger');
     body.clientHeight = 386;

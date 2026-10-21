@@ -10,6 +10,40 @@
 > Atlas `OBJ-038` / `AI-05`; it explains one Answer through ordered Canvas
 > targets and Focus Scopes and does not replay a Run or hidden reasoning.
 
+## Approved Visual Baseline (2026-10-20)
+
+The approved desktop style reference is [the screenshot](./egdesk-approved-desktop-style.jpg)
+and [its interactive HTML proposal](./egdesk-approved-desktop-style.html). The
+HTML contains *example data*, not product state or a replacement runtime.
+For production, `overlay/CSS/eg-desk-surface.uc.css` owns the accepted token
+values; this note explains their intent. The approved **style** does not freeze
+every menu, component, or window position shown in the proposal.
+
+- Chat shares the Desk's warm-neutral materials: `#FFFEFA` paper,
+  `#F9F9F6` received-bubble surface, `#E6EBE3` user bubble,
+  `#49634F` action accent, `#252A26` ink, `#646A61` secondary text,
+  and `#DEDFD8` / `#EAEAE4` separators. The system Korean font stack is
+  `-apple-system, BlinkMacSystemFont, "Apple SD Gothic Neo", "Malgun Gothic", sans-serif`.
+- Conversation rhythm: `13px/1.45` shell text, `12px/1.52` bubbles,
+  `11px` sender/time metadata, `17px 16px 14px` message-area padding,
+  `14px` between turns, `8px` between avatar and content, `9px 11px`
+  bubble inset. A `24px` circular avatar starts at the sender's first
+  message, rather than trailing a long attachment. User bubbles stay right.
+- The canvas Chat window keeps its real `우측` HUD move action. HUD and Canvas
+  are two presentations of the same conversation, not duplicated messages.
+  The document/result affordance focuses the real artifact when available;
+  activity detail is subordinate to the conversation.
+- The movable canvas frame is a quiet 32px secondary strip with a type icon,
+  visual grab handle, and unchanged `우측`/close actions. The live conversation
+  head beneath it is the primary title (44px in the canvas card); the HUD has
+  the same hierarchy without losing its own move/close controls. A logged-out
+  empty thread keeps `로그인` and `상태 새로고침` visible but uses 16px heading,
+  compact supporting copy, and upper-body placement rather than a hero panel.
+  The one-line composer remains compact by default and grows for a long draft.
+- Preserve actual connection, login, local-record coverage, error, stop,
+  attachment, tool, and permission feedback. Visual restraint must not hide
+  facts or imply a successful provider connection.
+
 ---
 
 ## Core Sentence
