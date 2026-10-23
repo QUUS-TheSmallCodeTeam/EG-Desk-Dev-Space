@@ -86,9 +86,12 @@ fixture가 물리적 입력 출처를 검증했다고 쓰지 않는다.** [H337,
 
 **T-02 — 현행 서비스에도 예산/클릭 구조는 확인됐지만 전체가 동일하지 않다.** 2026-10-23 추가
 REA 6.7.0 정적 분석은 새 서비스의 `$e`, `Ev`, `ig.clickPoint`에서 기본 예산·잔여 예산·move/down/up 구조를 확인했다.
-반면 attachment 경로는 `ensureAttachedTab`에서 `waitForTabAttachment(tabId, options)`로,
-초기화 재시도 조건은 `initializingTabIds`에서 `options[Xa] !== tabId`로 바뀌었다.
-새 helper 내부를 확장 분석하지 않았으므로 구 구현과 완전 동등하다고 결론내리지 않는다. [C1–C4]
+attachment 경로는 `waitForTabAttachment(tabId, options)`를 거치며, attached이면서 initializing인 탭의 일반 호출은 공유 promise를 기다린다.
+초기화 handler가 같은 탭의 표식을 넘기면 이 대기와 재시도는 우회한다. **자기 대기를 피하려는 구조라는 설명은 해석**이다. [C1–C8]
+최상위 일반 탭 대상의 debugger-unattached 오류에는 options·deadline을 재사용해 최대 1회 재시도한다. timeout 자체는 재시도 조건이 아니다.
+대기 시간은 원래 deadline에서 소비되어 이후 CDP 잔여 예산에 반영된다. deadline이 없으면 이 대기의 deadline 타이머도 없다.
+내부 attach에는 절대 deadline 대신 계산된 timeout 값이 전달되므로, 외부 대기 timeout 뒤 늦은 attach 완료와 focus emulation이 가능한 **정적 경로**가 남는다.
+이는 실제 발생이나 원래 클릭의 late effect를 증명하지 않는다. 오류·함수 위치·분석 범위는 부록 B에 구분했다. [C5–C8]
 
 **T-03 — 타임아웃 응답과 이미 보낸 명령의 취소는 다르다.** 확장 `Ia`가 CDP 명령을 보내고
 `Kw`는 명령 promise와 타이머를 경쟁시킨다. `clearTimeout`은 타이머 정리이며 CDP 명령 취소 호출이 아니다.
@@ -153,7 +156,7 @@ EG-05의 관련 위치는 변경 시 라인이 이동할 수 있으므로 테스
 - [scripts/egdesk-browser-tool-transport.test.mjs:526](../../apps/firefox-ui-demo/scripts/egdesk-browser-tool-transport.test.mjs#L526): 진행 중 approval 취소 시 DOM dispatch 0.
 
 실행 출력은 당시 대화에 보관되어 있으며 별도 저장소 보고서가 아니다. 이 개발 테스트의 통과는 독립 구현 검토나
-네이티브 입력 실험의 성공을 뜻하지 않는다. 이 문서 작성 과정에서 앱·입력·Stop 시나리오를 다시 실행하지 않았다.
+네이티브 입력 실험의 성공을 뜻하지 않는다. 이 문서의 OpenAI 제어 재현을 위한 앱·입력·Stop 실험은 다시 실행하지 않았으며, 별도로 진행되는 EG-Desk headless QA와 구분한다.
 
 <a id="remaining-analysis"></a>
 ## 7. 남은 분석: 필요한 이유와 최소 확인 범위
@@ -188,6 +191,8 @@ EG-05의 관련 위치는 변경 시 라인이 이동할 수 있으므로 테스
 
 브라우저 byte 범위는 UTF-8의 반개구간 `[start,end)`, line은 1-based다.
 네이티브 VA는 과거 image base `0x100000000` 기준이며 실제 로드 주소와 구별한다.
+C5는 Babel로 위치·원문 slice를 추출한 자료다. C6–C8은 그 원문 함수 slice에 클래스 포장만 추가한 파생 파일을 대상으로 한 **실제 REA 6.7.0 정적 분석**이다.
+파생 slice SHA-256은 `f5286c94b34c4c3abb8b7a30b0d921cfd818661fa66a78f304a8cc003b2f926c`다. 분석은 partial이며 출력 잘림은 없지만 동적 `this`·외부 helper 전체 연결이나 실행을 증명하지 않는다.
 
 | 주장 | 식별점 | 증거·수준 |
 |---|---|---|
@@ -195,7 +200,11 @@ EG-05의 관련 위치는 변경 시 라인이 이동할 수 있으므로 테스
 | B-02 | 과거 ASAR `.vite/build/main-CLu1A25j.js` L993/L1003; `executeCdpForBrowserUse`, `sendDebuggerCommand` | H340 설치 코드 보고. 현행 IAB 동등성은 UNVERIFIED |
 | T-01 | `We` `[252876,252986)` L844; `Rf` `[779186,779324)` L1121; `clickPoint` `[1169262,1170705)` L4263 | B1 정적 소스 추출. 모의 시계 결과는 H340 보고이며 실제 타임라인 아님 |
 | T-02 | `$e` `[367466,367576)` L875; `Ev` `[905463,905601)` L1152; `ig.clickPoint` `[1296183,1297626)` L4294 | C1–C4의 **REA 6.7.0 정적 검증**. 일반 소스 읽기와 구별 |
-| T-02 | `Oh.executeTargetCdp` `[882176,883844)` L1152; `Ya → Ev → request.timeoutMs → api.executeCdp` | C1/C2. attachment helper 내부 미확장, REA 결과 partial(외부 helper 미해결; 출력 잘림 아님) |
+| T-02 | `Oh.executeTargetCdp` `[882176,883844)` L1152; `Ya → Ev → request.timeoutMs → api.executeCdp` | C1/C2/C5–C8. 최상위 일반 탭·`options[Xa] !== tabId`에서 debugger-unattached 1회 재시도, 같은 options·deadline 재사용. timeout은 별도 오류 처리이며 재시도 조건 아님 |
+| T-02 | `Oh.waitForTabAttachment` `[891859,892203)`, `ensureAttachedTab` `[892203,892785)`, `runTabAttachHandlers` `[891431,891644)`; 모두 L1152 | C5/C6. attached+initializing 일반 호출은 공유 promise 대기; handler의 `{[Xa]:tabId}` 전달로 같은 탭 초기화의 대기/재시도 우회. 자기 대기 회피는 구조에 대한 해석 |
+| T-02 | `Tv` `[905653,905925)`, `Ev` `[905463,905601)`; L1152 | C5–C8. `Tv`는 원 deadline으로 대기하고 `Ev`는 이후 잔여 예산을 계산. `deadlineMs`가 없으면 `Tv` 타이머 없음. 대기 오류 `CDP operation exceeded its deadline before command dispatch`는 과거 `Input.*` 2,998ms timeout과 다른 경계 |
+| T-02 | `Oh.attachTab` `[892785,893214)`, `enableFocusEmulation` `[893214,893410)`; L1152 | C5/C6. 내부 attach에는 계산된 `timeoutMs`와 초기화 표식만 전달, `deadlineMs` 미전달. 외부 대기 timeout 뒤 늦은 attach→focus emulation 가능 경로; 실제 발생·원 클릭 효과는 UNKNOWN |
+| T-02 | 과거 `kf.attachTab` `[766515,766944)` L1121 ↔ 현행 `Oh.attachTab` | C5에서 원문 byte 동일; 함수 SHA-256 `cd4170a61895b1b274329eb49f6baea7f1bf1db805a40c191cda6ae694d9820f`. 호출자·외부 상태까지 동등하다는 뜻은 아님 |
 | T-03 | `Ia` `[390164,390451)`, `Kw` `[390451,390654)`, 바깥 `executeCdp` `[373699,374151)` | B2. 직접 취소 호출 없음은 조사한 함수 범위에 한정 |
 | N-01 | `FUN_100705dc0`, call `0x100705f00 → postToPid 0x10025ec14 → 0x10025ec20` | N2/N3: LLVM 본문 + 기존 REA 심볼/래퍼 증거. 최종 간접 target 및 실제 분기 실행 UNKNOWN |
 | N-02 | `FUN_10074a96c`; call `0x10074ac44`, return `0x10074ac48`; 이전 앱 `activateWithOptions:0` | N1의 LLVM 대조, N4 L9339 부근 `NSRunningApplication → SLSSetFrontProcessWithInfo` 샘플 |
@@ -222,6 +231,10 @@ L48 `willTerminate`는 관찰 종료 뒤 정리 시점이다. 그때 foreground 
 | C2 | `browser/timeout-origin-ZGb896/current-boundary-comparison.json` | 현행/과거 대응 비교; 동일한 부분과 attachment 변경을 분리 |
 | C3 | `browser/timeout-origin-ZGb896/rea-current-boundary-slice.json` | REA `ev_2f161ddd82938d19f4db82a6db89ace11401e30a88fcaf2af16a5a3d2e79044d` |
 | C4 | `browser/timeout-origin-ZGb896/rea-current-remaining-callers.json` | REA `ev_c3a3c025db170d1d728123d08af965178ac9586f083a08bb1bacf92b0943eb5d` |
+| C5 | `browser/timeout-origin-ZGb896/attachment-boundary-functions.json` | `2026-10-23T13:25:53.250Z`; 현행/과거 함수 원문 위치·source/slice SHA·대응표. source SHA는 부록 A |
+| C6 | `browser/timeout-origin-ZGb896/rea-attachment-boundary.json` | REA `ev_03bb870d7fe041d6e7854384d624563bf49cffe43b94db4265ab6854be835f5b`; 원문 파생 slice 분석 |
+| C7 | `browser/timeout-origin-ZGb896/rea-attachment-boundary-Tv-callers.json` | REA `ev_e26b958de58f84aaa8be195253eb58cdbf7307e787dd0e5fc8b2f42840feeec9`; 정적 의미 추적, coverage partial |
+| C8 | `browser/timeout-origin-ZGb896/rea-attachment-boundary-Ev-callers.json` | REA `ev_2237e5c919b44a7105504b839fcf45505578cb5358459fc0aaafe288b7174382`; 정적 의미 추적, coverage partial |
 | N1 | `native/focus-restore-6yqdDW/42-sampled-continuation-llvm-raw.json` | LLVM 정적 continuation와 샘플 주소의 대응 자료 |
 | N2 | `native/focus-restore-6yqdDW/43-native-e2e-bounded-raw.json` | 바이너리 식별·LLVM/기존 REA 분석. 이름의 e2e를 실제 입력 E2E 완료로 읽지 않음 |
 | N3 | `native/focus-restore-6yqdDW/45-virtual-cursor-dispatch-side-effect-raw.json` | `2026-10-21T14:46:48Z–14:47:46Z`; `postToPid` 호출 및 기존 REA `ev_4fb12a65679e8e6dc98d8b025318a722a28aef5f18ce18b969f398911dfcf26b` |
@@ -240,9 +253,11 @@ L48 `willTerminate`는 관찰 종료 뒤 정리 시점이다. 그때 foreground 
 | C2 | `0a63e9272877f866acac7e12bd55e7434cfc8fd5a5e9b1248d5df1a067f1ea2a` |
 | C3 | `61e5bfef93d62bb336430bb14050fea3f41e4d4e07fedf85b8ace237887cd731` |
 | C4 | `0d933afe4b19d630edfabf8ebaa1d93ba0fadf990a769a2ee9039eea0653d4f3` |
+| C5 / C6 | `de638f8298abdab5eb2420c073b82010d3ef7e95bbda22081cdaaf61fab75cac` / `1948fd51d882bad666cb05f0ac754c8bbee1a8f3d7709f181ced28f90c6b5423` |
+| C7 / C8 | `df4afd7b55c60c6ff4dfb781d69287e07cac5592af39df796ba6fb5dd1b7b4b0` / `12c60877f7550c4ec2a7f7dab008dac31344317e96f69b6b59a6c99811315ea9` |
 | N1 / N2 | `2848bf3c8252f9c290f812765c0e0b4b69e429f65ee2cc0359ec663210e53a30` / `9acafdd29d2dd6de945b58743724aeba0d7332cdc8c794d773812b209fde8b45` |
 | N3 / N4 | `13c52f8ece74cb2421c5aa71afdc38eb55ed3651347516cfb3e325b7dc5a256d` / `3c7e9d496dc60a6aebd60a7c6337da1a18b17e8dcd8fd62f965ca6550885921e` |
 | N5 / N6 | `f8b6cda86acd2051708ae573a9b46a89f56a5f6c94be018755157ccc5d55033b` / `68edc62bc53dd20ccbe9f1d8684d031a9c942e68480a0bd195f50bcf39ce8c8f` |
 
-현행 C1–C4 artifact SHA-256은 2026-10-23 보관 파일에서 산출했다. 설치 service SHA·함수 위치·REA evidence ID와 함께 조회한다.
+현행 C1–C8 artifact SHA-256은 2026-10-23 보관 파일에서 산출했다. 설치 service SHA·함수 위치·REA evidence ID와 함께 조회한다.
 자료의 해시가 맞아도 전체 호출 그래프·현재 설치 동작·취소 보장을 증명하는 것은 아니다.
