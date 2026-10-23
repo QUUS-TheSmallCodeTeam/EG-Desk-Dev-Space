@@ -1032,6 +1032,92 @@ test('right Chat HUD leaves the existing bottom Dock controls hit-test clear at 
   assert.ok(hudBottom <= dockTop - 8, `HUD bottom ${hudBottom} must clear Dock top ${dockTop}`);
 });
 
+test('800×600 zoom actions clear the Dock without moving the 960×700 or 1280×776 chrome', () => {
+  const css = readFileSync(new URL('../overlay/CSS/eg-desk-surface.uc.css', import.meta.url), 'utf8');
+  const baseZoom = css.match(/^#egd-zoom-indicator \{([^}]+)\}/m)?.[1] || '';
+  const narrowZoom = css.match(/@media \(max-width: 950px\) \{\s*#egd-zoom-indicator \{([^}]+)\}/)?.[1] || '';
+  const dock = css.match(/^#egd-dock \{([^}]+)\}/m)?.[1] || '';
+  const bag = css.match(/^#egd-preset-bag \{([^}]+)\}/m)?.[1] || '';
+  const px = (body, property) => Number.parseFloat(body.match(new RegExp(`\\b${property}:\\s*(\\d+)px`))?.[1]);
+  const measuredZoom = { width: 152, height: 41 }; // central QA 800×600 box
+  const measuredDockWidth = 598; // central QA 800×600 box; content width stays fixed above 700px
+  const zoomRect = (width, height) => {
+    const responsive = width <= 950 ? narrowZoom : '';
+    const left = px(responsive, 'left') || px(baseZoom, 'left');
+    const bottomInset = px(responsive, 'bottom') || px(baseZoom, 'bottom');
+    return { left, right: left + measuredZoom.width,
+      top: height - bottomInset - measuredZoom.height, bottom: height - bottomInset };
+  };
+  const dockRect = (width, height) => {
+    const left = (width - measuredDockWidth) / 2;
+    const bottom = height - px(dock, 'bottom');
+    return { left, right: left + measuredDockWidth,
+      top: bottom - px(dock, 'height'), bottom };
+  };
+  const overlaps = (a, b) => a.left < b.right && a.right > b.left && a.top < b.bottom && a.bottom > b.top;
+  const smallZoom = zoomRect(800, 600);
+  const smallDock = dockRect(800, 600);
+  assert.ok(!overlaps(smallZoom, smallDock),
+    `zoom ${JSON.stringify(smallZoom)} must not cover Dock ${JSON.stringify(smallDock)}`);
+  assert.ok(smallZoom.bottom <= smallDock.top - 8, 'place the whole zoom group above the Dock');
+  assert.ok(smallZoom.left >= px(bag, 'left') + px(bag, 'width') + 8,
+    'the moved zoom group also clears the preset rail at the left edge');
+  assert.ok(smallZoom.right <= 800 - 10 - 396 - 8,
+    'the moved zoom group remains left of the right HUD');
+  assert.deepEqual(zoomRect(960, 700), { left: 15, right: 167, top: 645, bottom: 686 });
+  assert.deepEqual(zoomRect(1280, 776), { left: 15, right: 167, top: 721, bottom: 762 });
+  assert.ok(!overlaps(zoomRect(960, 700), dockRect(960, 700)));
+  assert.ok(!overlaps(zoomRect(1280, 776), dockRect(1280, 776)));
+  assert.doesNotMatch(narrowZoom, /(?:z-index|pointer-events|display|transform|width|height):/,
+    'the responsive rule only repositions the existing clickable zoom controls');
+  assert.match(surfaceSource, /zoomOutButton\.addEventListener\('click'/);
+  assert.match(surfaceSource, /zoomInButton\.addEventListener\('click'/);
+  assert.match(surfaceSource, /zoomFitButton\.addEventListener\('click'/);
+  assert.match(surfaceSource, /dock\.appendChild\(makeGroup\(DOCK_RIGHT, 'right'\)\)/);
+});
+
+test('600×600 narrow HUD clears every zoom hit point and the Dock while larger HUDs stay put', () => {
+  const css = readFileSync(new URL('../overlay/CSS/eg-desk-surface.uc.css', import.meta.url), 'utf8');
+  const baseHud = css.match(/^#egd-hud \{([^}]+)\}/m)?.[1] || '';
+  const narrowHud = css.match(/@media \(max-width: 700px\) \{\s*#egd-hud \{([^}]+)\}/)?.[1] || '';
+  const baseZoom = css.match(/^#egd-zoom-indicator \{([^}]+)\}/m)?.[1] || '';
+  const narrowZoom = css.match(/@media \(max-width: 950px\) \{\s*#egd-zoom-indicator \{([^}]+)\}/)?.[1] || '';
+  const dock = css.match(/^#egd-dock \{([^}]+)\}/m)?.[1] || '';
+  const px = (body, property) => Number.parseFloat(body.match(new RegExp(`\\b${property}:\\s*(\\d+)px`))?.[1]);
+  const heightCut = body => Number.parseFloat(body.match(/height:\s*calc\(100vh - (\d+)px\)/)?.[1]);
+  const hudRect = (width, height) => {
+    const body = width <= 700 && narrowHud ? narrowHud : baseHud;
+    const top = px(baseHud, 'top');
+    const right = width - px(baseHud, 'right');
+    const panelWidth = Math.min(396, width - 20);
+    const bottom = top + Math.min(px(baseHud, 'max-height'), height - heightCut(body));
+    return { left: right - panelWidth, right, top, bottom };
+  };
+  const zoomRect = (width, height) => {
+    const body = width <= 950 && narrowZoom ? narrowZoom : baseZoom;
+    const left = px(body, 'left');
+    const bottom = height - px(body, 'bottom');
+    return { left, right: left + 152, top: bottom - 41, bottom };
+  };
+  const contains = (rect, x, y) => x >= rect.left && x < rect.right && y >= rect.top && y < rect.bottom;
+  const hud = hudRect(600, 600), zoom = zoomRect(600, 600);
+  const dockTop = 600 - px(dock, 'bottom') - px(dock, 'height');
+  for (const x of [zoom.left + 8, zoom.left + 76, zoom.right - 8]) {
+    const y = (zoom.top + zoom.bottom) / 2;
+    assert.ok(!contains(hud, x, y), `HUD must not intercept zoom hit point (${x}, ${y})`);
+    assert.ok(y < dockTop, `Dock must not intercept zoom hit point (${x}, ${y})`);
+  }
+  assert.ok(hud.bottom <= zoom.top - 8, 'the narrow HUD leaves an 8px clearance above the zoom group');
+  assert.ok(zoom.top - hud.bottom <= 12, 'the clearance does not needlessly shrink the Chat HUD');
+  assert.ok(zoom.bottom <= dockTop - 8, 'the zoom group remains clear above the Dock');
+  assert.ok(dockTop - hud.bottom >= 8, 'the narrow HUD also clears the Dock');
+  assert.deepEqual(hudRect(800, 600), { left: 394, right: 790, top: 72, bottom: 532 });
+  assert.deepEqual(hudRect(960, 700), { left: 554, right: 950, top: 72, bottom: 632 });
+  assert.deepEqual(hudRect(1280, 776), { left: 874, right: 1270, top: 72, bottom: 708 });
+  assert.doesNotMatch(narrowHud, /(?:display|visibility|pointer-events|z-index|width|transform):/,
+    'the narrow rule changes only HUD clearance, not its actions or horizontal topology');
+});
+
 test('wheel or focused-URL keyboard zoom exits actual fullscreen and restores the same live Browser Card', () => {
   const exitBody = surfaceSource.match(/  function exitCardFullscreen\(card = null, options = \{\}\) \{([\s\S]*?)\n  \}/)?.[1];
   const enterBody = surfaceSource.match(/  function enterLocalDesk\(\) \{([\s\S]*?)\n  \}/)?.[1];
