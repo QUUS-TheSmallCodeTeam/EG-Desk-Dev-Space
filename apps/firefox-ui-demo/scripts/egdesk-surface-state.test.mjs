@@ -1317,6 +1317,233 @@ test('bounded visual hierarchy keeps Canvas chrome quiet and Browser and Chat co
   assert.match(surfaceSource, /input\.addEventListener\('compositionend'/);
 });
 
+function browserMenuHarness() {
+  const sourceStart = surfaceSource.indexOf('    const duplicateBrowser = () => spawnBrowserCard(');
+  const sourceMiddle = surfaceSource.indexOf('    const selectBrowserForChat =', sourceStart);
+  const showStart = surfaceSource.indexOf('    const showBrowserMenu =', sourceMiddle);
+  const showEnd = surfaceSource.indexOf('    card._browserState =', showStart);
+  assert.ok(sourceStart > 0 && sourceMiddle > sourceStart && showStart > sourceMiddle && showEnd > showStart);
+  const document = { activeElement: null, body: { isConnected: true } };
+  const focused = [];
+  const connect = (node, connected) => {
+    if (!node || typeof node !== 'object') return;
+    node.isConnected = connected;
+    for (const child of node.children || []) connect(child, connected);
+  };
+  const el = (tag, attrs = {}, ...children) => {
+    const listeners = new Map();
+    const node = {
+      tag, children, isConnected: false, attrs: {},
+      getBoundingClientRect: () => ({ left: 20, top: 20, right: 50, bottom: 50 }),
+      contains(target) { return this === target || this.children.some(child => child?.contains?.(target)); },
+      focus() { if (this.isConnected) { document.activeElement = this; focused.push(this); } },
+      setAttribute(name, value) { this.attrs[name] = String(value); },
+      getAttribute(name) { return this.attrs[name] ?? null; },
+      addEventListener(name, listener) { listeners.set(name, listener); },
+      removeEventListener(name, listener) { if (listeners.get(name) === listener) listeners.delete(name); },
+      dispatchKey(key) {
+        const event = { key, target: document.activeElement, defaultPrevented: false,
+          preventDefault() { this.defaultPrevented = true; }, stopPropagation() {} };
+        listeners.get('keydown')?.(event);
+        return event;
+      },
+      dispatchFocusout(relatedTarget) { listeners.get('focusout')?.({ relatedTarget }); },
+      remove() {
+        if (this.contains(document.activeElement)) document.activeElement = document.body;
+        connect(this, false);
+      },
+    };
+    Object.assign(node, attrs);
+    return node;
+  };
+  document.documentElement = { isConnected: true, appendChild(node) { connect(node, true); } };
+  const menuButton = el('button');
+  const card = el('div');
+  const address = el('input');
+  const dockBrowser = el('button');
+  const outside = el('button');
+  for (const node of [menuButton, card, address, dockBrowser, outside]) connect(node, true);
+  card.id = 'egd-browser-card-1';
+  card._sourceRef = {};
+  card.querySelector = selector => selector === '.egd-card-url' ? address : null;
+  document.querySelector = selector => selector === '#egd-dock .egd-dock-btn[data-id="browser"]' ? dockBrowser : null;
+  document.activeElement = menuButton;
+  const nextCard = el('div');
+  const nextAddress = el('input');
+  connect(nextCard, true);
+  connect(nextAddress, true);
+  nextCard.querySelector = selector => selector === '.egd-card-url' ? nextAddress : null;
+  const effects = [];
+  const timers = [];
+  const window = { setTimeout(callback) { timers.push(callback); }, addEventListener() {}, removeEventListener() {} };
+  const flushTimers = () => { while (timers.length) timers.shift()(); };
+  const browserState = { uri: 'https://example.test/', homeUrl: 'https://home.test/', loading: false };
+  const build = compileFunction(`let browserMenuPanel = null;\n${surfaceSource.slice(sourceStart, sourceMiddle)}
+    const selectBrowserForChat = permission => effects.push(permission);\n${surfaceSource.slice(showStart, showEnd)}
+    return { showBrowserMenu, closeBrowserMenu, get panel() { return browserMenuPanel; } };`,
+    ['menuButton', 'card', 'document', 'window', 'el', 'browserState', 'resolveFloatingMenuPlacement',
+      'spawnBrowserCard', 'copyTextToClipboard', 'navigateBrowser', 'stopBrowser', 'reloadBrowser',
+      'isCardFullscreen', 'toggleCardFullscreen', 'effects']);
+  const menu = build(menuButton, card, document, window, el, browserState, () => ({ left: 30, top: 40 }),
+    () => { effects.push('duplicate'); return nextCard; }, () => { effects.push('copy'); outside.focus(); },
+    url => effects.push(['navigate', url]), () => effects.push('stop'), () => effects.push('reload'),
+    () => false, () => effects.push('maximize'), effects);
+  const triggerBody = surfaceSource.match(/    const menuButton = el\('button', \{[\s\S]*?onclick: \(ev\) => \{([\s\S]*?)\n      \},\n    \}, deskIcon\('menu'\)\);/)?.[1];
+  assert.ok(triggerBody, 'Browser menu trigger must remain directly testable');
+  const clickTrigger = compileFunction(`return ev => {${triggerBody}\n      }`,
+    ['browserCardControl', 'card', 'menuButton'])((_, command, ...args) => {
+      assert.equal(command, 'menu');
+      return menu.showBrowserMenu(...args);
+    }, card, menuButton);
+  const pressTrigger = detail => clickTrigger({ detail, stopPropagation() {} });
+  return { menu, pressTrigger, document, focused, menuButton, card, address, dockBrowser, outside,
+    nextCard, nextAddress, effects, flushTimers };
+}
+
+test('Browser more-menu keyboard entry, navigation, dismissal and focus return use the production handlers', () => {
+  const h = browserMenuHarness();
+  h.pressTrigger(0); // native Enter/Space button activation sends click detail 0
+  const panel = h.menu.panel;
+  assert.ok(panel?.isConnected);
+  assert.equal(h.document.activeElement, panel.children[0], 'keyboard open focuses the first item');
+  assert.equal(h.menuButton.getAttribute('aria-expanded'), 'true');
+  assert.equal(panel.dispatchKey('ArrowDown').defaultPrevented, true);
+  assert.equal(h.document.activeElement, panel.children[1]);
+  panel.dispatchKey('End');
+  assert.equal(h.document.activeElement, panel.children.at(-1));
+  panel.dispatchKey('ArrowDown');
+  assert.equal(h.document.activeElement, panel.children[0], 'arrow navigation wraps');
+  panel.dispatchKey('ArrowUp');
+  assert.equal(h.document.activeElement, panel.children.at(-1));
+  panel.dispatchKey('Home');
+  assert.equal(h.document.activeElement, panel.children[0]);
+  panel.dispatchKey('Escape');
+  assert.equal(h.menu.panel, null);
+  assert.equal(h.document.activeElement, h.menuButton, 'Escape returns to the surviving trigger');
+  assert.equal(h.menuButton.getAttribute('aria-expanded'), 'false');
+  assert.deepEqual(h.effects, [], 'focus navigation never executes a menu action');
+});
+
+test('Browser more-menu selection respects new Card, existing Card, disconnected trigger and outside click', () => {
+  const h = browserMenuHarness();
+  h.pressTrigger(0);
+  h.menu.panel.children[0].onclick({ detail: 0, stopPropagation() {} });
+  assert.equal(h.document.activeElement, h.nextAddress, 'duplicate focuses its new Browser rather than the old trigger');
+  assert.deepEqual(h.effects, ['duplicate']);
+
+  h.menuButton.focus();
+  h.pressTrigger(0);
+  h.menu.panel.children[4].onclick({ detail: 0, stopPropagation() {} });
+  assert.equal(h.document.activeElement, h.menuButton, 'Home returns to the still-present trigger');
+  assert.deepEqual(h.effects[1], ['navigate', 'https://home.test/']);
+
+  h.pressTrigger(0);
+  h.menu.panel.children[6].onclick({ detail: 0, stopPropagation() {} });
+  assert.equal(h.document.activeElement, h.menuButton, 'maximize keeps Browser toolbar focus');
+  assert.equal(h.effects[2], 'maximize');
+
+  h.pressTrigger(0);
+  h.menuButton.isConnected = false;
+  h.menu.panel.dispatchKey('Escape');
+  assert.equal(h.document.activeElement, h.address, 'a removed trigger falls back within its Browser');
+
+  h.menuButton.isConnected = true;
+  h.menuButton.focus();
+  h.pressTrigger(0);
+  h.menuButton.isConnected = false;
+  h.address.isConnected = false;
+  h.card.isConnected = false;
+  h.menu.panel.dispatchKey('Escape');
+  assert.equal(h.document.activeElement, h.dockBrowser, 'a removed Browser falls back to the Browser Dock entry');
+
+  h.menuButton.isConnected = true;
+  h.menuButton.focus();
+  h.pressTrigger(1);
+  const triggerFocuses = h.focused.filter(node => node === h.menuButton).length;
+  h.menu.panel._outsideHandler({ target: h.outside });
+  assert.equal(h.menu.panel, null);
+  assert.equal(h.focused.filter(node => node === h.menuButton).length, triggerFocuses,
+    'outside click closes without stealing focus back');
+});
+
+test('Browser more-menu leaves focus placed by a selected action alone', () => {
+  const h = browserMenuHarness();
+  h.pressTrigger(0);
+  h.menu.panel.children[1].onclick({ detail: 0, stopPropagation() {} });
+  assert.equal(h.menu.panel, null);
+  assert.deepEqual(h.effects, ['copy']);
+  assert.equal(h.document.activeElement, h.outside, 'a selected action may own the next focus target');
+});
+
+test('Browser more-menu pointer open accepts Escape on its still-focused trigger', () => {
+  const h = browserMenuHarness();
+  h.pressTrigger(1);
+  assert.equal(h.document.activeElement, h.menuButton);
+  assert.ok(h.menu.panel?.isConnected);
+  assert.equal(h.menuButton.dispatchKey('Escape').defaultPrevented, true);
+  assert.equal(h.menu.panel, null);
+  assert.equal(h.menuButton.getAttribute('aria-expanded'), 'false');
+  assert.equal(h.document.activeElement, h.menuButton);
+});
+
+test('Browser more-menu closes only after focus really leaves both trigger and menu', () => {
+  const h = browserMenuHarness();
+  h.pressTrigger(1);
+  const panel = h.menu.panel;
+  h.menuButton.dispatchFocusout(panel.children[0]);
+  panel.children[0].focus();
+  h.flushTimers();
+  assert.equal(h.menu.panel, panel, 'moving from trigger into an item keeps the menu open');
+
+  panel.dispatchFocusout(panel.children[1]);
+  panel.children[1].focus();
+  h.flushTimers();
+  assert.equal(h.menu.panel, panel, 'moving between items keeps the menu open');
+
+  panel.dispatchFocusout(h.outside);
+  h.outside.focus();
+  const triggerFocuses = h.focused.filter(node => node === h.menuButton).length;
+  h.flushTimers();
+  assert.equal(h.menu.panel, null);
+  assert.equal(h.menuButton.getAttribute('aria-expanded'), 'false');
+  assert.equal(h.document.activeElement, h.outside, 'leaving focus is not reclaimed by the menu');
+  assert.equal(h.focused.filter(node => node === h.menuButton).length, triggerFocuses);
+});
+
+test('Browser more-menu defers uncertain focusout and ignores a stale close after reopen', () => {
+  const h = browserMenuHarness();
+  h.pressTrigger(1);
+  const firstPanel = h.menu.panel;
+  h.menuButton.dispatchFocusout(null);
+  h.document.activeElement = h.document.body; // transient focus during an asynchronous handoff
+  firstPanel.children[0].focus();
+  h.flushTimers();
+  assert.equal(h.menu.panel, firstPanel, 'settled focus inside the menu cancels a pending close');
+
+  firstPanel.dispatchFocusout(null);
+  h.document.activeElement = h.document.body;
+  h.flushTimers();
+  assert.equal(h.menu.panel, null, 'unresolved focus outside closes after the deferred check');
+
+  h.menuButton.focus();
+  h.pressTrigger(1);
+  const reopenedPanel = h.menu.panel;
+  reopenedPanel.dispatchFocusout(null);
+  h.document.activeElement = h.document.body;
+  h.menu.closeBrowserMenu();
+  h.menuButton.focus();
+  h.pressTrigger(1);
+  const secondPanel = h.menu.panel;
+  h.flushTimers();
+  assert.equal(h.menu.panel, secondPanel, 'old focusout work cannot close a newer menu');
+});
+
+test('Browser more-menu keyboard target has a visible focus style', () => {
+  const css = readFileSync(new URL('../overlay/CSS/eg-desk-surface.uc.css', import.meta.url), 'utf8');
+  assert.ok(/\.egd-browser-menu-item:focus-visible\s*\{[^}]*outline:\s*2px solid var\(--egd-primary\)/.test(css),
+    'keyboard menu item needs the same visible focus outline as Browser toolbar buttons');
+});
+
 test('passive Board status stays off the lower Chat composer while its close control remains clickable', () => {
   const css = readFileSync(new URL('../overlay/CSS/eg-desk-surface.uc.css', import.meta.url), 'utf8');
   const noticeStyle = css.match(/^#egd-board-notice \{([\s\S]*?)^\}/m)?.[1];
