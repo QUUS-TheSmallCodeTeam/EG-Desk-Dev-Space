@@ -147,7 +147,7 @@ function fixture() {
   const browser = { browsingContext: { id: 101, currentWindowGlobal: windowGlobal } }
   let actionCalls = 0, domEffects = 0
   let clockMs = Date.now()
-  let holdAction = null
+  let holdAction = null, holdAfterAuthorization = null
   let authorizePhysicalAction
   const card = { id: 'browser-a', isConnected: true, classList: { contains: name => name === 'egd-browser-card' },
     _browserControls: {
@@ -164,6 +164,7 @@ function fixture() {
           actionRef: action.ref || null, actionUrl: action.url || null })
         if (!permitted) throw new Error('Browser action authority was revoked before input')
         domEffects++
+        if (holdAfterAuthorization) await holdAfterAuthorization
         return { dispatchReceipt: { eventDispatched: true,
           clickInputRoute: 'dom-click-no-pointerdown', targetClickObserved: true },
           after: { cardId: 'browser-a', text: ['Count: 1'] } }
@@ -204,10 +205,234 @@ function fixture() {
   return { dispatch: transport.browserToolDispatch, authorize: transport.browserToolAuthorizePhysicalAction,
     fixtureActionDiagnostic: transport.browserToolFixtureActionDiagnostic,
     req, selection, current, card, browser, ownerWindow,
-    runBindings, pendingBindings, cancelled, stoppedRuns, userSelections, actionLeases,
+    runBindings, pendingBindings, cancelled, stoppedRuns, userSelections, actionLeases, leases,
     get actionCalls() { return actionCalls }, get domEffects() { return domEffects },
-    hold(promise) { holdAction = promise }, advance(ms) { clockMs += ms } }
+    hold(promise) { holdAction = promise }, holdAfterAuthorization(promise) { holdAfterAuthorization = promise },
+    now: () => clockMs, advance(ms) { clockMs += ms } }
 }
+
+function projectionFixture(f = fixture()) {
+  const projectionSource = between('  function browserToolDisplayPoint(action, guard) {',
+    '  function browserToolAuthorizePhysicalAction(')
+  const { createBrowserAgentProjection, browserToolDisplayPoint, browserToolProjectionCurrent } = new Function(
+    'browserToolActionLeases', 'browserToolRunBindings', 'browserToolCardLeases',
+    'browserToolCancelledRuns', 'browserToolStoppedRuns', `${projectionSource}\n` +
+    'return {createBrowserAgentProjection,browserToolDisplayPoint,browserToolProjectionCurrent}')(
+    f.actionLeases, f.runBindings, f.leases, f.cancelled, f.stoppedRuns)
+  let seq = 0
+  const timers = new Map(), frames = new Map()
+  const scheduler = {
+    setTimeout(fn, delay) { const id = ++seq; timers.set(id, { fn, at: f.now() + delay }); return id },
+    clearTimeout(id) { timers.delete(id) },
+    requestAnimationFrame(fn) { const id = ++seq; frames.set(id, fn); return id },
+    cancelAnimationFrame(id) { frames.delete(id) },
+  }
+  f.card.dataset = {}
+  const marker = { hidden: true, style: {} }
+  const projection = createBrowserAgentProjection({ card: f.card, marker,
+    current: browserToolProjectionCurrent, scheduler, now: f.now })
+  f.card._browserControls.toolPrepareAgentProjection = projection.prepare
+  const guard = { documentId: 'doc-1', revision: 2,
+    viewport: { width: 720, height: 480, devicePixelRatio: 2 },
+    target: { ref: 'el_1', bounds: { x: 90, y: 80, width: 180, height: 80 } } }
+  return { ...f, f, marker, projection, guard, point: browserToolDisplayPoint, timers, frames,
+    frame() { const pending = [...frames.values()]; frames.clear(); for (const fn of pending) fn() },
+    tick(ms) { f.advance(ms); for (const [id, timer] of [...timers]) {
+      if (timer.at <= f.now()) { timers.delete(id); timer.fn() }
+    } },
+  }
+}
+
+async function pendingProjection(p) {
+  const bound = await p.f.dispatch(p.f.req('bind', { selection: p.f.selection('interact') }))
+  let release
+  p.f.holdAfterAuthorization(new Promise(resolve => { release = resolve }))
+  const request = p.f.req('act', { binding: bound.binding, guard: p.guard, action: { type: 'click', ref: 'el_1' } })
+  const result = p.f.dispatch(request)
+  await Promise.resolve()
+  return { result, release, request, lease: [...p.f.actionLeases.values()][0] }
+}
+
+test('approved request projects its observed target without waiting for drawing or input ACK', async () => {
+  const p = projectionFixture()
+  const pending = await pendingProjection(p)
+  assert.equal(p.marker.hidden, false)
+  assert.equal(p.marker.style.left, '25%')
+  assert.equal(p.marker.style.top, '25%')
+  assert.equal(p.f.card.dataset.egdAgentActivity, 'true')
+  assert.equal(p.f.domEffects, 1, 'no animation/timer/arrival gate before existing input')
+  assert.equal(p.frames.size, 1)
+  const before = JSON.stringify(p.guard)
+  p.f.card.style = { transform: 'translate(500px, 200px) scale(0.2)' }
+  p.frame()
+  assert.equal(p.marker.hidden, false, 'Desk camera-only changes do not revoke a stable target')
+  assert.equal(JSON.stringify(p.guard), before)
+  pending.release()
+  assert.equal((await pending.result).status, 'acted')
+  assert.equal(p.marker.hidden, true)
+  assert.equal(p.f.card.dataset.egdAgentActivity, undefined)
+  assert.equal(p.timers.size + p.frames.size, 0)
+})
+
+test('unapproved or denied requests never display an Agent target', async () => {
+  const p = projectionFixture()
+  const bound = await p.f.dispatch(p.f.req('bind', { selection: p.f.selection('interact') }))
+  let release
+  p.f.hold(new Promise(resolve => { release = resolve }))
+  const result = p.f.dispatch(p.f.req('act', { binding: bound.binding, guard: p.guard,
+    action: { type: 'click', ref: 'el_1' } }))
+  await Promise.resolve()
+  assert.equal(p.marker.hidden, true)
+  assert.equal(p.f.card.dataset.egdAgentActivity, undefined)
+  p.f.current.accountId = 'changed'
+  release()
+  assert.equal((await result).status, 'rejected')
+  assert.equal(p.marker.hidden, true)
+  assert.equal(p.f.domEffects, 0)
+})
+
+test('projection clears on cancel, Stop, deadline, document/card/authority change and cannot resurrect', async () => {
+  for (const reason of ['cancel', 'Stop', 'deadline', 'document', 'closed', 'account', 'card-epoch', 'request', 'reload', 'dispose']) {
+    const p = projectionFixture()
+    const pending = await pendingProjection(p)
+    assert.equal(p.marker.hidden, false, reason)
+    if (reason === 'cancel') {
+      await p.f.dispatch(p.f.req('cancel'))
+      assert.equal(p.marker.hidden, true, 'cancel clears before its receipt, without waiting for paint')
+    }
+    if (reason === 'Stop') productionStopHarness(p.f).interrupt()
+    if (reason === 'deadline') p.tick(11000)
+    if (reason === 'document') p.f.browser.browsingContext.currentWindowGlobal = { innerWindowId: 999 }
+    if (reason === 'closed') p.f.card.isConnected = false
+    if (reason === 'account') p.f.current.authorityEpoch++
+    if (reason === 'card-epoch') p.f.current.cardEpoch = 'replacement-card'
+    if (reason === 'request') p.f.leases.set(p.f.current.cardEpoch, 'different-request')
+    if (reason === 'reload') p.projection.invalidate()
+    if (reason === 'dispose') p.projection.dispose()
+    p.frame()
+    assert.equal(p.marker.hidden, true, reason)
+    assert.equal(p.f.card.dataset.egdAgentActivity, undefined, reason)
+    pending.lease.projection.show()
+    assert.equal(p.marker.hidden, true, `${reason}: old callback cannot resurrect`)
+    pending.release()
+    await pending.result
+    assert.equal(p.marker.hidden, true, `${reason}: late receipt cannot resurrect`)
+  }
+})
+
+test('display geometry is bounded, numeric-only and never changes guarded input geometry', async () => {
+  const p = projectionFixture()
+  const action = { type: 'click', ref: 'el_1' }
+  const original = JSON.stringify(p.guard)
+  assert.deepEqual(p.point(action, p.guard), { x: 25, y: 25 })
+  for (const bounds of [null, { x: NaN, y: 1, width: 2, height: 2 },
+    { x: 0, y: 0, width: Infinity, height: 2 }, { x: '1', y: 0, width: 2, height: 2 },
+    { x: 0, y: 0, width: -1, height: 2 }, { x: 900, y: 10, width: 30, height: 20 }]) {
+    const guard = { ...p.guard, target: { ref: 'el_1', bounds } }
+    assert.equal(p.point(action, guard), null)
+  }
+  assert.equal(p.point(action, { ...p.guard, viewport: { width: 0, height: 480 } }), null)
+  assert.equal(p.point(action, { ...p.guard, target: { ...p.guard.target, ref: 'other' } }), null)
+  assert.equal(p.point({ type: 'navigate' }, p.guard), null)
+  assert.equal(JSON.stringify(p.guard), original)
+  p.guard.target.bounds.x = 900
+  const pending = await pendingProjection(p)
+  assert.equal(p.marker.hidden, true, 'offscreen display is omitted, not an input rejection')
+  assert.equal(p.f.card.dataset.egdAgentActivity, 'true')
+  assert.equal(p.f.domEffects, 1)
+  pending.release()
+  assert.equal((await pending.result).status, 'acted')
+})
+
+test('projection failures do not change physical authorization or receipts', async () => {
+  for (const phase of ['prepare', 'show', 'clear']) {
+    const f = fixture()
+    f.card._browserControls.toolPrepareAgentProjection = () => {
+      if (phase === 'prepare') throw Error('display unavailable')
+      return { show() { if (phase === 'show') throw Error('paint failed') },
+        clear() { if (phase === 'clear') throw Error('cleanup failed') } }
+    }
+    const bound = await f.dispatch(f.req('bind', { selection: f.selection('interact') }))
+    const result = await f.dispatch(f.req('act', { binding: bound.binding,
+      guard: { documentId: 'doc-1', revision: 2 }, action: { type: 'click', ref: 'el_1' } }))
+    assert.equal(result.status, 'acted', phase)
+    assert.equal(f.domEffects, 1, phase)
+  }
+})
+
+test('a pending authorization cannot restore a projection invalidated by reload', async () => {
+  const p = projectionFixture()
+  const bound = await p.f.dispatch(p.f.req('bind', { selection: p.f.selection('interact') }))
+  let release
+  p.f.hold(new Promise(resolve => { release = resolve }))
+  const result = p.f.dispatch(p.f.req('act', { binding: bound.binding, guard: p.guard,
+    action: { type: 'click', ref: 'el_1' } }))
+  await Promise.resolve()
+  p.projection.invalidate()
+  release()
+  assert.equal((await result).status, 'acted', 'display invalidation does not override actor authority')
+  assert.equal(p.marker.hidden, true)
+  assert.equal(p.frames.size + p.timers.size, 0)
+})
+
+test('old request cleanup cannot clear a newer projection, and Cards remain isolated', async () => {
+  const p = projectionFixture(), other = projectionFixture()
+  const first = await pendingProjection(p)
+  const simultaneous = await pendingProjection(other)
+  first.release()
+  await first.result
+  assert.equal(other.marker.hidden, false)
+  let release
+  p.f.holdAfterAuthorization(new Promise(resolve => { release = resolve }))
+  const second = p.f.dispatch(p.f.req('act', { binding: first.lease.bound.binding, guard: p.guard,
+    action: { type: 'click', ref: 'el_1' } }))
+  await Promise.resolve()
+  assert.equal(p.marker.hidden, false)
+  first.lease.projection.clear()
+  first.lease.projection.show()
+  assert.equal(p.marker.hidden, false)
+  p.frame()
+  assert.equal(p.marker.hidden, false)
+  release()
+  await second
+  simultaneous.release()
+  await simultaneous.result
+})
+
+test('human reload clears display synchronously without changing the reload path', () => {
+  const reloadSource = between('    const reloadBrowser = () => {', '    const stopBrowser = () => {')
+  const order = []
+  const reload = new Function('agentProjection', 'setBrowserLoading', 'xulBrowser', 'loadBrowserUri', 'browserState',
+    `${reloadSource}\nreturn reloadBrowser`)(
+    { invalidate: () => order.push('hide') }, () => order.push('loading'),
+    { reload: () => order.push('reload') }, () => assert.fail('unexpected fallback'), {})
+  assert.equal(reload(), true)
+  assert.deepEqual(order, ['hide', 'loading', 'reload'])
+})
+
+test('only real viewport changes clear target display; camera fitting remains display-only', () => {
+  const layout = between('    const updateFitScale = () => {', '    presentation.layout = updateFitScale;')
+  const realResize = layout.slice(layout.indexOf('if (size !== lastCardSize)'), layout.indexOf('const zoom = canvasZoom()'))
+  assert(realResize.includes('agentProjection.invalidate()'))
+  assert(!layout.slice(layout.indexOf('const zoom = canvasZoom()')).includes('agentProjection.invalidate()'))
+  const pageZoom = between('    const onBrowserPageZoom = () => {', '    const onBrowserTitle = ')
+  assert(pageZoom.includes('agentProjection.invalidate()'))
+})
+
+test('Agent target is decorative; outline dot preserves the existing center icon and hide rules', () => {
+  const css = readFileSync(new URL('../overlay/CSS/eg-desk-surface.uc.css', import.meta.url), 'utf8')
+  assert.match(source, /class: 'egd-browser-agent-target', 'aria-hidden': 'true', hidden: true/)
+  assert.match(source, /wrap\.appendChild\(agentTargetMarker\)/)
+  assert.match(css, /\.egd-browser-agent-target\s*\{[^}]*pointer-events: none !important/s)
+  assert.match(css, /data-egd-agent-activity="true"[^\n]*\.egd-semantic-proxy\[data-lod="outline"\]::after/)
+  assert.match(css, /\.egd-semantic-center\s*\{[^}]*justify-content: center/s)
+  const helper = between('  function browserToolDisplayPoint(action, guard) {', '  function browserToolAuthorizePhysicalAction(')
+  assert.doesNotMatch(helper, /\.focus\(|\.click\(|dispatchEvent\(|scrollIntoView|canvasZoom|expectedRevision/)
+  const load = between('    const onBrowserLoadStart = () => {', '    const onBrowserPageZoom = ')
+  assert.match(load, /agentProjection\.invalidate\(\)/)
+  const cleanup = between('    const cleanupCard = () => {\n      try { unregisterBrowserAuthorizer', '    console.warn(TAG, \'browser Desk Window spawned\'')
+  assert.match(cleanup, /agentProjection\.dispose\(\)/)
+})
 
 test('native-shaped Parent actor preserves exact authority across Gecko wrappers', async () => {
   for (const variant of ['exact', 'same-native-wrappers', 'other-browser', 'other-context',

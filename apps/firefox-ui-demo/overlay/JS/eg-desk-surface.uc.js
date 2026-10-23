@@ -10235,6 +10235,87 @@
       parentReason: recorded.parentReason,
       geckoError: recorded.geckoError, sampledAtMs: recorded.sampledAtMs };
   }
+  // Last-observed target geometry is display-only. Never feed this point back
+  // into input, hit testing, scrolling, actor guards or reference generation.
+  function browserToolDisplayPoint(action, guard) {
+    if (!['click', 'fill'].includes(action?.type) || !action.ref || guard?.target?.ref !== action.ref) return null;
+    const bounds = guard.target.bounds;
+    const width = guard.viewport?.width, height = guard.viewport?.height;
+    if (!bounds || ![bounds.x, bounds.y, bounds.width, bounds.height, width, height].every(Number.isFinite) ||
+        width <= 0 || height <= 0 || bounds.width <= 0 || bounds.height <= 0) return null;
+    const right = bounds.x + bounds.width, bottom = bounds.y + bounds.height;
+    if (!Number.isFinite(right) || !Number.isFinite(bottom) || right <= 0 || bottom <= 0 ||
+        bounds.x >= width || bounds.y >= height) return null;
+    const x = Math.max(0, Math.min(width, bounds.x + bounds.width / 2)) / width * 100;
+    const y = Math.max(0, Math.min(height, bounds.y + bounds.height / 2)) / height * 100;
+    return Number.isFinite(x) && Number.isFinite(y) ? { x, y } : null;
+  }
+  function browserToolProjectionCurrent(lease) {
+    if (!lease?.authorized || !lease.card?.isConnected || !lease.browser?.isConnected ||
+        browserToolActionLeases.get(lease.leaseId) !== lease ||
+        browserToolCardLeases.get(lease.cardEpoch) !== lease.requestId ||
+        browserToolRunBindings.get(lease.key) !== lease.bound || browserToolCancelledRuns.has(lease.key) ||
+        browserToolStoppedRuns.has(JSON.stringify([lease.runId, lease.bound.clientThreadId])) ||
+        lease.browser.browsingContext !== lease.browsingContext ||
+        lease.browsingContext.currentWindowGlobal !== lease.windowGlobal) return false;
+    try {
+      const current = lease.card._browserControls.toolBinding();
+      return lease.card._browserControls.toolBrowser() === lease.browser &&
+        ['cardId', 'cardEpoch', 'profileId', 'accountId', 'userContextId', 'engineAccountKey', 'authorityEpoch']
+          .every(field => current[field] === lease.bound.binding[field]);
+    } catch { return false; }
+  }
+  function createBrowserAgentProjection({ card, marker, current, scheduler = window, now = () => Date.now() }) {
+    let generation = 0, active = null, frame = 0, timer = 0, disposed = false;
+    const hide = () => {
+      if (frame) scheduler.cancelAnimationFrame(frame);
+      if (timer) scheduler.clearTimeout(timer);
+      frame = timer = 0;
+      active = null;
+      marker.hidden = true;
+      delete card.dataset.egdAgentActivity;
+    };
+    const invalidate = () => { generation++; hide(); };
+    const prepare = lease => {
+      const epoch = generation;
+      let retired = false;
+      const valid = () => {
+        try {
+          return !disposed && epoch === generation && lease.card === card &&
+            Number.isSafeInteger(lease.deadlineMs) && now() < lease.deadlineMs && current(lease);
+        } catch { return false; }
+      };
+      return {
+        show() {
+          if (retired) return;
+          retired = true; // One authorization can never resurrect a cleared projection.
+          if (!valid()) return;
+          hide();
+          active = lease;
+          card.dataset.egdAgentActivity = 'true';
+          const point = lease.displayPoint;
+          if (point && [point.x, point.y].every(value => Number.isFinite(value) && value >= 0 && value <= 100)) {
+            marker.style.left = `${point.x}%`;
+            marker.style.top = `${point.y}%`;
+            marker.hidden = false;
+          }
+          const check = () => {
+            if (active !== lease) return;
+            frame = 0;
+            // Observe existing Stop/revocation state before the next paint;
+            // the Stop/input paths themselves do not depend on this display.
+            if (!valid()) { invalidate(); return; }
+            frame = scheduler.requestAnimationFrame(check);
+          };
+          frame = scheduler.requestAnimationFrame(check);
+          timer = scheduler.setTimeout(() => { if (active === lease) invalidate(); },
+            Math.max(0, lease.deadlineMs - now()));
+        },
+        clear() { retired = true; if (active === lease) invalidate(); },
+      };
+    };
+    return { prepare, invalidate, dispose() { disposed = true; invalidate(); } };
+  }
   function browserToolAuthorizePhysicalAction({ browser, browsingContext, windowGlobal,
     leaseId, requestId, deadlineMs, actionType, actionRef, actionUrl }) {
     const lease = browserToolActionLeases.get(leaseId);
@@ -10273,6 +10354,9 @@
     } catch { return deny('live-binding-unavailable'); }
     lease.authorized = true;
     browserToolRecordFixtureAuthorization(lease, 'approved');
+    // Best-effort projection only: no await, animation gate, input coordinates
+    // or success acknowledgement. Display failure cannot change approval.
+    try { lease.projection?.show(); } catch { try { lease.projection?.clear(); } catch {} }
     return true;
   }
   async function browserToolDispatchOnce(request) {
@@ -10310,7 +10394,10 @@
         browserToolRunBindings.delete(key);
         browserToolPendingBindings.delete(key);
         for (const [leaseId, lease] of browserToolActionLeases) {
-          if (lease.key === key) browserToolActionLeases.delete(leaseId);
+          if (lease.key === key) {
+            try { lease.projection?.clear(); } catch {}
+            browserToolActionLeases.delete(leaseId);
+          }
         }
         if (bound?.selectionToken) browserToolUserSelections.delete(bound.selectionToken);
         const pendingSelection = browserToolUserSelections.get(request.selectionToken);
@@ -10401,18 +10488,22 @@
       }
       const leaseId = chatBindingNonce();
       browserToolFixtureAuthorizationByCard.delete(request.cardId);
-      browserToolActionLeases.set(leaseId, { key, bound: authorized, card, browser,
+      const actionLease = { key, bound: authorized, card, browser,
         browsingContext, windowGlobal, leaseId, requestId, runId: request.runId,
         cardEpoch: request.targetCardEpoch, deadlineMs: request.deadlineMs,
         actionType: request.action.type, actionRef: request.action.ref || null,
-        actionUrl: request.action.url || null, authorized: false });
+        actionUrl: request.action.url || null, authorized: false,
+        displayPoint: browserToolDisplayPoint(request.action, request.guard) };
+      browserToolActionLeases.set(leaseId, actionLease);
       let receipt;
       try {
+        try { actionLease.projection = card._browserControls.toolPrepareAgentProjection?.(actionLease); } catch {}
         diagnosticPhase = 'actor';
         receipt = await card._browserControls.toolAct(authorized.binding, request.action, request.guard,
           { leaseId, requestId, deadlineMs: request.deadlineMs });
       }
       finally {
+        try { actionLease.projection?.clear(); } catch {}
         browserToolActionLeases.delete(leaseId);
         if (browserToolCardLeases.get(request.targetCardEpoch) === requestId) {
           browserToolCardLeases.delete(request.targetCardEpoch);
@@ -10680,6 +10771,11 @@
       wrap.appendChild(frame);
       xulBrowser = frame;
     }
+
+    const agentTargetMarker = el('span', { class: 'egd-browser-agent-target', 'aria-hidden': 'true', hidden: true });
+    wrap.appendChild(agentTargetMarker);
+    const agentProjection = createBrowserAgentProjection({ card, marker: agentTargetMarker,
+      current: browserToolProjectionCurrent });
 
     const getBrowserStateSnapshot = () => ({
       cardId: card.id,
@@ -11798,6 +11894,7 @@
       }
     };
     const navigateBrowser = (rawUrl, navOptions = {}) => {
+      agentProjection.invalidate();
       const url = normalizeBrowserUri(rawUrl || browserState.uri || browserState.homeUrl);
       browserState.uri = url;
       browserState.security = browserSecurityLabel(url);
@@ -11812,6 +11909,7 @@
       return loaded ? getBrowserStateSnapshot() : null;
     };
     const goBrowserBack = () => {
+      agentProjection.invalidate();
       if (browserState.historyIndex > 0) {
         browserState.historyIndex -= 1;
         const url = browserState.history[browserState.historyIndex];
@@ -11837,6 +11935,7 @@
       }
     };
     const goBrowserForward = () => {
+      agentProjection.invalidate();
       if (browserState.historyIndex < browserState.history.length - 1) {
         browserState.historyIndex += 1;
         const url = browserState.history[browserState.historyIndex];
@@ -11863,6 +11962,7 @@
     };
     const reloadBrowser = () => {
       try {
+        agentProjection.invalidate();
         setBrowserLoading(true);
         if (typeof xulBrowser?.reload === 'function') xulBrowser.reload();
         else loadBrowserUri(browserState.uri);
@@ -12119,6 +12219,7 @@
       toolBrowser: () => xulBrowser,
       toolObserve: browserToolObserve,
       toolAct: browserToolAct,
+      toolPrepareAgentProjection: agentProjection.prepare,
     };
     const presentation = createBrowserPresentationCache({ card, browser: xulBrowser,
       query: () => browserAgentActorRequest('presentationMetrics'),
@@ -12126,17 +12227,23 @@
     });
     card._browserPresentation = presentation;
     const onBrowserLoadStart = () => {
+      agentProjection.invalidate();
       presentation.invalidate();
       setBrowserLoading(true);
       state.refreshSemanticProjections?.();
     };
     const onBrowserLoadDone = () => {
+      agentProjection.invalidate();
       presentation.invalidate();
       setBrowserLoading(false);
       syncBrowserStateFromBrowser({ markDirtyOnLocationChange: true });
       state.refreshSemanticProjections?.();
     };
-    const onBrowserPageZoom = () => { presentation.invalidate(); state.refreshSemanticProjections?.(); };
+    const onBrowserPageZoom = () => {
+      agentProjection.invalidate();
+      presentation.invalidate();
+      state.refreshSemanticProjections?.();
+    };
     const onBrowserTitle = () => syncBrowserStateFromBrowser({ markDirtyOnLocationChange: false });
     for (const eventName of ['loadstart']) {
       try { xulBrowser.addEventListener(eventName, onBrowserLoadStart, true); } catch {}
@@ -12222,6 +12329,7 @@
       }
       const size = `${card.clientWidth},${card.clientHeight}`;
       if (size !== lastCardSize) {
+        agentProjection.invalidate();
         // Only a real Card resize may change the logical page viewport. The
         // screen-sized toolbar's extra space is presentation, not page resize.
         const nominalBodyHeight = card.clientHeight - nominalHeaderHeight - bodyFrameHeight;
@@ -12252,6 +12360,7 @@
 
     const cleanupCard = () => {
       try { unregisterBrowserAuthorizer?.(); } catch {}
+      agentProjection.dispose();
       unregisterBrowserAuthorizer = null;
       presentation.dispose();
       delete card._browserPresentation;
