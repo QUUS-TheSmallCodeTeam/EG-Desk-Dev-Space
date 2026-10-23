@@ -11940,7 +11940,7 @@
       };
       document.documentElement.appendChild(panel);
       anchor.setAttribute('aria-expanded', 'true');
-      if (focusFirst) items[0]?.focus();
+      if (focusFirst || document.activeElement !== anchor) items[0]?.focus();
       window.setTimeout(() => {
         if (browserMenuPanel === panel && panel._outsideHandler) {
           window.addEventListener('mousedown', panel._outsideHandler, true);
