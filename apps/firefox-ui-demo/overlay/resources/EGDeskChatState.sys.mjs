@@ -437,6 +437,8 @@ export function buildChatRequest(thread, message, requestId, runtime = {}) {
   const cwd = runtime.cwd !== undefined ? runtime.cwd : thread.cwd;
   if (cwd !== undefined) body.cwd = cwd;
   for (const field of ['model', 'effort']) if (runtime[field]) body[field] = runtime[field];
+  // The bridge binds a conversation to this engine and refuses a different one later.
+  if (isEngineId(runtime.engineId)) body.engineId = runtime.engineId;
   if (Array.isArray(runtime.contextSnapshotIds)) body.contextSnapshotIds = [...new Set(runtime.contextSnapshotIds)];
   if (runtime.contextCapabilities) body.contextCapabilities = { read: true, reader: true, publishBriefing: true };
   if (thread.profileEnabled === true) {
@@ -490,8 +492,9 @@ export function usableArtifact(artifact) {
     && typeof artifact.target?.path === 'string' && artifact.target.path.startsWith('/')
     && artifact.relation === 'referenced' && artifact.verifiedAt != null;
 }
-export function reduceChatEvent(state, event) {
-  if (event?.type !== 'chat.event' || event.v !== 2 || event.provider !== 'codex') return null;
+export function reduceChatEvent(state, event, engineIds = [DEFAULT_CHAT_ENGINE_ID]) {
+  // An engine the bridge has not listed is ignored, never shown as Codex.
+  if (event?.type !== 'chat.event' || event.v !== 2 || !engineIds.includes(chatEventEngineId(event))) return null;
   if (!event.streamId || !Number.isSafeInteger(event.seq)) return null;
   const stream = ensureStream(state, event.streamId);
   if (event.seq <= (stream.checkpoints[event.conversationId] ?? -1) || stream.seen[event.seq]) return null;
@@ -1024,6 +1027,86 @@ const PLAN_LABELS = [['free', '무료'], ['go', 'Go'], ['plus', 'Plus'], ['pro',
   ['business', 'Business'], ['ent26', 'Enterprise'], ['enterprise_cbp_automation', 'Enterprise'],
   ['enterprise_cbp_usage_based', 'Enterprise 사용량제'], ['enterprise', 'Enterprise'], ['edu', 'Edu'], ['edu_plus', 'Edu Plus'], ['edu_pro', 'Edu Pro']];
 export const codexPlanLabel = planType => typeof planType === 'string' ? lookup(PLAN_LABELS, planType) : null;
+
+// AI engines (helper contract: /v1/state engines[] {id, label, status, version, capabilities};
+// chat.event carries engineId, and older bridges only provider:'codex').
+export const DEFAULT_CHAT_ENGINE_ID = 'codex';
+const isEngineId = value => typeof value === 'string' && /^[a-z][a-z0-9-]{0,31}$/.test(value);
+const engineRows = engines => (Array.isArray(engines) ? engines : []).filter(row => isEngineId(row?.id));
+const ENGINE_STATUS_TEXT = [['ready', '사용 가능'], ['starting', '준비 중'], ['offline', '연결 끊김'], ['notInstalled', '설치 안 됨'],
+  ['versionUnsupported', '지원하지 않는 버전'], ['loginRequired', '로그인 필요'], ['decisionPending', '연결 방식 결정 대기'], ['disabled', '사용 중지됨']];
+const RUNNABLE_ENGINE_STATUSES = ['ready', 'starting', 'offline', 'loginRequired'];
+
+/** Engines whose chat events this screen admits: the bridge's engines[] and always Codex. */
+export function knownChatEngineIds(engines) {
+  return [...new Set([DEFAULT_CHAT_ENGINE_ID, ...engineRows(engines).map(row => row.id)])];
+}
+/** An envelope's engine: engineId, else the older provider field. */
+export function chatEventEngineId(event) {
+  if (event?.engineId !== undefined) return isEngineId(event.engineId) ? event.engineId : null;
+  return isEngineId(event?.provider) ? event.provider : null;
+}
+
+/**
+ * Engine picker rows. Codex is always choosable and reads the live login, not
+ * the engines[] snapshot; another engine is choosable only while it can run
+ * turns, so Claude stays disabled with '연결 방식 결정 대기'.
+ */
+export function chatEngineChoices(engines, auth = null) {
+  const rows = engineRows(engines);
+  if (!rows.some(row => row.id === DEFAULT_CHAT_ENGINE_ID)) rows.unshift({ id: DEFAULT_CHAT_ENGINE_ID, label: 'Codex' });
+  return [...new Map(rows.map(row => [row.id, row])).values()].map(row => {
+    const label = typeof row.label === 'string' && row.label.trim() ? row.label.trim().slice(0, 40) : row.id;
+    const capabilities = Array.isArray(row.capabilities) ? row.capabilities.filter(name => typeof name === 'string') : [];
+    if (row.id === DEFAULT_CHAT_ENGINE_ID) {
+      const plan = auth?.isLoggedIn ? codexPlanLabel(auth.planType) : null;
+      return { id: row.id, label, selectable: true, capabilities,
+        account: auth?.isLoggedIn ? `ChatGPT${plan ? ` ${plan}` : ''}` : null, note: auth?.isLoggedIn ? '사용 가능' : '로그인 필요' };
+    }
+    const status = lookup(ENGINE_STATUS_TEXT, row.status) ? row.status : 'offline';
+    const version = typeof row.version === 'string' && /^\d+\.\d+\.\d+$/.test(row.version) ? row.version : null;
+    const text = lookup(ENGINE_STATUS_TEXT, status);
+    return { id: row.id, label, selectable: RUNNABLE_ENGINE_STATUSES.includes(status), capabilities, account: null,
+      note: version && status !== 'notInstalled' ? `설치됨 ${version} · ${text}` : text };
+  });
+}
+
+/** A room is tied to its engine once it has a conversation, a held record, or any message (D3). */
+export const chatThreadEngineLocked = thread => !!thread && (!!thread.conversationId || !!thread.retainedNativeBinding
+  || (Array.isArray(thread.messages) && thread.messages.length > 0));
+/** The room's engine: its locked one (older rooms are Codex), else its pick, else the app-wide recent engine (D4). */
+export function chatThreadEngineId(thread, { recentEngineId = null, engines = null } = {}) {
+  if (chatThreadEngineLocked(thread)) return isEngineId(thread.engineId) ? thread.engineId : DEFAULT_CHAT_ENGINE_ID;
+  const choices = chatEngineChoices(engines);
+  return [thread?.engineId, recentEngineId].find(id => choices.some(choice => choice.id === id && choice.selectable)) || DEFAULT_CHAT_ENGINE_ID;
+}
+
+// ReasoningEffort is a model-advertised string (SDK type: minimal|low|medium|high|xhigh).
+// The picker offers the common three; '기본' sends nothing so the model default applies.
+export const CHAT_EFFORT_CHOICES = Object.freeze([
+  Object.freeze({ value: null, label: '기본' }), Object.freeze({ value: 'low', label: '낮음' }),
+  Object.freeze({ value: 'medium', label: '보통' }), Object.freeze({ value: 'high', label: '높음' })]);
+export const chatEffortValue = value => CHAT_EFFORT_CHOICES.some(choice => choice.value && choice.value === value) ? value : null;
+/** Effort choices only when the engine reports per-turn effort selection. */
+export const chatEffortChoices = choice => choice?.capabilities?.includes('effortSelect.perTurn') ? CHAT_EFFORT_CHOICES : [];
+/** Model line: no model catalog is published yet, so only the default (with its verified name when reported). */
+export function chatModelLabel(engineConfiguration) {
+  const model = typeof engineConfiguration?.effectiveModel === 'string' ? engineConfiguration.effectiveModel.trim().slice(0, 80) : '';
+  return model ? `기본 모델 · ${model}` : '기본 모델';
+}
+
+/** Header chip and room badge: the engine name, plus the effort when one is chosen. */
+export function chatEngineChipView(thread, { recentEngineId = null, engines = null, auth = null, engineConfiguration = null } = {}) {
+  const engineId = chatThreadEngineId(thread, { recentEngineId, engines });
+  const choice = chatEngineChoices(engines, auth).find(row => row.id === engineId) || { id: engineId, label: engineId, account: null, capabilities: [] };
+  const locked = chatThreadEngineLocked(thread);
+  const effort = chatEffortChoices(choice).find(row => row.value && row.value === chatEffortValue(thread?.effort)) || null;
+  return {
+    engineId, label: choice.label, locked, text: effort ? `${choice.label} · ${effort.label}` : choice.label,
+    title: [`AI 엔진 ${choice.label}`, choice.account, locked ? '이 대화에 고정' : '새 대화에 사용',
+      chatModelLabel(engineConfiguration), effort ? `추론 강도 ${effort.label}` : null].filter(Boolean).join(' · '),
+  };
+}
 
 /** Local clock for a reset, e.g. '오후 3:20'; another day adds '10월 27일 '. */
 export function formatResetClock(at, now = Date.now()) {

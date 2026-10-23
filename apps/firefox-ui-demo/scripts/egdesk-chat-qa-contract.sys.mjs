@@ -95,14 +95,22 @@ export class ChatProtocolProbe {
   #lastSeq = new Map();
   #runs = new Map();
   #requests = new Map();
+  #engineIds;
+
+  // Known engines: the bridge's /v1/state engines[] ids, and always Codex.
+  constructor({ engineIds = [] } = {}) {
+    this.#engineIds = new Set(['codex', ...(Array.isArray(engineIds) ? engineIds : [])]);
+  }
 
   get runs() { return [...this.#runs.values()].map((run) => structuredClone(run)); }
   byRun(runId) { const run = this.#runs.get(runId); return run && structuredClone(run); }
   byThread(clientThreadId) { return this.runs.filter((run) => run.clientThreadId === clientThreadId); }
 
   ingest(envelope) {
-    if (envelope?.type !== 'chat.event' || envelope.v !== 2 || envelope.provider !== 'codex') {
-      throw new Error('not a v2 Codex chat event');
+    // engineId names the engine; older bridges send only provider:'codex'.
+    const engineId = envelope?.engineId !== undefined ? envelope.engineId : envelope?.provider;
+    if (envelope?.type !== 'chat.event' || envelope.v !== 2 || !this.#engineIds.has(engineId)) {
+      throw new Error('not a v2 chat event from a known engine');
     }
     const streamId = requiredText(envelope.streamId, 'streamId');
     if (!Number.isSafeInteger(envelope.seq) || envelope.seq < 1) throw new Error('invalid event sequence');

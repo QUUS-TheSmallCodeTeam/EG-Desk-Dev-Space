@@ -274,10 +274,110 @@ async function main() {
     throw new Error(`Minimap drag verification failed (${failures.join(', ')}): ${JSON.stringify(check, null, 2)}`);
   }
 
+  // UX-02: each Board has a region on the minimap. Pressing the region or its
+  // name moves the camera to that Board; a View that is not a member lying
+  // over it makes the press offer '이 위치의 2개'.
+  const boardCheck = parseToolJson(resultText(await callTool('evaluate_privileged_script', {
+    expression: `(() => {
+      const wait = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
+      const press = (x, y) => {
+        const init = (buttons) => ({ bubbles: true, cancelable: true, clientX: x, clientY: y, button: 0, buttons, view: window });
+        document.querySelector('.egd-minimap-map').dispatchEvent(new MouseEvent('mousedown', init(1)));
+        window.dispatchEvent(new MouseEvent('mouseup', init(0)));
+      };
+      const center = (node) => {
+        const rect = node.getBoundingClientRect();
+        return [rect.left + rect.width / 2, rect.top + rect.height / 2];
+      };
+      const api = window.__egdesk;
+      const projection = api.agenda.restoreSnapshot({
+        version: 1,
+        savedAt: 1,
+        agenda: { id: 'egdesk-minimap-board-verify', title: '미니맵 확인', memberCardIds: [], contextBindings: [] },
+        cards: [],
+        shapes: [{ id: 'egdesk-minimap-board-mark', type: 'rect', geometry: { x: 0, y: 0, width: 360, height: 220 }, runtimeState: {} }],
+      });
+      if (!projection?.id) throw new Error('Board did not open');
+      const lookAway = () => {
+        api.state.setCanvasViewportTarget({ pan: { x: api.state.panTarget.x - 6000, y: api.state.panTarget.y }, zoom: 1 }, { immediate: true });
+        api.state.boards.activeProjectionId = null;
+        api.minimap.refresh();
+      };
+      const boardOnScreen = () => {
+        const region = document.getElementById(projection.id);
+        const zoom = api.state.zoomTarget;
+        const pan = api.state.panTarget;
+        const left = parseFloat(region.style.left) * zoom + pan.x;
+        const top = parseFloat(region.style.top) * zoom + pan.y;
+        return left >= 0 && top >= 0 && left + parseFloat(region.style.width) * zoom <= window.innerWidth
+          && top + parseFloat(region.style.height) * zoom <= window.innerHeight;
+      };
+      const boardSelector = '.egd-minimap-board[data-projection-id="' + projection.id + '"]';
+      if (!document.getElementById('egd-desk-minimap')) api.minimap.toggle();
+      lookAway();
+      return wait(150).then(() => {
+        const label = document.querySelector('[data-testid="minimap-board-go"][data-projection-id="' + projection.id + '"]');
+        const boardNode = document.querySelector(boardSelector);
+        if (!label || !boardNode) throw new Error('missing minimap Board region');
+        const regionName = label.getAttribute('aria-label');
+        const panBefore = { ...api.state.panTarget };
+        press(...center(boardNode));
+        const byRegion = {
+          stackOpened: !!document.querySelector('[data-testid="minimap-stack"]'),
+          cameraMoved: Math.abs(api.state.panTarget.x - panBefore.x) > 5,
+          onScreen: boardOnScreen(),
+          selected: api.state.boards.activeProjectionId === projection.id,
+        };
+        lookAway();
+        return wait(150).then(() => {
+          document.querySelector('[data-testid="minimap-board-go"][data-projection-id="' + projection.id + '"]').click();
+          const byName = { onScreen: boardOnScreen(), selected: api.state.boards.activeProjectionId === projection.id };
+          const member = document.getElementById(projection.members[0].viewId);
+          const free = api.shapes.restore({ id: 'egdesk-minimap-free-mark', type: 'rect', runtimeState: {},
+            geometry: { x: parseFloat(member.style.left) + 20, y: parseFloat(member.style.top) + 20, width: 160, height: 100 } });
+          api.minimap.refresh();
+          return wait(100).then(() => {
+            press(...center(document.querySelector('.egd-minimap-entity[data-entity-id="' + free.id + '"]')));
+            const stack = document.querySelector('[data-testid="minimap-stack"]');
+            const rows = api.minimap.snapshot().stack;
+            document.querySelector('[data-testid="minimap-stack-row"][data-kind="view"]')?.click();
+            return wait(100).then(() => ({
+              projectionId: projection.id,
+              regionName,
+              byRegion,
+              byName,
+              stackTitle: stack?.getAttribute('aria-label') || null,
+              stackRows: rows.map((row) => row.kind + ':' + row.targetId),
+              stackClosedAfterPick: !document.querySelector('[data-testid="minimap-stack"]'),
+              pickedView: api.state.activeEntityId === free.id,
+              freeId: free.id,
+            }));
+          });
+        });
+      });
+    })()`,
+  }, 30000)));
+  const boardFailures = [];
+  if (boardCheck.regionName !== '미니맵 확인 Board로 이동') boardFailures.push('Board region with its name');
+  if (boardCheck.byRegion.stackOpened || !boardCheck.byRegion.cameraMoved || !boardCheck.byRegion.onScreen || !boardCheck.byRegion.selected) {
+    boardFailures.push('pressing the Board region goes to the Board');
+  }
+  if (!boardCheck.byName.onScreen || !boardCheck.byName.selected) boardFailures.push('the Board name goes to the Board');
+  if (boardCheck.stackTitle !== '이 위치의 2개'
+    || boardCheck.stackRows.join(',') !== `board:${boardCheck.projectionId},view:${boardCheck.freeId}`) boardFailures.push('overlap list');
+  if (!boardCheck.stackClosedAfterPick || !boardCheck.pickedView) boardFailures.push('overlap list pick');
+  if (boardFailures.length) {
+    throw new Error(`Minimap Board verification failed (${boardFailures.join(', ')}): ${JSON.stringify(boardCheck, null, 2)}`);
+  }
+
   const screenshot = resultText(await callTool('screenshot_page', { saveTo: SCREENSHOT_PATH }, 30000));
   const cleanup = parseToolJson(resultText(await callTool('evaluate_privileged_script', {
     expression: `(() => {
       const api = window.__egdesk;
+      const boardProjectionId = ${JSON.stringify(boardCheck.projectionId)};
+      delete api.state.boards.projections[boardProjectionId];
+      if (api.state.boards.activeProjectionId === boardProjectionId) api.state.boards.activeProjectionId = null;
+      document.getElementById(boardProjectionId)?.remove();
       document.querySelectorAll('.egd-canvas-card, .egd-canvas-shape').forEach((node) => {
         try { if (typeof node._cleanup === 'function') node._cleanup(); } catch {}
         node.remove();
@@ -291,11 +391,12 @@ async function main() {
         cardCount: document.querySelectorAll('.egd-canvas-card').length,
         shapeCount: document.querySelectorAll('.egd-canvas-shape').length,
         minimapOpen: !!document.getElementById('egd-desk-minimap'),
+        boardRegionLeft: !!document.getElementById(boardProjectionId) || !!api.state.boards.projections[boardProjectionId],
         dirty: api.state.agenda.dirty,
       };
     })()`,
   }, 30000)));
-  if (cleanup.cardCount !== 0 || cleanup.shapeCount !== 0 || cleanup.minimapOpen || cleanup.dirty) {
+  if (cleanup.cardCount !== 0 || cleanup.shapeCount !== 0 || cleanup.minimapOpen || cleanup.boardRegionLeft || cleanup.dirty) {
     throw new Error(`Cleanup failed: ${JSON.stringify(cleanup, null, 2)}`);
   }
 
@@ -305,6 +406,7 @@ async function main() {
     screenshot: SCREENSHOT_PATH,
     remount,
     check,
+    boardCheck,
     cleanup,
     screenshotResult: screenshot,
   }, null, 2));

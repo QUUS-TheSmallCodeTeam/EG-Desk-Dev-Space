@@ -1740,7 +1740,7 @@ test('bounded visual hierarchy keeps Canvas chrome quiet and Browser and Chat co
   const dock = rule('#egd-dock');
   assert.match(dock, /height:\s*46px/);
   assert.match(dock, /border-radius:\s*10px/);
-  assert.match(rule('.egd-dock-btn'), /width:\s*32px;\s*height:\s*32px/);
+  assert.match(rule('.egd-dock-btn'), /width:\s*32px;\s*min-height:\s*32px/);
   const card = rule('.egd-canvas-card');
   assert.doesNotMatch(card, /gradient/);
   assert.match(rule('.egd-canvas-card.egd-entity-active::after'), /display:\s*none/);
@@ -1753,8 +1753,8 @@ test('bounded visual hierarchy keeps Canvas chrome quiet and Browser and Chat co
   assert.match(rule('.egd-codex-bubble'), /font-size:\s*14\.5px;\s*line-height:\s*1\.48/);
   assert.match(rule('.egd-codex-input'), /min-height:\s*40px/);
   const composerOverrides = [...css.matchAll(/^\.egd-codex-input \{([^}]+)\}/gm)];
-  assert.match(composerOverrides.at(-1)?.[1] || '', /max-height:\s*144px/,
-    'the approved final composer rule caps layout at 144px');
+  assert.match(composerOverrides.at(-1)?.[1] || '', /max-height:\s*9\.6em;[^}]*font-size:\s*15px;\s*line-height:\s*1\.6;/,
+    'the approved final composer rule caps layout at six 24px lines: 144px at 15px, growing with the font');
   assert.match(surfaceSource, /rows: '1'/);
   assert.match(surfaceSource, /input\.addEventListener\('compositionstart'/);
   assert.match(surfaceSource, /input\.addEventListener\('compositionend'/);
@@ -3557,6 +3557,9 @@ test('actual send path preserves draft B and new attachments typed during delaye
     'Browser tool selection from submitted draft A must be forwarded before attachments are cleared, not from later draft B');
   assert.equal(payload.selectedSources[0].browserToolSelection.threadId, payload.clientThreadId);
   assert.equal(payload.browserTransportId, 'ui-stream-1');
+  assert.equal(payload.engineId, 'codex', 'the first send ties the room to its resolved engine');
+  assert.equal(getThread(null).engineId, 'codex');
+  assert.equal(state.codex.recentEngineId, 'codex', 'and makes it the app-wide recent engine (D4)');
   assert.deepEqual(payload.executionPolicy, { mode: 'browserBounded' },
     'selected Browser sources use the ordinary per-run bounded policy');
   assert.ok(!['readOnlyQa', 'fixtureBrowserQa'].includes(payload.executionPolicy.mode),
@@ -5095,12 +5098,17 @@ test('production Settings card renders the reported account and drives Agent edi
   const emit = () => { for (const listener of listeners) listener(state.codex); };
   let confirmAnswer = false;
   const windowStub = { innerWidth: 1280, innerHeight: 800, confirm: () => confirmAnswer, setTimeout: () => 0 };
-  const spawn = compileFunction(`${spawnSource}\nreturn spawnSettingsCard;`, ['singletonSourceRef', 'focusOpenSourceCard', 'cardSeq', 'viewportToCanvasPoint', 'el', 'cardZ',
+  const placements = [];
+  const spawn = compileFunction(`${spawnSource}\nreturn spawnSettingsCard;`, ['singletonSourceRef', 'focusOpenSourceCard', 'cardSeq', 'resolveCanvasCardPlacement',
+    'revealPlacedCanvasCard', 'el', 'cardZ',
     'closeCanvasCard', 'state', 'ChatState', 'codexProfileAvatar', 'document', 'window', 'bindCardSourceRef', 'markAgendaDirty', 'setActiveEntity',
     'isCardFullscreen', 'focusCanvasCard', 'installCardHeaderFullscreenToggle', 'canvasZoom'])(
-    () => ({ kind: 'settings-card' }), () => null, 0, (x, y) => ({ x, y }), el, 0, () => {}, state, Chat, codexProfileAvatar, document, windowStub,
+    () => ({ kind: 'settings-card' }), () => null, 0, kind => { placements.push(kind); return { x: 10, y: 20, width: 600, height: 600, inView: true }; },
+    () => {}, el, 0, () => {}, state, Chat, codexProfileAvatar, document, windowStub,
     () => {}, () => {}, () => {}, () => false, () => {}, () => {}, () => 1);
   const card = spawn();
+  assert.deepEqual(placements, ['settings'], 'Settings opens through the shared placement policy');
+  assert.deepEqual([card.style.left, card.style.top, card.style.width, card.style.height], ['10px', '20px', '600px', '600px']);
   const text = () => card.textContent;
   assert.match(text(), /코덱스에 연결되지 않았습니다/);
   assert.match(text(), /준비 중 — 연결 방식 결정 대기/);
@@ -5642,7 +5650,7 @@ test('Board region and mark CSS use approved tokens: faint solid edge, 14px corn
   const far = rule('#egd-canvas-layer[data-egd-board-label="far"] .egd-board-region-head');
   assert.match(far, /bottom: 100%/);
   assert.match(far, /transform: scale\(var\(--egd-board-label-scale, 1\)\)/);
-  const tokens = surfaceCss.match(/^:root \{([\s\S]*?)\n\}/m)[1];
+  const tokens = surfaceCss.match(/^:root,\n\.egd-ontology-card \{([\s\S]*?)\n\}/m)[1];
   assert.match(tokens, /--egd-region-line: rgba\(102, 91, 69, \.21\);/, 'the approved region border');
   const block = (from, to) => surfaceCss.slice(surfaceCss.indexOf(from), surfaceCss.indexOf(to, surfaceCss.indexOf(from)));
   const regionBlock = block('.egd-board-region {', '.egd-board-missing {');
@@ -5848,4 +5856,671 @@ test('Chat and Desk CSS use approved tokens for the former blue-grey family, def
   assert.match(surfaceCss, /\.egd-codex-thread-filter-chip-active \{ background: var\(--egd-primary-container\); border-color: var\(--egd-primary\); color: var\(--egd-primary\); font-weight: 700; \}/);
   assert.ok(surfaceCss.indexOf('.egd-codex-thread-filter-chip-active {') > surfaceCss.indexOf('.egd-codex-thread-filter-chip { min-height: 28px;'),
     'the active chip follows the list-mode chip reset, so its tint is not reset to transparent');
+});
+
+// DSN-01: the approved style's light-dark pairs reach the production tokens;
+// the system scheme switches them, and only listed colours stay hard-coded.
+test('dark scheme maps every approved light-dark pair onto the --egd-* tokens', () => {
+  const approved = readFileSync(new URL('../docs/egdesk-approved-desktop-style.html', import.meta.url), 'utf8');
+  const pairs = new Map();
+  for (const [, name, light, dark] of approved.matchAll(/--eg-([a-z-]+):light-dark\((#[0-9a-f]{6}),(#[0-9a-f]{6})\)/g)) {
+    pairs.set(name, [light, dark]); // a later --eg-muted correction wins
+  }
+  const block = re => surfaceCss.match(re)?.[1] || '';
+  const light = block(/^:root,\n\.egd-ontology-card \{([\s\S]*?)\n\}/m);
+  const darkMedia = block(/^@media \(prefers-color-scheme: dark\) \{\n([\s\S]*?)\n\}/m);
+  const dark = block(/^@media \(prefers-color-scheme: dark\) \{\n  :root \{([\s\S]*?)\n  \}/m);
+  assert.ok(light && dark, 'one light token block and one dark :root block');
+  const tokens = body => new Map([...body.matchAll(/(--egd-[a-z0-9-]+): ([^;]+);/g)].map(([, name, value]) => [name, value.trim()]));
+  const lightTokens = tokens(light), darkTokens = tokens(dark);
+  const mapping = { surface: 'shell', 'surface-elevated': 'window', primary: 'accent', 'primary-container': 'selected', secondary: 'muted',
+    outline: 'line', 'outline-variant': 'line-soft', 'on-surface': 'ink', 'on-surface-variant': 'muted', wood: 'wood', 'wood-line': 'wood-line',
+    topbar: 'top', 'window-alt': 'window-alt', hover: 'hover', 'user-bubble': 'bubble', note: 'note' };
+  for (const [token, name] of Object.entries(mapping)) {
+    const [lightValue, darkValue] = pairs.get(name) || [];
+    assert.ok(lightValue, `approved --eg-${name} pair found`);
+    assert.equal(lightTokens.get(`--egd-${token}`)?.toLowerCase(), lightValue, `--egd-${token} light is --eg-${name}`);
+    assert.equal(darkTokens.get(`--egd-${token}`)?.toLowerCase(), darkValue, `--egd-${token} dark is --eg-${name}`);
+  }
+  // Rule-level pairs in the approved page: active edge, avatar, region line, desk veil.
+  for (const [token, lightValue, darkValue] of [['focus-border', '#A9B5A5', '#748673'], ['avatar-bg', '#DCE5DA', '#536552'],
+    ['region-line', 'rgba(102, 91, 69, .21)', 'rgba(204, 198, 180, .19)'], ['wood-veil', 'rgba(245, 243, 239, .68)', 'rgba(36, 42, 40, .82)']]) {
+    assert.deepEqual([lightTokens.get(`--egd-${token}`), darkTokens.get(`--egd-${token}`)], [lightValue, darkValue], token);
+  }
+  assert.match(approved, /light-dark\(#a9b5a5,#748673\)/);
+  assert.match(approved, /light-dark\(#f5f3efad,#242a28d0\)/);
+  // A literal light colour needs a dark value, unless it is an identity or a base mixed below.
+  const invariant = ['--egd-avatar-sage', '--egd-avatar-wood', '--egd-avatar-muted', '--egd-avatar-ink', '--egd-danger', '--egd-warning', '--egd-success'];
+  for (const [name, value] of lightTokens) {
+    if (!/^(#|rgba?\()/.test(value) && !/rgba\(/.test(value)) continue;
+    if (invariant.includes(name)) assert.equal(darkTokens.has(name), false, `${name} stays the same in both schemes`);
+    else assert.ok(darkTokens.has(name), `${name} has a dark value`);
+  }
+  for (const name of ['--egd-danger-ink', '--egd-warning-ink', '--egd-success-ink']) {
+    assert.match(darkTokens.get(name), /^color-mix\(in srgb, var\(--egd-(danger|warning|success)\) 40%, var\(--egd-on-surface\)\)$/, `${name} lifts toward the dark ink`);
+  }
+  assert.ok(surfaceCss.indexOf('@media (prefers-color-scheme: dark) {') < surfaceCss.indexOf('.egd-ui-icon {'), 'the dark tokens follow the light block');
+  assert.match(darkMedia, /:where\(\.egd-edge, \.egd-canvas-card:not\(\.egd-browser-card, \.egd-terminal-card, \.egd-ontology-card\),[\s\S]*?\) \{\n    color-scheme: dark;\n    color: var\(--egd-on-surface\);/,
+    'native controls follow the scheme; Browser page, Terminal and Ontology are not repainted');
+  assert.doesNotMatch(dark, /ontology|terminal/);
+  const terminal = surfaceCss.slice(surfaceCss.indexOf('/* ============ Terminal Card'), surfaceCss.indexOf('/* ============ Ontology Map Card'));
+  assert.ok(terminal.includes('#151923') && terminal.includes('#27313A'), 'the Terminal keeps its dark palette');
+  assert.match(surfaceSource, /browserEl\.style\.background = 'var\(--egd-surface\)';/);
+  assert.match(surfaceSource, /xulBrowser\.style\.cssText = 'width:100%; height:100%; background:#fff; display:block;';/, 'site content is not repainted');
+});
+
+test('hard-coded light and white colours outside the tokens are down to a short listed set', () => {
+  // Top-level chunks outside the token blocks and the Terminal and Ontology rules.
+  const declarations = [];
+  for (const chunk of surfaceCss.replace(/\/\*[\s\S]*?\*\//g, '').split(/\n(?=[^\s])/)) {
+    const head = chunk.split('{')[0].trim();
+    if (/^(:root,|@media \(prefers-color-scheme: dark\))/.test(head) || /ontology|terminal/.test(head)) continue;
+    for (const [, property, value] of chunk.matchAll(/([a-z-]+)\s*:\s*([^;{}]+)/g)) {
+      for (const [literal] of value.matchAll(/#[0-9a-f]{3,8}\b|rgba?\([^)]*\)/gi)) declarations.push({ head, property, literal });
+    }
+  }
+  const channels = literal => {
+    if (literal.startsWith('#')) {
+      let hex = literal.slice(1);
+      if (hex.length <= 4) hex = [...hex].map(c => c + c).join('');
+      return [0, 2, 4].map(i => parseInt(hex.slice(i, i + 2), 16)).concat(hex.length === 8 ? parseInt(hex.slice(6), 16) / 255 : 1);
+    }
+    const parts = literal.match(/\(([^)]*)\)/)[1].split(',').map(Number);
+    return parts.length === 3 ? [...parts, 1] : parts;
+  };
+  assert.ok(declarations.length > 20, 'colour declarations found');
+  const light = declarations.filter(({ literal }) => {
+    const [r, g, b, a] = channels(literal);
+    return a > .02 && Math.min(r, g, b) >= 200;
+  }).map(({ head, property, literal }) => `${head} ${property}: ${literal}`);
+  assert.deepEqual(light, [
+    '.egd-rail-search-type-card background: #E0F0EC',
+    '.egd-rail-search-type-file background: #E8ECE6',
+    '.egd-rail-search-type-history background: #E7EDF8',
+    '.egd-rail-search-type-thread background: #EFE8DC',
+    '.egd-rail-search-type-web background: #E8E6F4',
+    '.egd-codex-thread-avatar color: #fff',
+  ], 'only result-kind washes (repainted in dark below) and white initials on fixed avatar colours remain');
+  assert.match(surfaceCss, /@media \(prefers-color-scheme: dark\) \{\n  \.egd-rail-search-type:is\(\.egd-rail-search-type-card, [^)]*\) \{\n    background: color-mix\(in srgb, var\(--egd-type-ink\) 30%, var\(--egd-surface-elevated\)\);/);
+  // Near-black literals are shadows, the close-guard scrim or the invisible resize hit area.
+  const black = declarations.filter(({ literal }) => Math.max(...channels(literal).slice(0, 3)) <= 60);
+  assert.ok(black.length > 5);
+  for (const { head, property, literal } of black) {
+    const alpha = channels(literal)[3];
+    assert.ok(/shadow|filter/.test(property) || (property === 'background' && alpha <= .3), `${head} ${property}: ${literal}`);
+  }
+  assert.doesNotMatch(surfaceCss, /var\(--egd-[a-z-]+, (#|rgba?\()/i, 'no colour fallbacks behind defined tokens');
+  assert.doesNotMatch(surfaceCss, /--egd-text\b/, 'the undefined text token is gone');
+});
+
+// DSN-04: rows and buttons grow with a larger font; state is not colour alone.
+test('main rows and buttons keep a minimum height instead of a fixed one, and the composer follows the font', () => {
+  const rules = selector => [...surfaceCss.matchAll(new RegExp(`^${selector.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')} \\{([^}]+)\\}`, 'gm'))].map(match => match[1]);
+  for (const [selector, px] of [['#egd-dock', 46], ['.egd-dock-btn', 32], ['.egd-chat-card-header', 32], ['.egd-desk-window-titlebar', 32],
+    ['.egd-desk-window-toolbar', 32], ['.egd-card-toolbar', 34], ['.egd-rail-search', 30], ['.egd-rail-search-type', 22],
+    ['.egd-agenda-switch-search', 32], ['.egd-agenda-switch-filter', 26], ['.egd-agenda-close-btn', 34], ['.egd-codex-thread-home-new', 26],
+    ['.egd-codex-thread-search', 32], ['#egd-zoom-indicator', 35], ['button.egd-codex-engine-chip', 26], ['button.egd-codex-engine-effort', 28]]) {
+    const bodies = rules(selector);
+    assert.ok(bodies.length, `${selector} found`);
+    assert.match(bodies[0], new RegExp(`min-height: ${px}px;`), `${selector} keeps ${px}px as a floor`);
+    for (const body of bodies) assert.doesNotMatch(body, /(^|[\s;])height: \d+px/, `${selector} has no fixed px height`);
+  }
+  assert.match(rules('.egd-desk-window-titlebar')[0], /height: auto;/, 'overrides the 20px card topband height');
+  assert.match(rules('.egd-desk-window-identity')[0], /align-self: stretch;/);
+  assert.doesNotMatch(rules('.egd-desk-window-identity')[0], /height: 100%/);
+  assert.match(surfaceCss, /\.egd-chat-card-header,\n\.egd-chat-card\.egd-entity-active \.egd-chat-card-header \{\n  min-height: 32px;/);
+  const narrow = surfaceCss.match(/@media \(max-width: 700px\) \{([\s\S]*?)\n\}/)?.[1] || '';
+  assert.match(narrow, /\.egd-dock-btn \{ width: 29px; min-height: 30px; flex: none; \}/);
+  const composer = rules('.egd-codex-input');
+  for (const body of composer) assert.doesNotMatch(body, /line-height: \d+px/, 'composer line height is relative');
+  assert.match(composer.at(-1), /max-height: 9\.6em;[^}]*font-size: 15px; line-height: 1\.6;/, '6 × 24px = 144px at 15px');
+  // Browser rows keep their own scale-aware heights.
+  assert.match(surfaceCss, /\.egd-browser-card \.egd-desk-window-titlebar \{\n  height: 29px;/);
+});
+
+test('the chosen Dock tool, open room, Settings tab and File rail item are marked beyond tint', () => {
+  const rule = selector => surfaceCss.match(new RegExp(`^${selector.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')} \\{([^}]+)\\}`, 'm'))?.[1] || '';
+  assert.match(rule('.egd-dock-btn-active'), /box-shadow: inset 0 -2px 0 var\(--egd-primary\);/);
+  assert.match(rule('.egd-codex-thread-item-active'), /border-color: var\(--egd-focus-border\);/);
+  assert.match(rule('.egd-settings-tab-active'), /font-weight: 700;/);
+  assert.match(rule('.egd-bag-chip-active'), /font-weight: 650;/);
+  assert.match(surfaceSource, /'aria-pressed': kind === 'center' \? String\(state\.activeTool === item\.id\) : null,/);
+  assert.match(surfaceSource, /b\.classList\.toggle\('egd-dock-btn-active', b\.dataset\.id === item\.id\);\n\s*b\.setAttribute\('aria-pressed', String\(b\.dataset\.id === item\.id\)\);/);
+  assert.match(surfaceSource, /'aria-current': activeThread && thread\.id === activeThread\.id \? 'true' : null,/);
+  // Status dots already sit next to their words; the avatar ink stays readable on the fixed sage.
+  assert.match(surfaceSource, /egd-codex-subagent-dot egd-codex-subagent-dot-\$\{display\.status\}`, 'aria-hidden': 'true' \}\),\n\s*el\('span', \{ class: 'egd-codex-subagent-name' \}/);
+  assert.match(rule('.egd-profile-avatar-tone-1'), /color: var\(--egd-avatar-ink\);/);
+});
+
+// ============ CNV-02 card placement and UX-02 minimap Boards ============
+test('View sizes follow the type table, shrink to the visible room and never pass the minimum', () => {
+  assert.deepEqual(Surface.canvasViewSize('browser'), { width: 960, height: 640, minWidth: 320, minHeight: 240 });
+  assert.deepEqual(Surface.canvasViewSize('file'), { width: 720, height: 640, minWidth: 320, minHeight: 240 });
+  assert.deepEqual(Surface.canvasViewSize('chat'), { width: 420, height: 600, minWidth: 320, minHeight: 420 });
+  assert.deepEqual(Surface.canvasViewSize('terminal'), { width: 800, height: 400, minWidth: 320, minHeight: 240 });
+  assert.deepEqual(Surface.canvasViewSize('browser', { width: 700.6, height: 500 }), { width: 700, height: 500, minWidth: 320, minHeight: 240 },
+    'a smaller view shrinks only the new View');
+  assert.deepEqual(Surface.canvasViewSize('chat', { width: 200, height: 300 }), { width: 320, height: 420, minWidth: 320, minHeight: 420 },
+    'Chat never opens below 320×420');
+  assert.deepEqual(Surface.canvasViewSize('browser', { width: NaN, height: 0 }), { width: 960, height: 640, minWidth: 320, minHeight: 240 });
+  for (const kind of ['memo', 'constructor', undefined]) {
+    assert.deepEqual(Surface.canvasViewSize(kind), { width: 640, height: 480, minWidth: 320, minHeight: 240 }, `other type ${kind}`);
+  }
+  assert.ok(Object.isFrozen(Surface.CANVAS_VIEW_SIZES) && Object.isFrozen(Surface.CANVAS_VIEW_SIZES.browser));
+});
+
+test('the empty-spot search keeps 24px from every View and stays inside the bounds it is given', () => {
+  const card = { x: 0, y: 0, width: 200, height: 100 };
+  assert.deepEqual(Surface.nearestFreeCanvasSpot({ width: 100, height: 50, target: { x: 100.4, y: 50 } }), { x: 100, y: 50 });
+  assert.deepEqual(Surface.nearestFreeCanvasSpot({ width: 100, height: 50, target: { x: 50, y: 20 }, occupied: [card] }), { x: 50, y: -74 },
+    'just above the card, its bottom 24px from the card top');
+  assert.deepEqual(Surface.nearestFreeCanvasSpot({ width: 100, height: 50, target: { x: 50, y: 20 }, occupied: [card],
+    bounds: { left: 0, top: 0, right: 1000, bottom: 600 } }), { x: 50, y: 124 }, 'inside the bounds the closest spot is below');
+  assert.equal(Surface.nearestFreeCanvasSpot({ width: 100, height: 50, target: { x: 50, y: 20 }, occupied: [card],
+    bounds: { left: 0, top: 0, right: 220, bottom: 120 } }), null, 'no room inside the bounds');
+  assert.deepEqual(Surface.nearestFreeCanvasSpot({ width: 500, height: 50, target: { x: -50, y: 100 },
+    bounds: { left: 10.4, top: 0, right: 310, bottom: 600 } }), { x: 11, y: 100 }, 'wider than the bounds: its left edge stays in');
+  assert.deepEqual(Surface.nearestFreeCanvasSpot({ width: 100, height: 50, target: { x: 5, y: 6 },
+    occupied: [null, { x: NaN, y: 0, width: 10, height: 10 }, { x: 0, y: 0, width: 0, height: 10 }] }), { x: 5, y: 6 });
+  assert.equal(Surface.nearestFreeCanvasSpot({ width: 0, height: 10, target: { x: 0, y: 0 } }), null);
+  assert.equal(Surface.nearestFreeCanvasSpot({ width: 10, height: 10 }), null);
+});
+
+test('a new View opens in an empty spot of the view, or beside it with the camera to follow', () => {
+  const safe = { left: 0, top: 0, right: 1200, bottom: 700 };
+  const size = { width: 420, height: 600 };
+  assert.deepEqual(Surface.placeCanvasView({ size, safe }), { x: 390, y: 50, width: 420, height: 600, inView: true }, 'centred in an empty view');
+  assert.deepEqual(Surface.placeCanvasView({ size, safe, occupied: [{ x: 0, y: 0, width: 600, height: 700 }] }),
+    { x: 624, y: 50, width: 420, height: 600, inView: true }, 'beside the open View, 24px apart, still in view');
+  assert.deepEqual(Surface.placeCanvasView({ size, safe, occupied: [{ x: 300, y: 0, width: 600, height: 700 }] }),
+    { x: -144, y: 50, width: 420, height: 600, inView: false }, 'no room in view: the closest empty Canvas spot, existing View untouched');
+  assert.deepEqual(Surface.placeCanvasView({ size, safe, anchor: { x: 1000, y: 350 } }), { x: 780, y: 50, width: 420, height: 600, inView: true },
+    'an anchor near the edge keeps the View inside the view');
+  assert.deepEqual(Surface.placeCanvasView({ size: { width: 1500, height: 900 }, safe }), { x: 0, y: 0, width: 1500, height: 900, inView: false },
+    'larger than the view: its top-left bar is on screen');
+  const region = { x: 76, y: 140, width: 648, height: 344 };
+  assert.deepEqual(Surface.placeCanvasView({ size: region, safe: { left: 0, top: 0, right: 1600, bottom: 900 }, occupied: [{ x: 0, y: 0, width: 700, height: 900 }] }),
+    { x: 724, y: 278, width: 648, height: 344, inView: true }, 'a reopened Board region keeps 24px from the open View');
+  assert.equal(Surface.placeCanvasView({ size: { width: 0, height: 10 }, safe }), null);
+  assert.equal(Surface.placeCanvasView({ size, safe: { left: 0, top: 0, right: NaN, bottom: 10 } }), null);
+});
+
+test('revealing a placed View moves the camera only as far as needed', () => {
+  const safe = { left: 0, top: 0, right: 1000, bottom: 800 };
+  const camera = { pan: { x: 0, y: 0 }, zoom: 1 };
+  assert.deepEqual(Surface.revealRectPan({ x: 100, y: 100, width: 200, height: 100 }, safe, camera), { x: 0, y: 0 }, 'already in view');
+  assert.deepEqual(Surface.revealRectPan({ x: 1100, y: 100, width: 200, height: 100 }, safe, camera), { x: -300, y: 0 });
+  assert.deepEqual(Surface.revealRectPan({ x: -500, y: 900, width: 200, height: 100 }, safe, camera), { x: 500, y: -200 });
+  assert.deepEqual(Surface.revealRectPan({ x: 200, y: 50, width: 2000, height: 100 }, safe, camera), { x: -200, y: 0 }, 'too wide: left edge aligned');
+  assert.deepEqual(Surface.revealRectPan({ x: 2000, y: 0, width: 400, height: 200 }, safe, { pan: { x: 100, y: 0 }, zoom: 0.5 }), { x: -200, y: 0 });
+  assert.deepEqual(Surface.revealRectPan({ x: NaN, y: 0, width: 1, height: 1 }, safe, camera), { x: 0, y: 0 });
+  assert.equal(Surface.revealRectPan({ x: 0, y: 0, width: 1, height: 1 }, safe, {}), null);
+});
+
+test('every new View opens through the shared placement policy; a reopened Board too', () => {
+  for (const [name, kind] of [['spawnCodexChatCard', 'chat'], ['spawnOntologyMapCard', 'ontology'], ['spawnFileCard', 'file'],
+    ['spawnSettingsCard', 'settings'], ['spawnBrowserCard', 'browser'], ['spawnTerminalCard', 'terminal'], ['spawnInputEvidence', 'input-evidence']]) {
+    const body = declaration(name);
+    assert.ok(body, `${name} remains readable`);
+    assert.ok(body.includes(`resolveCanvasCardPlacement('${kind}'`), `${name} places a ${kind} View`);
+    assert.ok(body.includes('revealPlacedCanvasCard('), `${name} lets the camera follow a View placed outside the view`);
+  }
+  for (const gone of ["left: '180px', top: '140px'", 'const offset = ((cardSeq - 1) % 6) * 24;', '+ 64 - sourceMinX', 'function clampClientCardRect(']) {
+    assert.equal(surfaceSource.includes(gone), false, `former fixed placement gone: ${gone}`);
+  }
+  const reopen = declaration('openBoardSnapshot');
+  assert.match(reopen, /SurfaceState\.placeCanvasView\(\{ size: saved, safe: safeViewportWorldRect\(\), occupied, gap: 24 \}\)/);
+  assert.match(reopen, /querySelectorAll\('\.egd-canvas-card, \.egd-canvas-shape, \.egd-board-region'\)/);
+  assert.match(reopen, /SurfaceState\.revealRectPan\(persistentEntityGeometry\(region\), safeViewportRect\(\)/);
+});
+
+test('production placement reads the visible safe area in world px and avoids Views and Board regions', () => {
+  const make = compileFunction(`${declaration('safeViewportWorldRect')}\n${declaration('resolveCanvasCardPlacement')}\nreturn resolveCanvasCardPlacement;`,
+    ['state', 'document', 'safeViewportRect', 'viewportToCanvasPoint', 'persistentEntityGeometry', 'SurfaceState']);
+  const state = { zoomTarget: 0.5, zoom: 0.5, panTarget: { x: 100, y: 50 } };
+  let nodes = [];
+  const selectors = [];
+  const document = { querySelectorAll: selector => { selectors.push(selector); return nodes; } };
+  const place = make(state, document, () => ({ left: 24, top: 76, right: 1256, bottom: 700, width: 1232, height: 624 }),
+    (x, y) => ({ x: (x - state.panTarget.x) / state.zoomTarget, y: (y - state.panTarget.y) / state.zoomTarget }), node => node.geometry, Surface);
+  assert.deepEqual(place('browser'), { x: 600, y: 356, width: 960, height: 640, inView: true });
+  assert.deepEqual(selectors, ['.egd-canvas-card, .egd-canvas-shape, .egd-board-region']);
+  nodes = [{ geometry: { x: 500, y: 300, width: 400, height: 300 } }];
+  assert.deepEqual(place('browser'), { x: 600, y: 624, width: 960, height: 640, inView: true }, 'below the open View, 24px apart');
+  Object.assign(state, { zoomTarget: 2, zoom: 2, panTarget: { x: 0, y: 0 } });
+  nodes = [];
+  assert.deepEqual(place('browser'), { x: 12, y: 38, width: 616, height: 312, inView: true }, 'zoomed in: the new View fits the view');
+});
+
+test('the camera follows a View placed outside the view unless a restore or another camera move came first', () => {
+  const reveal = compileFunction(`${declaration('revealPlacedCanvasCard')}\nreturn revealPlacedCanvasCard;`,
+    ['state', 'window', 'persistentEntityGeometry', 'safeViewportRect', 'SurfaceState']);
+  const timers = [];
+  const pans = [];
+  const state = { panTarget: { x: 0, y: 0 }, zoomTarget: 1, agenda: { restoreInProgress: false }, surface: { restoring: false },
+    setCanvasPanTarget: pan => pans.push(pan) };
+  const follow = reveal(state, { setTimeout: fn => timers.push(fn) }, card => card.geometry, () => ({ left: 0, top: 0, right: 1000, bottom: 800 }), Surface);
+  const card = { isConnected: true, geometry: { x: 1300, y: 100, width: 400, height: 300 } };
+  follow(card, { x: 1300, y: 100, inView: true });
+  assert.equal(timers.length, 0, 'a View placed in view needs no camera move');
+  follow(card, { x: 1300, y: 100, inView: false });
+  timers.shift()();
+  assert.deepEqual(pans, [{ x: -700, y: 0 }]);
+  follow(card, { x: 1300, y: 100, inView: false });
+  card.geometry = { x: 40, y: 80, width: 400, height: 300 };
+  timers.shift()();
+  assert.equal(pans.length, 1, 'a restore wrote the saved rect');
+  card.geometry = { x: 1300, y: 100, width: 400, height: 300 };
+  follow(card, { x: 1300, y: 100, inView: false });
+  state.panTarget = { x: -20, y: 0 };
+  timers.shift()();
+  assert.equal(pans.length, 1, 'a Board focus or Briefing fit moved the camera first');
+  state.panTarget = { x: 0, y: 0 };
+  state.agenda.restoreInProgress = true;
+  follow(card, { x: 1300, y: 100, inView: false });
+  timers.shift()();
+  assert.equal(pans.length, 1, 'never during Desk restore');
+});
+
+test('a new Chat opens wholly inside the visible area, clear of the Dock, even when large Views fill the view', () => {
+  // Real safe-area, placement and reveal code over a 1440x900 window: rail on top, Dock at the bottom, HUD closed.
+  const build = (edit = source => source) => compileFunction(edit([declaration('viewportToCanvasPoint'), declaration('safeViewportRect'),
+    declaration('safeViewportWorldRect'), declaration('resolveCanvasCardPlacement'),
+    'return { safeViewportRect, resolveCanvasCardPlacement };'].join('\n')), ['state', 'window', 'document', 'persistentEntityGeometry', 'SurfaceState']);
+  const rects = { 'egd-desk-rail': { top: 0, bottom: 52, left: 0, right: 1440, width: 1440, height: 52 },
+    'egd-dock': { top: 842, bottom: 888, left: 364, right: 1076, width: 712, height: 46 } };
+  const hud = { classList: { contains: name => name === 'egd-hud-hidden' }, getBoundingClientRect: () => ({ left: 1450 }) };
+  const zoom = 0.9636363636363636;
+  const first = { x: 0, y: 0, width: 1280, height: 810 };
+  const artifact = { x: 1304, y: -517, width: 960, height: 640 };
+  const west = { x: -1304, y: 0, width: 1280, height: 810 };
+  const cases = [
+    ['an empty Desk', [], { x: 0, y: 0 }],
+    ['the first-use Browser fills the view', [first], { x: 0, y: 0 }],
+    ['the camera sits on an artifact Browser beside the Chat spot', [first, artifact], { x: -765.67, y: 574.2 }],
+    ['three large Views around the camera', [first, artifact, west], { x: 0, y: 0 }],
+  ];
+  const client = (rect, pan) => ({ left: rect.x * zoom + pan.x, top: rect.y * zoom + pan.y,
+    right: (rect.x + rect.width) * zoom + pan.x, bottom: (rect.y + rect.height) * zoom + pan.y });
+  const clear = (a, b, gap) => a.x + a.width + gap <= b.x || b.x + b.width + gap <= a.x || a.y + a.height + gap <= b.y || b.y + b.height + gap <= a.y;
+  // What a user would see wrong, per case: empty for production code.
+  const violations = edit => cases.flatMap(([label, views, pan]) => {
+    const state = { zoomTarget: zoom, zoom, panTarget: { ...pan } };
+    const nodes = views.map(geometry => ({ geometry }));
+    const document = { getElementById: id => id === 'egd-hud' ? hud : rects[id] ? { getBoundingClientRect: () => rects[id] } : null, querySelectorAll: () => nodes };
+    const api = build(edit)(state, { innerWidth: 1440, innerHeight: 900 }, document, node => node.geometry, Surface);
+    const safe = api.safeViewportRect();
+    const placement = api.resolveCanvasCardPlacement('chat', { anchorClientX: 922, anchorClientY: 477, avoidHud: true });
+    const found = [];
+    if (safe.bottom !== 842 - 24) found.push(`${label}: the Dock does not bound the visible area (bottom ${safe.bottom})`);
+    if (safe.top !== 52 + 24) found.push(`${label}: the rail does not bound the visible area (top ${safe.top})`);
+    if (!placement) return [...found, `${label}: no spot`];
+    for (const view of views) if (!clear(placement, view, 24)) found.push(`${label}: an existing View is touched`);
+    // Outside the view the camera follows with revealRectPan, which revealPlacedCanvasCard applies.
+    const camera = placement.inView ? pan : Surface.revealRectPan(placement, safe, { pan: state.panTarget, zoom });
+    const box = client(placement, camera);
+    const inside = box.left >= safe.left - 0.5 && box.top >= safe.top - 0.5 && box.right <= safe.right + 0.5 && box.bottom <= safe.bottom + 0.5;
+    if (!inside) found.push(`${label}: the Chat is not wholly inside the visible area${placement.inView ? ' although inView' : ' after the camera follows'}`);
+    if (!(box.bottom < 842)) found.push(`${label}: the Chat input sits behind the Dock`);
+    return found;
+  });
+  assert.deepEqual(violations(source => source), []);
+  // The guard sees a regression: leave the Dock out of the visible area and it reports it.
+  const withoutDock = violations(source => source.replace('bottom = Math.min(bottom, dockRect.top - margin)', 'void dockRect'));
+  assert.ok(withoutDock.some(line => /Dock does not bound/.test(line)), withoutDock.join('; '));
+});
+
+test('minimap Board regions map to the minimap frame with their names, active Board and pick order', () => {
+  const model = { bounds: { left: -100, top: -50 }, scale: 0.1, offsetX: 5, offsetY: 3 };
+  assert.deepEqual(Surface.minimapBox({ left: 100, top: 150, width: 640, height: 300 }, model), { left: 25, top: 23, width: 64, height: 30 });
+  assert.deepEqual(Surface.minimapBoardRegions({ model, activeId: 'a', regions: [
+    { id: 'a', title: '태화 리포트', rect: { left: 100, top: 150, width: 640, height: 300 } },
+    { id: 'b', title: '', rect: { left: -100, top: -50, width: 200, height: 60 } },
+    { id: 'bad', title: 'x', rect: { left: NaN, top: 0, width: 10, height: 10 } },
+    { title: 'no id', rect: { left: 0, top: 0, width: 10, height: 10 } },
+  ] }), [
+    { id: 'a', title: '태화 리포트', left: 25, top: 23, width: 64, height: 30, active: true, showLabel: true },
+    { id: 'b', title: 'Board', left: 5, top: 3, width: 20, height: 8, active: false, showLabel: false },
+  ]);
+  assert.deepEqual(Surface.minimapBoardRegions({ model: { bounds: model.bounds, scale: 0, offsetX: 0, offsetY: 0 }, regions: [{ id: 'a', rect: { left: 0, top: 0, width: 1, height: 1 } }] }), []);
+
+  const targets = [
+    { kind: 'board', id: 'a', box: { left: 25, top: 23, width: 64, height: 30 } },
+    { kind: 'view', id: 'member', projectionId: 'a', box: { left: 30, top: 30, width: 10, height: 10 } },
+    { kind: 'view', id: 'free', projectionId: null, box: { left: 40, top: 30, width: 10, height: 10 } },
+    { kind: 'view', id: 'v2', box: { left: 80, top: 40, width: 20, height: 20 } },
+    { kind: 'view', id: 'other-member', projectionId: 'b', box: { left: 120, top: 0, width: 12, height: 12 } },
+    { id: 'broken' },
+  ];
+  const ids = point => Surface.minimapTargetsAt(point, targets).map(target => target.id);
+  assert.deepEqual(ids({ x: 31, y: 31 }), ['a'], 'a View of this Board is picked through the Board: pressing the region goes to it');
+  assert.deepEqual(ids({ x: 42, y: 35 }), ['a', 'free'], 'a View that is not a member over the Board: both, Board first');
+  assert.deepEqual(ids({ x: 91, y: 50 }), ['a', 'v2'], '2px of slop at the Board edge');
+  assert.deepEqual(ids({ x: 92, y: 50 }), ['v2']);
+  assert.deepEqual(ids({ x: 125, y: 5 }), ['other-member'], 'a member whose Board is not under the press stays pickable');
+  assert.deepEqual(ids({ x: 0, y: 0 }), []);
+  assert.deepEqual(ids({ x: NaN, y: 0 }), []);
+  assert.equal(Surface.minimapStackTitle(3), '이 위치의 3개');
+  assert.equal(Surface.minimapStackTitle(undefined), '이 위치의 0개');
+
+  // The production minimap draws each Board region and lists Boards before Views, topmost View first.
+  const render = compileFunction(`${declaration('renderDeskMinimapWorld')}\nreturn renderDeskMinimapWorld;`,
+    ['minimapWorldModel', 'SurfaceState', 'state', 'buildMinimapEntityMarker', 'buildMinimapBoardRegion', 'el', 'worldRectToMinimapStyle',
+      'parsePxNumber', 'minimapEntityTitle']);
+  const children = [];
+  const map = { set textContent(value) { children.length = 0; }, appendChild: child => children.push(child) };
+  const rect = { left: 0, top: 0, width: 100, height: 100 };
+  const drawn = [];
+  render(() => ({ ...model, viewport: rect, regions: [{ id: 'egd-board-7', title: '주간 보고', rect: { left: 100, top: 150, width: 640, height: 300 } }],
+    entities: [{ entity: { id: 'low', style: { zIndex: '1' }, dataset: { projectionId: 'egd-board-7' } }, rect },
+      { entity: { id: 'high', style: { zIndex: '9' }, dataset: {} }, rect }] }),
+  Surface, { boards: { activeProjectionId: 'egd-board-7' } }, item => ({ marker: item.entity.id }),
+  board => { drawn.push(board); return { board: board.id }; }, (tag, props) => ({ viewport: props.class }), () => ({}),
+  (value, fallback = 0) => Number.parseFloat(value) || fallback, entity => `title ${entity.id}`)({ querySelector: () => map });
+  assert.deepEqual(drawn, [{ id: 'egd-board-7', title: '주간 보고', left: 25, top: 23, width: 64, height: 30, active: true, showLabel: true }]);
+  assert.deepEqual(children.map(child => child.board || child.marker || child.viewport), ['egd-board-7', 'low', 'high', 'egd-minimap-viewport'],
+    'regions sit under the View markers and the viewport box');
+  assert.deepEqual(map._egdeskMinimapTargets.map(target => `${target.kind}:${target.id}:${target.title}:${target.projectionId ?? '-'}`),
+    ['board:egd-board-7:주간 보고:-', 'view:high:title high:-', 'view:low:title low:egd-board-7'], 'Views carry the Board they belong to');
+});
+
+test('a still press on the minimap picks what is under it; a moving press pans', () => {
+  const install = compileFunction(`const MINIMAP_PICK_SLOP = 4;\n${declaration('installDeskMinimapPan')}\nreturn installDeskMinimapPan;`,
+    ['window', 'SurfaceState', 'minimapWorldModel', 'minimapPointToWorld', 'viewportWorldRect', 'moveCanvasViewportToWorld',
+      'refreshDeskMinimap', 'closeMinimapStack', 'openMinimapTargets']);
+  const listeners = {};
+  const windowListeners = {};
+  const moves = [];
+  const opened = [];
+  let closed = 0;
+  const map = {
+    addEventListener: (type, fn) => { listeners[type] = fn; }, getBoundingClientRect: () => ({ left: 100, top: 50 }),
+    classList: { add() {}, remove() {} },
+    _egdeskMinimapTargets: [{ kind: 'board', id: 'board-a', box: { left: 10, top: 10, width: 100, height: 60 } },
+      { kind: 'view', id: 'view-1', box: { left: 20, top: 20, width: 20, height: 20 } }],
+  };
+  install({ addEventListener: (type, fn) => { windowListeners[type] = fn; } }, Surface, () => ({}), () => ({ x: 0, y: 0 }),
+    () => ({ left: 0, top: 0, width: 100, height: 100 }), (left, top) => moves.push([left, top]), () => {}, () => { closed += 1; },
+    (panel, targets, point) => opened.push([targets.map(target => target.id), point]))({ querySelector: () => map });
+  const event = (x, y, target = {}) => ({ button: 0, clientX: x, clientY: y, preventDefault() {}, stopPropagation() {},
+    target: { closest: selector => (target.label && selector === '.egd-minimap-board-label' ? {} : null),
+      classList: { contains: name => name === 'egd-minimap-viewport' && !!target.viewport } } });
+
+  listeners.mousedown(event(125, 75));
+  windowListeners.mousemove(event(127, 76));
+  windowListeners.mouseup(event(127, 76));
+  assert.deepEqual(opened, [[['board-a', 'view-1'], { x: 25, y: 25 }]], 'a View over a Board it does not belong to offers both');
+  assert.equal(moves.length, 0, 'a still press does not pan');
+
+  listeners.mousedown(event(125, 75));
+  windowListeners.mousemove(event(140, 90));
+  windowListeners.mouseup(event(140, 90));
+  assert.equal(opened.length, 1, 'a moving press is a pan, not a pick');
+  assert.equal(moves.length, 1);
+
+  listeners.mousedown(event(300, 300));
+  windowListeners.mouseup(event(300, 300));
+  assert.equal(moves.length, 2, 'empty map moves the view there at once');
+  assert.equal(opened.length, 1);
+
+  listeners.mousedown(event(125, 75, { viewport: true }));
+  windowListeners.mouseup(event(125, 75));
+  assert.deepEqual(opened[1][0], ['board-a', 'view-1'], 'Boards under the current-view box stay pickable');
+
+  const before = closed;
+  listeners.mousedown(event(115, 65, { label: true }));
+  assert.equal(closed, before, 'a Board name handles its own click');
+  windowListeners.mouseup(event(115, 65));
+  assert.equal(opened.length, 2);
+});
+
+test('minimap picks go to the Board or View, and several targets open "이 위치의 N개"', () => {
+  const selected = [];
+  const viewports = [];
+  let refreshed = 0;
+  const region = { id: 'egd-board-7', geometry: { x: 1000, y: 500, width: 400, height: 300 } };
+  const focus = compileFunction(`${declaration('focusBoardFromMinimap')}\nreturn focusBoardFromMinimap;`,
+    ['document', 'state', 'closeMinimapStack', 'selectBoardProjection', 'SurfaceState', 'persistentEntityGeometry', 'safeViewportRect', 'refreshDeskMinimap'])(
+    { getElementById: id => (id === region.id ? region : null) },
+    { boards: { projections: { 'egd-board-7': { id: 'egd-board-7' } } }, setCanvasViewportTarget: camera => viewports.push(camera) },
+    () => {}, id => selected.push(id), Surface, node => node.geometry, () => ({ left: 24, top: 76, width: 1232, height: 624 }), () => { refreshed += 1; });
+  assert.equal(focus('egd-board-gone'), false);
+  assert.equal(focus('egd-board-7'), true);
+  assert.deepEqual(selected, ['egd-board-7'], 'the picked Board becomes the current Board');
+  assert.deepEqual(viewports, [{ zoom: 1, pan: { x: -560, y: -262 } }], 'its region is fitted into the safe area at no more than 100%');
+  assert.equal(refreshed, 1);
+
+  const document = settingsFakeDocument();
+  const createElement = document.createElement;
+  document.createElement = tag => Object.assign(createElement(tag), { offsetWidth: 180, contains: () => false });
+  const { el, clampNumber } = compileFunction(`${declaration('el')}\n${declaration('clampNumber')}\nreturn { el, clampNumber };`, ['document'])(document);
+  const went = [];
+  let stackClosed = 0;
+  const windowListeners = [];
+  const open = compileFunction(`${declaration('openMinimapTargets')}\nreturn openMinimapTargets;`,
+    ['closeMinimapStack', 'goToMinimapTarget', 'SurfaceState', 'el', 'document', 'window', 'clampNumber'])(
+    () => { stackClosed += 1; }, target => went.push(target.id), Surface, el, document,
+    { addEventListener: (type) => windowListeners.push(type), removeEventListener() {} }, clampNumber);
+  const panel = Object.assign(document.createElement('div'), { clientWidth: 300, querySelector: () => ({ offsetLeft: 9, offsetTop: 30 }) });
+  const board = { kind: 'board', id: 'egd-board-7', title: '주간 보고' };
+  const view = { kind: 'view', id: 'egd-browser-card-3', title: 'Browser' };
+  assert.equal(open(panel, [view], { x: 40, y: 25 }), null);
+  assert.deepEqual(went, ['egd-browser-card-3'], 'one target goes straight there');
+  assert.equal(open(panel, [], { x: 0, y: 0 }), null);
+  const stack = open(panel, [board, view], { x: 40, y: 25 });
+  assert.equal(stack.getAttribute('aria-label'), '이 위치의 2개');
+  assert.equal(stack.dataset.testid, 'minimap-stack');
+  assert.match(stack.textContent, /^이 위치의 2개주간 보고BoardBrowser$/);
+  assert.deepEqual([stack.style.left, stack.style.top], ['37px', '63px'], 'beside the press, inside the panel');
+  assert.deepEqual(windowListeners, ['mousedown'], 'a press elsewhere closes the list');
+  const rows = settingsNodes(stack, node => node.tagName === 'BUTTON');
+  assert.deepEqual(rows.map(row => [row.dataset.kind, row.dataset.targetId]), [['board', 'egd-board-7'], ['view', 'egd-browser-card-3']]);
+  assert.equal(document.activeElement, rows[0], 'the first row takes focus');
+  stack.fire('keydown', { key: 'ArrowDown' });
+  assert.equal(document.activeElement, rows[1]);
+  rows[1].fire('click');
+  assert.deepEqual(went, ['egd-browser-card-3', 'egd-browser-card-3']);
+  const closedBefore = stackClosed;
+  stack.fire('keydown', { key: 'Escape' });
+  assert.equal(stackClosed, closedBefore + 1, 'Esc closes only the list');
+
+  const rule = selector => surfaceCss.match(new RegExp(`^${selector.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')} \\{([^}]+)\\}`, 'm'))?.[1] || '';
+  assert.match(rule('.egd-minimap-board'), /border: 1px solid var\(--egd-region-line\);[\s\S]*background: var\(--egd-region-fill\);/);
+  assert.match(rule('.egd-minimap-board[data-active="true"]'), /border-color: var\(--egd-primary\);/);
+  assert.match(rule('.egd-minimap-stack'), /background: var\(--egd-surface-elevated\);[\s\S]*box-shadow: var\(--egd-shadow\);/);
+  for (const selector of ['.egd-minimap-board', '.egd-minimap-board-label', '.egd-minimap-stack', '.egd-minimap-stack-title', '.egd-minimap-row-kind']) {
+    assert.doesNotMatch(rule(selector), /#[0-9a-f]{3,8}\b|rgba?\(/i, `${selector} uses approved tokens only`);
+  }
+  assert.equal(surfaceCss.includes('.egd-minimap-agenda'), false, 'the single whole-Desk box is gone');
+});
+
+// AI engine selection (SUB-07, engine layer stage 7). Rows follow the bridge's
+// /v1/state engines[] (helper/engine-registry.mjs publicEngineRow).
+const engineRowsFixture = [
+  { id: 'codex', label: 'Codex', status: 'ready', version: '0.162.1', isDefault: true,
+    capabilities: ['stream', 'modelSelect.perTurn', 'effortSelect.perTurn'], profiles: [] },
+  { id: 'claude', label: 'Claude', status: 'decisionPending', statusReason: 'SUB-12', version: '2.1.300', capabilities: [], profiles: [] },
+];
+const signedInPro = { isLoggedIn: true, planType: 'pro' };
+
+test('chat events are admitted for known engines only; Codex keeps working with or without engineId', () => {
+  assert.deepEqual(Chat.knownChatEngineIds(null), ['codex'], 'an older bridge lists no engines: Codex alone');
+  assert.deepEqual(Chat.knownChatEngineIds(engineRowsFixture), ['codex', 'claude']);
+  assert.deepEqual(Chat.knownChatEngineIds([{ id: 'claude' }, { id: 'Bad Id' }, null]), ['codex', 'claude'], 'Codex is always known');
+  assert.equal(Chat.chatEventEngineId({ provider: 'codex' }), 'codex');
+  assert.equal(Chat.chatEventEngineId({ provider: 'codex', engineId: 'claude' }), 'claude');
+  assert.equal(Chat.chatEventEngineId({ provider: 'codex', engineId: null }), null, 'an invalid engineId is not read as the provider');
+
+  const state = Chat.createChatProtocolState();
+  Chat.registerChatRequest(state, { requestId: 'request-a', clientThreadId: 'ui-a' });
+  assert.equal(Chat.reduceChatEvent(state, envelope('run.started', 1)).status, 'running', 'provider-only Codex envelope');
+  assert.ok(Chat.reduceChatEvent(state, { ...envelope('message.delta', 2, { messageId: 'm', delta: 'a' }), engineId: 'codex' }));
+  assert.equal(Chat.reduceChatEvent(state, { ...envelope('message.delta', 3, { messageId: 'm', delta: 'x' }), engineId: 'gemini' }), null);
+  assert.equal(Chat.reduceChatEvent(state, { ...envelope('message.delta', 4, { messageId: 'm', delta: 'y' }), provider: 'other' }), null);
+  assert.equal(Chat.reduceChatEvent(state, { ...envelope('message.delta', 5, { messageId: 'm', delta: 'z' }), engineId: 'claude' }), null,
+    'Claude is ignored until the bridge lists it');
+  const listed = Chat.reduceChatEvent(state, { ...envelope('message.delta', 6, { messageId: 'm', delta: 'b' }), engineId: 'claude' },
+    Chat.knownChatEngineIds(engineRowsFixture));
+  assert.equal(listed.messages.find(message => message.id === 'm').content, 'ab', 'ignored events changed nothing');
+  assert.match(surfaceSource, /ChatState\.reduceChatEvent\(protocol, event, ChatState\.knownChatEngineIds\(state\.codex\.engines\)\)/);
+});
+
+test('engine choices: Codex is usable with its plan, Claude is listed but waits for its connection decision', () => {
+  const choices = Chat.chatEngineChoices(engineRowsFixture, signedInPro);
+  assert.deepEqual(choices.map(({ id, label, selectable, account, note }) => ({ id, label, selectable, account, note })), [
+    { id: 'codex', label: 'Codex', selectable: true, account: 'ChatGPT Pro', note: '사용 가능' },
+    { id: 'claude', label: 'Claude', selectable: false, account: null, note: '설치됨 2.1.300 · 연결 방식 결정 대기' },
+  ]);
+  assert.deepEqual(Chat.chatEngineChoices(null, { isLoggedIn: false }).map(({ id, selectable, account, note }) => ({ id, selectable, account, note })),
+    [{ id: 'codex', selectable: true, account: null, note: '로그인 필요' }], 'an older bridge shows Codex alone');
+  assert.equal(Chat.chatEngineChoices([{ id: 'claude', label: 'Claude', status: 'notInstalled', version: '2.1.300' }])[1].note, '설치 안 됨');
+  assert.equal(Chat.chatEngineChoices([{ id: 'claude', label: 'Claude', status: 'ready' }])[1].selectable, true, 'a connected engine becomes choosable');
+  assert.equal(Chat.chatEngineChoices([{ id: 'claude', status: 'mystery' }])[1].note, '연결 끊김', 'an unknown status is not shown raw');
+  for (const choice of choices) assert.doesNotMatch(`${choice.label} ${choice.note}`, /decisionPending|SUB-12|ready/);
+  assert.deepEqual(Chat.chatEffortChoices(choices[0]).map(choice => [choice.value, choice.label]),
+    [[null, '기본'], ['low', '낮음'], ['medium', '보통'], ['high', '높음']]);
+  assert.deepEqual(Chat.chatEffortChoices(choices[1]), [], 'no effort picker for an engine without per-turn effort');
+  assert.deepEqual(Chat.chatEffortChoices(Chat.chatEngineChoices(null)[0]), [], 'nor before the bridge reports capabilities');
+  for (const value of ['low', 'medium', 'high']) assert.equal(Chat.chatEffortValue(value), value);
+  for (const value of [null, '', 'xhigh', 'ultra', 'HIGH', 3]) assert.equal(Chat.chatEffortValue(value), null);
+  assert.equal(Chat.chatModelLabel(null), '기본 모델', 'no model catalog is invented');
+  assert.equal(Chat.chatModelLabel({ status: 'verified', effectiveModel: 'gpt-5.5' }), '기본 모델 · gpt-5.5');
+});
+
+test('a started room keeps its engine; a new room follows its pick, then the app-wide recent engine', () => {
+  const fresh = { id: 'new', messages: [] };
+  assert.equal(Chat.chatThreadEngineLocked(fresh), false);
+  for (const started of [{ messages: [{ id: 'm' }] }, { conversationId: 'c', messages: [] }, { retainedNativeBinding: { conversationId: 'c' }, messages: [] }]) {
+    assert.equal(Chat.chatThreadEngineLocked(started), true);
+    assert.equal(Chat.chatThreadEngineId(started, { recentEngineId: 'claude', engines: [{ id: 'claude', status: 'ready' }] }), 'codex',
+      'an older room is Codex, whatever the recent engine');
+  }
+  assert.equal(Chat.chatThreadEngineId({ engineId: 'claude', messages: [{ id: 'm' }] }, { engines: engineRowsFixture }), 'claude',
+    'a locked room is never silently switched, even when its engine is unavailable');
+  assert.equal(Chat.chatThreadEngineId(fresh, { engines: engineRowsFixture }), 'codex');
+  assert.equal(Chat.chatThreadEngineId(fresh, { recentEngineId: 'claude', engines: engineRowsFixture }), 'codex', 'an engine waiting for its decision is not a default');
+  const connected = [{ id: 'codex' }, { id: 'claude', status: 'ready' }];
+  assert.equal(Chat.chatThreadEngineId(fresh, { recentEngineId: 'claude', engines: connected }), 'claude', 'D4: recent engine');
+  assert.equal(Chat.chatThreadEngineId({ ...fresh, engineId: 'codex' }, { recentEngineId: 'claude', engines: connected }), 'codex', 'the room pick wins');
+
+  const view = Chat.chatEngineChipView({ id: 'r', messages: [{ id: 'm' }], effort: 'high' },
+    { engines: engineRowsFixture, auth: signedInPro, engineConfiguration: { effectiveModel: 'gpt-5.5' } });
+  assert.deepEqual(view, { engineId: 'codex', label: 'Codex', locked: true, text: 'Codex · 높음',
+    title: 'AI 엔진 Codex · ChatGPT Pro · 이 대화에 고정 · 기본 모델 · gpt-5.5 · 추론 강도 높음' });
+  assert.equal(Chat.chatEngineChipView(fresh, { auth: { isLoggedIn: false } }).title, 'AI 엔진 Codex · 새 대화에 사용 · 기본 모델');
+});
+
+test('chat requests carry the room engine, model and effort; an invalid engine is left for the bridge default', () => {
+  const thread = { id: 'room', profileEnabled: false, engineId: 'codex', model: 'gpt-5.5', effort: 'high' };
+  const runtime = runtimeFor(thread);
+  assert.deepEqual([runtime.engineId, runtime.model, runtime.effort], ['codex', 'gpt-5.5', 'high']);
+  const body = Chat.buildChatRequest(thread, '확인해 줘', 'q-engine', runtime);
+  assert.deepEqual([body.engineId, body.model, body.effort], ['codex', 'gpt-5.5', 'high']);
+  const plain = runtimeFor({ id: 'room' });
+  for (const field of ['engineId', 'model', 'effort']) assert.equal(Object.hasOwn(plain, field), false, field);
+  const unset = Chat.buildChatRequest({ id: 'room' }, 'hi', 'q', plain);
+  for (const field of ['engineId', 'model', 'effort']) assert.equal(Object.hasOwn(unset, field), false, field);
+  for (const engineId of ['', 'Codex', 'bad id', 7]) assert.equal(Object.hasOwn(Chat.buildChatRequest({ id: 'room' }, 'hi', 'q', { engineId }), 'engineId'), false);
+  assert.equal(Chat.buildChatRequest({ id: 'room' }, 'hi', 'q', { engineId: 'claude' }).engineId, 'claude', 'the bridge decides whether it can run');
+});
+
+test('engine controls: header chip, new-room choices, locked-room panel and effort picker map to bridge actions', () => {
+  const start = surfaceSource.indexOf('      const engineContext = {');
+  const end = surfaceSource.indexOf('      const renderThreadAgentRow = ', start);
+  assert.ok(start > 0 && end > start, 'the production engine renderers must remain directly testable');
+  const node = (tag, props = {}, ...children) => ({ tag, props, className: props.class, children: children.filter(child => child != null) });
+  const text = value => typeof value === 'string' ? value : (value?.children || []).map(text).join('');
+  const calls = [];
+  const bridge = new Proxy({}, { get: (_target, name) => (...args) => calls.push([name, ...args.filter(arg => typeof arg !== 'object')]) });
+  const renderers = codex => compileFunction(`${surfaceSource.slice(start, end)}\nreturn { renderEngineBadge, renderEngineChip, renderEngineChoices, renderEnginePanel };`,
+    ['codex', 'ChatState', 'el', 'deskIcon', 'codexBridge'])(codex, Chat, node, name => ({ tag: 'svg', icon: name }), bridge);
+  const codex = { recentEngineId: 'codex', engines: engineRowsFixture, authStatus: signedInPro, engineConfiguration: null, engineMenu: { threadId: 'new', left: 20, top: 40 } };
+  const ui = renderers(codex);
+  const fresh = { id: 'new', messages: [] };
+  const choices = ui.renderEngineChoices(fresh);
+  assert.equal(choices.props.role, 'radiogroup');
+  assert.deepEqual(choices.children.map(row => [row.props.data.engine, row.props['aria-checked'], row.props.disabled, text(row)]), [
+    ['codex', 'true', null, 'CodexChatGPT Pro · 사용 가능'],
+    ['claude', 'false', 'true', 'Claude설치됨 2.1.300 · 연결 방식 결정 대기'],
+  ]);
+  choices.children[0].props.onclick();
+  assert.deepEqual(calls.pop(), ['setThreadEngine', 'new', 'codex']);
+
+  const chip = ui.renderEngineChip(fresh);
+  assert.equal(chip.tag, 'button');
+  assert.equal(text(chip), 'Codex');
+  assert.equal(chip.props['aria-expanded'], 'true');
+  assert.doesNotMatch(chip.className, /agent-profile-chip|tool-mode-chip/, 'the header still carries no runtime-profile chips');
+  chip.props.onclick({ stopPropagation() {}, currentTarget: {} });
+  assert.deepEqual(calls.pop(), ['toggleEngineMenu', 'new']);
+  assert.equal(text(ui.renderEngineBadge({ id: 'old', messages: [{ id: 'm' }] })), 'Codex');
+
+  const openPanel = ui.renderEnginePanel(fresh);
+  assert.deepEqual(openPanel.children.filter(child => child.className === 'egd-codex-engine-section-label').map(text), ['AI 엔진', '모델', '추론 강도']);
+  assert.ok(openPanel.children.some(child => child.className === 'egd-codex-engine-choices'), 'a new room can still pick');
+  assert.equal(text(openPanel.children.find(child => child.className === 'egd-codex-engine-model')), '기본 모델');
+  const efforts = openPanel.children.find(child => child.className === 'egd-codex-engine-efforts');
+  assert.deepEqual(efforts.children.map(row => [text(row), row.props['aria-checked']]), [['기본', 'true'], ['낮음', 'false'], ['보통', 'false'], ['높음', 'false']]);
+  efforts.children[3].props.onclick();
+  assert.deepEqual(calls.pop(), ['setThreadEffort', 'new', 'high']);
+
+  const locked = ui.renderEnginePanel({ id: 'old', messages: [{ id: 'm' }], effort: 'medium' });
+  assert.equal(locked.children.some(child => child.className === 'egd-codex-engine-choices'), false, 'a started room shows only its engine');
+  const lockedSection = locked.children.find(child => child.className === 'egd-codex-engine-locked');
+  assert.match(text(lockedSection), /^CodexChatGPT Pro이 대화는 Codex로 이어집니다\. 다른 AI로 바꾸려면 새 대화로 이어가세요\.새 대화로 이어가기$/);
+  lockedSection.children.at(-1).props.onclick();
+  assert.deepEqual(calls.pop(), ['continueInNewThread', 'old']);
+  assert.equal(locked.children.find(child => child.className === 'egd-codex-engine-efforts').children[2].props['aria-checked'], 'true');
+
+  const older = renderers({ ...codex, engines: null }).renderEnginePanel(fresh);
+  assert.equal(older.children.some(child => child.className === 'egd-codex-engine-efforts'), false, 'no effort picker before capabilities are known');
+  for (const pattern of [/renderEngineChip\(activeThread\),\n            codexUsageRing\(codex\.authStatus\),/g]) {
+    assert.equal(surfaceSource.match(pattern)?.length, 2, 'both Chat heads show the engine chip next to the usage meter');
+  }
+  assert.match(surfaceSource, /egd-codex-session-badge-\$\{codexThreadSessionKey\(thread\)\}` \}, sessionLabel\),\n                    renderEngineBadge\(thread\),/);
+  assert.match(surfaceSource, /if \(codex\.authStatus\.isLoggedIn && !ChatState\.chatThreadEngineLocked\(activeThread\)\) \{\n            messages\.appendChild\(el\('div', \{ class: 'egd-codex-engine-start'/);
+});
+
+test('only an empty room changes engine; effort changes apply to the next turn', () => {
+  const method = name => surfaceSource.match(new RegExp(`      ${name}\\(([^)]*)\\) \\{([\\s\\S]*?)\\n      \\},`));
+  const bind = (name, deps, values) => {
+    const [, params, body] = method(name) || [];
+    assert.ok(body, `${name} must remain directly testable`);
+    return compileFunction(`return function (${params}) {${body}\n}`, deps)(...values);
+  };
+  const threads = [{ id: 'new', messages: [] }, { id: 'old', messages: [{ id: 'm' }] }];
+  const state = { codex: { threads, engines: [{ id: 'codex' }, { id: 'claude', status: 'ready' }], authStatus: signedInPro } };
+  let emits = 0;
+  const getThread = (_codex, id) => state.codex.threads.find(thread => thread.id === id) || null;
+  const update = (id, fn) => { state.codex.threads = state.codex.threads.map(thread => thread.id === id ? fn(thread) : thread); };
+  const deps = ['state', 'getCodexThreadById', 'ChatState', 'updateThreadById', 'emit'];
+  const values = [state, getThread, Chat, update, () => emits++];
+  const setEngine = bind('setThreadEngine', deps, values);
+  const setEffort = bind('setThreadEffort', deps, values);
+  setEngine('new', 'claude');
+  assert.equal(getThread(null, 'new').engineId, 'claude');
+  setEngine('old', 'claude');
+  assert.equal(getThread(null, 'old').engineId, undefined, 'D3: a started room is not switched');
+  state.codex.engines = engineRowsFixture;
+  setEngine('new', 'codex');
+  setEngine('new', 'claude');
+  assert.equal(getThread(null, 'new').engineId, 'codex', 'an engine waiting for its decision cannot be picked');
+  setEngine('new', 'gemini');
+  assert.equal(getThread(null, 'new').engineId, 'codex');
+  setEffort('old', 'high');
+  assert.equal(getThread(null, 'old').effort, 'high', 'effort is per turn, so a started room may change it');
+  setEffort('old', 'ultra');
+  assert.equal(getThread(null, 'old').effort, null, 'only offered values reach the request');
+  assert.equal(emits, 4);
+});
+
+test('engine panel styles use approved tokens and outrank the HUD button reset', () => {
+  const rule = selector => surfaceCss.match(new RegExp(`^${selector.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')} \\{([^}]+)\\}`, 'm'))?.[1] || '';
+  for (const selector of ['button.egd-codex-engine-chip', '.egd-codex-engine-badge', '.egd-codex-engine-panel', 'button.egd-codex-engine-choice',
+    '.egd-codex-engine-model', '.egd-codex-engine-efforts', 'button.egd-codex-engine-effort']) {
+    assert.ok(rule(selector), `${selector} is styled`);
+    assert.doesNotMatch(rule(selector), /#[0-9a-f]{3,8}\b|rgba?\(/i, `${selector} uses approved tokens only`);
+  }
+  assert.match(rule('.egd-codex-engine-panel'), /background: var\(--egd-frosted-bg\);[\s\S]*box-shadow: var\(--egd-frosted-shadow\);/);
+  assert.match(surfaceCss, /\.egd-codex-conversation-hud-head:has\(> \.egd-codex-engine-chip\):has\(> \.egd-usage-meter\),\n\.egd-codex-thread-active-head:has\(> \.egd-codex-engine-chip\):has\(> \.egd-usage-meter\) \{ grid-template-columns: auto minmax\(0, 1fr\) auto auto auto; \}/);
 });

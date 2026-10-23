@@ -310,6 +310,10 @@
       },
       toolMode: codexThreadToolMode(thread),
       systemPrompt: codexThreadSystemPrompt(thread),
+      // The room's engine pick and per-turn model/effort; the send path resolves an unset engine.
+      ...(thread?.engineId ? { engineId: thread.engineId } : {}),
+      ...(thread?.model ? { model: thread.model } : {}),
+      ...(thread?.effort ? { effort: thread.effort } : {}),
       // Stored Agents run from their saved revision; the bridge composes the instructions.
       ...(profile.server === true ? { profileId: profile.id, ...(Number.isSafeInteger(profile.revision) ? { profileRevision: profile.revision } : {}) } : {}),
     };
@@ -509,6 +513,12 @@
       showBridgeDetails: false,
       showDiagnostics: false,
       chatProtocol: ChatState.createChatProtocolState(),
+      // /v1/state engines[] and engineConfiguration (null on older bridges);
+      // a new room starts on the engine last used anywhere in the app (D4).
+      engines: null,
+      engineConfiguration: null,
+      recentEngineId: ChatState.DEFAULT_CHAT_ENGINE_ID,
+      engineMenu: null,
       localHistoryStatus: 'idle',
       localHistoryError: null,
       localHistoryBootReady: false,
@@ -1040,9 +1050,11 @@
       }
       return existing;
     }
+    const placement = resolveCanvasCardPlacement('input-evidence');
     const shell = spawnDeskWindowShell({ id: `egd-input-evidence-${++cardSeq}`, kind: 'input-evidence', className: 'egd-input-evidence-card',
       sourceRef: { kind: 'context-snapshot', id: reference.sourceId, scope: 'immutable-input' },
-      style: { left: `${180 + document.querySelectorAll('.egd-input-evidence-card').length * 680}px`, top: '160px', width: '640px', height: '480px' } });
+      style: { left: `${placement.x}px`, top: `${placement.y}px`, width: `${placement.width}px`, height: `${placement.height}px` } });
+    if (!options.restore) revealPlacedCanvasCard(shell.root, placement);
     shell.root._inputReference = cloneJson(reference);
     shell.root._inputEvidenceLoaded = !!evidenceSnapshot;
     shell.slots.identity.appendChild(el('strong', {}, '당시 입력 · 읽기 전용'));
@@ -1875,6 +1887,7 @@
         codexAccountKey: state.codex.codexAccountKey || null,
         unobservedPreviousRun: !!state.codex.chatProtocol.unobservedPreviousRun,
         threadDrafts: { ...state.codex.threadDrafts }, hudView: state.codex.hudView,
+        recentEngineId: state.codex.recentEngineId || null,
         localHistoryBackupKey: state.codex.legacyChatBackupKey || null,
       },
     };
@@ -2122,9 +2135,13 @@
       let projectionId;
       do { projectionId = `egd-board-${++cardSeq}`; } while (document.getElementById(projectionId));
       projection = SurfaceState.planBoardProjection(snapshot, projectionId);
-      const occupied = Array.from(document.querySelectorAll('.egd-canvas-card, .egd-canvas-shape')).map(persistentEntityGeometry);
-      const sourceMinX = Math.min(0, ...projection.members.map(m => m.record.geometry?.x || 0));
-      projection.offset = { x: occupied.length ? Math.max(...occupied.map(r => r.x + r.width)) + 64 - sourceMinX : 0, y: 0 };
+      // The whole Board region keeps its saved layout and takes the closest
+      // empty spot of the view, 24px clear of open Views and Boards.
+      const occupied = Array.from(document.querySelectorAll('.egd-canvas-card, .egd-canvas-shape, .egd-board-region')).map(persistentEntityGeometry);
+      const saved = SurfaceState.boardRegionRect(projection.members.map(member => member.record.geometry
+        || { x: 40, y: 80, width: 340, height: 180 }), { fallback: { x: 0, y: 0 } });
+      const spot = SurfaceState.placeCanvasView({ size: saved, safe: safeViewportWorldRect(), occupied, gap: 24 });
+      projection.offset = { x: spot.x - saved.x, y: spot.y - saved.y };
       state.boards.projections[projection.id] = projection;
       state.agenda.suppressDirty = true;
       try { for (const member of projection.members) mountBoardMember(projection, member); }
@@ -2138,7 +2155,9 @@
     const region = refreshBoardRegion(projection);
     selectBoardProjection(projection.id);
     if (options.focus !== false) {
-      state.setCanvasPanTarget?.({ x: 36 - parsePxNumber(region.style.left) * state.zoomTarget, y: 100 - parsePxNumber(region.style.top) * state.zoomTarget }, { immediate: true });
+      // A region already in view keeps the camera; otherwise the camera moves just enough.
+      state.setCanvasPanTarget?.(SurfaceState.revealRectPan(persistentEntityGeometry(region), safeViewportRect(),
+        { pan: state.panTarget, zoom: state.zoomTarget }), { immediate: true });
     }
     scheduleDeskSessionSave();
     return projection;
@@ -2253,6 +2272,8 @@
         state.codex.activeThreadId = snapshot.chat.activeThreadId;
         state.codex.threadDrafts = { ...snapshot.chat.threadDrafts };
         state.codex.hudView = snapshot.chat.hudView || 'conversation';
+        // An engine that is no longer usable falls back to Codex when a room resolves it.
+        if (typeof snapshot.chat.recentEngineId === 'string') state.codex.recentEngineId = snapshot.chat.recentEngineId;
       }
       const records = options.merge ? RecoveryState.missingDeskRecoveryViews(snapshot,
         Array.from(document.querySelectorAll('.egd-canvas-card, .egd-canvas-shape')).map(view => view.id)) : snapshot;
@@ -3669,17 +3690,6 @@
     setActiveEntity(null);
   }
 
-  function rectsOverlap(a, b) {
-    if (!a || !b) return false;
-    return a.left < b.right && a.right > b.left && a.top < b.bottom && a.bottom > b.top;
-  }
-
-  function rectOverlapArea(a, b) {
-    if (!rectsOverlap(a, b)) return 0;
-    return (Math.min(a.right, b.right) - Math.max(a.left, b.left))
-      * (Math.min(a.bottom, b.bottom) - Math.max(a.top, b.top));
-  }
-
   function clampNumber(value, min, max) {
     if (!Number.isFinite(value)) return min;
     return Math.max(min, Math.min(max, value));
@@ -3717,77 +3727,42 @@
     return { left, top, right, bottom, width: right - left, height: bottom - top };
   }
 
-  function clampClientCardRect(width, height, anchorClientX, anchorClientY, options = {}) {
-    const zoom = Math.max(0.001, state.zoomTarget || state.zoom || 1);
-    const visualWidth = width * zoom;
-    const visualHeight = height * zoom;
+  // The visible safe area in world px, where new Views open.
+  function safeViewportWorldRect(options = {}) {
     const safe = safeViewportRect(options);
-    const maxLeft = Math.max(safe.left, safe.right - visualWidth);
-    const maxTop = Math.max(safe.top, safe.bottom - visualHeight);
-    const baseLeft = Number.isFinite(anchorClientX)
-      ? anchorClientX - visualWidth / 2
-      : safe.left + Math.max(0, safe.width - visualWidth) / 2;
-    const baseTop = Number.isFinite(anchorClientY)
-      ? anchorClientY - visualHeight / 2
-      : safe.top + Math.max(0, safe.height - visualHeight) / 2;
-
-    return {
-      left: Math.max(safe.left, Math.min(maxLeft, baseLeft)),
-      top: Math.max(safe.top, Math.min(maxTop, baseTop)),
-      width: visualWidth,
-      height: visualHeight,
-    };
+    const zoom = Math.max(0.001, state.zoomTarget || state.zoom || 1);
+    const topLeft = viewportToCanvasPoint(safe.left, safe.top);
+    return { left: topLeft.x, top: topLeft.y, right: topLeft.x + safe.width / zoom, bottom: topLeft.y + safe.height / zoom };
   }
 
-  function resolveCanvasCardPlacement(width, height, options = {}) {
-    const offset = Number.isFinite(options.offset) ? options.offset : 0;
-    const anchorClientX = Number.isFinite(options.anchorClientX)
-      ? options.anchorClientX + offset
-      : window.innerWidth / 2 + offset;
-    const anchorClientY = Number.isFinite(options.anchorClientY)
-      ? options.anchorClientY + offset
-      : window.innerHeight / 2 + offset;
-    const primary = clampClientCardRect(width, height, anchorClientX, anchorClientY, options);
-    const candidates = [primary];
-    const safe = safeViewportRect(options);
-    const zoom = Math.max(0.001, state.zoomTarget || state.zoom || 1);
-    const visualWidth = width * zoom;
-    const visualHeight = height * zoom;
-    const step = Math.max(36, 24 * zoom);
-    const anchorPoints = [
-      [safe.left + safe.width / 2, safe.top + safe.height / 2],
-      [safe.left + visualWidth / 2, safe.top + visualHeight / 2],
-      [safe.right - visualWidth / 2, safe.top + visualHeight / 2],
-      [safe.left + visualWidth / 2, safe.bottom - visualHeight / 2],
-      [safe.right - visualWidth / 2, safe.bottom - visualHeight / 2],
-    ];
-    for (const [x, y] of anchorPoints) candidates.push(clampClientCardRect(width, height, x, y, options));
-    for (let i = 1; i <= 5; i += 1) {
-      candidates.push(clampClientCardRect(width, height, anchorClientX + step * i, anchorClientY + step * i, options));
-    }
+  // CNV-02: a new View opens at its type's size (shrunk to the visible safe
+  // area, never below its minimum) in the closest empty spot of that area,
+  // 24px clear of other Views and Board regions. Without room there it takes
+  // the closest empty Canvas spot and revealPlacedCanvasCard brings the camera.
+  // Existing Views never move or shrink.
+  function resolveCanvasCardPlacement(kind, options = {}) {
+    const safe = safeViewportWorldRect(options);
+    const size = SurfaceState.canvasViewSize(kind, { width: safe.right - safe.left, height: safe.bottom - safe.top });
+    const anchor = Number.isFinite(options.anchorClientX) && Number.isFinite(options.anchorClientY)
+      ? viewportToCanvasPoint(options.anchorClientX, options.anchorClientY) : null;
+    const occupied = Array.from(document.querySelectorAll('.egd-canvas-card, .egd-canvas-shape, .egd-board-region'))
+      .map(persistentEntityGeometry);
+    return SurfaceState.placeCanvasView({ size, safe, occupied, anchor, gap: 24 });
+  }
 
-    const existingRects = Array.from(document.querySelectorAll('.egd-canvas-card'))
-      .filter((card) => options.ignoreCardId == null || card.id !== options.ignoreCardId)
-      .map((card) => card.getBoundingClientRect());
-    let best = candidates[0];
-    let bestScore = Infinity;
-    for (const candidate of candidates) {
-      const rect = {
-        left: candidate.left,
-        top: candidate.top,
-        right: candidate.left + candidate.width,
-        bottom: candidate.top + candidate.height,
-      };
-      const overlap = existingRects.reduce((sum, other) => sum + rectOverlapArea(rect, other), 0);
-      const anchorDistance = Math.abs(candidate.left - primary.left) + Math.abs(candidate.top - primary.top);
-      const score = overlap * 20 + anchorDistance;
-      if (score < bestScore) {
-        bestScore = score;
-        best = candidate;
-      }
-    }
-
-    return viewportToCanvasPoint(best.left, best.top);
+  // The camera follows a View placed outside the view once its caller is done.
+  // A restore that writes the saved rect, or a camera move made meanwhile (a
+  // Board focus, a Briefing fit), keeps the camera where it is.
+  function revealPlacedCanvasCard(card, placement) {
+    if (!card || !placement || placement.inView) return;
+    const camera = { x: state.panTarget.x, y: state.panTarget.y, zoom: state.zoomTarget };
+    window.setTimeout(() => {
+      if (!card.isConnected || state.agenda.restoreInProgress || state.surface.restoring) return;
+      if (state.panTarget.x !== camera.x || state.panTarget.y !== camera.y || state.zoomTarget !== camera.zoom) return;
+      const rect = persistentEntityGeometry(card);
+      if (rect.x !== Math.round(placement.x) || rect.y !== Math.round(placement.y)) return;
+      state.setCanvasPanTarget?.(SurfaceState.revealRectPan(rect, safeViewportRect(), { pan: state.panTarget, zoom: state.zoomTarget }));
+    }, 0);
   }
 
   function resolveFloatingMenuPlacement(anchorRect, menuWidth = 152, menuHeight = 156) {
@@ -3947,6 +3922,7 @@
   }
 
   function closeDeskMinimap() {
+    closeMinimapStack();
     document.getElementById('egd-desk-minimap')?.remove();
   }
 
@@ -3971,16 +3947,25 @@
     return { left, top, right: left + width, bottom: top + height, width, height };
   }
 
+  // Each open Board's region in world px, for the minimap.
+  function boardRegionWorldRects() {
+    return Object.values(state.boards.projections).map((projection) => {
+      const region = document.getElementById(projection.id);
+      return region ? { id: projection.id, title: projection.title, rect: entityWorldRect(region) } : null;
+    }).filter(Boolean);
+  }
+
   function minimapDeskBounds() {
     const viewport = viewportWorldRect();
     const entities = Array.from(document.querySelectorAll('.egd-canvas-card, .egd-canvas-shape'))
       .map((entity) => ({ entity, rect: entityWorldRect(entity) }))
       .filter((item) => item.rect);
+    const regions = boardRegionWorldRects();
     let left = viewport.left;
     let top = viewport.top;
     let right = viewport.right;
     let bottom = viewport.bottom;
-    for (const { rect } of entities) {
+    for (const { rect } of [...entities, ...regions]) {
       left = Math.min(left, rect.left);
       top = Math.min(top, rect.top);
       right = Math.max(right, rect.right);
@@ -4015,7 +4000,7 @@
       bounds.width / Math.max(1, viewport.width),
       bounds.height / Math.max(1, viewport.height),
     );
-    return { bounds, viewport, entities, density, sparsity, spreadRatio };
+    return { bounds, viewport, entities, regions, density, sparsity, spreadRatio };
   }
 
   function minimapDimensionsForBounds(modelBase) {
@@ -4065,13 +4050,8 @@
   }
 
   function worldRectToMinimapStyle(rect, model, options = {}) {
-    const minSize = Number.isFinite(options.minSize) ? options.minSize : 3;
-    return {
-      left: Math.round(model.offsetX + (rect.left - model.bounds.left) * model.scale) + 'px',
-      top: Math.round(model.offsetY + (rect.top - model.bounds.top) * model.scale) + 'px',
-      width: Math.max(minSize, Math.round(rect.width * model.scale)) + 'px',
-      height: Math.max(minSize, Math.round(rect.height * model.scale)) + 'px',
-    };
+    const box = SurfaceState.minimapBox(rect, model, Number.isFinite(options.minSize) ? options.minSize : 3);
+    return { left: box.left + 'px', top: box.top + 'px', width: box.width + 'px', height: box.height + 'px' };
   }
 
   function minimapPointToWorld(clientX, clientY, map, model) {
@@ -4094,21 +4074,41 @@
     refreshDeskMinimap();
   }
 
+  function minimapEntityTitle(entity) {
+    return entity.classList.contains('egd-canvas-card')
+      ? cardLabelForViewportRail(entity)
+      : CANVAS_SHAPE_TITLES[entity.dataset.shapeType] || '도형';
+  }
+
+  // Presses on the map are read from its model (minimapTargetsAt), so markers
+  // only show where things are and name them on hover.
   function buildMinimapEntityMarker(item, model) {
     const entity = item.entity;
-    const rect = item.rect;
     const isCard = entity.classList.contains('egd-canvas-card');
-    return el('button', {
+    return el('span', {
       class: 'egd-minimap-entity'
         + (isCard ? ' egd-minimap-entity-card' : ' egd-minimap-entity-shape')
         + (entity.id === state.activeEntityId ? ' egd-minimap-entity-active' : ''),
-      title: isCard ? cardLabelForViewportRail(entity) : CANVAS_SHAPE_TITLES[entity.dataset.shapeType] || '도형',
-      style: worldRectToMinimapStyle(rect, model),
+      title: minimapEntityTitle(entity),
+      data: { entityId: entity.id },
+      style: worldRectToMinimapStyle(item.rect, model),
+    });
+  }
+
+  function buildMinimapBoardRegion(board) {
+    const label = `${board.title} Board로 이동`;
+    return el('div', {
+      class: 'egd-minimap-board',
+      data: { projectionId: board.id, active: String(board.active), testid: 'minimap-board' },
+      style: { left: board.left + 'px', top: board.top + 'px', width: board.width + 'px', height: board.height + 'px' },
+    }, el('button', {
+      type: 'button', class: 'egd-minimap-board-label', title: label, 'aria-label': label,
+      data: { projectionId: board.id, compact: String(!board.showLabel), testid: 'minimap-board-go' },
       onclick: (ev) => {
         ev.stopPropagation();
-        focusCanvasCard(entity);
+        focusBoardFromMinimap(board.id);
       },
-    });
+    }, board.showLabel ? board.title : ''));
   }
 
   function renderDeskMinimapWorld(panel) {
@@ -4116,21 +4116,123 @@
     if (!map) return null;
     const model = minimapWorldModel(map);
     map.textContent = '';
-    const agendaRegion = el('div', {
-      class: 'egd-minimap-agenda',
-      style: worldRectToMinimapStyle(model.bounds, model, { minSize: 16 }),
-    }, currentViewportAgendaLabel());
+    const boards = SurfaceState.minimapBoardRegions({
+      regions: model.regions, model, activeId: state.boards.activeProjectionId,
+    });
     const entityMarkers = model.entities.map((item) => buildMinimapEntityMarker(item, model));
     const viewportMarker = el('div', {
       class: 'egd-minimap-viewport',
       style: worldRectToMinimapStyle(model.viewport, model, { minSize: 8 }),
-      title: `Viewport · ${Math.round((state.zoomTarget || state.zoom || 1) * 100)}%`,
+      title: `현재 화면 · ${Math.round((state.zoomTarget || state.zoom || 1) * 100)}%`,
     });
-    map.appendChild(agendaRegion);
+    for (const board of boards) map.appendChild(buildMinimapBoardRegion(board));
     for (const marker of entityMarkers) map.appendChild(marker);
     map.appendChild(viewportMarker);
     map._egdeskMinimapModel = model;
+    // Boards first, then Views from the top of the stack down: the order the
+    // '이 위치의 N개' list reads in.
+    const views = model.entities
+      .map((item) => ({ item, z: parsePxNumber(item.entity.style.zIndex, 0) }))
+      .sort((a, b) => b.z - a.z)
+      .map(({ item }) => ({
+        kind: 'view', id: item.entity.id, title: minimapEntityTitle(item.entity),
+        projectionId: item.entity.dataset.projectionId || null, box: SurfaceState.minimapBox(item.rect, model),
+      }));
+    map._egdeskMinimapTargets = [
+      ...boards.map((board) => ({ kind: 'board', id: board.id, title: board.title, box: board })),
+      ...views,
+    ];
     return model;
+  }
+
+  // A Board picked on the minimap becomes the current Board, and the camera
+  // fits its region into the safe area without zooming past 100%.
+  function focusBoardFromMinimap(projectionId) {
+    const region = document.getElementById(projectionId);
+    if (!region || !state.boards.projections[projectionId]) return false;
+    closeMinimapStack();
+    selectBoardProjection(projectionId);
+    state.setCanvasViewportTarget?.(SurfaceState.fitSurfaceCamera(persistentEntityGeometry(region), safeViewportRect(), 1));
+    refreshDeskMinimap();
+    return true;
+  }
+
+  // A View picked on the minimap: the camera moves just enough to show it
+  // (its bar first when it is larger than the view) and it comes to the front.
+  function focusEntityFromMinimap(entityId) {
+    const entity = document.getElementById(entityId);
+    if (!entity?.isConnected) return false;
+    closeMinimapStack();
+    state.setCanvasPanTarget?.(SurfaceState.revealRectPan(persistentEntityGeometry(entity), safeViewportRect(),
+      { pan: state.panTarget, zoom: state.zoomTarget }));
+    focusCanvasCard(entity);
+    refreshDeskMinimap();
+    return true;
+  }
+
+  function goToMinimapTarget(target) {
+    return target?.kind === 'board' ? focusBoardFromMinimap(target.id) : focusEntityFromMinimap(target?.id);
+  }
+
+  function closeMinimapStack() {
+    const stack = document.querySelector('#egd-desk-minimap .egd-minimap-stack');
+    if (!stack) return;
+    stack._dispose?.();
+    stack.remove();
+  }
+
+  // One target under the press goes straight there; several open the
+  // '이 위치의 N개' list beside the press so the user picks one.
+  function openMinimapTargets(panel, targets, point) {
+    if (!targets?.length) return null;
+    if (targets.length === 1) {
+      goToMinimapTarget(targets[0]);
+      return null;
+    }
+    closeMinimapStack();
+    const map = panel.querySelector('.egd-minimap-map');
+    const title = SurfaceState.minimapStackTitle(targets.length);
+    const rows = targets.map((target) => el('button', {
+      type: 'button', class: 'egd-minimap-row egd-minimap-stack-row', role: 'menuitem',
+      data: { kind: target.kind, targetId: target.id, testid: 'minimap-stack-row' },
+      onclick: (ev) => {
+        ev.stopPropagation();
+        goToMinimapTarget(target);
+      },
+    },
+      el('span', { class: 'egd-minimap-row-dot', 'aria-hidden': 'true' }),
+      el('span', { class: 'egd-minimap-row-label' }, target.title),
+      target.kind === 'board' ? el('span', { class: 'egd-minimap-row-kind' }, 'Board') : null,
+    ));
+    const stack = el('div', { class: 'egd-minimap-stack', role: 'menu', 'aria-label': title, data: { testid: 'minimap-stack' } },
+      el('div', { class: 'egd-minimap-stack-title' }, title), ...rows);
+    const onKeydown = (ev) => {
+      if (ev.key === 'Escape') {
+        ev.preventDefault();
+        ev.stopPropagation();
+        closeMinimapStack();
+        return;
+      }
+      const current = rows.indexOf(document.activeElement);
+      const next = ev.key === 'ArrowDown' ? (current + 1) % rows.length
+        : ev.key === 'ArrowUp' ? (current - 1 + rows.length) % rows.length : -1;
+      if (next < 0) return;
+      ev.preventDefault();
+      rows[next].focus();
+    };
+    const onOutside = (ev) => {
+      if (!stack.isConnected) { stack._dispose(); return; }
+      if (!stack.contains(ev.target)) closeMinimapStack();
+    };
+    stack.addEventListener('keydown', onKeydown);
+    window.addEventListener('mousedown', onOutside, true);
+    stack._dispose = () => window.removeEventListener('mousedown', onOutside, true);
+    panel.appendChild(stack);
+    const maxLeft = Math.max(6, panel.clientWidth - stack.offsetWidth - 6);
+    stack.style.left = Math.round(clampNumber((map?.offsetLeft || 0) + point.x - 12, 6, maxLeft)) + 'px';
+    stack.style.top = Math.round((map?.offsetTop || 0) + point.y + 8) + 'px';
+    rows[0].focus();
+    return stack;
   }
 
   function buildDeskMinimapEntityRows() {
@@ -4148,7 +4250,7 @@
         title: `${kind} 보기`,
         'aria-current': isActive ? 'true' : null,
         onclick: () => {
-          focusCanvasCard(entity);
+          focusEntityFromMinimap(entity.id);
           closeDeskMinimap();
         },
       },
@@ -4196,9 +4298,19 @@
       dimensions: model.dimensions || null,
       mapRect: rectOf(map),
       viewportBoxRect: rectOf(viewportMarker),
+      boards: Array.from(panel?.querySelectorAll('.egd-minimap-board') || []).map((node) => ({
+        projectionId: node.dataset.projectionId,
+        active: node.dataset.active === 'true',
+        label: node.querySelector('.egd-minimap-board-label')?.textContent || '',
+        rect: rectOf(node),
+      })),
+      stack: Array.from(panel?.querySelectorAll('.egd-minimap-stack-row') || []).map((node) => ({
+        kind: node.dataset.kind, targetId: node.dataset.targetId, label: node.textContent,
+      })),
     };
   }
 
+  const MINIMAP_PICK_SLOP = 4;
   function installDeskMinimapPan(panel) {
     const map = panel.querySelector('.egd-minimap-map');
     if (!map) return;
@@ -4220,16 +4332,25 @@
       moveCanvasViewportToWorld(nextLeft, nextTop, { immediate: true });
       refreshDeskMinimap();
     };
+    // A press on Boards or Views that does not move is a pick (one target goes
+    // there, several open the list); once it moves it pans like empty map.
     map.addEventListener('mousedown', (ev) => {
       if (ev.button !== 0) return;
-      if (ev.target?.closest?.('.egd-minimap-entity')) return;
+      if (ev.target?.closest?.('.egd-minimap-board-label')) return;
+      closeMinimapStack();
       const model = minimapWorldModel(map);
       const point = minimapPointToWorld(ev.clientX, ev.clientY, map, model);
       const viewport = viewportWorldRect();
+      const mapRect = map.getBoundingClientRect();
+      const local = { x: ev.clientX - mapRect.left, y: ev.clientY - mapRect.top };
+      const targets = SurfaceState.minimapTargetsAt(local, map._egdeskMinimapTargets || []);
+      const press = { startX: ev.clientX, startY: ev.clientY, local, targets, moved: false };
       if (ev.target?.classList?.contains('egd-minimap-viewport')) {
-        drag = { mode: 'box', offsetX: point.x - viewport.left, offsetY: point.y - viewport.top };
+        drag = { ...press, mode: 'box', offsetX: point.x - viewport.left, offsetY: point.y - viewport.top };
+      } else if (targets.length) {
+        drag = { ...press, mode: 'center' };
       } else {
-        drag = { mode: 'center' };
+        drag = { ...press, mode: 'center', moved: true };
         setFromEvent(ev);
       }
       map.classList.add('egd-minimap-dragging');
@@ -4238,16 +4359,20 @@
     });
     window.addEventListener('mousemove', (ev) => {
       if (!drag) return;
+      if (!drag.moved && Math.hypot(ev.clientX - drag.startX, ev.clientY - drag.startY) < MINIMAP_PICK_SLOP) return;
+      drag.moved = true;
       setFromEvent(ev);
       ev.preventDefault();
       ev.stopPropagation();
     }, true);
     window.addEventListener('mouseup', (ev) => {
       if (!drag) return;
+      const press = drag;
       drag = null;
       map.classList.remove('egd-minimap-dragging');
       ev.preventDefault();
       ev.stopPropagation();
+      if (!press.moved) openMinimapTargets(panel, press.targets, press.local);
     }, true);
   }
 
@@ -4255,7 +4380,7 @@
     if (state.cardFullscreen) return;
     const existing = document.getElementById('egd-desk-minimap');
     if (existing) {
-      existing.remove();
+      closeDeskMinimap();
       return;
     }
     const panel = el('div', { id: 'egd-desk-minimap', class: 'egd-edge egd-frosted' },
@@ -4615,12 +4740,15 @@
           title: item.label,
           data: { id: item.id, kind, ...(item.id === 'shelf' ? { testid: 'file-dock-open' } : {}) },
           'aria-label': item.label,
+          // The chosen tool is also said as a pressed state, not only by its tint.
+          'aria-pressed': kind === 'center' ? String(state.activeTool === item.id) : null,
           onclick: () => {
             if (kind === 'center') {
               state.activeTool = item.id;
               syncActiveToolMode();
               for (const b of g.querySelectorAll('.egd-dock-btn')) {
                 b.classList.toggle('egd-dock-btn-active', b.dataset.id === item.id);
+                b.setAttribute('aria-pressed', String(b.dataset.id === item.id));
               }
             } else if (kind === 'left') {
               if (item.id === 'browser') {
@@ -4991,6 +5119,15 @@
     };
   }
 
+  // /v1/state engines[] rows and the verified Codex launch model, kept as
+  // reported; ChatState reads them (older bridges send neither).
+  function bridgeEngineFields(bridgeState) {
+    return {
+      engines: Array.isArray(bridgeState?.engines) ? bridgeState.engines : null,
+      engineConfiguration: bridgeState?.engineConfiguration && typeof bridgeState.engineConfiguration === 'object' ? bridgeState.engineConfiguration : null,
+    };
+  }
+
   function codexBridgeNotice(codex) {
     return SurfaceState.bridgeConnectionNotice({
       connected: codex.connected,
@@ -5040,6 +5177,7 @@
     const closeFloatingMenus = () => {
       codexBridge.closeMemberMenu();
       codexBridge.closeThreadMenu();
+      codexBridge.closeEngineMenu();
     };
     const onMessageScrollGesture = (ev) => {
       const target = ev.target;
@@ -5059,6 +5197,7 @@
       if (target.closest('.egd-codex-thread-member-clickable')) return;
       if (target.closest('.egd-codex-thread-menu')) return;
       if (target.closest('.egd-codex-thread-menu-trigger')) return;
+      if (target.closest('.egd-codex-engine-panel, .egd-codex-engine-chip')) return;
       closeFloatingMenus();
     };
     const onViewportMutate = (ev) => {
@@ -5324,6 +5463,85 @@
         }, ...menuChildren);
       };
 
+      // The room's AI engine (SUB-07): a badge in the room list, a header chip
+      // that opens the engine/model/effort panel, and the new-room choices.
+      const engineContext = { recentEngineId: codex.recentEngineId, engines: codex.engines,
+        auth: codex.authStatus, engineConfiguration: codex.engineConfiguration };
+      const renderEngineBadge = (thread) => {
+        const view = ChatState.chatEngineChipView(thread, engineContext);
+        return el('span', { class: 'egd-codex-engine-badge', title: view.title, data: { engine: view.engineId } }, view.label);
+      };
+      const renderEngineChip = (thread) => {
+        const view = ChatState.chatEngineChipView(thread, engineContext);
+        const open = codex.engineMenu?.threadId === thread.id;
+        return el('button', {
+          class: `egd-codex-engine-chip${open ? ' egd-codex-engine-chip-open' : ''}`,
+          title: view.title, 'aria-label': `${view.title} · AI 엔진과 추론 강도 선택`,
+          'aria-haspopup': 'dialog', 'aria-expanded': open ? 'true' : 'false',
+          data: { testid: 'chat-engine-chip', engine: view.engineId, locked: view.locked ? 'true' : 'false' },
+          onclick: (ev) => {
+            ev.stopPropagation();
+            codexBridge.toggleEngineMenu(thread.id, ev.currentTarget);
+          },
+        }, el('span', { class: 'egd-codex-engine-chip-text' }, view.text), deskIcon('chevron', 'egd-codex-engine-chip-icon'));
+      };
+      const renderEngineChoices = (thread) => {
+        const current = ChatState.chatThreadEngineId(thread, engineContext);
+        return el('div', { class: 'egd-codex-engine-choices', role: 'radiogroup', 'aria-label': 'AI 엔진' },
+          ...ChatState.chatEngineChoices(codex.engines, codex.authStatus).map((choice) => el('button', {
+            class: `egd-codex-engine-choice${choice.id === current ? ' egd-codex-engine-choice-selected' : ''}`,
+            role: 'radio', 'aria-checked': choice.id === current ? 'true' : 'false',
+            disabled: choice.selectable ? null : 'true',
+            data: { testid: 'chat-engine-choice', engine: choice.id },
+            onclick: () => codexBridge.setThreadEngine(thread.id, choice.id),
+          },
+          el('span', { class: 'egd-codex-engine-choice-name' }, choice.label),
+          el('span', { class: 'egd-codex-engine-choice-note' }, [choice.account, choice.note].filter(Boolean).join(' · ')),
+          choice.id === current ? deskIcon('check', 'egd-codex-engine-choice-check') : null)));
+      };
+      const renderEnginePanel = (thread) => {
+        const engineId = ChatState.chatThreadEngineId(thread, engineContext);
+        const choice = ChatState.chatEngineChoices(codex.engines, codex.authStatus).find((row) => row.id === engineId) || null;
+        const label = choice?.label || engineId;
+        const effort = ChatState.chatEffortValue(thread.effort);
+        const effortChoices = ChatState.chatEffortChoices(choice);
+        // D3: a room that has started keeps its engine; switching means a new room.
+        const engineSection = ChatState.chatThreadEngineLocked(thread)
+          ? el('div', { class: 'egd-codex-engine-locked' },
+            el('div', { class: 'egd-codex-engine-locked-row' },
+              deskIcon('lock', 'egd-codex-engine-locked-icon'),
+              el('span', { class: 'egd-codex-engine-choice-name' }, label),
+              choice?.account ? el('span', { class: 'egd-codex-engine-choice-note' }, choice.account) : null),
+            el('p', { class: 'egd-codex-engine-hint' }, `이 대화는 ${label}로 이어집니다. 다른 AI로 바꾸려면 새 대화로 이어가세요.`),
+            el('button', {
+              class: 'egd-codex-chip egd-codex-chip-subtle', data: { testid: 'chat-engine-continue' },
+              onclick: () => codexBridge.continueInNewThread(thread.id),
+            }, '새 대화로 이어가기'))
+          : renderEngineChoices(thread);
+        return el('div', {
+          class: 'egd-codex-engine-panel', role: 'dialog', 'aria-label': 'AI 엔진 설정',
+          data: { testid: 'chat-engine-panel' },
+          style: {
+            left: `${Math.round(codex.engineMenu?.left ?? 12)}px`,
+            top: `${Math.round(codex.engineMenu?.top ?? 12)}px`,
+          },
+          onclick: (ev) => ev.stopPropagation(),
+        },
+        el('div', { class: 'egd-codex-engine-section-label' }, 'AI 엔진'),
+        engineSection,
+        el('div', { class: 'egd-codex-engine-section-label' }, '모델'),
+        el('div', { class: 'egd-codex-engine-model' }, ChatState.chatModelLabel(codex.engineConfiguration)),
+        effortChoices.length ? el('div', { class: 'egd-codex-engine-section-label' }, '추론 강도') : null,
+        effortChoices.length ? el('div', { class: 'egd-codex-engine-efforts', role: 'radiogroup', 'aria-label': '추론 강도' },
+          ...effortChoices.map((option) => el('button', {
+            class: `egd-codex-engine-effort${option.value === effort ? ' egd-codex-engine-effort-selected' : ''}`,
+            role: 'radio', 'aria-checked': option.value === effort ? 'true' : 'false',
+            data: { testid: 'chat-engine-effort', effort: option.value || 'default' },
+            onclick: () => codexBridge.setThreadEffort(thread.id, option.value),
+          }, option.label))) : null,
+        effortChoices.length ? el('p', { class: 'egd-codex-engine-hint' }, '다음에 보내는 메시지부터 적용됩니다.') : null);
+      };
+
       const renderThreadAgentRow = (thread, compact = false) => {
         const runtime = codexThreadRuntimeConfig(thread);
         return el('div', { class: `egd-codex-thread-agent-row${compact ? ' egd-codex-thread-agent-row-compact' : ''}` },
@@ -5365,6 +5583,7 @@
           const threadMenuOpen = Boolean(codex.threadMenu && codex.threadMenu.threadId === thread.id);
           const item = el('div', {
             class: `egd-codex-thread-item${activeThread && thread.id === activeThread.id ? ' egd-codex-thread-item-active' : ''}${threadMenuOpen ? ' egd-codex-thread-item-menu-open' : ''}`,
+            'aria-current': activeThread && thread.id === activeThread.id ? 'true' : null,
           });
           item.addEventListener('click', () => codexBridge.selectThread(thread.id, { openConversation: true }));
           const lastMsg = thread.messages && thread.messages.length > 0 ? thread.messages[thread.messages.length - 1] : null;
@@ -5386,6 +5605,7 @@
                   el('div', { class: 'egd-codex-thread-meta-row' },
                     el('span', { class: `egd-codex-thread-kind egd-codex-thread-kind-${thread.type}` }, kindMeta.label),
                     el('span', { class: `egd-codex-session-badge egd-codex-session-badge-${codexThreadSessionKey(thread)}` }, sessionLabel),
+                    renderEngineBadge(thread),
                     el('span', { class: 'egd-codex-agent-profile-chip', title: profile.name }, profile.label),
                   ),
                   el('div', { class: 'egd-codex-thread-item-bottom' },
@@ -5471,6 +5691,7 @@
                 ? el('div', { class: 'egd-codex-conversation-hud-sub' }, (activeThread.participants || []).join(' · '))
                 : null,
             ),
+            renderEngineChip(activeThread),
             codexUsageRing(codex.authStatus),
             el('button', {
               class: `egd-codex-conversation-menu-trigger${threadMenuOpen ? ' egd-codex-conversation-menu-trigger-active' : ''}`,
@@ -5560,6 +5781,7 @@
               onclick: () => codexBridge.setHudView('list'),
             }, deskIcon('back')),
             el('div', { class: 'egd-codex-thread-active-title' }, activeThread.title),
+            renderEngineChip(activeThread),
             codexUsageRing(codex.authStatus),
             el('button', {
               class: 'egd-codex-conversation-menu-trigger',
@@ -5573,6 +5795,7 @@
           ));
           if (codex.threadMenu?.threadId === activeThread.id) conversation.appendChild(renderThreadMenu(activeThread));
         }
+        if (codex.engineMenu?.threadId === activeThread.id) conversation.appendChild(renderEnginePanel(activeThread));
 
         const messages = el('div', {
           class: 'egd-codex-messages',
@@ -5606,6 +5829,12 @@
             ));
           }
           messages.appendChild(el('div', { class: 'egd-codex-empty-state' }, ...emptyChildren));
+          // A new room picks its AI before the first message; after that the room keeps it.
+          if (codex.authStatus.isLoggedIn && !ChatState.chatThreadEngineLocked(activeThread)) {
+            messages.appendChild(el('div', { class: 'egd-codex-engine-start', data: { testid: 'chat-engine-start' } },
+              el('div', { class: 'egd-codex-engine-section-label' }, '이 대화에 쓸 AI'),
+              renderEngineChoices(activeThread)));
+          }
         } else {
           // Agent answers carry the Profile avatar captured at send; older answers
           // borrow the room's current Agent avatar only when the name still matches.
@@ -6270,6 +6499,7 @@
           state.codex.threadMenu = null;
         }
       }
+      if (state.codex.engineMenu && !getCodexThreadById(state.codex, state.codex.engineMenu.threadId)) state.codex.engineMenu = null;
       const active = getActiveCodexThread(state.codex);
       state.codex.conversationId = active?.conversationId || null;
       state.codex.draft = getCodexThreadDraft(state.codex, active?.id || null);
@@ -6658,7 +6888,7 @@
         case 'chat.event': {
           if (event.v === 2) {
             if (!ChatState.canAdmitChatEvent(protocol, state.codex.threads, event)) return;
-            const run = ChatState.reduceChatEvent(protocol, event);
+            const run = ChatState.reduceChatEvent(protocol, event, ChatState.knownChatEngineIds(state.codex.engines));
             if (run) { syncProtocolRun(run); emit(); }
           }
           return;
@@ -6712,6 +6942,7 @@
           connected: true,
           error: null,
           ...bridgeConnectionFields(bridgeState),
+          ...bridgeEngineFields(bridgeState),
         });
       } catch (error) {
         if (!epochScope.valid(token)) return;
@@ -7109,6 +7340,7 @@
         if (state.codex.hudView === 'list') {
           state.codex.threadMenu = null;
           state.codex.memberMenu = null;
+          state.codex.engineMenu = null;
         }
         emit();
       },
@@ -7116,6 +7348,7 @@
         state.codex.hudView = 'list';
         state.codex.threadMenu = null;
         state.codex.memberMenu = null;
+        state.codex.engineMenu = null;
         emit();
       },
       toggleThreadMenu(threadId, anchorEl = null) {
@@ -7160,11 +7393,50 @@
         state.codex.memberMenu = null;
         emit();
       },
+      toggleEngineMenu(threadId, anchorEl = null) {
+        if (!threadId) return;
+        if (state.codex.engineMenu?.threadId === threadId) {
+          state.codex.engineMenu = null;
+        } else {
+          const rect = anchorEl?.getBoundingClientRect?.();
+          state.codex.engineMenu = { threadId, ...(rect ? resolveFloatingMenuPlacement(rect, 264, 320) : { left: 12, top: 12 }) };
+          state.codex.threadMenu = null;
+          state.codex.memberMenu = null;
+        }
+        emit();
+      },
+      closeEngineMenu() {
+        if (!state.codex.engineMenu) return;
+        state.codex.engineMenu = null;
+        emit();
+      },
+      // D3: only a room that has not started can change its engine.
+      setThreadEngine(threadId, engineId) {
+        const thread = getCodexThreadById(state.codex, threadId);
+        if (!thread || ChatState.chatThreadEngineLocked(thread)) return;
+        if (!ChatState.chatEngineChoices(state.codex.engines, state.codex.authStatus).some((choice) => choice.id === engineId && choice.selectable)) return;
+        updateThreadById(threadId, (current) => ({ ...current, engineId }));
+        emit();
+      },
+      // Model and effort apply per turn, so a started room can change them.
+      setThreadEffort(threadId, effort) {
+        if (!getCodexThreadById(state.codex, threadId)) return;
+        updateThreadById(threadId, (current) => ({ ...current, effort: ChatState.chatEffortValue(effort) }));
+        emit();
+      },
+      continueInNewThread(threadId) {
+        const thread = getCodexThreadById(state.codex, threadId);
+        if (!thread) return;
+        state.codex.engineMenu = null;
+        this.createThread(thread.type, { agentProfileId: thread.agentProfileId, profileEnabled: thread.profileEnabled === true, openConversation: true });
+        boardNotice('새 대화를 열었습니다. 이전 대화 내용은 자동으로 옮겨지지 않습니다.');
+      },
       selectThread(threadId, options = {}) {
         if (!threadId) return;
         if (!setActiveThread(threadId)) return;
         state.codex.memberMenu = null;
         state.codex.threadMenu = null;
+        state.codex.engineMenu = null;
         const openConversation = options.openConversation !== false;
         if (openConversation) {
           state.codex.hudView = 'conversation';
@@ -7355,6 +7627,7 @@
             isStartingLogin: Boolean(status.loginInProgress),
             error: null,
             bridgeBuild: bridgeConnectionFields(bridgeState).bridgeBuild,
+            ...bridgeEngineFields(bridgeState),
           });
         } catch (error) {
           if (!epochScope.valid(token)) return;
@@ -7467,6 +7740,11 @@
           epochScope.finish(token);
           return;
         }
+        // The first send ties the room to its engine (D3) and makes it the app's recent one (D4).
+        const engineId = ChatState.chatThreadEngineId(getCodexThreadById(state.codex, activeThread.id) || activeThread,
+          { recentEngineId: state.codex.recentEngineId, engines: state.codex.engines });
+        updateThreadById(activeThread.id, thread => thread.engineId === engineId ? thread : { ...thread, engineId });
+        state.codex.recentEngineId = engineId;
         const authorProfile = activeThread.profileEnabled ? codexThreadAgentProfile(activeThread) : null;
         ChatState.registerChatRequest(protocol, { requestId, clientThreadId: ChatState.clientThreadBinding(activeThread), localThreadId: activeThread.id, conversationId: activeThread.conversationId, authorName: authorProfile ? authorProfile.name : 'Codex', ...(authorProfile?.avatar ? { authorAvatar: authorProfile.avatar } : {}) }, state.codex.authStatus);
         appendMessageToThread(activeThread.id, createCodexMessage('user', content, 'submitting', {
@@ -7483,6 +7761,7 @@
         emit();
         try {
           const runtimeConfig = codexThreadRuntimeConfig(activeThread);
+          runtimeConfig.engineId = engineId;
           runtimeConfig.contextSnapshotIds = inputReferences.map(reference => reference.snapshotId);
           runtimeConfig.contextCapabilities = ChatState.contextCapabilitiesForRequest(activeThread, state.codex.authStatus, runtimeConfig.contextSnapshotIds);
           const chatRequest = ChatState.buildChatRequest(activeThread, content, requestId, runtimeConfig);
@@ -7669,15 +7948,8 @@
 
     const id = `egd-chat-card-${++cardSeq}`;
     const safe = safeViewportRect({ avoidHud: true });
-    const zoom = Math.max(0.001, state.zoomTarget || state.zoom || 1);
-    const width = Math.min(440, Math.max(360, Math.floor(safe.width / zoom)));
-    const height = Math.min(680, Math.max(420, Math.floor(safe.height / zoom)));
-    const placement = resolveCanvasCardPlacement(width, height, {
-      anchorClientX,
-      anchorClientY,
-      avoidHud: true,
-      offset: ((cardSeq - 1) % 4) * 22,
-    });
+    const placement = resolveCanvasCardPlacement('chat', { anchorClientX, anchorClientY, avoidHud: true });
+    const { width, height } = placement;
     const card = el('div', {
       id,
       class: 'egd-canvas-card egd-chat-card',
@@ -7726,6 +7998,7 @@
     bindCardSourceRef(card, currentChatSourceRef());
     markAgendaDirty('create-chat-card', card);
     setActiveEntity(card);
+    revealPlacedCanvasCard(card, placement);
 
     const syncChatCardLayoutMode = () => {
       const compact = card.getBoundingClientRect().width < 680;
@@ -7820,9 +8093,6 @@
   // 내부 최소 폭에 걸려 가로 스크롤이 생긴다. 1440x900 기준으로 렌더 후 축소.
   const CARD_LOGICAL_W = 1440;
   const CARD_LOGICAL_H = 900;
-  const CARD_HEADER_H = 52;
-  const CARD_ASPECT = CARD_LOGICAL_H / CARD_LOGICAL_W;
-  const cardHeightForWidth = (width) => Math.round(CARD_HEADER_H + width * CARD_ASPECT);
 
   function canvasZoom() {
     return Math.max(0.001, state.zoom || state.zoomTarget || 1);
@@ -10043,20 +10313,7 @@
     if (existing) return existing;
 
     const id = `egd-ontology-card-${++cardSeq}`;
-    const windowMargin = 12;
-    const safe = safeViewportRect({ avoidHud: false, margin: windowMargin });
-    const initialWidth = Math.min(1760, Math.max(900, safe.width));
-    const initialHeight = Math.min(900, Math.max(560, safe.height));
-    const offset = ((cardSeq - 1) % 6) * 24;
-    const placement = clampClientCardRect(
-      initialWidth,
-      initialHeight,
-      safe.left + safe.width / 2 + offset,
-      safe.top + safe.height / 2 + offset,
-      { avoidHud: false, margin: windowMargin },
-    );
-    const topLeft = viewportToCanvasPoint(placement.left, placement.top);
-    const initialTop = Math.round(topLeft.y);
+    const placement = resolveCanvasCardPlacement('ontology', { avoidHud: false, margin: 12 });
     const deskWindow = spawnDeskWindowShell({
       id,
       kind: 'ontology',
@@ -10071,14 +10328,15 @@
       moveDirtyReason: 'move-ontology-card',
       resizeDirtyReason: 'resize-ontology-card',
       style: {
-        top: initialTop + 'px',
-        left: Math.round(topLeft.x) + 'px',
-        width: initialWidth + 'px',
-        height: initialHeight + 'px',
+        top: placement.y + 'px',
+        left: placement.x + 'px',
+        width: placement.width + 'px',
+        height: placement.height + 'px',
         zIndex: String(++cardZ),
       },
     });
     const card = deskWindow.root;
+    revealPlacedCanvasCard(card, placement);
     deskWindow.slots.identity.classList.add('egd-ontology-titlebar-identity');
     deskWindow.slots.identity.append(
       el('div', { class: 'egd-ontology-title' }, '온톨로지'),
@@ -10327,10 +10585,12 @@
       const existing = document.querySelector('.egd-file-card');
       if (existing) { focusCanvasCard(existing); return existing; }
     }
+    const placement = resolveCanvasCardPlacement('file');
     const shell = spawnDeskWindowShell({ id: `egd-file-card-${++cardSeq}`, kind: 'file', className: 'egd-file-card',
       activate: !options.restore, sourceRef: { kind: 'file-surface', id: `file-view-${chatBindingNonce()}`, scope: 'local-files' },
-      style: { left: '180px', top: '140px', width: '960px', height: '650px' } });
+      style: { left: `${placement.x}px`, top: `${placement.y}px`, width: `${placement.width}px`, height: `${placement.height}px` } });
     const card = shell.root;
+    if (!options.restore) revealPlacedCanvasCard(card, placement);
     card.dataset.testid = 'file-card';
     card.setAttribute('aria-label', '파일 작업 창');
     const title = el('strong', { class: 'egd-file-card-title' }, '파일');
@@ -10437,21 +10697,15 @@
     }
 
     const id = `egd-settings-card-${++cardSeq}`;
-    const initialWidth = 600;
-    const initialHeight = 600;
-    const offset = ((cardSeq - 1) % 6) * 24;
-    const center = viewportToCanvasPoint(
-      window.innerWidth / 2 + offset,
-      window.innerHeight / 2 + offset,
-    );
+    const placement = resolveCanvasCardPlacement('settings');
     const card = el('div', {
       id,
       class: 'egd-canvas-card egd-settings-card',
       style: {
-        top: Math.round(center.y - initialHeight / 2) + 'px',
-        left: Math.round(center.x - initialWidth / 2) + 'px',
-        width: initialWidth + 'px',
-        height: initialHeight + 'px',
+        top: placement.y + 'px',
+        left: placement.x + 'px',
+        width: placement.width + 'px',
+        height: placement.height + 'px',
         zIndex: String(++cardZ),
       },
     });
@@ -10991,6 +11245,7 @@
     bindCardSourceRef(card, sourceRef);
     markAgendaDirty('create-settings-card', card);
     setActiveEntity(card);
+    revealPlacedCanvasCard(card, placement);
 
     renderTabs();
     (activeTab === 'agents' ? renderAgentsTab : renderAccountTab)();
@@ -11595,13 +11850,10 @@
     }
 
     const id = `egd-browser-card-${++cardSeq}`;
-    const initialWidth = options.firstUse ? window.innerWidth : 720;
-    const initialHeight = options.firstUse ? window.innerHeight : cardHeightForWidth(initialWidth);
-    const offset = ((cardSeq - 1) % 6) * 24;
-    const center = viewportToCanvasPoint(
-      window.innerWidth / 2 + offset,
-      window.innerHeight / 2 + offset,
-    );
+    // The first Browser fills the window at the world origin; any other opens in an empty spot.
+    const placement = options.firstUse
+      ? { x: 0, y: 0, width: window.innerWidth, height: window.innerHeight, inView: true }
+      : resolveCanvasCardPlacement('browser');
     const deskWindow = spawnDeskWindowShell({
       id,
       kind: 'browser',
@@ -11616,14 +11868,15 @@
       moveDirtyReason: 'move-browser-card',
       resizeDirtyReason: 'resize-browser-card',
       style: {
-        top: (options.firstUse ? 0 : Math.round(center.y - initialHeight / 2)) + 'px',
-        left: (options.firstUse ? 0 : Math.round(center.x - initialWidth / 2)) + 'px',
-        width: initialWidth + 'px',
-        height: initialHeight + 'px',
+        top: placement.y + 'px',
+        left: placement.x + 'px',
+        width: placement.width + 'px',
+        height: placement.height + 'px',
         zIndex: String(++cardZ),
       },
     });
     const card = deskWindow.root;
+    revealPlacedCanvasCard(card, placement);
 
     const urlInput = el('input', {
       type: 'text',
@@ -13202,7 +13455,7 @@
         ...(action.type === 'click' && result?.result?.clickDiagnostics?.dispatchScope
           ? { clickInputRoute: result.result.clickDiagnostics.dispatchScope,
             targetClickObserved: result.result.clickDiagnostics.targetClickObserved === true } : {}),
-        ...(['scroll', 'press'].includes(action.type)
+        ...(['scroll', 'press', 'fill'].includes(action.type)
           ? BrowserAgentReceipts.browserToolDispatchReceiptFields(action.type, result?.result?.dispatchDiagnostics) : {}) },
         after: documentStillCurrent ? { cardId: card.id, ...result.after } : null,
         observation: documentStillCurrent ? result.observation : null };
@@ -13417,21 +13670,15 @@
       id,
       scope: 'local-pty',
     });
-    const initialWidth = 800;
-    const initialHeight = 500;
-    const offset = ((cardSeq - 1) % 6) * 24;
-    const center = viewportToCanvasPoint(
-      window.innerWidth / 2 + offset,
-      window.innerHeight / 2 + offset,
-    );
+    const placement = resolveCanvasCardPlacement('terminal');
     const card = el('div', {
       id,
       class: 'egd-canvas-card egd-terminal-card',
       style: {
-        top: Math.round(center.y - initialHeight / 2) + 'px',
-        left: Math.round(center.x - initialWidth / 2) + 'px',
-        width: initialWidth + 'px',
-        height: initialHeight + 'px',
+        top: placement.y + 'px',
+        left: placement.x + 'px',
+        width: placement.width + 'px',
+        height: placement.height + 'px',
         zIndex: String(++cardZ),
       },
     });
@@ -13477,6 +13724,7 @@
     bindCardSourceRef(card, sourceRef);
     markAgendaDirty('create-terminal-card', card);
     setActiveEntity(card);
+    revealPlacedCanvasCard(card, placement);
 
     // ---- Use iframe for terminal.html to isolate keyboard events ----
     const termBrowser = el('iframe', {
@@ -13694,7 +13942,7 @@
       if (el2) el2.style.visibility = 'collapse';
     }
     const browserEl = document.getElementById('browser');
-    if (browserEl) browserEl.style.background = '#F5F3EF';
+    if (browserEl) browserEl.style.background = 'var(--egd-surface)';
 
     // 메인 탭 panel 을 display:none 처리 + content process discard (0 프로세스)
     const panels = document.getElementById('tabbrowser-tabpanels');

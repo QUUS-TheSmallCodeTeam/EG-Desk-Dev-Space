@@ -271,6 +271,103 @@ export function resolveViewportBoard({
   return { primaryId, reason, visibleIds, extraCount };
 }
 
+// Card placement policy (CNV-02). Outer logical px per View type, from
+// egdesk-ux-realization-proposals.md '유형별 최소 크기'. A type not listed
+// opens at 640×480 with the common 320×240 minimum.
+const viewSize = (width, height, minWidth = 320, minHeight = 240) => Object.freeze({ width, height, minWidth, minHeight });
+export const CANVAS_VIEW_SIZES = Object.freeze({
+  browser: viewSize(960, 640),
+  file: viewSize(720, 640),
+  chat: viewSize(420, 600, 320, 420),
+  terminal: viewSize(800, 400),
+  settings: viewSize(600, 600),
+  // The map fills the view up to its former 1760×900 cap.
+  ontology: viewSize(1760, 900, 680, 440),
+  'input-evidence': viewSize(640, 480),
+});
+const OTHER_VIEW_SIZE = viewSize(640, 480);
+
+// The type's size shrunk to `room` (world px of the visible safe area), never
+// below its minimum. Only the new View gives way; existing Views keep theirs.
+export function canvasViewSize(kind, room = null) {
+  const base = Object.hasOwn(CANVAS_VIEW_SIZES, kind) ? CANVAS_VIEW_SIZES[kind] : OTHER_VIEW_SIZE;
+  const fit = (value, min, limit) => Number.isFinite(limit) && limit > 0 ? Math.max(min, Math.min(value, Math.floor(limit))) : value;
+  return {
+    width: fit(base.width, base.minWidth, room?.width),
+    height: fit(base.height, base.minHeight, room?.height),
+    minWidth: base.minWidth,
+    minHeight: base.minHeight,
+  };
+}
+
+const worldBox = rect => !!rect && [rect.x, rect.y, rect.width, rect.height].every(Number.isFinite)
+  && rect.width > 0 && rect.height > 0;
+
+// Top-left of the spot closest to `target` where a width×height rect keeps
+// `gap` px clear of every occupied rect, inside `bounds` when given. The
+// closest free point lies on the target's own axis or on an edge of a grown
+// obstacle, so only those coordinates are tried. Null when bounds hold none.
+export function nearestFreeCanvasSpot({ width, height, target, occupied = [], gap = 24, bounds = null } = {}) {
+  if (![width, height, target?.x, target?.y, gap].every(Number.isFinite) || width <= 0 || height <= 0) return null;
+  const limited = !!bounds && [bounds.left, bounds.top, bounds.right, bounds.bottom].every(Number.isFinite);
+  // Whole px inside the bounds. A rect wider or taller than the bounds keeps
+  // its top or left edge, where its bar is.
+  const minX = limited ? Math.ceil(bounds.left) : -Infinity;
+  const maxX = limited ? Math.max(minX, Math.floor(bounds.right - width)) : Infinity;
+  const minY = limited ? Math.ceil(bounds.top) : -Infinity;
+  const maxY = limited ? Math.max(minY, Math.floor(bounds.bottom - height)) : Infinity;
+  // Each block is the open range of top-left spots its rect rules out; one
+  // that rules out nothing inside the bounds is left out of the search.
+  const blocks = (Array.isArray(occupied) ? occupied : []).filter(worldBox).map(rect => ({
+    left: rect.x - gap - width, right: rect.x + rect.width + gap,
+    top: rect.y - gap - height, bottom: rect.y + rect.height + gap,
+  })).filter(block => block.left < maxX && block.right > minX && block.top < maxY && block.bottom > minY);
+  const axis = (start, edges, min, max) => [...new Set([Math.min(max, Math.max(min, start)), ...(limited ? [min, max] : []), ...edges])]
+    .filter(value => value >= min && value <= max);
+  const xs = axis(Math.round(target.x), blocks.flatMap(block => [block.left, block.right]), minX, maxX);
+  const ys = axis(Math.round(target.y), blocks.flatMap(block => [block.top, block.bottom]), minY, maxY);
+  const candidates = [];
+  for (const x of xs) for (const y of ys) candidates.push({ x, y, distance: Math.hypot(x - target.x, y - target.y) });
+  candidates.sort((a, b) => a.distance - b.distance || a.y - b.y || a.x - b.x);
+  const spot = candidates.find(({ x, y }) => blocks.every(block => x <= block.left || x >= block.right || y <= block.top || y >= block.bottom));
+  return spot ? { x: spot.x, y: spot.y } : null;
+}
+
+// A new View or reopened Board takes the closest empty spot inside the visible
+// safe area (world px), centred on `anchor` when given. Without room there it
+// takes the closest empty Canvas spot with inView false, so the camera can
+// follow it. Occupied rects never move.
+export function placeCanvasView({ size, safe, occupied = [], anchor = null, gap = 24 } = {}) {
+  const width = size?.width;
+  const height = size?.height;
+  if (!(width > 0 && height > 0) || !safe || ![safe.left, safe.top, safe.right, safe.bottom].every(Number.isFinite)) return null;
+  const center = Number.isFinite(anchor?.x) && Number.isFinite(anchor?.y)
+    ? anchor : { x: (safe.left + safe.right) / 2, y: (safe.top + safe.bottom) / 2 };
+  const fits = width <= safe.right - safe.left && height <= safe.bottom - safe.top;
+  const target = { x: Math.round(center.x - width / 2), y: Math.round(center.y - height / 2) };
+  const inside = nearestFreeCanvasSpot({ width, height, target, occupied, gap, bounds: safe });
+  if (inside) return { x: Math.round(inside.x), y: Math.round(inside.y), width, height, inView: fits };
+  const outside = nearestFreeCanvasSpot({ width, height, target, occupied, gap });
+  return { x: Math.round(outside.x), y: Math.round(outside.y), width, height, inView: false };
+}
+
+// The smallest camera pan that shows a world rect inside the safe area
+// (client px). On an axis where the rect is larger than the area, its top or
+// left edge, where the bar is, is aligned instead.
+export function revealRectPan(rect, safe, { pan, zoom } = {}) {
+  if (!pan || !Number.isFinite(pan.x) || !Number.isFinite(pan.y)) return null;
+  if (!worldBox(rect) || !(zoom > 0) || !safe || ![safe.left, safe.top, safe.right, safe.bottom].every(Number.isFinite)) {
+    return { x: pan.x, y: pan.y };
+  }
+  const axis = (start, size, offset, low, high) => {
+    const near = start * zoom + offset;
+    const far = near + size * zoom;
+    if (far - near > high - low || near < low) return offset + low - near;
+    return far > high ? offset - (far - high) : offset;
+  };
+  return { x: axis(rect.x, rect.width, pan.x, safe.left, safe.right), y: axis(rect.y, rect.height, pan.y, safe.top, safe.bottom) };
+}
+
 // Words the Desk shows. Internal identifiers (state.agenda, data-testid,
 // search result `type`) keep their names; only the visible copy is Korean,
 // and product nouns (Board, Canvas, Chat, Browser) stay as the user knows them.
@@ -305,6 +402,53 @@ export function railSearchSectionLabel(type) {
 export function deskMinimapCaption(zoom, count) {
   const percent = Number.isFinite(zoom) ? Math.round(zoom * 100) : 100;
   return `${percent}% · 대상 ${Math.max(0, Number(count) || 0)}개`;
+}
+
+// Desk Minimap (UX-02). A world rect ({ left, top, width, height }) in the
+// minimap's pixel frame: `bounds`, `scale` and offsets come from its model.
+export function minimapBox(rect, model, minSize = 3) {
+  return {
+    left: Math.round(model.offsetX + (rect.left - model.bounds.left) * model.scale),
+    top: Math.round(model.offsetY + (rect.top - model.bounds.top) * model.scale),
+    width: Math.max(minSize, Math.round(rect.width * model.scale)),
+    height: Math.max(minSize, Math.round(rect.height * model.scale)),
+  };
+}
+
+// Each Board's region on the minimap. Its name is written only when the box
+// is wide enough to read it; a smaller box keeps a name-less handle.
+export function minimapBoardRegions({ regions = [], model, activeId = null, labelMinWidth = 48, labelMinHeight = 14 } = {}) {
+  if (!model?.bounds || ![model.bounds.left, model.bounds.top, model.offsetX, model.offsetY].every(Number.isFinite)
+      || !(model.scale > 0)) return [];
+  return (Array.isArray(regions) ? regions : []).filter(region => region?.id != null && region.rect
+    && [region.rect.left, region.rect.top, region.rect.width, region.rect.height].every(Number.isFinite)
+    && region.rect.width > 0 && region.rect.height > 0).map(region => {
+    const box = minimapBox(region.rect, model, 8);
+    return {
+      id: region.id, title: String(region.title || 'Board'), ...box,
+      active: region.id === activeId, showLabel: box.width >= labelMinWidth && box.height >= labelMinHeight,
+    };
+  });
+}
+
+// Boards and Views whose minimap box holds a point (map px), in the given
+// order. A View inside a Board it belongs to (`projectionId`) is picked through
+// that Board, so pressing a Board's region goes to the Board. More than one
+// left over opens the '이 위치의 N개' list.
+export function minimapTargetsAt(point, targets = [], slop = 2) {
+  if (!Number.isFinite(point?.x) || !Number.isFinite(point?.y)) return [];
+  const hits = (Array.isArray(targets) ? targets : []).filter(target => {
+    const box = target?.box;
+    return !!box && [box.left, box.top, box.width, box.height].every(Number.isFinite)
+      && point.x >= box.left - slop && point.x <= box.left + box.width + slop
+      && point.y >= box.top - slop && point.y <= box.top + box.height + slop;
+  });
+  const boards = new Set(hits.filter(target => target.kind === 'board').map(target => target.id));
+  return hits.filter(target => target.kind === 'board' || target.projectionId == null || !boards.has(target.projectionId));
+}
+
+export function minimapStackTitle(count) {
+  return `이 위치의 ${Math.max(0, Math.round(Number(count) || 0))}개`;
 }
 
 // Bridge connection, said by state. A short drop reads '다시 연결 중…' while

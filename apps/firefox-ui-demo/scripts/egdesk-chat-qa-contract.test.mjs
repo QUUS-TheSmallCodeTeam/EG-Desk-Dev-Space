@@ -83,6 +83,18 @@ test('two client threads stay isolated and a mismatched POST cannot steal an ear
     details: { messageId: 'message-a', delta: 'leak' } })), /correlation mismatch/);
 });
 
+test('the probe admits known engines only: Codex always, listed engines by engineId', () => {
+  const probe = new ChatProtocolProbe();
+  assert.equal(probe.ingest({ ...event(1, 'run.started'), engineId: 'codex' }).accepted, true);
+  assert.throws(() => probe.ingest({ ...event(2, 'run.started', { runId: 'run-b' }), engineId: 'claude' }), /known engine/);
+  assert.throws(() => probe.ingest({ ...event(3, 'run.started', { runId: 'run-c' }), provider: 'other' }), /known engine/);
+  assert.throws(() => probe.ingest({ ...event(4, 'run.started', { runId: 'run-d' }), engineId: null }), /known engine/,
+    'an explicit invalid engineId is not read as the provider');
+  const listed = new ChatProtocolProbe({ engineIds: ['codex', 'claude'] });
+  assert.equal(listed.ingest({ ...event(1, 'run.started', { runId: 'run-b' }), engineId: 'claude' }).accepted, true);
+  assert.equal(listed.ingest(event(2, 'run.started')).accepted, true, 'an older provider-only Codex envelope still counts');
+});
+
 test('runtime loss is failed/offline evidence, not a completed stop', () => {
   const probe = new ChatProtocolProbe();
   probe.ingest(event(1, 'run.started'));
