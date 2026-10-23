@@ -410,6 +410,13 @@
   user-select: none;
   -moz-window-dragging: no-drag;
 }
+/* Between the left Bag and right HUD, above the centered Dock. */
+@media (max-width: 950px) {
+  #egd-zoom-indicator {
+    left: 88px;
+    bottom: 68px;
+  }
+}
 .egd-zoom-button {
   appearance: none;
   display: grid;
@@ -5743,7 +5750,9 @@
 .egd-resource-detail-row dt { color: var(--egd-on-surface-variant); }
 .egd-resource-detail-row dd { margin: 0; text-align: right; font-variant-numeric: tabular-nums; font-weight: 550; }
 
+/* Zoom begins 109px above the bottom; keep the narrow HUD 8px clear of it. */
 @media (max-width: 700px) {
+  #egd-hud { height: calc(100vh - 189px); }
   #egd-preset-bag { left: 10px; width: 58px; padding-inline: 4px; }
   .egd-bag-header, .egd-bag-chip { width: 48px; }
   #egd-dock {
