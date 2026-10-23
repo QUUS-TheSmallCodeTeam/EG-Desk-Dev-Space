@@ -1,4 +1,6 @@
 import { chatError, publicText, validateChatCwd } from './codex-chat-values.mjs'
+import { applyRateLimitsUpdate, normalizeRateLimits } from './codex-account-usage.mjs'
+import { publicAuthIdentityKey } from './codex-auth-state.mjs'
 
 // Verified Firefox chrome and local CLI callers can omit Origin.
 // Ordinary web origins must match this loopback service; never echo arbitrary origins.
@@ -137,4 +139,41 @@ export function createChatHttpHandler(chat, ensureAuth, history = chat) {
     }
     return true
   }
+}
+
+/**
+ * ChatGPT usage for the signed-in identity (account/rateLimits/read and the
+ * sparse account/rateLimits/updated notification).
+ * - A read answered after a sign-out or account switch is dropped.
+ * - A failed read changes nothing: no invented 0%, the last value goes stale.
+ * - Reads for one identity are coalesced and, unless forced, throttled.
+ * auth() → current auth state ({isLoggedIn, accountId, accountEmail, rateLimits}).
+ * update(patch) applies {rateLimits} to that state and broadcasts it.
+ */
+export function createRateLimitSync({ request, auth, ready = () => true, update, now = Date.now, minIntervalMs = 60_000 }) {
+  let inFlight = null, checked = null
+  const owner = () => { const state = auth(); return state?.isLoggedIn ? publicAuthIdentityKey(state) : null }
+  function refresh({ force = false } = {}) {
+    const identity = owner()
+    if (!identity || !ready()) return Promise.resolve()
+    if (inFlight?.identity === identity) return inFlight.promise
+    if (!force && checked?.identity === identity && now() - checked.at < minIntervalMs) return Promise.resolve()
+    checked = { identity, at: now() }
+    const read = { identity, promise: null }
+    let answer
+    try { answer = Promise.resolve(request('account/rateLimits/read', { excludeResetCreditDetails: true })) }
+    catch (error) { answer = Promise.reject(error) }
+    read.promise = answer
+      .then(result => { if (owner() === identity) update({ rateLimits: normalizeRateLimits(result, now()) }) })
+      .catch(() => {})
+      .finally(() => { if (inFlight === read) inFlight = null })
+    inFlight = read
+    return read.promise
+  }
+  function notify(message) {
+    if (message?.method !== 'account/rateLimits/updated' || !owner()) return false
+    update({ rateLimits: applyRateLimitsUpdate(auth().rateLimits ?? null, message.params, now()) })
+    return true
+  }
+  return { refresh, notify }
 }

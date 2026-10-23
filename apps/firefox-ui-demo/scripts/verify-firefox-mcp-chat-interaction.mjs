@@ -527,8 +527,12 @@ async function sendStory(action) {
       && after.acceptedRun?.runId === after.response.runId && after.acceptedRequestStatus === 'accepted'),
     check('ordinary Codex omits persona fields; enabled profile carries exact runtime config',
       body?.profileEnabled === baseline.profileEnabled && (baseline.profileEnabled
-        ? body?.agentProfile?.id === baseline.config.agentProfile?.id
-          && body?.toolMode === baseline.config.toolMode && body?.systemPrompt === baseline.config.systemPrompt
+        // A stored Agent Profile travels as its id and revision; the bridge composes it.
+        ? (baseline.config.profileId
+          ? body?.profileId === baseline.config.profileId && body?.profileRevision === baseline.config.profileRevision
+            && !Object.hasOwn(body || {}, 'systemPrompt')
+          : body?.agentProfile?.id === baseline.config.agentProfile?.id
+            && body?.toolMode === baseline.config.toolMode && body?.systemPrompt === baseline.config.systemPrompt)
         : !Object.hasOwn(body || {}, 'agentProfile') && !Object.hasOwn(body || {}, 'toolMode')
           && !Object.hasOwn(body || {}, 'systemPrompt'))),
     check('sent draft clears and composer layout shrinks to 40px', after.composer.value === '' && after.composer.draft === ''

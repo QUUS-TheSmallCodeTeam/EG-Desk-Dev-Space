@@ -441,7 +441,12 @@ export function buildChatRequest(thread, message, requestId, runtime = {}) {
   if (runtime.contextCapabilities) body.contextCapabilities = { read: true, reader: true, publishBriefing: true };
   if (thread.profileEnabled === true) {
     body.profileEnabled = true;
-    for (const field of ['agentProfile', 'systemPrompt', 'toolMode']) if (runtime[field]) body[field] = runtime[field];
+    // A stored Agent Profile is composed by the bridge from its saved revision;
+    // the legacy systemPrompt envelope is only for bridges without profiles.
+    if (isProfileId(runtime.profileId)) {
+      body.profileId = runtime.profileId;
+      if (Number.isSafeInteger(runtime.profileRevision) && runtime.profileRevision > 0) body.profileRevision = runtime.profileRevision;
+    } else for (const field of ['agentProfile', 'systemPrompt', 'toolMode']) if (runtime[field]) body[field] = runtime[field];
   }
   return body;
 }
@@ -461,7 +466,7 @@ function ensureRun(state, identity) {
     conversationId, runId, answerId: key, status: 'running', stopRequested: false,
     messages: [], activities: [], artifacts: [], pendingApprovals: [], pendingUserInputs: [], subAgents: [], error: null, summary: '',
   };
-  for (const field of ['requestId', 'clientThreadId', 'localThreadId', 'answerId', 'authorName']) {
+  for (const field of ['requestId', 'clientThreadId', 'localThreadId', 'answerId', 'authorName', 'authorAvatar']) {
     if (identity[field] || request?.[field]) run[field] = identity[field] || request[field];
   }
   if (request && !run.submissionOwnerCaptured) {
@@ -810,6 +815,7 @@ export function projectRunMessages(existing, run, now = Date.now()) {
       ...previous, ...incoming, role, id: previous?.id || incoming.id,
       providerItemId: incoming.id, content: incoming.content ?? incoming.text ?? '',
       authorName: role === 'assistant' ? previous?.authorName || run.authorName || 'Codex' : previous?.authorName,
+      ...(role === 'assistant' ? { authorAvatar: publicProfileAvatar(previous?.authorAvatar || run.authorAvatar) } : {}),
       createdAt: previous?.createdAt || incoming.createdAt || now,
       conversationId: run.conversationId, runId: run.runId, answerId: run.answerId, artifacts: [], briefing: null, contextCaptures: [], contextEvents: [], contextPackets: [],
     };
@@ -825,4 +831,245 @@ export function projectRunMessages(existing, run, now = Date.now()) {
     last.contextPackets = copy(run.contextPackets !== undefined ? run.contextPackets : priorAnswer?.contextPackets || []);
   }
   return messages;
+}
+
+// Agent Profiles (helper contract: /profiles). Screen-side mirror of the store
+// rules so the form can answer in Korean before a request; the bridge stays
+// the authority and rejects anything this misses.
+export const PROFILE_ID_PATTERN = /^[a-z0-9][a-z0-9-]{0,79}$/;
+export const isProfileId = value => typeof value === 'string' && PROFILE_ID_PATTERN.test(value);
+// Six swatches from docs/egdesk-approved-desktop-style.html :root tokens
+// (same order as helper AVATAR_PALETTE; the index picks the CSS tone class).
+export const PROFILE_AVATAR_PALETTE = ['#49634f', '#a9c5a9', '#958879', '#7b8079', '#252a26', '#f5f0df'];
+export const PROFILE_TONE_OPTIONS = [
+  { value: 'plain', label: '담백' }, { value: 'warm', label: '따뜻' }, { value: 'concise', label: '간결' },
+  { value: 'formal', label: '격식' }, { value: 'playful', label: '유쾌' },
+];
+export const PROFILE_FORM_LIMITS = { name: 40, role: 80, traits: 6, traitLength: 40, speechNotes: 500,
+  expertise: 8, expertiseLength: 80, instructions: 8000, toolPreferences: 20, toolLength: 64 };
+export const PROFILE_CONFLICT_TEXT = '다른 곳에서 바뀌었습니다. 최신 내용을 불러왔습니다.';
+const PROFILE_LIFECYCLE_LABELS = [['active', '사용 중'], ['draft', '초안'], ['disabled', '사용 중지'], ['archived', '보관됨'], ['deleted', '삭제됨']];
+const PROFILE_ORIGINS = ['user', 'template'];
+const SINGLE_LINE_BAD = /[\u0000-\u001f\u007f\u2028\u2029]/;
+const MULTI_LINE_BAD = /[\u0000-\u0008\u000b\u000c\u000e-\u001f\u007f]/;
+const TOOL_NAME = /^[A-Za-z0-9_.:-]+$/;
+const textLength = value => Array.from(value).length;
+const lookup = (pairs, value) => pairs.find(([key]) => key === value)?.[1] ?? null;
+function graphemesOf(text) {
+  if (typeof Intl?.Segmenter === 'function') return [...new Intl.Segmenter('und', { granularity: 'grapheme' }).segment(text)].map(part => part.segment);
+  return Array.from(text);
+}
+const isOneEmoji = text => text.length > 0 && text.length <= 32 && graphemesOf(text).length === 1
+  && /\p{Extended_Pictographic}|\p{Regional_Indicator}/u.test(text);
+const isInitial = text => /^[\p{L}\p{N}]{1,2}$/u.test(text);
+
+export function publicProfileAvatar(value) {
+  if (!value || typeof value !== 'object' || !['emoji', 'initial'].includes(value.kind) || typeof value.value !== 'string') return null;
+  const text = value.value.normalize('NFC').trim();
+  if (value.kind === 'emoji' ? !isOneEmoji(text) : !isInitial(text)) return null;
+  const color = typeof value.color === 'string' ? value.color.toLowerCase() : PROFILE_AVATAR_PALETTE[0];
+  return { kind: value.kind, value: text, color: PROFILE_AVATAR_PALETTE.includes(color) ? color : PROFILE_AVATAR_PALETTE[0] };
+}
+
+/** Avatar to draw: the saved emoji/initial, else the name's first letter; tone indexes the palette. */
+export function profileAvatarView(avatar, name = '') {
+  const saved = publicProfileAvatar(avatar);
+  const first = graphemesOf(typeof name === 'string' ? name.trim() : '')[0] || '?';
+  return { kind: saved?.kind || 'initial', text: saved?.value || first.toUpperCase(), tone: saved ? PROFILE_AVATAR_PALETTE.indexOf(saved.color) : 0, saved: !!saved };
+}
+
+/** Catalog rows from GET /profiles; malformed rows are dropped, never repaired into another identity. */
+export function normalizeProfileCatalog(payload) {
+  const rows = Array.isArray(payload?.profiles) ? payload.profiles.slice(0, 1000) : [];
+  const seen = new Set();
+  const revision = value => Number.isSafeInteger(value) && value > 0 ? value : null;
+  return rows.flatMap(row => {
+    if (!row || !isProfileId(row.id) || seen.has(row.id) || !lookup(PROFILE_LIFECYCLE_LABELS, row.lifecycle) || revision(row.headRevision) === null) return [];
+    if (typeof row.name !== 'string' || !row.name.trim()) return [];
+    seen.add(row.id);
+    return [{ id: row.id, lifecycle: row.lifecycle, origin: PROFILE_ORIGINS.includes(row.origin) ? row.origin : 'user',
+      activeRevision: revision(row.activeRevision), headRevision: revision(row.headRevision), hasDraft: row.hasDraft === true,
+      name: row.name.trim().slice(0, 40), role: typeof row.role === 'string' ? row.role.trim().slice(0, 80) : '',
+      avatar: publicProfileAvatar(row.avatar), updatedAt: Number.isFinite(row.updatedAt) ? row.updatedAt : null }];
+  });
+}
+export const profileRunnable = profile => !!profile && profile.lifecycle === 'active' && Number.isSafeInteger(profile.activeRevision);
+
+export function profileStatusView(profile) {
+  const lifecycle = profile?.lifecycle;
+  const label = lookup(PROFILE_LIFECYCLE_LABELS, lifecycle) || '상태 확인 필요';
+  const detail = lifecycle === 'active'
+    ? `버전 ${profile.activeRevision} 사용 중${profile.hasDraft ? ' · 아직 쓰지 않은 초안 있음' : ''}`
+    : lifecycle === 'draft' ? '초안 저장됨 · 아직 사용할 수 없음'
+      : lifecycle === 'disabled' ? '새 대화에서 고를 수 없음'
+        : lifecycle === 'archived' ? '보관함에 있음' : lifecycle === 'deleted' ? '삭제됨' : '';
+  return { label, detail, lifecycle: lifecycle || 'unknown', usable: profileRunnable(profile), example: profile?.origin === 'template' };
+}
+
+function formLine(value) { return typeof value === 'string' ? value.normalize('NFC').trim() : ''; }
+function formBlock(value) { return typeof value === 'string' ? value.normalize('NFC').replace(/\r\n?/g, '\n').trim() : ''; }
+function formList(value) {
+  const items = (Array.isArray(value) ? value : []).map(formLine).filter(Boolean);
+  return [...new Set(items)];
+}
+
+/** Editable form fields from a saved body (or an empty new Agent). */
+export function profileFormFromBody(body = null) {
+  const avatar = publicProfileAvatar(body?.avatar);
+  const tone = PROFILE_TONE_OPTIONS.some(option => option.value === body?.personality?.tone) ? body.personality.tone : 'plain';
+  return {
+    name: typeof body?.name === 'string' ? body.name : '',
+    avatarKind: avatar?.kind || 'initial', avatarValue: avatar?.value || '', avatarColor: avatar?.color || PROFILE_AVATAR_PALETTE[0],
+    role: typeof body?.role === 'string' ? body.role : '', tone,
+    traits: Array.isArray(body?.personality?.traits) ? body.personality.traits.filter(item => typeof item === 'string') : [],
+    speechNotes: typeof body?.personality?.speechNotes === 'string' ? body.personality.speechNotes : '',
+    expertise: Array.isArray(body?.expertise) ? body.expertise.filter(item => typeof item === 'string') : [],
+    instructions: typeof body?.instructions === 'string' ? body.instructions : '',
+    toolPreferences: Array.isArray(body?.toolPreferences) ? body.toolPreferences.filter(item => typeof item === 'string') : [],
+    model: body?.model && typeof body.model === 'object' ? copy(body.model) : null,
+  };
+}
+
+/** Korean field errors as {field, message} records, plus the request body when valid. */
+export function validateProfileForm(form = {}) {
+  const limits = PROFILE_FORM_LIMITS;
+  const errors = [];
+  const add = (field, message) => { if (!errors.some(error => error.field === field)) errors.push({ field, message }); };
+  const name = formLine(form.name);
+  if (!name) add('name', '담당자 이름을 입력해 주세요.');
+  else if (SINGLE_LINE_BAD.test(name)) add('name', '담당자 이름은 한 줄로 입력해 주세요.');
+  else if (textLength(name) > limits.name) add('name', `담당자 이름은 ${limits.name}자 이하로 입력해 주세요.`);
+  const kind = form.avatarKind === 'emoji' ? 'emoji' : 'initial';
+  let avatarValue = formLine(form.avatarValue);
+  if (!avatarValue && kind === 'initial' && name) {
+    const first = graphemesOf(name)[0] || '';
+    avatarValue = isInitial(first) ? first.toUpperCase() : '';
+  }
+  if (avatarValue && kind === 'emoji' && !isOneEmoji(avatarValue)) add('avatar', '아바타 이모지는 하나만 넣어 주세요.');
+  if (avatarValue && kind === 'initial' && !isInitial(avatarValue)) add('avatar', '이니셜은 글자나 숫자 1~2자로 넣어 주세요.');
+  const color = typeof form.avatarColor === 'string' ? form.avatarColor.toLowerCase() : '';
+  if (!PROFILE_AVATAR_PALETTE.includes(color)) add('avatarColor', '아바타 색은 준비된 6가지 중에서 골라 주세요.');
+  const role = formLine(form.role);
+  if (SINGLE_LINE_BAD.test(role) || textLength(role) > limits.role) add('role', `역할은 한 줄, ${limits.role}자 이하로 적어 주세요.`);
+  const tone = PROFILE_TONE_OPTIONS.some(option => option.value === form.tone) ? form.tone : null;
+  if (!tone) add('tone', '말투를 다시 골라 주세요.');
+  const traits = formList(form.traits);
+  if (traits.length > limits.traits) add('traits', `성격 특징은 ${limits.traits}개까지 넣을 수 있습니다.`);
+  else if (traits.some(item => SINGLE_LINE_BAD.test(item) || textLength(item) > limits.traitLength)) add('traits', `성격 특징 하나는 한 줄, ${limits.traitLength}자 이하로 적어 주세요.`);
+  const speechNotes = formBlock(form.speechNotes);
+  if (MULTI_LINE_BAD.test(speechNotes) || textLength(speechNotes) > limits.speechNotes) add('speechNotes', `말투 메모는 ${limits.speechNotes}자 이하로 적어 주세요.`);
+  const expertise = formList(form.expertise);
+  if (expertise.length > limits.expertise) add('expertise', `맡길 일은 ${limits.expertise}개까지 넣을 수 있습니다.`);
+  else if (expertise.some(item => SINGLE_LINE_BAD.test(item) || textLength(item) > limits.expertiseLength)) add('expertise', `맡길 일 하나는 한 줄, ${limits.expertiseLength}자 이하로 적어 주세요.`);
+  const instructions = formBlock(form.instructions);
+  if (MULTI_LINE_BAD.test(instructions) || textLength(instructions) > limits.instructions) add('instructions', `지침은 ${limits.instructions}자 이하로 적어 주세요.`);
+  const toolPreferences = formList(form.toolPreferences);
+  if (toolPreferences.length > limits.toolPreferences) add('toolPreferences', `선호 도구는 ${limits.toolPreferences}개까지 넣을 수 있습니다.`);
+  else if (toolPreferences.some(item => !TOOL_NAME.test(item) || item.length > limits.toolLength)) add('toolPreferences', '선호 도구 이름은 영문·숫자와 _ . : - 만 쓸 수 있습니다.');
+  if (errors.length) return { ok: false, errors, body: null };
+  return { ok: true, errors, body: {
+    name, avatar: avatarValue ? { kind, value: avatarValue, color } : null, role,
+    personality: { tone, traits, speechNotes }, expertise, instructions, toolPreferences,
+    model: form.model && typeof form.model === 'object' ? copy(form.model) : null,
+  } };
+}
+
+const PROFILE_DIFF_LABELS = [['name', '담당자 이름'], ['avatar', '아바타'], ['role', '역할'], ['personality.tone', '말투'],
+  ['personality.traits', '성격 특징'], ['personality.speechNotes', '말투 메모'], ['expertise', '맡길 일'],
+  ['instructions', '지침'], ['toolPreferences', '선호 도구'], ['model', '실행 모델']];
+function diffValueText(field, value) {
+  if (value === null || value === undefined) return '없음';
+  if (field === 'personality.tone') return PROFILE_TONE_OPTIONS.find(option => option.value === value)?.label || '확인 안 됨';
+  if (field === 'avatar') return value?.kind === 'emoji' ? `이모지 ${value.value}` : `이니셜 ${value?.value ?? ''}`;
+  if (field === 'model') return typeof value?.modelId === 'string' ? value.modelId : '확인 안 됨';
+  if (Array.isArray(value)) return value.length ? value.join(', ') : '없음';
+  const text = String(value);
+  return text ? (text.length > 300 ? `${text.slice(0, 300)}…` : text) : '비어 있음';
+}
+/** Rows for GET /profiles/:id/diff changes; unknown fields are skipped. */
+export function profileDiffRows(changes) {
+  return (Array.isArray(changes) ? changes : []).flatMap(change => {
+    const label = lookup(PROFILE_DIFF_LABELS, change?.field);
+    return label ? [{ field: change.field, label, before: diffValueText(change.field, change.before), after: diffValueText(change.field, change.after) }] : [];
+  });
+}
+
+/** Korean text for a failed /profiles request; server messages stay internal. */
+export function profileRequestErrorText(error) {
+  const code = error?.code;
+  if (code === 'PROFILE_REVISION_CONFLICT') return PROFILE_CONFLICT_TEXT;
+  if (code === 'PROFILE_LIFECYCLE_CONFLICT') return '지금 상태에서는 할 수 없는 작업입니다. 최신 상태를 불러왔습니다.';
+  if (code === 'PROFILE_LIMIT') return 'Agent를 더 만들 수 없습니다. 쓰지 않는 Agent를 삭제한 뒤 다시 시도해 주세요.';
+  if (code === 'PROFILE_REVISION_LIMIT') return '이 Agent는 버전을 더 저장할 수 없습니다.';
+  if (code === 'INVALID_PROFILE' || code === 'PROFILE_HTTP_INPUT') return '입력 내용을 저장할 수 없습니다. 항목을 확인해 주세요.';
+  if (code === 'PROFILE_NOT_FOUND' || code === 'PROFILE_REVISION_NOT_FOUND') return '이 Agent 또는 버전을 찾을 수 없습니다. 목록을 다시 불러왔습니다.';
+  if (code === 'PROFILE_STORE_UNAVAILABLE' || code === 'PROFILE_ROUTE_NOT_FOUND' || code === 'PROFILE_LOOPBACK_REQUIRED' || !error?.status || error.status === 404 || error.status === 503) {
+    return 'Agent 저장소에 연결하지 못했습니다. 코덱스 연결을 확인한 뒤 다시 시도해 주세요.';
+  }
+  return '요청을 처리하지 못했습니다. 잠시 뒤 다시 시도해 주세요.';
+}
+/** Korean text for /chat/send profile failures (runtime runProfile codes). */
+export function profileSendErrorText(code) {
+  if (code === 'PROFILE_NOT_RUNNABLE') return '이 대화방의 Agent는 지금 사용 중이 아닙니다. 설정에서 사용을 시작하거나 다른 Agent를 골라 주세요.';
+  if (code === 'PROFILE_NOT_FOUND') return '이 대화방의 Agent를 찾을 수 없습니다. 다른 Agent를 골라 주세요.';
+  if (code === 'PROFILE_REVISION_NOT_FOUND') return '이 Agent의 해당 버전을 찾을 수 없습니다. 설정을 다시 불러온 뒤 보내 주세요.';
+  if (code === 'INVALID_PROFILE') return 'Agent 설정을 확인하지 못해 보내지 않았습니다. 잠시 뒤 다시 보내거나 다른 Agent를 골라 주세요.';
+  if (code === 'PROFILE_STORE_UNAVAILABLE') return 'Agent 저장소를 열 수 없어 보내지 않았습니다. 잠시 뒤 다시 보내거나 기본 Codex로 바꿔 주세요.';
+  return null;
+}
+
+// ChatGPT plan and usage (helper contract: auth.planType, auth.rateLimits, auth.usage).
+const PLAN_LABELS = [['free', '무료'], ['go', 'Go'], ['plus', 'Plus'], ['pro', 'Pro'], ['prolite', 'Pro Lite'], ['promax', 'Pro Max'],
+  ['team', 'Team'], ['self_serve_business_prolite', 'Business'], ['self_serve_business_usage_based', 'Business 사용량제'],
+  ['business', 'Business'], ['ent26', 'Enterprise'], ['enterprise_cbp_automation', 'Enterprise'],
+  ['enterprise_cbp_usage_based', 'Enterprise 사용량제'], ['enterprise', 'Enterprise'], ['edu', 'Edu'], ['edu_plus', 'Edu Plus'], ['edu_pro', 'Edu Pro']];
+export const codexPlanLabel = planType => typeof planType === 'string' ? lookup(PLAN_LABELS, planType) : null;
+
+/** Local clock for a reset, e.g. '오후 3:20'; another day adds '10월 27일 '. */
+export function formatResetClock(at, now = Date.now()) {
+  if (!Number.isFinite(at) || at <= 0) return null;
+  const date = new Date(at), today = new Date(now);
+  const hours = date.getHours();
+  const clock = `${hours < 12 ? '오전' : '오후'} ${hours % 12 || 12}:${String(date.getMinutes()).padStart(2, '0')}`;
+  const sameDay = date.getFullYear() === today.getFullYear() && date.getMonth() === today.getMonth() && date.getDate() === today.getDate();
+  const year = date.getFullYear() === today.getFullYear() ? '' : `${date.getFullYear()}년 `;
+  return sameDay ? clock : `${year}${date.getMonth() + 1}월 ${date.getDate()}일 ${clock}`;
+}
+
+const usedPercentOf = window => Number.isFinite(window?.usedPercent) ? Math.min(100, Math.max(0, window.usedPercent)) : null;
+/** Small usage ring: a reported value or grey '확인 안 됨' (never an invented 0%). Null when signed out. */
+export function usageRingView(auth) {
+  if (!auth?.isLoggedIn) return null;
+  const usage = auth.usage && typeof auth.usage === 'object' ? auth.usage : null;
+  const level = ['ok', 'warn', 'limit'].includes(usage?.level) ? usage.level : 'unknown';
+  if (level === 'unknown') {
+    return { level, percent: null, text: '확인 안 됨', label: '사용 한도 확인 안 됨', title: '사용 한도 확인 안 됨 · 아직 보고된 사용량이 없습니다', stale: false, resetLabel: null };
+  }
+  const reported = [auth.rateLimits?.primary, auth.rateLimits?.secondary].map(usedPercentOf).filter(value => value !== null);
+  const parsed = Number.parseInt(String(usage.percentLabel || '').match(/^(\d{1,3})%/)?.[1] ?? '', 10);
+  const percent = level === 'limit' ? 100 : reported.length ? Math.floor(Math.max(...reported)) : Number.isFinite(parsed) ? Math.min(100, parsed) : null;
+  const stale = usage.stale === true;
+  const percentText = typeof usage.percentLabel === 'string' && usage.percentLabel ? usage.percentLabel : percent === null ? '사용량 확인 안 됨' : `${percent}% 사용`;
+  const parts = [typeof usage.windowLabel === 'string' ? usage.windowLabel : null, percentText,
+    typeof usage.resetLabel === 'string' ? usage.resetLabel : null, stale ? '확인한 지 오래되어 실제와 다를 수 있음' : null].filter(Boolean);
+  return { level, percent, text: level === 'limit' ? '한도' : percent === null ? '?' : `${percent}%`,
+    label: `사용 한도 ${parts.slice(0, 2).join(' ')}`.trim(), title: parts.join(' · '), stale, resetLabel: typeof usage.resetLabel === 'string' ? usage.resetLabel : null };
+}
+
+const ERROR_KIND_VALUES = ['auth', 'quota', 'permission', 'network', 'model', 'unknown'];
+/** Run error copy by kind (helper contract: run.error.kind, retryAt); model/unknown keep the reported text. */
+export function runErrorNotice(error, usage = null, now = Date.now()) {
+  if (!error) return null;
+  if (typeof error === 'string') return { kind: 'unknown', text: error, action: null };
+  const kind = ERROR_KIND_VALUES.includes(error.kind) ? error.kind : 'unknown';
+  if (kind === 'auth') return { kind, text: '다시 로그인이 필요합니다.', action: 'login' };
+  if (kind === 'quota') {
+    const resetAt = Number.isFinite(error.retryAt) && error.retryAt > now ? error.retryAt
+      : Number.isFinite(usage?.resetsAt) && usage.resetsAt > now ? usage.resetsAt : null;
+    const clock = formatResetClock(resetAt, now);
+    return { kind, text: clock ? `사용 한도에 도달했습니다. ${clock}에 다시 쓸 수 있습니다.` : '사용 한도에 도달했습니다. 다시 쓸 수 있는 시각은 아직 확인되지 않았습니다.', action: null };
+  }
+  if (kind === 'permission') return { kind, text: '권한이 부족합니다.', action: null };
+  if (kind === 'network') return { kind, text: '연결이 불안정합니다. 다시 시도해 주세요.', action: 'retry' };
+  return { kind, text: error.message || error.code || '실행 오류', action: null };
 }

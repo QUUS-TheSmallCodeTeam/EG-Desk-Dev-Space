@@ -14,6 +14,8 @@ const BROWSER_CODES = new Set([
   'BROWSER_POLICY_REQUIRED',
   'BROWSER_FIXTURE_REQUIRED', 'BROWSER_FIXTURE_UNAVAILABLE',
   'BROWSER_FIXTURE_SCOPE', 'BROWSER_FIXTURE_ATTESTATION_FAILED',
+  'BROWSER_NAVIGATE_OUT_OF_SCOPE', 'BROWSER_PRESS_TARGET_NOT_FOCUSED',
+  'BROWSER_WAIT_OUTCOME_UNKNOWN',
 ])
 const CONTEXT_CODES = new Set([
   'ACCOUNT_CHANGED', 'CONTEXT_CHANGED', 'CONTEXT_FORBIDDEN',
@@ -35,7 +37,7 @@ export function classifyPublicToolError(error, { browser = false, context = fals
   }
   if (!browser) return { code: 'TOOL_PROVIDER_FAILED', message: 'A tool provider failed; its raw diagnostic was withheld.' }
   const code = BROWSER_CODES.has(error?.code) ? error.code : 'BROWSER_TOOL_FAILED'
-  if (code === 'BROWSER_UI_TIMEOUT' || code === 'BROWSER_OUTCOME_UNKNOWN') return { code, message: 'Browser action outcome is unknown; inspect the Card before retrying.' }
+  if (code === 'BROWSER_UI_TIMEOUT' || code === 'BROWSER_OUTCOME_UNKNOWN' || code === 'BROWSER_WAIT_OUTCOME_UNKNOWN') return { code, message: 'Browser action outcome is unknown; inspect the Card before retrying.' }
   if (code === 'BROWSER_ACTION_UNVERIFIED') return { code, message: 'Browser action postcondition was not verified; do not retry blindly.' }
   return { code, message: 'Browser tool request was rejected; inspect the selected Card and Run state.' }
 }

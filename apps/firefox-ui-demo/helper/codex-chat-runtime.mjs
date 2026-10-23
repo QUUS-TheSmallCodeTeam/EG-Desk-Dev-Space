@@ -5,6 +5,7 @@ import { READ_ONLY_QA, BROWSER_BOUNDED, FIXTURE_BROWSER_QA, requestedExecutionPo
 import { classifyPublicToolError } from './codex-tool-errors.mjs'
 import { specManifestEntries, verifiedManifestOwners } from './codex-native-tool-manifest.mjs'
 import { nativeQaCommandReceipt, validateQaCommandNonce, validateQaOutputMarkers } from './codex-qa-command-receipt.mjs'
+import { MAX_COMPOSED } from './egdesk-profile-store.mjs'
 
 const TERMINAL = new Set(['completed', 'interrupted', 'failed'])
 const ITEM_STATUS = new Set(['inProgress', 'completed', 'failed', 'declined'])
@@ -25,6 +26,10 @@ const REVIVE_TOOLS = new Set(['resumeAgent', 'sendInput', 'followupTask'])
 const AGENT_STATE = { pendingInit: 'starting', running: 'running', completed: 'completed', errored: 'errored', interrupted: 'interrupted', shutdown: 'closed', notFound: 'notFound' }
 const ACTIVITY_STATE = { started: 'running', interacted: 'running', interrupted: 'interrupted', completed: 'completed' }
 const SUBAGENT_DONE = new Set(['completed', 'errored', 'interrupted', 'closed', 'notFound'])
+// Guarded Browser tools a selected Card with an interaction grant may call.
+// Observation alone never unlocks them; same-site, focus and wait budgets are
+// enforced again by the Browser provider and the actor.
+const BROWSER_INTERACTION_TOOLS = ['egdesk_browser_navigate', 'egdesk_browser_click', 'egdesk_browser_fill', 'egdesk_browser_scroll', 'egdesk_browser_press', 'egdesk_browser_wait']
 const idText = value => typeof value === 'string' && value.length <= 300 ? value : null
 const runKey = (threadId, turnId) => `${threadId}/${turnId}`
 const copy = value => JSON.parse(JSON.stringify(value))
@@ -153,8 +158,9 @@ function cleanNotification(method, p) {
 }
 
 export class CodexChatRuntime {
-  constructor({ request, respond, emit = () => {}, emitLegacy = () => {}, verifyFile = verifyLocalFile, now = Date.now, contexts = null, toolProviders = [], expectedProcessConfiguration = null, store = null, requireStore = false, getOwnerKey = () => null, qaReady = () => true, getNativeContractFingerprint = () => null }) {
+  constructor({ request, respond, emit = () => {}, emitLegacy = () => {}, verifyFile = verifyLocalFile, now = Date.now, contexts = null, toolProviders = [], expectedProcessConfiguration = null, store = null, requireStore = false, getOwnerKey = () => null, qaReady = () => true, getNativeContractFingerprint = () => null, profiles = null }) {
     Object.assign(this, { request, emitEvent: emit, emitLegacy, verifyFile, now })
+    this.profiles = profiles
     this.nativeRespond = respond
     this.dynamicRequestProviders = new Map()
     this.respond = (id, result, error) => {
@@ -250,7 +256,7 @@ export class CodexChatRuntime {
         const browser = provider.providerId === 'egdesk-browser' && spec?.name?.startsWith('egdesk_browser_')
         if (policy === READ_ONLY_QA && !contextRead && !(browser && spec.name === 'egdesk_browser_observe')) continue
         if (policy === BROWSER_BOUNDED && !contextRead && !(browser && (spec.name === 'egdesk_browser_observe'
-          || (browserInteraction && ['egdesk_browser_click', 'egdesk_browser_fill'].includes(spec.name))))) continue
+          || (browserInteraction && BROWSER_INTERACTION_TOOLS.includes(spec.name))))) continue
         if (policy === FIXTURE_BROWSER_QA && !contextRead && !(browser && ['egdesk_browser_observe', 'egdesk_browser_click', 'egdesk_browser_fill'].includes(spec.name))) continue
         const names = spec?.type === 'function' && typeof spec.name === 'string' ? [toolKey(null, spec.name)]
           : spec?.type === 'namespace' && typeof spec.name === 'string' && Array.isArray(spec.tools)
@@ -578,6 +584,7 @@ export class CodexChatRuntime {
           localRunId: prior?.localRunId || localId('run', clientThreadId, turnId),
           requestId: prior?.requestId || null,
           localMessageId: request?.localMessageId || null,
+          profileBinding: prior?.profileBinding,
         }
         if (prior) this.persistedRunStates.set(runKey(threadId, turnId), { status: prior.status, historyComplete: prior.historyComplete })
       }
@@ -595,11 +602,17 @@ export class CodexChatRuntime {
       ...(this.store ? { accountIdentity: { ownerHash: ownerHash(this.getOwnerKey()), status: 'verified' } } : {}),
       cwdPublic: publicText(this.threads.get(threadId)?.cwd || '', 2000),
     }
+    // Which saved profile revision ran. Restored runs keep the recorded binding
+    // so a later checkpoint never drops it from local history.
+    const profileBinding = context?.profileRun?.binding || context?.profileBinding
+    if (profileBinding && typeof profileBinding.profileId === 'string' && Number.isSafeInteger(profileBinding.revision) && typeof profileBinding.hash === 'string') {
+      run.profileBinding = { profileId: profileBinding.profileId, revision: profileBinding.revision, hash: profileBinding.hash }
+    }
     this.runs.set(key, run)
     if (owned) this.ownedRuns.add(run)
     this.trimRuns()
     if (announce) {
-      this.emit(run, 'run.started', { status: 'inProgress' })
+      this.emit(run, 'run.started', { status: 'inProgress', ...(run.profileBinding ? { profileBinding: run.profileBinding } : {}) })
       this.emitLegacy({ type: 'assistant-start', conversationId: threadId, runId: turnId, message: { id: key, role: 'assistant', content: '', status: 'streaming', createdAt: run.createdAt } })
     }
     return run
@@ -623,14 +636,14 @@ export class CodexChatRuntime {
     this.assertReady()
     if (typeof body.message !== 'string' || !body.message.trim()) throw chatError('EMPTY_MESSAGE', 'Message is required')
     if (body.message.length > MAX_TEXT) throw chatError('MESSAGE_TOO_LONG', `Message exceeds ${MAX_TEXT} characters`)
-    this.threadOverrides(body)
+    const profileRun = this.resolveProfile(body)
+    const instructions = this.threadOverrides(body, profileRun).developerInstructions || ''
     const requestedPolicy = requestedExecutionPolicy(body.executionPolicy)
     const legacyQaNonce = validateQaCommandNonce(body.qaCommandNonce)
     const qaOutputMarkers = validateQaOutputMarkers(body.qaOutputMarkers)
     if (legacyQaNonce && qaOutputMarkers) throw chatError('INVALID_QA_OUTPUT_MARKERS', 'Choose one QA marker contract per request', 400)
     const qaMarkers = qaOutputMarkers || (legacyQaNonce ? [legacyQaNonce] : null)
-    if (qaOutputMarkers && (body.message.includes(qaOutputMarkers[0]) ||
-        (body.profileEnabled === true && typeof body.systemPrompt === 'string' && body.systemPrompt.includes(qaOutputMarkers[0])))) {
+    if (qaOutputMarkers && (body.message.includes(qaOutputMarkers[0]) || instructions.includes(qaOutputMarkers[0]))) {
       throw chatError('QA_PRIVATE_MARKER_SPOILED', 'The first QA fixture marker must be absent from model-visible request text', 400)
     }
     if (requestedPolicy && !this.qaReady()) throw chatError('QA_POLICY_UNAVAILABLE', 'Bounded execution requires a verified native policy contract', 503)
@@ -642,7 +655,10 @@ export class CodexChatRuntime {
       // lost response. It must not change the identity of the original input.
       message: body.message, clientThreadId: body.clientThreadId || body.thread?.id,
       cwd: body.cwd, model: body.model, effort: body.effort, profileEnabled: body.profileEnabled === true,
-      systemPrompt: body.profileEnabled === true ? body.systemPrompt : undefined,
+      // A saved profile is identified by its immutable revision and hash; the
+      // free-text persona stays for older UI requests (unchanged fingerprint).
+      systemPrompt: !profileRun && body.profileEnabled === true ? body.systemPrompt : undefined,
+      profile: profileRun ? profileRun.binding : undefined,
       contextSnapshotIds: body.contextSnapshotIds, contextCapabilities: body.contextCapabilities, attachments: body.attachments,
       executionPolicy: body.executionPolicy,
       selectedSources: body.selectedSources, browserTransportId: body.browserTransportId,
@@ -751,6 +767,7 @@ export class CodexChatRuntime {
       executionPolicy: requestedPolicy || boundPolicy,
       qaOutputMarkers: qaMarkers,
       policyUpgrade: Boolean(conversationId && requestedPolicy && !boundPolicy),
+      profileRun,
     }
     const record = { fingerprint, settled: false, promise: null }
     record.promise = this.startTurn(body, context).catch(error => {
@@ -792,7 +809,24 @@ export class CodexChatRuntime {
     return record.promise
   }
 
-  threadOverrides(body) {
+  // AGENT-03: a saved Agent profile's active (or named) revision becomes the
+  // native developer instructions. Resolved once per send so the request
+  // fingerprint, the instructions and the Run record name the same revision.
+  resolveProfile(body) {
+    if (body.profileId === undefined || body.profileId === null) return null
+    if (body.profileEnabled === false) throw chatError('INVALID_PROFILE', 'Choose an Agent profile or turn profiles off, not both')
+    if (!this.profiles) throw chatError('PROFILE_STORE_UNAVAILABLE', 'Local profile storage is unavailable', 503)
+    // Store failures carry their own code and HTTP status (404 missing, 409 not active).
+    const resolved = this.profiles.runProfile(body.profileId, body.profileRevision ?? undefined)
+    const binding = resolved?.binding, instructions = resolved?.developerInstructions
+    if (!binding || typeof binding.profileId !== 'string' || !Number.isSafeInteger(binding.revision) || typeof binding.hash !== 'string' ||
+        typeof instructions !== 'string' || !instructions.trim() || instructions.length > MAX_COMPOSED) {
+      throw chatError('INVALID_PROFILE', `A saved profile must compose 1 to ${MAX_COMPOSED} characters of instructions`, 500)
+    }
+    return { binding: { profileId: binding.profileId, revision: binding.revision, hash: binding.hash }, developerInstructions: instructions }
+  }
+
+  threadOverrides(body, profileRun = null) {
     const options = {}
     const cwd = validateChatCwd(body)
     if (cwd !== undefined) options.cwd = cwd
@@ -800,7 +834,8 @@ export class CodexChatRuntime {
       if (!idText(body.model) || !body.model.trim()) throw chatError('INVALID_MODEL', 'Invalid model')
       options.model = body.model
     }
-    if (body.profileEnabled === true) {
+    if (profileRun) options.developerInstructions = profileRun.developerInstructions
+    else if (body.profileEnabled === true) {
       const prompt = typeof body.systemPrompt === 'string' ? body.systemPrompt.trim() : ''
       if (!prompt || prompt.length > 8000) throw chatError('INVALID_PROFILE', 'An enabled profile needs a systemPrompt of at most 8000 characters')
       options.developerInstructions = prompt
@@ -888,7 +923,7 @@ export class CodexChatRuntime {
 
   async startTurn(body, context) {
     const epoch = this.epoch
-    const overrides = this.threadOverrides(body)
+    const overrides = this.threadOverrides(body, context.profileRun)
     const policy = context.executionPolicy
     const qa = policy === READ_ONLY_QA
     const bounded = qa || policy === BROWSER_BOUNDED || policy === FIXTURE_BROWSER_QA
@@ -967,7 +1002,9 @@ export class CodexChatRuntime {
       // Read-only QA re-asserts and verifies its effective native thread policy
       // before *every* provider turn, including after reconnect or a profile
       // change. A loaded thread must be detached first so resume overrides take.
-      const mustReload = (bounded && !justRestored) || body.profileEnabled === true || body.profileEnabled === false
+      // A saved profile takes the same path, so a newly activated revision is
+      // applied to this thread on its next send.
+      const mustReload = (bounded && !justRestored) || body.profileEnabled === true || body.profileEnabled === false || Boolean(context.profileRun)
       if (mustReload && this.loadedThreads.has(cid)) {
         const detached = await this.request('thread/unsubscribe', { threadId: cid })
         this.loadedThreads.delete(cid)
@@ -1079,6 +1116,7 @@ export class CodexChatRuntime {
         clientThreadId: context.clientThreadId, localConversationId: context.localConversationId,
         localRunId: context.localRunId, localMessageId: context.localMessageId,
         ...(bounded ? { executionPolicy: run.executionPolicy } : {}),
+        ...(run.profileBinding ? { profileBinding: run.profileBinding } : {}),
       }
     } catch (error) {
       // A native JSON-RPC error is a definite rejection. A lost/ambiguous reply
@@ -1443,7 +1481,7 @@ export class CodexChatRuntime {
       const selectedBrowser = browser && run.browserBinding?.cards?.find(card => card.cardId === event.arguments?.cardId)
       const boundedBrowser = selectedBrowser && ['observe', 'interact'].includes(selectedBrowser.permission)
         && (event.tool === 'egdesk_browser_observe' || (selectedBrowser.permission === 'interact'
-          && ['egdesk_browser_click', 'egdesk_browser_fill'].includes(event.tool)))
+          && BROWSER_INTERACTION_TOOLS.includes(event.tool)))
       if ((mode === READ_ONLY_QA && !contextRead && !(browser && event.tool === 'egdesk_browser_observe')) ||
           (mode === BROWSER_BOUNDED && !contextRead && !boundedBrowser) ||
           (mode === FIXTURE_BROWSER_QA && !contextRead && !(browser && ['egdesk_browser_observe', 'egdesk_browser_click', 'egdesk_browser_fill'].includes(event.tool))) ||

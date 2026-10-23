@@ -11,6 +11,10 @@ import * as FileCard from '../overlay/resources/EGDeskFileCardState.sys.mjs';
 import { createEGDeskFileServiceCallbacks, createEGDeskNativeFilePickers } from '../overlay/resources/EGDeskFileView.sys.mjs';
 import { createDeskRecoveryStore, missingDeskRecoveryViews } from '../overlay/resources/EGDeskRecoveryState.sys.mjs';
 import { createTerminalCloseController, terminalExitEvidence, terminalResponsePacket } from '../overlay/resources/EGDeskTerminalState.sys.mjs';
+import { AVATAR_PALETTE, PROFILE_TONES, normalizeProfileBody } from '../helper/egdesk-profile-store.mjs';
+import { normalizeRateLimits, usageDisplay } from '../helper/codex-account-usage.mjs';
+import { PLAN_TYPES } from '../helper/codex-auth-state.mjs';
+import { publicError } from '../helper/codex-chat-values.mjs';
 
 // Exercise the actual production runtime-config body, without executing the
 // Firefox overlay bootstrap, DOM handlers, bridge requests, or runtime code.
@@ -4708,4 +4712,465 @@ test('draft pruning keeps only answerable live questions', () => {
   const prune = compileFunction(pruneDraftsBody, ['userInputDrafts', 'state', 'userInputDraftKey']);
   prune(drafts, { codex: { chatProtocol: protocol } }, (value, id) => `${value.conversationId}/${value.runId}/${id}`);
   assert.deepEqual([...drafts.keys()], [key('input:stream-a:0:number:7')]);
+});
+
+// ---- Agent Profiles, ChatGPT plan/usage, run error copy (AGENT-02/03/05/07, CHAT-01/02, SUB-03/05/14) ----
+
+const settingsSource = (() => {
+  const start = surfaceSource.indexOf('  function spawnSettingsCard(');
+  const end = surfaceSource.indexOf('\n  function resolveBrowserCard(', start);
+  return start >= 0 && end > start ? surfaceSource.slice(start, end) : '';
+})();
+const declaration = name => {
+  const start = surfaceSource.indexOf(`  function ${name}(`);
+  const end = start < 0 ? -1 : surfaceSource.indexOf('\n  }\n', start);
+  return end < 0 ? null : surfaceSource.slice(start, end + 4);
+};
+// The production resolver: the catalog decides, built-in definitions only when the store is absent.
+function productionProfileResolver(catalog) {
+  const sources = ['codexServerAgentProfile', 'codexAgentProfile', 'codexAgentProfileChoices'].map(declaration);
+  assert.ok(sources.every(Boolean), 'profile resolution must remain directly testable');
+  const legacy = {
+    'conversational-coding': { id: 'conversational-coding', label: 'Chat', name: 'Conversational Coding Agent', summary: '', capabilities: [], systemPrompt: 'legacy chat prompt', toolMode: 'basic-tools' },
+    'review-verifier': { id: 'review-verifier', label: 'Verify', name: 'Review and Verification Agent', summary: '', capabilities: [], systemPrompt: 'legacy verifier prompt', toolMode: 'verification' },
+  };
+  return compileFunction(`${sources.join('\n')}\nreturn { codexAgentProfile, codexAgentProfileChoices };`,
+    ['ChatState', 'CODEX_AGENT_PROFILES', 'CODEX_AGENT_PROFILE_DEFS', 'DEFAULT_CODEX_AGENT_PROFILE_ID', 'codexProfileCatalog'])(
+    Chat, legacy, Object.values(legacy), 'conversational-coding', catalog);
+}
+const catalogRows = [
+  { id: 'review-verifier', lifecycle: 'active', origin: 'template', activeRevision: 2, headRevision: 3, hasDraft: true,
+    name: '검증 담당', role: '버그와 회귀를 먼저 봅니다', avatar: { kind: 'initial', value: 'V', color: '#252A26' } },
+  { id: 'prof-stopped', lifecycle: 'disabled', origin: 'user', activeRevision: 1, headRevision: 1, hasDraft: false, name: '쉬는 Agent', role: '', avatar: null },
+  { id: 'prof-draft', lifecycle: 'draft', origin: 'user', activeRevision: null, headRevision: 1, hasDraft: true, name: '만드는 중', role: '', avatar: { kind: 'emoji', value: '🦉', color: '#a9c5a9' } },
+];
+
+test('Settings has no sample account, provider, model or Agent data left', () => {
+  assert.ok(settingsSource.length > 1000);
+  for (const sample of ['SETTINGS_MODELS', 'CODEX_ACCOUNT', 'SETTINGS_PROVIDERS', 'SETTINGS_AGENTS', 'm8chaa@gmail.com', 'Minsoo Cha',
+    'GPT-4.1', 'Gemini 2.5', 'Claude 4 Sonnet', 'Ollama', 'connectedProviders', '무제한']) {
+    assert.equal(surfaceSource.includes(sample), false, `sample data still present: ${sample}`);
+  }
+  assert.match(settingsSource, /const tabDefs = \[\s*\{ id: 'account', label: '계정'[^\]]*\{ id: 'agents', label: 'Agent 관리'[^\]]*\];/, 'only 계정 and Agent 관리; the model list is hidden');
+  assert.match(settingsSource, /const auth = codex\.authStatus \|\| \{\};/);
+  assert.match(settingsSource, /ChatState\.codexPlanLabel\(auth\.planType\)/);
+  assert.match(settingsSource, /ChatState\.usageRingView\(auth\)/);
+  assert.match(settingsSource, /bridge\(\)\?\.startLogin\(\)/, 'login reuses the actual auth flow');
+  assert.match(settingsSource, /bridge\(\)\?\.signOut\(\)/, 'sign-out reuses the actual auth flow');
+  assert.ok(settingsSource.includes("'준비 중 — 연결 방식 결정 대기'"), 'Claude is one pending line, not a fake connection');
+  assert.doesNotMatch(settingsSource, /#[0-9a-fA-F]{3,8}\b/, 'Settings colors come from CSS tokens');
+});
+
+test('Agent 관리 drives the profile routes with revision checks, conflict reload and delete confirmation', () => {
+  for (const route of ["'/profiles'", "'/draft'", "'/activate'", "'/lifecycle'", "'/revisions'", "'/diff'", '`/revisions/${revision}`']) {
+    assert.ok(settingsSource.includes(route), `route ${route}`);
+  }
+  assert.match(settingsSource, /method: 'PUT', body: \{ body: checked\.body, expectedRevision: agents\.baseRevision \}/);
+  assert.match(settingsSource, /body: \{ revision: detail\.headRevision, expectedActiveRevision: detail\.activeRevision \?\? null \}/);
+  assert.match(settingsSource, /error\?\.code === 'PROFILE_REVISION_CONFLICT'[\s\S]*agents\.notice = ChatState\.PROFILE_CONFLICT_TEXT/);
+  assert.match(settingsSource, /action === 'delete' && !window\.confirm\(/);
+  // Going back to an old version writes its body as a new draft; activate is not used for it.
+  const revert = settingsSource.match(/const revertTo = async \(detail, revision\) => \{([\s\S]*?)\n    \};/)?.[1] || '';
+  assert.match(revert, /`\/revisions\/\$\{revision\}`[\s\S]*'\/draft'[\s\S]*body: \{ body: old\.body, expectedRevision: detail\.headRevision \}/);
+  assert.doesNotMatch(revert, /\/activate/);
+  assert.equal(Chat.PROFILE_CONFLICT_TEXT, '다른 곳에서 바뀌었습니다. 최신 내용을 불러왔습니다.');
+  assert.equal(Chat.profileRequestErrorText({ status: 409, code: 'PROFILE_REVISION_CONFLICT' }), Chat.PROFILE_CONFLICT_TEXT);
+  for (const error of [{ status: 503, code: 'PROFILE_STORE_UNAVAILABLE' }, { status: 404, code: 'PROFILE_ROUTE_NOT_FOUND' }, new TypeError('NetworkError')]) {
+    assert.match(Chat.profileRequestErrorText(error), /Agent 저장소에 연결하지 못했습니다/);
+  }
+  assert.doesNotMatch(Chat.profileRequestErrorText({ status: 400, code: 'INVALID_PROFILE', message: 'name must be 1–40 characters' }), /[A-Za-z]{4,}/,
+    'server English stays internal');
+});
+
+test('the Agent form needs a name, keeps the approved six colors and the store limits, and saves the store body shape', () => {
+  assert.deepEqual(Chat.PROFILE_AVATAR_PALETTE, AVATAR_PALETTE);
+  assert.deepEqual(Chat.PROFILE_TONE_OPTIONS.map(option => option.value), PROFILE_TONES);
+  assert.deepEqual(Chat.PROFILE_TONE_OPTIONS.map(option => option.label), ['담백', '따뜻', '간결', '격식', '유쾌']);
+  const empty = Chat.validateProfileForm(Chat.profileFormFromBody(null));
+  assert.equal(empty.ok, false);
+  assert.deepEqual(empty.errors, [{ field: 'name', message: '담당자 이름을 입력해 주세요.' }]);
+  const base = { ...Chat.profileFormFromBody(null), name: '자료 정리 담당' };
+  const reject = (patch, field) => {
+    const result = Chat.validateProfileForm({ ...base, ...patch });
+    assert.equal(result.ok, false, JSON.stringify(patch).slice(0, 80));
+    assert.ok(result.errors.some(error => error.field === field && /[가-힣]/.test(error.message)), `${field} error for ${JSON.stringify(patch).slice(0, 60)}`);
+    assert.equal(result.body, null);
+  };
+  reject({ name: '   ' }, 'name');
+  reject({ name: '가'.repeat(41) }, 'name');
+  reject({ avatarColor: '#ff0000' }, 'avatarColor');
+  reject({ avatarColor: '#49634F'.replace('4', '5') }, 'avatarColor');
+  reject({ avatarKind: 'emoji', avatarValue: '🙂🙂' }, 'avatar');
+  reject({ avatarKind: 'initial', avatarValue: 'ABC' }, 'avatar');
+  reject({ role: 'x'.repeat(81) }, 'role');
+  reject({ tone: 'angry' }, 'tone');
+  reject({ traits: ['a', 'b', 'c', 'd', 'e', 'f', 'g'] }, 'traits');
+  reject({ traits: ['t'.repeat(41)] }, 'traits');
+  reject({ speechNotes: 's'.repeat(501) }, 'speechNotes');
+  reject({ expertise: Array.from({ length: 9 }, (_, i) => `일 ${i}`) }, 'expertise');
+  reject({ expertise: ['e'.repeat(81)] }, 'expertise');
+  reject({ instructions: 'i'.repeat(8001) }, 'instructions');
+  reject({ toolPreferences: ['browser tool'] }, 'toolPreferences');
+  reject({ toolPreferences: Array.from({ length: 21 }, (_, i) => `tool_${i}`) }, 'toolPreferences');
+  // Exactly at every limit is accepted, with the store's own normalization.
+  const full = Chat.validateProfileForm({ ...base, name: '가'.repeat(40), avatarKind: 'emoji', avatarValue: '🦉', avatarColor: '#F5F0DF',
+    role: 'r'.repeat(80), tone: 'formal', traits: ['꼼꼼함', '꼼꼼함', ...Array.from({ length: 5 }, (_, i) => `특징${i}`)], speechNotes: 's'.repeat(500),
+    expertise: Array.from({ length: 8 }, (_, i) => `맡길 일 ${i}`), instructions: 'line one\r\nline two', toolPreferences: ['browser', 'egdesk_browser_observe'] });
+  assert.equal(full.ok, true, JSON.stringify(full.errors));
+  assert.deepEqual(Object.keys(full.body), ['name', 'avatar', 'role', 'personality', 'expertise', 'instructions', 'toolPreferences', 'model']);
+  assert.deepEqual(full.body, normalizeProfileBody(full.body), 'the bridge stores exactly what the form sends');
+  assert.equal(full.body.avatar.color, '#f5f0df');
+  assert.equal(full.body.personality.traits.length, 6, 'duplicates collapse like the store');
+  // A blank avatar becomes the name's first letter on the chosen tone.
+  const initial = Chat.validateProfileForm({ ...base, name: 'kim', avatarValue: '', avatarColor: '#958879' });
+  assert.deepEqual(initial.body.avatar, { kind: 'initial', value: 'K', color: '#958879' });
+  // Editing a saved body round-trips without loss, including the unedited model.
+  const saved = normalizeProfileBody({ name: '검증 담당', avatar: { kind: 'initial', value: 'V', color: '#252a26' }, role: '검토',
+    personality: { tone: 'concise', traits: ['정확함'], speechNotes: '짧게' }, expertise: ['리뷰'], instructions: '근거를 먼저', toolPreferences: ['browser'],
+    model: { engine: 'codex', modelId: 'gpt-5.5', effort: 'high' } });
+  assert.deepEqual(Chat.validateProfileForm(Chat.profileFormFromBody(saved)).body, saved);
+});
+
+test('profile catalog, status, avatars and diffs read as the 대표님 sees them', () => {
+  const rows = Chat.normalizeProfileCatalog({ profiles: [...catalogRows, { id: 'Bad ID', lifecycle: 'active', headRevision: 1, name: 'x' },
+    { id: 'no-name', lifecycle: 'active', headRevision: 1, name: '' }, { id: 'odd-state', lifecycle: 'running', headRevision: 1, name: 'y' }, catalogRows[0]] });
+  assert.deepEqual(rows.map(row => row.id), ['review-verifier', 'prof-stopped', 'prof-draft'], 'malformed or repeated rows are dropped');
+  assert.equal(rows[0].avatar.color, '#252a26');
+  assert.deepEqual(Chat.profileStatusView(rows[0]), { label: '사용 중', detail: '버전 2 사용 중 · 아직 쓰지 않은 초안 있음', lifecycle: 'active', usable: true, example: true });
+  assert.equal(Chat.profileStatusView(rows[1]).usable, false);
+  assert.equal(Chat.profileStatusView(rows[1]).label, '사용 중지');
+  assert.equal(Chat.profileStatusView(rows[2]).detail, '초안 저장됨 · 아직 사용할 수 없음');
+  assert.deepEqual(Chat.profileAvatarView(rows[2].avatar, rows[2].name), { kind: 'emoji', text: '🦉', tone: 1, saved: true });
+  assert.deepEqual(Chat.profileAvatarView(null, '검증 담당'), { kind: 'initial', text: '검', tone: 0, saved: false });
+  assert.equal(Chat.profileAvatarView({ kind: 'initial', value: 'V', color: '#123456' }, 'x').tone, 0, 'an unknown color never paints outside the palette');
+  assert.deepEqual(Chat.profileDiffRows([
+    { field: 'name', before: '검증', after: '검증 담당' }, { field: 'personality.tone', before: 'plain', after: 'warm' },
+    { field: 'expertise', before: [], after: ['리뷰'], added: ['리뷰'], removed: [] }, { field: 'constructor', before: 1, after: 2 },
+  ]).map(row => [row.label, row.before, row.after]), [['담당자 이름', '검증', '검증 담당'], ['말투', '담백', '따뜻'], ['맡길 일', '없음', '리뷰']]);
+});
+
+test('a chosen Agent sends its stored profile and revision; a stopped or missing one is refused, not swapped', () => {
+  const ready = productionProfileResolver({ status: 'ready', profiles: Chat.normalizeProfileCatalog({ profiles: catalogRows }) });
+  assert.deepEqual(ready.codexAgentProfileChoices().map(profile => profile.id), ['review-verifier'], 'only active Agents can be picked');
+  const runtimeFor = (resolver, agentProfileId) => {
+    const thread = { id: 'room', profileEnabled: true, agentProfileId };
+    const profile = resolver.codexAgentProfile(agentProfileId);
+    return { thread, profile, runtime: productionRuntimeConfig(thread, () => profile, () => profile.toolMode, () => profile.systemPrompt) };
+  };
+  const active = runtimeFor(ready, 'review-verifier');
+  assert.equal(active.profile.name, '검증 담당');
+  assert.deepEqual(active.profile.avatar, { kind: 'initial', value: 'V', color: '#252a26' });
+  const body = Chat.buildChatRequest(active.thread, '확인해 줘', 'q1', active.runtime);
+  assert.equal(body.profileEnabled, true);
+  assert.equal(body.profileId, 'review-verifier');
+  assert.equal(body.profileRevision, 2, 'the active revision, not the unsaved draft head');
+  for (const field of ['systemPrompt', 'agentProfile', 'toolMode']) assert.equal(Object.hasOwn(body, field), false, field);
+  for (const id of ['prof-stopped', 'prof-draft', 'prof-deleted-elsewhere']) {
+    const stopped = runtimeFor(ready, id);
+    assert.equal(stopped.profile.server, true);
+    const wire = Chat.buildChatRequest(stopped.thread, 'hi', 'q2', stopped.runtime);
+    assert.equal(wire.profileId, id, 'the bridge decides; the room never borrows another Agent');
+    assert.equal(Object.hasOwn(wire, 'profileRevision'), false);
+    assert.equal(Object.hasOwn(wire, 'systemPrompt'), false);
+  }
+  assert.equal(ready.codexAgentProfile('prof-deleted-elsewhere').name, '찾을 수 없는 Agent');
+  // No profile store: the built-in definition keeps the previous systemPrompt path.
+  const offline = productionProfileResolver({ status: 'unavailable', profiles: [] });
+  assert.deepEqual(offline.codexAgentProfileChoices().map(profile => profile.id), ['conversational-coding', 'review-verifier']);
+  const legacy = runtimeFor(offline, 'review-verifier');
+  const legacyBody = Chat.buildChatRequest(legacy.thread, 'hi', 'q3', legacy.runtime);
+  assert.equal(legacyBody.systemPrompt, 'legacy verifier prompt');
+  assert.equal(Object.hasOwn(legacyBody, 'profileId'), false);
+  // A saved user Agent keeps its ID before the catalog loads, without a borrowed prompt.
+  const unknown = runtimeFor(offline, 'prof-mine');
+  assert.equal(unknown.profile.systemPrompt, null);
+  assert.equal(Object.hasOwn(Chat.buildChatRequest(unknown.thread, 'hi', 'q4', unknown.runtime), 'systemPrompt'), false);
+  // Ordinary Codex rooms carry neither path.
+  const plain = Chat.buildChatRequest({ id: 'room', profileEnabled: false }, 'hi', 'q5', active.runtime);
+  assert.equal(Object.hasOwn(plain, 'profileId'), false);
+  assert.equal(Object.hasOwn(plain, 'systemPrompt'), false);
+  assert.equal(Chat.buildChatRequest(active.thread, 'hi', 'q6', { profileId: 'Bad ID', profileRevision: 2, systemPrompt: 'p' }).systemPrompt, 'p');
+  // The room menu lists the catalog choices; send errors from runProfile read in Korean.
+  const menu = surfaceSource.match(/      const renderThreadMenu = \(thread\) => \{([\s\S]*?)\n      \};/)?.[1] || '';
+  assert.match(menu, /codexAgentProfileChoices\(\)\.map/);
+  assert.doesNotMatch(menu, /CODEX_AGENT_PROFILE_DEFS/);
+  for (const code of ['PROFILE_NOT_RUNNABLE', 'PROFILE_NOT_FOUND', 'PROFILE_REVISION_NOT_FOUND', 'INVALID_PROFILE', 'PROFILE_STORE_UNAVAILABLE']) {
+    assert.match(Chat.profileSendErrorText(code), /Agent/);
+  }
+  assert.equal(Chat.profileSendErrorText('RUN_IN_PROGRESS'), null);
+});
+
+test('Agent answers keep the Profile avatar captured when the request was sent', () => {
+  const state = Chat.createChatProtocolState();
+  const avatar = { kind: 'emoji', value: '🦉', color: '#a9c5a9' };
+  Chat.registerChatRequest(state, { requestId: 'q', clientThreadId: 'room', authorName: '부엉이', authorAvatar: avatar });
+  const run = Chat.acceptChatRequest(state, { accepted: true, requestId: 'q', conversationId: 'c', runId: 'r' }, 'q');
+  run.messages = [{ id: 'a', role: 'assistant', text: '답' }];
+  const [answer] = Chat.projectRunMessages([], run);
+  assert.equal(answer.authorName, '부엉이');
+  assert.deepEqual(answer.authorAvatar, avatar);
+  const renamed = Chat.projectRunMessages([answer], { ...run, authorName: '다른 이름', authorAvatar: { kind: 'initial', value: 'Z', color: '#49634f' } });
+  assert.deepEqual(renamed[0].authorAvatar, avatar, 'an existing answer keeps its author');
+  assert.equal(Chat.projectRunMessages([], { ...run, authorAvatar: { kind: 'emoji', value: 'not-emoji', color: '#49634f' } })[0].authorAvatar, null);
+});
+
+test('usage ring shows reported ChatGPT usage, grey 확인 안 됨 when nothing was reported, and the reset time on hover', () => {
+  assert.equal(Chat.usageRingView({ isLoggedIn: false, usage: { level: 'ok' } }), null, 'nothing to show while signed out');
+  for (const auth of [{ isLoggedIn: true }, { isLoggedIn: true, usage: usageDisplay(null) }, { isLoggedIn: true, usage: { level: 'mystery', percentLabel: '0% 사용' } }]) {
+    const view = Chat.usageRingView(auth);
+    assert.equal(view.level, 'unknown');
+    assert.equal(view.percent, null, 'never an invented 0%');
+    assert.equal(view.text, '확인 안 됨');
+  }
+  const now = Date.now();
+  const limits = normalizeRateLimits({ rateLimits: { primary: { usedPercent: 42.6, windowDurationMins: 300, resetsAt: Math.floor((now + 3600_000) / 1000) },
+    secondary: { usedPercent: 12, windowDurationMins: 10080 } } }, now);
+  const ok = Chat.usageRingView({ isLoggedIn: true, rateLimits: limits, usage: usageDisplay(limits, now) });
+  assert.equal(ok.level, 'ok');
+  assert.equal(ok.percent, 42);
+  assert.equal(ok.text, '42%');
+  assert.match(ok.title, /^5시간 한도 · 42% 사용 · .+에 초기화$/);
+  assert.equal(ok.stale, false);
+  const full = normalizeRateLimits({ rateLimits: { primary: { usedPercent: 100, windowDurationMins: 300, resetsAt: Math.floor((now + 600_000) / 1000) }, rateLimitReachedType: 'rate_limit_reached' } }, now);
+  const limit = Chat.usageRingView({ isLoggedIn: true, rateLimits: full, usage: usageDisplay(full, now) });
+  assert.equal(limit.level, 'limit');
+  assert.equal(limit.text, '한도');
+  assert.match(limit.title, /한도 도달/);
+  const old = Chat.usageRingView({ isLoggedIn: true, rateLimits: limits, usage: usageDisplay(limits, now + 16 * 60_000) });
+  assert.equal(old.stale, true);
+  assert.match(old.title, /확인한 지 오래되어 실제와 다를 수 있음/);
+  // Both Chat heads carry the ring; the CSS draws unknown as a grey track.
+  assert.equal(surfaceSource.match(/codexUsageRing\(codex\.authStatus\)/g)?.length, 2);
+  const css = readFileSync(new URL('../overlay/CSS/eg-desk-surface.uc.css', import.meta.url), 'utf8');
+  assert.match(css, /\.egd-usage-unknown \.egd-usage-ring \{ background: var\(--egd-outline\); \}/);
+});
+
+test('ChatGPT plan names come from the reported plan type only', () => {
+  assert.equal(Chat.codexPlanLabel('plus'), 'Plus');
+  assert.equal(Chat.codexPlanLabel('pro'), 'Pro');
+  assert.equal(Chat.codexPlanLabel('free'), '무료');
+  for (const missing of ['unknown', null, undefined, 'constructor', 'PLUS']) assert.equal(Chat.codexPlanLabel(missing), null, String(missing));
+  for (const plan of PLAN_TYPES) if (plan !== 'unknown') assert.ok(Chat.codexPlanLabel(plan), `label for ${plan}`);
+});
+
+test('run errors read by kind with the next step: login, reset time, permission, retry', () => {
+  const now = new Date(2026, 9, 24, 13, 0).getTime();
+  const resetAt = new Date(2026, 9, 24, 15, 20).getTime();
+  const quota = publicError({ message: 'You have hit your usage limit', codexErrorInfo: 'usageLimitExceeded' }, 'TURN_FAILED', 'codex');
+  assert.equal(quota.kind, 'quota');
+  assert.deepEqual(Chat.runErrorNotice(quota, { resetsAt: resetAt }, now), { kind: 'quota', text: '사용 한도에 도달했습니다. 오후 3:20에 다시 쓸 수 있습니다.', action: null });
+  assert.equal(Chat.runErrorNotice({ ...quota, retryAt: new Date(2026, 9, 25, 9, 5).getTime() }, null, now).text,
+    '사용 한도에 도달했습니다. 10월 25일 오전 9:05에 다시 쓸 수 있습니다.', 'retryAt from the error wins');
+  assert.match(Chat.runErrorNotice(quota, { resetsAt: now - 1 }, now).text, /다시 쓸 수 있는 시각은 아직 확인되지 않았습니다/);
+  const auth = publicError({ message: 'unauthorized', codexErrorInfo: 'unauthorized' }, 'TURN_FAILED', 'codex');
+  assert.deepEqual(Chat.runErrorNotice(auth, null, now), { kind: 'auth', text: '다시 로그인이 필요합니다.', action: 'login' });
+  assert.deepEqual(Chat.runErrorNotice(publicError({ message: 'blocked', codexErrorInfo: 'sandboxError' }, 'TURN_FAILED', 'codex'), null, now),
+    { kind: 'permission', text: '권한이 부족합니다.', action: null });
+  assert.deepEqual(Chat.runErrorNotice(publicError(new Error('socket closed'), 'CONNECTION_LOST'), null, now),
+    { kind: 'network', text: '연결이 불안정합니다. 다시 시도해 주세요.', action: 'retry' });
+  assert.deepEqual(Chat.runErrorNotice(publicError({ message: 'Context window exceeded', codexErrorInfo: 'contextWindowExceeded' }, 'TURN_FAILED', 'codex'), null, now),
+    { kind: 'model', text: 'Context window exceeded', action: null }, 'model keeps the existing text');
+  assert.deepEqual(Chat.runErrorNotice({ code: 'RUNTIME_LOST', message: '실행 연결이 끊어졌습니다.' }, null, now), { kind: 'unknown', text: '실행 연결이 끊어졌습니다.', action: null });
+  assert.deepEqual(Chat.runErrorNotice('문자열 오류'), { kind: 'unknown', text: '문자열 오류', action: null });
+  assert.equal(Chat.runErrorNotice(null), null);
+  // The conversation shows the notice with its button; the activity log uses the same words.
+  assert.match(surfaceSource, /ChatState\.runErrorNotice\(run\.error, codex\.authStatus\?\.usage\)/);
+  assert.match(surfaceSource, /runError\.action === 'login' \? el\('button'[\s\S]*?onclick: \(\) => codexBridge\.startLogin\(\)/);
+  assert.match(surfaceSource, /runError\.action === 'retry' \? el\('button'[\s\S]*?onclick: \(\) => codexBridge\.retryRun\(activeThread\.id, run\.runId\)/);
+  assert.match(surfaceSource, /rows\.push\(el\('p', \{ class: 'egd-codex-error' \}, ChatState\.runErrorNotice\(run\.error, state\.codex\.authStatus\?\.usage\)\.text\)\)/);
+});
+
+test('Settings, avatar and usage CSS use approved tokens only', () => {
+  const css = readFileSync(new URL('../overlay/CSS/eg-desk-surface.uc.css', import.meta.url), 'utf8');
+  const rules = [...css.replace(/\/\*[\s\S]*?\*\//g, '').matchAll(/([^{}]+)\{([^{}]*)\}/g)]
+    .filter(([, selector]) => /\.egd-(?:settings|profile-avatar|usage)/.test(selector));
+  assert.ok(rules.length > 40);
+  for (const [, selector, body] of rules) assert.doesNotMatch(body, /#[0-9a-fA-F]{3,8}\b/, selector.trim());
+  const token = name => css.match(new RegExp(`${name}:\\s*(#[0-9A-Fa-f]{6})`))?.[1]?.toLowerCase();
+  assert.deepEqual([token('--egd-primary'), token('--egd-avatar-sage'), token('--egd-avatar-wood'), token('--egd-avatar-muted'),
+    token('--egd-on-surface'), token('--egd-note')], AVATAR_PALETTE, 'the six tones are the store palette');
+  for (let tone = 0; tone < 6; tone++) assert.match(css, new RegExp(`\\.egd-profile-avatar-tone-${tone} \\{ background: var\\(--egd-`));
+});
+
+test('Browser scroll/press are wired into the Card dispatch allow-list and receipt', () => {
+  assert.match(surfaceSource, /const BrowserAgentReceipts = ChromeUtils\.importESModule\('chrome:\/\/userchrome\/content\/EGDeskBrowserAgentRuntimeParent\.sys\.mjs'\);/);
+  assert.match(surfaceSource, /\['navigate', 'click', 'fill', 'scroll', 'press'\]\.includes\(request\.action\?\.type\)/);
+  assert.match(surfaceSource, /request\.action\.selector \|\| \(!\['navigate', 'scroll'\]\.includes\(request\.action\.type\) && !request\.action\.ref\)/);
+  assert.match(surfaceSource, /BrowserAgentReceipts\.browserToolDispatchReceiptFields\(action\.type, result\?\.result\?\.dispatchDiagnostics\)/);
+});
+
+test('다시 시도 sends the failed request words once more, only into an empty composer', () => {
+  const body = surfaceSource.match(/      retryRun\(threadId, runId\) \{([\s\S]*?)\n      \},\n      async sendMessage/)?.[1];
+  assert.ok(body, 'production retryRun must remain directly testable');
+  const retry = compileFunction(body, ['threadId', 'runId', 'state', 'getCodexThreadById', 'threadBusy', 'codexRuns', 'boardNotice', 'getCodexThreadDraft']);
+  const thread = { id: 'room', messages: [{ id: 'u1', role: 'user', content: '첫 질문', requestId: 'q1' }, { id: 'u2', role: 'user', content: '다시 보낼 질문', requestId: 'q2' }] };
+  const state = { codex: { activeThreadId: 'other', threadDrafts: {} } };
+  const notices = [];
+  const calls = [];
+  const ctx = { setDraft: (text, id) => { calls.push(['draft', text, id]); state.codex.threadDrafts[id] = text; }, sendMessage: () => { calls.push(['send']); return 'sent'; } };
+  const run = (draft = '', busy = false) => {
+    state.codex.threadDrafts.room = draft;
+    return retry.call(ctx, 'room', 'turn-2', state, () => thread, () => busy, () => [{ runId: 'turn-2', requestId: 'q2' }],
+      text => notices.push(text), (codex, id) => codex.threadDrafts[id] || '');
+  };
+  assert.equal(run('입력 중'), null);
+  assert.deepEqual(calls, [], 'a draft in progress is never replaced');
+  assert.match(notices.at(-1), /입력 중인 내용이 있어/);
+  assert.equal(run('', true), null);
+  assert.deepEqual(calls, [], 'a busy room is not re-sent');
+  assert.equal(run(''), 'sent');
+  assert.deepEqual(calls, [['draft', '다시 보낼 질문', 'room'], ['send']]);
+  assert.equal(state.codex.activeThreadId, 'room');
+});
+
+// A small element fake: enough for el(), events and text, so the production
+// Settings card can be driven without Firefox.
+function settingsFakeDocument() {
+  const byId = new Map();
+  const doc = { activeElement: null };
+  class FakeNode {
+    constructor(tag) { this.tagName = tag.toUpperCase(); this.children = []; this.attributes = {}; this.dataset = {}; this.style = {}; this.listeners = {}; this.className = ''; this.ownText = ''; this.value = ''; this.isConnected = true; }
+    appendChild(child) { this.children.push(child); return child; }
+    replaceChildren(...children) { this.children = []; this.ownText = ''; for (const child of children) if (child != null) this.appendChild(typeof child === 'string' ? doc.createTextNode(child) : child); }
+    setAttribute(key, value) { this.attributes[key] = String(value); if (key === 'id') byId.set(String(value), this); }
+    getAttribute(key) { return this.attributes[key] ?? null; }
+    addEventListener(type, fn) { (this.listeners[type] ||= []).push(fn); }
+    removeEventListener() {}
+    get textContent() { return this.ownText + this.children.map(child => child.textContent).join(''); }
+    set textContent(value) { this.children = []; this.ownText = String(value); }
+    focus() { doc.activeElement = this; }
+    fire(type, extra = {}) { for (const fn of this.listeners[type] || []) fn({ stopPropagation() {}, preventDefault() {}, currentTarget: this, target: this, ...extra }); }
+  }
+  Object.assign(doc, {
+    createElement: tag => new FakeNode(tag),
+    createTextNode: text => ({ textContent: String(text), children: [] }),
+    getElementById: id => byId.get(id) || null,
+    documentElement: new FakeNode('html'),
+    addEventListener() {}, removeEventListener() {},
+  });
+  return doc;
+}
+const settingsNodes = (node, predicate, found = []) => {
+  if (node?.tagName && predicate(node)) found.push(node);
+  for (const child of node?.children || []) settingsNodes(child, predicate, found);
+  return found;
+};
+const settingsButton = (root, text) => settingsNodes(root, node => node.tagName === 'BUTTON' && node.textContent.trim() === text)[0];
+const settle = async () => { for (let i = 0; i < 6; i++) await new Promise(resolve => setImmediate(resolve)); };
+
+test('production Settings card renders the reported account and drives Agent edits through the profile routes', async () => {
+  const document = settingsFakeDocument();
+  const { el, codexProfileAvatar } = compileFunction(`${declaration('el')}\n${declaration('codexProfileAvatar')}\nreturn { el, codexProfileAvatar };`, ['document', 'ChatState'])(document, Chat);
+  const spawnSource = declaration('spawnSettingsCard');
+  assert.ok(spawnSource);
+  const listeners = new Set();
+  const calls = [];
+  const now = Date.now();
+  const limits = normalizeRateLimits({ rateLimits: { primary: { usedPercent: 42, windowDurationMins: 300, resetsAt: Math.floor((now + 3600_000) / 1000) } } }, now);
+  const state = { codex: { connected: false, isStartingLogin: false, authStatus: { isLoggedIn: false } } };
+  let catalog = { status: 'ready', profiles: Chat.normalizeProfileCatalog({ profiles: catalogRows }) };
+  const verifier = { id: 'review-verifier', lifecycle: 'active', origin: 'template', activeRevision: 2, headRevision: 3, hasDraft: true,
+    active: { revision: 2, body: normalizeProfileBody({ name: '검증 담당', role: '버그와 회귀를 먼저 봅니다', avatar: { kind: 'initial', value: 'V', color: '#252a26' } }) },
+    head: { revision: 3, body: normalizeProfileBody({ name: '검증 담당', role: '새 역할', personality: { tone: 'warm' } }) } };
+  let respond = null;
+  state.codexBridge = {
+    subscribe(listener) { listeners.add(listener); listener(state.codex); return () => listeners.delete(listener); },
+    startLogin() { calls.push(['login']); }, signOut() { calls.push(['signOut']); }, refreshAuthStatus() { calls.push(['refresh']); },
+    profileCatalog: () => catalog, loadProfiles() { calls.push(['loadProfiles']); return Promise.resolve(); },
+    async profileRequest(path, init = {}) {
+      calls.push([init.method || 'GET', path, init.body]);
+      if (respond) { const answer = respond(path, init); if (answer) return answer; }
+      if (path === '/profiles/review-verifier') return verifier;
+      if (path === '/profiles/review-verifier/revisions') return { profileId: 'review-verifier', revisions: [3, 2, 1].map(revision => ({ profileId: 'review-verifier', revision, parentRevision: revision - 1 || null, createdAt: now })) };
+      throw Object.assign(new Error('not mocked'), { status: 500 });
+    },
+  };
+  const emit = () => { for (const listener of listeners) listener(state.codex); };
+  let confirmAnswer = false;
+  const windowStub = { innerWidth: 1280, innerHeight: 800, confirm: () => confirmAnswer, setTimeout: () => 0 };
+  const spawn = compileFunction(`${spawnSource}\nreturn spawnSettingsCard;`, ['singletonSourceRef', 'focusOpenSourceCard', 'cardSeq', 'viewportToCanvasPoint', 'el', 'cardZ',
+    'closeCanvasCard', 'state', 'ChatState', 'codexProfileAvatar', 'document', 'window', 'bindCardSourceRef', 'markAgendaDirty', 'setActiveEntity',
+    'isCardFullscreen', 'focusCanvasCard', 'installCardHeaderFullscreenToggle', 'canvasZoom'])(
+    () => ({ kind: 'settings-card' }), () => null, 0, (x, y) => ({ x, y }), el, 0, () => {}, state, Chat, codexProfileAvatar, document, windowStub,
+    () => {}, () => {}, () => {}, () => false, () => {}, () => {}, () => 1);
+  const card = spawn();
+  const text = () => card.textContent;
+  assert.match(text(), /코덱스에 연결되지 않았습니다/);
+  assert.match(text(), /준비 중 — 연결 방식 결정 대기/);
+  assert.doesNotMatch(text(), /AI 모델|Provider|GPT-4/);
+
+  Object.assign(state.codex, { connected: true, authStatus: { isLoggedIn: false } });
+  emit();
+  settingsButton(card, '로그인').fire('click');
+  assert.deepEqual(calls.at(-1), ['login'], 'the actual login flow');
+
+  state.codex.authStatus = { isLoggedIn: true, accountEmail: 'owner@example.test', planType: 'pro', rateLimits: limits, usage: usageDisplay(limits, now) };
+  emit();
+  assert.match(text(), /owner@example\.test/);
+  assert.match(text(), /Pro 요금제/);
+  assert.match(text(), /5시간 한도 · 42% 사용/);
+  assert.match(text(), /에 초기화/);
+  settingsButton(card, '로그아웃').fire('click');
+  assert.deepEqual(calls.at(-1), ['signOut']);
+  state.codex.authStatus = { isLoggedIn: true, accountEmail: 'owner@example.test', planType: 'unknown' };
+  emit();
+  assert.match(text(), /요금제 확인 안 됨/);
+  assert.match(text(), /사용 한도 확인 안 됨/);
+  assert.doesNotMatch(text(), /0%/, 'no invented zero');
+
+  settingsButton(card, 'Agent 관리').fire('click');
+  assert.match(text(), /검증 담당예시/);
+  assert.match(text(), /쉬는 Agent/);
+  settingsNodes(card, node => node.dataset.profileId === 'review-verifier' && node.tagName === 'BUTTON')[0].fire('click');
+  await settle();
+  assert.match(text(), /사용 중 · 버전 2 사용 중 · 아직 쓰지 않은 초안 있음/);
+  assert.ok(settingsButton(card, '사용 시작 (버전 3)'));
+
+  // Delete asks first; a cancelled confirmation sends nothing.
+  const before = calls.length;
+  settingsButton(card, '삭제').fire('click');
+  assert.equal(calls.length, before);
+
+  settingsButton(card, '편집').fire('click');
+  assert.match(text(), /Agent 편집/);
+  const nameInput = document.getElementById(`${card.attributes.id}-profile-name`);
+  assert.equal(nameInput.value, '검증 담당', 'the form opens on the newest saved draft');
+  nameInput.value = '   ';
+  nameInput.fire('input');
+  settingsButton(card, '초안 저장').fire('click');
+  await settle();
+  assert.match(text(), /저장하지 못했습니다\. 아래 항목을 확인해 주세요\./);
+  assert.match(text(), /담당자 이름을 입력해 주세요\./);
+  assert.equal(calls.some(call => call[0] === 'PUT'), false, 'an invalid form never reaches the bridge');
+
+  nameInput.value = '검증 담당 2';
+  nameInput.fire('input');
+  respond = (path, init) => {
+    if (init.method === 'PUT') throw Object.assign(new Error('Profile changed since this edit started'), { status: 409, code: 'PROFILE_REVISION_CONFLICT' });
+    if (path === '/profiles/review-verifier') return { ...verifier, headRevision: 4, head: { revision: 4, body: normalizeProfileBody({ name: '다른 곳에서 바꾼 이름' }) } };
+    return null;
+  };
+  document.getElementById(`${card.attributes.id}-profile-name`).value = '검증 담당 2';
+  document.getElementById(`${card.attributes.id}-profile-name`).fire('input');
+  settingsButton(card, '초안 저장').fire('click');
+  await settle();
+  const put = calls.find(call => call[0] === 'PUT');
+  assert.equal(put[1], '/profiles/review-verifier/draft');
+  assert.equal(put[2].expectedRevision, 3);
+  assert.equal(put[2].body.name, '검증 담당 2');
+  assert.match(text(), /다른 곳에서 바뀌었습니다\. 최신 내용을 불러왔습니다\./);
+  assert.equal(document.getElementById(`${card.attributes.id}-profile-name`).value, '다른 곳에서 바꾼 이름');
+  settingsButton(card, '내 수정 다시 넣기').fire('click');
+  assert.equal(document.getElementById(`${card.attributes.id}-profile-name`).value, '검증 담당 2');
+
+  // A catalog without the store says so instead of an empty, working-looking list.
+  respond = null;
+  settingsButton(card, '취소').fire('click');
+  await settle();
+  settingsButton(card, '← Agent 목록').fire('click');
+  catalog = { status: 'unavailable', profiles: [] };
+  emit();
+  assert.match(text(), /Agent 저장소에 연결하지 못했습니다/);
+  card._cleanup();
+  assert.equal(listeners.size, 0, 'closing the card stops listening');
 });

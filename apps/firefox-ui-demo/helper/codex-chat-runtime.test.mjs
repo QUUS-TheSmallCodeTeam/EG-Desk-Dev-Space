@@ -9,6 +9,7 @@ import { createCodexBrowserToolProvider } from './codex-browser-tool-provider.mj
 import { ContextRuntime } from './egdesk-context-runtime.mjs'
 import { inspectNativeCapabilities } from './egdesk-native-capabilities.mjs'
 import { openChatStore } from './egdesk-chat-store.mjs'
+import { composeDeveloperInstructions, openProfileStore } from './egdesk-profile-store.mjs'
 import { explicitFileLinks, publicText, verifyLocalFile } from './codex-chat-values.mjs'
 import { createPrivateQaTempDirectory } from '../scripts/egdesk-qa-platform.mjs'
 
@@ -32,6 +33,7 @@ function harness(override = {}) {
     getNativeContractFingerprint: override.getNativeContractFingerprint,
     expectedProcessConfiguration: override.expectedProcessConfiguration,
     verifyFile: override.verifyFile || (async () => null),
+    profiles: override.profiles,
   })
   chat.setConnection(true)
   const notify = (method, params) => chat.handleNotification({ method, params })
@@ -416,7 +418,7 @@ test('selected Browser interaction belongs to one native run despite inherited s
   const first = await h.chat.send({ message: 'Click only this selected Card', clientThreadId: 'selected-chat',
     executionPolicy: { mode: 'browserBounded' }, selectedSources: [f.source], browserTransportId: 'selected-ui' })
   assert.deepEqual(h.calls.find(call => call.method === 'thread/start').params.dynamicTools.map(spec => spec.name),
-    ['egdesk_browser_observe', 'egdesk_browser_click', 'egdesk_browser_fill'])
+    ['egdesk_browser_observe', 'egdesk_browser_navigate', 'egdesk_browser_click', 'egdesk_browser_fill', 'egdesk_browser_scroll', 'egdesk_browser_press', 'egdesk_browser_wait'])
   assert.equal(first.executionPolicy.browserEffects, 'selected-card-observe-click-fill-this-run')
   assert.equal(h.chat.threads.get(first.conversationId).qaReceipt.browserEffects, 'observe-only-selected-card')
   assert.deepEqual(h.calls.find(call => call.method === 'turn/start').params.sandboxPolicy,
@@ -454,6 +456,31 @@ test('an observe-only native catalog cannot silently gain click/fill through a l
   error => error.code === 'BROWSER_TOOLS_UNAVAILABLE' && /explicit new Chat/.test(error.message))
   assert.equal(h.calls.filter(call => call.method === 'turn/start').length, count)
   assert.equal(f.actions.length, 0)
+})
+
+test('guarded navigate, scroll, press and wait need the selected Card interaction grant; observe-only stays observe-only', async () => {
+  const f = selectedBrowserTurnFixture(), h = qaHarness({ toolProviders: [f.provider] })
+  const granted = await h.chat.send({ message: 'Scroll and search on this selected Card', clientThreadId: 'selected-chat',
+    executionPolicy: { mode: 'browserBounded' }, selectedSources: [f.source], browserTransportId: 'selected-ui' })
+  for (const tool of ['egdesk_browser_navigate', 'egdesk_browser_scroll', 'egdesk_browser_press', 'egdesk_browser_wait']) {
+    await h.chat.handleServerRequest({ id: `granted-${tool}`, method: 'item/tool/call', params: {
+      threadId: granted.conversationId, turnId: granted.runId, callId: `call-${tool}`, tool, arguments: { cardId: 'selected-card' } } })
+    assert.equal(h.replies.at(-1)[0], `granted-${tool}`)
+    assert.equal(h.replies.at(-1)[1].success, true)
+  }
+  assert.deepEqual(f.actions.map(action => action.tool), ['egdesk_browser_navigate', 'egdesk_browser_scroll', 'egdesk_browser_press', 'egdesk_browser_wait'])
+  await h.finish(granted)
+
+  const o = selectedBrowserTurnFixture(), observeOnly = qaHarness({ toolProviders: [o.provider] })
+  const watched = await observeOnly.chat.send({ message: 'Only look at this Card', clientThreadId: 'selected-chat',
+    executionPolicy: { mode: 'browserBounded' }, selectedSources: [{ ...o.source, browserToolPermission: 'observe' }], browserTransportId: 'selected-ui' })
+  assert.deepEqual(observeOnly.calls.find(call => call.method === 'thread/start').params.dynamicTools.map(spec => spec.name), ['egdesk_browser_observe'])
+  for (const tool of ['egdesk_browser_navigate', 'egdesk_browser_scroll', 'egdesk_browser_press', 'egdesk_browser_wait']) {
+    await observeOnly.chat.handleServerRequest({ id: `observe-${tool}`, method: 'item/tool/call', params: {
+      threadId: watched.conversationId, turnId: watched.runId, callId: `call-${tool}`, tool, arguments: { cardId: 'selected-card' } } })
+    assert.equal(observeOnly.replies.at(-1)[2].code, -32601)
+  }
+  assert.equal(o.actions.length, 0)
 })
 
 test('older ordinary thread with a persisted Browser catalog keeps history but never grants a live actor', async () => {
@@ -1512,6 +1539,172 @@ test('unresolved ordinary config aborts profile disable before detaching or star
   await assert.rejects(h.chat.send({ message: 'Next', conversationId: first.conversationId, profileEnabled: false }), error => /Config unavailable/.test(error.message) && error.conversationId === first.conversationId)
   assert.equal(h.calls.filter(call => call.method === 'turn/start').length, 1)
   assert.equal(h.calls.some(call => call.method === 'thread/unsubscribe'), false)
+})
+
+// AGENT-03: saved Agent profiles from the local profile store.
+const profileBody = (extra = {}) => ({
+  name: '리오', avatar: { kind: 'initial', value: 'R' }, role: '회의 준비 담당',
+  personality: { tone: 'warm', traits: ['꼼꼼함'], speechNotes: '결론부터 말한다.' },
+  expertise: ['회의 자료 정리'], instructions: '대표님께는 존댓말을 쓴다.', ...extra,
+})
+function profileFixture(t) {
+  const dataDir = createPrivateQaTempDirectory('egdesk-runtime-profile-')
+  const profiles = openProfileStore({ dataDir, ownerHash: 'local-desktop-test' })
+  t.after(async () => { profiles.close(); await rm(dataDir, { recursive: true, force: true }) })
+  const created = profiles.createDraft(profileBody())
+  profiles.activate(created.id, 1, null)
+  return { dataDir, profiles, id: created.id, first: profiles.getRevision(created.id, 1) }
+}
+const resumingHarness = override => harness({ ...override, request: async (method, params, chat, defaults) => {
+  if (method === 'thread/unsubscribe') return { status: 'unsubscribed' }
+  return defaults(method, params)
+} })
+
+test('a saved Agent profile becomes the native instructions and its revision is recorded on the Run', async t => {
+  const p = profileFixture(t)
+  const h = harness({ profiles: p.profiles })
+  const accepted = await h.chat.send({ message: 'Hi', requestId: 'profile-1', clientThreadId: 'ui-profile', profileEnabled: true, profileId: p.id, systemPrompt: 'Older free-text persona' })
+  const start = h.calls.find(call => call.method === 'thread/start')
+  assert.equal(start.params.developerInstructions, composeDeveloperInstructions(p.first.body))
+  assert.match(start.params.developerInstructions, /이름: 리오/)
+  assert.equal(start.params.developerInstructions.includes('Older free-text persona'), false)
+  const binding = { profileId: p.id, revision: 1, hash: p.first.hash }
+  assert.deepEqual(accepted.profileBinding, binding)
+  assert.deepEqual(h.chat.snapshot(accepted.conversationId).runs[0].profileBinding, binding)
+  assert.deepEqual(h.events.find(event => event.event === 'run.started').details, { status: 'inProgress', profileBinding: binding })
+  // Same requestId with another revision is a different request.
+  await h.finish(accepted)
+  const second = p.profiles.saveDraft(p.id, profileBody({ instructions: '표로 정리해서 답한다.' }), 1)
+  p.profiles.activate(p.id, second.revision, 1)
+  await assert.rejects(h.chat.send({ message: 'Hi', requestId: 'profile-1', clientThreadId: 'ui-profile', profileEnabled: true, profileId: p.id, systemPrompt: 'Older free-text persona' }), error => error.code === 'REQUEST_CONFLICT')
+})
+
+test('a newly activated profile revision is applied to the same thread on its next send; a named revision runs as named', async t => {
+  const p = profileFixture(t)
+  const h = resumingHarness({ profiles: p.profiles })
+  const first = await h.chat.send({ message: 'First', profileEnabled: true, profileId: p.id })
+  await h.finish(first)
+  const saved = p.profiles.saveDraft(p.id, profileBody({ personality: { tone: 'concise' }, instructions: '세 줄 이내로 답한다.' }), 1)
+  p.profiles.activate(p.id, saved.revision, 1)
+  // profileId alone selects the profile path (no profileEnabled flag needed).
+  const next = await h.chat.send({ message: 'Next', conversationId: first.conversationId, profileId: p.id })
+  assert.equal(next.conversationId, first.conversationId)
+  assert.equal(h.calls.filter(call => call.method === 'thread/start').length, 1)
+  const resumed = h.calls.filter(call => call.method === 'thread/resume')
+  assert.equal(resumed.at(-1).params.developerInstructions, composeDeveloperInstructions(p.profiles.getRevision(p.id, 2).body))
+  assert.ok(h.calls.findIndex(call => call.method === 'thread/unsubscribe') < h.calls.indexOf(resumed.at(-1)))
+  assert.deepEqual(next.profileBinding, { profileId: p.id, revision: 2, hash: saved.hash })
+  await h.finish(next)
+  const pinned = await h.chat.send({ message: 'Use the first one', conversationId: first.conversationId, profileEnabled: true, profileId: p.id, profileRevision: 1 })
+  assert.equal(h.calls.filter(call => call.method === 'thread/resume').at(-1).params.developerInstructions, composeDeveloperInstructions(p.first.body))
+  assert.equal(pinned.profileBinding.revision, 1)
+  assert.deepEqual(h.chat.snapshot(first.conversationId).runs.map(run => run.profileBinding.revision), [1, 2, 1])
+})
+
+test('missing, inactive or unavailable profiles are rejected before any native call', async t => {
+  const p = profileFixture(t)
+  const h = harness({ profiles: p.profiles })
+  const send = extra => h.chat.send({ message: 'Hi', profileEnabled: true, ...extra })
+  await assert.rejects(send({ profileId: 'no-such-profile' }), error => error.code === 'PROFILE_NOT_FOUND' && error.httpStatus === 404)
+  await assert.rejects(send({ profileId: p.id, profileRevision: 99 }), error => error.code === 'PROFILE_REVISION_NOT_FOUND' && error.httpStatus === 404)
+  await assert.rejects(send({ profileId: p.id, profileRevision: 'latest' }), error => error.code === 'INVALID_PROFILE_REVISION' && error.httpStatus === 400)
+  await assert.rejects(send({ profileId: 'Not An ID' }), error => error.code === 'INVALID_PROFILE_ID' && error.httpStatus === 400)
+  await assert.rejects(h.chat.send({ message: 'Hi', profileEnabled: false, profileId: p.id }), error => error.code === 'INVALID_PROFILE' && error.httpStatus === 400)
+  const draftOnly = p.profiles.createDraft(profileBody({ name: '초안' }))
+  await assert.rejects(send({ profileId: draftOnly.id }), error => error.code === 'PROFILE_NOT_RUNNABLE' && error.httpStatus === 409)
+  p.profiles.disable(p.id)
+  await assert.rejects(send({ profileId: p.id }), error => error.code === 'PROFILE_NOT_RUNNABLE' && error.httpStatus === 409)
+  await assert.rejects(harness().chat.send({ message: 'Hi', profileEnabled: true, profileId: p.id }), error => error.code === 'PROFILE_STORE_UNAVAILABLE' && error.httpStatus === 503)
+  assert.deepEqual(h.calls, [])
+})
+
+test('older UI requests keep the free-text persona path, its durable fingerprint and no profile binding', async () => {
+  const dataDir = createPrivateQaTempDirectory('egdesk-runtime-legacy-profile-')
+  let store = null
+  try {
+    store = openChatStore({ dataDir, ownerScope: 'local-desktop-test' })
+    const calls = []
+    const chat = new CodexChatRuntime({
+      store, requireStore: true, getOwnerKey: () => 'codex:chatgpt:account-1', respond: () => {},
+      request: async (method, params) => {
+        calls.push({ method, params })
+        if (method === 'thread/start') return { thread: { id: 'native-legacy' }, cwd: '/work' }
+        if (method === 'turn/start') return { turn: { id: 'turn-legacy', status: 'inProgress', items: [] } }
+        throw new Error(`Unexpected native call: ${method}`)
+      },
+    })
+    chat.setConnection(true)
+    const body = { message: 'Hi', requestId: 'legacy-1', clientThreadId: 'ui-legacy', profileEnabled: true, systemPrompt: 'Be concise' }
+    const accepted = await chat.send(body)
+    assert.equal(calls[0].params.developerInstructions, 'Be concise')
+    assert.equal(Object.hasOwn(accepted, 'profileBinding'), false)
+    assert.equal(Object.hasOwn(chat.snapshot().runs[0], 'profileBinding'), false)
+    // The formula before saved profiles existed; replays recorded by an older bridge still match.
+    const legacyFingerprint = createHash('sha256').update(JSON.stringify({
+      message: body.message, clientThreadId: body.clientThreadId,
+      cwd: body.cwd, model: body.model, effort: body.effort, profileEnabled: true,
+      systemPrompt: body.systemPrompt,
+      contextSnapshotIds: body.contextSnapshotIds, contextCapabilities: body.contextCapabilities, attachments: body.attachments,
+      executionPolicy: body.executionPolicy,
+      selectedSources: body.selectedSources, browserTransportId: body.browserTransportId,
+      qaCommandNonce: body.qaCommandNonce, qaOutputMarkers: body.qaOutputMarkers,
+    })).digest('hex')
+    assert.equal(store.getRequest({ clientThreadId: 'ui-legacy', requestId: 'legacy-1' }).fingerprint, legacyFingerprint)
+  } finally {
+    try { store?.close() } catch {}
+    await rm(dataDir, { recursive: true, force: true })
+  }
+})
+
+test('real SQLite history keeps the profile binding through a restart and a reconciled checkpoint', async t => {
+  const p = profileFixture(t)
+  const dataDir = createPrivateQaTempDirectory('egdesk-runtime-profile-store-')
+  let store = null
+  try {
+    store = openChatStore({ dataDir, ownerScope: 'local-desktop-test' })
+    const native = async method => {
+      if (method === 'thread/start') return { thread: { id: 'native-profile' }, cwd: '/work' }
+      if (method === 'turn/start') return { turn: { id: 'turn-profile', status: 'inProgress', items: [] } }
+      if (method === 'thread/resume') return { thread: { id: 'native-profile', turns: [{ id: 'turn-profile', status: 'completed', items: [], itemsView: 'full' }] }, cwd: '/work' }
+      throw new Error(`Unexpected native call: ${method}`)
+    }
+    const runtime = () => new CodexChatRuntime({ store, requireStore: true, profiles: p.profiles, getOwnerKey: () => 'codex:chatgpt:account-1', request: native, respond: () => {} })
+    const chat = runtime()
+    chat.setConnection(true)
+    const accepted = await chat.send({ message: 'Stored with a profile', requestId: 'req-profile', clientThreadId: 'ui-profile', profileEnabled: true, profileId: p.id })
+    const binding = { profileId: p.id, revision: 1, hash: p.first.hash }
+    const stored = chat.getLocalHistory({ clientThreadId: 'ui-profile', limit: 500 })
+    assert.deepEqual(stored.runs[0].profileBinding, binding)
+    assert.deepEqual(stored.events.find(event => event.event === 'run.started').details.profileBinding, binding)
+    // Bridge restart before completion: recovery, then native resume reconciles the run.
+    const restarted = runtime()
+    assert.equal(restarted.recoverInterruptedRuns(), 1)
+    restarted.setConnection(true)
+    await restarted.resume({ conversationId: accepted.conversationId, clientThreadId: 'ui-profile' })
+    const after = restarted.getLocalHistory({ clientThreadId: 'ui-profile', limit: 500 })
+    assert.ok(after.events.some(event => event.event === 'run.reconciled'))
+    assert.equal(after.runs[0].status, 'completed')
+    assert.deepEqual(after.runs[0].profileBinding, binding)
+    assert.deepEqual(restarted.snapshot('native-profile').runs[0].profileBinding, binding)
+  } finally {
+    try { store?.close() } catch {}
+    await rm(dataDir, { recursive: true, force: true })
+  }
+})
+
+test('a Codex usage-limit turn error carries the quota kind into the Run and its completion event', async () => {
+  const h = harness()
+  const run = await h.chat.send({ message: 'Work' })
+  await h.notify('error', { threadId: run.conversationId, turnId: run.runId, error: { message: 'Reconnecting', codexErrorInfo: { responseStreamDisconnected: { httpStatusCode: 401 } } }, willRetry: true })
+  assert.equal(h.chat.snapshot().runs[0].error.kind, 'auth')
+  await h.notify('turn/completed', { threadId: run.conversationId, turn: { id: run.runId, status: 'failed', items: [],
+    error: { message: 'You have hit your usage limit.', codexErrorInfo: 'usageLimitExceeded' } } })
+  const shown = h.chat.snapshot().runs[0]
+  assert.equal(shown.status, 'failed')
+  assert.deepEqual(shown.error, { code: 'TURN_FAILED', origin: 'codex', message: 'You have hit your usage limit.', kind: 'quota' })
+  assert.equal(h.events.find(event => event.event === 'run.completed').details.error.kind, 'quota')
+  // A native turn error has no reset field; the screen takes it from auth.usage.
+  assert.equal(Object.hasOwn(shown.error, 'retryAt'), false)
 })
 
 test('network approvals preserve only public host/protocol and request scope, including a meaningful legacy reason', async () => {

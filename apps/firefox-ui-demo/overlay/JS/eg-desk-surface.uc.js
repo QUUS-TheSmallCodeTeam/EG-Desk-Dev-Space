@@ -14,6 +14,7 @@
   const InputContext = ChromeUtils.importESModule('chrome://userchrome/content/EGDeskInputContext.sys.mjs');
   const BriefingState = ChromeUtils.importESModule('chrome://userchrome/content/EGDeskBriefingState.sys.mjs');
   const FileCardState = ChromeUtils.importESModule('chrome://userchrome/content/EGDeskFileCardState.sys.mjs');
+  const BrowserAgentReceipts = ChromeUtils.importESModule('chrome://userchrome/content/EGDeskBrowserAgentRuntimeParent.sys.mjs');
   const BROWSER_AGENT_ACTOR_NAME = 'EGDeskBrowserAgentRuntime';
   const BROWSER_AGENT_HISTORY_LIMIT = 100;
   const EGDESK_START_URI = 'chrome://userchrome/content/egdesk-start.html';
@@ -191,19 +192,73 @@
     },
   ];
   const CODEX_AGENT_PROFILES = Object.fromEntries(CODEX_AGENT_PROFILE_DEFS.map((profile) => [profile.id, profile]));
-  const CODEX_AGENT_PROFILE_ORDER = CODEX_AGENT_PROFILE_DEFS.map((profile) => profile.id);
 
   function codexThreadKindMeta(type) {
     return type === 'group' ? THREAD_KIND_META.group : THREAD_KIND_META.dm;
   }
 
+  // Agent Profiles saved in the local profile store (GET /profiles). Until it
+  // answers, or when the bridge has no profile store, the built-in
+  // definitions above keep the previous systemPrompt path working.
+  let codexProfileCatalog = { status: 'idle', profiles: [] };
+
+  function codexServerAgentProfile(entry) {
+    const legacy = Object.hasOwn(CODEX_AGENT_PROFILES, entry.id) ? CODEX_AGENT_PROFILES[entry.id] : null;
+    return {
+      id: entry.id, label: legacy?.label || entry.name, name: entry.name, category: legacy?.category || 'agent',
+      summary: entry.role || legacy?.summary || '', capabilities: legacy?.capabilities || [],
+      systemPrompt: legacy?.systemPrompt || null, toolMode: legacy?.toolMode || null,
+      avatar: entry.avatar, role: entry.role, lifecycle: entry.lifecycle, origin: entry.origin,
+      revision: ChatState.profileRunnable(entry) ? entry.activeRevision : null, server: true,
+    };
+  }
+
   function codexAgentProfile(profileId) {
-    return CODEX_AGENT_PROFILES[profileId] || CODEX_AGENT_PROFILES[DEFAULT_CODEX_AGENT_PROFILE_ID];
+    const placeholder = (name, server) => ({
+      id: profileId, label: 'Agent', name, category: 'agent', summary: '', capabilities: [], systemPrompt: null, toolMode: null,
+      avatar: null, role: '', lifecycle: server ? 'missing' : 'unknown', origin: 'user', revision: null, server,
+    });
+    if (codexProfileCatalog.status === 'ready' && ChatState.isProfileId(profileId)) {
+      const entry = codexProfileCatalog.profiles.find((profile) => profile.id === profileId);
+      // A missing or stopped Agent stays itself: the bridge refuses the send
+      // rather than the room silently answering as another Agent.
+      return entry ? codexServerAgentProfile(entry) : placeholder('찾을 수 없는 Agent', true);
+    }
+    if (Object.hasOwn(CODEX_AGENT_PROFILES, profileId)) return CODEX_AGENT_PROFILES[profileId];
+    if (ChatState.isProfileId(profileId)) return placeholder('Agent', false);
+    return CODEX_AGENT_PROFILES[DEFAULT_CODEX_AGENT_PROFILE_ID];
+  }
+
+  // Agent avatar: the saved emoji/initial on one of the six approved palette tones.
+  function codexProfileAvatar(avatar, name, className = '') {
+    const view = ChatState.profileAvatarView(avatar, name);
+    return el('span', { class: `egd-profile-avatar egd-profile-avatar-tone-${view.tone}${className ? ` ${className}` : ''}`, 'aria-hidden': 'true' }, view.text);
+  }
+
+  // ChatGPT usage in the resource-monitor ring shape. Nothing reported shows a
+  // grey '확인 안 됨', never an invented 0%; the reset time is in the title.
+  function codexUsageRing(auth, className = '') {
+    const view = ChatState.usageRingView(auth);
+    if (!view) return null;
+    return el('span', {
+      class: `egd-usage-meter egd-usage-${view.level}${view.stale ? ' egd-usage-stale' : ''}${className ? ` ${className}` : ''}`,
+      role: 'img', 'aria-label': view.label, title: view.title, data: { testid: 'chat-usage-ring', level: view.level },
+    }, el('span', {
+      class: 'egd-usage-ring', 'aria-hidden': 'true',
+      style: view.percent === null ? null : `--egd-usage-fill: ${view.percent}%`,
+    }), el('span', { class: 'egd-usage-text', 'aria-hidden': 'true' }, view.text));
+  }
+
+  function codexAgentProfileChoices() {
+    return codexProfileCatalog.status === 'ready'
+      ? codexProfileCatalog.profiles.filter(ChatState.profileRunnable).map(codexServerAgentProfile)
+      : CODEX_AGENT_PROFILE_DEFS;
   }
 
   function normalizeCodexAgentProfileId(profileId, fallbackProfileId = DEFAULT_CODEX_AGENT_PROFILE_ID) {
-    if (typeof profileId === 'string' && CODEX_AGENT_PROFILES[profileId]) return profileId;
-    if (typeof fallbackProfileId === 'string' && CODEX_AGENT_PROFILES[fallbackProfileId]) return fallbackProfileId;
+    // Saved Agents keep their ID even before the catalog has loaded.
+    if (Object.hasOwn(CODEX_AGENT_PROFILES, profileId) || ChatState.isProfileId(profileId)) return profileId;
+    if (Object.hasOwn(CODEX_AGENT_PROFILES, fallbackProfileId) || ChatState.isProfileId(fallbackProfileId)) return fallbackProfileId;
     return DEFAULT_CODEX_AGENT_PROFILE_ID;
   }
 
@@ -252,6 +307,8 @@
       },
       toolMode: codexThreadToolMode(thread),
       systemPrompt: codexThreadSystemPrompt(thread),
+      // Stored Agents run from their saved revision; the bridge composes the instructions.
+      ...(profile.server === true ? { profileId: profile.id, ...(Number.isSafeInteger(profile.revision) ? { profileRevision: profile.revision } : {}) } : {}),
     };
   }
 
@@ -1232,7 +1289,7 @@
           submit: reply('submit'), skip: () => reply('skip')(),
         }));
       }
-      if (run.error) rows.push(el('p', { class: 'egd-codex-error' }, typeof run.error === 'string' ? run.error : run.error.message || run.error.code || '실행 오류'));
+      if (run.error) rows.push(el('p', { class: 'egd-codex-error' }, ChatState.runErrorNotice(run.error, state.codex.authStatus?.usage).text));
     }
     if (!rows.length) rows.push(el('p', {}, '기록된 활동이 없습니다.'));
     const body = el('div', { class: 'egd-codex-activity-body' }, ...rows);
@@ -4978,19 +5035,27 @@
             class: 'egd-codex-thread-menu-item',
             onclick: () => codexBridge.renameThread(thread.id),
           }, '채팅방 이름 변경'),
-          el('div', { class: 'egd-codex-thread-menu-label' }, 'Agent profile'),
+          el('div', { class: 'egd-codex-thread-menu-label' }, 'Agent'),
           el('button', {
-            class: 'egd-codex-thread-menu-item', 'aria-label': '기본 Codex 선택',
+            class: `egd-codex-thread-menu-item${thread.profileEnabled !== true ? ' egd-codex-thread-menu-item-active' : ''}`, 'aria-label': '기본 Codex 선택',
             onclick: () => codexBridge.setThreadAgentProfile(thread.id, null),
           }, '기본 Codex'),
-          ...CODEX_AGENT_PROFILE_DEFS.map((profile) => el('button', {
-            class: `egd-codex-thread-menu-item egd-codex-thread-menu-profile${profile.id === activeProfile.id ? ' egd-codex-thread-menu-item-active' : ''}`,
+          ...codexAgentProfileChoices().map((profile) => el('button', {
+            class: `egd-codex-thread-menu-item egd-codex-thread-menu-profile${thread.profileEnabled === true && profile.id === activeProfile.id ? ' egd-codex-thread-menu-item-active' : ''}`,
             title: profile.summary,
             onclick: () => codexBridge.setThreadAgentProfile(thread.id, profile.id),
           },
+          profile.server ? codexProfileAvatar(profile.avatar, profile.name, 'egd-codex-thread-menu-avatar') : null,
           el('span', { class: 'egd-codex-thread-menu-profile-label' }, profile.label),
-          el('span', { class: 'egd-codex-thread-menu-profile-name' }, profile.name),
+          el('span', { class: 'egd-codex-thread-menu-profile-name' }, profile.server ? profile.role || '' : profile.name),
           )),
+          // The room's own Agent stays visible while it cannot be chosen again.
+          thread.profileEnabled === true && activeProfile.server && activeProfile.revision === null
+            ? el('div', { class: 'egd-codex-thread-menu-note', role: 'note' }, `${activeProfile.name} · 지금 쓸 수 없음`) : null,
+          el('button', {
+            class: 'egd-codex-thread-menu-item',
+            onclick: () => { codexBridge.closeThreadMenu(); spawnSettingsCard({ tab: 'agents' }); },
+          }, 'Agent 관리 열기'),
           el('button', {
             class: 'egd-codex-thread-menu-item egd-codex-thread-menu-item-danger',
             onclick: () => codexBridge.deleteThread(thread.id),
@@ -5157,6 +5222,7 @@
                 ? el('div', { class: 'egd-codex-conversation-hud-sub' }, (activeThread.participants || []).join(' · '))
                 : null,
             ),
+            codexUsageRing(codex.authStatus),
             el('button', {
               class: `egd-codex-conversation-menu-trigger${threadMenuOpen ? ' egd-codex-conversation-menu-trigger-active' : ''}`,
               title: '채팅방 메뉴',
@@ -5245,6 +5311,7 @@
               onclick: () => codexBridge.setHudView('list'),
             }, deskIcon('back')),
             el('div', { class: 'egd-codex-thread-active-title' }, activeThread.title),
+            codexUsageRing(codex.authStatus),
             el('button', {
               class: 'egd-codex-conversation-menu-trigger',
               'aria-label': '채팅방 메뉴',
@@ -5291,6 +5358,9 @@
           }
           messages.appendChild(el('div', { class: 'egd-codex-empty-state' }, ...emptyChildren));
         } else {
+          // Agent answers carry the Profile avatar captured at send; older answers
+          // borrow the room's current Agent avatar only when the name still matches.
+          const roomProfile = activeThread.profileEnabled === true ? codexThreadAgentProfile(activeThread) : null;
           activeThread.messages.forEach((message, index) => {
             if (message.role === 'assistant' && message.status === 'streaming' && !message.content) return;
             const previous = activeThread.messages[index - 1] || null;
@@ -5339,11 +5409,14 @@
               class: 'egd-codex-result-chip', data: { testid: 'chat-message-inputs', requestId: message.requestId || '' },
               onclick: () => openCodexActivityPanel(activeThread.id),
             }, `첨부 입력 ${message.inputReferences.length}개 · 기록 보기`));
+            const authorAvatar = message.role === 'assistant'
+              ? message.authorAvatar || (roomProfile?.avatar && roomProfile.name === author ? roomProfile.avatar : null) : null;
+            const avatarView = ChatState.profileAvatarView(authorAvatar, author);
             const avatar = message.role !== 'user'
               ? el('div', {
-                  class: `egd-codex-message-avatar${groupedWithPrevious ? ' egd-codex-message-avatar-spacer' : ''}`,
+                  class: `egd-codex-message-avatar${groupedWithPrevious ? ' egd-codex-message-avatar-spacer' : ''}${avatarView.saved ? ` egd-profile-avatar-tone-${avatarView.tone}` : ''}`,
                   'aria-hidden': 'true',
-                }, groupedWithPrevious ? '' : author.slice(0, 1))
+                }, groupedWithPrevious ? '' : avatarView.saved ? avatarView.text : author.slice(0, 1))
               : null;
             messages.appendChild(el('div', {
               data: { messageId: message.id, runId: message.runId || '', testid: 'chat-message', role: message.role },
@@ -5369,6 +5442,23 @@
           class: 'egd-codex-error', role: 'status', data: { testid: 'chat-binding-held', bindingState: activeThread.bindingState },
         }, '이전 대화의 계정 소유가 확인되지 않아 연결을 보류했습니다. 로컬 기록은 유지됩니다.',
         el('button', { class: 'egd-codex-chip', 'aria-label': '새 Codex 대화 열기', data: { testid: 'chat-new-unbound-room' }, onclick: () => codexBridge.createThread('dm', { openConversation: true }) }, '새 Codex 대화')));
+        // A stopped or missing Agent is named, not replaced; the room and draft stay.
+        const roomAgent = activeThread.profileEnabled === true ? codexThreadAgentProfile(activeThread) : null;
+        if (roomAgent && !roomAgent.server && roomAgent.lifecycle === 'unknown' && codexProfileCatalog.status === 'unavailable') {
+          conversation.appendChild(el('div', {
+            class: 'egd-codex-error', role: 'status', data: { testid: 'chat-agent-unavailable', lifecycle: 'store-unavailable' },
+          }, 'Agent 저장소에 연결되지 않아 이 대화방의 Agent를 지금 쓸 수 없습니다. 대화와 초안은 그대로 남아 있습니다.',
+          el('button', { class: 'egd-codex-chip', onclick: (ev) => { ev.stopPropagation(); codexBridge.toggleThreadMenu(activeThread.id, ev.currentTarget); } }, '다른 Agent 고르기')));
+        }
+        if (roomAgent?.server && roomAgent.revision === null) {
+          const reason = ({ disabled: '사용 중지된', archived: '보관된', draft: '아직 사용 전인' })[roomAgent.lifecycle] || null;
+          conversation.appendChild(el('div', {
+            class: 'egd-codex-error', role: 'status', data: { testid: 'chat-agent-unavailable', lifecycle: roomAgent.lifecycle },
+          }, reason
+            ? `이 대화방의 Agent ${roomAgent.name}는 ${reason} 상태라 지금 보낼 수 없습니다. 대화와 초안은 그대로 남아 있습니다.`
+            : '이 대화방의 Agent를 찾을 수 없어 지금 보낼 수 없습니다. 대화와 초안은 그대로 남아 있습니다.',
+          el('button', { class: 'egd-codex-chip', onclick: (ev) => { ev.stopPropagation(); codexBridge.toggleThreadMenu(activeThread.id, ev.currentTarget); } }, '다른 Agent 고르기')));
+        }
         const run = codexCurrentRun(activeThread);
         const pending = Object.values(codex.chatProtocol.requests).find(request => ChatState.requestBelongsToThread(request, activeThread) && ['submitting', 'unconfirmed'].includes(request.status));
         const status = activeThread.preparingInput ? 'preparing-input' : activeThread.resuming ? 'restoring' : pending?.status || run?.status || 'ready';
@@ -5379,6 +5469,21 @@
           data: { testid: 'chat-run-status', status, runId: run?.runId || '', stopConfirmed: String(run?.status === 'interrupted') },
         }, el('span', {}, statusText),
         el('button', { 'aria-label': '활동 기록 열기', data: { testid: 'chat-activity-open', threadId: activeThread.id }, onclick: () => codexBridge.openActivity(activeThread.id) }, codexActivityButtonLabel(run))));
+        const runError = run?.status === 'failed' && run.error && run.error.code !== 'RUNTIME_LOST'
+          ? ChatState.runErrorNotice(run.error, codex.authStatus?.usage) : null;
+        if (runError) conversation.appendChild(el('div', {
+          class: `egd-codex-error egd-codex-run-error egd-codex-run-error-${runError.kind}`, role: 'alert',
+          data: { testid: 'chat-run-error', kind: runError.kind },
+        }, el('span', {}, runError.text),
+        runError.action === 'login' ? el('button', {
+          class: 'egd-codex-chip egd-codex-chip-primary', data: { testid: 'chat-run-error-login' },
+          disabled: (codex.isStartingLogin || codex.authStatus.loginInProgress) ? 'true' : null,
+          onclick: () => codexBridge.startLogin(),
+        }, (codex.isStartingLogin || codex.authStatus.loginInProgress) ? '로그인 중…' : '로그인') : null,
+        runError.action === 'retry' ? el('button', {
+          class: 'egd-codex-chip', data: { testid: 'chat-run-error-retry' },
+          onclick: () => codexBridge.retryRun(activeThread.id, run.runId),
+        }, '다시 시도') : null));
         if (pending?.status === 'unconfirmed') conversation.appendChild(el('button', {
           class: 'egd-codex-chip', 'aria-label': '요청 접수 상태 다시 확인', data: { testid: 'chat-reconcile' },
           onclick: () => codexBridge.reconcileRequest(activeThread.id),
@@ -6080,6 +6185,19 @@
       return response.json();
     };
 
+    // One catalog read at a time; a bridge without the profile store leaves
+    // rooms on the built-in definitions instead of inventing Agents.
+    let profileCatalogLoad = null;
+    const loadProfileCatalog = () => {
+      if (profileCatalogLoad) return profileCatalogLoad;
+      if (codexProfileCatalog.status !== 'ready') codexProfileCatalog = { status: 'loading', profiles: [] };
+      profileCatalogLoad = fetchJson('/profiles?includeArchived=true')
+        .then((payload) => { codexProfileCatalog = { status: 'ready', profiles: ChatState.normalizeProfileCatalog(payload) }; })
+        .catch(() => { codexProfileCatalog = { status: 'unavailable', profiles: [] }; })
+        .finally(() => { profileCatalogLoad = null; emit(); });
+      return profileCatalogLoad;
+    };
+
     async function listLocalHistoryThreads() {
       const threads = [];
       const seenIds = new Set();
@@ -6357,6 +6475,7 @@
       }
 
       if (!epochScope.valid(token)) return;
+      if (state.codex.connected) void loadProfileCatalog();
       const streamEpoch = epochScope.current();
       try {
         source = new EventSource('http://127.0.0.1:39218/events?chatProtocol=2');
@@ -6575,7 +6694,19 @@
         emit();
       },
       agentProfiles() {
-        return CODEX_AGENT_PROFILE_DEFS.map((profile) => ({ ...profile }));
+        return codexAgentProfileChoices().map((profile) => ({ ...profile }));
+      },
+      profileCatalog() {
+        return { status: codexProfileCatalog.status, profiles: codexProfileCatalog.profiles.map((profile) => ({ ...profile })) };
+      },
+      // Refreshes the shared catalog that Chat rooms read; settings call it after every change.
+      loadProfiles() {
+        return loadProfileCatalog();
+      },
+      // Settings-only access to the local profile routes; nothing else is reachable here.
+      async profileRequest(path, { method = 'GET', body } = {}) {
+        if (typeof path !== 'string' || !/^\/profiles(?:[/?]|$)/.test(path)) throw new Error('Invalid profile path');
+        return fetchJson(path, { method, ...(body === undefined ? {} : { body: JSON.stringify(body) }) });
       },
       addInputSources(threadId, sources) {
         const thread = getCodexThreadById(state.codex, threadId);
@@ -6674,6 +6805,7 @@
       },
       setThreadAgentProfile(threadId, profileId) {
         if (!threadId) return;
+        if (profileId && !codexAgentProfileChoices().some((profile) => profile.id === profileId)) return;
         const normalizedProfileId = normalizeCodexAgentProfileId(profileId);
         const profile = codexAgentProfile(normalizedProfileId);
         updateThreadById(threadId, (thread) => ({
@@ -6691,9 +6823,10 @@
         const thread = getCodexThreadById(state.codex, threadId);
         if (!thread) return;
         const currentId = normalizeCodexAgentProfileId(thread.agentProfileId, defaultCodexAgentProfileIdForThread(thread.type, thread.title));
-        const currentIndex = CODEX_AGENT_PROFILE_ORDER.indexOf(currentId);
-        const nextId = CODEX_AGENT_PROFILE_ORDER[(currentIndex + 1) % CODEX_AGENT_PROFILE_ORDER.length] || DEFAULT_CODEX_AGENT_PROFILE_ID;
-        this.setThreadAgentProfile(threadId, nextId);
+        const order = codexAgentProfileChoices().map((profile) => profile.id);
+        if (!order.length) return;
+        const currentIndex = order.indexOf(currentId);
+        this.setThreadAgentProfile(threadId, order[(currentIndex + 1) % order.length]);
       },
       setHudView(view) {
         state.codex.hudView = normalizeHudView(view);
@@ -6993,6 +7126,23 @@
           if (epochScope.valid(token)) update({ error: error.message });
         } finally { epochScope.finish(token); }
       },
+      // '다시 시도' after a network failure: the same words go out once more on an
+      // explicit click, only into an empty composer. Attachments are not re-sent.
+      retryRun(threadId, runId) {
+        const thread = getCodexThreadById(state.codex, threadId);
+        if (!thread || threadBusy(thread)) return null;
+        const run = codexRuns(thread).find((item) => item.runId === runId);
+        const prompt = thread.messages.findLast((message) => message.role === 'user' &&
+          ((run?.requestId && message.requestId === run.requestId) || (runId && message.runId === runId)));
+        if (!prompt?.content) { boardNotice('다시 보낼 메시지를 찾지 못했습니다.'); return null; }
+        if (getCodexThreadDraft(state.codex, threadId).trim()) {
+          boardNotice('입력 중인 내용이 있어 다시 보내지 않았습니다. 입력창을 비운 뒤 다시 시도해 주세요.');
+          return null;
+        }
+        state.codex.activeThreadId = threadId;
+        this.setDraft(prompt.content, threadId);
+        return this.sendMessage();
+      },
       async sendMessage() {
         const activeThread = getActiveCodexThread(state.codex);
         const draftText = getCodexThreadDraft(state.codex, activeThread?.id || null);
@@ -7040,7 +7190,8 @@
           epochScope.finish(token);
           return;
         }
-        ChatState.registerChatRequest(protocol, { requestId, clientThreadId: ChatState.clientThreadBinding(activeThread), localThreadId: activeThread.id, conversationId: activeThread.conversationId, authorName: activeThread.profileEnabled ? codexThreadAgentProfile(activeThread).name : 'Codex' }, state.codex.authStatus);
+        const authorProfile = activeThread.profileEnabled ? codexThreadAgentProfile(activeThread) : null;
+        ChatState.registerChatRequest(protocol, { requestId, clientThreadId: ChatState.clientThreadBinding(activeThread), localThreadId: activeThread.id, conversationId: activeThread.conversationId, authorName: authorProfile ? authorProfile.name : 'Codex', ...(authorProfile?.avatar ? { authorAvatar: authorProfile.avatar } : {}) }, state.codex.authStatus);
         appendMessageToThread(activeThread.id, createCodexMessage('user', content, 'submitting', {
           readBy: [SELF_MEMBER], requestId, inputReferences,
         }), { countUnread: false });
@@ -7087,6 +7238,8 @@
           if (error.code === 'BROWSER_TOOLS_UNAVAILABLE') {
             error.message = '이 대화는 Browser 조작 도구가 등록되기 전에 만들어졌습니다. 기존 기록과 초안은 유지됩니다. 새 Chat을 만든 뒤 Browser에서 이번 실행의 조작 대상을 다시 선택해 주세요.';
           }
+          const profileText = ChatState.profileSendErrorText(error.code);
+          if (profileText) error.message = profileText;
           if (error.conversationId) {
             request.conversationId = error.conversationId;
             updateThreadById(activeThread.id, thread => ({ ...thread, conversationId: error.conversationId, ...ChatState.nativeBindingForRun(thread, { conversationId: error.conversationId, accountKey: request.accountKey }) }));
@@ -7938,34 +8091,6 @@
     };
   }
 
-  // ============ Settings Canvas Card ============
-  const SETTINGS_MODELS = [
-    { id: 'gpt-4.1', name: 'GPT-4.1', provider: 'openai', desc: 'OpenAI \uCD5C\uC2E0 \uB300\uD615 \uBAA8\uB378', icon: 'G', color: '#10A37F', enabled: true, isDefault: true },
-    { id: 'gpt-4.1-mini', name: 'GPT-4.1 Mini', provider: 'openai', desc: '\uBE60\uB974\uACE0 \uACBD\uC81C\uC801\uC778 \uC18C\uD615 \uBAA8\uB378', icon: 'g', color: '#10A37F', enabled: true, isDefault: false },
-    { id: 'claude-4-sonnet', name: 'Claude 4 Sonnet', provider: 'anthropic', desc: 'Anthropic \uACE0\uC131\uB2A5 \uBAA8\uB378', icon: 'C', color: '#D97706', enabled: true, isDefault: false },
-    { id: 'claude-4-haiku', name: 'Claude 4 Haiku', provider: 'anthropic', desc: '\uBE60\uB978 \uC751\uB2F5 \uC18C\uD615 \uBAA8\uB378', icon: 'c', color: '#D97706', enabled: false, isDefault: false },
-    { id: 'gemini-2.5-pro', name: 'Gemini 2.5 Pro', provider: 'google', desc: 'Google \uCD5C\uC2E0 \uB300\uD615 \uBAA8\uB378', icon: 'G', color: '#4285F4', enabled: true, isDefault: false },
-    { id: 'gemini-2.5-flash', name: 'Gemini 2.5 Flash', provider: 'google', desc: '\uBE60\uB978 \uC751\uB2F5 \uACBD\uC81C\uD615 \uBAA8\uB378', icon: 'f', color: '#4285F4', enabled: false, isDefault: false },
-  ];
-  const CODEX_ACCOUNT = {
-    email: 'm8chaa@gmail.com',
-    name: 'Minsoo Cha',
-    avatar: 'M',
-    plan: 'Pro',
-    loggedIn: true,
-    connectedProviders: ['openai', 'anthropic', 'google'],
-  };
-  const SETTINGS_PROVIDERS = [
-    { id: 'openai', name: 'OpenAI', icon: '\u2B50', models: ['GPT-4.1', 'GPT-4.1 Mini', 'GPT-4.1 Nano'], quota: '\uBB34\uC81C\uD55C' },
-    { id: 'anthropic', name: 'Anthropic', icon: '\u26A1', models: ['Claude 4 Sonnet', 'Claude 4 Haiku'], quota: '\uBB34\uC81C\uD55C' },
-    { id: 'google', name: 'Google AI', icon: '\u2B22', models: ['Gemini 2.5 Pro', 'Gemini 2.5 Flash'], quota: '\uBB34\uC81C\uD55C' },
-    { id: 'local', name: 'Local (Ollama)', icon: '\uD83D\uDDA5\uFE0F', models: ['Llama 3', 'Mistral'], quota: '\uB85C\uCEEC' },
-  ];
-  const SETTINGS_AGENTS = [
-    { id: 'a1', name: '\uCF54\uB371\uC2A4 \uC5B4\uC2DC\uC2A4\uD134\uD2B8', desc: '\uAE30\uBCF8 AI \uC5B4\uC2DC\uC2A4\uD134\uD2B8', model: 'gpt-4.1', color: '#2D5A7B', prompt: '\uB2F9\uC2E0\uC740 \uB3C4\uC6C0\uC774 \uB418\uB294 AI \uC5B4\uC2DC\uC2A4\uD134\uD2B8\uC785\uB2C8\uB2E4.', active: true },
-    { id: 'a2', name: '\uCF54\uB4DC \uB9AC\uBDF0\uC5B4', desc: '\uCF54\uB4DC \uB9AC\uBDF0 \uBC0F \uBC84\uADF8 \uD0D0\uC9C0 \uC804\uBB38', model: 'claude-4-sonnet', color: '#8B5CF6', prompt: '\uB2F9\uC2E0\uC740 \uCF54\uB4DC \uB9AC\uBDF0 \uC804\uBB38\uAC00\uC785\uB2C8\uB2E4.', active: true },
-    { id: 'a3', name: '\uBC88\uC5ED\uAC00', desc: '\uB2E4\uAD6D\uC5B4 \uBC88\uC5ED \uC804\uBB38', model: 'gemini-2.5-pro', color: '#059669', prompt: '\uB2F9\uC2E0\uC740 \uC804\uBB38 \uBC88\uC5ED\uAC00\uC785\uB2C8\uB2E4.', active: false },
-  ];
   const ONTOLOGY_TIME_PANE_ORDER = ['past', 'present', 'future'];
   const ONTOLOGY_GRAPH_SCHEMA_VERSION = 3;
   const ONTOLOGY_TIME_PANE_LABELS = {
@@ -9897,14 +10022,20 @@
     return card;
   }
 
+  // ============ Settings Canvas Card ============
+  // 계정: the real ChatGPT sign-in, plan and usage from the bridge.
+  // Agent 관리: Agent Profiles in the local profile store (/profiles).
   function spawnSettingsCard(options = {}) {
     const sourceRef = singletonSourceRef('settings', { kind: 'settings-card' });
     const existing = options.openMode === 'new' ? null : focusOpenSourceCard(sourceRef);
-    if (existing) return existing;
+    if (existing) {
+      if (options.tab) existing._settingsShowTab?.(options.tab);
+      return existing;
+    }
 
     const id = `egd-settings-card-${++cardSeq}`;
-    const initialWidth = 560;
-    const initialHeight = 480;
+    const initialWidth = 600;
+    const initialHeight = 600;
     const offset = ((cardSeq - 1) % 6) * 24;
     const center = viewportToCanvasPoint(
       window.innerWidth / 2 + offset,
@@ -9935,215 +10066,500 @@
     );
 
     const contentArea = el('div', { class: 'egd-settings-content' });
-    let activeTab = 'models';
+    let activeTab = options.tab === 'agents' ? 'agents' : 'account';
+    const bridge = () => state.codexBridge || null;
 
-    const renderModelsTab = () => {
-      contentArea.textContent = '';
-      const section = el('div', { class: 'egd-settings-section' });
-      section.appendChild(el('div', { class: 'egd-settings-section-title' }, 'AI \uBAA8\uB378 \uBAA9\uB85D'));
-      for (const model of SETTINGS_MODELS) {
-        const toggle = el('button', {
-          class: 'egd-settings-toggle' + (model.enabled ? ' egd-settings-toggle-on' : ''),
-          onclick: () => {
-            model.enabled = !model.enabled;
-            renderModelsTab();
-          },
-        });
-        const row = el('div', { class: 'egd-settings-model-row' },
-          el('div', { class: 'egd-settings-model-icon', style: { background: model.color } }, model.icon),
-          el('div', { class: 'egd-settings-model-info' },
-            el('div', { class: 'egd-settings-model-name' }, model.name),
-            el('div', { class: 'egd-settings-model-desc' }, model.desc),
-          ),
-          ...(model.isDefault ? [el('span', { class: 'egd-settings-default-badge' }, '\uAE30\uBCF8')] : []),
-          toggle,
-        );
-        section.appendChild(row);
-      }
-      contentArea.appendChild(section);
-    };
-
-    const renderProvidersTab = () => {
-      contentArea.textContent = '';
-
-      // --- Codex Account Section ---
-      const acctSection = el('div', { class: 'egd-settings-section' });
-      acctSection.appendChild(el('div', { class: 'egd-settings-section-title' }, 'Codex \uACC4\uC815'));
-      if (CODEX_ACCOUNT.loggedIn) {
-        const acctCard = el('div', { class: 'egd-settings-codex-account' },
-          el('div', { class: 'egd-settings-codex-avatar', style: { background: '#2D5A7B' } }, CODEX_ACCOUNT.avatar),
-          el('div', { class: 'egd-settings-codex-info' },
-            el('div', { class: 'egd-settings-codex-name' },
-              CODEX_ACCOUNT.name,
-              el('span', { class: 'egd-settings-plan-badge' }, CODEX_ACCOUNT.plan),
-            ),
-            el('div', { class: 'egd-settings-codex-email' }, CODEX_ACCOUNT.email),
-          ),
-          el('button', { class: 'egd-settings-btn egd-settings-btn-danger', onclick: () => {
-            CODEX_ACCOUNT.loggedIn = false;
-            CODEX_ACCOUNT.connectedProviders = [];
-            renderProvidersTab();
-          } }, '\uB85C\uADF8\uC544\uC6C3'),
-        );
-        acctSection.appendChild(acctCard);
+    // --- 계정: the signed-in ChatGPT account as the bridge reports it ---
+    const renderAccountTab = () => {
+      const codex = state.codex;
+      const auth = codex.authStatus || {};
+      const loginBusy = Boolean(codex.isStartingLogin || auth.loginInProgress);
+      const section = el('section', { class: 'egd-settings-section', 'aria-label': 'ChatGPT 계정' },
+        el('div', { class: 'egd-settings-section-title' }, 'ChatGPT 계정'));
+      if (!codex.connected) {
+        section.appendChild(el('div', { class: 'egd-settings-account-card', data: { testid: 'settings-account', state: 'offline' } },
+          el('div', { class: 'egd-settings-account-copy' },
+            el('div', { class: 'egd-settings-account-title' }, '코덱스에 연결되지 않았습니다'),
+            el('div', { class: 'egd-settings-account-sub' }, '이 컴퓨터의 코덱스 연결이 준비되면 계정과 사용 한도를 보여 드립니다.')),
+          el('button', { class: 'egd-settings-btn', onclick: () => bridge()?.refreshAuthStatus() }, '상태 새로고침')));
+      } else if (!auth.isLoggedIn) {
+        section.appendChild(el('div', { class: 'egd-settings-account-card', data: { testid: 'settings-account', state: 'signed-out' } },
+          el('div', { class: 'egd-settings-account-copy' },
+            el('div', { class: 'egd-settings-account-title' }, '로그인되어 있지 않습니다'),
+            el('div', { class: 'egd-settings-account-sub' }, 'ChatGPT 계정으로 로그인하면 대화를 시작하고 사용 한도를 확인할 수 있습니다.')),
+          el('button', {
+            class: 'egd-settings-btn egd-settings-btn-primary', disabled: loginBusy ? 'true' : null,
+            onclick: () => bridge()?.startLogin(),
+          }, loginBusy ? '로그인 중…' : '로그인')));
       } else {
-        const loginCard = el('div', { class: 'egd-settings-codex-login' },
-          el('div', { class: 'egd-settings-codex-login-icon' }, '\uD83D\uDD11'),
-          el('div', { class: 'egd-settings-codex-login-text' },
-            el('div', { style: { fontWeight: '600', marginBottom: '4px' } }, 'Codex\uC5D0 \uB85C\uADF8\uC778\uD558\uC138\uC694'),
-            el('div', { style: { fontSize: '12px', color: '#666' } }, 'Codex \uACC4\uC815\uC73C\uB85C \uBAA8\uB4E0 AI Provider\uB97C \uD1B5\uD569 \uAD00\uB9AC\uD569\uB2C8\uB2E4.'),
-          ),
-          el('button', { class: 'egd-settings-btn egd-settings-btn-primary', onclick: () => {
-            CODEX_ACCOUNT.loggedIn = true;
-            CODEX_ACCOUNT.email = 'm8chaa@gmail.com';
-            CODEX_ACCOUNT.name = 'Minsoo Cha';
-            CODEX_ACCOUNT.connectedProviders = ['openai', 'anthropic', 'google'];
-            renderProvidersTab();
-          } }, '\uB85C\uADF8\uC778'),
-        );
-        acctSection.appendChild(loginCard);
+        const email = typeof auth.accountEmail === 'string' && auth.accountEmail.trim() ? auth.accountEmail.trim() : null;
+        const plan = ChatState.codexPlanLabel(auth.planType);
+        section.appendChild(el('div', { class: 'egd-settings-account-card', data: { testid: 'settings-account', state: 'signed-in' } },
+          el('span', { class: 'egd-profile-avatar egd-profile-avatar-tone-0 egd-settings-account-avatar', 'aria-hidden': 'true' },
+            ChatState.profileAvatarView(null, email || 'C').text),
+          el('div', { class: 'egd-settings-account-copy' },
+            el('div', { class: 'egd-settings-account-title' }, email || '이메일 확인 안 됨'),
+            el('div', { class: 'egd-settings-account-sub' }, 'ChatGPT로 로그인됨',
+              el('span', { class: 'egd-settings-plan-badge', data: { testid: 'settings-plan' } }, plan ? `${plan} 요금제` : '요금제 확인 안 됨'))),
+          el('button', { class: 'egd-settings-btn', onclick: () => bridge()?.signOut() }, '로그아웃')));
+        const ring = ChatState.usageRingView(auth);
+        const usage = auth.usage && typeof auth.usage === 'object' ? auth.usage : {};
+        const unknown = ring.level === 'unknown';
+        section.appendChild(el('div', {
+          class: `egd-settings-usage egd-usage-${ring.level}${ring.stale ? ' egd-usage-stale' : ''}`,
+          data: { testid: 'settings-usage', level: ring.level }, title: ring.title,
+        },
+        el('span', { class: 'egd-usage-ring egd-usage-ring-large', 'aria-hidden': 'true', style: ring.percent === null ? null : `--egd-usage-fill: ${ring.percent}%` }),
+        el('div', { class: 'egd-settings-usage-copy' },
+          el('div', { class: 'egd-settings-usage-title' }, unknown ? '사용 한도 확인 안 됨'
+            : [usage.windowLabel, usage.percentLabel].filter((part) => typeof part === 'string' && part).join(' · ') || ring.text),
+          el('div', { class: 'egd-settings-usage-sub' }, unknown ? '아직 보고된 사용량이 없습니다.' : ring.resetLabel || '초기화 시각 확인 안 됨'),
+          ring.stale ? el('div', { class: 'egd-settings-usage-note' }, '확인한 지 오래되어 실제와 다를 수 있습니다.') : null,
+          ring.level === 'limit' ? el('div', { class: 'egd-settings-usage-note egd-settings-usage-note-strong' }, '한도에 도달했습니다. 초기화 전까지는 새 요청이 거절될 수 있습니다.') : null)));
       }
-      contentArea.appendChild(acctSection);
-
-      // --- Connected Providers Section ---
-      const provSection = el('div', { class: 'egd-settings-section' });
-      provSection.appendChild(el('div', { class: 'egd-settings-section-title' }, '\uC5F0\uACB0\uB41C AI Provider'));
-      for (const prov of SETTINGS_PROVIDERS) {
-        const isConnected = CODEX_ACCOUNT.loggedIn && CODEX_ACCOUNT.connectedProviders.includes(prov.id);
-        const statusDot = isConnected ? 'egd-settings-status-dot-ok' : 'egd-settings-status-dot-off';
-        const statusText = isConnected ? '\uC5F0\uACB0\uB428' : '\uBBF8\uC5F0\uACB0';
-        const toggleBtn = CODEX_ACCOUNT.loggedIn
-          ? el('button', {
-              class: 'egd-settings-toggle' + (isConnected ? ' egd-settings-toggle-on' : ''),
-              onclick: () => {
-                if (isConnected) {
-                  CODEX_ACCOUNT.connectedProviders = CODEX_ACCOUNT.connectedProviders.filter(p => p !== prov.id);
-                } else {
-                  CODEX_ACCOUNT.connectedProviders.push(prov.id);
-                }
-                renderProvidersTab();
-              },
-            })
-          : null;
-        const row = el('div', { class: 'egd-settings-provider-row' },
-          el('div', { class: 'egd-settings-provider-logo' }, prov.icon),
-          el('div', { class: 'egd-settings-provider-info' },
-            el('div', { class: 'egd-settings-provider-name' }, prov.name),
-            el('div', { class: 'egd-settings-provider-status' },
-              el('span', { class: `egd-settings-status-dot ${statusDot}` }),
-              statusText,
-              ...(isConnected ? [' \u00B7 ', prov.models.join(', ')] : []),
-            ),
-            ...(isConnected ? [el('div', { class: 'egd-settings-provider-quota' }, '\uC0AC\uC6A9\uB7C9: ' + prov.quota)] : []),
-          ),
-          ...(toggleBtn ? [toggleBtn] : []),
-        );
-        provSection.appendChild(row);
-      }
-      contentArea.appendChild(provSection);
+      contentArea.replaceChildren(section, el('section', { class: 'egd-settings-section', 'aria-label': 'Claude' },
+        el('div', { class: 'egd-settings-section-title' }, 'Claude'),
+        el('div', { class: 'egd-settings-pending-line', data: { testid: 'settings-claude' } }, '준비 중 — 연결 방식 결정 대기')));
     };
 
-    let showAgentForm = false;
-    let editingAgent = null;
-    const renderAgentsTab = () => {
-      contentArea.textContent = '';
-      if (showAgentForm) {
-        const form = el('div', { class: 'egd-settings-form' });
-        const nameInput = el('input', { class: 'egd-settings-form-input', type: 'text', value: editingAgent ? editingAgent.name : '', placeholder: 'Agent \uC774\uB984' });
-        const descInput = el('input', { class: 'egd-settings-form-input', type: 'text', value: editingAgent ? editingAgent.desc : '', placeholder: '\uC124\uBA85' });
-        const modelSelect = el('select', { class: 'egd-settings-form-select' });
-        for (const m of SETTINGS_MODELS.filter(m => m.enabled)) {
-          const opt = el('option', { value: m.id }, m.name);
-          if (editingAgent && editingAgent.model === m.id) opt.selected = true;
-          modelSelect.appendChild(opt);
-        }
-        const promptArea = el('textarea', { class: 'egd-settings-form-textarea', placeholder: '\uC2DC\uC2A4\uD15C \uD504\uB86C\uD504\uD2B8' });
-        if (editingAgent) promptArea.value = editingAgent.prompt;
-        form.appendChild(el('div', {}, el('div', { class: 'egd-settings-form-label' }, 'Agent \uC774\uB984'), nameInput));
-        form.appendChild(el('div', {}, el('div', { class: 'egd-settings-form-label' }, '\uC124\uBA85'), descInput));
-        form.appendChild(el('div', {}, el('div', { class: 'egd-settings-form-label' }, '\uC0AC\uC6A9 \uBAA8\uB378'), modelSelect));
-        form.appendChild(el('div', {}, el('div', { class: 'egd-settings-form-label' }, '\uC2DC\uC2A4\uD15C \uD504\uB86C\uD504\uD2B8'), promptArea));
-        form.appendChild(el('div', { class: 'egd-settings-form-actions' },
-          el('button', { class: 'egd-settings-btn', onclick: () => { showAgentForm = false; editingAgent = null; renderAgentsTab(); } }, '\uCDE8\uC18C'),
-          el('button', { class: 'egd-settings-btn egd-settings-btn-primary', onclick: () => {
-            if (editingAgent) {
-              editingAgent.name = nameInput.value || editingAgent.name;
-              editingAgent.desc = descInput.value || editingAgent.desc;
-              editingAgent.model = modelSelect.value;
-              editingAgent.prompt = promptArea.value;
-            } else {
-              SETTINGS_AGENTS.push({
-                id: 'a' + (SETTINGS_AGENTS.length + 1),
-                name: nameInput.value || '\uC0C8 Agent',
-                desc: descInput.value || '',
-                model: modelSelect.value,
-                color: '#' + Math.floor(Math.random()*16777215).toString(16).padStart(6, '0'),
-                prompt: promptArea.value,
-                active: true,
-              });
-            }
-            showAgentForm = false; editingAgent = null; renderAgentsTab();
-          } }, editingAgent ? '\uC800\uC7A5' : '\uC0DD\uC131'),
-        ));
-        contentArea.appendChild(form);
+    // --- Agent 관리: saved Agent Profiles (list → detail → edit) ---
+    const agents = { mode: 'list', profileId: null, detail: null, revisions: [], diff: null, form: null, baseRevision: null,
+      errors: [], notice: null, keptForm: null, busy: false, showArchived: false, focusField: null };
+    const chipInputs = new Map();
+    const fieldId = (field) => `${id}-profile-${field}`;
+    const profilePath = (profileId, suffix = '') => `/profiles/${encodeURIComponent(profileId)}${suffix}`;
+    const profileApi = (path, init) => {
+      const api = bridge();
+      if (!api?.profileRequest) return Promise.reject(Object.assign(new Error('Profile storage unavailable'), { status: 0 }));
+      return api.profileRequest(path, init);
+    };
+    const refreshCatalog = () => Promise.resolve(bridge()?.loadProfiles?.()).catch(() => {});
+    const reloadAfter = (error, profileId) => {
+      agents.notice = ChatState.profileRequestErrorText(error);
+      if (['PROFILE_REVISION_CONFLICT', 'PROFILE_LIFECYCLE_CONFLICT', 'PROFILE_NOT_FOUND', 'PROFILE_REVISION_NOT_FOUND'].includes(error?.code)) {
+        void refreshCatalog();
+        if (profileId && error.code !== 'PROFILE_NOT_FOUND') return openProfile(profileId, agents.notice);
+        if (error.code === 'PROFILE_NOT_FOUND') { agents.mode = 'list'; agents.profileId = null; }
+      }
+      agents.busy = false;
+      renderAgentsTab();
+      return null;
+    };
+    const openProfile = async (profileId, notice = null) => {
+      Object.assign(agents, { mode: 'detail', profileId, notice, diff: null, busy: true, errors: [] });
+      if (agents.detail?.id !== profileId) agents.detail = null;
+      renderAgentsTab();
+      try {
+        const [detail, history] = await Promise.all([profileApi(profilePath(profileId)), profileApi(profilePath(profileId, '/revisions'))]);
+        if (agents.profileId !== profileId) return;
+        agents.detail = detail;
+        agents.revisions = Array.isArray(history?.revisions) ? history.revisions : [];
+      } catch (error) {
+        if (agents.profileId !== profileId) return;
+        agents.notice = ChatState.profileRequestErrorText(error);
+      } finally {
+        if (agents.profileId === profileId && agents.mode === 'detail') { agents.busy = false; renderAgentsTab(); }
+      }
+    };
+    const startEdit = (detail = null) => {
+      Object.assign(agents, { mode: 'edit', profileId: detail?.id || null, form: ChatState.profileFormFromBody(detail?.head?.body || null),
+        baseRevision: detail?.headRevision ?? null, errors: [], notice: null, keptForm: null, busy: false, diff: null });
+      renderAgentsTab();
+    };
+    const collectPendingChips = () => {
+      for (const [field, input] of chipInputs) {
+        const value = input.value.trim();
+        if (value && !agents.form[field].includes(value)) agents.form[field] = [...agents.form[field], value];
+        input.value = '';
+      }
+    };
+    const saveDraft = async () => {
+      if (agents.busy) return;
+      collectPendingChips();
+      const checked = ChatState.validateProfileForm(agents.form);
+      if (!checked.ok) {
+        agents.errors = checked.errors;
+        agents.focusField = checked.errors[0]?.field || null;
+        renderAgentsTab();
         return;
       }
-      const section = el('div', { class: 'egd-settings-section' });
-      section.appendChild(el('div', { class: 'egd-settings-section-title' }, 'Agent \uBAA9\uB85D'));
-      if (SETTINGS_AGENTS.length === 0) {
-        section.appendChild(el('div', { class: 'egd-settings-empty' }, '\uC0DD\uC131\uB41C Agent\uAC00 \uC5C6\uC2B5\uB2C8\uB2E4.'));
+      agents.errors = [];
+      agents.busy = true;
+      renderAgentsTab();
+      const editingId = agents.profileId;
+      try {
+        const saved = editingId
+          ? await profileApi(profilePath(editingId, '/draft'), { method: 'PUT', body: { body: checked.body, expectedRevision: agents.baseRevision } })
+          : await profileApi('/profiles', { method: 'POST', body: { body: checked.body } });
+        void refreshCatalog();
+        agents.busy = false;
+        await openProfile(saved.id, saved.unchanged ? '바뀐 내용이 없어 새 버전을 만들지 않았습니다.'
+          : saved.profile?.lifecycle === 'draft' ? '초안 저장됨 · 아직 사용할 수 없음. 사용 시작을 누르면 대화방에서 고를 수 있습니다.'
+            : `버전 ${saved.revision} 초안을 저장했습니다. 사용 시작을 눌러야 대화방에 적용됩니다.`);
+      } catch (error) {
+        agents.busy = false;
+        if (error?.code === 'PROFILE_REVISION_CONFLICT' && editingId) {
+          // Load the newest saved content, and keep this edit one click away.
+          try {
+            const latest = await profileApi(profilePath(editingId));
+            agents.keptForm = agents.form;
+            agents.form = ChatState.profileFormFromBody(latest.head?.body || null);
+            agents.baseRevision = latest.headRevision;
+            agents.detail = latest;
+            agents.notice = ChatState.PROFILE_CONFLICT_TEXT;
+            void refreshCatalog();
+          } catch (reloadError) { agents.notice = ChatState.profileRequestErrorText(reloadError); }
+          renderAgentsTab();
+          return;
+        }
+        agents.notice = ChatState.profileRequestErrorText(error);
+        renderAgentsTab();
       }
-      for (const agent of SETTINGS_AGENTS) {
-        const toggle = el('button', {
-          class: 'egd-settings-toggle' + (agent.active ? ' egd-settings-toggle-on' : ''),
-          onclick: () => { agent.active = !agent.active; renderAgentsTab(); },
-        });
-        const modelName = SETTINGS_MODELS.find(m => m.id === agent.model)?.name || agent.model;
-        const row = el('div', { class: 'egd-settings-agent-row' },
-          el('div', { class: 'egd-settings-agent-avatar', style: { background: agent.color } }, agent.name.charAt(0)),
-          el('div', { class: 'egd-settings-agent-info' },
-            el('div', { class: 'egd-settings-agent-name' }, agent.name),
-            el('div', { class: 'egd-settings-agent-desc' }, agent.desc),
-            el('div', { class: 'egd-settings-agent-model' }, '\uBAA8\uB378: ' + modelName),
-          ),
-          el('div', { class: 'egd-settings-agent-actions' },
-            el('button', { class: 'egd-settings-btn', onclick: () => { editingAgent = agent; showAgentForm = true; renderAgentsTab(); } }, '\uD3B8\uC9D1'),
-            el('button', { class: 'egd-settings-btn egd-settings-btn-danger', onclick: () => {
-              const idx = SETTINGS_AGENTS.indexOf(agent);
-              if (idx >= 0) SETTINGS_AGENTS.splice(idx, 1);
-              renderAgentsTab();
-            } }, '\uC0AD\uC81C'),
-          ),
-          toggle,
-        );
-        section.appendChild(row);
-      }
-      section.appendChild(el('div', { style: { marginTop: '12px' } },
-        el('button', { class: 'egd-settings-btn egd-settings-btn-primary', onclick: () => { showAgentForm = true; editingAgent = null; renderAgentsTab(); } }, '+ \uC0C8 Agent \uC0DD\uC131'),
-      ));
-      contentArea.appendChild(section);
+    };
+    const activateHead = async (detail) => {
+      if (agents.busy) return;
+      agents.busy = true;
+      renderAgentsTab();
+      try {
+        const view = await profileApi(profilePath(detail.id, '/activate'), { method: 'POST',
+          body: { revision: detail.headRevision, expectedActiveRevision: detail.activeRevision ?? null } });
+        void refreshCatalog();
+        agents.busy = false;
+        await openProfile(detail.id, `버전 ${view.activeRevision ?? detail.headRevision}을 사용합니다. 대화방에서 이 Agent를 고를 수 있습니다.`);
+      } catch (error) { await reloadAfter(error, detail.id); }
+    };
+    const LIFECYCLE_NOTICES = {
+      disable: '사용을 중지했습니다. 새 대화에서 고를 수 없고, 이 Agent를 쓰던 대화방은 다른 Agent를 골라야 보낼 수 있습니다.',
+      archive: '보관함으로 옮겼습니다.',
+      restore: '복원했습니다.',
+    };
+    const changeLifecycle = async (detail, action, name) => {
+      if (agents.busy) return;
+      if (action === 'delete' && !window.confirm(`'${name}' Agent를 삭제할까요? 삭제하면 되돌릴 수 없고, 이 Agent를 쓰던 대화방은 다른 Agent를 골라야 보낼 수 있습니다.`)) return;
+      agents.busy = true;
+      renderAgentsTab();
+      try {
+        await profileApi(profilePath(detail.id, '/lifecycle'), { method: 'POST', body: { action } });
+        void refreshCatalog();
+        agents.busy = false;
+        if (action === 'delete') {
+          Object.assign(agents, { mode: 'list', profileId: null, detail: null, notice: `${name} Agent를 삭제했습니다.` });
+          renderAgentsTab();
+        } else await openProfile(detail.id, LIFECYCLE_NOTICES[action]);
+      } catch (error) { await reloadAfter(error, detail.id); }
+    };
+    const showDiff = async (detail, from, to) => {
+      try {
+        const result = await profileApi(`${profilePath(detail.id, '/diff')}?from=${from}&to=${to}`);
+        if (agents.profileId !== detail.id) return;
+        agents.diff = { from: result.from, to: result.to, rows: ChatState.profileDiffRows(result.changes) };
+      } catch (error) { agents.notice = ChatState.profileRequestErrorText(error); }
+      renderAgentsTab();
+    };
+    // Going back writes the old content as a new draft; nothing is rewritten in place.
+    const revertTo = async (detail, revision) => {
+      if (agents.busy) return;
+      agents.busy = true;
+      renderAgentsTab();
+      try {
+        const old = await profileApi(profilePath(detail.id, `/revisions/${revision}`));
+        const saved = await profileApi(profilePath(detail.id, '/draft'), { method: 'PUT', body: { body: old.body, expectedRevision: detail.headRevision } });
+        void refreshCatalog();
+        agents.busy = false;
+        await openProfile(detail.id, saved.unchanged ? '지금 초안과 같은 내용이라 새 버전을 만들지 않았습니다.'
+          : `버전 ${revision} 내용으로 새 초안(버전 ${saved.revision})을 만들었습니다. 사용 시작을 눌러야 적용됩니다.`);
+      } catch (error) { await reloadAfter(error, detail.id); }
     };
 
-    const tabs = el('div', { class: 'egd-settings-tabs' });
+    const noticeLine = () => agents.notice
+      ? el('div', { class: 'egd-settings-notice', role: 'status', data: { testid: 'settings-agent-notice' } }, agents.notice) : null;
+
+    const renderAgentList = () => {
+      const reported = bridge()?.profileCatalog?.() || { status: 'unavailable', profiles: [] };
+      // Without a bridge connection the catalog can only be stale or empty; say so.
+      const catalog = reported.status !== 'ready' && !state.codex.connected ? { ...reported, status: 'unavailable' } : reported;
+      const archived = catalog.profiles.filter((profile) => profile.lifecycle === 'archived');
+      const shown = catalog.profiles.filter((profile) => (profile.lifecycle === 'archived') === agents.showArchived);
+      const section = el('section', { class: 'egd-settings-section', 'aria-label': 'Agent 목록' },
+        el('div', { class: 'egd-settings-section-head' },
+          el('div', {},
+            el('div', { class: 'egd-settings-section-title' }, agents.showArchived ? '보관함' : 'Agent'),
+            el('div', { class: 'egd-settings-section-sub' }, '대화방에서 고를 담당자를 만들고 고칩니다. 예시는 처음부터 들어 있는 Agent입니다.')),
+          el('button', {
+            class: 'egd-settings-btn egd-settings-btn-primary', data: { testid: 'settings-agent-create' },
+            disabled: catalog.status === 'ready' ? null : 'true', onclick: () => startEdit(null),
+          }, 'Agent 만들기')),
+        noticeLine());
+      if (catalog.status === 'unavailable') {
+        section.appendChild(el('div', { class: 'egd-settings-empty', data: { testid: 'settings-agent-unavailable' } },
+          el('p', {}, 'Agent 저장소에 연결하지 못했습니다. 코덱스 연결을 확인한 뒤 다시 불러와 주세요.'),
+          el('button', { class: 'egd-settings-btn', onclick: () => { void refreshCatalog(); } }, '다시 불러오기')));
+      } else if (catalog.status !== 'ready') {
+        section.appendChild(el('div', { class: 'egd-settings-empty', role: 'status' }, '불러오는 중…'));
+      } else if (!shown.length) {
+        section.appendChild(el('div', { class: 'egd-settings-empty' }, agents.showArchived ? '보관한 Agent가 없습니다.' : '아직 Agent가 없습니다. Agent 만들기로 첫 담당자를 만들어 보세요.'));
+      }
+      for (const profile of catalog.status === 'ready' ? shown : []) {
+        const status = ChatState.profileStatusView(profile);
+        section.appendChild(el('button', {
+          class: 'egd-settings-agent-row', type: 'button', data: { testid: 'settings-agent-row', profileId: profile.id, lifecycle: profile.lifecycle },
+          onclick: () => openProfile(profile.id),
+        },
+        codexProfileAvatar(profile.avatar, profile.name, 'egd-settings-agent-avatar'),
+        el('span', { class: 'egd-settings-agent-info' },
+          el('span', { class: 'egd-settings-agent-name' }, profile.name, status.example ? el('span', { class: 'egd-settings-badge' }, '예시') : null),
+          el('span', { class: 'egd-settings-agent-desc' }, profile.role || '역할 미설정'),
+          el('span', { class: 'egd-settings-agent-status' }, status.detail ? `${status.label} · ${status.detail}` : status.label)),
+        el('span', { class: `egd-settings-status-dot egd-settings-status-dot-${status.usable ? 'ok' : 'off'}`, 'aria-hidden': 'true' })));
+      }
+      if (catalog.status === 'ready' && (archived.length || agents.showArchived)) {
+        section.appendChild(el('button', {
+          class: 'egd-settings-link', onclick: () => { agents.showArchived = !agents.showArchived; agents.notice = null; renderAgentsTab(); },
+        }, agents.showArchived ? '← Agent 목록으로' : `보관함 보기 (${archived.length})`));
+      }
+      contentArea.replaceChildren(section);
+    };
+
+    const detailRow = (label, value) => el('div', { class: 'egd-settings-detail-row' }, el('dt', {}, label), el('dd', {}, value));
+    const chipRow = (items, empty) => items.length
+      ? el('span', { class: 'egd-settings-chip-row' }, ...items.map((item) => el('span', { class: 'egd-settings-chip' }, item))) : empty;
+    const renderAgentDetail = () => {
+      const detail = agents.detail;
+      const back = el('button', { class: 'egd-settings-link', onclick: () => { Object.assign(agents, { mode: 'list', profileId: null, notice: null, diff: null }); renderAgentsTab(); } }, '← Agent 목록');
+      if (!detail) {
+        contentArea.replaceChildren(el('section', { class: 'egd-settings-section' }, back, noticeLine(),
+          agents.busy ? el('div', { class: 'egd-settings-empty', role: 'status' }, '불러오는 중…') : null));
+        return;
+      }
+      const status = ChatState.profileStatusView(detail);
+      const shownRevision = detail.active || detail.head;
+      const body = shownRevision?.body || {};
+      const editable = ['draft', 'active', 'disabled'].includes(detail.lifecycle);
+      const pendingDraft = editable && (detail.hasDraft || detail.lifecycle !== 'active');
+      const tone = ChatState.PROFILE_TONE_OPTIONS.find((option) => option.value === body.personality?.tone)?.label || '담백';
+      const actions = el('div', { class: 'egd-settings-detail-actions' },
+        editable ? el('button', { class: 'egd-settings-btn', disabled: agents.busy ? 'true' : null, onclick: () => startEdit(detail) }, '편집') : null,
+        pendingDraft ? el('button', { class: 'egd-settings-btn egd-settings-btn-primary', data: { testid: 'settings-agent-activate' }, disabled: agents.busy ? 'true' : null,
+          onclick: () => activateHead(detail) }, `사용 시작 (버전 ${detail.headRevision})`) : null,
+        detail.lifecycle === 'active' ? el('button', { class: 'egd-settings-btn', disabled: agents.busy ? 'true' : null, onclick: () => changeLifecycle(detail, 'disable', body.name) }, '사용 중지') : null,
+        editable ? el('button', { class: 'egd-settings-btn', disabled: agents.busy ? 'true' : null, onclick: () => changeLifecycle(detail, 'archive', body.name) }, '보관') : null,
+        detail.lifecycle === 'archived' ? el('button', { class: 'egd-settings-btn', disabled: agents.busy ? 'true' : null, onclick: () => changeLifecycle(detail, 'restore', body.name) }, '복원') : null,
+        el('button', { class: 'egd-settings-btn egd-settings-btn-danger', disabled: agents.busy ? 'true' : null, onclick: () => changeLifecycle(detail, 'delete', body.name) }, '삭제'));
+      const section = el('section', { class: 'egd-settings-section egd-settings-agent-detail', data: { testid: 'settings-agent-detail', profileId: detail.id } },
+        back,
+        el('div', { class: 'egd-settings-detail-head' },
+          codexProfileAvatar(body.avatar, body.name, 'egd-settings-detail-avatar'),
+          el('div', { class: 'egd-settings-agent-info' },
+            el('div', { class: 'egd-settings-detail-name' }, body.name || 'Agent', status.example ? el('span', { class: 'egd-settings-badge' }, '예시') : null),
+            el('div', { class: 'egd-settings-agent-desc' }, body.role || '역할 미설정'),
+            el('div', { class: 'egd-settings-agent-status' }, status.detail ? `${status.label} · ${status.detail}` : status.label))),
+        noticeLine(),
+        detail.hasDraft && detail.activeRevision ? el('div', { class: 'egd-settings-callout' },
+          `저장했지만 아직 쓰지 않은 초안이 있습니다 (버전 ${detail.headRevision}).`,
+          el('button', { class: 'egd-settings-link', onclick: () => showDiff(detail, detail.activeRevision, detail.headRevision) }, '사용 중인 버전과 차이 보기')) : null,
+        actions,
+        el('div', { class: 'egd-settings-subtitle' }, detail.active ? `사용 중인 버전 ${detail.activeRevision} 내용` : `초안 버전 ${detail.headRevision} 내용`),
+        el('dl', { class: 'egd-settings-detail-list' },
+          detailRow('말투', tone),
+          detailRow('성격 특징', chipRow(body.personality?.traits || [], '없음')),
+          detailRow('말투 메모', body.personality?.speechNotes || '없음'),
+          detailRow('맡길 일', (body.expertise || []).length ? el('ul', { class: 'egd-settings-plain-list' }, ...body.expertise.map((item) => el('li', {}, item))) : '없음'),
+          detailRow('지침', body.instructions ? el('div', { class: 'egd-settings-instructions' }, body.instructions) : '없음'),
+          detailRow('선호 도구 (표시용)', chipRow(body.toolPreferences || [], '없음'))));
+      if (agents.diff) {
+        section.appendChild(el('div', { class: 'egd-settings-diff', data: { testid: 'settings-agent-diff' } },
+          el('div', { class: 'egd-settings-subtitle' }, `버전 ${agents.diff.from} → 버전 ${agents.diff.to} 바뀐 점`,
+            el('button', { class: 'egd-settings-link', onclick: () => { agents.diff = null; renderAgentsTab(); } }, '닫기')),
+          agents.diff.rows.length ? el('dl', { class: 'egd-settings-detail-list' }, ...agents.diff.rows.map((row) => detailRow(row.label,
+            el('span', { class: 'egd-settings-diff-values' }, el('del', {}, row.before), el('span', { 'aria-hidden': 'true' }, ' → '), el('ins', {}, row.after)))))
+            : el('p', { class: 'egd-settings-section-sub' }, '바뀐 내용이 없습니다.')));
+      }
+      const versions = el('div', { class: 'egd-settings-versions', data: { testid: 'settings-agent-versions' } },
+        el('div', { class: 'egd-settings-subtitle' }, '버전 기록'));
+      for (const revision of agents.revisions) {
+        const compareFrom = detail.activeRevision && detail.activeRevision !== revision.revision ? detail.activeRevision : revision.parentRevision;
+        versions.appendChild(el('div', { class: 'egd-settings-version-row' },
+          el('span', { class: 'egd-settings-version-name' }, `버전 ${revision.revision}`,
+            revision.revision === detail.activeRevision
+              ? el('span', { class: 'egd-settings-badge egd-settings-badge-strong' }, detail.lifecycle === 'active' ? '사용 중' : '마지막 사용 버전') : null,
+            revision.revision === detail.headRevision && (detail.hasDraft || !detail.activeRevision) ? el('span', { class: 'egd-settings-badge' }, '최신 초안') : null),
+          el('span', { class: 'egd-settings-version-time' }, ChatState.formatResetClock(revision.createdAt) || ''),
+          compareFrom ? el('button', { class: 'egd-settings-link', onclick: () => showDiff(detail, compareFrom, revision.revision) }, '차이 보기') : null,
+          editable && revision.revision !== detail.headRevision ? el('button', {
+            class: 'egd-settings-link', disabled: agents.busy ? 'true' : null, onclick: () => revertTo(detail, revision.revision),
+          }, '이 버전으로 되돌리기') : null));
+      }
+      section.appendChild(versions);
+      contentArea.replaceChildren(section);
+    };
+
+    const renderAgentForm = () => {
+      const form = agents.form;
+      const errorFor = (field) => agents.errors.find((error) => error.field === field) || null;
+      const field = (key, label, control, hint = null) => {
+        const error = errorFor(key);
+        return el('div', { class: `egd-settings-field${error ? ' egd-settings-field-invalid' : ''}`, data: { field: key } },
+          el('label', { class: 'egd-settings-form-label', for: fieldId(key) }, label),
+          control,
+          hint ? el('div', { class: 'egd-settings-form-hint' }, hint) : null,
+          error ? el('div', { class: 'egd-settings-field-error', role: 'alert' }, error.message) : null);
+      };
+      const textInput = (key, limit, placeholder) => {
+        const input = el('input', { class: 'egd-settings-form-input', type: 'text', id: fieldId(key), maxlength: String(limit), placeholder,
+          'aria-invalid': errorFor(key) ? 'true' : null });
+        input.value = form[key];
+        input.addEventListener('input', () => { form[key] = input.value; });
+        return input;
+      };
+      const textArea = (key, limit, placeholder, rows = 3) => {
+        const area = el('textarea', { class: 'egd-settings-form-textarea', id: fieldId(key), maxlength: String(limit), placeholder, rows: String(rows),
+          'aria-invalid': errorFor(key) ? 'true' : null });
+        area.value = form[key];
+        const counter = el('div', { class: 'egd-settings-form-count' }, `${Array.from(area.value).length}/${limit}`);
+        area.addEventListener('input', () => { form[key] = area.value; counter.textContent = `${Array.from(area.value).length}/${limit}`; });
+        return el('div', { class: 'egd-settings-form-area' }, area, counter);
+      };
+      const chipList = (key, max, itemMax, placeholder) => {
+        const input = el('input', { class: 'egd-settings-form-input', type: 'text', id: fieldId(key), maxlength: String(itemMax), placeholder,
+          'aria-invalid': errorFor(key) ? 'true' : null });
+        chipInputs.set(key, input);
+        const add = () => {
+          const value = input.value.trim();
+          if (!value || form[key].includes(value) || form[key].length >= max) return;
+          form[key] = [...form[key], value];
+          agents.focusField = key;
+          renderAgentsTab();
+        };
+        input.addEventListener('keydown', (ev) => { if (ev.key === 'Enter' && !ev.isComposing) { ev.preventDefault(); add(); } });
+        return el('div', { class: 'egd-settings-chip-editor' },
+          form[key].length ? el('div', { class: 'egd-settings-chip-row' }, ...form[key].map((item, index) => el('span', { class: 'egd-settings-chip' }, item,
+            el('button', { class: 'egd-settings-chip-remove', 'aria-label': `${item} 빼기`, onclick: () => {
+              form[key] = form[key].filter((_, at) => at !== index);
+              agents.focusField = key;
+              renderAgentsTab();
+            } }, '×')))) : null,
+          el('div', { class: 'egd-settings-chip-add' }, input,
+            el('button', { class: 'egd-settings-btn', disabled: form[key].length >= max ? 'true' : null, onclick: add }, '추가'),
+            el('span', { class: 'egd-settings-form-count' }, `${form[key].length}/${max}`)));
+      };
+      const preview = codexProfileAvatar(form.avatarValue ? { kind: form.avatarKind, value: form.avatarValue, color: form.avatarColor } : null,
+        form.name || '?', 'egd-settings-detail-avatar');
+      const avatarInput = el('input', { class: 'egd-settings-form-input egd-settings-avatar-input', type: 'text', id: fieldId('avatar'),
+        maxlength: form.avatarKind === 'emoji' ? '32' : '2', placeholder: form.avatarKind === 'emoji' ? '🙂' : '이니셜', 'aria-invalid': errorFor('avatar') ? 'true' : null });
+      avatarInput.value = form.avatarValue;
+      const syncPreview = () => {
+        const view = ChatState.profileAvatarView(form.avatarValue.trim() ? { kind: form.avatarKind, value: form.avatarValue.trim(), color: form.avatarColor } : null, form.name || '?');
+        preview.textContent = view.text;
+        preview.className = `egd-profile-avatar egd-profile-avatar-tone-${ChatState.PROFILE_AVATAR_PALETTE.indexOf(form.avatarColor) < 0 ? 0 : ChatState.PROFILE_AVATAR_PALETTE.indexOf(form.avatarColor)} egd-settings-detail-avatar`;
+      };
+      avatarInput.addEventListener('input', () => { form.avatarValue = avatarInput.value; syncPreview(); });
+      const segmented = (key, items, labelText) => el('div', { class: 'egd-settings-segmented', role: 'group', 'aria-label': labelText, id: fieldId(key), tabindex: '-1' },
+        ...items.map((item) => el('button', {
+          class: `egd-settings-segment${form[key] === item.value ? ' egd-settings-segment-active' : ''}`, 'aria-pressed': String(form[key] === item.value),
+          onclick: () => { form[key] = item.value; agents.focusField = null; renderAgentsTab(); },
+        }, item.label)));
+      const swatches = el('div', { class: 'egd-settings-swatches', role: 'group', 'aria-label': '아바타 색', id: fieldId('avatarColor'), tabindex: '-1' },
+        ...ChatState.PROFILE_AVATAR_PALETTE.map((color, index) => el('button', {
+          class: `egd-settings-swatch egd-profile-avatar-tone-${index}${form.avatarColor === color ? ' egd-settings-swatch-active' : ''}`,
+          'aria-pressed': String(form.avatarColor === color), 'aria-label': `색 ${index + 1}`,
+          onclick: () => { form.avatarColor = color; renderAgentsTab(); },
+        })));
+      const nameInput = textInput('name', ChatState.PROFILE_FORM_LIMITS.name, '예: 자료 정리 담당');
+      nameInput.addEventListener('input', syncPreview);
+      const limits = ChatState.PROFILE_FORM_LIMITS;
+      const section = el('section', { class: 'egd-settings-section egd-settings-agent-form', data: { testid: 'settings-agent-form' } },
+        el('button', { class: 'egd-settings-link', onclick: () => {
+          if (agents.profileId) void openProfile(agents.profileId); else { agents.mode = 'list'; renderAgentsTab(); }
+        } }, '← 돌아가기'),
+        el('div', { class: 'egd-settings-detail-name' }, agents.profileId ? 'Agent 편집' : 'Agent 만들기'),
+        agents.errors.length ? el('div', { class: 'egd-settings-error-summary', role: 'alert', data: { testid: 'settings-agent-errors' } },
+          el('div', {}, '저장하지 못했습니다. 아래 항목을 확인해 주세요.'),
+          el('ul', {}, ...agents.errors.map((error) => el('li', {}, el('button', { class: 'egd-settings-link', onclick: () => document.getElementById(fieldId(error.field))?.focus() }, error.message))))) : null,
+        noticeLine(),
+        agents.keptForm ? el('button', { class: 'egd-settings-btn', onclick: () => { agents.form = agents.keptForm; agents.keptForm = null; agents.notice = null; renderAgentsTab(); } }, '내 수정 다시 넣기') : null,
+        field('name', '담당자 이름 (필수)', nameInput),
+        field('avatar', '아바타', el('div', { class: 'egd-settings-avatar-editor' }, preview,
+          el('div', { class: 'egd-settings-avatar-controls' },
+            segmented('avatarKind', [{ value: 'initial', label: '이니셜' }, { value: 'emoji', label: '이모지' }], '아바타 종류'),
+            avatarInput, swatches)), '비워 두면 이름의 첫 글자를 씁니다.'),
+        errorFor('avatarColor') ? el('div', { class: 'egd-settings-field-error', role: 'alert' }, errorFor('avatarColor').message) : null,
+        field('role', '역할 한 줄', textInput('role', limits.role, '예: 회의 자료를 읽고 요점을 정리합니다')),
+        field('tone', '말투', segmented('tone', ChatState.PROFILE_TONE_OPTIONS, '말투')),
+        field('traits', `성격 특징 (최대 ${limits.traits}개)`, chipList('traits', limits.traits, limits.traitLength, '예: 꼼꼼함')),
+        field('speechNotes', '말투 메모', textArea('speechNotes', limits.speechNotes, '예: 결론을 먼저 말하고 근거는 짧게', 2)),
+        field('expertise', `맡길 일 (최대 ${limits.expertise}개)`, chipList('expertise', limits.expertise, limits.expertiseLength, '예: 주간 보고 초안 쓰기')),
+        field('instructions', '지침', textArea('instructions', limits.instructions, '이 Agent가 늘 지켜야 할 내용을 적어 주세요.', 6)),
+        field('toolPreferences', '선호 도구 (표시용)', chipList('toolPreferences', limits.toolPreferences, limits.toolLength, '예: browser'),
+          '표시용입니다. 실제로 쓸 수 있는 도구는 바뀌지 않습니다.'),
+        el('div', { class: 'egd-settings-form-actions' },
+          el('button', { class: 'egd-settings-btn', onclick: () => {
+            if (agents.profileId) void openProfile(agents.profileId); else { agents.mode = 'list'; agents.notice = null; renderAgentsTab(); }
+          } }, '취소'),
+          el('button', { class: 'egd-settings-btn egd-settings-btn-primary', data: { testid: 'settings-agent-save' },
+            disabled: agents.busy ? 'true' : null, onclick: () => { void saveDraft(); } }, agents.busy ? '저장 확인 중…' : '초안 저장')));
+      contentArea.replaceChildren(section);
+    };
+
+    const renderAgentsTab = () => {
+      if (activeTab !== 'agents') return;
+      chipInputs.clear();
+      if (agents.mode === 'edit' && agents.form) renderAgentForm();
+      else if (agents.mode === 'detail') renderAgentDetail();
+      else renderAgentList();
+      if (agents.focusField) {
+        document.getElementById(fieldId(agents.focusField))?.focus();
+        agents.focusField = null;
+      }
+    };
+
+    const tabs = el('div', { class: 'egd-settings-tabs', role: 'tablist' });
     const tabDefs = [
-      { id: 'models', label: 'AI \uBAA8\uB378', render: renderModelsTab },
-      { id: 'providers', label: '\uACC4\uC815 & Provider', render: renderProvidersTab },
-      { id: 'agents', label: 'Agent \uAD00\uB9AC', render: renderAgentsTab },
+      { id: 'account', label: '계정', render: renderAccountTab },
+      { id: 'agents', label: 'Agent 관리', render: renderAgentsTab },
     ];
     const renderTabs = () => {
       tabs.textContent = '';
       for (const t of tabDefs) {
         tabs.appendChild(el('button', {
-          class: 'egd-settings-tab' + (activeTab === t.id ? ' egd-settings-tab-active' : ''),
+          class: 'egd-settings-tab' + (activeTab === t.id ? ' egd-settings-tab-active' : ''), role: 'tab',
+          'aria-selected': String(activeTab === t.id), data: { testid: `settings-tab-${t.id}` },
           onclick: () => { activeTab = t.id; renderTabs(); t.render(); },
         }, t.label));
       }
     };
+    card._settingsShowTab = (tab) => {
+      const target = tabDefs.find((t) => t.id === tab);
+      if (!target) return;
+      activeTab = target.id;
+      renderTabs();
+      target.render();
+    };
 
+    // Live account and catalog changes re-render the list views only; an open
+    // form is never redrawn under the user's typing.
+    let unsubscribeCodex = null;
+    let subscribeAttempts = 0;
+    let lastCodexSignature = '';
+    const onCodexChange = () => {
+      const codex = state.codex;
+      const auth = codex.authStatus || {};
+      const catalog = bridge()?.profileCatalog?.();
+      const signature = JSON.stringify([codex.connected, codex.isStartingLogin, auth.isLoggedIn, auth.loginInProgress, auth.accountEmail,
+        auth.planType, auth.usage, auth.rateLimits, catalog?.status, catalog?.profiles]);
+      if (signature === lastCodexSignature) return;
+      lastCodexSignature = signature;
+      if (activeTab === 'account') renderAccountTab();
+      else if (agents.mode === 'list') renderAgentsTab();
+    };
+    const ensureCodexSubscription = () => {
+      if (unsubscribeCodex || (!card.isConnected && subscribeAttempts > 0)) return;
+      const api = bridge();
+      if (api?.subscribe) { unsubscribeCodex = api.subscribe(onCodexChange); return; }
+      if (++subscribeAttempts <= 30) window.setTimeout(ensureCodexSubscription, 1000);
+    };
     const shell = el('div', { class: 'egd-settings-shell' },
       el('div', { class: 'egd-settings-header' },
-        el('span', { style: { fontSize: '18px' } }, '\u2699\uFE0F'),
-        el('div', { class: 'egd-settings-header-title' }, '\uC0C1\uC138 \uC124\uC815'),
+        el('div', { class: 'egd-settings-header-title' }, '상세 설정'),
       ),
       tabs,
       contentArea,
@@ -10174,7 +10590,8 @@
     setActiveEntity(card);
 
     renderTabs();
-    renderModelsTab();
+    (activeTab === 'agents' ? renderAgentsTab : renderAccountTab)();
+    ensureCodexSubscription();
 
     // Drag support
     let drag = null;
@@ -10201,6 +10618,8 @@
     card._cleanup = () => {
       document.removeEventListener('mousemove', onMove);
       document.removeEventListener('mouseup', onUp);
+      unsubscribeCodex?.();
+      unsubscribeCodex = null;
     };
 
     return card;
@@ -10661,8 +11080,8 @@
         return { requestId, status: 'observed', snapshot };
       }
       if (request.kind !== 'act' || authorized.permission !== 'interact') throw new Error('Browser interaction was not selected');
-      if (!['navigate', 'click', 'fill'].includes(request.action?.type) || !request.guard ||
-          (request.action.type !== 'navigate' && (!request.action.ref || request.action.selector))) {
+      if (!['navigate', 'click', 'fill', 'scroll', 'press'].includes(request.action?.type) || !request.guard ||
+          request.action.selector || (!['navigate', 'scroll'].includes(request.action.type) && !request.action.ref)) {
         throw new Error('Unsupported or unguarded Browser action');
       }
       if (request.action.type === 'navigate' && !browserToolSafeNavigationUrl(request.action.url)) {
@@ -12379,7 +12798,9 @@
         documentStillCurrent,
         ...(action.type === 'click' && result?.result?.clickDiagnostics?.dispatchScope
           ? { clickInputRoute: result.result.clickDiagnostics.dispatchScope,
-            targetClickObserved: result.result.clickDiagnostics.targetClickObserved === true } : {}) },
+            targetClickObserved: result.result.clickDiagnostics.targetClickObserved === true } : {}),
+        ...(['scroll', 'press'].includes(action.type)
+          ? BrowserAgentReceipts.browserToolDispatchReceiptFields(action.type, result?.result?.dispatchDiagnostics) : {}) },
         after: documentStillCurrent ? { cardId: card.id, ...result.after } : null,
         observation: documentStillCurrent ? result.observation : null };
     };

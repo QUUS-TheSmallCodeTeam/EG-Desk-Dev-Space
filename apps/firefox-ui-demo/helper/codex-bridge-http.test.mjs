@@ -2,9 +2,11 @@ import test from 'node:test'
 import assert from 'node:assert/strict'
 import { Readable } from 'node:stream'
 import { rm } from 'node:fs/promises'
-import { createChatHttpHandler, guardBridgeRequest, readJsonBody, setBridgeCors } from './codex-bridge-http.mjs'
+import { readFile } from 'node:fs/promises'
+import { createChatHttpHandler, createRateLimitSync, guardBridgeRequest, readJsonBody, setBridgeCors } from './codex-bridge-http.mjs'
 import { CodexChatRuntime } from './codex-chat-runtime.mjs'
 import { openChatStore } from './egdesk-chat-store.mjs'
+import { openProfileStore } from './egdesk-profile-store.mjs'
 import { createPrivateQaTempDirectory } from '../scripts/egdesk-qa-platform.mjs'
 
 function request(body, headers = {}, url = '/chat/send') {
@@ -87,6 +89,27 @@ test('HTTP send preserves accepted/conversationId and adds run IDs without liste
   assert.equal(res.body.accepted, true)
   assert.equal(res.body.conversationId, 'thread')
   assert.deepEqual(received, { message: 'hi' })
+})
+
+test('HTTP send names a missing or inactive Agent profile with its own status before any native call', async t => {
+  const dataDir = createPrivateQaTempDirectory('egdesk-http-profile-')
+  const profiles = openProfileStore({ dataDir, ownerHash: 'local-desktop-test' })
+  t.after(async () => { profiles.close(); await rm(dataDir, { recursive: true, force: true }) })
+  const calls = []
+  const chat = new CodexChatRuntime({ request: async method => { calls.push(method); throw new Error('no native call expected') }, respond: () => {}, profiles })
+  chat.setConnection(true)
+  const handler = createChatHttpHandler(chat, async () => {})
+  const missing = response()
+  await handler(request(JSON.stringify({ message: 'hi', requestId: 'profile-missing', profileEnabled: true, profileId: 'no-such-profile' })), missing, new URL('http://localhost/chat/send'))
+  assert.equal(missing.status, 404)
+  assert.equal(missing.body.code, 'PROFILE_NOT_FOUND')
+  assert.equal(missing.body.accepted, false)
+  const draft = profiles.createDraft({ name: '초안' })
+  const inactive = response()
+  await handler(request(JSON.stringify({ message: 'hi', requestId: 'profile-draft', profileEnabled: true, profileId: draft.id })), inactive, new URL('http://localhost/chat/send'))
+  assert.equal(inactive.status, 409)
+  assert.equal(inactive.body.code, 'PROFILE_NOT_RUNNABLE')
+  assert.deepEqual(calls, [])
 })
 
 test('bounded QA output markers and policy traverse the ordinary EG-Desk /chat/send handler', async () => {
@@ -417,4 +440,103 @@ test('HTTP Agent answer acknowledges without echoing answers and rejects invalid
   await handler(request(JSON.stringify({ ...run, userInputId, action: 'skip' })), offline, new URL('http://localhost/chat/user-input'))
   assert.equal(offline.status, 503)
   assert.equal(offline.body.code, 'BRIDGE_OFFLINE')
+})
+
+// Shape of codex 0.162.1 GetAccountRateLimitsResponse / AccountRateLimitsUpdatedNotification.
+const limitsResult = (usedPercent, extra = {}) => ({ rateLimits: { limitId: 'codex', primary: { usedPercent, windowDurationMins: 300, resetsAt: 1793000000 }, secondary: null, credits: null, planType: 'plus', rateLimitReachedType: null, ...extra }, ordinaryUsageAllowed: true })
+function usageFixture({ minIntervalMs = 60_000 } = {}) {
+  const state = { isLoggedIn: true, accountEmail: 'owner@example.test', accountId: null, rateLimits: null }
+  const reads = [], updates = []
+  let clock = 1_000_000, ready = true
+  const sync = createRateLimitSync({
+    request: (method, params) => new Promise((resolve, reject) => reads.push({ method, params, resolve, reject })),
+    auth: () => state, ready: () => ready, now: () => clock, minIntervalMs,
+    update: patch => { updates.push(patch); Object.assign(state, patch) },
+  })
+  return { state, reads, updates, sync, tick: ms => { clock += ms }, setReady: value => { ready = value } }
+}
+
+test('ChatGPT usage is read after sign-in, coalesced, throttled unless forced, and normalized without invented values', async () => {
+  const u = usageFixture()
+  const first = u.sync.refresh(), joined = u.sync.refresh({ force: true })
+  assert.equal(u.reads.length, 1)
+  assert.deepEqual({ method: u.reads[0].method, params: u.reads[0].params }, { method: 'account/rateLimits/read', params: { excludeResetCreditDetails: true } })
+  u.reads[0].resolve(limitsResult(42.5))
+  await Promise.all([first, joined])
+  assert.deepEqual(u.state.rateLimits, { primary: { usedPercent: 42.5, windowMinutes: 300, resetsAt: 1793000000000 }, secondary: null, reachedType: null, usageAllowed: true, observedAt: 1_000_000 })
+  assert.equal(JSON.stringify(u.state.rateLimits).includes('codex'), false)
+  await u.sync.refresh()
+  assert.equal(u.reads.length, 1, 'an unforced read inside the interval is skipped')
+  const forced = u.sync.refresh({ force: true })
+  assert.equal(u.reads.length, 2, 'a finished turn forces a fresh read')
+  u.reads[1].resolve(limitsResult(55))
+  await forced
+  assert.equal(u.state.rateLimits.primary.usedPercent, 55)
+  u.tick(60_000)
+  void u.sync.refresh()
+  assert.equal(u.reads.length, 3)
+})
+
+test('a usage answer after sign-out or an account switch is dropped; failures and offline never invent usage', async () => {
+  const u = usageFixture()
+  const old = u.sync.refresh()
+  u.state.accountEmail = 'other@example.test'
+  const switched = u.sync.refresh({ force: true })
+  assert.equal(u.reads.length, 2, 'the new identity starts its own read')
+  u.reads[0].resolve(limitsResult(99))
+  await old
+  assert.equal(u.state.rateLimits, null, "the old account's numbers never show for the new one")
+  u.reads[1].reject(Object.assign(new Error('usage endpoint failed'), { code: -32603 }))
+  await switched
+  assert.equal(u.state.rateLimits, null)
+  assert.deepEqual(u.updates, [])
+  const late = u.sync.refresh({ force: true })
+  u.state.isLoggedIn = false
+  u.reads[2].resolve(limitsResult(10))
+  await late
+  assert.equal(u.state.rateLimits, null)
+  await u.sync.refresh({ force: true })
+  u.state.isLoggedIn = true; u.setReady(false)
+  await u.sync.refresh({ force: true })
+  u.setReady(true); u.state.accountEmail = null
+  await u.sync.refresh({ force: true })
+  assert.equal(u.reads.length, 3, 'signed out, offline or unknown identity sends no read')
+})
+
+test('sparse usage notifications merge into the signed-in identity only', async () => {
+  const u = usageFixture()
+  const read = u.sync.refresh()
+  u.reads[0].resolve(limitsResult(20, { secondary: { usedPercent: 5, windowDurationMins: 10080, resetsAt: 1793500000 } }))
+  await read
+  assert.equal(u.sync.notify({ method: 'account/rateLimits/updated', params: { rateLimits: { primary: { usedPercent: 30, windowDurationMins: null, resetsAt: null }, secondary: null } } }), true)
+  assert.deepEqual(u.state.rateLimits.primary, { usedPercent: 30, windowMinutes: 300, resetsAt: 1793000000000 })
+  assert.equal(u.state.rateLimits.secondary.usedPercent, 5, 'a null window never clears an observed one')
+  assert.equal(u.sync.notify({ method: 'account/updated', params: {} }), false)
+  u.state.isLoggedIn = false
+  const before = u.updates.length
+  assert.equal(u.sync.notify({ method: 'account/rateLimits/updated', params: { rateLimits: { primary: { usedPercent: 90 } } } }), false)
+  assert.equal(u.updates.length, before)
+})
+
+test('bridge mounts Agent profiles, plan usage and PUT preflight in the documented order', async () => {
+  const source = await readFile(new URL('./codex-bridge-server.mjs', import.meta.url), 'utf8')
+  const at = text => { const index = source.indexOf(text); assert.notEqual(index, -1, `missing server marker: ${text}`); return index }
+  // Profile storage opens beside chat storage, cannot stop the bridge, and reaches the Chat runtime.
+  assert.ok(at("profileStore = openProfileStore({ dataDir: path.join(dataDir, 'chat'), ownerHash: 'local-desktop-v1' })") < at('profileStore.seedTemplates()'))
+  assert.ok(at('profileStore.seedTemplates()') < at('const chat = new CodexChatRuntime({'))
+  assert.ok(at('  profiles: profileStore,') > at('const chat = new CodexChatRuntime({'))
+  at("const handleProfileHttp = createProfileHttpHandler({ store: () => profileStore, port: BRIDGE_PORT })")
+  // Mounted after the loopback guard and local files, before Context and Chat.
+  const mount = at('if (await handleProfileHttp(req, res, url)) return')
+  assert.ok(at('if (await localFiles.handle(req, res, url)) return') < mount)
+  assert.ok(mount < at('if (await handleContextHttp(req, res, url)) return'))
+  assert.ok(mount < at('if (await handleChatHttp(req, res, url)) return'))
+  at("'Access-Control-Allow-Methods': 'GET,POST,PUT,OPTIONS'")
+  at('profileStorageReady: Boolean(profileStore), profileStorageError: profileStoreError')
+  // Plan and usage travel with every auth snapshot (/v1/state, auth.status, auth-status).
+  at('usage: usageDisplay(authState.rateLimits, Date.now()),')
+  at("planType: publicPlanType(message.params?.planType) ?? authState.planType,")
+  at("rateLimits: identityChanged || !normalized.isLoggedIn ? null : authState.rateLimits,")
+  at("case 'account/rateLimits/updated':")
+  assert.ok(at("case 'turn/completed':") < at('void rateLimitSync.refresh({ force: true })'))
 })

@@ -1,13 +1,14 @@
 import { createServer } from 'node:http'
 import { spawn } from 'node:child_process'
 import { AppServerRpc } from './codex-app-server-rpc.mjs'
-import { normalizeNativeAuth, publicAuthIdentityKey } from './codex-auth-state.mjs'
+import { normalizeNativeAuth, publicAuthIdentityKey, publicPlanType } from './codex-auth-state.mjs'
+import { usageDisplay } from './codex-account-usage.mjs'
 import { CodexChatRuntime } from './codex-chat-runtime.mjs'
 import { BrowserToolTransport } from './codex-browser-tool-transport.mjs'
 import { createCodexBrowserToolProvider } from './codex-browser-tool-provider.mjs'
 import { fixtureBrowserQaFromEnv } from './codex-browser-fixture-qa.mjs'
 import { classifyPublicToolError } from './codex-tool-errors.mjs'
-import { createChatHttpHandler, guardBridgeRequest, readJsonBody, sendJson, setBridgeCors } from './codex-bridge-http.mjs'
+import { createChatHttpHandler, createRateLimitSync, guardBridgeRequest, readJsonBody, sendJson, setBridgeCors } from './codex-bridge-http.mjs'
 import { BoundedSseClient } from './codex-bridge-sse.mjs'
 import { TerminalSessionRegistry } from './terminal-sessions.mjs'
 import { createTerminalSessionFactory } from './terminal-platform.mjs'
@@ -18,6 +19,8 @@ import * as os from 'node:os'
 import path from 'node:path'
 import { ImmutableContextStore, appDataDirectory } from './egdesk-context-store.mjs'
 import { openChatStore } from './egdesk-chat-store.mjs'
+import { openProfileStore } from './egdesk-profile-store.mjs'
+import { createProfileHttpHandler } from './egdesk-profile-http.mjs'
 import { NativeReaderClient } from './egdesk-native-reader.mjs'
 import { ContextRuntime } from './egdesk-context-runtime.mjs'
 import { createContextHttpHandler } from './egdesk-context-http.mjs'
@@ -56,6 +59,8 @@ const authState = {
   authMode: null,
   accountId: null,
   accountEmail: null,
+  planType: null,
+  rateLimits: null,
   identityStatus: 'unknown',
   identityBasis: null,
   lastRefresh: null,
@@ -116,6 +121,17 @@ try {
   chatStoreError = publicText(error?.message || 'Local chat storage failed to open', 1000)
   console.error('[egdesk-codex-bridge] local chat storage unavailable:', chatStoreError)
 }
+// Agent profiles are local data like chat history: a failure leaves Chat and
+// the bridge running, and profile routes answer 503.
+let profileStore = null
+let profileStoreError = null
+try {
+  profileStore = openProfileStore({ dataDir: path.join(dataDir, 'chat'), ownerHash: 'local-desktop-v1' })
+  profileStore.seedTemplates()
+} catch (error) {
+  profileStoreError = publicText(error?.message || 'Local profile storage failed to open', 1000)
+  console.error('[egdesk-codex-bridge] local profile storage unavailable:', profileStoreError)
+}
 const localFiles = createEGDeskFileMount({ dataDir, port: BRIDGE_PORT })
 const contextStore = new ImmutableContextStore({
   dataDir,
@@ -137,6 +153,7 @@ const chat = new CodexChatRuntime({
   expectedProcessConfiguration: { model: appServerLaunch.configuredModel, effort: appServerLaunch.configuredEffort },
   qaReady: () => nativeCapabilities.qaReadOnly && appServerReady,
   getNativeContractFingerprint: () => nativeCapabilities.contractFingerprint,
+  profiles: profileStore,
   emit: event => broadcast(event, 2),
   emitLegacy: event => broadcast(event, 1),
 })
@@ -154,10 +171,21 @@ const ensureChatAuth = async () => {
 }
 const handleChatHttp = createChatHttpHandler(chat, ensureChatAuth)
 const handleContextHttp = createContextHttpHandler(contexts, ensureChatAuth)
+// Like /chat/history, profiles stay editable while Codex is signed out.
+const handleProfileHttp = createProfileHttpHandler({ store: () => profileStore, port: BRIDGE_PORT })
+// ChatGPT plan usage of the signed-in identity, refreshed after sign-in and
+// after each turn; a failed read leaves rateLimits as it was (null at first).
+const rateLimitSync = createRateLimitSync({
+  request: (method, params) => appServerRequest(method, params),
+  auth: () => authState,
+  ready: () => appServerReady,
+  update: patch => updateAuthState(patch),
+})
 
 function authSnapshot() {
   return {
     ...authState,
+    usage: usageDisplay(authState.rateLimits, Date.now()),
   }
 }
 
@@ -210,10 +238,13 @@ async function refreshAccountState({ refreshToken = false } = {}) {
   ])
 
   const normalized = normalizeNativeAuth(authResult, accountResult)
-  if (authState.isLoggedIn && (!normalized.isLoggedIn || publicAuthIdentityKey(authState) !== publicAuthIdentityKey(normalized))) chat.reset()
+  const identityChanged = authState.isLoggedIn && (!normalized.isLoggedIn || publicAuthIdentityKey(authState) !== publicAuthIdentityKey(normalized))
+  if (identityChanged) chat.reset()
   const nextSnapshot = {
     ...authState,
     ...normalized,
+    // Usage belongs to one identity; never show the previous account's numbers.
+    rateLimits: identityChanged || !normalized.isLoggedIn ? null : authState.rateLimits,
     loginInProgress: normalized.isLoggedIn ? false : authState.loginInProgress,
   }
 
@@ -221,6 +252,7 @@ async function refreshAccountState({ refreshToken = false } = {}) {
     ...nextSnapshot,
     statusText: authStatusTextFor(nextSnapshot),
   })
+  if (authState.isLoggedIn && (identityChanged || !authState.rateLimits)) void rateLimitSync.refresh({ force: identityChanged })
 }
 
 function handleAppServerNotification(message) {
@@ -228,6 +260,7 @@ function handleAppServerNotification(message) {
     case 'account/updated':
       updateAuthState({
         authMode: message.params?.authMode ?? null,
+        planType: publicPlanType(message.params?.planType) ?? authState.planType,
         statusText: authStatusTextFor({
           ...authState,
           authMode: message.params?.authMode ?? null,
@@ -266,6 +299,14 @@ function handleAppServerNotification(message) {
       emitAuthLifecycle('finished', { success, error })
       return
     }
+    // Returning here is safe: onNotification still passes the message to
+    // the native Reader and Chat runtime afterwards.
+    case 'account/rateLimits/updated':
+      rateLimitSync.notify(message)
+      return
+    case 'turn/completed':
+      void rateLimitSync.refresh({ force: true })
+      return
   }
 }
 
@@ -481,7 +522,7 @@ const bridgeServer = createServer(async (req, res) => {
   if (req.method === 'OPTIONS') {
     res.writeHead(204, {
       'Access-Control-Allow-Headers': 'Content-Type',
-      'Access-Control-Allow-Methods': 'GET,POST,OPTIONS'
+      'Access-Control-Allow-Methods': 'GET,POST,PUT,OPTIONS'
     })
     res.end()
     return
@@ -520,7 +561,7 @@ const bridgeServer = createServer(async (req, res) => {
   }
 
   if (req.method === 'GET' && route === '/health') {
-    sendJson(res, 200, { ok: true, port: BRIDGE_PORT, appServerReady, chatStorageReady: Boolean(chatStore && chat.storeHealthy), chatStorageError: chatStoreError, native: nativeCapabilities, engineConfiguration: nativePreflight, memoryIsolation, node: nodeRuntime })
+    sendJson(res, 200, { ok: true, port: BRIDGE_PORT, appServerReady, chatStorageReady: Boolean(chatStore && chat.storeHealthy), chatStorageError: chatStoreError, profileStorageReady: Boolean(profileStore), profileStorageError: profileStoreError, native: nativeCapabilities, engineConfiguration: nativePreflight, memoryIsolation, node: nodeRuntime })
     return
   }
 
@@ -544,6 +585,7 @@ const bridgeServer = createServer(async (req, res) => {
       provider: PROVIDER_ID,
       appServerReady,
       chatStorageReady: Boolean(chatStore && chat.storeHealthy),
+      profileStorageReady: Boolean(profileStore),
       native: nativeCapabilities,
       engineConfiguration: nativePreflight,
       memoryIsolation,
@@ -551,10 +593,11 @@ const bridgeServer = createServer(async (req, res) => {
       auth: authSnapshot(),
       chat: chat.snapshot(),
       capabilities: {
-        auth: ['status', 'start', 'cancel', 'signout'],
+        auth: ['status', 'start', 'cancel', 'signout', 'usage'],
         chat: chatStore && chat.storeHealthy ? ['send', 'stream', 'resume', 'interrupt', 'approvals', 'user-input', 'subagent-status', 'typed-activity', 'artifact-refs', 'local-history', 'legacy-import', ...(nativeCapabilities.qaReadOnly ? ['read-only-qa'] : [])] : ['local-history-unavailable'],
         context: nativeCapabilities.schemaMatch ? ['capture', 'immutable-inspect', 'native-dynamic-tools', 'smart-read', 'read-only-reader', 'answer-briefing'] : ['capture', 'immutable-inspect'],
         files: ['native-picker', 'scoped-read', 'managed-drafts', 'create-only-save-as'],
+        profiles: profileStore ? ['local-store', 'revisions', 'run-binding'] : ['local-store-unavailable'],
       },
     })
     return
@@ -633,6 +676,7 @@ const bridgeServer = createServer(async (req, res) => {
     return
   }
 
+  if (await handleProfileHttp(req, res, url)) return
   if (await handleContextHttp(req, res, url)) return
   if (await handleChatHttp(req, res, url)) return
 
@@ -673,6 +717,8 @@ async function shutdown() {
   catch { console.error('[egdesk-codex-bridge] managed file store did not close cleanly') }
   try { chatStore?.close() }
   catch { console.error('[egdesk-codex-bridge] local chat store did not close cleanly') }
+  try { profileStore?.close() }
+  catch { console.error('[egdesk-codex-bridge] local profile store did not close cleanly') }
   process.exit(0)
 }
 process.on('SIGINT', shutdown)
