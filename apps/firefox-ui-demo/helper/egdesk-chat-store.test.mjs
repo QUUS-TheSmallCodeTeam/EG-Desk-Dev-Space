@@ -83,7 +83,7 @@ test('accepted user message and request fingerprint commit together and survive 
   assert.equal(isOwnedAndPrivate(path.join(dataDir, filename), statSync(path.join(dataDir, filename)), 0o077), true)
   const raw = new DatabaseSync(path.join(dataDir, filename))
   assert.equal(raw.prepare('PRAGMA journal_mode').get().journal_mode, 'wal')
-  assert.equal(raw.prepare('PRAGMA user_version').get().user_version, 1)
+  assert.equal(raw.prepare('PRAGMA user_version').get().user_version, 2)
   raw.close()
 })
 
@@ -364,4 +364,168 @@ test('corrupt database and unsupported schema fail closed without reset', t => {
   const corrupt = readFileSync(filename)
   assert.throws(() => openChatStore({ dataDir, ownerScope: 'corrupt-owner' }), { code: 'STORE_OPEN_FAILED' })
   assert.deepEqual(readFileSync(filename), corrupt)
+})
+
+// Frozen copy of the schema shipped as user_version 1 (before engine columns).
+const V1_SCHEMA = `
+    CREATE TABLE threads (
+      local_conversation_id TEXT PRIMARY KEY, client_thread_id TEXT NOT NULL UNIQUE,
+      conversation_id TEXT, title TEXT, created_at INTEGER NOT NULL,
+      updated_at INTEGER NOT NULL, last_seq INTEGER NOT NULL DEFAULT 0,
+      coverage_json TEXT NOT NULL
+    );
+    CREATE INDEX threads_recent ON threads(updated_at DESC, client_thread_id);
+    CREATE TABLE events (
+      local_conversation_id TEXT NOT NULL, seq INTEGER NOT NULL, event_key TEXT NOT NULL,
+      event_hash TEXT NOT NULL, event_id TEXT NOT NULL, ts INTEGER NOT NULL,
+      event TEXT NOT NULL, request_id TEXT, local_run_id TEXT, local_message_id TEXT,
+      run_id TEXT, message_id TEXT, details_json TEXT NOT NULL,
+      run_json TEXT, message_json TEXT,
+      PRIMARY KEY(local_conversation_id, seq), UNIQUE(local_conversation_id, event_key),
+      FOREIGN KEY(local_conversation_id) REFERENCES threads(local_conversation_id)
+    );
+    CREATE TABLE event_refs (
+      local_conversation_id TEXT NOT NULL, seq INTEGER NOT NULL, ref_type TEXT NOT NULL,
+      ref_id TEXT NOT NULL, PRIMARY KEY(local_conversation_id, seq, ref_type, ref_id),
+      FOREIGN KEY(local_conversation_id, seq) REFERENCES events(local_conversation_id, seq)
+    );
+    CREATE INDEX event_ref_lookup ON event_refs(local_conversation_id, ref_type, ref_id, seq);
+    CREATE TABLE messages (
+      local_conversation_id TEXT NOT NULL, local_message_id TEXT NOT NULL,
+      local_run_id TEXT, request_id TEXT, message_id TEXT,
+      first_seq INTEGER NOT NULL, last_seq INTEGER NOT NULL, public_json TEXT NOT NULL,
+      PRIMARY KEY(local_conversation_id, local_message_id),
+      FOREIGN KEY(local_conversation_id) REFERENCES threads(local_conversation_id)
+    );
+    CREATE INDEX messages_recent ON messages(local_conversation_id, last_seq);
+    CREATE TABLE runs (
+      local_conversation_id TEXT NOT NULL, local_run_id TEXT NOT NULL,
+      request_id TEXT, run_id TEXT, first_seq INTEGER NOT NULL,
+      last_seq INTEGER NOT NULL, public_json TEXT NOT NULL,
+      PRIMARY KEY(local_conversation_id, local_run_id),
+      FOREIGN KEY(local_conversation_id) REFERENCES threads(local_conversation_id)
+    );
+    CREATE INDEX runs_recent ON runs(local_conversation_id, last_seq);
+    CREATE TABLE requests (
+      local_conversation_id TEXT NOT NULL, request_id TEXT NOT NULL,
+      fingerprint TEXT NOT NULL, message_hash TEXT NOT NULL, local_message_id TEXT NOT NULL,
+      status TEXT NOT NULL, outcome_json TEXT, accepted_at INTEGER NOT NULL,
+      updated_at INTEGER NOT NULL, PRIMARY KEY(local_conversation_id, request_id),
+      FOREIGN KEY(local_conversation_id) REFERENCES threads(local_conversation_id)
+    );
+    CREATE TABLE native_runs (
+      local_conversation_id TEXT NOT NULL, local_run_id TEXT NOT NULL, run_id TEXT NOT NULL,
+      PRIMARY KEY(local_conversation_id, local_run_id),
+      FOREIGN KEY(local_conversation_id) REFERENCES threads(local_conversation_id)
+    );
+    CREATE TABLE native_messages (
+      local_conversation_id TEXT NOT NULL, local_message_id TEXT NOT NULL, message_id TEXT NOT NULL,
+      PRIMARY KEY(local_conversation_id, local_message_id),
+      FOREIGN KEY(local_conversation_id) REFERENCES threads(local_conversation_id)
+    );
+    CREATE TABLE imports (
+      local_conversation_id TEXT NOT NULL, import_id TEXT NOT NULL, payload_hash TEXT NOT NULL,
+      state TEXT NOT NULL,
+      PRIMARY KEY(local_conversation_id, import_id),
+      FOREIGN KEY(local_conversation_id) REFERENCES threads(local_conversation_id)
+    );
+`
+function writeV1Database(dataDir, ownerScope) {
+  // Created through the store so the file is private, then rebuilt as v1.
+  openChatStore({ dataDir, ownerScope }).close()
+  const filename = path.join(dataDir, readdirSync(dataDir).find(name => name.endsWith('.sqlite')))
+  for (const suffix of ['', '-wal', '-shm']) rmSync(filename + suffix, { force: true })
+  writeFileSync(filename, '', { mode: 0o600 })
+  const db = new DatabaseSync(filename)
+  db.exec('PRAGMA journal_mode=WAL;')
+  db.exec(`BEGIN; ${V1_SCHEMA} PRAGMA user_version=1; COMMIT;`)
+  const coverageJson = JSON.stringify({ scope: 'egdesk-local', status: 'unknown', reasons: [], nativeHistoryComplete: null })
+  db.prepare('INSERT INTO threads VALUES (?, ?, ?, ?, ?, ?, ?, ?)').run('local-sent', 'client-sent', 'native-thread-1', 'Sent before upgrade', T, T + 3, 2, coverageJson)
+  db.prepare('INSERT INTO threads VALUES (?, ?, NULL, NULL, ?, ?, 0, ?)').run('local-draft', 'client-draft', T, T, coverageJson)
+  db.prepare('INSERT INTO events VALUES (?, ?, ?, ?, ?, ?, ?, NULL, NULL, NULL, NULL, NULL, ?, NULL, NULL)').run('local-sent', 1, 'native-thread:request-1', 'hash-1', 'evt-1', T + 1, 'native.thread.bound', JSON.stringify({ conversationId: 'native-thread-1', ownerHash: 'owner-hash' }))
+  db.prepare('INSERT INTO events VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, NULL, ?, NULL, ?, ?, NULL)').run('local-sent', 2, 'run-final', 'hash-2', 'evt-2', T + 2, 'run.completed', 'request-1', 'local-run-1', 'native-run-1', JSON.stringify({ status: 'completed' }), JSON.stringify(publicRun('Answer kept across the upgrade', 'completed')))
+  db.prepare('INSERT INTO runs VALUES (?, ?, ?, ?, ?, ?, ?)').run('local-sent', 'local-run-1', 'request-1', 'native-run-1', 2, 2, JSON.stringify({ ...publicRun('Answer kept across the upgrade', 'completed'), localRunId: 'local-run-1' }))
+  db.prepare('INSERT INTO requests VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)').run('local-sent', 'request-1', 'fingerprint-1', 'message-hash-1', 'local-user-1', 'accepted', JSON.stringify({ accepted: true }), T + 1, T + 3)
+  db.close()
+  return filename
+}
+
+test('a v1 database is backed up, then opens as v2 with every conversation, run and request kept and Codex as its engine', t => {
+  const dataDir = fixture(t)
+  const filename = writeV1Database(dataDir, 'desktop/profile-a')
+  const store = openChatStore({ dataDir, ownerScope: 'desktop/profile-a' })
+  const sent = store.getConversation('client-sent')
+  assert.equal(sent.conversationId, 'native-thread-1')
+  assert.equal(sent.title, 'Sent before upgrade')
+  assert.equal(sent.engineId, 'codex')
+  assert.equal(sent.engineProfileId, 'codex-default')
+  const draft = store.getConversation('client-draft')
+  assert.equal(draft.engineId, null, 'a chat never sent is not bound to an engine')
+  assert.equal(store.getLatestRun('client-sent').messages[1].text, 'Answer kept across the upgrade')
+  assert.equal(store.getRequest({ clientThreadId: 'client-sent', requestId: 'request-1' }).fingerprint, 'fingerprint-1')
+  assert.deepEqual(store.listEvents('client-sent').events.map(event => event.event), ['native.thread.bound', 'run.completed'])
+  assert.equal(store.listConversations({ limit: 10 }).threads.length, 2)
+  // The upgraded chat keeps accepting work, and the first send binds the draft.
+  store.acceptRequest({ clientThreadId: 'client-sent', requestId: 'request-2', fingerprint: 'fingerprint-2', ts: T + 4, localMessageId: 'local-user-2', message: userMessage('After upgrade') })
+  assert.deepEqual(store.bindNative({ clientThreadId: 'client-draft', conversationId: 'native-thread-2', engineId: 'codex', engineProfileId: 'codex-default' }), { clientThreadId: 'client-draft', conversationId: 'native-thread-2', engineId: 'codex', engineProfileId: 'codex-default' })
+  assert.equal(store.getConversation('client-draft').engineId, 'codex')
+  store.close()
+  const raw = new DatabaseSync(filename)
+  assert.equal(raw.prepare('PRAGMA user_version').get().user_version, 2)
+  assert.equal(raw.prepare("SELECT engine_id FROM runs WHERE local_run_id='local-run-1'").get().engine_id, 'codex')
+  raw.close()
+  const backup = `${filename}.v1.bak`
+  assert.equal(isOwnedAndPrivate(backup, statSync(backup), 0o077), true)
+  assert.deepEqual(readdirSync(dataDir).filter(name => name.includes('.tmp')), [])
+  const old = new DatabaseSync(backup)
+  assert.equal(old.prepare('PRAGMA user_version').get().user_version, 1)
+  assert.equal(old.prepare('SELECT COUNT(*) AS count FROM threads').get().count, 2)
+  assert.equal(old.prepare('SELECT COUNT(*) AS count FROM events').get().count, 2)
+  assert.equal(old.prepare("SELECT COUNT(*) AS count FROM pragma_table_info('threads') WHERE name='engine_id'").get().count, 0)
+  old.close()
+  // Reopening v2 neither migrates again nor rewrites the backup.
+  const backupBytes = readFileSync(backup)
+  const again = openChatStore({ dataDir, ownerScope: 'desktop/profile-a' })
+  assert.equal(again.getConversation('client-sent').engineId, 'codex')
+  again.close()
+  assert.deepEqual(readFileSync(backup), backupBytes)
+})
+
+test('a conversation stays bound to its first engine and runs copy their engine record into the index columns', t => {
+  const { dataDir, store } = opened(t)
+  conversation(store)
+  assert.equal(store.getConversation('client-1').engineId, null)
+  store.bindNative({ clientThreadId: 'client-1', conversationId: 'native-thread-1', engineId: 'codex', engineProfileId: 'codex-default' })
+  assert.deepEqual(store.bindNative({ clientThreadId: 'client-1', conversationId: 'native-thread-1', engineId: 'codex' }), { clientThreadId: 'client-1', conversationId: 'native-thread-1', engineId: 'codex' })
+  assert.throws(() => store.bindNative({ clientThreadId: 'client-1', engineId: 'claude', engineProfileId: 'claude-default' }), { code: 'ENGINE_MAPPING_CONFLICT', httpStatus: 409 })
+  assert.throws(() => store.bindNative({ clientThreadId: 'client-1', engineId: 'codex', engineProfileId: 'codex-work' }), { code: 'ENGINE_MAPPING_CONFLICT' })
+  assert.throws(() => store.bindNative({ clientThreadId: 'client-1', engineProfileId: 'codex-default' }), { code: 'INVALID_CHAT_RECORD' })
+  assert.deepEqual([store.getConversation('client-1').engineId, store.getConversation('client-1').engineProfileId], ['codex', 'codex-default'])
+  const engine = { id: 'codex', version: '0.162.1', engineProfileId: 'codex-default' }
+  store.appendEvent({ clientThreadId: 'client-1', eventKey: 'run-start', ts: T + 1, event: 'run.started', localRunId: 'local-run-1', runCheckpoint: { ...publicRun('Partial'), engine } })
+  store.appendEvent({ clientThreadId: 'client-1', eventKey: 'run-end', ts: T + 2, event: 'run.completed', localRunId: 'local-run-1', runCheckpoint: publicRun('Done', 'completed') })
+  assert.deepEqual(store.listEvents('client-1').events[0].details.run.engine, engine)
+  const raw = new DatabaseSync(path.join(dataDir, readdirSync(dataDir).find(name => name.endsWith('.sqlite'))))
+  assert.deepEqual({ ...raw.prepare("SELECT engine_id, engine_version, engine_profile_id FROM runs WHERE local_run_id='local-run-1'").get() }, { engine_id: 'codex', engine_version: '0.162.1', engine_profile_id: 'codex-default' })
+  raw.close()
+})
+
+test('an incomplete v1 or v2 schema fails closed without a backup, migration or reset', t => {
+  const dataDir = fixture(t)
+  const filename = writeV1Database(dataDir, 'desktop/broken-v1')
+  const db = new DatabaseSync(filename)
+  db.exec('DROP TABLE imports')
+  db.close()
+  assert.throws(() => openChatStore({ dataDir, ownerScope: 'desktop/broken-v1' }), { code: 'STORE_CORRUPT' })
+  assert.equal(readdirSync(dataDir).some(name => name.includes('.bak')), false)
+  const check = new DatabaseSync(filename)
+  assert.equal(check.prepare('PRAGMA user_version').get().user_version, 1)
+  check.close()
+  const other = fixture(t)
+  openChatStore({ dataDir: other, ownerScope: 'desktop/broken-v2' }).close()
+  const v2 = path.join(other, readdirSync(other).find(name => name.endsWith('.sqlite')))
+  const raw = new DatabaseSync(v2)
+  raw.exec('DROP INDEX threads_engine; ALTER TABLE threads DROP COLUMN engine_bound_at;')
+  raw.close()
+  assert.throws(() => openChatStore({ dataDir: other, ownerScope: 'desktop/broken-v2' }), { code: 'STORE_CORRUPT' })
 })

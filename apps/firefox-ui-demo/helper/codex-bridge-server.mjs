@@ -4,6 +4,8 @@ import { AppServerRpc } from './codex-app-server-rpc.mjs'
 import { normalizeNativeAuth, publicAuthIdentityKey, publicPlanType } from './codex-auth-state.mjs'
 import { usageDisplay } from './codex-account-usage.mjs'
 import { CodexChatRuntime } from './codex-chat-runtime.mjs'
+import { createCodexEngineAdapter, describeCodexEngine } from './codex-engine-adapter.mjs'
+import { EngineRegistry, describeClaudeEngine } from './engine-registry.mjs'
 import { BrowserToolTransport } from './codex-browser-tool-transport.mjs'
 import { createCodexBrowserToolProvider } from './codex-browser-tool-provider.mjs'
 import { fixtureBrowserQaFromEnv } from './codex-browser-fixture-qa.mjs'
@@ -147,9 +149,25 @@ const nativeReader = new NativeReaderClient({ request: (method, params) => appSe
 const contexts = new ContextRuntime({ store: contextStore, reader: nativeReader, getOwnerKey: () => publicAuthIdentityKey(authState), schemaReady: () => nativeCapabilities.schemaMatch && appServerReady })
 const browserTransport = new BrowserToolTransport({ getOwnerKey: () => publicAuthIdentityKey(authState) })
 const browserProvider = createCodexBrowserToolProvider({ transport: browserTransport, getOwnerKey: () => publicAuthIdentityKey(authState), schemaReady: () => nativeCapabilities.qaReadOnly && appServerReady, fixtureQa: fixtureBrowserQaFromEnv(process.env) })
-const chat = new CodexChatRuntime({
+// Codex is the one runnable engine. Claude is listed for the settings screen
+// but refused until its connection method is decided (SUB-12).
+const codexEngine = createCodexEngineAdapter({
   request: (method, params) => appServerRequest(method, params),
   respond: nativeRespond,
+  getOwnerKey: () => publicAuthIdentityKey(authState),
+  isReady: () => appServerReady,
+  describe: () => describeCodexEngine({
+    ready: appServerReady, starting: Boolean(appServerProcess) && !appServerReady, blocked: launchConfigBlocked,
+    version: nativeCapabilities.version, versionSupported: nativeCapabilities.version ? nativeCapabilities.schemaMatch : null,
+    auth: authState, usage: usageDisplay(authState.rateLimits, Date.now()),
+    residentProcesses: appServerProcess && appServerProcess.exitCode == null ? 1 : 0,
+  }),
+})
+const engineRegistry = new EngineRegistry({ defaultEngineId: PROVIDER_ID })
+engineRegistry.register(codexEngine)
+engineRegistry.describe(describeClaudeEngine())
+const chat = new CodexChatRuntime({
+  engines: engineRegistry,
   contexts,
   toolProviders: [browserProvider],
   store: chatStore,
@@ -169,7 +187,13 @@ if (chatStore) {
     console.error('[egdesk-codex-bridge] local chat recovery unavailable:', chatStoreError)
   }
 }
-const ensureChatAuth = async () => {
+// Authentication of the engine a request names (Codex when it names none).
+const ensureChatAuth = async (body = {}) => {
+  const engine = engineRegistry.require(body?.engineId ?? engineRegistry.defaultEngineId)
+  if (engine.id !== PROVIDER_ID) {
+    engineRegistry.assertReady(engine.id)
+    return
+  }
   chat.assertReady()
   await refreshAccountState()
   if (!authState.isLoggedIn) throw chatError('LOGIN_REQUIRED', 'Codex ChatGPT login is required', 401)
@@ -606,9 +630,12 @@ const bridgeServer = createServer(async (req, res) => {
         context: nativeCapabilities.schemaMatch ? ['capture', 'immutable-inspect', 'native-dynamic-tools', 'smart-read', 'read-only-reader', 'answer-briefing'] : ['capture', 'immutable-inspect'],
         files: ['native-picker', 'scoped-read', 'managed-drafts', 'create-only-save-as'],
         profiles: profileStore ? ['local-store', 'revisions', 'run-binding'] : ['local-store-unavailable'],
+        engines: ['registry', 'thread-lock'],
       },
       bridge: bridgeBuildState(bridgeBuild, expectedOverlayBuild(req.headers, url.searchParams)),
       appServerReconnect: appServerBackoff.snapshot(),
+      // Settings 'Accounts & AI engines' rows; the top-level Codex fields stay for older overlays.
+      engines: engineRegistry.publicEngines(),
     })
     return
   }

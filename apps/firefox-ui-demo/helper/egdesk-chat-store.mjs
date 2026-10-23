@@ -1,10 +1,10 @@
 import { createHash, randomUUID } from 'node:crypto'
-import { constants, closeSync, lstatSync, mkdirSync, openSync, realpathSync } from 'node:fs'
+import { constants, closeSync, lstatSync, mkdirSync, openSync, realpathSync, renameSync, rmSync } from 'node:fs'
 import path from 'node:path'
 import { DatabaseSync } from 'node:sqlite'
 import { isOwnedAndPrivate } from './egdesk-private-files.mjs'
 
-const VERSION = 1
+const VERSION = 2
 const MAX_RECORD_BYTES = 16 * 1024 * 1024
 const MAX_IMPORT_BYTES = 64 * 1024 * 1024
 const TERMINAL_RUN = new Set(['completed', 'failed', 'interrupted', 'cancelled'])
@@ -105,6 +105,8 @@ function thread(row) {
     localConversationId: row.local_conversation_id, clientThreadId: row.client_thread_id,
     conversationId: row.conversation_id, title: row.title, createdAt: row.created_at,
     updatedAt: row.updated_at, coverage: parse(row.coverage_json),
+    // null until the first send binds the conversation to an engine.
+    engineId: row.engine_id ?? null, engineProfileId: row.engine_profile_id ?? null,
   }
 }
 function savedEvent(row, db) {
@@ -138,21 +140,7 @@ function resultPage(rows, limit, property, convert = row => parse(row.public_jso
   return { [property]: selected.map(convert), nextCursor: hasMore ? selected.at(-1).last_seq ?? selected.at(-1).seq : null, hasMore }
 }
 
-function initialize(db) {
-  db.exec('PRAGMA foreign_keys=ON; PRAGMA busy_timeout=5000;')
-  if (String(db.prepare('PRAGMA journal_mode=WAL').get().journal_mode).toLowerCase() !== 'wal') fail('STORE_OPEN_FAILED', 'WAL could not be enabled', 500)
-  db.exec('PRAGMA synchronous=FULL;')
-  if (db.prepare('PRAGMA synchronous').get().synchronous !== 2) fail('STORE_OPEN_FAILED', 'FULL durability could not be enabled', 500)
-  if (db.prepare('PRAGMA quick_check').get().quick_check !== 'ok') fail('STORE_CORRUPT', 'Chat database failed integrity check; database was not reset', 500)
-  const version = db.prepare('PRAGMA user_version').get().user_version
-  if (version === VERSION) {
-    const required = ['threads', 'events', 'event_refs', 'messages', 'runs', 'requests', 'native_runs', 'native_messages', 'imports']
-    const found = new Set(db.prepare("SELECT name FROM sqlite_master WHERE type='table'").all().map(row => row.name))
-    if (required.some(name => !found.has(name))) fail('STORE_CORRUPT', 'Chat schema is incomplete; database was not reset', 500)
-    return
-  }
-  if (version !== 0 || db.prepare("SELECT name FROM sqlite_master WHERE type='table' LIMIT 1").get()) fail('UNSUPPORTED_STORE_VERSION', 'Existing chat database has an unsupported schema; database was not reset', 500)
-  db.exec(`BEGIN IMMEDIATE;
+const V1_TABLES = `
     CREATE TABLE threads (
       local_conversation_id TEXT PRIMARY KEY, client_thread_id TEXT NOT NULL UNIQUE,
       conversation_id TEXT, title TEXT, created_at INTEGER NOT NULL,
@@ -214,6 +202,77 @@ function initialize(db) {
       PRIMARY KEY(local_conversation_id, import_id),
       FOREIGN KEY(local_conversation_id) REFERENCES threads(local_conversation_id)
     );
+`
+const REQUIRED_TABLES = ['threads', 'events', 'event_refs', 'messages', 'runs', 'requests', 'native_runs', 'native_messages', 'imports']
+// v2 only adds engine binding columns. Every v1 conversation and run was Codex;
+// a thread without a native conversation was never sent and stays unbound.
+const V2_UPGRADE = `
+    ALTER TABLE threads ADD COLUMN engine_id TEXT;
+    ALTER TABLE threads ADD COLUMN engine_profile_id TEXT;
+    ALTER TABLE threads ADD COLUMN engine_bound_at INTEGER;
+    UPDATE threads SET engine_id = 'codex', engine_profile_id = 'codex-default' WHERE conversation_id IS NOT NULL;
+    ALTER TABLE runs ADD COLUMN engine_id TEXT;
+    ALTER TABLE runs ADD COLUMN engine_version TEXT;
+    ALTER TABLE runs ADD COLUMN engine_profile_id TEXT;
+    UPDATE runs SET engine_id = 'codex' WHERE engine_id IS NULL;
+    CREATE INDEX threads_engine ON threads(engine_id, updated_at DESC);
+`
+const V2_COLUMNS = { threads: ['engine_id', 'engine_profile_id', 'engine_bound_at'], runs: ['engine_id', 'engine_version', 'engine_profile_id'] }
+
+// Older builds refuse a v2 file (closed, never reset), so the exact v1 data is
+// kept beside it first. VACUUM INTO writes one consistent copy, WAL included,
+// into a new private file; nothing is migrated unless the copy completed.
+function backupV1(db, filename) {
+  const target = `${filename}.v1.bak`
+  const temporary = `${target}.${randomUUID()}.tmp`
+  try {
+    closeSync(openSync(temporary, constants.O_CREAT | constants.O_EXCL | constants.O_WRONLY | (constants.O_NOFOLLOW || 0), 0o600))
+    db.prepare('VACUUM INTO ?').run(temporary)
+    const info = lstatSync(temporary)
+    if (!info.isFile() || info.isSymbolicLink() || !isOwnedAndPrivate(temporary, info, 0o077)) throw new Error('Backup is not private')
+    renameSync(temporary, target)
+  } catch (error) {
+    try { rmSync(temporary, { force: true }) } catch { /* Keep original error. */ }
+    fail('STORE_MIGRATION_FAILED', 'Chat history backup failed; the database was kept unchanged', 500, error)
+  }
+}
+
+function initialize(db, filename) {
+  db.exec('PRAGMA foreign_keys=ON; PRAGMA busy_timeout=5000;')
+  if (String(db.prepare('PRAGMA journal_mode=WAL').get().journal_mode).toLowerCase() !== 'wal') fail('STORE_OPEN_FAILED', 'WAL could not be enabled', 500)
+  db.exec('PRAGMA synchronous=FULL;')
+  if (db.prepare('PRAGMA synchronous').get().synchronous !== 2) fail('STORE_OPEN_FAILED', 'FULL durability could not be enabled', 500)
+  if (db.prepare('PRAGMA quick_check').get().quick_check !== 'ok') fail('STORE_CORRUPT', 'Chat database failed integrity check; database was not reset', 500)
+  const version = db.prepare('PRAGMA user_version').get().user_version
+  const tablesPresent = () => {
+    const found = new Set(db.prepare("SELECT name FROM sqlite_master WHERE type='table'").all().map(row => row.name))
+    return REQUIRED_TABLES.every(name => found.has(name))
+  }
+  if (version === VERSION) {
+    const columnsPresent = Object.entries(V2_COLUMNS).every(([table, names]) => {
+      const found = new Set(db.prepare(`PRAGMA table_info(${table})`).all().map(row => row.name))
+      return names.every(name => found.has(name))
+    })
+    if (!tablesPresent() || !columnsPresent) fail('STORE_CORRUPT', 'Chat schema is incomplete; database was not reset', 500)
+    return
+  }
+  if (version === 1) {
+    if (!tablesPresent()) fail('STORE_CORRUPT', 'Chat schema is incomplete; database was not reset', 500)
+    backupV1(db, filename)
+    db.exec('BEGIN IMMEDIATE')
+    try {
+      db.exec(`${V2_UPGRADE} PRAGMA user_version=${VERSION};`)
+      db.exec('COMMIT')
+    } catch (error) {
+      try { db.exec('ROLLBACK') } catch { /* Preserve original failure. */ }
+      fail('STORE_MIGRATION_FAILED', 'Chat history could not be upgraded; the v1 database was kept unchanged', 500, error)
+    }
+    return
+  }
+  if (version !== 0 || db.prepare("SELECT name FROM sqlite_master WHERE type='table' LIMIT 1").get()) fail('UNSUPPORTED_STORE_VERSION', 'Existing chat database has an unsupported schema; database was not reset', 500)
+  db.exec(`BEGIN IMMEDIATE;
+    ${V1_TABLES}
+    ${V2_UPGRADE}
     PRAGMA user_version=${VERSION};
     COMMIT;`)
 }
@@ -237,10 +296,10 @@ export function openChatStore({ dataDir, ownerScope } = {}) {
   // Reject an unsafe existing file rather than changing its permissions in place.
   if (!privateDatabase(lstatSync(filename))) fail('INVALID_STORE_SCOPE', 'Chat database must be a private, unlinked regular file')
   let db
-  try { db = new DatabaseSync(filename); initialize(db) }
+  try { db = new DatabaseSync(filename); initialize(db, filename) }
   catch (error) {
     try { db?.close() } catch { /* Keep original error. */ }
-    if (['STORE_CORRUPT', 'UNSUPPORTED_STORE_VERSION', 'STORE_OPEN_FAILED'].includes(error.code)) throw error
+    if (['STORE_CORRUPT', 'UNSUPPORTED_STORE_VERSION', 'STORE_OPEN_FAILED', 'STORE_MIGRATION_FAILED'].includes(error.code)) throw error
     fail('STORE_OPEN_FAILED', 'Chat database could not be opened; database was not reset', 500, error)
   }
 
@@ -309,8 +368,11 @@ export function openChatStore({ dataDir, ownerScope } = {}) {
     }
     const projected = { ...parsed, localRunId, requestId: requestId ?? parsed.requestId ?? existing?.request_id ?? null, firstSeq: existing?.first_seq ?? seq, lastSeq: seq }
     const payload = publicJson(projected, 'saved run')
-    if (existing) db.prepare('UPDATE runs SET request_id=?, run_id=?, last_seq=?, public_json=? WHERE local_conversation_id=? AND local_run_id=?').run(projected.requestId, runId ?? existing.run_id, seq, payload, localId, localRunId)
-    else db.prepare('INSERT INTO runs VALUES (?, ?, ?, ?, ?, ?, ?)').run(localId, localRunId, projected.requestId, runId, seq, seq, payload)
+    // run.engine stays canonical in public_json; columns are an index copy.
+    const engineText = (value, limit) => typeof value === 'string' && value && value.length <= limit ? value : null
+    const engine = [engineText(parsed.engine?.id, 64), engineText(parsed.engine?.version, 64), engineText(parsed.engine?.engineProfileId, 512)]
+    if (existing) db.prepare('UPDATE runs SET request_id=?, run_id=?, last_seq=?, public_json=?, engine_id=COALESCE(?, engine_id), engine_version=COALESCE(?, engine_version), engine_profile_id=COALESCE(?, engine_profile_id) WHERE local_conversation_id=? AND local_run_id=?').run(projected.requestId, runId ?? existing.run_id, seq, payload, ...engine, localId, localRunId)
+    else db.prepare('INSERT INTO runs (local_conversation_id, local_run_id, request_id, run_id, first_seq, last_seq, public_json, engine_id, engine_version, engine_profile_id) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)').run(localId, localRunId, projected.requestId, runId, seq, seq, payload, ...engine)
     return projected
   }
   function appendCore(row, value) {
@@ -360,11 +422,20 @@ export function openChatStore({ dataDir, ownerScope } = {}) {
     const createdAt = time(input.createdAt ?? Date.now(), 'createdAt')
     const title = input.title === undefined ? null : input.title
     if (title !== null && (typeof title !== 'string' || title.length > 1000)) fail('INVALID_CHAT_RECORD', 'Invalid conversation title')
-    db.prepare('INSERT INTO threads VALUES (?, ?, NULL, ?, ?, ?, 0, ?)').run(localConversationId, clientThreadId, title, createdAt, createdAt, publicJson(coverage(input.coverage)))
+    db.prepare('INSERT INTO threads (local_conversation_id, client_thread_id, conversation_id, title, created_at, updated_at, last_seq, coverage_json) VALUES (?, ?, NULL, ?, ?, ?, 0, ?)').run(localConversationId, clientThreadId, title, createdAt, createdAt, publicJson(coverage(input.coverage)))
     return thread(q.thread.get(clientThreadId))
   }
   function bind(row, input) {
     const localId = row.local_conversation_id
+    // A conversation is locked to the engine (and engine account slot) of its
+    // first send; another engine continues only in a new conversation.
+    if (input.engineId !== undefined || input.engineProfileId !== undefined) {
+      const engineId = identifier(input.engineId, 'engineId')
+      const engineProfileId = input.engineProfileId === undefined ? null : identifier(input.engineProfileId, 'engineProfileId')
+      if ((row.engine_id && row.engine_id !== engineId) || (engineProfileId && row.engine_profile_id && row.engine_profile_id !== engineProfileId)) fail('ENGINE_MAPPING_CONFLICT', 'Local conversation is bound to a different engine', 409)
+      if (!row.engine_id) db.prepare('UPDATE threads SET engine_id=?, engine_profile_id=?, engine_bound_at=? WHERE local_conversation_id=?').run(engineId, engineProfileId, Date.now(), localId)
+      else if (!row.engine_profile_id && engineProfileId) db.prepare('UPDATE threads SET engine_profile_id=? WHERE local_conversation_id=?').run(engineProfileId, localId)
+    }
     if (input.conversationId !== undefined) {
       const nativeId = identifier(input.conversationId, 'conversationId')
       if (row.conversation_id && row.conversation_id !== nativeId) fail('NATIVE_MAPPING_CONFLICT', 'Local conversation already has a different native thread', 409)
@@ -381,7 +452,7 @@ export function openChatStore({ dataDir, ownerScope } = {}) {
       if (projected && projected[nativeKey === 'runId' ? 'run_id' : 'message_id'] && projected[nativeKey === 'runId' ? 'run_id' : 'message_id'] !== nativeValue) fail('NATIVE_MAPPING_CONFLICT', 'Projected native ID disagrees with binding', 409)
       db.prepare(`UPDATE ${nativeKey === 'runId' ? 'runs' : 'messages'} SET ${nativeKey === 'runId' ? 'run_id' : 'message_id'}=? WHERE local_conversation_id=? AND ${nativeKey === 'runId' ? 'local_run_id' : 'local_message_id'}=?`).run(nativeValue, localId, localValue)
     }
-    return { clientThreadId: row.client_thread_id, ...(input.conversationId !== undefined || row.conversation_id ? { conversationId: input.conversationId ?? row.conversation_id } : {}), ...(input.localRunId !== undefined ? { localRunId: input.localRunId, runId: input.runId } : {}), ...(input.localMessageId !== undefined ? { localMessageId: input.localMessageId, messageId: input.messageId } : {}) }
+    return { clientThreadId: row.client_thread_id, ...(input.conversationId !== undefined || row.conversation_id ? { conversationId: input.conversationId ?? row.conversation_id } : {}), ...(input.engineId !== undefined ? { engineId: input.engineId } : {}), ...(input.engineProfileId !== undefined ? { engineProfileId: input.engineProfileId } : {}), ...(input.localRunId !== undefined ? { localRunId: input.localRunId, runId: input.runId } : {}), ...(input.localMessageId !== undefined ? { localMessageId: input.localMessageId, messageId: input.messageId } : {}) }
   }
   function resolveLocalRunId(row, givenLocalRunId, nativeRunId, requestId, hasCheckpoint) {
     if (givenLocalRunId !== undefined) return identifier(givenLocalRunId, 'localRunId')
@@ -490,7 +561,7 @@ export function openChatStore({ dataDir, ownerScope } = {}) {
         return result.record
       })
     },
-    bindNative(input) { ensureOpen(); shape(input, ['clientThreadId', 'conversationId', 'localRunId', 'runId', 'localMessageId', 'messageId']); return tx(() => bind(requireThread(input.clientThreadId), input)) },
+    bindNative(input) { ensureOpen(); shape(input, ['clientThreadId', 'conversationId', 'engineId', 'engineProfileId', 'localRunId', 'runId', 'localMessageId', 'messageId']); return tx(() => bind(requireThread(input.clientThreadId), input)) },
     listEvents(clientThreadId, { afterSeq = 0, limit = 100, refType, refId } = {}) {
       ensureOpen(); page(afterSeq, limit)
       const row = requireThread(clientThreadId)

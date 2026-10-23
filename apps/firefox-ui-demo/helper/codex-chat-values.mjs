@@ -59,7 +59,9 @@ const CODEX_ERROR_KINDS = new Map([
 const CODEX_TRANSPORT_ERRORS = ['httpConnectionFailed', 'responseStreamConnectionFailed', 'responseStreamDisconnected', 'responseTooManyFailedAttempts']
 const HTTP_STATUS_KINDS = new Map([[401, 'auth'], [403, 'permission'], [429, 'quota']])
 // Bridge-issued codes whose cause is unambiguous; other codes stay unknown.
-const BRIDGE_CODE_KINDS = new Map([['LOGIN_REQUIRED', 'auth'], ['CONNECTION_LOST', 'network'], ['BRIDGE_OFFLINE', 'network'], ['RPC_TIMEOUT', 'network']])
+// Engine codes mirror ENGINE_ERRORS in engine-adapter.mjs (a test keeps them equal).
+const BRIDGE_CODE_KINDS = new Map([['LOGIN_REQUIRED', 'auth'], ['CONNECTION_LOST', 'network'], ['BRIDGE_OFFLINE', 'network'], ['RPC_TIMEOUT', 'network'],
+  ['ENGINE_LOGIN_REQUIRED', 'auth'], ['ENGINE_PROFILE_MISMATCH', 'auth'], ['ENGINE_UNAVAILABLE', 'network']])
 // Last resort for messages without a structured cause (e.g. JSON-RPC rejects).
 const MESSAGE_KINDS = [
   ['quota', /\b(?:usage limit|rate limit|quota exceeded)\b/i],

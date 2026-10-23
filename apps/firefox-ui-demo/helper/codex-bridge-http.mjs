@@ -116,7 +116,7 @@ export function createChatHttpHandler(chat, ensureAuth, history = chat) {
       const isSafetyResponse = url.pathname === '/chat/interrupt'
         || (url.pathname === '/chat/approval' && ['decline', 'cancel'].includes(body.decision))
         || (url.pathname === '/chat/user-input' && body.action === 'skip')
-      if (!isSafetyResponse) await ensureAuth()
+      if (!isSafetyResponse) await ensureAuth(body)
       const action = { '/chat/send': 'send', '/chat/resume': 'resume', '/chat/interrupt': 'interrupt', '/chat/approval': 'replyApproval', '/chat/user-input': 'replyUserInput' }[url.pathname]
       const result = await chat[action](body)
       sendJson(res, url.pathname === '/chat/send' ? 202 : 200, result)
