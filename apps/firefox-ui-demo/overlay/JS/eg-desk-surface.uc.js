@@ -10562,9 +10562,12 @@
     const menuButton = el('button', {
       class: 'egd-card-menu',
       title: '더보기',
+      'aria-label': '더보기',
+      'aria-haspopup': 'menu',
+      'aria-expanded': 'false',
       onclick: (ev) => {
         ev.stopPropagation();
-        browserCardControl(card, 'menu', menuButton);
+        browserCardControl(card, 'menu', menuButton, { focusFirst: ev.detail === 0 });
       },
     }, deskIcon('menu'));
 
@@ -11814,11 +11817,28 @@
       return true;
     };
     const duplicateBrowser = () => spawnBrowserCard(browserState.uri, { openMode: 'new' });
-    const closeBrowserMenu = () => {
-      if (!browserMenuPanel) return;
-      if (browserMenuPanel._outsideHandler) window.removeEventListener('mousedown', browserMenuPanel._outsideHandler, true);
-      browserMenuPanel.remove();
+    const focusBrowserMenuReturn = (anchor, actionResult = null) => {
+      const target = [
+        actionResult?.querySelector?.('.egd-card-url'),
+        anchor,
+        card.isConnected ? card.querySelector('.egd-card-url') : null,
+        document.querySelector('#egd-dock .egd-dock-btn[data-id="browser"]'),
+      ].find(node => node?.isConnected && !node.disabled);
+      target?.focus?.();
+    };
+    const closeBrowserMenu = ({ restoreFocus = false } = {}) => {
+      const panel = browserMenuPanel;
+      if (!panel) return;
+      if (panel._outsideHandler) window.removeEventListener('mousedown', panel._outsideHandler, true);
+      if (panel._keydownHandler) panel._anchor?.removeEventListener('keydown', panel._keydownHandler);
+      if (panel._focusoutHandler) {
+        panel._anchor?.removeEventListener('focusout', panel._focusoutHandler);
+        panel.removeEventListener('focusout', panel._focusoutHandler);
+      }
+      panel._anchor?.setAttribute('aria-expanded', 'false');
+      panel.remove();
       browserMenuPanel = null;
+      if (restoreFocus) focusBrowserMenuReturn(panel._anchor);
     };
     const selectBrowserForChat = (permission) => {
       const threadId = state.codex.activeThreadId;
@@ -11836,7 +11856,7 @@
       showAgentActivity(permission === 'interact'
         ? '이번 Chat 조작 대상으로 선택됨' : '이번 Chat 읽기 자료로 선택됨');
     };
-    const showBrowserMenu = (anchor = menuButton) => {
+    const showBrowserMenu = (anchor = menuButton, { focusFirst = false } = {}) => {
       if (browserMenuPanel?.isConnected) {
         closeBrowserMenu();
         return null;
@@ -11845,20 +11865,19 @@
       const pos = resolveFloatingMenuPlacement(anchorRect, 166, 224);
       const item = (label, title, action) => el('button', {
         class: 'egd-browser-menu-item',
+        role: 'menuitem',
         title,
         onclick: (ev) => {
           ev.stopPropagation();
           closeBrowserMenu();
-          action();
+          const result = action();
+          const focused = document.activeElement;
+          if (!focused?.isConnected || focused === document.body || focused === document.documentElement) {
+            focusBrowserMenuReturn(anchor, result);
+          }
         },
       }, label);
-      browserMenuPanel = el('div', {
-        class: 'egd-browser-menu egd-edge egd-frosted',
-        style: {
-          left: Math.round(pos.left) + 'px',
-          top: Math.round(pos.top) + 'px',
-        },
-      },
+      const items = [
         item('복제', '현재 URL을 새 Desk Window로 열기', duplicateBrowser),
         item('URL 복사', browserState.uri, () => copyTextToClipboard(browserState.uri)),
         item('Chat에 읽기 첨부', '현재 Browser의 읽기 자료만 다음 Chat에 선택합니다. 기존 조작 허용이 있으면 읽기 전용으로 바뀝니다.',
@@ -11868,16 +11887,66 @@
         item('홈', browserState.homeUrl, () => navigateBrowser(browserState.homeUrl)),
         item(browserState.loading ? '중지' : '새로고침', browserState.loading ? '로드 중지' : '현재 페이지 새로고침', () => (browserState.loading ? stopBrowser() : reloadBrowser())),
         item(isCardFullscreen(card) ? '창 복귀' : '최대화', 'Desk Window 최대화 전환', () => toggleCardFullscreen(card)),
-      );
-      browserMenuPanel._outsideHandler = (event) => {
+      ];
+      browserMenuPanel = el('div', {
+        class: 'egd-browser-menu egd-edge egd-frosted',
+        role: 'menu',
+        'aria-label': 'Browser 도구',
+        style: {
+          left: Math.round(pos.left) + 'px',
+          top: Math.round(pos.top) + 'px',
+        },
+      }, ...items);
+      const panel = browserMenuPanel;
+      panel._anchor = anchor;
+      panel._keydownHandler = (ev) => {
+        if (browserMenuPanel !== panel) return;
+        if (ev.key === 'Escape') {
+          ev.preventDefault();
+          ev.stopPropagation();
+          closeBrowserMenu({ restoreFocus: true });
+          return;
+        }
+        const current = items.indexOf(document.activeElement);
+        let next = -1;
+        if (ev.key === 'ArrowDown') next = current < 0 ? 0 : (current + 1) % items.length;
+        else if (ev.key === 'ArrowUp') next = current < 0 ? items.length - 1 : (current - 1 + items.length) % items.length;
+        else if (ev.key === 'Home') next = 0;
+        else if (ev.key === 'End') next = items.length - 1;
+        if (next < 0) return;
+        ev.preventDefault();
+        ev.stopPropagation();
+        items[next].focus();
+      };
+      panel._focusoutHandler = (ev) => {
+        if (browserMenuPanel !== panel) return;
+        if (panel.contains(ev.relatedTarget) || anchor.contains(ev.relatedTarget)) return;
+        // Focusout can precede the next focus target, including an item in this
+        // detached menu. Recheck after the handoff, and never close a newer menu.
+        window.setTimeout(() => {
+          if (browserMenuPanel !== panel) return;
+          const focused = document.activeElement;
+          if (panel.contains(focused) || anchor.contains(focused)) return;
+          closeBrowserMenu();
+        }, 0);
+      };
+      panel.addEventListener('keydown', panel._keydownHandler);
+      anchor.addEventListener('keydown', panel._keydownHandler);
+      panel.addEventListener('focusout', panel._focusoutHandler);
+      anchor.addEventListener('focusout', panel._focusoutHandler);
+      panel._outsideHandler = (event) => {
         if (browserMenuPanel?.contains(event.target) || anchor.contains(event.target)) return;
         closeBrowserMenu();
       };
-      document.documentElement.appendChild(browserMenuPanel);
+      document.documentElement.appendChild(panel);
+      anchor.setAttribute('aria-expanded', 'true');
+      if (focusFirst) items[0]?.focus();
       window.setTimeout(() => {
-        if (browserMenuPanel?._outsideHandler) window.addEventListener('mousedown', browserMenuPanel._outsideHandler, true);
+        if (browserMenuPanel === panel && panel._outsideHandler) {
+          window.addEventListener('mousedown', panel._outsideHandler, true);
+        }
       }, 0);
-      return browserMenuPanel;
+      return panel;
     };
     card._browserState = browserState;
     const browserToolBinding = () => {
