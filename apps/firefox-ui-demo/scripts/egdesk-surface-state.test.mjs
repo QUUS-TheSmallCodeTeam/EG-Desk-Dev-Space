@@ -641,6 +641,35 @@ test('production first-use focus presents the live Browser Card with the existin
   assert.equal(browser.id, 'browser-view-a', 'zooming the camera never replaces the Browser view');
 });
 
+test('new Chat height reserves the readable composer above the Dock at 600/800/960/1280', () => {
+  const body = surfaceSource.match(/  function fitCodexChatCardToReadableViewport\(card, safe, bodyFontPx\) \{([\s\S]*?)\n  \}/)?.[1];
+  assert.ok(body, 'use the production Chat-only height cap');
+  const fit = compileFunction(`return function fitCodexChatCardToReadableViewport(card, safe, bodyFontPx) {${body}\n  }`,
+    ['window', 'parsePxNumber', 'ZOOM_MAX'])(
+    { getComputedStyle: () => ({ minHeight: '420px', borderTopWidth: '1px', borderBottomWidth: '1px' }) },
+    (value, fallback = 0) => Number.parseFloat(value) || fallback, 4);
+  const spawnStart = surfaceSource.indexOf('  function spawnCodexChatCard(');
+  const browserStart = surfaceSource.indexOf('  // ============ Canvas Entity: Browser Card', spawnStart);
+  const spawnBody = surfaceSource.slice(spawnStart, browserStart);
+  assert.match(spawnBody,
+    /fitCodexChatCardToReadableViewport\(card, safe,\s*/,
+    'new Chat creation must apply the cap after mounting its actual body');
+  assert(spawnBody.indexOf('host.appendChild(card)') < spawnBody.indexOf('fitCodexChatCardToReadableViewport(card, safe,') &&
+    spawnBody.indexOf('fitCodexChatCardToReadableViewport(card, safe,') < spawnBody.indexOf("markAgendaDirty('create-chat-card', card)"),
+  'the capped geometry must be in place before Chat creation is recorded');
+  for (const { width, height } of [{ width: 600, height: 600 }, { width: 800, height: 600 },
+    { width: 960, height: 700 }, { width: 1280, height: 776 }]) {
+    const safe = { left: 24, top: 76, right: width - 24, bottom: height - 76,
+      width: width - 48, height: height - 152 };
+    const card = { style: { height: '680px' } };
+    assert.equal(fit(card, safe, 11), true);
+    const projectedHeight = (Number.parseFloat(card.style.height) + 2) * (10.6 / 11);
+    assert(projectedHeight <= safe.height, `${width}x${height}: Chat bottom remains above Dock`);
+    assert(Number.parseFloat(card.style.height) >= 420, `${width}x${height}: CSS minimum is preserved`);
+    assert.equal(fit(card, safe, 11), false, 'a second fit does not keep resizing the Card');
+  }
+});
+
 test('human Chat Dock open after initial Browser focus and zoom-out focuses only a compact Chat to readable detail', () => {
   const projectionBody = surfaceSource.match(/    const focusProjection = \(entry, \{ revealHeader = false \} = \{\}\) => \{([\s\S]*?)\n    \};/)?.[1];
   const compactBody = surfaceSource.match(/    const focusChatDockIfCompact = card => \{([\s\S]*?)\n    \};/)?.[1];
@@ -649,7 +678,9 @@ test('human Chat Dock open after initial Browser focus and zoom-out focuses only
   const dockBody = surfaceSource.slice(dockStart, dockEnd).match(/onclick: \(\) => \{([\s\S]*?)\n\s*\},\n\s*\}, el\('span', \{ class: 'egd-dock-icon' \}/)?.[1];
   assert.ok(projectionBody && compactBody && dockBody, 'use the production Dock and semantic-projection paths');
 
-  const safe = { left: 147, top: 76, right: 1256, bottom: 694, width: 1109, height: 618 };
+  const fitBody = surfaceSource.match(/  function fitCodexChatCardToReadableViewport\(card, safe, bodyFontPx\) \{([\s\S]*?)\n  \}/)?.[1];
+  assert.ok(fitBody);
+  let safe = { left: 147, top: 76, right: 1256, bottom: 694, width: 1109, height: 618 };
   const browser = { x: 15, y: 20, width: 1200, height: 720 };
   const initial = fitSurfaceCamera(browser,
     { left: 0, top: 0, width: 1200, height: 800 }, 1);
@@ -657,7 +688,11 @@ test('human Chat Dock open after initial Browser focus and zoom-out focuses only
   const frames = new Map(), listeners = new Map();
   let nextFrame = 0, composerFocuses = 0;
   const window = { requestAnimationFrame: fn => { frames.set(++nextFrame, fn); return nextFrame; },
-    cancelAnimationFrame: id => frames.delete(id) };
+    cancelAnimationFrame: id => frames.delete(id),
+    getComputedStyle: () => ({ minHeight: '420px', borderTopWidth: '1px', borderBottomWidth: '1px' }) };
+  const fitChat = compileFunction(`return function fitCodexChatCardToReadableViewport(card, safe, bodyFontPx) {${fitBody}\n  }`,
+    ['window', 'parsePxNumber', 'ZOOM_MAX'])(window,
+    (value, fallback = 0) => Number.parseFloat(value) || fallback, 4);
   const viewport = { id: 'canvas-viewport' };
   const document = { activeElement: { id: 'dock-button' },
     addEventListener: (name, fn) => listeners.set(name, fn),
@@ -699,8 +734,9 @@ test('human Chat Dock open after initial Browser focus and zoom-out focuses only
     surface, 4, 240, 180, target => focused.push(target));
   state.focusChatDockIfCompact = compileFunction(`let cancelPendingChatComposerFocus = () => {};\nreturn card => {${compactBody}\n    }`,
     ['state', 'syncEntries', 'entries', 'authorVisible', 'screenRect', 'SurfaceState',
-      'detailWidth', 'detailHeight', 'safeViewportRect', 'focusProjection', 'window', 'document', 'viewport'])(state, syncEntries, entries, () => true,
-    screenRect, surface, 240, 180, () => safe, focusProjection, window, document, viewport);
+      'detailWidth', 'detailHeight', 'safeViewportRect', 'fitCodexChatCardToReadableViewport',
+      'focusProjection', 'window', 'document', 'viewport'])(state, syncEntries, entries, () => true,
+    screenRect, surface, 240, 180, () => safe, fitChat, focusProjection, window, document, viewport);
   let spawned = 0;
   const dockClick = compileFunction(`return () => {${dockBody}\n          }`,
     ['kind', 'item', 'state', 'spawnCodexChatCard', 'toggleHUD'])(
@@ -715,7 +751,9 @@ test('human Chat Dock open after initial Browser focus and zoom-out focuses only
   assert.equal(cameraTargets.length, 1, 'compact Chat opens with its existing focus projection');
   assert(Math.abs(cameraTargets[0].zoom - 10.6 / 11) < 0.001);
   assert.ok(cameraTargets[0].pan.y + 90 * cameraTargets[0].zoom >= safe.top,
-    'the focused Chat header clears the topbar even when the readable Card exceeds the safe height');
+    'the focused Chat header clears the topbar after the Card is height-capped');
+  assert.ok(cameraTargets[0].pan.y + (90 + Number.parseFloat(card.style.height) + 2) * cameraTargets[0].zoom <= safe.bottom,
+    'the focused Chat composer-bearing Card remains above the Dock');
   assert.equal(focused[0], card);
   assert.equal(state.codex.hudView, 'conversation');
   assert.equal(state.codex.threadDrafts.room, 'unsent human draft');
@@ -745,7 +783,10 @@ test('human Chat Dock open after initial Browser focus and zoom-out focuses only
   flushFrames();
   assert.equal(composerFocuses, 1, 'another human Card click cancels the pending Chat keyboard focus');
 
-  state.zoom = state.zoomTarget = 1;
+  // The now height-capped Card is fully safe at its settled readable focus,
+  // whereas forcing 100% here would make even this fixture taller than safe.
+  state.zoom = state.zoomTarget = cameraTargets[1].zoom;
+  state.pan = state.panTarget = { ...cameraTargets[1].pan };
   entries.get(card).level = 'detail';
   dockClick();
   assert.equal(spawned, 3, 'the existing Chat Card is reused, not closed');
@@ -783,6 +824,30 @@ test('human Chat Dock open after initial Browser focus and zoom-out focuses only
   assert.equal(state.codex.activeThreadId, originalThread);
   assert.equal(state.codex.threadDrafts.room, originalDraft);
   assert.equal(messages.scrollTop, originalScroll);
+
+  for (const size of [{ width: 800, height: 600 }, { width: 600, height: 600 },
+    { width: 960, height: 700 }, { width: 1280, height: 776 }]) {
+    safe = { left: 24, top: 76, right: size.width - 24, bottom: size.height - 76,
+      width: size.width - 48, height: size.height - 152 };
+    card.style.height = '680px'; // existing pre-fix Chat, same DOM identity and draft
+    state.zoom = state.zoomTarget = size.width === 800 ? 1 : 0.83;
+    entries.get(card).level = size.width === 800 ? 'detail' : 'outline';
+    const before = cameraTargets.length;
+    dockClick();
+    assert.equal(cameraTargets.length, before + 1,
+      `${size.width}x${size.height}: even a detail-level but clipped Chat is revealed`);
+    assert.equal(state.codex.chatCardEntityId, card.id);
+    assert.equal(state.codex.threadDrafts.room, 'unsent human draft');
+    assert.deepEqual(browser, { x: 15, y: 20, width: 1200, height: 720 },
+      'Chat reveal does not resize the Browser world');
+    const target = cameraTargets.at(-1);
+    const actualHeight = Number.parseFloat(card.style.height);
+    const x = target.pan.x + 100 * target.zoom;
+    const y = target.pan.y + 90 * target.zoom;
+    assert(x >= safe.left - 0.5 && x + 440 * target.zoom <= safe.right + 0.5);
+    assert(y >= safe.top - 0.5 && y + (actualHeight + 2) * target.zoom <= safe.bottom + 0.5,
+      `${size.width}x${size.height}: composer-bearing Card is fully above the Dock`);
+  }
 });
 
 test('production fullscreen layout fills the actual Canvas viewport and keeps the prior Card rect for Desk', () => {

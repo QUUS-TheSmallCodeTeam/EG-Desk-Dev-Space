@@ -6976,6 +6976,26 @@
     toggleHUD('chat', '채팅', { preserveConversation: true });
   }
 
+  function fitCodexChatCardToReadableViewport(card, safe, bodyFontPx) {
+    if (!card || !safe || !Number.isFinite(safe.height) || safe.height <= 0) return false;
+    // Semantic focus raises Chat to this readable font size. A Card sized at
+    // the old, smaller camera zoom can otherwise put its composer below Dock.
+    const fontPx = Number.isFinite(bodyFontPx) && bodyFontPx > 0 ? bodyFontPx : 14;
+    const readableZoom = Math.min(ZOOM_MAX, Math.max(0.76, 10.6 / fontPx));
+    const style = window.getComputedStyle(card);
+    const minHeight = parsePxNumber(style.minHeight, 420);
+    const frameHeight = style.boxSizing === 'border-box' ? 0 :
+      parsePxNumber(style.borderTopWidth) + parsePxNumber(style.borderBottomWidth) +
+      parsePxNumber(style.paddingTop) + parsePxNumber(style.paddingBottom);
+    // Projection centers the inline content height, leaving half the spare
+    // space below. Reserve twice the frame so its outer bottom also fits.
+    const maxHeight = Math.floor(safe.height / readableZoom - frameHeight * 2);
+    const height = parsePxNumber(card.style.height, minHeight);
+    if (maxHeight < minHeight || height <= maxHeight) return false;
+    card.style.height = `${maxHeight}px`;
+    return true;
+  }
+
   function spawnCodexChatCard(anchorClientX = Math.round(window.innerWidth * 0.64), anchorClientY = Math.round(window.innerHeight * 0.53)) {
     const existing = state.codex.chatCardEntityId ? document.getElementById(state.codex.chatCardEntityId) : null;
     if (existing && existing.isConnected) {
@@ -7038,6 +7058,8 @@
 
     const host = document.getElementById('egd-canvas-layer') || document.documentElement;
     host.appendChild(card);
+    fitCodexChatCardToReadableViewport(card, safe,
+      parsePxNumber(window.getComputedStyle(body).fontSize, 14));
     bindCardSourceRef(card, currentChatSourceRef());
     markAgendaDirty('create-chat-card', card);
     setActiveEntity(card);
@@ -12747,17 +12769,17 @@
       if (!entry) return false;
       entry.visibilityDirty = true;
       if (!authorVisible(entry)) return false;
+      const safe = safeViewportRect();
+      const resized = fitCodexChatCardToReadableViewport(card, safe, entry.bodyFontPx);
       const zoom = Number.isFinite(state.zoomTarget) ? state.zoomTarget : state.zoom;
       const rect = screenRect(card, zoom, state.panTarget || state.pan);
       const level = SurfaceState.surfaceSemanticLevel({
         width: rect.width, height: rect.height, fontPx: entry.bodyFontPx * zoom,
         previous: entry.level, detailWidth, detailHeight,
       });
-      const safe = safeViewportRect();
-      const headerHeight = Math.min(rect.height, 32 * zoom);
-      const headerReachable = rect.x >= safe.left && rect.x + rect.width <= safe.right
-        && rect.y >= safe.top && rect.y + headerHeight <= safe.bottom;
-      if (level === 'detail' && headerReachable) return false;
+      const fullyInSafe = rect.x >= safe.left - 0.5 && rect.y >= safe.top - 0.5 &&
+        rect.x + rect.width <= safe.right + 0.5 && rect.y + rect.height <= safe.bottom + 0.5;
+      if (level === 'detail' && fullyInSafe && !resized) return false;
       focusProjection(entry, { revealHeader: true });
       const target = { zoom: state.zoomTarget, pan: { ...state.panTarget } };
       const initialFocus = document.activeElement;
