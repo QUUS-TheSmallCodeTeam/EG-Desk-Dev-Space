@@ -636,8 +636,9 @@
     if (run.status === 'completed') return '완료';
     const stopping = run.stopPending || run.stopRequested || run.status === 'stopping';
     // RUNTIME_LOST is reduced to failed, but does not prove native termination.
-    if (run.error?.code === 'RUNTIME_LOST' || run.status === 'unavailable') return stopping || run.stopUnconfirmed ? '중지 확인 필요' : '실행 상태 확인 필요';
-    if (run.status === 'failed') return '오류로 종료됨';
+    if (run.error?.code === 'RUNTIME_LOST') return '연결 끊김 · 실행 상태 확인 필요';
+    if (run.status === 'unavailable') return '실행 상태 확인 필요';
+    if (run.status === 'failed') return '실행 실패';
     if (ChatState.isRunBusy(run)) {
       if (run.stopUnconfirmed || (stopping && !state.codex.connected)) return '중지 확인 필요';
       if (!state.codex.connected) return '연결 끊김 · 실행 상태 확인 필요';

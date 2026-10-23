@@ -247,7 +247,7 @@ test('Stop feedback honors stopping status even before its boolean flag is popul
 });
 
 test('Stop feedback keeps actual terminal outcomes when an accepted ACK arrives later', async () => {
-  for (const [status, label] of [['completed', '완료'], ['interrupted', '중지됨'], ['failed', '오류로 종료됨']]) {
+  for (const [status, label] of [['completed', '완료'], ['interrupted', '중지됨'], ['failed', '실행 실패']]) {
     const f = stopFeedbackFixture();
     const pending = f.interrupt();
     Chat.reduceChatEvent(f.protocol, envelope('run.completed', 2, { status }));
@@ -301,7 +301,7 @@ test('Stop feedback never turns a lost connection into confirmation of stopping'
   assert.equal(f.ui().button.attrs.disabled, 'true');
   Chat.reduceChatEvent(f.protocol, envelope('run.unavailable', 2, { error: { code: 'RUNTIME_LOST' } }));
   assert.equal(f.run.status, 'failed', 'the reducer uses failed even though native termination is unknown');
-  assert.equal(f.ui().label, '중지 확인 필요');
+  assert.equal(f.ui().label, '연결 끊김 · 실행 상태 확인 필요');
   assert.equal(f.ui().button, null);
 });
 
@@ -309,12 +309,13 @@ test('Stop feedback distinguishes runtime loss and unavailable state from explic
   const f = stopFeedbackFixture();
   Chat.reduceChatEvent(f.protocol, envelope('run.unavailable', 2, { error: { code: 'RUNTIME_LOST' } }));
   assert.equal(f.run.status, 'failed');
-  assert.equal(f.ui().label, '실행 상태 확인 필요');
+  assert.equal(f.ui().label, '연결 끊김 · 실행 상태 확인 필요');
   f.run.status = 'unavailable';
   f.run.error = null;
+  f.run.stopRequested = true;
   assert.equal(f.ui().label, '실행 상태 확인 필요');
   Chat.reduceChatEvent(f.protocol, envelope('run.completed', 3, { status: 'failed', error: { code: 'EXECUTION_ERROR' } }));
-  assert.equal(f.ui().label, '오류로 종료됨');
+  assert.equal(f.ui().label, '실행 실패');
   Chat.reduceChatEvent(f.protocol, envelope('run.completed', 4, { status: 'interrupted' }));
   assert.equal(f.ui().label, '중지됨');
 });
