@@ -2,7 +2,7 @@ import test from 'node:test'
 import assert from 'node:assert/strict'
 import { createCodexBrowserToolProvider } from './codex-browser-tool-provider.mjs'
 import { BrowserToolTransport } from './codex-browser-tool-transport.mjs'
-import { createBrowserToolService } from './egdesk-browser-tool-runtime.mjs'
+import { boundedFieldValue, createBrowserToolService } from './egdesk-browser-tool-runtime.mjs'
 import { classifyPublicToolError } from './codex-tool-errors.mjs'
 
 function fixture() {
@@ -352,4 +352,65 @@ test('read-only grants and fixture QA still refuse the new guarded tools before 
     assert.equal(response.success, false, tool)
   }
   assert.equal(f.calls.filter(call => call[0] === 'dispatch').length, 0)
+})
+
+test('BrowserBounded fill reaches a same-origin frame editor and reports only its fixed fill route', async () => {
+  const owner = 'codex:chatgpt:fixture-owner'
+  const sent = [], events = []
+  const editor = { ref: 'f1/el_4', role: 'textbox', label: 'Message body', href: '', tag: 'div', disabled: false,
+    value: boundedFieldValue('', { editor: true }), bounds: { x: 210, y: 140, width: 300, height: 120 } }
+  let page = { cardId: 'card-1', documentId: 'document-1', revision: 1, readyState: 'complete',
+    viewport: { width: 720, height: 480, devicePixelRatio: 1 }, scroll: { x: 0, y: 0, maxY: 0 },
+    url: 'https://example.test/mail', text: ['Compose'], focusedElement: null, interactiveElements: [editor],
+    inaccessibleFrames: [{ label: 'Payment', reason: 'cross-origin', bounds: { x: 0, y: 300, width: 200, height: 100 } }] }
+  let route = 'dom-editor-replace'
+  const sendToUi = async request => {
+    sent.push(request)
+    if (request.kind === 'bind') return { requestId: request.requestId, status: 'bound', binding: {
+      cardId: 'card-1', cardEpoch: 'epoch-1', profileId: 'firefox-default', accountId: 'fixture-account',
+      userContextId: 0, url: 'https://example.test/mail', engineAccountKey: owner, authorityEpoch: 1 } }
+    if (request.kind === 'observe') return { requestId: request.requestId, status: 'observed', snapshot: page }
+    if (request.kind === 'act' && request.action.type === 'fill') {
+      page = { ...page, interactiveElements: [{ ...editor, value: boundedFieldValue(request.action.text, { editor: true }) }] }
+      return { requestId: request.requestId, status: 'acted', receipt: { after: page, observation: {},
+        dispatchReceipt: { actor: 'JSWindowActor', eventDispatched: true, documentStillCurrent: true,
+          ...(route ? { inputRoute: route, trustedInput: false, eventOrder: ['beforeinput', 'input'] } : {}) } } }
+    }
+    if (request.kind === 'cancel') return { requestId: request.requestId, status: 'cancelled' }
+    throw new Error('unexpected UI request')
+  }
+  const transport = { runs: new Map(), hasClient: id => id === 'ui-stream-1', bindRun: runId => transport.runs.set(runId, true),
+    unbindRun: runId => transport.runs.delete(runId), reset() {} }
+  const service = createBrowserToolService({ sendToUi, getOwnerKey: () => owner })
+  const provider = createCodexBrowserToolProvider({ transport, getOwnerKey: () => owner, service })
+  provider.runtime = { browserRegisteredThreads: new Set(['native-thread']), currentEpoch: () => 3,
+    emit: (run, event, detail) => events.push({ event, detail }) }
+  const source = { id: 'source-1', kind: 'browser', selectedByUser: true, browserToolPermission: 'interact',
+    browserToolSelection: { token: 'one-time-token', threadId: 'ui-thread-1' },
+    browserToolIdentity: { cardEpoch: 'epoch-1', userContextId: 0, engineAccountKey: owner, authorityEpoch: 1 },
+    sourceRef: { viewId: 'card-1', profileId: 'firefox-default', accountId: 'fixture-account', uri: 'https://example.test/mail' } }
+  const prepared = provider.prepare({ selectedSources: [source], clientThreadId: 'ui-thread-1', effectiveExecutionPolicy: 'browserBounded', browserTransportId: 'ui-stream-1' })
+  const run = { answerId: 'native-thread/turn', runId: 'turn', clientThreadId: 'ui-thread-1', status: 'inProgress', executionPolicy: { mode: 'browserBounded' } }
+  await provider.bindRun(run, prepared)
+  const parse = response => JSON.parse(response.contentItems[0].text)
+  const fill = async (callId, text) => {
+    const observed = parse(await provider.dispatch(run, { tool: 'egdesk_browser_observe', callId: `observe-${callId}`, arguments: { cardId: 'card-1' } }))
+    return provider.dispatch(run, { tool: 'egdesk_browser_fill', callId, arguments: { cardId: 'card-1',
+      observationId: observed.observationId, expectedRevision: 1, ref: 'f1/el_4',
+      expectedTarget: observed.snapshot.interactiveElements[0], text, postcondition: { kind: 'target-value', value: text } } })
+  }
+  const text = `Hello team. ${'Status update. '.repeat(40)}`
+  const filled = await fill('fill-1', text)
+  assert.equal(filled.success, true)
+  assert.equal(parse(filled).status, 'postcondition-observed')
+  const completed = events.filter(event => event.event === 'browser.tool.completed').at(-1).detail
+  assert.equal(completed.action, 'fill')
+  assert.equal(completed.inputRoute, 'dom-editor-replace')
+  assert.equal(JSON.stringify(completed).includes('Status update'), false, 'the run event carries no fill text')
+  route = null
+  const unrouted = await fill('fill-2', 'Short reply')
+  assert.equal(unrouted.success, true, 'until the surface forwards the fill route, the readback alone decides')
+  assert.equal(events.filter(event => event.event === 'browser.tool.completed').at(-1).detail.inputRoute, undefined)
+  assert.deepEqual(sent.filter(request => request.kind === 'act').map(request => request.action.ref), ['f1/el_4', 'f1/el_4'])
+  await provider.cancelRun(run)
 })

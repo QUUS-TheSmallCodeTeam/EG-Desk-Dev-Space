@@ -6,6 +6,7 @@ globalThis.JSWindowActorParent ||= class {}
 const { EGDeskBrowserAgentRuntimeChild } = await import('../overlay/resources/EGDeskBrowserAgentRuntimeChild.sys.mjs')
 const parentModule = await import('../overlay/resources/EGDeskBrowserAgentRuntimeParent.sys.mjs')
 const { EGDeskBrowserAgentRuntimeParent, registerBrowserActionAuthorizer } = parentModule
+const { boundedFieldValue } = await import('../helper/egdesk-browser-tool-runtime.mjs')
 
 function localDocumentFixture() {
   const actor = new EGDeskBrowserAgentRuntimeChild()
@@ -646,9 +647,16 @@ test('password, token and editable controls redact every snapshot label, value, 
   seen = f.actor.snapshot()
   assert(!JSON.stringify(seen).includes('EDITABLE_CANARY_DO_NOT_EXPOSE'))
   const editableControl = seen.interactiveElements.find(item => item.tag === 'div')
-  assert.equal(editableControl.label, 'Sensitive field')
-  assert.equal(editableControl.value, '')
+  // BRW-08: an editor is fillable, but its text never enters an observation:
+  // no text label fallback, and a value of length and fingerprint only.
+  assert.equal(editableControl.label, 'Editable text')
+  assert.match(editableControl.value, /^\[editor text hidden: 29 chars, #[0-9a-f]{14}\]$/)
   assert(seen.text.includes('Public count'))
+  editable.getAttribute = name => name === 'data-private' ? '' : null
+  seen = f.actor.snapshot()
+  assert.equal(seen.interactiveElements.find(item => item.tag === 'div').label, 'Sensitive field')
+  assert.equal(seen.interactiveElements.find(item => item.tag === 'div').value, '')
+  assert(!JSON.stringify(seen).includes('EDITABLE_CANARY_DO_NOT_EXPOSE'))
 })
 
 test('opacity-zero ordinary and composed-shadow ancestors hide text without hiding normal text', () => {
@@ -998,4 +1006,362 @@ test('Parent receipt filter copies only fixed scroll/press route fields', () => 
     ['press', { inputRoute: 'dom-keyboard-event', key: 'Enter', trustedInput: false, focusPolicy: 'stolen' }],
     ['scroll', { inputRoute: 'os-wheel', mode: 'document' }], ['click', { inputRoute: 'dom-scroll-api', mode: 'document' }],
     ['scroll', null], ['scroll', ['dom-scroll-api']]]) assert.deepEqual(fields(type, value), {})
+})
+
+// BRW-08: same-origin frames, open shadow roots, editors and long values.
+function fakeElement(doc, tagName, rect, { root = doc, attributes = {}, ...props } = {}) {
+  const listeners = new Set()
+  return { ownerDocument: doc, isConnected: true, tagName, disabled: false, focusCalls: 0, clickCount: 0,
+    getAttribute(name) { return attributes[name] ?? null }, getRootNode() { return root },
+    getBoundingClientRect() { return rect }, dispatchEvent() { return true }, scrollIntoView() {},
+    focus() { this.focusCalls++ }, contains(node) { return node === this },
+    addEventListener(name, fn) { if (name === 'click') listeners.add(fn) },
+    removeEventListener(name, fn) { if (name === 'click') listeners.delete(fn) },
+    click() { for (const fn of listeners) fn({ target: this }); this.clickCount++ }, ...props }
+}
+
+const singleTextWalker = (node, filter) => {
+  let done = false
+  return { nextNode() { if (done) return null; done = true; return filter.acceptNode(node) === 1 ? node : null } }
+}
+
+function fakeFrameDocument(href, label = 'Frame send') {
+  const doc = { nodeType: 9, title: 'Embedded', readyState: 'complete', location: { href } }
+  doc.body = { getBoundingClientRect: () => ({ width: 300, height: 200 }) }
+  doc.documentElement = { getBoundingClientRect: () => ({ width: 300, height: 200 }) }
+  doc.activeElement = doc.body
+  const button = fakeElement(doc, 'BUTTON', { left: 10, top: 10, width: 80, height: 30 }, { innerText: label })
+  const input = fakeElement(doc, 'INPUT', { left: 10, top: 60, width: 160, height: 30 },
+    { type: 'text', value: '', attributes: { type: 'text', 'aria-label': 'Frame note' } })
+  const text = { nodeValue: `${label} body text`, parentElement: button }
+  doc.querySelectorAll = () => [button, input]
+  doc.elementFromPoint = (_x, y) => y < 50 ? button : input
+  doc.createTreeWalker = (_root, _what, filter) => singleTextWalker(text, filter)
+  return { doc, button, input }
+}
+
+function frameFixture() {
+  const f = localDocumentFixture()
+  const { actor, win } = f
+  const top = actor.document
+  win.location.href = 'https://example.test/page'
+  const observed = []
+  win.MutationObserver = class { observe(target) { observed.push(target) } disconnect() {}
+    takeRecords() { return f.pendingMutations.splice(0) } }
+  const frameElement = (title, rect, contentDocument) => ({ tagName: 'IFRAME', ownerDocument: top, isConnected: true,
+    contentDocument, clientLeft: 0, clientTop: 0, getAttribute: name => name === 'title' ? title : null,
+    getBoundingClientRect: () => rect, contains(node) { return node === this } })
+  const same = fakeFrameDocument('https://example.test/embedded')
+  const iframeRect = { left: 200, top: 100, width: 300, height: 200 }
+  const iframe = frameElement('Compose', iframeRect, same.doc)
+  const crossOrigin = fakeFrameDocument('https://pay.other.test/checkout', 'CROSS_ORIGIN_CANARY')
+  const cross = frameElement('Payment', { left: 20, top: 320, width: 200, height: 100 }, crossOrigin.doc)
+  const unreadable = frameElement('Login', { left: 240, top: 320, width: 200, height: 100 }, null)
+  const hostRect = { left: 20, top: 200, width: 150, height: 40 }
+  const host = { tagName: 'X-WIDGET', ownerDocument: top, isConnected: true, getAttribute: () => null,
+    getBoundingClientRect: () => hostRect, contains(node) { return node === this } }
+  const shadowRoot = { nodeType: 11, host, ownerDocument: top }
+  host.shadowRoot = shadowRoot
+  const shadowButton = fakeElement(top, 'BUTTON', { left: 30, top: 205, width: 100, height: 30 },
+    { root: shadowRoot, innerText: 'Shadow save', parentElement: null })
+  shadowRoot.querySelectorAll = () => [shadowButton]
+  shadowRoot.elementFromPoint = () => shadowButton
+  const closedSecret = fakeElement(top, 'BUTTON', { left: 0, top: 0, width: 10, height: 10 },
+    { innerText: 'CLOSED_SHADOW_CANARY' })
+  const closedHost = { tagName: 'X-VAULT', ownerDocument: top, isConnected: true, shadowRoot: null,
+    openOrClosedShadowRoot: { querySelectorAll: () => [closedSecret] }, getAttribute: () => null,
+    getBoundingClientRect: () => ({ left: 0, top: 0, width: 10, height: 10 }) }
+  top.querySelectorAll = selector => selector === '*'
+    ? [f.button, f.input, host, closedHost, iframe, cross, unreadable] : [f.button, f.input]
+  const inside = (rect, x, y) => x >= rect.left && x <= rect.left + rect.width && y >= rect.top && y <= rect.top + rect.height
+  const topHit = top.elementFromPoint
+  let frameCovered = false
+  top.elementFromPoint = (x, y) => inside(iframeRect, x, y) ? (frameCovered ? f.button : iframe)
+    : inside(hostRect, x, y) ? host : topHit(x, y)
+  const shadowText = { nodeValue: 'Shadow status ready', parentElement: shadowButton }
+  const topWalker = top.createTreeWalker
+  top.createTreeWalker = (root, what, filter) => root === shadowRoot
+    ? singleTextWalker(shadowText, filter) : topWalker(root, what, filter)
+  return { f, actor, win, top, observed, same, iframe, cross, unreadable, host, shadowRoot, shadowButton,
+    coverFrame(value) { frameCovered = value } }
+}
+
+const byLabel = (snapshot, label) => snapshot.interactiveElements.find(item => item.label === label)
+
+test('observe exposes same-origin frame and open shadow elements as refs and lists other frames only as inaccessible', () => {
+  const x = frameFixture()
+  const seen = x.actor.snapshot()
+  const frameButton = byLabel(seen, 'Frame send')
+  assert.match(frameButton.ref, /^f\d+\/el_\d+$/, 'a frame element ref carries its frame path')
+  assert.deepEqual(frameButton.bounds, { x: 210, y: 110, width: 80, height: 30 }, 'bounds are top-viewport local')
+  assert.match(byLabel(seen, 'Frame note').ref, new RegExp(`^${frameButton.ref.split('/')[0]}/el_\\d+$`))
+  assert.match(byLabel(seen, 'Shadow save').ref, /^el_\d+$/)
+  assert.deepEqual(seen.interactiveElements.map(item => item.label),
+    ['Increment', 'Note', 'Shadow save', 'Frame send', 'Frame note'], 'shadow and frame elements stay in document order')
+  assert(seen.text.includes('Frame send body text'))
+  assert(seen.text.includes('Shadow status ready'))
+  assert.deepEqual(seen.inaccessibleFrames.map(frame => [frame.label, frame.reason]),
+    [['Payment', 'cross-origin'], ['Login', 'unreadable']])
+  assert.deepEqual(seen.inaccessibleFrames[0].bounds, { x: 20, y: 320, width: 200, height: 100 })
+  const json = JSON.stringify(seen)
+  for (const canary of ['CROSS_ORIGIN_CANARY', 'CLOSED_SHADOW_CANARY', 'pay.other.test']) assert(!json.includes(canary), canary)
+  assert(x.observed.includes(x.same.doc.documentElement), 'the frame document joins the mutation watch')
+  assert(x.observed.includes(x.shadowRoot), 'the open shadow root joins the mutation watch')
+})
+
+test('a sandboxed or private frame is not read even when its URL looks same-origin', () => {
+  const principal = origin => ({ origin, equals(other) { return other?.origin === origin } })
+  const x = frameFixture()
+  x.top.nodePrincipal = principal('https://example.test')
+  x.same.doc.nodePrincipal = principal('moz-nullprincipal:{sandboxed-frame}')
+  let seen = x.actor.snapshot()
+  assert.equal(byLabel(seen, 'Frame send'), undefined)
+  assert.deepEqual(seen.inaccessibleFrames[0], { label: 'Compose', reason: 'cross-origin',
+    bounds: { x: 200, y: 100, width: 300, height: 200 } })
+  x.same.doc.nodePrincipal = principal('https://example.test')
+  seen = x.actor.snapshot()
+  assert.match(byLabel(seen, 'Frame send').ref, /^f\d+\/el_\d+$/, 'Gecko principal equality admits the frame')
+  x.iframe.getAttribute = name => name === 'title' ? 'Compose' : name === 'data-private' ? '' : null
+  seen = x.actor.snapshot()
+  assert.equal(byLabel(seen, 'Frame send'), undefined)
+  assert.equal(seen.inaccessibleFrames.find(frame => frame.label === 'Compose').reason, 'private')
+})
+
+test('guarded click and fill reach frame and shadow targets through their own hit tests, never focus', async () => {
+  const x = frameFixture()
+  let seen = x.actor.snapshot()
+  const frameButton = byLabel(seen, 'Frame send')
+  const clicked = await x.actor.act({ type: 'click', ref: frameButton.ref }, guarded(guardFrom(seen, frameButton)))
+  assert.equal(x.same.button.clickCount, 1)
+  assert.equal(clicked.result.clickDiagnostics.dispatchScope, 'dom-click-no-pointerdown')
+  assert.equal(clicked.result.clickDiagnostics.targetClickObserved, true)
+
+  seen = x.actor.snapshot()
+  const frameInput = byLabel(seen, 'Frame note')
+  const filled = await x.actor.act({ type: 'fill', ref: frameInput.ref, text: 'Frame reply' },
+    guarded(guardFrom(seen, frameInput)))
+  assert.equal(x.same.input.value, 'Frame reply')
+  assert.equal(filled.after.interactiveElements.find(item => item.ref === frameInput.ref).value, 'Frame reply')
+
+  seen = x.actor.snapshot()
+  const shadowButton = byLabel(seen, 'Shadow save')
+  await x.actor.act({ type: 'click', ref: shadowButton.ref }, guarded(guardFrom(seen, shadowButton)))
+  assert.equal(x.shadowButton.clickCount, 1)
+  assert.equal(x.same.button.focusCalls + x.same.input.focusCalls + x.shadowButton.focusCalls + x.f.focusCalls, 0)
+
+  seen = x.actor.snapshot()
+  const again = byLabel(seen, 'Frame send')
+  x.coverFrame(true)
+  const performCalls = x.actor.actorPerformCalls
+  await assert.rejects(x.actor.act({ type: 'click', ref: again.ref }, guarded(guardFrom(seen, again))), /obscured/)
+  assert.equal(x.same.button.clickCount, 1, 'an element covering the frame in the parent document blocks the click')
+  assert.equal(x.actor.actorPerformCalls, performCalls)
+})
+
+test('a replaced, cross-origin or forged frame makes its refs stale before any input', async () => {
+  const x = frameFixture()
+  const seen = x.actor.snapshot()
+  const frameButton = byLabel(seen, 'Frame send')
+  const replacement = fakeFrameDocument('https://example.test/embedded-2')
+  x.iframe.contentDocument = replacement.doc
+  await assert.rejects(x.actor.act({ type: 'click', ref: frameButton.ref }, guarded(guardFrom(seen, frameButton))), /stale/)
+  assert.equal(x.actor.actorPerformCalls, 0)
+  await assert.rejects(x.actor.receiveMessage({ name: 'snapshot', data: { options: { wait: {
+    for: 'selector-visible', ref: frameButton.ref, documentId: seen.documentId, timeoutMs: 0 } } } }), /stale/)
+  const fresh = x.actor.snapshot()
+  assert.notEqual(fresh.revision, seen.revision, 'the frame document generation moves the revision')
+  assert.throws(() => x.actor.assertGuard({ type: 'click', ref: frameButton.ref }, guardFrom(fresh, frameButton)),
+    /frame is stale/, 'a fresh page guard does not revive the old frame ref')
+  const newButton = byLabel(fresh, 'Frame send')
+  assert.notEqual(newButton.ref.split('/')[0], frameButton.ref.split('/')[0])
+
+  replacement.doc.location.href = 'https://elsewhere.test/'
+  await assert.rejects(x.actor.act({ type: 'click', ref: newButton.ref }, guarded(guardFrom(fresh, newButton))), /stale/)
+  const after = x.actor.snapshot()
+  assert.equal(byLabel(after, 'Frame send'), undefined)
+  assert.deepEqual(after.inaccessibleFrames.map(frame => [frame.label, frame.reason]).slice(0, 1), [['Compose', 'cross-origin']])
+  const forged = { ...byLabel(after, 'Increment'), ref: 'f99/el_1' }
+  assert.throws(() => x.actor.assertGuard({ type: 'click', ref: forged.ref }, guardFrom(after, forged)), /frame is stale/)
+  assert.equal(x.same.button.clickCount + replacement.button.clickCount, 0)
+  assert.equal(x.actor.actorPerformCalls, 0)
+})
+
+test('focus inside a same-origin frame or open shadow root is observed there and keeps the no-focus key policy', async () => {
+  const x = frameFixture()
+  x.win.KeyboardEvent = class { constructor(name, init) { this.name = name; Object.assign(this, init) } }
+  x.top.activeElement = x.iframe
+  x.same.doc.activeElement = x.same.input
+  const seen = x.actor.snapshot()
+  const frameInput = byLabel(seen, 'Frame note')
+  assert.equal(seen.focusedElement.ref, frameInput.ref)
+  const pressed = await x.actor.act({ type: 'press', ref: frameInput.ref, key: 'Escape' },
+    guarded({ ...guardFrom(seen, frameInput), pressPolicy: 'already-focused' }))
+  assert.equal(pressed.result.dispatchDiagnostics.focusPolicy, 'already-focused')
+  assert.equal(x.same.input.focusCalls, 0)
+  x.top.activeElement = x.f.input
+  await assert.rejects(x.actor.act({ type: 'press', ref: frameInput.ref, key: 'Escape' },
+    guarded({ ...guardFrom(seen, frameInput), pressPolicy: 'already-focused' })), /stale/)
+  x.top.activeElement = x.host
+  x.shadowRoot.activeElement = x.shadowButton
+  assert.equal(x.actor.snapshot().focusedElement.label, 'Shadow save')
+})
+
+function editorFixture() {
+  const f = localDocumentFixture()
+  const top = f.actor.document
+  const events = []
+  let pageHandler = null, selectionCalls = 0
+  const editor = { ownerDocument: top, isConnected: true, tagName: 'DIV', isContentEditable: true,
+    parentElement: top.body, childNodes: [], focusCalls: 0,
+    getAttribute: name => name === 'aria-label' ? 'Message body' : null,
+    getBoundingClientRect: () => ({ left: 20, top: 140, width: 300, height: 120 }),
+    dispatchEvent(event) {
+      events.push(event.name)
+      if (event.name === 'beforeinput' && pageHandler) { pageHandler(event, editor); return false }
+      return true
+    },
+    replaceChildren(...nodes) { this.childNodes = nodes }, focus() { this.focusCalls++ },
+    scrollIntoView() {}, contains(node) { return node === this } }
+  top.createElement = tagName => ({ nodeType: 1, tagName: tagName.toUpperCase(), childNodes: [] })
+  top.createTextNode = nodeValue => ({ nodeType: 3, nodeValue })
+  top.getSelection = () => { selectionCalls++; return {} }
+  top.querySelectorAll = () => [f.button, f.input, editor]
+  f.win.InputEvent = class { constructor(name, init) { this.name = name; Object.assign(this, init) } }
+  return { f, editor, events, setPageHandler(fn) { pageHandler = fn }, get selectionCalls() { return selectionCalls } }
+}
+
+test('guarded editor fill replaces contenteditable text with an honest beforeinput/input order and no focus or selection', async () => {
+  const e = editorFixture()
+  let seen = e.f.actor.snapshot()
+  let editor = byLabel(seen, 'Message body')
+  assert.equal(editor.role, 'textbox')
+  assert.equal(editor.value, '[editor text hidden: empty]')
+  const text = '안녕하세요 대표님\nSecond line'
+  const filled = await e.f.actor.act({ type: 'fill', ref: editor.ref, text }, guarded(guardFrom(seen, editor)))
+  assert.deepEqual(e.events, ['beforeinput', 'input'])
+  assert.deepEqual(filled.result.dispatchDiagnostics, { inputRoute: 'dom-editor-replace', trustedInput: false,
+    focusApi: 'not-called', selectionApi: 'not-called', eventOrder: ['beforeinput', 'input'], beforeInputCanceled: false,
+    egdeskWroteContent: true, readbackMatches: true })
+  assert.deepEqual(e.editor.childNodes.map(node => node.nodeType === 3 ? node.nodeValue : node.tagName),
+    ['안녕하세요 대표님', 'BR', 'Second line'])
+  assert.equal(filled.after.interactiveElements.find(item => item.ref === editor.ref).value,
+    boundedFieldValue(text, { editor: true }))
+  assert(!JSON.stringify(filled.after).includes('Second line'), 'editor text never enters the observation')
+  assert.equal(e.editor.focusCalls + e.f.focusCalls + e.selectionCalls, 0)
+
+  // A rich editor that cancels beforeinput and builds paragraphs itself.
+  e.events.length = 0
+  e.setPageHandler((event, host) => {
+    host.childNodes = event.data.split('\n').map(line => ({ nodeType: 1, tagName: 'P',
+      childNodes: [{ nodeType: 3, nodeValue: line }] }))
+  })
+  seen = e.f.actor.snapshot()
+  editor = byLabel(seen, 'Message body')
+  const handled = await e.f.actor.act({ type: 'fill', ref: editor.ref, text: 'One\nTwo' }, guarded(guardFrom(seen, editor)))
+  assert.deepEqual(e.events, ['beforeinput'], 'no input event is invented after the page canceled beforeinput')
+  assert.equal(handled.result.dispatchDiagnostics.beforeInputCanceled, true)
+  assert.equal(handled.result.dispatchDiagnostics.egdeskWroteContent, false)
+  assert.equal(handled.result.dispatchDiagnostics.readbackMatches, false)
+  const readback = handled.after.interactiveElements.find(item => item.ref === editor.ref).value
+  assert.notEqual(readback, boundedFieldValue('One\nTwo', { editor: true }), 'restructured text reads back as different')
+  assert.equal(readback, boundedFieldValue('OneTwo', { editor: true }))
+})
+
+test('editor fill fails closed for nested, read-only, private or event-less editors before any change', async () => {
+  for (const reason of ['nested', 'read-only', 'private', 'no-input-event']) {
+    const e = editorFixture()
+    if (reason === 'nested') e.editor.parentElement = { isContentEditable: true, parentElement: e.f.actor.document.body }
+    if (reason === 'read-only') e.editor.getAttribute = name => name === 'aria-label' ? 'Message body'
+      : name === 'aria-readonly' ? 'true' : null
+    if (reason === 'private') e.editor.getAttribute = name => name === 'aria-label' ? 'Message body'
+      : name === 'data-sensitive' ? 'true' : null
+    if (reason === 'no-input-event') delete e.f.win.InputEvent
+    const seen = e.f.actor.snapshot()
+    const editor = seen.interactiveElements.find(item => item.tag === 'div')
+    await assert.rejects(e.f.actor.act({ type: 'fill', ref: editor.ref, text: 'changed' }, guarded(guardFrom(seen, editor))),
+      /editable|Sensitive|input events are unavailable/, reason)
+    assert.deepEqual(e.editor.childNodes, [], reason)
+    assert.deepEqual(e.events, [], reason)
+    assert.equal(e.f.actor.actorPerformCalls, reason === 'no-input-event' ? 1 : 0, reason)
+  }
+})
+
+test('long field values are observed by prefix, length and fingerprint, fill up to 8000 characters and stay guarded', async () => {
+  const f = localDocumentFixture()
+  f.win.KeyboardEvent = class { constructor(name, init) { this.name = name; Object.assign(this, init) } }
+  let seen = f.actor.snapshot()
+  let input = seen.interactiveElements.find(item => item.tag === 'input')
+  const long = 'Long draft line. '.repeat(200).slice(0, 3000)
+  const filled = await f.actor.act({ type: 'fill', ref: input.ref, text: long }, guarded(guardFrom(seen, input)))
+  assert.equal(f.input.value, long)
+  const observedValue = filled.after.interactiveElements.find(item => item.ref === input.ref).value
+  assert.equal(observedValue, boundedFieldValue(long))
+  assert.match(observedValue, /^Long draft line\..*\.\.\. \[3000 chars, #[0-9a-f]{14}\]$/)
+  assert(observedValue.length < 130)
+  assert.deepEqual(filled.result.dispatchDiagnostics.eventOrder, ['input', 'change'])
+  assert.equal(filled.result.dispatchDiagnostics.readbackMatches, true)
+  assert.equal(f.focusCalls, 0)
+
+  seen = f.actor.snapshot()
+  input = seen.interactiveElements.find(item => item.tag === 'input')
+  const pressed = await f.actor.act({ type: 'press', ref: input.ref, key: 'Tab' },
+    guarded({ ...guardFrom(seen, input), pressPolicy: 'after-fill' }))
+  assert.equal(pressed.result.dispatchDiagnostics.focusPolicy, 'after-fill', 'a long current value no longer blocks key input')
+
+  seen = f.actor.snapshot()
+  input = seen.interactiveElements.find(item => item.tag === 'input')
+  const performCalls = f.actor.actorPerformCalls
+  f.input.value = `${long.slice(0, 2999)}X`
+  await assert.rejects(f.actor.act({ type: 'fill', ref: input.ref, text: 'short' }, guarded(guardFrom(seen, input))),
+    /target changed/, 'a human edit past the first 120 characters changes the fingerprint')
+  seen = f.actor.snapshot()
+  input = seen.interactiveElements.find(item => item.tag === 'input')
+  await assert.rejects(f.actor.act({ type: 'fill', ref: input.ref, text: 'x'.repeat(8001) }, guarded(guardFrom(seen, input))),
+    /exceeds the bounded input/)
+  f.input.value = 'y'.repeat(8001)
+  seen = f.actor.snapshot()
+  input = seen.interactiveElements.find(item => item.tag === 'input')
+  assert.match(input.value, /\[over 8000 chars\]$/)
+  await assert.rejects(f.actor.act({ type: 'fill', ref: input.ref, text: 'short' }, guarded(guardFrom(seen, input))),
+    /exceeds the bounded observation/)
+  assert.equal(f.actor.actorPerformCalls, performCalls)
+  assert.equal(f.focusCalls, 0)
+})
+
+test('actor and helper bounded values agree byte for byte', () => {
+  const actor = new EGDeskBrowserAgentRuntimeChild()
+  for (const raw of ['', 'short', '  spaced   text  ', 'x'.repeat(120), 'x'.repeat(121), '한글 문장 '.repeat(60),
+    'a\nb\tc '.repeat(50), 'y'.repeat(8000), 'y'.repeat(8001)]) {
+    assert.equal(actor.boundedValue(raw), boundedFieldValue(raw))
+    assert.equal(actor.boundedValue(raw, { editor: true }), boundedFieldValue(raw, { editor: true }))
+  }
+  assert.notEqual(boundedFieldValue('a'.repeat(200)), boundedFieldValue(`${'a'.repeat(199)}b`))
+  assert.equal(boundedFieldValue('local note'), 'local note', 'short values keep their existing observed form')
+})
+
+test('Parent receipt filter copies only the fixed fill event order, never the text', () => {
+  const { browserToolDispatchReceiptFields: fields } = parentModule
+  const diagnostics = { inputRoute: 'dom-editor-replace', trustedInput: false, focusApi: 'not-called',
+    selectionApi: 'not-called', eventOrder: ['beforeinput', 'input'], beforeInputCanceled: false,
+    egdeskWroteContent: true, readbackMatches: true, text: 'TYPED_SECRET' }
+  const copied = fields('fill', diagnostics)
+  assert.deepEqual(copied, { inputRoute: 'dom-editor-replace', trustedInput: false, eventOrder: ['beforeinput', 'input'],
+    beforeInputCanceled: false, egdeskWroteContent: true, readbackMatches: true })
+  assert(!JSON.stringify(copied).includes('TYPED_SECRET'))
+  assert.deepEqual(fields('fill', { inputRoute: 'dom-value-setter', trustedInput: false, eventOrder: ['input', 'change'],
+    beforeInputCanceled: 'no', egdeskWroteContent: 1 }), { inputRoute: 'dom-value-setter', trustedInput: false,
+    eventOrder: ['input', 'change'], beforeInputCanceled: null, egdeskWroteContent: false, readbackMatches: false })
+  for (const bad of [{ ...diagnostics, trustedInput: true }, { ...diagnostics, inputRoute: 'clipboard-paste' },
+    { ...diagnostics, eventOrder: ['keydown'] }, { ...diagnostics, eventOrder: 'beforeinput' },
+    { ...diagnostics, eventOrder: ['input', 'input', 'input', 'input'] }]) assert.deepEqual(fields('fill', bad), {})
+})
+
+test('a page past the scan budget still lists its interactive elements but reads no further frames', () => {
+  const x = frameFixture()
+  const filler = Array.from({ length: 20000 }, () => ({ tagName: 'SPAN' }))
+  x.top.querySelectorAll = selector => selector === '*' ? [...filler, x.f.button, x.iframe] : [x.f.button]
+  const seen = x.actor.snapshot()
+  assert.deepEqual(seen.interactiveElements.map(item => item.label), ['Increment'])
+  assert.equal(byLabel(seen, 'Frame send'), undefined)
+  assert.deepEqual(seen.inaccessibleFrames, [])
 })

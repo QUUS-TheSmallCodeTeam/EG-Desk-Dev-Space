@@ -1,6 +1,6 @@
 import assert from 'node:assert/strict'
 import { test } from 'node:test'
-import { BROWSER_TOOL_SPECS, createBrowserToolService } from './egdesk-browser-tool-runtime.mjs'
+import { BROWSER_TOOL_SPECS, boundedFieldValue, createBrowserToolService } from './egdesk-browser-tool-runtime.mjs'
 
 test('click tool advertises the focus-safe DOM route and still requires a postcondition', () => {
   const click = BROWSER_TOOL_SPECS.find(item => item.name === 'egdesk_browser_click')
@@ -972,4 +972,113 @@ test('UI timeouts leave press, scroll and wait outcomes unknown without automati
     expectedRevision: 3, ref: 'el_1', expectedTarget: targetOf(old, 'el_1'),
     postcondition: { kind: 'visible-text', value: 'Count: 1' } }), { code: 'BROWSER_OBSERVATION_STALE' })
   assert.equal(w.acts().length, 0)
+})
+
+// BRW-08: frame refs, editors and long values through the B service.
+const editorItem = (value = boundedFieldValue('', { editor: true })) => ({ ref: 'f2/el_7', role: 'textbox',
+  label: 'Message body', href: '', value, tag: 'div', disabled: false, bounds: { x: 210, y: 140, width: 300, height: 120 } })
+const draftItem = (value = '') => ({ ref: 'el_2', role: 'textbox', label: 'Draft', href: '', value, tag: 'textarea',
+  disabled: false, bounds: { x: 12, y: 80, width: 300, height: 90 } })
+function fillFixture(readback) {
+  const f = guardedFixture()
+  f.current = guardedSnapshot({ interactiveElements: [editorItem(), draftItem()] })
+  f.setAct(request => {
+    const value = readback(request.action.text)
+    f.current = { ...f.current, interactiveElements: f.current.interactiveElements.map(item =>
+      item.ref === request.action.ref ? { ...item, value: item.tag === 'div'
+        ? boundedFieldValue(value, { editor: true }) : boundedFieldValue(value) } : item) }
+    return f.acted(request, f.current, actorReceipt())
+  })
+  return f
+}
+const fillArgs = (seen, ref, text, value = text) => ({ cardId: 'browser-1', observationId: seen.observationId,
+  expectedRevision: 3, ref, expectedTarget: targetOf(seen, ref), text, postcondition: { kind: 'target-value', value } })
+
+test('fill advertises editors, frame refs and the 8000-character bound without changing its schema', () => {
+  const fill = BROWSER_TOOL_SPECS.find(item => item.name === 'egdesk_browser_fill')
+  const observe = BROWSER_TOOL_SPECS.find(item => item.name === 'egdesk_browser_observe')
+  assert.match(fill.description, /contenteditable editor/)
+  assert.match(fill.description, /up to 8000 characters/)
+  assert.match(fill.description, /without moving focus/)
+  assert.match(observe.description, /same-origin frames/)
+  assert.match(observe.description, /inaccessibleFrames/)
+  assert.deepEqual(fill.inputSchema.required, ['cardId', 'observationId', 'expectedRevision', 'ref', 'expectedTarget', 'text', 'postcondition'])
+  assert.deepEqual(Object.keys(fill.inputSchema.properties), ['cardId', 'observationId', 'expectedRevision', 'ref', 'expectedTarget', 'text', 'postcondition'])
+})
+
+test('long and editor fills are confirmed only by the bounded readback of the full value', async () => {
+  const long = 'Quarterly note. '.repeat(300).slice(0, 4000)
+  const f = fillFixture(text => text)
+  await f.bind()
+  let seen = await f.observe()
+  const filled = await f.dispatch('egdesk_browser_fill', fillArgs(seen, 'el_2', long))
+  assert.equal(filled.status, 'postcondition-observed')
+  assert.deepEqual(filled.postcondition, { kind: 'target-value', value: long, matched: true, wasAlreadyTrue: false })
+  assert.equal(f.acts()[0].action.text, long)
+  assert.equal(filled.externalEffectVerified, false)
+
+  seen = await f.observe()
+  const text = '안녕하세요\nSecond line'
+  const edited = await f.dispatch('egdesk_browser_fill', fillArgs(seen, 'f2/el_7', text))
+  assert.equal(edited.status, 'postcondition-observed')
+  assert.equal(f.acts()[1].action.ref, 'f2/el_7', 'a frame ref reaches the actor unchanged')
+  assert.equal(f.acts()[1].guard.target.ref, 'f2/el_7')
+
+  seen = await f.observe()
+  const repeated = await f.dispatch('egdesk_browser_fill', fillArgs(seen, 'el_2', long))
+  assert.equal(repeated.status, 'postcondition-unverified', 'a value that was already there proves nothing')
+  assert.equal(repeated.postcondition.wasAlreadyTrue, true)
+})
+
+test('an editor that restructures or drops the text leaves the fill unverified and blocks a blind retry', async () => {
+  const f = fillFixture(text => text.replace(/\n/g, ''))
+  await f.bind()
+  const seen = await f.observe()
+  const text = 'Hello team\nSee attached'
+  const result = await f.dispatch('egdesk_browser_fill', fillArgs(seen, 'f2/el_7', text))
+  assert.equal(result.status, 'postcondition-unverified')
+  assert.equal(result.postcondition.matched, false)
+  const again = await f.observe()
+  await assert.rejects(f.dispatch('egdesk_browser_fill', fillArgs(again, 'f2/el_7', text)), { code: 'BROWSER_OUTCOME_UNKNOWN' })
+  assert.equal(f.acts().length, 1)
+})
+
+test('fill text and its postcondition stay bounded before any UI request', async () => {
+  const f = fillFixture(text => text)
+  await f.bind()
+  const seen = await f.observe()
+  for (const [text, value] of [['x'.repeat(8001), 'x'], ['x', 'x'.repeat(8001)],
+    ['\u0001'.repeat(8000), '\u0001'.repeat(8000)]]) {
+    await assert.rejects(f.dispatch('egdesk_browser_fill', fillArgs(seen, 'el_2', text, value)), { code: 'INVALID_BROWSER_TOOL' })
+  }
+  await assert.rejects(f.dispatch('egdesk_browser_click', { cardId: 'browser-1', observationId: seen.observationId,
+    expectedRevision: 3, ref: 'el_2', expectedTarget: targetOf(seen, 'el_2'),
+    postcondition: { kind: 'target-value', value: 'x'.repeat(513) } }), { code: 'INVALID_BROWSER_TOOL' },
+    'other tools keep their 512-character postcondition bound')
+  assert.equal(f.acts().length, 0)
+  const longest = '가'.repeat(8000)
+  assert.equal((await f.dispatch('egdesk_browser_fill', fillArgs(seen, 'el_2', longest))).status, 'postcondition-observed')
+})
+
+test('a frame-ref fill after Stop reaches the UI zero times, and a timed-out long fill stays unknown', async t => {
+  const stopped = fillFixture(text => text)
+  await stopped.bind()
+  const seen = await stopped.observe()
+  await stopped.service.cancelRun(run)
+  await assert.rejects(stopped.dispatch('egdesk_browser_fill', fillArgs(seen, 'f2/el_7', 'after stop')), { code: 'BROWSER_RUN_ENDED' })
+  assert.equal(stopped.acts().length, 0)
+
+  t.mock.timers.enable({ apis: ['setTimeout'] })
+  const f = fillFixture(text => text)
+  await f.bind()
+  f.setAct(() => new Promise(() => {}))
+  const before = await f.observe()
+  const long = 'Draft paragraph. '.repeat(400).slice(0, 6000)
+  const pending = f.dispatch('egdesk_browser_fill', fillArgs(before, 'el_2', long), 'timed-out-fill')
+  t.mock.timers.tick(15000)
+  await assert.rejects(pending, { code: 'BROWSER_UI_TIMEOUT', message: /outcome is unknown/ })
+  await assert.rejects(f.dispatch('egdesk_browser_fill', fillArgs(before, 'el_2', long), 'timed-out-fill'), { code: 'BROWSER_UI_TIMEOUT' })
+  const again = await f.observe()
+  await assert.rejects(f.dispatch('egdesk_browser_fill', fillArgs(again, 'el_2', long)), { code: 'BROWSER_OUTCOME_UNKNOWN' })
+  assert.equal(f.acts().length, 1, 'no automatic retry of an unknown fill')
 })

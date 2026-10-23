@@ -11,7 +11,8 @@ const FIXTURE_BROWSER_QA = 'fixtureBrowserQa'
 const BOUNDED_INTERACTION_TOOLS = new Set(['egdesk_browser_click', 'egdesk_browser_fill',
   'egdesk_browser_navigate', 'egdesk_browser_scroll', 'egdesk_browser_press', 'egdesk_browser_wait'])
 const SUCCESS_STATUSES = new Set(['observed', 'postcondition-observed', 'wait-condition-met'])
-const PUBLIC_INPUT_ROUTES = new Set(['dom-click-no-pointerdown', 'dom-scroll-api', 'dom-keyboard-event'])
+const PUBLIC_INPUT_ROUTES = new Set(['dom-click-no-pointerdown', 'dom-scroll-api', 'dom-keyboard-event',
+  'dom-value-setter', 'dom-editor-replace'])
 
 export function createCodexBrowserToolProvider({ transport, getOwnerKey, schemaReady = () => true, fixtureQa = null, service = createBrowserToolService({ sendToUi: request => transport.sendToUi(request), getOwnerKey }) }) {
   if (!transport || typeof transport.hasClient !== 'function' || typeof getOwnerKey !== 'function') throw new TypeError('Browser provider requires a bounded UI transport and account identity')

@@ -43,12 +43,24 @@ export function registerBrowserActionAuthorizer(browser, ownerWindow, authorize)
 }
 
 // Pure receipt filter for the chrome toolAct path: copies only the fixed,
-// non-content route fields a guarded scroll/press actor reports. Anything
+// non-content route fields a guarded scroll/press/fill actor reports. Anything
 // unexpected yields no route, so the helper reports the action unverified.
+// Fill fields describe the event order only; the value is proven by readback.
 const RECEIPT_KEYS = new Set(["Enter", "Escape", "Tab", "ArrowUp", "ArrowDown", "ArrowLeft",
   "ArrowRight", "Backspace", "Space"]);
+const FILL_ROUTES = new Set(["dom-value-setter", "dom-editor-replace"]);
+const FILL_EVENTS = new Set(["beforeinput", "input", "change"]);
 export function browserToolDispatchReceiptFields(actionType, diagnostics) {
   if (!diagnostics || typeof diagnostics !== "object" || Array.isArray(diagnostics)) return {};
+  if (actionType === "fill") {
+    const order = diagnostics.eventOrder;
+    if (!FILL_ROUTES.has(diagnostics.inputRoute) || diagnostics.trustedInput !== false ||
+        !Array.isArray(order) || order.length > 3 || !order.every(name => FILL_EVENTS.has(name))) return {};
+    return { inputRoute: diagnostics.inputRoute, trustedInput: false, eventOrder: [...order],
+      beforeInputCanceled: typeof diagnostics.beforeInputCanceled === "boolean" ? diagnostics.beforeInputCanceled : null,
+      egdeskWroteContent: diagnostics.egdeskWroteContent === true,
+      readbackMatches: diagnostics.readbackMatches === true };
+  }
   if (actionType === "scroll") {
     if (diagnostics.inputRoute !== "dom-scroll-api" || !["document", "into-view"].includes(diagnostics.mode)) return {};
     return { inputRoute: "dom-scroll-api", scrollMode: diagnostics.mode,

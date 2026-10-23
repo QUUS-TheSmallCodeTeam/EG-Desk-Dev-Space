@@ -1,6 +1,6 @@
 # Browser Agent Observation Runtime
 
-**Date**: 2026-05-20, updated 2026-10-24 (guarded tool path, BRW-05/BRW-06)
+**Date**: 2026-05-20, updated 2026-10-24 (guarded tool path, BRW-05/BRW-06; frames, shadow DOM, editors and long values, BRW-08)
 **Status**: Two runtime paths. The guarded model tool path is implemented in the helper and actor and unit-tested; its scroll/press chrome wiring and native catalog exposure are pending (see Wiring Status).
 **Scope**: Firefox Browser Cards, model (Codex) Browser tools, legacy internal agent actions and DOM-change summaries
 
@@ -36,7 +36,7 @@ Codex dynamic tool call
 |---|---|---|---|---|
 | `egdesk_browser_observe` | `observe` | none (read-only) | none | `observed` |
 | `egdesk_browser_click` | `act` | document, revision, viewport, focused ref, URL, exact live target, not obscured | `dom-click-no-pointerdown` (DOM `click()`, no mousedown, no focus) | `postcondition-observed` / `postcondition-unverified` |
-| `egdesk_browser_fill` | `act` | as click, plus editable non-sensitive field | DOM value + `input`/`change`, no focus | same |
+| `egdesk_browser_fill` | `act` | as click (without the hit test), plus a non-sensitive field or contenteditable editing host, text up to 8000 characters, current value up to 8000 characters | `dom-value-setter` (value setter, then `input`/`change`) or `dom-editor-replace` (cancelable `beforeinput`; EG-Desk replaces the editor text and sends `input` only if the page did not cancel it). No focus, no Selection API call | same; the `target-value` postcondition is the full expected value (see BRW-08 below) |
 | `egdesk_browser_navigate` | `act` | document guard, and the target URL on the **current document's site** (Gecko Public Suffix List; IP, single-label or unknown suffix = exact origin), http(s) only, no https-to-http downgrade | `location.href` | same, plus `navigationScope: "same-site"`, `pageLoadVerified: false` |
 | `egdesk_browser_scroll` | `act` | document guard plus the observed scroll offset (a human scroll in between is stale). `direction` (up/down/top/bottom, `amount` page/half) scrolls the document; `ref` + `expectedTarget` brings that element into view | `dom-scroll-api` (`scrollBy`/`scrollTo`/`scrollIntoView`, no focus, no pointer) | `postcondition-observed` (scrollY moved in that direction / target in view), `scroll-at-limit`, `postcondition-unverified` |
 | `egdesk_browser_press` | `act` | as fill's target checks (non-sensitive, bounded value), and the target is **already focused** or is **the field the last guarded action filled** | `dom-keyboard-event` (synthetic, `trustedInput: false`, no focus). Only Enter on a form text field emulates HTML implicit submission (`default-button-click` or `form-request-submit`); no other default key action happens | with postcondition: as click; without: `key-dispatched` |
@@ -56,9 +56,30 @@ Navigation scope is anchored to the current document, not the originally selecte
 - **Display is not effect (EG-03).** The target marker is display-only (click/fill only) and never feeds input. A result is confirmed only by the actor-reported route plus a current-document readback; `externalEffectVerified` is always `false`.
 - **Stop layers (EG-04).** After Stop or cancel the helper binding is closed before any deferred UI send (zero new dispatches), the surface tombstones the run, and the parent denies any pending lease. An input already dispatched is not rolled back; its result is reported as unknown.
 
+### Frames, Shadow DOM, Editors and Long Values (BRW-08)
+
+The actor is still registered for the top frame only (`allFrames: false` in `eg-desk-surface.uc.js`). It reads further documents from that one actor, in the same process, and never through a cross-origin boundary.
+
+| Case | Observation | Action guard (both passes) |
+|---|---|---|
+| Open shadow root | Elements and text are included in document order at their host. Ref has no frame path (`el_12`). The shadow root joins the mutation watch | Hit test in the shadow root (`ShadowRoot.elementFromPoint`), then the host in its own tree |
+| Closed shadow root | Not read | — |
+| Same-origin frame (document principal equal to the top document's; sandboxed frames have their own) | Elements and text are included at the frame's position, bounds in top-viewport coordinates (frame border and padding added; frame CSS transforms not modeled). Ref carries the frame path, one key per frame element and document generation (`f2/el_9`, nested `f2/f5/el_9`). The frame document joins the mutation watch. Depth limit 4 | Every frame on the path must still hold the same document, be connected in its parent document and be same-origin; otherwise `Browser frame is stale` and the revision moves. Hit test in the frame document, then the frame element in its parent document at the translated point |
+| Cross-origin, unreadable (no document, e.g. another process) or `data-sensitive`/`data-private` frame | Only `inaccessibleFrames: [{ label, reason, bounds }]` with `reason` `cross-origin`, `unreadable`, `private` or `depth-limit`; label from `title`/`aria-label`/`name`, never `src` | Never has refs; a forged frame path is `Browser frame is stale` |
+| contenteditable editing host | Role `textbox`. Label from attributes only, `Editable text` if none. Value `[editor text hidden: N chars, #fingerprint]` or `[editor text hidden: empty]`; editor text never enters `text`. `data-sensitive`/`data-private`/secret hints keep it a sensitive field | Fill only on the editing host (not a nested editable), not `aria-readonly`, and only where `InputEvent` exists |
+| Field value over 120 characters | `first 96 characters... [N chars, #fingerprint]`; over 8000 characters `[over 8000 chars]` | The fingerprint is part of the exact target, so a human edit past the first 120 characters is `Browser target changed`. Values over 8000 characters are refused |
+
+Behavior change: contenteditable is no longer a sensitive field by itself, so guarded click, press (focused or just filled) and fill can reach an editor; for example Enter on a chat editor may send through the page's own key handler, which is why Enter still needs a postcondition. Editor text itself stays out of every observation.
+
+Editor fill receipt (`result.dispatchDiagnostics`): `inputRoute`, `trustedInput: false`, `focusApi: "not-called"`, `selectionApi: "not-called"` (EG-Desk called neither; a page handler may still move focus itself), `eventOrder` (`["beforeinput", "input"]`, or `["beforeinput"]` when the page canceled it), `beforeInputCanceled`, `egdeskWroteContent`, `readbackMatches`. A field fill reports `["input", "change"]`; the value setter moves that field's own caret to the end, as any script assignment does. EG-Desk writes editor lines as text nodes separated by `<br>`, and reads editor text back the same way; an editor that rebuilds the text into paragraphs reads back as different, so the result stays `postcondition-unverified` rather than claiming success.
+
+The fingerprint is a non-cryptographic 53-bit hash (cyrb53) used only to notice change. `helper/egdesk-browser-tool-runtime.mjs` `boundedFieldValue` reproduces the actor's observed form byte for byte, so a `target-value` postcondition holding the full expected text (up to 8000 characters) is compared in that form. Text plus postcondition must fit 40000 JSON characters, inside the 48000-character UI request bound; other tools keep the 512-character postcondition bound.
+
+Scan bounds: 20000 elements per observation for discovering shadow roots and frames (interactive elements past that still count, in document order), shadow depth 16, 20 inaccessible frames listed.
+
 ### Snapshot Fields
 
-The actor snapshot now includes `scroll: { x, y, maxY }` (CSS pixels, integers). A wait response carries `wait: { for, outcome: "met" | "timeout", elapsedMs }`; the helper validates and removes it before storing the observation.
+The actor snapshot now includes `scroll: { x, y, maxY }` (CSS pixels, integers) and `inaccessibleFrames` (see BRW-08). A wait response carries `wait: { for, outcome: "met" | "timeout", elapsedMs }`; the helper validates and removes it before storing the observation.
 
 ### Error Codes Added
 
@@ -77,15 +98,18 @@ Until `helper/codex-tool-errors.mjs` lists them, the public classification of th
 | B service (`egdesk-browser-tool-runtime.mjs`): specs, validation, scope, focus policy, wait, postconditions | Implemented, unit-tested |
 | Provider (`codex-browser-tool-provider.mjs`): browserBounded interact grant for navigate/scroll/press/wait; fixture QA scope unchanged | Implemented, unit-tested |
 | Actor child: guarded scroll/press, same-site navigation guard, read-only wait, `scroll` snapshot field | Implemented, unit-tested with a fake DOM |
-| Actor parent: `browserToolDispatchReceiptFields` receipt filter | Implemented, unit-tested |
+| Actor parent: `browserToolDispatchReceiptFields` receipt filter | Implemented, unit-tested (scroll, press, and fill event order) |
+| Actor child: same-origin frame and open shadow root refs, frame generation guard, editor fill, long values (BRW-08) | Implemented, unit-tested with a fake DOM |
+| Helper: 8000-character fill, bounded `target-value` comparison, frame refs unchanged (BRW-08) | Implemented, unit-tested |
+| Surface `browserToolAct` receipt route for fill (`['scroll', 'press']` -> add `'fill'`) | Pending Main; until then the fill event order stays in the actor result and the helper decides from the readback alone |
 | Wait through the existing surface observe path | Works without surface changes (unit-tested on the extracted surface dispatch) |
 | Surface `browserToolDispatchOnce` action allow-list for `scroll`/`press` | Pending Main; until then the UI rejects them |
 | Surface `browserToolAct` receipt route for scroll/press | Pending Main; until then scroll/press results are `postcondition-unverified` |
 | `codex-chat-runtime.mjs` catalog and per-call allow-list | Pending Main; until then the model is not offered navigate/scroll/press/wait |
 | Public error codes in `codex-tool-errors.mjs` | Pending Main |
-| Real Firefox run (trusted page behavior, Gecko PSL, implicit submission on real forms) | Not verified |
+| Real Firefox run (trusted page behavior, Gecko PSL, implicit submission on real forms; BRW-08: same-process `contentDocument` under Fission, principal equality, `ShadowRoot.elementFromPoint`, real rich editors such as Gmail or Notion) | Not verified |
 
-Unit tests: `helper/egdesk-browser-tool-runtime.test.mjs`, `helper/codex-browser-tool-provider.test.mjs`, `scripts/egdesk-browser-agent-guard.test.mjs`, `scripts/egdesk-browser-tool-transport.test.mjs` (two tests there skip with a visible reason until the surface wiring lands).
+Unit tests: `helper/egdesk-browser-tool-runtime.test.mjs`, `helper/codex-browser-tool-provider.test.mjs`, `scripts/egdesk-browser-agent-guard.test.mjs`, `scripts/egdesk-browser-tool-transport.test.mjs` (tests there skip with a visible reason until the matching surface wiring lands; today only the fill receipt test skips).
 
 ---
 

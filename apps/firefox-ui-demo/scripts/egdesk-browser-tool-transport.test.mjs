@@ -1062,3 +1062,52 @@ test('production Browser Card receipt carries only the bounded scroll/press rout
   assert.equal(press.dispatchReceipt.defaultActionEmulated, 'form-request-submit')
   assert.equal(JSON.stringify(press).includes('typed text'), false)
 })
+
+// BRW-08: frame refs and long fill text cross the surface unchanged; the fill
+// receipt route needs Main to add 'fill' to browserToolAct's receipt list.
+test('UI dispatch passes a same-origin frame ref and long fill text to the actor once, and none after Stop', async () => {
+  const f = fixture()
+  const actions = []
+  const toolAct = f.card._browserControls.toolAct
+  f.card._browserControls.toolAct = async (binding, action, guard, lease) => {
+    actions.push({ action, guard })
+    return toolAct(binding, action, guard, lease)
+  }
+  const bound = await f.dispatch(f.req('bind', { selection: f.selection('interact') }))
+  const text = '대표님께 드리는 보고. '.repeat(700).slice(0, 8000)
+  const target = { ref: 'f3/el_12', role: 'textbox', label: 'Message body', href: '', value: '[editor text hidden: empty]', tag: 'div' }
+  const filled = await f.dispatch(f.req('act', { binding: bound.binding, guard: { documentId: 'doc-1', revision: 2, target },
+    action: { type: 'fill', ref: 'f3/el_12', text } }))
+  assert.equal(filled.status, 'acted')
+  assert.equal(actions.length, 1)
+  assert.equal(actions[0].action.ref, 'f3/el_12', 'the lease and actor see the frame path unchanged')
+  assert.equal(actions[0].action.text.length, 8000)
+  assert.equal(actions[0].guard.target.ref, 'f3/el_12')
+  f.stoppedRuns.add(JSON.stringify(['run-a', 'thread-a']))
+  const stopped = await f.dispatch(f.req('act', { binding: bound.binding, guard: { documentId: 'doc-1', revision: 3, target },
+    action: { type: 'fill', ref: 'f3/el_12', text: 'after stop' } }))
+  assert.equal(stopped.status, 'rejected')
+  assert.equal(f.actionCalls, 1, 'no actor dispatch after Stop')
+  assert.equal(f.domEffects, 1)
+})
+
+const surfaceFillReceiptWired = /\[([^\]]*)\]\.includes\(action\.type\)\s*\?\s*BrowserAgentReceipts\.browserToolDispatchReceiptFields/
+  .exec(toolActSource)?.[1]?.includes("'fill'") === true
+test('production Browser Card receipt carries only the bounded fill event order',
+  { skip: !surfaceFillReceiptWired && 'pending Main wiring: fill in browserToolAct receipt route list' }, async () => {
+  const windowGlobal = { id: 'window-global-a' }
+  const xulBrowser = { browsingContext: { currentWindowGlobal: windowGlobal } }
+  const actorResult = { ok: true, result: { ok: true, ref: 'f1/el_2', dispatchDiagnostics: { inputRoute: 'dom-editor-replace',
+    trustedInput: false, focusApi: 'not-called', selectionApi: 'not-called', eventOrder: ['beforeinput', 'input'],
+    beforeInputCanceled: false, egdeskWroteContent: true, readbackMatches: true, text: 'TYPED_SECRET' } },
+  after: { documentId: 'doc-a' }, observation: {} }
+  const toolAct = new Function('assertBrowserToolBinding', 'xulBrowser', 'showAgentActivity',
+    'browserAgentActorRequest', 'card', 'BrowserAgentReceipts', `${toolActSource}\nreturn browserToolAct`)(
+    () => {}, xulBrowser, () => {}, async () => actorResult, { id: 'browser-a' }, BrowserAgentReceipts)
+  const fill = await toolAct({}, { type: 'fill', ref: 'f1/el_2', text: 'TYPED_SECRET' }, {},
+    { leaseId: 'lease-a', requestId: 'request-a', deadlineMs: Date.now() + 5000 })
+  assert.deepEqual(fill.dispatchReceipt, { actor: 'JSWindowActor', eventDispatched: true, documentStillCurrent: true,
+    inputRoute: 'dom-editor-replace', trustedInput: false, eventOrder: ['beforeinput', 'input'],
+    beforeInputCanceled: false, egdeskWroteContent: true, readbackMatches: true })
+  assert.equal(JSON.stringify(fill.dispatchReceipt).includes('TYPED_SECRET'), false)
+})
