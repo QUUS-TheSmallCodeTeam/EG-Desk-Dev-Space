@@ -2759,41 +2759,60 @@ async function ownedReloadControl(harness, cardId, ownerTag) {
     if (!card?.isConnected || card.dataset.egdeskQaNegativeOwner !== ownerTag)
       throw new Error('reload control escaped the owned Card');
     const state = card._browserControls.getState();
-    const button = card.querySelector('.egd-card-reload');
     const context = card._browserControls.toolBrowser().browsingContext;
-    const raw = button?.getBoundingClientRect();
-    const rect = raw ? { left: raw.left, top: raw.top, right: raw.right, bottom: raw.bottom,
-      width: raw.width, height: raw.height } : null;
-    let rendered = !!button?.isConnected, opacity = 1;
-    for (let node = button; node; node = node.parentElement) {
-      const style = getComputedStyle(node);
-      opacity *= Number(style.opacity);
-      if (node.hidden || node.inert || style.display === 'none' || style.visibility !== 'visible') rendered = false;
-    }
-    const viewport = { width: window.innerWidth, height: window.innerHeight };
-    const hitPoints = [];
-    if (rect) for (const fy of [0.2, 0.5, 0.8]) for (const fx of [0.2, 0.5, 0.8]) {
-      const x = rect.left + rect.width * fx, y = rect.top + rect.height * fy;
-      const hit = document.elementFromPoint(x, y);
-      hitPoints.push({ x, y, hitsTarget: !!hit && (hit === button || button.contains(hit)),
-        hitId: hit?.id || null, hitTag: hit?.localName || null });
-    }
+    const presentation = card._browserPresentation?.diagnostics();
+    const camera = window.__egdesk.state;
+    const measure = button => {
+      const raw = button?.getBoundingClientRect();
+      const rect = raw ? { left: raw.left, top: raw.top, right: raw.right, bottom: raw.bottom,
+        width: raw.width, height: raw.height } : null;
+      let rendered = !!button?.isConnected, opacity = 1;
+      for (let node = button; node; node = node.parentElement) {
+        const style = getComputedStyle(node);
+        opacity *= Number(style.opacity);
+        if (node.hidden || node.inert || style.display === 'none' || style.visibility !== 'visible') rendered = false;
+      }
+      const viewport = { width: window.innerWidth, height: window.innerHeight };
+      const hitPoints = [];
+      if (rect) for (const fy of [0.2, 0.5, 0.8]) for (const fx of [0.2, 0.5, 0.8]) {
+        const x = rect.left + rect.width * fx, y = rect.top + rect.height * fy;
+        const hit = document.elementFromPoint(x, y);
+        hitPoints.push({ x, y, hitsTarget: !!hit && (hit === button || button.contains(hit)),
+          hitId: hit?.id || null, hitTag: hit?.localName || null });
+      }
+      return { label: button?.getAttribute('aria-label'),
+        title: button?.title, busy: button?.getAttribute('aria-busy'), icon: button?.dataset.icon,
+        enabled: !!button && !button.disabled && !button.matches(':disabled'), rendered,
+        effectiveOpacity: opacity, rect, viewport, hitPoints };
+    };
     return { cardId, ownerTag, binding: card._browserControls.toolBinding(),
       browsingContextId: String(context.id), innerWindowId: String(context.currentWindowGlobal?.innerWindowId),
-      sampledAtMs: Date.now(), loading: state.loading, label: button?.getAttribute('aria-label'),
-      title: button?.title, busy: button?.getAttribute('aria-busy'), icon: button?.dataset.icon,
-      enabled: !!button && !button.disabled && !button.matches(':disabled'), rendered,
-      effectiveOpacity: opacity, rect, viewport, hitPoints };
+      geometryStyle: { left: card.style.left, top: card.style.top, width: card.style.width, height: card.style.height },
+      sampledAtMs: Date.now(), loading: state.loading, semanticLevel: card.dataset.egdSemanticLevel,
+      presentation, font: card._browserPresentation?.font(),
+      camera: { pan: { ...camera.pan }, zoom: camera.zoom,
+        panTarget: { ...camera.panTarget }, zoomTarget: camera.zoomTarget },
+      ...measure(card.querySelector('.egd-card-reload')),
+      proxy: measure(card.querySelector('.egd-semantic-proxy')) };
   }, { cardId, ownerTag });
 }
 
-function assertReloadReady(control, expected) {
+function assertReloadPresentation(control, expected) {
   assert.ok(control?.cardId === expected.binding.cardId && control.ownerTag === expected.native.ownerTag
     && control.browsingContextId === expected.native.browsingContextId
     && control.innerWindowId === expected.native.innerWindowId, 'reload control changed native ownership/document');
   assert.deepEqual(control.binding, expected.binding, 'reload control changed Card/profile/owner binding');
-  assert.ok(control.loading === false && control.label === '새로고침' && control.title === '새로고침'
-    && control.busy === 'false' && control.icon === 'reload', 'reload control is loading/stop or lacks ready-state proof');
+  assert.deepEqual(control.geometryStyle, expected.native.geometryStyle, 'reload preparation changed saved Card geometry');
+  assert.ok(control.presentation?.cached === true && control.presentation.pending === false
+    && Number.isFinite(control.font) && control.font > 0, 'Browser presentation is unmeasured or pending');
+  const camera = control.camera;
+  assert.ok(camera && Number.isFinite(camera.zoom) && camera.zoom > 0 && camera.zoom === camera.zoomTarget
+    && Number.isFinite(camera.pan?.x) && Number.isFinite(camera.pan?.y)
+    && camera.pan.x === camera.panTarget?.x && camera.pan.y === camera.panTarget?.y,
+  'reload camera is not settled');
+}
+
+function assertReloadControlHit(control) {
   assert.ok(control.enabled === true && control.rendered === true
     && Number.isFinite(control.effectiveOpacity) && control.effectiveOpacity >= 0.99,
   'reload control is disabled, hidden or fading');
@@ -2805,6 +2824,27 @@ function assertReloadReady(control, expected) {
   assert.ok(control.hitPoints?.length === 9 && control.hitPoints.every(point => point.hitsTarget === true
     && point.x > rect.left && point.x < rect.right && point.y > rect.top && point.y < rect.bottom),
   'reload control lacks all nine actual target hit points');
+}
+
+function assertReloadReady(control, expected) {
+  assertReloadPresentation(control, expected);
+  assert.equal(control.semanticLevel, 'detail', 'reload requires the actual detail projection');
+  assert.ok(control.loading === false && control.label === '새로고침' && control.title === '새로고침'
+    && control.busy === 'false' && control.icon === 'reload', 'reload control is loading/stop or lacks ready-state proof');
+  assertReloadControlHit(control);
+}
+
+const reloadReadinessKey = control => JSON.stringify({ semanticLevel: control.semanticLevel,
+  presentation: control.presentation, font: control.font, camera: control.camera,
+  rect: control.rect, viewport: control.viewport, loading: control.loading,
+  label: control.label, busy: control.busy, hitPoints: control.hitPoints, proxy: control.proxy });
+
+function assertReloadSettlement(settled, expected) {
+  assertReloadReady(settled?.start, expected);
+  assertReloadReady(settled?.end, expected);
+  assert.equal(reloadReadinessKey(settled.start), reloadReadinessKey(settled.end));
+  assert.ok(settled.end.sampledAtMs - settled.start.sampledAtMs >= 240,
+    'reload lacks 240ms of settled readable presentation');
 }
 
 export function assertBrowserDocumentReplacement(proof) {
@@ -2826,6 +2866,19 @@ export function assertBrowserDocumentReplacement(proof) {
     && Number.isFinite(proof.reload.requestedAt) && proof.reload.observedAt >= proof.reload.requestedAt,
   'replacement lacks its actual owned UI reload evidence');
   assertReloadReady(proof.reload.preClick, beforeReload);
+  for (const phase of ['beforeSelection', 'beforeClick', 'beforeReselection'])
+    assertReloadSettlement(proof.reload.readiness?.[phase], phase === 'beforeReselection' ? afterReload : beforeReload);
+  assert.equal(reloadReadinessKey(proof.reload.preClick), reloadReadinessKey(proof.reload.readiness.beforeClick.end));
+  if (proof.reload.reveal) {
+    const reveal = proof.reload.reveal;
+    assert.equal(reveal.route, 'owned-card-semantic-proxy');
+    assert.equal(reveal.attempts, 1);
+    assertReloadPresentation(reveal.preClick, beforeReload);
+    assert.ok(['outline', 'marker'].includes(reveal.preClick.semanticLevel));
+    assertReloadControlHit(reveal.preClick.proxy);
+    assert.ok(reveal.preClick.sampledAtMs <= reveal.requestedAt && reveal.returnedAt >= reveal.requestedAt
+      && reveal.returnedAt <= proof.reload.requestedAt);
+  }
   assert.ok(proof.reload.preClick.sampledAtMs <= proof.reload.requestedAt,
     'reload readiness was not observed before clicking');
   assert.notEqual(beforeReload.native?.innerWindowId, afterReload.native?.innerWindowId,
@@ -2990,6 +3043,48 @@ export async function runBrowserDocumentReplacement(harness, fixture, deadlineMs
         ref: target.ref, expectedTarget: target, postcondition: { kind: 'visible-text', value: 'QA click count: 1' } } });
   };
   const sample = () => ownedDocumentBoundarySnapshot(harness, proof.cardId, ownerTag, fixture);
+  const readReload = async () => {
+    assertBeforeDeadline(deadlineMs);
+    const control = await ownedReloadControl(harness, proof.cardId, ownerTag);
+    proof.reload.lastControl = control;
+    assertBeforeDeadline(deadlineMs);
+    return control;
+  };
+  const settleReload = async (expected, allowProxy) => {
+    let start = null, key;
+    const end = await waitUntil(readReload, control => {
+      try {
+        assertReloadPresentation(control, expected);
+        if (control.semanticLevel === 'detail') assertReloadReady(control, expected);
+        else {
+          assert.ok(allowProxy && ['outline', 'marker'].includes(control.semanticLevel) && control.loading === false);
+          assertReloadControlHit(control.proxy);
+        }
+      } catch { start = null; key = null; return false; }
+      const next = reloadReadinessKey(control);
+      if (!start || next !== key) { start = control; key = next; }
+      return control.sampledAtMs - start.sampledAtMs >= 240;
+    }, { timeoutMs: Math.min(10000, deadlineMs - Date.now()), intervalMs: 60 });
+    assertBeforeDeadline(deadlineMs);
+    return { start, end };
+  };
+  const prepareReload = async (expected, phase) => {
+    let settled = await settleReload(expected, phase !== 'beforeReselection' && !proof.reload.reveal);
+    if (settled.end.semanticLevel !== 'detail') {
+      const preClick = await readReload();
+      assertReloadPresentation(preClick, expected);
+      assert.equal(reloadReadinessKey(preClick), reloadReadinessKey(settled.end));
+      assertReloadControlHit(preClick.proxy);
+      proof.reload.reveal = { route: 'owned-card-semantic-proxy', attempts: 1,
+        preClick, requestedAt: Date.now() };
+      await actionHarness.click(`${selectorForId(proof.cardId)} .egd-semantic-proxy`);
+      proof.reload.reveal.returnedAt = Date.now();
+      // One real reveal only. Never retry the proxy or click a compact reload.
+      settled = await settleReload(expected, false);
+    }
+    assertReloadSettlement(settled, expected);
+    proof.reload.readiness[phase] = settled;
+  };
   try {
     assertBeforeDeadline(deadlineMs);
     proof.cardId = await chrome(harness, ({ url, ownerTag }) => {
@@ -3009,6 +3104,10 @@ export async function runBrowserDocumentReplacement(harness, fixture, deadlineMs
     await chrome(harness, camera => {
       window.__egdesk.state.setCanvasViewportTarget(camera, { immediate: true }); return true;
     }, plan.visible);
+    proof.reload = { route: 'owned-card-reload-button', readiness: {} };
+    // Content complete and a momentary hit do not imply semantic readiness:
+    // asynchronous font measurement can replace detail with an outline proxy.
+    await prepareReload(await sample(), 'beforeSelection');
     const source = await selectOwnedProbeSource(actionHarness, thread, proof.cardId, ownerTag,
       'interact', fixture, saved.selection[0]?.cardId || null);
     proof.sourceId = source.id;
@@ -3020,21 +3119,10 @@ export async function runBrowserDocumentReplacement(harness, fixture, deadlineMs
     assert.equal(proof.stale.observed.snapshot.documentId, proof.beforeReload.snapshot.documentId);
     assert.equal(proof.beforeReload.snapshot.qaDiagnostics.performCalls, 0);
     assert.ok(proof.beforeReload.snapshot.text.includes('QA click count: 0'));
-    proof.reload = { route: 'owned-card-reload-button' };
-    // Content readyState can complete before Chrome changes Stop back to
-    // Reload. Wait for the real control and retain the last sample on failure.
-    const readReload = async () => {
-      assertBeforeDeadline(deadlineMs);
-      const control = await ownedReloadControl(harness, proof.cardId, ownerTag);
-      proof.reload.lastControl = control;
-      assertBeforeDeadline(deadlineMs);
-      return control;
-    };
-    await waitUntil(readReload, control => {
-      try { assertReloadReady(control, proof.beforeReload); return true; } catch { return false; }
-    }, { timeoutMs: Math.min(10000, deadlineMs - Date.now()), intervalMs: 100 });
+    await prepareReload(proof.beforeReload, 'beforeClick');
     proof.reload.preClick = await readReload();
     assertReloadReady(proof.reload.preClick, proof.beforeReload);
+    assert.equal(reloadReadinessKey(proof.reload.preClick), reloadReadinessKey(proof.reload.readiness.beforeClick.end));
     proof.reload.requestedAt = Date.now();
     await actionHarness.click(`${selectorForId(proof.cardId)} .egd-card-reload`);
     proof.afterReload = await waitUntil(async () => {
@@ -3065,6 +3153,7 @@ export async function runBrowserDocumentReplacement(harness, fixture, deadlineMs
     // B intentionally locks uncertain outcomes. Renew through the existing
     // rendered menu, never by editing a token, extending a lease or retrying.
     assertBeforeDeadline(deadlineMs);
+    await prepareReload(proof.afterReload, 'beforeReselection');
     const freshSource = await selectOwnedProbeSource(actionHarness, thread, proof.cardId, ownerTag,
       'interact', fixture, saved.selection[0]?.cardId || null);
     proof.explicitUiReselection = true;
