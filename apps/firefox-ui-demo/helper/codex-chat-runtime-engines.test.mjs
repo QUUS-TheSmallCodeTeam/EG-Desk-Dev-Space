@@ -241,3 +241,65 @@ test('Codex-only process configuration and ordinary instructions never apply to 
   // The same Codex process check still guards Codex threads.
   await assert.rejects(chat.send({ message: 'Codex work' }), error => error.code === 'NATIVE_CONFIGURATION_MISMATCH')
 })
+
+// model/list rows as codex-model-catalog.mjs publishes them (engines[].models).
+const LISTED_MODELS = [
+  { id: 'gpt-6.1-sol', displayName: 'GPT-6.1-Sol', isDefault: true, supportedEfforts: ['low', 'medium', 'high', 'ultra'], defaultEffort: 'low' },
+  { id: 'gpt-6-luna', displayName: 'GPT-6-Luna', isDefault: false, supportedEfforts: ['low', 'medium', 'max'], defaultEffort: 'medium' },
+  { id: 'codex-model', displayName: 'Thread model', isDefault: false, supportedEfforts: ['low'], defaultEffort: 'low' },
+]
+
+test('a turn may name only a listed model and an effort that model lists; without a list it passes as before', async () => {
+  const calls = []
+  let listed = LISTED_MODELS
+  const chat = new CodexChatRuntime({ engines: [codexEngine(calls, { getModels: () => listed })] })
+  chat.setConnection(true)
+  const refused = code => error => error.code === code && error.httpStatus === 400
+  await assert.rejects(chat.send({ message: 'Hi', model: 'gpt-reserve' }), refused('MODEL_UNAVAILABLE'))
+  await assert.rejects(chat.send({ message: 'Hi', model: 'gpt-6-luna', effort: 'ultra' }), refused('EFFORT_UNSUPPORTED'))
+  await assert.rejects(chat.send({ message: 'Hi', effort: 'xhigh' }), refused('EFFORT_UNSUPPORTED'), 'no listed model supports it')
+  assert.deepEqual(calls, [], 'refused before any native call')
+  // Unchosen settings are not checked against the list (the process default runs).
+  const plain = await chat.send({ message: 'Hi', requestId: 'plain-1' })
+  await chat.handleNotification({ method: 'turn/completed', params: { threadId: plain.conversationId, turn: { id: plain.runId, status: 'completed', items: [] } } })
+  const chosen = await chat.send({ message: 'Again', conversationId: plain.conversationId, model: 'gpt-6-luna', effort: 'max', requestId: 'chosen-1' })
+  assert.equal(chosen.accepted, true)
+  const turn = calls.filter(call => call[1] === 'turn/start').at(-1)[2]
+  assert.deepEqual([turn.model, turn.effort], ['gpt-6-luna', 'max'])
+  await chat.handleNotification({ method: 'turn/completed', params: { threadId: plain.conversationId, turn: { id: chosen.runId, status: 'completed', items: [] } } })
+  // Effort alone on a conversation: checked against that conversation's model (codex-model lists only low).
+  await assert.rejects(chat.send({ message: 'More', conversationId: plain.conversationId, effort: 'max' }), refused('EFFORT_UNSUPPORTED'))
+  const low = await chat.send({ message: 'More', conversationId: plain.conversationId, effort: 'low', requestId: 'low-1' })
+  assert.equal(low.accepted, true)
+  await chat.handleNotification({ method: 'turn/completed', params: { threadId: plain.conversationId, turn: { id: low.runId, status: 'completed', items: [] } } })
+  // A replayed request keeps its first answer even after the list changed.
+  listed = [LISTED_MODELS[0]]
+  const replay = await chat.send({ message: 'Again', conversationId: plain.conversationId, model: 'gpt-6-luna', effort: 'max', requestId: 'chosen-1' })
+  assert.equal(replay.runId, chosen.runId)
+  await assert.rejects(chat.send({ message: 'New', conversationId: plain.conversationId, model: 'gpt-6-luna', requestId: 'chosen-2' }), refused('MODEL_UNAVAILABLE'))
+  // Unknown list (offline catalog, failed read): every per-turn choice passes as before.
+  listed = null
+  const free = await chat.send({ message: 'Free', conversationId: plain.conversationId, model: 'gpt-reserve', effort: 'whatever', requestId: 'free-1' })
+  assert.equal(free.accepted, true)
+  // Invalid values are still refused first by the existing checks.
+  listed = LISTED_MODELS
+  await assert.rejects(chat.send({ message: 'Bad', model: '' }), error => error.code === 'INVALID_MODEL')
+  await assert.rejects(chat.send({ message: 'Bad', effort: ' ' }), error => error.code === 'INVALID_EFFORT')
+})
+
+test('effort alone on a new conversation is checked against the launch-configured model, and a refused request saves nothing', async () => {
+  await withStore('egdesk-runtime-models-', async store => {
+    const calls = []
+    const chat = new CodexChatRuntime({
+      engines: [codexEngine(calls, { getModels: () => LISTED_MODELS })], store, requireStore: true, getOwnerKey: () => OWNER_KEY,
+      expectedProcessConfiguration: { model: 'gpt-6-luna', effort: null },
+    })
+    chat.setConnection(true)
+    await assert.rejects(chat.send({ message: 'Hi', clientThreadId: 'ui-1', requestId: 'req-1', effort: 'ultra' }), error => error.code === 'EFFORT_UNSUPPORTED' && error.httpStatus === 400)
+    assert.equal(store.getConversation('ui-1'), null, 'nothing was saved for a refused choice')
+    assert.deepEqual(calls, [])
+    const accepted = await chat.send({ message: 'Hi', clientThreadId: 'ui-1', requestId: 'req-2', effort: 'max' })
+    assert.equal(accepted.accepted, true)
+    assert.equal(calls.find(call => call[1] === 'turn/start')[2].effort, 'max')
+  })
+})

@@ -5,6 +5,7 @@ import { rm } from 'node:fs/promises'
 import { readFile } from 'node:fs/promises'
 import { backoffDelayMs, createChatHttpHandler, createRateLimitSync, createReconnectBackoff, guardBridgeRequest, readJsonBody, setBridgeCors } from './codex-bridge-http.mjs'
 import { CodexChatRuntime } from './codex-chat-runtime.mjs'
+import { createCodexEngineAdapter } from './codex-engine-adapter.mjs'
 import { openChatStore } from './egdesk-chat-store.mjs'
 import { openProfileStore } from './egdesk-profile-store.mjs'
 import { createPrivateQaTempDirectory } from '../scripts/egdesk-qa-platform.mjs'
@@ -89,6 +90,34 @@ test('HTTP send preserves accepted/conversationId and adds run IDs without liste
   assert.equal(res.body.accepted, true)
   assert.equal(res.body.conversationId, 'thread')
   assert.deepEqual(received, { message: 'hi' })
+})
+
+test('HTTP send answers 400 MODEL_UNAVAILABLE or EFFORT_UNSUPPORTED for a choice outside the listed models, after auth and before any native call', async () => {
+  const calls = []
+  const models = [{ id: 'gpt-6-luna', displayName: 'GPT-6-Luna', isDefault: true, supportedEfforts: ['low', 'medium', 'max'], defaultEffort: 'medium' }]
+  const codex = createCodexEngineAdapter({
+    request: async (method, params) => {
+      calls.push(method)
+      if (method === 'thread/start') return { thread: { id: 'thread-1' }, model: 'gpt-6-luna' }
+      if (method === 'turn/start') return { turn: { id: 'turn-1', status: 'inProgress', items: [] } }
+      return {}
+    },
+    respond: () => {}, getModels: () => models,
+  })
+  const chat = new CodexChatRuntime({ engines: [codex] })
+  chat.setConnection(true)
+  let auth = 0
+  const handler = createChatHttpHandler(chat, async () => { auth += 1 })
+  const send = async body => { const res = response(); await handler(request(JSON.stringify(body)), res, new URL('http://localhost/chat/send')); return res }
+  const unavailable = await send({ message: 'hi', model: 'gpt-reserve', requestId: 'r-1' })
+  assert.deepEqual([unavailable.status, unavailable.body.accepted, unavailable.body.code, unavailable.body.requestId], [400, false, 'MODEL_UNAVAILABLE', 'r-1'])
+  const unsupported = await send({ message: 'hi', model: 'gpt-6-luna', effort: 'ultra' })
+  assert.deepEqual([unsupported.status, unsupported.body.code], [400, 'EFFORT_UNSUPPORTED'])
+  assert.deepEqual(calls, [])
+  assert.equal(auth, 2, 'the account is checked first, as for every send')
+  const accepted = await send({ message: 'hi', model: 'gpt-6-luna', effort: 'max' })
+  assert.deepEqual([accepted.status, accepted.body.accepted], [202, true])
+  assert.deepEqual(calls, ['thread/start', 'turn/start'])
 })
 
 test('HTTP send names a missing or inactive Agent profile with its own status before any native call', async t => {

@@ -24,6 +24,8 @@ import { chatError } from './codex-chat-values.mjs'
 //   forkThread?(params)             optional ('threadFork'): thread/fork params (threadId, lastTurnId?)
 //                                   → { thread: { id, forkedFromId? } }; a new thread, not loaded history
 //   steerTurn?(...)                 optional capability
+//   models?()                       optional: [{ id, displayName, isDefault, supportedEfforts, defaultEffort }]
+//                                   the models a turn may name, or null when unknown (no check then)
 //   respond(rpcId, result, error?)  answers an engine request (approval, question, EG-Desk tool)
 //   subscribe(sink) → unsubscribe   sink.notification(engineId, { method, params }),
 //                                   sink.serverRequest(engineId, { id, method, params }),
@@ -69,7 +71,7 @@ export function validateEngineAdapter(adapter) {
   if (!adapter || typeof adapter !== 'object' || !ENGINE_IDS.includes(adapter.id)) throw chatError('INVALID_ENGINE_ADAPTER', 'Engine adapter has an unknown engine id', 500)
   const missing = REQUIRED_METHODS.find(name => typeof adapter[name] !== 'function')
   if (missing) throw chatError('INVALID_ENGINE_ADAPTER', `Engine adapter ${adapter.id} lacks ${missing}()`, 500)
-  for (const name of ['steerTurn', 'forkThread']) {
+  for (const name of ['steerTurn', 'forkThread', 'models']) {
     if (adapter[name] !== undefined && typeof adapter[name] !== 'function') throw chatError('INVALID_ENGINE_ADAPTER', `Engine adapter ${adapter.id} has an invalid ${name}`, 500)
   }
   const capabilities = adapter.capabilities()

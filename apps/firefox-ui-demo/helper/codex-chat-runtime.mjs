@@ -9,6 +9,7 @@ import { MAX_COMPOSED } from './egdesk-profile-store.mjs'
 import { engineError } from './engine-adapter.mjs'
 import { createCodexEngineAdapter } from './codex-engine-adapter.mjs'
 import { EngineRegistry } from './engine-registry.mjs'
+import { assertModelSelection } from './codex-model-catalog.mjs'
 
 const TERMINAL = new Set(['completed', 'interrupted', 'failed'])
 const ITEM_STATUS = new Set(['inProgress', 'completed', 'failed', 'declined'])
@@ -805,6 +806,18 @@ export class CodexChatRuntime {
       }
     }
     if (this.store && !requestOwnerHash) throw chatError('NATIVE_ACCOUNT_UNVERIFIED', 'Codex account identity is unavailable; local history remains readable', 403)
+    // A new request (replays above keep their first answer) may name only a
+    // model the engine lists, and only an effort that model lists. Without a
+    // list nothing changes. Unchosen settings still meet assertProcessConfiguration.
+    if (body.model !== undefined || body.effort !== undefined) {
+      const engine = this.engines.get(engineId)
+      let listed = null
+      try { listed = typeof engine?.models === 'function' ? engine.models() : null } catch {}
+      assertModelSelection(listed, {
+        model: body.model, effort: body.effort,
+        currentModel: conversationId ? this.threads.get(conversationId)?.model ?? null : this.expectedProcessConfiguration?.model ?? null,
+      })
+    }
     const lock = conversationId || `client:${clientThreadId || 'legacy'}`
     if (this.locks.has(lock)) throw chatError('RUN_IN_PROGRESS', 'A request is already starting for this conversation', 409)
     if (this.locks.size >= MAX_RUNS) throw chatError('RUNTIME_BUSY', 'Too many pending requests', 429)

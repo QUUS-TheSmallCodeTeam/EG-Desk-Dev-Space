@@ -17,10 +17,11 @@ const AUTH_METHODS = { chatgpt: 'chatgpt', chatgptAuthTokens: 'chatgpt', apikey:
 
 /**
  * One /v1/state engines[] row from public bridge state only. auth is the
- * bridge's public auth snapshot; usage is usageDisplay() output. No token,
+ * bridge's public auth snapshot; usage is usageDisplay() output; models is the
+ * model/list catalog (codex-model-catalog.mjs) or null when unknown. No token,
  * credential location or executable path is read or returned.
  */
-export function describeCodexEngine({ ready = false, starting = false, blocked = false, version = null, versionSupported = null, auth = null, usage = null, residentProcesses = 0 } = {}) {
+export function describeCodexEngine({ ready = false, starting = false, blocked = false, version = null, versionSupported = null, auth = null, usage = null, residentProcesses = 0, models = null } = {}) {
   const signedIn = auth?.isLoggedIn === true
   return {
     id: CODEX_ENGINE_ID, label: 'Codex',
@@ -39,16 +40,21 @@ export function describeCodexEngine({ ready = false, starting = false, blocked =
       usage: usage ?? null,
     }],
     runtime: { residentProcesses: Number.isSafeInteger(residentProcesses) && residentProcesses > 0 ? residentProcesses : 0, residentLimit: 1, idleTimeoutMs: null },
+    models: Array.isArray(models) ? models : null,
   }
 }
 
-export function createCodexEngineAdapter({ request, respond, getOwnerKey = () => null, isReady = () => true, describe = null, refresh = null } = {}) {
+export function createCodexEngineAdapter({ request, respond, getOwnerKey = () => null, isReady = () => true, describe = null, refresh = null, getModels = () => null } = {}) {
   const sinks = new Set()
   const deliver = (kind, value) => { for (const sink of [...sinks]) sink[kind]?.(CODEX_ENGINE_ID, value) }
+  const models = () => { try { const list = getModels(); return Array.isArray(list) ? list : null } catch { return null } }
   return {
     id: CODEX_ENGINE_ID,
-    describe: () => describe ? describe() : describeCodexEngine({ ready: isReady() }),
-    refresh: async () => refresh ? refresh() : (describe ? describe() : describeCodexEngine({ ready: isReady() })),
+    describe: () => describe ? describe() : describeCodexEngine({ ready: isReady(), models: models() }),
+    refresh: async () => refresh ? refresh() : (describe ? describe() : describeCodexEngine({ ready: isReady(), models: models() })),
+    // Optional ('modelSelect.perTurn'): the models a turn may name, or null
+    // when unknown; the runtime checks a requested model and effort against it.
+    models,
     capabilities: () => new Set(CODEX_CAPABILITIES),
     // One shared login today, so every engine profile names the same account.
     ownerKey: () => getOwnerKey(),

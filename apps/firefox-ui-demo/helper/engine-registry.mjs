@@ -1,5 +1,6 @@
 import { chatError, publicText } from './codex-chat-values.mjs'
 import { ENGINE_CAPABILITIES, ENGINE_IDS, ENGINE_STATUSES, engineError, validateEngineAdapter } from './engine-adapter.mjs'
+import { publicModelRows } from './codex-model-catalog.mjs'
 
 const AUTH_STATUSES = new Set(['signedIn', 'signedOut', 'signingIn', 'unknown'])
 const token = (value, limit = 120) => typeof value === 'string' && value.trim() && value.length <= limit ? publicText(value, limit) : null
@@ -35,6 +36,30 @@ export function publicEngineRow(descriptor, { isDefault = false } = {}) {
     capabilities: (Array.isArray(descriptor?.capabilities) ? descriptor.capabilities : []).filter(name => ENGINE_CAPABILITIES.includes(name)),
     profiles: (Array.isArray(descriptor?.profiles) ? descriptor.profiles : []).slice(0, 8).map(publicProfile),
     runtime: { residentProcesses: count(runtime?.residentProcesses), residentLimit: count(runtime?.residentLimit), idleTimeoutMs: Number.isSafeInteger(runtime?.idleTimeoutMs) && runtime.idleTimeoutMs > 0 ? runtime.idleTimeoutMs : null },
+    // Choosable models [{ id, displayName, isDefault, supportedEfforts, defaultEffort }],
+    // or null when the engine has not listed them (unknown, never invented).
+    models: publicModelRows(descriptor?.models),
+  }
+}
+
+/**
+ * SSE engine.status (design §7): check() sends { type: 'engine.status', v,
+ * engines, ts } whenever the public engines[] rows differ from the last sent
+ * ones (connection, sign-in or account change, model list), and nothing when
+ * they are unchanged.
+ */
+export function createEngineStatusEmitter({ engines, emit, v = 1, now = Date.now }) {
+  let last = null
+  return {
+    check() {
+      let rows
+      try { rows = engines() } catch { return false }
+      const text = JSON.stringify(rows)
+      if (text === last) return false
+      last = text
+      emit({ type: 'engine.status', v, engines: rows, ts: now() })
+      return true
+    },
   }
 }
 

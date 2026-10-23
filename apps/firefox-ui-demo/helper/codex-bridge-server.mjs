@@ -5,7 +5,8 @@ import { normalizeNativeAuth, publicAuthIdentityKey, publicPlanType } from './co
 import { usageDisplay } from './codex-account-usage.mjs'
 import { CodexChatRuntime } from './codex-chat-runtime.mjs'
 import { createCodexEngineAdapter, describeCodexEngine } from './codex-engine-adapter.mjs'
-import { EngineRegistry, describeClaudeEngine } from './engine-registry.mjs'
+import { EngineRegistry, createEngineStatusEmitter, describeClaudeEngine } from './engine-registry.mjs'
+import { createModelCatalogSync } from './codex-model-catalog.mjs'
 import { BrowserToolTransport } from './codex-browser-tool-transport.mjs'
 import { createCodexBrowserToolProvider } from './codex-browser-tool-provider.mjs'
 import { fixtureBrowserQaFromEnv } from './codex-browser-fixture-qa.mjs'
@@ -150,6 +151,16 @@ const nativeReader = new NativeReaderClient({ request: (method, params) => appSe
 const contexts = new ContextRuntime({ store: contextStore, reader: nativeReader, getOwnerKey: () => publicAuthIdentityKey(authState), schemaReady: () => nativeCapabilities.schemaMatch && appServerReady })
 const browserTransport = new BrowserToolTransport({ getOwnerKey: () => publicAuthIdentityKey(authState) })
 const browserProvider = createCodexBrowserToolProvider({ transport: browserTransport, getOwnerKey: () => publicAuthIdentityKey(authState), schemaReady: () => nativeCapabilities.qaReadOnly && appServerReady, fixtureQa: fixtureBrowserQaFromEnv(process.env) })
+// The Codex models the signed-in account can choose (model/list, hidden ones
+// excluded), read after each ready connection and on every account change;
+// null while unknown or signed out. They fill the Codex engines[] row and
+// bound /chat/send.
+const modelCatalog = createModelCatalogSync({
+  request: (method, params) => appServerRequest(method, params),
+  ready: () => appServerReady && authState.isLoggedIn,
+  identity: () => modelAccountKey(authState),
+  onChange: () => engineStatus.check(),
+})
 // Codex is the one runnable engine. Claude is listed for the settings screen
 // but refused until its connection method is decided (SUB-12).
 const codexEngine = createCodexEngineAdapter({
@@ -157,16 +168,25 @@ const codexEngine = createCodexEngineAdapter({
   respond: nativeRespond,
   getOwnerKey: () => publicAuthIdentityKey(authState),
   isReady: () => appServerReady,
+  getModels: () => modelCatalog.snapshot(),
   describe: () => describeCodexEngine({
     ready: appServerReady, starting: Boolean(appServerProcess) && !appServerReady, blocked: launchConfigBlocked,
     version: nativeCapabilities.version, versionSupported: nativeCapabilities.version ? nativeCapabilities.schemaMatch : null,
     auth: authState, usage: usageDisplay(authState.rateLimits, Date.now()),
     residentProcesses: appServerProcess && appServerProcess.exitCode == null ? 1 : 0,
+    models: modelCatalog.snapshot(),
   }),
 })
 const engineRegistry = new EngineRegistry({ defaultEngineId: PROVIDER_ID })
 engineRegistry.register(codexEngine)
 engineRegistry.describe(describeClaudeEngine())
+// SSE engine.status (design §7): sent whenever a public engines[] row changes
+// (connection, sign-in or account change, model list), beside auth.status.
+const engineStatus = createEngineStatusEmitter({
+  engines: () => engineRegistry.publicEngines(),
+  emit: event => broadcast(event),
+  v: BRIDGE_PROTOCOL_VERSION,
+})
 const chat = new CodexChatRuntime({
   engines: engineRegistry,
   contexts,
@@ -234,6 +254,7 @@ function updateAuthState(patch, { broadcastStatus = true } = {}) {
     emitAuthStatus()
     broadcast({ type: 'auth-status', status: authSnapshot() })
   }
+  engineStatus.check()
 }
 
 function authStatusTextFor(snapshot) {
@@ -265,6 +286,12 @@ function resetLoginState() {
   authState.loginError = null
 }
 
+// Sign-in, sign-out and an account switch all change this, including a
+// signed-in account without a public identity key.
+function modelAccountKey(state) {
+  return `${state.isLoggedIn === true}:${publicAuthIdentityKey(state) ?? ''}`
+}
+
 function appServerRequest(method, params) {
   if (!appServerReady || !rpc) return Promise.reject(chatError('BRIDGE_OFFLINE', 'Codex app-server is offline', 503))
   return rpc.request(method, params)
@@ -278,6 +305,7 @@ async function refreshAccountState({ refreshToken = false } = {}) {
 
   const normalized = normalizeNativeAuth(authResult, accountResult)
   const identityChanged = authState.isLoggedIn && (!normalized.isLoggedIn || publicAuthIdentityKey(authState) !== publicAuthIdentityKey(normalized))
+  const previousAccount = modelAccountKey(authState)
   if (identityChanged) chat.reset()
   const nextSnapshot = {
     ...authState,
@@ -292,6 +320,8 @@ async function refreshAccountState({ refreshToken = false } = {}) {
     statusText: authStatusTextFor(nextSnapshot),
   })
   if (authState.isLoggedIn && (identityChanged || !authState.rateLimits)) void rateLimitSync.refresh({ force: identityChanged })
+  // Models belong to one account; never keep the previous account's list.
+  if (modelAccountKey(authState) !== previousAccount) void modelCatalog.refresh({ clear: true })
 }
 
 function handleAppServerNotification(message) {
@@ -409,6 +439,7 @@ function spawnAppServer() {
     stdio: ['ignore', 'pipe', 'pipe'],
   })
   appServerProcess = child
+  engineStatus.check()
   child.stdout.on('data', chunk => { const text = publicText(chunk.toString(), 4000).trim(); if (text) console.log(text) })
   child.stderr.on('data', chunk => { const text = publicText(chunk.toString(), 4000).trim(); if (text) console.error(text) })
   const lost = () => {
@@ -418,6 +449,7 @@ function spawnAppServer() {
     rpc?.close(new Error('Local Codex app-server exited'))
     chat.setConnection(false, { processLost: true })
     inheritedMcp.reset()
+    modelCatalog.reset()
     try { appServerSocket?.close() } catch {}
     updateAuthState({ statusText: 'Codex app-server offline', loginInProgress: false })
     scheduleAppServerReconnect()
@@ -480,6 +512,7 @@ async function connectToAppServer() {
       chat.setConnection(true)
       void inheritedMcp.refresh()
       await refreshAccountState()
+      void modelCatalog.refresh()
     } catch (error) {
       console.error('[egdesk-codex-bridge] initialization failed:', publicText(error.message, 1000))
       socket.close()
@@ -492,6 +525,7 @@ async function connectToAppServer() {
     if (appServerSocket !== socket) return
     appServerReady = false
     chat.setConnection(false)
+    engineStatus.check()
   }
   socket.onclose = () => {
     connection.close()
@@ -502,6 +536,8 @@ async function connectToAppServer() {
     if (rpc === connection) rpc = null
     chat.setConnection(false)
     inheritedMcp.reset()
+    modelCatalog.reset()
+    engineStatus.check()
     if (appServerLaunch.disableMemories && !launchConfigBlocked) memoryIsolation = { status: 'pending', feature: 'memories' }
     scheduleAppServerReconnect()
   }

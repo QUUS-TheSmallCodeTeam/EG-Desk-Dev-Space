@@ -71,6 +71,7 @@ test('Codex engine row reports status, version support, account slot and usage f
     profiles: [{ id: 'codex-default', label: 'ChatGPT', credentialStore: 'shared-user-default', active: true,
       auth: { status: 'signedIn', method: 'chatgpt', account: 'owner@example.com', planType: 'pro' }, usage }],
     runtime: { residentProcesses: 1, residentLimit: 1, idleTimeoutMs: null },
+    models: null,
   })
   assert.equal(JSON.stringify(row).includes('PRIVATE-CODE') || JSON.stringify(row).includes('secret-code'), false)
   const statusOf = state => describeCodexEngine(state).status
@@ -97,4 +98,23 @@ test('Codex branches through thread/fork with the same params object and reports
   assert.equal(calls[0][1], params, 'the params object is forwarded, not rebuilt')
   assert.ok(adapter.capabilities().has('threadFork') && adapter.capabilities().has('ephemeralThreads'))
   assert.ok(CODEX_CAPABILITIES.includes('threadFork') && CODEX_CAPABILITIES.includes('ephemeralThreads'))
+})
+
+test('Codex row and adapter carry the listed models, or null while they are unknown', async () => {
+  const models = [{ id: 'gpt-6.1-sol', displayName: 'GPT-6.1-Sol', isDefault: true, supportedEfforts: ['low', 'medium'], defaultEffort: 'low' }]
+  assert.deepEqual(describeCodexEngine({ ready: true, models }).models, models)
+  for (const unknown of [undefined, null, 'gpt-6.1-sol', {}]) assert.equal(describeCodexEngine({ models: unknown }).models, null)
+  let listed = null
+  const adapter = createCodexEngineAdapter({ request: () => {}, respond: () => {}, getModels: () => listed })
+  assert.equal(validateEngineAdapter(adapter), adapter)
+  assert.equal(adapter.models(), null)
+  assert.equal(adapter.describe().models, null)
+  listed = models
+  assert.deepEqual(adapter.models(), models)
+  assert.deepEqual(adapter.describe().models, models)
+  assert.deepEqual((await adapter.refresh()).models, models)
+  const broken = createCodexEngineAdapter({ request: () => {}, respond: () => {}, getModels: () => { throw new Error('/secret') } })
+  assert.equal(broken.models(), null)
+  assert.equal(createCodexEngineAdapter({ request: () => {}, respond: () => {} }).models(), null, 'no catalog: unknown')
+  assert.throws(() => validateEngineAdapter({ ...adapter, models: 'gpt-6.1-sol' }), { code: 'INVALID_ENGINE_ADAPTER' })
 })
