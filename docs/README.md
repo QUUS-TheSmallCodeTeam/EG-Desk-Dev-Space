@@ -55,6 +55,7 @@ Board가 새 Desk나 Canvas 자체를 뜻하지는 않습니다. 저장·공유�
 - [기존 Run Playback note — historical/superseded](../apps/firefox-ui-demo/docs/CANVAS_RUN_PLAYBACK_MODEL.md)
 - [Viewport 레이아웃·인터랙션](../apps/firefox-ui-demo/docs/VIEWPORT_LAYOUT_INTERACTION_MODEL.md)
 - [Browser Agent 관찰 런타임](../apps/firefox-ui-demo/docs/BROWSER_AGENT_OBSERVATION_RUNTIME.md)
+- [ChatGPT 데스크톱 Computer Use·Browser Control 조사](references/computer-use-browser-control-rea.md): 설치 코드·통제 실험·공개 자료의 근거와 Firefox 적용 시 확인할 경계.
 - [Human-in-the-loop await 모델](../apps/firefox-ui-demo/docs/HUMAN_IN_LOOP_WORKFLOW_AWAIT_MODEL.md)
 
 </details>
