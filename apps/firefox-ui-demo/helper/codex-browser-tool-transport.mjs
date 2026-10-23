@@ -42,7 +42,16 @@ export class BrowserToolTransport {
     this.runs.set(runId, { transportId, clientThreadId, ownerKey })
   }
 
-  unbindRun(runId) { this.runs.delete(runId) }
+  unbindRun(runId) {
+    const binding = this.runs.get(runId)
+    this.runs.delete(runId)
+    if (!binding) return
+    for (const [requestId, entry] of this.pending) if (entry.runId === runId && entry.runBinding === binding) {
+      this.clearTimer(entry.timer)
+      this.pending.delete(requestId)
+      entry.reject(fail('BROWSER_RUN_ENDED', 'Browser run ended while awaiting its UI response; outcome is unknown'))
+    }
+  }
 
   async sendToUi(request) {
     if (!request || typeof request !== 'object' || !short(request.requestId) || !short(request.runId, 300) ||
@@ -56,19 +65,30 @@ export class BrowserToolTransport {
     if (!client || client.closed || bound.ownerKey !== this.getOwnerKey() || bound.clientThreadId !== request.clientThreadId) {
       throw fail('BROWSER_UI_UNAVAILABLE', 'Bound Browser UI stream, Chat thread or account is unavailable')
     }
-    if (this.pending.has(request.requestId) || this.pending.size >= 64) throw fail('BROWSER_UI_BUSY', 'Browser UI request channel is busy')
-    const data = JSON.stringify(request)
+    if ([...this.pending.values()].some(entry => entry.requestId === request.requestId) || this.pending.size >= 64) {
+      throw fail('BROWSER_UI_BUSY', 'Browser UI request channel is busy')
+    }
+    // The UI echoes a unique handoff ID; caller IDs may be reused after a run
+    // ends. No retired-ID history is needed, and an old response stays stale.
+    const wireRequestId = randomUUID()
+    const data = JSON.stringify({ ...request, requestId: wireRequestId })
     if (data.length > 48000) throw fail('BROWSER_UI_PROTOCOL', 'Browser UI request exceeds the bounded transport size', 413)
     return new Promise((resolve, reject) => {
+      // Capture the binding generation, not just a reusable run ID.
+      const entry = { requestId: request.requestId, runId: request.runId, runBinding: bound, transportId: bound.transportId,
+        ownerKey: bound.ownerKey, deadlineMs: request.deadlineMs, resolve, reject, timer: null }
       const timer = this.setTimer(() => {
-        this.pending.delete(request.requestId)
+        if (this.pending.get(wireRequestId) !== entry) return
+        this.pending.delete(wireRequestId)
+        this.clearTimer(entry.timer)
         reject(fail('BROWSER_UI_TIMEOUT', 'Browser UI response deadline passed; outcome is unknown'))
       }, Math.max(1, request.deadlineMs - this.now()))
       timer?.unref?.()
-      this.pending.set(request.requestId, { transportId: bound.transportId, ownerKey: bound.ownerKey, deadlineMs: request.deadlineMs, resolve, reject, timer })
+      entry.timer = timer
+      this.pending.set(wireRequestId, entry)
       if (!client.send(`event: browser-tool-request\ndata: ${data}\n\n`)) {
         this.clearTimer(timer)
-        this.pending.delete(request.requestId)
+        this.pending.delete(wireRequestId)
         reject(fail('BROWSER_UI_DISCONNECTED', 'Browser UI stream could not accept the request'))
       }
     })
@@ -78,7 +98,8 @@ export class BrowserToolTransport {
     const requestId = response?.requestId
     const entry = this.pending.get(requestId)
     if (!short(transportId) || !short(requestId) || !entry || entry.transportId !== transportId ||
-        !this.hasClient(transportId) || entry.ownerKey !== this.getOwnerKey()) {
+        !this.hasClient(transportId) || entry.ownerKey !== this.getOwnerKey() ||
+        this.runs.get(entry.runId) !== entry.runBinding) {
       throw fail('BROWSER_UI_RESPONSE_STALE', 'No matching Browser request is awaiting this UI response')
     }
     if (this.now() >= entry.deadlineMs) {
@@ -92,7 +113,7 @@ export class BrowserToolTransport {
     }
     this.pending.delete(requestId)
     this.clearTimer(entry.timer)
-    entry.resolve(response)
+    entry.resolve({ ...response, requestId: entry.requestId })
     return { accepted: true, requestId }
   }
 
