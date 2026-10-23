@@ -74,6 +74,268 @@ export function surfaceProximityClusters(items, distance = 42) {
   return groups;
 }
 
+// Canvas marks are plain JSON records. An unknown or older type opens as the
+// original rectangle instead of an invisible element.
+export const CANVAS_SHAPE_TYPES = Object.freeze(['rect', 'ellipse', 'line', 'arrow', 'path', 'label', 'highlight']);
+const CANVAS_TOOL_SHAPES = Object.freeze({
+  square: 'rect', ellipse: 'ellipse', line: 'line', arrow: 'arrow',
+  pencil: 'path', label: 'label', highlight: 'highlight',
+});
+// 'arrow' is the arrow mark; the selection pointer is 'select'. The active tool
+// was never persisted, so no stored state carries the former pointer id.
+export const CANVAS_TOOL_IDS = Object.freeze(['select', 'hand', ...Object.keys(CANVAS_TOOL_SHAPES)]);
+export const CANVAS_PATH_MAX_POINTS = 2000;
+export const CANVAS_LABEL_MAX_LENGTH = 1000;
+
+export function canvasToolShapeType(tool) {
+  return Object.hasOwn(CANVAS_TOOL_SHAPES, tool) ? CANVAS_TOOL_SHAPES[tool] : null;
+}
+
+export function normalizeCanvasTool(tool) {
+  return CANVAS_TOOL_IDS.includes(tool) ? tool : 'select';
+}
+
+const round1 = value => Math.round(value * 10) / 10;
+
+export function normalizeCanvasPathPoints(points, max = CANVAS_PATH_MAX_POINTS) {
+  if (!Array.isArray(points)) return [];
+  const clean = [];
+  for (const point of points) {
+    const x = Array.isArray(point) ? point[0] : point?.x;
+    const y = Array.isArray(point) ? point[1] : point?.y;
+    if (!Number.isFinite(x) || !Number.isFinite(y)) continue;
+    const next = [round1(x), round1(y)];
+    const last = clean[clean.length - 1];
+    if (!last || last[0] !== next[0] || last[1] !== next[1]) clean.push(next);
+  }
+  const limit = Number.isInteger(max) && max >= 2 ? max : CANVAS_PATH_MAX_POINTS;
+  if (clean.length <= limit) return clean;
+  // Even thinning keeps the stroke's whole extent, including its last point.
+  return Array.from({ length: limit }, (_, index) => clean[Math.round(index * (clean.length - 1) / (limit - 1))]);
+}
+
+// Ramer–Douglas–Peucker over pointer samples; tolerance is in world pixels.
+export function simplifyCanvasPath(points, tolerance = 1) {
+  const clean = normalizeCanvasPathPoints(points);
+  if (clean.length <= 2) return clean;
+  const limit = Number.isFinite(tolerance) && tolerance > 0 ? tolerance : 1;
+  const keep = new Uint8Array(clean.length);
+  keep[0] = 1;
+  keep[clean.length - 1] = 1;
+  const stack = [[0, clean.length - 1]];
+  while (stack.length) {
+    const [first, last] = stack.pop();
+    const [ax, ay] = clean[first];
+    const [bx, by] = clean[last];
+    const dx = bx - ax;
+    const dy = by - ay;
+    const length = Math.hypot(dx, dy);
+    let index = -1;
+    let farthest = limit;
+    for (let current = first + 1; current < last; current += 1) {
+      const [px, py] = clean[current];
+      const distance = length === 0 ? Math.hypot(px - ax, py - ay)
+        : Math.abs(dy * px - dx * py + bx * ay - by * ax) / length;
+      if (distance > farthest) {
+        farthest = distance;
+        index = current;
+      }
+    }
+    if (index > 0) {
+      keep[index] = 1;
+      stack.push([first, index], [index, last]);
+    }
+  }
+  return clean.filter((_, index) => keep[index]);
+}
+
+// World box for a freehand stroke and its points relative to that box, so
+// moving the mark only moves the box.
+export function canvasPathBox(points, pad = 6) {
+  const clean = normalizeCanvasPathPoints(points);
+  if (!clean.length) return null;
+  const xs = clean.map(point => point[0]);
+  const ys = clean.map(point => point[1]);
+  const x = Math.floor(Math.min(...xs) - pad);
+  const y = Math.floor(Math.min(...ys) - pad);
+  return {
+    x, y,
+    width: Math.max(12, Math.ceil(Math.max(...xs) + pad) - x),
+    height: Math.max(12, Math.ceil(Math.max(...ys) + pad) - y),
+    points: clean.map(([px, py]) => [round1(px - x), round1(py - y)]),
+  };
+}
+
+export function normalizeCanvasLabelText(value, max = CANVAS_LABEL_MAX_LENGTH) {
+  return String(value ?? '')
+    .replace(/\r\n?/g, '\n')
+    .replace(/ /g, ' ')
+    .replace(/[ \t]+\n/g, '\n')
+    .replace(/\n{3,}/g, '\n\n')
+    .trim()
+    .slice(0, max);
+}
+
+const LINE_FIELDS = ['x1', 'y1', 'x2', 'y2'];
+const ROTATE_TRANSFORM = /^rotate\(-?\d+(?:\.\d+)?(?:e[+-]?\d+)?deg\)$/i;
+
+// Saved runtime fields keep the original line keys for every mark and add
+// points only for a freehand path and text only for a label.
+export function canvasShapeRuntime(type, fields = {}) {
+  const runtime = { transform: typeof fields.transform === 'string' ? fields.transform : '' };
+  for (const key of LINE_FIELDS) runtime[key] = fields[key] != null && fields[key] !== '' ? String(fields[key]) : null;
+  if (type === 'path') runtime.points = normalizeCanvasPathPoints(fields.points);
+  if (type === 'label') runtime.text = normalizeCanvasLabelText(fields.text);
+  return runtime;
+}
+
+export function restoreCanvasShape(record) {
+  const type = CANVAS_SHAPE_TYPES.includes(record?.type) ? record.type : 'rect';
+  const runtime = record?.runtimeState && typeof record.runtimeState === 'object' ? record.runtimeState : {};
+  const line = {};
+  for (const key of LINE_FIELDS) line[key] = runtime[key] != null && runtime[key] !== '' ? String(runtime[key]) : null;
+  return {
+    type,
+    transform: typeof runtime.transform === 'string' && ROTATE_TRANSFORM.test(runtime.transform) ? runtime.transform : '',
+    line,
+    points: type === 'path' ? normalizeCanvasPathPoints(runtime.points) : null,
+    text: type === 'label' ? normalizeCanvasLabelText(runtime.text) : null,
+  };
+}
+
+// Board region: 24px inner padding around its members and a 36px title row.
+export function boardRegionRect(memberRects, { padding = 24, titleHeight = 36, fallback = { x: 40, y: 80 } } = {}) {
+  const rects = (Array.isArray(memberRects) ? memberRects : []).filter(rect => rect
+    && [rect.x, rect.y, rect.width, rect.height].every(Number.isFinite));
+  if (!rects.length) {
+    const x = Number.isFinite(fallback?.x) ? fallback.x : 40;
+    const y = Number.isFinite(fallback?.y) ? fallback.y : 80;
+    return { x, y, width: 340, height: titleHeight + padding * 2 };
+  }
+  const x = Math.min(...rects.map(rect => rect.x)) - padding;
+  const y = Math.min(...rects.map(rect => rect.y)) - padding - titleHeight;
+  const right = Math.max(...rects.map(rect => rect.x + rect.width)) + padding;
+  const bottom = Math.max(...rects.map(rect => rect.y + rect.height)) + padding;
+  return { x, y, width: right - x, height: bottom - y };
+}
+
+// Below this camera zoom the 11.5px Board name would drop under the 9px that
+// keeps a View in detail; it leaves the shrinking title row, sits above the
+// region and is counter-scaled to stay at its readable screen size.
+export function boardRegionLabelScale(zoom, farBelow = 0.8) {
+  if (!Number.isFinite(zoom) || zoom <= 0) return { far: false, scale: 1 };
+  return zoom < farBelow ? { far: true, scale: 1 / zoom } : { far: false, scale: 1 };
+}
+
+// Viewport Board Detection (VIEWPORT_LAYOUT_INTERACTION_MODEL.md): visible
+// active Board → largest viewport overlap → active card's Board → most recent
+// Board → Desk. A region counts as in view when the shared area is at least
+// `minShare` of the smaller of the region and the viewport, so a sliver at the
+// screen edge is not announced as another Board in view.
+export function resolveViewportBoard({
+  viewport, regions = [], activeId = null, activeEntityBoardId = null, recentIds = [], minShare = 0.05,
+} = {}) {
+  const box = rect => rect && [rect.left, rect.top, rect.right, rect.bottom].every(Number.isFinite)
+    && rect.right > rect.left && rect.bottom > rect.top ? rect : null;
+  const view = box(viewport);
+  const valid = (Array.isArray(regions) ? regions : []).filter(region => region?.id != null && box(region.rect));
+  const known = new Set(valid.map(region => region.id));
+  const area = rect => (rect.right - rect.left) * (rect.bottom - rect.top);
+  const visible = view ? valid.map((region, order) => {
+    const width = Math.min(view.right, region.rect.right) - Math.max(view.left, region.rect.left);
+    const height = Math.min(view.bottom, region.rect.bottom) - Math.max(view.top, region.rect.top);
+    const overlap = width > 0 && height > 0 ? width * height : 0;
+    return { id: region.id, order, overlap, share: overlap / Math.min(area(region.rect), area(view)) };
+  }).filter(item => item.overlap > 0 && item.share >= minShare)
+    .sort((a, b) => b.overlap - a.overlap || a.order - b.order) : [];
+  const visibleIds = visible.map(item => item.id);
+  let primaryId = null;
+  let reason = 'desk';
+  if (activeId != null && visibleIds.includes(activeId)) {
+    primaryId = activeId;
+    reason = 'active-visible';
+  } else if (visibleIds.length) {
+    primaryId = visibleIds[0];
+    reason = 'largest-overlap';
+  } else if (activeEntityBoardId != null && known.has(activeEntityBoardId)) {
+    primaryId = activeEntityBoardId;
+    reason = 'active-card';
+  } else {
+    const recent = (Array.isArray(recentIds) ? recentIds : []).find(id => known.has(id));
+    if (recent != null) {
+      primaryId = recent;
+      reason = 'recent';
+    }
+  }
+  const extraCount = primaryId != null && visibleIds.includes(primaryId) ? visibleIds.length - 1 : visibleIds.length;
+  return { primaryId, reason, visibleIds, extraCount };
+}
+
+// Words the Desk shows. Internal identifiers (state.agenda, data-testid,
+// search result `type`) keep their names; only the visible copy is Korean,
+// and product nouns (Board, Canvas, Chat, Browser) stay as the user knows them.
+export function boardEntryStatusLabel(entry = {}) {
+  if (entry.dirty) return '저장 안 됨';
+  if (entry.closed) return '닫힘';
+  if (entry.current) return '현재';
+  if (entry.saved) return '저장됨';
+  return '초안';
+}
+
+export function boardEntryRecencyLabel(entry = {}) {
+  if (entry.closed) return '닫은 기록';
+  return entry.lastOpenedAt ? '최근' : '보관됨';
+}
+
+export function boardItemCountLabel(count) {
+  return `항목 ${Math.max(0, Math.round(Number(count) || 0))}개`;
+}
+
+export function boardSaveStatusTitle(dirty) {
+  return dirty ? '저장하지 않은 변경이 있습니다' : '저장됨';
+}
+
+const RAIL_SEARCH_SECTIONS = Object.freeze({
+  agenda: 'Board', card: 'Canvas', history: '방문 기록', file: '파일', thread: 'Chat', web: '웹',
+});
+export function railSearchSectionLabel(type) {
+  return Object.hasOwn(RAIL_SEARCH_SECTIONS, type) ? RAIL_SEARCH_SECTIONS[type] : '기타';
+}
+
+export function deskMinimapCaption(zoom, count) {
+  const percent = Number.isFinite(zoom) ? Math.round(zoom * 100) : 100;
+  return `${percent}% · 대상 ${Math.max(0, Number(count) || 0)}개`;
+}
+
+// Bridge connection, said by state. A short drop reads '다시 연결 중…' while
+// the overlay retries; only after `quietAttempts` failed reconnects does it say
+// the connection is lost and offer one retry. The raw transport error, the
+// round-trip time and the build fields go to the folded '자세히'. A bridge that
+// does not report `bridge` yet (older build) is read as matching.
+export const BRIDGE_QUIET_RECONNECTS = 3;
+export function bridgeConnectionNotice({
+  connected = false, failures = 0, error = null, latencyMs = null, bridge = null, quietAttempts = BRIDGE_QUIET_RECONNECTS,
+} = {}) {
+  const build = bridge && typeof bridge === 'object' ? bridge : {};
+  const details = [];
+  if (typeof error === 'string' && error.trim()) details.push(`오류: ${error.trim()}`);
+  if (Number.isFinite(latencyMs)) details.push(`응답 시간 ${Math.round(latencyMs)}ms`);
+  if (typeof build.buildHash === 'string' && build.buildHash) details.push(`브리지 빌드 ${build.buildHash.slice(0, 12)}`);
+  if (Number.isFinite(build.startedAt)) details.push(`브리지 시작 ${new Date(build.startedAt).toISOString()}`);
+  if (connected && build.sourceMismatch === true) {
+    return { state: 'mismatch', text: '브리지 버전이 맞지 않습니다 · 다시 시작 필요', action: null, details };
+  }
+  if (connected) return { state: 'online', text: '연결됨', action: null, details };
+  if ((Number(failures) || 0) < quietAttempts) return { state: 'reconnecting', text: '다시 연결 중…', action: null, details };
+  return { state: 'offline', text: '연결이 끊겼습니다', action: '다시 시도', details };
+}
+
+// Camera moves settle at once when the system asks for reduced motion, unless
+// the caller chose explicitly.
+export function cameraMoveImmediate(options = {}, reducedMotion = false) {
+  return typeof options?.immediate === 'boolean' ? options.immediate : reducedMotion === true;
+}
+
 const copy = value => value == null ? value : JSON.parse(JSON.stringify(value));
 export function ownedProjectionMembers(projection, ownership) {
   return projection.members.map(member => member.viewId).filter(id => ownership[id] === projection.id);

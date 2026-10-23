@@ -72,12 +72,15 @@
     { id: 'create',   label: '추가',    icon: 'plus' },
   ];
   const DOCK_CENTER = [
-    { id: 'pencil',   label: '펜',     icon: 'pencil' },
-    { id: 'hand',     label: '손',     icon: 'move' },
-    { id: 'square',   label: '사각형', icon: 'square' },
-    { id: 'ellipse',  label: '원',     icon: 'ellipse' },
-    { id: 'line',     label: '선',     icon: 'line' },
-    { id: 'arrow',    label: '선택',   icon: 'pointer', active: true },
+    { id: 'pencil',    label: '펜',     icon: 'pencil' },
+    { id: 'hand',      label: '손',     icon: 'move' },
+    { id: 'square',    label: '사각형', icon: 'square' },
+    { id: 'ellipse',   label: '원',     icon: 'ellipse' },
+    { id: 'line',      label: '선',     icon: 'line' },
+    { id: 'arrow',     label: '화살표', icon: 'arrow' },
+    { id: 'label',     label: '글자',   icon: 'text' },
+    { id: 'highlight', label: '강조',   icon: 'highlight' },
+    { id: 'select',    label: '선택',   icon: 'pointer', active: true },
   ];
   const DOCK_RIGHT = [
     { id: 'trash',    label: '휴지통', icon: 'trash' },
@@ -92,10 +95,10 @@
       emptyPreview: '아직 메시지가 없습니다',
     },
     group: {
-      label: 'Agenda',
-      longLabel: 'Agenda Thread',
-      createTitle: '새 Agenda Thread',
-      emptyPreview: '아직 Agenda 메시지가 없습니다',
+      label: 'Board',
+      longLabel: 'Board Thread',
+      createTitle: '새 Board Thread',
+      emptyPreview: '아직 Board 메시지가 없습니다',
     },
   };
   const DEFAULT_CODEX_AGENT_PROFILE_ID = 'conversational-coding';
@@ -140,8 +143,8 @@
       capabilities: ['agenda-routing', 'task-planning', 'verification-plan', 'agent-coordination'],
       systemPrompt: [
         'You are EG-Desk\'s coding project manager agent.',
-        'Preserve the high-level objective and agenda context while decomposing work into scoped coding tasks.',
-        'Decide whether work belongs in Agent DM, an Agenda Thread, a specialized agent, or a concrete implementation pass.',
+        'Preserve the high-level objective and Board context while decomposing work into scoped coding tasks.',
+        'Decide whether work belongs in Agent DM, a Board Thread, a specialized agent, or a concrete implementation pass.',
         'Track risks, verification requirements, and unresolved decisions; keep final chat output brief with links or canvas cards for detailed artifacts.',
       ].join('\n'),
     },
@@ -320,9 +323,14 @@
     return codexThreadKindMeta(type).longLabel;
   }
 
+  // The key names the badge style; the label is the word shown.
+  function codexThreadSessionKey(thread) {
+    if (ChatState.nativeBindingHeld(thread)) return 'local';
+    return thread?.conversationId ? 'resumed' : 'fresh';
+  }
+
   function codexThreadSessionLabel(thread) {
-    if (ChatState.nativeBindingHeld(thread)) return 'Local';
-    return thread?.conversationId ? 'Resumed' : 'Fresh';
+    return { local: '로컬 기록', resumed: '이어진 대화', fresh: '새 대화' }[codexThreadSessionKey(thread)];
   }
 
   function chatBindingNonce() {
@@ -336,7 +344,7 @@
   function buildThreadSubtitle(type, participants) {
     if (type === 'group') {
       const count = Math.max(0, participants.length);
-      return `Agenda Thread · 멤버 ${count}명`;
+      return `Board Thread · 멤버 ${count}명`;
     }
     const peer = participants.find((name) => name !== SELF_MEMBER) || 'Agent';
     return `Agent DM · ${peer}`;
@@ -405,7 +413,7 @@
   const state = {
     surface: { mode: 'desk', browserCardId: null, initialBrowserFocus: false, restoring: false },
     boards: { projections: {}, activeProjectionId: null },
-    activeTool: 'arrow',
+    activeTool: 'select',
     hudOpen: false,
     hudApp: null,
     activeEntityId: null,
@@ -492,6 +500,13 @@
       isStartingLogin: false,
       connected: false,
       lastBridgeLatency: null,
+      // Bridge reconnect state for the connection notice: failed reconnects in a
+      // row, the last raw transport error (shown only under '자세히'), and the
+      // /v1/state `bridge` build fields when the bridge reports them.
+      bridgeFailures: 0,
+      bridgeError: null,
+      bridgeBuild: null,
+      showBridgeDetails: false,
       showDiagnostics: false,
       chatProtocol: ChatState.createChatProtocolState(),
       localHistoryStatus: 'idle',
@@ -908,7 +923,7 @@
     const panelTop = document.getElementById('egd-answer-briefing')?.getBoundingClientRect().top;
     if (panelTop > safe.top + 180) { safe.bottom = Math.min(safe.bottom, panelTop - 20); safe.height = safe.bottom - safe.top; }
     const camera = SurfaceState.fitSurfaceCamera(bounds, safe);
-    state.setCanvasViewportTarget?.(camera, { immediate: window.matchMedia?.('(prefers-reduced-motion: reduce)').matches });
+    state.setCanvasViewportTarget?.(camera);
     focusCanvasCard(document.getElementById(resolved.find(item => item.status === 'available')?.view.id));
     return true;
   }
@@ -1321,6 +1336,12 @@
   const DESK_SESSION_PREF = 'egdesk.deskSession.v1';
   const ONTOLOGY_GRAPH_URL = 'chrome://userchrome/content/ontology/graph.json';
 
+  // The system 'reduce motion' setting, read at each camera move so a change
+  // applies without a restart.
+  function prefersReducedMotion() {
+    try { return window.matchMedia?.('(prefers-reduced-motion: reduce)')?.matches === true; } catch { return false; }
+  }
+
   function el(tag, props = {}, ...children) {
     const node = document.createElement(tag);
     for (const [k, v] of Object.entries(props)) {
@@ -1372,6 +1393,10 @@
     square: [['rect', { x: '4', y: '4', width: '16', height: '16', rx: '2' }]],
     ellipse: [['circle', { cx: '12', cy: '12', r: '8' }]],
     line: [['path', { d: 'M5 19 19 5' }]],
+    arrow: [['path', { d: 'M5 19 19 5m-8 0h8v8' }]],
+    text: [['path', { d: 'M5 6V4h14v2M12 4v16m-3 0h6' }]],
+    highlight: [['rect', { x: '3', y: '7', width: '18', height: '10', rx: '1.5' }], ['path', { d: 'm7 17 6-10m-1 10 6-10' }]],
+    board: [['rect', { x: '3', y: '4', width: '18', height: '16', rx: '2' }], ['path', { d: 'M9 4v16' }]],
     pointer: [['path', { d: 'M4 3v17l5-5 3.3 6 2.4-1.3-3.3-6L19 12 4 3Z' }]],
     trash: [['path', { d: 'M4 6h16M9 6V4h6v2m-9 0 1 15h10l1-15M10 10v7m4-7v7' }]],
     desk: [['rect', { x: '3', y: '3', width: '18', height: '18', rx: '2' }], ['path', { d: 'M12 3v18M3 12h18' }]],
@@ -1686,7 +1711,7 @@
     const nextMeta = {
       ...meta,
       id: agendaId,
-      title: fallback.title || snapshot?.agenda?.title || meta.title || 'Agenda',
+      title: fallback.title || snapshot?.agenda?.title || meta.title || 'Board',
       createdAt: meta.createdAt || snapshot?.savedAt || fallback.createdAt || now,
       updatedAt: meta.updatedAt || snapshot?.savedAt || fallback.updatedAt || now,
     };
@@ -1799,19 +1824,20 @@
 
   function serializeShapeState(shape) {
     if (!shape || !shape.isConnected) return null;
+    const type = shape.dataset.shapeType || 'rect';
+    // A label that was never committed has nothing to keep.
+    if (type === 'label' && !shape._labelText) return null;
     const geometry = persistentEntityGeometry(shape);
     return {
       id: shape.id,
-      type: shape.dataset.shapeType || 'rect',
+      type,
       geometry,
       sourceRef: cleanSourceRef(shape._sourceRef),
-      runtimeState: {
+      runtimeState: SurfaceState.canvasShapeRuntime(type, {
         transform: shape.style.transform || '',
-        x1: shape.dataset.x1 || null,
-        y1: shape.dataset.y1 || null,
-        x2: shape.dataset.x2 || null,
-        y2: shape.dataset.y2 || null,
-      },
+        x1: shape.dataset.x1, y1: shape.dataset.y1, x2: shape.dataset.x2, y2: shape.dataset.y2,
+        points: shape._pathPoints, text: shape._labelText,
+      }),
     };
   }
 
@@ -1948,6 +1974,9 @@
     return view;
   }
 
+  // Most recently activated Board projections, newest first (this session only).
+  const recentBoardProjectionIds = [];
+
   function selectBoardProjection(projectionId) {
     const projection = state.boards.projections[projectionId];
     if (!projection) return false;
@@ -1956,31 +1985,134 @@
     state.agenda.activeTitle = projection.title;
     state.agenda.dirty = !!projection.dirty;
     state.agenda.hasSavedState = !!coerceAgendaStore().agendas[projection.boardId];
+    const previous = recentBoardProjectionIds.indexOf(projection.id);
+    if (previous >= 0) recentBoardProjectionIds.splice(previous, 1);
+    recentBoardProjectionIds.unshift(projection.id);
+    recentBoardProjectionIds.length = Math.min(recentBoardProjectionIds.length, 8);
     syncViewportAgendaRail();
     return true;
+  }
+
+  function syncBoardRegionMarks(region, projection) {
+    const active = projection.id === state.boards.activeProjectionId;
+    const dirty = !!projection.dirty;
+    if (region.dataset.active !== String(active)) region.dataset.active = String(active);
+    if (region.dataset.dirty !== String(dirty)) region.dataset.dirty = String(dirty);
+    const current = region.querySelector('.egd-board-region-current');
+    if (current && current.hidden === active) current.hidden = !active;
+    const unsaved = region.querySelector('.egd-board-region-unsaved');
+    if (unsaved && unsaved.hidden === dirty) unsaved.hidden = !dirty;
+  }
+
+  function syncAllBoardRegionMarks() {
+    for (const projection of Object.values(state.boards.projections)) {
+      const region = document.getElementById(projection.id);
+      if (region) syncBoardRegionMarks(region, projection);
+    }
   }
 
   function refreshBoardRegion(projection) {
     let region = document.getElementById(projection.id);
     if (!region) {
       region = el('section', {
-        id: projection.id, class: 'egd-board-region', 'aria-label': `Board ${projection.title}`,
+        id: projection.id, class: 'egd-board-region',
         data: { boardId: projection.boardId, projectionId: projection.id, testid: 'board-projection' },
-      }, el('div', { class: 'egd-board-region-bar' },
-        el('button', { 'aria-label': `Board ${projection.title} 선택`, onclick: () => selectBoardProjection(projection.id) }, projection.title),
-        el('button', { 'aria-label': '이 Board 저장', data: { testid: 'board-save', projectionId: projection.id }, onclick: () => saveCurrentAgendaState({ projectionId: projection.id }) }, '저장'),
-        el('button', { 'aria-label': '이 Board의 요소를 Chat에 첨부', data: { testid: 'board-attach-chat', projectionId: projection.id },
-          onclick: () => openChatInputPanel(state.codex.activeThreadId, { viewIds: projection.members.map(member => member.viewId) }) }, 'Chat 첨부'),
-        el('button', { 'aria-label': '이 Board 닫기', data: { testid: 'board-close', projectionId: projection.id }, onclick: () => closeCurrentAgenda({ projectionId: projection.id }) }, '닫기')));
+      }, el('div', { class: 'egd-board-region-head' },
+        el('button', { type: 'button', class: 'egd-board-region-title', data: { testid: 'board-select', projectionId: projection.id },
+          onclick: () => selectBoardProjection(projection.id) },
+        deskIcon('board'), el('span', { class: 'egd-board-region-name' })),
+        el('span', { class: 'egd-board-region-current', hidden: true }, '현재 Board'),
+        el('span', { class: 'egd-board-region-unsaved', hidden: true }, '저장 안 됨'),
+        el('button', { type: 'button', class: 'egd-board-region-menu-button', title: 'Board 작업',
+          'aria-haspopup': 'menu', 'aria-expanded': 'false', data: { testid: 'board-menu', projectionId: projection.id },
+          onclick: (ev) => {
+            ev.stopPropagation();
+            toggleBoardRegionMenu(projection.id, ev.currentTarget);
+          } }, deskIcon('menu'))));
       document.getElementById('egd-canvas-layer').prepend(region);
     }
+    region.setAttribute('aria-label', `Board ${projection.title}`);
+    const name = region.querySelector('.egd-board-region-name');
+    if (name && name.textContent !== projection.title) name.textContent = projection.title;
+    region.querySelector('.egd-board-region-title')?.setAttribute('aria-label', `Board ${projection.title} 선택`);
+    region.querySelector('.egd-board-region-menu-button')?.setAttribute('aria-label', `${projection.title} Board 작업`);
+    syncBoardRegionMarks(region, projection);
     const rects = projection.members.map(m => document.getElementById(m.viewId)).filter(Boolean).map(persistentEntityGeometry);
-    const x = rects.length ? Math.min(...rects.map(r => r.x)) - 18 : projection.offset?.x || 40;
-    const y = rects.length ? Math.min(...rects.map(r => r.y)) - 48 : projection.offset?.y || 80;
-    const right = rects.length ? Math.max(...rects.map(r => r.x + r.width)) + 18 : x + 340;
-    const bottom = rects.length ? Math.max(...rects.map(r => r.y + r.height)) + 18 : y + 100;
-    Object.assign(region.style, { left: `${x}px`, top: `${y}px`, width: `${right - x}px`, height: `${bottom - y}px` });
+    const rect = SurfaceState.boardRegionRect(rects, { fallback: projection.offset });
+    Object.assign(region.style, { left: `${rect.x}px`, top: `${rect.y}px`, width: `${rect.width}px`, height: `${rect.height}px` });
+    scheduleViewportBoardSync();
     return region;
+  }
+
+  let boardRegionMenu = null;
+  function closeBoardRegionMenu({ restoreFocus = false } = {}) {
+    const menu = boardRegionMenu;
+    if (!menu) return;
+    boardRegionMenu = null;
+    menu._dispose?.();
+    menu.remove();
+    menu._anchor.setAttribute('aria-expanded', 'false');
+    if (restoreFocus && menu._anchor.isConnected) menu._anchor.focus();
+  }
+
+  function toggleBoardRegionMenu(projectionId, anchor) {
+    const sameMenu = boardRegionMenu?.dataset.projectionId === projectionId;
+    closeBoardRegionMenu();
+    const projection = state.boards.projections[projectionId];
+    if (sameMenu || !projection || !anchor?.isConnected) return null;
+    const item = (label, title, testid, action) => el('button', {
+      type: 'button', class: 'egd-board-menu-item', role: 'menuitem', title, 'aria-label': title,
+      data: { testid, projectionId },
+      onclick: (ev) => {
+        ev.stopPropagation();
+        closeBoardRegionMenu();
+        action();
+      },
+    }, label);
+    const items = [
+      item('저장', '이 Board 저장', 'board-save', () => saveCurrentAgendaState({ projectionId })),
+      item('Chat에 첨부', '이 Board의 요소를 Chat에 첨부', 'board-attach-chat',
+        () => openChatInputPanel(state.codex.activeThreadId, { viewIds: projection.members.map(member => member.viewId) })),
+      item('Board 닫기', '이 Board 닫기', 'board-close', () => closeCurrentAgenda({ projectionId })),
+    ];
+    const pos = resolveFloatingMenuPlacement(anchor.getBoundingClientRect(), 152, 112);
+    const menu = el('div', {
+      class: 'egd-board-menu', role: 'menu', 'aria-label': `${projection.title} Board 작업`,
+      data: { projectionId }, style: { left: `${Math.round(pos.left)}px`, top: `${Math.round(pos.top)}px` },
+    }, ...items);
+    const onKeydown = (ev) => {
+      if (ev.key === 'Escape') {
+        ev.preventDefault();
+        ev.stopPropagation();
+        closeBoardRegionMenu({ restoreFocus: true });
+        return;
+      }
+      const current = items.indexOf(document.activeElement);
+      const next = ev.key === 'ArrowDown' ? (current + 1) % items.length
+        : ev.key === 'ArrowUp' ? (current - 1 + items.length) % items.length
+          : ev.key === 'Home' ? 0 : ev.key === 'End' ? items.length - 1 : -1;
+      if (next < 0) return;
+      ev.preventDefault();
+      items[next].focus();
+    };
+    // The menu is screen chrome over a moving Canvas; a press elsewhere or a pan closes it.
+    const onOutside = (ev) => {
+      if (menu.contains(ev.target) || anchor.contains(ev.target)) return;
+      closeBoardRegionMenu();
+    };
+    menu.addEventListener('keydown', onKeydown);
+    window.addEventListener('mousedown', onOutside, true);
+    window.addEventListener('wheel', onOutside, true);
+    menu._anchor = anchor;
+    menu._dispose = () => {
+      window.removeEventListener('mousedown', onOutside, true);
+      window.removeEventListener('wheel', onOutside, true);
+    };
+    document.documentElement.appendChild(menu);
+    anchor.setAttribute('aria-expanded', 'true');
+    boardRegionMenu = menu;
+    items[0].focus();
+    return menu;
   }
 
   function openBoardSnapshot(snapshot, options = {}) {
@@ -2078,13 +2210,25 @@
   }
 
   function restoreShapeFromState(shapeState) {
-    const shape = createCanvasShape(shapeState?.type || 'rect');
+    const restored = SurfaceState.restoreCanvasShape(shapeState);
+    const shape = createCanvasShape(restored.type);
     retargetRestoredEntityId(shape, shapeState?.id);
     if (shapeState?.sourceRef) shape._sourceRef = shapeState.sourceRef;
     applyPersistentEntityGeometry(shape, shapeState?.geometry);
-    if (shapeState?.runtimeState?.transform) shape.style.transform = shapeState.runtimeState.transform;
-    for (const key of ['x1', 'y1', 'x2', 'y2']) {
-      if (shapeState?.runtimeState?.[key] != null) shape.dataset[key] = shapeState.runtimeState[key];
+    if (restored.transform) shape.style.transform = restored.transform;
+    for (const [key, value] of Object.entries(restored.line)) {
+      if (value != null) shape.dataset[key] = value;
+    }
+    if (restored.type === 'path') {
+      shape._pathPoints = restored.points;
+      renderCanvasPath(shape);
+    }
+    if (restored.type === 'label') {
+      shape._labelText = restored.text;
+      shape.querySelector('.egd-canvas-shape-label-text').textContent = restored.text;
+      // A label sizes to its text; the saved box is only its last measured extent.
+      shape.style.width = '';
+      shape.style.height = '';
     }
     const host = document.getElementById('egd-canvas-layer') || document.documentElement;
     host.appendChild(shape);
@@ -2381,7 +2525,7 @@
     return JSON.parse(JSON.stringify(value));
   }
 
-  function normalizeAgendaTitle(title, fallback = 'Agenda') {
+  function normalizeAgendaTitle(title, fallback = 'Board') {
     const cleaned = String(title || '').replace(/\s+/g, ' ').trim();
     return cleaned || fallback;
   }
@@ -2415,7 +2559,7 @@
     if (!agendaId) return false;
     const store = coerceAgendaStore();
     const snapshot = store.agendas?.[agendaId] || null;
-    const fallbackTitle = snapshot?.agenda?.title || store.meta?.[agendaId]?.title || 'Agenda';
+    const fallbackTitle = snapshot?.agenda?.title || store.meta?.[agendaId]?.title || 'Board';
     const title = normalizeAgendaTitle(nextTitle, fallbackTitle);
     store.meta[agendaId] = {
       ...(store.meta[agendaId] || {}),
@@ -2454,9 +2598,9 @@
       ? serializeAgendaSnapshot()
       : store.agendas?.[agendaId];
     if (!sourceSnapshot) return null;
-    const sourceTitle = sourceSnapshot.agenda?.title || store.meta?.[agendaId]?.title || 'Agenda';
+    const sourceTitle = sourceSnapshot.agenda?.title || store.meta?.[agendaId]?.title || 'Board';
     const newId = newAgendaId('agenda-copy');
-    const newTitle = normalizeAgendaTitle(options.title, `${sourceTitle} Copy`);
+    const newTitle = normalizeAgendaTitle(options.title, `${sourceTitle} 사본`);
     const shouldActivate = options.activate !== false;
     const snapshot = cloneJson(sourceSnapshot);
     snapshot.savedAt = Date.now();
@@ -2497,11 +2641,7 @@
   }
 
   function agendaEntryStatus(entry) {
-    if (entry.dirty) return 'Unsaved';
-    if (entry.closed) return 'Closed';
-    if (entry.current) return 'Current';
-    if (entry.saved) return 'Saved';
-    return 'Draft';
+    return SurfaceState.boardEntryStatusLabel(entry);
   }
 
   function agendaEntryMatchesFilter(entry, filter = state.agenda.switcherFilter) {
@@ -2792,16 +2932,16 @@
   function cardSubtitleForRailSearch(card) {
     if (!card) return '';
     if (card.classList.contains('egd-browser-card')) {
-      return card.querySelector('.egd-card-url')?.value || card._sourceRef?.uri || 'Browser card';
+      return card.querySelector('.egd-card-url')?.value || card._sourceRef?.uri || 'Browser 카드';
     }
     if (card.classList.contains('egd-chat-card')) {
       const active = getActiveCodexThread(state.codex);
-      return active ? `${codexThreadLongLabel(active.type)} · ${codexThreadSessionLabel(active)}` : 'Chat card';
+      return active ? `${codexThreadLongLabel(active.type)} · ${codexThreadSessionLabel(active)}` : 'Chat 카드';
     }
-    if (card.classList.contains('egd-ontology-card')) return 'Ontology map';
-    if (card.classList.contains('egd-terminal-card')) return 'Terminal card';
-    if (card.classList.contains('egd-settings-card')) return 'Settings card';
-    return card._sourceRef?.uri || card._sourceRef?.id || card.id || 'Canvas card';
+    if (card.classList.contains('egd-ontology-card')) return '온톨로지 지도';
+    if (card.classList.contains('egd-terminal-card')) return 'Terminal 카드';
+    if (card.classList.contains('egd-settings-card')) return '설정 카드';
+    return card._sourceRef?.uri || card._sourceRef?.id || card.id || 'Canvas 카드';
   }
 
   function railSearchUrlTitle(uri) {
@@ -2827,9 +2967,9 @@
       .map((entry) => ({
         key: `agenda:${entry.id}`,
         type: 'agenda',
-        section: 'Agenda',
+        section: SurfaceState.railSearchSectionLabel('agenda'),
         title: entry.title,
-        subtitle: [agendaEntryStatus(entry), `${entry.count} items`].join(' · '),
+        subtitle: [agendaEntryStatus(entry), SurfaceState.boardItemCountLabel(entry.count)].join(' · '),
         active: entry.current,
         execute: () => {
           if (!entry.current) switchAgenda(entry.id);
@@ -2860,7 +3000,7 @@
       .map(({ card, title, subtitle }) => ({
         key: `card:${card.id}`,
         type: 'card',
-        section: 'Canvas',
+        section: SurfaceState.railSearchSectionLabel('card'),
         title,
         subtitle,
         active: card.id === state.activeEntityId,
@@ -2885,9 +3025,9 @@
         results.push({
           key: `history:${agendaId}:${card.id}:${uri}`,
           type: 'history',
-          section: 'History',
+          section: SurfaceState.railSearchSectionLabel('history'),
           title: railSearchUrlTitle(uri),
-          subtitle: `${agendaTitle} · saved browser`,
+          subtitle: `${agendaTitle} · 저장된 Browser`,
           active: false,
           execute: () => spawnBrowserCard(uri, { openMode: 'focus-existing' }),
         });
@@ -2903,9 +3043,9 @@
       .slice(0, 6).map((file) => ({
       key: `file:${file.path}`,
       type: 'file',
-      section: 'Files',
+      section: SurfaceState.railSearchSectionLabel('file'),
       title: file.name,
-      subtitle: `${file.root} · ${file.type} · ${file.path}`,
+      subtitle: `${file.root} · ${file.type === 'folder' ? '폴더' : '파일'} · ${file.path}`,
       active: false,
       execute: () => spawnBrowserCard(railSearchPathToFileUrl(file.path, file.type === 'folder'), { openMode: 'new' }),
     }));
@@ -2929,7 +3069,7 @@
       .map((thread) => ({
         key: `thread:${thread.id}`,
         type: 'thread',
-        section: 'Chat',
+        section: SurfaceState.railSearchSectionLabel('thread'),
         title: thread.title,
         subtitle: `${codexThreadLongLabel(thread.type)} · ${codexThreadSessionLabel(thread)} · ${codexThreadPreview(thread)}`,
         active: thread.id === state.codex.activeThreadId,
@@ -2944,9 +3084,9 @@
     return {
       key: `web:${url}`,
       type: 'web',
-      section: 'Web',
-      title: railSearchLooksLikeNavigation(q) ? url : `Search "${q}"`,
-      subtitle: 'Browser card',
+      section: SurfaceState.railSearchSectionLabel('web'),
+      title: railSearchLooksLikeNavigation(q) ? url : `웹에서 "${q}" 검색`,
+      subtitle: '새 Browser 카드로 열기',
       active: false,
       execute: () => spawnBrowserCard(url, { openMode: 'new' }),
     };
@@ -3039,12 +3179,12 @@
           executeRailSearchResult(result);
         },
       },
-        el('span', { class: `egd-rail-search-type egd-rail-search-type-${result.type}` }, result.type),
+        el('span', { class: `egd-rail-search-type egd-rail-search-type-${result.type}` }, SurfaceState.railSearchSectionLabel(result.type)),
         el('span', { class: 'egd-rail-search-main' },
           el('span', { class: 'egd-rail-search-title' }, result.title),
           el('span', { class: 'egd-rail-search-subtitle' }, result.subtitle),
         ),
-        result.active ? el('span', { class: 'egd-rail-search-current' }, 'Active') : null,
+        result.active ? el('span', { class: 'egd-rail-search-current' }, '현재') : null,
       ));
     });
     panel.replaceChildren(
@@ -3157,8 +3297,8 @@
   }
 
   function showAgendaTransitionGuard({
-    title = 'Agenda',
-    heading = 'Agenda를 전환할까요?',
+    title = 'Board',
+    heading = 'Board를 전환할까요?',
     discardLabel = '버리고 전환',
     saveLabel = '저장 후 전환',
     onSave,
@@ -3288,6 +3428,7 @@
       class: 'egd-agenda-switch-row' + (entry.current ? ' egd-agenda-switch-row-current' : ''),
       role: 'button',
       tabindex: '0',
+      'aria-current': entry.current ? 'true' : null,
       'aria-label': `Board ${entry.title} 열기`,
       data: { agendaId: entry.id, boardId: entry.id, testid: 'board-open' },
       onclick: (ev) => {
@@ -3302,15 +3443,17 @@
         switchAgenda(entry.id);
       },
     },
-      el('span', { class: 'egd-agenda-switch-row-dot' }),
+      el('span', { class: 'egd-agenda-switch-row-dot', 'aria-hidden': 'true' }),
       el('span', { class: 'egd-agenda-switch-row-main' },
         el('span', { class: 'egd-agenda-switch-row-title' }, entry.title),
         el('span', { class: 'egd-agenda-switch-row-meta' },
           [
+            // The current Board is said in words, not only by the row colour.
+            entry.current && agendaEntryStatus(entry) !== '현재' ? '현재' : null,
             agendaEntryStatus(entry),
-            entry.closed ? 'Closed history' : entry.lastOpenedAt ? 'Recent' : 'Stored',
-            `${entry.count} items`,
-          ].join(' · '),
+            SurfaceState.boardEntryRecencyLabel(entry),
+            SurfaceState.boardItemCountLabel(entry.count),
+          ].filter(Boolean).join(' · '),
         ),
       ),
       el('span', { class: 'egd-agenda-switch-row-actions' },
@@ -3374,7 +3517,7 @@
         el('input', {
           type: 'search',
           class: 'egd-agenda-switch-search-input',
-          placeholder: 'Agenda 검색...',
+          placeholder: 'Board 검색...',
           value: state.agenda.switcherQuery,
           oninput: (ev) => {
             state.agenda.switcherQuery = ev.target.value;
@@ -3502,17 +3645,15 @@
   }
 
   function activeToolIsShape() {
-    return state.activeTool === 'square' || state.activeTool === 'ellipse' || state.activeTool === 'line';
+    return !!SurfaceState.canvasToolShapeType(state.activeTool);
   }
 
   function syncActiveToolMode() {
-    document.documentElement.dataset.egdActiveTool = state.activeTool || 'arrow';
+    document.documentElement.dataset.egdActiveTool = SurfaceState.normalizeCanvasTool(state.activeTool);
   }
 
   function shapeTypeForTool(tool = state.activeTool) {
-    if (tool === 'ellipse') return 'ellipse';
-    if (tool === 'line') return 'line';
-    return 'rect';
+    return SurfaceState.canvasToolShapeType(tool) || 'rect';
   }
 
   function deleteSelectedEntities() {
@@ -3676,6 +3817,59 @@
     return groupThread?.title || 'EG-Desk';
   }
 
+  // The top bar names the Board on screen. Saved titles keep using
+  // currentViewportAgendaLabel, which never carries the '· +N' suffix.
+  function viewportBoardResolution() {
+    const regions = [];
+    for (const projection of Object.values(state.boards.projections)) {
+      const region = document.getElementById(projection.id);
+      if (!region) continue;
+      const left = parsePxNumber(region.style.left, NaN);
+      const top = parsePxNumber(region.style.top, NaN);
+      regions.push({ id: projection.id, rect: { left, top,
+        right: left + parsePxNumber(region.style.width, 0), bottom: top + parsePxNumber(region.style.height, 0) } });
+    }
+    const activeEntity = state.activeEntityId ? document.getElementById(state.activeEntityId) : null;
+    return SurfaceState.resolveViewportBoard({
+      viewport: viewportWorldRect(), regions,
+      activeId: state.boards.activeProjectionId,
+      activeEntityBoardId: activeEntity?.dataset.projectionId || null,
+      recentIds: recentBoardProjectionIds,
+    });
+  }
+
+  function viewportBoardLabel(resolution = viewportBoardResolution()) {
+    const projection = resolution.primaryId != null ? state.boards.projections[resolution.primaryId] : null;
+    if (!projection) return { text: 'Board 없음', title: '화면에 보이는 Board가 없습니다' };
+    const names = resolution.visibleIds.map(id => state.boards.projections[id]?.title).filter(Boolean);
+    return {
+      text: resolution.extraCount > 0 ? `${projection.title} · +${resolution.extraCount}` : projection.title,
+      title: names.length > 1 ? `화면의 Board: ${names.join(', ')}` : projection.title,
+    };
+  }
+
+  function syncViewportBoardName() {
+    const agendaName = document.querySelector('.egd-rail-agenda-name');
+    if (!agendaName) return;
+    const label = viewportBoardLabel();
+    if (agendaName.textContent !== label.text) agendaName.textContent = label.text;
+    if (agendaName.title !== label.title) agendaName.title = label.title;
+  }
+
+  // Camera frames call this; the name follows the camera at most every 120ms.
+  const VIEWPORT_BOARD_SYNC_MS = 120;
+  let viewportBoardSyncTimer = 0;
+  let viewportBoardSyncAt = 0;
+  function scheduleViewportBoardSync() {
+    if (viewportBoardSyncTimer) return;
+    const wait = Math.max(0, VIEWPORT_BOARD_SYNC_MS - (Date.now() - viewportBoardSyncAt));
+    viewportBoardSyncTimer = window.setTimeout(() => {
+      viewportBoardSyncTimer = 0;
+      viewportBoardSyncAt = Date.now();
+      syncViewportBoardName();
+    }, wait);
+  }
+
   function cardLabelForViewportRail(card) {
     if (!card) return 'Card';
     if (card.classList.contains('egd-terminal-card')) return 'Terminal';
@@ -3712,16 +3906,15 @@
         railRight.insertBefore(gadget, avatar);
       }
     }
-    const agendaName = document.querySelector('.egd-rail-agenda-name');
-    if (agendaName) agendaName.textContent = currentViewportAgendaLabel();
+    syncViewportBoardName();
+    syncAllBoardRegionMarks();
     const switcher = document.querySelector('.egd-rail-switcher');
     if (switcher) switcher.classList.toggle('egd-rail-switcher-open', !!document.getElementById('egd-agenda-switcher'));
     const dirtyBadge = document.querySelector('.egd-rail-dirty-badge');
     if (dirtyBadge) {
       dirtyBadge.hidden = !state.agenda.dirty;
-      dirtyBadge.title = state.agenda.dirty
-        ? `Agenda unsaved changes · rev ${state.agenda.dirtyRevision}`
-        : 'Agenda saved';
+      dirtyBadge.title = SurfaceState.boardSaveStatusTitle(state.agenda.dirty);
+      dirtyBadge.dataset.revision = String(state.agenda.dirtyRevision || 0);
     }
     const saveBtn = document.querySelector('.egd-rail-save-btn');
     if (saveBtn) saveBtn.hidden = !state.agenda.dirty;
@@ -3854,7 +4047,7 @@
     panel.dataset.sparsity = String(Math.round(modelBase.sparsity * 100));
     const caption = panel.querySelector('.egd-minimap-caption');
     if (caption) {
-      caption.textContent = `${Math.round(dimensions.zoom * 100)}% · ${modelBase.entities.length} objects · ${Math.round(modelBase.spreadRatio * 10) / 10}x spread`;
+      caption.textContent = SurfaceState.deskMinimapCaption(dimensions.zoom, modelBase.entities.length);
     }
     return dimensions;
   }
@@ -3909,7 +4102,7 @@
       class: 'egd-minimap-entity'
         + (isCard ? ' egd-minimap-entity-card' : ' egd-minimap-entity-shape')
         + (entity.id === state.activeEntityId ? ' egd-minimap-entity-active' : ''),
-      title: isCard ? cardLabelForViewportRail(entity) : entity.dataset.shapeType || 'Shape',
+      title: isCard ? cardLabelForViewportRail(entity) : CANVAS_SHAPE_TITLES[entity.dataset.shapeType] || '도형',
       style: worldRectToMinimapStyle(rect, model),
       onclick: (ev) => {
         ev.stopPropagation();
@@ -3949,19 +4142,19 @@
       const isActive = entity.id && entity.id === state.activeEntityId;
       const kind = entity.classList.contains('egd-canvas-card')
         ? cardLabelForViewportRail(entity)
-        : entity.dataset.shapeType === 'ellipse' ? 'Ellipse'
-          : entity.dataset.shapeType === 'line' ? 'Line'
-            : 'Rect';
+        : CANVAS_SHAPE_TITLES[entity.dataset.shapeType] || '도형';
       return el('button', {
         class: 'egd-minimap-row' + (isActive ? ' egd-minimap-row-active' : ''),
-        title: `${kind} focus`,
+        title: `${kind} 보기`,
+        'aria-current': isActive ? 'true' : null,
         onclick: () => {
           focusCanvasCard(entity);
           closeDeskMinimap();
         },
       },
-        el('span', { class: 'egd-minimap-row-dot' }),
+        el('span', { class: 'egd-minimap-row-dot', 'aria-hidden': 'true' }),
         el('span', { class: 'egd-minimap-row-label' }, kind),
+        isActive ? el('span', { class: 'egd-minimap-row-current' }, '현재') : null,
       );
     });
   }
@@ -4067,11 +4260,11 @@
     }
     const panel = el('div', { id: 'egd-desk-minimap', class: 'egd-edge egd-frosted' },
       el('div', { class: 'egd-minimap-header' },
-        el('div', { class: 'egd-minimap-title' }, 'Desk Minimap'),
+        el('div', { class: 'egd-minimap-title' }, '미니맵'),
         el('button', { class: 'egd-minimap-close', title: '닫기', onclick: closeDeskMinimap }, '×'),
       ),
       el('div', { class: 'egd-minimap-map' }),
-      el('div', { class: 'egd-minimap-caption' }, '100% · 0 objects · 1x spread'),
+      el('div', { class: 'egd-minimap-caption' }, SurfaceState.deskMinimapCaption(1, 0)),
       el('div', { class: 'egd-minimap-list' }, ...buildDeskMinimapEntityRows()),
     );
     document.documentElement.appendChild(panel);
@@ -4328,8 +4521,8 @@
       el('span', { class: 'egd-rail-window-divider' }),
       el('button', { class: 'egd-rail-switcher', title: 'Board 목록', 'aria-label': 'Board 목록', onclick: toggleAgendaSwitcher },
         el('span', { class: 'egd-rail-desk-dot' }),
-        el('span', { class: 'egd-rail-desk-name egd-rail-agenda-name' }, currentViewportAgendaLabel()),
-        el('span', { class: 'egd-rail-dirty-badge', hidden: !state.agenda.dirty }, 'Unsaved'),
+        el('span', { class: 'egd-rail-desk-name egd-rail-agenda-name' }, viewportBoardLabel().text),
+        el('span', { class: 'egd-rail-dirty-badge', hidden: !state.agenda.dirty }, '저장 안 됨'),
         el('span', { class: 'egd-rail-card-badge', hidden: true }),
         el('span', { class: 'egd-rail-chevron' }, deskIcon('chevron')),
       ),
@@ -4782,10 +4975,59 @@
     return '로그아웃됨';
   }
 
+  // /v1/state `bridge` is { buildHash, startedAt, sourceMismatch }. An older
+  // bridge omits it and reads as matching. A successful read also clears the
+  // reconnect count and the raw error.
+  function bridgeConnectionFields(bridgeState) {
+    const bridge = bridgeState?.bridge;
+    return {
+      bridgeFailures: 0,
+      bridgeError: null,
+      bridgeBuild: bridge && typeof bridge === 'object' ? {
+        buildHash: typeof bridge.buildHash === 'string' ? bridge.buildHash : null,
+        startedAt: Number.isFinite(bridge.startedAt) ? bridge.startedAt : null,
+        sourceMismatch: bridge.sourceMismatch === true,
+      } : null,
+    };
+  }
+
+  function codexBridgeNotice(codex) {
+    return SurfaceState.bridgeConnectionNotice({
+      connected: codex.connected,
+      failures: codex.bridgeFailures,
+      error: codex.bridgeError,
+      latencyMs: codex.lastBridgeLatency,
+      bridge: codex.bridgeBuild,
+    });
+  }
+
   function codexBridgeSummary(codex) {
-    if (!codex.connected) return '브리지 오프라인';
-    if (codex.lastBridgeLatency != null) return `브리지 온라인 · ${codex.lastBridgeLatency}ms`;
-    return '브리지 온라인';
+    return codexBridgeNotice(codex).text;
+  }
+
+  // The bridge state in one line; the raw error and timing stay folded under
+  // '자세히', which keeps its open state across re-renders.
+  function buildCodexBridgeNotice(codex, codexBridge) {
+    const notice = codexBridgeNotice(codex);
+    if (notice.state === 'online') return null;
+    return el('div', {
+      class: `egd-codex-connection egd-codex-connection-${notice.state}`,
+      role: 'status',
+      data: { testid: 'chat-bridge-connection', bridgeState: notice.state },
+    },
+      el('div', { class: 'egd-codex-connection-row' },
+        el('span', { class: 'egd-codex-connection-text' }, notice.text),
+        notice.action ? el('button', {
+          class: 'egd-codex-chip egd-codex-chip-subtle',
+          onclick: () => codexBridge.reconnectNow?.(),
+        }, notice.action) : null,
+      ),
+      notice.details.length ? el('details', {
+        class: 'egd-codex-connection-details',
+        open: state.codex.showBridgeDetails ? '' : null,
+        ontoggle: (ev) => { state.codex.showBridgeDetails = ev.currentTarget.open === true; },
+      }, el('summary', {}, '자세히'), el('pre', {}, notice.details.join('\n'))) : null,
+    );
   }
 
   function mountCodexHUD(body, codexBridge, options = {}) {
@@ -4877,13 +5119,19 @@
       const isHudListView = hudView === 'list';
       const isHudConversationView = hudView === 'conversation';
 
-      const statusBridge = codex.error
-        ? 'Codex 점검 필요'
-        : (codex.connected ? 'Codex 연결됨' : 'Codex 연결 대기');
+      // While the bridge is not online the connection notice says the state;
+      // the chip row then carries only the account.
+      const bridgeNotice = codexBridgeNotice(codex);
+      const statusBridge = bridgeNotice.state !== 'online'
+        ? null
+        : (codex.error ? 'Codex 점검 필요' : 'Codex 연결됨');
       const statusAccount = codex.authStatus.isLoggedIn
         ? '로그인됨'
         : ((codex.isStartingLogin || codex.authStatus.loginInProgress) ? '로그인 중…' : '로그인 필요');
-      const indicatorState = codex.error ? 'error' : (codex.connected ? 'ok' : 'idle');
+      const indicatorState = bridgeNotice.state === 'reconnecting'
+        ? 'idle'
+        : (bridgeNotice.state !== 'online' || codex.error ? 'error' : 'ok');
+      const connectionNotice = buildCodexBridgeNotice(codex, codexBridge);
 
       const chromeActions = [];
       if (!codex.authStatus.isLoggedIn) {
@@ -4893,7 +5141,7 @@
           onclick: () => codexBridge.startLogin(),
         }, (codex.isStartingLogin || codex.authStatus.loginInProgress) ? '로그인 중…' : '로그인'));
       }
-      if (codex.error || !codex.connected) {
+      if (codex.error && codex.connected) {
         chromeActions.push(el('button', {
           class: 'egd-codex-chip egd-codex-chip-subtle',
           onclick: () => codexBridge.refreshAuthStatus(),
@@ -4903,7 +5151,7 @@
         el('div', { class: 'egd-codex-chrome-main' },
           el('span', { class: `egd-codex-chrome-indicator egd-codex-chrome-indicator-${indicatorState}` }),
           el('div', { class: 'egd-codex-chrome-status' },
-            el('span', { class: `egd-codex-system-chip egd-codex-system-chip-${indicatorState}` }, statusBridge),
+            statusBridge ? el('span', { class: `egd-codex-system-chip egd-codex-system-chip-${indicatorState}` }, statusBridge) : null,
             el('span', { class: `egd-codex-system-chip${codex.authStatus.isLoggedIn ? ' egd-codex-system-chip-ok' : ''}` }, statusAccount),
           ),
         ),
@@ -4985,8 +5233,8 @@
           el('div', { class: 'egd-codex-thread-home-status' }, `${codexBridgeSummary(codex)} · ${codexAuthSummary(codex)}`),
           el('div', { class: 'egd-codex-thread-session-summary' },
             el('div', { class: 'egd-codex-thread-session-pill' }, `Agent ${dmThreads.length}`),
-            el('div', { class: 'egd-codex-thread-session-pill' }, `Agenda ${groupThreads.length}`),
-            el('div', { class: 'egd-codex-thread-session-pill' }, `Unread ${unreadCountTotal}`),
+            el('div', { class: 'egd-codex-thread-session-pill' }, `Board ${groupThreads.length}`),
+            el('div', { class: 'egd-codex-thread-session-pill' }, `안 읽음 ${unreadCountTotal}`),
           ),
         ));
       }
@@ -5005,12 +5253,13 @@
       const filterDefs = [
         { key: 'all', label: '전체' },
         { key: 'dm', label: 'Agent' },
-        { key: 'group', label: 'Agenda' },
+        { key: 'group', label: 'Board' },
       ];
       for (const filterDef of filterDefs) {
         const selected = threadFilter === filterDef.key;
         filterRow.appendChild(el('button', {
           class: `egd-codex-thread-filter-chip${selected ? ' egd-codex-thread-filter-chip-active' : ''}`,
+          'aria-pressed': String(selected),
           onclick: () => codexBridge.setThreadFilter(filterDef.key),
           title: `${filterDef.label} 보기`,
         }, filterDef.label));
@@ -5136,7 +5385,7 @@
                   ),
                   el('div', { class: 'egd-codex-thread-meta-row' },
                     el('span', { class: `egd-codex-thread-kind egd-codex-thread-kind-${thread.type}` }, kindMeta.label),
-                    el('span', { class: `egd-codex-session-badge egd-codex-session-badge-${sessionLabel.toLowerCase()}` }, sessionLabel),
+                    el('span', { class: `egd-codex-session-badge egd-codex-session-badge-${codexThreadSessionKey(thread)}` }, sessionLabel),
                     el('span', { class: 'egd-codex-agent-profile-chip', title: profile.name }, profile.label),
                   ),
                   el('div', { class: 'egd-codex-thread-item-bottom' },
@@ -5283,7 +5532,7 @@
               el('button', {
                 class: 'egd-codex-thread-member-menu-item egd-codex-thread-member-menu-item-danger',
                 onclick: () => codexBridge.removeFromThread(activeThread.id, member),
-              }, 'Agenda에서 제거'),
+              }, 'Board Thread에서 제거'),
               el('button', {
                 class: 'egd-codex-thread-member-menu-item',
                 onclick: () => codexBridge.closeMemberMenu(),
@@ -5667,6 +5916,7 @@
       if (isHudListView) {
         const mainPane = el('div', { class: 'egd-codex-chat-main egd-codex-chat-main-list' },
           chromeRow,
+          connectionNotice,
           authCard || null,
           threadRail,
           diagnostics || null,
@@ -5676,6 +5926,7 @@
         const mainPane = el('div', { class: 'egd-codex-chat-main egd-codex-chat-main-conversation' },
           authCard || null,
           conversation || null,
+          connectionNotice,
           diagnostics || null,
           footer || null,
         );
@@ -6460,16 +6711,24 @@
           isStartingLogin: Boolean(status.loginInProgress),
           connected: true,
           error: null,
+          ...bridgeConnectionFields(bridgeState),
         });
       } catch (error) {
         if (!epochScope.valid(token)) return;
         try {
           const status = await fetchJson('/auth/status', { signal: token.signal });
           if (!epochScope.valid(token)) return;
-          update({ authStatus: status, isStartingLogin: Boolean(status.loginInProgress), connected: true, error: null });
+          update({ authStatus: status, isStartingLogin: Boolean(status.loginInProgress), connected: true, error: null,
+            ...bridgeConnectionFields(null) });
         } catch (fallbackError) {
           if (!epochScope.valid(token)) return;
-          update({ connected: false, error: `코덱스 브리지에 연결할 수 없습니다: ${fallbackError.message}` });
+          // The screen says '다시 연결 중…' by state; the raw message is kept
+          // for the folded '자세히' only.
+          update({
+            connected: false,
+            bridgeFailures: (state.codex.bridgeFailures || 0) + 1,
+            bridgeError: String(fallbackError?.message || fallbackError || ''),
+          });
           scheduleReconnect();
         }
       }
@@ -6556,6 +6815,23 @@
     return {
       loadLocalHistory,
       rootSseReady,
+      // '다시 시도' after the quiet retries ran out: start a fresh connect now
+      // and say '다시 연결 중…' again while it runs.
+      reconnectNow() {
+        if (state.codex.connected) return false;
+        if (reconnectTimer) {
+          window.clearTimeout(reconnectTimer);
+          reconnectTimer = null;
+        }
+        if (source) {
+          clearBrowserToolTransport({ revoke: true });
+          try { source.close(); } catch {}
+          source = null;
+        }
+        update({ bridgeFailures: 0 });
+        void connect();
+        return true;
+      },
       async reconcileRequest(threadId = state.codex.activeThreadId) {
         const thread = getCodexThreadById(state.codex, threadId);
         if (!thread) return null;
@@ -7078,6 +7354,7 @@
             authStatus: status,
             isStartingLogin: Boolean(status.loginInProgress),
             error: null,
+            bridgeBuild: bridgeConnectionFields(bridgeState).bridgeBuild,
           });
         } catch (error) {
           if (!epochScope.valid(token)) return;
@@ -7996,16 +8273,36 @@
   }
 
   // ============ Canvas Shapes ============
+  const CANVAS_SHAPE_TITLES = {
+    rect: '사각형', ellipse: '원', line: '선', arrow: '화살표',
+    path: '펜 그림', label: '글자', highlight: '강조',
+  };
+
   function createCanvasShape(type = 'rect') {
+    const shapeType = SurfaceState.CANVAS_SHAPE_TYPES.includes(type) ? type : 'rect';
     const shape = el('div', {
       id: `egd-shape-${++cardSeq}`,
-      class: `egd-canvas-shape egd-canvas-shape-${type}`,
-      data: { shapeType: type },
-      title: type === 'ellipse' ? '원' : type === 'line' ? '선' : '사각형',
+      class: `egd-canvas-shape egd-canvas-shape-${shapeType}`,
+      data: { shapeType },
+      title: CANVAS_SHAPE_TITLES[shapeType],
       style: { zIndex: String(++cardZ) },
     });
-    if (type === 'line') {
+    if (shapeType === 'line' || shapeType === 'arrow') {
       shape.appendChild(el('span', { class: 'egd-canvas-shape-line-stroke' }));
+    }
+    if (shapeType === 'arrow') {
+      shape.appendChild(el('span', { class: 'egd-canvas-shape-arrow-head' }));
+    }
+    if (shapeType === 'path') {
+      const stroke = { fill: 'none', 'stroke-linecap': 'round', 'stroke-linejoin': 'round' };
+      shape.appendChild(svgEl('svg', { class: 'egd-canvas-shape-path-svg', 'aria-hidden': 'true', focusable: 'false' },
+        svgEl('polyline', { ...stroke, class: 'egd-canvas-shape-path-stroke', stroke: 'currentColor', 'stroke-width': '3', 'pointer-events': 'none' }),
+        svgEl('polyline', { ...stroke, class: 'egd-canvas-shape-path-hit', stroke: 'transparent', 'stroke-width': '14', 'pointer-events': 'stroke', cursor: 'move' })));
+      shape._pathPoints = [];
+    }
+    if (shapeType === 'label') {
+      shape.appendChild(el('span', { class: 'egd-canvas-shape-label-text', spellcheck: 'false' }));
+      shape._labelText = '';
     }
     shape._sourceRef = makeSourceRef('canvas-shape', {
       id: shape.id,
@@ -8017,7 +8314,8 @@
 
   function updateCanvasShapeGeometry(shape, start, current, options = {}) {
     const type = shape?.dataset?.shapeType || 'rect';
-    if (type === 'line') {
+    if (type === 'path' || type === 'label') return;
+    if (type === 'line' || type === 'arrow') {
       const dx = current.x - start.x;
       const dy = current.y - start.y;
       let length = Math.hypot(dx, dy);
@@ -8043,8 +8341,8 @@
     let width = Math.abs(current.x - start.x);
     let height = Math.abs(current.y - start.y);
     if (options.defaultSize && width < 8 && height < 8) {
-      width = type === 'ellipse' ? 96 : 140;
-      height = type === 'ellipse' ? 96 : 88;
+      width = type === 'ellipse' ? 96 : type === 'highlight' ? 160 : 140;
+      height = type === 'ellipse' ? 96 : type === 'highlight' ? 40 : 88;
       left = start.x - width / 2;
       top = start.y - height / 2;
     }
@@ -8054,10 +8352,106 @@
     shape.style.height = `${Math.max(12, Math.round(height))}px`;
   }
 
+  function renderCanvasPath(shape) {
+    const points = (shape._pathPoints || []).map(([x, y]) => `${x},${y}`).join(' ');
+    for (const line of shape.querySelectorAll('polyline')) line.setAttribute('points', points);
+  }
+
+  // Freehand points are stored relative to the mark's box, so a move only
+  // changes the box position.
+  function updateCanvasPathGeometry(shape, worldPoints) {
+    const box = SurfaceState.canvasPathBox(worldPoints);
+    if (!box) return false;
+    shape.style.left = `${box.x}px`;
+    shape.style.top = `${box.y}px`;
+    shape.style.width = `${box.width}px`;
+    shape.style.height = `${box.height}px`;
+    shape._pathPoints = box.points;
+    renderCanvasPath(shape);
+    return true;
+  }
+
+  function beginCanvasLabelEdit(shape, { created = false } = {}) {
+    const text = shape?.querySelector('.egd-canvas-shape-label-text');
+    if (!text || shape.dataset.editing === 'true') return false;
+    const before = shape._labelText || '';
+    let composing = false;
+    let finished = false;
+    const onCompositionStart = () => { composing = true; };
+    const onCompositionEnd = () => { composing = false; };
+    const onKeydown = (ev) => {
+      ev.stopPropagation();
+      // A Korean IME confirms the syllable with Enter; only a settled Enter commits.
+      if (composing || ev.isComposing || ev.keyCode === 229) return;
+      if (ev.key === 'Enter' && !ev.shiftKey) {
+        ev.preventDefault();
+        finish(true);
+      } else if (ev.key === 'Escape') {
+        ev.preventDefault();
+        finish(false);
+      }
+    };
+    // Blur commits an open composition first; read the text after it lands.
+    const onBlur = () => window.setTimeout(() => finish(true), 0);
+    const finish = (commit) => {
+      if (finished) return;
+      finished = true;
+      text.removeEventListener('compositionstart', onCompositionStart);
+      text.removeEventListener('compositionend', onCompositionEnd);
+      text.removeEventListener('keydown', onKeydown);
+      text.removeEventListener('blur', onBlur);
+      for (const name of ['contenteditable', 'role', 'aria-label']) text.removeAttribute(name);
+      delete shape.dataset.editing;
+      shape._finishLabelEdit = null;
+      if (!shape.isConnected) return;
+      const value = commit ? SurfaceState.normalizeCanvasLabelText(text.innerText ?? text.textContent) : before;
+      if (!value) {
+        if (state.activeEntityId === shape.id) setActiveEntity(null);
+        shape._cleanup?.();
+        shape.remove();
+        if (!created) markAgendaDirty('delete-shape', shape);
+        return;
+      }
+      text.textContent = value;
+      shape._labelText = value;
+      if (value !== before) markAgendaDirty(created ? 'create-shape' : 'edit-shape', shape);
+    };
+    shape.dataset.editing = 'true';
+    text.setAttribute('contenteditable', 'true');
+    text.setAttribute('role', 'textbox');
+    text.setAttribute('aria-label', '글자 입력');
+    text.addEventListener('compositionstart', onCompositionStart);
+    text.addEventListener('compositionend', onCompositionEnd);
+    text.addEventListener('keydown', onKeydown);
+    text.addEventListener('blur', onBlur);
+    shape._finishLabelEdit = finish;
+    text.focus();
+    const selection = window.getSelection?.();
+    if (selection) {
+      const range = document.createRange();
+      range.selectNodeContents(text);
+      range.collapse(false);
+      selection.removeAllRanges();
+      selection.addRange(range);
+    }
+    return true;
+  }
+
+  function finishCanvasLabelEdits() {
+    const open = Array.from(document.querySelectorAll('.egd-canvas-shape-label[data-editing="true"]'));
+    for (const shape of open) shape._finishLabelEdit?.(true);
+    return open.length > 0;
+  }
+
   function installShapeInteractions(shape) {
     let drag = null;
     shape.addEventListener('mousedown', (ev) => {
       if (ev.button !== 0) return;
+      if (shape.dataset.editing === 'true') {
+        // Caret placement inside the label being typed, not a move.
+        ev.stopPropagation();
+        return;
+      }
       if (state.panModifier) {
         if (typeof state.startCanvasPanDrag === 'function') state.startCanvasPanDrag(ev);
         return;
@@ -8073,6 +8467,15 @@
       ev.preventDefault();
       ev.stopPropagation();
     });
+    if (shape.dataset.shapeType === 'label') {
+      shape.addEventListener('dblclick', (ev) => {
+        if (shape.dataset.editing === 'true') return;   // word selection while typing
+        ev.preventDefault();
+        ev.stopPropagation();
+        setActiveEntity(shape);
+        beginCanvasLabelEdit(shape);
+      });
+    }
     const onMove = (ev) => {
       if (!drag) return;
       const zoom = canvasZoom();
@@ -13971,8 +14374,14 @@
       viewport.style.setProperty('--egd-camera-pan-y', state.pan.y + 'px');
       viewport.style.setProperty('--egd-camera-zoom', String(state.zoom));
       viewport.style.setProperty('--egd-wood-opacity', String(Math.max(0, Math.min(1, (state.zoom * 100 - 2) / 10))));
+      // Far out, Board names leave the shrinking title row and keep their screen size.
+      const boardLabel = SurfaceState.boardRegionLabelScale(state.zoom);
+      layer.style.setProperty('--egd-board-label-scale', String(boardLabel.scale));
+      const boardLabelMode = boardLabel.far ? 'far' : 'near';
+      if (layer.dataset.egdBoardLabel !== boardLabelMode) layer.dataset.egdBoardLabel = boardLabelMode;
       state.renderSemanticProjections?.();
       refreshDeskMinimap();
+      scheduleViewportBoardSync();
     }
     let frame = 0;
     const animateToTargets = () => {
@@ -14002,7 +14411,7 @@
     const setCanvasPanTarget = (nextPan, options = {}) => {
       if (!nextPan || !Number.isFinite(nextPan.x) || !Number.isFinite(nextPan.y)) return;
       state.panTarget = { x: nextPan.x, y: nextPan.y };
-      if (options.immediate) {
+      if (SurfaceState.cameraMoveImmediate(options, prefersReducedMotion())) {
         if (frame) {
           window.cancelAnimationFrame(frame);
           frame = 0;
@@ -14022,7 +14431,7 @@
       if (Number.isFinite(nextViewport.zoom)) {
         state.zoomTarget = Math.max(ZOOM_MIN, Math.min(ZOOM_MAX, nextViewport.zoom));
       }
-      if (options.immediate) {
+      if (SurfaceState.cameraMoveImmediate(options, prefersReducedMotion())) {
         if (frame) {
           window.cancelAnimationFrame(frame);
           frame = 0;
@@ -14177,6 +14586,7 @@
     let shapeDraw = null;
     viewport.addEventListener('mousedown', (ev) => {
       if (ev.target !== viewport && ev.target !== layer) return;   // 카드/오버레이 클릭은 별도 처리
+      const closedLabel = finishCanvasLabelEdits();
       if (ev.button === 1) {   // 휠클릭(중버튼) 드래그 = 팬 (Miro/Figma 관습)
         beginCanvasPan(ev);
         return;
@@ -14188,6 +14598,31 @@
       }
       if (state.panModifier || state.activeTool === 'hand') {
         beginCanvasPan(ev);
+        return;
+      }
+      if (state.activeTool === 'label') {
+        // A click while a label is open only closes it; the next click adds one.
+        ev.preventDefault();
+        if (closedLabel) return;
+        const point = viewportToCanvasPoint(ev.clientX, ev.clientY);
+        const shape = createCanvasShape('label');
+        shape.style.left = `${Math.round(point.x)}px`;
+        shape.style.top = `${Math.round(point.y - 12)}px`;
+        layer.appendChild(shape);
+        setActiveEntity(shape);
+        beginCanvasLabelEdit(shape, { created: true });
+        return;
+      }
+      if (state.activeTool === 'pencil') {
+        const start = viewportToCanvasPoint(ev.clientX, ev.clientY);
+        const shape = createCanvasShape('path');
+        shape.classList.add('egd-canvas-shape-drawing');
+        updateCanvasPathGeometry(shape, [[start.x, start.y]]);
+        layer.appendChild(shape);
+        shapeDraw = { shape, start, current: start, points: [[start.x, start.y]],
+          clientX: ev.clientX, clientY: ev.clientY, lastX: ev.clientX, lastY: ev.clientY, moved: false };
+        setActiveEntity(null);
+        ev.preventDefault();
         return;
       }
       if (activeToolIsShape()) {
@@ -14223,6 +14658,17 @@
         if (Math.abs(ev.clientX - shapeDraw.clientX) > 2 || Math.abs(ev.clientY - shapeDraw.clientY) > 2) {
           shapeDraw.moved = true;
         }
+        if (shapeDraw.points) {
+          // Sample the pen every 2 screen pixels; release simplifies the whole stroke.
+          if (Math.hypot(ev.clientX - shapeDraw.lastX, ev.clientY - shapeDraw.lastY) >= 2
+              && shapeDraw.points.length < SurfaceState.CANVAS_PATH_MAX_POINTS) {
+            shapeDraw.points.push([current.x, current.y]);
+            shapeDraw.lastX = ev.clientX;
+            shapeDraw.lastY = ev.clientY;
+            updateCanvasPathGeometry(shapeDraw.shape, shapeDraw.points);
+          }
+          return;
+        }
         updateCanvasShapeGeometry(shapeDraw.shape, shapeDraw.start, current);
         return;
       }
@@ -14245,11 +14691,24 @@
         syncPanModeCursor();
       }
       if (shapeDraw) {
-        updateCanvasShapeGeometry(shapeDraw.shape, shapeDraw.start, shapeDraw.current, { defaultSize: !shapeDraw.moved });
-        shapeDraw.shape.classList.remove('egd-canvas-shape-drawing');
-        setActiveEntity(shapeDraw.shape);
-        markAgendaDirty('create-shape', shapeDraw.shape);
+        const draw = shapeDraw;
         shapeDraw = null;
+        if (draw.points) {
+          draw.points.push([draw.current.x, draw.current.y]);
+          const points = SurfaceState.simplifyCanvasPath(draw.points, 1 / Math.max(0.01, state.zoomTarget));
+          if (!draw.moved || points.length < 2) {
+            // A pen click without a stroke leaves nothing behind.
+            draw.shape._cleanup?.();
+            draw.shape.remove();
+            return;
+          }
+          updateCanvasPathGeometry(draw.shape, points);
+        } else {
+          updateCanvasShapeGeometry(draw.shape, draw.start, draw.current, { defaultSize: !draw.moved });
+        }
+        draw.shape.classList.remove('egd-canvas-shape-drawing');
+        setActiveEntity(draw.shape);
+        markAgendaDirty('create-shape', draw.shape);
         return;
       }
       if (!marqueeSel) return;
@@ -14684,6 +15143,11 @@
           close: (projectionId, options = {}) => closeCurrentAgenda({ ...options, projectionId }),
           save: (projectionId) => saveCurrentAgendaState({ projectionId }),
           projections: () => cloneJson(state.boards),
+          viewport: () => ({ ...viewportBoardResolution(), label: viewportBoardLabel().text }),
+        },
+        shapes: {
+          serialize: serializeShapeState,
+          restore: restoreShapeFromState,
         },
         surface: {
           enterDesk: enterLocalDesk,

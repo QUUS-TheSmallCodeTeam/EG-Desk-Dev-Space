@@ -3,6 +3,7 @@ import assert from 'node:assert/strict';
 import { existsSync, readFileSync } from 'node:fs';
 import { compileFunction } from 'node:vm';
 import { initialSurfaceMode, shouldFocusInitialBrowser, planBoardProjection, snapshotBoardProjection, remapMemberReferences, recoverDeskSnapshot, canPersistDeskSession, ownedProjectionMembers, missingProjectionMembers, fitSurfaceCamera, surfaceSemanticLevel, surfaceProximityClusters } from '../overlay/resources/EGDeskSurfaceState.sys.mjs';
+import * as Surface from '../overlay/resources/EGDeskSurfaceState.sys.mjs';
 import * as Chat from '../overlay/resources/EGDeskChatState.sys.mjs';
 import * as Markdown from '../overlay/resources/EGDeskMarkdown.sys.mjs';
 import * as InputContext from '../overlay/resources/EGDeskInputContext.sys.mjs';
@@ -694,8 +695,8 @@ test('first Browser zoom-out keeps the fitted Desk camera and later zoom remains
   assert.deepEqual(safe, { left: 147, top: 76, right: 1256, bottom: 694, width: 1109, height: 618 });
   let applied = 0, animated = 0;
   state.setCanvasViewportTarget = compileFunction(`return (nextViewport, options = {}) => {${targetBody}\n    }`,
-    ['state', 'ZOOM_MIN', 'ZOOM_MAX', 'frame', 'window', 'apply', 'scheduleAnimate'])(
-    state, .01, 4, 0, window, () => { applied++; }, () => { animated++; });
+    ['state', 'ZOOM_MIN', 'ZOOM_MAX', 'frame', 'window', 'apply', 'scheduleAnimate', 'SurfaceState', 'prefersReducedMotion'])(
+    state, .01, 4, 0, window, () => { applied++; }, () => { animated++; }, Surface, () => false);
   const exitFullscreen = compileFunction(`return function exitCardFullscreen(card = null, options = {}) {${exitBody}\n  }`,
     ['state', 'document', 'applyCardRect', 'setHudPresentationHidden', 'toggleDeskMinimap', 'setActiveEntity',
       'syncViewportAgendaRail', 'scheduleDeskSessionSave', 'SurfaceState', 'persistentEntityGeometry', 'safeViewportRect'])(
@@ -1468,17 +1469,19 @@ test('right Chat HUD leaves the existing bottom Dock controls hit-test clear at 
   assert.ok(hudBottom <= dockTop - 8, `HUD bottom ${hudBottom} must clear Dock top ${dockTop}`);
 });
 
-test('800×600 zoom actions clear the Dock without moving the 960×700 or 1280×776 chrome', () => {
+test('zoom actions clear the 18-button Dock at 800×600 and 960×700 without moving the 1280×776 chrome', () => {
   const css = readFileSync(new URL('../overlay/CSS/eg-desk-surface.uc.css', import.meta.url), 'utf8');
   const baseZoom = css.match(/^#egd-zoom-indicator \{([^}]+)\}/m)?.[1] || '';
-  const narrowZoom = css.match(/@media \(max-width: 950px\) \{\s*#egd-zoom-indicator \{([^}]+)\}/)?.[1] || '';
+  const narrowZoom = css.match(/@media \(max-width: 1080px\) \{\s*#egd-zoom-indicator \{([^}]+)\}/)?.[1] || '';
   const dock = css.match(/^#egd-dock \{([^}]+)\}/m)?.[1] || '';
   const bag = css.match(/^#egd-preset-bag \{([^}]+)\}/m)?.[1] || '';
   const px = (body, property) => Number.parseFloat(body.match(new RegExp(`\\b${property}:\\s*(\\d+)px`))?.[1]);
   const measuredZoom = { width: 152, height: 41 }; // central QA 800×600 box
-  const measuredDockWidth = 598; // central QA 800×600 box; content width stays fixed above 700px
+  // Central QA measured 598px for 15 buttons; the arrow, label and highlight
+  // tools add 3 × (32px + 6px gap). Content width stays fixed above 700px.
+  const measuredDockWidth = 598 + 3 * (32 + 6);
   const zoomRect = (width, height) => {
-    const responsive = width <= 950 ? narrowZoom : '';
+    const responsive = width <= 1080 ? narrowZoom : '';
     const left = px(responsive, 'left') || px(baseZoom, 'left');
     const bottomInset = px(responsive, 'bottom') || px(baseZoom, 'bottom');
     return { left, right: left + measuredZoom.width,
@@ -1500,10 +1503,14 @@ test('800×600 zoom actions clear the Dock without moving the 960×700 or 1280×
     'the moved zoom group also clears the preset rail at the left edge');
   assert.ok(smallZoom.right <= 800 - 10 - 396 - 8,
     'the moved zoom group remains left of the right HUD');
-  assert.deepEqual(zoomRect(960, 700), { left: 15, right: 167, top: 645, bottom: 686 });
+  assert.deepEqual(zoomRect(960, 700), { left: 88, right: 240, top: 591, bottom: 632 },
+    'at 960px the full Dock would reach the corner group, so zoom sits above the Dock');
+  assert.ok(zoomRect(960, 700).bottom <= dockRect(960, 700).top - 8);
   assert.deepEqual(zoomRect(1280, 776), { left: 15, right: 167, top: 721, bottom: 762 });
   assert.ok(!overlaps(zoomRect(960, 700), dockRect(960, 700)));
   assert.ok(!overlaps(zoomRect(1280, 776), dockRect(1280, 776)));
+  assert.ok(dockRect(1081, 700).left >= zoomRect(1081, 700).right + 8,
+    'just above the breakpoint the corner group keeps 8px clear of the Dock');
   assert.doesNotMatch(narrowZoom, /(?:z-index|pointer-events|display|transform|width|height):/,
     'the responsive rule only repositions the existing clickable zoom controls');
   assert.match(surfaceSource, /zoomOutButton\.addEventListener\('click'/);
@@ -1517,7 +1524,7 @@ test('600×600 narrow HUD clears every zoom hit point and the Dock while larger 
   const baseHud = css.match(/^#egd-hud \{([^}]+)\}/m)?.[1] || '';
   const narrowHud = css.match(/@media \(max-width: 700px\) \{\s*#egd-hud \{([^}]+)\}/)?.[1] || '';
   const baseZoom = css.match(/^#egd-zoom-indicator \{([^}]+)\}/m)?.[1] || '';
-  const narrowZoom = css.match(/@media \(max-width: 950px\) \{\s*#egd-zoom-indicator \{([^}]+)\}/)?.[1] || '';
+  const narrowZoom = css.match(/@media \(max-width: 1080px\) \{\s*#egd-zoom-indicator \{([^}]+)\}/)?.[1] || '';
   const dock = css.match(/^#egd-dock \{([^}]+)\}/m)?.[1] || '';
   const px = (body, property) => Number.parseFloat(body.match(new RegExp(`\\b${property}:\\s*(\\d+)px`))?.[1]);
   const heightCut = body => Number.parseFloat(body.match(/height:\s*calc\(100vh - (\d+)px\)/)?.[1]);
@@ -1530,7 +1537,7 @@ test('600×600 narrow HUD clears every zoom hit point and the Dock while larger 
     return { left: right - panelWidth, right, top, bottom };
   };
   const zoomRect = (width, height) => {
-    const body = width <= 950 && narrowZoom ? narrowZoom : baseZoom;
+    const body = width <= 1080 && narrowZoom ? narrowZoom : baseZoom;
     const left = px(body, 'left');
     const bottom = height - px(body, 'bottom');
     return { left, right: left + 152, top: bottom - 41, bottom };
@@ -1741,7 +1748,7 @@ test('bounded visual hierarchy keeps Canvas chrome quiet and Browser and Chat co
   assert.match(rule('.egd-card-page-title'), /font-size:\s*12px/);
   assert.match(rule('.egd-card-url'), /font:\s*12px/);
   assert.match(rule('.egd-codex-thread-item'), /background:\s*transparent/);
-  assert.match(rule('.egd-codex-thread-item-active'), /background:\s*#E8F0F4/);
+  assert.match(rule('.egd-codex-thread-item-active'), /background:\s*var\(--egd-primary-container\)/);
   assert.match(rule('.egd-codex-message-stack'), /max-width:\s*min\(86%, 640px\)/);
   assert.match(rule('.egd-codex-bubble'), /font-size:\s*14\.5px;\s*line-height:\s*1\.48/);
   assert.match(rule('.egd-codex-input'), /min-height:\s*40px/);
@@ -5173,4 +5180,672 @@ test('production Settings card renders the reported account and drives Agent edi
   assert.match(text(), /Agent 저장소에 연결하지 못했습니다/);
   card._cleanup();
   assert.equal(listeners.size, 0, 'closing the card stops listening');
+});
+
+// ============ Canvas marks, Board regions and the Board in view ============
+const surfaceCss = readFileSync(new URL('../overlay/CSS/eg-desk-surface.uc.css', import.meta.url), 'utf8');
+const topLevelFunction = name => surfaceSource.match(new RegExp(`  function ${name}\\([^]*?\\n  }\\n`))?.[0];
+const productionDockCenter = () => {
+  const literal = surfaceSource.match(/  const DOCK_CENTER = (\[[\s\S]*?\n  \]);/)?.[1];
+  assert.ok(literal, 'production Dock centre group stays a plain array');
+  return compileFunction(`return ${literal};`)();
+};
+
+test('Dock tool ids keep the selection pointer apart from the arrow mark', () => {
+  const tools = productionDockCenter();
+  assert.deepEqual(tools.map(tool => tool.id),
+    ['pencil', 'hand', 'square', 'ellipse', 'line', 'arrow', 'label', 'highlight', 'select']);
+  assert.deepEqual(tools.map(tool => tool.label), ['펜', '손', '사각형', '원', '선', '화살표', '글자', '강조', '선택']);
+  assert.equal(new Set(tools.map(tool => tool.id)).size, tools.length);
+  assert.deepEqual(tools.filter(tool => tool.active).map(tool => tool.id), ['select']);
+  assert.match(surfaceSource, /\n    activeTool: 'select',\n/, 'the Desk opens with the selection pointer');
+  for (const tool of tools) {
+    assert.ok(Surface.CANVAS_TOOL_IDS.includes(tool.id), `${tool.id} is a known Canvas tool`);
+    assert.ok(surfaceSource.includes(`\n    ${tool.icon}: [[`), `${tool.icon} icon is drawn locally`);
+  }
+  assert.deepEqual(Object.fromEntries(tools.map(tool => [tool.id, Surface.canvasToolShapeType(tool.id)])), {
+    pencil: 'path', hand: null, square: 'rect', ellipse: 'ellipse', line: 'line',
+    arrow: 'arrow', label: 'label', highlight: 'highlight', select: null,
+  });
+  assert.equal(Surface.normalizeCanvasTool('select'), 'select');
+  assert.equal(Surface.normalizeCanvasTool('pointer'), 'select', 'an unknown tool falls back to selection');
+  assert.equal(Surface.normalizeCanvasTool(undefined), 'select');
+  assert.equal(Surface.canvasToolShapeType('toString'), null, 'prototype keys are not tools');
+
+  const state = { activeTool: 'select' };
+  const tool = compileFunction(`${topLevelFunction('activeToolIsShape')}\n${topLevelFunction('shapeTypeForTool')}
+    return { activeToolIsShape, shapeTypeForTool };`, ['state', 'SurfaceState'])(state, Surface);
+  assert.equal(tool.activeToolIsShape(), false);
+  for (const id of ['pencil', 'square', 'arrow', 'label', 'highlight']) {
+    state.activeTool = id;
+    assert.equal(tool.activeToolIsShape(), true, id);
+  }
+  state.activeTool = 'hand';
+  assert.equal(tool.activeToolIsShape(), false);
+  assert.equal(tool.shapeTypeForTool('arrow'), 'arrow');
+  assert.equal(tool.shapeTypeForTool('select'), 'rect', 'the legacy fallback shape is unchanged');
+});
+
+test('the 18-button Dock fits a 600px window without scrolling any tool away', () => {
+  const narrow = surfaceCss.match(/@media \(max-width: 700px\) \{([\s\S]*?)\n\}/)?.[1] || '';
+  const px = (body, property) => Number.parseFloat(body.match(new RegExp(`(?:^|[\\s;{])${property}:\\s*(\\d+)px`))?.[1]);
+  const dock = narrow.match(/#egd-dock \{([^}]+)\}/)?.[1] || '';
+  const group = narrow.match(/\.egd-dock-group \{([^}]+)\}/)?.[1] || '';
+  const button = narrow.match(/\.egd-dock-btn \{([^}]+)\}/)?.[1] || '';
+  const counts = [8, productionDockCenter().length, 1];
+  const width = counts.reduce((sum, count) => sum + count * px(button, 'width') + (count - 1) * px(group, 'gap'), 0)
+    + 2 /* dividers */ + 4 * px(dock, 'gap') + 2 * px(dock, 'padding-inline') + 2 /* border */;
+  assert.equal(width, 580);
+  assert.ok(width <= 600 - 16, `${width}px Dock fits calc(100vw - 16px)`);
+});
+
+test('pen samples simplify to a stroke stored relative to its own box', () => {
+  const noisy = Array.from({ length: 50 }, (_, index) => [index * 4, 100 + (index % 2 ? 0.3 : -0.3)]);
+  assert.deepEqual(Surface.simplifyCanvasPath(noisy, 1), [[0, 99.7], [196, 100.3]]);
+  const corner = [[0, 0], [10, 0], [20, 0], [20, 10], [20, 20]];
+  assert.deepEqual(Surface.simplifyCanvasPath(corner, 1), [[0, 0], [20, 0], [20, 20]]);
+  assert.deepEqual(Surface.normalizeCanvasPathPoints([[1, 1], [1, 1], [NaN, 2], { x: 3.14159, y: 4 }, 'x']),
+    [[1, 1], [3.1, 4]], 'duplicates and invalid samples are dropped');
+  const many = Array.from({ length: 5000 }, (_, index) => [index, 0]);
+  const capped = Surface.normalizeCanvasPathPoints(many);
+  assert.equal(capped.length, Surface.CANVAS_PATH_MAX_POINTS);
+  assert.deepEqual([capped[0], capped.at(-1)], [[0, 0], [4999, 0]], 'thinning keeps both ends');
+  assert.deepEqual(Surface.canvasPathBox([[100.4, 50], [160, 90.2]]), {
+    x: 94, y: 44, width: 72, height: 53, points: [[6.4, 6], [66, 46.2]],
+  });
+  assert.equal(Surface.canvasPathBox([]), null);
+  assert.deepEqual(Surface.canvasPathBox([[10, 10], [40, 10]]).height, 12, 'a flat stroke keeps the 12px minimum box');
+});
+
+test('canvas mark records: the four new marks round-trip and older records restore as before', () => {
+  assert.deepEqual(Surface.canvasShapeRuntime('rect', { transform: '', x1: undefined, y1: '', x2: null }),
+    { transform: '', x1: null, y1: null, x2: null, y2: null }, 'the original record keys are unchanged');
+  const arrow = Surface.canvasShapeRuntime('arrow', { transform: 'rotate(33.69deg)', x1: '10', y1: '20', x2: 100, y2: 80 });
+  assert.deepEqual(arrow, { transform: 'rotate(33.69deg)', x1: '10', y1: '20', x2: '100', y2: '80' });
+  const path = Surface.canvasShapeRuntime('path', { points: [[6, 6], [20.04, 31], [20.04, 31]] });
+  assert.deepEqual(path.points, [[6, 6], [20, 31]]);
+  const label = Surface.canvasShapeRuntime('label', { text: '  회의 전 확인  \n\n\n\n결론 먼저  ' });
+  assert.equal(label.text, '회의 전 확인\n\n결론 먼저');
+  assert.equal(Object.hasOwn(Surface.canvasShapeRuntime('highlight', { points: [[1, 1]], text: 'x' }), 'points'), false);
+
+  const restore = (type, runtimeState) => Surface.restoreCanvasShape({ id: 's', type, runtimeState });
+  assert.deepEqual(restore('arrow', arrow), { type: 'arrow', transform: 'rotate(33.69deg)',
+    line: { x1: '10', y1: '20', x2: '100', y2: '80' }, points: null, text: null });
+  assert.deepEqual(restore('path', path).points, [[6, 6], [20, 31]]);
+  assert.equal(restore('label', label).text, '회의 전 확인\n\n결론 먼저');
+  assert.equal(restore('highlight', {}).type, 'highlight');
+
+  // Records saved before these tools existed.
+  const oldLine = { id: 'old-line', type: 'line', geometry: { x: 10, y: 12, width: 140, height: 16 },
+    runtimeState: { transform: 'rotate(-1.2e-14deg)', x1: '10', y1: '20', x2: '150', y2: '20' } };
+  assert.deepEqual(Surface.restoreCanvasShape(oldLine), { type: 'line', transform: 'rotate(-1.2e-14deg)',
+    line: { x1: '10', y1: '20', x2: '150', y2: '20' }, points: null, text: null });
+  assert.deepEqual(Surface.restoreCanvasShape({ id: 'old-rect', type: 'rect', geometry: { x: 1, y: 2 } }),
+    { type: 'rect', transform: '', line: { x1: null, y1: null, x2: null, y2: null }, points: null, text: null });
+  assert.equal(Surface.restoreCanvasShape({ type: 'triangle' }).type, 'rect', 'an unknown mark opens as a rectangle');
+  assert.equal(Surface.restoreCanvasShape({ type: 'line', runtimeState: { transform: 'translate(9px) rotate(1deg)' } }).transform, '');
+  assert.deepEqual(Surface.restoreCanvasShape({ type: 'path', runtimeState: { points: 'not points' } }).points, []);
+  assert.equal(Surface.normalizeCanvasLabelText('가'.repeat(1200)).length, Surface.CANVAS_LABEL_MAX_LENGTH);
+});
+
+test('production serializeShapeState and restoreShapeFromState carry pen points and label text', () => {
+  const serializeSource = topLevelFunction('serializeShapeState');
+  const restoreSource = topLevelFunction('restoreShapeFromState');
+  assert.ok(serializeSource && restoreSource);
+  const serialize = compileFunction(`${serializeSource}\nreturn serializeShapeState;`,
+    ['persistentEntityGeometry', 'cleanSourceRef', 'SurfaceState'])(
+    shape => ({ x: parseFloat(shape.style.left), y: parseFloat(shape.style.top), width: 72, height: 53, zIndex: 40003 }),
+    ref => ref || null, Surface);
+  const shape = (type, extra = {}) => ({ id: `shape-${type}`, isConnected: true, dataset: { shapeType: type, ...extra.dataset },
+    style: { left: '94px', top: '44px', transform: extra.transform || '' }, _pathPoints: extra.points, _labelText: extra.text });
+  const pen = serialize(shape('path', { points: [[6.4, 6], [66, 46.2]] }));
+  assert.deepEqual(pen, { id: 'shape-path', type: 'path', geometry: { x: 94, y: 44, width: 72, height: 53, zIndex: 40003 },
+    sourceRef: null, runtimeState: { transform: '', x1: null, y1: null, x2: null, y2: null, points: [[6.4, 6], [66, 46.2]] } });
+  const note = serialize(shape('label', { text: '로그인 버튼' }));
+  assert.equal(note.runtimeState.text, '로그인 버튼');
+  assert.equal(serialize(shape('label', { text: '' })), null, 'an uncommitted empty label is not saved');
+  const arrow = serialize(shape('arrow', { transform: 'rotate(45deg)', dataset: { x1: '1', y1: '2', x2: '3', y2: '4' } }));
+  assert.deepEqual(arrow.runtimeState, { transform: 'rotate(45deg)', x1: '1', y1: '2', x2: '3', y2: '4' });
+
+  const appended = [];
+  const created = [];
+  const restore = compileFunction(`${restoreSource}\nreturn restoreShapeFromState;`,
+    ['SurfaceState', 'createCanvasShape', 'retargetRestoredEntityId', 'applyPersistentEntityGeometry', 'renderCanvasPath', 'document'])(
+    Surface,
+    type => {
+      const text = { textContent: '' };
+      const node = { type, dataset: { shapeType: type }, style: {}, rendered: 0, querySelector: selector => selector === '.egd-canvas-shape-label-text' ? text : null, text };
+      created.push(node);
+      return node;
+    },
+    (node, id) => { node.id = id; },
+    (node, geometry) => Object.assign(node.style, { left: `${geometry.x}px`, top: `${geometry.y}px`, width: `${geometry.width}px`, height: `${geometry.height}px` }),
+    node => { node.rendered += 1; },
+    { getElementById: id => id === 'egd-canvas-layer' ? { appendChild: node => appended.push(node) } : null, documentElement: null });
+  const penView = restore(pen);
+  assert.deepEqual(penView._pathPoints, [[6.4, 6], [66, 46.2]]);
+  assert.equal(penView.rendered, 1, 'the stroke is redrawn from its saved points');
+  assert.equal(penView.style.left, '94px');
+  const noteView = restore(note);
+  assert.equal(noteView.text.textContent, '로그인 버튼');
+  assert.equal(noteView._labelText, '로그인 버튼');
+  assert.deepEqual([noteView.style.width, noteView.style.height], ['', ''], 'a label sizes to its text again');
+  const arrowView = restore(arrow);
+  assert.equal(arrowView.style.transform, 'rotate(45deg)');
+  assert.deepEqual({ ...arrowView.dataset }, { shapeType: 'arrow', x1: '1', y1: '2', x2: '3', y2: '4' });
+  const legacy = restore({ id: 'legacy', type: 'line', geometry: { x: 5, y: 6, width: 140, height: 16 },
+    runtimeState: { transform: 'rotate(10deg)', x1: '5', y1: '14', x2: '145', y2: '14' } });
+  assert.equal(legacy.type, 'line');
+  assert.equal(legacy.style.transform, 'rotate(10deg)');
+  assert.equal(legacy.dataset.x2, '145');
+  assert.deepEqual(created.map(node => node.type), ['path', 'label', 'arrow', 'line']);
+  assert.equal(appended.length, 4);
+});
+
+test('production label editing is IME-safe and commits only settled text', () => {
+  const body = topLevelFunction('beginCanvasLabelEdit');
+  assert.ok(body);
+  const listeners = {};
+  const text = { attributes: {}, innerText: '', textContent: '', focused: 0,
+    setAttribute(name, value) { this.attributes[name] = value; }, removeAttribute(name) { delete this.attributes[name]; },
+    addEventListener(type, fn) { listeners[type] = fn; }, removeEventListener(type) { delete listeners[type]; },
+    focus() { this.focused += 1; } };
+  const dirty = [];
+  let removed = false;
+  const shape = { id: 'label-1', isConnected: true, dataset: {}, _labelText: '', querySelector: () => text,
+    remove() { removed = true; this.isConnected = false; } };
+  const timers = [];
+  const begin = compileFunction(`${body}\nreturn beginCanvasLabelEdit;`,
+    ['state', 'window', 'document', 'SurfaceState', 'setActiveEntity', 'markAgendaDirty'])(
+    { activeEntityId: 'label-1' }, { setTimeout: fn => timers.push(fn), getSelection: () => null }, {}, Surface,
+    () => {}, (reason, entity) => dirty.push([reason, entity.id]));
+  assert.equal(begin(shape, { created: true }), true);
+  assert.equal(shape.dataset.editing, 'true');
+  assert.equal(text.attributes.contenteditable, 'true');
+  assert.equal(text.focused, 1);
+  const key = (fields) => {
+    const event = { stopped: false, prevented: false, stopPropagation() { this.stopped = true; }, preventDefault() { this.prevented = true; }, ...fields };
+    listeners.keydown(event);
+    return event;
+  };
+  listeners.compositionstart();
+  text.innerText = '로그';
+  const composingEnter = key({ key: 'Enter', isComposing: true, keyCode: 229 });
+  assert.equal(composingEnter.prevented, false, 'Enter that confirms a Hangul syllable is left to the IME');
+  assert.equal(shape.dataset.editing, 'true');
+  listeners.compositionend();
+  text.innerText = '로그인 버튼 ';
+  assert.equal(key({ key: 'Enter', shiftKey: true }).prevented, false, 'Shift+Enter keeps a line break');
+  const enter = key({ key: 'Enter' });
+  assert.equal(enter.prevented && enter.stopped, true);
+  assert.equal(shape.dataset.editing, undefined);
+  assert.equal(text.attributes.contenteditable, undefined);
+  assert.equal(text.textContent, '로그인 버튼');
+  assert.equal(shape._labelText, '로그인 버튼');
+  assert.deepEqual(dirty, [['create-shape', 'label-1']]);
+
+  // Escape on an existing label restores the committed text; an emptied label is removed.
+  begin(shape);
+  text.innerText = '바뀐 글자';
+  key({ key: 'Escape' });
+  assert.equal(shape._labelText, '로그인 버튼');
+  assert.equal(dirty.length, 1);
+  begin(shape);
+  text.innerText = '   ';
+  listeners.blur();
+  assert.equal(removed, false, 'blur waits for the IME commit before reading');
+  timers.shift()();
+  assert.equal(removed, true);
+  assert.deepEqual(dirty.at(-1), ['delete-shape', 'label-1']);
+});
+
+test('resolveViewportBoard ranks the Board in view and counts the others', () => {
+  const viewport = { left: 0, top: 0, right: 1000, bottom: 800 };
+  const region = (id, left, top, right, bottom) => ({ id, rect: { left, top, right, bottom } });
+  const a = region('a', 100, 100, 500, 500);      // 160,000 shared
+  const b = region('b', 600, 100, 1400, 700);     // 240,000 shared, the largest
+  const c = region('c', 990, 700, 1600, 1400);    // 1,000 shared: a sliver, not "in view"
+  const far = region('far', 3000, 3000, 3400, 3400);
+  const cases = [
+    ['visible active Board wins over a larger overlap', { regions: [a, b], activeId: 'a' }, { primaryId: 'a', reason: 'active-visible', visibleIds: ['b', 'a'], extraCount: 1 }],
+    ['largest overlap when the active Board is off screen', { regions: [a, b, far], activeId: 'far' }, { primaryId: 'b', reason: 'largest-overlap', visibleIds: ['b', 'a'], extraCount: 1 }],
+    ['an edge sliver does not count as another Board in view', { regions: [b, c], activeId: null }, { primaryId: 'b', reason: 'largest-overlap', visibleIds: ['b'], extraCount: 0 }],
+    ['active card Board when no Board is in view', { regions: [far, region('other', -900, 0, -100, 400)], activeEntityBoardId: 'other', recentIds: ['far'] }, { primaryId: 'other', reason: 'active-card', visibleIds: [], extraCount: 0 }],
+    ['most recent Board after that', { regions: [far], activeEntityBoardId: 'closed', recentIds: ['gone', 'far'] }, { primaryId: 'far', reason: 'recent', visibleIds: [], extraCount: 0 }],
+    ['Desk when nothing applies', { regions: [far], recentIds: ['gone'] }, { primaryId: null, reason: 'desk', visibleIds: [], extraCount: 0 }],
+    ['no Boards at all', {}, { primaryId: null, reason: 'desk', visibleIds: [], extraCount: 0 }],
+    ['three Boards in view: primary plus two', { regions: [a, b, region('d', 520, 520, 900, 780)], activeId: 'a' }, { primaryId: 'a', reason: 'active-visible', visibleIds: ['b', 'a', 'd'], extraCount: 2 }],
+    ['a small Board fully on screen counts', { regions: [region('small', 10, 10, 60, 40)] }, { primaryId: 'small', reason: 'largest-overlap', visibleIds: ['small'], extraCount: 0 }],
+    ['malformed regions and viewport are ignored', { viewport: { left: 0, top: 0, right: NaN, bottom: 10 }, regions: [a, { id: 'x' }, region('bad', 5, 5, 5, 9)] }, { primaryId: null, reason: 'desk', visibleIds: [], extraCount: 0 }],
+  ];
+  for (const [name, input, expected] of cases) {
+    assert.deepEqual(Surface.resolveViewportBoard({ viewport, ...input }), expected, name);
+  }
+  const ties = Surface.resolveViewportBoard({ viewport, regions: [region('first', 0, 0, 100, 100), region('second', 200, 0, 300, 100)] });
+  assert.deepEqual(ties.visibleIds, ['first', 'second'], 'equal overlap keeps region order');
+});
+
+test('production top-bar Board name reads "이름 · +N" and "Board 없음"', () => {
+  const body = topLevelFunction('viewportBoardLabel');
+  assert.ok(body);
+  const state = { boards: { projections: { a: { title: '태화 5월 리포트' }, b: { title: 'UI 리뷰' }, c: { title: '자료' } } } };
+  const label = compileFunction(`${body}\nreturn viewportBoardLabel;`, ['state', 'viewportBoardResolution'])(state, () => null);
+  assert.deepEqual(label({ primaryId: 'a', visibleIds: ['b', 'a', 'c'], extraCount: 2 }),
+    { text: '태화 5월 리포트 · +2', title: '화면의 Board: UI 리뷰, 태화 5월 리포트, 자료' });
+  assert.deepEqual(label({ primaryId: 'a', visibleIds: [], extraCount: 0 }), { text: '태화 5월 리포트', title: '태화 5월 리포트' });
+  assert.equal(label({ primaryId: null, visibleIds: [], extraCount: 0 }).text, 'Board 없음');
+  assert.equal(label({ primaryId: 'closed', visibleIds: [], extraCount: 0 }).text, 'Board 없음');
+  const rail = topLevelFunction('syncViewportAgendaRail');
+  assert.match(rail, /syncViewportBoardName\(\);\n    syncAllBoardRegionMarks\(\);/);
+  assert.doesNotMatch(rail, /agendaName\.textContent = currentViewportAgendaLabel\(\)/,
+    'the top bar follows the camera; saved titles keep currentViewportAgendaLabel');
+  assert.match(topLevelFunction('saveCurrentAgendaState'), /title: snapshot\.agenda\.title \|\| currentViewportAgendaLabel\(\)/);
+});
+
+test('camera movement refreshes the Board name at most every 120ms', () => {
+  const body = topLevelFunction('scheduleViewportBoardSync');
+  assert.ok(body);
+  const timers = [];
+  let now = 1000;
+  let synced = 0;
+  const schedule = compileFunction(`let viewportBoardSyncTimer = 0;\nlet viewportBoardSyncAt = 0;\n${body}\nreturn scheduleViewportBoardSync;`,
+    ['window', 'Date', 'syncViewportBoardName', 'VIEWPORT_BOARD_SYNC_MS'])(
+    { setTimeout: (fn, wait) => { timers.push({ fn, wait }); return timers.length; } }, { now: () => now }, () => { synced += 1; }, 120);
+  schedule();
+  schedule();
+  schedule();
+  assert.deepEqual(timers.map(timer => timer.wait), [0], 'the first move after a pause updates on the next task');
+  timers.shift().fn();
+  assert.equal(synced, 1);
+  now += 30;
+  schedule();
+  schedule();
+  assert.deepEqual(timers.map(timer => timer.wait), [90], 'moves during the window coalesce into one trailing update');
+  now += 90;
+  timers.shift().fn();
+  assert.equal(synced, 2);
+  const apply = surfaceSource.match(/    function apply\(\) \{([\s\S]*?)\n    \}/)?.[1];
+  assert.match(apply, /scheduleViewportBoardSync\(\);/);
+  assert.match(apply, /SurfaceState\.boardRegionLabelScale\(state\.zoom\)/);
+  assert.match(topLevelFunction('refreshBoardRegion'), /scheduleViewportBoardSync\(\);/);
+});
+
+test('Board region geometry keeps 24px padding and a 36px title row; far zoom keeps the name readable', () => {
+  assert.deepEqual(Surface.boardRegionRect([{ x: 100, y: 200, width: 300, height: 100 }, { x: 500, y: 260, width: 200, height: 200 }]),
+    { x: 76, y: 140, width: 648, height: 344 });
+  assert.deepEqual(Surface.boardRegionRect([], { fallback: { x: 900, y: 10 } }), { x: 900, y: 10, width: 340, height: 84 });
+  assert.deepEqual(Surface.boardRegionRect([{ x: 1, y: 2, width: NaN, height: 4 }]), { x: 40, y: 80, width: 340, height: 84 });
+  assert.deepEqual(Surface.boardRegionLabelScale(1), { far: false, scale: 1 });
+  assert.deepEqual(Surface.boardRegionLabelScale(0.8), { far: false, scale: 1 }, '11.5px × 0.8 = 9.2px is still read in place');
+  assert.deepEqual(Surface.boardRegionLabelScale(0.78), { far: true, scale: 1 / 0.78 });
+  assert.deepEqual(Surface.boardRegionLabelScale(0.5), { far: true, scale: 2 });
+  assert.deepEqual(Surface.boardRegionLabelScale(0.01), { far: true, scale: 100 });
+  assert.deepEqual(Surface.boardRegionLabelScale(NaN), { far: false, scale: 1 });
+});
+
+function boardRegionFakeDom() {
+  const byId = new Map();
+  class FakeNode {
+    constructor(tag, props = {}, children = []) {
+      Object.assign(this, { tag, attributes: {}, dataset: { ...(props.data || {}) }, style: {}, className: props.class || '',
+        hidden: props.hidden === true, onclick: props.onclick || null, listeners: {}, text: '', parent: null, isConnected: true });
+      for (const [key, value] of Object.entries(props)) {
+        if (!['class', 'data', 'hidden', 'onclick', 'style', 'id'].includes(key)) this.attributes[key] = String(value);
+      }
+      if (props.style) Object.assign(this.style, props.style);
+      if (props.id) this.id = props.id;
+      this.children = children.filter(child => child != null).map(child => typeof child === 'string'
+        ? Object.assign(new FakeNode('#text'), { text: child }) : child);
+      for (const child of this.children) child.parent = this;
+    }
+    get textContent() { return this.text + this.children.map(child => child.textContent).join(''); }
+    set textContent(value) { this.text = String(value); this.children = []; }
+    setAttribute(name, value) { this.attributes[name] = String(value); }
+    getAttribute(name) { return this.attributes[name] ?? null; }
+    addEventListener(type, fn) { this.listeners[type] = fn; }
+    contains(node) { return node === this || this.all().includes(node); }
+    focus() { document.activeElement = this; }
+    remove() { this.isConnected = false; root.children = root.children.filter(child => child !== this); }
+    all() { return this.children.flatMap(child => [child, ...child.all()]); }
+    querySelector(selector) {
+      const name = selector.slice(1);
+      return this.all().find(node => node.className.split(/\s+/).includes(name)) || null;
+    }
+  }
+  const layer = new FakeNode('div', { id: 'egd-canvas-layer' });
+  layer.prepend = node => { layer.children.unshift(node); byId.set(node.id, node); };
+  const root = { children: [], appendChild(node) { this.children.push(node); } };
+  const document = { activeElement: null, documentElement: root,
+    getElementById: id => id === 'egd-canvas-layer' ? layer : byId.get(id) || null };
+  const el = (tag, props = {}, ...children) => new FakeNode(tag, props, children);
+  return { FakeNode, byId, document, el, root, layer };
+}
+
+test('production Board region shows icon and name, the current Board edge, unsaved state and a [⋯] menu', () => {
+  const marks = topLevelFunction('syncBoardRegionMarks');
+  const refresh = topLevelFunction('refreshBoardRegion');
+  assert.ok(marks && refresh);
+  const dom = boardRegionFakeDom();
+  const members = { 'm-1': { x: 100, y: 200, width: 300, height: 100 }, 'm-2': { x: 500, y: 260, width: 200, height: 200 } };
+  for (const id of Object.keys(members)) dom.byId.set(id, { id });
+  const projection = { id: 'egd-board-7', boardId: 'board-weekly', title: '주간 보고', dirty: false, offset: { x: 0, y: 0 },
+    members: [{ viewId: 'm-1' }, { viewId: 'm-2' }] };
+  const state = { boards: { activeProjectionId: null, projections: { [projection.id]: projection } } };
+  const calls = [];
+  const build = compileFunction(`${marks}\n${refresh}\nreturn { syncBoardRegionMarks, refreshBoardRegion };`,
+    ['state', 'document', 'el', 'deskIcon', 'selectBoardProjection', 'toggleBoardRegionMenu',
+      'persistentEntityGeometry', 'SurfaceState', 'scheduleViewportBoardSync'])(
+    state, dom.document, dom.el, name => dom.el('svg', { class: `icon-${name}` }),
+    id => calls.push(['select', id]), (id, anchor) => calls.push(['menu', id, anchor.dataset.testid]),
+    view => members[view.id], Surface, () => calls.push(['sync']));
+  const region = build.refreshBoardRegion(projection);
+  assert.equal(region.tag, 'section');
+  assert.equal(region.className, 'egd-board-region');
+  assert.deepEqual(region.dataset, { boardId: 'board-weekly', projectionId: 'egd-board-7', testid: 'board-projection',
+    active: 'false', dirty: 'false' });
+  assert.equal(region.getAttribute('aria-label'), 'Board 주간 보고');
+  assert.deepEqual(region.style, { left: '76px', top: '140px', width: '648px', height: '344px' }, '24px padding, 36px title row');
+  const title = region.querySelector('.egd-board-region-title');
+  assert.ok(title.children.some(child => child.className === 'icon-board'), 'the name carries the Board icon');
+  assert.equal(region.querySelector('.egd-board-region-name').textContent, '주간 보고');
+  assert.equal(title.getAttribute('aria-label'), 'Board 주간 보고 선택');
+  title.onclick();
+  assert.deepEqual(calls.at(-1), ['select', 'egd-board-7']);
+  const current = region.querySelector('.egd-board-region-current');
+  const unsaved = region.querySelector('.egd-board-region-unsaved');
+  assert.deepEqual([current.textContent, current.hidden, unsaved.textContent, unsaved.hidden], ['현재 Board', true, '저장 안 됨', true]);
+  assert.deepEqual(region.all().filter(node => ['board-save', 'board-attach-chat', 'board-close'].includes(node.dataset.testid)), [],
+    'save, attach and close moved into the [⋯] menu');
+  const menu = region.querySelector('.egd-board-region-menu-button');
+  assert.deepEqual([menu.dataset.testid, menu.dataset.projectionId, menu.getAttribute('aria-haspopup'), menu.getAttribute('aria-label')],
+    ['board-menu', 'egd-board-7', 'menu', '주간 보고 Board 작업']);
+  let stopped = false;
+  menu.onclick({ stopPropagation: () => { stopped = true; }, currentTarget: menu });
+  assert.equal(stopped, true);
+  assert.deepEqual(calls.at(-1), ['menu', 'egd-board-7', 'board-menu']);
+
+  state.boards.activeProjectionId = projection.id;
+  projection.dirty = true;
+  projection.title = '주간 보고 v2';
+  assert.equal(build.refreshBoardRegion(projection), region, 'the same region is updated in place');
+  assert.deepEqual([region.dataset.active, region.dataset.dirty, current.hidden, unsaved.hidden], ['true', 'true', false, false]);
+  assert.equal(region.querySelector('.egd-board-region-name').textContent, '주간 보고 v2');
+  state.boards.activeProjectionId = 'another';
+  projection.dirty = false;
+  build.syncBoardRegionMarks(region, projection);
+  assert.deepEqual([region.dataset.active, region.dataset.dirty, current.hidden, unsaved.hidden], ['false', 'false', true, true]);
+  assert.ok(calls.filter(call => call[0] === 'sync').length >= 2, 'region geometry changes re-check the Board in view');
+});
+
+test('production Board [⋯] menu offers save, Chat attach and close for that Board only', () => {
+  const close = topLevelFunction('closeBoardRegionMenu');
+  const toggle = topLevelFunction('toggleBoardRegionMenu');
+  assert.ok(close && toggle);
+  const dom = boardRegionFakeDom();
+  const projection = { id: 'egd-board-7', title: '주간 보고', members: [{ viewId: 'm-1' }, { viewId: 'm-2' }] };
+  const state = { boards: { projections: { [projection.id]: projection } }, codex: { activeThreadId: 'thread-1' } };
+  const actions = [];
+  const windowListeners = new Map();
+  const window = { addEventListener: (type, fn) => windowListeners.set(type, fn), removeEventListener: type => windowListeners.delete(type) };
+  const api = compileFunction(`let boardRegionMenu = null;\n${close}\n${toggle}\nreturn { toggleBoardRegionMenu, closeBoardRegionMenu, current: () => boardRegionMenu };`,
+    ['state', 'document', 'window', 'el', 'resolveFloatingMenuPlacement', 'saveCurrentAgendaState', 'openChatInputPanel', 'closeCurrentAgenda'])(
+    state, dom.document, window, dom.el, () => ({ left: 300.4, top: 120.6 }),
+    options => actions.push(['save', options]), (threadId, options) => actions.push(['attach', threadId, options]),
+    options => actions.push(['close', options]));
+  const anchor = dom.el('button', { data: { testid: 'board-menu' } });
+  anchor.getBoundingClientRect = () => ({ left: 280, top: 90, right: 304, bottom: 114 });
+  const menu = api.toggleBoardRegionMenu(projection.id, anchor);
+  assert.equal(menu.getAttribute('role'), 'menu');
+  assert.equal(menu.getAttribute('aria-label'), '주간 보고 Board 작업');
+  assert.deepEqual(menu.style, { left: '300px', top: '121px' });
+  assert.deepEqual(menu.children.map(item => [item.textContent, item.dataset.testid, item.dataset.projectionId, item.getAttribute('role')]), [
+    ['저장', 'board-save', 'egd-board-7', 'menuitem'],
+    ['Chat에 첨부', 'board-attach-chat', 'egd-board-7', 'menuitem'],
+    ['Board 닫기', 'board-close', 'egd-board-7', 'menuitem'],
+  ]);
+  assert.equal(anchor.getAttribute('aria-expanded'), 'true');
+  assert.equal(dom.document.activeElement, menu.children[0], 'keyboard users land on the first action');
+  menu.listeners.keydown({ key: 'ArrowDown', preventDefault() {} });
+  assert.equal(dom.document.activeElement, menu.children[1]);
+  menu.children[1].onclick({ stopPropagation() {} });
+  assert.deepEqual(actions, [['attach', 'thread-1', { viewIds: ['m-1', 'm-2'] }]]);
+  assert.equal(api.current(), null);
+  assert.equal(anchor.getAttribute('aria-expanded'), 'false');
+  assert.equal(windowListeners.size, 0, 'closing removes the outside-press listeners');
+
+  const again = api.toggleBoardRegionMenu(projection.id, anchor);
+  again.children[0].onclick({ stopPropagation() {} });
+  api.toggleBoardRegionMenu(projection.id, anchor).children[2].onclick({ stopPropagation() {} });
+  assert.deepEqual(actions.slice(1), [['save', { projectionId: 'egd-board-7' }], ['close', { projectionId: 'egd-board-7' }]]);
+  api.toggleBoardRegionMenu(projection.id, anchor);
+  assert.equal(api.toggleBoardRegionMenu(projection.id, anchor), null, 'pressing [⋯] again closes its menu');
+  const escaped = api.toggleBoardRegionMenu(projection.id, anchor);
+  escaped.listeners.keydown({ key: 'Escape', preventDefault() {}, stopPropagation() {} });
+  assert.equal(api.current(), null);
+  assert.equal(dom.document.activeElement, anchor, 'Escape returns focus to [⋯]');
+  api.toggleBoardRegionMenu(projection.id, anchor);
+  windowListeners.get('mousedown')({ target: { outside: true } });
+  assert.equal(api.current(), null, 'a press elsewhere closes the menu');
+});
+
+test('Board region and mark CSS use approved tokens: faint solid edge, 14px corners, 2px current Board', () => {
+  const rule = selector => surfaceCss.match(new RegExp(`^${selector.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')} \\{([^}]+)\\}`, 'm'))?.[1] || '';
+  const region = rule('.egd-board-region');
+  assert.match(region, /border: calc\(1px \* var\(--egd-board-label-scale, 1\)\) solid var\(--egd-region-line\)/);
+  assert.match(region, /border-radius: 14px/);
+  assert.doesNotMatch(region, /dashed/);
+  const active = rule('.egd-board-region[data-active="true"]');
+  assert.match(active, /border-width: calc\(2px \* var\(--egd-board-label-scale, 1\)\)/);
+  assert.match(active, /border-color: var\(--egd-primary\)/);
+  assert.match(rule('.egd-board-region-head'), /height: 36px/);
+  assert.match(rule('.egd-board-region-title'), /font: 600 11\.5px/);
+  const far = rule('#egd-canvas-layer[data-egd-board-label="far"] .egd-board-region-head');
+  assert.match(far, /bottom: 100%/);
+  assert.match(far, /transform: scale\(var\(--egd-board-label-scale, 1\)\)/);
+  const tokens = surfaceCss.match(/^:root \{([\s\S]*?)\n\}/m)[1];
+  assert.match(tokens, /--egd-region-line: rgba\(102, 91, 69, \.21\);/, 'the approved region border');
+  const block = (from, to) => surfaceCss.slice(surfaceCss.indexOf(from), surfaceCss.indexOf(to, surfaceCss.indexOf(from)));
+  const regionBlock = block('.egd-board-region {', '.egd-board-missing {');
+  const shapeBlock = block('.egd-canvas-shape {', '.egd-card-header {');
+  for (const [name, css] of [['Board region', regionBlock], ['Canvas marks', shapeBlock]]) {
+    assert.ok(css.length > 200, `${name} block found`);
+    assert.doesNotMatch(css.replace(/transparent/g, ''), /#[0-9a-f]{3,8}\b|rgba?\(/i, `${name} adds no hard-coded colour`);
+  }
+  assert.match(rule('.egd-canvas-shape-highlight'), /background: var\(--egd-mark-highlight\)/);
+  assert.match(rule('.egd-canvas-shape-arrow-head'), /border-left: 13px solid var\(--egd-mark-stroke\)/);
+  assert.match(surfaceCss, /\.egd-canvas-shape-path > \*\|svg \{/, 'the SVG stroke box is matched across namespaces');
+  assert.match(surfaceCss, /:root\[data-egd-active-tool="label"\] #egd-canvas-viewport,\n:root\[data-egd-active-tool="label"\] #egd-canvas-layer \{\n  cursor: text;/);
+});
+
+// UX-03: visible Board copy is Korean product wording; internal identifiers
+// (state.agenda, data-testid, search result type and key) keep their names.
+test('Board, search and minimap copy map to Korean words while internal ids stay', () => {
+  assert.equal(Surface.boardEntryStatusLabel({ dirty: true, current: true }), '저장 안 됨');
+  assert.equal(Surface.boardEntryStatusLabel({ closed: true }), '닫힘');
+  assert.equal(Surface.boardEntryStatusLabel({ current: true, saved: true }), '현재');
+  assert.equal(Surface.boardEntryStatusLabel({ saved: true }), '저장됨');
+  assert.equal(Surface.boardEntryStatusLabel({}), '초안');
+  assert.equal(Surface.boardEntryRecencyLabel({ closed: true, lastOpenedAt: 1 }), '닫은 기록');
+  assert.equal(Surface.boardEntryRecencyLabel({ lastOpenedAt: 1 }), '최근');
+  assert.equal(Surface.boardEntryRecencyLabel({}), '보관됨');
+  assert.equal(Surface.boardItemCountLabel(3), '항목 3개');
+  assert.equal(Surface.boardItemCountLabel(undefined), '항목 0개');
+  assert.equal(Surface.boardSaveStatusTitle(true), '저장하지 않은 변경이 있습니다');
+  assert.equal(Surface.boardSaveStatusTitle(false), '저장됨');
+  assert.deepEqual(['agenda', 'card', 'history', 'file', 'thread', 'web', 'constructor', undefined].map(Surface.railSearchSectionLabel),
+    ['Board', 'Canvas', '방문 기록', '파일', 'Chat', '웹', '기타', '기타']);
+  assert.equal(Surface.deskMinimapCaption(1.234, 5), '123% · 대상 5개');
+  assert.equal(Surface.deskMinimapCaption(NaN, -1), '100% · 대상 0개');
+
+  // The production search rows keep type and key; only section and subtitle words change.
+  const web = compileFunction(`${declaration('buildRailSearchWebResult')}\nreturn buildRailSearchWebResult;`,
+    ['railSearchQuery', 'railSearchBrowserUrl', 'railSearchLooksLikeNavigation', 'SurfaceState', 'spawnBrowserCard'])(
+    q => q.trim(), q => `https://search.example/?q=${q}`, () => false, Surface, () => {});
+  const row = web('견적서');
+  assert.equal(row.type, 'web');
+  assert.equal(row.key, 'web:https://search.example/?q=견적서');
+  assert.equal(row.section, '웹');
+  assert.equal(row.title, '웹에서 "견적서" 검색');
+  assert.equal(row.subtitle, '새 Browser 카드로 열기');
+  const agenda = compileFunction(`${declaration('agendaEntryStatus')}\n${declaration('buildRailSearchAgendaResults')}\nreturn buildRailSearchAgendaResults;`,
+    ['agendaListEntries', 'railSearchMatches', 'SurfaceState', 'switchAgenda', 'syncViewportAgendaRail'])(
+    () => [{ id: 'agenda-a', title: '견적 검토', count: 2, current: true, saved: true }], () => true, Surface, () => {}, () => {});
+  assert.deepEqual(agenda('').map(({ key, type, section, subtitle }) => ({ key, type, section, subtitle })),
+    [{ key: 'agenda:agenda-a', type: 'agenda', section: 'Board', subtitle: '현재 · 항목 2개' }]);
+
+  // Session badges keep their style key; the shown word is Korean.
+  const session = compileFunction(`${declaration('codexThreadSessionKey')}\n${declaration('codexThreadSessionLabel')}\nreturn { codexThreadSessionKey, codexThreadSessionLabel };`,
+    ['ChatState'])(Chat);
+  for (const [thread, key, label] of [[{ retainedNativeBinding: true }, 'local', '로컬 기록'], [{ conversationId: 'c' }, 'resumed', '이어진 대화'], [{}, 'fresh', '새 대화']]) {
+    assert.deepEqual([session.codexThreadSessionKey(thread), session.codexThreadSessionLabel(thread)], [key, label]);
+  }
+  assert.match(surfaceSource, /egd-codex-session-badge-\$\{codexThreadSessionKey\(thread\)\}/);
+
+  // Thread kinds keep their 'group' key; the words are Board Thread.
+  const meta = surfaceSource.match(/  const THREAD_KIND_META = \{([\s\S]*?)\n  \};/)?.[1];
+  assert.ok(meta, 'thread kind labels remain directly readable');
+  assert.match(meta, /group: \{\n      label: 'Board',\n      longLabel: 'Board Thread',\n      createTitle: '새 Board Thread',/);
+  for (const gone of ["'Agenda Thread'", 'Agenda Thread ·', "'Unsaved'", 'Agenda saved', 'Desk Minimap', ' objects · ', 'x spread',
+    "'Agenda를 전환할까요?'", "'Agenda 검색...'", "'Agenda에서 제거'", '`Unread ', "section: 'History'", 'Search "', "'Active')"]) {
+    assert.equal(surfaceSource.includes(gone), false, `visible copy no longer says ${gone}`);
+  }
+  for (const kept of ["testid: 'board-open'", "testid: 'board-save'", 'data: { agendaId: entry.id, boardId: entry.id', "{ key: 'group', label: 'Board' }"]) {
+    assert.ok(surfaceSource.includes(kept), `internal id kept: ${kept}`);
+  }
+});
+
+// DSN-04: reduced motion makes camera moves immediate by default.
+test('reduced motion settles camera moves at once unless the caller chose', () => {
+  assert.equal(Surface.cameraMoveImmediate({}, true), true);
+  assert.equal(Surface.cameraMoveImmediate({}, false), false);
+  assert.equal(Surface.cameraMoveImmediate(undefined, true), true);
+  assert.equal(Surface.cameraMoveImmediate({ immediate: false }, true), false, 'an explicit choice wins');
+  assert.equal(Surface.cameraMoveImmediate({ immediate: true }, false), true);
+
+  const panBody = surfaceSource.match(/    const setCanvasPanTarget = \(nextPan, options = \{\}\) => \{([\s\S]*?)\n    \};\n    state\.setCanvasPanTarget/)?.[1];
+  const viewBody = surfaceSource.match(/    const setCanvasViewportTarget = \(nextViewport, options = \{\}\) => \{([\s\S]*?)\n    \};\n    state\.setCanvasViewportTarget/)?.[1];
+  assert.ok(panBody && viewBody, 'production camera setters remain directly testable');
+  const run = (reduced, move) => {
+    const counts = { applied: 0, animated: 0 };
+    const state = { pan: { x: 0, y: 0 }, panTarget: { x: 0, y: 0 }, zoom: 1, zoomTarget: 1 };
+    const deps = ['state', 'ZOOM_MIN', 'ZOOM_MAX', 'frame', 'window', 'apply', 'scheduleAnimate', 'SurfaceState', 'prefersReducedMotion'];
+    const args = [state, .01, 4, 0, { cancelAnimationFrame: () => {} }, () => { counts.applied++; }, () => { counts.animated++; }, Surface, () => reduced];
+    const setPan = compileFunction(`return (nextPan, options = {}) => {${panBody}\n    }`, deps)(...args);
+    const setView = compileFunction(`return (nextViewport, options = {}) => {${viewBody}\n    }`, deps)(...args);
+    move(setPan, setView);
+    return { ...counts, pan: state.pan, zoom: state.zoom };
+  };
+  assert.deepEqual(run(true, setPan => setPan({ x: 40, y: -20 })), { applied: 1, animated: 0, pan: { x: 40, y: -20 }, zoom: 1 });
+  assert.deepEqual(run(true, (_, setView) => setView({ pan: { x: 5, y: 6 }, zoom: 2 })), { applied: 1, animated: 0, pan: { x: 5, y: 6 }, zoom: 2 });
+  assert.deepEqual(run(false, (_, setView) => setView({ pan: { x: 5, y: 6 }, zoom: 2 })), { applied: 0, animated: 1, pan: { x: 0, y: 0 }, zoom: 1 });
+  assert.deepEqual(run(true, setPan => setPan({ x: 1, y: 1 }, { immediate: false })), { applied: 0, animated: 1, pan: { x: 0, y: 0 }, zoom: 1 });
+
+  const reads = matches => compileFunction(`${declaration('prefersReducedMotion')}\nreturn prefersReducedMotion();`, ['window'])(matches);
+  assert.equal(reads({ matchMedia: query => ({ matches: query === '(prefers-reduced-motion: reduce)' }) }), true);
+  assert.equal(reads({ matchMedia: () => ({ matches: false }) }), false);
+  assert.equal(reads({}), false);
+  assert.equal(reads({ matchMedia: () => { throw new Error('no media'); } }), false);
+  assert.match(surfaceSource, /function fitBriefingTargets\(resolved\) \{[\s\S]*?state\.setCanvasViewportTarget\?\.\(camera\);/,
+    'the Briefing camera uses the shared default instead of its own media check');
+
+  const motion = surfaceCss.match(/@media \(prefers-reduced-motion: reduce\) \{([\s\S]*?)\n\}/)?.[1] || '';
+  assert.match(motion, /\[class\*="egd-"\]/);
+  assert.match(motion, /transition: none !important;/);
+  assert.match(motion, /animation: none !important;/);
+  assert.match(motion, /\.egd-browser-loading \.egd-card-progress::before \{ left: 0; width: 100%;/, 'loading stays visible as a still bar');
+});
+
+// RT-05: bridge connection said by state; raw detail folded; older bridges compatible.
+test('bridge connection notice maps reconnect states and folds raw detail', () => {
+  const online = Surface.bridgeConnectionNotice({ connected: true, latencyMs: 41.6 });
+  assert.equal(online.state, 'online');
+  assert.equal(online.text, '연결됨');
+  assert.deepEqual(online.details, ['응답 시간 42ms']);
+  for (const failures of [0, 1, 2]) {
+    const notice = Surface.bridgeConnectionNotice({ connected: false, failures, error: 'NetworkError when attempting to fetch resource.' });
+    assert.deepEqual([notice.state, notice.text, notice.action], ['reconnecting', '다시 연결 중…', null]);
+  }
+  const offline = Surface.bridgeConnectionNotice({ connected: false, failures: 3, error: 'NetworkError when attempting to fetch resource.', latencyMs: 12 });
+  assert.deepEqual([offline.state, offline.text, offline.action], ['offline', '연결이 끊겼습니다', '다시 시도']);
+  assert.doesNotMatch(offline.text, /NetworkError|ms/, 'the main line never carries the raw error or timing');
+  assert.deepEqual(offline.details, ['오류: NetworkError when attempting to fetch resource.', '응답 시간 12ms']);
+  const bridge = { buildHash: 'a'.repeat(64), startedAt: Date.UTC(2026, 9, 24), sourceMismatch: true };
+  const mismatch = Surface.bridgeConnectionNotice({ connected: true, bridge });
+  assert.deepEqual([mismatch.state, mismatch.text], ['mismatch', '브리지 버전이 맞지 않습니다 · 다시 시작 필요']);
+  assert.deepEqual(mismatch.details, ['브리지 빌드 aaaaaaaaaaaa', '브리지 시작 2026-10-24T00:00:00.000Z']);
+  // Older bridges omit `bridge`, or send something else: read as matching.
+  for (const old of [undefined, null, 'v1', { buildHash: null, startedAt: null, sourceMismatch: false }, { sourceMismatch: 'true' }]) {
+    assert.equal(Surface.bridgeConnectionNotice({ connected: true, bridge: old }).state, 'online', JSON.stringify(old));
+  }
+
+  const fields = compileFunction(`${declaration('bridgeConnectionFields')}\nreturn bridgeConnectionFields;`, [])();
+  assert.deepEqual(fields({ provider: 'codex' }), { bridgeFailures: 0, bridgeError: null, bridgeBuild: null });
+  assert.deepEqual(fields(null), { bridgeFailures: 0, bridgeError: null, bridgeBuild: null });
+  assert.deepEqual(fields({ bridge: { buildHash: 'b'.repeat(64), startedAt: 7, sourceMismatch: 1, extra: 'x' } }).bridgeBuild,
+    { buildHash: 'b'.repeat(64), startedAt: 7, sourceMismatch: false });
+
+  const document = settingsFakeDocument();
+  const state = { codex: { showBridgeDetails: false } };
+  const { el } = compileFunction(`${declaration('el')}\nreturn { el };`, ['document'])(document);
+  const api = compileFunction(`${declaration('codexBridgeNotice')}\n${declaration('codexBridgeSummary')}\n${declaration('buildCodexBridgeNotice')}\nreturn { codexBridgeSummary, buildCodexBridgeNotice };`,
+    ['el', 'SurfaceState', 'state'])(el, Surface, state);
+  const codex = patch => ({ connected: false, bridgeFailures: 0, bridgeError: 'TypeError: NetworkError', lastBridgeLatency: null, bridgeBuild: null, ...patch });
+  assert.equal(api.buildCodexBridgeNotice(codex({ connected: true }), {}), null, 'nothing extra while connected');
+  assert.equal(api.codexBridgeSummary(codex({ connected: true, lastBridgeLatency: 30 })), '연결됨');
+  assert.equal(api.codexBridgeSummary(codex()), '다시 연결 중…');
+  let retried = 0;
+  const notice = api.buildCodexBridgeNotice(codex({ bridgeFailures: 3 }), { reconnectNow: () => { retried++; } });
+  assert.equal(notice.dataset.bridgeState, 'offline');
+  assert.equal(notice.getAttribute('role'), 'status');
+  const [row, details] = notice.children;
+  assert.equal(row.children[0].textContent, '연결이 끊겼습니다');
+  assert.doesNotMatch(row.textContent, /NetworkError/);
+  settingsButton(notice, '다시 시도').fire('click');
+  assert.equal(retried, 1);
+  assert.equal(details.tagName, 'DETAILS');
+  assert.equal(details.getAttribute('open'), null, "'자세히' starts folded");
+  assert.equal(details.children[0].textContent, '자세히');
+  assert.match(details.children[1].textContent, /오류: TypeError: NetworkError/);
+  details.open = true;
+  details.fire('toggle');
+  assert.equal(state.codex.showBridgeDetails, true);
+  assert.equal(api.buildCodexBridgeNotice(codex({ bridgeFailures: 3 }), {}).children[1].getAttribute('open'), '', 'stays open across re-renders');
+  const quiet = api.buildCodexBridgeNotice(codex({ bridgeFailures: 1 }), {});
+  assert.equal(quiet.dataset.bridgeState, 'reconnecting');
+  assert.equal(settingsButton(quiet, '다시 시도'), undefined, 'no button during the quiet retries');
+
+  assert.equal(surfaceSource.includes('코덱스 브리지에 연결할 수 없습니다'), false, 'the raw transport text is not the error line');
+  assert.equal(surfaceSource.includes('브리지 온라인 ·'), false, 'latency is not on the status line');
+  assert.match(surfaceSource, /bridgeFailures: \(state\.codex\.bridgeFailures \|\| 0\) \+ 1,\n            bridgeError: String\(fallbackError\?\.message \|\| fallbackError \|\| ''\),/);
+  assert.match(surfaceSource, /      reconnectNow\(\) \{\n        if \(state\.codex\.connected\) return false;/);
+});
+
+// DSN-02: the legacy blue-grey family resolves through approved tokens, and the
+// legacy Chat block no longer repaints what the approved block sets.
+test('Chat and Desk CSS use approved tokens for the former blue-grey family, defined once', () => {
+  const outsideOntology = surfaceCss.split(/\n(?=[^\s])/).filter(chunk => !/ontology/.test(chunk.split('{')[0])).join('\n');
+  for (const legacy of ['#2D5A7B', '#244a66', '#607688', '#243342', '#E3EEF5', '#F4F7F9', '#E5EBF1', '#F0F3F6', 'rgba(45, 90, 123', 'rgba(107, 123, 141']) {
+    assert.equal(outsideOntology.toLowerCase().includes(legacy.toLowerCase()), false, `${legacy} is gone outside the Ontology lens`);
+  }
+  assert.match(surfaceCss, /--egd-primary-strong: color-mix\(in srgb, var\(--egd-primary\) 72%, var\(--egd-on-surface\)\);/);
+  const count = selector => surfaceCss.split('\n').filter(line => line.startsWith(`${selector} {`)).length;
+  // Selectors of a CSS slice, one entry per rule head (grouped heads split).
+  const selectors = css => new Set([...css.replace(/\/\*[\s\S]*?\*\//g, '').matchAll(/(^|\})\s*([^{}@]+?)\s*\{/g)]
+    .flatMap(match => match[2].split(',').map(part => part.trim().replace(/\s+/g, ' '))));
+  const slice = (from, to) => surfaceCss.slice(surfaceCss.indexOf(from), surfaceCss.indexOf(to, surfaceCss.indexOf(from)));
+  const legacy = selectors(slice('/* Existing Chat controls and state remain', '/* Existing Chat-specific layers below'));
+  const approved = selectors(slice('/* Existing Chat-specific layers below', '/* A quiet one-line composer'));
+  assert.ok(legacy.size > 40 && approved.size > 30, 'both Chat blocks found');
+  assert.deepEqual([...legacy].filter(selector => approved.has(selector)), [], 'the legacy Chat block repaints nothing the approved block sets');
+  for (const selector of ['.egd-codex-code-block', '.egd-codex-inline-code', '#egd-codex-activity-panel', '.egd-codex-thread-filter-chip-active',
+    '.egd-codex-stop', '.egd-codex-run-status button', '.egd-codex-typing-dots span']) {
+    assert.equal(count(selector), 1, `${selector} defined once`);
+  }
+  assert.equal(surfaceCss.match(/@keyframes egd-typing-bounce/g)?.length, 1);
+  const panel = surfaceCss.match(/^#egd-codex-activity-panel \{([^}]+)\}/m)?.[1] || '';
+  assert.match(panel, /background: var\(--egd-surface-elevated\)/);
+  assert.match(panel, /box-shadow: var\(--egd-shadow\)/);
+  assert.match(surfaceCss, /\.egd-codex-thread-filter-chip-active \{ background: var\(--egd-primary-container\); border-color: var\(--egd-primary\); color: var\(--egd-primary\); font-weight: 700; \}/);
+  assert.ok(surfaceCss.indexOf('.egd-codex-thread-filter-chip-active {') > surfaceCss.indexOf('.egd-codex-thread-filter-chip { min-height: 28px;'),
+    'the active chip follows the list-mode chip reset, so its tint is not reset to transparent');
 });

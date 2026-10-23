@@ -15,7 +15,7 @@ export const VIEWPORTS = Object.freeze([
   { width: 1280, height: 776 },
 ]);
 const DOCK_IDS = Object.freeze(['chat', 'shelf', 'ontology', 'browser', 'ide', 'terminal', 'settings',
-  'create', 'pencil', 'hand', 'square', 'ellipse', 'line', 'arrow', 'trash']);
+  'create', 'pencil', 'hand', 'square', 'ellipse', 'line', 'arrow', 'label', 'highlight', 'select', 'trash']);
 const ZOOM_LABELS = Object.freeze(['Canvas 축소', 'Canvas 확대', '열린 창 전체 보기']);
 const DRAFT = 'EG-Desk headless QA draft — never send';
 const sleep = ms => new Promise(resolve => setTimeout(resolve, ms));

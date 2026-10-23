@@ -24,6 +24,14 @@ async function openBoard(harness, board) {
   await visible(harness, `[data-testid="board-projection"]${attributeSelector('data-board-id', board.id)}`);
 }
 
+// Save, Chat attach and close live in the Board region's [⋯] menu.
+async function boardMenuAction(harness, projectionId, action) {
+  const item = `[data-testid="${action}"]${attributeSelector('data-projection-id', projectionId)}`;
+  await harness.click(`[data-testid="board-menu"]${attributeSelector('data-projection-id', projectionId)}`);
+  await visible(harness, item);
+  await harness.click(item);
+}
+
 async function seedBoard(harness, supported = false) {
   return chrome(harness, ({ supported }) => {
     const api = window.__egdesk;
@@ -237,6 +245,18 @@ await runUiFlow(`rendered-ui-${scenario}`, async ({ harness, check, capture, res
   check('Board opening preserves Saved Board bytes and all pre-existing views', opened.savedUnchanged && opened.previousIntact);
   check('Board opens one projection with the requested members', opened.projectionCount === 1 && opened.members.length === 2);
   const projectionId = opened.projection.id;
+  const marks = await chrome(harness, (id) => {
+    const region = document.getElementById(id);
+    const current = region?.querySelector('.egd-board-region-current');
+    return { active: region?.dataset.active === 'true', current: current && !current.hidden ? current.textContent : null,
+      edge: region ? getComputedStyle(region).borderTopWidth : null,
+      name: region?.querySelector('.egd-board-region-name')?.textContent || '',
+      railName: document.querySelector('.egd-rail-agenda-name')?.textContent || '',
+      directActions: region ? region.querySelectorAll('[data-testid="board-save"], [data-testid="board-close"]').length : -1 };
+  }, projectionId);
+  check('opened Board region shows its name, the 2px current edge and 현재 Board',
+    marks.active && marks.current === '현재 Board' && marks.name === board.title && marks.directActions === 0, marks);
+  check('top bar names the Board now on screen', marks.railName.startsWith(board.title), marks);
 
   if (scenario === 'board-reopen') {
     const [closedMember, survivor] = opened.members;
@@ -262,7 +282,7 @@ await runUiFlow(`rendered-ui-${scenario}`, async ({ harness, check, capture, res
     check('surviving unsaved view and Browser object are preserved', identity.sameNode && identity.sameBrowser && identity.sameWidth);
     check('reopen preserves Saved Board bytes', reopened.savedUnchanged);
   } else if (scenario === 'board-close') {
-    await harness.click(`[data-testid="board-close"]${attributeSelector('data-projection-id', projectionId)}`);
+    await boardMenuAction(harness, projectionId, 'board-close');
     const closed = await waitUntil(() => boardObservation(harness, board.id), (state) => state.projectionCount === 0);
     check('normal clean Board close removes only its projection and owned views',
       closed.projectionCount === 0 && (await harness.inspect(attributeSelector('data-projection-id', projectionId))).length === 0);
@@ -277,7 +297,7 @@ await runUiFlow(`rendered-ui-${scenario}`, async ({ harness, check, capture, res
       api.agenda.markDirty('qa-controlled-reference-collision', document.getElementById(member.viewId));
       return true;
     }, { projectionId, member });
-    await harness.click(`[data-testid="board-save"]${attributeSelector('data-projection-id', projectionId)}`);
+    await boardMenuAction(harness, projectionId, 'board-save');
     const binding = await chrome(harness, (id) => window.__egdesk.agenda.readStore().agendas[id].agenda.contextBindings[0], board.id);
     check('only the schema view reference is mapped back to the source member', binding.viewId === member.sourceId);
     check('colliding external resource ID, URL, text and object key survive save',
@@ -323,7 +343,7 @@ await runUiFlow(`rendered-ui-${scenario}`, async ({ harness, check, capture, res
       await capture('terminal-printf');
     }
     {
-      await harness.click(`[data-testid="board-close"]${attributeSelector('data-projection-id', projectionId)}`);
+      await boardMenuAction(harness, projectionId, 'board-close');
       if ((await harness.inspect('#egd-agenda-close-guard')).some(node => node.visible)) {
         await harness.click('#egd-agenda-close-guard [data-action="discard"]');
       }

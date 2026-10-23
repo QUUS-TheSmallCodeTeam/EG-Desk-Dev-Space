@@ -6,9 +6,11 @@
 
 This document tracks product decisions and development backlog items that came from active design/development discussion. It is not a marketing whitepaper. The public-facing whitepaper is [Production v8](../../docs/production/EG-DESK%20백서%20-%20Production_v8_한글.md), while this file keeps the current product/runtime direction and todo surface aligned.
 
-Board is the product term used here. Some current runtime identifiers and UI
-copy still say `Agenda`; checked backlog items describe the underlying behavior,
-not completion of the visible rename.
+Board is the product term used here. Some current runtime identifiers (for
+example `state.agenda`, `data-agenda-id`, search result type `agenda`) still say
+`Agenda`; since 2026-10-24 the visible overlay copy says Board (`Board Thread`,
+`Board 검색...`, `Board를 전환할까요?`) and the former English status words are
+Korean. Checked backlog items describe the underlying behavior.
 
 ## 구현 현황 — 2026-09-27
 
@@ -194,10 +196,10 @@ Viewport HUD should reflect the Board or maximized card currently in view. When 
 
 ### P1 - Canvas and Viewport
 
-- [x] Shape tools: square, ellipse, line, arrow, pen.
+- [x] Shape tools: square, ellipse, line, arrow, pen (freehand), label, highlight; select is its own Dock tool. Arrow, pen, label and highlight share selection, move, delete and Board save/restore with the original shapes; covered by unit tests, while the Firefox run of `apps/firefox-ui-demo/scripts/verify-firefox-mcp-shapes.mjs` is still pending.
 - [x] Card maximized/fullscreen behavior with HUD hiding.
 - [x] HUD viewport fit checks.
-- [ ] Board region visual distinction on infinite canvas.
+- [x] Board region visual distinction on infinite canvas: faint solid edge, 14px corners, icon + name, actions in [⋯], 24px padding and 36px title row, 2px edge and `현재 Board` on the active Board, unsaved mark, and a far-zoom name chip; the top bar follows the Board on screen (`이름 · +N`, `Board 없음`). Unit-tested; the Firefox run of `verify-firefox-mcp-first-use-board.mjs` is still pending.
 - [ ] Card placement policy: empty-space search, active Board placement, unsaved changes guard.
 - [ ] Canvas output follow-up mode: temporal/spatial steps, camera movement, annotations, and comment anchors.
 - [ ] AI canvas annotation mode: draw boxes/arrows/labels over cards or screenshots.
@@ -226,7 +228,7 @@ Viewport HUD should reflect the Board or maximized card currently in view. When 
 - [ ] Clean-profile boot verification gate.
 - [ ] Portable EGDesk packaging path.
 - [ ] Rust helper consolidation for terminal/PTY/native functions.
-- [ ] Bridge restart/reconnect UX without noisy user-facing diagnostics.
+- [ ] Bridge restart/reconnect UX without noisy user-facing diagnostics. Screen side done 2026-10-24 (unit-tested, not yet run in Firefox): Chat says `다시 연결 중…` during the first quiet retries, then `연결이 끊겼습니다` with one `다시 시도` button; the raw transport error and timing sit under a folded `자세히`; `/v1/state` `bridge.sourceMismatch` shows `브리지 버전이 맞지 않습니다 · 다시 시작 필요`. The bridge side landed in `1143240` (app-server reconnect backoff, `/v1/state` `bridge` build fields, launcher restart of a crashed bridge). Still open: the overlay does not send its expected build (`X-EGDesk-Overlay-Build`) yet, so the mismatch line cannot fire, and none of this has run in Firefox.
 - [ ] Terminal/browser/auth/file watcher bus for cross-app workflow sync.
 - [ ] Local persistence schema decision: SQLite-first with possible PocketBase/Convex sync bridge later.
 - [ ] Add a Desk-visible host-activity view and control-lease model for computer-use that occurs outside native Desk Windows.

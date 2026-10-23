@@ -178,6 +178,8 @@ await runUiFlow(`context-briefing-fixture-${phase}`, async ({ harness, check, ca
   }, scene.boardId);
   const fileView = board.members.find(item => item.sourceId === scene.originalIds[0]).viewId;
   const browserView = board.members.find(item => item.sourceId === scene.originalIds[1]).viewId;
+  await clickThen('Open this Board actions menu', hook('board-menu') + attributeSelector('data-projection-id', board.id),
+    () => harness.inspect(hook('board-attach-chat') + attributeSelector('data-projection-id', board.id)), nodes => nodes.some(node => node.visible));
   await clickThen('Attach this Board selection to the current Chat', hook('board-attach-chat') + attributeSelector('data-projection-id', board.id), panel, value => value.exists);
   const selected = await chrome(harness, () => [...document.querySelectorAll('[data-testid="chat-attach-source"]')].filter(node => node.checked).map(node => node.dataset.viewId).sort());
   check('Board attach selects only its two actual member views', JSON.stringify(selected) === JSON.stringify([fileView, browserView].sort()));

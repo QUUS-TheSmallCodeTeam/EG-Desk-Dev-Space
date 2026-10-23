@@ -320,7 +320,7 @@ async function setup() {
     await new Promise((resolve) => setTimeout(resolve, 1500));
     api.state.agenda.suppressDirty = true; // Fixtures must never be agenda-save content.
     h.auth();
-    h.must(document.querySelector('.egd-dock-btn[data-id="arrow"]'), 'selection tool').click();
+    h.must(document.querySelector('.egd-dock-btn[data-id="select"]'), 'selection tool').click();
     for (const suffix of ['A', 'B']) {
       api.codexBridge.createThread('dm', { openConversation: false });
       const thread = h.must(api.state.codex.threads.find((item) => item.id === api.state.codex.activeThreadId), 'new thread');
@@ -805,7 +805,7 @@ async function main() {
       const card = h.must(document.getElementById(h.api.state.codex.chatCardEntityId), 'detached chat card');
       h.cardIds.push(card.id);
       h.chatCardId = card.id;
-      h.must(document.querySelector('.egd-dock-btn[data-id="arrow"]'), 'selection tool').click();
+      h.must(document.querySelector('.egd-dock-btn[data-id="select"]'), 'selection tool').click();
       const thread = h.api.state.codex.threads.find((item) => item.id === h.roomA);
       thread.messages.push(...Array.from({ length: 30 }, (_, i) => ({ id: `${h.run}-scroll-${i}`,
         role: i % 2 ? 'user' : 'assistant', authorName: i % 2 ? h.fixture.userAuthorName : h.fixture.authorName,

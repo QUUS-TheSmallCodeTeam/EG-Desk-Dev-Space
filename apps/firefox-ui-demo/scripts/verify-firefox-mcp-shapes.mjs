@@ -158,8 +158,27 @@ async function main() {
         mouse(window, 'mouseup', x + dx, y + dy);
       };
 
+      const pen = (points) => {
+        const viewport = document.getElementById('egd-canvas-viewport');
+        clickTool('pencil');
+        mouse(viewport, 'mousedown', points[0][0], points[0][1]);
+        for (const [x, y] of points.slice(1)) mouse(window, 'mousemove', x, y);
+        const last = points[points.length - 1];
+        mouse(window, 'mouseup', last[0], last[1]);
+      };
+      const label = (x, y, text) => {
+        const viewport = document.getElementById('egd-canvas-viewport');
+        clickTool('label');
+        mouse(viewport, 'mousedown', x, y);
+        const editor = document.querySelector('.egd-canvas-shape-label[data-editing="true"] .egd-canvas-shape-label-text');
+        if (!editor) throw new Error('label tool did not open a text field');
+        editor.textContent = text;
+        editor.dispatchEvent(new KeyboardEvent('keydown', { key: 'Enter', bubbles: true, cancelable: true }));
+      };
+
       let dragMoved = false;
       let deleteSelectedWorked = false;
+      let roundTrip = null;
 
       return wait(200).then(() => {
         document.querySelectorAll('.egd-canvas-shape').forEach((shape) => {
@@ -199,7 +218,23 @@ async function main() {
         deleteSelectedWorked = document.querySelectorAll('.egd-canvas-shape').length === 2
           && !document.querySelector('.egd-canvas-shape-line');
         draw('line', 680, 430, 960, 520);
-        clickTool('arrow');
+        draw('arrow', 620, 560, 820, 610);
+        pen([[860, 560], [880, 575], [905, 585], [930, 580], [955, 565], [975, 590]]);
+        draw('highlight', 620, 640, 820, 680);
+        label(860, 650, '로그인 버튼');
+        clickTool('select');
+        // Board save path: serialize, remove and restore the four new marks.
+        const api = window.__egdesk;
+        const fresh = ['arrow', 'path', 'highlight', 'label']
+          .map((type) => document.querySelector('.egd-canvas-shape-' + type)).filter(Boolean);
+        const before = fresh.map((shape) => api.shapes.serialize(shape));
+        for (const shape of fresh) { shape._cleanup?.(); shape.remove(); }
+        const after = before.map((record) => api.shapes.serialize(api.shapes.restore(record)));
+        const comparable = (record) => record && JSON.stringify({ type: record.type, x: record.geometry.x, y: record.geometry.y,
+          runtimeState: record.runtimeState });
+        roundTrip = { count: fresh.length, same: before.every((record, index) => comparable(record) === comparable(after[index])),
+          pathPoints: before.find((record) => record?.type === 'path')?.runtimeState.points.length || 0,
+          labelText: before.find((record) => record?.type === 'label')?.runtimeState.text || null };
         return wait(100);
       }).then(() => {
         const shapes = Array.from(document.querySelectorAll('.egd-canvas-shape')).map((shape) => {
@@ -222,6 +257,7 @@ async function main() {
           shapeCount: shapes.length,
           dragMoved,
           deleteSelectedWorked,
+          roundTrip,
           types: shapes.map((shape) => shape.type),
           shapes,
         };
@@ -230,11 +266,14 @@ async function main() {
   }));
 
   const parsed = parseToolJson(result);
-  const expectedTypes = ['rect', 'ellipse', 'line'];
+  const expectedTypes = ['rect', 'ellipse', 'line', 'arrow', 'path', 'highlight', 'label'];
   const typeSet = new Set(parsed.types);
   const missing = expectedTypes.filter((type) => !typeSet.has(type));
   const invalidSize = parsed.shapes.filter((shape) => shape.width < 12 || shape.height < 12);
-  if (parsed.shapeCount !== 3 || missing.length || invalidSize.length || !parsed.dragMoved || !parsed.deleteSelectedWorked) {
+  const roundTripOk = parsed.roundTrip?.count === 4 && parsed.roundTrip.same
+    && parsed.roundTrip.pathPoints >= 2 && parsed.roundTrip.labelText === '로그인 버튼';
+  if (parsed.shapeCount !== expectedTypes.length || missing.length || invalidSize.length || !parsed.dragMoved
+    || !parsed.deleteSelectedWorked || !roundTripOk || parsed.activeTool !== 'select' || parsed.rootTool !== 'select') {
     throw new Error(`Shape verification failed: ${JSON.stringify({ parsed, missing, invalidSize }, null, 2)}`);
   }
 
