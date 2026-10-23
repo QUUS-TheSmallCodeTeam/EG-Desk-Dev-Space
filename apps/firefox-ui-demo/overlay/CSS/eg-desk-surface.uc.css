@@ -168,6 +168,37 @@
   background: #B8C7B6;
 }
 
+/* Request activity, not an input/success acknowledgement. Keep the existing
+   outline center icon and compact-view hiding rules untouched. */
+.egd-browser-card[data-egd-agent-activity="true"] > .egd-semantic-proxy[data-lod="outline"]::after {
+  content: "";
+  position: absolute;
+  top: 7px;
+  right: 7px;
+  width: 6px;
+  height: 6px;
+  border-radius: 50%;
+  background: var(--egd-primary, #526B78);
+  pointer-events: none !important;
+}
+
+/* Percentages use the observed content viewport. The existing page wrap and
+   Desk camera supply display scaling; page zoom/DPR are not applied again. */
+.egd-browser-agent-target {
+  position: absolute;
+  z-index: 3;
+  width: 12px;
+  height: 12px;
+  box-sizing: border-box;
+  border: 2px solid var(--egd-primary, #526B78);
+  border-radius: 50%;
+  background: rgba(255, 254, 250, .72);
+  transform: translate(-50%, -50%);
+  pointer-events: none !important;
+  user-select: none;
+}
+.egd-browser-agent-target[hidden] { display: none !important; }
+
 .egd-semantic-label {
   display: block;
   max-width: 100%;
