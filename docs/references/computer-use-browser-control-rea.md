@@ -1,11 +1,12 @@
 # ChatGPT 데스크톱 Computer Use·Browser Control 조사
 
 작성·공개 자료 확인: **2026-10-23**. 대상 독자: EG-Desk 개발자.
-상태: **검토완료·미확인항목 포함**. 기존 설치본 분석·통제 실험과 10월 23일 추가 정적 검토를 합친 연구 참고 문서다.
+상태: **설치 분석·EG-Desk 범위별 검증 정리, native 미확인 항목 유지**. 기존 설치본 분석·통제 실험과 10월 23일 추가 정적 검토, 별도의 EG-Desk 개발 반영 원장을 합친 연구 참고 문서다. 전체 제품·모든 환경의 완료 선언은 아니다.
 제품 기능 명세나 모든 앱에서의 동작 보증이 아니며, 새 기능 결정을 요구하지 않는다.
 
 - **직접 확인:** 설치 코드에서 브라우저 CDP 입력·DOM 표시 커서와 네이티브 PID 입력·포커스 복원을 구분했다. 제한된 과거 A/B 시험에서는 A→B→A 복귀와 A의 입력 수신을 확인했다. 현행 브라우저 서비스는 REA 정적 분석, 현행 네이티브의 선택된 경계는 LLVM 정적 부분 대응까지 확인했으며 현행 네이티브 실행을 재검증한 것은 아니다.
 - **공개 자료:** 특정 버전의 제3자 실제 역분석, 독립 대체 구현, 공식 지원 설명은 서로 다른 근거다. 어느 것도 우리 현행 설치본의 전체 동작을 대신 증명하지 않는다.
+- **EG-Desk 반영:** transport 응답 격리·Stop 대기 표시·요청 단위 표시 마커의 통합, 중앙 회귀와 소유 headless fixture의 범위별 결과를 6.1에 기록했다. 설치 OpenAI 코드·실제 모델/provider·native OS 동작의 증거와는 구분한다.
 - **미확인:** timeout 뒤 최종 효과, native Stop 뒤 queued input, 현행 네이티브 버전의 동등성, Gecko 좌표 조합은 남아 있다. [남은 분석 표](#remaining-analysis)에 필요한 이유와 승인 후 최소 확인 범위를 정리했다.
 
 ## 1. 읽는 기준: 직접 확인 / 공개 자료 / 미확인
@@ -175,7 +176,7 @@ P-02의 [고정 LICENSE](https://github.com/iFurySt/open-computer-use/blob/43eb4
 
 ## 6. EG-Desk/Firefox에 적용할 때
 
-아래는 조사에서 얻은 **설계·검증 시사점**이다. Chromium/macOS 구현이 Firefox에 이미 이식됐다는 주장이 아니다.
+아래는 조사에서 얻은 **설계·검증 시사점과 별도의 EG-Desk 반영 현황**이다. Chromium/macOS 구현 자체가 Firefox에 이식됐다는 주장이 아니다.
 기존 [Browser Agent 관찰 런타임](../../apps/firefox-ui-demo/docs/BROWSER_AGENT_OBSERVATION_RUNTIME.md)과 따로 대조한다.
 
 | ID | 적용 관점 | 확인할 경계 |
@@ -187,12 +188,12 @@ P-02의 [고정 LICENSE](https://github.com/iFurySt/open-computer-use/blob/43eb4
 | EG-05 | 기존 단위 테스트 활용 | 아래 항목은 2026-10-23 중앙 검증에서 통과를 확인한 단위 테스트다(`79b3566`). **unit-test verified**이며 OpenAI REA 결과나 물리 OS 취소 보장으로 합산하지 않는다. |
 | EG-06 | 실제 EG-Desk 소유 fixture의 headless 경계 검증 | 2026-10-23 `42db7c0`의 browser-negative에서 **11개 거부 + guarded fill/click 양성 대조 2개 + 카메라 격리 사례 통과**. 실제 headless UI 실행이지만 test-only synthetic B-service·owned UI 범위이며 native-model/provider 검증은 아니다. [EGQ1] |
 | EG-07 | 실제 소유 fixture의 top-document reload 경계 검증 | 2026-10-23 UTC headless QA에서 **UI reload로 문서 교체 → 오래된 action 거부 → 명시적 재선택·fresh observe 후 DOM 클릭 1회 통과**. EG-Desk test-only 소유 UI 근거이며 설치 OpenAI REA·native-model/provider 검증이 아니다. [EGQ2] |
-| EG-08 | 요청 단위 표시 전용 target marker — **권고·구현 대기** | actor의 surface-local 위치를 현재 Desk 카메라로 표시하되 입력 좌표·권한과 분리한다. 표시 도착을 실행 성공으로 쓰지 않고 완료·실패·취소 시 해당 요청 표시만 정리한다. B-05에서 얻은 설계 시사점이며 EG-Desk 적용·실행 검증 완료가 아니다. [C16–C18] |
+| EG-08 | 요청 단위 표시 전용 target marker — **통합·소유 fixture 범위 검증** | `96e1a74`의 승인 요청 표시 마커·outline activity dot은 입력 제어를 변경하지 않는 독립 구현이다. 범위별 자동 검증과 detail/outline 표시·정리 결과를 EGA3/EGQ4에 구분한다. B-05는 설계 시사점이지 이 구현이나 현행 OpenAI 실행의 증명이 아니다. [C16–C18, EGA3, EGQ4] |
 
 EG-08에서 카메라 이동은 마커의 재투영만 바꾸며, 허용된 화면 밖 action을 막거나 카메라를 자동 이동하지 않는다.
 문서·대상·관찰 유효성은 기존 guard로 검사하고, 좌표 기반 입력이면 관련 layout 변경을 별도로 확인한다.
-마커는 hit-test·포커스를 받지 않는 표시층으로 두고 실행을 애니메이션 도착에 종속시키지 않는 것이 권고다.
-기존 EG-06의 화면 밖 action·카메라 보존 조건과, 표시만 갱신할 때 provider 호출 0인 조건을 유지해야 한다. 이 마커 구현·회귀 검증은 아직 완료되지 않았다.
+마커는 hit-test·포커스를 받지 않는 표시층으로 두고 실행을 애니메이션 도착에 종속시키지 않는 것이 적용 계약이다.
+기존 EG-06의 화면 밖 action·카메라 보존 조건과, 표시만 갱신할 때 provider 호출 0인 조건은 유지 대상이다. EGQ4의 표시·정리 검증을 모든 배율·레이아웃·native 입력 검증으로 확대하지 않는다. [EGA3]
 
 EG-05의 관련 위치는 변경 시 라인이 이동할 수 있으므로 테스트 의미와 함께 확인한다.
 
@@ -215,6 +216,43 @@ EG-07은 reload 버튼의 **idle(`loading=false`, `busy=false`)·활성 상태�
 cancel 후 소유 카드 메뉴의 명시적 재선택·fresh observe를 거쳐 guarded DOM click 1회, perform/count **0→1**·후조건 관찰을 확인했다. finally 정리 후 카메라·선택 상태도 복원됐다.
 전후 sends/authWrites/runs/providerTurns는 0, 실제 headless는 true이며 screenshot은 unsupported·`visualPass=null`이다. 클릭 경로는 `dom-click-no-pointerdown`으로, 좌표 입력·native-model/provider·OS 포커스 증거가 아니다. [EGQ2]
 
+### 6.1. 개발 반영·범위별 최종 검증 원장
+
+2026-10-23 Main 통합 기준은 **`deff647`**이며, 아래 개별 시험의 실행 커밋은 따로 표시한다.
+구현·중앙 회귀·PNG 시각 검토는 중앙 보고, EGQ3–EGQ6의 지정 JSON 필드는 직접 읽은 원시 근거다. 이 문서 갱신에서 구현 소스를 재검토하거나 시험·PNG 검토를 다시 실행한 것은 아니다. 각 수치는 명시한 커밋·시점·시험 범위에 한정하며 합산하지 않는다.
+OpenAI 설치 정적 분석은 설계 판단의 근거이고, 아래 EG-Desk 구현·검증을 대신 증명하지 않는다.
+
+| ID / 연결 | 통합 커밋·내용 | 보고된 검증 / 남은 경계 |
+|---|---|---|
+| EGA1 / EG-01·B-04 | `a8d88ae`: transport pending을 run-generation별로 분리하고 wire ID 및 재사용 ID의 늦은 응답을 격리 | 단위 **11/11**, 그 시점 중앙 **406/406**. 응답 격리 검증이며 이미 전송된 native 입력 취소·Chromium late effect 판별은 아님 |
+| EGA2 / EG-04 | `dd5c5bd` + `b1cc997`: Stop HTTP/ACK 대기 중 **중지 요청 중**, 실제 `interrupted` 상태에서 **중지됨** 표시. runtime 연결 상실을 종료로 취급하지 않음 | 해당 통합 시점 중앙 **506/506**. 후속 EGQ5에서 소유 fixture의 HTTP 대기→ACK→terminal 3단계 PASS. native Stop·물리 입력 취소 검증은 아님 |
+| EGA3 / EG-03·EG-08 | `96e1a74`: 승인된 요청의 표시 전용 target marker와 outline activity dot. 입력 제어는 변경하지 않음 | 독립 **260/260** 보고와 EGQ4의 detail/outline 표시·정리 확인. 촬영용 receipt 반환 보류를 실제 입력 지연·성능 증거로 해석하지 않음 |
+| EGA4 / EG-07 | `783bd2e`: reload QA의 semantic readiness와 native proxy reveal 1회 뒤 실제 UI reload 1회 경계를 보강 | 독립 **47/47** 보고. 후속 `692b241` 실행 EGQ3의 `browser-negative` PASS를 별도 보관하며 과거 EGQ2 결과를 덮어쓰지 않음 |
+| EGA5 / EG-04 시험 지원 | `692b241`: mock Stop ACK를 보류하는 시험용 fixture | **제품 기능이 아닌 시험 장치**. 보류 상태를 만들었다는 사실만으로 Stop 완료·native 큐 취소를 검증하지 않음 |
+
+`b1cc997`의 headless **4개 크기 PASS**와 screenshot 중앙 검토가 보고됐다(`g8yY7m`). 전체 원시 JSON은 보존되지 않아 이 기록은 4개 크기 범위에 한정하며 assertion 수·전체 시나리오 통과 수로 확장하지 않는다.
+이전 추가 실행 `iI8pfJ`의 reload 실패와 EGA4 보강을 별도로 기록하며, 기존 EGQ2의 역사적 결과는 보존한다.
+
+**중앙 자동 회귀:** 추출 테스트 의존성 실패 1건은 시험 수정 `b39da9d`의 Main 통합 후 해결됐다. `deff647` 실행은 **532/532, fail 0, skip 0, 10.97초**로 보고됐다. 이전 406/406·506/506과 별도 시점 결과이며 native 효과의 검증은 아니다.
+
+**소유 browser-negative:** `692b241` 실행 EGQ3은 `automatedAssertionsPassed:true`, `completedCases:[browser-negative]`다. 11개 거부 각각 actor perform 증가가 0이다(누적값 자체가 모두 0이라는 뜻은 아님).
+reload 영수증은 `owned-card-semantic-proxy` reveal `attempts:1` 뒤 `owned-card-reload-button` 경로, detail·idle 상태와 9/9 hit-test를 기록한다. Card 5/context 17을 유지하면서 innerWindowId `27917287425 → 27917287426`, actor document가 교체됐고, stale 거부 후 새 문서 perform은 0이었다.
+명시적 재선택·fresh observe 뒤 `dom-click-no-pointerdown`의 perform/count **0→1**, `documentStillCurrent:true`, 후조건 일치를 확인했다. 카메라 pan/zoom·실제 카메라·선택 복원도 기록됐다.
+전후 sends/authWrites/runs/providerTurns는 모두 0이며 소유 headless production UI·JSWindowActor + **synthetic B-service** 범위다. `nativeModelOriginVerified:false`, `actorPhysicalDispatchCounterVerified:false`, screenshot unsupported·`visualPass:null`이며 모델/실제 provider·물리 입력·시각 검증은 아니다. [EGQ3]
+
+**표시 마커:** EGQ4의 detail(zoom 1.5)와 outline 단계에서 장식용 `pointer-events:none`·`aria-hidden:true`를 확인했다. detail 마커 실측은 약 8.98px이며 outline activity dot은 6px·중앙 아이콘이 있다. Main의 두 PNG 검토는 fixture 버튼의 대상점과 outline 표시의 **한정된 시각 PASS**다.
+두 action 영수증은 `dom-click-no-pointerdown`, click count 1의 후조건 일치이며 이후 marker hidden·activity null이다. providerTurns는 0이다. 시험 전용 wrapper가 **이미 반환된 실제 actor 영수증**을 3,000ms 보류해 촬영했으므로 입력 지연·실제 모델·성능·native OS 증거가 아니다. 원시 `visualPass:null`과 Main의 PNG 검토 보고를 구분한다. [EGQ4]
+
+**Stop UI:** EGQ5는 자동 assertion PASS이며 pending HTTP에서 `stopPending:true`, **중지 요청 중**·비활성 버튼을 기록한다. ACK 뒤에는 `status:stopping`으로 같은 표시·비활성 버튼을 유지하며 아직 terminal이 아니다. `interrupted`에서 **중지됨**·Stop 버튼 0개로 전환한다.
+sends 1·interrupts 1·authWrites 0·providerTurns 0, transport globals unchanged가 기록됐다. Main은 3개 PNG의 단계별 표시를 확인했다. 원시 `visualPass:null`은 그대로 구분한다.
+실제 기록에는 `staleClickRetries` 필드가 없고 첫 클릭 성공이 보고됐다. 임시 도구의 일반화된 click 오류 재시도를 무입력·무중복의 근거로 쓰지 않는다. 이 PASS는 실제 headless EG-Desk UI + fixture backend의 상태 전이이며 OpenAI native Stop·물리 입력 취소·실제 provider 검증이 아니다. [EGQ5]
+
+**일반 UI:** `deff647`의 새 오프라인 소유 프로필 실행 EGQ6은 `ok:true`, **250/250 check**, action 26개·skipped 0개, 800×600·600×600·960×700·1280×776의 4개 viewport다. Main은 4개 PNG에서 Chat controls·composer·dock을 확인했으며 의도된 오프라인 history 경고를 정상 fixture 상태로 구분했다.
+각 viewport의 Fit All은 `status:click-only`, `fitPass:null`이다. 클릭 수행만 기록했으며 그 결과의 배치·맞춤 기하를 검증한 것은 아니다.
+원시 `visualPass:null`과 이 한정된 시각 검토 보고는 별개다. provider 실행은 `not-run`이며 실제 모델/provider·인증·native OS 시험이나 모든 UI 레이아웃 품질의 보증은 아니다. [EGQ6]
+
+남은 OS foreground 실험은 사용자 경계에 따라 보류했으며, 이 개발 반영으로 native 최종 수신·큐 취소·late effect의 UNKNOWN을 해소하지 않는다.
+
 <a id="remaining-analysis"></a>
 ## 7. 남은 분석: 필요한 이유와 최소 확인 범위
 
@@ -227,7 +265,7 @@ cancel 후 소유 카드 메뉴의 명시적 재선택·fresh observe를 거쳐 
 | R-03 / 현행 native 버전 변화 | 과거 offset·복원 결과를 새 helper에 잘못 적용하지 않기 위해 | N7의 정적 부분 대응을 기준으로, 실행 동등성이 제품 판단에 필요할 때 승인 범위를 확인한 제한 시험을 한다. | 정적 대응은 OS 전면 불필요; 실행 재검증은 별도 / **LLVM 정적 부분 대응 완료**, REA dossier 없음·runtime 동등성 **UNVERIFIED** |
 | R-04 / Gecko frame·zoom·배경 좌표 조합 | Chromium의 관찰/입력 좌표 계약을 Firefox로 오인하지 않기 위해 | 소유 페이지에서 frame·확대율·화면 배율·배경/최소화 조합별 fresh snapshot 좌표와 실제 수신 대상을 대조한다. | 좌표 단위 검증은 OS 전면 불필요; 배경/최소화 실측은 통제 전환 필요 / EG-06/07은 Canvas 카메라·top-document 교체와 DOM 클릭의 제한된 부분 검증. frame·page zoom·DPR·좌표 입력 및 조합별 실행은 **UNVERIFIED** |
 | R-05 / 불투명 host 연결 — 낮은 우선순위 | 대상·세션 경계의 누락을 확인하되 구현을 추측해 복제하지 않기 위해 | B-04의 송수신 JS·세션/숫자 탭 검사 부분 확인을 기준으로, 필요할 때 native pipe/host 내부의 ID 전달·재작성 연결만 보완한다. | 정적 검토는 OS 전면 불필요 / 내부 ID 재작성·E2E runtime 대응은 **UNKNOWN**. 모든 target 소유권 검증 아님; 제품 변경의 선행 조건으로 삼지 않음 |
-| R-06 / 표시 마커와 입력 경계 | 표시 성공을 입력 성공으로 오인하거나 Desk 카메라를 actor 수명과 결합하지 않기 위해 | EG-08 구현 후 소유 fixture에서 표시만으로 provider 호출 0, pan/zoom 뒤 같은 actor 유지·화면 밖 action·카메라 보존, 문서 교체 시 stale 거부와 요청 종료 정리를 확인한다. | 표시·소유 fixture 검증은 OS 전면 불필요 / B-05는 설치 정적 부분 확인. EG-Desk 마커는 **권고·구현 대기**, 현행 OpenAI 경로의 runtime 효과는 **UNVERIFIED** |
+| R-06 / 표시 마커와 입력 경계 | 표시 성공을 입력 성공으로 오인하거나 Desk 카메라를 actor 수명과 결합하지 않기 위해 | EGQ3의 actor/문서·카메라 경계와 EGQ4의 표시·종료 정리 결과를 기준으로, 범위를 넓힐 때 새 조합을 별도 검증한다. | 소유 fixture의 한정된 자동·표시 검증 완료. 전체 배율·레이아웃 및 현행 OpenAI runtime 효과는 **UNVERIFIED**; native 입력 증거로 전이하지 않음 |
 
 ## 부록 A. 버전·해시와 드리프트
 
@@ -305,7 +343,7 @@ L48 `willTerminate`는 관찰 종료 뒤 정리 시점이다. 그때 foreground 
 
 ## 부록 C. 원본 보관 매핑
 
-상대 경로 기준은 보관 실험 **`run-Qvnin2q5/`**다. EGQ1/EGQ2는 별도 EG-Desk QA 보관 디렉터리이며 이 REA 실험에 속하지 않는다. 원본은 이 저장소에 포함하지 않는다.
+상대 경로 기준은 보관 실험 **`run-Qvnin2q5/`**다. EGQ1–EGQ6은 별도 EG-Desk QA 보관 디렉터리이며 이 REA 실험에 속하지 않는다. 원본은 이 저장소에 포함하지 않는다.
 개인별 캐시 루트 대신 증거 ID·상대 경로·해시로 보관자에게 조회한다. 저장소 clone만으로 원본 실행을 재현할 수는 없다.
 
 | ID | 상대 경로 또는 기록 ID | 확인 범위 |
@@ -344,6 +382,11 @@ L48 `willTerminate`는 관찰 종료 뒤 정리 시점이다. 그때 foreground 
 | N9 | `native/focus-restore-6yqdDW/48-current-native-stop-queue-llvm-raw.json` | `2026-10-23T14:57:14Z`; N7과 같은 helper 26.1015.1001540·SHA·UUID. `raw_results`의 지정 함수 출력·파일 메타데이터를 대조한 직접 LLVM 정적 근거이며 REA 함수 dossier가 아님. 대상 실행·UI 입력·프로세스 메모리·runtime 관측 없음 |
 | EGQ1 | 별도 QA 보관: `egdesk-chat-evidence-CJTqA3/result.json` | 2026-10-23, `42db7c0` 실행 보고. result의 거부/양성 대조·cameraSurfaceIsolation·headless·backend 전후 카운터만 대조; 설치 OpenAI 제어 재현 실험이 아님 |
 | EGQ2 | 별도 QA 보관: `egdesk-chat-evidence-Abaf75/result.json` | reload 관찰 `2026-10-23T15:10:39.320Z`. 실행 runtime `7aeb22a`; 실행한 QA runner의 후속 커밋 `86c7156`(main 통합 `283f472`). `browserDocumentReplacement`·headless·backend 전후 카운터 대조 |
+| EGA1–EGA5 | 2026-10-23 중앙 개발·QA 보고; Main 통합 `deff647`, 개별 커밋·범위는 6.1 참조 | 구현·중앙 532/532·PNG 검토는 보고 근거. 지정 EGQ3–EGQ6 JSON은 별도 직접 대조. `g8yY7m`은 4개 크기 PASS·screenshot 검토 보고만 보존; 전체 원시 JSON/해시 미확보 |
+| EGQ3 | 별도 QA 보관: `egdesk-chat-evidence-rPD8tz/result.json` | `692b241` 실행(Main 보고), reload 관찰 `2026-10-23T16:31:49.090Z`. 자동 PASS·11개 거부 actor 증가 0·reload 영수증·후조건·backend 0 직접 대조. 소유 headless UI/actor + synthetic B-service이며 visual/model/provider/native OS 증거 아님 |
+| EGQ4 | 별도 QA 보관: `egdesk-chat-evidence-L14Faw/marker-result.json`; `owned-marker-detail.png`, `owned-marker-outline.png` | JSON의 표시 상태·DOM receipt·정리·3,000ms 반환 보류 직접 확인. PNG는 Main의 한정된 시각 PASS 보고이며 원시 `visualPass:null`과 구분 |
+| EGQ5 | 별도 QA 보관: `egdesk-chat-evidence-BFtB0e/stop-ack-result.json`; `headless-stop-pending.png`, `headless-stop-ack.png`, `headless-stop-terminal.png` | HTTP pending/ACK/terminal·카운터·globals 직접 확인, PNG는 Main 검토 보고. fixture backend의 UI PASS이며 native Stop·물리 no-replay 증거 아님 |
+| EGQ6 | 별도 QA 보관: `egdesk-chat-evidence-FNt1nj/headless-ui-result.json`; JSON에 연결된 4개 PNG | `deff647` 실행(Main 보고). `ok:true`·250 check·4 viewport·provider not-run 직접 확인. PNG는 Main의 한정된 검토 보고, 원시 `visualPass:null` |
 
 EGQ2의 소유 Card 5·context 17에서 `innerWindowId`는 `27917287425 → 27917287426`, actor document는 `3a895710-1afb-4bce-b941-c5452eb3c338 → 2322f46e-f6df-4a21-a867-59900c55d2c1`로 바뀌었다. 프로필·URL·대상 bounds의 동일성은 관찰값 비교이며 좌표 입력 성공을 뜻하지 않는다.
 
@@ -375,6 +418,10 @@ EGQ2의 소유 Card 5·context 17에서 `innerWindowId`는 `27917287425 → 2791
 | N9 | `a3ffcb1328a8344ca202d63025182f268b5a387d04b4d1d364c3c31bcb7aa1bd` |
 | EGQ1 | `a07a9f5aa10ca0e2ff20c9252711ab8f63ef81a9b9fc42555e65ade90e929908` |
 | EGQ2 | `a67fd11a570b7ba2feb9189c5b0381ead74cecb964c8363db42a09d157a5890a` |
+| EGQ3 | `90d9e490cc8a4ffcc8b1ba1824a5e9ec231018282646e8b84540625be5110839` |
+| EGQ4 | `c0e66c9142a30ea75f2228759c63dafc587fabf085b43cf8cdeaa3b2f2e6165e` |
+| EGQ5 | `d3d489f5ca5ac6a5d4537fef9efe64be5a41afb9f27ef4b6fd0672c52e7bbe97` |
+| EGQ6 | `65f7edfe1426fb44f413d960a548f554c91e45593cbe68b783901b415f735074` |
 
 현행 C1–C18 및 N7–N9 artifact SHA-256은 2026-10-23 UTC 보관 파일에서 산출했다. 설치 service/helper SHA·함수 위치·해당하는 REA evidence ID와 함께 조회한다.
 자료의 해시가 맞아도 전체 호출 그래프·현재 설치 동작·취소 보장을 증명하는 것은 아니다.
