@@ -14,7 +14,7 @@ import { assertQaEvidenceDirectory, chooseNativeScrollKey, contextIdFromList, cr
   mcpResultText, parseMcpJson,
   resolveQaMarionettePort } from './firefox-mcp-chat-harness.mjs';
 import { assertQaFixtureArtifact } from './egdesk-chat-qa-contract.sys.mjs';
-import { chooseQaThreadRow, composerIsReady } from './egdesk-qa-ui-flow.mjs';
+import { chatShellUsable, chooseQaThreadRow, composerIsReady } from './egdesk-qa-ui-flow.mjs';
 
 function removeCreatedTemp(directory, prefix) {
   if (path.dirname(directory) !== canonicalTempRoot() || !path.basename(directory).startsWith(prefix)) {
@@ -402,6 +402,10 @@ test('room selection resolves the requested local ID and exact label among multi
   assert.equal(chooseQaThreadRow(b, [a, b], rows).selector, '#b');
   assert.throws(() => chooseQaThreadRow({ ...a, id: 'wrong' }, [a, b], rows), /local ID/);
   assert.throws(() => chooseQaThreadRow(a, [a, { id: 'other', title: a.title }], rows), /not unique/);
+  // A row below its list's edge is drawn under another control; only a row a native click can reach is chosen.
+  const clipped = [{ title: a.title, visible: true, hittable: false, selector: '#a-clipped' }, { title: a.title, visible: true, hittable: true, selector: '#a-reachable' }];
+  assert.equal(chooseQaThreadRow(a, [a, b], clipped).selector, '#a-reachable');
+  assert.throws(() => chooseQaThreadRow(a, [a, b], clipped.slice(0, 1)), /clipped by its list/);
 });
 
 test('send readiness requires the complete draft and an enabled button in the same local room', () => {
@@ -412,4 +416,18 @@ test('send readiness requires the complete draft and an enabled button in the sa
   assert.equal(composerIsReady({ ...input, value: 'Q' }, button, 'QA request', 'room-a'), false);
   assert.equal(composerIsReady(input, button, 'QA request', 'room-b'), false);
   assert.equal(composerIsReady(input, { ...button, visible: false }, 'QA request', 'room-a'), false);
+});
+
+test('Chat counts as open only when wholly on screen and clear of the Dock', () => {
+  const box = (left, top, width, height) => ({ left, top, right: left + width, bottom: top + height, width, height });
+  const view = { width: 1440, height: 900 };
+  const dock = box(364, 842, 712, 46);
+  assert.equal(chatShellUsable(box(557, 158, 407, 580), dock, view), true, 'a Chat inside the window above the Dock');
+  assert.equal(chatShellUsable(box(491, 716, 407, 580), dock, view), false, 'camera left it behind: composer below the window');
+  assert.equal(chatShellUsable(box(557, 300, 407, 580), dock, view), false, 'its composer sits behind the Dock');
+  assert.equal(chatShellUsable(box(1257, 142, 407, 580), dock, view), false, 'cut off at the right edge');
+  assert.equal(chatShellUsable(box(557, 158, 407, 580), null, view), true, 'no Dock to avoid');
+  assert.equal(chatShellUsable(box(557, 158, 0, 580), dock, view), false, 'no size');
+  assert.equal(chatShellUsable(null, dock, view), false, 'no Chat');
+  assert.equal(chatShellUsable(box(557, 158, 407, 580), dock, { width: 0, height: 0 }), false, 'unknown window');
 });

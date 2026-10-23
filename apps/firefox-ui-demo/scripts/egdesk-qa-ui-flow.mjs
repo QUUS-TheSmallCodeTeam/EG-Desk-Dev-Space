@@ -29,8 +29,12 @@ export async function loopbackJson(route, { method = 'GET', body, token, include
 }
 
 export async function visible(harness, selector, timeoutMs = 15000) {
-  return waitUntil(() => harness.inspect(selector),
-    (nodes) => nodes.length > 0 && nodes.some((node) => node.visible), { timeoutMs });
+  try {
+    return await waitUntil(() => harness.inspect(selector),
+      (nodes) => nodes.length > 0 && nodes.some((node) => node.visible), { timeoutMs });
+  } catch (error) {
+    throw new Error(`${selector} did not become visible: ${error.message}`);
+  }
 }
 
 export async function runUiFlow(kind, callback) {
@@ -125,9 +129,33 @@ export async function observeChatEvents(clientThreadId) {
   return { events, get failure() { return failure; }, async close() { controller.abort(); await reading; } };
 }
 
+// "Open" means usable: wholly inside the window and clear of the Dock. A Chat the
+// camera left behind (a Browser opened beside it) still has a size, so size alone
+// says nothing; its composer can sit below the window or behind the Dock.
+export function chatShellUsable(shell, dock, view) {
+  if (!shell || !(shell.width > 0 && shell.height > 0) || !(view?.width > 0 && view?.height > 0)) return false;
+  const inside = shell.left >= -0.5 && shell.top >= -0.5 && shell.right <= view.width + 0.5 && shell.bottom <= view.height + 0.5;
+  const underDock = !!dock && dock.width > 0 && dock.height > 0 &&
+    shell.left < dock.right && shell.right > dock.left && shell.top < dock.bottom && shell.bottom > dock.top;
+  return inside && !underDock;
+}
+
+const chatUsableNow = (harness) => chrome(harness, () => {
+  const box = (node) => {
+    const rect = node?.getBoundingClientRect();
+    return rect ? { left: rect.left, top: rect.top, right: rect.right, bottom: rect.bottom, width: rect.width, height: rect.height } : null;
+  };
+  return { shell: box(document.querySelector('.egd-codex-chat-shell')), dock: box(document.getElementById('egd-dock')),
+    view: { width: window.innerWidth, height: window.innerHeight } };
+});
+
+// A person brings a left-behind Chat back with the Dock's Chat button, which
+// moves the camera so the Chat is readable again.
 export async function openChat(harness) {
-  const open = (await harness.inspect('.egd-codex-chat-shell')).some((node) => node.visible);
-  if (!open) await harness.click('.egd-dock-btn[data-id="chat"]');
+  const usable = async () => { const { shell, dock, view } = await chatUsableNow(harness); return chatShellUsable(shell, dock, view); };
+  if (await usable()) return;
+  await harness.click('.egd-dock-btn[data-id="chat"]');
+  await waitUntil(usable, Boolean, { timeoutMs: 10000, intervalMs: 100 });
 }
 
 export function composerIsReady(input, button, message, threadId) {
@@ -140,6 +168,10 @@ export function composerIsReady(input, button, message, threadId) {
 // earlier rejection comes back and the new text is appended to it. Replace
 // existing text the way a person does: focus, select all, then type or delete.
 export async function replaceComposerText(harness, text, selector = '.egd-codex-input') {
+  return replaceFieldText(harness, selector, text);
+}
+
+export async function replaceFieldText(harness, selector, text) {
   await harness.click(selector);
   await harness.press(process.platform === 'darwin' ? 'meta+a' : 'Control+a', selector);
   if (text) await harness.typeText(text);
@@ -198,19 +230,22 @@ export async function newQaThread(harness, label) {
 export function chooseQaThreadRow(thread, modelThreads, rows) {
   const modelMatches = modelThreads.filter(item => item.title === thread.title);
   assert.ok(modelMatches.length === 1 && modelMatches[0].id === thread.id, 'Requested room label is not unique for its local ID');
-  const matches = rows.filter(row => row.visible && row.title === thread.title);
-  assert.ok(matches.length > 0, `Requested room is not rendered: ${thread.title}`);
+  const labelled = rows.filter(row => row.visible && row.title === thread.title);
+  assert.ok(labelled.length > 0, `Requested room is not rendered: ${thread.title}`);
+  const matches = labelled.filter(row => row.hittable !== false);
+  assert.ok(matches.length > 0, `Requested room is clipped by its list, so a native click would land on another control: ${thread.title}`);
   // A room may appear in more than one list section. Each exact-label row maps
   // to the same uniquely verified local ID; the post-click identity is checked.
   return matches[0];
 }
 
 export async function selectQaThread(harness, thread) {
+  await openChat(harness);
   if ((await harness.inspect('.egd-codex-conversation-back')).some((node) => node.visible)) {
     await harness.click('.egd-codex-conversation-back');
   }
-  const search = (await harness.inspect('.egd-codex-thread-search'))[0];
-  if (search?.value) await harness.fill('.egd-codex-thread-search', '');
+  // The search box keeps text in app state that only an input event updates.
+  if ((await harness.inspect('.egd-codex-thread-search'))[0]?.value) await replaceFieldText(harness, '.egd-codex-thread-search', '');
   const observed = await chrome(harness, () => {
     const selectorFor = node => {
       const root = node.closest('#egd-hud, .egd-chat-card');
@@ -228,6 +263,9 @@ export async function selectQaThread(harness, thread) {
         const style = getComputedStyle(node);
         return { title: node.querySelector('.egd-codex-thread-title')?.textContent?.trim() || '',
           visible: rect.width > 0 && rect.height > 0 && style.display !== 'none' && style.visibility !== 'hidden',
+          // The list scrolls inside its card: past its edge, a native click at the row's
+          // centre lands on whatever is drawn there (diagnostics bar, Dock).
+          hittable: document.elementFromPoint(rect.x + rect.width / 2, rect.y + rect.height / 2)?.closest('.egd-codex-thread-item') === node,
           selector: selectorFor(node) };
       }),
     };

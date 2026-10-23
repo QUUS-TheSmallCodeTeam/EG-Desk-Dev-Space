@@ -255,6 +255,13 @@ await runUiFlow('rendered-ui-fixture-transport', async ({ harness, check, captur
   await capture('fixture-artifact-open');
 
   const threadB = await newQaThread(harness, `QA B ${nonce}`);
+  // The artifact Browser took the camera away from Chat; opening Chat again must leave its input on screen.
+  check('Chat input is on screen and clear of the Dock after a Browser opened beside it', await chrome(harness, () => {
+    const input = document.querySelector('.egd-codex-input')?.getBoundingClientRect();
+    const dock = document.getElementById('egd-dock')?.getBoundingClientRect();
+    return !!input && input.width > 0 && input.top >= 0 && input.left >= 0 && input.right <= window.innerWidth && input.bottom <= window.innerHeight &&
+      (!dock || !(dock.width > 0) || input.bottom <= dock.top || input.right <= dock.left || input.left >= dock.right);
+  }));
   const ordinaryPrompt = `EGDESK_QA_TEXT_ONLY ${nonce}`;
   await sendFromComposer(harness, ordinaryPrompt);
   fixture = await waitUntil(fixtureState, (state) => state.runs.some((run) => run.clientThreadId === threadB.wireClientThreadId && run.status === 'completed'));
@@ -537,20 +544,18 @@ await runUiFlow('rendered-ui-fixture-transport', async ({ harness, check, captur
   const authThread = await newQaThread(harness, `QA auth reset ${nonce}`);
   await sendFromComposer(harness, `EGDESK_QA_STOP auth-reset-${nonce}`);
   await waitUntil(fixtureState, state => state.runs.some(run => run.clientThreadId === authThread.wireClientThreadId && run.status === 'running'));
+  // The activity refresh button is read-only (/chat/state) since bc47de6; reopening
+  // the room is the explicit action that resumes its native conversation. Do it
+  // while the room list still has its full height, before diagnostics take space.
+  await control('/__qa/hold-resume', { hold: true });
+  const heldBefore = (await fixtureState()).observed.heldResumes;
+  await selectQaThread(harness, authThread);
+  await waitUntil(fixtureState, state => state.observed.heldResumes > heldBefore);
   await control('/__qa/auth-diagnostics', {});
   await visible(harness, '.egd-codex-diagnostics-toggle');
   if (!(await harness.inspect('.egd-codex-diagnostics')).some(node => node.visible)) await harness.click('.egd-codex-diagnostics-toggle');
   const signoutSelector = '.egd-codex-diagnostics-actions button:last-child';
   check('fixture logout control is the actual rendered logout button', (await harness.inspect(signoutSelector))[0]?.text === '로그아웃');
-  // The activity refresh button is read-only (/chat/state) since bc47de6; reopening
-  // the room is the explicit action that resumes its native conversation.
-  await control('/__qa/hold-resume', { hold: true });
-  const heldBefore = (await fixtureState()).observed.heldResumes;
-  await selectQaThread(harness, authThread);
-  await waitUntil(fixtureState, state => state.observed.heldResumes > heldBefore);
-  await visible(harness, '.egd-codex-diagnostics-toggle');
-  if (!(await harness.inspect(signoutSelector)).some(node => node.visible)) await harness.click('.egd-codex-diagnostics-toggle');
-  check('fixture logout control is still the rendered logout button after reopening the room', (await harness.inspect(signoutSelector))[0]?.text === '로그아웃');
   await fixtureState(); // Recheck exact fixture/profile binding immediately before logout.
   await harness.click(signoutSelector);
   const cacheState = () => chrome(harness, () => {
