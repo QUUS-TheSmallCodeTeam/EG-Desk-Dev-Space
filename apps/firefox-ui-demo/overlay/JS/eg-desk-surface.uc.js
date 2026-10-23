@@ -632,11 +632,17 @@
   function codexRunLabel(run) {
     if (!run) return '대화 준비';
     if (run.localHistory === true && !['completed', 'interrupted', 'failed', 'cancelled', 'unavailable'].includes(run.status)) return '지난 실행 · 현재 상태 미확인';
-    if (ChatState.isRunBusy(run) && !state.codex.connected) return '연결 끊김 · 실행 상태 확인 필요';
     if (run.status === 'interrupted') return '중지됨';
-    if (run.status === 'failed' || run.status === 'unavailable') return '실행 실패';
     if (run.status === 'completed') return '완료';
-    if (run.stopRequested || run.status === 'stopping') return '중지 요청됨 · 확인 중';
+    const stopping = run.stopPending || run.stopRequested || run.status === 'stopping';
+    // RUNTIME_LOST is reduced to failed, but does not prove native termination.
+    if (run.error?.code === 'RUNTIME_LOST' || run.status === 'unavailable') return stopping || run.stopUnconfirmed ? '중지 확인 필요' : '실행 상태 확인 필요';
+    if (run.status === 'failed') return '오류로 종료됨';
+    if (ChatState.isRunBusy(run)) {
+      if (run.stopUnconfirmed || (stopping && !state.codex.connected)) return '중지 확인 필요';
+      if (!state.codex.connected) return '연결 끊김 · 실행 상태 확인 필요';
+      if (stopping) return '중지 요청 중';
+    }
     if (run.pendingApprovals?.length) return '승인 대기';
     return '응답 중';
   }
@@ -5369,9 +5375,10 @@
             const stopButton = run && ChatState.isRunBusy(run) ? el('button', {
               class: 'egd-codex-stop', type: 'button', 'aria-label': '이 업무 중지',
               data: { testid: 'chat-stop', runId: run.runId, conversationId: run.conversationId },
-              disabled: run.stopPending || run.stopRequested ? 'true' : null,
+              disabled: run.stopPending || run.stopRequested || run.status === 'stopping' ? 'true' : null,
               onclick: () => codexBridge.interrupt(activeThread.id),
-            }, run.stopRequested ? '확인 중' : '중지') : null;
+            }, run.stopUnconfirmed || ((run.stopPending || run.stopRequested || run.status === 'stopping') && !codex.connected)
+              ? '중지 확인 필요' : run.stopPending || run.stopRequested || run.status === 'stopping' ? '중지 요청 중' : '중지') : null;
             return el('div', { class: 'egd-codex-footer' },
               el('div', { class: 'egd-codex-input-row' },
                 buildChatInputTray(activeThread, codexBridge),
@@ -6322,6 +6329,7 @@
         if (!run || run.stopPending || run.stopRequested) return false;
         const token = epochScope.begin();
         run.stopPending = true;
+        run.stopUnconfirmed = false;
         revokeBrowserToolRunImmediately(run, thread);
         emit();
         try {
@@ -6331,11 +6339,13 @@
             run.stopRequested = true;
             run.status = 'stopping';
           } else if (!result.accepted) {
+            if (ChatState.isRunBusy(run)) run.stopUnconfirmed = true;
             updateThreadById(threadId, current => ({ ...current, sendError: '중지 요청이 수락되지 않았습니다. 상태를 다시 확인해 주세요.' }));
           }
           return result;
         } catch (error) {
           if (!epochScope.valid(token)) return false;
+          if (ChatState.isRunBusy(run)) run.stopUnconfirmed = true;
           updateThreadById(threadId, current => ({ ...current, sendError: `중지 여부를 확인하지 못했습니다: ${error.message}` }));
           return false;
         } finally { epochScope.finish(token); if (epochScope.valid(token)) { run.stopPending = false; emit(); } }

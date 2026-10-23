@@ -180,6 +180,193 @@ test('only interrupted run completion confirms stop; runtime loss is offline/fai
   assert.equal(Chat.isRunBusy(run), false);
 });
 
+function stopFeedbackFixture() {
+  const protocol = Chat.createChatProtocolState();
+  const thread = { id: 'ui-a', conversationId: 'conversation-a', messages: [] };
+  const state = { codex: { activeThreadId: thread.id, connected: true, chatProtocol: protocol, threads: [thread] } };
+  const run = Chat.reduceChatEvent(protocol, envelope('run.started', 1));
+  const labelBody = surfaceSource.match(/  function codexRunLabel\(run\) \{([^]*?)\n  \}/)?.[1];
+  const currentBody = surfaceSource.match(/  function codexCurrentRun\(thread\) \{([^]*?)\n  \}/)?.[1];
+  const buttonBody = surfaceSource.match(/            const stopButton = ([^]*?);\n            return el\('div', \{ class: 'egd-codex-footer'/)?.[1];
+  const interruptBody = surfaceSource.match(/      async interrupt\(threadId = state.codex.activeThreadId\) \{([^]*?)\n      \},\n      subscribe/)?.[1];
+  assert.ok(labelBody && currentBody && buttonBody && interruptBody, 'exercise production status, button, current-run and interrupt paths');
+  const label = compileFunction(labelBody, ['run', 'ChatState', 'state']);
+  const current = compileFunction(currentBody, ['thread', 'codexRuns', 'ChatState']);
+  const button = compileFunction(`return ${buttonBody};`, ['run', 'ChatState', 'el', 'codexBridge', 'activeThread', 'codex']);
+  const epochScope = Chat.createChatEpochScope();
+  const requests = [], renders = [], revoked = [];
+  let resolve, reject;
+  const ui = (target = thread) => {
+    const selected = current(target, value => Chat.runsForThread(protocol, value), Chat);
+    return { runId: selected?.runId ?? null, label: label(selected, Chat, state),
+      button: button(selected, Chat, (tag, attrs, text) => ({ tag, attrs, text }), {}, target, state.codex) };
+  };
+  const interrupt = compileFunction(`return async function(threadId = state.codex.activeThreadId) {${interruptBody}\n};`,
+    ['state', 'getCodexThreadById', 'ChatState', 'protocol', 'epochScope', 'revokeBrowserToolRunImmediately', 'emit', 'fetchJson', 'updateThreadById'])(
+    state, (codex, id) => codex.threads.find(item => item.id === id), Chat, protocol, epochScope,
+    value => revoked.push(value.runId), () => renders.push(ui()),
+    (path, options) => { requests.push({ path, ...JSON.parse(options.body) });
+      return new Promise((yes, no) => { resolve = yes; reject = no; }); },
+    (id, update) => { const index = state.codex.threads.findIndex(item => item.id === id);
+      if (index >= 0) state.codex.threads[index] = update(state.codex.threads[index]); });
+  return { protocol, thread, run, state, epochScope, requests, renders, revoked, ui, interrupt,
+    resolve: value => resolve(value), reject: error => reject(error) };
+}
+
+test('Stop feedback immediately distinguishes pending HTTP from acknowledged stopping on the actual run', async () => {
+  const f = stopFeedbackFixture();
+  assert.equal(f.ui().label, '응답 중');
+  assert.equal(f.ui().button.text, '중지');
+  const pending = f.interrupt();
+  assert.equal(f.run.stopPending, true);
+  assert.equal(f.renders[0].label, '중지 요청 중');
+  assert.equal(f.ui().button.text, '중지 요청 중');
+  assert.equal(f.ui().button.attrs.disabled, 'true');
+  assert.equal(f.ui().button.attrs.data.runId, 'turn-a');
+  assert.deepEqual(f.revoked, ['turn-a']);
+  assert.deepEqual(f.requests, [{ path: '/chat/interrupt', conversationId: 'conversation-a', runId: 'turn-a' }]);
+  assert.equal(await f.interrupt(), false, 'duplicate Stop cannot dispatch another request');
+  f.resolve({ accepted: true, stopRequested: true }); await pending;
+  assert.equal(f.run.status, 'stopping');
+  assert.equal(f.ui().label, '중지 요청 중');
+  assert.equal(f.ui().button.text, '중지 요청 중');
+  assert.equal(f.ui().button.attrs.disabled, 'true');
+  Chat.reduceChatEvent(f.protocol, envelope('run.completed', 2, { status: 'interrupted' }));
+  assert.equal(f.ui().label, '중지됨');
+  assert.equal(f.ui().button, null);
+});
+
+test('Stop feedback honors stopping status even before its boolean flag is populated', () => {
+  const f = stopFeedbackFixture();
+  f.run.status = 'stopping';
+  f.run.stopPending = false;
+  f.run.stopRequested = false;
+  assert.equal(f.ui().label, '중지 요청 중');
+  assert.equal(f.ui().button.text, '중지 요청 중');
+  assert.equal(f.ui().button.attrs.disabled, 'true');
+});
+
+test('Stop feedback keeps actual terminal outcomes when an accepted ACK arrives later', async () => {
+  for (const [status, label] of [['completed', '완료'], ['interrupted', '중지됨'], ['failed', '오류로 종료됨']]) {
+    const f = stopFeedbackFixture();
+    const pending = f.interrupt();
+    Chat.reduceChatEvent(f.protocol, envelope('run.completed', 2, { status }));
+    assert.equal(f.run.stopPending, true, 'terminal event can precede the HTTP response');
+    assert.equal(f.ui().label, label);
+    assert.equal(f.ui().button, null);
+    f.resolve({ accepted: true, stopRequested: true }); await pending;
+    assert.equal(f.run.status, status, 'late ACK must not regress a terminal run into stopping');
+    assert.equal(f.ui().label, label);
+    assert.equal(f.ui().button, null);
+    assert.deepEqual(f.thread.messages, []);
+  }
+});
+
+test('Stop feedback reports request failure or timeout as unconfirmed and permits an explicit retry', async () => {
+  for (const failure of ['denied', 'network failure', 'timeout']) {
+    const f = stopFeedbackFixture();
+    const pending = f.interrupt();
+    if (failure === 'denied') f.resolve({ accepted: false });
+    else f.reject(new Error(failure));
+    await pending;
+    assert.equal(f.run.status, 'running');
+    assert.equal(f.run.stopPending, false);
+    assert.equal(f.run.stopUnconfirmed, true);
+    assert.equal(f.ui().label, '중지 확인 필요');
+    assert.equal(f.ui().button.text, '중지 확인 필요');
+    assert.equal(f.ui().button.attrs.disabled, null);
+    assert.ok(f.state.codex.threads[0].sendError);
+    assert.deepEqual(f.state.codex.threads[0].messages, [], 'feedback must not invent a chat message');
+    const retry = f.interrupt();
+    assert.equal(f.run.stopUnconfirmed, false);
+    assert.equal(f.ui().label, '중지 요청 중');
+    assert.equal(f.ui().button.text, '중지 요청 중');
+    f.resolve({ accepted: true, stopRequested: true }); await retry;
+    assert.equal(f.ui().label, '중지 요청 중');
+  }
+});
+
+test('Stop feedback never turns a lost connection into confirmation of stopping', async () => {
+  const f = stopFeedbackFixture();
+  f.state.codex.connected = false;
+  assert.equal(f.ui().label, '연결 끊김 · 실행 상태 확인 필요');
+  f.state.codex.connected = true;
+  const pending = f.interrupt();
+  f.state.codex.connected = false;
+  assert.equal(f.ui().label, '중지 확인 필요');
+  assert.equal(f.ui().button.text, '중지 확인 필요');
+  f.resolve({ accepted: true, stopRequested: true }); await pending;
+  assert.equal(f.ui().label, '중지 확인 필요');
+  assert.equal(f.ui().button.text, '중지 확인 필요');
+  assert.equal(f.ui().button.attrs.disabled, 'true');
+  Chat.reduceChatEvent(f.protocol, envelope('run.unavailable', 2, { error: { code: 'RUNTIME_LOST' } }));
+  assert.equal(f.run.status, 'failed', 'the reducer uses failed even though native termination is unknown');
+  assert.equal(f.ui().label, '중지 확인 필요');
+  assert.equal(f.ui().button, null);
+});
+
+test('Stop feedback distinguishes runtime loss and unavailable state from explicit terminal failure', () => {
+  const f = stopFeedbackFixture();
+  Chat.reduceChatEvent(f.protocol, envelope('run.unavailable', 2, { error: { code: 'RUNTIME_LOST' } }));
+  assert.equal(f.run.status, 'failed');
+  assert.equal(f.ui().label, '실행 상태 확인 필요');
+  f.run.status = 'unavailable';
+  f.run.error = null;
+  assert.equal(f.ui().label, '실행 상태 확인 필요');
+  Chat.reduceChatEvent(f.protocol, envelope('run.completed', 3, { status: 'failed', error: { code: 'EXECUTION_ERROR' } }));
+  assert.equal(f.ui().label, '오류로 종료됨');
+  Chat.reduceChatEvent(f.protocol, envelope('run.completed', 4, { status: 'interrupted' }));
+  assert.equal(f.ui().label, '중지됨');
+});
+
+test('Stop feedback belongs to the exact current run rather than the active thread or a global flag', async () => {
+  const f = stopFeedbackFixture();
+  const other = { id: 'ui-b', conversationId: 'conversation-b', messages: [] };
+  f.state.codex.threads.push(other);
+  Chat.reduceChatEvent(f.protocol, envelope('run.started', 2, {}, {
+    clientThreadId: other.id, conversationId: other.conversationId, runId: 'turn-b', answerId: 'conversation-b/turn-b',
+  }));
+  const pending = f.interrupt();
+  f.state.codex.activeThreadId = other.id;
+  assert.equal(f.ui(other).runId, 'turn-b');
+  assert.equal(f.ui(other).label, '응답 중');
+  assert.equal(f.ui(other).button.text, '중지');
+  Chat.reduceChatEvent(f.protocol, envelope('run.completed', 3, { status: 'completed' }));
+  Chat.reduceChatEvent(f.protocol, envelope('run.started', 4, {}, { runId: 'turn-next', answerId: 'conversation-a/turn-next' }));
+  f.resolve({ accepted: true, stopRequested: true }); await pending;
+  assert.equal(f.run.status, 'completed');
+  assert.equal(f.ui().runId, 'turn-next');
+  assert.equal(f.ui().label, '응답 중');
+  assert.equal(f.ui().button.text, '중지');
+  assert.equal(f.ui().button.attrs.data.runId, 'turn-next');
+});
+
+test('Stop feedback discards a stale ACK or failure after an account binding reset', async () => {
+  for (const late of ['ack', 'failure']) {
+    const f = stopFeedbackFixture();
+    const pending = f.interrupt();
+    f.epochScope.reset();
+    Chat.resetChatProtocol(f.protocol);
+    const rebound = { id: 'ui-a', conversationId: 'conversation-rebound', messages: [] };
+    f.state.codex.threads = [rebound];
+    const nextRun = Chat.reduceChatEvent(f.protocol, envelope('run.started', 1, {}, {
+      streamId: 'stream-rebound', conversationId: rebound.conversationId, runId: 'turn-rebound', answerId: 'conversation-rebound/turn-rebound',
+    }));
+    const rendersBefore = f.renders.length;
+    if (late === 'ack') f.resolve({ accepted: true, stopRequested: true });
+    else f.reject(new Error('old connection timeout'));
+    assert.equal(await pending, false);
+    assert.equal(f.renders.length, rendersBefore, 'old epoch must not emit into the rebound UI');
+    assert.equal(nextRun.status, 'running');
+    assert.equal(nextRun.stopPending, undefined);
+    assert.equal(nextRun.stopUnconfirmed, undefined);
+    assert.equal(rebound.sendError, undefined);
+    assert.equal(f.ui(rebound).label, '응답 중');
+    assert.equal(f.ui(rebound).button.text, '중지');
+    assert.equal(f.ui(rebound).button.attrs.data.runId, 'turn-rebound');
+  }
+});
+
 test('conversation snapshots do not suppress events for other conversations in the same stream', () => {
   const state = Chat.createChatProtocolState();
   Chat.mergeChatSnapshot(state, { conversationId: 'conversation-a', streamId: 'stream-a', seq: 10, connection: 'ready', runs: [] }, 'ui-a');
