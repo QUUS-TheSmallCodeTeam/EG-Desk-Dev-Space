@@ -6440,7 +6440,9 @@
       async reconcileRequest(threadId = state.codex.activeThreadId) {
         const thread = getCodexThreadById(state.codex, threadId);
         if (!thread) return null;
-        if (thread.conversationId) return refreshConversation(thread, false);
+        // Explicit recheck of an unconfirmed send: only the resume path can settle it.
+        // A read-only refresh leaves the request unconfirmed and the room blocked.
+        if (thread.conversationId) return refreshConversation(thread, true);
         const token = epochScope.begin();
         try {
           const snapshot = await fetchJson('/chat/state', { signal: token.signal });
