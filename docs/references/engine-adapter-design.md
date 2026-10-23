@@ -1,0 +1,491 @@
+# Agent 실행 엔진 계층(EngineAdapter) 설계 — SUB-06
+
+- 작성일: 2026-10-24 · 기준 코드: `ce20398`(브랜치 `claude/vision-gap-20261024`) · 상태: **설계안(미구현)**
+- 받는 쪽: 다음 구현을 지휘할 Main 개발자, 그리고 §11 결정을 내릴 대표님
+- 관련 원장 항목: SUB-06(이 문서), SUB-07~11, SUB-14, AGENT-08 — [EGDESK_VISION_GAP_LEDGER.md](../../ideas/confirmed/EGDESK_VISION_GAP_LEDGER.md)
+- 표기: [공식] 공식 문서·`--help` 문구 · [런타임] 이 Mac에서 직접 관찰 · [제안] 이 문서의 설계 판단(미구현·미검증) · [추정] 근거는 있으나 확인 안 됨
+- 조사 범위: 코드 읽기, 공식 문서, `claude --version`/`--help` 정적 조회, `ps` 관찰. 테스트·Firefox·모델 호출은 하지 않았다.
+
+---
+
+## 0. 결론과 권고
+
+1. **엔진 계층은 Claude 연결 방식 결정을 기다리지 않고 지금 만든다.** Chat 런타임은 지금처럼 1개만 두고(스트림 번호·로컬 기록·승인 규칙을 한 곳에서 관리), 그 아래에 엔진 어댑터를 여러 개 꽂는다. Codex 어댑터가 첫 구현이고 Claude 어댑터는 자리만 둔다. [제안]
+2. **내부 기준 이벤트는 지금의 Codex app-server 형태(thread/turn/item 알림 + 승인·질문·도구 요청)를 그대로 쓴다.** Claude 어댑터가 Claude 출력을 이 형태로 번역해 런타임에 넣는다. 화면과 SQLite가 받는 `chat.event` v2는 바꾸지 않고 `engineId` 필드만 더한다. 기존 런타임의 승인·질문·하위 Agent·보안 규칙(약 900줄)을 그대로 재사용할 수 있기 때문이다. [제안]
+3. **어댑터 인터페이스는 "의미 단위 메서드 + Codex 형태 이벤트"로 정한다**(§4). Codex 어댑터는 처음에 기존 `request()`를 그대로 통과시킨다. 그래서 기존 테스트가 확인하는 호출 이름·인자·순서가 바뀌지 않는다. [제안]
+4. **저장은 2단계로 바꾼다.** 1단계는 스키마를 바꾸지 않고 기존 `native.thread.bound` 기록과 Run 기록(`run.engine`)에 엔진·버전·계정 슬롯을 넣는다. 2단계에서 `threads.engine_id` 등을 더하는 v2 이전(추가만)을 한다. 이름 충돌을 막기 위해 **Agent Profile(성격·지침, 이미 `run.profileBinding`에 기록)** 과 **엔진 계정 슬롯(`engineProfileId`)** 을 구분한다(§6). [제안]
+5. **Claude 쪽은 결정에 따라 "전송 모듈" 하나만 달라진다.** CLI stream-json을 직접 쓰든 Agent SDK를 쓰든 나오는 메시지 형태가 같으므로(SDKMessage 계열 [공식]), 번역 계층은 공통으로 둔다. API 키 경로는 둘 중 하나에서 인증 환경변수만 바꾸면 된다(§10). [제안]
+6. **RAM 정책은 다음과 같다.** Codex는 지금처럼 app-server 1개를 공유하고, 계정이 여러 개가 되면 활성 계정의 것만 상주시킨다. Claude는 대화당 프로세스 1개를 두고, idle이면 종료하며, 동시 상주는 기본 2개로 제한한다. EG-Desk 도구는 helper 안에서 MCP로 제공해 대화마다 추가 프로세스가 생기지 않게 하고, 사용자 MCP 서버 상속은 막는다. 참고로 이 Mac에서 관찰한 stream-json `claude` 프로세스 RSS는 148·153·590MB였다 [런타임](§9).
+7. **대표님 결정이 필요한 것은 5가지다**(§11). (D1) Claude 연결 방식, (D2) `~/.claude` 설정 상속, (D3) 대화 중 엔진 전환 정책, (D4) 기본 엔진을 기억할 범위, (D5) EG-Desk 전용 로그인 저장소. 이 중 D1·D2만 Claude 구현을 막는다. 엔진 계층(§8의 1~7단계)은 결정 없이 진행할 수 있다.
+8. **첫 구현 묶음(결정과 무관)**: §8의 1~4단계. 어댑터 모듈 → 런타임 호출 교체 → 엔진 기록 → `/v1/state engines[]` 순서이며, Claude는 이 단계에서 '연결 방식 결정 대기'로만 표시된다.
+
+## 1. 대표님 화면에서 달라지는 점
+
+- 대화마다 어떤 AI로 실행했는지(Codex / Claude) 배지가 붙고 그 대화는 그 엔진에 고정된다. 기본 엔진을 바꿔도 진행 중인 작업은 원래 엔진에서 끝난다(SUB-06).
+- 설정의 '계정 & AI 엔진'이 실제 엔진 목록(`/v1/state engines[]`)에서 나온다. 지금의 가짜 데이터를 지우는 SUB-05와 이어진다.
+- Claude는 연결 방식이 정해지기 전까지 '설치됨 2.1.300 · 연결 방식 결정 대기'처럼 보이고 고를 수 없다.
+- 오류 문구가 엔진과 무관하게 같은 기준(로그인 필요 / 한도 도달·초기화 시각 / 권한 / 연결 / 모델)으로 나뉜다(SUB-14).
+
+---
+
+## 2. 지금 구조에서 확인한 사실 (Codex 단일 경로)
+
+모두 `ce20398` 기준 [런타임: 코드 읽기]이다. 다른 작업자가 같은 파일을 고치고 있으므로 줄 번호는 이동할 수 있다.
+
+| 영역 | 사실 | 위치 |
+|---|---|---|
+| 엔진 식별 | `PROVIDER_ID = 'codex'` 하나뿐 | `helper/codex-bridge-server.mjs:38` |
+| 프로세스 | app-server 프로세스 1개(`appServerProcess`)를 모든 대화가 공유(WebSocket JSON-RPC 다중화) | `codex-bridge-server.mjs:42`, `spawnAppServer` :356, `connectToAppServer` :384 |
+| 이벤트 라우팅 | 알림은 Context Reader가 먼저 가져가고, 남은 것은 `chat.handleNotification`, 요청은 `chat.handleServerRequest`로 간다 | `codex-bridge-server.mjs:400-404` |
+| 인증 | Chat 요청 전 Codex 로그인만 확인(`ensureChatAuth`). 계정이 바뀌면 런타임 전체 `chat.reset()` | `:167-171`, `:242` |
+| 런타임 주입점 | `new CodexChatRuntime({ request, respond, ... })`. `request`=app-server 호출, `respond`=서버 요청 응답(`nativeRespond`) | `helper/codex-chat-runtime.mjs:161-178`, 생성 `codex-bridge-server.mjs:145` |
+| Codex 호출 지점 | `thread/start`(:1021), `turn/start`(:1068), `thread/resume`(:1162), `thread/unsubscribe`(:1009, :1259), `turn/interrupt`(:1137, :1289, :1561, :1834), `config/read`(:992). QA 정책 모듈도 `config/read`·`mcpServerStatus/list`를 직접 호출 | `codex-chat-runtime.mjs`, `codex-chat-execution-policy.mjs:22,55` |
+| 알림 정리 | `cleanNotification`이 `turn/started·completed`, `item/started·completed`, `item/agentMessage/delta`, `item/reasoning/summaryTextDelta`, `item/plan/delta`, `turn/plan/updated`, `error`, `thread/tokenUsage/updated`, `serverRequest/resolved`만 통과시킨다. 항목은 `safeItem`이 `agentMessage·userMessage·reasoning·plan·commandExecution·fileChange·mcpToolCall·dynamicToolCall·collabAgentToolCall·subAgentActivity`만 남긴다 | `:139-158`, `:44-98` |
+| 서버 요청 | `item/tool/call`(EG-Desk 도구), `item/tool/requestUserInput`(질문), 그 밖의 승인(`item/commandExecution/requestApproval`, `item/fileChange/requestApproval`만 지원) | `:1398-1424`, `:1551-1607` |
+| 공개 이벤트 | `chat.event` v2, `provider:'codex'`. 이벤트 이름: `run.started`, `run.configuration`, `run.executionPolicy`, `message.started/delta/completed`, `activity.started/completed`, `plan.updated`, `summary.delta`, `approval.required/resolved`, `userInput.required/resolved`, `subagent.updated`, `artifact.available`, `qa.command.receipt`, `run.stop_requested`, `run.unavailable`, `run.reconciled`, `run.completed` (+ 저장 전용 `run.dispatching`, `native.thread.bound`, `run.recovery_unknown`) | `emit` :426-467 |
+| 연결 상태 | 연결·epoch가 런타임 전체에 하나. 프로세스가 끝나면 진행 중인 모든 Run이 `failed` | `setConnection` :497-529 |
+| 저장소 | SQLite `user_version=1`. 다른 버전은 열기를 거부(초기화 안 함). `threads`에 엔진 컬럼 없음. 공개 JSON에 `apikey`·`secret`·`systemprompt`·`reasoning` 같은 키가 있으면 저장 거부 | `helper/egdesk-chat-store.mjs:7`, `:147-154`, `:156-161`, `:12-18` |
+| 화면 필터 | `provider !== 'codex'`인 이벤트는 버림. QA 계약 스크립트도 같다 | `overlay/resources/EGDeskChatState.sys.mjs:494`, `scripts/egdesk-chat-qa-contract.sys.mjs:104` |
+| 오류 분류 | `ERROR_KINDS = ['auth','quota','permission','network','model','unknown']`, `publicError`가 `kind`·`retryAt`을 붙임 | `helper/codex-chat-values.mjs:43`, `:91-97` |
+| Codex 전용 의존 | Context Reader(`NativeReaderClient`)와 사용 한도 동기화(`createRateLimitSync`)는 app-server를 직접 쓴다 | `codex-bridge-server.mjs:141`, `:183` 부근 |
+
+리팩터 순서를 정할 때 지켜야 하는 테스트 고정점:
+
+- `helper/codex-chat-runtime.test.mjs:1835-1837`은 `'accept','run.dispatching','thread/start','native.thread.bound','turn/start','run.started','run.configuration'` **순서**를 단언한다. 새 이벤트를 끼우면 깨진다. 기존 이벤트의 details에 필드를 더하는 것은 괜찮다.
+- `helper/egdesk-chat-store.test.mjs:86`은 `user_version === 1`을 단언한다. 스키마 v2로 올리는 커밋에서 같이 고친다. `:359-361`(버전 99 거부)은 그대로 유지된다.
+- `codex-bridge-server.mjs` **원문 문자열**을 읽어 단언하는 테스트가 3개 있다. `codex-bridge-http.test.mjs:521-540`(`'const chat = new CodexChatRuntime({'`, `'  profiles: profileStore,'` 등), `egdesk-native-capabilities.test.mjs:241-259`(`'spawn(executable, appServerLaunch.args, {'`, `"appServerProcess.kill('SIGTERM')"` 등), `egdesk-file-mount.test.mjs:217-235`. app-server 기동 코드를 다른 파일로 옮기면 이 3개를 같은 커밋에서 고쳐야 한다.
+- 정적 grep 기준 `test(` 호출 수는 helper/*.test.mjs 523건, scripts/*.test.mjs를 포함하면 987건이다(실행하지 않음). 원장의 중앙 회귀는 534/534(b706baa) → 596/598(`2480174`)이다.
+
+---
+
+## 3. 계층 구조
+
+```
+ Chat UI (overlay)          ← chat.event v2 (provider 필드 + engineId 추가), SSE 'codex' 채널 이름 유지
+        │
+ bridge HTTP (/chat/*, /v1/state)  ← ensureAuth(body) 엔진별
+        │
+ ChatRuntime (현 CodexChatRuntime, 1개)
+   - requestId 멱등·로컬 기록(SQLite)·승인/질문/하위 Agent 규칙·EG-Desk 도구 권한 검사
+   - 대화(thread)마다 engineId 고정 → engineOf(threadId)
+   - 입력: "내부 기준 이벤트" = Codex app-server 형태 알림·요청 (cleanNotification/safeItem이 정리)
+        │                                   ▲
+        ▼ 의미 단위 메서드                   │ Codex 형태 이벤트
+ EngineRegistry ── CodexEngineAdapter ── app-server(WS JSON-RPC, 프로세스 1개/활성 계정)
+               └─ ClaudeEngineAdapter
+                     ├─ 번역 계층: SDKMessage 계열 → Codex 형태 (순수 함수, fixture 시험)
+                     └─ 전송 모듈 (D1 결정 후 하나): CLI stream-json 직접 | Agent SDK query()
+                           └─ claude 프로세스 1개/대화 (idle 종료, 상주 상한)
+ EG-Desk 도구 제공: Codex=dynamicTools(지금 그대로) / Claude=helper가 직접 제공하는 MCP(추가 프로세스 없음)
+```
+
+- **런타임을 1개로 두는 이유** [제안]. SSE `ready` 메시지가 런타임 하나의 `streamId`·`seq`로 재동기화한다(`codex-bridge-server.mjs` `/events`). 엔진마다 런타임을 따로 두면 스트림 번호·대화 잠금·요청 멱등이 둘로 갈린다. 화면 쪽 `reduceChatEvent`는 스트림 여러 개를 받을 수 있지만, 재동기화 계약은 스트림 하나를 전제로 한다.
+- **이름 원칙**: 이미 런타임 안에 "tool provider"(`egdesk-browser`, Context)라는 이름이 있으므로 실행 AI는 일관되게 **engine**이라 부른다. `provider:'codex'` 필드는 화면 하위 호환을 위해 당분간 남긴다(§8 7단계에서 정리).
+
+---
+
+## 4. EngineAdapter 인터페이스
+
+### 4.1 메서드
+
+```ts
+type EngineId = 'codex' | 'claude'
+
+interface EngineAdapter {
+  readonly id: EngineId
+
+  // ── 상태 (/v1/state engines[]의 한 줄)
+  describe(): EngineDescriptor                  // 동기·캐시. 비밀값·자격증명 경로 없음
+  refresh(): Promise<EngineDescriptor>          // 실행 파일·버전·로그인 상태 재확인(정적 조회만)
+  capabilities(engineProfileId?: string): ReadonlySet<EngineCapability>
+  ownerKey(engineProfileId: string): string | null   // 계정 식별 원문. 런타임이 해시해 기록
+  isReady(engineProfileId?: string): boolean
+
+  // ── 대화
+  startThread(spec: ThreadSpec): Promise<ThreadStarted>
+  resumeThread(threadId: string, spec: ThreadSpec): Promise<ThreadResumed>
+  releaseThread(threadId: string): Promise<'released' | 'notLoaded'>
+  startTurn(threadId: string, input: TurnInput): Promise<TurnStarted>
+  interruptTurn(threadId: string, turnId: string): Promise<void>
+  steerTurn?(threadId: string, turnId: string, input: TurnInput): Promise<void>  // 선택 능력
+
+  // ── 엔진이 보낸 요청(승인·질문·EG-Desk 도구)에 응답. 지금 nativeRespond와 같은 서명
+  respond(rpcId: string | number, result: unknown, error?: { code: number, message: string }): boolean
+
+  // ── 이벤트 구독
+  subscribe(sink: EngineSink): () => void
+  dispose(reason?: string): Promise<void>
+}
+
+interface EngineSink {
+  notification(engineId: EngineId, msg: { method: string, params: object }): void   // → runtime.handleNotification
+  serverRequest(engineId: EngineId, msg: { id: string | number, method: string, params: object }): void // → runtime.handleServerRequest
+  connection(engineId: EngineId, state: { ready: boolean, processLost?: boolean }): void  // 엔진 전체 상태만
+}
+
+type ThreadSpec = {
+  clientThreadId: string, engineProfileId: string,
+  cwd?: string, model?: string, effort?: string,
+  developerInstructions?: string,               // Agent Profile 합성 결과(AGENT-03)
+  tools: ToolSpec[],                            // EG-Desk 도구 카탈로그(collectToolSpecs 결과)
+  executionPolicy: null | 'readOnlyQa' | 'browserBounded' | 'fixtureBrowserQa',
+}
+type TurnInput = { text: string, clientUserMessageId: string /* = requestId */, model?: string, effort?: string, cwd?: string, additionalContext?: string }
+type ThreadStarted = { threadId: string, model: string | null, effort: string | null, cwd: string | null, engineVersion: string | null, policyReceipt?: object }
+type ThreadResumed = ThreadStarted & { turns: CodexTurn[], historySource: 'engine' | 'egdesk-local', historyIncomplete: boolean }
+type TurnStarted = { turnId: string, status: 'inProgress' | 'completed' | 'failed' | 'interrupted', model?: string, effort?: string }
+```
+
+- **Codex 어댑터 전용 탈출구** [제안]: `request(method, params)`를 Codex 어댑터에만 남긴다. QA 정책 검증(`loadQaThreadOverrides`, `verifyQaMcpIsolation`), `config/read`, Context Reader가 이것을 계속 쓴다. 런타임은 해당 능력(`boundedQa`, `profileOffInstructions`)이 있는 엔진에서만 이 경로를 탄다.
+- **Claude 프로세스 손실은 엔진 전체 연결 끊김이 아니다** [제안]. 대화 하나의 프로세스가 죽으면 Claude 어댑터가 그 대화의 진행 중 turn을 `turn/completed {status:'failed', error:{code:'RUNTIME_LOST'}}`로 합성하고, 대기 중인 승인·질문을 `serverRequest/resolved`로 합성한다. 그러면 런타임의 전역 epoch를 건드리지 않아도 된다. `sink.connection`은 실행 파일이 없어졌거나 로그아웃된 경우처럼 엔진 전체 상태가 바뀔 때만 쓴다.
+
+### 4.2 능력(capabilities)
+
+| 이름 | 뜻 | Codex | Claude |
+|---|---|---|---|
+| `stream` | 실시간 답변 | 있음 | 있음(`--include-partial-messages` [공식]) |
+| `resume` | 대화 재개 | 있음 | 있음(`--resume`/`resume` 옵션 [공식]) |
+| `nativeHistory` | 재개 시 엔진이 과거 turn을 돌려줌 | 있음 | 없음 → 로컬 기록이 원본 [제안] |
+| `interrupt` | 중지 | 있음 | 있음(SIGINT 또는 SDK `interrupt()` [공식]) |
+| `approvals.command` / `approvals.fileChange` | 명령·파일 변경 승인 카드 | 있음 | 있음(Bash / Edit·Write) |
+| `approvals.tool` | 그 밖의 도구 승인(WebFetch, MCP 등) | 없음 | 필요(새 승인 종류) |
+| `userInput` / `userInput.multiSelect` | 질문 카드 / 복수 선택 | 있음 / 없음 | 있음(AskUserQuestion) / 있음 |
+| `subagents` | 하위 Agent 진행 | 있음 | 있음(Agent 도구 + task_* 메시지) |
+| `dynamicTools` | EG-Desk 도구(Browser·Context) | 있음 | MCP로 제공(SUB-10) |
+| `boundedQa` | 읽기 전용 QA·Browser 한정 정책 검증 | 있음 | 처음엔 없음 → 해당 정책 요청 거부 |
+| `modelSelect.perTurn` / `effortSelect.perTurn` | 턴마다 모델·추론 강도 | 있음 | 프로세스 단위(바뀌면 재시작) |
+| `usage.rateLimits` | 요금제 한도 조회 | 있음(`account/rateLimits/read`) | 실행 중 `rate_limit_event`만 [공식] |
+
+### 4.3 오류 분류
+
+오류를 "언제 나는가"로 3층으로 나누고, 화면 분류(`kind`)는 기존 `ERROR_KINDS`를 그대로 쓴다. [제안]
+
+| 층 | 코드(HTTP) | kind | 화면 문구 방향 |
+|---|---|---|---|
+| 엔진 상태(보내기 전) | `ENGINE_NOT_INSTALLED`(503) | unknown | 'Claude가 이 Mac에 설치되어 있지 않음' |
+| | `ENGINE_VERSION_UNSUPPORTED`(503) | unknown | '지원 버전 아님' |
+| | `ENGINE_LOGIN_REQUIRED`(401) — 기존 `LOGIN_REQUIRED`를 엔진별로 일반화 | auth | '로그인 필요' + 공식 로그인 열기 |
+| | `ENGINE_DECISION_PENDING`(403) | unknown | '연결 방식 결정 대기' |
+| | `ENGINE_BUSY`(429) | unknown | '다른 Claude 대화가 작업 중' |
+| | `ENGINE_UNAVAILABLE`(503) — 기존 `BRIDGE_OFFLINE` 대응 | network | '연결 끊김 · 재시도' |
+| 대화 바인딩 | `ENGINE_MISMATCH`(409) | unknown | '이 대화는 Codex로 시작됨 · 새 대화로 이어가기' |
+| | `ENGINE_PROFILE_MISMATCH`(403) — 기존 `NATIVE_ACCOUNT_MISMATCH`의 엔진판 | auth | '다른 계정으로 시작한 대화' |
+| 실행 중 | `turn.error {code, origin: engineId, kind, retryAt?}` | 아래 표 | kind별 문구·버튼(SUB-14) |
+| 도구 | `classifyPublicToolError` 그대로 | — | 엔진과 무관 |
+
+Claude 출력 → `kind` 대응:
+
+| Claude 출력 | 값 | kind |
+|---|---|---|
+| `system/api_retry.error` [공식] | `authentication_failed`, `oauth_org_not_allowed`, `cloud_credential_error` | auth |
+| | `rate_limit`, `billing_error` | quota |
+| | `account_on_hold` | permission [제안: 재로그인으로 안 풀림] |
+| | `overloaded`, `server_error` | network |
+| | `invalid_request`, `model_not_found`, `max_output_tokens` | model |
+| | `unknown` | unknown |
+| `assistant.error` [공식] | `rate_limit`, `billing_error` → quota · `overloaded` → network · `max_output_tokens` → model | |
+| `rate_limit_event.rate_limit_info` [공식] | `status:'rejected'` → quota + `retryAt = resetsAt` · `errorCode:'credits_required'` → quota('추가 사용량 필요') · `allowed_warning` → 오류 아님, 사용량 경고 표시 | |
+| `result.subtype` [공식] | `error_max_budget_usd` → quota · `error_max_turns`, `error_max_structured_output_retries` → model · `error_during_execution` → 동반 오류로 판별, 없으면 unknown | |
+| `system/permission_denied`, `result.permission_denials` [공식] | 도구가 허락되지 않아 건너뜀 → permission(활동 카드 표시, Run 실패 아님) | |
+
+- `api_retry`는 Codex의 `error {willRetry:true}`로 번역하고, 최종 실패만 `turn.error`가 된다.
+- `safeTurn`이 지금 `publicError(turn.error, 'TURN_FAILED', 'codex')`로 origin을 고정하고 있다(`codex-chat-runtime.mjs:131`). origin은 엔진 id로 바꾼다.
+
+---
+
+## 5. 내부 기준 이벤트 대응표 (Codex ↔ Claude CLI stream-json ↔ Agent SDK)
+
+원칙 [제안]: Claude 어댑터는 Codex 형태의 **원본 알림**(`{method, params}`)을 만들어 런타임의 `handleNotification`/`handleServerRequest`에 넣는다. 정리(`cleanNotification`·`safeItem`)는 런타임에 남기므로 어댑터가 보안 정리를 우회하지 못한다. CLI stream-json과 Agent SDK는 같은 메시지 계열을 낸다(CLI 문서가 `claude -p`를 "Agent SDK via the CLI"로 설명 [공식]). 그래서 아래 표의 Claude 열 두 개는 대부분 같고, 전송 방법만 다르다.
+
+### 5.1 대화·턴 흐름
+
+| 내부 기준(Codex 형태) | Codex app-server | Claude CLI stream-json | Agent SDK (TS) |
+|---|---|---|---|
+| 대화 시작 `thread/start` → `{thread:{id}, model, cwd}` | 그대로 | `claude -p --input-format stream-json --output-format stream-json --verbose --include-partial-messages --session-id <EG-Desk가 만든 UUID>` 실행. threadId는 미리 정한 UUID. model·version은 첫 `system/init`(session_id, model, cwd, tools, mcp_servers, permissionMode, claude_code_version, capabilities) [공식]에서 채움 | `query({ prompt: AsyncIterable, options: { sessionId, cwd, model, effort, ... } })`, 첫 `SDKSystemMessage` init [공식] |
+| 대화 재개 `thread/resume` → turns | 그대로(엔진이 기록 반환) | `--resume <session_id>`로 다시 실행 [공식]. turns는 돌려받지 않음 → `turns: []`, `historySource:'egdesk-local'` [제안]. Claude 내부 기록 파일은 읽지 않음 | `options.resume` [공식] |
+| 대화 해제 `thread/unsubscribe` | 그대로 | stdin 닫기 → 종료 대기 [제안] | `query.close()` [공식] |
+| 턴 시작 `turn/start {threadId, input, clientUserMessageId}` → `{turn:{id}}` | 그대로 | stdin에 사용자 메시지 한 줄 `{"type":"user","message":{"role":"user","content":...}}` [추정: SDKUserMessage 형태, CLI 문서에 원문 예시 없음]. turnId는 어댑터가 만들고, `--replay-user-messages`로 되돌아온 사용자 메시지로 접수를 확인 [공식 플래그] | `streamInput()` 또는 prompt iterator에 SDKUserMessage [공식] |
+| `turn/started` | 그대로 | 어댑터가 합성(접수 확인 시점) | 같음 |
+| `turn/completed {status, error}` | 그대로 | `result` [공식]: `success` → completed, `error_*` → failed, 중지 뒤의 result → interrupted(`terminal_reason`, `aborted:true` 참고 [공식 필드, 값 해석은 추정]) | `SDKResultMessage` |
+| 중지 `turn/interrupt` | 그대로 | SIGINT [공식: "To end the turn instead, send SIGINT"]. SIGINT 뒤 프로세스가 살아 있는지는 미확인 → 끝나면 다음 보내기에서 `--resume` | `query.interrupt()` (스트리밍 입력 모드에서만 [공식]) |
+| 강제 종료 | — | SIGTERM은 진행 중 턴을 **미완료로 남김**(exit 143) [공식] → 일반 경로에서는 쓰지 않음 | SDK는 신호 전에 입력을 먼저 닫음 [공식] |
+| 턴별 모델·추론 강도 | `turn/start {model, effort}` | 프로세스 단위 `--model`, `--effort`만 → 바뀌면 idle 상태에서 `--resume`으로 재시작 [제안] | `setModel()` [공식], effort는 시작 옵션(실행 중 변경 수단 미확인) |
+| Agent Profile 지침 | `developerInstructions` | `--append-system-prompt` [공식]. **주의**: `--system-prompt-snapshot`이 기본 on이라 첫 요청의 시스템 프롬프트를 기록해 두고 이후 재개 때 다른 문구를 줘도 기록본을 보낸다 [공식 `--help` 문구] → 새 Profile revision을 다음 보내기에 반영하는 AGENT-03 동작과 충돌. `off` 필요 여부 검증 대상 | `systemPrompt: { type:'preset', preset:'claude_code', append }` [공식] |
+| cwd | thread/turn `cwd` | 프로세스 cwd + `--add-dir` | `options.cwd` |
+| 토큰 사용 `thread/tokenUsage/updated` | 그대로 | `assistant` usage, `result.usage`·`modelUsage` [공식]. 컨텍스트 창 크기의 필드 위치는 미확인 | `context_usage`, `getContextUsage()` [공식] |
+| 프로세스 끝남 | 전역 `setConnection(false,{processLost})` | 그 대화만: turn 실패·승인 해제 합성(§4.1) [제안] | 같음 |
+
+### 5.2 항목(item)
+
+| 내부 기준 item | Codex | Claude (CLI·SDK 공통: `assistant`/`user` 메시지의 content block) |
+|---|---|---|
+| `agentMessage` started → delta → completed | 그대로 | `stream_event` content_block_start(text) → `text_delta` → `assistant` 메시지의 text block(완성본). partial 이벤트는 본 대화에서만 나온다(`parent_tool_use_id` 항상 null [공식]). itemId = `${message.id}:${blockIndex}` [제안] |
+| `reasoning`(요약) | `summaryTextDelta` | thinking block. 처음에는 본문을 보여 주지 않고 '생각 중' 표시만 한다 [제안]. 저장소가 `reasoning` 계열 키를 거부하고, Codex도 요약만 쓴다 |
+| `commandExecution` | 그대로 | `tool_use` name=`Bash`(input.command) → started. 같은 `tool_use_id`의 `tool_result` → completed, `is_error` → failed. exitCode는 알 수 없음 → null(`tool_use_result`는 도구별 unknown [공식]) |
+| `fileChange` | 그대로 | `Edit`·`Write`·`MultiEdit`·`NotebookEdit` → changes[{path: input.file_path, kind}]. Write의 새 파일 여부는 구분 불가 → `update` [제안] |
+| `mcpToolCall` | 그대로 | `mcp__<server>__<tool>` → server/tool로 분리(EG-Desk 서버 제외) |
+| `dynamicToolCall` | EG-Desk 도구 | `mcp__egdesk__<tool>` → 기존 이름(`egdesk_browser_observe` 등)으로 되돌려 같은 카드를 쓴다. 대응 항목이 없는 내장 도구(Read·Grep·Glob·WebFetch·WebSearch·Skill)도 일반 활동 카드(`dynamicToolCall{tool}`)로 보낸다 [제안] |
+| `plan` / `turn/plan/updated` | 그대로 | `TodoWrite` 입력의 할 일 목록 → `plan[{step, status}]` (`in_progress` → `inProgress`) [추정: 입력 구조와 최신 버전의 계획 도구 이름 확인 필요] |
+| `collabAgentToolCall`(spawnAgent) | 그대로 | `tool_use` name=`Agent`(하위 Agent 시작) → tool `spawnAgent`, receiverThreadIds=[tool_use_id], 결과 `tool_result` → completed |
+| `subAgentActivity` | 그대로 | `system/task_started`·`task_progress`·`task_notification`(task_type `local_agent`, tool_use_id, status completed/failed/stopped) [공식 SDK 타입]. 하위 Agent의 assistant/user 메시지(`parent_tool_use_id`≠null 또는 `agent_id`)는 본 대화 말풍선으로 내보내지 않는다. 짝은 `agent_id`로 맞춘다(재개된 하위 Agent는 `parent_tool_use_id` 짝이 깨질 수 있음 [공식]) |
+| `userMessage` | 그대로 | `--replay-user-messages`의 되돌아온 메시지 → `userMessage{clientId=requestId}` [추정: 입력 uuid가 그대로 돌아오는지 미확인] |
+
+### 5.3 승인·질문·EG-Desk 도구
+
+| 내부 기준 요청 | Codex | Claude CLI | Agent SDK |
+|---|---|---|---|
+| `item/commandExecution/requestApproval` | 그대로 | `--permission-prompt-tool mcp__egdesk__approve` [공식 플래그] → EG-Desk MCP 서버에 tool call(`tool_name='Bash'`, input). 입력·응답 형식은 공식 예시가 없음(커뮤니티 자료: 응답은 text 블록 안의 JSON `{"behavior":"allow","updatedInput":…}` / `{"behavior":"deny","message":…}`) | `canUseTool('Bash', input, { toolUseID, requestId, signal, suggestions, decisionReason, agentID })` [공식] |
+| `item/fileChange/requestApproval` | 그대로 | 같은 경로(`Edit`/`Write`) | 같음 |
+| (확장) `item/tool/requestApproval` — 그 밖의 도구 | 없음 | 같은 경로(WebFetch, `mcp__*`, Skill 등) | 같음 |
+| 응답 `{decision: accept\|decline\|cancel}` | 그대로 | allow(+원래 input) / deny(message) | `{behavior:'allow', updatedInput}` / `{behavior:'deny', message, interrupt?}` [공식]. cancel → deny + `interrupt:true` |
+| `item/tool/requestUserInput` | 그대로 | AskUserQuestion이 prompt tool로 오는지 **미확인**. 안 오면 대안: EG-Desk 질문 도구(`mcp__egdesk__ask_user`)를 MCP로 주고 `--disallowedTools AskUserQuestion` [제안] | `canUseTool('AskUserQuestion', {questions:[{question, header(최대 12자), options 2~4개, multiSelect}]})` [공식] |
+| 질문 식별 | `question.id` | — | id가 없고 답의 키가 질문 원문 → `questionId = q<index>`, 원문은 rawLabels처럼 비공개 맵에 둔다 [제안] |
+| 답 | `{answers:{[id]:{answers:[label]}}}` | — | `updatedInput: {questions(원본), answers:{[질문 원문]: label \| labels[] \| 직접 입력}}` [공식] |
+| 건너뛰기 | error -32000 | deny | `{behavior:'deny', message:'User skipped the question'}` |
+| 한도·제약 | 질문 ≤8, 선택지 ≤12 (EG-Desk) | — | 질문 1~4, 선택지 2~4, **하위 Agent 안에서는 불가** [공식] |
+| `item/tool/call`(EG-Desk 도구) → `{success, contentItems}` | dynamicTools | helper가 직접 제공하는 MCP(loopback HTTP, Run 토큰) `tools/call` → 같은 `provider.dispatch` → MCP 결과 [제안] | `mcpServers: { egdesk: createSdkMcpServer({...}) }` 같은 프로세스 안 MCP [공식 API] → 같은 dispatch |
+| `serverRequest/resolved` | Codex 알림 | MCP 요청이 끊기거나 프로세스가 끝날 때 합성 | `canUseTool`의 `signal` abort 시 합성 |
+
+- **현재 런타임이 받아 주지 않는 것**: `approvals.tool`(일반 도구 승인)과 `multiSelect`. 1차에는 일반 도구 승인을 deny 처리하고 '이 도구 승인은 아직 지원하지 않음'을 Run 카드에 표시한다. 2차에 승인 카드 종류를 늘린다. `multiSelect`는 공개 질문 필드에 `multiSelect`를 더하고 질문 카드(CHAT-12)를 체크박스로 확장한다. 둘 다 화면 변경이라 overlay 담당과 조율해야 한다. [제안]
+- **승인 대기 시간 위험** [추정]: MCP prompt tool 방식은 사용자가 답할 때까지 MCP 요청이 열려 있다. MCP 호출 시간 제한에 걸리면 오래 기다린 승인이 끊길 수 있다. SDK `canUseTool`은 "can stay pending indefinitely"이다 [공식].
+
+### 5.4 대응 안 되는 것과 처리
+
+| 항목 | 처리 [제안] |
+|---|---|
+| Codex 한정 정책(readOnlyQa·browserBounded·fixtureBrowserQa)의 엔진 측 검증 | Claude에는 `boundedQa` 능력이 없으므로 요청을 `QA_POLICY_UNAVAILABLE`로 거부한다. 나중에 `--tools`·`--strict-mcp-config`·`--permission-mode dontAsk`·`--restricted` [공식 플래그] + `system/init`의 tools/mcp_servers 목록 대조로 같은 수준의 영수증을 만들 수 있는지 검토한다 |
+| Context Reader(smart-read·answer-briefing) | Codex app-server 전용이다. Claude 대화에서도 EG-Desk Context 도구(`egdesk_list_context`·`egdesk_read_source`)는 MCP로 쓸 수 있지만, 읽기 전용 Reader 기능은 Codex가 켜져 있어야 한다. Claude만 쓰는 사용자 시나리오에서 빠지는 기능이므로 화면에 표시한다 |
+| Codex collab 도구 중 `sendInput`·`wait`·`closeAgent` 등 | Claude는 시작·진행·종료만 대응한다 |
+| `system/compact_boundary` [공식] | 활동 카드 '대화 압축됨'(확장 알림) 또는 무시 |
+| 비용(`total_cost_usd`) | 구독 경로에서는 표시하지 않는다. API 키 프로필(SUB-15)에서만 확장 알림 `egdesk/engine/usage`로 표시 |
+| 확장 알림 이름 | Codex에 없는 것은 `egdesk/…` 접두어(예: `egdesk/engine/rateLimit`)로 같은 형태 안에 두고, `cleanNotification`에 허용 목록으로 추가한다 |
+
+---
+
+## 6. 저장 스키마 변경안 (`egdesk-chat-store`)
+
+### 6.1 이름 정리
+
+| 이름 | 뜻 | 지금 |
+|---|---|---|
+| `profileBinding {profileId, revision, hash}` | Agent Profile(성격·지침) 어느 revision으로 실행했는가 | 이미 Run에 기록(AGENT-03) |
+| `engineId` | `codex` \| `claude` | 없음 |
+| `engineVersion` | 그 Run을 실행한 엔진 버전. Codex는 `codex --version`, Claude는 `system/init.claude_code_version` | 없음 |
+| `engineProfileId` | 엔진 계정 슬롯(어느 로그인·어느 `CODEX_HOME`/`CLAUDE_CONFIG_DIR`). 지금은 `codex-default` 하나 | 없음(SUB-11) |
+
+과제 문구의 "profileId"는 계정 슬롯이므로 **`engineProfileId`** 로 쓰고, Agent Profile의 `profileId`와 섞지 않는다. [제안]
+
+### 6.2 1단계 — 스키마 변경 없음
+
+- `native.thread.bound` 기록의 details에 `engine: { id, version, engineProfileId }`를 더한다. 이벤트 순서는 그대로이므로 `codex-chat-runtime.test.mjs:1835` 순서 단언이 깨지지 않는다.
+- Run에 `run.engine = { id, version, engineProfileId }`를 둔다. `emit`이 Run 전체를 checkpoint로 저장하므로 `runs.public_json`에 자동으로 남는다. 키 이름에 `apiKey`·`secret` 같은 금지 키가 없어야 한다.
+- 예전 기록 읽기 규칙: `engine`이 없는 `native.thread.bound`는 `codex`(버전 미상)로 본다.
+- `assertNativeAccount`가 엔진 바인딩도 함께 돌려주고, 요청 엔진과 다르면 `ENGINE_MISMATCH`로 거부한다.
+- 요청 fingerprint에 `engineId`는 **값이 있을 때만** 넣는다. 그러면 업그레이드 전에 접수된 요청을 재전송해도 fingerprint가 같아 `REQUEST_CONFLICT`가 나지 않는다(`JSON.stringify`가 undefined 필드를 빼기 때문).
+- 계정 해시(ownerHash): **Codex는 지금 키를 그대로 쓴다.** 접두어 `codex:`를 붙이면 기존 대화의 기록된 ownerHash와 달라져 전부 `NATIVE_ACCOUNT_MISMATCH`가 된다. 새 엔진만 `claude:` 접두어로 시작한다(SUB-02 메모 보정).
+
+### 6.3 2단계 — 스키마 v2 (추가만)
+
+```sql
+-- user_version 1 → 2. BEGIN IMMEDIATE … COMMIT, 실패하면 ROLLBACK하고 원본을 유지한다.
+ALTER TABLE threads ADD COLUMN engine_id TEXT;          -- NULL = 아직 한 번도 보내지 않은 대화
+ALTER TABLE threads ADD COLUMN engine_profile_id TEXT;
+ALTER TABLE threads ADD COLUMN engine_bound_at INTEGER;
+UPDATE threads SET engine_id = 'codex', engine_profile_id = 'codex-default'
+ WHERE conversation_id IS NOT NULL;                     -- v1 데이터는 전부 Codex
+ALTER TABLE runs ADD COLUMN engine_id TEXT;
+ALTER TABLE runs ADD COLUMN engine_version TEXT;
+ALTER TABLE runs ADD COLUMN engine_profile_id TEXT;
+UPDATE runs SET engine_id = 'codex' WHERE engine_id IS NULL;
+CREATE INDEX threads_engine ON threads(engine_id, updated_at DESC);
+PRAGMA user_version = 2;
+```
+
+- `initialize()`: 2이면 테이블과 컬럼을 확인하고, 1이면 위 이전을 실행하고, 0이면 v2로 바로 만든다. 그 밖의 버전은 지금처럼 `UNSUPPORTED_STORE_VERSION`으로 닫힌다.
+- 이전 직전에 `chat-<hash>.sqlite`를 `.v1.bak`으로 복사해 둔다. 옛 빌드는 v2 파일을 열지 못하므로(닫힘 실패, 초기화 안 함) 되돌릴 때 이 백업이 필요하다. [제안]
+- `bindNative({clientThreadId, conversationId, engineId, engineProfileId})`: 처음 바인딩할 때 기록하고, 이미 다른 엔진이면 `ENGINE_MAPPING_CONFLICT`(409)로 거부한다. 대화 잠금을 저장소에서도 지키기 위해서다.
+- `thread()` 결과에 `engineId`·`engineProfileId`를 더한다. `projectRun`은 `run.engine`을 runs 컬럼에 복사한다.
+- runs 컬럼은 선택 사항이다(`public_json`에 이미 있음). threads 컬럼은 대화 목록을 엔진으로 거르고 잠금을 검사할 때 이벤트를 훑지 않으려면 필요하다.
+- conversation_id 충돌: Codex thread id와 Claude session UUID가 같을 확률은 무시할 만하다. 런타임 메모리 맵 키는 `${engineId}:${threadId}`로 바꾸는 것을 권고한다. [제안]
+- 테스트 영향: `egdesk-chat-store.test.mjs:86`의 1을 2로 바꾸고, v1 파일 → v2 이전 시험과 엔진 잠금 충돌 시험을 추가한다.
+
+---
+
+## 7. `/v1/state` `engines[]` 공개 형태
+
+기존 최상위 필드(`provider:'codex'`, `auth`, `native`, `engineConfiguration`, `capabilities`)는 화면 하위 호환을 위해 그대로 둔다. `engines`는 최상위에 추가한다. 능력 목록이 아니라 상태이기 때문이다. 화면이 기능 유무를 알 수 있도록 `capabilities.engines = ['registry', 'thread-lock']` 표시도 함께 둔다. [제안]
+
+```json
+{
+  "engines": [
+    {
+      "id": "codex",
+      "label": "Codex",
+      "status": "ready",
+      "version": "0.162.1",
+      "versionSupported": false,
+      "isDefault": true,
+      "capabilities": ["stream", "resume", "nativeHistory", "interrupt", "approvals.command", "approvals.fileChange",
+                       "userInput", "subagents", "dynamicTools", "boundedQa", "modelSelect.perTurn",
+                       "effortSelect.perTurn", "usage.rateLimits"],
+      "profiles": [
+        {
+          "id": "codex-default",
+          "label": "ChatGPT",
+          "credentialStore": "shared-user-default",
+          "active": true,
+          "auth": { "status": "signedIn", "method": "chatgpt", "account": "(지금 auth.accountEmail과 같은 공개 수준)", "planType": "pro" },
+          "usage": "(지금 auth.usage = usageDisplay() 형태 그대로)"
+        }
+      ],
+      "runtime": { "residentProcesses": 1, "residentLimit": 1, "idleTimeoutMs": null }
+    },
+    {
+      "id": "claude",
+      "label": "Claude",
+      "status": "decisionPending",
+      "statusReason": "SUB-12",
+      "version": "2.1.300",
+      "versionSupported": null,
+      "isDefault": false,
+      "capabilities": [],
+      "profiles": [],
+      "runtime": { "residentProcesses": 0, "residentLimit": 2, "idleTimeoutMs": 300000 }
+    }
+  ],
+  "capabilities": { "engines": ["registry", "thread-lock"] }
+}
+```
+
+- `status` 값: `ready` · `starting` · `offline` · `notInstalled` · `versionUnsupported` · `loginRequired` · `decisionPending` · `disabled`.
+- `profiles[].auth.status`: `signedIn` · `signedOut` · `signingIn` · `unknown`. `method`: Codex는 `chatgpt`·`apiKey`, Claude는 `claude auth status`의 `authMethod`(`claude.ai`·`api_key`·`api_key_helper`·`oauth_token`·`third_party`·`none` [공식]).
+- 넣지 않는 것: 토큰, 자격증명 파일·Keychain 경로, 실행 파일 절대경로(화면에 필요 없음). Claude 로그인 정보는 `claude auth status --json` 또는 SDK `accountInfo()`(email·organization·subscriptionType [공식 타입])에서 공개 필드만 쓴다. Keychain과 `.credentials.json`은 읽지 않는다(원장 SUB-08과 같음).
+- 표시 이름은 'Claude'로 한다. 'Claude Code'를 기능명·제품명으로 쓰는 것은 금지다 [공식 브랜딩 조항].
+- Claude 버전 표시: 결정 전에도 `claude --version` 정적 조회는 무해하므로 '설치됨 2.1.300'을 보여 줄 수 있다 [런타임: 이 Mac `2.1.300 (Claude Code)`].
+- SSE: 엔진 상태가 바뀌면 `{type:'engine.status', v:1, engineId, status:<engines[] 한 줄>, ts}`를 보낸다. 기존 `auth.status`(Codex)는 유지한다.
+- `chat.event` 봉투: `engineId`를 추가한다. `provider:'codex'`는 화면 필터(§2)가 넓어질 때까지 유지한다(§8 7단계).
+
+---
+
+## 8. 기존 런타임을 Codex 어댑터로 옮기는 단계별 계획
+
+공통 규칙 [제안]:
+- 각 단계는 **혼자 커밋해도 전체 테스트가 통과**해야 한다. 각 단계 시작 전후로 `node --test apps/firefox-ui-demo/helper/*.test.mjs`와 scripts 회귀(`docs/PATH_1_5_STABILIZATION.md:91-94`의 명령)를 실행해 기준선과 비교한다(이 문서 작성 중에는 실행하지 않음).
+- 지금 다른 작업자가 `codex-chat-runtime.mjs`·`codex-bridge-server.mjs`·`eg-desk-surface.uc.js`를 고치고 있다. 2단계 이후는 그 작업이 커밋된 뒤에 시작해 충돌을 피한다.
+- `CodexChatRuntime` 클래스 이름과 `'const chat = new CodexChatRuntime({'` 문자열은 마지막까지 유지한다(원문 단언 테스트). 이름을 바꾸려면 `export { ChatRuntime as CodexChatRuntime }` 별칭을 남긴다.
+
+| 단계 | 바꾸는 것 | 바뀌지 않는 것 | 테스트 영향 | 완료 기준 |
+|---|---|---|---|---|
+| 0 기준선 | 전체 테스트 결과를 기록 | 코드 | — | 통과·skip 수 기록 |
+| 1 어댑터 모듈 추가 | 새 파일 `helper/engine-adapter.mjs`(계약 주석, `ENGINE_CAPABILITIES`, 엔진 오류 코드, `validateEngineAdapter()`, Claude→kind 대응 함수), `helper/codex-engine-adapter.mjs`(기존 `request`/`respond` 통과: `startThread=p=>request('thread/start',p)` 등) | 기존 파일 전부 | 새 단위 테스트만 추가 | 새 테스트 통과, 기존 결과 동일 |
+| 2 런타임이 어댑터로 호출 | 생성자에 `engines` 옵션 추가. 없으면 `{request, respond}`로 Codex 어댑터를 만든다. `this.request`·`this.nativeRespond`는 Codex 어댑터의 함수를 가리킨다(QA 정책 모듈 호환). Codex 호출 9곳을 `this.engineOf(cid).startThread()` 등으로 교체 | Codex 어댑터는 **같은 메서드 이름·같은 인자·같은 순서**로 `request`를 부른다. `config/read`와 QA 검증은 Codex 전용 탈출구로 남긴다 | 런타임 121건·bridge-http 23건이 수정 없이 통과해야 한다(특히 :1835) | 기존 결과 동일 |
+| 3 엔진 기록(스키마 그대로) | §6.2: `native.thread.bound` details.engine, `run.engine`, 봉투 `engineId`, `send()`의 `body.engineId` 검증(없음 또는 `codex`만 허용, 나머지는 `ENGINE_UNAVAILABLE`), fingerprint 규칙 | 이벤트 순서, ownerHash 계산 | details·Run 전체를 deepEqual하는 테스트가 있으면 갱신(grep상 Run 하위 필드만 단언함). 엔진 필드 단위 테스트 추가 | 기존 대화 열기·이어 보내기 정상 |
+| 4 엔진 registry + `/v1/state engines[]` | 새 `helper/engine-registry.mjs`(등록·기본 엔진·대화별 엔진 결정: `body.engineId` → 대화 바인딩 → 기본값). bridge에서 registry를 만들되 Codex만 등록하고 Claude는 `decisionPending` 설명만 둔다. `ensureChatAuth(body)`를 엔진별로, `assertReady(engineId)` | 기존 `/v1/state` 필드, 원문 단언 문자열 | `/v1/state` 형태 테스트 추가. 원문 단언 3개는 문자열을 지우지 않는 한 영향 없음 | 화면에서 엔진 목록 조회 가능 |
+| 5 스키마 v2 | §6.3 이전 + 백업, `bindNative` 엔진 잠금, `thread()` 필드 | 이벤트·Run JSON | store 테스트 :86 수정, 이전·충돌 시험 추가 | v1 파일이 v2로 열리고 기존 대화 유지 |
+| 6 연결 상태를 엔진별로 | `setConnection(engineId, ready, opts)`(첫 인자가 boolean이면 `codex`로 간주하는 호환 서명), `reset(engineId)`(Codex 계정이 바뀌어도 Claude Run은 그대로), Codex epoch는 기존 `this.epoch` 별칭 | Codex 동작 | 기존 `setConnection(false)` 호출 테스트 그대로 통과 | Codex 끊김이 다른 엔진 Run을 실패시키지 않음(단위 시험) |
+| 7 화면 수용 | `reduceChatEvent`와 QA 계약의 `provider !== 'codex'` 필터를 엔진 목록으로 넓히고, 엔진 배지·잠금 표시(SUB-07). overlay 담당과 조율 | 런타임 | `scripts/egdesk-surface-state.test.mjs`(provider 고정 fixture 3곳), QA 계약 테스트 갱신 | Codex 화면 회귀 동일 |
+| 8 Claude 어댑터(D1·D2 결정 후) | 8a 번역 순수 함수(stream-json 줄 → Codex 형태, fixture 단위 시험) → 8b 전송 모듈(CLI 또는 SDK) + 프로세스 관리(§9) → 8c 승인·질문 → 8d EG-Desk 도구 MCP(SUB-10) → 8e 중지·재개·오류 분류 | Codex 경로 | 가짜 전송(fake stdout / mock `query()`)으로 시험. 실제 계정 E2E는 대표님 로그인 필요 | 원장 SUB-09 단계 기준 |
+| 9 (선택) Codex 기동 코드 이동 | app-server 기동·재연결·preflight를 `helper/codex-engine-process.mjs`로 이동(SUB-11 다계정에 필요) | 동작 | 원문 단언 테스트 3개를 **같은 커밋에서** 새 파일을 읽도록 수정 | 기존 결과 동일 |
+
+---
+
+## 9. 엔진별 RAM 대책
+
+관찰 [런타임, 2026-10-24 `ps`]: 이 Mac의 Claude 데스크톱 앱이 띄운 `claude` 2.1.308 프로세스 3개가 모두 `--input-format stream-json --output-format stream-json` 방식이었고, RSS는 각각 148MB·153MB·590MB였다(실행 시간 1.5시간~10시간, 590MB는 긴 세션). 지금 EG-Desk bridge는 떠 있지 않아 Codex app-server RSS는 관찰하지 못했다. 같은 관찰에서 사용자 `~/.codex` 설정의 MCP 서버(playwright 등)가 별도 프로세스로 떠 있는 것도 보였다. 상속한 MCP가 프로세스 수를 늘린다는 근거다.
+
+| 엔진 | 상주 단위 | 기본값 [제안] | idle 종료 | 상한 | 종료하지 않는 경우 |
+|---|---|---|---|---|---|
+| Codex | app-server 1개/활성 계정 슬롯(모든 대화가 공유) | 지금 그대로 1개 | 계정이 여러 개가 되면(SUB-11) 비활성 슬롯의 app-server를 진행 중 턴·대기 승인이 없을 때 5분 뒤 종료 | 활성 1 + 직전 1 | Context Reader 사용 중 |
+| Claude | `claude` 프로세스 1개/대화 | 보낼 때 실행, 마지막 `result` 뒤 idle 5분이면 종료 | 우아한 종료 순서: stdin 닫기 → 10초 대기 → SIGTERM → 5초 → SIGKILL. 입력을 먼저 닫는 순서는 SDK의 공식 동작과 같다 | 동시 상주 2개. 넘으면 가장 오래 쉰 idle 프로세스를 종료하고, 모두 바쁘면 `ENGINE_BUSY`(429) | 진행 중 턴, 대기 중 승인·질문(SIGTERM은 턴을 미완료로 남김 [공식]) |
+
+추가 규칙 [제안]:
+- **턴이 끝난 뒤 남는 프로세스 막기**: `claude -p`는 턴이 끝나고 stdin이 닫혀도 백그라운드 작업을 기본 최대 10분 기다린다 [공식]. EG-Desk 실행에는 `CLAUDE_CODE_DISABLE_BACKGROUND_TASKS`를 켜거나 `CLAUDE_CODE_PRINT_BG_WAIT_CEILING_MS`를 짧게 준다(변수 이름은 공식 문서에 있음, 정확한 효과는 env-vars 문서로 확인).
+- **EG-Desk 도구는 추가 프로세스 없이 제공**: CLI 경로에서는 helper(39218 포트)가 loopback HTTP MCP 엔드포인트를 Run별 토큰과 함께 열고 `--mcp-config`로 넘긴다. SDK 경로에서는 `createSdkMcpServer`로 같은 프로세스 안에서 제공한다 [공식 API]. 대화마다 stdio MCP 자식을 띄우지 않는다.
+- **사용자 MCP 상속 차단**: `--strict-mcp-config` [공식]로 `--mcp-config`에 준 서버만 쓰게 한다. 사용자 MCP 서버는 대화마다 각자 프로세스로 뜬다. D2와 연결된다.
+- **Agent SDK의 프로세스 수**: SDK는 helper(Node) 안에서 돌고 `claude` 자식 1개를 띄우므로 CLI 직접 방식과 프로세스 수가 같다. SDK 모듈이 helper 메모리에 더해지는 양은 측정이 필요하다 [추정].
+- **승인 대기 중 메모리**: 승인을 기다리는 대화는 프로세스를 계속 잡고 있다. 나중에 `PreToolUse` hook의 `defer` 결정으로 프로세스를 내렸다가 재개하는 방식을 검토할 수 있다 [공식 기능, 적용은 제안].
+- **측정**: `helper/system-resource-monitor.mjs`에 엔진 프로세스 RSS 합계를 더하고 `engines[].runtime`에 노출한다. idle 시간과 상한은 측정한 뒤 조정한다.
+
+---
+
+## 10. Claude 연결 방식 선택지별 차이 (엔진 계층에 미치는 영향만)
+
+(a) 앱 안 claude.ai 로그인은 Anthropic이 금지하므로 제외한다 [공식, 원장 인용].
+
+| 구분 | (b) 설치된 `claude` CLI 직접 실행 | (b') Agent SDK + 사용자 설치 `claude` | (c) API 키 |
+|---|---|---|---|
+| 어댑터에서 바뀌는 곳 | 전송 모듈(stdin/stdout 줄 처리) | 전송 모듈(`query()`) | 인증만. 전송은 (b) 또는 (b')를 재사용하고 env에 키를 넣는다(SUB-15) |
+| 프로세스 | 대화당 `claude` 1개 | 같음(SDK가 띄움) | 같음 |
+| 승인·질문 | 공식 경로는 `--permission-prompt-tool`(MCP). 입력·응답 형식의 공식 예시가 없고 AskUserQuestion 전달 여부도 미확인. 비공개 stdio 제어 프로토콜도 있다: Claude 데스크톱이 `--permission-prompt-tool=stdio`로 쓰는 것을 관찰했으나 공개 계약은 아님 [런타임] | `canUseTool` 콜백 하나로 승인과 AskUserQuestion을 모두 받는다 [공식] | 전송 방식을 따름 |
+| 중지 | SIGINT(턴 종료 [공식], 프로세스 생존 미확인) | `interrupt()` [공식] | 전송 방식을 따름 |
+| 턴 중 모델 변경 | 재시작 | `setModel()` [공식] | 전송 방식을 따름 |
+| EG-Desk 도구 | loopback HTTP MCP | 같은 프로세스 안 MCP | 전송 방식을 따름 |
+| 의존성 | 없음(사용자 `claude`) | npm `@anthropic-ai/claude-agent-sdk` 추가. 플랫폼별 바이너리를 optional dependency로 함께 받으므로 `pathToClaudeCodeExecutable`로 사용자 설치본을 지정해야 (b)와 같은 정책 해석이 유지된다 [공식] | — |
+| 버전 | `claude`는 자동 업데이트된다 → 최소 버전 + `system/init.capabilities`로 기능을 확인한다(공식 권고) | SDK 버전이 번들 CLI 버전을 따라간다(공식 예: SDK 0.3.191 ↔ CLI 2.1.191). 사용자 설치본(2.1.300)과 맞지 않으면 프로토콜 차이 위험 [추정] | 같음 |
+| 정책 문구 | "end user signing in to the unmodified Claude Code binary with their own Claude subscription"을 막지 않는다는 문구 [공식]에 가장 가깝다. 개인·내부 사용 해석은 [제안] | 같은 문서에 "Developers … including those using the Agent SDK, should use API key authentication" [공식]이 있다. **구독 + SDK 조합이 문구상 가장 애매하다** | 명확히 허용(종량 과금) |
+| 사용 한도 | 구독 한도에서 차감 [공식, 원장 인용] | 같음 | 키 소유자 종량 과금 |
+| `--bare` | 쓸 수 없음(OAuth를 안 읽음) [공식] | 같음 | 쓸 수 있음 |
+| 앞으로의 위험 | "`--bare` … will become the default for `-p`" [공식] → 구독 경로가 바뀔 수 있으므로 버전 게이트와 `system/init.apiKeySource` 확인 필요 | 같음 | 영향 없음 |
+| 시험 | 가짜 stdout 줄 fixture | `query()` mock | 같음 |
+
+공통 실행 조건 [제안, 근거 공식]:
+- 구독 프로필로 실행할 때는 env에서 `ANTHROPIC_API_KEY`·`ANTHROPIC_AUTH_TOKEN`·`CLAUDE_CODE_OAUTH_TOKEN`을 뺀다. `-p`에서는 `ANTHROPIC_API_KEY`가 있으면 항상 그것을 쓴다 [공식 인증 우선순위].
+- `--permission-mode`를 항상 명시한다. 2.1.302부터 `-p` 기본이 Manual로 바뀐다 [공식]. 이 Mac의 2.1.300 `--help` 선택지는 `acceptEdits·auto·bypassPermissions·manual·dontAsk·plan`이다 [공식 `--help`].
+- 계정 슬롯은 `CLAUDE_CONFIG_DIR`로 나눈다. 디렉터리마다 로그인·Keychain 항목이 따로 있다 [공식](D5).
+
+권고 [제안]: 번역 계층은 SDKMessage 형태를 기준으로 만들고, 전송 모듈은 결정 후 하나만 구현한다. 정책 문구 기준으로는 (b)가 (b')보다 해석 부담이 작고, 구현 편의는 (b')가 크다. (b)를 고르면 승인은 문서화된 `--permission-prompt-tool`(MCP)로 하고, AskUserQuestion이 그 경로로 오지 않으면 EG-Desk 질문 도구로 대체한다.
+
+---
+
+## 11. 대표님 결정이 필요한 지점
+
+| # | 결정 | 선택지와 영향 | 현재 권고 [제안] | 막히는 것 |
+|---|---|---|---|---|
+| D1 | Claude 연결 방식 (SUB-12) | (b) CLI 직접: 정책 해석이 가장 단순, 승인 경로 검증이 더 필요. (b') SDK: 구현이 쉬움, 구독과 함께 쓰면 정책 문구가 애매하고 npm 의존 추가. (c) API 키: 정책 명확, 종량 과금. (b)+(c) 병행 가능(엔진 계층은 같고 계정 슬롯만 다름) | 개인·내부용 (b), (c)는 SUB-15 별도 계정 슬롯으로. 외부 배포 전 Anthropic 문의 | §8 8단계 전체 |
+| D2 | `~/.claude` 설정 상속 (SUB-09) | 상속: 재로그인 없음. 대신 대표님 hooks·CLAUDE.md·MCP·skills가 EG-Desk 채팅 안에서 돌아 동작 예측이 어렵고, MCP 서버가 대화마다 떠서 RAM이 는다. 격리(`CLAUDE_CONFIG_DIR`): 처음 1회 로그인, 동작 예측 가능. 중간안: 로그인은 공유하고 `--strict-mcp-config` + `--setting-sources` 제한, 후보로 `--safe-mode`(CLAUDE.md·skills·plugins·hooks·MCP 끄고 인증 유지 [공식 `--help`]). 단 `--mcp-config`로 준 EG-Desk MCP까지 꺼지는지, `--setting-sources`로 hooks와 CLAUDE.md가 빠지는지는 미확인 | 중간안을 먼저 검증하고, 안 되면 격리 | 8b |
+| D3 | 대화 중 엔진 전환 | 잠금(엔진을 바꾸면 '새 대화로 이어가기' + 요약 전달) / 같은 대화에서 전환(기록을 새 엔진에 다시 보냄). 2026-04-19 MULTI_CLI §13.5("provider 전환 시 기존 대화 내역을 보존하고 그대로 submit")와 SUB-06("진행 중인 작업은 원래 엔진에서 끝남")이 부딪힌다 | 대화는 엔진에 잠그고, 전환은 새 대화로 이어 가기. §13.5 갱신 필요 | 7단계 화면 |
+| D4 | 기본 엔진 기억 범위 (HUM-ENGINE-001) | 앱 / Desk / 방 / 요청. MULTI_CLI §13.1은 이미 '최근 사용 provider'로 정했다 | §13.1 유지(앱 전역 최근 사용) + 방별 잠금. 그대로 받아들이면 추가 결정 불필요 | SUB-07 |
+| D5 | EG-Desk 전용 로그인 저장소 (SUB-11) | 공유: 터미널과 같은 로그인이라 EG-Desk에서 로그아웃하면 터미널도 끊긴다(Codex는 지금 이렇다). 전용: `CODEX_HOME`·`CLAUDE_CONFIG_DIR`를 EG-Desk 폴더로, 처음 1회 로그인, 계정 여러 개 가능 | 1차는 공유(지금 Codex와 같게), 다계정 요구가 생기면 전용 | SUB-11 |
+
+Main 개발자 선에서 정할 것(대표님 결정 불필요): 일반 도구 승인 카드 추가 시점, `multiSelect` 질문 UI, thinking 표시 여부, Claude idle 시간과 상주 상한 값(측정 후).
+
+---
+
+## 12. 위험·미확인 목록
+
+| 항목 | 상태 | 확인 방법 |
+|---|---|---|
+| CLI stream-json 입력 줄 형식 | [추정] SDKUserMessage 형태 | 실제 실행 1회(결정 후) |
+| `--permission-prompt-tool` 입력·응답 형식 | 공식 예시 없음, 커뮤니티 자료만 | 실제 실행 |
+| AskUserQuestion이 prompt tool로 오는가 | 미확인 | 실제 실행, 안 오면 EG-Desk 질문 도구로 대체 |
+| SIGINT 뒤 stream-json 프로세스 생존 | 미확인 | 실제 실행 |
+| `system/init`이 첫 입력 전에 나오는가 | 미확인 | 실제 실행(threadId는 미리 정하므로 설계 영향 작음) |
+| `--system-prompt-snapshot` 기본 on과 Profile 지침 변경 | [공식 `--help`] 충돌 소지 | `off` 지정 시 재개에서 새 지침 반영 확인 |
+| 2.1.302 `-p` 기본 Manual, `--bare` 기본화 예고 | [공식] | 버전 게이트 |
+| 로그인 상태의 이메일·구독 종류 필드 | CLI는 미확인, SDK `accountInfo()`는 있음 [공식 타입] | 로그인 상태에서 `claude auth status --json` |
+| `TodoWrite` 입력 구조·최신 계획 도구 이름 | 미확인 | 도구 스키마 확인 |
+| Claude 대화 기록을 엔진에서 다시 받을 공식 경로 | 미확인 → 로컬 기록이 원본 | — |
+| Codex ownerHash 접두어 변경 | 바꾸면 기존 대화 전부 불일치 | Codex는 바꾸지 않음(§6.2) |
+| Context Reader는 Codex 전용 | 사실 | Claude만 쓰는 시나리오에서 빠지는 기능 표시 |
+| MCP 승인 대기 시간 제한 | [추정] | 실제 실행 |
+| 다른 작업자와 파일 충돌 | 진행 중 | 2단계 이후는 그 커밋 뒤에 시작 |
+
+---
+
+## 13. 출처
+
+공식 문서(2026-10-24 조회):
+- Headless(`claude -p`, stream-json, `--bare`, SIGTERM, `api_retry`, `system/init`, 권한, 재개): https://code.claude.com/docs/en/headless
+- CLI reference(`--permission-prompt-tool`, `--permission-prompts`, `--include-partial-messages`, `--replay-user-messages`, `--session-id`, `--strict-mcp-config`, `claude auth status`): https://code.claude.com/docs/en/cli-reference
+- Agent SDK TypeScript(`query()`, `Query` 메서드, `Options`, `CanUseTool`, `PermissionResult`, SDKMessage 타입, `AccountInfo`, 번들 바이너리·`pathToClaudeCodeExecutable`): https://code.claude.com/docs/en/agent-sdk/typescript
+- Agent SDK 승인·질문(`canUseTool`, AskUserQuestion 형식·제한): https://code.claude.com/docs/en/agent-sdk/user-input
+- 인증(`CLAUDE_CONFIG_DIR`별 로그인 분리, Keychain, 우선순위, `--bare`와 OAuth): https://code.claude.com/docs/en/authentication
+- Legal and compliance(서드파티 claude.ai 로그인 금지, 무수정 바이너리, Agent SDK 개발자는 API 키, 이름·로고): https://code.claude.com/docs/en/legal-and-compliance
+- `--permission-prompt-tool` 응답 형식(커뮤니티, 비공식): https://github.com/anthropics/claude-code/issues/1175 , https://github.com/UnknownJoe796/claude-code-mcp-permission
+- 원장이 인용한 정책·한도 자료(재확인 안 함): code.claude.com/docs/en/agent-sdk/overview, support.claude.com/en/articles/15036540, docs.aside.com/help/ai
+
+로컬:
+- `claude --version` → `2.1.300 (Claude Code)`, `claude --help`, `claude auth --help`, `claude auth status --help`(정적 조회) [런타임]
+- `ps` 관찰: Claude 데스크톱 앱의 `claude` 2.1.308 stream-json 프로세스 플래그와 RSS [런타임]
+- `references/claude-code/CHANGELOG.md`(2.1.81까지, `--bare`·`--include-partial-messages`·`CLAUDE_CONFIG_DIR` 이력). `references/claude-agent-sdk/`는 비어 있음
+- 코드: `apps/firefox-ui-demo/helper/codex-chat-runtime.mjs`, `codex-bridge-server.mjs`, `egdesk-chat-store.mjs`, `codex-chat-values.mjs`, `codex-bridge-http.mjs`, `egdesk-native-capabilities.mjs`, `overlay/resources/EGDeskChatState.sys.mjs`, `docs/MULTI_CLI_CHAT_UIUX_IMPLEMENTATION_PLAN_V1.md`, 테스트 파일(§2)
