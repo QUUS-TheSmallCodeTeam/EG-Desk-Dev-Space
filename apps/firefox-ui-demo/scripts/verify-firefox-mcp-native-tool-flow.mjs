@@ -2724,6 +2724,396 @@ export async function runBrowserCameraSurfaceIsolation(harness, fixture, deadlin
   return proof;
 }
 
+async function ownedDocumentBoundarySnapshot(harness, cardId, ownerTag, fixture) {
+  const nativeIdentity = () => chrome(harness, ({ cardId, ownerTag }) => {
+    const card = document.getElementById(cardId);
+    if (!card?.isConnected || card.dataset.egdeskQaNegativeOwner !== ownerTag)
+      throw new Error('document replacement escaped the newly owned Card');
+    const context = card._browserControls.toolBrowser().browsingContext;
+    return { cardId, ownerTag, browsingContextId: String(context.id),
+      topBrowsingContextId: String(context.top?.id),
+      innerWindowId: String(context.currentWindowGlobal?.innerWindowId),
+      geometryStyle: { left: card.style.left, top: card.style.top,
+        width: card.style.width, height: card.style.height } };
+  }, { cardId, ownerTag });
+  const before = await nativeIdentity();
+  const observed = await ownedNegativeBrowserSnapshot(harness, cardId, ownerTag, fixture);
+  const after = await nativeIdentity();
+  assert.deepEqual(after, before, 'native document changed during the independent actor sample');
+  return { ...observed, native: after };
+}
+
+function assertReplacementTarget(before, after) {
+  const button = snapshot => snapshot?.interactiveElements?.find(item => item.label === 'Reveal QA details');
+  const oldTarget = button(before), newTarget = button(after);
+  assert.ok(oldTarget?.tag === 'button' && oldTarget.disabled === false && oldTarget.bounds
+    && ['x', 'y', 'width', 'height'].every(key => Number.isFinite(oldTarget.bounds[key]))
+    && oldTarget.bounds.width > 0 && oldTarget.bounds.height > 0, 'replacement lacks measured target coordinates');
+  for (const key of ['role', 'label', 'tag', 'href', 'value', 'disabled', 'bounds'])
+    assert.deepEqual(newTarget?.[key], oldTarget[key], `same-URL replacement changed target ${key}`);
+}
+
+async function ownedReloadControl(harness, cardId, ownerTag) {
+  return chrome(harness, ({ cardId, ownerTag }) => {
+    const card = document.getElementById(cardId);
+    if (!card?.isConnected || card.dataset.egdeskQaNegativeOwner !== ownerTag)
+      throw new Error('reload control escaped the owned Card');
+    const state = card._browserControls.getState();
+    const button = card.querySelector('.egd-card-reload');
+    const context = card._browserControls.toolBrowser().browsingContext;
+    const raw = button?.getBoundingClientRect();
+    const rect = raw ? { left: raw.left, top: raw.top, right: raw.right, bottom: raw.bottom,
+      width: raw.width, height: raw.height } : null;
+    let rendered = !!button?.isConnected, opacity = 1;
+    for (let node = button; node; node = node.parentElement) {
+      const style = getComputedStyle(node);
+      opacity *= Number(style.opacity);
+      if (node.hidden || node.inert || style.display === 'none' || style.visibility !== 'visible') rendered = false;
+    }
+    const viewport = { width: window.innerWidth, height: window.innerHeight };
+    const hitPoints = [];
+    if (rect) for (const fy of [0.2, 0.5, 0.8]) for (const fx of [0.2, 0.5, 0.8]) {
+      const x = rect.left + rect.width * fx, y = rect.top + rect.height * fy;
+      const hit = document.elementFromPoint(x, y);
+      hitPoints.push({ x, y, hitsTarget: !!hit && (hit === button || button.contains(hit)),
+        hitId: hit?.id || null, hitTag: hit?.localName || null });
+    }
+    return { cardId, ownerTag, binding: card._browserControls.toolBinding(),
+      browsingContextId: String(context.id), innerWindowId: String(context.currentWindowGlobal?.innerWindowId),
+      sampledAtMs: Date.now(), loading: state.loading, label: button?.getAttribute('aria-label'),
+      title: button?.title, busy: button?.getAttribute('aria-busy'), icon: button?.dataset.icon,
+      enabled: !!button && !button.disabled && !button.matches(':disabled'), rendered,
+      effectiveOpacity: opacity, rect, viewport, hitPoints };
+  }, { cardId, ownerTag });
+}
+
+function assertReloadReady(control, expected) {
+  assert.ok(control?.cardId === expected.binding.cardId && control.ownerTag === expected.native.ownerTag
+    && control.browsingContextId === expected.native.browsingContextId
+    && control.innerWindowId === expected.native.innerWindowId, 'reload control changed native ownership/document');
+  assert.deepEqual(control.binding, expected.binding, 'reload control changed Card/profile/owner binding');
+  assert.ok(control.loading === false && control.label === '새로고침' && control.title === '새로고침'
+    && control.busy === 'false' && control.icon === 'reload', 'reload control is loading/stop or lacks ready-state proof');
+  assert.ok(control.enabled === true && control.rendered === true
+    && Number.isFinite(control.effectiveOpacity) && control.effectiveOpacity >= 0.99,
+  'reload control is disabled, hidden or fading');
+  const rect = control.rect, viewport = control.viewport;
+  assert.ok(rect && ['left', 'top', 'right', 'bottom', 'width', 'height'].every(key => Number.isFinite(rect[key]))
+    && rect.width > 0 && rect.height > 0 && rect.left >= 0 && rect.top >= 0
+    && rect.right <= viewport?.width && rect.bottom <= viewport?.height,
+  'reload control is not fully inside the actual viewport');
+  assert.ok(control.hitPoints?.length === 9 && control.hitPoints.every(point => point.hitsTarget === true
+    && point.x > rect.left && point.x < rect.right && point.y > rect.top && point.y < rect.bottom),
+  'reload control lacks all nine actual target hit points');
+}
+
+export function assertBrowserDocumentReplacement(proof) {
+  assert.equal(proof?.scope, 'browser-top-level-document-replacement');
+  assert.equal(proof.simulatorOnly, true);
+  assert.equal(proof.nativeModelOriginVerified, false);
+  assert.equal(proof.providerTurns, 0);
+  assert.equal(proof.externalEffectVerified, false);
+  assertBrowserFixtureConfig(proof.fixture?.url, proof.fixture?.marker);
+  assert.ok(proof.cardId && proof.ownerTag && proof.priorCardId && proof.cameraCardId
+    && ![proof.priorCardId, proof.cameraCardId].includes(proof.cardId),
+  'replacement requires a separate owned Card from both earlier probes');
+  const { beforeReload, afterReload, afterDenied, stale, positive } = proof;
+  const oldDocument = beforeReload?.snapshot?.documentId;
+  const newDocument = afterReload?.snapshot?.documentId;
+  assert.ok(oldDocument && newDocument && oldDocument !== newDocument,
+    'same-URL reload did not replace the actual actor document');
+  assert.ok(proof.reload?.route === 'owned-card-reload-button'
+    && Number.isFinite(proof.reload.requestedAt) && proof.reload.observedAt >= proof.reload.requestedAt,
+  'replacement lacks its actual owned UI reload evidence');
+  assertReloadReady(proof.reload.preClick, beforeReload);
+  assert.ok(proof.reload.preClick.sampledAtMs <= proof.reload.requestedAt,
+    'reload readiness was not observed before clicking');
+  assert.notEqual(beforeReload.native?.innerWindowId, afterReload.native?.innerWindowId,
+    'reload did not replace the native WindowGlobal');
+  const bindingKeys = ['cardId', 'cardEpoch', 'profileId', 'accountId', 'userContextId',
+    'engineAccountKey', 'authorityEpoch', 'url'];
+  assert.ok(beforeReload.binding?.profileId && beforeReload.binding.engineAccountKey
+    && beforeReload.binding.cardEpoch && beforeReload.binding.accountId === '',
+  'replacement lacks its exact unlinked profile/owner binding');
+  for (const sample of [beforeReload, afterReload, afterDenied, positive?.beforeAttempt, positive?.afterAttempt]) {
+    const native = sample?.native, snapshot = sample?.snapshot;
+    assert.ok(native?.cardId === proof.cardId && native.ownerTag === proof.ownerTag
+      && /^[1-9][0-9]*$/.test(native.browsingContextId) && /^[1-9][0-9]*$/.test(native.innerWindowId)
+      && native.topBrowsingContextId === native.browsingContextId,
+    'replacement lacks exact owned top-level native identity');
+    assert.equal(native.browsingContextId, beforeReload.native.browsingContextId,
+      'reload replaced the Browser browsing context');
+    assert.deepEqual(native.geometryStyle, beforeReload.native.geometryStyle,
+      'reload changed the saved Card geometry');
+    for (const key of bindingKeys) assert.equal(sample.binding?.[key], beforeReload.binding[key],
+      `reload changed the exact ${key} binding`);
+    assert.ok(snapshot?.cardId === proof.cardId && snapshot.url === proof.fixture.url
+      && snapshot.readyState === 'complete' && snapshot.text?.includes(proof.fixture.marker),
+    'replacement lacks a complete current fixture sample');
+    assert.equal(snapshot.documentId, sample === beforeReload ? oldDocument : newDocument);
+    if (sample !== beforeReload) assert.equal(native.innerWindowId, afterReload.native.innerWindowId);
+    assert.deepEqual(snapshot.viewport, beforeReload.snapshot.viewport, 'reload changed the content viewport');
+    const diagnostic = snapshot.qaDiagnostics;
+    assert.ok(diagnostic?.kind === 'actor-perform-entry' && diagnostic.actorDocumentId === snapshot.documentId,
+      'replacement counter is missing or belongs to another actor document');
+    assert.equal(diagnostic.performCalls, sample === positive?.afterAttempt ? 1 : 0,
+      'replacement did not preserve zero actions before the single current click');
+  }
+  const button = snapshot => snapshot?.interactiveElements?.find(item => item.label === 'Reveal QA details');
+  assertReplacementTarget(beforeReload.snapshot, afterReload.snapshot);
+  assertReplacementTarget(beforeReload.snapshot, stale?.observed?.snapshot);
+  assertReplacementTarget(afterReload.snapshot, positive?.observed?.snapshot);
+  assertNegativeNoEffect(afterReload, afterDenied, 'stale-document denial');
+  assert.equal(stale?.code, 'BROWSER_ACTION_UNVERIFIED', 'old document action was not denied by the actual UI');
+  assert.equal(proof.explicitUiReselection, true, 'fresh action lacks explicit UI grant renewal after denial');
+  assert.equal(proof.grantRenewal, 'owned-card-menu-after-cancel');
+  assert.ok(stale.selectionToken && positive?.selectionToken && stale.selectionToken !== positive.selectionToken
+    && stale.syntheticRunId !== positive.syntheticRunId, 'replacement reused its denied run or one-run selection');
+  for (const [phase, documentId] of [[stale, oldDocument], [positive, newDocument]]) {
+    assert.ok(phase?.sourceId && phase.profileId === beforeReload.binding.profileId
+      && phase.ownerKey === beforeReload.binding.engineAccountKey
+      && phase.cardEpoch === beforeReload.binding.cardEpoch && phase.clientThreadId
+      && phase.syntheticRunId?.startsWith('qa-browser-simulator-'), 'replacement lost selected-source identity');
+    assert.ok(phase.observed?.status === 'observed' && phase.observed.cardId === proof.cardId
+      && phase.observed.observationId && phase.observed.snapshot?.documentId === documentId,
+    'replacement lost the actionable document observation');
+    assert.equal(phase.observed.snapshot.url, proof.fixture.url);
+    assert.deepEqual(phase.observed.snapshot.viewport, beforeReload.snapshot.viewport);
+    assert.ok(phase.observed.snapshot.text.includes(proof.fixture.marker));
+    const requests = phase.uiRequests;
+    assert.ok(Array.isArray(requests) && requests.length && requests.every(request =>
+      request.cardId === proof.cardId && request.targetCardEpoch === phase.cardEpoch
+      && request.runId === phase.syntheticRunId && request.clientThreadId === phase.clientThreadId
+      && request.requestId && request.responseRequestId === request.requestId
+      && Number.isFinite(request.attemptedAt) && request.respondedAt >= request.attemptedAt),
+    'replacement lost request/run/Card correlation');
+    const acts = requests.filter(request => request.kind === 'act');
+    assert.equal(acts.length, 1, 'replacement retried or omitted a guarded action');
+    const act = acts[0];
+    assert.equal(act.action?.type, 'click');
+    assertProbeGuard(act, phase.observed.snapshot, button(phase.observed.snapshot));
+    assert.ok(requests.slice(0, requests.indexOf(act)).some(request => request.kind === 'observe'
+      && request.status === 'observed' && request.respondedAt <= act.attemptedAt),
+    'replacement action lacks an earlier successful B observation');
+    if (phase === stale) {
+      assert.equal(act.status, 'rejected');
+      assert.match(act.error, /observation is stale/i);
+      assertProbeActionDiagnostic(act, proof.cardId, 'actor', 'rejected');
+      assert.ok(requests.some(request => request.kind === 'cancel' && request.status === 'cancelled'
+        && request.respondedAt <= positive.selectedAt), 'denied run was not cancelled before UI reselection');
+    } else {
+      assert.equal(act.status, 'acted');
+      assertProbeActionDiagnostic(act, proof.cardId, 'post-actor', 'acted');
+      assert.ok(requests.slice(requests.indexOf(act) + 1).some(request => request.kind === 'observe'
+        && request.status === 'observed' && request.attemptedAt >= act.respondedAt),
+      'replacement lacks post-click B readback');
+    }
+  }
+  assert.notEqual(positive.observed.observationId, stale.observed.observationId,
+    'fresh document action reused the old observation');
+  const receipt = positive.receipt;
+  assert.ok(receipt?.status === 'postcondition-observed' && receipt.cardId === proof.cardId
+    && receipt.action === 'click' && receipt.externalEffectVerified === false
+    && receipt.dispatchReceipt?.actor === 'JSWindowActor' && receipt.dispatchReceipt.eventDispatched === true
+    && receipt.dispatchReceipt.documentStillCurrent === true
+    && receipt.dispatchReceipt.clickInputRoute === 'dom-click-no-pointerdown'
+    && receipt.dispatchReceipt.targetClickObserved === true, 'replacement lacks a verified current DOM click receipt');
+  assert.deepEqual(receipt.postcondition,
+    { kind: 'visible-text', value: 'QA click count: 1', matched: true, wasAlreadyTrue: false });
+  for (const snapshot of [beforeReload.snapshot, afterReload.snapshot, afterDenied.snapshot,
+    stale.observed.snapshot, positive.observed.snapshot, positive.beforeAttempt.snapshot]) {
+    assert.ok(snapshot.text.includes('QA click count: 0') && !snapshot.text.includes('QA click count: 1'),
+      'replacement setup or stale action clicked the fixture');
+  }
+  assert.ok(positive.afterObserved?.status === 'observed' && positive.afterObserved.cardId === proof.cardId
+    && positive.afterObserved.observationId && positive.afterObserved.observationId !== positive.observed.observationId,
+  'replacement lacks fresh post-click observation');
+  for (const snapshot of [receipt.after, positive.afterObserved.snapshot, positive.afterAttempt.snapshot]) {
+    assert.ok(snapshot?.cardId === proof.cardId && snapshot.documentId === newDocument
+      && snapshot.url === proof.fixture.url && snapshot.text?.includes(proof.fixture.marker)
+      && snapshot.text.includes('QA click count: 1') && !snapshot.text.includes('QA click count: 0'),
+    'replacement single-click result was not independently read back in the new document');
+  }
+  assert.deepEqual(proof.restoredCamera, { ...proof.originalCamera,
+    actualPan: proof.originalCamera.pan, actualZoom: proof.originalCamera.zoom }, 'replacement did not restore the camera');
+  assert.deepEqual(proof.selectionAfter, proof.selectionBefore, 'replacement left a selected source');
+  assert.ok(proof.priorFixture?.cardId === proof.priorCardId && proof.priorFixture.beforeAttempt);
+  assert.deepEqual(proof.priorFixture.afterAttempt, proof.priorFixture.beforeAttempt,
+    'replacement changed the earlier fixture');
+  return true;
+}
+
+export async function runBrowserDocumentReplacement(harness, fixture, deadlineMs, thread,
+  priorCardId, priorOwnerTag, cameraCardId, result = {}) {
+  assertBeforeDeadline(deadlineMs);
+  const actionHarness = { evaluateChrome: source => harness.evaluateChrome(source),
+    async click(selector) {
+      assertBeforeDeadline(deadlineMs);
+      const value = await harness.click(selector);
+      assertBeforeDeadline(deadlineMs);
+      return value;
+    } };
+  const saved = await chrome(harness, threadId => {
+    const api = window.__egdesk;
+    return { camera: { pan: { ...api.state.panTarget }, zoom: api.state.zoomTarget },
+      selection: api.browserAgentTools.selectedSources(threadId).map(item =>
+        ({ id: item.id, cardId: item.sourceRef.viewId, permission: item.browserToolPermission })) };
+  }, thread.id);
+  assert.ok(saved.selection.length === 0 || (saved.selection.length === 1 && saved.selection[0].cardId === priorCardId),
+    'replacement initial selection is not the earlier owned Card');
+  const priorFixture = await ownedNegativeBrowserSnapshot(harness, priorCardId, priorOwnerTag, fixture);
+  const ownerTag = probeId('lane-c-document-owner');
+  const proof = { scope: 'browser-top-level-document-replacement', simulatorOnly: true,
+    nativeModelOriginVerified: false, providerTurns: 0, externalEffectVerified: false,
+    fixture, priorCardId, cameraCardId, ownerTag, originalCamera: saved.camera, selectionBefore: saved.selection };
+  result.browserDocumentReplacement = proof;
+  const units = [], cancelled = new Set();
+  const cancel = async unit => {
+    if (!unit || cancelled.has(unit)) return;
+    const receipts = await unit.service.cancelRun(unit.run);
+    assert.ok(receipts.some(item => item.status === 'fulfilled' && item.value?.status === 'cancelled'),
+      'replacement did not cancel its synthetic run');
+    cancelled.add(unit);
+  };
+  const scope = (unit, source) => ({ sourceId: source.id, profileId: source.sourceRef.profileId,
+    ownerKey: source.browserToolIdentity.engineAccountKey, cardEpoch: source.browserToolIdentity.cardEpoch,
+    selectionToken: source.browserToolSelection.token, clientThreadId: thread.wireClientThreadId,
+    syntheticRunId: unit.run.runId });
+  const observe = unit => unit.service.dispatch(unit.run, { tool: BROWSER_TOOL_NAMES.observe,
+    callId: probeId('qa-document-observe'), arguments: { cardId: proof.cardId } });
+  const click = (unit, observed) => {
+    const target = observed.snapshot.interactiveElements.find(item => item.label === 'Reveal QA details');
+    assert.ok(target?.ref && target.tag === 'button' && !target.disabled);
+    return unit.service.dispatch(unit.run, { tool: BROWSER_TOOL_NAMES.click,
+      callId: probeId('qa-document-click'), arguments: { cardId: proof.cardId,
+        observationId: observed.observationId, expectedRevision: observed.snapshot.revision,
+        ref: target.ref, expectedTarget: target, postcondition: { kind: 'visible-text', value: 'QA click count: 1' } } });
+  };
+  const sample = () => ownedDocumentBoundarySnapshot(harness, proof.cardId, ownerTag, fixture);
+  try {
+    assertBeforeDeadline(deadlineMs);
+    proof.cardId = await chrome(harness, ({ url, ownerTag }) => {
+      const card = window.__egdesk.cardRuntime.openBrowserCard(url, { openMode: 'new' });
+      card.dataset.egdeskQaNegativeOwner = ownerTag;
+      return card.id;
+    }, { url: fixture.url, ownerTag });
+    assert.ok(![priorCardId, cameraCardId].includes(proof.cardId), 'replacement reused an earlier probe Card');
+    await waitUntil(async () => {
+      assertBeforeDeadline(deadlineMs);
+      try { return await sample(); } catch { return null; }
+    }, value => value?.snapshot.readyState === 'complete',
+    { timeoutMs: Math.min(10000, deadlineMs - Date.now()), intervalMs: 100 });
+    const surface = await ownedCameraSurfaceSnapshot(harness, proof.cardId, ownerTag);
+    const plan = browserCameraSurfacePlan(surface.worldRect, surface.viewport);
+    assertBeforeDeadline(deadlineMs);
+    await chrome(harness, camera => {
+      window.__egdesk.state.setCanvasViewportTarget(camera, { immediate: true }); return true;
+    }, plan.visible);
+    const source = await selectOwnedProbeSource(actionHarness, thread, proof.cardId, ownerTag,
+      'interact', fixture, saved.selection[0]?.cardId || null);
+    proof.sourceId = source.id;
+    const oldUnit = await newNegativeService(harness, thread, proof.cardId, source, deadlineMs);
+    units.push(oldUnit);
+    await oldUnit.service.bind(oldUnit.run, oldUnit.prepared);
+    proof.stale = { ...scope(oldUnit, source), observed: await observe(oldUnit) };
+    proof.beforeReload = await sample();
+    assert.equal(proof.stale.observed.snapshot.documentId, proof.beforeReload.snapshot.documentId);
+    assert.equal(proof.beforeReload.snapshot.qaDiagnostics.performCalls, 0);
+    assert.ok(proof.beforeReload.snapshot.text.includes('QA click count: 0'));
+    proof.reload = { route: 'owned-card-reload-button' };
+    // Content readyState can complete before Chrome changes Stop back to
+    // Reload. Wait for the real control and retain the last sample on failure.
+    const readReload = async () => {
+      assertBeforeDeadline(deadlineMs);
+      const control = await ownedReloadControl(harness, proof.cardId, ownerTag);
+      proof.reload.lastControl = control;
+      assertBeforeDeadline(deadlineMs);
+      return control;
+    };
+    await waitUntil(readReload, control => {
+      try { assertReloadReady(control, proof.beforeReload); return true; } catch { return false; }
+    }, { timeoutMs: Math.min(10000, deadlineMs - Date.now()), intervalMs: 100 });
+    proof.reload.preClick = await readReload();
+    assertReloadReady(proof.reload.preClick, proof.beforeReload);
+    proof.reload.requestedAt = Date.now();
+    await actionHarness.click(`${selectorForId(proof.cardId)} .egd-card-reload`);
+    proof.afterReload = await waitUntil(async () => {
+      assertBeforeDeadline(deadlineMs);
+      try { return await sample(); } catch { return null; }
+    }, value => value?.snapshot.readyState === 'complete'
+      && value.snapshot.documentId !== proof.beforeReload.snapshot.documentId
+      && value.native.innerWindowId !== proof.beforeReload.native.innerWindowId,
+    { timeoutMs: Math.min(10000, deadlineMs - Date.now()), intervalMs: 100 });
+    assertBeforeDeadline(deadlineMs);
+    proof.reload.observedAt = Date.now();
+    assert.deepEqual(proof.afterReload.binding, proof.beforeReload.binding,
+      'reload changed the exact Card/profile/owner binding; no action attempted');
+    for (const key of ['cardId', 'ownerTag', 'browsingContextId', 'topBrowsingContextId', 'geometryStyle'])
+      assert.deepEqual(proof.afterReload.native[key], proof.beforeReload.native[key],
+        `reload changed native ${key}; no action attempted`);
+    assert.deepEqual(proof.afterReload.snapshot.viewport, proof.beforeReload.snapshot.viewport);
+    assertReplacementTarget(proof.beforeReload.snapshot, proof.afterReload.snapshot);
+    assert.equal(proof.afterReload.snapshot.qaDiagnostics.performCalls, 0);
+    assert.ok(proof.afterReload.snapshot.text.includes('QA click count: 0'));
+    proof.stale.code = await expectNegativeCode(click(oldUnit, proof.stale.observed),
+      ['BROWSER_ACTION_UNVERIFIED'], 'old top-level document observation');
+    proof.afterDenied = await sample();
+    assertNegativeNoEffect(proof.afterReload, proof.afterDenied, 'stale-document denial');
+    assert.equal(proof.afterDenied.snapshot.qaDiagnostics.performCalls, 0);
+    await cancel(oldUnit);
+    proof.stale.uiRequests = oldUnit.trace.requests.map(item => ({ ...item }));
+    // B intentionally locks uncertain outcomes. Renew through the existing
+    // rendered menu, never by editing a token, extending a lease or retrying.
+    assertBeforeDeadline(deadlineMs);
+    const freshSource = await selectOwnedProbeSource(actionHarness, thread, proof.cardId, ownerTag,
+      'interact', fixture, saved.selection[0]?.cardId || null);
+    proof.explicitUiReselection = true;
+    proof.grantRenewal = 'owned-card-menu-after-cancel';
+    const selectedAt = Date.now();
+    const freshUnit = await newNegativeService(harness, thread, proof.cardId, freshSource, deadlineMs);
+    units.push(freshUnit);
+    await freshUnit.service.bind(freshUnit.run, freshUnit.prepared);
+    proof.positive = { ...scope(freshUnit, freshSource), selectedAt, observed: await observe(freshUnit) };
+    proof.positive.beforeAttempt = await sample();
+    assert.deepEqual(proof.positive.beforeAttempt.native, proof.afterReload.native);
+    assert.deepEqual(proof.positive.beforeAttempt.binding, proof.afterReload.binding);
+    assert.equal(proof.positive.observed.snapshot.documentId, proof.afterReload.snapshot.documentId);
+    assert.equal(proof.positive.beforeAttempt.snapshot.qaDiagnostics.performCalls, 0);
+    assertReplacementTarget(proof.afterReload.snapshot, proof.positive.observed.snapshot);
+    assertBeforeDeadline(deadlineMs);
+    proof.positive.receipt = await click(freshUnit, proof.positive.observed);
+    proof.positive.afterObserved = await observe(freshUnit);
+    proof.positive.afterAttempt = await sample();
+    proof.positive.uiRequests = freshUnit.trace.requests.map(item => ({ ...item }));
+    proof.priorFixture = { cardId: priorCardId, ...assertNegativeNoEffect(priorFixture,
+      await ownedNegativeBrowserSnapshot(harness, priorCardId, priorOwnerTag, fixture), 'document replacement') };
+  } finally {
+    try { for (const unit of units) await cancel(unit); }
+    finally {
+      const restored = await chrome(harness, ({ camera, cardId, ownerTag, threadId }) => {
+        const api = window.__egdesk;
+        try {
+          const card = cardId && document.getElementById(cardId);
+          if (card?.dataset.egdeskQaNegativeOwner === ownerTag) {
+            for (const source of api.browserAgentTools.selectedSources(threadId)) {
+              if (source.sourceRef?.viewId === cardId) api.codexBridge.removeInputSource(threadId, source.id);
+            }
+          }
+        } finally { api.state.setCanvasViewportTarget(camera, { immediate: true }); }
+        return { camera: { pan: { ...api.state.panTarget }, zoom: api.state.zoomTarget,
+          actualPan: { ...api.state.pan }, actualZoom: api.state.zoom },
+        selection: api.browserAgentTools.selectedSources(threadId).map(item =>
+          ({ id: item.id, cardId: item.sourceRef.viewId, permission: item.browserToolPermission })) };
+      }, { camera: saved.camera, cardId: proof.cardId, ownerTag, threadId: thread.id });
+      proof.restoredCamera = restored.camera;
+      proof.selectionAfter = restored.selection;
+    }
+  }
+  assertBeforeDeadline(deadlineMs);
+  assertBrowserDocumentReplacement(proof);
+  return proof;
+}
+
 async function runBrowserNegativeProbes(harness, fixture, deadlineMs, result) {
   assertTurnTimeBudget(deadlineMs);
   result.browserNegativeStage = 'fixture-preflight';
@@ -3145,6 +3535,10 @@ async function runBrowserNegativeProbes(harness, fixture, deadlineMs, result) {
   const cameraSurfaceIsolation = await runBrowserCameraSurfaceIsolation(
     harness, fixture, deadlineMs, thread, cardId, ownerTag, result);
 
+  result.browserNegativeStage = 'top-level-document-replacement';
+  const documentReplacement = await runBrowserDocumentReplacement(
+    harness, fixture, deadlineMs, thread, cardId, ownerTag, cameraSurfaceIsolation.cardId, result);
+
   const final = await chrome(harness, initialCards => ({
     cards: initialCards.map(item => {
       const card = document.getElementById(item.id);
@@ -3165,7 +3559,7 @@ async function runBrowserNegativeProbes(harness, fixture, deadlineMs, result) {
     providerTurns: 0, actorPhysicalDispatchCounterVerified: false,
     actorPerformCounterVerified: true, actorPerformPositiveControl,
     cardId, fixture: { url: fixture.url, marker: fixture.marker }, probes, guardedActorPositiveControls,
-    cameraSurfaceIsolation,
+    cameraSurfaceIsolation, documentReplacement,
     requestsScopedToOwnedCard: true,
     preexistingBrowserCardStylesUnchanged: true, canvasPanZoomUnchanged: true };
   assertBrowserNegativeProbeResults(proof);
