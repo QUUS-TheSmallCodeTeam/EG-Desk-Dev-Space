@@ -121,7 +121,7 @@ DOM 상태이며 OS 전면 앱 복귀 증거가 아니다. 후속 클릭은 명�
 Chromium 내부 지연 지점·ACK·실제 detach 순서·timeout 후 최종 효과는 **UNKNOWN**이다.
 따라서 P1은 “효과 후 timeout이 입증됐다”가 아니라, **결과 미확정 상태에서 중복 입력을 만들지 않도록 하는 검증 과제**다.
 
-## 4. P2: native Stop 경계는 아직 미확인
+## 4. P2: native Stop의 실제 취소·수신 경계는 아직 미확인
 
 **S-01 — 관찰 종료는 작업 취소가 아니다.** 기존 `observationStoppedAtDeadline`은 30초 관찰기와 모니터의
 종료 경계다. 네이티브 명령 취소, 큐 배수, Stop 이후 입력 0회를 증명하지 않는다. [N5, N6, 추가 검토 보고]
@@ -129,12 +129,17 @@ Chromium 내부 지연 지점·ACK·실제 detach 순서·timeout 후 최종 효
 **N-05 — 현행 Stop/대기열의 정적 경로는 부분 확인됐다.** N7과 같은 helper의 LLVM·파일 메타데이터에서 Stop IPC의 정지 표식,
 Stop 정리·PerformAction의 앱별 serialExecutor 필드/tail 공유, 앞선 Task 결과 대기 후 action 전 취소·intervention reason 검사를 확인했다.
 관측된 `Task.cancel`의 대상은 `userInterruptionDebounceTaskByTargetIdentifier`이며 **입력 큐 취소가 아니다**. deactivate 및 오류 시 정지 표식 해제도 정리 경로이지 취소 완료 증거가 아니다.
-이는 직접 LLVM 정적 분석으로, 현행 REA 함수 dossier나 실행 증거가 아니다. UI Stop→IPC 연결과 마지막 guard 이후 `postToPid`까지의 취소·ACK·late effect는 **UNKNOWN**이다. [N9]
+이는 직접 LLVM 정적 분석으로, 현행 REA 함수 dossier나 실행 증거가 아니다. 앱별 Stop 메뉴의 송신 호출 경로는 N-07에서 정적으로 확인했지만, 일반 채팅/turn Stop·이 native handler의 실제 수신·마지막 guard 이후 `postToPid`까지의 취소·ACK·late effect는 **UNKNOWN**이다. [N9]
 
 **N-06 — mac JS의 timeout 정리는 Stop IPC 구성과 다르다.** 특정 mac client의 요청은 transport로 위임되며, native-pipe 요청은 직렬 대기 후 해당 요청의 deadline을 계산하고 증가형 JSON-RPC ID와 `requestType`을 전송한다.
 timeout callback은 pending Promise를 거부하는 정리 함수를 호출한 뒤 socket을 종료한다. 이것은 명시적인 AppStop IPC 구성이나 native 입력 큐 취소의 증거가 아니다.
 검사한 mac client에는 `startApp`·`stopAudioRecording`이 있지만 `stopApp`·`ComputerUseIPCAppStopRequest`는 두 해시 고정 모듈에서 발견되지 않았다. 이 부재를 전체 앱에 일반화하지 않는다.
-실제 REA는 원문 함수 slice의 일부 lexical 연결만 확인했으며 동적 transport·private-field 전체 연결과 실행은 미확인이다. UI Stop→N9 IPC 및 마지막 guard 뒤 취소·late effect의 **UNKNOWN**은 해소되지 않았다. [C11, C12]
+실제 REA는 원문 함수 slice의 일부 lexical 연결만 확인했으며 동적 transport·private-field 전체 연결과 실행은 미확인이다. 별도 앱별 Stop 메뉴 경로는 N-07과 구분하며, 일반 채팅/turn Stop·native 큐 취소·마지막 guard 뒤 late effect는 **UNKNOWN**이다. [C11, C12]
+
+**N-07 — 특정 앱의 Stop 메뉴는 요청 구성·송신 호출까지 정적으로 연결됐다.** 현행 앱의 application-control 상태 메뉴에서 `computer-use/stop-application`은 worker의 `stopApplication({applicationId})`로 전달된다.
+worker는 `{request:{app:id}, requestType:ComputerUseIPCAppStopRequest}`를 만들고 서비스 PID 대상 AppleEvent **`SkCu/SndR`·`AESendMessage`** 호출로 이어진다. N-06의 native-pipe transport와는 별도 경로다.
+main/worker 메시지·의존성 주입 연결은 소스 확인이며, 실제 REA가 해소한 것은 `qze → _7 → $5 → wze`의 lexical 호출이다. native FFI·실제 송수신·N9 handler 실행이나 입력 취소 효과까지 검증한 것은 아니다.
+빈 worker `handleCancel`은 AppStop 구현이나 큐 취소 증거가 아니다. **일반 채팅/turn Stop의 경로와 native 대기열·ACK·late effect는 여전히 UNKNOWN**이다. [C13–C15]
 
 네이티브 Stop/cancel과 queued input을 연결할 적합한 기존 런타임 trace는 확인되지 않았다. 현재 상태는 **UNKNOWN**이며,
 이를 채우기 위한 신규 네이티브 실행·REA·앱 권한 확대를 이 문서 작업에서 수행하지 않는다.
@@ -198,7 +203,7 @@ cancel 후 소유 카드 메뉴의 명시적 재선택·fresh observe를 거쳐 
 | ID / 항목 | EG-Desk에 필요한 이유 | 다음 최소 확인 | OS 전면 필요 여부 / 현재 상태 |
 |---|---|---|---|
 | R-01 / P1 timeout 뒤 효과 | 결과 미확정 요청의 중복 입력을 막기 위해 | 소유 fixture에서 command ID·move 수신·dispatch·timeout을 같은 시계로 연결한다. | 배경 시험 자체는 OS 전면 불필요; 전환 재현에는 통제된 전면 전환 필요 / 기존 로그로 late effect **UNKNOWN** |
-| R-02 / P2 native Stop | 새 dispatch 차단과 이미 보낸 입력의 수신을 구별하기 위해 | N-05의 정적 경계를 기준으로, 승인된 시험에서 `enqueue/dispatch/Stop ACK/receive`에 command ID·순서·PID를 붙여 ACK 전후를 구분한다. | 통제된 A/B 전면 전환·입력 필요 / Stop 표식·대기열·guard의 LLVM 부분 확인. UI Stop→IPC 및 마지막 guard 이후 취소·ACK·late effect는 런타임 trace가 없어 **UNKNOWN** |
+| R-02 / P2 native Stop | 새 dispatch 차단과 이미 보낸 입력의 수신을 구별하기 위해 | N-05/N-07의 정적 경계를 기준으로, 승인된 시험에서 `enqueue/dispatch/Stop ACK/receive`에 command ID·순서·PID를 붙여 ACK 전후를 구분한다. | 통제된 A/B 전면 전환·입력 필요 / 앱별 Stop 메뉴의 요청 구성·송신 호출과 native 표식/guard는 정적 부분 확인. 일반 채팅/turn Stop·FFI/handler 실제 수신·큐 취소·ACK·late effect는 **UNKNOWN** |
 | R-03 / 현행 native 버전 변화 | 과거 offset·복원 결과를 새 helper에 잘못 적용하지 않기 위해 | N7의 정적 부분 대응을 기준으로, 실행 동등성이 제품 판단에 필요할 때 승인 범위를 확인한 제한 시험을 한다. | 정적 대응은 OS 전면 불필요; 실행 재검증은 별도 / **LLVM 정적 부분 대응 완료**, REA dossier 없음·runtime 동등성 **UNVERIFIED** |
 | R-04 / Gecko frame·zoom·배경 좌표 조합 | Chromium의 관찰/입력 좌표 계약을 Firefox로 오인하지 않기 위해 | 소유 페이지에서 frame·확대율·화면 배율·배경/최소화 조합별 fresh snapshot 좌표와 실제 수신 대상을 대조한다. | 좌표 단위 검증은 OS 전면 불필요; 배경/최소화 실측은 통제 전환 필요 / EG-06/07은 Canvas 카메라·top-document 교체와 DOM 클릭의 제한된 부분 검증. frame·page zoom·DPR·좌표 입력 및 조합별 실행은 **UNVERIFIED** |
 | R-05 / 불투명 host 연결 — 낮은 우선순위 | 대상·세션 경계의 누락을 확인하되 구현을 추측해 복제하지 않기 위해 | B-04의 송수신 JS·세션/숫자 탭 검사 부분 확인을 기준으로, 필요할 때 native pipe/host 내부의 ID 전달·재작성 연결만 보완한다. | 정적 검토는 OS 전면 불필요 / 내부 ID 재작성·E2E runtime 대응은 **UNKNOWN**. 모든 target 소유권 검증 아님; 제품 변경의 선행 조건으로 삼지 않음 |
@@ -211,6 +216,8 @@ cancel 후 소유 카드 메뉴의 명시적 재선택·fresh observe를 거쳐 
 | 대상 | 과거 분석본 | 2026-10-23 추가 확인 |
 |---|---|---|
 | ChatGPT 앱 | `app.asar` SHA-256 `5ddc4e48259aa6f979e04529b1a5a4ae54b0f5c4ad6db5c6e004924c10916ddb`; 정확한 앱 버전은 H340에서 미기록 | 추가 설치 식별 확인: **26.1016.62342 / build 21477**, `@oai/cua` **0.2.6** |
+| 현행 ASAR 모듈 `.vite/build/main-JI9qDiXp.js` | 이번 범위에서 과거 비교 없음 | 모듈 SHA-256 `b8c5d07cc3c30fbf0abe729b05434e7d1ffa19ee6c4daa818ae8f855be66d1e1`; 위 현행 앱 버전. 전체 ASAR 해시와 구별 |
+| 현행 ASAR 모듈 `.vite/build/worker.js` | 이번 범위에서 과거 비교 없음 | 모듈 SHA-256 `6d233b3cdc282a638a4253d8a4f7866f181284f3b3e745f2ff1b995c7c061ef3`; 위 현행 앱 버전 |
 | CUA client | `fe7bd7ff410acbe429ef2b2faa9945f920c7f56f68c28bef96918f43980361ad` | `821e2b689eba8d95f3ad0ff328d68ac8692baec955d993ecd21d2cdb9ba31760` |
 | mac 전용 `client.js` — 위 CUA client와 별도 파일 | 이번 범위에서 과거 비교 없음 | `71134f10354fe9f7be23a62df52789908a8592151685286a7965b297a81cef8f`; 앱 26.1016.62342 / build 21477, CUA 0.2.6 |
 | mac 전용 `native-pipe.js` | 이번 범위에서 과거 비교 없음 | `51a1138a0f0d7f01fe5d4d0a4f0753c67b2c3f3ed55c7540c26d182274e116f4`; 같은 앱/CUA 버전 |
@@ -251,7 +258,7 @@ C9의 설치 JS 원문 slice·클래스 포장 파생물에 C10의 REA 6.7.0을 
 | N-04 — 현행 복원 후보 | 새 심볼 `safelyEnforceActiveState` `0x10074ab10 → continuation 0x10074abd8`; 최초 call `0x10074b4d8`, 반복 continuation `0x10074d1d4`의 call `0x10074d4ac` | N7 LLVM. receiver는 context `+0x1d8`, `activateWithOptions:0` 후보·BOOL/PID 비교·50ms/2s 형태 유지. 실제 복원 실행·대기시간 실측 아님 |
 | N-04 — 현행 virtualCursor 경계 | 현행 descriptor 대조 후 continuation `0x100708628`; call `0x100708768 → postToPid 0x100261478` | N7 LLVM·심볼·과거 명령열 비교. event/PID 전달 형태 유지; 최종 OS 전달·실제 분기 실행은 UNKNOWN |
 | N-04 — 현행 간접 전송 | `postToPid 0x100261478 → wrapper 0x100261484 → indirect branch 0x1002614c4`; slot `0x1014e3140` | N7의 정적 경계. slot의 최종 runtime target은 UNKNOWN; N8은 REA 분석 시도 기록이지 현행 함수 dossier가 아님 |
-| N-05 — 현행 Stop IPC | handle `0x10015c30c → descriptor 0x10110d520 → 0x100176be0 / 0x100176c3c`; call `0x100176cb0 → 정지 표식 0x1000adc50` | N9 `stopDescriptors2`, `stopIpcSelectedBody`. UI Stop에서 이 IPC로 진입하는 연결은 UNKNOWN |
+| N-05 — 현행 Stop IPC | handle `0x10015c30c → descriptor 0x10110d520 → 0x100176be0 / 0x100176c3c`; call `0x100176cb0 → 정지 표식 0x1000adc50` | N9 `stopDescriptors2`, `stopIpcSelectedBody`. N-07 앱별 Stop 메뉴와 요청 종류는 대응하지만 실제 송수신·handler 실행은 UNKNOWN |
 | N-05 — 현행 직렬 대기열 | Stop·PerformAction(`0x10015d9d0`)의 serialExecutor 필드 offset global `0x1015493b0`; 특수화 `0x1000ab8e4 / 0x1000ac0c4`, 공통 tail `+0x70` | N9 `stopEntryInitial`, `stopPerformActionEntry`, `stopQueueSpecialized`, `stopActionSerialSpecialization`. 같은 필드/slot의 정적 사용이며 실제 실행 순서·큐 취소 증거 아님 |
 | N-05 — 현행 action guard | worker `0x1000ac794`: 앞선 Task가 있으면 `.result` 대기 → `0x1000ac910`의 `Task.checkCancellation`; action의 call `0x10015e020 → 0x10015cccc`; stopped 오류 `0x10015d0ac–0x10015d0b0`, `appStoppedByUser` tag 2 | N9 `stopActionWorkerGate`, `stopInputQueuedGuards`, `stopActionValidation`, `stopStateAndErrorFieldMetadata`. intervention reason 검사 확인; N7의 입력 call `0x100708768`까지 취소가 원자적으로 보장된다는 뜻은 아님 |
 | N-05 — 현행 정리 경로 | Stop cleanup `0x1000ab728`, call `0x1000ab770 → deactivate 0x100072480`; 오류 경로 `0x100176fac → clearStoppedByUser 0x1000adde8` | N9 `stopBody0`, `stopIpcSelectedBody`, `stopExactNamesNmOutput`. 정리/표식 해제를 입력 역전·Stop ACK 완료로 해석하지 않음 |
@@ -259,6 +266,9 @@ C9의 설치 JS 원문 slice·클래스 포장 파생물에 C10의 REA 6.7.0을 
 | N-06 — mac JS 요청 | `mac/client.js`: `MacComputerUseClient(p).request` `[2864,3181)`; `mac/native-pipe.js`: `MacNativePipeTransport(P).request` `[2957,3315)`; 모두 L1 | C11과 연결된 원문 추출. transport 위임 → 직렬 대기 후 `Date.now()+timeout` deadline 생성. 이 동적 전체 연결을 REA가 해소했다는 뜻은 아님 |
 | N-06 — mac JS timeout | `native-pipe.js`의 `w` `[7375,7896)`, `g` `[8325,8479)`, 인코더 `j` `[3891,4097)`; L1 | C11 소스: 증가 ID·requestType 포함 JSON-RPC. `w`의 timeout callback이 `g`로 pending Promise 거부/정리를 수행한 뒤 `socket.end()` 호출. `g` 자체가 Stop IPC를 구성하지 않음 |
 | N-06 — REA 범위 | C12: 실제 REA 6.7.0, 원문 함수 slice·클래스 포장 파생물 | `w → j` 인코딩 lexical 연결 확인. 전체 coverage unknown / call-flow partial / 출력 잘림 없음. 동적 transport·private-field 미해결, 실행 없음. N9의 native LLVM 근거를 REA 함수 dossier로 격상하지 않음 |
+| N-07 — 메뉴/worker 소스 연결 | ASAR 모듈 내 UTF-8 byte: `main-JI9qDiXp.js`의 `m6e` `[4037402,4039843)` L1564; `worker.js`의 `wHe` `[2495389,2497483)` L683 | C13. 앱별 상태 메뉴→worker `stopApplication` 및 의존성 주입 소스 확인. 메시지/DI 경계는 REA 전체 그래프나 실제 실행 증거 아님 |
+| N-07 — 요청/AppleEvent | `worker.js`: `qze` `[2310648,2310811)` → `_7` `[2311674,2312114)` → `$5` `[2301522,2301819)` → `wze` `[2301819,2302528)`; 모두 L682 | C13/C14. AppStop 요청과 PID 대상 AppleEvent `SkCu/SndR` 송신 호출. 이 lexical 사슬만 REA 해소; 전체 coverage unknown / call-flow partial / 출력 잘림 없음. FFI·runtime·취소 효과는 미검증 |
+| N-07 — 별도 cancel 경계 | `worker.js`의 `_Le.handleCancel` `[2249538,2249554)` L682 | C13 원문에서 빈 메서드. AppStop 호출과 혼동하지 않으며 일반 채팅/turn Stop 경로를 입증하지 않음 |
 
 N5 L31/L32에서 foreground는 A, `sawActualBForeground`·`sawActualAReturn`은 true다.
 A의 key count는 1, text change는 0→1, cursor change는 0이다.
@@ -289,6 +299,9 @@ L48 `willTerminate`는 관찰 종료 뒤 정리 시점이다. 그때 foreground 
 | C10 | `browser/timeout-origin-ZGb896/rea-request-correlation.json` | REA `ev_8c96c7b4d8d4322d7a3889102052c876f560034635cec6c8151d4c29d1e699f6`; 원문 slice·클래스 포장 파생물의 제한된 정적 연결, partial·출력 잘림 없음 |
 | C11 | `browser/timeout-origin-ZGb896/native-stop-boundary-projection.json`; 연결된 원문 추출은 같은 디렉터리의 `native-stop-boundary-functions.json` | `2026-10-23T15:24:45.073Z`; 특정 mac 모듈의 식별값·method inventory·정확한 문자열 부재·함수 위치와 원문 추출 SHA 대조. 두 모듈 밖의 부재를 주장하지 않음 |
 | C12 | `browser/timeout-origin-ZGb896/rea-native-stop-boundary.json` | REA `ev_85b34fb5573248cf074c4996d07541e4063c984d01f03ff72bac939c436cc8c7`; source-faithful slice의 실제 정적 분석, runtime 증거 아님 |
+| C13 | `browser/timeout-origin-ZGb896/stop-ui-bridge-projection.json`, `stop-ui-bridge-functions.json` | `2026-10-23T15:42:50.700Z` projection; 현행 앱별 Stop 메뉴의 원문·모듈 byte 범위·archive 매핑과 소스 전용 연결 |
+| C14 | `browser/timeout-origin-ZGb896/rea-stop-ui-bridge.json` | REA `ev_a524f76896e88371675ed8e43e67b8bbac132d19174e999d87b4d762b0103a30`; REA 6.7.0의 선택된 원문 slice 정적 분석 |
+| C15 | `browser/timeout-origin-ZGb896/stop-ui-bridge-final-verification.json` | `2026-10-23T15:44:57.898Z` passed: main 12개·worker 34개 선택 멤버의 archive byte 매핑·모듈 해시 확인. 무결성 검증이며 새 runtime/취소 실험 아님 |
 | N1 | `native/focus-restore-6yqdDW/42-sampled-continuation-llvm-raw.json` | LLVM 정적 continuation와 샘플 주소의 대응 자료 |
 | N2 | `native/focus-restore-6yqdDW/43-native-e2e-bounded-raw.json` | 바이너리 식별·LLVM/기존 REA 분석. 이름의 e2e를 실제 입력 E2E 완료로 읽지 않음 |
 | N3 | `native/focus-restore-6yqdDW/45-virtual-cursor-dispatch-side-effect-raw.json` | `2026-10-21T14:46:48Z–14:47:46Z`; `postToPid` 호출 및 기존 REA `ev_4fb12a65679e8e6dc98d8b025318a722a28aef5f18ce18b969f398911dfcf26b` |
@@ -319,6 +332,8 @@ EGQ2의 소유 Card 5·context 17에서 `innerWindowId`는 `27917287425 → 2791
 | C9 / C10 | `7a00f3cfbb5a60761e844461312efa7e654bbcb43b303b8a2f5bb36bb95d90ae` / `c41d0db51e394e41dc1c10d57c0b93aa7a383f7ad663e357f9626ea38e2c5369` |
 | C11 projection / 연결된 원문 추출 | `738deafeeab32900efb9def550389e41177f4cd18ae8d04ad0846336f91dd400` / `3bc77750c779dd868cbf34c58b09c0281a65b0d04f1408a8fe137a83b655cfbc` |
 | C12 | `7befc66f2d0ae6b652d767175bb599ee975d00a17dc542c20e450d2bfafdccf7` |
+| C13 projection / 원문 추출 | `c9290d5b1270906b5129f436d28d5a4d70e0d440c00c851f443c7d3562b1a08f` / `a3f79a62c9b77c52517a481d3b448c68b5adee345d974547c051b0fbbbe4005f` |
+| C14 / C15 | `d3cd1da602a95a47e352fa4bf5350004b279af3adcae8f155f266612f5d59733` / `c9447ec927f403c99d377bc8d764b9f27fff2d18f02190d4eddfd5e2097e14c5` |
 | N1 / N2 | `2848bf3c8252f9c290f812765c0e0b4b69e429f65ee2cc0359ec663210e53a30` / `9acafdd29d2dd6de945b58743724aeba0d7332cdc8c794d773812b209fde8b45` |
 | N3 / N4 | `13c52f8ece74cb2421c5aa71afdc38eb55ed3651347516cfb3e325b7dc5a256d` / `3c7e9d496dc60a6aebd60a7c6337da1a18b17e8dcd8fd62f965ca6550885921e` |
 | N5 / N6 | `f8b6cda86acd2051708ae573a9b46a89f56a5f6c94be018755157ccc5d55033b` / `68edc62bc53dd20ccbe9f1d8684d031a9c942e68480a0bd195f50bcf39ce8c8f` |
@@ -327,5 +342,5 @@ EGQ2의 소유 Card 5·context 17에서 `innerWindowId`는 `27917287425 → 2791
 | EGQ1 | `a07a9f5aa10ca0e2ff20c9252711ab8f63ef81a9b9fc42555e65ade90e929908` |
 | EGQ2 | `a67fd11a570b7ba2feb9189c5b0381ead74cecb964c8363db42a09d157a5890a` |
 
-현행 C1–C12 및 N7–N9 artifact SHA-256은 2026-10-23 UTC 보관 파일에서 산출했다. 설치 service/helper SHA·함수 위치·해당하는 REA evidence ID와 함께 조회한다.
+현행 C1–C15 및 N7–N9 artifact SHA-256은 2026-10-23 UTC 보관 파일에서 산출했다. 설치 service/helper SHA·함수 위치·해당하는 REA evidence ID와 함께 조회한다.
 자료의 해시가 맞아도 전체 호출 그래프·현재 설치 동작·취소 보장을 증명하는 것은 아니다.
