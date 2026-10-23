@@ -51,6 +51,30 @@ function json(res, status, value) {
   res.end(JSON.stringify(value));
 }
 
+function settleStopHold(run, state) {
+  const hold = run.stopAckHold;
+  clearTimeout(hold.timer);
+  const response = hold.response;
+  response?.off?.('close', hold.onClose);
+  hold.response = null;
+  hold.state = state;
+  return response;
+}
+
+function expireStopHold(run, state = 'expired') {
+  const response = settleStopHold(run, state);
+  if (response && !response.destroyed && !response.writableEnded) {
+    json(response, 408, { accepted: false, stopRequested: false, code: 'QA_STOP_HOLD_EXPIRED' });
+  }
+}
+
+function acknowledgeStop(run, response) {
+  run.stopRequested = true;
+  run.fixtureStage = 'stop-requested';
+  envelope(run, 'run.stop_requested');
+  json(response, 202, { accepted: true, stopRequested: true });
+}
+
 async function bodyJson(req) {
   let raw = '';
   for await (const chunk of req) {
@@ -243,7 +267,7 @@ const handler = async (req, res) => {
         '/__qa/auth-refresh', '/__qa/reconnect', '/__qa/replay', '/auth/signout', '/__qa/hold-resume',
         '/__qa/release-resume', '/__qa/history', '/__qa/delta', '/__qa/auth-diagnostics', '/__qa/runtime-ready',
         '/__qa/account-change', '/__qa/terminal-mode', '/terminal/spawn', '/terminal/read', '/terminal/kill', '/terminal/resize',
-        '/context/captures', '/__qa/context-config', '/__qa/context-release'];
+        '/context/captures', '/__qa/context-config', '/__qa/context-release', '/__qa/hold-stop', '/__qa/release-stop'];
       return json(res, paths.includes(url.pathname) || /^\/context\/captures\/[\da-f-]{36}$/i.test(url.pathname) ? 204 : 404, {});
     }
     if (req.method === 'GET' && url.pathname === '/__qa/state') {
@@ -251,7 +275,35 @@ const handler = async (req, res) => {
       return json(res, 200, { fixture: true, profile, artifactRoot, artifactPath,
         streamId, seq, clients: clients.size, observed, context: context.stats, pendingContextCaptures: heldCaptures.length,
         runs: [...runs.values()].map((run) => ({ ...runState(run), conversationId: run.conversationId,
-          requestId: run.requestId, clientThreadId: run.clientThreadId, fixtureStage: run.fixtureStage || null })) });
+          requestId: run.requestId, clientThreadId: run.clientThreadId, fixtureStage: run.fixtureStage || null,
+          stopAckHold: run.stopAckHold ? { state: run.stopAckHold.state, deadlineAt: run.stopAckHold.deadlineAt } : null })) });
+    }
+    if (req.method === 'POST' && ['/__qa/hold-stop', '/__qa/release-stop'].includes(url.pathname)) {
+      if (req.headers['x-egdesk-qa-token'] !== token) return json(res, 403, { error: 'Fixture token required' });
+      assertQaFixtureManifest(profile);
+      const body = await bodyJson(req);
+      const run = runs.get(body.runId);
+      if (!run || run.scenario !== 'STOP' || run.conversationId !== body.conversationId || run.requestId !== body.requestId) {
+        return json(res, 404, { error: 'Exact STOP fixture run/request required' });
+      }
+      if (url.pathname === '/__qa/hold-stop') {
+        const now = Date.now();
+        if (!Number.isSafeInteger(body.deadlineAt) || body.deadlineAt <= now || body.deadlineAt > now + 15000) {
+          return json(res, 400, { error: 'deadlineAt must be an epoch millisecond deadline within 15 seconds' });
+        }
+        if (run.stopAckHold || run.stopRequested || run.status !== 'running') return json(res, 409, { error: 'Stop hold already used or run is not running' });
+        run.stopAckHold = { state: 'armed', deadlineAt: body.deadlineAt, response: null };
+        run.stopAckHold.timer = setTimeout(() => expireStopHold(run), body.deadlineAt - now);
+        run.stopAckHold.timer.unref?.();
+        return json(res, 200, { fixtureOnly: true, state: 'armed', deadlineAt: body.deadlineAt });
+      }
+      const hold = run.stopAckHold;
+      if (hold && ['armed', 'pending'].includes(hold.state) && Date.now() >= hold.deadlineAt) expireStopHold(run);
+      if (hold?.state !== 'pending' || !hold.response || hold.response.destroyed || run.status !== 'running') {
+        return json(res, 409, { error: 'No pending Stop ACK for that exact fixture run/request' });
+      }
+      acknowledgeStop(run, settleStopHold(run, 'released'));
+      return json(res, 200, { fixtureOnly: true, state: 'released', stopRequested: true, terminal: false });
     }
     if (req.method === 'POST' && ['/__qa/context-config', '/__qa/context-release'].includes(url.pathname)) {
       if (req.headers['x-egdesk-qa-token'] !== token) return json(res, 403, { error: 'Fixture token required' });
@@ -471,11 +523,18 @@ const handler = async (req, res) => {
       if (!run || run.conversationId !== body.conversationId || run.status !== 'running') {
         return json(res, 404, { accepted: false, stopRequested: false });
       }
+      const hold = run.stopAckHold;
+      if (hold && ['armed', 'pending'].includes(hold.state) && Date.now() >= hold.deadlineAt) expireStopHold(run);
+      if (hold && hold.state !== 'armed') return json(res, 409, { accepted: false, stopRequested: false, code: 'QA_STOP_HOLD_ALREADY_USED' });
       observed.interrupts.push({ conversationId: body.conversationId, runId: body.runId, requestedAt: Date.now() });
-      run.stopRequested = true;
-      run.fixtureStage = 'stop-requested';
-      envelope(run, 'run.stop_requested');
-      json(res, 202, { accepted: true, stopRequested: true });
+      if (hold) {
+        hold.state = 'pending';
+        hold.response = res;
+        hold.onClose = () => settleStopHold(run, 'cancelled');
+        res.once?.('close', hold.onClose);
+        return;
+      }
+      acknowledgeStop(run, res);
       return;
     }
     if (req.method === 'POST' && url.pathname === '/chat/approval') {
@@ -517,7 +576,10 @@ const handler = async (req, res) => {
     return json(res, error.httpStatus || 400, { error: error.message, ...(error.code ? { code: error.code } : {}) });
   }
 };
-return { handler, info: { kind: 'egdesk-qa-fixture-ready', host: HOST, port: PORT,
+const dispose = () => {
+  for (const run of runs.values()) if (['armed', 'pending'].includes(run.stopAckHold?.state)) expireStopHold(run, 'disposed');
+};
+return { handler, dispose, info: { kind: 'egdesk-qa-fixture-ready', host: HOST, port: PORT,
   profile, artifactPath, streamId, scope: 'explicit opt-in, temp-only, no shipped runtime replacement' } };
 }
 
@@ -532,5 +594,6 @@ if (process.argv[1] && path.resolve(process.argv[1]) === fileURLToPath(import.me
   }
   const fixture = createQaFixtureTransport({ profile: params.get('--profile'), token: process.env.EGDESK_QA_FIXTURE_TOKEN });
   const server = http.createServer(fixture.handler);
+  server.on('close', fixture.dispose);
   server.listen(PORT, HOST, () => process.stdout.write(`${JSON.stringify(fixture.info)}\n`));
 }

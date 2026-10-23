@@ -2,6 +2,7 @@ import assert from 'node:assert/strict';
 import fs from 'node:fs';
 import path from 'node:path';
 import { Readable } from 'node:stream';
+import { EventEmitter } from 'node:events';
 import test from 'node:test';
 import { bootstrapQaProfile, canonicalTempRoot, LOADER_FILES } from './egdesk-chat-qa-profile.mjs';
 import { createQaFixtureTransport } from './egdesk-chat-fixture-transport.mjs';
@@ -25,23 +26,26 @@ function setup(t) {
   const fetchBefore = globalThis.fetch;
   const eventSourceBefore = globalThis.EventSource;
   const transport = createQaFixtureTransport({ profile, token: TOKEN });
+  t.after(() => transport.dispose());
   assert.equal(globalThis.fetch, fetchBefore);
   assert.equal(globalThis.EventSource, eventSourceBefore);
   return transport;
 }
 
-async function request(handler, method, url, body = null, token = null) {
+async function request(handler, method, url, body = null, token = null, onResponse = () => {}) {
   const req = Readable.from(body === null ? [] : [JSON.stringify(body)]);
   Object.assign(req, { method, url, headers: token ? { 'x-egdesk-qa-token': token } : {} });
   let status;
   let headers = {};
   let resolve;
   const completed = new Promise((done) => { resolve = done; });
-  const res = {
+  const res = Object.assign(new EventEmitter(), {
     writeHead(value, nextHeaders = {}) { status = value; headers = nextHeaders; },
-    end(value = '') { resolve({ status, body: value ? (/application\/json/.test(headers['Content-Type'] || '') ? JSON.parse(value) : value) : null }); },
+    end(value = '') { this.writableEnded = true; resolve({ status, body: value ? (/application\/json/.test(headers['Content-Type'] || '') ? JSON.parse(value) : value) : null }); this.emit('close'); },
+    destroy() { this.destroyed = true; this.emit('close'); resolve({ status: 0, body: null }); },
     write() { return true; },
-  };
+  });
+  onResponse(res);
   await handler(req, res);
   return completed;
 }
@@ -118,6 +122,94 @@ test('fixture-only approval/stop acknowledgements remain usable during auth look
   const stopped = await request(handler, 'POST', '/chat/interrupt', { conversationId: identity.conversationId, runId: identity.runId });
   assert.equal(stopped.body.stopRequested, true);
   assert.equal((await request(handler, 'GET', `/chat/state?conversationId=${identity.conversationId}`)).body.runs[0].status, 'running');
+});
+
+const startStop = async handler => (await request(handler, 'POST', '/chat/send', {
+  message: 'EGDESK_QA_STOP held ACK unit', clientThreadId: 'stop-thread', requestId: 'stop-request', profileEnabled: false,
+})).body;
+const stopIdentity = run => ({ conversationId: run.conversationId, runId: run.runId, requestId: run.requestId });
+const fixtureState = async handler => (await request(handler, 'GET', '/__qa/state', null, TOKEN)).body;
+
+test('explicit Stop hold withholds HTTP and SSE until one exact release, never terminal completion', async t => {
+  const fetchSpy = t.mock.method(globalThis, 'fetch', () => { throw new Error('No real provider or forwarding'); });
+  const { handler } = setup(t);
+  const id = stopIdentity(await startStop(handler));
+  const hold = { ...id, deadlineAt: Date.now() + 10000 };
+  assert.equal((await request(handler, 'POST', '/__qa/hold-stop', hold)).status, 403);
+  assert.equal((await request(handler, 'POST', '/__qa/hold-stop', { ...hold, requestId: 'foreign' }, TOKEN)).status, 404);
+  assert.equal((await request(handler, 'POST', '/__qa/hold-stop', { ...hold, deadlineAt: Date.now() + 60000 }, TOKEN)).status, 400);
+  assert.equal((await request(handler, 'POST', '/__qa/hold-stop', hold, TOKEN)).status, 200);
+  assert.equal((await request(handler, 'POST', '/__qa/hold-stop', hold, TOKEN)).status, 409);
+  assert.equal((await request(handler, 'POST', '/__qa/release-stop', id, TOKEN)).status, 409);
+  let settled = false;
+  const nativeStopBody = { conversationId: id.conversationId, runId: id.runId };
+  const pending = request(handler, 'POST', '/chat/interrupt', nativeStopBody).then(value => { settled = true; return value; });
+  await new Promise(resolve => setImmediate(resolve));
+  const held = await fixtureState(handler);
+  assert.equal(settled, false, 'HTTP ACK must still be withheld');
+  assert.equal(held.runs[0].stopAckHold.state, 'pending');
+  assert.equal(held.runs[0].stopRequested, false);
+  assert.equal(held.runs[0].status, 'running');
+  assert.equal(held.observed.events.some(event => ['run.stop_requested', 'run.completed'].includes(event.event)), false);
+  assert.equal((await request(handler, 'POST', '/chat/interrupt', id)).status, 409);
+  assert.equal((await request(handler, 'POST', '/chat/interrupt', { ...id, conversationId: 'foreign' })).status, 404);
+  assert.equal((await request(handler, 'POST', '/__qa/release-stop', id)).status, 403);
+  assert.equal((await request(handler, 'POST', '/__qa/release-stop', { ...id, requestId: 'foreign' }, TOKEN)).status, 404);
+  assert.equal((await request(handler, 'POST', '/__qa/release', { runId: id.runId, phase: 'run' }, TOKEN)).status, 409);
+  assert.equal(settled, false, 'refused controls cannot release the pending response');
+  assert.equal((await request(handler, 'POST', '/__qa/release-stop', id, TOKEN)).status, 200);
+  assert.deepEqual(await pending, { status: 202, body: { accepted: true, stopRequested: true } });
+  const ack = await fixtureState(handler);
+  assert.equal(ack.runs[0].status, 'running');
+  assert.equal(ack.runs[0].stopRequested, true);
+  assert.equal(ack.runs[0].stopAckHold.state, 'released');
+  assert.equal(ack.observed.events.filter(event => event.event === 'run.stop_requested').length, 1);
+  assert.equal(ack.observed.events.some(event => event.event === 'run.completed'), false);
+  assert.equal((await request(handler, 'POST', '/__qa/release-stop', id, TOKEN)).status, 409);
+  assert.equal((await request(handler, 'POST', '/chat/interrupt', id)).status, 409);
+  assert.equal((await request(handler, 'POST', '/__qa/release', { runId: id.runId, phase: 'run' }, TOKEN)).status, 200);
+  const terminal = await fixtureState(handler);
+  assert.equal(terminal.runs[0].status, 'interrupted');
+  assert.equal(terminal.observed.events.filter(event => event.event === 'run.completed').length, 1);
+  assert.equal(terminal.observed.sends.length, 1);
+  assert.equal(terminal.observed.interrupts.length, 1);
+  assert.equal(terminal.observed.authWrites.length, 0);
+  assert.equal(fetchSpy.mock.callCount(), 0);
+});
+
+test('Stop hold deadline, client close and disposal cannot leak an ACK or retain a pending response', async t => {
+  for (const action of ['deadline', 'close', 'dispose']) {
+    const transport = setup(t);
+    const { handler } = transport;
+    const id = stopIdentity(await startStop(handler));
+    t.mock.timers.enable({ apis: ['setTimeout'] });
+    assert.equal((await request(handler, 'POST', '/__qa/hold-stop', { ...id, deadlineAt: Date.now() + 1000 }, TOKEN)).status, 200);
+    let response;
+    const pending = request(handler, 'POST', '/chat/interrupt', id, null, value => { response = value; });
+    await new Promise(resolve => setImmediate(resolve));
+    if (action === 'deadline') t.mock.timers.tick(1000);
+    else if (action === 'close') response.destroy();
+    else transport.dispose();
+    assert.equal((await pending).status, action === 'close' ? 0 : 408);
+    t.mock.timers.reset();
+    const state = await fixtureState(handler);
+    assert.equal(state.runs[0].stopAckHold.state, { deadline: 'expired', close: 'cancelled', dispose: 'disposed' }[action]);
+    assert.equal(state.runs[0].stopRequested, false);
+    assert.equal(state.observed.events.some(event => ['run.stop_requested', 'run.completed'].includes(event.event)), false);
+    assert.equal(state.observed.interrupts.length, 1);
+    assert.equal((await request(handler, 'POST', '/__qa/release-stop', id, TOKEN)).status, 409);
+    assert.equal((await request(handler, 'POST', '/chat/interrupt', id)).status, 409);
+  }
+});
+
+test('default Stop fixture still acknowledges immediately without the opt-in hold', async t => {
+  const { handler } = setup(t);
+  const id = stopIdentity(await startStop(handler));
+  assert.equal((await request(handler, 'POST', '/chat/interrupt', id)).status, 202);
+  const state = await fixtureState(handler);
+  assert.equal(state.runs[0].stopAckHold, null);
+  assert.equal(state.runs[0].stopRequested, true);
+  assert.equal(state.runs[0].status, 'running');
 });
 
 test('Terminal fixture is explicit and missing-session output never becomes native exit proof', async (t) => {
