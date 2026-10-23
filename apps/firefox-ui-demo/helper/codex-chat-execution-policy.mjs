@@ -13,14 +13,16 @@ export function requestedExecutionPolicy(value) {
   return value.mode
 }
 
-export async function listNativeMcpServers(request, threadId = null) {
+// detail: 'toolsAndAuthOnly' skips resources (the inherited-MCP list); QA
+// proofs omit it and get the full inventory.
+export async function listNativeMcpServers(request, threadId = null, { detail } = {}) {
   const servers = [], seen = new Set()
   let cursor = null
   for (let page = 0; page < 8; page++) {
     let result
     try {
       result = await request('mcpServerStatus/list', {
-        limit: 100, ...(threadId ? { threadId } : {}), ...(cursor ? { cursor } : {}),
+        limit: 100, ...(threadId ? { threadId } : {}), ...(cursor ? { cursor } : {}), ...(detail ? { detail } : {}),
       })
     } catch {
       throw chatError('QA_TOOL_ISOLATION_UNVERIFIED', 'Native MCP inventory is unavailable', 502)

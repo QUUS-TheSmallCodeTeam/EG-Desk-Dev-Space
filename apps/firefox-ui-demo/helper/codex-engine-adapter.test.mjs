@@ -88,3 +88,13 @@ test('Codex engine row reports status, version support, account slot and usage f
   assert.equal((await adapter.refresh()).status, 'offline')
   assert.equal(adapter.isReady(), false)
 })
+
+test('Codex branches through thread/fork with the same params object and reports one-time and branch support', async () => {
+  const { adapter, calls } = recorded()
+  const params = { threadId: 'thread-1', lastTurnId: 'turn-2', excludeTurns: true, config: {} }
+  await adapter.forkThread(params)
+  assert.deepEqual(calls, [['thread/fork', params]])
+  assert.equal(calls[0][1], params, 'the params object is forwarded, not rebuilt')
+  assert.ok(adapter.capabilities().has('threadFork') && adapter.capabilities().has('ephemeralThreads'))
+  assert.ok(CODEX_CAPABILITIES.includes('threadFork') && CODEX_CAPABILITIES.includes('ephemeralThreads'))
+})

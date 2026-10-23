@@ -99,7 +99,21 @@ function coverage(value) {
   publicJson(result, 'coverage')
   return result
 }
-function thread(row) {
+// CHAT-09 session kind, read from the conversation's first native binding
+// event (no schema change): stateless = started without saved native history;
+// forkedFrom = the native conversation (and turn) it was branched from.
+function bindingSession(row, details) {
+  if (!details || details.conversationId !== row.conversation_id) return { stateless: false, forkedFrom: null }
+  const from = details.forkedFrom
+  const id = value => typeof value === 'string' && value.length > 0 && value.length <= 512 ? value : null
+  return {
+    stateless: details.stateless === true,
+    forkedFrom: from && typeof from === 'object' && !Array.isArray(from) && id(from.conversationId)
+      ? { conversationId: from.conversationId, turnId: id(from.turnId), clientThreadId: id(from.clientThreadId) }
+      : null,
+  }
+}
+function thread(row, session = { stateless: false, forkedFrom: null }) {
   if (!row) return null
   return {
     localConversationId: row.local_conversation_id, clientThreadId: row.client_thread_id,
@@ -107,6 +121,7 @@ function thread(row) {
     updatedAt: row.updated_at, coverage: parse(row.coverage_json),
     // null until the first send binds the conversation to an engine.
     engineId: row.engine_id ?? null, engineProfileId: row.engine_profile_id ?? null,
+    stateless: session.stateless, forkedFrom: session.forkedFrom,
   }
 }
 function savedEvent(row, db) {
@@ -310,6 +325,14 @@ export function openChatStore({ dataDir, ownerScope } = {}) {
     message: db.prepare('SELECT * FROM messages WHERE local_conversation_id=? AND local_message_id=?'),
     run: db.prepare('SELECT * FROM runs WHERE local_conversation_id=? AND local_run_id=?'),
     request: db.prepare('SELECT * FROM requests WHERE local_conversation_id=? AND request_id=?'),
+    // The binding is among a conversation's first events; seq order stops there.
+    binding: db.prepare("SELECT details_json FROM events WHERE local_conversation_id=? AND event='native.thread.bound' ORDER BY seq LIMIT 1"),
+    native: db.prepare('SELECT * FROM threads WHERE conversation_id=? LIMIT 2'),
+  }
+  const publicThread = row => {
+    if (!row) return null
+    const binding = row.conversation_id ? q.binding.get(row.local_conversation_id) : null
+    return thread(row, bindingSession(row, binding ? parse(binding.details_json) : null))
   }
   let closed = false
   const ensureOpen = () => { if (closed) fail('STORE_CLOSED', 'Chat store is closed', 500) }
@@ -416,14 +439,14 @@ export function openChatStore({ dataDir, ownerScope } = {}) {
     const existing = q.thread.get(clientThreadId)
     if (existing) {
       if ((input.localConversationId !== undefined && input.localConversationId !== existing.local_conversation_id) || (input.title !== undefined && input.title !== existing.title) || (input.createdAt !== undefined && input.createdAt !== existing.created_at) || (input.coverage !== undefined && publicJson(coverage(input.coverage)) !== existing.coverage_json)) fail('CONVERSATION_CONFLICT', 'Conversation identity was replayed with different content', 409)
-      return thread(existing)
+      return publicThread(existing)
     }
     const localConversationId = identifier(input.localConversationId ?? randomUUID(), 'localConversationId')
     const createdAt = time(input.createdAt ?? Date.now(), 'createdAt')
     const title = input.title === undefined ? null : input.title
     if (title !== null && (typeof title !== 'string' || title.length > 1000)) fail('INVALID_CHAT_RECORD', 'Invalid conversation title')
     db.prepare('INSERT INTO threads (local_conversation_id, client_thread_id, conversation_id, title, created_at, updated_at, last_seq, coverage_json) VALUES (?, ?, NULL, ?, ?, ?, 0, ?)').run(localConversationId, clientThreadId, title, createdAt, createdAt, publicJson(coverage(input.coverage)))
-    return thread(q.thread.get(clientThreadId))
+    return publicThread(q.thread.get(clientThreadId))
   }
   function bind(row, input) {
     const localId = row.local_conversation_id
@@ -473,7 +496,14 @@ export function openChatStore({ dataDir, ownerScope } = {}) {
 
   return {
     createConversation(input) { ensureOpen(); return tx(() => create(input)) },
-    getConversation(clientThreadId) { ensureOpen(); return thread(q.thread.get(identifier(clientThreadId, 'clientThreadId'))) },
+    getConversation(clientThreadId) { ensureOpen(); return publicThread(q.thread.get(identifier(clientThreadId, 'clientThreadId'))) },
+    // The local conversation bound to one native conversation, or null.
+    getConversationByNative(conversationId) {
+      ensureOpen()
+      const rows = q.native.all(identifier(conversationId, 'conversationId'))
+      if (rows.length > 1) fail('NATIVE_MAPPING_CONFLICT', 'More than one local conversation claims this native thread', 409)
+      return publicThread(rows[0] ?? null)
+    },
     listConversations({ cursor = null, limit = 100 } = {}) {
       ensureOpen(); page(0, limit)
       let boundary = null
@@ -486,7 +516,7 @@ export function openChatStore({ dataDir, ownerScope } = {}) {
         : db.prepare('SELECT * FROM threads ORDER BY updated_at DESC, client_thread_id LIMIT ?').all(limit + 1)
       const hasMore = rows.length > limit
       const selected = rows.slice(0, limit)
-      return { threads: selected.map(thread), nextCursor: hasMore ? Buffer.from(JSON.stringify([selected.at(-1).updated_at, selected.at(-1).client_thread_id])).toString('base64url') : null, hasMore }
+      return { threads: selected.map(publicThread), nextCursor: hasMore ? Buffer.from(JSON.stringify([selected.at(-1).updated_at, selected.at(-1).client_thread_id])).toString('base64url') : null, hasMore }
     },
     acceptRequest(input) {
       ensureOpen(); shape(input, ['clientThreadId', 'requestId', 'fingerprint', 'ts', 'localMessageId', 'message'])

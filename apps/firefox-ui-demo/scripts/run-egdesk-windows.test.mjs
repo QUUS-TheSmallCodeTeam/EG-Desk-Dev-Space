@@ -6,8 +6,9 @@ import path from 'node:path';
 import { normalFirefoxPreferences, mergeNormalPreferences, normalChildEnvironment,
   assertPersistentProfile, requestedNormalProfile, safeDestination, profileIsRunning, assertHealthyBridge,
   validateBridgeReceipt, waitForHealthyBridge, ensureStorage, superviseBridge, superviseWindowsBridge,
-  SUPERVISE_BRIDGE_FLAG } from './run-egdesk-windows.mjs';
+  SUPERVISE_BRIDGE_FLAG, BRIDGE_BUILD_MARKER, synchronizeProfile, writeExpectedBridgeBuild } from './run-egdesk-windows.mjs';
 import { isOwnedAndPrivate } from '../helper/egdesk-private-files.mjs';
+import { computeBridgeBuildHash } from '../helper/egdesk-bridge-build.mjs';
 
 test('new Windows persistent data is private at creation and existing private content is preserved',
   { skip: process.platform !== 'win32' }, () => {
@@ -203,4 +204,55 @@ test('the Windows launcher starts the bridge through its supervisor, which refus
   assert.match(source, /spawn\(process\.execPath, \[bridgeEntry\], \{ env: process\.env, cwd: root, detached: true,/);
   assert.doesNotMatch(source, /\.kill\(|process\.kill|taskkill/i);
   if (process.platform !== 'win32') await assert.rejects(superviseWindowsBridge(), /only under the Windows launcher/);
+});
+
+function profileFixture() {
+  const root = fs.realpathSync.native(fs.mkdtempSync(path.join(os.tmpdir(), 'egdesk-normal-sync-test-')));
+  const profile = path.join(root, 'egdesk-windows-poc'), overlay = path.join(root, 'overlay'), outside = path.join(root, 'outside');
+  for (const dir of [path.join(profile, 'chrome'), path.join(overlay, 'JS'), path.join(overlay, 'CSS'), path.join(overlay, 'resources'), outside]) fs.mkdirSync(dir, { recursive: true });
+  fs.writeFileSync(path.join(overlay, 'JS', 'eg-desk-surface.uc.js'), '// overlay fixture');
+  fs.writeFileSync(path.join(overlay, 'CSS', 'eg-desk-surface.uc.css'), '/* overlay fixture */');
+  fs.writeFileSync(path.join(overlay, 'resources', 'EGDeskChatState.sys.mjs'), 'export {}');
+  const marker = path.join(profile, 'chrome', 'resources', BRIDGE_BUILD_MARKER);
+  return { root, profile, overlay, outside, marker, cleanup: () => fs.rmSync(root, { recursive: true, force: true }) };
+}
+
+test('profile sync writes the expected bridge build beside the overlay resources, as egdesk-bridge-build.mjs prints it', () => {
+  const fixture = profileFixture();
+  try {
+    const warnings = [];
+    assert.equal(BRIDGE_BUILD_MARKER, 'egdesk-bridge-build.json');
+    assert.equal(synchronizeProfile(fixture.profile, { locked: () => false, overlay: fixture.overlay,
+      buildHash: () => 'a'.repeat(64), warn: message => warnings.push(message) }), true);
+    assert.deepEqual(JSON.parse(fs.readFileSync(fixture.marker, 'utf8')), { buildHash: 'a'.repeat(64) });
+    assert.ok(fs.existsSync(path.join(fixture.profile, 'chrome', 'resources', 'EGDeskChatState.sys.mjs')));
+    assert.match(fs.readFileSync(path.join(fixture.profile, 'chrome', 'userChrome.css'), 'utf8'), /eg-desk-surface\.uc\.css/);
+    assert.deepEqual(warnings, []);
+    // The default is this checkout's helper build, the value the CLI prints.
+    assert.equal(writeExpectedBridgeBuild(fixture.profile), computeBridgeBuildHash());
+    assert.deepEqual(JSON.parse(fs.readFileSync(fixture.marker, 'utf8')), { buildHash: computeBridgeBuildHash() });
+    assert.deepEqual(fs.readdirSync(path.dirname(fixture.marker)).filter(name => name.endsWith('.tmp')), []);
+  } finally { fixture.cleanup(); }
+});
+
+test('a build marker that cannot be written only warns, removes a stale marker and never follows a link', () => {
+  const fixture = profileFixture();
+  try {
+    const warnings = [];
+    const warn = message => warnings.push(message);
+    fs.mkdirSync(path.dirname(fixture.marker), { recursive: true });
+    fs.writeFileSync(fixture.marker, JSON.stringify({ buildHash: 'b'.repeat(64) }));
+    assert.equal(synchronizeProfile(fixture.profile, { locked: () => false, overlay: fixture.overlay,
+      buildHash: () => { throw new Error('EACCES helper'); }, warn }), true, 'the launch goes on');
+    assert.equal(fs.existsSync(fixture.marker), false, 'a stale expected build is not kept');
+    assert.equal(writeExpectedBridgeBuild(fixture.profile, { buildHash: () => 'not-a-hash', warn }), null);
+    assert.equal(fs.existsSync(fixture.marker), false);
+    const target = path.join(fixture.outside, 'sentinel.json');
+    fs.writeFileSync(target, 'unchanged');
+    fs.symlinkSync(target, fixture.marker);
+    assert.equal(writeExpectedBridgeBuild(fixture.profile, { buildHash: () => 'c'.repeat(64), warn }), null);
+    assert.equal(fs.readFileSync(target, 'utf8'), 'unchanged');
+    assert.equal(warnings.length, 3);
+    assert.ok(warnings.every(message => message.startsWith('Expected bridge build marker was not written')));
+  } finally { fixture.cleanup(); }
 });

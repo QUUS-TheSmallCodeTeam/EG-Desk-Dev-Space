@@ -3,6 +3,8 @@ import assert from 'node:assert/strict'
 import path from 'node:path'
 import { spawnSync } from 'node:child_process'
 import { fileURLToPath } from 'node:url'
+import fs from 'node:fs'
+import { createPrivateQaTempDirectory } from '../scripts/egdesk-qa-platform.mjs'
 import {
   BRIDGE_ENTRY, OVERLAY_BUILD_HEADER, OVERLAY_BUILD_QUERY, bridgeBuildState, bridgeSourceFiles,
   computeBridgeBuildHash, expectedOverlayBuild, localModuleReferences, startBridgeBuild,
@@ -99,4 +101,33 @@ test('the build is read once at start; a failed or malformed read leaves buildHa
   assert.ok(Object.isFrozen(build))
   assert.deepEqual({ ...startBridgeBuild({ now: () => 7, compute: () => { throw new Error('EACCES /secret/path') } }) }, { buildHash: null, startedAt: 7 })
   assert.equal(startBridgeBuild({ compute: () => 'not-a-hash' }).buildHash, null)
+})
+
+test('the macOS launcher writes the expected build marker after copying overlay resources, and only warns on failure', () => {
+  const script = fs.readFileSync(new URL('../scripts/run-firefox-mcp-target.sh', import.meta.url), 'utf8')
+  const start = script.indexOf('BUILD_MARKER=')
+  const end = script.indexOf('\nfi\n', start)
+  assert.ok(start > script.indexOf('cp -R "$REPO_ROOT"/overlay/resources/. "$PROFILE/chrome/resources/"'), 'after the resources copy')
+  assert.ok(end > start && end < script.indexOf('rm -rf "$PROFILE/startupCache"') && end < script.indexOf('run-codex-bridge.sh'), 'before the bridge starts')
+  const block = script.slice(start, end + 3)
+  assert.match(block, /node "\$REPO_ROOT\/helper\/egdesk-bridge-build\.mjs"/)
+  const profile = createPrivateQaTempDirectory('egdesk-launcher-marker-')
+  try {
+    const resources = path.join(profile, 'chrome', 'resources')
+    fs.mkdirSync(resources, { recursive: true })
+    const marker = path.join(resources, 'egdesk-bridge-build.json')
+    const run = repoRoot => spawnSync('bash', ['-c', `set -euo pipefail\n${block}`], {
+      encoding: 'utf8', env: { ...process.env, PROFILE: profile, REPO_ROOT: repoRoot },
+    })
+    const ok = run(fileURLToPath(new URL('..', import.meta.url)))
+    assert.equal(ok.status, 0, ok.stderr)
+    assert.equal(ok.stderr, '')
+    assert.deepEqual(JSON.parse(fs.readFileSync(marker, 'utf8')), { buildHash: computeBridgeBuildHash() })
+    assert.deepEqual(fs.readdirSync(resources), ['egdesk-bridge-build.json'], 'no temporary file is left')
+    // Without helper source the launch continues, warns and drops the stale marker.
+    const failed = run(profile)
+    assert.equal(failed.status, 0)
+    assert.match(failed.stderr, /\[warn\] bridge build hash unavailable/)
+    assert.equal(fs.existsSync(marker), false)
+  } finally { fs.rmSync(profile, { recursive: true, force: true }) }
 })

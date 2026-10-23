@@ -81,3 +81,10 @@ test('Claude usage limits are quota with a reset time, warnings are not errors, 
   assert.equal(classifyClaudeError({ type: 'rate_limit_event', rate_limit_info: { status: 'allowed' } }), null)
   assert.deepEqual(classifyClaudeError({ type: 'system', subtype: 'permission_denied', tool_name: 'WebFetch' }), { kind: 'permission', code: 'permission_denied', willRetry: false, runFailure: false })
 })
+
+test('branching is an optional adapter method with its own capability, and one-time threads have theirs', () => {
+  assert.ok(ENGINE_CAPABILITIES.includes('threadFork') && ENGINE_CAPABILITIES.includes('ephemeralThreads'))
+  assert.equal(validateEngineAdapter(fakeAdapter({ forkThread: () => {}, capabilities: () => new Set(['threadFork', 'ephemeralThreads']) })).id, 'claude')
+  assert.equal(validateEngineAdapter(fakeAdapter()).forkThread, undefined, 'an engine may not branch at all')
+  assert.throws(() => validateEngineAdapter(fakeAdapter({ forkThread: 'yes' })), error => error.code === 'INVALID_ENGINE_ADAPTER' && error.message.includes('forkThread'))
+})

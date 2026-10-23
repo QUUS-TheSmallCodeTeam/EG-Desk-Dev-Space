@@ -21,6 +21,8 @@ import { chatError } from './codex-chat-values.mjs'
 //   releaseThread(threadId)         → { status: 'unsubscribed' | 'notLoaded' }
 //   startTurn(params)               turn/start params → { turn: { id, status } }
 //   interruptTurn(threadId, turnId)
+//   forkThread?(params)             optional ('threadFork'): thread/fork params (threadId, lastTurnId?)
+//                                   → { thread: { id, forkedFromId? } }; a new thread, not loaded history
 //   steerTurn?(...)                 optional capability
 //   respond(rpcId, result, error?)  answers an engine request (approval, question, EG-Desk tool)
 //   subscribe(sink) → unsubscribe   sink.notification(engineId, { method, params }),
@@ -35,6 +37,9 @@ export const ENGINE_CAPABILITIES = Object.freeze([
   'approvals.command', 'approvals.fileChange', 'approvals.tool',
   'userInput', 'userInput.multiSelect', 'subagents', 'dynamicTools', 'boundedQa',
   'modelSelect.perTurn', 'effortSelect.perTurn', 'usage.rateLimits',
+  // CHAT-09: a conversation without saved native history (thread/start
+  // ephemeral) and a branch of an existing conversation (forkThread).
+  'ephemeralThreads', 'threadFork',
 ])
 
 export const ENGINE_STATUSES = Object.freeze(['ready', 'starting', 'offline', 'notInstalled', 'versionUnsupported', 'loginRequired', 'decisionPending', 'disabled'])
@@ -64,7 +69,9 @@ export function validateEngineAdapter(adapter) {
   if (!adapter || typeof adapter !== 'object' || !ENGINE_IDS.includes(adapter.id)) throw chatError('INVALID_ENGINE_ADAPTER', 'Engine adapter has an unknown engine id', 500)
   const missing = REQUIRED_METHODS.find(name => typeof adapter[name] !== 'function')
   if (missing) throw chatError('INVALID_ENGINE_ADAPTER', `Engine adapter ${adapter.id} lacks ${missing}()`, 500)
-  if (adapter.steerTurn !== undefined && typeof adapter.steerTurn !== 'function') throw chatError('INVALID_ENGINE_ADAPTER', `Engine adapter ${adapter.id} has an invalid steerTurn`, 500)
+  for (const name of ['steerTurn', 'forkThread']) {
+    if (adapter[name] !== undefined && typeof adapter[name] !== 'function') throw chatError('INVALID_ENGINE_ADAPTER', `Engine adapter ${adapter.id} has an invalid ${name}`, 500)
+  }
   const capabilities = adapter.capabilities()
   if (!(capabilities instanceof Set) || [...capabilities].some(name => !ENGINE_CAPABILITIES.includes(name))) throw chatError('INVALID_ENGINE_ADAPTER', `Engine adapter ${adapter.id} reports unknown capabilities`, 500)
   return adapter

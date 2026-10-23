@@ -9,7 +9,7 @@ export const CODEX_ENGINE_PROFILE_ID = 'codex-default'
 export const CODEX_CAPABILITIES = Object.freeze([
   'stream', 'resume', 'nativeHistory', 'interrupt', 'approvals.command', 'approvals.fileChange',
   'userInput', 'subagents', 'dynamicTools', 'boundedQa', 'modelSelect.perTurn',
-  'effortSelect.perTurn', 'usage.rateLimits',
+  'effortSelect.perTurn', 'usage.rateLimits', 'ephemeralThreads', 'threadFork',
 ])
 
 const publicVersion = value => typeof value === 'string' && /^\d+\.\d+\.\d+(?:[-+][0-9A-Za-z.-]{1,40})?$/.test(value) ? value : null
@@ -58,6 +58,7 @@ export function createCodexEngineAdapter({ request, respond, getOwnerKey = () =>
     releaseThread: threadId => request('thread/unsubscribe', { threadId }),
     startTurn: params => request('turn/start', params),
     interruptTurn: (threadId, turnId) => request('turn/interrupt', { threadId, turnId }),
+    forkThread: params => request('thread/fork', params),
     // Arity is preserved: callers distinguish a result from a JSON-RPC error.
     respond: (id, result, error) => error === undefined ? respond(id, result) : respond(id, result, error),
     // Codex-only escape hatch: config/read, bounded-QA proofs and the

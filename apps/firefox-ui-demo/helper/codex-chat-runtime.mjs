@@ -125,6 +125,13 @@ function safeUserInputQuestions(value) {
 }
 
 const ordinaryThreadConfig = config => ({ ...(config || {}), features: { ...(config?.features || {}), default_mode_request_user_input: true } })
+// CHAT-09 session of a recorded native binding; null for an ordinary thread.
+function threadSession(details) {
+  const from = details?.forkedFrom
+  const forkedFrom = from && typeof from === 'object' && idText(from.conversationId)
+    ? { conversationId: from.conversationId, turnId: idText(from.turnId), clientThreadId: idText(from.clientThreadId) } : null
+  return details?.stateless === true || forkedFrom ? { stateless: details.stateless === true, forkedFrom } : null
+}
 
 function safeTurn(turn) {
   return {
@@ -174,6 +181,9 @@ export class CodexChatRuntime {
     this.request = codex.request
     this.nativeRespond = codex.respond
     this.threadEngines = new Map()
+    // CHAT-09: conversationId → { stateless, forkedFrom } of ordinary threads
+    // started without saved history or branched from another conversation.
+    this.threadSessions = new Map()
     this.profiles = profiles
     this.dynamicRequestProviders = new Map()
     this.respond = (id, result, error) => {
@@ -541,7 +551,7 @@ export class CodexChatRuntime {
     this.streamId = randomUUID()
     this.seq = 0
     const ownThread = conversationId => this.threadEngine(conversationId) === engineId
-    for (const map of [this.threads, this.threadToolOwners, this.threadToolManifests, this.threadToolManifestStatus, this.pendingStarts, this.pendingResumes]) {
+    for (const map of [this.threads, this.threadToolOwners, this.threadToolManifests, this.threadToolManifestStatus, this.threadSessions, this.pendingStarts, this.pendingResumes]) {
       for (const conversationId of [...map.keys()]) if (ownThread(conversationId)) map.delete(conversationId)
     }
     for (const set of [this.browserRegisteredThreads, this.loadedThreads, this.uncertainThreads, this.incompleteHistory]) {
@@ -686,6 +696,7 @@ export class CodexChatRuntime {
       engine: context?.engine && typeof context.engine.id === 'string'
         ? { id: context.engine.id, version: context.engine.version ?? null, engineProfileId: context.engine.engineProfileId ?? null }
         : { id: this.threadEngine(threadId), version: null, engineProfileId: null },
+      ...(this.threadSessions.get(threadId)?.stateless ? { stateless: true } : {}),
     }
     // Which saved profile revision ran. Restored runs keep the recorded binding
     // so a later checkpoint never drops it from local history.
@@ -697,7 +708,7 @@ export class CodexChatRuntime {
     if (owned) this.ownedRuns.add(run)
     this.trimRuns()
     if (announce) {
-      this.emit(run, 'run.started', { status: 'inProgress', ...(run.profileBinding ? { profileBinding: run.profileBinding } : {}) })
+      this.emit(run, 'run.started', { status: 'inProgress', ...(run.profileBinding ? { profileBinding: run.profileBinding } : {}), ...(run.stateless ? { stateless: true } : {}) })
       this.emitLegacy({ type: 'assistant-start', conversationId: threadId, runId: turnId, message: { id: key, role: 'assistant', content: '', status: 'streaming', createdAt: run.createdAt } })
     }
     return run
@@ -740,6 +751,12 @@ export class CodexChatRuntime {
     if (requestedPolicy && !this.engines.get(engineId).capabilities().has('boundedQa')) throw chatError('QA_POLICY_UNAVAILABLE', 'This AI engine cannot prove bounded execution', 503)
     if (qaMarkers && requestedPolicy && requestedPolicy !== READ_ONLY_QA) throw chatError('QA_COMMAND_POLICY_REQUIRED', 'Native QA command receipt requires readOnlyQa policy', 400)
     if (body.effort !== undefined && (!idText(body.effort) || !body.effort.trim())) throw chatError('INVALID_EFFORT', 'Invalid reasoning effort')
+    // CHAT-09: a one-time conversation keeps no native history (ephemeral).
+    // Only a new conversation can start that way; nothing is saved on refusal.
+    if (body.stateless !== undefined && typeof body.stateless !== 'boolean') throw chatError('INVALID_STATELESS', 'stateless must be true or false', 400)
+    const stateless = body.stateless === true
+    if (stateless && body.conversationId != null) throw chatError('STATELESS_REQUIRES_NEW', 'Only a new conversation can be started without saved history', 400)
+    if (stateless && !this.engines.get(engineId).capabilities().has('ephemeralThreads')) throw chatError('STATELESS_UNSUPPORTED', 'This AI engine cannot start a conversation without saved history', 409)
     const requestId = idText(body.requestId) || randomUUID()
     const fingerprint = createHash('sha256').update(JSON.stringify({
       // Native conversationId is a routing hint that can be learned after a
@@ -757,6 +774,8 @@ export class CodexChatRuntime {
       // Only an explicit engine changes identity, so a request accepted
       // before engine selection existed replays with the same fingerprint.
       engineId: typeof body.engineId === 'string' ? body.engineId : undefined,
+      // Same rule: only an explicit one-time request changes identity.
+      stateless: stateless || undefined,
     })).digest('hex')
     const previous = this.requests.get(requestId)
     if (previous) {
@@ -791,6 +810,7 @@ export class CodexChatRuntime {
     if (this.locks.size >= MAX_RUNS) throw chatError('RUNTIME_BUSY', 'Too many pending requests', 429)
     const registered = !conversationId && clientThreadId ? [...this.threads.values()].find(t => t.clientThreadId === clientThreadId) : null
     if (registered) {
+      if (stateless) throw chatError('STATELESS_REQUIRES_NEW', 'Only a new conversation can be started without saved history', 400)
       throw Object.assign(chatError('CONVERSATION_REQUIRED', 'Continue this conversation using its returned conversationId', 409), {
         conversationId: registered.id, requestId, resumeRequired: this.uncertainThreads.has(registered.id),
       })
@@ -804,6 +824,7 @@ export class CodexChatRuntime {
       if (!this.storeHealthy) throw chatError('CHAT_STORE_UNAVAILABLE', 'Local chat history cannot accept this message', 503)
       try {
         let thread = this.store.getConversation(clientThreadId)
+        if (stateless && thread?.conversationId) throw chatError('STATELESS_REQUIRES_NEW', 'Only a new conversation can be started without saved history', 400)
         if (thread?.conversationId && !conversationId) {
           throw Object.assign(chatError('CONVERSATION_REQUIRED', 'Continue this conversation using its returned conversationId', 409), {
             conversationId: thread.conversationId, requestId, resumeRequired: true,
@@ -832,7 +853,7 @@ export class CodexChatRuntime {
           localRunId, localMessageId,
         }
       } catch (error) {
-        if (['REQUEST_CONFLICT', 'CONVERSATION_REQUIRED', 'NATIVE_BINDING_MISMATCH', 'NATIVE_ACCOUNT_MISMATCH', 'NATIVE_ACCOUNT_UNVERIFIED', 'POLICY_TRANSITION_FORBIDDEN', 'FIXTURE_QA_NEW_CONVERSATION_REQUIRED', 'QA_COMMAND_POLICY_REQUIRED', 'ENGINE_MISMATCH', 'ENGINE_UNAVAILABLE'].includes(error?.code)) throw error
+        if (['REQUEST_CONFLICT', 'CONVERSATION_REQUIRED', 'STATELESS_REQUIRES_NEW', 'NATIVE_BINDING_MISMATCH', 'NATIVE_ACCOUNT_MISMATCH', 'NATIVE_ACCOUNT_UNVERIFIED', 'POLICY_TRANSITION_FORBIDDEN', 'FIXTURE_QA_NEW_CONVERSATION_REQUIRED', 'QA_COMMAND_POLICY_REQUIRED', 'ENGINE_MISMATCH', 'ENGINE_UNAVAILABLE'].includes(error?.code)) throw error
         this.storeHealthy = false
         throw chatError('CHAT_STORE_UNAVAILABLE', 'Local chat history could not save the message; no Codex turn was started', 503)
       }
@@ -864,6 +885,7 @@ export class CodexChatRuntime {
       qaOutputMarkers: qaMarkers,
       policyUpgrade: Boolean(conversationId && requestedPolicy && !boundPolicy),
       profileRun,
+      stateless,
       // A stored binding may have named the engine after the early lookup.
       engine: this.engineRecord(conversationId ? this.threadEngines.get(conversationId) || engineId : engineId),
     }
@@ -962,6 +984,7 @@ export class CodexChatRuntime {
     let browserToolsRegistered = false
     let toolManifest = null
     let recordedEngine = 'codex'
+    let session = null
     for (let page = 0; page < 1000; page++) {
       const result = this.store.listEvents(clientThreadId, { afterSeq, limit: 500 })
       for (const event of result.events || []) if (event.event === 'native.thread.bound' && event.details?.conversationId === conversationId) {
@@ -971,6 +994,7 @@ export class CodexChatRuntime {
         executionPolicy = event.details.executionPolicy || null
         browserToolsRegistered = event.details.browserToolsRegistered === true
         toolManifest = event.details.toolManifest ?? null
+        session = threadSession(event.details)
       } else if (event.event === 'native.executionPolicy.bound' && event.details?.conversationId === conversationId) {
         executionPolicy = event.details.executionPolicy
       }
@@ -989,6 +1013,8 @@ export class CodexChatRuntime {
     else this.browserRegisteredThreads.delete(conversationId)
     this.threadToolManifests.set(conversationId, toolManifest)
     this.threadEngines.set(conversationId, recordedEngine)
+    if (session) this.threadSessions.set(conversationId, session)
+    else this.threadSessions.delete(conversationId)
     return executionPolicy
   }
 
@@ -1001,7 +1027,7 @@ export class CodexChatRuntime {
         eventKey: `native-thread:${context.requestId}`, clientThreadId: context.clientThreadId,
         requestId: context.requestId,
         localRunId: context.localRunId, event: 'native.thread.bound',
-        details: { conversationId, ownerHash: identityHash, executionPolicy: context.executionPolicy || null, browserToolsRegistered: context.browserToolsRegistered === true, toolManifest: context.toolManifest || [], engine: context.engine }, ts: this.now(),
+        details: { conversationId, ownerHash: identityHash, executionPolicy: context.executionPolicy || null, browserToolsRegistered: context.browserToolsRegistered === true, toolManifest: context.toolManifest || [], engine: context.engine, ...(context.stateless ? { stateless: true } : {}) }, ts: this.now(),
       })
       this.store.bindNative({ clientThreadId: context.clientThreadId, conversationId, engineId: context.engine.id, engineProfileId: context.engine.engineProfileId })
     } catch {
@@ -1127,11 +1153,15 @@ export class CodexChatRuntime {
       if (bounded) Object.assign(overrides, qaOverrides)
       // Ordinary Agent questions may arrive outside Plan mode. Bounded threads never ask.
       else overrides.config = ordinaryThreadConfig(overrides.config)
+      if (context.stateless) overrides.ephemeral = true
       const result = await engine.startThread(overrides)
       if (epoch !== this.epochOf(engine.id)) throw chatError('ACCOUNT_CHANGED', 'Codex account changed', 409)
       cid = result?.thread?.id
       if (!idText(cid)) throw chatError('INVALID_THREAD_RESPONSE', 'Codex did not return a thread ID', 502)
+      // Never call a thread one-time when the engine says it saved it.
+      if (context.stateless && result.thread.ephemeral === false) throw chatError('STATELESS_UNVERIFIED', 'The AI engine saved this conversation; it was not bound as one-time', 502)
       this.threadEngines.set(cid, engine.id)
+      if (context.stateless) this.threadSessions.set(cid, { stateless: true, forkedFrom: null })
       let qaReceipt = null
       if (bounded) {
         qaReceipt = verifyQaNativeThread(result, policy)
@@ -1228,6 +1258,7 @@ export class CodexChatRuntime {
         localRunId: context.localRunId, localMessageId: context.localMessageId,
         ...(bounded ? { executionPolicy: run.executionPolicy } : {}),
         ...(run.profileBinding ? { profileBinding: run.profileBinding } : {}),
+        ...(run.stateless ? { stateless: true } : {}),
       }
     } catch (error) {
       // A native JSON-RPC error is a definite rejection. A lost/ambiguous reply
@@ -1387,6 +1418,81 @@ export class CodexChatRuntime {
       this.seq++
       return this.snapshot(cid)
     } finally { this.locks.delete(cid) }
+  }
+
+  // CHAT-09: branch a native conversation into a new local chat. thread/fork
+  // makes a new native thread (through fromTurnId when given) for the same
+  // account and engine; the new chat records where it came from. Like any
+  // conversation this runtime has not loaded, the branch hydrates its history
+  // on its first send or resume.
+  async fork(body) {
+    const store = this.assertStore()
+    const conversationId = idText(body.conversationId)
+    if (!conversationId) throw chatError('MISSING_THREAD_ID', 'conversationId is required')
+    const clientThreadId = idText(body.clientThreadId)
+    if (!clientThreadId?.trim()) throw chatError('INVALID_CLIENT_THREAD_ID', 'clientThreadId of the new conversation is required', 400)
+    const fromTurnId = body.fromTurnId == null ? null : idText(body.fromTurnId)
+    if (body.fromTurnId != null && !fromTurnId?.trim()) throw chatError('INVALID_TURN_ID', 'Invalid fromTurnId', 400)
+    const requestedEngineId = this.requestedEngine(body)
+    const source = store.getConversationByNative(conversationId)
+    if (!source) throw chatError('CONVERSATION_NOT_FOUND', 'This native conversation is not bound to a local chat', 404)
+    if (source.clientThreadId === clientThreadId) throw chatError('FORK_TARGET_EXISTS', 'Branch into a new conversation', 409)
+    // The source's account and engine are checked as for any continued send.
+    const policy = this.assertNativeAccount(source.clientThreadId, conversationId, requestedEngineId)
+    const forkedFrom = { conversationId, turnId: fromTurnId, clientThreadId: source.clientThreadId }
+    const target = store.getConversation(clientThreadId)
+    if (target?.conversationId) {
+      // A retry after a lost reply gets the branch it already made.
+      if (target.forkedFrom?.conversationId !== conversationId || target.forkedFrom.turnId !== fromTurnId) throw chatError('FORK_TARGET_EXISTS', 'Branch into a new conversation', 409)
+      this.assertNativeAccount(clientThreadId, target.conversationId)
+      return { accepted: true, duplicate: true, durable: this.storeHealthy, conversationId: target.conversationId, clientThreadId, localConversationId: target.localConversationId, forkedFrom: target.forkedFrom, engineId: this.threadEngine(target.conversationId) }
+    }
+    if (target && store.listEvents(clientThreadId, { limit: 1 }).events.length) throw chatError('FORK_TARGET_EXISTS', 'Branch into a new conversation', 409)
+    if (policy) throw chatError('FORK_BOUNDED_FORBIDDEN', 'A bounded QA conversation cannot be branched', 409)
+    if (this.threadSessions.get(conversationId)?.stateless) throw chatError('FORK_STATELESS_FORBIDDEN', 'A one-time conversation has no saved history to branch', 409)
+    const engine = this.engineOf(conversationId)
+    this.assertReady(engine.id)
+    if (!engine.capabilities().has('threadFork') || typeof engine.forkThread !== 'function') throw chatError('FORK_UNSUPPORTED', 'This AI engine cannot branch a conversation', 409)
+    const from = fromTurnId ? this.runs.get(runKey(conversationId, fromTurnId)) : null
+    if (from && !TERMINAL.has(from.status)) throw chatError('RUN_IN_PROGRESS', 'Branch from a finished turn', 409)
+    const lock = `client:${clientThreadId}`
+    if (this.locks.has(lock) || [...this.threads.values()].some(thread => thread.clientThreadId === clientThreadId)) throw chatError('RUN_IN_PROGRESS', 'A request is already starting for this conversation', 409)
+    if (this.locks.size >= MAX_RUNS) throw chatError('RUNTIME_BUSY', 'Too many pending requests', 429)
+    const identityHash = ownerHash(this.getOwnerKey())
+    const epoch = this.epochOf(engine.id)
+    // The branch carries the source's native tools, so it inherits their record.
+    const toolManifest = this.threadToolManifests.get(conversationId) ?? null
+    const browserToolsRegistered = this.browserRegisteredThreads.has(conversationId)
+    this.locks.add(lock)
+    try {
+      const result = await engine.forkThread({ threadId: conversationId, ...(fromTurnId ? { lastTurnId: fromTurnId } : {}), excludeTurns: true, config: ordinaryThreadConfig() })
+      if (epoch !== this.epochOf(engine.id) || ownerHash(this.getOwnerKey()) !== identityHash) throw chatError('ACCOUNT_CHANGED', 'Codex account or connection changed', 409)
+      const cid = result?.thread?.id
+      if (!idText(cid) || cid === conversationId) throw chatError('INVALID_THREAD_RESPONSE', 'Codex did not return a new thread ID', 502)
+      if (result.thread.forkedFromId != null && result.thread.forkedFromId !== conversationId) throw chatError('THREAD_MISMATCH', 'Codex branched a different thread', 502)
+      const engineRecord = this.engineRecord(engine.id)
+      let local
+      try {
+        local = target || store.createConversation({ clientThreadId, createdAt: this.now() })
+        store.appendEvent({
+          eventKey: `native-fork:${cid}`, clientThreadId, event: 'native.thread.bound', ts: this.now(),
+          details: { conversationId: cid, ownerHash: identityHash, executionPolicy: null, browserToolsRegistered, toolManifest, engine: engineRecord, forkedFrom },
+        })
+        store.bindNative({ clientThreadId, conversationId: cid, engineId: engineRecord.id, engineProfileId: engineRecord.engineProfileId })
+      } catch {
+        this.storeHealthy = false
+        throw chatError('CHAT_STORE_UNAVAILABLE', 'Local chat history could not save the branch', 503)
+      }
+      this.threadEngines.set(cid, engine.id)
+      this.threadSessions.set(cid, { stateless: false, forkedFrom })
+      this.threadToolManifests.set(cid, toolManifest)
+      if (browserToolsRegistered) this.browserRegisteredThreads.add(cid)
+      const providerIds = new Set(Array.isArray(toolManifest) ? toolManifest.map(entry => entry?.providerId) : [])
+      for (const provider of this.toolProviders) {
+        if (providerIds.has(provider === this.contexts ? 'egdesk-context-v1' : provider.providerId)) await this.callProvider(provider, 'registerThread', cid)
+      }
+      return { accepted: true, durable: this.storeHealthy, conversationId: cid, clientThreadId, localConversationId: local.localConversationId, forkedFrom, engineId: engine.id }
+    } finally { this.locks.delete(lock) }
   }
 
   findRun(body) {

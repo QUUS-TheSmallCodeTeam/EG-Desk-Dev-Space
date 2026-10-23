@@ -66,7 +66,7 @@ const historyId = (value, name) => {
 
 export function createChatHttpHandler(chat, ensureAuth, history = chat) {
   return async (req, res, url) => {
-    const routes = new Set(['/chat/send', '/chat/resume', '/chat/interrupt', '/chat/approval', '/chat/user-input'])
+    const routes = new Set(['/chat/send', '/chat/resume', '/chat/interrupt', '/chat/approval', '/chat/user-input', '/chat/fork'])
     if ((req.method === 'GET' && ['/chat/history/threads', '/chat/history'].includes(url.pathname)) ||
         (req.method === 'POST' && url.pathname === '/chat/history/import')) {
       try {
@@ -117,9 +117,10 @@ export function createChatHttpHandler(chat, ensureAuth, history = chat) {
         || (url.pathname === '/chat/approval' && ['decline', 'cancel'].includes(body.decision))
         || (url.pathname === '/chat/user-input' && body.action === 'skip')
       if (!isSafetyResponse) await ensureAuth(body)
-      const action = { '/chat/send': 'send', '/chat/resume': 'resume', '/chat/interrupt': 'interrupt', '/chat/approval': 'replyApproval', '/chat/user-input': 'replyUserInput' }[url.pathname]
+      const action = { '/chat/send': 'send', '/chat/resume': 'resume', '/chat/interrupt': 'interrupt', '/chat/approval': 'replyApproval', '/chat/user-input': 'replyUserInput', '/chat/fork': 'fork' }[url.pathname]
       const result = await chat[action](body)
-      sendJson(res, url.pathname === '/chat/send' ? 202 : 200, result)
+      // A new branch is created (201); a retried one answers with it (200).
+      sendJson(res, url.pathname === '/chat/send' ? 202 : url.pathname === '/chat/fork' && !result?.duplicate ? 201 : 200, result)
     } catch (error) {
       sendJson(res, error.httpStatus || 500, {
         accepted: false,

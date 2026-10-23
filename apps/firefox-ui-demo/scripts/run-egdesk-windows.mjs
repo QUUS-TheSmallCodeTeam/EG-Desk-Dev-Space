@@ -10,6 +10,7 @@ import { fileURLToPath } from 'node:url';
 import { resolveCodexExecutable } from '../helper/egdesk-native-capabilities.mjs';
 import { isOwnedAndPrivate } from '../helper/egdesk-private-files.mjs';
 import { backoffDelayMs } from '../helper/codex-bridge-http.mjs';
+import { computeBridgeBuildHash } from '../helper/egdesk-bridge-build.mjs';
 
 const repoRoot = fileURLToPath(new URL('../../../', import.meta.url));
 const appRoot = fileURLToPath(new URL('../', import.meta.url));
@@ -127,7 +128,28 @@ function writeManaged(target, content, root) {
   } finally { if (info(temporary)) fs.unlinkSync(temporary); }
 }
 
-export function synchronizeProfile(profile, { locked = profileIsRunning, overlay = path.join(appRoot, 'overlay') } = {}) {
+export const BRIDGE_BUILD_MARKER = 'egdesk-bridge-build.json';
+
+// RT-05: chrome/resources/egdesk-bridge-build.json {"buildHash"} is the helper
+// build this overlay expects (what `node helper/egdesk-bridge-build.mjs`
+// prints), so a bridge left running on older source is detected. A failure
+// only warns and removes a stale marker; the launch goes on.
+export function writeExpectedBridgeBuild(profile, { buildHash = computeBridgeBuildHash, warn = () => {} } = {}) {
+  const target = path.join(profile, 'chrome', 'resources', BRIDGE_BUILD_MARKER);
+  try {
+    const value = buildHash();
+    if (!/^[a-f0-9]{64}$/.test(value)) throw new Error('Bridge build hash is unavailable');
+    writeManaged(target, JSON.stringify({ buildHash: value }) + '\n', profile);
+    return value;
+  } catch (error) {
+    try { if (safeDestination(target, profile)?.isFile()) fs.unlinkSync(target); } catch {}
+    warn('Expected bridge build marker was not written: ' + (error?.message || 'unknown error'));
+    return null;
+  }
+}
+
+export function synchronizeProfile(profile, { locked = profileIsRunning, overlay = path.join(appRoot, 'overlay'),
+  buildHash = computeBridgeBuildHash, warn = () => {} } = {}) {
   if (locked(profile)) return false;
   const chrome = path.join(profile, 'chrome');
   const chromeInfo = safeDestination(chrome, profile);
@@ -161,6 +183,7 @@ export function synchronizeProfile(profile, { locked = profileIsRunning, overlay
     } });
     if (locked(profile)) throw new Error('Firefox started during overlay synchronization; retry after closing it');
   }
+  writeExpectedBridgeBuild(profile, { buildHash, warn });
   if (locked(profile)) throw new Error('Firefox started before preference synchronization');
   writeManaged(user, mergeNormalPreferences(info(user) ? fs.readFileSync(user, 'utf8') : ''), profile);
   const imports = fs.readdirSync(path.join(overlay, 'CSS')).filter(name => name.endsWith('.uc.css')).sort();
@@ -431,7 +454,7 @@ export async function launchNormalWindows({ args = process.argv.slice(2) } = {})
       if (!validateBridgeReceipt(receipt, windowsProcessIdentity(), expected)) throw new Error('Ready bridge port belongs to another process');
       log('started-owned-bridge');
     }
-    if (profileIsRunning(profile) || !synchronizeProfile(profile)) {
+    if (profileIsRunning(profile) || !synchronizeProfile(profile, { warn: message => log('bridge-build-marker-failed', message) })) {
       log('already-running'); return { status: 'already-running', profile };
     }
     if (profileIsRunning(profile)) { log('already-running'); return { status: 'already-running', profile }; }

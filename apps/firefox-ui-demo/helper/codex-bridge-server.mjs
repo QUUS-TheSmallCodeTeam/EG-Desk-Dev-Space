@@ -12,6 +12,7 @@ import { fixtureBrowserQaFromEnv } from './codex-browser-fixture-qa.mjs'
 import { classifyPublicToolError } from './codex-tool-errors.mjs'
 import { createChatHttpHandler, createRateLimitSync, createReconnectBackoff, guardBridgeRequest, readJsonBody, sendJson, setBridgeCors } from './codex-bridge-http.mjs'
 import { bridgeBuildState, expectedOverlayBuild, startBridgeBuild } from './egdesk-bridge-build.mjs'
+import { createInheritedMcpSync } from './codex-inherited-mcp.mjs'
 import { BoundedSseClient } from './codex-bridge-sse.mjs'
 import { TerminalSessionRegistry } from './terminal-sessions.mjs'
 import { createTerminalSessionFactory } from './terminal-platform.mjs'
@@ -187,6 +188,15 @@ if (chatStore) {
     console.error('[egdesk-codex-bridge] local chat recovery unavailable:', chatStoreError)
   }
 }
+// CU-07: the user's Codex MCP servers ordinary threads inherit, by name and
+// status only; read once per app-server connection, then kept current by
+// startup notices. Bounded QA threads disable them, so their notices are skipped.
+const inheritedMcp = createInheritedMcpSync({
+  request: (method, params) => appServerRequest(method, params),
+  ready: () => appServerReady,
+  ignoreThread: threadId => Boolean(threadId && chat.threads.get(threadId)?.executionPolicy),
+  onChange: servers => broadcast({ type: 'mcp.inherited', v: BRIDGE_PROTOCOL_VERSION, provider: PROVIDER_ID, inheritedMcp: servers, ts: Date.now() }),
+})
 // Authentication of the engine a request names (Codex when it names none).
 const ensureChatAuth = async (body = {}) => {
   const engine = engineRegistry.require(body?.engineId ?? engineRegistry.defaultEngineId)
@@ -336,6 +346,9 @@ function handleAppServerNotification(message) {
     case 'turn/completed':
       void rateLimitSync.refresh({ force: true })
       return
+    case 'mcpServer/startupStatus/updated':
+      inheritedMcp.notify(message)
+      return
   }
 }
 
@@ -404,6 +417,7 @@ function spawnAppServer() {
     appServerReady = false
     rpc?.close(new Error('Local Codex app-server exited'))
     chat.setConnection(false, { processLost: true })
+    inheritedMcp.reset()
     try { appServerSocket?.close() } catch {}
     updateAuthState({ statusText: 'Codex app-server offline', loginInProgress: false })
     scheduleAppServerReconnect()
@@ -464,6 +478,7 @@ async function connectToAppServer() {
       appServerReady = true
       appServerBackoff.reset()
       chat.setConnection(true)
+      void inheritedMcp.refresh()
       await refreshAccountState()
     } catch (error) {
       console.error('[egdesk-codex-bridge] initialization failed:', publicText(error.message, 1000))
@@ -486,6 +501,7 @@ async function connectToAppServer() {
     if (!launchConfigBlocked && appServerLaunch.hasOverrides) nativePreflight = { ...nativePreflight, status: 'pending', effectiveModel: null, effectiveEffort: null }
     if (rpc === connection) rpc = null
     chat.setConnection(false)
+    inheritedMcp.reset()
     if (appServerLaunch.disableMemories && !launchConfigBlocked) memoryIsolation = { status: 'pending', feature: 'memories' }
     scheduleAppServerReconnect()
   }
@@ -626,7 +642,7 @@ const bridgeServer = createServer(async (req, res) => {
       chat: chat.snapshot(),
       capabilities: {
         auth: ['status', 'start', 'cancel', 'signout', 'usage'],
-        chat: chatStore && chat.storeHealthy ? ['send', 'stream', 'resume', 'interrupt', 'approvals', 'user-input', 'subagent-status', 'typed-activity', 'artifact-refs', 'local-history', 'legacy-import', ...(nativeCapabilities.qaReadOnly ? ['read-only-qa'] : [])] : ['local-history-unavailable'],
+        chat: chatStore && chat.storeHealthy ? ['send', 'stream', 'resume', 'interrupt', 'approvals', 'user-input', 'subagent-status', 'typed-activity', 'artifact-refs', 'local-history', 'legacy-import', 'stateless', 'fork', ...(nativeCapabilities.qaReadOnly ? ['read-only-qa'] : [])] : ['local-history-unavailable'],
         context: nativeCapabilities.schemaMatch ? ['capture', 'immutable-inspect', 'native-dynamic-tools', 'smart-read', 'read-only-reader', 'answer-briefing'] : ['capture', 'immutable-inspect'],
         files: ['native-picker', 'scoped-read', 'managed-drafts', 'create-only-save-as'],
         profiles: profileStore ? ['local-store', 'revisions', 'run-binding'] : ['local-store-unavailable'],
@@ -636,6 +652,8 @@ const bridgeServer = createServer(async (req, res) => {
       appServerReconnect: appServerBackoff.snapshot(),
       // Settings 'Accounts & AI engines' rows; the top-level Codex fields stay for older overlays.
       engines: engineRegistry.publicEngines(),
+      // CU-07 rows { name, enabled, status, controlsExternal, kind }, or null when unknown.
+      inheritedMcp: inheritedMcp.snapshot(),
     })
     return
   }
