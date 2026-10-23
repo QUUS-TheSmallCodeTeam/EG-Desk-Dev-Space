@@ -2608,6 +2608,11 @@ export async function runBrowserCameraSurfaceIsolation(harness, fixture, deadlin
       selection: api.browserAgentTools.selectedSources(threadId).map(item =>
         ({ id: item.id, cardId: item.sourceRef.viewId, permission: item.browserToolPermission })) };
   }, thread.id);
+  assert.ok(saved.selection.length === 0 || (saved.selection.length === 1
+    && saved.selection[0].cardId === priorCardId),
+  'camera case initial selection must be empty or exactly the earlier owned Card');
+  // The earlier Card survives cancellation, but its one-run selection grant does not.
+  const priorSelectedCardId = saved.selection[0]?.cardId || null;
   const priorFixture = await ownedNegativeBrowserSnapshot(harness, priorCardId, priorOwnerTag, fixture);
   const ownerTag = probeId('lane-c-camera-owner');
   const proof = { scope: 'browser-camera-surface-isolation', inputRoute: 'dom-click-no-pointerdown',
@@ -2638,7 +2643,7 @@ export async function runBrowserCameraSurfaceIsolation(harness, fixture, deadlin
       }, camera);
     };
     await setCamera(plan.visible);
-    const source = await selectOwnedProbeSource(harness, thread, proof.cardId, ownerTag, 'interact', fixture, priorCardId);
+    const source = await selectOwnedProbeSource(harness, thread, proof.cardId, ownerTag, 'interact', fixture, priorSelectedCardId);
     unit = await newNegativeService(harness, thread, proof.cardId, source, deadlineMs);
     Object.assign(proof, { sourceId: source.id, cardEpoch: source.browserToolIdentity.cardEpoch,
       syntheticRunId: unit.run.runId });

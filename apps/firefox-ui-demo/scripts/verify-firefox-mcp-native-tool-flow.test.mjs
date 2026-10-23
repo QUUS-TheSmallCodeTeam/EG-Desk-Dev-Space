@@ -1203,7 +1203,8 @@ test('Browser resize observes height-only and device-scale changes even when Win
 });
 
 function cameraSurfaceFixture({ failClick = false, failCancel = false, changeContext = false,
-  changeDocument = false, changeWorldRect = false, ignoreOffscreenCamera = false } = {}) {
+  changeDocument = false, changeWorldRect = false, ignoreOffscreenCamera = false,
+  initialSelectedCardIds = ['owned-local-card'], selectedCardIdsAfterClick = null } = {}) {
   const fixture = { url: 'http://127.0.0.1:39220/egdesk-qa/QA_URL_0123456789abcdef',
     marker: 'QA_DOM_0123456789abcdef' };
   const thread = { id: 'qa-camera-thread', wireClientThreadId: 'qa-camera-wire' };
@@ -1245,7 +1246,9 @@ function cameraSurfaceFixture({ failClick = false, failCancel = false, changeCon
     cards.set(id, card);
     return card;
   };
-  selected = [sourceFor(addCard(priorCardId, priorOwnerTag, 101))];
+  addCard(priorCardId, priorOwnerTag, 101);
+  const sourcesFor = ids => ids.map(id => sourceFor(cards.get(id) || addCard(id, 'foreign-owner', 303)));
+  selected = sourcesFor(initialSelectedCardIds);
   state.setCanvasViewportTarget = (camera, options) => {
     assert.equal(options.immediate, true);
     effects.cameras.push(structuredClone(camera));
@@ -1309,10 +1312,11 @@ function cameraSurfaceFixture({ failClick = false, failCancel = false, changeCon
       if (selector === '[id="camera-owned-card"] .egd-card-menu') return;
       assert.equal(selector, '.egd-browser-menu-item[title^="이 Browser만 이번 Chat"]');
       selected.push(sourceFor(selectedCard));
+      if (selectedCardIdsAfterClick) selected = sourcesFor(selectedCardIdsAfterClick);
     },
   };
   const result = {};
-  return { effects, state, result, originalCamera,
+  return { effects, state, result, originalCamera, selectedCardIds: () => selected.map(item => item.sourceRef.viewId),
     run: () => runBrowserCameraSurfaceIsolation(harness, fixture, Date.now() + 60000,
       thread, priorCardId, priorOwnerTag, result) };
 }
@@ -1334,6 +1338,48 @@ test('camera surface-isolation executes visible, offscreen fresh observe, one gu
   assert.equal(proof.beforeAttempt.qaDiagnostics.performCalls, 0);
   assert.equal(proof.afterAttempt.qaDiagnostics.performCalls, 1);
   assert.equal(proof.coordinateInputVerified, false);
+});
+
+test('camera surface-isolation accepts an empty selection after the earlier owned run consumed/cancelled its grant', async () => {
+  const fixture = cameraSurfaceFixture({ initialSelectedCardIds: [] });
+  const proof = await fixture.run();
+  assert.equal(assertBrowserCameraSurfaceIsolation(proof), true);
+  assert.deepEqual(proof.selectionBefore, []);
+  assert.deepEqual(proof.selectionAfter, []);
+  assert.deepEqual(fixture.selectedCardIds(), []);
+  assert.equal(proof.priorFixture.cardId, 'owned-local-card', 'the earlier Card still exists without a live grant');
+  assert.equal(fixture.effects.acts.length, 1);
+  assert.equal(fixture.effects.acts[0].cardId, proof.cardId);
+  assert.equal(fixture.effects.cancels, 1);
+  assert.deepEqual(fixture.effects.removedSources, ['camera-owned-card-source']);
+  assert.deepEqual(fixture.effects.cameras.at(-1), fixture.originalCamera);
+});
+
+test('camera surface-isolation rejects foreign or duplicate initial selections before changing any surface', async () => {
+  for (const ids of [['foreign-card'], ['owned-local-card', 'foreign-card'], ['owned-local-card', 'owned-local-card']]) {
+    const fixture = cameraSurfaceFixture({ initialSelectedCardIds: ids });
+    await assert.rejects(fixture.run(), /camera case initial selection/);
+    assert.equal(fixture.effects.opens, 0);
+    assert.deepEqual(fixture.effects.cameras, []);
+    assert.deepEqual(fixture.effects.acts, []);
+    assert.deepEqual(fixture.effects.removedSources, []);
+    assert.deepEqual(fixture.selectedCardIds(), ids);
+  }
+});
+
+test('camera surface-isolation selection must equal the saved owned set plus only the new Card', async () => {
+  const prior = 'owned-local-card', added = 'camera-owned-card', foreign = 'foreign-card';
+  for (const [before, after] of [
+    [[], [prior, added]], [[], [foreign, added]], [[], [added, added]],
+    [[prior], [added]], [[prior], [prior]], [[prior], [prior, added, foreign]],
+  ]) {
+    const fixture = cameraSurfaceFixture({ initialSelectedCardIds: before, selectedCardIdsAfterClick: after });
+    await assert.rejects(fixture.run(), /negative probe selected/);
+    assert.deepEqual(fixture.effects.acts, []);
+    assert.deepEqual(fixture.effects.cameras.at(-1), fixture.originalCamera);
+    assert.deepEqual(fixture.selectedCardIds(), after.filter(id => id !== added),
+      'cleanup removes only the new owned selection, never concurrent foreign sources');
+  }
 });
 
 test('camera surface-isolation refuses changed identity/geometry or an on-screen Card before any click', async () => {
