@@ -7249,6 +7249,14 @@
     state.cardFullscreen = null;
     setHudPresentationHidden(fullscreen.previousHudHidden);
     if (fullscreen.previousMinimapOpen) toggleDeskMinimap();
+    if (initialBrowserFocus && fullscreenCard?.isConnected && options.restoreRect !== false
+        && typeof state.setCanvasViewportTarget === 'function') {
+      // The first Browser's restoreRect may be the full initial viewport at
+      // world (0, 0). Fit the camera into Desk chrome; never rewrite that rect.
+      const camera = SurfaceState.fitSurfaceCamera(
+        persistentEntityGeometry(fullscreenCard), safeViewportRect({ avoidHud: false }));
+      state.setCanvasViewportTarget(camera, { immediate: true });
+    }
     if (fullscreenCard?.isConnected) setActiveEntity(fullscreenCard);
     syncViewportAgendaRail();
     if (initialBrowserFocus) scheduleDeskSessionSave();
@@ -12463,7 +12471,7 @@
         && card.getAttribute('aria-hidden') !== 'true' && card.getClientRects().length > 0;
       return entry.authorVisible;
     };
-    const focusProjection = entry => {
+    const focusProjection = (entry, { revealHeader = false } = {}) => {
       if (!entry?.card.isConnected) return;
       entry.visibilityDirty = true;
       if (!authorVisible(entry)) return;
@@ -12477,9 +12485,10 @@
         (detailWidth + 1) / world.width, (detailHeight + 1) / world.height,
         fitted.zoom,
       ));
+      const centeredY = safe.top + (safe.height - world.height * zoom) / 2 - world.y * zoom;
       const pan = {
         x: safe.left + (safe.width - world.width * zoom) / 2 - world.x * zoom,
-        y: safe.top + (safe.height - world.height * zoom) / 2 - world.y * zoom,
+        y: revealHeader ? Math.max(centeredY, safe.top - world.y * zoom) : centeredY,
       };
       focusCanvasCard(entry.card);
       state.setCanvasViewportTarget?.({ pan, zoom });
@@ -12675,8 +12684,12 @@
         width: rect.width, height: rect.height, fontPx: entry.bodyFontPx * zoom,
         previous: entry.level, detailWidth, detailHeight,
       });
-      if (level === 'detail') return false;
-      focusProjection(entry);
+      const safe = safeViewportRect();
+      const headerHeight = Math.min(rect.height, 32 * zoom);
+      const headerReachable = rect.x >= safe.left && rect.x + rect.width <= safe.right
+        && rect.y >= safe.top && rect.y + headerHeight <= safe.bottom;
+      if (level === 'detail' && headerReachable) return false;
+      focusProjection(entry, { revealHeader: true });
       const target = { zoom: state.zoomTarget, pan: { ...state.panTarget } };
       const initialFocus = document.activeElement;
       let frame = 0, checks = 0, stopped = false;
@@ -13028,18 +13041,27 @@
       }
     };
     const zoomCanvasByFactor = (factor, cx, cy) => {
-      const prevZoom = state.zoomTarget;
-      const nextZoom = Math.max(ZOOM_MIN, Math.min(ZOOM_MAX, prevZoom * factor));
-      // A restored oversized Card can begin at the camera's minimum zoom.
-      // An outward gesture must still uncover the Desk in that case.
-      if (nextZoom === prevZoom) {
-        if (state.surface.initialBrowserFocus && factor < 1) enterLocalDesk();
-        return;
+      let prevZoom = state.zoomTarget;
+      let nextZoom = Math.max(ZOOM_MIN, Math.min(ZOOM_MAX, prevZoom * factor));
+      let anchorX = cx;
+      let anchorY = cy;
+      if (state.surface.initialBrowserFocus && factor < 1) {
+        const restoringBrowser = state.cardFullscreen?.cardId === state.surface.browserCardId;
+        enterLocalDesk();
+        if (restoringBrowser) {
+          // Fullscreen exit fits the saved Browser rect into the Desk. Apply
+          // this gesture to that new camera, not the stale fullscreen pose.
+          prevZoom = state.zoomTarget;
+          nextZoom = Math.max(ZOOM_MIN, Math.min(ZOOM_MAX, prevZoom * factor));
+          const safe = safeViewportRect({ avoidHud: false });
+          anchorX = safe.left + safe.width / 2;
+          anchorY = safe.top + safe.height / 2;
+        }
       }
-      if (state.surface.initialBrowserFocus && nextZoom < prevZoom) enterLocalDesk();
+      if (nextZoom === prevZoom) return;
       const ratio = nextZoom / prevZoom;
-      state.panTarget.x = cx - (cx - state.panTarget.x) * ratio;
-      state.panTarget.y = cy - (cy - state.panTarget.y) * ratio;
+      state.panTarget.x = anchorX - (anchorX - state.panTarget.x) * ratio;
+      state.panTarget.y = anchorY - (anchorY - state.panTarget.y) * ratio;
       state.zoomTarget = nextZoom;
       if (state.cardFullscreen?.cardId) {
         if (frame) {

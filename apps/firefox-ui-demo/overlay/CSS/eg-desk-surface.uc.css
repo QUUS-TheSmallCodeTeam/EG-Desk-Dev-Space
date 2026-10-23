@@ -2174,7 +2174,8 @@
   top: 72px;
   right: 10px;
   width: min(396px, calc(100vw - 20px));
-  height: calc(100vh - 82px);
+  /* Dock is 46px tall at bottom:12px; leave a 10px clear hit-test gap. */
+  height: calc(100vh - 140px);
   max-height: 840px;
   border-radius: 16px;
   padding: 9px;
@@ -3056,6 +3057,28 @@
 .egd-codex-chip-subtle {
   background: rgba(252, 249, 244, 0.68);
   color: var(--egd-on-surface-variant);
+}
+/* The HUD is an .egd-edge, whose generic button reset otherwise beats the
+   shared Chat chip class. Restore the same action affordance as Canvas Chat. */
+#egd-hud[data-app="chat"] .egd-codex-chip {
+  padding: 0 10px;
+  border: 1px solid var(--egd-chat-outline-soft);
+  background: var(--egd-chat-paper);
+  color: var(--egd-on-surface-variant);
+}
+#egd-hud[data-app="chat"] .egd-codex-chip-primary {
+  border-color: var(--egd-primary);
+  background: var(--egd-primary);
+  color: var(--egd-surface-elevated);
+}
+#egd-hud[data-app="chat"] .egd-codex-chip-subtle {
+  background: var(--egd-window-alt);
+}
+#egd-hud[data-app="chat"] .egd-codex-chip:not(.egd-codex-chip-primary):hover {
+  background: var(--egd-hover);
+}
+#egd-hud[data-app="chat"] .egd-codex-chip-primary:hover {
+  background: #3D5543;
 }
 .egd-codex-chip-icon {
   min-width: 50px;
@@ -5575,6 +5598,13 @@
 .egd-codex-input::placeholder { color: var(--egd-on-surface-variant); }
 .egd-codex-run-status { color: var(--egd-on-surface-variant); }
 .egd-codex-diagnostics-toggle { background: var(--egd-window-alt); color: var(--egd-on-surface-variant); }
+#egd-hud[data-app="chat"] .egd-codex-diagnostics-toggle {
+  padding: 0 8px;
+  border: 1px solid var(--egd-chat-outline-soft);
+  background: var(--egd-window-alt);
+  color: var(--egd-on-surface-variant);
+}
+#egd-hud[data-app="chat"] .egd-codex-diagnostics-toggle:hover { background: var(--egd-hover); }
 .egd-codex-diagnostics { background: var(--egd-window-alt); }
 
 /* A quiet one-line composer by default; selected attachments retain their own

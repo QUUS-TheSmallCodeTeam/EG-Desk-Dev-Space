@@ -435,6 +435,114 @@ test('initial Desk camera can fill the viewport with the same Browser Card and z
   assert.deepEqual(browser, before);
 });
 
+test('first-use Browser restore fits its saved world rect below Desk chrome without rewriting Browser state', () => {
+  const body = surfaceSource.match(/  function exitCardFullscreen\(card = null, options = \{\}\) \{([\s\S]*?)\n  \}/)?.[1];
+  assert.ok(body, 'exercise the production fullscreen exit');
+  const exit = compileFunction(`return function exitCardFullscreen(card = null, options = {}) {${body}\n  }`,
+    ['state', 'document', 'applyCardRect', 'setHudPresentationHidden', 'toggleDeskMinimap', 'setActiveEntity', 'syncViewportAgendaRail', 'scheduleDeskSessionSave', 'SurfaceState', 'persistentEntityGeometry', 'safeViewportRect']);
+  const worldRect = { left: '0px', top: '0px', width: '1280px', height: '776px', zIndex: '41000' };
+  const browserState = { uri: 'https://example.test/', pageZoom: 1.25, selectedTab: 'tab-a' };
+  const browser = { id: 'browser-view-a', isConnected: true, style: { ...worldRect }, _browserState: browserState,
+    classList: { remove: () => {} } };
+  const safe = { left: 124, top: 76, right: 1256, bottom: 694, width: 1132, height: 618 };
+  const classes = new Set(['egd-initial-browser-focus', 'egd-card-fullscreen-active', 'egd-browser-fullscreen-active']);
+  const document = { documentElement: { classList: { remove: name => classes.delete(name) } },
+    getElementById: id => id === browser.id ? browser : null };
+  let camera = null;
+  const state = { surface: { browserCardId: browser.id, initialBrowserFocus: true },
+    cardFullscreen: { cardId: browser.id, rect: worldRect, previousHudHidden: true, previousMinimapOpen: false },
+    setCanvasViewportTarget(target, options) { camera = { target, options }; } };
+  const run = exit(state, document, (card, rect) => Object.assign(card.style, rect), () => {},
+    () => assert.fail('no minimap was open'), () => {}, () => {}, () => {},
+    { fitSurfaceCamera }, card => ({ x: Number.parseFloat(card.style.left), y: Number.parseFloat(card.style.top),
+      width: Number.parseFloat(card.style.width), height: Number.parseFloat(card.style.height) }),
+    options => { assert.deepEqual(options, { avoidHud: false }); return safe; });
+  assert.equal(run(browser), true);
+  assert.ok(camera, 'restoring first-use focus must adjust the camera, not the Card');
+  assert.deepEqual(camera.options, { immediate: true });
+  const { pan, zoom } = camera.target;
+  const screen = { left: pan.x, top: pan.y, right: pan.x + 1280 * zoom, bottom: pan.y + 776 * zoom };
+  assert.ok(screen.left >= safe.left - 1 && screen.right <= safe.right + 1);
+  assert.ok(screen.top >= safe.top - 1 && screen.bottom <= safe.bottom + 1);
+  assert.ok(screen.top + 84 * zoom < safe.bottom, 'the Browser title and two rows remain usable');
+  assert.deepEqual(browser.style, worldRect);
+  assert.equal(browser._browserState, browserState);
+  assert.equal(state.cardFullscreen, null);
+  assert.equal(state.surface.initialBrowserFocus, false);
+});
+
+test('first Browser zoom-out keeps the fitted Desk camera and later zoom remains pointer-anchored', () => {
+  const exitBody = surfaceSource.match(/  function exitCardFullscreen\(card = null, options = \{\}\) \{([\s\S]*?)\n  \}/)?.[1];
+  const enterBody = surfaceSource.match(/  function enterLocalDesk\(\) \{([\s\S]*?)\n  \}/)?.[1];
+  const safeBody = surfaceSource.match(/  function safeViewportRect\(options = \{\}\) \{([\s\S]*?)\n  \}/)?.[1];
+  const targetBody = surfaceSource.match(/    const setCanvasViewportTarget = \(nextViewport, options = \{\}\) => \{([\s\S]*?)\n    \};\n    state\.setCanvasViewportTarget/)?.[1];
+  const factorBody = surfaceSource.match(/    const zoomCanvasByFactor = \(factor, cx, cy\) => \{([\s\S]*?)\n    \};\n    const zoomCanvasByWheel/)?.[1];
+  assert.ok(exitBody && enterBody && safeBody && targetBody && factorBody,
+    'run the production exit, Desk transition, safe frame, viewport setter, and zoom input');
+  const window = { innerWidth: 1280, innerHeight: 776, cancelAnimationFrame: () => {} };
+  const worldRect = { left: '0px', top: '0px', width: '1280px', height: '776px', zIndex: '41000' };
+  const browserState = { uri: 'https://example.test/', pageZoom: 1.25, selectedTab: 'tab-a' };
+  const browser = { id: 'browser-view-a', isConnected: true, style: { ...worldRect }, _browserState: browserState,
+    classList: { remove: () => {} } };
+  const elements = {
+    'egd-desk-rail': { getBoundingClientRect: () => ({ height: 52, bottom: 52 }) },
+    'egd-dock': { getBoundingClientRect: () => ({ height: 46, top: 718 }) },
+    'egd-preset-bag': { getBoundingClientRect: () => ({ width: 99, right: 123 }) },
+    'egd-hud': { classList: { contains: () => true } },
+    [browser.id]: browser,
+  };
+  const document = { documentElement: { classList: { remove: () => {} } },
+    getElementById: id => elements[id] || null };
+  const state = { surface: { browserCardId: browser.id, initialBrowserFocus: true },
+    cardFullscreen: { cardId: browser.id, rect: worldRect, previousHudHidden: true, previousMinimapOpen: false },
+    pan: { x: 0, y: 0 }, panTarget: { x: 0, y: 0 }, zoom: 1, zoomTarget: 1 };
+  const safeViewportRect = compileFunction(`return function safeViewportRect(options = {}) {${safeBody}\n  }`,
+    ['window', 'document'])(window, document);
+  const safe = safeViewportRect({ avoidHud: false });
+  assert.deepEqual(safe, { left: 147, top: 76, right: 1256, bottom: 694, width: 1109, height: 618 });
+  let applied = 0, animated = 0;
+  state.setCanvasViewportTarget = compileFunction(`return (nextViewport, options = {}) => {${targetBody}\n    }`,
+    ['state', 'ZOOM_MIN', 'ZOOM_MAX', 'frame', 'window', 'apply', 'scheduleAnimate'])(
+    state, .01, 4, 0, window, () => { applied++; }, () => { animated++; });
+  const exitFullscreen = compileFunction(`return function exitCardFullscreen(card = null, options = {}) {${exitBody}\n  }`,
+    ['state', 'document', 'applyCardRect', 'setHudPresentationHidden', 'toggleDeskMinimap', 'setActiveEntity',
+      'syncViewportAgendaRail', 'scheduleDeskSessionSave', 'SurfaceState', 'persistentEntityGeometry', 'safeViewportRect'])(
+    state, document, (card, rect) => Object.assign(card.style, rect), () => {},
+    () => assert.fail('minimap was closed'), () => {}, () => {}, () => {}, { fitSurfaceCamera },
+    card => ({ x: Number.parseFloat(card.style.left), y: Number.parseFloat(card.style.top),
+      width: Number.parseFloat(card.style.width), height: Number.parseFloat(card.style.height) }), safeViewportRect);
+  const enterDesk = compileFunction(`return function enterLocalDesk() {${enterBody}\n  }`,
+    ['state', 'exitCardFullscreen', 'document', 'scheduleDeskSessionSave'])(
+    state, exitFullscreen, document, () => {});
+  const zoomByFactor = compileFunction(`return (factor, cx, cy) => {${factorBody}\n    }`,
+    ['state', 'ZOOM_MIN', 'ZOOM_MAX', 'enterLocalDesk', 'frame', 'window', 'apply', 'scheduleAnimate', 'safeViewportRect'])(
+    state, .01, 4, enterDesk, 0, window, () => { applied++; }, () => { animated++; }, safeViewportRect);
+  const fitted = fitSurfaceCamera({ x: 0, y: 0, width: 1280, height: 776 }, safe);
+  const screen = () => ({ left: state.panTarget.x, top: state.panTarget.y,
+    right: state.panTarget.x + 1280 * state.zoomTarget,
+    bottom: state.panTarget.y + 776 * state.zoomTarget });
+  zoomByFactor(.99, 1270, 760); // first tiny outward gesture near the viewport corner
+  assert.equal(state.surface.initialBrowserFocus, false);
+  assert.equal(state.cardFullscreen, null);
+  assert.ok(screen().left >= safe.left - .001 && screen().right <= safe.right + .001,
+    'the Browser remains inside the Desk horizontally after the whole zoom input');
+  assert.ok(screen().top >= safe.top - .001 && screen().bottom <= safe.bottom + .001,
+    'the Browser title and controls remain below the topbar and above the Dock');
+  assert.ok(Math.abs(state.zoomTarget - fitted.zoom * .99) < 1e-9,
+    'the first user zoom factor still applies to the newly fitted Desk camera');
+  assert.equal(applied, 1, 'the real immediate viewport setter applied the exit fit');
+  assert.equal(animated, 1, 'the first user zoom was not suppressed');
+  assert.deepEqual(browser.style, worldRect);
+  assert.equal(browser._browserState, browserState);
+
+  const previous = { zoom: state.zoomTarget, pan: { ...state.panTarget } };
+  zoomByFactor(.9, 150, 200);
+  assert.ok(Math.abs(state.zoomTarget - previous.zoom * .9) < 1e-9);
+  assert.ok(Math.abs(state.panTarget.x - (150 - (150 - previous.pan.x) * .9)) < 1e-9);
+  assert.ok(Math.abs(state.panTarget.y - (200 - (200 - previous.pan.y) * .9)) < 1e-9);
+  assert.equal(animated, 2, 'ordinary subsequent zoom retains its pointer anchor');
+});
+
 test('semantic zoom uses the canonical 1–400% camera range without changing Card records', () => {
   assert.match(surfaceSource, /\bconst ZOOM_MIN = 0\.01\s*;/);
   assert.match(surfaceSource, /\bconst ZOOM_MAX = 4(?:\.0)?\s*;/);
@@ -534,16 +642,17 @@ test('production first-use focus presents the live Browser Card with the existin
 });
 
 test('human Chat Dock open after initial Browser focus and zoom-out focuses only a compact Chat to readable detail', () => {
-  const projectionBody = surfaceSource.match(/    const focusProjection = entry => \{([\s\S]*?)\n    \};/)?.[1];
+  const projectionBody = surfaceSource.match(/    const focusProjection = \(entry, \{ revealHeader = false \} = \{\}\) => \{([\s\S]*?)\n    \};/)?.[1];
   const compactBody = surfaceSource.match(/    const focusChatDockIfCompact = card => \{([\s\S]*?)\n    \};/)?.[1];
   const dockStart = surfaceSource.indexOf('  function buildDock() {');
   const dockEnd = surfaceSource.indexOf('    const divider =', dockStart);
   const dockBody = surfaceSource.slice(dockStart, dockEnd).match(/onclick: \(\) => \{([\s\S]*?)\n\s*\},\n\s*\}, el\('span', \{ class: 'egd-dock-icon' \}/)?.[1];
   assert.ok(projectionBody && compactBody && dockBody, 'use the production Dock and semantic-projection paths');
 
-  const safe = { left: 0, top: 0, width: 1200, height: 800 };
+  const safe = { left: 147, top: 76, right: 1256, bottom: 694, width: 1109, height: 618 };
   const browser = { x: 15, y: 20, width: 1200, height: 720 };
-  const initial = fitSurfaceCamera(browser, safe, 1);
+  const initial = fitSurfaceCamera(browser,
+    { left: 0, top: 0, width: 1200, height: 800 }, 1);
   const cameraTargets = [], focused = [];
   const frames = new Map(), listeners = new Map();
   let nextFrame = 0, composerFocuses = 0;
@@ -566,29 +675,32 @@ test('human Chat Dock open after initial Browser focus and zoom-out focuses only
 
   const composer = { isConnected: true, disabled: false,
     focus: () => { composerFocuses++; document.activeElement = composer } };
+  const messages = { scrollTop: 247 };
   const card = { id: 'chat-card', isConnected: true,
     style: { left: '100px', top: '90px', width: '440px', height: '680px' },
     classList: { contains: name => name === 'egd-chat-card' },
     contains: node => node === composer,
-    querySelector: selector => selector === '.egd-codex-input' ? composer : null };
+    querySelector: selector => selector === '.egd-codex-input' ? composer
+      : selector === '.egd-codex-messages' ? messages : null };
   const entries = new Map();
   const syncEntries = () => { if (!entries.has(card)) entries.set(card, {
     card, kind: 'chat', bodyFontPx: 11, level: null, visibilityDirty: false,
   }); };
-  const screenRect = (target, zoom) => {
+  const screenRect = (target, zoom, pan = state.panTarget) => {
     const world = { x: parseFloat(target.style.left), y: parseFloat(target.style.top),
       width: parseFloat(target.style.width), height: parseFloat(target.style.height) };
-    return { world, width: world.width * zoom, height: world.height * zoom };
+    return { world, x: pan.x + world.x * zoom, y: pan.y + world.y * zoom,
+      width: world.width * zoom, height: world.height * zoom };
   };
   const surface = { surfaceSemanticLevel, fitSurfaceCamera };
-  const focusProjection = compileFunction(`return entry => {${projectionBody}\n    }`,
+  const focusProjection = compileFunction(`return (entry, { revealHeader = false } = {}) => {${projectionBody}\n    }`,
     ['state', 'authorVisible', 'screenRect', 'safeViewportRect', 'SurfaceState', 'ZOOM_MAX',
       'detailWidth', 'detailHeight', 'focusCanvasCard'])(state, () => true, screenRect, () => safe,
     surface, 4, 240, 180, target => focused.push(target));
   state.focusChatDockIfCompact = compileFunction(`let cancelPendingChatComposerFocus = () => {};\nreturn card => {${compactBody}\n    }`,
     ['state', 'syncEntries', 'entries', 'authorVisible', 'screenRect', 'SurfaceState',
-      'detailWidth', 'detailHeight', 'focusProjection', 'window', 'document', 'viewport'])(state, syncEntries, entries, () => true,
-    screenRect, surface, 240, 180, focusProjection, window, document, viewport);
+      'detailWidth', 'detailHeight', 'safeViewportRect', 'focusProjection', 'window', 'document', 'viewport'])(state, syncEntries, entries, () => true,
+    screenRect, surface, 240, 180, () => safe, focusProjection, window, document, viewport);
   let spawned = 0;
   const dockClick = compileFunction(`return () => {${dockBody}\n          }`,
     ['kind', 'item', 'state', 'spawnCodexChatCard', 'toggleHUD'])(
@@ -602,6 +714,8 @@ test('human Chat Dock open after initial Browser focus and zoom-out focuses only
   assert.equal(spawned, 1);
   assert.equal(cameraTargets.length, 1, 'compact Chat opens with its existing focus projection');
   assert(Math.abs(cameraTargets[0].zoom - 10.6 / 11) < 0.001);
+  assert.ok(cameraTargets[0].pan.y + 90 * cameraTargets[0].zoom >= safe.top,
+    'the focused Chat header clears the topbar even when the readable Card exceeds the safe height');
   assert.equal(focused[0], card);
   assert.equal(state.codex.hudView, 'conversation');
   assert.equal(state.codex.threadDrafts.room, 'unsent human draft');
@@ -638,6 +752,37 @@ test('human Chat Dock open after initial Browser focus and zoom-out focuses only
   assert.equal(cameraTargets.length, 2, 'normal readable zoom keeps the human camera unchanged');
   assert.equal(composerFocuses, 1, 'normal visible Chat keeps its existing input ownership');
   assert.equal(state.codex.threadDrafts.room, 'unsent human draft');
+
+  // A normal wheel pan may leave the same readable Chat's header above the
+  // rail. Only the later explicit Dock click should reveal it again.
+  const panBody = surfaceSource.match(/    const panCanvasByWheel = \(ev\) => \{([\s\S]*?)\n    \};/)?.[1];
+  assert.ok(panBody);
+  const panWheel = compileFunction(`return ev => {${panBody}\n    }`,
+    ['state', 'normalizeWheelDelta', 'WHEEL_PAN_SPEED', 'scheduleAnimate'])(state, () => 1, 1.15, () => {});
+  state.zoom = state.zoomTarget = 0.968;
+  state.pan = state.panTarget = { x: 328.77, y: 0 };
+  panWheel({ deltaX: 0, deltaY: 236.85 / 1.15 });
+  state.pan = { ...state.panTarget }; // settled wheel animation
+  const offscreen = screenRect(card, state.zoomTarget, state.panTarget);
+  assert.ok(Math.abs(offscreen.x - 425.57) < 0.01 && Math.abs(offscreen.y + 149.73) < 0.01);
+  assert.equal(cameraTargets.length, 2, 'wheel pan never auto-reveals Chat');
+  const originalWorldRect = structuredClone(card.style);
+  const originalThread = state.codex.activeThreadId;
+  const originalDraft = state.codex.threadDrafts.room;
+  const originalScroll = messages.scrollTop;
+  entries.get(card).level = 'detail';
+  dockClick();
+  assert.equal(spawned, 4, 'Dock reuses the existing Chat View');
+  assert.equal(cameraTargets.length, 3, 'Dock reveals an offscreen detail Chat by camera only');
+  const reveal = cameraTargets.at(-1);
+  assert.ok(reveal.pan.y + 90 * reveal.zoom >= safe.top,
+    'the existing Chat title is reachable below the topbar');
+  assert.ok(reveal.pan.y + (90 + 32) * reveal.zoom <= safe.bottom,
+    'the whole Chat header remains reachable above the Dock');
+  assert.deepEqual(card.style, originalWorldRect);
+  assert.equal(state.codex.activeThreadId, originalThread);
+  assert.equal(state.codex.threadDrafts.room, originalDraft);
+  assert.equal(messages.scrollTop, originalScroll);
 });
 
 test('production fullscreen layout fills the actual Canvas viewport and keeps the prior Card rect for Desk', () => {
@@ -853,6 +998,40 @@ test('Browser fullscreen CSS hides Desk chrome and removes outer Card decoration
   assert.match(css, /:root\.egd-browser-fullscreen-active \.egd-browser-card\.egd-card-fullscreen \.egd-card-header \{\s*border-radius:\s*0/);
 });
 
+test('HUD Chat action buttons keep the Canvas affordance despite the edge button reset', () => {
+  const css = readFileSync(new URL('../overlay/CSS/eg-desk-surface.uc.css', import.meta.url), 'utf8');
+  const rule = selector => css.match(new RegExp(`^${selector.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')} \\{([^}]+)\\}`, 'm'))?.[1] || '';
+  assert.match(rule('.egd-edge button'), /background:\s*transparent;\s*border:\s*none;[\s\S]*padding:\s*0/,
+    'the shared edge reset is the demonstrated conflict');
+  const hudChip = rule('#egd-hud[data-app="chat"] .egd-codex-chip');
+  assert.match(hudChip, /padding:\s*0 10px/);
+  assert.match(hudChip, /border:\s*1px solid var\(--egd-chat-outline-soft\)/);
+  assert.match(hudChip, /background:\s*var\(--egd-chat-paper\)/);
+  const primary = rule('#egd-hud[data-app="chat"] .egd-codex-chip-primary');
+  assert.match(primary, /background:\s*var\(--egd-primary\)/);
+  assert.match(primary, /color:\s*var\(--egd-surface-elevated\)/);
+  const subtle = rule('#egd-hud[data-app="chat"] .egd-codex-chip-subtle');
+  assert.match(subtle, /background:\s*var\(--egd-window-alt\)/);
+  const diagnostics = rule('#egd-hud[data-app="chat"] .egd-codex-diagnostics-toggle');
+  assert.match(diagnostics, /padding:\s*0 8px/);
+  assert.match(diagnostics, /border:\s*1px solid var\(--egd-chat-outline-soft\)/);
+  assert.match(diagnostics, /background:\s*var\(--egd-window-alt\)/);
+});
+
+test('right Chat HUD leaves the existing bottom Dock controls hit-test clear at 1280×776', () => {
+  const css = readFileSync(new URL('../overlay/CSS/eg-desk-surface.uc.css', import.meta.url), 'utf8');
+  const rule = selector => css.match(new RegExp(`^${selector.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')} \\{([^}]+)\\}`, 'm'))?.[1] || '';
+  const hud = rule('#egd-hud');
+  const dock = rule('#egd-dock');
+  const px = (body, property) => Number.parseFloat(body.match(new RegExp(`${property}:\\s*(\\d+)px`))?.[1]);
+  const hudCut = Number.parseFloat(hud.match(/height:\s*calc\(100vh - (\d+)px\)/)?.[1]);
+  const viewportHeight = 776;
+  const hudBottom = px(hud, 'top') + Math.min(px(hud, 'max-height'), viewportHeight - hudCut);
+  const dockTop = viewportHeight - px(dock, 'bottom') - px(dock, 'height');
+  assert.ok(Number.isFinite(hudBottom) && Number.isFinite(dockTop));
+  assert.ok(hudBottom <= dockTop - 8, `HUD bottom ${hudBottom} must clear Dock top ${dockTop}`);
+});
+
 test('wheel or focused-URL keyboard zoom exits actual fullscreen and restores the same live Browser Card', () => {
   const exitBody = surfaceSource.match(/  function exitCardFullscreen\(card = null, options = \{\}\) \{([\s\S]*?)\n  \}/)?.[1];
   const enterBody = surfaceSource.match(/  function enterLocalDesk\(\) \{([\s\S]*?)\n  \}/)?.[1];
@@ -866,7 +1045,7 @@ test('wheel or focused-URL keyboard zoom exits actual fullscreen and restores th
   const enter = compileFunction(`return function enterLocalDesk() {${enterBody}\n  }`,
     ['state', 'exitCardFullscreen', 'document', 'scheduleDeskSessionSave']);
   const zoomFactor = compileFunction(`return function zoomCanvasByFactor(factor, cx, cy) {${factorBody}\n    }`,
-    ['state', 'ZOOM_MIN', 'ZOOM_MAX', 'enterLocalDesk', 'frame', 'window', 'apply', 'scheduleAnimate']);
+    ['state', 'ZOOM_MIN', 'ZOOM_MAX', 'enterLocalDesk', 'frame', 'window', 'apply', 'scheduleAnimate', 'safeViewportRect']);
   const zoom = compileFunction(`return function zoomCanvasByWheel(ev) {${wheelBody}\n    }`,
     ['normalizeWheelDelta', 'zoomCanvasByFactor', 'WHEEL_ZOOM_SPEED']);
   const keydown = compileFunction(`return function handleCanvasZoomKeydown(ev) {${keyBody}\n    }`,
@@ -888,7 +1067,8 @@ test('wheel or focused-URL keyboard zoom exits actual fullscreen and restores th
     () => {}, () => { saved++; });
   const enterDesk = enter(state, exitFullscreen, document, () => { saved++; });
   const applyFactor = zoomFactor(state, .01, 4, enterDesk, 0,
-    { cancelAnimationFrame() {} }, () => {}, () => { animated++; });
+    { cancelAnimationFrame() {} }, () => {}, () => { animated++; },
+    () => ({ left: 0, top: 0, width: 1600, height: 960 }));
   const zoomOut = zoom(() => 1, applyFactor, .0044);
   zoomOut({ deltaY: 100, clientX: 800, clientY: 480 });
   assert.equal(state.surface.initialBrowserFocus, false);
