@@ -3,9 +3,10 @@ import assert from 'node:assert/strict';
 import vm from 'node:vm';
 import { readFileSync } from 'node:fs';
 import {
-  VIEWPORTS, assertBeforeDeadline, captureHeadlessScreenshot, chatIssues, firstUseIssues,
+  VIEWPORTS, assertBeforeDeadline, canvasComposerClearanceIssues, captureHeadlessScreenshot, chatIssues, firstUseIssues,
   initialFirstUseIssues, observeChat, observeSettledFirstUse, observeTargets, parseCli, parseDeadline,
-  projectionGeometrySettled, resizeHeadless, screenshotOutcome, targetIssues, viewportSettled,
+  presentationRestoredOnWiderViewport, projectionGeometrySettled, resizeHeadless,
+  sameWorldGeometry, screenshotOutcome, targetIssues, viewportSettled,
   waitFor, waitStableViewport,
 } from './verify-firefox-mcp-headless-ui-regression.mjs';
 
@@ -174,6 +175,7 @@ test('first-use postcondition is reread after viewport settlement, never from tr
 
 test('Chat observation selects only the visible active HUD projection, not a leftover Canvas input', async () => {
   let inputLeft = 100;
+  let composerTop = 470;
   let hudOpacity = '1';
   let ancestorOpacity = '1';
   let ancestorVisibility = 'visible';
@@ -183,13 +185,20 @@ test('Chat observation selects only the visible active HUD projection, not a lef
       right: inputLeft + 200, bottom: 140, width: 200, height: 40 }),
     contains: hit => hit === input };
   const oldInput = { ...input, value: 'stale hidden input' };
+  const composer = { getBoundingClientRect: () => ({ left: 100, top: composerTop,
+    right: 320, bottom: composerTop + 40, width: 220, height: 40 }) };
+  const zoom = { getBoundingClientRect: () => ({ left: 88, top: 492, right: 250,
+    bottom: 533, width: 162, height: 41 }) };
   const hud = { id: 'egd-hud', parentElement: hudAncestor,
     classList: { contains: () => false },
     getBoundingClientRect: () => ({ left: 80, top: 60, right: 360, bottom: 500,
       width: 280, height: 440 }),
-    querySelector: () => input, querySelectorAll: () => [] };
+    querySelector: selector => selector === '.egd-codex-footer' ? composer : input,
+    querySelectorAll: () => [] };
   const oldCard = { ...hud, id: 'egd-chat-card-old', querySelector: () => oldInput };
-  const newCard = { ...hud, id: 'egd-chat-card-new', querySelector: () => input };
+  const newCard = { ...hud, id: 'egd-chat-card-new',
+    style: { left: '147px', top: '76px', width: '440px', height: '680px', maxHeight: '420px' },
+    querySelector: selector => selector === '.egd-codex-footer' ? composer : input };
   input.parentElement = hud;
   const state = { codex: { chatDockMode: 'hud', chatCardEntityId: null,
     activeThreadId: 'room-1', threads: [{ id: 'room-1', messages: [] }],
@@ -200,7 +209,7 @@ test('Chat observation selects only the visible active HUD projection, not a lef
   let blocked = false;
   let hitCalls = 0;
   const document = { getElementById: id => id === 'egd-hud' ? hud :
-    id === 'egd-chat-card-new' ? newCard : oldCard,
+    id === 'egd-chat-card-new' ? newCard : id === 'egd-zoom-indicator' ? zoom : oldCard,
   elementFromPoint() { hitCalls++; return blocked && hitCalls === 1 ? {} : input; } };
   const getComputedStyle = node => ({ display: 'block',
     visibility: node === hudAncestor ? ancestorVisibility : 'visible',
@@ -259,6 +268,32 @@ test('Chat observation selects only the visible active HUD projection, not a lef
   const returned = await observeChat(harness);
   assert.equal(returned.rootId, 'egd-chat-card-new');
   assert.equal(returned.inputValue, 'draft');
+  assert.equal(returned.composerZoomOverlapArea, 18 * 150,
+    'actual composer rectangle, not just the 3x3 textarea hit points, exposes the visual overlap');
+  assert.ok(canvasComposerClearanceIssues(returned).includes('composer-zoom-overlap'));
+  assert.equal(JSON.stringify(returned.world), JSON.stringify({ x: 147, y: 76, width: 440, height: 680 }));
+  assert.equal(returned.presentationHeight, 420);
+  composerTop = 444;
+  const clear = await observeChat(harness);
+  assert.equal(clear.composerZoomOverlapArea, 0);
+  assert.deepEqual(canvasComposerClearanceIssues(clear), []);
+});
+
+test('world-geometry proof rejects missing or changed saved dimensions independent of presentation cap', () => {
+  const world = { x: 147, y: 76, width: 440, height: 680 };
+  assert.equal(sameWorldGeometry(world, { ...world }), true);
+  assert.equal(sameWorldGeometry(world, { ...world, height: 420 }), false);
+  assert.equal(sameWorldGeometry(world, { ...world, x: 148 }), false);
+  assert.equal(sameWorldGeometry(world, null), false);
+  assert.ok(canvasComposerClearanceIssues({ mode: 'canvas', composerRect: null,
+    zoomRect: null, composerZoomOverlapArea: null, composerInViewport: false })
+    .includes('missing-composer-or-zoom-rect'));
+  const narrow = { world, presentationHeight: 421 };
+  assert.equal(presentationRestoredOnWiderViewport(narrow, { presentationHeight: 565 }), true);
+  assert.equal(presentationRestoredOnWiderViewport(narrow, { presentationHeight: 421 }), false);
+  assert.equal(presentationRestoredOnWiderViewport(narrow, { presentationHeight: null }), false);
+  assert.equal(presentationRestoredOnWiderViewport({ world, presentationHeight: 680 },
+    { presentationHeight: 680 }), true, 'an uncapped user-sized Card remains fully restored');
 });
 
 test('HUD projection requires geometry unchanged across the 240ms readiness interval', () => {
@@ -321,6 +356,9 @@ test('runner contains no provider submit path or synthetic DOM action fallback',
   assert.match(source, /deadlineMs, \{ intervalMs: 240 \}\)/);
   assert.match(source, /await scanControls\(harness, size, deadlineMs, result, `\$\{size\.width\}x\$\{size\.height\} HUD-open`\)/);
   assert.match(source, /const hudAfterScan = await observeChat\(harness\)/);
+  assert.match(source, /canvasComposerClearanceIssues\(canvasClearance\)/);
+  assert.match(source, /resize preserves the same Chat Card and saved world geometry/);
+  assert.match(source, /wider viewport restores Chat presentation height/);
   assert.match(source, /fitAll = \{ status: 'click-only', fitPass: null \}/);
   assert.match(source, /result\.screenshots\.push\(await captureHeadlessScreenshot\(harness, stage, deadlineMs\)\)/);
   assert.match(source, /catch \(error\) \{\s*assertBeforeDeadline\(deadlineMs\);\s*const outcome = screenshotOutcome\(error\)/);

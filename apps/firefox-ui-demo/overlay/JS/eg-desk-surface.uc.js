@@ -6976,8 +6976,24 @@
     toggleHUD('chat', '채팅', { preserveConversation: true });
   }
 
+  const CHAT_ZOOM_GAP = 8;
+
+  function visibleChatZoomRect() {
+    const indicator = document.getElementById('egd-zoom-indicator');
+    if (!indicator) return null;
+    const style = window.getComputedStyle(indicator);
+    const rect = indicator.getBoundingClientRect();
+    return style.display !== 'none' && style.visibility === 'visible' &&
+      Number(style.opacity) > 0 && rect.width > 0 && rect.height > 0 ? rect : null;
+  }
+
   function fitCodexChatCardToReadableViewport(card, safe, bodyFontPx) {
     if (!card || !safe || !Number.isFinite(safe.height) || safe.height <= 0) return false;
+    if (card.classList.contains('egd-card-fullscreen')) {
+      if (!card.style.maxHeight) return false;
+      card.style.maxHeight = '';
+      return true;
+    }
     // Semantic focus raises Chat to this readable font size. A Card sized at
     // the old, smaller camera zoom can otherwise put its composer below Dock.
     const fontPx = Number.isFinite(bodyFontPx) && bodyFontPx > 0 ? bodyFontPx : 14;
@@ -6989,10 +7005,25 @@
       parsePxNumber(style.paddingTop) + parsePxNumber(style.paddingBottom);
     // Projection centers the inline content height, leaving half the spare
     // space below. Reserve twice the frame so its outer bottom also fits.
-    const maxHeight = Math.floor(safe.height / readableZoom - frameHeight * 2);
-    const height = parsePxNumber(card.style.height, minHeight);
-    if (maxHeight < minHeight || height <= maxHeight) return false;
-    card.style.height = `${maxHeight}px`;
+    const dockLimit = Math.floor(safe.height / readableZoom - frameHeight * 2);
+    const savedHeight = parsePxNumber(card.style.height, minHeight);
+    let presentationHeight = dockLimit >= minHeight ? Math.min(savedHeight, dockLimit) : savedHeight;
+
+    const zoomRect = visibleChatZoomRect();
+    const cardRect = card.getBoundingClientRect();
+    const cameraZoom = state.zoom;
+    if (zoomRect && Number.isFinite(cameraZoom) && cameraZoom > 0 &&
+        cardRect.left < zoomRect.right && cardRect.right > zoomRect.left &&
+        cardRect.top < zoomRect.bottom &&
+        cardRect.top + (presentationHeight + frameHeight) * cameraZoom > zoomRect.top) {
+      // Only the visible Chat box contracts. The inline world height remains
+      // the saved/user size, and the message log already owns vertical scroll.
+      const zoomLimit = Math.floor((zoomRect.top - CHAT_ZOOM_GAP - cardRect.top) / cameraZoom - frameHeight);
+      presentationHeight = Math.min(presentationHeight, Math.max(minHeight, zoomLimit));
+    }
+    const nextMaxHeight = presentationHeight < savedHeight ? `${presentationHeight}px` : '';
+    if (card.style.maxHeight === nextMaxHeight) return false;
+    card.style.maxHeight = nextMaxHeight;
     return true;
   }
 
@@ -12448,15 +12479,19 @@
     };
     const screenRect = (card, zoom, pan) => {
       // Card creation, movement, resize, and fullscreen all write inline world
-      // geometry. Reading it avoids forced layout during camera animation.
+      // geometry. Chat alone may have a temporary visible-height cap; its
+      // saved inline height stays untouched for persistence and Board layout.
       const x = parsePxNumber(card.style.left, 0);
       const y = parsePxNumber(card.style.top, 0);
       const width = Math.max(1, parsePxNumber(card.style.width, 1));
-      const height = Math.max(1, parsePxNumber(card.style.height, 1));
+      const savedHeight = Math.max(1, parsePxNumber(card.style.height, 1));
+      const visibleHeight = card.classList.contains('egd-chat-card') && card.style.maxHeight
+        ? Math.min(savedHeight, parsePxNumber(card.style.maxHeight, savedHeight)) : savedHeight;
+      const world = { x, y, width, height: savedHeight };
       return {
-        world: { x, y, width, height },
+        world, visualWorld: { ...world, height: visibleHeight },
         x: pan.x + x * zoom, y: pan.y + y * zoom,
-        width: width * zoom, height: height * zoom,
+        width: width * zoom, height: visibleHeight * zoom,
       };
     };
     const place = (node, screenX, screenY, width, height, originX, originY, zoom) => {
@@ -12485,23 +12520,51 @@
         && card.getAttribute('aria-hidden') !== 'true' && card.getClientRects().length > 0;
       return entry.authorVisible;
     };
-    const focusProjection = entry => {
+    const focusProjection = (entry, { revealHeader = false } = {}) => {
       if (!entry?.card.isConnected) return;
       entry.visibilityDirty = true;
       if (!authorVisible(entry)) return;
-      const world = screenRect(entry.card, state.zoom, state.pan).world;
-      const safe = safeViewportRect();
-      const fitted = SurfaceState.fitSurfaceCamera(world, safe, 0.85);
-      // An unusually large View can be cropped, but must become readable
-      // without changing its saved dimensions or internal Browser viewport.
-      const zoom = Math.min(ZOOM_MAX, Math.max(
-        entry.kind === 'browser' ? 0.83 : 0.76, 10.6 / entry.bodyFontPx,
-        (detailWidth + 1) / world.width, (detailHeight + 1) / world.height,
-        fitted.zoom,
-      ));
+      const world = screenRect(entry.card, state.zoom, state.pan).visualWorld;
+      let safe = safeViewportRect();
+      const zoomFor = region => {
+        const fitted = SurfaceState.fitSurfaceCamera(world, region, 0.85);
+        // An unusually large View can be cropped, but must become readable
+        // without changing its saved dimensions or internal Browser viewport.
+        return Math.min(ZOOM_MAX, Math.max(
+          entry.kind === 'browser' ? 0.83 : 0.76, 10.6 / entry.bodyFontPx,
+          (detailWidth + 1) / world.width, (detailHeight + 1) / world.height,
+          fitted.zoom,
+        ));
+      };
+      let zoom = zoomFor(safe);
+      let chatFrameHeight = 0;
+      let chatZoomSafe = false;
+      if (entry.kind === 'chat') {
+        const zoomRect = visibleChatZoomRect();
+        const style = window.getComputedStyle(entry.card);
+        chatFrameHeight = style.boxSizing === 'border-box' ? 0 :
+          parsePxNumber(style.borderTopWidth) + parsePxNumber(style.borderBottomWidth) +
+          parsePxNumber(style.paddingTop) + parsePxNumber(style.paddingBottom);
+        const left = safe.left + (safe.width - world.width * zoom) / 2;
+        const top = safe.top + (safe.height - world.height * zoom) / 2;
+        if (zoomRect && left < zoomRect.right && left + world.width * zoom > zoomRect.left &&
+            top < zoomRect.bottom && top + (world.height + chatFrameHeight) * zoom > zoomRect.top) {
+          const bottom = Math.min(safe.bottom, zoomRect.top - CHAT_ZOOM_GAP);
+          if (bottom > safe.top && bottom < safe.bottom) {
+            safe = { ...safe, bottom, height: bottom - safe.top };
+            zoom = zoomFor(safe);
+            chatZoomSafe = true;
+          }
+        }
+      }
+      const centeredY = safe.top + (safe.height - world.height * zoom) / 2 - world.y * zoom;
+      const topPanY = safe.top - world.y * zoom;
       const pan = {
         x: safe.left + (safe.width - world.width * zoom) / 2 - world.x * zoom,
-        y: safe.top + (safe.height - world.height * zoom) / 2 - world.y * zoom,
+        y: chatZoomSafe
+          ? Math.max(topPanY, Math.min(centeredY,
+            safe.bottom - (world.height + chatFrameHeight) * zoom - world.y * zoom))
+          : revealHeader ? Math.max(centeredY, topPanY) : centeredY,
       };
       focusCanvasCard(entry.card);
       state.setCanvasViewportTarget?.({ pan, zoom });
@@ -12514,7 +12577,7 @@
           return authorVisible(entry);
         });
       if (!members.length) return;
-      const rects = members.map(entry => screenRect(entry.card, state.zoom, state.pan).world);
+      const rects = members.map(entry => screenRect(entry.card, state.zoom, state.pan).visualWorld);
       const left = Math.min(...rects.map(rect => rect.x));
       const top = Math.min(...rects.map(rect => rect.y));
       const right = Math.max(...rects.map(rect => rect.x + rect.width));
@@ -12699,10 +12762,25 @@
         width: rect.width, height: rect.height, fontPx: entry.bodyFontPx * zoom,
         previous: entry.level, detailWidth, detailHeight,
       });
+      let chatSafeBottom = safe.bottom;
+      let chatOuterBottom = rect.y + rect.height;
+      const zoomRect = visibleChatZoomRect();
+      if (zoomRect) {
+        const style = window.getComputedStyle(card);
+        const frameHeight = style.boxSizing === 'border-box' ? 0 :
+          parsePxNumber(style.borderTopWidth) + parsePxNumber(style.borderBottomWidth) +
+          parsePxNumber(style.paddingTop) + parsePxNumber(style.paddingBottom);
+        chatOuterBottom += frameHeight * zoom;
+        if (rect.x < zoomRect.right && rect.x + rect.width > zoomRect.left &&
+            rect.y < zoomRect.bottom && chatOuterBottom > zoomRect.top - CHAT_ZOOM_GAP) {
+          chatSafeBottom = Math.min(safe.bottom, zoomRect.top - CHAT_ZOOM_GAP);
+        }
+      }
       const fullyInSafe = rect.x >= safe.left - 0.5 && rect.y >= safe.top - 0.5 &&
-        rect.x + rect.width <= safe.right + 0.5 && rect.y + rect.height <= safe.bottom + 0.5;
+        rect.x + rect.width <= safe.right + 0.5 &&
+        chatOuterBottom <= chatSafeBottom + 0.5;
       if (level === 'detail' && fullyInSafe && !resized) return false;
-      focusProjection(entry);
+      focusProjection(entry, { revealHeader: true });
       const target = { zoom: state.zoomTarget, pan: { ...state.panTarget } };
       const initialFocus = document.activeElement;
       let frame = 0, checks = 0, stopped = false;
@@ -12776,6 +12854,7 @@
           if (card.hasAttribute('data-egd-semantic-level')) delete card.dataset.egdSemanticLevel;
           continue;
         }
+        if (entry.kind === 'chat') fitCodexChatCardToReadableViewport(card, safeViewportRect(), entry.bodyFontPx);
         const rect = screenRect(card, zoom, pan);
         entry.rect = rect;
         const projectedFont = entry.bodyFontPx * zoom;

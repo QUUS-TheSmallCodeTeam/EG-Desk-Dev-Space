@@ -271,6 +271,13 @@ export async function observeChat(harness) {
         rect.top < window.innerHeight : rootInViewport);
     const input = activeProjection ? root.querySelector('.egd-codex-input') : null;
     const inputRect = input?.getBoundingClientRect();
+    const composer = activeProjection ? root.querySelector('.egd-codex-footer') : null;
+    const composerRect = composer?.getBoundingClientRect();
+    const zoomRect = document.getElementById('egd-zoom-indicator')?.getBoundingClientRect();
+    const composerZoomOverlapArea = composerRect && zoomRect
+      ? Math.max(0, Math.min(composerRect.right, zoomRect.right) - Math.max(composerRect.left, zoomRect.left)) *
+        Math.max(0, Math.min(composerRect.bottom, zoomRect.bottom) - Math.max(composerRect.top, zoomRect.top))
+      : null;
     const inputInViewport = fullyInViewport(inputRect);
     const inputRendering = rendered(input);
     const inputVisible = !!input && inputInViewport && inputRendering.visible;
@@ -284,6 +291,11 @@ export async function observeChat(harness) {
     }
     const bounds = box => box && { left: box.left, top: box.top, right: box.right,
       bottom: box.bottom, width: box.width, height: box.height };
+    const px = value => Number.parseFloat(value);
+    const world = canvas && root && { x: px(root.style.left), y: px(root.style.top),
+      width: px(root.style.width), height: px(root.style.height) };
+    const presentationHeight = world && Math.min(world.height,
+      Number.isFinite(px(root.style.maxHeight)) ? px(root.style.maxHeight) : world.height);
     const threadId = codex.activeThreadId || null;
     const thread = codex.threads.find(item => item.id === threadId);
     return { mode: codex.chatDockMode, cardId: codex.chatCardEntityId || null,
@@ -292,6 +304,8 @@ export async function observeChat(harness) {
       rootEffectiveOpacity: rootRendering.opacity, rootRect: bounds(rect),
       inputVisible, inputInViewport, inputEffectiveOpacity: inputRendering.opacity, inputHitCount,
       inputRect: bounds(inputRect), inputDisabled: !!input?.disabled,
+      composerRect: bounds(composerRect), composerInViewport: fullyInViewport(composerRect),
+      zoomRect: bounds(zoomRect), composerZoomOverlapArea, world, presentationHeight,
       inputReadOnly: !!input?.readOnly, inputThreadId: input?.dataset.threadId || null,
       inputValue: input?.value ?? null, draft: threadId ? codex.threadDrafts[threadId] || '' : null,
       threadId, messageCount: thread?.messages?.length ?? null,
@@ -353,6 +367,29 @@ export function chatIssues(value, { mode, threadId, draft, messageCount }) {
   return issues;
 }
 
+export function canvasComposerClearanceIssues(value) {
+  if (value?.mode !== 'canvas') return ['not-canvas-chat'];
+  const issues = [];
+  if (!value.composerRect || !value.zoomRect || !Number.isFinite(value.composerZoomOverlapArea))
+    issues.push('missing-composer-or-zoom-rect');
+  if (!value.composerInViewport) issues.push('composer-outside-viewport');
+  if (value.composerZoomOverlapArea > 0) issues.push('composer-zoom-overlap');
+  return issues;
+}
+
+export function sameWorldGeometry(before, after) {
+  return ['x', 'y', 'width', 'height'].every(key =>
+    Number.isFinite(before?.[key]) && before[key] === after?.[key]);
+}
+
+export function presentationRestoredOnWiderViewport(prior, current) {
+  if (!Number.isFinite(prior?.world?.height) || !Number.isFinite(prior.presentationHeight) ||
+      !Number.isFinite(current?.presentationHeight)) return false;
+  const wasCapped = prior.presentationHeight < prior.world.height - 0.5;
+  return current.presentationHeight >= prior.presentationHeight - 0.5 &&
+    (!wasCapped || current.presentationHeight > prior.presentationHeight + 0.5);
+}
+
 export function projectionGeometrySettled(before, after) {
   return ['rootRect', 'inputRect'].every(key =>
     ['left', 'top', 'right', 'bottom', 'width', 'height'].every(part =>
@@ -399,6 +436,14 @@ async function chatRoundTrip(harness, size, deadlineMs, result, priorThreadId) {
     chatIssues(value, { mode: 'canvas', threadId, draft: DRAFT, messageCount }).length === 0, deadlineMs);
   requireCheck(result, 'Canvas draft and zero messages read back',
     chatIssues(drafted, { mode: 'canvas', threadId, draft: DRAFT, messageCount }).length === 0);
+  const canvasClearance = await observeChat(harness);
+  assertBeforeDeadline(deadlineMs);
+  requireCheck(result, `${size.width}x${size.height}: Canvas composer/Zoom actual rectangles do not intersect`,
+    canvasComposerClearanceIssues(canvasClearance).length === 0 &&
+      canvasClearance.cardId === canvas.cardId && sameWorldGeometry(canvas.world, canvasClearance.world),
+    { issues: canvasComposerClearanceIssues(canvasClearance), composer: canvasClearance.composerRect,
+      zoom: canvasClearance.zoomRect, overlapArea: canvasClearance.composerZoomOverlapArea,
+      beforeWorld: canvas.world, afterWorld: canvasClearance.world });
   await safeClick(harness, `${canvasSelector} button[title="우측 패널로 이동"]`,
     'Canvas Chat to HUD', size, deadlineMs, result);
   let previousHud = null;
@@ -439,8 +484,17 @@ async function chatRoundTrip(harness, size, deadlineMs, result, priorThreadId) {
     chatIssues(returned, { mode: 'canvas', threadId, draft: DRAFT, messageCount }).length === 0,
     { issues: chatIssues(returned, { mode: 'canvas', threadId, draft: DRAFT, messageCount }),
       oldCardId: canvas.cardId, currentCardId: returned.cardId, camera: returned.camera });
+  requireCheck(result, `${size.width}x${size.height}: returned Canvas composer/Zoom rectangles do not intersect`,
+    canvasComposerClearanceIssues(returned).length === 0,
+    { issues: canvasComposerClearanceIssues(returned), composer: returned.composerRect,
+      zoom: returned.zoomRect, overlapArea: returned.composerZoomOverlapArea });
+  requireCheck(result, `${size.width}x${size.height}: returned Chat saved and presentation heights observed`,
+    sameWorldGeometry(returned.world, returned.world) && Number.isFinite(returned.presentationHeight) &&
+      returned.presentationHeight > 0 && returned.presentationHeight <= returned.world.height,
+    { world: returned.world, presentationHeight: returned.presentationHeight });
   // Never reuse canvasSelector: moving through HUD may replace the Card DOM ID.
   return { threadId, messageCount, oldCardId: canvas.cardId, currentCardId: returned.cardId,
+    world: returned.world, presentationHeight: returned.presentationHeight,
     camera: { before: canvas.camera, hud: hud.camera, after: returned.camera } };
 }
 
@@ -476,6 +530,7 @@ export async function runRegression({ harness, profile, deadlineMs, viewports = 
     firstUseIssues(before, after).length === 0, { issues: firstUseIssues(before, after), before, after });
 
   let threadId = null;
+  let previousCanvas = null;
   for (const size of viewports) {
     assertBeforeDeadline(deadlineMs);
     await resizeHeadless(harness, size, deadlineMs);
@@ -486,6 +541,20 @@ export async function runRegression({ harness, profile, deadlineMs, viewports = 
     result.viewports.push(frame);
     requireCheck(result, `${stage}: exact real inner viewport`,
       settled.width === size.width && settled.height === size.height, frame.actual);
+    if (previousCanvas) {
+      const resizedChat = await observeChat(harness);
+      assertBeforeDeadline(deadlineMs);
+      requireCheck(result, `${stage}: resize preserves the same Chat Card and saved world geometry`,
+        resizedChat.mode === 'canvas' && resizedChat.cardId === previousCanvas.cardId &&
+          sameWorldGeometry(previousCanvas.world, resizedChat.world),
+        { prior: previousCanvas, current: { cardId: resizedChat.cardId, world: resizedChat.world } });
+      if (size.height > previousCanvas.size.height) {
+        requireCheck(result, `${stage}: wider viewport restores Chat presentation height`,
+          presentationRestoredOnWiderViewport(previousCanvas, resizedChat),
+          { savedHeight: resizedChat.world.height, priorPresentation: previousCanvas.presentationHeight,
+            currentPresentation: resizedChat.presentationHeight, priorSize: previousCanvas.size });
+      }
+    }
     const controls = await scanControls(harness, size, deadlineMs, result, stage);
     const zoomSafe = label => targetIssues(controls.zoom.find(item => item.id === label)).length === 0;
     if (zoomSafe('Canvas 확대') && zoomSafe('Canvas 축소')) {
@@ -516,6 +585,8 @@ export async function runRegression({ harness, profile, deadlineMs, viewports = 
     assertBeforeDeadline(deadlineMs);
     frame.chat = await chatRoundTrip(harness, size, deadlineMs, result, threadId);
     threadId = frame.chat.threadId;
+    previousCanvas = { size, cardId: frame.chat.currentCardId,
+      world: frame.chat.world, presentationHeight: frame.chat.presentationHeight };
     assertBeforeDeadline(deadlineMs);
     try {
       result.screenshots.push(await captureHeadlessScreenshot(harness, stage, deadlineMs));
