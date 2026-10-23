@@ -276,6 +276,75 @@ test('account change and cancellation invalidate pending or later Browser action
     { code: 'BROWSER_RUN_ENDED' })
 })
 
+test('cancel before the deferred UI send suppresses a fresh click but delivers the cancel tombstone', async () => {
+  const requests = []
+  let actionCalls = 0
+  const service = createBrowserToolService({ getOwnerKey: () => 'engine-account-1', sendToUi: request => {
+    requests.push(request)
+    if (request.kind === 'bind') return { requestId: request.requestId, status: 'bound', binding: {
+      cardId: 'browser-1', cardEpoch: 'card-epoch-1', profileId: 'firefox-default',
+      accountId: 'fixture-account', userContextId: 0, url: 'https://example.test/local',
+      engineAccountKey: 'codex:chatgpt:fixture@example.test', authorityEpoch: 0,
+    } }
+    if (request.kind === 'observe') return { requestId: request.requestId, status: 'observed', snapshot: snapshot() }
+    if (request.kind === 'cancel') return { requestId: request.requestId, status: 'cancelled' }
+    if (request.kind === 'act') {
+      actionCalls++
+      return { requestId: request.requestId, status: 'acted', receipt: {} }
+    }
+    throw new Error('unexpected UI request')
+  } })
+  await service.bind(run, service.prepare({ selectedSources: [source()] }))
+  const seen = await service.dispatch(run, { tool: 'egdesk_browser_observe', arguments: { cardId: 'browser-1' } })
+  const pendingClick = service.dispatch(run, { callId: 'cancel-before-send', tool: 'egdesk_browser_click', arguments: {
+    cardId: 'browser-1', observationId: seen.observationId, expectedRevision: seen.snapshot.revision,
+    ref: 'el_1', expectedTarget: seen.snapshot.interactiveElements[0],
+    postcondition: { kind: 'visible-text', value: 'Count: 1' },
+  } })
+  const cancelling = service.cancelRun(run) // no await: release the queued UI sends only after this closes the run
+  await assert.rejects(pendingClick, { code: 'BROWSER_RUN_ENDED' })
+  await cancelling
+  assert.equal(actionCalls, 0)
+  assert.equal(requests.filter(request => request.kind === 'act').length, 0)
+  assert.equal(requests.filter(request => request.kind === 'cancel').length, 1)
+})
+
+test('cancel after UI action handoff ends the run without claiming the click was rolled back', async () => {
+  const requests = []
+  let actionCalls = 0
+  let releaseAction
+  const service = createBrowserToolService({ getOwnerKey: () => 'engine-account-1', sendToUi: request => {
+    requests.push(request)
+    if (request.kind === 'bind') return { requestId: request.requestId, status: 'bound', binding: {
+      cardId: 'browser-1', cardEpoch: 'card-epoch-1', profileId: 'firefox-default',
+      accountId: 'fixture-account', userContextId: 0, url: 'https://example.test/local',
+      engineAccountKey: 'codex:chatgpt:fixture@example.test', authorityEpoch: 0,
+    } }
+    if (request.kind === 'observe') return { requestId: request.requestId, status: 'observed', snapshot: snapshot() }
+    if (request.kind === 'cancel') return { requestId: request.requestId, status: 'cancelled' }
+    if (request.kind === 'act') {
+      actionCalls++
+      return new Promise(resolve => { releaseAction = () => resolve({ requestId: request.requestId,
+        status: 'acted', receipt: {} }) })
+    }
+    throw new Error('unexpected UI request')
+  } })
+  await service.bind(run, service.prepare({ selectedSources: [source()] }))
+  const seen = await service.dispatch(run, { tool: 'egdesk_browser_observe', arguments: { cardId: 'browser-1' } })
+  const pendingClick = service.dispatch(run, { callId: 'cancel-after-handoff', tool: 'egdesk_browser_click', arguments: {
+    cardId: 'browser-1', observationId: seen.observationId, expectedRevision: seen.snapshot.revision,
+    ref: 'el_1', expectedTarget: seen.snapshot.interactiveElements[0],
+    postcondition: { kind: 'visible-text', value: 'Count: 1' },
+  } })
+  await Promise.resolve() // allow the queued action to reach sendToUi before cancelling
+  assert.equal(actionCalls, 1)
+  await service.cancelRun(run)
+  releaseAction()
+  await assert.rejects(pendingClick, { code: 'BROWSER_RUN_ENDED', message: /effect is unknown/ })
+  assert.equal(requests.filter(request => request.kind === 'cancel').length, 1)
+  assert.equal(actionCalls, 1)
+})
+
 test('cancel during pending UI bind sends tombstone and forbids late bind, observe and rebind', async () => {
   const requests = []
   let releaseBind

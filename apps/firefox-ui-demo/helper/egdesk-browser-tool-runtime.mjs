@@ -115,15 +115,21 @@ export function createBrowserToolService({ sendToUi, getOwnerKey, timeoutMs = 15
     })))
   }
 
-  async function requestUi(payload) {
+  async function requestUi(payload, binding, run) {
     const requestId = randomUUID()
     const targetCardEpoch = payload.selection?.cardEpoch || payload.binding?.cardEpoch || payload.cardEpoch
     if (!short(targetCardEpoch, 160)) reject('BROWSER_UI_PROTOCOL', 'Browser request has no exact Card generation')
     let timer
     try {
       const response = await Promise.race([
-        Promise.resolve().then(() => sendToUi({ version: 1, requestId, targetCardEpoch,
-          deadlineMs: now() + timeoutMs, ...payload })),
+        Promise.resolve().then(() => {
+          if (payload.kind !== 'cancel' && (!binding || binding.closed || closedRuns.has(run?.answerId) ||
+              binding.ownerKey !== getOwnerKey() || run?.status !== 'inProgress')) {
+            reject('BROWSER_RUN_ENDED', 'Browser run or account ended before UI dispatch')
+          }
+          return sendToUi({ version: 1, requestId, targetCardEpoch,
+            deadlineMs: now() + timeoutMs, ...payload })
+        }),
         new Promise((_, rejectTimeout) => { timer = setTimeout(() => rejectTimeout(Object.assign(new Error('Browser UI response timed out; outcome is unknown'), { code: 'BROWSER_UI_TIMEOUT' })), timeoutMs) }),
       ])
       if (!record(response) || response.requestId !== requestId) reject('BROWSER_UI_PROTOCOL', 'Browser UI response does not match this request')
@@ -182,7 +188,7 @@ export function createBrowserToolService({ sendToUi, getOwnerKey, timeoutMs = 15
         }
         if (card.clientThreadId !== binding.clientThreadId) reject('BROWSER_BINDING_FORBIDDEN', 'Browser selection belongs to another Chat thread')
         const response = await requestUi({ kind: 'bind', runId: binding.runId,
-          clientThreadId: binding.clientThreadId, cardId: card.cardId, selection: card })
+          clientThreadId: binding.clientThreadId, cardId: card.cardId, selection: card }, binding, run)
         if (response.status !== 'bound' || !record(response.binding) || response.binding.cardId !== card.cardId ||
             response.binding.profileId !== card.profileId || response.binding.accountId !== card.accountId ||
             !short(response.binding.cardEpoch, 160) || !Number.isSafeInteger(response.binding.userContextId) ||
@@ -227,7 +233,7 @@ export function createBrowserToolService({ sendToUi, getOwnerKey, timeoutMs = 15
       card.busy = true
       const pending = requestUi({ kind: 'observe', runId: binding.runId,
         clientThreadId: binding.clientThreadId, cardId: card.cardId, binding: card.ui,
-        options: { textLimit: 60, elementLimit: 80 } })
+        options: { textLimit: 60, elementLimit: 80 } }, binding, run)
       binding.pending.add(pending)
       let response
       try { response = await pending } finally { binding.pending.delete(pending); card.busy = false }
@@ -273,7 +279,7 @@ export function createBrowserToolService({ sendToUi, getOwnerKey, timeoutMs = 15
       ...(args.expectedTarget ? { target: args.expectedTarget } : {}) }
     const pending = requestUi({ kind: 'act', runId: binding.runId,
       clientThreadId: binding.clientThreadId, cardId: card.cardId, binding: card.ui,
-      action, guard, postcondition: args.postcondition })
+      action, guard, postcondition: args.postcondition }, binding, run)
     binding.pending.add(pending)
     let response
     try { response = await pending }
