@@ -2360,7 +2360,8 @@ function assertNegativeNoEffect(before, after, label) {
     actorPerformCallsBefore: oldCounter.performCalls, actorPerformCallsAfter: newCounter.performCalls };
 }
 
-async function selectOwnedProbeSource(harness, thread, cardId, ownerTag, permission, fixture) {
+async function selectOwnedProbeSource(harness, thread, cardId, ownerTag, permission, fixture,
+  additionalOwnedCardId = null) {
   assert.ok(['observe', 'interact'].includes(permission), 'negative probe permission is invalid');
   await chrome(harness, ({ cardId, ownerTag }) => {
     const card = document.getElementById(cardId);
@@ -2373,15 +2374,16 @@ async function selectOwnedProbeSource(harness, thread, cardId, ownerTag, permiss
   await harness.click(permission === 'interact'
     ? '.egd-browser-menu-item[title^="이 Browser만 이번 Chat"]'
     : '.egd-browser-menu-item[title^="현재 Browser의 읽기 자료만"]');
-  const source = await chrome(harness, ({ threadId, cardId, ownerTag }) => {
+  const source = await chrome(harness, ({ threadId, cardId, ownerTag, additionalOwnedCardId }) => {
     const card = document.getElementById(cardId);
     if (!card?.isConnected || card.dataset.egdeskQaNegativeOwner !== ownerTag)
       throw new Error('Browser probe selection escaped the owned fixture Card');
     const selected = window.__egdesk.browserAgentTools.selectedSources(threadId);
-    if (selected.length !== 1 || selected[0].sourceRef?.viewId !== cardId)
+    const expected = [cardId, ...(additionalOwnedCardId ? [additionalOwnedCardId] : [])].sort();
+    if (JSON.stringify(selected.map(item => item.sourceRef?.viewId).sort()) !== JSON.stringify(expected))
       throw new Error('negative probe selected more than the owned Browser Card');
-    return selected[0];
-  }, { threadId: thread.id, cardId, ownerTag });
+    return selected.find(item => item.sourceRef?.viewId === cardId);
+  }, { threadId: thread.id, cardId, ownerTag, additionalOwnedCardId });
   assert.equal(source.browserToolPermission, permission,
     'negative probe UI permission differs from the selected menu action');
   assert.equal(source.selectedByUser, true, 'negative probe lacks the rendered UI selection');
@@ -2450,6 +2452,271 @@ async function expectNegativeCode(operation, codes, label) {
       `${label} returned ${error?.code || error?.message || 'unknown'} instead of ${codes.join('/')}`);
     return error.code;
   }
+}
+
+export function browserCameraSurfacePlan(worldRect, viewport) {
+  const { x, y, width, height } = worldRect || {};
+  assert.ok([x, y, width, height, viewport?.width, viewport?.height].every(Number.isFinite)
+    && width > 0 && height > 0 && viewport.width > 160 && viewport.height > 160,
+  'camera surface-isolation fixture has no usable measured geometry');
+  const zoom = Math.min(1, (viewport.width - 160) / width, (viewport.height - 160) / height);
+  assert.ok(zoom >= 0.02, 'camera surface-isolation fixture cannot fit the current viewport');
+  const offscreenZoom = zoom * 0.8;
+  return {
+    visible: { zoom, pan: { x: (viewport.width - width * zoom) / 2 - x * zoom,
+      y: (viewport.height - height * zoom) / 2 - y * zoom } },
+    offscreen: { zoom: offscreenZoom,
+      pan: { x: -64 - (x + width) * offscreenZoom, y: -64 - (y + height) * offscreenZoom } },
+  };
+}
+
+async function ownedCameraSurfaceSnapshot(harness, cardId, ownerTag) {
+  return chrome(harness, ({ cardId, ownerTag }) => {
+    const api = window.__egdesk;
+    const card = document.getElementById(cardId);
+    if (!card?.isConnected || card.dataset.egdeskQaNegativeOwner !== ownerTag)
+      throw new Error('camera surface-isolation escaped its owned Card');
+    const browser = card._browserControls.toolBrowser();
+    const rect = card.getBoundingClientRect();
+    const style = getComputedStyle(card);
+    const px = (value, fallback) => Number.isFinite(parseFloat(value)) ? parseFloat(value) : fallback;
+    return { cardId, browsingContextId: String(browser.browsingContext.id),
+      worldRect: { x: px(card.style.left, card.offsetLeft), y: px(card.style.top, card.offsetTop),
+        width: card.offsetWidth, height: card.offsetHeight },
+      geometryStyle: { left: card.style.left, top: card.style.top, width: card.style.width, height: card.style.height },
+      rect: { left: rect.left, top: rect.top, right: rect.right, bottom: rect.bottom,
+        width: rect.width, height: rect.height },
+      viewport: { width: window.innerWidth, height: window.innerHeight },
+      display: style.display, visibility: style.visibility,
+      camera: { pan: { ...api.state.panTarget }, zoom: api.state.zoomTarget,
+        actualPan: { ...api.state.pan }, actualZoom: api.state.zoom } };
+  }, { cardId, ownerTag });
+}
+
+export function assertBrowserCameraSurfaceIsolation(proof) {
+  assert.equal(proof?.scope, 'browser-camera-surface-isolation');
+  assert.equal(proof.inputRoute, 'dom-click-no-pointerdown');
+  assert.equal(proof.coordinateInputVerified, false);
+  assert.deepEqual(proof.untested, ['frame-targeting', 'page-zoom', 'device-pixel-ratio']);
+  assert.equal(proof.simulatorOnly, true);
+  assert.equal(proof.nativeModelOriginVerified, false);
+  assert.equal(proof.providerTurns, 0);
+  assert.equal(proof.externalEffectVerified, false);
+  assertBrowserFixtureConfig(proof.fixture?.url, proof.fixture?.marker);
+  assert.ok(proof.cardId && proof.cardId !== proof.priorCardId && proof.sourceId && proof.cardEpoch
+    && proof.syntheticRunId?.startsWith('qa-browser-simulator-'), 'camera case needs a separately owned Card');
+  const { visible, offscreen, afterClick, observed, afterObserved, beforeAttempt, afterAttempt, receipt } = proof;
+  browserCameraSurfacePlan(visible?.worldRect, visible?.viewport);
+  const validRect = rect => rect && ['left', 'top', 'right', 'bottom', 'width', 'height']
+    .every(key => Number.isFinite(rect[key])) && rect.width > 0 && rect.height > 0
+    && Math.abs(rect.right - rect.left - rect.width) < 0.01
+    && Math.abs(rect.bottom - rect.top - rect.height) < 0.01;
+  const isOffscreen = surface => surface.rect.right <= 0 || surface.rect.bottom <= 0
+    || surface.rect.left >= surface.viewport.width || surface.rect.top >= surface.viewport.height;
+  for (const surface of [visible, offscreen, afterClick]) {
+    assert.ok(surface?.cardId === proof.cardId && /^[1-9][0-9]*$/.test(surface.browsingContextId)
+      && validRect(surface.rect)
+      && surface.viewport?.width > 0 && surface.viewport?.height > 0,
+    'camera case lacks measured Card/context/screen rectangles');
+    assert.equal(surface.browsingContextId, visible.browsingContextId, 'camera change replaced the browsing context');
+    assert.deepEqual(surface.worldRect, visible.worldRect, 'camera case moved or resized the Card world rect');
+    assert.deepEqual(surface.geometryStyle, visible.geometryStyle, 'camera case changed Card geometry styles');
+    assert.deepEqual(surface.viewport, visible.viewport, 'camera case resized the outer viewport');
+    assert.deepEqual(surface.camera.actualPan, surface.camera.pan, 'camera surface sample was still panning');
+    assert.equal(surface.camera.actualZoom, surface.camera.zoom, 'camera surface sample was still zooming');
+  }
+  assert.ok(visible.display !== 'none' && visible.visibility !== 'hidden'
+    && visible.rect.left >= 0 && visible.rect.top >= 0
+    && visible.rect.right <= visible.viewport.width && visible.rect.bottom <= visible.viewport.height,
+  'camera case lacks an actually visible baseline');
+  assert.ok(isOffscreen(offscreen) && isOffscreen(afterClick), 'camera case did not observe an offscreen Card');
+  assert.notDeepEqual(offscreen.camera.pan, visible.camera.pan, 'camera case did not pan');
+  assert.notEqual(offscreen.camera.zoom, visible.camera.zoom, 'camera case did not zoom');
+  assert.deepEqual(afterClick.camera, offscreen.camera, 'guarded DOM click moved the camera');
+  assert.deepEqual(proof.beforeClickSurface, offscreen, 'camera/context changed after the offscreen observation');
+  for (const observation of [proof.visibleObserved, observed, afterObserved]) {
+    assert.ok(observation?.status === 'observed' && observation.cardId === proof.cardId,
+      'camera case lacks a successful observation of its Card');
+  }
+  assert.ok(proof.visibleObserved?.observationId && observed?.observationId && afterObserved?.observationId
+    && new Set([proof.visibleObserved.observationId, observed.observationId, afterObserved.observationId]).size === 3,
+  'camera case reused an observation across camera/action changes');
+  const documentId = proof.visibleObserved.snapshot?.documentId;
+  for (const snapshot of [proof.visibleObserved.snapshot, observed.snapshot, beforeAttempt,
+    receipt?.after, afterObserved.snapshot, afterAttempt]) {
+    assert.ok(snapshot?.cardId === proof.cardId && snapshot.documentId === documentId && documentId
+      && snapshot.url === proof.fixture.url && snapshot.text?.includes(proof.fixture.marker),
+    'camera case replaced the actor document or escaped its local fixture');
+    assert.deepEqual(snapshot.viewport, proof.visibleObserved.snapshot.viewport,
+      'camera-only case changed the content viewport');
+  }
+  const requests = proof.uiRequests;
+  assert.ok(Array.isArray(requests) && requests.every(request => request.cardId === proof.cardId
+    && request.targetCardEpoch === proof.cardEpoch && request.runId === proof.syntheticRunId
+    && request.requestId && request.responseRequestId === request.requestId
+    && Number.isFinite(request.attemptedAt) && request.respondedAt >= request.attemptedAt),
+  'camera case lost request/run/Card correlation');
+  const acts = requests.filter(request => request.kind === 'act');
+  assert.equal(acts.length, 1, 'camera case must dispatch exactly one guarded click');
+  const acted = acts[0];
+  assert.ok(acted.status === 'acted' && acted.action?.type === 'click');
+  const target = observed.snapshot.interactiveElements?.find(item => item.ref === acted.action.ref);
+  assert.ok(target?.tag === 'button' && target.label === 'Reveal QA details' && target.disabled === false);
+  assertProbeGuard(acted, observed.snapshot, target);
+  assertProbeActionDiagnostic(acted, proof.cardId, 'post-actor', 'acted');
+  assert.ok(requests.slice(requests.indexOf(acted) + 1).some(request => request.kind === 'observe'
+    && request.status === 'observed' && request.attemptedAt >= acted.respondedAt),
+  'camera case lacks post-click observation');
+  assert.ok(receipt.status === 'postcondition-observed' && receipt.cardId === proof.cardId
+    && receipt.action === 'click' && receipt.externalEffectVerified === false
+    && receipt.dispatchReceipt?.actor === 'JSWindowActor' && receipt.dispatchReceipt.eventDispatched === true
+    && receipt.dispatchReceipt.documentStillCurrent === true
+    && receipt.dispatchReceipt.clickInputRoute === 'dom-click-no-pointerdown'
+    && receipt.dispatchReceipt.targetClickObserved === true, 'camera case lacks the scoped DOM click receipt');
+  assert.deepEqual(receipt.postcondition,
+    { kind: 'visible-text', value: 'QA click count: 1', matched: true, wasAlreadyTrue: false });
+  for (const snapshot of [proof.visibleObserved.snapshot, observed.snapshot, beforeAttempt])
+    assert.ok(snapshot.text.includes('QA click count: 0') && !snapshot.text.includes('QA click count: 1'),
+      'camera setup already changed the fixture click count');
+  for (const snapshot of [receipt.after, afterObserved.snapshot, afterAttempt])
+    assert.ok(snapshot.text.includes('QA click count: 1') && !snapshot.text.includes('QA click count: 0'),
+      'camera click count was not independently read back');
+  const before = beforeAttempt.qaDiagnostics, after = afterAttempt.qaDiagnostics;
+  assert.ok(before?.kind === 'actor-perform-entry' && after?.kind === 'actor-perform-entry'
+    && before.actorDocumentId === documentId && after.actorDocumentId === documentId
+    && before.performCalls === 0 && after.performCalls === 1,
+  'camera case did not enter the fresh actor perform dispatcher exactly once');
+  assert.deepEqual(proof.restoredCamera.pan, proof.originalCamera.pan, 'camera pan was not restored');
+  assert.equal(proof.restoredCamera.zoom, proof.originalCamera.zoom, 'camera zoom was not restored');
+  assert.deepEqual(proof.restoredCamera.actualPan, proof.originalCamera.pan, 'restored camera is still panning');
+  assert.equal(proof.restoredCamera.actualZoom, proof.originalCamera.zoom, 'restored camera is still zooming');
+  assert.deepEqual(proof.selectionAfter, proof.selectionBefore, 'camera case left an extra selected source');
+  assert.ok(proof.priorFixture?.cardId === proof.priorCardId && proof.priorFixture.beforeAttempt
+    && proof.priorFixture.afterAttempt && proof.priorFixture.actorDocumentId,
+  'camera case lacks independent earlier-fixture evidence');
+  assert.deepEqual(proof.priorFixture.afterAttempt, proof.priorFixture.beforeAttempt,
+    'camera case changed the earlier owned fixture');
+  return true;
+}
+
+export async function runBrowserCameraSurfaceIsolation(harness, fixture, deadlineMs, thread,
+  priorCardId, priorOwnerTag, result = {}) {
+  assertBeforeDeadline(deadlineMs);
+  const saved = await chrome(harness, threadId => {
+    const api = window.__egdesk;
+    return { camera: { pan: { ...api.state.panTarget }, zoom: api.state.zoomTarget },
+      selection: api.browserAgentTools.selectedSources(threadId).map(item =>
+        ({ id: item.id, cardId: item.sourceRef.viewId, permission: item.browserToolPermission })) };
+  }, thread.id);
+  const priorFixture = await ownedNegativeBrowserSnapshot(harness, priorCardId, priorOwnerTag, fixture);
+  const ownerTag = probeId('lane-c-camera-owner');
+  const proof = { scope: 'browser-camera-surface-isolation', inputRoute: 'dom-click-no-pointerdown',
+    coordinateInputVerified: false, untested: ['frame-targeting', 'page-zoom', 'device-pixel-ratio'],
+    simulatorOnly: true, nativeModelOriginVerified: false, providerTurns: 0, externalEffectVerified: false,
+    fixture, priorCardId, originalCamera: saved.camera, selectionBefore: saved.selection };
+  result.browserCameraSurfaceIsolation = proof;
+  let unit;
+  try {
+    proof.cardId = await chrome(harness, ({ url, ownerTag }) => {
+      const card = window.__egdesk.cardRuntime.openBrowserCard(url, { openMode: 'new' });
+      card.dataset.egdeskQaNegativeOwner = ownerTag;
+      return card.id;
+    }, { url: fixture.url, ownerTag });
+    assert.notEqual(proof.cardId, priorCardId, 'camera case reused the earlier fixture Card');
+    await waitUntil(async () => {
+      assertBeforeDeadline(deadlineMs);
+      try { return await ownedNegativeBrowserSnapshot(harness, proof.cardId, ownerTag, fixture); }
+      catch { return null; }
+    }, Boolean, { timeoutMs: Math.min(15000, deadlineMs - Date.now()), intervalMs: 200 });
+    const initialSurface = await ownedCameraSurfaceSnapshot(harness, proof.cardId, ownerTag);
+    const plan = browserCameraSurfacePlan(initialSurface.worldRect, initialSurface.viewport);
+    const setCamera = async camera => {
+      assertBeforeDeadline(deadlineMs);
+      await chrome(harness, camera => {
+        window.__egdesk.state.setCanvasViewportTarget(camera, { immediate: true });
+        return true;
+      }, camera);
+    };
+    await setCamera(plan.visible);
+    const source = await selectOwnedProbeSource(harness, thread, proof.cardId, ownerTag, 'interact', fixture, priorCardId);
+    unit = await newNegativeService(harness, thread, proof.cardId, source, deadlineMs);
+    Object.assign(proof, { sourceId: source.id, cardEpoch: source.browserToolIdentity.cardEpoch,
+      syntheticRunId: unit.run.runId });
+    await unit.service.bind(unit.run, unit.prepared);
+    const observe = () => unit.service.dispatch(unit.run, { tool: BROWSER_TOOL_NAMES.observe,
+      callId: probeId('qa-camera-observe'), arguments: { cardId: proof.cardId } });
+    proof.visibleObserved = await observe();
+    proof.visible = await ownedCameraSurfaceSnapshot(harness, proof.cardId, ownerTag);
+    assert.ok(proof.visible.display !== 'none' && proof.visible.visibility !== 'hidden'
+      && proof.visible.rect.width > 0 && proof.visible.rect.height > 0
+      && proof.visible.rect.left >= 0 && proof.visible.rect.top >= 0
+      && proof.visible.rect.right <= proof.visible.viewport.width
+      && proof.visible.rect.bottom <= proof.visible.viewport.height, 'actual Card baseline is not visible');
+    await setCamera(plan.offscreen);
+    proof.offscreen = await ownedCameraSurfaceSnapshot(harness, proof.cardId, ownerTag);
+    const rect = proof.offscreen.rect;
+    assert.ok(rect.right <= 0 || rect.bottom <= 0 || rect.left >= proof.offscreen.viewport.width
+      || rect.top >= proof.offscreen.viewport.height, 'actual Card rect did not move offscreen');
+    proof.observed = await observe();
+    proof.beforeAttempt = (await ownedNegativeBrowserSnapshot(harness, proof.cardId, ownerTag, fixture)).snapshot;
+    assert.equal(proof.offscreen.browsingContextId, proof.visible.browsingContextId,
+      'camera change replaced the browsing context before click');
+    assert.deepEqual(proof.offscreen.worldRect, proof.visible.worldRect,
+      'camera change moved or resized the Card before click');
+    assert.deepEqual(proof.offscreen.geometryStyle, proof.visible.geometryStyle,
+      'camera change modified Card geometry styles before click');
+    for (const snapshot of [proof.observed.snapshot, proof.beforeAttempt]) {
+      assert.equal(snapshot.documentId, proof.visibleObserved.snapshot.documentId,
+        'camera change replaced the actor document before click');
+      assert.deepEqual(snapshot.viewport, proof.visibleObserved.snapshot.viewport,
+        'camera change modified the content viewport before click');
+      assert.ok(snapshot.text.includes('QA click count: 0'), 'camera setup already clicked the fixture');
+    }
+    const target = proof.observed.snapshot.interactiveElements.find(item => item.label === 'Reveal QA details');
+    assert.ok(target?.ref && target.tag === 'button' && !target.disabled, 'offscreen fixture button is unavailable');
+    proof.beforeClickSurface = await ownedCameraSurfaceSnapshot(harness, proof.cardId, ownerTag);
+    assert.deepEqual(proof.beforeClickSurface, proof.offscreen,
+      'camera/context changed after the offscreen observation');
+    proof.receipt = await unit.service.dispatch(unit.run, { tool: BROWSER_TOOL_NAMES.click,
+      callId: probeId('qa-camera-click'), arguments: { cardId: proof.cardId,
+        observationId: proof.observed.observationId, expectedRevision: proof.observed.snapshot.revision,
+        ref: target.ref, expectedTarget: target, postcondition: { kind: 'visible-text', value: 'QA click count: 1' } } });
+    proof.afterObserved = await observe();
+    proof.afterAttempt = (await ownedNegativeBrowserSnapshot(harness, proof.cardId, ownerTag, fixture)).snapshot;
+    proof.afterClick = await ownedCameraSurfaceSnapshot(harness, proof.cardId, ownerTag);
+    proof.uiRequests = unit.trace.requests.map(item => ({ ...item }));
+    proof.priorFixture = { cardId: priorCardId, ...assertNegativeNoEffect(priorFixture,
+      await ownedNegativeBrowserSnapshot(harness, priorCardId, priorOwnerTag, fixture), 'camera surface-isolation') };
+  } finally {
+    try {
+      if (unit) {
+        const receipts = await unit.service.cancelRun(unit.run);
+        assert.ok(receipts.some(item => item.status === 'fulfilled' && item.value?.status === 'cancelled'),
+          'camera case did not cancel its synthetic run');
+      }
+    } finally {
+      const restored = await chrome(harness, ({ camera, cardId, sourceId, ownerTag, threadId }) => {
+        const api = window.__egdesk;
+        try {
+          const card = cardId && document.getElementById(cardId);
+          if (sourceId) api.codexBridge.removeInputSource(threadId, sourceId);
+          else if (card?.dataset.egdeskQaNegativeOwner === ownerTag) {
+            for (const source of api.browserAgentTools.selectedSources(threadId)) {
+              if (source.sourceRef?.viewId === cardId) api.codexBridge.removeInputSource(threadId, source.id);
+            }
+          }
+        } finally { api.state.setCanvasViewportTarget(camera, { immediate: true }); }
+        return { camera: { pan: { ...api.state.panTarget }, zoom: api.state.zoomTarget,
+          actualPan: { ...api.state.pan }, actualZoom: api.state.zoom },
+        selection: api.browserAgentTools.selectedSources(threadId).map(item =>
+          ({ id: item.id, cardId: item.sourceRef.viewId, permission: item.browserToolPermission })) };
+      }, { camera: saved.camera, cardId: proof.cardId, sourceId: proof.sourceId, ownerTag, threadId: thread.id });
+      proof.restoredCamera = restored.camera;
+      proof.selectionAfter = restored.selection;
+    }
+  }
+  assertBrowserCameraSurfaceIsolation(proof);
+  return proof;
 }
 
 async function runBrowserNegativeProbes(harness, fixture, deadlineMs, result) {
@@ -2869,6 +3136,10 @@ async function runBrowserNegativeProbes(harness, fixture, deadlineMs, result) {
     } finally { await cancel(unit); }
   }
 
+  result.browserNegativeStage = 'camera-surface-isolation';
+  const cameraSurfaceIsolation = await runBrowserCameraSurfaceIsolation(
+    harness, fixture, deadlineMs, thread, cardId, ownerTag, result);
+
   const final = await chrome(harness, initialCards => ({
     cards: initialCards.map(item => {
       const card = document.getElementById(item.id);
@@ -2889,6 +3160,7 @@ async function runBrowserNegativeProbes(harness, fixture, deadlineMs, result) {
     providerTurns: 0, actorPhysicalDispatchCounterVerified: false,
     actorPerformCounterVerified: true, actorPerformPositiveControl,
     cardId, fixture: { url: fixture.url, marker: fixture.marker }, probes, guardedActorPositiveControls,
+    cameraSurfaceIsolation,
     requestsScopedToOwnedCard: true,
     preexistingBrowserCardStylesUnchanged: true, canvasPanZoomUnchanged: true };
   assertBrowserNegativeProbeResults(proof);
