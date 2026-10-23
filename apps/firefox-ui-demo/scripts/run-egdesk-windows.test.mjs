@@ -5,7 +5,8 @@ import os from 'node:os';
 import path from 'node:path';
 import { normalFirefoxPreferences, mergeNormalPreferences, normalChildEnvironment,
   assertPersistentProfile, requestedNormalProfile, safeDestination, profileIsRunning, assertHealthyBridge,
-  validateBridgeReceipt, waitForHealthyBridge, ensureStorage } from './run-egdesk-windows.mjs';
+  validateBridgeReceipt, waitForHealthyBridge, ensureStorage, superviseBridge, superviseWindowsBridge,
+  SUPERVISE_BRIDGE_FLAG } from './run-egdesk-windows.mjs';
 import { isOwnedAndPrivate } from '../helper/egdesk-private-files.mjs';
 
 test('new Windows persistent data is private at creation and existing private content is preserved',
@@ -145,4 +146,61 @@ test('startup polling is bounded and can be tested without launching any process
   await assert.rejects(waitForHealthyBridge({ now: () => now, pause: async ms => { now += ms; },
     read: async () => { throw new Error('occupied incompatible server'); }, timeoutMs: 1000 }), /within 1000ms/);
   assert.equal(now, 1000);
+});
+
+function fakeBridgeRuns(codes, { runMs = 10 } = {}) {
+  const clock = { now: 0 }, waits = [], starts = [];
+  const start = async () => {
+    starts.push(clock.now);
+    const code = codes[Math.min(starts.length - 1, codes.length - 1)];
+    clock.now += typeof runMs === 'function' ? runMs(starts.length) : runMs;
+    if (code instanceof Error) throw code;
+    return code;
+  };
+  return { clock, waits, starts, options: { start, now: () => clock.now, delay: failures => failures * 100,
+    pause: async ms => { waits.push(ms); clock.now += ms; } } };
+}
+
+test('bridge supervisor restarts unexpected exits with growing waits and ends on the bridge\'s clean exit', async () => {
+  const run = fakeBridgeRuns([1, null, new Error('spawn failed'), 0]);
+  assert.deepEqual(await superviseBridge(run.options).done, { status: 'exited', code: 0, failures: 3 });
+  assert.equal(run.starts.length, 4);
+  assert.deepEqual(run.waits, [100, 200, 300]);
+});
+
+test('bridge supervisor stops after maxRestarts failures in a row, and a stable run clears the count', async () => {
+  const failing = fakeBridgeRuns([1]);
+  assert.deepEqual(await superviseBridge({ ...failing.options, maxRestarts: 2 }).done, { status: 'gave-up', code: 1, failures: 3 });
+  assert.equal(failing.starts.length, 3);
+  const stable = fakeBridgeRuns([1, 1, 1, 1, 0], { runMs: attempt => (attempt === 3 ? 61000 : 10) });
+  const result = await superviseBridge({ ...stable.options, maxRestarts: 2, stableMs: 60000 }).done;
+  assert.deepEqual(result, { status: 'exited', code: 0, failures: 2 });
+  assert.deepEqual(stable.waits, [100, 200, 100, 200]);
+});
+
+test('stopping the supervisor ends the loop at once and never signals the running bridge', async () => {
+  let release, starts = 0;
+  const waiting = superviseBridge({ start: async () => { starts += 1; return 1; },
+    pause: () => new Promise(resolve => { release = resolve; }), delay: () => 30000 });
+  await new Promise(resolve => setImmediate(resolve));
+  waiting.stop();
+  assert.deepEqual(await waiting.done, { status: 'stopped', code: 1, failures: 1 });
+  assert.equal(starts, 1);
+  release();
+  let exit;
+  const running = superviseBridge({ start: () => new Promise(resolve => { exit = resolve; }) });
+  await new Promise(resolve => setImmediate(resolve));
+  running.stop();
+  exit(1);
+  assert.deepEqual(await running.done, { status: 'stopped', code: 1, failures: 0 });
+});
+
+test('the Windows launcher starts the bridge through its supervisor, which refuses to run elsewhere', async () => {
+  const source = fs.readFileSync(new URL('./run-egdesk-windows.mjs', import.meta.url), 'utf8');
+  assert.equal(SUPERVISE_BRIDGE_FLAG, '--supervise-bridge');
+  assert.match(source, /detached\(process\.execPath, \[fileURLToPath\(import\.meta\.url\), SUPERVISE_BRIDGE_FLAG\], env, root, output\)/);
+  assert.doesNotMatch(source, /detached\(process\.execPath, \[bridgeEntry\]/);
+  assert.match(source, /spawn\(process\.execPath, \[bridgeEntry\], \{ env: process\.env, cwd: root, detached: true,/);
+  assert.doesNotMatch(source, /\.kill\(|process\.kill|taskkill/i);
+  if (process.platform !== 'win32') await assert.rejects(superviseWindowsBridge(), /only under the Windows launcher/);
 });

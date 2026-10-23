@@ -9,11 +9,13 @@ import { spawn, execFileSync } from 'node:child_process';
 import { fileURLToPath } from 'node:url';
 import { resolveCodexExecutable } from '../helper/egdesk-native-capabilities.mjs';
 import { isOwnedAndPrivate } from '../helper/egdesk-private-files.mjs';
+import { backoffDelayMs } from '../helper/codex-bridge-http.mjs';
 
 const repoRoot = fileURLToPath(new URL('../../../', import.meta.url));
 const appRoot = fileURLToPath(new URL('../', import.meta.url));
 const bridgeEntry = path.join(appRoot, 'helper', 'codex-bridge-server.mjs');
 const MANAGED = '// EG-Desk normal Windows launch preferences.';
+export const SUPERVISE_BRIDGE_FLAG = '--supervise-bridge';
 const info = target => { try { return fs.lstatSync(target); } catch (e) { if (e.code === 'ENOENT') return null; throw e; } };
 const within = (root, target) => target === root || target.startsWith(root + path.sep);
 const samePath = (a, b) => typeof a === 'string' && typeof b === 'string'
@@ -294,6 +296,82 @@ async function detached(executable, args, env, cwd, output) {
   } finally { fs.closeSync(fd); }
 }
 
+const appendEvent = logPath => (event, message = '') => fs.appendFileSync(logPath,
+  JSON.stringify({ at: new Date().toISOString(), event, message }) + '\n', { mode: 0o600 });
+
+// Keeps the bridge running. start() runs one bridge and resolves with its exit
+// code. Exit 0 is the bridge's own clean stop (shutdown signal, or another
+// bridge already owns :39218) and ends the loop; any other exit starts it
+// again after 1s, 2s, 4s … (at most 30s, jittered). A run of stableMs or longer
+// clears the count; more than maxRestarts failures in a row stops trying.
+// stop() ends the loop without signalling the running bridge or anything else.
+export function superviseBridge({ start, maxRestarts = 8, stableMs = 60000, now = Date.now,
+  pause = ms => new Promise(resolve => setTimeout(resolve, ms)), delay = backoffDelayMs, log = () => {} }) {
+  let stopping = false, stopped;
+  const stopRequest = new Promise(resolve => { stopped = resolve; });
+  const done = (async () => {
+    let failures = 0;
+    for (;;) {
+      const startedAt = now();
+      let code;
+      try { code = await start(); } catch { code = null; }
+      if (stopping) return { status: 'stopped', code, failures };
+      if (code === 0) return { status: 'exited', code, failures };
+      if (now() - startedAt >= stableMs) failures = 0;
+      failures += 1;
+      if (failures > maxRestarts) return { status: 'gave-up', code, failures };
+      const wait = delay(failures);
+      log('bridge-restart', 'exit ' + code + '; restart ' + failures + '/' + maxRestarts + ' in ' + wait + 'ms');
+      await Promise.race([pause(wait), stopRequest]);
+      if (stopping) return { status: 'stopped', code, failures };
+    }
+  })();
+  return { done, stop() { stopping = true; stopped(); } };
+}
+
+// Started detached by launchNormalWindows. Each bridge it starts is detached
+// too, so the bridge outlives a closed supervisor, and gets a fresh receipt so
+// the next launch can still prove it owns the running bridge.
+export async function superviseWindowsBridge() {
+  if (process.platform !== 'win32') throw new Error('The EG-Desk bridge supervisor runs only under the Windows launcher');
+  const dataDir = ensureStorage(path.join(process.env.LOCALAPPDATA || path.join(os.homedir(), 'AppData', 'Local'), 'EG-Desk'));
+  const logs = ensureStorage(path.join(dataDir, 'logs'));
+  const logPath = path.join(logs, 'windows-launcher.log');
+  const output = path.join(logs, 'codex-bridge.log');
+  const receiptPath = path.join(logs, 'windows-bridge-receipt.json');
+  for (const target of [logPath, output, receiptPath]) safeDestination(target, dataDir);
+  const log = appendEvent(logPath);
+  const root = fs.realpathSync.native(repoRoot), node = fs.realpathSync.native(process.execPath);
+  const start = () => new Promise((resolve, reject) => {
+    const fd = fs.openSync(output, 'a', 0o600);
+    let child;
+    try {
+      child = spawn(process.execPath, [bridgeEntry], { env: process.env, cwd: root, detached: true,
+        windowsHide: true, shell: false, stdio: ['ignore', fd, fd] });
+    } finally { fs.closeSync(fd); }
+    child.once('error', reject);
+    child.once('exit', code => resolve(code));
+    child.once('spawn', () => {
+      try {
+        const identity = windowsProcessIdentity(child.pid);
+        if (!identity?.startTime) throw new Error('Started bridge identity is unavailable');
+        writeManaged(receiptPath, JSON.stringify({ kind: 'egdesk-normal-windows-bridge-v1',
+          pid: child.pid, startTime: identity.startTime, repoRoot: root, dataDir, node }) + '\n', dataDir);
+        log('bridge-started');
+      } catch (error) { log('bridge-receipt-failed', error.message); }
+    });
+  });
+  const supervisor = superviseBridge({ start, log });
+  for (const signal of ['SIGINT', 'SIGTERM', 'SIGBREAK']) process.once(signal, () => {
+    supervisor.stop();
+    log('bridge-supervisor-stopped', 'the running bridge was left running');
+    process.exit(0);
+  });
+  const result = await supervisor.done;
+  log('bridge-supervisor-' + result.status, 'exit ' + result.code);
+  return result;
+}
+
 export async function launchNormalWindows({ args = process.argv.slice(2) } = {}) {
   if (process.platform !== 'win32' || Number(process.versions.node.split('.')[0]) < 24 || !isBuiltin('node:sqlite')) {
     throw new Error('This EG-Desk launcher requires Windows and Node.js 24+ with node:sqlite');
@@ -302,8 +380,7 @@ export async function launchNormalWindows({ args = process.argv.slice(2) } = {})
   const logs = ensureStorage(path.join(dataDir, 'logs'));
   const logPath = path.join(logs, 'windows-launcher.log');
   safeDestination(logPath, dataDir);
-  const log = (event, message = '') => fs.appendFileSync(logPath,
-    JSON.stringify({ at: new Date().toISOString(), event, message }) + '\n', { mode: 0o600 });
+  const log = appendEvent(logPath);
   let claim = null;
   try {
     const profile = assertPersistentProfile(requestedNormalProfile(args));
@@ -345,11 +422,10 @@ export async function launchNormalWindows({ args = process.argv.slice(2) } = {})
       await Promise.all([requireFreePort(39218), requireFreePort(39219)]);
       const output = path.join(logs, 'codex-bridge.log');
       safeDestination(output, dataDir);
-      const pid = await detached(process.execPath, [bridgeEntry], env, root, output);
-      const identity = windowsProcessIdentity(pid);
-      if (!identity?.startTime) throw new Error('Started bridge identity is unavailable; inspect codex-bridge.log');
-      writeManaged(receiptPath, JSON.stringify({ kind: 'egdesk-normal-windows-bridge-v1',
-        pid, startTime: identity.startTime, repoRoot: root, dataDir, node: expected.node }) + '\n', dataDir);
+      // The supervisor starts the bridge, writes its receipt and starts it
+      // again after an unexpected exit.
+      const pid = await detached(process.execPath, [fileURLToPath(import.meta.url), SUPERVISE_BRIDGE_FLAG], env, root, output);
+      if (!windowsProcessIdentity(pid)?.startTime) throw new Error('Started bridge supervisor is unavailable; inspect codex-bridge.log');
       await waitForHealthyBridge();
       const receipt = JSON.parse(fs.readFileSync(receiptPath, 'utf8'));
       if (!validateBridgeReceipt(receipt, windowsProcessIdentity(), expected)) throw new Error('Ready bridge port belongs to another process');
@@ -374,6 +450,7 @@ export async function launchNormalWindows({ args = process.argv.slice(2) } = {})
 }
 
 if (process.argv[1] && path.resolve(process.argv[1]) === fileURLToPath(import.meta.url)) {
-  launchNormalWindows().then(result => process.stdout.write(JSON.stringify(result) + '\n'))
+  (process.argv[2] === SUPERVISE_BRIDGE_FLAG ? superviseWindowsBridge() : launchNormalWindows())
+    .then(result => process.stdout.write(JSON.stringify(result) + '\n'))
     .catch(error => { console.error(error.message); process.exitCode = 1; });
 }

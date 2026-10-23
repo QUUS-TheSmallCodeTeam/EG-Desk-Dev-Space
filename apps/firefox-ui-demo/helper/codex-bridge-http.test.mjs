@@ -3,7 +3,7 @@ import assert from 'node:assert/strict'
 import { Readable } from 'node:stream'
 import { rm } from 'node:fs/promises'
 import { readFile } from 'node:fs/promises'
-import { createChatHttpHandler, createRateLimitSync, guardBridgeRequest, readJsonBody, setBridgeCors } from './codex-bridge-http.mjs'
+import { backoffDelayMs, createChatHttpHandler, createRateLimitSync, createReconnectBackoff, guardBridgeRequest, readJsonBody, setBridgeCors } from './codex-bridge-http.mjs'
 import { CodexChatRuntime } from './codex-chat-runtime.mjs'
 import { openChatStore } from './egdesk-chat-store.mjs'
 import { openProfileStore } from './egdesk-profile-store.mjs'
@@ -539,4 +539,63 @@ test('bridge mounts Agent profiles, plan usage and PUT preflight in the document
   at("rateLimits: identityChanged || !normalized.isLoggedIn ? null : authState.rateLimits,")
   at("case 'account/rateLimits/updated':")
   assert.ok(at("case 'turn/completed':") < at('void rateLimitSync.refresh({ force: true })'))
+})
+
+test('app-server reconnect waits 1s, 2s, 4s … capped at 30s, and jitter only shortens the wait', () => {
+  const steady = { random: () => 0 }
+  assert.deepEqual([1, 2, 3, 4, 5, 6, 7, 40, 5000].map(failures => backoffDelayMs(failures, steady)), [1000, 2000, 4000, 8000, 16000, 30000, 30000, 30000, 30000])
+  for (const failures of [0, -3, NaN, undefined, 'x']) assert.equal(backoffDelayMs(failures, steady), 1000)
+  for (const failures of [1, 3, 6, 50]) {
+    const base = backoffDelayMs(failures, steady)
+    const shortest = backoffDelayMs(failures, { random: () => 0.999999 })
+    assert.ok(shortest >= Math.floor(base * 0.8) && shortest <= base, `${failures}: ${shortest} of ${base}`)
+  }
+  assert.equal(backoffDelayMs(3, { initialMs: 500, maxMs: 1500, random: () => 0 }), 1500)
+})
+
+test('reconnect state counts consecutive failures, shows only count and next time, and a ready connection resets it', () => {
+  let clock = 10_000
+  const backoff = createReconnectBackoff({ now: () => clock, random: () => 0 })
+  assert.deepEqual(backoff.snapshot(), { consecutiveFailures: 0, nextAttemptAt: null })
+  assert.deepEqual([backoff.next(), backoff.next(), backoff.next()], [1000, 2000, 4000])
+  assert.deepEqual(backoff.snapshot(), { consecutiveFailures: 3, nextAttemptAt: 14_000 })
+  clock = 14_000
+  backoff.attempting()
+  assert.deepEqual(backoff.snapshot(), { consecutiveFailures: 3, nextAttemptAt: null })
+  backoff.reset()
+  assert.deepEqual(backoff.snapshot(), { consecutiveFailures: 0, nextAttemptAt: null })
+  assert.equal(backoff.next(), 1000)
+  assert.deepEqual(Object.keys(backoff.snapshot()), ['consecutiveFailures', 'nextAttemptAt'])
+})
+
+test('/v1/state keeps every existing field in order and adds bridge build and reconnect state', async () => {
+  const source = await readFile(new URL('./codex-bridge-server.mjs', import.meta.url), 'utf8')
+  const route = source.indexOf("if (req.method === 'GET' && route === '/v1/state') {")
+  assert.notEqual(route, -1)
+  const body = source.indexOf('    sendJson(res, 200, {', route)
+  const end = source.indexOf('\n    })\n    return\n', body)
+  assert.ok(route < body && body < end)
+  const block = source.slice(body, end)
+  assert.deepEqual([...block.matchAll(/^ {6}([A-Za-z]\w*)(?=[:,])/gm)].map(match => match[1]), [
+    'protocolVersion', 'provider', 'appServerReady', 'chatStorageReady', 'profileStorageReady', 'native',
+    'engineConfiguration', 'memoryIsolation', 'node', 'auth', 'chat', 'capabilities',
+    'bridge', 'appServerReconnect',
+  ])
+  assert.deepEqual([...block.matchAll(/^ {8}([A-Za-z]\w*)(?=:)/gm)].map(match => match[1]), ['auth', 'chat', 'context', 'files', 'profiles'])
+  assert.ok(block.includes('bridge: bridgeBuildState(bridgeBuild, expectedOverlayBuild(req.headers, url.searchParams)),'))
+  assert.ok(block.includes('appServerReconnect: appServerBackoff.snapshot(),'))
+})
+
+test('bridge hashes its source once at start, backs off app-server reconnects and resets on a ready connection', async () => {
+  const source = await readFile(new URL('./codex-bridge-server.mjs', import.meta.url), 'utf8')
+  const at = text => { const index = source.indexOf(text); assert.notEqual(index, -1, `missing server marker: ${text}`); return index }
+  assert.equal(source.split('startBridgeBuild(').length, 2, 'the build hash is computed exactly once')
+  assert.ok(at('const bridgeBuild = startBridgeBuild()') < at('const bridgeServer = createServer('))
+  const schedule = source.slice(at('function scheduleAppServerReconnect() {'), at('function spawnAppServer() {'))
+  assert.match(schedule, /appServerBackoff\.attempting\(\)\n {4}connectToAppServer\(\)\n {2}\}, appServerBackoff\.next\(\)\)/)
+  assert.doesNotMatch(schedule, /\}, \d+\)/)
+  const open = source.slice(at('socket.onopen = async () => {'), at('socket.onmessage = event => {'))
+  assert.ok(open.indexOf('appServerReady = true') < open.indexOf('appServerBackoff.reset()'))
+  assert.equal(source.split('appServerBackoff.reset()').length, 2)
+  at("'Access-Control-Allow-Headers': 'Content-Type, X-EGDesk-Overlay-Build',")
 })

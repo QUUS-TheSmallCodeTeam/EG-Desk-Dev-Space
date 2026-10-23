@@ -177,3 +177,34 @@ export function createRateLimitSync({ request, auth, ready = () => true, update,
   }
   return { refresh, notify }
 }
+
+/**
+ * Wait before reconnect attempt `failures` (1 = first retry): 1s, 2s, 4s …
+ * capped at maxMs, shortened by up to `jitter` of itself so restarted
+ * clients do not retry in step. random() → [0, 1).
+ */
+export function backoffDelayMs(failures, { initialMs = 1000, maxMs = 30_000, jitter = 0.2, random = Math.random } = {}) {
+  const step = Math.max(1, Math.floor(Number(failures) || 1))
+  const base = Math.min(maxMs, initialMs * 2 ** Math.min(step - 1, 30))
+  return Math.max(0, Math.round(base - base * jitter * random()))
+}
+
+/**
+ * Consecutive app-server reconnect failures for /v1/state: a count and the
+ * next attempt time only, never the failure text. reset() after a ready
+ * connection starts the next loss again at the initial delay.
+ */
+export function createReconnectBackoff({ now = Date.now, ...delay } = {}) {
+  let failures = 0, nextAttemptAt = null
+  return {
+    next() {
+      failures += 1
+      const ms = backoffDelayMs(failures, delay)
+      nextAttemptAt = now() + ms
+      return ms
+    },
+    attempting() { nextAttemptAt = null },
+    reset() { failures = 0; nextAttemptAt = null },
+    snapshot() { return { consecutiveFailures: failures, nextAttemptAt } },
+  }
+}

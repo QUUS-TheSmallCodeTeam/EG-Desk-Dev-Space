@@ -8,7 +8,8 @@ import { BrowserToolTransport } from './codex-browser-tool-transport.mjs'
 import { createCodexBrowserToolProvider } from './codex-browser-tool-provider.mjs'
 import { fixtureBrowserQaFromEnv } from './codex-browser-fixture-qa.mjs'
 import { classifyPublicToolError } from './codex-tool-errors.mjs'
-import { createChatHttpHandler, createRateLimitSync, guardBridgeRequest, readJsonBody, sendJson, setBridgeCors } from './codex-bridge-http.mjs'
+import { createChatHttpHandler, createRateLimitSync, createReconnectBackoff, guardBridgeRequest, readJsonBody, sendJson, setBridgeCors } from './codex-bridge-http.mjs'
+import { bridgeBuildState, expectedOverlayBuild, startBridgeBuild } from './egdesk-bridge-build.mjs'
 import { BoundedSseClient } from './codex-bridge-sse.mjs'
 import { TerminalSessionRegistry } from './terminal-sessions.mjs'
 import { createTerminalSessionFactory } from './terminal-platform.mjs'
@@ -36,6 +37,9 @@ const APP_SERVER_WS_URL = `ws://127.0.0.1:${APP_SERVER_PORT}`
 const appServerLaunch = buildCodexAppServerLaunch({ env: process.env, listen: APP_SERVER_WS_URL })
 const BRIDGE_PROTOCOL_VERSION = 1
 const PROVIDER_ID = 'codex'
+// Hash of the helper modules this process loaded, read once at start, so the
+// overlay can tell a bridge left running on older source (/v1/state bridge).
+const bridgeBuild = startBridgeBuild()
 
 const clients = new Set()
 
@@ -43,6 +47,7 @@ let appServerProcess = null
 let appServerSocket = null
 let appServerReady = false
 let reconnectTimer = null
+const appServerBackoff = createReconnectBackoff()
 let loginPollTimer = null
 let rpc = null
 let nativeCapabilities = { executable: null, version: null, schemaVersion: NATIVE_SCHEMA_VERSION, schemaMatch: false, experimentalApi: true, dynamicTools: false, readerReadOnly: false, qaReadOnly: false }
@@ -347,10 +352,12 @@ function startLoginPolling() {
 
 function scheduleAppServerReconnect() {
   if (reconnectTimer || launchConfigBlocked) return
+  // 1s, 2s, 4s … up to 30s with jitter; a ready connection starts over at 1s.
   reconnectTimer = setTimeout(() => {
     reconnectTimer = null
+    appServerBackoff.attempting()
     connectToAppServer()
-  }, 1000)
+  }, appServerBackoff.next())
 }
 
 function spawnAppServer() {
@@ -431,6 +438,7 @@ async function connectToAppServer() {
         throw preflight.error
       }
       appServerReady = true
+      appServerBackoff.reset()
       chat.setConnection(true)
       await refreshAccountState()
     } catch (error) {
@@ -521,7 +529,7 @@ const bridgeServer = createServer(async (req, res) => {
 
   if (req.method === 'OPTIONS') {
     res.writeHead(204, {
-      'Access-Control-Allow-Headers': 'Content-Type',
+      'Access-Control-Allow-Headers': 'Content-Type, X-EGDesk-Overlay-Build',
       'Access-Control-Allow-Methods': 'GET,POST,PUT,OPTIONS'
     })
     res.end()
@@ -599,6 +607,8 @@ const bridgeServer = createServer(async (req, res) => {
         files: ['native-picker', 'scoped-read', 'managed-drafts', 'create-only-save-as'],
         profiles: profileStore ? ['local-store', 'revisions', 'run-binding'] : ['local-store-unavailable'],
       },
+      bridge: bridgeBuildState(bridgeBuild, expectedOverlayBuild(req.headers, url.searchParams)),
+      appServerReconnect: appServerBackoff.snapshot(),
     })
     return
   }
