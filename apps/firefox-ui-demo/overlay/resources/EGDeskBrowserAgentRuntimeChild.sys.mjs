@@ -54,6 +54,25 @@ export class EGDeskBrowserAgentRuntimeChild extends JSWindowActorChild {
     return true;
   }
 
+  isDisabled(node) {
+    if (node?.disabled === true) return true;
+    try { if (node?.matches?.(":disabled")) return true; } catch {}
+    for (let current = node; current; current = this.composedParent(current)) {
+      if (current.getAttribute?.("aria-disabled") === "true") return true;
+    }
+    return false;
+  }
+
+  isFillableControl(node) {
+    if (!node || node.readOnly || node.getAttribute?.("aria-readonly") === "true") return false;
+    const tag = String(node.tagName || "").toLowerCase();
+    if (tag === "textarea" || tag === "select") return true;
+    if (tag !== "input") return false;
+    const type = String(node.type || node.getAttribute?.("type") || "text").toLowerCase();
+    return ["text", "search", "email", "url", "tel", "number", "date", "time",
+      "datetime-local", "month", "week"].includes(type);
+  }
+
   roleFor(node) {
     const explicit = node.getAttribute?.("role");
     if (explicit) return explicit;
@@ -187,7 +206,7 @@ export class EGDeskBrowserAgentRuntimeChild extends JSWindowActorChild {
         tag: String(node.tagName || "").toLowerCase(),
         href: node.href || node.getAttribute?.("href") || "",
         value: this.valueFor(node),
-        disabled: !!node.disabled || node.getAttribute?.("aria-disabled") === "true",
+        disabled: this.isDisabled(node),
         bounds: {
           x: Math.round(rect.left),
           y: Math.round(rect.top),
@@ -322,10 +341,13 @@ export class EGDeskBrowserAgentRuntimeChild extends JSWindowActorChild {
       throw new Error("Browser action requires an observed element reference");
     }
     const target = this.nodeForRef(action.ref);
-    if (!target || !this.isVisible(target) || target.disabled || target.getAttribute?.("aria-disabled") === "true") {
+    if (!target || !this.isVisible(target) || this.isDisabled(target)) {
       throw new Error("Browser target is unavailable; observe again");
     }
     if (this.isSensitiveControl(target)) throw new Error("Sensitive fields require the native user path");
+    if (action.type === "fill" && !this.isFillableControl(target)) {
+      throw new Error("Browser target is not an editable field; observe again");
+    }
     if (("value" in target && String(target.value || "").length > 120) ||
         (target.isContentEditable && String(target.textContent || "").length > 120)) {
       throw new Error("Browser target value exceeds the bounded observation; use the native user path");

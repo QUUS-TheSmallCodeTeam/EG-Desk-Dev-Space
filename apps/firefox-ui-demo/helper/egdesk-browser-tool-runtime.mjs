@@ -76,13 +76,16 @@ function validateArgs(tool, args) {
   if (tool === 'egdesk_browser_fill' && (typeof args.text !== 'string' || args.text.length > 8192 ||
       args.postcondition.kind !== 'target-value')) reject('INVALID_BROWSER_TOOL', 'Fill requires bounded text and a target-value postcondition')
 }
+function validSnapshot(snapshot, cardId) {
+  return record(snapshot) && snapshot.cardId === cardId &&
+    short(snapshot.documentId, 160) && Number.isSafeInteger(snapshot.revision) &&
+    record(snapshot.viewport) && Number.isFinite(snapshot.viewport.width) && Number.isFinite(snapshot.viewport.height) &&
+    Number.isFinite(snapshot.viewport.devicePixelRatio) && snapshot.viewport.devicePixelRatio > 0 &&
+    typeof snapshot.url === 'string' && Array.isArray(snapshot.interactiveElements) && Array.isArray(snapshot.text)
+}
 function observationFrom(response, cardId) {
   const snapshot = response?.snapshot
-  if (response?.status !== 'observed' || !record(snapshot) || snapshot.cardId !== cardId ||
-      !short(snapshot.documentId, 160) || !Number.isSafeInteger(snapshot.revision) ||
-      !record(snapshot.viewport) || !Number.isFinite(snapshot.viewport.width) || !Number.isFinite(snapshot.viewport.height) ||
-      !Number.isFinite(snapshot.viewport.devicePixelRatio) || snapshot.viewport.devicePixelRatio <= 0 ||
-      typeof snapshot.url !== 'string' || !Array.isArray(snapshot.interactiveElements) || !Array.isArray(snapshot.text)) {
+  if (response?.status !== 'observed' || !validSnapshot(snapshot, cardId)) {
     reject('BROWSER_OBSERVATION_UNAVAILABLE', 'The selected Browser did not return a verifiable observation')
   }
   return snapshot
@@ -282,7 +285,15 @@ export function createBrowserToolService({ sendToUi, getOwnerKey, timeoutMs = 15
       reject('BROWSER_ACTION_UNVERIFIED', response.error || 'Browser action was not confirmed; do not retry blindly')
     }
     const after = response.receipt.after
-    const matched = !wasAlreadyTrue && checkPostcondition(args.postcondition, after, args.ref)
+    const dispatchReceipt = response.receipt.dispatchReceipt
+    const readbackIsCurrent = validSnapshot(after, card.cardId) && record(dispatchReceipt) &&
+      dispatchReceipt.actor === 'JSWindowActor' && dispatchReceipt.eventDispatched === true &&
+      dispatchReceipt.documentStillCurrent === true &&
+      (action.type === 'navigate' || after.documentId === observed.snapshot.documentId) &&
+      (action.type !== 'click' || (
+        dispatchReceipt.clickInputRoute === 'dom-click-no-pointerdown' &&
+        dispatchReceipt.targetClickObserved === true))
+    const matched = !wasAlreadyTrue && readbackIsCurrent && checkPostcondition(args.postcondition, after, args.ref)
     if (!matched) markUnknown()
     return { status: matched ? 'postcondition-observed' : 'postcondition-unverified',
       cardId: card.cardId, action: action.type, dispatchReceipt: response.receipt.dispatchReceipt || null,

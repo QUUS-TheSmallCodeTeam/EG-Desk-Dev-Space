@@ -292,6 +292,38 @@ test('human focus change invalidates a model action without taking focus back', 
   assert.equal(f.focusCalls, 0)
 })
 
+test('fieldset-disabled and aria-disabled ancestor controls are observed and guarded as unavailable', async () => {
+  for (const reason of ['fieldset', 'aria-ancestor']) {
+    const f = localDocumentFixture()
+    const before = f.actor.snapshot()
+    const button = before.interactiveElements.find(item => item.role === 'button')
+    if (reason === 'fieldset') f.button.matches = selector => selector === ':disabled'
+    else f.button.parentElement = { parentElement: f.actor.document.body,
+      getAttribute: name => name === 'aria-disabled' ? 'true' : null }
+    assert.equal(f.actor.snapshot().interactiveElements.find(item => item.ref === button.ref).disabled, true, reason)
+    await assert.rejects(f.actor.act({ type: 'click', ref: button.ref },
+      guarded(guardFrom(before, button))), /unavailable|disabled/i, reason)
+    assert.equal(f.clicks, 0, reason)
+    assert.equal(f.actor.actorPerformCalls, 0, reason)
+  }
+})
+
+test('guarded fill rejects a button and a read-only field before entering perform', async () => {
+  for (const reason of ['button', 'read-only']) {
+    const f = localDocumentFixture()
+    if (reason === 'button') f.button.value = 'original'
+    else f.input.readOnly = true
+    const before = f.actor.snapshot()
+    const target = before.interactiveElements.find(item => item.tag === (reason === 'button' ? 'button' : 'input'))
+    await assert.rejects(f.actor.act({ type: 'fill', ref: target.ref, text: 'changed' },
+      guarded(guardFrom(before, target))), /editable|read.only/i, reason)
+    assert.equal(reason === 'button' ? f.button.value : f.input.value,
+      reason === 'button' ? 'original' : '', reason)
+    assert.equal(f.actor.actorPerformCalls, 0, reason)
+    assert.equal(f.inputEvents, 0, reason)
+  }
+})
+
 test('password, token and editable controls redact every snapshot label, value, focus and text path', () => {
   const f = localDocumentFixture()
   const password = 'PASSWORD_CANARY_DO_NOT_EXPOSE'
@@ -408,6 +440,24 @@ test('actor rechecks live parent authority and deadline after delayed query, bef
     release({ authorized: invalidation === 'deadline' })
     await assert.rejects(action, /authority was revoked/)
     assert.equal(f.clicks, 0)
+  }
+})
+
+test('focus, disabled state and document changes during parent approval prevent late input', async () => {
+  for (const change of ['focus', 'disabled', 'document']) {
+    const f = localDocumentFixture()
+    const before = f.actor.snapshot()
+    const button = before.interactiveElements.find(item => item.role === 'button')
+    let approve
+    f.actor.sendQuery = () => new Promise(resolve => { approve = resolve })
+    const pending = f.actor.act({ type: 'click', ref: button.ref }, guarded(guardFrom(before, button)))
+    if (change === 'focus') f.actor.document.activeElement = f.input
+    if (change === 'disabled') f.button.disabled = true
+    if (change === 'document') f.actor.document = { ...f.actor.document }
+    approve({ authorized: true })
+    await assert.rejects(pending, /stale|unavailable/i, change)
+    assert.equal(f.clicks, 0, change)
+    assert.equal(f.actor.actorPerformCalls, 0, change)
   }
 })
 
