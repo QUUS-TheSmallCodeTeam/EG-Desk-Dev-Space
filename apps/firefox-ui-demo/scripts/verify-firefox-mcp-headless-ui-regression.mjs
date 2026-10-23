@@ -66,6 +66,18 @@ export function screenshotOutcome(pathOrError) {
   return { status: 'error', visualPass: null, error: message };
 }
 
+export async function captureHeadlessScreenshot(harness, stage, deadlineMs, now = Date.now) {
+  assertBeforeDeadline(deadlineMs, now());
+  const captured = await harness.screenshot(`headless-${stage}`, {
+    allowHeadlessChromeFallback: true, deadlineMs,
+  });
+  assertBeforeDeadline(deadlineMs, now());
+  const outcome = screenshotOutcome(captured);
+  const metadata = outcome.status === 'captured' ? harness.lastScreenshotMetadata : null;
+  return { viewport: stage, ...outcome, route: metadata?.route ?? null,
+    width: metadata?.width ?? null, height: metadata?.height ?? null };
+}
+
 export async function observeGuard(harness) {
   return chrome(harness, () => {
     const gfx = Cc['@mozilla.org/gfx/info;1'].getService(Ci.nsIGfxInfo);
@@ -506,13 +518,11 @@ export async function runRegression({ harness, profile, deadlineMs, viewports = 
     threadId = frame.chat.threadId;
     assertBeforeDeadline(deadlineMs);
     try {
-      const captured = await harness.screenshot(`headless-${stage}`);
-      assertBeforeDeadline(deadlineMs);
-      result.screenshots.push({ viewport: stage, ...screenshotOutcome(captured) });
+      result.screenshots.push(await captureHeadlessScreenshot(harness, stage, deadlineMs));
     } catch (error) {
       assertBeforeDeadline(deadlineMs);
       const outcome = screenshotOutcome(error);
-      result.screenshots.push({ viewport: stage, ...outcome });
+      result.screenshots.push({ viewport: stage, ...outcome, route: null, width: null, height: null });
       result.screenshot = { status: outcome.status, visualPass: null };
       if (outcome.status === 'error') throw error;
     }

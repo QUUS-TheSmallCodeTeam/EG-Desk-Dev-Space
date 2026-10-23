@@ -3,7 +3,7 @@ import assert from 'node:assert/strict';
 import vm from 'node:vm';
 import { readFileSync } from 'node:fs';
 import {
-  VIEWPORTS, assertBeforeDeadline, chatIssues, firstUseIssues,
+  VIEWPORTS, assertBeforeDeadline, captureHeadlessScreenshot, chatIssues, firstUseIssues,
   initialFirstUseIssues, observeChat, observeSettledFirstUse, observeTargets, parseCli, parseDeadline,
   projectionGeometrySettled, resizeHeadless, screenshotOutcome, targetIssues, viewportSettled,
   waitFor, waitStableViewport,
@@ -286,6 +286,34 @@ test('screenshot unsupported is unverified, while other errors remain errors', (
   }
 });
 
+test('headless screenshot caller opts in per call, passes the deadline, and records capture metadata without visual proof', async () => {
+  const calls = [];
+  const harness = { lastScreenshotMetadata: { route: 'stale', width: 1, height: 1 },
+    async screenshot(name, options) {
+      calls.push({ name, options });
+      this.lastScreenshotMetadata = { route: 'headless-chrome', width: 800, height: 600 };
+      return '/private/var/tmp/egdesk-headless-800x600.png';
+    } };
+  const captured = await captureHeadlessScreenshot(harness, '800x600', deadline, () => beforeDeadline);
+  assert.deepEqual(calls, [{ name: 'headless-800x600',
+    options: { allowHeadlessChromeFallback: true, deadlineMs: deadline } }]);
+  assert.deepEqual(captured, { viewport: '800x600', status: 'captured',
+    path: '/private/var/tmp/egdesk-headless-800x600.png', visualPass: null,
+    route: 'headless-chrome', width: 800, height: 600 });
+  const noMetadata = await captureHeadlessScreenshot({ screenshot: async () => '/tmp/captured.png' },
+    '600x600', deadline, () => beforeDeadline);
+  assert.deepEqual(noMetadata, { viewport: '600x600', status: 'captured', path: '/tmp/captured.png',
+    visualPass: null, route: null, width: null, height: null });
+  await assert.rejects(captureHeadlessScreenshot(harness, '800x600', deadline, () => deadline),
+    /deadline reached/);
+  assert.equal(calls.length, 1, 'expired deadline never starts a second capture');
+  let now = beforeDeadline;
+  await assert.rejects(captureHeadlessScreenshot({ async screenshot() {
+    now = deadline;
+    return '/tmp/late.png';
+  } }, '800x600', deadline, () => now), /deadline reached/);
+});
+
 test('runner contains no provider submit path or synthetic DOM action fallback', () => {
   const source = readFileSync(new URL('./verify-firefox-mcp-headless-ui-regression.mjs', import.meta.url), 'utf8');
   assert.doesNotMatch(source, /\/chat\/send|newQaThread|sendFromComposer|loopbackJson|\.dispatchEvent\(|\.click\(\)/);
@@ -294,7 +322,7 @@ test('runner contains no provider submit path or synthetic DOM action fallback',
   assert.match(source, /await scanControls\(harness, size, deadlineMs, result, `\$\{size\.width\}x\$\{size\.height\} HUD-open`\)/);
   assert.match(source, /const hudAfterScan = await observeChat\(harness\)/);
   assert.match(source, /fitAll = \{ status: 'click-only', fitPass: null \}/);
-  assert.match(source, /assertBeforeDeadline\(deadlineMs\);\s*try \{\s*const captured = await harness\.screenshot/);
+  assert.match(source, /result\.screenshots\.push\(await captureHeadlessScreenshot\(harness, stage, deadlineMs\)\)/);
   assert.match(source, /catch \(error\) \{\s*assertBeforeDeadline\(deadlineMs\);\s*const outcome = screenshotOutcome\(error\)/);
   assert.match(source, /if \(outcome\.status === 'error'\) throw error/);
   assert.match(source, /await harness\.click\(selector\)/);
