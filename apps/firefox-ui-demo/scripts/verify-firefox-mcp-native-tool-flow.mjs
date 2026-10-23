@@ -100,6 +100,42 @@ export function assertNegativeFixtureBackend(profile, health, state) {
   return { fixture: true, profile, sends: 0, authWrites: 0, runs: 0, providerTurns: 0 };
 }
 
+export function assertQaAttachMode(cases, env = process.env) {
+  assertQaExecutionMode(cases, env);
+  const simulator = cases.length === 1 && cases[0] === 'browser-negative';
+  const headless = env.EGDESK_QA_BROWSER_NEGATIVE_HEADLESS;
+  assert.ok(headless == null || headless === '0' || headless === '1', 'invalid headless diagnostic gate');
+  assert.ok(headless !== '1' || simulator, 'headless diagnostics are only for model-free browser-negative');
+  assert.ok(env.EGDESK_MARIONETTE_PORT === '2828'
+    || (simulator && env.EGDESK_MARIONETTE_PORT === '2829'),
+  'Lane C requires port 2828; only fixture-only browser-negative may attach to 2829');
+  return { headlessDiagnostics: simulator && headless === '1' };
+}
+
+export async function captureBrowserNegativeScreenshot(harness, cases, env = process.env) {
+  const { headlessDiagnostics } = assertQaAttachMode(cases, env);
+  assert.deepEqual(cases, ['browser-negative'], 'diagnostic capture is simulator-only');
+  // Profile verification remains fatal, outside the narrowly bounded capture fallback.
+  await harness.assertRemoteProfile();
+  let headlessEvidence = {};
+  if (headlessDiagnostics) {
+    const isHeadless = await chrome(harness, () => {
+      const gfxInfo = Cc['@mozilla.org/gfx/info;1'].getService(Ci.nsIGfxInfo);
+      return gfxInfo.isHeadless;
+    });
+    assert.equal(isHeadless, true, 'headless diagnostic gate requires actual gfxInfo.isHeadless === true');
+    headlessEvidence = { gfxInfoIsHeadless: isHeadless };
+  }
+  try {
+    return { status: 'captured', path: await harness.screenshot('browser-guards-verified'), visualPass: null,
+      ...headlessEvidence };
+  } catch (error) {
+    if (!headlessDiagnostics || !/^screenshot_page:\s*(?:Error:\s*)?(?:Protocol error \(browsingContext\.captureScreenshot\):\s*)?unsupported operation(?:\s*:|\s*$)/i.test(error?.message || '')) throw error;
+    return { status: 'unsupported', visualPass: null, errorCode: 'unsupported operation',
+      scope: 'headless-screenshot-only', domProbeProofIndependent: true, ...headlessEvidence };
+  }
+}
+
 export function parseResumeEmptyThreadId(value, cases) {
   if (value == null) return null;
   assert.ok(typeof value === 'string' && /^thread-dm-[a-z0-9]{7}$/.test(value),
@@ -703,9 +739,15 @@ export function browserFixtureHtml(marker) {
 <body><main><h1>EG-Desk local Browser QA</h1><p id="fixture-marker">${marker}</p>
 <p id="qa-state">Waiting for QA action</p><label for="qa-input">QA note</label>
 <input id="qa-input" aria-label="QA note" type="text" autocomplete="off">
-<button id="qa-button" type="button">Reveal QA details</button><section id="qa-changed"></section></main>
-<script>document.getElementById('qa-button').addEventListener('click',()=>{
+<button id="qa-button" type="button">Reveal QA details</button><span id="qa-click-count">QA click count: 0</span>
+<div id="qa-guard-controls" style="display:flex;flex-wrap:wrap">
+<input aria-label="QA readonly note" type="text" readonly autocomplete="off" style="width:130px">
+<fieldset disabled style="border:0;padding:0;margin:0"><input aria-label="QA fieldset note" type="text" autocomplete="off" style="width:130px"></fieldset>
+<div aria-disabled="true"><input aria-label="QA ancestor note" type="text" autocomplete="off" style="width:130px"></div>
+</div><section id="qa-changed"></section></main>
+<script>let qaClicks=0;document.getElementById('qa-button').addEventListener('click',()=>{
 document.getElementById('qa-state').textContent='Changed by QA click';
+document.getElementById('qa-click-count').textContent='QA click count: '+(++qaClicks);
 const node=document.createElement('p');node.textContent='Newly revealed node';
 document.getElementById('qa-changed').appendChild(node)});</script></body></html>`;
 }
@@ -2060,7 +2102,100 @@ const NEGATIVE_PROBE_NAMES = Object.freeze([
   'stale-dom-at-actor', 'resized-viewport-at-actor',
   'observe-only-interaction-denied', 'stop-before-first-bind-accept',
   'expired-request-before-actor', 'cancel-before-act',
+  'readonly-fill-at-actor', 'disabled-fieldset-fill-at-actor', 'aria-disabled-ancestor-fill-at-actor',
 ]);
+
+const CHILD_TARGET_PROBES = Object.freeze([
+  { name: 'readonly-fill-at-actor', label: 'QA readonly note', disabled: false,
+    reason: /not an editable field/i },
+  { name: 'disabled-fieldset-fill-at-actor', label: 'QA fieldset note', disabled: true,
+    reason: /target is unavailable/i },
+  { name: 'aria-disabled-ancestor-fill-at-actor', label: 'QA ancestor note', disabled: true,
+    reason: /target is unavailable/i },
+]);
+
+function assertProbeActionDiagnostic(request, cardId, phase, status) {
+  const diagnostic = request?.actorDiagnostic;
+  assert.ok(diagnostic?.cardId === cardId && diagnostic.phase === phase && diagnostic.status === status
+    && diagnostic.actionType === request.action?.type
+    && diagnostic.sampledAtMs >= request.attemptedAt && diagnostic.sampledAtMs <= request.respondedAt,
+  'fixture action diagnostic lacks the current actor phase/receipt');
+}
+
+function assertProbeGuard(request, snapshot, target) {
+  assert.deepEqual(request.guard, { documentId: snapshot.documentId, revision: snapshot.revision,
+    viewport: snapshot.viewport, url: snapshot.url,
+    focusedRef: snapshot.focusedElement?.ref || null, target },
+  'fixture action lost its exact observed guard');
+  assert.equal(request.action?.ref, target?.ref, 'fixture action changed its observed target');
+  assert.equal(request.action?.selector, undefined, 'fixture action cannot use a selector fallback');
+}
+
+function assertGuardedPositiveControls(proof, actorDocumentId) {
+  assertBrowserFixtureConfig(proof.fixture?.url, proof.fixture?.marker);
+  assert.deepEqual(proof.guardedActorPositiveControls?.map(item => item.action), ['fill', 'click'],
+    'guarded fill/click positive controls are incomplete');
+  for (const item of proof.guardedActorPositiveControls) {
+    assert.ok(item.cardId === proof.cardId && item.simulatorOnly === true && item.sourceId
+      && item.cardEpoch && item.syntheticRunId?.startsWith('qa-browser-simulator-'),
+    'guarded positive control lost owned selected-Card scope');
+    const { observed, afterObserved, beforeAttempt, afterAttempt, receipt } = item;
+    assert.ok(observed?.status === 'observed' && afterObserved?.status === 'observed'
+      && observed.cardId === proof.cardId && afterObserved.cardId === proof.cardId
+      && observed.observationId && afterObserved.observationId
+      && observed.observationId !== afterObserved.observationId,
+    'guarded positive control lacks a fresh B observation');
+    for (const snapshot of [observed.snapshot, beforeAttempt, receipt?.after, afterObserved.snapshot, afterAttempt]) {
+      assert.ok(snapshot?.cardId === proof.cardId && snapshot.documentId === actorDocumentId
+        && snapshot.url === proof.fixture.url && snapshot.text?.includes(proof.fixture.marker)
+        && Number.isSafeInteger(snapshot.revision) && snapshot.viewport,
+      'guarded positive control lost current fixture document evidence');
+    }
+    const counterBefore = beforeAttempt.qaDiagnostics, counterAfter = afterAttempt.qaDiagnostics;
+    assert.ok(counterBefore?.kind === 'actor-perform-entry' && counterAfter?.kind === 'actor-perform-entry'
+      && counterBefore.actorDocumentId === actorDocumentId && counterAfter.actorDocumentId === actorDocumentId
+      && Number.isSafeInteger(counterBefore.performCalls) && counterBefore.performCalls >= 0
+      && counterAfter.performCalls === counterBefore.performCalls + 1,
+    'guarded positive control did not enter perform exactly once');
+    const requests = item.uiRequests;
+    assert.ok(Array.isArray(requests) && requests.every(request => request.requestId
+      && request.responseRequestId === request.requestId && request.runId === item.syntheticRunId
+      && request.cardId === proof.cardId && request.targetCardEpoch === item.cardEpoch
+      && Number.isFinite(request.attemptedAt) && request.respondedAt >= request.attemptedAt),
+    'guarded positive control lost UI receipt correlation');
+    const acts = requests.filter(request => request.kind === 'act');
+    assert.equal(acts.length, 1, 'guarded positive control must have exactly one UI act');
+    const acted = acts[0];
+    assert.ok(acted.status === 'acted' && acted.action?.type === item.action,
+      'guarded positive control lacks an acted UI receipt');
+    const target = observed.snapshot.interactiveElements.find(element => element.ref === acted.action.ref);
+    assert.ok(target && !target.disabled && target.label === (item.action === 'fill' ? 'QA note' : 'Reveal QA details'),
+      'guarded positive control targeted another fixture element');
+    assertProbeGuard(acted, observed.snapshot, target);
+    assertProbeActionDiagnostic(acted, proof.cardId, 'post-actor', 'acted');
+    assert.ok(requests.slice(requests.indexOf(acted) + 1).some(request => request.kind === 'observe'
+      && request.status === 'observed' && request.attemptedAt >= acted.respondedAt),
+    'guarded positive control has no post-action UI observation');
+    assert.ok(receipt.status === 'postcondition-observed' && receipt.cardId === proof.cardId
+      && receipt.action === item.action && receipt.externalEffectVerified === false
+      && receipt.dispatchReceipt?.actor === 'JSWindowActor'
+      && receipt.dispatchReceipt.eventDispatched === true && receipt.dispatchReceipt.documentStillCurrent === true,
+    'guarded positive control lacks a current actor receipt');
+    const value = item.action === 'fill' ? 'QA_GUARDED_FILL_CONTROL' : 'QA click count: 2';
+    assert.deepEqual(receipt.postcondition, { kind: item.action === 'fill' ? 'target-value' : 'visible-text',
+      value, matched: true, wasAlreadyTrue: false }, 'guarded positive control lacks a new bounded postcondition');
+    const matched = snapshot => item.action === 'fill'
+      ? snapshot.interactiveElements?.find(element => element.ref === target.ref)?.value === value
+      : snapshot.text.includes(value);
+    assert.ok(!matched(observed.snapshot) && !matched(beforeAttempt)
+      && [receipt.after, afterObserved.snapshot, afterAttempt].every(matched),
+    'guarded positive control postcondition is not independently observed');
+    if (item.action === 'fill') assert.equal(acted.action.text, value);
+    else assert.ok(receipt.dispatchReceipt.clickInputRoute === 'dom-click-no-pointerdown'
+      && receipt.dispatchReceipt.targetClickObserved === true,
+    'guarded click lacks its focus-safe target event receipt');
+  }
+}
 
 export function assertBrowserNegativeProbeResults(proof) {
   assert.equal(proof?.simulatorOnly, true, 'negative probes must be marked test-only');
@@ -2074,6 +2209,7 @@ export function assertBrowserNegativeProbeResults(proof) {
   assert.ok(control?.cardId === proof.cardId && typeof control.actorDocumentId === 'string'
     && Number.isSafeInteger(control.before) && control.before >= 0 && control.after === control.before + 1,
   'live actor counter lacks its controlled positive action');
+  assertGuardedPositiveControls(proof, control.actorDocumentId);
   assert.deepEqual((proof?.probes || []).map(item => item.name), NEGATIVE_PROBE_NAMES,
     'bounded Browser negative probes are incomplete');
   assert.ok(proof.probes.every(item => item.denied === true
@@ -2139,6 +2275,18 @@ export function assertBrowserNegativeProbeResults(proof) {
     && cancelled.uiRequests.some(item => item.requestId === cancelled.uiRequestId && item.status === 'rejected'
       && item.kind === 'act' && item.deadlineMs > item.attemptedAt),
   'cancelled request lacks its earlier owned cancellation and actual UI denial');
+  for (const spec of CHILD_TARGET_PROBES) {
+    const item = proof.probes.find(probe => probe.name === spec.name);
+    const request = item.uiRequests.find(request => request.kind === 'act');
+    const target = item.beforeAttempt.interactiveElements?.find(element => element.label === spec.label);
+    assert.ok(target?.tag === 'input' && target.value === '' && target.disabled === spec.disabled,
+      `${spec.name} lacks the expected live fixture target`);
+    assert.ok(item.code === null && item.uiActRequests === 1 && request.action?.type === 'fill'
+      && request.action.text === 'QA_CHILD_DENIAL_MUST_NOT_FILL' && spec.reason.test(request.error),
+    `${spec.name} lacks the specific Child target denial`);
+    assertProbeGuard(request, item.beforeAttempt, target);
+    assertProbeActionDiagnostic(request, proof.cardId, 'actor', 'rejected');
+  }
   assert.equal(proof.requestsScopedToOwnedCard, true,
     'negative probes targeted a Card other than the newly owned fixture');
   assert.equal(proof.preexistingBrowserCardStylesUnchanged, true,
@@ -2202,6 +2350,7 @@ function assertNegativeNoEffect(before, after, label) {
   assert.equal(newCounter.performCalls, oldCounter.performCalls, `${label} entered the actor perform dispatcher`);
   const observed = value => ({ url: value.snapshot.url, documentId: value.snapshot.documentId,
     revision: value.snapshot.revision, viewport: value.snapshot.viewport, text: value.snapshot.text,
+    interactiveElements: value.snapshot.interactiveElements, focusedElement: value.snapshot.focusedElement,
     inputValue: value.inputValue, actorPerformCalls: value.snapshot.qaDiagnostics.performCalls });
   const beforeAttempt = observed(before), afterAttempt = observed(after);
   assert.deepEqual(afterAttempt, beforeAttempt, `${label} changed the independently observed fixture`);
@@ -2260,7 +2409,9 @@ async function newNegativeService(harness, thread, cardId, source, deadlineMs,
     const sampled = await chrome(harness, async request => {
       const attemptedAt = Date.now();
       const response = await window.__egdesk.browserAgentTools.dispatch(request);
-      return { attemptedAt, respondedAt: Date.now(), response };
+      const actorDiagnostic = request.kind === 'act'
+        ? window.__egdesk.browserAgentTools.fixtureActionDiagnostic(request.cardId) : null;
+      return { attemptedAt, respondedAt: Date.now(), response, actorDiagnostic };
     }, request);
     const response = sampled.response;
     assert.equal(response?.requestId, request.requestId, 'negative UI response belongs to another request');
@@ -2269,6 +2420,8 @@ async function newNegativeService(harness, thread, cardId, source, deadlineMs,
       clientThreadId: request.clientThreadId, cardId: request.cardId,
       targetCardEpoch: request.targetCardEpoch, deadlineMs: request.deadlineMs,
       attemptedAt: sampled.attemptedAt, respondedAt: sampled.respondedAt,
+      ...(request.kind === 'act' ? { action: request.action, guard: request.guard,
+        actorDiagnostic: sampled.actorDiagnostic } : {}),
       status: response?.status || null, error: String(response?.error || '').slice(0, 200) });
     if (request.kind === 'bind' && response?.binding) trace.binding = response.binding;
     return response;
@@ -2336,6 +2489,7 @@ async function runBrowserNegativeProbes(harness, fixture, deadlineMs, result) {
     pan: { ...window.__egdesk.state.panTarget }, zoom: window.__egdesk.state.zoomTarget,
   }));
   const probes = [];
+  const guardedActorPositiveControls = [];
   let actorPerformPositiveControl = null;
   result.browserNegativeProbeReceipts = probes;
   const bound = async permission => {
@@ -2659,6 +2813,60 @@ async function runBrowserNegativeProbes(harness, fixture, deadlineMs, result) {
         cardId: cancelReceipt.cardId, status: cancelReceipt.status, at: cancelReceipt.respondedAt } });
   } finally { await cancel(unit); }
 
+  // Each action uses a new current-turn selection/binding and a fresh B
+  // observation. Unlike the older stale-DOM setup click, these are guarded.
+  result.browserNegativeStage = 'guarded-actor-positive-controls';
+  for (const action of ['fill', 'click']) {
+    unit = await bound('interact');
+    try {
+      const observed = await observe(unit);
+      const before = await ownedNegativeBrowserSnapshot(harness, cardId, ownerTag, fixture);
+      const target = observed.snapshot.interactiveElements.find(item =>
+        item.label === (action === 'fill' ? 'QA note' : 'Reveal QA details'));
+      assert.ok(target?.ref && target.disabled === false, 'guarded positive fixture target is unavailable');
+      const arguments_ = action === 'fill' ? fillArgs(observed, 'QA_GUARDED_FILL_CONTROL')
+        : { cardId, observationId: observed.observationId, expectedRevision: observed.snapshot.revision,
+          ref: target.ref, expectedTarget: target,
+          postcondition: { kind: 'visible-text', value: 'QA click count: 2' } };
+      const receipt = await unit.service.dispatch(unit.run, {
+        tool: BROWSER_TOOL_NAMES[action], callId: probeId(`qa-guarded-${action}`), arguments: arguments_,
+      });
+      const afterObserved = await observe(unit);
+      const after = await ownedNegativeBrowserSnapshot(harness, cardId, ownerTag, fixture);
+      guardedActorPositiveControls.push({ action, cardId, simulatorOnly: true,
+        sourceId: unit.source.id, cardEpoch: unit.source.browserToolIdentity.cardEpoch,
+        syntheticRunId: unit.run.runId, observed, afterObserved, receipt,
+        beforeAttempt: before.snapshot, afterAttempt: after.snapshot,
+        uiRequests: unit.trace.requests.map(item => ({ ...item })) });
+    } finally { await cancel(unit); }
+  }
+
+  // B rejects disabled targets before sending UI input. Bypass only B's target
+  // precheck, not the current selection, UI binding, observed guard or Child.
+  // The readonly/fieldset/ancestor setup is static fixture content, never chrome DOM mutation.
+  result.browserNegativeStage = 'child-noneditable-target-denials';
+  for (const spec of CHILD_TARGET_PROBES) {
+    unit = await bound('interact');
+    try {
+      const observed = await observe(unit);
+      const target = observed.snapshot.interactiveElements.find(item => item.label === spec.label);
+      assert.ok(target?.ref && target.tag === 'input' && target.value === ''
+        && target.disabled === spec.disabled, `${spec.name} fixture setup is not present`);
+      const before = await ownedNegativeBrowserSnapshot(harness, cardId, ownerTag, fixture);
+      const response = await directUiAct(unit,
+        { type: 'fill', ref: target.ref, text: 'QA_CHILD_DENIAL_MUST_NOT_FILL' },
+        guardFromObserved(observed, target));
+      assert.equal(response?.status, 'rejected', `${spec.name} unexpectedly succeeded`);
+      const denied = unit.trace.requests.at(-1);
+      assert.match(denied.error, spec.reason, `${spec.name} did not reach the intended Child guard`);
+      assertProbeActionDiagnostic(denied, cardId, 'actor', 'rejected');
+      const unchanged = assertNegativeNoEffect(before,
+        await ownedNegativeBrowserSnapshot(harness, cardId, ownerTag, fixture), spec.name);
+      record(spec.name, null, unit, { ...unchanged, uiActRequests: 1,
+        uiStatus: response.status, uiReason: denied.error, uiRequestId: denied.requestId });
+    } finally { await cancel(unit); }
+  }
+
   const final = await chrome(harness, initialCards => ({
     cards: initialCards.map(item => {
       const card = document.getElementById(item.id);
@@ -2678,7 +2886,7 @@ async function runBrowserNegativeProbes(harness, fixture, deadlineMs, result) {
   const proof = { simulatorOnly: true, nativeModelOriginVerified: false,
     providerTurns: 0, actorPhysicalDispatchCounterVerified: false,
     actorPerformCounterVerified: true, actorPerformPositiveControl,
-    cardId, probes,
+    cardId, fixture: { url: fixture.url, marker: fixture.marker }, probes, guardedActorPositiveControls,
     requestsScopedToOwnedCard: true,
     preexistingBrowserCardStylesUnchanged: true, canvasPanZoomUnchanged: true };
   assertBrowserNegativeProbeResults(proof);
@@ -2702,8 +2910,7 @@ async function main() {
     : null;
   const profile = required(option('--profile', process.env.EGDESK_FIREFOX_PROFILE), '--profile is required');
   assertBeforeDeadline(deadlineMs);
-  assert.equal(process.env.EGDESK_MARIONETTE_PORT, '2828', 'Lane C attaches only Main-leased QA Firefox Marionette port 2828');
-  assertQaExecutionMode(cases);
+  assertQaAttachMode(cases);
   await runUiFlow('native-tool-flow-real-chat', async ({ harness, check, result }) => {
     result.realExecutionVerified = false;
     result.selectedRealExecutionVerified = false;
@@ -2724,7 +2931,11 @@ async function main() {
       result.browserNegativeBackendBefore = assertNegativeFixtureBackend(profile, health, await state());
       try {
         result.browserNegative = await runBrowserNegativeProbes(harness, browserFixture, deadlineMs, result);
-        result.screenshots.push(await harness.screenshot('browser-guards-verified'));
+        result.browserNegativeDomProbeProofVerified = true;
+        result.browserNegativeVisual = await captureBrowserNegativeScreenshot(harness, cases);
+        result.visualPass = null; // A screenshot, even when available, is not a visual review.
+        if (result.browserNegativeVisual.path) result.screenshots.push(result.browserNegativeVisual.path);
+        if (result.browserNegativeVisual.status === 'unsupported') result.visualReview = 'unsupported-headless';
       } finally {
         result.browserNegativeBackendAfter = assertNegativeFixtureBackend(profile, await loopbackJson('/health'), await state());
       }
