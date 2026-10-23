@@ -219,7 +219,7 @@ cancel 후 소유 카드 메뉴의 명시적 재선택·fresh observe를 거쳐 
 ### 6.1. 개발 반영·범위별 최종 검증 원장
 
 2026-10-23 Main 통합 기준은 **`deff647`**이며, 아래 개별 시험의 실행 커밋은 따로 표시한다.
-구현·중앙 회귀·PNG 시각 검토는 중앙 보고, EGQ3–EGQ6의 지정 JSON 필드는 직접 읽은 원시 근거다. 이 문서 갱신에서 구현 소스를 재검토하거나 시험·PNG 검토를 다시 실행한 것은 아니다. 각 수치는 명시한 커밋·시점·시험 범위에 한정하며 합산하지 않는다.
+구현·중앙 회귀·PNG 시각 검토는 중앙 보고, EGQ3–EGQ8의 지정 JSON 필드는 직접 읽은 원시 근거다. 이 문서 갱신에서 구현 소스를 재검토하거나 시험·PNG 검토를 다시 실행한 것은 아니다. 각 수치는 명시한 커밋·시점·시험 범위에 한정하며 합산하지 않는다.
 OpenAI 설치 정적 분석은 설계 판단의 근거이고, 아래 EG-Desk 구현·검증을 대신 증명하지 않는다.
 
 | ID / 연결 | 통합 커밋·내용 | 보고된 검증 / 남은 경계 |
@@ -234,6 +234,7 @@ OpenAI 설치 정적 분석은 설계 판단의 근거이고, 아래 EG-Desk 구
 이전 추가 실행 `iI8pfJ`의 reload 실패와 EGA4 보강을 별도로 기록하며, 기존 EGQ2의 역사적 결과는 보존한다.
 
 **중앙 자동 회귀:** 추출 테스트 의존성 실패 1건은 시험 수정 `b39da9d`의 Main 통합 후 해결됐다. `deff647` 실행은 **532/532, fail 0, skip 0, 10.97초**로 보고됐다. 이전 406/406·506/506과 별도 시점 결과이며 native 효과의 검증은 아니다.
+후속 Main `b706baa`는 `0adf25a`의 approve command/file 테스트 2개를 합친 **tests-only 변경**이며 production 변경은 없다. 2026-10-23 **16:56 UTC 중앙 534/534, fail 0, skip 0, 10.934초**, runtime 파일 독립 **94/94·Ohm CLEAR**가 보고됐다. 앞선 532/deff647 결과는 역사적 수치로 보존하며 서로 다른 시점·범위의 수치를 합산하지 않는다. 이 후속 기록은 중앙·독립 검토 보고이며 본 문서 작업의 재실행 결과가 아니다.
 
 **소유 browser-negative:** `692b241` 실행 EGQ3은 `automatedAssertionsPassed:true`, `completedCases:[browser-negative]`다. 11개 거부 각각 actor perform 증가가 0이다(누적값 자체가 모두 0이라는 뜻은 아님).
 reload 영수증은 `owned-card-semantic-proxy` reveal `attempts:1` 뒤 `owned-card-reload-button` 경로, detail·idle 상태와 9/9 hit-test를 기록한다. Card 5/context 17을 유지하면서 innerWindowId `27917287425 → 27917287426`, actor document가 교체됐고, stale 거부 후 새 문서 perform은 0이었다.
@@ -251,6 +252,10 @@ sends 1·interrupts 1·authWrites 0·providerTurns 0, transport globals unchange
 각 viewport의 Fit All은 `status:click-only`, `fitPass:null`이다. 클릭 수행만 기록했으며 그 결과의 배치·맞춤 기하를 검증한 것은 아니다.
 원시 `visualPass:null`과 이 한정된 시각 검토 보고는 별개다. provider 실행은 `not-run`이며 실제 모델/provider·인증·native OS 시험이나 모든 UI 레이아웃 품질의 보증은 아니다. [EGQ6]
 
+**page zoom의 제한된 DOM 경계:** EGQ7은 실제 `fullZoom 1→1.25`, content viewport `1440×870 / DPR 1 → 1152×696 / DPR 1.25`에서 PASS다. Card 4/context 16/innerWindowId `23622320129`와 actor document는 유지됐다. 이전 관찰의 action은 `BROWSER_ACTION_UNVERIFIED`로 거부되어 perform/count가 0이었다.
+명시적 cancel→실제 소유 카드 메뉴 재승인·새 run→fresh observe 뒤 DOM click의 perform/count **0→1**, `documentStillCurrent:true`와 후조건 일치를 확인했다. 자동 재시도가 아니다. cleanup은 card removed·selection 0과 카메라 정리값을 기록하며 카메라 복원은 중앙 보고다. 전후 sends/authWrites/runs/providerTurns는 0, `nativeModelOriginVerified:false`, `coordinateInputVerified:false`, `visualPass:null`이다. [EGQ7]
+첫 EGQ8은 fresh observe만으로 재개하려다 기존 unknown-outcome quarantine에 차단되어 `passed:false`였다. 이 실패 원본을 보존하고 재선택을 포함하도록 **시험 흐름만 수정**해 EGQ7을 통과했다. Main 실행 기준 `8301bd9`는 `deff647` 이후 문서 변경만 포함한다는 보고이며 제품 구현 변경으로 분류하지 않는다. page zoom에 따른 DPR 관측값 변화는 OS 화면 배율·좌표 입력·frame·배경/최소화 조합의 검증이 아니다. [EGQ7, EGQ8]
+
 남은 OS foreground 실험은 사용자 경계에 따라 보류했으며, 이 개발 반영으로 native 최종 수신·큐 취소·late effect의 UNKNOWN을 해소하지 않는다.
 
 <a id="remaining-analysis"></a>
@@ -263,7 +268,7 @@ sends 1·interrupts 1·authWrites 0·providerTurns 0, transport globals unchange
 | R-01 / P1 timeout 뒤 효과 | 결과 미확정 요청의 중복 입력을 막기 위해 | 소유 fixture에서 command ID·move 수신·dispatch·timeout을 같은 시계로 연결한다. | 배경 시험 자체는 OS 전면 불필요; 전환 재현에는 통제된 전면 전환 필요 / 기존 로그로 late effect **UNKNOWN** |
 | R-02 / P2 native Stop | 새 dispatch 차단과 이미 보낸 입력의 수신을 구별하기 위해 | N-05/N-07의 정적 경계를 기준으로, 승인된 시험에서 `enqueue/dispatch/Stop ACK/receive`에 command ID·순서·PID를 붙여 ACK 전후를 구분한다. | 통제된 A/B 전면 전환·입력 필요 / 앱별 Stop 메뉴의 요청 구성·송신 호출과 native 표식/guard는 정적 부분 확인. 일반 채팅/turn Stop·FFI/handler 실제 수신·큐 취소·ACK·late effect는 **UNKNOWN** |
 | R-03 / 현행 native 버전 변화 | 과거 offset·복원 결과를 새 helper에 잘못 적용하지 않기 위해 | N7의 정적 부분 대응을 기준으로, 실행 동등성이 제품 판단에 필요할 때 승인 범위를 확인한 제한 시험을 한다. | 정적 대응은 OS 전면 불필요; 실행 재검증은 별도 / **LLVM 정적 부분 대응 완료**, REA dossier 없음·runtime 동등성 **UNVERIFIED** |
-| R-04 / Gecko frame·zoom·배경 좌표 조합 | Chromium의 관찰/입력 좌표 계약을 Firefox로 오인하지 않기 위해 | 소유 페이지에서 frame·확대율·화면 배율·배경/최소화 조합별 fresh snapshot 좌표와 실제 수신 대상을 대조한다. | 좌표 단위 검증은 OS 전면 불필요; 배경/최소화 실측은 통제 전환 필요 / EG-06/07은 Canvas 카메라·top-document 교체와 DOM 클릭의 제한된 부분 검증. frame·page zoom·DPR·좌표 입력 및 조합별 실행은 **UNVERIFIED** |
+| R-04 / Gecko frame·zoom·배경 좌표 조합 | Chromium의 관찰/입력 좌표 계약을 Firefox로 오인하지 않기 위해 | EGQ7의 단일 page zoom DOM 사례를 기준으로 frame·다른 zoom·OS 화면 배율·좌표 입력·배경/최소화 조합을 별도 검증한다. | EG-06/07의 카메라·문서 교체와 EGQ7의 fullZoom 1→1.25 stale 거부→명시적 재승인 후 DOM 클릭은 제한된 부분 확인. **R-04 전체 완료 아님**; frame·OS DPR·좌표 입력·배경/최소화 및 조합별 실행은 **UNVERIFIED**, OS 전면 실험 보류 |
 | R-05 / 불투명 host 연결 — 낮은 우선순위 | 대상·세션 경계의 누락을 확인하되 구현을 추측해 복제하지 않기 위해 | B-04의 송수신 JS·세션/숫자 탭 검사 부분 확인을 기준으로, 필요할 때 native pipe/host 내부의 ID 전달·재작성 연결만 보완한다. | 정적 검토는 OS 전면 불필요 / 내부 ID 재작성·E2E runtime 대응은 **UNKNOWN**. 모든 target 소유권 검증 아님; 제품 변경의 선행 조건으로 삼지 않음 |
 | R-06 / 표시 마커와 입력 경계 | 표시 성공을 입력 성공으로 오인하거나 Desk 카메라를 actor 수명과 결합하지 않기 위해 | EGQ3의 actor/문서·카메라 경계와 EGQ4의 표시·종료 정리 결과를 기준으로, 범위를 넓힐 때 새 조합을 별도 검증한다. | 소유 fixture의 한정된 자동·표시 검증 완료. 전체 배율·레이아웃 및 현행 OpenAI runtime 효과는 **UNVERIFIED**; native 입력 증거로 전이하지 않음 |
 
@@ -343,7 +348,7 @@ L48 `willTerminate`는 관찰 종료 뒤 정리 시점이다. 그때 foreground 
 
 ## 부록 C. 원본 보관 매핑
 
-상대 경로 기준은 보관 실험 **`run-Qvnin2q5/`**다. EGQ1–EGQ6은 별도 EG-Desk QA 보관 디렉터리이며 이 REA 실험에 속하지 않는다. 원본은 이 저장소에 포함하지 않는다.
+상대 경로 기준은 보관 실험 **`run-Qvnin2q5/`**다. EGQ1–EGQ8은 별도 EG-Desk QA 보관 디렉터리이며 이 REA 실험에 속하지 않는다. 원본은 이 저장소에 포함하지 않는다.
 개인별 캐시 루트 대신 증거 ID·상대 경로·해시로 보관자에게 조회한다. 저장소 clone만으로 원본 실행을 재현할 수는 없다.
 
 | ID | 상대 경로 또는 기록 ID | 확인 범위 |
@@ -387,6 +392,8 @@ L48 `willTerminate`는 관찰 종료 뒤 정리 시점이다. 그때 foreground 
 | EGQ4 | 별도 QA 보관: `egdesk-chat-evidence-L14Faw/marker-result.json`; `owned-marker-detail.png`, `owned-marker-outline.png` | JSON의 표시 상태·DOM receipt·정리·3,000ms 반환 보류 직접 확인. PNG는 Main의 한정된 시각 PASS 보고이며 원시 `visualPass:null`과 구분 |
 | EGQ5 | 별도 QA 보관: `egdesk-chat-evidence-BFtB0e/stop-ack-result.json`; `headless-stop-pending.png`, `headless-stop-ack.png`, `headless-stop-terminal.png` | HTTP pending/ACK/terminal·카운터·globals 직접 확인, PNG는 Main 검토 보고. fixture backend의 UI PASS이며 native Stop·물리 no-replay 증거 아님 |
 | EGQ6 | 별도 QA 보관: `egdesk-chat-evidence-FNt1nj/headless-ui-result.json`; JSON에 연결된 4개 PNG | `deff647` 실행(Main 보고). `ok:true`·250 check·4 viewport·provider not-run 직접 확인. PNG는 Main의 한정된 검토 보고, 원시 `visualPass:null` |
+| EGQ7 | 별도 QA 보관: `egdesk-chat-evidence-xuXt4F/pagezoom-result.json` | fullZoom·viewport/DPR·동일 문서·stale 거부 perform 0·명시적 cancel/재승인 후 DOM perform 1·후조건·cleanup·backend 0 직접 대조. `passed:true`; 소유 headless fixture의 DOM 경계이며 좌표/모델/provider/시각/OS 배율 증거 아님 |
+| EGQ8 | 별도 QA 보관: `egdesk-chat-evidence-XO4KlI/pagezoom-result.json` | 보존된 첫 실패. `passed:false`, fresh observe 뒤 `A prior Browser action has an unknown outcome; select the context again`. 시험 흐름의 재선택 필요성을 기록하며 제품 수정·자동 재시도 성공으로 해석하지 않음 |
 
 EGQ2의 소유 Card 5·context 17에서 `innerWindowId`는 `27917287425 → 27917287426`, actor document는 `3a895710-1afb-4bce-b941-c5452eb3c338 → 2322f46e-f6df-4a21-a867-59900c55d2c1`로 바뀌었다. 프로필·URL·대상 bounds의 동일성은 관찰값 비교이며 좌표 입력 성공을 뜻하지 않는다.
 
@@ -422,6 +429,8 @@ EGQ2의 소유 Card 5·context 17에서 `innerWindowId`는 `27917287425 → 2791
 | EGQ4 | `c0e66c9142a30ea75f2228759c63dafc587fabf085b43cf8cdeaa3b2f2e6165e` |
 | EGQ5 | `d3d489f5ca5ac6a5d4537fef9efe64be5a41afb9f27ef4b6fd0672c52e7bbe97` |
 | EGQ6 | `65f7edfe1426fb44f413d960a548f554c91e45593cbe68b783901b415f735074` |
+| EGQ7 | `82401d87fdeb3a901d079e0d851df47436155252627bc4fc62fd0be1b66bbccd` |
+| EGQ8 | `3f53042bc6517dabccf1466080a273edf1bf221753ddfb77ae7d905129d1328c` |
 
 현행 C1–C18 및 N7–N9 artifact SHA-256은 2026-10-23 UTC 보관 파일에서 산출했다. 설치 service/helper SHA·함수 위치·해당하는 REA evidence ID와 함께 조회한다.
 자료의 해시가 맞아도 전체 호출 그래프·현재 설치 동작·취소 보장을 증명하는 것은 아니다.
