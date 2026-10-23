@@ -2,9 +2,10 @@ import test from 'node:test';
 import assert from 'node:assert/strict';
 import { spawnSync } from 'node:child_process';
 import { createHash } from 'node:crypto';
+import { runInNewContext } from 'node:vm';
 import {
   parseDeadlineUtc, assertBeforeDeadline, assertTurnTimeBudget, parseCases, scenarioCoverage,
-  assertQaExecutionMode, assertNegativeFixtureBackend,
+  assertQaExecutionMode, assertNegativeFixtureBackend, assertQaAttachMode, captureBrowserNegativeScreenshot,
   parseResumeEmptyThreadId, assertResumeEmptyThreadState,
   parseResumeSourceOptions, assertPreparedSourceResumeEvidence,
   chooseChatProxyTarget,
@@ -199,6 +200,102 @@ test('model-free Browser probes require their own gate and exact untouched fixtu
   for (const key of ['sends', 'authWrites']) assert.throws(() => assertNegativeFixtureBackend('owned-profile', health,
     { ...state, observed: { ...state.observed, [key]: [{}] } }), /zero fixture/);
   assert.throws(() => assertNegativeFixtureBackend('owned-profile', health, { ...state, runs: [{}] }), /Chat run/);
+});
+
+const negativeEnv = { EGDESK_QA_BROWSER_NEGATIVE: '1', EGDESK_QA_FIXTURE_TRANSPORT: '1',
+  EGDESK_QA_FIXTURE_TOKEN: 'QA_PUBLIC_TOKEN_0123456789', EGDESK_MARIONETTE_PORT: '2829',
+  EGDESK_QA_BROWSER_NEGATIVE_HEADLESS: '1' };
+
+test('only gated model-free Browser probes may attach to 2829; provider cases stay on 2828', () => {
+  for (const port of ['2828', '2829']) assert.deepEqual(assertQaAttachMode(['browser-negative'],
+    { ...negativeEnv, EGDESK_MARIONETTE_PORT: port }), { headlessDiagnostics: true });
+  for (const port of [undefined, '2827', '2830', 2829, '02829']) assert.throws(() => assertQaAttachMode(
+    ['browser-negative'], { ...negativeEnv, EGDESK_MARIONETTE_PORT: port }), /port 2828/);
+  for (const key of ['EGDESK_QA_BROWSER_NEGATIVE', 'EGDESK_QA_FIXTURE_TRANSPORT', 'EGDESK_QA_FIXTURE_TOKEN']) {
+    assert.throws(() => assertQaAttachMode(['browser-negative'], { ...negativeEnv, [key]: undefined }));
+  }
+  assert.throws(() => assertQaAttachMode(['browser-negative', 'browser'], negativeEnv), /separately/);
+  for (const cases of [['native'], ['source'], ['browser'], ['native', 'browser']]) {
+    const env = { EGDESK_QA_REAL_TURN: '1', EGDESK_MARIONETTE_PORT: '2828' };
+    assert.deepEqual(assertQaAttachMode(cases, env), { headlessDiagnostics: false });
+    assert.throws(() => assertQaAttachMode(cases, { ...env, EGDESK_MARIONETTE_PORT: '2829' }), /port 2828/);
+    assert.throws(() => assertQaAttachMode(cases, { ...env, EGDESK_QA_BROWSER_NEGATIVE_HEADLESS: '1' }), /only for model-free/);
+  }
+  assert.throws(() => assertQaAttachMode(['browser-negative'],
+    { ...negativeEnv, EGDESK_QA_BROWSER_NEGATIVE_HEADLESS: 'yes' }), /invalid headless/);
+});
+
+test('headless diagnostic screenshot unsupported is separate from DOM proof and never a visual pass', async () => {
+  let profileChecks = 0, captures = 0;
+  const harness = { async assertRemoteProfile() { profileChecks++; },
+    async evaluateChrome() { return true; }, async screenshot(name) {
+    captures++; assert.equal(name, 'browser-guards-verified'); return '/owned/qa.png';
+  } };
+  assert.deepEqual(await captureBrowserNegativeScreenshot(harness, ['browser-negative'], negativeEnv),
+    { status: 'captured', path: '/owned/qa.png', visualPass: null, gfxInfoIsHeadless: true });
+  for (const message of ['screenshot_page: Error: unsupported operation: chrome capture unavailable',
+    'screenshot_page: Error: Protocol error (browsingContext.captureScreenshot): unsupported operation']) {
+    const unsupported = { ...harness, async screenshot() { throw new Error(message); } };
+    assert.deepEqual(await captureBrowserNegativeScreenshot(unsupported, ['browser-negative'], negativeEnv),
+      { status: 'unsupported', visualPass: null, errorCode: 'unsupported operation',
+        scope: 'headless-screenshot-only', domProbeProofIndependent: true, gfxInfoIsHeadless: true });
+    await assert.rejects(captureBrowserNegativeScreenshot(unsupported, ['browser-negative'],
+      { ...negativeEnv, EGDESK_QA_BROWSER_NEGATIVE_HEADLESS: undefined }), error => error.message === message);
+  }
+  for (const message of ['screenshot_page: Error: unknown error', 'screenshot_page: timed out',
+    'screenshot_page: Error: unsupported image format', 'unsupported operation',
+    'evaluate_privileged_script: unsupported operation',
+    'screenshot_page: Error: unknown error: unsupported operation']) {
+    await assert.rejects(captureBrowserNegativeScreenshot({ ...harness,
+      async screenshot() { throw new Error(message); } }, ['browser-negative'], negativeEnv),
+    error => error.message === message);
+  }
+  const mismatch = new Error('Refusing different Firefox profile');
+  await assert.rejects(captureBrowserNegativeScreenshot({ ...harness,
+    async assertRemoteProfile() { throw mismatch; } }, ['browser-negative'], negativeEnv), error => error === mismatch);
+  assert.equal(captures, 1, 'profile mismatch must fail before attempting screenshot');
+  assert.ok(profileChecks > 1);
+  await assert.rejects(captureBrowserNegativeScreenshot(harness, ['browser'],
+    { EGDESK_QA_REAL_TURN: '1', EGDESK_MARIONETTE_PORT: '2828' }), /simulator-only/);
+});
+
+test('headless screenshot gate reads actual gfxInfo before capture and fails closed on false, absent or failed reads', async () => {
+  for (const value of [true, false, undefined, null, 'true', 1]) {
+    const events = [];
+    const gfxInterface = {};
+    const harness = {
+      async assertRemoteProfile() { events.push('profile'); },
+      async evaluateChrome(source) {
+        return runInNewContext(`(${source})()`, {
+          Ci: { nsIGfxInfo: gfxInterface },
+          Cc: { '@mozilla.org/gfx/info;1': { getService(type) {
+            assert.equal(type, gfxInterface);
+            return { get isHeadless() { events.push('gfxInfo-read'); return value; } };
+          } } },
+        });
+      },
+      async screenshot() { events.push('capture'); return '/owned/qa.png'; },
+    };
+    if (value === true) {
+      const result = await captureBrowserNegativeScreenshot(harness, ['browser-negative'], negativeEnv);
+      assert.equal(result.gfxInfoIsHeadless, true);
+      assert.deepEqual(events, ['profile', 'gfxInfo-read', 'capture']);
+    } else {
+      await assert.rejects(captureBrowserNegativeScreenshot(harness, ['browser-negative'], negativeEnv), /actual gfxInfo/);
+      assert.deepEqual(events, ['profile', 'gfxInfo-read']);
+    }
+  }
+  for (const message of ['gfxInfo unavailable', 'screenshot_page: Error: unsupported operation']) {
+    let captures = 0;
+    const failure = new Error(message);
+    const harness = { async assertRemoteProfile() {}, async evaluateChrome() { throw failure; },
+      async screenshot() { captures++; return '/owned/qa.png'; } };
+    await assert.rejects(captureBrowserNegativeScreenshot(harness, ['browser-negative'], negativeEnv), error => error === failure);
+    assert.equal(captures, 0, 'headless precheck failure must not enter capture or its fallback');
+    assert.deepEqual(await captureBrowserNegativeScreenshot(harness, ['browser-negative'],
+      { ...negativeEnv, EGDESK_QA_BROWSER_NEGATIVE_HEADLESS: undefined }),
+    { status: 'captured', path: '/owned/qa.png', visualPass: null });
+  }
 });
 
 test('source-only resume accepts one already active empty ordinary room and rejects uncertain reuse', () => {
@@ -905,11 +1002,12 @@ test('C rejects Browser cancel-before-act, forbidden schemes and permission esca
       errorCode: 'BROWSER_ACTION_UNVERIFIED' } : item) }), /permission boundary/);
 });
 
-test('actual negative-probe result cannot claim a native model turn or skip an owned no-effect denial', () => {
+function negativeProbeProof() {
   const names = ['stale-revision-before-ui', 'forbidden-scheme-before-ui',
     'stale-dom-at-actor', 'resized-viewport-at-actor',
     'observe-only-interaction-denied', 'stop-before-first-bind-accept',
-    'expired-request-before-actor', 'cancel-before-act'];
+    'expired-request-before-actor', 'cancel-before-act',
+    'readonly-fill-at-actor', 'disabled-fieldset-fill-at-actor', 'aria-disabled-ancestor-fill-at-actor'];
   const receipts = [
     { code: 'BROWSER_OBSERVATION_STALE', uiActRequests: 0 },
     { code: 'INVALID_BROWSER_TOOL', serviceActRequests: 0, uiProtocolDenied: true, uiProtocolActRequests: 1 },
@@ -924,12 +1022,44 @@ test('actual negative-probe result cannot claim a native model turn or skip an o
     { code: 'BROWSER_RUN_ENDED', uiStatus: 'rejected', uiReason: 'run cancelled', serviceActRequestsAfterCancel: 0, uiActRequests: 1,
       attemptedAt: 102, uiRequestId: 'act-7', cancelReceipt: { requestId: 'cancel-7', runId: 'qa-browser-simulator-7',
         cardId: 'owned-local-card', status: 'cancelled', at: 101 } },
+    ...Array.from({ length: 3 }, () => ({ code: null, uiActRequests: 1 })),
   ];
+  const fixture = { url: 'http://127.0.0.1:39220/egdesk-qa/QA_URL_0123456789abcdef', marker: 'QA_DOM_0123456789abcdef' };
+  const snapshot = (elements = []) => ({ cardId: 'owned-local-card', documentId: 'actor-owned',
+    url: fixture.url, revision: 1, viewport: { width: 800, height: 600, devicePixelRatio: 1 },
+    text: [fixture.marker], focusedElement: null, interactiveElements: elements });
+  const guard = (before, target) => ({ documentId: before.documentId, url: before.url,
+    revision: before.revision, viewport: before.viewport, focusedRef: null, target });
+  const diagnostic = (actionType, phase, status) => ({ cardId: 'owned-local-card', actionType, phase, status, sampledAtMs: 102 });
+  const guardedActorPositiveControls = ['fill', 'click'].map(action => {
+    const target = { ref: `el-${action}`, label: action === 'fill' ? 'QA note' : 'Reveal QA details',
+      tag: action === 'fill' ? 'input' : 'button', disabled: false, value: '' };
+    const before = snapshot([target]), after = structuredClone(before);
+    const value = action === 'fill' ? 'QA_GUARDED_FILL_CONTROL' : 'QA click count: 2';
+    if (action === 'fill') after.interactiveElements[0].value = value;
+    else { after.text.push(value); after.revision++; }
+    const counter = performCalls => ({ kind: 'actor-perform-entry', actorDocumentId: 'actor-owned', performCalls });
+    const uiRequest = (kind, status, at) => ({ kind, status, requestId: `${action}-${kind}`,
+      responseRequestId: `${action}-${kind}`, runId: `qa-browser-simulator-${action}`, cardId: 'owned-local-card',
+      targetCardEpoch: 'card-epoch-owned', attemptedAt: at, respondedAt: at + 3 });
+    return { action, cardId: 'owned-local-card', simulatorOnly: true, sourceId: `source-${action}`,
+      cardEpoch: 'card-epoch-owned', syntheticRunId: `qa-browser-simulator-${action}`,
+      observed: { status: 'observed', cardId: 'owned-local-card', observationId: `before-${action}`, snapshot: before },
+      afterObserved: { status: 'observed', cardId: 'owned-local-card', observationId: `after-${action}`, snapshot: after },
+      beforeAttempt: { ...before, qaDiagnostics: counter(1) }, afterAttempt: { ...after, qaDiagnostics: counter(2) },
+      receipt: { status: 'postcondition-observed', cardId: 'owned-local-card', action, externalEffectVerified: false,
+        after, dispatchReceipt: { actor: 'JSWindowActor', eventDispatched: true, documentStillCurrent: true,
+          ...(action === 'click' ? { clickInputRoute: 'dom-click-no-pointerdown', targetClickObserved: true } : {}) },
+        postcondition: { kind: action === 'fill' ? 'target-value' : 'visible-text', value, matched: true, wasAlreadyTrue: false } },
+      uiRequests: [{ ...uiRequest('act', 'acted', 100), action: { type: action, ref: target.ref,
+        ...(action === 'fill' ? { text: value } : {}) }, guard: guard(before, target),
+        actorDiagnostic: diagnostic(action, 'post-actor', 'acted') }, uiRequest('observe', 'observed', 104)] };
+  });
   const proof = { simulatorOnly: true, nativeModelOriginVerified: false,
     actorPhysicalDispatchCounterVerified: false,
     actorPerformCounterVerified: true, actorPerformPositiveControl: { cardId: 'owned-local-card',
       actorDocumentId: 'actor-owned', before: 0, after: 1 },
-    providerTurns: 0, cardId: 'owned-local-card',
+    providerTurns: 0, cardId: 'owned-local-card', fixture, guardedActorPositiveControls,
     probes: names.map((name, index) => ({ name, cardId: 'owned-local-card', denied: true,
       ownedFixtureContentUnchangedAfterDeniedAction: true, simulatorOnly: true,
       sourceId: `qa-source-${index}`, cardEpoch: 'card-epoch-owned',
@@ -948,6 +1078,20 @@ test('actual negative-probe result cannot claim a native model turn or skip an o
       ...receipts[index] })),
     requestsScopedToOwnedCard: true, preexistingBrowserCardStylesUnchanged: true,
     canvasPanZoomUnchanged: true };
+  for (const [offset, label] of ['QA readonly note', 'QA fieldset note', 'QA ancestor note'].entries()) {
+    const item = proof.probes[8 + offset];
+    const target = { ref: `el-denied-${offset}`, tag: 'input', label, disabled: offset !== 0, value: '' };
+    item.beforeAttempt = { ...snapshot([target]), actorPerformCalls: 1 };
+    item.afterAttempt = structuredClone(item.beforeAttempt);
+    Object.assign(item.uiRequests[0], { action: { type: 'fill', ref: target.ref, text: 'QA_CHILD_DENIAL_MUST_NOT_FILL' },
+      guard: guard(item.beforeAttempt, target), actorDiagnostic: diagnostic('fill', 'actor', 'rejected'),
+      error: offset === 0 ? 'Browser target is not an editable field; observe again' : 'Browser target is unavailable; observe again' });
+  }
+  return proof;
+}
+
+test('actual negative-probe result cannot claim a native model turn or skip an owned no-effect denial', () => {
+  const proof = negativeProbeProof();
   assert.equal(assertBrowserNegativeProbeResults(proof), true);
   assert.throws(() => assertBrowserNegativeProbeResults({ ...proof, actorPerformCounterVerified: false }), /perform-entry counter/);
   assert.throws(() => assertBrowserNegativeProbeResults({ ...proof,
@@ -973,6 +1117,72 @@ test('actual negative-probe result cannot claim a native model turn or skip an o
     preexistingBrowserCardStylesUnchanged: false }), /preexisting Browser Card/);
 });
 
+for (const action of ['fill', 'click']) {
+  test(`guarded ${action} control rejects missing guard, stale/current-document claims and unobserved effects`, () => {
+    const corruptions = [
+      item => { item.uiRequests[0].guard = undefined; },
+      item => { item.uiRequests[0].guard.revision++; },
+      item => { item.uiRequests[0].action.selector = '#qa-input'; },
+      item => { item.uiRequests[0].responseRequestId = 'other-request'; },
+      item => { item.uiRequests[0].targetCardEpoch = 'other-epoch'; },
+      item => { item.uiRequests[0].status = 'rejected'; },
+      item => { item.uiRequests[0].actorDiagnostic.phase = 'preflight'; },
+      item => { item.uiRequests[0].actorDiagnostic.sampledAtMs = 99; },
+      item => { item.afterObserved.observationId = item.observed.observationId; },
+      item => { item.uiRequests.pop(); },
+      item => { item.uiRequests[1].attemptedAt = 100; },
+      item => { item.afterAttempt.qaDiagnostics.performCalls = 1; },
+      item => { item.afterAttempt.qaDiagnostics.performCalls = 3; },
+      item => { item.receipt.dispatchReceipt.actor = 'simulated'; },
+      item => { item.receipt.dispatchReceipt.eventDispatched = false; },
+      item => { item.receipt.dispatchReceipt.documentStillCurrent = false; },
+      item => { item.receipt.after.documentId = 'old-document'; },
+      item => { item.afterAttempt.url = 'http://127.0.0.1:39220/egdesk-qa/QA_URL_otherfixture00'; },
+      item => { item.afterAttempt.text = []; },
+      item => { item.receipt.postcondition.wasAlreadyTrue = true; },
+      item => { item.receipt.externalEffectVerified = true; },
+      item => { item.afterAttempt = structuredClone(item.beforeAttempt);
+        item.afterAttempt.qaDiagnostics.performCalls++; },
+    ];
+    if (action === 'click') corruptions.push(
+      item => { item.receipt.dispatchReceipt.clickInputRoute = 'native-pointer'; },
+      item => { item.receipt.dispatchReceipt.targetClickObserved = false; });
+    for (const corrupt of corruptions) {
+      const proof = negativeProbeProof();
+      corrupt(proof.guardedActorPositiveControls.find(item => item.action === action));
+      assert.throws(() => assertBrowserNegativeProbeResults(proof), undefined, corrupt.toString());
+    }
+    const missing = negativeProbeProof();
+    missing.guardedActorPositiveControls = missing.guardedActorPositiveControls.filter(item => item.action !== action);
+    assert.throws(() => assertBrowserNegativeProbeResults(missing), /positive controls are incomplete/);
+  });
+}
+
+for (const name of ['readonly-fill-at-actor', 'disabled-fieldset-fill-at-actor', 'aria-disabled-ancestor-fill-at-actor']) {
+  test(`${name} requires the guarded Child phase, exact reason and unchanged independent perform/content evidence`, () => {
+    const corruptions = [
+      item => { item.uiRequests[0].actorDiagnostic.phase = 'preflight'; },
+      item => { item.uiRequests[0].actorDiagnostic.status = 'acted'; },
+      item => { item.uiRequests[0].actorDiagnostic.cardId = 'other-card'; },
+      item => { item.uiRequests[0].actorDiagnostic.sampledAtMs = 104; },
+      item => { item.uiRequests[0].guard = null; },
+      item => { item.uiRequests[0].guard.url = 'https://example.com/'; },
+      item => { item.uiRequests[0].action.selector = 'input'; },
+      item => { item.uiRequests[0].error = 'Browser observation is stale; observe again'; },
+      item => { item.actorPerformCallsAfter++; },
+      item => { item.afterAttempt.interactiveElements[0].value = 'unexpected fill'; },
+      item => { item.afterAttempt.focusedElement = { ref: 'other-target' }; },
+      item => { item.beforeAttempt.interactiveElements[0].disabled = !item.beforeAttempt.interactiveElements[0].disabled;
+        item.afterAttempt = structuredClone(item.beforeAttempt); },
+    ];
+    for (const corrupt of corruptions) {
+      const proof = negativeProbeProof();
+      corrupt(proof.probes.find(item => item.name === name));
+      assert.throws(() => assertBrowserNegativeProbeResults(proof), undefined, corrupt.toString());
+    }
+  });
+}
+
 test('Browser resize observes height-only and device-scale changes even when Windows keeps the same inner width', () => {
   const before = { width: 1440, height: 870, devicePixelRatio: 1 };
   assert.equal(browserViewportChanged(before, { ...before }), false);
@@ -991,6 +1201,15 @@ test('owned Browser fixture handler serves only one exact loopback GET with a pe
   assert.ok(html.includes(`<p id="fixture-marker">${marker}</p>`));
   assert.ok(html.includes('Reveal QA details') && html.includes('QA note'));
   assert.equal(html.includes('<form'), false);
+  assert.match(html, /<input aria-label="QA readonly note"[^>]* readonly /);
+  assert.match(html, /<fieldset disabled[^>]*><input aria-label="QA fieldset note"[^>]*><\/fieldset>/);
+  assert.match(html, /<div aria-disabled="true"><input aria-label="QA ancestor note"[^>]*><\/div>/);
+  // The inherited-disabled controls must not accidentally become native
+  // disabled inputs: these cases specifically exercise ancestor traversal.
+  for (const label of ['QA fieldset note', 'QA ancestor note']) {
+    const input = html.match(new RegExp(`<input aria-label="${label}"[^>]*>`))[0];
+    assert.doesNotMatch(input, /\s(?:disabled|readonly)(?:\s|=|>)/);
+  }
   const response = () => ({ status: null, headers: null, body: null,
     writeHead(status, headers) { this.status = status; this.headers = headers; },
     end(body) { this.body = body; } });
@@ -1011,6 +1230,28 @@ test('owned Browser fixture handler serves only one exact loopback GET with a pe
     headers: { host: '127.0.0.1:39220' } }, post);
   assert.equal(post.status, 405);
   assert.throws(() => createBrowserFixtureHandler({ port: 39218, pathMarker, marker }), /separately leased/);
+});
+
+test('fixture click marker changes only in its content script and preserves the original stale-DOM setup', () => {
+  const html = browserFixtureHtml('QA_DOM_0123456789abcdef');
+  let click;
+  const children = [];
+  const nodes = { 'qa-state': { textContent: 'Waiting for QA action' },
+    'qa-click-count': { textContent: 'QA click count: 0' },
+    'qa-button': { addEventListener(type, callback) { assert.equal(type, 'click'); click = callback; } },
+    'qa-changed': { appendChild(node) { children.push(node); } } };
+  runInNewContext(html.match(/<script>([\s\S]*?)<\/script>/)[1], { document: {
+    getElementById(id) { assert.ok(nodes[id], `content script escaped fixture node: ${id}`); return nodes[id]; },
+    createElement(tag) { assert.equal(tag, 'p'); return { textContent: '' }; },
+  } });
+  assert.equal(nodes['qa-click-count'].textContent, 'QA click count: 0');
+  click();
+  assert.equal(nodes['qa-state'].textContent, 'Changed by QA click');
+  assert.equal(children[0].textContent, 'Newly revealed node');
+  assert.equal(nodes['qa-click-count'].textContent, 'QA click count: 1');
+  click();
+  assert.equal(nodes['qa-click-count'].textContent, 'QA click count: 2');
+  assert.equal(children.length, 2);
 });
 
 test('Browser fixture preflight accepts only the exact owned HTTP document before any model turn', async () => {
