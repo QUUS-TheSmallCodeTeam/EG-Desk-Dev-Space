@@ -1640,8 +1640,26 @@ function browserMenuHarness() {
       return menu.showBrowserMenu(...args);
     }, card, menuButton);
   const pressTrigger = detail => clickTrigger({ detail, stopPropagation() {} });
+  const macPointerDownItem = index => {
+    const panel = menu.panel, target = panel.children[index];
+    const event = { button: 0, target, currentTarget: target, defaultPrevented: false,
+      preventDefault() { this.defaultPrevented = true; }, stopPropagation() {} };
+    panel._outsideHandler(event); // window capture precedes the item's mousedown
+    target.onmousedown?.(event);
+    if (!event.defaultPrevented) {
+      // Observed Firefox/macOS default: mousedown blurs the focused item to
+      // BODY without focusing the clicked button. The timer runs before mouseup.
+      document.activeElement = document.body;
+      panel.dispatchFocusout(null);
+    } else {
+      // Also exercise an uncertain focusout during explicit item-to-item focus.
+      panel.dispatchFocusout(null);
+    }
+    flushTimers();
+    return { event, panel, target };
+  };
   return { menu, pressTrigger, document, focused, menuButton, card, address, dockBrowser, outside,
-    nextCard, nextAddress, effects, flushTimers };
+    nextCard, nextAddress, effects, flushTimers, macPointerDownItem };
 }
 
 test('Browser more-menu keyboard entry, navigation, dismissal and focus return use the production handlers', () => {
@@ -1741,6 +1759,72 @@ test('Browser more-menu pointer open from body focuses an item so Escape closes 
   assert.equal(h.menu.panel, null);
   assert.equal(h.menuButton.getAttribute('aria-expanded'), 'false');
   assert.equal(h.document.activeElement, h.menuButton);
+});
+
+test('Browser more-menu Mac pointer selection survives focusout before mouseup and acts exactly once', async t => {
+  for (const detail of [0, 1]) {
+    for (const [index, permission] of [[2, 'observe'], [3, 'interact']]) {
+      await t.test(`${detail ? 'pointer' : 'keyboard'} open then pointer ${permission}`, () => {
+        const h = browserMenuHarness();
+        h.document.activeElement = h.document.body;
+        h.pressTrigger(detail);
+        h.flushTimers();
+        const { event, panel, target } = h.macPointerDownItem(index);
+        assert.equal(panel.isConnected, true, 'menu must survive the timer before mouseup/click');
+        assert.equal(event.defaultPrevented, true, 'only the menu-item default blur is prevented');
+        assert.equal(h.document.activeElement, target, 'pointer selection explicitly focuses its item');
+        assert.deepEqual(h.effects, [], 'mousedown must not execute the action');
+        // Mouseup is now still over the connected item, so its click is delivered.
+        target.onclick({ detail: 1, stopPropagation() {} });
+        h.flushTimers();
+        assert.deepEqual(h.effects, [permission]);
+        assert.equal(h.menu.panel, null);
+        assert.equal(h.menuButton.getAttribute('aria-expanded'), 'false');
+        assert.equal(h.document.activeElement, h.menuButton);
+      });
+    }
+  }
+});
+
+test('Browser more-menu pointer focus still permits Tab, Escape and outside dismissal without an action', () => {
+  for (const dismissal of ['Tab', 'Escape', 'outside']) {
+    const h = browserMenuHarness();
+    h.document.activeElement = h.document.body;
+    h.pressTrigger(1);
+    const { panel, target } = h.macPointerDownItem(2);
+    assert.equal(h.menu.panel, panel);
+    assert.equal(h.document.activeElement, target);
+    if (dismissal === 'Tab') {
+      assert.equal(panel.dispatchKey('Tab').defaultPrevented, false, 'Tab must leave normally');
+      panel.dispatchFocusout(h.outside);
+      h.outside.focus();
+    } else if (dismissal === 'Escape') {
+      panel.dispatchKey('Escape');
+    } else {
+      panel._outsideHandler({ target: h.outside });
+      assert.equal(h.document.activeElement, h.document.body, 'outside mousedown does not restore the trigger');
+      h.outside.focus();
+    }
+    h.flushTimers();
+    assert.equal(h.menu.panel, null);
+    assert.equal(h.menuButton.getAttribute('aria-expanded'), 'false');
+    assert.equal(h.document.activeElement, dismissal === 'Escape' ? h.menuButton : h.outside);
+    assert.deepEqual(h.effects, [], dismissal);
+  }
+});
+
+test('Browser more-menu non-primary mousedown does not override native focus or run an action', () => {
+  for (const button of [1, 2]) {
+    const h = browserMenuHarness();
+    h.pressTrigger(0);
+    const target = h.menu.panel.children[2], focused = h.document.activeElement;
+    const event = { button, target, currentTarget: target, defaultPrevented: false,
+      preventDefault() { this.defaultPrevented = true; } };
+    target.onmousedown?.(event);
+    assert.equal(event.defaultPrevented, false);
+    assert.equal(h.document.activeElement, focused);
+    assert.deepEqual(h.effects, []);
+  }
 });
 
 test('Browser more-menu closes only after focus really leaves both trigger and menu', () => {

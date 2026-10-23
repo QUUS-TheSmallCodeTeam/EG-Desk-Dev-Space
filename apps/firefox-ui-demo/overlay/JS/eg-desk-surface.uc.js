@@ -11920,6 +11920,13 @@
         class: 'egd-browser-menu-item',
         role: 'menuitem',
         title,
+        onmousedown: (ev) => {
+          if (ev.button !== 0) return;
+          // macOS can blur to BODY on button mousedown, closing the menu before
+          // mouseup/click. Keep this item focused; only click runs its action.
+          ev.preventDefault();
+          ev.currentTarget.focus();
+        },
         onclick: (ev) => {
           ev.stopPropagation();
           closeBrowserMenu();
