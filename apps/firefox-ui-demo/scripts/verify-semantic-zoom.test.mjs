@@ -210,7 +210,7 @@ test('production fit/layout preserves page viewport through all camera levels an
   const start = overlay.indexOf('    let logicalHeight = 0, lastCardSize');
   const end = overlay.indexOf('    deskWindow.onResize(updateFitScale);', start);
   assert.ok(start > 0 && end > start);
-  let zoom = 1, inverse = 1, invalidations = 0;
+  let zoom = 1, inverse = 1, invalidations = 0, targetInvalidations = 0;
   const world = { left: '0px', top: '0px', width: '1440px', height: '640px' };
   const card = { clientWidth: 1440, clientHeight: 640, style: world, setAttribute() {} };
   const header = { get offsetHeight() { return 67 * inverse; }, style: {
@@ -220,16 +220,19 @@ test('production fit/layout preserves page viewport through all camera levels an
     get clientHeight() { return Math.max(0, card.clientHeight - header.offsetHeight); } };
   const wrap = { style: {} };
   const presentation = { invalidate() { invalidations += 1; } };
+  const agentProjection = { invalidate() { targetInvalidations += 1; } };
   const update = compileFunction(`${overlay.slice(start, end)}; return updateFitScale;`,
-    ['body', 'card', 'header', 'wrap', 'options', 'presentation', 'CARD_LOGICAL_W', 'canvasZoom', 'browserPresentationFit'])(
-    body, card, header, wrap, {}, presentation, 1440, () => zoom, production('browserPresentationFit'));
+    ['body', 'card', 'header', 'wrap', 'options', 'presentation', 'agentProjection', 'CARD_LOGICAL_W', 'canvasZoom', 'browserPresentationFit'])(
+    body, card, header, wrap, {}, presentation, agentProjection, 1440, () => zoom, production('browserPresentationFit'));
   update();
+  assert.equal(targetInvalidations, 1, 'initial Card layout invalidates old target display');
   const initialViewport = wrap.style.height;
   assert.equal(initialViewport, '574px');
   for (const next of [.8, .75, .83, .3, .01, 4, 1]) {
     zoom = next; update();
     assert.equal(wrap.style.height, initialViewport, `page viewport preserved at ${zoom}`);
     assert.equal(invalidations, 1, 'no font IPC invalidation for camera-only changes');
+    assert.equal(targetInvalidations, 1, 'camera-only changes preserve the approved target projection');
     assert.ok(Number.parseFloat(wrap.style.transform.slice(6)) >= 0);
     assert.deepEqual(world, { left: '0px', top: '0px', width: '1440px', height: '640px' });
     if (zoom >= .75 && zoom <= 1) {
@@ -242,6 +245,13 @@ test('production fit/layout preserves page viewport through all camera levels an
   update();
   assert.notEqual(wrap.style.height, initialViewport, 'real Card resize retains responsive page behavior');
   assert.equal(invalidations, 2);
+  assert.equal(targetInvalidations, 2, 'real Card width resize invalidates target display');
+  card.clientHeight += 80;
+  update();
+  assert.equal(targetInvalidations, 3, 'real Card height resize invalidates target display');
+  zoom = .3;
+  update();
+  assert.equal(targetInvalidations, 3, 'camera zoom after resize still does not invalidate target display');
 });
 
 test('Browser-only readable chrome CSS keeps two rows and 32px controls without changing other Card types', () => {
