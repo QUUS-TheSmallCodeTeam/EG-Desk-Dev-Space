@@ -229,7 +229,9 @@ test('actual provider, B service and transport permit only an attested local fix
       } }
       else if (request.kind === 'observe') response = { requestId: request.requestId, status: 'observed', snapshot: snapshot(0) }
       else if (request.kind === 'act') { revision = 2; response = { requestId: request.requestId, status: 'acted', receipt: {
-        dispatchReceipt: { actor: 'JSWindowActor', eventDispatched: true }, after: snapshot(1), observation: { visibleTextChanged: true },
+        dispatchReceipt: { actor: 'JSWindowActor', eventDispatched: true, documentStillCurrent: true,
+          clickInputRoute: 'dom-click-no-pointerdown', targetClickObserved: true },
+        after: snapshot(1), observation: { visibleTextChanged: true },
       } } }
       else response = { requestId: request.requestId, status: 'cancelled' }
       transport.receive(transportId, response)

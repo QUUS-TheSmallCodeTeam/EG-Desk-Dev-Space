@@ -24,12 +24,18 @@ function snapshot(revision = 3, overrides = {}) {
     interactiveElements: [{ ref: 'el_1', role: 'button', label: 'Increment', href: '', value: '',
       tag: 'button', disabled: false, bounds: { x: 12, y: 30, width: 80, height: 30 } }], ...overrides }
 }
+function omitDispatchFields(receipt, ...fields) {
+  const dispatchReceipt = { ...receipt.dispatchReceipt }
+  for (const field of fields) delete dispatchReceipt[field]
+  return { ...receipt, dispatchReceipt }
+}
 function fixture(permission = 'interact') {
   let owner = 'engine-account-1'
   let current = snapshot()
   let actionCalls = 0
   let navigationAfterNull = false
   let clickNavigationUrl = null
+  let editReceipt = receipt => receipt
   const requests = []
   const sendToUi = async request => {
     requests.push(request)
@@ -45,17 +51,20 @@ function fixture(permission = 'interact') {
       if (request.action.type === 'click') current = clickNavigationUrl
         ? snapshot(4, { url: new URL(clickNavigationUrl).href, documentId: 'document-2',
           readyState: 'complete', text: ['Arrived'] })
-        : snapshot(4, { text: ['Count: 1'] })
-      if (request.action.type === 'fill') current = snapshot(4, { interactiveElements: [
+        : snapshot(current.revision + 1, { documentId: current.documentId, url: current.url, text: ['Count: 1'] })
+      if (request.action.type === 'fill') current = snapshot(current.revision + 1, { documentId: current.documentId,
+        url: current.url, interactiveElements: [
         { ...current.interactiveElements[0], value: request.action.text, role: 'textbox', tag: 'input' }] })
       if (request.action.type === 'navigate') current = snapshot(4, {
         url: new URL(request.action.url).href, documentId: 'document-2', readyState: 'complete',
       })
       return { requestId: request.requestId, status: 'acted',
-        receipt: { dispatchReceipt: { actor: 'JSWindowActor', eventDispatched: true },
+        receipt: editReceipt({ dispatchReceipt: { actor: 'JSWindowActor', eventDispatched: true,
+            documentStillCurrent: true, ...(request.action.type === 'click'
+              ? { clickInputRoute: 'dom-click-no-pointerdown', targetClickObserved: true } : {}) },
           after: (navigationAfterNull && request.action.type === 'navigate') ||
             (clickNavigationUrl && request.action.type === 'click') ? null : current,
-          observation: { visibleTextChanged: request.action.type === 'click' } } }
+          observation: { visibleTextChanged: request.action.type === 'click' } }) }
     }
     throw new Error('unexpected UI request')
   }
@@ -67,6 +76,7 @@ function fixture(permission = 'interact') {
   return { service, requests, setOwner: value => { owner = value }, setSnapshot: value => { current = value },
     setNavigationAfterNull: value => { navigationAfterNull = value },
     setClickNavigation: value => { clickNavigationUrl = value },
+    setReceiptEditor: value => { editReceipt = value },
     get actionCalls() { return actionCalls }, permission }
 }
 
@@ -110,6 +120,42 @@ test('fresh observed target dispatches once and returns DOM post-observation, ne
   assert.equal(f.actionCalls, 1)
 })
 
+test('an acted response cannot prove a click from another Card, an undispatched action, or a missed target click', async () => {
+  for (const [reason, edit] of [
+    ['wrong-card-readback', receipt => ({ ...receipt, after: { ...receipt.after, cardId: 'other-browser' } })],
+    ['different-document-readback', receipt => ({ ...receipt, after: { ...receipt.after, documentId: 'other-document' } })],
+    ['incomplete-readback', receipt => ({ ...receipt, after: { cardId: 'browser-1', text: ['Count: 1'] } })],
+    ['no-dispatch', receipt => ({ ...receipt, dispatchReceipt: { ...receipt.dispatchReceipt, eventDispatched: false } })],
+    ['missing-dispatch-receipt', receipt => ({ ...receipt, dispatchReceipt: undefined })],
+    ['missing-current-window-global', receipt => omitDispatchFields(receipt, 'documentStillCurrent')],
+    ['missing-click-route', receipt => omitDispatchFields(receipt, 'clickInputRoute')],
+    ['missing-target-click', receipt => omitDispatchFields(receipt, 'targetClickObserved')],
+    ['missing-all-click-diagnostics', receipt => omitDispatchFields(receipt,
+      'documentStillCurrent', 'clickInputRoute', 'targetClickObserved')],
+    ['missed-target', receipt => ({ ...receipt, dispatchReceipt: { ...receipt.dispatchReceipt, targetClickObserved: false } })],
+    ['stale-window-global', receipt => ({ ...receipt, dispatchReceipt: { ...receipt.dispatchReceipt, documentStillCurrent: false } })],
+    ['false-click-route', receipt => ({ ...receipt, dispatchReceipt: { ...receipt.dispatchReceipt, clickInputRoute: false } })],
+    ['wrong-click-route', receipt => ({ ...receipt, dispatchReceipt: { ...receipt.dispatchReceipt, clickInputRoute: 'document-window' } })],
+  ]) {
+    const f = fixture()
+    f.setReceiptEditor(edit)
+    await f.service.bind(run, f.service.prepare({ selectedSources: [source()] }))
+    const seen = await f.service.dispatch(run, { tool: 'egdesk_browser_observe', arguments: { cardId: 'browser-1' } })
+    const args = { cardId: 'browser-1', observationId: seen.observationId, expectedRevision: 3,
+      ref: 'el_1', expectedTarget: seen.snapshot.interactiveElements[0],
+      postcondition: { kind: 'visible-text', value: 'Count: 1' } }
+    const result = await f.service.dispatch(run, { tool: 'egdesk_browser_click', arguments: args })
+    assert.equal(result.status, 'postcondition-unverified', reason)
+    assert.equal(result.externalEffectVerified, false, reason)
+    const again = await f.service.dispatch(run, { tool: 'egdesk_browser_observe', arguments: { cardId: 'browser-1' } })
+    await assert.rejects(f.service.dispatch(run, { tool: 'egdesk_browser_click', arguments: {
+      ...args, observationId: again.observationId, expectedRevision: again.snapshot.revision,
+      expectedTarget: again.snapshot.interactiveElements[0],
+    } }), { code: 'BROWSER_OUTCOME_UNKNOWN' }, reason)
+    assert.equal(f.actionCalls, 1, reason)
+  }
+})
+
 test('duplicate native call IDs share one action receipt and cannot change payload', async () => {
   const f = fixture()
   await f.service.bind(run, f.service.prepare({ selectedSources: [source()] }))
@@ -127,6 +173,51 @@ test('duplicate native call IDs share one action receipt and cannot change paylo
     arguments: { ...args, postcondition: { kind: 'visible-text', value: 'Count: 2' } } }),
   { code: 'BROWSER_CALL_ID_REUSED' })
   assert.equal(f.actionCalls, 1)
+})
+
+test('UI timeout means unknown outcome even if the click later completes; neither call ID nor re-observation repeats it', async () => {
+  let current = snapshot(), releaseAction, actionCalls = 0
+  const service = createBrowserToolService({ timeoutMs: 1000, getOwnerKey: () => 'engine-account-1',
+    sendToUi: request => {
+      if (request.kind === 'bind') return { requestId: request.requestId, status: 'bound', binding: {
+        cardId: 'browser-1', cardEpoch: 'card-epoch-1', profileId: 'firefox-default',
+        accountId: 'fixture-account', userContextId: 0, url: 'https://example.test/local',
+        engineAccountKey: 'codex:chatgpt:fixture@example.test', authorityEpoch: 0,
+      } }
+      if (request.kind === 'observe') return { requestId: request.requestId, status: 'observed', snapshot: current }
+      if (request.kind === 'act') {
+        actionCalls++
+        return new Promise(resolve => { releaseAction = () => {
+          current = snapshot(4, { text: ['Count: 1'] })
+          resolve({ requestId: request.requestId, status: 'acted', receipt: {
+            dispatchReceipt: { actor: 'JSWindowActor', eventDispatched: true,
+              documentStillCurrent: true, clickInputRoute: 'dom-click-no-pointerdown', targetClickObserved: true },
+            after: current,
+          } })
+        } })
+      }
+      throw new Error('unexpected UI request')
+    } })
+  await service.bind(run, service.prepare({ selectedSources: [source()] }))
+  const seen = await service.dispatch(run, { tool: 'egdesk_browser_observe', arguments: { cardId: 'browser-1' } })
+  const event = { callId: 'timed-out-click', tool: 'egdesk_browser_click', arguments: {
+    cardId: 'browser-1', observationId: seen.observationId, expectedRevision: 3,
+    ref: 'el_1', expectedTarget: seen.snapshot.interactiveElements[0],
+    postcondition: { kind: 'visible-text', value: 'Count: 1' },
+  } }
+  const pending = service.dispatch(run, event)
+  await assert.rejects(pending, { code: 'BROWSER_UI_TIMEOUT', message: /outcome is unknown/ })
+  assert.equal(actionCalls, 1)
+  assert.equal(typeof releaseAction, 'function')
+  releaseAction()
+  await assert.rejects(service.dispatch(run, event), { code: 'BROWSER_UI_TIMEOUT' })
+  const after = await service.dispatch(run, { tool: 'egdesk_browser_observe', arguments: { cardId: 'browser-1' } })
+  assert.equal(after.snapshot.text[0], 'Count: 1', 'late readback is visible but does not prove the timed-out call')
+  await assert.rejects(service.dispatch(run, { ...event, callId: 'not-an-automatic-retry', arguments: {
+    ...event.arguments, observationId: after.observationId, expectedRevision: after.snapshot.revision,
+    expectedTarget: after.snapshot.interactiveElements[0],
+  } }), { code: 'BROWSER_OUTCOME_UNKNOWN' })
+  assert.equal(actionCalls, 1)
 })
 
 test('cached native call result is inaccessible after cancellation or Engine account switch', async () => {
@@ -248,6 +339,8 @@ test('navigate and fill return scoped receipts and force a fresh observation for
     postcondition: { kind: 'url', value: url },
   } })
   assert.equal(nav.status, 'postcondition-observed')
+  assert.equal(nav.after.documentId, 'document-2', 'a navigation may read back a new document')
+  assert.equal(nav.dispatchReceipt.documentStillCurrent, true)
   assert.equal(nav.pageLoadVerified, false)
   assert.equal(nav.externalEffectVerified, false)
 
@@ -263,6 +356,51 @@ test('navigate and fill return scoped receipts and force a fresh observation for
   } })
   assert.equal(filled.status, 'postcondition-observed')
   assert.equal(filled.after.interactiveElements[0].value, 'local note')
+  assert.equal(filled.dispatchReceipt.documentStillCurrent, true)
+  assert.equal(filled.dispatchReceipt.clickInputRoute, undefined, 'fill does not need click diagnostics')
+})
+
+test('fill and navigation cannot claim a postcondition without current-window diagnostics', async () => {
+  for (const tool of ['egdesk_browser_fill', 'egdesk_browser_navigate']) {
+    for (const diagnostic of ['missing', 'false']) {
+      const f = fixture()
+      if (tool === 'egdesk_browser_fill') f.setSnapshot(snapshot(3, { interactiveElements: [
+        { ref: 'el_1', role: 'textbox', label: 'Note', href: '', value: '', tag: 'input', disabled: false },
+      ] }))
+      f.setReceiptEditor(receipt => diagnostic === 'missing'
+        ? omitDispatchFields(receipt, 'documentStillCurrent')
+        : { ...receipt, dispatchReceipt: { ...receipt.dispatchReceipt, documentStillCurrent: false } })
+      await f.service.bind(run, f.service.prepare({ selectedSources: [source()] }))
+      const seen = await f.service.dispatch(run, { tool: 'egdesk_browser_observe', arguments: { cardId: 'browser-1' } })
+      const argumentsForTool = tool === 'egdesk_browser_fill'
+        ? { cardId: 'browser-1', observationId: seen.observationId, expectedRevision: 3,
+          ref: 'el_1', expectedTarget: seen.snapshot.interactiveElements[0], text: 'local note',
+          postcondition: { kind: 'target-value', value: 'local note' } }
+        : { cardId: 'browser-1', observationId: seen.observationId, expectedRevision: 3,
+          url: 'https://example.test/next', postcondition: { kind: 'url', value: 'https://example.test/next' } }
+      const result = await f.service.dispatch(run, { tool, arguments: argumentsForTool })
+      assert.equal(result.status, 'postcondition-unverified', `${tool}: ${diagnostic}`)
+      assert.equal(result.externalEffectVerified, false)
+      assert.equal(f.actionCalls, 1)
+    }
+  }
+})
+
+test('fill cannot claim a readback from another document even with a current-window flag', async () => {
+  const f = fixture()
+  f.setSnapshot(snapshot(3, { interactiveElements: [
+    { ref: 'el_1', role: 'textbox', label: 'Note', href: '', value: '', tag: 'input', disabled: false },
+  ] }))
+  f.setReceiptEditor(receipt => ({ ...receipt, after: { ...receipt.after, documentId: 'other-document' } }))
+  await f.service.bind(run, f.service.prepare({ selectedSources: [source()] }))
+  const seen = await f.service.dispatch(run, { tool: 'egdesk_browser_observe', arguments: { cardId: 'browser-1' } })
+  const result = await f.service.dispatch(run, { tool: 'egdesk_browser_fill', arguments: {
+    cardId: 'browser-1', observationId: seen.observationId, expectedRevision: 3,
+    ref: 'el_1', expectedTarget: seen.snapshot.interactiveElements[0], text: 'local note',
+    postcondition: { kind: 'target-value', value: 'local note' },
+  } })
+  assert.equal(result.status, 'postcondition-unverified')
+  assert.equal(result.externalEffectVerified, false)
 })
 
 test('URL postcondition compares canonical browser URLs including normalized trailing slash', async () => {
