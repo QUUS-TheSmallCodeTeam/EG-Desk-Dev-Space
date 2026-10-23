@@ -645,9 +645,10 @@ test('new Chat height reserves the readable composer above the Dock at 600/800/9
   const body = surfaceSource.match(/  function fitCodexChatCardToReadableViewport\(card, safe, bodyFontPx\) \{([\s\S]*?)\n  \}/)?.[1];
   assert.ok(body, 'use the production Chat-only height cap');
   const fit = compileFunction(`return function fitCodexChatCardToReadableViewport(card, safe, bodyFontPx) {${body}\n  }`,
-    ['window', 'parsePxNumber', 'ZOOM_MAX'])(
+    ['window', 'state', 'visibleChatZoomRect', 'parsePxNumber', 'ZOOM_MAX', 'CHAT_ZOOM_GAP'])(
     { getComputedStyle: () => ({ minHeight: '420px', borderTopWidth: '1px', borderBottomWidth: '1px' }) },
-    (value, fallback = 0) => Number.parseFloat(value) || fallback, 4);
+    { zoom: 1 }, () => null,
+    (value, fallback = 0) => Number.parseFloat(value) || fallback, 4, 8);
   const spawnStart = surfaceSource.indexOf('  function spawnCodexChatCard(');
   const browserStart = surfaceSource.indexOf('  // ============ Canvas Entity: Browser Card', spawnStart);
   const spawnBody = surfaceSource.slice(spawnStart, browserStart);
@@ -661,13 +662,135 @@ test('new Chat height reserves the readable composer above the Dock at 600/800/9
     { width: 960, height: 700 }, { width: 1280, height: 776 }]) {
     const safe = { left: 24, top: 76, right: width - 24, bottom: height - 76,
       width: width - 48, height: height - 152 };
-    const card = { style: { height: '680px' } };
+    const card = { style: { height: '680px', maxHeight: '' },
+      classList: { contains: () => false }, getBoundingClientRect: () => ({}) };
     assert.equal(fit(card, safe, 11), true);
-    const projectedHeight = (Number.parseFloat(card.style.height) + 2) * (10.6 / 11);
+    const projectedHeight = (Number.parseFloat(card.style.maxHeight) + 2) * (10.6 / 11);
     assert(projectedHeight <= safe.height, `${width}x${height}: Chat bottom remains above Dock`);
-    assert(Number.parseFloat(card.style.height) >= 420, `${width}x${height}: CSS minimum is preserved`);
+    assert(Number.parseFloat(card.style.maxHeight) >= 420, `${width}x${height}: CSS minimum is preserved`);
+    assert.equal(card.style.height, '680px', 'Dock fit never overwrites the saved world height');
     assert.equal(fit(card, safe, 11), false, 'a second fit does not keep resizing the Card');
   }
+});
+
+test('Chat Zoom clearance caps only presentation height and recovers on wider viewports', () => {
+  const fitBody = surfaceSource.match(/  function fitCodexChatCardToReadableViewport\(card, safe, bodyFontPx\) \{([\s\S]*?)\n  \}/)?.[1];
+  const zoomBody = surfaceSource.match(/  function visibleChatZoomRect\(\) \{([\s\S]*?)\n  \}/)?.[1];
+  const geometryBody = surfaceSource.match(/  function persistentEntityGeometry\(entity\) \{([\s\S]*?)\n  \}/)?.[1];
+  const screenBody = surfaceSource.match(/    const screenRect = \(card, zoom, pan\) => \{([\s\S]*?)\n    \};/)?.[1];
+  assert.ok(fitBody && zoomBody && geometryBody && screenBody);
+  const state = { zoom: 10.6 / 11, cardFullscreen: null };
+  const zoomIndicator = { getBoundingClientRect: () => zoomRect };
+  let zoomRect = { left: 88, right: 250, top: 492, bottom: 533, width: 162, height: 41 };
+  let indicatorVisible = true;
+  let screenLeft = 227;
+  let screenTop = 76;
+  const window = { getComputedStyle: node => node === zoomIndicator
+    ? { display: indicatorVisible ? 'flex' : 'none', visibility: 'visible', opacity: '1' }
+    : { minHeight: '420px', boxSizing: 'content-box', borderTopWidth: '1px', borderBottomWidth: '1px' } };
+  const document = { getElementById: id => id === 'egd-zoom-indicator' ? zoomIndicator : null };
+  const px = (value, fallback = 0) => Number.parseFloat(value) || fallback;
+  const visibleZoom = compileFunction(`return function visibleChatZoomRect() {${zoomBody}\n  }`,
+    ['document', 'window'])(document, window);
+  const fit = compileFunction(`return function fitCodexChatCardToReadableViewport(card, safe, bodyFontPx) {${fitBody}\n  }`,
+    ['window', 'state', 'visibleChatZoomRect', 'parsePxNumber', 'ZOOM_MAX', 'CHAT_ZOOM_GAP'])(
+    window, state, visibleZoom, px, 4, 8);
+  const persistent = compileFunction(`return function persistentEntityGeometry(entity) {${geometryBody}\n  }`,
+    ['state', 'parsePxNumber'])(state, px);
+  const screenRect = compileFunction(`return (card, zoom, pan) => {${screenBody}\n    }`,
+    ['parsePxNumber'])(px);
+  const card = { id: 'chat-a', isConnected: true,
+    style: { left: '147px', top: '76px', width: '440px', height: '680px', maxHeight: '', zIndex: '9' },
+    classList: { contains: name => name === 'egd-chat-card' },
+    getBoundingClientRect() {
+      const visibleHeight = Math.min(px(this.style.height), px(this.style.maxHeight, Infinity));
+      return { left: screenLeft, right: screenLeft + 442 * state.zoom, top: screenTop,
+        bottom: screenTop + (visibleHeight + 2) * state.zoom, width: 442 * state.zoom,
+        height: (visibleHeight + 2) * state.zoom };
+    } };
+  const saved = persistent(card);
+  const safeFor = (width, height) => ({ left: 24, top: 76, right: width - 24,
+    bottom: height - 76, width: width - 48, height: height - 152 });
+  for (const [width, screenX] of [[800, 227], [600, 120]]) {
+    screenLeft = screenX;
+    assert.equal(fit(card, safeFor(width, 600), 11), width === 800);
+    const visible = card.getBoundingClientRect();
+    assert(visible.bottom <= zoomRect.top - 8 + 0.01, `${width}x600: full Chat stays 8px above Zoom`);
+    assert(Number.parseFloat(card.style.maxHeight) >= 420, 'header, footer, and readable font retain CSS minimum');
+    assert.deepEqual(persistent(card), saved, 'temporary presentation cap cannot change saved or Board geometry');
+    const projected = screenRect(card, state.zoom, { x: 0, y: 0 });
+    assert.equal(projected.world.height, 680, 'semantic snapshot retains saved world height');
+    assert.equal(projected.visualWorld.height, Number.parseFloat(card.style.maxHeight),
+      'camera projection uses the displayed height');
+  }
+  const narrowCap = Number.parseFloat(card.style.maxHeight);
+  const projectionBody = surfaceSource.match(/    const focusProjection = \(entry, \{ revealHeader = false \} = \{\}\) => \{([\s\S]*?)\n    \};/)?.[1];
+  assert.ok(projectionBody, 'exercise the actual Chat focus camera after presentation fit');
+  state.pan = { x: 0, y: 0 };
+  let target = null;
+  state.setCanvasViewportTarget = value => { target = value; };
+  const focus = compileFunction(`return (entry, { revealHeader = false } = {}) => {${projectionBody}\n    }`,
+    ['state', 'authorVisible', 'screenRect', 'safeViewportRect', 'SurfaceState', 'ZOOM_MAX',
+      'detailWidth', 'detailHeight', 'focusCanvasCard', 'visibleChatZoomRect',
+      'window', 'parsePxNumber', 'CHAT_ZOOM_GAP'])(state, () => true, screenRect,
+    () => safeFor(600, 600), { fitSurfaceCamera }, 4, 240, 180, () => {}, visibleZoom, window, px, 8);
+  focus({ card, kind: 'chat', bodyFontPx: 11 }, { revealHeader: true });
+  assert.ok(target, 'Dock Chat focus produces one camera target');
+  const projected = screenRect(card, target.zoom, target.pan);
+  screenLeft = projected.x; screenTop = projected.y;
+  state.zoom = target.zoom; state.pan = target.pan;
+  assert(screenTop >= 76 - 0.01, 'Chat header remains below the rail');
+  assert(card.getBoundingClientRect().bottom <= zoomRect.top - 8 + 0.01,
+    'focus uses the same Zoom top minus 8px boundary and cannot recenter into overlap');
+  assert.equal(fit(card, safeFor(600, 600), 11), false,
+    'settled camera does not toggle the presentation cap on the next frame');
+  const settledTarget = target;
+  target = null;
+  focus({ card, kind: 'chat', bodyFontPx: 11 }, { revealHeader: true });
+  assert(Math.abs(target.pan.y - settledTarget.pan.y) < 0.01,
+    'repeated Chat focus has no cap/recenter oscillation');
+  assert.deepEqual(persistent(card), saved);
+  screenTop = 76;
+  zoomRect = { left: 15, right: 177, top: 645, bottom: 686, width: 162, height: 41 };
+  screenLeft = 227;
+  for (const [width, height] of [[960, 700], [1280, 776]]) {
+    fit(card, safeFor(width, height), 11);
+    assert(Number.parseFloat(card.style.maxHeight) > narrowCap,
+      `${width}x${height}: Zoom-only cap clears; only the existing Dock cap may remain`);
+    assert.deepEqual(persistent(card), saved);
+  }
+  fit(card, safeFor(1280, 900), 11);
+  assert.equal(card.style.maxHeight, '', 'enough vertical space restores the full saved display height');
+  assert.equal(screenRect(card, state.zoom, { x: 0, y: 0 }).visualWorld.height, 680);
+  assert.deepEqual(persistent(card), saved);
+
+  zoomRect = { left: 0, right: 80, top: 492, bottom: 533, width: 80, height: 41 };
+  screenLeft = 120;
+  fit(card, safeFor(600, 600), 11);
+  const dockOnly = card.style.maxHeight;
+  assert(Number.parseFloat(dockOnly) > narrowCap, 'non-intersecting Zoom does not trigger its extra cap');
+  indicatorVisible = false;
+  zoomRect.left = 88; zoomRect.right = 250;
+  assert.equal(fit(card, safeFor(600, 600), 11), false, 'a hidden Zoom is ignored');
+  assert.equal(card.style.maxHeight, dockOnly);
+  assert.deepEqual(persistent(card), saved);
+
+  indicatorVisible = true;
+  card.style.height = '540px'; // a restored/user-sized Chat Card, not the new-card default
+  const custom = persistent(card);
+  fit(card, safeFor(600, 600), 11);
+  assert.equal(card.style.height, '540px');
+  assert.deepEqual(persistent(card), custom);
+  zoomRect = { left: 88, right: 250, top: 791, bottom: 832, width: 162, height: 41 };
+  fit(card, safeFor(1280, 900), 11);
+  assert.equal(card.style.maxHeight, '', 'a wide viewport restores the exact user-sized display');
+  assert.deepEqual(persistent(card), custom);
+  zoomRect = { left: 88, right: 250, top: 492, bottom: 533, width: 162, height: 41 };
+  fit(card, safeFor(600, 600), 11);
+  assert.notEqual(card.style.maxHeight, '');
+  card.classList.contains = name => name === 'egd-chat-card' || name === 'egd-card-fullscreen';
+  fit(card, safeFor(600, 600), 11);
+  assert.equal(card.style.maxHeight, '', 'fullscreen is never held to the temporary Chat cap');
 });
 
 test('human Chat Dock open after initial Browser focus and zoom-out focuses only a compact Chat to readable detail', () => {
@@ -681,6 +804,7 @@ test('human Chat Dock open after initial Browser focus and zoom-out focuses only
   const fitBody = surfaceSource.match(/  function fitCodexChatCardToReadableViewport\(card, safe, bodyFontPx\) \{([\s\S]*?)\n  \}/)?.[1];
   assert.ok(fitBody);
   let safe = { left: 147, top: 76, right: 1256, bottom: 694, width: 1109, height: 618 };
+  let dockZoomRect = null;
   const browser = { x: 15, y: 20, width: 1200, height: 720 };
   const initial = fitSurfaceCamera(browser,
     { left: 0, top: 0, width: 1200, height: 800 }, 1);
@@ -690,11 +814,9 @@ test('human Chat Dock open after initial Browser focus and zoom-out focuses only
   const window = { requestAnimationFrame: fn => { frames.set(++nextFrame, fn); return nextFrame; },
     cancelAnimationFrame: id => frames.delete(id),
     getComputedStyle: () => ({ minHeight: '420px', borderTopWidth: '1px', borderBottomWidth: '1px' }) };
-  const fitChat = compileFunction(`return function fitCodexChatCardToReadableViewport(card, safe, bodyFontPx) {${fitBody}\n  }`,
-    ['window', 'parsePxNumber', 'ZOOM_MAX'])(window,
-    (value, fallback = 0) => Number.parseFloat(value) || fallback, 4);
   const viewport = { id: 'canvas-viewport' };
   const document = { activeElement: { id: 'dock-button' },
+    getElementById: () => null,
     addEventListener: (name, fn) => listeners.set(name, fn),
     removeEventListener: (name, fn) => { if (listeners.get(name) === fn) listeners.delete(name) },
     emit: (name, target) => listeners.get(name)?.({ target }) };
@@ -705,6 +827,9 @@ test('human Chat Dock open after initial Browser focus and zoom-out focuses only
       threadDrafts: { room: 'unsent human draft' } },
     setCanvasViewportTarget: target => { cameraTargets.push(target); state.zoomTarget = target.zoom; state.panTarget = target.pan; },
     codexBridge: { selectThread: (id, options) => { assert.equal(id, 'room'); assert.deepEqual(options, { openConversation: true }); } } };
+  const fitChat = compileFunction(`return function fitCodexChatCardToReadableViewport(card, safe, bodyFontPx) {${fitBody}\n  }`,
+    ['window', 'state', 'visibleChatZoomRect', 'parsePxNumber', 'ZOOM_MAX', 'CHAT_ZOOM_GAP'])(
+    window, state, () => dockZoomRect, (value, fallback = 0) => Number.parseFloat(value) || fallback, 4, 8);
   assert.equal(state.zoom, 1, 'initial Browser focus is the starting camera');
   state.zoom = state.zoomTarget = 0.83;
 
@@ -712,8 +837,17 @@ test('human Chat Dock open after initial Browser focus and zoom-out focuses only
     focus: () => { composerFocuses++; document.activeElement = composer } };
   const messages = { scrollTop: 247 };
   const card = { id: 'chat-card', isConnected: true,
-    style: { left: '100px', top: '90px', width: '440px', height: '680px' },
+    style: { left: '100px', top: '90px', width: '440px', height: '680px', maxHeight: '' },
     classList: { contains: name => name === 'egd-chat-card' },
+    getBoundingClientRect() {
+      const zoom = state.zoom;
+      const height = Math.min(Number.parseFloat(this.style.height),
+        Number.parseFloat(this.style.maxHeight) || Infinity);
+      const left = state.pan.x + Number.parseFloat(this.style.left) * zoom;
+      const top = state.pan.y + Number.parseFloat(this.style.top) * zoom;
+      return { left, top, right: left + 442 * zoom, bottom: top + (height + 2) * zoom,
+        width: 442 * zoom, height: (height + 2) * zoom };
+    },
     contains: node => node === composer,
     querySelector: selector => selector === '.egd-codex-input' ? composer
       : selector === '.egd-codex-messages' ? messages : null };
@@ -724,19 +858,26 @@ test('human Chat Dock open after initial Browser focus and zoom-out focuses only
   const screenRect = (target, zoom, pan = state.panTarget) => {
     const world = { x: parseFloat(target.style.left), y: parseFloat(target.style.top),
       width: parseFloat(target.style.width), height: parseFloat(target.style.height) };
+    const visualWorld = { ...world, height: Math.min(world.height,
+      parseFloat(target.style.maxHeight) || Infinity) };
     return { world, x: pan.x + world.x * zoom, y: pan.y + world.y * zoom,
-      width: world.width * zoom, height: world.height * zoom };
+      visualWorld, width: world.width * zoom, height: visualWorld.height * zoom };
   };
   const surface = { surfaceSemanticLevel, fitSurfaceCamera };
   const focusProjection = compileFunction(`return (entry, { revealHeader = false } = {}) => {${projectionBody}\n    }`,
     ['state', 'authorVisible', 'screenRect', 'safeViewportRect', 'SurfaceState', 'ZOOM_MAX',
-      'detailWidth', 'detailHeight', 'focusCanvasCard'])(state, () => true, screenRect, () => safe,
-    surface, 4, 240, 180, target => focused.push(target));
+      'detailWidth', 'detailHeight', 'focusCanvasCard', 'visibleChatZoomRect',
+      'window', 'parsePxNumber', 'CHAT_ZOOM_GAP'])(state, () => true, screenRect, () => safe,
+    surface, 4, 240, 180, target => focused.push(target), () => dockZoomRect,
+    window, (value, fallback = 0) => Number.parseFloat(value) || fallback, 8);
   state.focusChatDockIfCompact = compileFunction(`let cancelPendingChatComposerFocus = () => {};\nreturn card => {${compactBody}\n    }`,
     ['state', 'syncEntries', 'entries', 'authorVisible', 'screenRect', 'SurfaceState',
       'detailWidth', 'detailHeight', 'safeViewportRect', 'fitCodexChatCardToReadableViewport',
-      'focusProjection', 'window', 'document', 'viewport'])(state, syncEntries, entries, () => true,
-    screenRect, surface, 240, 180, () => safe, fitChat, focusProjection, window, document, viewport);
+      'focusProjection', 'window', 'document', 'viewport', 'visibleChatZoomRect',
+      'parsePxNumber', 'CHAT_ZOOM_GAP'])(state, syncEntries, entries, () => true,
+    screenRect, surface, 240, 180, () => safe, fitChat, focusProjection, window, document, viewport,
+    () => dockZoomRect,
+    (value, fallback = 0) => Number.parseFloat(value) || fallback, 8);
   let spawned = 0;
   const dockClick = compileFunction(`return () => {${dockBody}\n          }`,
     ['kind', 'item', 'state', 'spawnCodexChatCard', 'toggleHUD'])(
@@ -751,8 +892,8 @@ test('human Chat Dock open after initial Browser focus and zoom-out focuses only
   assert.equal(cameraTargets.length, 1, 'compact Chat opens with its existing focus projection');
   assert(Math.abs(cameraTargets[0].zoom - 10.6 / 11) < 0.001);
   assert.ok(cameraTargets[0].pan.y + 90 * cameraTargets[0].zoom >= safe.top,
-    'the focused Chat header clears the topbar after the Card is height-capped');
-  assert.ok(cameraTargets[0].pan.y + (90 + Number.parseFloat(card.style.height) + 2) * cameraTargets[0].zoom <= safe.bottom,
+    'the focused Chat header clears the topbar after the Card is presentation-capped');
+  assert.ok(cameraTargets[0].pan.y + (90 + Number.parseFloat(card.style.maxHeight) + 2) * cameraTargets[0].zoom <= safe.bottom,
     'the focused Chat composer-bearing Card remains above the Dock');
   assert.equal(focused[0], card);
   assert.equal(state.codex.hudView, 'conversation');
@@ -783,8 +924,8 @@ test('human Chat Dock open after initial Browser focus and zoom-out focuses only
   flushFrames();
   assert.equal(composerFocuses, 1, 'another human Card click cancels the pending Chat keyboard focus');
 
-  // The now height-capped Card is fully safe at its settled readable focus,
-  // whereas forcing 100% here would make even this fixture taller than safe.
+  // The presentation-capped Card is safe at its settled readable focus;
+  // forcing 100% here would make even this fixture taller than safe.
   state.zoom = state.zoomTarget = cameraTargets[1].zoom;
   state.pan = state.panTarget = { ...cameraTargets[1].pan };
   entries.get(card).level = 'detail';
@@ -825,6 +966,44 @@ test('human Chat Dock open after initial Browser focus and zoom-out focuses only
   assert.equal(state.codex.threadDrafts.room, originalDraft);
   assert.equal(messages.scrollTop, originalScroll);
 
+  // At CSS min-height the presentation cannot contract any further. The
+  // detail-level Card fits Dock, but its footer still crosses the Zoom gap.
+  // A Dock re-click must move the camera instead of taking the old early exit.
+  safe = { left: 24, top: 76, right: 776, bottom: 524, width: 752, height: 448 };
+  dockZoomRect = { left: 88, right: 250, top: 492, bottom: 533, width: 162, height: 41 };
+  card.style.maxHeight = '420px';
+  const savedWorld = { ...card.style };
+  state.zoom = state.zoomTarget = 10.6 / 11;
+  state.pan = state.panTarget = { x: 100, y: 90 - 90 * state.zoom };
+  entries.get(card).level = 'detail';
+  assert.equal(fitChat(card, safe, 11), false, 'CSS minimum blocks a further height reduction');
+  assert(card.getBoundingClientRect().bottom > dockZoomRect.top - 8,
+    'initial detail Card violates the required Zoom clearance despite fitting Dock');
+  const beforeZoomRepair = cameraTargets.length;
+  dockClick();
+  assert.equal(cameraTargets.length, beforeZoomRepair + 1,
+    'Dock re-click cannot early-return when Zoom masks the minimum-height Chat');
+  const repaired = cameraTargets.at(-1);
+  state.zoom = state.zoomTarget = repaired.zoom;
+  state.pan = state.panTarget = { ...repaired.pan };
+  assert(card.getBoundingClientRect().bottom <= dockZoomRect.top - 8 + 0.5,
+    'Chat-only camera target clears the actual outer Card from Zoom');
+  assert.deepEqual(card.style, savedWorld, 'camera repair does not change saved world geometry or size');
+  assert.equal(fitChat(card, safe, 11), false, 'settled minimum-height cap does not oscillate');
+  entries.get(card).level = 'detail';
+  dockClick();
+  assert.equal(cameraTargets.length, beforeZoomRepair + 1,
+    'a second Dock click at the settled Zoom-safe target does not recenter again');
+  assert.equal(state.codex.threadDrafts.room, 'unsent human draft');
+  safe = { left: 24, top: 76, right: 1256, bottom: 824, width: 1232, height: 748 };
+  dockZoomRect = { left: 88, right: 250, top: 791, bottom: 832, width: 162, height: 41 };
+  assert.equal(fitChat(card, safe, 11), true, 'wide viewport removes the temporary cap');
+  assert.equal(card.style.maxHeight, '');
+  assert.equal(card.style.height, '680px', 'wide recovery restores the original displayed height');
+  assert.equal(card.style.left, savedWorld.left);
+  assert.equal(card.style.top, savedWorld.top);
+  dockZoomRect = null;
+
   for (const size of [{ width: 800, height: 600 }, { width: 600, height: 600 },
     { width: 960, height: 700 }, { width: 1280, height: 776 }]) {
     safe = { left: 24, top: 76, right: size.width - 24, bottom: size.height - 76,
@@ -841,7 +1020,7 @@ test('human Chat Dock open after initial Browser focus and zoom-out focuses only
     assert.deepEqual(browser, { x: 15, y: 20, width: 1200, height: 720 },
       'Chat reveal does not resize the Browser world');
     const target = cameraTargets.at(-1);
-    const actualHeight = Number.parseFloat(card.style.height);
+    const actualHeight = Number.parseFloat(card.style.maxHeight) || Number.parseFloat(card.style.height);
     const x = target.pan.x + 100 * target.zoom;
     const y = target.pan.y + 90 * target.zoom;
     assert(x >= safe.left - 0.5 && x + 440 * target.zoom <= safe.right + 0.5);
