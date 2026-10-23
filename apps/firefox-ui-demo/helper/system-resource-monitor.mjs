@@ -11,6 +11,7 @@ const MIN_COUNTER_INTERVAL_MS = 250
 const DISK_TIMEOUT_MS = 1_000
 const MAX_PENDING_DISK_READS = 2
 const MAX_SAFE_BIGINT = BigInt(Number.MAX_SAFE_INTEGER)
+const CPU_TIME_KEYS = ['user', 'nice', 'sys', 'idle', 'irq']
 
 const percent = (part, whole) => Math.round(part / whole * 1_000) / 10
 const emptyCpu = status => ({ status, percent: null, basis: 'all-logical-cores', intervalMs: null })
@@ -21,16 +22,20 @@ const emptyNetwork = (status, interfaceName = null) => ({ status, interface: int
 function cpuTotals(entries) {
   if (!Array.isArray(entries) || entries.length === 0) return null
   let total = 0, idle = 0
+  const perCore = []
   for (const entry of entries) {
     const times = entry?.times
     if (!times) return null
-    for (const key of ['user', 'nice', 'sys', 'idle', 'irq']) {
+    const core = []
+    for (const key of CPU_TIME_KEYS) {
       if (!Number.isFinite(times[key]) || times[key] < 0) return null
       total += times[key]
+      core.push(times[key])
     }
+    perCore.push(core)
     idle += times.idle
   }
-  return Number.isSafeInteger(total) && Number.isSafeInteger(idle) ? { total, idle, cores: entries.length } : null
+  return Number.isSafeInteger(total) && Number.isSafeInteger(idle) ? { total, idle, cores: entries.length, perCore } : null
 }
 
 function memorySnapshot(total, free) {
@@ -119,8 +124,8 @@ export function createSystemResourceMonitor({
         resolve(value)
       }
       const timer = setTimeout(() => finish(emptyDisk('unavailable')), diskTimeoutMs)
-      Promise.resolve().then(() => readDisk(profilePath)).then(
-        stats => { pendingDiskReads--; if (!finished) finish(diskSnapshot(stats)) },
+      Promise.resolve().then(() => closed ? null : readDisk(profilePath)).then(
+        stats => { pendingDiskReads--; if (!finished) finish(stats === null ? emptyDisk('unavailable') : diskSnapshot(stats)) },
         () => { pendingDiskReads--; finish(emptyDisk('unavailable')) },
       )
     })
@@ -136,7 +141,9 @@ export function createSystemResourceMonitor({
           const intervalMs = at - previousCpu.at
           const totalDelta = counters.total - previousCpu.total
           const idleDelta = counters.idle - previousCpu.idle
-          if (intervalMs >= MIN_COUNTER_INTERVAL_MS && intervalMs <= maxCounterGapMs && totalDelta > 0 && idleDelta >= 0 && idleDelta <= totalDelta) {
+          const coresMonotonic = counters.perCore.every((core, index) =>
+            core.every((value, field) => value >= previousCpu.perCore[index][field]))
+          if (coresMonotonic && intervalMs >= MIN_COUNTER_INTERVAL_MS && intervalMs <= maxCounterGapMs && totalDelta > 0 && idleDelta >= 0 && idleDelta <= totalDelta) {
             cpu = { status: 'ok', percent: percent(totalDelta - idleDelta, totalDelta), basis: 'all-logical-cores', intervalMs: Math.round(intervalMs) }
           } else cpu = emptyCpu('warming')
         } else cpu = emptyCpu('warming')
@@ -149,15 +156,16 @@ export function createSystemResourceMonitor({
 
     const diskPromise = sampleDisk()
     const networkPromise = platform === 'darwin'
-      ? Promise.resolve().then(() => readNetwork({ signal: abort.signal })).catch(() => null)
+      ? Promise.resolve().then(() => closed ? null : readNetwork({ signal: abort.signal }))
+        .then(counters => ({ counters, at: monotonicNow() })).catch(() => null)
       : Promise.resolve(null)
-    const [disk, networkCounters] = await Promise.all([diskPromise, networkPromise])
+    const [disk, networkReading] = await Promise.all([diskPromise, networkPromise])
 
     let network = emptyNetwork(platform === 'darwin' ? 'unavailable' : 'unsupported')
     if (platform === 'darwin') {
       try {
-        const counters = networkCounters
-        const at = monotonicNow()
+        const counters = networkReading?.counters
+        const at = networkReading?.at
         if (counters && typeof counters.interface === 'string' && typeof counters.rxBytes === 'bigint' && typeof counters.txBytes === 'bigint' && counters.rxBytes >= 0n && counters.txBytes >= 0n) {
           network = emptyNetwork('warming', counters.interface)
           if (previousNetwork && previousNetwork.interface === counters.interface) {
