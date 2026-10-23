@@ -64,7 +64,7 @@ export async function runUiFlow(kind, callback) {
   } catch (error) {
     result.error = error.message;
     if (harness) {
-      try { result.screenshots.push(await harness.screenshot('failure')); } catch {}
+      try { result.screenshots.push(await harness.screenshot('failure', { allowHeadlessChromeFallback: true, deadlineMs: Date.now() + 90000 })); } catch {}
     }
     process.exitCode = 1;
   } finally {
@@ -135,10 +135,23 @@ export function composerIsReady(input, button, message, threadId) {
     input.value === message && input.dataset?.threadId === threadId;
 }
 
+// The composer redraws from the app's stored draft, and only an input event
+// updates that draft. MCP fill resets the value without one, so text left by an
+// earlier rejection comes back and the new text is appended to it. Replace
+// existing text the way a person does: focus, select all, then type or delete.
+export async function replaceComposerText(harness, text, selector = '.egd-codex-input') {
+  await harness.click(selector);
+  await harness.press(process.platform === 'darwin' ? 'meta+a' : 'Control+a', selector);
+  if (text) await harness.typeText(text);
+  else await harness.press('Backspace', selector);
+  await waitUntil(() => harness.inspect(selector), (nodes) => nodes[0]?.value === text, { timeoutMs: 5000, intervalMs: 50 });
+}
+
 export async function sendFromComposer(harness, message) {
   const composer = '.egd-codex-input';
   await visible(harness, composer);
   const { threadId } = await chatIdentity(harness);
+  if ((await harness.inspect(composer))[0]?.value) await replaceComposerText(harness, '', composer);
   await harness.fill(composer, message);
   let stableSamples = 0;
   // Sample both controls in the same profile-bound evaluation. Two separate

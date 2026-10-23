@@ -465,29 +465,50 @@ export class FirefoxMcpChatHarness {
     }));
   }
 
+  // The app redraws its panels on every state event. When that lands between the
+  // snapshot and the native input, the MCP rejects the UID before dispatching
+  // anything, so taking a fresh snapshot and trying again cannot double-send.
+  async #withFreshUid(action) {
+    for (let attempt = 1; ; attempt++) {
+      try { return await action(); }
+      catch (error) {
+        if (attempt >= 3 || !/stale\/invalid/.test(String(error?.message))) throw error;
+        await new Promise((resolve) => setTimeout(resolve, 150));
+      }
+    }
+  }
+
   async click(selector) {
-    const uid = await this.uidFor(selector);
-    await this.assertRemoteProfile();
-    return this.#call('click_by_uid', { uid });
+    return this.#withFreshUid(async () => {
+      const uid = await this.uidFor(selector);
+      await this.assertRemoteProfile();
+      return this.#call('click_by_uid', { uid });
+    });
   }
 
   async fill(selector, value) {
-    const uid = await this.uidFor(selector);
-    await this.assertRemoteProfile();
-    return this.#call('fill_by_uid', { uid, value });
+    return this.#withFreshUid(async () => {
+      const uid = await this.uidFor(selector);
+      await this.assertRemoteProfile();
+      return this.#call('fill_by_uid', { uid, value });
+    });
   }
 
   async press(key, selector) {
-    const uid = selector ? await this.uidFor(selector) : undefined;
-    await this.assertRemoteProfile();
-    return this.#call('press_key', { key, ...(uid ? { uid } : {}) });
+    return this.#withFreshUid(async () => {
+      const uid = selector ? await this.uidFor(selector) : undefined;
+      await this.assertRemoteProfile();
+      return this.#call('press_key', { key, ...(uid ? { uid } : {}) });
+    });
   }
 
   async typeText(text, { selector, submitKey } = {}) {
     if (typeof text !== 'string') throw new Error('Native typing requires text');
-    const uid = selector ? await this.uidFor(selector) : undefined;
-    await this.assertRemoteProfile();
-    return this.#call('type_text', { text, ...(uid ? { uid } : {}), ...(submitKey ? { submitKey } : {}) });
+    return this.#withFreshUid(async () => {
+      const uid = selector ? await this.uidFor(selector) : undefined;
+      await this.assertRemoteProfile();
+      return this.#call('type_text', { text, ...(uid ? { uid } : {}), ...(submitKey ? { submitKey } : {}) });
+    });
   }
 
   async scrollWithKey(selector, key = 'auto') {

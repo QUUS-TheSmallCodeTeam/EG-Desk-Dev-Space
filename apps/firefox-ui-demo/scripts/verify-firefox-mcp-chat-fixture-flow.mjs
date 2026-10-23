@@ -5,7 +5,7 @@ import { createHmac, randomUUID } from 'node:crypto';
 import { assertFreshAccountRoom, assertOrdinarySend, assertPlainRenderedMessage, assertQaFixtureArtifact } from './egdesk-chat-qa-contract.sys.mjs';
 import { assertQaFixtureManifest } from './egdesk-chat-qa-profile.mjs';
 import { attributeSelector, chatIdentity, chrome, loopbackJson, newQaThread,
-  runUiFlow, selectQaThread, sendFromComposer, visible, waitUntil } from './egdesk-qa-ui-flow.mjs';
+  replaceComposerText, runUiFlow, selectQaThread, sendFromComposer, visible, waitUntil } from './egdesk-qa-ui-flow.mjs';
 
 const token = process.env.EGDESK_QA_FIXTURE_TOKEN || '';
 if (process.env.EGDESK_QA_FIXTURE_TRANSPORT !== '1' || token.length < 16) {
@@ -212,7 +212,12 @@ await runUiFlow('rendered-ui-fixture-transport', async ({ harness, check, captur
   await control('/__qa/replay', {});
   const beforeReconnect = await fixtureState();
   await control('/__qa/reconnect', {});
-  await waitUntil(fixtureState, (state) => state.clients > 0 && state.observed.resumes.length > beforeReconnect.observed.resumes.length);
+  // Since bc47de6 a stream reconnect only re-subscribes; the native conversation
+  // is resumed by an explicit room selection or send, never implicitly.
+  await waitUntil(fixtureState, (state) => state.clients > 0);
+  await new Promise(resolve => setTimeout(resolve, 600));
+  check('stream reconnect re-subscribes without resuming the native conversation by itself',
+    (await fixtureState()).observed.resumes.length === beforeReconnect.observed.resumes.length);
   await waitUntil(() => messages(harness), (rows) => rows.some((row) => row.role === 'assistant'));
   const hydrated = await messages(harness);
   const userRows = hydrated.filter((row) => row.role === 'user' && row.rawText === completePrompt);
@@ -224,12 +229,20 @@ await runUiFlow('rendered-ui-fixture-transport', async ({ harness, check, captur
   const hydratedAssistant = hydrated.find(row => row.id === rawAfterDelta.id);
   assertPlainRenderedMessage(rawAfterDelta.text, hydratedAssistant.rawText, hydratedAssistant.text);
   check('hydration preserves the complete raw and visible assistant message', true);
-  await harness.click(`[data-testid="chat-artifact"]${attributeSelector('data-artifact-id', artifact.id)}`);
-  const openedFile = await chrome(harness, (filePath) => [...document.querySelectorAll('.egd-browser-card')].some((card) => {
-    const uri = card._browserState?.uri || card._sourceRef?.uri || '';
-    try { return decodeURIComponent(new URL(uri).pathname) === filePath; } catch { return false; }
-  }), artifact.target.path);
-  check('explicit artifact click opens the verified temporary file on Canvas', openedFile);
+  // Hydration redraws the log; the chip sits at its end. Bring it into view with
+  // the native End key before the native click, and keep the geometry for a failure.
+  const artifactChip = `[data-testid="chat-artifact"]${attributeSelector('data-artifact-id', artifact.id)}`;
+  await harness.scrollWithKey('.egd-codex-messages', 'End');
+  const chipGeometry = { chip: (await harness.inspect(artifactChip))[0]?.rect, log: (await harness.inspect('.egd-codex-messages'))[0]?.rect };
+  await harness.click(artifactChip);
+  // The card is created by the click handler; wait for it and keep what was seen
+  // (cards, any board notice) so a failure explains itself.
+  const openedFile = await waitUntil(() => chrome(harness, (filePath) => {
+    const cards = [...document.querySelectorAll('.egd-browser-card')].map(card => card._browserState?.uri || card._sourceRef?.uri || '');
+    return { opened: cards.some(uri => { try { return decodeURIComponent(new URL(uri).pathname) === filePath; } catch { return false; } }),
+      cards, notice: document.getElementById('egd-board-notice')?.textContent || null };
+  }, artifact.target.path), value => value.opened);
+  check('explicit artifact click opens the verified temporary file on Canvas', openedFile.opened, chipGeometry);
   await waitUntil(() => chrome(harness, async (filePath) => {
     const card = [...document.querySelectorAll('.egd-browser-card')].find(card => {
       try { return decodeURIComponent(new URL(card._browserState?.uri || card._sourceRef?.uri || '').pathname) === filePath; } catch { return false; }
@@ -255,15 +268,15 @@ await runUiFlow('rendered-ui-fixture-transport', async ({ harness, check, captur
 
   await sendFromComposer(harness, `EGDESK_QA_REJECT ${nonce}`);
   await waitUntil(() => chatIdentity(harness), identity => !!identity.sendError);
-  await harness.fill('[data-testid="chat-composer"]', 'QA unsent draft after definite rejection');
+  await replaceComposerText(harness, 'QA unsent draft after definite rejection');
   check('definite 503 rejection leaves the composer able to send a later request', !(await harness.inspect('[data-testid="chat-send"]'))[0].disabled);
   await sendFromComposer(harness, `EGDESK_QA_AMBIGUOUS ${nonce}`);
   await visible(harness, '[data-testid="chat-reconcile"]');
-  await harness.fill('[data-testid="chat-composer"]', 'QA unsent draft during reconciliation');
+  await replaceComposerText(harness, 'QA unsent draft during reconciliation');
   check('ambiguous transport failure stays blocked pending explicit reconciliation', (await harness.inspect('[data-testid="chat-send"]'))[0].disabled);
   await harness.click('[data-testid="chat-reconcile"]');
   await waitUntil(() => harness.inspect('[data-testid="chat-send"]'), nodes => nodes[0] && !nodes[0].disabled);
-  await harness.fill('[data-testid="chat-composer"]', '');
+  await replaceComposerText(harness, '');
   await capture('fixture-rejection-reconcile');
 
   await sendFromComposer(harness, `EGDESK_QA_STOP ${nonce}`);
@@ -529,12 +542,15 @@ await runUiFlow('rendered-ui-fixture-transport', async ({ harness, check, captur
   if (!(await harness.inspect('.egd-codex-diagnostics')).some(node => node.visible)) await harness.click('.egd-codex-diagnostics-toggle');
   const signoutSelector = '.egd-codex-diagnostics-actions button:last-child';
   check('fixture logout control is the actual rendered logout button', (await harness.inspect(signoutSelector))[0]?.text === '로그아웃');
+  // The activity refresh button is read-only (/chat/state) since bc47de6; reopening
+  // the room is the explicit action that resumes its native conversation.
   await control('/__qa/hold-resume', { hold: true });
-  await harness.click('[data-testid="chat-activity-open"]');
   const heldBefore = (await fixtureState()).observed.heldResumes;
-  await harness.click('[aria-label="활동 상태 다시 확인"]');
+  await selectQaThread(harness, authThread);
   await waitUntil(fixtureState, state => state.observed.heldResumes > heldBefore);
-  await harness.click('[aria-label="활동 기록 닫기"]');
+  await visible(harness, '.egd-codex-diagnostics-toggle');
+  if (!(await harness.inspect(signoutSelector)).some(node => node.visible)) await harness.click('.egd-codex-diagnostics-toggle');
+  check('fixture logout control is still the rendered logout button after reopening the room', (await harness.inspect(signoutSelector))[0]?.text === '로그아웃');
   await fixtureState(); // Recheck exact fixture/profile binding immediately before logout.
   await harness.click(signoutSelector);
   const cacheState = () => chrome(harness, () => {
