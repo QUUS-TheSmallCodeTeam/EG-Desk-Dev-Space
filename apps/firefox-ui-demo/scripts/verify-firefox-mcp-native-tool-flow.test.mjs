@@ -22,6 +22,7 @@ import {
   assertPublicBrowserSseBindings,
   assertBrowserSameChatAddition, assertBrowserNegativeGuards,
   assertBrowserNegativeProbeResults,
+  browserCameraSurfacePlan, assertBrowserCameraSurfaceIsolation, runBrowserCameraSurfaceIsolation,
   browserViewportChanged,
   assertBrowserFixtureConfig, browserFixtureHtml, createBrowserFixtureHandler,
   assertBrowserFixtureServerReady,
@@ -1199,6 +1200,200 @@ test('Browser resize observes height-only and device-scale changes even when Win
   assert.equal(browserViewportChanged(before, { ...before, width: 1320 }), true);
   assert.equal(browserViewportChanged(before, { ...before, devicePixelRatio: 1.25 }), true);
   assert.equal(browserViewportChanged(before, null), false);
+});
+
+function cameraSurfaceFixture({ failClick = false, failCancel = false, changeContext = false,
+  changeDocument = false, changeWorldRect = false, ignoreOffscreenCamera = false } = {}) {
+  const fixture = { url: 'http://127.0.0.1:39220/egdesk-qa/QA_URL_0123456789abcdef',
+    marker: 'QA_DOM_0123456789abcdef' };
+  const thread = { id: 'qa-camera-thread', wireClientThreadId: 'qa-camera-wire' };
+  const priorCardId = 'owned-local-card', priorOwnerTag = 'prior-camera-owner';
+  const originalCamera = { pan: { x: 18, y: 27 }, zoom: 0.86 };
+  const state = { panTarget: { ...originalCamera.pan }, pan: { ...originalCamera.pan },
+    zoomTarget: originalCamera.zoom, zoom: originalCamera.zoom };
+  const effects = { acts: [], cameras: [], removedSources: [], opens: 0, cancels: 0 };
+  const cards = new Map();
+  let selected = [], selectedCard = null, diagnostic = null;
+  const bindingFor = card => ({ cardId: card.id, cardEpoch: `${card.id}-epoch`, profileId: 'qa-profile',
+    accountId: '', userContextId: 0, engineAccountKey: 'codex:fixture', authorityEpoch: 1, url: fixture.url });
+  const snapshotFor = card => ({ cardId: card.id, documentId: card.documentId,
+    revision: card.clicks + 1, viewport: { width: 640, height: 430, devicePixelRatio: 1 }, url: fixture.url,
+    text: [fixture.marker, `QA click count: ${card.clicks}`, ...(card.clicks ? ['Newly revealed node'] : [])],
+    interactiveElements: [{ ref: 'el-button', tag: 'button', role: 'button', href: '', value: '',
+      label: 'Reveal QA details', disabled: false },
+      { ref: 'el-note', tag: 'input', role: 'textbox', href: '', label: 'QA note', value: '', disabled: false }],
+    focusedElement: null, qaDiagnostics: { kind: 'actor-perform-entry',
+      actorDocumentId: card.documentId, performCalls: card.clicks } });
+  const sourceFor = card => ({ id: `${card.id}-source`, kind: 'browser', selectedByUser: true,
+    browserToolPermission: 'interact', sourceRef: { viewId: card.id, profileId: 'qa-profile', accountId: '', uri: fixture.url },
+    browserToolIdentity: { cardEpoch: `${card.id}-epoch`, userContextId: 0,
+      engineAccountKey: 'codex:fixture', authorityEpoch: 1 },
+    browserToolSelection: { token: `${card.id}-token`, threadId: thread.wireClientThreadId } });
+  const addCard = (id, owner, contextId) => {
+    const browser = { browsingContext: { id: contextId } };
+    const card = { id, isConnected: true, dataset: { egdeskQaNegativeOwner: owner },
+      style: { left: '120px', top: '200px', width: '640px', height: '480px' },
+      offsetLeft: 120, offsetTop: 200, offsetWidth: 640, offsetHeight: 480,
+      classList: { contains: name => name === 'egd-browser-card' }, clicks: 0, documentId: `${id}-document`,
+      getBoundingClientRect() {
+        const left = this.offsetLeft * state.zoom + state.pan.x, top = this.offsetTop * state.zoom + state.pan.y;
+        const width = this.offsetWidth * state.zoom, height = this.offsetHeight * state.zoom;
+        return { left, top, right: left + width, bottom: top + height, width, height };
+      } };
+    card._browserControls = { toolBrowser: () => browser, toolBinding: () => bindingFor(card),
+      toolObserve: async () => snapshotFor(card) };
+    cards.set(id, card);
+    return card;
+  };
+  selected = [sourceFor(addCard(priorCardId, priorOwnerTag, 101))];
+  state.setCanvasViewportTarget = (camera, options) => {
+    assert.equal(options.immediate, true);
+    effects.cameras.push(structuredClone(camera));
+    const offscreen = camera.pan.x < -500;
+    if (offscreen && ignoreOffscreenCamera) return;
+    state.panTarget = { ...camera.pan }; state.pan = { ...camera.pan };
+    state.zoomTarget = camera.zoom; state.zoom = camera.zoom;
+    const card = cards.get('camera-owned-card');
+    if (offscreen && card) {
+      if (changeContext) card._browserControls.toolBrowser().browsingContext.id = 999;
+      if (changeDocument) card.documentId = 'replacement-document';
+      if (changeWorldRect) card.offsetWidth++;
+    }
+  };
+  const api = { state, cardRuntime: {
+    openBrowserCard(url, options) {
+      assert.equal(url, fixture.url); assert.equal(options.openMode, 'new'); effects.opens++;
+      return addCard('camera-owned-card', null, 202);
+    },
+    focusCard(card) { selectedCard = card; },
+  }, browserAgentTools: {
+    selectedSources(threadId) { assert.equal(threadId, thread.id); return selected; },
+    async dispatch(request) {
+      assert.equal(request.cardId, 'camera-owned-card', 'camera action escaped the separately owned fixture');
+      const card = cards.get(request.cardId);
+      const base = { requestId: request.requestId };
+      if (request.kind === 'bind') return { ...base, status: 'bound', binding: bindingFor(card) };
+      if (request.kind === 'observe') return { ...base, status: 'observed', snapshot: snapshotFor(card) };
+      if (request.kind === 'cancel') {
+        effects.cancels++;
+        return { ...base, status: failCancel ? 'rejected' : 'cancelled' };
+      }
+      assert.equal(request.kind, 'act');
+      effects.acts.push(JSON.parse(JSON.stringify(request)));
+      assert.equal(request.action.type, 'click');
+      const before = snapshotFor(card);
+      assert.deepEqual(JSON.parse(JSON.stringify(request.guard)), { documentId: before.documentId,
+        revision: before.revision, viewport: before.viewport, url: before.url, focusedRef: null,
+        target: before.interactiveElements[0] });
+      if (failClick) return { ...base, status: 'rejected', error: 'injected unknown click outcome' };
+      card.clicks++;
+      diagnostic = { cardId: card.id, actionType: 'click', phase: 'post-actor', status: 'acted', sampledAtMs: Date.now() };
+      return { ...base, status: 'acted', receipt: { after: snapshotFor(card),
+        dispatchReceipt: { actor: 'JSWindowActor', eventDispatched: true, documentStillCurrent: true,
+          clickInputRoute: 'dom-click-no-pointerdown', targetClickObserved: true } } };
+    },
+    fixtureActionDiagnostic: () => diagnostic,
+  }, codexBridge: {
+    removeInputSource(threadId, sourceId) {
+      assert.equal(threadId, thread.id); assert.equal(sourceId, 'camera-owned-card-source');
+      effects.removedSources.push(sourceId); selected = selected.filter(item => item.id !== sourceId);
+    },
+  } };
+  const context = { window: { __egdesk: api, innerWidth: 1280, innerHeight: 810 },
+    document: { getElementById: id => cards.get(id) },
+    getComputedStyle: () => ({ display: 'block', visibility: 'visible' }) };
+  const harness = {
+    async evaluateChrome(source) { return JSON.parse(JSON.stringify(await runInNewContext(`(${source})()`, context))); },
+    async click(selector) {
+      assert.equal(selectedCard?.id, 'camera-owned-card');
+      if (selector === '[id="camera-owned-card"] .egd-card-menu') return;
+      assert.equal(selector, '.egd-browser-menu-item[title^="이 Browser만 이번 Chat"]');
+      selected.push(sourceFor(selectedCard));
+    },
+  };
+  const result = {};
+  return { effects, state, result, originalCamera,
+    run: () => runBrowserCameraSurfaceIsolation(harness, fixture, Date.now() + 60000,
+      thread, priorCardId, priorOwnerTag, result) };
+}
+
+test('camera surface-isolation executes visible, offscreen fresh observe, one guarded DOM click and finally restore', async () => {
+  const fixture = cameraSurfaceFixture();
+  const proof = await fixture.run();
+  assert.equal(assertBrowserCameraSurfaceIsolation(proof), true);
+  assert.equal(proof, fixture.result.browserCameraSurfaceIsolation);
+  assert.equal(fixture.effects.opens, 1);
+  assert.equal(fixture.effects.acts.length, 1);
+  assert.equal(fixture.effects.cancels, 1);
+  assert.equal(fixture.effects.cameras.length, 3);
+  assert.deepEqual(fixture.effects.cameras.at(-1), fixture.originalCamera);
+  assert.deepEqual(fixture.effects.removedSources, ['camera-owned-card-source']);
+  assert.equal(proof.visible.browsingContextId, '202');
+  assert.equal(proof.offscreen.browsingContextId, '202');
+  assert.ok(proof.offscreen.rect.right <= 0 && proof.offscreen.rect.bottom <= 0);
+  assert.equal(proof.beforeAttempt.qaDiagnostics.performCalls, 0);
+  assert.equal(proof.afterAttempt.qaDiagnostics.performCalls, 1);
+  assert.equal(proof.coordinateInputVerified, false);
+});
+
+test('camera surface-isolation refuses changed identity/geometry or an on-screen Card before any click', async () => {
+  for (const [option, pattern] of [['changeContext', /browsing context/], ['changeDocument', /actor document/],
+    ['changeWorldRect', /resized the Card/], ['ignoreOffscreenCamera', /did not move offscreen/]]) {
+    const fixture = cameraSurfaceFixture({ [option]: true });
+    await assert.rejects(fixture.run(), pattern);
+    assert.equal(fixture.effects.acts.length, 0, option);
+    assert.deepEqual(fixture.effects.cameras.at(-1), fixture.originalCamera, option);
+    assert.deepEqual(fixture.state.pan, fixture.originalCamera.pan, option);
+    assert.equal(fixture.state.zoom, fixture.originalCamera.zoom, option);
+    assert.deepEqual(fixture.effects.removedSources, ['camera-owned-card-source'], option);
+  }
+});
+
+test('camera surface-isolation restores camera and selection after click or cancel failure without retry', async () => {
+  for (const [option, pattern] of [['failClick', /unknown click outcome/], ['failCancel', /did not cancel/]]) {
+    const fixture = cameraSurfaceFixture({ [option]: true });
+    await assert.rejects(fixture.run(), pattern);
+    assert.equal(fixture.effects.acts.length, 1);
+    assert.deepEqual(fixture.effects.cameras.at(-1), fixture.originalCamera);
+    assert.deepEqual(fixture.result.browserCameraSurfaceIsolation.restoredCamera.pan, fixture.originalCamera.pan);
+    assert.deepEqual(fixture.effects.removedSources, ['camera-owned-card-source']);
+  }
+});
+
+test('camera surface-isolation evidence cannot promote DOM input or omit rectangle, identity, fresh guard or restoration proof', async () => {
+  const baseline = await cameraSurfaceFixture().run();
+  const corruptions = [
+    proof => { proof.coordinateInputVerified = true; },
+    proof => { proof.providerTurns = 1; },
+    proof => { proof.untested = []; },
+    proof => { proof.cardId = proof.priorCardId; },
+    proof => { proof.visible.rect.left = -10; },
+    proof => { proof.offscreen.rect = proof.visible.rect; },
+    proof => { proof.offscreen.browsingContextId = '999'; },
+    proof => { proof.afterClick.worldRect.width++; },
+    proof => { proof.afterClick.geometryStyle.left = '1px'; },
+    proof => { proof.afterClick.camera.pan.x++; },
+    proof => { proof.observed.observationId = proof.visibleObserved.observationId; },
+    proof => { proof.afterObserved.snapshot.documentId = 'replacement'; },
+    proof => { proof.beforeAttempt.viewport.devicePixelRatio = 2; },
+    proof => { proof.uiRequests.find(item => item.kind === 'act').guard.revision++; },
+    proof => { proof.uiRequests.push(proof.uiRequests.find(item => item.kind === 'act')); },
+    proof => { proof.uiRequests.find(item => item.kind === 'act').responseRequestId = 'other'; },
+    proof => { proof.receipt.dispatchReceipt.clickInputRoute = 'native-pointer'; },
+    proof => { proof.receipt.externalEffectVerified = true; },
+    proof => { proof.afterAttempt.text = [proof.fixture.marker, 'QA click count: 2']; },
+    proof => { proof.afterAttempt.qaDiagnostics.performCalls = 2; },
+    proof => { proof.restoredCamera.zoom = 4; },
+    proof => { proof.selectionAfter = []; },
+    proof => { proof.priorFixture.afterAttempt.inputValue = 'changed'; },
+  ];
+  for (const corrupt of corruptions) {
+    const proof = structuredClone(baseline);
+    corrupt(proof);
+    assert.throws(() => assertBrowserCameraSurfaceIsolation(proof), undefined, corrupt.toString());
+  }
+  assert.throws(() => browserCameraSurfacePlan({ x: 0, y: 0, width: 0, height: 480 }, { width: 1280, height: 810 }),
+    /measured geometry/);
 });
 
 test('owned Browser fixture handler serves only one exact loopback GET with a persistent DOM marker', () => {
