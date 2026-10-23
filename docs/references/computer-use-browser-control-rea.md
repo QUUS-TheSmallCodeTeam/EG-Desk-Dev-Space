@@ -126,7 +126,12 @@ Chromium 내부 지연 지점·ACK·실제 detach 순서·timeout 후 최종 효
 **S-01 — 관찰 종료는 작업 취소가 아니다.** 기존 `observationStoppedAtDeadline`은 30초 관찰기와 모니터의
 종료 경계다. 네이티브 명령 취소, 큐 배수, Stop 이후 입력 0회를 증명하지 않는다. [N5, N6, 추가 검토 보고]
 
-네이티브 Stop/cancel과 queued input을 연결할 적합한 기존 trace는 확인되지 않았다. 현재 상태는 **UNKNOWN**이며,
+**N-05 — 현행 Stop/대기열의 정적 경로는 부분 확인됐다.** N7과 같은 helper의 LLVM·파일 메타데이터에서 Stop IPC의 정지 표식,
+Stop 정리·PerformAction의 앱별 serialExecutor 필드/tail 공유, 앞선 Task 결과 대기 후 action 전 취소·intervention reason 검사를 확인했다.
+관측된 `Task.cancel`의 대상은 `userInterruptionDebounceTaskByTargetIdentifier`이며 **입력 큐 취소가 아니다**. deactivate 및 오류 시 정지 표식 해제도 정리 경로이지 취소 완료 증거가 아니다.
+이는 직접 LLVM 정적 분석으로, 현행 REA 함수 dossier나 실행 증거가 아니다. UI Stop→IPC 연결과 마지막 guard 이후 `postToPid`까지의 취소·ACK·late effect는 **UNKNOWN**이다. [N9]
+
+네이티브 Stop/cancel과 queued input을 연결할 적합한 기존 런타임 trace는 확인되지 않았다. 현재 상태는 **UNKNOWN**이며,
 이를 채우기 위한 신규 네이티브 실행·REA·앱 권한 확대를 이 문서 작업에서 수행하지 않는다.
 후속 EG-Desk 소유 fixture를 승인받는다면 같은 시계로 `enqueue → dispatch → Stop ACK → receive`를 기록하고
 `commandId / sequence / PID`를 연결해야 한다. “ACK 전 dispatch, ACK 후 수신”과 “ACK 후 새 dispatch”를 구별해야 한다.
@@ -182,7 +187,7 @@ Card·browsing context·document·content viewport가 같고, actor perform 1회
 | ID / 항목 | EG-Desk에 필요한 이유 | 다음 최소 확인 | OS 전면 필요 여부 / 현재 상태 |
 |---|---|---|---|
 | R-01 / P1 timeout 뒤 효과 | 결과 미확정 요청의 중복 입력을 막기 위해 | 소유 fixture에서 command ID·move 수신·dispatch·timeout을 같은 시계로 연결한다. | 배경 시험 자체는 OS 전면 불필요; 전환 재현에는 통제된 전면 전환 필요 / 기존 로그로 late effect **UNKNOWN** |
-| R-02 / P2 native Stop | 새 dispatch 차단과 이미 보낸 입력의 수신을 구별하기 위해 | `enqueue/dispatch/Stop ACK/receive`에 command ID·순서·PID를 붙여 ACK 전후를 구분한다. | 통제된 A/B 전면 전환·입력 필요 / 적합한 기존 trace 없음, **UNKNOWN** |
+| R-02 / P2 native Stop | 새 dispatch 차단과 이미 보낸 입력의 수신을 구별하기 위해 | N-05의 정적 경계를 기준으로, 승인된 시험에서 `enqueue/dispatch/Stop ACK/receive`에 command ID·순서·PID를 붙여 ACK 전후를 구분한다. | 통제된 A/B 전면 전환·입력 필요 / Stop 표식·대기열·guard의 LLVM 부분 확인. UI Stop→IPC 및 마지막 guard 이후 취소·ACK·late effect는 런타임 trace가 없어 **UNKNOWN** |
 | R-03 / 현행 native 버전 변화 | 과거 offset·복원 결과를 새 helper에 잘못 적용하지 않기 위해 | N7의 정적 부분 대응을 기준으로, 실행 동등성이 제품 판단에 필요할 때 승인 범위를 확인한 제한 시험을 한다. | 정적 대응은 OS 전면 불필요; 실행 재검증은 별도 / **LLVM 정적 부분 대응 완료**, REA dossier 없음·runtime 동등성 **UNVERIFIED** |
 | R-04 / Gecko frame·zoom·배경 좌표 조합 | Chromium의 관찰/입력 좌표 계약을 Firefox로 오인하지 않기 위해 | 소유 페이지에서 frame·확대율·화면 배율·배경/최소화 조합별 fresh snapshot 좌표와 실제 수신 대상을 대조한다. | 좌표 단위 검증은 OS 전면 불필요; 배경/최소화 실측은 통제 전환 필요 / EG-06은 Canvas 카메라 이동과 DOM 클릭의 제한된 부분 검증. frame·page zoom·DPR·좌표 입력 및 조합별 실행은 **UNVERIFIED** |
 | R-05 / 불투명 host 연결 — 낮은 우선순위 | 대상·세션 경계의 누락을 확인하되 구현을 추측해 복제하지 않기 위해 | B-04의 송수신 JS·세션/숫자 탭 검사 부분 확인을 기준으로, 필요할 때 native pipe/host 내부의 ID 전달·재작성 연결만 보완한다. | 정적 검토는 OS 전면 불필요 / 내부 ID 재작성·E2E runtime 대응은 **UNKNOWN**. 모든 target 소유권 검증 아님; 제품 변경의 선행 조건으로 삼지 않음 |
@@ -206,7 +211,7 @@ Card·browsing context·document·content viewport가 같고, actor perform 1회
 ## 부록 B. 주장별 함수·증거 위치
 
 브라우저 byte 범위는 UTF-8의 반개구간 `[start,end)`, line은 1-based다.
-네이티브 VA는 해당 버전의 image base `0x100000000` 기준이며 실제 로드 주소와 구별한다. 아래 native 함수 위치는 현행으로 명시한 N-04 행을 제외하면 과거 버전이다.
+네이티브 VA는 해당 버전의 image base `0x100000000` 기준이며 실제 로드 주소와 구별한다. 아래 native 함수 위치는 현행으로 명시한 N-04·N-05 행을 제외하면 과거 버전이다.
 C5는 Babel로 위치·원문 slice를 추출한 자료다. C6–C8은 그 원문 함수 slice에 클래스 포장만 추가한 파생 파일을 대상으로 한 **실제 REA 6.7.0 정적 분석**이다.
 파생 slice SHA-256은 `f5286c94b34c4c3abb8b7a30b0d921cfd818661fa66a78f304a8cc003b2f926c`다. 분석은 partial이며 출력 잘림은 없지만 동적 `this`·외부 helper 전체 연결이나 실행을 증명하지 않는다.
 C9의 설치 JS 원문 slice·클래스 포장 파생물에 C10의 REA 6.7.0을 실행했다. 출력 잘림 없이 partial이며, `$o.create → ob → Xue`, `Kw → Ia` 연결만 해소했다. 나머지 B-04 동작은 일반 소스 확인이며 동적 전체 그래프·runtime 검증이 아니다.
@@ -233,6 +238,11 @@ C9의 설치 JS 원문 slice·클래스 포장 파생물에 C10의 REA 6.7.0을 
 | N-04 — 현행 복원 후보 | 새 심볼 `safelyEnforceActiveState` `0x10074ab10 → continuation 0x10074abd8`; 최초 call `0x10074b4d8`, 반복 continuation `0x10074d1d4`의 call `0x10074d4ac` | N7 LLVM. receiver는 context `+0x1d8`, `activateWithOptions:0` 후보·BOOL/PID 비교·50ms/2s 형태 유지. 실제 복원 실행·대기시간 실측 아님 |
 | N-04 — 현행 virtualCursor 경계 | 현행 descriptor 대조 후 continuation `0x100708628`; call `0x100708768 → postToPid 0x100261478` | N7 LLVM·심볼·과거 명령열 비교. event/PID 전달 형태 유지; 최종 OS 전달·실제 분기 실행은 UNKNOWN |
 | N-04 — 현행 간접 전송 | `postToPid 0x100261478 → wrapper 0x100261484 → indirect branch 0x1002614c4`; slot `0x1014e3140` | N7의 정적 경계. slot의 최종 runtime target은 UNKNOWN; N8은 REA 분석 시도 기록이지 현행 함수 dossier가 아님 |
+| N-05 — 현행 Stop IPC | handle `0x10015c30c → descriptor 0x10110d520 → 0x100176be0 / 0x100176c3c`; call `0x100176cb0 → 정지 표식 0x1000adc50` | N9 `stopDescriptors2`, `stopIpcSelectedBody`. UI Stop에서 이 IPC로 진입하는 연결은 UNKNOWN |
+| N-05 — 현행 직렬 대기열 | Stop·PerformAction(`0x10015d9d0`)의 serialExecutor 필드 offset global `0x1015493b0`; 특수화 `0x1000ab8e4 / 0x1000ac0c4`, 공통 tail `+0x70` | N9 `stopEntryInitial`, `stopPerformActionEntry`, `stopQueueSpecialized`, `stopActionSerialSpecialization`. 같은 필드/slot의 정적 사용이며 실제 실행 순서·큐 취소 증거 아님 |
+| N-05 — 현행 action guard | worker `0x1000ac794`: 앞선 Task가 있으면 `.result` 대기 → `0x1000ac910`의 `Task.checkCancellation`; action의 call `0x10015e020 → 0x10015cccc`; stopped 오류 `0x10015d0ac–0x10015d0b0`, `appStoppedByUser` tag 2 | N9 `stopActionWorkerGate`, `stopInputQueuedGuards`, `stopActionValidation`, `stopStateAndErrorFieldMetadata`. intervention reason 검사 확인; N7의 입력 call `0x100708768`까지 취소가 원자적으로 보장된다는 뜻은 아님 |
+| N-05 — 현행 정리 경로 | Stop cleanup `0x1000ab728`, call `0x1000ab770 → deactivate 0x100072480`; 오류 경로 `0x100176fac → clearStoppedByUser 0x1000adde8` | N9 `stopBody0`, `stopIpcSelectedBody`, `stopExactNamesNmOutput`. 정리/표식 해제를 입력 역전·Stop ACK 완료로 해석하지 않음 |
+| N-05 — 현행 cancel 대상 | `0x1000add6c → Task.cancel`; `userInterruptionDebounceTaskByTargetIdentifier` | N9 `stopSetMarker`, `stopTaskRecordGetSet`, `stopTaskBindingsLLVM`, `stopStateAndErrorFieldMetadata`. 사용자 개입 debounce Task 대상이며 입력 큐·이미 보낸 OS 이벤트 취소가 아님 |
 
 N5 L31/L32에서 foreground는 A, `sawActualBForeground`·`sawActualAReturn`은 true다.
 A의 key count는 1, text change는 0→1, cursor change는 0이다.
@@ -269,6 +279,7 @@ L48 `willTerminate`는 관찰 종료 뒤 정리 시점이다. 그때 foreground 
 | N6 | 같은 induced 디렉터리의 `B-87917.events.jsonl` L47 | 원시 로그의 관찰 종료 경계 확인; 뒤의 L48 정리 시점과 구별 |
 | N7 | `native/focus-restore-6yqdDW/46-current-native-llvm-raw.json` | 2026-10-23 현행 helper 식별·새 심볼·LLVM 함수/명령열 최소 대응. `direct-LLVM-static-not-REA-function-dossier` |
 | N8 | `native/focus-restore-6yqdDW/47-current-native-rea-attempt-raw.json` | 2026-10-23 REA/Ghidra 초기화 미완료·세션 종료 기록. 현행 REA 함수 dossier 미확보; runtime 증거 아님 |
+| N9 | `native/focus-restore-6yqdDW/48-current-native-stop-queue-llvm-raw.json` | `2026-10-23T14:57:14Z`; N7과 같은 helper 26.1015.1001540·SHA·UUID. `raw_results`의 지정 함수 출력·파일 메타데이터를 대조한 직접 LLVM 정적 근거이며 REA 함수 dossier가 아님. 대상 실행·UI 입력·프로세스 메모리·runtime 관측 없음 |
 | EGQ1 | 별도 QA 보관: `egdesk-chat-evidence-CJTqA3/result.json` | 2026-10-23, `42db7c0` 실행 보고. result의 거부/양성 대조·cameraSurfaceIsolation·headless·backend 전후 카운터만 대조; 설치 OpenAI 제어 재현 실험이 아님 |
 
 원본 교체를 감지할 최소 artifact SHA-256은 다음과 같다. 설치 실행 파일 해시와 JSON/로그 파일 해시는 다른 값이다.
@@ -289,7 +300,8 @@ L48 `willTerminate`는 관찰 종료 뒤 정리 시점이다. 그때 foreground 
 | N3 / N4 | `13c52f8ece74cb2421c5aa71afdc38eb55ed3651347516cfb3e325b7dc5a256d` / `3c7e9d496dc60a6aebd60a7c6337da1a18b17e8dcd8fd62f965ca6550885921e` |
 | N5 / N6 | `f8b6cda86acd2051708ae573a9b46a89f56a5f6c94be018755157ccc5d55033b` / `68edc62bc53dd20ccbe9f1d8684d031a9c942e68480a0bd195f50bcf39ce8c8f` |
 | N7 / N8 | `e4e71047cb008961d3726d9b79463c5b010d450f74b75bc91647362dabe48827` / `0bd1e57738753986492adc4de022d7db0ebf1aa75abfa2a5e61612936a537dd0` |
+| N9 | `a3ffcb1328a8344ca202d63025182f268b5a387d04b4d1d364c3c31bcb7aa1bd` |
 | EGQ1 | `a07a9f5aa10ca0e2ff20c9252711ab8f63ef81a9b9fc42555e65ade90e929908` |
 
-현행 C1–C10 및 N7/N8 artifact SHA-256은 2026-10-23 보관 파일에서 산출했다. 설치 service/helper SHA·함수 위치·해당하는 REA evidence ID와 함께 조회한다.
+현행 C1–C10 및 N7–N9 artifact SHA-256은 2026-10-23 UTC 보관 파일에서 산출했다. 설치 service/helper SHA·함수 위치·해당하는 REA evidence ID와 함께 조회한다.
 자료의 해시가 맞아도 전체 호출 그래프·현재 설치 동작·취소 보장을 증명하는 것은 아니다.
