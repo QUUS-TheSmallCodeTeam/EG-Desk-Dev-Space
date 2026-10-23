@@ -348,3 +348,73 @@ test('real-store HTTP imports and reads local-only legacy text without native au
     await rm(dataDir, { recursive: true, force: true })
   }
 })
+
+async function askingRuntime() {
+  const replies = []
+  const chat = new CodexChatRuntime({
+    request: async method => {
+      if (method === 'thread/start') return { thread: { id: 'thread' } }
+      if (method === 'turn/start') return { turn: { id: 'turn', status: 'inProgress', items: [] } }
+      throw new Error('Unexpected native call')
+    }, respond: (...args) => replies.push(args),
+  })
+  chat.setConnection(true)
+  const run = await chat.send({ message: 'Ask me' })
+  const ask = async id => {
+    await chat.handleServerRequest({ id, method: 'item/tool/requestUserInput', params: { threadId: run.conversationId, turnId: run.runId, itemId: id, isBlocking: true, questions: [
+      { id: 'password', header: 'Password', question: 'Password?', isSecret: true, options: null },
+    ] } })
+    return chat.snapshot().runs[0].pendingUserInputs.at(-1).userInputId
+  }
+  return { chat, replies, run, ask }
+}
+
+test('HTTP Agent answer requires auth, skip works without it, and stale questions return 409', async () => {
+  const { chat, replies, run, ask } = await askingRuntime()
+  let authCalls = 0
+  const handler = createChatHttpHandler(chat, async () => { authCalls++; throw Object.assign(new Error('Account lookup failed'), { httpStatus: 503 }) })
+  const userInputId = await ask('ask-auth')
+  const submit = response()
+  await handler(request(JSON.stringify({ ...run, userInputId, action: 'submit', answers: [{ questionId: 'password', text: 'HTTP_UNSENT_SECRET' }] })), submit, new URL('http://localhost/chat/user-input'))
+  assert.equal(submit.status, 503)
+  assert.equal(authCalls, 1)
+  assert.deepEqual(replies, [])
+  assert.equal(chat.snapshot().runs[0].pendingUserInputs[0].status, 'pending')
+  const skip = response()
+  await handler(request(JSON.stringify({ ...run, userInputId, action: 'skip' })), skip, new URL('http://localhost/chat/user-input'))
+  assert.equal(skip.status, 200)
+  assert.deepEqual(skip.body, { accepted: true, userInputId, conversationId: run.conversationId, runId: run.runId, status: 'replySent' })
+  assert.equal(authCalls, 1, 'a skip is a safety response and needs no account lookup')
+  assert.deepEqual(replies, [['ask-auth', null, { code: -32000, message: 'User skipped the question' }]])
+  const stale = response()
+  await handler(request(JSON.stringify({ ...run, userInputId, action: 'skip' })), stale, new URL('http://localhost/chat/user-input'))
+  assert.equal(stale.status, 409)
+  assert.deepEqual(stale.body, { accepted: false, conversationId: run.conversationId, requestId: run.requestId, code: 'STALE_USER_INPUT', error: 'Question is stale, already answered, or belongs to another run' })
+  assert.ok(!JSON.stringify([submit.body, skip.body, stale.body]).includes('HTTP_UNSENT_SECRET'))
+})
+
+test('HTTP Agent answer acknowledges without echoing answers and rejects invalid or oversized bodies', async () => {
+  const { chat, replies, run, ask } = await askingRuntime()
+  const handler = createChatHttpHandler(chat, async () => {})
+  const userInputId = await ask('ask-ok')
+  const invalid = response()
+  await handler(request(JSON.stringify({ ...run, userInputId, action: 'submit', answers: [{ questionId: 'password', text: 'HTTP_INVALID_SECRET', optionIndex: 0 }] })), invalid, new URL('http://localhost/chat/user-input'))
+  assert.equal(invalid.status, 400)
+  assert.equal(invalid.body.code, 'INVALID_USER_INPUT_ANSWER')
+  const large = response()
+  await handler(request(JSON.stringify({ ...run, userInputId, action: 'submit', answers: [{ questionId: 'password', text: 'x'.repeat(70000) }] })), large, new URL('http://localhost/chat/user-input'))
+  assert.equal(large.status, 413)
+  assert.deepEqual(replies, [])
+  const ok = response()
+  await handler(request(JSON.stringify({ ...run, userInputId, action: 'submit', answers: [{ questionId: 'password', text: 'HTTP_PRIVATE_SECRET' }] })), ok, new URL('http://localhost/chat/user-input'))
+  assert.equal(ok.status, 200)
+  assert.deepEqual(ok.body, { accepted: true, userInputId, conversationId: run.conversationId, runId: run.runId, status: 'replySent' })
+  assert.deepEqual(replies, [['ask-ok', { answers: { password: { answers: ['HTTP_PRIVATE_SECRET'] } } }]])
+  const exposed = JSON.stringify([invalid.body, ok.body, chat.snapshot()])
+  for (const hidden of ['HTTP_INVALID_SECRET', 'HTTP_PRIVATE_SECRET']) assert.ok(!exposed.includes(hidden), hidden)
+  const offline = response()
+  chat.setConnection(false)
+  await handler(request(JSON.stringify({ ...run, userInputId, action: 'skip' })), offline, new URL('http://localhost/chat/user-input'))
+  assert.equal(offline.status, 503)
+  assert.equal(offline.body.code, 'BRIDGE_OFFLINE')
+})

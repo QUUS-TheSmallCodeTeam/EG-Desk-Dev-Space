@@ -51,7 +51,13 @@ export async function runUiFlow(kind, callback) {
         result.checks.push({ label, passed: Boolean(condition), ...(details === undefined ? {} : { details }) });
         assert.ok(condition, label);
       },
-      async capture(name) { const screenshot = await harness.screenshot(name); result.screenshots.push(screenshot); return screenshot; },
+      // Headless Gecko rejects BiDi page screenshots; the harness then draws the
+      // owned headless Chrome window only, within an explicit deadline.
+      async capture(name) {
+        const screenshot = await harness.screenshot(name, { allowHeadlessChromeFallback: true, deadlineMs: Date.now() + 90000 });
+        result.screenshots.push(screenshot);
+        return screenshot;
+      },
     };
     await callback(context);
     result.automatedAssertionsPassed = true;

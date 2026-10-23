@@ -1,5 +1,6 @@
 import assert from 'node:assert/strict';
 import fs from 'node:fs';
+import { createHmac } from 'node:crypto';
 import path from 'node:path';
 import { Readable } from 'node:stream';
 import { EventEmitter } from 'node:events';
@@ -58,7 +59,7 @@ test('fixture rejects unknown bridge/auth/send/approval URLs without forwarding 
   for (const [method, route] of [
     ['POST', '/auth/unknown-signout'], ['POST', '/auth/start'], ['POST', '/auth/cancel'],
     ['POST', '/account/login/cancel'], ['GET', '/auth/unknown'],
-    ['POST', '/chat/send/unknown'], ['POST', '/chat/approval/unknown'],
+    ['POST', '/chat/send/unknown'], ['POST', '/chat/approval/unknown'], ['POST', '/chat/user-input/unknown'],
     ['GET', '/v1/unknown'], ['OPTIONS', '/auth/unknown-signout'],
   ]) {
     assert.equal((await request(handler, method, route, {})).status, 404, `${method} ${route}`);
@@ -356,4 +357,229 @@ test('delayed capture fixture releases only the selected wire thread and never c
   const state = (await request(handler, 'GET', '/__qa/state', null, TOKEN)).body;
   assert.equal(state.pendingContextCaptures, 0);
   assert.equal(state.observed.sends.length, 0);
+});
+
+const QUESTION_KEYS = ['questionId', 'header', 'question', 'options', 'allowsOther', 'isSecret'];
+const SUBAGENT_KEYS = ['threadId', 'label', 'taskPreview', 'model', 'state', 'message', 'lastTool', 'blocked', 'updatedAt', 'parentEnded'];
+const PRIVATE_ANSWER = 'QA-PRIVATE-ANSWER-never-retained-7d1c';
+const startUserInput = async handler => (await request(handler, 'POST', '/chat/send', {
+  message: 'EGDESK_QA_USER_INPUT unit', clientThreadId: 'question-thread', requestId: 'question-request', profileEnabled: false,
+})).body;
+const waitFor = async (accept, deadline = Date.now() + 2000) => {
+  while (!(await accept())) {
+    if (Date.now() > deadline) throw new Error('Fixture state did not change in time');
+    await new Promise(resolve => setTimeout(resolve, 20));
+  }
+};
+const conversation = async (handler, id) => (await request(handler, 'GET', `/chat/state?conversationId=${id.conversationId}`)).body;
+
+test('USER_INPUT publishes the public question shape and waits without any automatic reply', async t => {
+  const { handler, info } = setup(t);
+  assert.equal((await request(handler, 'OPTIONS', '/chat/user-input')).status, 204);
+  const capabilities = (await request(handler, 'GET', '/v1/state')).body.capabilities.chat;
+  assert.ok(['user-input', 'subagent-status'].every(name => capabilities.includes(name)));
+  const id = await startUserInput(handler);
+  const run = (await conversation(handler, id)).runs[0];
+  assert.equal(run.status, 'running');
+  assert.equal(run.pendingUserInputs.length, 1);
+  const input = run.pendingUserInputs[0];
+  assert.deepEqual(Object.keys(input), ['userInputId', 'kind', 'status', 'itemId', 'isBlocking', 'questions']);
+  assert.ok(input.userInputId.startsWith(`input:${info.streamId}:`));
+  assert.equal(input.kind, 'userInput');
+  assert.equal(input.status, 'pending');
+  assert.equal(input.isBlocking, true);
+  assert.equal(input.questions.length, 2);
+  for (const question of input.questions) assert.deepEqual(Object.keys(question), QUESTION_KEYS);
+  const [choice, privateNote] = input.questions;
+  assert.equal(choice.options.length, 2);
+  assert.ok(choice.options.every(option => Object.keys(option).join() === 'label,description'));
+  assert.equal(choice.allowsOther, true);
+  assert.equal(choice.isSecret, false);
+  assert.equal(privateNote.options, null);
+  assert.equal(privateNote.allowsOther, false);
+  assert.equal(privateNote.isSecret, true);
+  const state = await fixtureState(handler);
+  const required = state.observed.events.filter(event => event.event === 'userInput.required');
+  assert.equal(required.length, 1);
+  assert.deepEqual(required[0].details, input);
+  assert.equal(required[0].runId, id.runId);
+  assert.equal(required[0].itemId, input.itemId);
+  assert.equal(state.observed.userInputs.length, 0);
+  assert.equal(state.runs[0].fixtureStage, 'user-input-pending');
+  assert.equal((await request(handler, 'POST', '/__qa/release', { runId: id.runId, phase: 'userInput' }, TOKEN)).status, 409);
+  assert.equal((await request(handler, 'POST', '/__qa/release', { runId: id.runId, phase: 'run' }, TOKEN)).status, 409);
+});
+
+test('USER_INPUT submit validates every answer, then records only shape and keyed digest', async t => {
+  const fetchSpy = t.mock.method(globalThis, 'fetch', () => { throw new Error('No real provider or forwarding'); });
+  const { handler } = setup(t);
+  const id = await startUserInput(handler);
+  const input = (await conversation(handler, id)).runs[0].pendingUserInputs[0];
+  const reply = { userInputId: input.userInputId, conversationId: id.conversationId, runId: id.runId, action: 'submit' };
+  const good = [{ questionId: 'qa_scope', optionIndex: 1 }, { questionId: 'qa_private_note', text: `  ${PRIVATE_ANSWER}  ` }];
+  const bodies = [];
+  const send = async body => { const value = await request(handler, 'POST', '/chat/user-input', body); bodies.push(value.body); return value; };
+  for (const answers of [undefined, [], [good[0]], [...good, good[0]], [good[0], good[0]],
+    [good[0], { questionId: 'unknown', text: PRIVATE_ANSWER }], [{ questionId: 'qa_scope', optionIndex: 2 }, good[1]],
+    [{ questionId: 'qa_scope', optionIndex: -1 }, good[1]], [{ questionId: 'qa_scope', optionIndex: 0.5 }, good[1]],
+    [{ questionId: 'qa_scope', optionIndex: '1' }, good[1]], [{ questionId: 'qa_scope', optionIndex: 0, text: 'both' }, good[1]],
+    [{ questionId: 'qa_scope' }, good[1]], [good[0], { questionId: 'qa_private_note', optionIndex: 0 }],
+    [good[0], { questionId: 'qa_private_note', text: '   ' }], [good[0], { questionId: 'qa_private_note', text: 'x'.repeat(4001) }],
+    [good[0], { questionId: 'qa_private_note', text: `${PRIVATE_ANSWER}\0` }], [good[0], { ...good[1], extra: true }],
+    [good[0], { questionId: 'qa_private_note', text: 42 }], [null, good[1]]]) {
+    const result = await send({ ...reply, answers });
+    assert.equal(result.status, 400, JSON.stringify(answers)?.slice(0, 80));
+    assert.equal(result.body.code, 'INVALID_USER_INPUT_ANSWER');
+  }
+  assert.equal((await send({ ...reply, action: 'accept', answers: good })).status, 400);
+  assert.equal((await send({ ...reply, answers: good, clientThreadId: 'unexpected' })).status, 400);
+  for (const stale of [{ runId: 'foreign' }, { conversationId: 'foreign' }, { userInputId: `${input.userInputId}:other` }]) {
+    const result = await send({ ...reply, answers: good, ...stale });
+    assert.equal(result.status, 409);
+    assert.equal(result.body.code, 'STALE_USER_INPUT');
+  }
+  await request(handler, 'POST', '/__qa/auth-refresh', { fail: true }, TOKEN);
+  assert.equal((await send({ ...reply, answers: good })).status, 503, 'submit is not a safety response');
+  await request(handler, 'POST', '/__qa/auth-refresh', { fail: false }, TOKEN);
+  let state = await fixtureState(handler);
+  assert.equal(state.observed.userInputs.length, 0);
+  assert.equal(state.runs[0].pendingUserInputs[0].status, 'pending');
+  const seqBefore = state.seq;
+  const accepted = await send({ ...reply, answers: [...good].reverse() });
+  assert.equal(accepted.status, 200);
+  assert.deepEqual(accepted.body, { accepted: true, userInputId: input.userInputId, conversationId: id.conversationId, runId: id.runId, status: 'replySent' });
+  assert.equal((await send({ ...reply, answers: good })).body.code, 'STALE_USER_INPUT');
+  assert.equal((await send({ ...reply, action: 'skip' })).status, 409);
+  state = await fixtureState(handler);
+  assert.ok(state.seq > seqBefore, 'replySent advances the snapshot sequence');
+  assert.equal(state.runs[0].status, 'running');
+  assert.equal(state.runs[0].pendingUserInputs[0].status, 'replySent');
+  assert.equal(state.runs[0].fixtureStage, 'user-input-reply-sent');
+  assert.deepEqual(state.observed.userInputs.map(({ repliedAt, ...entry }) => entry), [{
+    userInputId: input.userInputId, conversationId: id.conversationId, runId: id.runId, action: 'submit', answers: [
+      { questionId: 'qa_scope', isSecret: false, optionIndex: 1, label: '근거 포함' },
+      { questionId: 'qa_private_note', isSecret: true, textLength: PRIVATE_ANSWER.length,
+        textDigest: createHmac('sha256', TOKEN).update(PRIVATE_ANSWER).digest('hex') },
+    ] }]);
+  const snapshot = await conversation(handler, id);
+  for (const value of [state, snapshot, bodies]) assert.equal(JSON.stringify(value).includes(PRIVATE_ANSWER), false);
+  assert.equal(state.observed.events.some(event => JSON.stringify(event).includes('QA-PRIVATE')), false);
+
+  assert.equal((await request(handler, 'POST', '/__qa/release', { runId: id.runId, phase: 'run' }, TOKEN)).status, 409);
+  assert.equal((await request(handler, 'POST', '/__qa/release', { runId: id.runId, phase: 'userInput' })).status, 403);
+  assert.equal((await request(handler, 'POST', '/__qa/release', { runId: id.runId, phase: 'userInput' }, TOKEN)).status, 200);
+  state = await fixtureState(handler);
+  const resolved = state.observed.events.filter(event => event.event === 'userInput.resolved');
+  assert.deepEqual(resolved.map(event => event.details), [{ userInputId: input.userInputId }]);
+  assert.deepEqual(state.runs[0].pendingUserInputs, []);
+  assert.equal(state.runs[0].status, 'running', 'resolution is not run completion');
+  assert.equal(state.observed.events.filter(event => event.event === 'userInput.required')[0].details.status, 'pending');
+  assert.equal((await request(handler, 'POST', '/__qa/release', { runId: id.runId, phase: 'userInput' }, TOKEN)).status, 409);
+  assert.equal((await send({ ...reply, answers: good })).status, 409);
+  assert.equal((await request(handler, 'POST', '/__qa/release', { runId: id.runId, phase: 'run' }, TOKEN)).status, 200);
+  state = await fixtureState(handler);
+  const terminal = state.runs[0];
+  assert.equal(terminal.status, 'completed');
+  assert.equal(terminal.runId, id.runId);
+  assert.equal(terminal.messages.find(message => message.role === 'assistant').status, 'completed');
+  const order = state.observed.events.filter(event => event.runId === id.runId).map(event => event.event);
+  assert.ok(order.indexOf('userInput.resolved') < order.indexOf('message.started'));
+  assert.equal(order.at(-1), 'run.completed');
+  assert.equal(state.observed.sends.length, 1);
+  assert.equal(state.observed.userInputs.length, 1);
+  assert.equal(JSON.stringify(state).includes(PRIVATE_ANSWER), false);
+  assert.equal(fetchSpy.mock.callCount(), 0);
+});
+
+test('USER_INPUT skip is a fail-safe reply that still waits for explicit resolution', async t => {
+  const { handler } = setup(t);
+  const id = await startUserInput(handler);
+  const input = (await conversation(handler, id)).runs[0].pendingUserInputs[0];
+  const skip = { userInputId: input.userInputId, conversationId: id.conversationId, runId: id.runId, action: 'skip' };
+  assert.equal((await request(handler, 'POST', '/chat/user-input', { ...skip, answers: [{ questionId: 'qa_scope', optionIndex: 0 }] })).status, 400);
+  await request(handler, 'POST', '/__qa/auth-refresh', { fail: true }, TOKEN);
+  const skipped = await request(handler, 'POST', '/chat/user-input', skip);
+  assert.equal(skipped.status, 200);
+  assert.equal(skipped.body.status, 'replySent');
+  assert.equal((await request(handler, 'POST', '/chat/user-input', skip)).status, 409);
+  let state = await fixtureState(handler);
+  assert.deepEqual(state.observed.userInputs.map(entry => [entry.action, entry.answers]), [['skip', []]]);
+  assert.equal(state.runs[0].status, 'running');
+  await request(handler, 'POST', '/__qa/release', { runId: id.runId, phase: 'userInput' }, TOKEN);
+  await request(handler, 'POST', '/__qa/release', { runId: id.runId, phase: 'run' }, TOKEN);
+  state = await fixtureState(handler);
+  assert.equal(state.runs[0].status, 'completed');
+  assert.deepEqual(state.runs[0].pendingUserInputs, []);
+});
+
+test('USER_INPUT stop and offline paths never accept an answer for an ended or unreachable run', async t => {
+  const { handler } = setup(t);
+  const id = await startUserInput(handler);
+  const input = (await conversation(handler, id)).runs[0].pendingUserInputs[0];
+  const reply = { userInputId: input.userInputId, conversationId: id.conversationId, runId: id.runId, action: 'skip' };
+  assert.equal((await request(handler, 'POST', '/chat/interrupt', { conversationId: id.conversationId, runId: id.runId })).status, 202);
+  assert.equal((await request(handler, 'POST', '/__qa/release', { runId: id.runId, phase: 'run' }, TOKEN)).status, 200);
+  const state = await fixtureState(handler);
+  assert.equal(state.runs[0].status, 'interrupted');
+  assert.deepEqual(state.runs[0].pendingUserInputs, []);
+  assert.equal(state.observed.events.some(event => event.event === 'message.started' && event.runId === id.runId), false);
+  assert.equal((await request(handler, 'POST', '/chat/user-input', reply)).body.code, 'STALE_USER_INPUT');
+  const lost = await request(handler, 'POST', '/chat/send', { message: 'EGDESK_QA_LOST unit', profileEnabled: false });
+  await waitFor(async () => (await conversation(handler, lost.body)).connection === 'offline');
+  const offline = await request(handler, 'POST', '/chat/user-input', reply);
+  assert.equal(offline.status, 503);
+  assert.equal(offline.body.code, 'BRIDGE_OFFLINE');
+  assert.equal((await fixtureState(handler)).observed.userInputs.length, 0);
+});
+
+test('SUBAGENT publishes bounded sub-agent rows with blocked reasons and never a run per child thread', async t => {
+  const { handler } = setup(t);
+  const sent = await request(handler, 'POST', '/chat/send', { message: 'EGDESK_QA_SUBAGENT unit',
+    clientThreadId: 'subagent-thread', requestId: 'subagent-request', profileEnabled: false });
+  assert.equal(sent.status, 202);
+  const id = sent.body;
+  let state = await fixtureState(handler);
+  assert.equal(state.runs.length, 1, 'child threads never become EG-Desk runs');
+  let run = state.runs[0];
+  assert.equal(run.fixtureStage, 'subagents-visible');
+  assert.equal(run.subAgents.length, 3);
+  for (const row of run.subAgents) {
+    assert.deepEqual(Object.keys(row), SUBAGENT_KEYS);
+    assert.ok(row.taskPreview.length <= 160);
+    assert.equal(row.parentEnded, false);
+  }
+  const [done, errored, waiting] = run.subAgents;
+  assert.deepEqual([done.label, done.state, done.blocked], ['researcher', 'running', null]);
+  assert.deepEqual([errored.label, errored.state, errored.blocked], [null, 'errored', { reason: 'errored' }]);
+  assert.ok(errored.message.length <= 500);
+  assert.deepEqual([waiting.label, waiting.state, waiting.blocked], ['reviewer', 'running', { reason: 'approvalRequested' }]);
+  const updates = state.observed.events.filter(event => event.event === 'subagent.updated');
+  assert.equal(updates.length, 5);
+  for (const update of updates) assert.deepEqual(Object.keys(update.details), ['subAgent']);
+  for (const row of run.subAgents) assert.deepEqual(updates.findLast(update => update.details.subAgent.threadId === row.threadId).details.subAgent, row);
+  assert.equal(updates.find(update => update.details.subAgent.threadId === errored.threadId).details.subAgent.state, 'starting');
+  const collab = run.activities.find(activity => activity.kind === 'collabAgentToolCall');
+  assert.deepEqual(collab.detail, { tool: 'spawnAgent', status: 'inProgress', receiverCount: 3 });
+  assert.equal(JSON.stringify(run.activities).includes('prompt'), false);
+  assert.equal(run.activities.filter(activity => activity.kind !== 'collabAgentToolCall').length, 1);
+  assert.deepEqual(run.pendingUserInputs, []);
+  assert.equal((await request(handler, 'POST', '/__qa/release', { runId: id.runId, phase: 'run' }, TOKEN)).status, 409);
+  assert.equal((await request(handler, 'POST', '/__qa/release', { runId: id.runId, phase: 'subagent' }, TOKEN)).status, 200);
+  assert.equal((await request(handler, 'POST', '/__qa/release', { runId: id.runId, phase: 'subagent' }, TOKEN)).status, 409);
+  run = (await conversation(handler, id)).runs[0];
+  assert.deepEqual(run.subAgents.map(row => [row.state, row.blocked?.reason || null]),
+    [['completed', null], ['errored', 'errored'], ['running', 'approvalRequested']]);
+  assert.equal(run.activities.find(activity => activity.kind === 'collabAgentToolCall').status, 'completed');
+  assert.equal(run.status, 'running');
+  assert.equal((await request(handler, 'POST', '/__qa/release', { runId: id.runId, phase: 'run' }, TOKEN)).status, 200);
+  state = await fixtureState(handler);
+  run = state.runs[0];
+  assert.equal(run.status, 'completed');
+  assert.ok(run.subAgents.every(row => row.parentEnded));
+  assert.ok(run.activities.every(activity => activity.status === 'completed'));
+  assert.equal(run.messages.some(message => message.role === 'assistant'), false, 'sub-agent status never becomes a chat message');
+  assert.equal(state.observed.events.filter(event => event.event === 'subagent.updated').length, 9);
+  assert.equal(state.observed.sends.length, 1);
+  assert.equal((await request(handler, 'POST', '/chat/user-input', { userInputId: 'input:none', conversationId: id.conversationId,
+    runId: id.runId, action: 'skip' })).status, 409);
 });

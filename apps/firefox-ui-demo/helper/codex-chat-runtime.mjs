@@ -13,6 +13,18 @@ const MAX_ITEMS = 100
 const MAX_THREADS = 32
 const MAX_REQUESTS = 128
 const MAX_PUBLIC_EVENT_TEXT = 8 * 1024 * 1024
+const BOUNDED_MODES = [READ_ONLY_QA, BROWSER_BOUNDED, FIXTURE_BROWSER_QA]
+const USER_INPUT_METHOD = 'item/tool/requestUserInput'
+const MAX_INPUT_QUESTIONS = 8
+const MAX_INPUT_OPTIONS = 12
+const MAX_INPUT_ANSWER = 4000
+const MAX_SUBAGENTS = 32
+const COLLAB_TOOLS = new Set(['spawnAgent', 'sendInput', 'resumeAgent', 'wait', 'closeAgent', 'sendMessage', 'followupTask', 'interruptAgent', 'listAgents'])
+const COLLAB_STATUS = new Set(['inProgress', 'completed', 'failed', 'interrupted'])
+const REVIVE_TOOLS = new Set(['resumeAgent', 'sendInput', 'followupTask'])
+const AGENT_STATE = { pendingInit: 'starting', running: 'running', completed: 'completed', errored: 'errored', interrupted: 'interrupted', shutdown: 'closed', notFound: 'notFound' }
+const ACTIVITY_STATE = { started: 'running', interacted: 'running', interrupted: 'interrupted', completed: 'completed' }
+const SUBAGENT_DONE = new Set(['completed', 'errored', 'interrupted', 'closed', 'notFound'])
 const idText = value => typeof value === 'string' && value.length <= 300 ? value : null
 const runKey = (threadId, turnId) => `${threadId}/${turnId}`
 const copy = value => JSON.parse(JSON.stringify(value))
@@ -54,9 +66,57 @@ function safeItem(item) {
       durationMs: Number.isFinite(item.durationMs) ? item.durationMs : null,
     }
     case 'dynamicToolCall': return { ...base, status: ITEM_STATUS.has(item.status) ? item.status : 'inProgress', tool: publicText(item.tool, 120) }
+    // Native keys agentsStates by model-chosen thread IDs. Never keep that
+    // object shape: a key such as "secret" would poison the durable store.
+    case 'collabAgentToolCall': {
+      const states = item.agentsStates && typeof item.agentsStates === 'object' && !Array.isArray(item.agentsStates) ? Object.entries(item.agentsStates) : []
+      const receivers = [...new Set((Array.isArray(item.receiverThreadIds) ? item.receiverThreadIds : []).slice(0, MAX_SUBAGENTS * 2).map(idText).filter(Boolean))]
+      return {
+        ...base, tool: COLLAB_TOOLS.has(item.tool) ? item.tool : 'unknown',
+        status: COLLAB_STATUS.has(item.status) ? item.status : 'inProgress',
+        receiverThreadIds: receivers.slice(0, MAX_SUBAGENTS),
+        taskPreview: publicText(item.prompt, 160) || null,
+        model: idText(item.model) ? publicText(item.model, 120) || null : null,
+        agentStates: states.slice(0, MAX_SUBAGENTS * 2).filter(([threadId]) => idText(threadId)).slice(0, MAX_SUBAGENTS)
+          .map(([threadId, value]) => ({ threadId, state: AGENT_STATE[value?.status] || 'unknown', message: publicText(value?.message, 500) || null })),
+        truncated: receivers.length > MAX_SUBAGENTS || states.length > MAX_SUBAGENTS,
+      }
+    }
+    case 'subAgentActivity': return {
+      ...base, agentThreadId: idText(item.agentThreadId), agentPath: publicText(item.agentPath, 120) || null,
+      kind: Object.hasOwn(ACTIVITY_STATE, item.kind) ? item.kind : null,
+      model: idText(item.model) ? publicText(item.model, 120) || null : null,
+    }
     default: return null
   }
 }
+
+// Public question copy plus the private original labels. Only an option index
+// crosses back from the UI; redacted public labels are never sent to native.
+function safeUserInputQuestions(value) {
+  if (!Array.isArray(value) || !value.length || value.length > MAX_INPUT_QUESTIONS) return null
+  const ids = new Set(), questions = []
+  for (const question of value) {
+    if (!question || typeof question !== 'object' || !idText(question.id) || ids.has(question.id)) return null
+    if (typeof question.header !== 'string' || question.header.length > 200) return null
+    if (typeof question.question !== 'string' || !question.question.trim() || question.question.length > 2000) return null
+    let options = question.options ?? null
+    if (options !== null && (!Array.isArray(options) || options.length > MAX_INPUT_OPTIONS)) return null
+    if (options?.length === 0) options = null
+    if (options?.some(option => !option || typeof option !== 'object' || typeof option.label !== 'string' || !option.label.trim() || option.label.length > 200 ||
+        (option.description != null && (typeof option.description !== 'string' || option.description.length > 1000)))) return null
+    ids.add(question.id)
+    questions.push({
+      questionId: question.id, header: publicText(question.header, 200), question: publicText(question.question, 2000),
+      options: options && options.map(option => ({ label: publicText(option.label, 200), description: publicText(option.description, 1000) })),
+      allowsOther: Boolean(options), isSecret: question.isSecret === true,
+      rawLabels: options && options.map(option => option.label),
+    })
+  }
+  return questions
+}
+
+const ordinaryThreadConfig = config => ({ ...(config || {}), features: { ...(config?.features || {}), default_mode_request_user_input: true } })
 
 function safeTurn(turn) {
   return {
@@ -140,6 +200,9 @@ export class CodexChatRuntime {
     this.pendingStarts = new Map()
     this.pendingResumes = new Map()
     this.pendingApprovals = new Map()
+    // Separate from approvals: a question carries rpcId and original option
+    // labels here only. Answers are never retained anywhere.
+    this.pendingUserInputs = new Map()
     this.requests = new Map()
     this.persistedRunStates = new Map()
     this.locks = new Set()
@@ -274,7 +337,8 @@ export class CodexChatRuntime {
       } while (true)
       for (const { clientThreadId, run } of pending) {
         const checkpoint = {
-          ...run, status: 'unknown', historyComplete: false, pendingApprovals: [],
+          ...run, status: 'unknown', historyComplete: false, pendingApprovals: [], pendingUserInputs: [],
+          ...(Array.isArray(run.subAgents) ? { subAgents: run.subAgents.map(row => SUBAGENT_DONE.has(row?.state) ? row : { ...row, state: 'unknown' }) } : {}),
           error: publicError('Bridge restarted before this run was confirmed complete', 'RUNTIME_RESTARTED'),
           messages: (run.messages || []).map(message => message.status === 'streaming' ? { ...message, status: 'partial' } : message),
         }
@@ -413,6 +477,7 @@ export class CodexChatRuntime {
     this.rawMessages.clear()
     this.visibleMessages.clear()
     this.pendingApprovals.clear()
+    this.pendingUserInputs.clear()
     this.dynamicRequestProviders.clear()
     this.pendingStarts.clear()
     this.pendingResumes.clear()
@@ -430,6 +495,8 @@ export class CodexChatRuntime {
     this.epoch++
     this.loadedThreads.clear()
     for (const run of this.runs.values()) {
+      // A child Agent can outlive its parent turn; its last state is now unknown.
+      this.updateSubAgentRows(run, (run.subAgents || []).filter(row => !SUBAGENT_DONE.has(row.state) && row.state !== 'unknown').map(row => ({ threadId: row.threadId, state: 'unknown' })), true)
       if (TERMINAL.has(run.status)) continue
       run.status = processLost ? 'failed' : 'unknown'
       run.historyComplete = false
@@ -442,11 +509,13 @@ export class CodexChatRuntime {
         }
       }
       run.pendingApprovals = []
+      this.clearUserInputs(run)
       this.emit(run, 'run.unavailable', { status: run.status, error: run.error })
       if (this.store && run.localRunId) this.persistedRunStates.set(runKey(run.conversationId, run.runId), { status: run.status, historyComplete: run.historyComplete })
       this.emitLegacy({ type: 'assistant-error', conversationId: run.conversationId, messageId: run.answerId, error: run.error.message })
     }
     this.pendingApprovals.clear()
+    this.pendingUserInputs.clear()
     this.dynamicRequestProviders.clear()
     this.qaOutputMarkersByRun.clear()
     this.rawMessages.clear()
@@ -521,7 +590,7 @@ export class CodexChatRuntime {
       localRunId: context?.localRunId || null,
       localMessageId: context?.localMessageId || null,
       status: 'inProgress', stopRequested: false, stopConfirmed: false,
-      messages: [], activities: [], artifacts: [], pendingApprovals: [], error: null,
+      messages: [], activities: [], artifacts: [], pendingApprovals: [], pendingUserInputs: [], subAgents: [], error: null,
       createdAt: this.now(), truncated: false, historyComplete: true,
       ...(this.store ? { accountIdentity: { ownerHash: ownerHash(this.getOwnerKey()), status: 'verified' } } : {}),
       cwdPublic: publicText(this.threads.get(threadId)?.cwd || '', 2000),
@@ -910,6 +979,8 @@ export class CodexChatRuntime {
       const nativeTools = this.collectToolSpecs(policy, { browserInteraction: browserInteractionRequested })
       if (nativeTools.specs.length) overrides.dynamicTools = nativeTools.specs
       if (bounded) Object.assign(overrides, qaOverrides)
+      // Ordinary Agent questions may arrive outside Plan mode. Bounded threads never ask.
+      else overrides.config = ordinaryThreadConfig(overrides.config)
       const result = await this.request('thread/start', overrides)
       if (epoch !== this.epoch) throw chatError('ACCOUNT_CHANGED', 'Codex account changed', 409)
       cid = result?.thread?.id
@@ -1050,7 +1121,7 @@ export class CodexChatRuntime {
     try {
       await this.queue
       // Never fall back to thread/start if a historical ID is invalid or unavailable.
-      const result = await this.request('thread/resume', { threadId: cid, ...overrides })
+      const result = await this.request('thread/resume', { threadId: cid, ...overrides, ...(policy ? {} : { config: ordinaryThreadConfig(overrides.config) }) })
       if (epoch !== this.epoch) throw chatError('CONTEXT_CHANGED', 'Codex connection or account changed', 409)
       if (result?.thread?.id !== cid) throw chatError('THREAD_MISMATCH', 'Codex resumed a different thread', 502)
       let qaReceipt = null
@@ -1209,6 +1280,67 @@ export class CodexChatRuntime {
     return { accepted: true, approvalId: approval.approvalId, conversationId: run.conversationId, runId: run.runId, status: 'replySent' }
   }
 
+  // Answer text reaches only the native response. Errors use fixed wording.
+  userInputAnswers(input, answers) {
+    const invalid = () => chatError('INVALID_USER_INPUT_ANSWER', 'Answer every question exactly once with one listed choice or allowed text')
+    if (!Array.isArray(answers) || answers.length !== input.questions.length) throw invalid()
+    const values = new Map()
+    for (const answer of answers) {
+      if (!answer || typeof answer !== 'object' || Array.isArray(answer)) throw invalid()
+      const index = input.questions.findIndex(question => question.questionId === answer.questionId)
+      if (index < 0 || values.has(index)) throw invalid()
+      const question = input.questions[index]
+      const hasOption = answer.optionIndex !== undefined, hasText = answer.text !== undefined
+      if (hasOption === hasText) throw invalid()
+      if (hasOption) {
+        if (!question.options || !Number.isInteger(answer.optionIndex) || answer.optionIndex < 0 || answer.optionIndex >= question.options.length) throw invalid()
+        values.set(index, input.rawLabels[index][answer.optionIndex])
+      } else {
+        if (question.options && !question.allowsOther) throw invalid()
+        const text = typeof answer.text === 'string' ? answer.text : ''
+        const trimmed = text.trim()
+        // A private answer is sent exactly as typed; surrounding spaces may matter.
+        if (!trimmed || trimmed.length > MAX_INPUT_ANSWER || text.includes('\0') || (question.isSecret && text.length > MAX_INPUT_ANSWER)) throw invalid()
+        values.set(index, question.isSecret ? text : trimmed)
+      }
+    }
+    return Object.fromEntries(input.questions.map((question, index) => [question.questionId, { answers: [values.get(index)] }]))
+  }
+
+  async replyUserInput(body) {
+    this.assertReady()
+    const input = typeof body.userInputId === 'string' ? this.pendingUserInputs.get(body.userInputId) : null
+    if (!input || input.conversationId !== body.conversationId || input.runId !== body.runId || input.status !== 'pending') {
+      throw chatError('STALE_USER_INPUT', 'Question is stale, already answered, or belongs to another run', 409)
+    }
+    if (!['submit', 'skip'].includes(body.action)) throw chatError('INVALID_USER_INPUT_ANSWER', 'Unsupported answer action')
+    const run = this.findRun(body)
+    if (TERMINAL.has(run.status)) throw chatError('STALE_USER_INPUT', 'Run has ended', 409)
+    let answers = null
+    if (body.action === 'submit') {
+      answers = this.userInputAnswers(input, body.answers)
+      if (!this.ownedRuns.has(run)) throw chatError('NATIVE_RUN_UNBOUND', 'This native run has no verified EG-Desk dispatch binding', 409)
+      if (this.boundedRun(run)) throw chatError('BOUNDED_INPUT_FORBIDDEN', 'Bounded execution never answers an Agent question', 403)
+    }
+    // Mark before sending: a synchronous resolved event must not be overwritten.
+    input.status = 'replySent'
+    try {
+      if (answers) this.respond(input.rpcId, { answers })
+      else this.respond(input.rpcId, null, { code: -32000, message: 'User skipped the question' })
+    } catch (error) {
+      input.status = 'pending'
+      throw error
+    }
+    const pending = run.pendingUserInputs.find(item => item.userInputId === input.userInputId)
+    if (pending) pending.status = 'replySent'
+    this.seq++
+    return { accepted: true, userInputId: input.userInputId, conversationId: run.conversationId, runId: run.runId, status: 'replySent' }
+  }
+
+  boundedRun(run) {
+    return BOUNDED_MODES.includes(run.executionPolicy?.mode) || BOUNDED_MODES.includes(this.threads.get(run.conversationId)?.executionPolicy)
+  }
+
   handleNotification(message) {
     const event = cleanNotification(message.method, message.params)
     if (!event) return Promise.resolve()
@@ -1234,6 +1366,13 @@ export class CodexChatRuntime {
       }
       return this.enqueue({ method: 'dynamic', rpcId: message.id, threadId: idText(p.threadId), turnId: idText(p.turnId), callId: p.callId, tool: p.tool, namespace: p.namespace || null, arguments: p.arguments })
     }
+    // Keep the approval envelope so buffering, binding failure, unowned-run and
+    // bounded-QA refusals apply unchanged. Invalid questions arrive as null.
+    if (message.method === USER_INPUT_METHOD) return this.enqueue({
+      method: 'approval', nativeMethod: message.method, rpcId: message.id,
+      threadId: idText(p.threadId), turnId: idText(p.turnId), itemId: idText(p.itemId),
+      isBlocking: p.isBlocking !== false, questions: safeUserInputQuestions(p.questions), choices: [],
+    })
     const event = {
       method: 'approval', nativeMethod: message.method, rpcId: message.id,
       threadId: idText(p.threadId), turnId: idText(p.turnId), itemId: idText(p.itemId),
@@ -1278,11 +1417,18 @@ export class CodexChatRuntime {
         const run = this.runs.get(runKey(approval.conversationId, approval.runId))
         if (run) { run.pendingApprovals = run.pendingApprovals.filter(a => a.approvalId !== id); this.emit(run, 'approval.resolved', { approvalId: id }) }
       }
+      for (const [id, input] of this.pendingUserInputs) if (input.rpcId === event.requestId && input.conversationId === event.threadId) {
+        this.pendingUserInputs.delete(id)
+        const run = this.runs.get(runKey(input.conversationId, input.runId))
+        if (run) { run.pendingUserInputs = run.pendingUserInputs.filter(item => item.userInputId !== id); this.emit(run, 'userInput.resolved', { userInputId: id }) }
+      }
       return
     }
     const run = this.runs.get(runKey(event.threadId, event.turnId))
     if (!run || !this.ownedRuns.has(run)) {
       if (event.method === 'approval' || event.method === 'dynamic') this.respond(event.rpcId, null, { code: -32601, message: 'No matching EG-Desk run' })
+      // A child Agent thread never gains authority; its parent row shows the stall.
+      if (!run && event.method === 'approval' && event.nativeMethod !== USER_INPUT_METHOD) this.markSubAgentBlocked(event.threadId)
       return
     }
     if (event.method === 'approval') return this.receiveApproval(run, event)
@@ -1377,6 +1523,7 @@ export class CodexChatRuntime {
       void this.request('turn/interrupt', { threadId: run.conversationId, turnId: run.runId }).catch(() => {})
       return
     }
+    if (event.nativeMethod === USER_INPUT_METHOD) return this.receiveUserInput(run, event)
     const kinds = { 'item/commandExecution/requestApproval': 'commandExecution', 'item/fileChange/requestApproval': 'fileChange' }
     const kind = kinds[event.nativeMethod]
     if (!kind || !event.choices.length || TERMINAL.has(run.status)) {
@@ -1420,6 +1567,98 @@ export class CodexChatRuntime {
     this.pendingApprovals.set(approvalId, { ...pending, rpcId: event.rpcId, conversationId: run.conversationId, runId: run.runId })
     run.pendingApprovals.push(pending)
     this.emit(run, 'approval.required', pending, event.itemId)
+  }
+
+  receiveUserInput(run, event) {
+    if (TERMINAL.has(run.status) || this.connection !== 'ready') {
+      this.respond(event.rpcId, null, { code: -32601, message: 'EG-Desk run is no longer active' })
+      return
+    }
+    if (!event.questions) {
+      this.respond(event.rpcId, null, { code: -32602, message: 'Invalid user input request' })
+      run.error = publicError('Codex asked a question EG-Desk cannot safely display; nothing was answered', 'INVALID_USER_INPUT_REQUEST')
+      this.emit(run, 'run.unavailable', { status: run.status, error: run.error })
+      return
+    }
+    const userInputId = `input:${this.streamId}:${this.epoch}:${typeof event.rpcId}:${event.rpcId}`
+    if (this.pendingUserInputs.has(userInputId)) return
+    if (this.pendingApprovals.size + this.pendingUserInputs.size >= MAX_ITEMS) {
+      this.respond(event.rpcId, null, { code: -32000, message: 'Too many pending user input requests' })
+      return
+    }
+    const pending = {
+      userInputId, kind: 'userInput', status: 'pending', itemId: event.itemId, isBlocking: event.isBlocking,
+      questions: event.questions.map(({ rawLabels, ...question }) => question),
+    }
+    this.pendingUserInputs.set(userInputId, { ...pending, rpcId: event.rpcId, conversationId: run.conversationId, runId: run.runId, rawLabels: event.questions.map(question => question.rawLabels) })
+    run.pendingUserInputs.push(pending)
+    this.emit(run, 'userInput.required', pending, event.itemId)
+  }
+
+  clearUserInputs(run) {
+    for (const [id, input] of this.pendingUserInputs) if (input.conversationId === run.conversationId && input.runId === run.runId) this.pendingUserInputs.delete(id)
+    const cleared = run.pendingUserInputs || []
+    run.pendingUserInputs = []
+    for (const input of cleared) this.emit(run, 'userInput.resolved', { userInputId: input.userInputId })
+  }
+
+  // Display only: the child's request was already refused without authority.
+  markSubAgentBlocked(threadId) {
+    if (!threadId) return
+    const run = [...this.runs.values()].reverse().find(candidate => this.ownedRuns.has(candidate) && candidate.subAgents?.some(row => row.threadId === threadId))
+    if (run) this.updateSubAgentRows(run, [{ threadId, create: false, blockedApproval: true }], true)
+  }
+
+  updateSubAgents(run, item, announce) {
+    const updates = []
+    if (item.type === 'collabAgentToolCall') {
+      const revive = REVIVE_TOOLS.has(item.tool)
+      const states = new Map(item.agentStates.map(entry => [entry.threadId, entry]))
+      for (const threadId of new Set([...item.receiverThreadIds, ...states.keys()])) {
+        if (threadId === run.conversationId) continue
+        const entry = states.get(threadId)
+        const receiver = item.receiverThreadIds.includes(threadId)
+        updates.push({
+          threadId, revive,
+          ...(receiver ? { lastTool: item.tool } : {}),
+          ...(receiver && item.tool === 'spawnAgent' ? { taskPreview: item.taskPreview, model: item.model, initialState: item.status === 'failed' ? 'unknown' : 'starting' } : {}),
+          ...(entry ? { state: entry.state, message: entry.message } : {}),
+        })
+      }
+    } else if (item.type === 'subAgentActivity' && item.agentThreadId && item.agentThreadId !== run.conversationId) {
+      const state = ACTIVITY_STATE[item.kind]
+      updates.push({ threadId: item.agentThreadId, label: item.agentPath, model: item.model, ...(state ? { state, revive: item.kind === 'started' || item.kind === 'interacted' } : {}) })
+    }
+    this.updateSubAgentRows(run, updates, announce)
+  }
+
+  // One bounded row per child thread; IDs stay values, never object keys.
+  updateSubAgentRows(run, updates, announce) {
+    if (!updates.length) return
+    run.subAgents ||= []
+    const changed = new Set()
+    for (const update of updates) {
+      let row = run.subAgents.find(candidate => candidate.threadId === update.threadId)
+      if (!row) {
+        if (update.create === false) continue
+        if (run.subAgents.length >= MAX_SUBAGENTS) { run.truncated = true; continue }
+        row = { threadId: update.threadId, label: null, taskPreview: null, model: null, state: update.initialState || 'unknown', message: null, lastTool: null, blocked: null, updatedAt: this.now(), parentEnded: false }
+        run.subAgents.push(row)
+        changed.add(row)
+      }
+      const before = JSON.stringify({ ...row, updatedAt: 0 })
+      for (const key of ['label', 'taskPreview', 'model', 'lastTool']) if (update[key]) row[key] = update[key]
+      // Only resume-type signals may reopen a finished child; stale snapshots may not.
+      const regress = SUBAGENT_DONE.has(row.state) && ['running', 'starting'].includes(update.state) && !update.revive
+      if (update.state && !regress) {
+        row.state = update.state
+        if (update.message !== undefined) row.message = update.message
+      }
+      const approval = update.blockedApproval || (row.blocked?.reason === 'approvalRequested' && !SUBAGENT_DONE.has(row.state) && !update.revive)
+      row.blocked = row.state === 'errored' ? { reason: 'errored' } : row.state === 'notFound' ? { reason: 'notFound' } : approval ? { reason: 'approvalRequested' } : null
+      if (JSON.stringify({ ...row, updatedAt: 0 }) !== before) { row.updatedAt = this.now(); changed.add(row) }
+    }
+    if (announce) for (const row of changed) this.emit(run, 'subagent.updated', { subAgent: row })
   }
 
   messageDelta(run, itemId, delta) {
@@ -1537,9 +1776,28 @@ export class CodexChatRuntime {
     } else if (item.type === 'plan') {
       activity.title = 'Plan'
       activity.detail = { text: item.text }
+    } else if (item.type === 'collabAgentToolCall') {
+      // Prompt text stays out of activity detail; only the row keeps a short preview.
+      activity.status = item.status
+      activity.title = item.tool
+      activity.detail = { tool: item.tool, status: item.status, receiverCount: item.receiverThreadIds.length, states: item.agentStates.map(entry => entry.state) }
+    } else if (item.type === 'subAgentActivity') {
+      activity.title = 'Sub-agent'
+      activity.detail = { status: item.kind, state: ACTIVITY_STATE[item.kind] || 'unknown' }
     } else return
     this.put(run, 'activities', activity)
     if (announce) this.emit(run, completed ? 'activity.completed' : 'activity.started', activity, item.id)
+    if (item.type !== 'collabAgentToolCall' && item.type !== 'subAgentActivity') return
+    if (this.boundedRun(run)) {
+      // Bounded threads disable multi_agent; any collaboration is out of scope.
+      if (item.type === 'collabAgentToolCall' && announce && !TERMINAL.has(run.status) && run.error?.code !== 'QA_SCOPE_VIOLATION') {
+        run.error = publicError('Bounded execution attempted to start or steer another Agent; the turn was stopped', 'QA_SCOPE_VIOLATION')
+        this.emit(run, 'run.unavailable', { status: run.status, error: run.error })
+        void this.request('turn/interrupt', { threadId: run.conversationId, turnId: run.runId }).catch(() => {})
+      }
+      return
+    }
+    this.updateSubAgents(run, item, announce)
   }
 
   async collectArtifacts(run, item, announce) {
@@ -1585,6 +1843,9 @@ export class CodexChatRuntime {
     for (const [id, approval] of this.pendingApprovals) if (approval.conversationId === run.conversationId && approval.runId === run.runId) this.pendingApprovals.delete(id)
     for (const [id, pending] of this.dynamicRequestProviders) if (pending.run === run) this.dynamicRequestProviders.delete(id)
     run.pendingApprovals = []
+    this.clearUserInputs(run)
+    // Child Agents may keep running after this turn; do not invent their outcome.
+    for (const row of run.subAgents || []) row.parentEnded = true
     for (const key of this.rawMessages.keys()) if (key.startsWith(`${run.answerId}/`)) this.rawMessages.delete(key)
     for (const key of this.visibleMessages.keys()) if (key.startsWith(`${run.answerId}/`)) this.visibleMessages.delete(key)
     this.emit(run, 'run.completed', { status: run.status, stopRequested: run.stopRequested, stopConfirmed: run.stopConfirmed, error: run.error })

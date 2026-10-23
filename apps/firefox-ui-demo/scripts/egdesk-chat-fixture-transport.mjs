@@ -5,7 +5,7 @@ import fs from 'node:fs';
 import http from 'node:http';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
-import { randomUUID } from 'node:crypto';
+import { createHmac, randomUUID } from 'node:crypto';
 import { assertQaFixtureManifest } from './egdesk-chat-qa-profile.mjs';
 import { assertOrdinarySend } from './egdesk-chat-qa-contract.sys.mjs';
 import { createQaContextFixture } from './egdesk-context-qa-fixture.mjs';
@@ -13,6 +13,38 @@ import { observeQaFixtureFile } from './egdesk-context-qa-contract.mjs';
 
 const PORT = 39218;
 const HOST = '127.0.0.1';
+const SCENARIO = /^EGDESK_QA_(COMPLETE|TEXT_ONLY|STOP|APPROVAL|USER_INPUT|SUBAGENT|LOST|START_FAIL|REJECT|AMBIGUOUS|CONTEXT)\b/;
+// Same public bounds the helper enforces before a question reaches SSE.
+const INPUT_LIMITS = { questions: 8, options: 12, header: 200, question: 2000, label: 200, description: 1000, answer: 4000 };
+const SUBAGENT_STATES = new Set(['starting', 'running', 'completed', 'errored', 'interrupted', 'closed', 'notFound', 'unknown']);
+const SUBAGENT_BLOCKS = new Set(['approvalRequested', 'errored', 'notFound']);
+const SUBAGENT_KEYS = ['threadId', 'label', 'taskPreview', 'model', 'state', 'message', 'lastTool', 'blocked', 'updatedAt', 'parentEnded'];
+
+const bounded = (value, max) => typeof value === 'string' && value.length > 0 && value.length <= max;
+const boundedOrNull = (value, max) => value === null || bounded(value, max);
+
+function assertPublicUserInput(input) {
+  const ok = Array.isArray(input.questions) && input.questions.length >= 1 && input.questions.length <= INPUT_LIMITS.questions
+    && new Set(input.questions.map(question => question.questionId)).size === input.questions.length
+    && input.questions.every(question => bounded(question.questionId, 200) && bounded(question.header, INPUT_LIMITS.header)
+      && bounded(question.question, INPUT_LIMITS.question) && typeof question.isSecret === 'boolean'
+      && (question.options === null ? question.allowsOther === false
+        : Array.isArray(question.options) && question.options.length >= 1 && question.options.length <= INPUT_LIMITS.options
+          && question.allowsOther === true && question.options.every(option => bounded(option.label, INPUT_LIMITS.label)
+            && typeof option.description === 'string' && option.description.length <= INPUT_LIMITS.description)));
+  if (!ok) throw new Error('Fixture user input exceeds the public contract');
+  return input;
+}
+
+function assertSubAgentRow(row) {
+  if (JSON.stringify(Object.keys(row)) !== JSON.stringify(SUBAGENT_KEYS) || !bounded(row.threadId, 200)
+      || !boundedOrNull(row.label, 120) || !boundedOrNull(row.taskPreview, 160) || !boundedOrNull(row.message, 500)
+      || !SUBAGENT_STATES.has(row.state) || !(row.blocked === null || SUBAGENT_BLOCKS.has(row.blocked?.reason))
+      || typeof row.parentEnded !== 'boolean' || !Number.isSafeInteger(row.updatedAt)) {
+    throw new Error('Fixture sub-agent row exceeds the public contract');
+  }
+  return row;
+}
 
 // Importing this factory starts no service. Unit tests invoke the handler with
 // in-memory requests; only the explicit CLI below is allowed to listen.
@@ -37,12 +69,13 @@ let accountVariant = 'a';
 let holdResume = false;
 let partialHistory = false;
 let terminalMode = null;
+let userInputRpc = 0;
 const heldResumes = [];
 const fixtureTerminals = new Map();
 const clients = new Set();
 const runs = new Map();
 const failedStarts = new Map();
-const observed = { sends: [], interrupts: [], resumes: [], approvals: [], authWrites: [], events: [], reconnects: 0, replays: 0, heldResumes: 0, releasedResumes: 0, contextCaptureFailures: 0 };
+const observed = { sends: [], interrupts: [], resumes: [], approvals: [], userInputs: [], authWrites: [], events: [], reconnects: 0, replays: 0, heldResumes: 0, releasedResumes: 0, contextCaptureFailures: 0 };
 
 function json(res, status, value) {
   res.writeHead(status, { 'Content-Type': 'application/json; charset=utf-8',
@@ -113,6 +146,8 @@ function runState(run) {
     stopRequested: run.stopRequested, messages: [...run.messages.values()],
     activities: [...run.activities.values()], artifacts: [...run.artifacts],
     pendingApprovals: [...run.pendingApprovals], error: run.error,
+    pendingUserInputs: structuredClone(run.pendingUserInputs), subAgents: structuredClone(run.subAgents),
+    ...(run.truncated ? { truncated: true } : {}),
     ...(run.contextCaptures ? { contextCaptures: run.contextCaptures, contextEvents: run.contextEvents || [], briefing: run.briefing || null } : {}) };
 }
 
@@ -240,6 +275,112 @@ function approvalScenario(run) {
   envelope(run, 'approval.required', { approval }, approval.itemId);
 }
 
+function userInputScenario(run) {
+  const input = assertPublicUserInput({ userInputId: `input:${streamId}:0:number:${++userInputRpc}`, kind: 'userInput',
+    status: 'pending', itemId: `${run.runId}-user-input`, isBlocking: true, questions: [
+      { questionId: 'qa_scope', header: '정리 범위', question: 'QA fixture: 결과를 어느 범위로 정리할까요?',
+        options: [{ label: '요약만', description: '핵심 결론만 짧게 정리합니다.' },
+          { label: '근거 포함', description: '판단 근거와 출처를 함께 정리합니다.' }], allowsOther: true, isSecret: false },
+      { questionId: 'qa_private_note', header: '비공개 메모', question: 'QA fixture: 비공개로 전달할 메모를 입력하세요.',
+        options: null, allowsOther: false, isSecret: true },
+    ] });
+  run.pendingUserInputs.push(input);
+  run.fixtureStage = 'user-input-pending';
+  // Clone: later replySent must not rewrite the recorded/replayed required event.
+  envelope(run, 'userInput.required', structuredClone(input), input.itemId);
+}
+
+// Only the shape and a token-keyed digest of free text leave this route.
+function userInputAnswers(input, body) {
+  if (body.action === 'skip') return body.answers === undefined || (Array.isArray(body.answers) && !body.answers.length) ? [] : null;
+  if (body.action !== 'submit' || !Array.isArray(body.answers) || body.answers.length !== input.questions.length) return null;
+  const result = [];
+  for (const answer of body.answers) {
+    if (!answer || typeof answer !== 'object' || Array.isArray(answer)
+        || Object.keys(answer).some(key => !['questionId', 'optionIndex', 'text'].includes(key))) return null;
+    const index = input.questions.findIndex(item => item.questionId === answer.questionId);
+    const question = input.questions[index];
+    if (!question || result.some(item => item.questionId === question.questionId)) return null;
+    const hasIndex = answer.optionIndex !== undefined;
+    if (hasIndex === (answer.text !== undefined)) return null;
+    if (hasIndex) {
+      if (!question.options || !Number.isSafeInteger(answer.optionIndex) || answer.optionIndex < 0
+          || answer.optionIndex >= question.options.length) return null;
+      result.push({ index, questionId: question.questionId, isSecret: question.isSecret,
+        optionIndex: answer.optionIndex, label: question.options[answer.optionIndex].label });
+      continue;
+    }
+    if (typeof answer.text !== 'string' || answer.text.includes('\0') || (question.options && !question.allowsOther)) return null;
+    const text = answer.text.trim();
+    if (!text || text.length > INPUT_LIMITS.answer) return null;
+    result.push({ index, questionId: question.questionId, isSecret: question.isSecret,
+      textLength: text.length, textDigest: createHmac('sha256', token).update(text).digest('hex') });
+  }
+  return result.sort((a, b) => a.index - b.index).map(({ index, ...item }) => item);
+}
+
+function resolveUserInput(run) {
+  const { userInputId } = run.pendingUserInputs[0];
+  run.pendingUserInputs = [];
+  envelope(run, 'userInput.resolved', { userInputId });
+  // The same native run continues after the reply; completion stays a separate release.
+  const messageId = `${run.runId}-message`;
+  const text = run.userInputAction === 'skip' ? 'QA fixture: 질문을 건너뛰어 기본 범위로 이어갑니다.'
+    : 'QA fixture: 답변을 받아 같은 실행을 이어갑니다.';
+  run.messages.set(messageId, { id: messageId, role: 'assistant', status: 'streaming', text });
+  envelope(run, 'message.started', { messageId, phase: 'answer' }, messageId);
+  envelope(run, 'message.delta', { messageId, delta: text, phase: 'answer' }, messageId);
+  run.finishFixture = () => {
+    run.messages.get(messageId).status = 'completed';
+    envelope(run, 'message.completed', { messageId, text, phase: 'answer' }, messageId);
+  };
+  run.fixtureStage = 'user-input-resolved';
+}
+
+function updateSubAgent(run, threadId, fields) {
+  const index = run.subAgents.findIndex(item => item.threadId === threadId);
+  if (index < 0 && run.subAgents.length >= 32) { run.truncated = true; return; }
+  const base = index < 0 ? { threadId, label: null, taskPreview: null, model: null, state: 'unknown', message: null,
+    lastTool: null, blocked: null, updatedAt: 0, parentEnded: false } : run.subAgents[index];
+  const row = assertSubAgentRow({ ...base, ...fields, threadId, updatedAt: Date.now() });
+  if (index < 0) run.subAgents.push(row); else run.subAgents[index] = row;
+  envelope(run, 'subagent.updated', { subAgent: structuredClone(row) });
+}
+
+function subAgentScenario(run) {
+  const collab = { id: `${run.runId}-collab`, kind: 'collabAgentToolCall', status: 'inProgress',
+    title: 'QA fixture: 하위 Agent 생성', detail: { tool: 'spawnAgent', status: 'inProgress', receiverCount: 3 }, sourceRefs: [] };
+  const gather = { id: `${run.runId}-activity`, kind: 'commandExecution', status: 'inProgress',
+    title: 'QA fixture: 하위 Agent 결과 모으기', sourceRefs: [] };
+  for (const activity of [collab, gather]) {
+    run.activities.set(activity.id, activity);
+    envelope(run, 'activity.started', structuredClone(activity), activity.id);
+  }
+  const [done, errored, waiting] = [randomUUID(), randomUUID(), randomUUID()];
+  const model = 'qa-fixture-model';
+  updateSubAgent(run, done, { label: 'researcher', taskPreview: 'QA fixture: 공개 참고 자료를 읽고 핵심만 요약합니다.',
+    model, state: 'running', lastTool: 'spawnAgent' });
+  updateSubAgent(run, errored, { taskPreview: 'QA fixture: 존재하지 않는 경로를 확인합니다.', model, state: 'starting', lastTool: 'spawnAgent' });
+  updateSubAgent(run, waiting, { label: 'reviewer', taskPreview: 'QA fixture: 변경 전 승인이 필요한 작업을 검토합니다.',
+    model, state: 'running', lastTool: 'spawnAgent' });
+  updateSubAgent(run, errored, { state: 'errored', message: 'QA fixture: 하위 작업이 오류로 끝났습니다.',
+    lastTool: 'wait', blocked: { reason: 'errored' } });
+  // A child approval request is refused (never granted); only the parent row records it.
+  updateSubAgent(run, waiting, { blocked: { reason: 'approvalRequested' } });
+  run.settleSubAgents = () => {
+    updateSubAgent(run, done, { state: 'completed', message: 'QA fixture: 요약을 마쳤습니다.', lastTool: 'wait' });
+    Object.assign(collab, { status: 'completed', detail: { ...collab.detail, status: 'completed' } });
+    envelope(run, 'activity.completed', structuredClone(collab), collab.id);
+    run.fixtureStage = 'subagents-settled';
+  };
+  run.finishFixture = () => {
+    gather.status = 'completed';
+    envelope(run, 'activity.completed', structuredClone(gather), gather.id);
+    for (const row of [...run.subAgents]) updateSubAgent(run, row.threadId, { parentEnded: true });
+  };
+  run.fixtureStage = 'subagents-visible';
+}
+
 function unavailableScenario(run) {
   setTimeout(() => {
     connection = 'offline';
@@ -263,7 +404,7 @@ const handler = async (req, res) => {
     }
     if (req.method === 'OPTIONS') {
       const paths = ['/health', '/v1/state', '/auth/status', '/events', '/chat/state', '/chat/resume',
-        '/chat/send', '/chat/interrupt', '/chat/approval', '/__qa/state', '/__qa/release',
+        '/chat/send', '/chat/interrupt', '/chat/approval', '/chat/user-input', '/__qa/state', '/__qa/release',
         '/__qa/auth-refresh', '/__qa/reconnect', '/__qa/replay', '/auth/signout', '/__qa/hold-resume',
         '/__qa/release-resume', '/__qa/history', '/__qa/delta', '/__qa/auth-diagnostics', '/__qa/runtime-ready',
         '/__qa/account-change', '/__qa/terminal-mode', '/terminal/spawn', '/terminal/read', '/terminal/kill', '/terminal/resize',
@@ -356,8 +497,13 @@ const handler = async (req, res) => {
         run.pendingApprovals = [];
         envelope(run, 'approval.resolved', { approvalId });
         run.fixtureStage = 'approval-resolved';
-      } else if (body.phase === 'run' && ['message-completed', 'approval-resolved', 'stop-requested'].includes(run.fixtureStage)) {
+      } else if (body.phase === 'userInput' && run.fixtureStage === 'user-input-reply-sent') resolveUserInput(run);
+      else if (body.phase === 'subagent' && run.fixtureStage === 'subagents-visible') run.settleSubAgents();
+      else if (body.phase === 'run' && ['message-completed', 'approval-resolved', 'user-input-resolved', 'subagents-settled',
+        'stop-requested'].includes(run.fixtureStage)) {
+        if (!run.stopRequested) run.finishFixture?.();
         run.status = run.stopRequested || run.approvalDecision === 'cancel' ? 'interrupted' : 'completed';
+        run.pendingUserInputs = []; // finish clears unanswered questions; run.completed tells the UI.
         for (const message of run.messages.values()) if (message.status === 'streaming') message.status = 'partial';
         envelope(run, 'run.completed', { status: run.status });
         run.fixtureStage = 'terminal';
@@ -426,7 +572,7 @@ const handler = async (req, res) => {
       const auth = authSnapshot();
       return json(res, 200, url.pathname === '/auth/status' ? auth : {
         protocolVersion: 2, provider: 'codex', appServerReady: true, auth,
-        capabilities: { auth: ['status'], chat: ['send', 'stream', 'interrupt', 'resume'] },
+        capabilities: { auth: ['status'], chat: ['send', 'stream', 'interrupt', 'resume', 'user-input', 'subagent-status'] },
       });
     }
     if (req.method === 'POST' && url.pathname === '/auth/signout') {
@@ -460,10 +606,10 @@ const handler = async (req, res) => {
     if (req.method === 'POST' && url.pathname === '/chat/send') {
       const body = await bodyJson(req);
       assertOrdinarySend(body);
-      if (!/^EGDESK_QA_(COMPLETE|TEXT_ONLY|STOP|APPROVAL|LOST|START_FAIL|REJECT|AMBIGUOUS|CONTEXT)\b/.test(body.message)) {
+      if (!SCENARIO.test(body.message)) {
         return json(res, 400, { error: 'Fixture accepts only explicit EGDESK_QA_* messages' });
       }
-      let scenario = body.message.match(/^EGDESK_QA_(COMPLETE|TEXT_ONLY|STOP|APPROVAL|LOST|START_FAIL|REJECT|AMBIGUOUS|CONTEXT)\b/)[1];
+      let scenario = body.message.match(SCENARIO)[1];
       if (scenario === 'REJECT' || scenario === 'AMBIGUOUS') {
         observed.sends.push({ ...body, scenario, outcome: scenario === 'REJECT' ? 'definite-rejection' : 'ambiguous-no-run' });
         if (scenario === 'REJECT') return json(res, 503, { accepted: false, code: 'BRIDGE_OFFLINE', error: 'QA definite rejection', conversationId: body.conversationId || null });
@@ -492,7 +638,7 @@ const handler = async (req, res) => {
         runId, answerId: `${conversationId}/${runId}`, status: 'running', stopRequested: false,
         messages: new Map([[`${runId}-native-user`, { id: `${runId}-native-user`, role: 'user',
           text: body.message, content: body.message, status: 'completed', createdAt: Date.now() }]]),
-        activities: new Map(), artifacts: [], pendingApprovals: [], error: null };
+        activities: new Map(), artifacts: [], pendingApprovals: [], pendingUserInputs: [], subAgents: [], error: null };
       if (scenario === 'CONTEXT') {
         if (Object.keys(body.contextCapabilities || {}).length !== 3
             || !['read', 'reader', 'publishBriefing'].every(key => body.contextCapabilities[key] === true)) throw new Error('Explicit context capabilities required');
@@ -513,6 +659,8 @@ const handler = async (req, res) => {
         else if (scenario === 'TEXT_ONLY') textOnlyScenario(run);
         else if (scenario === 'STOP') stopScenario(run);
         else if (scenario === 'APPROVAL') approvalScenario(run);
+        else if (scenario === 'USER_INPUT') userInputScenario(run);
+        else if (scenario === 'SUBAGENT') subAgentScenario(run);
         else if (scenario !== 'CONTEXT') unavailableScenario(run);
       }, 80);
       return;
@@ -553,6 +701,29 @@ const handler = async (req, res) => {
       json(res, 202, { accepted: true, approvalId: approval.approvalId,
         conversationId: run.conversationId, runId: run.runId, status: 'replySent' });
       return;
+    }
+    if (req.method === 'POST' && url.pathname === '/chat/user-input') {
+      const body = await bodyJson(req);
+      const invalid = () => json(res, 400, { accepted: false, code: 'INVALID_USER_INPUT_ANSWER', error: 'Answer does not match the pending questions' });
+      if (!body || typeof body !== 'object' || Array.isArray(body)
+          || Object.keys(body).some(key => !['userInputId', 'conversationId', 'runId', 'action', 'answers'].includes(key))) return invalid();
+      // Mirrors the bridge: only skip is a safety response that bypasses account lookup.
+      if (body.action !== 'skip' && authLookupFails) return json(res, 503, { accepted: false, code: 'QA_AUTH_LOOKUP_FAILED', error: 'QA account refresh temporarily unavailable' });
+      if (connection !== 'ready') return json(res, 503, { accepted: false, code: 'BRIDGE_OFFLINE', error: 'Fixture runtime is offline' });
+      const run = runs.get(body.runId);
+      const input = run?.pendingUserInputs.find(item => item.userInputId === body.userInputId);
+      if (!run || run.conversationId !== body.conversationId || !input || input.status !== 'pending' || run.status !== 'running') {
+        return json(res, 409, { accepted: false, code: 'STALE_USER_INPUT', error: 'Question no longer belongs to this pending run' });
+      }
+      const answers = userInputAnswers(input, body);
+      if (!answers) return invalid();
+      observed.userInputs.push({ userInputId: input.userInputId, conversationId: run.conversationId, runId: run.runId,
+        action: body.action, answers, repliedAt: Date.now() });
+      input.status = 'replySent';
+      seq++;
+      run.fixtureStage = 'user-input-reply-sent';
+      run.userInputAction = body.action;
+      return json(res, 200, { accepted: true, userInputId: input.userInputId, conversationId: run.conversationId, runId: run.runId, status: 'replySent' });
     }
     if (req.method === 'POST' && ['/terminal/spawn', '/terminal/read', '/terminal/kill', '/terminal/resize'].includes(url.pathname)) {
       if (terminalMode !== 'unknown') return json(res, 403, { error: 'Terminal fixture mode is not explicitly enabled' });

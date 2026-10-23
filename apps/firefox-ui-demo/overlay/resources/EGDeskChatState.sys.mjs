@@ -291,6 +291,8 @@ export function normalizeLocalHistoryPage(page, clientThreadId) {
     localSeq: event.seq ?? run.localSeq,
     localHistory: true, localThreadId: clientThreadId, localConversationId,
     pendingApprovals: (run.pendingApprovals || []).map(approval => ({ ...approval, stale: true })),
+    pendingUserInputs: (Array.isArray(run.pendingUserInputs) ? run.pendingUserInputs : []).map(publicUserInput).filter(Boolean).map(input => ({ ...input, stale: true })),
+    subAgents: (Array.isArray(run.subAgents) ? run.subAgents : []).map(publicSubAgent).filter(Boolean).slice(0, MAX_SUB_AGENTS),
   });
   const events = copy(Array.isArray(page.events) ? page.events : []);
   const eventMessages = [];
@@ -457,7 +459,7 @@ function ensureRun(state, identity) {
   const key = runKey(conversationId, runId);
   const run = state.runs[key] ||= {
     conversationId, runId, answerId: key, status: 'running', stopRequested: false,
-    messages: [], activities: [], artifacts: [], pendingApprovals: [], error: null, summary: '',
+    messages: [], activities: [], artifacts: [], pendingApprovals: [], pendingUserInputs: [], subAgents: [], error: null, summary: '',
   };
   for (const field of ['requestId', 'clientThreadId', 'localThreadId', 'answerId', 'authorName']) {
     if (identity[field] || request?.[field]) run[field] = identity[field] || request[field];
@@ -539,6 +541,18 @@ export function reduceChatEvent(state, event) {
   } else if (event.event === 'approval.resolved') {
     const id = details.id || details.approvalId || event.itemId;
     run.pendingApprovals = run.pendingApprovals.filter(item => item.id !== id);
+  } else if (event.event === 'userInput.required') {
+    // A malformed or late question is dropped; it never becomes answerable.
+    const input = publicUserInput(details.userInput || details);
+    if (input && isRunBusy(run)) upsert(run.pendingUserInputs ||= [], input, 'userInputId');
+  } else if (event.event === 'userInput.resolved') {
+    run.pendingUserInputs = (run.pendingUserInputs || []).filter(item => item.userInputId !== details.userInputId);
+  } else if (event.event === 'subagent.updated') {
+    const row = publicSubAgent(details.subAgent);
+    const rows = run.subAgents ||= [];
+    const index = row ? rows.findIndex(item => item.threadId === row.threadId) : -1;
+    if (index >= 0) rows[index] = { ...rows[index], ...row };
+    else if (row && rows.length < MAX_SUB_AGENTS) rows.push(row);
   } else if (event.event === 'run.stop_requested') {
     run.stopRequested = true;
     if (isRunBusy(run)) run.status = 'stopping';
@@ -546,6 +560,7 @@ export function reduceChatEvent(state, event) {
     run.status = details.status || 'completed';
     run.error = details.error || null;
     run.pendingApprovals = [];
+    run.pendingUserInputs = [];
     for (const message of run.messages) {
       if (message.status === 'streaming') message.status = run.status === 'completed' ? 'complete' : 'partial';
     }
@@ -555,6 +570,7 @@ export function reduceChatEvent(state, event) {
       state.connection = 'offline';
       run.status = 'failed';
       run.pendingApprovals = [];
+      run.pendingUserInputs = [];
       for (const message of run.messages) if (message.status === 'streaming') message.status = 'partial';
     } else {
       run.status = details.status || run.status;
@@ -605,8 +621,18 @@ export function mergeChatSnapshot(state, snapshot, clientThreadId) {
     }
     run.messages = run.messages.map(message => ({ ...message, content: message.content ?? message.text ?? '', status: message.status === 'completed' ? 'complete' : message.status, role: message.role || 'assistant', runId: run.runId, answerId: run.answerId }));
     if (!preserve) {
-      for (const key of ['status', 'stopRequested', 'error', 'summary', 'plan', 'pendingApprovals', 'truncated', 'historyComplete', 'contextCaptures', 'contextEvents', 'briefing']) if (key in incoming) run[key] = copy(incoming[key]);
+      const localInputs = run.pendingUserInputs || [];
+      for (const key of ['status', 'stopRequested', 'error', 'summary', 'plan', 'pendingApprovals', 'pendingUserInputs', 'subAgents', 'truncated', 'historyComplete', 'contextCaptures', 'contextEvents', 'briefing']) if (key in incoming) run[key] = copy(incoming[key]);
       run.pendingApprovals = (run.pendingApprovals || []).map(approval => ({ ...approval, id: approval.id || approval.approvalId }));
+      // A snapshot never rewinds a local in-flight/sent/stale reply on the same question.
+      run.pendingUserInputs = (Array.isArray(run.pendingUserInputs) ? run.pendingUserInputs : []).map(publicUserInput).filter(Boolean).map(input => {
+        const local = localInputs.find(item => item.userInputId === input.userInputId);
+        if (!local) return input;
+        const merged = { ...input, status: local.status === 'replySent' ? 'replySent' : input.status };
+        for (const flag of ['replyPending', 'stale', 'error']) if (local[flag]) merged[flag] = local[flag];
+        return merged;
+      });
+      run.subAgents = (Array.isArray(run.subAgents) ? run.subAgents : []).map(publicSubAgent).filter(Boolean).slice(0, MAX_SUB_AGENTS);
       if (incoming.context) {
         run.contextCaptures = copy(incoming.context.captures || []);
         run.contextPackets = copy(incoming.context.packets || []);
@@ -655,6 +681,108 @@ export function acknowledgeApprovalReply(run, reply) {
   const approval = run.pendingApprovals.find(item => (item.approvalId || item.id) === reply.approvalId);
   if (approval) { approval.status = 'replySent'; approval.replyPending = false; }
   return true;
+}
+
+// Agent questions (helper contract: run.pendingUserInputs). Model text is
+// bounded display text only; IDs stay opaque and are never parsed here.
+const MAX_SUB_AGENTS = 32;
+const MAX_USER_INPUT_ANSWER = 4000;
+const nonEmptyId = value => typeof value === 'string' && value.length > 0 && value.length <= 512 ? value : null;
+const shownText = (value, limit) => typeof value === 'string' ? value.slice(0, limit) : '';
+function publicUserInput(value) {
+  const userInputId = nonEmptyId(value?.userInputId);
+  if (!userInputId || !['pending', 'replySent'].includes(value.status)) return null;
+  const source = Array.isArray(value.questions) ? value.questions : [];
+  if (source.length < 1 || source.length > 8) return null;
+  const questions = source.map(question => {
+    const questionId = nonEmptyId(question?.questionId);
+    const text = shownText(question?.question, 2000);
+    if (!questionId || !text.trim()) return null;
+    const rawOptions = question.options == null || (Array.isArray(question.options) && !question.options.length) ? null : question.options;
+    if (rawOptions && (!Array.isArray(rawOptions) || rawOptions.length > 12)) return null;
+    const options = rawOptions && rawOptions.map(option => typeof option?.label === 'string' && option.label.trim()
+      ? { label: shownText(option.label, 200), description: shownText(option.description, 1000) } : null);
+    if (options?.includes(null)) return null;
+    return { questionId, header: shownText(question.header, 200), question: text, options,
+      allowsOther: !!options && question.allowsOther === true, isSecret: question.isSecret === true };
+  });
+  if (questions.includes(null) || new Set(questions.map(question => question.questionId)).size !== questions.length) return null;
+  return { userInputId, kind: 'userInput', status: value.status, itemId: nonEmptyId(value.itemId), isBlocking: value.isBlocking === true, questions };
+}
+
+export const pendingUserInputCount = run => run?.localHistory === true ? 0
+  : (run?.pendingUserInputs || []).filter(input => input.status === 'pending' && !input.stale).length;
+
+const answerText = value => {
+  const text = typeof value === 'string' ? value.trim() : '';
+  return text && text.length <= MAX_USER_INPUT_ANSWER && !text.includes('\u0000') ? text : null;
+};
+
+// The single gate for the card buttons and the bridge. `draft` is the UI-only
+// [{ questionId, choice: optionIndex | 'other' | null, text }] list.
+export function userInputRequestFor(run, userInputId, draft, action = 'submit') {
+  if (run?.localHistory === true || !isRunBusy(run) || !['submit', 'skip'].includes(action)) return null;
+  const input = (run.pendingUserInputs || []).find(item => item.userInputId === userInputId);
+  if (!input || input.status !== 'pending' || input.replyPending || input.stale) return null;
+  const identity = { userInputId, conversationId: run.conversationId, runId: run.runId, action };
+  if (action === 'skip') return identity;
+  const entries = Array.isArray(draft) ? draft : [];
+  if (entries.some(entry => !input.questions.some(question => question.questionId === entry?.questionId))) return null;
+  const answers = [];
+  for (const question of input.questions) {
+    const matches = entries.filter(entry => entry.questionId === question.questionId);
+    if (matches.length !== 1) return null;
+    const { choice, text } = matches[0];
+    const freeText = question.options ? choice === 'other' && question.allowsOther : choice == null;
+    if (question.options && Number.isSafeInteger(choice) && choice >= 0 && choice < question.options.length) answers.push({ questionId: question.questionId, optionIndex: choice });
+    else if (freeText && answerText(text)) answers.push({ questionId: question.questionId, text: answerText(text) });
+    else return null;
+  }
+  return { ...identity, answers };
+}
+
+export function acknowledgeUserInputReply(run, reply) {
+  if (!reply?.accepted || reply.status !== 'replySent' || typeof reply.userInputId !== 'string'
+    || reply.conversationId !== run?.conversationId || reply.runId !== run?.runId) return false;
+  const input = (run.pendingUserInputs || []).find(item => item.userInputId === reply.userInputId);
+  if (input) { input.status = 'replySent'; input.replyPending = false; input.error = null; }
+  return true;
+}
+
+// Sub-agent rows (helper contract: run.subAgents). Display only; no authority.
+const SUB_AGENT_STATE_LABELS = { starting: '준비 중', running: '진행 중', completed: '완료', closed: '종료',
+  errored: '오류', notFound: '찾을 수 없음', interrupted: '중단됨', unknown: '상태 확인 필요' };
+const SUB_AGENT_BLOCKED_LABELS = { approvalRequested: '승인 요청으로 멈춤', errored: '오류로 멈춤', notFound: '찾을 수 없음' };
+function publicSubAgent(value) {
+  const threadId = nonEmptyId(value?.threadId);
+  if (!threadId) return null;
+  const optional = (text, limit) => typeof text === 'string' && text.trim() ? text.slice(0, limit) : null;
+  const reason = value.blocked?.reason;
+  return { threadId, label: optional(value.label, 120), taskPreview: optional(value.taskPreview, 160),
+    model: optional(value.model, 120), state: Object.hasOwn(SUB_AGENT_STATE_LABELS, value.state) ? value.state : 'unknown',
+    message: optional(value.message, 500), lastTool: optional(value.lastTool, 40),
+    blocked: Object.hasOwn(SUB_AGENT_BLOCKED_LABELS, reason) ? { reason } : null,
+    updatedAt: value.updatedAt ?? null, parentEnded: value.parentEnded === true };
+}
+
+export function subAgentDisplay(row, run) {
+  // Once the parent run is no longer observed, a "running" child is unconfirmed.
+  const observed = !!run && run.localHistory !== true && isRunBusy(run) && row.parentEnded !== true;
+  let state = Object.hasOwn(SUB_AGENT_STATE_LABELS, row.state) ? row.state : 'unknown';
+  if (!observed && ['starting', 'running'].includes(state)) state = 'unknown';
+  const reason = Object.hasOwn(SUB_AGENT_BLOCKED_LABELS, row.blocked?.reason) ? row.blocked.reason
+    : ['errored', 'notFound'].includes(state) ? state : null;
+  const status = reason ? 'blocked' : ['starting', 'running'].includes(state) ? 'active'
+    : ['completed', 'closed'].includes(state) ? 'done' : 'stopped';
+  const stateLabel = SUB_AGENT_STATE_LABELS[state];
+  const blockedLabel = reason && SUB_AGENT_BLOCKED_LABELS[reason] !== stateLabel ? SUB_AGENT_BLOCKED_LABELS[reason] : null;
+  return { status, state, stateLabel, blockedLabel, name: row.label || `하위 Agent ${row.threadId.slice(0, 8)}` };
+}
+
+export function subAgentSummary(run) {
+  const rows = (Array.isArray(run?.subAgents) ? run.subAgents : []).map(publicSubAgent).filter(Boolean)
+    .slice(0, MAX_SUB_AGENTS).map(row => ({ row, display: subAgentDisplay(row, run) }));
+  return { total: rows.length, blocked: rows.filter(({ display }) => display.status === 'blocked').length, rows };
 }
 
 // Correlate native items with the submitted request/turn, then preserve role order.

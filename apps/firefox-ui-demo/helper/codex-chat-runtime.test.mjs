@@ -1,6 +1,6 @@
 import test from 'node:test'
 import assert from 'node:assert/strict'
-import { mkdtemp, writeFile, chmod, symlink, rm, realpath, mkdir } from 'node:fs/promises'
+import { mkdtemp, writeFile, chmod, symlink, rm, realpath, mkdir, readdir, readFile } from 'node:fs/promises'
 import os from 'node:os'
 import path from 'node:path'
 import { createHash } from 'node:crypto'
@@ -80,6 +80,8 @@ test('read-only QA is explicit, verifies native thread and MCP isolation before 
   assert.deepEqual(start.config.mcp_servers['configured-tools'], { enabled: false })
   assert.deepEqual(start.config.plugins['account-plugin'], { enabled: false })
   assert.equal(start.config.features.plugins, false)
+  assert.equal(start.config.features.multi_agent, false)
+  assert.equal(start.config.features.default_mode_request_user_input, false)
   assert.deepEqual(h.calls.find(call => call.method === 'config/read').params, { includeLayers: true, cwd: null })
   assert.equal(start.config.web_search, 'disabled')
   assert.deepEqual(start.dynamicTools.map(tool => tool.name), ['egdesk_list_context', 'egdesk_read_source'])
@@ -105,7 +107,8 @@ test('ordinary Chat does not apply QA MCP or plugin overrides to its native thre
   const h = qaHarness()
   await h.chat.send({ message: 'Ordinary work retains its existing native configuration' })
   assert.equal(h.calls.some(call => call.method === 'config/read' || call.method === 'mcpServerStatus/list'), false)
-  assert.equal(Object.hasOwn(h.calls.find(call => call.method === 'thread/start').params, 'config'), false)
+  // Only the ordinary Agent-question opt-in; no QA MCP, plugin or web overrides.
+  assert.deepEqual(h.calls.find(call => call.method === 'thread/start').params.config, { features: { default_mode_request_user_input: true } })
 })
 
 test('actual ContextRuntime attachment capture and dynamic read specs remain available under the validated 0.160.1 gate', async () => {
@@ -881,7 +884,7 @@ test('an early native tool request waits for successful per-run provider binding
 test('ordinary Codex does not inject a default profile, model, sandbox or approval override', async () => {
   const h = harness()
   const run = await h.chat.send({ message: 'Hello', requestId: 'request-1', clientThreadId: 'ui-1', systemPrompt: 'legacy persona', agentProfile: { id: 'legacy' }, toolMode: 'unsafe' })
-  assert.deepEqual(h.calls[0], { method: 'thread/start', params: {} })
+  assert.deepEqual(h.calls[0], { method: 'thread/start', params: { config: { features: { default_mode_request_user_input: true } } } })
   assert.equal(h.calls[1].method, 'turn/start')
   assert.deepEqual(h.calls[1].params.input, [{ type: 'text', text: 'Hello', text_elements: [] }])
   assert.equal(h.calls[1].params.approvalPolicy, undefined)
@@ -1718,7 +1721,9 @@ test('restart marks active local run unknown without a provider call or rerun', 
   const chat = new CodexChatRuntime({
     store: {
       listConversations: () => ({ threads: [{ clientThreadId: 'client-1' }], nextCursor: null, hasMore: false }),
-      listRuns: () => ({ runs: [{ localRunId: 'run-1', requestId: 'request-1', runId: 'turn-1', conversationId: 'native-1', status: 'inProgress', messages: [{ id: 'part', role: 'assistant', text: 'Partial', status: 'streaming' }] }], nextCursor: null, hasMore: false }),
+      listRuns: () => ({ runs: [{ localRunId: 'run-1', requestId: 'request-1', runId: 'turn-1', conversationId: 'native-1', status: 'inProgress', messages: [{ id: 'part', role: 'assistant', text: 'Partial', status: 'streaming' }],
+        pendingUserInputs: [{ userInputId: 'input:old', kind: 'userInput', status: 'pending', questions: [] }],
+        subAgents: [{ threadId: 'child-running', state: 'running', blocked: null }, { threadId: 'child-done', state: 'completed', blocked: null }] }], nextCursor: null, hasMore: false }),
       appendEvent: event => { events.push(event) },
       getRequest: () => ({ requestId: 'request-1' }),
       recordRequestOutcome: () => {},
@@ -1729,6 +1734,8 @@ test('restart marks active local run unknown without a provider call or rerun', 
   assert.equal(events[0].event, 'run.recovery_unknown')
   assert.equal(events[0].runCheckpoint.status, 'unknown')
   assert.equal(events[0].runCheckpoint.messages[0].status, 'partial')
+  assert.deepEqual(events[0].runCheckpoint.pendingUserInputs, [])
+  assert.deepEqual(events[0].runCheckpoint.subAgents.map(row => [row.threadId, row.state]), [['child-running', 'unknown'], ['child-done', 'completed']])
 })
 
 test('stored native owner mismatch blocks resume before any provider call', async () => {
@@ -1808,6 +1815,528 @@ test('real SQLite store captures a full turn, serves offline history and dedupes
     assert.equal(replay.duplicate, true)
     assert.equal(replay.runId, 'turn-1')
     assert.equal(replay.localRunId, accepted.localRunId)
+  } finally {
+    try { store?.close() } catch {}
+    await rm(dataDir, { recursive: true, force: true })
+  }
+})
+
+// Agent questions (item/tool/requestUserInput) and sub-Agent status rows.
+const USER_INPUT = 'item/tool/requestUserInput'
+const agentQuestions = () => [
+  { id: 'deploy_target', header: 'Target', question: 'Where should this go? (token=PUBLIC_QUESTION_TOKEN)', isOther: true, isSecret: false, options: [
+    { label: 'Staging', description: 'Safe default' },
+    { label: 'Use api_key=RAW_LABEL_TOKEN', description: 'Original label differs from its public copy' },
+  ] },
+  { id: 'password', header: 'Password', question: 'Enter the deploy password', isOther: false, isSecret: true, options: null },
+]
+const ask = (h, run, id, params = {}) => h.chat.handleServerRequest({ id, method: USER_INPUT, params: {
+  threadId: run.conversationId, turnId: run.runId, itemId: 'ask-item', isBlocking: true, questions: agentQuestions(), ...params,
+} })
+const pendingInput = (h, index = 0) => h.chat.snapshot().runs[0].pendingUserInputs[index]
+
+test('Agent question is a separate redacted pending card bound to the exact run', async () => {
+  const h = harness()
+  const run = await h.chat.send({ message: 'Ask before deploying', requestId: 'ask-request', clientThreadId: 'ask-ui' })
+  await ask(h, run, 'ask-1')
+  assert.deepEqual(h.replies, [], 'a question is never answered automatically')
+  const state = h.chat.snapshot().runs[0]
+  assert.deepEqual(state.pendingApprovals, [])
+  assert.equal(state.pendingUserInputs.length, 1)
+  const pending = state.pendingUserInputs[0]
+  assert.equal(pending.userInputId, `input:${h.chat.streamId}:${h.chat.epoch}:string:ask-1`)
+  assert.deepEqual(Object.keys(pending).sort(), ['isBlocking', 'itemId', 'kind', 'questions', 'status', 'userInputId'])
+  assert.equal(pending.kind, 'userInput')
+  assert.equal(pending.status, 'pending')
+  assert.equal(pending.isBlocking, true)
+  assert.deepEqual(pending.questions.map(q => [q.questionId, q.allowsOther, q.isSecret]), [['deploy_target', true, false], ['password', false, true]])
+  assert.equal(pending.questions[1].options, null)
+  assert.equal(pending.questions[0].options[1].label, 'Use api_key=[REDACTED]')
+  assert.deepEqual(Object.keys(pending.questions[0]).sort(), ['allowsOther', 'header', 'isSecret', 'options', 'question', 'questionId'])
+  const required = h.events.filter(event => event.event === 'userInput.required')
+  assert.equal(required.length, 1)
+  assert.deepEqual([required[0].conversationId, required[0].runId, required[0].answerId, required[0].itemId], [run.conversationId, run.runId, run.answerId, 'ask-item'])
+  assert.deepEqual(required[0].details, pending)
+  const exposed = JSON.stringify([h.events, h.legacy, h.chat.snapshot()])
+  for (const hidden of ['PUBLIC_QUESTION_TOKEN', 'RAW_LABEL_TOKEN', 'rawLabels', 'rpcId']) assert.ok(!exposed.includes(hidden), hidden)
+  assert.equal(h.chat.pendingApprovals.size, 0)
+  assert.equal(h.chat.pendingUserInputs.size, 1)
+})
+
+test('Agent answers need exactly one valid answer per question and map choices to original labels', async () => {
+  const h = harness()
+  const run = await h.chat.send({ message: 'Ask' })
+  await ask(h, run, 'ask-2')
+  const { userInputId } = pendingInput(h)
+  const reply = answers => h.chat.replyUserInput({ ...run, userInputId, action: 'submit', answers })
+  await assert.rejects(h.chat.replyUserInput({ ...run, runId: 'wrong', userInputId, action: 'submit', answers: [] }), e => e.code === 'STALE_USER_INPUT')
+  await assert.rejects(h.chat.replyUserInput({ ...run, userInputId: 'input:forged', action: 'submit', answers: [] }), e => e.code === 'STALE_USER_INPUT')
+  await assert.rejects(h.chat.replyUserInput({ ...run, userInputId, action: 'accept' }), e => e.code === 'INVALID_USER_INPUT_ANSWER')
+  const typed = { questionId: 'password', text: 'INVALID_PATH_SECRET' }
+  for (const answers of [
+    undefined, {}, [], [{ questionId: 'deploy_target', optionIndex: 0 }],
+    [{ questionId: 'deploy_target', optionIndex: 0 }, { questionId: 'deploy_target', optionIndex: 1 }],
+    [{ questionId: 'unknown', optionIndex: 0 }, typed],
+    [{ questionId: 'deploy_target', optionIndex: 2 }, typed],
+    [{ questionId: 'deploy_target', optionIndex: -1 }, typed],
+    [{ questionId: 'deploy_target', optionIndex: 0.5 }, typed],
+    [{ questionId: 'deploy_target', optionIndex: '0' }, typed],
+    [{ questionId: 'deploy_target', optionIndex: 0, text: 'both' }, typed],
+    [{ questionId: 'deploy_target' }, typed],
+    [{ questionId: 'deploy_target', optionIndex: 0 }, { questionId: 'password', optionIndex: 0 }],
+    [{ questionId: 'deploy_target', optionIndex: 0 }, { questionId: 'password', text: '   ' }],
+    [{ questionId: 'deploy_target', optionIndex: 0 }, { questionId: 'password', text: 'x'.repeat(4001) }],
+    [{ questionId: 'deploy_target', optionIndex: 0 }, { questionId: 'password', text: 'nul\0byte' }],
+    [{ questionId: 'deploy_target', optionIndex: 0 }, { questionId: 'password', text: 42 }],
+    [{ questionId: 'deploy_target', optionIndex: 0 }, null],
+  ]) await assert.rejects(reply(answers), error => error.code === 'INVALID_USER_INPUT_ANSWER' && !error.message.includes('INVALID_PATH_SECRET'))
+  assert.deepEqual(h.replies, [])
+  assert.equal(pendingInput(h).status, 'pending')
+  const result = await reply([{ questionId: 'password', text: ' typed value ' }, { questionId: 'deploy_target', optionIndex: 1 }])
+  assert.deepEqual(result, { accepted: true, userInputId, conversationId: run.conversationId, runId: run.runId, status: 'replySent' })
+  assert.deepEqual(h.replies, [['ask-2', { answers: { deploy_target: { answers: ['Use api_key=RAW_LABEL_TOKEN'] }, password: { answers: [' typed value '] } } }]])
+  assert.equal(pendingInput(h).status, 'replySent')
+  await assert.rejects(reply([{ questionId: 'password', text: 'again' }, { questionId: 'deploy_target', optionIndex: 0 }]), e => e.code === 'STALE_USER_INPUT')
+  await h.notify('serverRequest/resolved', { threadId: run.conversationId, requestId: 'ask-2' })
+  assert.deepEqual(h.chat.snapshot().runs[0].pendingUserInputs, [])
+  assert.deepEqual(h.events.filter(event => event.event === 'userInput.resolved').map(event => event.details), [{ userInputId }])
+  assert.equal(h.replies.length, 1)
+})
+
+test('free text on a choice question is the automatic Other answer and non-private text is trimmed', async () => {
+  const h = harness()
+  const run = await h.chat.send({ message: 'Ask' })
+  await ask(h, run, 7, { questions: [agentQuestions()[0], { id: 'note', header: 'Note', question: 'Anything else?', options: [] }] })
+  const pending = pendingInput(h)
+  assert.equal(pending.userInputId.endsWith(':number:7'), true)
+  assert.deepEqual(pending.questions.map(q => [q.options === null, q.allowsOther]), [[false, true], [true, false]])
+  await h.chat.replyUserInput({ ...run, userInputId: pending.userInputId, action: 'submit', answers: [{ questionId: 'deploy_target', text: '  Production  ' }, { questionId: 'note', text: ' none ' }] })
+  assert.deepEqual(h.replies, [[7, { answers: { deploy_target: { answers: ['Production'] }, note: { answers: ['none'] } } }]])
+})
+
+test('answered Agent question continues the same run without another thread or turn', async () => {
+  const h = harness()
+  const run = await h.chat.send({ message: 'Continue after my answer', requestId: 'input-positive-request', clientThreadId: 'input-positive-ui' })
+  const identity = value => ({ conversationId: value.conversationId, runId: value.runId, answerId: value.answerId })
+  const callsBefore = h.calls.length
+  const current = () => {
+    const runs = h.chat.snapshot().runs
+    assert.equal(runs.length, 1, 'an answer must not create another run')
+    assert.deepEqual(identity(runs[0]), identity(run))
+    return runs[0]
+  }
+  const assertStillRunning = () => {
+    assert.equal(current().status, 'inProgress')
+    assert.equal(h.events.filter(event => event.event === 'run.completed').length, 0)
+  }
+  await ask(h, run, 'input-positive', { questions: [agentQuestions()[0]] })
+  const reply = { ...run, userInputId: current().pendingUserInputs[0].userInputId, action: 'submit', answers: [{ questionId: 'deploy_target', optionIndex: 0 }] }
+  assert.equal((await h.chat.replyUserInput(reply)).status, 'replySent')
+  assert.deepEqual(h.replies, [['input-positive', { answers: { deploy_target: { answers: ['Staging'] } } }]])
+  assertStillRunning() // Sending an answer is not completion.
+  await h.notify('serverRequest/resolved', { threadId: run.conversationId, requestId: 'input-positive' })
+  assert.deepEqual(current().pendingUserInputs, [])
+  assertStillRunning()
+  await assert.rejects(h.chat.replyUserInput(reply), error => error.code === 'STALE_USER_INPUT')
+  const item = { id: 'after-answer', type: 'commandExecution', status: 'inProgress', command: 'echo staging' }
+  await h.item(run, item, false)
+  await h.item(run, { ...item, status: 'completed', exitCode: 0 })
+  assertStillRunning()
+  await h.finish(run)
+  assert.equal(current().status, 'completed')
+  const lifecycle = h.events.filter(event => ['userInput.required', 'userInput.resolved', 'activity.started', 'activity.completed', 'run.completed'].includes(event.event))
+  assert.deepEqual(lifecycle.map(event => event.event), ['userInput.required', 'userInput.resolved', 'activity.started', 'activity.completed', 'run.completed'])
+  for (const event of lifecycle) assert.deepEqual(identity(event), identity(run))
+  await assert.rejects(h.chat.replyUserInput(reply), error => error.code === 'STALE_USER_INPUT')
+  assert.equal(h.replies.length, 1, 'late duplicates never send another answer')
+  assert.deepEqual(h.calls.slice(callsBefore), [], 'question/answer/resolution/terminal add zero thread/start or turn/start requests')
+})
+
+test('skipped Agent question sends the native cancellation error and keeps the turn', async () => {
+  const h = harness()
+  const run = await h.chat.send({ message: 'Ask' })
+  await ask(h, run, 'skip-1')
+  const { userInputId } = pendingInput(h)
+  const result = await h.chat.replyUserInput({ ...run, userInputId, action: 'skip', answers: [{ questionId: 'password', text: 'IGNORED_ON_SKIP' }] })
+  assert.equal(result.status, 'replySent')
+  assert.deepEqual(h.replies, [['skip-1', null, { code: -32000, message: 'User skipped the question' }]])
+  assert.equal(h.chat.snapshot().runs[0].status, 'inProgress')
+  assert.equal(h.calls.some(call => call.method === 'turn/interrupt'), false)
+  assert.ok(!JSON.stringify([h.replies, h.events, h.chat.snapshot()]).includes('IGNORED_ON_SKIP'))
+  await assert.rejects(h.chat.replyUserInput({ ...run, userInputId, action: 'skip' }), e => e.code === 'STALE_USER_INPUT')
+})
+
+test('private Agent answers reach only the native response, never events, legacy, snapshot or errors', async () => {
+  const h = harness()
+  const run = await h.chat.send({ message: 'Ask for a password' })
+  await ask(h, run, 'secret-1')
+  const { userInputId } = pendingInput(h)
+  let failNative = true
+  h.chat.nativeRespond = (...args) => {
+    if (failNative) throw Object.assign(new Error('Codex app-server is offline'), { code: 'BRIDGE_OFFLINE', httpStatus: 503 })
+    h.replies.push(args)
+  }
+  const answers = [{ questionId: 'deploy_target', optionIndex: 0 }, { questionId: 'password', text: 'PRIVATE_ANSWER_SENTINEL' }]
+  await assert.rejects(h.chat.replyUserInput({ ...run, userInputId, action: 'submit', answers }), error => error.code === 'BRIDGE_OFFLINE' && !error.message.includes('PRIVATE_ANSWER_SENTINEL'))
+  assert.equal(pendingInput(h).status, 'pending', 'a failed native send restores the card')
+  failNative = false
+  const result = await h.chat.replyUserInput({ ...run, userInputId, action: 'submit', answers })
+  assert.ok(JSON.stringify(h.replies).includes('PRIVATE_ANSWER_SENTINEL'))
+  await h.notify('serverRequest/resolved', { threadId: run.conversationId, requestId: 'secret-1' })
+  await h.finish(run)
+  const exposed = JSON.stringify([result, h.events, h.legacy, h.chat.snapshot(), [...h.chat.pendingUserInputs.values()]])
+  assert.ok(!exposed.includes('PRIVATE_ANSWER_SENTINEL'))
+})
+
+test('bounded QA refuses Agent questions and any sub-Agent collaboration', async () => {
+  const h = qaHarness()
+  const run = await h.chat.send({ message: 'qa', executionPolicy: { mode: 'readOnlyQa' } })
+  await ask(h, run, 'qa-ask')
+  assert.deepEqual(h.replies, [['qa-ask', null, { code: -32601, message: 'Read-only QA has no interactive approval capability' }]])
+  let state = h.chat.snapshot(run.conversationId).runs[0]
+  assert.equal(state.error.code, 'QA_SCOPE_VIOLATION')
+  assert.deepEqual(state.pendingUserInputs, [])
+  assert.equal(h.events.some(event => event.event === 'userInput.required'), false)
+  assert.equal(h.calls.filter(call => call.method === 'turn/interrupt').length, 1)
+  h.chat.pendingUserInputs.set('forged', { userInputId: 'forged', conversationId: run.conversationId, runId: run.runId, status: 'pending', rpcId: 'forged-rpc',
+    questions: [{ questionId: 'q', options: null, allowsOther: false, isSecret: false }], rawLabels: [null] })
+  await assert.rejects(h.chat.replyUserInput({ ...run, userInputId: 'forged', action: 'submit', answers: [{ questionId: 'q', text: 'no' }] }), error => error.code === 'BOUNDED_INPUT_FORBIDDEN')
+  assert.equal(h.replies.length, 1)
+
+  const collab = qaHarness()
+  const qa = await collab.chat.send({ message: 'qa', executionPolicy: { mode: 'readOnlyQa' } })
+  const spawn = { id: 'qa-spawn', type: 'collabAgentToolCall', tool: 'spawnAgent', status: 'completed', receiverThreadIds: ['qa-child'], prompt: 'escape', agentsStates: { 'qa-child': { status: 'running' } } }
+  await collab.item(qa, spawn, false)
+  await collab.item(qa, spawn)
+  state = collab.chat.snapshot(qa.conversationId).runs[0]
+  assert.equal(state.error.code, 'QA_SCOPE_VIOLATION')
+  assert.deepEqual(state.subAgents, [])
+  assert.equal(state.activities.find(activity => activity.id === 'qa-spawn').kind, 'collabAgentToolCall')
+  assert.equal(collab.calls.filter(call => call.method === 'turn/interrupt').length, 1, 'one violation interrupts once')
+  assert.equal(collab.events.some(event => event.event === 'subagent.updated'), false)
+  assert.equal(collab.calls.find(call => call.method === 'thread/start').params.config.features.default_mode_request_user_input, false)
+})
+
+test('unowned, foreign and finished runs never gain an Agent question callback', async () => {
+  const resumed = harness({ request: async (method, params, chat) => {
+    assert.equal(method, 'thread/resume')
+    await ask({ chat }, { conversationId: params.threadId, runId: 'live-turn' }, 'resume-ask')
+    return { thread: { id: params.threadId, turns: [{ id: 'live-turn', status: 'inProgress', items: [] }] } }
+  } })
+  const state = await resumed.chat.resume({ conversationId: 'resume-thread', clientThreadId: 'resume-ui' })
+  assert.deepEqual(state.runs[0].pendingUserInputs, [])
+  assert.deepEqual(resumed.replies[0], ['resume-ask', null, { code: -32601, message: 'No matching EG-Desk run' }])
+
+  const h = harness()
+  const run = await h.chat.send({ message: 'Owned' })
+  await ask(h, { ...run, runId: 'foreign-turn' }, 'foreign-ask')
+  await h.finish(run)
+  await ask(h, run, 'late-ask')
+  assert.deepEqual(h.replies.map(reply => [reply[0], reply[2].code]), [['foreign-ask', -32601], ['late-ask', -32601]])
+  assert.equal(h.chat.pendingUserInputs.size, 0)
+  assert.equal(h.events.some(event => event.event === 'userInput.required'), false)
+})
+
+test('Agent question IDs become stale after disconnect or account reset and are never replayed', async () => {
+  const h = harness()
+  const run = await h.chat.send({ message: 'Ask' })
+  await ask(h, run, 9)
+  const { userInputId } = pendingInput(h)
+  h.chat.setConnection(false)
+  assert.deepEqual(h.chat.snapshot().runs[0].pendingUserInputs, [])
+  assert.ok(h.events.some(event => event.event === 'userInput.resolved' && event.details.userInputId === userInputId))
+  h.chat.setConnection(true)
+  // A native resend after reconnect is a new card in the new epoch, as with approvals.
+  await ask(h, run, 9)
+  assert.notEqual(pendingInput(h).userInputId, userInputId)
+  const answers = [{ questionId: 'deploy_target', optionIndex: 0 }, { questionId: 'password', text: 'late' }]
+  await assert.rejects(h.chat.replyUserInput({ ...run, userInputId, action: 'submit', answers }), e => e.code === 'STALE_USER_INPUT')
+  await assert.rejects(h.chat.replyUserInput({ ...run, userInputId, action: 'skip' }), e => e.code === 'STALE_USER_INPUT')
+  assert.deepEqual(h.replies, [], 'the old ID is never replayed as an answer')
+  assert.equal(h.chat.snapshot().runs[0].status, 'unknown')
+
+  const reset = harness()
+  const second = await reset.chat.send({ message: 'Ask' })
+  await ask(reset, second, 'reset-ask')
+  const old = pendingInput(reset).userInputId
+  reset.chat.reset()
+  reset.chat.setConnection(true)
+  await assert.rejects(reset.chat.replyUserInput({ ...second, userInputId: old, action: 'skip' }), e => e.code === 'STALE_USER_INPUT')
+  assert.equal(reset.chat.pendingUserInputs.size, 0)
+  assert.deepEqual(reset.replies, [])
+})
+
+test('malformed Agent questions are refused as invalid without a pending card', async () => {
+  const h = harness()
+  const run = await h.chat.send({ message: 'Ask' })
+  const question = (extra = {}) => ({ id: 'q', header: 'H', question: 'Q?', options: null, ...extra })
+  const option = (extra = {}) => ({ label: 'A', description: 'd', ...extra })
+  const invalid = [
+    'not-array', [], Array.from({ length: 9 }, (_, i) => question({ id: `q${i}` })),
+    [question({ options: Array.from({ length: 13 }, (_, i) => option({ label: `L${i}` })) })],
+    [question({ header: 'h'.repeat(201) })], [question({ question: 'q'.repeat(2001) })], [question({ question: '   ' })],
+    [question(), question()], [question({ id: '' })], [question({ id: 7 })], [question({ id: 'x'.repeat(301) })],
+    [question({ options: [option({ label: 'l'.repeat(201) })] })], [question({ options: [option({ description: 'd'.repeat(1001) })] })],
+    [question({ options: [option({ label: '' })] })], [question({ options: [{ description: 'no label' }] })], [question({ options: 'A' })], [null],
+  ]
+  for (const [index, questions] of invalid.entries()) await ask(h, run, `bad-${index}`, { questions })
+  assert.equal(h.replies.length, invalid.length)
+  for (const [index, reply] of h.replies.entries()) assert.deepEqual(reply, [`bad-${index}`, null, { code: -32602, message: 'Invalid user input request' }])
+  const state = h.chat.snapshot().runs[0]
+  assert.equal(state.error.code, 'INVALID_USER_INPUT_REQUEST')
+  assert.equal(state.status, 'inProgress')
+  assert.deepEqual(state.pendingUserInputs, [])
+  assert.equal(h.events.some(event => event.event === 'userInput.required'), false)
+  assert.ok(h.events.some(event => event.event === 'run.unavailable' && event.details.error.code === 'INVALID_USER_INPUT_REQUEST'))
+
+  await ask(h, run, 'max-ok', { questions: Array.from({ length: 8 }, (_, i) => question({ id: `ok${i}`, header: 'h'.repeat(200), question: 'q'.repeat(2000),
+    options: Array.from({ length: 12 }, (_, j) => option({ label: 'l'.repeat(198) + String(j).padStart(2, '0'), description: 'd'.repeat(1000) })) })) })
+  assert.equal(pendingInput(h).questions.length, 8)
+  for (let i = 1; i < 100; i++) await ask(h, run, `fill-${i}`, { questions: [question()] })
+  assert.equal(h.chat.pendingUserInputs.size, 100)
+  await ask(h, run, 'over-capacity', { questions: [question()] })
+  assert.deepEqual(h.replies.at(-1), ['over-capacity', null, { code: -32000, message: 'Too many pending user input requests' }])
+  assert.equal(h.chat.snapshot().runs[0].pendingUserInputs.length, 100)
+})
+
+test('a finished turn clears non-blocking Agent questions and later answers are stale', async () => {
+  const h = harness()
+  const run = await h.chat.send({ message: 'Ask' })
+  await ask(h, run, 'non-blocking', { isBlocking: false })
+  const pending = pendingInput(h)
+  assert.equal(pending.isBlocking, false)
+  await h.finish(run)
+  assert.deepEqual(h.chat.snapshot().runs[0].pendingUserInputs, [])
+  assert.equal(h.chat.pendingUserInputs.size, 0)
+  const order = h.events.filter(event => ['userInput.resolved', 'run.completed'].includes(event.event)).map(event => event.event)
+  assert.deepEqual(order, ['userInput.resolved', 'run.completed'])
+  await assert.rejects(h.chat.replyUserInput({ ...run, userInputId: pending.userInputId, action: 'skip' }), e => e.code === 'STALE_USER_INPUT')
+  assert.deepEqual(h.replies, [])
+})
+
+test('MCP elicitation remains an explicit unsupported interaction', async () => {
+  const h = harness()
+  const run = await h.chat.send({ message: 'Work' })
+  await h.chat.handleServerRequest({ id: 'elicit', method: 'mcpServer/elicitation/request', params: { threadId: run.conversationId, turnId: run.runId, message: 'Need input' } })
+  assert.deepEqual(h.replies[0], ['elicit', null, { code: -32601, message: 'This interactive request is not supported by EG-Desk' }])
+  assert.deepEqual(h.chat.snapshot().runs[0].pendingUserInputs, [])
+})
+
+test('an Agent question delivered before the turn/start response binds only to the returned run', async () => {
+  const h = harness({ request: async (method, params, chat, defaults) => {
+    if (method !== 'turn/start') return defaults(method, params)
+    await ask({ chat }, { conversationId: params.threadId, runId: 'early-turn' }, 'early-ask')
+    await ask({ chat }, { conversationId: params.threadId, runId: 'other-turn' }, 'other-ask')
+    return { turn: { id: 'early-turn', status: 'inProgress', items: [] } }
+  } })
+  const run = await h.chat.send({ message: 'Early', requestId: 'early-request', clientThreadId: 'early-ui' })
+  assert.equal(run.runId, 'early-turn')
+  assert.equal(pendingInput(h).userInputId.endsWith(':string:early-ask'), true)
+  assert.deepEqual(h.replies, [['other-ask', null, { code: -32601, message: 'No matching EG-Desk run' }]])
+})
+
+test('ordinary resume opts into Agent questions while bounded resume never does', async () => {
+  const h = harness()
+  await h.chat.resume({ conversationId: 'ordinary-thread' })
+  assert.deepEqual(h.calls[0], { method: 'thread/resume', params: { threadId: 'ordinary-thread', config: { features: { default_mode_request_user_input: true } } } })
+
+  const qa = qaHarness()
+  const ordinary = await qa.chat.send({ message: 'ordinary' })
+  await qa.finish(ordinary)
+  await qa.chat.send({ message: 'qa', conversationId: ordinary.conversationId, executionPolicy: { mode: 'readOnlyQa' } })
+  const resume = qa.calls.find(call => call.method === 'thread/resume').params
+  assert.equal(resume.sandbox, 'read-only')
+  assert.equal(resume.config.features.multi_agent, false)
+  assert.equal(resume.config.features.default_mode_request_user_input, false)
+})
+
+const spawnItem = (extra = {}) => ({ id: 'spawn-1', type: 'collabAgentToolCall', tool: 'spawnAgent', status: 'completed', senderThreadId: 'parent',
+  receiverThreadIds: ['child-1'], prompt: 'Research the change', model: 'gpt-child', reasoningEffort: 'high', agentsStates: { 'child-1': { status: 'pendingInit', message: null } }, ...extra })
+const rows = h => h.chat.snapshot().runs[0].subAgents
+const row = (h, threadId) => rows(h).find(candidate => candidate.threadId === threadId)
+
+test('sub-Agent collaboration becomes bounded per-child rows without prompt text', async () => {
+  const h = harness()
+  const run = await h.chat.send({ message: 'Delegate' })
+  const prompt = `PROMPT_START sk-PROMPTSECRET123 ${'x'.repeat(400)} PROMPT_TAIL_SENTINEL`
+  await h.item(run, spawnItem({ status: 'inProgress', receiverThreadIds: [], agentsStates: {}, prompt }), false)
+  assert.deepEqual(rows(h), [])
+  assert.equal(h.chat.snapshot().runs[0].activities[0].status, 'inProgress')
+  await h.item(run, spawnItem({ prompt }))
+  let child = row(h, 'child-1')
+  assert.deepEqual(Object.keys(child).sort(), ['blocked', 'label', 'lastTool', 'message', 'model', 'parentEnded', 'state', 'taskPreview', 'threadId', 'updatedAt'])
+  assert.deepEqual([child.state, child.label, child.model, child.lastTool, child.blocked, child.parentEnded], ['starting', null, 'gpt-child', 'spawnAgent', null, false])
+  assert.ok(child.taskPreview.startsWith('PROMPT_START [REDACTED]'))
+  assert.ok(child.taskPreview.length <= 160)
+  await h.item(run, { id: 'activity-1', type: 'subAgentActivity', agentThreadId: 'child-1', agentPath: 'researcher', kind: 'started', model: 'gpt-child' })
+  assert.deepEqual([row(h, 'child-1').state, row(h, 'child-1').label], ['running', 'researcher'])
+  await h.item(run, { id: 'wait-1', type: 'collabAgentToolCall', tool: 'wait', status: 'completed', receiverThreadIds: ['child-1'], agentsStates: { 'child-1': { status: 'completed', message: `Done: token=CHILD_MESSAGE_TOKEN ${'m'.repeat(600)}` } } })
+  child = row(h, 'child-1')
+  assert.deepEqual([child.state, child.lastTool, child.blocked], ['completed', 'wait', null])
+  assert.ok(child.message.startsWith('Done: token=[REDACTED]'))
+  assert.equal(child.message.length, 500)
+  await h.item(run, spawnItem({ id: 'spawn-2', receiverThreadIds: ['child-2', 'child-3', 'child-4', 'child-5'], prompt: null, model: null,
+    agentsStates: { 'child-2': { status: 'errored', message: 'boom' }, 'child-3': { status: 'notFound' }, 'child-4': { status: 'shutdown' }, 'child-5': { status: 'mystery' } } }))
+  assert.deepEqual(['child-2', 'child-3', 'child-4', 'child-5'].map(id => [row(h, id).state, row(h, id).blocked]), [
+    ['errored', { reason: 'errored' }], ['notFound', { reason: 'notFound' }], ['closed', null], ['unknown', null]])
+  assert.equal(row(h, 'child-2').taskPreview, null)
+  await h.item(run, { id: 'odd-tool', type: 'collabAgentToolCall', tool: 'rewriteHistory', status: 'weird', receiverThreadIds: [], agentsStates: [] })
+  const activities = h.chat.snapshot().runs[0].activities
+  assert.deepEqual(activities.find(activity => activity.id === 'odd-tool').detail, { tool: 'unknown', status: 'inProgress', receiverCount: 0, states: [] })
+  assert.deepEqual(activities.find(activity => activity.id === 'spawn-1').detail, { tool: 'spawnAgent', status: 'completed', receiverCount: 1, states: ['starting'] })
+  assert.equal(activities.find(activity => activity.id === 'activity-1').kind, 'subAgentActivity')
+  const updates = h.events.filter(event => event.event === 'subagent.updated')
+  assert.ok(updates.length >= 4)
+  for (const event of updates) {
+    assert.deepEqual(Object.keys(event.details), ['subAgent'])
+    assert.equal(event.runId, run.runId)
+  }
+  assert.equal(updates.at(-1).details.subAgent.threadId, 'child-5')
+  const exposed = JSON.stringify([h.events, h.chat.snapshot()])
+  for (const hidden of ['PROMPT_TAIL_SENTINEL', 'PROMPTSECRET123', 'CHILD_MESSAGE_TOKEN', 'reasoningEffort', 'agentsStates']) assert.ok(!exposed.includes(hidden), hidden)
+})
+
+test('finished child state is not reopened by stale snapshots, only by resume-type signals', async () => {
+  const h = harness()
+  const run = await h.chat.send({ message: 'Delegate' })
+  const collab = (id, tool, status, message = null) => h.item(run, { id, type: 'collabAgentToolCall', tool, status: 'completed', receiverThreadIds: ['child-1'], agentsStates: { 'child-1': { status, message } } })
+  await h.item(run, spawnItem())
+  await collab('wait-1', 'wait', 'completed', 'final words')
+  await collab('wait-2', 'wait', 'running')
+  assert.deepEqual([row(h, 'child-1').state, row(h, 'child-1').message], ['completed', 'final words'])
+  await collab('list-1', 'listAgents', 'pendingInit')
+  assert.equal(row(h, 'child-1').state, 'completed')
+  await collab('send-1', 'sendInput', 'running')
+  assert.deepEqual([row(h, 'child-1').state, row(h, 'child-1').message], ['running', null])
+  await h.item(run, { id: 'a-1', type: 'subAgentActivity', agentThreadId: 'child-1', kind: 'completed' })
+  await h.item(run, { id: 'a-2', type: 'subAgentActivity', agentThreadId: 'child-1', kind: 'interacted' })
+  assert.equal(row(h, 'child-1').state, 'running')
+  await h.item(run, { id: 'a-3', type: 'subAgentActivity', agentThreadId: 'child-1', kind: 'interrupted' })
+  assert.equal(row(h, 'child-1').state, 'interrupted')
+  await collab('resume-1', 'resumeAgent', 'running')
+  assert.equal(row(h, 'child-1').state, 'running')
+  await collab('close-1', 'closeAgent', 'shutdown')
+  assert.equal(row(h, 'child-1').state, 'closed')
+})
+
+test('child Agent approval is refused without authority and marks only its parent row blocked', async () => {
+  const h = harness()
+  const run = await h.chat.send({ message: 'Delegate' })
+  await h.item(run, spawnItem())
+  await h.item(run, { id: 'a-1', type: 'subAgentActivity', agentThreadId: 'child-1', agentPath: 'researcher', kind: 'started' })
+  const before = h.events.length
+  await h.chat.handleServerRequest({ id: 'child-approval', method: 'item/commandExecution/requestApproval', params: { threadId: 'child-1', turnId: 'child-turn', itemId: 'cmd', command: 'rm -rf /tmp/x', availableDecisions: ['accept', 'decline'] } })
+  assert.deepEqual(h.replies, [['child-approval', null, { code: -32601, message: 'No matching EG-Desk run' }]])
+  assert.deepEqual(h.chat.snapshot().runs[0].pendingApprovals, [])
+  assert.deepEqual([row(h, 'child-1').state, row(h, 'child-1').blocked], ['running', { reason: 'approvalRequested' }])
+  assert.deepEqual(h.events.slice(before).map(event => [event.event, event.details.subAgent?.blocked?.reason]), [['subagent.updated', 'approvalRequested']])
+  await ask(h, { conversationId: 'child-1', runId: 'child-turn' }, 'child-ask')
+  await h.chat.handleServerRequest({ id: 'stranger-approval', method: 'item/fileChange/requestApproval', params: { threadId: 'stranger', turnId: 't', itemId: 'edit' } })
+  assert.deepEqual(h.replies.slice(1).map(reply => [reply[0], reply[2].code]), [['child-ask', -32601], ['stranger-approval', -32601]])
+  assert.equal(rows(h).length, 1)
+  assert.equal(h.chat.pendingUserInputs.size, 0)
+  await h.item(run, { id: 'wait-1', type: 'collabAgentToolCall', tool: 'wait', status: 'completed', receiverThreadIds: ['child-1'], agentsStates: { 'child-1': { status: 'running' } } })
+  assert.deepEqual(row(h, 'child-1').blocked, { reason: 'approvalRequested' }, 'a running snapshot does not prove the stall ended')
+  await h.item(run, { id: 'send-1', type: 'collabAgentToolCall', tool: 'sendInput', status: 'completed', receiverThreadIds: ['child-1'], agentsStates: { 'child-1': { status: 'running' } } })
+  assert.equal(row(h, 'child-1').blocked, null)
+})
+
+test('child Agent thread events never create or finish an EG-Desk run', async () => {
+  const h = harness()
+  const run = await h.chat.send({ message: 'Delegate' })
+  await h.item(run, spawnItem())
+  await h.notify('item/completed', { threadId: 'child-1', turnId: 'child-turn', item: { id: 'child-answer', type: 'agentMessage', text: 'CHILD_PRIVATE_ANSWER' } })
+  await h.notify('turn/completed', { threadId: 'child-1', turn: { id: 'child-turn', status: 'completed', items: [] } })
+  const state = h.chat.snapshot()
+  assert.equal(state.runs.length, 1)
+  assert.equal(state.runs[0].status, 'inProgress')
+  assert.ok(!JSON.stringify([h.events, state]).includes('CHILD_PRIVATE_ANSWER'))
+})
+
+test('resumed history rebuilds sub-Agent rows silently with the same sanitizer', async () => {
+  const h = harness({ request: async (method, params) => ({ cwd: '/work', thread: { id: params.threadId, turns: [{ id: 'old-turn', status: 'inProgress', items: [
+    spawnItem({ prompt: `History prompt ${'y'.repeat(300)} HISTORY_PROMPT_TAIL`, agentsStates: { 'child-1': { status: 'running', message: 'api_key=HISTORY_KEY' } } }),
+    { id: 'history-activity', type: 'subAgentActivity', agentThreadId: 'child-1', agentPath: 'historian', kind: 'interacted' },
+  ] }] } }) })
+  const state = await h.chat.resume({ conversationId: 'old', clientThreadId: 'old-ui' })
+  assert.deepEqual(state.runs[0].subAgents.map(child => [child.threadId, child.state, child.label]), [['child-1', 'running', 'historian']])
+  assert.equal(h.events.length, 0)
+  const json = JSON.stringify(state)
+  for (const hidden of ['HISTORY_PROMPT_TAIL', 'HISTORY_KEY']) assert.ok(!json.includes(hidden), hidden)
+})
+
+test('sub-Agent rows are capped and lose certainty on disconnect, even after the parent turn ended', async () => {
+  const h = harness()
+  const run = await h.chat.send({ message: 'Delegate' })
+  const children = Array.from({ length: 40 }, (_, i) => `child-${i}`)
+  await h.item(run, spawnItem({ receiverThreadIds: children, agentsStates: Object.fromEntries(children.map(id => [id, { status: 'running' }])) }))
+  assert.equal(rows(h).length, 32)
+  assert.equal(h.chat.snapshot().runs[0].truncated, true)
+  await h.item(run, { id: 'a-new', type: 'subAgentActivity', agentThreadId: 'child-new', kind: 'started' })
+  assert.equal(row(h, 'child-new'), undefined)
+  await h.item(run, { id: 'wait-1', type: 'collabAgentToolCall', tool: 'wait', status: 'completed', receiverThreadIds: ['child-0'], agentsStates: { 'child-0': { status: 'completed' } } })
+  await h.finish(run)
+  assert.ok(rows(h).every(child => child.parentEnded === true))
+  assert.deepEqual([row(h, 'child-0').state, row(h, 'child-1').state], ['completed', 'running'], 'the parent ending does not invent child outcomes')
+  const before = h.events.length
+  h.chat.setConnection(false)
+  assert.deepEqual([row(h, 'child-0').state, row(h, 'child-1').state, row(h, 'child-31').state], ['completed', 'unknown', 'unknown'])
+  const changed = h.events.slice(before).filter(event => event.event === 'subagent.updated')
+  assert.equal(changed.length, 31)
+  assert.equal(h.chat.snapshot().runs[0].status, 'completed')
+})
+
+test('real SQLite store keeps Agent questions and child rows durable without answers or poisoned keys', async () => {
+  const dataDir = createPrivateQaTempDirectory('egdesk-runtime-input-')
+  let store = null
+  try {
+    store = openChatStore({ dataDir, ownerScope: 'local-desktop-test' })
+    const replies = [], events = []
+    const chat = new CodexChatRuntime({
+      store, requireStore: true, getOwnerKey: () => 'codex:chatgpt:account-1', emit: event => events.push(event),
+      request: async method => {
+        if (method === 'thread/start') return { thread: { id: 'native-1' }, cwd: '/safe/work' }
+        if (method === 'turn/start') return { turn: { id: 'turn-1', status: 'inProgress', items: [] } }
+        throw new Error(`Unexpected native call: ${method}`)
+      }, respond: (...args) => replies.push(args),
+    })
+    chat.setConnection(true)
+    const run = await chat.send({ message: 'Ask me', clientThreadId: 'ui-1', requestId: 'req-1' })
+    await chat.handleServerRequest({ id: 'ask-1', method: USER_INPUT, params: { threadId: 'native-1', turnId: 'turn-1', itemId: 'ask', isBlocking: true, questions: [
+      { id: 'password', header: 'Password', question: 'Deploy password?', isSecret: true, options: null },
+      { id: 'secret', header: 'Secret', question: 'Pick one', options: [{ label: 'A', description: '' }] },
+      { id: 'api_key', header: 'Key', question: 'Note?', options: null },
+    ] } })
+    await chat.handleNotification({ method: 'item/completed', params: { threadId: 'native-1', turnId: 'turn-1', item: spawnItem({
+      receiverThreadIds: ['password', 'secret'], agentsStates: { password: { status: 'running' }, secret: { status: 'pendingInit' } } }) } })
+    const { userInputId } = chat.snapshot().runs[0].pendingUserInputs[0]
+    await chat.replyUserInput({ ...run, userInputId, action: 'submit', answers: [
+      { questionId: 'password', text: '  SQLITE_SECRET_ANSWER  ' }, { questionId: 'secret', optionIndex: 0 }, { questionId: 'api_key', text: ' SQLITE_PLAIN_ANSWER ' },
+    ] })
+    assert.deepEqual(replies, [['ask-1', { answers: { password: { answers: ['  SQLITE_SECRET_ANSWER  '] }, secret: { answers: ['A'] }, api_key: { answers: ['SQLITE_PLAIN_ANSWER'] } } }]])
+    assert.equal(chat.storeHealthy, true, 'model-chosen IDs named like private keys must not poison the store')
+    assert.ok(events.length > 0 && events.every(event => event.durable === true))
+    const history = chat.getLocalHistory({ clientThreadId: 'ui-1', limit: 500 })
+    assert.deepEqual(history.runs[0].pendingUserInputs[0].questions.map(q => q.questionId), ['password', 'secret', 'api_key'])
+    assert.deepEqual(history.runs[0].subAgents.map(child => [child.threadId, child.state]), [['password', 'running'], ['secret', 'starting']])
+    const stored = []
+    for (const name of await readdir(dataDir, { recursive: true })) {
+      try { stored.push(await readFile(path.join(dataDir, name))) } catch {}
+    }
+    assert.ok(stored.length > 0)
+    for (const hidden of ['SQLITE_SECRET_ANSWER', 'SQLITE_PLAIN_ANSWER']) {
+      assert.ok(!JSON.stringify([history, events, chat.snapshot()]).includes(hidden), hidden)
+      assert.ok(!stored.some(buffer => buffer.includes(hidden)), `${hidden} on disk`)
+    }
+    store.close(); store = null
+    store = openChatStore({ dataDir, ownerScope: 'local-desktop-test' })
+    const restarted = new CodexChatRuntime({ store, requireStore: true, getOwnerKey: () => 'codex:chatgpt:account-1',
+      request: async () => { throw new Error('Recovery must not call native') }, respond: () => {} })
+    assert.equal(restarted.recoverInterruptedRuns(), 1)
+    const recovered = restarted.getLocalHistory({ clientThreadId: 'ui-1', limit: 500 }).runs[0]
+    assert.equal(recovered.status, 'unknown')
+    assert.deepEqual(recovered.pendingUserInputs, [])
+    assert.deepEqual(recovered.subAgents.map(child => child.state), ['unknown', 'unknown'])
   } finally {
     try { store?.close() } catch {}
     await rm(dataDir, { recursive: true, force: true })

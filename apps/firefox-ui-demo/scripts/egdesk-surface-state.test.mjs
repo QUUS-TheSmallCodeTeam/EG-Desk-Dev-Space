@@ -4280,3 +4280,432 @@ test('Chat composer reserves title, status and log space on compact cards', asyn
     assert.match(css, /\.egd-codex-send \{ width: 32px; height: 32px;/);
   });
 });
+
+// Agent questions (item/tool/requestUserInput) and sub-agent status rows.
+// Production card/section/bridge bodies run against an inert DOM; secret
+// answers may exist only in the caller-held draft and a live input property.
+const questionInput = (overrides = {}) => ({
+  userInputId: 'input:stream-a:0:number:7', kind: 'userInput', status: 'pending', itemId: 'item-q', isBlocking: true,
+  questions: [
+    { questionId: 'scope', header: '범위', question: '어느 범위로 진행할까요?', options: [{ label: '전체', description: '모든 파일' }, { label: '일부', description: '' }], allowsOther: true, isSecret: false },
+    { questionId: 'password', header: '토큰', question: '배포 토큰을 입력해 주세요.', options: null, allowsOther: false, isSecret: true },
+  ], ...overrides });
+const questionRun = (input = questionInput()) => {
+  const state = Chat.createChatProtocolState();
+  const run = Chat.reduceChatEvent(state, envelope('run.started', 1));
+  Chat.reduceChatEvent(state, envelope('userInput.required', 2, input));
+  return { state, run };
+};
+const SECRET_ANSWER = 'tok-SECRET-4f1c';
+const fullDraft = () => [{ questionId: 'scope', choice: 1, text: '' }, { questionId: 'password', choice: null, text: `  ${SECRET_ANSWER} ` }];
+
+function inertDOM() {
+  const doc = { createElement: tag => new Node(tag), createTextNode: value => new Node('#text', value) };
+  class Node {
+    constructor(tag, text = '') {
+      Object.assign(this, { tag, text, children: [], attributes: {}, dataset: {}, listeners: {}, className: '', style: {} });
+    }
+    appendChild(child) { this.children.push(child); return child; }
+    setAttribute(name, value) { this.attributes[name] = String(value); }
+    addEventListener(type, callback) { (this.listeners[type] ||= []).push(callback); }
+    set innerHTML(_) { throw new Error('production renderer must use safe DOM text'); }
+    get textContent() { return this.text + this.children.map(child => child.textContent).join(''); }
+    all(test) { return this.children.flatMap(child => [...(test(child) ? [child] : []), ...child.all(test)]); }
+    testid(id) { return this.all(child => child.dataset.testid === id); }
+    dispatch(type, fields = {}) {
+      const event = { target: this, defaultPrevented: false, preventDefault() { this.defaultPrevented = true; }, ...fields };
+      for (const callback of this.listeners[type] || []) callback(event);
+      return event;
+    }
+  }
+  return doc;
+}
+// Everything a DOM serializer, accessibility tree or log could expose: never `.value`.
+const exposedText = node => JSON.stringify([node.tag, node.text, node.className, node.attributes, node.dataset, node.children.map(exposedText)]);
+const elBody = surfaceSource.match(/  function el\(tag, props = \{\}, \.\.\.children\) \{([^]*?)\n  \}/)?.[1];
+const userInputBlockBody = surfaceSource.match(/  function codexUserInputBlock\(run, input, draft, actions\) \{([^]*?)\n  \}/)?.[1];
+const subAgentSectionBody = surfaceSource.match(/  function codexSubAgentSection\(run\) \{([^]*?)\n  \}/)?.[1];
+const activityButtonBody = surfaceSource.match(/  function codexActivityButtonLabel\(run\) \{([^]*?)\n  \}/)?.[1];
+const pruneDraftsBody = surfaceSource.match(/  function pruneUserInputDrafts\(\) \{([^]*?)\n  \}/)?.[1];
+const replyUserInputBody = surfaceSource.match(/      async replyUserInput\(\{ userInputId, conversationId, runId, action = 'submit', draft \}\) \{([^]*?)\n      \},\n      async interrupt/)?.[1];
+const productionEl = () => compileFunction(`return function el(tag, props = {}, ...children) {${elBody}\n};`, ['document'])(inertDOM());
+const userInputBlock = compileFunction(userInputBlockBody || '', ['run', 'input', 'draft', 'actions', 'el', 'ChatState']);
+const subAgentSection = compileFunction(subAgentSectionBody || '', ['run', 'el', 'ChatState']);
+
+test('Agent question surfaces stay directly testable and wired at the contract positions', () => {
+  assert.ok(elBody && userInputBlockBody && subAgentSectionBody && activityButtonBody && pruneDraftsBody && replyUserInputBody);
+  const panel = surfaceSource.match(/  function renderCodexActivityPanel\(\) \{([^]*?)\n  \}/)?.[1];
+  const order = ['run.plan?.text', 'codexSubAgentSection(run)', 'for (const activity of run.activities', "activity.kind === 'collabAgentToolCall' || activity.kind === 'subAgentActivity') continue",
+    'for (const approval of run.pendingApprovals', 'for (const input of run.pendingUserInputs', 'codexUserInputBlock(run, input', 'if (run.error)'].map(text => panel.indexOf(text));
+  assert.ok(order.every(index => index >= 0), 'all activity panel anchors present');
+  assert.deepEqual([...order].sort((a, b) => a - b), order, 'plan → sub-agents → activities (minus agent kinds) → approvals → questions');
+  assert.match(panel, /addEventListener\('compositionstart'/);
+  assert.match(panel, /addEventListener\('compositionend'/);
+  assert.match(panel, /if \(activityPanelComposing && panel\?\.contains\(document\.activeElement\)\) \{ activityPanelDeferred = true; return; \}/);
+  const reset = surfaceSource.match(/    const resetThreadConversations = \(\) => \{([^]*?)\n    \};/)?.[1];
+  assert.match(reset, /userInputDrafts\.clear\(\);/);
+  assert.equal(surfaceSource.includes('state.codex.userInput'), false, 'drafts are not stored on exposed state');
+  const css = readFileSync(new URL('../overlay/CSS/eg-desk-surface.uc.css', import.meta.url), 'utf8');
+  for (const selector of ['.egd-codex-user-input {', '.egd-codex-subagent-row {', '.egd-codex-subagent-dot-active', '.egd-codex-subagent-dot-done', '.egd-codex-subagent-dot-blocked', '.egd-codex-subagent-dot-stopped']) assert.ok(css.includes(selector), selector);
+});
+
+test('Agent questions reduce into the exact run, outside the transcript, and clear on resolve or run end', () => {
+  const { state, run } = questionRun();
+  assert.deepEqual(run.messages, []);
+  assert.deepEqual(run.artifacts, []);
+  assert.equal(run.pendingUserInputs.length, 1);
+  assert.deepEqual(run.pendingUserInputs[0], questionInput());
+  assert.equal(Chat.pendingUserInputCount(run), 1);
+  assert.equal(Chat.isRunBusy(run), true);
+  const invalid = [
+    { ...questionInput(), userInputId: '' }, { ...questionInput(), status: 'answered' },
+    questionInput({ userInputId: 'too-many', questions: Array.from({ length: 9 }, (_, i) => ({ questionId: `q${i}`, header: '', question: 'q?', options: null })) }),
+    questionInput({ userInputId: 'duplicate', questions: [{ questionId: 'a', question: 'x?', options: null }, { questionId: 'a', question: 'y?', options: null }] }),
+    questionInput({ userInputId: 'options', questions: [{ questionId: 'a', question: 'x?', options: Array.from({ length: 13 }, (_, i) => ({ label: `o${i}` })) }] }),
+    questionInput({ userInputId: 'blank-label', questions: [{ questionId: 'a', question: 'x?', options: [{ label: ' ' }] }] }),
+  ];
+  invalid.forEach((input, index) => Chat.reduceChatEvent(state, envelope('userInput.required', 10 + index, input)));
+  assert.deepEqual(run.pendingUserInputs.map(input => input.userInputId), ['input:stream-a:0:number:7'], 'malformed questions are never answerable');
+  Chat.reduceChatEvent(state, envelope('userInput.required', 20, { userInput: questionInput({ userInputId: 'wrapped', questions: [{ questionId: 'a', question: 'x?', options: [] }] }) }));
+  const wrapped = run.pendingUserInputs.find(input => input.userInputId === 'wrapped');
+  assert.equal(wrapped.questions[0].options, null, 'empty options are free text');
+  assert.equal(wrapped.questions[0].allowsOther, false);
+  Chat.reduceChatEvent(state, envelope('userInput.resolved', 21, { userInputId: 'wrapped' }));
+  assert.deepEqual(run.pendingUserInputs.map(input => input.userInputId), ['input:stream-a:0:number:7']);
+  Chat.reduceChatEvent(state, envelope('run.completed', 22, { status: 'completed' }));
+  assert.deepEqual(run.pendingUserInputs, []);
+  Chat.reduceChatEvent(state, envelope('userInput.required', 23, questionInput({ userInputId: 'late' })));
+  assert.deepEqual(run.pendingUserInputs, [], 'a late question on a finished run is dropped');
+
+  const lost = questionRun();
+  Chat.reduceChatEvent(lost.state, envelope('run.unavailable', 3, { error: { code: 'UNSUPPORTED_INTERACTION' } }));
+  assert.equal(lost.run.pendingUserInputs.length, 1, 'only runtime loss or completion clears questions');
+  Chat.reduceChatEvent(lost.state, envelope('run.unavailable', 4, { error: { code: 'RUNTIME_LOST' } }));
+  assert.deepEqual(lost.run.pendingUserInputs, []);
+});
+
+test('question answers bind the exact run with exactly one answer per question', () => {
+  const { run } = questionRun();
+  const identity = { userInputId: 'input:stream-a:0:number:7', conversationId: 'conversation-a', runId: 'turn-a' };
+  assert.deepEqual(Chat.userInputRequestFor(run, identity.userInputId, fullDraft()),
+    { ...identity, action: 'submit', answers: [{ questionId: 'scope', optionIndex: 1 }, { questionId: 'password', text: SECRET_ANSWER }] });
+  const other = [{ questionId: 'scope', choice: 'other', text: ' 직접 입력 ' }, fullDraft()[1]];
+  assert.deepEqual(Chat.userInputRequestFor(run, identity.userInputId, other).answers[0], { questionId: 'scope', text: '직접 입력' });
+  const variants = [
+    [fullDraft()[0]], [{ questionId: 'scope', choice: null, text: '' }, fullDraft()[1]],
+    [{ questionId: 'scope', choice: 2, text: '' }, fullDraft()[1]], [{ questionId: 'scope', choice: -1, text: '' }, fullDraft()[1]],
+    [{ questionId: 'scope', choice: '1', text: '' }, fullDraft()[1]], [{ questionId: 'scope', choice: 'other', text: '   ' }, fullDraft()[1]],
+    [fullDraft()[0], { questionId: 'password', choice: 0, text: SECRET_ANSWER }], [fullDraft()[0], { questionId: 'password', choice: null, text: 'x'.repeat(4001) }],
+    [fullDraft()[0], { questionId: 'password', choice: null, text: 'a\u0000b' }], [...fullDraft(), { questionId: 'unknown', choice: 0 }],
+    [...fullDraft(), fullDraft()[1]], null, {},
+  ];
+  for (const draft of variants) assert.equal(Chat.userInputRequestFor(run, identity.userInputId, draft), null, JSON.stringify(draft));
+  assert.equal(Chat.userInputRequestFor(run, 'other-id', fullDraft()), null);
+  assert.deepEqual(Chat.userInputRequestFor(run, identity.userInputId, null, 'skip'), { ...identity, action: 'skip' });
+  assert.equal(Chat.userInputRequestFor(run, identity.userInputId, fullDraft(), 'cancel'), null);
+  const noOther = questionRun(questionInput({ questions: [{ questionId: 'pick', question: '고르세요', options: [{ label: 'A' }], allowsOther: false }] })).run;
+  assert.equal(Chat.userInputRequestFor(noOther, identity.userInputId, [{ questionId: 'pick', choice: 'other', text: 'free' }]), null);
+  assert.deepEqual(Chat.userInputRequestFor(noOther, identity.userInputId, [{ questionId: 'pick', choice: 0 }]).answers, [{ questionId: 'pick', optionIndex: 0 }]);
+
+  const input = run.pendingUserInputs[0];
+  for (const [flag, value] of [['replyPending', true], ['stale', true]]) {
+    input[flag] = value;
+    assert.equal(Chat.userInputRequestFor(run, identity.userInputId, fullDraft()), null, flag);
+    assert.equal(Chat.userInputRequestFor(run, identity.userInputId, null, 'skip'), null, flag);
+    delete input[flag];
+  }
+  assert.equal(Chat.userInputRequestFor({ ...run, localHistory: true }, identity.userInputId, fullDraft()), null);
+  assert.equal(Chat.userInputRequestFor({ ...run, status: 'interrupted' }, identity.userInputId, fullDraft()), null);
+  assert.equal(Chat.acknowledgeUserInputReply(run, { accepted: true, ...identity, conversationId: 'other', status: 'replySent' }), false);
+  assert.equal(Chat.acknowledgeUserInputReply(run, { accepted: true, ...identity, status: 'pending' }), false);
+  assert.equal(Chat.acknowledgeUserInputReply(run, { accepted: true, ...identity, status: 'replySent' }), true);
+  assert.equal(input.status, 'replySent');
+  assert.equal(Chat.userInputRequestFor(run, identity.userInputId, fullDraft()), null, 'replySent is not answerable again');
+  assert.equal(Chat.pendingUserInputCount(run), 0);
+  assert.equal(Chat.isRunBusy(run), true, 'replySent does not complete execution');
+  assert.equal(JSON.stringify(run).includes(SECRET_ANSWER), false);
+});
+
+test('question snapshots keep local reply state, history is stale, and account reset drops questions', () => {
+  const { state, run } = questionRun();
+  run.pendingUserInputs[0].replyPending = true;
+  Chat.mergeChatSnapshot(state, { conversationId: 'conversation-a', streamId: 'stream-a', seq: 5, runs: [{ runId: 'turn-a', status: 'running',
+    pendingUserInputs: [questionInput(), questionInput({ userInputId: 'broken', questions: [] })],
+    subAgents: Array.from({ length: 40 }, (_, i) => ({ threadId: `child-${i}`, state: 'running', label: null })) }] }, 'ui-a');
+  assert.deepEqual(run.pendingUserInputs.map(input => input.userInputId), ['input:stream-a:0:number:7']);
+  assert.equal(run.pendingUserInputs[0].replyPending, true, 'an in-flight reply is not re-enabled by a snapshot');
+  assert.equal(Chat.userInputRequestFor(run, 'input:stream-a:0:number:7', fullDraft()), null);
+  assert.equal(run.subAgents.length, 32);
+  run.pendingUserInputs[0].replyPending = false;
+  run.pendingUserInputs[0].status = 'replySent';
+  Chat.mergeChatSnapshot(state, { conversationId: 'conversation-a', streamId: 'stream-a', seq: 6, runs: [{ runId: 'turn-a', pendingUserInputs: [questionInput()] }] }, 'ui-a');
+  assert.equal(run.pendingUserInputs[0].status, 'replySent', 'a snapshot never rewinds a sent reply');
+
+  const page = { protocolVersion: 1, thread: { localConversationId: 'local-a', clientThreadId: 'room' },
+    runs: [{ localRunId: 'local-run', conversationId: 'native-a', runId: 'run-a', status: 'running', pendingUserInputs: [questionInput()] }], events: [], messages: [] };
+  page.runs[0].pendingUserInputs.push({ userInputId: 'corrupt', status: 'pending', questions: 'not-a-list' });
+  page.runs[0].subAgents = [{ threadId: 'child-a', label: { html: '<b>' }, state: 'running' }, { label: 'no thread id' }];
+  const normalized = Chat.normalizeLocalHistoryPage(page, 'room');
+  assert.deepEqual(normalized.runs[0].pendingUserInputs.map(input => input.userInputId), ['input:stream-a:0:number:7'], 'a corrupt stored question cannot break the panel');
+  assert.deepEqual(normalized.runs[0].subAgents.map(row => [row.threadId, row.label]), [['child-a', null]]);
+  assert.equal(Chat.subAgentDisplay(normalized.runs[0].subAgents[0], normalized.runs[0]).stateLabel, '상태 확인 필요', 'a stored running child is not claimed as running');
+  assert.equal(normalized.runs[0].pendingUserInputs[0].stale, true);
+  assert.equal(Chat.userInputRequestFor(normalized.runs[0], 'input:stream-a:0:number:7', fullDraft()), null);
+  assert.equal(Chat.userInputRequestFor(normalized.runs[0], 'input:stream-a:0:number:7', null, 'skip'), null);
+  assert.equal(page.runs[0].pendingUserInputs[0].stale, undefined);
+
+  Chat.resetChatProtocol(state);
+  const serialized = JSON.stringify(state);
+  for (const text of ['input:stream-a:0:number:7', '배포 토큰', 'child-0']) assert.equal(serialized.includes(text), false, text);
+});
+
+test('sub-agent rows upsert by thread and map to the four display groups', () => {
+  const state = Chat.createChatProtocolState();
+  const run = Chat.reduceChatEvent(state, envelope('run.started', 1));
+  const row = (threadId, fields = {}) => ({ threadId, label: null, taskPreview: null, model: null, state: 'running', message: null, lastTool: 'spawnAgent', blocked: null, updatedAt: 1, parentEnded: false, ...fields });
+  Chat.reduceChatEvent(state, envelope('subagent.updated', 2, { subAgent: row('019f-child-aaaa', { taskPreview: 'x'.repeat(400), message: 'm'.repeat(900) }) }));
+  assert.equal(run.subAgents[0].taskPreview.length, 160);
+  assert.equal(run.subAgents[0].message.length, 500);
+  Chat.reduceChatEvent(state, envelope('subagent.updated', 3, { subAgent: row('019f-child-aaaa', { state: 'errored', blocked: { reason: 'errored' }, prompt: 'RAW PROMPT' }) }));
+  Chat.reduceChatEvent(state, envelope('subagent.updated', 4, { subAgent: { state: 'running' } }));
+  assert.equal(run.subAgents.length, 1);
+  assert.equal(run.subAgents[0].state, 'errored');
+  assert.deepEqual(run.subAgents[0].blocked, { reason: 'errored' });
+  assert.equal(JSON.stringify(run.subAgents).includes('RAW PROMPT'), false, 'only contract fields are kept');
+  for (let i = 0; i < 40; i++) Chat.reduceChatEvent(state, envelope('subagent.updated', 10 + i, { subAgent: row(`child-${i}`) }));
+  assert.equal(run.subAgents.length, 32, 'rows are bounded; new threads beyond the bound are ignored');
+  Chat.reduceChatEvent(state, envelope('subagent.updated', 60, { subAgent: row('child-0', { state: 'completed' }) }));
+  assert.equal(run.subAgents.find(item => item.threadId === 'child-0').state, 'completed', 'existing rows still update at the bound');
+
+  const show = fields => Chat.subAgentDisplay(row('0123456789abcdef', fields), run);
+  const table = {
+    starting: ['active', '준비 중', null], running: ['active', '진행 중', null], completed: ['done', '완료', null], closed: ['done', '종료', null],
+    errored: ['blocked', '오류', '오류로 멈춤'], notFound: ['blocked', '찾을 수 없음', null], interrupted: ['stopped', '중단됨', null],
+    unknown: ['stopped', '상태 확인 필요', null], invented: ['stopped', '상태 확인 필요', null],
+  };
+  for (const [value, [status, stateLabel, blockedLabel]] of Object.entries(table)) {
+    const display = show({ state: value });
+    assert.deepEqual([display.status, display.stateLabel, display.blockedLabel], [status, stateLabel, blockedLabel], value);
+  }
+  assert.deepEqual(show({ blocked: { reason: 'approvalRequested' } }), { status: 'blocked', state: 'running', stateLabel: '진행 중', blockedLabel: '승인 요청으로 멈춤', name: '하위 Agent 01234567' });
+  assert.equal(show({ label: 'research/agent-2' }).name, 'research/agent-2');
+  assert.equal(show({ parentEnded: true }).stateLabel, '상태 확인 필요', 'an ended parent no longer observes a running child');
+  assert.equal(Chat.subAgentDisplay(row('a', { state: 'running' }), { ...run, status: 'completed' }).status, 'stopped');
+  const summary = Chat.subAgentSummary({ ...run, subAgents: [row('a'), row('b', { state: 'notFound' }), row('c', { blocked: { reason: 'approvalRequested' } }), row('d', { state: 'completed' })] });
+  assert.equal(summary.total, 4);
+  assert.equal(summary.blocked, 2);
+  assert.deepEqual(Chat.subAgentSummary(null), { total: 0, blocked: 0, rows: [] });
+});
+
+test('production run status and activity button announce waiting questions and blocked sub-agents', () => {
+  const labelBody = surfaceSource.match(/  function codexRunLabel\(run\) \{([^]*?)\n  \}/)?.[1];
+  const label = compileFunction(labelBody, ['run', 'ChatState', 'state']);
+  const buttonLabel = compileFunction(activityButtonBody, ['run', 'ChatState']);
+  const ui = { codex: { connected: true } };
+  const { run } = questionRun();
+  assert.equal(label(run, Chat, ui), '답변 대기');
+  assert.equal(buttonLabel(run, Chat), '활동 기록 · 질문 1건');
+  run.pendingApprovals.push({ approvalId: 'p', status: 'pending', choices: ['decline'] });
+  run.subAgents.push({ threadId: 'child', state: 'errored', blocked: { reason: 'errored' } });
+  assert.equal(label(run, Chat, ui), '승인 대기');
+  assert.equal(buttonLabel(run, Chat), '활동 기록 · 승인 1건 · 질문 1건 · 막힘 1건');
+  run.pendingApprovals = [];
+  run.subAgents = [];
+  run.pendingUserInputs[0].status = 'replySent';
+  assert.equal(label(run, Chat, ui), '응답 중', 'a sent answer is no longer waiting on the user');
+  assert.equal(buttonLabel(run, Chat), '활동 기록');
+  assert.equal(buttonLabel(null, Chat), '활동 기록');
+});
+
+test('production question card: radios, other-text gate, password field, and no secret exposure', () => {
+  const { run } = questionRun();
+  const input = run.pendingUserInputs[0];
+  const calls = { draft: [], submit: [], skip: 0 };
+  const actions = { draft: answers => calls.draft.push(structuredClone(answers)), submit: answers => calls.submit.push(answers), skip: () => { calls.skip++; } };
+  const card = userInputBlock(run, input, undefined, actions, productionEl(), Chat);
+  assert.equal(card.dataset.testid, 'chat-user-input');
+  assert.equal(card.dataset.userInputId, input.userInputId);
+  assert.equal(card.dataset.status, 'pending');
+  assert.equal(card.attributes['aria-label'], 'Agent 질문');
+  assert.equal(card.children[0].textContent, 'Agent 질문');
+  assert.ok(card.textContent.includes('답변할 때까지 작업이 멈춰 있습니다.'));
+  const radios = card.testid('chat-user-input-option');
+  assert.deepEqual(radios.map(radio => [radio.attributes.type, radio.dataset.optionIndex, radio.dataset.questionId]), [['radio', '0', 'scope'], ['radio', '1', 'scope'], ['radio', 'other', 'scope']]);
+  assert.equal(new Set(radios.map(radio => radio.attributes.name)).size, 1, 'one radio group per question');
+  assert.ok(card.textContent.includes('모든 파일') && card.textContent.includes('기타(직접 입력)'));
+  const [otherText] = card.testid('chat-user-input-other');
+  const [secret] = card.testid('chat-user-input-text');
+  const [submit] = card.testid('chat-user-input-submit');
+  const [skip] = card.testid('chat-user-input-skip');
+  assert.equal(otherText.disabled, true, 'other text is enabled only after choosing 기타');
+  assert.deepEqual([secret.attributes.type, secret.attributes.autocomplete, secret.attributes.spellcheck], ['password', 'off', 'false']);
+  assert.equal(submit.disabled, true);
+  assert.equal(skip.disabled, false);
+  assert.equal(card.all(node => node.attributes.role === 'alert').length, 0);
+
+  radios[2].checked = true; radios[2].dispatch('change');
+  assert.equal(otherText.disabled, false);
+  assert.equal(submit.disabled, true);
+  otherText.value = '직접'; otherText.dispatch('input');
+  assert.equal(submit.disabled, true, 'every question needs an answer');
+  secret.value = SECRET_ANSWER; secret.dispatch('input');
+  assert.equal(submit.disabled, false);
+  radios[0].checked = true; radios[0].dispatch('change');
+  assert.equal(otherText.disabled, true);
+  assert.equal(submit.disabled, false);
+  assert.equal(exposedText(card).includes(SECRET_ANSWER), false, 'secret never reaches attributes, data, aria or text');
+  assert.equal(calls.draft.at(-1)[1].text, SECRET_ANSWER, 'the draft is handed only to the caller');
+
+  assert.equal(secret.dispatch('keydown', { key: 'Enter', ctrlKey: true, isComposing: true }).defaultPrevented, false);
+  assert.equal(calls.submit.length, 0, 'IME composition never submits');
+  secret.dispatch('keydown', { key: 'Enter', metaKey: true });
+  submit.dispatch('click');
+  assert.equal(calls.submit.length, 2);
+  assert.deepEqual(Chat.userInputRequestFor(run, input.userInputId, calls.submit[0]).answers, [{ questionId: 'scope', optionIndex: 0 }, { questionId: 'password', text: SECRET_ANSWER }]);
+  skip.dispatch('click');
+  assert.equal(calls.skip, 1);
+
+  const restored = userInputBlock(run, input, fullDraft(), actions, productionEl(), Chat);
+  assert.equal(restored.testid('chat-user-input-option')[1].checked, true);
+  assert.equal(restored.testid('chat-user-input-text')[0].value, fullDraft()[1].text);
+  assert.equal(restored.testid('chat-user-input-text')[0].attributes.value, undefined, 'secret is a property, not a value attribute');
+  assert.equal(exposedText(restored).includes(SECRET_ANSWER), false);
+});
+
+test('production question card is inert after reply, stale, or for free-text-only questions', () => {
+  const { run } = questionRun();
+  const input = run.pendingUserInputs[0];
+  const actions = { draft: () => assert.fail('locked card has no draft'), submit: () => assert.fail('locked card submits nothing'), skip: () => assert.fail('locked card skips nothing') };
+  input.status = 'replySent';
+  const sent = userInputBlock(run, input, fullDraft(), actions, productionEl(), Chat);
+  assert.equal(sent.dataset.status, 'replySent');
+  assert.equal(sent.children[0].textContent, '답변 전달됨 · 작업 상태 확인 중');
+  assert.equal(sent.textContent.includes('답변할 때까지'), false);
+  assert.ok(sent.textContent.includes('비공개 답변 전달됨'));
+  assert.equal(sent.testid('chat-user-input-text').length, 0, 'no secret field survives a sent reply');
+  const controls = [...sent.testid('chat-user-input-option'), ...sent.testid('chat-user-input-other'), ...sent.testid('chat-user-input-submit'), ...sent.testid('chat-user-input-skip')];
+  assert.equal(controls.length, 6, '3 radios, other text, submit, skip');
+  assert.ok(controls.every(control => control.disabled === true));
+  for (const control of controls) control.dispatch(control.tag === 'button' ? 'click' : 'change');
+  assert.equal(exposedText(sent).includes(SECRET_ANSWER), false);
+
+  input.status = 'pending';
+  input.stale = true;
+  input.error = '이 질문은 더 이상 답할 수 없습니다.';
+  const stale = userInputBlock(run, input, undefined, actions, productionEl(), Chat);
+  assert.ok(stale.textContent.includes('이 질문은 더 이상 답할 수 없습니다.'));
+  assert.ok([...stale.testid('chat-user-input-submit'), ...stale.testid('chat-user-input-skip'), ...stale.testid('chat-user-input-text')].every(control => control.disabled === true));
+  assert.equal(stale.all(node => node.attributes.role === 'alert').length, 0, 'persistent card text is not re-announced on every render');
+
+  const free = questionRun(questionInput({ isBlocking: false, questions: [{ questionId: 'note', header: '', question: '메모를 남겨 주세요', options: null }] })).run;
+  const freeCard = userInputBlock(free, free.pendingUserInputs[0], undefined, { draft: () => {}, submit: () => {}, skip: () => {} }, productionEl(), Chat);
+  assert.equal(freeCard.textContent.includes('답변할 때까지'), false);
+  assert.equal(freeCard.testid('chat-user-input-option').length, 0);
+  assert.equal(freeCard.testid('chat-user-input-text')[0].attributes.type, 'text');
+  assert.equal(freeCard.all(node => node.tag === 'legend')[0].textContent, '질문 1');
+});
+
+test('production sub-agent section is a quiet, bounded list with blocked emphasis', () => {
+  const state = Chat.createChatProtocolState();
+  const run = Chat.reduceChatEvent(state, envelope('run.started', 1));
+  assert.equal(subAgentSection(run, productionEl(), Chat), null, 'no section without sub-agents');
+  run.subAgents.push(
+    { threadId: '019f8d42-aaaa', label: 'research', taskPreview: '자료 조사', state: 'running', message: null, blocked: null },
+    { threadId: '019f8d43-bbbb', label: null, taskPreview: null, state: 'running', message: '승인이 필요합니다', blocked: { reason: 'approvalRequested' } },
+    { threadId: '019f8d44-cccc', label: 'writer', taskPreview: null, state: 'completed', message: null, blocked: null });
+  const section = subAgentSection(run, productionEl(), Chat);
+  assert.equal(section.dataset.testid, 'chat-subagents');
+  assert.equal(section.children[0].textContent, '하위 Agent · 3 · 막힘 1');
+  const rows = section.testid('chat-subagent');
+  assert.deepEqual(rows.map(row => [row.dataset.agentThreadId, row.dataset.status]), [['019f8d42-aaaa', 'active'], ['019f8d43-bbbb', 'blocked'], ['019f8d44-cccc', 'done']]);
+  assert.equal(rows[1].textContent, '하위 Agent 019f8d43진행 중승인 요청으로 멈춤승인이 필요합니다');
+  assert.ok(rows[0].textContent.includes('자료 조사'));
+  assert.equal(section.all(node => 'role' in node.attributes || 'aria-live' in node.attributes).length, 0, 'no alert/live role inside re-rendered rows');
+  assert.ok(rows.every(row => row.children[0].attributes['aria-hidden'] === 'true'), 'status is text, not color alone');
+});
+
+test('production replyUserInput posts the exact body once, ignores reset epochs, and marks 409 stale', async () => {
+  const setup = () => {
+    const { state: protocol, run } = questionRun();
+    const epochScope = Chat.createChatEpochScope();
+    const drafts = new Map([[`conversation-a/turn-a/${run.pendingUserInputs[0].userInputId}`, fullDraft()]]);
+    const requests = [];
+    let emits = 0, settle;
+    const fetchJson = (path, options) => { requests.push({ path, body: JSON.parse(options.body), signal: options.signal });
+      return new Promise((resolve, reject) => { settle = { resolve, reject }; }); };
+    const reply = compileFunction(`return async function({ userInputId, conversationId, runId, action = 'submit', draft }) {${replyUserInputBody}\n};`,
+      ['protocol', 'ChatState', 'epochScope', 'emit', 'fetchJson', 'userInputDrafts'])(protocol, Chat, epochScope, () => { emits++; }, fetchJson, drafts);
+    const input = run.pendingUserInputs[0];
+    const identity = { userInputId: input.userInputId, conversationId: 'conversation-a', runId: 'turn-a' };
+    return { protocol, run, input, identity, drafts, requests, reply, epochScope, emits: () => emits, settle: () => settle };
+  };
+
+  const ok = setup();
+  const pending = ok.reply({ ...ok.identity, action: 'submit' });
+  assert.equal(ok.input.replyPending, true);
+  assert.equal(ok.emits(), 1);
+  assert.equal(await ok.reply({ ...ok.identity, action: 'submit' }), false, 'duplicate submit cannot dispatch');
+  assert.equal(ok.requests.length, 1);
+  assert.deepEqual(ok.requests[0].body, { ...ok.identity, action: 'submit', answers: [{ questionId: 'scope', optionIndex: 1 }, { questionId: 'password', text: SECRET_ANSWER }] });
+  assert.equal(ok.requests[0].path, '/chat/user-input');
+  ok.settle().resolve({ accepted: true, ...ok.identity, status: 'replySent' });
+  assert.equal((await pending).status, 'replySent');
+  assert.equal(ok.input.status, 'replySent');
+  assert.equal(ok.input.replyPending, false);
+  assert.equal(ok.drafts.size, 0, 'the accepted draft (and its secret) is dropped');
+  assert.equal(JSON.stringify(ok.protocol).includes(SECRET_ANSWER), false);
+
+  const late = setup();
+  const latePending = late.reply({ ...late.identity, action: 'submit' });
+  late.epochScope.reset();
+  late.settle().resolve({ accepted: true, ...late.identity, status: 'replySent' });
+  assert.equal(await latePending, false);
+  assert.equal(late.input.status, 'pending', 'an old-epoch response cannot acknowledge');
+  assert.equal(late.emits(), 1, 'no render after the account epoch changed');
+  assert.equal(late.requests[0].signal.aborted, true);
+
+  const stale = setup();
+  const stalePending = stale.reply({ ...stale.identity, action: 'submit' });
+  stale.settle().reject(Object.assign(new Error('Stale user input'), { status: 409, code: 'STALE_USER_INPUT' }));
+  assert.equal(await stalePending, false);
+  assert.equal(stale.input.stale, true);
+  assert.equal(stale.input.error, '이 질문은 더 이상 답할 수 없습니다.');
+  assert.equal(stale.input.replyPending, false);
+  assert.equal(stale.drafts.size, 0);
+  assert.equal(Chat.userInputRequestFor(stale.run, stale.identity.userInputId, fullDraft()), null);
+
+  const offline = setup();
+  const offlinePending = offline.reply({ ...offline.identity, action: 'submit' });
+  offline.settle().reject(Object.assign(new Error('Codex bridge offline'), { status: 503, code: 'BRIDGE_OFFLINE' }));
+  assert.equal(await offlinePending, false);
+  assert.equal(offline.input.stale, false);
+  assert.equal(offline.input.status, 'pending');
+  assert.equal(offline.input.error, '답변 전달 여부를 확인하지 못했습니다: Codex bridge offline');
+  assert.equal(offline.drafts.size, 1, 'a retryable failure keeps the draft');
+  assert.ok(Chat.userInputRequestFor(offline.run, offline.identity.userInputId, fullDraft()), 'retry is possible');
+
+  const skip = setup();
+  const skipPending = skip.reply({ ...skip.identity, action: 'skip' });
+  assert.deepEqual(skip.requests[0].body, { ...skip.identity, action: 'skip' });
+  skip.settle().resolve({ accepted: true, ...skip.identity, status: 'replySent' });
+  await skipPending;
+  assert.equal(skip.input.status, 'replySent');
+
+  const unknown = setup();
+  assert.equal(await unknown.reply({ ...unknown.identity, runId: 'other-run', action: 'submit' }), false);
+  assert.equal(await unknown.reply({ ...unknown.identity, action: 'submit', draft: [fullDraft()[0]] }), false);
+  assert.equal(unknown.requests.length, 0);
+});
+
+test('draft pruning keeps only answerable live questions', () => {
+  const { state: protocol, run } = questionRun();
+  Chat.reduceChatEvent(protocol, envelope('userInput.required', 3, questionInput({ userInputId: 'stale-one' })));
+  Chat.reduceChatEvent(protocol, envelope('userInput.required', 4, questionInput({ userInputId: 'sent-one' })));
+  run.pendingUserInputs[1].stale = true;
+  run.pendingUserInputs[2].status = 'replySent';
+  const key = id => `conversation-a/turn-a/${id}`;
+  const drafts = new Map([[key('input:stream-a:0:number:7'), fullDraft()], [key('stale-one'), fullDraft()], [key('sent-one'), fullDraft()], [key('resolved'), fullDraft()]]);
+  const prune = compileFunction(pruneDraftsBody, ['userInputDrafts', 'state', 'userInputDraftKey']);
+  prune(drafts, { codex: { chatProtocol: protocol } }, (value, id) => `${value.conversationId}/${value.runId}/${id}`);
+  assert.deepEqual([...drafts.keys()], [key('input:stream-a:0:number:7')]);
+});

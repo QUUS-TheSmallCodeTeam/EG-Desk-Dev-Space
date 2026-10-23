@@ -64,7 +64,7 @@ const historyId = (value, name) => {
 
 export function createChatHttpHandler(chat, ensureAuth, history = chat) {
   return async (req, res, url) => {
-    const routes = new Set(['/chat/send', '/chat/resume', '/chat/interrupt', '/chat/approval'])
+    const routes = new Set(['/chat/send', '/chat/resume', '/chat/interrupt', '/chat/approval', '/chat/user-input'])
     if ((req.method === 'GET' && ['/chat/history/threads', '/chat/history'].includes(url.pathname)) ||
         (req.method === 'POST' && url.pathname === '/chat/history/import')) {
       try {
@@ -113,8 +113,9 @@ export function createChatHttpHandler(chat, ensureAuth, history = chat) {
       // unavailable. Runtime methods still verify connection, turn and callback.
       const isSafetyResponse = url.pathname === '/chat/interrupt'
         || (url.pathname === '/chat/approval' && ['decline', 'cancel'].includes(body.decision))
+        || (url.pathname === '/chat/user-input' && body.action === 'skip')
       if (!isSafetyResponse) await ensureAuth()
-      const action = { '/chat/send': 'send', '/chat/resume': 'resume', '/chat/interrupt': 'interrupt', '/chat/approval': 'replyApproval' }[url.pathname]
+      const action = { '/chat/send': 'send', '/chat/resume': 'resume', '/chat/interrupt': 'interrupt', '/chat/approval': 'replyApproval', '/chat/user-input': 'replyUserInput' }[url.pathname]
       const result = await chat[action](body)
       sendJson(res, url.pathname === '/chat/send' ? 202 : 200, result)
     } catch (error) {

@@ -1,6 +1,7 @@
 #!/usr/bin/env node
 // Real rendered UI driven by an explicitly selected test HTTP/SSE transport.
 // Main owns both fixture-server and Firefox startup/shutdown.
+import { createHmac, randomUUID } from 'node:crypto';
 import { assertFreshAccountRoom, assertOrdinarySend, assertPlainRenderedMessage, assertQaFixtureArtifact } from './egdesk-chat-qa-contract.sys.mjs';
 import { assertQaFixtureManifest } from './egdesk-chat-qa-profile.mjs';
 import { attributeSelector, chatIdentity, chrome, loopbackJson, newQaThread,
@@ -30,6 +31,95 @@ async function messages(harness) {
   });
 }
 
+// Span boundaries in rendered text carry no meaning; compare without whitespace.
+const shows = (text, ...needles) => typeof text === 'string' && needles.every(needle => text.replace(/\s+/g, '').includes(String(needle).replace(/\s+/g, '')));
+
+// Read-only control/state observation. Typed values never cross back: only whether a field is filled.
+async function questionCard(harness) {
+  return chrome(harness, () => {
+    const cards = [...document.querySelectorAll('[data-testid="chat-user-input"]')];
+    const card = cards[0];
+    if (!card) return { count: 0 };
+    const field = node => ({ type: node.type, disabled: node.disabled, filled: (node.value || '').length > 0,
+      autocomplete: node.getAttribute('autocomplete'), spellcheck: node.spellcheck });
+    const button = node => ({ disabled: node.disabled, text: node.textContent.trim() });
+    return { count: cards.length, content: card.textContent.replace(/\s+/g, ' ').trim(),
+      alerts: card.querySelectorAll('[role="alert"]').length + (card.getAttribute('role') === 'alert' ? 1 : 0),
+      radios: [...card.querySelectorAll('[data-testid="chat-user-input-option"]')].map(node => ({ type: node.type, disabled: node.disabled, checked: node.checked })),
+      other: [...card.querySelectorAll('[data-testid="chat-user-input-other"]')].map(field),
+      freeText: [...card.querySelectorAll('[data-testid="chat-user-input-text"]')].map(field),
+      submit: [...card.querySelectorAll('[data-testid="chat-user-input-submit"]')].map(button),
+      skip: [...card.querySelectorAll('[data-testid="chat-user-input-skip"]')].map(button) };
+  });
+}
+
+// Native clicks need one exact element; derive it from the radio's own label and attributes.
+async function questionOptionSelector(harness, label) {
+  const selector = await chrome(harness, (label) => {
+    const base = '[data-testid="chat-user-input-option"]';
+    const labelOf = node => [[...(node.labels || [])].map(item => item.textContent).join(' '), node.getAttribute('aria-label'),
+      node.dataset.label, node.closest('label')?.textContent].find(text => text && text.trim()) || '';
+    const matches = [...document.querySelectorAll(`[data-testid="chat-user-input"] ${base}`)].filter(node => labelOf(node).includes(label));
+    if (matches.length !== 1) return null;
+    // CSS.escape, not JSON: CSS reads JSON's backslash-n as a plain "n". Control-character values are skipped.
+    const exact = base + [...matches[0].attributes]
+      .filter(attr => !['class', 'style', 'checked', 'data-testid'].includes(attr.name) && !/[\u0000-\u001f]/.test(attr.value))
+      .map(attr => `[${CSS.escape(attr.name)}="${CSS.escape(attr.value)}"]`).join('');
+    return document.querySelectorAll(exact).length === 1 ? exact : null;
+  }, label);
+  if (!selector) throw new Error(`Question option "${label}" needs its own label and a distinguishing attribute for a native click`);
+  return selector;
+}
+
+// Where a private test answer could linger: state graph, attributes, text, live fields, web storage.
+async function privateAnswerTrace(harness, needle) {
+  return chrome(harness, (needle) => {
+    const seen = new WeakSet();
+    const stack = [window.__egdesk?.state];
+    let state = false;
+    for (let budget = 400000; stack.length && budget > 0 && !state; budget--) {
+      const value = stack.pop();
+      if (typeof value === 'string') { state = value.includes(needle); continue; }
+      if (!value || typeof value !== 'object' || seen.has(value) || value === window
+          || (typeof Node === 'function' && value instanceof Node) || (typeof Window === 'function' && value instanceof Window)) continue;
+      seen.add(value);
+      try {
+        if (value instanceof Map) for (const [key, item] of value) stack.push(key, item);
+        else if (value instanceof Set) for (const item of value) stack.push(item);
+        else for (const key of Object.keys(value)) { stack.push(key); try { stack.push(value[key]); } catch {} }
+      } catch {}
+    }
+    let storage = false;
+    for (const area of ['localStorage', 'sessionStorage']) {
+      try {
+        const store = window[area];
+        for (let index = 0; index < store.length; index++) {
+          const key = store.key(index);
+          if (key.includes(needle) || (store.getItem(key) || '').includes(needle)) storage = true;
+        }
+      } catch {}
+    }
+    return { state, storage, text: document.documentElement.textContent.includes(needle),
+      attributes: [...document.querySelectorAll('*')].some(node => [...node.attributes].some(attr => attr.value.includes(needle))),
+      fields: [...document.querySelectorAll('input, textarea')].filter(node => (node.value || '').includes(needle))
+        .map(node => node.getAttribute('data-testid') || node.localName) };
+  }, needle);
+}
+
+async function subAgentView(harness, activityIds) {
+  return chrome(harness, ({ collabId, gatherId }) => {
+    const sections = [...document.querySelectorAll('[data-testid="chat-subagents"]')];
+    const gather = document.querySelector(`.egd-codex-activity-row[data-activity-id="${CSS.escape(gatherId)}"]`);
+    return { sections: sections.map(section => ({ text: section.textContent.replace(/\s+/g, ' ').trim(),
+      alerts: section.querySelectorAll('[role="alert"]').length + (section.getAttribute('role') === 'alert' ? 1 : 0),
+      beforeActivity: !!gather && !!(section.compareDocumentPosition(gather) & Node.DOCUMENT_POSITION_FOLLOWING),
+      rows: [...section.querySelectorAll('[data-testid="chat-subagent"]')].map(row => ({ threadId: row.dataset.agentThreadId,
+        status: row.dataset.status, text: row.textContent.replace(/\s+/g, ' ').trim() })) })),
+    collabRows: document.querySelectorAll(`.egd-codex-activity-row[data-activity-id="${CSS.escape(collabId)}"]`).length,
+    gatherRow: !!gather };
+  }, activityIds);
+}
+
 await runUiFlow('rendered-ui-fixture-transport', async ({ harness, check, capture, result, defer }) => {
   result.providerTurn = 'fixture-only';
   assertQaFixtureManifest(harness.profile);
@@ -46,6 +136,25 @@ await runUiFlow('rendered-ui-fixture-transport', async ({ harness, check, captur
   const initialFixture = await fixtureState();
   check('fixture server has no prior sends from another test', initialFixture.observed.sends.length === 0);
   await chrome(harness, () => { window.__egdeskQaTransportIdentity = { fetch: window.fetch, EventSource: window.EventSource }; return true; });
+  // A headless Chrome window opens without a usable viewport. Size only the
+  // owned headless window; a visible window keeps its own size.
+  await chrome(harness, ({ width, height }) => {
+    const gfx = Cc['@mozilla.org/gfx/info;1'].getService(Ci.nsIGfxInfo);
+    if (gfx.isHeadless !== true || document.documentURI !== 'chrome://browser/content/browser.xhtml') return false;
+    window.resizeTo(width + window.outerWidth - window.innerWidth, height + window.outerHeight - window.innerHeight);
+    return true;
+  }, { width: 1440, height: 900 });
+  // A fresh profile opens on the first-use Browser with the Desk shell hidden;
+  // zoom out once natively to reveal the Dock, as the headless regression does.
+  const dockVisible = () => chrome(harness, () => {
+    const node = document.querySelector('#egd-dock .egd-dock-btn[data-id="chat"]');
+    const rect = node?.getBoundingClientRect();
+    return !!rect && rect.width > 0 && rect.height > 0 && getComputedStyle(node).visibility !== 'hidden';
+  });
+  if (!await dockVisible()) {
+    await harness.press('meta+-');
+    await waitUntil(dockVisible, Boolean);
+  }
   defer(async () => {
     const untouched = await chrome(harness, () => {
       const original = window.__egdeskQaTransportIdentity;
@@ -209,6 +318,129 @@ await runUiFlow('rendered-ui-fixture-transport', async ({ harness, check, captur
   await control('/__qa/release', { runId: approvalRun.runId, phase: 'run' });
   await harness.click('[aria-label="활동 기록 닫기"]');
   await waitUntil(() => harness.inspect('[data-testid="chat-run-status"]'), (nodes) => nodes[0]?.dataset.status === 'completed');
+
+  // Agent question: shown in the activity record, answered only by explicit native input.
+  const threadQ = await newQaThread(harness, `QA question ${nonce}`);
+  const privateAnswer = `QA-PRIVATE-${nonce}-${randomUUID().slice(0, 8)}`;
+  const sendsBeforeQuestion = (await fixtureState()).observed.sends.length;
+  await sendFromComposer(harness, `EGDESK_QA_USER_INPUT ${nonce}`);
+  fixture = await waitUntil(fixtureState, (state) => state.runs.some((run) => run.clientThreadId === threadQ.wireClientThreadId && run.pendingUserInputs?.length));
+  const questionRun = fixture.runs.find((run) => run.clientThreadId === threadQ.wireClientThreadId);
+  const pendingQuestion = questionRun.pendingUserInputs[0];
+  const [choiceQuestion, privateQuestion] = pendingQuestion.questions;
+  check('fixture question uses the public two-question contract', pendingQuestion.status === 'pending' && pendingQuestion.isBlocking &&
+    choiceQuestion.options?.length === 2 && choiceQuestion.allowsOther && privateQuestion.options === null && privateQuestion.isSecret);
+  await waitUntil(() => harness.inspect('[data-testid="chat-run-status"]'), (nodes) => shows(nodes[0]?.text, '답변 대기'));
+  check('parent run status reads waiting for an answer', true);
+  check('activity button counts the pending question', shows((await harness.inspect('[data-testid="chat-activity-open"]'))[0]?.text, '질문 1건'));
+  await harness.click('[data-testid="chat-activity-open"]');
+  await visible(harness, '[data-testid="chat-user-input"]');
+  await new Promise(resolve => setTimeout(resolve, 500));
+  let card = await questionCard(harness);
+  check('question is not answered or skipped automatically', (await fixtureState()).observed.userInputs.length === 0 && card.count === 1);
+  check('question card shows the blocking notice, every header, question, option and description',
+    ['Agent 질문', '답변할 때까지 작업이 멈춰 있습니다.', '기타(직접 입력)', choiceQuestion.header, choiceQuestion.question,
+      privateQuestion.header, privateQuestion.question, ...choiceQuestion.options.flatMap(item => [item.label, item.description])]
+      .every(text => shows(card.content, text)));
+  check('choice question renders radios and its other-text stays disabled until chosen',
+    card.radios.length >= choiceQuestion.options.length && card.radios.every(item => item.type === 'radio') &&
+    card.other.length === 1 && card.other[0].disabled);
+  check('private free-text answer is a password field without autocomplete or spellcheck',
+    card.freeText.length === 1 && card.freeText[0].type === 'password' && card.freeText[0].autocomplete === 'off' &&
+    card.freeText[0].spellcheck === false && !card.freeText[0].disabled);
+  check('send stays disabled until every question has an answer while skip is offered',
+    card.submit.length === 1 && shows(card.submit[0].text, '답변 보내기') && card.submit[0].disabled &&
+    card.skip.length === 1 && shows(card.skip[0].text, '건너뛰기') && !card.skip[0].disabled && card.alerts === 0);
+  const chosenOption = choiceQuestion.options[1];
+  const optionSelector = await questionOptionSelector(harness, chosenOption.label);
+  await harness.click(optionSelector);
+  await waitUntil(() => chrome(harness, (selector) => document.querySelector(selector)?.checked === true, optionSelector), Boolean);
+  check('one chosen option alone does not enable send', (await questionCard(harness)).submit[0].disabled);
+  await harness.fill('[data-testid="chat-user-input-text"]', privateAnswer);
+  card = await waitUntil(() => questionCard(harness), (value) => value.submit?.[0] && !value.submit[0].disabled);
+  check('answering every question enables send without submitting', (await fixtureState()).observed.userInputs.length === 0 && card.other[0].disabled);
+  const draftTrace = await privateAnswerTrace(harness, privateAnswer);
+  check('private draft lives only in its field, not in app state, attributes, text or storage',
+    !draftTrace.state && !draftTrace.attributes && !draftTrace.text && !draftTrace.storage &&
+    JSON.stringify(draftTrace.fields) === JSON.stringify(['chat-user-input-text']));
+  await harness.click('[data-testid="chat-user-input-submit"]');
+  fixture = await waitUntil(fixtureState, (state) => state.observed.userInputs.length === 1);
+  const reply = fixture.observed.userInputs[0];
+  check('one explicit submit sends the chosen option and the exact private text once',
+    reply.action === 'submit' && reply.userInputId === pendingQuestion.userInputId && reply.runId === questionRun.runId &&
+    reply.answers.length === 2 && reply.answers[0].questionId === choiceQuestion.questionId && reply.answers[0].optionIndex === 1 &&
+    reply.answers[1].questionId === privateQuestion.questionId &&
+    reply.answers[1].textDigest === createHmac('sha256', token).update(privateAnswer).digest('hex'));
+  card = await waitUntil(() => questionCard(harness), (value) => value.count === 1 && shows(value.content, '답변 전달됨 · 작업 상태 확인 중'));
+  check('replySent disables every control and marks the private answer as delivered without echoing it',
+    shows(card.content, '비공개 답변 전달됨') && card.radios.every(item => item.disabled) &&
+    [...card.other, ...card.freeText].every(item => item.disabled && !item.filled) &&
+    [...card.submit, ...card.skip].every(item => item.disabled) &&
+    (await fixtureState()).runs.find((run) => run.runId === questionRun.runId).status === 'running');
+  const sentTrace = await privateAnswerTrace(harness, privateAnswer);
+  check('submitted private answer is cleared from fields, state, attributes, text and storage',
+    !sentTrace.state && !sentTrace.attributes && !sentTrace.text && !sentTrace.storage && sentTrace.fields.length === 0);
+  const questionSnapshot = await loopbackJson(`/chat/state?conversationId=${encodeURIComponent(questionRun.conversationId)}`);
+  check('fixture records and snapshots never contain the private answer',
+    !JSON.stringify(await fixtureState()).includes(privateAnswer) && !JSON.stringify(questionSnapshot).includes(privateAnswer));
+  await capture('fixture-user-input-reply-sent');
+  await control('/__qa/release', { runId: questionRun.runId, phase: 'userInput' });
+  await waitUntil(() => harness.inspect('[data-testid="chat-user-input"]'), (nodes) => nodes.length === 0);
+  await waitUntil(() => harness.inspect('[data-testid="chat-run-status"]'), (nodes) => nodes[0] && !shows(nodes[0].text, '답변 대기'));
+  check('resolved question disappears while the same run keeps working',
+    (await fixtureState()).runs.find((run) => run.runId === questionRun.runId).status === 'running' &&
+    !shows((await harness.inspect('[data-testid="chat-activity-open"]'))[0]?.text ?? '질문', '질문'));
+  await control('/__qa/release', { runId: questionRun.runId, phase: 'run' });
+  await waitUntil(() => harness.inspect('[data-testid="chat-run-status"]'), (nodes) => nodes[0]?.dataset.status === 'completed');
+  fixture = await fixtureState();
+  const finalTrace = await privateAnswerTrace(harness, privateAnswer);
+  check('the answered run completes as the same run with one reply and no extra send',
+    fixture.observed.userInputs.length === 1 && fixture.observed.sends.length === sendsBeforeQuestion + 1 &&
+    fixture.runs.find((run) => run.runId === questionRun.runId).status === 'completed' &&
+    !finalTrace.state && !finalTrace.attributes && !finalTrace.text && !finalTrace.storage && finalTrace.fields.length === 0);
+  await harness.click('[aria-label="활동 기록 닫기"]');
+
+  // Sub-agents: quiet rows inside the same activity record, blocked ones called out.
+  await sendFromComposer(harness, `EGDESK_QA_SUBAGENT ${nonce}`);
+  fixture = await waitUntil(fixtureState, (state) => state.runs.some((run) => run.clientThreadId === threadQ.wireClientThreadId && run.fixtureStage === 'subagents-visible'));
+  const subAgentRun = fixture.runs.find((run) => run.clientThreadId === threadQ.wireClientThreadId && run.fixtureStage === 'subagents-visible');
+  const [agentDone, agentErrored, agentWaiting] = subAgentRun.subAgents;
+  check('fixture sub-agents are running, errored and approval-blocked',
+    subAgentRun.subAgents.length === 3 && agentDone.state === 'running' && !agentDone.blocked &&
+    agentErrored.blocked?.reason === 'errored' && agentErrored.label === null && agentWaiting.blocked?.reason === 'approvalRequested');
+  const subAgentActivities = { collabId: `${subAgentRun.runId}-collab`, gatherId: `${subAgentRun.runId}-activity` };
+  await waitUntil(() => harness.inspect('[data-testid="chat-activity-open"]'), (nodes) => shows(nodes[0]?.text, '막힘 2건'));
+  check('activity button counts blocked sub-agents', true);
+  await harness.click('[data-testid="chat-activity-open"]');
+  await visible(harness, '[data-testid="chat-subagent"]');
+  let agents = await waitUntil(() => subAgentView(harness, subAgentActivities), (value) => value.sections.length === 1 && value.sections[0].rows.length === 3);
+  const agentRow = (view, agent) => view.sections[0].rows.find(row => row.threadId === agent.threadId);
+  check('sub-agent section lists exactly the three child threads under one heading with the blocked count',
+    shows(agents.sections[0].text, '하위 Agent · 3', '막힘 2') &&
+    subAgentRun.subAgents.every(agent => agentRow(agents, agent)));
+  check('running sub-agent shows its name, progress and task preview', agentRow(agents, agentDone).status === 'active' &&
+    shows(agentRow(agents, agentDone).text, 'researcher', '진행 중', agentDone.taskPreview));
+  check('errored sub-agent is blocked under its short fallback name with its reason',
+    agentRow(agents, agentErrored).status === 'blocked' &&
+    shows(agentRow(agents, agentErrored).text, `하위 Agent ${agentErrored.threadId.slice(0, 8)}`, '오류로 멈춤', agentErrored.message));
+  check('approval request from a sub-agent is shown as blocked, never granted',
+    agentRow(agents, agentWaiting).status === 'blocked' &&
+    shows(agentRow(agents, agentWaiting).text, 'reviewer', '승인 요청으로 멈춤') &&
+    (await harness.inspect('[data-testid="chat-approval"]')).length === 0);
+  check('sub-agent rows stay quiet and replace the raw collaboration activity row',
+    agents.sections[0].alerts === 0 && agents.collabRows === 0 && agents.gatherRow && agents.sections[0].beforeActivity);
+  check('sub-agent status creates no chat message', !(await messages(harness)).some(row => row.runId === subAgentRun.runId && row.role === 'assistant'));
+  await capture('fixture-subagent-blocked');
+  await control('/__qa/release', { runId: subAgentRun.runId, phase: 'subagent' });
+  agents = await waitUntil(() => subAgentView(harness, subAgentActivities), (value) => value.sections[0] && agentRow(value, agentDone)?.status === 'done');
+  check('finished sub-agent turns done while blocked ones stay blocked',
+    shows(agentRow(agents, agentDone).text, '완료') && shows(agents.sections[0].text, '막힘 2') &&
+    agentRow(agents, agentErrored).status === 'blocked' && agentRow(agents, agentWaiting).status === 'blocked');
+  await control('/__qa/release', { runId: subAgentRun.runId, phase: 'run' });
+  await waitUntil(() => harness.inspect('[data-testid="chat-run-status"]'), (nodes) => nodes[0]?.dataset.status === 'completed' && nodes[0].dataset.runId === subAgentRun.runId);
+  check('sub-agent run completes without any reply or extra send',
+    (await fixtureState()).observed.userInputs.length === 1 && (await fixtureState()).observed.sends.length === sendsBeforeQuestion + 2);
+  await harness.click('[aria-label="활동 기록 닫기"]');
 
   const threadC = await newQaThread(harness, `QA retry ${nonce}`);
   const retryPrompt = `EGDESK_QA_START_FAIL ${nonce}`;

@@ -645,7 +645,15 @@
       if (stopping) return '중지 요청 중';
     }
     if (run.pendingApprovals?.length) return '승인 대기';
+    if (ChatState.pendingUserInputCount(run)) return '답변 대기';
     return '응답 중';
+  }
+
+  function codexActivityButtonLabel(run) {
+    const approvals = run?.pendingApprovals?.length || 0;
+    const questions = ChatState.pendingUserInputCount(run);
+    const blocked = ChatState.subAgentSummary(run).blocked;
+    return ['활동 기록', approvals ? `승인 ${approvals}건` : '', questions ? `질문 ${questions}건` : '', blocked ? `막힘 ${blocked}건` : ''].filter(Boolean).join(' · ');
   }
 
   function openCodexActivityPanel(threadId) {
@@ -979,18 +987,148 @@
     return shell.root;
   }
 
+  // Agent question drafts live only in this closure: never state.codex, thread
+  // drafts, Desk storage, DOM attributes or logs (secret answers included).
+  const userInputDrafts = new Map();
+  let activityPanelComposing = false;
+  let activityPanelDeferred = false;
+  const userInputDraftKey = (run, userInputId) => `${run.conversationId}/${run.runId}/${userInputId}`;
+
+  function pruneUserInputDrafts() {
+    if (!userInputDrafts.size) return;
+    const live = new Set();
+    for (const run of Object.values(state.codex.chatProtocol.runs)) {
+      for (const input of run.pendingUserInputs || []) {
+        if (input.status === 'pending' && !input.stale) live.add(userInputDraftKey(run, input.userInputId));
+      }
+    }
+    for (const key of [...userInputDrafts.keys()]) if (!live.has(key)) userInputDrafts.delete(key);
+  }
+
+  // Agent question card. Controls mirror `draft`; values are set as properties,
+  // so a secret answer never becomes a value/data/aria attribute.
+  function codexUserInputBlock(run, input, draft, actions) {
+    const userInputId = input.userInputId;
+    const sent = input.status === 'replySent';
+    const locked = sent || input.status !== 'pending' || !!input.replyPending || !!input.stale
+      || run.localHistory === true || !ChatState.isRunBusy(run);
+    const answers = (input.questions || []).map(question => {
+      const saved = Array.isArray(draft) ? draft.find(entry => entry?.questionId === question.questionId) : null;
+      return { questionId: question.questionId, choice: saved?.choice ?? null, text: typeof saved?.text === 'string' ? saved.text : '' };
+    });
+    const focusKey = (index, part) => `${userInputId}\n${index}\n${part}`;
+    const otherFields = [];
+    const submit = el('button', { type: 'button', 'aria-label': 'Agent 질문에 답변 보내기',
+      data: { testid: 'chat-user-input-submit', focusKey: focusKey(-1, 'submit') },
+      onclick: () => { if (!locked && ChatState.userInputRequestFor(run, userInputId, answers)) actions.submit(answers); } }, '답변 보내기');
+    const sync = () => {
+      for (const { field, answer } of otherFields) field.disabled = locked || answer.choice !== 'other';
+      submit.disabled = locked || !ChatState.userInputRequestFor(run, userInputId, answers);
+    };
+    const changed = () => { if (locked) return; actions.draft(answers); sync(); };
+    const textField = (question, answer, testid, part, label) => {
+      const field = el('input', { type: question.isSecret ? 'password' : 'text', 'aria-label': label,
+        autocomplete: question.isSecret ? 'off' : null, spellcheck: question.isSecret ? 'false' : null,
+        maxlength: '4000', data: { testid, focusKey: focusKey(answers.indexOf(answer), part) },
+        oninput: ev => { answer.text = ev.target.value; changed(); },
+        onkeydown: ev => {
+          if (ev.key !== 'Enter' || !(ev.metaKey || ev.ctrlKey) || ev.shiftKey || ev.altKey) return;
+          if (ev.isComposing || ev.keyCode === 229) return;
+          ev.preventDefault();
+          if (!submit.disabled) actions.submit(answers);
+        } });
+      field.value = answer.text;
+      field.disabled = locked;
+      return field;
+    };
+    const block = el('section', { class: 'egd-codex-user-input', 'aria-label': 'Agent 질문',
+      data: { testid: 'chat-user-input', userInputId, runId: run.runId, status: input.status } },
+    el('strong', {}, sent ? '답변 전달됨 · 작업 상태 확인 중' : 'Agent 질문'),
+    input.isBlocking && !sent ? el('p', { class: 'egd-codex-user-input-blocking' }, '답변할 때까지 작업이 멈춰 있습니다.') : null);
+    (input.questions || []).forEach((question, index) => {
+      const answer = answers[index];
+      const set = el('fieldset', { class: 'egd-codex-user-input-question', data: { questionId: question.questionId } },
+        el('legend', {}, question.header || `질문 ${index + 1}`),
+        el('p', {}, question.question));
+      if (sent && question.isSecret) {
+        set.appendChild(el('p', { class: 'egd-codex-user-input-note' }, '비공개 답변 전달됨'));
+      } else if (question.options) {
+        const radio = (value, part, text, description) => {
+          const control = el('input', { type: 'radio', name: `egd-user-input:${userInputId}:${index}`,
+            data: { testid: 'chat-user-input-option', questionId: question.questionId, optionIndex: String(value), focusKey: focusKey(index, part) },
+            onchange: ev => { if (ev.target.checked) { answer.choice = value; changed(); } } });
+          control.checked = answer.choice === value;
+          control.disabled = locked;
+          return el('label', { class: 'egd-input-source-choice' }, control,
+            el('span', {}, text, description ? el('small', {}, description) : null));
+        };
+        question.options.forEach((option, optionIndex) => set.appendChild(radio(optionIndex, `option-${optionIndex}`, option.label, option.description)));
+        if (question.allowsOther) {
+          set.appendChild(radio('other', 'other-choice', '기타(직접 입력)', null));
+          const field = textField(question, answer, 'chat-user-input-other', 'other', '기타 답변 직접 입력');
+          otherFields.push({ field, answer });
+          set.appendChild(field);
+        }
+      } else {
+        set.appendChild(textField(question, answer, 'chat-user-input-text', 'text', question.isSecret ? '비공개 답변 입력' : '답변 입력'));
+      }
+      block.appendChild(set);
+    });
+    const skip = el('button', { type: 'button', 'aria-label': 'Agent 질문 건너뛰기',
+      data: { testid: 'chat-user-input-skip', focusKey: focusKey(-1, 'skip') },
+      onclick: () => { if (!locked) actions.skip(); } }, '건너뛰기');
+    skip.disabled = locked;
+    sync();
+    block.appendChild(el('div', { class: 'egd-codex-user-input-actions' }, submit, skip));
+    if (input.error) block.appendChild(el('p', { class: 'egd-codex-user-input-error' }, input.error));
+    return block;
+  }
+
+  // Sub-agent rows stay quietly inside the activity record: no alert role and
+  // no new panel; the delegated prompt is only the helper's short preview.
+  function codexSubAgentSection(run) {
+    const summary = ChatState.subAgentSummary(run);
+    if (!summary.total) return null;
+    return el('section', { class: 'egd-codex-subagents', 'aria-label': '하위 Agent', data: { testid: 'chat-subagents', runId: run.runId } },
+      el('strong', {}, `하위 Agent · ${summary.total}${summary.blocked ? ` · 막힘 ${summary.blocked}` : ''}`),
+      el('ul', {}, ...summary.rows.map(({ row, display }) => el('li', {
+        class: 'egd-codex-subagent-row', data: { testid: 'chat-subagent', agentThreadId: row.threadId, status: display.status },
+      }, el('span', { class: `egd-codex-subagent-dot egd-codex-subagent-dot-${display.status}`, 'aria-hidden': 'true' }),
+      el('span', { class: 'egd-codex-subagent-name' }, display.name),
+      el('span', { class: 'egd-codex-subagent-status' }, display.stateLabel),
+      row.taskPreview ? el('small', { class: 'egd-codex-subagent-task' }, row.taskPreview) : null,
+      display.blockedLabel ? el('p', { class: 'egd-codex-subagent-blocked' }, display.blockedLabel) : null,
+      row.message ? el('p', { class: 'egd-codex-subagent-message' }, row.message) : null))));
+  }
+
   function renderCodexActivityPanel() {
+    pruneUserInputDrafts();
     const thread = getCodexThreadById(state.codex, state.codex.activityThreadId);
-    if (!thread) { document.getElementById('egd-codex-activity-panel')?.remove(); return; }
     let panel = document.getElementById('egd-codex-activity-panel');
+    if (!thread) { activityPanelComposing = false; activityPanelDeferred = false; panel?.remove(); return; }
+    // An SSE re-render must not cut IME composition in an Agent answer.
+    if (activityPanelComposing && panel?.contains(document.activeElement)) { activityPanelDeferred = true; return; }
+    activityPanelComposing = false;
+    activityPanelDeferred = false;
     if (!panel) {
       panel = el('section', { id: 'egd-codex-activity-panel', role: 'region', 'aria-label': '활동 기록', data: { testid: 'chat-activity-panel' } });
       panel.addEventListener('mousedown', ev => ev.stopPropagation());
+      panel.addEventListener('compositionstart', () => { activityPanelComposing = true; });
+      panel.addEventListener('compositionend', () => {
+        activityPanelComposing = false;
+        if (!activityPanelDeferred) return;
+        activityPanelDeferred = false;
+        queueMicrotask(renderCodexActivityPanel);
+      });
       document.documentElement.appendChild(panel);
     }
     panel.dataset.threadId = thread.id;
     const oldBody = panel.querySelector('.egd-codex-activity-body');
     const scrollTop = oldBody?.scrollTop || 0;
+    const focused = panel.contains(document.activeElement) ? document.activeElement : null;
+    const focusState = focused?.dataset?.focusKey ? { key: focused.dataset.focusKey,
+      start: typeof focused.selectionStart === 'number' ? focused.selectionStart : null,
+      end: focused.selectionEnd, direction: focused.selectionDirection || 'none' } : null;
     const rows = [];
     for (const message of thread.messages || []) {
       if (!message.inputReferences?.length) continue;
@@ -1035,7 +1173,11 @@
       const steps = Array.isArray(run.plan) ? run.plan : run.plan?.steps;
       if (Array.isArray(steps)) rows.push(el('ul', {}, ...steps.map(step => el('li', {}, `${step.step || step.title || ''} · ${step.status || ''}`))));
       else if (run.plan?.text) rows.push(el('p', {}, run.plan.text));
+      const subAgents = codexSubAgentSection(run);
+      if (subAgents) rows.push(subAgents);
       for (const activity of run.activities || []) {
+        // Agent-to-agent records are shown only as the sub-agent rows above.
+        if (activity.kind === 'collabAgentToolCall' || activity.kind === 'subAgentActivity') continue;
         const row = el('article', { class: 'egd-codex-activity-row', data: { activityId: activity.id, status: activity.status } },
           el('strong', {}, activity.title || activity.kind || '활동'),
           el('span', {}, ({ inProgress: '진행 중', completed: '완료', failed: '실패', declined: '거절됨' })[activity.status] || activity.status || ''),
@@ -1081,6 +1223,15 @@
         if (approval.error) block.appendChild(el('p', { role: 'alert' }, approval.error));
         rows.push(block);
       }
+      for (const input of run.pendingUserInputs || []) {
+        const draftKey = userInputDraftKey(run, input.userInputId);
+        const reply = action => draft => state.codexBridge.replyUserInput({ userInputId: input.userInputId,
+          conversationId: run.conversationId, runId: run.runId, action, draft });
+        rows.push(codexUserInputBlock(run, input, userInputDrafts.get(draftKey), {
+          draft: answers => { if (input.status === 'pending' && !input.stale) userInputDrafts.set(draftKey, answers.map(entry => ({ ...entry }))); },
+          submit: reply('submit'), skip: () => reply('skip')(),
+        }));
+      }
       if (run.error) rows.push(el('p', { class: 'egd-codex-error' }, typeof run.error === 'string' ? run.error : run.error.message || run.error.code || '실행 오류'));
     }
     if (!rows.length) rows.push(el('p', {}, '기록된 활동이 없습니다.'));
@@ -1088,9 +1239,17 @@
     panel.replaceChildren(el('header', {}, el('strong', {}, '활동 기록'), el('button', {
       'aria-label': '활동 상태 다시 확인', onclick: () => state.codexBridge.refreshConversation(thread.id),
     }, '새로고침'), el('button', {
-      'aria-label': '활동 기록 닫기', onclick: () => { state.codex.activityThreadId = null; panel.remove(); },
+      'aria-label': '활동 기록 닫기', onclick: () => {
+        state.codex.activityThreadId = null; activityPanelComposing = false; activityPanelDeferred = false; panel.remove();
+      },
     }, '닫기')), body);
     body.scrollTop = scrollTop;
+    // Restore focus/caret to the same Agent answer control after replacement.
+    const restored = focusState && [...body.querySelectorAll('[data-focus-key]')].find(node => node.dataset.focusKey === focusState.key);
+    if (restored && !restored.disabled) {
+      restored.focus({ preventScroll: true });
+      if (focusState.start !== null) try { restored.setSelectionRange(focusState.start, focusState.end, focusState.direction); } catch {}
+    }
   }
 
   const ZOOM_MIN = 0.01;
@@ -5219,7 +5378,7 @@
           class: 'egd-codex-run-status', role: 'status', 'aria-live': 'polite',
           data: { testid: 'chat-run-status', status, runId: run?.runId || '', stopConfirmed: String(run?.status === 'interrupted') },
         }, el('span', {}, statusText),
-        el('button', { 'aria-label': '활동 기록 열기', data: { testid: 'chat-activity-open', threadId: activeThread.id }, onclick: () => codexBridge.openActivity(activeThread.id) }, run?.pendingApprovals?.length ? `활동 기록 · 승인 ${run.pendingApprovals.length}건` : '활동 기록')));
+        el('button', { 'aria-label': '활동 기록 열기', data: { testid: 'chat-activity-open', threadId: activeThread.id }, onclick: () => codexBridge.openActivity(activeThread.id) }, codexActivityButtonLabel(run))));
         if (pending?.status === 'unconfirmed') conversation.appendChild(el('button', {
           class: 'egd-codex-chip', 'aria-label': '요청 접수 상태 다시 확인', data: { testid: 'chat-reconcile' },
           onclick: () => codexBridge.reconcileRequest(activeThread.id),
@@ -5871,6 +6030,9 @@
       browserToolUserSelections.clear();
       browserToolActionLeases.clear();
       ChatState.resetChatProtocol(protocol);
+      userInputDrafts.clear();
+      activityPanelComposing = false;
+      activityPanelDeferred = false;
       refreshing.clear();
       resumedNativeBindings.clear();
       streamReady = false;
@@ -6323,6 +6485,33 @@
           current.error = current.stale ? '이 승인은 더 이상 유효하지 않습니다. 현재 상태를 다시 확인해 주세요.' : `응답 전달 여부를 확인하지 못했습니다: ${error.message}`;
           return false;
         } finally { epochScope.finish(token); if (epochScope.valid(token)) { approval.replyPending = false; emit(); } }
+      },
+      async replyUserInput({ userInputId, conversationId, runId, action = 'submit', draft }) {
+        const run = protocol.runs[ChatState.runKey(conversationId, runId)];
+        const input = run?.pendingUserInputs?.find(item => item.userInputId === userInputId);
+        const draftKey = `${conversationId}/${runId}/${userInputId}`;
+        const request = ChatState.userInputRequestFor(run, userInputId, draft ?? userInputDrafts.get(draftKey), action);
+        if (!request) return false;
+        const token = epochScope.begin();
+        input.replyPending = true;
+        input.error = null;
+        emit();
+        try {
+          const result = await fetchJson('/chat/user-input', { method: 'POST', signal: token.signal, body: JSON.stringify(request) });
+          if (!epochScope.valid(token)) return false;
+          if (ChatState.acknowledgeUserInputReply(run, result) && result.userInputId === userInputId) userInputDrafts.delete(draftKey);
+          return result;
+        } catch (error) {
+          if (!epochScope.valid(token)) return false;
+          // Error text is the helper's public message only; answers are never echoed.
+          const current = run.pendingUserInputs?.find(item => item.userInputId === userInputId) || input;
+          current.stale = error.code === 'STALE_USER_INPUT' || error.status === 409;
+          if (current.stale) userInputDrafts.delete(draftKey);
+          current.error = current.stale ? '이 질문은 더 이상 답할 수 없습니다.'
+            : error.code === 'INVALID_USER_INPUT_ANSWER' ? '답변을 보낼 수 없습니다. 선택과 입력을 다시 확인해 주세요.'
+              : `답변 전달 여부를 확인하지 못했습니다: ${error.message}`;
+          return false;
+        } finally { epochScope.finish(token); if (epochScope.valid(token)) { input.replyPending = false; emit(); } }
       },
       async interrupt(threadId = state.codex.activeThreadId) {
         const thread = getCodexThreadById(state.codex, threadId);

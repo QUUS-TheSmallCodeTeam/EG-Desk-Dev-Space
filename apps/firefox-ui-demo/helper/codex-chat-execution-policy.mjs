@@ -105,7 +105,9 @@ export function qaThreadOverrides(servers, directIds) {
     sandbox: 'read-only', approvalPolicy: 'never',
     config: {
       web_search: 'disabled',
-      features: { apps: false, hooks: false, multi_agent: false, plugins: false, remote_plugin: false, code_mode: { enabled: false } },
+      // Explicit false: a thread first started as ordinary Chat carries the
+      // question feature, and a bounded resume must not inherit it.
+      features: { apps: false, hooks: false, multi_agent: false, plugins: false, remote_plugin: false, default_mode_request_user_input: false, code_mode: { enabled: false } },
       mcp_servers, plugins,
     },
   }

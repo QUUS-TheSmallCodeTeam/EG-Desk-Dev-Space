@@ -238,3 +238,18 @@ test('timed-out Reader also remains quarantined without native completion proof'
     assert.equal(h.calls.filter(call => call.method === 'thread/start').length, 1)
   } finally { clearTimeout(keeper) }
 })
+
+test('Reader child Agent question is refused, interrupted and never answered', async () => {
+  let handled = null
+  const h = nativeHarness({ start: ({ reader, params, id }) => {
+    setImmediate(() => {
+      handled = reader.handleServerRequest({ id: 'reader-ask', method: 'item/tool/requestUserInput', params: { threadId: params.threadId, turnId: id, itemId: 'ask', isBlocking: true,
+        questions: [{ id: 'password', header: 'Password', question: 'Share a secret?', isSecret: true, options: null }] } })
+    })
+    return { turn: { id, status: 'inProgress' } }
+  } })
+  await assert.rejects(h.reader.read(h.input), e => e.code === 'READER_SCOPE_VIOLATION')
+  assert.equal(handled, true, 'the Reader consumes its child request before Chat can see it')
+  assert.deepEqual(h.replies, [['reader-ask', null, { code: -32601, message: 'Reader has no interactive, tool-execution or approval capability' }]])
+  assert.ok(h.calls.some(call => call.method === 'turn/interrupt' && call.params.turnId === 'reader-turn-1'))
+})
