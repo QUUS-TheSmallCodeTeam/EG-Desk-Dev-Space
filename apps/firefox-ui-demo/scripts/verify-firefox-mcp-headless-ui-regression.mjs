@@ -239,6 +239,63 @@ export async function observeTargets(harness, selector) {
   }), { selector });
 }
 
+// Readback for Main's native Dock zoom / Browser toolbar QA. This never asks
+// the content actor for an observation, metrics refresh, refs, or authority.
+export async function observeBrowserPresentation(harness, cardId) {
+  assert.match(cardId, /^egd-browser-card-\d+$/);
+  return chrome(harness, ({ cardId: id }) => {
+    const card = document.getElementById(id);
+    if (!card?.classList.contains('egd-browser-card')) return null;
+    const browser = card._xulBrowser;
+    const rect = card.getBoundingClientRect();
+    const zoom = window.__egdesk.state.zoom;
+    const font = selector => {
+      const node = card.querySelector(selector);
+      return node ? Number.parseFloat(getComputedStyle(node).fontSize) * zoom : null;
+    };
+    const controls = [...card.querySelectorAll('.egd-card-header button, .egd-card-header [role="button"]')]
+      .filter(node => !node.disabled && node.getAttribute('aria-disabled') !== 'true')
+      .map(node => {
+        const box = node.getBoundingClientRect();
+        let hits = 0;
+        for (const y of [.2, .5, .8]) for (const x of [.2, .5, .8]) {
+          const hit = document.elementFromPoint(box.left + box.width * x, box.top + box.height * y);
+          if (hit && (hit === node || node.contains(hit))) hits++;
+        }
+        return { label: node.getAttribute('aria-label') || node.title || node.className,
+          width: box.width, height: box.height, hits };
+      });
+    const px = value => Number.parseFloat(value);
+    return { cardId: id, level: card.dataset.egdSemanticLevel, zoom,
+      world: { x: px(card.style.left), y: px(card.style.top),
+        width: px(card.style.width), height: px(card.style.height) },
+      screen: { x: rect.x, y: rect.y, width: rect.width, height: rect.height },
+      contextId: browser?.browsingContext?.id ?? null,
+      innerWindowId: browser?.browsingContext?.currentWindowGlobal?.innerWindowId ?? null,
+      logicalWidth: browser?.clientWidth, logicalHeight: browser?.clientHeight,
+      pageZoom: browser?.fullZoom ?? null,
+      contentFontPx: card._browserPresentation?.font() ?? null,
+      metrics: card._browserPresentation?.read() ?? null,
+      cache: card._browserPresentation?.diagnostics() ?? null,
+      titleFontPx: font('.egd-card-page-title'), addressFontPx: font('.egd-card-url'), controls };
+  }, { cardId });
+}
+
+export function browserPresentationIssues(before, after, { expectDetail = true } = {}) {
+  const issues = [];
+  if (!before || !after || !before.contextId || !before.innerWindowId ||
+      ['cardId', 'contextId', 'innerWindowId', 'logicalWidth', 'logicalHeight', 'pageZoom']
+        .some(key => before[key] !== after[key]) ||
+      JSON.stringify(before.world) !== JSON.stringify(after.world)) issues.push('browser-identity-viewport-or-world-changed');
+  if (expectDetail) {
+    if (after?.level !== 'detail' || !(after.contentFontPx >= 9)) issues.push('readable-content-not-detail');
+    if (!(after?.titleFontPx >= 10.5) || !(after.addressFontPx >= 10.5)) issues.push('two-row-bar-font-too-small');
+    if (!after?.controls?.length || after.controls.some(control => control.width < 31.5 ||
+      control.height < 31.5 || control.hits !== 9)) issues.push('two-row-bar-target-unusable');
+  } else if (after?.level === 'detail') issues.push('unreadable-content-not-compact');
+  return issues;
+}
+
 export async function observeChat(harness) {
   return chrome(harness, () => {
     const api = window.__egdesk;

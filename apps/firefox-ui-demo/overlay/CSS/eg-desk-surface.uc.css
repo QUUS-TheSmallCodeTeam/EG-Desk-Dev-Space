@@ -1022,6 +1022,67 @@
 
 .egd-browser-card .egd-card-body { border-top-color: transparent; }
 
+/* Cancel Desk shrink only for the attached Browser controls, not the page.
+   32+32 keeps the original 64px row budget at 100%. JS fits the unchanged
+   logical viewport in the remaining body when these screen-sized rows grow. */
+.egd-browser-card[data-egd-browser-presentation] > .egd-card-header {
+  --egd-browser-ui-scale: 1;
+  border-bottom-width: calc(1px * var(--egd-browser-ui-scale));
+}
+.egd-browser-card[data-egd-browser-presentation] .egd-desk-window-titlebar,
+.egd-browser-card[data-egd-browser-presentation] .egd-desk-window-toolbar {
+  height: calc(32px * var(--egd-browser-ui-scale));
+  min-height: calc(32px * var(--egd-browser-ui-scale));
+  padding-inline: calc(9px * var(--egd-browser-ui-scale));
+}
+.egd-browser-card[data-egd-browser-presentation] .egd-desk-window-titlebar {
+  border-bottom-width: calc(1px * var(--egd-browser-ui-scale));
+}
+.egd-browser-card[data-egd-browser-presentation] .egd-card-page-title,
+.egd-browser-card[data-egd-browser-presentation] .egd-card-page-status {
+  font-size: calc(11px * var(--egd-browser-ui-scale));
+}
+.egd-browser-card[data-egd-browser-presentation] .egd-card-url {
+  font-size: calc(12px * var(--egd-browser-ui-scale));
+}
+.egd-browser-card[data-egd-browser-presentation] .egd-desk-window-control,
+.egd-browser-card[data-egd-browser-presentation] .egd-card-nav-btn,
+.egd-browser-card[data-egd-browser-presentation] .egd-card-menu {
+  width: calc(32px * var(--egd-browser-ui-scale));
+  height: calc(32px * var(--egd-browser-ui-scale));
+  flex-shrink: 0;
+}
+.egd-browser-card[data-egd-browser-presentation] .egd-desk-window-control {
+  border-width: calc(10.5px * var(--egd-browser-ui-scale));
+}
+.egd-browser-card[data-egd-browser-presentation] .egd-card-nav-btn .egd-ui-icon,
+.egd-browser-card[data-egd-browser-presentation] .egd-card-menu .egd-ui-icon,
+.egd-browser-card[data-egd-browser-presentation] .egd-window-kind-icon {
+  width: calc(15px * var(--egd-browser-ui-scale));
+  height: calc(15px * var(--egd-browser-ui-scale));
+}
+.egd-browser-card[data-egd-browser-presentation] .egd-card-omnibox {
+  height: calc(30px * var(--egd-browser-ui-scale));
+}
+.egd-browser-card[data-egd-browser-presentation] .egd-card-omnibox-icon {
+  font-size: calc(12px * var(--egd-browser-ui-scale));
+}
+.egd-browser-card[data-egd-browser-presentation] .egd-card-security {
+  font-size: calc(8px * var(--egd-browser-ui-scale));
+}
+.egd-browser-card[data-egd-browser-presentation] .egd-card-omnibox-icon .egd-ui-icon {
+  width: calc(13px * var(--egd-browser-ui-scale));
+  height: calc(13px * var(--egd-browser-ui-scale));
+}
+.egd-browser-card[data-egd-browser-presentation] .egd-desk-window-progress {
+  flex-basis: calc(2px * var(--egd-browser-ui-scale));
+}
+/* Keep the full north resize strip, but outside the 32px title controls.
+   Its previous inner 6px intercepted the controls' top hit-test row at 100%. */
+.egd-browser-card[data-egd-browser-presentation] > .egd-card-resize-hit-n {
+  top: -10px;
+}
+
 .egd-card-progress {
   position: relative;
   height: 2px;

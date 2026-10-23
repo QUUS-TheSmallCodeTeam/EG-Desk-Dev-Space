@@ -10995,7 +10995,7 @@
       const actor = windowGlobal.getActor(BROWSER_AGENT_ACTOR_NAME);
       if (!actor?.sendQuery) throw new Error('Browser agent JSActor unavailable');
       const result = await actor.sendQuery(method, payload);
-      if (method === 'captureInput' && (!card.isConnected || xulBrowser.browsingContext !== context
+      if (['captureInput', 'presentationMetrics'].includes(method) && (!card.isConnected || xulBrowser.browsingContext !== context
           || context.currentWindowGlobal !== windowGlobal)) throw new Error('Browser changed during capture; attach the current page again');
       return result;
     };
@@ -12109,11 +12109,23 @@
       toolObserve: browserToolObserve,
       toolAct: browserToolAct,
     };
-    const onBrowserLoadStart = () => setBrowserLoading(true);
+    const presentation = createBrowserPresentationCache({ card, browser: xulBrowser,
+      query: () => browserAgentActorRequest('presentationMetrics'),
+      changed: () => state.refreshSemanticProjections?.(),
+    });
+    card._browserPresentation = presentation;
+    const onBrowserLoadStart = () => {
+      presentation.invalidate();
+      setBrowserLoading(true);
+      state.refreshSemanticProjections?.();
+    };
     const onBrowserLoadDone = () => {
+      presentation.invalidate();
       setBrowserLoading(false);
       syncBrowserStateFromBrowser({ markDirtyOnLocationChange: true });
+      state.refreshSemanticProjections?.();
     };
+    const onBrowserPageZoom = () => { presentation.invalidate(); state.refreshSemanticProjections?.(); };
     const onBrowserTitle = () => syncBrowserStateFromBrowser({ markDirtyOnLocationChange: false });
     for (const eventName of ['loadstart']) {
       try { xulBrowser.addEventListener(eventName, onBrowserLoadStart, true); } catch {}
@@ -12122,6 +12134,9 @@
       try { xulBrowser.addEventListener(eventName, onBrowserLoadDone, true); } catch {}
     }
     try { xulBrowser.addEventListener('DOMTitleChanged', onBrowserTitle, true); } catch {}
+    for (const eventName of ['FullZoomChange', 'TextZoomChange']) {
+      xulBrowser.addEventListener(eventName, onBrowserPageZoom, true);
+    }
     setBrowserLoading(true);
     window.setTimeout(() => syncBrowserStateFromBrowser({ markDirtyOnLocationChange: false }), 400);
 
@@ -12184,26 +12199,51 @@
       if (!urlInput.value.trim()) urlInput.value = browserVisibleAddress(browserState.uri);
     });
 
-    // ---- Fit-to-card scaling: width 기준 scale, height 는 logical viewport 로 흡수 ----
+    // Real resize establishes the page viewport; camera changes only its fit.
+    let logicalHeight = 0, lastCardSize = '', lastPresentationZoom = null;
+    let nominalHeaderHeight = 0, bodyFrameHeight = 0;
     const updateFitScale = () => {
-      const bw = body.clientWidth;
-      const bh = body.clientHeight;
-      if (bw < 10 || bh < 10) return;
-      // Subpixel rounding 때문에 일부 사이트(Naver 등) 우측 1px 정도가 잘릴 수 있다.
-      // Width 에 아주 작은 안전 여유를 두고 가운데 정렬해서 clipping 을 피한다.
-      const safeBw = Math.max(1, bw - 2);
-      const scale = safeBw / CARD_LOGICAL_W;
-      const logicalHeight = card._fixedLogicalHeight || Math.max(1, Math.round(bh / scale));
-      if (options.firstUse && !card._fixedLogicalHeight) card._fixedLogicalHeight = logicalHeight;
-      wrap.style.left = Math.max(0, Math.round((bw - safeBw) / 2)) + 'px';
-      wrap.style.height = logicalHeight + 'px';
-      wrap.style.transform = `scale(${scale})`;
+      if (body.clientWidth < 10 || card.clientHeight < 10) return;
+      if (!nominalHeaderHeight) {
+        nominalHeaderHeight = header.offsetHeight;
+        bodyFrameHeight = card.clientHeight - nominalHeaderHeight - body.clientHeight;
+        card.setAttribute('data-egd-browser-presentation', 'true');
+      }
+      const size = `${card.clientWidth},${card.clientHeight}`;
+      if (size !== lastCardSize) {
+        // Only a real Card resize may change the logical page viewport. The
+        // screen-sized toolbar's extra space is presentation, not page resize.
+        const nominalBodyHeight = card.clientHeight - nominalHeaderHeight - bodyFrameHeight;
+        const widthScale = Math.max(1, body.clientWidth - 2) / CARD_LOGICAL_W;
+        logicalHeight = card._fixedLogicalHeight || Math.max(1, Math.round(nominalBodyHeight / widthScale));
+        if (options.firstUse && !card._fixedLogicalHeight) card._fixedLogicalHeight = logicalHeight;
+        wrap.style.height = logicalHeight + 'px';
+        lastCardSize = size;
+        presentation.invalidate();
+      }
+      const zoom = canvasZoom();
+      const inverse = Math.max(1, 1 / zoom);
+      if (lastPresentationZoom !== inverse) {
+        header.style.setProperty('--egd-browser-ui-scale', String(inverse));
+        lastPresentationZoom = inverse;
+      }
+      // Fit the same mounted page below the attached readable two-row bar.
+      // Uniform fitting preserves its aspect and never writes browser zoom.
+      const fit = browserPresentationFit({ width: body.clientWidth, height: body.clientHeight,
+        logicalWidth: CARD_LOGICAL_W, logicalHeight });
+      const transform = `scale(${fit.scale})`;
+      if (wrap.style.transform !== transform) wrap.style.transform = transform;
+      const left = fit.left + 'px';
+      if (wrap.style.left !== left) wrap.style.left = left;
     };
+    presentation.layout = updateFitScale;
     deskWindow.onResize(updateFitScale);
 
     const cleanupCard = () => {
       try { unregisterBrowserAuthorizer?.(); } catch {}
       unregisterBrowserAuthorizer = null;
+      presentation.dispose();
+      delete card._browserPresentation;
       if (state.codex.authCardEntityId === card.id) {
         state.codex.authCardEntityId = null;
       }
@@ -12219,6 +12259,9 @@
         try { xulBrowser.removeEventListener(eventName, onBrowserLoadDone, true); } catch {}
       }
       try { xulBrowser.removeEventListener('DOMTitleChanged', onBrowserTitle, true); } catch {}
+      for (const eventName of ['FullZoomChange', 'TextZoomChange']) {
+        xulBrowser.removeEventListener(eventName, onBrowserPageZoom, true);
+      }
     };
 
     console.warn(TAG, 'browser Desk Window spawned', id, normalizedUrl);
@@ -12530,6 +12573,102 @@
     } catch (e) { console.warn(TAG, 'discardBrowser unavailable', e); }
   }
 
+  // Presentation-only evidence: never creates Agent observations, refs or grants.
+  function browserPresentationFont(metrics, renderedWidth) {
+    if (metrics?.version !== 1 || metrics.complete !== true ||
+        !Number.isFinite(metrics.fontPx) || metrics.fontPx <= 0 || metrics.fontPx > 4096 ||
+        !Number.isFinite(metrics.viewportWidth) || metrics.viewportWidth <= 0 || metrics.viewportWidth > 100000 ||
+        !Number.isFinite(metrics.viewportHeight) || metrics.viewportHeight <= 0 || metrics.viewportHeight > 100000 ||
+        !Number.isInteger(metrics.sampleCount) || metrics.sampleCount < 1 || metrics.sampleCount > 64 ||
+        !Number.isFinite(renderedWidth) || renderedWidth <= 0) return null;
+    // The actual rendered width already includes content fit AND Desk zoom.
+    const projected = metrics.fontPx * renderedWidth / metrics.viewportWidth;
+    return Number.isFinite(projected) && projected > 0 ? projected : null;
+  }
+
+  function createBrowserPresentationCache({ card, browser, query, changed,
+    now = () => Date.now(), setTimer = (fn, ms) => window.setTimeout(fn, ms),
+    clearTimer = id => window.clearTimeout(id) }) {
+    const maxAge = 30000;
+    let cached = null, generation = 0, retryAt = 0, queued = 0, flight = null, disposed = false;
+    let queries = 0;
+    const identity = () => ({ context: browser.browsingContext,
+      global: browser.browsingContext?.currentWindowGlobal, zoom: browser.fullZoom ?? 1 });
+    const current = id => !disposed && card.isConnected && browser.isConnected && id.global &&
+      browser.browsingContext === id.context && id.context.currentWindowGlobal === id.global &&
+      (browser.fullZoom ?? 1) === id.zoom;
+    const read = () => {
+      if (cached && !current(cached.identity)) {
+        generation += 1;
+        cached = null;
+        retryAt = 0;
+      }
+      const age = cached ? now() - cached.at : -1;
+      return cached && age >= 0 && age < maxAge ? cached.value : null;
+    };
+    const ensure = () => {
+      if (disposed || read() || queued || flight || now() < retryAt || !card.isConnected) return;
+      // Coalesce load/pageshow/resize. Camera animation only reuses local data;
+      // an expired cache is retried only when a visible readability candidate asks.
+      queued = setTimer(() => {
+        queued = 0;
+        const id = identity(), ticket = generation;
+        if (!current(id)) { retryAt = now() + maxAge; return; }
+        const pending = { expired: false, timer: 0, deadline: now() + 1200 };
+        flight = pending;
+        queries += 1;
+        const expire = () => {
+          if (pending.expired) return;
+          pending.expired = true;
+          if (flight !== pending) return;
+          // sendQuery cannot be cancelled here. Release only its local slot;
+          // this token permanently rejects any eventual old-document reply.
+          flight = null;
+          cached = null;
+          retryAt = ticket === generation && current(id) ? now() + maxAge : 0;
+          if (!disposed) changed();
+        };
+        pending.timer = setTimer(expire, 1200);
+        Promise.resolve().then(query).then(value => {
+          if (now() >= pending.deadline) { expire(); return; }
+          if (pending.expired || ticket !== generation || !current(id)) return;
+          cached = browserPresentationFont(value, value?.viewportWidth) === null ? null
+            : { value: { version: 1, complete: true, fontPx: value.fontPx,
+              viewportWidth: value.viewportWidth, viewportHeight: value.viewportHeight,
+              sampleCount: value.sampleCount }, identity: id, at: now() };
+        }, () => { /* No Agent fallback and no remote retry loop. */ }).finally(() => {
+          clearTimer(pending.timer);
+          if (flight === pending) flight = null;
+          if (disposed || pending.expired) return;
+          retryAt = ticket === generation && current(id) ? now() + maxAge : 0;
+          changed();
+        });
+      }, 80);
+    };
+    const invalidate = () => {
+      generation += 1;
+      cached = null;
+      retryAt = 0;
+      if (queued) clearTimer(queued);
+      queued = 0;
+    };
+    return {
+      read, ensure, invalidate,
+      font: () => browserPresentationFont(read(), browser.getBoundingClientRect().width),
+      diagnostics: () => ({ cached: !!read(), pending: !!flight || !!queued, queries }),
+      dispose() {
+        disposed = true;
+        invalidate();
+        if (flight) clearTimer(flight.timer);
+      },
+    };
+  }
+
+  function browserPresentationFit({ width, height, logicalWidth, logicalHeight }) {
+    const scale = Math.max(0, Math.min(Math.max(1, width - 2) / logicalWidth, height / logicalHeight));
+    return { scale, left: Math.max(0, (width - logicalWidth * scale) / 2) };
+  }
+
   // ============ Canvas Pan / Zoom ============
   function installSemanticZoom(viewport, layer) {
     // A projection stays inside its original View's stacking context. The
@@ -12612,10 +12751,13 @@
       let safe = safeViewportRect();
       const zoomFor = region => {
         const fitted = SurfaceState.fitSurfaceCamera(world, region, 0.85);
+        const measured = entry.kind === 'browser' ? entry.card._browserPresentation?.font() : null;
+        const measuredWorldFont = Number.isFinite(measured) && measured > 0 ? measured / state.zoom : null;
         // An unusually large View can be cropped, but must become readable
         // without changing its saved dimensions or internal Browser viewport.
         return Math.min(ZOOM_MAX, Math.max(
-          entry.kind === 'browser' ? 0.83 : 0.76, 10.6 / entry.bodyFontPx,
+          measuredWorldFont ? 0 : entry.kind === 'browser' ? 0.83 : 0.76,
+          10.6 / (measuredWorldFont || entry.bodyFontPx),
           (detailWidth + 1) / world.width, (detailHeight + 1) / world.height,
           fitted.zoom,
         ));
@@ -12939,16 +13081,22 @@
           continue;
         }
         if (entry.kind === 'chat') fitCodexChatCardToReadableViewport(card, safeViewportRect(), entry.bodyFontPx);
+        if (entry.kind === 'browser') card._browserPresentation?.layout();
         const rect = screenRect(card, zoom, pan);
         entry.rect = rect;
-        const projectedFont = entry.bodyFontPx * zoom;
+        if (entry.kind === 'browser' && !card._browserState?.loading &&
+            rect.width >= detailWidth * .88 && rect.height >= detailHeight * .88 &&
+            rect.x + rect.width > 0 && rect.y + rect.height > 0 &&
+            rect.x < window.innerWidth && rect.y < window.innerHeight) card._browserPresentation?.ensure();
+        const projectedFont = entry.kind === 'browser' ? card._browserPresentation?.font() : null;
+        const measuredFont = Number.isFinite(projectedFont) && projectedFont > 0;
         let level = isCardFullscreen(card) ? 'detail' : SurfaceState.surfaceSemanticLevel({
-          width: rect.width, height: rect.height, fontPx: projectedFont, previous: entry.level,
+          width: rect.width, height: rect.height, fontPx: measuredFont ? projectedFont : entry.bodyFontPx * zoom, previous: entry.level,
           detailWidth, detailHeight,
         });
         // Browser's two control rows need a tighter readable band than a
         // generic View; keep a small enter/exit gap rather than flickering.
-        if (entry.kind === 'browser' && !isCardFullscreen(card) && level === 'detail'
+        if (entry.kind === 'browser' && !measuredFont && !isCardFullscreen(card) && level === 'detail'
           && zoom < (entry.level === 'detail' ? 0.76 : 0.82)) {
           level = SurfaceState.surfaceSemanticLevel({
             width: rect.width, height: rect.height, fontPx: 0.1,

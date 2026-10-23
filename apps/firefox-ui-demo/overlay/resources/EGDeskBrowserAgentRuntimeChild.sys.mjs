@@ -16,6 +16,8 @@ export class EGDeskBrowserAgentRuntimeChild extends JSWindowActorChild {
   }
 
   async receiveMessage(message) {
+    // System presentation signal: no request options, observation, or action authority.
+    if (message.name === "presentationMetrics") return this.presentationMetrics();
     const data = message.data || {};
     if (message.name === "snapshot") return this.snapshot(data.options || {});
     if (message.name === "captureInput") return captureDocumentText(this.document, data.options || {});
@@ -128,6 +130,166 @@ export class EGDeskBrowserAgentRuntimeChild extends JSWindowActorChild {
   }
 
   nowMs() { return Date.now(); }
+
+  presentationMetricNowMs() { return globalThis.performance?.now?.() ?? Date.now(); }
+
+  presentationMetrics() {
+    const win = this.contentWindow;
+    const width = win?.innerWidth;
+    const height = win?.innerHeight;
+    const validViewport = Number.isSafeInteger(width) && Number.isSafeInteger(height) &&
+      width > 0 && height > 0 && width <= 100000 && height <= 100000;
+    const viewportWidth = validViewport ? width : 0;
+    const viewportHeight = validViewport ? height : 0;
+    let sampleCount = 0;
+    const unavailable = () => ({ version: 1, fontPx: null, viewportWidth, viewportHeight,
+      sampleCount, complete: false });
+    if (!validViewport) return unavailable();
+
+    const started = this.presentationMetricNowMs();
+    const withinBudget = () => {
+      const now = this.presentationMetricNowMs();
+      return Number.isFinite(started) && Number.isFinite(now) &&
+        now >= started && now - started < 8;
+    };
+    const validRect = rect => rect && [rect.left, rect.top, rect.width, rect.height]
+      .every(Number.isFinite) && rect.width >= 0 && rect.height >= 0 &&
+      Number.isFinite(rect.left + rect.width) && Number.isFinite(rect.top + rect.height);
+    const intersects = (rect, clip) => clip.left < clip.right && clip.top < clip.bottom &&
+      rect.width > 0 && rect.height > 0 &&
+      rect.left < clip.right && rect.left + rect.width > clip.left &&
+      rect.top < clip.bottom && rect.top + rect.height > clip.top;
+    const unsupportedScale = style =>
+      (style.transform && style.transform !== "none") ||
+      (style.scale && style.scale !== "none" && style.scale !== "1") ||
+      (style.rotate && style.rotate !== "none" && style.rotate !== "0deg") ||
+      (style.translate && style.translate !== "none" && style.translate !== "0px") ||
+      (style.zoom && style.zoom !== "normal" && style.zoom !== "100%" &&
+        Number(style.zoom) !== 1);
+    const hidden = (node, style) => node.hidden || node.inert ||
+      node.getAttribute?.("aria-hidden") === "true" ||
+      node.getAttribute?.("data-sensitive") != null ||
+      node.getAttribute?.("data-private") != null || node.isContentEditable ||
+      style.display === "none" || style.contentVisibility === "hidden" ||
+      Number(style.opacity) === 0;
+    const excludedTag = tag => ["SCRIPT", "STYLE", "TEMPLATE", "NOSCRIPT", "INPUT",
+      "TEXTAREA", "SELECT", "OPTION"].includes(tag);
+    const opaqueContentTag = tag => ["IFRAME", "FRAME", "OBJECT", "EMBED", "CANVAS"].includes(tag);
+
+    try {
+      const doc = this.document;
+      const root = doc?.documentElement;
+      if (!root || !withinBudget()) return unavailable();
+      const range = doc.createRange?.();
+      if (!range?.selectNodeContents || !range?.getClientRects || !withinBudget()) return unavailable();
+      const stateByNode = new WeakMap();
+      const viewport = { left: 0, top: 0, right: width, bottom: height };
+      const nextNode = (current, descend) => {
+        if (descend && current.firstChild) return current.firstChild;
+        while (current !== root) {
+          if (current.nextSibling) return current.nextSibling;
+          current = current.parentNode || current.parentElement;
+          if (!current) return null;
+        }
+        return null;
+      };
+      let node = root, visited = 0, minFont = Infinity;
+      while (node) {
+        if (!withinBudget() || ++visited > 256) return unavailable();
+        let descend = true;
+        if (node.nodeType === 1) {
+          const tag = String(node.tagName || "").toUpperCase();
+          if (excludedTag(tag) || node.hidden || node.inert ||
+              node.getAttribute?.("aria-hidden") === "true" ||
+              node.getAttribute?.("data-sensitive") != null ||
+              node.getAttribute?.("data-private") != null || node.isContentEditable) {
+            descend = false;
+          } else {
+            const style = this.contentWindow.getComputedStyle(node);
+            if (!style || !withinBudget()) return unavailable();
+            if (hidden(node, style)) {
+              descend = false;
+            } else {
+              if (!["visible", "hidden", "collapse"].includes(style.visibility)) return unavailable();
+              // Firefox exposes both open and closed author roots to privileged
+              // callers. If this getter is unavailable here, absence of a
+              // shadowRoot cannot prove that the light DOM is complete.
+              if (!("openOrClosedShadowRoot" in node) ||
+                  node.openOrClosedShadowRoot !== null) return unavailable();
+              const parent = node === root ? null : (node.parentNode || node.parentElement);
+              const inherited = parent ? stateByNode.get(parent) : viewport;
+              if (!inherited) return unavailable();
+              // Positioned descendants may escape an ancestor's overflow clip.
+              // Keep traversing even an empty clip, but do not claim a metric
+              // for a positioned descendant whose visibility is ambiguous.
+              if (inherited.hasOverflowClip && !["static", "relative"].includes(style.position)) {
+                return unavailable();
+              }
+              if (opaqueContentTag(tag)) {
+                const rect = node.getBoundingClientRect?.();
+                if (!validRect(rect) || !withinBudget()) return unavailable();
+                if (intersects(rect, inherited)) return unavailable();
+                descend = false;
+              }
+              const clipsX = ["hidden", "clip", "scroll", "auto"].includes(style.overflowX);
+              const clipsY = ["hidden", "clip", "scroll", "auto"].includes(style.overflowY);
+              const clip = { ...inherited, fontSize: style.fontSize,
+                visible: style.visibility === "visible",
+                unsupportedScale: !!(inherited.unsupportedScale || unsupportedScale(style)),
+                hasOverflowClip: !!(inherited.hasOverflowClip || clipsX || clipsY) };
+              if (clipsX || clipsY) {
+                const rect = node.getBoundingClientRect?.();
+                if (!validRect(rect) || !withinBudget()) return unavailable();
+                if (clipsX) {
+                  clip.left = Math.max(clip.left, rect.left);
+                  clip.right = Math.min(clip.right, rect.left + rect.width);
+                }
+                if (clipsY) {
+                  clip.top = Math.max(clip.top, rect.top);
+                  clip.bottom = Math.min(clip.bottom, rect.top + rect.height);
+                }
+              }
+              stateByNode.set(node, clip);
+            }
+          }
+        } else if (node.nodeType === 3 && /\S/.test(node.nodeValue || "")) {
+          const parent = node.parentNode || node.parentElement;
+          const state = stateByNode.get(parent);
+          if (!state) return unavailable();
+          if (!state.visible) {
+            node = nextNode(node, false);
+            continue;
+          }
+          range.selectNodeContents(node);
+          const rects = range.getClientRects();
+          if (!rects || !Number.isSafeInteger(rects.length) || rects.length > 64 ||
+              !withinBudget()) return unavailable();
+          let onScreen = false;
+          for (const rect of rects) {
+            if (!validRect(rect) || !withinBudget()) return unavailable();
+            if (intersects(rect, state)) onScreen = true;
+          }
+          if (onScreen) {
+            if (state.unsupportedScale) return unavailable();
+            if (sampleCount >= 64) return unavailable();
+            const match = /^(?:\d+(?:\.\d+)?|\.\d+)px$/.exec(state.fontSize || "");
+            const font = match ? Number(match[0].slice(0, -2)) : NaN;
+            if (!Number.isFinite(font) || font <= 0 || font > 4096) return unavailable();
+            sampleCount++;
+            minFont = Math.min(minFont, font);
+          }
+        }
+        node = nextNode(node, descend);
+      }
+      if (!withinBudget() || !sampleCount || this.document !== doc ||
+          this.contentWindow !== win || win.innerWidth !== width ||
+          win.innerHeight !== height) return unavailable();
+      return { version: 1, fontPx: minFont, viewportWidth, viewportHeight,
+        sampleCount, complete: true };
+    } catch {
+      return unavailable();
+    }
+  }
 
   labelFor(node) {
     if (this.isSensitiveControl(node)) return "Sensitive field";

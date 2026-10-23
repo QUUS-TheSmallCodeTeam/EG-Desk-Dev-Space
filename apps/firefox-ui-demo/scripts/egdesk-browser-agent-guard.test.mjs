@@ -64,6 +64,272 @@ function localDocumentFixture() {
     get inputEvents() { return inputEvents }, get focusCalls() { return focusCalls } }
 }
 
+function presentationFixture() {
+  const f = localDocumentFixture()
+  const { actor, win } = f
+  actor.presentationMetricNowMs = () => 0
+  const doc = actor.document
+  doc.body.nodeType = 1
+  doc.body.tagName = 'BODY'
+  doc.body.openOrClosedShadowRoot = null
+  doc.body.parentElement = doc.documentElement
+  doc.body.getAttribute = () => null
+  doc.documentElement.nodeType = 1
+  doc.documentElement.tagName = 'HTML'
+  doc.documentElement.openOrClosedShadowRoot = null
+  doc.documentElement.getAttribute = () => null
+  doc.documentElement.firstChild = doc.body
+  const append = (parent, child) => {
+    child.parentElement = parent
+    if (!parent.firstChild) parent.firstChild = child
+    else {
+      let sibling = parent.firstChild
+      while (sibling.nextSibling) sibling = sibling.nextSibling
+      sibling.nextSibling = child
+    }
+    return child
+  }
+  const element = (parent, tagName = 'DIV', metricStyle = {}, attributes = {}) => append(parent, {
+    nodeType: 1, tagName, metricStyle, hidden: false, inert: false,
+    openOrClosedShadowRoot: null,
+    getAttribute(name) { return attributes[name] ?? null },
+    getBoundingClientRect() { return { left: 0, top: 0, width: 720, height: 480 } },
+  })
+  const textNode = (parent, value = 'Actual text', rect = { left: 10, top: 10, width: 100, height: 20 }) =>
+    append(parent, { nodeType: 3, nodeValue: value, rects: [rect] })
+  const textAt = (parent, fontPx, value = 'Actual text', rect) =>
+    textNode(element(parent, 'SPAN', { fontSize: `${fontPx}px` }), value, rect)
+  win.getComputedStyle = node => ({
+    display: 'block', visibility: 'visible', opacity: '1', fontSize: '16px',
+    transform: 'none', zoom: '1', scale: 'none', rotate: 'none', translate: 'none',
+    contentVisibility: 'visible', overflowX: 'visible', overflowY: 'visible', position: 'static',
+    ...node.metricStyle,
+  })
+  doc.createRange = () => {
+    let selected
+    return { selectNodeContents(node) { selected = node }, getClientRects() { return selected.rects } }
+  }
+  return { ...f, append, element, textNode, textAt }
+}
+
+test('presentationMetrics is an argument-free read-only system request, not an observation or action', async () => {
+  const f = presentationFixture()
+  f.textAt(f.actor.document.body, 16)
+  f.actor.observationState = () => { throw new Error('observation generated') }
+  f.actor.snapshot = () => { throw new Error('snapshot generated') }
+  f.actor.act = () => { throw new Error('action entered') }
+  f.actor.sendQuery = () => { throw new Error('parent authorization requested') }
+  const documentId = f.actor.documentId
+  const result = await f.actor.receiveMessage({ name: 'presentationMetrics',
+    get data() { throw new Error('request arguments read') } })
+  assert.deepEqual(result, { version: 1, fontPx: 16, viewportWidth: 720, viewportHeight: 480,
+    sampleCount: 1, complete: true })
+  assert.equal(f.actor.documentId, documentId)
+  assert.equal(f.actor.revision, 1)
+  assert.equal(f.actor.observedDocument, null)
+  assert.equal(f.actor.refSeq, 0)
+  assert.equal(f.actor.actorPerformCalls, 0)
+  assert.equal(f.clicks, 0)
+  assert.equal(f.inputEvents, 0)
+  assert.equal(f.focusCalls, 0)
+  assert.deepEqual(Object.keys(result), ['version', 'fontPx', 'viewportWidth', 'viewportHeight',
+    'sampleCount', 'complete'])
+})
+
+test('presentationMetrics samples real viewport text rather than the 11px wrapper or only headlines', async () => {
+  const f = presentationFixture()
+  const wrapper = f.element(f.actor.document.body, 'DIV', { fontSize: '11px' })
+  f.textAt(wrapper, 32, 'Headline')
+  f.textAt(wrapper, 16, 'Readable body')
+  assert.deepEqual(await f.actor.receiveMessage({ name: 'presentationMetrics' }),
+    { version: 1, fontPx: 16, viewportWidth: 720, viewportHeight: 480,
+      sampleCount: 2, complete: true })
+  f.textAt(wrapper, 13, 'Smaller caption')
+  assert.equal((await f.actor.receiveMessage({ name: 'presentationMetrics' })).fontPx, 13)
+})
+
+test('presentationMetrics excludes hidden, private, input and off-viewport text without returning content', async () => {
+  const f = presentationFixture()
+  const root = f.actor.document.body
+  f.textAt(root, 16, 'PUBLIC_CANARY')
+  f.textNode(f.element(root, 'SPAN', { fontSize: '3px', display: 'none' }), 'HIDDEN_CANARY')
+  f.textNode(f.element(root, 'SPAN', { fontSize: '3px', opacity: '0' }), 'OPACITY_CANARY')
+  f.textNode(f.element(root, 'SPAN', { fontSize: '3px' }, { 'aria-hidden': 'true' }), 'ARIA_CANARY')
+  f.textNode(f.element(root, 'SPAN', { fontSize: '3px' }, { 'data-sensitive': 'true' }), 'PRIVATE_CANARY')
+  f.textNode(f.element(root, 'INPUT', { fontSize: '3px' }), 'INPUT_CANARY')
+  f.textNode(f.element(root, 'DIV', { fontSize: '3px', contentVisibility: 'hidden' }), 'CONTENT_CANARY')
+  f.textAt(root, 3, 'OFFSCREEN_CANARY', { left: 900, top: 10, width: 50, height: 20 })
+  const result = await f.actor.receiveMessage({ name: 'presentationMetrics' })
+  assert.equal(result.fontPx, 16)
+  assert.equal(result.sampleCount, 1)
+  assert.equal(result.complete, true)
+  assert(!JSON.stringify(result).includes('CANARY'))
+})
+
+test('presentationMetrics does not miss a visible descendant of a visibility-hidden parent', async () => {
+  const f = presentationFixture()
+  const parent = f.element(f.actor.document.body, 'DIV', { visibility: 'hidden' })
+  f.textNode(parent, 'HIDDEN_DIRECT_CANARY')
+  f.textNode(f.element(parent, 'SPAN', { visibility: 'visible', fontSize: '12px' }), 'Visible override')
+  f.textAt(f.actor.document.body, 16, 'Main body')
+  const result = await f.actor.receiveMessage({ name: 'presentationMetrics' })
+  assert.equal(result.complete, true)
+  assert.equal(result.fontPx, 12)
+  assert.equal(result.sampleCount, 2)
+})
+
+test('presentationMetrics fails closed for unsupported transforms, zoom and malformed dimensions or font', async () => {
+  for (const style of [{ transform: 'matrix(0.5, 0, 0, 0.5, 0, 0)' }, { zoom: '1.25' },
+    { scale: '0.5' }, { fontSize: 'NaNpx' }]) {
+    const f = presentationFixture()
+    f.textNode(f.element(f.actor.document.body, 'SPAN', style), 'Visible')
+    const result = await f.actor.receiveMessage({ name: 'presentationMetrics' })
+    assert.equal(result.complete, false)
+    assert.equal(result.fontPx, null)
+  }
+  for (const dimension of [0, -1, 0.5, NaN, Infinity]) {
+    const f = presentationFixture()
+    f.textAt(f.actor.document.body, 16)
+    f.win.innerWidth = dimension
+    const result = await f.actor.receiveMessage({ name: 'presentationMetrics' })
+    assert.equal(result.complete, false)
+    assert.equal(result.fontPx, null)
+    assert.equal(result.viewportWidth, 0)
+    assert.equal(result.viewportHeight, 0)
+  }
+  const f = presentationFixture()
+  f.textAt(f.actor.document.body, 16, 'Visible', { left: NaN, top: 0, width: 20, height: 20 })
+  assert.equal((await f.actor.receiveMessage({ name: 'presentationMetrics' })).complete, false)
+})
+
+test('presentationMetrics ignores a decorative transform that contains no sampled text', async () => {
+  const f = presentationFixture()
+  f.element(f.actor.document.body, 'DIV', { transform: 'matrix(0.5, 0, 0, 0.5, 0, 0)' })
+  f.textAt(f.actor.document.body, 16)
+  const result = await f.actor.receiveMessage({ name: 'presentationMetrics' })
+  assert.equal(result.complete, true)
+  assert.equal(result.fontPx, 16)
+})
+
+test('presentationMetrics fails closed on node, sample and time limits or no valid text', async () => {
+  for (const limit of ['nodes', 'samples', 'time', 'empty']) {
+    const f = presentationFixture()
+    if (limit === 'nodes') for (let i = 0; i < 257; i++) f.element(f.actor.document.body)
+    if (limit === 'samples') for (let i = 0; i < 65; i++) f.textAt(f.actor.document.body, 16)
+    if (limit === 'time') {
+      f.textAt(f.actor.document.body, 16)
+      let clock = 0
+      f.actor.presentationMetricNowMs = () => (clock += 5)
+    }
+    const result = await f.actor.receiveMessage({ name: 'presentationMetrics' })
+    assert.equal(result.complete, false, limit)
+    assert.equal(result.fontPx, null, limit)
+    assert(result.sampleCount <= 64, limit)
+  }
+})
+
+test('presentationMetrics accepts the exact traversal/sample caps but not one beyond', async () => {
+  const nodes = presentationFixture()
+  nodes.textAt(nodes.actor.document.body, 16)
+  for (let i = 0; i < 252; i++) nodes.element(nodes.actor.document.body)
+  assert.equal((await nodes.actor.receiveMessage({ name: 'presentationMetrics' })).complete, true)
+  nodes.element(nodes.actor.document.body)
+  assert.equal((await nodes.actor.receiveMessage({ name: 'presentationMetrics' })).complete, false)
+
+  const samples = presentationFixture()
+  for (let i = 0; i < 64; i++) samples.textAt(samples.actor.document.body, 16)
+  const atCap = await samples.actor.receiveMessage({ name: 'presentationMetrics' })
+  assert.equal(atCap.complete, true)
+  assert.equal(atCap.sampleCount, 64)
+  samples.textAt(samples.actor.document.body, 12)
+  const pastCap = await samples.actor.receiveMessage({ name: 'presentationMetrics' })
+  assert.equal(pastCap.complete, false)
+  assert.equal(pastCap.fontPx, null)
+  assert.equal(pastCap.sampleCount, 64)
+})
+
+test('presentationMetrics preserves CSS font px across DPR and rejects ancestor scale or stale document', async () => {
+  const f = presentationFixture()
+  const text = f.textAt(f.actor.document.body, 16)
+  f.win.devicePixelRatio = 2
+  assert.equal((await f.actor.receiveMessage({ name: 'presentationMetrics' })).fontPx, 16)
+  f.actor.document.body.metricStyle = { zoom: '1.25' }
+  assert.equal((await f.actor.receiveMessage({ name: 'presentationMetrics' })).complete, false)
+  f.actor.document.body.metricStyle = {}
+  const originalRects = f.actor.document.createRange
+  f.actor.document.createRange = () => {
+    const range = originalRects()
+    return { selectNodeContents: range.selectNodeContents,
+      getClientRects() { f.actor.document = { ...f.actor.document }; return text.rects } }
+  }
+  assert.equal((await f.actor.receiveMessage({ name: 'presentationMetrics' })).complete, false)
+})
+
+test('presentationMetrics does not claim complete coverage of a visible embedded document', async () => {
+  const f = presentationFixture()
+  f.textAt(f.actor.document.body, 16)
+  const frame = f.element(f.actor.document.body, 'IFRAME')
+  assert.equal((await f.actor.receiveMessage({ name: 'presentationMetrics' })).complete, false)
+  frame.getBoundingClientRect = () => ({ left: 900, top: 10, width: 100, height: 100 })
+  assert.equal((await f.actor.receiveMessage({ name: 'presentationMetrics' })).complete, true)
+})
+
+test('presentationMetrics cannot claim 16px when a closed shadow host may contain 8px text', async () => {
+  const f = presentationFixture()
+  f.textAt(f.actor.document.body, 16, 'Outside text')
+  const host = f.element(f.actor.document.body, 'DIV')
+  const shadow = { nodeType: 11, mode: 'closed', host }
+  f.textAt(shadow, 8, 'Small shadow text')
+  host.shadowRoot = null
+  host.openOrClosedShadowRoot = shadow
+  const result = await f.actor.receiveMessage({ name: 'presentationMetrics' })
+  assert.equal(result.complete, false)
+  assert.equal(result.fontPx, null)
+})
+
+test('presentationMetrics fails closed if the privileged shadow accessor is unavailable', async () => {
+  const f = presentationFixture()
+  f.textAt(f.actor.document.body, 16, 'Outside text')
+  const host = f.element(f.actor.document.body, 'DIV')
+  delete host.openOrClosedShadowRoot
+  host.shadowRoot = null
+  let result = await f.actor.receiveMessage({ name: 'presentationMetrics' })
+  assert.equal(result.complete, false)
+  assert.equal(result.fontPx, null)
+  Object.defineProperty(host, 'openOrClosedShadowRoot', {
+    get() { throw new Error('privileged accessor denied') },
+  })
+  result = await f.actor.receiveMessage({ name: 'presentationMetrics' })
+  assert.equal(result.complete, false)
+  assert.equal(result.fontPx, null)
+})
+
+test('presentationMetrics cannot prune an off-viewport overflow ancestor over fixed 8px text', async () => {
+  const f = presentationFixture()
+  f.textAt(f.actor.document.body, 16, 'Outside text')
+  const parent = f.element(f.actor.document.body, 'DIV',
+    { overflowX: 'hidden', overflowY: 'hidden' })
+  parent.getBoundingClientRect = () => ({ left: 900, top: 10, width: 100, height: 100 })
+  const fixed = f.element(parent, 'SPAN', { position: 'fixed', fontSize: '8px' })
+  f.textNode(fixed, 'Visible fixed caption', { left: 20, top: 20, width: 100, height: 10 })
+  const result = await f.actor.receiveMessage({ name: 'presentationMetrics' })
+  assert.equal(result.complete, false)
+  assert.equal(result.fontPx, null)
+})
+
+test('presentationMetrics cannot ignore fixed text outside a partially visible overflow clip', async () => {
+  const f = presentationFixture()
+  f.textAt(f.actor.document.body, 16, 'Outside text')
+  const clipped = f.element(f.actor.document.body, 'DIV',
+    { overflowX: 'hidden', overflowY: 'hidden' })
+  clipped.getBoundingClientRect = () => ({ left: 0, top: 0, width: 50, height: 50 })
+  const fixed = f.element(clipped, 'DIV', { position: 'fixed' })
+  f.textAt(fixed, 8, 'Fixed text', { left: 100, top: 100, width: 80, height: 16 })
+  const result = await f.actor.receiveMessage({ name: 'presentationMetrics' })
+  assert.equal(result.complete, false)
+  assert.equal(result.fontPx, null)
+})
+
 function qaCounterOptions(f) {
   const fixtureUrl = 'http://127.0.0.1:39220/egdesk-qa/QA_URL_0123456789abcdef';
   const fixtureMarker = 'QA_DOM_0123456789abcdef';
