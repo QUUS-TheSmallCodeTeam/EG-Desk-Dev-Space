@@ -4,12 +4,14 @@ import fs from 'node:fs';
 import path from 'node:path';
 import test from 'node:test';
 import { fileURLToPath } from 'node:url';
+import { runInNewContext } from 'node:vm';
 import { createPrivateQaTempDirectory } from './egdesk-qa-platform.mjs';
 import { assertQaProfile, bootstrapQaProfile, canonicalTempRoot,
   assertQaFixtureManifest, LOADER_FILES, QA_MARKER_BYTES, QA_MARKER_NAME,
   QA_FIXTURE_DIRECTORY, QA_FIXTURE_FILE, QA_FIXTURE_MANIFEST, QA_REAL_TURN_DIRECTORY, QA_BACKEND_DATA_DIRECTORY, deskRecoveryFixture } from './egdesk-chat-qa-profile.mjs';
 import { assertQaEvidenceDirectory, chooseNativeScrollKey, contextIdFromList, createQaEvidenceDirectory, firstSnapshotUid,
-  decodeQaEvaluationResult, FirefoxMcpChatHarness, mcpResultText, parseMcpJson,
+  captureQaScreenshot, decodeQaEvaluationResult, FirefoxMcpChatHarness, isUnsupportedBidiScreenshotError,
+  mcpResultText, parseMcpJson,
   resolveQaMarionettePort } from './firefox-mcp-chat-harness.mjs';
 import { assertQaFixtureArtifact } from './egdesk-chat-qa-contract.sys.mjs';
 import { chooseQaThreadRow, composerIsReady } from './egdesk-qa-ui-flow.mjs';
@@ -125,6 +127,216 @@ test('MCP parsing and evidence setup are pure of Firefox and never need npx', (t
   assert.equal(FirefoxMcpChatHarness.prototype.call, undefined);
   assert.equal(FirefoxMcpChatHarness.prototype.request, undefined);
   assert.equal(typeof FirefoxMcpChatHarness.prototype.evaluateChrome, 'function');
+  assert.equal(typeof Object.getOwnPropertyDescriptor(FirefoxMcpChatHarness.prototype, 'lastScreenshotMetadata')?.get, 'function');
+});
+
+const ONE_PIXEL_PNG_BASE64 = 'iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mP8/x8AAwMCAO+aN9kAAAAASUVORK5CYII=';
+const UNSUPPORTED_BIDI_SCREENSHOT = new Error('screenshot_page: Error: BiDi error: "unsupported operation"');
+
+test('screenshot fallback gate accepts only unsupported BiDi screenshot_page, never profile/timeout/cancel errors', () => {
+  assert.equal(isUnsupportedBidiScreenshotError(UNSUPPORTED_BIDI_SCREENSHOT), true);
+  for (const message of [
+    'screenshot_page: Error: BiDi error: "unsupported operation" for a different request',
+    'screenshot_page: Error: BiDi error: "not supported"',
+    'screenshot_page: UnsupportedOperationError: WebDriver BiDi browsingContext.captureScreenshot is not supported',
+    'screenshot_by_uid: UnsupportedOperationError: BiDi browsingContext.captureScreenshot is not supported',
+    'screenshot_page: UnsupportedOperationError: local file save is not supported',
+    'screenshot_page: BiDi browsingContext.captureScreenshot timed out',
+    'screenshot_page: BiDi browsingContext.captureScreenshot was cancelled',
+    'screenshot_page: different profile; BiDi browsingContext.captureScreenshot unsupported',
+    'screenshot_page: Chrome evaluation stale',
+  ]) assert.equal(isUnsupportedBidiScreenshotError(new Error(message)), false, message);
+  assert.equal(isUnsupportedBidiScreenshotError(UNSUPPORTED_BIDI_SCREENSHOT.message), false);
+});
+
+test('normal screenshot remains MCP-owned, returns path metadata and never evaluates Chrome', async (t) => {
+  const evidenceDir = createQaEvidenceDirectory();
+  t.after(() => removeCreatedTemp(evidenceDir, 'egdesk-chat-evidence-'));
+  let profileChecks = 0;
+  const result = await captureQaScreenshot({ name: 'normal', evidenceDir,
+    assertRemoteProfile: async () => { profileChecks++; },
+    screenshotPage: async (saveTo, timeoutMs) => {
+      assert.equal(saveTo, 'normal.png');
+      assert.equal(timeoutMs, 45000);
+      fs.writeFileSync(path.join(evidenceDir, saveTo), Buffer.from(ONE_PIXEL_PNG_BASE64, 'base64'),
+        { flag: 'wx', mode: 0o600 });
+    },
+    evaluateChrome: () => assert.fail('normal screenshot must not run the fallback'),
+  });
+  assert.equal(profileChecks, 1);
+  assert.deepEqual(result, { path: path.join(evidenceDir, 'normal.png'), route: 'mcp-screenshot-page',
+    width: 1, height: 1, visualPass: null });
+  assert.equal(fs.readFileSync(result.path).toString('base64'), ONE_PIXEL_PNG_BASE64);
+  await assert.rejects(captureQaScreenshot({ name: 'normal', evidenceDir,
+    assertRemoteProfile: async () => {}, screenshotPage: () => assert.fail('existing screenshot must not be overwritten'),
+  }), /Refusing to overwrite screenshot/);
+});
+
+test('opt-in normal screenshot cannot report success after its explicit deadline', async (t) => {
+  const evidenceDir = createQaEvidenceDirectory();
+  t.after(() => removeCreatedTemp(evidenceDir, 'egdesk-chat-evidence-'));
+  const realNow = Date.now;
+  const deadlineMs = realNow() + 5000;
+  let pageCalled = false;
+  try {
+    await assert.rejects(captureQaScreenshot({ name: 'late-normal', evidenceDir,
+      allowHeadlessChromeFallback: true, deadlineMs,
+      assertRemoteProfile: async () => {},
+      screenshotPage: async (saveTo) => {
+        pageCalled = true;
+        fs.writeFileSync(path.join(evidenceDir, saveTo), Buffer.from(ONE_PIXEL_PNG_BASE64, 'base64'),
+          { flag: 'wx', mode: 0o600 });
+        Date.now = () => deadlineMs + 1;
+      },
+      evaluateChrome: () => assert.fail('a completed normal capture must never switch routes'),
+    }), /Screenshot deadline exceeded/);
+  } finally { Date.now = realNow; }
+  assert.equal(pageCalled, true, 'the deadline expires only after the normal screenshot completes');
+});
+
+test('opt-in unsupported BiDi screenshot produces a validated private PNG and explicit source metadata', async (t) => {
+  const evidenceDir = createQaEvidenceDirectory();
+  t.after(() => removeCreatedTemp(evidenceDir, 'egdesk-chat-evidence-'));
+  let source;
+  const result = await captureQaScreenshot({ name: 'fallback', evidenceDir,
+    allowHeadlessChromeFallback: true, deadlineMs: Date.now() + 5000,
+    assertRemoteProfile: async () => {},
+    screenshotPage: async (saveTo, timeoutMs) => {
+      assert.equal(saveTo, 'fallback.png');
+      assert.ok(timeoutMs > 0 && timeoutMs <= 5000);
+      throw UNSUPPORTED_BIDI_SCREENSHOT;
+    },
+    evaluateChrome: async (functionSource) => {
+      source = functionSource;
+      return { pngBase64: ONE_PIXEL_PNG_BASE64, width: 1, height: 1 };
+    },
+  });
+  assert.equal(result.path, path.join(evidenceDir, 'fallback.png'));
+  assert.equal(result.route, 'headless-chrome-drawSnapshot');
+  assert.equal(result.visualPass, null, 'capturing pixels does not award a visual pass');
+  assert.deepEqual([result.width, result.height], [1, 1]);
+  assert.equal(fs.readFileSync(result.path).toString('base64'), ONE_PIXEL_PNG_BASE64);
+  if (process.platform !== 'win32') assert.equal(fs.statSync(result.path).mode & 0o777, 0o600);
+  assert.match(source, /wg\.drawSnapshot\(new DOMRect\(0, 0, width, height\), dpr,/);
+  assert.match(source, /'rgb\(255,255,255\)', \{ drawView: true \}/);
+  assert.match(source, /window\.document\.createElementNS\('http:\/\/www\.w3\.org\/1999\/xhtml', 'canvas'\)/);
+  assert.match(source, /finally \{ bitmap\?\.close\(\); \}/);
+});
+
+test('screenshot fallback refuses missing deadline, unrelated failures, stale evaluation and invalid PNG data', async (t) => {
+  const evidenceDir = createQaEvidenceDirectory();
+  t.after(() => removeCreatedTemp(evidenceDir, 'egdesk-chat-evidence-'));
+  let evaluations = 0;
+  const base = { evidenceDir, assertRemoteProfile: async () => {},
+    screenshotPage: async () => { throw UNSUPPORTED_BIDI_SCREENSHOT; },
+    evaluateChrome: async () => { evaluations++; return { pngBase64: ONE_PIXEL_PNG_BASE64, width: 1, height: 1 }; } };
+  await assert.rejects(captureQaScreenshot({ ...base, name: 'no-opt-in' }), /unsupported operation/);
+  assert.equal(evaluations, 0);
+  await assert.rejects(captureQaScreenshot({ ...base, name: 'no-deadline', allowHeadlessChromeFallback: true }),
+    /explicit future deadlineMs/);
+  assert.equal(evaluations, 0);
+  const deadlineMs = Date.now() + 5000;
+  for (const [name, error] of [
+    ['timeout', new Error('screenshot_page: BiDi browsingContext.captureScreenshot timed out')],
+    ['cancel', new Error('screenshot_page: BiDi browsingContext.captureScreenshot cancelled')],
+    ['unsupported-other', new Error('screenshot_page: UnsupportedOperationError: WebDriver BiDi browsingContext.captureScreenshot is not supported')],
+    ['other', new Error('screenshot_page: file save refused')],
+  ]) {
+    await assert.rejects(captureQaScreenshot({ ...base, name, allowHeadlessChromeFallback: true,
+      deadlineMs, screenshotPage: async () => { throw error; } }), (actual) => actual === error);
+    assert.equal(fs.existsSync(path.join(evidenceDir, `${name}.png`)), false);
+  }
+  assert.equal(evaluations, 0);
+  await assert.rejects(captureQaScreenshot({ ...base, name: 'profile', allowHeadlessChromeFallback: true,
+    deadlineMs, assertRemoteProfile: async () => { throw new Error('different Firefox profile'); } }), /different Firefox profile/);
+  assert.equal(evaluations, 0);
+  for (const [name, value] of [
+    ['bad-base64', { pngBase64: '!not-base64!', width: 1, height: 1 }],
+    ['not-png', { pngBase64: Buffer.from('not a PNG').toString('base64'), width: 1, height: 1 }],
+    ['bad-ihdr', { pngBase64: ONE_PIXEL_PNG_BASE64, width: 2, height: 1 }],
+    ['huge-bitmap', { pngBase64: ONE_PIXEL_PNG_BASE64, width: 999999, height: 1 }],
+  ]) {
+    await assert.rejects(captureQaScreenshot({ ...base, name, allowHeadlessChromeFallback: true,
+      deadlineMs, evaluateChrome: async () => value }), /base64|PNG|IHDR|dimensions/);
+    assert.equal(fs.existsSync(path.join(evidenceDir, `${name}.png`)), false);
+  }
+  for (const [name, message] of [['stale', 'Stale browser chrome context'],
+    ['eval-cancel', 'Screenshot capture cancelled'], ['eval-deadline', 'Screenshot deadline exceeded']]) {
+    await assert.rejects(captureQaScreenshot({ ...base, name, allowHeadlessChromeFallback: true,
+      deadlineMs, evaluateChrome: async () => { throw new Error(message); } }),
+    (error) => error.message === message);
+    assert.equal(fs.existsSync(path.join(evidenceDir, `${name}.png`)), false);
+  }
+});
+
+test('headless Chrome snapshot callback guards real root context and closes bitmap on success or failure', async (t) => {
+  const evidenceDir = createQaEvidenceDirectory();
+  t.after(() => removeCreatedTemp(evidenceDir, 'egdesk-chat-evidence-'));
+  let source;
+  const result = await captureQaScreenshot({ name: 'source-check', evidenceDir,
+    allowHeadlessChromeFallback: true, deadlineMs: Date.now() + 5000,
+    assertRemoteProfile: async () => {}, screenshotPage: async () => { throw UNSUPPORTED_BIDI_SCREENSHOT; },
+    evaluateChrome: async (functionSource) => {
+      source = functionSource;
+      return { pngBase64: ONE_PIXEL_PNG_BASE64, width: 1, height: 1 };
+    } });
+  assert.ok(fs.existsSync(result.path));
+  const runSnapshot = async ({ headless = true, uri = 'chrome://browser/content/browser.xhtml',
+    isContent = false, parent = null, isCurrentGlobal = true, staleAfterDraw = false,
+    failCanvas = false } = {}) => {
+    const observed = { calls: 0, closes: 0, drawArgs: null, canvasCreates: [] };
+    const bitmap = { width: 1, height: 1, close() { observed.closes++; } };
+    const bc = { isContent, parent, currentWindowGlobal: null };
+    const wg = { isCurrentGlobal, async drawSnapshot(...args) {
+      observed.calls++;
+      observed.drawArgs = args;
+      if (staleAfterDraw) bc.currentWindowGlobal = { isCurrentGlobal: true };
+      return bitmap;
+    } };
+    bc.currentWindowGlobal = wg;
+    const canvas = { getContext: () => ({ drawImage() {} }),
+      toDataURL: () => { if (failCanvas) throw new Error('canvas failed');
+        return `data:image/png;base64,${ONE_PIXEL_PNG_BASE64}`; } };
+    const document = { documentURI: uri,
+      createElement: () => { throw new Error('XUL canvas creation is not supported'); },
+      createElementNS(namespace, localName) {
+        observed.canvasCreates.push([namespace, localName]);
+        return canvas;
+      } };
+    const window = { document, docShell: { browsingContext: bc }, innerWidth: 1, innerHeight: 1, devicePixelRatio: 1 };
+    const context = { Cc: { '@mozilla.org/gfx/info;1': { getService: () => ({ isHeadless: headless }) } },
+      Ci: { nsIGfxInfo: {} }, window, DOMRect: class DOMRect {
+        constructor(x, y, width, height) { Object.assign(this, { x, y, width, height }); }
+      } };
+    try {
+      const value = await runInNewContext(`(${source})()`, context);
+      return { observed, value };
+    } catch (error) { return { observed, error }; }
+  };
+  const ok = await runSnapshot();
+  assert.equal(ok.error, undefined);
+  assert.deepEqual([ok.value.width, ok.value.height, ok.value.pngBase64], [1, 1, ONE_PIXEL_PNG_BASE64]);
+  assert.deepEqual([ok.observed.drawArgs[0].x, ok.observed.drawArgs[0].y,
+    ok.observed.drawArgs[0].width, ok.observed.drawArgs[0].height], [0, 0, 1, 1]);
+  assert.equal(ok.observed.drawArgs[1], 1);
+  assert.equal(ok.observed.drawArgs[2], 'rgb(255,255,255)');
+  assert.equal(ok.observed.drawArgs[3].drawView, true);
+  assert.deepEqual(ok.observed.canvasCreates, [['http://www.w3.org/1999/xhtml', 'canvas']]);
+  assert.equal(ok.observed.closes, 1);
+  for (const [options, pattern, draws, closes] of [
+    [{ headless: false }, /non-headless/, 0, 0],
+    [{ uri: 'https://example.test/' }, /non-root/, 0, 0],
+    [{ isContent: true }, /non-root/, 0, 0],
+    [{ parent: {} }, /non-root/, 0, 0],
+    [{ isCurrentGlobal: false }, /non-root/, 0, 0],
+    [{ staleAfterDraw: true }, /Stale/, 1, 1],
+    [{ failCanvas: true }, /canvas failed/, 1, 1],
+  ]) {
+    const outcome = await runSnapshot(options);
+    assert.match(outcome.error?.message || '', pattern);
+    assert.equal(outcome.observed.calls, draws);
+    assert.equal(outcome.observed.closes, closes);
+  }
 });
 
 test('QA port policy retains 2829 by default and permits only explicit 2828 or 2829', () => {

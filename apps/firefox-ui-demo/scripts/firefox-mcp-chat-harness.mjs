@@ -77,6 +77,183 @@ export function assertQaEvidenceDirectory(directory) {
   return directory;
 }
 
+const PNG_SIGNATURE = Buffer.from([137, 80, 78, 71, 13, 10, 26, 10]);
+const MAX_CHROME_SNAPSHOT_DIMENSION = 8192;
+const MAX_CHROME_SNAPSHOT_PIXELS = 16_777_216;
+const MAX_CHROME_SNAPSHOT_BYTES = 16 * 1024 * 1024;
+
+function pngDimensions(bytes) {
+  if (bytes.length < 33 || !bytes.subarray(0, 8).equals(PNG_SIGNATURE) ||
+      bytes.readUInt32BE(8) !== 13 || bytes.toString('ascii', 12, 16) !== 'IHDR') {
+    throw new Error('Screenshot is not a PNG with an IHDR');
+  }
+  const width = bytes.readUInt32BE(16);
+  const height = bytes.readUInt32BE(20);
+  if (!width || !height) throw new Error('Screenshot PNG has invalid IHDR dimensions');
+  return { width, height };
+}
+
+function boundedChromeSnapshotDimensions(width, height) {
+  if (!Number.isSafeInteger(width) || !Number.isSafeInteger(height) || width < 1 || height < 1 ||
+      width > MAX_CHROME_SNAPSHOT_DIMENSION || height > MAX_CHROME_SNAPSHOT_DIMENSION ||
+      width * height > MAX_CHROME_SNAPSHOT_PIXELS) {
+    throw new Error('Headless Chrome screenshot dimensions exceed the QA bound');
+  }
+}
+
+function decodeChromeSnapshotPng(value) {
+  const encoded = value?.pngBase64;
+  if (typeof encoded !== 'string' || encoded.length < 4 ||
+      encoded.length > 4 * Math.ceil(MAX_CHROME_SNAPSHOT_BYTES / 3) ||
+      !/^(?:[A-Za-z0-9+/]{4})*(?:[A-Za-z0-9+/]{2}==|[A-Za-z0-9+/]{3}=)?$/.test(encoded)) {
+    throw new Error('Headless Chrome screenshot has invalid bounded base64');
+  }
+  const bytes = Buffer.from(encoded, 'base64');
+  if (bytes.length > MAX_CHROME_SNAPSHOT_BYTES || bytes.toString('base64') !== encoded) {
+    throw new Error('Headless Chrome screenshot exceeds the QA byte bound');
+  }
+  const dimensions = pngDimensions(bytes);
+  boundedChromeSnapshotDimensions(dimensions.width, dimensions.height);
+  if (dimensions.width !== value.width || dimensions.height !== value.height) {
+    throw new Error('Headless Chrome screenshot IHDR differs from the captured bitmap');
+  }
+  return bytes;
+}
+
+function inspectQaScreenshotFile(target) {
+  const info = fs.lstatSync(target);
+  if (!info.isFile() || info.isSymbolicLink() || !isOwnedAndPrivate(target, info) ||
+      fs.realpathSync.native(target) !== target) throw new Error('Screenshot is not a canonical owned file');
+  const header = Buffer.alloc(33);
+  const descriptor = fs.openSync(target, 'r');
+  try {
+    if (fs.readSync(descriptor, header, 0, header.length, 0) !== header.length) {
+      throw new Error(`Screenshot is not a PNG with an IHDR: ${target}`);
+    }
+  } finally { fs.closeSync(descriptor); }
+  return pngDimensions(header);
+}
+
+export function isUnsupportedBidiScreenshotError(error) {
+  return error instanceof Error &&
+    error.message === 'screenshot_page: Error: BiDi error: "unsupported operation"';
+}
+
+function remainingScreenshotMs(deadlineMs, capMs) {
+  const remaining = deadlineMs - Date.now();
+  if (!Number.isSafeInteger(deadlineMs) || remaining <= 0) throw new Error('Screenshot deadline exceeded');
+  return Math.max(1, Math.min(remaining, capMs));
+}
+
+async function beforeScreenshotDeadline(run, deadlineMs, capMs) {
+  const waitMs = remainingScreenshotMs(deadlineMs, capMs);
+  let timer;
+  try {
+    return await Promise.race([
+      Promise.resolve().then(run),
+      new Promise((_, reject) => {
+        timer = setTimeout(() => reject(new Error(waitMs === capMs
+          ? 'Screenshot operation timed out' : 'Screenshot deadline exceeded')), waitMs);
+      }),
+    ]);
+  } finally { clearTimeout(timer); }
+}
+
+function headlessChromeSnapshotSource(deadlineMs) {
+  return `async () => {
+    const uri = 'chrome://browser/content/browser.xhtml';
+    const gfx = Cc['@mozilla.org/gfx/info;1'].getService(Ci.nsIGfxInfo);
+    const bc = window.docShell?.browsingContext;
+    const wg = bc?.currentWindowGlobal;
+    const assertLiveRoot = () => {
+      if (Date.now() >= ${deadlineMs}) throw new Error('Screenshot deadline exceeded');
+      if (gfx.isHeadless !== true) throw new Error('Headless Chrome screenshot refused a non-headless Firefox');
+      if (window.document.documentURI !== uri || window.docShell?.browsingContext !== bc ||
+          bc?.isContent !== false || bc?.parent !== null || !wg ||
+          bc.currentWindowGlobal !== wg || wg.isCurrentGlobal !== true) {
+        throw new Error('Stale or non-root browser-chrome screenshot context');
+      }
+    };
+    assertLiveRoot();
+    const width = window.innerWidth;
+    const height = window.innerHeight;
+    const dpr = window.devicePixelRatio;
+    if (!Number.isFinite(width) || !Number.isFinite(height) || !Number.isFinite(dpr) ||
+        width < 1 || height < 1 || dpr <= 0 || dpr > 4 ||
+        width > ${MAX_CHROME_SNAPSHOT_DIMENSION} || height > ${MAX_CHROME_SNAPSHOT_DIMENSION} ||
+        Math.ceil(width * dpr) > ${MAX_CHROME_SNAPSHOT_DIMENSION} ||
+        Math.ceil(height * dpr) > ${MAX_CHROME_SNAPSHOT_DIMENSION} ||
+        Math.ceil(width * dpr) * Math.ceil(height * dpr) > ${MAX_CHROME_SNAPSHOT_PIXELS}) {
+      throw new Error('Headless Chrome viewport exceeds the QA pixel bound');
+    }
+    let bitmap;
+    try {
+      bitmap = await wg.drawSnapshot(new DOMRect(0, 0, width, height), dpr,
+        'rgb(255,255,255)', { drawView: true });
+      assertLiveRoot();
+      const capturedWidth = bitmap?.width;
+      const capturedHeight = bitmap?.height;
+      if (!Number.isSafeInteger(capturedWidth) || !Number.isSafeInteger(capturedHeight) ||
+          capturedWidth < 1 || capturedHeight < 1 ||
+          capturedWidth > ${MAX_CHROME_SNAPSHOT_DIMENSION} ||
+          capturedHeight > ${MAX_CHROME_SNAPSHOT_DIMENSION} ||
+          capturedWidth * capturedHeight > ${MAX_CHROME_SNAPSHOT_PIXELS}) {
+        throw new Error('Headless Chrome bitmap exceeds the QA pixel bound');
+      }
+      const canvas = window.document.createElementNS('http://www.w3.org/1999/xhtml', 'canvas');
+      canvas.width = capturedWidth;
+      canvas.height = capturedHeight;
+      const context = canvas.getContext('2d');
+      if (!context) throw new Error('Headless Chrome screenshot canvas unavailable');
+      context.drawImage(bitmap, 0, 0);
+      const dataUrl = canvas.toDataURL('image/png');
+      assertLiveRoot();
+      const prefix = 'data:image/png;base64,';
+      if (typeof dataUrl !== 'string' || !dataUrl.startsWith(prefix) ||
+          dataUrl.length - prefix.length > ${4 * Math.ceil(MAX_CHROME_SNAPSHOT_BYTES / 3)}) {
+        throw new Error('Headless Chrome screenshot exceeds the QA encoded byte bound');
+      }
+      return { pngBase64: dataUrl.slice(prefix.length), width: capturedWidth, height: capturedHeight };
+    } finally { bitmap?.close(); }
+  }`;
+}
+
+// The class keeps returning a path; this small seam permits offline tests of
+// the exact fallback gate without connecting to Firefox or starting MCP.
+export async function captureQaScreenshot({ name, evidenceDir, assertRemoteProfile, screenshotPage,
+  evaluateChrome, allowHeadlessChromeFallback = false, deadlineMs } = {}) {
+  if (allowHeadlessChromeFallback && (!Number.isSafeInteger(deadlineMs) || deadlineMs <= Date.now())) {
+    throw new Error('Headless Chrome screenshot fallback requires an explicit future deadlineMs');
+  }
+  if (allowHeadlessChromeFallback) {
+    await beforeScreenshotDeadline(assertRemoteProfile, deadlineMs, 30000);
+  } else await assertRemoteProfile();
+  const canonicalDir = assertQaEvidenceDirectory(evidenceDir);
+  if (typeof name !== 'string' || !/^[a-z0-9][a-z0-9._-]*$/i.test(name)) {
+    throw new Error('Screenshot target must be a named file in a dedicated canonical temp evidence directory');
+  }
+  const target = path.join(canonicalDir, `${name}.png`);
+  if (fs.existsSync(target)) throw new Error(`Refusing to overwrite screenshot: ${target}`);
+  let route = 'mcp-screenshot-page';
+  try {
+    await screenshotPage(`${name}.png`, allowHeadlessChromeFallback
+      ? remainingScreenshotMs(deadlineMs, 45000) : 45000);
+    if (allowHeadlessChromeFallback) remainingScreenshotMs(deadlineMs, 1);
+  } catch (error) {
+    if (!allowHeadlessChromeFallback || !isUnsupportedBidiScreenshotError(error)) throw error;
+    if (fs.existsSync(target)) throw new Error(`Refusing to overwrite screenshot: ${target}`);
+    const value = await beforeScreenshotDeadline(
+      () => evaluateChrome(headlessChromeSnapshotSource(deadlineMs)), deadlineMs, 30000);
+    const bytes = decodeChromeSnapshotPng(value);
+    remainingScreenshotMs(deadlineMs, 1);
+    fs.writeFileSync(target, bytes, { flag: 'wx', mode: 0o600 });
+    route = 'headless-chrome-drawSnapshot';
+  }
+  const { width, height } = inspectQaScreenshotFile(target);
+  if (allowHeadlessChromeFallback) remainingScreenshotMs(deadlineMs, 1);
+  return { path: target, route, width, height, visualPass: null };
+}
+
 export async function waitUntil(read, accept, { timeoutMs = 15000, intervalMs = 150 } = {}) {
   const deadline = Date.now() + timeoutMs;
   let last;
@@ -99,6 +276,7 @@ export class FirefoxMcpChatHarness {
   #context = null;
   #tools = new Set();
   #evidenceDir;
+  #lastScreenshotMetadata = null;
 
   constructor({ profile, marionettePort = resolveQaMarionettePort() }) {
     this.#profile = assertQaProfile(profile);
@@ -122,6 +300,7 @@ export class FirefoxMcpChatHarness {
   get marionettePort() { return this.#port; }
   get evidenceDir() { return this.#evidenceDir; }
   get stderrTail() { return this.#stderr; }
+  get lastScreenshotMetadata() { return this.#lastScreenshotMetadata && { ...this.#lastScreenshotMetadata }; }
 
   async connect() {
     if (this.#proc) throw new Error('MCP transport already connected');
@@ -331,27 +510,16 @@ export class FirefoxMcpChatHarness {
       overflow: max > 0 };
   }
 
-  async screenshot(name) {
-    await this.assertRemoteProfile();
-    const canonicalDir = assertQaEvidenceDirectory(this.#evidenceDir);
-    if (typeof name !== 'string' || !/^[a-z0-9][a-z0-9._-]*$/i.test(name)) {
-      throw new Error('Screenshot target must be a named file in a dedicated canonical temp evidence directory');
-    }
-    const target = path.join(canonicalDir, `${name}.png`);
-    if (fs.existsSync(target)) throw new Error(`Refusing to overwrite screenshot: ${target}`);
-    // A relative saveTo stays inside this MCP child's dedicated temp cwd.
-    // The cached MCP permits that without --unrestricted-save-paths.
-    await this.#call('screenshot_page', { saveTo: `${name}.png` }, 45000);
-    const info = fs.lstatSync(target);
-    if (!info.isFile() || info.isSymbolicLink() || !isOwnedAndPrivate(target, info) ||
-        fs.realpathSync.native(target) !== target) throw new Error('Screenshot is not a canonical owned file');
-    const header = Buffer.alloc(8);
-    const descriptor = fs.openSync(target, 'r');
-    try { fs.readSync(descriptor, header, 0, 8, 0); } finally { fs.closeSync(descriptor); }
-    if (!header.equals(Buffer.from([137, 80, 78, 71, 13, 10, 26, 10]))) {
-      throw new Error(`Screenshot is not a PNG: ${target}`);
-    }
-    return target;
+  async screenshot(name, { allowHeadlessChromeFallback = false, deadlineMs } = {}) {
+    this.#lastScreenshotMetadata = null;
+    const result = await captureQaScreenshot({ name, evidenceDir: this.#evidenceDir,
+      assertRemoteProfile: () => this.assertRemoteProfile(),
+      // A relative saveTo stays inside this MCP child's dedicated temp cwd.
+      screenshotPage: (saveTo, timeoutMs) => this.#call('screenshot_page', { saveTo }, timeoutMs),
+      evaluateChrome: (source) => this.evaluateChrome(source),
+      allowHeadlessChromeFallback, deadlineMs });
+    this.#lastScreenshotMetadata = result;
+    return result.path;
   }
 
   async close() {
