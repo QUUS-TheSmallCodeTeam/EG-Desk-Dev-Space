@@ -1486,6 +1486,19 @@ test('Browser more-menu pointer open accepts Escape on its still-focused trigger
   assert.equal(h.document.activeElement, h.menuButton);
 });
 
+test('Browser more-menu pointer open from body focuses an item so Escape closes and restores the trigger', () => {
+  const h = browserMenuHarness();
+  h.document.activeElement = h.document.body; // native Mac pointer activation can leave focus on BODY
+  h.pressTrigger(1);
+  const panel = h.menu.panel;
+  assert.ok(panel?.isConnected);
+  assert.equal(h.document.activeElement, panel.children[0]);
+  assert.equal(panel.dispatchKey('Escape').defaultPrevented, true);
+  assert.equal(h.menu.panel, null);
+  assert.equal(h.menuButton.getAttribute('aria-expanded'), 'false');
+  assert.equal(h.document.activeElement, h.menuButton);
+});
+
 test('Browser more-menu closes only after focus really leaves both trigger and menu', () => {
   const h = browserMenuHarness();
   h.pressTrigger(1);

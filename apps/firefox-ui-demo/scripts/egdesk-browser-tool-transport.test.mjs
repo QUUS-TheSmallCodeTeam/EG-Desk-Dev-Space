@@ -18,7 +18,7 @@ const dispatchSource = between('  function browserToolSameUrl(left, right) {', '
 const attachSource = between('  function attachBrowserToolTransport({ source, respond }) {', '\n\n  function spawnBrowserCard(')
 const sourceSelection = between('  function chatInputSourceForView(view) {', '  function chatInputSources(')
 const selectedSources = between('  function registerBrowserToolSelection(threadId, source, permission) {', '  function browserToolSafeNavigationUrl(value) {')
-const menuSelection = between('    const selectBrowserForChat = (permission) => {', '    const showBrowserMenu = (anchor = menuButton) => {')
+const menuSelection = between('    const selectBrowserForChat = (permission) => {', '    const showBrowserMenu = ')
 const stopRevokeSource = between('  function revokeBrowserToolRunImmediately(run, thread) {', '  function registerBrowserToolSelection(')
 const toolActSource = between('    const browserToolAct = async (expected, action, guard, lease) => {', '    card._browserControls = {')
 const toolBindingSource = between('    const browserToolBinding = () => {', '    const assertBrowserToolBinding = (expected) => {')
