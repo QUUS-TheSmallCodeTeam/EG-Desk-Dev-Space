@@ -3,8 +3,8 @@ import assert from 'node:assert/strict';
 import vm from 'node:vm';
 import { readFileSync } from 'node:fs';
 import {
-  VIEWPORTS, assertBeforeDeadline, canvasComposerClearanceIssues, captureHeadlessScreenshot, chatIssues, firstUseIssues,
-  initialFirstUseIssues, observeChat, observeSettledFirstUse, observeTargets, parseCli, parseDeadline,
+  VIEWPORTS, assertBeforeDeadline, browserPresentationIssues, canvasComposerClearanceIssues, captureHeadlessScreenshot, chatIssues, firstUseIssues,
+  initialFirstUseIssues, observeBrowserPresentation, observeChat, observeSettledFirstUse, observeTargets, parseCli, parseDeadline,
   presentationRestoredOnWiderViewport, projectionGeometrySettled, resizeHeadless,
   sameWorldGeometry, screenshotOutcome, targetIssues, viewportSettled,
   waitFor, waitStableViewport,
@@ -13,6 +13,38 @@ import {
 const roundDeadlineUtc = '2026-10-23T17:00:00Z';
 const deadline = Date.parse(roundDeadlineUtc);
 const beforeDeadline = deadline - 60_000;
+
+test('native Browser zoom readback checks body plus both rows, exact viewport and every control hit point', () => {
+  const before = { cardId: 'egd-browser-card-3', contextId: 16, innerWindowId: 72,
+    logicalWidth: 1440, logicalHeight: 573, pageZoom: 1,
+    world: { x: 0, y: 0, width: 1440, height: 640 } };
+  const after = { ...before, level: 'detail', contentFontPx: 12.5,
+    titleFontPx: 11, addressFontPx: 12, controls: [{ width: 32, height: 32, hits: 9 }] };
+  assert.deepEqual(browserPresentationIssues(before, after), []);
+  for (const key of ['contextId', 'innerWindowId', 'logicalWidth', 'logicalHeight', 'pageZoom']) {
+    assert.ok(browserPresentationIssues(before, { ...after, [key]: 999 })
+      .includes('browser-identity-viewport-or-world-changed'));
+  }
+  assert.ok(browserPresentationIssues(before, { ...after, titleFontPx: 8.8 })
+    .includes('two-row-bar-font-too-small'));
+  assert.ok(browserPresentationIssues(before, { ...after, controls: [{ width: 32, height: 32, hits: 8 }] })
+    .includes('two-row-bar-target-unusable'));
+  assert.ok(browserPresentationIssues(before, { ...after, controls: [{ width: 24, height: 24, hits: 9 }] })
+    .includes('two-row-bar-target-unusable'));
+  assert.deepEqual(browserPresentationIssues(before, { ...after, level: 'outline', contentFontPx: 8.5 },
+    { expectDetail: false }), []);
+});
+
+test('Browser presentation QA emits only local readback, never actor or Agent capture', async () => {
+  let emitted;
+  const harness = { evaluateChrome: source => { emitted = source; return null; } };
+  await observeBrowserPresentation(harness, 'egd-browser-card-3');
+  assert.doesNotThrow(() => new vm.Script(`(${emitted})`));
+  assert.doesNotMatch(emitted, /toolObserve|agentSnapshot|captureInput|sendQuery|\.ensure\(|\.click\(|setCanvasViewport/);
+  assert.match(emitted, /elementFromPoint/);
+  assert.match(emitted, /innerWindowId/);
+  await assert.rejects(observeBrowserPresentation(harness, '#unowned-selector'), /match/);
+});
 
 test('CLI requires an explicit future UTC deadline and a profile; no port or surface override exists', () => {
   assert.equal(parseDeadline(roundDeadlineUtc, beforeDeadline), deadline);
