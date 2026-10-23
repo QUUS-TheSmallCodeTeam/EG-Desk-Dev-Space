@@ -234,7 +234,8 @@ test('headless diagnostic screenshot unsupported is separate from DOM proof and 
   assert.deepEqual(await captureBrowserNegativeScreenshot(harness, ['browser-negative'], negativeEnv),
     { status: 'captured', path: '/owned/qa.png', visualPass: null, gfxInfoIsHeadless: true });
   for (const message of ['screenshot_page: Error: unsupported operation: chrome capture unavailable',
-    'screenshot_page: Error: Protocol error (browsingContext.captureScreenshot): unsupported operation']) {
+    'screenshot_page: Error: Protocol error (browsingContext.captureScreenshot): unsupported operation',
+    'screenshot_page: Error: BiDi error: "unsupported operation"']) {
     const unsupported = { ...harness, async screenshot() { throw new Error(message); } };
     assert.deepEqual(await captureBrowserNegativeScreenshot(unsupported, ['browser-negative'], negativeEnv),
       { status: 'unsupported', visualPass: null, errorCode: 'unsupported operation',
@@ -245,6 +246,13 @@ test('headless diagnostic screenshot unsupported is separate from DOM proof and 
   for (const message of ['screenshot_page: Error: unknown error', 'screenshot_page: timed out',
     'screenshot_page: Error: unsupported image format', 'unsupported operation',
     'evaluate_privileged_script: unsupported operation',
+    'evaluate_privileged_script: Error: BiDi error: "unsupported operation"',
+    'screenshot_page: Error: Protocol error (browsingContext.navigate): unsupported operation',
+    'screenshot_page: Error: BiDi error: "unknown error"',
+    'screenshot_page: Error: BiDi error: "unsupported operation": Refusing different Firefox profile',
+    'screenshot_page: Error: BiDi error: "unsupported operation"\nRefusing different Firefox profile',
+    'Refusing different Firefox profile: screenshot_page: Error: BiDi error: "unsupported operation"',
+    'screenshot_page: Error: BiDi error: "unsupported operation" trailing context',
     'screenshot_page: Error: unknown error: unsupported operation']) {
     await assert.rejects(captureBrowserNegativeScreenshot({ ...harness,
       async screenshot() { throw new Error(message); } }, ['browser-negative'], negativeEnv),
@@ -285,7 +293,8 @@ test('headless screenshot gate reads actual gfxInfo before capture and fails clo
       assert.deepEqual(events, ['profile', 'gfxInfo-read']);
     }
   }
-  for (const message of ['gfxInfo unavailable', 'screenshot_page: Error: unsupported operation']) {
+  for (const message of ['gfxInfo unavailable', 'screenshot_page: Error: unsupported operation',
+    'screenshot_page: Error: BiDi error: "unsupported operation"']) {
     let captures = 0;
     const failure = new Error(message);
     const harness = { async assertRemoteProfile() {}, async evaluateChrome() { throw failure; },

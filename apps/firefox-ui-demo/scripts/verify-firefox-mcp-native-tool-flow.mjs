@@ -130,7 +130,9 @@ export async function captureBrowserNegativeScreenshot(harness, cases, env = pro
     return { status: 'captured', path: await harness.screenshot('browser-guards-verified'), visualPass: null,
       ...headlessEvidence };
   } catch (error) {
-    if (!headlessDiagnostics || !/^screenshot_page:\s*(?:Error:\s*)?(?:Protocol error \(browsingContext\.captureScreenshot\):\s*)?unsupported operation(?:\s*:|\s*$)/i.test(error?.message || '')) throw error;
+    const unsupported = error?.message === 'screenshot_page: Error: BiDi error: "unsupported operation"'
+      || /^screenshot_page:\s*(?:Error:\s*)?(?:Protocol error \(browsingContext\.captureScreenshot\):\s*)?unsupported operation(?:\s*:|\s*$)/i.test(error?.message || '');
+    if (!headlessDiagnostics || !unsupported) throw error;
     return { status: 'unsupported', visualPass: null, errorCode: 'unsupported operation',
       scope: 'headless-screenshot-only', domProbeProofIndependent: true, ...headlessEvidence };
   }
