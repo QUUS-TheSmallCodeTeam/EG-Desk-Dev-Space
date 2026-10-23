@@ -1062,6 +1062,70 @@ test('approvals require exact pending thread/run and explicit supported choice',
   assert.deepEqual(h.chat.snapshot().runs[0].pendingApprovals, [])
 })
 
+for (const kind of ['commandExecution', 'fileChange']) {
+  test(`accepted ${kind} approval resolves into same-turn activity, not a new or prematurely completed run`, async () => {
+    const h = harness()
+    const run = await h.chat.send({ message: 'Continue the approved work',
+      requestId: 'approval-positive-request', clientThreadId: 'approval-positive-ui' })
+    const identity = value => ({ conversationId: value.conversationId, runId: value.runId, answerId: value.answerId })
+    const expectedIdentity = identity(run)
+    const callsBeforeApproval = h.calls.length
+    assert.deepEqual(h.calls.map(call => call.method), ['thread/start', 'turn/start'])
+    const current = () => {
+      const runs = h.chat.snapshot().runs
+      assert.equal(runs.length, 1, 'approval continuation must not create another run')
+      assert.deepEqual(identity(runs[0]), expectedIdentity)
+      return runs[0]
+    }
+    const assertStillRunning = () => {
+      assert.equal(current().status, 'inProgress')
+      assert.equal(h.events.filter(event => event.event === 'run.completed').length, 0)
+      assert.equal(h.legacy.filter(event => event.type === 'assistant-complete').length, 0)
+    }
+    const rpcId = `approval-positive-${kind}`
+    await h.chat.handleServerRequest({ id: rpcId, method: `item/${kind}/requestApproval`, params: {
+      threadId: run.conversationId, turnId: run.runId, itemId: 'approved-item',
+      ...(kind === 'commandExecution' ? { command: 'echo approved', availableDecisions: ['accept', 'decline'] } : {}),
+    } })
+    const approvalId = current().pendingApprovals[0].approvalId
+    const reply = { ...run, approvalId, decision: 'accept' }
+    const result = await h.chat.replyApproval(reply)
+    assert.equal(result.status, 'replySent')
+    assert.deepEqual(h.replies, [[rpcId, { decision: 'accept' }]], 'exactly one native allow response')
+    assert.equal(current().pendingApprovals[0].status, 'replySent')
+    assertStillRunning() // Sending permission is neither execution nor completion.
+
+    await h.notify('serverRequest/resolved', { threadId: run.conversationId, requestId: rpcId })
+    assert.deepEqual(current().pendingApprovals, [])
+    assert.equal(h.events.filter(event => event.event === 'approval.resolved').length, 1)
+    assertStillRunning() // Resolution also does not stand in for turn/completed.
+    await assert.rejects(h.chat.replyApproval(reply), error => error.code === 'STALE_APPROVAL')
+
+    const item = { id: 'approved-item', type: kind, status: 'inProgress',
+      ...(kind === 'commandExecution' ? { command: 'echo approved' }
+        : { changes: [{ path: 'approved.txt', kind: { type: 'update' }, diff: 'fixture only' }] }) }
+    await h.item(run, item, false)
+    assert.equal(current().activities.find(activity => activity.id === item.id).status, 'inProgress')
+    assertStillRunning()
+    await h.item(run, { ...item, status: 'completed', ...(kind === 'commandExecution' ? { exitCode: 0 } : {}) })
+    assert.equal(current().activities.find(activity => activity.id === item.id).status, 'completed')
+    assertStillRunning() // Even completed activity is not the terminal turn event.
+
+    await h.finish(run)
+    assert.equal(current().status, 'completed')
+    const lifecycle = h.events.filter(event => ['approval.required', 'approval.resolved',
+      'activity.started', 'activity.completed', 'run.completed'].includes(event.event))
+    assert.deepEqual(lifecycle.map(event => event.event), ['approval.required', 'approval.resolved',
+      'activity.started', 'activity.completed', 'run.completed'])
+    for (const event of lifecycle) assert.deepEqual(identity(event), expectedIdentity)
+    assert.equal(h.legacy.filter(event => event.type === 'assistant-complete').length, 1)
+    await assert.rejects(h.chat.replyApproval(reply), error => error.code === 'STALE_APPROVAL')
+    assert.deepEqual(h.replies, [[rpcId, { decision: 'accept' }]], 'late duplicates never send another allow')
+    assert.deepEqual(h.calls.slice(callsBeforeApproval), [],
+      'approval/resolution/activity/terminal must add zero thread/start or turn/start requests')
+  })
+}
+
 test('unsupported interactive requests are explicitly rejected without granting permission', async () => {
   const h = harness()
   const run = await h.chat.send({ message: 'Work' })
