@@ -68,6 +68,7 @@ Core principles:
 | Area | Current source |
 |---|---|
 | Public-facing whitepaper | [Production v8](../../docs/production/EG-DESK%20백서%20-%20Production_v8_한글.md) |
+| Vision gap ledger (2026-10-24 code audit, current state per item) | [`EGDESK_VISION_GAP_LEDGER.md`](./EGDESK_VISION_GAP_LEDGER.md) |
 | Interaction and orchestration contract | `ideas/confirmed/EGDESK_INTERACTION_AND_ORCHESTRATION_CONTRACT.md` |
 | Interaction trace and acceptance coverage (non-normative; not runtime evidence) | `ideas/confirmed/EGDESK_PRODUCT_INTERACTION_TRACE_ATLAS.md` |
 | Firefox shell strategy | `ideas/confirmed/FIREFOX_SHELL_STRATEGY.md` |
