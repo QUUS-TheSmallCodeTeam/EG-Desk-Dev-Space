@@ -1207,7 +1207,9 @@ function cameraSurfaceFixture({ failClick = false, failCancel = false, changeCon
   changeDocument = false, changeWorldRect = false, ignoreOffscreenCamera = false,
   initialSelectedCardIds = ['owned-local-card'], selectedCardIdsAfterClick = null,
   documentReplacement = false, reloadDoesNotReplace = false, staleActionAccepted = false,
-  replacementProfileChanged = false, reloadLoadingSamples = 0, reloadCovered = false } = {}) {
+  replacementProfileChanged = false, reloadLoadingSamples = 0, reloadCovered = false,
+  compactAfterPresentation = false, presentationPendingSamples = 0, revealFails = false,
+  proxyCovered = false, presentationNeverSettles = false } = {}) {
   const fixture = { url: 'http://127.0.0.1:39220/egdesk-qa/QA_URL_0123456789abcdef',
     marker: 'QA_DOM_0123456789abcdef' };
   const thread = { id: 'qa-camera-thread', wireClientThreadId: 'qa-camera-wire' };
@@ -1216,7 +1218,7 @@ function cameraSurfaceFixture({ failClick = false, failCancel = false, changeCon
   const state = { panTarget: { ...originalCamera.pan }, pan: { ...originalCamera.pan },
     zoomTarget: originalCamera.zoom, zoom: originalCamera.zoom };
   const effects = { acts: [], cameras: [], removedSources: [], opens: 0, cancels: 0,
-    reloads: 0, selections: 0, controlReads: 0 };
+    reloads: 0, selections: 0, controlReads: 0, reveals: 0 };
   const ownedCardId = documentReplacement ? 'document-owned-card' : 'camera-owned-card';
   const cards = new Map();
   let selected = [], selectedCard = null, diagnostic = null;
@@ -1249,6 +1251,16 @@ function cameraSurfaceFixture({ failClick = false, failCancel = false, changeCon
         return { left, top, right: left + width, bottom: top + height, width, height };
       } };
     card.loading = false;
+    card.dataset.egdSemanticLevel = 'detail';
+    card._browserPresentation = {
+      diagnostics() {
+        card.presentationPending = presentationNeverSettles || presentationPendingSamples-- > 0;
+        if (compactAfterPresentation && !card.presentationPending && !card.revealed)
+          card.dataset.egdSemanticLevel = 'outline';
+        return { cached: !card.presentationPending, pending: card.presentationPending, queries: 1 };
+      },
+      font: () => card.presentationPending ? null : card.dataset.egdSemanticLevel === 'detail' ? 10.6 : 7.98,
+    };
     card.reloadButton = { isConnected: true, parentElement: card, localName: 'button', disabled: false,
       get title() { return card.loading ? '중지' : '새로고침'; },
       get dataset() { return { icon: card.loading ? 'stop' : 'reload' }; },
@@ -1260,7 +1272,10 @@ function cameraSurfaceFixture({ failClick = false, failCancel = false, changeCon
         const width = 28 * state.zoom, height = 28 * state.zoom;
         return { left, top, right: left + width, bottom: top + height, width, height };
       } };
-    card.querySelector = selector => selector === '.egd-card-reload' ? card.reloadButton : null;
+    card.proxy = { ...card.reloadButton, parentElement: card,
+      getBoundingClientRect: () => card.getBoundingClientRect() };
+    card.querySelector = selector => selector === '.egd-card-reload' ? card.reloadButton
+      : selector === '.egd-semantic-proxy' ? card.proxy : null;
     card._browserControls = { toolBrowser: () => browser, toolBinding: () => bindingFor(card),
       getState: () => { effects.controlReads++; card.loading = reloadLoadingSamples-- > 0;
         return { loading: card.loading }; },
@@ -1331,16 +1346,32 @@ function cameraSurfaceFixture({ failClick = false, failCancel = false, changeCon
   } };
   const context = { window: { __egdesk: api, innerWidth: 1280, innerHeight: 810 },
     document: { getElementById: id => cards.get(id),
-      elementFromPoint: () => reloadCovered ? { id: 'cover', localName: 'div' } : cards.get(ownedCardId)?.reloadButton },
+      elementFromPoint: () => {
+        const card = cards.get(ownedCardId);
+        if (card?.dataset.egdSemanticLevel === 'outline')
+          return proxyCovered ? { id: 'cover' } : card.proxy;
+        return reloadCovered ? { id: 'cover', localName: 'div' } : card?.reloadButton;
+      } },
     getComputedStyle: () => ({ display: 'block', visibility: 'visible', opacity: '1' }) };
   const harness = {
     async evaluateChrome(source) { return JSON.parse(JSON.stringify(await runInNewContext(`(${source})()`, context))); },
     async click(selector) {
+      if (selector === `[id="${ownedCardId}"] .egd-semantic-proxy`) {
+        const card = cards.get(ownedCardId);
+        effects.reveals++;
+        assert.equal(card.dataset.egdSemanticLevel, 'outline');
+        if (!revealFails) {
+          card.revealed = true; card.dataset.egdSemanticLevel = 'detail';
+          state.zoomTarget = state.zoom = 1.33;
+        }
+        return;
+      }
       assert.equal(selectedCard?.id, ownedCardId);
       if (selector === `[id="${ownedCardId}"] .egd-card-reload`) {
         assert.equal(documentReplacement, true);
         assert.equal(selectedCard.loading, false, 'never click the Stop state');
         assert.equal(reloadCovered, false, 'never click through an occluder');
+        assert.equal(selectedCard.dataset.egdSemanticLevel, 'detail', 'never reload a compact projection');
         effects.reloads++;
         if (!reloadDoesNotReplace) {
           selectedCard.documentId += '-reloaded';
@@ -1364,7 +1395,9 @@ function cameraSurfaceFixture({ failClick = false, failCancel = false, changeCon
   const result = {};
   return { effects, state, result, originalCamera, selectedCardIds: () => selected.map(item => item.sourceRef.viewId),
     run: () => documentReplacement
-      ? runBrowserDocumentReplacement(harness, fixture, Date.now() + (reloadDoesNotReplace || reloadCovered ? 40 : 60000),
+      ? runBrowserDocumentReplacement(harness, fixture, Date.now() +
+        (reloadDoesNotReplace || revealFails ? 1800
+          : reloadCovered || proxyCovered || presentationNeverSettles ? 400 : 60000),
         thread, priorCardId, priorOwnerTag, 'previous-camera-card', result)
       : runBrowserCameraSurfaceIsolation(harness, fixture, Date.now() + 60000,
         thread, priorCardId, priorOwnerTag, result) };
@@ -1378,6 +1411,7 @@ test('top-level replacement denies the old observation at zero, then explicit UI
   assert.equal(f.effects.selections, 2);
   assert.equal(f.effects.acts.length, 2, 'one denied old request and one current guarded click');
   assert.equal(f.effects.cancels, 2);
+  assert.equal(f.effects.reveals, 0, 'already readable Cards need no proxy input');
   assert.notEqual(proof.beforeReload.snapshot.documentId, proof.afterReload.snapshot.documentId);
   assert.equal(proof.afterDenied.snapshot.qaDiagnostics.performCalls, 0);
   assert.equal(proof.positive.afterAttempt.snapshot.qaDiagnostics.performCalls, 1);
@@ -1397,6 +1431,44 @@ test('document replacement waits for Chrome idle then records nine real reload h
   assert.equal(proof.reload.preClick.innerWindowId, proof.beforeReload.native.innerWindowId);
   assert.notEqual(proof.reload.preClick.innerWindowId, proof.afterReload.native.innerWindowId);
   assert.equal(f.effects.reloads, 1);
+});
+
+test('pending presentation can turn detail into outline: native reveal once before a settled single reload', async () => {
+  const f = cameraSurfaceFixture({ documentReplacement: true, compactAfterPresentation: true,
+    presentationPendingSamples: 2 });
+  const proof = await f.run();
+  assert.equal(f.effects.reveals, 1);
+  assert.equal(f.effects.reloads, 1);
+  assert.equal(f.effects.acts.length, 2);
+  assert.equal(proof.reload.reveal.preClick.semanticLevel, 'outline');
+  assert.equal(proof.reload.preClick.semanticLevel, 'detail');
+  assert.equal(proof.reload.preClick.presentation.pending, false);
+  assert.ok(proof.reload.readiness.beforeClick.end.sampledAtMs -
+    proof.reload.readiness.beforeClick.start.sampledAtMs >= 240);
+  assert.deepEqual(proof.beforeReload.native.geometryStyle, proof.afterReload.native.geometryStyle);
+  assert.deepEqual(f.effects.cameras.at(-1), f.originalCamera);
+  for (const corrupt of [
+    p => { p.reload.reveal.attempts = 2; },
+    p => { p.reload.reveal.preClick.proxy.hitPoints[0].hitsTarget = false; },
+    p => { p.reload.reveal.preClick.semanticLevel = 'detail'; },
+    p => { p.reload.reveal.preClick.geometryStyle.width = '999px'; },
+  ]) {
+    const invalid = structuredClone(proof); corrupt(invalid);
+    assert.throws(() => assertBrowserDocumentReplacement(invalid));
+  }
+});
+
+test('unsettled presentation, covered proxy and ineffective reveal fail closed without reload or retry', async () => {
+  for (const option of ['presentationNeverSettles', 'proxyCovered', 'revealFails']) {
+    const f = cameraSurfaceFixture({ documentReplacement: true, compactAfterPresentation: true, [option]: true });
+    await assert.rejects(f.run(), undefined, option);
+    assert.equal(f.effects.reloads, 0, option);
+    assert.equal(f.effects.acts.length, 0, option);
+    assert.equal(f.effects.reveals, option === 'revealFails' ? 1 : 0, option);
+    assert.equal(f.effects.selections, 0, 'readability is required before selecting a source');
+    assert.deepEqual(f.selectedCardIds(), ['owned-local-card']);
+    assert.deepEqual(f.effects.cameras.at(-1), f.originalCamera);
+  }
 });
 
 test('covered reload fails without native click or guarded action and retains preflight evidence', async () => {
@@ -1425,6 +1497,17 @@ test('document replacement failure stops without retry and still restores the ow
 test('replacement proof rejects missing native document, zero-action, fresh guard, exact receipt and restoration evidence', async () => {
   const baseline = await cameraSurfaceFixture({ documentReplacement: true }).run();
   const corruptions = [
+    p => { delete p.reload.readiness; },
+    p => { p.reload.preClick.semanticLevel = 'outline'; },
+    p => { delete p.reload.preClick.presentation; },
+    p => { p.reload.preClick.presentation.pending = true; },
+    p => { p.reload.preClick.presentation.cached = false; },
+    p => { p.reload.preClick.font = null; },
+    p => { p.reload.preClick.camera.zoomTarget += .1; },
+    p => { p.reload.preClick.geometryStyle.width = '999px'; },
+    p => { p.reload.readiness.beforeClick.start.sampledAtMs = p.reload.readiness.beforeClick.end.sampledAtMs; },
+    p => { p.reload.readiness.beforeSelection.end.rect.left++; },
+    p => { p.reload.readiness.beforeReselection.end.innerWindowId = p.beforeReload.native.innerWindowId; },
     p => { delete p.reload.preClick; },
     p => { p.reload.preClick.loading = true; },
     p => { p.reload.preClick.label = '중지'; },
