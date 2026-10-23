@@ -4,7 +4,7 @@
 상태: **검토완료·미확인항목 포함**. 기존 설치본 분석·통제 실험과 10월 23일 추가 정적 검토를 합친 연구 참고 문서다.
 제품 기능 명세나 모든 앱에서의 동작 보증이 아니며, 새 기능 결정을 요구하지 않는다.
 
-- **직접 확인:** 설치 코드에서 브라우저 CDP 입력·DOM 표시 커서와 네이티브 PID 입력·포커스 복원을 구분했다. 제한된 과거 A/B 시험에서는 A→B→A 복귀와 A의 입력 수신을 확인했다. 현행 서비스의 예산/클릭 구조는 추가 정적 분석으로 확인했지만 현행 네이티브 동작까지 재검증한 것은 아니다.
+- **직접 확인:** 설치 코드에서 브라우저 CDP 입력·DOM 표시 커서와 네이티브 PID 입력·포커스 복원을 구분했다. 제한된 과거 A/B 시험에서는 A→B→A 복귀와 A의 입력 수신을 확인했다. 현행 브라우저 서비스는 REA 정적 분석, 현행 네이티브의 선택된 경계는 LLVM 정적 부분 대응까지 확인했으며 현행 네이티브 실행을 재검증한 것은 아니다.
 - **공개 자료:** 특정 버전의 제3자 실제 역분석, 독립 대체 구현, 공식 지원 설명은 서로 다른 근거다. 어느 것도 우리 현행 설치본의 전체 동작을 대신 증명하지 않는다.
 - **미확인:** timeout 뒤 최종 효과, native Stop 뒤 queued input, 현행 네이티브 버전의 동등성, Gecko 좌표 조합은 남아 있다. [남은 분석 표](#remaining-analysis)에 필요한 이유와 승인 후 최소 확인 범위를 정리했다.
 
@@ -74,6 +74,10 @@ IAB에서 이 전체 경로를 실행 추적한 증거는 확보하지 않았다
 A에 들어갔다고 기록한다. 그러나 fixture 로그는 문자 `ㅌ` 자체를 저장하지 않으며
 `inputPhysicalOriginVerifiedByFixture=false`다. 따라서 **사람 관찰 보고와 계측된 수신/변경을 합쳐 설명하되,
 fixture가 물리적 입력 출처를 검증했다고 쓰지 않는다.** [H337, N5, N6]
+
+**N-04 — 현행 네이티브는 LLVM 정적 부분 대응까지 확인했다.** 새 심볼·디스어셈블리에서 복원 후보의 수신 객체·BOOL/PID 검사와
+virtualCursor 관련 `postToPid` 경로를 대응시켰다. 선택된 경계에서 의미 있는 구조 변화는 발견하지 않았지만 전체 동등성이나 실제 입력 전달을 입증하지 않는다.
+현행 Ghidra 초기화는 완료되지 않아 **REA 함수 dossier는 없다**. 이 결과는 LLVM 정적 분석이며 일반 소스 읽기·REA 분석 완료·runtime 검증과 구별한다. [N7, N8]
 
 이 결과는 독립적인 OS 포커스 두 개, 영구적인 전역 커서 무이동, 모든 앱의 동시 조작 또는 Stop 후 무입력을 보장하지 않는다.
 
@@ -167,7 +171,7 @@ EG-05의 관련 위치는 변경 시 라인이 이동할 수 있으므로 테스
 |---|---|---|---|
 | R-01 / P1 timeout 뒤 효과 | 결과 미확정 요청의 중복 입력을 막기 위해 | 소유 fixture에서 command ID·move 수신·dispatch·timeout을 같은 시계로 연결한다. | 배경 시험 자체는 OS 전면 불필요; 전환 재현에는 통제된 전면 전환 필요 / 기존 로그로 late effect **UNKNOWN** |
 | R-02 / P2 native Stop | 새 dispatch 차단과 이미 보낸 입력의 수신을 구별하기 위해 | `enqueue/dispatch/Stop ACK/receive`에 command ID·순서·PID를 붙여 ACK 전후를 구분한다. | 통제된 A/B 전면 전환·입력 필요 / 적합한 기존 trace 없음, **UNKNOWN** |
-| R-03 / 현행 native 버전 변화 | 과거 offset·복원 결과를 새 helper에 잘못 적용하지 않기 위해 | 현행 해시 기준으로 관련 함수만 대응시킨 뒤, 실행 동등성이 필요할 때 별도 승인된 제한 시험을 한다. | 정적 대응은 OS 전면 불필요; 실행 재검증은 별도 / 해시 변경 확인, 동등성 **UNVERIFIED** |
+| R-03 / 현행 native 버전 변화 | 과거 offset·복원 결과를 새 helper에 잘못 적용하지 않기 위해 | N7의 정적 부분 대응을 기준으로, 실행 동등성이 제품 판단에 필요할 때 승인 범위를 확인한 제한 시험을 한다. | 정적 대응은 OS 전면 불필요; 실행 재검증은 별도 / **LLVM 정적 부분 대응 완료**, REA dossier 없음·runtime 동등성 **UNVERIFIED** |
 | R-04 / Gecko frame·zoom·배경 좌표 조합 | Chromium의 관찰/입력 좌표 계약을 Firefox로 오인하지 않기 위해 | 소유 페이지에서 frame·확대율·화면 배율·배경/최소화 조합별 fresh snapshot 좌표와 실제 수신 대상을 대조한다. | 좌표 단위 검증은 OS 전면 불필요; 배경/최소화 실측은 통제 전환 필요 / 조합별 실행 **UNVERIFIED** |
 | R-05 / 불투명 host 연결 — 낮은 우선순위 | 대상·세션 경계의 누락을 확인하되 구현을 추측해 복제하지 않기 위해 | 기존 정적 자료에서 client→host→extension/target 식별자 연결만 보완한다. | 정적 검토는 OS 전면 불필요 / 연결 일부 **UNKNOWN**, 제품 변경의 선행 조건으로 삼지 않음 |
 
@@ -185,12 +189,12 @@ EG-05의 관련 위치는 변경 시 라인이 이동할 수 있으므로 테스
 | SkyComputerUseService | **26.1013.1001501 (1001501)**; `f21c31c0ee5df419dbd165bf76ebd65c64d864c6fec5b6c6c3a23c42ff3d2e13` | 추가 설치 식별 확인: **26.1015.1001540**; `ef4f4dc20e64ee29027bf178f553c0c39b9cfa517a4cd39734510259f23c058a` |
 
 현행 버전/해시는 추가 검토 보고를 반영했다. 현행 네이티브 바이너리를 과거 offset으로 해석하지 않는다.
-과거 native UUID는 `6AD9DE94-5466-38A4-B2E0-F81DFBC620DB`다.
+과거 native UUID는 `6AD9DE94-5466-38A4-B2E0-F81DFBC620DB`, 현행은 `374107F0-B948-3F44-A251-E9E7D5FEBC70`다. 현행 식별값은 N7에서 재확인했다.
 
 ## 부록 B. 주장별 함수·증거 위치
 
 브라우저 byte 범위는 UTF-8의 반개구간 `[start,end)`, line은 1-based다.
-네이티브 VA는 과거 image base `0x100000000` 기준이며 실제 로드 주소와 구별한다.
+네이티브 VA는 해당 버전의 image base `0x100000000` 기준이며 실제 로드 주소와 구별한다. 아래 native 함수 위치는 현행으로 명시한 N-04 행을 제외하면 과거 버전이다.
 C5는 Babel로 위치·원문 slice를 추출한 자료다. C6–C8은 그 원문 함수 slice에 클래스 포장만 추가한 파생 파일을 대상으로 한 **실제 REA 6.7.0 정적 분석**이다.
 파생 slice SHA-256은 `f5286c94b34c4c3abb8b7a30b0d921cfd818661fa66a78f304a8cc003b2f926c`다. 분석은 partial이며 출력 잘림은 없지만 동적 `this`·외부 helper 전체 연결이나 실행을 증명하지 않는다.
 
@@ -209,6 +213,9 @@ C5는 Babel로 위치·원문 slice를 추출한 자료다. C6–C8은 그 원�
 | N-01 | `FUN_100705dc0`, call `0x100705f00 → postToPid 0x10025ec14 → 0x10025ec20` | N2/N3: LLVM 본문 + 기존 REA 심볼/래퍼 증거. 최종 간접 target 및 실제 분기 실행 UNKNOWN |
 | N-02 | `FUN_10074a96c`; call `0x10074ac44`, return `0x10074ac48`; 이전 앱 `activateWithOptions:0` | N1의 LLVM 대조, N4 L9339 부근 `NSRunningApplication → SLSSetFrontProcessWithInfo` 샘플 |
 | N-02/N-03 | A 로그 L31 `keyDown`, L32 `textDidChange`; B 로그 L47 관찰 종료 | N5/N6 계측. `ㅌ`과 사용자 직접 입력은 H337의 당시 관찰 보고 |
+| N-04 — 현행 복원 후보 | 새 심볼 `safelyEnforceActiveState` `0x10074ab10 → continuation 0x10074abd8`; 최초 call `0x10074b4d8`, 반복 continuation `0x10074d1d4`의 call `0x10074d4ac` | N7 LLVM. receiver는 context `+0x1d8`, `activateWithOptions:0` 후보·BOOL/PID 비교·50ms/2s 형태 유지. 실제 복원 실행·대기시간 실측 아님 |
+| N-04 — 현행 virtualCursor 경계 | 현행 descriptor 대조 후 continuation `0x100708628`; call `0x100708768 → postToPid 0x100261478` | N7 LLVM·심볼·과거 명령열 비교. event/PID 전달 형태 유지; 최종 OS 전달·실제 분기 실행은 UNKNOWN |
+| N-04 — 현행 간접 전송 | `postToPid 0x100261478 → wrapper 0x100261484 → indirect branch 0x1002614c4`; slot `0x1014e3140` | N7의 정적 경계. slot의 최종 runtime target은 UNKNOWN; N8은 REA 분석 시도 기록이지 현행 함수 dossier가 아님 |
 
 N5 L31/L32에서 foreground는 A, `sawActualBForeground`·`sawActualAReturn`은 true다.
 A의 key count는 1, text change는 0→1, cursor change는 0이다.
@@ -241,6 +248,8 @@ L48 `willTerminate`는 관찰 종료 뒤 정리 시점이다. 그때 foreground 
 | N4 | `native/activation-cause-F5T7Wz/bound-explicit-source/induced/helper-78131-20s.sample.txt` | 과거 실행 샘플; A87904/B87917 입력 실험과는 다른 관찰 자료 |
 | N5 | 같은 induced 디렉터리의 `A-87904.events.jsonl` L31/L32 | 원시 로그에서 입력 수신·텍스트 변경·물리 출처 false 재확인 |
 | N6 | 같은 induced 디렉터리의 `B-87917.events.jsonl` L47 | 원시 로그의 관찰 종료 경계 확인; 뒤의 L48 정리 시점과 구별 |
+| N7 | `native/focus-restore-6yqdDW/46-current-native-llvm-raw.json` | 2026-10-23 현행 helper 식별·새 심볼·LLVM 함수/명령열 최소 대응. `direct-LLVM-static-not-REA-function-dossier` |
+| N8 | `native/focus-restore-6yqdDW/47-current-native-rea-attempt-raw.json` | 2026-10-23 REA/Ghidra 초기화 미완료·세션 종료 기록. 현행 REA 함수 dossier 미확보; runtime 증거 아님 |
 
 원본 교체를 감지할 최소 artifact SHA-256은 다음과 같다. 설치 실행 파일 해시와 JSON/로그 파일 해시는 다른 값이다.
 
@@ -258,6 +267,7 @@ L48 `willTerminate`는 관찰 종료 뒤 정리 시점이다. 그때 foreground 
 | N1 / N2 | `2848bf3c8252f9c290f812765c0e0b4b69e429f65ee2cc0359ec663210e53a30` / `9acafdd29d2dd6de945b58743724aeba0d7332cdc8c794d773812b209fde8b45` |
 | N3 / N4 | `13c52f8ece74cb2421c5aa71afdc38eb55ed3651347516cfb3e325b7dc5a256d` / `3c7e9d496dc60a6aebd60a7c6337da1a18b17e8dcd8fd62f965ca6550885921e` |
 | N5 / N6 | `f8b6cda86acd2051708ae573a9b46a89f56a5f6c94be018755157ccc5d55033b` / `68edc62bc53dd20ccbe9f1d8684d031a9c942e68480a0bd195f50bcf39ce8c8f` |
+| N7 / N8 | `e4e71047cb008961d3726d9b79463c5b010d450f74b75bc91647362dabe48827` / `0bd1e57738753986492adc4de022d7db0ebf1aa75abfa2a5e61612936a537dd0` |
 
-현행 C1–C8 artifact SHA-256은 2026-10-23 보관 파일에서 산출했다. 설치 service SHA·함수 위치·REA evidence ID와 함께 조회한다.
+현행 C1–C8 및 N7/N8 artifact SHA-256은 2026-10-23 보관 파일에서 산출했다. 설치 service/helper SHA·함수 위치·해당하는 REA evidence ID와 함께 조회한다.
 자료의 해시가 맞아도 전체 호출 그래프·현재 설치 동작·취소 보장을 증명하는 것은 아니다.
