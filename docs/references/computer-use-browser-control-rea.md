@@ -162,6 +162,7 @@ P-02의 [고정 LICENSE](https://github.com/iFurySt/open-computer-use/blob/43eb4
 | EG-04 | Stop의 층위를 분리 | 상위 실행 중지, lease 무효화, 새 dispatch 차단, 이미 보낸 OS 입력의 최종 수신은 다른 검증이다. |
 | EG-05 | 기존 단위 테스트 활용 | 아래 항목은 2026-10-23 중앙 검증에서 통과를 확인한 단위 테스트다(`79b3566`). **unit-test verified**이며 OpenAI REA 결과나 물리 OS 취소 보장으로 합산하지 않는다. |
 | EG-06 | 실제 EG-Desk 소유 fixture의 headless 경계 검증 | 2026-10-23 `42db7c0`의 browser-negative에서 **11개 거부 + guarded fill/click 양성 대조 2개 + 카메라 격리 사례 통과**. 실제 headless UI 실행이지만 test-only synthetic B-service·owned UI 범위이며 native-model/provider 검증은 아니다. [EGQ1] |
+| EG-07 | 실제 소유 fixture의 top-document reload 경계 검증 | 2026-10-23 UTC headless QA에서 **UI reload로 문서 교체 → 오래된 action 거부 → 명시적 재선택·fresh observe 후 DOM 클릭 1회 통과**. EG-Desk test-only 소유 UI 근거이며 설치 OpenAI REA·native-model/provider 검증이 아니다. [EGQ2] |
 
 EG-05의 관련 위치는 변경 시 라인이 이동할 수 있으므로 테스트 의미와 함께 확인한다.
 
@@ -179,6 +180,11 @@ Card·browsing context·document·content viewport가 같고, actor perform 1회
 실행 전후 sends/authWrites/runs/providerTurns는 모두 0이다. `dom-click-no-pointerdown` 경로이며 좌표 입력·OS 포커스·native-model/provider 실행 증거가 아니다.
 `gfxInfoIsHeadless=true`; screenshot은 unsupported·`visualPass=null`로 남겨 DOM/probe 검증과 시각 검증을 분리한다. [EGQ1]
 
+EG-07은 reload 버튼의 **idle(`loading=false`, `busy=false`)·활성 상태와 9개 hit-test 지점**을 확인한 뒤 실제 하네스 UI 클릭으로 수행했다.
+같은 소유 Card·프로필·browsing context·URL·대상 bounds에서 Firefox `innerWindowId`와 actor document ID가 바뀌었다. 오래된 action은 `BROWSER_ACTION_UNVERIFIED`로 거부됐고 새 문서 perform은 0이었다.
+cancel 후 소유 카드 메뉴의 명시적 재선택·fresh observe를 거쳐 guarded DOM click 1회, perform/count **0→1**·후조건 관찰을 확인했다. finally 정리 후 카메라·선택 상태도 복원됐다.
+전후 sends/authWrites/runs/providerTurns는 0, 실제 headless는 true이며 screenshot은 unsupported·`visualPass=null`이다. 클릭 경로는 `dom-click-no-pointerdown`으로, 좌표 입력·native-model/provider·OS 포커스 증거가 아니다. [EGQ2]
+
 <a id="remaining-analysis"></a>
 ## 7. 남은 분석: 필요한 이유와 최소 확인 범위
 
@@ -189,7 +195,7 @@ Card·browsing context·document·content viewport가 같고, actor perform 1회
 | R-01 / P1 timeout 뒤 효과 | 결과 미확정 요청의 중복 입력을 막기 위해 | 소유 fixture에서 command ID·move 수신·dispatch·timeout을 같은 시계로 연결한다. | 배경 시험 자체는 OS 전면 불필요; 전환 재현에는 통제된 전면 전환 필요 / 기존 로그로 late effect **UNKNOWN** |
 | R-02 / P2 native Stop | 새 dispatch 차단과 이미 보낸 입력의 수신을 구별하기 위해 | N-05의 정적 경계를 기준으로, 승인된 시험에서 `enqueue/dispatch/Stop ACK/receive`에 command ID·순서·PID를 붙여 ACK 전후를 구분한다. | 통제된 A/B 전면 전환·입력 필요 / Stop 표식·대기열·guard의 LLVM 부분 확인. UI Stop→IPC 및 마지막 guard 이후 취소·ACK·late effect는 런타임 trace가 없어 **UNKNOWN** |
 | R-03 / 현행 native 버전 변화 | 과거 offset·복원 결과를 새 helper에 잘못 적용하지 않기 위해 | N7의 정적 부분 대응을 기준으로, 실행 동등성이 제품 판단에 필요할 때 승인 범위를 확인한 제한 시험을 한다. | 정적 대응은 OS 전면 불필요; 실행 재검증은 별도 / **LLVM 정적 부분 대응 완료**, REA dossier 없음·runtime 동등성 **UNVERIFIED** |
-| R-04 / Gecko frame·zoom·배경 좌표 조합 | Chromium의 관찰/입력 좌표 계약을 Firefox로 오인하지 않기 위해 | 소유 페이지에서 frame·확대율·화면 배율·배경/최소화 조합별 fresh snapshot 좌표와 실제 수신 대상을 대조한다. | 좌표 단위 검증은 OS 전면 불필요; 배경/최소화 실측은 통제 전환 필요 / EG-06은 Canvas 카메라 이동과 DOM 클릭의 제한된 부분 검증. frame·page zoom·DPR·좌표 입력 및 조합별 실행은 **UNVERIFIED** |
+| R-04 / Gecko frame·zoom·배경 좌표 조합 | Chromium의 관찰/입력 좌표 계약을 Firefox로 오인하지 않기 위해 | 소유 페이지에서 frame·확대율·화면 배율·배경/최소화 조합별 fresh snapshot 좌표와 실제 수신 대상을 대조한다. | 좌표 단위 검증은 OS 전면 불필요; 배경/최소화 실측은 통제 전환 필요 / EG-06/07은 Canvas 카메라·top-document 교체와 DOM 클릭의 제한된 부분 검증. frame·page zoom·DPR·좌표 입력 및 조합별 실행은 **UNVERIFIED** |
 | R-05 / 불투명 host 연결 — 낮은 우선순위 | 대상·세션 경계의 누락을 확인하되 구현을 추측해 복제하지 않기 위해 | B-04의 송수신 JS·세션/숫자 탭 검사 부분 확인을 기준으로, 필요할 때 native pipe/host 내부의 ID 전달·재작성 연결만 보완한다. | 정적 검토는 OS 전면 불필요 / 내부 ID 재작성·E2E runtime 대응은 **UNKNOWN**. 모든 target 소유권 검증 아님; 제품 변경의 선행 조건으로 삼지 않음 |
 
 ## 부록 A. 버전·해시와 드리프트
@@ -251,7 +257,7 @@ L48 `willTerminate`는 관찰 종료 뒤 정리 시점이다. 그때 foreground 
 
 ## 부록 C. 원본 보관 매핑
 
-상대 경로 기준은 보관 실험 **`run-Qvnin2q5/`**다. EGQ1은 별도 EG-Desk QA 보관 디렉터리이며 이 REA 실험에 속하지 않는다. 원본은 이 저장소에 포함하지 않는다.
+상대 경로 기준은 보관 실험 **`run-Qvnin2q5/`**다. EGQ1/EGQ2는 별도 EG-Desk QA 보관 디렉터리이며 이 REA 실험에 속하지 않는다. 원본은 이 저장소에 포함하지 않는다.
 개인별 캐시 루트 대신 증거 ID·상대 경로·해시로 보관자에게 조회한다. 저장소 clone만으로 원본 실행을 재현할 수는 없다.
 
 | ID | 상대 경로 또는 기록 ID | 확인 범위 |
@@ -281,6 +287,9 @@ L48 `willTerminate`는 관찰 종료 뒤 정리 시점이다. 그때 foreground 
 | N8 | `native/focus-restore-6yqdDW/47-current-native-rea-attempt-raw.json` | 2026-10-23 REA/Ghidra 초기화 미완료·세션 종료 기록. 현행 REA 함수 dossier 미확보; runtime 증거 아님 |
 | N9 | `native/focus-restore-6yqdDW/48-current-native-stop-queue-llvm-raw.json` | `2026-10-23T14:57:14Z`; N7과 같은 helper 26.1015.1001540·SHA·UUID. `raw_results`의 지정 함수 출력·파일 메타데이터를 대조한 직접 LLVM 정적 근거이며 REA 함수 dossier가 아님. 대상 실행·UI 입력·프로세스 메모리·runtime 관측 없음 |
 | EGQ1 | 별도 QA 보관: `egdesk-chat-evidence-CJTqA3/result.json` | 2026-10-23, `42db7c0` 실행 보고. result의 거부/양성 대조·cameraSurfaceIsolation·headless·backend 전후 카운터만 대조; 설치 OpenAI 제어 재현 실험이 아님 |
+| EGQ2 | 별도 QA 보관: `egdesk-chat-evidence-Abaf75/result.json` | reload 관찰 `2026-10-23T15:10:39.320Z`. 실행 runtime `7aeb22a`; 실행한 QA runner의 후속 커밋 `86c7156`(main 통합 `283f472`). `browserDocumentReplacement`·headless·backend 전후 카운터 대조 |
+
+EGQ2의 소유 Card 5·context 17에서 `innerWindowId`는 `27917287425 → 27917287426`, actor document는 `3a895710-1afb-4bce-b941-c5452eb3c338 → 2322f46e-f6df-4a21-a867-59900c55d2c1`로 바뀌었다. 프로필·URL·대상 bounds의 동일성은 관찰값 비교이며 좌표 입력 성공을 뜻하지 않는다.
 
 원본 교체를 감지할 최소 artifact SHA-256은 다음과 같다. 설치 실행 파일 해시와 JSON/로그 파일 해시는 다른 값이다.
 
@@ -302,6 +311,7 @@ L48 `willTerminate`는 관찰 종료 뒤 정리 시점이다. 그때 foreground 
 | N7 / N8 | `e4e71047cb008961d3726d9b79463c5b010d450f74b75bc91647362dabe48827` / `0bd1e57738753986492adc4de022d7db0ebf1aa75abfa2a5e61612936a537dd0` |
 | N9 | `a3ffcb1328a8344ca202d63025182f268b5a387d04b4d1d364c3c31bcb7aa1bd` |
 | EGQ1 | `a07a9f5aa10ca0e2ff20c9252711ab8f63ef81a9b9fc42555e65ade90e929908` |
+| EGQ2 | `a67fd11a570b7ba2feb9189c5b0381ead74cecb964c8363db42a09d157a5890a` |
 
 현행 C1–C10 및 N7–N9 artifact SHA-256은 2026-10-23 UTC 보관 파일에서 산출했다. 설치 service/helper SHA·함수 위치·해당하는 REA evidence ID와 함께 조회한다.
 자료의 해시가 맞아도 전체 호출 그래프·현재 설치 동작·취소 보장을 증명하는 것은 아니다.
