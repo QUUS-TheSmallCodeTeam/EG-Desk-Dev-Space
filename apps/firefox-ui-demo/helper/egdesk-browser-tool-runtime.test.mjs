@@ -98,13 +98,13 @@ test('only explicitly selected Browser sources expose tools; read-only never gra
     postcondition: { kind: 'visible-text', value: 'Count: 1' },
   } }), { code: 'BROWSER_INTERACTION_NOT_GRANTED' })
   assert.equal(f.actionCalls, 0)
-  assert.equal(BROWSER_TOOL_SPECS.length, 4)
+  assert.equal(BROWSER_TOOL_SPECS.length, 7)
 })
 
 test('fresh observed target dispatches once and returns DOM post-observation, never external success', async () => {
   const f = fixture()
   const prepared = f.service.prepare({ selectedSources: [source()] })
-  assert.equal(f.service.specs(prepared).length, 4)
+  assert.equal(f.service.specs(prepared).length, 7)
   await f.service.bind(run, prepared)
   const observed = await f.service.dispatch(run, { tool: 'egdesk_browser_observe', arguments: { cardId: 'browser-1' } })
   const args = { cardId: 'browser-1', observationId: observed.observationId, expectedRevision: 3,
@@ -478,10 +478,10 @@ test('URL postcondition compares canonical browser URLs including normalized tra
   const before = await f.service.dispatch(run, { tool: 'egdesk_browser_observe', arguments: { cardId: 'browser-1' } })
   const result = await f.service.dispatch(run, { tool: 'egdesk_browser_navigate', arguments: {
     cardId: 'browser-1', observationId: before.observationId, expectedRevision: 3,
-    url: 'https://example.com', postcondition: { kind: 'url', value: 'https://example.com' },
+    url: 'https://example.test', postcondition: { kind: 'url', value: 'https://example.test' },
   } })
   assert.equal(result.status, 'postcondition-observed')
-  assert.equal(result.after.url, 'https://example.com/')
+  assert.equal(result.after.url, 'https://example.test/')
   assert.equal(result.externalEffectVerified, false)
 })
 
@@ -507,7 +507,7 @@ test('new-document re-observation resolves navigation uncertainty without extern
   f.setNavigationAfterNull(true)
   await f.service.bind(run, f.service.prepare({ selectedSources: [source()] }))
   const before = await f.service.dispatch(run, { tool: 'egdesk_browser_observe', arguments: { cardId: 'browser-1' } })
-  const destination = 'http://127.0.0.1:18181/next'
+  const destination = 'https://example.test/next'
   const navigation = await f.service.dispatch(run, { tool: 'egdesk_browser_navigate', arguments: {
     cardId: 'browser-1', observationId: before.observationId, expectedRevision: 3,
     url: destination, postcondition: { kind: 'url', value: destination },
@@ -558,13 +558,13 @@ test('navigation to a different final URL remains interaction-uncertain after ob
   f.setNavigationAfterNull(true)
   await f.service.bind(run, f.service.prepare({ selectedSources: [source()] }))
   const before = await f.service.dispatch(run, { tool: 'egdesk_browser_observe', arguments: { cardId: 'browser-1' } })
-  const destination = 'http://127.0.0.1:18181/expected'
+  const destination = 'https://example.test/expected'
   await f.service.dispatch(run, { tool: 'egdesk_browser_navigate', arguments: {
     cardId: 'browser-1', observationId: before.observationId, expectedRevision: 3,
     url: destination, postcondition: { kind: 'url', value: destination },
   } })
   f.setSnapshot(snapshot(4, { documentId: 'document-2', readyState: 'complete',
-    url: 'http://127.0.0.1:18181/unexpected' }))
+    url: 'https://example.test/unexpected' }))
   const observed = await f.service.dispatch(run, { tool: 'egdesk_browser_observe', arguments: { cardId: 'browser-1' } })
   assert.equal(observed.navigationPostconditionReobserved, false)
   await assert.rejects(f.service.dispatch(run, { tool: 'egdesk_browser_click', arguments: {
@@ -572,4 +572,404 @@ test('navigation to a different final URL remains interaction-uncertain after ob
     ref: 'el_1', expectedTarget: observed.snapshot.interactiveElements[0],
     postcondition: { kind: 'visible-text', value: 'Count: 1' },
   } }), { code: 'BROWSER_OUTCOME_UNKNOWN' })
+})
+
+// Guarded scroll / press / wait / same-site navigate (BRW-05, BRW-06).
+function guardedSnapshot(overrides = {}) {
+  return snapshot(3, { readyState: 'complete', scroll: { x: 0, y: 0, maxY: 2000 }, focusedElement: null,
+    interactiveElements: [
+      { ref: 'el_1', role: 'button', label: 'Increment', href: '', value: '', tag: 'button', disabled: false,
+        bounds: { x: 12, y: 30, width: 80, height: 30 } },
+      { ref: 'el_2', role: 'searchbox', label: 'Search', href: '', value: '', tag: 'input', disabled: false,
+        bounds: { x: 12, y: 80, width: 160, height: 30 } },
+      { ref: 'el_3', role: 'link', label: 'Footer', href: 'https://example.test/about', value: '', tag: 'a',
+        disabled: false, bounds: { x: 12, y: 1400, width: 80, height: 20 } },
+    ], ...overrides })
+}
+const actorReceipt = (extra = {}) => ({ actor: 'JSWindowActor', eventDispatched: true, documentStillCurrent: true, ...extra })
+const scrollReceipt = (mode = 'document', extra = {}) => actorReceipt({ inputRoute: 'dom-scroll-api', scrollMode: mode, ...extra })
+const keyReceipt = (key, focusPolicy, extra = {}) => actorReceipt({ inputRoute: 'dom-keyboard-event', key,
+  trustedInput: false, targetKeyObserved: true, keydownDefaultPrevented: false, defaultActionEmulated: null, focusPolicy, ...extra })
+function guardedFixture({ timeoutMs } = {}) {
+  let current = guardedSnapshot()
+  let onAct = () => { throw new Error('unexpected act') }
+  let onWait = null
+  const requests = []
+  const sendToUi = async request => {
+    requests.push(request)
+    if (request.kind === 'bind') return { requestId: request.requestId, status: 'bound', binding: {
+      cardId: 'browser-1', cardEpoch: 'card-epoch-1', profileId: 'firefox-default', accountId: 'fixture-account',
+      userContextId: 0, url: 'https://example.test/local', engineAccountKey: 'codex:chatgpt:fixture@example.test', authorityEpoch: 0 } }
+    if (request.kind === 'cancel') return { requestId: request.requestId, status: 'cancelled' }
+    if (request.kind === 'observe' && request.options?.wait) {
+      return onWait ? onWait(request) : { requestId: request.requestId, status: 'observed',
+        snapshot: { ...current, wait: { for: request.options.wait.for, outcome: 'met', elapsedMs: 5 } } }
+    }
+    if (request.kind === 'observe') return { requestId: request.requestId, status: 'observed', snapshot: current }
+    if (request.kind === 'act') return onAct(request)
+    throw new Error('unexpected UI request')
+  }
+  const service = createBrowserToolService({ sendToUi, getOwnerKey: () => 'engine-account-1', ...(timeoutMs ? { timeoutMs } : {}) })
+  let sequence = 0
+  const dispatch = (tool, args, callId = `guarded-call-${++sequence}`) => service.dispatch(run, { tool, callId, arguments: args })
+  const observe = () => dispatch('egdesk_browser_observe', { cardId: 'browser-1' })
+  const acted = (request, after, dispatchReceipt) => ({ requestId: request.requestId, status: 'acted',
+    receipt: { dispatchReceipt, after, observation: { visibleTextChanged: false } } })
+  return { service, requests, dispatch, observe, acted,
+    acts: () => requests.filter(request => request.kind === 'act'),
+    waits: () => requests.filter(request => request.kind === 'observe' && request.options?.wait),
+    get current() { return current }, set current(value) { current = value },
+    setAct(fn) { onAct = fn }, setWait(fn) { onWait = fn },
+    bind: () => service.bind(run, service.prepare({ selectedSources: [source()] })) }
+}
+const targetOf = (seen, ref) => seen.snapshot.interactiveElements.find(item => item.ref === ref)
+
+test('guarded scroll sends one document-scoped request and returns the observed scrollY change', async () => {
+  const f = guardedFixture()
+  await f.bind()
+  const seen = await f.observe()
+  f.setAct(request => {
+    f.current = guardedSnapshot({ scroll: { x: 0, y: 432, maxY: 2000 } })
+    return f.acted(request, f.current, scrollReceipt('document'))
+  })
+  const args = { cardId: 'browser-1', observationId: seen.observationId, expectedRevision: 3, direction: 'down' }
+  const result = await f.dispatch('egdesk_browser_scroll', args)
+  assert.equal(result.status, 'postcondition-observed')
+  assert.deepEqual(result.scroll, { before: { x: 0, y: 0, maxY: 2000 }, after: { x: 0, y: 432, maxY: 2000 } })
+  assert.deepEqual(result.postcondition, { kind: 'scroll-position', direction: 'down', amount: 'page', matched: true })
+  assert.equal(result.dispatchReceipt.inputRoute, 'dom-scroll-api')
+  assert.equal(result.externalEffectVerified, false)
+  const [request] = f.acts()
+  assert.deepEqual(request.action, { type: 'scroll', direction: 'down', amount: 'page' })
+  assert.deepEqual(request.guard.scroll, { x: 0, y: 0, maxY: 2000 })
+  assert.equal(request.guard.documentId, 'document-1')
+  assert.equal(request.guard.revision, 3)
+  assert.equal(request.guard.target, undefined)
+  assert.equal(request.postcondition, undefined)
+  await assert.rejects(f.dispatch('egdesk_browser_scroll', args), { code: 'BROWSER_OBSERVATION_STALE' })
+  assert.equal(f.acts().length, 1)
+
+  f.current = guardedSnapshot({ scroll: { x: 0, y: 2000, maxY: 2000 } })
+  const bottom = await f.observe()
+  f.setAct(request => f.acted(request, f.current, scrollReceipt('document')))
+  const limited = await f.dispatch('egdesk_browser_scroll', { ...args, observationId: bottom.observationId, amount: 'half' })
+  assert.equal(limited.status, 'scroll-at-limit', 'no movement at the end is a known state, not a success')
+  assert.equal(limited.postcondition.matched, false)
+})
+
+test('scroll without an actor route stays unverified but only requires re-observation', async () => {
+  const f = guardedFixture()
+  await f.bind()
+  const seen = await f.observe()
+  f.setAct(request => {
+    f.current = guardedSnapshot({ scroll: { x: 0, y: 432, maxY: 2000 } })
+    return f.acted(request, f.current, actorReceipt())
+  })
+  const result = await f.dispatch('egdesk_browser_scroll', { cardId: 'browser-1', observationId: seen.observationId,
+    expectedRevision: 3, direction: 'down' })
+  assert.equal(result.status, 'postcondition-unverified', 'a moved viewport without the reported route is not confirmed')
+  assert.equal(result.scroll.after, null)
+  const again = await f.observe()
+  f.setAct(request => f.acted(request, guardedSnapshot({ text: ['Count: 1'] }),
+    actorReceipt({ clickInputRoute: 'dom-click-no-pointerdown', targetClickObserved: true })))
+  const click = await f.dispatch('egdesk_browser_click', { cardId: 'browser-1', observationId: again.observationId,
+    expectedRevision: 3, ref: 'el_1', expectedTarget: targetOf(again, 'el_1'),
+    postcondition: { kind: 'visible-text', value: 'Count: 1' } })
+  assert.equal(click.status, 'postcondition-observed', 'scroll uncertainty does not lock the Card like an effectful action')
+})
+
+test('scroll into view requires the exact observed element and rejects malformed or stale requests before UI', async () => {
+  const f = guardedFixture()
+  await f.bind()
+  const seen = await f.observe()
+  const base = { cardId: 'browser-1', observationId: seen.observationId, expectedRevision: 3 }
+  for (const [args, code] of [
+    [{ ...base, ref: 'el_3', expectedTarget: targetOf(seen, 'el_3'), direction: 'down' }, 'INVALID_BROWSER_TOOL'],
+    [{ ...base, direction: 'sideways' }, 'INVALID_BROWSER_TOOL'],
+    [{ ...base, ref: 'el_3', expectedTarget: targetOf(seen, 'el_3'), amount: 'page' }, 'INVALID_BROWSER_TOOL'],
+    [{ ...base, ref: 'el_3', expectedTarget: { ...targetOf(seen, 'el_3'), label: 'Changed' } }, 'BROWSER_TARGET_STALE'],
+    [{ ...base, expectedRevision: 2, direction: 'down' }, 'BROWSER_OBSERVATION_STALE'],
+  ]) await assert.rejects(f.dispatch('egdesk_browser_scroll', args), { code })
+  assert.equal(f.acts().length, 0)
+  f.setAct(request => {
+    f.current = guardedSnapshot({ scroll: { x: 0, y: 1200, maxY: 2000 }, interactiveElements: [
+      { ...targetOf(seen, 'el_3'), bounds: { x: 12, y: 200, width: 80, height: 20 } }] })
+    return f.acted(request, f.current, scrollReceipt('into-view', { targetInView: true }))
+  })
+  const result = await f.dispatch('egdesk_browser_scroll', { ...base, ref: 'el_3', expectedTarget: targetOf(seen, 'el_3') })
+  assert.equal(result.status, 'postcondition-observed')
+  assert.deepEqual(result.postcondition, { kind: 'target-in-view', matched: true, wasAlreadyTrue: false })
+  assert.deepEqual(f.acts()[0].action, { type: 'scroll', ref: 'el_3' })
+  assert.equal(f.acts()[0].guard.target.ref, 'el_3')
+
+  f.current = guardedSnapshot({ scroll: undefined })
+  const unscrollable = await f.observe()
+  await assert.rejects(f.dispatch('egdesk_browser_scroll', { cardId: 'browser-1', observationId: unscrollable.observationId,
+    expectedRevision: 3, direction: 'down' }), { code: 'BROWSER_OBSERVATION_STALE' })
+  assert.equal(f.acts().length, 1)
+})
+
+test('press reaches only the focused element or the field just filled and never asks to move focus', async () => {
+  const f = guardedFixture()
+  await f.bind()
+  const unfocused = await f.observe()
+  const pressArgs = (seen, key, extra = {}) => ({ cardId: 'browser-1', observationId: seen.observationId,
+    expectedRevision: seen.snapshot.revision, ref: 'el_2', expectedTarget: targetOf(seen, 'el_2'), key, ...extra })
+  await assert.rejects(f.dispatch('egdesk_browser_press', pressArgs(unfocused, 'Escape')), { code: 'BROWSER_PRESS_TARGET_NOT_FOCUSED' })
+  await assert.rejects(f.dispatch('egdesk_browser_press', pressArgs(unfocused, 'Enter')), { code: 'INVALID_BROWSER_TOOL' },
+    'Enter can submit, so it needs a testable postcondition')
+  await assert.rejects(f.dispatch('egdesk_browser_press', pressArgs(unfocused, 'F5')), { code: 'INVALID_BROWSER_TOOL' })
+  assert.equal(f.acts().length, 0)
+
+  f.current = guardedSnapshot({ focusedElement: { ref: 'el_2', role: 'searchbox', label: 'Search', value: '' } })
+  const focused = await f.observe()
+  f.setAct(request => f.acted(request, f.current, keyReceipt('Escape', 'already-focused')))
+  const escape = await f.dispatch('egdesk_browser_press', pressArgs(focused, 'Escape'))
+  assert.equal(escape.status, 'key-dispatched', 'a key without a postcondition reports dispatch, never an effect')
+  assert.equal(escape.postcondition, null)
+  assert.equal(f.acts()[0].guard.pressPolicy, 'already-focused')
+  assert.deepEqual(f.acts()[0].action, { type: 'press', ref: 'el_2', key: 'Escape' })
+
+  f.current = guardedSnapshot()
+  const beforeFill = await f.observe()
+  f.setAct(request => {
+    f.current = guardedSnapshot({ revision: 4, interactiveElements: [targetOf(beforeFill, 'el_1'),
+      { ...targetOf(beforeFill, 'el_2'), value: 'seoul' }, targetOf(beforeFill, 'el_3')] })
+    return f.acted(request, f.current, actorReceipt())
+  })
+  const filled = await f.dispatch('egdesk_browser_fill', { cardId: 'browser-1', observationId: beforeFill.observationId,
+    expectedRevision: 3, ref: 'el_2', expectedTarget: targetOf(beforeFill, 'el_2'), text: 'seoul',
+    postcondition: { kind: 'target-value', value: 'seoul' } })
+  assert.equal(filled.status, 'postcondition-observed')
+  const afterFill = await f.observe()
+  f.setAct(request => {
+    f.current = guardedSnapshot({ revision: 5, text: ['Results for seoul'] })
+    return f.acted(request, f.current, keyReceipt('Enter', 'after-fill', { defaultActionEmulated: 'form-request-submit' }))
+  })
+  const submitted = await f.dispatch('egdesk_browser_press', pressArgs(afterFill, 'Enter', {
+    postcondition: { kind: 'visible-text', value: 'Results for seoul' } }))
+  assert.equal(submitted.status, 'postcondition-observed')
+  assert.equal(submitted.dispatchReceipt.defaultActionEmulated, 'form-request-submit')
+  assert.equal(submitted.dispatchReceipt.trustedInput, false)
+  assert.equal(f.acts().at(-1).guard.pressPolicy, 'after-fill')
+  assert.equal(f.acts().at(-1).guard.focusedRef, null)
+
+  const next = await f.observe()
+  f.setAct(request => f.acted(request, guardedSnapshot({ revision: 5, text: ['Count: 1'] }),
+    actorReceipt({ clickInputRoute: 'dom-click-no-pointerdown', targetClickObserved: true })))
+  await f.dispatch('egdesk_browser_click', { cardId: 'browser-1', observationId: next.observationId,
+    expectedRevision: 5, ref: 'el_1', expectedTarget: targetOf(next, 'el_1'),
+    postcondition: { kind: 'visible-text', value: 'Count: 1' } })
+  const afterClick = await f.observe()
+  await assert.rejects(f.dispatch('egdesk_browser_press', pressArgs(afterClick, 'ArrowDown')),
+    { code: 'BROWSER_PRESS_TARGET_NOT_FOCUSED' }, 'any other action ends the just-filled key eligibility')
+  assert.equal(f.acts().length, 4)
+})
+
+test('press with an untrusted-route claim mismatch is unknown and blocks the next blind action', async () => {
+  const f = guardedFixture()
+  await f.bind()
+  f.current = guardedSnapshot({ focusedElement: { ref: 'el_2', role: 'searchbox', label: 'Search', value: '' } })
+  const seen = await f.observe()
+  f.setAct(request => f.acted(request, f.current, keyReceipt('ArrowDown', 'already-focused', { trustedInput: true })))
+  const result = await f.dispatch('egdesk_browser_press', { cardId: 'browser-1', observationId: seen.observationId,
+    expectedRevision: 3, ref: 'el_2', expectedTarget: targetOf(seen, 'el_2'), key: 'ArrowDown' })
+  assert.equal(result.status, 'postcondition-unverified')
+  const again = await f.observe()
+  await assert.rejects(f.dispatch('egdesk_browser_press', { cardId: 'browser-1', observationId: again.observationId,
+    expectedRevision: 3, ref: 'el_2', expectedTarget: targetOf(again, 'el_2'), key: 'ArrowDown' }), { code: 'BROWSER_OUTCOME_UNKNOWN' })
+  assert.equal(f.acts().length, 1)
+})
+
+test('navigate is limited to http(s) on the current document site and spends the prior observation', async () => {
+  const f = guardedFixture()
+  await f.bind()
+  const seen = await f.observe()
+  const navigate = (observed, url) => f.dispatch('egdesk_browser_navigate', { cardId: 'browser-1',
+    observationId: observed.observationId, expectedRevision: observed.snapshot.revision, url,
+    postcondition: { kind: 'url', value: url } })
+  for (const url of ['https://evil.test/', 'http://example.test/downgrade', 'https://example.test.evil.test/']) {
+    await assert.rejects(navigate(seen, url), { code: 'BROWSER_NAVIGATE_OUT_OF_SCOPE' }, url)
+  }
+  assert.equal(f.acts().length, 0)
+  f.setAct(request => {
+    f.current = guardedSnapshot({ documentId: 'document-2', revision: 1, url: request.action.url })
+    return f.acted(request, f.current, actorReceipt())
+  })
+  const moved = await navigate(seen, 'https://www.example.test/next')
+  assert.equal(moved.status, 'postcondition-observed')
+  assert.equal(moved.navigationScope, 'same-site')
+  assert.equal(moved.pageLoadVerified, false)
+  assert.equal(f.acts()[0].guard.navigationScope, 'same-site')
+  await assert.rejects(navigate(seen, 'https://example.test/again'), { code: 'BROWSER_OBSERVATION_STALE' },
+    'the pre-navigation observation is stale')
+  assert.equal(f.acts().length, 1)
+})
+
+test('same-site navigation helper is conservative for suffixes, IP origins and downgrades', async () => {
+  const { sameSiteNavigation } = await import('./egdesk-browser-tool-runtime.mjs')
+  for (const [from, to, expected] of [
+    ['https://a.example.co.kr/x', 'https://b.example.co.kr/y', true],
+    ['https://alpha.co.kr/', 'https://beta.co.kr/', false],
+    ['https://alice.github.io/', 'https://bob.github.io/', false],
+    ['http://example.test/a', 'https://www.example.test/b', true],
+    ['https://example.test/a', 'http://example.test/b', false],
+    ['http://127.0.0.1:18181/a', 'http://127.0.0.1:18181/b', true],
+    ['http://127.0.0.1:18181/a', 'http://127.0.0.1:18182/a', false],
+    ['http://localhost:3000/', 'http://localhost:3000/next', true],
+    ['https://example.test/', 'javascript:alert(1)', false],
+    ['about:blank', 'https://example.test/', false],
+  ]) assert.equal(sameSiteNavigation(from, to), expected, `${from} -> ${to}`)
+})
+
+test('wait reports met, not met before timeout, or unknown and never sends an action', async () => {
+  const f = guardedFixture()
+  await f.bind()
+  const seen = await f.observe()
+  const loaded = await f.dispatch('egdesk_browser_wait', { cardId: 'browser-1', for: 'load', timeoutMs: 3000 })
+  assert.equal(loaded.status, 'wait-condition-met')
+  assert.equal(loaded.wait.outcome, 'met')
+  assert.equal(loaded.snapshot.wait, undefined, 'the actor wait report is not stored as page content')
+  assert.deepEqual(f.waits()[0].options.wait, { for: 'load', timeoutMs: 3000 })
+  await assert.rejects(f.dispatch('egdesk_browser_click', { cardId: 'browser-1', observationId: seen.observationId,
+    expectedRevision: 3, ref: 'el_1', expectedTarget: targetOf(seen, 'el_1'),
+    postcondition: { kind: 'visible-text', value: 'Count: 1' } }), { code: 'BROWSER_OBSERVATION_STALE' })
+
+  f.setWait(request => ({ requestId: request.requestId, status: 'observed',
+    snapshot: { ...f.current, wait: { for: 'idle', outcome: 'timeout', elapsedMs: 1000 } } }))
+  const busy = await f.dispatch('egdesk_browser_wait', { cardId: 'browser-1', for: 'idle', timeoutMs: 1000 })
+  assert.equal(busy.status, 'wait-timeout')
+  assert.equal(busy.wait.outcome, 'not-met-before-timeout')
+  f.setWait(request => ({ requestId: request.requestId, status: 'observed',
+    snapshot: { ...f.current, readyState: 'loading', wait: { for: 'load', outcome: 'met', elapsedMs: 3 } } }))
+  assert.equal((await f.dispatch('egdesk_browser_wait', { cardId: 'browser-1', for: 'load', timeoutMs: 1000 })).status,
+    'wait-condition-unverified', 'the helper re-checks what the returned observation proves')
+  for (const response of [
+    request => ({ requestId: request.requestId, status: 'rejected', error: 'Browser document changed during wait' }),
+    request => ({ requestId: request.requestId, status: 'observed', snapshot: f.current }),
+  ]) {
+    f.setWait(response)
+    await assert.rejects(f.dispatch('egdesk_browser_wait', { cardId: 'browser-1', for: 'load', timeoutMs: 1000 }),
+      { code: 'BROWSER_WAIT_OUTCOME_UNKNOWN' })
+  }
+  f.setWait(null)
+  const fresh = await f.observe()
+  for (const [args, code] of [
+    [{ cardId: 'browser-1', for: 'load', timeoutMs: 10001 }, 'INVALID_BROWSER_TOOL'],
+    [{ cardId: 'browser-1', for: 'load', timeoutMs: 99 }, 'INVALID_BROWSER_TOOL'],
+    [{ cardId: 'browser-1', for: 'load', timeoutMs: 1000, ref: 'el_1' }, 'INVALID_BROWSER_TOOL'],
+    [{ cardId: 'browser-1', for: 'selector-visible', timeoutMs: 1000, ref: 'el_1' }, 'INVALID_BROWSER_TOOL'],
+    [{ cardId: 'browser-1', for: 'selector-visible', timeoutMs: 1000, ref: 'el_9', observationId: fresh.observationId }, 'BROWSER_TARGET_STALE'],
+    [{ cardId: 'browser-1', for: 'selector-visible', timeoutMs: 1000, ref: 'el_1', observationId: 'old' }, 'BROWSER_OBSERVATION_STALE'],
+  ]) await assert.rejects(f.dispatch('egdesk_browser_wait', args), { code })
+  const visible = await f.dispatch('egdesk_browser_wait', { cardId: 'browser-1', for: 'selector-visible',
+    timeoutMs: 1000, ref: 'el_1', observationId: fresh.observationId })
+  assert.equal(visible.status, 'wait-condition-met')
+  assert.deepEqual(f.waits().at(-1).options.wait, { for: 'selector-visible', timeoutMs: 1000, ref: 'el_1', documentId: 'document-1' })
+  assert.equal(f.acts().length, 0)
+})
+
+test('wait after an unconfirmed navigation waits for the replacement document and can resolve it', async () => {
+  const f = guardedFixture()
+  await f.bind()
+  const seen = await f.observe()
+  const destination = 'https://example.test/next'
+  f.setAct(request => ({ requestId: request.requestId, status: 'rejected', error: 'actor destroyed during navigation' }))
+  await assert.rejects(f.dispatch('egdesk_browser_navigate', { cardId: 'browser-1', observationId: seen.observationId,
+    expectedRevision: 3, url: destination, postcondition: { kind: 'url', value: destination } }), { code: 'BROWSER_ACTION_UNVERIFIED' })
+  f.current = guardedSnapshot({ documentId: 'document-2', revision: 1, url: destination })
+  const loaded = await f.dispatch('egdesk_browser_wait', { cardId: 'browser-1', for: 'load', timeoutMs: 5000 })
+  assert.equal(f.waits()[0].options.wait.notDocumentId, 'document-1')
+  assert.equal(loaded.status, 'wait-condition-met')
+  assert.equal(loaded.wait.documentReplaced, true)
+  assert.equal(loaded.navigationPostconditionReobserved, true)
+  f.setAct(request => f.acted(request, guardedSnapshot({ documentId: 'document-2', revision: 1, url: destination,
+    text: ['Count: 1'] }), actorReceipt({ clickInputRoute: 'dom-click-no-pointerdown', targetClickObserved: true })))
+  const click = await f.dispatch('egdesk_browser_click', { cardId: 'browser-1', observationId: loaded.observationId,
+    expectedRevision: 1, ref: 'el_1', expectedTarget: targetOf(loaded, 'el_1'),
+    postcondition: { kind: 'visible-text', value: 'Count: 1' } })
+  assert.equal(click.status, 'postcondition-observed')
+})
+
+test('wait must fit inside the bounded UI response deadline', async () => {
+  const f = guardedFixture({ timeoutMs: 5000 })
+  await f.bind()
+  await f.observe()
+  await assert.rejects(f.dispatch('egdesk_browser_wait', { cardId: 'browser-1', for: 'load', timeoutMs: 3500 }),
+    { code: 'INVALID_BROWSER_TOOL' })
+  assert.equal(f.waits().length, 0)
+  assert.equal((await f.dispatch('egdesk_browser_wait', { cardId: 'browser-1', for: 'load', timeoutMs: 3000 })).status,
+    'wait-condition-met')
+})
+
+test('after Stop new scroll, press, wait and navigate requests reach the UI zero times', async () => {
+  const f = guardedFixture()
+  await f.bind()
+  f.current = guardedSnapshot({ focusedElement: { ref: 'el_2', role: 'searchbox', label: 'Search', value: '' } })
+  const seen = await f.observe()
+  f.setAct(request => f.acted(request, f.current, scrollReceipt('document')))
+  const pendingScroll = f.dispatch('egdesk_browser_scroll', { cardId: 'browser-1', observationId: seen.observationId,
+    expectedRevision: 3, direction: 'down' })
+  const cancelling = f.service.cancelRun(run) // before the deferred UI send runs
+  await assert.rejects(pendingScroll, { code: 'BROWSER_RUN_ENDED' })
+  await cancelling
+  const sentBefore = f.requests.length
+  for (const [tool, args] of [
+    ['egdesk_browser_scroll', { cardId: 'browser-1', observationId: seen.observationId, expectedRevision: 3, direction: 'up' }],
+    ['egdesk_browser_press', { cardId: 'browser-1', observationId: seen.observationId, expectedRevision: 3,
+      ref: 'el_2', expectedTarget: targetOf(seen, 'el_2'), key: 'Escape' }],
+    ['egdesk_browser_wait', { cardId: 'browser-1', for: 'load', timeoutMs: 1000 }],
+    ['egdesk_browser_navigate', { cardId: 'browser-1', observationId: seen.observationId, expectedRevision: 3,
+      url: 'https://example.test/next', postcondition: { kind: 'url', value: 'https://example.test/next' } }],
+  ]) await assert.rejects(f.dispatch(tool, args), { code: 'BROWSER_RUN_ENDED' }, tool)
+  assert.equal(f.requests.length, sentBefore)
+  assert.equal(f.acts().length, 0)
+  assert.equal(f.waits().length, 0)
+  assert.equal(f.requests.filter(request => request.kind === 'cancel').length, 1)
+})
+
+test('UI timeouts leave press, scroll and wait outcomes unknown without automatic retry', async t => {
+  t.mock.timers.enable({ apis: ['setTimeout'] })
+  const f = guardedFixture()
+  await f.bind()
+  f.current = guardedSnapshot({ focusedElement: { ref: 'el_2', role: 'searchbox', label: 'Search', value: '' } })
+  f.setAct(() => new Promise(() => {}))
+  f.setWait(() => new Promise(() => {}))
+  const seen = await f.observe()
+  const press = { cardId: 'browser-1', observationId: seen.observationId, expectedRevision: 3,
+    ref: 'el_2', expectedTarget: targetOf(seen, 'el_2'), key: 'Enter', postcondition: { kind: 'visible-text', value: 'Results' } }
+  const pressing = f.dispatch('egdesk_browser_press', press, 'timed-out-press')
+  t.mock.timers.tick(15000)
+  await assert.rejects(pressing, { code: 'BROWSER_UI_TIMEOUT', message: /outcome is unknown/ })
+  await assert.rejects(f.dispatch('egdesk_browser_press', press, 'timed-out-press'), { code: 'BROWSER_UI_TIMEOUT' })
+  assert.equal(f.acts().length, 1, 'the same call ID shares the unknown receipt instead of re-sending')
+  const again = await f.observe()
+  await assert.rejects(f.dispatch('egdesk_browser_press', { ...press, observationId: again.observationId }),
+    { code: 'BROWSER_OUTCOME_UNKNOWN' })
+  assert.equal(f.acts().length, 1)
+
+  const s = guardedFixture()
+  await s.bind()
+  s.setAct(() => new Promise(() => {}))
+  const before = await s.observe()
+  const scrolling = s.dispatch('egdesk_browser_scroll', { cardId: 'browser-1', observationId: before.observationId,
+    expectedRevision: 3, direction: 'down' })
+  t.mock.timers.tick(15000)
+  await assert.rejects(scrolling, { code: 'BROWSER_UI_TIMEOUT' })
+  assert.equal(s.acts().length, 1)
+  await assert.rejects(s.dispatch('egdesk_browser_scroll', { cardId: 'browser-1', observationId: before.observationId,
+    expectedRevision: 3, direction: 'down' }), { code: 'BROWSER_OBSERVATION_STALE' })
+  assert.equal(s.acts().length, 1, 'no automatic re-scroll; a new request needs a fresh observation')
+
+  const w = guardedFixture()
+  await w.bind()
+  w.setWait(() => new Promise(() => {}))
+  const old = await w.observe()
+  const waiting = w.dispatch('egdesk_browser_wait', { cardId: 'browser-1', for: 'load', timeoutMs: 3000 })
+  t.mock.timers.tick(15000)
+  await assert.rejects(waiting, { code: 'BROWSER_UI_TIMEOUT' })
+  await assert.rejects(w.dispatch('egdesk_browser_click', { cardId: 'browser-1', observationId: old.observationId,
+    expectedRevision: 3, ref: 'el_1', expectedTarget: targetOf(old, 'el_1'),
+    postcondition: { kind: 'visible-text', value: 'Count: 1' } }), { code: 'BROWSER_OBSERVATION_STALE' })
+  assert.equal(w.acts().length, 0)
 })

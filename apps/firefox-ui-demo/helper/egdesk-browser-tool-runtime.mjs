@@ -19,13 +19,23 @@ const target = { type: 'object', additionalProperties: false, required: ['ref', 
 const postcondition = { type: 'object', additionalProperties: false, required: ['kind', 'value'],
   properties: { kind: { type: 'string', enum: ['visible-text', 'url', 'target-value'] }, value: { type: 'string' } } }
 const base = { cardId: { type: 'string' }, observationId: { type: 'string' }, expectedRevision: { type: 'integer' } }
+// Existing tool inputSchemas are hashed into native thread manifests; change
+// only descriptions of observe/navigate/click/fill, never their schemas.
+const SCROLL_DIRECTIONS = ['up', 'down', 'top', 'bottom']
+const SCROLL_AMOUNTS = ['page', 'half']
+const PRESS_KEYS = ['Enter', 'Escape', 'Tab', 'ArrowUp', 'ArrowDown', 'ArrowLeft', 'ArrowRight', 'Backspace', 'Space']
+// Activation keys can submit or activate like a click; they need a testable effect.
+const ACTIVATION_KEYS = new Set(['Enter', 'Space'])
+const WAIT_CONDITIONS = ['load', 'idle', 'selector-visible']
+const MAX_WAIT_MS = 10000
+const WAIT_RESPONSE_MARGIN_MS = 2000
 function spec(name, description, properties, required) {
   return { type: 'function', name, description, inputSchema: { type: 'object', additionalProperties: false, properties, required } }
 }
 export const BROWSER_TOOL_SPECS = [
   spec('egdesk_browser_observe', 'Observe one explicitly selected Browser Card. Coordinates are Browser surface-local; camera movement does not change the target. A selected account label does not prove site login.',
     { cardId: base.cardId }, ['cardId']),
-  spec('egdesk_browser_navigate', 'Request navigation in the bound Browser Card, then observe. A dispatched request does not prove load or an external effect.',
+  spec('egdesk_browser_navigate', 'Request navigation in the bound Browser Card to an http(s) URL on the same site (registrable domain) as the currently observed document; other sites and https-to-http downgrades are rejected. Then observe. A dispatched request does not prove load or an external effect.',
     { ...base, url: { type: 'string' }, postcondition }, ['cardId', 'observationId', 'expectedRevision', 'url', 'postcondition']),
   spec('egdesk_browser_click', 'Request one guarded DOM click on an observed element without pointerdown or a focus step. A site may ignore synthetic clicks or focus another element itself. Requires a fresh observation, exact target precondition and testable DOM postcondition; an interaction grant is not proof of external authorization or submission success.',
     { ...base, ref: { type: 'string' }, expectedTarget: target, postcondition },
@@ -33,6 +43,15 @@ export const BROWSER_TOOL_SPECS = [
   spec('egdesk_browser_fill', 'Fill an observed non-password field in the bound Browser Card. Requires a fresh observation, exact target precondition and a testable DOM postcondition.',
     { ...base, ref: { type: 'string' }, expectedTarget: target, text: { type: 'string' }, postcondition },
     ['cardId', 'observationId', 'expectedRevision', 'ref', 'expectedTarget', 'text', 'postcondition']),
+  spec('egdesk_browser_scroll', 'Scroll the bound Browser Card with the DOM scroll API, without focus or pointer input: either direction (up, down, top, bottom) by amount (page or half, default page), or ref with expectedTarget to bring one observed element into view. Requires a fresh observation and returns the observed scroll position change; scrolling does not prove that more content loaded.',
+    { ...base, direction: { type: 'string', enum: SCROLL_DIRECTIONS }, amount: { type: 'string', enum: SCROLL_AMOUNTS },
+      ref: { type: 'string' }, expectedTarget: target }, ['cardId', 'observationId', 'expectedRevision']),
+  spec('egdesk_browser_press', 'Dispatch one synthetic DOM key event to an observed element that is already focused, or to the field just filled with egdesk_browser_fill. EG-Desk never moves focus. Synthetic key events are untrusted, so the browser runs no default key action; only Enter on a form text field emulates implicit form submission, and the receipt states it. Enter and Space require a testable postcondition; other keys may omit it.',
+    { ...base, ref: { type: 'string' }, expectedTarget: target, key: { type: 'string', enum: PRESS_KEYS }, postcondition },
+    ['cardId', 'observationId', 'expectedRevision', 'ref', 'expectedTarget', 'key']),
+  spec('egdesk_browser_wait', 'Wait up to timeoutMs (100 to 10000) for the bound Browser document to finish loading (load), to stop changing (idle), or for an observed element ref to become visible (selector-visible, which needs that observationId), then return a fresh observation. wait-timeout means the condition was not observed in time; a replaced document or lost response is an unknown outcome. Never acts on the page.',
+    { cardId: base.cardId, for: { type: 'string', enum: WAIT_CONDITIONS }, ref: { type: 'string' },
+      observationId: base.observationId, timeoutMs: { type: 'integer' } }, ['cardId', 'for', 'timeoutMs']),
 ]
 const SPEC_BY_NAME = new Map(BROWSER_TOOL_SPECS.map(item => [item.name, item]))
 
@@ -51,6 +70,51 @@ function sameUrl(left, right) {
   try { return new URL(left).href === new URL(right).href }
   catch { return false }
 }
+// Conservative helper-side approximation of the registrable domain. The
+// Firefox actor re-checks with the full Public Suffix List before input.
+// Listed multi-label suffixes (including shared hosting) never form a site.
+const MULTI_LABEL_SUFFIXES = new Set([
+  'co.kr', 'or.kr', 'ne.kr', 'go.kr', 'ac.kr', 're.kr', 'pe.kr', 'ms.kr', 'hs.kr', 'es.kr', 'sc.kr', 'kg.kr', 'mil.kr',
+  'co.uk', 'org.uk', 'ac.uk', 'gov.uk', 'me.uk', 'net.uk', 'ltd.uk', 'plc.uk', 'co.jp', 'ne.jp', 'or.jp', 'ac.jp', 'go.jp',
+  'com.au', 'net.au', 'org.au', 'edu.au', 'gov.au', 'com.cn', 'net.cn', 'org.cn', 'gov.cn', 'com.tw', 'com.hk', 'com.sg',
+  'com.br', 'co.nz', 'co.in', 'co.za', 'com.mx', 'com.tr',
+  'github.io', 'gitlab.io', 'githubusercontent.com', 'vercel.app', 'netlify.app', 'pages.dev', 'workers.dev', 'web.app',
+  'firebaseapp.com', 'appspot.com', 'herokuapp.com', 'blogspot.com', 'azurewebsites.net', 'cloudfront.net',
+  'amazonaws.com', 'onrender.com', 'fly.dev', 'glitch.me', 'ngrok.io', 'ngrok-free.app', 'surge.sh', 'wordpress.com',
+])
+function hostSite(hostname) {
+  const host = String(hostname || '').toLowerCase().replace(/\.$/, '')
+  if (!host || host.includes(':') || host.startsWith('[') || /^\d+(?:\.\d+){3}$/.test(host) || !host.includes('.')) return null
+  const labels = host.split('.')
+  const keep = MULTI_LABEL_SUFFIXES.has(labels.slice(-2).join('.')) ? 3 : 2
+  return labels.length >= keep ? labels.slice(-keep).join('.') : null
+}
+export function sameSiteNavigation(fromUrl, toUrl) {
+  let from, to
+  try { from = new URL(fromUrl); to = new URL(toUrl) } catch { return false }
+  if (![from, to].every(url => ['http:', 'https:'].includes(url.protocol))) return false
+  if (from.protocol === 'https:' && to.protocol === 'http:') return false
+  const fromSite = hostSite(from.hostname)
+  const toSite = hostSite(to.hostname)
+  // IP, single-label and public-suffix hosts are scoped to their exact origin.
+  if (!fromSite || !toSite) return from.origin === to.origin
+  return fromSite === toSite
+}
+function validPostcondition(condition) {
+  return record(condition) && ['visible-text', 'url', 'target-value'].includes(condition.kind) &&
+    typeof condition.value === 'string' && condition.value.length <= 512 &&
+    (condition.kind === 'target-value' || !!condition.value) &&
+    (condition.kind !== 'url' || safeUrl(condition.value)) &&
+    Object.keys(condition).every(key => ['kind', 'value'].includes(key))
+}
+function validTarget(args) {
+  return short(args.ref, 160) && record(args.expectedTarget) && args.expectedTarget.ref === args.ref &&
+    Object.keys(args.expectedTarget).every(key => ['ref', 'role', 'label', 'href', 'value', 'tag', 'disabled', 'bounds'].includes(key)) &&
+    ['ref', 'role', 'label', 'href', 'value', 'tag'].every(key => typeof args.expectedTarget[key] === 'string')
+}
+function validScroll(value) {
+  return record(value) && ['x', 'y', 'maxY'].every(key => Number.isSafeInteger(value[key]) && value[key] >= 0)
+}
 function validateArgs(tool, args) {
   const schema = SPEC_BY_NAME.get(tool)?.inputSchema
   if (!schema || !record(args)) reject('INVALID_BROWSER_TOOL', 'Unsupported Browser tool or argument object')
@@ -58,21 +122,43 @@ function validateArgs(tool, args) {
       schema.required.some(key => !Object.hasOwn(args, key))) reject('INVALID_BROWSER_TOOL', 'Invalid Browser tool arguments')
   if (!short(args.cardId, 160)) reject('INVALID_BROWSER_TOOL', 'cardId is required')
   if (tool === 'egdesk_browser_observe') return
-  if (!short(args.observationId, 160) || !Number.isSafeInteger(args.expectedRevision) || args.expectedRevision < 0 ||
-      !record(args.postcondition) || !['visible-text', 'url', 'target-value'].includes(args.postcondition.kind) ||
-      typeof args.postcondition.value !== 'string' || args.postcondition.value.length > 512 ||
-      (args.postcondition.kind !== 'target-value' && !args.postcondition.value) ||
-      (args.postcondition.kind === 'url' && !safeUrl(args.postcondition.value)) ||
-      Object.keys(args.postcondition).some(key => !['kind', 'value'].includes(key))) reject('INVALID_BROWSER_TOOL', 'Fresh observation and postcondition are required')
+  if (tool === 'egdesk_browser_wait') {
+    const byRef = args.for === 'selector-visible'
+    if (!WAIT_CONDITIONS.includes(args.for) || !Number.isSafeInteger(args.timeoutMs) ||
+        args.timeoutMs < 100 || args.timeoutMs > MAX_WAIT_MS ||
+        (byRef ? !short(args.ref, 160) || !short(args.observationId, 160)
+          : Object.hasOwn(args, 'ref') || Object.hasOwn(args, 'observationId'))) {
+      reject('INVALID_BROWSER_TOOL', 'Wait requires a known condition, a 100-10000 ms timeout and, for selector-visible only, an observed ref')
+    }
+    return
+  }
+  if (!short(args.observationId, 160) || !Number.isSafeInteger(args.expectedRevision) || args.expectedRevision < 0) {
+    reject('INVALID_BROWSER_TOOL', 'Fresh observation and postcondition are required')
+  }
+  if (tool === 'egdesk_browser_scroll') {
+    const byRef = Object.hasOwn(args, 'ref')
+    if (byRef === Object.hasOwn(args, 'direction') ||
+        (byRef ? !validTarget(args) || Object.hasOwn(args, 'amount')
+          : !SCROLL_DIRECTIONS.includes(args.direction) || Object.hasOwn(args, 'expectedTarget') ||
+            (Object.hasOwn(args, 'amount') && !SCROLL_AMOUNTS.includes(args.amount)))) {
+      reject('INVALID_BROWSER_TOOL', 'Scroll requires either a direction or one exact observed element')
+    }
+    return
+  }
+  if (tool === 'egdesk_browser_press') {
+    if (!validTarget(args)) reject('INVALID_BROWSER_TOOL', 'An exact observed element precondition is required')
+    if (!PRESS_KEYS.includes(args.key) || (Object.hasOwn(args, 'postcondition')
+      ? !validPostcondition(args.postcondition) : ACTIVATION_KEYS.has(args.key))) {
+      reject('INVALID_BROWSER_TOOL', 'Press requires a guarded key; Enter and Space require a testable postcondition')
+    }
+    return
+  }
+  if (!validPostcondition(args.postcondition)) reject('INVALID_BROWSER_TOOL', 'Fresh observation and postcondition are required')
   if (tool === 'egdesk_browser_navigate') {
     if (!safeUrl(args.url) || args.postcondition.kind !== 'url') reject('INVALID_BROWSER_TOOL', 'Navigation requires an explicit safe URL and URL postcondition')
     return
   }
-  if (!short(args.ref, 160) || !record(args.expectedTarget) || args.expectedTarget.ref !== args.ref ||
-      Object.keys(args.expectedTarget).some(key => !['ref', 'role', 'label', 'href', 'value', 'tag', 'disabled', 'bounds'].includes(key)) ||
-      ['ref', 'role', 'label', 'href', 'value', 'tag'].some(key => typeof args.expectedTarget[key] !== 'string')) {
-    reject('INVALID_BROWSER_TOOL', 'An exact observed element precondition is required')
-  }
+  if (!validTarget(args)) reject('INVALID_BROWSER_TOOL', 'An exact observed element precondition is required')
   if (tool === 'egdesk_browser_fill' && (typeof args.text !== 'string' || args.text.length > 8192 ||
       args.postcondition.kind !== 'target-value')) reject('INVALID_BROWSER_TOOL', 'Fill requires bounded text and a target-value postcondition')
 }
@@ -96,6 +182,19 @@ function checkPostcondition(condition, snapshot, ref) {
   if (condition.kind === 'visible-text') return snapshot.text.some(text => String(text).includes(condition.value))
   if (condition.kind === 'target-value') return snapshot.interactiveElements.some(item => item.ref === ref && item.value === condition.value)
   return false
+}
+// true/false from observed bounds, null when the element is not in the bounded list.
+function elementInView(snapshot, ref) {
+  const bounds = snapshot?.interactiveElements?.find(item => item.ref === ref)?.bounds
+  if (!record(bounds) || !['x', 'y', 'width', 'height'].every(key => Number.isFinite(bounds[key]))) return null
+  const { width, height } = snapshot.viewport
+  return bounds.width > 0 && bounds.height > 0 && bounds.x < width && bounds.y < height &&
+    bounds.x + bounds.width > 0 && bounds.y + bounds.height > 0
+}
+function withoutWait(snapshot) {
+  if (!record(snapshot)) return snapshot
+  const { wait, ...rest } = snapshot
+  return rest
 }
 
 export function createBrowserToolService({ sendToUi, getOwnerKey, timeoutMs = 15000, now = Date.now } = {}) {
@@ -199,7 +298,7 @@ export function createBrowserToolService({ sendToUi, getOwnerKey, timeoutMs = 15
         if (binding.closed || closedRuns.has(run.answerId) || run.status !== 'inProgress') reject('BROWSER_RUN_ENDED', 'Browser run ended during binding')
         if (prepared.ownerKey !== getOwnerKey()) reject('BROWSER_OWNER_CHANGED', 'Engine account changed during Browser binding')
         binding.cards.set(card.cardId, { ...card, ui: response.binding, observation: null,
-          busy: false, uncertain: false, pendingTransition: null })
+          busy: false, uncertain: false, pendingTransition: null, lastFill: null })
       }
       if (binding.closed || closedRuns.has(run.answerId) || prepared.ownerKey !== getOwnerKey() || run.status !== 'inProgress') {
         reject('BROWSER_RUN_ENDED', 'Browser run or account ended before binding completed')
@@ -219,6 +318,72 @@ export function createBrowserToolService({ sendToUi, getOwnerKey, timeoutMs = 15
     }
   }
 
+  // Observation and wait both replace the Card's single fresh observation.
+  // A pending document transition is resolved only by a new document whose
+  // readback satisfies the original postcondition.
+  function recordObservation(card, snapshot) {
+    const transition = card.pendingTransition
+    const transitionRecovered = !!(transition &&
+      snapshot.documentId !== transition.priorDocumentId &&
+      ['interactive', 'complete'].includes(snapshot.readyState) &&
+      !transition.wasAlreadyTrue && checkPostcondition(transition.condition, snapshot, transition.ref))
+    if (transitionRecovered) { card.uncertain = false; card.pendingTransition = null }
+    if (card.lastFill && card.lastFill.documentId !== snapshot.documentId) card.lastFill = null
+    card.observation = { id: randomUUID(), snapshot }
+    return { navigationPostconditionReobserved: transitionRecovered && transition.actionType === 'navigate',
+      documentTransitionPostconditionReobserved: transitionRecovered }
+  }
+
+  async function observeRequest(run, binding, card, options) {
+    card.busy = true
+    const pending = requestUi({ kind: 'observe', runId: binding.runId,
+      clientThreadId: binding.clientThreadId, cardId: card.cardId, binding: card.ui, options }, binding, run)
+    binding.pending.add(pending)
+    try { return await pending } finally { binding.pending.delete(pending); card.busy = false }
+  }
+
+  // Wait is read-only: it never takes an action lease and never marks the
+  // Card uncertain. Its answer is met, not met before timeout, or unknown.
+  async function waitForCondition(run, binding, card, args) {
+    if (args.timeoutMs + WAIT_RESPONSE_MARGIN_MS > timeoutMs) reject('INVALID_BROWSER_TOOL', 'Wait timeout exceeds the bounded Browser request budget')
+    let documentId = null
+    if (args.for === 'selector-visible') {
+      const observed = card.observation
+      if (!observed || observed.id !== args.observationId) reject('BROWSER_OBSERVATION_STALE', 'Observe this Browser Card again before waiting for an element')
+      if (!observed.snapshot.interactiveElements.some(item => item.ref === args.ref)) reject('BROWSER_TARGET_STALE', 'Wait target is not in the observed element list')
+      documentId = observed.snapshot.documentId
+    }
+    const transition = card.pendingTransition
+    const wait = { for: args.for, timeoutMs: args.timeoutMs,
+      ...(documentId ? { ref: args.ref, documentId } : {}),
+      // While a dispatched transition is pending, the prior document cannot
+      // satisfy load/idle; the actor keeps waiting for its replacement.
+      ...(transition ? { notDocumentId: transition.priorDocumentId } : {}) }
+    // A wait spends the current observation: the page is expected to change.
+    card.observation = null
+    const response = await observeRequest(run, binding, card, { textLimit: 60, elementLimit: 80, wait })
+    if (binding.closed || binding.ownerKey !== getOwnerKey()) reject('BROWSER_RUN_ENDED', 'Browser run ended during wait')
+    const reported = response?.snapshot?.wait
+    let snapshot
+    try { snapshot = observationFrom({ ...response, snapshot: withoutWait(response?.snapshot) }, card.cardId) }
+    catch { reject('BROWSER_WAIT_OUTCOME_UNKNOWN', 'Wait ended without a verifiable observation; observe again before acting') }
+    if (!record(reported) || reported.for !== args.for || !['met', 'timeout'].includes(reported.outcome) ||
+        !Number.isSafeInteger(reported.elapsedMs) || reported.elapsedMs < 0) {
+      reject('BROWSER_WAIT_OUTCOME_UNKNOWN', 'Wait ended without a verifiable observation; observe again before acting')
+    }
+    // The helper re-checks what the returned observation can prove.
+    const consistent = (args.for === 'selector-visible' || snapshot.readyState === 'complete') &&
+      (!wait.notDocumentId || snapshot.documentId !== wait.notDocumentId) &&
+      (!documentId || snapshot.documentId === documentId)
+    const status = reported.outcome === 'timeout' ? 'wait-timeout' : consistent ? 'wait-condition-met' : 'wait-condition-unverified'
+    const recovery = recordObservation(card, snapshot)
+    return { status, cardId: card.cardId, action: 'wait', observationId: card.observation.id, snapshot,
+      wait: { for: args.for, timeoutMs: args.timeoutMs, elapsedMs: reported.elapsedMs,
+        outcome: status === 'wait-condition-met' ? 'met' : status === 'wait-timeout' ? 'not-met-before-timeout' : 'unverified',
+        documentReplaced: !!wait.notDocumentId && snapshot.documentId !== wait.notDocumentId },
+      ...recovery, externalEffectVerified: false }
+  }
+
   async function executeDispatch(run, event) {
     const args = event?.arguments
     const tool = event?.tool
@@ -230,56 +395,71 @@ export function createBrowserToolService({ sendToUi, getOwnerKey, timeoutMs = 15
     if (card.busy) reject('BROWSER_CARD_BUSY', 'Wait for the current Browser request to finish')
     if (tool !== 'egdesk_browser_observe' && card.permission !== 'interact') reject('BROWSER_INTERACTION_NOT_GRANTED', 'Read-only Browser context does not authorize interaction')
     if (tool === 'egdesk_browser_observe') {
-      card.busy = true
-      const pending = requestUi({ kind: 'observe', runId: binding.runId,
-        clientThreadId: binding.clientThreadId, cardId: card.cardId, binding: card.ui,
-        options: { textLimit: 60, elementLimit: 80 } }, binding, run)
-      binding.pending.add(pending)
-      let response
-      try { response = await pending } finally { binding.pending.delete(pending); card.busy = false }
+      const response = await observeRequest(run, binding, card, { textLimit: 60, elementLimit: 80 })
       if (binding.closed || binding.ownerKey !== getOwnerKey()) reject('BROWSER_RUN_ENDED', 'Browser run ended during observation')
       const snapshot = observationFrom(response, card.cardId)
-      const transition = card.pendingTransition
-      const transitionRecovered = !!(transition &&
-        snapshot.documentId !== transition.priorDocumentId &&
-        ['interactive', 'complete'].includes(snapshot.readyState) &&
-        !transition.wasAlreadyTrue && checkPostcondition(transition.condition, snapshot, transition.ref))
-      if (transitionRecovered) { card.uncertain = false; card.pendingTransition = null }
-      card.observation = { id: randomUUID(), snapshot }
+      const recovery = recordObservation(card, snapshot)
       return { status: 'observed', cardId: card.cardId, observationId: card.observation.id,
-        snapshot, navigationPostconditionReobserved: transitionRecovered && transition.actionType === 'navigate',
-        documentTransitionPostconditionReobserved: transitionRecovered, externalEffectVerified: false }
+        snapshot, ...recovery, externalEffectVerified: false }
     }
+    if (tool === 'egdesk_browser_wait') return waitForCondition(run, binding, card, args)
     if (card.uncertain) reject('BROWSER_OUTCOME_UNKNOWN', 'A prior Browser action has an unknown outcome; select the context again')
     const observed = card.observation
     if (!observed || observed.id !== args.observationId || observed.snapshot.revision !== args.expectedRevision) reject('BROWSER_OBSERVATION_STALE', 'Observe this Browser Card again before acting')
-    if (tool !== 'egdesk_browser_navigate') {
+    const byRef = Object.hasOwn(args, 'ref')
+    if (byRef) {
       const original = observed.snapshot.interactiveElements.find(item => item.ref === args.ref)
-      if (!original || !sameTarget(original, args.expectedTarget) || original.disabled) reject('BROWSER_TARGET_STALE', 'Target precondition does not match the observed element')
+      if (!original || !sameTarget(original, args.expectedTarget) ||
+          (tool !== 'egdesk_browser_scroll' && original.disabled)) reject('BROWSER_TARGET_STALE', 'Target precondition does not match the observed element')
+    }
+    if (tool === 'egdesk_browser_navigate' && !sameSiteNavigation(observed.snapshot.url, args.url)) {
+      reject('BROWSER_NAVIGATE_OUT_OF_SCOPE', 'Navigation is limited to http(s) pages on the current document site')
+    }
+    if (tool === 'egdesk_browser_scroll' && !validScroll(observed.snapshot.scroll)) {
+      reject('BROWSER_OBSERVATION_STALE', 'Observe this Browser Card again; the observation has no scroll position')
+    }
+    // Key input never moves focus: the target must already be focused or be
+    // the field this run just filled with a confirmed value.
+    let pressPolicy = null
+    if (tool === 'egdesk_browser_press') {
+      const focusedRef = observed.snapshot.focusedElement?.ref || null
+      pressPolicy = focusedRef === args.ref ? 'already-focused'
+        : card.lastFill?.ref === args.ref && card.lastFill.documentId === observed.snapshot.documentId ? 'after-fill' : null
+      if (!pressPolicy) reject('BROWSER_PRESS_TARGET_NOT_FOCUSED', 'Key input needs the observed focused element or the field just filled; EG-Desk never moves focus')
     }
     // A single observation authorizes at most one dispatch. Unknown outcomes are
     // not retried automatically; the next action requires a new observation.
     card.observation = null
+    if (!(tool === 'egdesk_browser_press' && card.lastFill?.ref === args.ref)) card.lastFill = null
     card.busy = true
     const action = tool === 'egdesk_browser_navigate' ? { type: 'navigate', url: args.url } :
       tool === 'egdesk_browser_click' ? { type: 'click', ref: args.ref } :
-      { type: 'fill', ref: args.ref, text: args.text }
-    const wasAlreadyTrue = checkPostcondition(args.postcondition, observed.snapshot, args.ref)
+      tool === 'egdesk_browser_fill' ? { type: 'fill', ref: args.ref, text: args.text } :
+      tool === 'egdesk_browser_press' ? { type: 'press', ref: args.ref, key: args.key } :
+      byRef ? { type: 'scroll', ref: args.ref } : { type: 'scroll', direction: args.direction, amount: args.amount || 'page' }
+    const condition = args.postcondition || null
+    const wasAlreadyTrue = condition ? checkPostcondition(condition, observed.snapshot, args.ref) : false
+    // Scroll changes only the viewport, which the next observation reports in
+    // full; its unknown outcome needs re-observation but does not lock the Card.
     const markUnknown = () => {
+      if (action.type === 'scroll') return
       card.uncertain = true
       if (action.type === 'navigate' ||
-          (action.type === 'click' && ['url', 'visible-text'].includes(args.postcondition.kind))) {
-        card.pendingTransition = { condition: args.postcondition, ref: args.ref || null,
+          (['click', 'press'].includes(action.type) && condition && ['url', 'visible-text'].includes(condition.kind))) {
+        card.pendingTransition = { condition, ref: args.ref || null,
           priorDocumentId: observed.snapshot.documentId, actionType: action.type, wasAlreadyTrue }
       }
     }
     const guard = { documentId: observed.snapshot.documentId, revision: observed.snapshot.revision,
       viewport: observed.snapshot.viewport, url: observed.snapshot.url,
       focusedRef: observed.snapshot.focusedElement?.ref || null,
-      ...(args.expectedTarget ? { target: args.expectedTarget } : {}) }
+      ...(args.expectedTarget ? { target: args.expectedTarget } : {}),
+      ...(action.type === 'navigate' ? { navigationScope: 'same-site' } : {}),
+      ...(action.type === 'scroll' ? { scroll: observed.snapshot.scroll } : {}),
+      ...(pressPolicy ? { pressPolicy } : {}) }
     const pending = requestUi({ kind: 'act', runId: binding.runId,
       clientThreadId: binding.clientThreadId, cardId: card.cardId, binding: card.ui,
-      action, guard, postcondition: args.postcondition }, binding, run)
+      action, guard, ...(condition ? { postcondition: condition } : {}) }, binding, run)
     binding.pending.add(pending)
     let response
     try { response = await pending }
@@ -292,20 +472,49 @@ export function createBrowserToolService({ sendToUi, getOwnerKey, timeoutMs = 15
     }
     const after = response.receipt.after
     const dispatchReceipt = response.receipt.dispatchReceipt
+    // Display markers and dispatch are separate from effect: only the actor's
+    // reported route plus a current-document readback can confirm a result.
     const readbackIsCurrent = validSnapshot(after, card.cardId) && record(dispatchReceipt) &&
       dispatchReceipt.actor === 'JSWindowActor' && dispatchReceipt.eventDispatched === true &&
       dispatchReceipt.documentStillCurrent === true &&
       (action.type === 'navigate' || after.documentId === observed.snapshot.documentId) &&
       (action.type !== 'click' || (
         dispatchReceipt.clickInputRoute === 'dom-click-no-pointerdown' &&
-        dispatchReceipt.targetClickObserved === true))
-    const matched = !wasAlreadyTrue && readbackIsCurrent && checkPostcondition(args.postcondition, after, args.ref)
+        dispatchReceipt.targetClickObserved === true)) &&
+      (action.type !== 'scroll' || (dispatchReceipt.inputRoute === 'dom-scroll-api' &&
+        dispatchReceipt.scrollMode === (byRef ? 'into-view' : 'document') && validScroll(after.scroll))) &&
+      (action.type !== 'press' || (dispatchReceipt.inputRoute === 'dom-keyboard-event' &&
+        dispatchReceipt.key === args.key && dispatchReceipt.trustedInput === false &&
+        dispatchReceipt.targetKeyObserved === true && dispatchReceipt.focusPolicy === pressPolicy))
+    const common = { cardId: card.cardId, action: action.type, dispatchReceipt: dispatchReceipt || null,
+      after: after || null, observation: response.receipt.observation || null }
+    if (action.type === 'scroll') {
+      const before = observed.snapshot.scroll
+      const moved = readbackIsCurrent ? after.scroll.y - before.y : null
+      const wantDown = ['down', 'bottom'].includes(action.direction)
+      const inView = byRef && readbackIsCurrent && dispatchReceipt.targetInView === true && elementInView(after, args.ref) !== false
+      const matched = byRef ? inView : moved !== null && (wantDown ? moved > 0 : moved < 0)
+      const atLimit = !byRef && moved === 0 && (wantDown ? before.y >= before.maxY : before.y <= 0)
+      return { status: matched ? 'postcondition-observed' : atLimit ? 'scroll-at-limit' : 'postcondition-unverified',
+        ...common, postcondition: byRef
+          ? { kind: 'target-in-view', matched, wasAlreadyTrue: elementInView(observed.snapshot, args.ref) === true }
+          : { kind: 'scroll-position', direction: action.direction, amount: action.amount, matched },
+        scroll: { before, after: readbackIsCurrent ? after.scroll : null }, externalEffectVerified: false }
+    }
+    if (action.type === 'press' && !condition) {
+      // Non-activation keys may omit a postcondition: the dispatch is reported,
+      // never its effect. A non-current readback still makes the outcome unknown.
+      if (!readbackIsCurrent) markUnknown()
+      return { status: readbackIsCurrent ? 'key-dispatched' : 'postcondition-unverified', ...common,
+        postcondition: null, externalEffectVerified: false }
+    }
+    const matched = !wasAlreadyTrue && readbackIsCurrent && checkPostcondition(condition, after, args.ref)
     if (!matched) markUnknown()
-    return { status: matched ? 'postcondition-observed' : 'postcondition-unverified',
-      cardId: card.cardId, action: action.type, dispatchReceipt: response.receipt.dispatchReceipt || null,
-      postcondition: { ...args.postcondition, matched, wasAlreadyTrue }, after: after || null,
-      observation: response.receipt.observation || null,
-      ...(action.type === 'navigate' ? { pageLoadVerified: false } : {}), externalEffectVerified: false }
+    if (matched && action.type === 'fill') card.lastFill = { ref: args.ref, documentId: observed.snapshot.documentId }
+    return { status: matched ? 'postcondition-observed' : 'postcondition-unverified', ...common,
+      postcondition: { ...condition, matched, wasAlreadyTrue },
+      ...(action.type === 'navigate' ? { navigationScope: 'same-site', pageLoadVerified: false } : {}),
+      externalEffectVerified: false }
   }
 
   async function dispatch(run, event) {
@@ -337,7 +546,7 @@ export function createBrowserToolService({ sendToUi, getOwnerKey, timeoutMs = 15
     const binding = bindings.get(run?.answerId) || pendingBindings.get(run?.answerId)
     if (!binding) return []
     binding.closed = true
-    for (const card of binding.cards.values()) card.observation = null
+    for (const card of binding.cards.values()) { card.observation = null; card.lastFill = null }
     return cancelCards(binding)
   }
   function reset() {

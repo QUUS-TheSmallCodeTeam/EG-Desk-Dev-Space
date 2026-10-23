@@ -1,5 +1,6 @@
 import { realpath, stat } from 'node:fs/promises'
 import path from 'node:path'
+import { publicEpochMs } from './codex-account-usage.mjs'
 
 export const MAX_TEXT = 20000
 
@@ -39,8 +40,60 @@ export function publicNetworkContext(value) {
   return { host, protocol }
 }
 
-export function publicError(error, code = 'CHAT_ERROR', origin = 'bridge') {
-  return { code: String(code), origin, message: publicText(error?.message || error || 'Codex request failed', 2000) }
+export const ERROR_KINDS = ['auth', 'quota', 'permission', 'network', 'model', 'unknown']
+
+// CodexErrorInfo string variants of the codex 0.162.1 app-server schema
+// (ErrorNotification/TurnCompleted TurnError) by recovery: auth = sign in again,
+// quota = wait for reset or another account, permission = policy/sandbox/
+// approval block, network = retry the connection, model = change the request
+// or start a new conversation. 'other' carries no cause and falls through.
+const CODEX_ERROR_KINDS = new Map([
+  ['unauthorized', 'auth'],
+  ['usageLimitExceeded', 'quota'], ['rateLimitExceeded', 'quota'],
+  ['cyberPolicy', 'permission'], ['misalignmentPolicyViolation', 'permission'], ['tooManyDenials', 'permission'], ['sandboxError', 'permission'],
+  ['serverOverloaded', 'network'], ['internalServerError', 'network'],
+  ['contextWindowExceeded', 'model'], ['sessionBudgetExceeded', 'model'], ['flexUnavailable', 'model'], ['badRequest', 'model'],
+  ['threadRollbackFailed', 'unknown'],
+])
+// Object variants carrying an optional upstream httpStatusCode.
+const CODEX_TRANSPORT_ERRORS = ['httpConnectionFailed', 'responseStreamConnectionFailed', 'responseStreamDisconnected', 'responseTooManyFailedAttempts']
+const HTTP_STATUS_KINDS = new Map([[401, 'auth'], [403, 'permission'], [429, 'quota']])
+// Bridge-issued codes whose cause is unambiguous; other codes stay unknown.
+const BRIDGE_CODE_KINDS = new Map([['LOGIN_REQUIRED', 'auth'], ['CONNECTION_LOST', 'network'], ['BRIDGE_OFFLINE', 'network'], ['RPC_TIMEOUT', 'network']])
+// Last resort for messages without a structured cause (e.g. JSON-RPC rejects).
+const MESSAGE_KINDS = [
+  ['quota', /\b(?:usage limit|rate limit|quota exceeded)\b/i],
+  ['auth', /\b(?:unauthori[sz]ed|not (?:logged|signed) in|(?:log|sign) in again|re-?authenticate|token (?:has )?expired)\b/i],
+  ['permission', /\b(?:permission denied|forbidden|access denied|not permitted)\b/i],
+  ['network', /\b(?:ECONNREFUSED|ECONNRESET|ENOTFOUND|ETIMEDOUT|EAI_AGAIN|network error|stream disconnected|connection (?:refused|reset|closed|lost)|is not connected)\b/i],
+]
+
+function codexInfoKind(info) {
+  if (typeof info === 'string') return CODEX_ERROR_KINDS.get(info) || null
+  if (!info || typeof info !== 'object' || Array.isArray(info)) return null
+  if (Object.hasOwn(info, 'activeTurnNotSteerable')) return 'unknown'
+  const variant = CODEX_TRANSPORT_ERRORS.find(name => Object.hasOwn(info, name))
+  if (!variant) return null
+  return HTTP_STATUS_KINDS.get(info[variant]?.httpStatusCode) || 'network'
+}
+
+export function publicErrorKind(error, code) {
+  const fromInfo = error && typeof error === 'object' ? codexInfoKind(error.codexErrorInfo) : null
+  if (fromInfo) return fromInfo
+  const fromCode = BRIDGE_CODE_KINDS.get(String(code)) || (typeof error?.code === 'string' ? BRIDGE_CODE_KINDS.get(error.code) : null)
+  if (fromCode) return fromCode
+  const message = typeof error === 'string' ? error : typeof error?.message === 'string' ? error.message : ''
+  return MESSAGE_KINDS.find(([, pattern]) => pattern.test(message.slice(0, 2000)))?.[0] || 'unknown'
+}
+
+// code/origin/message are unchanged; kind is added, and retryAt (quota reset,
+// epoch ms) only when the caller or a bridge error supplies one.
+export function publicError(error, code = 'CHAT_ERROR', origin = 'bridge', { retryAt } = {}) {
+  const result = { code: String(code), origin, message: publicText(error?.message || error || 'Codex request failed', 2000), kind: publicErrorKind(error, code) }
+  // Only bridge-made Error objects may carry retryAt; native payloads cannot.
+  const resetAt = publicEpochMs(retryAt ?? (error instanceof Error ? error.retryAt : undefined))
+  if (resetAt !== null) result.retryAt = resetAt
+  return result
 }
 
 export function chatError(code, message, httpStatus = 400) {

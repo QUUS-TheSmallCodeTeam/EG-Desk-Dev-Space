@@ -6,6 +6,12 @@ import { fixtureSnapshotMatches } from './codex-browser-fixture-qa.mjs'
 const BROWSER_BOUNDED = 'browserBounded'
 const READ_ONLY_QA = 'readOnlyQa'
 const FIXTURE_BROWSER_QA = 'fixtureBrowserQa'
+// Guarded tools an explicit interaction selection may use. Navigation scope,
+// focus and wait budgets are enforced again by the B service and the actor.
+const BOUNDED_INTERACTION_TOOLS = new Set(['egdesk_browser_click', 'egdesk_browser_fill',
+  'egdesk_browser_navigate', 'egdesk_browser_scroll', 'egdesk_browser_press', 'egdesk_browser_wait'])
+const SUCCESS_STATUSES = new Set(['observed', 'postcondition-observed', 'wait-condition-met'])
+const PUBLIC_INPUT_ROUTES = new Set(['dom-click-no-pointerdown', 'dom-scroll-api', 'dom-keyboard-event'])
 
 export function createCodexBrowserToolProvider({ transport, getOwnerKey, schemaReady = () => true, fixtureQa = null, service = createBrowserToolService({ sendToUi: request => transport.sendToUi(request), getOwnerKey }) }) {
   if (!transport || typeof transport.hasClient !== 'function' || typeof getOwnerKey !== 'function') throw new TypeError('Browser provider requires a bounded UI transport and account identity')
@@ -93,9 +99,9 @@ export function createCodexBrowserToolProvider({ transport, getOwnerKey, schemaR
         if (run.executionPolicy?.mode === BROWSER_BOUNDED) {
           const card = run.browserBinding?.cards?.find(item => item.cardId === event.arguments?.cardId)
           if (!card) throw chatError('BROWSER_CARD_NOT_SELECTED', 'This run has no grant for that Browser Card', 403)
-          if (!['egdesk_browser_observe', 'egdesk_browser_click', 'egdesk_browser_fill'].includes(event.tool)
-            || (event.tool !== 'egdesk_browser_observe' && card.permission !== 'interact')) {
-            throw chatError('BROWSER_INTERACTION_NOT_GRANTED', 'This run permits only its selected Browser observation or granted click/fill', 403)
+          if (event.tool !== 'egdesk_browser_observe'
+            && !(BOUNDED_INTERACTION_TOOLS.has(event.tool) && card.permission === 'interact')) {
+            throw chatError('BROWSER_INTERACTION_NOT_GRANTED', 'This run permits only its selected Browser observation or granted guarded interaction', 403)
           }
         }
         const fixtureMode = run.executionPolicy?.mode === FIXTURE_BROWSER_QA
@@ -132,8 +138,11 @@ export function createCodexBrowserToolProvider({ transport, getOwnerKey, schemaR
           void service.cancelRun(run).catch(() => {})
           throw chatError('BROWSER_FIXTURE_ATTESTATION_FAILED', 'Fixture action did not retain the exact local page and postcondition', 403)
         }
-        const success = ['observed', 'postcondition-observed'].includes(result.status)
+        const success = SUCCESS_STATUSES.has(result.status)
         const selected = run.browserBinding?.cards?.find(card => card.cardId === result.cardId)
+        // The route the actor reported, from a fixed set; never a success claim.
+        const inputRoute = [result.dispatchReceipt?.inputRoute, result.dispatchReceipt?.clickInputRoute]
+          .find(route => PUBLIC_INPUT_ROUTES.has(route))
         this.runtime.emit(run, success ? 'browser.tool.completed' : 'browser.tool.unverified', {
           callId: event.callId, cardId: result.cardId, status: result.status,
           originalProviderId: this.providerId, namespace: event.namespace || null,
@@ -143,6 +152,7 @@ export function createCodexBrowserToolProvider({ transport, getOwnerKey, schemaR
           ...(result.action ? { action: result.action } : {}),
           ...(result.observationId ? { observationId: result.observationId } : {}),
           ...(result.postcondition ? { postconditionMatched: result.postcondition.matched === true } : {}),
+          ...(inputRoute ? { inputRoute } : {}),
           externalEffectVerified: false,
         }, event.callId)
         return { success, contentItems: [{ type: 'inputText', text: JSON.stringify(result) }] }

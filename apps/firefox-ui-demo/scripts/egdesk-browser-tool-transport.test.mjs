@@ -4,8 +4,8 @@ import { test } from 'node:test'
 import * as ChatState from '../overlay/resources/EGDeskChatState.sys.mjs'
 
 globalThis.JSWindowActorParent ||= class {}
-const { EGDeskBrowserAgentRuntimeParent, registerBrowserActionAuthorizer } =
-  await import('../overlay/resources/EGDeskBrowserAgentRuntimeParent.sys.mjs')
+const BrowserAgentReceipts = await import('../overlay/resources/EGDeskBrowserAgentRuntimeParent.sys.mjs')
+const { EGDeskBrowserAgentRuntimeParent, registerBrowserActionAuthorizer } = BrowserAgentReceipts
 
 const source = readFileSync(new URL('../overlay/JS/eg-desk-surface.uc.js', import.meta.url), 'utf8').replace(/\r\n/g, '\n')
 const between = (start, end) => {
@@ -985,4 +985,80 @@ test('normal root Chat ready SSE attaches Browser transport, posts correlated re
   assert.equal(state.codex.threads[0].inputSources[0].browserToolPermission, 'observe')
   await assert.rejects(boundRespond({ requestId: 'late-request', status: 'observed' }), /stream changed/)
   assert.equal(posts.length, 1, 'late responses must not post through a replacement Chat stream')
+})
+
+// BRW-06: wait is read-only and travels on the existing observe request.
+test('UI observe forwards a read-only wait to the actor without an action lease, and not after Stop', async () => {
+  const f = fixture()
+  const bound = await f.dispatch(f.req('bind', { selection: f.selection('interact') }))
+  const seen = []
+  f.card._browserControls.toolObserve = async (_binding, options) => {
+    seen.push(options)
+    return { cardId: 'browser-a', documentId: 'doc-1', revision: 2, readyState: 'complete',
+      viewport: { width: 720, height: 480, devicePixelRatio: 1 }, url: f.current.url, text: [], interactiveElements: [],
+      wait: { for: options.wait?.for, outcome: 'met', elapsedMs: 3 } }
+  }
+  const wait = { for: 'load', timeoutMs: 3000, notDocumentId: 'doc-0' }
+  const response = await f.dispatch(f.req('observe', { binding: bound.binding, options: { textLimit: 60, elementLimit: 80, wait } }))
+  assert.equal(response.status, 'observed')
+  assert.deepEqual(seen[0].wait, wait)
+  assert.equal(response.snapshot.wait.outcome, 'met')
+  assert.equal(f.actionLeases.size, 0)
+  assert.equal(f.actionCalls, 0)
+  f.stoppedRuns.add(JSON.stringify(['run-a', 'thread-a']))
+  const stopped = await f.dispatch(f.req('observe', { binding: bound.binding, options: { wait } }))
+  assert.equal(stopped.status, 'rejected')
+  assert.equal(seen.length, 1, 'a stopped run never reaches the actor wait')
+})
+
+// These two turn on when Main wires scroll/press into eg-desk-surface.uc.js
+// (browserToolDispatchOnce action allow-list and browserToolAct receipt).
+const surfaceScrollPressWired = /'scroll'/.test(dispatchSource) && /'press'/.test(dispatchSource)
+const surfaceReceiptWired = toolActSource.includes('browserToolDispatchReceiptFields')
+
+test('UI dispatch leases guarded scroll and press by exact action type and refuses them after Stop',
+  { skip: !surfaceScrollPressWired && 'pending Main wiring: scroll/press in browserToolDispatchOnce action allow-list' }, async () => {
+  const f = fixture()
+  const bound = await f.dispatch(f.req('bind', { selection: f.selection('interact') }))
+  const guard = { documentId: 'doc-1', revision: 2, scroll: { x: 0, y: 0, maxY: 900 } }
+  const scrolled = await f.dispatch(f.req('act', { binding: bound.binding, guard,
+    action: { type: 'scroll', direction: 'down', amount: 'page' } }))
+  assert.equal(scrolled.status, 'acted')
+  const pressed = await f.dispatch(f.req('act', { binding: bound.binding, guard: { ...guard, pressPolicy: 'already-focused' },
+    action: { type: 'press', ref: 'el_2', key: 'Escape' } }))
+  assert.equal(pressed.status, 'acted')
+  for (const action of [{ type: 'press', key: 'Enter' }, { type: 'scroll', selector: 'body', direction: 'down', amount: 'page' }]) {
+    assert.equal((await f.dispatch(f.req('act', { binding: bound.binding, guard, action }))).status, 'rejected', JSON.stringify(action))
+  }
+  assert.equal(f.domEffects, 2)
+  f.stoppedRuns.add(JSON.stringify(['run-a', 'thread-a']))
+  const stopped = await f.dispatch(f.req('act', { binding: bound.binding, guard,
+    action: { type: 'scroll', direction: 'up', amount: 'page' } }))
+  assert.equal(stopped.status, 'rejected')
+  assert.equal(f.actionCalls, 2, 'no actor dispatch after Stop')
+})
+
+test('production Browser Card receipt carries only the bounded scroll/press route fields',
+  { skip: !surfaceReceiptWired && 'pending Main wiring: browserToolAct -> browserToolDispatchReceiptFields' }, async () => {
+  const windowGlobal = { id: 'window-global-a' }
+  const xulBrowser = { browsingContext: { currentWindowGlobal: windowGlobal } }
+  let actorResult
+  const toolAct = new Function('assertBrowserToolBinding', 'xulBrowser', 'showAgentActivity',
+    'browserAgentActorRequest', 'card', 'BrowserAgentReceipts', `${toolActSource}\nreturn browserToolAct`)(
+    () => {}, xulBrowser, () => {}, async () => actorResult, { id: 'browser-a' }, BrowserAgentReceipts)
+  const lease = { leaseId: 'lease-a', requestId: 'request-a', deadlineMs: Date.now() + 5000 }
+  actorResult = { ok: true, result: { dispatchDiagnostics: { inputRoute: 'dom-scroll-api', mode: 'document',
+    scrollBefore: { x: 0, y: 0 }, scrollAfter: { x: 0, y: 432 }, raw: 'actor-internal' } },
+    after: { documentId: 'doc-a' }, observation: {} }
+  const scroll = await toolAct({}, { type: 'scroll', direction: 'down', amount: 'page' }, {}, lease)
+  assert.deepEqual(scroll.dispatchReceipt, { actor: 'JSWindowActor', eventDispatched: true, documentStillCurrent: true,
+    inputRoute: 'dom-scroll-api', scrollMode: 'document' })
+  actorResult = { ok: true, result: { dispatchDiagnostics: { inputRoute: 'dom-keyboard-event', key: 'Enter',
+    trustedInput: false, targetKeyObserved: true, keydownDefaultPrevented: false,
+    defaultActionEmulated: 'form-request-submit', focusPolicy: 'after-fill', value: 'typed text' } },
+    after: { documentId: 'doc-a' }, observation: {} }
+  const press = await toolAct({}, { type: 'press', ref: 'el_2', key: 'Enter' }, {}, lease)
+  assert.equal(press.dispatchReceipt.inputRoute, 'dom-keyboard-event')
+  assert.equal(press.dispatchReceipt.defaultActionEmulated, 'form-request-submit')
+  assert.equal(JSON.stringify(press).includes('typed text'), false)
 })

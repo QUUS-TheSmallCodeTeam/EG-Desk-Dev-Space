@@ -4,8 +4,8 @@ import { test } from 'node:test'
 globalThis.JSWindowActorChild ||= class {}
 globalThis.JSWindowActorParent ||= class {}
 const { EGDeskBrowserAgentRuntimeChild } = await import('../overlay/resources/EGDeskBrowserAgentRuntimeChild.sys.mjs')
-const { EGDeskBrowserAgentRuntimeParent, registerBrowserActionAuthorizer } =
-  await import('../overlay/resources/EGDeskBrowserAgentRuntimeParent.sys.mjs')
+const parentModule = await import('../overlay/resources/EGDeskBrowserAgentRuntimeParent.sys.mjs')
+const { EGDeskBrowserAgentRuntimeParent, registerBrowserActionAuthorizer } = parentModule
 
 function localDocumentFixture() {
   const actor = new EGDeskBrowserAgentRuntimeChild()
@@ -761,4 +761,241 @@ test('parent actor delegates only its exact embedded Browser to privileged UI au
   webDocument.defaultView = webWindow
   assert.throws(() => registerBrowserActionAuthorizer({ ...browser,
     ownerDocument: webDocument }, webWindow, () => true), /chrome-owned Browser Card/)
+})
+
+// Guarded scroll / press / wait / same-site navigation (BRW-05, BRW-06).
+function interactionFixture() {
+  const f = localDocumentFixture()
+  const { win, input } = f
+  Object.assign(win, { scrollX: 0, scrollY: 0, scrollMaxY: 1500 })
+  const scrollCalls = []
+  win.scrollBy = ({ top }) => { scrollCalls.push(['by', top]); win.scrollY = Math.min(win.scrollMaxY, Math.max(0, win.scrollY + top)) }
+  win.scrollTo = ({ top }) => { scrollCalls.push(['to', top]); win.scrollY = Math.min(win.scrollMaxY, Math.max(0, top)) }
+  win.KeyboardEvent = class { constructor(name, init) { Object.assign(this, init); this.name = name } }
+  const keyEvents = [], keyListeners = new Set()
+  let preventKeydown = false, submits = 0
+  const inputDispatch = input.dispatchEvent.bind(input)
+  input.dispatchEvent = event => {
+    if (!(event instanceof win.KeyboardEvent)) return inputDispatch(event)
+    keyEvents.push(`${event.name}:${event.key}`)
+    if (event.name === 'keydown') for (const listener of keyListeners) listener(event)
+    return !(event.name === 'keydown' && preventKeydown)
+  }
+  const inputAdd = input.addEventListener, inputRemove = input.removeEventListener
+  input.addEventListener = (name, fn, capture) => name === 'keydown' ? keyListeners.add(fn) : inputAdd.call(input, name, fn, capture)
+  input.removeEventListener = (name, fn, capture) => name === 'keydown' ? keyListeners.delete(fn) : inputRemove.call(input, name, fn, capture)
+  input.form = { elements: [input], requestSubmit() { submits++ } }
+  // Keep the base fixture's live counter getters (a spread would freeze them).
+  return Object.defineProperties(f, { scrollCalls: { value: scrollCalls }, keyEvents: { value: keyEvents },
+    preventKeydown: { value: value => { preventKeydown = value } }, submits: { get: () => submits } })
+}
+const scrollGuard = (snapshot, target = null) => ({ ...guardFrom(snapshot, target), scroll: snapshot.scroll })
+const pressGuard = (snapshot, target, pressPolicy) => ({ ...guardFrom(snapshot, target), pressPolicy })
+const inputItem = snapshot => snapshot.interactiveElements.find(item => item.tag === 'input')
+
+test('guarded scroll moves only the document viewport with the DOM scroll API and no focus or pointer input', async () => {
+  const f = interactionFixture()
+  const mouse = []
+  f.win.windowUtils = { sendMouseEventToWindow(...args) { mouse.push(args) }, sendMouseEvent(...args) { mouse.push(args) } }
+  const before = f.actor.snapshot()
+  assert.deepEqual(before.scroll, { x: 0, y: 0, maxY: 1500 })
+  const down = await f.actor.act({ type: 'scroll', direction: 'down', amount: 'page' }, guarded(scrollGuard(before)))
+  assert.deepEqual(down.result.dispatchDiagnostics, { inputRoute: 'dom-scroll-api', mode: 'document',
+    scrollBefore: { x: 0, y: 0 }, scrollAfter: { x: 0, y: 432 }, maxScrollY: 1500 })
+  assert.equal(down.after.scroll.y, 432)
+  const middle = f.actor.snapshot()
+  await f.actor.act({ type: 'scroll', direction: 'up', amount: 'half' }, guarded(scrollGuard(middle)))
+  assert.equal(f.win.scrollY, 192)
+  await f.actor.act({ type: 'scroll', direction: 'bottom', amount: 'page' }, guarded(scrollGuard(f.actor.snapshot())))
+  assert.equal(f.win.scrollY, 1500)
+  await f.actor.act({ type: 'scroll', direction: 'top', amount: 'page' }, guarded(scrollGuard(f.actor.snapshot())))
+  assert.equal(f.win.scrollY, 0)
+  assert.deepEqual(f.scrollCalls, [['by', 432], ['by', -240], ['to', 1500], ['to', 0]])
+  assert.equal(mouse.length, 0)
+  assert.equal(f.focusCalls, 0)
+  assert.equal(f.clicks, 0)
+  assert.equal(f.actor.actorPerformCalls, 4)
+})
+
+test('guarded scroll is stale after a human scroll, mutation or revoked authority, before any scroll call', async () => {
+  for (const reason of ['human-scroll', 'mutation', 'authority', 'selector', 'no-scroll-guard']) {
+    const f = interactionFixture()
+    const before = f.actor.snapshot()
+    const options = guarded(scrollGuard(before))
+    const action = { type: 'scroll', direction: 'down', amount: 'page' }
+    if (reason === 'human-scroll') f.win.scrollY = 100
+    if (reason === 'mutation') f.pendingMutations.push({})
+    if (reason === 'authority') f.actor.sendQuery = async () => ({ authorized: false, reason: 'ui-denied' })
+    if (reason === 'selector') action.selector = 'body'
+    if (reason === 'no-scroll-guard') delete options.guard.scroll
+    await assert.rejects(f.actor.act(action, options), /stale|revoked|reference/i, reason)
+    assert.deepEqual(f.scrollCalls, [], reason)
+    assert.equal(f.actor.actorPerformCalls, 0, reason)
+  }
+})
+
+test('guarded into-view scroll needs the exact observed element and reports whether it is in view', async () => {
+  const f = interactionFixture()
+  let intoView = 0
+  f.input.scrollIntoView = () => { intoView++ }
+  const before = f.actor.snapshot()
+  const input = inputItem(before)
+  const result = await f.actor.act({ type: 'scroll', ref: input.ref }, guarded(scrollGuard(before, input)))
+  assert.deepEqual(result.result.dispatchDiagnostics, { inputRoute: 'dom-scroll-api', mode: 'into-view',
+    scrollBefore: { x: 0, y: 0 }, scrollAfter: { x: 0, y: 0 }, targetInView: true })
+  assert.equal(intoView, 1)
+  const again = f.actor.snapshot()
+  await assert.rejects(f.actor.act({ type: 'scroll', ref: input.ref },
+    guarded(scrollGuard(again, { ...inputItem(again), label: 'Other' }))), /changed/)
+  await assert.rejects(f.actor.act({ type: 'scroll', ref: input.ref, direction: 'down' },
+    guarded(scrollGuard(again, inputItem(again)))), /reference/)
+  assert.equal(intoView, 1)
+  assert.equal(f.focusCalls, 0)
+})
+
+test('guarded press never focuses and needs the focused target or the field the last guarded action filled', async () => {
+  const f = interactionFixture()
+  const before = f.actor.snapshot()
+  const input = inputItem(before)
+  for (const policy of ['already-focused', 'after-fill', undefined]) {
+    await assert.rejects(f.actor.act({ type: 'press', ref: input.ref, key: 'Escape' },
+      guarded(pressGuard(before, input, policy))), /not focused|just filled|focus policy/, String(policy))
+  }
+  assert.deepEqual(f.keyEvents, [])
+  assert.equal(f.actor.actorPerformCalls, 0)
+
+  await f.actor.act({ type: 'fill', ref: input.ref, text: 'seoul' }, guarded(guardFrom(before, input)))
+  const filled = f.actor.snapshot()
+  const result = await f.actor.act({ type: 'press', ref: input.ref, key: 'Enter' },
+    guarded(pressGuard(filled, inputItem(filled), 'after-fill')))
+  assert.deepEqual(f.keyEvents, ['keydown:Enter', 'keypress:Enter', 'keyup:Enter'])
+  assert.equal(f.submits, 1, 'Enter emulates implicit submission of a single-field form')
+  assert.deepEqual(result.result.dispatchDiagnostics, { inputRoute: 'dom-keyboard-event', key: 'Enter',
+    trustedInput: false, targetKeyObserved: true, keydownDefaultPrevented: false,
+    defaultActionEmulated: 'form-request-submit', focusPolicy: 'after-fill' })
+  const consecutive = f.actor.snapshot()
+  await f.actor.act({ type: 'press', ref: input.ref, key: 'ArrowDown' },
+    guarded(pressGuard(consecutive, inputItem(consecutive), 'after-fill')))
+  assert.equal(f.keyEvents.at(-1), 'keyup:ArrowDown')
+  assert.equal(f.submits, 1)
+
+  const preClick = f.actor.snapshot()
+  const button = preClick.interactiveElements.find(item => item.role === 'button')
+  await f.actor.act({ type: 'click', ref: button.ref }, guarded(guardFrom(preClick, button)))
+  const afterClick = f.actor.snapshot()
+  await assert.rejects(f.actor.act({ type: 'press', ref: input.ref, key: 'Escape' },
+    guarded(pressGuard(afterClick, inputItem(afterClick), 'after-fill'))), /just filled/)
+
+  f.actor.document.activeElement = f.input
+  const focused = f.actor.snapshot()
+  f.preventKeydown(true)
+  const prevented = await f.actor.act({ type: 'press', ref: input.ref, key: 'Enter' },
+    guarded(pressGuard(focused, inputItem(focused), 'already-focused')))
+  assert.equal(prevented.result.dispatchDiagnostics.keydownDefaultPrevented, true)
+  assert.equal(prevented.result.dispatchDiagnostics.defaultActionEmulated, null)
+  assert.equal(f.submits, 1, 'a site that handles Enter itself gets no emulated submission')
+  assert.equal(f.focusCalls, 0)
+  for (const key of ['F5', 'constructor', 'toString', undefined]) {
+    await assert.rejects(f.actor.act({ type: 'press', ref: input.ref, key },
+      guarded(pressGuard(f.actor.snapshot(), inputItem(f.actor.snapshot()), 'already-focused'))), /guarded key set/, String(key))
+  }
+})
+
+test('guarded Enter clicks an enabled default button and refuses sensitive fields', async () => {
+  const f = interactionFixture()
+  f.button.type = 'submit'
+  f.input.form.elements = [f.input, f.button]
+  f.actor.document.activeElement = f.input
+  const before = f.actor.snapshot()
+  const result = await f.actor.act({ type: 'press', ref: inputItem(before).ref, key: 'Enter' },
+    guarded(pressGuard(before, inputItem(before), 'already-focused')))
+  assert.equal(result.result.dispatchDiagnostics.defaultActionEmulated, 'default-button-click')
+  assert.equal(f.clicks, 1)
+  assert.equal(f.submits, 0)
+  const sensitive = interactionFixture()
+  sensitive.input.type = 'password'
+  sensitive.input.getAttribute = name => name === 'type' ? 'password' : null
+  sensitive.actor.document.activeElement = sensitive.input
+  const secret = sensitive.actor.snapshot()
+  await assert.rejects(sensitive.actor.act({ type: 'press', ref: inputItem(secret).ref, key: 'Enter' },
+    guarded(pressGuard(secret, inputItem(secret), 'already-focused'))), /Sensitive/)
+  assert.deepEqual(sensitive.keyEvents, [])
+})
+
+test('guarded navigation stays on the current document site using Gecko Public Suffix data', async () => {
+  const previous = globalThis.Services
+  try {
+    globalThis.Services = { eTLD: { getBaseDomainFromHost(host) {
+      const labels = host.split('.')
+      if (labels.length < 3 && host.endsWith('co.kr')) throw new Error('NS_ERROR_INSUFFICIENT_DOMAIN_LEVELS')
+      return labels.slice(host.endsWith('.co.kr') ? -3 : -2).join('.')
+    } } }
+    const f = interactionFixture()
+    f.win.location.href = 'https://shop.example.co.kr/a'
+    for (const url of ['https://other.co.kr/', 'http://shop.example.co.kr/downgrade', 'https://example.co.kr.evil.test/']) {
+      const before = f.actor.snapshot()
+      await assert.rejects(f.actor.act({ type: 'navigate', url }, guarded(guardFrom(before))), /current document site/, url)
+      assert.equal(f.win.location.href, 'https://shop.example.co.kr/a', url)
+    }
+    assert.equal(f.actor.actorPerformCalls, 0)
+    const before = f.actor.snapshot()
+    await f.actor.act({ type: 'navigate', url: 'https://www.example.co.kr/b' }, guarded(guardFrom(before)))
+    assert.equal(f.win.location.href, 'https://www.example.co.kr/b')
+    delete globalThis.Services
+    const exact = interactionFixture()
+    exact.win.location.href = 'https://shop.example.co.kr/a'
+    const unknownSuffix = exact.actor.snapshot()
+    await assert.rejects(exact.actor.act({ type: 'navigate', url: 'https://www.example.co.kr/b' },
+      guarded(guardFrom(unknownSuffix))), /current document site/, 'without PSL data only the exact origin is in scope')
+    await exact.actor.act({ type: 'navigate', url: 'https://shop.example.co.kr/c' }, guarded(guardFrom(exact.actor.snapshot())))
+    assert.equal(exact.win.location.href, 'https://shop.example.co.kr/c')
+  } finally {
+    if (previous === undefined) delete globalThis.Services
+    else globalThis.Services = previous
+  }
+})
+
+test('wait is a read-only snapshot query that reports met or timeout and never enters perform', async () => {
+  const f = interactionFixture()
+  Object.assign(f.actor, { waitPollMs: 1, idleQuietMs: 5 })
+  const wait = spec => f.actor.receiveMessage({ name: 'snapshot', data: { options: { textLimit: 5, wait: spec } } })
+  const loaded = await wait({ for: 'load', timeoutMs: 1000 })
+  assert.equal(loaded.wait.outcome, 'met')
+  assert.equal(loaded.wait.for, 'load')
+  assert.equal(typeof loaded.documentId, 'string')
+  assert.equal((await wait({ for: 'idle', timeoutMs: 1000 })).wait.outcome, 'met')
+  f.actor.document.readyState = 'loading'
+  assert.equal((await wait({ for: 'load', timeoutMs: 0 })).wait.outcome, 'timeout')
+  f.actor.document.readyState = 'complete'
+  assert.equal((await wait({ for: 'load', timeoutMs: 10, notDocumentId: loaded.documentId })).wait.outcome, 'timeout',
+    'the document a pending transition left cannot satisfy load')
+  const observed = f.actor.snapshot()
+  const ref = inputItem(observed).ref
+  assert.equal((await wait({ for: 'selector-visible', timeoutMs: 100, ref, documentId: observed.documentId })).wait.outcome, 'met')
+  await assert.rejects(wait({ for: 'selector-visible', timeoutMs: 100, ref: 'el_999', documentId: observed.documentId }), /stale/)
+  await assert.rejects(wait({ for: 'selector-visible', timeoutMs: 100, ref, documentId: 'other-document' }), /stale/)
+  await assert.rejects(wait({ for: 'load', timeoutMs: 10001 }), /bounded condition/)
+  f.actor.document.readyState = 'loading'
+  const replaced = wait({ for: 'load', timeoutMs: 500 })
+  setTimeout(() => { f.actor.document = { ...f.actor.document } }, 5)
+  await assert.rejects(replaced, /changed during wait; outcome is unknown/)
+  assert.equal(f.actor.actorPerformCalls, 0)
+  assert.equal(f.clicks + f.inputEvents + f.focusCalls, 0)
+})
+
+test('Parent receipt filter copies only fixed scroll/press route fields', () => {
+  const { browserToolDispatchReceiptFields: fields } = parentModule
+  assert.deepEqual(fields('scroll', { inputRoute: 'dom-scroll-api', mode: 'document', scrollBefore: { x: 1, y: 2 }, raw: 'x' }),
+    { inputRoute: 'dom-scroll-api', scrollMode: 'document' })
+  assert.deepEqual(fields('scroll', { inputRoute: 'dom-scroll-api', mode: 'into-view', targetInView: 'yes' }),
+    { inputRoute: 'dom-scroll-api', scrollMode: 'into-view', targetInView: false })
+  assert.deepEqual(fields('press', { inputRoute: 'dom-keyboard-event', key: 'Enter', trustedInput: false,
+    targetKeyObserved: true, keydownDefaultPrevented: false, defaultActionEmulated: 'eval', focusPolicy: 'after-fill', value: 'typed' }),
+  { inputRoute: 'dom-keyboard-event', key: 'Enter', trustedInput: false, targetKeyObserved: true,
+    keydownDefaultPrevented: false, defaultActionEmulated: null, focusPolicy: 'after-fill' })
+  for (const [type, value] of [['press', { inputRoute: 'dom-keyboard-event', key: 'Enter', trustedInput: true, focusPolicy: 'after-fill' }],
+    ['press', { inputRoute: 'dom-keyboard-event', key: 'F5', trustedInput: false, focusPolicy: 'after-fill' }],
+    ['press', { inputRoute: 'dom-keyboard-event', key: 'Enter', trustedInput: false, focusPolicy: 'stolen' }],
+    ['scroll', { inputRoute: 'os-wheel', mode: 'document' }], ['click', { inputRoute: 'dom-scroll-api', mode: 'document' }],
+    ['scroll', null], ['scroll', ['dom-scroll-api']]]) assert.deepEqual(fields(type, value), {})
 })

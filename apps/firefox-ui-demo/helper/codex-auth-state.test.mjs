@@ -1,6 +1,6 @@
 import test from 'node:test'
 import assert from 'node:assert/strict'
-import { normalizeNativeAuth, publicAuthIdentityKey } from './codex-auth-state.mjs'
+import { normalizeNativeAuth, PLAN_TYPES, publicAuthIdentityKey, publicPlanType } from './codex-auth-state.mjs'
 
 const managedAuth = { authMethod: 'chatgpt', requiresOpenaiAuth: true }
 const nativeAccount = email => ({ account: { type: 'chatgpt', email, planType: 'plus' } })
@@ -54,7 +54,7 @@ test('normalization only returns public auth fields and does not copy opaque aut
     ...nativeAccount('a@example.com'), opaquePrivatePayload: 'DO_NOT_COPY',
   })
   assert.ok(!JSON.stringify(result).includes('DO_NOT_COPY'))
-  assert.deepEqual(Object.keys(result).sort(), ['isLoggedIn', 'authMode', 'accountId', 'accountEmail', 'identityStatus', 'identityBasis', 'source', 'requiresOpenaiAuth'].sort())
+  assert.deepEqual(Object.keys(result).sort(), ['isLoggedIn', 'authMode', 'accountId', 'accountEmail', 'planType', 'identityStatus', 'identityBasis', 'source', 'requiresOpenaiAuth'].sort())
 })
 
 test('missing auth/account data has neither a known identity nor a login claim', () => {
@@ -64,4 +64,32 @@ test('missing auth/account data has neither a known identity nor a login claim',
   assert.equal(result.accountId, null)
   assert.equal(result.accountEmail, null)
   assert.equal(publicAuthIdentityKey(result), null)
+})
+
+test('planType passes only as a codex 0.162.1 schema enum value', () => {
+  // Same 18 values as GetAccountResponse/AccountUpdatedNotification PlanType.
+  assert.deepEqual([...PLAN_TYPES].sort(), ['business', 'edu', 'edu_plus', 'edu_pro', 'ent26', 'enterprise', 'enterprise_cbp_automation',
+    'enterprise_cbp_usage_based', 'free', 'go', 'plus', 'pro', 'prolite', 'promax', 'self_serve_business_prolite',
+    'self_serve_business_usage_based', 'team', 'unknown'])
+  for (const planType of PLAN_TYPES) {
+    assert.equal(normalizeNativeAuth(managedAuth, { account: { type: 'chatgpt', email: 'a@example.com', planType } }).planType, planType)
+  }
+  assert.equal(normalizeNativeAuth(managedAuth, nativeAccount('a@example.com')).planType, 'plus')
+  for (const planType of ['Pro', 'PLUS', ' pro', 'enterprise-ultra', 'pro<script>', '', null, undefined, 3, { pro: true }, ['pro']]) {
+    assert.equal(normalizeNativeAuth(managedAuth, { account: { type: 'chatgpt', email: 'a@example.com', planType } }).planType, null)
+    assert.equal(publicPlanType(planType), null)
+  }
+})
+
+test('planType is not read from non-ChatGPT accounts or missing account data', () => {
+  assert.equal(normalizeNativeAuth({ authMethod: 'apikey' }, { account: { type: 'apiKey', planType: 'pro' } }).planType, null)
+  assert.equal(normalizeNativeAuth(managedAuth, { account: { type: 'amazonBedrock', planType: 'pro' } }).planType, null)
+  assert.equal(normalizeNativeAuth(managedAuth, { account: null }).planType, null)
+  assert.equal(normalizeNativeAuth(null, null).planType, null)
+})
+
+test('planType does not change the public identity key', () => {
+  const plus = normalizeNativeAuth(managedAuth, { account: { type: 'chatgpt', email: 'a@example.com', planType: 'plus' } })
+  const pro = normalizeNativeAuth(managedAuth, { account: { type: 'chatgpt', email: 'a@example.com', planType: 'pro' } })
+  assert.equal(publicAuthIdentityKey(plus), publicAuthIdentityKey(pro))
 })

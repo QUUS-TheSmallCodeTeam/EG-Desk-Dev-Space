@@ -2,6 +2,8 @@ import test from 'node:test'
 import assert from 'node:assert/strict'
 import { createCodexBrowserToolProvider } from './codex-browser-tool-provider.mjs'
 import { BrowserToolTransport } from './codex-browser-tool-transport.mjs'
+import { createBrowserToolService } from './egdesk-browser-tool-runtime.mjs'
+import { classifyPublicToolError } from './codex-tool-errors.mjs'
 
 function fixture() {
   const calls = [], events = []
@@ -41,7 +43,7 @@ test('QA Browser preparation requires an original observe selection and a live U
   assert.equal(prepared.selection.selectedSources[0].browserToolPermission, 'observe')
   assert.equal(prepared.selection.selectedSources[0].id, 'source-1')
   assert.equal(prepared.selection.selectedSources[0].browserToolSelection.token, 'one-time-token')
-  assert.equal(f.provider.specs().length, 4)
+  assert.equal(f.provider.specs().length, 7)
   assert.throws(() => f.provider.requireThread('old-native', prepared), error => error.code === 'BROWSER_TOOLS_UNAVAILABLE')
   f.provider.registerThread('new-native')
   f.provider.requireThread('new-native', prepared)
@@ -82,15 +84,18 @@ test('BrowserBounded accepts a single explicit current-turn interaction selectio
   await f.provider.dispatch(run, { tool: 'egdesk_browser_click', callId: 'click', arguments: { cardId: 'card-1' } })
   assert.ok(f.calls.some(call => call[0] === 'dispatch' && call[1] === 'turn-1' && call[2] === 'egdesk_browser_click'))
   const before = f.calls.filter(call => call[0] === 'dispatch').length
-  const navigate = await f.provider.dispatch(run, { tool: 'egdesk_browser_navigate', callId: 'navigate', arguments: { cardId: 'card-1' } })
+  // Navigation is now a granted guarded tool; its same-site scope is enforced
+  // by the B service against the live observation, not by this name gate.
+  await f.provider.dispatch(run, { tool: 'egdesk_browser_navigate', callId: 'navigate', arguments: { cardId: 'card-1' } })
+  const unlisted = await f.provider.dispatch(run, { tool: 'egdesk_browser_hover', callId: 'hover', arguments: { cardId: 'card-1' } })
   const foreign = await f.provider.dispatch(run, { tool: 'egdesk_browser_fill', callId: 'foreign', arguments: { cardId: 'card-other' } })
   const later = { ...run, answerId: 'native/turn-2', runId: 'turn-2', browserBinding: undefined }
   await f.provider.bindRun(later, null)
   const inherited = await f.provider.dispatch(later, { tool: 'egdesk_browser_click', callId: 'inherited', arguments: { cardId: 'card-1' } })
-  assert.equal(navigate.success, false)
+  assert.equal(unlisted.success, false)
   assert.equal(foreign.success, false)
   assert.equal(inherited.success, false)
-  assert.equal(f.calls.filter(call => call[0] === 'dispatch').length, before)
+  assert.deepEqual(f.calls.filter(call => call[0] === 'dispatch').slice(before).map(call => call[2]), ['egdesk_browser_navigate'])
 })
 
 test('unverified native dynamic-tool schema exposes no Browser specs or selected Card authority', () => {
@@ -269,4 +274,82 @@ test('actual provider, B service and transport permit only an attested local fix
   assert.ok(sent.every(request => request.clientThreadId === 'ui-thread-1' && request.targetCardEpoch === 'epoch-1'))
   assert.equal(sent[3].selectionToken, 'one-time-token')
   assert.equal(events.find(event => event.event === 'browser.tool.completed' && event.detail.action === 'click').detail.externalEffectVerified, false)
+})
+
+test('BrowserBounded interaction grants navigate, scroll, press and wait through the actual B service scope checks', async () => {
+  const owner = 'codex:chatgpt:fixture-owner'
+  const sent = [], events = []
+  let page = { cardId: 'card-1', documentId: 'document-1', revision: 1, readyState: 'complete',
+    viewport: { width: 720, height: 480, devicePixelRatio: 1 }, scroll: { x: 0, y: 0, maxY: 900 },
+    url: 'https://example.test/owned-page', text: ['Owned'], focusedElement: null, interactiveElements: [] }
+  const sendToUi = async request => {
+    sent.push(request)
+    if (request.kind === 'bind') return { requestId: request.requestId, status: 'bound', binding: {
+      cardId: 'card-1', cardEpoch: 'epoch-1', profileId: 'firefox-default', accountId: 'fixture-account',
+      userContextId: 0, url: 'https://example.test/owned-page', engineAccountKey: owner, authorityEpoch: 1 } }
+    if (request.kind === 'observe') return { requestId: request.requestId, status: 'observed',
+      snapshot: request.options?.wait ? { ...page, wait: { for: request.options.wait.for, outcome: 'met', elapsedMs: 4 } } : page }
+    if (request.kind === 'act' && request.action.type === 'scroll') {
+      page = { ...page, scroll: { x: 0, y: 432, maxY: 900 } }
+      return { requestId: request.requestId, status: 'acted', receipt: { after: page, observation: {},
+        dispatchReceipt: { actor: 'JSWindowActor', eventDispatched: true, documentStillCurrent: true,
+          inputRoute: 'dom-scroll-api', scrollMode: 'document' } } }
+    }
+    if (request.kind === 'cancel') return { requestId: request.requestId, status: 'cancelled' }
+    throw new Error('unexpected UI request')
+  }
+  const transport = { runs: new Map(), hasClient: id => id === 'ui-stream-1', bindRun: runId => transport.runs.set(runId, true),
+    unbindRun: runId => transport.runs.delete(runId), reset() {} }
+  const service = createBrowserToolService({ sendToUi, getOwnerKey: () => owner })
+  const provider = createCodexBrowserToolProvider({ transport, getOwnerKey: () => owner, service })
+  provider.runtime = { browserRegisteredThreads: new Set(['native-thread']), currentEpoch: () => 3,
+    emit: (run, event, detail) => events.push({ event, detail }) }
+  const source = { id: 'source-1', kind: 'browser', selectedByUser: true, browserToolPermission: 'interact',
+    browserToolSelection: { token: 'one-time-token', threadId: 'ui-thread-1' },
+    browserToolIdentity: { cardEpoch: 'epoch-1', userContextId: 0, engineAccountKey: owner, authorityEpoch: 1 },
+    sourceRef: { viewId: 'card-1', profileId: 'firefox-default', accountId: 'fixture-account', uri: 'https://example.test/owned-page' } }
+  const prepared = provider.prepare({ selectedSources: [source], clientThreadId: 'ui-thread-1', effectiveExecutionPolicy: 'browserBounded', browserTransportId: 'ui-stream-1' })
+  const run = { answerId: 'native-thread/turn', runId: 'turn', clientThreadId: 'ui-thread-1', status: 'inProgress', executionPolicy: { mode: 'browserBounded' } }
+  await provider.bindRun(run, prepared)
+  const parse = response => JSON.parse(response.contentItems[0].text)
+  let observed = parse(await provider.dispatch(run, { tool: 'egdesk_browser_observe', callId: 'observe-1', arguments: { cardId: 'card-1' } }))
+  const outside = await provider.dispatch(run, { tool: 'egdesk_browser_navigate', callId: 'navigate-out', arguments: {
+    cardId: 'card-1', observationId: observed.observationId, expectedRevision: 1, url: 'https://elsewhere.test/',
+    postcondition: { kind: 'url', value: 'https://elsewhere.test/' } } })
+  assert.equal(outside.success, false)
+  assert.equal(parse(outside).error.code, classifyPublicToolError({ code: 'BROWSER_NAVIGATE_OUT_OF_SCOPE' }, { browser: true }).code)
+  assert.equal(sent.filter(request => request.kind === 'act').length, 0)
+  const scrolled = await provider.dispatch(run, { tool: 'egdesk_browser_scroll', callId: 'scroll-1', arguments: {
+    cardId: 'card-1', observationId: observed.observationId, expectedRevision: 1, direction: 'down' } })
+  assert.equal(scrolled.success, true)
+  assert.equal(parse(scrolled).scroll.after.y, 432)
+  assert.equal(events.find(event => event.detail.action === 'scroll').detail.inputRoute, 'dom-scroll-api')
+  const waited = await provider.dispatch(run, { tool: 'egdesk_browser_wait', callId: 'wait-1', arguments: { cardId: 'card-1', for: 'idle', timeoutMs: 2000 } })
+  assert.equal(waited.success, true)
+  assert.equal(parse(waited).status, 'wait-condition-met')
+  observed = parse(waited)
+  const unfocused = await provider.dispatch(run, { tool: 'egdesk_browser_press', callId: 'press-1', arguments: {
+    cardId: 'card-1', observationId: observed.observationId, expectedRevision: 1, ref: 'el_1',
+    expectedTarget: { ref: 'el_1', role: 'textbox', label: 'Search', href: '', value: '', tag: 'input' }, key: 'Escape' } })
+  assert.equal(unfocused.success, false, 'press reaches the B service, which applies its own target and focus checks')
+  assert.deepEqual(sent.filter(request => request.kind === 'act').map(request => request.action.type), ['scroll'])
+  await provider.cancelRun(run)
+})
+
+test('read-only grants and fixture QA still refuse the new guarded tools before the B service', async () => {
+  const f = fixture()
+  const prepared = f.provider.prepare({ selectedSources: selected('observe'), clientThreadId: 'ui-thread-1', effectiveExecutionPolicy: 'browserBounded', browserTransportId: 'ui-stream-1' })
+  const run = { answerId: 'native/turn-ro', runId: 'turn-ro', clientThreadId: 'ui-thread-1', status: 'inProgress', executionPolicy: { mode: 'browserBounded' } }
+  await f.provider.bindRun(run, prepared)
+  for (const tool of ['egdesk_browser_navigate', 'egdesk_browser_scroll', 'egdesk_browser_press', 'egdesk_browser_wait']) {
+    const response = await f.provider.dispatch(run, { tool, callId: `ro-${tool}`, arguments: { cardId: 'card-1' } })
+    assert.equal(response.success, false, tool)
+    assert.equal(JSON.parse(response.contentItems[0].text).error.code, 'BROWSER_INTERACTION_NOT_GRANTED', tool)
+  }
+  const fixtureRun = { ...run, answerId: 'native/turn-fx', runId: 'turn-fx', executionPolicy: { mode: 'fixtureBrowserQa' } }
+  for (const tool of ['egdesk_browser_navigate', 'egdesk_browser_scroll', 'egdesk_browser_press', 'egdesk_browser_wait']) {
+    const response = await f.provider.dispatch(fixtureRun, { tool, callId: `fx-${tool}`, arguments: { cardId: 'card-1' } })
+    assert.equal(response.success, false, tool)
+  }
+  assert.equal(f.calls.filter(call => call[0] === 'dispatch').length, 0)
 })

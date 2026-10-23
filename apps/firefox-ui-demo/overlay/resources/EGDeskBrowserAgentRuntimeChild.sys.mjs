@@ -1,5 +1,23 @@
 import { captureDocumentText } from './EGDeskInputContext.sys.mjs';
 
+// Guarded key set. Events are synthetic (untrusted): Gecko runs no default
+// action for them, so only Enter's implicit form submission is emulated.
+const GUARDED_KEYS = Object.freeze({
+  Enter: { key: "Enter", code: "Enter", keyCode: 13, charCode: 13 },
+  Escape: { key: "Escape", code: "Escape", keyCode: 27 },
+  Tab: { key: "Tab", code: "Tab", keyCode: 9 },
+  ArrowUp: { key: "ArrowUp", code: "ArrowUp", keyCode: 38 },
+  ArrowDown: { key: "ArrowDown", code: "ArrowDown", keyCode: 40 },
+  ArrowLeft: { key: "ArrowLeft", code: "ArrowLeft", keyCode: 37 },
+  ArrowRight: { key: "ArrowRight", code: "ArrowRight", keyCode: 39 },
+  Backspace: { key: "Backspace", code: "Backspace", keyCode: 8 },
+  Space: { key: " ", code: "Space", keyCode: 32, charCode: 32 },
+});
+// Input types that take part in HTML implicit submission.
+const IMPLICIT_SUBMIT_TYPES = ["text", "search", "email", "url", "tel", "password", "date", "month",
+  "week", "time", "datetime-local", "number"];
+const MAX_WAIT_MS = 10000;
+
 export class EGDeskBrowserAgentRuntimeChild extends JSWindowActorChild {
   constructor() {
     super();
@@ -13,13 +31,19 @@ export class EGDeskBrowserAgentRuntimeChild extends JSWindowActorChild {
     this.lastViewport = null;
     // Entry into the side-effecting dispatcher, not physical input events.
     this.actorPerformCalls = 0;
+    // The one field the last guarded action filled; key input may follow it.
+    this.lastGuardedFill = null;
+    this.waitPollMs = 100;
+    this.idleQuietMs = 500;
   }
 
   async receiveMessage(message) {
     // System presentation signal: no request options, observation, or action authority.
     if (message.name === "presentationMetrics") return this.presentationMetrics();
     const data = message.data || {};
-    if (message.name === "snapshot") return this.snapshot(data.options || {});
+    if (message.name === "snapshot") {
+      return data.options?.wait ? this.waitThenSnapshot(data.options) : this.snapshot(data.options || {});
+    }
     if (message.name === "captureInput") return captureDocumentText(this.document, data.options || {});
     if (message.name === "act") return this.act(data.action || {}, data.options || {});
     throw new Error(`Unsupported browser agent actor message: ${message.name}`);
@@ -130,6 +154,36 @@ export class EGDeskBrowserAgentRuntimeChild extends JSWindowActorChild {
   }
 
   nowMs() { return Date.now(); }
+
+  // Registrable domain from Gecko's Public Suffix List; null for IP,
+  // single-label or unavailable data, which limits scope to the exact origin.
+  siteForHost(host) {
+    const eTLD = globalThis.Services?.eTLD;
+    if (typeof eTLD?.getBaseDomainFromHost !== "function") return null;
+    try { return eTLD.getBaseDomainFromHost(host) || null; } catch { return null; }
+  }
+
+  sameSiteNavigation(fromUrl, toUrl) {
+    let from, to;
+    try { from = new URL(fromUrl); to = new URL(toUrl); } catch { return false; }
+    if (![from, to].every(url => ["http:", "https:"].includes(url.protocol))) return false;
+    if (from.protocol === "https:" && to.protocol === "http:") return false;
+    const fromSite = this.siteForHost(from.hostname);
+    const toSite = this.siteForHost(to.hostname);
+    if (!fromSite || !toSite) return from.origin === to.origin;
+    return fromSite === toSite;
+  }
+
+  scrollState() {
+    const win = this.contentWindow;
+    const doc = this.document;
+    const int = value => Number.isFinite(Number(value)) ? Math.max(0, Math.round(Number(value))) : 0;
+    const x = int(win?.scrollX ?? win?.pageXOffset);
+    const y = int(win?.scrollY ?? win?.pageYOffset);
+    const maxY = Number.isFinite(win?.scrollMaxY) ? int(win.scrollMaxY)
+      : Math.max(0, Math.max(int(doc?.documentElement?.scrollHeight), int(doc?.body?.scrollHeight)) - int(win?.innerHeight));
+    return { x, y, maxY };
+  }
 
   presentationMetricNowMs() { return globalThis.performance?.now?.() ?? Date.now(); }
 
@@ -447,8 +501,51 @@ export class EGDeskBrowserAgentRuntimeChild extends JSWindowActorChild {
       text: this.textSegments(doc, options.textLimit || 80),
       interactiveElements: this.interactiveElements(doc, options.elementLimit || 80),
       focusedElement: this.focusedElement(doc),
+      scroll: this.scrollState(),
       inaccessible: false,
     };
+  }
+
+  // Read-only wait inside this document. It never enters perform or takes a
+  // lease; a replaced document destroys this actor, so the caller sees no
+  // answer (unknown) rather than a claim about the new page.
+  async waitThenSnapshot(options = {}) {
+    const spec = options.wait;
+    const condition = spec?.for;
+    if (!["load", "idle", "selector-visible"].includes(condition) || !Number.isSafeInteger(spec.timeoutMs) ||
+        spec.timeoutMs < 0 || spec.timeoutMs > MAX_WAIT_MS) throw new Error("Browser wait requires a bounded condition");
+    const doc = this.document;
+    if (condition === "selector-visible" && (typeof spec.ref !== "string" || !this.nodeByRef.has(spec.ref) ||
+        spec.documentId !== this.observationState().documentId)) {
+      throw new Error("Browser wait target is stale; observe again");
+    }
+    const started = this.nowMs();
+    let lastRevision = null, quietSince = started;
+    const met = () => {
+      const state = this.observationState();
+      if (typeof spec.notDocumentId === "string" && state.documentId === spec.notDocumentId) return false;
+      if (condition === "selector-visible") {
+        if (state.documentId !== spec.documentId) throw new Error("Browser wait target is stale; observe again");
+        const node = this.nodeForRef(spec.ref);
+        return !!node && this.isVisible(node);
+      }
+      if (doc.readyState !== "complete") { lastRevision = null; return false; }
+      if (condition === "load") return true;
+      const now = this.nowMs();
+      if (state.revision !== lastRevision) { lastRevision = state.revision; quietSince = now; }
+      return now - quietSince >= this.idleQuietMs;
+    };
+    let outcome = "timeout";
+    for (;;) {
+      if (this.document !== doc) throw new Error("Browser document changed during wait; outcome is unknown");
+      if (met()) { outcome = "met"; break; }
+      if (this.nowMs() - started >= spec.timeoutMs) break;
+      await new Promise(resolve => this.contentWindow.setTimeout(resolve, this.waitPollMs));
+    }
+    if (this.document !== doc) throw new Error("Browser document changed during wait; outcome is unknown");
+    const { wait: _wait, ...snapshotOptions } = options;
+    return { ...this.snapshot(snapshotOptions),
+      wait: { for: condition, outcome, elapsedMs: Math.max(0, Math.round(this.nowMs() - started)) } };
   }
 
   diffLists(beforeList, afterList, keyFn, limit = 20) {
@@ -498,7 +595,14 @@ export class EGDeskBrowserAgentRuntimeChild extends JSWindowActorChild {
         || guard.url !== this.contentWindow.location.href) {
       throw new Error("Browser observation is stale; observe the current page again");
     }
-    if (action.type === "navigate") return;
+    if (action.type === "navigate") {
+      // Guarded model navigation stays on the current document's site.
+      if (!this.sameSiteNavigation(this.contentWindow.location.href, action.url)) {
+        throw new Error("Browser navigation is limited to the current document site");
+      }
+      return;
+    }
+    if (action.type === "scroll") return this.assertScrollGuard(action, guard);
     if (!action.ref || action.selector || !guard.target || guard.target.ref !== action.ref) {
       throw new Error("Browser action requires an observed element reference");
     }
@@ -518,6 +622,7 @@ export class EGDeskBrowserAgentRuntimeChild extends JSWindowActorChild {
     if (!live || ["role", "label", "href", "value", "tag"].some(key => live[key] !== guard.target[key])) {
       throw new Error("Browser target changed; observe again");
     }
+    if (action.type === "press") this.assertKeyTarget(action, guard, target);
     if (action.type === "click") {
       const rect = target.getBoundingClientRect();
       const hit = this.document.elementFromPoint?.(rect.left + rect.width / 2, rect.top + rect.height / 2);
@@ -525,6 +630,118 @@ export class EGDeskBrowserAgentRuntimeChild extends JSWindowActorChild {
         throw new Error("Browser target is obscured; observe again");
       }
     }
+  }
+
+  // Scroll guard: same document/revision (checked above) plus the observed
+  // scroll offset, so a human scroll in between makes the request stale.
+  assertScrollGuard(action, guard) {
+    const scroll = this.scrollState();
+    if (!guard.scroll || guard.scroll.x !== scroll.x || guard.scroll.y !== scroll.y) {
+      throw new Error("Browser observation is stale; the scroll position changed");
+    }
+    if (action.selector) throw new Error("Browser action requires an observed element reference");
+    if (!action.ref) {
+      if (guard.target || !["up", "down", "top", "bottom"].includes(action.direction) ||
+          !["page", "half"].includes(action.amount)) throw new Error("Browser scroll requires a bounded direction");
+      return;
+    }
+    if (action.direction || !guard.target || guard.target.ref !== action.ref) {
+      throw new Error("Browser action requires an observed element reference");
+    }
+    const target = this.nodeForRef(action.ref);
+    if (!target || !this.isVisible(target)) throw new Error("Browser target is unavailable; observe again");
+    const live = this.interactiveElements(this.document, 500).find(item => item.ref === action.ref);
+    if (!live || ["role", "label", "href", "value", "tag"].some(key => live[key] !== guard.target[key])) {
+      throw new Error("Browser target changed; observe again");
+    }
+  }
+
+  // Key input never moves focus: the target is the focused element, or the
+  // field the previous guarded action filled in this same document.
+  assertKeyTarget(action, guard, target) {
+    if (typeof action.key !== "string" || !Object.hasOwn(GUARDED_KEYS, action.key)) {
+      throw new Error("Browser key is outside the guarded key set");
+    }
+    if (guard.pressPolicy === "already-focused") {
+      if (this.document.activeElement !== target) throw new Error("Browser key target is not focused; EG-Desk never moves focus");
+      return;
+    }
+    if (guard.pressPolicy === "after-fill") {
+      if (this.lastGuardedFill?.ref !== action.ref || this.lastGuardedFill.node !== target ||
+          !this.isFillableControl(target)) throw new Error("Browser key target is not the field just filled; observe the focused element");
+      return;
+    }
+    throw new Error("Browser key input requires a focus policy");
+  }
+
+  guardedScroll(action) {
+    const win = this.contentWindow;
+    const before = this.scrollState();
+    if (action.ref) {
+      const target = this.nodeForRef(action.ref);
+      if (!target) throw new Error(`Browser agent target not found: ${action.ref}`);
+      target.scrollIntoView?.({ block: "center", inline: "nearest", behavior: "instant" });
+      const rect = target.getBoundingClientRect?.();
+      const targetInView = !!rect && rect.width > 0 && rect.height > 0 && rect.top < win.innerHeight &&
+        rect.top + rect.height > 0 && rect.left < win.innerWidth && rect.left + rect.width > 0;
+      const after = this.scrollState();
+      return { ok: true, dispatchDiagnostics: { inputRoute: "dom-scroll-api", mode: "into-view",
+        scrollBefore: { x: before.x, y: before.y }, scrollAfter: { x: after.x, y: after.y }, targetInView } };
+    }
+    const height = Math.max(0, Math.round(Number(win.innerHeight) || 0));
+    const step = Math.round(height * (action.amount === "half" ? 0.5 : 0.9));
+    if (action.direction === "top") win.scrollTo({ left: before.x, top: 0, behavior: "instant" });
+    else if (action.direction === "bottom") win.scrollTo({ left: before.x, top: before.maxY, behavior: "instant" });
+    else win.scrollBy({ left: 0, top: action.direction === "down" ? step : -step, behavior: "instant" });
+    const after = this.scrollState();
+    return { ok: true, dispatchDiagnostics: { inputRoute: "dom-scroll-api", mode: "document",
+      scrollBefore: { x: before.x, y: before.y }, scrollAfter: { x: after.x, y: after.y }, maxScrollY: after.maxY } };
+  }
+
+  // HTML implicit submission: click the form's default button, or submit a
+  // form with a single blocking field; otherwise there is no default action.
+  implicitSubmission(target) {
+    const typeOf = node => String(node?.type || node?.getAttribute?.("type") || "text").toLowerCase();
+    const tagOf = node => String(node?.tagName || "").toLowerCase();
+    if (tagOf(target) !== "input" || !IMPLICIT_SUBMIT_TYPES.includes(typeOf(target))) return null;
+    const form = target.form;
+    if (!form || typeof form.requestSubmit !== "function") return null;
+    const elements = Array.from(form.elements || []);
+    const submitter = elements.find(node => (tagOf(node) === "button" && typeOf(node) === "submit") ||
+      (tagOf(node) === "input" && ["submit", "image"].includes(typeOf(node))));
+    if (submitter) return this.isDisabled(submitter) || typeof submitter.click !== "function" ? null : { form, submitter };
+    const blocking = elements.filter(node => tagOf(node) === "input" && IMPLICIT_SUBMIT_TYPES.includes(typeOf(node)));
+    return blocking.length > 1 ? null : { form, submitter: null };
+  }
+
+  guardedPress(target, action, guard) {
+    this.assertKeyTarget(action, guard, target);
+    const keySpec = GUARDED_KEYS[action.key];
+    const KeyboardEvent = this.contentWindow.KeyboardEvent;
+    if (typeof KeyboardEvent !== "function") throw new Error("Browser key events are unavailable; use the native user path");
+    const init = { key: keySpec.key, code: keySpec.code, keyCode: keySpec.keyCode, which: keySpec.keyCode,
+      bubbles: true, cancelable: true, composed: true, view: this.contentWindow };
+    let targetKeyObserved = false;
+    const onKey = () => { targetKeyObserved = true; };
+    target.addEventListener?.("keydown", onKey, true);
+    let keydownNotCanceled;
+    try { keydownNotCanceled = target.dispatchEvent(new KeyboardEvent("keydown", init)); }
+    finally { target.removeEventListener?.("keydown", onKey, true); }
+    let keypressNotCanceled = keydownNotCanceled;
+    if (keySpec.charCode && keydownNotCanceled) {
+      keypressNotCanceled = target.dispatchEvent(new KeyboardEvent("keypress", { ...init, charCode: keySpec.charCode }));
+    }
+    let defaultActionEmulated = null;
+    if (action.key === "Enter" && keydownNotCanceled && keypressNotCanceled && target.isConnected) {
+      const submission = this.implicitSubmission(target);
+      // The default button gets the same focus-free DOM click as guarded clicks.
+      if (submission?.submitter) { submission.submitter.click(); defaultActionEmulated = "default-button-click"; }
+      else if (submission) { submission.form.requestSubmit(); defaultActionEmulated = "form-request-submit"; }
+    }
+    target.dispatchEvent(new KeyboardEvent("keyup", init));
+    return { ok: true, ref: action.ref, key: action.key, dispatchDiagnostics: { inputRoute: "dom-keyboard-event",
+      key: action.key, trustedInput: false, targetKeyObserved, keydownDefaultPrevented: !keydownNotCanceled,
+      defaultActionEmulated, focusPolicy: guard.pressPolicy } };
   }
 
   clickTarget(target, { avoidFocus = false } = {}) {
@@ -582,6 +799,8 @@ export class EGDeskBrowserAgentRuntimeChild extends JSWindowActorChild {
 
   perform(action = {}, options = {}) {
     const type = action.type || action.action || "snapshot";
+    // Any other guarded action ends the "just filled" key-input eligibility.
+    if (options.guard && !(type === "press" && action.ref === this.lastGuardedFill?.ref)) this.lastGuardedFill = null;
     if (type === "navigate") {
       const url = this.safeNavigationUrl(action.url || action.value);
       if (!url) throw new Error("Browser navigation requires an absolute http(s) URL without credentials");
@@ -589,6 +808,7 @@ export class EGDeskBrowserAgentRuntimeChild extends JSWindowActorChild {
       return { ok: true };
     }
     if (type === "scroll") {
+      if (options.guard) return this.guardedScroll(action);
       this.contentWindow.scrollBy({ left: action.dx || 0, top: action.dy || action.deltaY || 0, behavior: "instant" });
       return { ok: true };
     }
@@ -596,6 +816,7 @@ export class EGDeskBrowserAgentRuntimeChild extends JSWindowActorChild {
 
     const target = this.targetFor(action);
     if (!target) throw new Error(`Browser agent target not found: ${action.ref || action.selector || ""}`);
+    if (type === "press" && options.guard) return this.guardedPress(target, action, options.guard);
     target.scrollIntoView?.({ block: "center", inline: "center" });
 
     if (type === "click") {
@@ -617,6 +838,7 @@ export class EGDeskBrowserAgentRuntimeChild extends JSWindowActorChild {
         throw new Error(`Browser agent target is not editable: ${action.ref || action.selector || ""}`);
       }
       this.dispatchInputEvents(target);
+      if (options.guard && type === "fill") this.lastGuardedFill = { ref: action.ref, node: target };
       return { ok: true, ref: action.ref || this.elementRef(target) };
     }
 

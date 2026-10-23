@@ -42,6 +42,32 @@ export function registerBrowserActionAuthorizer(browser, ownerWindow, authorize)
   return dispose;
 }
 
+// Pure receipt filter for the chrome toolAct path: copies only the fixed,
+// non-content route fields a guarded scroll/press actor reports. Anything
+// unexpected yields no route, so the helper reports the action unverified.
+const RECEIPT_KEYS = new Set(["Enter", "Escape", "Tab", "ArrowUp", "ArrowDown", "ArrowLeft",
+  "ArrowRight", "Backspace", "Space"]);
+export function browserToolDispatchReceiptFields(actionType, diagnostics) {
+  if (!diagnostics || typeof diagnostics !== "object" || Array.isArray(diagnostics)) return {};
+  if (actionType === "scroll") {
+    if (diagnostics.inputRoute !== "dom-scroll-api" || !["document", "into-view"].includes(diagnostics.mode)) return {};
+    return { inputRoute: "dom-scroll-api", scrollMode: diagnostics.mode,
+      ...(diagnostics.mode === "into-view" ? { targetInView: diagnostics.targetInView === true } : {}) };
+  }
+  if (actionType === "press") {
+    if (diagnostics.inputRoute !== "dom-keyboard-event" || diagnostics.trustedInput !== false ||
+        !RECEIPT_KEYS.has(diagnostics.key) ||
+        !["already-focused", "after-fill"].includes(diagnostics.focusPolicy)) return {};
+    return { inputRoute: "dom-keyboard-event", key: diagnostics.key, trustedInput: false,
+      targetKeyObserved: diagnostics.targetKeyObserved === true,
+      keydownDefaultPrevented: diagnostics.keydownDefaultPrevented === true,
+      defaultActionEmulated: ["default-button-click", "form-request-submit"].includes(diagnostics.defaultActionEmulated)
+        ? diagnostics.defaultActionEmulated : null,
+      focusPolicy: diagnostics.focusPolicy };
+  }
+  return {};
+}
+
 function authorizerFor(browser, context) {
   const registration = browserAuthorizers.get(context?.id);
   if (!registration || !registeredChromeBrowser(registration.browser, registration.ownerWindow) ||
