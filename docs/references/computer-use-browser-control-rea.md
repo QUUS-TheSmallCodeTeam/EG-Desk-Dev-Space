@@ -65,6 +65,20 @@ cached 세션은 기존 세션·활성 turn이 필요하고, 숫자 `target.tabI
 앱의 `session_id`와 CDP `target.sessionId`는 별개다. CDP 전송에는 target/method/commandParams를 쓰며 바깥 RPC ID를 입력 효과 ID로 넘기지 않는다.
 native pipe/host 내부의 ID 재작성 여부와 전체 경로의 실제 ID·효과 대응은 **UNKNOWN**이다. 소스 확인과 REA의 제한된 호출 연결은 부록에서 구분한다. [C9, C10]
 
+**B-05 — 현행 탭 커서도 표시 좌표와 입력 좌표가 분리된다.** 2026-10-23 설치 JS에서 `ig.clickPoint`는
+`point`로 표시 커서를 움직인 뒤 별도의 `inputPoint/inputTarget`으로 CDP 입력을 전송한다. `qv`는 프레임 입력 좌표와
+상위 표시 좌표를 구분하며, `Wh.targetForElement`는 대상 누락·stale 및 이전 문서를 검사한다.
+이는 브라우저 프레임/문서 경계의 정적 근거이지 EG-Desk의 Desk 카메라 모델이나 모든 좌표 조합의 실행 보증이 아니다. [C16]
+
+확장 상태는 탭·세션에 연결되고 content script의 표시층은 `aria-hidden`, `pointer-events:none`, fixed 배치를 사용한다.
+표시 좌표는 viewport 경계로 제한될 수 있으므로 그 값을 실행 좌표로 역사용할 수 없다.
+`Aw.createCursorArrivalWaiter`는 도착 알림뿐 아니라 **1,500ms 만료에도 대기를 완료**한다. 이 완료는 CDP ACK·대상 수신·후조건 충족이 아니다.
+도착 대기 여부를 고르는 `qw`의 활성 탭·일반 창·비최소화 검사도 OS foreground 확인이 아니다. [C16]
+
+위 동작은 **설치 소스 확인**이다. 실제 REA는 선택한 원문 slice에서 `Dn → rn`, `j2 → qv`, `ui → w5` 등의 정적 호출을 해소했다.
+객체 주입·확장 메시지·CDP 전달 전체를 실행 추적한 결과는 아니다. 신규 공개 자료나 런타임 시험을 근거로 추가하지 않았으며,
+현행 실행·OS 포인터/포커스·실제 입력 효과는 **UNVERIFIED**다. [C17, C18]
+
 ### Native: PID 입력 경로와 포커스 복원을 구분한다
 
 **N-01 — 네이티브 virtualCursor를 표시 전용으로 분류할 수 없다.** 과거 바이너리의
@@ -167,12 +181,18 @@ P-02의 [고정 LICENSE](https://github.com/iFurySt/open-computer-use/blob/43eb4
 | ID | 적용 관점 | 확인할 경계 |
 |---|---|---|
 | EG-01 | 결과 미확정과 실패를 구분 | timeout 직후 자동 재클릭 대신 새 관찰·후조건·동일 요청 중복 방지를 확인한다. |
-| EG-02 | 대상과 좌표를 입력 직전 재확인 | Card·문서·프레임·viewport·권한 수명을 묶고 Canvas 화면 밖, 확대·축소, 화면 배율은 Gecko에서 별도 검증한다. |
+| EG-02 | 대상과 좌표를 입력 직전 재확인 | Card·문서·프레임·content viewport·권한 수명을 묶고 page zoom·화면 배율·좌표 입력은 Gecko에서 별도 검증한다. Desk pan/zoom은 표시 변환이며 그 변경만으로 안정적인 surface-local actor ref·입력을 무효화하지 않는다. |
 | EG-03 | 표시와 효과를 별도로 검증 | 커서 애니메이션, dispatch 시작, 실제 대상 수신, 후조건 충족을 하나의 성공 신호로 합치지 않는다. |
 | EG-04 | Stop의 층위를 분리 | 상위 실행 중지, lease 무효화, 새 dispatch 차단, 이미 보낸 OS 입력의 최종 수신은 다른 검증이다. |
 | EG-05 | 기존 단위 테스트 활용 | 아래 항목은 2026-10-23 중앙 검증에서 통과를 확인한 단위 테스트다(`79b3566`). **unit-test verified**이며 OpenAI REA 결과나 물리 OS 취소 보장으로 합산하지 않는다. |
 | EG-06 | 실제 EG-Desk 소유 fixture의 headless 경계 검증 | 2026-10-23 `42db7c0`의 browser-negative에서 **11개 거부 + guarded fill/click 양성 대조 2개 + 카메라 격리 사례 통과**. 실제 headless UI 실행이지만 test-only synthetic B-service·owned UI 범위이며 native-model/provider 검증은 아니다. [EGQ1] |
 | EG-07 | 실제 소유 fixture의 top-document reload 경계 검증 | 2026-10-23 UTC headless QA에서 **UI reload로 문서 교체 → 오래된 action 거부 → 명시적 재선택·fresh observe 후 DOM 클릭 1회 통과**. EG-Desk test-only 소유 UI 근거이며 설치 OpenAI REA·native-model/provider 검증이 아니다. [EGQ2] |
+| EG-08 | 요청 단위 표시 전용 target marker — **권고·구현 대기** | actor의 surface-local 위치를 현재 Desk 카메라로 표시하되 입력 좌표·권한과 분리한다. 표시 도착을 실행 성공으로 쓰지 않고 완료·실패·취소 시 해당 요청 표시만 정리한다. B-05에서 얻은 설계 시사점이며 EG-Desk 적용·실행 검증 완료가 아니다. [C16–C18] |
+
+EG-08에서 카메라 이동은 마커의 재투영만 바꾸며, 허용된 화면 밖 action을 막거나 카메라를 자동 이동하지 않는다.
+문서·대상·관찰 유효성은 기존 guard로 검사하고, 좌표 기반 입력이면 관련 layout 변경을 별도로 확인한다.
+마커는 hit-test·포커스를 받지 않는 표시층으로 두고 실행을 애니메이션 도착에 종속시키지 않는 것이 권고다.
+기존 EG-06의 화면 밖 action·카메라 보존 조건과, 표시만 갱신할 때 provider 호출 0인 조건을 유지해야 한다. 이 마커 구현·회귀 검증은 아직 완료되지 않았다.
 
 EG-05의 관련 위치는 변경 시 라인이 이동할 수 있으므로 테스트 의미와 함께 확인한다.
 
@@ -207,6 +227,7 @@ cancel 후 소유 카드 메뉴의 명시적 재선택·fresh observe를 거쳐 
 | R-03 / 현행 native 버전 변화 | 과거 offset·복원 결과를 새 helper에 잘못 적용하지 않기 위해 | N7의 정적 부분 대응을 기준으로, 실행 동등성이 제품 판단에 필요할 때 승인 범위를 확인한 제한 시험을 한다. | 정적 대응은 OS 전면 불필요; 실행 재검증은 별도 / **LLVM 정적 부분 대응 완료**, REA dossier 없음·runtime 동등성 **UNVERIFIED** |
 | R-04 / Gecko frame·zoom·배경 좌표 조합 | Chromium의 관찰/입력 좌표 계약을 Firefox로 오인하지 않기 위해 | 소유 페이지에서 frame·확대율·화면 배율·배경/최소화 조합별 fresh snapshot 좌표와 실제 수신 대상을 대조한다. | 좌표 단위 검증은 OS 전면 불필요; 배경/최소화 실측은 통제 전환 필요 / EG-06/07은 Canvas 카메라·top-document 교체와 DOM 클릭의 제한된 부분 검증. frame·page zoom·DPR·좌표 입력 및 조합별 실행은 **UNVERIFIED** |
 | R-05 / 불투명 host 연결 — 낮은 우선순위 | 대상·세션 경계의 누락을 확인하되 구현을 추측해 복제하지 않기 위해 | B-04의 송수신 JS·세션/숫자 탭 검사 부분 확인을 기준으로, 필요할 때 native pipe/host 내부의 ID 전달·재작성 연결만 보완한다. | 정적 검토는 OS 전면 불필요 / 내부 ID 재작성·E2E runtime 대응은 **UNKNOWN**. 모든 target 소유권 검증 아님; 제품 변경의 선행 조건으로 삼지 않음 |
+| R-06 / 표시 마커와 입력 경계 | 표시 성공을 입력 성공으로 오인하거나 Desk 카메라를 actor 수명과 결합하지 않기 위해 | EG-08 구현 후 소유 fixture에서 표시만으로 provider 호출 0, pan/zoom 뒤 같은 actor 유지·화면 밖 action·카메라 보존, 문서 교체 시 stale 거부와 요청 종료 정리를 확인한다. | 표시·소유 fixture 검증은 OS 전면 불필요 / B-05는 설치 정적 부분 확인. EG-Desk 마커는 **권고·구현 대기**, 현행 OpenAI 경로의 runtime 효과는 **UNVERIFIED** |
 
 ## 부록 A. 버전·해시와 드리프트
 
@@ -223,6 +244,7 @@ cancel 후 소유 카드 메뉴의 명시적 재선택·fresh observe를 거쳐 
 | mac 전용 `native-pipe.js` | 이번 범위에서 과거 비교 없음 | `51a1138a0f0d7f01fe5d4d0a4f0753c67b2c3f3ed55c7540c26d182274e116f4`; 같은 앱/CUA 버전 |
 | CUA service | `cf71f3412b13b56acf2b90370f9baba52283f3b045df3de38255f3518046ffea` | `0924ce1c8694292a6d80f544a7a168833c73e9b3981791860638a20a6f3b8b2d` |
 | Chrome 확장 | **1.26.1015.10801**, background `b61ee9b05ff9adfecdde4efdc4ec1fd326fe585268d6676eceec5d6cedffeac6` | 추가 설치 식별 확인: background 해시 동일 |
+| Chrome 확장 `content-scripts/codex.js` | 이번 범위에서 과거 비교 없음 | 확장 **1.26.1015.10801**, SHA-256 `168b307ff1e936bcfdc9344f4e668b4767cf91b6ac8d7dd868e927c9474c9221`; C16–C18에서 현행 service/background와 함께 재검증. 설치 파일 일치이며 실행 중 로드본 증명은 아님 |
 | SkyComputerUseService | **26.1013.1001501 (1001501)**; `f21c31c0ee5df419dbd165bf76ebd65c64d864c6fec5b6c6c3a23c42ff3d2e13` | 추가 설치 식별 확인: **26.1015.1001540**; `ef4f4dc20e64ee29027bf178f553c0c39b9cfa517a4cd39734510259f23c058a` |
 
 현행 버전/해시는 추가 검토 보고를 반영했다. 현행 네이티브 바이너리를 과거 offset으로 해석하지 않는다.
@@ -235,15 +257,21 @@ cancel 후 소유 카드 메뉴의 명시적 재선택·fresh observe를 거쳐 
 C5는 Babel로 위치·원문 slice를 추출한 자료다. C6–C8은 그 원문 함수 slice에 클래스 포장만 추가한 파생 파일을 대상으로 한 **실제 REA 6.7.0 정적 분석**이다.
 파생 slice SHA-256은 `f5286c94b34c4c3abb8b7a30b0d921cfd818661fa66a78f304a8cc003b2f926c`다. 분석은 partial이며 출력 잘림은 없지만 동적 `this`·외부 helper 전체 연결이나 실행을 증명하지 않는다.
 C9의 설치 JS 원문 slice·클래스 포장 파생물에 C10의 REA 6.7.0을 실행했다. 출력 잘림 없이 partial이며, `$o.create → ob → Xue`, `Kw → Ia` 연결만 해소했다. 나머지 B-04 동작은 일반 소스 확인이며 동적 전체 그래프·runtime 검증이 아니다.
+C16은 현행 service·확장 background·content의 원문 함수/상수 48개 위치·해시 추출이다. C17은 선택한 원문에 포장만 추가한 파생물의 실제 REA 6.7.0 분석이며 **partial·출력 잘림 없음**이다.
+C18은 `Dn → rn`, `j2 → qv`, `ui → w5` 등 해소된 관계의 원문 위치 매핑과 설치 바이트 재검증이다. 객체 주입·메시지·전체 CDP 경로와 runtime 실행을 해소했다는 뜻은 아니다.
 
 | 주장 | 식별점 | 증거·수준 |
 |---|---|---|
-| B-01/B-02 | 확장 `focusTab`, `executeCdp`, `Ia`, `Kw` L38; overlay `pointer-events:none` | B2의 정적 함수 + H340의 설치 코드 검토 보고. overlay/IAB 원본은 이번 문서 작업에서 재열람하지 않음 |
+| B-01/B-02 | 확장 `focusTab`, `executeCdp`, `Ia`, `Kw` L38; overlay `pointer-events:none` | B2의 정적 함수 + H340의 설치 코드 검토 보고. 현행 overlay 추가 확인은 B-05/C16–C18과 구분하며 IAB 전체 경로는 재열람·실행 검증하지 않음 |
 | B-02 | 과거 ASAR `.vite/build/main-CLu1A25j.js` L993/L1003; `executeCdpForBrowserUse`, `sendDebuggerCommand` | H340 설치 코드 보고. 현행 IAB 동등성은 UNVERIFIED |
 | B-04 — service 요청/응답 | `Jc.sendSessionRequest` `[1438154,1439676)` L4324; `Qn.sendRequest` `[117690,117933)`, `handleIncomingMessage` `[117933,118213)` L851 | C9 소스. session/turn/context 결합, 인스턴스별 증가 ID와 pending map 응답 대응 |
 | B-04 — transport 경계 | `as.sendMessage` `[1406391,1406536)`, `Xue` `[1410092,1410206)`, `ob` `[1410336,1410455)` L4323; 확장 `iS.connect` `[393624,394572)` L38 | C9 소스: JSON→socket, `nodeRepl.nativePipe.createConnection` 위임, native port 수신 callback. 내부 host 구현 미조사; C10은 위의 제한된 호출 연결만 확인 |
 | B-04 — 확장 응답/입력 | `Ko.handleIncomingRequest` `[12913,13480)` L1; `Ia` `[390164,390451)` L38 | C9 소스. 받은 RPC ID로 응답; `Ia`의 CDP 전송은 바깥 RPC ID를 입력 효과 ID로 사용하지 않음 |
 | B-04 — 세션/숫자 탭 | `Aw.resolveSession` `[371721,372093)`, `Ou.executeCdp` `[373699,374151)`, `requireSessionTab` `[380602,381202)`, `requireOwnedTab` `[381202,381366)`; L38 | C9 소스. cached 기존 세션·활성 turn 확인; 숫자 탭 소유권·attached 검사. 다른 target 형태로 일반화하지 않음 |
+| B-05 — 표시/입력 분리 | service `ig.clickPoint` `[1296183,1297626)` L4294; `pg.moveMouse` `[1322301,1322490)` L4304 | C16 소스. 표시 `point`와 입력 `inputPoint/inputTarget` 분리; 표시 오류 처리는 입력 성공 증거가 아님 |
+| B-05 — 좌표/문서 | service `qv` `[956496,958300)`, `j2` `[958300,959580)` L1159; `ui` `[367768,367909)`, `w5` `[367576,367768)` L875; `Wh.targetForElement` `[974010,974515)` L1161 | C16 소스와 C17/C18의 제한된 호출 관계. 프레임 좌표 변환·hit-test·문서 검사이며 Desk 카메라 모델·관찰부터 dispatch까지 원자적 layout 보장 아님 |
+| B-05 — 탭 상태/도착 대기 | background `Ob.setCursorState` `[330794,330978)`, `Aw.moveMouse` `[368554,369158)`, `createCursorArrivalWaiter` `[372429,372731)`, `ww` `[364240,364247)`, `qw` `[388772,389013)`; L38 | C16. 탭/세션 표시 상태, 도착 또는 1,500ms 만료 완료. `qw`는 OS foreground 확인 아님; marker 도착은 입력 ACK 아님 |
+| B-05 — DOM 표시층 | content `Dn` `[28109,29422)`, `Cn` `[24314,24448)`, `Ln` `[29559,29707)`; L1 | C16. aria-hidden·pointer-events:none·fixed 표시층과 viewport 범위 제한. 표시 좌표를 실행 좌표로 역사용하거나 native OS 포인터로 해석하지 않음 |
 | T-01 | `We` `[252876,252986)` L844; `Rf` `[779186,779324)` L1121; `clickPoint` `[1169262,1170705)` L4263 | B1 정적 소스 추출. 모의 시계 결과는 H340 보고이며 실제 타임라인 아님 |
 | T-02 | `$e` `[367466,367576)` L875; `Ev` `[905463,905601)` L1152; `ig.clickPoint` `[1296183,1297626)` L4294 | C1–C4의 **REA 6.7.0 정적 검증**. 일반 소스 읽기와 구별 |
 | T-02 | `Oh.executeTargetCdp` `[882176,883844)` L1152; `Ya → Ev → request.timeoutMs → api.executeCdp` | C1/C2/C5–C8. 최상위 일반 탭·`options[Xa] !== tabId`에서 debugger-unattached 1회 재시도, 같은 options·deadline 재사용. timeout은 별도 오류 처리이며 재시도 조건 아님 |
@@ -302,6 +330,9 @@ L48 `willTerminate`는 관찰 종료 뒤 정리 시점이다. 그때 foreground 
 | C13 | `browser/timeout-origin-ZGb896/stop-ui-bridge-projection.json`, `stop-ui-bridge-functions.json` | `2026-10-23T15:42:50.700Z` projection; 현행 앱별 Stop 메뉴의 원문·모듈 byte 범위·archive 매핑과 소스 전용 연결 |
 | C14 | `browser/timeout-origin-ZGb896/rea-stop-ui-bridge.json` | REA `ev_a524f76896e88371675ed8e43e67b8bbac132d19174e999d87b4d762b0103a30`; REA 6.7.0의 선택된 원문 slice 정적 분석 |
 | C15 | `browser/timeout-origin-ZGb896/stop-ui-bridge-final-verification.json` | `2026-10-23T15:44:57.898Z` passed: main 12개·worker 34개 선택 멤버의 archive byte 매핑·모듈 해시 확인. 무결성 검증이며 새 runtime/취소 실험 아님 |
+| C16 | `browser/timeout-origin-ZGb896/cursor-boundary-functions.json` | 2026-10-23 16:03 UTC 추출. 현행 service 28개·background 12개·content 8개 항목의 원문 byte·line·source/member/slice SHA. 설치 source 읽기이며 실행 증거 아님 |
+| C17 | `browser/timeout-origin-ZGb896/rea-cursor-boundary.json` | REA `ev_5a94fde124dd3e0c068a96acd33b62caf35a7fd50339dece84e931d9bfd20491`; REA 6.7.0 선택 slice 3개 정적 분석. partial·출력 잘림 없음, 공개 문서 인용이나 runtime 증거 아님 |
+| C18 | `browser/timeout-origin-ZGb896/cursor-boundary-projection.json` | C17의 해소 관계→C16 원문 위치 매핑 및 설치 48개 항목 바이트 일치 재검증. 전체 전송 연결·실행 중 로드본·입력 효과를 입증하지 않음 |
 | N1 | `native/focus-restore-6yqdDW/42-sampled-continuation-llvm-raw.json` | LLVM 정적 continuation와 샘플 주소의 대응 자료 |
 | N2 | `native/focus-restore-6yqdDW/43-native-e2e-bounded-raw.json` | 바이너리 식별·LLVM/기존 REA 분석. 이름의 e2e를 실제 입력 E2E 완료로 읽지 않음 |
 | N3 | `native/focus-restore-6yqdDW/45-virtual-cursor-dispatch-side-effect-raw.json` | `2026-10-21T14:46:48Z–14:47:46Z`; `postToPid` 호출 및 기존 REA `ev_4fb12a65679e8e6dc98d8b025318a722a28aef5f18ce18b969f398911dfcf26b` |
@@ -334,6 +365,9 @@ EGQ2의 소유 Card 5·context 17에서 `innerWindowId`는 `27917287425 → 2791
 | C12 | `7befc66f2d0ae6b652d767175bb599ee975d00a17dc542c20e450d2bfafdccf7` |
 | C13 projection / 원문 추출 | `c9290d5b1270906b5129f436d28d5a4d70e0d440c00c851f443c7d3562b1a08f` / `a3f79a62c9b77c52517a481d3b448c68b5adee345d974547c051b0fbbbe4005f` |
 | C14 / C15 | `d3cd1da602a95a47e352fa4bf5350004b279af3adcae8f155f266612f5d59733` / `c9447ec927f403c99d377bc8d764b9f27fff2d18f02190d4eddfd5e2097e14c5` |
+| C16 | `4483dd15afb95de7efde2b98467e50be30268a35721722cb7e9cd279f58f0874` |
+| C17 | `da4647bbfacb24a148dc6cc8206d1864260a446aa638995c8d6b36039cbd1662` |
+| C18 | `64330602a10c8419dac6ce2bc948f1d4df92553bc7e152445ca9a885972a4bbf` |
 | N1 / N2 | `2848bf3c8252f9c290f812765c0e0b4b69e429f65ee2cc0359ec663210e53a30` / `9acafdd29d2dd6de945b58743724aeba0d7332cdc8c794d773812b209fde8b45` |
 | N3 / N4 | `13c52f8ece74cb2421c5aa71afdc38eb55ed3651347516cfb3e325b7dc5a256d` / `3c7e9d496dc60a6aebd60a7c6337da1a18b17e8dcd8fd62f965ca6550885921e` |
 | N5 / N6 | `f8b6cda86acd2051708ae573a9b46a89f56a5f6c94be018755157ccc5d55033b` / `68edc62bc53dd20ccbe9f1d8684d031a9c942e68480a0bd195f50bcf39ce8c8f` |
@@ -342,5 +376,5 @@ EGQ2의 소유 Card 5·context 17에서 `innerWindowId`는 `27917287425 → 2791
 | EGQ1 | `a07a9f5aa10ca0e2ff20c9252711ab8f63ef81a9b9fc42555e65ade90e929908` |
 | EGQ2 | `a67fd11a570b7ba2feb9189c5b0381ead74cecb964c8363db42a09d157a5890a` |
 
-현행 C1–C15 및 N7–N9 artifact SHA-256은 2026-10-23 UTC 보관 파일에서 산출했다. 설치 service/helper SHA·함수 위치·해당하는 REA evidence ID와 함께 조회한다.
+현행 C1–C18 및 N7–N9 artifact SHA-256은 2026-10-23 UTC 보관 파일에서 산출했다. 설치 service/helper SHA·함수 위치·해당하는 REA evidence ID와 함께 조회한다.
 자료의 해시가 맞아도 전체 호출 그래프·현재 설치 동작·취소 보장을 증명하는 것은 아니다.
