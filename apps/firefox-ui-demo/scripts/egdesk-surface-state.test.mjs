@@ -12,7 +12,7 @@ import * as FileCard from '../overlay/resources/EGDeskFileCardState.sys.mjs';
 import { createEGDeskFileServiceCallbacks, createEGDeskNativeFilePickers } from '../overlay/resources/EGDeskFileView.sys.mjs';
 import { createDeskRecoveryStore, missingDeskRecoveryViews } from '../overlay/resources/EGDeskRecoveryState.sys.mjs';
 import { createTerminalCloseController, terminalExitEvidence, terminalResponsePacket } from '../overlay/resources/EGDeskTerminalState.sys.mjs';
-import { AVATAR_PALETTE, PROFILE_TONES, normalizeProfileBody } from '../helper/egdesk-profile-store.mjs';
+import { AVATAR_PALETTE, PROFILE_TONES, TOOL_CEILING_AXES, normalizeProfileBody } from '../helper/egdesk-profile-store.mjs';
 import { normalizeRateLimits, usageDisplay } from '../helper/codex-account-usage.mjs';
 import { PLAN_TYPES } from '../helper/codex-auth-state.mjs';
 import { publicError } from '../helper/codex-chat-values.mjs';
@@ -4833,8 +4833,10 @@ test('the Agent form needs a name, keeps the approved six colors and the store l
     role: 'r'.repeat(80), tone: 'formal', traits: ['꼼꼼함', '꼼꼼함', ...Array.from({ length: 5 }, (_, i) => `특징${i}`)], speechNotes: 's'.repeat(500),
     expertise: Array.from({ length: 8 }, (_, i) => `맡길 일 ${i}`), instructions: 'line one\r\nline two', toolPreferences: ['browser', 'egdesk_browser_observe'] });
   assert.equal(full.ok, true, JSON.stringify(full.errors));
-  assert.deepEqual(Object.keys(full.body), ['name', 'avatar', 'role', 'personality', 'expertise', 'instructions', 'toolPreferences', 'model']);
-  assert.deepEqual(full.body, normalizeProfileBody(full.body), 'the bridge stores exactly what the form sends');
+  assert.deepEqual(Object.keys(full.body), ['name', 'avatar', 'role', 'personality', 'expertise', 'instructions', 'toolPreferences', 'model', 'toolCeiling']);
+  const { toolCeiling: noCeiling, ...storedFields } = full.body;
+  assert.equal(noCeiling, null, 'the tool switch starts off: no ceiling, today\'s behavior');
+  assert.deepEqual(storedFields, normalizeProfileBody(full.body), 'the bridge stores exactly what the form sends (a null ceiling leaves no key)');
   assert.equal(full.body.avatar.color, '#f5f0df');
   assert.equal(full.body.personality.traits.length, 6, 'duplicates collapse like the store');
   // A blank avatar becomes the name's first letter on the chosen tone.
@@ -4844,7 +4846,7 @@ test('the Agent form needs a name, keeps the approved six colors and the store l
   const saved = normalizeProfileBody({ name: '검증 담당', avatar: { kind: 'initial', value: 'V', color: '#252a26' }, role: '검토',
     personality: { tone: 'concise', traits: ['정확함'], speechNotes: '짧게' }, expertise: ['리뷰'], instructions: '근거를 먼저', toolPreferences: ['browser'],
     model: { engine: 'codex', modelId: 'gpt-5.5', effort: 'high' } });
-  assert.deepEqual(Chat.validateProfileForm(Chat.profileFormFromBody(saved)).body, saved);
+  assert.deepEqual(Chat.validateProfileForm(Chat.profileFormFromBody(saved)).body, { ...saved, toolCeiling: null });
 });
 
 test('profile catalog, status, avatars and diffs read as the 대표님 sees them', () => {
@@ -9046,5 +9048,364 @@ test('Chat gets one local system line when 대표님 holds a Browser Card, in ti
     '.egd-browser-card .egd-browser-agent-hand', '.egd-browser-agent-row']) {
     assert.ok(rule(selector), `${selector} is styled`);
     assert.doesNotMatch(rule(selector), /#[0-9a-f]{3,8}\b|rgba?\(/i, `${selector} uses approved tokens only`);
+  }
+});
+
+// ---- AGENT-02/04/05, CHAT-07: Agent tools, 사용 준비, profile peek, 작업 중 bubble ----
+
+const RESEARCH_CEILING = { browser: 'observe', files: 'read', terminal: 'none', network: 'on', mcp: 'inherited' };
+
+test('the Agent tool section mirrors the store axes in Korean and maps switch, axes and the 리서치 preset onto body.toolCeiling', () => {
+  assert.deepEqual(Chat.PROFILE_TOOL_CEILING_AXES.map(item => [item.axis, item.options.map(option => option.value), item.open]),
+    TOOL_CEILING_AXES.map(item => [item.axis, [...item.values], item.open]), 'same axes, values and open behavior as the store');
+  assert.deepEqual(Chat.PROFILE_TOOL_CEILING_AXES.map(item => [item.label, item.options.map(option => option.label)]), [
+    ['브라우저', ['쓰지 않음', '보기만', '보기와 조작']], ['파일', ['읽기만', '읽기와 쓰기']],
+    ['터미널 명령', ['실행 안 함', '실행 전에 묻기', '묻지 않고 실행']], ['인터넷', ['연결 안 함', '연결 허용']],
+    ['연결된 외부 도구', ['쓰지 않음', '내 설정 그대로']]]);
+  assert.deepEqual(Chat.PROFILE_TOOL_CEILING_AXES.flatMap(item => item.options.filter(option => option.pending).map(option => `${item.axis}:${option.value}`)),
+    ['terminal:allow'], 'only 묻지 않고 실행 is pending');
+  const research = Chat.PROFILE_TOOL_CEILING_PRESETS.find(preset => preset.id === 'research');
+  assert.equal(research.label, '리서치 Agent');
+  assert.deepEqual({ ...research.ceiling }, RESEARCH_CEILING);
+  // A revision saved before AGENT-04 has no key: the switch starts off and saves null.
+  const old = normalizeProfileBody({ name: '옛 Agent' });
+  assert.equal(Object.hasOwn(old, 'toolCeiling'), false);
+  const oldForm = Chat.profileFormFromBody(old);
+  assert.equal(oldForm.toolCeilingOn, false);
+  assert.deepEqual(oldForm.toolCeiling, { browser: 'interact', files: 'write', terminal: 'ask', network: 'on', mcp: 'inherited' });
+  assert.equal(Chat.validateProfileForm(oldForm).body.toolCeiling, null);
+  // On with the preset: all five keys in store order, kept as sent by the store.
+  const on = Chat.validateProfileForm({ ...oldForm, toolCeilingOn: true, toolCeiling: { ...research.ceiling } });
+  assert.equal(on.ok, true);
+  assert.deepEqual(Object.keys(on.body.toolCeiling), ['browser', 'files', 'terminal', 'network', 'mcp']);
+  assert.deepEqual(on.body.toolCeiling, RESEARCH_CEILING);
+  assert.deepEqual(normalizeProfileBody(on.body), on.body);
+  // Reopened it is still the preset; off keeps the picks in the form but sends null, which removes the key.
+  const reopened = Chat.profileFormFromBody(normalizeProfileBody(on.body));
+  assert.equal(reopened.toolCeilingOn, true);
+  assert.equal(Chat.toolCeilingPresetId(reopened.toolCeiling), 'research');
+  const off = Chat.validateProfileForm({ ...reopened, toolCeilingOn: false });
+  assert.equal(off.body.toolCeiling, null);
+  assert.equal(Object.hasOwn(normalizeProfileBody(off.body), 'toolCeiling'), false);
+  // One axis changed is no longer the preset; an unknown value is a Korean field error and is never sent.
+  assert.equal(Chat.toolCeilingPresetId({ ...RESEARCH_CEILING, network: 'off' }), null);
+  const bad = Chat.validateProfileForm({ ...reopened, toolCeiling: { ...RESEARCH_CEILING, browser: 'drive' } });
+  assert.equal(bad.ok, false);
+  assert.deepEqual(bad.errors, [{ field: 'toolCeiling', message: '쓸 수 있는 도구를 다시 골라 주세요.' }]);
+  // 묻지 않고 실행 saved elsewhere stays as saved; it narrows nothing and the form says it still asks.
+  const allow = { ...RESEARCH_CEILING, terminal: 'allow' };
+  assert.deepEqual(Chat.validateProfileForm({ ...reopened, toolCeiling: allow }).body.toolCeiling, allow);
+  assert.match(Chat.toolCeilingNotes(allow).join(' '), /준비 중이라, 지금은 실행 전에 묻습니다/);
+  // A browser kept to 쓰지 않음/보기만 with outside tools inherited names what stays reachable.
+  assert.equal(Chat.TOOL_CEILING_EXTERNAL_BROWSER_NOTE, '직접 연결한 브라우저 도구(예: firefox-devtools)는 계속 쓸 수 있습니다');
+  assert.deepEqual(Chat.toolCeilingNotes(RESEARCH_CEILING), [Chat.TOOL_CEILING_EXTERNAL_BROWSER_NOTE]);
+  assert.deepEqual(Chat.toolCeilingNotes({ ...RESEARCH_CEILING, browser: 'none' }), [Chat.TOOL_CEILING_EXTERNAL_BROWSER_NOTE]);
+  assert.deepEqual(Chat.toolCeilingNotes({ ...RESEARCH_CEILING, mcp: 'none' }), []);
+  assert.deepEqual(Chat.toolCeilingNotes({ ...RESEARCH_CEILING, browser: 'interact' }), []);
+  assert.deepEqual(Chat.toolCeilingNotes(null), []);
+  // One-line summaries name only what is narrowed, in Korean words.
+  assert.equal(Chat.toolCeilingSummary(RESEARCH_CEILING), '브라우저 보기만 · 파일 읽기만 · 터미널 실행 안 함');
+  assert.equal(Chat.toolCeilingSummary(null), '제한 없음');
+  assert.equal(Chat.toolCeilingSummary(Chat.openToolCeiling()), '제한 없음');
+  assert.equal(Chat.toolCeilingSummary(allow), '브라우저 보기만 · 파일 읽기만', '묻지 않고 실행 runs as 실행 전에 묻기, so it narrows nothing');
+  assert.equal(Chat.toolCeilingSummary({ browser: 'none', files: 'write', terminal: 'ask', network: 'off', mcp: 'none' }),
+    '브라우저 쓰지 않음 · 인터넷 연결 안 함 · 외부 도구 쓰지 않음');
+  assert.equal(Chat.publicToolCeiling({ ...RESEARCH_CEILING, extra: 'x' }), null, 'an unknown key is not a ceiling');
+  assert.deepEqual(Chat.publicToolCeiling({ files: 'read' }), { browser: 'interact', files: 'read', terminal: 'ask', network: 'on', mcp: 'inherited' },
+    'a missing axis is its open value, as in the store');
+  // The version diff spells the whole ceiling out.
+  assert.deepEqual(Chat.profileDiffRows([{ field: 'toolCeiling', before: null, after: RESEARCH_CEILING }]).map(row => [row.label, row.before, row.after]),
+    [['쓸 수 있는 도구', '제한 없음 · 지금처럼', '브라우저 보기만 · 파일 읽기만 · 터미널 명령 실행 안 함 · 인터넷 연결 허용 · 연결된 외부 도구 내 설정 그대로']]);
+});
+
+test('사용 준비 lists what the newest version still leaves empty and only counts it', () => {
+  const fresh = Chat.profileReadinessView(normalizeProfileBody({ name: '새 Agent' }));
+  assert.deepEqual(fresh.items.map(item => [item.key, item.label, item.done, item.state]), [
+    ['name', '담당자 이름', true, '채움'], ['avatar', '아바타', false, '정하지 않음'], ['role', '역할 한 줄', false, '비어 있음'],
+    ['expertise', '맡길 일', false, '비어 있음'], ['instructions', '지침', false, '비어 있음']]);
+  assert.deepEqual([fresh.missing, fresh.ready, fresh.title, fresh.countText, fresh.tools],
+    [4, false, '사용 준비 · 빠진 항목 4개', '빠진 항목 4개', '제한 없음 · 지금처럼']);
+  const full = Chat.profileReadinessView(normalizeProfileBody({ name: '검증 담당', avatar: { kind: 'initial', value: 'V', color: '#252a26' },
+    role: '버그부터 봅니다', expertise: ['코드 리뷰'], instructions: '근거를 먼저', toolCeiling: RESEARCH_CEILING }));
+  assert.deepEqual([full.missing, full.ready, full.title, full.countText, full.tools],
+    [0, true, '사용할 준비가 됐습니다', null, '브라우저 보기만 · 파일 읽기만 · 터미널 실행 안 함']);
+  // Blank text is still empty; nothing at all is five gaps.
+  const blank = Chat.profileReadinessView({ name: '이름', role: '   ', instructions: '\n\n', expertise: ['  '] });
+  assert.deepEqual(blank.items.filter(item => !item.done).map(item => item.key), ['avatar', 'role', 'expertise', 'instructions']);
+  assert.equal(Chat.profileReadinessView(null).missing, 5);
+});
+
+test('the 작업 중 bubble shows only while the run is busy, names what a held run waits for, and leaves when it ends', () => {
+  const running = { status: 'running', pendingApprovals: [], pendingUserInputs: [] };
+  assert.deepEqual(Chat.agentWorkingView(running), { state: 'working', text: 'Agent 작업 중' });
+  for (const status of ['completed', 'interrupted', 'failed', 'cancelled', 'unavailable']) assert.equal(Chat.agentWorkingView({ ...running, status }), null, status);
+  assert.equal(Chat.agentWorkingView(null), null);
+  assert.equal(Chat.agentWorkingView({ ...running, localHistory: true }), null, 'a past run from local history never claims work now');
+  assert.equal(Chat.agentWorkingView(running, { connected: false }), null, 'offline the bridge cannot say it is working');
+  assert.equal(Chat.agentWorkingView({ ...running, stopUnconfirmed: true }), null);
+  assert.deepEqual(Chat.agentWorkingView({ ...running, pendingApprovals: [{ id: 'a' }] }), { state: 'approval', text: '승인을 기다리는 중' });
+  assert.deepEqual(Chat.agentWorkingView({ ...running, pendingUserInputs: [{ userInputId: 'q', status: 'pending' }] }), { state: 'question', text: '답변을 기다리는 중' });
+  assert.deepEqual(Chat.agentWorkingView({ ...running, status: 'stopping' }), { state: 'stopping', text: '중지하는 중' });
+  for (const view of [Chat.agentWorkingView(running), Chat.agentWorkingView({ ...running, status: 'stopping' })]) {
+    assert.equal(Object.keys(view).some(key => /thought|reason|summary/i.test(key)), false, 'no thought text');
+  }
+  // Driven by the actual reducer: appears on run.started, gone once the run is stopped.
+  const state = Chat.createChatProtocolState();
+  Chat.registerChatRequest(state, { requestId: 'request-a', clientThreadId: 'ui-a' });
+  const run = Chat.reduceChatEvent(state, envelope('run.started', 1));
+  assert.equal(Chat.agentWorkingView(run).state, 'working');
+  Chat.reduceChatEvent(state, envelope('run.completed', 2, { status: 'interrupted' }));
+  assert.equal(Chat.agentWorkingView(run), null, 'stopped: the bubble is gone');
+});
+
+test('the profile peek shows the room Agent: role, 말투, 맡길 일, the engine chip model, its tools in one line and this Board', () => {
+  const avatar = { kind: 'initial', value: 'V', color: '#252a26' };
+  const profile = { id: 'review-verifier', name: '검증 담당', role: '버그와 회귀를 먼저 봅니다', avatar, server: true, revision: 2 };
+  const detail = { id: 'review-verifier', activeRevision: 2,
+    active: { revision: 2, body: normalizeProfileBody({ name: '검증 담당', role: '버그와 회귀를 먼저 봅니다', avatar,
+      personality: { tone: 'concise', traits: ['정확함', '꼼꼼함'] }, expertise: ['코드 리뷰', '회귀 확인', '테스트 읽기', '보고서'], toolCeiling: RESEARCH_CEILING }) },
+    head: { revision: 3, body: normalizeProfileBody({ name: '아직 쓰지 않은 초안' }) } };
+  const view = Chat.agentPeekView({ author: '검증 담당', authorAvatar: avatar, profile, detail, detailStatus: 'ready',
+    modelText: 'Codex · GPT-5.5 · 높음', boardTitle: '출시 준비', threadType: 'dm' });
+  assert.deepEqual({ name: view.name, role: view.role, tone: view.tone, expertise: view.expertise, model: view.model, tools: view.tools,
+    board: view.board, profileId: view.profileId, note: view.note, loading: view.loading }, {
+    name: '검증 담당', role: '버그와 회귀를 먼저 봅니다', tone: '간결 · 정확함, 꼼꼼함', expertise: ['코드 리뷰', '회귀 확인', '테스트 읽기', '보고서'],
+    model: 'Codex · GPT-5.5 · 높음', tools: '브라우저 보기만 · 파일 읽기만 · 터미널 실행 안 함', board: '출시 준비 · 지금 열린 Board',
+    profileId: 'review-verifier', note: null, loading: false });
+  assert.deepEqual(view.avatar, avatar);
+  // Loading and failed reads say so; the catalog name and role still show.
+  const loading = Chat.agentPeekView({ author: '검증 담당', profile, detailStatus: 'loading', modelText: 'Codex' });
+  assert.deepEqual([loading.name, loading.role, loading.tone, loading.tools, loading.expertiseEmpty, loading.loading],
+    ['검증 담당', '버그와 회귀를 먼저 봅니다', '불러오는 중…', '불러오는 중…', '불러오는 중…', true]);
+  const failed = Chat.agentPeekView({ author: '검증 담당', profile, detailStatus: 'error' });
+  assert.deepEqual([failed.tone, failed.tools, failed.loading], ['확인하지 못했습니다', '확인하지 못했습니다', false]);
+  // No ceiling reads 제한 없음; an older answer under another name says so.
+  const plainTools = Chat.agentPeekView({ author: '예전 이름', profile, detail: { active: { body: normalizeProfileBody({ name: '검증 담당' }) } }, detailStatus: 'ready' });
+  assert.equal(plainTools.tools, '제한 없음');
+  assert.equal(plainTools.note, '이 답변을 보낸 당시 이름: 예전 이름');
+  // A plain Codex room has no Agent settings to open.
+  const codex = Chat.agentPeekView({ author: 'Codex', modelText: 'Codex · 기본 모델', boardTitle: '', threadType: 'group' });
+  assert.deepEqual([codex.name, codex.role, codex.tools, codex.profileId, codex.board, codex.model],
+    ['Codex', '기본 Codex 대화 · 따로 정한 Agent 없음', '제한 없음', null, 'EG-Desk · Board Thread', 'Codex · 기본 모델']);
+  for (const shown of [view, loading, failed, codex]) {
+    for (const text of [shown.tone, shown.tools, shown.board, shown.role]) assert.doesNotMatch(text, /observe|inherited|interact|toolCeiling|null|undefined/);
+  }
+});
+
+test('the peek panel and the 작업 중 bubble are keyboard reachable: Esc closes the peek, its buttons open settings and the record', () => {
+  const document = settingsFakeDocument();
+  const parts = compileFunction(`${declaration('el')}\n${declaration('codexMessageAvatarFace')}\n${declaration('codexAgentPeekPanel')}\n${declaration('codexAgentWorkingRow')}
+    return { codexAgentPeekPanel, codexAgentWorkingRow };`, ['document', 'ChatState'])(document, Chat);
+  const calls = [];
+  const avatar = { kind: 'initial', value: 'V', color: '#252a26' };
+  const view = Chat.agentPeekView({ author: '검증 담당', profile: { id: 'review-verifier', name: '검증 담당', role: '리뷰', avatar, server: true, revision: 2 },
+    detail: { active: { body: normalizeProfileBody({ name: '검증 담당', avatar, expertise: ['코드 리뷰', '회귀 확인', '테스트 읽기', '보고서'], toolCeiling: RESEARCH_CEILING }) } },
+    detailStatus: 'ready', modelText: 'Codex · GPT-5.5', boardTitle: '출시 준비' });
+  const panel = parts.codexAgentPeekPanel(view, { left: 40.4, top: 80, onClose: () => calls.push('close'),
+    onOpenSettings: () => calls.push('settings'), onOpenActivity: () => calls.push('activity') });
+  assert.equal(panel.attributes.role, 'dialog');
+  assert.equal(panel.attributes['aria-label'], '검증 담당 프로필');
+  assert.equal(panel.dataset.testid, 'chat-agent-peek');
+  assert.deepEqual([panel.style.left, panel.style.top], ['40px', '80px']);
+  const rows = settingsNodes(panel, node => node.tagName === 'DIV' && node.className === 'egd-codex-agent-peek-row').map(node => node.textContent);
+  assert.deepEqual(rows, ['말투담백', '맡길 일코드 리뷰 · 회귀 확인 · 테스트 읽기 외 1개', '모델Codex · GPT-5.5',
+    '쓸 수 있는 도구브라우저 보기만 · 파일 읽기만 · 터미널 실행 안 함', '이 대화 Board출시 준비 · 지금 열린 Board']);
+  const buttons = settingsNodes(panel, node => node.tagName === 'BUTTON');
+  assert.deepEqual(buttons.map(button => button.textContent), ['Agent 설정 열기', '활동 기록 보기']);
+  assert.ok(buttons.every(button => button.dataset.focusKey), 'focus survives the chat redraw');
+  panel.fire('keydown', { key: 'Enter' });
+  assert.deepEqual(calls, []);
+  panel.fire('keydown', { key: 'Escape' });
+  assert.deepEqual(calls, ['close']);
+  buttons[0].fire('click');
+  buttons[1].fire('click');
+  assert.deepEqual(calls, ['close', 'settings', 'activity']);
+  // The working bubble: the Agent's face, dots, words, and one button to the record.
+  const row = parts.codexAgentWorkingRow({ state: 'working', text: 'Agent 작업 중' }, { runId: 'turn-a', name: '검증 담당', avatar, onOpen: () => calls.push('open') });
+  assert.deepEqual([row.dataset.testid, row.dataset.runId, row.dataset.state], ['chat-agent-working', 'turn-a', 'working']);
+  assert.equal(row.textContent, 'VAgent 작업 중');
+  const face = row.children[0];
+  assert.equal(face.attributes['aria-hidden'], 'true');
+  assert.match(face.className, /egd-profile-avatar-tone-4/);
+  const bubble = settingsNodes(row, node => node.tagName === 'BUTTON')[0];
+  assert.equal(bubble.attributes['aria-label'], '검증 담당 · Agent 작업 중 · 활동 기록 열기');
+  assert.equal(bubble.dataset.focusKey, 'agent-working-turn-a');
+  bubble.fire('click');
+  assert.equal(calls.at(-1), 'open');
+  // A plain Codex room shows the first letter on the plain chat colour.
+  const plain = parts.codexAgentWorkingRow({ state: 'approval', text: '승인을 기다리는 중' }, { runId: 'r', name: 'Codex' });
+  assert.equal(plain.children[0].className, 'egd-codex-message-avatar');
+  assert.equal(plain.textContent, 'C승인을 기다리는 중');
+});
+
+test('Agent 관리 shows 사용 준비 on the detail and saves the tool section through the draft route', async () => {
+  const document = settingsFakeDocument();
+  const { el, codexProfileAvatar } = compileFunction(`${declaration('el')}\n${declaration('codexProfileAvatar')}\nreturn { el, codexProfileAvatar };`, ['document', 'ChatState'])(document, Chat);
+  const listeners = new Set();
+  const calls = [];
+  const state = { codex: { connected: true, isStartingLogin: false, authStatus: { isLoggedIn: true } } };
+  const catalog = { status: 'ready', profiles: Chat.normalizeProfileCatalog({ profiles: catalogRows }) };
+  // An old revision: no toolCeiling key at all.
+  let headBody = normalizeProfileBody({ name: '검증 담당', role: '새 역할' });
+  let headRevision = 3;
+  const detail = () => ({ id: 'review-verifier', lifecycle: 'active', origin: 'template', activeRevision: 2, headRevision, hasDraft: true,
+    active: { revision: 2, body: normalizeProfileBody({ name: '검증 담당' }) }, head: { revision: headRevision, body: headBody } });
+  state.codexBridge = {
+    subscribe(listener) { listeners.add(listener); listener(state.codex); return () => listeners.delete(listener); },
+    profileCatalog: () => catalog, loadProfiles() { return Promise.resolve(); },
+    async profileRequest(path, init = {}) {
+      calls.push([init.method || 'GET', path, init.body]);
+      if (init.method === 'PUT') {
+        headBody = normalizeProfileBody(init.body.body);
+        headRevision += 1;
+        return { id: 'review-verifier', revision: headRevision, profile: { lifecycle: 'active' } };
+      }
+      if (path === '/profiles/review-verifier') return detail();
+      if (path === '/profiles/review-verifier/revisions') return { profileId: 'review-verifier', revisions: [] };
+      throw Object.assign(new Error('not mocked'), { status: 500 });
+    },
+  };
+  const windowStub = { innerWidth: 1280, innerHeight: 800, confirm: () => false, setTimeout: () => 0 };
+  const spawn = compileFunction(`${declaration('spawnSettingsCard')}\nreturn spawnSettingsCard;`, ['singletonSourceRef', 'focusOpenSourceCard', 'cardSeq', 'resolveCanvasCardPlacement',
+    'revealPlacedCanvasCard', 'el', 'cardZ',
+    'closeCanvasCard', 'state', 'ChatState', 'codexProfileAvatar', 'document', 'window', 'bindCardSourceRef', 'markAgendaDirty', 'setActiveEntity',
+    'isCardFullscreen', 'focusCanvasCard', 'installCardHeaderFullscreenToggle', 'canvasZoom'])(
+    () => ({ kind: 'settings-card' }), () => null, 0, () => ({ x: 10, y: 20, width: 600, height: 600, inView: true }),
+    () => {}, el, 0, () => {}, state, Chat, codexProfileAvatar, document, windowStub,
+    () => {}, () => {}, () => {}, () => false, () => {}, () => {}, () => 1);
+  // CHAT-07 [Agent 설정 열기] opens straight onto the Agent's detail.
+  const card = spawn({ tab: 'agents', profileId: 'review-verifier' });
+  await settle();
+  const byTestId = (testid, root = card) => settingsNodes(root, node => node.dataset.testid === testid);
+  const readiness = byTestId('settings-agent-readiness')[0];
+  assert.ok(readiness, 'the detail opens with 사용 준비');
+  assert.equal(readiness.dataset.missing, '3');
+  assert.match(readiness.textContent, /^사용 준비 · 빠진 항목 3개/);
+  assert.match(readiness.textContent, /쓸 수 있는 도구: 제한 없음 · 지금처럼$/);
+  assert.deepEqual(byTestId('settings-agent-readiness-item', readiness).map(node => [node.dataset.field, node.dataset.done]),
+    [['name', 'true'], ['avatar', 'false'], ['role', 'true'], ['expertise', 'false'], ['instructions', 'false']]);
+  const activate = settingsButton(card, '사용 시작 (버전 3)');
+  assert.ok(activate, '사용 시작 keeps its label');
+  assert.equal(activate.attributes.disabled, undefined, '사용 시작 is never blocked by gaps');
+  assert.equal(byTestId('settings-agent-readiness-count')[0].textContent, '빠진 항목 3개');
+  assert.equal(activate.attributes['aria-describedby'], `${card.attributes.id}-agent-readiness-count`);
+  assert.equal(byTestId('settings-agent-ceiling-summary')[0].textContent, '제한 없음 · 지금처럼');
+  // A gap opens the form on its own field.
+  settingsNodes(readiness, node => node.tagName === 'BUTTON' && node.textContent === '지침')[0].fire('click');
+  assert.match(card.textContent, /Agent 편집/);
+  assert.equal(document.activeElement, document.getElementById(`${card.attributes.id}-profile-instructions`));
+  // The tool section starts off on an old revision.
+  const section = () => byTestId('settings-agent-ceiling')[0];
+  const toggle = () => byTestId('settings-agent-ceiling-switch')[0];
+  const option = (axis, value) => byTestId('settings-agent-ceiling-option').find(node => node.dataset.axis === axis && node.dataset.value === value);
+  const preset = () => byTestId('settings-agent-ceiling-preset')[0];
+  assert.equal(section().dataset.on, 'false');
+  assert.equal(section().textContent, '이 Agent가 쓸 수 있는 도구도구 제한 사용제한 없음 · 지금처럼');
+  assert.deepEqual([toggle().attributes.role, toggle().attributes['aria-checked']], ['switch', 'false']);
+  toggle().fire('click');
+  assert.equal(toggle().attributes['aria-checked'], 'true');
+  assert.equal(document.activeElement, toggle(), 'focus stays on the switch after the redraw');
+  assert.equal(option('browser', 'interact').attributes['aria-pressed'], 'true', 'switching on starts from today\'s behavior');
+  assert.equal(option('terminal', 'allow').attributes.disabled, 'true');
+  assert.equal(option('terminal', 'allow').textContent, '묻지 않고 실행 · 준비 중');
+  assert.equal(preset().textContent, '리서치 Agent');
+  preset().fire('click');
+  assert.equal(preset().attributes['aria-pressed'], 'true');
+  assert.equal(option('browser', 'observe').attributes['aria-pressed'], 'true');
+  assert.deepEqual(byTestId('settings-agent-ceiling-note').map(node => node.textContent), [Chat.TOOL_CEILING_EXTERNAL_BROWSER_NOTE]);
+  option('mcp', 'none').fire('click');
+  assert.equal(document.activeElement, document.getElementById(`${card.attributes.id}-profile-ceiling-mcp`), 'focus stays on the row that changed');
+  assert.equal(byTestId('settings-agent-ceiling-note').length, 0, 'outside tools off: nothing left to warn about');
+  assert.equal(preset().attributes['aria-pressed'], 'false');
+  settingsButton(card, '초안 저장').fire('click');
+  await settle();
+  const firstPut = calls.find(call => call[0] === 'PUT');
+  assert.equal(firstPut[1], '/profiles/review-verifier/draft');
+  assert.equal(firstPut[2].expectedRevision, 3);
+  assert.deepEqual(firstPut[2].body.toolCeiling, { ...RESEARCH_CEILING, mcp: 'none' });
+  assert.match(byTestId('settings-agent-readiness')[0].textContent, /쓸 수 있는 도구: 브라우저 보기만 · 파일 읽기만 · 터미널 실행 안 함 · 외부 도구 쓰지 않음$/);
+  // Reopened it is on; switching off saves null (no ceiling, today's behavior).
+  settingsButton(card, '편집').fire('click');
+  assert.equal(section().dataset.on, 'true');
+  toggle().fire('click');
+  settingsButton(card, '초안 저장').fire('click');
+  await settle();
+  const lastPut = calls.filter(call => call[0] === 'PUT').at(-1);
+  assert.equal(lastPut[2].expectedRevision, 4);
+  assert.equal(lastPut[2].body.toolCeiling, null);
+  assert.equal(Object.hasOwn(headBody, 'toolCeiling'), false);
+  // An open edit form is never discarded by a second [Agent 설정 열기].
+  settingsButton(card, '편집').fire('click');
+  card._settingsOpenProfile('review-verifier');
+  assert.match(card.textContent, /Agent 편집/);
+  card._cleanup();
+  assert.equal(listeners.size, 0);
+});
+
+test('the activity record names a run\'s ceiling under its head and reads ceiling rows in words', () => {
+  const state = Chat.createChatProtocolState();
+  Chat.registerChatRequest(state, { requestId: 'request-a', clientThreadId: 'ui-a' });
+  const run = Chat.reduceChatEvent(state, envelope('run.started', 1, { status: 'inProgress', toolCeiling: RESEARCH_CEILING }));
+  assert.deepEqual(run.toolCeiling, RESEARCH_CEILING);
+  assert.equal(Chat.toolCeilingRunLine(run), '도구 제한: 브라우저 보기만 · 파일 읽기만 · 터미널 실행 안 함');
+  // A later record without the key never erases it; a malformed one is ignored.
+  Chat.mergeChatSnapshot(state, { conversationId: 'conversation-a', streamId: 'stream-a', seq: 5, connection: 'ready', runs: [{ runId: 'turn-a', status: 'inProgress', messages: [] }] }, 'ui-a');
+  Chat.mergeChatSnapshot(state, { conversationId: 'conversation-a', streamId: 'stream-a', seq: 6, connection: 'ready', runs: [{ runId: 'turn-a', status: 'inProgress', toolCeiling: { browser: 'drive' } }] }, 'ui-a');
+  assert.deepEqual(run.toolCeiling, RESEARCH_CEILING);
+  // The send response and /v1/state runs[] carry it too.
+  const sent = Chat.createChatProtocolState();
+  Chat.registerChatRequest(sent, { requestId: 'q2', clientThreadId: 'ui-b' });
+  const accepted = Chat.acceptChatRequest(sent, { accepted: true, requestId: 'q2', conversationId: 'c2', runId: 'r2',
+    toolCeiling: { browser: 'none', files: 'write', terminal: 'ask', network: 'off', mcp: 'none' } }, 'q2');
+  assert.equal(Chat.toolCeilingRunLine(accepted), '도구 제한: 브라우저 쓰지 않음 · 인터넷 연결 안 함 · 외부 도구 쓰지 않음');
+  const [restored] = Chat.mergeChatSnapshot(Chat.createChatProtocolState(), { conversationId: 'c3', streamId: 's3', seq: 1, connection: 'ready',
+    runs: [{ runId: 'r3', status: 'completed', toolCeiling: RESEARCH_CEILING }] }, 'ui-c');
+  assert.deepEqual(restored.toolCeiling, RESEARCH_CEILING);
+  assert.equal(Chat.toolCeilingRunLine({ toolCeiling: null }), null);
+  assert.equal(Chat.toolCeilingRunLine({}), null);
+  assert.equal(Chat.toolCeilingRunLine({ toolCeiling: Chat.openToolCeiling() }), null, 'a ceiling that narrows nothing adds no line');
+  // Rows: a refusal shows its command; notices carry the detail keys as sentences.
+  assert.deepEqual(Chat.toolCeilingActivityView({ kind: 'toolCeiling', status: 'declined', title: '이 Agent는 터미널 명령이 허용되지 않습니다',
+    detail: { axis: 'terminal', limit: 'none', command: 'rm -rf build' } }), { statusLabel: '도구 제한으로 막음', notes: [], command: 'rm -rf build' });
+  const notice = detail => Chat.toolCeilingActivityView({ kind: 'toolCeiling', status: 'completed', title: '안내', detail: { axis: 'browser', limit: 'observe', ...detail } });
+  assert.deepEqual(notice({ externalBrowserToolsStillInherited: true }), { statusLabel: '안내', notes: ['직접 연결한 브라우저 도구는 이 Agent에서도 쓸 수 있습니다'], command: null });
+  assert.deepEqual(notice({ nativeFeatureCheck: 'unavailable' }).notes, ['Codex 버전이 확인을 지원하지 않아 일부 제한을 확인하지 못했습니다']);
+  assert.equal(notice({ externalBrowserToolsStillInherited: true, nativeFeatureCheck: 'unavailable' }).notes.length, 2);
+  assert.deepEqual(notice({ externalBrowserToolsStillInherited: 'yes', nativeFeatureCheck: 'verified' }).notes, [], 'only the exact helper values speak');
+  assert.equal(Chat.toolCeilingActivityView({ kind: 'commandExecution', detail: { command: 'ls' } }), null);
+});
+
+test('chat wiring: faces and names open the peek, the 작업 중 bubble closes the log, and the record shows ceilings', () => {
+  const peek = surfaceSource.match(/      const renderAgentPeek = \(thread, message\) => \{([\s\S]*?)\n      \};/)?.[1] || '';
+  assert.match(peek, /modelText: ChatState\.chatEngineChipView\(thread, engineContext\)\.text/, 'the model line is the engine chip value');
+  assert.match(peek, /codexBridge\.agentProfileDetail\(profile\.id, profile\.revision\)/);
+  assert.match(peek, /spawnSettingsCard\(\{ tab: 'agents', \.\.\.\(view\.profileId \? \{ profileId: view\.profileId \} : \{\}\) \}\)/);
+  assert.match(peek, /onOpenActivity: \(\) => \{ codexBridge\.closeAgentPeek\(\); codexBridge\.openActivity\(thread\.id\); \}/);
+  assert.match(peek, /onClose: \(\) => \{ codexBridge\.closeAgentPeek\(\); returnFocus\(\); \}/);
+  assert.match(surfaceSource, /const avatar = message\.role === 'assistant' && !groupedWithPrevious\n              \? el\('button', peekTriggerProps\(message, author, avatarClass, `agent-peek-face-\$\{message\.id\}`\), avatarText\)/);
+  assert.match(surfaceSource, /el\('button', peekTriggerProps\(message, author, 'egd-codex-message-role-name', `agent-peek-name-\$\{message\.id\}`\), author\)/);
+  assert.match(surfaceSource, /'aria-haspopup': 'dialog', 'aria-expanded': peekOpenFor\(message\) \? 'true' : 'false'/);
+  assert.match(surfaceSource, /if \(opening\) body\.querySelector\('\.egd-codex-agent-peek \[data-focus-key\]'\)\?\.focus\(\{ preventScroll: true \}\);/, 'opening moves focus into the peek');
+  assert.match(surfaceSource, /if \(target\.closest\('\.egd-codex-agent-peek, \.egd-codex-agent-peek-trigger'\)\) return;\n      closeFloatingMenus\(\);/);
+  assert.match(surfaceSource, /      codexBridge\.closeAgentPeek\?\.\(\);\n    \};/);
+  assert.match(surfaceSource, /      agentProfileDetail\(profileId, revision = null\) \{\n        if \(!ChatState\.isProfileId\(profileId\)\) return null;\n        const cached = agentProfileDetails\.get\(profileId\);\n        if \(cached && cached\.revision === revision\) return cached;/,
+    'one read per active revision, so a redraw never asks again');
+  // The bubble follows the last line, replaces the dots inside its run's answer, and opens the record; the status line stays.
+  assert.match(surfaceSource, /const working = ChatState\.nativeBindingHeld\(activeThread\) \? null : ChatState\.agentWorkingView\(workingRun, \{ connected: codex\.connected \}\);/);
+  assert.match(surfaceSource, /          appendControlNotices\(\);\n          if \(working\) \{\n            messages\.appendChild\(codexAgentWorkingRow\(working, \{/);
+  assert.match(surfaceSource, /onOpen: \(\) => codexBridge\.openActivity\(activeThread\.id\)/);
+  assert.match(surfaceSource, /&& !\(working && message\.runId && message\.runId === workingRun\?\.runId\)\) \{/);
+  assert.match(surfaceSource, /data: \{ testid: 'chat-run-status', status, runId: run\?\.runId \|\| ''/);
+  // The activity record.
+  const panel = declaration('renderCodexActivityPanel') || '';
+  assert.match(panel, /const ceilingLine = ChatState\.toolCeilingRunLine\(run\);\n      if \(ceilingLine\) rows\.push\(el\('p', \{ class: 'egd-codex-run-ceiling', data: \{ testid: 'chat-run-tool-ceiling'/);
+  assert.match(panel, /const ceiling = ChatState\.toolCeilingActivityView\(activity\);/);
+  assert.match(panel, /for \(const note of ceiling\.notes\) row\.appendChild/);
+  // Styles: approved tokens only, light and dark.
+  const block = surfaceCss.slice(surfaceCss.indexOf('/* AGENT-04 tool section of the Agent form'), surfaceCss.indexOf('/* DSN-01: rules a token cannot carry.'));
+  assert.ok(block.length > 2000, 'new styles found');
+  assert.doesNotMatch(block.replace(/transparent/g, ''), /#[0-9a-f]{3,8}\b|rgba?\(/i, 'tokens only');
+  for (const selector of ['button.egd-codex-message-avatar', 'button.egd-codex-working-bubble', '.egd-codex-agent-peek', '.egd-settings-readiness', '.egd-settings-switch', '.egd-codex-run-ceiling']) {
+    assert.ok(block.includes(`\n${selector} {`), `${selector} is styled`);
   }
 });

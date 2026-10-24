@@ -238,6 +238,69 @@
     return el('span', { class: `egd-profile-avatar egd-profile-avatar-tone-${view.tone}${className ? ` ${className}` : ''}`, 'aria-hidden': 'true' }, view.text);
   }
 
+  // Chat author face: a saved emoji/initial on its palette tone, else the
+  // name's first letter on the plain chat avatar colour.
+  function codexMessageAvatarFace(avatar, name) {
+    const view = ChatState.profileAvatarView(avatar, name);
+    return { text: view.saved ? view.text : String(name || '?').slice(0, 1), toneClass: view.saved ? ` egd-profile-avatar-tone-${view.tone}` : '' };
+  }
+
+  // CHAT-07: the small profile peek an Agent answer's face or name opens
+  // (view from ChatState.agentPeekView). Esc closes it; onClose returns focus.
+  function codexAgentPeekPanel(view, { left = 12, top = 12, onClose, onOpenSettings, onOpenActivity } = {}) {
+    const face = codexMessageAvatarFace(view.avatar, view.name);
+    const row = (label, value, testid) => el('div', { class: 'egd-codex-agent-peek-row', data: { testid } }, el('dt', {}, label), el('dd', {}, value));
+    const expertise = view.expertise.length > 3 ? `${view.expertise.slice(0, 3).join(' · ')} 외 ${view.expertise.length - 3}개`
+      : view.expertise.length ? view.expertise.join(' · ') : view.expertiseEmpty;
+    const panel = el('div', {
+      class: 'egd-codex-agent-peek', role: 'dialog', 'aria-label': `${view.name} 프로필`, 'aria-busy': view.loading ? 'true' : null,
+      data: { testid: 'chat-agent-peek', profileId: view.profileId || '' },
+      style: { left: `${Math.round(left)}px`, top: `${Math.round(top)}px` },
+      onclick: (ev) => ev.stopPropagation(),
+    },
+    el('div', { class: 'egd-codex-agent-peek-head' },
+      el('span', { class: `egd-codex-message-avatar egd-codex-agent-peek-avatar${face.toneClass}`, 'aria-hidden': 'true' }, face.text),
+      el('div', { class: 'egd-codex-agent-peek-identity' },
+        el('div', { class: 'egd-codex-agent-peek-name' }, view.name),
+        el('div', { class: 'egd-codex-agent-peek-role' }, view.role))),
+    el('dl', { class: 'egd-codex-agent-peek-list' },
+      row('말투', view.tone, 'chat-agent-peek-tone'),
+      row('맡길 일', expertise, 'chat-agent-peek-expertise'),
+      row('모델', view.model, 'chat-agent-peek-model'),
+      row('쓸 수 있는 도구', view.tools, 'chat-agent-peek-tools'),
+      row('이 대화 Board', view.board, 'chat-agent-peek-board')),
+    view.note ? el('p', { class: 'egd-codex-agent-peek-note' }, view.note) : null,
+    el('div', { class: 'egd-codex-agent-peek-actions' },
+      el('button', { class: 'egd-codex-chip', type: 'button', data: { testid: 'chat-agent-peek-settings', focusKey: 'agent-peek-settings' },
+        onclick: () => onOpenSettings?.() }, 'Agent 설정 열기'),
+      el('button', { class: 'egd-codex-chip egd-codex-chip-subtle', type: 'button', data: { testid: 'chat-agent-peek-activity', focusKey: 'agent-peek-activity' },
+        onclick: () => onOpenActivity?.() }, '활동 기록 보기')));
+    panel.addEventListener('keydown', (ev) => {
+      if (ev.key !== 'Escape') return;
+      ev.preventDefault();
+      ev.stopPropagation();
+      onClose?.();
+    });
+    return panel;
+  }
+
+  // AGENT-05: '[···] Agent 작업 중' beside the Agent's face at the end of the
+  // conversation (view from ChatState.agentWorkingView). Pressing it opens the
+  // activity record; it never shows thought text.
+  function codexAgentWorkingRow(working, { runId = '', name = 'Codex', avatar = null, onOpen } = {}) {
+    const face = codexMessageAvatarFace(avatar, name);
+    return el('div', { class: 'egd-codex-working-row', data: { testid: 'chat-agent-working', runId, state: working.state } },
+      el('span', { class: `egd-codex-message-avatar${face.toneClass}`, 'aria-hidden': 'true' }, face.text),
+      el('button', {
+        class: 'egd-codex-working-bubble', type: 'button', title: '활동 기록 열기',
+        'aria-label': `${name} · ${working.text} · 활동 기록 열기`,
+        data: { testid: 'chat-agent-working-open', focusKey: `agent-working-${runId}` },
+        onclick: (ev) => { ev.stopPropagation(); onOpen?.(); },
+      },
+      el('span', { class: 'egd-codex-typing-dots', 'aria-hidden': 'true' }, el('span'), el('span'), el('span')),
+      el('span', { class: 'egd-codex-working-text' }, working.text)));
+  }
+
   // ChatGPT usage in the resource-monitor ring shape. Nothing reported shows a
   // grey '확인 안 됨', never an invented 0%; the reset time is in the title.
   function codexUsageRing(auth, className = '') {
@@ -535,6 +598,8 @@
       engineConfiguration: null,
       recentEngineId: ChatState.DEFAULT_CHAT_ENGINE_ID,
       engineMenu: null,
+      // CHAT-07: the open profile peek { threadId, messageId, left, top, returnFocusKey }.
+      agentPeek: null,
       // /v1/state capabilities.chat ('stateless', 'fork') and inheritedMcp;
       // null until a bridge reports them (older bridges never do).
       chatCapabilities: null,
@@ -1458,6 +1523,9 @@
     if (state.codex.chatProtocol.unobservedPreviousRun) rows.push(el('p', { role: 'status', data: { testid: 'chat-account-reset-status' } }, '이전 Codex 연결의 실행 종료는 확인되지 않았습니다. 로그아웃은 중지 확인이 아닙니다. 이전 계정에 다시 연결해 상태를 확인하세요.'));
     for (const run of codexRuns(thread)) {
       rows.push(el('h4', { data: { runId: run.runId } }, codexRunLabel(run)));
+      // AGENT-04: the ceiling this run was started under, named under its head.
+      const ceilingLine = ChatState.toolCeilingRunLine(run);
+      if (ceilingLine) rows.push(el('p', { class: 'egd-codex-run-ceiling', data: { testid: 'chat-run-tool-ceiling', runId: run.runId } }, ceilingLine));
       for (const entry of run.contextEvents || []) {
         const labels = { 'context.read.started': '자료 읽기 시작', 'context.read.completed': '요청 범위의 자료 읽기 완료',
           'context.read.failed': '자료 읽기 실패', 'reader.started': 'Reader 처리 시작', 'reader.completed': 'Reader 처리 완료', 'reader.failed': 'Reader 처리 실패' };
@@ -1482,11 +1550,17 @@
       for (const activity of run.activities || []) {
         // Agent-to-agent records are shown only as the sub-agent rows above.
         if (activity.kind === 'collabAgentToolCall' || activity.kind === 'subAgentActivity') continue;
-        const row = el('article', { class: 'egd-codex-activity-row', data: { activityId: activity.id, status: activity.status } },
-          el('strong', {}, activity.title || activity.kind || '활동'),
-          el('span', {}, ({ inProgress: '진행 중', completed: '완료', failed: '실패', declined: '거절됨' })[activity.status] || activity.status || ''),
+        // AGENT-04: a refusal or notice from the Agent's tool ceiling, in words.
+        const ceiling = ChatState.toolCeilingActivityView(activity);
+        const row = el('article', { class: `egd-codex-activity-row${ceiling ? ' egd-codex-activity-row-ceiling' : ''}`,
+          data: { activityId: activity.id, status: activity.status, ...(ceiling ? { kind: 'toolCeiling' } : {}) } },
+          el('strong', {}, activity.title || (ceiling ? '도구 제한' : activity.kind) || '활동'),
+          el('span', {}, ceiling ? ceiling.statusLabel : ({ inProgress: '진행 중', completed: '완료', failed: '실패', declined: '거절됨' })[activity.status] || activity.status || ''),
           typeof activity.detail === 'string' ? el('pre', {}, activity.detail) : null);
-        if (activity.detail && typeof activity.detail === 'object') {
+        if (ceiling) {
+          if (ceiling.command) row.appendChild(el('pre', {}, ceiling.command));
+          for (const note of ceiling.notes) row.appendChild(el('p', { class: 'egd-codex-activity-note', data: { testid: 'chat-ceiling-note' } }, note));
+        } else if (activity.detail && typeof activity.detail === 'object') {
           for (const key of ['text', 'command', 'cwd', 'exitCode', 'durationMs', 'server', 'tool']) {
             const value = activity.detail[key];
             if (value !== undefined && value !== null && value !== '') row.appendChild(el('pre', {}, `${key}: ${value}`));
@@ -5496,6 +5570,7 @@
       codexBridge.closeThreadMenu();
       codexBridge.closeEngineMenu();
       codexBridge.closeMessageMenu?.();
+      codexBridge.closeAgentPeek?.();
     };
     const onMessageScrollGesture = (ev) => {
       const target = ev.target;
@@ -5517,6 +5592,7 @@
       if (target.closest('.egd-codex-thread-menu-trigger')) return;
       if (target.closest('.egd-codex-message-menu-trigger')) return;
       if (target.closest('.egd-codex-engine-panel, .egd-codex-engine-chip')) return;
+      if (target.closest('.egd-codex-agent-peek, .egd-codex-agent-peek-trigger')) return;
       closeFloatingMenus();
     };
     const onViewportMutate = (ev) => {
@@ -5898,6 +5974,33 @@
         effortChoices.length || modelView.listed ? el('p', { class: 'egd-codex-engine-hint' }, '다음에 보내는 메시지부터 적용됩니다.') : null);
       };
 
+      // CHAT-07: the profile peek for one Agent answer. The room Agent's saved
+      // settings load when it opens; the model line is the engine chip's text.
+      const renderAgentPeek = (thread, message) => {
+        const peek = codex.agentPeek || {};
+        const profile = thread.profileEnabled === true ? codexThreadAgentProfile(thread) : null;
+        const entry = profile?.server === true ? codexBridge.agentProfileDetail(profile.id, profile.revision) : null;
+        const view = ChatState.agentPeekView({
+          author: codexMessageAuthorLabel(message), authorAvatar: message.authorAvatar || null, profile,
+          detail: entry?.detail || null, detailStatus: entry?.status || 'idle',
+          modelText: ChatState.chatEngineChipView(thread, engineContext).text,
+          boardTitle: state.agenda?.activeTitle || '', threadType: thread.type,
+        });
+        const returnFocus = () => {
+          const key = peek.returnFocusKey || `agent-peek-face-${message.id}`;
+          [...body.querySelectorAll('[data-focus-key]')].find((node) => node.dataset.focusKey === key)?.focus({ preventScroll: true });
+        };
+        return codexAgentPeekPanel(view, {
+          left: peek.left ?? 12, top: peek.top ?? 12,
+          onClose: () => { codexBridge.closeAgentPeek(); returnFocus(); },
+          onOpenSettings: () => {
+            codexBridge.closeAgentPeek();
+            spawnSettingsCard({ tab: 'agents', ...(view.profileId ? { profileId: view.profileId } : {}) });
+          },
+          onOpenActivity: () => { codexBridge.closeAgentPeek(); codexBridge.openActivity(thread.id); },
+        });
+      };
+
       const renderThreadAgentRow = (thread, compact = false) => {
         const runtime = codexThreadRuntimeConfig(thread);
         return el('div', { class: `egd-codex-thread-agent-row${compact ? ' egd-codex-thread-agent-row-compact' : ''}` },
@@ -6260,6 +6363,24 @@
           // Agent answers carry the Profile avatar captured at send; older answers
           // borrow the room's current Agent avatar only when the name still matches.
           const roomProfile = activeThread.profileEnabled === true ? codexThreadAgentProfile(activeThread) : null;
+          // AGENT-05: while the run is busy, one '[···] Agent 작업 중' bubble closes the
+          // conversation; it replaces the dots inside the streaming answer.
+          const workingRun = codexCurrentRun(activeThread);
+          const working = ChatState.nativeBindingHeld(activeThread) ? null : ChatState.agentWorkingView(workingRun, { connected: codex.connected });
+          // CHAT-07: an answer's face and name open the profile peek; focus moves into it.
+          const peekOpenFor = (message) => codex.agentPeek?.threadId === activeThread.id && codex.agentPeek.messageId === message.id;
+          const togglePeek = (message, ev) => {
+            ev.stopPropagation();
+            const opening = !peekOpenFor(message);
+            codexBridge.toggleAgentPeek(activeThread.id, message.id, ev.currentTarget);
+            if (opening) body.querySelector('.egd-codex-agent-peek [data-focus-key]')?.focus({ preventScroll: true });
+          };
+          const peekTriggerProps = (message, author, className, focusKey) => ({
+            class: `${className} egd-codex-agent-peek-trigger`, type: 'button',
+            'aria-label': `${author} 프로필 보기`, 'aria-haspopup': 'dialog', 'aria-expanded': peekOpenFor(message) ? 'true' : 'false',
+            data: { testid: 'chat-agent-peek-open', focusKey, messageId: message.id || '' },
+            onclick: (ev) => togglePeek(message, ev),
+          });
           // CHAT-06 Await: each plan card sits under the Agent answer that proposed it.
           const planPlacement = ChatState.planProposalPlacement(ChatState.planProposalsForThread(codex.planProposals, activeThread), activeThread.messages);
           const appendPlanCards = (entries) => {
@@ -6327,7 +6448,8 @@
             if (message.role === 'user' && ['submitting', 'unconfirmed', 'failed'].includes(message.status)) {
               bubble.appendChild(el('span', { class: 'egd-codex-message-time', role: 'status' }, ({ submitting: '보내는 중', unconfirmed: '접수 미확인', failed: '전송 거절됨' })[message.status]));
             }
-            if (message.status === 'streaming' && message.role === 'assistant' && activeThread.profileEnabled === true && !ChatState.nativeBindingHeld(activeThread)) {
+            if (message.status === 'streaming' && message.role === 'assistant' && activeThread.profileEnabled === true && !ChatState.nativeBindingHeld(activeThread)
+              && !(working && message.runId && message.runId === workingRun?.runId)) {
               bubble.appendChild(el('div', {
                 class: 'egd-codex-streaming',
                 role: 'status',
@@ -6335,7 +6457,9 @@
               }, el('div', { class: 'egd-codex-typing-dots', 'aria-hidden': 'true' }, el('span'), el('span'), el('span'))));
             }
             const roleLabel = !groupedWithPrevious && message.role !== 'user'
-              ? el('div', { class: 'egd-codex-message-role' }, author)
+              ? el('div', { class: 'egd-codex-message-role' }, message.role === 'assistant'
+                ? el('button', peekTriggerProps(message, author, 'egd-codex-message-role-name', `agent-peek-name-${message.id}`), author)
+                : author)
               : null;
             const meta = codexMessageTimeMeta(message, activeThread);
             // The message menu sits on the open side of the bubble.
@@ -6350,12 +6474,11 @@
             const authorAvatar = message.role === 'assistant'
               ? message.authorAvatar || (roomProfile?.avatar && roomProfile.name === author ? roomProfile.avatar : null) : null;
             const avatarView = ChatState.profileAvatarView(authorAvatar, author);
-            const avatar = message.role !== 'user'
-              ? el('div', {
-                  class: `egd-codex-message-avatar${groupedWithPrevious ? ' egd-codex-message-avatar-spacer' : ''}${avatarView.saved ? ` egd-profile-avatar-tone-${avatarView.tone}` : ''}`,
-                  'aria-hidden': 'true',
-                }, groupedWithPrevious ? '' : avatarView.saved ? avatarView.text : author.slice(0, 1))
-              : null;
+            const avatarClass = `egd-codex-message-avatar${groupedWithPrevious ? ' egd-codex-message-avatar-spacer' : ''}${avatarView.saved ? ` egd-profile-avatar-tone-${avatarView.tone}` : ''}`;
+            const avatarText = groupedWithPrevious ? '' : avatarView.saved ? avatarView.text : author.slice(0, 1);
+            const avatar = message.role === 'assistant' && !groupedWithPrevious
+              ? el('button', peekTriggerProps(message, author, avatarClass, `agent-peek-face-${message.id}`), avatarText)
+              : message.role !== 'user' ? el('div', { class: avatarClass, 'aria-hidden': 'true' }, avatarText) : null;
             messages.appendChild(el('div', {
               data: { messageId: message.id, runId: message.runId || '', testid: 'chat-message', role: message.role },
               class: [
@@ -6368,8 +6491,19 @@
           });
           appendPlanCards(planPlacement.trailing);
           appendControlNotices();
+          if (working) {
+            messages.appendChild(codexAgentWorkingRow(working, {
+              runId: workingRun.runId || '', name: workingRun.authorName || roomProfile?.name || 'Codex',
+              avatar: workingRun.authorAvatar || roomProfile?.avatar || null,
+              onOpen: () => codexBridge.openActivity(activeThread.id),
+            }));
+          }
         }
         conversation.appendChild(messages);
+        if (codex.agentPeek?.threadId === activeThread.id) {
+          const peekMessage = activeThread.messages.find((message) => message.id === codex.agentPeek.messageId && message.role === 'assistant');
+          if (peekMessage) conversation.appendChild(renderAgentPeek(activeThread, peekMessage));
+        }
         const menuMessage = codex.messageMenu?.threadId === activeThread.id
           ? activeThread.messages.find((message) => message.id === codex.messageMenu.messageId && ChatState.chatMessageForkPoint(activeThread, message)) : null;
         if (menuMessage) conversation.appendChild(renderMessageMenu(activeThread, menuMessage));
@@ -6980,6 +7114,8 @@
       if (state.codex.engineMenu && !getCodexThreadById(state.codex, state.codex.engineMenu.threadId)) state.codex.engineMenu = null;
       if (state.codex.messageMenu && !getCodexThreadById(state.codex, state.codex.messageMenu.threadId)?.messages
         ?.some((message) => message.id === state.codex.messageMenu.messageId)) state.codex.messageMenu = null;
+      if (state.codex.agentPeek && !getCodexThreadById(state.codex, state.codex.agentPeek.threadId)?.messages
+        ?.some((message) => message.id === state.codex.agentPeek.messageId)) state.codex.agentPeek = null;
       const active = getActiveCodexThread(state.codex);
       state.codex.conversationId = active?.conversationId || null;
       state.codex.draft = getCodexThreadDraft(state.codex, active?.id || null);
@@ -7159,6 +7295,8 @@
     // One catalog read at a time; a bridge without the profile store leaves
     // rooms on the built-in definitions instead of inventing Agents.
     let profileCatalogLoad = null;
+    // CHAT-07 peek: GET /profiles/:id per Agent, keyed by the active revision asked for.
+    const agentProfileDetails = new Map();
     const loadProfileCatalog = () => {
       if (profileCatalogLoad) return profileCatalogLoad;
       if (codexProfileCatalog.status !== 'ready') codexProfileCatalog = { status: 'loading', profiles: [] };
@@ -8125,6 +8263,7 @@
           state.codex.memberMenu = null;
           state.codex.engineMenu = null;
           state.codex.messageMenu = null;
+          state.codex.agentPeek = null;
         }
         emit();
       },
@@ -8134,6 +8273,7 @@
         state.codex.memberMenu = null;
         state.codex.engineMenu = null;
         state.codex.messageMenu = null;
+        state.codex.agentPeek = null;
         emit();
       },
       toggleThreadMenu(threadId, anchorEl = null) {
@@ -8151,6 +8291,7 @@
         if (!alreadyOpen) {
           state.codex.memberMenu = null;
           state.codex.messageMenu = null;
+          state.codex.agentPeek = null;
         }
         emit();
       },
@@ -8191,6 +8332,7 @@
           state.codex.threadMenu = null;
           state.codex.memberMenu = null;
           state.codex.messageMenu = null;
+          state.codex.agentPeek = null;
         }
         emit();
       },
@@ -8308,6 +8450,7 @@
           state.codex.threadMenu = null;
           state.codex.memberMenu = null;
           state.codex.engineMenu = null;
+          state.codex.agentPeek = null;
         }
         emit();
       },
@@ -8316,6 +8459,44 @@
         state.codex.messageMenu = null;
         emit();
       },
+      // CHAT-07: one peek at a time, opened beside the face or name that was pressed.
+      toggleAgentPeek(threadId, messageId, anchorEl = null) {
+        if (!threadId || !messageId) return;
+        if (state.codex.agentPeek?.threadId === threadId && state.codex.agentPeek.messageId === messageId) {
+          state.codex.agentPeek = null;
+        } else {
+          const rect = anchorEl?.getBoundingClientRect?.();
+          // Left-aligned with the face: the anchor's right edge is pushed out by the panel width.
+          const placement = rect ? resolveFloatingMenuPlacement({ top: rect.top, bottom: rect.bottom, right: rect.left + 288 }, 288, 300) : { left: 12, top: 12 };
+          state.codex.agentPeek = { threadId, messageId, ...placement, returnFocusKey: anchorEl?.dataset?.focusKey || null };
+          state.codex.threadMenu = null;
+          state.codex.memberMenu = null;
+          state.codex.engineMenu = null;
+          state.codex.messageMenu = null;
+          // A failed read is tried again each time the peek opens.
+          for (const [profileId, entry] of agentProfileDetails) if (entry.status === 'error') agentProfileDetails.delete(profileId);
+        }
+        emit();
+      },
+      closeAgentPeek() {
+        if (!state.codex.agentPeek) return;
+        state.codex.agentPeek = null;
+        emit();
+      },
+      // The room Agent's saved settings for the peek, read once per active
+      // revision; the read finishing redraws. Returns { status, detail }.
+      agentProfileDetail(profileId, revision = null) {
+        if (!ChatState.isProfileId(profileId)) return null;
+        const cached = agentProfileDetails.get(profileId);
+        if (cached && cached.revision === revision) return cached;
+        const entry = { status: 'loading', detail: cached?.detail || null, revision };
+        agentProfileDetails.set(profileId, entry);
+        fetchJson(`/profiles/${encodeURIComponent(profileId)}`)
+          .then((detail) => { entry.status = 'ready'; entry.detail = detail; })
+          .catch(() => { entry.status = 'error'; })
+          .finally(() => { if (agentProfileDetails.get(profileId) === entry) emit(); });
+        return entry;
+      },
       selectThread(threadId, options = {}) {
         if (!threadId) return;
         if (!setActiveThread(threadId)) return;
@@ -8323,6 +8504,7 @@
         state.codex.threadMenu = null;
         state.codex.engineMenu = null;
         state.codex.messageMenu = null;
+        state.codex.agentPeek = null;
         const openConversation = options.openConversation !== false;
         if (openConversation) {
           state.codex.hudView = 'conversation';
@@ -11602,6 +11784,7 @@
     const existing = options.openMode === 'new' ? null : focusOpenSourceCard(sourceRef);
     if (existing) {
       if (options.tab) existing._settingsShowTab?.(options.tab);
+      if (options.profileId) existing._settingsOpenProfile?.(options.profileId);
       return existing;
     }
 
@@ -11932,10 +12115,32 @@
       const editable = ['draft', 'active', 'disabled'].includes(detail.lifecycle);
       const pendingDraft = editable && (detail.hasDraft || detail.lifecycle !== 'active');
       const tone = ChatState.PROFILE_TONE_OPTIONS.find((option) => option.value === body.personality?.tone)?.label || '담백';
+      // AGENT-02 사용 준비: the newest saved version (what 사용 시작 turns on) checked
+      // field by field. It never blocks 사용 시작; the missing count sits beside it.
+      const readiness = editable ? ChatState.profileReadinessView(detail.head?.body || body) : null;
+      const readinessCountId = `${id}-agent-readiness-count`;
+      const readinessPanel = readiness ? el('section', {
+        class: `egd-settings-readiness${readiness.ready ? ' egd-settings-readiness-ready' : ''}`, 'aria-label': '사용 준비',
+        data: { testid: 'settings-agent-readiness', missing: String(readiness.missing) },
+      },
+      el('div', { class: 'egd-settings-readiness-title' }, readiness.title),
+      el('ul', { class: 'egd-settings-readiness-list' }, ...readiness.items.map((item) => el('li', {
+        class: `egd-settings-readiness-item egd-settings-readiness-item-${item.done ? 'done' : 'missing'}`,
+        data: { testid: 'settings-agent-readiness-item', field: item.key, done: String(item.done) },
+      },
+      el('span', { class: 'egd-settings-readiness-mark', 'aria-hidden': 'true' }),
+      item.done ? el('span', { class: 'egd-settings-readiness-label' }, item.label)
+        : el('button', { class: 'egd-settings-link egd-settings-readiness-label', type: 'button', 'aria-label': `${item.label} 채우러 가기`,
+          disabled: agents.busy ? 'true' : null, onclick: () => { agents.focusField = item.key; startEdit(detail); } }, item.label),
+      el('span', { class: 'egd-settings-readiness-state' }, item.state)))),
+      el('div', { class: 'egd-settings-readiness-tools' }, `쓸 수 있는 도구: ${readiness.tools}`)) : null;
       const actions = el('div', { class: 'egd-settings-detail-actions' },
         editable ? el('button', { class: 'egd-settings-btn', disabled: agents.busy ? 'true' : null, onclick: () => startEdit(detail) }, '편집') : null,
         pendingDraft ? el('button', { class: 'egd-settings-btn egd-settings-btn-primary', data: { testid: 'settings-agent-activate' }, disabled: agents.busy ? 'true' : null,
+          'aria-describedby': readiness?.countText ? readinessCountId : null,
           onclick: () => activateHead(detail) }, `사용 시작 (버전 ${detail.headRevision})`) : null,
+        pendingDraft && readiness?.countText ? el('span', { class: 'egd-settings-readiness-count', id: readinessCountId,
+          data: { testid: 'settings-agent-readiness-count' } }, readiness.countText) : null,
         detail.lifecycle === 'active' ? el('button', { class: 'egd-settings-btn', disabled: agents.busy ? 'true' : null, onclick: () => changeLifecycle(detail, 'disable', body.name) }, '사용 중지') : null,
         editable ? el('button', { class: 'egd-settings-btn', disabled: agents.busy ? 'true' : null, onclick: () => changeLifecycle(detail, 'archive', body.name) }, '보관') : null,
         detail.lifecycle === 'archived' ? el('button', { class: 'egd-settings-btn', disabled: agents.busy ? 'true' : null, onclick: () => changeLifecycle(detail, 'restore', body.name) }, '복원') : null,
@@ -11949,6 +12154,7 @@
             el('div', { class: 'egd-settings-agent-desc' }, body.role || '역할 미설정'),
             el('div', { class: 'egd-settings-agent-status' }, status.detail ? `${status.label} · ${status.detail}` : status.label))),
         noticeLine(),
+        readinessPanel,
         detail.hasDraft && detail.activeRevision ? el('div', { class: 'egd-settings-callout' },
           `저장했지만 아직 쓰지 않은 초안이 있습니다 (버전 ${detail.headRevision}).`,
           el('button', { class: 'egd-settings-link', onclick: () => showDiff(detail, detail.activeRevision, detail.headRevision) }, '사용 중인 버전과 차이 보기')) : null,
@@ -11960,7 +12166,11 @@
           detailRow('말투 메모', body.personality?.speechNotes || '없음'),
           detailRow('맡길 일', (body.expertise || []).length ? el('ul', { class: 'egd-settings-plain-list' }, ...body.expertise.map((item) => el('li', {}, item))) : '없음'),
           detailRow('지침', body.instructions ? el('div', { class: 'egd-settings-instructions' }, body.instructions) : '없음'),
-          detailRow('선호 도구 (표시용)', chipRow(body.toolPreferences || [], '없음'))));
+          detailRow('선호 도구 (표시용)', chipRow(body.toolPreferences || [], '없음')),
+          detailRow('쓸 수 있는 도구', ChatState.publicToolCeiling(body.toolCeiling)
+            ? el('span', { data: { testid: 'settings-agent-ceiling-summary' } }, ChatState.toolCeilingSummary(body.toolCeiling),
+              ...ChatState.toolCeilingNotes(body.toolCeiling).map((note) => el('span', { class: 'egd-settings-ceiling-note' }, note)))
+            : el('span', { data: { testid: 'settings-agent-ceiling-summary' } }, ChatState.TOOL_CEILING_OFF_TEXT))));
       if (agents.diff) {
         section.appendChild(el('div', { class: 'egd-settings-diff', data: { testid: 'settings-agent-diff' } },
           el('div', { class: 'egd-settings-subtitle' }, `버전 ${agents.diff.from} → 버전 ${agents.diff.to} 바뀐 점`,
@@ -12062,6 +12272,53 @@
       const nameInput = textInput('name', ChatState.PROFILE_FORM_LIMITS.name, '예: 자료 정리 담당');
       nameInput.addEventListener('input', syncPreview);
       const limits = ChatState.PROFILE_FORM_LIMITS;
+      // AGENT-04: '이 Agent가 쓸 수 있는 도구'. Off saves toolCeiling null (today's
+      // behavior); on saves the five picks. '묻지 않고 실행' is shown as pending.
+      const ceilingOn = form.toolCeilingOn === true;
+      const ceilingPick = (axis, value) => {
+        form.toolCeiling = { ...form.toolCeiling, [axis]: value };
+        agents.focusField = `ceiling-${axis}`;
+        renderAgentsTab();
+      };
+      const ceilingAxisRow = ({ axis, label, options }) => el('div', { class: 'egd-settings-ceiling-row', data: { axis } },
+        el('span', { class: 'egd-settings-ceiling-axis', id: fieldId(`ceiling-${axis}-label`) }, label),
+        el('div', { class: 'egd-settings-segmented', role: 'group', 'aria-labelledby': fieldId(`ceiling-${axis}-label`), id: fieldId(`ceiling-${axis}`), tabindex: '-1' },
+          ...options.map((option) => {
+            const active = form.toolCeiling[axis] === option.value;
+            return el('button', {
+              class: `egd-settings-segment${active ? ' egd-settings-segment-active' : ''}${option.pending ? ' egd-settings-segment-pending' : ''}`,
+              type: 'button', 'aria-pressed': String(active), disabled: option.pending ? 'true' : null,
+              title: option.pending ? '준비 중입니다. 지금은 실행 전에 묻습니다.' : null,
+              data: { testid: 'settings-agent-ceiling-option', axis, value: option.value },
+              onclick: () => ceilingPick(axis, option.value),
+            }, option.pending ? `${option.label} · 준비 중` : option.label);
+          })));
+      const ceilingNotes = ceilingOn ? ChatState.toolCeilingNotes(form.toolCeiling) : [];
+      const presetId = ceilingOn ? ChatState.toolCeilingPresetId(form.toolCeiling) : null;
+      const ceilingSection = el('div', {
+        class: `egd-settings-field egd-settings-ceiling${errorFor('toolCeiling') ? ' egd-settings-field-invalid' : ''}`,
+        role: 'group', 'aria-labelledby': fieldId('ceiling-title'), data: { field: 'toolCeiling', testid: 'settings-agent-ceiling', on: String(ceilingOn) },
+      },
+      el('div', { class: 'egd-settings-form-label', id: fieldId('ceiling-title') }, '이 Agent가 쓸 수 있는 도구'),
+      el('button', {
+        class: `egd-settings-switch${ceilingOn ? ' egd-settings-switch-on' : ''}`, type: 'button', role: 'switch',
+        'aria-checked': String(ceilingOn), id: fieldId('toolCeiling'), data: { testid: 'settings-agent-ceiling-switch' },
+        onclick: () => { form.toolCeilingOn = !ceilingOn; agents.focusField = 'toolCeiling'; renderAgentsTab(); },
+      }, el('span', { class: 'egd-settings-switch-track', 'aria-hidden': 'true' }, el('span', { class: 'egd-settings-switch-thumb' })),
+      el('span', { class: 'egd-settings-switch-label' }, '도구 제한 사용')),
+      ceilingOn
+        ? el('div', { class: 'egd-settings-ceiling-body' },
+          el('div', { class: 'egd-settings-ceiling-presets' },
+            el('span', { class: 'egd-settings-ceiling-axis' }, '빠르게 고르기'),
+            ...ChatState.PROFILE_TOOL_CEILING_PRESETS.map((preset) => el('button', {
+              class: `egd-settings-btn${presetId === preset.id ? ' egd-settings-btn-selected' : ''}`, type: 'button',
+              'aria-pressed': String(presetId === preset.id), data: { testid: 'settings-agent-ceiling-preset', preset: preset.id },
+              onclick: () => { form.toolCeiling = { ...preset.ceiling }; agents.focusField = 'toolCeiling'; renderAgentsTab(); },
+            }, preset.label))),
+          ...ChatState.PROFILE_TOOL_CEILING_AXES.map(ceilingAxisRow),
+          ...ceilingNotes.map((note) => el('div', { class: 'egd-settings-ceiling-note', role: 'note', data: { testid: 'settings-agent-ceiling-note' } }, note)))
+        : el('div', { class: 'egd-settings-form-hint', data: { testid: 'settings-agent-ceiling-off' } }, ChatState.TOOL_CEILING_OFF_TEXT),
+      errorFor('toolCeiling') ? el('div', { class: 'egd-settings-field-error', role: 'alert' }, errorFor('toolCeiling').message) : null);
       const section = el('section', { class: 'egd-settings-section egd-settings-agent-form', data: { testid: 'settings-agent-form' } },
         el('button', { class: 'egd-settings-link', onclick: () => {
           if (agents.profileId) void openProfile(agents.profileId); else { agents.mode = 'list'; renderAgentsTab(); }
@@ -12085,7 +12342,8 @@
         field('expertise', `맡길 일 (최대 ${limits.expertise}개)`, chipList('expertise', limits.expertise, limits.expertiseLength, '예: 주간 보고 초안 쓰기')),
         field('instructions', '지침', textArea('instructions', limits.instructions, '이 Agent가 늘 지켜야 할 내용을 적어 주세요.', 6)),
         field('toolPreferences', '선호 도구 (표시용)', chipList('toolPreferences', limits.toolPreferences, limits.toolLength, '예: browser'),
-          '표시용입니다. 실제로 쓸 수 있는 도구는 바뀌지 않습니다.'),
+          '표시용입니다. 실제로 쓸 수 있는 도구는 아래에서 정합니다.'),
+        ceilingSection,
         el('div', { class: 'egd-settings-form-actions' },
           el('button', { class: 'egd-settings-btn', onclick: () => {
             if (agents.profileId) void openProfile(agents.profileId); else { agents.mode = 'list'; agents.notice = null; renderAgentsTab(); }
@@ -12128,6 +12386,14 @@
       activeTab = target.id;
       renderTabs();
       target.render();
+    };
+    // CHAT-07 [Agent 설정 열기]: the Agent's detail; an open edit form is never discarded.
+    card._settingsOpenProfile = (profileId) => {
+      if (!ChatState.isProfileId(profileId)) return;
+      activeTab = 'agents';
+      renderTabs();
+      if (agents.mode === 'edit') { renderAgentsTab(); return; }
+      void openProfile(profileId);
     };
 
     // Live account and catalog changes re-render the list views only; an open
@@ -12187,6 +12453,7 @@
 
     renderTabs();
     (activeTab === 'agents' ? renderAgentsTab : renderAccountTab)();
+    if (activeTab === 'agents' && ChatState.isProfileId(options.profileId)) void openProfile(options.profileId);
     ensureCodexSubscription();
 
     // Drag support

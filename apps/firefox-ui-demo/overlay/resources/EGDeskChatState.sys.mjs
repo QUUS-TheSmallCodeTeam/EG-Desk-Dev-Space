@@ -480,9 +480,18 @@ function ensureRun(state, identity) {
   if (request) Object.assign(request, { conversationId, runId, answerId: run.answerId, status: 'accepted' });
   return run;
 }
+// AGENT-04: the ceiling a run was started under (send response, run.started,
+// /v1/state runs[]). Only a well-formed ceiling is kept; it is never cleared by
+// a later record that omits it.
+function recordRunToolCeiling(run, value) {
+  const ceiling = run ? publicToolCeiling(value) : null;
+  if (ceiling) run.toolCeiling = ceiling;
+}
 export function acceptChatRequest(state, response, requestId) {
   if (!response?.accepted) return null;
-  return ensureRun(state, { ...response, requestId: response.requestId || requestId });
+  const run = ensureRun(state, { ...response, requestId: response.requestId || requestId });
+  recordRunToolCeiling(run, response.toolCeiling);
+  return run;
 }
 function upsert(items, item, key = 'id') {
   const index = items.findIndex(old => old[key] === item[key]);
@@ -508,6 +517,7 @@ export function reduceChatEvent(state, event, engineIds = [DEFAULT_CHAT_ENGINE_I
   run.streamId = event.streamId;
   run.seq = Math.max(run.seq || -1, event.seq);
   const details = event.details || {};
+  if (event.event === 'run.started') recordRunToolCeiling(run, details.toolCeiling);
   if (event.event.startsWith('message.')) {
     const id = details.messageId || event.itemId;
     if (!id) return run;
@@ -630,6 +640,7 @@ export function mergeChatSnapshot(state, snapshot, clientThreadId) {
         ? copy(values) : mergeItems(run[key], values, preserve);
     }
     run.messages = run.messages.map(message => ({ ...message, content: message.content ?? message.text ?? '', status: message.status === 'completed' ? 'complete' : message.status, role: message.role || 'assistant', runId: run.runId, answerId: run.answerId }));
+    recordRunToolCeiling(run, incoming.toolCeiling);
     if (!preserve) {
       const localInputs = run.pendingUserInputs || [];
       for (const key of ['status', 'stopRequested', 'error', 'summary', 'plan', 'pendingApprovals', 'pendingUserInputs', 'subAgents', 'truncated', 'historyComplete', 'contextCaptures', 'contextEvents', 'briefing']) if (key in incoming) run[key] = copy(incoming[key]);
@@ -911,6 +922,93 @@ export function profileStatusView(profile) {
   return { label, detail, lifecycle: lifecycle || 'unknown', usable: profileRunnable(profile), example: profile?.origin === 'template' };
 }
 
+// AGENT-04 tool ceiling (helper body.toolCeiling): the most an Agent may do per
+// tool kind, five axes in the store's order, narrowest value first. null keeps
+// today's behavior on every axis; `open` is that behavior for one axis. A
+// `limit` phrase exists only for values that narrow something. Terminal
+// 'allow' still runs as 'ask' (no automatic approval yet), so it is pending.
+export const PROFILE_TOOL_CEILING_AXES = Object.freeze([
+  { axis: 'browser', label: '브라우저', open: 'interact', options: [
+    { value: 'none', label: '쓰지 않음', limit: '브라우저 쓰지 않음' }, { value: 'observe', label: '보기만', limit: '브라우저 보기만' },
+    { value: 'interact', label: '보기와 조작' }] },
+  { axis: 'files', label: '파일', open: 'write', options: [
+    { value: 'read', label: '읽기만', limit: '파일 읽기만' }, { value: 'write', label: '읽기와 쓰기' }] },
+  { axis: 'terminal', label: '터미널 명령', open: 'ask', options: [
+    { value: 'none', label: '실행 안 함', limit: '터미널 실행 안 함' }, { value: 'ask', label: '실행 전에 묻기' },
+    { value: 'allow', label: '묻지 않고 실행', pending: true }] },
+  { axis: 'network', label: '인터넷', open: 'on', options: [
+    { value: 'off', label: '연결 안 함', limit: '인터넷 연결 안 함' }, { value: 'on', label: '연결 허용' }] },
+  { axis: 'mcp', label: '연결된 외부 도구', open: 'inherited', options: [
+    { value: 'none', label: '쓰지 않음', limit: '외부 도구 쓰지 않음' }, { value: 'inherited', label: '내 설정 그대로' }] },
+].map(axis => Object.freeze({ ...axis, options: Object.freeze(axis.options.map(option => Object.freeze(option))) })));
+export const PROFILE_TOOL_CEILING_PRESETS = Object.freeze([
+  Object.freeze({ id: 'research', label: '리서치 Agent', ceiling: Object.freeze({ browser: 'observe', files: 'read', terminal: 'none', network: 'on', mcp: 'inherited' }) }),
+]);
+export const TOOL_CEILING_OFF_TEXT = '제한 없음 · 지금처럼';
+export const TOOL_CEILING_EXTERNAL_BROWSER_NOTE = '직접 연결한 브라우저 도구(예: firefox-devtools)는 계속 쓸 수 있습니다';
+const ceilingAxis = axis => PROFILE_TOOL_CEILING_AXES.find(item => item.axis === axis) || null;
+const ceilingOption = (axis, value) => ceilingAxis(axis)?.options.find(option => option.value === value) || null;
+/** Every axis at today's behavior (the switch turned on before any pick). */
+export const openToolCeiling = () => Object.fromEntries(PROFILE_TOOL_CEILING_AXES.map(({ axis, open }) => [axis, open]));
+/** Five known keys in store order, a missing axis filled with its open value; anything else is null. */
+export function publicToolCeiling(value) {
+  if (!value || typeof value !== 'object' || Array.isArray(value)) return null;
+  if (Object.keys(value).some(key => !ceilingAxis(key))) return null;
+  const ceiling = {};
+  for (const { axis, open } of PROFILE_TOOL_CEILING_AXES) {
+    const chosen = value[axis] === undefined || value[axis] === null ? open : value[axis];
+    if (!ceilingOption(axis, chosen)) return null;
+    ceiling[axis] = chosen;
+  }
+  return ceiling;
+}
+/** Korean phrases for the axes a ceiling narrows, in axis order. */
+export function toolCeilingLimits(value) {
+  const ceiling = publicToolCeiling(value);
+  return ceiling ? PROFILE_TOOL_CEILING_AXES.flatMap(({ axis }) => ceilingOption(axis, ceiling[axis])?.limit || []) : [];
+}
+/** One line: the narrowed axes, or '제한 없음' when nothing is narrowed. */
+export function toolCeilingSummary(value) {
+  const limits = toolCeilingLimits(value);
+  return limits.length ? limits.join(' · ') : '제한 없음';
+}
+/** The run's recorded ceiling as '도구 제한: …', or null when it narrows nothing. */
+export function toolCeilingRunLine(run) {
+  const limits = toolCeilingLimits(run?.toolCeiling);
+  return limits.length ? `도구 제한: ${limits.join(' · ')}` : null;
+}
+/** Notes under the form's ceiling picks. */
+export function toolCeilingNotes(value) {
+  const ceiling = publicToolCeiling(value);
+  if (!ceiling) return [];
+  const notes = [];
+  if (ceiling.browser !== 'interact' && ceiling.mcp === 'inherited') notes.push(TOOL_CEILING_EXTERNAL_BROWSER_NOTE);
+  if (ceiling.terminal === 'allow') notes.push('묻지 않고 실행은 아직 준비 중이라, 지금은 실행 전에 묻습니다.');
+  return notes;
+}
+/** The preset this ceiling matches exactly, or null. */
+export function toolCeilingPresetId(value) {
+  const ceiling = publicToolCeiling(value);
+  if (!ceiling) return null;
+  return PROFILE_TOOL_CEILING_PRESETS.find(preset => PROFILE_TOOL_CEILING_AXES.every(({ axis }) => preset.ceiling[axis] === ceiling[axis]))?.id || null;
+}
+/** Every axis spelled out (diffs compare whole ceilings). */
+function toolCeilingFullText(value) {
+  const ceiling = publicToolCeiling(value);
+  if (!ceiling) return TOOL_CEILING_OFF_TEXT;
+  return PROFILE_TOOL_CEILING_AXES.map(({ axis, label }) => `${label} ${ceilingOption(axis, ceiling[axis]).label}`).join(' · ');
+}
+/** A toolCeiling activity row: its status word, the refused command, and notes from the detail keys. */
+export function toolCeilingActivityView(activity) {
+  if (activity?.kind !== 'toolCeiling') return null;
+  const detail = activity.detail && typeof activity.detail === 'object' && !Array.isArray(activity.detail) ? activity.detail : {};
+  const notes = [];
+  if (detail.externalBrowserToolsStillInherited === true) notes.push('직접 연결한 브라우저 도구는 이 Agent에서도 쓸 수 있습니다');
+  if (detail.nativeFeatureCheck === 'unavailable') notes.push('Codex 버전이 확인을 지원하지 않아 일부 제한을 확인하지 못했습니다');
+  return { statusLabel: activity.status === 'declined' ? '도구 제한으로 막음' : '안내', notes,
+    command: typeof detail.command === 'string' && detail.command.trim() ? detail.command : null };
+}
+
 function formLine(value) { return typeof value === 'string' ? value.normalize('NFC').trim() : ''; }
 function formBlock(value) { return typeof value === 'string' ? value.normalize('NFC').replace(/\r\n?/g, '\n').trim() : ''; }
 function formList(value) {
@@ -932,6 +1030,10 @@ export function profileFormFromBody(body = null) {
     instructions: typeof body?.instructions === 'string' ? body.instructions : '',
     toolPreferences: Array.isArray(body?.toolPreferences) ? body.toolPreferences.filter(item => typeof item === 'string') : [],
     model: body?.model && typeof body.model === 'object' ? copy(body.model) : null,
+    // A revision saved before AGENT-04 has no toolCeiling key: the switch starts off.
+    // The picks stay when the switch is turned off and on again.
+    toolCeilingOn: !!publicToolCeiling(body?.toolCeiling),
+    toolCeiling: publicToolCeiling(body?.toolCeiling) || openToolCeiling(),
   };
 }
 
@@ -971,18 +1073,88 @@ export function validateProfileForm(form = {}) {
   const toolPreferences = formList(form.toolPreferences);
   if (toolPreferences.length > limits.toolPreferences) add('toolPreferences', `선호 도구는 ${limits.toolPreferences}개까지 넣을 수 있습니다.`);
   else if (toolPreferences.some(item => !TOOL_NAME.test(item) || item.length > limits.toolLength)) add('toolPreferences', '선호 도구 이름은 영문·숫자와 _ . : - 만 쓸 수 있습니다.');
+  // Switch off sends null (no ceiling, today's behavior); on sends all five keys.
+  const toolCeiling = form.toolCeilingOn === true ? publicToolCeiling(form.toolCeiling) : null;
+  if (form.toolCeilingOn === true && !toolCeiling) add('toolCeiling', '쓸 수 있는 도구를 다시 골라 주세요.');
   if (errors.length) return { ok: false, errors, body: null };
   return { ok: true, errors, body: {
     name, avatar: avatarValue ? { kind, value: avatarValue, color } : null, role,
     personality: { tone, traits, speechNotes }, expertise, instructions, toolPreferences,
     model: form.model && typeof form.model === 'object' ? copy(form.model) : null,
+    toolCeiling,
   } };
+}
+
+/**
+ * AGENT-02 사용 준비: what a saved body still leaves empty. It never blocks
+ * 사용 시작; the list names the gaps and the missing count goes beside it.
+ */
+export function profileReadinessView(body) {
+  const saved = body && typeof body === 'object' ? body : {};
+  const items = [
+    { key: 'name', label: '담당자 이름', done: !!formLine(saved.name), missingText: '비어 있음' },
+    { key: 'avatar', label: '아바타', done: !!publicProfileAvatar(saved.avatar), missingText: '정하지 않음' },
+    { key: 'role', label: '역할 한 줄', done: !!formLine(saved.role), missingText: '비어 있음' },
+    { key: 'expertise', label: '맡길 일', done: formList(saved.expertise).length > 0, missingText: '비어 있음' },
+    { key: 'instructions', label: '지침', done: !!formBlock(saved.instructions), missingText: '비어 있음' },
+  ].map(({ missingText, ...item }) => ({ ...item, state: item.done ? '채움' : missingText }));
+  const missing = items.filter(item => !item.done).length;
+  const ceiling = publicToolCeiling(saved.toolCeiling);
+  return { items, missing, ready: missing === 0,
+    title: missing ? `사용 준비 · 빠진 항목 ${missing}개` : '사용할 준비가 됐습니다',
+    countText: missing ? `빠진 항목 ${missing}개` : null,
+    tools: ceiling ? toolCeilingSummary(ceiling) : TOOL_CEILING_OFF_TEXT };
+}
+
+/**
+ * AGENT-05: the '[···] Agent 작업 중' bubble at the end of the conversation.
+ * Shown only while the run is busy and the bridge can say so; it carries no
+ * thought text. A run held on 대표님 names what it waits for instead.
+ */
+export function agentWorkingView(run, { connected = true } = {}) {
+  if (!isRunBusy(run) || !connected || run.stopUnconfirmed) return null;
+  if (run.pendingApprovals?.length) return { state: 'approval', text: '승인을 기다리는 중' };
+  if (pendingUserInputCount(run)) return { state: 'question', text: '답변을 기다리는 중' };
+  if (run.stopPending || run.stopRequested || run.status === 'stopping') return { state: 'stopping', text: '중지하는 중' };
+  return { state: 'working', text: 'Agent 작업 중' };
+}
+
+/**
+ * CHAT-07: what the profile peek shows for an answer's author. `profile` is
+ * the room's Agent (null for a plain Codex room); `detail` is GET
+ * /profiles/:id once loaded. The model line is the engine chip's own text.
+ */
+export function agentPeekView({ author = 'Codex', authorAvatar = null, profile = null, detail = null, detailStatus = 'idle',
+  modelText = '', boardTitle = '', threadType = 'dm' } = {}) {
+  const board = `${boardTitle || 'EG-Desk'}${threadType === 'group' ? ' · Board Thread' : ' · 지금 열린 Board'}`;
+  const base = { model: modelText || '확인 안 됨', board, profileId: null, loading: false, note: null, expertiseEmpty: '정하지 않음' };
+  if (!profile) {
+    return { ...base, name: author || 'Codex', avatar: publicProfileAvatar(authorAvatar), role: '기본 Codex 대화 · 따로 정한 Agent 없음',
+      tone: '정하지 않음', expertise: [], tools: '제한 없음' };
+  }
+  const name = profile.name || author || 'Agent';
+  const note = author && author !== name ? `이 답변을 보낸 당시 이름: ${author}` : null;
+  if (profile.server !== true) {
+    return { ...base, name, avatar: publicProfileAvatar(profile.avatar) || publicProfileAvatar(authorAvatar), role: profile.summary || profile.role || '역할 미설정',
+      tone: '정하지 않음', expertise: [], tools: '제한 없음', note };
+  }
+  const body = detail?.active?.body || null;
+  const pending = !body && detailStatus === 'loading' ? '불러오는 중…' : !body ? '확인하지 못했습니다' : null;
+  const tone = body ? PROFILE_TONE_OPTIONS.find(option => option.value === body.personality?.tone)?.label || '담백' : null;
+  const traits = body ? formList(body.personality?.traits).slice(0, 3) : [];
+  return { ...base, name, avatar: publicProfileAvatar(body?.avatar) || publicProfileAvatar(profile.avatar) || publicProfileAvatar(authorAvatar),
+    role: formLine(body?.role) || profile.role || '역할 미설정', profileId: profile.id, loading: !!pending && detailStatus === 'loading', note,
+    tone: pending || [tone, traits.join(', ')].filter(Boolean).join(' · '),
+    expertise: body ? formList(body.expertise) : [],
+    expertiseEmpty: pending || '정하지 않음',
+    tools: pending || toolCeilingSummary(body.toolCeiling) };
 }
 
 const PROFILE_DIFF_LABELS = [['name', '담당자 이름'], ['avatar', '아바타'], ['role', '역할'], ['personality.tone', '말투'],
   ['personality.traits', '성격 특징'], ['personality.speechNotes', '말투 메모'], ['expertise', '맡길 일'],
-  ['instructions', '지침'], ['toolPreferences', '선호 도구'], ['model', '실행 모델']];
+  ['instructions', '지침'], ['toolPreferences', '선호 도구'], ['model', '실행 모델'], ['toolCeiling', '쓸 수 있는 도구']];
 function diffValueText(field, value) {
+  if (field === 'toolCeiling') return toolCeilingFullText(value);
   if (value === null || value === undefined) return '없음';
   if (field === 'personality.tone') return PROFILE_TONE_OPTIONS.find(option => option.value === value)?.label || '확인 안 됨';
   if (field === 'avatar') return value?.kind === 'emoji' ? `이모지 ${value.value}` : `이니셜 ${value?.value ?? ''}`;

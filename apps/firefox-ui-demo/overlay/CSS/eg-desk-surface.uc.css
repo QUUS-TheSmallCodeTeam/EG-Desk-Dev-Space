@@ -7050,6 +7050,199 @@ button.egd-plan-confirm-go[aria-disabled="true"] { opacity: .6; cursor: default;
 .egd-codex-browser-control-text { min-width: 0; color: var(--egd-on-surface); overflow-wrap: anywhere; }
 .egd-codex-browser-control-detail { min-width: 0; overflow-wrap: anywhere; }
 
+/* AGENT-04 tool section of the Agent form: a switch, then one segmented row per
+   tool kind. The pending '묻지 않고 실행' stays visible but cannot be picked. */
+.egd-settings-ceiling { gap: 8px; }
+.egd-settings-switch {
+  display: inline-flex;
+  align-items: center;
+  gap: 8px;
+  align-self: flex-start;
+  padding: 2px 0;
+  border: 0;
+  background: transparent;
+  color: var(--egd-on-surface);
+  font: 600 12px/1.4 var(--egd-font);
+  cursor: pointer;
+}
+.egd-settings-switch-track {
+  position: relative;
+  flex: none;
+  width: 30px;
+  height: 18px;
+  border: 1px solid var(--egd-outline);
+  border-radius: 999px;
+  background: var(--egd-window-alt);
+  transition: background .12s ease, border-color .12s ease;
+}
+.egd-settings-switch-thumb {
+  position: absolute;
+  top: 2px;
+  left: 2px;
+  width: 12px;
+  height: 12px;
+  border-radius: 50%;
+  background: var(--egd-on-surface-variant);
+  transition: transform .12s ease, background .12s ease;
+}
+.egd-settings-switch-on .egd-settings-switch-track { border-color: var(--egd-primary); background: var(--egd-primary); }
+.egd-settings-switch-on .egd-settings-switch-thumb { background: var(--egd-surface-elevated); transform: translateX(12px); }
+.egd-settings-switch:focus-visible { outline: 2px solid var(--egd-primary); outline-offset: 2px; border-radius: 6px; }
+.egd-settings-ceiling-body {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  padding: 10px 12px;
+  border: 1px solid var(--egd-outline-variant);
+  border-radius: 9px;
+  background: var(--egd-window-alt);
+}
+.egd-settings-ceiling-presets,
+.egd-settings-ceiling-row { display: flex; flex-wrap: wrap; align-items: center; gap: 6px 10px; }
+.egd-settings-ceiling-axis { min-width: 96px; font-size: 11.5px; font-weight: 650; color: var(--egd-on-surface-variant); }
+.egd-settings-ceiling-row .egd-settings-segmented { background: var(--egd-surface-elevated); }
+.egd-settings-segment-pending,
+.egd-settings-segment-pending:hover { background: transparent; color: var(--egd-on-surface-variant); opacity: .55; cursor: default; }
+.egd-settings-btn-selected { border-color: var(--egd-primary); background: var(--egd-primary-container); }
+.egd-settings-ceiling-note {
+  display: block;
+  padding: 7px 10px;
+  border: 1px solid var(--egd-note-line);
+  border-radius: 7px;
+  background: var(--egd-note-soft);
+  color: var(--egd-on-surface);
+  font-size: 11.5px;
+  line-height: 1.5;
+}
+.egd-settings-detail-list .egd-settings-ceiling-note { margin-top: 6px; }
+
+/* AGENT-02 사용 준비: what the newest version still leaves empty, never a gate. */
+.egd-settings-readiness {
+  margin: 8px 0;
+  padding: 10px 12px;
+  border: 1px solid var(--egd-note-line);
+  border-radius: 9px;
+  background: var(--egd-note-soft);
+  font-size: 12px;
+}
+.egd-settings-readiness-ready { border-color: var(--egd-outline-variant); background: var(--egd-success-bg); }
+.egd-settings-readiness-title { margin-bottom: 6px; font-weight: 650; color: var(--egd-on-surface); }
+.egd-settings-readiness-ready .egd-settings-readiness-title { color: var(--egd-success-ink); }
+.egd-settings-readiness-list { display: flex; flex-direction: column; gap: 4px; margin: 0; padding: 0; list-style: none; }
+.egd-settings-readiness-item { display: flex; align-items: center; gap: 8px; min-height: 22px; }
+.egd-settings-readiness-mark {
+  position: relative;
+  flex: none;
+  width: 14px;
+  height: 14px;
+  box-sizing: border-box;
+  border: 1.5px solid var(--egd-line-strong);
+  border-radius: 50%;
+}
+.egd-settings-readiness-item-done .egd-settings-readiness-mark { border-color: var(--egd-success); background: var(--egd-success); }
+.egd-settings-readiness-item-done .egd-settings-readiness-mark::after {
+  content: '';
+  position: absolute;
+  left: 3.5px;
+  top: 1px;
+  width: 3px;
+  height: 6px;
+  border: solid var(--egd-surface-elevated);
+  border-width: 0 1.5px 1.5px 0;
+  transform: rotate(45deg);
+}
+.egd-settings-readiness-label { flex: 1; min-width: 0; }
+.egd-settings-readiness-state { font-size: 11px; color: var(--egd-on-surface-variant); }
+.egd-settings-readiness-item-missing .egd-settings-readiness-state { color: var(--egd-warning-ink); }
+.egd-settings-readiness-tools { margin-top: 6px; padding-top: 6px; border-top: 1px solid var(--egd-note-line); font-size: 11.5px; color: var(--egd-on-surface-variant); }
+.egd-settings-readiness-count { align-self: center; font-size: 11px; font-weight: 600; color: var(--egd-warning-ink); }
+
+/* CHAT-07: an Agent answer's face and name open its profile peek. The HUD's
+   generic button reset is matched here so the face keeps its chat colours. */
+button.egd-codex-message-avatar {
+  padding: 0;
+  border: 0;
+  background: var(--egd-chat-avatar);
+  color: var(--egd-primary);
+  font-family: var(--egd-font);
+  cursor: pointer;
+}
+button.egd-codex-message-role-name {
+  padding: 0;
+  border: 0;
+  background: transparent;
+  color: inherit;
+  font: inherit;
+  cursor: pointer;
+}
+button.egd-codex-message-role-name:hover { color: var(--egd-on-surface); text-decoration: underline; }
+.egd-codex-agent-peek-trigger:focus-visible { outline: 2px solid var(--egd-primary); outline-offset: 2px; }
+.egd-codex-agent-peek-trigger[aria-expanded="true"] { box-shadow: 0 0 0 2px var(--egd-card-focus-ring); }
+.egd-codex-agent-peek {
+  position: fixed;
+  z-index: 32040;
+  box-sizing: border-box;
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+  width: 288px;
+  max-width: calc(100vw - 16px);
+  padding: 12px;
+  border: var(--egd-frosted-border);
+  border-radius: 10px;
+  background: var(--egd-frosted-bg);
+  box-shadow: var(--egd-frosted-shadow);
+  color: var(--egd-on-surface);
+  font: 12px/1.5 var(--egd-font);
+}
+.egd-codex-agent-peek-head { display: flex; align-items: center; gap: 10px; }
+.egd-codex-agent-peek .egd-codex-agent-peek-avatar { width: 32px; height: 32px; min-width: 32px; margin: 0; font-size: 13px; }
+.egd-codex-agent-peek-identity { min-width: 0; }
+.egd-codex-agent-peek-name { font-size: 13px; font-weight: 700; overflow-wrap: anywhere; }
+.egd-codex-agent-peek-role { color: var(--egd-on-surface-variant); overflow-wrap: anywhere; }
+.egd-codex-agent-peek-list { display: flex; flex-direction: column; gap: 5px; margin: 0; }
+.egd-codex-agent-peek-row { display: grid; grid-template-columns: 88px minmax(0, 1fr); gap: 8px; }
+.egd-codex-agent-peek-row dt { color: var(--egd-on-surface-variant); }
+.egd-codex-agent-peek-row dd { margin: 0; overflow-wrap: anywhere; }
+.egd-codex-agent-peek-note { margin: 0; font-size: 11px; color: var(--egd-on-surface-variant); }
+.egd-codex-agent-peek-actions { display: flex; flex-wrap: wrap; gap: 6px; }
+
+/* AGENT-05: '[···] Agent 작업 중' at the end of the conversation. It reads as a
+   quiet Agent bubble and opens the activity record when pressed. */
+.egd-codex-working-row {
+  display: flex;
+  align-items: flex-start;
+  gap: 8px;
+  flex-shrink: 0;
+  width: 100%;
+  max-width: 760px;
+  margin-inline: auto;
+}
+.egd-codex-working-row .egd-codex-message-avatar { margin-top: 4px; }
+button.egd-codex-working-bubble {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  min-height: 32px;
+  padding: 6px 11px;
+  border: 1px solid var(--egd-chat-outline-soft);
+  border-radius: 10px 10px 10px 3px;
+  background: var(--egd-window-alt);
+  color: var(--egd-on-surface-variant);
+  font: 600 12px/1.4 var(--egd-font);
+  cursor: pointer;
+}
+button.egd-codex-working-bubble:hover { border-color: var(--egd-focus-border); color: var(--egd-on-surface); }
+button.egd-codex-working-bubble:focus-visible { outline: 2px solid var(--egd-primary); outline-offset: 2px; }
+.egd-codex-working-bubble .egd-codex-typing-dots { margin-right: 0; }
+.egd-codex-working-row[data-state="approval"] .egd-codex-working-bubble,
+.egd-codex-working-row[data-state="question"] .egd-codex-working-bubble { border-color: var(--egd-note-line); background: var(--egd-note-soft); color: var(--egd-warning-ink); }
+
+/* AGENT-04 in the activity record: the run's ceiling under its head, and the
+   notes a ceiling row carries. */
+.egd-codex-run-ceiling { margin: 0 0 4px; padding: 6px 10px; border-radius: 7px; background: var(--egd-window-alt); color: var(--egd-on-surface-variant); font-size: 12px; }
+.egd-codex-activity-note { margin: 0; font-size: 12px; color: var(--egd-on-surface-variant); }
+
 /* DSN-01: rules a token cannot carry. Search result kinds keep their own hue;
    in dark the ink lifts toward the dark ink and the wash darkens. */
 @media (prefers-color-scheme: dark) {
