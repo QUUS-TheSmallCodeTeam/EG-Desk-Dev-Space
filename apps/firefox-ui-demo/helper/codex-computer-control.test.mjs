@@ -1,8 +1,10 @@
 import test from 'node:test'
 import assert from 'node:assert/strict'
 import { Readable } from 'node:stream'
-import { readFile } from 'node:fs/promises'
+import { readFile, rm } from 'node:fs/promises'
 import { CodexChatRuntime } from './codex-chat-runtime.mjs'
+import { openChatStore } from './egdesk-chat-store.mjs'
+import { createPrivateQaTempDirectory } from '../scripts/egdesk-qa-platform.mjs'
 import { createComputerControlHttpHandler } from './codex-bridge-http.mjs'
 import {
   COMPUTER_CONTROL_FEATURES, COMPUTER_CONTROL_POLICIES, DEFAULT_COMPUTER_CONTROL_POLICY,
@@ -70,13 +72,16 @@ function native({ custom } = {}) {
   return { calls, request, threadConfig }
 }
 
-function runtime({ policy, custom, mcpServerKind } = {}) {
+function runtime({ policy, custom, mcpServerKind, now, store, computerControlStore } = {}) {
   const fake = native({ custom })
   const events = [], changes = []
   const chat = new CodexChatRuntime({
     request: fake.request, respond: () => {}, emit: event => events.push(event), verifyFile: async () => null,
     ...(policy ? { computerControlPolicy: policy } : {}),
     ...(mcpServerKind ? { mcpServerKind } : {}),
+    ...(now ? { now } : {}),
+    ...(store ? { store, requireStore: true, getOwnerKey: () => 'email:owner@example.com' } : {}),
+    ...(computerControlStore ? { computerControlStore } : {}),
     onComputerControlChange: value => changes.push(value),
   })
   chat.setConnection(true)
@@ -292,8 +297,12 @@ test('an MCP tool call row says what its server can control, never its plugin id
   assert.deepEqual(rows.map(row => [row.id, row.detail.controlKind]), [
     ['cua', 'computer'], ['repl', 'computer'], ['pw', 'browser'], ['plugin-only', 'computer'], ['drive', 'other'], ['unlisted', 'repl'],
   ])
-  assert.deepEqual(Object.keys(rows[0].detail), ['server', 'tool', 'durationMs', 'controlKind'])
-  assert.equal(rows[0].title, 'cua_repl / js')
+  assert.deepEqual(Object.keys(rows[0].detail), ['server', 'tool', 'durationMs', 'controlKind', 'status', 'argumentsBytes', 'resultImageCount', 'resultTextBytes'])
+  // A computer-control call reads as 컴퓨터 조작; the server's name stays in detail.
+  assert.equal(rows[0].title, '컴퓨터 조작 · js')
+  assert.equal(rows[0].detail.server, 'cua_repl')
+  assert.equal(rows.find(row => row.id === 'pw').title, 'playwright-electron / js')
+  assert.equal(rows.find(row => row.id === 'drive').title, 'drive / js')
   const exposed = JSON.stringify([h.events, h.chat.snapshot()])
   for (const hidden of ['ARGUMENT_SENTINEL', 'IMAGE_SENTINEL', 'RESULT_SENTINEL', COMPUTER_PLUGIN]) assert.ok(!exposed.includes(hidden), hidden)
   // Without the inherited lookup node_repl reads as a REPL; a failing lookup changes nothing.
@@ -302,6 +311,183 @@ test('an MCP tool call row says what its server can control, never its plugin id
     const other = await plain.chat.send({ message: 'Hi', requestId: 'r-1' })
     await plain.chat.handleNotification({ method: 'item/completed', params: { threadId: other.conversationId, turnId: other.runId, item: { id: 'repl', type: 'mcpToolCall', server: 'node_repl', tool: 'js', status: 'completed' } } })
     assert.equal(plain.chat.snapshot().runs[0].activities.find(row => row.id === 'repl').detail.controlKind, 'repl')
+  }
+})
+
+// CU-01 Q1 (다): computer control stays on, and its use is shown instead.
+const mcpItem = (run, id, server, status, extra = {}) => ({
+  method: status === 'inProgress' ? 'item/started' : 'item/completed',
+  params: { threadId: run.conversationId, turnId: run.runId, item: { id, type: 'mcpToolCall', server, tool: 'js', status, ...(server === 'cua_repl' ? { pluginId: COMPUTER_PLUGIN } : {}), ...extra } },
+})
+
+test('an MCP call keeps sizes only: argument bytes, result images and result text bytes, never the content', async () => {
+  const h = runtime()
+  const run = await h.chat.send({ message: 'Hi', requestId: 'r-1' })
+  const args = { code: 'await cua.type("ARGUMENT_SENTINEL 한글")' }
+  const text = 'RESULT_SENTINEL 화면 설명'
+  const result = { content: [
+    { type: 'image', data: 'IMAGE_SENTINEL', mimeType: 'image/png' },
+    { type: 'text', text },
+    { type: 'resource', resource: { uri: 'file:///RESOURCE_SENTINEL.png', mimeType: 'image/png', blob: 'BLOB_SENTINEL' } },
+    { type: 'text', text: 'second' },
+  ], structuredContent: { note: 'STRUCTURED_SENTINEL' } }
+  const row = id => h.chat.snapshot().runs[0].activities.find(activity => activity.id === id)
+  await h.chat.handleNotification(mcpItem(run, 'cua-1', 'cua_repl', 'inProgress', { arguments: args }))
+  const argumentsBytes = Buffer.byteLength(JSON.stringify(args))
+  assert.deepEqual(row('cua-1').detail, { server: 'cua_repl', tool: 'js', durationMs: null, controlKind: 'computer', status: 'inProgress', argumentsBytes, resultImageCount: null, resultTextBytes: null })
+  await h.chat.handleNotification(mcpItem(run, 'cua-1', 'cua_repl', 'completed', { arguments: args, result, durationMs: 42 }))
+  assert.deepEqual(row('cua-1').detail, { server: 'cua_repl', tool: 'js', durationMs: 42, controlKind: 'computer', status: 'completed', argumentsBytes, resultImageCount: 2, resultTextBytes: Buffer.byteLength(text) + Buffer.byteLength('second') })
+  assert.equal(row('cua-1').status, 'completed')
+  // A failed call without arguments or a result reports neither; its error text stays out.
+  await h.chat.handleNotification(mcpItem(run, 'drive-1', 'drive', 'failed', { error: { message: 'ERROR_SENTINEL' } }))
+  assert.deepEqual(row('drive-1').detail, { server: 'drive', tool: 'js', durationMs: null, controlKind: 'other', status: 'failed', argumentsBytes: null, resultImageCount: null, resultTextBytes: null })
+  const exposed = JSON.stringify([h.events, h.chat.snapshot()])
+  for (const hidden of ['ARGUMENT_SENTINEL', 'RESULT_SENTINEL', 'IMAGE_SENTINEL', 'RESOURCE_SENTINEL', 'BLOB_SENTINEL', 'STRUCTURED_SENTINEL', 'ERROR_SENTINEL', '한글', '화면 설명', COMPUTER_PLUGIN]) assert.ok(!exposed.includes(hidden), hidden)
+})
+
+test('run.computerUse counts each computer-control call once and is active only while one is in progress', async () => {
+  let clock = 1000
+  const h = runtime({ mcpServerKind: name => (name === 'node_repl' ? 'desktop' : null), now: () => clock })
+  const run = await h.chat.send({ message: 'Hi', requestId: 'r-1' })
+  const call = async (at, ...args) => { clock = at; await h.chat.handleNotification(mcpItem(run, ...args)) }
+  const use = () => h.chat.snapshot().runs[0].computerUse
+  const used = () => h.events.filter(event => event.event === 'computer.used').map(event => event.details)
+  // An ordinary MCP call is not computer control: no computerUse at all.
+  await call(1500, 'drive-1', 'drive', 'completed')
+  assert.equal(Object.hasOwn(h.chat.snapshot().runs[0], 'computerUse'), false)
+  await call(2000, 'a', 'cua_repl', 'inProgress')
+  assert.deepEqual(use(), { calls: 1, lastAt: 2000, servers: ['cua_repl'], active: true })
+  await call(3000, 'b', 'node_repl', 'inProgress')
+  assert.deepEqual(use(), { calls: 2, lastAt: 3000, servers: ['cua_repl', 'node_repl'], active: true })
+  await call(4000, 'a', 'cua_repl', 'completed')
+  assert.deepEqual(use(), { calls: 2, lastAt: 4000, servers: ['cua_repl', 'node_repl'], active: true }, 'b is still in progress')
+  await call(5000, 'b', 'node_repl', 'failed')
+  assert.deepEqual(use(), { calls: 2, lastAt: 5000, servers: ['cua_repl', 'node_repl'], active: false })
+  // Replays and late items change nothing: an ended call is neither counted again nor reopened.
+  await call(6000, 'a', 'cua_repl', 'completed')
+  await call(6000, 'b', 'node_repl', 'inProgress')
+  assert.deepEqual(use(), { calls: 2, lastAt: 5000, servers: ['cua_repl', 'node_repl'], active: false })
+  // A call first seen at its completion still counts once.
+  await call(7000, 'c', 'cua_repl', 'completed')
+  assert.deepEqual(use(), { calls: 3, lastAt: 7000, servers: ['cua_repl', 'node_repl'], active: false })
+  const id = run.runId
+  assert.deepEqual(used(), [
+    { runId: id, calls: 1, lastAt: 2000, active: true }, { runId: id, calls: 2, lastAt: 3000, active: true },
+    { runId: id, calls: 2, lastAt: 4000, active: true }, { runId: id, calls: 2, lastAt: 5000, active: false },
+    { runId: id, calls: 3, lastAt: 7000, active: false },
+  ])
+  // Each computer.used follows its call's activity row and names the call.
+  const first = h.events.findIndex(event => event.event === 'computer.used')
+  assert.equal(h.events[first - 1].event, 'activity.started')
+  assert.equal(h.events[first - 1].itemId, 'a')
+  assert.equal(h.events[first].itemId, 'a')
+  // The turn's own item list replays the calls without counting them again.
+  clock = 8000
+  await h.chat.handleNotification({ method: 'turn/completed', params: { threadId: run.conversationId, turn: { id: run.runId, status: 'completed', items: [mcpItem(run, 'a', 'cua_repl', 'completed').params.item, mcpItem(run, 'c', 'cua_repl', 'completed').params.item] } } })
+  assert.deepEqual(use(), { calls: 3, lastAt: 7000, servers: ['cua_repl', 'node_repl'], active: false })
+  assert.equal(used().length, 5)
+  // At most 8 server names are kept.
+  const many = runtime({ mcpServerKind: () => 'desktop' })
+  const other = await many.chat.send({ message: 'Hi', requestId: 'r-1' })
+  for (let index = 0; index < 10; index++) await many.chat.handleNotification(mcpItem(other, `m-${index}`, `desk-${index}`, 'completed'))
+  assert.deepEqual(many.chat.snapshot().runs[0].computerUse.servers, Array.from({ length: 8 }, (_, index) => `desk-${index}`))
+  assert.equal(many.chat.snapshot().runs[0].computerUse.calls, 10)
+})
+
+test('a turn that ends or loses Codex with a computer call in progress is no longer active', async () => {
+  let clock = 1000
+  const ended = runtime({ now: () => clock })
+  const run = await ended.chat.send({ message: 'Hi', requestId: 'r-1' })
+  await ended.chat.handleNotification(mcpItem(run, 'x', 'cua_repl', 'inProgress'))
+  clock = 9000
+  await ended.chat.handleNotification({ method: 'turn/completed', params: { threadId: run.conversationId, turn: { id: run.runId, status: 'interrupted', items: [] } } })
+  assert.deepEqual(ended.chat.snapshot().runs[0].computerUse, { calls: 1, lastAt: 9000, servers: ['cua_repl'], active: false })
+  const tail = ended.events.slice(-2)
+  assert.deepEqual(tail.map(event => event.event), ['computer.used', 'run.completed'])
+  assert.deepEqual(tail[0].details, { runId: run.runId, calls: 1, lastAt: 9000, active: false })
+  // A lost connection ends it too, without inventing when the call ended.
+  clock = 1000
+  const lost = runtime({ now: () => clock })
+  const other = await lost.chat.send({ message: 'Hi', requestId: 'r-1' })
+  await lost.chat.handleNotification(mcpItem(other, 'y', 'cua_repl', 'inProgress'))
+  clock = 9000
+  lost.chat.setConnection(false)
+  assert.deepEqual(lost.chat.snapshot().runs[0].computerUse, { calls: 1, lastAt: 1000, servers: ['cua_repl'], active: false })
+  assert.deepEqual(lost.events.slice(-2).map(event => event.event), ['computer.used', 'run.unavailable'])
+})
+
+test('computer calls seen only in native history are counted without a time or a live event', async () => {
+  const items = [
+    { id: 'h-1', type: 'mcpToolCall', server: 'cua_repl', pluginId: COMPUTER_PLUGIN, tool: 'js', status: 'completed', arguments: { code: 'HISTORY_ARGUMENT' }, result: { content: [{ type: 'image', data: 'HISTORY_IMAGE' }] } },
+    { id: 'h-2', type: 'mcpToolCall', server: 'cua_repl', pluginId: COMPUTER_PLUGIN, tool: 'js', status: 'inProgress' },
+  ]
+  const h = runtime({ custom: async method => method === 'thread/resume' ? { thread: { id: 'old', turns: [{ id: 'old-turn', status: 'interrupted', items }] }, cwd: '/work' } : undefined })
+  const state = await h.chat.resume({ conversationId: 'old' })
+  assert.deepEqual(state.runs[0].computerUse, { calls: 2, lastAt: null, servers: ['cua_repl'], active: false })
+  assert.equal(state.runs[0].activities.find(activity => activity.id === 'h-1').detail.resultImageCount, 1)
+  assert.equal(h.events.length, 0)
+  for (const hidden of ['HISTORY_ARGUMENT', 'HISTORY_IMAGE']) assert.ok(!JSON.stringify(state).includes(hidden), hidden)
+})
+
+test('run.started names the computer-control policy of an ordinary Codex run only when the runtime has the setting', async () => {
+  const policyOf = h => h.events.filter(event => event.event === 'run.started').map(event => event.details.computerControl)
+  for (const policy of ['inherit', 'off']) {
+    const h = runtime({ policy })
+    const run = await h.chat.send({ message: 'Hi', requestId: 'r-1' })
+    assert.deepEqual(policyOf(h), [{ policy }])
+    assert.deepEqual(Object.keys(h.events.find(event => event.event === 'run.started').details), ['status', 'computerControl'])
+    // Only details change: the run itself carries no new field.
+    assert.equal(Object.hasOwn(h.chat.snapshot().runs[0], 'computerControl'), false)
+    await h.finish(run)
+  }
+  // The bridge's saved setting counts as having the setting; a change applies to the next run.
+  const saved = { policy: null, persisted: true, save: () => true }
+  const h = runtime({ computerControlStore: saved })
+  const first = await h.chat.send({ message: 'Hi', requestId: 'r-1' })
+  await h.finish(first)
+  h.chat.setComputerControlPolicy('off')
+  await h.chat.send({ message: 'Again', requestId: 'r-2', conversationId: first.conversationId })
+  assert.deepEqual(policyOf(h), [{ policy: 'inherit' }, { policy: 'off' }])
+  // Without the setting run.started keeps its earlier shape.
+  const plain = runtime()
+  await plain.chat.send({ message: 'Hi', requestId: 'r-1' })
+  assert.deepEqual(plain.events.find(event => event.event === 'run.started').details, { status: 'inProgress' })
+  // Bounded QA threads never get the policy (computer control is off there regardless).
+  const qa = runtime({ policy: 'inherit', custom: async (method, params) => {
+    if (method === 'thread/start') return { thread: { id: 'qa-thread' }, cwd: '/work', sandbox: { type: 'readOnly', networkAccess: false }, approvalPolicy: 'never' }
+    if (method === 'mcpServerStatus/list' && params.threadId) return { data: [], nextCursor: null }
+    if (method === 'experimentalFeature/list') return { data: ['browser_use', 'browser_use_external', 'computer_use'].map(name => ({ name, enabled: false })), nextCursor: null }
+  } })
+  await qa.chat.send({ message: 'Read', requestId: 'qa-1', executionPolicy: { mode: 'readOnlyQa' } })
+  assert.equal(Object.hasOwn(qa.events.find(event => event.event === 'run.started').details, 'computerControl'), false)
+})
+
+test('run.computerUse and computer.used reach the stored run checkpoint and events, still without content', async () => {
+  const dataDir = createPrivateQaTempDirectory('egdesk-computer-use-')
+  let store = null
+  try {
+    store = openChatStore({ dataDir, ownerScope: 'local-desktop-test' })
+    let clock = 1000
+    const h = runtime({ store, now: () => clock, policy: 'inherit' })
+    const run = await h.chat.send({ message: 'Hi', clientThreadId: 'ui-1', requestId: 'r-1' })
+    clock = 2000
+    await h.chat.handleNotification(mcpItem(run, 'cua-1', 'cua_repl', 'inProgress', { arguments: { code: 'STORED_ARGUMENT' } }))
+    clock = 3000
+    await h.chat.handleNotification(mcpItem(run, 'cua-1', 'cua_repl', 'completed', { arguments: { code: 'STORED_ARGUMENT' }, result: { content: [{ type: 'image', data: 'STORED_IMAGE' }, { type: 'text', text: 'STORED_TEXT' }] } }))
+    await h.finish(run)
+    const history = h.chat.getLocalHistory({ clientThreadId: 'ui-1', limit: 500 })
+    assert.deepEqual(history.runs[0].computerUse, { calls: 1, lastAt: 3000, servers: ['cua_repl'], active: false })
+    // The store adds its run checkpoint beside the event's own details.
+    assert.deepEqual(history.events.filter(event => event.event === 'computer.used').map(({ details: { runId, calls, lastAt, active } }) => ({ runId, calls, lastAt, active })), [
+      { runId: run.runId, calls: 1, lastAt: 2000, active: true }, { runId: run.runId, calls: 1, lastAt: 3000, active: false },
+    ])
+    assert.deepEqual(history.events.find(event => event.event === 'run.started').details.computerControl, { policy: 'inherit' })
+    assert.equal(history.runs[0].activities.find(activity => activity.id === 'cua-1').title, '컴퓨터 조작 · js')
+    const stored = JSON.stringify(history)
+    for (const hidden of ['STORED_ARGUMENT', 'STORED_IMAGE', 'STORED_TEXT', COMPUTER_PLUGIN]) assert.ok(!stored.includes(hidden), hidden)
+  } finally {
+    try { store?.close() } catch {}
+    await rm(dataDir, { recursive: true, force: true })
   }
 })
 

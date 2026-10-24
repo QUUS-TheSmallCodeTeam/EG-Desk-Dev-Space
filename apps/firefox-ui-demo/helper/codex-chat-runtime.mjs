@@ -45,6 +45,35 @@ const ownerHash = ownerKey => typeof ownerKey === 'string' && ownerKey
   ? createHash('sha256').update(ownerKey).digest('hex') : null
 const unknownCoverage = () => ({ scope: 'egdesk-local', status: 'unknown', reasons: [], nativeHistoryComplete: null })
 const toolKey = (namespace, name) => `${namespace || ''}\0${name}`
+// CU-01 (Q1 (다)): run.computerUse keeps at most this many server names, and
+// the runtime remembers at most this many call IDs per run to count each once.
+const MAX_COMPUTER_SERVERS = 8
+const MAX_COMPUTER_CALL_IDS = 4096
+
+// Sizes only, never content: the UTF-8 length of an MCP call's arguments as
+// JSON, or null when absent or not serializable.
+function jsonBytes(value) {
+  if (value === undefined) return null
+  try {
+    const text = JSON.stringify(value)
+    return typeof text === 'string' ? Buffer.byteLength(text) : null
+  } catch { return null }
+}
+
+// Counts only, never content: images (MCP image blocks, or embedded image
+// resources) and the UTF-8 length of text blocks in an MCP result. Both are
+// null while no result has arrived.
+function mcpResultCounts(result) {
+  const content = result && typeof result === 'object' && Array.isArray(result.content) ? result.content : null
+  if (!content) return { resultImageCount: null, resultTextBytes: null }
+  let images = 0, textBytes = 0
+  for (const block of content) {
+    if (!block || typeof block !== 'object') continue
+    if (block.type === 'image' || (block.type === 'resource' && typeof block.resource?.mimeType === 'string' && block.resource.mimeType.startsWith('image/'))) images++
+    else if (block.type === 'text' && typeof block.text === 'string') textBytes += Buffer.byteLength(block.text)
+  }
+  return { resultImageCount: images, resultTextBytes: textBytes }
+}
 
 // Shared by live events and history. In particular, reasoning.content, raw tool
 // input/results, diffs and shell output never enter the retained state or SSE.
@@ -73,12 +102,15 @@ function safeItem(item) {
       })) : [],
     }
     // controlKind (CU-01): what the server can drive, from its name and plugin
-    // id; the plugin id, arguments, results and images are never kept.
+    // id; the plugin id, arguments, results and images are never kept. Only
+    // their sizes are: argumentsBytes, resultImageCount, resultTextBytes.
     case 'mcpToolCall': return {
       ...base, status: ITEM_STATUS.has(item.status) ? item.status : 'inProgress',
       server: publicText(item.server, 120), tool: publicText(item.tool, 120),
       durationMs: Number.isFinite(item.durationMs) ? item.durationMs : null,
       controlKind: mcpControlKind(nativeMcpServerKind({ name: typeof item.server === 'string' ? item.server : '', pluginId: typeof item.pluginId === 'string' ? item.pluginId : null })),
+      argumentsBytes: jsonBytes(item.arguments),
+      ...mcpResultCounts(item.result),
     }
     case 'dynamicToolCall': return { ...base, status: ITEM_STATUS.has(item.status) ? item.status : 'inProgress', tool: publicText(item.tool, 120) }
     // Native keys agentsStates by model-chosen thread IDs. Never keep that
@@ -198,6 +230,14 @@ export class CodexChatRuntime {
       ...(computerControlStore ? { persisted: computerControlStore.persisted === true } : {}),
     }
     this.onComputerControlChange = onComputerControlChange
+    // CU-01 (Q1 (다)): run.started names the policy an ordinary Codex run
+    // started under only when this runtime has the setting (an explicit policy
+    // or the bridge's store); a runtime built without it keeps the earlier
+    // run.started shape, like a profile without a ceiling.
+    this.computerControlReported = computerControlPolicy != null || computerControlStore != null
+    // run → Map(callId → 'active' | 'ended') of its computer-control MCP calls,
+    // so each call is counted once and active follows the calls in progress.
+    this.computerCalls = new WeakMap()
     // Engines: an EngineRegistry, or adapters to register. Without either the
     // given request/respond become the Codex adapter, which calls them with
     // the same methods and params as before.
@@ -637,6 +677,8 @@ export class CodexChatRuntime {
       }
       run.pendingApprovals = []
       this.clearUserInputs(run)
+      // The call's real end is unknown, so lastAt stays as it was.
+      if (this.endComputerCalls(run, false)) this.emitComputerUse(run)
       this.emit(run, 'run.unavailable', { status: run.status, error: run.error })
       if (this.store && run.localRunId) this.persistedRunStates.set(runKey(run.conversationId, run.runId), { status: run.status, historyComplete: run.historyComplete })
       this.emitLegacy({ type: 'assistant-error', conversationId: run.conversationId, messageId: run.answerId, error: run.error.message })
@@ -742,7 +784,9 @@ export class CodexChatRuntime {
     if (owned) this.ownedRuns.add(run)
     this.trimRuns()
     if (announce) {
-      this.emit(run, 'run.started', { status: 'inProgress', ...(run.profileBinding ? { profileBinding: run.profileBinding } : {}), ...(run.toolCeiling ? { toolCeiling: run.toolCeiling } : {}), ...(run.stateless ? { stateless: true } : {}) })
+      // computerControl: the policy startTurn applied to this ordinary Codex
+      // run (CU-01); absent for bounded, other-engine and history-only runs.
+      this.emit(run, 'run.started', { status: 'inProgress', ...(run.profileBinding ? { profileBinding: run.profileBinding } : {}), ...(run.toolCeiling ? { toolCeiling: run.toolCeiling } : {}), ...(run.stateless ? { stateless: true } : {}), ...(context?.computerControl ? { computerControl: { policy: context.computerControl.policy } } : {}) })
       this.emitLegacy({ type: 'assistant-start', conversationId: threadId, runId: turnId, message: { id: key, role: 'assistant', content: '', status: 'streaming', createdAt: run.createdAt } })
     }
     return run
@@ -1115,7 +1159,10 @@ export class CodexChatRuntime {
     const ceiling = context.profileRun?.toolCeiling || null
     if (ceilingNarrows(ceiling) && engine.id !== 'codex') throw chatError('PROFILE_CEILING_UNSUPPORTED', 'This AI engine cannot enforce the Agent tool limits yet', 409)
     // CU-01: 'off' applies to ordinary Codex threads; bounded threads already disable it all.
-    const computerOff = !bounded && engine.id === 'codex' && this.computerControl.policy === 'off'
+    const computerPolicy = this.computerControl.policy
+    const computerOff = !bounded && engine.id === 'codex' && computerPolicy === 'off'
+    // run.started reports the same policy this turn's thread was prepared with.
+    context.computerControl = !bounded && engine.id === 'codex' && this.computerControlReported ? { policy: computerPolicy } : null
     context.ceilingNotices = []
     const preparedProviders = new Map()
     for (const provider of this.toolProviders) if ((!bounded && provider.providerId !== 'egdesk-browser') ||
@@ -1452,6 +1499,7 @@ export class CodexChatRuntime {
         }
         if (epoch !== this.epochOf(engineId)) throw chatError('CONTEXT_CHANGED', 'Codex connection or account changed', 409)
         run.status = turn.status
+        if (TERMINAL.has(run.status)) this.endComputerCalls(run, false)
         run.stopConfirmed = turn.status === 'interrupted'
         run.error = turn.error
         run.truncated ||= Boolean(turn.truncated)
@@ -2149,6 +2197,7 @@ export class CodexChatRuntime {
     }
     run.truncated ||= Boolean(item.truncated)
     let activity = { id: item.id, kind: item.type, status: completed ? 'completed' : 'inProgress', title: item.type, detail: {}, sourceRefs: [] }
+    let computerUsed = false
     if (item.type === 'commandExecution') {
       activity = { ...activity, status: item.status, title: item.command || 'Command', detail: { command: item.command, cwd: item.cwd, exitCode: item.exitCode, durationMs: item.durationMs } }
     } else if (item.type === 'fileChange') {
@@ -2165,9 +2214,17 @@ export class CodexChatRuntime {
         if (target) activity.sourceRefs.push({ type: 'file', target: { path: target }, status: 'available', openable: true })
       }
     } else if (item.type === 'mcpToolCall') {
+      const controlKind = this.mcpCallControlKind(run, item)
       activity.status = item.status
-      activity.title = `${item.server} / ${item.tool}`
-      activity.detail = { server: item.server, tool: item.tool, durationMs: item.durationMs, controlKind: this.mcpCallControlKind(run, item) }
+      // CU-01 (Q1 (다)): a call that can drive the Mac reads as computer
+      // control; the server's own name stays in detail only.
+      activity.title = controlKind === 'computer' ? `컴퓨터 조작 · ${item.tool}` : `${item.server} / ${item.tool}`
+      activity.detail = {
+        server: item.server, tool: item.tool, durationMs: item.durationMs, controlKind,
+        status: item.status, argumentsBytes: item.argumentsBytes ?? null,
+        resultImageCount: item.resultImageCount ?? null, resultTextBytes: item.resultTextBytes ?? null,
+      }
+      if (controlKind === 'computer') computerUsed = this.noteComputerCall(run, item, announce)
     } else if (item.type === 'dynamicToolCall') {
       activity.status = item.status
       activity.title = item.tool
@@ -2192,6 +2249,7 @@ export class CodexChatRuntime {
     } else return
     this.put(run, 'activities', activity)
     if (announce) this.emit(run, completed ? 'activity.completed' : 'activity.started', activity, item.id)
+    if (announce && computerUsed) this.emitComputerUse(run, item.id)
     if (item.type !== 'collabAgentToolCall' && item.type !== 'subAgentActivity') return
     if (this.boundedRun(run)) {
       // Bounded threads disable multi_agent; any collaboration is out of scope.
@@ -2253,6 +2311,7 @@ export class CodexChatRuntime {
     for (const row of run.subAgents || []) row.parentEnded = true
     for (const key of this.rawMessages.keys()) if (key.startsWith(`${run.answerId}/`)) this.rawMessages.delete(key)
     for (const key of this.visibleMessages.keys()) if (key.startsWith(`${run.answerId}/`)) this.visibleMessages.delete(key)
+    if (this.endComputerCalls(run, true)) this.emitComputerUse(run)
     this.emit(run, 'run.completed', { status: run.status, stopRequested: run.stopRequested, stopConfirmed: run.stopConfirmed, error: run.error })
     if (run.status === 'completed') this.emitLegacy({ type: 'assistant-complete', conversationId: run.conversationId, messageId: run.answerId })
     else this.emitLegacy({ type: 'assistant-error', conversationId: run.conversationId, messageId: run.answerId, error: run.error?.message || 'Codex response was interrupted.' })
@@ -2276,6 +2335,48 @@ export class CodexChatRuntime {
     let inherited = null
     if (this.runEngine(run) === 'codex') { try { inherited = this.mcpServerKind(item.server) } catch {} }
     return strongerControlKind(item.controlKind || 'other', inherited ? mcpControlKind(inherited) : 'other')
+  }
+
+  // CU-01 (Q1 (다)): run.computerUse = { calls, lastAt, servers, active } for
+  // this run's computer-control MCP calls (controlKind 'computer'), created on
+  // the first one. calls counts each call ID once; active is true while one
+  // of them is in progress; lastAt (ms) is when one last started or ended as
+  // it happened, null when seen only in history; servers lists at most
+  // MAX_COMPUTER_SERVERS public server names. Returns whether it changed.
+  noteComputerCall(run, item, live) {
+    let calls = this.computerCalls.get(run)
+    if (!calls) this.computerCalls.set(run, calls = new Map())
+    const before = calls.get(item.id)
+    // An ended call never reopens on a late or replayed started item.
+    const state = before === 'ended' || item.status !== 'inProgress' || TERMINAL.has(run.status) ? 'ended' : 'active'
+    if (before === state) return false
+    calls.set(item.id, state)
+    if (calls.size > MAX_COMPUTER_CALL_IDS) for (const [id, value] of calls) if (value === 'ended') { calls.delete(id); break }
+    const use = run.computerUse || { calls: 0, lastAt: null, servers: [], active: false }
+    if (!before) use.calls++
+    if (live) use.lastAt = this.now()
+    if (item.server && use.servers.length < MAX_COMPUTER_SERVERS && !use.servers.includes(item.server)) use.servers.push(item.server)
+    use.active = [...calls.values()].includes('active')
+    run.computerUse = use
+    return true
+  }
+
+  // A run that ended or lost its engine has no computer call in progress.
+  // stamp: also record now as lastAt. Returns whether active changed.
+  endComputerCalls(run, stamp) {
+    if (!run.computerUse?.active) return false
+    const calls = this.computerCalls.get(run)
+    if (calls) for (const [id, value] of calls) if (value === 'active') calls.set(id, 'ended')
+    run.computerUse.active = false
+    if (stamp) run.computerUse.lastAt = this.now()
+    return true
+  }
+
+  // SSE 'computer.used': the run's computer-control count after a call
+  // started or ended. Counts and a time only, never the call's content.
+  emitComputerUse(run, itemId) {
+    const { calls, lastAt, active } = run.computerUse
+    this.emit(run, 'computer.used', { runId: run.runId, calls, lastAt, active }, itemId)
   }
 
   computerControlSnapshot() {
