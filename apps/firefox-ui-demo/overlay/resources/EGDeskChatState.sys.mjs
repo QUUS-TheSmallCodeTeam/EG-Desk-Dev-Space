@@ -443,6 +443,10 @@ export function buildChatRequest(thread, message, requestId, runtime = {}) {
   if (runtime.stateless === true && !thread.conversationId) body.stateless = true;
   if (Array.isArray(runtime.contextSnapshotIds)) body.contextSnapshotIds = [...new Set(runtime.contextSnapshotIds)];
   if (runtime.contextCapabilities) body.contextCapabilities = { read: true, reader: true, publishBriefing: true };
+  // CTX-03: which suggestion list this turn answered, and the refs taken from it.
+  if (typeof runtime.contextResolution?.resolutionId === 'string' && Array.isArray(runtime.contextResolution.chosen)) {
+    body.contextResolution = { resolutionId: runtime.contextResolution.resolutionId, chosen: [...runtime.contextResolution.chosen] };
+  }
   if (thread.profileEnabled === true) {
     body.profileEnabled = true;
     // A stored Agent Profile is composed by the bridge from its saved revision;
@@ -459,6 +463,138 @@ export function contextCapabilitiesForRequest(thread, auth, sourceIds = []) {
   // native thread. An explicit context request never silently replaces it.
   return sourceIds.length || (codexAccountKey(auth) && (!thread.conversationId || thread.contextToolsAvailable === true))
     ? { read: true, reader: true, publishBriefing: true } : null;
+}
+
+// CTX-03 '이것도 붙일까요?': the helper only suggests (policy suggest-only).
+// Relevance (reasons, score) and permission (requiresConsent, excludedBy) stay
+// separate; card names come from the screen's own cards, never from the helper.
+export const CONTEXT_REASON_TEXT = Object.freeze({
+  explicit: '직접 고른 자료', focused: '지금 보고 있는 카드', activeBoardMember: '지금 Board에 있는 카드',
+  sameCluster: '보고 있는 카드 옆에 모여 있음', visibleLarge: '화면에 크게 보이는 카드', recentlyUsed: '최근 30분 안에 쓴 자료',
+});
+export const CONTEXT_CONSENT_TEXT = '로그인된 페이지·Browser 내용이에요. 직접 확인하고 붙여 주세요';
+export const CONTEXT_EXCLUSION_TEXT = Object.freeze({ otherAccount: '다른 계정의 자료라 붙일 수 없어요', noPermission: '읽을 권한이 없는 자료예요' });
+export const CONTEXT_BOARD_MATCH_TEXT = Object.freeze({ active: '지금 Board', focused: '보고 있는 카드의 Board', visibleArea: '화면에 가장 많이 보이는 Board' });
+export const CONTEXT_SUGGEST_TITLE = '이것도 붙일까요?';
+export const CONTEXT_RESOLVER_RECORD_TITLE = '이번에 Agent가 볼 자료 · 고른 이유';
+// The helper keeps a resolution for 15 minutes; an unchosen one is sent only while clearly fresh.
+export const CONTEXT_RESOLUTION_FRESH_MS = 14 * 60 * 1000;
+const CONTEXT_REF = /^[A-Za-z0-9][A-Za-z0-9_.:-]{0,191}$/;
+const CONTEXT_KIND_LABEL = Object.freeze({ browser: 'Browser', file: '파일', 'board-element': 'Canvas 요소' });
+const contextRef = value => typeof value === 'string' && CONTEXT_REF.test(value);
+
+export function normalizeContextResolution(payload) {
+  if (!payload || typeof payload !== 'object' || payload.policy !== 'suggest-only') return null;
+  if (typeof payload.resolutionId !== 'string' || !/^[\da-f-]{36}$/i.test(payload.resolutionId)) return null;
+  const candidates = [];
+  for (const item of Array.isArray(payload.candidates) ? payload.candidates.slice(0, 12) : []) {
+    if (!item || !contextRef(item.ref) || !CONTEXT_KIND_LABEL[item.kind] || candidates.some(entry => entry.ref === item.ref)) continue;
+    const candidate = { ref: item.ref, kind: item.kind, score: Number.isFinite(item.score) ? item.score : 0,
+      reasons: Array.isArray(item.reasons) ? item.reasons.filter(reason => Object.hasOwn(CONTEXT_REASON_TEXT, reason)) : [],
+      // Unknown consent means consent: nothing is attached without a person's own check.
+      requiresConsent: item.requiresConsent !== false };
+    if (item.excludedBy !== undefined && item.excludedBy !== null) candidate.excludedBy = String(item.excludedBy);
+    candidates.push(candidate);
+  }
+  const board = payload.board && contextRef(payload.board.boardId) && CONTEXT_BOARD_MATCH_TEXT[payload.board.matchedBy]
+    ? { boardId: payload.board.boardId, matchedBy: payload.board.matchedBy } : null;
+  return { resolutionId: payload.resolutionId, policy: 'suggest-only',
+    resolvedAt: Number.isSafeInteger(payload.resolvedAt) ? payload.resolvedAt : null, board, candidates };
+}
+
+export function contextReasonText(reasons = []) {
+  return (Array.isArray(reasons) ? reasons : []).map(reason => CONTEXT_REASON_TEXT[reason]).filter(Boolean).join(' · ');
+}
+
+export function contextBoardText(board, boardTitleFor = () => null) {
+  const match = board && CONTEXT_BOARD_MATCH_TEXT[board.matchedBy];
+  if (!match) return null;
+  const title = boardTitleFor(board.boardId);
+  return title ? `${match} · ${title}` : match;
+}
+
+const contextExclusionText = code => CONTEXT_EXCLUSION_TEXT[code] || '지금은 붙일 수 없는 자료예요';
+
+// Rows for the suggestion area. Already attached cards and cards no longer on
+// the screen are left out. 'pick' rows can be added together; 'consent' rows
+// only one at a time by their own checkbox; 'excluded' rows only show why.
+export function contextSuggestionRows(resolution, { attachedRefs = [], picked = [], labelFor = () => null, boardTitleFor = () => null } = {}) {
+  const attached = new Set(attachedRefs);
+  const pickedSet = new Set(picked);
+  const rows = [];
+  for (const candidate of resolution?.candidates || []) {
+    if (attached.has(candidate.ref)) continue;
+    const label = labelFor(candidate.ref, candidate.kind);
+    if (!label) continue;
+    const mode = candidate.excludedBy ? 'excluded' : candidate.requiresConsent ? 'consent' : 'pick';
+    rows.push({ ref: candidate.ref, kind: candidate.kind, label, mode, score: candidate.score,
+      reasonText: contextReasonText(candidate.reasons),
+      note: mode === 'excluded' ? contextExclusionText(candidate.excludedBy) : mode === 'consent' ? CONTEXT_CONSENT_TEXT : null,
+      picked: mode !== 'excluded' && pickedSet.has(candidate.ref) });
+  }
+  return { rows, bulkRefs: rows.filter(row => row.mode === 'pick').map(row => row.ref),
+    pickedRefs: rows.filter(row => row.picked).map(row => row.ref), boardText: contextBoardText(resolution?.board, boardTitleFor) };
+}
+
+// The refs a person attached from the suggestion area (marked resolverRef on
+// the attached source) and still sends now. Nothing chosen sends chosen: [].
+export function contextResolutionForSend(entry, sources = [], { now = Date.now(), accountKey = null } = {}) {
+  const resolution = entry?.resolution;
+  if (!resolution?.resolutionId || (entry.accountKey ?? null) !== (accountKey ?? null)) return null;
+  const candidates = new Map((resolution.candidates || []).map(candidate => [candidate.ref, candidate]));
+  const chosen = [];
+  for (const source of Array.isArray(sources) ? sources : []) {
+    const ref = source?.resolverRef;
+    if (!ref || source.sourceRef?.viewId !== ref || chosen.includes(ref)) continue;
+    const candidate = candidates.get(ref);
+    if (candidate && !candidate.excludedBy) chosen.push(ref);
+  }
+  const age = now - entry.receivedAt;
+  if (!chosen.length && !(Number.isFinite(age) && age >= 0 && age < CONTEXT_RESOLUTION_FRESH_MS)) return null;
+  return { resolutionId: resolution.resolutionId, chosen: chosen.slice(0, 16) };
+}
+
+export function contextResolverErrorText(code) {
+  return ({
+    RESOLUTION_EXPIRED: '자료 추천이 오래되어 새로 불러왔어요. 추천을 확인한 뒤 다시 보내 주세요.',
+    RESOLVER_CHOICE_FORBIDDEN: '고른 자료 중 다른 계정의 자료나 읽을 권한이 없는 자료가 있어 보내지 않았어요. 그 자료를 빼고 다시 보내 주세요.',
+    RESOLVER_CHOICE_UNKNOWN: '고른 자료가 추천 목록에 없어 보내지 않았어요. 추천을 다시 확인해 주세요.',
+    RESOLVER_CHOICE_UNCAPTURED: '고른 자료를 첨부하지 못해 보내지 않았어요. 자료를 다시 붙여 주세요.',
+    INVALID_RESOLVER_CHOICE: '고른 자료 정보를 확인하지 못해 보내지 않았어요. 추천을 다시 불러온 뒤 보내 주세요.',
+    INVALID_RESOLVER_SIGNAL: '화면 정보를 읽지 못해 자료 추천을 보여 드리지 못했어요. 필요한 자료는 ＋ 첨부로 붙여 주세요.',
+    CONTEXT_LOOPBACK_REQUIRED: '이 기기의 EG-Desk 화면에서만 자료 추천을 받을 수 있어요.',
+  })[code] || null;
+}
+
+// CTX-04 '왜 이것이 붙었나': names from the screen (or the capture label),
+// reason words and scores only. No captured text.
+export function contextResolverRecordView(resolver, { labelFor = () => null, captures = [], boardTitleFor = () => null } = {}) {
+  if (!resolver || typeof resolver !== 'object' || !Array.isArray(resolver.candidates)) return null;
+  const captureList = Array.isArray(captures) ? captures.filter(Boolean) : [];
+  const rows = [];
+  const covered = new Set();
+  let suggested = 0;
+  let chosen = 0;
+  for (const candidate of resolver.candidates) {
+    if (!candidate || !contextRef(candidate.ref)) continue;
+    const explicit = Array.isArray(candidate.reasons) && candidate.reasons.includes('explicit');
+    if (candidate.chosen === true) chosen++;
+    if (!candidate.excludedBy && (!explicit || candidate.chosen === true)) suggested++;
+    if (candidate.chosen !== true && !explicit) continue;
+    const capture = captureList.find(item => (candidate.sourceId && item.sourceId === candidate.sourceId) || item.sourceRef?.viewId === candidate.ref);
+    if (capture?.sourceId) covered.add(capture.sourceId);
+    rows.push({ ref: candidate.ref, chosen: candidate.chosen === true,
+      label: labelFor(candidate.ref, candidate.kind) || (typeof capture?.label === 'string' && capture.label) || CONTEXT_KIND_LABEL[candidate.kind] || '자료',
+      reasonText: contextReasonText(candidate.reasons) || CONTEXT_REASON_TEXT.explicit,
+      scoreText: Number.isFinite(candidate.score) ? `점수 ${candidate.score}` : null });
+  }
+  for (const capture of captureList) {
+    if (!capture.sourceId || covered.has(capture.sourceId)) continue;
+    rows.push({ ref: null, chosen: false, label: typeof capture.label === 'string' && capture.label ? capture.label : '자료',
+      reasonText: CONTEXT_REASON_TEXT.explicit, scoreText: null });
+  }
+  return { title: CONTEXT_RESOLVER_RECORD_TITLE, boardText: contextBoardText(resolver.board, boardTitleFor), rows,
+    summary: suggested ? `추천 ${suggested}개 중 ${chosen}개를 골라 붙였어요` : '추천 없이 직접 고른 자료만 붙였어요' };
 }
 function ensureRun(state, identity) {
   const request = state.requests[identity.requestId];
@@ -549,6 +685,7 @@ export function reduceChatEvent(state, event, engineIds = [DEFAULT_CHAT_ENGINE_I
     for (const artifact of artifacts) if (usableArtifact(artifact)) upsert(run.artifacts, copy(artifact));
   } else if (event.event === 'context.bound') {
     run.contextCaptures = copy(details.captures || []);
+    run.contextResolver = copy(details.resolver || null);
   } else if (/^(context\.read|reader)\.(started|completed|failed)$/.test(event.event)) {
     run.contextEvents ||= [];
     run.contextEvents.push({ id: `${event.streamId}:${event.seq}`, event: event.event, ts: event.ts, details: copy(details) });
@@ -657,6 +794,7 @@ export function mergeChatSnapshot(state, snapshot, clientThreadId) {
       if (incoming.context) {
         run.contextCaptures = copy(incoming.context.captures || []);
         run.contextPackets = copy(incoming.context.packets || []);
+        if (incoming.context.resolver) run.contextResolver = copy(incoming.context.resolver);
         if (incoming.context.briefings?.length) run.briefing = copy(incoming.context.briefings.at(-1));
       }
       if (stream) { run.streamId = snapshot.streamId; run.seq = snapshot.seq; }

@@ -74,6 +74,112 @@ export function surfaceProximityClusters(items, distance = 42) {
   return groups;
 }
 
+// CTX-03 screen signals for POST /context/resolve. Only opaque screen ids,
+// viewport fractions, focus and recency times and account-scope tokens leave
+// the screen: titles, URLs, paths and captured text are never in the body.
+export const CONTEXT_SIGNAL_TOKEN = /^[A-Za-z0-9][A-Za-z0-9_.:-]{0,191}$/;
+export const CONTEXT_SIGNAL_KINDS = Object.freeze(['browser', 'file', 'board-element']);
+export const CONTEXT_SIGNAL_LIMITS = Object.freeze({ explicit: 16, visible: 64, clusters: 32, clusterSize: 64, recent: 32, scopes: 8 });
+export const CONTEXT_RECENT_WINDOW_MS = 30 * 60 * 1000;
+// Cards closer than this many screen pixels count as one group.
+export const CONTEXT_CLUSTER_GAP = 24;
+
+const signalToken = value => typeof value === 'string' && CONTEXT_SIGNAL_TOKEN.test(value) ? value : null;
+
+function clippedScreenRect(rect, viewport) {
+  if (!rect || !viewport) return null;
+  const [left, top, width, height, vw, vh] = [rect.left, rect.top, rect.width, rect.height, viewport.width, viewport.height].map(Number);
+  if (![left, top, width, height, vw, vh].every(Number.isFinite) || width <= 0 || height <= 0 || vw <= 0 || vh <= 0) return null;
+  const x1 = Math.max(0, left);
+  const y1 = Math.max(0, top);
+  const x2 = Math.min(vw, left + width);
+  const y2 = Math.min(vh, top + height);
+  return x2 > x1 && y2 > y1 ? { left: x1, top: y1, width: x2 - x1, height: y2 - y1 } : null;
+}
+
+// The visible fraction of the Desk viewport a card covers (0..1).
+export function contextVisibleArea(rect, viewport) {
+  const clip = clippedScreenRect(rect, viewport);
+  if (!clip) return 0;
+  return Math.min(1, Math.round(clip.width * clip.height / (viewport.width * viewport.height) * 1000) / 1000);
+}
+
+// views: [{ ref, kind, rect, boardId?, focused?, accountScope?, signedIn?, permission?, lastInteractedAt? }]
+// explicit: [{ kind, ref, accountScope? }] already attached; recent: [{ kind, ref, at }].
+// One ref keeps one kind and one account scope across the lists, as the helper requires.
+export function contextResolverSignals({
+  views = [], explicit = [], recent = [], activeBoardId = null, scopes = [], viewport = null,
+  now = Date.now(), clusterGap = CONTEXT_CLUSTER_GAP,
+} = {}) {
+  const gap = Number.isFinite(clusterGap) && clusterGap >= 0 ? clusterGap : CONTEXT_CLUSTER_GAP;
+  const known = new Map();
+  const visible = [];
+  const markers = [];
+  let focusTaken = false;
+  const ordered = (Array.isArray(views) ? views : [])
+    .map((view, order) => ({ view, order, ref: signalToken(view?.ref) }))
+    .filter(({ view, ref }) => ref && CONTEXT_SIGNAL_KINDS.includes(view.kind))
+    .map(item => ({ ...item, clip: clippedScreenRect(item.view.rect, viewport), area: contextVisibleArea(item.view.rect, viewport) }))
+    .filter(item => item.area > 0 || item.view.focused === true)
+    .sort((a, b) => (b.view.focused === true) - (a.view.focused === true)
+      || (a.view.kind === 'board-element') - (b.view.kind === 'board-element')
+      || b.area - a.area || a.order - b.order);
+  for (const { view, ref, clip, area } of ordered) {
+    if (known.has(ref) || visible.length >= CONTEXT_SIGNAL_LIMITS.visible) continue;
+    const item = { kind: view.kind, ref };
+    const accountScope = signalToken(view.accountScope);
+    if (accountScope) item.accountScope = accountScope;
+    if (view.permission === 'allowed' || view.permission === 'denied') item.permission = view.permission;
+    if (typeof view.signedIn === 'boolean') item.signedIn = view.signedIn;
+    const boardId = signalToken(view.boardId);
+    if (boardId) item.boardId = boardId;
+    if (view.focused === true && !focusTaken) { item.focused = true; focusTaken = true; }
+    item.area = area;
+    if (Number.isSafeInteger(view.lastInteractedAt) && view.lastInteractedAt >= 0) item.lastInteractedAt = view.lastInteractedAt;
+    visible.push(item);
+    known.set(ref, item);
+    if (clip) markers.push({ id: ref, cx: clip.left + clip.width / 2, cy: clip.top + clip.height / 2,
+      width: clip.width + 2 * gap, height: clip.height + 2 * gap });
+  }
+  const cluster = surfaceProximityClusters(markers)
+    .map(group => group.slice(0, CONTEXT_SIGNAL_LIMITS.clusterSize)).slice(0, CONTEXT_SIGNAL_LIMITS.clusters);
+  const resource = item => {
+    const ref = signalToken(item?.ref);
+    if (!ref) return null;
+    const current = known.get(ref);
+    if (current) return { kind: current.kind, ref, ...(current.accountScope ? { accountScope: current.accountScope } : {}) };
+    if (!CONTEXT_SIGNAL_KINDS.includes(item.kind)) return null;
+    const out = { kind: item.kind, ref };
+    const accountScope = signalToken(item.accountScope);
+    if (accountScope) out.accountScope = accountScope;
+    if (typeof item.signedIn === 'boolean') out.signedIn = item.signedIn;
+    known.set(ref, out);
+    return out;
+  };
+  const explicitList = [];
+  for (const item of Array.isArray(explicit) ? explicit : []) {
+    if (explicitList.length >= CONTEXT_SIGNAL_LIMITS.explicit) break;
+    const out = resource(item);
+    if (out && !explicitList.some(entry => entry.ref === out.ref)) explicitList.push(out);
+  }
+  const recentByRef = new Map();
+  for (const item of Array.isArray(recent) ? recent : []) {
+    const at = item?.at;
+    if (!Number.isSafeInteger(at) || at < now - CONTEXT_RECENT_WINDOW_MS || at > now + 5 * 60 * 1000) continue;
+    const out = resource(item);
+    if (out && !(recentByRef.get(out.ref)?.at >= at)) recentByRef.set(out.ref, { ...out, at });
+  }
+  const recentList = [...recentByRef.values()]
+    .sort((a, b) => b.at - a.at || (a.ref < b.ref ? -1 : a.ref > b.ref ? 1 : 0)).slice(0, CONTEXT_SIGNAL_LIMITS.recent);
+  const scopeList = [...new Set((Array.isArray(scopes) ? scopes : []).map(signalToken).filter(Boolean))].slice(0, CONTEXT_SIGNAL_LIMITS.scopes);
+  const body = {};
+  const boardId = signalToken(activeBoardId);
+  if (boardId) body.boardId = boardId;
+  Object.assign(body, { explicit: explicitList, visible, cluster, recent: recentList });
+  if (scopeList.length) body.account = { scopes: scopeList };
+  return body;
+}
+
 // Canvas marks are plain JSON records. An unknown or older type opens as the
 // original rectangle instead of an invisible element.
 export const CANVAS_SHAPE_TYPES = Object.freeze(['rect', 'ellipse', 'line', 'arrow', 'path', 'label', 'highlight']);

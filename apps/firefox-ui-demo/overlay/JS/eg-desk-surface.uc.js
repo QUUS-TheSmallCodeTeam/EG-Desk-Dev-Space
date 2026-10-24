@@ -542,6 +542,9 @@
       cardsByKey: Object.create(null),
       defaultProfileId: 'firefox-egdesk-default',
     },
+    // CTX-03 '이것도 붙일까요?' per Chat room: the last helper suggestion list,
+    // the rows a person ticked, and whether the area is folded or closed.
+    contextSuggest: { unsupportedUntil: 0, byThread: {} },
     codex: {
       provider: 'codex',
       protocolVersion: 0,
@@ -1115,6 +1118,22 @@
     }, { nextId: () => `capture-${chatBindingNonce()}` });
   }
 
+  // Every source a person picks (attach panel or '이것도 붙일까요?') goes the same
+  // way: a Browser becomes this Chat's one-time observe selection, replacing an
+  // older chip of the same card.
+  function userSelectedChatSources(threadId, sources) {
+    const additions = [];
+    for (const source of sources) {
+      if (source.kind !== 'browser') { additions.push(source); continue; }
+      const existing = getCodexThreadById(state.codex, threadId)?.inputSources?.find(item =>
+        item.kind === 'browser' && item.sourceRef?.viewId === source.sourceRef.viewId);
+      if (existing) state.codexBridge.removeInputSource(threadId, existing.id);
+      const selectedSource = registerBrowserToolSelection(threadId, source, 'observe');
+      additions.push(selectedSource || { ...source, selectedByUser: true, browserToolPermission: 'observe' });
+    }
+    return additions;
+  }
+
   function openChatInputPanel(threadId, { viewIds = null, snapshots = null } = {}) {
     const thread = getCodexThreadById(state.codex, threadId);
     if (!thread) return;
@@ -1168,16 +1187,7 @@
         });
       } }, '파일 선택…'));
       body.appendChild(el('button', { 'aria-label': '선택한 자료를 Chat 초안에 첨부', data: { testid: 'chat-attach-confirm' }, onclick: () => {
-        const additions = [];
-        for (const source of picked.values()) {
-          if (source.kind !== 'browser') { additions.push(source); continue; }
-          const existing = getCodexThreadById(state.codex, threadId)?.inputSources?.find(item =>
-            item.kind === 'browser' && item.sourceRef?.viewId === source.sourceRef.viewId);
-          if (existing) state.codexBridge.removeInputSource(threadId, existing.id);
-          const selectedSource = registerBrowserToolSelection(threadId, source, 'observe');
-          additions.push(selectedSource || { ...source, selectedByUser: true, browserToolPermission: 'observe' });
-        }
-        state.codexBridge.addInputSources(threadId, additions); close();
+        state.codexBridge.addInputSources(threadId, userSelectedChatSources(threadId, picked.values())); close();
       } }, '선택 항목 첨부'));
     }
     document.documentElement.appendChild(panel);
@@ -1206,6 +1216,170 @@
         el('button', { type: 'button', 'aria-label': '브리핑 근거 첨부 제거', onclick: () => bridge.removeBriefingInput(thread.id, reference.sourceId) }, '×')));
     }
     return tray;
+  }
+
+  // CTX-03 screen side of '이것도 붙일까요?'. The kind follows chatInputSourceForView
+  // without asking a Browser for its tool binding, so collecting signals changes nothing.
+  function contextResolverKindForView(view) {
+    if (!view?.isConnected || view.dataset.codexRole === 'auth' || view.classList.contains('egd-chat-card')) return null;
+    if (view.classList.contains('egd-file-card')) {
+      const current = view._fileView?.snapshot?.();
+      return current?.fileId && current?.draftId ? 'file' : null;
+    }
+    if (view.classList.contains('egd-browser-card')) {
+      const uri = browserCardState(view)?.uri;
+      return uri ? (uri.startsWith('file:') ? 'file' : 'browser') : null;
+    }
+    return view.classList.contains('egd-canvas-shape') ? 'board-element' : null;
+  }
+
+  // The helper returns refs only; the name is read from the card on this screen.
+  function contextCandidateLabel(view) {
+    if (!contextResolverKindForView(view)) return null;
+    if (view.classList.contains('egd-file-card')) {
+      return view.querySelector('.egdesk-file-title')?.textContent?.trim() || cardLabelForViewportRail(view);
+    }
+    if (view.classList.contains('egd-browser-card')) {
+      const host = browserDisplayHost(browserCardState(view)?.uri || '');
+      return host ? `Browser · ${host}` : 'Browser';
+    }
+    const text = view.querySelector('.egd-canvas-shape-label-text')?.textContent?.trim();
+    return text ? `Canvas 요소 · ${text.slice(0, 24)}` : (view.getAttribute('title') || 'Canvas 요소');
+  }
+
+  function contextBoardTitle(boardId) {
+    return Object.values(state.boards.projections).find(projection => projection.boardId === boardId)?.title || null;
+  }
+
+  // POST /context/resolve body: screen ids, viewport fractions, focus and account
+  // tokens only (no title, url, path or text). Auth and Chat cards are left out.
+  function collectContextResolverSignals(thread, now = Date.now()) {
+    const views = [];
+    for (const view of document.querySelectorAll('.egd-browser-card, .egd-file-card, .egd-canvas-shape')) {
+      const kind = contextResolverKindForView(view);
+      if (!kind || !view.id) continue;
+      const rect = view.getBoundingClientRect();
+      const item = { ref: view.id, kind, rect: { left: rect.left, top: rect.top, width: rect.width, height: rect.height },
+        boardId: state.boards.projections[view.dataset.projectionId]?.boardId || null, focused: state.activeEntityId === view.id };
+      if (kind === 'browser') {
+        // The profile id is an opaque token; the site account itself never leaves the screen.
+        item.accountScope = view._sourceRef?.profileId || state.sourceRefs.defaultProfileId;
+        if (view._sourceRef?.accountId) item.signedIn = true;
+      }
+      views.push(item);
+    }
+    const scopes = [state.sourceRefs.defaultProfileId];
+    const explicit = [];
+    for (const source of thread?.inputSources || []) {
+      const ref = source.sourceRef?.viewId;
+      if (!ref) continue;
+      const profileId = source.kind === 'browser' ? source.sourceRef.profileId : null;
+      if (profileId) scopes.push(profileId);
+      explicit.push({ kind: source.kind, ref, ...(profileId ? { accountScope: profileId } : {}) });
+    }
+    const recent = [];
+    for (const message of thread?.messages || []) {
+      for (const reference of message.inputReferences || []) {
+        const ref = reference.localSource?.sourceRef?.viewId;
+        const kind = ref && contextResolverKindForView(document.getElementById(ref));
+        const at = typeof reference.capturedAt === 'number' ? reference.capturedAt : Date.parse(reference.capturedAt || '');
+        if (kind && Number.isSafeInteger(at)) recent.push({ kind, ref, at });
+      }
+    }
+    return SurfaceState.contextResolverSignals({ views, explicit, recent, scopes, now,
+      activeBoardId: state.boards.projections[state.boards.activeProjectionId]?.boardId || null,
+      viewport: { width: window.innerWidth, height: window.innerHeight } });
+  }
+
+  // Above the input tray. Nothing is ticked or attached by itself: plain rows
+  // can be added together, signed-in/Browser rows only by their own checkbox,
+  // and rows outside the account or permission show only why.
+  function buildContextSuggestions(thread, bridge) {
+    const store = state.contextSuggest;
+    const entry = store?.byThread?.[thread.id];
+    if (!entry || entry.dismissed || Date.now() < (store.unsupportedUntil || 0) || !state.codex?.authStatus?.isLoggedIn) return null;
+    const close = el('button', { type: 'button', class: 'egd-context-suggest-close', 'aria-label': '자료 추천 닫기', title: '닫기',
+      data: { testid: 'chat-context-suggest-close', focusKey: `ctx-close:${thread.id}` },
+      onclick: () => bridge.dismissContextSuggestions(thread.id) }, '×');
+    if (!entry.resolution) {
+      if (entry.status !== 'error' || !entry.error) return null;
+      return el('section', { class: 'egd-context-suggest egd-context-suggest-error', role: 'status',
+        data: { testid: 'chat-context-suggest', threadId: thread.id, state: 'error' } },
+      el('div', { class: 'egd-context-suggest-head' }, el('p', { class: 'egd-context-suggest-message' }, entry.error), close));
+    }
+    const view = ChatState.contextSuggestionRows(entry.resolution, {
+      attachedRefs: (thread.inputSources || []).map(source => source.sourceRef?.viewId).filter(Boolean),
+      picked: entry.picked || [], labelFor: ref => contextCandidateLabel(document.getElementById(ref)), boardTitleFor: contextBoardTitle,
+    });
+    if (!view.rows.length) return null;
+    const collapsed = entry.collapsed === true;
+    const listId = `egd-context-suggest-list-${thread.id}`;
+    const picked = new Set(view.pickedRefs);
+    const addPicked = el('button', { type: 'button', class: 'egd-context-suggest-add',
+      data: { testid: 'chat-context-add-picked', focusKey: `ctx-add:${thread.id}` },
+      onclick: () => bridge.attachContextSuggestions(thread.id, [...picked]) });
+    const syncAddPicked = () => {
+      addPicked.textContent = picked.size ? `고른 ${picked.size}개 붙이기` : '고른 것 붙이기';
+      addPicked.disabled = !picked.size;
+    };
+    syncAddPicked();
+    const rows = view.rows.map(row => {
+      // The row's own words (name, reason, note) name the checkbox.
+      const check = el('input', { type: 'checkbox', class: 'egd-context-suggest-check',
+        disabled: row.mode === 'excluded' ? 'true' : null,
+        data: { testid: 'chat-context-candidate-check', ref: row.ref, focusKey: `ctx-pick:${thread.id}:${row.ref}` } });
+      check.checked = row.picked;
+      check.addEventListener('change', () => {
+        if (check.checked) picked.add(row.ref); else picked.delete(row.ref);
+        bridge.setContextSuggestionPicked(thread.id, row.ref, check.checked);
+        syncAddPicked();
+      });
+      return el('label', { class: `egd-context-suggest-row egd-context-suggest-row-${row.mode}`,
+        'aria-disabled': row.mode === 'excluded' ? 'true' : null,
+        data: { testid: 'chat-context-candidate', ref: row.ref, mode: row.mode } },
+      check,
+      el('span', { class: 'egd-context-suggest-text' },
+        el('span', { class: 'egd-context-suggest-name' }, row.label),
+        row.reasonText ? el('span', { class: 'egd-context-suggest-reason' }, row.reasonText) : null,
+        row.note ? el('span', { class: 'egd-context-suggest-note', data: { testid: 'chat-context-candidate-note' } }, row.note) : null));
+    });
+    const head = el('div', { class: 'egd-context-suggest-head' },
+      el('button', { type: 'button', class: 'egd-context-suggest-toggle', 'aria-expanded': String(!collapsed),
+        'aria-controls': collapsed ? null : listId, title: collapsed ? '추천 펼치기' : '추천 접기',
+        data: { testid: 'chat-context-suggest-toggle', focusKey: `ctx-toggle:${thread.id}` },
+        onclick: () => bridge.toggleContextSuggestions(thread.id) },
+      el('span', { class: 'egd-context-suggest-title' }, ChatState.CONTEXT_SUGGEST_TITLE),
+      el('span', { class: 'egd-context-suggest-count' }, `${view.rows.length}개`)),
+      view.boardText ? el('span', { class: 'egd-context-suggest-board', data: { testid: 'chat-context-suggest-board' } }, view.boardText) : null,
+      close);
+    const body = collapsed ? null : el('div', { class: 'egd-context-suggest-body', id: listId },
+      el('div', { class: 'egd-context-suggest-list', role: 'group', 'aria-label': '추천 자료' }, ...rows),
+      el('div', { class: 'egd-context-suggest-actions' },
+        el('span', { class: 'egd-context-suggest-hint' }, '고른 자료만 붙어요'),
+        view.bulkRefs.length ? el('button', { type: 'button', class: 'egd-context-suggest-all', title: '로그인된 페이지·Browser는 빼고 붙여요',
+          data: { testid: 'chat-context-add-all', focusKey: `ctx-all:${thread.id}` },
+          onclick: () => bridge.attachContextSuggestions(thread.id, view.bulkRefs) }, `모두 추가 · ${view.bulkRefs.length}개`) : null,
+        addPicked));
+    return el('section', { class: 'egd-context-suggest', role: 'group', 'aria-label': ChatState.CONTEXT_SUGGEST_TITLE,
+      data: { testid: 'chat-context-suggest', threadId: thread.id, collapsed: String(collapsed) } }, head, body);
+  }
+
+  // CTX-04 in the activity record: what this run's Agent can read and why, from
+  // the run's resolver record (names from this screen, reasons and scores only).
+  function contextResolverRecordSection(run) {
+    const view = ChatState.contextResolverRecordView(run.contextResolver, {
+      labelFor: ref => contextCandidateLabel(document.getElementById(ref)), captures: run.contextCaptures, boardTitleFor: contextBoardTitle,
+    });
+    if (!view) return null;
+    return el('section', { class: 'egd-codex-context-resolver', data: { testid: 'chat-context-resolver', runId: run.runId || '' } },
+      el('strong', { class: 'egd-codex-context-resolver-title' }, view.title),
+      view.boardText ? el('p', { class: 'egd-codex-context-resolver-board' }, view.boardText) : null,
+      view.rows.length ? el('ul', { class: 'egd-codex-context-resolver-list' }, ...view.rows.map(row =>
+        el('li', { data: { testid: 'chat-context-resolver-row', chosen: String(row.chosen), ...(row.ref ? { ref: row.ref } : {}) } },
+          el('span', { class: 'egd-codex-context-resolver-name' }, row.label),
+          el('span', { class: 'egd-codex-context-resolver-reason' }, row.reasonText),
+          row.scoreText ? el('span', { class: 'egd-codex-context-resolver-score' }, row.scoreText) : null))) : null,
+      el('p', { class: 'egd-codex-context-resolver-summary' }, view.summary));
   }
 
   function briefingResolvedTargets(session, step = BriefingState.currentBriefingStep(session)) {
@@ -1630,6 +1804,9 @@
       // AGENT-04: the ceiling this run was started under, named under its head.
       const ceilingLine = ChatState.toolCeilingRunLine(run);
       if (ceilingLine) rows.push(el('p', { class: 'egd-codex-run-ceiling', data: { testid: 'chat-run-tool-ceiling', runId: run.runId } }, ceilingLine));
+      // CTX-04: what this run's Agent can read and why it was picked.
+      const resolverSection = contextResolverRecordSection(run);
+      if (resolverSection) rows.push(resolverSection);
       for (const entry of run.contextEvents || []) {
         const labels = { 'context.read.started': '자료 읽기 시작', 'context.read.completed': '요청 범위의 자료 읽기 완료',
           'context.read.failed': '자료 읽기 실패', 'reader.started': 'Reader 처리 시작', 'reader.completed': 'Reader 처리 완료', 'reader.failed': 'Reader 처리 실패' };
@@ -2489,11 +2666,13 @@
     }, label);
     const items = [
       item('저장', '이 Board 저장', 'board-save', () => saveCurrentAgendaState({ projectionId })),
+      // CTX-01: only while the bridge's Desk store keeps Board versions.
+      boardVersionHistoryReady() ? item('버전 기록', '이 Board의 버전 기록', 'board-history', () => openBoardHistoryPanel(projection.boardId)) : null,
       item('Chat에 첨부', '이 Board의 요소를 Chat에 첨부', 'board-attach-chat',
         () => openChatInputPanel(state.codex.activeThreadId, { viewIds: projection.members.map(member => member.viewId) })),
       item('Board 닫기', '이 Board 닫기', 'board-close', () => closeCurrentAgenda({ projectionId })),
-    ];
-    const pos = resolveFloatingMenuPlacement(anchor.getBoundingClientRect(), 152, 112);
+    ].filter(Boolean);
+    const pos = resolveFloatingMenuPlacement(anchor.getBoundingClientRect(), 152, items.length * 36 + 4);
     const menu = el('div', {
       class: 'egd-board-menu', role: 'menu', 'aria-label': `${projection.title} Board 작업`,
       data: { projectionId }, style: { left: `${Math.round(pos.left)}px`, top: `${Math.round(pos.top)}px` },
@@ -2531,6 +2710,255 @@
     boardRegionMenu = menu;
     items[0].focus();
     return menu;
+  }
+
+  // ── CTX-01: Board versions in the bridge's Desk store ──
+  function boardVersionHistoryReady() {
+    return deskStoreSync().status().ready;
+  }
+
+  function boardTitleFor(boardId) {
+    const projection = Object.values(state.boards.projections).find(item => item.boardId === boardId);
+    return projection?.title || coerceAgendaStore().meta?.[boardId]?.title || 'Board';
+  }
+
+  // A conflict never overwrites the stored head; the person chooses what happens next.
+  async function syncBoardToStore(boardId, snapshot, title) {
+    const result = await deskStoreSync().saveBoard(boardId, snapshot, { title });
+    if (result.conflict) showBoardConflict({ boardId, snapshot, title, headRevision: result.headRevision });
+    else if (result.stored === 'both' && document.getElementById('egd-board-history')?.dataset.boardId === boardId) void loadBoardHistory();
+    return result;
+  }
+
+  // Put a stored Board version into this PC's Board list and redraw the Board if it is open.
+  async function applyBoardBodyLocally(boardId, body, { title } = {}) {
+    if (body?.agenda?.id !== boardId) return false;
+    const store = coerceAgendaStore();
+    const meta = store.meta[boardId] || {};
+    const name = (typeof title === 'string' && title.trim()) || meta.title || body.agenda.title || 'Board';
+    const snapshot = { ...cloneJson(body), savedAt: Date.now() };
+    snapshot.agenda = { ...snapshot.agenda, title: name };
+    store.agendas[boardId] = snapshot;
+    store.meta[boardId] = { ...meta, id: boardId, title: name, createdAt: meta.createdAt || snapshot.savedAt, updatedAt: snapshot.savedAt };
+    if (!writeAgendaStoreAndSync(store)) return false;
+    const projection = Object.values(state.boards.projections).find(item => item.boardId === boardId);
+    if (!projection) return true;
+    if (!(await completeAgendaClose({ projectionId: projection.id }))) return false;
+    return !!switchAgenda(boardId);
+  }
+
+  // '다른 곳에서 바뀌었습니다': [최신 보기] then [최신 버전으로 열기], or [내 것으로 새 버전 저장].
+  function boardConflictView(conflict, actions = {}) {
+    const busy = conflict.busy ? 'true' : null;
+    const latest = conflict.latest;
+    const latestView = !latest ? null : latest.preview
+      ? el('div', { class: 'egd-store-preview', role: 'region', 'aria-label': '최신 버전', data: { testid: 'board-conflict-latest' } },
+        el('strong', {}, `최신 버전 ${latest.headRevision}${Number.isFinite(latest.createdAt) ? ` · ${RecoveryState.deskStoreTime(latest.createdAt)}` : ''}`),
+        el('p', {}, `이름 ${latest.preview.title} · 카드 ${latest.preview.cardCount}개 · 도형 ${latest.preview.shapeCount}개${latest.preview.kinds ? ` (${latest.preview.kinds})` : ''}`),
+        el('p', { class: 'egd-store-panel-copy' }, '최신 버전으로 열면 이 PC에만 저장된 내 변경은 화면에서 사라집니다.'))
+      : el('p', { class: 'egd-store-panel-status', role: 'status' }, '최신 버전을 불러오지 못했습니다. 잠시 뒤 다시 시도해 주세요.');
+    return el('div', { class: 'egd-store-conflict-body' },
+      el('div', { class: 'egd-store-panel-head' },
+        el('strong', {}, '다른 곳에서 이 Board가 바뀌었습니다'),
+        el('button', { type: 'button', class: 'egd-store-panel-close', 'aria-label': '안내 닫기', data: { testid: 'board-conflict-close', focusKey: 'close' }, onclick: () => actions.onClose?.() }, '×')),
+      el('p', { class: 'egd-store-panel-copy' }, `'${conflict.title || 'Board'}'에 다른 창이나 PC에서 저장한 새 버전이 있습니다. 내 변경은 이 PC 설정에 저장했고, 버전 기록은 덮어쓰지 않았습니다.`),
+      conflict.message ? el('p', { class: 'egd-store-panel-status', role: 'status' }, conflict.message) : null,
+      latestView,
+      el('div', { class: 'egd-store-actions' },
+        latest?.body
+          ? el('button', { type: 'button', disabled: busy, data: { testid: 'board-conflict-open-latest', focusKey: 'open-latest' }, onclick: () => actions.onOpenLatest?.() }, '최신 버전으로 열기')
+          : el('button', { type: 'button', disabled: busy, data: { testid: 'board-conflict-show-latest', focusKey: 'show-latest' }, onclick: () => actions.onShowLatest?.() }, '최신 보기'),
+        el('button', { type: 'button', class: 'egd-store-primary', disabled: busy, data: { testid: 'board-conflict-save-mine', focusKey: 'save-mine' }, onclick: () => actions.onSaveMine?.() }, '내 것으로 새 버전 저장')));
+  }
+
+  function showBoardConflict({ boardId, snapshot, title, headRevision }) {
+    document.getElementById('egd-board-conflict')?.remove();
+    const conflict = { boardId, snapshot, title: title || boardTitleFor(boardId), headRevision, latest: null, busy: false, message: null };
+    const panel = el('section', { id: 'egd-board-conflict', class: 'egd-store-panel', role: 'alertdialog', 'aria-label': '다른 곳에서 바뀐 Board', data: { testid: 'board-conflict', boardId } });
+    const close = () => panel.remove();
+    const render = (focusKey) => {
+      if (!panel.isConnected) return;
+      panel.replaceChildren(boardConflictView(conflict, {
+        onClose: close,
+        onShowLatest: async () => {
+          conflict.busy = true;
+          render();
+          const latest = await deskStoreSync().latestBoard(boardId);
+          conflict.busy = false;
+          conflict.latest = latest.missing || latest.error || latest.unavailable ? { preview: null } : latest;
+          if (Number.isSafeInteger(latest.headRevision)) conflict.headRevision = latest.headRevision;
+          render(latest.body ? 'open-latest' : 'show-latest');
+        },
+        onOpenLatest: async () => {
+          conflict.busy = true;
+          render();
+          const opened = await applyBoardBodyLocally(boardId, conflict.latest.body, { title: conflict.latest.title });
+          if (opened) { close(); boardNotice('최신 버전으로 Board를 열었습니다.'); return; }
+          Object.assign(conflict, { busy: false, message: '열려 있는 화면을 닫지 못해 최신 버전을 열지 못했습니다. 화면의 상태를 확인한 뒤 다시 시도해 주세요.' });
+          render('open-latest');
+        },
+        onSaveMine: async () => {
+          conflict.busy = true;
+          render();
+          const result = await deskStoreSync().saveBoardAsNewVersion(boardId, conflict.snapshot, { title: conflict.title, headRevision: conflict.headRevision });
+          if (result.stored === 'both') {
+            close();
+            boardNotice(result.unchanged ? '최신 버전과 같은 구성이라 새 버전을 만들지 않았습니다.' : `내 구성을 새 버전 ${result.revision}으로 저장했습니다.`);
+            return;
+          }
+          Object.assign(conflict, { busy: false, latest: null, headRevision: result.headRevision ?? conflict.headRevision,
+            message: result.conflict ? '그사이 또 바뀌었습니다. 최신 버전을 다시 확인해 주세요.' : '버전 기록에 저장하지 못했습니다. 연결을 확인한 뒤 다시 시도해 주세요.' });
+          render('show-latest');
+        },
+      }));
+      if (focusKey) panel.querySelector(`[data-focus-key="${focusKey}"]`)?.focus();
+    };
+    panel.addEventListener('keydown', (ev) => {
+      if (ev.key !== 'Escape') return;
+      ev.preventDefault();
+      ev.stopPropagation();
+      close();
+    });
+    document.documentElement.appendChild(panel);
+    render('show-latest');
+    return panel;
+  }
+
+  const boardHistory = { boardId: null, title: '', rows: [], page: null, selected: null, record: null, confirming: false, busy: false, message: null, failed: false };
+
+  function closeBoardHistoryPanel({ restoreFocus = false } = {}) {
+    const panel = document.getElementById('egd-board-history');
+    if (!panel) return;
+    panel.remove();
+    if (!restoreFocus) return;
+    const projection = Object.values(state.boards.projections).find(item => item.boardId === boardHistory.boardId);
+    document.getElementById(projection?.id || '')?.querySelector('.egd-board-region-menu-button')?.focus();
+  }
+
+  async function openBoardHistoryPanel(boardId) {
+    closeBoardHistoryPanel();
+    Object.assign(boardHistory, { boardId, title: boardTitleFor(boardId), rows: [], page: null, selected: null, record: null,
+      confirming: false, busy: false, message: '버전 기록을 불러오는 중입니다…', failed: false });
+    const panel = el('section', { id: 'egd-board-history', class: 'egd-store-panel', role: 'dialog', 'aria-label': `${boardHistory.title} 버전 기록`, data: { testid: 'board-history', boardId } });
+    panel.addEventListener('keydown', (ev) => {
+      if (ev.key !== 'Escape') return;
+      ev.preventDefault();
+      ev.stopPropagation();
+      closeBoardHistoryPanel({ restoreFocus: true });
+    });
+    document.documentElement.appendChild(panel);
+    renderBoardHistoryPanel('close');
+    await loadBoardHistory({ focusFirst: true });
+    return panel;
+  }
+
+  async function loadBoardHistory({ more = false, focusFirst = false } = {}) {
+    const boardId = boardHistory.boardId;
+    const page = await deskStoreSync().boardRevisions(boardId, { before: more ? boardHistory.page?.nextBefore : undefined });
+    if (boardHistory.boardId !== boardId || !document.getElementById('egd-board-history')) return;
+    if (page.missing) Object.assign(boardHistory, { rows: [], page: null, failed: false, message: '아직 버전 기록이 없습니다. 이 Board를 저장하면 기록이 시작됩니다.' });
+    else if (page.unavailable || page.error) Object.assign(boardHistory, { failed: true, message: '버전 기록을 불러오지 못했습니다. 연결을 확인한 뒤 다시 시도해 주세요.' });
+    else {
+      const rows = more ? [...boardHistory.rows, ...page.rows] : page.rows;
+      Object.assign(boardHistory, { rows, page, failed: false, message: rows.length ? null : '아직 버전 기록이 없습니다.' });
+    }
+    renderBoardHistoryPanel(focusFirst && boardHistory.rows.length ? `revision-${boardHistory.rows[0].revision}` : undefined);
+  }
+
+  function boardHistoryListView(rows, { selected = null, onSelect = () => {} } = {}) {
+    return el('div', { class: 'egd-store-list', role: 'group', 'aria-label': '저장된 버전', data: { testid: 'board-history-list' } },
+      ...rows.map(row => el('button', {
+        type: 'button', class: 'egd-store-row', 'aria-pressed': row.revision === selected ? 'true' : 'false',
+        'aria-label': `${row.label} · ${row.time} · ${row.author}${row.current ? ' · 지금 버전' : ''}${row.note ? ` · ${row.note}` : ''}`,
+        data: { testid: 'board-history-row', revision: String(row.revision), focusKey: `revision-${row.revision}` },
+        onclick: () => onSelect(row.revision),
+      },
+      el('span', { class: 'egd-store-row-time' }, row.label),
+      el('span', { class: 'egd-store-row-tag' }, row.author),
+      row.current ? el('span', { class: 'egd-store-row-current' }, '지금 버전') : null,
+      el('span', { class: 'egd-store-row-meta' }, row.note ? `${row.time} · ${row.note}` : row.time))));
+  }
+
+  function boardHistoryPreviewView(record, actions = {}) {
+    const box = (...children) => el('div', { class: 'egd-store-preview', role: 'region', 'aria-label': '고른 버전', data: { testid: 'board-history-preview' } }, ...children);
+    if (!record) return box(el('p', { role: 'status' }, '고른 버전을 불러오는 중입니다…'));
+    if (!record.preview) return box(el('p', { role: 'status' }, '이 버전을 불러오지 못했습니다. 다시 골라 주세요.'));
+    const { preview } = record;
+    const busy = actions.busy ? 'true' : null;
+    return box(
+      el('strong', {}, `버전 ${record.revision} · ${RecoveryState.deskStoreTime(record.createdAt)}`),
+      el('p', {}, `이름 ${preview.title}`),
+      el('p', {}, `카드 ${preview.cardCount}개 · 도형 ${preview.shapeCount}개${preview.kinds ? ` (${preview.kinds})` : ''}`),
+      actions.confirming
+        ? el('div', { class: 'egd-store-confirm', role: 'group', 'aria-label': '되돌리기 확인' },
+          el('p', {}, `버전 ${record.revision}의 구성을 새 버전으로 저장합니다. 지금 버전도 기록에 남습니다.${actions.dirty ? ' 열려 있는 이 Board의 저장하지 않은 변경은 반영되지 않습니다.' : ''}`),
+          el('div', { class: 'egd-store-actions' },
+            el('button', { type: 'button', class: 'egd-store-primary', disabled: busy, data: { testid: 'board-history-confirm', focusKey: 'confirm' }, onclick: () => actions.onConfirm?.() }, '되돌리기'),
+            el('button', { type: 'button', disabled: busy, data: { testid: 'board-history-cancel', focusKey: 'cancel' }, onclick: () => actions.onCancel?.() }, '취소')))
+        : el('div', { class: 'egd-store-actions' },
+          el('button', { type: 'button', class: 'egd-store-primary', disabled: busy || (actions.current ? 'true' : null),
+            title: actions.current ? '지금 버전입니다.' : null,
+            data: { testid: 'board-history-revert', focusKey: 'revert' }, onclick: () => actions.onRevert?.() }, '이 버전으로 되돌리기')));
+  }
+
+  function renderBoardHistoryPanel(focusKey = document.activeElement?.dataset?.focusKey || null) {
+    const panel = document.getElementById('egd-board-history');
+    if (!panel) return;
+    const selectedRow = boardHistory.rows.find(row => row.revision === boardHistory.selected) || null;
+    const projection = Object.values(state.boards.projections).find(item => item.boardId === boardHistory.boardId);
+    panel.replaceChildren(
+      el('div', { class: 'egd-store-panel-head' },
+        el('strong', {}, `${boardHistory.title} · 버전 기록`),
+        el('button', { type: 'button', class: 'egd-store-panel-close', 'aria-label': '버전 기록 닫기', data: { focusKey: 'close' },
+          onclick: () => closeBoardHistoryPanel({ restoreFocus: true }) }, '×')),
+      el('p', { class: 'egd-store-panel-copy' }, '저장할 때마다 버전이 남습니다. 예전 버전으로 되돌려도 새 버전으로 저장되어 지금 버전이 지워지지 않습니다.'),
+      boardHistory.message ? el('p', { class: 'egd-store-panel-status', role: 'status' }, boardHistory.message) : null,
+      boardHistory.failed ? el('button', { type: 'button', class: 'egd-store-more', data: { focusKey: 'retry' }, onclick: () => loadBoardHistory() }, '다시 시도') : null,
+      boardHistoryListView(boardHistory.rows, { selected: boardHistory.selected, onSelect: selectBoardHistoryRow }),
+      boardHistory.page?.hasMore ? el('button', { type: 'button', class: 'egd-store-more', data: { focusKey: 'more' }, onclick: () => loadBoardHistory({ more: true }) }, '더 보기') : null,
+      boardHistory.selected == null ? null : boardHistoryPreviewView(boardHistory.record, {
+        busy: boardHistory.busy, confirming: boardHistory.confirming, current: !!selectedRow?.current, dirty: !!projection?.dirty,
+        onRevert: () => { boardHistory.confirming = true; renderBoardHistoryPanel('confirm'); },
+        onCancel: () => { boardHistory.confirming = false; renderBoardHistoryPanel('revert'); },
+        onConfirm: () => revertBoardVersion(boardHistory.selected),
+      }));
+    if (focusKey) panel.querySelector(`[data-focus-key="${focusKey}"]`)?.focus();
+  }
+
+  async function selectBoardHistoryRow(revision) {
+    Object.assign(boardHistory, { selected: revision, record: null, confirming: false });
+    renderBoardHistoryPanel(`revision-${revision}`);
+    const record = await deskStoreSync().boardRevision(boardHistory.boardId, revision);
+    if (boardHistory.selected !== revision || !document.getElementById('egd-board-history')) return;
+    boardHistory.record = record;
+    renderBoardHistoryPanel();
+  }
+
+  // [이 버전으로 되돌리기]: the store publishes the old body as a new version; the screen follows.
+  async function revertBoardVersion(revision) {
+    if (boardHistory.busy) return false;
+    const boardId = boardHistory.boardId;
+    boardHistory.busy = true;
+    renderBoardHistoryPanel();
+    try {
+      const record = boardHistory.record?.revision === revision && boardHistory.record.body
+        ? boardHistory.record : await deskStoreSync().boardRevision(boardId, revision);
+      if (!record?.body) { boardNotice('이 버전을 불러오지 못했습니다. Board는 그대로입니다.'); return false; }
+      const result = await deskStoreSync().revertBoard(boardId, revision);
+      if (result.conflict) { boardNotice('다른 곳에서 이 Board가 바뀌었습니다. 버전 기록을 새로 불러왔으니 다시 골라 주세요.'); return false; }
+      if (!result.reverted) { boardNotice('이 버전으로 되돌리지 못했습니다. Board는 그대로입니다.'); return false; }
+      const applied = await applyBoardBodyLocally(boardId, record.body);
+      boardNotice(result.unchanged ? '지금 버전과 같은 구성이라 새 버전을 만들지 않았습니다.'
+        : applied ? `버전 ${revision}의 구성으로 되돌려 새 버전 ${result.revision}으로 저장했습니다.`
+          : `버전 ${revision}의 구성을 새 버전 ${result.revision}으로 저장했습니다. 열려 있는 화면은 닫지 못해 그대로 두었습니다.`);
+      return true;
+    } finally {
+      boardHistory.busy = false;
+      if (document.getElementById('egd-board-history')) {
+        Object.assign(boardHistory, { selected: null, record: null, confirming: false });
+        await loadBoardHistory({ focusFirst: true });
+      }
+    }
   }
 
   function openBoardSnapshot(snapshot, options = {}) {
@@ -2762,6 +3190,8 @@
       closedAt: null,
     };
     if (!writeAgendaStoreAndSync(store)) return null;
+    // The preference value is saved; a ready Desk store also keeps it as a new Board version.
+    void syncBoardToStore(agendaId, snapshot, store.meta[agendaId].title);
     const projection = !Array.isArray(options.memberIds) && state.boards.projections[options.projectionId || state.boards.activeProjectionId];
     if (projection) {
       projection.source = cloneJson(snapshot);
@@ -5173,7 +5603,7 @@
         },
       }, deskIcon('close')),
       el('button', { class: 'egd-rail-icon', title: '미니맵', 'aria-label': '미니맵', onclick: toggleDeskMinimap }, deskIcon('minimap')),
-      el('button', { id: 'egd-recovery-open', class: 'egd-rail-icon', 'aria-label': '복구 기록', title: '복구 기록', hidden: true, onclick: () => renderDeskRecoveryNotice(true) }, deskIcon('recovery')),
+      el('button', { id: 'egd-recovery-open', class: 'egd-rail-icon', 'aria-label': '복구 기록', title: '복구 기록', hidden: true, onclick: () => openDeskRecoveryEntry() }, deskIcon('recovery')),
       el('button', { class: 'egd-rail-icon', title: '알림 연결 전', 'aria-label': '알림 연결 전', disabled: 'true' }, deskIcon('alert')),
       buildResourceGadget(),
       el('div', { class: 'egd-rail-avatar', title: '로컬 Desk', 'aria-label': '로컬 Desk' }, deskIcon('account')),
@@ -5673,6 +6103,8 @@
     let deferredCodex = null;
     let pendingMessageScroll = null;
     let focusOpenedRoom = false;
+    // A render that puts focus back on the composer is not a new look at it.
+    let restoringComposerFocus = false;
     const mode = options.mode || 'hud';
     // A room opened from the keyboard hands focus to its conversation, so the
     // list leaving the screen does not drop focus onto the page.
@@ -6861,6 +7293,9 @@
             composerObserver.observe(input);
             composerObserver.observe(body);
             queueMicrotask(resizeComposer);
+            // CTX-03: opening this room's composer, or focusing it, asks for suggestions (debounced).
+            input.addEventListener('focus', () => { if (!restoringComposerFocus) codexBridge.requestContextSuggestions?.(activeThread.id); });
+            if (inputState?.threadId !== activeThread.id) codexBridge.requestContextSuggestions?.(activeThread.id);
             const run = codexCurrentRun(activeThread);
             const stopButton = run && ChatState.isRunBusy(run) ? el('button', {
               class: 'egd-codex-stop', type: 'button', 'aria-label': '이 업무 중지',
@@ -6870,6 +7305,7 @@
             }, run.stopUnconfirmed || ((run.stopPending || run.stopRequested || run.status === 'stopping') && !codex.connected)
               ? '중지 확인 필요' : run.stopPending || run.stopRequested || run.status === 'stopping' ? '중지 요청 중' : '중지') : null;
             return el('div', { class: 'egd-codex-footer' },
+              buildContextSuggestions(activeThread, codexBridge),
               el('div', { class: 'egd-codex-input-row' },
                 buildChatInputTray(activeThread, codexBridge),
                 input,
@@ -6939,7 +7375,8 @@
       }
       const newInput = body.querySelector('.egd-codex-input');
       if (newInput && inputState?.threadId === activeThread?.id && inputState.focused) {
-        newInput.focus({ preventScroll: true });
+        restoringComposerFocus = true;
+        try { newInput.focus({ preventScroll: true }); } finally { restoringComposerFocus = false; }
         newInput.setSelectionRange(inputState.start, inputState.end, inputState.direction);
         requestAnimationFrame(() => { if (newInput.isConnected) newInput.scrollTop = inputState.scrollTop; });
       }
@@ -7149,6 +7586,82 @@
       if (!epochScope.valid(token)) throw new Error('연결이 바뀌어 자료 캡처를 중단했습니다.');
       if (!Array.isArray(result.captures) || result.captures.length !== sources.length) throw new Error('일부 첨부의 캡처 저장을 확인하지 못했습니다.');
       return sources.map(source => InputContext.capturedInputReference(source, result.captures.find(capture => capture.id === source.id)));
+    }
+
+    // CTX-03: ask the helper which sources fit what is on screen now. Suggest
+    // only: the reply fills '이것도 붙일까요?' and never attaches anything.
+    const CONTEXT_SUGGEST_DEBOUNCE_MS = 400;
+    const CONTEXT_SUGGEST_REUSE_MS = 60 * 1000;
+    const CONTEXT_SUGGEST_RETRY_MS = 10 * 60 * 1000;
+    const CONTEXT_SUGGEST_FAILED = '자료 추천을 지금 불러오지 못했어요. 필요한 자료는 ＋ 첨부로 붙여 주세요.';
+    let contextSuggestTimer = 0;
+    let contextSuggestSeq = 0;
+    function forgetContextSuggestions() {
+      window.clearTimeout(contextSuggestTimer);
+      contextSuggestTimer = 0;
+      contextSuggestSeq++;
+      state.contextSuggest = { unsupportedUntil: 0, byThread: {} };
+    }
+    function requestContextSuggestions(threadId, { force = false, immediate = false } = {}) {
+      if (!threadId) return;
+      window.clearTimeout(contextSuggestTimer);
+      contextSuggestTimer = window.setTimeout(() => {
+        contextSuggestTimer = 0;
+        void resolveContextSuggestions(threadId, force);
+      }, immediate ? 0 : CONTEXT_SUGGEST_DEBOUNCE_MS);
+    }
+    // RESOLUTION_EXPIRED: the old list is dropped, asked again and shown again.
+    function expireContextSuggestions(threadId) {
+      const entry = state.contextSuggest?.byThread?.[threadId];
+      if (entry) Object.assign(entry, { resolution: null, status: 'expired', key: null });
+      requestContextSuggestions(threadId, { force: true, immediate: true });
+    }
+    async function resolveContextSuggestions(threadId, force) {
+      const store = state.contextSuggest;
+      const thread = getCodexThreadById(state.codex, threadId);
+      if (!store || Date.now() < (store.unsupportedUntil || 0) || !thread || ChatState.nativeBindingHeld(thread)
+          || !state.codex.connected || !state.codex.authStatus.isLoggedIn) return;
+      let body;
+      try { body = JSON.stringify(collectContextResolverSignals(thread)); }
+      catch (error) { console.warn(TAG, 'context signals failed', error); return; }
+      if (body.length > 60 * 1024) return;
+      const accountKey = ChatState.codexAccountKey(state.codex.authStatus) || null;
+      const previous = store.byThread[threadId];
+      const sameAsked = previous?.key === body && previous.accountKey === accountKey;
+      if (!force && sameAsked && (previous.status === 'loading'
+          || (previous.status === 'ready' && Date.now() - previous.receivedAt < CONTEXT_SUGGEST_REUSE_MS))) return;
+      const seq = ++contextSuggestSeq;
+      // The last list stays on screen while the next one loads; a closed area
+      // stays closed for the same screen, and another account starts empty.
+      store.byThread[threadId] = { ...(previous || {}), key: body, accountKey, seq, status: 'loading',
+        dismissed: sameAsked && previous.dismissed === true,
+        ...(previous && previous.accountKey !== accountKey ? { resolution: null, picked: [] } : {}) };
+      let next;
+      try {
+        const resolution = ChatState.normalizeContextResolution(await fetchJson('/context/resolve', { method: 'POST', body }));
+        const selectable = new Set((resolution?.candidates || []).filter(candidate => !candidate.excludedBy).map(candidate => candidate.ref));
+        next = resolution
+          ? { status: 'ready', resolution, receivedAt: Date.now(), error: null,
+            picked: (store.byThread[threadId]?.picked || []).filter(ref => selectable.has(ref)) }
+          : { status: 'error', resolution: null, error: CONTEXT_SUGGEST_FAILED };
+      } catch (error) {
+        if (state.contextSuggest !== store || store.byThread[threadId]?.seq !== seq) return;
+        if (error.status === 404) {
+          // An older bridge has no /context/resolve: the area stays hidden (asked again later).
+          store.unsupportedUntil = Date.now() + CONTEXT_SUGGEST_RETRY_MS;
+          store.byThread = {};
+          emit();
+          return;
+        }
+        // Not signed in yet, a starting bridge or a lost connection hides the area quietly.
+        const quiet = !error.status || error.status === 401 || error.status >= 500
+          || ['IDENTITY_REQUIRED', 'ACCOUNT_CHANGED', 'LOGIN_REQUIRED'].includes(error.code);
+        next = { status: quiet ? 'idle' : 'error', resolution: null,
+          error: quiet ? null : ChatState.contextResolverErrorText(error.code) || CONTEXT_SUGGEST_FAILED };
+      }
+      if (state.contextSuggest !== store || store.byThread[threadId]?.seq !== seq) return;
+      store.byThread[threadId] = { ...store.byThread[threadId], ...next };
+      emit();
     }
 
     async function ensureNativeReadyForSend(thread) {
@@ -7378,6 +7891,7 @@
     const resetThreadConversations = () => {
       epochScope.reset();
       clearBrowserToolTransport();
+      forgetContextSuggestions();
       browserToolAuthorityEpoch++;
       browserToolFixtureLastAction = null;
       browserToolFixtureAuthorizationByCard.clear();
@@ -7825,6 +8339,8 @@
     const connect = async () => {
       const token = epochScope.begin();
       streamReady = false;
+      // RT-07: a new connection confirms the Desk store again before saving there.
+      deskStoreSync().markOffline();
       try {
       try {
         const bridgeState = await fetchJson('/v1/state', { signal: token.signal, headers: await bridgeStateHeaders() });
@@ -7849,6 +8365,7 @@
           ...bridgeEngineFields(bridgeState),
           ...bridgeSessionFields(bridgeState),
         });
+        void deskStoreBridgeObserved(bridgeState);
       } catch (error) {
         if (!epochScope.valid(token)) return;
         try {
@@ -7856,6 +8373,8 @@
           if (!epochScope.valid(token)) return;
           update({ authStatus: status, isStartingLogin: Boolean(status.loginInProgress), connected: true, error: null,
             ...bridgeConnectionFields(null), ...bridgeSessionFields(null) });
+          // An older bridge without /v1/state: preferences only, as before.
+          void deskStoreBridgeObserved(null);
         } catch (fallbackError) {
           if (!epochScope.valid(token)) return;
           // The screen says '다시 연결 중…' by state; the raw message is kept
@@ -7938,6 +8457,8 @@
       connectionSource.onerror = () => {
         if (!epochScope.valid(streamEpoch) || source !== connectionSource) return;
         clearBrowserToolTransport({ revoke: true });
+        // CTX-03: a restarted bridge no longer knows the old suggestion lists.
+        if (state.contextSuggest) state.contextSuggest = { unsupportedUntil: 0, byThread: {} };
         try { connectionSource.close(); } catch {}
         source = null;
         streamReady = false;
@@ -8312,6 +8833,47 @@
         state.codex.hudView = 'conversation';
         emit();
         if (!state.hudOpen && state.codex.chatDockMode !== 'canvas') toggleHUD('chat', '채팅');
+      },
+      // CTX-03 '이것도 붙일까요?'.
+      requestContextSuggestions(threadId, options = {}) { requestContextSuggestions(threadId, options); },
+      setContextSuggestionPicked(threadId, ref, picked) {
+        const entry = state.contextSuggest?.byThread?.[threadId];
+        if (!entry || typeof ref !== 'string') return;
+        const next = new Set(entry.picked || []);
+        if (picked) next.add(ref); else next.delete(ref);
+        entry.picked = [...next];
+      },
+      toggleContextSuggestions(threadId) {
+        const entry = state.contextSuggest?.byThread?.[threadId];
+        if (!entry) return;
+        entry.collapsed = !entry.collapsed;
+        emit();
+      },
+      dismissContextSuggestions(threadId) {
+        const entry = state.contextSuggest?.byThread?.[threadId];
+        if (!entry) return;
+        entry.dismissed = true;
+        emit();
+      },
+      // Only the refs a person chose, through the attach panel's own path. The
+      // attached source keeps resolverRef so the send can name what was taken.
+      attachContextSuggestions(threadId, refs) {
+        const entry = state.contextSuggest?.byThread?.[threadId];
+        const thread = getCodexThreadById(state.codex, threadId);
+        if (!entry?.resolution || !thread || thread.preparingInput || !Array.isArray(refs)) return;
+        const candidates = new Map(entry.resolution.candidates.map(candidate => [candidate.ref, candidate]));
+        const sources = [];
+        let missing = 0;
+        for (const ref of new Set(refs)) {
+          const candidate = candidates.get(ref);
+          if (!candidate || candidate.excludedBy) continue;
+          const source = chatInputSourceForView(document.getElementById(ref));
+          if (source) sources.push({ ...source, resolverRef: ref }); else missing++;
+        }
+        entry.picked = (entry.picked || []).filter(ref => !refs.includes(ref));
+        if (missing) boardNotice(`고른 자료 중 ${missing}개는 지금 붙일 수 없어 빼고 붙였어요.`);
+        if (sources.length) this.addInputSources(threadId, userSelectedChatSources(threadId, sources));
+        else emit();
       },
       removeInputSource(threadId, sourceId) {
         if (getCodexThreadById(state.codex, threadId)?.preparingInput) return;
@@ -9010,6 +9572,12 @@
           runtimeConfig.effort = modelFields.effort;
           runtimeConfig.contextSnapshotIds = inputReferences.map(reference => reference.snapshotId);
           runtimeConfig.contextCapabilities = ChatState.contextCapabilitiesForRequest(activeThread, state.codex.authStatus, runtimeConfig.contextSnapshotIds);
+          // CTX-03: the suggestion list this turn answered and the refs taken from it ([] when none).
+          runtimeConfig.contextResolution = ChatState.contextResolutionForSend(state.contextSuggest?.byThread?.[activeThread.id], selectedInputs,
+            { now: Date.now(), accountKey: ChatState.codexAccountKey(state.codex.authStatus) || null });
+          if (runtimeConfig.contextResolution?.chosen.length && !runtimeConfig.contextCapabilities) {
+            runtimeConfig.contextCapabilities = { read: true, reader: true, publishBriefing: true };
+          }
           runtimeConfig.stateless = ChatState.chatStatelessStartView(activeThread, state.codex.chatCapabilities).on;
           const chatRequest = ChatState.buildChatRequest(activeThread, content, requestId, runtimeConfig);
           if (selectedBrowserSources.length) {
@@ -9055,6 +9623,11 @@
           // A refused model or effort returns the room's choice to the default.
           const modelReset = ChatState.chatModelRejectionReset(error.code);
           if (modelReset) updateThreadById(activeThread.id, thread => ({ ...thread, ...modelReset }));
+          // CTX-03: a refused suggestion choice says why in Korean; an expired list is
+          // asked again and shown again, and the message is not resent.
+          const resolverText = ChatState.contextResolverErrorText(error.code);
+          if (resolverText) error.message = resolverText;
+          if (error.code === 'RESOLUTION_EXPIRED') expireContextSuggestions(activeThread.id);
           if (error.conversationId) {
             request.conversationId = error.conversationId;
             updateThreadById(activeThread.id, thread => ({ ...thread, conversationId: error.conversationId, ...ChatState.nativeBindingForRun(thread, { conversationId: error.conversationId, accountKey: request.accountKey }) }));
@@ -16842,6 +17415,247 @@
     return deskRecoveryStore;
   }
 
+  // ── RT-07 / CTX-02: the bridge's local Desk store and '복구 기록' ──
+  // Detection, the one-time import and saving live in EGDeskRecoveryState;
+  // this screen only supplies the bridge request and draws the panels.
+  let deskStoreSyncRef = null;
+  function deskStoreSync() {
+    if (!deskStoreSyncRef) deskStoreSyncRef = RecoveryState.createDeskStoreSync({
+      request: deskStoreRequest,
+      readRawDesk: rawDeskRecord,
+      readAgendaStore: () => coerceAgendaStore(),
+      onNotice: message => boardNotice(message),
+      onChange: () => syncDeskHistoryOpener(),
+    });
+    return deskStoreSyncRef;
+  }
+
+  // Resolves {status, body}; throws when the bridge cannot be reached or the time runs out.
+  async function deskStoreRequest(method, path, body, { timeoutMs = 10000 } = {}) {
+    const controller = new AbortController();
+    const timer = window.setTimeout(() => controller.abort(), timeoutMs);
+    try {
+      const response = await fetch(`http://127.0.0.1:39218${path}`, {
+        method, signal: controller.signal, headers: { 'Content-Type': 'application/json' },
+        ...(body === undefined ? {} : { body: JSON.stringify(body) }),
+      });
+      let payload = null;
+      try { payload = await response.json(); } catch { /* An empty or non-JSON answer. */ }
+      return { status: response.status, body: payload };
+    } finally { window.clearTimeout(timer); }
+  }
+
+  // Each /v1/state read (null for an older bridge). A store that just became
+  // ready receives the Desk as it is now (after the one-time import, never instead of it).
+  async function deskStoreBridgeObserved(bridgeState) {
+    try {
+      const result = await deskStoreSync().observeBridge(bridgeState);
+      if (result?.ready && result.connected) persistDeskSession();
+    } catch (error) { console.warn(TAG, 'Desk store connection failed', error); }
+    syncDeskHistoryOpener();
+  }
+
+  function syncDeskHistoryOpener() {
+    const opener = document.getElementById('egd-recovery-open');
+    if (!opener) return;
+    let records = 0;
+    try { records = recoveryStore().list().length; } catch { records = 0; }
+    opener.hidden = records === 0 && !deskStoreSync().status().ready;
+  }
+
+  // The rail '복구 기록': the store's list when it is ready, otherwise the earlier notice.
+  function openDeskRecoveryEntry() {
+    if (deskStoreSync().status().ready) return openDeskHistoryPanel();
+    renderDeskRecoveryNotice(true);
+    return null;
+  }
+
+  const deskHistory = { rows: [], page: null, selected: null, record: null, confirming: false, busy: false, message: null, failed: false };
+
+  function closeDeskHistoryPanel({ restoreFocus = false } = {}) {
+    const panel = document.getElementById('egd-desk-history');
+    if (!panel) return;
+    panel.remove();
+    if (restoreFocus) document.getElementById('egd-recovery-open')?.focus();
+  }
+
+  async function openDeskHistoryPanel() {
+    closeDeskHistoryPanel();
+    Object.assign(deskHistory, { rows: [], page: null, selected: null, record: null, confirming: false, busy: false,
+      message: '복구 기록을 불러오는 중입니다…', failed: false });
+    const panel = el('section', { id: 'egd-desk-history', class: 'egd-store-panel', role: 'dialog', 'aria-label': '복구 기록', data: { testid: 'desk-history' } });
+    panel.addEventListener('keydown', (ev) => {
+      if (ev.key !== 'Escape') return;
+      ev.preventDefault();
+      ev.stopPropagation();
+      closeDeskHistoryPanel({ restoreFocus: true });
+    });
+    document.documentElement.appendChild(panel);
+    renderDeskHistoryPanel('close');
+    await loadDeskHistoryPage({ focusFirst: true });
+    return panel;
+  }
+
+  async function loadDeskHistoryPage({ more = false, focusFirst = false } = {}) {
+    const page = await deskStoreSync().generations({ before: more ? deskHistory.page?.nextBefore : undefined });
+    if (!document.getElementById('egd-desk-history')) return;
+    if (page.unavailable || page.error) {
+      Object.assign(deskHistory, { message: '복구 기록을 불러오지 못했습니다. 연결을 확인한 뒤 다시 시도해 주세요.', failed: true });
+    } else {
+      const rows = more ? [...deskHistory.rows, ...page.rows] : page.rows;
+      Object.assign(deskHistory, { rows, page, failed: false, message: rows.length ? null : '아직 남은 기록이 없습니다. Desk가 저장되면 여기에 시점이 쌓입니다.' });
+    }
+    renderDeskHistoryPanel(focusFirst && deskHistory.rows.length ? `generation-${deskHistory.rows[0].generation}` : undefined);
+  }
+
+  // One row per saved point; the reason and counts come from the store, in Korean.
+  function deskHistoryListView(rows, { selected = null, onSelect = () => {} } = {}) {
+    return el('div', { class: 'egd-store-list', role: 'group', 'aria-label': '저장된 시점', data: { testid: 'desk-history-list' } },
+      ...rows.map(row => el('button', {
+        type: 'button', class: 'egd-store-row', 'aria-pressed': row.generation === selected ? 'true' : 'false',
+        'aria-label': `${row.time} ${row.reason}${row.current ? ' · 지금' : ''} · ${row.counts}${row.note ? ` · ${row.note}` : ''}`,
+        data: { testid: 'desk-history-row', generation: String(row.generation), focusKey: `generation-${row.generation}` },
+        onclick: () => onSelect(row.generation),
+      },
+      el('span', { class: 'egd-store-row-time' }, row.time),
+      el('span', { class: 'egd-store-row-tag' }, row.reason),
+      row.current ? el('span', { class: 'egd-store-row-current' }, '지금') : null,
+      el('span', { class: 'egd-store-row-meta' }, row.note ? `${row.counts} · ${row.note}` : row.counts))));
+  }
+
+  // A short look at one point and its two ways back; the saved text itself is never shown.
+  function deskHistoryPreviewView(record, actions = {}) {
+    const box = (...children) => el('div', { class: 'egd-store-preview', role: 'region', 'aria-label': '고른 시점', data: { testid: 'desk-history-preview' } }, ...children);
+    if (!record) return box(el('p', { role: 'status' }, '고른 시점을 불러오는 중입니다…'));
+    if (record.missing) return box(el('p', { role: 'status' }, '이 시점은 보관 기간이 지나 정리되었습니다. 다른 시점을 골라 주세요.'));
+    if (!record.preview) return box(el('p', { role: 'status' }, '이 시점을 불러오지 못했습니다. 다시 골라 주세요.'));
+    const { preview } = record;
+    const busy = actions.busy ? 'true' : null;
+    return box(
+      el('strong', {}, `${RecoveryState.deskStoreTime(record.createdAt)} 시점`),
+      el('p', {}, `카드 ${preview.cardCount}개 · 도형 ${preview.shapeCount}개${preview.kinds ? ` (${preview.kinds})` : ''}`),
+      el('p', {}, preview.boardsText),
+      actions.confirming
+        ? el('div', { class: 'egd-store-confirm', role: 'group', 'aria-label': '복원 확인' },
+          el('p', {}, '지금 화면을 이 시점으로 바꿉니다. 지금 상태도 복구 기록에 남아 다시 돌아올 수 있습니다. 대화는 그대로 둡니다.'),
+          el('div', { class: 'egd-store-actions' },
+            el('button', { type: 'button', class: 'egd-store-primary', disabled: busy, data: { testid: 'desk-history-confirm', focusKey: 'confirm' }, onclick: () => actions.onConfirm?.() }, '복원'),
+            el('button', { type: 'button', disabled: busy, data: { testid: 'desk-history-cancel', focusKey: 'cancel' }, onclick: () => actions.onCancel?.() }, '취소')))
+        : el('div', { class: 'egd-store-actions' },
+          el('button', { type: 'button', class: 'egd-store-primary', disabled: busy || (actions.current ? 'true' : null),
+            title: actions.current ? '지금 기록된 시점입니다.' : null,
+            data: { testid: 'desk-history-restore', focusKey: 'restore' }, onclick: () => actions.onRestore?.() }, '이 시점으로 복원'),
+          el('button', { type: 'button', disabled: busy, data: { testid: 'desk-history-merge', focusKey: 'merge' }, onclick: () => actions.onMerge?.() }, '지금 작업에 합치기')));
+  }
+
+  function renderDeskHistoryPanel(focusKey = document.activeElement?.dataset?.focusKey || null) {
+    const panel = document.getElementById('egd-desk-history');
+    if (!panel) return;
+    let earlierRecords = 0;
+    try { earlierRecords = recoveryStore().list().length; } catch { earlierRecords = 0; }
+    const selectedRow = deskHistory.rows.find(row => row.generation === deskHistory.selected) || null;
+    panel.replaceChildren(
+      el('div', { class: 'egd-store-panel-head' },
+        el('strong', {}, '복구 기록'),
+        el('button', { type: 'button', class: 'egd-store-panel-close', 'aria-label': '복구 기록 닫기', data: { focusKey: 'close' },
+          onclick: () => closeDeskHistoryPanel({ restoreFocus: true }) }, '×')),
+      el('p', { class: 'egd-store-panel-copy' }, 'Desk가 저장될 때마다 시점이 남습니다. 시점을 골라 미리 보고, 되돌리거나 지금 작업에 합칠 수 있습니다.'),
+      deskHistory.message ? el('p', { class: 'egd-store-panel-status', role: 'status' }, deskHistory.message) : null,
+      deskHistory.failed ? el('button', { type: 'button', class: 'egd-store-more', data: { focusKey: 'retry' }, onclick: () => loadDeskHistoryPage() }, '다시 시도') : null,
+      deskHistoryListView(deskHistory.rows, { selected: deskHistory.selected, onSelect: selectDeskHistoryRow }),
+      deskHistory.page?.hasMore ? el('button', { type: 'button', class: 'egd-store-more', data: { focusKey: 'more' }, onclick: () => loadDeskHistoryPage({ more: true }) }, '더 보기') : null,
+      deskHistory.selected == null ? null : deskHistoryPreviewView(deskHistory.record, {
+        busy: deskHistory.busy, confirming: deskHistory.confirming, current: !!selectedRow?.current,
+        onRestore: () => { deskHistory.confirming = true; renderDeskHistoryPanel('confirm'); },
+        onCancel: () => { deskHistory.confirming = false; renderDeskHistoryPanel('restore'); },
+        onConfirm: () => restoreDeskGeneration(deskHistory.selected),
+        onMerge: () => mergeDeskGeneration(deskHistory.selected),
+      }),
+      earlierRecords ? el('button', { type: 'button', class: 'egd-store-link', data: { focusKey: 'earlier' },
+        onclick: () => { closeDeskHistoryPanel(); renderDeskRecoveryNotice(true); } }, '이전 복구 원본 보기') : null);
+    if (focusKey) panel.querySelector(`[data-focus-key="${focusKey}"]`)?.focus();
+  }
+
+  async function selectDeskHistoryRow(generation) {
+    Object.assign(deskHistory, { selected: generation, record: null, confirming: false });
+    renderDeskHistoryPanel(`generation-${generation}`);
+    const record = await deskStoreSync().generation(generation);
+    if (deskHistory.selected !== generation || !document.getElementById('egd-desk-history')) return;
+    deskHistory.record = record;
+    renderDeskHistoryPanel();
+  }
+
+  // Draw a saved Desk in place of the current one. Chat rooms stay as they are now.
+  async function redrawDeskFromState(snapshot) {
+    if (!snapshot?.agenda?.id) return false;
+    if (!(await clearCanvasEntitiesForRestore())) return false;
+    closeBoardRegionMenu();
+    for (const region of Array.from(document.querySelectorAll('.egd-board-region'))) region.remove();
+    state.boards = { projections: {}, activeProjectionId: null };
+    const { chat, ...layout } = snapshot;
+    return restoreDeskSession(layout);
+  }
+
+  // [이 시점으로 복원]: the store publishes it as a new point, then the Desk is drawn from it.
+  async function restoreDeskGeneration(generation) {
+    if (deskHistory.busy) return false;
+    deskHistory.busy = true;
+    renderDeskHistoryPanel();
+    let restored = false;
+    try {
+      // The Desk as it is now becomes its own point first, so this can be undone.
+      if (SurfaceState.canPersistDeskSession(state.surface)) await deskStoreSync().saveDesk(serializeDeskSnapshot(), { reason: 'explicit' });
+      state.surface.restoring = true;
+      const result = await deskStoreSync().restoreGeneration(generation);
+      if (!result.restored) {
+        boardNotice(result.missing ? '이 시점은 보관 기간이 지나 정리되었습니다. 지금 작업은 그대로입니다.'
+          : result.conflict ? '다른 창에서 Desk가 바뀌었습니다. 목록을 새로 불러왔으니 다시 골라 주세요.'
+            : '이 시점으로 되돌리지 못했습니다. 지금 작업은 그대로입니다.');
+        return false;
+      }
+      restored = await redrawDeskFromState(result.state);
+      boardNotice(restored ? '고른 시점으로 Desk를 되돌렸습니다. 되돌리기 전 상태도 복구 기록에 남아 있습니다.'
+        : '일부 화면을 닫지 못해 되돌리기를 마치지 못했습니다. 복구 기록에서 다시 시도할 수 있습니다.');
+      return restored;
+    } finally {
+      state.surface.restoring = false;
+      deskHistory.busy = false;
+      persistDeskSession();
+      if (document.getElementById('egd-desk-history')) {
+        Object.assign(deskHistory, { selected: null, record: null, confirming: false });
+        await loadDeskHistoryPage({ focusFirst: true });
+      }
+    }
+  }
+
+  // [지금 작업에 합치기]: current entities win; only views missing now are added.
+  async function mergeDeskGeneration(generation) {
+    if (deskHistory.busy) return false;
+    deskHistory.busy = true;
+    renderDeskHistoryPanel();
+    try {
+      const record = deskHistory.record?.generation === generation && deskHistory.record.state
+        ? deskHistory.record : await deskStoreSync().generation(generation);
+      if (!record?.state) { boardNotice('이 시점을 불러오지 못했습니다. 지금 작업은 그대로입니다.'); return false; }
+      const existing = Array.from(document.querySelectorAll('.egd-canvas-card, .egd-canvas-shape')).map(view => view.id);
+      const missing = RecoveryState.missingDeskRecoveryViews(record.state, existing);
+      const count = missing.cards.filter(card => !(card.type === 'chat' && state.codex.chatCardEntityId)).length + missing.shapes.length;
+      if (!count) { boardNotice('그 시점의 화면이 이미 모두 열려 있습니다. 지금 작업은 그대로입니다.'); return false; }
+      const previousActiveId = state.activeEntityId;
+      state.surface.restoring = true;
+      let merged = false;
+      try { merged = restoreDeskSession(record.state, { merge: true }); }
+      finally { state.surface.restoring = false; }
+      if (previousActiveId) setActiveEntity(document.getElementById(previousActiveId));
+      persistDeskSession({ reason: 'explicit' });
+      boardNotice(merged ? `지금 작업은 그대로 두고 그 시점에만 있던 화면 ${count}개를 더했습니다.` : '합치지 못했습니다. 지금 작업은 그대로입니다.');
+      return merged;
+    } finally {
+      deskHistory.busy = false;
+      if (document.getElementById('egd-desk-history')) await loadDeskHistoryPage();
+    }
+  }
+
   function rawDeskRecord() {
     return servicesRef().prefs.prefHasUserValue(DESK_SESSION_PREF) ? servicesRef().prefs.getStringPref(DESK_SESSION_PREF) : null;
   }
@@ -16865,7 +17679,7 @@
   function renderDeskRecoveryNotice(force = false) {
     const records = recoveryStore().list();
     const opener = document.getElementById('egd-recovery-open');
-    if (opener) opener.hidden = records.length === 0;
+    if (opener) opener.hidden = records.length === 0 && !deskStoreSync().status().ready;
     document.getElementById('egd-desk-recovery')?.remove();
     if (!force && (!state.surface.recoveryBackupKey && !state.surface.recoveryProtected || state.surface.recoveryAcknowledged)) return;
     const key = state.surface.recoveryBackupKey || records[0]?.key || null;
@@ -16907,17 +17721,22 @@
       } catch (error) { state.surface.recoveryReason = error.message; renderDeskRecoveryNotice(true); return false; }
     }
     state.surface.recoveryAcknowledged = true;
-    const saved = persistDeskSession();
+    const saved = persistDeskSession({ reason: 'explicit' });
     if (saved) document.getElementById('egd-desk-recovery')?.remove();
     else { state.surface.recoveryAcknowledged = false; boardNotice('현재 작업을 저장하지 못했습니다. 다시 시도해 주세요.'); }
     return saved;
   }
 
   let deskSaveTimer = null;
-  function persistDeskSession() {
+  function persistDeskSession(options = {}) {
     if (!SurfaceState.canPersistDeskSession(state.surface) || !document.getElementById('egd-canvas-layer')
         || (state.codex.legacyChatBackupRequired && !state.codex.legacyChatBackupKey)) return false;
-    return writeSurfacePref(DESK_SESSION_PREF, serializeDeskSnapshot());
+    const snapshot = serializeDeskSnapshot();
+    // The preference value stays the fallback on every save; a ready Desk store
+    // also keeps this Desk as a recovery point (offline, 503 or timeout: preferences only).
+    const saved = writeSurfacePref(DESK_SESSION_PREF, snapshot);
+    void deskStoreSync().saveDesk(snapshot, { reason: options?.reason === 'explicit' ? 'explicit' : 'autosave' });
+    return saved;
   }
 
   function scheduleDeskSessionSave() {
@@ -17127,6 +17946,9 @@
           open: (boardId, options = {}) => switchAgenda(boardId, options),
           close: (projectionId, options = {}) => closeCurrentAgenda({ ...options, projectionId }),
           save: (projectionId) => saveCurrentAgendaState({ projectionId }),
+          // CTX-01: '버전 기록' for one Board while the Desk store is ready.
+          openHistory: (boardId) => openBoardHistoryPanel(boardId),
+          revertVersion: revertBoardVersion,
           projections: () => cloneJson(state.boards),
           viewport: () => ({ ...viewportBoardResolution(), label: viewportBoardLabel().text }),
         },
@@ -17144,6 +17966,11 @@
           persist: persistDeskSession, storagePref: DESK_SESSION_PREF,
           retryRecovery: retryDeskRecovery, continueRecovery: continueDeskRecovery,
           recoveryRecords: () => recoveryStore().list().map(({ key, savedAt, reason }) => ({ key, savedAt, reason })),
+          // RT-07 / CTX-02: the bridge's Desk store (mode, last generation) and '복구 기록'.
+          storeStatus: () => deskStoreSync().status(),
+          openHistory: openDeskHistoryPanel,
+          restoreGeneration: restoreDeskGeneration,
+          mergeGeneration: mergeDeskGeneration,
         },
       };
       host.appendChild(buildDeskRail());
