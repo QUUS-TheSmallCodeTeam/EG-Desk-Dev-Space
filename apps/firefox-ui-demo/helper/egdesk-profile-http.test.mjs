@@ -3,8 +3,10 @@ import assert from 'node:assert/strict'
 import { realpathSync, rmSync } from 'node:fs'
 import path from 'node:path'
 import { Readable } from 'node:stream'
+import { crc32, deflateSync } from 'node:zlib'
 import { createPrivateQaTempDirectory } from '../scripts/egdesk-qa-platform.mjs'
-import { openProfileStore } from './egdesk-profile-store.mjs'
+import { exportAgentMarkdown } from './egdesk-profile-file.mjs'
+import { AVATAR_PALETTE, TOOL_CEILING_PRESETS, openProfileStore, profileHash } from './egdesk-profile-store.mjs'
 import { createProfileHttpHandler, handleProfileHttp } from './egdesk-profile-http.mjs'
 
 function fixture(t) {
@@ -196,4 +198,158 @@ test('POST /profiles/:id/duplicate makes a new draft and leaves the original unc
   }
   assert.equal(store.list({ includeArchived: true }).profiles.length, count, 'no refused copy was written')
   assert.equal((await api('POST', `/profiles/${chosen.data.id}/duplicate`)).data.lifecycle, 'deleted')
+})
+
+// ---- 2-P: presets, Agent files, avatar photos ----
+function pngChunk(type, data) {
+  const head = Buffer.alloc(4), crc = Buffer.alloc(4), payload = Buffer.concat([Buffer.from(type, 'latin1'), data])
+  head.writeUInt32BE(data.length)
+  crc.writeUInt32BE(crc32(payload))
+  return Buffer.concat([head, payload, crc])
+}
+function png(extra = []) {
+  const header = Buffer.alloc(13)
+  header.writeUInt32BE(1, 0)
+  header.writeUInt32BE(1, 4)
+  header[8] = 8
+  header[9] = 2
+  return Buffer.concat([Buffer.from([0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a]), pngChunk('IHDR', header), ...extra, pngChunk('IDAT', deflateSync(Buffer.from([0, 10, 20, 30]))), pngChunk('IEND', Buffer.alloc(0))])
+}
+
+test('GET /profiles/tool-presets lists the starting ranges and POST /profiles takes one only for a new Agent', async t => {
+  const { open } = fixture(t)
+  const store = open()
+  const api = (...args) => call({ store }, ...args)
+  const presets = await api('GET', '/profiles/tool-presets')
+  assert.equal(presets.status, 200)
+  assert.equal(presets.data.defaultPreset, 'open')
+  assert.deepEqual(presets.data.presets.map(item => [item.id, item.label]), [['read-only', '읽기만'], ['research', '리서치'], ['writing', '문서 작업'], ['coding', '코딩'], ['open', '제한 없음']])
+  const plain = await api('POST', '/profiles', { body: body() })
+  assert.equal(plain.data.profile.head.body.toolCeiling, undefined)
+  const coding = await api('POST', '/profiles', { body: body(), toolPreset: 'coding' })
+  assert.deepEqual([coding.status, coding.data.profile.head.body.toolCeiling], [201, TOOL_CEILING_PRESETS.find(item => item.id === 'coding').toolCeiling])
+  for (const [args, status, code] of [
+    [['POST', '/profiles', { body: body(), toolPreset: 'root' }], 400, 'INVALID_PROFILE'],
+    [['POST', '/profiles', { toolPreset: 'coding' }], 400, 'PROFILE_HTTP_INPUT'],
+    [['GET', '/profiles/tool-presets?x=1'], 400, 'PROFILE_HTTP_INPUT'],
+    [['POST', '/profiles/tool-presets', {}], 404, 'PROFILE_ROUTE_NOT_FOUND'],
+  ]) {
+    const result = await api(...args)
+    assert.deepEqual([result.status, result.data.code], [status, code], `${args[0]} ${args[1]}`)
+  }
+  assert.equal(store.list().profiles.length, 2)
+})
+
+test('POST /profiles/import previews without writing, then makes a draft that waits for review', async t => {
+  const { open } = fixture(t)
+  const store = open()
+  const api = (...args) => call({ store }, ...args)
+  const text = ['---', 'name: code-reviewer', 'description: Reviews diffs before merge.', 'tools: Read, Grep, Glob', 'api_key: sk-never-kept', '---', 'Review the diff.'].join('\n')
+  const dry = await api('POST', '/profiles/import', { text, filename: 'code-reviewer.md', dryRun: true })
+  assert.equal(dry.status, 200)
+  assert.deepEqual([dry.data.dryRun, dry.data.format, dry.data.flavor, dry.data.body.name], [true, 'md', 'claude-code', 'code-reviewer'])
+  assert.deepEqual(dry.data.preview.toolCeiling, { browser: 'none', files: 'read', terminal: 'none', network: 'off', mcp: 'none' })
+  assert.deepEqual(dry.data.preview.unknownFields, ['api_key'])
+  assert.ok(!JSON.stringify(dry.data).includes('sk-never-kept'))
+  assert.equal(store.list({ includeArchived: true }).profiles.length, 0, 'a preview writes nothing')
+
+  const made = await api('POST', '/profiles/import', { text })
+  assert.equal(made.status, 201)
+  assert.deepEqual([made.data.profile.lifecycle, made.data.profile.activeRevision, made.data.profile.reviewRequired], ['draft', null, true])
+  assert.deepEqual(made.data.profile.source.map(({ at, ...rest }) => rest), [{ kind: 'import', format: 'md', flavor: 'claude-code', name: 'code-reviewer' }])
+  assert.deepEqual(made.data.preview, dry.data.preview)
+  assert.equal(made.data.profile.head.body.instructions, 'Review the diff.')
+
+  // An EG-Desk file comes back as the same body, still as a new draft.
+  const own = { name: '리오', role: '회의 준비 담당', personality: { tone: 'warm' }, toolCeiling: { browser: 'observe', files: 'read', terminal: 'none', network: 'on', mcp: 'none' } }
+  const mine = await api('POST', '/profiles/import', { text: exportAgentMarkdown(own).text })
+  assert.deepEqual([mine.status, mine.data.hash, mine.data.profile.source[0].flavor, mine.data.profile.reviewRequired], [201, profileHash(own), 'egdesk', true])
+
+  const before = store.list({ includeArchived: true }).profiles.length
+  for (const [payload, status, code] of [
+    [{ text: 'name = "x"', filename: 'x.toml' }, 400, 'AGENT_FILE_FORMAT'],
+    [{ text: '# no front matter' }, 400, 'AGENT_FILE_FORMAT'],
+    [{ text: `---\nname: A\n---\n${'가'.repeat(8001)}` }, 400, 'AGENT_FILE_TOO_LONG'],
+    [{ text, dryRun: 'yes' }, 400, 'PROFILE_HTTP_INPUT'],
+    [{ text, owner: 'x' }, 400, 'PROFILE_HTTP_INPUT'],
+    [{ filename: 'a.md' }, 400, 'PROFILE_HTTP_INPUT'],
+    [{ text: 'x'.repeat(140 * 1024) }, 413, 'BODY_TOO_LARGE'],
+  ]) {
+    const result = await api('POST', '/profiles/import', payload)
+    assert.deepEqual([result.status, result.data.code], [status, code], JSON.stringify(result.data))
+    assert.equal(typeof result.data.error, 'string')
+  }
+  assert.equal(store.list({ includeArchived: true }).profiles.length, before, 'no refused file made a draft')
+})
+
+test('GET /profiles/:id/export writes the active or a chosen revision as .md or Codex .toml', async t => {
+  const { open } = fixture(t)
+  const store = open()
+  store.seedTemplates()
+  const api = (...args) => call({ store }, ...args)
+  const { data: { id } } = await api('POST', '/profiles', { body: body() })
+  await api('PUT', `/profiles/${id}/draft`, { body: body({ role: '일정 담당' }), expectedRevision: 1 })
+  await api('POST', `/profiles/${id}/activate`, { revision: 1, expectedActiveRevision: null })
+  const md = await api('GET', `/profiles/${id}/export`)
+  assert.deepEqual([md.status, md.data.profileId, md.data.revision, md.data.format, md.data.filename, md.data.omitted], [200, id, 1, 'md', '리오.md', []])
+  assert.match(md.data.text, /^---\nname: '리오'\ndescription: '회의 준비 담당'\n/)
+  const chosen = await api('GET', `/profiles/${id}/export?format=codex-toml&revision=2`)
+  assert.deepEqual([chosen.data.revision, chosen.data.format, chosen.data.filename, chosen.data.mediaType], [2, 'codex-toml', '리오.toml', 'application/toml; charset=utf-8'])
+  assert.match(chosen.data.text, /^description = "일정 담당"$/m)
+  assert.equal((await api('GET', '/profiles/review-verifier/export')).data.filename, 'review-and-verification-agent.md')
+  await api('POST', `/profiles/${id}/lifecycle`, { action: 'delete' })
+  for (const [url, status, code] of [
+    [`/profiles/${id}/export`, 409, 'PROFILE_LIFECYCLE_CONFLICT'],
+    ['/profiles/review-verifier/export?format=docx', 400, 'PROFILE_HTTP_INPUT'],
+    ['/profiles/review-verifier/export?revision=0', 400, 'PROFILE_HTTP_INPUT'],
+    ['/profiles/review-verifier/export?revision=5', 404, 'PROFILE_REVISION_NOT_FOUND'],
+    ['/profiles/review-verifier/export?x=1', 400, 'PROFILE_HTTP_INPUT'],
+    ['/profiles/prof-missing/export', 404, 'PROFILE_NOT_FOUND'],
+  ]) {
+    const result = await api('GET', url)
+    assert.deepEqual([result.status, result.data.code], [status, code], url)
+  }
+})
+
+test('avatar photos upload as plain base64, come back cleaned, and stay out of exported files', async t => {
+  const { open } = fixture(t)
+  const store = open()
+  const api = (...args) => call({ store }, ...args)
+  const original = png([pngChunk('tEXt', Buffer.from('Location\0home address'))])
+  const put = await api('POST', '/profiles/avatar-images', { mediaType: 'image/png', imageBase64: original.toString('base64') })
+  assert.equal(put.status, 201)
+  assert.match(put.data.assetId, /^img-[0-9a-f]{64}$/)
+  assert.deepEqual([put.data.width, put.data.height, put.data.unchanged], [1, 1, false])
+  const again = await api('POST', '/profiles/avatar-images', { mediaType: 'image/png', imageBase64: original.toString('base64') })
+  assert.deepEqual([again.status, again.data.assetId, again.data.unchanged], [200, put.data.assetId, true])
+  const got = await api('GET', `/profiles/avatar-images/${put.data.assetId}`)
+  assert.equal(got.status, 200)
+  const bytes = Buffer.from(got.data.imageBase64, 'base64')
+  assert.deepEqual([got.data.mediaType, got.data.byteSize, bytes.length], ['image/png', bytes.length, bytes.length])
+  assert.ok(!bytes.includes('home address'))
+
+  const photo = { kind: 'image', value: '리', color: AVATAR_PALETTE[0], assetId: put.data.assetId }
+  const created = await api('POST', '/profiles', { body: body({ avatar: photo }) })
+  assert.deepEqual([created.status, created.data.profile.head.body.avatar], [201, photo])
+  const exported = await api('GET', `/profiles/${created.data.id}/export`)
+  assert.deepEqual(exported.data.omitted, ['avatarImage'])
+  assert.ok(!exported.data.text.includes(put.data.assetId))
+
+  for (const [method, url, payload, status, code] of [
+    ['POST', '/profiles/avatar-images', { mediaType: 'image/gif', imageBase64: 'R0lGODlh' }, 400, 'INVALID_PROFILE_IMAGE'],
+    ['POST', '/profiles/avatar-images', { mediaType: 'image/jpeg', imageBase64: original.toString('base64') }, 400, 'INVALID_PROFILE_IMAGE'],
+    ['POST', '/profiles/avatar-images', { mediaType: 'image/png', imageBase64: `data:image/png;base64,${original.toString('base64')}` }, 400, 'INVALID_PROFILE_IMAGE'],
+    ['POST', '/profiles/avatar-images', { mediaType: 'image/png' }, 400, 'PROFILE_HTTP_INPUT'],
+    ['POST', '/profiles/avatar-images', { mediaType: 'image/png', imageBase64: 'A'.repeat(800 * 1024) }, 413, 'BODY_TOO_LARGE'],
+    ['POST', '/profiles/avatar-images', { mediaType: 'image/png', imageBase64: 'A'.repeat(720 * 1024) }, 413, 'PROFILE_IMAGE_TOO_LARGE'],
+    ['GET', `/profiles/avatar-images/img-${'0'.repeat(64)}`, undefined, 404, 'PROFILE_ASSET_NOT_FOUND'],
+    ['GET', '/profiles/avatar-images/img-xyz', undefined, 404, 'PROFILE_ROUTE_NOT_FOUND'],
+    ['GET', '/profiles/avatar-images', undefined, 404, 'PROFILE_NOT_FOUND'],
+    ['POST', '/profiles', { body: body({ avatar: { ...photo, assetId: `img-${'1'.repeat(64)}` } }) }, 400, 'PROFILE_ASSET_NOT_FOUND'],
+  ]) {
+    const result = await api(method, url, payload)
+    assert.deepEqual([result.status, result.data.code], [status, code], `${method} ${url}`)
+  }
+  const crossSite = await api('POST', '/profiles/avatar-images', { mediaType: 'image/png', imageBase64: original.toString('base64') }, { origin: 'https://example.com' })
+  assert.deepEqual([crossSite.status, crossSite.data.code], [403, 'PROFILE_LOOPBACK_REQUIRED'])
 })

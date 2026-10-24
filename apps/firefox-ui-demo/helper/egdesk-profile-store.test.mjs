@@ -4,11 +4,14 @@ import { createHash } from 'node:crypto'
 import { chmodSync, readdirSync, realpathSync, rmSync } from 'node:fs'
 import path from 'node:path'
 import { DatabaseSync } from 'node:sqlite'
+import { crc32, deflateSync } from 'node:zlib'
 import { createPrivateQaTempDirectory } from '../scripts/egdesk-qa-platform.mjs'
 import { openChatStore } from './egdesk-chat-store.mjs'
+import { exportAgentFile, importAgentFile } from './egdesk-profile-file.mjs'
 import {
-  AVATAR_PALETTE, MAX_COMPOSED, MAX_SOURCE_ENTRIES, PERSONALITY_LIMITS, PROFILE_TEMPLATES, PROFILE_TONES, composeDeveloperInstructions,
-  copyName, diffProfileBodies, normalizeProfileBody, openProfileStore, profileBinding, profileHash,
+  AVATAR_PALETTE, MAX_AVATAR_IMAGES, MAX_AVATAR_IMAGE_BYTES, MAX_COMPOSED, MAX_SOURCE_ENTRIES, PERSONALITY_LIMITS, PROFILE_TEMPLATES, PROFILE_TONES,
+  TOOL_CEILING_PRESETS, composeDeveloperInstructions, copyName, diffProfileBodies, normalizeProfileBody, openProfileStore, profileBinding, profileHash,
+  sanitizeAvatarImage, withoutAvatarImage,
 } from './egdesk-profile-store.mjs'
 
 function fixture(t) {
@@ -58,6 +61,7 @@ const V1_SCHEMA = `
     CREATE TRIGGER profile_revisions_kept BEFORE DELETE ON profile_revisions
       BEGIN SELECT RAISE(ABORT, 'profile revisions are kept'); END;
     CREATE TABLE store_meta (name TEXT PRIMARY KEY, value TEXT NOT NULL);`
+const INSERT_OLD_PROFILE = 'INSERT INTO profiles (id, owner_hash, active_revision, lifecycle, origin, created_at, updated_at) VALUES (?, ?, ?, ?, ?, ?, ?)'
 /** A private profile file as an older EG-Desk left it: rows written straight into the given schema. */
 function writeOldStore(dataDir, ownerHash, { version = 1, schema = V1_SCHEMA, rows = true } = {}) {
   const owner = sha(ownerHash)
@@ -66,10 +70,10 @@ function writeOldStore(dataDir, ownerHash, { version = 1, schema = V1_SCHEMA, ro
   db.exec(`PRAGMA journal_mode=DELETE; BEGIN; ${schema} PRAGMA user_version=${version}; COMMIT;`)
   const json = JSON.stringify(normalizeProfileBody(rio())), template = JSON.stringify(normalizeProfileBody(PROFILE_TEMPLATES[0].body))
   if (rows) {
-    db.prepare('INSERT INTO profiles VALUES (?, ?, ?, ?, ?, ?, ?)').run('prof-old-1', owner, null, 'draft', 'user', 10, 10)
+    db.prepare(INSERT_OLD_PROFILE).run('prof-old-1', owner, null, 'draft', 'user', 10, 10)
     db.prepare('INSERT INTO profile_revisions VALUES (?, ?, ?, ?, ?, ?, ?)').run('prof-old-1', 1, null, sha(json), 'user', json, 10)
     db.prepare('UPDATE profiles SET lifecycle=?, active_revision=? WHERE id=?').run('active', 1, 'prof-old-1')
-    db.prepare('INSERT INTO profiles VALUES (?, ?, ?, ?, ?, ?, ?)').run(PROFILE_TEMPLATES[0].id, owner, null, 'active', 'template', 5, 5)
+    db.prepare(INSERT_OLD_PROFILE).run(PROFILE_TEMPLATES[0].id, owner, null, 'active', 'template', 5, 5)
     db.prepare('INSERT INTO profile_revisions VALUES (?, ?, ?, ?, ?, ?, ?)').run(PROFILE_TEMPLATES[0].id, 1, null, sha(template), 'template', template, 5)
     db.prepare("INSERT INTO store_meta VALUES ('templates_seeded', '5')").run()
   }
@@ -450,14 +454,15 @@ test('an imported Agent waits as a draft until the user activates it', t => {
   assert.equal(store.list({ includeArchived: true }).profiles.length, before)
 })
 
-test('a version 1 file is upgraded in place to version 2 and saved revisions keep their bytes', t => {
+test('a version 1 file is upgraded in place to version 3 and saved revisions keep their bytes', t => {
   const { dataDir, open, handles } = fixture(t)
   const { filename, hash } = writeOldStore(dataDir, 'local-desktop-v1')
   assert.equal(schemaOf(filename).version, 1)
   const store = open('local-desktop-v1')
   const upgraded = schemaOf(filename)
-  assert.equal(upgraded.version, 2)
+  assert.equal(upgraded.version, 3)
   assert.ok(upgraded.objects.includes('trigger:profiles_source_append_only'))
+  assert.ok(['table:profile_assets', 'trigger:profile_assets_immutable', 'trigger:profile_assets_in_use_kept'].every(name => upgraded.objects.includes(name)))
   const old = store.get('prof-old-1')
   assert.deepEqual([old.lifecycle, old.activeRevision, old.active.hash, old.source, old.reviewRequired], ['active', 1, hash, [], false])
   assert.deepEqual(store.runProfile('prof-old-1').binding, { profileId: 'prof-old-1', revision: 1, hash })
@@ -476,9 +481,9 @@ test('a version 1 file is upgraded in place to version 2 and saved revisions kee
 
 test('a newer or damaged profile file is refused without being changed', t => {
   const { dataDir } = fixture(t)
-  const newer = writeOldStore(dataDir, 'owner-newer', { version: 3 })
+  const newer = writeOldStore(dataDir, 'owner-newer', { version: 4 })
   assert.throws(() => openProfileStore({ dataDir, ownerHash: 'owner-newer' }), error => error.code === 'UNSUPPORTED_STORE_VERSION' && /newer EG-Desk/.test(error.message))
-  assert.deepEqual([schemaOf(newer.filename).version, schemaOf(newer.filename).columns[0].some(column => column.startsWith('profiles.source_json'))], [3, false])
+  assert.deepEqual([schemaOf(newer.filename).version, schemaOf(newer.filename).columns[0].some(column => column.startsWith('profiles.source_json'))], [4, false])
 
   const broken = writeOldStore(dataDir, 'owner-broken', { schema: V1_SCHEMA.replace(/CREATE TRIGGER profile_revisions_kept[^;]+;[^;]+;/, '') })
   assert.throws(() => openProfileStore({ dataDir, ownerHash: 'owner-broken' }), error => error.code === 'STORE_CORRUPT')
@@ -504,4 +509,260 @@ test('where a profile came from is append-only even at the database layer', t =>
   raw.prepare('UPDATE profiles SET source_json=? WHERE id=?').run(`${current.slice(0, -1)},{"kind":"note","at":1}]`, copy.id)
   assert.deepEqual(store.get(copy.id).source.map(item => item.kind), ['duplicate', 'note'], 'appending is the one change allowed')
   assert.throws(() => raw.prepare("INSERT INTO profiles (id, owner_hash, lifecycle, origin, created_at, updated_at, source_json) VALUES ('prof-x', 'o', 'draft', 'user', 1, 1, 'x')").run(), /CHECK constraint/)
+})
+
+// ---- D-A1 tool presets, D-A3 avatar photos (2-P) ----
+const PNG_SIG = Buffer.from([0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a])
+function pngChunk(type, data) {
+  const head = Buffer.alloc(4), crc = Buffer.alloc(4), body = Buffer.concat([Buffer.from(type, 'latin1'), data])
+  head.writeUInt32BE(data.length)
+  crc.writeUInt32BE(crc32(body))
+  return Buffer.concat([head, body, crc])
+}
+/** An RGB PNG; seed changes the pixels so each seed is a different picture. */
+function png({ width = 2, height = 2, seed = 0, before = [], after = [], trailing = Buffer.alloc(0), raw } = {}) {
+  const header = Buffer.alloc(13)
+  header.writeUInt32BE(width, 0)
+  header.writeUInt32BE(height, 4)
+  header[8] = 8
+  header[9] = 2
+  const rows = raw ?? Buffer.concat(Array.from({ length: height }, (_, y) => Buffer.from([0, ...Array.from({ length: width * 3 }, (_, x) => (x + y + seed) % 256)])))
+  return Buffer.concat([PNG_SIG, pngChunk('IHDR', header), ...before, pngChunk('IDAT', deflateSync(rows)), ...after, pngChunk('IEND', Buffer.alloc(0)), trailing])
+}
+const jpegSegment = (marker, payload) => {
+  const head = Buffer.alloc(4)
+  head.writeUInt16BE(0xff00 | marker, 0)
+  head.writeUInt16BE(payload.length + 2, 2)
+  return Buffer.concat([head, payload])
+}
+/** A JPEG whose EXIF holds an orientation and a GPS block, plus a comment, a thumbnail and bytes after the end. */
+function jpeg({ frame = 0xc0, orientation = 6 } = {}) {
+  const tiff = Buffer.alloc(48)
+  tiff.write('MM', 0, 'latin1')
+  tiff.writeUInt16BE(42, 2)
+  tiff.writeUInt32BE(8, 4)
+  tiff.writeUInt16BE(2, 8)
+  tiff.writeUInt16BE(0x0112, 10); tiff.writeUInt16BE(3, 12); tiff.writeUInt32BE(1, 14); tiff.writeUInt16BE(orientation, 18)
+  tiff.writeUInt16BE(0x8825, 22); tiff.writeUInt16BE(4, 24); tiff.writeUInt32BE(1, 26); tiff.writeUInt32BE(38, 30)
+  tiff.write('GPSSECRET', 38, 'latin1')
+  const jfif = Buffer.concat([Buffer.from('JFIF\0', 'latin1'), Buffer.from([1, 2, 0, 0, 1, 0, 1, 2, 2]), Buffer.alloc(12, 7)])
+  return Buffer.concat([
+    Buffer.from([0xff, 0xd8]), jpegSegment(0xe0, jfif), jpegSegment(0xe1, Buffer.concat([Buffer.from('Exif\0\0', 'latin1'), tiff])),
+    jpegSegment(0xfe, Buffer.from('comment secret')), jpegSegment(0xdb, Buffer.concat([Buffer.from([0]), Buffer.alloc(64, 1)])),
+    jpegSegment(frame, Buffer.from([8, 0, 16, 0, 16, 3, 1, 0x22, 0, 2, 0x11, 1, 3, 0x11, 1])),
+    jpegSegment(0xc4, Buffer.concat([Buffer.from([0]), Buffer.alloc(16, 0)])), jpegSegment(0xda, Buffer.from([3, 1, 0, 2, 0x11, 3, 0x11, 0, 63, 0])),
+    Buffer.from([0x12, 0x34, 0xff, 0x00, 0x56, 0xff, 0xd0, 0x78]), Buffer.from([0xff, 0xd9]), Buffer.from('trailing secret'),
+  ])
+}
+function webpChunk(fourcc, data) {
+  const head = Buffer.alloc(8)
+  head.write(fourcc, 0, 'latin1')
+  head.writeUInt32LE(data.length, 4)
+  return Buffer.concat([head, data, Buffer.alloc(data.length & 1)])
+}
+const riff = chunks => { const body = Buffer.concat([Buffer.from('WEBP', 'latin1'), ...chunks]); const head = Buffer.alloc(8); head.write('RIFF', 0, 'latin1'); head.writeUInt32LE(body.length, 4); return Buffer.concat([head, body]) }
+const vp8l = (width, height) => { const data = Buffer.alloc(9); data[0] = 0x2f; data.writeUInt32LE((width - 1) | ((height - 1) << 14) | (1 << 28), 1); return webpChunk('VP8L', data) }
+const vp8x = (flags, width, height) => { const data = Buffer.alloc(10); data[0] = flags; data.writeUIntLE(width - 1, 4, 3); data.writeUIntLE(height - 1, 7, 3); return webpChunk('VP8X', data) }
+const upload = bytes => ({ mediaType: bytes[0] === 0x89 ? 'image/png' : bytes[0] === 0xff ? 'image/jpeg' : 'image/webp', imageBase64: bytes.toString('base64') })
+
+test('a new Agent can start from a named tool range; the default stays no ceiling and nothing saved changes', t => {
+  const { dataDir, open, handles } = fixture(t)
+  const store = open()
+  assert.deepEqual(store.toolPresets().presets.map(item => item.id), ['read-only', 'research', 'writing', 'coding', 'open'])
+  assert.equal(store.toolPresets().defaultPreset, 'open')
+  const plain = store.createDraft(rio())
+  assert.equal(plain.profile.head.body.toolCeiling, undefined, 'no preset chosen: today\'s behaviour, no ceiling')
+  assert.equal(plain.hash, profileHash(rio()))
+  const research = store.createDraft(rio(), { toolPreset: 'research' })
+  assert.deepEqual(research.profile.head.body.toolCeiling, TOOL_CEILING_PRESETS.find(item => item.id === 'research').toolCeiling)
+  assert.match(composeDeveloperInstructions(research.profile.head.body), /브라우저는 보기만/)
+  const own = { browser: 'none', files: 'write', terminal: 'ask', network: 'on', mcp: 'none' }
+  assert.deepEqual(store.createDraft(rio({ toolCeiling: own }), { toolPreset: 'read-only' }).profile.head.body.toolCeiling, own, 'a ceiling the body sets wins')
+  assert.equal(store.createDraft(rio(), { toolPreset: 'open' }).profile.head.body.toolCeiling, undefined)
+  rejects(() => store.createDraft(rio(), { toolPreset: 'admin' }))
+  rejects(() => store.createDraft(rio(), 'research'))
+  rejects(() => store.createDraft({ name: 'A', systemPrompt: 'x' }, { toolPreset: 'coding' }))
+  // Only createDraft reads presets: editing keeps whatever the body says.
+  assert.equal(store.saveDraft(plain.id, rio({ role: '고친 역할' }), 1).profile.head.body.toolCeiling, undefined)
+  store.close(); handles.length = 0
+
+  // When D-A1 is decided the store opens with another default; it applies to new drafts only.
+  const decided = openProfileStore({ dataDir, ownerHash: 'local-desktop-v1', defaultToolPreset: 'read-only' })
+  handles.push(decided)
+  assert.equal(decided.get(plain.id).head.body.toolCeiling, undefined, 'never backfilled')
+  assert.deepEqual(decided.createDraft(rio()).profile.head.body.toolCeiling, TOOL_CEILING_PRESETS[0].toolCeiling)
+  assert.equal(decided.createDraft(rio(), { toolPreset: 'open' }).profile.head.body.toolCeiling, undefined)
+  assert.equal(decided.importDraft(rio()).profile.head.body.toolCeiling, undefined, 'an imported Agent keeps its own ceiling')
+  assert.equal(decided.duplicate(plain.id).profile.head.body.toolCeiling, undefined)
+  assert.equal(decided.toolPresets().defaultPreset, 'read-only')
+  rejects(() => openProfileStore({ dataDir, ownerHash: 'x', defaultToolPreset: 'everything' }))
+})
+
+test('avatar photos are checked, written again without metadata and kept by content id', () => {
+  const secret = pngChunk('tEXt', Buffer.from('Comment\0secret place'))
+  const cleanedPng = sanitizeAvatarImage(png({ before: [secret, pngChunk('pHYs', Buffer.alloc(9))], after: [pngChunk('eXIf', Buffer.from('GPSSECRET'))], trailing: Buffer.from('trailing secret') }), 'image/png')
+  assert.deepEqual([cleanedPng.mediaType, cleanedPng.width, cleanedPng.height], ['image/png', 2, 2])
+  assert.ok(!cleanedPng.bytes.includes('secret') && !cleanedPng.bytes.includes('GPSSECRET'))
+  assert.ok(cleanedPng.bytes.includes('pHYs'), 'chunks that shape the picture stay')
+  assert.deepEqual(sanitizeAvatarImage(cleanedPng.bytes).bytes, cleanedPng.bytes, 'cleaning is stable')
+  // An interlaced image inflates to the exact size of its seven passes.
+  const header = Buffer.alloc(13); header.writeUInt32BE(3, 0); header.writeUInt32BE(3, 4); header[8] = 8; header[9] = 0; header[12] = 1
+  const passes = [[1, 1], [0, 0], [0, 0], [1, 1], [2, 1], [1, 2], [3, 1]] // 3×3 gray Adam7 passes as (columns, rows)
+  const raw = Buffer.alloc(passes.filter(([w, h]) => w && h).reduce((sum, [w, h]) => sum + h * (1 + w), 0))
+  const interlaced = Buffer.concat([PNG_SIG, pngChunk('IHDR', header), pngChunk('IDAT', deflateSync(raw)), pngChunk('IEND', Buffer.alloc(0))])
+  assert.equal(sanitizeAvatarImage(interlaced).width, 3)
+  rejects(() => sanitizeAvatarImage(Buffer.concat([PNG_SIG, pngChunk('IHDR', header), pngChunk('IDAT', deflateSync(Buffer.alloc(raw.length + 1))), pngChunk('IEND', Buffer.alloc(0))])), 'INVALID_PROFILE_IMAGE')
+
+  const cleanedJpeg = sanitizeAvatarImage(jpeg(), 'image/jpeg')
+  assert.deepEqual([cleanedJpeg.mediaType, cleanedJpeg.width, cleanedJpeg.height], ['image/jpeg', 16, 16])
+  assert.ok(!['secret', 'GPSSECRET'].some(text => cleanedJpeg.bytes.includes(text)), 'EXIF, comments, thumbnail and trailing bytes are gone')
+  assert.deepEqual([...cleanedJpeg.bytes.subarray(0, 4)], [0xff, 0xd8, 0xff, 0xe0])
+  assert.equal(cleanedJpeg.bytes.toString('latin1', 24, 30), 'Exif\0\0')
+  assert.equal(cleanedJpeg.bytes.readUInt16BE(48), 6, 'orientation alone survives so the photo stands the right way up')
+  assert.deepEqual([...cleanedJpeg.bytes.subarray(-2)], [0xff, 0xd9])
+  assert.equal(sanitizeAvatarImage(jpeg({ orientation: 1 })).bytes.includes('Exif'), false)
+  assert.equal(sanitizeAvatarImage(jpeg({ frame: 0xc2 })).width, 16, 'progressive frames are fine')
+
+  const extended = riff([vp8x(0x10 | 0x08 | 0x04, 16, 16), vp8l(16, 16), webpChunk('EXIF', Buffer.from('GPSSECRET')), webpChunk('XMP ', Buffer.from('secret!'))])
+  const cleanedWebp = sanitizeAvatarImage(extended, 'image/webp')
+  assert.deepEqual([cleanedWebp.width, cleanedWebp.height, cleanedWebp.bytes[20]], [16, 16, 0x10], 'EXIF and XMP flags cleared, alpha kept')
+  assert.ok(!cleanedWebp.bytes.includes('secret') && !cleanedWebp.bytes.includes('GPSSECRET'))
+  assert.equal(cleanedWebp.bytes.readUInt32LE(4), cleanedWebp.bytes.length - 8)
+  const lossy = Buffer.from([0x50, 0x01, 0x00, 0x9d, 0x01, 0x2a, 20, 0, 10, 0, 0, 0])
+  assert.deepEqual([sanitizeAvatarImage(riff([webpChunk('VP8 ', lossy)])).width, sanitizeAvatarImage(riff([webpChunk('VP8 ', lossy)])).height], [20, 10])
+
+  const bad = [
+    [Buffer.from('GIF89a........'), undefined],
+    [png(), 'image/jpeg'],
+    [png({ width: 4096, height: 1 }), undefined],
+    [png({ before: [pngChunk('acTL', Buffer.alloc(8))] }), undefined],
+    [png({ before: [pngChunk('zzZZ', Buffer.alloc(1)), pngChunk('ABCD', Buffer.alloc(1))] }), undefined],
+    [png({ width: 3, height: 2, raw: Buffer.alloc(2 * 7) }), undefined],
+    [png({ raw: Buffer.from([9, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0]) }), undefined],
+    [png().subarray(0, png().length - 12), undefined], // no IEND
+    [(() => { const damaged = Buffer.from(png()); damaged[29] ^= 1; return damaged })(), undefined],
+    [jpeg({ frame: 0xc3 }), undefined],
+    [Buffer.from([0xff, 0xd8, 0xff, 0xd9]), undefined],
+    [riff([vp8x(0x02, 16, 16), vp8l(16, 16)]), undefined],
+    [riff([vp8l(16, 16), vp8l(16, 16)]), undefined],
+    [riff([vp8x(0, 32, 32), vp8l(16, 16)]), undefined],
+    [Buffer.alloc(0), undefined],
+  ]
+  for (const [bytes, declared] of bad) rejects(() => sanitizeAvatarImage(bytes, declared), 'INVALID_PROFILE_IMAGE')
+  rejects(() => sanitizeAvatarImage(png({ before: [pngChunk('tEXt', Buffer.alloc(MAX_AVATAR_IMAGE_BYTES))] })), 'PROFILE_IMAGE_TOO_LARGE')
+})
+
+test('a photo avatar names an image kept in this store and never leaves with an import or export', t => {
+  const { dataDir, open } = fixture(t)
+  const store = open()
+  const put = store.putAvatarImage(upload(png({ before: [pngChunk('tEXt', Buffer.from('Author\0someone'))] })))
+  assert.match(put.assetId, /^img-[0-9a-f]{64}$/)
+  assert.deepEqual([put.mediaType, put.width, put.height, put.unchanged], ['image/png', 2, 2, false])
+  const again = store.putAvatarImage(upload(png({ before: [pngChunk('tEXt', Buffer.from('Author\0another'))] })))
+  assert.deepEqual([again.assetId, again.unchanged], [put.assetId, true], 'the same picture is kept once')
+  const kept = store.getAvatarImage(put.assetId)
+  assert.equal(kept.byteSize, kept.bytes.length)
+  assert.equal(kept.bytes.includes('someone'), false)
+  assert.equal(`img-${sha(kept.bytes)}`, put.assetId)
+
+  const photo = { kind: 'image', value: '리', color: AVATAR_PALETTE[2], assetId: put.assetId }
+  const created = store.createDraft(rio({ avatar: photo }))
+  assert.deepEqual(created.profile.head.body.avatar, photo)
+  assert.deepEqual(Object.keys(created.profile.head.body.avatar), ['kind', 'value', 'color', 'assetId'])
+  assert.equal(store.list().profiles[0].avatar.assetId, put.assetId)
+  assert.equal(store.duplicate(created.id).profile.head.body.avatar.assetId, put.assetId, 'a copy in the same store keeps the photo')
+  assert.deepEqual(withoutAvatarImage(created.profile.head.body).avatar, { kind: 'initial', value: '리', color: AVATAR_PALETTE[2] })
+  const imported = store.importDraft(rio({ avatar: photo }))
+  assert.deepEqual(imported.profile.head.body.avatar, { kind: 'initial', value: '리', color: AVATAR_PALETTE[2] }, 'an imported Agent never brings a photo')
+  const missing = { ...photo, assetId: `img-${'0'.repeat(64)}` }
+  rejects(() => store.createDraft(rio({ avatar: missing })), 'PROFILE_ASSET_NOT_FOUND')
+  rejects(() => store.saveDraft(created.id, rio({ avatar: missing }), 1), 'PROFILE_ASSET_NOT_FOUND')
+  for (const avatar of [{ ...photo, assetId: 'img-abc' }, { ...photo, value: '' }, { kind: 'image', value: '리', assetId: put.assetId, url: 'x' }, { kind: 'initial', value: '리', assetId: put.assetId }, { ...photo, assetId: `data:image/png;base64,${kept.bytes.toString('base64')}` }]) {
+    rejects(() => store.createDraft(rio({ avatar })))
+  }
+  rejects(() => store.getAvatarImage('img-xyz'), 'INVALID_PROFILE_ASSET_ID')
+  rejects(() => store.getAvatarImage(missing.assetId), 'PROFILE_ASSET_NOT_FOUND')
+  for (const input of [{ mediaType: 'image/gif', imageBase64: 'AAAA' }, { mediaType: 'image/png', imageBase64: `data:image/png;base64,${png().toString('base64')}` }, { mediaType: 'image/png' }, { mediaType: 'image/png', imageBase64: png().toString('base64'), name: 'x' }, null]) {
+    rejects(() => store.putAvatarImage(input), 'INVALID_PROFILE_IMAGE')
+  }
+  rejects(() => store.putAvatarImage({ mediaType: 'image/png', imageBase64: 'A'.repeat(4 * Math.ceil(MAX_AVATAR_IMAGE_BYTES / 3) + 4) }), 'PROFILE_IMAGE_TOO_LARGE')
+
+  // Exported files carry the initial, never the photo or its id.
+  const file = exportAgentFile(created.profile.head.body, 'md')
+  assert.deepEqual(file.omitted, ['avatarImage'])
+  assert.ok(!file.text.includes(put.assetId) && !file.text.includes('img-'))
+
+  const raw = new DatabaseSync(path.join(dataDir, `profiles-${store.ownerHash}.sqlite`))
+  t.after(() => raw.close())
+  assert.throws(() => raw.prepare('UPDATE profile_assets SET bytes=? WHERE id=?').run(Buffer.from([1]), put.assetId), /immutable|CHECK/)
+  assert.throws(() => raw.prepare('DELETE FROM profile_assets WHERE id=?').run(put.assetId), /in use are kept/)
+  const orphan = store.putAvatarImage(upload(png({ seed: 9 })))
+  raw.prepare('DELETE FROM profile_assets WHERE id=?').run(orphan.assetId)
+  rejects(() => store.getAvatarImage(orphan.assetId), 'PROFILE_ASSET_NOT_FOUND')
+})
+
+test('at the photo cap, old uploads no revision uses make room; recent ones are not taken away', t => {
+  const { dataDir, open } = fixture(t)
+  const store = open()
+  const used = store.putAvatarImage(upload(png({ seed: 1 })))
+  store.createDraft(rio({ avatar: { kind: 'image', value: '리', color: AVATAR_PALETTE[0], assetId: used.assetId } }))
+  const raw = new DatabaseSync(path.join(dataDir, `profiles-${store.ownerHash}.sqlite`))
+  t.after(() => raw.close())
+  const fill = createdAt => {
+    raw.exec('BEGIN')
+    for (let index = raw.prepare('SELECT COUNT(*) AS n FROM profile_assets').get().n; index < MAX_AVATAR_IMAGES; index++) {
+      raw.prepare('INSERT INTO profile_assets VALUES (?, ?, ?, 1, 1, 1, ?, ?)').run(`img-${sha(`${createdAt}-${index}`)}`, store.ownerHash, 'image/png', Buffer.from([index % 256]), createdAt)
+    }
+    raw.exec('COMMIT')
+  }
+  fill(1)
+  const roomMade = store.putAvatarImage(upload(png({ seed: 2 })))
+  assert.equal(roomMade.unchanged, false)
+  assert.equal(raw.prepare('SELECT COUNT(*) AS n FROM profile_assets').get().n, 2, 'only the photo in use and the new one remain')
+  assert.equal(store.getAvatarImage(used.assetId).assetId, used.assetId)
+  fill(Date.now())
+  rejects(() => store.putAvatarImage(upload(png({ seed: 3 }))), 'PROFILE_ASSET_LIMIT')
+  assert.equal(store.putAvatarImage(upload(png({ seed: 2 }))).unchanged, true, 'an image already kept is still found at the cap')
+})
+
+test('a version 2 file gains the photo table and keeps its rows', t => {
+  const { dataDir, open } = fixture(t)
+  const v2 = `${V1_SCHEMA}
+    ALTER TABLE profiles ADD COLUMN source_json TEXT NOT NULL DEFAULT '[]'
+      CHECK (CASE WHEN json_valid(source_json) THEN json_type(source_json) = 'array' ELSE 0 END);
+    CREATE TRIGGER profiles_source_append_only BEFORE UPDATE OF source_json ON profiles
+      WHEN json_array_length(NEW.source_json) < json_array_length(OLD.source_json)
+        OR substr(NEW.source_json, 1, length(OLD.source_json) - 1) IS NOT substr(OLD.source_json, 1, length(OLD.source_json) - 1)
+      BEGIN SELECT RAISE(ABORT, 'profile source is append-only'); END;`
+  const { filename, hash } = writeOldStore(dataDir, 'owner-v2', { version: 2, schema: v2 })
+  const store = open('owner-v2')
+  const upgraded = schemaOf(filename)
+  assert.equal(upgraded.version, 3)
+  assert.deepEqual(store.runProfile('prof-old-1').binding, { profileId: 'prof-old-1', revision: 1, hash })
+  assert.match(store.putAvatarImage(upload(png())).assetId, /^img-/)
+  const fresh = open('fresh-owner')
+  const created = schemaOf(path.join(dataDir, `profiles-${fresh.ownerHash}.sqlite`))
+  const tidy = shape => ({ ...shape, objects: shape.objects.filter(name => !name.startsWith('index:sqlite_autoindex')) })
+  assert.deepEqual(tidy(created), tidy(upgraded))
+})
+
+test('preset lists, photo records and Agent file previews pass the chat store private-field gate', t => {
+  const { dataDir, open } = fixture(t)
+  const store = open()
+  const chat = openChatStore({ dataDir: path.join(dataDir, 'chat'), ownerScope: 'local-desktop-v1' })
+  t.after(() => chat.close())
+  chat.createConversation({ clientThreadId: 'client-2p', createdAt: 1 })
+  const image = store.putAvatarImage(upload(png()))
+  const withPhoto = store.createDraft(rio({ avatar: { kind: 'image', value: '리', color: AVATAR_PALETTE[0], assetId: image.assetId } }), { toolPreset: 'coding' })
+  const { bytes, ...imageMeta } = store.getAvatarImage(image.assetId)
+  const claudeFile = '---\nname: reviewer\ndescription: Reviews\napi_key: sk-not-kept\nsecret: hidden\ntools: Read, Bash\n---\nReview carefully.'
+  const shapes = {
+    presets: store.toolPresets(), image, imageMeta: { ...imageMeta, byteSize: bytes.length }, withPhoto,
+    exported: exportAgentFile(withPhoto.profile.head.body, 'md'), toml: exportAgentFile(withPhoto.profile.head.body, 'codex-toml'),
+    preview: importAgentFile(claudeFile), own: importAgentFile(exportAgentFile(rio(), 'md').text),
+    exportSource: store.exportRevision(withPhoto.id),
+  }
+  chat.appendEvent({ clientThreadId: 'client-2p', eventKey: '2p-shapes', ts: 2, event: 'profile.applied', details: shapes })
+  assert.ok(!JSON.stringify(shapes.preview).includes('sk-not-kept') && !JSON.stringify(shapes.preview).includes('hidden'))
+  assert.deepEqual(shapes.preview.preview.unknownFields, ['api_key', 'secret'], 'names only, as list items rather than object keys')
 })

@@ -1,7 +1,9 @@
+import { Buffer } from 'node:buffer'
 import { createHash, randomUUID } from 'node:crypto'
 import { constants, closeSync, lstatSync, mkdirSync, openSync, realpathSync } from 'node:fs'
 import path from 'node:path'
 import { DatabaseSync } from 'node:sqlite'
+import { crc32, inflateSync } from 'node:zlib'
 import { isOwnedAndPrivate } from './egdesk-private-files.mjs'
 
 // Local Agent Profile store. A profile has a stable ID and an append-only
@@ -15,7 +17,9 @@ import { isOwnedAndPrivate } from './egdesk-private-files.mjs'
 //   1  profiles, profile_revisions (immutable, kept), store_meta
 //   2  profiles.source_json — where a profile came from, append-only
 //      (the `source` rule of kwaroran/character-card-spec-v3 SPEC_V3.md, MIT)
-const VERSION = 2
+//   3  profile_assets — avatar photos by content id (D-A3); bodies keep only
+//      the id, never image bytes or a data URL (paperclip customAvatarAssetId, pattern only)
+const VERSION = 3
 export const MAX_PROFILES = 200
 const MAX_PROFILE_ROWS = 1000 // Live + soft-deleted rows; deleted rows keep their history.
 export const MAX_REVISIONS = 500
@@ -50,9 +54,44 @@ const CEILING_KEYS = TOOL_CEILING_AXES.map(item => item.axis)
 // awesome-openclaw-agents SOUL.md "Don't" / "Example Interactions"). With
 // every other field at its cap the composed text still fits MAX_COMPOSED.
 export const PERSONALITY_LIMITS = Object.freeze({ examples: 3, exampleUser: 100, exampleReply: 280, avoid: 8, avoidItem: 80 })
+// AGENT-04·D-A1: named ceilings a new Agent can start from. Only createDraft
+// reads them and only to fill a missing toolCeiling, so nothing already saved
+// changes (create-time default, never backfilled: paperclip
+// server/src/lib/agent-permissions.ts:60-76, pattern only). D-A1 is still
+// open: the default stays 'open' (no ceiling, today's behaviour) unless the
+// store is opened with another defaultToolPreset.
+const preset = (id, label, description, toolCeiling) => Object.freeze({ id, label, description, toolCeiling: toolCeiling && Object.freeze(toolCeiling) })
+export const TOOL_CEILING_PRESETS = Object.freeze([
+  preset('read-only', '읽기만', '파일과 브라우저를 보기만 한다. 명령·인터넷·외부 도구는 쓰지 않는다.', { browser: 'observe', files: 'read', terminal: 'none', network: 'off', mcp: 'none' }),
+  preset('research', '리서치', '인터넷과 브라우저로 찾아보고 읽기만 한다. 파일을 고치거나 명령을 실행하지 않는다.', { browser: 'observe', files: 'read', terminal: 'none', network: 'on', mcp: 'none' }),
+  preset('writing', '문서 작업', '자료를 찾아보고 파일을 만들거나 고친다. 명령은 실행하지 않는다.', { browser: 'observe', files: 'write', terminal: 'none', network: 'on', mcp: 'none' }),
+  preset('coding', '코딩', '파일을 만들고 고치며, 터미널 명령은 매번 묻는다.', { browser: 'observe', files: 'write', terminal: 'ask', network: 'on', mcp: 'inherited' }),
+  preset('open', '제한 없음', '지금과 같다. 이 Agent만 따로 막지 않는다.', null),
+])
+export const DEFAULT_TOOL_PRESET = 'open'
+function toolPreset(id, name = 'toolPreset') {
+  const found = TOOL_CEILING_PRESETS.find(item => item.id === id)
+  if (!found) fail('INVALID_PROFILE', `${name} must be one of ${TOOL_CEILING_PRESETS.map(item => item.id).join(', ')}`)
+  return found
+}
+// D-A3 avatar photos. Size cap and plain-base64 rule from paperclipai/paperclip
+// packages/shared/src/agent-avatar-upload.ts:3-9 (MIT License, Copyright (c)
+// 2025 Paperclip AI). The helper has no image codec, so a photo is not
+// re-encoded: its container is read chunk by chunk and written again with only
+// the parts that draw the picture (no EXIF/XMP/text/thumbnail, nothing after
+// the end marker), and PNG pixel data is inflated to its exact expected size.
+export const AVATAR_IMAGE_TYPES = Object.freeze(['image/png', 'image/jpeg', 'image/webp'])
+export const MAX_AVATAR_IMAGE_BYTES = 512 * 1024
+export const MAX_AVATAR_IMAGE_SIDE = 2048
+export const MAX_AVATAR_IMAGES = 200
+const AVATAR_IMAGE_GRACE_MS = 10 * 60 * 1000 // An upload not yet saved in any revision is kept at least this long.
+const AVATAR_ASSET_ID = /^img-[0-9a-f]{64}$/
+const BASE64 = /^(?:[A-Za-z0-9+/]{4})*(?:[A-Za-z0-9+/]{2}==|[A-Za-z0-9+/]{3}=)?$/
 // Provenance chain carried by a copy: the newest entries win.
 export const MAX_SOURCE_ENTRIES = 8
-const IMPORT_FORMATS = ['egdesk']
+// 'egdesk' = an .egdesk bundle; 'md' = one Agent file (egdesk-profile-file.mjs).
+const IMPORT_FORMATS = ['egdesk', 'md']
+const IMPORT_FLAVORS = ['egdesk', 'agency-agents', 'claude-code']
 const COPY_SUFFIX = ' 사본'
 const PROFILE_ID = /^[a-z0-9][a-z0-9-]{0,79}$/
 const SINGLE_LINE_BAD = /[\u0000-\u001f\u007f\u2028\u2029]/
@@ -96,18 +135,22 @@ function list(value, name, { max, itemMax, pattern }) {
 }
 function avatar(value) {
   if (value === undefined || value === null) return null
-  shape(value, ['kind', 'value', 'color'], 'avatar')
-  if (!['emoji', 'initial'].includes(value.kind)) fail('INVALID_PROFILE', 'avatar.kind must be emoji or initial')
+  const image = value?.kind === 'image'
+  // A photo is named by its asset id; `value` is the initial drawn when the photo cannot be.
+  shape(value, image ? ['kind', 'value', 'color', 'assetId'] : ['kind', 'value', 'color'], 'avatar')
+  if (!['emoji', 'initial', 'image'].includes(value.kind)) fail('INVALID_PROFILE', 'avatar.kind must be emoji, initial or image')
   if (typeof value.value !== 'string') fail('INVALID_PROFILE', 'avatar.value must be text')
   const text = value.value.normalize('NFC').trim()
   if (value.kind === 'emoji') {
     const parts = [...graphemes.segment(text)]
-    // One pictographic grapheme (ZWJ sequences and flags included); no image uploads.
+    // One pictographic grapheme (ZWJ sequences and flags included).
     if (parts.length !== 1 || text.length > 32 || !/\p{Extended_Pictographic}|\p{Regional_Indicator}/u.test(text)) fail('INVALID_PROFILE', 'avatar.value must be exactly one emoji')
   } else if (!/^[\p{L}\p{N}]{1,2}$/u.test(text)) fail('INVALID_PROFILE', 'avatar.value must be 1–2 letters or digits')
   const color = value.color === undefined ? AVATAR_PALETTE[0] : typeof value.color === 'string' ? value.color.toLowerCase() : null
   if (!AVATAR_PALETTE.includes(color)) fail('INVALID_PROFILE', 'avatar.color must be one of the approved palette colors')
-  return { kind: value.kind, value: text, color }
+  if (!image) return { kind: value.kind, value: text, color }
+  if (typeof value.assetId !== 'string' || !AVATAR_ASSET_ID.test(value.assetId)) fail('INVALID_PROFILE', 'avatar.assetId must name an uploaded avatar image')
+  return { kind: 'image', value: text, color, assetId: value.assetId }
 }
 function examples(value) {
   const { examples: max, exampleUser, exampleReply } = PERSONALITY_LIMITS
@@ -181,6 +224,12 @@ export function normalizeProfileBody(input) {
   return toolCeiling ? { ...body, toolCeiling } : body
 }
 export const profileHash = body => digest(JSON.stringify(normalizeProfileBody(body)))
+/** The same body with a photo avatar written as its initial: photos never leave this install (D-A3). */
+export function withoutAvatarImage(body) {
+  if (body?.avatar?.kind !== 'image') return body
+  const { value, color } = body.avatar
+  return { ...body, avatar: { kind: 'initial', value, color } }
+}
 
 const TONE_DIRECTIVES = {
   plain: '꾸밈 없이 평이한 말투로 답한다.',
@@ -357,6 +406,230 @@ export function copyName(name) {
   return `${base.trim()}${COPY_SUFFIX}`.trim()
 }
 
+// ---- Avatar photos (D-A3): check the container, keep only what draws the picture ----
+const imageFail = message => fail('INVALID_PROFILE_IMAGE', message)
+function imageSide(width, height) {
+  if (!(width >= 1 && height >= 1 && width <= MAX_AVATAR_IMAGE_SIDE && height <= MAX_AVATAR_IMAGE_SIDE)) imageFail(`Image must be 1–${MAX_AVATAR_IMAGE_SIDE} pixels on each side`)
+}
+const startsWithText = (data, text) => data.length >= text.length && data.toString('latin1', 0, text.length) === text
+
+const PNG_SIGNATURE = Buffer.from([0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a])
+// Chunks that draw or colour the picture. Text, EXIF, time and other ancillary chunks are dropped.
+const PNG_KEEP = new Set(['IHDR', 'PLTE', 'IDAT', 'IEND', 'tRNS', 'gAMA', 'cHRM', 'sRGB', 'iCCP', 'sBIT', 'bKGD', 'pHYs'])
+const PNG_DEPTHS = new Map([[0, [1, 2, 4, 8, 16]], [2, [8, 16]], [3, [1, 2, 4, 8]], [4, [8, 16]], [6, [8, 16]]])
+const PNG_CHANNELS = new Map([[0, 1], [2, 3], [3, 1], [4, 2], [6, 4]])
+const ADAM7 = [[0, 0, 8, 8], [4, 0, 8, 8], [0, 4, 4, 8], [2, 0, 4, 4], [0, 2, 2, 4], [1, 0, 2, 2], [0, 1, 1, 2]]
+/** Scanline runs of the inflated image data: one run, or seven Adam7 passes (empty passes have no bytes). */
+function pngPasses({ width, height, interlace, bitsPerPixel }) {
+  return (interlace ? ADAM7 : [[0, 0, 1, 1]])
+    .map(([x, y, dx, dy]) => ({ columns: width > x ? Math.ceil((width - x) / dx) : 0, rows: height > y ? Math.ceil((height - y) / dy) : 0 }))
+    .filter(pass => pass.columns && pass.rows)
+    .map(pass => ({ rows: pass.rows, rowBytes: 1 + Math.ceil(pass.columns * bitsPerPixel / 8) }))
+}
+function cleanPng(input) {
+  const kept = [PNG_SIGNATURE], idat = []
+  let offset = PNG_SIGNATURE.length, header = null, palette = false, idatClosed = false, ended = false
+  while (!ended) {
+    if (offset + 12 > input.length) imageFail('PNG ends before its last chunk')
+    const length = input.readUInt32BE(offset), type = input.toString('latin1', offset + 4, offset + 8)
+    if (!/^[A-Za-z]{4}$/.test(type) || length > input.length - offset - 12) imageFail('PNG chunk is damaged')
+    const dataEnd = offset + 8 + length
+    if (crc32(input.subarray(offset + 4, dataEnd)) !== input.readUInt32BE(dataEnd)) imageFail('PNG chunk checksum does not match')
+    const data = input.subarray(offset + 8, dataEnd)
+    if (!header && type !== 'IHDR') imageFail('PNG must start with its header chunk')
+    if (type === 'IHDR') {
+      if (header || length !== 13) imageFail('PNG header is damaged')
+      const [depth, colorType, compression, filter, interlace] = data.subarray(8)
+      if (!PNG_DEPTHS.get(colorType)?.includes(depth) || compression !== 0 || filter !== 0 || interlace > 1) imageFail('PNG header is not supported')
+      header = { width: data.readUInt32BE(0), height: data.readUInt32BE(4), colorType, interlace, bitsPerPixel: depth * PNG_CHANNELS.get(colorType) }
+      imageSide(header.width, header.height)
+    } else if (type === 'acTL' || type === 'fcTL' || type === 'fdAT') imageFail('Moving images cannot be used as an avatar')
+    else if (type === 'IDAT') {
+      if (idatClosed) imageFail('PNG image data must be in one run')
+      idat.push(data)
+    } else {
+      if (idat.length) idatClosed = true
+      if (type === 'PLTE') {
+        if (idat.length || palette || !length || length % 3 || length > 768) imageFail('PNG palette is damaged')
+        palette = true
+      }
+      ended = type === 'IEND'
+    }
+    if (PNG_KEEP.has(type)) kept.push(input.subarray(offset, dataEnd + 4))
+    else if (type.charCodeAt(0) < 0x61) imageFail('PNG has a required part EG-Desk cannot read') // Upper-case first letter: critical chunk.
+    offset = dataEnd + 4
+  }
+  if (!idat.length || (header.colorType === 3 && !palette)) imageFail('PNG has no image data')
+  const passes = pngPasses(header)
+  const expected = passes.reduce((sum, pass) => sum + pass.rows * pass.rowBytes, 0)
+  let raw
+  try { raw = inflateSync(Buffer.concat(idat), { maxOutputLength: expected + 1 }) } catch { imageFail('PNG image data is damaged') }
+  if (raw.length !== expected) imageFail('PNG image data does not match its size')
+  let at = 0
+  for (const { rows, rowBytes } of passes) {
+    for (let row = 0; row < rows; row++, at += rowBytes) if (raw[at] > 4) imageFail('PNG image data is damaged')
+  }
+  return { mediaType: 'image/png', bytes: Buffer.concat(kept), width: header.width, height: header.height }
+}
+
+// Baseline, extended and progressive Huffman frames: the ones every browser draws.
+const JPEG_FRAMES = new Set([0xc0, 0xc1, 0xc2])
+const JPEG_TABLES = new Set([0xc4, 0xdb, 0xdd]) // Huffman tables, quantization tables, restart interval.
+/** EXIF orientation (tag 0x0112) from a TIFF block; everything else in EXIF (place, camera, time) is dropped. */
+function exifOrientation(tiff) {
+  try {
+    const order = tiff.toString('latin1', 0, 2)
+    if (order !== 'II' && order !== 'MM') return 1
+    const u16 = at => order === 'II' ? tiff.readUInt16LE(at) : tiff.readUInt16BE(at)
+    const u32 = at => order === 'II' ? tiff.readUInt32LE(at) : tiff.readUInt32BE(at)
+    if (u16(2) !== 42) return 1
+    const ifd = u32(4)
+    for (let index = 0, count = Math.min(u16(ifd), 512); index < count; index++) {
+      const entry = ifd + 2 + index * 12
+      if (u16(entry) === 0x0112 && u16(entry + 2) === 3 && u32(entry + 4) === 1) {
+        const value = u16(entry + 8)
+        return value >= 1 && value <= 8 ? value : 1
+      }
+    }
+  } catch { /* A damaged EXIF block only loses its orientation. */ }
+  return 1
+}
+/** A 36-byte APP1 holding only the orientation, so a phone photo still stands the right way up. */
+function orientationSegment(orientation) {
+  const segment = Buffer.alloc(36)
+  segment.writeUInt16BE(0xffe1, 0)
+  segment.writeUInt16BE(34, 2)
+  segment.write('Exif\0\0MM', 4, 'latin1')
+  segment.writeUInt16BE(42, 12)
+  segment.writeUInt32BE(8, 14) // IFD0 right after the TIFF header
+  segment.writeUInt16BE(1, 18) // one entry
+  segment.writeUInt16BE(0x0112, 20)
+  segment.writeUInt16BE(3, 22) // SHORT
+  segment.writeUInt32BE(1, 24)
+  segment.writeUInt16BE(orientation, 28) // bytes 32-35 stay 0: no next IFD
+  return segment
+}
+function cleanJpeg(input) {
+  const parts = []
+  let offset = 2, frame = null, scans = 0, orientation = 1, jfif = null
+  for (;;) {
+    if (offset + 2 > input.length || input[offset] !== 0xff) imageFail('JPEG is damaged')
+    while (input[offset + 1] === 0xff) offset++ // fill bytes before a marker
+    const marker = input[offset + 1]
+    offset += 2
+    if (marker === 0xd9) break
+    if (marker === undefined || offset + 2 > input.length) imageFail('JPEG is damaged')
+    const length = input.readUInt16BE(offset)
+    if (length < 2 || offset + length > input.length) imageFail('JPEG is damaged')
+    const segment = input.subarray(offset - 2, offset + length), payload = input.subarray(offset + 2, offset + length)
+    offset += length
+    if (marker === 0xe0 && !jfif && payload.length >= 14 && startsWithText(payload, 'JFIF\0')) {
+      // JFIF header kept, its embedded thumbnail dropped (thumbnail size 0×0).
+      jfif = Buffer.concat([Buffer.from([0xff, 0xe0, 0x00, 0x10]), payload.subarray(0, 12), Buffer.from([0, 0])])
+    } else if (marker === 0xe1 && startsWithText(payload, 'Exif\0\0')) orientation = exifOrientation(payload.subarray(6))
+    else if ((marker === 0xe2 && startsWithText(payload, 'ICC_PROFILE\0')) || (marker === 0xee && startsWithText(payload, 'Adobe'))) parts.push(segment)
+    else if ((marker >= 0xe0 && marker <= 0xef) || marker === 0xfe) { /* Other application blocks and comments are dropped. */ }
+    else if (JPEG_FRAMES.has(marker)) {
+      const components = payload[5]
+      if (frame || payload[0] !== 8 || ![1, 3, 4].includes(components) || payload.length !== 6 + 3 * components) imageFail('JPEG frame is not supported')
+      frame = { height: payload.readUInt16BE(1), width: payload.readUInt16BE(3) }
+      imageSide(frame.width, frame.height)
+      parts.push(segment)
+    } else if (JPEG_TABLES.has(marker)) parts.push(segment)
+    else if (marker === 0xda) {
+      if (!frame) imageFail('JPEG picture data comes before its frame')
+      let end = offset
+      // Entropy-coded data runs to the next marker; FF00 is a stuffed byte and FFD0–FFD7 are restart markers.
+      while (end < input.length && !(input[end] === 0xff && end + 1 < input.length && input[end + 1] !== 0x00 && (input[end + 1] < 0xd0 || input[end + 1] > 0xd7))) end++
+      parts.push(segment, input.subarray(offset, end))
+      offset = end
+      scans++
+    } else imageFail('JPEG uses a part EG-Desk cannot read')
+  }
+  if (!frame || !scans) imageFail('JPEG has no image data')
+  const head = [Buffer.from([0xff, 0xd8]), ...(jfif ? [jfif] : []), ...(orientation === 1 ? [] : [orientationSegment(orientation)])]
+  return { mediaType: 'image/jpeg', bytes: Buffer.concat([...head, ...parts, Buffer.from([0xff, 0xd9])]), width: frame.width, height: frame.height }
+}
+
+function webpPicture({ fourcc, data }) {
+  if (fourcc === 'VP8 ') {
+    // Key frame tag, then start code 9D 01 2A, then 14-bit width and height.
+    if (data.length < 10 || (data[0] & 1) !== 0 || data[3] !== 0x9d || data[4] !== 0x01 || data[5] !== 0x2a) imageFail('WebP picture is damaged')
+    return { width: data.readUInt16LE(6) & 0x3fff, height: data.readUInt16LE(8) & 0x3fff }
+  }
+  if (data.length < 5 || data[0] !== 0x2f) imageFail('WebP picture is damaged')
+  const bits = data.readUInt32LE(1)
+  if (bits >>> 29 !== 0) imageFail('WebP picture is damaged')
+  return { width: (bits & 0x3fff) + 1, height: ((bits >>> 14) & 0x3fff) + 1 }
+}
+function webpChunk(fourcc, data) {
+  const header = Buffer.alloc(8)
+  header.write(fourcc, 0, 'latin1')
+  header.writeUInt32LE(data.length, 4)
+  return Buffer.concat([header, data, data.length & 1 ? Buffer.alloc(1) : Buffer.alloc(0)])
+}
+function cleanWebp(input) {
+  const end = 8 + input.readUInt32LE(4)
+  if (end < 20 || end > input.length) imageFail('WebP is damaged')
+  const chunks = []
+  for (let offset = 12; offset < end;) {
+    if (offset + 8 > end) imageFail('WebP is damaged')
+    const fourcc = input.toString('latin1', offset, offset + 4), size = input.readUInt32LE(offset + 4)
+    if (size > end - offset - 8) imageFail('WebP is damaged')
+    chunks.push({ fourcc, data: input.subarray(offset + 8, offset + 8 + size) })
+    offset += 8 + size + (size & 1)
+  }
+  const pictures = chunks.filter(chunk => chunk.fourcc === 'VP8 ' || chunk.fourcc === 'VP8L')
+  if (chunks.some(chunk => chunk.fourcc === 'ANIM' || chunk.fourcc === 'ANMF')) imageFail('Moving images cannot be used as an avatar')
+  if (pictures.length !== 1) imageFail('WebP must hold exactly one picture')
+  const size = webpPicture(pictures[0])
+  imageSide(size.width, size.height)
+  let kept
+  if (chunks[0].fourcc === 'VP8X') {
+    const header = chunks[0].data
+    if (header.length < 10 || header[0] & 0x02) imageFail('Moving images cannot be used as an avatar')
+    if (1 + header.readUIntLE(4, 3) !== size.width || 1 + header.readUIntLE(7, 3) !== size.height) imageFail('WebP canvas does not match its picture')
+    const icc = header[0] & 0x20 ? chunks.find(chunk => chunk.fourcc === 'ICCP') : null
+    const alpha = chunks.find(chunk => chunk.fourcc === 'ALPH' && chunks.indexOf(chunk) < chunks.indexOf(pictures[0]))
+    const flags = Buffer.from(header.subarray(0, 10))
+    flags.fill(0, 0, 4)
+    flags[0] = (header[0] & 0x10) | (icc ? 0x20 : 0) // keep alpha and colour profile; EXIF and XMP flags cleared
+    kept = [webpChunk('VP8X', flags), ...(icc ? [webpChunk('ICCP', icc.data)] : []), ...(alpha ? [webpChunk('ALPH', alpha.data)] : []), webpChunk(pictures[0].fourcc, pictures[0].data)]
+  } else if (chunks[0] === pictures[0]) kept = [webpChunk(pictures[0].fourcc, pictures[0].data)]
+  else imageFail('WebP is damaged')
+  const riff = Buffer.alloc(12)
+  riff.write('RIFF', 0, 'latin1')
+  riff.writeUInt32LE(4 + kept.reduce((sum, chunk) => sum + chunk.length, 0), 4)
+  riff.write('WEBP', 8, 'latin1')
+  return { mediaType: 'image/webp', bytes: Buffer.concat([riff, ...kept]), width: size.width, height: size.height }
+}
+
+/**
+ * Checks one PNG/JPEG/WebP photo (≤ 512 KB, ≤ 2048 px a side, not moving) and
+ * returns it written again without metadata → {mediaType, bytes, width, height}.
+ * The type comes from the bytes; a declared mediaType must agree with them.
+ */
+export function sanitizeAvatarImage(input, declaredType) {
+  const bytes = Buffer.isBuffer(input) ? input : input instanceof Uint8Array ? Buffer.from(input.buffer, input.byteOffset, input.byteLength) : null
+  if (!bytes || !bytes.length) imageFail('Image is empty')
+  if (bytes.length > MAX_AVATAR_IMAGE_BYTES) fail('PROFILE_IMAGE_TOO_LARGE', `Image must be at most ${MAX_AVATAR_IMAGE_BYTES / 1024} KB`, 413)
+  const detected = bytes.length >= 8 && bytes.subarray(0, 8).equals(PNG_SIGNATURE) ? 'image/png'
+    : bytes.length >= 3 && bytes[0] === 0xff && bytes[1] === 0xd8 && bytes[2] === 0xff ? 'image/jpeg'
+      : bytes.length >= 12 && startsWithText(bytes, 'RIFF') && bytes.toString('latin1', 8, 12) === 'WEBP' ? 'image/webp' : null
+  if (!detected) imageFail('Only PNG, JPEG and WebP images can be used')
+  if (declaredType !== undefined && declaredType !== detected) imageFail('Image type does not match its contents')
+  return detected === 'image/png' ? cleanPng(bytes) : detected === 'image/jpeg' ? cleanJpeg(bytes) : cleanWebp(bytes)
+}
+function avatarUpload(input) {
+  if (!input || typeof input !== 'object' || Array.isArray(input) || Object.keys(input).some(key => key !== 'mediaType' && key !== 'imageBase64')) imageFail('Send {mediaType, imageBase64}')
+  if (!AVATAR_IMAGE_TYPES.includes(input.mediaType)) imageFail(`mediaType must be one of ${AVATAR_IMAGE_TYPES.join(', ')}`)
+  const text = input.imageBase64
+  if (typeof text !== 'string' || text.length < 4) imageFail('imageBase64 must be base64 text')
+  if (text.length > 4 * Math.ceil(MAX_AVATAR_IMAGE_BYTES / 3)) fail('PROFILE_IMAGE_TOO_LARGE', `Image must be at most ${MAX_AVATAR_IMAGE_BYTES / 1024} KB`, 413)
+  if (!BASE64.test(text)) imageFail('imageBase64 must be plain base64, not a URL or data URL')
+  return sanitizeAvatarImage(Buffer.from(text, 'base64'), input.mediaType)
+}
+
 // Version 1 exactly as it shipped; a new file is built as version 1 and then
 // takes every step below, so new and upgraded files end with the same schema.
 const SCHEMA_V1 = `
@@ -395,11 +668,33 @@ const MIGRATIONS = Object.freeze([
         OR substr(NEW.source_json, 1, length(OLD.source_json) - 1) IS NOT substr(OLD.source_json, 1, length(OLD.source_json) - 1)
       BEGIN SELECT RAISE(ABORT, 'profile source is append-only'); END;`,
   }),
+  Object.freeze({
+    version: 3,
+    // Avatar photos already cleaned by sanitizeAvatarImage, named by the
+    // sha256 of their bytes. Rows never change; one that any saved revision
+    // names is kept for as long as that revision is.
+    sql: `
+    CREATE TABLE profile_assets (
+      id TEXT PRIMARY KEY CHECK (length(id) = 68 AND substr(id, 1, 4) = 'img-'),
+      owner_hash TEXT NOT NULL,
+      media_type TEXT NOT NULL CHECK (media_type IN ('image/png','image/jpeg','image/webp')),
+      width INTEGER NOT NULL CHECK (width > 0), height INTEGER NOT NULL CHECK (height > 0),
+      byte_size INTEGER NOT NULL CHECK (byte_size > 0 AND byte_size <= ${MAX_AVATAR_IMAGE_BYTES}),
+      bytes BLOB NOT NULL CHECK (typeof(bytes) = 'blob' AND length(bytes) = byte_size),
+      created_at INTEGER NOT NULL
+    );
+    CREATE TRIGGER profile_assets_immutable BEFORE UPDATE ON profile_assets
+      BEGIN SELECT RAISE(ABORT, 'profile assets are immutable'); END;
+    CREATE TRIGGER profile_assets_in_use_kept BEFORE DELETE ON profile_assets
+      WHEN EXISTS (SELECT 1 FROM profile_revisions WHERE json_extract(body_json, '$.avatar.assetId') = OLD.id)
+      BEGIN SELECT RAISE(ABORT, 'profile assets in use are kept'); END;`,
+  }),
 ])
 // [first version that has it, table or trigger name]
 const SCHEMA_OBJECTS = [
   [1, 'profiles'], [1, 'profile_revisions'], [1, 'store_meta'], [1, 'profile_revisions_immutable'], [1, 'profile_revisions_kept'],
   [2, 'profiles_source_append_only'],
+  [3, 'profile_assets'], [3, 'profile_assets_immutable'], [3, 'profile_assets_in_use_kept'],
 ]
 function requireSchema(db, version) {
   const found = new Set(db.prepare("SELECT name FROM sqlite_master WHERE type IN ('table','trigger')").all().map(row => row.name))
@@ -445,9 +740,14 @@ function initialize(db) {
   requireSchema(db, VERSION)
 }
 
-/** Synchronous local-only profile store for one owner scope (same file rules as the chat store). */
-export function openProfileStore({ dataDir, ownerHash } = {}) {
+/**
+ * Synchronous local-only profile store for one owner scope (same file rules as the chat store).
+ * defaultToolPreset: the TOOL_CEILING_PRESETS id createDraft uses when the caller names none
+ * (D-A1 is undecided, so it stays 'open' = no ceiling unless Main changes it here).
+ */
+export function openProfileStore({ dataDir, ownerHash, defaultToolPreset = DEFAULT_TOOL_PRESET } = {}) {
   if (typeof dataDir !== 'string' || !path.isAbsolute(dataDir) || typeof ownerHash !== 'string' || !ownerHash.trim() || ownerHash.length > 512 || ownerHash.includes('\0')) fail('INVALID_STORE_SCOPE', 'Absolute dataDir and local owner scope are required')
+  const defaultPreset = toolPreset(defaultToolPreset, 'defaultToolPreset')
   const owner = digest(ownerHash)
   mkdirSync(dataDir, { recursive: true, mode: 0o700 })
   const stat = lstatSync(dataDir)
@@ -475,6 +775,12 @@ export function openProfileStore({ dataDir, ownerHash } = {}) {
     insertProfile: db.prepare('INSERT INTO profiles (id, owner_hash, active_revision, lifecycle, origin, created_at, updated_at, source_json) VALUES (?, ?, ?, ?, ?, ?, ?, ?)'),
     insertRevision: db.prepare('INSERT INTO profile_revisions (profile_id, revision, parent_revision, hash, author, body_json, created_at) VALUES (?, ?, ?, ?, ?, ?, ?)'),
     touch: db.prepare('UPDATE profiles SET lifecycle=?, active_revision=?, updated_at=? WHERE id=? AND owner_hash=?'),
+    asset: db.prepare('SELECT * FROM profile_assets WHERE id=? AND owner_hash=?'),
+    assetMeta: db.prepare('SELECT id, media_type, width, height, byte_size FROM profile_assets WHERE id=? AND owner_hash=?'),
+    insertAsset: db.prepare('INSERT INTO profile_assets (id, owner_hash, media_type, width, height, byte_size, bytes, created_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?)'),
+    countAssets: db.prepare('SELECT COUNT(*) AS n FROM profile_assets'),
+    // Uploads no saved revision names, older than the grace period.
+    pruneAssets: db.prepare("DELETE FROM profile_assets WHERE created_at < ? AND NOT EXISTS (SELECT 1 FROM profile_revisions WHERE json_extract(profile_revisions.body_json, '$.avatar.assetId') = profile_assets.id)"),
   }
   let closed = false
   const ensureOpen = () => { if (closed) fail('STORE_CLOSED', 'Profile store is closed', 500) }
@@ -544,6 +850,11 @@ export function openProfileStore({ dataDir, ownerHash } = {}) {
       createdAt: shown.createdAt, updatedAt: shown.updatedAt,
     }
   }
+  /** A photo avatar must name an image uploaded to this store (inside a transaction). */
+  function requireAvatarAsset(body) {
+    if (body.avatar?.kind === 'image' && !q.assetMeta.get(body.avatar.assetId, owner)) fail('PROFILE_ASSET_NOT_FOUND', 'Avatar image was not uploaded to this EG-Desk; upload it again', 400)
+  }
+  const assetSummary = (row, unchanged) => ({ assetId: row.id, mediaType: row.media_type, width: row.width, height: row.height, byteSize: row.byte_size, unchanged })
   /** One new user draft at revision 1 (inside a transaction). */
   function insertDraft(json, hash, source, ts) {
     if (db.prepare("SELECT COUNT(*) AS n FROM profiles WHERE owner_hash=? AND lifecycle<>'deleted'").get(owner).n >= MAX_PROFILES ||
@@ -584,11 +895,25 @@ export function openProfileStore({ dataDir, ownerHash } = {}) {
       ensureOpen(); const row = requireProfile(id)
       return { profileId: row.id, revisions: db.prepare('SELECT * FROM profile_revisions WHERE profile_id=? ORDER BY revision DESC LIMIT ?').all(row.id, MAX_REVISIONS).map(summaryOf) }
     },
-    createDraft(body) {
+    /**
+     * A new user draft. options.toolPreset (a TOOL_CEILING_PRESETS id, else the
+     * store's defaultToolPreset) fills toolCeiling only when the body leaves it
+     * out; a body that sets toolCeiling keeps its own. Nothing else reads presets.
+     */
+    createDraft(body, options = {}) {
       ensureOpen()
-      const normalized = normalizeProfileBody(body)
+      if (!options || typeof options !== 'object' || Array.isArray(options)) fail('INVALID_PROFILE', 'options must be an object')
+      const chosen = options.toolPreset === undefined || options.toolPreset === null ? defaultPreset : toolPreset(options.toolPreset)
+      shape(body, BODY_KEYS, 'profile body')
+      const filled = chosen.toolCeiling && (body.toolCeiling === undefined || body.toolCeiling === null) ? { ...body, toolCeiling: chosen.toolCeiling } : body
+      const normalized = normalizeProfileBody(filled)
       const json = JSON.stringify(normalized), hash = digest(json)
-      return tx(() => insertDraft(json, hash, [], now()))
+      return tx(() => { requireAvatarAsset(normalized); return insertDraft(json, hash, [], now()) })
+    },
+    /** The ceilings a new Agent can start from, and the one used when none is chosen. */
+    toolPresets() {
+      ensureOpen()
+      return { defaultPreset: defaultPreset.id, presets: TOOL_CEILING_PRESETS.map(item => ({ ...item, toolCeiling: item.toolCeiling && { ...item.toolCeiling } })) }
     },
     /**
      * AGENT-02 "복제해서 새로 만들기": a new user draft from one saved revision
@@ -606,24 +931,68 @@ export function openProfileStore({ dataDir, ownerHash } = {}) {
         if (row.lifecycle === 'deleted') lifecycleConflict('A deleted profile cannot be duplicated', row)
         const from = revisionOf(row, revision === undefined || revision === null ? row.active_revision ?? q.head.get(row.id).revision : revision)
         const body = normalizeProfileBody({ ...from.body, name: name === undefined || name === null ? copyName(from.body.name) : name })
+        requireAvatarAsset(body)
         const json = JSON.stringify(body), ts = now()
         const entry = { kind: 'duplicate', origin: row.origin, profileId: row.id, revision: from.revision, hash: from.hash, name: from.body.name, at: ts }
         return insertDraft(json, digest(json), [...sourceOf(row), entry], ts)
       })
     },
     /**
-     * A body from outside this install (today: an .egdesk bundle). It is
+     * A body from outside this install: an .egdesk bundle ('egdesk') or one
+     * Agent file ('md', with the flavor egdesk-profile-file.mjs detected). It is
      * always a draft with reviewRequired until the user activates a revision.
+     * A photo avatar never comes with it (photos are not exported), so one is
+     * kept as its initial. No tool preset is applied: the file's own ceiling stays.
      */
-    importDraft(body, { format = 'egdesk' } = {}) {
+    importDraft(body, { format = 'egdesk', flavor } = {}) {
       ensureOpen()
       if (!IMPORT_FORMATS.includes(format)) fail('INVALID_PROFILE', 'Profile import format is not supported')
-      const normalized = normalizeProfileBody(body)
+      if (flavor !== undefined && (format !== 'md' || !IMPORT_FLAVORS.includes(flavor))) fail('INVALID_PROFILE', 'Profile import flavor is not supported')
+      const normalized = withoutAvatarImage(normalizeProfileBody(body))
       const json = JSON.stringify(normalized), hash = digest(json)
       return tx(() => {
         const ts = now()
-        return insertDraft(json, hash, [{ kind: 'import', format, name: normalized.name, at: ts }], ts)
+        return insertDraft(json, hash, [{ kind: 'import', format, ...(flavor ? { flavor } : {}), name: normalized.name, at: ts }], ts)
       })
+    },
+    /** One saved revision to write out as a file (default: active, else latest). Deleted profiles are not exported. */
+    exportRevision(id, revision) {
+      ensureOpen()
+      const row = requireProfile(id)
+      if (row.lifecycle === 'deleted') lifecycleConflict('A deleted profile cannot be exported', row)
+      const chosen = revisionOf(row, revision === undefined || revision === null ? row.active_revision ?? q.head.get(row.id).revision : revision)
+      return { profileId: row.id, lifecycle: row.lifecycle, revision: chosen.revision, hash: chosen.hash, body: chosen.body }
+    },
+    /**
+     * D-A3: keep one avatar photo {mediaType, imageBase64} → {assetId, mediaType,
+     * width, height, byteSize, unchanged}. The bytes are checked and written
+     * again without metadata before they are kept; the same picture gives the
+     * same assetId. At the cap, uploads no revision uses (older than 10 minutes) make room.
+     */
+    putAvatarImage(input) {
+      ensureOpen()
+      const image = avatarUpload(input)
+      const id = `img-${digest(image.bytes)}`
+      return tx(() => {
+        const existing = q.assetMeta.get(id, owner)
+        if (existing) return assetSummary(existing, true)
+        const ts = now()
+        if (q.countAssets.get().n >= MAX_AVATAR_IMAGES) q.pruneAssets.run(ts - AVATAR_IMAGE_GRACE_MS)
+        if (q.countAssets.get().n >= MAX_AVATAR_IMAGES) fail('PROFILE_ASSET_LIMIT', `At most ${MAX_AVATAR_IMAGES} avatar images can be kept`, 409)
+        q.insertAsset.run(id, owner, image.mediaType, image.width, image.height, image.bytes.length, image.bytes, ts)
+        return assetSummary(q.assetMeta.get(id, owner), false)
+      })
+    },
+    /** One kept avatar photo with its bytes (a Buffer). */
+    getAvatarImage(assetId) {
+      ensureOpen()
+      if (typeof assetId !== 'string' || !AVATAR_ASSET_ID.test(assetId)) fail('INVALID_PROFILE_ASSET_ID', 'Avatar image ID is invalid')
+      const row = q.asset.get(assetId, owner)
+      if (!row) fail('PROFILE_ASSET_NOT_FOUND', 'Avatar image does not exist', 404)
+      const bytes = Buffer.from(row.bytes)
+      if (`img-${digest(bytes)}` !== row.id) fail('STORE_CORRUPT', 'Saved avatar image does not match its ID', 500)
+      const { unchanged, ...meta } = assetSummary(row, true)
+      return { ...meta, bytes }
     },
     saveDraft(id, body, expectedRevision) {
       ensureOpen()
@@ -641,6 +1010,7 @@ export function openProfileStore({ dataDir, ownerHash } = {}) {
         }
         if (head.hash === hash) return saved(row, head.revision, hash, true)
         if (head.revision >= MAX_REVISIONS) fail('PROFILE_REVISION_LIMIT', `A profile keeps at most ${MAX_REVISIONS} revisions`, 409)
+        requireAvatarAsset(normalized)
         const ts = Math.max(now(), row.updated_at)
         q.insertRevision.run(row.id, head.revision + 1, head.revision, hash, 'user', json, ts)
         q.touch.run(row.lifecycle, row.active_revision, ts, row.id, owner)
@@ -691,7 +1061,9 @@ export function openProfileStore({ dataDir, ownerHash } = {}) {
       const prepared = templates.map(item => {
         shape(item, ['id', 'body'], 'template')
         if (profileId(item.id).startsWith('prof-')) fail('INVALID_PROFILE_ID', 'Template IDs cannot use the user profile prefix')
-        const json = JSON.stringify(normalizeProfileBody(item.body))
+        const body = normalizeProfileBody(item.body)
+        if (body.avatar?.kind === 'image') fail('INVALID_PROFILE', 'Templates cannot use an avatar image')
+        const json = JSON.stringify(body)
         return { id: item.id, json, hash: digest(json) }
       })
       if (new Set(prepared.map(item => item.id)).size !== prepared.length) fail('INVALID_PROFILE', 'Template IDs must be unique')
