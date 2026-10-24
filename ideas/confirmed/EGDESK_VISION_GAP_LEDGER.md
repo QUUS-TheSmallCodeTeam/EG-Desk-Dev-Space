@@ -1,10 +1,10 @@
 # EG-Desk 비전 Gap 원장
 
-**기준일**: 2026-10-24 (최초 조사 코드 기준 `bebe45c`, 진행 기록은 `d7aac51`까지, 작업 브랜치 `claude/vision-gap-20261024`)  
+**기준일**: 2026-10-24 (최초 조사 코드 기준 `bebe45c`, 진행 기록은 `5760981`까지, 작업 브랜치 `claude/vision-gap-20261024`)  
 **정본 백로그**: [EGDESK_PRODUCT_VISION_AND_DEV_TODO.md](./EGDESK_PRODUCT_VISION_AND_DEV_TODO.md)  
 **범위**: 비전 문서의 미체크 항목 + 2026-10-24 대표님 추가 목표(기능·UI/UX·디자인 전부, Codex+Claude 구독 지원, 브라우저 제어, 컴퓨터 사용, Agent 캐릭터 설정)
 
-총 95개 항목 — 없음 17 · 일부 47 · 완료 31 · 미확인 0 (아래 영역 표의 상태 열을 2026-10-24 `d7aac51`까지의 진행 기록 반영 뒤 다시 센 값. 최초 조사 때는 없음 45 · 일부 47 · 완료 2 · 미확인 1).
+총 95개 항목 — 없음 12 · 일부 52 · 완료 31 · 미확인 0 (아래 영역 표의 상태 열을 2026-10-24 `5760981`까지의 진행 기록 반영 뒤 다시 센 값. `d7aac51` 기준은 없음 17 · 일부 47 · 완료 31. 그 뒤 CHAT-03·CHAT-10·CU-01·CU-03·CODE-02가 helper·모듈만으로 없음 → 일부가 됐고, 완료로 바뀐 항목은 없다. 최초 조사 때는 없음 45 · 일부 47 · 완료 2 · 미확인 1).
 상태는 처음에 코드·git 기록과 대조해 판별했다(읽기 전용 조사, 테스트·Firefox 미실행). 그 뒤 바뀐 것은 진행 기록에 근거를 남겼다. 체크박스가 아니라 이 원장의 상태 열이 현재 판단이다. '일부(helper·모듈)'는 helper나 순수 모듈만 있고 화면 연결 전이라는 뜻이다.
 
 ## 진행 기록
@@ -71,6 +71,51 @@
 | 2026-10-24 | (원장 정정) CHAT-11 Chat 'Agenda' 표기 | 일부 → 완료 | `163a60e`(UX-03과 같은 커밋)에서 화면의 'Agenda'가 'Board'로 바뀜(내부 id 유지). 지금 코드 문구: 'Board Thread', '새 Board Thread', 'Board Thread · 멤버 N명', 'Board Thread에서 제거'. 같은 커밋 기준 headless 렌더링 fixture 72/72, UI 회귀 274/274 |
 | 2026-10-24 | (원장 정정) CODE-03 근거 | 문구 정정, 상태 일부 유지 | "200개를 넘으면 페이지 없음"은 사실이 아님. `d40ad5c`(2026-09-27)부터 listDirectory가 cursor·nextCursor로 나눠 주고, 파일 창 트리에 '더 보기' 행이 있다(EGDeskFileView moreRow). 항목 본문의 빠진 것·구현 스케치를 고침 |
 | 2026-10-24 | (결정) 대표님 결정 반영 | 결정 기록 / SUB-12 없음 → 완료 | 레퍼런스 채택 지도 5장·REA 채택안 6장 권고안을 모두 채택. 따로 정한 것: Claude 연결 D-S1(= SUB-12, (b) 무수정 claude + 공식 SDK와 같은 stdio 제어 통로), Mac 앱 조작 D-C1(= Q3·REA 7·8, 자체 Rust 도우미), 실제 화면 시험 D-C4(= Q2·REA 11, 관찰 전용부터). 아직 정하지 않은 것은 아래 '대표님 결정이 필요한 것' 표에 남김. 같은 결정 표시: reference-adoption-map 5장, rea-mechanism-adoption 6장, computer-use-options 5장 |
+| 2026-10-24 | RT-07 Desk·대화 저장소 v2/v3, CTX-01 Board 검색·카드 단위 병합, CHAT-01 방별 Agent 저장, RT-03 JSON Canvas (2-RT) | 일부 유지 / 일부 유지 / 일부 유지(helper) / 일부 유지(helper 모듈) | `b4e51f8`. Desk 저장소 v2: 60초 안의 자동 저장은 머리 자동 저장 하나를 바꿔 씀(D-R1, 직접 저장·복원·가져오기는 늘 남음), 대화 메시지는 메시지마다 한 번만 저장하고 세대끼리 공유, Board 제목·카드 이름·메모 검색 색인(FTS5 trigram, 없으면 일반 검색), 카드 단위 병합과 충돌 목록(쓰기 없음). HTTP `GET /v1/boards/_search`·`POST /v1/boards/:id/merge`. 대화 저장소 v3: 방마다 고른 Agent(profileId·revision)와 방 멤버 객체, 옛 이름 목록 변환. v1/v2 파일은 `.bak`으로 남기고 제자리에서 올림(옛 빌드로 돌아가려면 .bak을 되돌림). `egdesk-json-canvas.mjs`: Board ↔ JSON Canvas 1.0 변환(첨부·캡처 기본 제외, D-R3). 방 Agent·멤버 HTTP 라우트(`/chat/rooms/...`)와 화면(병합 선택 화면·방별 Agent 복원, S10)은 연결 전. 커밋 메시지에 시험 수치 없음 |
+| 2026-10-24 | SUB-09 Claude 실행 통로 (2-E 전송) | 일부 유지(helper 모듈) | `d76bb67`. `claude-engine-transport.mjs`: 대표님이 설치한 무수정 claude를 셸 없이 절대 경로로 띄우고, stream-json 입출력과 숨은 `--permission-prompt-tool stdio`로 제어 요청을 주고받음(D-S1 (b)). 멈출 때 프로세스 그룹에 stdin 닫기 → SIGTERM → SIGKILL 순서로 보내 claude나 도구 자식 프로세스가 남지 않게 함. 격리(D-S2): hooks 끔, EG-Desk sdk MCP만(`--strict-mcp-config`), claude.ai MCP·설정 파일·CLAUDE.md·skills 끔, 로그인은 공유. 환경에 API 키가 있으면 시작 전에 멈춤(D-S4). 최소 CLI 2.1.205와 init.capabilities로 실행을 막음. 이 통로는 CLI 공개 계약이 아니어서 따라 만든 SDK 커밋을 파일 머리말에 기록. 가짜 프로세스 단위 시험만 있고 실제 claude로는 미실행 |
+| 2026-10-24 | RT-01 깨끗한 첫 실행 점검, fx-autoconfig 로더 고정 (1-Q) | 일부 유지(스크립트·단위 시험) | `0557a36`. install.sh·install.bat이 fx-autoconfig 커밋 `dfdab56`(2026-07-23)만 받고, 복사할 8개 파일을 SHA-256으로 확인한 뒤에야 Firefox를 건드림. `--check-loader`는 받기·확인만. `scripts/verify-clean-profile-boot.mjs`: 임시 프로필 → 격리 브리지 → Firefox → Desk 뜸 확인 → Firefox 종료 → 브리지 종료 → 포트 해제 → 영수증. 자기가 띄운 프로세스만 멈추고 쓰는 중인 포트는 거절, `--plan`은 계획만 출력. 가짜 프로세스 단위 시험만 있고, 새 로더와 overlay 호환을 포함한 실제 실행은 안 함(apps/firefox-ui-demo/docs/PATH_1_5_STABILIZATION.md에 기록) |
+| 2026-10-24 | (문서) 화면 파일 분리 계획 | 문서 추가 | `ac1f8d6`. [surface-module-split-plan.md](../../docs/references/surface-module-split-plan.md): eg-desk-surface.uc.js의 구역을 `overlay/resources/surface/*.mjs`로 그대로 옮기는 6단계(차가운 카드 3개 → 설정 → Browser → Chat 활동 → Chat 연결·대화 → Canvas·Board). 화면 작업을 한 줄이 아니라 최대 6줄로 나눠 돌리려는 것. 1~5단계를 사본에 적용해 화면 시험 5개 파일 457개(통과 453·실패 0·todo 4)를 유지함(시험 줄 35곳 수정). 실제 저장소에는 아직 적용 안 함, Firefox 로딩 미확인 |
+| 2026-10-24 | SUB-09 Claude 엔진 어댑터, SUB-08 Claude 상태·로그인 명령, SUB-06 Claude 등록, SUB-10 EG-Desk 도구, SUB-14 Claude 한도 (2-E 연결) | 일부 유지(helper) ×5 | `bcbbd11`. `claude-engine-adapter.mjs`: 대화당 claude 프로세스 하나(첫 회차 `--session-id`, 이후 `--resume`), 5분 유휴면 종료, 동시 2개까지(넘으면 ENGINE_BUSY), 중지는 interrupt 제어 요청 + 안전장치, 프로세스가 죽으면 그 회차만 끝남. 승인·질문은 permission broker, EG-Desk 도구는 프로세스 안 'sdk' MCP, 출력은 stream 번역기로. Claude 행이 설치·버전(최소 2.1.205)·init.capabilities·로그인으로 ready/loginRequired/notInstalled/versionUnsupported를 판정. API 키가 EG-Desk 환경에 있으면 확인 전까지 시작 안 함(D-S4, 키는 claude에 넘기지 않음), 한도 뒤 자동 이어가기 없음(D-S5, 초기화 시각만). `GET /engines/claude/login-command`가 Terminal 카드용 `claude auth login --claudeai`/`--console` 줄을 돌려줌. 브리지가 Claude를 등록하고 이벤트를 Chat으로 보냄. 다만 런타임 쪽 계약 8가지([engine-adapter-design.md §14.6](../../docs/references/engine-adapter-design.md), 예: 저장소가 있으면 `send()`가 Codex 외 엔진을 거절)가 남아, 지금 Chat에서 Claude 대화는 시작되지 않음. 이 Mac의 claude가 로그아웃 상태라 실제 claude로는 미실행. 패턴: claude-agent-sdk-python(MIT), claude-agent-acp(Apache-2.0) |
+| 2026-10-24 | CU-01 컴퓨터 허락 카드·사람 사용 중 양보, CU-02 컴퓨터 도구 입력권 게이트, CHAT-10 Board 멤버 라우팅, CHAT-03 메시지 보내기, CHAT-13 하위 Agent 다시 맡기기, CHAT-01 방 Agent 기록 (2-R) | 없음 → 일부(helper) / 일부 유지 / 없음 → 일부(helper) / 없음 → 일부(helper) / 완료 유지 / 일부 유지 | `2d9672e`(대화 저장소 v3 `b4e51f8` 위). D-C3: Codex 컴퓨터 조작 MCP의 '이 앱 써도 될까요'(elicitation)를 한 번짜리 허락 카드 'computerElicitation'([이번만 허락]/[거절])으로 바꿈. 예/아니오·하나 고르기 칸만 받고 '이번 대화'·'항상'은 내놓지 않으며, 회차가 끝나거나 5분이 지나면 취소. 'egdesk-computer' 도구는 입력권(host lease)이 있고 컴퓨터 조작이 꺼져 있지 않을 때만 제공(관찰 상한이면 읽기 도구만). 사람이 Mac을 쓰는 중·키가 눌린 중·입력 중지 상태면 provider에 가기 전에 거절하고, 사람이 Mac을 쓰는 중 Codex 컴퓨터 호출(cua_repl)이 오면 회차를 한 번 중단함(best effort). 이 중단은 결정표의 REA 10('지금은 표시만', 남음)과 겹치므로 연결할 때 맞춰 봐야 함. D-M2 `POST /chat/board/send`: @로 부른 Agent만, 없으면 Lead가 답함. 멤버는 자기 대화에서 Board 맥락 블록을 받아 답하고(run.board 귀속), 방당 Board 회차는 2개까지. D-M1 `POST /chat/subagent/reassign`: 막힌 하위 Agent의 일을 유휴 부모에게 돌려줌. D-M3 `POST /chat/share`: 고른 메시지를 복사하고 양쪽 기록에 줄을 남기며, 받는 쪽 다음 회차에 한 번 `<egdesk-shared-messages>`로 읽힘. 보낼 때 방의 Agent를 setRoomAgent로 기록. 이 라우트들은 브리지 HTTP에 들어 있음. 컴퓨터 provider·hostLease·noteHostControl을 브리지에 끼우는 줄과 화면(허락 카드·멤버 칩·다시 맡기기 버튼, S8·S9)은 연결 전. 커밋 메시지에 시험 수치 없음. 패턴: codex-computer-use-mcp, t3code(MIT) |
+| 2026-10-24 | AGENT-02 Agent 파일 가져오기·내보내기·사진 아바타, AGENT-04 새 Agent 도구 범위 프리셋 (2-P) | 완료 유지(helper 추가) / 완료 유지(helper 추가) | `6cd17ca`. Agent를 .md(agency-agents·Claude Code 머리말 + 합성된 지침)와 Codex .toml(샌드박스 한계는 머리 주석)로 내보냄. EG-Desk가 만든 .md는 같은 본문·해시로 다시 읽힘(D-A2). 다른 도구의 .md는 검토를 기다리는 초안이 됨(미리보기 먼저, 8000자 한도, Claude Code 도구 목록은 상한을 좁히기만, 모르는 필드는 이름만 보여 줌). 사진 아바타(PNG·JPEG·WebP 512KB 이하)는 확인 뒤 메타데이터 없이 다시 써서 profile_assets(Profile 저장소 스키마 v3)에 보관하고, 내보낸 파일에는 넣지 않음(D-A3). 도구 범위 프리셋은 만들 때만 적용하고 기본값은 '제한 없음' 유지(D-A1 미결정). 라우트 `/profiles/tool-presets`·`/profiles/import`·`/profiles/:id/export`·`/profiles/avatar-images`. 화면(S9)은 연결 전이고, 지금 화면의 Profile 편집은 사진 아바타를 떨어뜨리므로 S9에서 함께 고쳐야 함(2-P 작업자 보고). 커밋 메시지에 시험 수치 없음 |
+| 2026-10-24 | CU-03 Mac 관찰 도우미 1단계, CU-01 host-activity 행, RT-04 Rust 도우미 통합·터미널 토큰, CU-02 입력권 연결 부품 (2-CH Rust) | 없음 → 일부(helper·관찰 전용) / 위 2-R 행과 함께 일부 / 일부 유지 / 일부 유지 | `30c8eca`. helper-rust에 `egdesk-helper host-observe`: 앞 앱 바뀜, 실행 중인 앱(bundleId·pid·이름), 화면의 창(번호·위치·소유 pid, 제목은 요청할 때만 + 화면 기록 사전 확인), 권한 미리 보기(사전 확인만), com.openai.sky.CUAService 실행 여부를 알림. 0700 폴더 안 0600 Unix 소켓에 클라이언트 하나, 실행마다 nonce와 같은 uid 확인, stdin 끝·heartbeat 끊김·규약 위반이면 종료. 입력·캡처·접근성 쓰기는 없음(CU-03의 창 캡처·AX는 2단계). WebSocket 터미널은 이제 실행 토큰이 없으면 연결을 거절(상수 시간 비교). Node 쪽 `egdesk-host-agent.mjs`(도우미 감독: 절대 경로, 셸 없음, heartbeat, 재시작 backoff, guardAlive·attachLease, 입력 감시는 끔)와 `egdesk-host-activity.mjs`(앞 앱·서비스·Codex 컴퓨터 조작 행). 브리지·화면 연결 전이고, 실제 Mac에서 앱 전환 감지는 미확인, 커밋 메시지에 시험 수치 없음. 패턴: trycua/cua cua-driver, open-computer-use(MIT, 출처 표기) |
+| 2026-10-24 | CODE-02 Board 프로젝트 폴더, CODE-04 원본에 저장·충돌 비교, CODE-05 덩어리별 되돌리기, CODE-06 프로젝트 명령·결과 카드 (2-X) | 없음 → 일부(helper·모듈) / 일부 유지 / 일부 유지 / 일부 유지 | `8580896`. 원본 저장과 검토 중 되돌리기는 원본이 사용자가 본 해시와 같을 때만 쓰고(다르면 SOURCE_CHANGED와 두 해시, D-X1), 임시 파일 + 이름 바꾸기로 권한을 유지. Agent가 만든 파일은 그대로일 때만 지움. 프로젝트 폴더는 고르기 창 선택으로만 Board·방에 붙고, 재시작 뒤 같은 dev/ino일 때만 다시 연결(D-X3). 명령은 사용자가 입력한 것만 돌리고 package.json scripts는 제안만(D-X6). File view에 '원본에 저장'과 비교 화면, EGDeskDiffView 검토, 프로젝트 '검사' 결과 카드와 줄 이동. EGDeskChangeReview: 승인 본문, 적용 뒤 덩어리별 되돌리기·취소, 만든 파일은 확인 후 지우기(D-X2). Codex·Claude·ACP·git 공통 파일 변경 모양, git checkpoint(기본 끔, 전용 ref, 사용자 index 미변경, D-X4), Terminal 프로젝트 명령 실행 캡처. 브리지가 회차 cwd에 프로젝트 폴더를 쓰는 줄(resolveProjectWorkspace)과 화면 연결(S3·S10)은 남음. 실제 Firefox 창 미확인, 커밋 메시지에 시험 수치 없음 |
+| 2026-10-24 | CTX-04 보낸 뒤 바뀐 자료, CTX-03 추천 모드·제외 목록·관련 Board 후보 (2-CTX) | 일부 유지(helper) / 일부 유지(helper) | `5a650c7`. 맥락 런타임이 대화별 Browser·파일 자료를 기억하고, 버스의 file.changed·browser.navigated를 따라 '바뀜'으로 표시함. 다음 메시지(일반 후속 질문 포함)에 내용 없는 한 줄(id·종류·이유 코드)과 context.sources.changed 이벤트가 붙음. `GET /context/sources`, packet의 staleSources. 메모리 안·상한 있음·계정이 바뀌면 지움. D-R2는 미결정이라 기본값은 그대로 두고 설정만 둠: contextSuggest {mode: always·firstMessage·off, neverSuggest: 사이트·폴더}, `GET/POST /context/suggest-settings`(목록의 사이트·폴더는 후보에서 빠지고, 직접 고른 것은 유지). 입력한 말이 들어 있는 저장 Board가 'board' 후보가 됨(가중치 15, 그 말은 Board 검색에만 쓰고 기록에 남기지 않음). QA 브리핑 계약이 targets[]를 받음. 브리지 한 줄(`contexts.attachServices`)과 화면 칩·설정(S10)은 연결 전. 패턴만: VS Code chat implicit context(MIT), cline FileContextTracker(Apache-2.0) |
+| 2026-10-24 | BRW-08 닫힌 shadow·내부 스크롤, BRW-12 시간 초과 뒤 동작 확인(reconcile), BRW-06 글자 기다리기·조용해질 때까지 대기 (1-A) | 일부 유지 / 일부 유지 / 완료 유지 | `5760981`(REA 묶음 가 계약 위). Agent가 보는 페이지 목록에 cursor:pointer·onclick 요소(clickable), 숨은 라디오·체크박스를 감싼 label, 내부 스크롤 상자(scrollable), 닫힌 shadow root(openOrClosedShadowRoot, 기본 위젯 제외)가 들어감. ref는 WeakRef(최신 관찰의 ref만 강하게 붙듦). 거절된 클릭은 무엇이 가렸는지 구조로만 알려 주고(obscuredBy), 뷰포트 안 중심을 누름. 조작 뒤 100ms마다 살펴 500ms 조용하면 끝냄(최대 1.5초, 입력권·예산 - 500ms를 넘지 않음). 새 읽기 전용 도구 `egdesk_browser_wait_text`(보이는 글자만, 찾는 글을 되읽어 주지 않음). 기존 도구 스키마는 그대로(해시 고정 시험). UI 시간 초과 뒤 helper가 한 번 물어 '확실히 안 들어감'일 때만 카드를 풀고, 동작은 다시 보내지 않음(REA EG-01). 시험: 소유 150/150, helper 전체 1104 통과·9 skip·실패 0, surface-state 354/354. chat 런타임의 도구 목록 import·wait_text 읽기 전용 표시와 화면 쪽 callId·budgetMs·reconcile 처리(S1)는 연결 전. Firefox 미실행이고, 이 커밋 뒤 headless browser-negative·대화 흐름은 다시 돌리지 않음 |
+
+## 다음 세션 시작점 (2026-10-24 마감)
+
+**지금 상태**: 브랜치 `claude/vision-gap-20261024`, 마지막 기능 커밋 `5760981`(1-A 브라우저 정확도, 이 원장 갱신 커밋은 그 위에 얹힘). 진행 중인 변경은 없다. 합친 상태에서 helper 시험 1104/1113 통과·실패 0(skip 9), 화면 쪽 시험 764/768 통과·실패 0·todo 4(todo는 S1·S5 몫). 마지막 headless 대화 흐름 72/72·UI 회귀 274/274는 `9dbfa51`·`b3ae83e` 시점 값이다. 그 뒤 1-A(`5760981`)가 Browser actor를 바꿨으므로 headless browser-negative와 대화 흐름을 다시 돌려 확인해야 한다.
+
+**바로 이어 할 순서** (중단된 작업 포함):
+
+1. **화면 파일 분리 1~5단계** — [surface-module-split-plan.md](../../docs/references/surface-module-split-plan.md). 사본에서는 1~5단계 뒤에도 화면 시험이 유지됐고, 실제 저장소 적용과 Firefox 로딩 확인은 아직이다.
+2. **화면 1차 S1(다시 시작)** → 그 뒤 S2~S10을 분리된 모듈 줄마다 병렬로. S1 범위는 [reference-adoption-map.md 4.5](../../docs/references/reference-adoption-map.md)의 S1에, 1-A가 S1에 넘긴 것(act 요청의 callId·budgetMs, 새 요청 'reconcile', 대화상자 종류, obscuredBy 전달)을 더한다.
+3. **통합 연결** — 오늘 helper 커밋들이 남긴 "끼우는 줄". 계약은 아래 문서·커밋에서 다시 확인한다.
+   - Claude 런타임 계약 8가지: [engine-adapter-design.md §14.6](../../docs/references/engine-adapter-design.md) — `send()`의 Codex 외 엔진 거절 풀기, rpc id의 엔진으로 응답 보내기, 승인·질문의 assertReady를 그 Run의 엔진 기준으로, acceptForSession 통과, multiSelect 유지, `egdesk/engine/rateLimit` 알림 사용(자동 재시도 없음), 시작 전 거절은 '불확실한 대화'로 두지 않기, 재개 때 dynamicTools·cwd 넘기기.
+   - 컴퓨터 도구(`2d9672e`·`30c8eca`): `new CodexChatRuntime({ hostLease })`, toolProviders에 'egdesk-computer' provider, 입력권 이벤트 → `chat.noteHostControl(event)`, 브리지에 `egdesk-host-agent`·`egdesk-host-activity`(`GET /host/activity`, SSE 'host.activity'). 컴퓨터 도구는 새 대화부터만 보인다.
+   - 2-CTX·2-X 브리지 줄(`5a650c7`·`8580896`): `contexts.attachServices({ bus, settings, boards })`, 회차 cwd·allowedRoots에 `resolveProjectWorkspace(...)`.
+   - chat 방 Agent·멤버 라우트(`b4e51f8`의 대화 저장소 v3 함수 위): `PUT /chat/rooms/:id/agent`, `GET·PUT·POST /chat/rooms/:id/members`, `DELETE /chat/rooms/:id/members/:memberKey`(제안된 경로).
+   - 1-A(`5760981`): codex-chat-runtime의 브라우저 조작 도구 사본을 `BROWSER_INTERACTION_TOOL_NAMES` import로 바꾸고, 관찰 자리를 `BROWSER_READ_TOOL_NAMES`로 넓히고, `egdesk_browser_wait_text`를 readOnly 목록과 관찰 상한에 넣는다.
+   - 2-P(`6cd17ca`): .egdesk 내보내기의 Agent에서 사진 id를 빼기(`withoutAvatarImage`), D-A1이 정해지면 `openProfileStore`에 기본 프리셋.
+   - REA 10 맞추기: `2d9672e`는 사람이 Mac을 쓰는 중 Codex 컴퓨터 호출이 오면 회차를 한 번 중단한다. 결정표의 REA 10은 '지금은 표시만'으로 남아 있으니 noteHostControl을 끼울 때 대표님 결정과 맞춘다.
+4. **2-M 작업 흐름 2차(다시 시작)** — Lead 계획 단계의 담당 Agent·종합, 팝업 닫힘으로 로그인 끝남(D-B11 결정 뒤), 한도 초기화 대기 조건, 트레이 단축키 이벤트.
+5. **2-BH 브라우저 2차** — 스크린샷(가림·거부), trusted 클릭(착지 가드), 이동 가드, 대화 단위 조작 권한, 다중 카드, iframe 관찰·조작, Agent 표식 제안 도구.
+6. **Rust Mac 도우미 2단계** — .app 번들·권한 버튼·창 캡처·AX 읽기(입력 없음). 번들 ID와 서명 방식을 정해야 한다(ad-hoc 서명은 빌드마다 화면 기록 등 허락이 풀릴 수 있어 확인 필요).
+7. **문서 정리** — 비전 문서 체크박스(원장에서 완료가 된 항목, 예: CHAT-04·CHAT-11), atlas 편집 원장에 HUM-ENGINE-002 기록.
+
+근거 문서: [reference-adoption-map.md 4장](../../docs/references/reference-adoption-map.md)(묶음 정의, 4.5 묶음별 요약), [rea-mechanism-adoption.md 5장](../../docs/references/rea-mechanism-adoption.md)(REA 구현 묶음).
+
+**작업자 handoff 파일**: `docs/references/session-handoffs/2026-10-24/handoff-*.md`(1-A, 2-R, 2-CH-rust, 2-CTX, 2-P, 2-X, 2E-connect, 2E-transport, 2RT, decisions)와 결정 기록·묶음 지시문을 세션 scratchpad에서 저장소로 옮겨 보관했다(같은 폴더 README.md). 핵심 계약은 각 커밋 메시지, [engine-adapter-design.md §14](../../docs/references/engine-adapter-design.md), [reference-adoption-map.md 4.5](../../docs/references/reference-adoption-map.md)와 위 3번 목록에 남아 있다. 화면용 세부 모양(SSE 필드, 응답 모양)은 handoff에만 있는 것도 있으니, 파일이 없으면 해당 helper 코드와 시험에서 읽는다.
+
+**대표님이 직접 할 일**:
+
+- Terminal에서 `claude auth login`. 로그인하면 다음 세션이 짧은 실제 왕복 1~2회를 확인한다(빈 임시 폴더에서 먼저 전송만, 그다음 어댑터로 한 번 — engine-adapter-design §14.5).
+- Rust 도우미의 앱 전환 감지 확인: 도우미를 띄운 채 앱을 한두 번 바꿔 본다.
+- 실제 Firefox 창에서 오늘 바뀐 화면을 눈으로 확인한다.
+- 남은 결정: D-C2, REA 5·10, D-B10, D-B11, D-A1, D-A5, D-A6, D-K2, D-K3, D-G4, D-X5(CodeMirror 6과 vendor 설치), D-R2, D-R4~R6(패키징). 나머지(Q4·D-L2·외부 배포·Profile 소유 범위·Agent/Profile 화면 구분)는 아래 '대표님 결정이 필요한 것' 표에 있다.
+
+**확인 필요(실측 전)**: 실제 Codex·Claude 왕복(Claude는 0회), Firefox 고유 동작(닫힌 shadow·WeakRef ref·beforeunload 대화상자 감지), 새 로더 `dfdab56`과 overlay 호환(`scripts/verify-clean-profile-boot.mjs` 실제 실행), Windows 전부.
 
 ## 대표님 결정이 필요한 것
 
@@ -136,8 +181,8 @@ Chat·Agent·캐릭터성 영역은 "고른 프로필을 실제 지침으로 보
 | CHAT-05 | 일부 | M | 답변 브리핑에서 여러 근거를 한 번에 강조해 보며, 남긴 단계 의견이 사라지지 않고 남는다. |  |  |
 | CHAT-06 | 완료 | L | 앞 작업이 끝나면 다음 Agent 작업이 알아서 시작되고, 무엇 때문에 기다리는지 화면에 보인다. | 일부 결정(D-M4 정함, 자동 시작 기본값·사용량 한도 남음) |  |
 | AGENT-08 | 일부 | M | Agent마다 Codex로 돌릴지 Claude로 돌릴지 정해 두면 그 구독으로 답한다. | 결정됨(D-S1·D-A4) | 있음 |
-| CHAT-03 | 없음 | L | 개인 대화에서 시작한 일을 Board 대화방으로 넘기고, 필요한 메시지만 골라 같이 볼 수 있다. | 결정됨(D-M3) |  |
-| CHAT-10 | 없음 | XL | Board 대화방에서 여러 Agent가 각자 맡은 일을 하고, 누가 진행 중이고 누가 막혔는지 한눈에 보인다. | 결정됨(D-M1·M2·M4) |  |
+| CHAT-03 | 일부 | L | 개인 대화에서 시작한 일을 Board 대화방으로 넘기고, 필요한 메시지만 골라 같이 볼 수 있다. | 결정됨(D-M3) |  |
+| CHAT-10 | 일부 | XL | Board 대화방에서 여러 Agent가 각자 맡은 일을 하고, 누가 진행 중이고 누가 막혔는지 한눈에 보인다. | 결정됨(D-M1·M2·M4) |  |
 | AGENT-06 | 완료 | S | 고른 Agent 설정이 실제 답변 지침으로 들어간다. |  |  |
 
 <details><summary>항목별 근거·빠진 것·구현 스케치</summary>
@@ -525,9 +570,9 @@ Chat·Agent·캐릭터성 영역은 "고른 프로필을 실제 지침으로 보
 | BRW-12 | 일부 | M | Agent 클릭이 시간 초과돼도 같은 동작이 두 번 실행되지 않는다는 것을 확인된 상태로 쓸 수 있다. |  | 있음 |
 | BRW-13 | 완료 | M | Agent가 브라우저에서 무엇을 했는지 카드에서 바로 보고, 필요하면 그 자리에서 멈추거나 직접 손댈 수 있다. |  |  |
 | BRW-14 | 일부 | M | 실제로 쓰는 웹사이트에서 Agent 브라우저 조작이 된다는 것을 확인하고 쓸 수 있다. | 결정됨(D-B12) | 있음 |
-| CU-01 | 없음 | XL | Agent가 다른 앱을 조작할 때 Desk 안 창에서 누가 조작 중인지, 무엇을 했는지 보고 멈출 수 있다. | 일부 결정(D-C3 정함, REA 10 남음) | 있음 |
+| CU-01 | 일부 | XL | Agent가 다른 앱을 조작할 때 Desk 안 창에서 누가 조작 중인지, 무엇을 했는지 보고 멈출 수 있다. | 일부 결정(D-C3 정함, REA 10 남음) | 있음 |
 | CU-02 | 일부 | L | 사람과 Agent가 동시에 마우스·키보드를 잡아 엉키는 일이 생기지 않는다. | 결정됨(D-C5·D-C7) | 있음 |
-| CU-03 | 없음 | XL | Agent가 Finder·메모·엑셀 같은 데스크톱 앱도 보고 조작할 수 있다. | 결정됨(Q3·D-C1) | 있음 |
+| CU-03 | 일부 | XL | Agent가 Finder·메모·엑셀 같은 데스크톱 앱도 보고 조작할 수 있다. | 결정됨(Q3·D-C1) | 있음 |
 | CU-04 | 없음 | XL | Agent가 내 화면을 빼앗지 않고 따로 일하며, 내 화면을 쓰려면 반드시 먼저 허락을 받는다. | 일부 결정(D-C5·D-C8 정함, Q4 남음) | 있음 |
 | CU-05 | 없음 | L | Agent가 엉뚱하게 조작하면 단축키 하나로 즉시 모든 Agent 입력을 멈출 수 있다. | 결정됨(D-C6) | 있음 |
 | CU-06 | 완료 | M | 이미 설치된 Codex Computer Use를 EG-Desk Agent가 쓸 수 있는지 알게 되고, 되면 데스크톱 조작을 빨리 쓸 수 있다. | 일부 결정(Q1·Q3·D-C3 정함, D-C2 남음) | 있음 |
@@ -986,7 +1031,7 @@ The SQLite-first persistence choice is already adopted in the CONTRACT (L79-80, 
 | ID | 상태 | 크기 | 대표님 화면에서 달라지는 점 | 결정 | 환경 제약 |
 |---|---|---|---|---|---|
 | RT-05 | 완료 | M | 브리지가 끊겨도 원문 오류 대신 '다시 연결 중'만 잠깐 보이고 저절로 돌아오며, 안 되면 버튼 하나로 다시 시작할 수 있다. |  |  |
-| CODE-02 | 없음 | M | 채팅방이나 Board마다 '프로젝트 폴더'를 고르면 에이전트 작업 위치와 파일 창 폴더가 같아지고, 화면 위에 어떤 프로젝트인지 늘 보인다. | 결정됨(D-X3) |  |
+| CODE-02 | 일부 | M | 채팅방이나 Board마다 '프로젝트 폴더'를 고르면 에이전트 작업 위치와 파일 창 폴더가 같아지고, 화면 위에 어떤 프로젝트인지 늘 보인다. | 결정됨(D-X3) |  |
 | CODE-05 | 일부 | L | 에이전트가 파일을 고치면 무엇이 바뀌었는지 줄 단위 비교로 보고, 승인 전에 내용을 확인할 수 있다. | 결정됨(D-X2·X4) |  |
 | CODE-06 | 일부 | L | 에이전트가 테스트나 빌드를 돌리면 통과/실패 수와 실패 위치가 결과 카드로 보이고, 눌러서 해당 파일 줄로 이동한다. | 결정됨(D-X6) |  |
 | CODE-07 | 없음 | S | Dock의 IDE 버튼을 누르면 프로젝트 파일·편집·변경 비교·테스트 결과가 한 번에 열린다. |  |  |

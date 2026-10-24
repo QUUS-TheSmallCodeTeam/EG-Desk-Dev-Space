@@ -1,0 +1,7 @@
+- Main 개발자: only four doc files are modified and none are staged. Other workers' uncommitted code changes and docs/references/surface-module-split-plan.md are in the tree too, so stage only these four paths when committing.
+- Possible follow-ups:
+  - Record HUM-ENGINE-002 in the atlas editorial ledger.
+  - Tick the CHAT-04 and CHAT-11 vision checkboxes.
+  - When batches 사·아·차 start, fix the concrete helper-rust module paths. The rea doc memo says the Swift paths are placeholders.
+- Decisions still open, for 대표님: D-B10, D-B11, D-C2, Q4, REA 5, REA 10, D-A1, D-A5, D-A6, D-K2, D-K3, D-G4, D-X5, D-R2, D-R4–R6, D-L2, Profile owner scope, Agent/Profile screen split, and external distribution.
+- The user's actual chat question (Swift vs Rust for memory/performance) still needs an answer from Main. It bears on REA decision 8, now recorded as (나) Rust.
