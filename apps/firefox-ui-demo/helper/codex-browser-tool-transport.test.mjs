@@ -276,3 +276,33 @@ test('a transport timeout records seq, sentAtMs and timedOutAtMs and still leave
   assert.equal(h.timers.size, 0)
   assert.equal(h.sent.length, 2, 'a timeout never resends')
 })
+
+test('budgetMs and callId reach the UI unchanged; malformed values are refused before sending; a timeout names its handoff ID', async t => {
+  const h = harness()
+  t.after(() => h.transport.reset())
+  const chosen = h.transport.registerClient(h.client('chosen'))
+  h.transport.bindRun('run-1', 'ui-thread-1', chosen)
+  for (const bad of [{ budgetMs: 0 }, { budgetMs: 60001 }, { budgetMs: 1.5 }, { budgetMs: '500' },
+    { callId: '' }, { callId: 'x'.repeat(161) }, { callId: 7 }]) {
+    await assert.rejects(h.transport.sendToUi({ ...h.request('bad'), kind: 'act', ...bad }), { code: 'BROWSER_UI_PROTOCOL' }, JSON.stringify(bad))
+  }
+  assert.equal(h.sent.length, 0)
+  const pending = h.transport.sendToUi({ ...h.request('act-1'), kind: 'act', budgetMs: 500, callId: 'native-call-1' }).catch(error => error)
+  const wire = h.wire()
+  assert.equal(wire.budgetMs, 500)
+  assert.equal(wire.callId, 'native-call-1')
+  ;[...h.timers.values()][0].callback()
+  const timeout = await pending
+  assert.equal(timeout.code, 'BROWSER_UI_TIMEOUT')
+  assert.equal(timeout.wireRequestId, wire.requestId, 'the lease request ID Firefox handed the actor')
+  assert.notEqual(timeout.wireRequestId, 'act-1')
+  // A reconcile question travels like any other request, with no action.
+  const question = h.transport.sendToUi({ ...h.request('question-1'), kind: 'reconcile', callId: 'native-call-1',
+    actRequestId: wire.requestId, budgetMs: 300 })
+  const asked = h.wire()
+  assert.equal(asked.kind, 'reconcile')
+  assert.equal(asked.actRequestId, wire.requestId)
+  h.transport.receive(chosen, { requestId: asked.requestId, status: 'reconciled',
+    reconcile: { callId: 'native-call-1', entered: false, fenced: true } })
+  assert.equal((await question).reconcile.entered, false)
+})

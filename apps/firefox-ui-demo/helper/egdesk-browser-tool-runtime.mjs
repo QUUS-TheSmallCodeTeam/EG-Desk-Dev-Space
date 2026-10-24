@@ -29,6 +29,13 @@ const ACTIVATION_KEYS = new Set(['Enter', 'Space'])
 const WAIT_CONDITIONS = ['load', 'idle', 'selector-visible']
 const MAX_WAIT_MS = 10000
 const WAIT_RESPONSE_MARGIN_MS = 2000
+// egdesk_browser_wait_text: a short visible text to appear or disappear.
+const MAX_WAIT_TEXT = 200
+const OBSERVE_TEXT_LIMIT = 60
+// BRW-12: one read-only reconcile question after a lost act response, on a
+// short budget of its own. Never a retry of the action (REA EG-01).
+const RECONCILE_TIMEOUT_MS = 3000
+const DIALOG_TYPES = new Set(['alert', 'confirm', 'prompt', 'beforeunload'])
 // Fill text and its full-value postcondition share one bounded UI request
 // (codex-browser-tool-transport.mjs refuses requests over 48000 characters).
 const MAX_FILL_TEXT = 8000
@@ -38,23 +45,23 @@ const OBSERVED_VALUE_MAX = 120
 // performance.timeOrigin + performance.now() (epoch ms, may be fractional).
 const sameClock = () => performance.timeOrigin + performance.now()
 // UI/actor timing fields copied into receipts as sent; malformed ones are dropped.
-const UI_TIMING_MS = ['receivedAtMs', 'authorizedAtMs', 'performEnterMs', 'performExitMs', 'firstEventAtMs']
+const UI_TIMING_MS = ['receivedAtMs', 'authorizedAtMs', 'actorReceivedAtMs', 'performEnterMs', 'performExitMs', 'firstEventAtMs']
 const UI_TIMING_COUNTS = ['performCallsBefore', 'performCallsAfter']
 function spec(name, description, properties, required) {
   return { type: 'function', name, description, inputSchema: { type: 'object', additionalProperties: false, properties, required } }
 }
 export const BROWSER_TOOL_SPECS = [
-  spec('egdesk_browser_observe', 'Observe one explicitly selected Browser Card. Coordinates are Browser surface-local; camera movement does not change the target. Elements inside open shadow roots and same-origin frames are included, and a frame element ref carries its frame path (for example f2/el_9); cross-origin, private or unreadable frames appear only in inaccessibleFrames and cannot be read or operated. A selected account label does not prove site login.',
+  spec('egdesk_browser_observe', 'Observe one explicitly selected Browser Card. Coordinates are Browser surface-local; camera movement does not change the target. Elements inside open and closed shadow roots and same-origin frames are included, and a frame element ref carries its frame path (for example f2/el_9); cross-origin, private or unreadable frames appear only in inaccessibleFrames and cannot be read or operated. Elements a page made clickable without a native control (cursor:pointer or onclick) have role clickable; a label around a hidden radio or checkbox has that role with value checked or unchecked; an element that scrolls its own content has role scrollable (or its own role) and its scroll offsets in scrollContainers. A selected account label does not prove site login.',
     { cardId: base.cardId }, ['cardId']),
   spec('egdesk_browser_navigate', 'Request navigation in the bound Browser Card to an http(s) URL on the same site (registrable domain) as the currently observed document; other sites and https-to-http downgrades are rejected. Then observe. A dispatched request does not prove load or an external effect.',
     { ...base, url: { type: 'string' }, postcondition }, ['cardId', 'observationId', 'expectedRevision', 'url', 'postcondition']),
-  spec('egdesk_browser_click', 'Request one guarded DOM click on an observed element without pointerdown or a focus step. A site may ignore synthetic clicks or focus another element itself. Requires a fresh observation, exact target precondition and testable DOM postcondition; an interaction grant is not proof of external authorization or submission success.',
+  spec('egdesk_browser_click', 'Request one guarded DOM click on an observed element without pointerdown or a focus step. A site may ignore synthetic clicks or focus another element itself. Requires a fresh observation, exact target precondition and testable DOM postcondition; an interaction grant is not proof of external authorization or submission success. A click that would land on another element is refused before input, and the error names what covers it (obscuredBy) so you can deal with that element first.',
     { ...base, ref: { type: 'string' }, expectedTarget: target, postcondition },
     ['cardId', 'observationId', 'expectedRevision', 'ref', 'expectedTarget', 'postcondition']),
   spec('egdesk_browser_fill', 'Fill an observed non-password field, or replace the text of an observed contenteditable editor, in the bound Browser Card with up to 8000 characters, without moving focus. Requires a fresh observation, exact target precondition and a target-value postcondition holding the full value you expect. Observations show a field value over 120 characters as a prefix with its length and fingerprint, and editor text only as its length and fingerprint; EG-Desk compares the postcondition in that form. An editor may handle the input itself, so a multi-line editor value can stay unverified.',
     { ...base, ref: { type: 'string' }, expectedTarget: target, text: { type: 'string' }, postcondition },
     ['cardId', 'observationId', 'expectedRevision', 'ref', 'expectedTarget', 'text', 'postcondition']),
-  spec('egdesk_browser_scroll', 'Scroll the bound Browser Card with the DOM scroll API, without focus or pointer input: either direction (up, down, top, bottom) by amount (page or half, default page), or ref with expectedTarget to bring one observed element into view. Requires a fresh observation and returns the observed scroll position change; scrolling does not prove that more content loaded.',
+  spec('egdesk_browser_scroll', 'Scroll the bound Browser Card with the DOM scroll API, without focus or pointer input: either direction (up, down, top, bottom) by amount (page or half, default page) for the page, ref with expectedTarget to bring one observed element into view, or ref and expectedTarget of an element listed in scrollContainers together with direction (and amount) to scroll inside that element. Requires a fresh observation and returns the observed scroll position change; scrolling does not prove that more content loaded.',
     { ...base, direction: { type: 'string', enum: SCROLL_DIRECTIONS }, amount: { type: 'string', enum: SCROLL_AMOUNTS },
       ref: { type: 'string' }, expectedTarget: target }, ['cardId', 'observationId', 'expectedRevision']),
   spec('egdesk_browser_press', 'Dispatch one synthetic DOM key event to an observed element that is already focused, or to the field just filled with egdesk_browser_fill. EG-Desk never moves focus. Synthetic key events are untrusted, so the browser runs no default key action; only Enter on a form text field emulates implicit form submission, and the receipt states it. Enter and Space require a testable postcondition; other keys may omit it.',
@@ -63,8 +70,19 @@ export const BROWSER_TOOL_SPECS = [
   spec('egdesk_browser_wait', 'Wait up to timeoutMs (100 to 10000) for the bound Browser document to finish loading (load), to stop changing (idle), or for an observed element ref to become visible (selector-visible, which needs that observationId), then return a fresh observation. wait-timeout means the condition was not observed in time; a replaced document or lost response is an unknown outcome. Never acts on the page.',
     { cardId: base.cardId, for: { type: 'string', enum: WAIT_CONDITIONS }, ref: { type: 'string' },
       observationId: base.observationId, timeoutMs: { type: 'integer' } }, ['cardId', 'for', 'timeoutMs']),
+  // New tool, appended so existing schemas and their manifest order stay.
+  spec('egdesk_browser_wait_text', 'Wait up to timeoutMs (100 to 10000) until the visible page text of one selected Browser Card contains text, or no longer contains textGone (give exactly one, up to 200 characters), then return a fresh observation. Matching is case-sensitive after collapsing whitespace, on visible page text only: field values, editors, sensitive fields and hidden text are never read. Read-only and allowed with an observe grant; it never acts on the page. wait-timeout means the condition was not seen in time; a replaced document or lost response is an unknown outcome.',
+    { cardId: base.cardId, text: { type: 'string' }, textGone: { type: 'string' }, timeoutMs: { type: 'integer' } },
+    ['cardId', 'timeoutMs']),
 ]
 const SPEC_BY_NAME = new Map(BROWSER_TOOL_SPECS.map(item => [item.name, item]))
+// Tool classes for the runtime and provider (1-R imports these instead of
+// keeping its own copy). Read tools never take an action lease and work
+// with an observe grant; interaction tools need an interact grant.
+export const BROWSER_READ_TOOL_NAMES = Object.freeze(['egdesk_browser_observe', 'egdesk_browser_wait_text'])
+export const BROWSER_INTERACTION_TOOL_NAMES = Object.freeze(['egdesk_browser_navigate', 'egdesk_browser_click',
+  'egdesk_browser_fill', 'egdesk_browser_scroll', 'egdesk_browser_press', 'egdesk_browser_wait'])
+const READ_TOOLS = new Set(BROWSER_READ_TOOL_NAMES)
 
 function reject(code, message) { throw Object.assign(new Error(message), { code }) }
 function record(value) { return value && typeof value === 'object' && !Array.isArray(value) }
@@ -156,6 +174,32 @@ function validTarget(args) {
 function validScroll(value) {
   return record(value) && ['x', 'y', 'maxY'].every(key => Number.isSafeInteger(value[key]) && value[key] >= 0)
 }
+// The observed scroll offsets of one listed scroll container, or null.
+function scrollContainerOf(snapshot, ref) {
+  const entry = Array.isArray(snapshot?.scrollContainers) ? snapshot.scrollContainers.find(item => item?.ref === ref) : null
+  return entry && validScroll(entry) ? { x: entry.x, y: entry.y, maxY: entry.maxY } : null
+}
+function validContainerScroll(value) {
+  return record(value) && validScroll(value.before) && validScroll(value.after)
+}
+// Collapsed like the actor collapses page text; 1-200 characters.
+function waitNeedle(value) {
+  if (typeof value !== 'string' || value.length > 2000) return null
+  const text = value.replace(/\s+/g, ' ').trim()
+  return text && text.length <= MAX_WAIT_TEXT ? text : null
+}
+// A page dialog the UI saw while the action ran (type only, never its text).
+function dialogOf(value) {
+  return record(value) && DIALOG_TYPES.has(value.type) ? { type: value.type } : null
+}
+// What covered a refused click: the actor's structural description (tag,
+// id, classes, role, ref), from the structured field or its fixed message.
+const OBSCURED_PATTERN = /target (?:is|became) obscured(?: before click)? by ([A-Za-z0-9 #._=:/-]{1,160}); observe again/
+function obscuredByOf(response) {
+  const value = typeof response?.obscuredBy === 'string' ? response.obscuredBy
+    : OBSCURED_PATTERN.exec(String(response?.error || ''))?.[1]
+  return typeof value === 'string' && /^[A-Za-z0-9 #._=:/-]{1,160}$/.test(value) ? value : null
+}
 function validateArgs(tool, args) {
   const schema = SPEC_BY_NAME.get(tool)?.inputSchema
   if (!schema || !record(args)) reject('INVALID_BROWSER_TOOL', 'Unsupported Browser tool or argument object')
@@ -163,6 +207,14 @@ function validateArgs(tool, args) {
       schema.required.some(key => !Object.hasOwn(args, key))) reject('INVALID_BROWSER_TOOL', 'Invalid Browser tool arguments')
   if (!short(args.cardId, 160)) reject('INVALID_BROWSER_TOOL', 'cardId is required')
   if (tool === 'egdesk_browser_observe') return
+  if (tool === 'egdesk_browser_wait_text') {
+    const wanted = Object.hasOwn(args, 'text') ? args.text : args.textGone
+    if (Object.hasOwn(args, 'text') === Object.hasOwn(args, 'textGone') || !waitNeedle(wanted) ||
+        !Number.isSafeInteger(args.timeoutMs) || args.timeoutMs < 100 || args.timeoutMs > MAX_WAIT_MS) {
+      reject('INVALID_BROWSER_TOOL', 'Wait for text requires exactly one of text or textGone (1-200 characters) and a 100-10000 ms timeout')
+    }
+    return
+  }
   if (tool === 'egdesk_browser_wait') {
     const byRef = args.for === 'selector-visible'
     if (!WAIT_CONDITIONS.includes(args.for) || !Number.isSafeInteger(args.timeoutMs) ||
@@ -177,12 +229,16 @@ function validateArgs(tool, args) {
     reject('INVALID_BROWSER_TOOL', 'Fresh observation and postcondition are required')
   }
   if (tool === 'egdesk_browser_scroll') {
-    const byRef = Object.hasOwn(args, 'ref')
-    if (byRef === Object.hasOwn(args, 'direction') ||
-        (byRef ? !validTarget(args) || Object.hasOwn(args, 'amount')
-          : !SCROLL_DIRECTIONS.includes(args.direction) || Object.hasOwn(args, 'expectedTarget') ||
-            (Object.hasOwn(args, 'amount') && !SCROLL_AMOUNTS.includes(args.amount)))) {
-      reject('INVALID_BROWSER_TOOL', 'Scroll requires either a direction or one exact observed element')
+    // Schema unchanged: direction alone scrolls the document, ref alone brings
+    // that element into view, ref with direction scrolls inside that observed
+    // scroll container (BRW-08).
+    const byRef = Object.hasOwn(args, 'ref'), byDirection = Object.hasOwn(args, 'direction')
+    const amountOk = !Object.hasOwn(args, 'amount') || SCROLL_AMOUNTS.includes(args.amount)
+    if ((!byRef && !byDirection) ||
+        (byRef ? !validTarget(args) || (byDirection ? !SCROLL_DIRECTIONS.includes(args.direction) || !amountOk
+          : Object.hasOwn(args, 'amount'))
+          : !SCROLL_DIRECTIONS.includes(args.direction) || Object.hasOwn(args, 'expectedTarget') || !amountOk)) {
+      reject('INVALID_BROWSER_TOOL', 'Scroll requires a direction, one exact observed element, or an observed scroll container with a direction')
     }
     return
   }
@@ -281,7 +337,9 @@ export function createBrowserToolService({ sendToUi, getOwnerKey, timeoutMs = 15
 
   // trace receives this request's same-clock record: seq and sentAtMs at
   // handoff, then responseAtMs plus the UI/actor timing, or timedOutAtMs.
-  async function requestUi(payload, binding, run, trace = {}) {
+  // budgetMs is the same deadline as a relative budget, so Firefox can spend
+  // it on its own monotonic clock (REA 웹8, BRW-12).
+  async function requestUi(payload, binding, run, trace = {}, { budgetMs = timeoutMs } = {}) {
     const requestId = randomUUID()
     const targetCardEpoch = payload.selection?.cardEpoch || payload.binding?.cardEpoch || payload.cardEpoch
     if (!short(targetCardEpoch, 160)) reject('BROWSER_UI_PROTOCOL', 'Browser request has no exact Card generation')
@@ -298,9 +356,9 @@ export function createBrowserToolService({ sendToUi, getOwnerKey, timeoutMs = 15
           if (binding) trace.seq = binding.seq = (binding.seq || 0) + 1
           trace.sentAtMs = clock()
           return sendToUi({ version: 1, requestId, targetCardEpoch,
-            deadlineMs: now() + timeoutMs, ...payload, ...(binding ? { seq: trace.seq } : {}), sentAtMs: trace.sentAtMs })
+            deadlineMs: now() + budgetMs, budgetMs, ...payload, ...(binding ? { seq: trace.seq } : {}), sentAtMs: trace.sentAtMs })
         }),
-        new Promise((_, rejectTimeout) => { timer = setTimeout(() => rejectTimeout(Object.assign(new Error('Browser UI response timed out; outcome is unknown'), { code: 'BROWSER_UI_TIMEOUT' })), timeoutMs) }),
+        new Promise((_, rejectTimeout) => { timer = setTimeout(() => rejectTimeout(Object.assign(new Error('Browser UI response timed out; outcome is unknown'), { code: 'BROWSER_UI_TIMEOUT' })), budgetMs) }),
       ])
       trace.responseAtMs = clock()
       if (!record(response) || response.requestId !== requestId) reject('BROWSER_UI_PROTOCOL', 'Browser UI response does not match this request')
@@ -347,7 +405,7 @@ export function createBrowserToolService({ sendToUi, getOwnerKey, timeoutMs = 15
     if (!prepared || !preparedRuns.has(prepared)) return []
     const permissions = [...prepared.cards.values()].map(card => card.permission)
     if (!permissions.length) return []
-    return permissions.includes('interact') ? BROWSER_TOOL_SPECS : BROWSER_TOOL_SPECS.slice(0, 1)
+    return permissions.includes('interact') ? BROWSER_TOOL_SPECS : BROWSER_TOOL_SPECS.filter(item => READ_TOOLS.has(item.name))
   }
 
   async function bind(run, prepared) {
@@ -467,6 +525,83 @@ export function createBrowserToolService({ sendToUi, getOwnerKey, timeoutMs = 15
       ...recovery, timing: { ...trace }, externalEffectVerified: false }
   }
 
+  // egdesk_browser_wait_text: read-only like wait, allowed with an observe
+  // grant. The text goes to the actor as a wait option and is never echoed
+  // back in the result; the result says met, not met in time, or unverified.
+  async function waitForText(run, binding, card, args) {
+    if (args.timeoutMs + WAIT_RESPONSE_MARGIN_MS > timeoutMs) reject('INVALID_BROWSER_TOOL', 'Wait timeout exceeds the bounded Browser request budget')
+    const gone = Object.hasOwn(args, 'textGone')
+    const needle = waitNeedle(gone ? args.textGone : args.text)
+    const condition = gone ? 'text-gone' : 'text'
+    const transition = card.pendingTransition
+    const wait = { for: condition, text: needle, timeoutMs: args.timeoutMs,
+      ...(transition ? { notDocumentId: transition.priorDocumentId } : {}) }
+    card.observation = null
+    const trace = {}
+    const response = await observeRequest(run, binding, card, { textLimit: OBSERVE_TEXT_LIMIT, elementLimit: 80, wait }, trace)
+    if (binding.closed || binding.ownerKey !== getOwnerKey()) reject('BROWSER_RUN_ENDED', 'Browser run ended during wait')
+    const reported = response?.snapshot?.wait
+    let snapshot
+    try { snapshot = observationFrom({ ...response, snapshot: withoutWait(response?.snapshot) }, card.cardId) }
+    catch { reject('BROWSER_WAIT_OUTCOME_UNKNOWN', 'Wait ended without a verifiable observation; observe again before acting') }
+    if (!record(reported) || reported.for !== condition || !['met', 'timeout'].includes(reported.outcome) ||
+        !Number.isSafeInteger(reported.elapsedMs) || reported.elapsedMs < 0 ||
+        !Number.isSafeInteger(reported.matchCount) || reported.matchCount < 0) {
+      reject('BROWSER_WAIT_OUTCOME_UNKNOWN', 'Wait ended without a verifiable observation; observe again before acting')
+    }
+    // What the returned (bounded) text can prove: present text is visible in
+    // it, unless the list was cut at its limit; gone text is absent from it.
+    const seen = snapshot.text.some(text => String(text).replace(/\s+/g, ' ').includes(needle))
+    const truncated = snapshot.text.length >= OBSERVE_TEXT_LIMIT
+    const consistent = (!wait.notDocumentId || snapshot.documentId !== wait.notDocumentId) && (gone
+      ? reported.matchCount === 0 && !seen
+      : reported.matchCount > 0 && (seen || truncated))
+    const status = reported.outcome === 'timeout' ? 'wait-timeout' : consistent ? 'wait-condition-met' : 'wait-condition-unverified'
+    const recovery = recordObservation(card, snapshot)
+    return { status, cardId: card.cardId, action: 'wait_text', observationId: card.observation.id, snapshot,
+      wait: { for: condition, timeoutMs: args.timeoutMs, elapsedMs: reported.elapsedMs,
+        outcome: status === 'wait-condition-met' ? 'met' : status === 'wait-timeout' ? 'not-met-before-timeout' : 'unverified',
+        documentReplaced: !!wait.notDocumentId && snapshot.documentId !== wait.notDocumentId },
+      ...recovery, timing: { ...trace }, externalEffectVerified: false }
+  }
+
+  // One 'reconcile' question: {callId, actRequestId, guard document} ->
+  // {entered: true|false|'unknown', fenced, performing}. dispatched false only
+  // when the actor answered "never entered" for the observed document and
+  // fenced that call, with no perform timing; malformed or missing answers
+  // are 'unknown'. Read-only: no lease, never a second action.
+  async function reconcileAct(run, binding, card, { callId, actRequestId, guard, actSeq }) {
+    const unknown = reason => ({ dispatched: 'unknown', summary: { answered: false, reason } })
+    if (binding.closed || closedRuns.has(run?.answerId) || binding.ownerKey !== getOwnerKey() || run?.status !== 'inProgress') {
+      return unknown('run-ended')
+    }
+    let response
+    try {
+      response = await requestUi({ kind: 'reconcile', runId: binding.runId, clientThreadId: binding.clientThreadId,
+        cardId: card.cardId, binding: card.ui, callId, ...(actRequestId ? { actRequestId } : {}),
+        ...(Number.isSafeInteger(actSeq) ? { actSeq } : {}),
+        guard: { documentId: guard.documentId,
+          ...(Object.hasOwn(guard, 'innerWindowId') ? { innerWindowId: guard.innerWindowId } : {}),
+          ...(Object.hasOwn(guard, 'browsingContextId') ? { browsingContextId: guard.browsingContextId } : {}) } },
+      binding, run, {}, { budgetMs: Math.min(RECONCILE_TIMEOUT_MS, timeoutMs) })
+    } catch { return unknown('no-answer') }
+    const answer = response?.reconcile
+    const dialog = dialogOf(response?.dialog)
+    if (response?.status !== 'reconciled' || !record(answer) ||
+        (answer.callId !== callId && !(actRequestId && answer.requestId === actRequestId))) return unknown('unrecognized-answer')
+    const timing = record(answer.timing) ? answer.timing : {}
+    if (answer.entered === true) {
+      return { dispatched: true, ...(dialog ? { dialog } : {}),
+        summary: { answered: true, entered: true, performing: answer.performing === true } }
+    }
+    if (answer.entered === false && answer.fenced === true && answer.documentId === guard.documentId &&
+        ['performEnterMs', 'performExitMs'].every(key => timing[key] == null) && !dialog) {
+      return { dispatched: false, summary: { answered: true, entered: false, fenced: true } }
+    }
+    return unknown(answer.entered === 'unknown' && ['other-document', 'record-evicted'].includes(answer.reason)
+      ? answer.reason : 'unproven')
+  }
+
   async function executeDispatch(run, event) {
     const args = event?.arguments
     const tool = event?.tool
@@ -476,7 +611,7 @@ export function createBrowserToolService({ sendToUi, getOwnerKey, timeoutMs = 15
     const card = binding.cards.get(args.cardId)
     if (!card) reject('BROWSER_CARD_NOT_SELECTED', 'Browser Card was not selected for this run')
     if (card.busy) reject('BROWSER_CARD_BUSY', 'Wait for the current Browser request to finish')
-    if (tool !== 'egdesk_browser_observe' && card.permission !== 'interact') reject('BROWSER_INTERACTION_NOT_GRANTED', 'Read-only Browser context does not authorize interaction')
+    if (!READ_TOOLS.has(tool) && card.permission !== 'interact') reject('BROWSER_INTERACTION_NOT_GRANTED', 'Read-only Browser context does not authorize interaction')
     if (tool === 'egdesk_browser_observe') {
       const trace = {}
       const response = await observeRequest(run, binding, card, { textLimit: 60, elementLimit: 80 }, trace)
@@ -487,6 +622,7 @@ export function createBrowserToolService({ sendToUi, getOwnerKey, timeoutMs = 15
         snapshot, ...recovery, timing: { ...trace }, externalEffectVerified: false }
     }
     if (tool === 'egdesk_browser_wait') return waitForCondition(run, binding, card, args)
+    if (tool === 'egdesk_browser_wait_text') return waitForText(run, binding, card, args)
     if (card.uncertain) reject('BROWSER_OUTCOME_UNKNOWN', 'A prior Browser action has an unknown outcome; select the context again')
     const observed = card.observation
     if (!observed || observed.id !== args.observationId || observed.snapshot.revision !== args.expectedRevision) reject('BROWSER_OBSERVATION_STALE', 'Observe this Browser Card again before acting')
@@ -501,6 +637,11 @@ export function createBrowserToolService({ sendToUi, getOwnerKey, timeoutMs = 15
     }
     if (tool === 'egdesk_browser_scroll' && !validScroll(observed.snapshot.scroll)) {
       reject('BROWSER_OBSERVATION_STALE', 'Observe this Browser Card again; the observation has no scroll position')
+    }
+    const containerScroll = tool === 'egdesk_browser_scroll' && byRef && Object.hasOwn(args, 'direction')
+    const containerBefore = containerScroll ? scrollContainerOf(observed.snapshot, args.ref) : null
+    if (containerScroll && !containerBefore) {
+      reject('BROWSER_TARGET_STALE', 'Scroll with a direction inside an element needs an observed scroll container (scrollContainers)')
     }
     // Key input never moves focus: the target must already be focused or be
     // the field this run just filled with a confirmed value.
@@ -520,6 +661,7 @@ export function createBrowserToolService({ sendToUi, getOwnerKey, timeoutMs = 15
       tool === 'egdesk_browser_click' ? { type: 'click', ref: args.ref } :
       tool === 'egdesk_browser_fill' ? { type: 'fill', ref: args.ref, text: args.text } :
       tool === 'egdesk_browser_press' ? { type: 'press', ref: args.ref, key: args.key } :
+      containerScroll ? { type: 'scroll', ref: args.ref, direction: args.direction, amount: args.amount || 'page' } :
       byRef ? { type: 'scroll', ref: args.ref } : { type: 'scroll', direction: args.direction, amount: args.amount || 'page' }
     const condition = args.postcondition || null
     const wasAlreadyTrue = condition ? checkPostcondition(condition, observed.snapshot, args.ref) : false
@@ -536,6 +678,25 @@ export function createBrowserToolService({ sendToUi, getOwnerKey, timeoutMs = 15
           priorDocumentId: observed.snapshot.documentId, actionType: action.type, wasAlreadyTrue }
       }
     }
+    // BRW-12: after a lost response, ask once whether the actor entered
+    // perform for this call. Proven "never entered" (fenced by the actor)
+    // frees the Card like a refusal; anything else stays locked. The action
+    // itself is never sent again.
+    const reconcileLostAct = async error => {
+      const outcome = await reconcileAct(run, binding, card, { callId, guard,
+        actRequestId: short(error.wireRequestId, 160) ? error.wireRequestId : null, actSeq: trace.seq })
+      error.dispatched = outcome.dispatched
+      error.reconcile = outcome.summary
+      if (outcome.dialog) error.dialog = outcome.dialog
+      if (card.uncertainAction) card.uncertainAction.dispatched = outcome.dispatched
+      if (outcome.dispatched === false) {
+        card.uncertain = false; card.uncertainAction = null; card.pendingTransition = null
+        throw Object.assign(new Error('Browser action was not sent; observe this Browser Card again before trying it'),
+          { code: 'BROWSER_OBSERVATION_STALE', dispatchPhase: 'not-dispatched', dispatched: false,
+            reconcile: outcome.summary, timing: { ...trace } })
+      }
+      error.dispatchPhase = outcome.dispatched === true ? 'dispatched' : 'unknown'
+    }
     const guard = { documentId: observed.snapshot.documentId, revision: observed.snapshot.revision,
       viewport: observed.snapshot.viewport, url: observed.snapshot.url,
       focusedRef: observed.snapshot.focusedElement?.ref || null,
@@ -546,29 +707,41 @@ export function createBrowserToolService({ sendToUi, getOwnerKey, timeoutMs = 15
       ...(args.expectedTarget ? { target: args.expectedTarget } : {}),
       ...(action.type === 'navigate' ? { navigationScope: 'same-site' } : {}),
       ...(action.type === 'scroll' ? { scroll: observed.snapshot.scroll } : {}),
+      ...(containerBefore ? { containerScroll: { x: containerBefore.x, y: containerBefore.y } } : {}),
       ...(pressPolicy ? { pressPolicy } : {}) }
+    // callId names this one native call to the UI and actor, so a lost
+    // response can be reconciled against what the actor recorded.
+    const callId = short(event?.callId, 160) ? event.callId : null
     const pending = requestUi({ kind: 'act', runId: binding.runId,
       clientThreadId: binding.clientThreadId, cardId: card.cardId, binding: card.ui,
-      action, guard, ...(condition ? { postcondition: condition } : {}) }, binding, run, trace)
+      ...(callId ? { callId } : {}), action, guard, ...(condition ? { postcondition: condition } : {}) }, binding, run, trace)
     binding.pending.add(pending)
     let response
     try { response = await pending }
-    catch (error) { markUnknown(); throw error }
+    catch (error) {
+      markUnknown()
+      if (error?.code === 'BROWSER_UI_TIMEOUT' && callId) await reconcileLostAct(error)
+      throw error
+    }
     finally { binding.pending.delete(pending); card.busy = false }
     if (binding.closed || binding.ownerKey !== getOwnerKey()) reject('BROWSER_RUN_ENDED', 'Browser run ended during action; effect is unknown')
+    const dialog = dialogOf(response.dialog)
     if (response.status !== 'acted' || !record(response.receipt)) {
+      const obscuredBy = obscuredByOf(response)
       // Not sent: only this observation is spent; no lock, no retry. The
       // model re-observes and may decide again under a new call ID.
-      if (provenNotDispatched(response)) {
+      if (provenNotDispatched(response) && !dialog) {
         throw Object.assign(new Error('Browser action was not sent; observe this Browser Card again before trying it'),
-          { code: 'BROWSER_OBSERVATION_STALE', dispatchPhase: 'not-dispatched', timing: { ...trace } })
+          { code: 'BROWSER_OBSERVATION_STALE', dispatchPhase: 'not-dispatched', dispatched: false, timing: { ...trace },
+            ...(obscuredBy ? { obscuredBy } : {}) })
       }
       markUnknown()
       // The helper's conclusion, not the UI's claim: a contradicted
       // 'not-dispatched' is reported as unknown.
+      const dispatchPhase = response.dispatchPhase === 'dispatched' ? 'dispatched' : 'unknown'
       throw Object.assign(new Error(response.error || 'Browser action was not confirmed; do not retry blindly'),
-        { code: 'BROWSER_ACTION_UNVERIFIED', timing: { ...trace },
-          dispatchPhase: response.dispatchPhase === 'dispatched' ? 'dispatched' : 'unknown' })
+        { code: 'BROWSER_ACTION_UNVERIFIED', timing: { ...trace }, dispatchPhase,
+          dispatched: dispatchPhase === 'dispatched' ? true : 'unknown', ...(dialog ? { dialog } : {}) })
     }
     const after = response.receipt.after
     const dispatchReceipt = response.receipt.dispatchReceipt
@@ -582,12 +755,27 @@ export function createBrowserToolService({ sendToUi, getOwnerKey, timeoutMs = 15
         dispatchReceipt.clickInputRoute === 'dom-click-no-pointerdown' &&
         dispatchReceipt.targetClickObserved === true)) &&
       (action.type !== 'scroll' || (dispatchReceipt.inputRoute === 'dom-scroll-api' &&
-        dispatchReceipt.scrollMode === (byRef ? 'into-view' : 'document') && validScroll(after.scroll))) &&
+        dispatchReceipt.scrollMode === (containerScroll ? 'container' : byRef ? 'into-view' : 'document') &&
+        validScroll(after.scroll) && (!containerScroll || validContainerScroll(dispatchReceipt.containerScroll)))) &&
       (action.type !== 'press' || (dispatchReceipt.inputRoute === 'dom-keyboard-event' &&
         dispatchReceipt.key === args.key && dispatchReceipt.trustedInput === false &&
         dispatchReceipt.targetKeyObserved === true && dispatchReceipt.focusPolicy === pressPolicy))
     const common = { cardId: card.cardId, action: action.type, dispatchReceipt: dispatchReceipt || null,
-      after: after || null, observation: response.receipt.observation || null, timing: { ...trace } }
+      after: after || null, observation: response.receipt.observation || null, timing: { ...trace },
+      ...(dialog ? { dialog } : {}) }
+    if (containerScroll) {
+      // Readback: the container's offsets in the current after-snapshot.
+      const afterContainer = readbackIsCurrent ? scrollContainerOf(after, args.ref) : null
+      const moved = afterContainer ? afterContainer.y - containerBefore.y : null
+      const wantDown = ['down', 'bottom'].includes(action.direction)
+      const matched = moved !== null && (wantDown ? moved > 0 : moved < 0)
+      const atLimit = moved === 0 && (wantDown ? containerBefore.y >= containerBefore.maxY : containerBefore.y <= 0)
+      // Like any scroll it never locks the Card; a dialog only withholds "observed".
+      return { status: matched && !dialog ? 'postcondition-observed' : atLimit && !dialog ? 'scroll-at-limit' : 'postcondition-unverified',
+        ...common, postcondition: { kind: 'container-scroll-position', ref: args.ref, direction: action.direction,
+          amount: action.amount, matched },
+        scroll: { container: { ref: args.ref, before: containerBefore, after: afterContainer } }, externalEffectVerified: false }
+    }
     if (action.type === 'scroll') {
       const before = observed.snapshot.scroll
       const moved = readbackIsCurrent ? after.scroll.y - before.y : null
@@ -604,11 +792,12 @@ export function createBrowserToolService({ sendToUi, getOwnerKey, timeoutMs = 15
     if (action.type === 'press' && !condition) {
       // Non-activation keys may omit a postcondition: the dispatch is reported,
       // never its effect. A non-current readback still makes the outcome unknown.
-      if (!readbackIsCurrent) markUnknown()
-      return { status: readbackIsCurrent ? 'key-dispatched' : 'postcondition-unverified', ...common,
+      if (!readbackIsCurrent || dialog) markUnknown()
+      return { status: readbackIsCurrent && !dialog ? 'key-dispatched' : 'postcondition-unverified', ...common,
         postcondition: null, externalEffectVerified: false }
     }
-    const matched = !wasAlreadyTrue && readbackIsCurrent && checkPostcondition(condition, after, args.ref)
+    // A page dialog still open after the action leaves the outcome unknown.
+    const matched = !wasAlreadyTrue && readbackIsCurrent && !dialog && checkPostcondition(condition, after, args.ref)
     if (!matched) markUnknown()
     if (matched && action.type === 'fill') card.lastFill = { ref: args.ref, documentId: observed.snapshot.documentId }
     return { status: matched ? 'postcondition-observed' : 'postcondition-unverified', ...common,

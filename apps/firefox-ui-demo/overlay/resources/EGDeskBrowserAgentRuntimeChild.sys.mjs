@@ -36,12 +36,46 @@ const MUTATION_OPTIONS = Object.freeze({ subtree: true, childList: true, attribu
 const SETTLE_RESPONSE_MARGIN_MS = 500;
 // The only dispatch phases a guarded refusal may claim (helper contract B).
 const DISPATCH_PHASES = new Set(["not-dispatched", "dispatched", "unknown"]);
+// BRW-06/08 extra candidates beyond INTERACTIVE_SELECTOR, as in agent-browser
+// cli/src/native/snapshot.rs find_cursor_interactive_elements (Apache-2.0):
+// cursor:pointer or onclick elements, labels that wrap a hidden radio or
+// checkbox, and overflow scroll containers (browser-use dom/serializer
+// serializer.py, MIT). Computed-style reads are budgeted per observation.
+const NATIVE_INTERACTIVE_TAGS = new Set(["A", "BUTTON", "INPUT", "SELECT", "TEXTAREA", "DETAILS", "SUMMARY",
+  "OPTION", "IFRAME", "FRAME"]);
+const NON_CONTENT_TAGS = new Set(["HTML", "HEAD", "BODY", "SCRIPT", "STYLE", "TEMPLATE", "NOSCRIPT", "LINK", "META",
+  "TITLE", "BR", "SLOT"]);
+const MAX_STYLE_CHECKS = 3000;
+const MAX_POINTER_CANDIDATES = 60;
+const MAX_SCROLL_CONTAINERS = 12;
+// Settle after a guarded action (nanobrowser core/interaction/evidence.ts,
+// Apache-2.0: poll 100 ms, quiet 500 ms, cap 1.5 s), never past the lease.
+const SETTLE_POLL_MS = 100;
+const SETTLE_QUIET_MS = 500;
+const SETTLE_CAP_MS = 1500;
+const MAX_SETTLE_REQUESTS = 3;
+const REQUEST_INITIATORS = new Set(["fetch", "xmlhttprequest", "beacon"]);
+// BRW-12 reconcile: which guarded requests entered perform, and which were
+// answered "never entered" (fenced so they can never enter later).
+const MAX_PERFORM_RECORDS = 128;
+const MAX_FENCES = 256;
+const MAX_ACT_BUDGET_MS = 60000;
+// egdesk_browser_wait_text: visible text only, bounded scan and match count.
+const MAX_WAIT_TEXT = 200;
+const MAX_TEXT_MATCH_NODES = 20000;
+const MAX_TEXT_MATCHES = 50;
+const TEXT_EXCLUDED_PARENTS = new Set(["SCRIPT", "STYLE", "TEMPLATE", "NOSCRIPT", "TEXTAREA", "SELECT", "OPTION",
+  "INPUT"]);
 
 export class EGDeskBrowserAgentRuntimeChild extends JSWindowActorChild {
   constructor() {
     super();
     this.refByNode = new WeakMap();
+    // ref -> WeakRef(node) (firefox-devtools-mcp uidRegistry.ts, MIT): old
+    // refs never keep detached DOM alive. The latest observation's refs are
+    // also held strongly in liveRefs until the next observation.
     this.nodeByRef = new Map();
+    this.liveRefs = new Map();
     this.refSeq = 0;
     // Same-origin frame generations: one key per (frame element, document).
     // A ref inside a frame carries the key path, e.g. "f2/f5/el_9".
@@ -63,6 +97,13 @@ export class EGDeskBrowserAgentRuntimeChild extends JSWindowActorChild {
     this.lastGuardedFill = null;
     this.waitPollMs = 100;
     this.idleQuietMs = 500;
+    this.settlePollMs = SETTLE_POLL_MS;
+    this.settleQuietMs = SETTLE_QUIET_MS;
+    // Guarded requests that entered perform, keyed "call:<callId>" and
+    // "request:<lease requestId>", and keys answered "never entered".
+    this.performRecords = new Map();
+    this.performRecordsEvicted = false;
+    this.fences = new Set();
   }
 
   async receiveMessage(message) {
@@ -73,6 +114,8 @@ export class EGDeskBrowserAgentRuntimeChild extends JSWindowActorChild {
       return data.options?.wait ? this.waitThenSnapshot(data.options) : this.snapshot(data.options || {});
     }
     if (message.name === "captureInput") return captureDocumentText(this.document, data.options || {});
+    // Read-only question about one earlier guarded request (BRW-12).
+    if (message.name === "reconcile") return this.reconcile(data);
     if (message.name === "act") {
       if (!data.options?.guard) return this.act(data.action || {}, data.options || {});
       // A guarded refusal answers as data, not as a thrown Error: a cloned
@@ -113,19 +156,60 @@ export class EGDeskBrowserAgentRuntimeChild extends JSWindowActorChild {
   }
 
   elementRef(node) {
-    const existing = this.refByNode.get(node);
-    if (existing) return existing;
-    const frame = this.frameByDocument.get(node?.ownerDocument);
-    const ref = `${frame ? `${frame.path}/` : ""}el_${++this.refSeq}`;
-    this.refByNode.set(node, ref);
-    this.nodeByRef.set(ref, node);
+    let ref = this.refByNode.get(node);
+    if (!ref) {
+      const frame = this.frameByDocument.get(node?.ownerDocument);
+      ref = `${frame ? `${frame.path}/` : ""}el_${++this.refSeq}`;
+      this.refByNode.set(node, ref);
+    }
+    // A pruned or collected handle is re-registered while the node lives.
+    if (this.refTarget(ref) !== node) this.nodeByRef.set(ref, this.weakHandle(node));
     return ref;
+  }
+
+  weakHandle(node) {
+    return typeof WeakRef === "function" ? new WeakRef(node) : { deref: () => node };
+  }
+
+  refTarget(ref) {
+    try { return this.nodeByRef.get(ref)?.deref?.() || null; } catch { return null; }
+  }
+
+  // The refs the latest observation handed out stay strongly reachable until
+  // the next observation; collected handles are dropped.
+  retainLiveRefs(refs) {
+    const live = new Map();
+    for (const ref of refs) {
+      const node = typeof ref === "string" ? this.refTarget(ref) : null;
+      if (node) live.set(ref, node);
+    }
+    this.liveRefs = live;
+    for (const [ref, handle] of this.nodeByRef) {
+      let node = null;
+      try { node = handle?.deref?.() || null; } catch {}
+      if (!node) this.nodeByRef.delete(ref);
+    }
+  }
+
+  // Closed shadow roots are read through Gecko's privileged
+  // openOrClosedShadowRoot (Playwright injectedScript expectHitTarget walks
+  // closed roots bottom-up the same way). UA widget roots (media controls,
+  // date fields) are browser internals, not page content, and stay unread.
+  shadowRootOf(element) {
+    let root = null;
+    try { root = element?.openOrClosedShadowRoot ?? null; } catch {}
+    if (!root) { try { root = element?.shadowRoot ?? null; } catch {} }
+    if (!root) return null;
+    try {
+      if (root.isUAWidget === true || (typeof root.isUAWidget === "function" && root.isUAWidget() === true)) return null;
+    } catch { return null; }
+    return root;
   }
 
   // Stale like remote/shared/DOM.sys.mjs:552 isStale: disconnected, or its
   // document is no longer the active document of its browsing context.
   nodeForRef(ref) {
-    const node = this.nodeByRef.get(ref);
+    const node = this.refTarget(ref);
     if (!node || !node.isConnected || !this.documentActive(node.ownerDocument)) return null;
     const frame = this.frameForRef(ref);
     return frame === undefined || (frame && node.ownerDocument !== frame.document) ? null : node;
@@ -275,7 +359,95 @@ export class EGDeskBrowserAgentRuntimeChild extends JSWindowActorChild {
       return "textbox";
     }
     if (node.isContentEditable) return "textbox";
+    const pointer = this.pointerSignals(node);
+    const choice = (tag === "label" || pointer) ? this.hiddenChoiceInput(node) : null;
+    if (choice) return choice.type;
+    if (this.scrollContainerState(node)) return "scrollable";
+    if (pointer) return "clickable";
     return tag || "element";
+  }
+
+  // cursor:pointer that is not just inherited, or an onclick handler.
+  pointerSignals(node, style = null) {
+    let onclick = false;
+    try { onclick = node.getAttribute?.("onclick") != null || typeof node.onclick === "function"; } catch {}
+    if (onclick) return true;
+    let own = style;
+    try { own ||= this.styleFor(node); } catch { return false; }
+    if (own?.cursor !== "pointer") return false;
+    const parent = this.composedParent(node);
+    if (!parent || parent.nodeType === 9) return true;
+    try { return this.styleFor(parent)?.cursor !== "pointer"; } catch { return true; }
+  }
+
+  // A wrapper (a label, or a pointer element) around a radio or checkbox the
+  // page hid to draw its own: the wrapper stands in for the control.
+  hiddenChoiceInput(node) {
+    let input = null;
+    try { input = node.querySelector?.('input[type="radio" i], input[type="checkbox" i]') || null; } catch {}
+    if (!input) return null;
+    let hidden = input.hidden === true;
+    if (!hidden) {
+      try {
+        const style = this.styleFor(input);
+        hidden = style?.display === "none" || ["hidden", "collapse"].includes(style?.visibility);
+      } catch { return null; }
+    }
+    if (!hidden) return null;
+    const type = String(input.type || input.getAttribute?.("type") || "").toLowerCase();
+    if (!["radio", "checkbox"].includes(type)) return null;
+    return { type, state: input.indeterminate === true ? "mixed" : input.checked === true ? "checked" : "unchecked" };
+  }
+
+  // Scroll position of an element that scrolls its own overflow (not the
+  // document), or null. Only auto/scroll overflow counts: a hidden overflow
+  // is not something a person could scroll either.
+  scrollContainerState(node, style = null) {
+    const tag = String(node?.tagName || "").toUpperCase();
+    if (!node || tag === "HTML" || tag === "BODY" || NATIVE_INTERACTIVE_TAGS.has(tag)) return null;
+    let own = style;
+    try { own ||= this.styleFor(node); } catch { return null; }
+    const scrolls = value => ["auto", "scroll"].includes(value);
+    if (!scrolls(own?.overflowY) && !scrolls(own?.overflowX) && !scrolls(own?.overflow)) return null;
+    const int = value => Number.isFinite(Number(value)) ? Math.max(0, Math.round(Number(value))) : 0;
+    const maxY = Math.max(0, int(node.scrollHeight) - int(node.clientHeight));
+    const maxX = Math.max(0, int(node.scrollWidth) - int(node.clientWidth));
+    if (maxY <= 1 && maxX <= 1) return null;
+    return { x: int(node.scrollLeft), y: int(node.scrollTop), maxY };
+  }
+
+  // Which extra candidate an element is, within the observation's budget.
+  extraCandidateKind(element, budget = null) {
+    const tag = String(element?.tagName || "").toUpperCase();
+    if (!tag || NATIVE_INTERACTIVE_TAGS.has(tag) || NON_CONTENT_TAGS.has(tag)) return null;
+    const allowPointer = !budget || budget.pointer < MAX_POINTER_CANDIDATES;
+    const allowScroll = !budget || budget.scroll < MAX_SCROLL_CONTAINERS;
+    if (!allowPointer && !allowScroll) return null;
+    if (tag === "LABEL" && allowPointer && this.hiddenChoiceInput(element)) {
+      if (budget) budget.pointer++;
+      return "choice";
+    }
+    if (budget) {
+      if (budget.styleChecks >= MAX_STYLE_CHECKS) return null;
+      budget.styleChecks++;
+    }
+    let style;
+    try { style = this.styleFor(element); } catch { return null; }
+    if (allowPointer && this.pointerSignals(element, style)) {
+      if (budget) budget.pointer++;
+      return "pointer";
+    }
+    if (allowScroll && this.scrollContainerState(element, style)) {
+      if (budget) budget.scroll++;
+      return "scroll";
+    }
+    return null;
+  }
+
+  isCandidate(node) {
+    if (typeof node?.matches !== "function") return true;
+    try { if (node.matches(INTERACTIVE_SELECTOR) === true) return true; } catch {}
+    return !!this.extraCandidateKind(node);
   }
 
   privateMarked(node) {
@@ -320,6 +492,35 @@ export class EGDeskBrowserAgentRuntimeChild extends JSWindowActorChild {
   }
 
   nowMs() { return Date.now(); }
+
+  // Monotonic milliseconds on this page's performance clock: settle, waits and
+  // the relative act budget are measured here, never on the wall clock.
+  monoNow() {
+    for (const perf of [this.contentWindow?.performance, globalThis.performance]) {
+      try {
+        const value = perf.now();
+        if (Number.isFinite(value) && value >= 0) return value;
+      } catch {}
+    }
+    return Date.now();
+  }
+
+  sleep(ms) {
+    return new Promise(resolve => this.contentWindow.setTimeout(resolve, Math.max(0, ms)));
+  }
+
+  // Relative budget from the request (helper budgetMs, less what the UI
+  // already spent) turned into a deadline on the monotonic clock at receipt.
+  budgetDeadline(budgetMs) {
+    return Number.isSafeInteger(budgetMs) && budgetMs > 0 && budgetMs <= MAX_ACT_BUDGET_MS
+      ? this.monoNow() + budgetMs : Infinity;
+  }
+
+  remainingMs(lease, budgetDeadline) {
+    const wall = Number.isSafeInteger(lease?.deadlineMs) ? lease.deadlineMs - this.nowMs() : Infinity;
+    const mono = Number.isFinite(budgetDeadline) ? budgetDeadline - this.monoNow() : Infinity;
+    return Math.min(wall, mono);
+  }
 
   // Same-clock stamp (helper contract C): this page global's
   // performance.timeOrigin + performance.now(), the clock an owned fixture
@@ -578,6 +779,7 @@ export class EGDeskBrowserAgentRuntimeChild extends JSWindowActorChild {
     if (tag === "select") return this.compact(node.selectedOptions?.[0]?.textContent || node.value || "", 120);
     if (tag === "textarea" || tag === "input") return this.boundedValue(node.value || "");
     if (node.isContentEditable) return this.boundedValue(this.editorText(node), { editor: true });
+    if (tag === "label" || this.pointerSignals(node)) return this.hiddenChoiceInput(node)?.state || "";
     return "";
   }
 
@@ -634,12 +836,14 @@ export class EGDeskBrowserAgentRuntimeChild extends JSWindowActorChild {
       frame.getAttribute?.("name") || "Embedded frame", 120);
   }
 
-  // One pass over the top document, open shadow roots and same-origin frames,
-  // in document order. Closed shadow roots stay unread. Cross-origin, private
-  // and too-deep frames are only listed as inaccessible; nothing is read
-  // through them. Shadow roots and frame documents join the mutation watch.
-  scanRoots(doc) {
+  // One pass over the top document, open and closed shadow roots and
+  // same-origin frames, in document order. Cross-origin, private and too-deep
+  // frames are only listed as inaccessible; nothing is read through them.
+  // Shadow roots and frame documents join the mutation watch. With classify,
+  // pointer/choice/scroll candidates join the selector matches (budgeted).
+  scanRoots(doc, { classify = true } = {}) {
     const roots = [], candidates = [], inaccessibleFrames = [];
+    const budget = { styleChecks: 0, pointer: 0, scroll: 0 };
     let scanned = 0;
     const visit = (root, frame, shadowDepth) => {
       roots.push(root);
@@ -653,9 +857,11 @@ export class EGDeskBrowserAgentRuntimeChild extends JSWindowActorChild {
       for (let index = 0; index < elements.length && scanned < MAX_SCAN_ELEMENTS; index++, scanned++) {
         const element = elements[index];
         if (matched.has(element)) { candidates.push(element); pushed.add(element); }
+        else if (classify && this.extraCandidateKind(element, budget)) { candidates.push(element); pushed.add(element); }
         const tag = String(element.tagName || "").toUpperCase();
-        if (tag === "IFRAME" || tag === "FRAME") this.scanFrame(element, frame, visit, inaccessibleFrames);
-        else if (element.shadowRoot && shadowDepth < MAX_SHADOW_DEPTH) visit(element.shadowRoot, frame, shadowDepth + 1);
+        if (tag === "IFRAME" || tag === "FRAME") { this.scanFrame(element, frame, visit, inaccessibleFrames); continue; }
+        const shadow = shadowDepth < MAX_SHADOW_DEPTH ? this.shadowRootOf(element) : null;
+        if (shadow) visit(shadow, frame, shadowDepth + 1);
       }
       // Past the scan budget the remaining interactive elements still count,
       // in document order; only their shadow roots and frames go unread.
@@ -731,12 +937,25 @@ export class EGDeskBrowserAgentRuntimeChild extends JSWindowActorChild {
     return items;
   }
 
-  // Focus through open shadow roots and live same-origin frames; it stops at
-  // a frame element whose document this actor has not observed.
+  // Scroll positions of the listed elements that scroll their own overflow,
+  // so a container scroll can be guarded like the document scroll.
+  scrollContainersFor(items) {
+    const containers = [];
+    for (const item of items) {
+      if (containers.length >= MAX_SCROLL_CONTAINERS) break;
+      const node = this.refTarget(item.ref);
+      const state = node ? this.scrollContainerState(node) : null;
+      if (state) containers.push({ ref: item.ref, ...state });
+    }
+    return containers;
+  }
+
+  // Focus through open and closed shadow roots and live same-origin frames;
+  // it stops at a frame element whose document this actor has not observed.
   deepActiveElement(doc) {
     let active = doc.activeElement;
     for (let depth = 0; active && depth < 32; depth++) {
-      const shadowActive = active.shadowRoot?.activeElement;
+      const shadowActive = this.shadowRootOf(active)?.activeElement;
       if (shadowActive) { active = shadowActive; continue; }
       const tag = String(active.tagName || "").toUpperCase();
       if (tag !== "IFRAME" && tag !== "FRAME") break;
@@ -819,6 +1038,9 @@ export class EGDeskBrowserAgentRuntimeChild extends JSWindowActorChild {
     const doc = this.document;
     const state = this.observationState();
     const scan = this.scanRoots(doc);
+    const interactiveElements = this.interactiveElements(doc, options.elementLimit || 80, scan);
+    const focusedElement = this.focusedElement(doc);
+    this.retainLiveRefs([...interactiveElements.map(item => item.ref), focusedElement?.ref]);
     return {
       ...state,
       ...this.documentIdentity(),
@@ -827,12 +1049,43 @@ export class EGDeskBrowserAgentRuntimeChild extends JSWindowActorChild {
       title: doc.title || "",
       readyState: doc.readyState || "",
       text: this.textSegments(doc, options.textLimit || 80, scan),
-      interactiveElements: this.interactiveElements(doc, options.elementLimit || 80, scan),
-      focusedElement: this.focusedElement(doc),
+      interactiveElements,
+      focusedElement,
       scroll: this.scrollState(),
+      scrollContainers: this.scrollContainersFor(interactiveElements),
       inaccessible: false,
       inaccessibleFrames: scan.inaccessibleFrames,
     };
+  }
+
+  // Visible page text nodes that contain needle (whitespace collapsed,
+  // case-sensitive), across the same roots an observation reads. Field
+  // values, editors, sensitive controls and hidden text never match.
+  visibleTextMatches(doc, needle) {
+    const filter = this.contentWindow.NodeFilter;
+    let visited = 0, matches = 0;
+    for (const root of this.scanRoots(doc, { classify: false }).roots) {
+      const isDocument = root === doc || root.nodeType === 9;
+      const walkRoot = isDocument ? root.body || root.documentElement : root;
+      const owner = isDocument ? root : root.ownerDocument;
+      if (!walkRoot || typeof owner?.createTreeWalker !== "function") continue;
+      const walker = owner.createTreeWalker(walkRoot, filter.SHOW_TEXT, {
+        acceptNode: (node) => {
+          if (++visited > MAX_TEXT_MATCH_NODES) return filter.FILTER_REJECT;
+          const text = String(node.nodeValue || "").slice(0, 10000).replace(/\s+/g, " ").trim();
+          if (!text.includes(needle)) return filter.FILTER_REJECT;
+          const parent = node.parentElement || node.parentNode?.host;
+          if (!parent || TEXT_EXCLUDED_PARENTS.has(String(parent.tagName || "").toUpperCase()) ||
+              !this.isVisible(parent) || this.isSensitiveText(node)) return filter.FILTER_REJECT;
+          return filter.FILTER_ACCEPT;
+        },
+      });
+      while (walker.nextNode()) {
+        if (++matches >= MAX_TEXT_MATCHES) return matches;
+      }
+      if (visited > MAX_TEXT_MATCH_NODES) break;
+    }
+    return matches;
   }
 
   // Read-only wait inside this document. It never enters perform or takes a
@@ -841,15 +1094,21 @@ export class EGDeskBrowserAgentRuntimeChild extends JSWindowActorChild {
   async waitThenSnapshot(options = {}) {
     const spec = options.wait;
     const condition = spec?.for;
-    if (!["load", "idle", "selector-visible"].includes(condition) || !Number.isSafeInteger(spec.timeoutMs) ||
+    if (!["load", "idle", "selector-visible", "text", "text-gone"].includes(condition) ||
+        !Number.isSafeInteger(spec.timeoutMs) ||
         spec.timeoutMs < 0 || spec.timeoutMs > MAX_WAIT_MS) throw new Error("Browser wait requires a bounded condition");
+    const textCondition = condition === "text" || condition === "text-gone";
+    const needle = textCondition && typeof spec.text === "string" ? spec.text.replace(/\s+/g, " ").trim() : "";
+    if (textCondition && (!needle || needle.length > MAX_WAIT_TEXT)) {
+      throw new Error("Browser text wait requires 1-200 characters of text");
+    }
     const doc = this.document;
     if (condition === "selector-visible" && (typeof spec.ref !== "string" || !this.nodeByRef.has(spec.ref) ||
         spec.documentId !== this.observationState().documentId || this.frameForRef(spec.ref) === undefined)) {
       throw new Error("Browser wait target is stale; observe again");
     }
-    const started = this.nowMs();
-    let lastRevision = null, quietSince = started;
+    const started = this.monoNow();
+    let lastRevision = null, quietSince = started, matchCount = null, matchRevision = null, polls = 0;
     const met = () => {
       const state = this.observationState();
       if (typeof spec.notDocumentId === "string" && state.documentId === spec.notDocumentId) return false;
@@ -860,23 +1119,33 @@ export class EGDeskBrowserAgentRuntimeChild extends JSWindowActorChild {
         const node = this.nodeForRef(spec.ref);
         return !!node && this.isVisible(node);
       }
+      if (textCondition) {
+        // Rescan on a DOM change, and every fifth poll for style-only changes.
+        if (matchCount === null || state.revision !== matchRevision || polls % 5 === 0) {
+          matchCount = this.visibleTextMatches(doc, needle);
+          matchRevision = state.revision;
+        }
+        return condition === "text" ? matchCount > 0 : matchCount === 0;
+      }
       if (doc.readyState !== "complete") { lastRevision = null; return false; }
       if (condition === "load") return true;
-      const now = this.nowMs();
+      const now = this.monoNow();
       if (state.revision !== lastRevision) { lastRevision = state.revision; quietSince = now; }
       return now - quietSince >= this.idleQuietMs;
     };
     let outcome = "timeout";
-    for (;;) {
+    for (;; polls++) {
       if (this.document !== doc) throw new Error("Browser document changed during wait; outcome is unknown");
       if (met()) { outcome = "met"; break; }
-      if (this.nowMs() - started >= spec.timeoutMs) break;
-      await new Promise(resolve => this.contentWindow.setTimeout(resolve, this.waitPollMs));
+      if (this.monoNow() - started >= spec.timeoutMs) break;
+      await this.sleep(this.waitPollMs);
     }
     if (this.document !== doc) throw new Error("Browser document changed during wait; outcome is unknown");
     const { wait: _wait, ...snapshotOptions } = options;
+    // The text itself is never echoed: only whether and how often it matched.
     return { ...this.snapshot(snapshotOptions),
-      wait: { for: condition, outcome, elapsedMs: Math.max(0, Math.round(this.nowMs() - started)) } };
+      wait: { for: condition, outcome, elapsedMs: Math.max(0, Math.round(this.monoNow() - started)),
+        ...(textCondition ? { matchCount: Math.min(matchCount ?? 0, MAX_TEXT_MATCHES) } : {}) } };
   }
 
   diffLists(beforeList, afterList, keyFn, limit = 20) {
@@ -963,9 +1232,47 @@ export class EGDeskBrowserAgentRuntimeChild extends JSWindowActorChild {
     }
     this.assertSameTarget(target, action.ref, guard.target);
     if (action.type === "press") this.assertKeyTarget(action, guard, target);
-    if (action.type === "click" && !this.targetIsTopmost(target)) {
-      throw new Error("Browser target is obscured; observe again");
+    if (action.type === "click") this.assertTopmost(target, "Browser target is obscured");
+  }
+
+  // Refuses a click that would land on something else, and says what: a short
+  // structural description (tag, id, two classes, role, its ref if observed),
+  // never the blocker's text. The receipt carries it as obscuredBy.
+  assertTopmost(target, prefix) {
+    const hit = this.hitTest(target);
+    if (hit.topmost) return;
+    // Nothing covers it: scroll it into view first (scroll with its ref).
+    if (hit.reason === "outside-viewport") throw new Error(`${prefix}: it is outside the viewport; observe again`);
+    const blocker = hit.blocker ? this.describeNode(hit.blocker) : "";
+    throw Object.assign(new Error(`${prefix}${blocker ? ` by ${blocker}` : ""}; observe again`),
+      blocker ? { obscuredBy: blocker } : {});
+  }
+
+  safeIdent(value) {
+    const text = String(value || "");
+    return /^[A-Za-z][A-Za-z0-9_-]{0,31}$/.test(text) && !/[0-9a-f]{12,}|\d{6,}/i.test(text) ? text : "";
+  }
+
+  describeNode(node) {
+    const tag = this.safeIdent(String(node?.tagName || "").toLowerCase()) || "element";
+    let text = tag;
+    const id = this.safeIdent(node.id || node.getAttribute?.("id"));
+    if (id) text += `#${id}`;
+    else {
+      let className = "";
+      try { className = typeof node.className === "string" ? node.className : node.getAttribute?.("class") || ""; } catch {}
+      const classes = String(className).split(/\s+/).map(name => this.safeIdent(name)).filter(Boolean).slice(0, 2);
+      if (classes.length) text += `.${classes.join(".")}`;
+      for (let parent = this.composedParent(node), depth = 0; parent && depth < 8; parent = this.composedParent(parent), depth++) {
+        const parentId = this.safeIdent(parent.id || parent.getAttribute?.("id"));
+        if (parentId) { text += ` inside ${this.safeIdent(String(parent.tagName || "").toLowerCase()) || "element"}#${parentId}`; break; }
+      }
     }
+    const role = this.safeIdent(node.getAttribute?.("role"));
+    if (role) text += ` role=${role}`;
+    const ref = this.refByNode.get(node);
+    if (typeof ref === "string" && this.refTarget(ref) === node) text += ` ref=${ref}`;
+    return text.slice(0, 160);
   }
 
   // Frame generation first, then the node: a ref from a replaced frame
@@ -978,36 +1285,64 @@ export class EGDeskBrowserAgentRuntimeChild extends JSWindowActorChild {
   }
 
   assertSameTarget(target, ref, expected) {
-    let candidate = typeof target.matches !== "function";
-    if (!candidate) { try { candidate = target.matches(INTERACTIVE_SELECTOR) === true; } catch {} }
-    const live = candidate ? this.elementItem(target) : null;
+    const live = this.isCandidate(target) ? this.elementItem(target) : null;
     if (!live || live.ref !== ref || ["role", "label", "href", "value", "tag"].some(key => live[key] !== expected[key])) {
       throw new Error("Browser target changed; observe again");
     }
   }
 
-  // Hit test through open shadow roots and same-origin frames: the target is
-  // topmost in its own tree, each shadow host in its tree, and each frame
-  // element in its parent document at the translated point.
-  targetIsTopmost(target) {
-    const rect = target.getBoundingClientRect();
-    let x = rect.left + rect.width / 2, y = rect.top + rect.height / 2, node = target;
+  // Point a click would use: the centre of the part of the element inside its
+  // own viewport (firefox-devtools-mcp src/firefox/dom.ts
+  // scrollAndGetInViewCenterPoint, MIT), or null when none of it is inside.
+  inViewCenter(rect, view) {
+    const width = Number(view?.innerWidth), height = Number(view?.innerHeight);
+    if (!(width > 0) || !(height > 0)) return { x: rect.left + rect.width / 2, y: rect.top + rect.height / 2 };
+    const left = Math.min(Math.max(rect.left, 0), width), right = Math.min(Math.max(rect.left + rect.width, 0), width);
+    const top = Math.min(Math.max(rect.top, 0), height), bottom = Math.min(Math.max(rect.top + rect.height, 0), height);
+    if (right <= left || bottom <= top) return null;
+    return { x: (left + right) / 2, y: (top + bottom) / 2 };
+  }
+
+  // The hit counts as the target when it is the node, inside it, or tied to it
+  // through a label (agent-browser cli/src/native/element.rs BLOCKER_AT_JS,
+  // Apache-2.0: a styled sibling inside the same label stands for the control).
+  hitReachesTarget(hit, node) {
+    if (hit === node || node.contains?.(hit)) return true;
+    try {
+      const hitLabel = hit.closest?.("label");
+      if (hitLabel && (hitLabel.control === node || hitLabel.contains?.(node))) return true;
+      const nodeLabel = node.closest?.("label");
+      if (nodeLabel && nodeLabel.contains?.(hit)) return true;
+    } catch {}
+    return false;
+  }
+
+  // Hit test through open and closed shadow roots and same-origin frames,
+  // bottom-up like Playwright injectedScript.ts expectHitTarget (Apache-2.0):
+  // the target is topmost in its own tree, each shadow host in its tree, and
+  // each frame element in its parent document at the translated point.
+  hitTest(target) {
+    const point = this.inViewCenter(target.getBoundingClientRect(), this.windowFor(target));
+    if (!point) return { topmost: false, blocker: null, reason: "outside-viewport" };
+    let { x, y } = point, node = target;
     for (let depth = 0; depth < 32; depth++) {
       const root = node.getRootNode?.() || null;
       const ownDocument = this.frameByDocument.get(node.ownerDocument)?.document || this.document;
       const scope = typeof root?.elementFromPoint === "function" ? root : ownDocument;
       const hit = scope.elementFromPoint?.(x, y);
-      if (!hit || (hit !== node && !node.contains?.(hit))) return false;
+      if (!hit || !this.hitReachesTarget(hit, node)) return { topmost: false, blocker: hit || null };
       if (root?.host) { node = root.host; continue; }
       const frame = this.frameByDocument.get(scope);
-      if (!frame) return true;
+      if (!frame) return { topmost: true, blocker: null };
       const offset = this.frameContentOffset(frame.frameElement);
       x += offset.x;
       y += offset.y;
       node = frame.frameElement;
     }
-    return false;
+    return { topmost: false, blocker: null };
   }
+
+  targetIsTopmost(target) { return this.hitTest(target).topmost; }
 
   // Scroll guard: same document/revision (checked above) plus the observed
   // scroll offset, so a human scroll in between makes the request stale.
@@ -1017,17 +1352,27 @@ export class EGDeskBrowserAgentRuntimeChild extends JSWindowActorChild {
       throw new Error("Browser observation is stale; the scroll position changed");
     }
     if (action.selector) throw new Error("Browser action requires an observed element reference");
+    const boundedDirection = ["up", "down", "top", "bottom"].includes(action.direction) && ["page", "half"].includes(action.amount);
     if (!action.ref) {
-      if (guard.target || !["up", "down", "top", "bottom"].includes(action.direction) ||
-          !["page", "half"].includes(action.amount)) throw new Error("Browser scroll requires a bounded direction");
+      if (guard.target || !boundedDirection) throw new Error("Browser scroll requires a bounded direction");
       return;
     }
-    if (action.direction || !guard.target || guard.target.ref !== action.ref) {
+    // ref alone scrolls that element into view; ref with a direction scrolls
+    // inside that observed scroll container.
+    const container = action.direction != null;
+    if ((container && !boundedDirection) || (!container && action.amount != null) ||
+        !guard.target || guard.target.ref !== action.ref) {
       throw new Error("Browser action requires an observed element reference");
     }
     const target = this.guardTarget(action.ref);
     if (!this.isVisible(target)) throw new Error("Browser target is unavailable; observe again");
     this.assertSameTarget(target, action.ref, guard.target);
+    if (!container) return;
+    const state = this.scrollContainerState(target);
+    if (!state) throw new Error("Browser target is not a scrollable container; observe again");
+    if (!guard.containerScroll || guard.containerScroll.x !== state.x || guard.containerScroll.y !== state.y) {
+      throw new Error("Browser observation is stale; the container scroll position changed");
+    }
   }
 
   // Key input never moves focus: the target is the focused element, or the
@@ -1051,6 +1396,20 @@ export class EGDeskBrowserAgentRuntimeChild extends JSWindowActorChild {
   guardedScroll(action) {
     const win = this.contentWindow;
     const before = this.scrollState();
+    if (action.ref && action.direction != null) {
+      const target = this.nodeForRef(action.ref);
+      const from = target && this.scrollContainerState(target);
+      if (!from) throw new Error(`Browser scroll container not found: ${action.ref}`);
+      const height = Math.max(0, Math.round(Number(target.clientHeight) || 0));
+      const step = Math.round(height * (action.amount === "half" ? 0.5 : 0.9));
+      this.markFirstEvent();
+      if (action.direction === "top") target.scrollTo?.({ left: from.x, top: 0, behavior: "instant" });
+      else if (action.direction === "bottom") target.scrollTo?.({ left: from.x, top: from.maxY, behavior: "instant" });
+      else target.scrollBy?.({ left: 0, top: action.direction === "down" ? step : -step, behavior: "instant" });
+      const to = this.scrollContainerState(target) || { x: from.x, y: from.y, maxY: from.maxY };
+      return { ok: true, dispatchDiagnostics: { inputRoute: "dom-scroll-api", mode: "container",
+        containerBefore: from, containerAfter: to } };
+    }
     if (action.ref) {
       const target = this.nodeForRef(action.ref);
       if (!target) throw new Error(`Browser agent target not found: ${action.ref}`);
@@ -1158,9 +1517,7 @@ export class EGDeskBrowserAgentRuntimeChild extends JSWindowActorChild {
 
   clickTarget(target, { avoidFocus = false } = {}) {
     const rect = target.getBoundingClientRect();
-    if (avoidFocus && !this.targetIsTopmost(target)) {
-      throw new Error("Browser target became obscured before click; observe again");
-    }
+    if (avoidFocus) this.assertTopmost(target, "Browser target became obscured before click");
     if (avoidFocus) {
       if (typeof target.click !== "function") {
         throw new Error("Browser target has no focus-safe DOM click; use the native user path");
@@ -1275,22 +1632,28 @@ export class EGDeskBrowserAgentRuntimeChild extends JSWindowActorChild {
   async act(action = {}, options = {}) {
     // Timing and phase are recorded for guarded actions only (REA 웹8 a, 웹10).
     const timing = { performCallsBefore: this.actorPerformCalls };
+    const guarded = !!options.guard;
+    // Hop record: when this actor received the request, on the shared clock.
+    if (guarded) timing.actorReceivedAtMs = this.clockMs();
+    const budgetDeadline = guarded ? this.budgetDeadline(options.budgetMs) : Infinity;
+    const keys = guarded ? this.performKeys(options) : [];
     let entered = false;
     try {
-      if (options.guard) this.assertGuard(action, options.guard);
+      if (guarded) this.assertGuard(action, options.guard);
       const before = this.snapshot(options.snapshot || {});
       const lease = options.lease;
-      if (options.guard) {
+      if (guarded) {
         if (!lease || typeof lease.leaseId !== "string" || !lease.leaseId ||
             typeof lease.requestId !== "string" || !lease.requestId ||
-            !Number.isSafeInteger(lease.deadlineMs) || this.nowMs() >= lease.deadlineMs ||
+            !Number.isSafeInteger(lease.deadlineMs) || this.remainingMs(lease, budgetDeadline) <= 0 ||
             typeof this.sendQuery !== "function") throw new Error("Browser action lease is missing or expired");
+        if (this.isFenced(keys)) throw new Error("Browser action was reconciled as never sent; observe again");
         const authorization = await this.sendQuery("authorizeAct", {
           leaseId: lease.leaseId, requestId: lease.requestId, deadlineMs: lease.deadlineMs,
           actionType: action.type, actionRef: action.ref || null, actionUrl: action.url || null,
         });
-        if (authorization?.authorized !== true || this.nowMs() >= lease.deadlineMs) {
-          const reason = this.nowMs() >= lease.deadlineMs ? "deadline-expired-after-approval" :
+        if (authorization?.authorized !== true || this.remainingMs(lease, budgetDeadline) <= 0) {
+          const reason = this.remainingMs(lease, budgetDeadline) <= 0 ? "deadline-expired-after-approval" :
             /^(?:missing-browsing-context|missing-embedder|missing-authorizer|ui-denied|parent-callback-error)$/.test(authorization?.reason)
               ? authorization.reason : "unknown";
           throw new Error(`Browser action authority was revoked before input [${reason}]`);
@@ -1298,35 +1661,46 @@ export class EGDeskBrowserAgentRuntimeChild extends JSWindowActorChild {
         // The parent checked the current run/Card/account authority after the
         // asynchronous actor hop. Recheck live page state immediately before I/O.
         this.assertGuard(action, options.guard);
+        // A reconcile answered while approval was pending fenced this request.
+        if (this.isFenced(keys)) throw new Error("Browser action was reconciled as never sent; observe again");
       }
-      // Failed perform calls also count. An unchanged count proves this actor
-      // never entered perform; it does not count physical events or successes.
-      this.actorPerformCalls++;
-      entered = true;
-      timing.performEnterMs = this.clockMs();
-      let result;
-      this.performTiming = options.guard ? timing : null;
-      try { result = this.perform(action, options); }
-      finally { this.performTiming = null; timing.performExitMs = this.clockMs(); }
-      // Settle is bounded by what is left of the lease (REA 웹8 c).
-      const requested = Number.isFinite(options.settleMs) ? options.settleMs : 250;
-      const remaining = options.guard && Number.isSafeInteger(lease?.deadlineMs)
-        ? lease.deadlineMs - this.nowMs() - SETTLE_RESPONSE_MARGIN_MS : Infinity;
-      const settleMs = Math.max(0, Math.min(requested, remaining));
-      await new Promise((resolve) => this.contentWindow.setTimeout(resolve, settleMs));
-      const after = this.snapshot(options.snapshot || {});
-      timing.performCallsAfter = this.actorPerformCalls;
-      return {
-        ok: true,
-        action,
-        result,
-        before,
-        after,
-        observation: this.diff(before, after),
-        ...(options.guard ? { timing: this.timingRecord(timing) } : {}),
-      };
+      const navigation = guarded ? this.watchNavigation() : null;
+      try {
+        // Failed perform calls also count. An unchanged count proves this actor
+        // never entered perform; it does not count physical events or successes.
+        this.actorPerformCalls++;
+        entered = true;
+        timing.performEnterMs = this.clockMs();
+        const performStartedMono = this.monoNow();
+        const record = guarded ? this.recordPerformEntry(keys, timing.performEnterMs) : null;
+        let result;
+        this.performTiming = guarded ? timing : null;
+        try { result = this.perform(action, options); }
+        finally {
+          this.performTiming = null;
+          timing.performExitMs = this.clockMs();
+          if (record) record.exitMs = timing.performExitMs;
+        }
+        const settle = guarded
+          ? await this.settleAfterPerform({ action, lease, budgetDeadline, navigation, since: performStartedMono,
+            limits: options.settle })
+          : await this.sleep(Number.isFinite(options.settleMs) ? options.settleMs : 250).then(() => null);
+        const after = this.snapshot(options.snapshot || {});
+        timing.performCallsAfter = this.actorPerformCalls;
+        const observation = this.diff(before, after);
+        if (settle) observation.settle = settle;
+        return {
+          ok: true,
+          action,
+          result,
+          before,
+          after,
+          observation,
+          ...(guarded ? { timing: this.timingRecord(timing) } : {}),
+        };
+      } finally { navigation?.stop(); }
     } catch (error) {
-      if (options.guard && error && typeof error === "object") {
+      if (guarded && error && typeof error === "object") {
         timing.performCallsAfter = this.actorPerformCalls;
         // "not-dispatched" only when this call never entered perform and the
         // perform-entry count did not move meanwhile.
@@ -1338,10 +1712,145 @@ export class EGDeskBrowserAgentRuntimeChild extends JSWindowActorChild {
     }
   }
 
+  // Settle after a guarded action: watch every pollMs until neither the DOM
+  // nor the page's fetch/XHR list changed for quietMs, a navigation starts,
+  // or the cap. The cap never spends the reply budget (REA 웹8 c): it is
+  // min(1500 ms, what the lease or relative budget leaves - 500 ms). The
+  // receipt keeps request paths only; a query shows as "?…".
+  // Pattern: nanobrowser core/interaction/evidence.ts (Apache-2.0),
+  // chrome-devtools-mcp WaitForHelper.ts (Apache-2.0), Playwright
+  // tools/backend/utils.ts waitForCompletion (Apache-2.0).
+  async settleAfterPerform({ action, lease, budgetDeadline, navigation, since, limits }) {
+    const started = this.monoNow();
+    const bounded = (value, fallback, max) => Number.isFinite(value) ? Math.max(0, Math.min(value, max)) : fallback;
+    const requestedCap = bounded(limits?.maxMs, SETTLE_CAP_MS, SETTLE_CAP_MS);
+    const quietMs = bounded(limits?.quietMs, this.settleQuietMs, SETTLE_CAP_MS);
+    const pollMs = Math.max(1, bounded(limits?.pollMs, this.settlePollMs, 250));
+    const cap = Math.max(0, Math.min(requestedCap, this.remainingMs(lease, budgetDeadline) - SETTLE_RESPONSE_MARGIN_MS));
+    const doc = this.document;
+    let revision = this.observationState().revision, requests = this.settleRequests(since), domChanges = 0;
+    let quietSince = started;
+    // A navigate action has nothing to settle in this document.
+    let endedBy = action.type === "navigate" ? "navigation-requested" : null;
+    while (!endedBy) {
+      if (navigation?.started) { endedBy = "navigation-started"; break; }
+      const elapsed = this.monoNow() - started;
+      if (elapsed >= cap) { endedBy = cap < requestedCap ? "deadline" : "cap"; break; }
+      await this.sleep(Math.min(pollMs, cap - elapsed));
+      if (this.document !== doc) { endedBy = "document-changed"; break; }
+      if (navigation?.started) { endedBy = "navigation-started"; break; }
+      const now = this.monoNow();
+      const nextRevision = this.observationState().revision;
+      const nextRequests = this.settleRequests(since);
+      if (nextRevision !== revision || nextRequests.count !== requests.count) {
+        if (nextRevision !== revision) domChanges++;
+        revision = nextRevision;
+        requests = nextRequests;
+        quietSince = now;
+      } else if (now - quietSince >= quietMs) endedBy = "quiet";
+    }
+    return { waitedMs: Math.max(0, Math.round(this.monoNow() - started)), endedBy, domChanges,
+      requests: requests.paths,
+      ...(requests.count > requests.paths.length ? { moreRequests: requests.count - requests.paths.length } : {}) };
+  }
+
+  // fetch/XHR/beacon requests this page finished since the action started
+  // (Resource Timing: an entry appears when its response ends).
+  settleRequests(sinceMono) {
+    let entries = [];
+    try { entries = Array.from(this.contentWindow?.performance?.getEntriesByType?.("resource") || []); } catch {}
+    const base = this.contentWindow?.location?.href;
+    const seen = entries.filter(entry => Number(entry?.startTime) >= sinceMono &&
+      REQUEST_INITIATORS.has(String(entry?.initiatorType)));
+    return { count: seen.length, paths: seen.slice(0, MAX_SETTLE_REQUESTS).map(entry =>
+      ({ path: this.requestPath(entry.name, base), type: String(entry.initiatorType) })) };
+  }
+
+  // A request URL as a receipt prints it: its path, its origin only when that
+  // differs from the page's, never user info, query or fragment ("?…" marks a
+  // query), and only the scheme of a non-http(s) URL. Same rule as nanobrowser
+  // evidence.ts requestUrl (Apache-2.0), written for EG-Desk.
+  requestPath(url, base) {
+    try {
+      const parsed = new URL(String(url));
+      if (!["http:", "https:"].includes(parsed.protocol)) return `${parsed.protocol}…`;
+      let sameOrigin = false;
+      try { sameOrigin = parsed.origin === new URL(base).origin; } catch {}
+      const where = sameOrigin ? "" : `${parsed.protocol}//${parsed.host}`;
+      return `${where}${parsed.pathname}${parsed.search ? "?…" : ""}`.slice(0, 200);
+    } catch { return "(unreadable URL)"; }
+  }
+
+  // Watches for this document starting to unload while a guarded action
+  // settles, so the receipt returns before the actor goes away. Listeners are
+  // capture-only, never cancel anything and are removed when settle ends.
+  watchNavigation() {
+    const state = { started: false, stop() {} };
+    const win = this.contentWindow;
+    if (typeof win?.addEventListener !== "function") return state;
+    const onUnload = () => { state.started = true; };
+    try {
+      win.addEventListener("beforeunload", onUnload, true);
+      win.addEventListener("pagehide", onUnload, true);
+      state.stop = () => {
+        try { win.removeEventListener("beforeunload", onUnload, true); } catch {}
+        try { win.removeEventListener("pagehide", onUnload, true); } catch {}
+      };
+    } catch {}
+    return state;
+  }
+
+  performKeys(options = {}) {
+    const keys = [];
+    const valid = value => typeof value === "string" && value.length > 0 && value.length <= 160;
+    if (valid(options.callId)) keys.push(`call:${options.callId}`);
+    if (valid(options.lease?.requestId)) keys.push(`request:${options.lease.requestId}`);
+    return keys;
+  }
+
+  isFenced(keys) { return keys.some(key => this.fences.has(key)); }
+
+  recordPerformEntry(keys, enterMs) {
+    const record = { enterMs, exitMs: null, documentId: this.documentId };
+    for (const key of keys) {
+      this.performRecords.delete(key);
+      this.performRecords.set(key, record);
+    }
+    while (this.performRecords.size > MAX_PERFORM_RECORDS) {
+      this.performRecords.delete(this.performRecords.keys().next().value);
+      this.performRecordsEvicted = true;
+    }
+    return record;
+  }
+
+  // BRW-12: did an earlier guarded request (by call ID or lease request ID)
+  // enter perform in this document? true when recorded (performing while
+  // perform has not returned, e.g. a page dialog holds it); false only for
+  // this same observed document with no record, and that key is then fenced
+  // so the request can never enter later; otherwise "unknown". Read-only.
+  reconcile(data = {}) {
+    const valid = value => typeof value === "string" && value.length > 0 && value.length <= 160;
+    const keys = [...(valid(data.callId) ? [`call:${data.callId}`] : []),
+      ...(valid(data.requestId) ? [`request:${data.requestId}`] : [])];
+    if (!keys.length) throw new Error("Browser reconcile requires a call or request ID");
+    const answer = { version: 1, ...(valid(data.callId) ? { callId: data.callId } : {}),
+      ...(valid(data.requestId) ? { requestId: data.requestId } : {}), documentId: this.documentId };
+    const record = keys.map(key => this.performRecords.get(key)).find(Boolean);
+    if (record) {
+      return { ...answer, entered: true, performing: record.exitMs == null,
+        timing: this.timingRecord({ performEnterMs: record.enterMs, performExitMs: record.exitMs }) };
+    }
+    if (data.documentId !== this.documentId) return { ...answer, entered: "unknown", reason: "other-document" };
+    if (this.performRecordsEvicted) return { ...answer, entered: "unknown", reason: "record-evicted" };
+    for (const key of keys) this.fences.add(key);
+    while (this.fences.size > MAX_FENCES) this.fences.delete(this.fences.values().next().value);
+    return { ...answer, entered: false, fenced: true };
+  }
+
   // Only finite, non-negative stamps and safe-integer counts leave the actor.
   timingRecord(timing) {
     const record = {};
-    for (const key of ["performEnterMs", "performExitMs", "firstEventAtMs"]) {
+    for (const key of ["actorReceivedAtMs", "performEnterMs", "performExitMs", "firstEventAtMs"]) {
       if (Number.isFinite(timing[key]) && timing[key] >= 0) record[key] = timing[key];
     }
     for (const key of ["performCallsBefore", "performCallsAfter"]) {
@@ -1358,7 +1867,8 @@ export class EGDeskBrowserAgentRuntimeChild extends JSWindowActorChild {
     if (phase === "not-dispatched") {
       for (const key of ["performEnterMs", "performExitMs", "firstEventAtMs"]) delete timing[key];
     }
+    const obscuredBy = typeof error?.obscuredBy === "string" && error.obscuredBy ? { obscuredBy: error.obscuredBy.slice(0, 160) } : {};
     return { ok: false, refused: true, error: String(error?.message || error || "Browser action was refused").slice(0, 500),
-      dispatchPhase: phase, timing };
+      dispatchPhase: phase, timing, ...obscuredBy };
   }
 }

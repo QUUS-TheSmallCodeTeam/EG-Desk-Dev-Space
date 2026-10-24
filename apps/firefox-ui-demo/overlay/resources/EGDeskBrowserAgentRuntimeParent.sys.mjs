@@ -62,7 +62,16 @@ export function browserToolDispatchReceiptFields(actionType, diagnostics) {
       readbackMatches: diagnostics.readbackMatches === true };
   }
   if (actionType === "scroll") {
-    if (diagnostics.inputRoute !== "dom-scroll-api" || !["document", "into-view"].includes(diagnostics.mode)) return {};
+    if (diagnostics.inputRoute !== "dom-scroll-api" || !["document", "into-view", "container"].includes(diagnostics.mode)) return {};
+    if (diagnostics.mode === "container") {
+      // Integer offsets of the observed scroll container, before and after.
+      const position = value => value && typeof value === "object" && !Array.isArray(value) &&
+        ["x", "y", "maxY"].every(key => Number.isSafeInteger(value[key]) && value[key] >= 0)
+        ? { x: value.x, y: value.y, maxY: value.maxY } : null;
+      const before = position(diagnostics.containerBefore), after = position(diagnostics.containerAfter);
+      if (!before || !after) return {};
+      return { inputRoute: "dom-scroll-api", scrollMode: "container", containerScroll: { before, after } };
+    }
     return { inputRoute: "dom-scroll-api", scrollMode: diagnostics.mode,
       ...(diagnostics.mode === "into-view" ? { targetInView: diagnostics.targetInView === true } : {}) };
   }

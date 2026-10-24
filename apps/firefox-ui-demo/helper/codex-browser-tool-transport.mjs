@@ -6,6 +6,12 @@ const short = (value, max = 160) => typeof value === 'string' && value.length > 
 // integer) and sentAtMs (performance.timeOrigin + performance.now()).
 const badSeq = request => Object.hasOwn(request, 'seq') && !(Number.isSafeInteger(request.seq) && request.seq > 0)
 const badSentAt = request => Object.hasOwn(request, 'sentAtMs') && !(Number.isFinite(request.sentAtMs) && request.sentAtMs > 0)
+// Optional relative budget (ms) for the same deadline, spent by Firefox on its
+// own monotonic clock; never longer than the transport's 60 s bound.
+const badBudget = request => Object.hasOwn(request, 'budgetMs') &&
+  !(Number.isSafeInteger(request.budgetMs) && request.budgetMs > 0 && request.budgetMs <= 60000)
+// Optional native call ID an act or reconcile request names (BRW-12).
+const badCallId = request => Object.hasOwn(request, 'callId') && !short(request.callId)
 
 // One SSE client, one run and one native Browser request are bound together.
 // A response from another window or a stale stream cannot satisfy the call.
@@ -62,7 +68,8 @@ export class BrowserToolTransport {
     if (!request || typeof request !== 'object' || !short(request.requestId) || !short(request.runId, 300) ||
         !short(request.clientThreadId) ||
         !short(request.cardId) || !short(request.targetCardEpoch) || !Number.isSafeInteger(request.deadlineMs) ||
-        request.deadlineMs <= this.now() || request.deadlineMs > this.now() + 60000 || badSeq(request) || badSentAt(request)) {
+        request.deadlineMs <= this.now() || request.deadlineMs > this.now() + 60000 || badSeq(request) || badSentAt(request) ||
+        badBudget(request) || badCallId(request)) {
       throw fail('BROWSER_UI_PROTOCOL', 'Browser UI request has invalid correlation, target or deadline', 400)
     }
     const bound = this.runs.get(request.runId)
@@ -80,7 +87,7 @@ export class BrowserToolTransport {
     if (data.length > 48000) throw fail('BROWSER_UI_PROTOCOL', 'Browser UI request exceeds the bounded transport size', 413)
     return new Promise((resolve, reject) => {
       // Capture the binding generation, not just a reusable run ID.
-      const entry = { requestId: request.requestId, runId: request.runId, runBinding: bound, transportId: bound.transportId,
+      const entry = { requestId: request.requestId, wireRequestId, runId: request.runId, runBinding: bound, transportId: bound.transportId,
         ownerKey: bound.ownerKey, deadlineMs: request.deadlineMs, resolve, reject, timer: null,
         sent: { ...(Object.hasOwn(request, 'seq') ? { seq: request.seq } : {}),
           ...(Object.hasOwn(request, 'sentAtMs') ? { sentAtMs: request.sentAtMs } : {}) } }
@@ -125,9 +132,12 @@ export class BrowserToolTransport {
   }
 
   // A timeout ends the wait, not the input (REA T-03): the record says when it
-  // was sent and when this transport stopped waiting, on the same clock.
+  // was sent and when this transport stopped waiting, on the same clock. The
+  // handoff ID is the lease request ID Firefox gave the actor, so a later
+  // reconcile question can name it (BRW-12).
   timedOut(entry, message) {
-    return Object.assign(fail('BROWSER_UI_TIMEOUT', message), { ...entry.sent, timedOutAtMs: this.clock() })
+    return Object.assign(fail('BROWSER_UI_TIMEOUT', message), { ...entry.sent, timedOutAtMs: this.clock(),
+      wireRequestId: entry.wireRequestId })
   }
 
   reset({ dropClients = false } = {}) {

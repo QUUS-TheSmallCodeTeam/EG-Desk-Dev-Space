@@ -1,4 +1,4 @@
-import { BROWSER_TOOL_SPECS, createBrowserToolService } from './egdesk-browser-tool-runtime.mjs'
+import { BROWSER_INTERACTION_TOOL_NAMES, BROWSER_READ_TOOL_NAMES, BROWSER_TOOL_SPECS, createBrowserToolService } from './egdesk-browser-tool-runtime.mjs'
 import { chatError } from './codex-chat-values.mjs'
 import { classifyPublicToolError } from './codex-tool-errors.mjs'
 import { fixtureSnapshotMatches } from './codex-browser-fixture-qa.mjs'
@@ -8,8 +8,31 @@ const READ_ONLY_QA = 'readOnlyQa'
 const FIXTURE_BROWSER_QA = 'fixtureBrowserQa'
 // Guarded tools an explicit interaction selection may use. Navigation scope,
 // focus and wait budgets are enforced again by the B service and the actor.
-const BOUNDED_INTERACTION_TOOLS = new Set(['egdesk_browser_click', 'egdesk_browser_fill',
-  'egdesk_browser_navigate', 'egdesk_browser_scroll', 'egdesk_browser_press', 'egdesk_browser_wait'])
+// The lists live in the runtime so the chat runtime shares one copy.
+const BOUNDED_INTERACTION_TOOLS = new Set(BROWSER_INTERACTION_TOOL_NAMES)
+// Read tools any granted Card may use (no action lease, never acts).
+const BOUNDED_READ_TOOLS = new Set(BROWSER_READ_TOOL_NAMES)
+const DISPATCH_PHASES = new Set(['not-dispatched', 'dispatched', 'unknown'])
+const DIALOG_TYPES = new Set(['alert', 'confirm', 'prompt', 'beforeunload'])
+// Fixed, content-free facts the model may see beside a public error code:
+// whether the action was sent, what structurally covered a refused click,
+// and the type of a page dialog. Raw diagnostics stay withheld.
+function publicBrowserErrorDetail(error) {
+  if (!error || typeof error !== 'object') return {}
+  const detail = {}
+  if (DISPATCH_PHASES.has(error.dispatchPhase)) detail.dispatchPhase = error.dispatchPhase
+  if ([true, false, 'unknown'].includes(error.dispatched)) detail.dispatched = error.dispatched
+  if (typeof error.obscuredBy === 'string' && /^[A-Za-z0-9 #._=:/-]{1,160}$/.test(error.obscuredBy)) detail.obscuredBy = error.obscuredBy
+  if (DIALOG_TYPES.has(error.dialog?.type)) detail.dialog = { type: error.dialog.type }
+  if (error.reconcile && typeof error.reconcile === 'object') {
+    const { answered, entered, performing, fenced, reason } = error.reconcile
+    detail.reconcile = { answered: answered === true,
+      ...([true, false].includes(entered) ? { entered } : {}),
+      ...(performing === true ? { performing: true } : {}), ...(fenced === true ? { fenced: true } : {}),
+      ...(['run-ended', 'no-answer', 'unrecognized-answer', 'other-document', 'record-evicted', 'unproven'].includes(reason) ? { reason } : {}) }
+  }
+  return detail
+}
 const SUCCESS_STATUSES = new Set(['observed', 'postcondition-observed', 'wait-condition-met'])
 const PUBLIC_INPUT_ROUTES = new Set(['dom-click-no-pointerdown', 'dom-scroll-api', 'dom-keyboard-event',
   'dom-value-setter', 'dom-editor-replace'])
@@ -100,7 +123,7 @@ export function createCodexBrowserToolProvider({ transport, getOwnerKey, schemaR
         if (run.executionPolicy?.mode === BROWSER_BOUNDED) {
           const card = run.browserBinding?.cards?.find(item => item.cardId === event.arguments?.cardId)
           if (!card) throw chatError('BROWSER_CARD_NOT_SELECTED', 'This run has no grant for that Browser Card', 403)
-          if (event.tool !== 'egdesk_browser_observe'
+          if (!BOUNDED_READ_TOOLS.has(event.tool)
             && !(BOUNDED_INTERACTION_TOOLS.has(event.tool) && card.permission === 'interact')) {
             throw chatError('BROWSER_INTERACTION_NOT_GRANTED', 'This run permits only its selected Browser observation or granted guarded interaction', 403)
           }
@@ -166,7 +189,7 @@ export function createCodexBrowserToolProvider({ transport, getOwnerKey, schemaR
           bridgeEpoch: this.runtime.currentEpoch?.() ?? null,
           ...(selected?.sourceId ? { sourceId: selected.sourceId } : {}),
           ...(selected?.cardEpoch ? { targetCardEpoch: selected.cardEpoch } : {}) }, event.callId)
-        return { success: false, contentItems: [{ type: 'inputText', text: JSON.stringify({ error: failure }) }] }
+        return { success: false, contentItems: [{ type: 'inputText', text: JSON.stringify({ error: { ...failure, ...publicBrowserErrorDetail(error) } }) }] }
       }
     },
     async cancelRun(run) {

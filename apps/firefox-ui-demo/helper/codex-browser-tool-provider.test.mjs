@@ -43,7 +43,7 @@ test('QA Browser preparation requires an original observe selection and a live U
   assert.equal(prepared.selection.selectedSources[0].browserToolPermission, 'observe')
   assert.equal(prepared.selection.selectedSources[0].id, 'source-1')
   assert.equal(prepared.selection.selectedSources[0].browserToolSelection.token, 'one-time-token')
-  assert.equal(f.provider.specs().length, 7)
+  assert.equal(f.provider.specs().length, 8)
   assert.throws(() => f.provider.requireThread('old-native', prepared), error => error.code === 'BROWSER_TOOLS_UNAVAILABLE')
   f.provider.registerThread('new-native')
   f.provider.requireThread('new-native', prepared)
@@ -413,4 +413,52 @@ test('BrowserBounded fill reaches a same-origin frame editor and reports only it
   assert.equal(events.filter(event => event.event === 'browser.tool.completed').at(-1).detail.inputRoute, undefined)
   assert.deepEqual(sent.filter(request => request.kind === 'act').map(request => request.action.ref), ['f1/el_4', 'f1/el_4'])
   await provider.cancelRun(run)
+})
+
+test('wait_text is a read tool: an observe grant reaches the B service with it, fixture QA does not', async () => {
+  const f = fixture()
+  const prepared = f.provider.prepare({ selectedSources: selected('observe'), clientThreadId: 'ui-thread-1', effectiveExecutionPolicy: 'browserBounded', browserTransportId: 'ui-stream-1' })
+  const run = { answerId: 'native/turn-wt', runId: 'turn-wt', clientThreadId: 'ui-thread-1', status: 'inProgress', executionPolicy: { mode: 'browserBounded' } }
+  await f.provider.bindRun(run, prepared)
+  const waited = await f.provider.dispatch(run, { tool: 'egdesk_browser_wait_text', callId: 'wt-1',
+    arguments: { cardId: 'card-1', text: 'Order confirmed', timeoutMs: 2000 } })
+  assert.equal(waited.success, true)
+  assert.deepEqual(f.calls.filter(call => call[0] === 'dispatch').map(call => call[2]), ['egdesk_browser_wait_text'])
+  const fixtureRun = { ...run, answerId: 'native/turn-wt-fx', runId: 'turn-wt-fx', executionPolicy: { mode: 'fixtureBrowserQa' } }
+  const refused = await f.provider.dispatch(fixtureRun, { tool: 'egdesk_browser_wait_text', callId: 'wt-fx',
+    arguments: { cardId: 'card-1', text: 'Order confirmed', timeoutMs: 2000 } })
+  assert.equal(refused.success, false)
+  assert.equal(f.calls.filter(call => call[0] === 'dispatch').length, 1)
+})
+
+test('a failed Browser call shows only fixed facts beside the public code: sent or not, what covered it, dialog type', async () => {
+  const f = fixture()
+  const run = { answerId: 'native/turn-err', runId: 'turn-err', clientThreadId: 'ui-thread-1', status: 'inProgress',
+    browserBinding: { cards: [{ cardId: 'card-1', permission: 'interact' }] } }
+  const parse = response => JSON.parse(response.contentItems[0].text).error
+  for (const [thrown, expected] of [
+    [Object.assign(new Error('Browser target is obscured by div#cookie-consent role=dialog ref=el_7; observe again We use cookies'),
+      { code: 'BROWSER_OBSERVATION_STALE', dispatchPhase: 'not-dispatched', dispatched: false, obscuredBy: 'div#cookie-consent role=dialog ref=el_7' }),
+    { code: 'BROWSER_OBSERVATION_STALE', dispatchPhase: 'not-dispatched', dispatched: false, obscuredBy: 'div#cookie-consent role=dialog ref=el_7' }],
+    [Object.assign(new Error('raw'), { code: 'BROWSER_UI_TIMEOUT', dispatchPhase: 'dispatched', dispatched: true,
+      dialog: { type: 'confirm', message: 'Delete everything?' },
+      reconcile: { answered: true, entered: true, performing: true, raw: 'x' } }),
+    { code: 'BROWSER_UI_TIMEOUT', dispatchPhase: 'dispatched', dispatched: true, dialog: { type: 'confirm' },
+      reconcile: { answered: true, entered: true, performing: true } }],
+    [Object.assign(new Error('raw'), { code: 'BROWSER_ACTION_UNVERIFIED', dispatchPhase: 'sent?', dispatched: 'maybe',
+      obscuredBy: '<img src=x onerror=alert(1)>', dialog: { type: 'custom' } }),
+    { code: 'BROWSER_ACTION_UNVERIFIED' }],
+  ]) {
+    const service = { dispatch: async () => { throw thrown }, cancelRun: async () => [], reset: async () => [] }
+    const provider = createCodexBrowserToolProvider({ transport: f.transport, getOwnerKey: () => 'codex:account-1', service })
+    provider.runtime = f.provider.runtime
+    const response = await provider.dispatch(run, { tool: 'egdesk_browser_click', callId: `err-${expected.code}`, arguments: { cardId: 'card-1' } })
+    assert.equal(response.success, false)
+    const error = parse(response)
+    const { message, ...rest } = error
+    assert.equal(message, classifyPublicToolError(thrown, { browser: true }).message, 'the raw message stays withheld')
+    assert.deepEqual(rest, expected)
+    assert.equal(JSON.stringify(error).includes('cookies'), false)
+    assert.equal(JSON.stringify(error).includes('Delete everything'), false)
+  }
 })

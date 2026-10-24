@@ -1,6 +1,7 @@
 import assert from 'node:assert/strict'
 import { test } from 'node:test'
-import { BROWSER_TOOL_SPECS, boundedFieldValue, createBrowserToolService } from './egdesk-browser-tool-runtime.mjs'
+import { BROWSER_INTERACTION_TOOL_NAMES, BROWSER_READ_TOOL_NAMES, BROWSER_TOOL_SPECS, boundedFieldValue,
+  createBrowserToolService } from './egdesk-browser-tool-runtime.mjs'
 import { classifyPublicToolError } from './codex-tool-errors.mjs'
 
 test('click tool advertises the focus-safe DOM route and still requires a postcondition', () => {
@@ -89,7 +90,8 @@ test('only explicitly selected Browser sources expose tools; read-only never gra
   assert.throws(() => f.service.prepare({ selectedSources: [{ ...source('observe'), browserToolSelection: null }] }),
     { code: 'INVALID_BROWSER_SELECTION' })
   const prepared = f.service.prepare({ selectedSources: [source('observe')] })
-  assert.deepEqual(f.service.specs(prepared).map(item => item.name), ['egdesk_browser_observe'])
+  assert.deepEqual(f.service.specs(prepared).map(item => item.name), ['egdesk_browser_observe', 'egdesk_browser_wait_text'],
+    'an observe grant offers only the read tools')
   await f.service.bind(run, prepared)
   const observed = await f.service.dispatch(run, { tool: 'egdesk_browser_observe', arguments: { cardId: 'browser-1' } })
   assert.equal(observed.snapshot.coordinateSpace, 'browser-viewport-local')
@@ -99,13 +101,13 @@ test('only explicitly selected Browser sources expose tools; read-only never gra
     postcondition: { kind: 'visible-text', value: 'Count: 1' },
   } }), { code: 'BROWSER_INTERACTION_NOT_GRANTED' })
   assert.equal(f.actionCalls, 0)
-  assert.equal(BROWSER_TOOL_SPECS.length, 7)
+  assert.equal(BROWSER_TOOL_SPECS.length, 8)
 })
 
 test('fresh observed target dispatches once and returns DOM post-observation, never external success', async () => {
   const f = fixture()
   const prepared = f.service.prepare({ selectedSources: [source()] })
-  assert.equal(f.service.specs(prepared).length, 7)
+  assert.equal(f.service.specs(prepared).length, 8)
   await f.service.bind(run, prepared)
   const observed = await f.service.dispatch(run, { tool: 'egdesk_browser_observe', arguments: { cardId: 'browser-1' } })
   const args = { cardId: 'browser-1', observationId: observed.observationId, expectedRevision: 3,
@@ -595,6 +597,7 @@ function guardedFixture({ timeoutMs, clock } = {}) {
   let current = guardedSnapshot()
   let onAct = () => { throw new Error('unexpected act') }
   let onWait = null
+  let onReconcile = null
   const requests = []
   const sendToUi = async request => {
     requests.push(request)
@@ -608,6 +611,7 @@ function guardedFixture({ timeoutMs, clock } = {}) {
     }
     if (request.kind === 'observe') return { requestId: request.requestId, status: 'observed', snapshot: current }
     if (request.kind === 'act') return onAct(request)
+    if (request.kind === 'reconcile' && onReconcile) return onReconcile(request)
     throw new Error('unexpected UI request')
   }
   const service = createBrowserToolService({ sendToUi, getOwnerKey: () => 'engine-account-1',
@@ -621,7 +625,8 @@ function guardedFixture({ timeoutMs, clock } = {}) {
     acts: () => requests.filter(request => request.kind === 'act'),
     waits: () => requests.filter(request => request.kind === 'observe' && request.options?.wait),
     get current() { return current }, set current(value) { current = value },
-    setAct(fn) { onAct = fn }, setWait(fn) { onWait = fn },
+    setAct(fn) { onAct = fn }, setWait(fn) { onWait = fn }, setReconcile(fn) { onReconcile = fn },
+    reconciles: () => requests.filter(request => request.kind === 'reconcile'),
     bind: () => service.bind(run, service.prepare({ selectedSources: [source()] })) }
 }
 const targetOf = (seen, ref) => seen.snapshot.interactiveElements.find(item => item.ref === ref)
@@ -686,7 +691,9 @@ test('scroll into view requires the exact observed element and rejects malformed
   const seen = await f.observe()
   const base = { cardId: 'browser-1', observationId: seen.observationId, expectedRevision: 3 }
   for (const [args, code] of [
-    [{ ...base, ref: 'el_3', expectedTarget: targetOf(seen, 'el_3'), direction: 'down' }, 'INVALID_BROWSER_TOOL'],
+    // ref + direction means "scroll inside this container": a link is not one.
+    [{ ...base, ref: 'el_3', expectedTarget: targetOf(seen, 'el_3'), direction: 'down' }, 'BROWSER_TARGET_STALE'],
+    [{ ...base, ref: 'el_3', expectedTarget: targetOf(seen, 'el_3'), direction: 'sideways' }, 'INVALID_BROWSER_TOOL'],
     [{ ...base, direction: 'sideways' }, 'INVALID_BROWSER_TOOL'],
     [{ ...base, ref: 'el_3', expectedTarget: targetOf(seen, 'el_3'), amount: 'page' }, 'INVALID_BROWSER_TOOL'],
     [{ ...base, ref: 'el_3', expectedTarget: { ...targetOf(seen, 'el_3'), label: 'Changed' } }, 'BROWSER_TARGET_STALE'],
@@ -1208,7 +1215,11 @@ test('a timed-out action records sentAtMs and timedOutAtMs, stays unknown, and t
   assert.equal(f.acts()[0].sentAtMs, 5000.25)
   assert.equal(await f.dispatch('egdesk_browser_click', clickArgs(seen), 'timed-out-timing').catch(error => error), timedOut)
   const again = await f.observe()
-  assert.deepEqual(again.uncertainAction, { action: 'click', timing: { seq: 3, sentAtMs: 5000.25, timedOutAtMs: 20000.75 } })
+  assert.deepEqual(again.uncertainAction, { action: 'click', dispatched: 'unknown',
+    timing: { seq: 3, sentAtMs: 5000.25, timedOutAtMs: 20000.75 } },
+  'the reconcile question was not answered (this UI has no reconcile), so it stays unknown')
+  assert.equal(timedOut.dispatched, 'unknown')
+  assert.deepEqual(timedOut.reconcile, { answered: false, reason: 'no-answer' })
   await assert.rejects(f.dispatch('egdesk_browser_click', clickArgs(again)), { code: 'BROWSER_OUTCOME_UNKNOWN' })
   assert.equal(f.acts().length, 1, 'no automatic retry after a timeout')
 })
@@ -1236,4 +1247,269 @@ test('Gecko innerWindowId and browsingContextId pass from the observation into t
   await f.dispatch('egdesk_browser_click', clickArgs(legacy))
   assert.equal(Object.hasOwn(f.acts()[2].guard, 'innerWindowId'), false, 'an observation without the field adds nothing')
   assert.equal(Object.hasOwn(f.acts()[2].guard, 'browsingContextId'), false)
+})
+
+// ---- 1-A: tool classes, wait_text, container scroll, reconcile, obscuredBy, dialogs ----
+import { createHash } from 'node:crypto'
+
+test('tool classes are exported for the chat runtime; wait_text is appended and existing schemas are untouched', () => {
+  assert.deepEqual(BROWSER_READ_TOOL_NAMES, ['egdesk_browser_observe', 'egdesk_browser_wait_text'])
+  assert.deepEqual(BROWSER_INTERACTION_TOOL_NAMES, ['egdesk_browser_navigate', 'egdesk_browser_click', 'egdesk_browser_fill',
+    'egdesk_browser_scroll', 'egdesk_browser_press', 'egdesk_browser_wait'])
+  assert.throws(() => BROWSER_READ_TOOL_NAMES.push('x'), TypeError, 'frozen for importers')
+  const names = BROWSER_TOOL_SPECS.map(item => item.name)
+  assert.deepEqual(names, ['egdesk_browser_observe', 'egdesk_browser_navigate', 'egdesk_browser_click', 'egdesk_browser_fill',
+    'egdesk_browser_scroll', 'egdesk_browser_press', 'egdesk_browser_wait', 'egdesk_browser_wait_text'])
+  assert.deepEqual([...BROWSER_READ_TOOL_NAMES, ...BROWSER_INTERACTION_TOOL_NAMES].sort(), [...names].sort(),
+    'every Browser tool is in exactly one class')
+  // sha256 of [name, inputSchema] for the seven tools at d7aac51: native
+  // thread manifests hash these schemas, so they must not move.
+  const digest = createHash('sha256').update(JSON.stringify(BROWSER_TOOL_SPECS.slice(0, 7)
+    .map(item => [item.name, item.inputSchema]))).digest('hex')
+  assert.equal(digest, '9f92c38ddae6e6c19126d09675001535e8bfb2e1cb7abdeefc7e5165a9c1b684')
+  const waitText = BROWSER_TOOL_SPECS.at(-1)
+  assert.deepEqual(waitText.inputSchema, { type: 'object', additionalProperties: false,
+    properties: { cardId: { type: 'string' }, text: { type: 'string' }, textGone: { type: 'string' }, timeoutMs: { type: 'integer' } },
+    required: ['cardId', 'timeoutMs'] })
+  assert.match(waitText.description, /field values, editors, sensitive fields and hidden text are never read/)
+  assert.match(BROWSER_TOOL_SPECS.find(item => item.name === 'egdesk_browser_scroll').description, /scrollContainers/)
+})
+
+function waitTextReply(request, { outcome = 'met', matchCount = 1, text = ['Order confirmed'], ...extra } = {}) {
+  return { requestId: request.requestId, status: 'observed', snapshot: { ...guardedSnapshot({ text }),
+    wait: { for: request.options.wait.for, outcome, elapsedMs: 40, matchCount, ...extra } } }
+}
+
+test('wait_text sends one read-only wait, never echoes the text, and states met, not met in time or unverified', async () => {
+  const f = guardedFixture()
+  await f.bind()
+  for (const args of [
+    { cardId: 'browser-1', timeoutMs: 1000 },
+    { cardId: 'browser-1', text: 'a', textGone: 'b', timeoutMs: 1000 },
+    { cardId: 'browser-1', text: '   ', timeoutMs: 1000 },
+    { cardId: 'browser-1', text: 'x'.repeat(201), timeoutMs: 1000 },
+    { cardId: 'browser-1', text: 'ok', timeoutMs: 99 },
+    { cardId: 'browser-1', text: 'ok', timeoutMs: 10001 },
+    { cardId: 'browser-1', text: 'ok', timeoutMs: 1000, ref: 'el_1' },
+  ]) await assert.rejects(f.dispatch('egdesk_browser_wait_text', args), { code: 'INVALID_BROWSER_TOOL' }, JSON.stringify(args))
+  assert.equal(f.waits().length, 0)
+  f.setWait(request => waitTextReply(request))
+  const met = await f.dispatch('egdesk_browser_wait_text', { cardId: 'browser-1', text: '  Order\n confirmed ', timeoutMs: 2000 })
+  assert.deepEqual(f.waits()[0].options.wait, { for: 'text', text: 'Order confirmed', timeoutMs: 2000 },
+    'whitespace collapses like the actor collapses page text')
+  assert.equal(met.status, 'wait-condition-met')
+  assert.equal(met.action, 'wait_text')
+  assert.deepEqual(met.wait, { for: 'text', timeoutMs: 2000, elapsedMs: 40, outcome: 'met', documentReplaced: false })
+  assert.equal(JSON.stringify(met.wait).includes('Order'), false, 'the wait record never echoes the text')
+  assert.equal(typeof met.observationId, 'string', 'it leaves a fresh observation')
+  f.setWait(request => waitTextReply(request, { outcome: 'timeout', matchCount: 0, text: ['Pending'] }))
+  assert.equal((await f.dispatch('egdesk_browser_wait_text', { cardId: 'browser-1', text: 'Order confirmed', timeoutMs: 1000 })).status, 'wait-timeout')
+  f.setWait(request => waitTextReply(request, { matchCount: 1, text: ['Something else'] }))
+  assert.equal((await f.dispatch('egdesk_browser_wait_text', { cardId: 'browser-1', text: 'Order confirmed', timeoutMs: 1000 })).status,
+    'wait-condition-unverified', 'a claimed match the returned text cannot show stays unverified')
+  f.setWait(request => waitTextReply(request, { matchCount: 1, text: Array.from({ length: 60 }, (_, i) => `Line ${i}`) }))
+  assert.equal((await f.dispatch('egdesk_browser_wait_text', { cardId: 'browser-1', text: 'Order confirmed', timeoutMs: 1000 })).status,
+    'wait-condition-met', 'a text list cut at its limit cannot disprove the actor count')
+  f.setWait(request => waitTextReply(request, { matchCount: 0, text: ['Done'] }))
+  const gone = await f.dispatch('egdesk_browser_wait_text', { cardId: 'browser-1', textGone: 'Loading…', timeoutMs: 1000 })
+  assert.equal(gone.status, 'wait-condition-met')
+  assert.equal(f.waits().at(-1).options.wait.for, 'text-gone')
+  f.setWait(request => waitTextReply(request, { matchCount: 0, text: ['Loading… still'] }))
+  assert.equal((await f.dispatch('egdesk_browser_wait_text', { cardId: 'browser-1', textGone: 'Loading…', timeoutMs: 1000 })).status,
+    'wait-condition-unverified')
+  f.setWait(request => waitTextReply(request, { matchCount: 'many' }))
+  await assert.rejects(f.dispatch('egdesk_browser_wait_text', { cardId: 'browser-1', text: 'Order confirmed', timeoutMs: 1000 }),
+    { code: 'BROWSER_WAIT_OUTCOME_UNKNOWN' })
+  assert.equal(f.acts().length, 0, 'never an action')
+  const tight = guardedFixture({ timeoutMs: 5000 })
+  await tight.bind()
+  await assert.rejects(tight.dispatch('egdesk_browser_wait_text', { cardId: 'browser-1', text: 'ok', timeoutMs: 3500 }),
+    { code: 'INVALID_BROWSER_TOOL' }, 'the wait leaves room for the reply inside the request budget')
+})
+
+test('wait_text works with an observe grant, where every interaction tool is refused', async () => {
+  const requests = []
+  const service = createBrowserToolService({ getOwnerKey: () => 'engine-account-1', sendToUi: async request => {
+    requests.push(request)
+    if (request.kind === 'bind') return { requestId: request.requestId, status: 'bound', binding: {
+      cardId: 'browser-1', cardEpoch: 'card-epoch-1', profileId: 'firefox-default', accountId: 'fixture-account',
+      userContextId: 0, url: 'https://example.test/local', engineAccountKey: 'codex:chatgpt:fixture@example.test', authorityEpoch: 0 } }
+    if (request.kind === 'observe') return waitTextReply(request)
+    throw new Error('unexpected UI request')
+  } })
+  await service.bind(run, service.prepare({ selectedSources: [source('observe')] }))
+  const met = await service.dispatch(run, { tool: 'egdesk_browser_wait_text', callId: 'ro-wait-text',
+    arguments: { cardId: 'browser-1', text: 'Order confirmed', timeoutMs: 1000 } })
+  assert.equal(met.status, 'wait-condition-met')
+  await assert.rejects(service.dispatch(run, { tool: 'egdesk_browser_wait', callId: 'ro-wait',
+    arguments: { cardId: 'browser-1', for: 'load', timeoutMs: 1000 } }), { code: 'BROWSER_INTERACTION_NOT_GRANTED' })
+  assert.deepEqual(requests.map(request => request.kind), ['bind', 'observe'])
+})
+
+function containerSnapshot(y, overrides = {}) {
+  return guardedSnapshot({ interactiveElements: [...guardedSnapshot().interactiveElements,
+    { ref: 'el_4', role: 'scrollable', label: 'Rows', href: '', value: '', tag: 'div', disabled: false,
+      bounds: { x: 12, y: 200, width: 260, height: 200 } }],
+  scrollContainers: [{ ref: 'el_4', x: 0, y, maxY: 600 }], ...overrides })
+}
+const containerReceipt = (before, after) => scrollReceipt('container', { containerScroll: {
+  before: { x: 0, y: before, maxY: 600 }, after: { x: 0, y: after, maxY: 600 } } })
+
+test('ref with direction scrolls inside one observed scroll container, guarded by its own offset', async () => {
+  const f = guardedFixture()
+  f.current = containerSnapshot(0)
+  await f.bind()
+  const seen = await f.observe()
+  f.setAct(request => {
+    f.current = containerSnapshot(180)
+    return f.acted(request, f.current, containerReceipt(0, 180))
+  })
+  const args = { cardId: 'browser-1', observationId: seen.observationId, expectedRevision: 3, ref: 'el_4',
+    expectedTarget: targetOf(seen, 'el_4'), direction: 'down' }
+  const result = await f.dispatch('egdesk_browser_scroll', args)
+  assert.equal(result.status, 'postcondition-observed')
+  assert.deepEqual(result.postcondition, { kind: 'container-scroll-position', ref: 'el_4', direction: 'down', amount: 'page', matched: true })
+  assert.deepEqual(result.scroll, { container: { ref: 'el_4', before: { x: 0, y: 0, maxY: 600 }, after: { x: 0, y: 180, maxY: 600 } } })
+  const [request] = f.acts()
+  assert.deepEqual(request.action, { type: 'scroll', ref: 'el_4', direction: 'down', amount: 'page' })
+  assert.deepEqual(request.guard.containerScroll, { x: 0, y: 0 })
+  assert.deepEqual(request.guard.scroll, { x: 0, y: 0, maxY: 2000 }, 'the document offset is guarded as well')
+  assert.equal(request.guard.target.ref, 'el_4')
+  // At the bottom already: scroll-at-limit, never a lock.
+  f.current = containerSnapshot(600)
+  const bottom = await f.observe()
+  f.setAct(request => f.acted(request, f.current, containerReceipt(600, 600)))
+  assert.equal((await f.dispatch('egdesk_browser_scroll', { ...args, observationId: bottom.observationId,
+    expectedTarget: targetOf(bottom, 'el_4') })).status, 'scroll-at-limit')
+  // A document-mode receipt for a container request is not proof.
+  const again = await f.observe()
+  f.setAct(request => f.acted(request, containerSnapshot(600), scrollReceipt('document')))
+  const odd = await f.dispatch('egdesk_browser_scroll', { ...args, observationId: again.observationId,
+    expectedTarget: targetOf(again, 'el_4'), direction: 'up', amount: 'half' })
+  assert.equal(odd.status, 'postcondition-unverified')
+  assert.deepEqual(f.acts().at(-1).action, { type: 'scroll', ref: 'el_4', direction: 'up', amount: 'half' })
+  const next = await f.observe()
+  assert.equal(next.uncertainAction, undefined, 'a scroll never locks the Card')
+  // An element missing from scrollContainers cannot take a direction.
+  await assert.rejects(f.dispatch('egdesk_browser_scroll', { ...args, observationId: next.observationId, ref: 'el_1',
+    expectedTarget: targetOf(next, 'el_1') }), { code: 'BROWSER_TARGET_STALE' })
+  assert.equal(f.acts().length, 3)
+})
+
+test('act requests name their call ID and relative budget; a lost response is reconciled once and never resent', async t => {
+  t.mock.timers.enable({ apis: ['setTimeout'] })
+  const lose = async (answer, { dialog } = {}) => {
+    const f = guardedFixture()
+    await f.bind()
+    const seen = await f.observe()
+    f.setAct(() => new Promise(() => {}))
+    f.setReconcile(request => ({ requestId: request.requestId, status: 'reconciled',
+      ...(dialog ? { dialog } : {}), reconcile: typeof answer === 'function' ? answer(request) : answer }))
+    const pending = f.dispatch('egdesk_browser_click', clickArgs(seen), 'lost-click')
+    await flushHandoff()
+    t.mock.timers.tick(15000)
+    const error = await pending.catch(caught => caught)
+    return { f, error, seen }
+  }
+  // Proven never entered, and fenced: the Card is free and nothing was resent.
+  const fenced = await lose(request => ({ version: 1, callId: request.callId, entered: false, fenced: true,
+    documentId: request.guard.documentId }))
+  assert.equal(fenced.error.code, 'BROWSER_OBSERVATION_STALE')
+  assert.equal(fenced.error.dispatchPhase, 'not-dispatched')
+  assert.equal(fenced.error.dispatched, false)
+  const act = fenced.f.acts()[0]
+  assert.equal(act.callId, 'lost-click')
+  assert.equal(act.budgetMs, 15000)
+  const [question] = fenced.f.reconciles()
+  assert.deepEqual(Object.keys(question).filter(key => !['requestId', 'version', 'targetCardEpoch', 'deadlineMs',
+    'budgetMs', 'runId', 'clientThreadId', 'cardId', 'binding', 'seq', 'sentAtMs'].includes(key)).sort(),
+  ['actSeq', 'callId', 'guard', 'kind'])
+  assert.equal(question.kind, 'reconcile')
+  assert.equal(question.callId, 'lost-click')
+  assert.equal(question.actSeq, act.seq)
+  assert.equal(question.budgetMs, 3000, 'the question has its own short budget')
+  assert.deepEqual(question.guard, { documentId: 'document-1' })
+  assert.equal(Object.hasOwn(question, 'action'), false, 'a reconcile carries no action')
+  const free = await fenced.f.observe()
+  assert.equal(free.uncertainAction, undefined)
+  fenced.f.setAct(request => clicked(fenced.f, request))
+  assert.equal((await fenced.f.dispatch('egdesk_browser_click', clickArgs(free))).status, 'postcondition-observed')
+  assert.equal(fenced.f.acts().length, 2, 'only the model\'s own new call acted')
+  // Entered (a page dialog may still hold it): sent, outcome unknown, Card locked.
+  const entered = await lose(request => ({ version: 1, callId: request.callId, entered: true, performing: true,
+    documentId: request.guard.documentId, timing: { performEnterMs: 1 } }), { dialog: { type: 'alert', message: 'Hi' } })
+  assert.equal(entered.error.code, 'BROWSER_UI_TIMEOUT')
+  assert.equal(entered.error.dispatched, true)
+  assert.equal(entered.error.dispatchPhase, 'dispatched')
+  assert.deepEqual(entered.error.reconcile, { answered: true, entered: true, performing: true })
+  assert.deepEqual(entered.error.dialog, { type: 'alert' })
+  const locked = await entered.f.observe()
+  assert.equal(locked.uncertainAction.dispatched, true)
+  await assert.rejects(entered.f.dispatch('egdesk_browser_click', clickArgs(locked)), { code: 'BROWSER_OUTCOME_UNKNOWN' })
+  assert.equal(entered.f.acts().length, 1)
+  // Anything short of a fenced "never entered" for the observed document stays unknown and locked.
+  for (const [label, answer] of [
+    ['not fenced', request => ({ callId: request.callId, entered: false, documentId: request.guard.documentId })],
+    ['other document', request => ({ callId: request.callId, entered: false, fenced: true, documentId: 'document-9' })],
+    ['perform timing', request => ({ callId: request.callId, entered: false, fenced: true, documentId: request.guard.documentId,
+      timing: { performEnterMs: 5 } })],
+    ['another call', () => ({ callId: 'someone-else', entered: false, fenced: true, documentId: 'document-1' })],
+    ['actor unsure', request => ({ callId: request.callId, entered: 'unknown', reason: 'other-document' })],
+  ]) {
+    const lost = await lose(answer)
+    assert.equal(lost.error.code, 'BROWSER_UI_TIMEOUT', label)
+    assert.equal(lost.error.dispatched, 'unknown', label)
+    assert.equal(lost.error.dispatchPhase, 'unknown', label)
+    const again = await lost.f.observe()
+    assert.equal(again.uncertainAction?.action, 'click', label)
+    assert.equal(lost.f.acts().length, 1, label)
+  }
+  const unsure = await lose(request => ({ callId: request.callId, entered: 'unknown', reason: 'other-document' }))
+  assert.deepEqual(unsure.error.reconcile, { answered: false, reason: 'other-document' })
+})
+
+test('a refused click says what covered it; a page dialog with the action keeps the outcome unknown', async () => {
+  const f = guardedFixture()
+  await f.bind()
+  let seen = await f.observe()
+  f.setAct(request => notSent(request, { error: 'Browser target is obscured by div#cookie-consent role=dialog ref=el_7; observe again' }))
+  const covered = await f.dispatch('egdesk_browser_click', clickArgs(seen)).catch(error => error)
+  assert.equal(covered.code, 'BROWSER_OBSERVATION_STALE')
+  assert.equal(covered.obscuredBy, 'div#cookie-consent role=dialog ref=el_7')
+  assert.equal(covered.dispatched, false)
+  seen = await f.observe()
+  f.setAct(request => notSent(request, { error: 'Browser target is obscured; observe again', obscuredBy: 'div.banner inside section#top ref=f2/el_3' }))
+  assert.equal((await f.dispatch('egdesk_browser_click', clickArgs(seen)).catch(error => error)).obscuredBy,
+    'div.banner inside section#top ref=f2/el_3', 'the structured field wins')
+  seen = await f.observe()
+  f.setAct(request => notSent(request, { error: 'Browser target is obscured by <b onclick=x>Buy</b>; observe again' }))
+  assert.equal((await f.dispatch('egdesk_browser_click', clickArgs(seen)).catch(error => error)).obscuredBy, undefined)
+  assert.equal((await f.observe()).uncertainAction, undefined, 'a refused click never locks')
+  // An alert open after the click: dispatched, never "matched".
+  seen = await f.observe()
+  f.setAct(request => ({ ...clicked(f, request), dialog: { type: 'alert', message: 'Saved!' } }))
+  const held = await f.dispatch('egdesk_browser_click', clickArgs(seen))
+  assert.equal(held.status, 'postcondition-unverified')
+  assert.deepEqual(held.dialog, { type: 'alert' })
+  assert.equal(JSON.stringify(held).includes('Saved!'), false)
+  await assert.rejects(f.dispatch('egdesk_browser_click', clickArgs(await f.observe())), { code: 'BROWSER_OUTCOME_UNKNOWN' })
+  // A "not-dispatched" refusal that also reports a dialog is not trusted as not sent.
+  const g = guardedFixture()
+  await g.bind()
+  const looked = await g.observe()
+  g.setAct(request => notSent(request, { dialog: { type: 'confirm' } }))
+  const contradicted = await g.dispatch('egdesk_browser_click', clickArgs(looked)).catch(error => error)
+  assert.equal(contradicted.code, 'BROWSER_ACTION_UNVERIFIED')
+  assert.deepEqual(contradicted.dialog, { type: 'confirm' })
+})
+
+test('the actor receipt stamp joins the same-clock record when the UI forwards it', async () => {
+  let time = 1000
+  const f = guardedFixture({ clock: () => (time += 0.5) })
+  await f.bind()
+  const seen = await f.observe()
+  f.setAct(request => clicked(f, request, { timing: { receivedAtMs: 1002.6, authorizedAtMs: 1002.7, actorReceivedAtMs: 1002.65,
+    performEnterMs: 1002.75, performExitMs: 1002.9, performCallsBefore: 0, performCallsAfter: 1 } }))
+  const click = await f.dispatch('egdesk_browser_click', clickArgs(seen))
+  assert.equal(click.timing.actorReceivedAtMs, 1002.65)
 })

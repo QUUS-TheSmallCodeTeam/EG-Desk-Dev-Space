@@ -378,8 +378,15 @@ function guardFrom(snapshot, target = null) {
     focusedRef: snapshot.focusedElement?.ref || null, target }
 }
 
+// settle.maxMs 0 keeps unit tests fast; the settle loop has its own tests.
 const guarded = guard => ({ guard, lease: { leaseId: 'lease-local', requestId: 'request-local',
-  deadlineMs: Date.now() + 10000 }, settleMs: 0 })
+  deadlineMs: Date.now() + 10000 }, settleMs: 0, settle: { maxMs: 0 } })
+// The actor's receipt stamp (hop record) is checked once, then set aside.
+function withoutHop(timing) {
+  assert.ok(Number.isFinite(timing.actorReceivedAtMs) && timing.actorReceivedAtMs >= 0, 'actor receipt stamp')
+  const { actorReceivedAtMs: _hop, ...rest } = timing
+  return rest
+}
 
 test('guarded native Browser actor changes isolated local DOM exactly once and returns post-observation', async () => {
   const f = localDocumentFixture()
@@ -1066,13 +1073,20 @@ function frameFixture() {
     { root: shadowRoot, innerText: 'Shadow save', parentElement: null })
   shadowRoot.querySelectorAll = () => [shadowButton]
   shadowRoot.elementFromPoint = () => shadowButton
-  const closedSecret = fakeElement(top, 'BUTTON', { left: 0, top: 0, width: 10, height: 10 },
-    { innerText: 'CLOSED_SHADOW_CANARY' })
+  // A closed root is page content Gecko lets the privileged actor read; a UA
+  // widget root (media controls, date fields) is browser internals.
+  const closedButton = fakeElement(top, 'BUTTON', { left: 0, top: 0, width: 10, height: 10 },
+    { innerText: 'Closed vault open' })
   const closedHost = { tagName: 'X-VAULT', ownerDocument: top, isConnected: true, shadowRoot: null,
-    openOrClosedShadowRoot: { querySelectorAll: () => [closedSecret] }, getAttribute: () => null,
+    openOrClosedShadowRoot: { querySelectorAll: () => [closedButton] }, getAttribute: () => null,
+    getBoundingClientRect: () => ({ left: 0, top: 0, width: 10, height: 10 }) }
+  const widgetSecret = fakeElement(top, 'BUTTON', { left: 0, top: 0, width: 10, height: 10 },
+    { innerText: 'UA_WIDGET_CANARY' })
+  const widgetHost = { tagName: 'VIDEO', ownerDocument: top, isConnected: true, shadowRoot: null,
+    openOrClosedShadowRoot: { isUAWidget: () => true, querySelectorAll: () => [widgetSecret] }, getAttribute: () => null,
     getBoundingClientRect: () => ({ left: 0, top: 0, width: 10, height: 10 }) }
   top.querySelectorAll = selector => selector === '*'
-    ? [f.button, f.input, host, closedHost, iframe, cross, unreadable] : [f.button, f.input]
+    ? [f.button, f.input, host, closedHost, widgetHost, iframe, cross, unreadable] : [f.button, f.input]
   const inside = (rect, x, y) => x >= rect.left && x <= rect.left + rect.width && y >= rect.top && y <= rect.top + rect.height
   const topHit = top.elementFromPoint
   let frameCovered = false
@@ -1097,14 +1111,15 @@ test('observe exposes same-origin frame and open shadow elements as refs and lis
   assert.match(byLabel(seen, 'Frame note').ref, new RegExp(`^${frameButton.ref.split('/')[0]}/el_\\d+$`))
   assert.match(byLabel(seen, 'Shadow save').ref, /^el_\d+$/)
   assert.deepEqual(seen.interactiveElements.map(item => item.label),
-    ['Increment', 'Note', 'Shadow save', 'Frame send', 'Frame note'], 'shadow and frame elements stay in document order')
+    ['Increment', 'Note', 'Shadow save', 'Closed vault open', 'Frame send', 'Frame note'],
+    'open shadow, closed shadow (openOrClosedShadowRoot) and frame elements stay in document order')
   assert(seen.text.includes('Frame send body text'))
   assert(seen.text.includes('Shadow status ready'))
   assert.deepEqual(seen.inaccessibleFrames.map(frame => [frame.label, frame.reason]),
     [['Payment', 'cross-origin'], ['Login', 'unreadable']])
   assert.deepEqual(seen.inaccessibleFrames[0].bounds, { x: 20, y: 320, width: 200, height: 100 })
   const json = JSON.stringify(seen)
-  for (const canary of ['CROSS_ORIGIN_CANARY', 'CLOSED_SHADOW_CANARY', 'pay.other.test']) assert(!json.includes(canary), canary)
+  for (const canary of ['CROSS_ORIGIN_CANARY', 'UA_WIDGET_CANARY', 'pay.other.test']) assert(!json.includes(canary), canary)
   assert(x.observed.includes(x.same.doc.documentElement), 'the frame document joins the mutation watch')
   assert(x.observed.includes(x.shadowRoot), 'the open shadow root joins the mutation watch')
 })
@@ -1388,7 +1403,7 @@ test('snapshot carries the actor Gecko document identity and an act from another
     assert.equal(refusal.refused, true, key)
     assert.match(refusal.error, /stale/, key)
     assert.equal(refusal.dispatchPhase, 'not-dispatched', key)
-    assert.deepEqual(refusal.timing, { performCallsBefore: 0, performCallsAfter: 0 }, key)
+    assert.deepEqual(withoutHop(refusal.timing), { performCallsBefore: 0, performCallsAfter: 0 }, key)
   }
   assert.equal(f.clicks, 0)
   // An identity the actor cannot read is not "this document".
@@ -1458,7 +1473,7 @@ test('guarded refusals answer as data with the phase the actor can prove; perfor
       assert.ok(refusal.timing.performExitMs >= refusal.timing.performEnterMs)
     } else {
       assert.equal(refusal.dispatchPhase, 'not-dispatched', reason)
-      assert.deepEqual(refusal.timing, { performCallsBefore: 0, performCallsAfter: 0 }, reason)
+      assert.deepEqual(withoutHop(refusal.timing), { performCallsBefore: 0, performCallsAfter: 0 }, reason)
       assert.equal(f.actor.actorPerformCalls, 0, reason)
     }
     assert.equal(f.clicks, 0, reason)
@@ -1483,38 +1498,34 @@ test('guarded refusals answer as data with the phase the actor can prove; perfor
     error => !('dispatchPhase' in error))
 })
 
-test('a guarded action reports same-clock perform timing and bounds settle by what the lease leaves', async () => {
+// A page clock that only moves when the actor sleeps (plus a tiny tick so
+// same-clock stamps stay strictly ordered), for settle and budget tests.
+function pagedClock(f, { onSleep = () => {} } = {}) {
+  const clock = { mono: 5000, tick: 0, delays: [], entries: [] }
+  f.win.performance = { timeOrigin: 1700000000000, now: () => clock.mono + (clock.tick++) / 1000,
+    getEntriesByType: type => type === 'resource' ? clock.entries : [] }
+  f.win.setTimeout = (fn, ms) => { clock.delays.push(ms); clock.mono += ms; onSleep(clock); fn() }
+  return clock
+}
+const settleOptions = (snapshot, target, lease = {}, extra = {}) => ({ guard: guardFrom(snapshot, target), settleMs: 150,
+  lease: { leaseId: 'lease-s', requestId: `request-${Math.random()}`, deadlineMs: Date.now() + 10000, ...lease }, ...extra })
+
+test('a guarded action reports same-clock perform timing and the actor receipt stamp', async () => {
   const f = localDocumentFixture()
-  let clockMs = 1000
-  f.actor.nowMs = () => clockMs
-  let pageClock = 5000
-  f.win.performance = { timeOrigin: 1700000000000, now: () => pageClock++ }
-  const delays = []
-  f.win.setTimeout = (fn, ms) => { delays.push(ms); fn() }
+  const clock = pagedClock(f)
   const before = f.actor.snapshot()
   const button = before.interactiveElements.find(item => item.role === 'button')
-  const options = { guard: guardFrom(before, button), settleMs: 150,
-    lease: { leaseId: 'lease-a', requestId: 'request-a', deadlineMs: clockMs + 10000 } }
-  const acted = await guardedAct(f, { type: 'click', ref: button.ref }, options)
+  const acted = await guardedAct(f, { type: 'click', ref: button.ref }, settleOptions(before, button))
   assert.equal(acted.ok, true)
   const { timing } = acted
-  assert.deepEqual(Object.keys(timing).sort(), ['firstEventAtMs', 'performCallsAfter', 'performCallsBefore',
-    'performEnterMs', 'performExitMs'])
+  assert.deepEqual(Object.keys(timing).sort(), ['actorReceivedAtMs', 'firstEventAtMs', 'performCallsAfter',
+    'performCallsBefore', 'performEnterMs', 'performExitMs'])
   assert.equal(timing.performCallsBefore, 0)
   assert.equal(timing.performCallsAfter, 1)
   assert.ok(timing.performEnterMs >= 1700000005000, 'stamped on the page performance clock')
+  assert.ok(timing.actorReceivedAtMs < timing.performEnterMs, 'received before perform')
   assert.ok(timing.performEnterMs < timing.firstEventAtMs && timing.firstEventAtMs < timing.performExitMs)
-  assert.deepEqual(delays, [150])
-
-  // 600ms left: settle = min(150, 600 - 500) = 100. 400ms left: settle 0.
-  for (const [left, expected] of [[600, 100], [400, 0]]) {
-    const seen = f.actor.snapshot()
-    const target = seen.interactiveElements.find(item => item.role === 'button')
-    delays.length = 0
-    await guardedAct(f, { type: 'click', ref: target.ref }, { guard: guardFrom(seen, target), settleMs: 150,
-      lease: { leaseId: `lease-${left}`, requestId: `request-${left}`, deadlineMs: clockMs + left } })
-    assert.deepEqual(delays, [expected], `${left}ms left`)
-  }
+  assert.ok(clock.delays.length > 0)
   // Each guarded route stamps its first DOM event.
   const fill = localDocumentFixture()
   const observed = fill.actor.snapshot()
@@ -1522,6 +1533,107 @@ test('a guarded action reports same-clock perform timing and bounds settle by wh
   const filled = await guardedAct(fill, { type: 'fill', ref: input.ref, text: 'note' }, guarded(guardFrom(observed, input)))
   assert.ok(filled.timing.firstEventAtMs >= filled.timing.performEnterMs &&
     filled.timing.firstEventAtMs <= filled.timing.performExitMs)
+})
+
+test('settle ends after 500 ms of quiet, polling every 100 ms; the old fixed settleMs is not used for guarded acts', async () => {
+  const f = localDocumentFixture()
+  const clock = pagedClock(f)
+  const before = f.actor.snapshot()
+  const button = before.interactiveElements.find(item => item.role === 'button')
+  const acted = await guardedAct(f, { type: 'click', ref: button.ref }, settleOptions(before, button))
+  assert.deepEqual(clock.delays, [100, 100, 100, 100, 100])
+  assert.deepEqual(acted.observation.settle, { waitedMs: 500, endedBy: 'quiet', domChanges: 0, requests: [] })
+  // The click's own DOM change happened inside perform: it is already in the baseline.
+  assert.equal(acted.after.text[0], 'Count: 1')
+})
+
+test('settle waits for a delayed fetch and its DOM update, and keeps request paths only', async () => {
+  const f = localDocumentFixture()
+  f.win.location.href = 'https://shop.example.test/cart'
+  const countNode = f.actor.document.createTreeWalker(null, 4, { acceptNode: () => 1 }).nextNode()
+  const clock = pagedClock(f, { onSleep: c => {
+    // 300 ms after the click the page's fetch finishes and it renders the result.
+    if (c.delays.length === 3) {
+      c.entries.push({ name: 'https://shop.example.test/api/cart/items?token=SECRET_QUERY_CANARY#frag', initiatorType: 'fetch', startTime: c.mono - 250 })
+      c.entries.push({ name: 'https://cdn.other.test/pixel.gif?u=1', initiatorType: 'img', startTime: c.mono - 200 })
+      c.entries.push({ name: 'https://metrics.other.test/collect', initiatorType: 'beacon', startTime: c.mono - 100 })
+      countNode.nodeValue = 'Cart updated'
+      f.pendingMutations.push({})
+    }
+  } })
+  const before = f.actor.snapshot()
+  const button = before.interactiveElements.find(item => item.role === 'button')
+  const acted = await guardedAct(f, { type: 'click', ref: button.ref }, settleOptions(before, button))
+  assert.equal(acted.observation.settle.endedBy, 'quiet')
+  assert.equal(acted.observation.settle.waitedMs, 800, 'quiet restarts at the fetch and DOM change at 300 ms')
+  assert.equal(acted.observation.settle.domChanges, 1)
+  assert.deepEqual(acted.observation.settle.requests, [
+    { path: '/api/cart/items?…', type: 'fetch' },
+    { path: 'https://metrics.other.test/collect', type: 'beacon' }])
+  assert(!JSON.stringify(acted).includes('SECRET_QUERY_CANARY'), 'a query value never reaches the receipt')
+  assert(!JSON.stringify(acted.observation.settle).includes('pixel.gif'), 'images are not settle requests')
+  assert(acted.after.text.includes('Cart updated'), 'the after-snapshot shows the loaded result')
+  assert(acted.observation.newVisibleText.includes('Cart updated'))
+})
+
+test('settle stops at its 1.5 s cap on a page that never goes quiet', async () => {
+  const f = localDocumentFixture()
+  const clock = pagedClock(f, { onSleep: () => f.pendingMutations.push({}) })
+  const before = f.actor.snapshot()
+  const button = before.interactiveElements.find(item => item.role === 'button')
+  const acted = await guardedAct(f, { type: 'click', ref: button.ref }, settleOptions(before, button))
+  assert.equal(acted.observation.settle.endedBy, 'cap')
+  assert.equal(acted.observation.settle.waitedMs, 1500)
+  assert.equal(Math.round(clock.delays.reduce((sum, ms) => sum + ms, 0)), 1500)
+  assert.ok(acted.observation.settle.domChanges >= 15)
+})
+
+test('settle never spends the reply budget: lease deadline or relative budget minus 500 ms', async () => {
+  // The wall clock stands at 1000; the page clock moves only while settling.
+  for (const [deadlineMs, budgetMs, total, endedBy] of [
+    [1600, undefined, 100, 'deadline'],   // 600 ms left on the lease
+    [1400, undefined, 0, 'deadline'],     // 400 ms left
+    [11000, 700, 200, 'deadline'],        // relative budget 700 ms, measured on the page clock
+    [11000, 2500, 500, 'quiet'],
+  ]) {
+    const f = localDocumentFixture()
+    f.actor.nowMs = () => 1000
+    const clock = pagedClock(f)
+    const before = f.actor.snapshot()
+    const button = before.interactiveElements.find(item => item.role === 'button')
+    const acted = await guardedAct(f, { type: 'click', ref: button.ref },
+      settleOptions(before, button, { deadlineMs }, budgetMs ? { budgetMs } : {}))
+    const label = JSON.stringify([deadlineMs, budgetMs])
+    assert.equal(Math.round(clock.delays.reduce((sum, ms) => sum + ms, 0)), total, label)
+    assert.equal(acted.observation.settle.endedBy, endedBy, label)
+  }
+  // A spent relative budget refuses before approval, like an expired lease.
+  const f = localDocumentFixture()
+  pagedClock(f)
+  const before = f.actor.snapshot()
+  const button = before.interactiveElements.find(item => item.role === 'button')
+  f.actor.sendQuery = async () => { f.win.performance.now = () => 1e9; return { authorized: true } }
+  const refusal = await guardedAct(f, { type: 'click', ref: button.ref },
+    settleOptions(before, button, {}, { budgetMs: 1000 }))
+  assert.equal(refusal.dispatchPhase, 'not-dispatched')
+  assert.match(refusal.error, /deadline-expired-after-approval/)
+  assert.equal(f.clicks, 0)
+})
+
+test('settle returns at once when the action starts unloading the document, and removes its listeners', async () => {
+  const f = localDocumentFixture()
+  const clock = pagedClock(f)
+  const listeners = new Map()
+  f.win.addEventListener = (name, fn, capture) => { assert.equal(capture, true); listeners.set(name, fn) }
+  f.win.removeEventListener = name => listeners.delete(name)
+  const click = f.button.click.bind(f.button)
+  f.button.click = function () { click(); listeners.get('beforeunload')?.({ type: 'beforeunload' }) }
+  const before = f.actor.snapshot()
+  const button = before.interactiveElements.find(item => item.role === 'button')
+  const acted = await guardedAct(f, { type: 'click', ref: button.ref }, settleOptions(before, button))
+  assert.equal(acted.observation.settle.endedBy, 'navigation-started')
+  assert.deepEqual(clock.delays, [])
+  assert.equal(listeners.size, 0, 'no listener outlives settle')
 })
 
 test('Parent hands the UI the native document identity after child data so a child cannot replace it', () => {
@@ -1545,4 +1657,342 @@ test('Parent hands the UI the native document identity after child data so a chi
   assert.equal(seen.browsingContextId, 301)
   assert.equal(seen.windowGlobal, parent.manager)
   unregister()
+})
+
+// ---- 1-A (BRW-06 / BRW-08 / BRW-12): candidates, occlusion, container scroll,
+// weak refs, text waits, reconcile. A rich fake document: parents, styles,
+// rects, z-order hit testing (later elements on top) and text nodes.
+globalThis.CSS ||= { escape: value => String(value) }
+const R = (left, top, width, height) => ({ left, top, width, height })
+function richFixture({ href = 'https://shop.example.test/page' } = {}) {
+  const actor = new EGDeskBrowserAgentRuntimeChild()
+  const pendingMutations = []
+  const doc = { nodeType: 9, title: 'Rich fixture', readyState: 'complete' }
+  const elements = [], texts = []
+  const interactive = node => (node.tagName === 'A' && node.attrs.href != null) ||
+    ['BUTTON', 'INPUT', 'TEXTAREA', 'SELECT'].includes(node.tagName) ||
+    node.attrs.role != null || node.attrs.tabindex != null || node.attrs.contenteditable != null
+  const inside = (rect, x, y) => x >= rect.left && x < rect.left + rect.width && y >= rect.top && y < rect.top + rect.height
+  function el(tagName, { parent = null, rect = R(0, 0, 0, 0), attrs = {}, style = {}, text = null, ...props } = {}) {
+    const node = { nodeType: 1, tagName, ownerDocument: doc, isConnected: true, disabled: false, attrs, style, rect,
+      parentElement: parent, kids: [], clickCount: 0, listeners: new Map(), textValue: text,
+      getAttribute(name) { return attrs[name] ?? null },
+      getRootNode() { return doc },
+      getBoundingClientRect() { return this.rect },
+      matches(selector) { return selector === ':disabled' ? this.disabled === true : interactive(this) },
+      contains(other) { for (let n = other; n; n = n.parentElement) if (n === this) return true; return false },
+      closest(selector) { for (let n = this; n; n = n.parentElement) if (selector === 'label' && n.tagName === 'LABEL') return n; return null },
+      querySelector() {
+        const queue = [...this.kids]
+        while (queue.length) { const n = queue.shift(); if (n.tagName === 'INPUT' && ['radio', 'checkbox'].includes(n.type)) return n; queue.push(...n.kids) }
+        return null
+      },
+      addEventListener(name, fn) { if (!this.listeners.has(name)) this.listeners.set(name, new Set()); this.listeners.get(name).add(fn) },
+      removeEventListener(name, fn) { this.listeners.get(name)?.delete(fn) },
+      dispatchEvent() { return true }, scrollIntoView() {}, focus() {},
+      click() { for (const fn of this.listeners.get('click') || []) fn({ target: this }); this.clickCount++; this.onActivate?.() },
+      get innerText() { return this.textValue ?? '' }, get textContent() { return this.textValue ?? '' },
+      ...props }
+    parent?.kids.push(node)
+    elements.push(node)
+    if (text) texts.push({ nodeValue: text, parentElement: node, parentNode: node })
+    return node
+  }
+  const win = { location: { href }, innerWidth: 800, innerHeight: 600, devicePixelRatio: 1,
+    getComputedStyle(node) { return { display: 'block', visibility: 'visible', opacity: '1', cursor: 'auto',
+      overflowX: 'visible', overflowY: 'visible', ...(node.style || {}) } },
+    NodeFilter: { SHOW_TEXT: 4, FILTER_ACCEPT: 1, FILTER_REJECT: 2 },
+    MutationObserver: class { observe() {} disconnect() {} takeRecords() { return pendingMutations.splice(0) } },
+    Event: class { constructor(name) { this.name = name } }, setTimeout }
+  doc.body = { nodeType: 1, tagName: 'BODY', getBoundingClientRect: () => R(0, 0, 800, 600) }
+  doc.documentElement = { nodeType: 1, tagName: 'HTML', getBoundingClientRect: () => R(0, 0, 800, 600) }
+  doc.activeElement = doc.body
+  doc.querySelector = () => null
+  doc.getElementById = id => elements.find(node => node.isConnected && node.id === id) || null
+  doc.querySelectorAll = selector => elements.filter(node => node.isConnected && (selector === '*' || interactive(node)))
+  doc.elementFromPoint = (x, y) => {
+    for (let index = elements.length - 1; index >= 0; index--) {
+      const node = elements[index]
+      if (node.isConnected && node.style.display !== 'none' && inside(node.rect, x, y)) return node
+    }
+    return null
+  }
+  doc.createTreeWalker = (_root, _what, filter) => {
+    let index = 0
+    return { nextNode() {
+      while (index < texts.length) { const text = texts[index++]; if (text.parentElement.isConnected && filter.acceptNode(text) === 1) return text }
+      return null
+    } }
+  }
+  actor.document = doc
+  actor.contentWindow = win
+  actor.sendQuery = async () => ({ authorized: true })
+  return { actor, doc, win, el, texts, pendingMutations }
+}
+
+test('observe lists pointer and onclick elements, labels around hidden choices and scroll containers, not inherited pointers', () => {
+  const r = richFixture()
+  const card = r.el('DIV', { rect: R(20, 20, 220, 60), style: { cursor: 'pointer' }, text: 'Open plan' })
+  r.el('SPAN', { parent: card, rect: R(30, 30, 80, 20), style: { cursor: 'pointer' }, text: 'Pro' })
+  r.el('DIV', { rect: R(20, 100, 220, 40), attrs: { onclick: 'go()' }, text: 'Legacy card' })
+  const label = r.el('LABEL', { rect: R(20, 160, 160, 40), text: 'Monthly' })
+  r.el('INPUT', { parent: label, type: 'radio', attrs: { type: 'radio' }, hidden: true, checked: false })
+  const list = r.el('DIV', { rect: R(300, 20, 260, 200), style: { overflowY: 'auto' }, attrs: { 'aria-label': 'Rows' },
+    scrollHeight: 800, clientHeight: 200, scrollWidth: 260, clientWidth: 260, scrollTop: 40, scrollLeft: 0 })
+  r.el('DIV', { rect: R(300, 260, 260, 100), style: { overflowY: 'hidden' }, scrollHeight: 900, clientHeight: 100, text: 'Clipped panel' })
+  r.el('DIV', { rect: R(300, 380, 260, 100), text: 'Plain text block' })
+  const seen = r.actor.snapshot()
+  assert.deepEqual(seen.interactiveElements.map(item => [item.role, item.label, item.value, item.tag]), [
+    ['clickable', 'Open plan', '', 'div'], ['clickable', 'Legacy card', '', 'div'],
+    ['radio', 'Monthly', 'unchecked', 'label'], ['scrollable', 'Rows', '', 'div']])
+  const rows = seen.interactiveElements.at(-1)
+  assert.deepEqual(seen.scrollContainers, [{ ref: rows.ref, x: 0, y: 40, maxY: 600 }])
+  assert.equal(r.actor.refTarget(rows.ref), list)
+  // The per-observation budget caps pointer candidates.
+  const many = richFixture()
+  for (let index = 0; index < 70; index++) many.el('DIV', { rect: R(0, index * 8, 100, 8), style: { cursor: 'pointer' }, text: `Item ${index}` })
+  assert.equal(many.actor.snapshot({ elementLimit: 100 }).interactiveElements.length, 60)
+})
+
+test('guarded clicks reach a pointer div and a hidden-radio label; the label reads back checked', async () => {
+  const r = richFixture()
+  const card = r.el('DIV', { rect: R(20, 20, 220, 60), style: { cursor: 'pointer' }, text: 'Open plan' })
+  const label = r.el('LABEL', { rect: R(20, 160, 160, 40), text: 'Monthly' })
+  const radio = r.el('INPUT', { parent: label, type: 'radio', attrs: { type: 'radio' }, hidden: true, checked: false })
+  label.onActivate = () => { radio.checked = true; r.pendingMutations.push({}) }
+  let seen = r.actor.snapshot()
+  const cardItem = byLabel(seen, 'Open plan')
+  await r.actor.act({ type: 'click', ref: cardItem.ref }, guarded(guardFrom(seen, cardItem)))
+  assert.equal(card.clickCount, 1)
+  seen = r.actor.snapshot()
+  const choice = byLabel(seen, 'Monthly')
+  const result = await r.actor.act({ type: 'click', ref: choice.ref }, guarded(guardFrom(seen, choice)))
+  assert.equal(label.clickCount, 1)
+  assert.equal(result.after.interactiveElements.find(item => item.ref === choice.ref).value, 'checked')
+  // The same element without its pointer is no longer that target.
+  seen = r.actor.snapshot()
+  const again = byLabel(seen, 'Open plan')
+  card.style = {}
+  await assert.rejects(r.actor.act({ type: 'click', ref: again.ref }, guarded(guardFrom(seen, again))), /target changed/)
+  assert.equal(card.clickCount, 1)
+})
+
+test('ref with a direction scrolls inside the observed container only, guarded by the container offset', async () => {
+  const r = richFixture()
+  Object.assign(r.win, { scrollX: 0, scrollY: 0, scrollMaxY: 0 })
+  const documentScrolls = []
+  r.win.scrollBy = (...args) => documentScrolls.push(args)
+  r.win.scrollTo = (...args) => documentScrolls.push(args)
+  const list = r.el('DIV', { rect: R(300, 20, 260, 200), style: { overflowY: 'auto' }, attrs: { 'aria-label': 'Rows' },
+    scrollHeight: 800, clientHeight: 200, scrollWidth: 260, clientWidth: 260, scrollTop: 0, scrollLeft: 0 })
+  list.scrollBy = ({ top }) => { list.scrollTop = Math.max(0, Math.min(600, list.scrollTop + top)) }
+  list.scrollTo = ({ top }) => { list.scrollTop = Math.max(0, Math.min(600, top)) }
+  r.el('BUTTON', { rect: R(20, 20, 100, 30), text: 'Save' })
+  const containerGuard = (snapshot, item) => ({ ...guardFrom(snapshot, item), scroll: snapshot.scroll,
+    containerScroll: (({ x, y }) => ({ x, y }))(snapshot.scrollContainers.find(entry => entry.ref === item.ref)) })
+  let seen = r.actor.snapshot()
+  const rows = byLabel(seen, 'Rows')
+  const down = await r.actor.act({ type: 'scroll', ref: rows.ref, direction: 'down', amount: 'page' }, guarded(containerGuard(seen, rows)))
+  assert.equal(list.scrollTop, 180)
+  assert.deepEqual(down.result.dispatchDiagnostics, { inputRoute: 'dom-scroll-api', mode: 'container',
+    containerBefore: { x: 0, y: 0, maxY: 600 }, containerAfter: { x: 0, y: 180, maxY: 600 } })
+  assert.deepEqual(down.after.scrollContainers, [{ ref: rows.ref, x: 0, y: 180, maxY: 600 }])
+  assert.deepEqual(documentScrolls, [], 'the page itself never scrolls')
+  assert.deepEqual(parentModule.browserToolDispatchReceiptFields('scroll', down.result.dispatchDiagnostics),
+    { inputRoute: 'dom-scroll-api', scrollMode: 'container',
+      containerScroll: { before: { x: 0, y: 0, maxY: 600 }, after: { x: 0, y: 180, maxY: 600 } } })
+  assert.deepEqual(parentModule.browserToolDispatchReceiptFields('scroll', { inputRoute: 'dom-scroll-api', mode: 'container',
+    containerBefore: { x: 0, y: -1, maxY: 600 }, containerAfter: { x: 0, y: 1, maxY: 600 } }), {})
+  seen = r.actor.snapshot()
+  await r.actor.act({ type: 'scroll', ref: rows.ref, direction: 'bottom', amount: 'page' }, guarded(containerGuard(seen, byLabel(seen, 'Rows'))))
+  assert.equal(list.scrollTop, 600)
+  seen = r.actor.snapshot()
+  const guard = containerGuard(seen, byLabel(seen, 'Rows'))
+  list.scrollTop = 100
+  await assert.rejects(r.actor.act({ type: 'scroll', ref: rows.ref, direction: 'up', amount: 'half' }, guarded(guard)),
+    /container scroll position changed/, 'a person scrolled the list in between')
+  seen = r.actor.snapshot()
+  const save = byLabel(seen, 'Save')
+  await assert.rejects(r.actor.act({ type: 'scroll', ref: save.ref, direction: 'down', amount: 'page' },
+    guarded({ ...guardFrom(seen, save), scroll: seen.scroll, containerScroll: { x: 0, y: 0 } })), /not a scrollable container/)
+  assert.equal(r.actor.actorPerformCalls, 2)
+})
+
+test('a click under a cookie banner is refused before input and names the banner by structure, never its text', async () => {
+  const r = richFixture()
+  const target = r.el('BUTTON', { rect: R(20, 100, 140, 40), text: 'Accept terms' })
+  const banner = r.el('DIV', { rect: R(0, 0, 800, 220), id: 'cookie-consent', className: 'banner fixed',
+    attrs: { id: 'cookie-consent', class: 'banner fixed', role: 'dialog', 'aria-label': 'Cookie preferences' },
+    text: 'We use cookies BANNER_TEXT_CANARY' })
+  const dismiss = r.el('BUTTON', { parent: banner, rect: R(600, 150, 100, 40), text: 'Dismiss' })
+  dismiss.onActivate = () => { banner.isConnected = false; dismiss.isConnected = false; r.pendingMutations.push({}) }
+  let seen = r.actor.snapshot()
+  const bannerItem = seen.interactiveElements.find(item => item.role === 'dialog')
+  const accept = byLabel(seen, 'Accept terms')
+  const refusal = await guardedAct(r, { type: 'click', ref: accept.ref }, guarded(guardFrom(seen, accept)))
+  assert.equal(refusal.dispatchPhase, 'not-dispatched')
+  assert.equal(refusal.obscuredBy, `div#cookie-consent role=dialog ref=${bannerItem.ref}`)
+  assert.equal(refusal.error, `Browser target is obscured by div#cookie-consent role=dialog ref=${bannerItem.ref}; observe again`)
+  for (const canary of ['cookies', 'BANNER_TEXT_CANARY', 'Cookie preferences']) assert.equal(JSON.stringify(refusal).includes(canary), false, canary)
+  assert.equal(target.clickCount, 0)
+  await r.actor.act({ type: 'click', ref: byLabel(seen, 'Dismiss').ref }, guarded(guardFrom(seen, byLabel(seen, 'Dismiss'))))
+  seen = r.actor.snapshot()
+  await r.actor.act({ type: 'click', ref: accept.ref }, guarded(guardFrom(seen, byLabel(seen, 'Accept terms'))))
+  assert.equal(target.clickCount, 1, 'after Dismiss the same click works')
+  // A token-like id is never echoed; classes and an id'd ancestor describe it instead.
+  const t = richFixture()
+  t.el('BUTTON', { rect: R(20, 100, 140, 40), text: 'Buy' })
+  const shell = t.el('SECTION', { rect: R(0, 0, 10, 10), id: 'promo', attrs: { id: 'promo' } })
+  t.el('DIV', { parent: shell, rect: R(0, 0, 800, 220), id: 'a1b2c3d4e5f6a7b8c9d0', className: 'overlay sess-4f9a8b7c6d5e4f3a2b1c',
+    attrs: { id: 'a1b2c3d4e5f6a7b8c9d0' } })
+  const looked = t.actor.snapshot()
+  const covered = await guardedAct(t, { type: 'click', ref: byLabel(looked, 'Buy').ref }, guarded(guardFrom(looked, byLabel(looked, 'Buy'))))
+  assert.equal(covered.obscuredBy, 'div.overlay inside section#promo')
+})
+
+test('a styled box inside the same label counts as the control; a half-visible target is hit at its visible centre', async () => {
+  const r = richFixture()
+  const label = r.el('LABEL', { rect: R(20, 20, 200, 40), text: 'Agree' })
+  const box = r.el('INPUT', { parent: label, rect: R(24, 30, 16, 16), type: 'checkbox', attrs: { type: 'checkbox', 'aria-label': 'Agree box' } })
+  r.el('SPAN', { parent: label, rect: R(20, 26, 24, 24), text: 'v' })
+  label.control = box
+  const half = r.el('BUTTON', { rect: R(-80, 300, 100, 40), text: 'Half visible' })
+  r.el('BUTTON', { rect: R(900, 300, 100, 40), text: 'Off screen' })
+  let seen = r.actor.snapshot()
+  await r.actor.act({ type: 'click', ref: byLabel(seen, 'Agree box').ref }, guarded(guardFrom(seen, byLabel(seen, 'Agree box'))))
+  assert.equal(box.clickCount, 1)
+  seen = r.actor.snapshot()
+  await r.actor.act({ type: 'click', ref: byLabel(seen, 'Half visible').ref }, guarded(guardFrom(seen, byLabel(seen, 'Half visible'))))
+  assert.equal(half.clickCount, 1, 'hit at x=10, not at the off-screen centre x=-30')
+  seen = r.actor.snapshot()
+  const off = await guardedAct(r, { type: 'click', ref: byLabel(seen, 'Off screen').ref }, guarded(guardFrom(seen, byLabel(seen, 'Off screen'))))
+  assert.equal(off.error, 'Browser target is obscured: it is outside the viewport; observe again')
+  assert.equal(off.obscuredBy, undefined)
+  assert.equal(off.dispatchPhase, 'not-dispatched')
+})
+
+test('refs are weak handles; the latest observation holds its own refs strongly until the next one', () => {
+  const r = richFixture()
+  const save = r.el('BUTTON', { rect: R(20, 20, 100, 30), text: 'Save' })
+  const seen = r.actor.snapshot()
+  const ref = byLabel(seen, 'Save').ref
+  assert.ok(r.actor.nodeByRef.get(ref) instanceof WeakRef)
+  assert.equal(r.actor.liveRefs.get(ref), save)
+  save.isConnected = false
+  const next = r.actor.snapshot()
+  assert.equal(byLabel(next, 'Save'), undefined)
+  assert.equal(r.actor.liveRefs.has(ref), false, 'a ref the new observation no longer lists is not held strongly')
+  assert.equal(r.actor.nodeForRef(ref), null)
+  save.isConnected = true
+  r.actor.nodeByRef.delete(ref)
+  const back = r.actor.snapshot()
+  assert.equal(byLabel(back, 'Save').ref, ref, 'the same node keeps its ref after its handle is gone')
+  assert.equal(r.actor.nodeForRef(ref), save)
+})
+
+test('wait for text reads visible page text only, reports a count and never echoes the text', async () => {
+  const r = richFixture()
+  r.actor.waitPollMs = 1
+  r.el('P', { rect: R(20, 20, 300, 20), text: 'Order confirmed' })
+  r.el('TEXTAREA', { rect: R(20, 60, 300, 60), text: 'Order confirmed draft' })
+  r.el('DIV', { rect: R(20, 140, 300, 40), isContentEditable: true, text: 'Order confirmed in editor' })
+  r.el('DIV', { rect: R(20, 200, 300, 20), style: { display: 'none' }, text: 'Order confirmed hidden' })
+  r.el('INPUT', { rect: R(20, 240, 300, 30), type: 'password', attrs: { type: 'password' }, value: 'Order confirmed' })
+  const wait = spec => r.actor.receiveMessage({ name: 'snapshot', data: { options: { textLimit: 60, wait: spec } } })
+  const met = await wait({ for: 'text', text: ' Order\n confirmed ', timeoutMs: 1000 })
+  assert.deepEqual(Object.keys(met.wait), ['for', 'outcome', 'elapsedMs', 'matchCount'])
+  assert.equal(met.wait.outcome, 'met')
+  assert.equal(met.wait.matchCount, 1, 'field, editor and hidden text never match')
+  assert.equal(JSON.stringify(met.wait).includes('Order'), false)
+  const later = wait({ for: 'text', text: 'Saved', timeoutMs: 2000 })
+  setTimeout(() => { r.el('P', { rect: R(20, 300, 100, 20), text: 'Saved' }); r.pendingMutations.push({}) }, 5)
+  assert.equal((await later).wait.outcome, 'met')
+  const spinner = r.el('P', { rect: R(20, 330, 100, 20), text: 'Loading…' })
+  const gone = wait({ for: 'text-gone', text: 'Loading…', timeoutMs: 2000 })
+  setTimeout(() => { spinner.isConnected = false; r.pendingMutations.push({}) }, 5)
+  assert.deepEqual((({ outcome, matchCount }) => ({ outcome, matchCount }))((await gone).wait), { outcome: 'met', matchCount: 0 })
+  const never = await wait({ for: 'text', text: 'Never there', timeoutMs: 20 })
+  assert.deepEqual((({ outcome, matchCount }) => ({ outcome, matchCount }))(never.wait), { outcome: 'timeout', matchCount: 0 })
+  await assert.rejects(wait({ for: 'text', text: '  ', timeoutMs: 100 }), /1-200 characters/)
+  await assert.rejects(wait({ for: 'text-gone', text: 'x'.repeat(201), timeoutMs: 100 }), /1-200 characters/)
+  assert.equal(r.actor.actorPerformCalls, 0)
+})
+
+test('reconcile answers from the perform record, fences a request that never entered, and is unknown elsewhere', async () => {
+  const f = localDocumentFixture()
+  const options = (snapshot, target, callId, requestId) => ({ ...guarded(guardFrom(snapshot, target)), callId,
+    lease: { leaseId: 'lease-r', requestId, deadlineMs: Date.now() + 10000 } })
+  const current = () => { const seen = f.actor.snapshot(); return [seen, seen.interactiveElements.find(item => item.role === 'button')] }
+  let [seen, button] = current()
+  await f.actor.act({ type: 'click', ref: button.ref }, options(seen, button, 'call-1', 'wire-1'))
+  const byCall = await f.actor.receiveMessage({ name: 'reconcile', data: { callId: 'call-1', documentId: seen.documentId } })
+  assert.equal(byCall.entered, true)
+  assert.equal(byCall.performing, false)
+  assert.ok(byCall.timing.performEnterMs <= byCall.timing.performExitMs)
+  assert.equal(f.actor.reconcile({ requestId: 'wire-1', documentId: 'anything' }).entered, true,
+    'the lease request ID the current UI already passes also identifies it')
+  const never = f.actor.reconcile({ callId: 'call-2', requestId: 'wire-2', documentId: f.actor.documentId })
+  assert.deepEqual(never, { version: 1, callId: 'call-2', requestId: 'wire-2', documentId: f.actor.documentId,
+    entered: false, fenced: true })
+  ;[seen, button] = current()
+  for (const [callId, requestId] of [['call-2', 'wire-x'], ['call-y', 'wire-2']]) {
+    const refusal = await guardedAct(f, { type: 'click', ref: button.ref }, options(seen, button, callId, requestId))
+    assert.equal(refusal.dispatchPhase, 'not-dispatched', callId)
+    assert.match(refusal.error, /reconciled as never sent/, callId)
+  }
+  assert.equal(f.clicks, 1)
+  assert.deepEqual(f.actor.reconcile({ callId: 'call-3', documentId: 'document-elsewhere' }),
+    { version: 1, callId: 'call-3', documentId: f.actor.documentId, entered: 'unknown', reason: 'other-document' })
+  ;[seen, button] = current()
+  await f.actor.act({ type: 'click', ref: button.ref }, options(seen, button, 'call-3', 'wire-3'))
+  assert.equal(f.clicks, 2, 'an unknown answer fences nothing')
+  // A fence placed while parent approval is pending still stops the input.
+  ;[seen, button] = current()
+  let release
+  f.actor.sendQuery = () => new Promise(resolve => { release = resolve })
+  const pending = guardedAct(f, { type: 'click', ref: button.ref }, options(seen, button, 'call-4', 'wire-4'))
+  await Promise.resolve()
+  assert.equal(f.actor.reconcile({ callId: 'call-4', documentId: f.actor.documentId }).entered, false)
+  release({ authorized: true })
+  assert.equal((await pending).dispatchPhase, 'not-dispatched')
+  assert.equal(f.clicks, 2)
+  // A page dialog holding the click inside perform: entered, still performing.
+  f.actor.sendQuery = async () => ({ authorized: true })
+  ;[seen, button] = current()
+  let during = null
+  const click = f.button.click.bind(f.button)
+  f.button.click = function () { during = f.actor.reconcile({ callId: 'call-5', documentId: f.actor.documentId }); click() }
+  await f.actor.act({ type: 'click', ref: button.ref }, options(seen, button, 'call-5', 'wire-5'))
+  assert.equal(during.entered, true)
+  assert.equal(during.performing, true)
+  assert.equal(f.actor.reconcile({ callId: 'call-5', documentId: f.actor.documentId }).performing, false)
+  f.actor.performRecordsEvicted = true
+  assert.equal(f.actor.reconcile({ callId: 'call-9', documentId: f.actor.documentId }).entered, 'unknown')
+  assert.throws(() => f.actor.reconcile({ documentId: f.actor.documentId }), /call or request ID/)
+})
+
+test('behaviour fixture pages cover pointer div, inner scroll, closed shadow, cookie banner, delayed fetch and dialogs offline', async () => {
+  const { BROWSER_BEHAVIOR_SCENARIOS, browserBehaviorFixtureHtml } = await import('../helper/codex-browser-fixture-qa.mjs')
+  const marker = 'QA_DOM_0123456789abcdef'
+  assert.deepEqual(BROWSER_BEHAVIOR_SCENARIOS.map(item => item.id),
+    ['pointer-div', 'inner-scroll', 'closed-shadow', 'cookie-banner', 'delayed-fetch', 'dialogs'])
+  const expects = {
+    'pointer-div': [/\.card\{cursor:pointer/, /onclick=/, /<label class="choice"><input type="radio"/, /\.choice input\{display:none\}/],
+    'inner-scroll': [/#rows\{height:200px;overflow:auto/, /Row '\+i/],
+    'closed-shadow': [/attachShadow\(\{mode:'closed'\}\)/],
+    'cookie-banner': [/id="cookie-consent" class="banner fixed" role="dialog"/, /position:fixed/],
+    'delayed-fetch': [/fetch\(location\.href,\{cache:'no-store'\}\)/, /setTimeout\(resolve,300\)/, /Cart updated/],
+    dialogs: [/alert\('EG-Desk QA alert'\)/, /confirm\('EG-Desk QA confirm'\)/],
+  }
+  for (const { id, gap, expect } of BROWSER_BEHAVIOR_SCENARIOS) {
+    const html = browserBehaviorFixtureHtml(id, marker)
+    assert.match(gap, /^BRW-(06|08|12)$/, id)
+    assert.ok(expect.length > 20, id)
+    assert.ok(html.includes(`<p id="fixture-marker">${marker}</p>`), `${id} carries the DOM marker the harness checks`)
+    assert.match(html, new RegExp(`connect-src ${id === 'delayed-fetch' ? "'self'" : "'none'"};`), id)
+    assert.doesNotMatch(html, /(?:src|href)=["']?(?:https?:)?\/\//i, `${id} loads nothing from elsewhere`)
+    for (const pattern of expects[id]) assert.match(html, pattern, id)
+  }
+  assert.throws(() => browserBehaviorFixtureHtml('unknown', marker), /Unknown/)
+  assert.throws(() => browserBehaviorFixtureHtml('dialogs', 'short<script>'), /marker is invalid/)
 })
