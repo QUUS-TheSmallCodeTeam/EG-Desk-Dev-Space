@@ -156,3 +156,44 @@ test('createProfileHttpHandler mounts like the other bridge handlers', async t =
   const other = fakeRequest('GET', '/chat/state')
   assert.equal(await handler(other, res, new URL(other.url, 'http://127.0.0.1:39218')), false)
 })
+
+test('POST /profiles/:id/duplicate makes a new draft and leaves the original unchanged', async t => {
+  const { open } = fixture(t)
+  const store = open()
+  store.seedTemplates()
+  const api = (...args) => call({ store }, ...args)
+  const fromExample = await api('POST', '/profiles/review-verifier/duplicate')
+  assert.equal(fromExample.status, 201)
+  assert.match(fromExample.data.id, /^prof-/)
+  assert.deepEqual([fromExample.data.revision, fromExample.data.profile.lifecycle, fromExample.data.profile.head.body.name], [1, 'draft', 'Review and Verification Agent 사본'])
+  assert.deepEqual(fromExample.data.profile.source.map(item => [item.kind, item.origin, item.profileId, item.revision]), [['duplicate', 'template', 'review-verifier', 1]])
+  assert.equal((await api('GET', '/profiles/review-verifier')).data.headRevision, 1)
+  const listed = (await api('GET', '/profiles')).data.profiles.find(item => item.id === fromExample.data.id)
+  assert.deepEqual([listed.latestSource.profileId, listed.reviewRequired], ['review-verifier', false])
+
+  const { data: { id } } = await api('POST', '/profiles', { body: body() })
+  await api('PUT', `/profiles/${id}/draft`, { body: body({ role: '일정 담당' }), expectedRevision: 1 })
+  const chosen = await api('POST', `/profiles/${id}/duplicate`, { revision: 1, name: '리오 B' })
+  assert.deepEqual([chosen.status, chosen.data.profile.head.body.name, chosen.data.profile.head.body.role], [201, '리오 B', '회의 준비 담당'])
+  const latest = await api('POST', `/profiles/${id}/duplicate`, {})
+  assert.deepEqual([latest.data.profile.head.body.name, latest.data.profile.head.body.role], ['리오 사본', '일정 담당'])
+
+  await api('POST', `/profiles/${chosen.data.id}/lifecycle`, { action: 'delete' })
+  const cases = [
+    [['POST', `/profiles/${id}/duplicate`, { revision: '1' }], 400, 'INVALID_PROFILE_REVISION'],
+    [['POST', `/profiles/${id}/duplicate`, { revision: 9 }], 404, 'PROFILE_REVISION_NOT_FOUND'],
+    [['POST', `/profiles/${id}/duplicate`, { name: '' }], 400, 'INVALID_PROFILE'],
+    [['POST', `/profiles/${id}/duplicate`, { owner: 'x' }], 400, 'PROFILE_HTTP_INPUT'],
+    [['POST', `/profiles/${id}/duplicate`, { name: '리오' }, { origin: 'https://example.com' }], 403, 'PROFILE_LOOPBACK_REQUIRED'],
+    [['POST', `/profiles/${chosen.data.id}/duplicate`], 409, 'PROFILE_LIFECYCLE_CONFLICT'],
+    [['POST', '/profiles/prof-missing/duplicate'], 404, 'PROFILE_NOT_FOUND'],
+    [['GET', `/profiles/${id}/duplicate`], 404, 'PROFILE_ROUTE_NOT_FOUND'],
+  ]
+  const count = store.list({ includeArchived: true }).profiles.length
+  for (const [args, status, code] of cases) {
+    const result = await api(...args)
+    assert.deepEqual([result.status, result.data.code], [status, code], `${args[0]} ${args[1]} → ${JSON.stringify(result.data)}`)
+  }
+  assert.equal(store.list({ includeArchived: true }).profiles.length, count, 'no refused copy was written')
+  assert.equal((await api('POST', `/profiles/${chosen.data.id}/duplicate`)).data.lifecycle, 'deleted')
+})

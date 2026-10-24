@@ -7,7 +7,15 @@ import { isOwnedAndPrivate } from './egdesk-private-files.mjs'
 // Local Agent Profile store. A profile has a stable ID and an append-only
 // chain of revisions; Runs bind to {profileId, revision, hash}. Public body
 // keys are fixed so no stored object key is model- or user-chosen.
-const VERSION = 1
+//
+// Schema versions (PRAGMA user_version). Older files are upgraded in place by
+// MIGRATIONS, one numbered step after another inside the opening write
+// transaction (ordered-sequence pattern from tldraw store/src/lib/migrate.ts,
+// pattern only; ADD COLUMN steps as in openai/codex state/migrations, Apache-2.0):
+//   1  profiles, profile_revisions (immutable, kept), store_meta
+//   2  profiles.source_json — where a profile came from, append-only
+//      (the `source` rule of kwaroran/character-card-spec-v3 SPEC_V3.md, MIT)
+const VERSION = 2
 export const MAX_PROFILES = 200
 const MAX_PROFILE_ROWS = 1000 // Live + soft-deleted rows; deleted rows keep their history.
 export const MAX_REVISIONS = 500
@@ -37,6 +45,15 @@ export const TOOL_CEILING_AXES = Object.freeze([
   Object.freeze({ axis: 'mcp', values: Object.freeze(['none', 'inherited']), open: 'inherited' }),
 ])
 const CEILING_KEYS = TOOL_CEILING_AXES.map(item => item.axis)
+// AGENT-02·06: "이렇게 말한다" example exchanges and "하지 말 것" rules, kept
+// apart from the free-form instructions (character-card-spec-v3 mes_example,
+// awesome-openclaw-agents SOUL.md "Don't" / "Example Interactions"). With
+// every other field at its cap the composed text still fits MAX_COMPOSED.
+export const PERSONALITY_LIMITS = Object.freeze({ examples: 3, exampleUser: 100, exampleReply: 280, avoid: 8, avoidItem: 80 })
+// Provenance chain carried by a copy: the newest entries win.
+export const MAX_SOURCE_ENTRIES = 8
+const IMPORT_FORMATS = ['egdesk']
+const COPY_SUFFIX = ' 사본'
 const PROFILE_ID = /^[a-z0-9][a-z0-9-]{0,79}$/
 const SINGLE_LINE_BAD = /[\u0000-\u001f\u007f\u2028\u2029]/
 const MULTI_LINE_BAD = /[\u0000-\u0008\u000b\u000c\u000e-\u001f\u007f]/
@@ -92,16 +109,36 @@ function avatar(value) {
   if (!AVATAR_PALETTE.includes(color)) fail('INVALID_PROFILE', 'avatar.color must be one of the approved palette colors')
   return { kind: value.kind, value: text, color }
 }
+function examples(value) {
+  const { examples: max, exampleUser, exampleReply } = PERSONALITY_LIMITS
+  if (value === undefined || value === null) return []
+  if (!Array.isArray(value) || value.length > max) fail('INVALID_PROFILE', `personality.examples must be a list of at most ${max} items`)
+  const pairs = new Map() // Keep first-seen order; a repeated pair carries no meaning.
+  for (const item of value) {
+    shape(item, ['user', 'reply'], 'personality.examples item')
+    const pair = { user: line(item.user, 'personality.examples user', { min: 1, max: exampleUser }), reply: block(item.reply, 'personality.examples reply', exampleReply) }
+    if (!pair.reply) fail('INVALID_PROFILE', 'personality.examples reply is required')
+    const key = JSON.stringify(pair)
+    if (!pairs.has(key)) pairs.set(key, pair)
+  }
+  return [...pairs.values()]
+}
 function personality(value) {
   if (value === undefined || value === null) value = {}
-  shape(value, ['tone', 'traits', 'speechNotes'], 'personality')
+  shape(value, ['tone', 'traits', 'speechNotes', 'examples', 'avoid'], 'personality')
   const tone = value.tone === undefined || value.tone === null ? 'plain' : value.tone
   if (!PROFILE_TONES.includes(tone)) fail('INVALID_PROFILE', 'personality.tone is not supported')
-  return {
+  const result = {
     tone,
     traits: list(value.traits, 'personality.traits', { max: 6, itemMax: 40 }),
     speechNotes: block(value.speechNotes, 'personality.speechNotes', 500),
   }
+  const shown = examples(value.examples)
+  const avoid = list(value.avoid, 'personality.avoid', { max: PERSONALITY_LIMITS.avoid, itemMax: PERSONALITY_LIMITS.avoidItem })
+  // Empty lists are left out, so a body saved before these fields keeps its bytes and hash.
+  if (shown.length) result.examples = shown
+  if (avoid.length) result.avoid = avoid
+  return result
 }
 function model(value) {
   if (value === undefined || value === null) return null
@@ -160,16 +197,23 @@ const CEILING_DIRECTIVES = {
   network: { off: '인터넷에 연결하지 않는다.' },
   mcp: { none: '연결된 외부 도구(MCP)는 쓰지 않는다.' },
 }
-/** Deterministic developer instructions: identity → tone → work → tool limits → user instructions. */
+const EXAMPLE_NOTICE = '아래 대화는 말투와 답하는 모양만 보여 주는 예시다. 예시에 나온 내용을 사실로 삼거나 그대로 되풀이하지 않는다.'
+/**
+ * Deterministic developer instructions: identity → tone (+ examples) → work
+ * (+ what not to do) → tool limits → user instructions. A body without
+ * examples or avoid composes exactly what it did before those fields existed.
+ */
 export function composeDeveloperInstructions(input) {
   const body = normalizeProfileBody(input)
-  const { tone, traits, speechNotes } = body.personality
+  const { tone, traits, speechNotes, examples: shown = [], avoid = [] } = body.personality
   const limits = body.toolCeiling ? CEILING_KEYS.map(axis => CEILING_DIRECTIVES[axis][body.toolCeiling[axis]]).filter(Boolean) : []
   const sections = [
     ['아래는 사용자가 EG-Desk에서 정한 담당자 설정이다. 이 설정에 맞춰 일한다.'],
     ['# 담당자', `이름: ${body.name}`, body.role && `역할: ${body.role}`],
     ['# 말투와 성격', TONE_DIRECTIVES[tone], traits.length && `성격: ${traits.join(', ')}`, speechNotes && `말하기 메모:\n${speechNotes}`],
+    shown.length && ['# 말투 예시', EXAMPLE_NOTICE, ...shown.map((pair, index) => `예시 ${index + 1}\n사용자: ${pair.user}\n${body.name}: ${pair.reply}`)],
     body.expertise.length && ['# 맡길 일', ...body.expertise.map(item => `- ${item}`)],
+    avoid.length && ['# 하지 말 것', ...avoid.map(item => `- ${item}`)],
     limits.length && ['# 쓸 수 있는 도구', ...limits.map(item => `- ${item}`)],
     body.instructions && ['# 사용자 지침', body.instructions],
   ]
@@ -188,7 +232,9 @@ export function profileBinding(profile, revision = profile?.active) {
 const DIFF_FIELDS = [
   ['name', body => body.name], ['avatar', body => body.avatar], ['role', body => body.role],
   ['personality.tone', body => body.personality.tone], ['personality.traits', body => body.personality.traits],
-  ['personality.speechNotes', body => body.personality.speechNotes], ['expertise', body => body.expertise],
+  ['personality.speechNotes', body => body.personality.speechNotes],
+  ['personality.examples', body => body.personality.examples ?? []], ['personality.avoid', body => body.personality.avoid ?? []],
+  ['expertise', body => body.expertise],
   ['instructions', body => body.instructions], ['toolPreferences', body => body.toolPreferences], ['model', body => body.model],
   ['toolCeiling', body => body.toolCeiling ?? null],
 ]
@@ -196,11 +242,13 @@ const DIFF_FIELDS = [
 export function diffProfileBodies(fromBody, toBody) {
   const before = normalizeProfileBody(fromBody), after = normalizeProfileBody(toBody)
   const changes = []
+  const missingFrom = (items, others) => { const keys = new Set(others.map(item => JSON.stringify(item))); return items.filter(item => !keys.has(JSON.stringify(item))) }
   for (const [field, read] of DIFF_FIELDS) {
     const a = read(before), b = read(after)
     if (JSON.stringify(a) === JSON.stringify(b)) continue
+    // List items compare by value, so example pairs diff like plain strings.
     changes.push(Array.isArray(a)
-      ? { field, before: a, after: b, added: b.filter(item => !a.includes(item)), removed: a.filter(item => !b.includes(item)) }
+      ? { field, before: a, after: b, added: missingFrom(b, a), removed: missingFrom(a, b) }
       : { field, before: a, after: b })
   }
   return changes
@@ -298,21 +346,20 @@ function revisionNumber(value, name = 'revision') {
   if (!Number.isSafeInteger(value) || value < 1) fail('INVALID_PROFILE_REVISION', `${name} must be a positive integer`)
   return value
 }
-
-function initialize(db) {
-  db.exec('PRAGMA foreign_keys=ON; PRAGMA busy_timeout=5000;')
-  if (String(db.prepare('PRAGMA journal_mode=WAL').get().journal_mode).toLowerCase() !== 'wal') fail('STORE_OPEN_FAILED', 'WAL could not be enabled', 500)
-  db.exec('PRAGMA synchronous=FULL;')
-  if (db.prepare('PRAGMA synchronous').get().synchronous !== 2) fail('STORE_OPEN_FAILED', 'FULL durability could not be enabled', 500)
-  if (db.prepare('PRAGMA quick_check').get().quick_check !== 'ok') fail('STORE_CORRUPT', 'Profile database failed integrity check; database was not reset', 500)
-  const version = db.prepare('PRAGMA user_version').get().user_version
-  if (version === VERSION) {
-    const found = new Set(db.prepare("SELECT name FROM sqlite_master WHERE type IN ('table','trigger')").all().map(row => row.name))
-    if (['profiles', 'profile_revisions', 'store_meta', 'profile_revisions_immutable', 'profile_revisions_kept'].some(name => !found.has(name))) fail('STORE_CORRUPT', 'Profile schema is incomplete; database was not reset', 500)
-    return
+/** "리오" → "리오 사본", shortening the name (whole graphemes) so it stays within 40 characters. */
+export function copyName(name) {
+  const room = 40 - chars(COPY_SUFFIX)
+  let base = ''
+  for (const { segment } of graphemes.segment(String(name ?? '').normalize('NFC').trim())) {
+    if (chars(base + segment) > room) break
+    base += segment
   }
-  if (version !== 0 || db.prepare("SELECT name FROM sqlite_master WHERE type='table' LIMIT 1").get()) fail('UNSUPPORTED_STORE_VERSION', 'Existing profile database has an unsupported schema; database was not reset', 500)
-  db.exec(`BEGIN IMMEDIATE;
+  return `${base.trim()}${COPY_SUFFIX}`.trim()
+}
+
+// Version 1 exactly as it shipped; a new file is built as version 1 and then
+// takes every step below, so new and upgraded files end with the same schema.
+const SCHEMA_V1 = `
     CREATE TABLE profiles (
       id TEXT PRIMARY KEY, owner_hash TEXT NOT NULL, active_revision INTEGER,
       lifecycle TEXT NOT NULL CHECK (lifecycle IN ('draft','active','disabled','archived','deleted')),
@@ -332,9 +379,70 @@ function initialize(db) {
       BEGIN SELECT RAISE(ABORT, 'profile revisions are immutable'); END;
     CREATE TRIGGER profile_revisions_kept BEFORE DELETE ON profile_revisions
       BEGIN SELECT RAISE(ABORT, 'profile revisions are kept'); END;
-    CREATE TABLE store_meta (name TEXT PRIMARY KEY, value TEXT NOT NULL);
-    PRAGMA user_version=${VERSION};
-    COMMIT;`)
+    CREATE TABLE store_meta (name TEXT PRIMARY KEY, value TEXT NOT NULL);`
+// Each step runs once, in order. Steps only add; nothing already saved is rewritten.
+const MIGRATIONS = Object.freeze([
+  Object.freeze({
+    version: 2,
+    // A JSON array of fixed-key entries. Rows written before version 2 start
+    // empty. The trigger lets an update only extend the array, never shorten
+    // or rewrite it (character-card-spec-v3: applications only append to `source`).
+    sql: `
+    ALTER TABLE profiles ADD COLUMN source_json TEXT NOT NULL DEFAULT '[]'
+      CHECK (CASE WHEN json_valid(source_json) THEN json_type(source_json) = 'array' ELSE 0 END);
+    CREATE TRIGGER profiles_source_append_only BEFORE UPDATE OF source_json ON profiles
+      WHEN json_array_length(NEW.source_json) < json_array_length(OLD.source_json)
+        OR substr(NEW.source_json, 1, length(OLD.source_json) - 1) IS NOT substr(OLD.source_json, 1, length(OLD.source_json) - 1)
+      BEGIN SELECT RAISE(ABORT, 'profile source is append-only'); END;`,
+  }),
+])
+// [first version that has it, table or trigger name]
+const SCHEMA_OBJECTS = [
+  [1, 'profiles'], [1, 'profile_revisions'], [1, 'store_meta'], [1, 'profile_revisions_immutable'], [1, 'profile_revisions_kept'],
+  [2, 'profiles_source_append_only'],
+]
+function requireSchema(db, version) {
+  const found = new Set(db.prepare("SELECT name FROM sqlite_master WHERE type IN ('table','trigger')").all().map(row => row.name))
+  const columns = new Set(db.prepare('PRAGMA table_info(profiles)').all().map(row => row.name))
+  if (SCHEMA_OBJECTS.some(([since, name]) => since <= version && !found.has(name)) || (version >= 2 && !columns.has('source_json'))) {
+    fail('STORE_CORRUPT', 'Profile schema is incomplete; database was not reset', 500)
+  }
+}
+
+function initialize(db) {
+  db.exec('PRAGMA foreign_keys=ON; PRAGMA busy_timeout=5000;')
+  if (String(db.prepare('PRAGMA journal_mode=WAL').get().journal_mode).toLowerCase() !== 'wal') fail('STORE_OPEN_FAILED', 'WAL could not be enabled', 500)
+  db.exec('PRAGMA synchronous=FULL;')
+  if (db.prepare('PRAGMA synchronous').get().synchronous !== 2) fail('STORE_OPEN_FAILED', 'FULL durability could not be enabled', 500)
+  if (db.prepare('PRAGMA quick_check').get().quick_check !== 'ok') fail('STORE_CORRUPT', 'Profile database failed integrity check; database was not reset', 500)
+  const readVersion = () => {
+    const version = db.prepare('PRAGMA user_version').get().user_version
+    if (version > VERSION) fail('UNSUPPORTED_STORE_VERSION', 'Profile database was made by a newer EG-Desk; database was not reset', 500)
+    return version
+  }
+  if (readVersion() < VERSION) {
+    db.exec('BEGIN IMMEDIATE')
+    try {
+      // Read again under the write lock: another window may have upgraded the file meanwhile.
+      let version = readVersion()
+      if (version === 0) {
+        if (db.prepare("SELECT name FROM sqlite_master WHERE type='table' LIMIT 1").get()) fail('UNSUPPORTED_STORE_VERSION', 'Existing profile database has an unsupported schema; database was not reset', 500)
+        db.exec(SCHEMA_V1)
+        version = 1
+      } else requireSchema(db, version) // Never build on a damaged older file.
+      for (const step of MIGRATIONS) {
+        if (step.version <= version) continue
+        db.exec(step.sql)
+        version = step.version
+      }
+      db.exec(`PRAGMA user_version=${VERSION}`)
+      db.exec('COMMIT')
+    } catch (error) {
+      try { db.exec('ROLLBACK') } catch { /* Preserve original failure; the file keeps its old version. */ }
+      throw error
+    }
+  }
+  requireSchema(db, VERSION)
 }
 
 /** Synchronous local-only profile store for one owner scope (same file rules as the chat store). */
@@ -364,8 +472,8 @@ export function openProfileStore({ dataDir, ownerHash } = {}) {
     profile: db.prepare('SELECT * FROM profiles WHERE id=? AND owner_hash=?'),
     head: db.prepare('SELECT * FROM profile_revisions WHERE profile_id=? ORDER BY revision DESC LIMIT 1'),
     revision: db.prepare('SELECT * FROM profile_revisions WHERE profile_id=? AND revision=?'),
-    insertProfile: db.prepare('INSERT INTO profiles VALUES (?, ?, ?, ?, ?, ?, ?)'),
-    insertRevision: db.prepare('INSERT INTO profile_revisions VALUES (?, ?, ?, ?, ?, ?, ?)'),
+    insertProfile: db.prepare('INSERT INTO profiles (id, owner_hash, active_revision, lifecycle, origin, created_at, updated_at, source_json) VALUES (?, ?, ?, ?, ?, ?, ?, ?)'),
+    insertRevision: db.prepare('INSERT INTO profile_revisions (profile_id, revision, parent_revision, hash, author, body_json, created_at) VALUES (?, ?, ?, ?, ?, ?, ?)'),
     touch: db.prepare('UPDATE profiles SET lifecycle=?, active_revision=?, updated_at=? WHERE id=? AND owner_hash=?'),
   }
   let closed = false
@@ -389,6 +497,18 @@ export function openProfileStore({ dataDir, ownerHash } = {}) {
     return { profileId: row.profile_id, revision: row.revision, parentRevision: row.parent_revision, hash: row.hash, author: row.author, createdAt: row.created_at, body }
   }
   const summaryOf = row => ({ profileId: row.profile_id, revision: row.revision, parentRevision: row.parent_revision, hash: row.hash, author: row.author, createdAt: row.created_at })
+  /** Where this profile came from, oldest first: [] for one made here from scratch. */
+  function sourceOf(row) {
+    let entries
+    try { entries = JSON.parse(row.source_json) } catch { fail('STORE_CORRUPT', 'Saved profile source is unreadable; database was not reset', 500) }
+    if (!Array.isArray(entries) || !entries.every(entry => entry && typeof entry === 'object' && !Array.isArray(entry) && typeof entry.kind === 'string')) {
+      fail('STORE_CORRUPT', 'Saved profile source is unreadable; database was not reset', 500)
+    }
+    return entries
+  }
+  // Instructions that came from outside this install wait for the user to read
+  // them: the profile runs nothing until a revision is activated here.
+  const reviewRequired = (row, source) => row.active_revision === null && source.some(entry => entry.kind === 'import')
   function requireProfile(id) {
     const row = q.profile.get(profileId(id), owner)
     if (!row) fail('PROFILE_NOT_FOUND', 'Profile does not exist', 404)
@@ -403,10 +523,12 @@ export function openProfileStore({ dataDir, ownerHash } = {}) {
     const head = record(q.head.get(row.id))
     if (!head) fail('STORE_CORRUPT', 'Saved profile has no revisions; database was not reset', 500)
     const active = row.active_revision === null ? null : record(q.revision.get(row.id, row.active_revision))
+    const source = sourceOf(row)
     return {
       id: row.id, lifecycle: row.lifecycle, origin: row.origin,
       activeRevision: row.active_revision, headRevision: head.revision,
       hasDraft: head.revision !== row.active_revision,
+      source, reviewRequired: reviewRequired(row, source),
       createdAt: row.created_at, updatedAt: row.updated_at, active, head,
     }
   }
@@ -417,8 +539,19 @@ export function openProfileStore({ dataDir, ownerHash } = {}) {
       id: shown.id, lifecycle: shown.lifecycle, origin: shown.origin,
       activeRevision: shown.activeRevision, headRevision: shown.headRevision, hasDraft: shown.hasDraft,
       name: body.name, role: body.role, avatar: body.avatar,
+      // The list carries only the nearest origin; GET /profiles/:id has the whole chain.
+      latestSource: shown.source.at(-1) ?? null, reviewRequired: shown.reviewRequired,
       createdAt: shown.createdAt, updatedAt: shown.updatedAt,
     }
+  }
+  /** One new user draft at revision 1 (inside a transaction). */
+  function insertDraft(json, hash, source, ts) {
+    if (db.prepare("SELECT COUNT(*) AS n FROM profiles WHERE owner_hash=? AND lifecycle<>'deleted'").get(owner).n >= MAX_PROFILES ||
+        db.prepare('SELECT COUNT(*) AS n FROM profiles').get().n >= MAX_PROFILE_ROWS) fail('PROFILE_LIMIT', `At most ${MAX_PROFILES} profiles can be kept`, 409)
+    const id = `prof-${randomUUID()}`
+    q.insertProfile.run(id, owner, null, 'draft', 'user', ts, ts, JSON.stringify(source.slice(-MAX_SOURCE_ENTRIES)))
+    q.insertRevision.run(id, 1, null, hash, 'user', json, ts)
+    return saved({ id }, 1, hash, false)
   }
   function saved(row, revision, hash, unchanged) {
     return { id: row.id, revision, hash, unchanged, profile: view(q.profile.get(row.id, owner)) }
@@ -455,13 +588,41 @@ export function openProfileStore({ dataDir, ownerHash } = {}) {
       ensureOpen()
       const normalized = normalizeProfileBody(body)
       const json = JSON.stringify(normalized), hash = digest(json)
+      return tx(() => insertDraft(json, hash, [], now()))
+    },
+    /**
+     * AGENT-02 "복제해서 새로 만들기": a new user draft from one saved revision
+     * (the active one, else the latest). The original and its revisions stay
+     * as they are (clone-keeps-original: openai-agents-python Agent.clone,
+     * crewAI BaseAgent.copy drops the id). The copy's source is the original's
+     * source plus one 'duplicate' entry naming the revision it came from.
+     * options.name replaces the default "<name> 사본".
+     */
+    duplicate(id, revision, options = {}) {
+      ensureOpen()
+      const name = options?.name
       return tx(() => {
-        if (db.prepare("SELECT COUNT(*) AS n FROM profiles WHERE owner_hash=? AND lifecycle<>'deleted'").get(owner).n >= MAX_PROFILES ||
-            db.prepare('SELECT COUNT(*) AS n FROM profiles').get().n >= MAX_PROFILE_ROWS) fail('PROFILE_LIMIT', `At most ${MAX_PROFILES} profiles can be kept`, 409)
-        const id = `prof-${randomUUID()}`, ts = now()
-        q.insertProfile.run(id, owner, null, 'draft', 'user', ts, ts)
-        q.insertRevision.run(id, 1, null, hash, 'user', json, ts)
-        return saved({ id }, 1, hash, false)
+        const row = requireProfile(id)
+        if (row.lifecycle === 'deleted') lifecycleConflict('A deleted profile cannot be duplicated', row)
+        const from = revisionOf(row, revision === undefined || revision === null ? row.active_revision ?? q.head.get(row.id).revision : revision)
+        const body = normalizeProfileBody({ ...from.body, name: name === undefined || name === null ? copyName(from.body.name) : name })
+        const json = JSON.stringify(body), ts = now()
+        const entry = { kind: 'duplicate', origin: row.origin, profileId: row.id, revision: from.revision, hash: from.hash, name: from.body.name, at: ts }
+        return insertDraft(json, digest(json), [...sourceOf(row), entry], ts)
+      })
+    },
+    /**
+     * A body from outside this install (today: an .egdesk bundle). It is
+     * always a draft with reviewRequired until the user activates a revision.
+     */
+    importDraft(body, { format = 'egdesk' } = {}) {
+      ensureOpen()
+      if (!IMPORT_FORMATS.includes(format)) fail('INVALID_PROFILE', 'Profile import format is not supported')
+      const normalized = normalizeProfileBody(body)
+      const json = JSON.stringify(normalized), hash = digest(json)
+      return tx(() => {
+        const ts = now()
+        return insertDraft(json, hash, [{ kind: 'import', format, name: normalized.name, at: ts }], ts)
       })
     },
     saveDraft(id, body, expectedRevision) {
@@ -539,7 +700,7 @@ export function openProfileStore({ dataDir, ownerHash } = {}) {
         const ts = now(), seeded = []
         for (const item of prepared) {
           if (db.prepare('SELECT 1 FROM profiles WHERE id=?').get(item.id)) continue
-          q.insertProfile.run(item.id, owner, null, 'active', 'template', ts, ts)
+          q.insertProfile.run(item.id, owner, null, 'active', 'template', ts, ts, '[]')
           q.insertRevision.run(item.id, 1, null, item.hash, 'template', item.json, ts)
           q.touch.run('active', 1, ts, item.id, owner)
           seeded.push(item.id)

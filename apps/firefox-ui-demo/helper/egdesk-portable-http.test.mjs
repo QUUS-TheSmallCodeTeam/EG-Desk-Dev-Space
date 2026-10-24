@@ -173,7 +173,8 @@ test('a Board exports with its chat and profiles; import adds a new conversation
   assert.equal(imported.data.desk, null)
   assert.deepEqual(imported.data.boards.map(item => item.boardId), ['agenda-alpha-001'])
   assert.deepEqual(imported.data.chats.map(item => [item.clientThreadId, item.idChanged, item.runs]), [[THREAD, false, 1]])
-  assert.deepEqual(imported.data.profiles.map(item => [item.name, item.status, item.active]), [['Reviewer Kim', 'imported', true]])
+  // Active where it was exported, but an Agent from a file waits as a draft until the user reviews it here.
+  assert.deepEqual(imported.data.profiles.map(item => [item.name, item.status, item.active, item.reviewRequired]), [['Reviewer Kim', 'imported', false, true]])
   const conversation = b.chat.getConversation(THREAD)
   assert.deepEqual([conversation.title, conversation.conversationId, conversation.coverage.status], ['Plan chat', null, 'complete'])
   const run = b.chat.getLatestRun(THREAD)
@@ -181,7 +182,11 @@ test('a Board exports with its chat and profiles; import adds a new conversation
   assert.match(run.messages[1].text, /password: \[REDACTED\]/)
   assert.deepEqual(b.chat.listMessages(THREAD).messages.map(message => message.text), ['Summarize the plan', 'Plan summary. Use password: [REDACTED] never.'])
   const profile = b.profiles.list().profiles.find(item => item.name === 'Reviewer Kim')
-  assert.deepEqual([profile?.lifecycle, profile?.id.startsWith('prof-')], ['active', true])
+  assert.deepEqual([profile?.lifecycle, profile?.id.startsWith('prof-'), profile?.activeRevision, profile?.reviewRequired], ['draft', true, null, true])
+  assert.deepEqual([profile.latestSource.kind, profile.latestSource.format, profile.latestSource.name], ['import', 'egdesk', 'Reviewer Kim'])
+  assert.throws(() => b.profiles.runProfile(profile.id), error => error.code === 'PROFILE_NOT_RUNNABLE', 'nothing runs before review')
+  const reviewed = b.profiles.activate(profile.id, 1, null)
+  assert.deepEqual([reviewed.lifecycle, reviewed.reviewRequired, reviewed.source.length], ['active', false, 1], 'activating is the review; the source stays')
 
   // Same machine: the conversation ID is taken, so a new one; the Board's chat card follows it.
   const again = await a.api('POST', '/v1/portable/import', { fileRef: out.data.fileRef, mode: 'asNew' })

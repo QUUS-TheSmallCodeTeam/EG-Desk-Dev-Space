@@ -15,6 +15,7 @@ import { MAX_PROFILES, PROFILE_TEMPLATES, normalizeProfileBody, profileHash } fr
 // bundle library's Argon2id + secretstream envelope) into a helper-chosen
 // folder. Inspect and import read a file from that folder or an uploaded copy;
 // import always makes new copies and never overwrites what is already here.
+// Imported Agent profiles arrive as drafts marked reviewRequired, never active.
 //
 // Bundle graph (bundle library node types are fixed):
 //   root 'desk' (type board) or 'board' (type board), body = root payload
@@ -627,10 +628,12 @@ function writeImport(plan, { desk, chat, profiles }) {
       written.chats.push({ clientThreadId: item.clientThreadId, title: item.title, sourceThreadId: item.sourceThreadId, idChanged: item.clientThreadId !== item.sourceThreadId, runs: item.snapshot.runs.length })
     }
     for (const item of plan.profiles) {
-      if (item.duplicate) { written.profiles.push({ profileId: null, name: item.body.name, status: 'duplicate', active: false }); continue }
-      const created = profiles.createDraft(item.body)
-      if (item.lifecycle === 'active') profiles.activate(created.id, created.revision, null)
-      written.profiles.push({ profileId: created.id, name: item.body.name, status: 'imported', active: item.lifecycle === 'active' })
+      if (item.duplicate) { written.profiles.push({ profileId: null, name: item.body.name, status: 'duplicate', active: false, reviewRequired: false }); continue }
+      // An Agent from a file is never turned on here, even if it was in use where
+      // it was exported: it waits as a draft until the user reads its
+      // instructions and activates it (reviewRequired on the profile).
+      const created = profiles.importDraft(item.body, { format: 'egdesk' })
+      written.profiles.push({ profileId: created.id, name: item.body.name, status: 'imported', active: false, reviewRequired: true })
     }
   } catch (error) { throw partial(error) }
   return written

@@ -14,6 +14,7 @@ const ROUTES = [
   ['GET', new RegExp(`^/profiles/${ID}/revisions/([1-9]\\d{0,8})$`), 'revision'],
   ['PUT', new RegExp(`^/profiles/${ID}/draft$`), 'draft'],
   ['POST', new RegExp(`^/profiles/${ID}/activate$`), 'activate'],
+  ['POST', new RegExp(`^/profiles/${ID}/duplicate$`), 'duplicate'],
   ['POST', new RegExp(`^/profiles/${ID}/lifecycle$`), 'lifecycle'],
   ['GET', new RegExp(`^/profiles/${ID}/diff$`), 'diff'],
 ]
@@ -39,12 +40,15 @@ function revisionParam(value, name) {
  * handleProfileHttp(req, url, {store, readJson, send, ensureAuth, port}) → true when it owned the URL.
  * store: profile store or () => store (null means storage is unavailable).
  * send(status, data) writes the response; readJson(req, {maxBytes}) defaults to readJsonBody.
- * GET /profiles[?includeArchived=true]       → {profiles}
+ * GET /profiles[?includeArchived=true]       → {profiles} (each with latestSource, reviewRequired)
  * POST /profiles {body}                      → 201 {id, revision, hash, unchanged, profile}
- * GET /profiles/:id                          → profile with active/head revisions
+ * GET /profiles/:id                          → profile with active/head revisions, source[], reviewRequired
  * GET /profiles/:id/revisions[/:revision]    → summaries, or one revision with body
  * PUT /profiles/:id/draft {body, expectedRevision}
  * POST /profiles/:id/activate {revision, expectedActiveRevision}
+ * POST /profiles/:id/duplicate {revision?, name?} → 201 like create: a new draft
+ *                                            copied from that revision (default: active, else latest),
+ *                                            named name or "<name> 사본"; the original is unchanged
  * POST /profiles/:id/lifecycle {action: disable|archive|restore|delete}
  * GET /profiles/:id/diff?from=&to=           → {profileId, from, to, changes}
  */
@@ -62,7 +66,7 @@ export async function handleProfileHttp(req, url, { store, readJson = readJsonBo
       if (found && req.method === method) { match = found; action = name; break }
     }
     if (!action) throw httpError('PROFILE_ROUTE_NOT_FOUND', 'Unknown profile endpoint', 404)
-    const body = ['create', 'draft', 'activate', 'lifecycle'].includes(action) ? await readJson(req, { maxBytes: MAX_BODY }) : null
+    const body = ['create', 'draft', 'activate', 'duplicate', 'lifecycle'].includes(action) ? await readJson(req, { maxBytes: MAX_BODY }) : null
     if (typeof ensureAuth === 'function') await ensureAuth()
     // Resolve after every await so an owner switch never writes to the old store.
     const profiles = typeof store === 'function' ? store() : store
@@ -84,6 +88,10 @@ export async function handleProfileHttp(req, url, { store, readJson = readJsonBo
     } else if (action === 'activate') {
       fields(body, ['revision', 'expectedActiveRevision'])
       result = profiles.activate(id, body.revision, body.expectedActiveRevision)
+    } else if (action === 'duplicate') {
+      fields(body, ['revision', 'name'], [])
+      result = profiles.duplicate(id, body.revision, { name: body.name })
+      status = 201
     } else if (action === 'lifecycle') {
       fields(body, ['action'])
       result = profiles.lifecycle(id, body.action)
