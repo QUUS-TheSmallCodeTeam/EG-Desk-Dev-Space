@@ -175,7 +175,7 @@ function cleanNotification(method, p) {
 }
 
 export class CodexChatRuntime {
-  constructor({ request, respond, engines = null, emit = () => {}, emitLegacy = () => {}, verifyFile = verifyLocalFile, now = Date.now, contexts = null, toolProviders = [], expectedProcessConfiguration = null, store = null, requireStore = false, getOwnerKey = () => null, qaReady = () => true, getNativeContractFingerprint = () => null, profiles = null, mcpServerKind = null, computerControlPolicy = DEFAULT_COMPUTER_CONTROL_POLICY, onComputerControlChange = () => {} }) {
+  constructor({ request, respond, engines = null, emit = () => {}, emitLegacy = () => {}, verifyFile = verifyLocalFile, now = Date.now, contexts = null, toolProviders = [], expectedProcessConfiguration = null, store = null, requireStore = false, getOwnerKey = () => null, qaReady = () => true, getNativeContractFingerprint = () => null, profiles = null, mcpServerKind = null, computerControlPolicy = null, computerControlStore = null, onComputerControlChange = () => {} }) {
     Object.assign(this, { emitEvent: emit, emitLegacy, verifyFile, now })
     // CU-07/CU-01: the inherited MCP kind of a server name (codex-inherited-mcp
     // kindOf), or null; it can only strengthen an activity row's controlKind.
@@ -185,7 +185,18 @@ export class CodexChatRuntime {
     // ordinary thread under 'off' read back as off, false after a refusal,
     // null when nothing is confirmed (inherit, not checked yet, or a Codex
     // build that cannot report thread features).
-    this.computerControl = { policy: normalizeComputerControlPolicy(computerControlPolicy), verified: null }
+    // computerControlStore (egdesk-bridge-settings.mjs) keeps the policy across
+    // restarts: { policy: saved policy or null, persisted: whether a choice can
+    // be kept, save(policy) → boolean }. With a store the snapshot ends with
+    // persisted: whether the current policy is saved for the next start.
+    // Policy order: an explicit computerControlPolicy, the saved one, then
+    // DEFAULT_COMPUTER_CONTROL_POLICY.
+    this.computerControlStore = computerControlStore
+    this.computerControl = {
+      policy: normalizeComputerControlPolicy(computerControlPolicy ?? computerControlStore?.policy ?? DEFAULT_COMPUTER_CONTROL_POLICY),
+      verified: null,
+      ...(computerControlStore ? { persisted: computerControlStore.persisted === true } : {}),
+    }
     this.onComputerControlChange = onComputerControlChange
     // Engines: an EngineRegistry, or adapters to register. Without either the
     // given request/respond become the Codex adapter, which calls them with
@@ -1218,7 +1229,8 @@ export class CodexChatRuntime {
         const extra = ceilingNarrows(ceiling) ? await ceilingOverrides() : null
         const computerExtra = computerOff ? await this.computerControlOffOverrides(overrides.cwd || this.threads.get(cid)?.cwd || null) : null
         if (epoch !== this.epochOf(engine.id)) throw chatError('CONTEXT_CHANGED', 'Codex connection or account changed', 409)
-        const resumed = await this.restoreThread(cid, context.clientThreadId, mergeCeilingOverrides(mergeCeilingOverrides({ ...overrides, ...(qaOverrides || {}) }, extra), computerExtra?.overrides), { policy })
+        // A bounded thread resumed with the ceiling's shell_tool false must read it back off.
+        const resumed = await this.restoreThread(cid, context.clientThreadId, mergeCeilingOverrides(mergeCeilingOverrides({ ...overrides, ...(qaOverrides || {}) }, extra), computerExtra?.overrides), { policy, shellOff: Boolean(extra) && ceiling?.terminal === 'none' })
         if (!bounded) context.ceilingNotices.push(...ceilingReportNotices(ceiling, await verifyCeilingNativeThread(this.request, ceiling, resumed, cid)))
         if (computerExtra) {
           await this.verifyComputerControl(cid, computerExtra)
@@ -1254,7 +1266,8 @@ export class CodexChatRuntime {
       let qaReceipt = null
       if (bounded) {
         qaReceipt = verifyQaNativeThread(result, policy)
-        qaReceipt = await verifyQaMcpIsolation(this.request, cid, qaReceipt)
+        // A terminal 'none' ceiling sent shell_tool false (loadCeilingThreadOverrides); confirm it.
+        qaReceipt = await verifyQaMcpIsolation(this.request, cid, qaReceipt, { shellOff: ceilingNarrows(ceiling) && ceiling.terminal === 'none' })
       } else context.ceilingNotices.push(...ceilingReportNotices(ceiling, await verifyCeilingNativeThread(this.request, ceiling, result, cid)))
       if (computerExtra) await this.verifyComputerControl(cid, computerExtra)
       if (epoch !== this.epochOf(engine.id)) throw chatError('ACCOUNT_CHANGED', 'Codex account changed', 409)
@@ -1388,7 +1401,7 @@ export class CodexChatRuntime {
     } finally { if (this.pendingStarts.get(cid) === pending) this.pendingStarts.delete(cid) }
   }
 
-  async restoreThread(cid, clientThreadId, overrides = {}, { policy = null } = {}) {
+  async restoreThread(cid, clientThreadId, overrides = {}, { policy = null, shellOff = false } = {}) {
     const engineId = this.threadEngine(cid)
     const epoch = this.epochOf(engineId)
     const pending = { buffer: [] }
@@ -1402,7 +1415,7 @@ export class CodexChatRuntime {
       let qaReceipt = null
       if (policy) {
         qaReceipt = verifyQaNativeThread(result, policy)
-        qaReceipt = await verifyQaMcpIsolation(this.request, cid, qaReceipt)
+        qaReceipt = await verifyQaMcpIsolation(this.request, cid, qaReceipt, { shellOff })
       }
       if (epoch !== this.epochOf(engineId)) throw chatError('CONTEXT_CHANGED', 'Codex connection or account changed', 409)
       this.rememberThread(cid, result, clientThreadId)
@@ -2266,20 +2279,29 @@ export class CodexChatRuntime {
   }
 
   computerControlSnapshot() {
-    return { policy: this.computerControl.policy, verified: this.computerControl.verified }
+    const { policy, verified, persisted } = this.computerControl
+    return this.computerControlStore ? { policy, verified, persisted } : { policy, verified }
   }
 
   // POST /settings/computer-control. A changed policy is unconfirmed until the
   // next ordinary thread is read back; loaded threads are reloaded on their next send.
+  // With a store the policy is saved too; a failed save still applies the
+  // policy and reports persisted: false.
   setComputerControlPolicy(value) {
     const policy = normalizeComputerControlPolicy(value)
-    if (policy !== this.computerControl.policy) this.updateComputerControl({ policy, verified: null })
+    const patch = policy !== this.computerControl.policy ? { policy, verified: null } : {}
+    if (this.computerControlStore) {
+      let saved = false
+      try { saved = this.computerControlStore.save(policy) === true } catch {}
+      patch.persisted = saved
+    }
+    this.updateComputerControl(patch)
     return this.computerControlSnapshot()
   }
 
   updateComputerControl(patch) {
     const next = { ...this.computerControl, ...patch }
-    if (next.policy === this.computerControl.policy && next.verified === this.computerControl.verified) return
+    if (next.policy === this.computerControl.policy && next.verified === this.computerControl.verified && next.persisted === this.computerControl.persisted) return
     this.computerControl = next
     try { this.onComputerControlChange(this.computerControlSnapshot()) } catch {}
   }

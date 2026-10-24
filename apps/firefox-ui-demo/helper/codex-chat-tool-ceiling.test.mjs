@@ -10,6 +10,7 @@ import {
   TOOL_CEILING_AXES, composeDeveloperInstructions, diffProfileBodies, normalizeProfileBody, normalizeToolCeiling, openProfileStore, profileHash,
 } from './egdesk-profile-store.mjs'
 import { CEILING_MESSAGES, ceilingApprovalRefusal, effectiveToolCeiling, mergeCeilingOverrides } from './codex-chat-tool-ceiling.mjs'
+import { verifyQaMcpIsolation } from './codex-chat-execution-policy.mjs'
 import { createPrivateQaTempDirectory } from '../scripts/egdesk-qa-platform.mjs'
 
 // AGENT-04: an Agent profile's tool ceiling, from the saved body to the native thread.
@@ -568,4 +569,85 @@ test('the run ceiling and its refusals are kept in local history and restored wi
   restored.threads.set(run.conversationId, { id: run.conversationId, clientThreadId: 'ui-ceiling' })
   assert.deepEqual(restored.ensureRun(run.conversationId, run.runId, null, false).toolCeiling, RESEARCH)
   assert.deepEqual(replies, [['cmd-1', { decision: 'decline' }]])
+})
+
+// A bounded (QA) run whose Agent ceiling has terminal 'none' sends shell_tool
+// false; the QA feature check now reads it back like the browser switches.
+test('QA with a terminal none ceiling confirms shell_tool is off on the new thread before the turn', async t => {
+  const p = profileStore(t)
+  const id = p.add({ toolCeiling: { terminal: 'none' } })
+  const h = harness({ profiles: p.profiles })
+  const run = await h.chat.send({ message: 'Read only', profileId: id, executionPolicy: { mode: 'readOnlyQa' } })
+  assert.equal(h.started()[0].config.features.shell_tool, false)
+  assert.equal(h.started()[0].sandbox, 'read-only')
+  assert.equal(run.executionPolicy.nativeComputerFeatures, 'off')
+  assert.equal(run.executionPolicy.nativeShellTool, 'off')
+  const checkAt = h.calls.findIndex(call => call.method === 'experimentalFeature/list' && call.params.threadId === run.conversationId)
+  assert.ok(checkAt !== -1 && checkAt < h.calls.findIndex(call => call.method === 'turn/start'))
+})
+
+test('QA with a terminal none ceiling refuses a new thread that still reports shell_tool on, or does not report it', async t => {
+  const p = profileStore(t)
+  const id = p.add({ toolCeiling: { terminal: 'none' } })
+  for (const data of [
+    CEILING_FEATURES.map(name => ({ name, enabled: name === 'shell_tool', stage: 'stable' })),
+    CEILING_FEATURES.filter(name => name !== 'shell_tool').map(name => ({ name, enabled: false, stage: 'stable' })),
+  ]) {
+    const h = harness({ profiles: p.profiles, request: async (method, params) => method === 'experimentalFeature/list' && params.threadId ? { data, nextCursor: null } : undefined })
+    await assert.rejects(h.chat.send({ message: 'Read only', profileId: id, executionPolicy: { mode: 'readOnlyQa' } }),
+      error => error.code === 'QA_TOOL_ISOLATION_UNVERIFIED' && error.httpStatus === 502 && /shell tool/.test(error.message) && /no turn was started$/.test(error.message))
+    assert.equal(h.calls.some(call => call.method === 'turn/start'), false)
+  }
+})
+
+test('QA without a terminal none ceiling does not ask for shell_tool and keeps the receipt shape', async t => {
+  const p = profileStore(t)
+  // shell_tool reads on (never sent) on these threads; only the browser and computer switches matter.
+  for (const [index, ceiling] of [null, { browser: 'observe' }, { terminal: 'allow', files: 'read' }].entries()) {
+    const h = harness({ profiles: p.profiles })
+    const run = await h.chat.send({ message: 'Read only', ...(ceiling ? { profileId: p.add({ name: `상한 ${index}`, toolCeiling: ceiling }) } : {}), executionPolicy: { mode: 'readOnlyQa' } })
+    assert.equal(Object.hasOwn(h.started()[0].config.features, 'shell_tool'), false, JSON.stringify(ceiling))
+    assert.equal(run.executionPolicy.nativeComputerFeatures, 'off')
+    assert.equal(Object.hasOwn(run.executionPolicy, 'nativeShellTool'), false, JSON.stringify(ceiling))
+  }
+})
+
+test('QA with a terminal none ceiling re-checks shell_tool when the same thread is resumed for the next send', async t => {
+  const p = profileStore(t)
+  const id = p.add({ toolCeiling: { terminal: 'none' } })
+  let shellOnAfterResume = false
+  const h = harness({ profiles: p.profiles, request: async (method, params) => {
+    if (method === 'experimentalFeature/list' && params.threadId && shellOnAfterResume) return featureList({ browser_use: false, browser_use_external: false, computer_use: false })
+  } })
+  const first = await h.chat.send({ message: 'First', profileId: id, executionPolicy: { mode: 'readOnlyQa' } })
+  await h.finish(first)
+  const next = await h.chat.send({ message: 'Next', conversationId: first.conversationId, profileId: id, executionPolicy: { mode: 'readOnlyQa' } })
+  const resumed = h.calls.filter(call => call.method === 'thread/resume').at(-1).params
+  assert.equal(resumed.config.features.shell_tool, false)
+  assert.equal(next.executionPolicy.nativeShellTool, 'off')
+  const resumeAt = h.calls.lastIndexOf(h.calls.filter(call => call.method === 'thread/resume').at(-1))
+  const checkAt = h.calls.findLastIndex(call => call.method === 'experimentalFeature/list' && call.params.threadId === first.conversationId)
+  assert.ok(resumeAt < checkAt && checkAt < h.calls.findLastIndex(call => call.method === 'turn/start'))
+  await h.finish(next)
+  // The resumed thread reports shell_tool on: the third send is refused before any turn.
+  shellOnAfterResume = true
+  const turns = h.calls.filter(call => call.method === 'turn/start').length
+  await assert.rejects(h.chat.send({ message: 'Third', conversationId: first.conversationId, profileId: id, executionPolicy: { mode: 'readOnlyQa' } }),
+    error => error.code === 'QA_TOOL_ISOLATION_UNVERIFIED' && /shell tool/.test(error.message))
+  assert.equal(h.calls.filter(call => call.method === 'turn/start').length, turns)
+})
+
+test('verifyQaMcpIsolation checks shell_tool only when asked and records unchecked on a build without thread features', async () => {
+  const servers = { data: [{ name: 'user-tools', tools: {}, resources: [], resourceTemplates: [], toolsError: null }], nextCursor: null }
+  const reply = features => async method => method === 'mcpServerStatus/list' ? servers : features()
+  const browserOff = () => featureList({ browser_use: false, browser_use_external: false, computer_use: false })
+  const receipt = { mode: 'readOnlyQa', status: 'native-thread-verified' }
+  assert.deepEqual(await verifyQaMcpIsolation(reply(browserOff), 't-1', receipt),
+    { ...receipt, externalMcpCatalog: 'empty', inspectedMcpServers: 1, nativeComputerFeatures: 'off' })
+  await assert.rejects(verifyQaMcpIsolation(reply(browserOff), 't-1', receipt, { shellOff: true }), error => error.code === 'QA_TOOL_ISOLATION_UNVERIFIED')
+  assert.deepEqual(await verifyQaMcpIsolation(reply(() => featureList({ shell_tool: false, browser_use: false, browser_use_external: false, computer_use: false })), 't-1', receipt, { shellOff: true }),
+    { ...receipt, externalMcpCatalog: 'empty', inspectedMcpServers: 1, nativeComputerFeatures: 'off', nativeShellTool: 'off' })
+  const absent = async () => { throw Object.assign(new Error('Invalid request: unknown variant `experimentalFeature/list`'), { code: -32600 }) }
+  assert.deepEqual(await verifyQaMcpIsolation(reply(absent), 't-1', receipt, { shellOff: true }),
+    { ...receipt, externalMcpCatalog: 'empty', inspectedMcpServers: 1, nativeComputerFeatures: 'unchecked', nativeShellTool: 'unchecked' })
 })

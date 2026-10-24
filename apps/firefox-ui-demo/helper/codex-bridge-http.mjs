@@ -144,10 +144,12 @@ export function createChatHttpHandler(chat, ensureAuth, history = chat) {
 
 /**
  * CU-01 computer control setting for ordinary Codex threads.
- * POST /settings/computer-control {policy: 'inherit'|'off'} → 200 {policy, verified}
+ * POST /settings/computer-control {policy: 'inherit'|'off'} → 200 {policy, verified, persisted}
  * Loopback/Origin guard, an application/json object with exactly one key. No
  * Codex call is made, so it works signed out; the policy takes effect on the
- * next send. /v1/state carries the same {policy, verified} as computerControl.
+ * next send and is saved for the next start. A failed save is not an error:
+ * the policy still applies and persisted is false. /v1/state carries the same
+ * {policy, verified, persisted} as computerControl.
  */
 export function createComputerControlHttpHandler(chat, { port = 39218 } = {}) {
   return async (req, res, url) => {

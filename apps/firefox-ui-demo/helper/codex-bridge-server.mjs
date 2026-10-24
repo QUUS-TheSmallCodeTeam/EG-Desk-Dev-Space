@@ -27,6 +27,7 @@ import { openChatStore } from './egdesk-chat-store.mjs'
 import { openProfileStore } from './egdesk-profile-store.mjs'
 import { createProfileHttpHandler } from './egdesk-profile-http.mjs'
 import { openDeskStore } from './egdesk-desk-store.mjs'
+import { openBridgeSettings } from './egdesk-bridge-settings.mjs'
 import { createDeskHttpHandler } from './egdesk-desk-http.mjs'
 import { NativeReaderClient } from './egdesk-native-reader.mjs'
 import { ContextRuntime } from './egdesk-context-runtime.mjs'
@@ -156,6 +157,10 @@ try {
   deskStoreError = publicText(error?.message || 'Local Desk storage failed to open', 1000)
   console.error('[egdesk-codex-bridge] local Desk storage unavailable:', deskStoreError)
 }
+// CU-01: settings the user chose that outlive a restart (computer control).
+// Never throws; a broken file is set aside and logged, and the bridge starts
+// with defaults (computerControl.persisted then tells the screen).
+const bridgeSettings = openBridgeSettings({ dataDir: path.join(dataDir, 'settings') })
 // RT-06/CHAT-06 workflow runtime (event bus, connected-root watcher, task
 // graph). Opened after Chat below; callbacks that fire earlier are no-ops.
 let workflow = null
@@ -224,7 +229,9 @@ const chat = new CodexChatRuntime({
   // CU-01: an MCP call's controlKind also reads the inherited classification
   // (declared below; a Computer Use marker makes node_repl 'computer').
   mcpServerKind: name => inheritedMcp.kindOf(name),
-  // CU-01 stage 1: 'inherit' until the decision; POST /settings/computer-control changes it.
+  // CU-01 stage 1: the saved choice, else 'inherit' until the decision; POST
+  // /settings/computer-control changes and saves it.
+  computerControlStore: bridgeSettings.computerControl,
   onComputerControlChange: computerControl => broadcast({ type: 'computer.control', v: BRIDGE_PROTOCOL_VERSION, provider: PROVIDER_ID, computerControl, ts: Date.now() }),
 })
 if (chatStore) {
@@ -734,7 +741,7 @@ const bridgeServer = createServer(async (req, res) => {
       inheritedMcp: inheritedMcp.snapshot(),
       // RT-06/CHAT-06 { tasks, taskError, maxConcurrency, eventSeq, droppedEvents, watchedRoots, maxWatchedRoots, refusedRoots, droppedFileEvents }.
       workflow: workflow.snapshot(),
-      // CU-01 { policy: 'inherit'|'off', verified: true|false|null } for ordinary Codex threads.
+      // CU-01 { policy: 'inherit'|'off', verified: true|false|null, persisted: boolean } for ordinary Codex threads.
       computerControl: chat.computerControlSnapshot(),
       // RT-07 Desk store ready; false means the screen keeps its preference values.
       deskStorageReady: Boolean(deskStore),

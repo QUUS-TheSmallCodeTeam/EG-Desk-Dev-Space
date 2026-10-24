@@ -186,7 +186,10 @@ export function verifyQaNativeThread(result, mode = READ_ONLY_QA) {
 // Also checks Codex's own browser and computer switches are off on that
 // thread. nativeComputerFeatures is 'off', or 'unchecked' when this Codex
 // build cannot report thread features (the MCP check above still ran).
-export async function verifyQaMcpIsolation(request, threadId, receipt) {
+// shellOff: the run's Agent ceiling has terminal 'none', so the thread was
+// started or resumed with shell_tool false; that switch must read off as
+// well, and the receipt adds nativeShellTool ('off' | 'unchecked').
+export async function verifyQaMcpIsolation(request, threadId, receipt, { shellOff = false } = {}) {
   const servers = await listNativeMcpServers(request, threadId)
   if (servers.some(server => Object.keys(server.tools).length || server.resources.length || server.resourceTemplates.length || server.toolsError != null)) {
     throw chatError('QA_TOOL_ISOLATION_UNVERIFIED', 'Native thread still exposes external MCP capabilities; no turn was started', 502)
@@ -197,7 +200,13 @@ export async function verifyQaMcpIsolation(request, threadId, receipt) {
   if (features && featuresNotOff(features, NATIVE_COMPUTER_FEATURES).length) {
     throw chatError('QA_TOOL_ISOLATION_UNVERIFIED', 'Native thread still allows built-in browser or computer control; no turn was started', 502)
   }
-  return { ...receipt, externalMcpCatalog: 'empty', inspectedMcpServers: servers.length, nativeComputerFeatures: features ? 'off' : 'unchecked' }
+  if (shellOff && features && featuresNotOff(features, ['shell_tool']).length) {
+    throw chatError('QA_TOOL_ISOLATION_UNVERIFIED', 'Native thread still allows the shell tool the Agent terminal limit turns off; no turn was started', 502)
+  }
+  return {
+    ...receipt, externalMcpCatalog: 'empty', inspectedMcpServers: servers.length, nativeComputerFeatures: features ? 'off' : 'unchecked',
+    ...(shellOff ? { nativeShellTool: features ? 'off' : 'unchecked' } : {}),
+  }
 }
 
 export const QA_TURN_OVERRIDES = Object.freeze({
