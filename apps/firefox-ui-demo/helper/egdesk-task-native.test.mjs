@@ -27,9 +27,32 @@ const status = (graph, id, taskId = 'a') => graph.getGraph(id).tasks.find((task)
 
 async function fixture(t, options = {}) {
   const directory = await mkdtemp(path.join(os.tmpdir(), 'egdesk-task-native-'));
-  t.after(() => rm(directory, { recursive: true, force: true }));
-  const ledger = await openNativeTaskLedger(path.join(directory, 'native'));
-  const store = await openTaskStore(path.join(directory, 'graph'));
+  // Cleanup order: stop the graphs, let every journal/ledger write that already
+  // started finish, then remove the folder. A write still creating or renaming
+  // its temp file while rm walks the folder fails rmdir with ENOTEMPTY.
+  const writes = new Set(), graphs = [];
+  const tracked = (work) => {
+    writes.add(work);
+    void work.finally(() => writes.delete(work)).catch(() => {});
+    return work;
+  };
+  t.after(async () => {
+    for (const graph of graphs) graph.close();
+    while (writes.size) await Promise.allSettled([...writes]);
+    await rm(directory, { recursive: true, force: true });
+  });
+  async function openLedger() {
+    const opened = await openNativeTaskLedger(path.join(directory, 'native'));
+    return { snapshot: () => opened.snapshot(), transact: (change) => tracked(opened.transact(change)) };
+  }
+  async function openGraph(callbacks) {
+    const opened = await openTaskStore(path.join(directory, 'graph'));
+    const store = { ...opened, save: (events) => tracked(opened.save(events)) };
+    const graph = await openTaskGraph({ store, maxConcurrency: 2, ...callbacks });
+    graphs.push(graph);
+    return graph;
+  }
+  const ledger = await openLedger();
   const calls = [], events = [], pendingEvents = [], eventErrors = [], replies = [];
   const authority = { ownerKey: 'engine-A', generation: 1, delegationKey: 'delegation-parent', revoked: false };
   const auth = {
@@ -72,7 +95,7 @@ async function fixture(t, options = {}) {
   const resolver = options.resolve ?? (async ({ binding }) => ({ message: `PRIVATE-RESOLVED-${binding.sourceRef}`, cwd: '/authorized/work' }));
   adapter = createNativeTaskAdapter({ chat, ledger: options.wrapLedger?.(ledger) ?? ledger,
     resolveTaskInput: resolver, ...auth });
-  const graph = await openTaskGraph({ store, maxConcurrency: 2, ...adapter });
+  const graph = await openGraph(adapter);
   async function register(value, boardId = `board-${value.graphId}`) {
     const queued = await graph.submitGraph(value);
     await adapter.registerGraph({ boardId, graph: queued });
@@ -89,7 +112,7 @@ async function fixture(t, options = {}) {
     await flush();
   }
   return { directory, ledger, graph, adapter, chat, calls, events, eventErrors, replies, authority, auth,
-    resolver, resumedTurns, register, flush, finish,
+    resolver, resumedTurns, register, flush, finish, openLedger, openGraph,
     setAdapter(next) { adapter = next; },
   };
 }
@@ -196,10 +219,10 @@ test('restart reconciles exact native IDs without sending a replacement task', a
   await until(() => h.adapter.getState(value.graphId).attempts[0]?.phase === 'accepted');
   const original = h.ledger.snapshot().attempts[0];
   h.resumedTurns.set(original.native.conversationId, [{ id: original.native.runId, status: 'completed', items: [], itemsView: 'full' }]);
-  const ledger = await openNativeTaskLedger(path.join(h.directory, 'native'));
+  const ledger = await h.openLedger();
   const adapter = createNativeTaskAdapter({ chat: h.chat, ledger, resolveTaskInput: h.resolver, ...h.auth });
   h.setAdapter(adapter);
-  const graph = await openTaskGraph({ store: await openTaskStore(path.join(h.directory, 'graph')), ...adapter });
+  const graph = await h.openGraph(adapter);
   assert.equal(graph.getGraph(value.graphId).recoveryHold, true);
   await assert.rejects(adapter.execute({ binding: original.binding, dependencyReceipts: [], approvalReceiptId: null }),
     { code: 'TASK_RECONCILE_REQUIRED' });
@@ -217,8 +240,11 @@ test('unknown lost acceptance and transport failure are held across restart, nev
   const value = spec('unknown', false, false);
   await h.register(value); await h.graph.activateGraph(scope(value));
   await until(() => h.ledger.snapshot().attempts[0]?.phase === 'unknown');
+  // Held means the graph journaled the attempt as uncertain. That journal write
+  // follows the failed send in the background; wait for it, not just the ledger.
+  await until(() => h.graph.getGraph(value.graphId).tasks[0].uncertain);
   const adapter = createNativeTaskAdapter({ chat: h.chat,
-    ledger: await openNativeTaskLedger(path.join(h.directory, 'native')), resolveTaskInput: h.resolver, ...h.auth });
+    ledger: await h.openLedger(), resolveTaskInput: h.resolver, ...h.auth });
   const result = await adapter.reconcile(h.graph, scope(value));
   assert.equal(result.results[0].status, 'unverified');
   assert.equal(status(h.graph, value.graphId), 'running');
@@ -241,9 +267,9 @@ test('lost reply holds partial history, then reconciles a known native thread wi
   assert.equal(original.native, null);
   h.resumedTurns.set(nativeThread, [{ id: 'native-lost-turn', status: 'completed', items: [], itemsView: 'summary' }]);
   const adapter = createNativeTaskAdapter({ chat: h.chat,
-    ledger: await openNativeTaskLedger(path.join(h.directory, 'native')), resolveTaskInput: h.resolver, ...h.auth });
+    ledger: await h.openLedger(), resolveTaskInput: h.resolver, ...h.auth });
   h.setAdapter(adapter);
-  const graph = await openTaskGraph({ store: await openTaskStore(path.join(h.directory, 'graph')), ...adapter });
+  const graph = await h.openGraph(adapter);
   const held = await adapter.reconcile(graph, scope(value));
   assert.equal(held.results[0].status, 'unverified');
   assert.equal(status(graph, value.graphId), 'running');
