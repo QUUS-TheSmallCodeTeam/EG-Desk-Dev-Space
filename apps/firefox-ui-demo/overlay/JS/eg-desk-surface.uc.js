@@ -327,14 +327,30 @@
     return codexThreadKindMeta(type).longLabel;
   }
 
-  // The key names the badge style; the label is the word shown.
+  // The key names the badge style; the label is the word shown. A one-time or
+  // branched room (CHAT-09) says so before its connection state.
   function codexThreadSessionKey(thread) {
+    const kind = ChatState.chatSessionKind(thread);
+    if (kind) return kind;
     if (ChatState.nativeBindingHeld(thread)) return 'local';
     return thread?.conversationId ? 'resumed' : 'fresh';
   }
 
   function codexThreadSessionLabel(thread) {
-    return { local: '로컬 기록', resumed: '이어진 대화', fresh: '새 대화' }[codexThreadSessionKey(thread)];
+    return { stateless: '일회성', forked: '분기됨', local: '로컬 기록', resumed: '이어진 대화', fresh: '새 대화' }[codexThreadSessionKey(thread)];
+  }
+
+  // Room list and header badge. A branched room's badge opens the room it came from.
+  function buildCodexSessionBadge(thread, codexBridge) {
+    const className = `egd-codex-session-badge egd-codex-session-badge-${codexThreadSessionKey(thread)}`;
+    const label = codexThreadSessionLabel(thread);
+    const data = { testid: 'chat-session-badge', session: codexThreadSessionKey(thread) };
+    if (data.session !== 'forked') return el('span', { class: className, data }, label);
+    return el('button', {
+      class: `${className} egd-codex-session-badge-link`, type: 'button', data,
+      title: '원본 대화 열기', 'aria-label': `${label} · 원본 대화 열기`,
+      onclick: (ev) => { ev.stopPropagation(); codexBridge.openForkSource(thread.id); },
+    }, label);
   }
 
   function chatBindingNonce() {
@@ -519,6 +535,11 @@
       engineConfiguration: null,
       recentEngineId: ChatState.DEFAULT_CHAT_ENGINE_ID,
       engineMenu: null,
+      // /v1/state capabilities.chat ('stateless', 'fork') and inheritedMcp;
+      // null until a bridge reports them (older bridges never do).
+      chatCapabilities: null,
+      inheritedMcp: null,
+      messageMenu: null,
       localHistoryStatus: 'idle',
       localHistoryError: null,
       localHistoryBootReady: false,
@@ -563,6 +584,41 @@
     }
     const prefix = lastMessage.role === 'user' ? '나: ' : '';
     return `${prefix}${lastMessage.content}`.slice(0, 70);
+  }
+
+  // What a screen reader says for a room row: its name, unread count and last line.
+  function codexThreadRowLabel(thread) {
+    const unread = thread.unreadCount > 0 ? `안 읽은 메시지 ${thread.unreadCount}개` : null;
+    return [thread.title, unread, stripMarkdown(codexThreadPreview(thread))].filter(Boolean).join(' · ');
+  }
+
+  // A room row is a div that holds its own menu button, so it takes the button
+  // role and its keys here. Keys aimed at that menu button stay with it.
+  function bindChatRoomRowKeys(row, activate) {
+    row.addEventListener('keydown', (ev) => {
+      if (ev.target !== row || ev.isComposing || ev.altKey || ev.ctrlKey || ev.metaKey) return;
+      if (ev.key !== 'Enter' && ev.key !== ' ' && ev.key !== 'Spacebar') return;
+      ev.preventDefault();
+      activate();
+    });
+  }
+
+  // Chat rebuilds its DOM on every change. Like the activity panel, a control
+  // with a focus key gets keyboard focus and caret back after the rebuild.
+  function chatFocusSnapshot(root, active) {
+    const key = active && root?.contains(active) ? active.dataset?.focusKey : null;
+    if (!key) return null;
+    return { key, start: typeof active.selectionStart === 'number' ? active.selectionStart : null,
+      end: active.selectionEnd, direction: active.selectionDirection || 'none' };
+  }
+
+  function restoreChatFocus(root, snapshot) {
+    if (!root || !snapshot) return false;
+    const target = [...root.querySelectorAll('[data-focus-key]')].find(node => node.dataset.focusKey === snapshot.key);
+    if (!target || target.disabled) return false;
+    target.focus({ preventScroll: true });
+    if (snapshot.start !== null) try { target.setSelectionRange(snapshot.start, snapshot.end, snapshot.direction); } catch {}
+    return true;
   }
 
   function codexThreadTypeLabel(type) {
@@ -671,21 +727,23 @@
     return { text: String(message?.content || ''), links: (message?.artifacts || []).filter(ChatState.usableArtifact) };
   }
 
-  function openChatFileReference(reference) {
+  // `opener` is the Chat card whose artifact was pressed; a new Browser keeps
+  // it in sight when the camera follows (revealPlacedCanvasCard).
+  function openChatFileReference(reference, options = {}) {
     const path = reference?.target?.path;
     if (reference?.type !== 'file' || typeof path !== 'string' || !path.startsWith('/')) return false;
     const file = railSearchNsFileFromPath(path);
     try {
       if (!file?.exists?.()) throw new Error('missing');
     } catch { boardNotice('참조된 파일을 열 수 없습니다. 경로와 접근 권한을 확인해 주세요.'); return false; }
-    const card = spawnBrowserCard(railSearchPathToFileUrl(path), { openMode: 'focus-existing' });
+    const card = spawnBrowserCard(railSearchPathToFileUrl(path), { openMode: 'focus-existing', opener: options.opener || null });
     focusCanvasCard(card);
     return card;
   }
 
-  function openCodexResultLink(link) {
+  function openCodexResultLink(link, options = {}) {
     if (!ChatState.usableArtifact(link)) return false;
-    return openChatFileReference(link);
+    return openChatFileReference(link, options);
   }
 
   function buildCodexResultChips(message, thread, links) {
@@ -697,7 +755,10 @@
       'aria-label': `참조된 파일 열기: ${artifact.label || artifact.target.path.split('/').pop()}`,
       title: `참조된 기존 파일 · ${artifact.target.path}`,
       data: { testid: 'chat-artifact', artifactId: artifact.id, answerId: artifact.answerId, runId: artifact.runId },
-      onclick: ev => { ev.preventDefault(); ev.stopPropagation(); openCodexResultLink(artifact); },
+      onclick: ev => {
+        ev.preventDefault(); ev.stopPropagation();
+        openCodexResultLink(artifact, { opener: ev.currentTarget?.closest?.('.egd-chat-card') || null });
+      },
     }, el('span', { class: 'egd-codex-result-label' }, artifact.label || artifact.target.path.split('/').pop()),
     el('span', { 'aria-hidden': 'true', class: 'egd-codex-result-arrow' }, '↗'))));
   }
@@ -3752,8 +3813,10 @@
 
   // The camera follows a View placed outside the view once its caller is done.
   // A restore that writes the saved rect, or a camera move made meanwhile (a
-  // Board focus, a Briefing fit), keeps the camera where it is.
-  function revealPlacedCanvasCard(card, placement) {
+  // Board focus, a Briefing fit), keeps the camera where it is. A View opened
+  // from a Chat card (an artifact chip) is framed with that Chat while both
+  // stay readable; otherwise it shows alone with a short way back to the Chat.
+  function revealPlacedCanvasCard(card, placement, options = {}) {
     if (!card || !placement || placement.inView) return;
     const camera = { x: state.panTarget.x, y: state.panTarget.y, zoom: state.zoomTarget };
     window.setTimeout(() => {
@@ -3761,8 +3824,63 @@
       if (state.panTarget.x !== camera.x || state.panTarget.y !== camera.y || state.zoomTarget !== camera.zoom) return;
       const rect = persistentEntityGeometry(card);
       if (rect.x !== Math.round(placement.x) || rect.y !== Math.round(placement.y)) return;
-      state.setCanvasPanTarget?.(SurfaceState.revealRectPan(rect, safeViewportRect(), { pan: state.panTarget, zoom: state.zoomTarget }));
+      const safe = safeViewportRect();
+      const view = { pan: state.panTarget, zoom: state.zoomTarget };
+      const opener = options.opener?.isConnected && options.opener !== card ? options.opener : null;
+      if (opener) {
+        const chat = chatOpenerView(opener);
+        const minZoom = SurfaceState.semanticDetailZoomFloor([{ ...rect, kind: options.kind }, chat]);
+        const paired = SurfaceState.pairedRevealCamera([rect, chat], safe, { ...view, minZoom });
+        if (paired) { state.setCanvasViewportTarget?.(paired); return; }
+        showChatReturnCue(opener);
+      }
+      state.setCanvasPanTarget?.(SurfaceState.revealRectPan(rect, safe, view));
     }, 0);
+  }
+
+  // The opening Chat card as the camera sees it: its visible height (a
+  // readable cap may shorten it) and the body font its detail level reads.
+  function chatOpenerView(card) {
+    const rect = persistentEntityGeometry(card);
+    const height = card.style.maxHeight ? Math.min(rect.height, parsePxNumber(card.style.maxHeight, rect.height)) : rect.height;
+    const body = card.querySelector('.egd-chat-card-body') || card;
+    return { kind: 'chat', x: rect.x, y: rect.y, width: rect.width, height,
+      fontPx: parsePxNumber(window.getComputedStyle(body).fontSize, 14) };
+  }
+
+  // Shown for a few seconds when a View opened from Chat took the camera
+  // alone. Pressing it brings that Chat back the way the Dock's Chat does; it
+  // leaves once the Chat is back by any way (Dock, a click into the Chat).
+  const CHAT_RETURN_CUE_MS = 6000;
+  function dismissChatReturnCue() {
+    document.getElementById('egd-chat-return')?._dismiss?.();
+  }
+
+  function showChatReturnCue(chatCard) {
+    document.getElementById('egd-chat-return')?._dismiss?.();
+    const cue = el('div', { id: 'egd-chat-return', class: 'egd-edge egd-frosted', role: 'status' });
+    const chatListeners = new AbortController();
+    let timer = 0;
+    const dismiss = () => {
+      if (timer) window.clearTimeout(timer);
+      timer = 0;
+      chatListeners.abort();
+      cue.remove();
+    };
+    cue._dismiss = dismiss;
+    for (const type of ['mousedown', 'focusin']) chatCard.addEventListener(type, dismiss, { capture: true, signal: chatListeners.signal });
+    cue.appendChild(el('button', {
+      type: 'button', class: 'egd-chat-return-button', data: { testid: 'chat-return' },
+      onclick: (ev) => {
+        ev.stopPropagation();
+        dismiss();
+        if (!chatCard.isConnected) return;
+        if (!state.focusChatDockIfCompact?.(chatCard)) focusCanvasCard(chatCard);
+      },
+    }, deskIcon('chat'), el('span', {}, '채팅으로 돌아가기')));
+    document.documentElement.appendChild(cue);
+    timer = window.setTimeout(dismiss, CHAT_RETURN_CUE_MS);
+    return cue;
   }
 
   function resolveFloatingMenuPlacement(anchorRect, menuWidth = 152, menuHeight = 156) {
@@ -4762,6 +4880,7 @@
               } else if (item.id === 'ontology') {
                 spawnOntologyMapCard();
               } else if (item.id === 'chat') {
+                dismissChatReturnCue();
                 state.codex.hudView = 'conversation';
                 const chatCard = spawnCodexChatCard();
                 state.codexBridge?.selectThread(state.codex.activeThreadId, { openConversation: true });
@@ -5002,7 +5121,9 @@
       artifacts: ChatState.nativeBindingHeld(thread) ? [] : run?.artifacts || message?.artifacts || [],
       openArtifact: artifact => {
         const current = getCodexThreadById(state.codex, thread?.id);
-        if (current && !ChatState.nativeBindingHeld(current)) return openCodexResultLink(artifact);
+        if (current && !ChatState.nativeBindingHeld(current)) {
+          return openCodexResultLink(artifact, { opener: container.closest?.('.egd-chat-card') || null });
+        }
         return false;
       },
       openWeb: url => openUrlInBrowserCard(url),
@@ -5119,6 +5240,36 @@
     };
   }
 
+  // CHAT-09/CU-07: /v1/state capabilities.chat and inheritedMcp, kept as
+  // reported. An older bridge sends neither: no one-time start or branching,
+  // and the inherited tool list reads '확인할 수 없음'.
+  function bridgeSessionFields(bridgeState) {
+    const chat = bridgeState?.capabilities?.chat;
+    return {
+      chatCapabilities: Array.isArray(chat) ? chat.filter((name) => typeof name === 'string') : null,
+      inheritedMcp: Array.isArray(bridgeState?.inheritedMcp) ? bridgeState.inheritedMcp : null,
+    };
+  }
+
+  // RT-05: the helper build this overlay was installed with. The launcher
+  // writes the marker; an overlay installed without it sends nothing, and the
+  // bridge then never reports a mismatch.
+  const OVERLAY_BUILD_MARKER_URL = 'chrome://userchrome/content/egdesk-bridge-build.json';
+  function readExpectedOverlayBuild(load = fetch) {
+    return Promise.resolve()
+      .then(() => load(OVERLAY_BUILD_MARKER_URL, { cache: 'no-store' }))
+      .then((response) => (response?.ok ? response.json() : null))
+      .then((marker) => {
+        const value = typeof marker?.buildHash === 'string' ? marker.buildHash.trim().toLowerCase() : '';
+        return /^[a-f0-9]{64}$/.test(value) ? value : null;
+      })
+      .catch(() => null);
+  }
+
+  function overlayBuildHeaders(buildHash) {
+    return typeof buildHash === 'string' && /^[a-f0-9]{64}$/.test(buildHash) ? { 'X-EGDesk-Overlay-Build': buildHash } : {};
+  }
+
   // /v1/state engines[] rows and the verified Codex launch model, kept as
   // reported; ChatState reads them (older bridges send neither).
   function bridgeEngineFields(bridgeState) {
@@ -5173,11 +5324,19 @@
     let compositionInProgress = false;
     let deferredCodex = null;
     let pendingMessageScroll = null;
+    let focusOpenedRoom = false;
     const mode = options.mode || 'hud';
+    // A room opened from the keyboard hands focus to its conversation, so the
+    // list leaving the screen does not drop focus onto the page.
+    const openRoomFromKeyboard = (threadId) => {
+      focusOpenedRoom = true;
+      try { codexBridge.selectThread(threadId, { openConversation: true }); } finally { focusOpenedRoom = false; }
+    };
     const closeFloatingMenus = () => {
       codexBridge.closeMemberMenu();
       codexBridge.closeThreadMenu();
       codexBridge.closeEngineMenu();
+      codexBridge.closeMessageMenu?.();
     };
     const onMessageScrollGesture = (ev) => {
       const target = ev.target;
@@ -5197,6 +5356,7 @@
       if (target.closest('.egd-codex-thread-member-clickable')) return;
       if (target.closest('.egd-codex-thread-menu')) return;
       if (target.closest('.egd-codex-thread-menu-trigger')) return;
+      if (target.closest('.egd-codex-message-menu-trigger')) return;
       if (target.closest('.egd-codex-engine-panel, .egd-codex-engine-chip')) return;
       closeFloatingMenus();
     };
@@ -5244,6 +5404,7 @@
       pendingMessageScroll = null;
       composerObserver?.disconnect();
       composerObserver = null;
+      const focusState = chatFocusSnapshot(body, document.activeElement);
       body.textContent = '';
       const explicitActiveThread = codex.activeThreadId
         ? getCodexThreadById(codex, codex.activeThreadId)
@@ -5383,8 +5544,26 @@
         class: 'egd-codex-thread-search',
         value: codex.threadQuery || '',
         placeholder: '대화방 찾기',
+        'aria-label': '대화방 찾기',
+        data: { focusKey: 'room-search' },
       });
-      threadSearch.addEventListener('input', () => codexBridge.setThreadQuery(threadSearch.value));
+      // Each filtered render replaces this input; the caret comes back through
+      // its focus key. A Korean syllable in composition is filtered once it ends.
+      threadSearch.addEventListener('input', (ev) => {
+        if (ev.isComposing || compositionInProgress) return;
+        codexBridge.setThreadQuery(threadSearch.value);
+      });
+      threadSearch.addEventListener('compositionstart', () => { compositionInProgress = true; });
+      threadSearch.addEventListener('compositionend', () => {
+        compositionInProgress = false;
+        const next = deferredCodex;
+        deferredCodex = null;
+        queueMicrotask(() => {
+          if (!threadSearch.isConnected) return;
+          if (threadSearch.value !== (codex.threadQuery || '')) codexBridge.setThreadQuery(threadSearch.value);
+          else if (next) render(next);
+        });
+      });
       threadTop.appendChild(threadSearch);
 
       const threadFilter = normalizeThreadFilter(codex.threadFilter);
@@ -5444,6 +5623,7 @@
             class: 'egd-codex-thread-menu-item',
             onclick: () => { codexBridge.closeThreadMenu(); spawnSettingsCard({ tab: 'agents' }); },
           }, 'Agent 관리 열기'),
+          ...renderForkMenuItems(thread, null, '대화 분기', '지금까지의 대화를 새 대화방으로 이어 갑니다.'),
           el('button', {
             class: 'egd-codex-thread-menu-item egd-codex-thread-menu-item-danger',
             onclick: () => codexBridge.deleteThread(thread.id),
@@ -5556,6 +5736,62 @@
         );
       };
 
+      // CHAT-09: branch actions in the room and message menus, the message
+      // menu itself, and the '기록 없이 시작' switch on a new room. A branch
+      // that cannot run now stays visible, disabled, with its reason.
+      const renderForkMenuItems = (thread, fromTurnId, label, hint) => {
+        const fork = codexBridge.forkAvailability(thread.id, fromTurnId);
+        return [
+          el('button', {
+            class: 'egd-codex-thread-menu-item',
+            disabled: fork.available ? null : 'true', 'aria-disabled': fork.available ? null : 'true',
+            data: { testid: fromTurnId ? 'chat-fork-message' : 'chat-fork-thread' },
+            onclick: () => { void codexBridge.forkThread(thread.id, fromTurnId ? { fromTurnId } : {}); },
+          }, label),
+          el('div', { class: 'egd-codex-thread-menu-note', role: 'note' }, fork.available ? hint : fork.reason),
+        ];
+      };
+      const renderMessageMenu = (thread, message) => el('div', {
+        class: 'egd-codex-thread-menu egd-codex-message-menu', role: 'group', 'aria-label': '메시지 메뉴',
+        data: { testid: 'chat-message-menu', messageId: message.id },
+        style: {
+          left: `${Math.round(codex.messageMenu?.left ?? 12)}px`,
+          top: `${Math.round(codex.messageMenu?.top ?? 12)}px`,
+        },
+        onclick: (ev) => ev.stopPropagation(),
+      },
+      ...renderForkMenuItems(thread, message.runId, '이 지점에서 분기', message.role === 'user'
+        ? '이 요청과 그 응답까지의 대화를 새 대화방으로 이어 갑니다.' : '이 응답까지의 대화를 새 대화방으로 이어 갑니다.'),
+      el('button', { class: 'egd-codex-thread-menu-item', onclick: () => codexBridge.closeMessageMenu() }, '닫기'));
+      const renderMessageMenuTrigger = (thread, message) => {
+        if (!ChatState.chatMessageForkPoint(thread, message)) return null;
+        const open = codex.messageMenu?.threadId === thread.id && codex.messageMenu.messageId === message.id;
+        return el('button', {
+          class: `egd-codex-message-menu-trigger${open ? ' egd-codex-message-menu-trigger-active' : ''}`,
+          type: 'button', title: '메시지 메뉴', 'aria-label': '메시지 메뉴',
+          'aria-expanded': open ? 'true' : 'false',
+          data: { testid: 'chat-message-menu-open', focusKey: `message-menu-${message.id}` },
+          onclick: (ev) => {
+            ev.stopPropagation();
+            codexBridge.toggleMessageMenu(thread.id, message.id, ev.currentTarget);
+          },
+        }, '⋯');
+      };
+      const renderStatelessStart = (thread) => {
+        const view = ChatState.chatStatelessStartView(thread, codex.chatCapabilities);
+        return el('div', { class: 'egd-codex-stateless-start', data: { testid: 'chat-stateless-start', state: view.on ? 'on' : 'off' } },
+          el('button', {
+            class: `egd-codex-stateless-toggle${view.on ? ' egd-codex-stateless-toggle-on' : ''}`,
+            type: 'button', role: 'switch', 'aria-checked': view.on ? 'true' : 'false',
+            disabled: view.available ? null : 'true',
+            data: { testid: 'chat-stateless-toggle', focusKey: 'stateless-start' },
+            onclick: () => codexBridge.setThreadStateless(thread.id, !view.on),
+          },
+          el('span', { class: 'egd-codex-stateless-switch', 'aria-hidden': 'true' }),
+          el('span', { class: 'egd-codex-stateless-label' }, '기록 없이 시작')),
+          el('p', { class: 'egd-codex-engine-hint' }, view.note));
+      };
+
       const renderThreadSection = (label, threads, options = {}) => {
         const excludedIds = options.excludeIds instanceof Set ? options.excludeIds : null;
         const recordIds = options.recordIds instanceof Set ? options.recordIds : null;
@@ -5584,12 +5820,16 @@
           const item = el('div', {
             class: `egd-codex-thread-item${activeThread && thread.id === activeThread.id ? ' egd-codex-thread-item-active' : ''}${threadMenuOpen ? ' egd-codex-thread-item-menu-open' : ''}`,
             'aria-current': activeThread && thread.id === activeThread.id ? 'true' : null,
+            role: 'button',
+            tabindex: '0',
+            'aria-label': codexThreadRowLabel(thread),
+            data: { focusKey: `room-${thread.id}` },
           });
           item.addEventListener('click', () => codexBridge.selectThread(thread.id, { openConversation: true }));
+          bindChatRoomRowKeys(item, () => openRoomFromKeyboard(thread.id));
           const lastMsg = thread.messages && thread.messages.length > 0 ? thread.messages[thread.messages.length - 1] : null;
           const lastTime = lastMsg && lastMsg.createdAt ? formatRelativeTime(lastMsg.createdAt) : '';
           const kindMeta = codexThreadKindMeta(thread.type);
-          const sessionLabel = codexThreadSessionLabel(thread);
           const profile = codexThreadAgentProfile(thread);
           const avatarInitial = (thread.title || '?')[0].toUpperCase();
           const avatarColors = ['#2D5A7B','#7B2D5A','#5A7B2D','#2D7B5A','#7B5A2D','#5A2D7B','#3D6B8B','#8B3D6B'];
@@ -5604,7 +5844,7 @@
                   ),
                   el('div', { class: 'egd-codex-thread-meta-row' },
                     el('span', { class: `egd-codex-thread-kind egd-codex-thread-kind-${thread.type}` }, kindMeta.label),
-                    el('span', { class: `egd-codex-session-badge egd-codex-session-badge-${codexThreadSessionKey(thread)}` }, sessionLabel),
+                    buildCodexSessionBadge(thread, codexBridge),
                     renderEngineBadge(thread),
                     el('span', { class: 'egd-codex-agent-profile-chip', title: profile.name }, profile.label),
                   ),
@@ -5617,6 +5857,7 @@
                     el('button', {
                       class: `egd-codex-thread-menu-trigger${threadMenuOpen ? ' egd-codex-thread-menu-trigger-active' : ''}`,
                       title: '채팅방 메뉴',
+                      'aria-label': `${thread.title} 채팅방 메뉴`,
                       onclick: (ev) => {
                         ev.stopPropagation();
                         codexBridge.toggleThreadMenu(thread.id, ev.currentTarget);
@@ -5690,6 +5931,7 @@
               activeThread.type === 'group'
                 ? el('div', { class: 'egd-codex-conversation-hud-sub' }, (activeThread.participants || []).join(' · '))
                 : null,
+              el('div', { class: 'egd-codex-conversation-hud-badges' }, buildCodexSessionBadge(activeThread, codexBridge)),
             ),
             renderEngineChip(activeThread),
             codexUsageRing(codex.authStatus),
@@ -5780,7 +6022,8 @@
               'aria-label': '대화 목록으로 돌아가기',
               onclick: () => codexBridge.setHudView('list'),
             }, deskIcon('back')),
-            el('div', { class: 'egd-codex-thread-active-title' }, activeThread.title),
+            el('div', { class: 'egd-codex-thread-active-title' }, activeThread.title,
+              buildCodexSessionBadge(activeThread, codexBridge)),
             renderEngineChip(activeThread),
             codexUsageRing(codex.authStatus),
             el('button', {
@@ -5834,6 +6077,7 @@
             messages.appendChild(el('div', { class: 'egd-codex-engine-start', data: { testid: 'chat-engine-start' } },
               el('div', { class: 'egd-codex-engine-section-label' }, '이 대화에 쓸 AI'),
               renderEngineChoices(activeThread)));
+            messages.appendChild(renderStatelessStart(activeThread));
           }
         } else {
           // Agent answers carry the Profile avatar captured at send; older answers
@@ -5881,7 +6125,10 @@
               ? el('div', { class: 'egd-codex-message-role' }, author)
               : null;
             const meta = codexMessageTimeMeta(message, activeThread);
-            const messageLine = el('div', { class: 'egd-codex-message-line' }, bubble);
+            // The message menu sits on the open side of the bubble.
+            const menuTrigger = renderMessageMenuTrigger(activeThread, message);
+            const messageLine = el('div', { class: 'egd-codex-message-line' },
+              message.role === 'user' ? menuTrigger : null, bubble, message.role === 'user' ? null : menuTrigger);
             const messageStack = el('div', { class: 'egd-codex-message-stack' }, roleLabel, messageLine, resultChips, briefingControl, meta);
             if (message.inputReferences?.length) messageStack.appendChild(el('button', {
               class: 'egd-codex-result-chip', data: { testid: 'chat-message-inputs', requestId: message.requestId || '' },
@@ -5907,6 +6154,9 @@
           });
         }
         conversation.appendChild(messages);
+        const menuMessage = codex.messageMenu?.threadId === activeThread.id
+          ? activeThread.messages.find((message) => message.id === codex.messageMenu.messageId && ChatState.chatMessageForkPoint(activeThread, message)) : null;
+        if (menuMessage) conversation.appendChild(renderMessageMenu(activeThread, menuMessage));
         if (activeThread.localHistoryCoverage && activeThread.localHistoryCoverage.status !== 'complete') conversation.appendChild(el('p', {
           class: 'egd-codex-run-status', role: 'status', data: { testid: 'chat-local-history-coverage' },
         }, activeThread.localHistoryCoverage.status === 'unknown' && !activeThread.localHistoryCoverage.reasons?.length
@@ -6196,6 +6446,10 @@
         newInput.setSelectionRange(inputState.start, inputState.end, inputState.direction);
         requestAnimationFrame(() => { if (newInput.isConnected) newInput.scrollTop = inputState.scrollTop; });
       }
+      if (focusOpenedRoom) {
+        const target = newInput && !newInput.disabled ? newInput : body.querySelector('.egd-codex-conversation-back');
+        target?.focus({ preventScroll: true });
+      } else restoreChatFocus(body, focusState);
     };
 
     unsubscribe = codexBridge.subscribe(render)
@@ -6294,6 +6548,11 @@
     const refreshing = new Map();
     const resumedNativeBindings = new Set();
     const confirmedLegacyImports = new Set();
+    // Rooms with a /chat/fork request in flight (one branch at a time per room).
+    const forkingThreads = new Set();
+    // RT-05: the installed build, read once and sent with every /v1/state read.
+    let overlayBuildRead = null;
+    const bridgeStateHeaders = async () => overlayBuildHeaders(await (overlayBuildRead ||= readExpectedOverlayBuild()));
     const initialDefaultThreadId = state.codex.threads[0]?.id;
     let localLoadPromise = null;
     let lastLocalLoadAt = 0;
@@ -6500,6 +6759,8 @@
         }
       }
       if (state.codex.engineMenu && !getCodexThreadById(state.codex, state.codex.engineMenu.threadId)) state.codex.engineMenu = null;
+      if (state.codex.messageMenu && !getCodexThreadById(state.codex, state.codex.messageMenu.threadId)?.messages
+        ?.some((message) => message.id === state.codex.messageMenu.messageId)) state.codex.messageMenu = null;
       const active = getActiveCodexThread(state.codex);
       state.codex.conversationId = active?.conversationId || null;
       state.codex.draft = getCodexThreadDraft(state.codex, active?.id || null);
@@ -6631,6 +6892,8 @@
       state.codex.messageThreadMap = {};
       state.codex.memberMenu = null;
       state.codex.threadMenu = null;
+      state.codex.messageMenu = null;
+      forkingThreads.clear();
       state.codex.activityThreadId = null;
       document.getElementById('egd-codex-input-panel')?.remove();
       closeAnswerBriefing({ restore: false });
@@ -6885,6 +7148,10 @@
             return;
           }
           return;
+        // CU-07: the inherited tool list changed (null when it can no longer be read).
+        case 'mcp.inherited':
+          update({ inheritedMcp: Array.isArray(event.inheritedMcp) ? event.inheritedMcp : null });
+          return;
         case 'chat.event': {
           if (event.v === 2) {
             if (!ChatState.canAdmitChatEvent(protocol, state.codex.threads, event)) return;
@@ -6924,7 +7191,7 @@
       streamReady = false;
       try {
       try {
-        const bridgeState = await fetchJson('/v1/state', { signal: token.signal });
+        const bridgeState = await fetchJson('/v1/state', { signal: token.signal, headers: await bridgeStateHeaders() });
         if (!epochScope.valid(token)) return;
         const status = bridgeState?.auth || state.codex.authStatus;
         if (
@@ -6943,6 +7210,7 @@
           error: null,
           ...bridgeConnectionFields(bridgeState),
           ...bridgeEngineFields(bridgeState),
+          ...bridgeSessionFields(bridgeState),
         });
       } catch (error) {
         if (!epochScope.valid(token)) return;
@@ -6950,7 +7218,7 @@
           const status = await fetchJson('/auth/status', { signal: token.signal });
           if (!epochScope.valid(token)) return;
           update({ authStatus: status, isStartingLogin: Boolean(status.loginInProgress), connected: true, error: null,
-            ...bridgeConnectionFields(null) });
+            ...bridgeConnectionFields(null), ...bridgeSessionFields(null) });
         } catch (fallbackError) {
           if (!epochScope.valid(token)) return;
           // The screen says '다시 연결 중…' by state; the raw message is kept
@@ -7341,6 +7609,7 @@
           state.codex.threadMenu = null;
           state.codex.memberMenu = null;
           state.codex.engineMenu = null;
+          state.codex.messageMenu = null;
         }
         emit();
       },
@@ -7349,6 +7618,7 @@
         state.codex.threadMenu = null;
         state.codex.memberMenu = null;
         state.codex.engineMenu = null;
+        state.codex.messageMenu = null;
         emit();
       },
       toggleThreadMenu(threadId, anchorEl = null) {
@@ -7363,7 +7633,10 @@
             : { left: 12, top: 12 };
           state.codex.threadMenu = { threadId, ...placement };
         }
-        if (!alreadyOpen) state.codex.memberMenu = null;
+        if (!alreadyOpen) {
+          state.codex.memberMenu = null;
+          state.codex.messageMenu = null;
+        }
         emit();
       },
       closeThreadMenu() {
@@ -7402,6 +7675,7 @@
           state.codex.engineMenu = { threadId, ...(rect ? resolveFloatingMenuPlacement(rect, 264, 320) : { left: 12, top: 12 }) };
           state.codex.threadMenu = null;
           state.codex.memberMenu = null;
+          state.codex.messageMenu = null;
         }
         emit();
       },
@@ -7431,12 +7705,99 @@
         this.createThread(thread.type, { agentProfileId: thread.agentProfileId, profileEnabled: thread.profileEnabled === true, openConversation: true });
         boardNotice('새 대화를 열었습니다. 이전 대화 내용은 자동으로 옮겨지지 않습니다.');
       },
+      // CHAT-09: '기록 없이 시작' on a room that has not sent yet.
+      setThreadStateless(threadId, on) {
+        const thread = getCodexThreadById(state.codex, threadId);
+        if (!thread || ChatState.chatThreadEngineLocked(thread)) return;
+        updateThreadById(threadId, (current) => ({ ...current, startStateless: on === true }));
+        emit();
+      },
+      forkAvailability(threadId, fromTurnId = null) {
+        const thread = getCodexThreadById(state.codex, threadId);
+        return ChatState.chatForkAvailability(thread, {
+          connected: state.codex.connected, auth: state.codex.authStatus, capabilities: state.codex.chatCapabilities,
+          busy: !!thread && (threadBusy(thread) || forkingThreads.has(thread.id)),
+          runs: ChatState.runsForThread(protocol, thread), fromTurnId,
+        });
+      },
+      // The bridge branches the native conversation into a new room; the new
+      // room then opens and /chat/resume shows the history it carried over.
+      async forkThread(threadId, { fromTurnId = null } = {}) {
+        const source = getCodexThreadById(state.codex, threadId);
+        const availability = this.forkAvailability(threadId, fromTurnId);
+        state.codex.threadMenu = null;
+        state.codex.messageMenu = null;
+        if (!source || !availability.available) {
+          if (availability.reason) boardNotice(availability.reason);
+          emit();
+          return null;
+        }
+        const target = createCodexThread(source.type, `${source.title} (분기)`, '', {
+          participants: source.participants, participantRoles: source.participantRoles,
+          profileEnabled: source.profileEnabled === true, agentProfileId: source.agentProfileId,
+        });
+        if (source.effort) target.effort = source.effort;
+        if (source.model) target.model = source.model;
+        const body = ChatState.buildChatForkRequest(source, ChatState.clientThreadBinding(target), fromTurnId, source.engineId);
+        const token = epochScope.begin();
+        forkingThreads.add(source.id);
+        emit();
+        try {
+          const result = await fetchJson('/chat/fork', { method: 'POST', signal: token.signal, body: JSON.stringify(body) });
+          if (!epochScope.valid(token)) return null;
+          const forked = ChatState.forkedThreadFromResult(target, getCodexThreadById(state.codex, source.id) || source, result);
+          if (!forked) throw Object.assign(new Error('Fork reply did not name the new conversation'), { code: 'INVALID_THREAD_RESPONSE', status: 502 });
+          state.codex.threads = [forked, ...state.codex.threads];
+          state.codex.threadDrafts = { ...(state.codex.threadDrafts || {}), [forked.id]: '' };
+          this.selectThread(forked.id, { openConversation: true });
+          boardNotice(fromTurnId ? '선택한 지점까지의 대화를 새 대화방으로 분기했습니다. 원본 대화는 그대로입니다.'
+            : '대화를 새 대화방으로 분기했습니다. 원본 대화는 그대로입니다.');
+          return result;
+        } catch (error) {
+          if (!epochScope.valid(token)) return null;
+          boardNotice(ChatState.chatForkErrorText(error));
+          return null;
+        } finally {
+          epochScope.finish(token);
+          forkingThreads.delete(source.id);
+          if (epochScope.valid(token)) emit();
+        }
+      },
+      openForkSource(threadId) {
+        const thread = getCodexThreadById(state.codex, threadId);
+        const source = ChatState.findForkSourceThread(state.codex.threads.filter((item) => item.id !== threadId), thread?.forkedFrom);
+        if (!source) {
+          boardNotice('원본 대화방을 이 기기에서 찾지 못했습니다.');
+          return false;
+        }
+        this.selectThread(source.id, { openConversation: true });
+        return true;
+      },
+      toggleMessageMenu(threadId, messageId, anchorEl = null) {
+        if (!threadId || !messageId) return;
+        if (state.codex.messageMenu?.threadId === threadId && state.codex.messageMenu.messageId === messageId) {
+          state.codex.messageMenu = null;
+        } else {
+          const rect = anchorEl?.getBoundingClientRect?.();
+          state.codex.messageMenu = { threadId, messageId, ...(rect ? resolveFloatingMenuPlacement(rect, 230, 120) : { left: 12, top: 12 }) };
+          state.codex.threadMenu = null;
+          state.codex.memberMenu = null;
+          state.codex.engineMenu = null;
+        }
+        emit();
+      },
+      closeMessageMenu() {
+        if (!state.codex.messageMenu) return;
+        state.codex.messageMenu = null;
+        emit();
+      },
       selectThread(threadId, options = {}) {
         if (!threadId) return;
         if (!setActiveThread(threadId)) return;
         state.codex.memberMenu = null;
         state.codex.threadMenu = null;
         state.codex.engineMenu = null;
+        state.codex.messageMenu = null;
         const openConversation = options.openConversation !== false;
         if (openConversation) {
           state.codex.hudView = 'conversation';
@@ -7617,7 +7978,7 @@
       async refreshAuthStatus() {
         const token = epochScope.begin();
         try {
-          const bridgeState = await fetchJson('/v1/state', { signal: token.signal });
+          const bridgeState = await fetchJson('/v1/state', { signal: token.signal, headers: await bridgeStateHeaders() });
           if (!epochScope.valid(token)) return;
           const status = bridgeState?.auth || state.codex.authStatus;
           update({
@@ -7628,6 +7989,7 @@
             error: null,
             bridgeBuild: bridgeConnectionFields(bridgeState).bridgeBuild,
             ...bridgeEngineFields(bridgeState),
+            ...bridgeSessionFields(bridgeState),
           });
         } catch (error) {
           if (!epochScope.valid(token)) return;
@@ -7764,6 +8126,7 @@
           runtimeConfig.engineId = engineId;
           runtimeConfig.contextSnapshotIds = inputReferences.map(reference => reference.snapshotId);
           runtimeConfig.contextCapabilities = ChatState.contextCapabilitiesForRequest(activeThread, state.codex.authStatus, runtimeConfig.contextSnapshotIds);
+          runtimeConfig.stateless = ChatState.chatStatelessStartView(activeThread, state.codex.chatCapabilities).on;
           const chatRequest = ChatState.buildChatRequest(activeThread, content, requestId, runtimeConfig);
           if (selectedBrowserSources.length) {
             chatRequest.selectedSources = selectedBrowserSources;
@@ -7779,8 +8142,13 @@
           });
           if (!epochScope.valid(token)) return;
           const run = ChatState.acceptChatRequest(protocol, result, requestId);
-          if (run) syncProtocolRun(run);
-          else {
+          if (run) {
+            // CHAT-09: the reply confirms a one-time start; a bounded run keeps the room from branching.
+            if (chatRequest.stateless || chatRequest.executionPolicy) updateThreadById(activeThread.id, thread => ({ ...thread,
+              ...(chatRequest.stateless ? { stateless: result.stateless === true, startStateless: false } : {}),
+              ...(chatRequest.executionPolicy ? { executionBounded: true } : {}) }));
+            syncProtocolRun(run);
+          } else {
             const error = new Error(result.error || '실행 접수 상태를 확인하지 못했습니다.');
             error.status = result.accepted === false ? 400 : 0;
             error.conversationId = result.conversationId || null;
@@ -7794,7 +8162,7 @@
           if (error.code === 'BROWSER_TOOLS_UNAVAILABLE') {
             error.message = '이 대화는 Browser 조작 도구가 등록되기 전에 만들어졌습니다. 기존 기록과 초안은 유지됩니다. 새 Chat을 만든 뒤 Browser에서 이번 실행의 조작 대상을 다시 선택해 주세요.';
           }
-          const profileText = ChatState.profileSendErrorText(error.code);
+          const profileText = ChatState.profileSendErrorText(error.code) || ChatState.chatStatelessErrorText(error.code);
           if (profileText) error.message = profileText;
           if (error.conversationId) {
             request.conversationId = error.conversationId;
@@ -10774,9 +11142,38 @@
           ring.stale ? el('div', { class: 'egd-settings-usage-note' }, '확인한 지 오래되어 실제와 다를 수 있습니다.') : null,
           ring.level === 'limit' ? el('div', { class: 'egd-settings-usage-note egd-settings-usage-note-strong' }, '한도에 도달했습니다. 초기화 전까지는 새 요청이 거절될 수 있습니다.') : null)));
       }
-      contentArea.replaceChildren(section, el('section', { class: 'egd-settings-section', 'aria-label': 'Claude' },
+      contentArea.replaceChildren(section, renderConnectedTools(), el('section', { class: 'egd-settings-section', 'aria-label': 'Claude' },
         el('div', { class: 'egd-settings-section-title' }, 'Claude'),
         el('div', { class: 'egd-settings-pending-line', data: { testid: 'settings-claude' } }, '준비 중 — 연결 방식 결정 대기')));
+    };
+
+    // --- 연결된 도구 (CU-07): external tools ordinary Codex chats inherit from
+    // the user's Codex settings, as the bridge lists them. Blocking them waits
+    // for a decision, so there is no switch here.
+    const renderConnectedTools = () => {
+      // Offline, a list from before may be stale: it reads '확인할 수 없음' until the bridge answers again.
+      const view = ChatState.inheritedMcpView(state.codex.connected ? state.codex.inheritedMcp : null);
+      const section = el('section', { class: 'egd-settings-section', 'aria-label': '연결된 도구', data: { testid: 'settings-mcp', state: view.status } },
+        el('div', { class: 'egd-settings-section-title' }, '연결된 도구'),
+        el('p', { class: 'egd-settings-section-sub egd-settings-mcp-intro' }, '코덱스 설정에서 물려받아 일반 대화에서 쓰이는 외부 도구입니다.'));
+      if (view.status === 'unknown') {
+        section.appendChild(el('div', { class: 'egd-settings-empty', data: { testid: 'settings-mcp-unknown' } }, '확인할 수 없음 · 코덱스 연결이 준비되면 다시 확인합니다.'));
+      } else if (view.status === 'empty') {
+        section.appendChild(el('div', { class: 'egd-settings-empty', data: { testid: 'settings-mcp-empty' } }, '물려받은 외부 도구가 없습니다.'));
+      } else {
+        section.appendChild(el('ul', { class: 'egd-settings-mcp-list' }, ...view.rows.map((row) => el('li', {
+          class: 'egd-settings-mcp-row', data: { testid: 'settings-mcp-row', kind: row.kind, tone: row.tone },
+        },
+        el('div', { class: 'egd-settings-mcp-head' },
+          el('span', { class: 'egd-settings-mcp-name' }, row.name),
+          el('span', { class: 'egd-settings-badge egd-settings-mcp-kind' }, row.kindLabel),
+          el('span', { class: `egd-settings-mcp-status egd-settings-mcp-status-${row.tone}` }, row.statusLabel)),
+        row.controlsExternal
+          ? el('div', { class: 'egd-settings-mcp-note', data: { testid: 'settings-mcp-external' } }, '일반 대화에서 EG-Desk 승인 없이 쓸 수 있는 외부 제어 도구입니다')
+          : null))));
+      }
+      section.appendChild(el('div', { class: 'egd-settings-pending-line', data: { testid: 'settings-mcp-block-pending' } }, '차단 여부 결정 대기'));
+      return section;
     };
 
     // --- Agent 관리: saved Agent Profiles (list → detail → edit) ---
@@ -11202,7 +11599,7 @@
       const auth = codex.authStatus || {};
       const catalog = bridge()?.profileCatalog?.();
       const signature = JSON.stringify([codex.connected, codex.isStartingLogin, auth.isLoggedIn, auth.loginInProgress, auth.accountEmail,
-        auth.planType, auth.usage, auth.rateLimits, catalog?.status, catalog?.profiles]);
+        auth.planType, auth.usage, auth.rateLimits, catalog?.status, catalog?.profiles, codex.inheritedMcp]);
       if (signature === lastCodexSignature) return;
       lastCodexSignature = signature;
       if (activeTab === 'account') renderAccountTab();
@@ -11876,7 +12273,7 @@
       },
     });
     const card = deskWindow.root;
-    revealPlacedCanvasCard(card, placement);
+    revealPlacedCanvasCard(card, placement, { kind: 'browser', opener: options.opener });
 
     const urlInput = el('input', {
       type: 'text',

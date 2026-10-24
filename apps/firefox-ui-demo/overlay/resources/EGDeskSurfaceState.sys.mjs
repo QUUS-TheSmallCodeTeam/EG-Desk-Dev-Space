@@ -368,6 +368,42 @@ export function revealRectPan(rect, safe, { pan, zoom } = {}) {
   return { x: axis(rect.x, rect.width, pan.x, safe.left, safe.right), y: axis(rect.y, rect.height, pan.y, safe.top, safe.bottom) };
 }
 
+// The lowest camera zoom at which every given View (world px, with its kind
+// and body font) opens in semantic detail, by the floors the projection focus
+// uses: a Browser 0.83 until its page font is measured, any other View 0.76
+// and a 10.6px body font, and each at least the 240×180px detail box.
+export function semanticDetailZoomFloor(views = []) {
+  let floor = 0;
+  for (const view of Array.isArray(views) ? views : []) {
+    if (!(view?.width > 0 && view?.height > 0)) continue;
+    const fontPx = view.fontPx > 0 ? view.fontPx : 14;
+    floor = Math.max(floor, view.kind === 'browser' ? 0.83 : 0.76, 10.6 / fontPx, 241 / view.width, 181 / view.height);
+  }
+  return floor;
+}
+
+// A View opened from a Chat (an artifact chip) is framed with that Chat:
+// the smallest pan when both fit at the current zoom, else a zoom out centred
+// on both. The zoom never rises, and never drops below `minZoom` (the
+// semantic detail floor) nor below a current zoom already under that floor.
+// Null when they cannot share the safe area, so the new View shows alone.
+export function pairedRevealCamera(rects, safe, { pan, zoom, minZoom = 0 } = {}) {
+  const boxes = (Array.isArray(rects) ? rects : []).filter(worldBox);
+  if (boxes.length < 2 || !(zoom > 0) || !pan || !Number.isFinite(pan.x) || !Number.isFinite(pan.y)
+    || !safe || ![safe.left, safe.top, safe.right, safe.bottom].every(Number.isFinite)) return null;
+  const left = Math.min(...boxes.map(rect => rect.x));
+  const top = Math.min(...boxes.map(rect => rect.y));
+  const union = { x: left, y: top,
+    width: Math.max(...boxes.map(rect => rect.x + rect.width)) - left,
+    height: Math.max(...boxes.map(rect => rect.y + rect.height)) - top };
+  const area = { left: safe.left, top: safe.top, width: safe.right - safe.left, height: safe.bottom - safe.top };
+  const fitZoom = Math.min(zoom, area.width / union.width, area.height / union.height);
+  const floor = Math.min(zoom, Number.isFinite(minZoom) ? minZoom : 0);
+  if (!(fitZoom > 0) || fitZoom < floor) return null;
+  if (fitZoom >= zoom) return { zoom, pan: revealRectPan(union, safe, { pan, zoom }) };
+  return fitSurfaceCamera(union, area, fitZoom);
+}
+
 // Words the Desk shows. Internal identifiers (state.agenda, data-testid,
 // search result `type`) keep their names; only the visible copy is Korean,
 // and product nouns (Board, Canvas, Chat, Browser) stay as the user knows them.

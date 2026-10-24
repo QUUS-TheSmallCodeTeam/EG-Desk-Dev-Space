@@ -439,6 +439,8 @@ export function buildChatRequest(thread, message, requestId, runtime = {}) {
   for (const field of ['model', 'effort']) if (runtime[field]) body[field] = runtime[field];
   // The bridge binds a conversation to this engine and refuses a different one later.
   if (isEngineId(runtime.engineId)) body.engineId = runtime.engineId;
+  // CHAT-09: '기록 없이 시작' applies to the first send of a new conversation only.
+  if (runtime.stateless === true && !thread.conversationId) body.stateless = true;
   if (Array.isArray(runtime.contextSnapshotIds)) body.contextSnapshotIds = [...new Set(runtime.contextSnapshotIds)];
   if (runtime.contextCapabilities) body.contextCapabilities = { read: true, reader: true, publishBriefing: true };
   if (thread.profileEnabled === true) {
@@ -1155,4 +1157,161 @@ export function runErrorNotice(error, usage = null, now = Date.now()) {
   if (kind === 'permission') return { kind, text: '권한이 부족합니다.', action: null };
   if (kind === 'network') return { kind, text: '연결이 불안정합니다. 다시 시도해 주세요.', action: 'retry' };
   return { kind, text: error.message || error.code || '실행 오류', action: null };
+}
+
+// CHAT-09 one-time and branched conversations (helper contract: /chat/history
+// threads[] and thread carry stateless and forkedFrom; /v1/state capabilities.chat
+// lists 'stateless' and 'fork' when the bridge can do them).
+const capabilityListed = (capabilities, name) => Array.isArray(capabilities) && capabilities.includes(name);
+/** The room's session kind: 'stateless' (one-time), 'forked' (branched), or null for an ordinary room. */
+export function chatSessionKind(thread) {
+  if (thread?.stateless === true) return 'stateless';
+  if (thread?.forkedFrom && typeof thread.forkedFrom === 'object' && typeof thread.forkedFrom.conversationId === 'string' && thread.forkedFrom.conversationId) return 'forked';
+  return null;
+}
+
+/** The '기록 없이 시작' switch on a new room: shown until the first send; on only when the bridge supports it. */
+export function chatStatelessStartView(thread, capabilities) {
+  const supported = capabilityListed(capabilities, 'stateless');
+  const open = !!thread && !chatThreadEngineLocked(thread);
+  const on = supported && open && thread.startStateless === true;
+  const note = !Array.isArray(capabilities) ? '코덱스 연결을 확인한 뒤 고를 수 있습니다.'
+    : !supported ? '지금 연결된 브리지는 기록 없이 시작을 지원하지 않습니다.'
+      : on ? '코덱스에 대화 기록을 남기지 않습니다. 나중에 이어서 대화하지 못할 수 있고, 분기할 수 없습니다. 이 화면의 대화 내용은 이 기기에 남습니다.'
+        : '켜면 코덱스에 기록을 남기지 않는 일회성 대화로 시작합니다.';
+  return { available: supported && open, on, note };
+}
+
+/** Korean text for /chat/send one-time failures. */
+export function chatStatelessErrorText(code) {
+  if (code === 'STATELESS_REQUIRES_NEW') return '기록 없이 시작은 새 대화에서만 할 수 있습니다. 새 대화를 열어 다시 보내 주세요.';
+  if (code === 'INVALID_STATELESS') return '기록 없이 시작 요청을 확인하지 못해 보내지 않았습니다.';
+  if (code === 'STATELESS_UNSUPPORTED') return '이 AI 엔진은 기록 없이 시작을 지원하지 않습니다. 선택을 끄고 다시 보내 주세요.';
+  if (code === 'STATELESS_UNVERIFIED') return '코덱스가 기록 없이 시작을 확인해 주지 않아 대화를 연결하지 않았습니다. 다시 보내거나 선택을 끄고 보내 주세요.';
+  return null;
+}
+
+const BOUNDED_EXECUTION_MODES = ['readOnlyQa', 'browserBounded', 'fixtureBrowserQa'];
+/** A room that ran with a bounded policy (QA or a selected Browser): the bridge refuses to branch it. */
+export function chatThreadBounded(thread, runs = []) {
+  if (thread?.executionBounded === true) return true;
+  return [...(Array.isArray(runs) ? runs : []), ...(Array.isArray(thread?.localRuns) ? thread.localRuns : [])]
+    .some(run => BOUNDED_EXECUTION_MODES.includes(run?.executionPolicy?.mode ?? run?.executionPolicy));
+}
+
+/** Where a message can branch from: its turn in this room's current conversation, else null. */
+export function chatMessageForkPoint(thread, message) {
+  if (!thread?.conversationId || !message || !['user', 'assistant'].includes(message.role)) return null;
+  if (typeof message.runId !== 'string' || !message.runId) return null;
+  if (message.conversationId && message.conversationId !== thread.conversationId) return null;
+  return message.runId;
+}
+
+/**
+ * Whether '대화 분기' / '이 지점에서 분기' can run now, and the reason shown
+ * when it cannot. A one-time or bounded room never can; others wait for the
+ * connection, the account and any running turn.
+ */
+export function chatForkAvailability(thread, { connected = false, auth = null, capabilities = null, busy = false, runs = [], fromTurnId = null } = {}) {
+  const no = reason => ({ available: false, reason });
+  if (!thread) return no('대화방을 찾지 못했습니다.');
+  if (chatSessionKind(thread) === 'stateless') return no('일회성 대화는 코덱스에 기록이 남지 않아 분기할 수 없습니다.');
+  if (chatThreadBounded(thread, runs)) return no('점검이나 Browser 조작으로 제한해 실행한 대화는 분기할 수 없습니다.');
+  if (!thread.conversationId) return no(nativeBindingHeld(thread) ? '이전 대화의 계정 소유를 확인한 뒤 분기할 수 있습니다.' : '아직 시작하지 않은 대화는 분기할 수 없습니다.');
+  if (!connected || !auth?.isLoggedIn) return no('코덱스에 연결해 로그인하면 분기할 수 있습니다.');
+  if (!capabilityListed(capabilities, 'fork')) return no('지금 연결된 브리지는 대화 분기를 지원하지 않습니다.');
+  if (!canResumeNativeThread(thread, auth)) return no('지금 로그인한 계정의 대화인지 확인한 뒤 분기할 수 있습니다.');
+  const from = fromTurnId ? (Array.isArray(runs) ? runs : []).find(run => run?.runId === fromTurnId && run.conversationId === thread.conversationId) : null;
+  if (from && isRunBusy(from)) return no('이 응답이 끝난 뒤 이 지점에서 분기할 수 있습니다.');
+  if (busy) return no('진행 중인 실행이 끝난 뒤 분기할 수 있습니다.');
+  return { available: true, reason: null };
+}
+
+/** POST /chat/fork body: the source's native conversation, the new room's binding, and the turn to branch after. */
+export function buildChatForkRequest(source, clientThreadId, fromTurnId = null, engineId = null) {
+  const body = { conversationId: source.conversationId, clientThreadId };
+  if (typeof fromTurnId === 'string' && fromTurnId) body.fromTurnId = fromTurnId;
+  if (isEngineId(engineId)) body.engineId = engineId;
+  return body;
+}
+
+/**
+ * The new room after a 201/200 fork reply, or null when the reply does not
+ * name a new conversation for this room. It keeps the source's verified
+ * account so /chat/resume can load the branched history.
+ */
+export function forkedThreadFromResult(target, source, result) {
+  const conversationId = typeof result?.conversationId === 'string' && result.conversationId ? result.conversationId : null;
+  if (result?.accepted !== true || !conversationId || conversationId === source?.conversationId) return null;
+  if (result.clientThreadId !== clientThreadBinding(target)) return null;
+  const from = result.forkedFrom && typeof result.forkedFrom === 'object' ? result.forkedFrom : {};
+  const text = value => typeof value === 'string' && value ? value : null;
+  return {
+    ...target,
+    conversationId,
+    localConversationId: text(result.localConversationId) || target.localConversationId || null,
+    engineId: isEngineId(result.engineId) ? result.engineId : target.engineId,
+    bindingAccountKey: source.bindingAccountKey || null,
+    bindingState: knownCodexAccountKey(source.bindingAccountKey) ? 'verified' : 'live-unverified',
+    retainedNativeBinding: null,
+    stateless: false,
+    startStateless: false,
+    forkedFrom: {
+      conversationId: text(from.conversationId) || source.conversationId,
+      turnId: text(from.turnId),
+      clientThreadId: text(from.clientThreadId) || clientThreadBinding(source),
+    },
+  };
+}
+
+/** The room a branch came from: same native conversation first, then its local binding. */
+export function findForkSourceThread(threads, forkedFrom) {
+  if (!forkedFrom || typeof forkedFrom !== 'object') return null;
+  const rows = Array.isArray(threads) ? threads : [];
+  const { conversationId, clientThreadId } = forkedFrom;
+  return (conversationId && rows.find(thread => thread.conversationId === conversationId || thread.retainedNativeBinding?.conversationId === conversationId))
+    || (clientThreadId && rows.find(thread => thread.id === clientThreadId || thread.clientBindingId === clientThreadId
+      || thread.retainedNativeBinding?.clientThreadId === clientThreadId || clientThreadId.startsWith(`${thread.id}-binding-`)))
+    || null;
+}
+
+/** Korean text for a failed /chat/fork; the bridge message stays internal. */
+export function chatForkErrorText(error) {
+  const code = error?.code;
+  if (code === 'FORK_TARGET_EXISTS') return '분기할 새 대화방이 이미 쓰이고 있습니다. 다시 분기해 주세요.';
+  if (code === 'FORK_BOUNDED_FORBIDDEN') return '점검이나 Browser 조작으로 제한해 실행한 대화는 분기할 수 없습니다.';
+  if (code === 'FORK_STATELESS_FORBIDDEN') return '일회성 대화는 코덱스에 기록이 남지 않아 분기할 수 없습니다.';
+  if (code === 'FORK_UNSUPPORTED') return '이 AI 엔진은 대화 분기를 지원하지 않습니다.';
+  if (code === 'RUN_IN_PROGRESS') return '진행 중인 실행이 끝난 뒤 분기할 수 있습니다.';
+  if (code === 'CONVERSATION_NOT_FOUND') return '원본 대화의 기록을 이 기기에서 찾지 못해 분기하지 못했습니다.';
+  if (code === 'NATIVE_ACCOUNT_MISMATCH') return '지금 로그인한 계정의 대화가 아니어서 분기할 수 없습니다.';
+  if (code === 'LOGIN_REQUIRED') return '로그인한 뒤 분기할 수 있습니다.';
+  if (code === 'CHAT_STORE_UNAVAILABLE') return '이 기기의 대화 기록 저장소를 열 수 없어 분기하지 못했습니다.';
+  if (code === 'INVALID_THREAD_RESPONSE' || code === 'THREAD_MISMATCH') return '코덱스의 분기 결과를 확인하지 못했습니다. 원본 대화는 그대로입니다.';
+  if (!error?.status) return '브리지에 연결하지 못해 분기하지 못했습니다. 연결을 확인한 뒤 다시 시도해 주세요.';
+  return '대화를 분기하지 못했습니다. 원본 대화는 그대로입니다. 잠시 뒤 다시 시도해 주세요.';
+}
+
+// CU-07 inherited external tools (helper contract: /v1/state.inheritedMcp is
+// null when unknown, else [{ name, enabled, status, controlsExternal, kind }];
+// SSE codex { type: 'mcp.inherited', inheritedMcp } replaces it).
+const MCP_STATUS_TEXT = [['connected', '연결됨'], ['starting', '시작 중'], ['notStarted', '시작 전'], ['available', '사용 가능'],
+  ['authenticationRequired', '로그인 필요'], ['failed', '실패'], ['cancelled', '취소됨'], ['disabled', '꺼짐']];
+const MCP_STATUS_TONE = { connected: 'ok', available: 'ok', starting: 'idle', notStarted: 'idle', authenticationRequired: 'warn', failed: 'warn', cancelled: 'off', disabled: 'off' };
+const MCP_KIND_TEXT = [['browser', '브라우저 제어'], ['desktop', '데스크톱 제어'], ['repl', '코드 실행'], ['other', '기타']];
+/** Settings rows for the inherited tools: Korean status and kind; 'unknown' when the bridge cannot say. */
+export function inheritedMcpView(value) {
+  if (!Array.isArray(value)) return { status: 'unknown', rows: [] };
+  const rows = value.filter(row => row && typeof row === 'object' && typeof row.name === 'string' && row.name.trim()).slice(0, 64).map(row => {
+    const status = lookup(MCP_STATUS_TEXT, row.status) ? row.status : null;
+    const kind = lookup(MCP_KIND_TEXT, row.kind) ? row.kind : 'other';
+    return {
+      name: row.name.trim().slice(0, 80),
+      statusLabel: status ? lookup(MCP_STATUS_TEXT, status) : '확인 안 됨',
+      tone: status ? MCP_STATUS_TONE[status] : 'idle',
+      kind, kindLabel: lookup(MCP_KIND_TEXT, kind),
+      controlsExternal: row.controlsExternal === true,
+    };
+  });
+  return { status: rows.length ? 'listed' : 'empty', rows };
 }

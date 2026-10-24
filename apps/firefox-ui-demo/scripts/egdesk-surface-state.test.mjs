@@ -1071,17 +1071,18 @@ test('human Chat Dock open after initial Browser focus and zoom-out focuses only
     screenRect, surface, 240, 180, () => safe, fitChat, focusProjection, window, document, viewport,
     () => dockZoomRect,
     (value, fallback = 0) => Number.parseFloat(value) || fallback, 8);
-  let spawned = 0;
+  let spawned = 0, returnCueDismissed = 0;
   const dockClick = compileFunction(`return () => {${dockBody}\n          }`,
-    ['kind', 'item', 'state', 'spawnCodexChatCard', 'toggleHUD'])(
+    ['kind', 'item', 'state', 'spawnCodexChatCard', 'toggleHUD', 'dismissChatReturnCue'])(
     'left', { id: 'chat', label: '채팅' }, state, () => {
       spawned++; state.activeEntityId = card.id; state.codex.chatCardEntityId = card.id;
       state.codex.chatDockMode = 'canvas'; return card;
     },
-    () => assert.fail('Chat Dock must not toggle a visible Chat off'));
+    () => assert.fail('Chat Dock must not toggle a visible Chat off'), () => { returnCueDismissed++; });
 
   dockClick();
   assert.equal(spawned, 1);
+  assert.equal(returnCueDismissed, 1, 'the Dock Chat also clears a way-back-to-Chat cue');
   assert.equal(cameraTargets.length, 1, 'compact Chat opens with its existing focus projection');
   assert(Math.abs(cameraTargets[0].zoom - 10.6 / 11) < 0.001);
   assert.ok(cameraTargets[0].pan.y + 90 * cameraTargets[0].zoom >= safe.top,
@@ -6477,7 +6478,7 @@ test('engine controls: header chip, new-room choices, locked-room panel and effo
   for (const pattern of [/renderEngineChip\(activeThread\),\n            codexUsageRing\(codex\.authStatus\),/g]) {
     assert.equal(surfaceSource.match(pattern)?.length, 2, 'both Chat heads show the engine chip next to the usage meter');
   }
-  assert.match(surfaceSource, /egd-codex-session-badge-\$\{codexThreadSessionKey\(thread\)\}` \}, sessionLabel\),\n                    renderEngineBadge\(thread\),/);
+  assert.match(surfaceSource, /buildCodexSessionBadge\(thread, codexBridge\),\n                    renderEngineBadge\(thread\),/);
   assert.match(surfaceSource, /if \(codex\.authStatus\.isLoggedIn && !ChatState\.chatThreadEngineLocked\(activeThread\)\) \{\n            messages\.appendChild\(el\('div', \{ class: 'egd-codex-engine-start'/);
 });
 
@@ -6523,4 +6524,795 @@ test('engine panel styles use approved tokens and outrank the HUD button reset',
   }
   assert.match(rule('.egd-codex-engine-panel'), /background: var\(--egd-frosted-bg\);[\s\S]*box-shadow: var\(--egd-frosted-shadow\);/);
   assert.match(surfaceCss, /\.egd-codex-conversation-hud-head:has\(> \.egd-codex-engine-chip\):has\(> \.egd-usage-meter\),\n\.egd-codex-thread-active-head:has\(> \.egd-codex-engine-chip\):has\(> \.egd-usage-meter\) \{ grid-template-columns: auto minmax\(0, 1fr\) auto auto auto; \}/);
+});
+
+// ============ Polish: header buttons in dark, keyboard room rows, room search focus, artifact camera ============
+
+test('card and Chat panel header buttons draw no native face and take their colours from tokens in both schemes', () => {
+  // Firefox paints a header button with an author border but no background in the
+  // system button colour, a light grey box in dark. Every header button sets one.
+  const css = surfaceCss.replace(/\/\*[\s\S]*?\*\//g, '');
+  const rules = selector => [...css.matchAll(/([^{}]+)\{([^{}]*)\}/g)]
+    .filter(([, head]) => head.split(',').some(part => part.trim().replace(/:(hover|focus-visible)$/, '') === selector))
+    .map(([, head, body]) => ({ head: head.trim(), body }));
+  const resting = selector => rules(selector).filter(({ head }) => head.split(',').some(part => part.trim() === selector));
+  for (const selector of ['.egd-chat-card-action', '.egd-hud-pin', '.egd-hud-close', '.egd-card-nav-btn', '.egd-card-menu', '.egd-file-chat-attach']) {
+    assert.ok(resting(selector).some(({ body }) => /background(-color)?:\s*(transparent|var\(--egd-)/.test(body)), `${selector} sets its own background`);
+    for (const { head, body } of rules(selector)) {
+      assert.doesNotMatch(body, /#[0-9a-f]{3,8}\b|rgba?\(/i, `${head} uses tokens only`);
+    }
+  }
+  const shared = surfaceCss.match(/^\.egd-chat-card-action,\n\.egd-hud-pin,\n\.egd-hud-close \{([^}]+)\}/m)?.[1] || '';
+  assert.match(shared, /appearance: none;\n  background-color: transparent;/);
+  assert.match(surfaceCss, /^\.egd-chat-card-action:focus-visible,\n\.egd-hud-pin:focus-visible,\n\.egd-hud-close:focus-visible \{ outline: 2px solid var\(--egd-primary\); outline-offset: 1px; \}/m);
+  // Hover keeps the light look: the outline edge and the paper layer, both tokens that the dark block redefines.
+  assert.match(surfaceCss, /\.egd-chat-card-action:hover \{\n  border-color: var\(--egd-chat-outline-soft\);\n  background: var\(--egd-chat-layer-elevated\);/);
+  // The header still builds exactly these two buttons with that class.
+  const header = surfaceSource.match(/    const header = el\('div', \{ class: 'egd-chat-card-header' \},[\s\S]*?\n    \);/)?.[0] || '';
+  assert.equal(header.match(/class: 'egd-chat-card-action'/g)?.length, 2, "'우측' and close");
+  assert.ok(header.includes("}, '우측'),") && header.includes("title: '닫기'"));
+});
+
+test('Chat room rows are buttons a keyboard can reach and choose, with the open room marked', () => {
+  const bindKeys = compileFunction(`${declaration('bindChatRoomRowKeys')}\nreturn bindChatRoomRowKeys;`, [])();
+  const row = { listeners: {}, addEventListener(type, fn) { (this.listeners[type] ||= []).push(fn); } };
+  let opened = 0;
+  bindKeys(row, () => { opened += 1; });
+  const press = (key, fields = {}) => {
+    const event = { key, target: row, defaultPrevented: false, preventDefault() { this.defaultPrevented = true; }, ...fields };
+    for (const fn of row.listeners.keydown) fn(event);
+    return event;
+  };
+  assert.equal(press('Enter').defaultPrevented, true);
+  assert.equal(press(' ').defaultPrevented, true, 'Space does not scroll the list');
+  assert.equal(opened, 2, 'Enter and Space open the room');
+  for (const [key, fields] of [['Tab', {}], ['ArrowDown', {}], ['Enter', { target: { menu: true } }], ['Enter', { isComposing: true }],
+    ['Enter', { metaKey: true }], [' ', { ctrlKey: true }], ['Enter', { altKey: true }]]) {
+    assert.equal(press(key, fields).defaultPrevented, false, `${key} ${JSON.stringify(fields)} is left alone`);
+  }
+  assert.equal(opened, 2, 'keys on the row menu button stay with that button');
+
+  const item = surfaceSource.match(/          const item = el\('div', \{\n            class: `egd-codex-thread-item[\s\S]*?\n          bindChatRoomRowKeys\(item, \(\) => openRoomFromKeyboard\(thread\.id\)\);/)?.[0];
+  assert.ok(item, 'the row keeps its class, click and key wiring together');
+  assert.match(item, /'aria-current': activeThread && thread\.id === activeThread\.id \? 'true' : null,\n            role: 'button',\n            tabindex: '0',\n            'aria-label': codexThreadRowLabel\(thread\),\n            data: \{ focusKey: `room-\$\{thread\.id\}` \},/);
+  assert.match(item, /item\.addEventListener\('click', \(\) => codexBridge\.selectThread\(thread\.id, \{ openConversation: true \}\)\);/, 'the mouse path is unchanged');
+  const label = compileFunction(`${declaration('codexThreadRowLabel')}\nreturn codexThreadRowLabel;`, ['codexThreadPreview', 'stripMarkdown'])(
+    thread => thread.preview, text => text.replace(/\*\*/g, ''));
+  assert.equal(label({ title: '보고서', unreadCount: 2, preview: '**초안** 끝' }), '보고서 · 안 읽은 메시지 2개 · 초안 끝');
+  assert.equal(label({ title: '보고서', unreadCount: 0, preview: '' }), '보고서');
+  assert.match(surfaceSource, /'aria-label': `\$\{thread\.title\} 채팅방 메뉴`,/);
+  // A visible ring inside the list, and the row menu shows while focus is in the row.
+  assert.match(surfaceCss, /^\.egd-codex-thread-item:focus-visible \{\n  outline: 2px solid var\(--egd-primary\);\n  outline-offset: -2px;\n\}/m);
+  assert.match(surfaceCss, /\.egd-codex-thread-item:focus-within \.egd-codex-thread-menu-trigger,/);
+
+  // A room opened from the keyboard hands focus to its composer, or Back when there is none.
+  const mount = surfaceSource.match(/  function mountCodexHUD\(body, codexBridge, options = \{\}\) \{([\s\S]*?)\n  \}/)?.[1] || '';
+  const opener = mount.match(/    const openRoomFromKeyboard = \(threadId\) => \{[\s\S]*?\n    \};/)?.[0];
+  const handoff = mount.match(/      if \(focusOpenedRoom\) \{[\s\S]*?\} else restoreChatFocus\(body, focusState\);/)?.[0];
+  assert.ok(opener && handoff && mount.includes('    let focusOpenedRoom = false;'));
+  const focusable = name => ({ name, disabled: false, focused: null, focus(options) { this.focused = options; } });
+  // The compiled render takes the rebuilt composer as `newInput`, as the real render finds it.
+  const shim = (composer, back) => {
+    const calls = [];
+    const api = compileFunction(['let focusOpenedRoom = false;',
+      'const render = newInput => {', handoff, '};', opener, 'return { openRoomFromKeyboard, render, flag: () => focusOpenedRoom };'].join('\n'),
+    ['codexBridge', 'body', 'restoreChatFocus', 'focusState'])(
+      { selectThread(id, options) { calls.push([id, options]); api.render(composer); } },
+      { querySelector: selector => selector === '.egd-codex-conversation-back' ? back : null },
+      () => calls.push(['restore']), null);
+    return { api, calls };
+  };
+  const composer = focusable('composer'), back = focusable('back');
+  const first = shim(composer, back);
+  first.api.openRoomFromKeyboard('room-a');
+  assert.deepEqual(first.calls, [['room-a', { openConversation: true }]]);
+  assert.deepEqual(composer.focused, { preventScroll: true });
+  assert.equal(first.api.flag(), false, 'only that one render moves focus');
+  first.api.render(composer);
+  assert.deepEqual(first.calls.at(-1), ['restore'], 'later renders restore focus by key instead');
+  const disabled = { ...focusable('composer'), disabled: true }, back2 = focusable('back');
+  shim(disabled, back2).api.openRoomFromKeyboard('room-b');
+  assert.equal(disabled.focused, null);
+  assert.deepEqual(back2.focused, { preventScroll: true }, 'Back takes focus when the composer is unavailable');
+});
+
+test('the room search keeps focus and caret across each filtered render and waits for a Korean syllable', () => {
+  const helpers = compileFunction(`${declaration('chatFocusSnapshot')}\n${declaration('restoreChatFocus')}\nreturn { chatFocusSnapshot, restoreChatFocus };`, [])();
+  const field = (key, extra = {}) => ({ dataset: key ? { focusKey: key } : {}, disabled: false, focused: null, range: null,
+    focus(options) { this.focused = options; }, setSelectionRange(...args) { this.range = args; }, ...extra });
+  const root = nodes => ({ nodes, contains: node => nodes.includes(node), querySelectorAll: selector => {
+    assert.equal(selector, '[data-focus-key]');
+    return nodes.filter(node => node.dataset.focusKey);
+  } });
+  const typing = field('room-search', { selectionStart: 2, selectionEnd: 2, selectionDirection: 'forward' });
+  const before = root([field('room-room-a'), typing]);
+  const snapshot = helpers.chatFocusSnapshot(before, typing);
+  assert.deepEqual(snapshot, { key: 'room-search', start: 2, end: 2, direction: 'forward' });
+  const rebuilt = field('room-search');
+  assert.equal(helpers.restoreChatFocus(root([field('room-room-a'), rebuilt]), snapshot), true);
+  assert.deepEqual(rebuilt.focused, { preventScroll: true });
+  assert.deepEqual(rebuilt.range, [2, 2, 'forward'], 'the caret stays where the person was typing');
+  const row = field('room-room-a');
+  assert.deepEqual(helpers.chatFocusSnapshot(root([row]), row), { key: 'room-room-a', start: null, end: undefined, direction: 'none' });
+  const rowAgain = field('room-room-a');
+  helpers.restoreChatFocus(root([rowAgain]), helpers.chatFocusSnapshot(root([row]), row));
+  assert.deepEqual([rowAgain.focused, rowAgain.range], [{ preventScroll: true }, null], 'a focused room row is focused again, with no caret');
+  assert.equal(helpers.chatFocusSnapshot(before, field(null)), null, 'a control without a key is left to its own restore');
+  assert.equal(helpers.chatFocusSnapshot(before, field('room-search')), null, 'focus outside this Chat is not taken');
+  assert.equal(helpers.restoreChatFocus(root([field('room-room-b')]), snapshot), false, 'a control gone from the new render is not replaced');
+  assert.equal(helpers.restoreChatFocus(root([field('room-search', { disabled: true })]), snapshot), false);
+
+  // The render snapshots focus before it empties the body and restores it last.
+  const mount = surfaceSource.match(/  function mountCodexHUD\(body, codexBridge, options = \{\}\) \{([\s\S]*?)\n  \}/)?.[1] || '';
+  assert.ok(mount.indexOf('const focusState = chatFocusSnapshot(body, document.activeElement);') < mount.indexOf("      body.textContent = '';"));
+  assert.ok(mount.indexOf('} else restoreChatFocus(body, focusState);') > mount.indexOf('const newInput = body.querySelector'));
+
+  // The actual search wiring: composition defers filtering and the render, then flushes once.
+  const searchSource = mount.match(/      const threadSearch = el\('input', \{[\s\S]*?\n      threadTop\.appendChild\(threadSearch\);/)?.[0];
+  assert.ok(searchSource, 'the search input wiring stays directly testable');
+  const elFor = compileFunction(`return function el(tag, props = {}, ...children) {${elBody}\n};`, ['document'])(inertDOM());
+  const wire = (codex) => {
+    const queries = [], renders = [], tasks = [];
+    const api = compileFunction(['let compositionInProgress = false, deferredCodex = null;', searchSource,
+      'return { input: threadSearch, composing: () => compositionInProgress, defer: value => { deferredCodex = value; }, deferred: () => deferredCodex };'].join('\n'),
+    ['el', 'codex', 'codexBridge', 'threadTop', 'render', 'queueMicrotask'])(
+      elFor, codex, { setThreadQuery(value) { queries.push(value); codex.threadQuery = value; } }, { appendChild() {} },
+      next => renders.push(next), task => tasks.push(task));
+    api.input.isConnected = true;
+    return { ...api, queries, renders, flush: () => { while (tasks.length) tasks.shift()(); } };
+  };
+  const codex = { threadQuery: '' };
+  const search = wire(codex);
+  assert.equal(search.input.dataset.focusKey, 'room-search');
+  assert.equal(search.input.attributes['aria-label'], '대화방 찾기');
+  search.input.value = 'q';
+  search.input.dispatch('input', { isComposing: false });
+  assert.deepEqual(search.queries, ['q'], 'plain typing filters at once');
+  search.input.dispatch('compositionstart');
+  assert.equal(search.composing(), true, 'the shared flag also holds Chat renders back');
+  search.input.value = 'q보';
+  search.input.dispatch('input', { isComposing: true });
+  search.input.value = 'q보고';
+  search.input.dispatch('input', { isComposing: false });
+  assert.deepEqual(search.queries, ['q'], 'no render while the syllable is open');
+  search.defer({ sse: 1 });
+  search.input.dispatch('compositionend');
+  assert.equal(search.composing(), false);
+  assert.equal(search.deferred(), null);
+  assert.deepEqual(search.queries, ['q'], 'filtering waits for the event to finish');
+  search.flush();
+  assert.deepEqual(search.queries, ['q', 'q보고'], 'the finished text filters once');
+  assert.deepEqual(search.renders, [], 'that filter render already carries the deferred SSE state');
+
+  const unchanged = wire({ threadQuery: '같음' });
+  unchanged.input.value = '같음';
+  unchanged.input.dispatch('compositionstart');
+  unchanged.defer({ sse: 2 });
+  unchanged.input.dispatch('compositionend');
+  unchanged.flush();
+  assert.deepEqual([unchanged.queries, unchanged.renders], [[], [{ sse: 2 }]], 'a cancelled composition still releases the held render');
+  const replaced = wire({ threadQuery: '' });
+  replaced.input.value = '새';
+  replaced.input.dispatch('compositionstart');
+  replaced.input.dispatch('compositionend');
+  replaced.input.isConnected = false;
+  replaced.flush();
+  assert.deepEqual(replaced.queries, [], 'an input already replaced by a render does nothing');
+  // The render itself still holds back while composing.
+  assert.match(mount, /    const render = \(codex\) => \{\n      if \(compositionInProgress\) \{\n        deferredCodex = codex;\n        return;\n      \}/);
+});
+
+test('the lowest zoom that keeps Views in semantic detail follows the projection focus floors', () => {
+  assert.equal(Surface.semanticDetailZoomFloor([]), 0);
+  assert.equal(Surface.semanticDetailZoomFloor([{ kind: 'browser', width: 960, height: 640 }]), 0.83);
+  assert.equal(Surface.semanticDetailZoomFloor([{ kind: 'chat', width: 420, height: 600, fontPx: 14 }]), 0.76);
+  assert.equal(Surface.semanticDetailZoomFloor([{ kind: 'chat', width: 420, height: 600, fontPx: 12 }]), 10.6 / 12, 'a smaller body font needs more zoom');
+  assert.equal(Surface.semanticDetailZoomFloor([{ kind: 'browser', width: 960, height: 640 }, { kind: 'chat', width: 420, height: 600, fontPx: 13 }]), 0.83);
+  assert.equal(Surface.semanticDetailZoomFloor([{ kind: 'chat', width: 200, height: 600, fontPx: 14 }]), 241 / 200, 'the 240px detail box');
+  assert.equal(Surface.semanticDetailZoomFloor([{ kind: 'chat', width: 0, height: 600 }, null]), 0);
+});
+
+test('a View opened from Chat is framed together with that Chat, never below the detail floor', () => {
+  const safe = { left: 24, top: 76, right: 1256, bottom: 700, width: 1232, height: 624 };
+  const chat = { x: 0, y: 0, width: 420, height: 600 };
+  const pan = { x: 24, y: 76 };
+  // Both fit at the current zoom: only the smallest pan, no zoom change.
+  const beside = { x: 444, y: 0, width: 760, height: 560 };
+  assert.deepEqual(Surface.pairedRevealCamera([beside, chat], safe, { pan, zoom: 1, minZoom: 0.83 }), { zoom: 1, pan: { x: 24, y: 76 } });
+  const right = { x: 900, y: 0, width: 600, height: 560 };
+  assert.deepEqual(Surface.pairedRevealCamera([right, chat], { left: 0, top: 0, right: 1600, bottom: 800 }, { pan: { x: -300, y: 0 }, zoom: 1, minZoom: 0.83 }),
+    { zoom: 1, pan: { x: 0, y: 0 } }, 'the pan brings the Chat back on screen beside the new View');
+  // Too wide at 1: zoom out to fit both, centred.
+  const browser = { x: 444, y: 0, width: 960, height: 600 };
+  const fitted = Surface.pairedRevealCamera([browser, chat], safe, { pan, zoom: 1, minZoom: 0.83 });
+  assert.equal(fitted.zoom, 1232 / 1404);
+  assert.ok(fitted.zoom >= 0.83, 'still readable');
+  assert.deepEqual(fitted.pan, { x: 24, y: 76 + (624 - 600 * fitted.zoom) / 2 });
+  // Would need to drop below the floor: no shared camera.
+  const below = { x: 0, y: 624, width: 960, height: 640 };
+  assert.equal(Surface.pairedRevealCamera([below, chat], safe, { pan, zoom: 1, minZoom: 0.83 }), null, 'stacked: 1264px tall needs 0.49');
+  // Already zoomed out under the floor: framing at that zoom is allowed, zooming out further is not.
+  assert.deepEqual(Surface.pairedRevealCamera([browser, chat], safe, { pan, zoom: 0.5, minZoom: 0.83 }).zoom, 0.5);
+  assert.equal(Surface.pairedRevealCamera([below, chat], safe, { pan, zoom: 0.45, minZoom: 0.83 }).zoom, 0.45, 'stacked fits at 0.45 as it is');
+  assert.equal(Surface.pairedRevealCamera([below, chat], safe, { pan, zoom: 0.6, minZoom: 0.83 }), null, 'but 0.6 would have to drop to 0.49');
+  // The zoom never rises.
+  assert.equal(Surface.pairedRevealCamera([{ x: 0, y: 0, width: 10, height: 10 }, { x: 20, y: 0, width: 10, height: 10 }], safe, { pan, zoom: 0.9 }).zoom, 0.9);
+  for (const bad of [[[browser], safe, { pan, zoom: 1 }], [[browser, chat], safe, { pan, zoom: 0 }], [[browser, chat], null, { pan, zoom: 1 }],
+    [[browser, { x: NaN, y: 0, width: 1, height: 1 }], safe, { pan, zoom: 1 }], [[browser, chat], safe, { zoom: 1 }]]) {
+    assert.equal(Surface.pairedRevealCamera(...bad), null);
+  }
+});
+
+test('an artifact Browser keeps its Chat in sight, or shows alone with a short way back to the Chat', () => {
+  const reveal = compileFunction(`${declaration('revealPlacedCanvasCard')}\nreturn revealPlacedCanvasCard;`,
+    ['state', 'window', 'persistentEntityGeometry', 'safeViewportRect', 'SurfaceState', 'chatOpenerView', 'showChatReturnCue']);
+  const timers = [], pans = [], cameras = [], cues = [];
+  const state = { panTarget: { x: 24, y: 76 }, zoomTarget: 1, agenda: { restoreInProgress: false }, surface: { restoring: false },
+    setCanvasPanTarget: pan => pans.push(pan), setCanvasViewportTarget: camera => cameras.push(camera) };
+  const safe = { left: 24, top: 76, right: 1256, bottom: 700, width: 1232, height: 624 };
+  const follow = reveal(state, { setTimeout: fn => timers.push(fn) }, card => card.geometry, () => safe, Surface,
+    card => ({ kind: 'chat', ...card.geometry, fontPx: 14 }), card => cues.push(card));
+  const chat = { isConnected: true, geometry: { x: 0, y: 0, width: 420, height: 600 } };
+  const beside = { isConnected: true, geometry: { x: 444, y: 0, width: 960, height: 600 } };
+  follow(beside, { x: 444, y: 0, inView: false }, { kind: 'browser', opener: chat });
+  timers.shift()();
+  assert.deepEqual(cameras, [Surface.pairedRevealCamera([beside.geometry, chat.geometry], safe, { pan: { x: 24, y: 76 }, zoom: 1, minZoom: 0.83 })]);
+  assert.equal(cameras[0].zoom, 1232 / 1404);
+  assert.deepEqual([pans, cues], [[], []], 'both shown: no lone pan and no cue');
+
+  const below = { isConnected: true, geometry: { x: 0, y: 624, width: 960, height: 640 } };
+  follow(below, { x: 0, y: 624, inView: false }, { kind: 'browser', opener: chat });
+  timers.shift()();
+  assert.equal(cameras.length, 1);
+  assert.deepEqual(cues, [chat], 'the cue points back to the Chat that opened it');
+  assert.deepEqual(pans, [Surface.revealRectPan(below.geometry, safe, { pan: { x: 24, y: 76 }, zoom: 1 })], 'the new View is shown as before');
+
+  // Without an opener (Dock, address bar, Agent) nothing changes; a closed Chat counts as none.
+  follow(below, { x: 0, y: 624, inView: false }, { kind: 'browser' });
+  timers.shift()();
+  follow(below, { x: 0, y: 624, inView: false }, { kind: 'browser', opener: { ...chat, isConnected: false } });
+  timers.shift()();
+  assert.deepEqual([cameras.length, cues.length, pans.length], [1, 1, 3]);
+  follow(below, { x: 0, y: 624, inView: true }, { kind: 'browser', opener: chat });
+  assert.equal(timers.length, 0, 'a View placed in view moves no camera');
+
+  // Wiring: only an artifact opened from a Chat card passes its opener.
+  assert.match(surfaceSource, /openCodexResultLink\(artifact, \{ opener: ev\.currentTarget\?\.closest\?\.\('\.egd-chat-card'\) \|\| null \}\);/);
+  assert.match(surfaceSource, /return openCodexResultLink\(artifact, \{ opener: container\.closest\?\.\('\.egd-chat-card'\) \|\| null \}\);/);
+  assert.match(declaration('openChatFileReference'), /spawnBrowserCard\(railSearchPathToFileUrl\(path\), \{ openMode: 'focus-existing', opener: options\.opener \|\| null \}\);/);
+  assert.match(declaration('spawnBrowserCard'), /revealPlacedCanvasCard\(card, placement, \{ kind: 'browser', opener: options\.opener \}\);/);
+  assert.match(surfaceSource, /if \(item\.id === 'browser'\) \{\n                spawnBrowserCard\(\);/, 'the Dock Browser opens without an opener');
+});
+
+test('the way back to Chat is a short-lived button that brings the Chat back like the Dock does', () => {
+  const created = [];
+  const doc = { createElement: tag => { const node = inertDOM().createElement(tag); node.remove = () => { node.removed = true; }; created.push(node); return node; },
+    createTextNode: value => inertDOM().createTextNode(value), documentElement: { children: [], appendChild(node) { this.children.push(node); } },
+    getElementById: id => doc.documentElement.children.find(node => node.attributes.id === id && !node.removed) || null };
+  const el = compileFunction(`return function el(tag, props = {}, ...children) {${elBody}\n};`, ['document'])(doc);
+  const timers = new Map();
+  let nextTimer = 0;
+  const windowStub = { setTimeout: (fn, ms) => { timers.set(++nextTimer, { fn, ms }); return nextTimer; }, clearTimeout: id => timers.delete(id) };
+  const calls = [];
+  const state = { focusChatDockIfCompact: card => { calls.push(['dock', card.id]); return card.compact; } };
+  const show = compileFunction(`${declaration('showChatReturnCue')}\nreturn showChatReturnCue;`,
+    ['document', 'el', 'window', 'state', 'deskIcon', 'focusCanvasCard', 'CHAT_RETURN_CUE_MS', 'AbortController'])(
+    doc, el, windowStub, state, () => doc.createElement('svg'), card => calls.push(['focus', card.id]), 6000, AbortController);
+  const chatCard = (id, fields = {}) => ({ id, isConnected: true, compact: false, listeners: [], ...fields,
+    addEventListener(type, fn, options) {
+      const entry = { type, fn, capture: options?.capture === true };
+      this.listeners.push(entry);
+      options?.signal?.addEventListener('abort', () => { this.listeners = this.listeners.filter(item => item !== entry); });
+    },
+    fire(type) { for (const entry of this.listeners.filter(item => item.type === type)) entry.fn(); } });
+  const chat = chatCard('chat-1', { compact: true });
+  const cue = show(chat);
+  assert.equal(cue.attributes.id, 'egd-chat-return');
+  assert.equal(cue.attributes.role, 'status');
+  assert.ok(cue.className.includes('egd-edge'));
+  const button = cue.children[0];
+  assert.equal(button.dataset.testid, 'chat-return');
+  assert.equal(button.textContent, '채팅으로 돌아가기');
+  assert.deepEqual([...timers.values()].map(timer => timer.ms), [6000], 'it stays a few seconds');
+  assert.deepEqual(chat.listeners.map(entry => [entry.type, entry.capture]), [['mousedown', true], ['focusin', true]]);
+  button.dispatch('click', { stopPropagation() {} });
+  assert.deepEqual(calls, [['dock', 'chat-1']], 'the Dock Chat path moves the camera to a readable Chat');
+  assert.equal(cue.removed, true);
+  assert.equal(timers.size, 0);
+  assert.deepEqual(chat.listeners, [], 'its Chat listeners go with it');
+
+  const second = show(chatCard('chat-2'));
+  const third = show(chatCard('chat-3'));
+  assert.equal(second.removed, true, 'one cue at a time');
+  third.children[0].dispatch('click', { stopPropagation() {} });
+  assert.deepEqual(calls.slice(1), [['dock', 'chat-3'], ['focus', 'chat-3']], 'a Chat already readable is just brought forward');
+  const lone = show(chatCard('chat-4', { isConnected: false }));
+  [...timers.values()][0].fn();
+  assert.equal(lone.removed, true, 'it leaves on its own');
+  const clicked = chatCard('chat-5');
+  const back = show(clicked);
+  clicked.fire('mousedown');
+  assert.deepEqual([back.removed, timers.size, calls.length], [true, 0, 3], 'a click into the Chat means it is back');
+  const focused = chatCard('chat-6');
+  const viaFocus = show(focused);
+  focused.fire('focusin');
+  assert.equal(viaFocus.removed, true);
+  assert.match(surfaceSource, /\} else if \(item\.id === 'chat'\) \{\n                dismissChatReturnCue\(\);/, 'the Dock Chat button also clears it');
+  assert.match(declaration('dismissChatReturnCue'), /document\.getElementById\('egd-chat-return'\)\?\._dismiss\?\.\(\);/);
+  assert.match(surfaceSource, /  const CHAT_RETURN_CUE_MS = 6000;\n  function dismissChatReturnCue\(\) \{/);
+  const rule = surfaceCss.match(/^#egd-chat-return \{([^}]+)\}/m)?.[1] || '';
+  assert.match(rule, /bottom: 70px;/, 'above the Dock');
+  for (const [, body] of surfaceCss.matchAll(/^#egd-chat-return[^{]*\{([^}]+)\}/gm)) assert.doesNotMatch(body, /#[0-9a-f]{3,8}\b|rgba?\(/i, 'tokens only');
+});
+
+// ============ CHAT-09 one-time and branched conversations, CU-07 inherited tools, RT-05 build marker ============
+const sessionAuth = { isLoggedIn: true, authMode: 'chatgpt', accountEmail: 'known@example.test', identityStatus: 'known' };
+const sessionAccountKey = Chat.codexAccountKey(sessionAuth);
+const sessionSource = { id: 'room-a', type: 'dm', title: 'Codex 1', participants: ['나', 'Codex'], participantRoles: { 나: 'owner', Codex: 'member' },
+  profileEnabled: false, agentProfileId: null, conversationId: 'native-a', bindingState: 'verified', bindingAccountKey: sessionAccountKey,
+  engineId: 'codex', effort: 'high', messages: [{ id: 'm1', role: 'user', runId: 'r1', conversationId: 'native-a' }] };
+
+test('session badges say 일회성 and 분기됨 before the connection state, and 분기됨 opens the source room', () => {
+  const document = settingsFakeDocument();
+  const { el } = compileFunction(`${declaration('el')}\nreturn { el };`, ['document'])(document);
+  const api = compileFunction(`${declaration('codexThreadSessionKey')}\n${declaration('codexThreadSessionLabel')}\n${declaration('buildCodexSessionBadge')}\nreturn { codexThreadSessionKey, codexThreadSessionLabel, buildCodexSessionBadge };`,
+    ['ChatState', 'el'])(Chat, el);
+  const forkedFrom = { conversationId: 'native-a', turnId: 'r1', clientThreadId: 'room-a' };
+  for (const [thread, key, label] of [
+    [{ stateless: true, conversationId: 'c', forkedFrom }, 'stateless', '일회성'],
+    [{ forkedFrom, conversationId: 'c' }, 'forked', '분기됨'],
+    [{ forkedFrom, retainedNativeBinding: { conversationId: 'c' } }, 'forked', '분기됨'],
+    [{ forkedFrom: { conversationId: '' }, conversationId: 'c' }, 'resumed', '이어진 대화'],
+    [{ stateless: 'true', retainedNativeBinding: { conversationId: 'c' } }, 'local', '로컬 기록'],
+    [{ forkedFrom: null, stateless: false }, 'fresh', '새 대화'],
+  ]) assert.deepEqual([api.codexThreadSessionKey(thread), api.codexThreadSessionLabel(thread)], [key, label], JSON.stringify(thread));
+  assert.deepEqual([Chat.chatSessionKind({ stateless: true }), Chat.chatSessionKind({ forkedFrom }), Chat.chatSessionKind({}), Chat.chatSessionKind(null)],
+    ['stateless', 'forked', null, null]);
+
+  const opened = [];
+  const bridge = { openForkSource: id => opened.push(id) };
+  const plain = api.buildCodexSessionBadge({ id: 'room-s', stateless: true }, bridge);
+  assert.deepEqual([plain.tagName, plain.className, plain.textContent, plain.dataset.session],
+    ['SPAN', 'egd-codex-session-badge egd-codex-session-badge-stateless', '일회성', 'stateless']);
+  assert.equal(api.buildCodexSessionBadge({ id: 'room-f' }, bridge).className, 'egd-codex-session-badge egd-codex-session-badge-fresh', 'existing badges keep their style key');
+  const link = api.buildCodexSessionBadge({ id: 'room-b', forkedFrom, conversationId: 'native-b' }, bridge);
+  assert.equal(link.tagName, 'BUTTON');
+  assert.match(link.className, /egd-codex-session-badge-forked egd-codex-session-badge-link/);
+  assert.equal(link.getAttribute('aria-label'), '분기됨 · 원본 대화 열기');
+  let stopped = false;
+  link.fire('click', { stopPropagation() { stopped = true; } });
+  assert.deepEqual([opened, stopped], [['room-b'], true], 'the badge opens the source room without also opening its own row');
+  assert.equal((surfaceSource.match(/buildCodexSessionBadge\(activeThread, codexBridge\)/g) || []).length, 2, 'both Chat heads carry the badge');
+
+  // Local history rooms get stateless and forkedFrom from the thread summary.
+  const hydrated = Chat.hydrateLocalChatThread({ id: 'room-b', messages: [] }, Chat.normalizeLocalHistoryPage({
+    protocolVersion: 1, thread: { clientThreadId: 'room-b', localConversationId: 'local-b', conversationId: 'native-b', stateless: false, forkedFrom },
+    events: [], messages: [], runs: [],
+  }, 'room-b'));
+  assert.deepEqual([Chat.chatSessionKind(hydrated), hydrated.forkedFrom], ['forked', forkedFrom]);
+
+  // The source room: the same native conversation first, then its local binding.
+  const rooms = [{ id: 'room-x', conversationId: 'native-x' }, { id: 'room-held', retainedNativeBinding: { conversationId: 'native-a' } }, { id: 'room-a' }];
+  assert.equal(Chat.findForkSourceThread(rooms, forkedFrom).id, 'room-held');
+  assert.equal(Chat.findForkSourceThread([{ id: 'room-a' }], { conversationId: 'gone', clientThreadId: 'room-a-binding-7' }).id, 'room-a');
+  assert.equal(Chat.findForkSourceThread([{ id: 'room-z', clientBindingId: 'wire-z' }], { conversationId: 'gone', clientThreadId: 'wire-z' }).id, 'room-z');
+  assert.equal(Chat.findForkSourceThread(rooms, { conversationId: 'gone', clientThreadId: 'nowhere' }), null);
+  assert.equal(Chat.findForkSourceThread(rooms, null), null);
+  const openBody = surfaceSource.match(/      openForkSource\(threadId\) \{([\s\S]*?)\n      \},/)?.[1];
+  assert.ok(openBody, 'the badge action remains directly testable');
+  const notices = [];
+  const selected = [];
+  const open = compileFunction(`return { selectThread(id, options) { selected.push([id, options]); }, openForkSource(threadId) {${openBody}\n} };`,
+    ['state', 'getCodexThreadById', 'ChatState', 'boardNotice', 'selected'])(
+    { codex: { threads: [{ id: 'room-b', forkedFrom }, { id: 'room-a', conversationId: 'native-a' }] } }, (codex, id) => codex.threads.find(row => row.id === id) || null,
+    Chat, text => notices.push(text), selected);
+  assert.equal(open.openForkSource('room-b'), true);
+  assert.deepEqual(selected, [['room-a', { openConversation: true }]]);
+  const lost = compileFunction(`return { selectThread() { throw new Error('no source'); }, openForkSource(threadId) {${openBody}\n} };`,
+    ['state', 'getCodexThreadById', 'ChatState', 'boardNotice'])(
+    { codex: { threads: [{ id: 'room-b', forkedFrom }] } }, (codex, id) => codex.threads.find(row => row.id === id) || null, Chat, text => notices.push(text));
+  assert.equal(lost.openForkSource('room-b'), false);
+  assert.deepEqual(notices, ['원본 대화방을 이 기기에서 찾지 못했습니다.']);
+});
+
+test('기록 없이 시작: the switch, the first-send body, the confirmed badge and Korean refusals', async () => {
+  const fresh = { id: 'room', messages: [] };
+  assert.deepEqual(Chat.chatStatelessStartView(fresh, null), { available: false, on: false, note: '코덱스 연결을 확인한 뒤 고를 수 있습니다.' });
+  assert.equal(Chat.chatStatelessStartView({ ...fresh, startStateless: true }, ['send']).on, false, 'a bridge without the capability never gets it');
+  assert.match(Chat.chatStatelessStartView(fresh, ['send']).note, /지원하지 않습니다/);
+  const off = Chat.chatStatelessStartView(fresh, ['send', 'stateless']);
+  assert.deepEqual([off.available, off.on], [true, false]);
+  assert.match(off.note, /일회성 대화로 시작/);
+  const on = Chat.chatStatelessStartView({ ...fresh, startStateless: true }, ['send', 'stateless']);
+  assert.deepEqual([on.available, on.on], [true, true]);
+  assert.match(on.note, /기록을 남기지 않습니다/);
+  assert.match(on.note, /이 기기에 남습니다/);
+  assert.doesNotMatch(on.note, /stateless|ephemeral/i);
+  for (const started of [{ ...fresh, startStateless: true, messages: [{ id: 'm' }] }, { ...fresh, startStateless: true, conversationId: 'c' }]) {
+    assert.deepEqual([Chat.chatStatelessStartView(started, ['stateless']).available, Chat.chatStatelessStartView(started, ['stateless']).on], [false, false]);
+  }
+
+  assert.equal(Chat.buildChatRequest(fresh, 'hi', 'q', { stateless: true }).stateless, true);
+  assert.equal(Object.hasOwn(Chat.buildChatRequest({ ...fresh, conversationId: 'c' }, 'hi', 'q', { stateless: true }), 'stateless'), false, 'only a new conversation');
+  for (const runtime of [{}, { stateless: 'yes' }, { stateless: false }]) assert.equal(Object.hasOwn(Chat.buildChatRequest(fresh, 'hi', 'q', runtime), 'stateless'), false);
+
+  for (const code of ['STATELESS_REQUIRES_NEW', 'INVALID_STATELESS', 'STATELESS_UNSUPPORTED', 'STATELESS_UNVERIFIED']) {
+    assert.match(Chat.chatStatelessErrorText(code), /기록 없이 시작/);
+    assert.doesNotMatch(Chat.chatStatelessErrorText(code), /[A-Z]{4,}/, 'no code on screen');
+  }
+  assert.equal(Chat.chatStatelessErrorText('RUN_IN_PROGRESS'), null);
+
+  // The production send path: the switch adds stateless:true once, and the reply sets the badge.
+  const body = surfaceSource.match(/      async sendMessage\(\) \{([\s\S]*?)\n      \},/)?.[1];
+  assert.ok(body);
+  const deps = ['state', 'getActiveCodexThread', 'getCodexThreadDraft', 'ChatState', 'threadBusy', 'epochScope', 'ensureNativeReadyForSend', 'updateThreadById', 'emit',
+    'captureThreadInputs', 'getCodexThreadById', 'protocol', 'codexThreadAgentProfile', 'appendMessageToThread', 'createCodexMessage', 'SELF_MEMBER', 'codexThreadRuntimeConfig', 'fetchJson', 'syncProtocolRun', 'browserToolSelectedSources',
+    'rootSseReady', 'InputContext'];
+  const send = async (room, capabilities, reply) => {
+    const state = { codex: { activeThreadId: 'room', threads: [{ id: 'room', messages: [], inputSources: [], briefingInputs: [], profileEnabled: false, ...room }],
+      threadDrafts: { room: '안녕' }, threadDraftRevisions: { room: 1 }, authStatus: sessionAuth, connected: true, chatCapabilities: capabilities } };
+    const getThread = (_codex, id = 'room') => state.codex.threads.find(thread => thread.id === id);
+    const update = (id, fn) => { const index = state.codex.threads.findIndex(thread => thread.id === id); state.codex.threads[index] = fn(state.codex.threads[index]); return state.codex.threads[index]; };
+    let payload = null;
+    await compileFunction(`return (async () => {${body}\n})();`, deps)(state, () => getThread(null), (codex, id) => codex.threadDrafts[id] || '', Chat, () => false,
+      { begin: () => ({}), valid: () => true, finish() {} }, async () => true, update, () => {}, async () => [], getThread, Chat.createChatProtocolState(), () => ({}),
+      (id, message) => update(id, thread => ({ ...thread, messages: [...thread.messages, message] })),
+      (role, content, status, options) => ({ id: `message-${role}`, role, content, status, ...options }), '나', () => ({}),
+      async (_url, request) => { payload = JSON.parse(request.body); return reply(payload); }, () => {}, () => [],
+      () => ({ sourceReady: true, eventSourceReadyState: 1, browserTransportId: null }), InputContext);
+    return { payload, thread: getThread(null) };
+  };
+  const accepted = request => ({ accepted: true, conversationId: 'native-one', runId: 'r1', answerId: 'native-one/r1', ...(request.stateless ? { stateless: true } : {}) });
+  const oneTime = await send({ startStateless: true }, ['send', 'stateless'], accepted);
+  assert.equal(oneTime.payload.stateless, true);
+  assert.deepEqual([oneTime.thread.stateless, oneTime.thread.startStateless], [true, false]);
+  assert.equal(Chat.chatSessionKind(oneTime.thread), 'stateless');
+  const ordinary = await send({}, ['send', 'stateless'], accepted);
+  assert.equal(Object.hasOwn(ordinary.payload, 'stateless'), false);
+  assert.equal(Object.hasOwn(ordinary.thread, 'stateless'), false, 'an ordinary send writes no session field');
+  const older = await send({ startStateless: true }, ['send'], accepted);
+  assert.equal(Object.hasOwn(older.payload, 'stateless'), false, 'an older bridge is never sent the field');
+  const refused = await send({ startStateless: true }, ['send', 'stateless'], () => {
+    throw Object.assign(new Error('This AI engine cannot start a thread without saved history'), { status: 409, code: 'STATELESS_UNSUPPORTED' });
+  });
+  assert.equal(refused.thread.sendError, '이 AI 엔진은 기록 없이 시작을 지원하지 않습니다. 선택을 끄고 다시 보내 주세요.');
+  assert.equal(refused.thread.startStateless, true, 'the choice stays for the next try');
+  assert.equal(refused.thread.messages[0].status, 'failed');
+
+  const setBody = surfaceSource.match(/      setThreadStateless\(threadId, on\) \{([\s\S]*?)\n      \},/)?.[1];
+  assert.ok(setBody);
+  const rooms = { codex: { threads: [{ id: 'new', messages: [] }, { id: 'old', messages: [{ id: 'm' }] }] } };
+  const getRoom = (_codex, id) => rooms.codex.threads.find(thread => thread.id === id) || null;
+  const updateRoom = (id, fn) => { rooms.codex.threads = rooms.codex.threads.map(thread => thread.id === id ? fn(thread) : thread); };
+  const setStateless = compileFunction(`return function (threadId, on) {${setBody}\n}`, ['state', 'getCodexThreadById', 'ChatState', 'updateThreadById', 'emit'])(rooms, getRoom, Chat, updateRoom, () => {});
+  setStateless('new', true);
+  setStateless('old', true);
+  assert.deepEqual(rooms.codex.threads.map(thread => thread.startStateless), [true, undefined], 'only a room that has not sent can change it');
+  setStateless('new', 'yes');
+  assert.equal(rooms.codex.threads[0].startStateless, false);
+});
+
+test('대화 분기: availability with reasons, the /chat/fork body, the new room and Korean errors', async () => {
+  const ready = { connected: true, auth: sessionAuth, capabilities: ['send', 'fork'], busy: false, runs: [] };
+  assert.deepEqual(Chat.chatForkAvailability(sessionSource, ready), { available: true, reason: null });
+  for (const [thread, context, pattern] of [
+    [{ ...sessionSource, stateless: true }, ready, /일회성 대화는/],
+    [{ ...sessionSource, executionBounded: true }, ready, /제한해 실행한 대화/],
+    [sessionSource, { ...ready, runs: [{ conversationId: 'native-a', runId: 'r1', executionPolicy: { mode: 'readOnlyQa' } }] }, /제한해 실행한 대화/],
+    [{ ...sessionSource, localRuns: [{ runId: 'r0', executionPolicy: { mode: 'fixtureBrowserQa' } }] }, ready, /제한해 실행한 대화/],
+    [{ ...sessionSource, conversationId: null }, ready, /아직 시작하지 않은/],
+    [{ ...sessionSource, conversationId: null, retainedNativeBinding: { conversationId: 'native-a' } }, ready, /계정 소유/],
+    [sessionSource, { ...ready, connected: false }, /연결해 로그인/],
+    [sessionSource, { ...ready, auth: { isLoggedIn: false } }, /연결해 로그인/],
+    [sessionSource, { ...ready, capabilities: ['send'] }, /브리지는 대화 분기를 지원하지 않습니다/],
+    [sessionSource, { ...ready, capabilities: null }, /브리지는 대화 분기를 지원하지 않습니다/],
+    [{ ...sessionSource, bindingAccountKey: 'codex:chatgpt:other@example.test' }, ready, /계정의 대화인지/],
+    [sessionSource, { ...ready, busy: true }, /진행 중인 실행이 끝난 뒤/],
+    [sessionSource, { ...ready, fromTurnId: 'r2', runs: [{ conversationId: 'native-a', runId: 'r2', status: 'running' }] }, /이 응답이 끝난 뒤/],
+    [null, ready, /찾지 못했습니다/],
+  ]) {
+    const result = Chat.chatForkAvailability(thread, context);
+    assert.equal(result.available, false, pattern.source);
+    assert.match(result.reason, pattern);
+  }
+  assert.equal(Chat.chatForkAvailability(sessionSource, { ...ready, fromTurnId: 'r2', runs: [{ conversationId: 'native-a', runId: 'r2', status: 'completed' }] }).available, true);
+  assert.equal(Chat.chatForkAvailability(sessionSource, { ...ready, runs: [{ conversationId: 'native-a', runId: 'r1', localHistory: true, status: 'running' }], fromTurnId: 'r1' }).available, true,
+    'a stored run is history, not a running turn');
+
+  assert.equal(Chat.chatMessageForkPoint(sessionSource, { role: 'assistant', runId: 'r2', conversationId: 'native-a' }), 'r2');
+  assert.equal(Chat.chatMessageForkPoint(sessionSource, { role: 'user', runId: 'r1' }), 'r1');
+  for (const message of [{ role: 'assistant' }, { role: 'system', runId: 'r1' }, { role: 'assistant', runId: 'r1', conversationId: 'older-native' }, null]) {
+    assert.equal(Chat.chatMessageForkPoint(sessionSource, message), null, JSON.stringify(message));
+  }
+  assert.equal(Chat.chatMessageForkPoint({ ...sessionSource, conversationId: null }, { role: 'assistant', runId: 'r1' }), null);
+
+  assert.deepEqual(Chat.buildChatForkRequest(sessionSource, 'room-new', null, 'codex'), { conversationId: 'native-a', clientThreadId: 'room-new', engineId: 'codex' });
+  assert.deepEqual(Chat.buildChatForkRequest(sessionSource, 'room-new', 'r2'), { conversationId: 'native-a', clientThreadId: 'room-new', fromTurnId: 'r2' });
+  assert.deepEqual(Chat.buildChatForkRequest(sessionSource, 'room-new', '', 'Bad Engine'), { conversationId: 'native-a', clientThreadId: 'room-new' });
+
+  for (const [code, text] of [
+    ['FORK_TARGET_EXISTS', '분기할 새 대화방이 이미 쓰이고 있습니다. 다시 분기해 주세요.'],
+    ['FORK_BOUNDED_FORBIDDEN', '점검이나 Browser 조작으로 제한해 실행한 대화는 분기할 수 없습니다.'],
+    ['FORK_STATELESS_FORBIDDEN', '일회성 대화는 코덱스에 기록이 남지 않아 분기할 수 없습니다.'],
+    ['FORK_UNSUPPORTED', '이 AI 엔진은 대화 분기를 지원하지 않습니다.'],
+    ['RUN_IN_PROGRESS', '진행 중인 실행이 끝난 뒤 분기할 수 있습니다.'],
+    ['CONVERSATION_NOT_FOUND', '원본 대화의 기록을 이 기기에서 찾지 못해 분기하지 못했습니다.'],
+    ['NATIVE_ACCOUNT_MISMATCH', '지금 로그인한 계정의 대화가 아니어서 분기할 수 없습니다.'],
+    ['LOGIN_REQUIRED', '로그인한 뒤 분기할 수 있습니다.'],
+    ['CHAT_STORE_UNAVAILABLE', '이 기기의 대화 기록 저장소를 열 수 없어 분기하지 못했습니다.'],
+    ['INVALID_THREAD_RESPONSE', '코덱스의 분기 결과를 확인하지 못했습니다. 원본 대화는 그대로입니다.'],
+    ['THREAD_MISMATCH', '코덱스의 분기 결과를 확인하지 못했습니다. 원본 대화는 그대로입니다.'],
+  ]) assert.equal(Chat.chatForkErrorText({ code, status: 409 }), text, code);
+  assert.match(Chat.chatForkErrorText(new TypeError('NetworkError when attempting to fetch resource.')), /브리지에 연결하지 못해/);
+  assert.match(Chat.chatForkErrorText({ code: 'SOMETHING_NEW', status: 500 }), /원본 대화는 그대로입니다/);
+
+  // The production branch flow, against a fake bridge reply.
+  const body = surfaceSource.match(/      async forkThread\(threadId, \{ fromTurnId = null \} = \{\}\) \{([\s\S]*?)\n      \},/)?.[1];
+  assert.ok(body, 'the production branch flow must remain directly testable');
+  const harness = (reply, source = sessionSource) => {
+    const state = { codex: { threads: [source], threadDrafts: {}, threadMenu: { threadId: source.id }, messageMenu: { threadId: source.id, messageId: 'm1' },
+      connected: true, authStatus: sessionAuth, chatCapabilities: ['fork'] } };
+    const calls = { fetch: [], notices: [], selected: [] };
+    const forking = new Set();
+    const bridge = compileFunction(`return {
+      forkAvailability(threadId, fromTurnId) {
+        return ChatState.chatForkAvailability(getCodexThreadById(state.codex, threadId), { connected: true, auth: state.codex.authStatus,
+          capabilities: state.codex.chatCapabilities, busy: forkingThreads.has(threadId), runs: [], fromTurnId });
+      },
+      selectThread(threadId) { selected.push(threadId); },
+      async forkThread(threadId, { fromTurnId = null } = {}) {${body}\n      },
+    };`, ['state', 'getCodexThreadById', 'createCodexThread', 'ChatState', 'epochScope', 'forkingThreads', 'emit', 'fetchJson', 'boardNotice', 'selected'])(
+      state, (codex, id) => codex.threads.find(row => row.id === id) || null,
+      (type, title, subtitle, options) => ({ id: 'room-new', type, title, subtitle, participants: options.participants, participantRoles: options.participantRoles,
+        profileEnabled: options.profileEnabled, agentProfileId: options.agentProfileId, conversationId: null, messages: [] }),
+      Chat, { begin: () => ({}), valid: () => true, finish() {} }, forking, () => {},
+      async (path, init) => {
+        calls.fetch.push([path, init.method, JSON.parse(init.body)]);
+        assert.equal(forking.has(source.id), true, 'the room is marked while its branch is in flight');
+        return reply(JSON.parse(init.body));
+      },
+      text => calls.notices.push(text), calls.selected);
+    return { state, calls, bridge, forking };
+  };
+  const created = request => ({ accepted: true, durable: true, conversationId: 'native-b', clientThreadId: request.clientThreadId, localConversationId: 'local-b',
+    forkedFrom: { conversationId: 'native-a', turnId: request.fromTurnId ?? null, clientThreadId: 'room-a' }, engineId: 'codex' });
+  const ok = harness(created);
+  const result = await ok.bridge.forkThread('room-a', { fromTurnId: 'r1' });
+  assert.equal(result.conversationId, 'native-b');
+  assert.deepEqual(ok.calls.fetch, [['/chat/fork', 'POST', { conversationId: 'native-a', clientThreadId: 'room-new', fromTurnId: 'r1', engineId: 'codex' }]]);
+  const branch = ok.state.codex.threads[0];
+  assert.deepEqual([branch.id, branch.title, branch.conversationId, branch.localConversationId, branch.bindingState, branch.bindingAccountKey, branch.effort, branch.engineId],
+    ['room-new', 'Codex 1 (분기)', 'native-b', 'local-b', 'verified', sessionAccountKey, 'high', 'codex']);
+  assert.deepEqual(branch.forkedFrom, { conversationId: 'native-a', turnId: 'r1', clientThreadId: 'room-a' });
+  assert.equal(Chat.chatSessionKind(branch), 'forked');
+  assert.equal(Chat.canResumeNativeThread(branch, sessionAuth), true, 'the new room loads its history through /chat/resume when it opens');
+  assert.deepEqual(ok.calls.selected, ['room-new']);
+  assert.deepEqual([ok.state.codex.threadMenu, ok.state.codex.messageMenu, ok.state.codex.threadDrafts['room-new']], [null, null, '']);
+  assert.equal(ok.forking.size, 0);
+  assert.deepEqual(ok.calls.notices, ['선택한 지점까지의 대화를 새 대화방으로 분기했습니다. 원본 대화는 그대로입니다.']);
+  assert.deepEqual(ok.state.codex.threads[1], sessionSource, 'the source room is unchanged');
+
+  const whole = harness(created);
+  await whole.bridge.forkThread('room-a');
+  assert.equal(Object.hasOwn(whole.calls.fetch[0][2], 'fromTurnId'), false, 'the room menu branches the whole conversation');
+  assert.equal(whole.state.codex.threads[0].forkedFrom.turnId, null);
+
+  const refused = harness(() => { throw Object.assign(new Error('Branch into a new conversation'), { status: 409, code: 'FORK_TARGET_EXISTS' }); });
+  assert.equal(await refused.bridge.forkThread('room-a'), null);
+  assert.deepEqual(refused.state.codex.threads, [sessionSource], 'no room is added on a refusal');
+  assert.deepEqual(refused.calls.notices, ['분기할 새 대화방이 이미 쓰이고 있습니다. 다시 분기해 주세요.']);
+  assert.equal(refused.forking.size, 0);
+
+  const odd = harness(request => ({ ...created(request), clientThreadId: 'someone-else' }));
+  assert.equal(await odd.bridge.forkThread('room-a'), null);
+  assert.deepEqual(odd.calls.notices, ['코덱스의 분기 결과를 확인하지 못했습니다. 원본 대화는 그대로입니다.']);
+  assert.equal(odd.state.codex.threads.length, 1);
+
+  const oneTime = harness(() => assert.fail('a one-time room never reaches the bridge'), { ...sessionSource, stateless: true });
+  assert.equal(await oneTime.bridge.forkThread('room-a'), null);
+  assert.deepEqual(oneTime.calls.notices, ['일회성 대화는 코덱스에 기록이 남지 않아 분기할 수 없습니다.']);
+  assert.deepEqual(oneTime.calls.fetch, []);
+
+  assert.equal(Chat.forkedThreadFromResult({ id: 'n' }, sessionSource, { accepted: true, conversationId: 'native-a', clientThreadId: 'n' }), null, 'the source id is not a branch');
+  assert.equal(Chat.forkedThreadFromResult({ id: 'n' }, sessionSource, { accepted: false, conversationId: 'native-c', clientThreadId: 'n' }), null);
+});
+
+test('branch menus and the 기록 없이 시작 switch: disabled with the reason, and actions map to the bridge', () => {
+  const start = surfaceSource.indexOf('      const renderForkMenuItems = ');
+  const end = surfaceSource.indexOf('      const renderThreadSection = ', start);
+  assert.ok(start > 0 && end > start, 'the production branch renderers must remain directly testable');
+  const document = settingsFakeDocument();
+  const { el } = compileFunction(`${declaration('el')}\nreturn { el };`, ['document'])(document);
+  const calls = [];
+  let availability = { available: true, reason: null };
+  const bridge = {
+    forkAvailability: (...args) => { calls.push(['forkAvailability', ...args]); return availability; },
+    forkThread: (...args) => calls.push(['forkThread', ...args]),
+    toggleMessageMenu: (threadId, messageId) => calls.push(['toggleMessageMenu', threadId, messageId]),
+    closeMessageMenu: () => calls.push(['closeMessageMenu']),
+    setThreadStateless: (...args) => calls.push(['setThreadStateless', ...args]),
+  };
+  const renderers = codex => compileFunction(`${surfaceSource.slice(start, end)}\nreturn { renderForkMenuItems, renderMessageMenu, renderMessageMenuTrigger, renderStatelessStart };`,
+    ['codex', 'ChatState', 'el', 'codexBridge'])(codex, Chat, el, bridge);
+  const ui = renderers({ messageMenu: { threadId: 'room-a', messageId: 'm2', left: 40, top: 60 }, chatCapabilities: ['send', 'stateless', 'fork'] });
+
+  const [roomItem, roomNote] = ui.renderForkMenuItems(sessionSource, null, '대화 분기', '지금까지의 대화를 새 대화방으로 이어 갑니다.');
+  assert.deepEqual([roomItem.textContent, roomItem.getAttribute('disabled'), roomItem.dataset.testid, roomNote.textContent],
+    ['대화 분기', null, 'chat-fork-thread', '지금까지의 대화를 새 대화방으로 이어 갑니다.']);
+  roomItem.fire('click');
+  assert.deepEqual(calls.splice(0), [['forkAvailability', 'room-a', null], ['forkThread', 'room-a', {}]]);
+  assert.match(surfaceSource, /\.\.\.renderForkMenuItems\(thread, null, '대화 분기', '지금까지의 대화를 새 대화방으로 이어 갑니다\.'\),\n          el\('button', \{\n            class: 'egd-codex-thread-menu-item egd-codex-thread-menu-item-danger',/,
+    'the room menu offers it just above 채팅방 삭제');
+
+  const answer = { id: 'm2', role: 'assistant', runId: 'r2', conversationId: 'native-a', content: '답' };
+  const trigger = ui.renderMessageMenuTrigger(sessionSource, answer);
+  assert.deepEqual([trigger.tagName, trigger.getAttribute('aria-label'), trigger.getAttribute('aria-expanded')], ['BUTTON', '메시지 메뉴', 'true']);
+  trigger.fire('click', { currentTarget: trigger });
+  assert.deepEqual(calls.splice(0), [['toggleMessageMenu', 'room-a', 'm2']]);
+  for (const message of [{ id: 'x', role: 'assistant' }, { id: 'y', role: 'user', status: 'failed' }, { id: 'z', role: 'assistant', runId: 'r9', conversationId: 'older-native' }]) {
+    assert.equal(ui.renderMessageMenuTrigger(sessionSource, message), null, 'no menu where there is no point to branch from');
+  }
+  const menu = ui.renderMessageMenu(sessionSource, answer);
+  assert.deepEqual([menu.getAttribute('role'), menu.getAttribute('aria-label'), menu.style.left, menu.style.top, menu.dataset.messageId], ['group', '메시지 메뉴', '40px', '60px', 'm2']);
+  assert.match(menu.className, /egd-codex-thread-menu egd-codex-message-menu/, 'the shared menu class keeps clicks inside it from closing it');
+  const [forkItem, note, close] = menu.children;
+  assert.deepEqual([forkItem.textContent, note.textContent, close.textContent], ['이 지점에서 분기', '이 응답까지의 대화를 새 대화방으로 이어 갑니다.', '닫기']);
+  forkItem.fire('click');
+  close.fire('click');
+  assert.deepEqual(calls.splice(0), [['forkAvailability', 'room-a', 'r2'], ['forkThread', 'room-a', { fromTurnId: 'r2' }], ['closeMessageMenu']]);
+  assert.match(ui.renderMessageMenu(sessionSource, { ...answer, role: 'user' }).children[1].textContent, /이 요청과 그 응답까지/);
+
+  availability = { available: false, reason: '일회성 대화는 코덱스에 기록이 남지 않아 분기할 수 없습니다.' };
+  const blocked = ui.renderMessageMenu({ ...sessionSource, stateless: true }, answer);
+  assert.deepEqual([blocked.children[0].getAttribute('disabled'), blocked.children[0].getAttribute('aria-disabled'), blocked.children[1].textContent],
+    ['true', 'true', '일회성 대화는 코덱스에 기록이 남지 않아 분기할 수 없습니다.']);
+  assert.ok(ui.renderMessageMenuTrigger({ ...sessionSource, stateless: true }, answer), 'a one-time room still opens the menu to say why');
+  assert.deepEqual(calls.splice(0), [['forkAvailability', 'room-a', 'r2'], ['forkAvailability', 'room-a', 'r2']], 'rendering only asks');
+
+  const fresh = { id: 'new', messages: [] };
+  const offSwitch = ui.renderStatelessStart(fresh);
+  const toggle = offSwitch.children[0];
+  assert.deepEqual([offSwitch.dataset.state, toggle.getAttribute('role'), toggle.getAttribute('aria-checked'), toggle.getAttribute('disabled'), toggle.textContent],
+    ['off', 'switch', 'false', null, '기록 없이 시작']);
+  toggle.fire('click');
+  assert.deepEqual(calls.splice(0), [['setThreadStateless', 'new', true]]);
+  const onSwitch = ui.renderStatelessStart({ ...fresh, startStateless: true });
+  assert.deepEqual([onSwitch.dataset.state, onSwitch.children[0].getAttribute('aria-checked')], ['on', 'true']);
+  assert.match(onSwitch.children[0].className, /egd-codex-stateless-toggle-on/);
+  onSwitch.children[0].fire('click');
+  assert.deepEqual(calls.splice(0), [['setThreadStateless', 'new', false]]);
+  const older = renderers({ messageMenu: null, chatCapabilities: ['send'] }).renderStatelessStart(fresh);
+  assert.deepEqual([older.children[0].getAttribute('disabled'), older.children[1].textContent], ['true', '지금 연결된 브리지는 기록 없이 시작을 지원하지 않습니다.']);
+  assert.match(surfaceSource, /renderEngineChoices\(activeThread\)\)\);\n            messages\.appendChild\(renderStatelessStart\(activeThread\)\);/, 'the switch sits under the engine choice');
+
+  // The message trigger sits on the open side of the bubble, and closes with the other menus.
+  assert.match(surfaceSource, /message\.role === 'user' \? menuTrigger : null, bubble, message\.role === 'user' \? null : menuTrigger\);/);
+  assert.match(surfaceSource, /      codexBridge\.closeEngineMenu\(\);\n      codexBridge\.closeMessageMenu\?\.\(\);/);
+  assert.match(surfaceSource, /if \(target\.closest\('\.egd-codex-message-menu-trigger'\)\) return;/);
+
+  // New controls use tokens only, so the dark token block covers them.
+  for (const selector of ['.egd-codex-session-badge-stateless', '.egd-codex-session-badge-forked', '.egd-codex-message-menu-trigger', 'button.egd-codex-stateless-toggle',
+    '.egd-codex-stateless-switch', '.egd-settings-mcp-row', '.egd-settings-mcp-note']) {
+    const rule = surfaceCss.match(new RegExp(`^${selector.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')} \\{([^}]+)\\}`, 'm'))?.[1];
+    assert.ok(rule, selector);
+    assert.doesNotMatch(rule, /#[0-9a-f]{3,8}\b|rgba?\(/i, `${selector} uses tokens only`);
+  }
+});
+
+test('연결된 도구: inherited external tools read in Korean, with the external-control note and no block switch', () => {
+  assert.deepEqual(Chat.inheritedMcpView(null), { status: 'unknown', rows: [] });
+  assert.deepEqual(Chat.inheritedMcpView(undefined), { status: 'unknown', rows: [] });
+  assert.deepEqual(Chat.inheritedMcpView({ name: 'x' }), { status: 'unknown', rows: [] });
+  assert.deepEqual(Chat.inheritedMcpView([]), { status: 'empty', rows: [] });
+  const reported = [
+    { name: 'chrome-devtools', enabled: true, status: 'connected', controlsExternal: true, kind: 'browser' },
+    { name: 'computer-use', enabled: true, status: 'authenticationRequired', controlsExternal: true, kind: 'desktop' },
+    { name: 'node-repl', enabled: true, status: 'starting', controlsExternal: true, kind: 'repl' },
+    { name: 'docs', enabled: false, status: 'disabled', controlsExternal: false, kind: 'other' },
+    { name: 'later', enabled: true, status: 'notStarted', controlsExternal: false, kind: 'other' },
+    { name: 'ready', enabled: true, status: 'available', controlsExternal: false, kind: 'other' },
+    { name: 'broken', enabled: true, status: 'failed', controlsExternal: false, kind: 'other' },
+    { name: 'stopped', enabled: true, status: 'cancelled', controlsExternal: false, kind: 'other' },
+    { name: 'odd', status: 'mystery', kind: 'robot', controlsExternal: 'yes' },
+    { name: '  ', status: 'connected' }, null, 'x',
+  ];
+  const view = Chat.inheritedMcpView(reported);
+  assert.equal(view.status, 'listed');
+  assert.deepEqual(view.rows.map(row => [row.name, row.statusLabel, row.tone, row.kindLabel, row.controlsExternal]), [
+    ['chrome-devtools', '연결됨', 'ok', '브라우저 제어', true],
+    ['computer-use', '로그인 필요', 'warn', '데스크톱 제어', true],
+    ['node-repl', '시작 중', 'idle', '코드 실행', true],
+    ['docs', '꺼짐', 'off', '기타', false],
+    ['later', '시작 전', 'idle', '기타', false],
+    ['ready', '사용 가능', 'ok', '기타', false],
+    ['broken', '실패', 'warn', '기타', false],
+    ['stopped', '취소됨', 'off', '기타', false],
+    ['odd', '확인 안 됨', 'idle', '기타', false],
+  ]);
+
+  // The production Settings '계정' tab shows them under '연결된 도구'.
+  const document = settingsFakeDocument();
+  const { el, codexProfileAvatar } = compileFunction(`${declaration('el')}\n${declaration('codexProfileAvatar')}\nreturn { el, codexProfileAvatar };`, ['document', 'ChatState'])(document, Chat);
+  const listeners = new Set();
+  const state = { codex: { connected: true, isStartingLogin: false, authStatus: { isLoggedIn: false }, inheritedMcp: null } };
+  state.codexBridge = {
+    subscribe(listener) { listeners.add(listener); listener(state.codex); return () => listeners.delete(listener); },
+    profileCatalog: () => ({ status: 'ready', profiles: [] }), loadProfiles: () => Promise.resolve(),
+  };
+  const spawn = compileFunction(`${declaration('spawnSettingsCard')}\nreturn spawnSettingsCard;`, ['singletonSourceRef', 'focusOpenSourceCard', 'cardSeq', 'resolveCanvasCardPlacement',
+    'revealPlacedCanvasCard', 'el', 'cardZ', 'closeCanvasCard', 'state', 'ChatState', 'codexProfileAvatar', 'document', 'window', 'bindCardSourceRef', 'markAgendaDirty', 'setActiveEntity',
+    'isCardFullscreen', 'focusCanvasCard', 'installCardHeaderFullscreenToggle', 'canvasZoom'])(
+    () => ({ kind: 'settings-card' }), () => null, 0, () => ({ x: 0, y: 0, width: 600, height: 600, inView: true }), () => {}, el, 0, () => {}, state, Chat, codexProfileAvatar,
+    document, { innerWidth: 1280, innerHeight: 800, confirm: () => false, setTimeout: () => 0 }, () => {}, () => {}, () => {}, () => false, () => {}, () => {}, () => 1);
+  const card = spawn();
+  const section = () => settingsNodes(card, node => node.dataset.testid === 'settings-mcp')[0];
+  assert.equal(section().dataset.state, 'unknown');
+  assert.match(section().textContent, /연결된 도구/);
+  assert.match(section().textContent, /확인할 수 없음/);
+  assert.match(section().textContent, /차단 여부 결정 대기/);
+  assert.equal(settingsNodes(section(), node => node.tagName === 'BUTTON' || node.getAttribute('role') === 'switch').length, 0, 'no block switch while the decision is pending');
+
+  state.codex.inheritedMcp = [];
+  for (const listener of listeners) listener(state.codex);
+  assert.equal(section().dataset.state, 'empty');
+  assert.match(section().textContent, /물려받은 외부 도구가 없습니다/);
+
+  state.codex.inheritedMcp = reported.slice(0, 4);
+  for (const listener of listeners) listener(state.codex);
+  const rows = settingsNodes(section(), node => node.dataset.testid === 'settings-mcp-row');
+  assert.deepEqual(rows.map(row => [row.dataset.kind, row.dataset.tone]), [['browser', 'ok'], ['desktop', 'warn'], ['repl', 'idle'], ['other', 'off']]);
+  assert.match(rows[0].textContent, /^chrome-devtools브라우저 제어연결됨일반 대화에서 EG-Desk 승인 없이 쓸 수 있는 외부 제어 도구입니다$/);
+  assert.equal(settingsNodes(section(), node => node.dataset.testid === 'settings-mcp-external').length, 3, 'only external-control tools carry the note');
+  assert.doesNotMatch(section().textContent, /authenticationRequired|notStarted|controlsExternal|disabled/, 'no raw status values on screen');
+  assert.equal(settingsNodes(section(), node => node.tagName === 'BUTTON').length, 0);
+  state.codex.connected = false;
+  for (const listener of listeners) listener(state.codex);
+  assert.equal(section().dataset.state, 'unknown', 'offline, an earlier list is not shown as current');
+  card._cleanup();
+});
+
+test('bridge build marker: /v1/state carries the installed build, and a missing or broken marker sends nothing', async () => {
+  const api = compileFunction(`${declaration('readExpectedOverlayBuild')}\n${declaration('overlayBuildHeaders')}\n${declaration('bridgeSessionFields')}\nreturn { readExpectedOverlayBuild, overlayBuildHeaders, bridgeSessionFields };`,
+    ['OVERLAY_BUILD_MARKER_URL', 'fetch'])('chrome://userchrome/content/egdesk-bridge-build.json', () => { throw new Error('the default loader is not used here'); });
+  const hash = 'c'.repeat(64);
+  const loads = [];
+  const respond = value => async (url, init) => { loads.push([url, init]); return value; };
+  assert.equal(await api.readExpectedOverlayBuild(respond({ ok: true, json: async () => ({ buildHash: hash }) })), hash);
+  assert.deepEqual(loads[0], ['chrome://userchrome/content/egdesk-bridge-build.json', { cache: 'no-store' }]);
+  assert.match(surfaceSource, /  const OVERLAY_BUILD_MARKER_URL = 'chrome:\/\/userchrome\/content\/egdesk-bridge-build\.json';/);
+  assert.equal(await api.readExpectedOverlayBuild(respond({ ok: true, json: async () => ({ buildHash: ` ${hash.toUpperCase()}\n` }) })), hash);
+  for (const missing of [respond({ ok: false, status: 404 }), respond({ ok: true, json: async () => { throw new SyntaxError('bad json'); } }),
+    respond({ ok: true, json: async () => ({ buildHash: 'abc' }) }), respond({ ok: true, json: async () => null }), respond(null),
+    async () => { throw new TypeError('NS_ERROR_FILE_NOT_FOUND'); }, () => { throw new Error('sync failure'); }]) {
+    assert.equal(await api.readExpectedOverlayBuild(missing), null);
+  }
+  assert.deepEqual(api.overlayBuildHeaders(hash), { 'X-EGDesk-Overlay-Build': hash });
+  for (const none of [null, undefined, '', 'abc', 'C'.repeat(64), 7]) assert.deepEqual(api.overlayBuildHeaders(none), {});
+
+  // Both /v1/state reads carry it; the marker is read once and reused.
+  assert.equal((surfaceSource.match(/fetchJson\('\/v1\/state', \{ signal: token\.signal, headers: await bridgeStateHeaders\(\) \}\)/g) || []).length, 2);
+  assert.equal((surfaceSource.match(/fetchJson\('\/v1\/state'/g) || []).length, 2, 'no /v1/state read goes without it');
+  assert.match(surfaceSource, /const bridgeStateHeaders = async \(\) => overlayBuildHeaders\(await \(overlayBuildRead \|\|= readExpectedOverlayBuild\(\)\)\);/);
+  const fetchBody = surfaceSource.match(/    const fetchJson = async \(path, options = \{\}\) => \{([\s\S]*?)\n    \};/)?.[1];
+  assert.ok(fetchBody);
+  const sent = [];
+  const fetchJson = compileFunction(`return async (path, options = {}) => {${fetchBody}\n    };`, ['fetch'])(async (url, init) => { sent.push([url, init.headers]); return { ok: true, json: async () => ({}) }; });
+  await fetchJson('/v1/state', { headers: api.overlayBuildHeaders(hash) });
+  await fetchJson('/v1/state', { headers: api.overlayBuildHeaders(null) });
+  assert.deepEqual(sent, [
+    ['http://127.0.0.1:39218/v1/state', { 'Content-Type': 'application/json', 'X-EGDesk-Overlay-Build': hash }],
+    ['http://127.0.0.1:39218/v1/state', { 'Content-Type': 'application/json' }],
+  ]);
+  // A mismatch the bridge reports then shows the existing line.
+  const fields = compileFunction(`${declaration('bridgeConnectionFields')}\nreturn bridgeConnectionFields;`, [])();
+  assert.equal(Surface.bridgeConnectionNotice({ connected: true, bridge: fields({ bridge: { buildHash: 'd'.repeat(64), startedAt: 1, sourceMismatch: true } }).bridgeBuild }).text,
+    '브리지 버전이 맞지 않습니다 · 다시 시작 필요');
+
+  assert.deepEqual(api.bridgeSessionFields(null), { chatCapabilities: null, inheritedMcp: null });
+  assert.deepEqual(api.bridgeSessionFields({ capabilities: { chat: ['send', 'fork', 'stateless', 7] }, inheritedMcp: [{ name: 'x' }] }),
+    { chatCapabilities: ['send', 'fork', 'stateless'], inheritedMcp: [{ name: 'x' }] });
+  assert.deepEqual(api.bridgeSessionFields({ capabilities: {}, inheritedMcp: 'x' }), { chatCapabilities: null, inheritedMcp: null });
+  assert.equal((surfaceSource.match(/\.\.\.bridgeSessionFields\(bridgeState\),/g) || []).length, 2, 'connect and refresh both read them');
+  assert.match(surfaceSource, /case 'mcp\.inherited':\n          update\(\{ inheritedMcp: Array\.isArray\(event\.inheritedMcp\) \? event\.inheritedMcp : null \}\);/,
+    'the SSE codex event replaces the list');
 });
