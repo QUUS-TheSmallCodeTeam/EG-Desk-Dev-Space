@@ -123,6 +123,60 @@ test('POST /events/browser is loopback/Origin guarded, strips the URL to origin 
   assert.equal(published.length, 2, 'refused requests publish nothing')
 })
 
+test('a popup card may name the card that opened it (openerCardId); it is optional, opaque, and never the card itself', () => {
+  const bus = createWorkflowEventBus()
+  const popup = bus.publish({ topic: 'browser.oauthCompleted', owner: OWNER,
+    payload: { cardId: 'egd-browser-card-9', origin: 'http://127.0.0.1:43123', path: '/oauth/callback', openerCardId: 'egd-browser-card-2' } })
+  assert.deepEqual(popup.payload, { cardId: 'egd-browser-card-9', origin: 'http://127.0.0.1:43123', path: '/oauth/callback', openerCardId: 'egd-browser-card-2' })
+  assert.ok(Object.isFrozen(popup.payload))
+  const navigated = bus.publish({ topic: 'browser.navigated', owner: OWNER,
+    payload: { cardId: 'egd-browser-card-9', origin: 'http://localhost:43124', path: '/login', openerCardId: 'egd-browser-card-2' } })
+  assert.equal(navigated.payload.openerCardId, 'egd-browser-card-2')
+  const plain = bus.publish({ topic: 'browser.oauthCompleted', owner: OWNER, payload: { cardId: 'c1', origin: 'https://a.example', path: '/cb' } })
+  assert.equal(Object.hasOwn(plain.payload, 'openerCardId'), false, 'an ordinary card keeps the old payload shape')
+  const nulled = bus.publish({ topic: 'browser.navigated', owner: OWNER, payload: { cardId: 'c1', origin: 'https://a.example', path: '/', openerCardId: null } })
+  assert.equal(Object.hasOwn(nulled.payload, 'openerCardId'), false, 'null means no opener and is left out')
+  assert.equal(popup.summary, 'Browser sign-in finished at http://127.0.0.1:43123/oauth/callback', 'card IDs stay out of the summary')
+  for (const bad of ['', '../card', 'card id', 'a'.repeat(161), 7, true, { id: 'c' }]) {
+    assert.throws(() => bus.publish({ topic: 'browser.oauthCompleted', owner: OWNER,
+      payload: { cardId: 'c1', origin: 'https://a.example', path: '/cb', openerCardId: bad } }), { code: 'WORKFLOW_EVENT_INPUT' }, String(bad))
+  }
+  assert.throws(() => bus.publish({ topic: 'browser.oauthCompleted', owner: OWNER,
+    payload: { cardId: 'c1', origin: 'https://a.example', path: '/cb', openerCardId: 'c1' } }), { code: 'WORKFLOW_EVENT_INPUT', message: /not the card itself/ })
+  assert.throws(() => bus.publish({ topic: 'browser.oauthCompleted', owner: OWNER,
+    payload: { cardId: 'c1', origin: 'https://a.example', path: '/cb', openerUrl: 'https://a.example/' } }), { code: 'WORKFLOW_EVENT_INPUT' }, 'only openerCardId is new')
+  assert.throws(() => bus.publish({ topic: 'auth.changed', owner: OWNER, payload: { signedIn: true, openerCardId: 'c2' } }), { code: 'WORKFLOW_EVENT_INPUT' },
+    'other topics do not take an opener')
+})
+
+test('POST /events/browser accepts openerCardId from a popup card and passes it through; bad openers publish nothing', async () => {
+  const bus = createWorkflowEventBus()
+  const handler = createWorkflowEventHttpHandler({ bus, owner: OWNER })
+  const published = []
+  bus.subscribe({ owner: OWNER }, event => { published.push(event) })
+  const accepted = await request(handler, 'POST', '/events/browser', { cardId: 'egd-browser-card-9', kind: 'oauthCompleted',
+    url: 'http://127.0.0.1:43123/oauth/callback?code=SECRET-CODE&state=s', openerCardId: 'egd-browser-card-2' }, { origin: 'chrome://browser' })
+  assert.equal(accepted.status, 202)
+  assert.deepEqual(accepted.body.event, { seq: 1, id: accepted.body.event.id, topic: 'browser.oauthCompleted',
+    origin: 'http://127.0.0.1:43123', path: '/oauth/callback', openerCardId: 'egd-browser-card-2' })
+  const ordinary = await request(handler, 'POST', '/events/browser', { cardId: 'egd-browser-card-2', kind: 'navigated', url: 'https://a.example/x' })
+  assert.equal(Object.hasOwn(ordinary.body.event, 'openerCardId'), false, 'the old request shape still answers with the old event shape')
+  const nulled = await request(handler, 'POST', '/events/browser', { cardId: 'egd-browser-card-2', kind: 'navigated', url: 'https://a.example/y', openerCardId: null })
+  assert.equal(nulled.status, 202)
+  assert.equal(Object.hasOwn(nulled.body.event, 'openerCardId'), false)
+  await bus.flush()
+  assert.deepEqual(published[0].payload, { cardId: 'egd-browser-card-9', origin: 'http://127.0.0.1:43123', path: '/oauth/callback', openerCardId: 'egd-browser-card-2' })
+  assert.equal(JSON.stringify(published).includes('SECRET-CODE'), false)
+  for (const openerCardId of ['../c', '', 'egd-browser-card-9', 42]) {
+    const refused = await request(handler, 'POST', '/events/browser', { cardId: 'egd-browser-card-9', kind: 'oauthCompleted', url: 'https://a.example/cb', openerCardId })
+    assert.equal(refused.status, 400, String(openerCardId))
+    assert.equal(refused.body.code, 'WORKFLOW_EVENT_INPUT')
+  }
+  assert.equal((await request(handler, 'POST', '/events/browser', { cardId: 'c', kind: 'navigated', url: 'https://a.example/', openerCardId: 'p', title: 'x' })).status, 400)
+  await bus.flush()
+  assert.equal(published.length, 3, 'refused requests publish nothing')
+})
+
 test('browser events from the screen are rate-limited per second', async () => {
   let clock = 0
   const bus = createWorkflowEventBus()

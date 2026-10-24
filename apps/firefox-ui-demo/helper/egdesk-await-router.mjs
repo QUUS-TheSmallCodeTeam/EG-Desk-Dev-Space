@@ -4,8 +4,10 @@
  *
  * Matching is exact and per gate; nothing is matched broadly:
  *   oauth        browser.oauthCompleted with the same origin, a path equal to
- *                pathPrefix or below it on a "/" boundary, and the same cardId
- *                when the gate names one. browser.navigated never satisfies it.
+ *                pathPrefix or below it on a "/" boundary, and — when the gate
+ *                names a card — that cardId, or a popup card whose
+ *                openerCardId is that card (BRW-04: the sign-in finished in the
+ *                popup the card opened). browser.navigated never satisfies it.
  *   file         file.changed in the same connected rootId whose relative path
  *                matches relativeGlob ("*", "?" within a segment, "**" across).
  *   terminalExit terminal.exit of the same sessionId (and exitCode if given).
@@ -44,6 +46,18 @@ export function pathWithin(path, prefix) {
   return path === prefix || path.startsWith(prefix.endsWith('/') ? prefix : `${prefix}/`)
 }
 
+/**
+ * The card rule of an oauth gate: a gate without a card takes any card; a gate
+ * naming a card takes that card, or a popup card the screen reported as opened
+ * from it (payload.openerCardId, exact string). The screen mirrors this in
+ * EGDeskSurfaceState oauthGateMatches.
+ */
+export function gateCardMatches(gateCardId, payload) {
+  if (gateCardId === undefined) return true
+  if (!payload) return false
+  return payload.cardId === gateCardId || (typeof payload.openerCardId === 'string' && payload.openerCardId === gateCardId)
+}
+
 export function gateMatchesEvent(gate, event, target = {}) {
   if (!gate || !event?.payload) return false
   const payload = event.payload
@@ -53,7 +67,7 @@ export function gateMatchesEvent(gate, event, target = {}) {
   switch (gate.kind) {
     case 'oauth':
       return event.topic === 'browser.oauthCompleted' && payload.origin === gate.origin &&
-        pathWithin(payload.path, gate.pathPrefix) && (gate.cardId === undefined || payload.cardId === gate.cardId)
+        pathWithin(payload.path, gate.pathPrefix) && gateCardMatches(gate.cardId, payload)
     case 'file':
       return event.topic === 'file.changed' && payload.rootId === gate.root && globMatch(gate.relativeGlob, payload.relativePath)
     case 'terminalExit':

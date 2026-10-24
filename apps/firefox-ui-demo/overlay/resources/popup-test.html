@@ -1,19 +1,99 @@
 <!DOCTYPE html>
-<html>
-<head><meta charset="utf-8"><title>Popup Capture Test</title></head>
-<body style="font:500 16px -apple-system,system-ui,sans-serif;padding:40px;color:#1A1A1A;background:#F5F3EF;margin:0">
-  <h1 style="color:#2D5A7B;margin:0 0 12px">Popup Capture Test</h1>
-  <p style="color:#5A5A5A;margin:0 0 24px">Firing <code>window.open("https://example.com")</code> in 800ms — expected: new canvas card appears.</p>
-  <p id="status" style="color:#2E7D32;font-weight:600"></p>
-  <button id="manual" style="padding:8px 16px;background:#2D5A7B;color:#fff;border:none;border-radius:8px;cursor:pointer;margin-top:12px">Trigger popup manually</button>
+<html lang="ko">
+<head>
+<meta charset="utf-8">
+<title>Popup Capture Test</title>
+<style>
+  body { font: 500 15px -apple-system, system-ui, sans-serif; padding: 32px 40px; color: #1A1A1A; background: #F5F3EF; margin: 0; }
+  h1 { color: #2D5A7B; margin: 0 0 8px; font-size: 22px; }
+  p { color: #5A5A5A; margin: 0 0 16px; line-height: 1.5; }
+  label { display: block; margin: 0 0 16px; color: #3A3A3A; }
+  input { font: inherit; width: min(420px, 100%); padding: 6px 10px; border: 1px solid #C9C4BA; border-radius: 6px; background: #fff; }
+  ol { padding-left: 20px; margin: 0 0 16px; }
+  li { margin: 0 0 14px; }
+  button { font: inherit; padding: 8px 14px; background: #2D5A7B; color: #fff; border: none; border-radius: 8px; cursor: pointer; }
+  button:focus-visible { outline: 3px solid #F2B84B; outline-offset: 2px; }
+  .expect { display: block; color: #5A5A5A; font-size: 13px; margin-top: 4px; }
+  code { font-size: 13px; }
+  #log { background: #fff; border-radius: 8px; padding: 12px 14px; min-height: 48px; margin: 0; white-space: pre-wrap; font: 13px ui-monospace, monospace; }
+</style>
+</head>
+<body>
+  <h1>Popup Capture Test</h1>
+  <p>EG-Desk Browser 카드에서 이 페이지를 열고 아래 버튼을 하나씩 눌러 봅니다. 결과는 맨 아래 기록에 남습니다.
+    자동 회귀 시험은 <code>scripts/verify-firefox-mcp-browser-popups.mjs</code>가 같은 다섯 가지를 확인합니다.</p>
+  <label>팝업으로 열 주소 (1·2·5번)
+    <input id="url" type="url" value="https://example.com" spellcheck="false">
+  </label>
+  <ol>
+    <li><button id="unsized" type="button">크기 지정 없는 팝업</button>
+      <span class="expect"><code>window.open(url, '_blank')</code> · 기대: 새 Browser 카드, 반환값은 창 객체</span></li>
+    <li><button id="sized" type="button">크기 지정 팝업 (로그인 창 모양)</button>
+      <span class="expect"><code>window.open(url, 'egdesk-login', 'popup,width=480,height=640')</code> · 기대: EG-Desk 화면이 다른 창에 또 뜨지 않음</span></li>
+    <li><button id="message" type="button">opener에게 메시지 보내는 팝업</button>
+      <span class="expect">빈 팝업에 '로그인 끝' 메시지를 보내는 스크립트를 씀 · 기대: 아래 기록에 "메시지 받음"</span></li>
+    <li><button id="selfclose" type="button">스스로 닫히는 팝업</button>
+      <span class="expect">빈 팝업이 1초 뒤 <code>window.close()</code> · 기대: 팝업 카드가 사라지고 이 카드는 남음</span></li>
+    <li><button id="noopener" type="button">noopener 팝업</button>
+      <span class="expect"><code>window.open(url, '_blank', 'noopener')</code> · 기대: 새 카드, 반환값은 null</span></li>
+  </ol>
+  <pre id="log" aria-live="polite"></pre>
   <script>
-    function doPopup(){
-      var w = window.open('https://example.com', '_blank');
-      document.getElementById('status').textContent = 'window.open returned: ' + (w ? 'OK' : 'NULL (blocked)');
-      console.warn('[popup-test] window.open →', w);
+    const log = (text) => {
+      const line = new Date().toLocaleTimeString() + '  ' + text;
+      const node = document.getElementById('log');
+      node.textContent = (node.textContent ? node.textContent + '\n' : '') + line;
+      console.warn('[popup-test]', text);
+    };
+    const target = () => {
+      const value = document.getElementById('url').value.trim();
+      try { const url = new URL(value); if (url.protocol === 'http:' || url.protocol === 'https:') return url.href; } catch (error) {}
+      log('주소가 http(s)가 아니어서 https://example.com 을 엽니다');
+      return 'https://example.com/';
+    };
+    const opened = (name, popup) => log(name + ': window.open 반환값 = ' + (popup ? '창 객체' : 'null (차단됐거나 연결이 끊김)'));
+
+    // Writes a script into an about:blank popup. This only works while the popup
+    // keeps its opener link (same origin as this page); a lost link shows up here.
+    function writePopup(name, features, script) {
+      let popup = null;
+      try { popup = window.open('', name, features); } catch (error) { log(name + ': window.open 오류 ' + error.message); return null; }
+      opened(name, popup);
+      if (!popup) return null;
+      try {
+        popup.document.open();
+        popup.document.write('<!doctype html><meta charset="utf-8"><title>' + name + '</title><p>' + name + '</p><script>' + script + '<\/script>');
+        popup.document.close();
+      } catch (error) {
+        log(name + ': 팝업에 쓸 수 없음 (opener 연결이 끊김) — ' + error.message);
+      }
+      return popup;
     }
-    document.getElementById('manual').addEventListener('click', doPopup);
-    setTimeout(doPopup, 800);
+
+    window.addEventListener('message', (event) => {
+      if (event.data && event.data.popupTest === 'login-finished') log('메시지 받음: 팝업이 로그인 끝을 알렸습니다');
+    });
+
+    document.getElementById('unsized').addEventListener('click', () => opened('크기 지정 없는 팝업', window.open(target(), '_blank')));
+    document.getElementById('sized').addEventListener('click', () => opened('크기 지정 팝업', window.open(target(), 'egdesk-login', 'popup,width=480,height=640')));
+    document.getElementById('message').addEventListener('click', () => {
+      writePopup('egdesk-popup-message', '', 'try { window.opener.postMessage({ popupTest: "login-finished" }, "*"); document.title = "보냄"; } catch (error) { document.title = "opener 없음"; }');
+    });
+    document.getElementById('selfclose').addEventListener('click', () => {
+      const popup = writePopup('egdesk-popup-selfclose', '', 'setTimeout(function () { window.close(); }, 1000);');
+      if (!popup) return;
+      const started = Date.now();
+      const timer = setInterval(() => {
+        let closed = false;
+        try { closed = popup.closed === true; } catch (error) {}
+        if (closed) { clearInterval(timer); log('스스로 닫힘: 팝업이 닫혔습니다 (카드도 사라졌는지 확인)'); }
+        else if (Date.now() - started > 5000) { clearInterval(timer); log('스스로 닫힘: 5초가 지나도 팝업이 열려 있습니다'); }
+      }, 200);
+    });
+    document.getElementById('noopener').addEventListener('click', () => opened('noopener 팝업', window.open(target(), '_blank', 'noopener')));
+
+    // Old behavior on request only: ?auto=1 fires the plain popup once after load.
+    if (new URLSearchParams(location.search).get('auto') === '1') setTimeout(() => opened('자동 팝업', window.open(target(), '_blank')), 800);
   </script>
 </body>
 </html>

@@ -3,7 +3,7 @@ import { test } from 'node:test'
 import { mkdtemp, rm } from 'node:fs/promises'
 import os from 'node:os'
 import path from 'node:path'
-import { createAwaitGateRouter, gateMatchesEvent, globMatch, pathWithin } from './egdesk-await-router.mjs'
+import { createAwaitGateRouter, gateCardMatches, gateMatchesEvent, globMatch, pathWithin } from './egdesk-await-router.mjs'
 import { createWorkflowEventBus } from './egdesk-event-bus.mjs'
 import { openTaskGraph } from './egdesk-task-graph.mjs'
 import { openTaskStore } from './egdesk-task-store.mjs'
@@ -138,6 +138,44 @@ test('matching is exact: same origin, path on a "/" boundary, same card, same se
   assert.equal(gateMatchesEvent(oauth, manual, { graphId: 'g1', taskId: 't1' }), true, 'manual continue is the fallback for any kind')
   assert.equal(gateMatchesEvent(oauth, manual, { graphId: 'g1', taskId: 't2' }), false)
   assert.equal(gateMatchesEvent({ gateId: 'u', kind: 'userAction' }, { topic: 'terminal.exit', payload: { sessionId: 'u', exitCode: 0 } }), false)
+})
+
+test('BRW-04: a sign-in that finished in a popup card counts for the gate on the card that opened it, and only that card', () => {
+  const oauth = { gateId: 'login', kind: 'oauth', origin: 'http://127.0.0.1:8123', pathPrefix: '/oauth/callback', cardId: 'card-1' }
+  const done = (payload, topic = 'browser.oauthCompleted') => ({ topic, payload: { origin: 'http://127.0.0.1:8123', path: '/oauth/callback', ...payload } })
+  assert.equal(gateMatchesEvent(oauth, done({ cardId: 'card-popup', openerCardId: 'card-1' })), true, 'popup opened by the gate card')
+  assert.equal(gateMatchesEvent(oauth, done({ cardId: 'card-1', openerCardId: 'card-0' })), true, 'the gate card itself, even when it was a popup too')
+  assert.equal(gateMatchesEvent(oauth, done({ cardId: 'card-popup', openerCardId: 'card-2' })), false, 'a popup of another card')
+  assert.equal(gateMatchesEvent(oauth, done({ cardId: 'card-popup' })), false, 'a card with no opener')
+  assert.equal(gateMatchesEvent(oauth, done({ cardId: 'card-popup', openerCardId: 'card-1' }, 'browser.navigated')), false, 'navigation alone is still not completion')
+  assert.equal(gateMatchesEvent(oauth, done({ cardId: 'card-popup', openerCardId: 'card-1', path: '/oauth/callbackevil' })), false, 'the path rule is unchanged')
+  assert.equal(gateMatchesEvent(oauth, done({ cardId: 'card-popup', openerCardId: 'card-1', origin: 'http://localhost:8123' })), false, 'the origin rule is unchanged')
+  const anyCard = { ...oauth, cardId: undefined }
+  assert.equal(gateMatchesEvent(anyCard, done({ cardId: 'card-popup', openerCardId: 'card-7' })), true, 'a gate without a card still takes any card')
+  assert.equal(gateCardMatches(undefined, { cardId: 'x' }), true)
+  assert.equal(gateCardMatches('card-1', { cardId: 'card-1' }), true)
+  assert.equal(gateCardMatches('card-1', { cardId: 'card-9', openerCardId: 'card-1' }), true)
+  assert.equal(gateCardMatches('card-1', { cardId: 'card-9', openerCardId: 'card-2' }), false)
+  assert.equal(gateCardMatches('card-1', { cardId: 'card-9', openerCardId: null }), false)
+  assert.equal(gateCardMatches('card-1', { cardId: 'card-9', openerCardId: ['card-1'] }), false, 'only an exact string')
+})
+
+test('BRW-04: the popup sign-in event from the bus opens the opener card gate and starts the waiting task', async () => {
+  const { native, graph, publish } = await wired()
+  const value = spec([['import', [], [{ gateId: 'login', kind: 'oauth', origin: 'http://127.0.0.1:9100', pathPrefix: '/oauth/callback', cardId: 'egd-browser-card-2' }]]], 'popup')
+  await graph.submitGraph(value)
+  await graph.activateGraph(scope(value))
+  await publish('browser.oauthCompleted', { cardId: 'egd-browser-card-5', origin: 'http://127.0.0.1:9100', path: '/oauth/callback', openerCardId: 'egd-browser-card-3' })
+  assert.equal(native.starts.length, 0, 'a popup of a different card does not count')
+  await publish('browser.navigated', { cardId: 'egd-browser-card-4', origin: 'http://127.0.0.1:9100', path: '/oauth/callback', openerCardId: 'egd-browser-card-2' })
+  assert.equal(native.starts.length, 0, 'a navigation report alone does not count')
+  const event = await publish('browser.oauthCompleted', { cardId: 'egd-browser-card-4', origin: 'http://127.0.0.1:9100', path: '/oauth/callback', openerCardId: 'egd-browser-card-2' })
+  await until(() => native.starts.length === 1)
+  const started = task(graph, value.graphId, 'import')
+  assert.equal(started.status, 'running')
+  const login = started.gates.find(gate => gate.gateId === 'login')
+  assert.deepEqual([login.cardId, login.status, login.satisfiedBy, login.satisfiedAt], ['egd-browser-card-2', 'satisfied', 'browser.oauthCompleted', event.at],
+    'the gate keeps naming the original card and records the popup sign-in as its evidence')
 })
 
 test('when the matching event arrives the gate is satisfied and the waiting downstream task starts by itself', async () => {
