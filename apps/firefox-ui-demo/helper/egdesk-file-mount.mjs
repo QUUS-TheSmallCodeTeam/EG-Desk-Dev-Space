@@ -22,7 +22,7 @@ export function requireEGDeskNodeRuntime({ version = process.versions.node, hasS
 
 // Product-local file authority is intentionally not derived from Codex auth,
 // HTTP body fields, or the subscription account. The adapter owns body bounds.
-export function createEGDeskFileMount({ dataDir, port = 39218, nativeExecutable, nodeRuntime = {}, platform = process.platform, createHttpAdapter = createEGDeskFileHttpAdapter, createNativeAdapter = createEGDeskNativeCreateOnlyAdapter } = {}) {
+export function createEGDeskFileMount({ dataDir, port = 39218, nativeExecutable, nodeRuntime = {}, platform = process.platform, createHttpAdapter = createEGDeskFileHttpAdapter, createNativeAdapter = createEGDeskNativeCreateOnlyAdapter, onRootRegistered = null } = {}) {
   const runtime = requireEGDeskNodeRuntime(nodeRuntime)
   if (typeof dataDir !== 'string' || !path.isAbsolute(dataDir)) throw new TypeError('File dataDir must be an absolute app-owned path')
   // The descriptor-relative helper currently implements POSIX only. Keep
@@ -51,7 +51,9 @@ export function createEGDeskFileMount({ dataDir, port = 39218, nativeExecutable,
       }
     },
   }
-  const adapter = createHttpAdapter({ draftDirectory: path.join(dataDir, 'file-drafts'), localOwnerScope: 'egdesk-local', createOnlyAdapter, port })
+  // onRootRegistered({rootId, absolutePath}) lets the bridge watch a connected
+  // root (RT-06); it is backend-only and never sees a renderer-supplied path.
+  const adapter = createHttpAdapter({ draftDirectory: path.join(dataDir, 'file-drafts'), localOwnerScope: 'egdesk-local', createOnlyAdapter, port, ...(onRootRegistered ? { onRootRegistered } : {}) })
   // Backend-only bridge from local file authority into immutable context.
   // Renderer bodies provide opaque references, never bytes, paths or an owner.
   const managedFileView = Object.freeze({

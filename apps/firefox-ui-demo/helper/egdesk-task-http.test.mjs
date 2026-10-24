@@ -156,3 +156,21 @@ test('authority is rechecked after authentication and reconciliation awaits', as
   assert.equal(resumed.status, 403);
   assert.equal(h.calls.some(([name]) => name === 'resume'), false);
 });
+
+test('manual continue exists only with a continueGate callback and opens one waiting external gate', async () => {
+  const h = fixture();
+  await request(h.handler, 'POST', '/tasks/submit', { boardId: 'board-A', graph: spec });
+  assert.equal((await request(h.handler, 'POST', '/tasks/continue', { boardId: 'board-A', scope, taskId: 'task-A', gateId: 'login' })).status, 404);
+  const continued = [];
+  h.projection.tasks[0].gates = [{ gateId: 'task:x', kind: 'task', taskId: 'x', status: 'waiting' },
+    { gateId: 'login', kind: 'oauth', origin: 'https://login.example', pathPrefix: '/cb', status: 'waiting' }];
+  const handler = createTaskHttpHandler({ graph: h.graph, adapter: h.adapter, ensureAuth: async () => {},
+    continueGate: async (value) => { continued.push(value); h.projection.tasks[0].gates[1].status = 'satisfied'; } });
+  const ok = await request(handler, 'POST', '/tasks/continue', { boardId: 'board-A', scope, taskId: 'task-A', gateId: 'login' });
+  assert.equal(ok.status, 200);
+  assert.deepEqual(continued, [{ graphId: scope.graphId, taskId: 'task-A', gateId: 'login' }]);
+  assert.equal((await request(handler, 'POST', '/tasks/continue', { boardId: 'board-A', scope, taskId: 'task-A', gateId: 'login' })).body.code, 'TASK_GATE_STALE');
+  assert.equal((await request(handler, 'POST', '/tasks/continue', { boardId: 'board-A', scope, taskId: 'task-A', gateId: 'task:x' })).body.code, 'TASK_GATE_STALE', 'upstream tasks are not skipped by hand');
+  assert.equal((await request(handler, 'POST', '/tasks/continue', { boardId: 'board-A', scope, taskId: 'task-A' })).status, 400);
+  assert.equal(continued.length, 1);
+});

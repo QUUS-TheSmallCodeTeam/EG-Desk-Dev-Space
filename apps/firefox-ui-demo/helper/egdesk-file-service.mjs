@@ -101,7 +101,7 @@ function lineDiff(before, after) {
  * creates fileName with O_EXCL and verifies bytes through that same descriptor.
  * No path-based fallback is safe against a concurrent parent-directory swap.
  */
-export function createEGDeskFileService({ draftStore, createOnlyAdapter, makeId = randomUUID, now = Date.now } = {}) {
+export function createEGDeskFileService({ draftStore, createOnlyAdapter, makeId = randomUUID, now = Date.now, onRootRegistered = null } = {}) {
   if (!draftStore || !['create', 'get', 'compareAndSwap'].every(key => typeof draftStore[key] === 'function')) {
     fail('DRAFT_STORE_REQUIRED', 'A managed compare-and-swap draft store is required')
   }
@@ -148,6 +148,9 @@ export function createEGDeskFileService({ draftStore, createOnlyAdapter, makeId 
     const rootId = makeId()
     roots.set(rootId, { path: real, identity: { dev: stat.dev, ino: stat.ino } })
     const directoryId = handle(rootId, '', 'directory', stat)
+    // RT-06: a connected root may be watched for changes. The watcher gets the
+    // verified real path backend-side; responses and events keep the opaque ID.
+    if (typeof onRootRegistered === 'function') { try { onRootRegistered({ rootId, absolutePath: real }) } catch {} }
     return { rootId, directoryId, name: path.basename(real), displayPath: real, capability: saveAsAvailable ? 'read-and-create-only' : 'read-and-managed-copy', saveAsAvailable }
   }
 

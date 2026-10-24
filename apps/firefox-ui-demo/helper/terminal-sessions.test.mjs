@@ -204,3 +204,22 @@ test('unknown native error cannot report successful later input or resize', () =
   }
   assert.equal(writes, 0)
 })
+
+test('RT-06: a confirmed exit is reported once to onExit; kill acceptance and errors report nothing', () => {
+  const exits = []
+  const registry = new TerminalSessionRegistry({ onExit: receipt => { exits.push(receipt); throw new Error('observer failure is ignored') } })
+  const pty = register(registry)
+  registry.kill('terminal-1')
+  assert.deepEqual(exits, [], 'a stop request is not an exit')
+  pty.exit(0, 0)
+  pty.exit(0, 0)
+  assert.deepEqual(exits, [{ sessionId: 'terminal-1', exitCode: 0, signal: 0, exitSource: 'pty.onExit' }])
+  assert.equal(registry.snapshot('terminal-1').status, 'EXITED')
+  const child = register(registry, new ChildProcess(), 'terminal-2', false)
+  child.emit('error', new Error('spawn failed'))
+  child.emit('close')
+  assert.equal(exits.length, 1, 'errors and stream closure never synthesize an exit')
+  const piped = register(registry, new ChildProcess(), 'terminal-3', false)
+  piped.emit('exit', null, 'SIGTERM')
+  assert.deepEqual(exits[1], { sessionId: 'terminal-3', exitCode: null, signal: 'SIGTERM', exitSource: 'process.exit' })
+})

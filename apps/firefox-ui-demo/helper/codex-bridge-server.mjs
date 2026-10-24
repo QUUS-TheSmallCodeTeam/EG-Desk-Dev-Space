@@ -32,6 +32,7 @@ import { createContextHttpHandler } from './egdesk-context-http.mjs'
 import { buildCodexAppServerLaunch, inspectNativeCapabilities, preflightOwnedAppServer, resolveCodexExecutable, NATIVE_SCHEMA_VERSION } from './egdesk-native-capabilities.mjs'
 import { createEGDeskFileMount, requireEGDeskNodeRuntime } from './egdesk-file-mount.mjs'
 import { createSystemResourceMonitor } from './system-resource-monitor.mjs'
+import { openWorkflowRuntime } from './egdesk-workflow-runtime.mjs'
 
 const nodeRuntime = requireEGDeskNodeRuntime()
 
@@ -141,7 +142,10 @@ try {
   profileStoreError = publicText(error?.message || 'Local profile storage failed to open', 1000)
   console.error('[egdesk-codex-bridge] local profile storage unavailable:', profileStoreError)
 }
-const localFiles = createEGDeskFileMount({ dataDir, port: BRIDGE_PORT })
+// RT-06/CHAT-06 workflow runtime (event bus, connected-root watcher, task
+// graph). Opened after Chat below; callbacks that fire earlier are no-ops.
+let workflow = null
+const localFiles = createEGDeskFileMount({ dataDir, port: BRIDGE_PORT, onRootRegistered: root => workflow?.watchRoot(root) })
 const contextStore = new ImmutableContextStore({
   dataDir,
   managedFileView: localFiles.managedFileView,
@@ -198,7 +202,7 @@ const chat = new CodexChatRuntime({
   qaReady: () => nativeCapabilities.qaReadOnly && appServerReady,
   getNativeContractFingerprint: () => nativeCapabilities.contractFingerprint,
   profiles: profileStore,
-  emit: event => broadcast(event, 2),
+  emit: event => { broadcast(event, 2); workflow?.onChatEvent(event) },
   emitLegacy: event => broadcast(event, 1),
 })
 if (chatStore) {
@@ -232,6 +236,13 @@ const handleChatHttp = createChatHttpHandler(chat, ensureChatAuth)
 const handleContextHttp = createContextHttpHandler(contexts, ensureChatAuth)
 // Like /chat/history, profiles stay editable while Codex is signed out.
 const handleProfileHttp = createProfileHttpHandler({ store: () => profileStore, port: BRIDGE_PORT })
+// Task graph (CHAT-06): /tasks/*, /task-sources; events (RT-06): /events/browser,
+// /events/recent; SSE workflow.event and task.graph frames on /events.
+workflow = await openWorkflowRuntime({
+  dataDir, chat, port: BRIDGE_PORT, broadcast: event => broadcast(event),
+  ensureAuth: () => ensureChatAuth(), getOwnerKey: () => publicAuthIdentityKey(authState), maxConcurrency: 2,
+})
+if (workflow.snapshot().taskError) console.error('[egdesk-codex-bridge] local task storage unavailable:', workflow.snapshot().taskError)
 // ChatGPT plan usage of the signed-in identity, refreshed after sign-in and
 // after each turn; a failed read leaves rateLimits as it was (null at first).
 const rateLimitSync = createRateLimitSync({
@@ -254,6 +265,8 @@ function updateAuthState(patch, { broadcastStatus = true } = {}) {
     emitAuthStatus()
     broadcast({ type: 'auth-status', status: authSnapshot() })
   }
+  // auth.changed carries signedIn only; the account key is compared in memory.
+  workflow?.observeAuth({ signedIn: authState.isLoggedIn === true, accountKey: modelAccountKey(authState) })
   engineStatus.check()
 }
 
@@ -567,7 +580,7 @@ async function startChatgptLogin() {
 }
 
 // ── Terminal PTY support ──
-const terminalRegistry = new TerminalSessionRegistry()
+const terminalRegistry = new TerminalSessionRegistry({ onExit: receipt => workflow?.publishTerminalExit(receipt) })
 
 // npm 설치 과정에서 node-pty spawn-helper의 실행 비트가 소실되는 경우가 있어
 // (posix_spawnp failed → 조용히 child_process fallback 강등) 기동 시 복구한다.
@@ -633,6 +646,9 @@ const bridgeServer = createServer(async (req, res) => {
     return
   }
 
+  // Workflow events and task graph routes have their own loopback/Origin guard.
+  if (await workflow.handle(req, res, url)) return
+
   if (req.method === 'POST' && route === '/browser-tool/respond') {
     try {
       const body = await readJsonBody(req, { maxBytes: 190000 })
@@ -690,6 +706,8 @@ const bridgeServer = createServer(async (req, res) => {
       engines: engineRegistry.publicEngines(),
       // CU-07 rows { name, enabled, status, controlsExternal, kind }, or null when unknown.
       inheritedMcp: inheritedMcp.snapshot(),
+      // RT-06/CHAT-06 { tasks, taskError, maxConcurrency, eventSeq, droppedEvents, watchedRoots, maxWatchedRoots, refusedRoots, droppedFileEvents }.
+      workflow: workflow.snapshot(),
     })
     return
   }
@@ -804,6 +822,8 @@ async function shutdown() {
   shuttingDown = true
   bridgeServer.close()
   systemResourceMonitor.close()
+  try { await workflow?.close() }
+  catch { console.error('[egdesk-codex-bridge] workflow runtime did not close cleanly') }
   try { await localFiles.close() }
   catch { console.error('[egdesk-codex-bridge] managed file store did not close cleanly') }
   try { chatStore?.close() }
@@ -816,6 +836,7 @@ process.on('SIGINT', shutdown)
 process.on('SIGTERM', shutdown)
 process.on('exit', () => {
   systemResourceMonitor.close()
+  workflow?.files.close()
   rpc?.close()
   try { appServerSocket?.close(); } catch {}
   try { appServerProcess?.kill(); } catch {}

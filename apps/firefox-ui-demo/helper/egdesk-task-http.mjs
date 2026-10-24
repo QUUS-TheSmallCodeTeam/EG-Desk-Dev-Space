@@ -12,7 +12,7 @@ function fields(value, allowed, required = allowed) {
 
 // The verification receipts remain server-private. UI receives statuses and
 // evidence references, never a receipt that can be offered as completion proof.
-function publicGraph(value) {
+export function publicGraph(value) {
   if (!value) return null;
   return { ...value, tasks: value.tasks.map((task) => {
     const { receipt, approvalReceipt, attempts, lateOutcomes, ...rest } = task;
@@ -32,9 +32,11 @@ function publicGraph(value) {
  * adapter.waitForBoardStop before removing that Board's UI.
  * POST /tasks/retry {boardId,scope,taskId,operationId}
  * POST /tasks/approval {boardId,scope,taskId,approvalId,decision:'approved'|'rejected'}
+ * POST /tasks/continue {boardId,scope,taskId,gateId} manual fallback for one
+ * waiting external gate (userAction, oauth, file, terminalExit); needs continueGate.
  * No client execution settings, raw prompt, native approval or receipt endpoint.
  */
-export function createTaskHttpHandler({ graph, adapter, ensureAuth, port = 39218 }) {
+export function createTaskHttpHandler({ graph, adapter, ensureAuth, port = 39218, continueGate = null }) {
   if (typeof ensureAuth !== 'function') throw new TypeError('ensureAuth is required');
   function state(graphId) {
     const native = adapter.getState(graphId);
@@ -62,7 +64,8 @@ export function createTaskHttpHandler({ graph, adapter, ensureAuth, port = 39218
         return true;
       }
       const action = url.pathname.slice('/tasks/'.length);
-      if (req.method !== 'POST' || !['submit', 'activate', 'cancel', 'retry', 'resume', 'approval'].includes(action)) {
+      if (req.method !== 'POST' || !['submit', 'activate', 'cancel', 'retry', 'resume', 'approval',
+        ...(typeof continueGate === 'function' ? ['continue'] : [])].includes(action)) {
         sendJson(res, 404, { code: 'TASK_ROUTE_NOT_FOUND', error: 'Unknown task endpoint' });
         return true;
       }
@@ -76,7 +79,7 @@ export function createTaskHttpHandler({ graph, adapter, ensureAuth, port = 39218
         return true;
       }
       const extras = { activate: [], cancel: ['closeBoard'], retry: ['taskId', 'operationId'],
-        resume: [], approval: ['taskId', 'approvalId', 'decision'] }[action];
+        resume: [], approval: ['taskId', 'approvalId', 'decision'], continue: ['taskId', 'gateId'] }[action];
       fields(body, ['boardId', 'scope', ...extras], ['boardId', 'scope', ...(action === 'cancel' ? [] : extras)]);
       fields(body.scope, SCOPE);
       adapter.assertScope(body.scope, body.boardId);
@@ -99,6 +102,15 @@ export function createTaskHttpHandler({ graph, adapter, ensureAuth, port = 39218
         await adapter.reconcile(graph, body.scope);
         adapter.assertScope(body.scope, body.boardId);
         if (!graph.getGraph(body.scope.graphId).cancelRequested) await graph.resumeGraph(body.scope);
+      } else if (action === 'continue') {
+        if (adapter.getState(body.scope.graphId).fenced) throw nativeTaskError('TASK_FENCED', 'Graph is cancelled');
+        const waiting = () => graph.getGraph(body.scope.graphId)?.tasks.find((item) => item.taskId === body.taskId)
+          ?.gates?.find((gate) => gate.gateId === body.gateId && gate.status === 'waiting' &&
+            !['task', 'approval'].includes(gate.kind));
+        if (!waiting()) throw nativeTaskError('TASK_GATE_STALE', 'Gate is not waiting');
+        await continueGate({ graphId: body.scope.graphId, taskId: body.taskId, gateId: body.gateId });
+        adapter.assertScope(body.scope, body.boardId);
+        if (waiting()) throw nativeTaskError('TASK_GATE_STALE', 'Gate could not be continued');
       } else if (action === 'approval') {
         const task = graph.getGraph(body.scope.graphId)?.tasks.find((item) => item.taskId === body.taskId);
         if (task?.status !== 'approval-required') throw nativeTaskError('TASK_APPROVAL_STALE', 'Task is not awaiting preapproval');

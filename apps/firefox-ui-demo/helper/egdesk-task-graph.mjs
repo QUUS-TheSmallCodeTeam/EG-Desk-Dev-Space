@@ -8,7 +8,18 @@
  *                                            parentTaskId, requestedBy }),
  *         recordOutcome(receipt), approveTask(receipt), confirmCancellation(receipt),
  *         cancelGraph(scope), retryTask({...scope, taskId, operationId}),
- *         resumeGraph(scope), getGraph(id), getEvents(id?).
+ *         resumeGraph(scope), getGraph(id), getEvents(id?),
+ *         satisfyGate({ graphId, taskId, gateId, evidence }), openGates().
+ *
+ * Gates (CHAT-06): a task waits on every upstream task in dependsOn (kind
+ * "task"), on optional external gates, then on approvalRequired (kind
+ * "approval"). External gates are explicit, exact conditions:
+ *   { gateId, kind: 'userAction', label? }
+ *   { gateId, kind: 'oauth', origin, pathPrefix, cardId? }
+ *   { gateId, kind: 'file', root, relativeGlob }          (root = connected rootId)
+ *   { gateId, kind: 'terminalExit', sessionId, exitCode? }
+ * Satisfying one is journaled with a bounded evidence reference; when the last
+ * gate is satisfied the task becomes ready and starts automatically.
  *
  * All receipts carry { receiptId, outcome, binding, evidenceRefs } and are checked
  * against the exact binding sent to the native adapter. verifyReceipt must confirm
@@ -17,6 +28,10 @@
 
 const ID = /^[A-Za-z0-9][A-Za-z0-9._:/-]*$/;
 const TASK_STATES = new Set(['running', 'completed', 'failed', 'cancelled']);
+const GATE_KINDS = new Set(['userAction', 'oauth', 'file', 'terminalExit']);
+const GATE_EVIDENCE_TOPICS = new Set(['terminal.exit', 'file.changed', 'browser.oauthCompleted', 'user.action']);
+const MAX_GATES = 8;
+const CONTROL = /[\u0000-\u001f\u007f]/;
 
 function error(code, message) {
   const result = new Error(message);
@@ -53,6 +68,70 @@ function frozen(value) {
   return value;
 }
 
+function plainText(value, name, max) {
+  assert(typeof value === 'string' && value.trim().length > 0 && value.length <= max && !CONTROL.test(value),
+    'E_TASK_INPUT', `${name} must be short plain text`);
+  return value;
+}
+
+// Exact http(s) origin and a path prefix with at least one segment; a bare "/"
+// would match every page of the site, so it is refused.
+function normalizeOAuthTarget(origin, pathPrefix) {
+  let url = null;
+  try { url = new URL(origin); } catch { /* refused below */ }
+  assert(typeof origin === 'string' && url && ['http:', 'https:'].includes(url.protocol) && url.origin === origin,
+    'E_TASK_INPUT', 'oauth origin must be an exact http(s) origin');
+  assert(typeof pathPrefix === 'string' && pathPrefix.length > 1 && pathPrefix.length <= 512 &&
+    pathPrefix.startsWith('/') && !CONTROL.test(pathPrefix) && !/[?#\\]/.test(pathPrefix) &&
+    !pathPrefix.includes('//') && !pathPrefix.split('/').some((part) => part === '.' || part === '..') &&
+    new URL(pathPrefix, origin).pathname === pathPrefix,
+  'E_TASK_INPUT', 'oauth pathPrefix must be a canonical path with at least one segment');
+  return { origin, pathPrefix };
+}
+
+// Root-relative glob: "*" and "?" stay within one segment, "**" spans segments.
+// A glob made only of wildcards would match any change in the folder: refused.
+function normalizeRelativeGlob(value) {
+  assert(typeof value === 'string' && value.length > 0 && value.length <= 512 && !CONTROL.test(value) &&
+    !value.startsWith('/') && !value.includes('\\') &&
+    !value.split('/').some((part) => part === '' || part === '.' || part === '..') &&
+    /[^*?/]/.test(value),
+  'E_TASK_INPUT', 'file relativeGlob must be a relative pattern naming at least one literal character');
+  return value;
+}
+
+function normalizeGate(input) {
+  assert(input !== null && typeof input === 'object' && !Array.isArray(input) && GATE_KINDS.has(input.kind),
+    'E_TASK_INPUT', 'gate kind must be userAction, oauth, file or terminalExit');
+  const gateId = id(input.gateId, 'gateId');
+  assert(gateId !== 'approval' && !gateId.startsWith('task:'), 'E_TASK_INPUT', 'gateId is reserved');
+  switch (input.kind) {
+    case 'userAction':
+      object(input, 'userAction gate', ['gateId', 'kind', 'label']);
+      return { gateId, kind: 'userAction', ...(input.label === undefined ? {} : { label: plainText(input.label, 'label', 200) }) };
+    case 'oauth': {
+      object(input, 'oauth gate', ['gateId', 'kind', 'origin', 'pathPrefix', 'cardId']);
+      const target = normalizeOAuthTarget(input.origin, input.pathPrefix);
+      return { gateId, kind: 'oauth', ...target, ...(input.cardId === undefined ? {} : { cardId: id(input.cardId, 'cardId') }) };
+    }
+    case 'file':
+      object(input, 'file gate', ['gateId', 'kind', 'root', 'relativeGlob']);
+      return { gateId, kind: 'file', root: id(input.root, 'root'), relativeGlob: normalizeRelativeGlob(input.relativeGlob) };
+    default:
+      object(input, 'terminalExit gate', ['gateId', 'kind', 'sessionId', 'exitCode']);
+      assert(input.exitCode === undefined || Number.isSafeInteger(input.exitCode), 'E_TASK_INPUT', 'exitCode must be an integer');
+      return { gateId, kind: 'terminalExit', sessionId: id(input.sessionId, 'sessionId'),
+        ...(input.exitCode === undefined ? {} : { exitCode: input.exitCode }) };
+  }
+}
+
+function normalizeEvidence(input) {
+  object(input, 'gate evidence', ['eventId', 'topic', 'at']);
+  assert(GATE_EVIDENCE_TOPICS.has(input.topic) && typeof input.at === 'string' && input.at.length <= 40 &&
+    !Number.isNaN(Date.parse(input.at)), 'E_TASK_INPUT', 'gate evidence must name a known event');
+  return { eventId: id(input.eventId, 'eventId'), topic: input.topic, at: input.at };
+}
+
 function normalizeGraph(input) {
   object(input, 'graph', ['graphId', 'requestId', 'runId', 'parentTaskId', 'requestedBy', 'tasks']);
   const graphId = id(input.graphId, 'graphId');
@@ -64,19 +143,25 @@ function normalizeGraph(input) {
   assert(Array.isArray(input.tasks) && input.tasks.length > 0 && input.tasks.length <= 256,
     'E_TASK_INPUT', 'graph must contain 1–256 tasks');
   const tasks = input.tasks.map((task) => {
-    object(task, 'task', ['taskId', 'ownerId', 'sourceRef', 'dependsOn', 'approvalRequired']);
+    object(task, 'task', ['taskId', 'ownerId', 'sourceRef', 'dependsOn', 'approvalRequired', 'gates']);
     assert(Array.isArray(task.dependsOn) && task.dependsOn.length <= 256,
       'E_TASK_INPUT', 'dependsOn must be an array');
     assert(task.approvalRequired === undefined || typeof task.approvalRequired === 'boolean',
       'E_TASK_INPUT', 'approvalRequired must be boolean');
     const dependsOn = task.dependsOn.map((dependency) => id(dependency, 'dependency ID')).sort();
     assert(new Set(dependsOn).size === dependsOn.length, 'E_TASK_INPUT', 'duplicate dependency');
+    assert(task.gates === undefined || (Array.isArray(task.gates) && task.gates.length <= MAX_GATES),
+      'E_TASK_INPUT', `gates must be an array of at most ${MAX_GATES}`);
+    const gates = (task.gates ?? []).map(normalizeGate).sort((a, b) => a.gateId.localeCompare(b.gateId));
+    assert(new Set(gates.map((gate) => gate.gateId)).size === gates.length, 'E_TASK_INPUT', 'duplicate gate ID');
     return {
       taskId: id(task.taskId, 'taskId'),
       ownerId: id(task.ownerId, 'ownerId'),
       sourceRef: id(task.sourceRef, 'sourceRef'),
       dependsOn,
       approvalRequired: task.approvalRequired === true,
+      // Absent when empty so journals written before gates replay unchanged.
+      ...(gates.length ? { gates } : {}),
     };
   }).sort((a, b) => a.taskId.localeCompare(b.taskId));
   const byId = new Map(tasks.map((task) => [task.taskId, task]));
@@ -145,6 +230,7 @@ function taskStatus(graph, task) {
     const upstream = graph.tasks.get(dependency);
     return upstream.state !== 'completed' || !upstream.receipt;
   })) return 'waiting-on-dependency';
+  if ((task.spec.gates ?? []).some((gate) => !task.gatesSatisfied.has(gate.gateId))) return 'waiting-on-dependency';
   if (task.spec.approvalRequired && task.approvalReceipt?.outcome !== 'approved') {
     return 'approval-required';
   }
@@ -170,7 +256,7 @@ function project(events) {
         spec: task, state: null, attempts: [], receipt: null,
         approvalRequested: false, approvalReceipt: null,
         uncertain: false, interruptUncertain: false, approvalDeliveryUncertain: false,
-        lateOutcomes: [],
+        lateOutcomes: [], gatesSatisfied: new Map(),
       }]));
       graphs.set(spec.graphId, { spec, tasks, activated: false, cancelRequested: false });
       requestKeys.set(key, spec.graphId);
@@ -280,6 +366,15 @@ function project(events) {
           'E_TASK_JOURNAL', 'invalid uncertain approval delivery');
         task.approvalDeliveryUncertain = true;
         break;
+      case 'task-gate-satisfied': {
+        const gate = (task.spec.gates ?? []).find((entry) => entry.gateId === event.gateId);
+        assert(gate && !graph.cancelRequested && task.state === null && !task.gatesSatisfied.has(event.gateId),
+          'E_TASK_JOURNAL', 'invalid gate satisfaction');
+        assert(JSON.stringify(normalizeEvidence(event.evidence)) === JSON.stringify(event.evidence),
+          'E_TASK_JOURNAL', 'noncanonical gate evidence');
+        task.gatesSatisfied.set(event.gateId, clone(event.evidence));
+        break;
+      }
       case 'task-retry-requested':
         assert(task.state === 'failed' && !graph.cancelRequested &&
           typeof event.operationId === 'string' && !retryIds.has(event.operationId),
@@ -304,6 +399,26 @@ function project(events) {
   return { graphs, requestKeys, receiptIds, retryIds };
 }
 
+// One list of what a task waits on, in order: upstream tasks, external gates,
+// then approval. status is waiting | satisfied (approval may be rejected).
+function visibleGates(graph, task) {
+  const upstream = task.spec.dependsOn.map((dependency) => {
+    const entry = graph.tasks.get(dependency);
+    return { gateId: `task:${dependency}`, kind: 'task', taskId: dependency,
+      status: entry.state === 'completed' && entry.receipt ? 'satisfied' : 'waiting' };
+  });
+  const external = (task.spec.gates ?? []).map((gate) => {
+    const evidence = task.gatesSatisfied.get(gate.gateId);
+    return { ...clone(gate), status: evidence ? 'satisfied' : 'waiting',
+      ...(evidence ? { satisfiedBy: evidence.topic, satisfiedAt: evidence.at } : {}) };
+  });
+  const approval = task.spec.approvalRequired ? [{ gateId: 'approval', kind: 'approval',
+    status: task.approvalReceipt?.outcome === 'approved' ? 'satisfied' :
+      task.approvalReceipt?.outcome === 'rejected' ? 'rejected' : 'waiting',
+    requested: task.approvalRequested }] : [];
+  return [...upstream, ...external, ...approval];
+}
+
 function visibleGraph(graph, recoveryHold) {
   return {
     ...clone(graph.spec),
@@ -320,6 +435,7 @@ function visibleGraph(graph, recoveryHold) {
         taskId: dependency,
         status: taskStatus(graph, graph.tasks.get(dependency)),
       })),
+      gates: visibleGates(graph, task),
       approvalRequested: task.approvalRequested,
       approvalReceipt: clone(task.approvalReceipt),
       receipt: clone(task.receipt),
@@ -607,6 +723,51 @@ class TaskGraphRuntime {
       }
     }
     return this.getGraph(graph.spec.graphId);
+  }
+
+  /**
+   * Latches one external gate. Callers are the gate router (a matching workflow
+   * event) and the manual "continue" route; both name the exact gate. Already
+   * satisfied is a no-op; a cancelled graph or a started/finished task refuses.
+   */
+  async satisfyGate(input) {
+    object(input, 'gate satisfaction', ['graphId', 'taskId', 'gateId', 'evidence']);
+    const graph = this.#projection.graphs.get(id(input.graphId, 'graphId'));
+    const task = graph?.tasks.get(id(input.taskId, 'taskId'));
+    const gateId = id(input.gateId, 'gateId');
+    assert(task && (task.spec.gates ?? []).some((gate) => gate.gateId === gateId),
+      'E_TASK_SCOPE', 'gate targets an unknown task gate');
+    const evidence = normalizeEvidence(input.evidence);
+    if (task.gatesSatisfied.has(gateId)) return this.getGraph(graph.spec.graphId);
+    assert(!graph.cancelRequested && task.state === null, 'E_TASK_STATE', 'gate is no longer waiting');
+    try {
+      await this.#append({ type: 'task-gate-satisfied', graphId: graph.spec.graphId,
+        taskId: task.spec.taskId, gateId, evidence });
+    } catch (cause) {
+      if (cause.code !== 'E_TASK_JOURNAL' ||
+          !this.#projection.graphs.get(graph.spec.graphId)?.tasks.get(task.spec.taskId)?.gatesSatisfied.has(gateId)) {
+        throw cause;
+      }
+    }
+    await this.#schedule();
+    return this.getGraph(graph.spec.graphId);
+  }
+
+  /** External gates still waiting in graphs that are not cancelled. */
+  openGates() {
+    const open = [];
+    for (const graph of this.#projection.graphs.values()) {
+      if (graph.cancelRequested) continue;
+      for (const task of graph.tasks.values()) {
+        if (task.state !== null) continue;
+        for (const gate of task.spec.gates ?? []) {
+          if (!task.gatesSatisfied.has(gate.gateId)) {
+            open.push({ graphId: graph.spec.graphId, taskId: task.spec.taskId, gate: clone(gate) });
+          }
+        }
+      }
+    }
+    return open;
   }
 
   async retryTask({ graphId, requestId, runId, parentTaskId, requestedBy, taskId, operationId }) {

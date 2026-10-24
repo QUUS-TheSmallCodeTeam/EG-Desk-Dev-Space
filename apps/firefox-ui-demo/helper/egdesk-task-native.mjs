@@ -605,5 +605,12 @@ export function createNativeTaskAdapter({ chat, resolveTaskInput, ledger, captur
       const record = graphRecord(scope, boardId);
       grant(record, {}, 'access').check();
       return clone(record);
+    },
+    // Argument-free change hint (approval issued, attempt settled); readers
+    // refetch getState through the authority-checked route.
+    subscribe(listener) {
+      requireValue(typeof listener === 'function', 'TASK_ADAPTER_CONFIG', 'listener must be a function', 500);
+      listeners.add(listener);
+      return () => listeners.delete(listener);
     } };
 }

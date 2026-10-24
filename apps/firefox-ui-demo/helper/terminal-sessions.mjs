@@ -11,8 +11,10 @@ const metadata = entry => ({
 // Process exit evidence outlives active ownership, but only in this bridge
 // instance. Missing/expired sessions (including after restart) remain UNKNOWN.
 export class TerminalSessionRegistry {
-  constructor({ now = Date.now, maxExitReceipts = 128, exitReceiptTtlMs = 10 * 60 * 1000, maxOutputBytes = 256 * 1024 } = {}) {
-    Object.assign(this, { now, maxExitReceipts, exitReceiptTtlMs, maxOutputBytes })
+  // onExit({ sessionId, exitCode, signal, exitSource }) is told once per
+  // confirmed exit (RT-06 terminal.exit); it never changes the receipt.
+  constructor({ now = Date.now, maxExitReceipts = 128, exitReceiptTtlMs = 10 * 60 * 1000, maxOutputBytes = 256 * 1024, onExit = null } = {}) {
+    Object.assign(this, { now, maxExitReceipts, exitReceiptTtlMs, maxOutputBytes, onExit })
     this.active = new Map()
     this.exitReceipts = new Map()
   }
@@ -112,6 +114,12 @@ export class TerminalSessionRegistry {
       exitedAt: this.now(), exitSource, ...(driverEvidence || {}),
     })
     this.pruneReceipts()
+    if (typeof this.onExit === 'function') {
+      try {
+        this.onExit({ sessionId: entry.id, exitCode: Number.isInteger(exitCode) ? exitCode : null,
+          signal: typeof signal === 'string' || Number.isInteger(signal) ? signal : null, exitSource })
+      } catch {}
+    }
   }
 
   snapshot(id) {

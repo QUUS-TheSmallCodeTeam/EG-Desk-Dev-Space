@@ -94,7 +94,7 @@ function checkedBody(operation, body) {
  * boundary), then bound to a short-lived in-memory nonce. Web-origin requests
  * cannot bootstrap or use this channel. Both forms share scoped services.
  */
-export function createEGDeskFileHttpAdapter({ draftDirectory, localOwnerScope = 'egdesk-local', resolveRootSelection, createOnlyAdapter, storeForOwner, port = 39218, now = Date.now } = {}) {
+export function createEGDeskFileHttpAdapter({ draftDirectory, localOwnerScope = 'egdesk-local', resolveRootSelection, createOnlyAdapter, storeForOwner, port = 39218, now = Date.now, onRootRegistered = null } = {}) {
   const localOwner = scopedOwner(localOwnerScope)
   const boundOwner = requested => {
     if (requested != null && requested !== localOwner) throw error('OWNER_SCOPE_MISMATCH', 'File operations belong to the configured local EG-Desk owner', 403)
@@ -124,7 +124,7 @@ export function createEGDeskFileHttpAdapter({ draftDirectory, localOwnerScope = 
     if (!owners.has(ownerScope)) {
       const pending = (async () => {
         const store = storeForOwner ? await storeForOwner(ownerScope) : await openEGDeskManagedDraftStore({ directory: draftDirectory, ownerScope })
-        return { store, service: createEGDeskFileService({ draftStore: store, createOnlyAdapter }) }
+        return { store, service: createEGDeskFileService({ draftStore: store, createOnlyAdapter, onRootRegistered }) }
       })()
       owners.set(ownerScope, pending)
       pending.catch(() => { if (owners.get(ownerScope) === pending) owners.delete(ownerScope) })
