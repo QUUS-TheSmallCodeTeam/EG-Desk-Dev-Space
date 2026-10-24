@@ -36,18 +36,25 @@ const NAME_RULES = [
 // Used only when the name says nothing: the server's tool names.
 const TOOL_RULES = [
   ['browser', /^(?:(?:browser|playwright|puppeteer)_\w+|navigate_page|new_page|list_pages|select_page|close_page|take_snapshot)$/],
-  ['desktop', /^(?:computer(?:_\w+)?|app_(?:click|type|key|scroll|drag)|mouse_\w+|left_click|right_click|double_click|open_application)$/],
+  // get_app_state · perform_secondary_action · select_text: Codex Computer Use's
+  // own methods (tmustier/codex-computer-use-mcp src/tools.ts:13-24);
+  // get_window_state: trycua cua-driver. Generic names (click, type_text,
+  // scroll, press_key) also appear on browser servers, so they stay out.
+  ['desktop', /^(?:computer(?:_\w+)?|app_(?:click|type|key|scroll|drag)|mouse_\w+|left_click|right_click|double_click|open_application|get_app_state|get_window_state|perform_secondary_action|select_text)$/],
   ['repl', /^(?:js|js_reset|repl|eval|execute_code|run_code|run_python|exec_command|shell|bash|run_command|run_shell_command)$/],
 ]
 
 const nameTokens = name => String(name).replace(/([a-z0-9])([A-Z])/g, '$1 $2').toLowerCase().split(/[^a-z0-9]+/).filter(Boolean)
 
-// Markers of OpenAI's Codex / ChatGPT Computer Use ("Sky") service in a direct
-// mcp_servers declaration (~/.codex/config.toml): its service path variable,
-// the cua_node runtime, the SkyComputerUse client or service, the
-// unified-computer-use plugin or the cua-repl package. Whatever such a server
-// is called (node_repl, say), it can drive the Mac.
-const COMPUTER_USE_SIGNAL = /SKY_CUA_SERVICE_PATH|CUA_REPL_|cua_node|SkyComputerUse|unified-computer-use|cua-repl|com\.openai\.sky\b|Codex Computer Use\.app/i
+// Markers of a computer-use install in a direct mcp_servers declaration
+// (~/.codex/config.toml). OpenAI's Codex / ChatGPT Computer Use ("Sky"): its
+// service path variable, the cua_node runtime, the SkyComputerUse client or
+// service, the unified-computer-use plugin, the cua-repl or native @oai/sky
+// package. trycua's cua-driver: the cua-driver / cua-driver-local executable,
+// its CuaDriver(.Local).app bundle or the com.trycua.driver bundle id
+// (cua libs/cua-driver/rust/crates/cua-driver/src/bundle.rs:13-16). Whatever
+// such a server is called (node_repl, say), it can drive the Mac.
+const COMPUTER_USE_SIGNAL = /SKY_CUA_SERVICE_PATH|CUA_REPL_|cua_node|SkyComputerUse|unified-computer-use|cua-repl|@oai\/sky\b|com\.openai\.sky\b|Codex Computer Use\.app|com\.trycua\.driver\b|cua-driver\b|CuaDriver(?:Local)?\.app/i
 
 /**
  * Whether direct declarations (readNativeDirectMcpDeclarations entries) carry

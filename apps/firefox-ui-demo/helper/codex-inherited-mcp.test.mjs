@@ -30,6 +30,15 @@ test('server kind comes from whole name tokens first, then tool names; controlsE
     [['search_docs', 'get_file'], 'other'], [[], 'other'], [['javascript_tool_docs'], 'other'],
   ]
   for (const [toolNames, kind] of byTools) assert.equal(classifyMcpServer({ name: 'acme', toolNames }).kind, kind, toolNames.join())
+  // Codex Computer Use and cua-driver method names mark a desktop server; the
+  // generic action names they share with browser servers do not.
+  for (const tool of ['get_app_state', 'get_window_state', 'perform_secondary_action', 'select_text']) {
+    assert.deepEqual(classifyMcpServer({ name: 'acme', toolNames: ['list_apps', tool] }), { controlsExternal: true, kind: 'desktop' }, tool)
+  }
+  for (const tools of [['click', 'type_text', 'press_key', 'scroll'], ['list_apps'], ['set_value'], ['get_app_status'], ['select_text_range']]) {
+    assert.equal(classifyMcpServer({ name: 'acme', toolNames: tools }).kind, 'other', tools.join())
+  }
+  assert.equal(classifyMcpServer({ name: 'acme', toolNames: ['take_snapshot', 'get_app_state'] }).kind, 'browser', 'browser tool rules still come first')
   assert.equal(classifyMcpServer({ name: 'playwright', toolNames: ['js'] }).kind, 'browser', 'a name rule wins over tools')
   assert.equal(classifyMcpServer({ name: 'acme', toolNames: ['js', 'browser_click'] }).kind, 'browser', 'browser rules are checked before desktop and repl')
   assert.deepEqual(classifyMcpServer(), { controlsExternal: false, kind: 'other' })
@@ -51,7 +60,18 @@ test('a Computer Use marker in a direct declaration makes the server desktop wha
     { command: 'node', env_vars: [{ name: 'SKY_CUA_SERVICE_PATH' }] },
     { command: '/x/plugins/cache/openai-bundled/unified-computer-use/26.1/run' },
     [{ command: 'node' }, { env: { SKY_CUA_SERVICE_PATH: '/x' } }],
+    // The native Sky package and trycua's cua-driver installs.
+    { command: 'node', args: ['/x/node_modules/@oai/sky/bin/mcp.js'] },
+    { command: '/Applications/CuaDriver.app/Contents/MacOS/cua-driver', args: ['mcp'] },
+    { command: '/Applications/CuaDriverLocal.app/Contents/MacOS/cua-driver-local', args: ['mcp'] },
+    { command: 'cua-driver', args: ['mcp'] },
+    { command: 'npx', args: ['@trycua/cua-driver'] },
+    { command: 'open', args: ['-b', 'com.trycua.driver'] },
+    { command: 'open', args: ['-b', 'com.trycua.driver.local'] },
   ]) assert.equal(hasComputerUseSignal(declaration), true, JSON.stringify(declaration))
+  for (const declaration of [
+    { command: 'node', args: ['/x/@oai/skyline/index.js'] }, { command: '/x/cua-drivers-guide/run' }, { command: 'open', args: ['-b', 'com.trycua.drivers'] },
+  ]) assert.equal(hasComputerUseSignal(declaration), false, `${JSON.stringify(declaration)}: only whole markers count`)
   for (const declaration of [
     { command: 'npx', args: ['@playwright/mcp'] }, { command: 'node', args: ['repl.js'], env: { API_KEY: 'SECRET' } },
     { url: 'https://mcp.example/' }, {}, null, 'cua_node', [{ command: 7 }], { env: ['SKY_CUA_SERVICE_PATH'] },
