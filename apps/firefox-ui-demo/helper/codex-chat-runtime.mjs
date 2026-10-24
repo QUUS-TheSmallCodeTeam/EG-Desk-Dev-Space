@@ -793,6 +793,8 @@ export class CodexChatRuntime {
       systemPrompt: !profileRun && body.profileEnabled === true ? body.systemPrompt : undefined,
       profile: profileRun ? profileRun.binding : undefined,
       contextSnapshotIds: body.contextSnapshotIds, contextCapabilities: body.contextCapabilities, attachments: body.attachments,
+      // CTX-03: only a send that names chosen suggestions changes identity.
+      contextResolution: body.contextResolution,
       executionPolicy: body.executionPolicy,
       selectedSources: body.selectedSources, browserTransportId: body.browserTransportId,
       qaCommandNonce: body.qaCommandNonce, qaOutputMarkers: body.qaOutputMarkers,

@@ -243,7 +243,7 @@ const ensureChatAuth = async (body = {}) => {
 }
 const handleChatHttp = createChatHttpHandler(chat, ensureChatAuth)
 const handleComputerControlHttp = createComputerControlHttpHandler(chat, { port: BRIDGE_PORT })
-const handleContextHttp = createContextHttpHandler(contexts, ensureChatAuth)
+const handleContextHttp = createContextHttpHandler(contexts, ensureChatAuth, { port: BRIDGE_PORT })
 // Like /chat/history, profiles stay editable while Codex is signed out.
 const handleProfileHttp = createProfileHttpHandler({ store: () => profileStore, port: BRIDGE_PORT })
 // Task graph (CHAT-06): /tasks/*, /task-sources; events (RT-06): /events/browser,

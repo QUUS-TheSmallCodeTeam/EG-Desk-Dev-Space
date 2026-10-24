@@ -28,6 +28,9 @@ const CONTEXT_CODES = new Set([
   'READER_INVALID_PACKET', 'READER_ISOLATION_UNAVAILABLE', 'READER_OFFLINE',
   'READER_OUTPUT_LIMIT', 'READER_SCOPE_VIOLATION', 'READER_START_FAILED',
   'READER_STOP_PENDING', 'READER_TIMEOUT',
+  // CTX-03 suggestion choices (fixed codes, no source text).
+  'INVALID_RESOLVER_CHOICE', 'RESOLUTION_EXPIRED', 'RESOLVER_CHOICE_FORBIDDEN',
+  'RESOLVER_CHOICE_UNCAPTURED', 'RESOLVER_CHOICE_UNKNOWN',
 ])
 
 export function classifyPublicToolError(error, { browser = false, context = false } = {}) {

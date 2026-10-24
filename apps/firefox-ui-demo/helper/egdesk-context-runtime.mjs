@@ -2,6 +2,12 @@ import { createHash, randomUUID } from 'node:crypto'
 import path from 'node:path'
 import { chatError, publicText } from './codex-chat-values.mjs'
 import { SmartReadEngine } from './egdesk-smart-read.mjs'
+import { resolveContext, resolverRecord, validateResolverChoice, validateResolverSignals } from './egdesk-context-resolver.mjs'
+
+// Suggestions live only in memory until a send names one; nothing is written
+// to disk for candidates the person never used.
+const RESOLUTION_TTL_MS = 15 * 60 * 1000
+const MAX_RESOLUTIONS = 64
 
 const tools = [
   ['egdesk_list_context', 'List only immutable sources and current-run output candidates explicitly bound to this run.', {}, []],
@@ -27,6 +33,7 @@ export class ContextRuntime {
     this.runtime = null
     this.bindings = new Map()
     this.calls = new Map()
+    this.resolutions = new Map()
   }
 
   owner() {
@@ -47,16 +54,47 @@ export class ContextRuntime {
     return { captures }
   }
 
+  // CTX-03: rank what the screen reports as relevant. Policy is suggest-only:
+  // this never captures, binds or reads anything.
+  resolve(body) {
+    const signals = validateResolverSignals(body)
+    const ownerKey = this.owner()
+    const now = this.now()
+    for (const [id, saved] of this.resolutions) if (saved.expiresAt <= now) this.resolutions.delete(id)
+    const resolution = resolveContext(signals, { now })
+    const resolutionId = randomUUID()
+    this.resolutions.set(resolutionId, { ownerKey, resolution, expiresAt: now + RESOLUTION_TTL_MS })
+    while (this.resolutions.size > MAX_RESOLUTIONS) this.resolutions.delete(this.resolutions.keys().next().value)
+    return { resolutionId, ...resolution }
+  }
+
+  resolution(choice, ownerKey) {
+    const saved = this.resolutions.get(choice.resolutionId)
+    if (!saved || saved.expiresAt <= this.now()) reject('RESOLUTION_EXPIRED', 'These context suggestions expired; ask for suggestions again', 409)
+    if (saved.ownerKey !== ownerKey) reject('ACCOUNT_CHANGED', 'Context suggestions belong to another account', 403)
+    for (const ref of choice.chosen) {
+      const candidate = saved.resolution.candidates.find(item => item.ref === ref)
+      if (!candidate) reject('RESOLVER_CHOICE_UNKNOWN', 'A chosen item was not among the suggestions', 400)
+      if (candidate.excludedBy) reject('RESOLVER_CHOICE_FORBIDDEN', 'A chosen item is outside this account or permission scope', 403)
+    }
+    return saved.resolution
+  }
+
   async prepare(body) {
     const epoch = this.runtime?.epoch
+    const choice = body.contextResolution === undefined ? null : validateResolverChoice(body.contextResolution)
     const ids = body.contextSnapshotIds ?? []
     if (!Array.isArray(ids) || ids.length > 16 || ids.some(id => typeof id !== 'string')) reject('INVALID_CONTEXT', 'contextSnapshotIds must contain at most 16 immutable source IDs', 400)
     const caps = body.contextCapabilities || {}
     if (Object.keys(caps).some(key => !['read', 'reader', 'publishBriefing'].includes(key)) || Object.values(caps).some(value => typeof value !== 'boolean')) reject('INVALID_CONTEXT', 'Invalid per-action context capabilities', 400)
     const needsTools = ids.length || body.attachments?.length || caps.publishBriefing || caps.read || caps.reader
-    if (!needsTools) return null
+    if (!needsTools) {
+      if (choice?.chosen.length) reject('RESOLVER_CHOICE_UNCAPTURED', 'Chosen suggestions must be attached through the normal capture path', 400)
+      return null
+    }
     if (!this.schemaReady()) reject('NATIVE_SCHEMA_MISMATCH', 'Context tools require the verified native app-server schema')
     const ownerKey = this.owner()
+    const resolution = choice ? this.resolution(choice, ownerKey) : null
     if (body.attachments?.length && caps.read !== true) reject('CONTEXT_PERMISSION_REQUIRED', 'Attaching sources requires explicit read capability', 403)
     const captures = body.attachments?.length ? (await this.capture({ clientThreadId: body.clientThreadId || body.thread?.id, attachments: body.attachments })).captures : []
     const sourceIds = [...new Set([...ids, ...captures.map(capture => capture.sourceId)])]
@@ -65,7 +103,18 @@ export class ContextRuntime {
     const resolved = []
     for (const id of sourceIds) resolved.push(await this.store.getCapture(ownerKey, id))
     if (this.owner() !== ownerKey || this.runtime?.epoch !== epoch) reject('ACCOUNT_CHANGED', 'Account or connection changed during context preparation')
-    return { ownerKey, sourceIds, captures: resolved, capabilities: { read: caps.read === true, reader: caps.reader === true, publishBriefing: caps.publishBriefing === true } }
+    let resolver
+    if (resolution) {
+      // A chosen suggestion counts only when this turn actually captured it.
+      const chosen = new Map()
+      for (const ref of choice.chosen) {
+        const capture = resolved.find(item => item.uiId === ref || item.sourceRef?.viewId === ref)
+        if (!capture) reject('RESOLVER_CHOICE_UNCAPTURED', 'Chosen suggestions must be attached through the normal capture path', 400)
+        chosen.set(ref, capture.sourceId)
+      }
+      resolver = resolverRecord(choice.resolutionId, resolution, chosen)
+    }
+    return { ownerKey, sourceIds, captures: resolved, capabilities: { read: caps.read === true, reader: caps.reader === true, publishBriefing: caps.publishBriefing === true }, ...(resolver ? { resolver } : {}) }
   }
 
   async registerThread(conversationId) {
@@ -86,12 +135,13 @@ export class ContextRuntime {
     if (!prepared) return
     const epoch = this.runtime.epoch
     if (this.owner() !== prepared.ownerKey) reject('ACCOUNT_CHANGED', 'Account changed before context binding')
-    const binding = await this.store.bind(prepared.ownerKey, run, prepared.sourceIds, prepared.capabilities, readerConfiguration)
+    const binding = await this.store.bind(prepared.ownerKey, run, prepared.sourceIds, prepared.capabilities, readerConfiguration, prepared.resolver)
     if (this.owner() !== prepared.ownerKey || this.runtime.epoch !== epoch) reject('ACCOUNT_CHANGED', 'Account or connection changed during context binding')
     const value = { ...binding, ownerKey: prepared.ownerKey, controllers: new Set() }
     this.bindings.set(run.answerId, value)
-    run.context = { bindingId: binding.bindingId, capabilities: binding.capabilities, readerConfiguration: binding.readerConfiguration, captures: binding.captures, packets: [], briefings: [] }
-    this.runtime.emit(run, 'context.bound', { captures: binding.captures, bindingId: binding.bindingId })
+    const resolver = binding.resolver ? { resolver: binding.resolver } : {}
+    run.context = { bindingId: binding.bindingId, capabilities: binding.capabilities, readerConfiguration: binding.readerConfiguration, captures: binding.captures, packets: [], briefings: [], ...resolver }
+    this.runtime.emit(run, 'context.bound', { captures: binding.captures, bindingId: binding.bindingId, ...resolver })
   }
 
   async restoreRun(run) {
@@ -116,7 +166,8 @@ export class ContextRuntime {
     if (this.getOwnerKey() !== ownerKey || this.runtime.epoch !== epoch) reject('ACCOUNT_CHANGED', 'Account or connection changed during context resume')
     const binding = { ...records[0], ownerKey, sourceIds, captures, bindingId: records[0].id, controllers: new Set() }
     this.bindings.set(run.answerId, binding)
-    run.context = { bindingId: binding.bindingId, capabilities: binding.capabilities, readerConfiguration: binding.readerConfiguration, captures, packets, briefings }
+    const resolver = records.find(record => record.resolver)?.resolver
+    run.context = { bindingId: binding.bindingId, capabilities: binding.capabilities, readerConfiguration: binding.readerConfiguration, captures, packets, briefings, ...(resolver ? { resolver } : {}) }
   }
 
   assertBound(run, capability) {
@@ -244,5 +295,5 @@ export class ContextRuntime {
 
   cancelRun(run) { for (const controller of this.bindings.get(run.answerId)?.controllers || []) controller.abort() }
   disconnect(options) { for (const binding of this.bindings.values()) for (const controller of binding.controllers) controller.abort(); this.calls.clear(); this.reader?.disconnect(options) }
-  reset() { for (const binding of this.bindings.values()) for (const controller of binding.controllers) controller.abort(); this.bindings.clear(); this.calls.clear(); this.smartRead.sessions.clear(); this.reader?.disconnect() }
+  reset() { for (const binding of this.bindings.values()) for (const controller of binding.controllers) controller.abort(); this.bindings.clear(); this.calls.clear(); this.resolutions.clear(); this.smartRead.sessions.clear(); this.reader?.disconnect() }
 }
