@@ -33,7 +33,7 @@ export function publicGraph(value) {
  * POST /tasks/retry {boardId,scope,taskId,operationId}
  * POST /tasks/approval {boardId,scope,taskId,approvalId,decision:'approved'|'rejected'}
  * POST /tasks/continue {boardId,scope,taskId,gateId} manual fallback for one
- * waiting external gate (userAction, oauth, file, terminalExit); needs continueGate.
+ * waiting or expired external gate (userAction, oauth, file, terminalExit); needs continueGate.
  * No client execution settings, raw prompt, native approval or receipt endpoint.
  */
 export function createTaskHttpHandler({ graph, adapter, ensureAuth, port = 39218, continueGate = null }) {
@@ -105,7 +105,7 @@ export function createTaskHttpHandler({ graph, adapter, ensureAuth, port = 39218
       } else if (action === 'continue') {
         if (adapter.getState(body.scope.graphId).fenced) throw nativeTaskError('TASK_FENCED', 'Graph is cancelled');
         const waiting = () => graph.getGraph(body.scope.graphId)?.tasks.find((item) => item.taskId === body.taskId)
-          ?.gates?.find((gate) => gate.gateId === body.gateId && gate.status === 'waiting' &&
+          ?.gates?.find((gate) => gate.gateId === body.gateId && ['waiting', 'expired'].includes(gate.status) &&
             !['task', 'approval'].includes(gate.kind));
         if (!waiting()) throw nativeTaskError('TASK_GATE_STALE', 'Gate is not waiting');
         await continueGate({ graphId: body.scope.graphId, taskId: body.taskId, gateId: body.gateId });

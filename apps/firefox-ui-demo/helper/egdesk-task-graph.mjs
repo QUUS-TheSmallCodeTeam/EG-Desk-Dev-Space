@@ -9,7 +9,8 @@
  *         recordOutcome(receipt), approveTask(receipt), confirmCancellation(receipt),
  *         cancelGraph(scope), retryTask({...scope, taskId, operationId}),
  *         resumeGraph(scope), getGraph(id), getEvents(id?),
- *         satisfyGate({ graphId, taskId, gateId, evidence }), openGates().
+ *         satisfyGate({ graphId, taskId, gateId, evidence }), openGates(),
+ *         reschedule(), close().
  *
  * Gates (CHAT-06): a task waits on every upstream task in dependsOn (kind
  * "task"), on optional external gates, then on approvalRequired (kind
@@ -21,6 +22,18 @@
  * Satisfying one is journaled with a bounded evidence reference; when the last
  * gate is satisfied the task becomes ready and starts automatically.
  *
+ * Gate expiry: any external gate may also carry expiresAt (canonical ISO time)
+ * or timeoutMs (counted from the moment the gate becomes the task's current
+ * wait: graph activation or the last upstream completion, whichever is later).
+ * Either is at most 7 days. When it passes, 'task-gate-expired' is journaled:
+ * the gate shows status 'expired', the task stays waiting-on-dependency, and
+ * only the manual continue (user.action) can still open it. Nothing fails or
+ * advances by itself.
+ *
+ * canStart(context) (optional, synchronous) can hold a ready task back for a
+ * moment, e.g. while the conversation it continues in is busy; call
+ * reschedule() when that may have changed.
+ *
  * All receipts carry { receiptId, outcome, binding, evidenceRefs } and are checked
  * against the exact binding sent to the native adapter. verifyReceipt must confirm
  * actual native evidence; a self-declared "verified" flag is never accepted.
@@ -31,6 +44,7 @@ const TASK_STATES = new Set(['running', 'completed', 'failed', 'cancelled']);
 const GATE_KINDS = new Set(['userAction', 'oauth', 'file', 'terminalExit']);
 const GATE_EVIDENCE_TOPICS = new Set(['terminal.exit', 'file.changed', 'browser.oauthCompleted', 'user.action']);
 const MAX_GATES = 8;
+const MAX_GATE_WAIT_MS = 7 * 24 * 60 * 60 * 1000;
 const CONTROL = /[\u0000-\u001f\u007f]/;
 
 function error(code, message) {
@@ -100,28 +114,64 @@ function normalizeRelativeGlob(value) {
   return value;
 }
 
+// Optional expiry: an absolute canonical ISO time, or a wait length in ms.
+function normalizeExpiry(input) {
+  assert(input.expiresAt === undefined || input.timeoutMs === undefined,
+    'E_TASK_INPUT', 'a gate takes expiresAt or timeoutMs, not both');
+  if (input.timeoutMs !== undefined) {
+    assert(Number.isSafeInteger(input.timeoutMs) && input.timeoutMs >= 1 && input.timeoutMs <= MAX_GATE_WAIT_MS,
+      'E_TASK_INPUT', 'timeoutMs must be a whole number of milliseconds up to 7 days');
+    return { timeoutMs: input.timeoutMs };
+  }
+  if (input.expiresAt === undefined) return {};
+  const at = typeof input.expiresAt === 'string' && input.expiresAt.length <= 40 ? Date.parse(input.expiresAt) : NaN;
+  assert(!Number.isNaN(at) && new Date(at).toISOString() === input.expiresAt,
+    'E_TASK_INPUT', 'expiresAt must be a canonical ISO time such as 2026-10-25T09:00:00.000Z');
+  return { expiresAt: input.expiresAt };
+}
+
 function normalizeGate(input) {
   assert(input !== null && typeof input === 'object' && !Array.isArray(input) && GATE_KINDS.has(input.kind),
     'E_TASK_INPUT', 'gate kind must be userAction, oauth, file or terminalExit');
   const gateId = id(input.gateId, 'gateId');
   assert(gateId !== 'approval' && !gateId.startsWith('task:'), 'E_TASK_INPUT', 'gateId is reserved');
+  const expiry = ['expiresAt', 'timeoutMs'];
   switch (input.kind) {
     case 'userAction':
-      object(input, 'userAction gate', ['gateId', 'kind', 'label']);
-      return { gateId, kind: 'userAction', ...(input.label === undefined ? {} : { label: plainText(input.label, 'label', 200) }) };
+      object(input, 'userAction gate', ['gateId', 'kind', 'label', ...expiry]);
+      return { gateId, kind: 'userAction', ...(input.label === undefined ? {} : { label: plainText(input.label, 'label', 200) }),
+        ...normalizeExpiry(input) };
     case 'oauth': {
-      object(input, 'oauth gate', ['gateId', 'kind', 'origin', 'pathPrefix', 'cardId']);
+      object(input, 'oauth gate', ['gateId', 'kind', 'origin', 'pathPrefix', 'cardId', ...expiry]);
       const target = normalizeOAuthTarget(input.origin, input.pathPrefix);
-      return { gateId, kind: 'oauth', ...target, ...(input.cardId === undefined ? {} : { cardId: id(input.cardId, 'cardId') }) };
+      return { gateId, kind: 'oauth', ...target, ...(input.cardId === undefined ? {} : { cardId: id(input.cardId, 'cardId') }),
+        ...normalizeExpiry(input) };
     }
     case 'file':
-      object(input, 'file gate', ['gateId', 'kind', 'root', 'relativeGlob']);
-      return { gateId, kind: 'file', root: id(input.root, 'root'), relativeGlob: normalizeRelativeGlob(input.relativeGlob) };
+      object(input, 'file gate', ['gateId', 'kind', 'root', 'relativeGlob', ...expiry]);
+      return { gateId, kind: 'file', root: id(input.root, 'root'), relativeGlob: normalizeRelativeGlob(input.relativeGlob),
+        ...normalizeExpiry(input) };
     default:
-      object(input, 'terminalExit gate', ['gateId', 'kind', 'sessionId', 'exitCode']);
+      object(input, 'terminalExit gate', ['gateId', 'kind', 'sessionId', 'exitCode', ...expiry]);
       assert(input.exitCode === undefined || Number.isSafeInteger(input.exitCode), 'E_TASK_INPUT', 'exitCode must be an integer');
       return { gateId, kind: 'terminalExit', sessionId: id(input.sessionId, 'sessionId'),
-        ...(input.exitCode === undefined ? {} : { exitCode: input.exitCode }) };
+        ...(input.exitCode === undefined ? {} : { exitCode: input.exitCode }), ...normalizeExpiry(input) };
+  }
+}
+
+/** Same gate rules as a submitted graph; for callers that validate before submitting. */
+export function normalizeTaskGate(input) {
+  return normalizeGate(input);
+}
+
+/** An absolute expiresAt must lie in the future and within 7 days of submission. */
+export function assertGateWindow(graph, now = Date.now()) {
+  for (const task of graph?.tasks ?? []) {
+    for (const gate of task.gates ?? []) {
+      if (gate?.expiresAt === undefined) continue;
+      const at = Date.parse(gate.expiresAt);
+      assert(at > now && at - now <= MAX_GATE_WAIT_MS, 'E_TASK_INPUT', 'expiresAt must be in the future and at most 7 days away');
+    }
   }
 }
 
@@ -184,6 +234,11 @@ function normalizeGraph(input) {
   }
   for (const task of tasks) visit(task.taskId);
   return { graphId, requestId, runId, parentTaskId, requestedBy, tasks };
+}
+
+/** Pure validation and canonical form of a graph, as submitGraph would store it. */
+export function normalizeTaskGraph(input) {
+  return normalizeGraph(input);
 }
 
 function binding(graph, task, attemptId = null) {
@@ -256,9 +311,9 @@ function project(events) {
         spec: task, state: null, attempts: [], receipt: null,
         approvalRequested: false, approvalReceipt: null,
         uncertain: false, interruptUncertain: false, approvalDeliveryUncertain: false,
-        lateOutcomes: [], gatesSatisfied: new Map(),
+        lateOutcomes: [], gatesSatisfied: new Map(), gatesExpired: new Map(), completedAt: null,
       }]));
-      graphs.set(spec.graphId, { spec, tasks, activated: false, cancelRequested: false });
+      graphs.set(spec.graphId, { spec, tasks, activated: false, activatedAt: null, cancelRequested: false });
       requestKeys.set(key, spec.graphId);
       continue;
     }
@@ -270,6 +325,7 @@ function project(events) {
       case 'graph-activated':
         assert(!graph.activated && !graph.cancelRequested, 'E_TASK_JOURNAL', 'invalid activation');
         graph.activated = true;
+        graph.activatedAt = event.at;
         break;
       case 'graph-cancel-requested':
         assert(!graph.cancelRequested, 'E_TASK_JOURNAL', 'duplicate cancellation');
@@ -312,6 +368,7 @@ function project(events) {
         'E_TASK_JOURNAL', 'invalid task outcome binding');
         task.state = event.receipt.outcome;
         task.receipt = event.receipt;
+        if (event.receipt.outcome === 'completed') task.completedAt = event.at;
         attempt.status = event.receipt.outcome;
         attempt.receipt = event.receipt;
         break;
@@ -372,7 +429,17 @@ function project(events) {
           'E_TASK_JOURNAL', 'invalid gate satisfaction');
         assert(JSON.stringify(normalizeEvidence(event.evidence)) === JSON.stringify(event.evidence),
           'E_TASK_JOURNAL', 'noncanonical gate evidence');
+        assert(!task.gatesExpired.has(event.gateId) || event.evidence.topic === 'user.action',
+          'E_TASK_JOURNAL', 'an expired gate opens only by hand');
         task.gatesSatisfied.set(event.gateId, clone(event.evidence));
+        break;
+      }
+      case 'task-gate-expired': {
+        const gate = (task.spec.gates ?? []).find((entry) => entry.gateId === event.gateId);
+        assert(gate && (gate.expiresAt !== undefined || gate.timeoutMs !== undefined) && graph.activated &&
+          !graph.cancelRequested && task.state === null && !task.gatesSatisfied.has(event.gateId) &&
+          !task.gatesExpired.has(event.gateId), 'E_TASK_JOURNAL', 'invalid gate expiry');
+        task.gatesExpired.set(event.gateId, event.at);
         break;
       }
       case 'task-retry-requested':
@@ -399,8 +466,22 @@ function project(events) {
   return { graphs, requestKeys, receiptIds, retryIds };
 }
 
+// When an expiring gate runs out, in ms; null while its clock has not started.
+// timeoutMs counts from the later of activation and the last upstream completion.
+function gateDeadline(graph, task, gate) {
+  if (gate.expiresAt !== undefined) return Date.parse(gate.expiresAt);
+  if (gate.timeoutMs === undefined || !graph.activated || !graph.activatedAt) return null;
+  let start = Date.parse(graph.activatedAt);
+  for (const dependency of task.spec.dependsOn) {
+    const upstream = graph.tasks.get(dependency);
+    if (upstream.state !== 'completed' || !upstream.receipt || !upstream.completedAt) return null;
+    start = Math.max(start, Date.parse(upstream.completedAt));
+  }
+  return start + gate.timeoutMs;
+}
+
 // One list of what a task waits on, in order: upstream tasks, external gates,
-// then approval. status is waiting | satisfied (approval may be rejected).
+// then approval. status is waiting | satisfied | expired (approval may be rejected).
 function visibleGates(graph, task) {
   const upstream = task.spec.dependsOn.map((dependency) => {
     const entry = graph.tasks.get(dependency);
@@ -409,8 +490,14 @@ function visibleGates(graph, task) {
   });
   const external = (task.spec.gates ?? []).map((gate) => {
     const evidence = task.gatesSatisfied.get(gate.gateId);
-    return { ...clone(gate), status: evidence ? 'satisfied' : 'waiting',
-      ...(evidence ? { satisfiedBy: evidence.topic, satisfiedAt: evidence.at } : {}) };
+    const expiredAt = task.gatesExpired.get(gate.gateId);
+    const timed = gate.expiresAt !== undefined || gate.timeoutMs !== undefined;
+    const deadline = timed ? gateDeadline(graph, task, gate) : null;
+    return { ...clone(gate), status: evidence ? 'satisfied' : expiredAt ? 'expired' : 'waiting',
+      ...(evidence ? { satisfiedBy: evidence.topic, satisfiedAt: evidence.at } : {}),
+      // expiresAt: when this wait runs out; null while its clock has not started.
+      ...(timed ? { expiresAt: deadline === null ? null : new Date(deadline).toISOString() } : {}),
+      ...(expiredAt ? { expiredAt } : {}) };
   });
   const approval = task.spec.approvalRequired ? [{ gateId: 'approval', kind: 'approval',
     status: task.approvalReceipt?.outcome === 'approved' ? 'satisfied' :
@@ -449,15 +536,16 @@ function visibleGraph(graph, recoveryHold) {
 }
 
 export async function openTaskGraph({ store = null, maxConcurrency = 2, execute, interrupt,
-  requestApproval, verifyReceipt } = {}) {
+  requestApproval, verifyReceipt, canStart = null } = {}) {
   assert(Number.isSafeInteger(maxConcurrency) && maxConcurrency >= 1 && maxConcurrency <= 32,
     'E_TASK_INPUT', 'maxConcurrency must be 1–32');
   for (const [name, callback] of Object.entries({ execute, interrupt, requestApproval, verifyReceipt })) {
     assert(typeof callback === 'function', 'E_TASK_INPUT', `${name} callback is required`);
   }
+  assert(canStart === null || typeof canStart === 'function', 'E_TASK_INPUT', 'canStart must be a function');
   const events = store ? await store.load() : [];
   return new TaskGraphRuntime({ events, store, maxConcurrency, execute, interrupt,
-    requestApproval, verifyReceipt });
+    requestApproval, verifyReceipt, canStart });
 }
 
 class TaskGraphRuntime {
@@ -468,8 +556,12 @@ class TaskGraphRuntime {
   #interrupt;
   #requestApproval;
   #verifyReceipt;
+  #canStart;
   #maxConcurrency;
   #recoveryHolds;
+  #expiryTimer = null;
+  #expiring = false;
+  #closed = false;
   #writeTail = Promise.resolve();
   #scheduling = null;
   #scheduleAgain = false;
@@ -478,7 +570,7 @@ class TaskGraphRuntime {
   // yet, can be proven never dispatched. Replayed running attempts are unknown.
   #pendingDispatch = new Set();
 
-  constructor({ events, store, maxConcurrency, execute, interrupt, requestApproval, verifyReceipt }) {
+  constructor({ events, store, maxConcurrency, execute, interrupt, requestApproval, verifyReceipt, canStart = null }) {
     this.#events = clone(events);
     this.#projection = project(this.#events);
     this.#store = store;
@@ -487,8 +579,72 @@ class TaskGraphRuntime {
     this.#interrupt = interrupt;
     this.#requestApproval = requestApproval;
     this.#verifyReceipt = verifyReceipt;
+    this.#canStart = canStart;
     // A reloaded active graph never dispatches, even if its last status was ready.
     this.#recoveryHolds = new Set(this.#projection.graphs.keys());
+    // Expiry only journals a gate's state; it never dispatches, so it also runs
+    // for graphs held for recovery (a wait that ran out while closed expires now).
+    this.#armExpiry();
+  }
+
+  /** Stops the expiry timer; the journal and projection stay readable. */
+  close() {
+    this.#closed = true;
+    if (this.#expiryTimer) clearTimeout(this.#expiryTimer);
+    this.#expiryTimer = null;
+  }
+
+  /** Re-runs scheduling, e.g. after canStart's answer may have changed. */
+  async reschedule() {
+    await this.#schedule();
+  }
+
+  // Every waiting, expiring gate whose clock has started, with its deadline.
+  #expiryCandidates() {
+    const due = [];
+    for (const graph of this.#projection.graphs.values()) {
+      if (!graph.activated || graph.cancelRequested) continue;
+      for (const task of graph.tasks.values()) {
+        if (task.state !== null) continue;
+        for (const gate of task.spec.gates ?? []) {
+          if (gate.expiresAt === undefined && gate.timeoutMs === undefined) continue;
+          if (task.gatesSatisfied.has(gate.gateId) || task.gatesExpired.has(gate.gateId)) continue;
+          const deadline = gateDeadline(graph, task, gate);
+          if (deadline !== null) due.push({ graphId: graph.spec.graphId, taskId: task.spec.taskId, gateId: gate.gateId, deadline });
+        }
+      }
+    }
+    return due;
+  }
+
+  #armExpiry() {
+    if (this.#expiryTimer) clearTimeout(this.#expiryTimer);
+    this.#expiryTimer = null;
+    if (this.#closed || this.#expiring) return;
+    const next = Math.min(...this.#expiryCandidates().map((entry) => entry.deadline));
+    if (!Number.isFinite(next)) return;
+    this.#expiryTimer = setTimeout(() => {
+      this.#expiryTimer = null;
+      void this.#expireDue();
+    }, Math.min(Math.max(0, next - Date.now()), 2 ** 31 - 1));
+    this.#expiryTimer.unref?.();
+  }
+
+  async #expireDue() {
+    if (this.#closed || this.#expiring) return;
+    this.#expiring = true;
+    try {
+      const now = Date.now();
+      for (const entry of this.#expiryCandidates()) {
+        if (entry.deadline > now) continue;
+        try {
+          await this.#append({ type: 'task-gate-expired', graphId: entry.graphId, taskId: entry.taskId, gateId: entry.gateId });
+        } catch { /* satisfied, started or cancelled meanwhile: nothing expires */ }
+      }
+    } finally {
+      this.#expiring = false;
+      this.#armExpiry();
+    }
   }
 
   subscribe(listener) {
@@ -530,6 +686,7 @@ class TaskGraphRuntime {
       for (const listener of this.#listeners) {
         try { listener(clone(event)); } catch { /* observers do not alter the journal */ }
       }
+      this.#armExpiry();
       return event;
     });
     this.#writeTail = operation.catch(() => {});
@@ -547,6 +704,7 @@ class TaskGraphRuntime {
     const requestKey = `${spec.runId}\0${spec.requestId}`;
     assert(!this.#projection.requestKeys.has(requestKey),
       'E_TASK_IDEMPOTENCY', 'same request/Run has another graph ID');
+    assertGateWindow(spec);
     try {
       await this.#append({ type: 'graph-submitted', graph: spec });
     } catch (cause) {
@@ -740,6 +898,8 @@ class TaskGraphRuntime {
     const evidence = normalizeEvidence(input.evidence);
     if (task.gatesSatisfied.has(gateId)) return this.getGraph(graph.spec.graphId);
     assert(!graph.cancelRequested && task.state === null, 'E_TASK_STATE', 'gate is no longer waiting');
+    assert(!task.gatesExpired.has(gateId) || evidence.topic === 'user.action',
+      'E_TASK_STATE', 'an expired gate opens only by hand');
     try {
       await this.#append({ type: 'task-gate-satisfied', graphId: graph.spec.graphId,
         taskId: task.spec.taskId, gateId, evidence });
@@ -753,7 +913,7 @@ class TaskGraphRuntime {
     return this.getGraph(graph.spec.graphId);
   }
 
-  /** External gates still waiting in graphs that are not cancelled. */
+  /** External gates still waiting in graphs that are not cancelled; expired ones say expired: true. */
   openGates() {
     const open = [];
     for (const graph of this.#projection.graphs.values()) {
@@ -762,7 +922,8 @@ class TaskGraphRuntime {
         if (task.state !== null) continue;
         for (const gate of task.spec.gates ?? []) {
           if (!task.gatesSatisfied.has(gate.gateId)) {
-            open.push({ graphId: graph.spec.graphId, taskId: task.spec.taskId, gate: clone(gate) });
+            open.push({ graphId: graph.spec.graphId, taskId: task.spec.taskId, gate: clone(gate),
+              ...(task.gatesExpired.has(gate.gateId) ? { expired: true } : {}) });
           }
         }
       }
@@ -811,10 +972,20 @@ class TaskGraphRuntime {
     for (const graph of this.#projection.graphs.values()) {
       if (this.#recoveryHolds.has(graph.spec.graphId) || graph.cancelRequested || !graph.activated) continue;
       for (const task of graph.tasks.values()) {
-        if (taskStatus(graph, task) === 'ready') return { kind: 'execute', graph, task };
+        if (taskStatus(graph, task) === 'ready' && this.#mayStart(graph, task)) return { kind: 'execute', graph, task };
       }
     }
     return null;
+  }
+
+  // A ready task the canStart hook holds back stays ready (nothing is journaled).
+  #mayStart(graph, task) {
+    if (!this.#canStart) return true;
+    try {
+      return this.#canStart(frozen({ graphId: graph.spec.graphId, taskId: task.spec.taskId })) === true;
+    } catch {
+      return false;
+    }
   }
 
   async #schedule() {

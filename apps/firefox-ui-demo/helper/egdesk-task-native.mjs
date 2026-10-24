@@ -5,7 +5,7 @@ import { nativeHash, nativeTaskError, stableJSON } from './egdesk-task-native-st
 const SCOPE = ['graphId', 'requestId', 'runId', 'parentTaskId', 'requestedBy'];
 const BINDING = [...SCOPE, 'taskId', 'ownerId', 'sourceRef', 'attemptId'];
 const INPUT = ['message', 'cwd', 'model', 'effort', 'profileEnabled', 'systemPrompt',
-  'contextSnapshotIds', 'contextCapabilities'];
+  'contextSnapshotIds', 'contextCapabilities', 'conversationId', 'clientThreadId', 'engineId'];
 const equal = (a, b) => stableJSON(a) === stableJSON(b);
 const clone = (value) => structuredClone(value);
 const pick = (value, keys) => Object.fromEntries(keys.map((key) => [key, value[key]]));
@@ -57,6 +57,11 @@ function normalizedInput(value) {
     Object.keys(caps).every((key) => ['read', 'reader', 'publishBriefing'].includes(key)) &&
     Object.values(caps).every((entry) => typeof entry === 'boolean'),
   'TASK_INPUT_UNRESOLVED', 'Invalid resolved context capabilities', 403);
+  // Continue in an existing conversation: the native thread and its local chat
+  // come together, with the engine that conversation runs on, and no new cwd.
+  const sameThread = ['conversationId', 'clientThreadId', 'engineId'].filter((key) => value[key] !== undefined);
+  requireValue(sameThread.length === 0 || sameThread.length === 3 && sameThread.every((key) => ref(value[key])) &&
+    value.cwd === undefined, 'TASK_INPUT_UNRESOLVED', 'Invalid resolved conversation target', 403);
   return clone(value);
 }
 function nativeIds(value) {
@@ -93,7 +98,10 @@ function deferred() {
  * true only while that account/generation/parent delegation remains current.
  * resolveTaskInput({...ctx,boardId,phase}) MUST be side-effect-free and verify
  * the current owner, Board, source, parent delegation, and every cwd/profile/
- * model/context grant before returning only INPUT fields.
+ * model/context grant before returning only INPUT fields. It may name an
+ * existing conversation ({conversationId, clientThreadId, engineId}, no cwd):
+ * the step then continues there instead of in a new child thread, and the
+ * chat runtime's own account/engine binding checks apply to that send.
  * sourceRef is never interpreted as a prompt. Resolved payloads stay in memory.
  *
  * registerGraph({boardId,graph}) precedes activation. Wire chat's trusted emit
@@ -248,7 +256,9 @@ export function createNativeTaskAdapter({ chat, resolveTaskInput, ledger, captur
       requireValue(!fenced(record), 'TASK_FENCED', 'Task graph has stopped admitting work');
       const input = await resolve(ctx, record, 'execute', guard);
       const requestId = `task-native-${randomUUID()}`;
-      const clientThreadId = `task-child-${randomUUID()}`;
+      // A same-thread step continues the conversation it names; others get their own.
+      const sameThread = input.conversationId !== undefined;
+      const clientThreadId = sameThread ? input.clientThreadId : `task-child-${randomUUID()}`;
       const waiter = deferred();
       outcomes.set(key, waiter);
       await ledger.transact((state) => {
@@ -265,8 +275,9 @@ export function createNativeTaskAdapter({ chat, resolveTaskInput, ledger, captur
         guard.check();
         const accepted = await chat.send({ ...input, requestId, clientThreadId });
         guard.check();
-        requireValue(accepted?.accepted === true && accepted.requestId === requestId && nativeIds(accepted),
-          'TASK_NATIVE_ACCEPTANCE', 'Native request acceptance was not correlated');
+        requireValue(accepted?.accepted === true && accepted.requestId === requestId && nativeIds(accepted) &&
+          (!sameThread || accepted.conversationId === input.conversationId),
+        'TASK_NATIVE_ACCEPTANCE', 'Native request acceptance was not correlated');
         const attempt = await ledger.transact((state) => {
           guard.check();
           const current = state.attempts.find((item) => item.key === key);
@@ -287,8 +298,10 @@ export function createNativeTaskAdapter({ chat, resolveTaskInput, ledger, captur
           if (current && !current.receipt) {
             current.phase = 'unknown';
             // A failed or missing turn/start reply can still expose the native
-            // thread ID. It is only a reconciliation lead, never run proof.
-            if (ref(error?.conversationId)) current.candidateConversationId = error.conversationId;
+            // thread ID. It is only a reconciliation lead, never run proof. A
+            // same-thread step's conversation already holds other runs of the
+            // same local chat, so it is never offered as a lead.
+            if (!sameThread && ref(error?.conversationId)) current.candidateConversationId = error.conversationId;
           }
         });
         guard.check();

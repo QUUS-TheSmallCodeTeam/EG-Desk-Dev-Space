@@ -2127,6 +2127,17 @@ export class CodexChatRuntime {
     else this.emitLegacy({ type: 'assistant-error', conversationId: run.conversationId, messageId: run.answerId, error: run.error?.message || 'Codex response was interrupted.' })
   }
 
+  // True while a send would be refused or queued behind other work: a request
+  // is starting or resuming, a turn is active or unreconciled, or the thread
+  // needs an explicit resume. Synchronous, so a caller that sees false and
+  // calls send() in the same tick takes the conversation's start lock first.
+  conversationBusy(conversationId) {
+    const cid = idText(conversationId)
+    if (!cid) return false
+    return this.locks.has(cid) || this.pendingStarts.has(cid) || this.pendingResumes.has(cid) || this.uncertainThreads.has(cid)
+      || [...this.runs.values()].some(run => run.conversationId === cid && !TERMINAL.has(run.status))
+  }
+
   snapshot(conversationId = null) {
     const runs = [...this.runs.values()].filter(run => !conversationId || run.conversationId === conversationId)
     return copy({

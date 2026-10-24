@@ -1,0 +1,428 @@
+import assert from 'node:assert/strict'
+import { test } from 'node:test'
+import { createServer } from 'node:http'
+import { mkdtemp, readFile, rm, stat } from 'node:fs/promises'
+import os from 'node:os'
+import path from 'node:path'
+import { CodexChatRuntime } from './codex-chat-runtime.mjs'
+import { openChatStore } from './egdesk-chat-store.mjs'
+import { composeAwaitResume } from './egdesk-await-resume.mjs'
+import { createAwaitGateRouter } from './egdesk-await-router.mjs'
+import { createWorkflowEventBus } from './egdesk-event-bus.mjs'
+import { PLAN_TOOL_NAME, createPlanToolProvider } from './egdesk-plan-tool-provider.mjs'
+import { openTaskGraph } from './egdesk-task-graph.mjs'
+import { openTaskStore } from './egdesk-task-store.mjs'
+import { openWorkflowRuntime } from './egdesk-workflow-runtime.mjs'
+
+const delay = ms => new Promise(resolve => setTimeout(resolve, ms))
+async function until(predicate, label = 'expected state') {
+  for (let count = 0; count < 1500; count += 1) { if (await predicate()) return; await delay(3) }
+  assert.fail(`${label} did not arrive`)
+}
+const listen = server => new Promise(resolve => server.listen(0, '127.0.0.1', () => resolve(server.address().port)))
+const close = server => new Promise(resolve => { server.closeAllConnections?.(); server.close(() => resolve()) })
+const textOf = turn => turn.input.map(item => item.text).join('\n')
+
+async function bridge(t, { durable = false } = {}) {
+  const dataDir = await mkdtemp(path.join(os.tmpdir(), 'egdesk-plans-'))
+  const frames = [], turnStarts = [], threadStarts = [], replies = []
+  let runtime = null
+  let threads = 0, turns = 0
+  const owner = { key: 'id:plan-account' }
+  const planProvider = createPlanToolProvider({ plans: () => runtime?.plans ?? null })
+  const store = durable ? openChatStore({ dataDir: path.join(dataDir, 'chat'), ownerScope: 'plan-test' }) : null
+  if (store) t.after(() => { try { store.close() } catch {} })
+  const chat = new CodexChatRuntime({
+    ...(store ? { store, requireStore: true, getOwnerKey: () => owner.key } : {}),
+    request: async (method, params) => {
+      if (method === 'thread/start') { threadStarts.push(params); return { thread: { id: `native-thread-${++threads}` }, cwd: dataDir } }
+      if (method === 'turn/start') { turnStarts.push(params); return { turn: { id: `native-turn-${++turns}`, status: 'inProgress', items: [] } } }
+      if (method === 'turn/interrupt') return {}
+      if (method === 'thread/resume') return { thread: { id: params.threadId, turns: [] } }
+      throw new Error(`Unexpected native RPC ${method}`)
+    },
+    respond: (...args) => replies.push(args), verifyFile: async () => null,
+    toolProviders: [planProvider],
+    emit: event => { frames.push(event); runtime?.onChatEvent(event) },
+  })
+  chat.setConnection(true)
+  const server = createServer((req, res) => {
+    const url = new URL(req.url, 'http://127.0.0.1')
+    void runtime.handle(req, res, url).then(handled => { if (!handled) { res.writeHead(404); res.end('{}') } })
+  })
+  const port = await listen(server)
+  runtime = await openWorkflowRuntime({ dataDir, chat, port, broadcast: frame => frames.push(frame),
+    ensureAuth: async () => {}, getOwnerKey: () => owner.key })
+  t.after(async () => { await runtime.close(); await close(server); await rm(dataDir, { recursive: true, force: true }) })
+  const base = `http://127.0.0.1:${port}`
+  const call = async (method, route, body, headers = {}) => {
+    const response = await fetch(`${base}${route}`, { method, headers: { ...(body ? { 'content-type': 'application/json' } : {}), ...headers },
+      ...(body ? { body: JSON.stringify(body) } : {}) })
+    return { status: response.status, body: await response.json() }
+  }
+  async function finishTurn(index, status = 'completed') {
+    await chat.handleNotification({ method: 'turn/completed', params: { threadId: turnStarts[index].threadId, turn: { id: `native-turn-${index + 1}`, status, items: [] } } })
+    await chat.queue
+  }
+  let callCount = 0
+  async function propose(run, args) {
+    const id = `plan-call-${++callCount}`
+    await chat.handleServerRequest({ id, method: 'item/tool/call', params: { threadId: run.conversationId, turnId: run.runId,
+      callId: `call-${callCount}`, tool: PLAN_TOOL_NAME, arguments: args } })
+    await until(() => replies.some(reply => reply[0] === id), 'plan tool reply')
+    const reply = replies.find(entry => entry[0] === id)[1]
+    return { success: reply.success, result: JSON.parse(reply.contentItems[0].text) }
+  }
+  const state = async graphId => (await call('GET', `/tasks/state?graphId=${graphId}`)).body
+  return { runtime, chat, frames, turnStarts, threadStarts, replies, call, finishTurn, propose, state, dataDir, owner }
+}
+
+const taskOf = (state, taskId) => state.graph.tasks.find(entry => entry.taskId === taskId)
+const graphScope = value => ({ graphId: value.graphId, requestId: value.requestId, runId: value.runId, parentTaskId: value.parentTaskId, requestedBy: value.requestedBy })
+
+const REPORT_PLAN = {
+  title: 'Quarterly report',
+  tasks: [
+    { taskId: 'collect', title: 'Collect numbers', instructions: 'Collect the Q3 numbers from the finance folder.', dependsOn: [] },
+    { taskId: 'publish', title: 'Publish to the wiki', instructions: 'Publish the report to the GitHub wiki.', dependsOn: ['collect'],
+      gates: [{ gateId: 'github-login', kind: 'oauth', origin: 'https://github.com', pathPrefix: '/login/oauth/callback', timeoutMs: 600000 }] },
+    { taskId: 'review', title: 'Review in a new chat', instructions: 'Review the published wiki page for typos.', dependsOn: ['publish'],
+      resumeIn: 'newThread', gates: [{ gateId: 'looks-right', kind: 'userAction', label: 'Report looks right' }] },
+  ],
+}
+
+test('Agent proposes a plan; nothing runs until approval, then steps continue in the same conversation and wait for their conditions', async t => {
+  const h = await bridge(t)
+  const first = await h.chat.send({ message: 'Prepare the quarterly report end to end.', clientThreadId: 'chat-1' })
+  assert.ok(h.threadStarts[0].dynamicTools.some(spec => spec.name === PLAN_TOOL_NAME), 'ordinary threads are offered the plan tool')
+
+  const proposed = await h.propose(first, REPORT_PLAN)
+  assert.equal(proposed.success, true)
+  assert.equal(proposed.result.status, 'proposed')
+  assert.match(proposed.result.planId, /^plan-/)
+  assert.equal(proposed.result.taskCount, 3)
+  assert.match(proposed.result.message, /대표님 승인을 기다립니다/)
+  const { planId, graphId } = proposed.result
+
+  // Saved as proposed only: queued, not activated, no new turn.
+  let state = await h.state(graphId)
+  assert.equal(state.graph.activated, false)
+  assert.deepEqual(state.graph.tasks.map(task => task.status), ['queued', 'queued', 'queued'])
+  assert.equal(h.turnStarts.length, 1)
+  const chatEvent = h.frames.find(frame => frame.type === 'chat.event' && frame.event === 'plan.proposed')
+  assert.equal(chatEvent.details.planId, planId)
+  assert.deepEqual(chatEvent.details.tasks.map(task => [task.taskId, task.resumeIn]), [['collect', 'sameThread'], ['publish', 'sameThread'], ['review', 'newThread']])
+  assert.equal(JSON.stringify(chatEvent).includes('Collect the Q3'), false, 'instructions stay out of chat history')
+  const proposedFrame = h.frames.find(frame => frame.type === 'task.plan' && frame.change === 'proposed')
+  assert.equal(proposedFrame.plan.planId, planId)
+  assert.equal(proposedFrame.plan.status, 'proposed')
+
+  const detail = await h.call('GET', `/tasks/plans?planId=${planId}`)
+  assert.equal(detail.status, 200)
+  assert.equal(detail.body.plan.title, 'Quarterly report')
+  assert.equal(detail.body.plan.origin.conversationId, first.conversationId)
+  assert.deepEqual(detail.body.plan.tasks.map(task => task.instructions), REPORT_PLAN.tasks.map(task => task.instructions))
+  const listed = await h.call('GET', '/tasks/plans')
+  assert.deepEqual(listed.body.plans.map(plan => plan.planId), [planId])
+  assert.equal(Object.hasOwn(listed.body.plans[0].tasks[0], 'instructions'), false)
+
+  // Instructions live in the private task-source file; the plan file keeps titles and IDs.
+  const planFile = path.join(h.dataDir, 'task-plans', 'task-plans.json')
+  const sourceFile = path.join(h.dataDir, 'task-sources', 'task-sources.json')
+  assert.equal((await stat(planFile)).mode & 0o777, 0o600)
+  assert.equal((await readFile(planFile, 'utf8')).includes('Collect the Q3'), false)
+  assert.equal((await readFile(sourceFile, 'utf8')).includes('Collect the Q3'), true)
+  assert.equal((await readFile(planFile, 'utf8')).includes('id:plan-account'), false, 'the owner is stored hashed')
+
+  // Approval activates; the first step waits for the proposing turn to end.
+  const approved = await h.call('POST', `/tasks/plans/${planId}/approve`, {})
+  assert.equal(approved.status, 200)
+  assert.equal(approved.body.plan.status, 'approved')
+  assert.equal(approved.body.graph.activated, true)
+  assert.equal(taskOf(approved.body, 'collect').status, 'ready')
+  assert.ok(h.frames.some(frame => frame.type === 'task.plan' && frame.change === 'approved'))
+  await delay(30)
+  assert.equal(h.turnStarts.length, 1, 'no step starts while the proposing turn runs')
+  assert.equal((await h.call('POST', `/tasks/plans/${planId}/approve`, {})).status, 200, 'approving again is harmless')
+
+  await h.finishTurn(0)
+  await until(() => h.turnStarts.length === 2, 'first step in the same conversation')
+  assert.equal(h.turnStarts[1].threadId, first.conversationId)
+  assert.equal(h.threadStarts.length, 1, 'no new native thread for a same-thread step')
+  const resume = textOf(h.turnStarts[1])
+  assert.match(resume, /^<egdesk-await-resume>/)
+  assert.match(resume, /<status>satisfied<\/status>/)
+  assert.match(resume, /Collect the Q3 numbers from the finance folder\./)
+  assert.match(resume, /대표님 approved this plan/)
+
+  await h.finishTurn(1)
+  await until(async () => taskOf(await h.state(graphId), 'collect').status === 'completed', 'first step completed')
+  state = await h.state(graphId)
+  const login = taskOf(state, 'publish').gates.find(gate => gate.gateId === 'github-login')
+  assert.equal(login.status, 'waiting')
+  assert.ok(Date.parse(login.expiresAt) > Date.now(), 'the wait clock started when the step became current')
+
+  // 대표님 keeps chatting in the same conversation while the login happens.
+  const chatting = await h.chat.send({ message: 'Also add a revenue chart.', clientThreadId: 'chat-1', conversationId: first.conversationId })
+  assert.equal(h.turnStarts.length, 3)
+  const oauth = await h.call('POST', '/events/browser', { cardId: 'card-1', kind: 'oauthCompleted', url: 'https://github.com/login/oauth/callback?code=SECRET-CODE-123&state=xyz' })
+  assert.equal(oauth.status, 202)
+  await until(async () => taskOf(await h.state(graphId), 'publish').status === 'ready', 'login gate satisfied')
+  await delay(30)
+  assert.equal(h.turnStarts.length, 3, 'the step waits for the running turn instead of interrupting it')
+  await h.chat.handleNotification({ method: 'turn/completed', params: { threadId: chatting.conversationId, turn: { id: chatting.runId, status: 'completed', items: [] } } })
+  await h.chat.queue
+  await until(() => h.turnStarts.length === 4, 'second step after the chat turn ended')
+  assert.equal(h.turnStarts[3].threadId, first.conversationId)
+  const second = textOf(h.turnStarts[3])
+  assert.match(second, /Login finished at https:\/\/github\.com\/login\/oauth\/callback/)
+  assert.match(second, /<condition kind="task" gate="task:collect">Step "Collect numbers" \(collect\) completed\.<\/condition>/)
+  assert.equal(second.includes('SECRET-CODE'), false)
+  assert.equal(second.includes('code='), false)
+
+  // The last step runs in a new conversation once 대표님 confirms.
+  await h.finishTurn(3)
+  await until(async () => taskOf(await h.state(graphId), 'publish').status === 'completed', 'second step completed')
+  state = await h.state(graphId)
+  const continued = await h.call('POST', '/tasks/continue', { boardId: state.native.boardId, scope: graphScope(state.graph), taskId: 'review', gateId: 'looks-right' })
+  assert.equal(continued.status, 200)
+  await until(() => h.turnStarts.length === 5, 'new-thread step')
+  assert.equal(h.threadStarts.length, 2)
+  assert.equal(h.turnStarts[4].threadId, 'native-thread-2')
+  const review = textOf(h.turnStarts[4])
+  assert.match(review, /^\[EG-Desk approved plan "Quarterly report" — step "Review in a new chat" \(review\)\]/)
+  assert.match(review, /Review the published wiki page for typos\./)
+  assert.equal(review.includes('<egdesk-await-resume>'), false)
+  await h.finishTurn(4)
+  await until(async () => (await h.call('GET', `/tasks/plans?planId=${planId}`)).body.plan.status === 'completed', 'plan completed')
+  assert.equal(JSON.stringify(h.frames).includes('SECRET-CODE'), false)
+})
+
+test('with durable chat history the step is a turn of the original local chat, and an account change sends nothing', async t => {
+  const h = await bridge(t, { durable: true })
+  const first = await h.chat.send({ message: 'Plan the launch.', clientThreadId: 'ui-1', requestId: 'req-1' })
+  const { result } = await h.propose(first, { title: 'Launch', tasks: [{ taskId: 'draft', title: 'Draft notes', instructions: 'Draft the launch notes.', dependsOn: [] }] })
+  assert.equal((await h.call('POST', `/tasks/plans/${result.planId}/approve`, {})).status, 200)
+  await h.finishTurn(0)
+  await until(() => h.turnStarts.length === 2, 'same-thread step')
+  assert.equal(h.turnStarts[1].threadId, first.conversationId)
+  let history = h.chat.getLocalHistory({ clientThreadId: 'ui-1', limit: 500 })
+  const resumed = history.messages.filter(message => message.role === 'user').at(-1)
+  assert.match(resumed.text, /^<egdesk-await-resume>/)
+  assert.match(resumed.requestId, /^task-native-/)
+  assert.equal(history.runs.at(-1).accountIdentity.status, 'verified')
+  await h.finishTurn(1)
+  await until(async () => (await h.call('GET', `/tasks/plans?planId=${result.planId}`)).body.plan.status === 'completed', 'step completed')
+
+  // A second plan is approved, then the account changes before its step may start.
+  const again = await h.chat.send({ message: 'One more thing.', clientThreadId: 'ui-1', conversationId: first.conversationId, requestId: 'req-2' })
+  const next = await h.propose(again, { title: 'Follow-up', tasks: [{ taskId: 'mail', title: 'Mail', instructions: 'Mail the notes.', dependsOn: [] }] })
+  assert.equal((await h.call('POST', `/tasks/plans/${next.result.planId}/approve`, {})).status, 200)
+  const usersBefore = h.chat.getLocalHistory({ clientThreadId: 'ui-1', limit: 500 }).messages.filter(message => message.role === 'user').length
+  h.owner.key = 'id:another-account'
+  await h.chat.handleNotification({ method: 'turn/completed', params: { threadId: again.conversationId, turn: { id: again.runId, status: 'completed', items: [] } } })
+  await h.chat.queue
+  await delay(80)
+  assert.equal(h.turnStarts.length, 3, 'nothing is sent for another account')
+  history = h.chat.getLocalHistory({ clientThreadId: 'ui-1', limit: 500 })
+  assert.equal(history.messages.filter(message => message.role === 'user').length, usersBefore, 'no message was saved for a refused step')
+})
+
+test('a rejected plan never runs; plans belong to the proposing account and the routes are guarded', async t => {
+  const h = await bridge(t)
+  const first = await h.chat.send({ message: 'Plan something.', clientThreadId: 'chat-2' })
+  const { result } = await h.propose(first, { title: 'Small plan', tasks: [{ taskId: 'only', title: 'Only step', instructions: 'Do the only step.', dependsOn: [] }] })
+  const planId = result.planId
+  assert.equal((await h.call('POST', `/tasks/plans/${planId}/approve`, { extra: true })).status, 400)
+  assert.equal((await h.call('POST', `/tasks/plans/${planId}/approve`, {}, { origin: 'https://evil.example' })).status, 403)
+  assert.equal((await h.call('POST', '/tasks/plans/not-a-plan/approve', {})).status, 404)
+  assert.equal((await h.call('POST', '/tasks/plans/plan-missing/approve', {})).status, 404)
+
+  h.owner.key = 'id:someone-else'
+  assert.equal((await h.call('GET', `/tasks/plans?planId=${planId}`)).status, 404)
+  assert.deepEqual((await h.call('GET', '/tasks/plans')).body.plans, [])
+  assert.equal((await h.call('POST', `/tasks/plans/${planId}/approve`, {})).status, 404)
+  h.owner.key = 'id:plan-account'
+
+  const rejected = await h.call('POST', `/tasks/plans/${planId}/reject`, {})
+  assert.equal(rejected.status, 200)
+  assert.equal(rejected.body.plan.status, 'rejected')
+  assert.equal(rejected.body.graph.cancelRequested, true)
+  assert.deepEqual(rejected.body.graph.tasks.map(task => task.status), ['cancelled'])
+  assert.equal((await h.call('POST', `/tasks/plans/${planId}/approve`, {})).status, 409)
+  assert.equal((await h.call('POST', `/tasks/plans/${planId}/reject`, {})).status, 200, 'rejecting again is harmless')
+  await h.finishTurn(0)
+  await delay(30)
+  assert.equal(h.turnStarts.length, 1)
+
+  // An approved plan held for its busy conversation can still be cancelled cleanly.
+  const second = await h.chat.send({ message: 'Plan again.', clientThreadId: 'chat-2', conversationId: first.conversationId })
+  const again = await h.propose(second, { title: 'Second plan', tasks: [{ taskId: 'step', title: 'Step', instructions: 'Do the step.', dependsOn: [] }] })
+  const approved = await h.call('POST', `/tasks/plans/${again.result.planId}/approve`, {})
+  assert.equal(taskOf(approved.body, 'step').status, 'ready')
+  assert.equal((await h.call('POST', `/tasks/plans/${again.result.planId}/reject`, {})).status, 409, 'an approved plan is stopped with /tasks/cancel')
+  const cancelled = await h.call('POST', '/tasks/cancel', { boardId: approved.body.plan.boardId, scope: approved.body.plan.scope })
+  assert.equal(cancelled.status, 202)
+  assert.equal(taskOf(cancelled.body, 'step').status, 'cancelled')
+  await h.chat.handleNotification({ method: 'turn/completed', params: { threadId: second.conversationId, turn: { id: second.runId, status: 'completed', items: [] } } })
+  await h.chat.queue
+  await delay(50)
+  assert.equal(h.turnStarts.length, 2, 'nothing is sent for a cancelled step')
+  assert.equal((await h.call('GET', `/tasks/plans?planId=${again.result.planId}`)).body.plan.status, 'cancelled')
+})
+
+test('an invalid plan is explained to the Agent and saves nothing', async t => {
+  const h = await bridge(t)
+  const first = await h.chat.send({ message: 'Plan badly.', clientThreadId: 'chat-3' })
+  const step = (taskId, extra = {}) => ({ taskId, title: `Step ${taskId}`, instructions: `Do ${taskId}.`, dependsOn: [], ...extra })
+  for (const [args, reason] of [
+    [{ title: 'Cycle', tasks: [step('a', { dependsOn: ['b'] }), step('b', { dependsOn: ['a'] })] }, /dependency cycle/],
+    [{ title: 'Missing', tasks: [step('a', { dependsOn: ['ghost'] })] }, /missing dependency ghost/],
+    [{ title: 'Too many', tasks: Array.from({ length: 13 }, (_, index) => step(`s${index}`)) }, /1-12 steps/],
+    [{ title: 'Long', tasks: [step('a', { instructions: 'x'.repeat(4001) })] }, /1-4000 characters/],
+    [{ title: 'Gate', tasks: [step('a', { gates: [{ gateId: 'g', kind: 'webhook' }] })] }, /Step a: gate kind/],
+    [{ title: 'Broad', tasks: [step('a', { gates: [{ gateId: 'g', kind: 'oauth', origin: 'https://github.com', pathPrefix: '/' }] })] }, /pathPrefix/],
+    [{ title: 'Week', tasks: [step('a', { gates: [{ gateId: 'g', kind: 'userAction', timeoutMs: 8 * 24 * 3600 * 1000 }] })] }, /7 days/],
+    [{ title: 'Where', tasks: [step('a', { resumeIn: 'elsewhere' })] }, /sameThread or newThread/],
+    [{ title: 'Extra', tasks: [step('a')], when: 'now' }, /Unknown argument: when/],
+  ]) {
+    const { success, result } = await h.propose(first, args)
+    assert.equal(success, true, args.title)
+    assert.equal(result.status, 'invalid', args.title)
+    assert.equal(result.code, 'PLAN_INVALID')
+    assert.match(result.reason, reason, args.title)
+  }
+  assert.deepEqual((await h.call('GET', '/tasks/plans')).body.plans, [])
+  assert.equal(h.runtime.sources.stats().sources, 0, 'no task text was saved for a refused plan')
+  assert.equal(h.frames.some(frame => frame.type === 'task.plan' || frame.event === 'plan.proposed'), false)
+})
+
+test('bounded and QA threads are never offered the plan tool, and a run with a policy is refused', async () => {
+  const provider = createPlanToolProvider({ plans: () => ({ propose: async () => assert.fail('must not propose') }) })
+  const chat = new CodexChatRuntime({ request: async () => ({}), respond: () => {}, toolProviders: [provider] })
+  assert.ok(chat.collectToolSpecs(null).specs.some(spec => spec.name === PLAN_TOOL_NAME))
+  for (const policy of ['readOnlyQa', 'browserBounded', 'fixtureBrowserQa']) {
+    assert.equal(chat.collectToolSpecs(policy).specs.some(spec => spec.name === PLAN_TOOL_NAME), false, policy)
+  }
+  const refused = await provider.dispatch({ answerId: 'a', executionPolicy: { mode: 'readOnlyQa' } }, { callId: 'c', tool: PLAN_TOOL_NAME, arguments: {} })
+  assert.equal(refused.success, false)
+  assert.deepEqual(JSON.parse(refused.contentItems[0].text), { error: { code: 'PLAN_FORBIDDEN' } })
+  const offline = createPlanToolProvider({ plans: () => null })
+  assert.equal(JSON.parse((await offline.dispatch({ answerId: 'a' }, { callId: 'c', tool: PLAN_TOOL_NAME, arguments: {} })).contentItems[0].text).error.code, 'PLAN_UNAVAILABLE')
+  assert.deepEqual(createPlanToolProvider({ plans: () => null, schemaReady: () => false }).specs(), [])
+})
+
+function graphHarness(store = null) {
+  const starts = []
+  const valid = new Set()
+  return { starts, valid, options: { store, maxConcurrency: 2, execute(context) { starts.push(context) }, interrupt() {}, requestApproval() {},
+    verifyReceipt({ receipt }) { return valid.has(receipt.receiptId) } } }
+}
+const oneGate = (gate, suffix = 'x', extraTasks = []) => ({ graphId: `graph-${suffix}`, requestId: `request-${suffix}`, runId: `run-${suffix}`, parentTaskId: null,
+  requestedBy: 'local-user', tasks: [{ taskId: 'wait', ownerId: 'agent', sourceRef: 'source-wait', dependsOn: extraTasks.map(task => task.taskId), approvalRequired: false, gates: [gate] }, ...extraTasks] })
+const scopeOf = value => ({ graphId: value.graphId, requestId: value.requestId, runId: value.runId, parentTaskId: value.parentTaskId, requestedBy: value.requestedBy })
+
+test('a gate whose wait runs out is marked expired, journaled and kept waiting; only a manual continue opens it', async t => {
+  const directory = path.join(await mkdtemp(path.join(os.tmpdir(), 'egdesk-expiry-')), 'task-graph')
+  t.after(() => rm(path.dirname(directory), { recursive: true, force: true }))
+  const native = graphHarness(await openTaskStore(directory))
+  const graph = await openTaskGraph(native.options)
+  t.after(() => graph.close())
+  const bus = createWorkflowEventBus()
+  const router = createAwaitGateRouter({ graph, bus, owner: 'egdesk-local' })
+  t.after(() => router.close())
+  const changes = []
+  graph.subscribe(event => changes.push(event.type))
+
+  // Validation: one expiry form, at most 7 days, canonical and in the future.
+  for (const [gate, message] of [
+    [{ gateId: 'g', kind: 'userAction', timeoutMs: 1000, expiresAt: new Date(Date.now() + 60000).toISOString() }, /not both/],
+    [{ gateId: 'g', kind: 'userAction', timeoutMs: 7 * 24 * 3600 * 1000 + 1 }, /7 days/],
+    [{ gateId: 'g', kind: 'userAction', timeoutMs: 0 }, /7 days/],
+    [{ gateId: 'g', kind: 'userAction', expiresAt: '2026-10-25' }, /canonical ISO/],
+    [{ gateId: 'g', kind: 'userAction', expiresAt: new Date(Date.now() - 1000).toISOString() }, /future/],
+    [{ gateId: 'g', kind: 'userAction', expiresAt: new Date(Date.now() + 8 * 24 * 3600 * 1000).toISOString() }, /7 days/],
+  ]) await assert.rejects(graph.submitGraph(oneGate(gate, `bad-${changes.length}-${Math.random().toString(36).slice(2)}`)), { code: 'E_TASK_INPUT', message })
+
+  // The clock of a downstream gate starts only once its upstream step completed.
+  const upstream = { taskId: 'before', ownerId: 'agent', sourceRef: 'source-before', dependsOn: [], approvalRequired: false }
+  const chained = oneGate({ gateId: 'exit', kind: 'terminalExit', sessionId: 'term-9', timeoutMs: 40 }, 'chain', [upstream])
+  await graph.submitGraph(chained)
+  await graph.activateGraph(scopeOf(chained))
+  let gate = graph.getGraph('graph-chain').tasks.find(task => task.taskId === 'wait').gates.find(entry => entry.gateId === 'exit')
+  assert.equal(gate.expiresAt, null)
+  await delay(70)
+  assert.equal(graph.getGraph('graph-chain').tasks.find(task => task.taskId === 'wait').gates.find(entry => entry.gateId === 'exit').status, 'waiting')
+  const started = native.starts.find(context => context.binding.taskId === 'before')
+  const receipt = { receiptId: 'native-before', outcome: 'completed', binding: structuredClone(started.binding), evidenceRefs: [] }
+  native.valid.add(receipt.receiptId)
+  await graph.recordOutcome(receipt)
+  gate = graph.getGraph('graph-chain').tasks.find(task => task.taskId === 'wait').gates.find(entry => entry.gateId === 'exit')
+  assert.ok(Date.parse(gate.expiresAt) >= Date.now() + 20, 'counted from the upstream completion')
+
+  await until(() => graph.getGraph('graph-chain').tasks.find(task => task.taskId === 'wait').gates.find(entry => entry.gateId === 'exit').status === 'expired')
+  const waiting = graph.getGraph('graph-chain').tasks.find(task => task.taskId === 'wait')
+  assert.equal(waiting.status, 'waiting-on-dependency', 'expiry neither fails nor advances the step')
+  assert.ok(waiting.gates.find(entry => entry.gateId === 'exit').expiredAt)
+  assert.ok(changes.includes('task-gate-expired'))
+  assert.equal(native.starts.length, 1)
+
+  // The awaited event after expiry no longer opens it; the manual continue does.
+  bus.publish({ topic: 'terminal.exit', owner: 'egdesk-local', payload: { sessionId: 'term-9', exitCode: 0, signal: null } })
+  await bus.flush(); await router.drain()
+  assert.equal(native.starts.length, 1)
+  assert.deepEqual(graph.openGates().map(open => [open.gate.gateId, open.expired]), [['exit', true]])
+  await assert.rejects(graph.satisfyGate({ graphId: 'graph-chain', taskId: 'wait', gateId: 'exit', evidence: { eventId: 'evt-x', topic: 'terminal.exit', at: new Date().toISOString() } }), { code: 'E_TASK_STATE' })
+
+  // Expiry survives a restart (journaled), then the manual continue starts the step.
+  graph.close()
+  const reopened = await openTaskGraph(graphHarness(await openTaskStore(directory)).options)
+  t.after(() => reopened.close())
+  assert.equal(reopened.getGraph('graph-chain').tasks.find(task => task.taskId === 'wait').gates.find(entry => entry.gateId === 'exit').status, 'expired')
+  assert.ok(reopened.getEvents('graph-chain').some(event => event.type === 'task-gate-expired' && event.gateId === 'exit'))
+  await reopened.satisfyGate({ graphId: 'graph-chain', taskId: 'wait', gateId: 'exit', evidence: { eventId: 'evt-y', topic: 'user.action', at: new Date().toISOString() } })
+  const opened = reopened.getGraph('graph-chain').tasks.find(task => task.taskId === 'wait').gates.find(entry => entry.gateId === 'exit')
+  assert.deepEqual([opened.status, opened.satisfiedBy], ['satisfied', 'user.action'])
+})
+
+test('over HTTP an expired gate stays visible, SSE announces it, and POST /tasks/continue still opens it', async t => {
+  const h = await bridge(t)
+  const boardId = 'board-expiry'
+  const source = await h.call('POST', '/task-sources', { boardId, message: 'Continue once the file arrives.' })
+  const graph = { graphId: 'graph-expiry', requestId: 'request-expiry', runId: 'run-expiry', parentTaskId: null, requestedBy: 'local-user', tasks: [
+    { taskId: 'upload', ownerId: 'agent-ops', sourceRef: source.body.sourceRef, dependsOn: [], approvalRequired: false,
+      gates: [{ gateId: 'arrived', kind: 'file', root: 'root-1', relativeGlob: 'in/*.pdf', timeoutMs: 30 }] },
+  ] }
+  assert.equal((await h.call('POST', '/tasks/submit', { boardId, graph })).status, 201)
+  await h.call('POST', '/tasks/activate', { boardId, scope: graphScope(graph) })
+  await until(async () => taskOf(await h.state('graph-expiry'), 'upload').gates[0].status === 'expired', 'expired gate')
+  const frame = h.frames.find(entry => entry.type === 'task.graph' && entry.change === 'task-gate-expired')
+  assert.equal(frame.graph.tasks[0].gates[0].status, 'expired')
+  assert.equal(frame.graph.tasks[0].status, 'waiting-on-dependency')
+  assert.equal(h.turnStarts.length, 0)
+  const continued = await h.call('POST', '/tasks/continue', { boardId, scope: graphScope(graph), taskId: 'upload', gateId: 'arrived' })
+  assert.equal(continued.status, 200)
+  assert.deepEqual([continued.body.graph.tasks[0].gates[0].status, continued.body.graph.tasks[0].gates[0].satisfiedBy], ['satisfied', 'user.action'])
+  await until(() => h.turnStarts.length === 1, 'continued step')
+})
+
+test('the resume message carries only public condition facts and keeps long instructions intact', () => {
+  const message = composeAwaitResume({
+    graphId: 'graph-plan-1', planId: 'plan-1', planTitle: 'Login & publish <now>', task: { taskId: 'publish', title: 'Publish' },
+    instructions: `Use ]]> safely. ${'<'.repeat(3990)}`,
+    gates: [
+      { gateId: 'task:collect', kind: 'task', taskId: 'collect', status: 'satisfied' },
+      { gateId: 'login', kind: 'oauth', origin: 'https://github.com', pathPrefix: '/login/oauth/callback', status: 'satisfied', satisfiedBy: 'browser.oauthCompleted', satisfiedAt: '2026-10-24T01:00:00.000Z' },
+      { gateId: 'exit', kind: 'terminalExit', sessionId: 'term-1', status: 'satisfied', satisfiedBy: 'user.action', satisfiedAt: '2026-10-24T02:00:00.000Z', expiredAt: '2026-10-24T01:30:00.000Z' },
+      { gateId: 'pending', kind: 'userAction', label: 'token=abc123 ok', status: 'waiting' },
+    ],
+    taskTitles: new Map([['collect', 'Collect']]),
+  })
+  assert.ok(message.length < 20000, 'fits one chat message')
+  assert.match(message, /<await_id>graph-plan-1\/publish<\/await_id>/)
+  assert.match(message, /<plan id="plan-1">Login &amp; publish &lt;now&gt;<\/plan>/)
+  assert.match(message, /Login finished at https:\/\/github\.com\/login\/oauth\/callback at 2026-10-24T01:00:00\.000Z\./)
+  assert.match(message, /Continued by hand instead of waiting for Terminal term-1 to exit \(its wait ran out at 2026-10-24T01:30:00\.000Z\)/)
+  assert.match(message, /<instructions><!\[CDATA\[Use \]\]\]\]><!\[CDATA\[> safely\./)
+  assert.equal(message.includes('pending'), false, 'unmet conditions are not claimed')
+})

@@ -33,6 +33,7 @@ import { buildCodexAppServerLaunch, inspectNativeCapabilities, preflightOwnedApp
 import { createEGDeskFileMount, requireEGDeskNodeRuntime } from './egdesk-file-mount.mjs'
 import { createSystemResourceMonitor } from './system-resource-monitor.mjs'
 import { openWorkflowRuntime } from './egdesk-workflow-runtime.mjs'
+import { createPlanToolProvider } from './egdesk-plan-tool-provider.mjs'
 
 const nodeRuntime = requireEGDeskNodeRuntime()
 
@@ -155,6 +156,9 @@ const nativeReader = new NativeReaderClient({ request: (method, params) => appSe
 const contexts = new ContextRuntime({ store: contextStore, reader: nativeReader, getOwnerKey: () => publicAuthIdentityKey(authState), schemaReady: () => nativeCapabilities.schemaMatch && appServerReady })
 const browserTransport = new BrowserToolTransport({ getOwnerKey: () => publicAuthIdentityKey(authState) })
 const browserProvider = createCodexBrowserToolProvider({ transport: browserTransport, getOwnerKey: () => publicAuthIdentityKey(authState), schemaReady: () => nativeCapabilities.qaReadOnly && appServerReady, fixtureQa: fixtureBrowserQaFromEnv(process.env) })
+// egdesk_propose_plan on ordinary threads: plans wait for approval in the
+// workflow runtime opened below (null until then, so the tool answers unavailable).
+const planProvider = createPlanToolProvider({ plans: () => workflow?.plans ?? null, schemaReady: () => nativeCapabilities.schemaMatch && appServerReady })
 // The Codex models the signed-in account can choose (model/list, hidden ones
 // excluded), read after each ready connection and on every account change;
 // null while unknown or signed out. They fill the Codex engines[] row and
@@ -194,7 +198,7 @@ const engineStatus = createEngineStatusEmitter({
 const chat = new CodexChatRuntime({
   engines: engineRegistry,
   contexts,
-  toolProviders: [browserProvider],
+  toolProviders: [browserProvider, planProvider],
   store: chatStore,
   requireStore: true,
   getOwnerKey: () => publicAuthIdentityKey(authState),

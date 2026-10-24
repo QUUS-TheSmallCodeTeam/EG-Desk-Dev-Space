@@ -11,6 +11,8 @@
  *   terminalExit terminal.exit of the same sessionId (and exitCode if given).
  *   any kind     user.action naming exactly { graphId, taskId, gateId } — the
  *                manual "continue" fallback.
+ * An expired gate (its expiresAt/timeoutMs ran out) no longer opens on its own
+ * event; only that manual user.action continues it.
  */
 export const GATE_TOPICS = Object.freeze(['terminal.exit', 'file.changed', 'browser.oauthCompleted', 'user.action'])
 
@@ -72,6 +74,7 @@ export function createAwaitGateRouter({ graph, bus, owner }) {
   async function route(event) {
     const satisfied = []
     for (const open of graph.openGates()) {
+      if (open.expired === true && event.topic !== 'user.action') continue
       if (!gateMatchesEvent(open.gate, event, open)) continue
       try {
         await graph.satisfyGate({ graphId: open.graphId, taskId: open.taskId, gateId: open.gate.gateId,

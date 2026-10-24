@@ -9,6 +9,7 @@ import { openTaskGraph } from './egdesk-task-graph.mjs'
 import { createTaskHttpHandler, publicGraph } from './egdesk-task-http.mjs'
 import { createNativeTaskAdapter } from './egdesk-task-native.mjs'
 import { nativeHash, nativeTaskError, openNativeTaskLedger } from './egdesk-task-native-store.mjs'
+import { createTaskPlanHttpHandler, createTaskPlanService, openTaskPlanStore } from './egdesk-task-plans.mjs'
 import { createTaskSourceHttpHandler, openTaskSourceRegistry } from './egdesk-task-sources.mjs'
 import { openTaskStore } from './egdesk-task-store.mjs'
 
@@ -24,7 +25,15 @@ const hashed = (prefix, value) => `${prefix}-${createHash('sha256').update(Strin
  *   { type: 'workflow.event', v: 1, event: { seq, id, at, topic, source, summary, payload }, ts }
  *   { type: 'task.graph', v: 1, graphId, change, graph, ts }   graph = GET /tasks/state graph
  *   { type: 'task.native', v: 1, ts }   hint: refetch GET /tasks/state (e.g. a preapproval ID was issued)
- * Routes: /tasks/* (egdesk-task-http.mjs), POST /task-sources, POST /events/browser, GET /events/recent.
+ *   { type: 'task.plan', v: 1, planId, change: 'proposed'|'approved'|'rejected', plan, ts }
+ *     plan = one entry of GET /tasks/plans (no instructions)
+ * A gate whose expiresAt/timeoutMs ran out arrives as task.graph with change 'task-gate-expired';
+ * the gate shows status 'expired' and opens only through POST /tasks/continue.
+ * Routes: /tasks/plans* (egdesk-task-plans.mjs), /tasks/* (egdesk-task-http.mjs),
+ * POST /task-sources, POST /events/browser, GET /events/recent.
+ *
+ * Plan steps that continue in their original conversation (resumeIn 'sameThread')
+ * stay ready while that conversation is busy and start after its turn ends.
  *
  * Task storage failing to open leaves events working; task routes answer 503.
  */
@@ -75,20 +84,55 @@ export async function openWorkflowRuntime({
   let unsubscribeGraph = () => {}
   let handleTasks = null
   let handleSources = null
+  let handlePlans = null
   let tasksError = null
   let sources = null
+  let plans = null
+  let taskChat = null
+  // While a same-thread plan step waits for its conversation, scheduling is
+  // retried on chat turn endings and, as a fallback, once a second.
+  let heldTimer = null
+  let kickQueued = false
+  function holdRetry() {
+    if (heldTimer || !graph) return
+    heldTimer = setTimeout(() => { heldTimer = null; void graph?.reschedule().catch(() => {}) }, 1000)
+    heldTimer.unref?.()
+  }
+  function kick() {
+    if (kickQueued) return
+    kickQueued = true
+    setImmediate(() => {
+      kickQueued = false
+      taskChat?.pump?.()
+      if (heldTimer && graph) void graph.reschedule().catch(() => {})
+    })
+  }
   try {
-    // openStores (tests) may omit sourceDirectory to keep task sources in memory.
+    // openStores (tests) may omit sourceDirectory/planDirectory to keep them in memory.
     const stores = openStores ? await openStores() : {
       store: await openTaskStore(path.join(dataDir, 'task-graph')),
       ledger: await openNativeTaskLedger(path.join(dataDir, 'task-native')),
       sourceDirectory: path.join(dataDir, 'task-sources'),
+      planDirectory: path.join(dataDir, 'task-plans'),
     }
     sources = await openTaskSourceRegistry({ directory: stores.sourceDirectory ?? null, getOwnerKey: ownerKey })
-    adapter = createNativeTaskAdapter({ chat, ledger: stores.ledger, resolveTaskInput: context => sources.resolve(context),
+    const planStore = await openTaskPlanStore({ directory: stores.planDirectory ?? null })
+    taskChat = sameThreadChat(chat, { wanted: body => {
+      try {
+        const attempt = stores.ledger.snapshot().attempts.find(item => item.requestId === body.requestId)
+        if (!attempt || attempt.interruptRequested) return false
+        const graphId = attempt.binding.graphId
+        return !graph?.getGraph(graphId)?.cancelRequested && adapter?.getState(graphId)?.fenced === false
+      } catch { return false }
+    } })
+    adapter = createNativeTaskAdapter({ chat: taskChat, ledger: stores.ledger,
+      resolveTaskInput: context => plans?.resolveTaskInput(context) ?? sources.resolve(context),
       captureScope, assertDelegationCurrent })
     graph = await openTaskGraph({ store: stores.store, maxConcurrency, execute: adapter.execute, interrupt: adapter.interrupt,
-      requestApproval: adapter.requestApproval, verifyReceipt: adapter.verifyReceipt })
+      requestApproval: adapter.requestApproval, verifyReceipt: adapter.verifyReceipt,
+      canStart: context => plans ? plans.canStart(context) : true })
+    plans = createTaskPlanService({ store: planStore, sources, graph, adapter, chat, getOwnerKey: ownerKey,
+      broadcast: frame => broadcast(frame), onBlocked: holdRetry })
     unsubscribeGraph = graph.subscribe(journalEvent => {
       const graphId = journalEvent.graphId ?? journalEvent.graph?.graphId
       if (!graphId) return
@@ -110,12 +154,15 @@ export async function openWorkflowRuntime({
       await bus.flush()
     } })
     handleSources = createTaskSourceHttpHandler({ sources, ensureAuth, port })
+    handlePlans = createTaskPlanHttpHandler({ plans, ensureAuth, port })
   } catch (error) {
     tasksError = publicText(error?.message || 'Local task storage failed to open', 1000)
     unsubscribeGraph()
     unsubscribeGraph = () => {}
     router?.close()
-    graph = null; adapter = null; router = null; handleTasks = null; handleSources = null
+    graph?.close?.()
+    taskChat?.close?.()
+    graph = null; adapter = null; router = null; handleTasks = null; handleSources = null; handlePlans = null; plans = null; taskChat = null
   }
 
   async function handle(req, res, url) {
@@ -127,6 +174,7 @@ export async function openWorkflowRuntime({
       return true
     }
     if (await handleSources(req, res, url)) return true
+    if (await handlePlans(req, res, url)) return true
     return handleTasks(req, res)
   }
 
@@ -135,6 +183,8 @@ export async function openWorkflowRuntime({
     get sources() { return sources },
     get graph() { return graph },
     get adapter() { return adapter },
+    // The plan service egdesk_propose_plan proposes through; null while task storage is unavailable.
+    get plans() { return plans },
     handle,
     observeAuth,
     watchRoot: root => files.watchRoot(root),
@@ -144,6 +194,8 @@ export async function openWorkflowRuntime({
     // Wire to the chat runtime's v2 emit: run.started/run.completed settle task attempts.
     onChatEvent(event) {
       if (!adapter) return null
+      // A turn ending may free a conversation a same-thread plan step waits for.
+      if (['run.completed', 'run.unavailable', 'run.reconciled'].includes(event?.event)) kick()
       try { return adapter.onChatEvent(event).catch(() => ({ matched: false })) } catch { return null }
     },
     snapshot() {
@@ -152,10 +204,55 @@ export async function openWorkflowRuntime({
     },
     async close() {
       router?.close()
+      graph?.close?.()
+      taskChat?.close?.()
+      if (heldTimer) clearTimeout(heldTimer)
+      heldTimer = null
       unsubscribeGraph()
       unsubscribeSse()
       files.close()
       bus.close()
     },
+  }
+}
+
+/**
+ * The chat the task adapter sends through. A send naming an existing
+ * conversation (a same-thread plan step) goes out only while that conversation
+ * is idle: the busy check and the start of chat.send happen in one tick, so the
+ * send takes the conversation's start lock before anyone else can. Otherwise it
+ * waits, and is dropped (never sent) if its task was cancelled meanwhile.
+ */
+function sameThreadChat(chat, { wanted }) {
+  if (!['send', 'interrupt', 'resume', 'snapshot'].every(key => typeof chat?.[key] === 'function')) return chat
+  const waiting = []
+  let timer = null
+  const busy = conversationId => typeof chat.conversationBusy === 'function' && chat.conversationBusy(conversationId)
+  function pump() {
+    for (let index = 0; index < waiting.length;) {
+      const entry = waiting[index]
+      if (busy(entry.body.conversationId)) { index += 1; continue }
+      waiting.splice(index, 1)
+      if (!wanted(entry.body)) { entry.reject(nativeTaskError('TASK_FENCED', 'The task stopped before its conversation was free')); continue }
+      try { entry.resolve(chat.send(entry.body)) } catch (error) { entry.reject(error) }
+    }
+    if (waiting.length && !timer) {
+      timer = setTimeout(() => { timer = null; pump() }, 250)
+      timer.unref?.()
+    }
+  }
+  return {
+    send(body) {
+      const conversationId = body?.conversationId
+      if (typeof conversationId !== 'string' || (!busy(conversationId) && !waiting.some(entry => entry.body.conversationId === conversationId))) {
+        return chat.send(body)
+      }
+      return new Promise((resolve, reject) => { waiting.push({ body, resolve, reject }); pump() })
+    },
+    interrupt: (...args) => chat.interrupt(...args),
+    resume: (...args) => chat.resume(...args),
+    snapshot: (...args) => chat.snapshot(...args),
+    pump,
+    close() { if (timer) clearTimeout(timer); timer = null },
   }
 }
