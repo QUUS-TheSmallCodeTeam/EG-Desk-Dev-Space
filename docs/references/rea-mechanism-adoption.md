@@ -2,10 +2,11 @@
 
 - 작성: 2026-10-24
 - 읽을 사람: 대표님(결정). 이어서 구현 작업자를 배정할 Main 개발자.
-- 상태: 소스 읽기 조사만 끝났다. Firefox·Mac에서 실행해 확인한 항목은 0개다. 이 문서 말고 바뀐 파일은 없다.
+- 상태: 소스 읽기 조사만 끝났다. Firefox·Mac에서 실행해 확인한 항목은 0개다. 이 문서 말고 바뀐 파일은 없다(작성 시점).
+- 대표님 결정(2026-10-24): 6장 결정 1~12 중 10건을 정했다(5·10은 미결정). Mac 조작은 자체 도우미를 Rust로(결정 7·8), 실제 화면 시험은 관찰 전용부터(결정 11).
 - 함께 볼 문서
   - [REA 분석글](computer-use-browser-control-rea.md): 안전 원칙 EG-01~08, 주장 ID(B·T·N·S·P)
-  - [Mac 앱 조작 방식 선택](computer-use-options.md): Q1~Q4. Q1은 (다)로 결정됨, Q2~Q4는 결정 전
+  - [Mac 앱 조작 방식 선택](computer-use-options.md): Q1~Q4. 2026-10-24에 Q1 (다), Q2 관찰 전용부터, Q3 자체 Rust 도우미로 결정됨. Q4는 결정 전
   - 갭 장부 `ideas/confirmed/EGDESK_VISION_GAP_LEDGER.md`: BRW-05~14, CU-01~09, RT-04
   - 계약 `ideas/confirmed/EGDESK_INTERACTION_AND_ORCHESTRATION_CONTRACT.md`: §12, `impl-e24-computer-use`
 - 표기
@@ -158,8 +159,8 @@ OpenAI 코드는 복사하지 않는다. OpenAI 쪽은 REA 주장 ID 수준으�
 
 **전제**
 - macOS 26.6.2, Apple M5 기준이다(computer-use-options §2.1).
-- Q1은 (다)로 결정됐다: Codex 컴퓨터 조작을 켜 두고 표시를 보강한다. Q2(OS 전면 입력 시험)·Q3(장기 방향)은 결정 전이다.
-- 맥1~맥9·맥11은 **EG-Desk 자체 Mac adapter**(computer-use-options의 B안)용이다. Q3이 (가) 단계적 또는 (나) 자체 adapter일 때만 만들 의미가 있다.
+- Q1은 (다)로 결정됐다: Codex 컴퓨터 조작을 켜 두고 표시를 보강한다. Q2는 2026-10-24에 **관찰 전용부터**로 결정됐다: 실제 화면 시험은 앱 목록·창 상태 읽기까지만 하고 OS 입력은 보내지 않는다(결정 11).
+- Q3은 2026-10-24에 **EG-Desk 자체 도우미를 Rust로**로 결정됐다(결정 7·8 (나), RT-04 Rust helper와 합침). cua-driver를 띄우는 안은 채택하지 않고 cua-driver(MIT) Rust 코드는 참고·이식한다(출처 표기). 권한은 별도 도우미 .app만 받는다(결정 9). 그래서 맥1~맥9·맥11(**EG-Desk 자체 Mac adapter**, computer-use-options의 B안)은 만들 대상이다. 아래 4.2와 5.2의 Swift 파일 계획은 Rust 모듈로 바뀐다(5.2 메모).
 - 맥10은 Codex 컴퓨터 조작을 켜 둔 **지금** 쓸 감독 기능이다.
 - macOS 14부터 앱 활성화가 협조적으로 바뀌었다. `activate()`·`yieldActivation(to:)`는 활성화를 보장하지 않고, `activateIgnoringOtherApps`는 deprecated이며 효과가 없다 [공식: Apple 문서 메타데이터].
 - 오픈소스 표기: OCU = open-computer-use, cua = trycua/cua의 cua-driver Rust(`libs/cua-driver/rust/crates/`), Peekaboo, macOS-use. 고정 커밋은 8장에 있다. OCU의 `experiments/LockedUse` 코드는 검증 단계 경로이고 주 실행 경로가 아니다.
@@ -286,6 +287,8 @@ OpenAI 코드는 복사하지 않는다. OpenAI 쪽은 REA 주장 ID 수준으�
 | **자. Mac 화면 연결** | host-activity View, 설정의 권한·앱 승인 행, 중지 3단계 표시, bridge 연결 | surface, `codex-bridge-server.mjs`, `codex-chat-runtime.mjs` | 사·아 이후. 브라우저 묶음이 surface를 놓은 사이 | 소유 fixture | M | 관찰 View와 설정 화면에 Mac 조작 상태·권한이 보인다 |
 | **차. Mac 입력** | 맥2, 맥3, 맥4, 맥6, 맥11, 맥10 자동 중지 토글 | `macos-host-agent/Sources/HostAgent/` 아래 Actions·CursorOverlay·FocusGuard·HumanInputMonitor·Watchdog·EmergencyStop, `egdesk-host-tool-provider.mjs` | 결정 7·10·11·12 + 손쉬운 사용·입력 모니터링 권한 | OS 전면 입력 시험 필수 | XL | 포인터·앞 창을 뺏지 않는 Mac 조작, 손대면 양보, 앱별 중지, 긴급 중지 키 |
 
+> **메모 (2026-10-24, 결정 8 (나))**: 묶음 사·아·차는 Rust로 바뀐다. 표의 Swift package `helper/macos-host-agent/`와 그 아래 `.swift` 모듈(Actions·CursorOverlay·FocusGuard·HumanInputMonitor·Watchdog·EmergencyStop·WindowCapture·ActivityObserver·Permissions·AppLane)은 RT-04 Rust helper(`helper-rust/`) 안의 Rust 모듈로 만든다. 정확한 경로는 착수 때 다시 정한다. 권한을 받는 별도 도우미 .app 번들과 서명은 그대로 필요하다(결정 9). cua-driver(MIT)의 Rust 크레이트(objc2·screencapturekit 사용 예)는 참고·이식 대상이다(출처 표기). 결정 7·8·9가 정해져 사·아는 시작할 수 있다. 아는 관찰 전용이라 결정 11(관찰 전용부터)과 맞는다. 차는 OS 입력을 보내므로 결정 11의 입력 시험 보류가 풀려야 하고, 결정 10은 아직 정하지 않았다.
+
 ### 5.3 진행 순서
 
 1. **지금**: 묶음 가(작업자 1명)와 묶음 나(Main)를 시작한다. 결정이 필요 없다.
@@ -307,53 +310,77 @@ OpenAI 코드는 복사하지 않는다. OpenAI 쪽은 REA 주장 ID 수준으�
 - (가) 별도 '사람처럼 누르기' 도구로만 허용한다 — 지금 안전 클릭은 그대로 두고, Agent가 따로 고를 때만 쓴다
 - (나) 쓰지 않는다
 
+> **결정 (2026-10-24, 대표님): (가).** 별도 '사람처럼 누르기' 도구로만 쓴다. 일반 클릭이 효과 없을 때만, 새로 관찰한 뒤 1회 누르고 착지 가드를 둔다. 키보드 trusted 입력(웹2)은 2단계로 따로 한다(reference-adoption-map D-B4).
+
 **결정 2. '사용자가 직접 눌렀음' 권한을 줄지**
 - 사람 클릭과 키 입력은 페이지에 팝업 열기·다운로드·클립보드 쓰기 같은 권한을 준다.
 - (가) 조작을 허용한 카드에서는 준다
 - (나) 주지 않는다 — 이 권한만 빼는 방법은 **확인 필요**라서, 지금으로서는 웹1·웹2를 쓰지 않는 것과 같다
 
+> **결정 (2026-10-24, 대표님): (가).** 조작을 허용한 카드에는 '사용자가 직접 눌렀음'(user activation)을 준다.
+
 **결정 3. 카드 스크린샷(웹6)의 가림 범위와 허용 조건**
 - 가림 범위: (가) 비밀번호·민감 표시 칸만 / (나) 다른 사이트 iframe(결제·로그인)까지 / (다) 스크린샷을 도입하지 않는다
 - 허용 조건: 관찰 권한만으로 허용할지, 조작 허용 카드에서만 허용할지
+
+> **결정 (2026-10-24, 대표님): 가림은 (나) 비밀번호·민감 표시 칸 + 다른 사이트 iframe.** 허용 조건은 관찰 허용 카드도 포함한다. 읽지 못한 창도 가리고, 가리기에 실패하면 보내지 않는다(reference-adoption-map D-B6).
 
 **결정 4. 다른 사이트 iframe 안 조작(웹5)을 열지**
 - (가) 연다 — 결제·로그인·임베드 편집기 안도 Agent가 조작할 수 있다
 - (나) 열지 않는다 — 지금처럼 '들어갈 수 없는 영역'으로 보고만 한다
 
+> **결정 (2026-10-24, 대표님): (가) 연다.** 범위는 보기와 클릭까지다. 비밀 칸은 어느 경우든 대표님이 직접 한다(reference-adoption-map D-B5).
+
 **결정 5. 표시점 이동 애니메이션(웹7)을 넣을지**
 - 동작마다 최대 약 0.6초가 늘어난다.
 - (가) 넣는다 / (나) 넣지 않는다
+
+> **아직 정하지 않음 (2026-10-24 기준).** 지금 동작을 유지한다: 표시점은 승인 순간 그 자리에 바로 나타난다. 묶음 마는 시작하지 않는다.
 
 **결정 6. '항상 포커스 있음' 위장(웹3 완전판)**
 - 일반 Firefox로는 불가능하고 패치된 Firefox 빌드가 필요하다.
 - (가) 일반 Firefox를 유지하고 부분 대체만 한다 ← 권고
 - (나) 패치 빌드를 검토한다
 
+> **결정 (2026-10-24, 대표님): (가).** 일반 Firefox를 유지하고 부분 대체만 한다.
+
 ### Mac
 
 **결정 7. Mac 조작의 장기 방향 (= computer-use-options Q3)**
 - Mac 묶음 사·아·차는 (가) 단계적 또는 (나) 자체 adapter일 때만 시작할 의미가 있다. (다) Codex 내장만이면 맥10(감독)만 남는다.
+
+> **결정 (2026-10-24, 대표님): EG-Desk 자체 도우미를 Rust로 만든다.** cua-driver를 띄우는 안이 아니라 자체 adapter를 RT-04 Rust helper와 합쳐 만든다. cua-driver(MIT) Rust 코드는 참고·이식한다(출처 표기). (다)가 아니므로 사·아·차는 만들 대상이고, Codex 컴퓨터 조작은 Q1 (다)대로 켜 두므로 맥10(감독)도 쓴다. computer-use-options Q3, reference-adoption-map D-C1과 같은 결정이다.
 
 **결정 8. Mac adapter를 무엇으로 만들지**
 - (가) Swift 'EG-Desk Host Agent.app' ← 권고. 접근성·ScreenCaptureKit을 1급으로 쓰고, 기존 `macos-gesture-helper` Swift package(macOS 14) 경험이 있다
 - (나) RT-04 Rust helper에 통합한다. cua-driver가 objc2·screencapturekit 크레이트로 같은 일을 한 예가 있다
 - 어느 쪽이든 권한 주체가 되려면 .app 번들과 서명이 필요하다.
 
+> **결정 (2026-10-24, 대표님): (나) RT-04 Rust helper에 통합한다.** 묶음 사·아·차의 Swift 계획은 Rust로 바뀐다(5.2 메모). 권한을 받는 .app 번들과 서명은 그대로 필요하다.
+
 **결정 9. Mac 조작 권한을 누구에게 줄지**
 - (가) 별도 Host Agent 앱에만 준다 ← 권고. 권한이 웹 내용과 분리된다
 - (나) EG-Desk(Firefox) 앱 자체에 준다
+
+> **결정 (2026-10-24, 대표님): (가).** Mac 조작 권한은 별도 도우미 .app에만 준다.
 
 **결정 10. Codex 컴퓨터 조작 중 '대표님이 마우스·키보드를 만지면 Codex 자동 중지'를 켤지**
 - 입력 모니터링 권한이 새로 필요하다. Q1 (다)의 '표시만'을 넘는 동작 변경이다.
 - (가) 선택 토글로 넣는다 / (나) 표시만 유지한다
 
+> **아직 정하지 않음 (2026-10-24 기준).** 지금은 표시만 한다(자동 중지 없음).
+
 **결정 11. OS 전면 입력 시험 보류를 풀 범위 (= computer-use-options Q2와 연결)**
 - 다음은 실제 입력 시험 없이는 검증할 수 없다: 접근성·postToPid 입력이 들어가는지, 앞 앱 되돌리기가 되는지, '중지 후 입력 0', 사람 입력 감지.
+
+> **결정 (2026-10-24, 대표님): 관찰 전용부터.** 실제 화면 시험은 앱 목록·창 상태 읽기까지만 하고 OS 입력은 보내지 않는다. 위 네 가지 입력 시험은 아직 하지 않는다. computer-use-options Q2, reference-adoption-map D-C4와 같은 결정이다.
 
 **결정 12. 전역 포인터 경로(HID)를 허용할지**
 - 창 끌기·텍스트 드래그 선택은 앱 대상 입력으로 되지 않는다.
 - (가) 대표님이 화면을 명시적으로 넘긴 경우에만 허용한다 ← 권고
 - (나) 허용하지 않는다 — 그 동작은 Agent가 할 수 없다
+
+> **결정 (2026-10-24, 대표님): (가).** 전역 포인터 경로(HID)는 대표님이 화면을 명시적으로 넘긴 경우에만 허용한다.
 
 ---
 
