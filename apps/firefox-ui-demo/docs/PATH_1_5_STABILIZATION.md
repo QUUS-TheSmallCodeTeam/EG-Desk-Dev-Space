@@ -412,3 +412,69 @@ Observed on Windows / Firefox 158.0 / Node 24.19.0:
   owned bridge without comparing source hashes. Applying this backend requires
   safely restarting the dedicated bridge as well as the EG-Desk Firefox instance;
   no new installation is needed.
+
+## 깨끗한 첫 실행 점검 · 로더 고정 — 2026-10-24 (RT-01·02, 묶음 1-Q 일부)
+
+바뀐 것:
+
+- **설치할 때마다 같은 로더가 깔린다.** `scripts/install.sh`·`scripts/install.bat`은
+  fx-autoconfig를 매번 최신(HEAD)으로 받던 방식을 버리고 커밋 `dfdab56`(2026-07-23,
+  MPL-2.0)만 받는다. Firefox 폴더와 프로필에 복사할 8개 파일(`config.js`,
+  `config-prefs.js`, `chrome/utils` 6개)의 SHA-256이 고정값과 하나라도 다르면 아무것도
+  복사하지 않고 멈춘다. 받을 곳만 `EGDESK_FX_AUTOCONFIG_URL`로 바꿀 수 있고(사내
+  mirror 등), 커밋·해시 확인은 그대로다. 줄바꿈 설정에 흔들리지 않게
+  `core.autocrlf=false`로 받는다.
+- **로더만 확인하는 모드**: `./install.sh --check-loader`, `install.bat --check-loader`.
+  받아서 확인만 하고 끝낸다. Firefox 설치 폴더와 프로필은 바꾸지 않고 관리자 권한도
+  필요 없다.
+- **'새 PC 첫 실행' 점검 명령 하나**: `scripts/verify-clean-profile-boot.mjs`.
+  임시 프로필 → 격리된 bridge → Firefox → Desk가 떴는지 확인 → Firefox 종료 →
+  bridge 종료 → 포트 해제 확인 → 영수증(JSON)을 순서대로 잇는다.
+
+저장소 루트에서:
+
+```sh
+# 실행 계획만 출력 (아무것도 띄우지 않음)
+node apps/firefox-ui-demo/scripts/verify-clean-profile-boot.mjs --plan --fetch-pinned-loader
+# 실제 점검 — 고정 로더를 받아 새 임시 프로필에 넣는다 (Main이 실행)
+node apps/firefox-ui-demo/scripts/verify-clean-profile-boot.mjs --fetch-pinned-loader [--headless] [--firefox-bin <절대 경로>]
+# 단위 시험 — 가짜 프로세스만 쓰고 Firefox·bridge는 띄우지 않음
+node --test apps/firefox-ui-demo/scripts/verify-clean-profile-boot.test.mjs
+```
+
+점검이 보는 것 (영수증 `checks`, 필수만 통과해야 `ok: true`):
+
+| 단계 | 필수 확인 | 기록만 (필수 아님) |
+|---|---|---|
+| 시작 전 | Firefox 실행 파일, Firefox 폴더의 `config.js`·`config-prefs.js`가 있고 고정값과 같음, Firefox MCP·geckodriver 설치본, 포트 39218·39219·2829·6001이 비어 있음, 로더 6개가 고정값과 같음 | — |
+| bridge | `/health` 응답과 저장소 준비, 이 명령이 띄운 프로세스가 응답, 데이터가 임시 프로필 안(`qa-fixtures/backend-data`)에 생김, `/v1/state`가 로그인 안 됨 | app-server 준비 여부 |
+| Firefox | 같은 임시 프로필에 붙음, `browser.xhtml`에 Desk가 뜸, 화면도 로그인 안 됨 | 첫 사용 Browser 상태(headless 회귀와 같은 기준), overlay 콘솔 오류 수 |
+| 종료 | Firefox가 종료 요청으로 스스로 닫힘, bridge가 SIGTERM에 정상 종료(코드 0, Windows는 기록만), 네 포트가 모두 다시 비어 있음 | — |
+
+지키는 것:
+
+- 이 명령이 띄운 프로세스만 멈춘다. 네 포트 중 하나라도 쓰이고 있으면 프로필도
+  만들지 않고 거절하며, 이미 떠 있는 bridge에 붙지 않는다.
+- bridge는 프로필 안의 데이터 폴더·`CODEX_HOME`·내보내기 폴더만 쓴다. 실제 로그인과
+  실제 Desk 기록을 건드리지 않는다. 호출한 셸의 `EGDESK_*`·`CODEX_*`·`OPENAI_*`·
+  `ANTHROPIC_*`·`CLAUDE_*` 값은 넘기지 않는다(실행 파일 위치 `EGDESK_CODEX_BIN`만 예외).
+  영수증에는 넘기지 않은 변수의 이름만 남고, 값과 계정 이메일·ID는 남지 않는다.
+- 종료 순서: Firefox에 종료 요청 → MCP 연결 닫기 → Firefox가 닫혔는지 확인(안 닫히면
+  SIGTERM, 그래도 남으면 그 프로세스 묶음만 SIGKILL) → bridge SIGTERM(같은 방식으로
+  올림) → 포트 해제 확인 → 영수증. Firefox를 먼저 닫아 overlay의 종료 저장이 bridge에
+  닿게 한다. 중간에 Ctrl+C를 누르면 기다림을 멈추고 같은 정리를 한 뒤
+  `interrupted: true`를 남긴다(한 번 더 누르면 띄운 프로세스 묶음을 바로 끝냄).
+- 프로필·증거(영수증, `bridge.log`, `firefox.log`, 받은 로더)는 남긴다.
+  `--remove-profile-on-pass`를 줄 때만 통과한 실행의 프로필을 지운다.
+
+상태:
+
+| 항목 | 상태 | 근거 |
+|---|---|---|
+| `install.sh` 고정 받기·해시 확인 | [런타임] | 로컬 fx-autoconfig 사본(`file://`)으로 `--check-loader` 실행: `dfdab56`, 8개 일치, exit 0. 그 커밋이 없는 저장소는 exit 1로 거절. 알 수 없는 옵션은 exit 2 |
+| `install.bat` | [제안] — 이 Mac에서 실행 불가 | 커밋·해시 값은 단위 시험이 `install.sh`·점검 스크립트와 대조한다. Windows에서 `install.bat --check-loader` 확인 필요 |
+| GitHub에서 커밋 지정 얕은 받기 | 확인 필요 | 로컬 `file://`에서만 확인했다. 서버가 거절하면 전체 기록을 받아 그 커밋으로 가도록 해 두었다 |
+| 점검 스크립트의 로더 받기 | [런타임] | 같은 로컬 사본에서 `dfdab56`·8개 일치. 임시 git 저장소로 다른 커밋·변조된 해시 거절도 시험 |
+| 점검 스크립트 단위 시험 | [런타임] 23/23 | 실행 계획, 영수증 형태, 정리 순서, 포트 거절, 강제 종료, 죽지 않는 프로세스 보고, 중단, 비밀 미복사 |
+| 실제 Firefox·bridge로 점검 실행 | 미실행 | Main이 실행한다 |
+| 이 Mac의 현재 EG-Desk 프로필 로더 | 고정값과 다름 | `egtc3irr.egdesk.default-release/chrome/utils`의 `boot.sys.mjs`·`fs.sys.mjs`가 `dfdab56`과 다르다(2026-04-18 설치본). `~/Applications/Firefox.app`(158.0.1)의 `config.js`·`config-prefs.js`는 같다. 그래서 점검은 `--loader-source`(현재 프로필) 대신 `--fetch-pinned-loader`로 실행한다 |

@@ -9,14 +9,27 @@ echo.
 echo === EG-Desk firefox-ui-demo installer ===
 echo.
 
-REM --- admin check ---
-net session >nul 2>&1
-if errorlevel 1 goto :err_admin
-
 REM --- paths ---
 set "REPO_ROOT=%~dp0.."
 set "OVERLAY_DIR=%REPO_ROOT%\overlay"
 set "TMP_CLONE=%TEMP%\egdesk-fx-autoconfig"
+
+REM --- fx-autoconfig pin (RT-01/02) ---
+REM Fetch one fixed commit and check the 8 copied files by SHA-256 before any
+REM Firefox folder is touched. When changing these values, also change
+REM install.sh and FX_AUTOCONFIG_PIN in scripts\verify-clean-profile-boot.mjs
+REM (verify-clean-profile-boot.test.mjs compares all three).
+REM EGDESK_FX_AUTOCONFIG_URL may point at a mirror; commit and hashes still apply.
+set "FXAC_URL=https://github.com/MrOtherGuy/fx-autoconfig.git"
+if defined EGDESK_FX_AUTOCONFIG_URL set "FXAC_URL=%EGDESK_FX_AUTOCONFIG_URL%"
+set "FXAC_COMMIT=dfdab5684faffc112b76ccb1d8cab7f75da0102c"
+
+if /i "%~1"=="--check-loader" goto :check_loader_only
+if not "%~1"=="" goto :err_usage
+
+REM --- admin check ---
+net session >nul 2>&1
+if errorlevel 1 goto :err_admin
 
 REM --- detect Firefox install (avoid if/else parens bug with x86 path) ---
 set "FF_INSTALL="
@@ -37,15 +50,13 @@ if not defined FF_PROFILE (
 if not defined FF_PROFILE goto :err_noprofile
 echo [info] Firefox profile: !FF_PROFILE!
 
-REM --- git check ---
-where git >nul 2>&1
-if errorlevel 1 goto :err_nogit
-
-REM --- clone ---
-if exist "%TMP_CLONE%" rmdir /s /q "%TMP_CLONE%"
-echo [step] Cloning MrOtherGuy/fx-autoconfig ...
-git clone --depth=1 https://github.com/MrOtherGuy/fx-autoconfig.git "%TMP_CLONE%"
+REM --- fetch the pinned loader and verify it before copying anything ---
+call :fetch_pinned_loader
+if errorlevel 3 goto :err_nogit
+if errorlevel 2 goto :err_integrity
 if errorlevel 1 goto :err_clone
+call :verify_pinned_loader
+if errorlevel 1 goto :err_integrity
 
 REM --- copy bootstrap to Firefox install dir ---
 echo [step] Installing bootstrap into Firefox install dir ...
@@ -79,6 +90,8 @@ if exist "%TMP_CLONE%" rmdir /s /q "%TMP_CLONE%" >nul 2>&1
 echo.
 echo === Install complete ===
 echo.
+echo Loader: fx-autoconfig %FXAC_COMMIT:~0,7% - pinned 2026-07-23, SHA-256 verified
+echo.
 echo Next steps:
 echo   1. about:config - toolkit.legacyUserProfileCustomizations.stylesheets = true
 echo   2. about:support - Clear startup cache... button
@@ -87,6 +100,113 @@ echo.
 echo Uninstall: scripts\uninstall.bat
 endlocal
 exit /b 0
+
+REM ==============================================================
+REM  --check-loader: fetch + verify only. No admin, no Firefox change.
+REM ==============================================================
+:check_loader_only
+call :fetch_pinned_loader
+if errorlevel 3 goto :err_nogit
+if errorlevel 2 goto :err_integrity
+if errorlevel 1 goto :err_clone
+call :verify_pinned_loader
+if errorlevel 1 goto :err_integrity
+if exist "%TMP_CLONE%" rmdir /s /q "%TMP_CLONE%" >nul 2>&1
+echo [ok] Loader check only. Firefox install folder and profiles were not changed.
+endlocal
+exit /b 0
+
+REM ==============================================================
+REM  Subroutines
+REM ==============================================================
+
+REM Fetch exactly FXAC_COMMIT. core.autocrlf=false keeps repository bytes so the
+REM SHA-256 values do not depend on the user's Git for Windows line-ending setting.
+REM exit /b 1 = fetch failed, 2 = HEAD is not the pinned commit, 3 = no git.
+:fetch_pinned_loader
+where git >nul 2>&1
+if errorlevel 1 exit /b 3
+if exist "%TMP_CLONE%" rmdir /s /q "%TMP_CLONE%"
+git -c init.defaultBranch=main init -q "%TMP_CLONE%" >nul 2>&1
+if errorlevel 1 exit /b 1
+git -C "%TMP_CLONE%" config core.autocrlf false
+git -C "%TMP_CLONE%" remote add origin "%FXAC_URL%"
+echo [step] Fetching MrOtherGuy/fx-autoconfig at %FXAC_COMMIT:~0,7% ...
+set "GIT_TERMINAL_PROMPT=0"
+git -C "%TMP_CLONE%" fetch -q --depth=1 origin %FXAC_COMMIT% >nul 2>&1
+if not errorlevel 1 goto :fetch_checkout
+echo [info] Commit fetch not available; fetching full history ...
+git -C "%TMP_CLONE%" fetch -q origin >nul 2>&1
+if errorlevel 1 exit /b 1
+:fetch_checkout
+git -C "%TMP_CLONE%" -c advice.detachedHead=false checkout -q %FXAC_COMMIT% >nul 2>&1
+if errorlevel 1 exit /b 2
+set "FXAC_ACTUAL="
+for /f "delims=" %%C in ('git -C "%TMP_CLONE%" rev-parse HEAD') do set "FXAC_ACTUAL=%%C"
+if /i not "!FXAC_ACTUAL!"=="%FXAC_COMMIT%" exit /b 2
+exit /b 0
+
+:verify_pinned_loader
+call :verify_sha256 "program\config.js" 80dc421264a3ea04275e1724b7b57234f89254e9582a6c17e9a911b65c3aa6d7
+if errorlevel 1 exit /b 1
+call :verify_sha256 "program\defaults\pref\config-prefs.js" 6bfd2ed139d18ff5178e0fc62a3b4058540ddbeba3adc912c0d69edb70c17ece
+if errorlevel 1 exit /b 1
+call :verify_sha256 "profile\chrome\utils\boot.sys.mjs" 1f0b37d765c7b10b963a465a62a420059e334a18b6b48bd8c09059837e676106
+if errorlevel 1 exit /b 1
+call :verify_sha256 "profile\chrome\utils\chrome.manifest" d80557b7bdd46f91f0d249f25f1bf66ed83f8c9e620cd0c9334029e4826924d0
+if errorlevel 1 exit /b 1
+call :verify_sha256 "profile\chrome\utils\fs.sys.mjs" 1d6302c5484dc914e43685740937f1d89908099f835e53f532338822c31b08af
+if errorlevel 1 exit /b 1
+call :verify_sha256 "profile\chrome\utils\module_loader.mjs" e7fca8757159751df080e5cbfcd27b508d98c5cdfd6434ea14247832418d1f63
+if errorlevel 1 exit /b 1
+call :verify_sha256 "profile\chrome\utils\uc_api.sys.mjs" dc7547aecbaac67da94b54e353f8e306a0ca01b2a461e106cc88c63a2e210cac
+if errorlevel 1 exit /b 1
+call :verify_sha256 "profile\chrome\utils\utils.sys.mjs" 3fb7c9799864ee01428722939f324acea1e6065cb63a9298e7bbc59e5adbd96a
+if errorlevel 1 exit /b 1
+REM The utils folder is copied whole, so it must hold only the 6 checked files.
+set "FXAC_COUNT=0"
+for %%F in ("%TMP_CLONE%\profile\chrome\utils\*") do set /a FXAC_COUNT+=1
+if not "!FXAC_COUNT!"=="6" (
+  echo [ERROR] Loader utils folder does not hold exactly the 6 pinned files.
+  exit /b 1
+)
+echo [info] fx-autoconfig %FXAC_COMMIT:~0,7% verified: 8 files match SHA-256
+exit /b 0
+
+REM %1 = path inside the fetched repository, %2 = expected lowercase SHA-256.
+REM certutil prints a heading line, then the hash (spaced on older Windows).
+:verify_sha256
+set "FXAC_FILE=%TMP_CLONE%\%~1"
+if not exist "%FXAC_FILE%" (
+  echo [ERROR] Pinned loader file missing: %~1
+  exit /b 1
+)
+set "FXAC_HASH="
+for /f "skip=1 delims=" %%H in ('certutil -hashfile "%FXAC_FILE%" SHA256') do if not defined FXAC_HASH set "FXAC_HASH=%%H"
+if not defined FXAC_HASH (
+  echo [ERROR] Could not hash %~1 with certutil.
+  exit /b 1
+)
+set "FXAC_HASH=!FXAC_HASH: =!"
+if /i not "!FXAC_HASH!"=="%~2" (
+  echo [ERROR] SHA-256 differs from the pin: %~1
+  echo         got      !FXAC_HASH!
+  echo         expected %~2
+  exit /b 1
+)
+exit /b 0
+
+REM ==============================================================
+REM  Errors
+REM ==============================================================
+
+:err_usage
+echo [ERROR] Unknown option: %~1
+echo Usage:
+echo   install.bat                 install EG-Desk overlay and the pinned fx-autoconfig loader
+echo   install.bat --check-loader  fetch and verify the loader only; Firefox is not changed
+endlocal
+exit /b 9
 
 :err_admin
 echo [ERROR] Administrator privileges required.
@@ -114,7 +234,7 @@ endlocal
 exit /b 5
 
 :err_clone
-echo [ERROR] fx-autoconfig clone failed. Check network.
+echo [ERROR] fx-autoconfig fetch failed. Check network or !FXAC_URL!.
 endlocal
 exit /b 6
 
@@ -122,3 +242,9 @@ exit /b 6
 echo [ERROR] Failed to copy bootstrap files (permission issue?).
 endlocal
 exit /b 7
+
+:err_integrity
+echo [ERROR] fx-autoconfig is not the pinned commit %FXAC_COMMIT% or a file hash differs. Nothing was copied.
+if exist "%TMP_CLONE%" rmdir /s /q "%TMP_CLONE%" >nul 2>&1
+endlocal
+exit /b 8
