@@ -46,6 +46,9 @@ const DOCUMENTED = new Set([
   'stream_event/message_start', 'stream_event/content_block_start', 'stream_event/content_block_delta',
   'stream_event/content_block_stop', 'stream_event/message_delta', 'stream_event/message_stop', 'stream_event/ping',
   'stream_event/text_delta', 'stream_event/input_json_delta', 'stream_event/thinking_delta',
+  // The stdio control channel (claude-engine-permissions.mjs, egdesk-claude-mcp.mjs)
+  // shares stdout; a transport routes these lines there before translating.
+  'control_request', 'control_response', 'control_cancel_request',
 ])
 
 // Built-in file tools → the input field holding the path. MultiEdit is an
@@ -67,6 +70,62 @@ const TERMINAL_REASON_KINDS = new Map([
   ['malformed_tool_use_exhausted', 'model'], ['structured_output_retry_exhausted', 'model'], ['budget_exhausted', 'quota'],
 ])
 const ABORT_REASONS = new Set(['aborted_streaming', 'aborted_tools'])
+// rate_limit_info.rateLimitType → which subscription limit (SUB-14). The first
+// five are the official SDK RateLimitType (claude-agent-sdk-python types.py);
+// seven_day_overage_included is a newer CLI bucket (pattern: pingdotgg/t3code
+// apps/server/src/provider/claudeUsageLimits.ts, MIT). windowMinutes matches
+// the Codex usage rows, so the same '5시간 한도'/'주간 한도' labels apply.
+const RATE_LIMIT_WINDOWS = new Map([
+  ['five_hour', { window: 'fiveHour', windowMinutes: 5 * 60 }],
+  ['seven_day', { window: 'weekly', windowMinutes: 7 * 24 * 60 }],
+  ['seven_day_opus', { window: 'weeklyOpus', windowMinutes: 7 * 24 * 60 }],
+  ['seven_day_sonnet', { window: 'weeklySonnet', windowMinutes: 7 * 24 * 60 }],
+  ['seven_day_overage_included', { window: 'weeklyIncluded', windowMinutes: 7 * 24 * 60 }],
+  ['overage', { window: 'overage', windowMinutes: null }],
+])
+const RATE_LIMIT_STATUSES = new Set(['allowed', 'allowed_warning', 'rejected'])
+/** Public window names in display order. */
+export const CLAUDE_RATE_LIMIT_WINDOWS = Object.freeze([...RATE_LIMIT_WINDOWS.values()].map(entry => entry.window))
+const WINDOW_MINUTES = new Map([...RATE_LIMIT_WINDOWS.values()].map(entry => [entry.window, entry.windowMinutes]))
+
+/** rateLimitType → { window, windowMinutes }; unknown or missing → nulls. */
+export function claudeRateLimitWindow(rateLimitType) {
+  const hit = typeof rateLimitType === 'string' ? RATE_LIMIT_WINDOWS.get(rateLimitType) : undefined
+  return hit ? { ...hit } : { window: null, windowMinutes: null }
+}
+
+/**
+ * Keep one row per limit window from successive egdesk/engine/rateLimit params
+ * so a screen can show "5시간 한도 42% · 주간 한도 10%" together.
+ *   prev: the previous return value or null; now: epoch ms (optional; without
+ *   it rows whose reset time passed are not pruned).
+ * Returns { windows: [{window, windowMinutes, usedPercent, resetsAt, status}],
+ *           rejected: {window, resetsAt} | null, creditsRequired, observedAt }.
+ * Pure; unknown params return prev unchanged.
+ */
+export function applyClaudeRateLimit(prev, params, now = null) {
+  const p = plainObject(params)
+  const at = Number.isFinite(now) && now > 0 ? Math.round(now) : null
+  const base = plainObject(prev) && Array.isArray(prev.windows) ? prev : null
+  if (!p || !RATE_LIMIT_STATUSES.has(p.status)) return base
+  const window = WINDOW_MINUTES.has(p.window) ? p.window : null
+  const resetsAt = Number.isFinite(p.resetsAt) && p.resetsAt > 0 ? p.resetsAt : null
+  const usedPercent = Number.isFinite(p.usedPercent) ? Math.min(100, Math.max(0, p.usedPercent)) : null
+  const elapsed = row => at !== null && row.resetsAt !== null && row.resetsAt <= at
+  let windows = (base?.windows || []).filter(row => row.window !== window && !elapsed(row))
+  if (window) {
+    const old = base?.windows.find(row => row.window === window)
+    windows.push({ window, windowMinutes: WINDOW_MINUTES.get(window), usedPercent: usedPercent ?? old?.usedPercent ?? null, resetsAt: resetsAt ?? (old && !elapsed(old) ? old.resetsAt : null), status: p.status })
+    windows = CLAUDE_RATE_LIMIT_WINDOWS.flatMap(name => windows.filter(row => row.window === name))
+  }
+  const kept = base?.rejected && !elapsed(base.rejected) && base.rejected.window !== window ? base.rejected : null
+  return {
+    windows,
+    rejected: p.status === 'rejected' ? { window, resetsAt } : kept,
+    creditsRequired: p.creditsRequired === true,
+    observedAt: at ?? base?.observedAt ?? null,
+  }
+}
 
 const idText = value => typeof value === 'string' && value.length > 0 && value.length <= 300 ? value : null
 const toolName = value => typeof value === 'string' && /^[A-Za-z0-9][A-Za-z0-9_.:-]{0,127}$/.test(value) ? value : null
@@ -449,13 +508,20 @@ export function createClaudeTranslator({ threadId, turnId = null, egdeskMcpServe
   }
 
   // ── rate_limit_event → extension notification; a rejection colours the turn's failure
+  // window/windowMinutes name the limit ('fiveHour' 300 / 'weekly' 10080 / ...);
+  // utilization is the official 0-1 fraction, usedPercent the same as 0-100.
   function onRateLimit(msg) {
     const info = plainObject(msg.rate_limit_info) || {}
     const classified = classifyClaudeError(msg)
     if (classified) turnFailure = classified
-    if (!['allowed', 'allowed_warning', 'rejected'].includes(info.status)) return skip('rate_limit_event')
+    if (!RATE_LIMIT_STATUSES.has(info.status)) return skip('rate_limit_event')
     const utilization = typeof info.utilization === 'number' && Number.isFinite(info.utilization) ? Math.min(1, Math.max(0, info.utilization)) : null
-    return [n('egdesk/engine/rateLimit', { engineId: 'claude', status: info.status, resetsAt: publicEpochMs(info.resetsAt), utilization, creditsRequired: info.errorCode === 'credits_required' })]
+    return [n('egdesk/engine/rateLimit', {
+      engineId: 'claude', status: info.status, ...claudeRateLimitWindow(info.rateLimitType),
+      resetsAt: publicEpochMs(info.resetsAt), utilization, usedPercent: utilization === null ? null : Math.round(utilization * 1000) / 10,
+      overageStatus: RATE_LIMIT_STATUSES.has(info.overageStatus) ? info.overageStatus : null,
+      creditsRequired: info.errorCode === 'credits_required',
+    })]
   }
 
   // ── result → thread/tokenUsage/updated + turn/completed

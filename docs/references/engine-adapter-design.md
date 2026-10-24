@@ -5,6 +5,7 @@
 - 관련 원장 항목: SUB-06(이 문서), SUB-07~11, SUB-14, AGENT-08 — [EGDESK_VISION_GAP_LEDGER.md](../../ideas/confirmed/EGDESK_VISION_GAP_LEDGER.md)
 - 표기: [공식] 공식 문서·`--help` 문구 · [런타임] 이 Mac에서 직접 관찰 · [제안] 이 문서의 설계 판단(미구현·미검증) · [추정] 근거는 있으나 확인 안 됨
 - 조사 범위: 코드 읽기, 공식 문서, `claude --version`/`--help` 정적 조회, `ps` 관찰. 테스트·Firefox·모델 호출은 하지 않았다.
+- 갱신 2026-10-24(묶음 1-C): §5.3·§9·§10·§12를 공식 Agent SDK 코드에서 확인한 stdio 제어 통로 기준으로 고쳤다. 승인·질문은 `--permission-prompt-tool stdio`, EG-Desk 도구는 'sdk' MCP(포트·Run 토큰 없음), 질문 건너뛰기는 deny가 아니라 allow + 빈 답이다. 부품 3개(`claude-engine-permissions.mjs`, `egdesk-claude-mcp.mjs`, `claude-stream-translate.mjs`의 한도 창 구분)는 만들었고 단위 시험만 통과했다. 실제 `claude` 실행은 D1 결정 전이라 하지 않았다.
 
 ---
 
@@ -184,7 +185,7 @@ Claude 출력 → `kind` 대응:
 | | `invalid_request`, `model_not_found`, `max_output_tokens` | model |
 | | `unknown` | unknown |
 | `assistant.error` [공식] | `rate_limit`, `billing_error` → quota · `overloaded` → network · `max_output_tokens` → model | |
-| `rate_limit_event.rate_limit_info` [공식] | `status:'rejected'` → quota + `retryAt = resetsAt` · `errorCode:'credits_required'` → quota('추가 사용량 필요') · `allowed_warning` → 오류 아님, 사용량 경고 표시 | |
+| `rate_limit_event.rate_limit_info` [공식] | `status:'rejected'` → quota + `retryAt = resetsAt` · `errorCode:'credits_required'` → quota('추가 사용량 필요') · `allowed_warning` → 오류 아님, 사용량 경고 표시 · (2026-10-24) `rateLimitType` → `window`(`fiveHour` 300분 / `weekly`·`weeklyOpus`·`weeklySonnet`·`weeklyIncluded` 10080분 / `overage`)과 `usedPercent`(0~100)를 `egdesk/engine/rateLimit`에 실음, 여러 이벤트는 `applyClaudeRateLimit()`으로 창마다 한 줄 | |
 | `result.subtype` [공식] | `error_max_budget_usd` → quota · `error_max_turns`, `error_max_structured_output_retries` → model · `error_during_execution` → 동반 오류로 판별, 없으면 unknown | |
 | `system/permission_denied`, `result.permission_denials` [공식] | 도구가 허락되지 않아 건너뜀 → permission(활동 카드 표시, Run 실패 아님) | |
 
@@ -232,22 +233,29 @@ Claude 출력 → `kind` 대응:
 
 ### 5.3 승인·질문·EG-Desk 도구
 
-| 내부 기준 요청 | Codex | Claude CLI | Agent SDK |
-|---|---|---|---|
-| `item/commandExecution/requestApproval` | 그대로 | `--permission-prompt-tool mcp__egdesk__approve` [공식 플래그] → EG-Desk MCP 서버에 tool call(`tool_name='Bash'`, input). 입력·응답 형식은 공식 예시가 없음(커뮤니티 자료: 응답은 text 블록 안의 JSON `{"behavior":"allow","updatedInput":…}` / `{"behavior":"deny","message":…}`) | `canUseTool('Bash', input, { toolUseID, requestId, signal, suggestions, decisionReason, agentID })` [공식] |
-| `item/fileChange/requestApproval` | 그대로 | 같은 경로(`Edit`/`Write`) | 같음 |
-| (확장) `item/tool/requestApproval` — 그 밖의 도구 | 없음 | 같은 경로(WebFetch, `mcp__*`, Skill 등) | 같음 |
-| 응답 `{decision: accept\|decline\|cancel}` | 그대로 | allow(+원래 input) / deny(message) | `{behavior:'allow', updatedInput}` / `{behavior:'deny', message, interrupt?}` [공식]. cancel → deny + `interrupt:true` |
-| `item/tool/requestUserInput` | 그대로 | AskUserQuestion이 prompt tool로 오는지 **미확인**. 안 오면 대안: EG-Desk 질문 도구(`mcp__egdesk__ask_user`)를 MCP로 주고 `--disallowedTools AskUserQuestion` [제안] | `canUseTool('AskUserQuestion', {questions:[{question, header(최대 12자), options 2~4개, multiSelect}]})` [공식] |
-| 질문 식별 | `question.id` | — | id가 없고 답의 키가 질문 원문 → `questionId = q<index>`, 원문은 rawLabels처럼 비공개 맵에 둔다 [제안] |
-| 답 | `{answers:{[id]:{answers:[label]}}}` | — | `updatedInput: {questions(원본), answers:{[질문 원문]: label \| labels[] \| 직접 입력}}` [공식] |
-| 건너뛰기 | error -32000 | deny | `{behavior:'deny', message:'User skipped the question'}` |
-| 한도·제약 | 질문 ≤8, 선택지 ≤12 (EG-Desk) | — | 질문 1~4, 선택지 2~4, **하위 Agent 안에서는 불가** [공식] |
-| `item/tool/call`(EG-Desk 도구) → `{success, contentItems}` | dynamicTools | helper가 직접 제공하는 MCP(loopback HTTP, Run 토큰) `tools/call` → 같은 `provider.dispatch` → MCP 결과 [제안] | `mcpServers: { egdesk: createSdkMcpServer({...}) }` 같은 프로세스 안 MCP [공식 API] → 같은 dispatch |
-| `serverRequest/resolved` | Codex 알림 | MCP 요청이 끊기거나 프로세스가 끝날 때 합성 | `canUseTool`의 `signal` abort 시 합성 |
+> **2026-10-24 보강(묶음 1-C) [제안, 근거는 공식 SDK 코드]**: Claude는 공식 Agent SDK와 같은 stdio 제어 통로로 연결한다. SDK는 canUseTool 콜백이 있으면 CLI를 `--permission-prompt-tool stdio`로 띄우고(claude-agent-sdk-python `types.py` `_configure_can_use_tool`, MIT), 대화와 같은 stdin/stdout에 `control_request`/`control_response` 줄을 주고받는다(`_internal/query.py` `_handle_control_request`). 그래서 명령·파일 승인, AskUserQuestion, EG-Desk 도구 호출이 모두 한 파이프로 온다. CLI를 직접 띄우든 SDK를 쓰든 이 통로는 같다. 다만 CLI 공개 문서의 계약이 아니라 SDK 코드가 근거이므로, D1 결정 뒤 실제 실행 1회로 확인한다(§12).
+>
+> 만든 부품(결정 없이 완료, 실행 연결은 2-E): `helper/claude-engine-permissions.mjs`(승인·질문 변환과 보류 기록), `helper/egdesk-claude-mcp.mjs`(EG-Desk 도구 MCP 서버), `helper/claude-stream-translate.mjs`(control 줄은 번역하지 않고 '무시'로 셈). 셋 다 순수 함수이고, 기존 런타임(`CodexChatRuntime`)에 넣어 승인 카드·질문 카드·도구 호출이 그대로 동작하는 것을 단위 시험으로 확인했다.
 
-- **현재 런타임이 받아 주지 않는 것**: `approvals.tool`(일반 도구 승인)과 `multiSelect`. 1차에는 일반 도구 승인을 deny 처리하고 '이 도구 승인은 아직 지원하지 않음'을 Run 카드에 표시한다. 2차에 승인 카드 종류를 늘린다. `multiSelect`는 공개 질문 필드에 `multiSelect`를 더하고 질문 카드(CHAT-12)를 체크박스로 확장한다. 둘 다 화면 변경이라 overlay 담당과 조율해야 한다. [제안]
-- **승인 대기 시간 위험** [추정]: MCP prompt tool 방식은 사용자가 답할 때까지 MCP 요청이 열려 있다. MCP 호출 시간 제한에 걸리면 오래 기다린 승인이 끊길 수 있다. SDK `canUseTool`은 "can stay pending indefinitely"이다 [공식].
+| 내부 기준 요청 | Codex | Claude (stdio 제어 통로, CLI 직접·SDK 공통) |
+|---|---|---|
+| `item/commandExecution/requestApproval` | 그대로 | `control_request {subtype:'can_use_tool', tool_name:'Bash' 또는 'PowerShell', input, tool_use_id, permission_suggestions, title…}` → 같은 요청으로 바꾼다. `itemId = tool_use_id`라서 번역기가 만든 활동 행의 명령이 카드에 붙는다 |
+| `item/fileChange/requestApproval` | 그대로 | 같은 경로(`Edit`·`Write`·`MultiEdit`·`NotebookEdit`). 경로는 번역기의 활동 행에서 온다 |
+| (확장) 그 밖의 도구 승인 | 없음 | 1차는 카드 없이 거절한다(`behavior:'deny'`, interrupt 없음 → Claude는 다른 방법으로 계속). `mcp__egdesk__*`만 여기서 허용하고, 실제 권한은 호출 때 런타임이 검사한다(Codex dynamicTools와 같음) |
+| 응답 `{decision}` | 그대로 | `control_response {subtype:'success', response: PermissionResult}`. accept → `{behavior:'allow', updatedInput: 원래 입력}`(SDK도 원래 입력을 돌려줌), decline → deny, cancel → deny + `interrupt:true`, acceptForSession → allow + `updatedPermissions`(CLI 제안을 `destination:'session'`으로 바꿈. 제안이 없으면 Bash는 1회 허용만 — 'Bash' 전체 규칙은 모든 명령을 허용하므로). 런타임이 오류로 답하면(카드를 못 띄움, run 없음) deny만 하고 중지 여부는 런타임이 정한다 |
+| `item/tool/requestUserInput` | 그대로 | `can_use_tool` + `tool_name:'AskUserQuestion'`. 콜백이 등록되면 SDK가 AskUserQuestion도 이 경로로 보낸다(claude-agent-acp `src/elicitation.ts` 머리 주석, Apache-2.0) |
+| 질문 식별 | `question.id` | id가 없음 → `q<index>`. 질문 원문은 메모리의 보류 기록에만 두고 공개 상태·저장소의 키로 쓰지 않는다 |
+| 답 | `{answers:{[id]:{answers:[label]}}}` | `updatedInput: {...원래 입력, answers:{[질문 원문]: 라벨 또는 직접 입력}}`. 복수 선택은 쉼표로 잇고, 쉼표·따옴표가 든 항목은 JSON 따옴표로 감싼다(claude-agent-acp `applyAskElicitationResponse` 패턴). 답 객체는 prototype 없는 객체라 '__proto__' 같은 질문 문장도 보통 키다 |
+| 건너뛰기 | error -32000 | **allow + 빈 answers**. Claude는 "사용자가 건너뜀"을 읽고 대화가 계속된다(같은 패턴: claude-agent-acp decline, t3code). 이전 계획의 deny는 쓰지 않는다 |
+| 한도·제약 | 질문 ≤8, 선택지 ≤12 (EG-Desk) | Claude: 질문 1~4, 선택지 2~4, 하위 Agent 안에서는 불가 [공식]. 변환은 EG-Desk 한도까지 받는다. 같은 질문 문장이 두 번 오면 답의 키가 겹치므로 거절한다 |
+| `item/tool/call`(EG-Desk 도구) → `{success, contentItems}` | dynamicTools | **'sdk' MCP**: `--mcp-config '{"mcpServers":{"egdesk":{"type":"sdk","name":"egdesk"}}}'`(SDK `subprocess_cli.py`와 같은 모양). CLI가 `control_request {subtype:'mcp_message', server_name:'egdesk', message: JSON-RPC}`로 보낸다. tools/list는 그 스레드의 도구 카탈로그(=Codex에 주는 dynamicTools specs, inputSchema 그대로), tools/call은 `item/tool/call`로 바꿔 `runtime.handleServerRequest`에 넣는다 → 기존 검사(run 바인딩, 실행 정책, Browser 카드 권한, Agent 한도) 뒤 provider.dispatch → 결과를 MCP CallToolResult로. 런타임이 거절하면 `isError` 결과로 Claude에게 알린다 |
+| `serverRequest/resolved` | Codex 알림 | CLI가 `control_cancel_request {request_id}`를 보내면 합성한다. 프로세스가 끝나면 남은 보류 전부 합성한다 |
+
+- **런타임이 아직 받지 않는 것**: `acceptForSession`(런타임 `handleServerRequest`가 선택지를 accept·decline·cancel로 거른다), `multiSelect` 질문 UI, 일반 도구 승인 카드. 변환 부품은 셋 다 준비돼 있다(`offerSessionGrant` 옵션, 질문에 `multiSelect:true` 표시). 런타임 선택지 필터와 화면 버튼은 런타임·화면 담당이 연다. [제안]
+- **런타임 응답 경로**: 런타임의 `respond`는 지금 Codex 어댑터로만 간다(`codex-chat-runtime.mjs` 생성자의 `this.nativeRespond = codex.respond`). 두 부품은 rpcId를 `claude:<threadId>:perm:<n>`·`claude:<threadId>:mcp:<n>`로 만들므로, Claude 연결(2-E)에서 이 접두어로 Claude 어댑터에 돌려보내면 된다. [제안]
+- **승인 대기 시간**: stdio 통로의 승인·질문은 MCP 호출이 아니므로 이전에 걱정한 'MCP 호출 시간 제한에 걸린 승인'은 해당하지 않는다(SDK `canUseTool`은 무기한 대기 가능 [공식]). EG-Desk 도구 호출(tools/call)은 MCP 요청이므로 CLI의 MCP 시간 제한 영향은 받을 수 있다 [추정, §12].
+- **시작·중지 순서**: SDK는 스트리밍 입력 모드에서 먼저 `control_request {subtype:'initialize', hooks:null, …}`를 보낸다(query.py `initialize`). 이 요청에 `systemPromptSnapshot` 필드가 있으므로 §5.1의 `--system-prompt-snapshot` 충돌을 이 값으로 끌 수 있는지 확인한다 [추정]. 중지는 SIGINT 대신 `control_request {subtype:'interrupt'}`(query.py `interrupt`)를 기본으로 한다. 두 요청 모두 `buildControlRequest()`로 만든다. [제안]
+- **hooks·그 밖의 제어 요청**: EG-Desk는 hook 콜백을 등록하지 않는다. `hook_callback`이나 모르는 제어 요청이 오면 SDK처럼 `control_response {subtype:'error'}`로 그 요청만 실패시킨다.
 
 ### 5.4 대응 안 되는 것과 처리
 
@@ -400,8 +408,8 @@ PRAGMA user_version = 2;
 
 추가 규칙 [제안]:
 - **턴이 끝난 뒤 남는 프로세스 막기**: `claude -p`는 턴이 끝나고 stdin이 닫혀도 백그라운드 작업을 기본 최대 10분 기다린다 [공식]. EG-Desk 실행에는 `CLAUDE_CODE_DISABLE_BACKGROUND_TASKS`를 켜거나 `CLAUDE_CODE_PRINT_BG_WAIT_CEILING_MS`를 짧게 준다(변수 이름은 공식 문서에 있음, 정확한 효과는 env-vars 문서로 확인).
-- **EG-Desk 도구는 추가 프로세스 없이 제공**: CLI 경로에서는 helper(39218 포트)가 loopback HTTP MCP 엔드포인트를 Run별 토큰과 함께 열고 `--mcp-config`로 넘긴다. SDK 경로에서는 `createSdkMcpServer`로 같은 프로세스 안에서 제공한다 [공식 API]. 대화마다 stdio MCP 자식을 띄우지 않는다.
-- **사용자 MCP 상속 차단**: `--strict-mcp-config` [공식]로 `--mcp-config`에 준 서버만 쓰게 한다. 사용자 MCP 서버는 대화마다 각자 프로세스로 뜬다. D2와 연결된다.
+- **EG-Desk 도구는 추가 프로세스 없이 제공**: CLI 직접 실행이든 SDK든 'sdk' MCP 서버(`--mcp-config`의 `{"type":"sdk","name":"egdesk"}`)로 대화와 같은 stdin/stdout 파이프에서 제공한다(§5.3, `helper/egdesk-claude-mcp.mjs`). helper 포트를 열지 않고 Run별 토큰도 필요 없다. 대화마다 stdio MCP 자식을 띄우지 않는다. (2026-10-24 갱신: 이전의 loopback HTTP MCP + Run 토큰 계획은 쓰지 않는다 [제안].)
+- **사용자 MCP 상속 차단**: `--strict-mcp-config` [공식]로 `--mcp-config`에 준 서버만 쓰게 한다. 사용자 MCP 서버는 대화마다 각자 프로세스로 뜬다. D2와 연결된다. SDK도 sdk 서버를 넣은 `--mcp-config`와 `--strict-mcp-config`를 함께 붙이므로(`subprocess_cli.py` `_build_command`) 둘을 같이 쓰는 조합은 SDK 설계 안에 있다 [조사: 코드].
 - **Agent SDK의 프로세스 수**: SDK는 helper(Node) 안에서 돌고 `claude` 자식 1개를 띄우므로 CLI 직접 방식과 프로세스 수가 같다. SDK 모듈이 helper 메모리에 더해지는 양은 측정이 필요하다 [추정].
 - **승인 대기 중 메모리**: 승인을 기다리는 대화는 프로세스를 계속 잡고 있다. 나중에 `PreToolUse` hook의 `defer` 결정으로 프로세스를 내렸다가 재개하는 방식을 검토할 수 있다 [공식 기능, 적용은 제안].
 - **측정**: `helper/system-resource-monitor.mjs`에 엔진 프로세스 RSS 합계를 더하고 `engines[].runtime`에 노출한다. idle 시간과 상한은 측정한 뒤 조정한다.
@@ -416,10 +424,10 @@ PRAGMA user_version = 2;
 |---|---|---|---|
 | 어댑터에서 바뀌는 곳 | 전송 모듈(stdin/stdout 줄 처리) | 전송 모듈(`query()`) | 인증만. 전송은 (b) 또는 (b')를 재사용하고 env에 키를 넣는다(SUB-15) |
 | 프로세스 | 대화당 `claude` 1개 | 같음(SDK가 띄움) | 같음 |
-| 승인·질문 | 공식 경로는 `--permission-prompt-tool`(MCP). 입력·응답 형식의 공식 예시가 없고 AskUserQuestion 전달 여부도 미확인. 비공개 stdio 제어 프로토콜도 있다: Claude 데스크톱이 `--permission-prompt-tool=stdio`로 쓰는 것을 관찰했으나 공개 계약은 아님 [런타임] | `canUseTool` 콜백 하나로 승인과 AskUserQuestion을 모두 받는다 [공식] | 전송 방식을 따름 |
+| 승인·질문 | `--permission-prompt-tool stdio` 제어 통로(§5.3). 공식 SDK가 canUseTool을 구현하는 바로 그 통로라 승인과 AskUserQuestion이 함께 온다 [조사: SDK 코드]. Claude 데스크톱도 같은 플래그로 쓴다 [런타임]. CLI 공개 문서의 계약은 아님 | `canUseTool` 콜백 하나로 승인과 AskUserQuestion을 모두 받는다 [공식] (내부적으로 같은 stdio 통로) | 전송 방식을 따름 |
 | 중지 | SIGINT(턴 종료 [공식], 프로세스 생존 미확인) | `interrupt()` [공식] | 전송 방식을 따름 |
 | 턴 중 모델 변경 | 재시작 | `setModel()` [공식] | 전송 방식을 따름 |
-| EG-Desk 도구 | loopback HTTP MCP | 같은 프로세스 안 MCP | 전송 방식을 따름 |
+| EG-Desk 도구 | 'sdk' MCP(같은 파이프의 `mcp_message`) | 같은 프로세스 안 MCP(`createSdkMcpServer`, 내부적으로 같은 `mcp_message`) | 전송 방식을 따름 |
 | 의존성 | 없음(사용자 `claude`) | npm `@anthropic-ai/claude-agent-sdk` 추가. 플랫폼별 바이너리를 optional dependency로 함께 받으므로 `pathToClaudeCodeExecutable`로 사용자 설치본을 지정해야 (b)와 같은 정책 해석이 유지된다 [공식] | — |
 | 버전 | `claude`는 자동 업데이트된다 → 최소 버전 + `system/init.capabilities`로 기능을 확인한다(공식 권고) | SDK 버전이 번들 CLI 버전을 따라간다(공식 예: SDK 0.3.191 ↔ CLI 2.1.191). 사용자 설치본(2.1.300)과 맞지 않으면 프로토콜 차이 위험 [추정] | 같음 |
 | 정책 문구 | "end user signing in to the unmodified Claude Code binary with their own Claude subscription"을 막지 않는다는 문구 [공식]에 가장 가깝다. 개인·내부 사용 해석은 [제안] | 같은 문서에 "Developers … including those using the Agent SDK, should use API key authentication" [공식]이 있다. **구독 + SDK 조합이 문구상 가장 애매하다** | 명확히 허용(종량 과금) |
@@ -433,7 +441,7 @@ PRAGMA user_version = 2;
 - `--permission-mode`를 항상 명시한다. 2.1.302부터 `-p` 기본이 Manual로 바뀐다 [공식]. 이 Mac의 2.1.300 `--help` 선택지는 `acceptEdits·auto·bypassPermissions·manual·dontAsk·plan`이다 [공식 `--help`].
 - 계정 슬롯은 `CLAUDE_CONFIG_DIR`로 나눈다. 디렉터리마다 로그인·Keychain 항목이 따로 있다 [공식](D5).
 
-권고 [제안]: 번역 계층은 SDKMessage 형태를 기준으로 만들고, 전송 모듈은 결정 후 하나만 구현한다. 정책 문구 기준으로는 (b)가 (b')보다 해석 부담이 작고, 구현 편의는 (b')가 크다. (b)를 고르면 승인은 문서화된 `--permission-prompt-tool`(MCP)로 하고, AskUserQuestion이 그 경로로 오지 않으면 EG-Desk 질문 도구로 대체한다.
+권고 [제안]: 번역 계층은 SDKMessage 형태를 기준으로 만들고, 전송 모듈은 결정 후 하나만 구현한다. 정책 문구 기준으로는 (b)가 (b')보다 해석 부담이 작고, 구현 편의는 (b')가 크다. (2026-10-24 갱신) (b)를 골라도 승인·질문·EG-Desk 도구는 SDK와 같은 stdio 제어 통로로 하므로 (b')와 구현 차이는 '줄 읽기·쓰기를 직접 하느냐'뿐이다. 이전 권고(승인은 MCP `--permission-prompt-tool`, 질문은 EG-Desk 질문 도구로 대체)는 쓰지 않는다. MCP prompt tool은 '사용자 상호작용 필요' MCP 도구를 승인하지 못한다는 공식 cli-reference 문구도 근거다(레퍼런스 채택 지도 3.1).
 
 ---
 
@@ -456,9 +464,13 @@ Main 개발자 선에서 정할 것(대표님 결정 불필요): 일반 도구 �
 | 항목 | 상태 | 확인 방법 |
 |---|---|---|
 | CLI stream-json 입력 줄 형식 | [추정] SDKUserMessage 형태 | 실제 실행 1회(결정 후) |
-| `--permission-prompt-tool` 입력·응답 형식 | 공식 예시 없음, 커뮤니티 자료만 | 실제 실행 |
-| AskUserQuestion이 prompt tool로 오는가 | 미확인 | 실제 실행, 안 오면 EG-Desk 질문 도구로 대체 |
-| SIGINT 뒤 stream-json 프로세스 생존 | 미확인 | 실제 실행 |
+| stdio 제어 통로(`can_use_tool`·`mcp_message`·`control_response`) 형식 | (2026-10-24) 공식 SDK 코드로 형식 확인 [조사]. CLI 공개 문서의 계약은 아님. 부품은 fixture 시험만 통과 | D1 뒤 실제 실행 1회. 형식이 다르면 `claude-engine-permissions.mjs`·`egdesk-claude-mcp.mjs`의 변환만 고친다 |
+| AskUserQuestion이 승인 통로로 오는가 | (2026-10-24) stdio 통로에서는 `can_use_tool`로 온다(claude-agent-acp 코드 주석·구현) [조사] | 실제 실행 |
+| 승인 응답에 SDK TS가 덧붙이는 필드(`toolUseID`, `decisionClassification`)가 필요한가 | Python SDK는 보내지 않음 → 부품도 보내지 않음 [조사] | 실제 실행 |
+| tools/call의 `_meta['claudecode/toolUseId']`로 tool_use id가 오는가 | [추정]. 없으면 부품이 자체 callId를 쓴다(기능 영향 없음, 활동 행과 짝만 약해짐) | 실제 실행 |
+| `--allowedTools mcp__egdesk`가 그 서버의 모든 도구에 맞는가 | [추정]. 안 맞아도 `can_use_tool`로 오면 부품이 허용한다 | 실제 실행 |
+| EG-Desk 도구 호출(tools/call)의 CLI 쪽 MCP 시간 제한 | 미확인. 가장 긴 `egdesk_browser_wait`는 10초+여유 | 실제 실행 |
+| SIGINT 뒤 stream-json 프로세스 생존 | 미확인. (2026-10-24) 중지는 `control_request {subtype:'interrupt'}`를 기본으로 하므로 SIGINT는 예비 수단 [제안] | 실제 실행 |
 | `system/init`이 첫 입력 전에 나오는가 | 미확인 | 실제 실행(threadId는 미리 정하므로 설계 영향 작음) |
 | `--system-prompt-snapshot` 기본 on과 Profile 지침 변경 | [공식 `--help`] 충돌 소지 | `off` 지정 시 재개에서 새 지침 반영 확인 |
 | 2.1.302 `-p` 기본 Manual, `--bare` 기본화 예고 | [공식] | 버전 게이트 |
@@ -467,7 +479,7 @@ Main 개발자 선에서 정할 것(대표님 결정 불필요): 일반 도구 �
 | Claude 대화 기록을 엔진에서 다시 받을 공식 경로 | 미확인 → 로컬 기록이 원본 | — |
 | Codex ownerHash 접두어 변경 | 바꾸면 기존 대화 전부 불일치 | Codex는 바꾸지 않음(§6.2) |
 | Context Reader는 Codex 전용 | 사실 | Claude만 쓰는 시나리오에서 빠지는 기능 표시 |
-| MCP 승인 대기 시간 제한 | [추정] | 실제 실행 |
+| MCP 승인 대기 시간 제한 | (2026-10-24) 승인은 stdio 통로라 해당 없음. EG-Desk 도구 호출만 위 행 | — |
 | 다른 작업자와 파일 충돌 | 진행 중 | 2단계 이후는 그 커밋 뒤에 시작 |
 
 ---
@@ -483,6 +495,11 @@ Main 개발자 선에서 정할 것(대표님 결정 불필요): 일반 도구 �
 - Legal and compliance(서드파티 claude.ai 로그인 금지, 무수정 바이너리, Agent SDK 개발자는 API 키, 이름·로고): https://code.claude.com/docs/en/legal-and-compliance
 - `--permission-prompt-tool` 응답 형식(커뮤니티, 비공식): https://github.com/anthropics/claude-code/issues/1175 , https://github.com/UnknownJoe796/claude-code-mcp-permission
 - 원장이 인용한 정책·한도 자료(재확인 안 함): code.claude.com/docs/en/agent-sdk/overview, support.claude.com/en/articles/15036540, docs.aside.com/help/ai
+
+레퍼런스 코드(2026-10-24 갱신 때 읽음, 패턴만 따름):
+- anthropics/claude-agent-sdk-python (MIT, 2026-10-24 push): `src/claude_agent_sdk/_internal/query.py`(`initialize`, `_read_messages`의 control 분기, `_handle_control_request`의 can_use_tool·mcp_message, `interrupt`·`set_model`), `_internal/sdk_mcp_bridge.py`(재초기화·ping·미지원 메서드), `_internal/transport/subprocess_cli.py`(`_build_command`: `--permission-prompt-tool`, sdk 서버를 넣은 `--mcp-config`, `--strict-mcp-config`), `types.py`(`_configure_can_use_tool` → `"stdio"`, `SDKControlPermissionRequest`, `PermissionUpdate` destination, `RateLimitType`)
+- agentclientprotocol/claude-agent-acp (Apache-2.0): `src/elicitation.ts`(`applyAskElicitationResponse`: 건너뛰기 = 빈 answers, 복수 선택 이음), `src/permissions/normalization.ts`·`effects.ts`(제안 검증, allow/deny 모양), `src/acp-agent.ts` `handleAskUserQuestion`
+- pingdotgg/t3code (MIT): `apps/server/src/orchestration-v2/Adapters/ClaudeAdapterV2.ts` `permissionResultFromDecision`·`toSessionPermissionUpdates`, `apps/server/src/provider/claudeUsageLimits.ts`(rateLimitType → 5시간/주간 창)
 
 로컬:
 - `claude --version` → `2.1.300 (Claude Code)`, `claude --help`, `claude auth --help`, `claude auth status --help`(정적 조회) [런타임]

@@ -1,6 +1,6 @@
 import test from 'node:test'
 import assert from 'node:assert/strict'
-import { CLAUDE_TRANSLATE_LIMITS, createClaudeTranslator, splitMcpToolName } from './claude-stream-translate.mjs'
+import { CLAUDE_RATE_LIMIT_WINDOWS, CLAUDE_TRANSLATE_LIMITS, applyClaudeRateLimit, claudeRateLimitWindow, createClaudeTranslator, splitMcpToolName } from './claude-stream-translate.mjs'
 import { classifyClaudeError } from './engine-adapter.mjs'
 import { publicError, publicText } from './codex-chat-values.mjs'
 import { CodexChatRuntime } from './codex-chat-runtime.mjs'
@@ -287,7 +287,7 @@ test('result becomes turn/completed with completed, failed (classified) or inter
   const rejected = translator()
   const resetsAt = 1_800_000_000
   const rejectedEvents = feed(rejected, [{ type: 'rate_limit_event', ...meta(), rate_limit_info: { status: 'rejected', resetsAt, utilization: 1 } }, result('error_during_execution')])
-  assert.deepEqual(rejectedEvents[0], { method: 'egdesk/engine/rateLimit', params: { threadId: THREAD, turnId: TURN, engineId: 'claude', status: 'rejected', resetsAt: resetsAt * 1000, utilization: 1, creditsRequired: false } })
+  assert.deepEqual(rejectedEvents[0], { method: 'egdesk/engine/rateLimit', params: { threadId: THREAD, turnId: TURN, engineId: 'claude', status: 'rejected', window: null, windowMinutes: null, resetsAt: resetsAt * 1000, utilization: 1, usedPercent: 100, overageStatus: null, creditsRequired: false } })
   assert.deepEqual([last(rejectedEvents).params.turn.error.kind, last(rejectedEvents).params.turn.error.retryAt], ['quota', resetsAt * 1000])
 
   const auth = last(feed(translator(), [result('success', { is_error: true, api_error_status: 401, result: 'Invalid API key RESULT_TEXT_SENTINEL' })]))
@@ -362,7 +362,8 @@ test('unknown, malformed and untranslated input is ignored and counted, never tu
   assert.deepEqual([oddEvents[0].params.turn.status, oddEvents[0].params.turn.error.kind], ['failed', 'unknown'])
   const stats = t.stats()
   assert.deepEqual([stats.invalidJson, stats.notMessage, stats.blank, stats.translateErrors], [1, 3, 2, 0])
-  assert.equal(stats.unrecognized.control_request, 1)
+  // Control lines belong to the stdio control channel (claude-engine-permissions.mjs); counted as ignored, not drift.
+  assert.equal(stats.ignored.control_request, 1)
   assert.equal(stats.unrecognized['system/brand_new_thing'], 1)
   assert.equal(stats.ignored['system/compact_boundary'], 1)
   assert.equal(stats.ignored.tool_progress, 1)
@@ -479,4 +480,51 @@ test('the existing runtime shows a translated retry and a classified Claude fail
   assert.deepEqual([seen[0].kind, seen[0].code], ['quota', 'TURN_ERROR'])
   const state = chat.snapshot().runs[0]
   assert.deepEqual([state.status, state.error.kind, state.error.code, state.error.message], ['failed', 'quota', 'TURN_FAILED', 'Claude could not finish the turn (error_max_budget_usd)'])
+})
+
+// SUB-14: which limit. rateLimitType values are the official SDK RateLimitType
+// (claude-agent-sdk-python types.py); seven_day_overage_included follows t3code
+// claudeUsageLimits.ts. utilization is a 0-1 fraction, resetsAt Unix seconds.
+test('rate limit events name the 5-hour or weekly window with a 0-100 percentage', () => {
+  const resetsAt = 1_800_000_000
+  const event = info => feed(translator(), [{ type: 'rate_limit_event', ...meta(), rate_limit_info: info }])[0].params
+  const five = event({ status: 'allowed_warning', resetsAt, rateLimitType: 'five_hour', utilization: 0.425, overageStatus: 'allowed', isUsingOverage: false })
+  assert.deepEqual(five, { threadId: THREAD, turnId: TURN, engineId: 'claude', status: 'allowed_warning', window: 'fiveHour', windowMinutes: 300, resetsAt: resetsAt * 1000, utilization: 0.425, usedPercent: 42.5, overageStatus: 'allowed', creditsRequired: false })
+  assert.deepEqual([event({ status: 'allowed', rateLimitType: 'seven_day', utilization: 0.07 })].map(p => [p.window, p.windowMinutes, p.usedPercent]), [['weekly', 10080, 7]])
+  assert.deepEqual(['seven_day_opus', 'seven_day_sonnet', 'seven_day_overage_included', 'overage', 'brand_new_window', undefined].map(type => event({ status: 'allowed', rateLimitType: type }).window),
+    ['weeklyOpus', 'weeklySonnet', 'weeklyIncluded', 'overage', null, null])
+  const odd = event({ status: 'rejected', rateLimitType: { five_hour: true }, utilization: 7, overageStatus: 'maybe' })
+  assert.deepEqual([odd.window, odd.utilization, odd.usedPercent, odd.overageStatus], [null, 1, 100, null])
+  assert.equal(event({ status: 'allowed', rateLimitType: 'five_hour' }).usedPercent, null, 'unreported usage is never shown as 0%')
+  assert.deepEqual(CLAUDE_RATE_LIMIT_WINDOWS, ['fiveHour', 'weekly', 'weeklyOpus', 'weeklySonnet', 'weeklyIncluded', 'overage'])
+  assert.deepEqual(claudeRateLimitWindow('five_hour'), { window: 'fiveHour', windowMinutes: 300 })
+  assert.deepEqual(claudeRateLimitWindow('toString'), { window: null, windowMinutes: null })
+})
+
+test('applyClaudeRateLimit keeps one row per window and clears a rejection when that window recovers', () => {
+  const t = translator()
+  const params = info => t.translate({ type: 'rate_limit_event', ...meta(), rate_limit_info: info })[0].params
+  const now = 1_700_000_000_000
+  const fiveReset = 1_700_003_600, weekReset = 1_700_400_000
+  let state = applyClaudeRateLimit(null, params({ status: 'allowed', rateLimitType: 'seven_day', utilization: 0.1, resetsAt: weekReset }), now)
+  state = applyClaudeRateLimit(state, params({ status: 'rejected', rateLimitType: 'five_hour', utilization: 1, resetsAt: fiveReset }), now)
+  assert.deepEqual(state, {
+    windows: [
+      { window: 'fiveHour', windowMinutes: 300, usedPercent: 100, resetsAt: fiveReset * 1000, status: 'rejected' },
+      { window: 'weekly', windowMinutes: 10080, usedPercent: 10, resetsAt: weekReset * 1000, status: 'allowed' },
+    ],
+    rejected: { window: 'fiveHour', resetsAt: fiveReset * 1000 }, creditsRequired: false, observedAt: now,
+  })
+  // A weekly update keeps the 5-hour rejection; a later 5-hour 'allowed' clears it.
+  state = applyClaudeRateLimit(state, params({ status: 'allowed_warning', rateLimitType: 'seven_day', utilization: 0.8 }), now + 1)
+  assert.deepEqual([state.rejected?.window, state.windows.find(row => row.window === 'weekly').usedPercent, state.windows.find(row => row.window === 'weekly').resetsAt], ['fiveHour', 80, weekReset * 1000])
+  state = applyClaudeRateLimit(state, params({ status: 'allowed', rateLimitType: 'five_hour', utilization: 0.05, resetsAt: weekReset + 18000 }), now + 2)
+  assert.equal(state.rejected, null)
+  // Rows whose reset time passed drop out; unknown params leave the state as it was.
+  const later = applyClaudeRateLimit(state, params({ status: 'allowed', rateLimitType: 'overage' }), weekReset * 1000 + 1)
+  assert.deepEqual(later.windows.map(row => row.window), ['fiveHour', 'overage'])
+  assert.equal(applyClaudeRateLimit(state, { status: 'bogus' }, now), state)
+  assert.equal(applyClaudeRateLimit(null, null), null)
+  const credits = applyClaudeRateLimit(null, params({ status: 'rejected', errorCode: 'credits_required' }))
+  assert.deepEqual(credits, { windows: [], rejected: { window: null, resetsAt: null }, creditsRequired: true, observedAt: null })
 })
