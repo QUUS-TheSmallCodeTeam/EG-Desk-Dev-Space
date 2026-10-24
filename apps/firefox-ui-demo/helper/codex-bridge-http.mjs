@@ -64,9 +64,20 @@ const historyId = (value, name) => {
   return value
 }
 
+// POST routes → runtime method. 2-R additions:
+//   /chat/board/send       → sendBoard (D-M2: @mentioned members or the Lead answer; 202)
+//   /chat/share            → shareMessages (D-M3: copies into another conversation; 200)
+//   /chat/subagent/reassign → reassignSubAgent (D-M1: a blocked sub-Agent's task to its parent; 202)
+const CHAT_ACTIONS = Object.freeze({
+  '/chat/send': 'send', '/chat/resume': 'resume', '/chat/interrupt': 'interrupt', '/chat/approval': 'replyApproval',
+  '/chat/user-input': 'replyUserInput', '/chat/fork': 'fork',
+  '/chat/board/send': 'sendBoard', '/chat/share': 'shareMessages', '/chat/subagent/reassign': 'reassignSubAgent',
+})
+const SENDS = new Set(['/chat/send', '/chat/board/send'])
+
 export function createChatHttpHandler(chat, ensureAuth, history = chat) {
   return async (req, res, url) => {
-    const routes = new Set(['/chat/send', '/chat/resume', '/chat/interrupt', '/chat/approval', '/chat/user-input', '/chat/fork'])
+    const routes = new Set(Object.keys(CHAT_ACTIONS))
     if ((req.method === 'GET' && ['/chat/history/threads', '/chat/history'].includes(url.pathname)) ||
         (req.method === 'POST' && url.pathname === '/chat/history/import')) {
       try {
@@ -128,25 +139,27 @@ export function createChatHttpHandler(chat, ensureAuth, history = chat) {
     if (req.method !== 'POST' || !routes.has(url.pathname)) return false
     let body = {}
     try {
-      body = await readJsonBody(req, { maxBytes: url.pathname === '/chat/send' ? 2 * 1024 * 1024 : 65536 })
+      body = await readJsonBody(req, { maxBytes: SENDS.has(url.pathname) ? 2 * 1024 * 1024 : 65536 })
       // Reject explicit invalid context before even the authentication RPCs.
-      if (url.pathname === '/chat/send') validateChatCwd(body)
+      if (SENDS.has(url.pathname)) validateChatCwd(body)
       // Existing correlated stop/denial is fail-safe even if account lookup is
       // unavailable. Runtime methods still verify connection, turn and callback.
       const isSafetyResponse = url.pathname === '/chat/interrupt'
         || (url.pathname === '/chat/approval' && ['decline', 'cancel'].includes(body.decision))
         || (url.pathname === '/chat/user-input' && body.action === 'skip')
       if (!isSafetyResponse) await ensureAuth(body)
-      const action = { '/chat/send': 'send', '/chat/resume': 'resume', '/chat/interrupt': 'interrupt', '/chat/approval': 'replyApproval', '/chat/user-input': 'replyUserInput', '/chat/fork': 'fork' }[url.pathname]
+      const action = CHAT_ACTIONS[url.pathname]
+      if (typeof chat[action] !== 'function') throw Object.assign(new Error('This bridge does not offer that chat action'), { code: 'CHAT_ACTION_UNAVAILABLE', httpStatus: 501 })
       const result = await chat[action](body)
       // A new branch is created (201); a retried one answers with it (200).
-      sendJson(res, url.pathname === '/chat/send' ? 202 : url.pathname === '/chat/fork' && !result?.duplicate ? 201 : 200, result)
+      sendJson(res, SENDS.has(url.pathname) || url.pathname === '/chat/subagent/reassign' ? 202 : url.pathname === '/chat/fork' && !result?.duplicate ? 201 : 200, result)
     } catch (error) {
       sendJson(res, error.httpStatus || 500, {
         accepted: false,
         conversationId: typeof error.conversationId === 'string' ? error.conversationId : (typeof body.conversationId === 'string' ? body.conversationId : ''),
         requestId: typeof error.requestId === 'string' ? error.requestId : (typeof body.requestId === 'string' ? body.requestId : null),
         ...(typeof error.resumeRequired === 'boolean' ? { resumeRequired: error.resumeRequired } : {}),
+        ...(typeof error.stopRequired === 'boolean' ? { stopRequired: error.stopRequired } : {}),
         ...(typeof error.saved === 'boolean' ? { saved: error.saved } : {}),
         ...(typeof error.durable === 'boolean' ? { durable: error.durable } : {}),
         ...(typeof error.dispatchStatus === 'string' ? { dispatchStatus: error.dispatchStatus } : {}),

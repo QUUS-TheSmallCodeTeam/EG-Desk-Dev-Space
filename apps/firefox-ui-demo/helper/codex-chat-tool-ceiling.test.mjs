@@ -9,7 +9,7 @@ import { openChatStore } from './egdesk-chat-store.mjs'
 import {
   TOOL_CEILING_AXES, composeDeveloperInstructions, diffProfileBodies, normalizeProfileBody, normalizeToolCeiling, openProfileStore, profileHash,
 } from './egdesk-profile-store.mjs'
-import { CEILING_MESSAGES, ceilingApprovalRefusal, effectiveToolCeiling, mergeCeilingOverrides } from './codex-chat-tool-ceiling.mjs'
+import { CEILING_MESSAGES, ceilingAllowsComputerTool, ceilingApprovalRefusal, computerRefusal, effectiveToolCeiling, mergeCeilingOverrides } from './codex-chat-tool-ceiling.mjs'
 import { verifyQaMcpIsolation } from './codex-chat-execution-policy.mjs'
 import { createPrivateQaTempDirectory } from '../scripts/egdesk-qa-platform.mjs'
 
@@ -650,4 +650,15 @@ test('verifyQaMcpIsolation checks shell_tool only when asked and records uncheck
   const absent = async () => { throw Object.assign(new Error('Invalid request: unknown variant `experimentalFeature/list`'), { code: -32600 }) }
   assert.deepEqual(await verifyQaMcpIsolation(reply(absent), 't-1', receipt, { shellOff: true }),
     { ...receipt, externalMcpCatalog: 'empty', inspectedMcpServers: 1, nativeComputerFeatures: 'unchecked', nativeShellTool: 'unchecked' })
+})
+
+test('CU-03: EG-Desk computer tools follow the browser axis — watching keeps only the tools that read', () => {
+  for (const method of ['capture', 'list_apps', 'list_windows', 'click', 'type_text', 'drag', 'unknown_tool']) {
+    assert.equal(ceilingAllowsComputerTool(null, method), true)
+    assert.equal(ceilingAllowsComputerTool({ browser: 'interact' }, method), true)
+    assert.equal(ceilingAllowsComputerTool({ browser: 'none' }, method), false)
+  }
+  assert.deepEqual(['capture', 'list_apps', 'list_windows', 'click', 'type_text', 'key', 'scroll', 'drag', ''].filter(method => ceilingAllowsComputerTool({ browser: 'observe' }, method)), ['capture', 'list_apps', 'list_windows'])
+  assert.deepEqual(computerRefusal({ browser: 'observe' }), { axis: 'browser', title: CEILING_MESSAGES.computerObserve })
+  assert.deepEqual(computerRefusal({ browser: 'none' }), { axis: 'browser', title: CEILING_MESSAGES.computerNone })
 })

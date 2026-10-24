@@ -3,6 +3,7 @@ import {
   NATIVE_COMPUTER_FEATURES, disabledNativeMcpConfig, featuresNotOff, listNativeMcpServers, readNativeDirectMcpServerIds, readNativeThreadFeatures,
 } from './codex-chat-execution-policy.mjs'
 import { nativeMcpServerKind } from './codex-inherited-mcp.mjs'
+import { classifyHostTool } from './egdesk-host-lease.mjs'
 import { normalizeToolCeiling } from './egdesk-profile-store.mjs'
 
 // AGENT-04: a saved Agent profile's tool ceiling, enforced on the Codex
@@ -26,6 +27,8 @@ export const CEILING_MESSAGES = Object.freeze({
   network: '이 Agent는 인터넷 연결이 허용되지 않습니다',
   browserExternalInherited: '직접 연결한 외부 브라우저·컴퓨터 조작 도구(MCP)는 이 Agent에서도 쓸 수 있습니다. 막으려면 외부 도구(MCP)도 끄세요',
   nativeCheckUnavailable: '이 Codex 버전은 기능 상태를 알려 주지 않아, 브라우저·터미널 기능이 꺼졌는지는 확인하지 못했습니다',
+  computerNone: '이 Agent는 컴퓨터 조작이 허용되지 않습니다',
+  computerObserve: '이 Agent는 컴퓨터 화면을 보기만 할 수 있습니다',
 })
 
 /**
@@ -58,6 +61,23 @@ export function ceilingAllowsBrowserTool(ceiling, tool) {
 /** The message for a refused Browser tool call. */
 export function browserRefusal(ceiling) {
   return { axis: 'browser', title: ceiling.browser === 'none' ? CEILING_MESSAGES.browserNone : CEILING_MESSAGES.browserObserve }
+}
+
+/**
+ * EG-Desk's own computer tools (CU-03) follow the browser axis, the same axis
+ * that already turns Codex's built-in computer switches off: 'interact' (or
+ * no ceiling) allows every method, 'observe' only methods that do not touch
+ * the desktop (classifyHostTool 'other': capture, list_apps, list_windows),
+ * 'none' none. method is the tool name without its egdesk_computer_ prefix.
+ */
+export function ceilingAllowsComputerTool(ceiling, method) {
+  if (!ceiling || ceiling.browser === 'interact') return true
+  return ceiling.browser === 'observe' && classifyHostTool(method) === 'other'
+}
+
+/** The message for a refused computer tool call or computer permission question. */
+export function computerRefusal(ceiling) {
+  return { axis: 'browser', title: ceiling?.browser === 'observe' ? CEILING_MESSAGES.computerObserve : CEILING_MESSAGES.computerNone }
 }
 
 /**

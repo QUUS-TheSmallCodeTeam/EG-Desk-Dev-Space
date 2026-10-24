@@ -4,7 +4,9 @@ import { mkdtemp, writeFile, chmod, symlink, rm, realpath, mkdir, readdir, readF
 import os from 'node:os'
 import path from 'node:path'
 import { createHash } from 'node:crypto'
-import { CodexChatRuntime } from './codex-chat-runtime.mjs'
+import { CodexChatRuntime, COMPUTER_ELICITATION_TIMEOUT_MS, COMPUTER_PROVIDER_ID, boardContextBlock, boardMemberThreadId, boardMembers, boardMentions, boardRecipients, computerElicitationRequest } from './codex-chat-runtime.mjs'
+import { createHostLease } from './egdesk-host-lease.mjs'
+import { createComputerAdapter, createFakeComputerProvider } from './egdesk-computer-adapter.mjs'
 import { createCodexBrowserToolProvider } from './codex-browser-tool-provider.mjs'
 import { ContextRuntime } from './egdesk-context-runtime.mjs'
 import { inspectNativeCapabilities } from './egdesk-native-capabilities.mjs'
@@ -2572,6 +2574,427 @@ test('real SQLite store keeps Agent questions and child rows durable without ans
     assert.equal(recovered.status, 'unknown')
     assert.deepEqual(recovered.pendingUserInputs, [])
     assert.deepEqual(recovered.subAgents.map(child => child.state), ['unknown', 'unknown'])
+  } finally {
+    try { store?.close() } catch {}
+    await rm(dataDir, { recursive: true, force: true })
+  }
+})
+
+// ── 2-R: computer permission card (D-C3), computer tools and host lease
+// (CU-02·03), room Agent (CHAT-01), Board members (D-M2), sub-Agent hand-back
+// (D-M1) and shared messages (D-M3) ──
+
+function r2Harness(override = {}) {
+  const calls = [], events = [], replies = [], timers = []
+  let turnCount = 0, threadCount = 0
+  const defaults = async (method, params) => {
+    if (method === 'thread/start') return { thread: { id: `thread-${++threadCount}` }, cwd: '/work', model: 'configured-model' }
+    if (method === 'thread/resume') return { thread: { id: params.threadId, turns: [] }, cwd: '/work' }
+    if (method === 'thread/unsubscribe') return { status: 'unsubscribed' }
+    if (method === 'config/read') return { config: { developer_instructions: null } }
+    if (method === 'turn/start') return { turn: { id: `turn-${++turnCount}`, status: 'inProgress', items: [] } }
+    if (method === 'turn/interrupt') return {}
+    throw new Error(`Unexpected method: ${method}`)
+  }
+  const chat = new CodexChatRuntime({
+    request: async (method, params) => { calls.push({ method, params }); return (override.request || defaults)(method, params, defaults) },
+    respond: (...args) => replies.push(args), emit: event => events.push(event),
+    toolProviders: override.toolProviders, hostLease: override.hostLease, mcpServerKind: override.mcpServerKind,
+    store: override.store, requireStore: Boolean(override.store),
+    getOwnerKey: override.getOwnerKey || (() => 'codex:chatgpt:r2-account'),
+    profiles: override.profiles,
+    setTimer: (fn, ms) => { const timer = { fn, ms, cleared: false }; timers.push(timer); return timer },
+    clearTimer: timer => { timer.cleared = true },
+    verifyFile: async () => null,
+  })
+  chat.setConnection(true)
+  const notify = (method, params) => chat.handleNotification({ method, params })
+  const ask = (method, params, id) => chat.handleServerRequest({ id, method, params })
+  const item = (run, value, completed = true) => notify(completed ? 'item/completed' : 'item/started', { threadId: run.conversationId, turnId: run.runId, item: value })
+  const finish = (run, status = 'completed') => notify('turn/completed', { threadId: run.conversationId, turn: { id: run.runId, status, items: [] } })
+  const tick = async () => { for (let index = 0; index < 5; index++) await new Promise(resolve => setImmediate(resolve)) }
+  return { chat, calls, events, replies, timers, notify, ask, item, finish, tick }
+}
+
+const r2Profiles = () => ({ runProfile: (profileId, revision) => ({ binding: { profileId, revision: revision ?? 1, hash: `hash-${profileId}` }, developerInstructions: `You are ${profileId}`, toolCeiling: null, model: null }) })
+const elicitation = (run, extra = {}) => ({ serverName: 'cua_repl', threadId: run.conversationId, turnId: run.runId, mode: 'form', message: 'Allow ChatGPT to use TextEdit?', requestedSchema: { type: 'object', properties: {} }, ...extra })
+
+test('D-C3: a computer server asking to use an app becomes a one-time permission card that only the person answers', async () => {
+  const h = r2Harness()
+  const run = await h.chat.send({ message: 'TextEdit에 메모 써 줘', requestId: 'cu-1' })
+  const before = h.replies.length
+  await h.ask('mcpServer/elicitation/request', elicitation(run, {
+    _meta: { persist: ['session', 'always'] },
+    requestedSchema: { type: 'object', required: ['decision'], properties: {
+      decision: { type: 'string', enum: ['allow_once', 'allow_session', 'always_allow', 'deny'], enumNames: ['Allow once', 'Allow for this session', 'Always allow', 'Deny'] },
+      persist: { type: 'boolean', title: 'Remember this choice' },
+    } },
+  }), 'rpc-e1')
+  assert.equal(h.replies.length, before, 'nothing is answered by itself')
+  const card = h.events.find(event => event.event === 'approval.required').details
+  assert.equal(card.kind, 'computerElicitation')
+  assert.deepEqual(card.choices, ['accept', 'decline'])
+  assert.deepEqual([card.serverName, card.appName, card.message], ['cua_repl', 'TextEdit', 'Allow ChatGPT to use TextEdit?'])
+  // Session and permanent choices are never offered; the persistence switch is hidden.
+  assert.deepEqual(card.fields, [{ type: 'enum', title: null, description: null, options: [{ label: 'Allow once' }, { label: 'Deny' }], choice: 0, required: true }])
+  assert.equal(JSON.stringify(card).includes('persist'), false, 'the server\'s property names are not saved with the card')
+  assert.equal(h.timers.at(-1).ms, COMPUTER_ELICITATION_TIMEOUT_MS)
+  assert.equal(h.chat.snapshot().runs[0].pendingApprovals[0].approvalId, card.approvalId)
+  const reply = await h.chat.replyApproval({ approvalId: card.approvalId, conversationId: run.conversationId, runId: run.runId, decision: 'accept' })
+  assert.equal(reply.status, 'replySent')
+  assert.deepEqual(h.replies.at(-1), ['rpc-e1', { action: 'accept', content: { decision: 'allow_once', persist: false } }])
+  assert.equal(h.timers.at(-1).cleared, true)
+})
+
+test('D-C3: the person\'s own answers are applied by field index; a required choice is never guessed', async () => {
+  const h = r2Harness()
+  const run = await h.chat.send({ message: 'Finder 정리', requestId: 'cu-answers' })
+  await h.ask('mcpServer/elicitation/request', elicitation(run, { requestedSchema: { type: 'object', required: ['window'], properties: {
+    window: { type: 'string', oneOf: [{ const: 'w-1', title: '문서 1' }, { const: 'w-2', title: '문서 2' }] },
+    notify: { type: 'boolean', title: 'Show a banner', default: true },
+  } } }), 'rpc-e2')
+  const card = h.events.find(event => event.event === 'approval.required').details
+  assert.deepEqual(card.fields.map(field => [field.type, field.type === 'enum' ? field.choice : field.value]), [['enum', null], ['boolean', true]])
+  assert.deepEqual(card.fields[0].options, [{ label: '문서 1' }, { label: '문서 2' }])
+  const ids = { approvalId: card.approvalId, conversationId: run.conversationId, runId: run.runId, decision: 'accept' }
+  await assert.rejects(h.chat.replyApproval(ids), error => error.code === 'INVALID_ELICITATION_ANSWER')
+  await assert.rejects(h.chat.replyApproval({ ...ids, answers: [{ index: 0, value: true }] }), error => error.code === 'INVALID_ELICITATION_ANSWER')
+  await assert.rejects(h.chat.replyApproval({ ...ids, answers: [{ index: 0, choice: 5 }] }), error => error.code === 'INVALID_ELICITATION_ANSWER')
+  await h.chat.replyApproval({ ...ids, answers: [{ index: 0, choice: 1 }, { index: 1, value: false }] })
+  assert.deepEqual(h.replies.at(-1), ['rpc-e2', { action: 'accept', content: { window: 'w-2', notify: false } }])
+})
+
+test('D-C3: decline, no answer in time and the run ending close the question; a question without its turn joins the active run', async () => {
+  const h = r2Harness()
+  const run = await h.chat.send({ message: 'Finder 써 줘', requestId: 'cu-2' })
+  const cardOf = () => h.events.filter(event => event.event === 'approval.required').at(-1).details
+  await h.ask('mcpServer/elicitation/request', elicitation(run, { turnId: null, message: 'Allow Codex to use Finder?' }), 'e-decline')
+  assert.equal(cardOf().appName, 'Finder')
+  await h.chat.replyApproval({ approvalId: cardOf().approvalId, conversationId: run.conversationId, runId: run.runId, decision: 'decline' })
+  assert.deepEqual(h.replies.at(-1), ['e-decline', { action: 'decline' }])
+
+  await h.ask('mcpServer/elicitation/request', elicitation(run), 'e-timeout')
+  const expired = cardOf()
+  h.timers.at(-1).fn()
+  assert.deepEqual(h.replies.at(-1), ['e-timeout', { action: 'cancel' }])
+  assert.deepEqual(h.events.at(-1).details, { approvalId: expired.approvalId, outcome: 'expired' })
+  assert.deepEqual(h.chat.snapshot().runs[0].pendingApprovals.filter(item => item.approvalId === expired.approvalId), [])
+  await assert.rejects(h.chat.replyApproval({ approvalId: expired.approvalId, conversationId: run.conversationId, runId: run.runId, decision: 'accept' }), error => error.code === 'STALE_APPROVAL')
+
+  await h.ask('mcpServer/elicitation/request', elicitation(run), 'e-end')
+  const timer = h.timers.at(-1)
+  await h.finish(run)
+  assert.ok(h.replies.some(([id, result]) => id === 'e-end' && result?.action === 'cancel'))
+  assert.equal(timer.cleared, true)
+})
+
+test('D-C3: other servers are refused as before; url, unknown modes and free-text fields cancel; a limited Agent or computer control off declines', async () => {
+  const h = r2Harness({ mcpServerKind: name => name === 'node_repl' ? 'desktop' : null })
+  const run = await h.chat.send({ message: 'work', requestId: 'cu-3' })
+  await h.ask('mcpServer/elicitation/request', elicitation(run, { serverName: 'notes-server' }), 'e-other')
+  assert.deepEqual(h.replies.at(-1), ['e-other', null, { code: -32601, message: 'This interactive request is not supported by EG-Desk' }])
+  assert.equal(h.chat.snapshot().runs[0].error.code, 'UNSUPPORTED_INTERACTION')
+
+  await h.ask('mcpServer/elicitation/request', elicitation(run, { serverName: 'node_repl', mode: 'url', url: 'https://example.test/consent', elicitationId: 'x' }), 'e-url')
+  assert.deepEqual(h.replies.at(-1), ['e-url', { action: 'cancel' }])
+  await h.ask('mcpServer/elicitation/request', elicitation(run, { mode: 'openai/form' }), 'e-mode')
+  assert.deepEqual(h.replies.at(-1), ['e-mode', { action: 'cancel' }])
+  await h.ask('mcpServer/elicitation/request', elicitation(run, { requestedSchema: { type: 'object', properties: { reason: { type: 'string' } } } }), 'e-text')
+  assert.deepEqual(h.replies.at(-1), ['e-text', { action: 'cancel' }])
+  const rows = h.chat.snapshot().runs[0].activities.filter(activity => activity.kind === 'computerControl')
+  assert.deepEqual(rows.map(row => [row.status, row.detail.reason]), [['declined', 'url'], ['declined', 'unsupportedMode'], ['declined', 'unsupportedField']])
+  assert.equal(h.events.some(event => event.event === 'approval.required'), false)
+
+  const live = [...h.chat.runs.values()][0]
+  live.toolCeiling = { browser: 'observe', files: 'write', terminal: 'ask', network: 'on', mcp: 'inherit' }
+  await h.ask('mcpServer/elicitation/request', elicitation(run), 'e-ceiling')
+  assert.deepEqual(h.replies.at(-1), ['e-ceiling', { action: 'decline' }])
+  assert.equal(h.chat.snapshot().runs[0].activities.at(-1).title, '이 Agent는 컴퓨터 화면을 보기만 할 수 있습니다')
+  live.toolCeiling = undefined
+  h.chat.setComputerControlPolicy('off')
+  await h.ask('mcpServer/elicitation/request', elicitation(run), 'e-off')
+  assert.deepEqual(h.replies.at(-1), ['e-off', { action: 'decline' }])
+  assert.equal(h.events.some(event => event.event === 'approval.required'), false)
+})
+
+test('computerElicitationRequest keeps a plain confirmation and refuses what a two-button card cannot answer', () => {
+  assert.deepEqual(computerElicitationRequest({ mode: 'form', serverName: 'cua', message: 'Allow ChatGPT to use Notes?', requestedSchema: { type: 'object', properties: {} } }).card,
+    { serverName: 'cua', appName: 'Notes', message: 'Allow ChatGPT to use Notes?', fields: [] })
+  assert.deepEqual(computerElicitationRequest({ mode: 'form', message: 'Pick', requestedSchema: { properties: { scope: { type: 'string', enum: ['session', 'always'] } }, required: ['scope'] } }), { cancel: 'unsupportedField' })
+  assert.deepEqual(computerElicitationRequest({ mode: 'form', message: 'Pick', requestedSchema: { properties: { tags: { type: 'array', items: { enum: ['a'] } } } } }), { cancel: 'unsupportedField' })
+  assert.deepEqual(computerElicitationRequest({ mode: 'form', message: 'Pick', requestedSchema: { properties: {}, required: ['missing'] } }), { cancel: 'unsupportedField' })
+  assert.deepEqual(computerElicitationRequest({ mode: 'form', message: '', requestedSchema: {} }), { cancel: 'invalid' })
+  assert.deepEqual(computerElicitationRequest({ mode: 'url', url: 'https://example.test' }), { cancel: 'url' })
+})
+
+function computerToolProvider(adapter) {
+  const methods = { capture: 'capture', list_apps: 'listApps', click: 'click', type_text: 'typeText' }
+  return {
+    providerId: COMPUTER_PROVIDER_ID,
+    specs: () => Object.keys(methods).map(name => ({ type: 'function', name: `egdesk_computer_${name}`, description: name, inputSchema: { type: 'object', properties: {} } })),
+    async dispatch(run, event) {
+      const result = await adapter.call(methods[event.tool.slice('egdesk_computer_'.length)], event.arguments)
+      return { success: true, contentItems: [{ type: 'inputText', text: JSON.stringify(result) }] }
+    },
+  }
+}
+
+test('CU-03: EG-Desk computer tools are offered only with a host lease and checked against it before they reach the provider', async () => {
+  let clock = 100_000
+  const lease = createHostLease({ now: () => clock, requireMonitor: false })
+  const fake = createFakeComputerProvider()
+  const adapter = createComputerAdapter({ provider: fake, lease, now: () => clock })
+  const provider = computerToolProvider(adapter)
+
+  const without = r2Harness({ toolProviders: [provider] })
+  await without.chat.send({ message: 'no lease', requestId: 'no-lease' })
+  assert.equal(without.calls.find(call => call.method === 'thread/start').params.dynamicTools, undefined)
+
+  const h = r2Harness({ toolProviders: [provider], hostLease: lease })
+  const run = await h.chat.send({ message: 'TextEdit 저장 눌러 줘', requestId: 'computer-1' })
+  assert.deepEqual(h.calls.find(call => call.method === 'thread/start').params.dynamicTools.map(tool => tool.name), ['egdesk_computer_capture', 'egdesk_computer_list_apps', 'egdesk_computer_click', 'egdesk_computer_type_text'])
+  // An Agent limited to watching would get only the tools that read.
+  assert.deepEqual(h.chat.collectToolSpecs(null, { toolCeiling: { browser: 'observe' } }).specs.map(spec => spec.name), ['egdesk_computer_capture', 'egdesk_computer_list_apps'])
+  assert.deepEqual(h.chat.collectToolSpecs(null, { toolCeiling: { browser: 'none' } }).specs, [])
+  const call = (id, tool, args) => h.ask('item/tool/call', { threadId: run.conversationId, turnId: run.runId, callId: id, tool, arguments: args }, id)
+  const click = { target: { app: 'com.apple.TextEdit' }, element: 'Save' }
+
+  lease.observeInput({ kind: 'pointer' }) // the person is using the Mac
+  await call('click-held', 'egdesk_computer_click', click)
+  await h.tick()
+  const [id, held] = h.replies.at(-1)
+  assert.equal(id, 'click-held')
+  assert.equal(held.success, false)
+  const refused = JSON.parse(held.contentItems[0].text)
+  assert.deepEqual([refused.effect, refused.dispatched, refused.error.code], ['refused', false, 'USER_CONTROL'])
+  assert.deepEqual(refused.nextCall, { tool: 'capture', arguments: { target: { app: 'com.apple.TextEdit' } } })
+  assert.equal(fake.calls.length, 0, 'the provider was not called')
+  const row = h.chat.snapshot().runs[0].activities.at(-1)
+  assert.deepEqual([row.kind, row.status, row.detail.code, row.title], ['computerControl', 'declined', 'USER_CONTROL', '사람이 컴퓨터를 쓰는 중이라 Agent 조작을 보내지 않았습니다'])
+
+  // Reading does not touch the desktop and is not held back.
+  await call('apps', 'egdesk_computer_list_apps', {})
+  await h.tick()
+  assert.equal(JSON.parse(h.replies.at(-1)[1].contentItems[0].text).ok, true)
+  assert.deepEqual(fake.calls.map(entry => entry.method), ['listApps'])
+
+  clock += 11_000 // the person stopped; the lease is ready again
+  await call('click-ok', 'egdesk_computer_click', click)
+  await h.tick()
+  const sent = JSON.parse(h.replies.at(-1)[1].contentItems[0].text)
+  assert.deepEqual([h.replies.at(-1)[0], sent.effect, sent.dispatched], ['click-ok', 'confirmed', true])
+  assert.deepEqual(fake.events.map(event => event.method), ['click'])
+
+  await lease.stopAll()
+  await call('click-stopped', 'egdesk_computer_click', click)
+  await h.tick()
+  assert.equal(JSON.parse(h.replies.at(-1)[1].contentItems[0].text).error.code, 'STOPPED')
+
+  h.chat.setComputerControlPolicy('off')
+  await call('click-off', 'egdesk_computer_click', click)
+  assert.deepEqual(h.replies.at(-1), ['click-off', null, { code: -32601, message: 'Computer control is turned off in EG-Desk settings' }])
+  assert.equal(fake.events.length, 1)
+})
+
+test('CU-02: a Codex computer call (cua_repl) while a person holds the Mac stops the turn once, said to be best effort', async () => {
+  let clock = 500_000
+  const lease = createHostLease({ now: () => clock, requireMonitor: false })
+  const h = r2Harness({ hostLease: lease })
+  const run = await h.chat.send({ message: '앱 조작', requestId: 'cua-1' })
+  // A computer call while nobody else uses the Mac continues.
+  await h.item(run, { id: 'mcp-0', type: 'mcpToolCall', server: 'cua_repl', tool: 'get_app_state', status: 'inProgress', arguments: {} }, false)
+  assert.equal(h.calls.some(call => call.method === 'turn/interrupt'), false)
+  lease.observeInput({ kind: 'key' })
+  await h.item(run, { id: 'mcp-1', type: 'mcpToolCall', server: 'cua_repl', tool: 'click', status: 'inProgress', arguments: {} }, false)
+  await h.tick()
+  assert.deepEqual(h.calls.filter(call => call.method === 'turn/interrupt').map(call => call.params.turnId), [run.runId])
+  const yielded = h.events.find(event => event.event === 'computer.yielded').details
+  assert.deepEqual([yielded.runId, yielded.reason, yielded.bestEffort], [run.runId, 'personUsing', true])
+  const row = h.chat.snapshot().runs[0].activities.find(activity => activity.kind === 'computerControl')
+  assert.equal(row.title.includes('이미 보낸 입력은 되돌리지 못할 수 있음'), true)
+  await h.item(run, { id: 'mcp-2', type: 'mcpToolCall', server: 'cua_repl', tool: 'click', status: 'inProgress', arguments: {} }, false)
+  assert.equal(h.chat.noteHostControl({ type: 'control.yielded', reason: 'human-input' }), 0, 'once per run')
+  await h.tick()
+  assert.equal(h.calls.filter(call => call.method === 'turn/interrupt').length, 1)
+})
+
+test('CU-02: a takeover or a stop forwarded from the host lease interrupts only runs with a computer call in progress', async () => {
+  const h = r2Harness({ hostLease: createHostLease({ requireMonitor: false }) })
+  const busy = await h.chat.send({ message: 'computer', requestId: 'busy', clientThreadId: 'busy-room' })
+  const idle = await h.chat.send({ message: 'text only', requestId: 'idle', clientThreadId: 'idle-room' })
+  await h.item(busy, { id: 'mcp-1', type: 'mcpToolCall', server: 'cua_repl', tool: 'type_text', status: 'inProgress', arguments: {} }, false)
+  assert.equal(h.chat.noteHostControl({ type: 'control.state', status: { state: 'ready' } }), 0)
+  assert.equal(h.chat.noteHostControl({ type: 'control.stopped', scope: 'all' }), 1)
+  await h.tick()
+  assert.deepEqual(h.calls.filter(call => call.method === 'turn/interrupt').map(call => call.params.turnId), [busy.runId])
+  assert.equal(h.events.find(event => event.event === 'computer.yielded').details.reason, 'stopped')
+  assert.notEqual(idle.runId, busy.runId)
+})
+
+test('CHAT-01: a send records the room\'s Agent through the chat store; turning Agents off clears it; a failed record never stops the message', async () => {
+  const dataDir = createPrivateQaTempDirectory('egdesk-room-agent-')
+  let store = null
+  try {
+    store = openChatStore({ dataDir, ownerScope: 'room-agent-test' })
+    const written = []
+    store.setRoomAgent = input => { written.push(input); return { clientThreadId: input.clientThreadId, agent: null } }
+    const h = r2Harness({ store, profiles: r2Profiles() })
+    const first = await h.chat.send({ message: 'hi', clientThreadId: 'room-1', requestId: 'ra-1', profileId: 'reviewer' })
+    assert.deepEqual(written.map(({ ts, ...rest }) => rest), [{ clientThreadId: 'room-1', profileId: 'reviewer', revision: null }])
+    await h.finish(first)
+    await h.chat.send({ message: 'pinned', clientThreadId: 'room-1', conversationId: first.conversationId, requestId: 'ra-2', profileId: 'reviewer', profileRevision: 3 })
+    assert.deepEqual(written.at(-1).revision, 3)
+    await h.finish({ conversationId: first.conversationId, runId: 'turn-2' })
+    await h.chat.send({ message: 'plain', clientThreadId: 'room-1', conversationId: first.conversationId, requestId: 'ra-3', profileEnabled: false })
+    assert.equal(written.at(-1).profileId, null)
+    await h.finish({ conversationId: first.conversationId, runId: 'turn-3' })
+    await h.chat.send({ message: 'unchanged', clientThreadId: 'room-1', conversationId: first.conversationId, requestId: 'ra-4' })
+    assert.equal(written.length, 3, 'a send that names no Agent leaves the room as it was')
+    store.setRoomAgent = () => { throw new Error('disk full') }
+    const other = await h.chat.send({ message: 'still sent', clientThreadId: 'room-2', requestId: 'ra-5', profileId: 'reviewer' })
+    assert.equal(other.accepted, true)
+    assert.equal(h.chat.snapshot().localHistoryDurable, true)
+  } finally {
+    try { store?.close() } catch {}
+    await rm(dataDir, { recursive: true, force: true })
+  }
+})
+
+test('D-M2: mentions are read from agent links and @names, longest name first; without one only the Lead answers', () => {
+  const members = boardMembers([
+    { kind: 'user', role: 'owner' },
+    { kind: 'agent', profileId: 'lead-agent', label: '리드', role: 'admin' },
+    { kind: 'agent', profileId: 'designer', label: '디자인 리뷰어' },
+    { kind: 'agent', profileId: 'design-lite', label: '디자인' },
+    { kind: 'agent', profileId: 'coder', label: '코더' },
+    { kind: 'agent', label: '예전 이름' },
+  ])
+  assert.deepEqual(members.map(member => member.memberKey), ['user', 'agent:lead-agent', 'agent:designer', 'agent:design-lite', 'agent:coder'])
+  assert.deepEqual(boardMentions('[@코더](agent://coder) 그리고 @디자인 리뷰어, 확인해 줘', members), ['coder', 'designer'])
+  assert.deepEqual(boardMentions('@디자인 의견은?', members), ['design-lite'])
+  assert.deepEqual(boardMentions('메일 a@코더 는 아님, @없는사람 도 아님', members), [])
+  assert.deepEqual(boardRecipients({ message: '정리해 줘', members, leadProfileId: 'lead-agent' }).map(entry => [entry.profileId, entry.reason, entry.lead]), [['lead-agent', 'lead', true]])
+  assert.deepEqual(boardRecipients({ message: '@리드 @코더', members, leadProfileId: 'lead-agent' }).map(entry => [entry.profileId, entry.reason, entry.lead]), [['lead-agent', 'mentioned', true], ['coder', 'mentioned', false]])
+  assert.deepEqual(boardRecipients({ message: '정리해 줘', members, leadProfileId: null }), [])
+  assert.equal(boardMemberThreadId('room-1', 'coder'), boardMemberThreadId('room-1', 'coder'))
+  assert.notEqual(boardMemberThreadId('room-1', 'coder'), boardMemberThreadId('room-1', 'designer'))
+  const block = boardContextBlock({ members, recipient: { ...members[4], reason: 'mentioned' }, leadProfileId: 'lead-agent', recentMessages: [{ role: 'agent', author: '리드', text: '<b>계획</b> 초안' }] })
+  assert.match(block, /^<egdesk-board-context>\nYou are "코더"/)
+  assert.match(block, /The person addressed you with @코더\./)
+  assert.match(block, /- 리드 \(Lead\)\n/)
+  assert.match(block, /- 코더 \(you\)\n/)
+  assert.match(block, /\[리드\] ‹b>계획‹\/b> 초안/)
+  assert.equal(block.includes('agent:coder') || block.includes('lead-agent'), false, 'names only, never IDs')
+})
+
+test('D-M2: a Board send wakes the Lead in the room conversation, or each mentioned member in its own, attributed and capped at two', async () => {
+  const h = r2Harness({ profiles: r2Profiles() })
+  const members = [
+    { kind: 'user', role: 'owner' },
+    { kind: 'agent', profileId: 'lead-agent', label: '리드', role: 'admin' },
+    { kind: 'agent', profileId: 'designer', label: '디자인 리뷰어' },
+    { kind: 'agent', profileId: 'coder', label: '코더' },
+  ]
+  const first = await h.chat.sendBoard({ clientThreadId: 'room-1', message: '오늘 할 일 정리해 줘', requestId: 'b-1', members, leadProfileId: 'lead-agent' })
+  assert.deepEqual(first.recipients.map(entry => [entry.profileId, entry.reason, entry.clientThreadId, entry.status]), [['lead-agent', 'lead', 'room-1', 'started']])
+  const turn = h.calls.find(call => call.method === 'turn/start').params
+  assert.equal(turn.input[0].text, '오늘 할 일 정리해 줘', 'the person\'s message is sent as written')
+  assert.match(turn.additionalContext.egdesk_board.value, /You are "리드"/)
+  assert.match(turn.additionalContext.egdesk_board.value, /answer as the room's Lead/)
+  assert.equal(h.calls.find(call => call.method === 'thread/start').params.developerInstructions, 'You are lead-agent')
+  assert.deepEqual(h.events.find(event => event.event === 'run.started').details.board, { roomClientThreadId: 'room-1', memberKey: 'agent:lead-agent', profileId: 'lead-agent', label: '리드', reason: 'lead' })
+  await h.finish({ conversationId: first.recipients[0].conversationId, runId: first.recipients[0].runId })
+
+  const second = await h.chat.sendBoard({ clientThreadId: 'room-1', message: '@디자인 리뷰어 @코더 화면 봐 줘', requestId: 'b-2', members, leadProfileId: 'lead-agent', recentMessages: [{ role: 'user', author: '사람', text: '오늘 할 일 정리해 줘' }] })
+  assert.deepEqual(second.recipients.map(entry => [entry.profileId, entry.reason, entry.clientThreadId, entry.status]), [
+    ['designer', 'mentioned', boardMemberThreadId('room-1', 'designer'), 'started'],
+    ['coder', 'mentioned', boardMemberThreadId('room-1', 'coder'), 'started'],
+  ])
+  assert.equal(new Set(second.recipients.map(entry => entry.conversationId)).size, 2, 'each member answers in its own conversation')
+  const memberTurns = h.calls.filter(call => call.method === 'turn/start').slice(-2)
+  assert.match(memberTurns[0].params.additionalContext.egdesk_board.value, /The person addressed you with @디자인 리뷰어\.[\s\S]*\[사람\] 오늘 할 일 정리해 줘/)
+  assert.deepEqual(h.chat.snapshot().runs.filter(run => run.board).map(run => [run.board.profileId, run.board.reason]), [['lead-agent', 'lead'], ['designer', 'mentioned'], ['coder', 'mentioned']])
+
+  const third = await h.chat.sendBoard({ clientThreadId: 'room-1', message: '@리드 정리', requestId: 'b-3', members, leadProfileId: 'lead-agent' })
+  assert.deepEqual(third.recipients.map(entry => [entry.profileId, entry.status, entry.code]), [['lead-agent', 'deferred', 'BOARD_CONCURRENCY_LIMIT']])
+  assert.equal(third.accepted, false)
+  // The room's own Agent leads even when its member list leaves it out.
+  const unlisted = await h.chat.sendBoard({ clientThreadId: 'room-2', message: '시작', requestId: 'b-4', members: members.filter(member => member.profileId !== 'lead-agent'), profileId: 'lead-agent' })
+  assert.deepEqual(unlisted.recipients.map(entry => [entry.profileId, entry.reason, entry.clientThreadId, entry.status]), [['lead-agent', 'lead', 'room-2', 'started']])
+  await assert.rejects(h.chat.sendBoard({ clientThreadId: 'room-1', message: 'hi' }), error => error.code === 'BOARD_MEMBERS_REQUIRED')
+  await assert.rejects(h.chat.sendBoard({ clientThreadId: 'room-1', message: 'hi', members, leadProfileId: null }), error => error.code === 'BOARD_NO_RECIPIENT')
+  await assert.rejects(h.chat.sendBoard({ clientThreadId: 'room-1', message: 'hi', members, conversationId: 'thread-1' }), error => error.code === 'INVALID_BOARD_SEND')
+  await assert.rejects(h.chat.sendBoard({ clientThreadId: 'room-1', message: 'hi', members, leadProfileId: 'lead-agent', recentMessages: [{ role: 'robot', text: 'x' }] }), error => error.code === 'INVALID_BOARD_MESSAGES')
+})
+
+test('D-M1: a sub-Agent stopped on an approval stays declined and its task can be handed back to the idle parent Agent', async () => {
+  const h = r2Harness()
+  const parent = await h.chat.send({ message: '릴리스 노트 조사', requestId: 'p-1', clientThreadId: 'parent-room' })
+  await h.item(parent, { id: 'spawn-1', type: 'collabAgentToolCall', tool: 'spawnAgent', status: 'completed', receiverThreadIds: ['child-1', 'child-2'], prompt: 'Collect the release notes', agentsStates: { 'child-1': { status: 'running' }, 'child-2': { status: 'running' } } })
+  await h.ask('item/commandExecution/requestApproval', { threadId: 'child-1', turnId: 'child-turn', itemId: 'cmd', command: 'rm -rf build' }, 'child-approval')
+  assert.deepEqual(h.replies.at(-1), ['child-approval', null, { code: -32601, message: 'No matching EG-Desk run' }])
+  const ids = { conversationId: parent.conversationId, runId: parent.runId }
+  await assert.rejects(h.chat.reassignSubAgent({ ...ids, threadId: 'child-1' }), error => error.code === 'RUN_IN_PROGRESS' && error.stopRequired === true)
+  await h.finish(parent)
+  await assert.rejects(h.chat.reassignSubAgent({ ...ids, threadId: 'child-2' }), error => error.code === 'SUBAGENT_NOT_BLOCKED')
+  await assert.rejects(h.chat.reassignSubAgent({ ...ids, threadId: 'child-9' }), error => error.code === 'SUBAGENT_NOT_FOUND')
+  const handed = await h.chat.reassignSubAgent({ ...ids, threadId: 'child-1' })
+  assert.deepEqual(handed.handedBack, { threadId: 'child-1', fromRunId: parent.runId })
+  assert.equal(handed.conversationId, parent.conversationId)
+  const turn = h.calls.filter(call => call.method === 'turn/start').at(-1).params
+  assert.equal(turn.threadId, parent.conversationId)
+  assert.match(turn.input[0].text, /승인이 필요해 멈춘 일을 직접 맡아 주세요/)
+  assert.match(turn.additionalContext.egdesk_subagent_handback.value, /Collect the release notes/)
+  assert.match(turn.additionalContext.egdesk_subagent_handback.value, /does not grant sub-agent approvals/)
+  assert.deepEqual(h.events.find(event => event.event === 'subagent.handedBack').details, { threadId: 'child-1', requestId: handed.requestId, runId: handed.runId })
+  // While the handed-back turn runs the parent is busy; afterwards the same
+  // hand-back is the same request, not a second turn.
+  await assert.rejects(h.chat.reassignSubAgent({ ...ids, threadId: 'child-1' }), error => error.code === 'RUN_IN_PROGRESS')
+  await h.finish({ conversationId: parent.conversationId, runId: handed.runId })
+  const again = await h.chat.reassignSubAgent({ ...ids, threadId: 'child-1' })
+  assert.equal(again.runId, handed.runId)
+  assert.equal(h.calls.filter(call => call.method === 'turn/start').length, 2)
+})
+
+test('D-M3: shared messages are copied with a line on both sides and reach the receiving Agent once, across a restart', async () => {
+  const dataDir = createPrivateQaTempDirectory('egdesk-share-')
+  let store = null
+  try {
+    store = openChatStore({ dataDir, ownerScope: 'share-test' })
+    const h = r2Harness({ store })
+    const source = await h.chat.send({ message: '디자인 시안 A가 낫다', clientThreadId: 'personal', requestId: 's-1' })
+    await h.item(source, { id: 'msg-a', type: 'agentMessage', text: '네, A안이 대비가 더 좋습니다.', phase: 'final_answer' })
+    await h.finish(source)
+    const board = await h.chat.send({ message: 'Board 시작', clientThreadId: 'board-room', requestId: 's-2' })
+    await h.finish(board)
+    const picked = store.listMessages('personal').messages.map(message => message.localMessageId)
+    assert.equal(picked.length, 2)
+    const shared = h.chat.shareMessages({ fromClientThreadId: 'personal', toClientThreadId: 'board-room', localMessageIds: picked })
+    assert.deepEqual([shared.accepted, shared.messageCount, shared.attach], [true, 2, 'nextTurn'])
+    const inbound = store.listEvents('board-room').events.find(event => event.event === 'messages.shared.in')
+    assert.deepEqual(inbound.details.link, { clientThreadId: 'personal', localMessageIds: picked })
+    assert.equal(store.listEvents('personal').events.find(event => event.event === 'messages.shared.out').details.link.clientThreadId, 'board-room')
+    assert.throws(() => h.chat.shareMessages({ fromClientThreadId: 'personal', toClientThreadId: 'board-room', localMessageIds: ['nope'] }), error => error.code === 'MESSAGE_NOT_FOUND')
+    assert.throws(() => h.chat.shareMessages({ fromClientThreadId: 'personal', toClientThreadId: 'personal', localMessageIds: picked }), error => error.code === 'INVALID_SHARE')
+
+    const next = await h.chat.send({ message: '이거 반영해 줘', clientThreadId: 'board-room', conversationId: board.conversationId, requestId: 's-3' })
+    const block = h.calls.filter(call => call.method === 'turn/start').at(-1).params.additionalContext.egdesk_shared_messages.value
+    assert.match(block, /^<egdesk-shared-messages>/)
+    assert.match(block, /\[사람\] 디자인 시안 A가 낫다/)
+    assert.match(block, /\[Agent\] 네, A안이 대비가 더 좋습니다\./)
+    assert.ok(h.events.some(event => event.event === 'messages.shared.attached' && event.details.shareIds[0] === shared.shareId))
+    await h.finish(next)
+    const later = await h.chat.send({ message: '다음', clientThreadId: 'board-room', conversationId: board.conversationId, requestId: 's-4' })
+    assert.equal(h.calls.filter(call => call.method === 'turn/start').at(-1).params.additionalContext, undefined)
+    await h.finish(later)
+
+    // A share made before a restart still reaches the next turn after it, once.
+    const again = h.chat.shareMessages({ fromClientThreadId: 'personal', toClientThreadId: 'board-room', localMessageIds: picked.slice(0, 1), shareId: 'share-second' })
+    const restarted = r2Harness({ store })
+    await restarted.chat.send({ message: '재시작 뒤', clientThreadId: 'board-room', conversationId: board.conversationId, requestId: 's-5' })
+    const restartedBlock = restarted.calls.find(call => call.method === 'turn/start').params.additionalContext.egdesk_shared_messages.value
+    assert.equal((restartedBlock.match(/^--- /gm) || []).length, 1, 'only the share not attached yet')
+    assert.equal(again.shareId, 'share-second')
   } finally {
     try { store?.close() } catch {}
     await rm(dataDir, { recursive: true, force: true })

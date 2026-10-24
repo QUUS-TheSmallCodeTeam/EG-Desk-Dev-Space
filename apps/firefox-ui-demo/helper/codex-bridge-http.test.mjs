@@ -677,3 +677,31 @@ test('run changes and command output are read from bridge memory without an acco
   const post = response()
   assert.equal(await handler(request('{}', {}, '/chat/run-changes'), post, new URL('http://localhost/chat/run-changes')), false, 'only GET reads outputs')
 })
+
+test('2-R routes: Board send, message sharing and sub-Agent hand-back reach their runtime actions with auth; a stop requirement is reported', async () => {
+  const seen = []
+  let auth = 0
+  const chat = {
+    sendBoard: async body => { seen.push(['sendBoard', body]); return { accepted: true, requestId: 'b-1', clientThreadId: body.clientThreadId, recipients: [] } },
+    shareMessages: body => { seen.push(['shareMessages', body]); return { accepted: true, shareId: 'share-1', messageCount: 1, attach: 'nextTurn' } },
+    reassignSubAgent: async () => { throw Object.assign(new Error('Stop or wait for the current turn, then hand the task back'), { httpStatus: 409, code: 'RUN_IN_PROGRESS', stopRequired: true, conversationId: 'parent' }) },
+  }
+  const handler = createChatHttpHandler(chat, async () => { auth += 1 })
+  const post = async (path, body) => { const res = response(); assert.equal(await handler(request(JSON.stringify(body), {}, path), res, new URL(`http://localhost${path}`)), true); return res }
+  const board = await post('/chat/board/send', { clientThreadId: 'room-1', message: '@코더 봐 줘' })
+  assert.deepEqual([board.status, board.body.accepted], [202, true])
+  const share = await post('/chat/share', { fromClientThreadId: 'a', toClientThreadId: 'b', localMessageIds: ['m-1'] })
+  assert.deepEqual([share.status, share.body.shareId], [200, 'share-1'])
+  const handback = await post('/chat/subagent/reassign', { conversationId: 'parent', runId: 'turn-1', threadId: 'child-1' })
+  assert.deepEqual([handback.status, handback.body.code, handback.body.stopRequired, handback.body.accepted], [409, 'RUN_IN_PROGRESS', true, false])
+  assert.deepEqual(seen.map(([action, body]) => [action, Object.keys(body)]), [['sendBoard', ['clientThreadId', 'message']], ['shareMessages', ['fromClientThreadId', 'toClientThreadId', 'localMessageIds']]])
+  assert.equal(auth, 3)
+  const invalidCwd = await post('/chat/board/send', { clientThreadId: 'room-1', message: 'hi', cwd: 'relative/path' })
+  assert.equal(invalidCwd.status, 400)
+  assert.equal(auth, 3, 'an invalid project folder is refused before the account check, as for /chat/send')
+  // A runtime without the action answers that plainly instead of crashing.
+  const bare = createChatHttpHandler({}, async () => {})
+  const res = response()
+  await bare(request(JSON.stringify({ clientThreadId: 'room-1', message: 'hi' }), {}, '/chat/board/send'), res, new URL('http://localhost/chat/board/send'))
+  assert.deepEqual([res.status, res.body.code, res.body.accepted], [501, 'CHAT_ACTION_UNAVAILABLE', false])
+})
