@@ -5,7 +5,7 @@ import { execFileSync } from 'node:child_process'
 import os from 'node:os'
 import path from 'node:path'
 import { DatabaseSync } from 'node:sqlite'
-import { openChatStore as openNativeChatStore } from './egdesk-chat-store.mjs'
+import { MAX_ROOM_MEMBERS, PRIVATE_KEYS, openChatStore as openNativeChatStore, roomMemberKey, roomMembersFromLegacy } from './egdesk-chat-store.mjs'
 import { createPrivateQaTempDirectory } from '../scripts/egdesk-qa-platform.mjs'
 import { isOwnedAndPrivate } from './egdesk-private-files.mjs'
 
@@ -83,7 +83,7 @@ test('accepted user message and request fingerprint commit together and survive 
   assert.equal(isOwnedAndPrivate(path.join(dataDir, filename), statSync(path.join(dataDir, filename)), 0o077), true)
   const raw = new DatabaseSync(path.join(dataDir, filename))
   assert.equal(raw.prepare('PRAGMA journal_mode').get().journal_mode, 'wal')
-  assert.equal(raw.prepare('PRAGMA user_version').get().user_version, 2)
+  assert.equal(raw.prepare('PRAGMA user_version').get().user_version, 3)
   raw.close()
 })
 
@@ -450,7 +450,7 @@ function writeV1Database(dataDir, ownerScope) {
   return filename
 }
 
-test('a v1 database is backed up, then opens as v2 with every conversation, run and request kept and Codex as its engine', t => {
+test('a v1 database is backed up, then opens as v3 with every conversation, run and request kept and Codex as its engine', t => {
   const dataDir = fixture(t)
   const filename = writeV1Database(dataDir, 'desktop/profile-a')
   const store = openChatStore({ dataDir, ownerScope: 'desktop/profile-a' })
@@ -471,7 +471,7 @@ test('a v1 database is backed up, then opens as v2 with every conversation, run 
   assert.equal(store.getConversation('client-draft').engineId, 'codex')
   store.close()
   const raw = new DatabaseSync(filename)
-  assert.equal(raw.prepare('PRAGMA user_version').get().user_version, 2)
+  assert.equal(raw.prepare('PRAGMA user_version').get().user_version, 3)
   assert.equal(raw.prepare("SELECT engine_id FROM runs WHERE local_run_id='local-run-1'").get().engine_id, 'codex')
   raw.close()
   const backup = `${filename}.v1.bak`
@@ -528,4 +528,146 @@ test('an incomplete v1 or v2 schema fails closed without a backup, migration or 
   raw.exec('DROP INDEX threads_engine; ALTER TABLE threads DROP COLUMN engine_bound_at;')
   raw.close()
   assert.throws(() => openChatStore({ dataDir: other, ownerScope: 'desktop/broken-v2' }), { code: 'STORE_CORRUPT' })
+})
+
+// ── v3: the Agent picked for each room and room members as objects ──
+
+// Frozen copy of the v2 upgrade (engine columns) shipped as user_version 2.
+const V2_UPGRADE_FROZEN = `
+    ALTER TABLE threads ADD COLUMN engine_id TEXT;
+    ALTER TABLE threads ADD COLUMN engine_profile_id TEXT;
+    ALTER TABLE threads ADD COLUMN engine_bound_at INTEGER;
+    UPDATE threads SET engine_id = 'codex', engine_profile_id = 'codex-default' WHERE conversation_id IS NOT NULL;
+    ALTER TABLE runs ADD COLUMN engine_id TEXT;
+    ALTER TABLE runs ADD COLUMN engine_version TEXT;
+    ALTER TABLE runs ADD COLUMN engine_profile_id TEXT;
+    UPDATE runs SET engine_id = 'codex' WHERE engine_id IS NULL;
+    CREATE INDEX threads_engine ON threads(engine_id, updated_at DESC);
+`
+function privateKeysIn(value, found = []) {
+  if (Array.isArray(value)) for (const item of value) privateKeysIn(item, found)
+  else if (value && typeof value === 'object') for (const [key, child] of Object.entries(value)) {
+    if (PRIVATE_KEYS.has(key.toLowerCase().replace(/[_-]/g, ''))) found.push(key)
+    privateKeysIn(child, found)
+  }
+  return found
+}
+
+test('a v2 database is backed up, then opens as v3 with every conversation kept and no room Agent or members yet', t => {
+  const dataDir = fixture(t)
+  const filename = writeV1Database(dataDir, 'desktop/profile-v2')
+  const upgrade = new DatabaseSync(filename)
+  upgrade.exec(`BEGIN; ${V2_UPGRADE_FROZEN} PRAGMA user_version=2; COMMIT;`)
+  upgrade.close()
+  const store = openChatStore({ dataDir, ownerScope: 'desktop/profile-v2' })
+  const sent = store.getConversation('client-sent')
+  assert.deepEqual([sent.title, sent.engineId, sent.engineProfileId, sent.agent], ['Sent before upgrade', 'codex', 'codex-default', null])
+  assert.equal(store.getLatestRun('client-sent').messages[1].text, 'Answer kept across the upgrade')
+  assert.deepEqual(store.listRoomMembers('client-sent'), { clientThreadId: 'client-sent', members: [] })
+  store.close()
+  const raw = new DatabaseSync(filename)
+  assert.equal(raw.prepare('PRAGMA user_version').get().user_version, 3)
+  raw.close()
+  const backup = `${filename}.v2.bak`
+  assert.equal(isOwnedAndPrivate(backup, statSync(backup), 0o077), true)
+  const old = new DatabaseSync(backup)
+  assert.equal(old.prepare('PRAGMA user_version').get().user_version, 2)
+  assert.equal(old.prepare("SELECT COUNT(*) AS count FROM sqlite_master WHERE name='room_members'").get().count, 0)
+  old.close()
+  // A v2 file missing its engine columns is damaged, not something to upgrade.
+  const other = fixture(t)
+  const broken = writeV1Database(other, 'desktop/broken-v2-upgrade')
+  const mark = new DatabaseSync(broken)
+  mark.exec('PRAGMA user_version=2')
+  mark.close()
+  assert.throws(() => openChatStore({ dataDir: other, ownerScope: 'desktop/broken-v2-upgrade' }), { code: 'STORE_CORRUPT' })
+  assert.equal(readdirSync(other).some(name => name.includes('.bak')), false)
+})
+
+test('CHAT-01: each room remembers the Agent picked for it (profile and revision) across restarts, apart from its engine', t => {
+  const { dataDir, store } = opened(t)
+  conversation(store, 'room-a')
+  conversation(store, 'room-b')
+  assert.equal(store.getConversation('room-a').agent, null)
+  assert.deepEqual(store.setRoomAgent({ clientThreadId: 'room-a', profileId: 'code-reviewer', revision: 3, ts: T + 5 }), { clientThreadId: 'room-a', agent: { profileId: 'code-reviewer', revision: 3, setAt: T + 5 } })
+  // The same choice again keeps when it was made; a new revision is a new choice.
+  assert.equal(store.setRoomAgent({ clientThreadId: 'room-a', profileId: 'code-reviewer', revision: 3, ts: T + 9 }).agent.setAt, T + 5)
+  store.setRoomAgent({ clientThreadId: 'room-b', profileId: 'designer', ts: T + 6 })
+  assert.deepEqual(store.getConversation('room-b').agent, { profileId: 'designer', revision: null, setAt: T + 6 })
+  store.bindNative({ clientThreadId: 'room-a', conversationId: 'native-a', engineId: 'codex', engineProfileId: 'codex-default' })
+  assert.deepEqual([store.getConversation('room-a').engineProfileId, store.getConversation('room-a').agent.profileId], ['codex-default', 'code-reviewer'])
+  assert.deepEqual(store.listConversations({ limit: 10 }).threads.map(item => [item.clientThreadId, item.agent?.profileId ?? null]).sort(), [['room-a', 'code-reviewer'], ['room-b', 'designer']])
+  store.close()
+  const reopened = openChatStore({ dataDir, ownerScope: 'desktop/profile-a' })
+  t.after(() => reopened.close())
+  assert.deepEqual(reopened.getConversation('room-a').agent, { profileId: 'code-reviewer', revision: 3, setAt: T + 5 })
+  assert.deepEqual(reopened.setRoomAgent({ clientThreadId: 'room-a', profileId: null }), { clientThreadId: 'room-a', agent: null })
+  for (const input of [
+    { clientThreadId: 'room-a' }, { clientThreadId: 'room-a', profileId: 'Code Reviewer' }, { clientThreadId: 'room-a', profileId: 'x'.repeat(81) },
+    { clientThreadId: 'room-a', profileId: 'designer', revision: 0 }, { clientThreadId: 'room-a', profileId: null, revision: 2 },
+    { clientThreadId: 'room-a', profileId: 'designer', extra: true },
+  ]) assert.throws(() => reopened.setRoomAgent(input), { code: 'INVALID_CHAT_RECORD' }, JSON.stringify(input))
+  assert.throws(() => reopened.setRoomAgent({ clientThreadId: 'room-missing', profileId: 'designer' }), { code: 'CONVERSATION_NOT_FOUND', httpStatus: 404 })
+})
+
+test('CHAT-10: room members are objects (person, Agent profiles, earlier names) kept in order with when they joined', t => {
+  const { store } = opened(t)
+  conversation(store, 'board-room')
+  const set = store.setRoomMembers({ clientThreadId: 'board-room', ts: T + 1, members: [
+    { kind: 'user' }, { kind: 'agent', profileId: 'codex-assistant', role: 'admin' }, { profileId: 'designer', addedAt: T - 50 },
+  ] })
+  assert.deepEqual(set.members, [
+    { memberKey: 'user', kind: 'user', profileId: null, role: 'owner', addedAt: T + 1, label: null },
+    { memberKey: 'agent:codex-assistant', kind: 'agent', profileId: 'codex-assistant', role: 'admin', addedAt: T + 1, label: null },
+    { memberKey: 'agent:designer', kind: 'agent', profileId: 'designer', role: 'member', addedAt: T - 50, label: null },
+  ])
+  // Replacing the list keeps each existing member's join time; order is the new order.
+  const reordered = store.setRoomMembers({ clientThreadId: 'board-room', ts: T + 9, members: [{ profileId: 'designer' }, { kind: 'user' }, { profileId: 'researcher' }] })
+  assert.deepEqual(reordered.members.map(item => [item.memberKey, item.addedAt]), [['agent:designer', T - 50], ['user', T + 1], ['agent:researcher', T + 9]])
+  // Add: a new member goes last; an existing one changes role but keeps its place and join time.
+  const added = store.addRoomMember({ clientThreadId: 'board-room', member: { profileId: 'codex-assistant', role: 'admin' }, ts: T + 10 })
+  assert.deepEqual([added.added, added.members.at(-1).memberKey, added.members.at(-1).addedAt], [true, 'agent:codex-assistant', T + 10])
+  const promoted = store.addRoomMember({ clientThreadId: 'board-room', member: { profileId: 'designer', role: 'admin' }, ts: T + 11 })
+  assert.deepEqual([promoted.added, promoted.members[0].role, promoted.members[0].addedAt], [false, 'admin', T - 50])
+  const removed = store.removeRoomMember({ clientThreadId: 'board-room', memberKey: 'agent:researcher' })
+  assert.deepEqual([removed.removed, removed.members.map(item => item.memberKey)], [true, ['agent:designer', 'user', 'agent:codex-assistant']])
+  assert.equal(store.removeRoomMember({ clientThreadId: 'board-room', memberKey: 'agent:researcher' }).removed, false)
+  assert.deepEqual(store.listRoomMembers('board-room').members.map(item => item.memberKey), ['agent:designer', 'user', 'agent:codex-assistant'])
+
+  for (const members of [
+    [{ kind: 'user' }, { kind: 'user' }], [{ profileId: 'designer' }, { profileId: 'designer', role: 'admin' }],
+    [{ kind: 'robot' }], [{ kind: 'agent' }], [{ kind: 'user', profileId: 'designer' }], [{ profileId: 'Designer' }],
+    [{ profileId: 'designer', role: 'guest' }], [{ profileId: 'designer', label: '줄\n바꿈' }], [{ profileId: 'designer', memberKey: 'agent:other' }],
+    [{ profileId: 'designer', nickname: 'x' }], 'designer', Array.from({ length: MAX_ROOM_MEMBERS + 1 }, (_, n) => ({ profileId: `agent-${n}` })),
+  ]) assert.throws(() => store.setRoomMembers({ clientThreadId: 'board-room', members }), { code: 'INVALID_CHAT_RECORD' }, JSON.stringify(members).slice(0, 80))
+  assert.deepEqual(store.listRoomMembers('board-room').members.length, 3, 'a refused list writes nothing')
+  store.setRoomMembers({ clientThreadId: 'board-room', members: Array.from({ length: MAX_ROOM_MEMBERS }, (_, n) => ({ profileId: `agent-${n}` })) })
+  assert.throws(() => store.addRoomMember({ clientThreadId: 'board-room', member: { kind: 'user' } }), { code: 'ROOM_MEMBER_LIMIT', httpStatus: 409 })
+  assert.throws(() => store.listRoomMembers('room-missing'), { code: 'CONVERSATION_NOT_FOUND' })
+  assert.deepEqual(privateKeysIn([set, added, removed, store.getConversation('board-room')]), [])
+})
+
+test('earlier name lists become member objects: the person, linked Agents and unlinked names kept as labels', t => {
+  const { store } = opened(t)
+  conversation(store, 'legacy-room')
+  // What the screen kept: names, and roles in an object keyed by those names.
+  const participants = Object.freeze(['나', '코덱스 어시스턴트', '디자인 리뷰어', '  ', 7, '코덱스 어시스턴트', 'Codex'])
+  const participantRoles = Object.freeze({ 나: 'owner', '코덱스 어시스턴트': 'admin', '디자인 리뷰어': 'superuser' })
+  const resolveProfileId = name => ({ '코덱스 어시스턴트': 'codex-assistant', Codex: 'codex-assistant' })[name] ?? null
+  const members = roomMembersFromLegacy({ participants, participantRoles, resolveProfileId, addedAt: T })
+  assert.deepEqual(members, [
+    { kind: 'user', role: 'owner', addedAt: T },
+    { kind: 'agent', profileId: 'codex-assistant', role: 'admin', label: '코덱스 어시스턴트', addedAt: T },
+    { kind: 'agent', role: 'member', label: '디자인 리뷰어', addedAt: T },
+  ], 'two names for one Agent become one member; an unknown role falls back')
+  const saved = store.setRoomMembers({ clientThreadId: 'legacy-room', members })
+  const legacyKey = roomMemberKey({ kind: 'agent', label: '디자인 리뷰어' })
+  assert.match(legacyKey, /^legacy:[0-9a-f]{32}$/)
+  assert.deepEqual(saved.members.map(item => [item.memberKey, item.profileId, item.label]), [['user', null, null], ['agent:codex-assistant', 'codex-assistant', '코덱스 어시스턴트'], [legacyKey, null, '디자인 리뷰어']])
+  // Later the screen links the earlier name to a real Agent: remove the label-only member, add the profile.
+  store.removeRoomMember({ clientThreadId: 'legacy-room', memberKey: legacyKey })
+  store.addRoomMember({ clientThreadId: 'legacy-room', member: { profileId: 'design-reviewer', label: '디자인 리뷰어' } })
+  assert.deepEqual(store.listRoomMembers('legacy-room').members.map(item => item.memberKey), ['user', 'agent:codex-assistant', 'agent:design-reviewer'])
+  assert.deepEqual(roomMembersFromLegacy({}), [])
+  assert.deepEqual(roomMembersFromLegacy({ participants: ['나', 'x'.repeat(200)], selfName: '나' })[1].label.length, 80)
 })

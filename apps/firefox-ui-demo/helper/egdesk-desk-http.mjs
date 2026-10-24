@@ -19,6 +19,8 @@ export const DESK_BODY_LIMITS = Object.freeze({
 const BOARD = '([A-Za-z0-9][A-Za-z0-9._-]{0,127})'
 const NUMBER = '([1-9]\\d{0,15})'
 const ROUTES = [
+  // '_search' can never be a Board ID (IDs start with a letter or digit).
+  ['GET', /^\/v1\/boards\/_search$/, 'search'],
   ['GET', /^\/v1\/desk\/current$/, 'current'],
   ['PUT', /^\/v1\/desk\/current$/, 'save'],
   ['GET', /^\/v1\/desk\/generations$/, 'generations'],
@@ -31,8 +33,10 @@ const ROUTES = [
   ['GET', new RegExp(`^/v1/boards/${BOARD}/revisions$`), 'revisions'],
   ['GET', new RegExp(`^/v1/boards/${BOARD}/revisions/${NUMBER}$`), 'revision'],
   ['POST', new RegExp(`^/v1/boards/${BOARD}/revert$`), 'revert'],
+  ['POST', new RegExp(`^/v1/boards/${BOARD}/merge$`), 'merge'],
 ]
-const BODY_LIMIT = { save: 'deskState', saveBoard: 'board', import: 'import', restore: 'small', revert: 'small' }
+const BODY_LIMIT = { save: 'deskState', saveBoard: 'board', import: 'import', restore: 'small', revert: 'small', merge: 'board' }
+const QUERY_KEYS = { generations: ['limit', 'before'], revisions: ['limit', 'before'], search: ['q', 'limit'] }
 
 function httpError(code, message, httpStatus = 400) {
   return Object.assign(new Error(message), { code, httpStatus })
@@ -72,6 +76,12 @@ const isDeskPath = pathname => pathname === '/v1/desk' || pathname.startsWith('/
  * GET  /v1/boards/:id/revisions?limit=&before=  → summaries, newest first
  * GET  /v1/boards/:id/revisions/:revision       → one revision with body
  * POST /v1/boards/:id/revert {revision, expectedRevision?} → 201 new revision | 200 unchanged
+ * GET  /v1/boards/_search?q=&limit=             → {query, index, boards: [Board summary + fields, snippet]}
+ *                                                 (CTX-03: title, card names, memo text; best match first)
+ * POST /v1/boards/:id/merge {body, baseRevision, prefer?: mine|theirs}
+ *                                               → 200 {headRevision, body, hash, conflicts, clean, unchanged};
+ *                                                 writes nothing (CTX-01: save the merged body with
+ *                                                 expectedRevision = headRevision)
  */
 export async function handleDeskHttp(req, url, { store, readJson = readJsonBody, send, port = 39218 } = {}) {
   if (!isDeskPath(url.pathname)) return false
@@ -93,7 +103,7 @@ export async function handleDeskHttp(req, url, { store, readJson = readJsonBody,
     // Resolve after the await so a reopened store is the one written.
     const desk = typeof store === 'function' ? store() : store
     if (!desk) throw httpError('DESK_STORE_UNAVAILABLE', 'Local Desk storage is unavailable', 503)
-    query(url, ['generations', 'revisions'].includes(action) ? ['limit', 'before'] : [])
+    query(url, QUERY_KEYS[action] ?? [])
     let status = 200, result
     if (action === 'current') result = desk.current()
     else if (action === 'save') {
@@ -120,7 +130,13 @@ export async function handleDeskHttp(req, url, { store, readJson = readJsonBody,
       status = result.unchanged ? 200 : 201
     } else if (action === 'revisions') result = desk.boardRevisions(match[1], { limit: numberParam(url, 'limit'), before: numberParam(url, 'before') })
     else if (action === 'revision') result = desk.boardRevision(match[1], Number(match[2]))
-    else {
+    else if (action === 'search') {
+      const text = url.searchParams.get('q')
+      result = desk.searchBoards({ query: text === null ? undefined : text, limit: numberParam(url, 'limit') })
+    } else if (action === 'merge') {
+      fields(body, ['body', 'baseRevision', 'prefer'], ['body', 'baseRevision'])
+      result = desk.mergeBoard(match[1], body)
+    } else {
       fields(body, ['revision', 'expectedRevision'], ['revision'])
       result = desk.revertBoard(match[1], body)
       status = result.unchanged ? 200 : 201

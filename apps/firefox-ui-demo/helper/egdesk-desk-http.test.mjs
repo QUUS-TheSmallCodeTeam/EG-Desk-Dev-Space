@@ -207,3 +207,43 @@ test('the bridge opens the Desk store beside the others and mounts its routes af
   assert.ok(at('try { deskStore?.close() }') > at('async function shutdown() {'))
   assert.equal(path.basename(new URL('./egdesk-desk-http.mjs', import.meta.url).pathname), 'egdesk-desk-http.mjs')
 })
+
+test('Board search route answers best matches first; a Board named search is still a Board', async t => {
+  const store = fixture(t).open()
+  const api = (...args) => call({ store }, ...args)
+  await api('PUT', '/v1/boards/agenda-a', { body: board('주간 회의', { shapes: [{ id: 'l1', type: 'label', runtimeState: { text: '회의록 정리' } }] }), expectedRevision: null })
+  await api('PUT', '/v1/boards/search', { body: board('검색이라는 이름의 Board'), expectedRevision: null })
+  const found = await api('GET', `/v1/boards/_search?q=${encodeURIComponent('회의록')}&limit=5`)
+  assert.deepEqual([found.status, found.data.index, found.data.query, found.data.boards.map(item => [item.boardId, item.fields, item.snippet])],
+    [200, 'fts5-trigram', '회의록', [['agenda-a', ['notes'], '회의록 정리']]])
+  assert.deepEqual((await api('GET', `/v1/boards/_search?q=${encodeURIComponent('회의')}`)).data.boards.map(item => item.boardId), ['agenda-a'])
+  assert.equal((await api('GET', '/v1/boards/search')).data.title, '검색이라는 이름의 Board')
+  for (const [url, code] of [['/v1/boards/_search', 'INVALID_BOARD_QUERY'], ['/v1/boards/_search?q=', 'INVALID_BOARD_QUERY'], ['/v1/boards/_search?q=a&limit=0', 'DESK_HTTP_INPUT'],
+    ['/v1/boards/_search?q=a&limit=101', 'INVALID_BOARD_QUERY'], ['/v1/boards/_search?q=a&sort=new', 'DESK_HTTP_INPUT'], ['/v1/boards/_search?q=a&q=b', 'DESK_HTTP_INPUT']]) {
+    const answer = await api('GET', url)
+    assert.deepEqual([answer.status, answer.data.code], [400, code], url)
+  }
+  assert.deepEqual([(await api('POST', '/v1/boards/_search')).status], [405])
+})
+
+test('Board merge route merges an older edit onto the head without writing', async t => {
+  const store = fixture(t).open()
+  const api = (...args) => call({ store }, ...args)
+  const card = (id, x) => ({ id, geometry: { x, y: 0, width: 10, height: 10 } })
+  await api('PUT', '/v1/boards/agenda-a', { body: board('기획', { cards: [card('c1', 0)] }), expectedRevision: null })
+  await api('PUT', '/v1/boards/agenda-a', { body: board('기획', { cards: [card('c1', 0), card('c2', 50)] }), expectedRevision: 1 })
+  const mine = board('기획', { cards: [card('c1', 30)] })
+  const merged = await api('POST', '/v1/boards/agenda-a/merge', { body: mine, baseRevision: 1 })
+  assert.deepEqual([merged.status, merged.data.headRevision, merged.data.clean, merged.data.body.cards.map(item => [item.id, item.geometry.x])], [200, 2, true, [['c1', 30], ['c2', 50]]])
+  assert.equal((await api('GET', '/v1/boards/agenda-a')).data.headRevision, 2, 'nothing was written')
+  const saved = await api('PUT', '/v1/boards/agenda-a', { body: merged.data.body, expectedRevision: merged.data.headRevision })
+  assert.deepEqual([saved.status, saved.data.revision], [201, 3])
+  for (const [payload, status, code] of [
+    [{ body: mine }, 400, 'DESK_HTTP_INPUT'], [{ body: mine, baseRevision: 1, extra: true }, 400, 'DESK_HTTP_INPUT'],
+    [{ body: mine, baseRevision: 9 }, 404, 'BOARD_REVISION_NOT_FOUND'], [{ body: mine, baseRevision: 1, prefer: 'latest' }, 400, 'INVALID_BOARD_MERGE'],
+  ]) {
+    const answer = await api('POST', '/v1/boards/agenda-a/merge', payload)
+    assert.deepEqual([answer.status, answer.data.code], [status, code], JSON.stringify(payload).slice(0, 60))
+  }
+  assert.deepEqual([(await api('POST', '/v1/boards/agenda-missing/merge', { body: mine, baseRevision: 1 })).status], [404])
+})

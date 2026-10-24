@@ -7,7 +7,8 @@ import { createPrivateQaTempDirectory } from '../scripts/egdesk-qa-platform.mjs'
 import { PRIVATE_KEYS } from './egdesk-chat-store.mjs'
 import { isOwnedAndPrivate } from './egdesk-private-files.mjs'
 import {
-  DESK_RETENTION, MAX_BOARD_BODY_BYTES, MAX_DESK_STATE_BYTES, MAX_TITLE_CHARS, contentHash, openDeskStore,
+  BOARD_SEARCH_LIMITS, DESK_AUTOSAVE_MERGE_MS, DESK_RETENTION, MAX_BOARD_BODY_BYTES, MAX_DESK_STATE_BYTES, MAX_TITLE_CHARS,
+  boardSearchText, contentHash, mergeBoardBodies, openDeskStore,
 } from './egdesk-desk-store.mjs'
 
 const T0 = Date.UTC(2026, 9, 1, 12) // Noon UTC: far from any day boundary.
@@ -24,7 +25,10 @@ function fixture(t, options = {}) {
     rmSync(dataDir, { recursive: true, force: true })
   })
   const open = (extra = {}) => {
-    const store = openDeskStore({ dataDir, ownerScope: 'local-desktop-v1', now: () => clock.now, utcOffsetMinutes: 0, ...options, ...extra })
+    // The autosave window is off here so each save below is its own generation;
+    // the window has its own tests (merge: true).
+    const { merge, ...rest } = { ...options, ...extra }
+    const store = openDeskStore({ dataDir, ownerScope: 'local-desktop-v1', now: () => clock.now, utcOffsetMinutes: 0, autosaveMergeMs: merge ? undefined : 0, ...rest })
     handles.push(store)
     return store
   }
@@ -333,7 +337,7 @@ test('the Desk database is private (0600 file, 0700 directory) and everything su
   const raw = new DatabaseSync(filename, { readOnly: true })
   t.after(() => raw.close())
   assert.equal(raw.prepare('PRAGMA journal_mode').get().journal_mode, 'wal')
-  assert.equal(raw.prepare('PRAGMA user_version').get().user_version, 1)
+  assert.equal(raw.prepare('PRAGMA user_version').get().user_version, 2)
 })
 
 test('unsafe or unknown store files are refused without changing them', t => {
@@ -391,4 +395,399 @@ test('unsafe or unknown store files are refused without changing them', t => {
   openDeskStore({ dataDir: shared, ownerScope: 'x' }).close()
   chmodSync(shared, 0o755)
   rejects(() => openDeskStore({ dataDir: shared, ownerScope: 'x' }), 'INVALID_STORE_SCOPE')
+})
+
+// ── 2-RT: autosave window, chat kept once, Board search, card merge, schema v2 ──
+
+test('autosaves within 60 seconds become one recovery point; explicit saves and the next window always add one', t => {
+  const { open, clock } = fixture(t, { merge: true })
+  const store = open()
+  assert.equal(store.autosaveMergeMs, DESK_AUTOSAVE_MERGE_MS)
+  assert.equal(DESK_AUTOSAVE_MERGE_MS, 60_000)
+  const first = store.saveCurrent({ state: desk(1), parentGeneration: null })
+  assert.deepEqual([first.generation, first.merged, first.replacedGeneration], [1, false, null])
+  // Moving cards around: each autosave replaces the head of the same window.
+  clock.now = T0 + 10_000
+  const moved = store.saveCurrent({ state: desk(2), parentGeneration: 1 })
+  assert.deepEqual([moved.generation, moved.parent, moved.seq, moved.merged, moved.replacedGeneration, moved.createdAt], [2, null, 1, true, 1, T0 + 10_000])
+  rejects(() => store.generation(1), 'DESK_GENERATION_NOT_FOUND', 404)
+  // The window is anchored at its first save, so 59 s after it still merges ...
+  clock.now = T0 + 59_000
+  assert.deepEqual(Object.values((({ generation, merged }) => ({ generation, merged }))(store.saveCurrent({ state: desk(3), parentGeneration: 2 }))), [3, true])
+  // ... and 61 s after it starts a new recovery point on top of the merged one.
+  clock.now = T0 + 61_000
+  const next = store.saveCurrent({ state: desk(4), parentGeneration: 3 })
+  assert.deepEqual([next.generation, next.parent, next.seq, next.merged], [4, 3, 2, false])
+  // An explicit save always adds a row and ends the window.
+  clock.now = T0 + 62_000
+  const explicit = store.saveCurrent({ state: desk(5), parentGeneration: 4, reason: 'explicit' })
+  assert.deepEqual([explicit.generation, explicit.merged, explicit.reason], [5, false, 'explicit'])
+  clock.now = T0 + 63_000
+  assert.equal(store.saveCurrent({ state: desk(6), parentGeneration: 5 }).merged, false, 'never merged into an explicit save')
+  clock.now = T0 + 64_000
+  assert.deepEqual([store.saveCurrent({ state: desk(7), parentGeneration: 6 }).generation, store.current().state], [7, desk(7)])
+  assert.deepEqual(store.generations().generations.map(item => [item.generation, item.reason, item.parent, item.seq]),
+    [[7, 'autosave', 5, 4], [5, 'explicit', 4, 3], [4, 'autosave', 3, 2], [3, 'autosave', null, 1]])
+  // A restore is its own recovery point, and an autosave after it is too.
+  const restored = store.restore({ generation: 4 })
+  assert.deepEqual([restored.generation, restored.merged], [8, false])
+  assert.equal(store.saveCurrent({ state: desk(9), parentGeneration: 8 }).merged, false)
+  for (const autosaveMergeMs of [-1, 1.5, DAY + 1]) rejects(() => open({ ownerScope: 'bad-window', autosaveMergeMs }), 'INVALID_STORE_OPTIONS')
+})
+
+test('a head another window collided with is never merged away: the overwritten work stays in the journal', t => {
+  const { open, clock } = fixture(t, { merge: true })
+  const store = open()
+  store.saveCurrent({ state: desk(1), parentGeneration: null })
+  clock.now = T0 + 1000
+  // Window B saved on top of 1 (merging its own window), then window A, still on 1 ...
+  const b = store.saveCurrent({ state: desk(2), parentGeneration: 1 })
+  assert.deepEqual([b.generation, b.merged], [2, true])
+  clock.now = T0 + 2000
+  assert.throws(() => store.saveCurrent({ state: desk(3), parentGeneration: 1 }), error => error.code === 'DESK_GENERATION_CONFLICT' && error.generation === 2)
+  // ... retries on the latest generation: a new row, B's Desk is kept.
+  const a = store.saveCurrent({ state: desk(3), parentGeneration: 2 })
+  assert.deepEqual([a.generation, a.merged, a.parent], [3, false, 2])
+  assert.deepEqual(store.generation(2).state, desk(2))
+  // A's own next autosave in the same window merges again (A wrote 3).
+  clock.now = T0 + 3000
+  assert.deepEqual([store.saveCurrent({ state: desk(4), parentGeneration: 3 }).merged], [true])
+})
+
+const chatDesk = (messagesA, messagesB = [{ id: 'b-1', role: 'user', text: '다른 방 첫 메시지' }], extra = {}) => ({
+  ...desk(1),
+  chat: {
+    threads: [
+      { id: 'thread-a', type: 'dm', title: 'Codex', participants: ['나', 'Codex'], messages: messagesA, unreadCount: 0 },
+      { id: 'thread-b', type: 'group', title: '보드 방', messages: messagesB, unreadCount: 1 },
+      { id: 'thread-empty', type: 'dm', title: '빈 방', messages: [] },
+      { id: 'thread-none', type: 'dm', title: '목록 없음', messages: null },
+    ],
+    activeThreadId: 'thread-a', threadDrafts: {},
+  },
+  ...extra,
+})
+const message = (n, text = `메시지 ${n} ${'내용 '.repeat(50)}`) => ({ id: `a-${n}`, role: n % 2 ? 'user' : 'assistant', text, status: 'complete' })
+
+test('chat transcripts in a Desk are kept once per message: generations share them and reads return the exact state', t => {
+  const { open, file } = fixture(t, { retention: { recent: 2, dailyDays: 1, maxBytes: 512 * 1024 * 1024 } })
+  const store = open()
+  const one = chatDesk([message(1), message(2)])
+  const two = chatDesk([message(1), message(2), message(3)])
+  const three = chatDesk([message(1), message(2), message(3), message(4)])
+  store.saveCurrent({ state: one, parentGeneration: null })
+  store.saveCurrent({ state: two, parentGeneration: 1 })
+  // Same text, same key order, empty and missing lists untouched.
+  assert.equal(JSON.stringify(store.current().state), JSON.stringify(two))
+  assert.equal(JSON.stringify(store.generation(1).state), JSON.stringify(one))
+  assert.equal(store.current().bytes, Buffer.byteLength(JSON.stringify(two)), 'bytes is the size the screen sent')
+  const raw = new DatabaseSync(file(store), { readOnly: true })
+  t.after(() => raw.close())
+  const blobs = () => raw.prepare('SELECT hash, refs FROM desk_blobs ORDER BY hash').all().map(row => ({ ...row }))
+  // a-1, a-2 shared by both generations; a-3 in one; b-1 shared.
+  assert.deepEqual(blobs().map(row => row.refs).sort(), [1, 2, 2, 2])
+  assert.equal(raw.prepare("SELECT COUNT(*) AS n FROM desk_generations WHERE instr(state_json, '메시지 1') > 0").get().n, 0, 'no transcript copy inside a generation')
+  // Pruning lets go of messages nobody holds any more (recent: 2).
+  store.saveCurrent({ state: three, parentGeneration: 2 })
+  assert.deepEqual(store.generations().generations.map(item => item.generation), [3, 2])
+  assert.deepEqual(blobs().map(row => row.refs).sort(), [1, 2, 2, 2, 2])
+  store.saveCurrent({ state: desk(9), parentGeneration: 3 })
+  store.saveCurrent({ state: desk(10), parentGeneration: 4 })
+  assert.deepEqual(blobs(), [], 'a Desk without chat holds no messages')
+  // Restore brings the transcript back from an earlier generation's copy.
+  store.saveCurrent({ state: three, parentGeneration: 5 })
+  store.saveCurrent({ state: two, parentGeneration: 6 })
+  store.restore({ generation: 6 })
+  assert.equal(JSON.stringify(store.current().state), JSON.stringify(three))
+  assert.deepEqual(blobs().map(row => row.refs).sort(), [1, 2, 2, 2, 2])
+  // A missing or changed message is reported, never served.
+  const writer = new DatabaseSync(file(store))
+  writer.exec("DELETE FROM desk_blobs WHERE hash IN (SELECT hash FROM desk_blobs LIMIT 1)")
+  writer.close()
+  rejects(() => store.current(), 'STORE_CORRUPT', 500)
+  const tampered = open({ ownerScope: 'tampered-chat' })
+  tampered.saveCurrent({ state: one, parentGeneration: null })
+  const edit = new DatabaseSync(file(tampered))
+  edit.exec("DROP TRIGGER desk_blobs_fixed; UPDATE desk_blobs SET json = '{\"id\":\"a-1\",\"role\":\"user\",\"text\":\"forged\"}' WHERE json LIKE '%a-1%'")
+  edit.close()
+  rejects(() => tampered.current(), 'STORE_CORRUPT', 500)
+})
+
+test('the byte budget counts a shared chat message once', t => {
+  const long = Array.from({ length: 20 }, (_, n) => message(n + 1, `긴 메시지 ${n} ${'x'.repeat(2000)}`))
+  const states = [1, 2, 3].map(n => chatDesk(long, undefined, { note: n }))
+  const full = Buffer.byteLength(JSON.stringify(states[0]))
+  // Three full copies would not fit; one transcript plus three small Desks does.
+  const { open } = fixture(t, { retention: { recent: 10, dailyDays: 1, maxBytes: Math.floor(full * 1.5) } })
+  const store = open()
+  let parent = null
+  for (const state of states) parent = store.saveCurrent({ state, parentGeneration: parent }).generation
+  assert.deepEqual(store.generations().generations.map(item => item.generation), [3, 2, 1])
+  // A budget below one transcript keeps only the head.
+  const tight = open({ ownerScope: 'tight', retention: { recent: 10, dailyDays: 1, maxBytes: Math.floor(full / 2) } })
+  parent = null
+  for (const state of states) parent = tight.saveCurrent({ state, parentGeneration: parent }).generation
+  assert.deepEqual(tight.generations().generations.map(item => item.generation), [3])
+  assert.equal(JSON.stringify(tight.current().state), JSON.stringify(states[2]))
+})
+
+const searchBoard = (title, { cards = [], labels = [], memos } = {}) => ({
+  version: 1, savedAt: T0,
+  agenda: { id: 'agenda-x', title, memberCardIds: cards.map(card => card.id), contextBindings: [] },
+  cards, shapes: labels.map((text, index) => ({ id: `label-${index}`, type: 'label', geometry: { x: 0, y: 0, width: 10, height: 10 }, runtimeState: { transform: '', text } })),
+  ...(memos ? { memos } : {}),
+})
+const browserCard = (id, uri, pageTitle) => ({ id, type: 'browser', geometry: { x: 0, y: 0, width: 10, height: 10 }, runtimeState: { uri, title: pageTitle } })
+
+test('Board search finds title, card names and memo text, Korean short words included, best match first', t => {
+  const { open, clock } = fixture(t)
+  const store = open()
+  assert.equal(store.searchIndex, 'fts5-trigram')
+  store.saveBoard('agenda-weekly', { body: searchBoard('주간 회의', { cards: [browserCard('c1', 'https://docs.example.com/%EA%B8%B0%ED%9A%8D?token=abc', '분기 기획서')], labels: ['회의록 정리 담당: 민수'] }), expectedRevision: null })
+  clock.now = T0 + 1000
+  store.saveBoard('agenda-design', { body: searchBoard('Design Review', { cards: [{ id: 'f1', type: 'file', runtimeState: { root: { name: '디자인 시안' } } }], memos: [{ id: 'm1', text: '회의 전에 색 대비 확인', replies: [{ id: 'r1', text: 'Figma 링크 첨부' }] }] }), expectedRevision: null })
+  clock.now = T0 + 2000
+  store.saveBoard('agenda-misc', { body: searchBoard('기타', { labels: ['100% 완료_표시'] }), expectedRevision: null })
+  const ids = query => store.searchBoards({ query }).boards.map(board => board.boardId)
+  // Two-letter Korean words match as substrings; the title match ranks first.
+  assert.deepEqual(ids('회의'), ['agenda-weekly', 'agenda-design'])
+  assert.deepEqual(ids('회의록'), ['agenda-weekly'])
+  assert.deepEqual(ids('기획서'), ['agenda-weekly'], 'Browser page title is a card name')
+  assert.deepEqual(ids('docs.example.com/기획'), ['agenda-weekly'], 'the site and decoded path are searchable')
+  assert.deepEqual(ids('token=abc'), [], 'the query string is not indexed')
+  assert.deepEqual(ids('figma'), ['agenda-design'], 'memo replies, any letter case')
+  assert.deepEqual(ids('디자인 시안'), ['agenda-design'])
+  assert.deepEqual(ids('회의 대비'), ['agenda-design'], 'every word must appear')
+  assert.deepEqual(ids('100%'), ['agenda-misc'])
+  assert.deepEqual(ids('0%'), ['agenda-misc'])
+  assert.deepEqual(ids('완료_'), ['agenda-misc'], '% and _ are plain letters')
+  assert.deepEqual(ids('_표'), ['agenda-misc'])
+  assert.deepEqual(ids('없는말'), [])
+  const hit = store.searchBoards({ query: '회의록' })
+  assert.deepEqual(hit.boards[0].fields, ['notes'])
+  assert.equal(hit.boards[0].snippet, '회의록 정리 담당: 민수')
+  assert.deepEqual([hit.index, hit.query, hit.boards[0].title, hit.boards[0].headRevision], ['fts5-trigram', '회의록', '주간 회의', 1])
+  assert.deepEqual(store.searchBoards({ query: '주간' }).boards[0].snippet, null, 'a title-only hit needs no snippet')
+  assert.equal(store.searchBoards({ query: '회의', limit: 1 }).boards.length, 1)
+
+  // The index follows every head change: edits, a title change alone, revert, imports.
+  clock.now = T0 + 3000
+  store.saveBoard('agenda-weekly', { body: searchBoard('주간 회의', { labels: ['안건 확정'] }), expectedRevision: 1 })
+  assert.deepEqual([ids('회의록'), ids('안건')], [[], ['agenda-weekly']])
+  store.saveBoard('agenda-weekly', { body: searchBoard('주간 회의', { labels: ['안건 확정'] }), expectedRevision: 2, title: '월간 점검' })
+  assert.deepEqual([ids('월간 점검'), ids('주간')], [['agenda-weekly'], []])
+  store.revertBoard('agenda-weekly', { revision: 1 })
+  assert.deepEqual([ids('회의록'), ids('안건')], [['agenda-weekly'], []])
+  store.importPrefs({ boards: [{ boardId: 'agenda-old', title: '예전 보드', body: searchBoard('예전 보드', { labels: ['가져온 메모'] }) }] })
+  store.importPortable({ boards: [{ boardId: 'agenda-copy', title: '복사본', body: searchBoard('복사본', { labels: ['묶음 메모'] }) }] })
+  assert.deepEqual([ids('가져온'), ids('묶음 메모')], [['agenda-old'], ['agenda-copy']])
+
+  for (const query of [undefined, '', '   ', 'x'.repeat(BOARD_SEARCH_LIMITS.queryChars + 1), 'a b c d e f g h i', 5]) rejects(() => store.searchBoards({ query }), 'INVALID_BOARD_QUERY')
+  for (const limit of [0, 101, 1.5]) rejects(() => store.searchBoards({ query: '회의', limit }), 'INVALID_BOARD_QUERY')
+  assert.deepEqual(boardSearchText({ cards: [null, { type: 'browser', runtimeState: { uri: 'javascript:alert(1)', title: 7 } }], shapes: [{ type: 'rect' }], memos: 'x' }), { cards: '', notes: '' })
+})
+
+test('three-way Board merge: different cards combine, same card both changed is a listed conflict, deletes never beat changes', () => {
+  const card = (id, x, extra = {}) => ({ id, type: 'file', geometry: { x, y: 0, width: 100, height: 100 }, ...extra })
+  const body = (cards, agenda = {}, extra = {}) => ({ version: 1, savedAt: T0, agenda: { id: 'agenda-a', title: '기획', memberCardIds: cards.map(item => item.id), contextBindings: [], ...agenda }, cards, shapes: [], ...extra })
+  const base = Object.freeze(body([card('c1', 0), card('c2', 100), card('c3', 200)]))
+  // Mine moved c1, deleted c3, added c4; theirs edited c2 and added c5 (another window).
+  const mine = body([card('c1', 50), card('c2', 100), card('c4', 400)], {}, { savedAt: T0 + 5 })
+  const theirs = body([card('c1', 0), card('c2', 100, { title: '수정' }), card('c3', 200), card('c5', 500)], {}, { savedAt: T0 + 9 })
+  const clean = mergeBoardBodies({ base, mine, theirs })
+  assert.equal(clean.clean, true)
+  assert.deepEqual(clean.conflicts, [])
+  assert.deepEqual(clean.body.cards.map(item => [item.id, item.geometry.x, item.title ?? null]), [['c1', 50, null], ['c2', 100, '수정'], ['c5', 500, null], ['c4', 400, null]])
+  assert.deepEqual(clean.body.agenda.memberCardIds, ['c1', 'c2', 'c5', 'c4'])
+  assert.equal(clean.body.savedAt, T0 + 9)
+  assert.deepEqual(mergeBoardBodies({ base, mine: base, theirs }).body, theirs, 'an untouched side takes the other side')
+
+  // Both moved c1: mine wins by default, theirs when asked; the conflict carries both.
+  const both = mergeBoardBodies({ base, mine: body([card('c1', 50), card('c2', 100), card('c3', 200)]), theirs: body([card('c1', 70), card('c2', 100), card('c3', 200)]) })
+  assert.deepEqual([both.clean, both.body.cards[0].geometry.x], [false, 50])
+  assert.deepEqual(both.conflicts.map(item => [item.kind, item.id, item.reason, item.kept, item.mine.geometry.x, item.theirs.geometry.x]), [['card', 'c1', 'both-changed', 'mine', 50, 70]])
+  assert.equal(mergeBoardBodies({ base, mine: body([card('c1', 50), card('c2', 100), card('c3', 200)]), theirs: body([card('c1', 70), card('c2', 100), card('c3', 200)]), prefer: 'theirs' }).body.cards[0].geometry.x, 70)
+
+  // Mine deleted c2 while theirs changed it: the changed card stays (and stays a member).
+  const deleted = mergeBoardBodies({ base, mine: body([card('c1', 0), card('c3', 200)]), theirs: body([card('c1', 0), card('c2', 999), card('c3', 200)]) })
+  assert.deepEqual(deleted.body.cards.map(item => item.id), ['c1', 'c2', 'c3'])
+  assert.deepEqual(deleted.body.agenda.memberCardIds, ['c1', 'c2', 'c3'])
+  assert.deepEqual(deleted.conflicts.map(item => [item.id, item.reason, item.kept, item.mine]), [['c2', 'mine-deleted', 'theirs', null]])
+  const theirsDeleted = mergeBoardBodies({ base, mine: body([card('c1', 0), card('c2', 5), card('c3', 200)]), theirs: body([card('c1', 0), card('c3', 200)]) })
+  assert.deepEqual(theirsDeleted.conflicts.map(item => [item.id, item.reason, item.kept]), [['c2', 'theirs-deleted', 'mine']])
+
+  // Both added the same id differently; both renamed the Board; marks merge the same way.
+  const added = mergeBoardBodies({ base, mine: body([...base.cards, card('c9', 1)], { title: '기획안' }), theirs: body([...base.cards, card('c9', 2)], { title: '기획 v2' }) })
+  assert.deepEqual(added.conflicts.map(item => [item.kind, item.id ?? item.path, item.reason, item.kept]), [['field', 'agenda.title', 'both-changed', 'mine'], ['card', 'c9', 'both-added', 'mine']])
+  const marks = mergeBoardBodies({ base: { shapes: [{ id: 's1', type: 'rect' }] }, mine: { shapes: [{ id: 's1', type: 'rect' }, { id: 's2', type: 'label' }] }, theirs: { shapes: [] } })
+  assert.deepEqual(marks.body.shapes.map(item => item.id), ['s2'])
+  // No common base: everything both added.
+  assert.deepEqual(mergeBoardBodies({ base: null, mine: body([card('c1', 0)]), theirs: body([card('c2', 0)]) }).body.cards.map(item => item.id), ['c2', 'c1'])
+  const refuse = input => assert.throws(() => mergeBoardBodies(input), error => error.code === 'INVALID_BOARD_MERGE')
+  refuse({ base, mine: null, theirs })
+  refuse({ base, mine, theirs, prefer: 'newest' })
+  refuse({ base, mine: body([card('c1', 0), card('c1', 1)]), theirs })
+  refuse({ base, mine: { cards: [{ type: 'file' }] }, theirs })
+  refuse({ base, mine: { cards: 'c1' }, theirs })
+  assert.deepEqual(base.cards.map(item => item.geometry.x), [0, 100, 200], 'inputs are not changed')
+})
+
+test('mergeBoard merges an edit that started from an older revision onto the head without writing, then the merged body saves', t => {
+  const { open } = fixture(t)
+  const store = open()
+  const card = (id, x) => ({ id, type: 'file', geometry: { x, y: 0, width: 100, height: 100 } })
+  const body = cards => ({ version: 1, savedAt: T0, agenda: { id: 'agenda-a', title: '기획', memberCardIds: cards.map(item => item.id), contextBindings: [] }, cards, shapes: [] })
+  store.saveBoard('agenda-a', { body: body([card('c1', 0), card('c2', 100)]), expectedRevision: null })
+  store.saveBoard('agenda-a', { body: body([card('c1', 0), card('c2', 100), card('c3', 300)]), expectedRevision: 1 })
+  const windowA = body([card('c1', 40), card('c2', 100)])
+  rejects(() => store.saveBoard('agenda-a', { body: windowA, expectedRevision: 1 }), 'BOARD_REVISION_CONFLICT', 409)
+  const merged = store.mergeBoard('agenda-a', { body: windowA, baseRevision: 1 })
+  assert.deepEqual([merged.baseRevision, merged.headRevision, merged.clean, merged.unchanged], [1, 2, true, false])
+  assert.deepEqual(merged.body.cards.map(item => [item.id, item.geometry.x]), [['c1', 40], ['c2', 100], ['c3', 300]])
+  assert.equal(merged.hash, contentHash(merged.body))
+  assert.equal(store.boardRevisions('agenda-a').revisions.length, 2, 'merging writes nothing')
+  assert.equal(store.saveBoard('agenda-a', { body: merged.body, expectedRevision: merged.headRevision }).revision, 3)
+  assert.equal(store.mergeBoard('agenda-a', { body: merged.body, baseRevision: 3 }).unchanged, true)
+  rejects(() => store.mergeBoard('agenda-a', { body: windowA, baseRevision: 9 }), 'BOARD_REVISION_NOT_FOUND', 404)
+  rejects(() => store.mergeBoard('agenda-missing', { body: windowA, baseRevision: 1 }), 'BOARD_NOT_FOUND', 404)
+  rejects(() => store.mergeBoard('agenda-a', { body: { ...windowA, secret: 'x' }, baseRevision: 1 }), 'PRIVATE_BOARD_PAYLOAD')
+  assert.deepEqual(privateKeysIn([merged, store.searchBoards({ query: '기획' })]), [])
+})
+
+// Frozen copy of the schema shipped as user_version 1.
+const DESK_V1_SCHEMA = `
+    CREATE TABLE desk_generations (
+      generation INTEGER PRIMARY KEY AUTOINCREMENT,
+      parent INTEGER, seq INTEGER NOT NULL CHECK (seq > 0), state_hash TEXT NOT NULL,
+      created INTEGER NOT NULL,
+      reason TEXT NOT NULL CHECK (reason IN ('autosave','explicit','import','restore')),
+      restored_from INTEGER, card_count INTEGER, shape_count INTEGER,
+      bytes INTEGER NOT NULL CHECK (bytes > 0 AND bytes <= 4194304),
+      state_json TEXT NOT NULL
+    );
+    CREATE TRIGGER desk_generations_immutable BEFORE UPDATE ON desk_generations
+      BEGIN SELECT RAISE(ABORT, 'desk generations are immutable'); END;
+    CREATE TABLE boards (
+      board_id TEXT PRIMARY KEY, title TEXT NOT NULL, head_revision INTEGER NOT NULL,
+      metadata_version INTEGER NOT NULL CHECK (metadata_version > 0),
+      lifecycle TEXT NOT NULL CHECK (lifecycle IN ('active','archived')),
+      created INTEGER NOT NULL, updated INTEGER NOT NULL,
+      FOREIGN KEY(board_id, head_revision) REFERENCES board_revisions(board_id, revision) DEFERRABLE INITIALLY DEFERRED
+    );
+    CREATE TABLE board_revisions (
+      board_id TEXT NOT NULL, revision INTEGER NOT NULL CHECK (revision > 0),
+      parent_revision INTEGER, hash TEXT NOT NULL,
+      author TEXT NOT NULL CHECK (author IN ('user','import')),
+      reverted_from INTEGER,
+      bytes INTEGER NOT NULL CHECK (bytes > 0 AND bytes <= 4194304),
+      body_json TEXT NOT NULL, created INTEGER NOT NULL,
+      PRIMARY KEY(board_id, revision),
+      FOREIGN KEY(board_id) REFERENCES boards(board_id) DEFERRABLE INITIALLY DEFERRED
+    );
+    CREATE TRIGGER board_revisions_immutable BEFORE UPDATE ON board_revisions
+      BEGIN SELECT RAISE(ABORT, 'board revisions are immutable'); END;
+    CREATE TRIGGER board_revisions_kept BEFORE DELETE ON board_revisions
+      BEGIN SELECT RAISE(ABORT, 'board revisions are kept'); END;
+    CREATE TABLE desk_imports (import_hash TEXT PRIMARY KEY, created INTEGER NOT NULL, result_json TEXT NOT NULL);
+    CREATE TABLE store_meta (name TEXT PRIMARY KEY, value TEXT NOT NULL);
+`
+function writeDeskV1(open, file, ownerScope) {
+  // Created through the store so the file is private, then rebuilt as v1.
+  const created = open({ ownerScope })
+  const filename = file(created)
+  created.close()
+  for (const suffix of ['', '-wal', '-shm']) rmSync(filename + suffix, { force: true })
+  writeFileSync(filename, '', { mode: 0o600 })
+  const db = new DatabaseSync(filename)
+  db.exec('PRAGMA journal_mode=WAL;')
+  db.exec(`BEGIN; ${DESK_V1_SCHEMA} PRAGMA user_version=1; COMMIT;`)
+  const state = chatDesk([message(1), message(2)])
+  const stateJson = JSON.stringify(state)
+  db.prepare('INSERT INTO desk_generations (parent, seq, state_hash, created, reason, restored_from, card_count, shape_count, bytes, state_json) VALUES (NULL, 1, ?, ?, ?, NULL, 1, 0, ?, ?)').run(contentHash(state), T0, 'autosave', Buffer.byteLength(stateJson), stateJson)
+  const old = searchBoard('예전 회의', { labels: ['v1에서 쓴 메모'] })
+  const oldJson = JSON.stringify(old)
+  db.exec('BEGIN')
+  db.prepare("INSERT INTO boards VALUES ('agenda-v1', '예전 회의', 1, 1, 'active', ?, ?)").run(T0, T0)
+  db.prepare("INSERT INTO board_revisions VALUES ('agenda-v1', 1, NULL, ?, 'user', NULL, ?, ?, ?)").run(contentHash(old), Buffer.byteLength(oldJson), oldJson, T0)
+  db.exec('COMMIT')
+  db.close()
+  return { filename, state, old }
+}
+
+test('a v1 Desk database is backed up, then opens as v2 with every generation and Board kept and searchable', t => {
+  const { open, file, clock } = fixture(t)
+  const { filename, state, old } = writeDeskV1(open, file, 'desk-v1')
+  const store = open({ ownerScope: 'desk-v1' })
+  assert.equal(JSON.stringify(store.current().state), JSON.stringify(state), 'a v1 generation keeps its full text and reads as before')
+  assert.deepEqual(store.board('agenda-v1').head.body, old)
+  assert.deepEqual(store.searchBoards({ query: 'v1에서' }).boards.map(board => board.boardId), ['agenda-v1'], 'existing Boards are indexed during the upgrade')
+  clock.now = T0 + 1000
+  const next = store.saveCurrent({ state: chatDesk([message(1), message(2), message(3)]), parentGeneration: 1 })
+  assert.deepEqual([next.generation, next.parent, next.seq], [2, 1, 2])
+  assert.deepEqual(store.generation(1).state, state)
+  store.close()
+  const raw = new DatabaseSync(filename, { readOnly: true })
+  assert.equal(raw.prepare('PRAGMA user_version').get().user_version, 2)
+  assert.equal(raw.prepare('SELECT chat_refs_json FROM desk_generations WHERE generation=1').get().chat_refs_json, null)
+  raw.close()
+  const backup = `${filename}.v1.bak`
+  assert.ok(isOwnedAndPrivate(backup, statSync(backup), 0o077))
+  const copy = new DatabaseSync(backup, { readOnly: true })
+  assert.deepEqual([copy.prepare('PRAGMA user_version').get().user_version, copy.prepare('SELECT COUNT(*) AS n FROM desk_generations').get().n], [1, 1])
+  copy.close()
+  // Reopening v2 neither migrates again nor rewrites the backup.
+  const before = readFileSync(backup)
+  const again = open({ ownerScope: 'desk-v1' })
+  assert.equal(again.current().generation, 2)
+  assert.deepEqual(readFileSync(backup), before)
+
+  // An incomplete v1 or v2 schema fails closed: no backup, no migration, no reset.
+  const broken = writeDeskV1(open, file, 'desk-v1-broken')
+  const edit = new DatabaseSync(broken.filename)
+  edit.exec('DROP TABLE desk_imports')
+  edit.close()
+  rejects(() => open({ ownerScope: 'desk-v1-broken' }), 'STORE_CORRUPT')
+  assert.equal(existsSync(`${broken.filename}.v1.bak`), false)
+  const v2 = open({ ownerScope: 'desk-v2-broken' })
+  const v2File = file(v2)
+  v2.close()
+  const drop = new DatabaseSync(v2File)
+  drop.exec('DROP TABLE board_search')
+  drop.close()
+  rejects(() => open({ ownerScope: 'desk-v2-broken' }), 'STORE_CORRUPT')
+  const meta = open({ ownerScope: 'desk-v2-meta' })
+  const metaFile = file(meta)
+  meta.close()
+  const unmark = new DatabaseSync(metaFile)
+  unmark.exec("DELETE FROM store_meta WHERE name='board_search'")
+  unmark.close()
+  rejects(() => open({ ownerScope: 'desk-v2-meta' }), 'STORE_CORRUPT')
+})
+
+test('without FTS5 the same search runs on a plain index (substring match for every word)', t => {
+  const { open, file } = fixture(t)
+  const created = open({ ownerScope: 'plain-search' })
+  created.saveBoard('agenda-weekly', { body: searchBoard('주간 회의', { labels: ['회의록 정리'] }), expectedRevision: null })
+  const filename = file(created)
+  created.close()
+  // What a SQLite build without FTS5 would have made.
+  const raw = new DatabaseSync(filename)
+  raw.exec(`BEGIN;
+    CREATE TABLE board_search_plain (board_id TEXT PRIMARY KEY, title TEXT NOT NULL, cards TEXT NOT NULL, notes TEXT NOT NULL);
+    INSERT INTO board_search_plain SELECT board_id, title, cards, notes FROM board_search;
+    DROP TABLE board_search;
+    ALTER TABLE board_search_plain RENAME TO board_search;
+    UPDATE store_meta SET value='plain' WHERE name='board_search';
+    COMMIT;`)
+  raw.close()
+  const store = open({ ownerScope: 'plain-search' })
+  assert.equal(store.searchIndex, 'plain')
+  store.saveBoard('agenda-design', { body: searchBoard('Design Review', { labels: ['회의 전 확인'] }), expectedRevision: null })
+  const ids = query => store.searchBoards({ query }).boards.map(board => board.boardId)
+  assert.deepEqual(ids('회의록'), ['agenda-weekly'])
+  assert.deepEqual(ids('회의'), ['agenda-weekly', 'agenda-design'], 'title match first')
+  assert.deepEqual(ids('Design 확인'), ['agenda-design'])
+  assert.equal(store.searchBoards({ query: '회의록' }).index, 'plain')
+  store.saveBoard('agenda-weekly', { body: searchBoard('주간 회의', { labels: ['안건'] }), expectedRevision: 1 })
+  assert.deepEqual([ids('회의록'), ids('안건')], [[], ['agenda-weekly']])
 })

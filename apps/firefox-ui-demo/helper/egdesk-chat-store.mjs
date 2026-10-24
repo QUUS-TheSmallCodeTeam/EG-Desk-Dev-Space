@@ -4,7 +4,7 @@ import path from 'node:path'
 import { DatabaseSync } from 'node:sqlite'
 import { isOwnedAndPrivate } from './egdesk-private-files.mjs'
 
-const VERSION = 2
+const VERSION = 3
 const MAX_RECORD_BYTES = 16 * 1024 * 1024
 const MAX_IMPORT_BYTES = 64 * 1024 * 1024
 const TERMINAL_RUN = new Set(['completed', 'failed', 'interrupted', 'cancelled'])
@@ -23,6 +23,13 @@ function fail(code, message, httpStatus = 400, cause) {
 const digest = value => createHash('sha256').update(value).digest('hex')
 const hash = value => digest(JSON.stringify(value))
 const own = (object, key) => Object.hasOwn(object, key)
+export const ROOM_MEMBER_KINDS = Object.freeze(['user', 'agent'])
+export const ROOM_MEMBER_ROLES = Object.freeze(['owner', 'admin', 'member'])
+export const MAX_ROOM_MEMBERS = 64
+const MEMBER_LABEL_CHARS = 80
+// Same rule as the profile store's Agent profile IDs (egdesk-profile-store.mjs PROFILE_ID).
+const PROFILE_ID = /^[a-z0-9][a-z0-9-]{0,79}$/
+const LINE_BAD = /[\u0000-\u001f\u007f\u2028\u2029]/
 
 function shape(value, keys) {
   if (!value || typeof value !== 'object' || Array.isArray(value) || Object.keys(value).some(key => !keys.includes(key))) {
@@ -122,7 +129,80 @@ function thread(row, session = { stateless: false, forkedFrom: null }) {
     // null until the first send binds the conversation to an engine.
     engineId: row.engine_id ?? null, engineProfileId: row.engine_profile_id ?? null,
     stateless: session.stateless, forkedFrom: session.forkedFrom,
+    // CHAT-01: the Agent picked for this room (not the engine account slot above).
+    agent: row.agent_profile_id ? { profileId: row.agent_profile_id, revision: row.agent_profile_revision ?? null, setAt: row.agent_set_at ?? null } : null,
   }
+}
+
+// ── Room members (CHAT-10): objects, never name strings or name-keyed maps ──
+
+function memberLabel(value) {
+  if (value === undefined || value === null) return null
+  if (typeof value !== 'string') fail('INVALID_CHAT_RECORD', 'Member label must be text')
+  const text = value.normalize('NFC').trim()
+  if (!text || Array.from(text).length > MEMBER_LABEL_CHARS || LINE_BAD.test(text)) fail('INVALID_CHAT_RECORD', `Member label must be a single line of 1–${MEMBER_LABEL_CHARS} characters`)
+  return text
+}
+/**
+ * One room member, checked. kind 'user' is the person (one per room, default
+ * role owner); kind 'agent' names an Agent profile by profileId (default role
+ * member). An earlier name that is not linked to an Agent yet is kept as an
+ * Agent member with a label only. memberKey is derived, never chosen:
+ * 'user', 'agent:<profileId>' or 'legacy:<hash of label>'. addedAt stays
+ * undefined when not given (the writer keeps the saved time or uses now).
+ */
+function normalizeMember(input) {
+  shape(input, ['memberKey', 'kind', 'profileId', 'role', 'addedAt', 'label'])
+  const kind = input.kind ?? (input.profileId ? 'agent' : undefined)
+  if (!ROOM_MEMBER_KINDS.includes(kind)) fail('INVALID_CHAT_RECORD', 'Member kind must be user or agent')
+  let profileId = null
+  if (input.profileId !== undefined && input.profileId !== null) {
+    if (kind === 'user') fail('INVALID_CHAT_RECORD', 'The person is not an Agent profile')
+    if (typeof input.profileId !== 'string' || !PROFILE_ID.test(input.profileId)) fail('INVALID_CHAT_RECORD', 'Member profileId must be an Agent profile ID')
+    profileId = input.profileId
+  }
+  const label = memberLabel(input.label)
+  if (kind === 'agent' && !profileId && !label) fail('INVALID_CHAT_RECORD', 'An Agent member needs a profileId (or, for an earlier name, a label)')
+  const role = input.role ?? (kind === 'user' ? 'owner' : 'member')
+  if (!ROOM_MEMBER_ROLES.includes(role)) fail('INVALID_CHAT_RECORD', 'Member role must be owner, admin or member')
+  const addedAt = input.addedAt === undefined ? undefined : time(input.addedAt, 'addedAt')
+  const memberKey = kind === 'user' ? 'user' : profileId ? `agent:${profileId}` : `legacy:${digest(label).slice(0, 32)}`
+  if (input.memberKey !== undefined && input.memberKey !== memberKey) fail('INVALID_CHAT_RECORD', 'memberKey does not match the member')
+  return { memberKey, kind, profileId, role, addedAt, label }
+}
+/** The memberKey a member input would be saved under. */
+export function roomMemberKey(member) {
+  return normalizeMember(member).memberKey
+}
+/**
+ * Earlier screens kept room members as names ('나', '디자인 리뷰어') with roles
+ * in an object keyed by those names. This turns them into member inputs for
+ * setRoomMembers: selfName becomes the person, resolveProfileId(name) links a
+ * name to an Agent profile (null when it cannot), and an unlinked name stays
+ * a label-only Agent member. Two names linked to one profile become one
+ * member. Pure; nothing is saved and the inputs are not changed.
+ */
+export function roomMembersFromLegacy({ participants, participantRoles, selfName = '나', resolveProfileId = () => null, addedAt } = {}) {
+  const clean = name => typeof name === 'string' ? Array.from(name.normalize('NFC').replace(/[\u0000-\u001f\u007f\u2028\u2029]+/g, ' ').trim()).slice(0, MEMBER_LABEL_CHARS).join('').trim() : ''
+  const roles = participantRoles && typeof participantRoles === 'object' && !Array.isArray(participantRoles) ? participantRoles : {}
+  const members = [], keys = new Set()
+  for (const raw of Array.isArray(participants) ? participants : []) {
+    const name = clean(raw)
+    if (!name) continue
+    const given = typeof raw === 'string' && own(roles, raw) ? roles[raw] : undefined
+    const self = name === clean(selfName)
+    const role = ROOM_MEMBER_ROLES.includes(given) ? given : self ? 'owner' : 'member'
+    const resolved = self ? null : resolveProfileId(name)
+    const member = self ? { kind: 'user', role }
+      : typeof resolved === 'string' && PROFILE_ID.test(resolved) ? { kind: 'agent', profileId: resolved, role, label: name }
+        : { kind: 'agent', role, label: name }
+    if (addedAt !== undefined) member.addedAt = addedAt
+    const key = roomMemberKey(member)
+    if (keys.has(key)) continue
+    keys.add(key)
+    members.push(member)
+  }
+  return members
 }
 function savedEvent(row, db) {
   if (!row) return null
@@ -219,6 +299,7 @@ const V1_TABLES = `
     );
 `
 const REQUIRED_TABLES = ['threads', 'events', 'event_refs', 'messages', 'runs', 'requests', 'native_runs', 'native_messages', 'imports']
+const V3_TABLES = [...REQUIRED_TABLES, 'room_members']
 // v2 only adds engine binding columns. Every v1 conversation and run was Codex;
 // a thread without a native conversation was never sent and stays unbound.
 const V2_UPGRADE = `
@@ -233,12 +314,31 @@ const V2_UPGRADE = `
     CREATE INDEX threads_engine ON threads(engine_id, updated_at DESC);
 `
 const V2_COLUMNS = { threads: ['engine_id', 'engine_profile_id', 'engine_bound_at'], runs: ['engine_id', 'engine_version', 'engine_profile_id'] }
+// v3 (CHAT-01, CHAT-10) adds the Agent picked for each room (profileId and the
+// profile revision it was picked at) and room members as objects. Additive
+// only: every v2 call answers as before, threads gain an agent field.
+const V3_UPGRADE = `
+    ALTER TABLE threads ADD COLUMN agent_profile_id TEXT;
+    ALTER TABLE threads ADD COLUMN agent_profile_revision INTEGER;
+    ALTER TABLE threads ADD COLUMN agent_set_at INTEGER;
+    CREATE TABLE room_members (
+      local_conversation_id TEXT NOT NULL, member_key TEXT NOT NULL,
+      kind TEXT NOT NULL CHECK (kind IN ('user','agent')),
+      profile_id TEXT, label TEXT,
+      role TEXT NOT NULL CHECK (role IN ('owner','admin','member')),
+      added_at INTEGER NOT NULL, position INTEGER NOT NULL,
+      PRIMARY KEY(local_conversation_id, member_key),
+      FOREIGN KEY(local_conversation_id) REFERENCES threads(local_conversation_id)
+    );
+    CREATE INDEX room_members_profile ON room_members(profile_id);
+`
+const V3_COLUMNS = { threads: [...V2_COLUMNS.threads, 'agent_profile_id', 'agent_profile_revision', 'agent_set_at'], runs: V2_COLUMNS.runs }
 
-// Older builds refuse a v2 file (closed, never reset), so the exact v1 data is
+// Older builds refuse a newer file (closed, never reset), so the exact data is
 // kept beside it first. VACUUM INTO writes one consistent copy, WAL included,
 // into a new private file; nothing is migrated unless the copy completed.
-function backupV1(db, filename) {
-  const target = `${filename}.v1.bak`
+function backupVersion(db, filename, version) {
+  const target = `${filename}.v${version}.bak`
   const temporary = `${target}.${randomUUID()}.tmp`
   try {
     closeSync(openSync(temporary, constants.O_CREAT | constants.O_EXCL | constants.O_WRONLY | (constants.O_NOFOLLOW || 0), 0o600))
@@ -259,28 +359,28 @@ function initialize(db, filename) {
   if (db.prepare('PRAGMA synchronous').get().synchronous !== 2) fail('STORE_OPEN_FAILED', 'FULL durability could not be enabled', 500)
   if (db.prepare('PRAGMA quick_check').get().quick_check !== 'ok') fail('STORE_CORRUPT', 'Chat database failed integrity check; database was not reset', 500)
   const version = db.prepare('PRAGMA user_version').get().user_version
-  const tablesPresent = () => {
+  const tablesPresent = (required = REQUIRED_TABLES) => {
     const found = new Set(db.prepare("SELECT name FROM sqlite_master WHERE type='table'").all().map(row => row.name))
-    return REQUIRED_TABLES.every(name => found.has(name))
+    return required.every(name => found.has(name))
   }
+  const columnsPresent = columns => Object.entries(columns).every(([table, names]) => {
+    const found = new Set(db.prepare(`PRAGMA table_info(${table})`).all().map(row => row.name))
+    return names.every(name => found.has(name))
+  })
   if (version === VERSION) {
-    const columnsPresent = Object.entries(V2_COLUMNS).every(([table, names]) => {
-      const found = new Set(db.prepare(`PRAGMA table_info(${table})`).all().map(row => row.name))
-      return names.every(name => found.has(name))
-    })
-    if (!tablesPresent() || !columnsPresent) fail('STORE_CORRUPT', 'Chat schema is incomplete; database was not reset', 500)
+    if (!tablesPresent(V3_TABLES) || !columnsPresent(V3_COLUMNS)) fail('STORE_CORRUPT', 'Chat schema is incomplete; database was not reset', 500)
     return
   }
-  if (version === 1) {
-    if (!tablesPresent()) fail('STORE_CORRUPT', 'Chat schema is incomplete; database was not reset', 500)
-    backupV1(db, filename)
+  if (version === 1 || version === 2) {
+    if (!tablesPresent() || (version === 2 && !columnsPresent(V2_COLUMNS))) fail('STORE_CORRUPT', 'Chat schema is incomplete; database was not reset', 500)
+    backupVersion(db, filename, version)
     db.exec('BEGIN IMMEDIATE')
     try {
-      db.exec(`${V2_UPGRADE} PRAGMA user_version=${VERSION};`)
+      db.exec(`${version === 1 ? V2_UPGRADE : ''} ${V3_UPGRADE} PRAGMA user_version=${VERSION};`)
       db.exec('COMMIT')
     } catch (error) {
       try { db.exec('ROLLBACK') } catch { /* Preserve original failure. */ }
-      fail('STORE_MIGRATION_FAILED', 'Chat history could not be upgraded; the v1 database was kept unchanged', 500, error)
+      fail('STORE_MIGRATION_FAILED', `Chat history could not be upgraded; the v${version} database was kept unchanged`, 500, error)
     }
     return
   }
@@ -288,6 +388,7 @@ function initialize(db, filename) {
   db.exec(`BEGIN IMMEDIATE;
     ${V1_TABLES}
     ${V2_UPGRADE}
+    ${V3_UPGRADE}
     PRAGMA user_version=${VERSION};
     COMMIT;`)
 }
@@ -494,6 +595,26 @@ export function openChatStore({ dataDir, ownerScope } = {}) {
     fail('LOCAL_RUN_ID_REQUIRED', 'Checkpoint requires localRunId, native runId, or requestId')
   }
 
+  // ── Room Agent and members (v3) ──
+  const memberOf = row => ({ memberKey: row.member_key, kind: row.kind, profileId: row.profile_id, role: row.role, addedAt: row.added_at, label: row.label })
+  const membersOf = localId => db.prepare('SELECT * FROM room_members WHERE local_conversation_id=? ORDER BY position, member_key').all(localId).map(memberOf)
+  const roomAnswer = row => ({ clientThreadId: row.client_thread_id, members: membersOf(row.local_conversation_id) })
+  const stamp = value => value === undefined ? Date.now() : time(value, 'ts')
+  function checkedMembers(list) {
+    if (!Array.isArray(list) || list.length > MAX_ROOM_MEMBERS) fail('INVALID_CHAT_RECORD', `members must be a list of at most ${MAX_ROOM_MEMBERS}`)
+    const members = list.map(normalizeMember)
+    if (new Set(members.map(member => member.memberKey)).size !== members.length) fail('INVALID_CHAT_RECORD', 'A member appears twice in one room')
+    return members
+  }
+  // Replaces the room's member list in order; a member already in the room
+  // keeps its saved addedAt unless a new one is given.
+  function writeMembers(localId, members, ts) {
+    const saved = new Map(db.prepare('SELECT member_key, added_at FROM room_members WHERE local_conversation_id=?').all(localId).map(row => [row.member_key, row.added_at]))
+    db.prepare('DELETE FROM room_members WHERE local_conversation_id=?').run(localId)
+    const insert = db.prepare('INSERT INTO room_members (local_conversation_id, member_key, kind, profile_id, label, role, added_at, position) VALUES (?, ?, ?, ?, ?, ?, ?, ?)')
+    members.forEach((member, index) => insert.run(localId, member.memberKey, member.kind, member.profileId, member.label, member.role, member.addedAt ?? saved.get(member.memberKey) ?? ts, index))
+  }
+
   return {
     createConversation(input) { ensureOpen(); return tx(() => create(input)) },
     getConversation(clientThreadId) { ensureOpen(); return publicThread(q.thread.get(identifier(clientThreadId, 'clientThreadId'))) },
@@ -592,6 +713,69 @@ export function openChatStore({ dataDir, ownerScope } = {}) {
       })
     },
     bindNative(input) { ensureOpen(); shape(input, ['clientThreadId', 'conversationId', 'engineId', 'engineProfileId', 'localRunId', 'runId', 'localMessageId', 'messageId']); return tx(() => bind(requireThread(input.clientThreadId), input)) },
+    /**
+     * CHAT-01: remember the Agent picked for this room (profileId and the
+     * profile revision it was picked at; revision null = follow the active
+     * revision). profileId null clears it. Answers {clientThreadId, agent}.
+     * The thread's engine binding is separate and unchanged.
+     */
+    setRoomAgent(input) {
+      ensureOpen(); shape(input, ['clientThreadId', 'profileId', 'revision', 'ts'])
+      const row = requireThread(input.clientThreadId)
+      if (input.profileId === undefined) fail('INVALID_CHAT_RECORD', 'profileId is required (null clears the room Agent)')
+      if (input.profileId !== null && (typeof input.profileId !== 'string' || !PROFILE_ID.test(input.profileId))) fail('INVALID_CHAT_RECORD', 'profileId must be an Agent profile ID')
+      const revision = input.revision === undefined || input.revision === null ? null : input.revision
+      if (revision !== null && (!Number.isSafeInteger(revision) || revision < 1)) fail('INVALID_CHAT_RECORD', 'revision must be a positive integer')
+      if (input.profileId === null && revision !== null) fail('INVALID_CHAT_RECORD', 'A cleared room Agent has no revision')
+      const ts = stamp(input.ts)
+      return tx(() => {
+        const current = q.thread.get(row.client_thread_id)
+        const same = current.agent_profile_id === input.profileId && (current.agent_profile_revision ?? null) === revision
+        if (!same) db.prepare('UPDATE threads SET agent_profile_id=?, agent_profile_revision=?, agent_set_at=? WHERE local_conversation_id=?').run(input.profileId, revision, input.profileId === null ? null : ts, row.local_conversation_id)
+        return { clientThreadId: row.client_thread_id, agent: thread(q.thread.get(row.client_thread_id)).agent }
+      })
+    },
+    /** CHAT-10: the room's members in order: [{memberKey, kind, profileId, role, addedAt, label}]. */
+    listRoomMembers(clientThreadId) { ensureOpen(); return roomAnswer(requireThread(clientThreadId)) },
+    /**
+     * Replace the room's members (in this order) in one write. At most one
+     * person (kind user) and MAX_ROOM_MEMBERS members; a member already in
+     * the room keeps its addedAt unless one is given. roomMembersFromLegacy
+     * makes this list from an earlier screen's names.
+     */
+    setRoomMembers(input) {
+      ensureOpen(); shape(input, ['clientThreadId', 'members', 'ts'])
+      const row = requireThread(input.clientThreadId)
+      const members = checkedMembers(input.members)
+      if (members.filter(member => member.kind === 'user').length > 1) fail('INVALID_CHAT_RECORD', 'A room has one person')
+      const ts = stamp(input.ts)
+      return tx(() => { writeMembers(row.local_conversation_id, members, ts); return roomAnswer(row) })
+    },
+    /** Add a member at the end, or change the role/label of one already there (addedAt and place kept). */
+    addRoomMember(input) {
+      ensureOpen(); shape(input, ['clientThreadId', 'member', 'ts'])
+      const row = requireThread(input.clientThreadId)
+      const member = normalizeMember(input.member)
+      const ts = stamp(input.ts)
+      return tx(() => {
+        const current = membersOf(row.local_conversation_id).map(normalizeMember)
+        const at = current.findIndex(item => item.memberKey === member.memberKey)
+        if (at === -1 && current.length >= MAX_ROOM_MEMBERS) fail('ROOM_MEMBER_LIMIT', `A room holds at most ${MAX_ROOM_MEMBERS} members`, 409)
+        const next = at === -1 ? [...current, member] : current.map((item, index) => index === at ? { ...member, addedAt: member.addedAt ?? item.addedAt } : item)
+        writeMembers(row.local_conversation_id, next, ts)
+        return { ...roomAnswer(row), added: at === -1 }
+      })
+    },
+    /** Remove one member by memberKey; removing someone not in the room changes nothing (removed: false). */
+    removeRoomMember(input) {
+      ensureOpen(); shape(input, ['clientThreadId', 'memberKey'])
+      const row = requireThread(input.clientThreadId)
+      const memberKey = identifier(input.memberKey, 'memberKey')
+      return tx(() => {
+        const removed = db.prepare('DELETE FROM room_members WHERE local_conversation_id=? AND member_key=?').run(row.local_conversation_id, memberKey).changes > 0
+        return { ...roomAnswer(row), removed }
+      })
+    },
     listEvents(clientThreadId, { afterSeq = 0, limit = 100, refType, refId } = {}) {
       ensureOpen(); page(afterSeq, limit)
       const row = requireThread(clientThreadId)
