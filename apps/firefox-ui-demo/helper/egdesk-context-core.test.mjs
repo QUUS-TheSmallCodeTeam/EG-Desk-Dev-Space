@@ -451,3 +451,231 @@ test('context resume restores exact delivered references and immutable briefing 
   assert.equal(h.calls.length, calls)
   assert.ok(!JSON.stringify(run.context).includes('ownerScope'))
 })
+
+// ── 1-O: Canvas results, multi-evidence briefing, saved step comments ──
+
+const httpResponse = () => ({ writeHead(status) { this.status = status }, end(body) { this.body = JSON.parse(body) } })
+const jsonRequest = (method, body) => {
+  const req = Readable.from(body === undefined ? [] : [Buffer.from(JSON.stringify(body))])
+  req.method = method; req.headers = { 'content-type': 'application/json' }
+  return req
+}
+const toolJson = reply => JSON.parse(reply.result.contentItems[0].text)
+
+test('existing context tools keep their recorded schema hashes, so older conversations still verify', async () => {
+  const { specManifestEntries, verifiedManifestOwners } = await import('./codex-native-tool-manifest.mjs')
+  const pinned = {
+    egdesk_list_context: '17b4b5efbdf97956413705b362bead95a0fb95363c637feaadf9058c23f18ac9',
+    egdesk_read_source: '489e5c4a747ec63d0cf34a4c0fe2bdb742bf0013e9434ad832f0cd7b72df1fe2',
+    egdesk_capture_output: 'edd899ec6c18cec76cca25964f2edc2ccc8f08d4f6a7db238aeaad966f495ee2',
+    egdesk_publish_briefing: '53c35129017b4aecca005671ec313756fa5977dc847fa996b4674b2033f760e0',
+  }
+  const current = CONTEXT_TOOL_SPECS.flatMap(spec => specManifestEntries(spec, 'egdesk-context-v1'))
+  for (const [name, hash] of Object.entries(pinned)) assert.equal(current.find(entry => entry.key === `\0${name}`).schemaHash, hash, `${name} inputSchema changed`)
+  // A thread recorded before the new tools existed still resolves every owner.
+  const recorded = current.filter(entry => Object.keys(pinned).some(name => entry.key === `\0${name}`))
+  const owners = new Map(current.map(entry => [entry.key, 'contexts']))
+  assert.equal(verifiedManifestOwners(recorded, current, owners).status, 'verified')
+  assert.deepEqual(CONTEXT_TOOL_SPECS.slice(4).map(spec => spec.name), ['egdesk_publish_briefing_multi', 'egdesk_publish_output'])
+  const output = CONTEXT_TOOL_SPECS.find(spec => spec.name === 'egdesk_publish_output')
+  assert.deepEqual(Object.keys(output.inputSchema.properties).sort(), ['markdown', 'outputKey', 'title'])
+  assert.match(output.description, /do not repeat/i)
+})
+
+test('publish_output stores a Canvas result, versions it by outputKey and never echoes the markdown', async t => {
+  const h = await harness(t)
+  const capture = await h.capture()
+  const run = await h.start([capture.sourceId])
+  const report = '# Quarterly report\n\n' + 'Row of findings\n'.repeat(40)
+  const first = await h.tool(run, 'egdesk_publish_output', { title: 'Quarterly report', markdown: report, outputKey: 'q3-report' }, 'out-1')
+  assert.equal(first.result.success, true)
+  const firstResult = toolJson(first)
+  assert.equal(firstResult.output.version, 1)
+  assert.equal(firstResult.output.outputKey, 'q3-report')
+  assert.match(firstResult.shown, /Do not repeat/)
+  assert.ok(!first.result.contentItems[0].text.includes('Row of findings'), 'the tool result never repeats the body')
+  const published = h.events.filter(e => e.event === 'output.published')
+  assert.equal(published.length, 1)
+  assert.equal(published[0].answerId, run.answerId)
+  assert.equal(published[0].details.output.charCount, report.length)
+  assert.ok(!JSON.stringify(published[0].details).includes('Row of findings'), 'the event stream carries metadata only')
+  // A retried identical call in the same answer is the same version.
+  const retry = await h.tool(run, 'egdesk_publish_output', { title: 'Quarterly report', markdown: report, outputKey: 'q3-report' }, 'out-retry')
+  assert.equal(toolJson(retry).unchanged, true)
+  assert.equal(toolJson(retry).output.id, firstResult.output.id)
+  assert.equal(h.events.filter(e => e.event === 'output.published').length, 1)
+  const second = await h.tool(run, 'egdesk_publish_output', { title: 'Quarterly report', markdown: report + '\nRevised total', outputKey: 'q3-report' }, 'out-2')
+  const secondOutput = h.events.filter(e => e.event === 'output.published')[1].details.output
+  assert.equal(toolJson(second).output.version, 2)
+  assert.equal(secondOutput.previousId, firstResult.output.id)
+  const fresh = await h.tool(run, 'egdesk_publish_output', { title: 'Another', markdown: 'Separate result body' }, 'out-3')
+  assert.match(toolJson(fresh).output.outputKey, /^output-[\da-f]{8}$/)
+  assert.equal(toolJson(fresh).output.version, 1)
+  assert.equal(h.chat.runs.get(run.answerId).context.outputs.length, 3)
+
+  const handler = createContextHttpHandler(h.contexts, async () => {})
+  const one = httpResponse()
+  await handler({ method: 'GET' }, one, new URL(`http://localhost/context/outputs/${firstResult.output.id}`))
+  assert.equal(one.status, 200)
+  assert.equal(one.body.markdown, report)
+  assert.equal(one.body.output.hash, hashContent(report))
+  assert.equal(one.body.output.ownerScope, undefined)
+  const versions = httpResponse()
+  await handler({ method: 'GET' }, versions, new URL(`http://localhost/context/outputs?conversationId=${encodeURIComponent(run.conversationId)}&outputKey=q3-report`))
+  assert.deepEqual(versions.body.outputs.map(item => item.version), [1, 2])
+  assert.ok(versions.body.outputs.every(item => item.markdown === undefined))
+  const badQuery = httpResponse()
+  await handler({ method: 'GET' }, badQuery, new URL('http://localhost/context/outputs?outputKey=q3-report'))
+  assert.equal(badQuery.status, 400)
+
+  // Same key in another conversation starts its own history.
+  const other = await h.start([capture.sourceId], { clientThreadId: 'ui-2' })
+  const otherReply = await h.tool(other, 'egdesk_publish_output', { title: 'Quarterly report', markdown: report, outputKey: 'q3-report' }, 'other-out')
+  assert.equal(toolJson(otherReply).output.version, 1)
+})
+
+test('publish_output refuses paths, URLs, oversize bodies and runs without the publish capability', async t => {
+  const h = await harness(t)
+  const capture = await h.capture()
+  const run = await h.start([capture.sourceId])
+  const refused = async (args, id) => {
+    const reply = await h.tool(run, 'egdesk_publish_output', args, id)
+    assert.equal(reply.result.success, false, id)
+    return JSON.parse(reply.result.contentItems[0].text).error.code
+  }
+  assert.equal(await refused({ title: 'Report', markdown: '/Users/someone/report.md' }, 'path-body'), 'INVALID_CONTEXT_TOOL')
+  assert.equal(await refused({ title: 'Report', markdown: 'https://example.com/report.md' }, 'url-body'), 'INVALID_CONTEXT_TOOL')
+  assert.equal(await refused({ title: 'https://example.com', markdown: 'Body' }, 'url-title'), 'INVALID_CONTEXT_TOOL')
+  assert.equal(await refused({ title: '~/notes', markdown: 'Body' }, 'home-title'), 'INVALID_CONTEXT_TOOL')
+  assert.equal(await refused({ title: 'Two\nlines', markdown: 'Body' }, 'multiline-title'), 'INVALID_CONTEXT_TOOL')
+  assert.equal(await refused({ title: 'Report', markdown: 'x'.repeat(20001) }, 'oversize'), 'INVALID_CONTEXT_TOOL')
+  assert.equal(await refused({ title: 'Report', markdown: 'Body', outputKey: 'Bad Key' }, 'bad-key'), 'INVALID_CONTEXT_TOOL')
+  assert.equal(await refused({ title: 'Report', markdown: 'Body', path: '/tmp/x' }, 'extra-arg'), 'INVALID_CONTEXT_TOOL')
+  // Ordinary prose that mentions a link is content, not a locator.
+  const prose = await h.tool(run, 'egdesk_publish_output', { title: 'A/B 결과', markdown: 'See https://example.com for the source table.' }, 'prose')
+  assert.equal(prose.result.success, true)
+  // Credentials in the body are redacted before storage.
+  const secret = await h.tool(run, 'egdesk_publish_output', { title: 'Config', markdown: 'api_key=sk-abcdefghijklmnop\nOther line' }, 'secret')
+  const stored = await h.contexts.readOutput(toolJson(secret).output.id)
+  assert.ok(!stored.markdown.includes('sk-abcdefghijklmnop'))
+  assert.equal(stored.output.redacted, true)
+
+  const denied = await h.start([capture.sourceId], { clientThreadId: 'ui-2', contextCapabilities: { read: true, reader: true, publishBriefing: false } })
+  const reply = await h.tool(denied, 'egdesk_publish_output', { title: 'Report', markdown: 'Body' }, 'no-cap')
+  assert.equal(reply.result.success, false)
+  assert.equal(JSON.parse(reply.result.contentItems[0].text).error.code, 'CONTEXT_PERMISSION_REQUIRED')
+})
+
+test('publish_output caps results per answer and restores output metadata on resume', async t => {
+  const h = await harness(t)
+  const capture = await h.capture()
+  const run = await h.start([capture.sourceId])
+  for (let index = 0; index < 8; index++) assert.equal((await h.tool(run, 'egdesk_publish_output', { title: `Result ${index}`, markdown: `Body ${index}` }, `cap-${index}`)).result.success, true)
+  const ninth = await h.tool(run, 'egdesk_publish_output', { title: 'Result 9', markdown: 'Body 9' }, 'cap-9')
+  assert.equal(ninth.result.success, false)
+  await assert.rejects(h.contexts.publishOutput(h.chat.runs.get(run.answerId), { title: 'Result 9', markdown: 'Body 9' }), e => e.code === 'OUTPUT_LIMIT')
+  const live = h.chat.runs.get(run.answerId)
+  const original = structuredClone(live.context.outputs)
+  h.contexts.bindings.clear()
+  delete live.context
+  await h.contexts.restoreRun(live)
+  assert.deepEqual(live.context.outputs.map(item => item.id).sort(), original.map(item => item.id).sort())
+  assert.ok(!JSON.stringify(live.context.outputs).includes('ownerScope'))
+})
+
+test('multi-target briefing lights up several evidence targets per step and keeps the original tool shape unchanged', async t => {
+  const h = await harness(t)
+  const a = await h.capture('Evidence A\nsecond line\nthird line'), b = await h.capture('Evidence B', { id: 'b', sourceRef: { viewId: 'view-2', resourceId: 'page-2' } })
+  const run = await h.start([a.sourceId, b.sourceId])
+  const published = await h.tool(run, 'egdesk_publish_briefing_multi', { title: 'Compare', steps: [
+    { id: 'both', text: 'Both sources agree', targets: [{ sourceId: a.sourceId, range: { startLine: 2, endLine: 3 } }, { viewId: 'view-2' }], emphasis: 'spotlight', fallback: 'Open both sources' },
+    { id: 'one', text: 'Only A', targets: [{ sourceId: a.sourceId }], emphasis: 'outline', fallback: 'Open A' },
+  ] }, 'v2')
+  assert.equal(published.result.success, true)
+  const briefing = toolJson(published).briefing
+  assert.equal(briefing.steps[0].targets.length, 2)
+  assert.deepEqual(briefing.steps[0].target, briefing.steps[0].targets[0])
+  assert.equal(briefing.steps[0].targets[1].sourceId, b.sourceId)
+  assert.equal(briefing.steps[0].targets[1].hash, b.hash)
+  assert.equal(briefing.steps[1].emphasis, 'outline')
+  const refusedV2 = async (steps, id) => {
+    const reply = await h.tool(run, 'egdesk_publish_briefing_multi', { title: 'Bad', steps }, id)
+    assert.equal(reply.result.success, false, id)
+    return JSON.parse(reply.result.contentItems[0].text).error.code
+  }
+  const step = extra => ({ id: 's', text: 'T', fallback: 'F', targets: [{ sourceId: a.sourceId }], ...extra })
+  assert.equal(await refusedV2([step({ targets: [{ sourceId: a.sourceId }, { sourceId: a.sourceId }] })], 'dup'), 'INVALID_BRIEFING_TARGET')
+  assert.equal(await refusedV2([step({ targets: Array.from({ length: 7 }, (_, i) => ({ sourceId: a.sourceId, range: { startLine: 1, endLine: 1 + (i % 3) } })) })], 'seven'), 'INVALID_BRIEFING_TARGET')
+  assert.equal(await refusedV2([step({ targets: [] })], 'none'), 'INVALID_BRIEFING_TARGET')
+  assert.equal(await refusedV2([step({ emphasis: 'blink' })], 'emphasis'), 'INVALID_BRIEFING')
+  assert.equal(await refusedV2([step({ target: { sourceId: a.sourceId } })], 'mixed'), 'INVALID_BRIEFING')
+  assert.equal(await refusedV2([step({ targets: [{ path: '/tmp/x' }] })], 'path'), 'INVALID_BRIEFING_TARGET')
+  const single = await h.tool(run, 'egdesk_publish_briefing', { title: 'Old', steps: [{ id: 'old', text: 'Old', target: { sourceId: a.sourceId }, fallback: 'Open' }] }, 'v1')
+  const oldStep = toolJson(single).briefing.steps[0]
+  assert.deepEqual(Object.keys(oldStep), ['id', 'text', 'target', 'fallback'], 'the original tool keeps its stored step shape')
+  assert.equal(h.events.filter(e => e.event === 'briefing.published').length, 2)
+})
+
+test('briefing step comments are numbered records that survive closing and can be resolved', async t => {
+  const h = await harness(t)
+  const a = await h.capture('Evidence A'), b = await h.capture('Evidence B', { id: 'b', sourceRef: { viewId: 'view-2', resourceId: 'page-2' } })
+  const run = await h.start([a.sourceId, b.sourceId])
+  const published = await h.tool(run, 'egdesk_publish_briefing_multi', { title: 'Compare', steps: [
+    { id: 'both', text: 'Both', targets: [{ sourceId: a.sourceId }, { sourceId: b.sourceId }], fallback: 'Open both' },
+    { id: 'a-only', text: 'A', targets: [{ sourceId: a.sourceId }], fallback: 'Open A' },
+  ] }, 'brief')
+  const briefingId = toolJson(published).briefing.id
+  const handler = createContextHttpHandler(h.contexts, async () => {})
+  const post = async (path, body) => { const res = httpResponse(); await handler(jsonRequest('POST', body), res, new URL(`http://localhost${path}`)); return res }
+  const get = async path => { const res = httpResponse(); await handler({ method: 'GET' }, res, new URL(`http://localhost${path}`)); return res }
+  const first = await post(`/context/briefings/${briefingId}/comments`, { stepId: 'both', text: '  Compare the totals  ' })
+  assert.equal(first.status, 201)
+  assert.equal(first.body.comment.seq, 1)
+  assert.equal(first.body.comment.text, 'Compare the totals')
+  assert.deepEqual(first.body.comment.sourceIds, [a.sourceId, b.sourceId])
+  assert.equal(first.body.comment.answerId, run.answerId)
+  const second = await post(`/context/briefings/${briefingId}/comments`, { stepId: 'a-only', text: 'Why only A?', sourceIds: [a.sourceId] })
+  assert.equal(second.body.comment.seq, 2)
+  const concurrent = await Promise.all([1, 2, 3].map(n => h.contexts.addBriefingComment(briefingId, { stepId: 'both', text: `Parallel ${n}` })))
+  assert.deepEqual(concurrent.map(item => item.seq).sort(), [3, 4, 5], 'numbers are assigned one at a time')
+  assert.equal((await post(`/context/briefings/${briefingId}/comments`, { stepId: 'a-only', text: 'B?', sourceIds: [b.sourceId] })).status, 403)
+  assert.equal((await post(`/context/briefings/${briefingId}/comments`, { stepId: 'missing', text: 'x' })).status, 404)
+  assert.equal((await post(`/context/briefings/${briefingId}/comments`, { stepId: 'both', text: ' ' })).status, 400)
+  assert.equal((await post(`/context/briefings/${briefingId}/comments`, { stepId: 'both', text: 'x'.repeat(2001) })).status, 400)
+  assert.equal((await post(`/context/briefings/${briefingId}/comments`, { stepId: 'both', text: 'x', anchor: 'y' })).status, 400)
+
+  // Closing the briefing loses nothing: a fresh read returns every comment in order.
+  h.contexts.bindings.clear()
+  const listed = await get(`/context/briefings/${briefingId}/comments`)
+  assert.deepEqual(listed.body.comments.map(item => item.seq), [1, 2, 3, 4, 5])
+  assert.ok(listed.body.comments.every(item => item.ownerScope === undefined))
+  const resolved = await post(`/context/briefing-comments/${first.body.comment.id}`, { resolved: true })
+  assert.equal(resolved.status, 200)
+  assert.equal(resolved.body.comment.resolved, true)
+  assert.equal(resolved.body.comment.text, 'Compare the totals', 'resolving never rewrites the comment')
+  assert.equal((await get(`/context/briefings/${briefingId}/comments`)).body.comments[0].resolved, true)
+  const reopened = await post(`/context/briefing-comments/${first.body.comment.id}`, { resolved: false })
+  assert.equal(reopened.body.comment.resolvedAt, null)
+  assert.equal((await post(`/context/briefing-comments/${first.body.comment.id}`, { resolved: 'yes' })).status, 400)
+  assert.equal((await post(`/context/briefing-comments/${first.body.comment.id}`, { resolved: true, text: 'rewrite' })).status, 400)
+
+  // Another account sees none of it.
+  h.changeOwner('email:b@example.com')
+  assert.equal((await get(`/context/briefings/${briefingId}/comments`)).status, 404)
+  assert.equal((await post(`/context/briefing-comments/${first.body.comment.id}`, { resolved: true })).status, 404)
+})
+
+test('only briefing comments are mutable; replacement is atomic and owner checked', async t => {
+  const h = await harness(t)
+  const owner = 'email:a@example.com'
+  const id = await h.store.putRecord(owner, 'briefing-comments', { briefingId: 'b', seq: 1, text: 'One', resolved: false })
+  await h.store.replaceRecord(owner, 'briefing-comments', id, { briefingId: 'b', seq: 1, text: 'One', resolved: true, ownerScope: 'forged' })
+  const record = await h.store.getRecord(owner, 'briefing-comments', id)
+  assert.equal(record.resolved, true)
+  assert.equal(record.ownerScope, h.store.ownerScope(owner))
+  const capture = await h.capture()
+  await assert.rejects(h.store.replaceRecord(owner, 'sources', capture.sourceId, {}), e => e.code === 'IMMUTABLE_RECORD')
+  await assert.rejects(h.store.replaceRecord('email:b@example.com', 'briefing-comments', id, {}), e => e.code === 'CONTEXT_NOT_FOUND')
+  const names = await (await import('node:fs/promises')).readdir(await h.store.directory(owner, 'briefing-comments'))
+  assert.deepEqual(names, [`${id}.json`], 'no temporary file is left behind')
+})

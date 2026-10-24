@@ -1,6 +1,6 @@
 import { createHash, randomUUID } from 'node:crypto'
 import { constants } from 'node:fs'
-import { mkdir, open, readFile, readdir, realpath, writeFile } from 'node:fs/promises'
+import { mkdir, open, readFile, readdir, realpath, rename, rm, writeFile } from 'node:fs/promises'
 import os from 'node:os'
 import path from 'node:path'
 import { chatError, publicText, verifyLocalFile } from './codex-chat-values.mjs'
@@ -10,6 +10,10 @@ const uuid = value => typeof value === 'string' && /^[\da-f-]{36}$/i.test(value)
 const fail = (code, message, status = 400) => { throw chatError(code, message, status) }
 const small = (value, max = 512) => typeof value === 'string' && value.length <= max ? value : null
 const copy = value => JSON.parse(JSON.stringify(value))
+const RECORD_KINDS = ['sources', 'blobs', 'bindings', 'packets', 'briefings', 'readers', 'scratch', 'deliveries', 'threads', 'outputs', 'briefing-comments']
+// Everything else is write-once. A briefing comment keeps its text and anchor;
+// only its resolved state may change (CHAT-05).
+const MUTABLE_KINDS = new Set(['briefing-comments'])
 
 export function appDataDirectory(env = process.env, home = os.homedir(), platform = os.platform()) {
   if (env.EGDESK_DATA_DIR) {
@@ -62,7 +66,7 @@ export class ImmutableContextStore {
   }
 
   async directory(ownerKey, kind) {
-    if (!['sources', 'blobs', 'bindings', 'packets', 'briefings', 'readers', 'scratch', 'deliveries', 'threads'].includes(kind)) fail('INVALID_RECORD', 'Invalid context record kind')
+    if (!RECORD_KINDS.includes(kind)) fail('INVALID_RECORD', 'Invalid context record kind')
     const dir = path.join(this.root, this.ownerScope(ownerKey), kind)
     await mkdir(dir, { recursive: true, mode: 0o700 })
     return dir
@@ -99,6 +103,47 @@ export class ImmutableContextStore {
     }
     if (record.ownerScope !== this.ownerScope(ownerKey) || record.id !== id) fail('CONTEXT_FORBIDDEN', 'Context ownership mismatch', 403)
     return record
+  }
+
+  // Atomic same-directory rename, so a reader never sees a half-written record.
+  // Only MUTABLE_KINDS may change after the first write.
+  async replaceRecord(ownerKey, kind, id, record) {
+    if (!MUTABLE_KINDS.has(kind)) fail('IMMUTABLE_RECORD', 'This context record kind is write-once', 409)
+    const previous = await this.getRecord(ownerKey, kind, id)
+    const dir = await this.directory(ownerKey, kind)
+    const temp = path.join(dir, `.${id}.${randomUUID()}.tmp`)
+    try {
+      await writeFile(temp, JSON.stringify({ ...record, id, ownerScope: previous.ownerScope }), { flag: 'wx', mode: 0o600 })
+      await rename(temp, path.join(dir, `${id}.json`))
+    } catch (error) {
+      await rm(temp, { force: true })
+      throw error
+    }
+    return id
+  }
+
+  // CHAT-08: an Agent-published Canvas result. The markdown body is a
+  // content-addressed blob; the record keeps identity, version and hash only.
+  async putOutput(ownerKey, output, markdown) {
+    if (typeof markdown !== 'string') fail('INVALID_OUTPUT', 'Output markdown is required')
+    const bytes = Buffer.from(markdown)
+    const hash = await this.blob(ownerKey, bytes)
+    const id = await this.putRecord(ownerKey, 'outputs', { ...copy(output), hash, byteLength: bytes.length })
+    return this.publicOutput(await this.getRecord(ownerKey, 'outputs', id))
+  }
+
+  publicOutput(record) {
+    const { ownerScope, ...value } = record
+    return copy(value)
+  }
+
+  async listOutputs(ownerKey, predicate = () => true) {
+    return (await this.listRecords(ownerKey, 'outputs', predicate)).map(record => this.publicOutput(record))
+  }
+
+  async readOutput(ownerKey, id) {
+    const record = await this.getRecord(ownerKey, 'outputs', id)
+    return { output: this.publicOutput(record), markdown: (await this.readBlob(ownerKey, record.hash)).toString('utf8') }
   }
 
   async listRecords(ownerKey, kind, predicate = () => true) {

@@ -4,6 +4,7 @@ import { hashContent } from './egdesk-context-store.mjs'
 import { validateResolverSignals } from './egdesk-context-resolver.mjs'
 
 const RESOLVE_MAX_BYTES = 64 * 1024
+const COMMENT_MAX_BYTES = 16 * 1024
 
 export function createContextHttpHandler(context, ensureAuth, { port = 39218 } = {}) {
   return async (req, res, url) => {
@@ -24,6 +25,34 @@ export function createContextHttpHandler(context, ensureAuth, { port = 39218 } =
       await ensureAuth()
       if (req.method === 'POST' && url.pathname === '/context/captures') {
         sendJson(res, 201, await context.capture(await readJsonBody(req, { maxBytes: 2 * 1024 * 1024 })))
+        return true
+      }
+      // CHAT-08: Agent-published Canvas results. The list carries metadata only;
+      // one result's markdown (at most 20,000 characters) comes from its own GET.
+      if (url.pathname === '/context/outputs') {
+        if (req.method !== 'GET') { sendJson(res, 405, { error: 'Use GET for published results', code: 'METHOD_NOT_ALLOWED' }); return true }
+        const outputKey = url.searchParams.has('outputKey') ? url.searchParams.get('outputKey') : undefined
+        sendJson(res, 200, await context.listOutputVersions({ conversationId: url.searchParams.get('conversationId') ?? undefined, outputKey }))
+        return true
+      }
+      const output = url.pathname.match(/^\/context\/outputs\/([\da-f-]{36})$/i)
+      if (output) {
+        if (req.method !== 'GET') { sendJson(res, 405, { error: 'Use GET for a published result', code: 'METHOD_NOT_ALLOWED' }); return true }
+        sendJson(res, 200, await context.readOutput(output[1]))
+        return true
+      }
+      // CHAT-05: step comments kept as records (list, add, resolve).
+      const comments = url.pathname.match(/^\/context\/briefings\/([\da-f-]{36})\/comments$/i)
+      if (comments) {
+        if (req.method === 'GET') sendJson(res, 200, await context.listBriefingComments(comments[1]))
+        else if (req.method === 'POST') sendJson(res, 201, { comment: await context.addBriefingComment(comments[1], await readJsonBody(req, { maxBytes: COMMENT_MAX_BYTES })) })
+        else sendJson(res, 405, { error: 'Use GET or POST for briefing comments', code: 'METHOD_NOT_ALLOWED' })
+        return true
+      }
+      const comment = url.pathname.match(/^\/context\/briefing-comments\/([\da-f-]{36})$/i)
+      if (comment) {
+        if (req.method !== 'POST') { sendJson(res, 405, { error: 'Use POST to change a comment state', code: 'METHOD_NOT_ALLOWED' }); return true }
+        sendJson(res, 200, { comment: await context.resolveBriefingComment(comment[1], await readJsonBody(req, { maxBytes: COMMENT_MAX_BYTES })) })
         return true
       }
       const match = url.pathname.match(/^\/context\/(captures|packets|briefings)\/([\da-f-]{36})$/i)
