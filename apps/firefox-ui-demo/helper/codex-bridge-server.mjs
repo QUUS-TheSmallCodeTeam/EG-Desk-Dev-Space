@@ -29,6 +29,7 @@ import { createProfileHttpHandler } from './egdesk-profile-http.mjs'
 import { openDeskStore } from './egdesk-desk-store.mjs'
 import { openBridgeSettings } from './egdesk-bridge-settings.mjs'
 import { createDeskHttpHandler } from './egdesk-desk-http.mjs'
+import { createPortableHttpHandler } from './egdesk-portable-http.mjs'
 import { NativeReaderClient } from './egdesk-native-reader.mjs'
 import { ContextRuntime } from './egdesk-context-runtime.mjs'
 import { createContextHttpHandler } from './egdesk-context-http.mjs'
@@ -268,6 +269,9 @@ const handleContextHttp = createContextHttpHandler(contexts, ensureChatAuth, { p
 const handleProfileHttp = createProfileHttpHandler({ store: () => profileStore, port: BRIDGE_PORT })
 // Desk and Board routes also work signed out (local data only).
 const handleDeskHttp = createDeskHttpHandler({ store: () => deskStore, port: BRIDGE_PORT })
+// RT-03 .egdesk export/inspect/import over the same local stores (signed out too).
+// Exports go to ~/Downloads/EG-Desk, or <app data>/exports without a Downloads folder.
+const handlePortableHttp = createPortableHttpHandler({ desk: () => deskStore, chat: () => chatStore, profiles: () => profileStore, appDataDir: dataDir, port: BRIDGE_PORT })
 // Task graph (CHAT-06): /tasks/*, /task-sources; events (RT-06): /events/browser,
 // /events/recent; SSE workflow.event and task.graph frames on /events.
 workflow = await openWorkflowRuntime({
@@ -732,6 +736,7 @@ const bridgeServer = createServer(async (req, res) => {
         profiles: profileStore ? ['local-store', 'revisions', 'run-binding'] : ['local-store-unavailable'],
         engines: ['registry', 'thread-lock'],
         desk: deskStore ? ['local-store', 'generations', 'restore', 'board-revisions', 'board-revert', 'prefs-import'] : ['local-store-unavailable'],
+        portable: deskStore ? ['export', 'inspect', 'import-as-new', 'passphrase', 'exports-list'] : ['local-store-unavailable'],
       },
       bridge: bridgeBuildState(bridgeBuild, expectedOverlayBuild(req.headers, url.searchParams)),
       appServerReconnect: appServerBackoff.snapshot(),
@@ -825,6 +830,7 @@ const bridgeServer = createServer(async (req, res) => {
   if (await handleComputerControlHttp(req, res, url)) return
   if (await handleProfileHttp(req, res, url)) return
   if (await handleDeskHttp(req, res, url)) return
+  if (await handlePortableHttp(req, res, url)) return
   if (await handleContextHttp(req, res, url)) return
   if (await handleChatHttp(req, res, url)) return
 

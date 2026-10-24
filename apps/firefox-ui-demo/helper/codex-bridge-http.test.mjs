@@ -610,7 +610,7 @@ test('/v1/state keeps every existing field in order and adds bridge build, recon
     'engineConfiguration', 'memoryIsolation', 'node', 'auth', 'chat', 'capabilities',
     'bridge', 'appServerReconnect', 'engines', 'inheritedMcp', 'workflow', 'computerControl', 'deskStorageReady',
   ])
-  assert.deepEqual([...block.matchAll(/^ {8}([A-Za-z]\w*)(?=:)/gm)].map(match => match[1]), ['auth', 'chat', 'context', 'files', 'profiles', 'engines', 'desk'])
+  assert.deepEqual([...block.matchAll(/^ {8}([A-Za-z]\w*)(?=:)/gm)].map(match => match[1]), ['auth', 'chat', 'context', 'files', 'profiles', 'engines', 'desk', 'portable'])
   assert.ok(block.includes('bridge: bridgeBuildState(bridgeBuild, expectedOverlayBuild(req.headers, url.searchParams)),'))
   assert.ok(block.includes('appServerReconnect: appServerBackoff.snapshot(),'))
   assert.ok(block.includes('inheritedMcp: inheritedMcp.snapshot(),'))

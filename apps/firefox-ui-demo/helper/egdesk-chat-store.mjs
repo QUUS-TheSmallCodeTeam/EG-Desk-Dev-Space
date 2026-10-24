@@ -620,51 +620,73 @@ export function openChatStore({ dataDir, ownerScope } = {}) {
     },
     importSnapshot(input) {
       ensureOpen(); shape(input, ['clientThreadId', 'importId', 'snapshot'])
-      const clientThreadId = identifier(input.clientThreadId, 'clientThreadId')
-      const importId = identifier(input.importId, 'importId')
-      const snapshotJson = publicJson(input.snapshot, 'public v2 snapshot', MAX_IMPORT_BYTES)
-      const snapshot = parse(snapshotJson)
-      if (snapshot.protocolVersion !== 2 || !Array.isArray(snapshot.runs) || typeof snapshot.truncated !== 'boolean' || typeof snapshot.historyComplete !== 'boolean') fail('INVALID_CHAT_RECORD', 'Import requires an existing public v2 chat snapshot')
-      if (snapshot.runs.some(run => (run.conversationId && snapshot.conversationId && run.conversationId !== snapshot.conversationId) || (run.clientThreadId && run.clientThreadId !== clientThreadId))) fail('INVALID_CHAT_RECORD', 'Snapshot runs must belong to the selected thread')
-      const payloadHash = digest(snapshotJson)
-      const reasons = [
-        snapshot.truncated || snapshot.runs.some(run => run.truncated) ? 'snapshot-truncated' : null,
-        !snapshot.historyComplete || snapshot.runs.some(run => run.historyComplete === false) ? 'native-history-incomplete' : null,
-      ].filter(Boolean)
-      const importedCoverage = coverage({ scope: 'egdesk-local', status: reasons.length ? 'partial' : 'complete', reasons, nativeHistoryComplete: snapshot.historyComplete })
+      const prepared = prepareImport(input)
+      return tx(() => applyImport(prepared))
+    },
+    /**
+     * RT-03 portable import as a new conversation: create it (title, createdAt)
+     * and import its public v2 runs in one transaction. A clientThreadId that
+     * already exists is CONVERSATION_EXISTS (409) and nothing is written.
+     */
+    importConversationCopy(input) {
+      ensureOpen(); shape(input, ['clientThreadId', 'importId', 'snapshot', 'title', 'createdAt'])
+      const prepared = prepareImport({ clientThreadId: input.clientThreadId, importId: input.importId, snapshot: input.snapshot })
       return tx(() => {
-        const saved = create({ clientThreadId })
-        const row = q.thread.get(clientThreadId)
-        const prior = db.prepare('SELECT payload_hash, state FROM imports WHERE local_conversation_id=? AND import_id=?').get(row.local_conversation_id, importId)
-        if (prior) {
-          if (prior.payload_hash !== payloadHash) fail('IMPORT_CONFLICT', 'Import ID was reused with different content', 409)
-          return { imported: false, alreadyImported: prior.state === 'imported', clientThreadId, localConversationId: saved.localConversationId, coverage: thread(q.thread.get(clientThreadId)).coverage, ...(prior.state === 'skipped' ? { skippedReason: 'canonical-history-present' } : {}) }
-        }
-        if (row.last_seq > 0 || thread(row).coverage.status !== 'unknown') {
-          db.prepare('INSERT INTO imports VALUES (?, ?, ?, ?)').run(row.local_conversation_id, importId, payloadHash, 'skipped')
-          return { imported: false, alreadyImported: false, clientThreadId, localConversationId: saved.localConversationId, coverage: thread(row).coverage, skippedReason: 'canonical-history-present' }
-        }
-        if (typeof snapshot.conversationId === 'string' && snapshot.conversationId) bind(row, { conversationId: snapshot.conversationId })
-        const ts = Date.now()
-        appendCore(row, { eventKey: `import:${importId}`, ts, event: 'history.imported', details: { importId, runCount: snapshot.runs.length, truncated: snapshot.truncated, historyComplete: snapshot.historyComplete } })
-        for (let index = 0; index < snapshot.runs.length; index++) {
-          const run = snapshot.runs[index]
-          const nativeRunId = typeof run.runId === 'string' ? run.runId : null
-          const mapped = nativeRunId ? db.prepare('SELECT local_run_id FROM native_runs WHERE local_conversation_id=? AND run_id=?').get(row.local_conversation_id, nativeRunId) : null
-          const suppliedLocalRunId = run.localRunId == null ? null : identifier(run.localRunId, 'localRunId')
-          if (mapped && suppliedLocalRunId && mapped.local_run_id !== suppliedLocalRunId) fail('NATIVE_MAPPING_CONFLICT', 'Imported local run ID disagrees with existing native mapping', 409)
-          const localRunId = suppliedLocalRunId ?? mapped?.local_run_id ?? `lr-${digest(`${row.local_conversation_id}\0${nativeRunId ?? `${importId}:${index}`}`).slice(0, 32)}`
-          if (q.run.get(row.local_conversation_id, localRunId)) continue // Preserve canonical captured run.
-          const eventKey = `import:${importId}:run:${index}`
-          appendCore(row, { eventKey, ts, event: 'run.imported', requestId: run.requestId ?? null, localRunId, runId: nativeRunId, details: {}, runCheckpoint: run, refs: references(run) })
-          checkpointMessages(row, eventKey, ts, localRunId, run.requestId ?? null, run)
-          if (nativeRunId) bind(row, { localRunId, runId: nativeRunId })
-        }
-        db.prepare('INSERT INTO imports VALUES (?, ?, ?, ?)').run(row.local_conversation_id, importId, payloadHash, 'imported')
-        db.prepare('UPDATE threads SET coverage_json=? WHERE local_conversation_id=?').run(publicJson(importedCoverage), row.local_conversation_id)
-        return { imported: true, alreadyImported: false, clientThreadId, localConversationId: saved.localConversationId, coverage: importedCoverage }
+        if (q.thread.get(prepared.clientThreadId)) fail('CONVERSATION_EXISTS', 'A conversation with this ID already exists; nothing was imported', 409)
+        create({ clientThreadId: prepared.clientThreadId, title: input.title ?? null, createdAt: input.createdAt ?? Date.now() })
+        return applyImport(prepared)
       })
     },
     close() { if (!closed) { db.close(); closed = true } },
+  }
+
+  function prepareImport(input) {
+    const clientThreadId = identifier(input.clientThreadId, 'clientThreadId')
+    const importId = identifier(input.importId, 'importId')
+    const snapshotJson = publicJson(input.snapshot, 'public v2 snapshot', MAX_IMPORT_BYTES)
+    const snapshot = parse(snapshotJson)
+    if (snapshot.protocolVersion !== 2 || !Array.isArray(snapshot.runs) || typeof snapshot.truncated !== 'boolean' || typeof snapshot.historyComplete !== 'boolean') fail('INVALID_CHAT_RECORD', 'Import requires an existing public v2 chat snapshot')
+    if (snapshot.runs.some(run => (run.conversationId && snapshot.conversationId && run.conversationId !== snapshot.conversationId) || (run.clientThreadId && run.clientThreadId !== clientThreadId))) fail('INVALID_CHAT_RECORD', 'Snapshot runs must belong to the selected thread')
+    const payloadHash = digest(snapshotJson)
+    const reasons = [
+      snapshot.truncated || snapshot.runs.some(run => run.truncated) ? 'snapshot-truncated' : null,
+      !snapshot.historyComplete || snapshot.runs.some(run => run.historyComplete === false) ? 'native-history-incomplete' : null,
+    ].filter(Boolean)
+    const importedCoverage = coverage({ scope: 'egdesk-local', status: reasons.length ? 'partial' : 'complete', reasons, nativeHistoryComplete: snapshot.historyComplete })
+    return { clientThreadId, importId, snapshot, payloadHash, importedCoverage }
+  }
+
+  // Runs inside the caller's transaction.
+  function applyImport({ clientThreadId, importId, snapshot, payloadHash, importedCoverage }) {
+    const saved = create({ clientThreadId })
+    const row = q.thread.get(clientThreadId)
+    const prior = db.prepare('SELECT payload_hash, state FROM imports WHERE local_conversation_id=? AND import_id=?').get(row.local_conversation_id, importId)
+    if (prior) {
+      if (prior.payload_hash !== payloadHash) fail('IMPORT_CONFLICT', 'Import ID was reused with different content', 409)
+      return { imported: false, alreadyImported: prior.state === 'imported', clientThreadId, localConversationId: saved.localConversationId, coverage: thread(q.thread.get(clientThreadId)).coverage, ...(prior.state === 'skipped' ? { skippedReason: 'canonical-history-present' } : {}) }
+    }
+    if (row.last_seq > 0 || thread(row).coverage.status !== 'unknown') {
+      db.prepare('INSERT INTO imports VALUES (?, ?, ?, ?)').run(row.local_conversation_id, importId, payloadHash, 'skipped')
+      return { imported: false, alreadyImported: false, clientThreadId, localConversationId: saved.localConversationId, coverage: thread(row).coverage, skippedReason: 'canonical-history-present' }
+    }
+    if (typeof snapshot.conversationId === 'string' && snapshot.conversationId) bind(row, { conversationId: snapshot.conversationId })
+    const ts = Date.now()
+    appendCore(row, { eventKey: `import:${importId}`, ts, event: 'history.imported', details: { importId, runCount: snapshot.runs.length, truncated: snapshot.truncated, historyComplete: snapshot.historyComplete } })
+    for (let index = 0; index < snapshot.runs.length; index++) {
+      const run = snapshot.runs[index]
+      const nativeRunId = typeof run.runId === 'string' ? run.runId : null
+      const mapped = nativeRunId ? db.prepare('SELECT local_run_id FROM native_runs WHERE local_conversation_id=? AND run_id=?').get(row.local_conversation_id, nativeRunId) : null
+      const suppliedLocalRunId = run.localRunId == null ? null : identifier(run.localRunId, 'localRunId')
+      if (mapped && suppliedLocalRunId && mapped.local_run_id !== suppliedLocalRunId) fail('NATIVE_MAPPING_CONFLICT', 'Imported local run ID disagrees with existing native mapping', 409)
+      const localRunId = suppliedLocalRunId ?? mapped?.local_run_id ?? `lr-${digest(`${row.local_conversation_id}\0${nativeRunId ?? `${importId}:${index}`}`).slice(0, 32)}`
+      if (q.run.get(row.local_conversation_id, localRunId)) continue // Preserve canonical captured run.
+      const eventKey = `import:${importId}:run:${index}`
+      appendCore(row, { eventKey, ts, event: 'run.imported', requestId: run.requestId ?? null, localRunId, runId: nativeRunId, details: {}, runCheckpoint: run, refs: references(run) })
+      checkpointMessages(row, eventKey, ts, localRunId, run.requestId ?? null, run)
+      if (nativeRunId) bind(row, { localRunId, runId: nativeRunId })
+    }
+    db.prepare('INSERT INTO imports VALUES (?, ?, ?, ?)').run(row.local_conversation_id, importId, payloadHash, 'imported')
+    db.prepare('UPDATE threads SET coverage_json=? WHERE local_conversation_id=?').run(publicJson(importedCoverage), row.local_conversation_id)
+    return { imported: true, alreadyImported: false, clientThreadId, localConversationId: saved.localConversationId, coverage: importedCoverage }
   }
 }

@@ -527,6 +527,46 @@ export function openDeskStore({ dataDir, ownerScope, now = Date.now, utcOffsetMi
         return { duplicate: false, ...result }
       })
     },
+    /** Board IDs in use (summaries only), for choosing import IDs without reading bodies. */
+    boardIds() {
+      ensureOpen()
+      return new Set(q.boards.all(MAX_BOARDS).map(row => row.board_id))
+    },
+    /**
+     * RT-03 portable .egdesk import as a new copy, in one transaction. Every
+     * Board is created as revision 1 (author import) under an ID that must be
+     * free; an ID already in use is BOARD_EXISTS (409) and nothing is written.
+     * The Desk state, when given, becomes a new `import` generation on top of
+     * the current head (the earlier head stays in the journal), or nothing new
+     * when it equals the head.
+     */
+    importPortable({ state = null, boards = [] } = {}) {
+      ensureOpen()
+      const desk = state === null ? null : payload(state, 'desk')
+      if (!Array.isArray(boards) || boards.length > MAX_BOARDS) fail('INVALID_DESK_IMPORT', `boards must be a list of at most ${MAX_BOARDS} items`)
+      const items = boards.map(item => {
+        if (!plain(item) || Object.keys(item).some(key => !['boardId', 'title', 'body'].includes(key))) fail('INVALID_DESK_IMPORT', 'Each Board needs {boardId, title?, body}')
+        const body = payload(item.body, 'board')
+        return { id: boardId(item.boardId), name: importTitle(item.title, item.body), body }
+      })
+      if (new Set(items.map(item => item.id)).size !== items.length) fail('INVALID_DESK_IMPORT', 'Board IDs in one import must be unique')
+      if (!desk && !items.length) fail('INVALID_DESK_IMPORT', 'Nothing to import')
+      return tx(() => {
+        if (q.boardCount.get().n + items.length > MAX_BOARDS) fail('BOARD_LIMIT', `At most ${MAX_BOARDS} Boards can be kept`, 409)
+        for (const item of items) if (q.board.get(item.id)) fail('BOARD_EXISTS', 'A Board with this ID already exists; nothing was imported', 409)
+        const ts = clock()
+        const boardResults = items.map(({ id, name, body }) => {
+          createBoard(id, name, body, 'import', ts)
+          return { boardId: id, title: name, revision: 1 }
+        })
+        let deskResult = null
+        if (desk) {
+          const head = q.head.get()
+          deskResult = head && head.state_hash === desk.hash ? unchanged(head) : appendGeneration(head, desk, 'import')
+        }
+        return { desk: deskResult, boards: boardResults }
+      })
+    },
     close() { if (!closed) { db.close(); closed = true } },
   }
 }
