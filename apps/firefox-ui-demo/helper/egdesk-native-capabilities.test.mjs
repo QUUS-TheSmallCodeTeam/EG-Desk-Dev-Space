@@ -4,7 +4,7 @@ import { readFile, writeFile, mkdtemp, realpath, rm } from 'node:fs/promises'
 import { spawnSync } from 'node:child_process'
 import os from 'node:os'
 import path from 'node:path'
-import { buildCodexAppServerLaunch, inspectNativeCapabilities, preflightOwnedAppServer, resolveCodexExecutable, verifyCodexLaunchConfiguration, verifyCodexMemoryFeatureDisabled } from './egdesk-native-capabilities.mjs'
+import { buildCodexAppServerLaunch, CODEX_CHAT_VERSION_POLICY, ENGINE_VERSION_STATUSES, engineVersionStatus, inspectNativeCapabilities, preflightOwnedAppServer, resolveCodexExecutable, verifyCodexLaunchConfiguration, verifyCodexMemoryFeatureDisabled } from './egdesk-native-capabilities.mjs'
 import { fingerprintNativeExecutable, verifyNativeSchemaDirectory } from './codex-native-schema-probe.mjs'
 import { AppServerRpc } from './codex-app-server-rpc.mjs'
 
@@ -268,4 +268,28 @@ test('dynamic tool transport explicitly opts into experimental API before native
   await init
   assert.equal(frames[1].method, 'initialized')
   rpc.close()
+})
+
+// SUB-13: ordinary Chat uses a range (verified / not verified / below minimum),
+// the experimental schema features keep the exact sets (t3code providerCompatibility.ts).
+test('Chat version range: checked versions are supported, newer ones untested, older ones unsupported, and schema features stay exact', () => {
+  assert.deepEqual(ENGINE_VERSION_STATUSES, ['supported', 'untested', 'unsupported'])
+  const status = version => engineVersionStatus(version, CODEX_CHAT_VERSION_POLICY)
+  for (const version of ['0.157.1', '0.160.1', '0.162.1', '0.163.0-alpha.10.2']) assert.equal(status(version), 'supported', version)
+  for (const version of ['0.157.0', '0.160.2', '0.163.0', '0.163.0-alpha.10.3', '0.170.0', '1.0.0', '0.162.1+build.7']) assert.equal(status(version), 'untested', version)
+  for (const version of ['0.156.9', '0.130.0', '0.157.0-alpha.1', '0.0.1']) assert.equal(status(version), 'unsupported', version)
+  for (const version of [null, undefined, '', 'codex-cli 0.162.1', '0.162', 'v0.162.1', '/usr/local/bin/codex', 162, `0.162.1-${'x'.repeat(90)}`]) assert.equal(status(version), null, String(version))
+  assert.equal(engineVersionStatus('2.1.300', { verified: [], minimum: 'bad' }), 'untested', 'no usable minimum: never invented as unsupported')
+  assert.equal(engineVersionStatus('2.1.300', null), 'untested')
+  // The PATH codex 0.162.1 is no longer reported as unknown for Chat, while
+  // its Context/QA contract still needs the exact schema proof.
+  const inspect = version => inspectNativeCapabilities({ executable: '/selected/native', run: () => ({ status: 0, stdout: `codex-cli ${version}\n` }),
+    probe: () => ({ contextContract: true, qaContract: true, schemaFingerprint: 'a'.repeat(64) }), fingerprint: () => 'b'.repeat(64) })
+  const daily = inspect('0.162.1')
+  assert.deepEqual([daily.versionStatus, daily.schemaMatch, daily.qaReadOnly], ['supported', false, false])
+  const pinned = inspect('0.160.1')
+  assert.deepEqual([pinned.versionStatus, pinned.schemaMatch, pinned.qaReadOnly], ['supported', true, true])
+  assert.deepEqual([inspect('0.165.0').versionStatus, inspect('0.165.0').schemaMatch], ['untested', false])
+  assert.equal(inspect('0.150.0').versionStatus, 'unsupported')
+  assert.equal(inspectNativeCapabilities({ executable: '/selected/native', run: () => ({ status: 1, stdout: '' }) }).versionStatus, null)
 })

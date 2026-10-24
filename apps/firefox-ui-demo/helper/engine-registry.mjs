@@ -1,6 +1,7 @@
 import { chatError, publicText } from './codex-chat-values.mjs'
 import { ENGINE_CAPABILITIES, ENGINE_IDS, ENGINE_STATUSES, engineError, validateEngineAdapter } from './engine-adapter.mjs'
 import { publicModelRows } from './codex-model-catalog.mjs'
+import { ENGINE_VERSION_STATUSES } from './egdesk-native-capabilities.mjs'
 
 const AUTH_STATUSES = new Set(['signedIn', 'signedOut', 'signingIn', 'unknown'])
 const token = (value, limit = 120) => typeof value === 'string' && value.trim() && value.length <= limit ? publicText(value, limit) : null
@@ -31,7 +32,12 @@ export function publicEngineRow(descriptor, { isDefault = false } = {}) {
     status: ENGINE_STATUSES.includes(descriptor?.status) ? descriptor.status : 'offline',
     ...(token(descriptor?.statusReason, 60) ? { statusReason: token(descriptor.statusReason, 60) } : {}),
     version: publicVersion(descriptor?.version),
+    // Exact experimental-schema contract (Codex Context/QA); null when not applicable.
     versionSupported: typeof descriptor?.versionSupported === 'boolean' ? descriptor.versionSupported : null,
+    // SUB-13 Chat range: 'supported' (verified) | 'untested' | 'unsupported' | null (unknown).
+    versionStatus: ENGINE_VERSION_STATUSES.includes(descriptor?.versionStatus) ? descriptor.versionStatus : null,
+    // The engine's CLI was found (true), not found (false) or not checked yet (null).
+    installed: typeof descriptor?.installed === 'boolean' ? descriptor.installed : null,
     isDefault,
     capabilities: (Array.isArray(descriptor?.capabilities) ? descriptor.capabilities : []).filter(name => ENGINE_CAPABILITIES.includes(name)),
     profiles: (Array.isArray(descriptor?.profiles) ? descriptor.profiles : []).slice(0, 8).map(publicProfile),
@@ -63,12 +69,33 @@ export function createEngineStatusEmitter({ engines, emit, v = 1, now = Date.now
   }
 }
 
+export const CLAUDE_ENGINE_PROFILE_ID = 'claude-default'
+const CLAUDE_AUTH_STATUSES = new Set(['signedIn', 'signedOut', 'unknown'])
+
 // Claude is listed but cannot run until the connection method is decided
-// (SUB-12, decisions D1/D2). Stage 8 replaces this row with a real adapter.
-export function describeClaudeEngine({ version = null } = {}) {
+// (SUB-12, decisions D1/D2), so status stays 'decisionPending' whatever the
+// static check says. The check (claude-engine-auth.mjs snapshot: installed,
+// version, versionStatus, auth) fills the version and the one CLI login slot
+// (SUB-08); before it, or without a CLI, profiles is empty. A later stage
+// replaces this row with a real adapter.
+export function describeClaudeEngine({ version = null, versionStatus = null, installed = null, auth = null } = {}) {
+  const status = CLAUDE_AUTH_STATUSES.has(auth?.status) ? auth.status : 'unknown'
+  const signedIn = status === 'signedIn'
   return {
     id: 'claude', label: 'Claude', status: 'decisionPending', statusReason: 'SUB-12',
-    version, versionSupported: null, capabilities: [], profiles: [],
+    version, versionSupported: null, versionStatus, installed: typeof installed === 'boolean' ? installed : null,
+    capabilities: [],
+    profiles: installed === true ? [{
+      // The CLI keeps its own login (Keychain); EG-Desk never reads it.
+      id: CLAUDE_ENGINE_PROFILE_ID, label: signedIn && typeof auth.label === 'string' ? auth.label : 'Claude', credentialStore: 'claude-cli', active: true,
+      auth: {
+        status,
+        method: signedIn && typeof auth.method === 'string' ? auth.method : null,
+        account: signedIn && typeof auth.account === 'string' ? auth.account : null,
+        planType: signedIn && typeof auth.planType === 'string' ? auth.planType : null,
+      },
+      usage: null,
+    }] : [],
     runtime: { residentProcesses: 0, residentLimit: 2, idleTimeoutMs: 300000 },
   }
 }
@@ -95,6 +122,13 @@ export class EngineRegistry {
 
   describe(descriptor) {
     if (!ENGINE_IDS.includes(descriptor?.id) || this.runnable.has(descriptor.id) || this.listed.has(descriptor.id)) throw chatError('INVALID_ENGINE_ADAPTER', 'Listed engine has an unknown or duplicate id', 500)
+    this.listed.set(descriptor.id, { ...descriptor })
+  }
+
+  // Replaces the row of an engine already listed (a new static check); it
+  // never lists a new engine or turns a runnable one into a listed one.
+  updateListed(descriptor) {
+    if (!this.listed.has(descriptor?.id)) throw chatError('INVALID_ENGINE_ADAPTER', 'Only a listed engine can be updated', 500)
     this.listed.set(descriptor.id, { ...descriptor })
   }
 

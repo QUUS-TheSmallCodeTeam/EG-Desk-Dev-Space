@@ -1,7 +1,7 @@
 import test from 'node:test'
 import assert from 'node:assert/strict'
 import { readFile } from 'node:fs/promises'
-import { EngineRegistry, createEngineStatusEmitter, describeClaudeEngine, publicEngineRow } from './engine-registry.mjs'
+import { CLAUDE_ENGINE_PROFILE_ID, EngineRegistry, createEngineStatusEmitter, describeClaudeEngine, publicEngineRow } from './engine-registry.mjs'
 import { CODEX_CAPABILITIES, createCodexEngineAdapter, describeCodexEngine } from './codex-engine-adapter.mjs'
 
 const MODELS = [
@@ -13,7 +13,7 @@ function bridgeLikeRegistry({ ready = true, auth = { isLoggedIn: true, authMode:
   const registry = new EngineRegistry({ defaultEngineId: 'codex' })
   const codex = registry.register(createCodexEngineAdapter({
     request: async () => ({}), respond: () => {}, isReady: () => ready, getModels: () => models,
-    describe: () => describeCodexEngine({ ready, version: '0.162.1', versionSupported: false, auth, usage: { status: 'available', usedPercent: 20 }, residentProcesses: ready ? 1 : 0, models }),
+    describe: () => describeCodexEngine({ ready, version: '0.162.1', versionSupported: false, versionStatus: 'supported', auth, usage: { status: 'available', usedPercent: 20 }, residentProcesses: ready ? 1 : 0, models }),
   }))
   registry.describe(describeClaudeEngine())
   return { registry, codex }
@@ -23,7 +23,7 @@ test('/v1/state engines lists runnable Codex as default and Claude as decision p
   const { registry } = bridgeLikeRegistry()
   assert.deepEqual(registry.publicEngines(), [
     {
-      id: 'codex', label: 'Codex', status: 'ready', version: '0.162.1', versionSupported: false, isDefault: true,
+      id: 'codex', label: 'Codex', status: 'ready', version: '0.162.1', versionSupported: false, versionStatus: 'supported', installed: true, isDefault: true,
       capabilities: [...CODEX_CAPABILITIES],
       profiles: [{ id: 'codex-default', label: 'ChatGPT', credentialStore: 'shared-user-default', active: true,
         auth: { status: 'signedIn', method: 'chatgpt', account: 'owner@example.com', planType: 'pro' }, usage: { status: 'available', usedPercent: 20 } }],
@@ -31,7 +31,7 @@ test('/v1/state engines lists runnable Codex as default and Claude as decision p
       models: MODELS,
     },
     {
-      id: 'claude', label: 'Claude', status: 'decisionPending', statusReason: 'SUB-12', version: null, versionSupported: null, isDefault: false,
+      id: 'claude', label: 'Claude', status: 'decisionPending', statusReason: 'SUB-12', version: null, versionSupported: null, versionStatus: null, installed: null, isDefault: false,
       capabilities: [], profiles: [], runtime: { residentProcesses: 0, residentLimit: 2, idleTimeoutMs: 300000 }, models: null,
     },
   ])
@@ -183,4 +183,68 @@ test('bridge reads the model list after each ready connection and account change
   assert.match(error, /engineStatus\.check\(\)/)
   const spawned = source.slice(at('function spawnAppServer() {'), at('async function connectToAppServer() {'))
   assert.ok(spawned.indexOf('appServerProcess = child') < spawned.indexOf('engineStatus.check()'), 'the starting status is announced')
+})
+
+// SUB-08/13: the listed Claude row shows the static CLI check (installed,
+// version range, plan and email) but stays 'decisionPending' and unrunnable.
+test('the Claude row carries the static CLI check but stays decision pending and unrunnable', () => {
+  const registry = new EngineRegistry({ defaultEngineId: 'codex' })
+  registry.register(createCodexEngineAdapter({ request: async () => ({}), respond: () => {} }))
+  registry.describe(describeClaudeEngine())
+  const claudeRow = () => registry.publicEngines().find(row => row.id === 'claude')
+  assert.deepEqual([claudeRow().installed, claudeRow().profiles], [null, []], 'not checked yet')
+  registry.updateListed(describeClaudeEngine({
+    installed: true, version: '2.1.300', versionStatus: 'untested', checkedAt: 1234,
+    auth: { status: 'signedIn', method: 'claudeai', label: 'Claude Max', account: 'owner@example.com', planType: 'max', token: 'PRIVATE', configDirectory: '/Users/me/.claude' },
+  }))
+  assert.deepEqual(claudeRow(), {
+    id: 'claude', label: 'Claude', status: 'decisionPending', statusReason: 'SUB-12', version: '2.1.300', versionSupported: null, versionStatus: 'untested', installed: true, isDefault: false,
+    capabilities: [],
+    profiles: [{ id: CLAUDE_ENGINE_PROFILE_ID, label: 'Claude Max', credentialStore: 'claude-cli', active: true,
+      auth: { status: 'signedIn', method: 'claudeai', account: 'owner@example.com', planType: 'max' }, usage: null }],
+    runtime: { residentProcesses: 0, residentLimit: 2, idleTimeoutMs: 300000 }, models: null,
+  })
+  assert.equal(/PRIVATE|\/Users\/me|checkedAt/.test(JSON.stringify(claudeRow())), false)
+  assert.throws(() => registry.require('claude'), error => error.code === 'ENGINE_UNAVAILABLE' && /being decided/.test(error.message))
+  assert.equal(registry.has('claude'), false)
+  // Signed out keeps the slot with no account; a missing CLI has no slot.
+  registry.updateListed(describeClaudeEngine({ installed: true, version: '2.1.300', versionStatus: 'untested', auth: { status: 'signedOut', label: 'Claude Max', account: 'old@example.com', planType: 'max' } }))
+  assert.deepEqual(claudeRow().profiles[0].auth, { status: 'signedOut', method: null, account: null, planType: null })
+  assert.equal(claudeRow().profiles[0].label, 'Claude')
+  registry.updateListed(describeClaudeEngine({ installed: true, auth: null }))
+  assert.equal(claudeRow().profiles[0].auth.status, 'unknown')
+  registry.updateListed(describeClaudeEngine({ installed: false, version: null, versionStatus: null, auth: null }))
+  assert.deepEqual([claudeRow().installed, claudeRow().profiles, claudeRow().status], [false, [], 'decisionPending'])
+  // updateListed never lists a new engine or shadows a runnable one.
+  assert.throws(() => registry.updateListed({ id: 'codex', status: 'ready' }), { code: 'INVALID_ENGINE_ADAPTER' })
+  assert.throws(() => new EngineRegistry().updateListed(describeClaudeEngine()), { code: 'INVALID_ENGINE_ADAPTER' })
+  assert.throws(() => registry.updateListed(null), { code: 'INVALID_ENGINE_ADAPTER' })
+})
+
+test('engine rows publish versionStatus and installed only from their allow-lists', () => {
+  for (const versionStatus of ['supported', 'untested', 'unsupported']) assert.equal(publicEngineRow({ id: 'claude', versionStatus }).versionStatus, versionStatus)
+  for (const versionStatus of ['broken', 'SUPPORTED', true, 1, {}, undefined]) assert.equal(publicEngineRow({ id: 'claude', versionStatus }).versionStatus, null)
+  for (const installed of [true, false]) assert.equal(publicEngineRow({ id: 'claude', installed }).installed, installed)
+  for (const installed of ['yes', 1, null, undefined]) assert.equal(publicEngineRow({ id: 'claude', installed }).installed, null)
+})
+
+test('bridge checks Claude statically at start, on /v1/state and on demand, and updates only the listed row', async () => {
+  const source = await readFile(new URL('./codex-bridge-server.mjs', import.meta.url), 'utf8')
+  const at = text => { const index = source.indexOf(text); assert.notEqual(index, -1, `missing server marker: ${text}`); return index }
+  at("import { createClaudeEngineStatus } from './claude-engine-auth.mjs'")
+  const status = source.slice(at('const claudeEngineStatus = createClaudeEngineStatus({'), at('const chat = new CodexChatRuntime({'))
+  assert.ok(at('const engineStatus = createEngineStatusEmitter({') < at('const claudeEngineStatus = createClaudeEngineStatus({'))
+  assert.match(status, /engineRegistry\.updateListed\(describeClaudeEngine\(snapshot\)\)\n {4}engineStatus\.check\(\)/)
+  assert.equal(source.match(/engineRegistry\.register\(/g).length, 1, 'Claude is still never registered as runnable')
+  // /v1/state never waits for the CLI; the change arrives as engine.status.
+  const state = source.slice(at("if (req.method === 'GET' && route === '/v1/state') {"), at("if (req.method === 'GET' && route === '/auth/status') {"))
+  assert.match(state, /\n {4}void claudeEngineStatus\.refresh\(\)\n/)
+  assert.equal(state.includes('await claudeEngineStatus'), false)
+  const route = source.slice(at("if (req.method === 'POST' && route === '/engines/claude/refresh') {"), at('if (await handleComputerControlHttp(req, res, url)) return'))
+  assert.match(route, /await claudeEngineStatus\.refresh\(\{ force: true \}\)/)
+  assert.match(route, /engineRegistry\.publicEngines\(\)\.find\(row => row\.id === 'claude'\)/)
+  const listen = source.slice(at('bridgeServer.listen(BRIDGE_PORT'), at('let shuttingDown = false'))
+  assert.ok(listen.indexOf('void connectToAppServer()') < listen.indexOf('void claudeEngineStatus.refresh()'))
+  // Codex publishes its Chat version range beside the exact schema contract.
+  at('    versionStatus: nativeCapabilities.versionStatus ?? null,')
 })

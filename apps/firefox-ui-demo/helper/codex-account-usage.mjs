@@ -1,9 +1,16 @@
 // ChatGPT subscription usage from codex 0.162.1 app-server:
 // account/rateLimits/read (GetAccountRateLimitsResponse) and the sparse
-// account/rateLimits/updated notification. Only the single-bucket
-// `rateLimits` view is read; limit IDs, credits, upsell banners and backend
-// account IDs never enter public state. Unreported usage stays null — it is
-// never shown as 0%.
+// account/rateLimits/updated notification. The main Codex allowance is read:
+// the single-bucket `rateLimits` view while it belongs to it, else the
+// `rateLimitsByLimitId.codex` bucket. A model-specific bucket (limitId other
+// than 'codex') never replaces the main 5-hour/weekly rows (SUB-03/14).
+// Limit IDs, credits, upsell banners and backend account IDs never enter
+// public state. Unreported usage stays null — it is never shown as 0%.
+//
+// Main-bucket filter and plan-based window defaults follow the pattern of
+// t3code apps/server/src/provider/codexUsageLimits.ts:59-74, :131, :167-173
+// (MIT, Copyright (c) 2026 T3 Tools Inc.); the code here is our own.
+import { publicPlanType } from './codex-auth-state.mjs'
 
 // RateLimitReachedType enum of the same schema.
 export const RATE_LIMIT_REACHED_TYPES = new Set([
@@ -53,9 +60,46 @@ function publicReachedType(value) {
   return typeof value === 'string' && RATE_LIMIT_REACHED_TYPES.has(value) ? value : null
 }
 
+export const MAIN_LIMIT_ID = 'codex'
+const SESSION_MINUTES = 5 * 60
+const WEEK_MINUTES = 7 * 24 * 60
+const MONTH_MINUTES = 30 * 24 * 60
+// Free and Go plans have one monthly allowance; paid plans the 5-hour and weekly pair.
+const MONTHLY_PLANS = new Set(['free', 'go'])
+
+const plainObject = value => value && typeof value === 'object' && !Array.isArray(value) ? value : null
+
+// An absent or null limitId is the main allowance (older CLIs omit it).
+function isMainBucket(snapshot) {
+  return snapshot.limitId == null || snapshot.limitId === MAIN_LIMIT_ID
+}
+
 function snapshotOf(value) {
-  const snapshot = value?.rateLimits
-  return snapshot && typeof snapshot === 'object' && !Array.isArray(snapshot) ? snapshot : null
+  return plainObject(value?.rateLimits)
+}
+
+// Full read: the single-bucket view when it is the main allowance, else the
+// keyed main bucket; a model-specific view alone reports nothing.
+function mainSnapshotOf(nativeResult) {
+  const single = snapshotOf(nativeResult)
+  if (single && isMainBucket(single)) return single
+  const keyed = plainObject(plainObject(nativeResult?.rateLimitsByLimitId)?.[MAIN_LIMIT_ID])
+  return keyed && isMainBucket(keyed) ? keyed : null
+}
+
+// primary/secondary are positions, not durations. Without a reported length
+// the plan decides it; an unknown plan leaves it unknown (never guessed).
+function defaultWindowMinutes(position, planType) {
+  const plan = publicPlanType(planType)
+  if (!plan || plan === 'unknown') return null
+  if (position === 'secondary') return WEEK_MINUTES
+  return MONTHLY_PLANS.has(plan) ? MONTH_MINUTES : SESSION_MINUTES
+}
+
+function withDefaultWindow(window, position, planType) {
+  if (!window || window.windowMinutes !== null) return window
+  const windowMinutes = defaultWindowMinutes(position, planType)
+  return windowMinutes === null ? window : { ...window, windowMinutes }
 }
 
 function observedNow(now) {
@@ -65,11 +109,11 @@ function observedNow(now) {
 // Full read result → public limits, or null when nothing was reported.
 // usageAllowed mirrors ordinaryUsageAllowed (null = unavailable).
 export function normalizeRateLimits(nativeResult, now = Date.now()) {
-  const snapshot = snapshotOf(nativeResult)
+  const snapshot = mainSnapshotOf(nativeResult)
   if (!snapshot) return null
   return {
-    primary: publicWindow(snapshot.primary),
-    secondary: publicWindow(snapshot.secondary),
+    primary: withDefaultWindow(publicWindow(snapshot.primary), 'primary', snapshot.planType),
+    secondary: withDefaultWindow(publicWindow(snapshot.secondary), 'secondary', snapshot.planType),
     reachedType: publicReachedType(snapshot.rateLimitReachedType),
     usageAllowed: typeof nativeResult.ordinaryUsageAllowed === 'boolean' ? nativeResult.ordinaryUsageAllowed : null,
     observedAt: observedNow(now),
@@ -87,15 +131,16 @@ function mergeWindow(prev, next, now) {
 
 // Sparse account/rateLimits/updated merge (JSON-RPC message or its params).
 // Nulls never clear prior values, so a reached limit only clears on a full
-// account/rateLimits/read; recovery is not inferred from percentages.
+// account/rateLimits/read; recovery is not inferred from percentages. An
+// update for another bucket (e.g. a model-specific allowance) changes nothing.
 export function applyRateLimitsUpdate(prev, notification, now = Date.now()) {
   const snapshot = snapshotOf(notification?.params ?? notification)
-  if (!snapshot) return prev || null
+  if (!snapshot || !isMainBucket(snapshot)) return prev || null
   const at = observedNow(now)
   const base = prev && typeof prev === 'object' ? prev : { primary: null, secondary: null, reachedType: null, usageAllowed: null }
   return {
-    primary: mergeWindow(base.primary || null, publicWindow(snapshot.primary), at),
-    secondary: mergeWindow(base.secondary || null, publicWindow(snapshot.secondary), at),
+    primary: withDefaultWindow(mergeWindow(base.primary || null, publicWindow(snapshot.primary), at), 'primary', snapshot.planType),
+    secondary: withDefaultWindow(mergeWindow(base.secondary || null, publicWindow(snapshot.secondary), at), 'secondary', snapshot.planType),
     reachedType: publicReachedType(snapshot.rateLimitReachedType) ?? publicReachedType(base.reachedType),
     usageAllowed: typeof base.usageAllowed === 'boolean' ? base.usageAllowed : null,
     observedAt: at,

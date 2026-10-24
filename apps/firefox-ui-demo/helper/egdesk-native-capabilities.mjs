@@ -13,6 +13,48 @@ export const NATIVE_SCHEMA_VERSION = '0.160.1'
 const CONTEXT_CONTRACT_VERSIONS = new Set(['0.157.1', '0.160.1', '0.163.0-alpha.10.2'])
 const QA_POLICY_CONTRACT_VERSIONS = new Set(['0.160.1', '0.163.0-alpha.10.2'])
 
+// SUB-13: ordinary Chat follows a version range instead of the exact sets
+// above, so an automatic CLI update keeps Chat running and the screen says
+// 'verified' or 'not verified' (guidance, never a block). The experimental
+// schema features (Context/Reader, bounded QA) keep their exact sets.
+// Range policy pattern: t3code apps/server/src/provider/providerCompatibility.ts:57-101
+// and packages/shared/src/semver.ts (MIT, Copyright (c) 2026 T3 Tools Inc.);
+// the code here is our own.
+//   supported   an exact version EG-Desk Chat was checked against
+//   untested    at or above the minimum, not checked yet (Chat continues)
+//   unsupported below the minimum (Chat may fail; the screen explains)
+//   null        version unknown
+export const ENGINE_VERSION_STATUSES = Object.freeze(['supported', 'untested', 'unsupported'])
+// 0.162.1 is the schema the Chat usage, model list and account code was
+// written against (codex-account-usage.mjs, codex-auth-state.mjs).
+export const CODEX_CHAT_VERSION_POLICY = Object.freeze({
+  verified: Object.freeze([...CONTEXT_CONTRACT_VERSIONS, '0.162.1']),
+  minimum: '0.157.0',
+})
+
+const SEMVER = /^(\d{1,9})\.(\d{1,9})\.(\d{1,9})(?:-([0-9A-Za-z-]+(?:\.[0-9A-Za-z-]+)*))?(?:\+[0-9A-Za-z.-]+)?$/
+
+function parseSemver(value) {
+  const match = typeof value === 'string' && value.length <= 80 ? SEMVER.exec(value) : null
+  return match ? { core: [Number(match[1]), Number(match[2]), Number(match[3])], prerelease: match[4] ?? null } : null
+}
+
+function compareCore(left, right) {
+  for (let index = 0; index < 3; index++) if (left[index] !== right[index]) return left[index] > right[index] ? 1 : -1
+  return 0
+}
+
+export function engineVersionStatus(version, policy) {
+  const parsed = parseSemver(version)
+  if (!parsed) return null
+  if (Array.isArray(policy?.verified) && policy.verified.includes(version)) return 'supported'
+  const minimum = parseSemver(policy?.minimum)
+  if (!minimum) return 'untested'
+  const compared = compareCore(parsed.core, minimum.core)
+  // A prerelease of the minimum itself comes before it.
+  return compared < 0 || (compared === 0 && parsed.prerelease !== null) ? 'unsupported' : 'untested'
+}
+
 const MODEL_ID = /^[A-Za-z0-9][A-Za-z0-9._:/-]{0,127}$/
 const REASONING_EFFORTS = new Set(['none', 'minimal', 'low', 'medium', 'high', 'xhigh', 'max', 'ultra'])
 
@@ -131,6 +173,8 @@ export function inspectNativeCapabilities({ executable, env = process.env, cwd =
   const contractFingerprint = contextContract ? createHash('sha256').update(`${version}\0${binaryFingerprint}\0${proof.schemaFingerprint}`).digest('hex') : null
   return {
     executable, version, schemaVersion: NATIVE_SCHEMA_VERSION,
+    // Ordinary Chat (range policy); schemaMatch stays the exact experimental contract.
+    versionStatus: engineVersionStatus(version, CODEX_CHAT_VERSION_POLICY),
     schemaMatch: contextContract, experimentalApi: true,
     dynamicTools: contextContract, readerReadOnly: contextContract,
     qaReadOnly: qaContract,

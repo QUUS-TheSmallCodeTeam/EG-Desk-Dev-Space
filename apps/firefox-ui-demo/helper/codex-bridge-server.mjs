@@ -4,8 +4,9 @@ import { AppServerRpc } from './codex-app-server-rpc.mjs'
 import { normalizeNativeAuth, publicAuthIdentityKey, publicPlanType } from './codex-auth-state.mjs'
 import { usageDisplay } from './codex-account-usage.mjs'
 import { CodexChatRuntime } from './codex-chat-runtime.mjs'
-import { createCodexEngineAdapter, describeCodexEngine } from './codex-engine-adapter.mjs'
+import { codexDeviceLoginPatch, codexLoginInProgressResponse, codexLoginMode, codexLoginStartParams, createCodexEngineAdapter, describeCodexEngine, isStaleLoginFailure } from './codex-engine-adapter.mjs'
 import { EngineRegistry, createEngineStatusEmitter, describeClaudeEngine } from './engine-registry.mjs'
+import { createClaudeEngineStatus } from './claude-engine-auth.mjs'
 import { createModelCatalogSync } from './codex-model-catalog.mjs'
 import { BrowserToolTransport } from './codex-browser-tool-transport.mjs'
 import { createCodexBrowserToolProvider } from './codex-browser-tool-provider.mjs'
@@ -199,6 +200,7 @@ const codexEngine = createCodexEngineAdapter({
   describe: () => describeCodexEngine({
     ready: appServerReady, starting: Boolean(appServerProcess) && !appServerReady, blocked: launchConfigBlocked,
     version: nativeCapabilities.version, versionSupported: nativeCapabilities.version ? nativeCapabilities.schemaMatch : null,
+    versionStatus: nativeCapabilities.versionStatus ?? null,
     auth: authState, usage: usageDisplay(authState.rateLimits, Date.now()),
     residentProcesses: appServerProcess && appServerProcess.exitCode == null ? 1 : 0,
     models: modelCatalog.snapshot(),
@@ -213,6 +215,16 @@ const engineStatus = createEngineStatusEmitter({
   engines: () => engineRegistry.publicEngines(),
   emit: event => broadcast(event),
   v: BRIDGE_PROTOCOL_VERSION,
+})
+// SUB-08/13: static Claude CLI check (`--version`, `auth status --json`) for
+// the listed Claude row: installed, version range, signed-in plan and email.
+// It never reads Keychain or credential files and never makes Claude
+// runnable; the row stays 'decisionPending' until SUB-12 is decided.
+const claudeEngineStatus = createClaudeEngineStatus({
+  onChange: snapshot => {
+    engineRegistry.updateListed(describeClaudeEngine(snapshot))
+    engineStatus.check()
+  },
 })
 const chat = new CodexChatRuntime({
   engines: engineRegistry,
@@ -387,6 +399,9 @@ function handleAppServerNotification(message) {
       void refreshAccountState().catch(() => {})
       return
     case 'account/login/completed': {
+      // The browser login cancelled on a switch to code entry ends with its
+      // own loginId; it must not end the code sign-in now running.
+      if (isStaleLoginFailure(message.params, authState.authSessionId)) return
       if (loginPollTimer) {
         clearInterval(loginPollTimer)
         loginPollTimer = null
@@ -397,6 +412,11 @@ function handleAppServerNotification(message) {
         ...authState,
         loginInProgress: false,
         loginError: error,
+        // A finished login's page link and one-time code are no longer valid.
+        authSessionId: null,
+        authUrl: null,
+        verificationUrl: null,
+        userCode: null,
       }
       updateAuthState({
         ...nextSnapshot,
@@ -615,6 +635,27 @@ async function startChatgptLogin() {
   return result
 }
 
+// SUB-04 code entry: the screen shows verificationUrl and userCode; the user
+// signs in there and types the code, so no browser callback is needed. The
+// code reaches the screen only (auth status and this answer), never a log.
+async function startChatgptDeviceLogin() {
+  const result = await appServerRequest('account/login/start', codexLoginStartParams('device'))
+  let patch
+  try { patch = codexDeviceLoginPatch(result) }
+  catch (error) {
+    // An incomplete answer must not leave a half-started login behind.
+    if (typeof result?.loginId === 'string') void appServerRequest('account/login/cancel', { loginId: result.loginId }).catch(() => {})
+    throw error
+  }
+  updateAuthState(patch, { broadcastStatus: false })
+  startLoginPolling()
+  broadcast({ type: 'login-started' })
+  emitAuthLifecycle('started', { loginId: patch.authSessionId, mode: 'device' })
+  emitAuthStatus()
+  broadcast({ type: 'auth-status', status: authSnapshot() })
+  return patch
+}
+
 // ── Terminal PTY support ──
 const terminalRegistry = new TerminalSessionRegistry({ onExit: receipt => workflow?.publishTerminalExit(receipt) })
 
@@ -716,6 +757,8 @@ const bridgeServer = createServer(async (req, res) => {
     try {
       await refreshAccountState()
     } catch {}
+    // At most once a minute, in the background; a change arrives as engine.status.
+    void claudeEngineStatus.refresh()
     sendJson(res, 200, {
       protocolVersion: BRIDGE_PROTOCOL_VERSION,
       provider: PROVIDER_ID,
@@ -729,7 +772,7 @@ const bridgeServer = createServer(async (req, res) => {
       auth: authSnapshot(),
       chat: chat.snapshot(),
       capabilities: {
-        auth: ['status', 'start', 'cancel', 'signout', 'usage'],
+        auth: ['status', 'start', 'cancel', 'signout', 'usage', 'device-code'],
         chat: chatStore && chat.storeHealthy ? ['send', 'stream', 'resume', 'interrupt', 'approvals', 'user-input', 'subagent-status', 'typed-activity', 'artifact-refs', 'local-history', 'legacy-import', 'stateless', 'fork', ...(nativeCapabilities.qaReadOnly ? ['read-only-qa'] : [])] : ['local-history-unavailable'],
         context: nativeCapabilities.schemaMatch ? ['capture', 'immutable-inspect', 'native-dynamic-tools', 'smart-read', 'read-only-reader', 'answer-briefing'] : ['capture', 'immutable-inspect'],
         files: ['native-picker', 'scoped-read', 'managed-drafts', 'create-only-save-as'],
@@ -764,6 +807,9 @@ const bridgeServer = createServer(async (req, res) => {
 
   if (req.method === 'POST' && route === '/auth/start') {
     try {
+      // { mode: 'device' } starts code entry (SUB-04); no body keeps the browser flow.
+      const body = await readJsonBody(req, { maxBytes: 1024 })
+      const mode = codexLoginMode(body.mode)
       await refreshAccountState()
       if (authState.isLoggedIn) {
         sendJson(res, 200, {
@@ -774,27 +820,47 @@ const bridgeServer = createServer(async (req, res) => {
         return
       }
       if (authState.loginInProgress && authState.authSessionId) {
-        sendJson(res, 200, {
-          started: false,
-          loginInProgress: true,
-          loginId: authState.authSessionId,
-          message: 'Codex browser login is already running.'
-        })
+        if (authState.loginMode === mode) {
+          sendJson(res, 200, codexLoginInProgressResponse(authState))
+          return
+        }
+        // Switching between browser and code entry ends the running login first.
+        try { await appServerRequest('account/login/cancel', { loginId: authState.authSessionId }) } catch {}
+        resetLoginState()
+      }
+      if (mode === 'device') {
+        const patch = await startChatgptDeviceLogin()
+        sendJson(res, 200, { started: true, mode, loginId: patch.authSessionId, verificationUrl: patch.verificationUrl, userCode: patch.userCode })
         return
       }
       const result = await startChatgptLogin()
       sendJson(res, 200, {
         started: true,
+        mode,
         loginId: result.loginId,
         authUrl: result.authUrl,
       })
     } catch (error) {
-      emitAuthLifecycle('failed', { error: publicText(error instanceof Error ? error.message : String(error), 2000) })
+      const message = publicText(error instanceof Error ? error.message : String(error), 2000)
+      // A malformed request (body, mode) is the caller's error, not a failed login.
+      if (Number.isInteger(error?.httpStatus) && error.httpStatus >= 400 && error.httpStatus < 500) {
+        sendJson(res, error.httpStatus, { started: false, code: error.code || 'INVALID_REQUEST', message })
+        return
+      }
+      emitAuthLifecycle('failed', { error: message })
       sendJson(res, 500, {
         started: false,
-        message: publicText(error instanceof Error ? error.message : String(error), 2000),
+        message,
       })
     }
+    return
+  }
+
+  // 'Check again' for the Claude row (e.g. after `claude auth login` in a
+  // terminal): one static check, coalesced, then the public row.
+  if (req.method === 'POST' && route === '/engines/claude/refresh') {
+    await claudeEngineStatus.refresh({ force: true })
+    sendJson(res, 200, { engine: engineRegistry.publicEngines().find(row => row.id === 'claude') ?? null })
     return
   }
 
@@ -859,6 +925,7 @@ bridgeServer.listen(BRIDGE_PORT, '127.0.0.1', () => {
     ts: Date.now(),
   })
   void connectToAppServer()
+  void claudeEngineStatus.refresh()
 })
 
 let shuttingDown = false

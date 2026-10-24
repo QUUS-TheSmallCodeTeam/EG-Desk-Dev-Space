@@ -3,6 +3,8 @@
 // pass-through: the same native method, the same params object and the same
 // call order the runtime used before adapters existed. Calls are not wrapped
 // in async functions, so a synchronous failure stays synchronous.
+import { chatError } from './codex-chat-values.mjs'
+
 export const CODEX_ENGINE_ID = 'codex'
 // The one shared login (CODEX_HOME) the bridge uses today (SUB-11).
 export const CODEX_ENGINE_PROFILE_ID = 'codex-default'
@@ -14,6 +16,7 @@ export const CODEX_CAPABILITIES = Object.freeze([
 
 const publicVersion = value => typeof value === 'string' && /^\d+\.\d+\.\d+(?:[-+][0-9A-Za-z.-]{1,40})?$/.test(value) ? value : null
 const AUTH_METHODS = { chatgpt: 'chatgpt', chatgptAuthTokens: 'chatgpt', apikey: 'apiKey', apiKey: 'apiKey' }
+const VERSION_STATUSES = new Set(['supported', 'untested', 'unsupported'])
 
 /**
  * One /v1/state engines[] row from public bridge state only. auth is the
@@ -21,13 +24,17 @@ const AUTH_METHODS = { chatgpt: 'chatgpt', chatgptAuthTokens: 'chatgpt', apikey:
  * model/list catalog (codex-model-catalog.mjs) or null when unknown. No token,
  * credential location or executable path is read or returned.
  */
-export function describeCodexEngine({ ready = false, starting = false, blocked = false, version = null, versionSupported = null, auth = null, usage = null, residentProcesses = 0, models = null } = {}) {
+export function describeCodexEngine({ ready = false, starting = false, blocked = false, version = null, versionSupported = null, versionStatus = null, installed = null, auth = null, usage = null, residentProcesses = 0, models = null } = {}) {
   const signedIn = auth?.isLoggedIn === true
   return {
     id: CODEX_ENGINE_ID, label: 'Codex',
     status: blocked ? 'disabled' : ready ? (signedIn ? 'ready' : 'loginRequired') : starting ? 'starting' : 'offline',
     version: publicVersion(version),
+    // versionSupported: exact Context/QA schema contract; versionStatus: SUB-13 Chat range.
     versionSupported: typeof versionSupported === 'boolean' ? versionSupported : null,
+    versionStatus: VERSION_STATUSES.has(versionStatus) ? versionStatus : null,
+    // A reported version means the CLI ran; otherwise not known here.
+    installed: typeof installed === 'boolean' ? installed : publicVersion(version) ? true : null,
     capabilities: [...CODEX_CAPABILITIES],
     profiles: [{
       id: CODEX_ENGINE_PROFILE_ID, label: 'ChatGPT', credentialStore: 'shared-user-default', active: true,
@@ -42,6 +49,70 @@ export function describeCodexEngine({ ready = false, starting = false, blocked =
     runtime: { residentProcesses: Number.isSafeInteger(residentProcesses) && residentProcesses > 0 ? residentProcesses : 0, residentLimit: 1, idleTimeoutMs: null },
     models: Array.isArray(models) ? models : null,
   }
+}
+
+// SUB-04 ChatGPT sign-in modes. 'browser' opens the callback page
+// (account/login/start type 'chatgpt'); 'device' shows a one-time code to type
+// on the verification page, for when the browser cannot come back to the
+// bridge (type 'chatgptDeviceCode', codex 0.162.1 LoginAccountParams). Flow
+// pattern: agentclientprotocol/codex-acp src/CodexAcpClient.ts:301-354,
+// :1342-1384 (Apache-2.0); the code here is our own. The user code is
+// returned to the screen only: never logged, stored or put in lifecycle details.
+export const CODEX_LOGIN_MODES = Object.freeze(['browser', 'device'])
+const USER_CODE = /^(?=.{4,40}$)[A-Za-z0-9]{2,16}(?:-[A-Za-z0-9]{2,16}){0,3}$/
+
+function boundedId(value) {
+  return typeof value === 'string' && value.trim() && value.length <= 200 ? value : null
+}
+
+function httpsUrl(value) {
+  if (typeof value !== 'string' || value.length > 2048) return null
+  try {
+    const url = new URL(value)
+    return url.protocol === 'https:' && !url.username && !url.password ? url.href : null
+  } catch { return null }
+}
+
+// The POST /auth/start body's mode; absent means the existing browser flow.
+export function codexLoginMode(value) {
+  if (value === undefined || value === null) return 'browser'
+  if (CODEX_LOGIN_MODES.includes(value)) return value
+  throw chatError('INVALID_LOGIN_MODE', "Login mode must be 'browser' or 'device'", 400)
+}
+
+export function codexLoginStartParams(mode) {
+  return mode === 'device' ? { type: 'chatgptDeviceCode' } : { type: 'chatgpt' }
+}
+
+// account/login/start answer for the code-entry flow → the bridge auth state
+// patch; anything but a complete device-code answer is refused.
+export function codexDeviceLoginPatch(result) {
+  const loginId = boundedId(result?.loginId)
+  const verificationUrl = httpsUrl(result?.verificationUrl)
+  const userCode = typeof result?.userCode === 'string' && USER_CODE.test(result.userCode) ? result.userCode : null
+  if (result?.type !== 'chatgptDeviceCode' || !loginId || !verificationUrl || !userCode) throw new Error('Unexpected login response')
+  return {
+    loginInProgress: true, authSessionId: loginId, authUrl: null, verificationUrl, userCode,
+    callbackUrl: null, loginMode: 'device', loginError: null, statusText: 'Signing in…',
+  }
+}
+
+// POST /auth/start answer while a login is already running in the same mode,
+// so the screen can show the same page link or code again.
+export function codexLoginInProgressResponse(state) {
+  const device = state?.loginMode === 'device'
+  return {
+    started: false, loginInProgress: true, loginId: state?.authSessionId ?? null, mode: device ? 'device' : 'browser',
+    ...(device ? { verificationUrl: state.verificationUrl ?? null, userCode: state.userCode ?? null } : {}),
+    message: device ? 'Codex code sign-in is already running.' : 'Codex browser login is already running.',
+  }
+}
+
+// account/login/completed of a login that is no longer the running one (the
+// browser login cancelled when the user switched to the code) must not end
+// the new login. A success is never ignored: the account is signed in.
+export function isStaleLoginFailure(params, currentLoginId) {
+  return params?.success !== true && typeof params?.loginId === 'string' && params.loginId !== currentLoginId
 }
 
 export function createCodexEngineAdapter({ request, respond, getOwnerKey = () => null, isReady = () => true, describe = null, refresh = null, getModels = () => null } = {}) {

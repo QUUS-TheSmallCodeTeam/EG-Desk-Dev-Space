@@ -1,7 +1,7 @@
 import test from 'node:test'
 import assert from 'node:assert/strict'
 import {
-  applyRateLimitsUpdate, normalizeRateLimits, publicEpochMs, RATE_LIMIT_REACHED_TYPES,
+  applyRateLimitsUpdate, MAIN_LIMIT_ID, normalizeRateLimits, publicEpochMs, RATE_LIMIT_REACHED_TYPES,
   USAGE_STALE_AFTER_MS, usageDisplay,
 } from './codex-account-usage.mjs'
 
@@ -200,4 +200,51 @@ test('usageDisplay is unknown without limits and tolerates malformed input', () 
   }
   const odd = usageDisplay({ primary: { usedPercent: -20, windowMinutes: 'x', resetsAt: 'soon' }, secondary: 7, reachedType: 'bogus', observedAt: now }, now)
   assert.deepEqual(odd, { level: 'ok', percentLabel: '0% 사용', windowLabel: null, resetLabel: null, resetsAt: null, stale: false })
+})
+
+// SUB-03/14: a model-specific bucket (limitId other than 'codex') must never
+// replace the main 5-hour/weekly rows (t3code codexUsageLimits.ts:69, :173).
+test('a model-specific bucket never replaces the main allowance, on a read or a sparse update', () => {
+  assert.equal(MAIN_LIMIT_ID, 'codex')
+  const main = normalizeRateLimits(readResult({ limitId: 'codex', planType: 'pro', primary: window(30, 300, sec(at(15, 0))), secondary: window(12, 10080, sec(at(9, 0, 30))) }), now)
+  const spark = { method: 'account/rateLimits/updated', params: { rateLimits: { limitId: 'codex_spark', limitName: 'Spark', planType: 'pro', primary: window(97, 300, sec(at(14, 0))), secondary: window(99, 10080, null), rateLimitReachedType: 'rate_limit_reached' } } }
+  assert.equal(applyRateLimitsUpdate(main, spark, now + 1000), main, 'the other bucket changes nothing, not even observedAt')
+  assert.equal(applyRateLimitsUpdate(null, spark, now), null)
+  assert.equal(usageDisplay(applyRateLimitsUpdate(main, spark, now), now).percentLabel, '30% 사용')
+  // Unlabelled (older CLI) and explicitly 'codex' updates still merge.
+  assert.equal(applyRateLimitsUpdate(main, { rateLimits: { primary: { usedPercent: 41 } } }, now).primary.usedPercent, 41)
+  assert.equal(applyRateLimitsUpdate(main, { rateLimits: { limitId: null, primary: { usedPercent: 42 } } }, now).primary.usedPercent, 42)
+  assert.equal(applyRateLimitsUpdate(main, { rateLimits: { limitId: 'codex', primary: { usedPercent: 43 } } }, now).primary.usedPercent, 43)
+  // A read whose single view is another bucket falls back to the keyed main bucket.
+  const fallback = normalizeRateLimits(readResult({ limitId: 'codex_spark', primary: window(97, 300, null) }, {
+    ordinaryUsageAllowed: true, rateLimitsByLimitId: { codex_spark: { limitId: 'codex_spark', primary: window(97, 300, null) }, codex: { limitId: 'codex', primary: window(25, 300, sec(at(16, 0))) } },
+  }), now)
+  assert.deepEqual(fallback, { primary: { usedPercent: 25, windowMinutes: 300, resetsAt: at(16, 0) }, secondary: null, reachedType: null, usageAllowed: true, observedAt: now })
+  // Only another bucket reported: nothing is shown rather than the wrong allowance.
+  assert.equal(normalizeRateLimits(readResult({ limitId: 'codex_spark', primary: window(97, 300, null) }), now), null)
+  assert.equal(normalizeRateLimits(readResult({ limitId: 'codex_spark', primary: window(97, 300, null) }, { rateLimitsByLimitId: { codex: { limitId: 'other', primary: window(1, 300, null) } } }), now), null)
+  for (const keyed of [null, [], 'codex', { codex: [] }, { codex: 'x' }]) {
+    assert.equal(normalizeRateLimits(readResult({ limitId: 'codex_spark' }, { rateLimitsByLimitId: keyed }), now), null)
+  }
+  assert.ok(!JSON.stringify(fallback).includes('codex'), 'limit IDs never enter public state')
+})
+
+test('a missing window length comes from the plan: 5-hour and weekly when paid, 30 days on Free/Go, unknown otherwise', () => {
+  const sparse = planType => normalizeRateLimits(readResult({ planType, primary: { usedPercent: 10 }, secondary: { usedPercent: 4 } }), now)
+  assert.deepEqual([sparse('plus').primary.windowMinutes, sparse('plus').secondary.windowMinutes], [300, 10080])
+  assert.deepEqual([sparse('pro').primary.windowMinutes, sparse('team').secondary.windowMinutes], [300, 10080])
+  assert.deepEqual([sparse('free').primary.windowMinutes, sparse('go').primary.windowMinutes], [43200, 43200])
+  assert.equal(usageDisplay(sparse('free'), now).windowLabel, '30일 한도')
+  assert.equal(usageDisplay(sparse('plus'), now).windowLabel, '5시간 한도')
+  for (const planType of [undefined, null, 'unknown', 'PLUS', 'premium', 7]) {
+    assert.deepEqual([sparse(planType).primary.windowMinutes, sparse(planType).secondary.windowMinutes], [null, null], String(planType))
+  }
+  // A reported length always wins over the plan default.
+  assert.equal(normalizeRateLimits(readResult({ planType: 'free', primary: window(1, 300, null) }), now).primary.windowMinutes, 300)
+  // Sparse update: an observed length is kept; the plan fills only a still-unknown one.
+  const prev = normalizeRateLimits(readResult({ primary: window(5, 1440, null) }), now)
+  assert.equal(applyRateLimitsUpdate(prev, { rateLimits: { planType: 'plus', primary: { usedPercent: 6 } } }, now).primary.windowMinutes, 1440)
+  const fresh = applyRateLimitsUpdate(null, { rateLimits: { planType: 'plus', primary: { usedPercent: 6 }, secondary: { usedPercent: 2 } } }, now)
+  assert.deepEqual([fresh.primary.windowMinutes, fresh.secondary.windowMinutes], [300, 10080])
+  assert.equal(applyRateLimitsUpdate(null, { rateLimits: { primary: { usedPercent: 6 } } }, now).primary.windowMinutes, null)
 })

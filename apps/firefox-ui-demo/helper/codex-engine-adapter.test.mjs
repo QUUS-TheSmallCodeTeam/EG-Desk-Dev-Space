@@ -1,6 +1,10 @@
 import test from 'node:test'
 import assert from 'node:assert/strict'
-import { CODEX_CAPABILITIES, CODEX_ENGINE_PROFILE_ID, createCodexEngineAdapter, describeCodexEngine } from './codex-engine-adapter.mjs'
+import { readFile } from 'node:fs/promises'
+import {
+  CODEX_CAPABILITIES, CODEX_ENGINE_PROFILE_ID, CODEX_LOGIN_MODES, codexDeviceLoginPatch, codexLoginInProgressResponse, codexLoginMode,
+  codexLoginStartParams, createCodexEngineAdapter, describeCodexEngine, isStaleLoginFailure,
+} from './codex-engine-adapter.mjs'
 import { ENGINE_STATUSES, validateEngineAdapter } from './engine-adapter.mjs'
 
 function recorded() {
@@ -64,9 +68,9 @@ test('Codex adapter tags fed app-server traffic for each subscriber until it uns
 test('Codex engine row reports status, version support, account slot and usage from public bridge state only', async () => {
   const auth = { isLoggedIn: true, authMode: 'chatgpt', accountEmail: 'owner@example.com', planType: 'pro', accountId: 'acct-1', authUrl: 'https://auth.example/secret-code', userCode: 'PRIVATE-CODE' }
   const usage = { status: 'available', usedPercent: 20 }
-  const row = describeCodexEngine({ ready: true, version: '0.162.1', versionSupported: false, auth, usage, residentProcesses: 1 })
+  const row = describeCodexEngine({ ready: true, version: '0.162.1', versionSupported: false, versionStatus: 'supported', auth, usage, residentProcesses: 1 })
   assert.deepEqual(row, {
-    id: 'codex', label: 'Codex', status: 'ready', version: '0.162.1', versionSupported: false,
+    id: 'codex', label: 'Codex', status: 'ready', version: '0.162.1', versionSupported: false, versionStatus: 'supported', installed: true,
     capabilities: [...CODEX_CAPABILITIES],
     profiles: [{ id: 'codex-default', label: 'ChatGPT', credentialStore: 'shared-user-default', active: true,
       auth: { status: 'signedIn', method: 'chatgpt', account: 'owner@example.com', planType: 'pro' }, usage }],
@@ -82,6 +86,9 @@ test('Codex engine row reports status, version support, account slot and usage f
   for (const state of [{}, { ready: true, auth }, { starting: true }]) assert.ok(ENGINE_STATUSES.includes(statusOf(state)))
   const signedOut = describeCodexEngine({ ready: true, version: '/usr/local/bin/codex', auth: { isLoggedIn: false, loginInProgress: true, accountEmail: 'old@example.com' } })
   assert.equal(signedOut.version, null)
+  assert.deepEqual([signedOut.installed, signedOut.versionStatus], [null, null], 'no reported version: not known, never invented')
+  assert.equal(describeCodexEngine({ versionStatus: 'broken' }).versionStatus, null)
+  assert.equal(describeCodexEngine({ installed: false }).installed, false)
   assert.deepEqual(signedOut.profiles[0].auth, { status: 'signingIn', method: null, account: null, planType: null })
   assert.equal(describeCodexEngine().profiles[0].auth.status, 'unknown')
   const adapter = createCodexEngineAdapter({ request: () => {}, respond: () => {}, isReady: () => false })
@@ -117,4 +124,64 @@ test('Codex row and adapter carry the listed models, or null while they are unkn
   assert.equal(broken.models(), null)
   assert.equal(createCodexEngineAdapter({ request: () => {}, respond: () => {} }).models(), null, 'no catalog: unknown')
   assert.throws(() => validateEngineAdapter({ ...adapter, models: 'gpt-6.1-sol' }), { code: 'INVALID_ENGINE_ADAPTER' })
+})
+
+// SUB-04: code entry when the browser cannot come back (codex-acp CodexAcpClient.ts:301-354).
+const DEVICE_ANSWER = { type: 'chatgptDeviceCode', loginId: 'login-7', verificationUrl: 'https://auth.openai.com/codex/device', userCode: 'ABCD-12345' }
+
+test('ChatGPT sign-in offers browser and code entry, and code entry needs a complete device-code answer', () => {
+  assert.deepEqual(CODEX_LOGIN_MODES, ['browser', 'device'])
+  assert.equal(codexLoginMode(undefined), 'browser', 'no body keeps the existing browser flow')
+  assert.equal(codexLoginMode(null), 'browser')
+  assert.equal(codexLoginMode('device'), 'device')
+  for (const mode of ['code', 'DEVICE', '', 1, {}, ['device']]) assert.throws(() => codexLoginMode(mode), error => error.code === 'INVALID_LOGIN_MODE' && error.httpStatus === 400)
+  assert.deepEqual(codexLoginStartParams('device'), { type: 'chatgptDeviceCode' })
+  assert.deepEqual(codexLoginStartParams('browser'), { type: 'chatgpt' })
+  assert.deepEqual(codexDeviceLoginPatch(DEVICE_ANSWER), {
+    loginInProgress: true, authSessionId: 'login-7', authUrl: null, verificationUrl: 'https://auth.openai.com/codex/device', userCode: 'ABCD-12345',
+    callbackUrl: null, loginMode: 'device', loginError: null, statusText: 'Signing in…',
+  })
+  for (const broken of [
+    null, {}, { ...DEVICE_ANSWER, type: 'chatgpt' }, { ...DEVICE_ANSWER, loginId: '' }, { ...DEVICE_ANSWER, loginId: 'x'.repeat(201) },
+    { ...DEVICE_ANSWER, verificationUrl: 'http://auth.openai.com/codex/device' }, { ...DEVICE_ANSWER, verificationUrl: 'javascript:alert(1)' },
+    { ...DEVICE_ANSWER, verificationUrl: 'https://user:pass@auth.openai.com/device' }, { ...DEVICE_ANSWER, verificationUrl: `https://a.example/${'x'.repeat(2050)}` },
+    { ...DEVICE_ANSWER, userCode: '' }, { ...DEVICE_ANSWER, userCode: 'AB' }, { ...DEVICE_ANSWER, userCode: '<script>' }, { ...DEVICE_ANSWER, userCode: 'ABCD 1234' }, { ...DEVICE_ANSWER, userCode: 42 },
+  ]) assert.throws(() => codexDeviceLoginPatch(broken), /Unexpected login response/)
+})
+
+test('a running sign-in answers again with its own link or code, and only a stale failure is ignored', () => {
+  const device = codexLoginInProgressResponse({ loginMode: 'device', authSessionId: 'login-7', verificationUrl: DEVICE_ANSWER.verificationUrl, userCode: 'ABCD-12345', authUrl: 'https://never.example' })
+  assert.deepEqual(device, { started: false, loginInProgress: true, loginId: 'login-7', mode: 'device', verificationUrl: DEVICE_ANSWER.verificationUrl, userCode: 'ABCD-12345', message: 'Codex code sign-in is already running.' })
+  const browser = codexLoginInProgressResponse({ loginMode: 'browser', authSessionId: 'login-6', userCode: 'NOT-SHOWN' })
+  assert.deepEqual(browser, { started: false, loginInProgress: true, loginId: 'login-6', mode: 'browser', message: 'Codex browser login is already running.' })
+  assert.equal(isStaleLoginFailure({ success: false, loginId: 'login-6' }, 'login-7'), true, 'the cancelled browser login')
+  assert.equal(isStaleLoginFailure({ success: false, loginId: 'login-6' }, null), true, 'after a cancel')
+  assert.equal(isStaleLoginFailure({ success: false, loginId: 'login-7' }, 'login-7'), false)
+  assert.equal(isStaleLoginFailure({ success: false }, 'login-7'), false, 'an answer without loginId still ends the login')
+  assert.equal(isStaleLoginFailure({ success: false, loginId: null }, 'login-7'), false)
+  assert.equal(isStaleLoginFailure({ success: true, loginId: 'login-6' }, 'login-7'), false, 'a success is never ignored')
+  assert.equal(isStaleLoginFailure(undefined, 'login-7'), false)
+})
+
+test('bridge starts code entry from POST /auth/start { mode: device }, switches modes by cancelling first, and keeps the code out of lifecycle details', async () => {
+  const source = await readFile(new URL('./codex-bridge-server.mjs', import.meta.url), 'utf8')
+  const at = text => { const index = source.indexOf(text); assert.notEqual(index, -1, `missing server marker: ${text}`); return index }
+  const start = source.slice(at("if (req.method === 'POST' && route === '/auth/start') {"), at("if (req.method === 'POST' && route === '/auth/cancel') {"))
+  assert.ok(start.indexOf('await readJsonBody(req, { maxBytes: 1024 })') < start.indexOf('const mode = codexLoginMode(body.mode)'))
+  assert.ok(start.indexOf('const mode = codexLoginMode(body.mode)') < start.indexOf('await refreshAccountState()'), 'a bad mode is refused before any account call')
+  assert.match(start, /if \(authState\.loginMode === mode\) \{\n {10}sendJson\(res, 200, codexLoginInProgressResponse\(authState\)\)/)
+  assert.ok(start.indexOf("appServerRequest('account/login/cancel', { loginId: authState.authSessionId })") < start.indexOf('resetLoginState()'))
+  assert.ok(start.indexOf('resetLoginState()') < start.indexOf('await startChatgptDeviceLogin()'))
+  assert.match(start, /sendJson\(res, 200, \{ started: true, mode, loginId: patch\.authSessionId, verificationUrl: patch\.verificationUrl, userCode: patch\.userCode \}\)/)
+  assert.match(start, /sendJson\(res, error\.httpStatus, \{ started: false, code: error\.code \|\| 'INVALID_REQUEST', message \}\)/)
+  const device = source.slice(at('async function startChatgptDeviceLogin() {'), at('// ── Terminal PTY support ──'))
+  assert.match(device, /appServerRequest\('account\/login\/start', codexLoginStartParams\('device'\)\)/)
+  assert.match(device, /emitAuthLifecycle\('started', \{ loginId: patch\.authSessionId, mode: 'device' \}\)/)
+  assert.ok(device.indexOf("appServerRequest('account/login/cancel', { loginId: result.loginId })") < device.indexOf('updateAuthState(patch'), 'a malformed answer cancels its login before any state change')
+  assert.equal(/console\.|userCode/.test(device.replace('patch.userCode', '')), false, 'the code is never logged or put in lifecycle details')
+  assert.ok(at('async function startChatgptLogin() {') < at('async function startChatgptDeviceLogin() {'), 'browser flow marker unchanged and first')
+  const completed = source.slice(at("case 'account/login/completed': {"), at("case 'account/rateLimits/updated':"))
+  assert.ok(completed.indexOf('if (isStaleLoginFailure(message.params, authState.authSessionId)) return') < completed.indexOf('clearInterval(loginPollTimer)'))
+  assert.match(completed, /authSessionId: null,\n {8}authUrl: null,\n {8}verificationUrl: null,\n {8}userCode: null,/)
+  at("auth: ['status', 'start', 'cancel', 'signout', 'usage', 'device-code'],")
 })
