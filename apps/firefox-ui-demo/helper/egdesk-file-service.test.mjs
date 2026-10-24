@@ -4,8 +4,10 @@ import * as fs from 'node:fs/promises'
 import os from 'node:os'
 import path from 'node:path'
 import { createHash } from 'node:crypto'
-import { createEGDeskFileService } from './egdesk-file-service.mjs'
-import { createEGDeskFileView, suggestEGDeskCopyName } from '../overlay/resources/EGDeskFileView.sys.mjs'
+import { execFileSync } from 'node:child_process'
+import { createEGDeskFileService, DEFAULT_SEARCH_IGNORES } from './egdesk-file-service.mjs'
+import { createEGDeskGitReview } from './egdesk-git-review.mjs'
+import { createEGDeskFileView, createEGDeskGitStateIndex, EGDESK_GIT_STATE_LABELS, normalizeFileChangedEvent, parentFolderOf, suggestEGDeskCopyName } from '../overlay/resources/EGDeskFileView.sys.mjs'
 
 function draftStore() {
   const records = new Map()
@@ -563,4 +565,381 @@ test('Save As partial or uncertain result warns about the target and keeps the d
     assert.equal(view.element.querySelector('textarea').value, 'start')
     await view.close()
   }
+})
+
+// ---- 1-G: git review, content search and the File view '변경' tab ----
+
+// Isolated git (own HOME, empty global config) inside a temp folder.
+async function gitFixture(t) {
+  const base = await fs.realpath(await fs.mkdtemp(path.join(os.tmpdir(), 'egdesk-file-git-')))
+  t.after(() => fs.rm(base, { recursive: true, force: true }))
+  const home = path.join(base, 'home')
+  await fs.mkdir(home)
+  await fs.writeFile(path.join(home, 'gitconfig'), '')
+  const env = { ...process.env, HOME: home, GIT_CONFIG_GLOBAL: path.join(home, 'gitconfig'), GIT_CONFIG_NOSYSTEM: '1', GIT_CEILING_DIRECTORIES: base }
+  delete env.GIT_DIR; delete env.GIT_WORK_TREE; delete env.GIT_INDEX_FILE
+  const root = path.join(base, 'repo')
+  await fs.mkdir(root)
+  const git = (...args) => execFileSync('git', args, { cwd: root, env, encoding: 'utf8' })
+  git('init', '-q', '-b', 'main'); git('config', 'user.email', 'file@example.invalid'); git('config', 'user.name', 'File Test'); git('config', 'commit.gpgsign', 'false')
+  const service = createEGDeskFileService({ draftStore: draftStore(), gitReview: createEGDeskGitReview({ env }) })
+  const put = async (relative, body) => { await fs.mkdir(path.dirname(path.join(root, relative)), { recursive: true }); await fs.writeFile(path.join(root, relative), body) }
+  return { base, root, env, git, service, put }
+}
+
+test('service git routes: status for the tree, change list with opaque ids, per-file diffs in lineDiff shape', async t => {
+  const { root, git, service, put } = await gitFixture(t)
+  await put('a.txt', 'one\ntwo\n')
+  await put('gone.txt', 'bye\n')
+  await put('.gitignore', '*.log\n')
+  git('add', '-A'); git('commit', '-qm', 'init')
+  await put('a.txt', 'one\nTWO\n')
+  await fs.unlink(path.join(root, 'gone.txt'))
+  await put('new/fresh.txt', 'fresh\nlines\n')
+  await put('new/big.txt', Buffer.alloc(1024 * 1024 + 1, 65))
+  await put('debug.log', 'ignored\n')
+  const rootHandle = await service.registerRoot(root)
+
+  const status = await service.gitStatus({ rootId: rootHandle.rootId })
+  assert.equal(status.available, true)
+  assert.equal(status.isRepo, true)
+  assert.deepEqual(status.entries.map(entry => [entry.relativePath, entry.state, entry.directory]).sort(), [['a.txt', 'modified', false], ['gone.txt', 'deleted', false], ['new', 'untracked', true]])
+
+  const listed = await service.gitChanges({ rootId: rootHandle.rootId })
+  assert.equal(listed.scope, 'uncommitted')
+  assert.equal(listed.branch, 'main')
+  assert.deepEqual(listed.files.map(file => [file.relativePath, file.status]).sort(), [['a.txt', 'modified'], ['gone.txt', 'deleted'], ['new/big.txt', 'untracked'], ['new/fresh.txt', 'untracked']])
+  assert.deepEqual(listed.totals, { files: 4, additions: 1, deletions: 2 })
+  assert.ok(listed.files.every(file => typeof file.changeId === 'string' && !('fileId' in file) && !file.changeId.includes('/')))
+  const change = name => listed.files.find(file => file.relativePath === name).changeId
+
+  const modified = await service.gitFileDiff({ changeId: change('a.txt') })
+  assert.deepEqual(modified.hunks, [{ baseStartLine: 2, baseLines: ['two'], currentStartLine: 2, currentLines: ['TWO'] }])
+  assert.equal((await service.readFile({ fileId: modified.fileId })).text, 'one\nTWO\n')
+  const deleted = await service.gitFileDiff({ changeId: change('gone.txt') })
+  assert.equal(deleted.fileId, null)
+  assert.deepEqual(deleted.hunks, [{ baseStartLine: 1, baseLines: ['bye'], currentStartLine: 1, currentLines: [] }])
+  const fresh = await service.gitFileDiff({ changeId: change('new/fresh.txt') })
+  assert.match(fresh.patch, /^--- \/dev\/null$/m)
+  assert.deepEqual(fresh.hunks, [{ baseStartLine: 1, baseLines: [], currentStartLine: 1, currentLines: ['fresh', 'lines'] }])
+  const big = await service.gitFileDiff({ changeId: change('new/big.txt') })
+  assert.deepEqual([big.tooLarge, big.truncated, big.hunks.length, big.patch], [true, true, 0, ''])
+
+  // Two list generations stay valid; older change ids are refused.
+  const second = await service.gitChanges({ rootId: rootHandle.rootId })
+  assert.equal((await service.gitFileDiff({ changeId: change('a.txt') })).status, 'modified')
+  await service.gitChanges({ rootId: rootHandle.rootId })
+  await assert.rejects(service.gitFileDiff({ changeId: change('a.txt') }), { code: 'UNKNOWN_CHANGE' })
+  assert.equal((await service.gitFileDiff({ changeId: second.files[0].changeId })).changeId, second.files[0].changeId)
+  await assert.rejects(service.gitChanges({ rootId: rootHandle.rootId, scope: 'turn' }), { code: 'UNSUPPORTED_SCOPE' })
+  await assert.rejects(service.gitStatus({ rootId: 'not-a-root' }), { code: 'UNKNOWN_ROOT' })
+})
+
+test('git review degrades to "not a repository" or "git unavailable" without failing the File view', async t => {
+  const { base } = await gitFixture(t)
+  const plain = path.join(base, 'plain')
+  await fs.mkdir(plain)
+  const env = { ...process.env, GIT_CEILING_DIRECTORIES: base }
+  const service = createEGDeskFileService({ draftStore: draftStore(), gitReview: createEGDeskGitReview({ env }) })
+  const rootHandle = await service.registerRoot(plain)
+  assert.deepEqual(await service.gitStatus({ rootId: rootHandle.rootId }), { rootId: rootHandle.rootId, available: true, isRepo: false, branch: null, truncated: false, entries: [] })
+  assert.equal((await service.gitChanges({ rootId: rootHandle.rootId })).isRepo, false)
+  const missingGit = createEGDeskFileService({ draftStore: draftStore(), gitReview: createEGDeskGitReview({ gitExecutable: path.join(base, 'no-git') }) })
+  const missingRoot = await missingGit.registerRoot(plain)
+  assert.equal((await missingGit.gitStatus({ rootId: missingRoot.rootId })).available, false)
+  const unavailable = await missingGit.gitChanges({ rootId: missingRoot.rootId })
+  assert.deepEqual([unavailable.available, unavailable.files, unavailable.totals.files], [false, [], 0])
+})
+
+test('content search: git grep in a work tree, bounded walk elsewhere; results carry file handles and line numbers', async t => {
+  const { root, git, service, put, base } = await gitFixture(t)
+  await put('.gitignore', 'ignored.txt\n')
+  await put('src/a.js', 'const Needle = 1\n\nneedle()\n')
+  git('add', '-A'); git('commit', '-qm', 'init')
+  await put('src/untracked.txt', 'untracked needle\n')
+  await put('ignored.txt', 'needle should stay hidden\n')
+  const rootHandle = await service.registerRoot(root)
+  const found = await service.searchContents({ rootId: rootHandle.rootId, query: 'needle' })
+  assert.equal(found.source, 'git-grep')
+  assert.equal(found.scope, 'contents')
+  assert.deepEqual(found.matches.map(match => `${match.relativePath}:${match.lineNumber}`).sort(), ['src/a.js:1', 'src/a.js:3', 'src/untracked.txt:1'])
+  const first = found.matches.find(match => match.relativePath === 'src/a.js' && match.lineNumber === 1)
+  assert.deepEqual(first.matchRanges, [{ start: 6, end: 12 }])
+  assert.equal(first.column, 6)
+  assert.match((await service.readFile({ fileId: first.fileId })).text, /Needle/)
+  assert.deepEqual((await service.searchContents({ rootId: rootHandle.rootId, query: 'Needle', caseSensitive: true })).matches.map(match => match.lineNumber), [1])
+  await assert.rejects(service.searchContents({ rootId: rootHandle.rootId, query: 'a\nb' }), { code: 'INVALID_QUERY' })
+  await assert.rejects(service.searchContents({ rootId: rootHandle.rootId, query: 'x', caseSensitive: 'yes' }), { code: 'INVALID_OPTION' })
+
+  // Outside git: skip DEFAULT_SEARCH_IGNORES, binary, oversized and symlinked files.
+  const plain = path.join(base, 'plain')
+  const outside = path.join(base, 'outside')
+  await fs.mkdir(path.join(plain, 'node_modules', 'pkg'), { recursive: true })
+  await fs.mkdir(path.join(plain, 'docs'), { recursive: true })
+  await fs.mkdir(outside)
+  await fs.writeFile(path.join(plain, 'docs', 'note.md'), '# Title\n찾을 문장 needle 입니다\n')
+  await fs.writeFile(path.join(plain, 'node_modules', 'pkg', 'index.js'), 'needle in dependency\n')
+  await fs.writeFile(path.join(plain, 'blob.bin'), Buffer.from([0, 110, 101, 101, 100, 108, 101]))
+  await fs.writeFile(path.join(plain, 'huge.txt'), `needle${'x'.repeat(1024 * 1024)}`)
+  await fs.writeFile(path.join(outside, 'secret.txt'), 'needle secret\n')
+  await fs.symlink(path.join(outside, 'secret.txt'), path.join(plain, 'linked.txt'))
+  const walkService = createEGDeskFileService({ draftStore: draftStore(), gitReview: createEGDeskGitReview({ env: { ...process.env, GIT_CEILING_DIRECTORIES: base } }) })
+  const plainHandle = await walkService.registerRoot(plain)
+  const walked = await walkService.searchContents({ rootId: plainHandle.rootId, query: 'NEEDLE' })
+  assert.equal(walked.source, 'walk')
+  assert.deepEqual(walked.matches.map(match => [match.relativePath, match.lineNumber, match.lineContent]), [['docs/note.md', 2, '찾을 문장 needle 입니다']])
+  assert.deepEqual(DEFAULT_SEARCH_IGNORES, ['.git', 'node_modules', 'target', 'dist', 'build'])
+})
+
+test('name search skips ignored folders by default, includes them on request, and follows .gitignore inside a work tree', async t => {
+  const { root, git, service, put, base } = await gitFixture(t)
+  await put('.gitignore', 'secret-note.txt\n')
+  await put('src/note.txt', 'tracked\n')
+  git('add', '-A'); git('commit', '-qm', 'init')
+  await put('secret-note.txt', 'ignored\n')
+  await put('draft-note.txt', 'untracked\n')
+  const rootHandle = await service.registerRoot(root)
+  const viaGit = await service.search({ rootId: rootHandle.rootId, query: 'note' })
+  assert.equal(viaGit.source, 'git-index')
+  assert.deepEqual(viaGit.matches.map(match => match.relativePath).sort(), ['draft-note.txt', path.join('src', 'note.txt')])
+  assert.ok((await service.readFile({ fileId: viaGit.matches.find(match => match.name === 'note.txt').id })).text.startsWith('tracked'))
+  const everything = await service.search({ rootId: rootHandle.rootId, query: 'note', includeIgnored: true })
+  assert.equal(everything.source, 'walk')
+  assert.ok(everything.matches.some(match => match.name === 'secret-note.txt'))
+
+  const plain = path.join(base, 'plain')
+  await fs.mkdir(path.join(plain, 'node_modules', 'lib'), { recursive: true })
+  await fs.writeFile(path.join(plain, 'node_modules', 'lib', 'match-me.js'), '')
+  await fs.writeFile(path.join(plain, 'match-me.txt'), '')
+  const walkService = createEGDeskFileService({ draftStore: draftStore(), gitReview: createEGDeskGitReview({ env: { ...process.env, GIT_CEILING_DIRECTORIES: base } }) })
+  const plainHandle = await walkService.registerRoot(plain)
+  assert.deepEqual((await walkService.search({ rootId: plainHandle.rootId, query: 'match-me' })).matches.map(match => match.name), ['match-me.txt'])
+  assert.deepEqual((await walkService.search({ rootId: plainHandle.rootId, query: 'match-me', includeIgnored: true })).matches.map(match => match.name).sort(), ['match-me.js', 'match-me.txt'])
+  await assert.rejects(walkService.search({ rootId: plainHandle.rootId, query: 'x', includeIgnored: 'yes' }), { code: 'INVALID_OPTION' })
+})
+
+test('git state index: letters, folder markers, untracked folders and NFD names', () => {
+  const index = createEGDeskGitStateIndex([
+    { relativePath: 'src/app.js', state: 'modified' },
+    { relativePath: 'new dir', state: 'untracked', directory: true },
+    { relativePath: '문서/한글.txt', state: 'added' },
+    { relativePath: 'bogus', state: 'unknown-state' },
+  ])
+  assert.equal(index.stateFor('src/app.js'), 'modified')
+  assert.equal(index.stateFor('src'), 'contains')
+  assert.equal(index.stateFor('new dir'), 'untracked')
+  assert.equal(index.stateFor('new dir/inner/file.txt'), 'untracked')
+  assert.equal(index.stateFor('문서/한글.txt'.normalize('NFD')), 'added')
+  assert.equal(index.stateFor('문서'.normalize('NFD')), 'contains')
+  assert.equal(index.stateFor('bogus'), null)
+  assert.equal(index.stateFor('other.txt'), null)
+  assert.equal(EGDESK_GIT_STATE_LABELS.modified.letter, 'M')
+  assert.equal(parentFolderOf('a/b/c.txt'), 'a/b')
+  assert.equal(parentFolderOf('top.txt'), '')
+  assert.deepEqual(normalizeFileChangedEvent({ topic: 'file.changed', payload: { rootId: 'r', relativePath: 'a/b.txt', change: 'rename' } }), { rootId: 'r', relativePath: 'a/b.txt', change: 'rename' })
+  for (const relativePath of ['/abs', 'a/../b', 'a//b', 'a\\b', '', 'x\u0000y']) assert.equal(normalizeFileChangedEvent({ rootId: 'r', relativePath }), null)
+  assert.equal(normalizeFileChangedEvent({ relativePath: 'a.txt' }), null)
+})
+
+// Fake service with a mutable folder tree for File view git/watch tests.
+function treeService(overrides = {}) {
+  const folders = { 'root-dir': [{ id: 'dir-src', name: 'src', kind: 'directory' }, { id: 'file-readme', name: 'README.md', kind: 'file' }], 'dir-src': [{ id: 'file-app', name: 'app.js', kind: 'file' }] }
+  const calls = []
+  const service = {
+    folders, calls,
+    listDirectory: async ({ directoryId }) => { calls.push(['list', directoryId]); return { entries: (folders[directoryId] || []).map(entry => ({ ...entry })), nextCursor: null } },
+    search: async () => ({ matches: [], truncated: false }),
+    readFile: async ({ fileId }) => ({ name: fileId, size: 30, sha256: 'b'.repeat(64), diskRevision: `rev-${fileId}`, kind: 'text', text: 'line one\nline two\nline three\n' }),
+    createDraft: async ({ fileId }) => ({ id: `draft-${fileId}`, fileId, name: fileId, head: 'h0', text: 'line one\nline two\nline three\n', bufferRevision: 0, savedRevision: 0 }),
+    readDraft: async ({ draftId }) => ({ id: draftId, fileId: draftId.slice(6), head: 'h0', text: 'line one\nline two\nline three\n', bufferRevision: 0, savedRevision: 0 }),
+    updateDraft: async ({ draftId, text }) => ({ id: draftId, fileId: draftId.slice(6), head: 'h1', text, bufferRevision: 1, savedRevision: 0 }),
+    saveDraft: async () => ({ draft: {}, receipt: {} }), saveAs: async () => ({}), diffDraft: async () => ({ bufferRevision: 0, hunks: [] }),
+    gitStatus: async () => { calls.push(['status']); return { available: true, isRepo: true, branch: 'main', truncated: false, entries: [{ relativePath: 'src/app.js', state: 'modified' }, { relativePath: 'README.md'.normalize('NFC'), state: 'added' }] } },
+    gitChanges: async () => { calls.push(['changes']); return { available: true, isRepo: true, branch: 'main', truncated: false, countsAvailable: true, totals: { files: 2, additions: 3, deletions: 1 }, files: [
+      { changeId: 'c-app', relativePath: 'src/app.js', previousPath: null, status: 'modified', additions: 2, deletions: 1, binary: false },
+      { changeId: 'c-old', relativePath: 'old.txt', previousPath: null, status: 'deleted', additions: 0, deletions: 1, binary: false },
+    ] } },
+    gitFileDiff: async ({ changeId }) => { calls.push(['diff', changeId]); return changeId === 'c-app'
+      ? { changeId, fileId: 'file-app', relativePath: 'src/app.js', previousPath: null, status: 'modified', binary: false, truncated: false, tooLarge: false, patch: '', hunks: [{ baseStartLine: 2, baseLines: ['two'], currentStartLine: 2, currentLines: ['TWO', 'extra'] }] }
+      : { changeId, fileId: null, relativePath: 'old.txt', previousPath: null, status: 'deleted', binary: false, truncated: false, tooLarge: false, patch: '', hunks: [{ baseStartLine: 1, baseLines: ['bye'], currentStartLine: 1, currentLines: [] }] } },
+    searchContents: async ({ query }) => { calls.push(['contents', query]); return { truncated: false, matches: [{ fileId: 'file-app', relativePath: 'src/app.js', lineNumber: 3, lineContent: 'call needle()', matchRanges: [{ start: 5, end: 11 }], column: 5 }] } },
+    ...overrides,
+  }
+  return service
+}
+const settle = async (count = 4) => { for (let index = 0; index < count; index++) await nextTurn() }
+const treeItemNamed = (container, name) => container.querySelectorAll('[role="treeitem"]').find(item => item.dataset.name === name)
+
+test('File view tree shows git state letters, folder markers and spoken labels', async () => {
+  const service = treeService()
+  const document = fakeDocument()
+  const view = createEGDeskFileView({ document, service })
+  document.body.append(view.element)
+  await view.openRoot({ rootId: 'root', directoryId: 'root-dir', name: 'Project' })
+  await view.refreshGitStatus()
+  const folder = treeItemNamed(view.element, 'src')
+  const readme = treeItemNamed(view.element, 'README.md')
+  assert.equal(folder.querySelector('.egdesk-file-tree-state').textContent, '•')
+  assert.equal(folder.getAttribute('aria-label'), 'src, 안에 변경 있음')
+  assert.equal(readme.dataset.gitState, 'added')
+  assert.equal(readme.querySelector('.egdesk-file-tree-state').hidden, false)
+  folder.click(); await settle()
+  const app = treeItemNamed(view.element, 'app.js')
+  assert.equal(app.querySelector('.egdesk-file-tree-state').textContent, 'M')
+  assert.equal(app.getAttribute('aria-label'), 'app.js, 수정됨')
+  app.click(); await settle()
+  assert.equal(view.snapshot().fileId, 'file-app')
+  await view.close()
+})
+
+test('File view 변경 tab lists uncommitted changes and opens a per-file diff with the existing hunk layout', async () => {
+  const service = treeService()
+  const document = fakeDocument()
+  const view = createEGDeskFileView({ document, service })
+  document.body.append(view.element)
+  await view.openRoot({ rootId: 'root', directoryId: 'root-dir', name: 'Project' })
+  const [filesTab, changesTab] = view.element.querySelectorAll('[role="tab"]')
+  assert.equal(filesTab.getAttribute('aria-selected'), 'true')
+  assert.equal(changesTab.disabled, false)
+  filesTab.fire('keydown', { key: 'ArrowRight' }); await settle()
+  assert.equal(document.activeElement, changesTab)
+  assert.equal(changesTab.getAttribute('aria-selected'), 'true')
+  assert.equal(view.element.querySelector('.egdesk-file-tree').hidden, true)
+  assert.equal(view.element.querySelector('.egdesk-file-changes').hidden, false)
+  const scopes = view.element.querySelector('.egdesk-file-change-scopes').querySelectorAll('[role="radio"]')
+  assert.deepEqual(scopes.map(scope => [scope.textContent, scope.getAttribute('aria-checked'), scope.getAttribute('aria-disabled')]), [['커밋 안 한 변경', 'true', null], ['이번 회차', 'false', 'true']])
+  assert.equal(view.element.querySelector('.egdesk-file-change-summary').textContent, 'main · 파일 2개 · +3 −1')
+  const rows = view.element.querySelectorAll('.egdesk-file-change-row')
+  assert.equal(rows.length, 2)
+  assert.equal(rows[0].getAttribute('aria-label'), 'src/app.js, 수정됨, +2 −1')
+  assert.equal(rows[0].querySelector('.egdesk-file-change-state').textContent, 'M')
+  rows[0].click(); await settle()
+  const panel = view.element.querySelector('.egdesk-file-change-diff')
+  assert.equal(panel.hidden, false)
+  assert.equal(panel.querySelector('.egdesk-file-change-diff-heading').textContent, 'src/app.js · 수정됨')
+  assert.equal(panel.querySelector('.egdesk-file-hunk-title').textContent, '커밋 2행 ↔ 지금 2행')
+  assert.equal(panel.querySelector('.egdesk-file-hunk-after').textContent, 'TWO\nextra')
+  panel.querySelector('.egdesk-file-change-open').click(); await settle()
+  assert.equal(view.snapshot().fileId, 'file-app')
+  assert.equal(panel.hidden, false)
+  rows[1].click(); await settle()
+  assert.equal(panel.querySelector('.egdesk-file-change-open'), null)
+  assert.equal(panel.querySelector('.egdesk-file-hunk-before').textContent, 'bye')
+  await view.close()
+})
+
+test('File view 변경 tab explains non-repositories and missing git; the tab stays off without git callbacks', async () => {
+  for (const [result, message] of [[{ available: true, isRepo: false, files: [] }, '이 폴더는 git 저장소 안에 있지 않습니다.'], [{ available: false, isRepo: false, files: [] }, 'git을 찾을 수 없어 변경을 볼 수 없습니다.'], [{ available: true, isRepo: true, branch: 'dev', files: [], totals: { files: 0, additions: 0, deletions: 0 } }, 'dev · 커밋 안 한 변경이 없습니다.']]) {
+    const document = fakeDocument()
+    const view = createEGDeskFileView({ document, service: treeService({ gitChanges: async () => result }) })
+    await view.openRoot({ rootId: 'root', directoryId: 'root-dir' })
+    view.element.querySelectorAll('[role="tab"]')[1].click(); await settle()
+    assert.equal(view.element.querySelector('.egdesk-file-change-summary').textContent, message)
+    await view.close()
+  }
+  const { view } = uiFixture()
+  const changesTab = view.element.querySelectorAll('[role="tab"]')[1]
+  assert.equal(changesTab.disabled, true)
+  changesTab.click(); await settle()
+  assert.equal(view.element.querySelector('.egdesk-file-changes').hidden, true)
+  const contentMode = view.element.querySelector('.egdesk-file-search-modes').querySelectorAll('[role="radio"]')[1]
+  assert.equal(contentMode.disabled, true)
+  contentMode.click()
+  assert.equal(contentMode.getAttribute('aria-checked'), 'false')
+  await view.close()
+})
+
+test('content search mode sends the untrimmed query, marks matches, and jumps to the line', async () => {
+  const service = treeService()
+  const document = fakeDocument()
+  const view = createEGDeskFileView({ document, service })
+  document.body.append(view.element)
+  await view.openRoot({ rootId: 'root', directoryId: 'root-dir', name: 'Project' })
+  const [nameMode, contentMode] = view.element.querySelector('.egdesk-file-search-modes').querySelectorAll('[role="radio"]')
+  assert.equal(nameMode.getAttribute('aria-checked'), 'true')
+  contentMode.click()
+  assert.equal(contentMode.getAttribute('aria-checked'), 'true')
+  assert.equal(view.element.querySelector('.egdesk-file-search-label-text').textContent, '파일 내용 검색')
+  view.element.querySelector('.egdesk-file-search-input').value = ' needle'
+  view.element.querySelector('.egdesk-file-search').fire('submit'); await settle()
+  assert.deepEqual(service.calls.filter(call => call[0] === 'contents'), [['contents', ' needle']])
+  const result = view.element.querySelector('.egdesk-file-content-result')
+  assert.equal(result.querySelector('.egdesk-file-content-location').textContent, 'src/app.js:3')
+  assert.equal(result.querySelector('.egdesk-file-content-match').textContent, 'needle')
+  assert.equal(result.getAttribute('aria-label'), 'src/app.js 3행: call needle()')
+  const editor = view.element.querySelector('textarea')
+  let selection = null
+  editor.setSelectionRange = (start, end) => { selection = [start, end] }
+  result.click(); await settle()
+  assert.equal(view.snapshot().fileId, 'file-app')
+  assert.deepEqual(selection, [18, 28])
+  assert.equal(document.activeElement, editor)
+  // Past the end clamps to the last (empty) line after the final newline.
+  assert.equal(view.revealLine(99), true)
+  assert.deepEqual(selection, [29, 29])
+  assert.equal(view.revealLine(0), false)
+  nameMode.fire('keydown', { key: 'ArrowRight' })
+  assert.equal(contentMode.getAttribute('aria-checked'), 'true')
+  contentMode.fire('keydown', { key: 'ArrowLeft' })
+  assert.equal(nameMode.getAttribute('aria-checked'), 'true')
+  await view.close()
+})
+
+test('onFileChanged collects events, re-lists only loaded affected folders, keeps expanded folders, and refreshes git state once', async () => {
+  const service = treeService()
+  const document = fakeDocument()
+  const view = createEGDeskFileView({ document, service, fileChangeDelayMs: 5 })
+  document.body.append(view.element)
+  await view.openRoot({ rootId: 'root', directoryId: 'root-dir', name: 'Project' })
+  const folder = treeItemNamed(view.element, 'src')
+  folder.click(); await settle()
+  assert.equal(folder.getAttribute('aria-expanded'), 'true')
+  const app = treeItemNamed(view.element, 'app.js')
+  await view.refreshGitStatus()
+  service.calls.length = 0
+
+  service.folders['root-dir'] = [{ id: 'dir-src-2', name: 'src', kind: 'directory' }, { id: 'file-new', name: 'NEW.txt', kind: 'file' }]
+  service.folders['dir-src-2'] = service.folders['dir-src']
+  treeItemNamed(view.element, 'README.md').focus()
+  assert.equal(view.onFileChanged({ rootId: 'root', relativePath: 'NEW.txt', change: 'rename' }), true)
+  assert.equal(view.onFileChanged({ payload: { rootId: 'root', relativePath: 'README.md', change: 'rename' } }), true)
+  assert.equal(view.onFileChanged({ rootId: 'other-root', relativePath: 'x.txt' }), false)
+  assert.equal(view.onFileChanged({ rootId: 'root', relativePath: '../escape' }), false)
+  await new Promise(resolve => setTimeout(resolve, 20)); await settle()
+  assert.deepEqual(service.calls, [['list', 'root-dir'], ['status']])
+  assert.equal(treeItemNamed(view.element, 'README.md'), undefined)
+  assert.ok(treeItemNamed(view.element, 'NEW.txt'))
+  assert.equal(treeItemNamed(view.element, 'src'), folder)
+  assert.equal(folder.getAttribute('aria-expanded'), 'true')
+  assert.equal(treeItemNamed(view.element, 'app.js'), app)
+  assert.equal(document.activeElement, folder, 'focus on a removed item moves to the first remaining item')
+
+  // A content edit keeps the listing: same nodes, git state refreshed.
+  service.calls.length = 0
+  view.onFileChanged({ rootId: 'root', relativePath: 'src/app.js', change: 'change' })
+  await view.flushFileChanges()
+  assert.deepEqual(service.calls, [['list', 'dir-src-2'], ['status']])
+  assert.equal(treeItemNamed(view.element, 'app.js'), app)
+
+  // A change inside the expanded folder re-lists that folder with its new handle.
+  service.folders['dir-src-2'] = [{ id: 'file-app', name: 'app.js', kind: 'file' }, { id: 'file-util', name: 'util.js', kind: 'file' }]
+  service.calls.length = 0
+  view.onFileChanged({ rootId: 'root', relativePath: 'src/util.js', change: 'rename' })
+  await view.flushFileChanges()
+  assert.deepEqual(service.calls, [['list', 'dir-src-2'], ['status']])
+  assert.ok(treeItemNamed(folder, 'util.js'))
+  treeItemNamed(folder, 'util.js').click(); await settle()
+  assert.equal(view.snapshot().fileId, 'file-util')
+
+  // A folder that disappears stops being tracked; later events for it only refresh git state.
+  service.folders['root-dir'] = [{ id: 'file-new', name: 'NEW.txt', kind: 'file' }]
+  view.onFileChanged({ rootId: 'root', relativePath: 'src', change: 'rename' })
+  await view.flushFileChanges()
+  assert.equal(treeItemNamed(view.element, 'src'), undefined)
+  service.calls.length = 0
+  view.onFileChanged({ rootId: 'root', relativePath: 'src/app.js', change: 'change' })
+  await view.flushFileChanges()
+  assert.deepEqual(service.calls, [['status']])
+  assert.equal(await view.close(), true)
+  assert.equal(view.onFileChanged({ rootId: 'root', relativePath: 'NEW.txt' }), false)
 })

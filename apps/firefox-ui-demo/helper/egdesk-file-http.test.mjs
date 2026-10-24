@@ -336,3 +336,42 @@ test('uncertain native failure exposes only allowlisted outcome metadata', async
   assert.deepEqual(failed.body.details, { targetName: 'uncertain.txt', created: null, fileMayExist: true, originalUpdated: false, nativeCode: 'EGDESK_NATIVE_TIMEOUT', recovery: 'inspect-target-before-retry' })
   for (const sensitive of ['secret-token', '/private/raw/native/path', 'stderr', '123', '456']) assert.equal(JSON.stringify(failed.body).includes(sensitive), false)
 })
+
+test('git and content-search routes: bounded fields, opaque change ids, and git failures without paths or stderr', async t => {
+  const { client, dispatch } = await fixture(t)
+  const authorized = await client.registerRoot({ selectionId: 'selected-owner-a' })
+  // The fixture root sits in os.tmpdir(); whatever git says about it, the route answers.
+  const status = await client.gitStatus({ rootId: authorized.rootId })
+  assert.equal(status.rootId, authorized.rootId)
+  assert.equal(typeof status.isRepo, 'boolean')
+  const found = await client.searchContents({ rootId: authorized.rootId, query: 'external', caseSensitive: false })
+  assert.deepEqual(found.matches.map(match => [match.relativePath, match.lineNumber]), [['source.txt', 1]])
+  assert.equal(typeof found.matches[0].fileId, 'string')
+  assert.equal((await client.search({ rootId: authorized.rootId, query: 'source', includeIgnored: true })).matches.length, 1)
+  const stale = await dispatch('gitFileDiff', { changeId: 'never-issued' })
+  assert.deepEqual([stale.status, stale.body.code], [404, 'UNKNOWN_CHANGE'])
+  const extra = await dispatch('gitChanges', { rootId: authorized.rootId, cwd: '/etc' })
+  assert.deepEqual([extra.status, extra.body.code], [400, 'UNEXPECTED_FIELD'])
+  const badId = await dispatch('gitFileDiff', { changeId: 'x'.repeat(513) })
+  assert.deepEqual([badId.status, badId.body.code], [400, 'INVALID_ID'])
+  const scope = await dispatch('gitChanges', { rootId: authorized.rootId, scope: 'turn' })
+  assert.deepEqual([scope.status, scope.body.code], [400, 'UNSUPPORTED_SCOPE'])
+
+  const temp = await fs.mkdtemp(path.join(os.tmpdir(), 'egdesk-file-http-git-'))
+  const root = path.join(temp, 'root')
+  await fs.mkdir(root)
+  const slowGit = {
+    status: async () => { throw Object.assign(new Error(`fatal: ${root} stderr detail`), { code: 'GIT_TIMEOUT' }) },
+    changes: async () => { throw Object.assign(new Error(`fatal: ${root}`), { code: 'GIT_FAILED' }) },
+    grep: async () => null, listFiles: async () => null,
+  }
+  const adapter = createEGDeskFileHttpAdapter({ draftDirectory: path.join(temp, 'drafts'), localOwnerScope: 'owner-g', resolveRootSelection: async () => root, gitReview: slowGit })
+  t.after(async () => { await adapter.close(); await fs.rm(temp, { recursive: true, force: true }) })
+  const call = (operation, body) => adapter.dispatch({ method: 'POST', pathname: EGDESK_FILE_ENDPOINTS[operation], body, ownerScope: 'owner-g' })
+  const rootId = (await call('registerRoot', { selectionId: 'any' })).body.result.rootId
+  const timedOut = await call('gitStatus', { rootId })
+  assert.deepEqual([timedOut.status, timedOut.body.code], [504, 'GIT_TIMEOUT'])
+  const failed = await call('gitChanges', { rootId })
+  assert.deepEqual([failed.status, failed.body.code], [500, 'GIT_FAILED'])
+  for (const body of [timedOut.body, failed.body]) assert.equal(JSON.stringify(body).includes(root), false)
+})

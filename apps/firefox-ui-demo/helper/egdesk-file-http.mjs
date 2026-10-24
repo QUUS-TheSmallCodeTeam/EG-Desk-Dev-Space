@@ -4,6 +4,8 @@ import { guardBridgeRequest, sendJson } from './codex-bridge-http.mjs'
 import { randomBytes, randomUUID } from 'node:crypto'
 import path from 'node:path'
 
+// git/* and search/contents are read-only. They take the opaque rootId or a
+// changeId from gitChanges; the helper resolves the verified root path itself.
 export const EGDESK_FILE_ENDPOINTS = Object.freeze({
   openPickerChannel: '/v1/files/picker/channel',
   beginPicker: '/v1/files/picker/begin',
@@ -11,6 +13,7 @@ export const EGDESK_FILE_ENDPOINTS = Object.freeze({
   registerRoot: '/v1/files/roots',
   listDirectory: '/v1/files/list',
   search: '/v1/files/search',
+  searchContents: '/v1/files/search/contents',
   readFile: '/v1/files/read',
   createDraft: '/v1/files/drafts/create',
   readDraft: '/v1/files/drafts/read',
@@ -20,12 +23,17 @@ export const EGDESK_FILE_ENDPOINTS = Object.freeze({
   sourceStatus: '/v1/files/drafts/source-status',
   reconnectDraft: '/v1/files/drafts/reconnect',
   saveAs: '/v1/files/save-as',
+  gitStatus: '/v1/files/git/status',
+  gitChanges: '/v1/files/git/changes',
+  gitFileDiff: '/v1/files/git/diff',
 })
 const OPERATIONS = new Map(Object.entries(EGDESK_FILE_ENDPOINTS).map(([name, route]) => [route, name]))
 const FIELDS = Object.freeze({
   openPickerChannel: [], beginPicker: ['purpose'], completePicker: ['requestId', 'absolutePath', 'cancelled'],
   registerRoot: ['selectionId'], listDirectory: ['directoryId', 'limit', 'cursor'],
-  search: ['rootId', 'query', 'limit', 'maxVisits', 'maxDepth'], readFile: ['fileId'],
+  search: ['rootId', 'query', 'limit', 'maxVisits', 'maxDepth', 'includeIgnored'], readFile: ['fileId'],
+  searchContents: ['rootId', 'query', 'limit', 'caseSensitive'],
+  gitStatus: ['rootId'], gitChanges: ['rootId', 'scope'], gitFileDiff: ['changeId'],
   createDraft: ['fileId'], readDraft: ['draftId'],
   updateDraft: ['draftId', 'expectedHead', 'text', 'operationId'],
   saveDraft: ['draftId', 'expectedHead', 'bufferRevision', 'operationId'],
@@ -44,11 +52,12 @@ const scopedOwner = ownerScope => {
 function responseError(cause) {
   const code = cause?.code || 'FILE_SERVICE_ERROR'
   const conflicts = new Set(['DRAFT_CONFLICT', 'BUFFER_CONFLICT', 'TARGET_EXISTS', 'ROOT_CHANGED', 'RESOURCE_CHANGED', 'DRAFT_EXISTS', 'SOURCE_RECONNECT_CONFLICT'])
-  const missing = new Set(['UNKNOWN_ROOT', 'UNKNOWN_RESOURCE', 'UNKNOWN_DRAFT', 'RESOURCE_UNAVAILABLE', 'ROOT_UNAVAILABLE'])
+  const missing = new Set(['UNKNOWN_ROOT', 'UNKNOWN_RESOURCE', 'UNKNOWN_DRAFT', 'UNKNOWN_CHANGE', 'RESOURCE_UNAVAILABLE', 'ROOT_UNAVAILABLE'])
   const large = new Set(['FILE_TOO_LARGE', 'DIRECTORY_TOO_LARGE', 'BODY_TOO_LARGE'])
   const saveFailures = new Set(['SAVE_AS_INCOMPLETE', 'SAVE_AS_UNCERTAIN', 'SAVE_AS_FAILED'])
+  const gitFailures = { GIT_UNAVAILABLE: 503, GIT_TIMEOUT: 504, GIT_FAILED: 500 }
   const known = cause instanceof FileSurfaceError || cause?.httpStatus || conflicts.has(code) || missing.has(code) || large.has(code)
-  const status = cause?.httpStatus || (conflicts.has(code) ? 409 : missing.has(code) ? 404 : large.has(code) ? 413 : code === 'SAVE_AS_UNAVAILABLE' ? 503 : saveFailures.has(code) ? 500 : code === 'UNSUPPORTED_EDIT' ? 415 : cause instanceof FileSurfaceError ? 400 : 500)
+  const status = cause?.httpStatus || (conflicts.has(code) ? 409 : missing.has(code) ? 404 : large.has(code) ? 413 : code === 'SAVE_AS_UNAVAILABLE' ? 503 : saveFailures.has(code) ? 500 : code === 'UNSUPPORTED_EDIT' ? 415 : Object.hasOwn(gitFailures, code) && cause instanceof FileSurfaceError ? gitFailures[code] : cause instanceof FileSurfaceError ? 400 : 500)
   return { status, body: { ok: false, code: known ? code : 'FILE_SERVICE_ERROR', error: known ? cause.message : 'The file operation could not be completed', ...(cause instanceof FileSurfaceError ? { details: cause.details } : {}) } }
 }
 
@@ -74,7 +83,7 @@ function checkedBody(operation, body) {
   const allowed = new Set(FIELDS[operation])
   for (const key of Object.keys(body)) if (!allowed.has(key)) throw error('UNEXPECTED_FIELD', `Field is not allowed: ${key}`)
   if (Buffer.byteLength(JSON.stringify(body)) > (operation === 'updateDraft' ? TEXT_BODY_BYTES : SMALL_BODY_BYTES)) throw error('BODY_TOO_LARGE', 'File request exceeds its bounded size limit', 413)
-  for (const key of ['requestId', 'selectionId', 'rootId', 'directoryId', 'fileId', 'draftId', 'expectedHead', 'operationId']) {
+  for (const key of ['requestId', 'selectionId', 'rootId', 'directoryId', 'fileId', 'draftId', 'expectedHead', 'operationId', 'changeId']) {
     if (Object.hasOwn(body, key) && (typeof body[key] !== 'string' || !body[key] || body[key].length > 512)) throw error('INVALID_ID', `Invalid ${key}`)
   }
   return body
@@ -94,7 +103,7 @@ function checkedBody(operation, body) {
  * boundary), then bound to a short-lived in-memory nonce. Web-origin requests
  * cannot bootstrap or use this channel. Both forms share scoped services.
  */
-export function createEGDeskFileHttpAdapter({ draftDirectory, localOwnerScope = 'egdesk-local', resolveRootSelection, createOnlyAdapter, storeForOwner, port = 39218, now = Date.now, onRootRegistered = null } = {}) {
+export function createEGDeskFileHttpAdapter({ draftDirectory, localOwnerScope = 'egdesk-local', resolveRootSelection, createOnlyAdapter, storeForOwner, port = 39218, now = Date.now, onRootRegistered = null, gitReview } = {}) {
   const localOwner = scopedOwner(localOwnerScope)
   const boundOwner = requested => {
     if (requested != null && requested !== localOwner) throw error('OWNER_SCOPE_MISMATCH', 'File operations belong to the configured local EG-Desk owner', 403)
@@ -124,7 +133,7 @@ export function createEGDeskFileHttpAdapter({ draftDirectory, localOwnerScope = 
     if (!owners.has(ownerScope)) {
       const pending = (async () => {
         const store = storeForOwner ? await storeForOwner(ownerScope) : await openEGDeskManagedDraftStore({ directory: draftDirectory, ownerScope })
-        return { store, service: createEGDeskFileService({ draftStore: store, createOnlyAdapter, onRootRegistered }) }
+        return { store, service: createEGDeskFileService({ draftStore: store, createOnlyAdapter, onRootRegistered, ...(gitReview ? { gitReview } : {}) }) }
       })()
       owners.set(ownerScope, pending)
       pending.catch(() => { if (owners.get(ownerScope) === pending) owners.delete(ownerScope) })

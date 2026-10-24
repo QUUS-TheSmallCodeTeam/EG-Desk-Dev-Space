@@ -2,6 +2,7 @@ import { randomUUID, createHash } from 'node:crypto'
 import { constants } from 'node:fs'
 import * as fs from 'node:fs/promises'
 import path from 'node:path'
+import { contentMatchRanges, contentSnippet, createEGDeskGitReview, EGDESK_GIT_REVIEW_LIMITS } from './egdesk-git-review.mjs'
 
 const MAX_READ_BYTES = 8 * 1024 * 1024
 const MAX_LIST = 200
@@ -9,6 +10,16 @@ const MAX_SEARCH = 100
 const MAX_SEARCH_VISITS = 5000
 const MAX_SEARCH_DEPTH = 12
 const MAX_DIRECTORY_ENTRIES = 10_000
+const MAX_CONTENT_FILE_BYTES = 1024 * 1024
+const MAX_CONTENT_FILES = 2000
+const CONTENT_WALK_BUDGET_MS = 1000
+// Folders a name/content walk skips unless the caller asks to include them.
+// Pattern from BloopAI/vibe-kanban (Apache-2.0)
+// crates/services/src/services/file_search.rs:247-254 — pattern only.
+export const DEFAULT_SEARCH_IGNORES = Object.freeze(['.git', 'node_modules', 'target', 'dist', 'build'])
+const GIT_NOT_READY = new Set(['GIT_UNAVAILABLE'])
+const toNative = posixPath => path.join(...posixPath.split('/'))
+const toPosix = nativePath => nativePath.split(path.sep).join('/')
 const textDecoder = new TextDecoder('utf-8', { fatal: true, ignoreBOM: true })
 const hash = bytes => createHash('sha256').update(bytes).digest('hex')
 
@@ -101,12 +112,16 @@ function lineDiff(before, after) {
  * creates fileName with O_EXCL and verifies bytes through that same descriptor.
  * No path-based fallback is safe against a concurrent parent-directory swap.
  */
-export function createEGDeskFileService({ draftStore, createOnlyAdapter, makeId = randomUUID, now = Date.now, onRootRegistered = null } = {}) {
+export function createEGDeskFileService({ draftStore, createOnlyAdapter, makeId = randomUUID, now = Date.now, onRootRegistered = null, gitReview = createEGDeskGitReview() } = {}) {
   if (!draftStore || !['create', 'get', 'compareAndSwap'].every(key => typeof draftStore[key] === 'function')) {
     fail('DRAFT_STORE_REQUIRED', 'A managed compare-and-swap draft store is required')
   }
   const roots = new Map()
   const resources = new Map()
+  // Opaque change handles from gitChanges. Two list generations per root stay
+  // valid so a click racing an automatic refresh still resolves.
+  const changes = new Map()
+  const changeGeneration = new Map()
   const saveAsAvailable = createOnlyAdapter?.capability === 'descriptor-relative-create-only' && typeof createOnlyAdapter.createFile === 'function'
 
   async function checkedRoot(rootId) {
@@ -176,18 +191,28 @@ export function createEGDeskFileService({ draftStore, createOnlyAdapter, makeId 
     return { entries, nextCursor: cursor + pageSize < names.length ? cursor + pageSize : null, total: names.length }
   }
 
-  async function search({ rootId, query, limit, maxVisits = MAX_SEARCH_VISITS, maxDepth = MAX_SEARCH_DEPTH }) {
-    const root = await checkedRoot(rootId)
-    if (typeof query !== 'string' || !query.trim() || query.length > 256) fail('INVALID_QUERY', 'Search query must contain 1–256 characters')
-    const resultLimit = positiveLimit(limit, 50, MAX_SEARCH)
-    const visitLimit = positiveLimit(maxVisits, MAX_SEARCH_VISITS, MAX_SEARCH_VISITS)
-    const depthLimit = positiveLimit(maxDepth, MAX_SEARCH_DEPTH, MAX_SEARCH_DEPTH)
-    const needle = query.toLocaleLowerCase()
+  // Regular, non-symlink file or directory strictly inside the root, as a new
+  // opaque handle; null for anything else (missing, symlink, escaped, special).
+  async function handleForRelative(root, rootId, nativeRelative, wantKind = null) {
+    if (!nativeRelative || path.isAbsolute(nativeRelative)) return null
+    const target = path.join(root.path, nativeRelative)
+    if (!inside(root.path, target) || target === root.path) return null
+    const stat = await fs.lstat(target, { bigint: true }).catch(() => null)
+    if (!stat || stat.isSymbolicLink() || (!stat.isFile() && !stat.isDirectory())) return null
+    const kind = stat.isDirectory() ? 'directory' : 'file'
+    if (wantKind && kind !== wantKind) return null
+    const real = await fs.realpath(target).catch(() => null)
+    if (!real || !inside(root.path, real)) return null
+    return { id: handle(rootId, nativeRelative, kind, stat), kind, stat }
+  }
+
+  // BFS over the root that skips DEFAULT_SEARCH_IGNORES (unless includeIgnored)
+  // and never follows symlinks or leaves the root.
+  async function walkRoot(root, { visitLimit, depthLimit, includeIgnored, onEntry, shouldStop }) {
     const queue = [{ relativePath: '', depth: 0 }]
-    const matches = []
     let visited = 0
     let stoppedInsideDirectory = false
-    while (queue.length && visited < visitLimit && matches.length < resultLimit) {
+    while (queue.length && visited < visitLimit && !shouldStop()) {
       const current = queue.shift()
       const currentPath = path.join(root.path, current.relativePath)
       const currentStat = await fs.lstat(currentPath, { bigint: true }).catch(() => null)
@@ -198,20 +223,215 @@ export function createEGDeskFileService({ draftStore, createOnlyAdapter, makeId 
       try { directory = await fs.opendir(currentPath) }
       catch { continue }
       for await (const dirent of directory) {
-        if (visited >= visitLimit || matches.length >= resultLimit) { stoppedInsideDirectory = true; break }
+        if (visited >= visitLimit || shouldStop()) { stoppedInsideDirectory = true; break }
         const name = dirent.name
+        if (!includeIgnored && DEFAULT_SEARCH_IGNORES.includes(name)) continue
         visited++
         const relativePath = path.join(current.relativePath, name)
-        const target = path.join(root.path, relativePath)
-        const stat = await fs.lstat(target, { bigint: true }).catch(() => null)
+        const stat = await fs.lstat(path.join(root.path, relativePath), { bigint: true }).catch(() => null)
         if (!stat || stat.isSymbolicLink() || (!stat.isDirectory() && !stat.isFile())) continue
-        if (name.toLocaleLowerCase().includes(needle)) {
-          matches.push({ id: handle(rootId, relativePath, stat.isDirectory() ? 'directory' : 'file', stat), name, relativePath, kind: stat.isDirectory() ? 'directory' : 'file' })
-        }
+        await onEntry({ name, relativePath, stat })
         if (stat.isDirectory() && current.depth < depthLimit) queue.push({ relativePath, depth: current.depth + 1 })
       }
     }
-    return { matches, visited, truncated: stoppedInsideDirectory || queue.length > 0 || visited >= visitLimit || matches.length >= resultLimit, scope: 'names' }
+    return { visited, incomplete: stoppedInsideDirectory || queue.length > 0 || visited >= visitLimit }
+  }
+
+  // Inside a git work tree, `git ls-files -co --exclude-standard` lists exactly
+  // the names a .gitignore-aware search should see (vibe-kanban TaskForm mode,
+  // file_search.rs:257-266); folder names come from file ancestors as in
+  // t3code withDirectoryAncestors (WorkspaceSearchIndex.ts:283-295). Pattern only.
+  async function searchGitIndex(root, rootId, needle, resultLimit) {
+    let listed
+    try { listed = await gitReview?.listFiles?.(root.path) }
+    catch { return null }
+    if (!listed) return null
+    const candidates = new Map()
+    for (const filePath of listed.paths) {
+      const parts = filePath.split('/')
+      if (parts.some(part => !part || part === '.' || part === '..')) continue
+      for (let depth = 1; depth <= parts.length; depth++) {
+        if (!parts[depth - 1].toLocaleLowerCase().includes(needle)) continue
+        const candidate = parts.slice(0, depth).join('/')
+        if (!candidates.has(candidate)) candidates.set(candidate, { depth, kind: depth === parts.length ? 'file' : 'directory' })
+      }
+    }
+    const ordered = [...candidates].sort((a, b) => a[1].depth - b[1].depth || a[0].localeCompare(b[0]))
+    const matches = []
+    let stoppedAtLimit = false
+    for (const [candidate, { kind }] of ordered) {
+      if (matches.length >= resultLimit) { stoppedAtLimit = true; break }
+      const nativeRelative = toNative(candidate)
+      const resolved = await handleForRelative(root, rootId, nativeRelative, kind)
+      if (resolved) matches.push({ id: resolved.id, name: path.basename(nativeRelative), relativePath: nativeRelative, kind })
+    }
+    return { matches, visited: listed.paths.length, truncated: listed.truncated || stoppedAtLimit, scope: 'names', source: 'git-index' }
+  }
+
+  async function search({ rootId, query, limit, maxVisits = MAX_SEARCH_VISITS, maxDepth = MAX_SEARCH_DEPTH, includeIgnored = false }) {
+    const root = await checkedRoot(rootId)
+    if (typeof query !== 'string' || !query.trim() || query.length > 256) fail('INVALID_QUERY', 'Search query must contain 1–256 characters')
+    if (typeof includeIgnored !== 'boolean') fail('INVALID_OPTION', 'includeIgnored must be a boolean')
+    const resultLimit = positiveLimit(limit, 50, MAX_SEARCH)
+    const visitLimit = positiveLimit(maxVisits, MAX_SEARCH_VISITS, MAX_SEARCH_VISITS)
+    const depthLimit = positiveLimit(maxDepth, MAX_SEARCH_DEPTH, MAX_SEARCH_DEPTH)
+    const needle = query.toLocaleLowerCase()
+    if (!includeIgnored) {
+      const viaGit = await searchGitIndex(root, rootId, needle, resultLimit)
+      if (viaGit) return viaGit
+    }
+    const matches = []
+    const walked = await walkRoot(root, {
+      visitLimit, depthLimit, includeIgnored,
+      shouldStop: () => matches.length >= resultLimit,
+      onEntry: ({ name, relativePath, stat }) => {
+        if (!name.toLocaleLowerCase().includes(needle)) return
+        const kind = stat.isDirectory() ? 'directory' : 'file'
+        matches.push({ id: handle(rootId, relativePath, kind, stat), name, relativePath, kind })
+      },
+    })
+    return { matches, visited: walked.visited, truncated: walked.incomplete || matches.length >= resultLimit, scope: 'names', source: 'walk' }
+  }
+
+  async function contentLines(root, nativeRelative, stat) {
+    if (stat.size > BigInt(MAX_CONTENT_FILE_BYTES)) return null
+    const target = path.join(root.path, nativeRelative)
+    let file
+    try { file = await fs.open(target, constants.O_RDONLY | (constants.O_NOFOLLOW || 0)) }
+    catch { return null }
+    try {
+      const opened = await file.stat({ bigint: true })
+      if (!sameIdentity(opened, stat) || !opened.isFile() || opened.size > BigInt(MAX_CONTENT_FILE_BYTES)) return null
+      const text = decodedText(await file.readFile())
+      return text == null ? null : text.split('\n')
+    } catch { return null }
+    finally { await file.close().catch(() => {}) }
+  }
+
+  // Content search: `git grep` inside a work tree, otherwise a bounded walk
+  // over UTF-8 text files of at most 1 MiB. Query text is never logged.
+  // Result shape follows t3code's ProjectSearchContentsInput/Result (MIT,
+  // packages/contracts/src/project.ts:262-293): untrimmed query ≤256,
+  // {path, lineNumber, lineContent, matchRanges}, truncated; ≤100 hits per file
+  // (apps/server/src/workspace/WorkspaceSearchIndex.ts:42-43). Pattern only.
+  async function searchContents({ rootId, query, limit, caseSensitive = false }) {
+    const root = await checkedRoot(rootId)
+    if (typeof query !== 'string' || !query.trim() || query.length > 256 || /[\0\r\n]/.test(query)) fail('INVALID_QUERY', 'Content search needs one line of 1–256 characters')
+    if (typeof caseSensitive !== 'boolean') fail('INVALID_OPTION', 'caseSensitive must be a boolean')
+    const resultLimit = positiveLimit(limit, 50, MAX_SEARCH)
+    const matches = []
+    const resolvedFiles = new Map()
+    const addMatch = async (nativeRelative, lineNumber, line, knownHandle = null) => {
+      let fileHandle = knownHandle || resolvedFiles.get(nativeRelative)
+      if (fileHandle === undefined) {
+        fileHandle = (await handleForRelative(root, rootId, nativeRelative, 'file'))?.id || null
+        resolvedFiles.set(nativeRelative, fileHandle)
+      }
+      if (!fileHandle) return
+      const ranges = contentMatchRanges(line, query, caseSensitive)
+      matches.push({ fileId: fileHandle, relativePath: toPosix(nativeRelative), lineNumber, ...contentSnippet(line, ranges) })
+    }
+    let grep = null
+    try { grep = await gitReview?.grep?.(root.path, { query, caseSensitive, limit: resultLimit + 1 }) }
+    catch (error) { if (!['GIT_UNAVAILABLE', 'GIT_TIMEOUT', 'GIT_FAILED'].includes(error?.code)) throw error }
+    if (grep) {
+      for (const match of grep.matches) {
+        if (matches.length > resultLimit) break
+        const parts = match.relativePath.split('/')
+        if (parts.some(part => !part || part === '.' || part === '..')) continue
+        await addMatch(toNative(match.relativePath), match.lineNumber, match.lineContent)
+      }
+      return { matches: matches.slice(0, resultLimit), truncated: grep.truncated || matches.length > resultLimit, scope: 'contents', source: 'git-grep' }
+    }
+    const deadline = now() + CONTENT_WALK_BUDGET_MS
+    let files = 0
+    let budgetStop = false
+    const walked = await walkRoot(root, {
+      visitLimit: MAX_SEARCH_VISITS, depthLimit: MAX_SEARCH_DEPTH, includeIgnored: false,
+      shouldStop: () => matches.length > resultLimit || files >= MAX_CONTENT_FILES || (budgetStop ||= now() > deadline),
+      onEntry: async ({ relativePath, stat }) => {
+        if (!stat.isFile() || matches.length > resultLimit) return
+        files++
+        const lines = await contentLines(root, relativePath, stat)
+        if (!lines) return
+        let knownHandle = null
+        let perFile = 0
+        for (let index = 0; index < lines.length && matches.length <= resultLimit && perFile < EGDESK_GIT_REVIEW_LIMITS.grepMatchesPerFile; index++) {
+          const line = lines[index].replace(/\r$/, '')
+          if (!contentMatchRanges(line, query, caseSensitive).length) continue
+          knownHandle ||= handle(rootId, relativePath, 'file', stat)
+          await addMatch(relativePath, index + 1, line, knownHandle)
+          perFile++
+        }
+      },
+    })
+    return { matches: matches.slice(0, resultLimit), truncated: walked.incomplete || budgetStop || files >= MAX_CONTENT_FILES || matches.length > resultLimit, scope: 'contents', source: 'walk' }
+  }
+
+  const gitError = error => {
+    if (error instanceof FileSurfaceError) return error
+    const code = typeof error?.code === 'string' && /^(?:GIT_[A-Z_]+|INVALID_PATH|NOT_A_REPOSITORY)$/.test(error.code) ? error.code : 'GIT_FAILED'
+    return new FileSurfaceError(code, code === 'GIT_TIMEOUT' ? 'git did not answer in time' : code === 'NOT_A_REPOSITORY' ? 'The connected folder is not inside a git repository' : 'git review failed')
+  }
+  const gitUnavailable = rootId => ({ rootId, available: false, isRepo: false, branch: null, truncated: false })
+
+  // Tree decoration: root-relative POSIX paths with one state each. Untracked
+  // folders arrive as one `directory: true` entry (status --untracked-files=normal).
+  async function gitStatus({ rootId }) {
+    const root = await checkedRoot(rootId)
+    try {
+      const result = await gitReview.status(root.path, { untracked: 'normal' })
+      return { rootId, available: true, isRepo: result.isRepo, branch: result.branch, truncated: result.truncated,
+        entries: result.entries.filter(entry => entry.state !== 'ignored').map(({ relativePath, previousPath, state, staged, unstaged, directory }) => ({ relativePath, previousPath, state, staged, unstaged, directory })) }
+    } catch (error) {
+      if (GIT_NOT_READY.has(error?.code)) return { ...gitUnavailable(rootId), entries: [] }
+      throw gitError(error)
+    }
+  }
+
+  // '커밋 안 한 변경' list. Each file gets an opaque changeId for gitFileDiff;
+  // file handles are created only when a diff is opened.
+  async function gitChanges({ rootId, scope = 'uncommitted' }) {
+    const root = await checkedRoot(rootId)
+    if (scope !== 'uncommitted') fail('UNSUPPORTED_SCOPE', 'Only uncommitted changes are available here; turn changes come from the chat runtime')
+    let result
+    try { result = await gitReview.changes(root.path) }
+    catch (error) {
+      if (GIT_NOT_READY.has(error?.code)) return { ...gitUnavailable(rootId), scope, files: [], totals: { files: 0, additions: 0, deletions: 0 } }
+      throw gitError(error)
+    }
+    const generation = (changeGeneration.get(rootId) || 0) + 1
+    changeGeneration.set(rootId, generation)
+    for (const [id, change] of changes) if (change.rootId === rootId && change.generation < generation - 1) changes.delete(id)
+    const files = result.files.map(file => {
+      const changeId = makeId()
+      changes.set(changeId, { rootId, generation, relativePath: file.relativePath, previousPath: file.previousPath, status: file.status })
+      return { changeId, ...file }
+    })
+    const totals = files.reduce((sum, file) => ({ files: sum.files + 1, additions: sum.additions + (file.additions || 0), deletions: sum.deletions + (file.deletions || 0) }), { files: 0, additions: 0, deletions: 0 })
+    return { rootId, scope, available: true, isRepo: result.isRepo, branch: result.branch, truncated: result.truncated, countsAvailable: result.countsAvailable !== false, files, totals }
+  }
+
+  // One file's change against HEAD, in the lineDiff hunk shape plus the raw
+  // unified patch (≤1 MiB). Untracked files are read through the exact-read path.
+  async function gitFileDiff({ changeId }) {
+    const change = changes.get(changeId)
+    if (!change) fail('UNKNOWN_CHANGE', 'Change list is out of date; refresh it')
+    const root = await checkedRoot(change.rootId)
+    const base = { changeId, relativePath: change.relativePath, previousPath: change.previousPath, status: change.status }
+    const current = change.status === 'deleted' ? null : await handleForRelative(root, change.rootId, toNative(change.relativePath), 'file')
+    const fileId = current?.id || null
+    if (change.status === 'untracked') {
+      if (!current) fail('RESOURCE_UNAVAILABLE', 'File is missing')
+      if (current.stat.size > BigInt(EGDESK_GIT_REVIEW_LIMITS.patchMaxBytes)) return { ...base, fileId, binary: false, truncated: true, tooLarge: true, patch: '', hunks: [] }
+      const read = await readFile({ fileId })
+      if (read.kind !== 'text') return { ...base, fileId, binary: true, truncated: false, tooLarge: false, patch: '', hunks: [] }
+      return { ...base, fileId, binary: false, truncated: false, tooLarge: false, ...gitReview.newFilePatch(change.relativePath, read.text) }
+    }
+    try {
+      const diff = await gitReview.fileDiff(root.path, { relativePath: change.relativePath, previousPath: change.previousPath })
+      return { ...base, fileId, binary: diff.binary, truncated: diff.truncated, tooLarge: false, patch: diff.patch, hunks: diff.hunks }
+    } catch (error) { throw gitError(error) }
   }
 
   async function readFile({ fileId }) {
@@ -351,5 +571,5 @@ export function createEGDeskFileService({ draftStore, createOnlyAdapter, makeId 
     }
   }
 
-  return { registerRoot, listDirectory, search, readFile, createDraft, readDraft, resolveCaptureSource, updateDraft, saveDraft, diffDraft, sourceStatus, reconnectDraft, saveAs }
+  return { registerRoot, listDirectory, search, searchContents, readFile, createDraft, readDraft, resolveCaptureSource, updateDraft, saveDraft, diffDraft, sourceStatus, reconnectDraft, saveAs, gitStatus, gitChanges, gitFileDiff }
 }
