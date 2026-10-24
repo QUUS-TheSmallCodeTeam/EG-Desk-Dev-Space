@@ -26,6 +26,8 @@ import { ImmutableContextStore, appDataDirectory } from './egdesk-context-store.
 import { openChatStore } from './egdesk-chat-store.mjs'
 import { openProfileStore } from './egdesk-profile-store.mjs'
 import { createProfileHttpHandler } from './egdesk-profile-http.mjs'
+import { openDeskStore } from './egdesk-desk-store.mjs'
+import { createDeskHttpHandler } from './egdesk-desk-http.mjs'
 import { NativeReaderClient } from './egdesk-native-reader.mjs'
 import { ContextRuntime } from './egdesk-context-runtime.mjs'
 import { createContextHttpHandler } from './egdesk-context-http.mjs'
@@ -143,6 +145,17 @@ try {
   profileStoreError = publicText(error?.message || 'Local profile storage failed to open', 1000)
   console.error('[egdesk-codex-bridge] local profile storage unavailable:', profileStoreError)
 }
+// RT-07/CTX-01/CTX-02 Desk recovery journal and saved Board revisions. A
+// failure leaves the bridge running; /v1/desk and /v1/boards answer 503 and
+// the screen keeps its preference values.
+let deskStore = null
+let deskStoreError = null
+try {
+  deskStore = openDeskStore({ dataDir: path.join(dataDir, 'desk'), ownerScope: 'local-desktop-v1' })
+} catch (error) {
+  deskStoreError = publicText(error?.message || 'Local Desk storage failed to open', 1000)
+  console.error('[egdesk-codex-bridge] local Desk storage unavailable:', deskStoreError)
+}
 // RT-06/CHAT-06 workflow runtime (event bus, connected-root watcher, task
 // graph). Opened after Chat below; callbacks that fire earlier are no-ops.
 let workflow = null
@@ -246,6 +259,8 @@ const handleComputerControlHttp = createComputerControlHttpHandler(chat, { port:
 const handleContextHttp = createContextHttpHandler(contexts, ensureChatAuth, { port: BRIDGE_PORT })
 // Like /chat/history, profiles stay editable while Codex is signed out.
 const handleProfileHttp = createProfileHttpHandler({ store: () => profileStore, port: BRIDGE_PORT })
+// Desk and Board routes also work signed out (local data only).
+const handleDeskHttp = createDeskHttpHandler({ store: () => deskStore, port: BRIDGE_PORT })
 // Task graph (CHAT-06): /tasks/*, /task-sources; events (RT-06): /events/browser,
 // /events/recent; SSE workflow.event and task.graph frames on /events.
 workflow = await openWorkflowRuntime({
@@ -671,7 +686,7 @@ const bridgeServer = createServer(async (req, res) => {
   }
 
   if (req.method === 'GET' && route === '/health') {
-    sendJson(res, 200, { ok: true, port: BRIDGE_PORT, appServerReady, chatStorageReady: Boolean(chatStore && chat.storeHealthy), chatStorageError: chatStoreError, profileStorageReady: Boolean(profileStore), profileStorageError: profileStoreError, native: nativeCapabilities, engineConfiguration: nativePreflight, memoryIsolation, node: nodeRuntime })
+    sendJson(res, 200, { ok: true, port: BRIDGE_PORT, appServerReady, chatStorageReady: Boolean(chatStore && chat.storeHealthy), chatStorageError: chatStoreError, profileStorageReady: Boolean(profileStore), profileStorageError: profileStoreError, deskStorageReady: Boolean(deskStore), deskStorageError: deskStoreError, native: nativeCapabilities, engineConfiguration: nativePreflight, memoryIsolation, node: nodeRuntime })
     return
   }
 
@@ -709,6 +724,7 @@ const bridgeServer = createServer(async (req, res) => {
         files: ['native-picker', 'scoped-read', 'managed-drafts', 'create-only-save-as'],
         profiles: profileStore ? ['local-store', 'revisions', 'run-binding'] : ['local-store-unavailable'],
         engines: ['registry', 'thread-lock'],
+        desk: deskStore ? ['local-store', 'generations', 'restore', 'board-revisions', 'board-revert', 'prefs-import'] : ['local-store-unavailable'],
       },
       bridge: bridgeBuildState(bridgeBuild, expectedOverlayBuild(req.headers, url.searchParams)),
       appServerReconnect: appServerBackoff.snapshot(),
@@ -720,6 +736,8 @@ const bridgeServer = createServer(async (req, res) => {
       workflow: workflow.snapshot(),
       // CU-01 { policy: 'inherit'|'off', verified: true|false|null } for ordinary Codex threads.
       computerControl: chat.computerControlSnapshot(),
+      // RT-07 Desk store ready; false means the screen keeps its preference values.
+      deskStorageReady: Boolean(deskStore),
     })
     return
   }
@@ -799,6 +817,7 @@ const bridgeServer = createServer(async (req, res) => {
 
   if (await handleComputerControlHttp(req, res, url)) return
   if (await handleProfileHttp(req, res, url)) return
+  if (await handleDeskHttp(req, res, url)) return
   if (await handleContextHttp(req, res, url)) return
   if (await handleChatHttp(req, res, url)) return
 
@@ -843,6 +862,8 @@ async function shutdown() {
   catch { console.error('[egdesk-codex-bridge] local chat store did not close cleanly') }
   try { profileStore?.close() }
   catch { console.error('[egdesk-codex-bridge] local profile store did not close cleanly') }
+  try { deskStore?.close() }
+  catch { console.error('[egdesk-codex-bridge] local Desk store did not close cleanly') }
   process.exit(0)
 }
 process.on('SIGINT', shutdown)

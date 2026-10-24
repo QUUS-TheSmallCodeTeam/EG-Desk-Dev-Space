@@ -9,7 +9,7 @@ const MAX_RECORD_BYTES = 16 * 1024 * 1024
 const MAX_IMPORT_BYTES = 64 * 1024 * 1024
 const TERMINAL_RUN = new Set(['completed', 'failed', 'interrupted', 'cancelled'])
 const TERMINAL_MESSAGE = new Set(['complete', 'final', 'interrupted', 'error'])
-const PRIVATE_KEYS = new Set([
+export const PRIVATE_KEYS = new Set([
   'reasoning', 'rawreasoning', 'rawmodelreasoning', 'hiddenreasoning', 'reasoningcontent',
   'credential', 'credentials', 'cookie', 'cookies', 'setcookie',
   'authorization', 'authpayload', 'authtoken', 'accesstoken',
