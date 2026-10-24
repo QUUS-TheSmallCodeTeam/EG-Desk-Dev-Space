@@ -6,6 +6,7 @@ import { classifyPublicToolError } from './codex-tool-errors.mjs'
 import { specManifestEntries, verifiedManifestOwners } from './codex-native-tool-manifest.mjs'
 import { nativeQaCommandReceipt, validateQaCommandNonce, validateQaOutputMarkers } from './codex-qa-command-receipt.mjs'
 import { MAX_COMPOSED } from './egdesk-profile-store.mjs'
+import { browserRefusal, ceilingAllowsBrowserTool, ceilingApprovalRefusal, ceilingBrowserSelection, ceilingNarrows, CEILING_MESSAGES, effectiveToolCeiling, liveBrowserSelected, loadCeilingThreadOverrides, mergeCeilingOverrides, recordedToolCeiling, verifyCeilingNativeThread } from './codex-chat-tool-ceiling.mjs'
 import { engineError } from './engine-adapter.mjs'
 import { createCodexEngineAdapter } from './codex-engine-adapter.mjs'
 import { EngineRegistry } from './engine-registry.mjs'
@@ -308,7 +309,7 @@ export class CodexChatRuntime {
     catch (error) { throw this.providerFailure(error, provider) }
   }
 
-  collectToolSpecs(policy = null, { forManifest = false, browserInteraction = false } = {}) {
+  collectToolSpecs(policy = null, { forManifest = false, browserInteraction = false, toolCeiling = null } = {}) {
     const specs = [], owners = new Map(), selected = [], manifest = []
     for (const [index, provider] of this.toolProviders.entries()) {
       const providerId = provider === this.contexts ? 'egdesk-context-v1' : provider.providerId
@@ -328,6 +329,8 @@ export class CodexChatRuntime {
         if (policy === BROWSER_BOUNDED && !contextRead && !(browser && (spec.name === 'egdesk_browser_observe'
           || (browserInteraction && BROWSER_INTERACTION_TOOLS.includes(spec.name))))) continue
         if (policy === FIXTURE_BROWSER_QA && !contextRead && !(browser && ['egdesk_browser_observe', 'egdesk_browser_click', 'egdesk_browser_fill'].includes(spec.name))) continue
+        // AGENT-04: a new thread's catalog never offers Browser tools the Agent may not use.
+        if (browser && !ceilingAllowsBrowserTool(toolCeiling, spec.name)) continue
         const names = spec?.type === 'function' && typeof spec.name === 'string' ? [toolKey(null, spec.name)]
           : spec?.type === 'namespace' && typeof spec.name === 'string' && Array.isArray(spec.tools)
             ? spec.tools.map(tool => tool?.type === 'function' && typeof tool.name === 'string' ? toolKey(spec.name, tool.name) : null)
@@ -675,6 +678,7 @@ export class CodexChatRuntime {
           requestId: prior?.requestId || null,
           localMessageId: request?.localMessageId || null,
           profileBinding: prior?.profileBinding,
+          toolCeiling: prior?.toolCeiling,
           engine: prior?.engine,
         }
         if (prior) this.persistedRunStates.set(runKey(threadId, turnId), { status: prior.status, historyComplete: prior.historyComplete })
@@ -704,12 +708,15 @@ export class CodexChatRuntime {
     const profileBinding = context?.profileRun?.binding || context?.profileBinding
     if (profileBinding && typeof profileBinding.profileId === 'string' && Number.isSafeInteger(profileBinding.revision) && typeof profileBinding.hash === 'string') {
       run.profileBinding = { profileId: profileBinding.profileId, revision: profileBinding.revision, hash: profileBinding.hash }
+      // AGENT-04: the tool ceiling this run enforced, beside the revision it came from.
+      const toolCeiling = context?.profileRun ? context.profileRun.toolCeiling : recordedToolCeiling(context?.toolCeiling)
+      if (toolCeiling) run.toolCeiling = { ...toolCeiling }
     }
     this.runs.set(key, run)
     if (owned) this.ownedRuns.add(run)
     this.trimRuns()
     if (announce) {
-      this.emit(run, 'run.started', { status: 'inProgress', ...(run.profileBinding ? { profileBinding: run.profileBinding } : {}), ...(run.stateless ? { stateless: true } : {}) })
+      this.emit(run, 'run.started', { status: 'inProgress', ...(run.profileBinding ? { profileBinding: run.profileBinding } : {}), ...(run.toolCeiling ? { toolCeiling: run.toolCeiling } : {}), ...(run.stateless ? { stateless: true } : {}) })
       this.emitLegacy({ type: 'assistant-start', conversationId: threadId, runId: turnId, message: { id: key, role: 'assistant', content: '', status: 'streaming', createdAt: run.createdAt } })
     }
     return run
@@ -739,6 +746,8 @@ export class CodexChatRuntime {
     if (typeof body.message !== 'string' || !body.message.trim()) throw chatError('EMPTY_MESSAGE', 'Message is required')
     if (body.message.length > MAX_TEXT) throw chatError('MESSAGE_TOO_LONG', `Message exceeds ${MAX_TEXT} characters`)
     const profileRun = this.resolveProfile(body)
+    // Ceilings are applied through Codex thread settings; refuse rather than run an unlimited Agent elsewhere.
+    if (ceilingNarrows(profileRun?.toolCeiling) && engineId !== 'codex') throw chatError('PROFILE_CEILING_UNSUPPORTED', 'This AI engine cannot enforce the Agent tool limits yet', 409)
     const instructions = this.threadOverrides(body, profileRun).developerInstructions || ''
     const requestedPolicy = requestedExecutionPolicy(body.executionPolicy)
     const legacyQaNonce = validateQaCommandNonce(body.qaCommandNonce)
@@ -909,6 +918,7 @@ export class CodexChatRuntime {
         'QA_POLICY_UNVERIFIED', 'QA_TOOL_ISOLATION_UNVERIFIED', 'QA_POLICY_UNAVAILABLE',
         'BROWSER_POLICY_REQUIRED', 'INVALID_BROWSER_SELECTION', 'BROWSER_UI_UNAVAILABLE',
         'BROWSER_TOOLS_UNAVAILABLE', 'QA_REQUIRES_NEW_CONVERSATION',
+        'PROFILE_CEILING_UNAVAILABLE', 'PROFILE_CEILING_UNVERIFIED',
       ].includes(failure.code)) {
         try {
           this.store.recordRequestOutcome({
@@ -956,7 +966,8 @@ export class CodexChatRuntime {
         typeof instructions !== 'string' || !instructions.trim() || instructions.length > MAX_COMPOSED) {
       throw chatError('INVALID_PROFILE', `A saved profile must compose 1 to ${MAX_COMPOSED} characters of instructions`, 500)
     }
-    return { binding: { profileId: binding.profileId, revision: binding.revision, hash: binding.hash }, developerInstructions: instructions }
+    // AGENT-04: the binding hash covers the ceiling, so the fingerprint already names it.
+    return { binding: { profileId: binding.profileId, revision: binding.revision, hash: binding.hash }, developerInstructions: instructions, toolCeiling: effectiveToolCeiling(resolved.toolCeiling) }
   }
 
   threadOverrides(body, profileRun = null) {
@@ -1072,10 +1083,27 @@ export class CodexChatRuntime {
     const policy = context.executionPolicy
     const qa = policy === READ_ONLY_QA
     const bounded = qa || policy === BROWSER_BOUNDED || policy === FIXTURE_BROWSER_QA
+    // AGENT-04: the Agent's tool ceiling narrows this run; it never widens it.
+    const ceiling = context.profileRun?.toolCeiling || null
+    if (ceilingNarrows(ceiling) && engine.id !== 'codex') throw chatError('PROFILE_CEILING_UNSUPPORTED', 'This AI engine cannot enforce the Agent tool limits yet', 409)
+    context.ceilingNotices = []
     const preparedProviders = new Map()
     for (const provider of this.toolProviders) if ((!bounded && provider.providerId !== 'egdesk-browser') ||
         (bounded && (provider === this.contexts || provider.providerId === 'egdesk-browser'))) {
-      preparedProviders.set(provider, await this.callProvider(provider, 'prepare', { ...body, effectiveExecutionPolicy: policy }) || null)
+      let input = body
+      if (provider.providerId === 'egdesk-browser' && ceiling?.browser === 'none') {
+        // No Browser grant at all, even for a Card the user selected.
+        if (liveBrowserSelected(body.selectedSources)) context.ceilingNotices.push({ key: 'browser-selection', axis: 'browser', title: CEILING_MESSAGES.browserDropped })
+        continue
+      }
+      if (provider.providerId === 'egdesk-browser') {
+        const narrowed = ceilingBrowserSelection(ceiling, body.selectedSources)
+        if (narrowed.downgraded) {
+          input = { ...body, selectedSources: narrowed.sources }
+          context.ceilingNotices.push({ key: 'browser-selection', axis: 'browser', title: CEILING_MESSAGES.browserDowngraded })
+        }
+      }
+      preparedProviders.set(provider, await this.callProvider(provider, 'prepare', { ...input, effectiveExecutionPolicy: policy }) || null)
     }
     const browserInteractionRequested = policy === BROWSER_BOUNDED && [...preparedProviders]
       .some(([provider, prepared]) => provider.providerId === 'egdesk-browser' && prepared?.interactionRequested === true)
@@ -1087,6 +1115,10 @@ export class CodexChatRuntime {
       cwd: overrides.cwd || this.threads.get(context.conversationId)?.cwd || null,
     }) : null
     if (epoch !== this.epochOf(engine.id)) throw chatError('ACCOUNT_CHANGED', 'Codex account or connection changed', 409)
+    // A continued thread reads its settings after its history (and cwd) is restored.
+    const ceilingOverrides = () => loadCeilingThreadOverrides(this.request, ceiling, {
+      bounded, cwd: overrides.cwd || this.threads.get(context.conversationId)?.cwd || null,
+    })
     const effort = body.effort
     // CLI 0.156.1 defines ReasoningEffort as a non-empty model-advertised string.
     if (effort !== undefined && (!idText(effort) || !effort.trim())) throw chatError('INVALID_EFFORT', 'Invalid reasoning effort')
@@ -1158,15 +1190,26 @@ export class CodexChatRuntime {
         this.loadedThreads.delete(cid)
         if (!['unsubscribed', 'notLoaded'].includes(detached?.status)) throw chatError('PROFILE_TRANSITION_UNAVAILABLE', 'Could not detach this native thread for a profile change', 409)
       }
-      if (!this.loadedThreads.has(cid)) await this.restoreThread(cid, context.clientThreadId, { ...overrides, ...(qaOverrides || {}) }, { policy })
+      if (!this.loadedThreads.has(cid)) {
+        // A saved profile always reloads the thread, so a changed ceiling is re-applied here.
+        const extra = ceilingNarrows(ceiling) ? await ceilingOverrides() : null
+        if (epoch !== this.epochOf(engine.id)) throw chatError('CONTEXT_CHANGED', 'Codex connection or account changed', 409)
+        const resumed = await this.restoreThread(cid, context.clientThreadId, mergeCeilingOverrides({ ...overrides, ...(qaOverrides || {}) }, extra), { policy })
+        if (!bounded) await verifyCeilingNativeThread(this.request, ceiling, resumed, cid)
+        if (epoch !== this.epochOf(engine.id)) throw chatError('CONTEXT_CHANGED', 'Codex connection or account changed', 409)
+      }
       if (bounded) this.persistExecutionPolicy(context, cid)
     } else {
-      const nativeTools = this.collectToolSpecs(policy, { browserInteraction: browserInteractionRequested })
+      const nativeTools = this.collectToolSpecs(policy, { browserInteraction: browserInteractionRequested, toolCeiling: ceiling })
       if (nativeTools.specs.length) overrides.dynamicTools = nativeTools.specs
       if (bounded) Object.assign(overrides, qaOverrides)
       // Ordinary Agent questions may arrive outside Plan mode. Bounded threads never ask.
       else overrides.config = ordinaryThreadConfig(overrides.config)
       if (context.stateless) overrides.ephemeral = true
+      if (ceilingNarrows(ceiling)) {
+        mergeCeilingOverrides(overrides, await ceilingOverrides())
+        if (epoch !== this.epochOf(engine.id)) throw chatError('ACCOUNT_CHANGED', 'Codex account changed', 409)
+      }
       const result = await engine.startThread(overrides)
       if (epoch !== this.epochOf(engine.id)) throw chatError('ACCOUNT_CHANGED', 'Codex account changed', 409)
       cid = result?.thread?.id
@@ -1179,7 +1222,7 @@ export class CodexChatRuntime {
       if (bounded) {
         qaReceipt = verifyQaNativeThread(result, policy)
         qaReceipt = await verifyQaMcpIsolation(this.request, cid, qaReceipt)
-      }
+      } else await verifyCeilingNativeThread(this.request, ceiling, result, cid)
       if (epoch !== this.epochOf(engine.id)) throw chatError('ACCOUNT_CHANGED', 'Codex account changed', 409)
       this.rememberThread(cid, result, context.clientThreadId)
       this.threadToolOwners.set(cid, nativeTools.owners)
@@ -1260,6 +1303,7 @@ export class CodexChatRuntime {
       this.emit(run, 'run.configuration', { configuration: readerConfiguration })
       for (const provider of preparedProviders.keys()) await this.callProvider(provider, 'bindRun', run, preparedProviders.get(provider), readerConfiguration)
       if (epoch !== this.epochOf(engine.id)) throw chatError('ACCOUNT_CHANGED', 'Codex account or connection changed', 409)
+      for (const notice of context.ceilingNotices) this.noteCeiling(run, notice.key, notice)
       // Notifications can precede the RPC response. Only the returned turn ID
       // may inherit this request's correlation; other turns remain unclaimed.
       while (pending.buffer.length) await this.apply(pending.buffer.shift())
@@ -1271,6 +1315,7 @@ export class CodexChatRuntime {
         localRunId: context.localRunId, localMessageId: context.localMessageId,
         ...(bounded ? { executionPolicy: run.executionPolicy } : {}),
         ...(run.profileBinding ? { profileBinding: run.profileBinding } : {}),
+        ...(run.toolCeiling ? { toolCeiling: run.toolCeiling } : {}),
         ...(run.stateless ? { stateless: true } : {}),
       }
     } catch (error) {
@@ -1541,6 +1586,9 @@ export class CodexChatRuntime {
         [READ_ONLY_QA, BROWSER_BOUNDED, FIXTURE_BROWSER_QA].includes(this.threads.get(run.conversationId)?.executionPolicy))) {
       throw chatError('BOUNDED_APPROVAL_FORBIDDEN', 'Bounded execution never grants an interactive approval', 403)
     }
+    if (body.decision === 'accept' && ceilingApprovalRefusal(run.toolCeiling, { kind: approval.kind, network: Boolean(approval.networkApprovalContext) })) {
+      throw chatError('PROFILE_CEILING_FORBIDDEN', 'This Agent profile does not allow that action', 403)
+    }
     // Mark before sending: a synchronous resolved event must not be overwritten.
     approval.status = 'replySent'
     try { this.respond(approval.rpcId, { decision: body.decision }) } catch (error) {
@@ -1725,6 +1773,12 @@ export class CodexChatRuntime {
         this.respond(event.rpcId, null, { code: -32601, message: 'This run does not authorize the requested dynamic tool' })
         return
       }
+      // AGENT-04: the Agent's ceiling wins over a Card's interaction grant.
+      if (browser && !ceilingAllowsBrowserTool(run.toolCeiling, event.tool)) {
+        this.respond(event.rpcId, null, { code: -32601, message: 'This Agent profile does not allow the requested Browser tool' })
+        this.noteCeiling(run, `rpc:${typeof event.rpcId}:${event.rpcId}`, { ...browserRefusal(run.toolCeiling), tool: event.tool })
+        return
+      }
       const provider = this.threadToolOwners.get(run.conversationId)?.get(toolKey(event.namespace, event.tool))
       if (!provider?.dispatch) this.respond(event.rpcId, null, { code: -32601, message: 'Unsupported dynamic tool' })
       else if (this.dynamicRequestProviders.size >= 512 || this.dynamicRequestProviders.has(event.rpcId)) this.respond(event.rpcId, null, { code: -32000, message: 'Native tool callback capacity or ID conflict' })
@@ -1800,6 +1854,15 @@ export class CodexChatRuntime {
     if (event.nativeMethod === USER_INPUT_METHOD) return this.receiveUserInput(run, event)
     const kinds = { 'item/commandExecution/requestApproval': 'commandExecution', 'item/fileChange/requestApproval': 'fileChange' }
     const kind = kinds[event.nativeMethod]
+    // AGENT-04: an action outside the Agent's ceiling is declined without a
+    // card; the turn continues and the activity says why. Never auto-accepted.
+    const refusal = kind && !TERMINAL.has(run.status) ? ceilingApprovalRefusal(run.toolCeiling, { kind, network: event.isNetworkApproval }) : null
+    if (refusal) {
+      this.respond(event.rpcId, { decision: 'decline' })
+      const command = kind === 'commandExecution' ? event.command || run.activities.find(a => a.id === event.itemId)?.detail?.command : null
+      this.noteCeiling(run, `rpc:${typeof event.rpcId}:${event.rpcId}`, { ...refusal, ...(command ? { command } : {}) })
+      return
+    }
     if (!kind || !event.choices.length || TERMINAL.has(run.status)) {
       this.respond(event.rpcId, null, { code: -32601, message: 'This interactive request is not supported by EG-Desk' })
       run.error = publicError('Codex requested an unsupported interaction; no permission was granted', 'UNSUPPORTED_INTERACTION')
@@ -1867,6 +1930,19 @@ export class CodexChatRuntime {
     this.pendingUserInputs.set(userInputId, { ...pending, rpcId: event.rpcId, conversationId: run.conversationId, runId: run.runId, rawLabels: event.questions.map(question => question.rawLabels) })
     run.pendingUserInputs.push(pending)
     this.emit(run, 'userInput.required', pending, event.itemId)
+  }
+
+  // AGENT-04: one activity row per refusal (or narrowed selection) so the
+  // activity record shows what the Agent's ceiling stopped. Fixed keys only.
+  noteCeiling(run, key, { axis, title, command = null, tool = null }) {
+    const activity = {
+      id: `ceiling-${createHash('sha256').update(`${run.answerId}\0${key}`).digest('hex').slice(0, 24)}`,
+      kind: 'toolCeiling', status: 'declined', title,
+      detail: { axis, limit: run.toolCeiling?.[axis] ?? null, ...(command ? { command: publicText(command, 2000) } : {}), ...(tool ? { tool: publicText(tool, 120) } : {}) },
+      sourceRefs: [],
+    }
+    this.put(run, 'activities', activity)
+    this.emit(run, 'activity.completed', activity)
   }
 
   clearUserInputs(run) {

@@ -25,7 +25,18 @@ export const AVATAR_PALETTE = [
   '#f5f0df', // --eg-note (light)
 ]
 const REASONING_EFFORTS = new Set(['none', 'minimal', 'low', 'medium', 'high', 'xhigh', 'max', 'ultra'])
-const BODY_KEYS = ['name', 'avatar', 'role', 'personality', 'expertise', 'instructions', 'toolPreferences', 'model']
+const BODY_KEYS = ['name', 'avatar', 'role', 'personality', 'expertise', 'instructions', 'toolPreferences', 'model', 'toolCeiling']
+// AGENT-04: the most an Agent may do per tool kind. Values run narrowest
+// first; `open` is today's behavior and fills an axis the input leaves out.
+// A profile without a ceiling (null) keeps today's behavior on every axis.
+export const TOOL_CEILING_AXES = Object.freeze([
+  Object.freeze({ axis: 'browser', values: Object.freeze(['none', 'observe', 'interact']), open: 'interact' }),
+  Object.freeze({ axis: 'files', values: Object.freeze(['read', 'write']), open: 'write' }),
+  Object.freeze({ axis: 'terminal', values: Object.freeze(['none', 'ask', 'allow']), open: 'ask' }),
+  Object.freeze({ axis: 'network', values: Object.freeze(['off', 'on']), open: 'on' }),
+  Object.freeze({ axis: 'mcp', values: Object.freeze(['none', 'inherited']), open: 'inherited' }),
+])
+const CEILING_KEYS = TOOL_CEILING_AXES.map(item => item.axis)
 const PROFILE_ID = /^[a-z0-9][a-z0-9-]{0,79}$/
 const SINGLE_LINE_BAD = /[\u0000-\u001f\u007f\u2028\u2029]/
 const MULTI_LINE_BAD = /[\u0000-\u0008\u000b\u000c\u000e-\u001f\u007f]/
@@ -101,11 +112,23 @@ function model(value) {
   if (effort !== null && !REASONING_EFFORTS.has(effort)) fail('INVALID_PROFILE', 'model.effort is not supported')
   return { engine: value.engine, modelId: value.modelId, effort }
 }
+/** Fixed five keys in fixed order, or null for no ceiling. */
+export function normalizeToolCeiling(value) {
+  if (value === undefined || value === null) return null
+  shape(value, CEILING_KEYS, 'toolCeiling')
+  const ceiling = {}
+  for (const { axis, values, open } of TOOL_CEILING_AXES) {
+    const chosen = value[axis] === undefined || value[axis] === null ? open : value[axis]
+    if (!values.includes(chosen)) fail('INVALID_PROFILE', `toolCeiling.${axis} must be one of ${values.join(', ')}`)
+    ceiling[axis] = chosen
+  }
+  return ceiling
+}
 
 /** Canonical public body: fixed keys in fixed order, so equal input gives equal JSON and hash. */
 export function normalizeProfileBody(input) {
   shape(input, BODY_KEYS, 'profile body')
-  return {
+  const body = {
     name: line(input.name, 'name', { min: 1, max: 40 }),
     avatar: avatar(input.avatar),
     role: line(input.role, 'role', { max: 80 }),
@@ -115,6 +138,10 @@ export function normalizeProfileBody(input) {
     toolPreferences: list(input.toolPreferences, 'toolPreferences', { max: 20, itemMax: 64, pattern: /^[A-Za-z0-9_.:-]+$/ }),
     model: model(input.model),
   }
+  // No ceiling keeps the bytes (and hash) a body had before AGENT-04, so an
+  // older revision re-saved unchanged is still "unchanged".
+  const toolCeiling = normalizeToolCeiling(input.toolCeiling)
+  return toolCeiling ? { ...body, toolCeiling } : body
 }
 export const profileHash = body => digest(JSON.stringify(normalizeProfileBody(body)))
 
@@ -125,15 +152,25 @@ const TONE_DIRECTIVES = {
   formal: '격식 있는 존댓말로 정중하게 답한다.',
   playful: '가볍고 유쾌한 말투로 답하되 사실과 판단은 흐리지 않는다.',
 }
-/** Deterministic developer instructions: identity → tone → work → user instructions. */
+// Only narrowed axes are named; EG-Desk also enforces them at run time.
+const CEILING_DIRECTIVES = {
+  browser: { none: '브라우저는 쓰지 않는다.', observe: '브라우저는 보기만 하고 클릭·입력·이동은 하지 않는다.' },
+  files: { read: '파일은 읽기만 하고 만들거나 고치지 않는다.' },
+  terminal: { none: '터미널 명령은 실행하지 않는다.' },
+  network: { off: '인터넷에 연결하지 않는다.' },
+  mcp: { none: '연결된 외부 도구(MCP)는 쓰지 않는다.' },
+}
+/** Deterministic developer instructions: identity → tone → work → tool limits → user instructions. */
 export function composeDeveloperInstructions(input) {
   const body = normalizeProfileBody(input)
   const { tone, traits, speechNotes } = body.personality
+  const limits = body.toolCeiling ? CEILING_KEYS.map(axis => CEILING_DIRECTIVES[axis][body.toolCeiling[axis]]).filter(Boolean) : []
   const sections = [
     ['아래는 사용자가 EG-Desk에서 정한 담당자 설정이다. 이 설정에 맞춰 일한다.'],
     ['# 담당자', `이름: ${body.name}`, body.role && `역할: ${body.role}`],
     ['# 말투와 성격', TONE_DIRECTIVES[tone], traits.length && `성격: ${traits.join(', ')}`, speechNotes && `말하기 메모:\n${speechNotes}`],
     body.expertise.length && ['# 맡길 일', ...body.expertise.map(item => `- ${item}`)],
+    limits.length && ['# 쓸 수 있는 도구', ...limits.map(item => `- ${item}`)],
     body.instructions && ['# 사용자 지침', body.instructions],
   ]
   // Field caps keep the total below MAX_COMPOSED; the slice is a guard only.
@@ -153,6 +190,7 @@ const DIFF_FIELDS = [
   ['personality.tone', body => body.personality.tone], ['personality.traits', body => body.personality.traits],
   ['personality.speechNotes', body => body.personality.speechNotes], ['expertise', body => body.expertise],
   ['instructions', body => body.instructions], ['toolPreferences', body => body.toolPreferences], ['model', body => body.model],
+  ['toolCeiling', body => body.toolCeiling ?? null],
 ]
 /** Field-level changes as an array of fixed-key records. */
 export function diffProfileBodies(fromBody, toBody) {
@@ -481,6 +519,8 @@ export function openProfileStore({ dataDir, ownerHash } = {}) {
         binding: profileBinding({ id: row.id }, chosen),
         developerInstructions: composeDeveloperInstructions(chosen.body),
         model: chosen.body.model,
+        // A revision saved before AGENT-04 has no field: no ceiling.
+        toolCeiling: normalizeToolCeiling(chosen.body.toolCeiling),
       }
     },
     /** First run only: insert example templates as active. Never re-seeds after deletion. */
