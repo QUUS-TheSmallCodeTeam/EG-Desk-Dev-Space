@@ -286,7 +286,7 @@ export function normalizeLocalHistoryPage(page, clientThreadId) {
     localHistory: true,
   });
   const asRun = (run, event = {}) => ({
-    ...copy(run), localRunId: run.localRunId || event.localRunId || undefined,
+    ...copy(run), ...localComputerFields(run, event), localRunId: run.localRunId || event.localRunId || undefined,
     runId: run.runId || event.runId || undefined,
     localSeq: event.seq ?? run.localSeq,
     localHistory: true, localThreadId: clientThreadId, localConversationId,
@@ -536,6 +536,14 @@ export function contextSuggestionRows(resolution, { attachedRefs = [], picked = 
     pickedRefs: rows.filter(row => row.picked).map(row => row.ref), boardText: contextBoardText(resolution?.board, boardTitleFor) };
 }
 
+// Whether '이것도 붙일까요?' has anything to draw for one room: a list, or an
+// error line. Loading, idle and a closed area draw nothing, so an answer that
+// keeps it that way needs no redraw of the Chat.
+export function contextSuggestionShown(entry) {
+  if (!entry || typeof entry !== 'object' || entry.dismissed === true) return false;
+  return !!entry.resolution || (entry.status === 'error' && typeof entry.error === 'string' && entry.error.length > 0);
+}
+
 // The refs a person attached from the suggestion area (marked resolverRef on
 // the attached source) and still sends now. Nothing chosen sends chosen: [].
 export function contextResolutionForSend(entry, sources = [], { now = Date.now(), accountKey = null } = {}) {
@@ -623,6 +631,28 @@ function recordRunToolCeiling(run, value) {
   const ceiling = run ? publicToolCeiling(value) : null;
   if (ceiling) run.toolCeiling = ceiling;
 }
+// CU-01: the computer control policy an ordinary Codex run started under
+// (run.started details.computerControl); never cleared by a later record.
+function recordRunComputerControl(run, value) {
+  if (run && COMPUTER_CONTROL_POLICIES.includes(value?.policy)) run.computerControl = { policy: value.policy };
+}
+// SSE computer.used: the bridge's count and time; server names come from snapshots only.
+function computerUseWithEvent(current, details) {
+  const before = publicComputerUse(current) || { calls: 0, lastAt: null, servers: [], active: false };
+  const next = publicComputerUse(details) || before;
+  return { calls: Math.max(before.calls, next.calls), lastAt: next.lastAt ?? before.lastAt, servers: before.servers, active: next.active };
+}
+function endComputerUse(run) {
+  if (run.computerUse?.active) run.computerUse = { ...run.computerUse, active: false };
+}
+// A stored run keeps computerUse; its policy is read from its run.started event.
+function localComputerFields(run, event) {
+  const fields = {};
+  if (run && 'computerUse' in run) fields.computerUse = publicComputerUse(run.computerUse);
+  const policy = event.event === 'run.started' ? event.details?.computerControl?.policy : run?.computerControl?.policy;
+  if (COMPUTER_CONTROL_POLICIES.includes(policy)) fields.computerControl = { policy };
+  return fields;
+}
 export function acceptChatRequest(state, response, requestId) {
   if (!response?.accepted) return null;
   const run = ensureRun(state, { ...response, requestId: response.requestId || requestId });
@@ -653,7 +683,10 @@ export function reduceChatEvent(state, event, engineIds = [DEFAULT_CHAT_ENGINE_I
   run.streamId = event.streamId;
   run.seq = Math.max(run.seq || -1, event.seq);
   const details = event.details || {};
-  if (event.event === 'run.started') recordRunToolCeiling(run, details.toolCeiling);
+  if (event.event === 'run.started') {
+    recordRunToolCeiling(run, details.toolCeiling);
+    recordRunComputerControl(run, details.computerControl);
+  }
   if (event.event.startsWith('message.')) {
     const id = details.messageId || event.itemId;
     if (!id) return run;
@@ -710,12 +743,15 @@ export function reduceChatEvent(state, event, engineIds = [DEFAULT_CHAT_ENGINE_I
     const index = row ? rows.findIndex(item => item.threadId === row.threadId) : -1;
     if (index >= 0) rows[index] = { ...rows[index], ...row };
     else if (row && rows.length < MAX_SUB_AGENTS) rows.push(row);
+  } else if (event.event === 'computer.used') {
+    run.computerUse = computerUseWithEvent(run.computerUse, details);
   } else if (event.event === 'run.stop_requested') {
     run.stopRequested = true;
     if (isRunBusy(run)) run.status = 'stopping';
   } else if (event.event === 'run.completed') {
     run.status = details.status || 'completed';
     run.error = details.error || null;
+    endComputerUse(run);
     run.pendingApprovals = [];
     run.pendingUserInputs = [];
     for (const message of run.messages) {
@@ -726,6 +762,7 @@ export function reduceChatEvent(state, event, engineIds = [DEFAULT_CHAT_ENGINE_I
     if (run.error.code === 'RUNTIME_LOST') {
       state.connection = 'offline';
       run.status = 'failed';
+      endComputerUse(run);
       run.pendingApprovals = [];
       run.pendingUserInputs = [];
       for (const message of run.messages) if (message.status === 'streaming') message.status = 'partial';
@@ -791,6 +828,8 @@ export function mergeChatSnapshot(state, snapshot, clientThreadId) {
         return merged;
       });
       run.subAgents = (Array.isArray(run.subAgents) ? run.subAgents : []).map(publicSubAgent).filter(Boolean).slice(0, MAX_SUB_AGENTS);
+      // CU-01: the bridge's count replaces this screen's; a run that never drove the Mac has none.
+      if ('computerUse' in incoming) run.computerUse = publicComputerUse(incoming.computerUse);
       if (incoming.context) {
         run.contextCaptures = copy(incoming.context.captures || []);
         run.contextPackets = copy(incoming.context.packets || []);
@@ -1254,6 +1293,8 @@ export function agentWorkingView(run, { connected = true } = {}) {
   if (run.pendingApprovals?.length) return { state: 'approval', text: '승인을 기다리는 중' };
   if (pendingUserInputCount(run)) return { state: 'question', text: '답변을 기다리는 중' };
   if (run.stopPending || run.stopRequested || run.status === 'stopping') return { state: 'stopping', text: '중지하는 중' };
+  // CU-01: while a computer-control call is in progress the bubble says so.
+  if (publicComputerUse(run.computerUse)?.active) return { state: 'computer', text: COMPUTER_USE_ACTIVE_TEXT };
   return { state: 'working', text: 'Agent 작업 중' };
 }
 
@@ -1797,8 +1838,16 @@ export const COMPUTER_CONTROL_UNVERIFIED_TEXT = '컴퓨터 조작이 꺼졌는�
 /** { policy, verified } as the bridge reports it, or null when it does not say. */
 export function normalizeComputerControl(value) {
   if (!value || typeof value !== 'object' || !COMPUTER_CONTROL_POLICIES.includes(value.policy)) return null;
-  return { policy: value.policy, verified: typeof value.verified === 'boolean' ? value.verified : null };
+  // persisted (bridge with a settings store): false when the choice holds only until the bridge restarts.
+  return { policy: value.policy, verified: typeof value.verified === 'boolean' ? value.verified : null,
+    ...(typeof value.persisted === 'boolean' ? { persisted: value.persisted } : {}) };
 }
+export const COMPUTER_CONTROL_UNSAVED_TEXT = '이번 실행에서만 적용(저장 안 됨)';
+export const COMPUTER_CONTROL_SAVED_TEXT = '설정을 저장했습니다. EG-Desk를 다시 시작해도 그대로입니다.';
+export const COMPUTER_CONTROL_SAVE_FAILED_TEXT = '아직 저장하지 못했습니다. 이번 실행에서만 적용됩니다. 잠시 뒤 다시 저장해 주세요.';
+// The bridge applied the choice but could not save it: it holds until the bridge restarts.
+const computerControlUnsaved = current => current.persisted === false
+  ? { label: COMPUTER_CONTROL_UNSAVED_TEXT, note: 'EG-Desk를 다시 시작하면 전에 저장된 설정으로 돌아갈 수 있습니다.', action: '다시 저장' } : null;
 /** Everything the Settings '컴퓨터 조작' row draws. */
 export function computerControlView(value) {
   const current = normalizeComputerControl(value);
@@ -1808,17 +1857,24 @@ export function computerControlView(value) {
   }
   if (current.policy === 'inherit') {
     return { status: 'inherit', policy: 'inherit', on: true, available: true, statusLabel: '켜 둠 · 내 Codex 설정 그대로', check: null,
-      note: '내 Codex 설정에서 켜 둔 컴퓨터 조작 도구를 EG-Desk 대화의 Agent도 쓸 수 있습니다.' };
+      note: '내 Codex 설정에서 켜 둔 컴퓨터 조작 도구를 EG-Desk 대화의 Agent도 쓸 수 있습니다. 쓸 때마다 대화에 횟수가 남습니다.',
+      unsaved: computerControlUnsaved(current) };
   }
   const check = current.verified === true ? { label: '꺼진 것을 확인함', tone: 'ok' }
     : current.verified === false ? { label: '확인 실패', tone: 'warn' } : { label: '아직 확인 안 됨', tone: 'idle' };
   return { status: 'off', policy: 'off', on: false, available: true, statusLabel: 'EG-Desk 대화에서는 끔', check,
-    note: '대화를 보낼 때마다 꺼졌는지 확인하고, 확인이 안 되면 보내지 않습니다. Codex 앱 설정은 바뀌지 않습니다.' };
+    note: '대화를 보낼 때마다 꺼졌는지 확인하고, 확인이 안 되면 보내지 않습니다. Codex 앱 설정은 바뀌지 않습니다.',
+    unsaved: computerControlUnsaved(current) };
 }
-/** POST /settings/computer-control for a real change, or null (unknown, same, or not a policy). */
+/**
+ * POST /settings/computer-control for a real change, or null (unknown, or not a
+ * policy). The same policy is sent again only while the bridge reports it
+ * unsaved (persisted: false): the bridge then retries the save.
+ */
 export function buildComputerControlRequest(value, policy) {
   const current = normalizeComputerControl(value);
-  if (!current || !COMPUTER_CONTROL_POLICIES.includes(policy) || policy === current.policy) return null;
+  if (!current || !COMPUTER_CONTROL_POLICIES.includes(policy)) return null;
+  if (policy === current.policy && current.persisted !== false) return null;
   return { path: '/settings/computer-control', body: { policy } };
 }
 /** Korean text for a refused switch; the setting stays as it was. */
@@ -1842,6 +1898,88 @@ export function mcpControlBadge(activity) {
   if (activity?.kind !== 'mcpToolCall' || !activity.detail || typeof activity.detail !== 'object') return null;
   const label = lookup(MCP_CONTROL_BADGES, activity.detail.controlKind);
   return label ? { kind: activity.detail.controlKind, label } : null;
+}
+/**
+ * The badge drawn beside an activity title: none when the title already names
+ * it (the bridge titles computer-control rows '컴퓨터 조작 · {tool}'), so one
+ * row says '컴퓨터 조작' once.
+ */
+export function activityControlBadge(activity) {
+  const badge = mcpControlBadge(activity);
+  return badge && !(typeof activity.title === 'string' && activity.title.startsWith(badge.label)) ? badge : null;
+}
+
+// CU-01 (Q1 (다)) how often an answer drove this Mac (helper contract 0387f73:
+// run.computerUse { calls, lastAt: ms | null, servers: ≤8 names, active } on
+// snapshots and stored runs, absent when the run never drove the Mac; SSE
+// chat.event 'computer.used' details { runId, calls, lastAt, active } after a
+// call starts or ends, with active false before run.completed and
+// run.unavailable; run.started details.computerControl { policy } for an
+// ordinary Codex run; mcpToolCall rows carry sizes only: argumentsBytes,
+// resultImageCount, resultTextBytes). No call content ever reaches the screen.
+export const COMPUTER_USE_ACTIVE_TEXT = '컴퓨터 조작 중';
+const MAX_COMPUTER_SERVERS = 8;
+/** { calls, lastAt, servers, active } as the bridge reports it, or null. */
+export function publicComputerUse(value) {
+  if (!value || typeof value !== 'object') return null;
+  return {
+    calls: Number.isSafeInteger(value.calls) && value.calls >= 0 ? value.calls : 0,
+    lastAt: Number.isFinite(value.lastAt) && value.lastAt > 0 ? value.lastAt : null,
+    servers: (Array.isArray(value.servers) ? value.servers : []).filter(name => typeof name === 'string' && name.trim())
+      .map(name => name.trim().slice(0, 120)).slice(0, MAX_COMPUTER_SERVERS),
+    active: value.active === true,
+  };
+}
+const isComputerActivity = activity => mcpControlBadge(activity)?.kind === 'computer';
+const clockText = at => {
+  const date = new Date(at);
+  return `${String(date.getHours()).padStart(2, '0')}:${String(date.getMinutes()).padStart(2, '0')}`;
+};
+/**
+ * The one line under an answer whose run drove this Mac: '이 답변에서 컴퓨터를
+ * N번 조작했어요 · 마지막 HH:MM', or null when it never did. While a call is in
+ * progress the working bubble says '컴퓨터 조작 중', so the line only counts
+ * ('이 답변에서 컴퓨터 조작 N번 · …') and is tinted. activityId is the run's
+ * latest computer-control row, where pressing the line goes.
+ */
+export function computerUseView(run, { formatTime = clockText } = {}) {
+  const use = publicComputerUse(run?.computerUse);
+  const active = !!use?.active && isRunBusy(run);
+  if (!use || (use.calls <= 0 && !active)) return null;
+  const time = use.lastAt ? formatTime(use.lastAt) : null;
+  const head = active ? `이 답변에서 컴퓨터 조작 ${use.calls}번` : `이 답변에서 컴퓨터를 ${use.calls}번 조작했어요`;
+  const text = [head, time ? `마지막 ${time}` : null].filter(Boolean).join(' · ');
+  const rows = (Array.isArray(run.activities) ? run.activities : []).filter(isComputerActivity);
+  return { calls: use.calls, active, lastAt: use.lastAt, text, label: `${text}${active ? ' · 지금 조작 중' : ''} · 활동 기록에서 보기`, activityId: rows.at(-1)?.id || null };
+}
+/** The activity record's line under a run head: count and tools, or the policy it ran under; null when unknown. */
+export function computerUseRunLine(run, { formatTime = clockText } = {}) {
+  const use = publicComputerUse(run?.computerUse);
+  if (use && use.calls > 0) {
+    return [`컴퓨터 조작 ${use.calls}번`, use.lastAt ? `마지막 ${formatTime(use.lastAt)}` : null,
+      use.active && isRunBusy(run) ? '지금 조작 중' : null, use.servers.length ? use.servers.join(', ') : null].filter(Boolean).join(' · ');
+  }
+  if (run?.computerControl?.policy === 'off') return '컴퓨터 조작 끈 채로 실행';
+  if (run?.computerControl?.policy === 'inherit') return '컴퓨터 조작 켜 둠 · 이 실행에서는 조작 안 함';
+  return null;
+}
+const byteText = bytes => bytes < 1024 ? `${bytes}바이트`
+  : bytes < 1024 * 1024 ? `${Number((bytes / 1024).toFixed(1))}KB` : `${Number((bytes / 1024 / 1024).toFixed(1))}MB`;
+const sizeOf = value => Number.isSafeInteger(value) && value >= 0 ? value : null;
+/**
+ * The detail line of an MCP call row: '{server} · 인자 N바이트 · 화면 N장 ·
+ * 글 N바이트 · N초', sizes and counts only; null for other rows.
+ */
+export function mcpCallDetailText(activity) {
+  if (activity?.kind !== 'mcpToolCall' || !activity.detail || typeof activity.detail !== 'object') return null;
+  const { server, argumentsBytes, resultImageCount, resultTextBytes, durationMs } = activity.detail;
+  const parts = [typeof server === 'string' && server.trim() ? server.trim().slice(0, 120) : null];
+  if (sizeOf(argumentsBytes) !== null) parts.push(`인자 ${byteText(argumentsBytes)}`);
+  if (sizeOf(resultImageCount) !== null) parts.push(`화면 ${resultImageCount}장`);
+  if (sizeOf(resultTextBytes)) parts.push(`글 ${byteText(resultTextBytes)}`);
+  if (Number.isFinite(durationMs) && durationMs >= 0) parts.push(durationMs < 1000 ? `${Math.round(durationMs)}ms` : `${Number((durationMs / 1000).toFixed(1))}초`);
+  const text = parts.filter(Boolean).join(' · ');
+  return text || null;
 }
 
 // CHAT-06 Await task list (helper contract: GET /tasks/state?graphId= -> { graph,

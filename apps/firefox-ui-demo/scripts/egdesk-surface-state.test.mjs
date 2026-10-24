@@ -13,6 +13,7 @@ import * as FileCard from '../overlay/resources/EGDeskFileCardState.sys.mjs';
 import { createEGDeskFileServiceCallbacks, createEGDeskNativeFilePickers } from '../overlay/resources/EGDeskFileView.sys.mjs';
 import { createDeskRecoveryStore, missingDeskRecoveryViews } from '../overlay/resources/EGDeskRecoveryState.sys.mjs';
 import * as Recovery from '../overlay/resources/EGDeskRecoveryState.sys.mjs';
+import * as Portable from '../overlay/resources/EGDeskPortableState.sys.mjs';
 import { createTerminalCloseController, terminalExitEvidence, terminalResponsePacket } from '../overlay/resources/EGDeskTerminalState.sys.mjs';
 import { AVATAR_PALETTE, PROFILE_TONES, TOOL_CEILING_AXES, normalizeProfileBody } from '../helper/egdesk-profile-store.mjs';
 import { normalizeRateLimits, usageDisplay } from '../helper/codex-account-usage.mjs';
@@ -5615,11 +5616,14 @@ test('production Board [⋯] menu offers save, Chat attach and close for that Bo
   // Without the bridge's Desk store (older bridge, offline) the menu stays as before.
   let storeReady = false;
   const placements = [];
+  let portableReady = false;
   const api = compileFunction(`let boardRegionMenu = null;\n${close}\n${toggle}\nreturn { toggleBoardRegionMenu, closeBoardRegionMenu, current: () => boardRegionMenu };`,
-    ['state', 'document', 'window', 'el', 'resolveFloatingMenuPlacement', 'saveCurrentAgendaState', 'openChatInputPanel', 'closeCurrentAgenda', 'boardVersionHistoryReady', 'openBoardHistoryPanel'])(
+    ['state', 'document', 'window', 'el', 'resolveFloatingMenuPlacement', 'saveCurrentAgendaState', 'openChatInputPanel', 'closeCurrentAgenda', 'boardVersionHistoryReady', 'openBoardHistoryPanel',
+      'portableExportReady', 'openPortableExport'])(
     state, dom.document, window, dom.el, (rect, width, height) => { placements.push([width, height]); return { left: 300.4, top: 120.6 }; },
     options => actions.push(['save', options]), (threadId, options) => actions.push(['attach', threadId, options]),
-    options => actions.push(['close', options]), () => storeReady, boardId => actions.push(['history', boardId]));
+    options => actions.push(['close', options]), () => storeReady, boardId => actions.push(['history', boardId]),
+    () => portableReady, options => actions.push(['export', options]));
   const anchor = dom.el('button', { data: { testid: 'board-menu' } });
   anchor.getBoundingClientRect = () => ({ left: 280, top: 90, right: 304, bottom: 114 });
   const menu = api.toggleBoardRegionMenu(projection.id, anchor);
@@ -5665,6 +5669,16 @@ test('production Board [⋯] menu offers save, Chat attach and close for that Bo
   assert.equal(placements.at(-1)[1], 148, 'the menu is placed for four actions');
   withHistory.children[1].onclick({ stopPropagation() {} });
   assert.deepEqual(actions.at(-1), ['history', 'agenda-weekly']);
+  assert.equal(api.current(), null);
+
+  // RT-03: with a bridge that writes .egdesk files, '내보내기…' comes before 'Board 닫기' and exports that Board.
+  portableReady = true;
+  const withExport = api.toggleBoardRegionMenu(projection.id, anchor);
+  assert.deepEqual(withExport.children.map(item => [item.textContent, item.dataset.testid]), [
+    ['저장', 'board-save'], ['버전 기록', 'board-history'], ['Chat에 첨부', 'board-attach-chat'], ['내보내기…', 'board-export'], ['Board 닫기', 'board-close'],
+  ]);
+  withExport.children[3].onclick({ stopPropagation() {} });
+  assert.deepEqual(actions.at(-1), ['export', { scope: 'board', boardId: 'agenda-weekly', boardTitle: '주간 보고' }]);
   assert.equal(api.current(), null);
 });
 
@@ -9500,8 +9514,13 @@ test('활동 기록: an MCP call row carries what its server can drive, never it
   // The production activity record draws the badge beside the title; the detail keys it prints stay as before.
   const panel = declaration('renderCodexActivityPanel') || '';
   assert.match(panel, /const control = ChatState\.mcpControlBadge\(activity\);/);
-  assert.match(panel, /\.\.\.\(control \? \{ controlKind: control\.kind \} : \{\}\) \} \},\n          el\('strong', \{\}, activity\.title \|\| \(ceiling \? '도구 제한' : activity\.kind\) \|\| '활동'\),\n          control \? el\('span', \{ class: `egd-codex-activity-control egd-codex-activity-control-\$\{control\.kind\}`, data: \{ testid: 'chat-activity-control' \} \}, control\.label\) : null,/);
+  // CU-01 (Q1 (다)): the row keeps its controlKind; the badge is drawn only when the title does not already say it.
+  assert.match(panel, /const badge = ChatState\.activityControlBadge\(activity\);/);
+  assert.match(panel, /\.\.\.\(control \? \{ controlKind: control\.kind \} : \{\}\) \} \},\n          el\('strong', \{\}, activity\.title \|\| \(ceiling \? '도구 제한' : activity\.kind\) \|\| '활동'\),\n          badge \? el\('span', \{ class: `egd-codex-activity-control egd-codex-activity-control-\$\{badge\.kind\}`, data: \{ testid: 'chat-activity-control' \} \}, badge\.label\) : null,/);
   assert.match(panel, /for \(const key of \['text', 'command', 'cwd', 'exitCode', 'durationMs', 'server', 'tool'\]\)/, 'no arguments or controlKind printed');
+  assert.deepEqual(Chat.activityControlBadge(row('computer')), { kind: 'computer', label: '컴퓨터 조작' }, 'an older title (server / tool) keeps the badge');
+  assert.equal(Chat.activityControlBadge({ ...row('computer'), title: '컴퓨터 조작 · js' }), null, "the bridge's '컴퓨터 조작 · {tool}' title says it once");
+  assert.deepEqual(Chat.activityControlBadge({ ...row('browser'), title: '컴퓨터 조작 · js' }), { kind: 'browser', label: '브라우저 제어' });
 });
 
 test('연결된 도구: with computer control off, a tool that can drive this Mac reads off in EG-Desk chats', () => {
@@ -9740,7 +9759,7 @@ test("Chat: '카드로 보기' sits with the result chips, a long answer folds w
   assert.match(surfaceSource, /\}, foldOpen \? '접기' : '여기서 모두 보기'\)\) : null;/);
   assert.match(surfaceSource, /const cardChip = cardable && !fold\?\.long \? el\('button', \{/);
   assert.match(surfaceSource, /el\('span', \{ class: 'egd-codex-result-label' \}, '카드로 보기'\)\) : null;/);
-  assert.match(surfaceSource, /const messageStack = el\('div', \{ class: 'egd-codex-message-stack' \}, roleLabel, messageLine, answerFold, resultRow, briefingControl, meta\);/);
+  assert.match(surfaceSource, /const messageStack = el\('div', \{ class: 'egd-codex-message-stack' \}, roleLabel, messageLine, answerFold, computerLine, resultRow, briefingControl, meta\);/);
   // Only a press calls these; no render, event or run end does.
   assert.equal((surfaceSource.match(/openAnswerResultCard\(/g) || []).length, 2, 'the declaration and the one press handler');
   assert.equal((surfaceSource.match(/spawnResultCard\(/g) || []).length, 4, 'declaration, the press path, and the two restore paths');
@@ -10157,6 +10176,97 @@ test('CTX-03 resolve request: debounced reuse, Korean errors, quiet network loss
   await run(true);
   assert.equal(requests.length, before, 'nothing is asked before sign-in');
   assert.match(surfaceSource, /if \(error\.code === 'RESOLUTION_EXPIRED'\) expireContextSuggestions\(activeThread\.id\);/);
+});
+
+// A Chat redraw replaces its buttons, so a click under way when it lands (the
+// back arrow pressed about when the answer arrives) never happens. An answer
+// that leaves the area as it was redraws nothing.
+test('CTX-03 an answer that changes nothing on screen does not redraw Chat (older bridge, quiet failure)', async () => {
+  assert.equal(Chat.contextSuggestionShown(null), false);
+  assert.equal(Chat.contextSuggestionShown({ status: 'loading' }), false, 'loading draws nothing');
+  assert.equal(Chat.contextSuggestionShown({ status: 'idle', resolution: null, error: null }), false);
+  assert.equal(Chat.contextSuggestionShown({ status: 'error', resolution: null, error: '불러오지 못했어요' }), true, 'an error line is shown');
+  assert.equal(Chat.contextSuggestionShown({ status: 'ready', resolution: Chat.normalizeContextResolution(contextPayload()) }), true);
+  assert.equal(Chat.contextSuggestionShown({ status: 'loading', resolution: Chat.normalizeContextResolution(contextPayload()) }), true,
+    'the last list stays on screen while the next one loads');
+  assert.equal(Chat.contextSuggestionShown({ status: 'ready', resolution: Chat.normalizeContextResolution(contextPayload()), dismissed: true }), false, 'a closed area draws nothing');
+
+  const body = surfaceSource.match(/    async function resolveContextSuggestions\(threadId, force\) \{([\s\S]*?)\n    \}\n/)?.[1];
+  assert.ok(body, 'the resolve request stays directly testable');
+  const fresh = () => ({ codex: { connected: true, authStatus: sessionAuth, threads: [{ id: 'room' }] }, contextSuggest: { unsupportedUntil: 0, byThread: {} } });
+  let state = fresh();
+  let reply = async () => contextPayload();
+  let emits = 0;
+  const run = force => compileFunction(`return (async () => {${body}\n})();`, ['threadId', 'force', 'state', 'getCodexThreadById', 'ChatState', 'collectContextResolverSignals',
+    'fetchJson', 'emit', 'console', 'TAG', 'CONTEXT_SUGGEST_REUSE_MS', 'CONTEXT_SUGGEST_RETRY_MS', 'CONTEXT_SUGGEST_FAILED', 'contextSuggestSeq'])(
+    'room', force, state, (codex, id) => codex.threads.find(thread => thread.id === id), Chat, () => ({ explicit: [], visible: [], cluster: [], recent: [] }),
+    async () => reply(), () => { emits++; }, { warn() {} }, '[test]', 60_000, 600_000, '자료 추천을 지금 불러오지 못했어요.', 0);
+
+  // An older bridge (the QA fixture too) answers 404 on the first look: nothing was shown, nothing is redrawn.
+  reply = async () => { throw Object.assign(new Error('Fixture route not found'), { status: 404 }); };
+  await run(false);
+  assert.ok(state.contextSuggest.unsupportedUntil > Date.now(), 'not asked again for a while');
+  assert.equal(emits, 0, 'a first 404 leaves Chat as it is');
+  // A lost connection or a bridge still starting, with nothing shown: quiet and no redraw.
+  for (const quiet of [{ status: undefined }, { status: 503, code: 'RUNTIME_NOT_READY' }, { status: 401, code: 'LOGIN_REQUIRED' }]) {
+    state = fresh();
+    reply = async () => { throw Object.assign(new Error('quiet'), quiet); };
+    await run(true);
+    assert.equal(state.contextSuggest.byThread.room.status, 'idle');
+    assert.equal(emits, 0, `${quiet.code || 'a lost connection'} with nothing shown redraws nothing`);
+  }
+  // A list arriving is drawn; a quiet failure after it takes it away (one redraw each).
+  reply = async () => contextPayload();
+  await run(true);
+  assert.equal(emits, 1, 'a new list is drawn');
+  reply = async () => { throw Object.assign(new Error('quiet'), { status: undefined }); };
+  await run(true);
+  assert.equal(state.contextSuggest.byThread.room.resolution, null);
+  assert.equal(emits, 2, 'the shown list is taken away');
+  // A shown list on an older bridge is taken away too.
+  reply = async () => contextPayload();
+  await run(true);
+  assert.equal(emits, 3);
+  reply = async () => { throw Object.assign(new Error('gone'), { status: 404 }); };
+  await run(true);
+  assert.deepEqual(state.contextSuggest.byThread, {});
+  assert.equal(emits, 4, 'the area that was on screen leaves');
+  // A non-quiet error is shown, so it is drawn.
+  state = fresh();
+  reply = async () => { throw Object.assign(new Error('bad'), { status: 400, code: 'INVALID_RESOLVER_SIGNAL' }); };
+  await run(true);
+  assert.equal(emits, 5, 'an error line is drawn');
+});
+
+test('CTX-03 a room that left the screen during the pause is not asked (asked again when its composer opens)', () => {
+  const source = surfaceSource.match(/    function requestContextSuggestions\(threadId, \{ force = false, immediate = false \} = \{\}\) \{[\s\S]*?\n    \}\n/)?.[0];
+  assert.ok(source, 'the request pause stays directly testable');
+  let pending = null;
+  let composers = [];
+  const asked = [];
+  const fakeWindow = { setTimeout: (callback, ms) => { pending = { callback, ms }; return 7; }, clearTimeout: () => { pending = null; } };
+  const fakeDocument = { querySelectorAll: selector => selector === '.egd-codex-input' ? composers : [] };
+  const request = compileFunction(`let contextSuggestTimer = 0;\n${source}\nreturn requestContextSuggestions;`,
+    ['window', 'document', 'resolveContextSuggestions', 'CONTEXT_SUGGEST_DEBOUNCE_MS'])(
+    fakeWindow, fakeDocument, (threadId, force) => { asked.push([threadId, force]); }, 400);
+  composers = [{ dataset: { threadId: 'room' } }];
+  request('room');
+  assert.equal(pending.ms, 400);
+  pending.callback();
+  assert.deepEqual(asked, [['room', false]], 'the open room is asked after the pause');
+  request('room');
+  composers = [];
+  pending.callback();
+  assert.equal(asked.length, 1, 'back on the room list before the pause ended: nothing is asked');
+  request('room', { force: true, immediate: true });
+  composers = [{ dataset: { threadId: 'other' } }];
+  assert.equal(pending.ms, 0);
+  pending.callback();
+  assert.equal(asked.length, 1, 'another room on screen: nothing is asked for this one');
+  request('room', { force: true, immediate: true });
+  composers = [{ dataset: { threadId: 'room' } }];
+  pending.callback();
+  assert.deepEqual(asked.at(-1), ['room', true]);
 });
 
 test('CTX-03 send: contextResolution names the list and the refs taken from it, [] when none, read only with a capture', async () => {
@@ -10693,4 +10803,618 @@ test('Board saves keep versions: a 409 never overwrites, the list reads 직접 �
   const css = readFileSync(new URL('../overlay/CSS/eg-desk-surface.uc.css', import.meta.url), 'utf8');
   for (const selector of ['.egd-store-panel {', '#egd-desk-history, #egd-board-history {', '#egd-board-conflict {', '.egd-store-panel button.egd-store-row[aria-pressed="true"]']) assert.ok(css.includes(selector), selector);
   assert.match(css, /#egd-desk-recovery,\n    #egd-desk-history, #egd-board-history, #egd-board-conflict,/, 'dark mode gives the panels the dark native controls');
+});
+
+// ============ CU-01 (Q1 (다)) when the Agent drove this Mac, shown in the conversation ============
+test('CU-01 computer.used: the run keeps the bridge count and time, servers from snapshots, and nothing stays in progress after it ends', () => {
+  const state = Chat.createChatProtocolState();
+  const run = Chat.reduceChatEvent(state, envelope('run.started', 1, { status: 'inProgress', computerControl: { policy: 'inherit' } }));
+  assert.deepEqual(run.computerControl, { policy: 'inherit' }, 'run.started names the policy the run started under');
+  assert.equal('computerUse' in run, false, 'a run that never drove the Mac has no count');
+  assert.equal(Chat.computerUseView(run), null);
+  Chat.reduceChatEvent(state, envelope('computer.used', 2, { runId: 'turn-a', calls: 1, lastAt: 2000, active: true }, { itemId: 'cua-1' }));
+  assert.deepEqual(run.computerUse, { calls: 1, lastAt: 2000, servers: [], active: true });
+  assert.deepEqual(Chat.agentWorkingView(run), { state: 'computer', text: '컴퓨터 조작 중' }, 'the working bubble says so while a call is in progress');
+  // A snapshot brings the public server names; malformed ones are dropped.
+  Chat.mergeChatSnapshot(state, { conversationId: 'conversation-a', streamId: 'stream-a', seq: 3, runs: [{ runId: 'turn-a', status: 'running',
+    computerUse: { calls: 1, lastAt: 2000, servers: ['cua_repl', '', 7, ' node_repl '], active: true } }] }, 'ui-a');
+  assert.deepEqual(run.computerUse, { calls: 1, lastAt: 2000, servers: ['cua_repl', 'node_repl'], active: true });
+  Chat.reduceChatEvent(state, envelope('computer.used', 4, { runId: 'turn-a', calls: 2, lastAt: 3000, active: false }));
+  assert.deepEqual(run.computerUse, { calls: 2, lastAt: 3000, servers: ['cua_repl', 'node_repl'], active: false }, 'an event keeps the snapshot servers');
+  assert.deepEqual(Chat.agentWorkingView(run), { state: 'working', text: 'Agent 작업 중' });
+  // A malformed event never counts backwards or claims a call in progress.
+  Chat.reduceChatEvent(state, envelope('computer.used', 5, { runId: 'turn-a', calls: 'x', lastAt: -1, active: 'yes' }));
+  assert.deepEqual(run.computerUse, { calls: 2, lastAt: 3000, servers: ['cua_repl', 'node_repl'], active: false });
+  // Waiting on 대표님 wins over the computer state.
+  Chat.reduceChatEvent(state, envelope('computer.used', 6, { runId: 'turn-a', calls: 3, lastAt: 4000, active: true }));
+  assert.equal(Chat.agentWorkingView({ ...run, pendingApprovals: [{ id: 'a' }] }).state, 'approval');
+  Chat.reduceChatEvent(state, envelope('run.completed', 7, { status: 'completed' }));
+  assert.deepEqual(run.computerUse, { calls: 3, lastAt: 4000, servers: ['cua_repl', 'node_repl'], active: false }, 'the end of the run ends any call in progress');
+  // A lost runtime ends it too; a policy that is not the bridge's is not kept.
+  const lost = Chat.createChatProtocolState();
+  const other = Chat.reduceChatEvent(lost, envelope('run.started', 1, { status: 'inProgress', computerControl: { policy: 'on' } }));
+  assert.equal('computerControl' in other, false);
+  Chat.reduceChatEvent(lost, envelope('computer.used', 2, { calls: 1, lastAt: 10, active: true }));
+  Chat.reduceChatEvent(lost, envelope('run.unavailable', 3, { error: { code: 'RUNTIME_LOST' } }));
+  assert.equal(other.computerUse.active, false);
+  // A snapshot without computerUse for a run that has one keeps it; null clears it.
+  Chat.mergeChatSnapshot(state, { conversationId: 'conversation-a', streamId: 'stream-a', seq: 9, runs: [{ runId: 'turn-a', status: 'completed' }] }, 'ui-a');
+  assert.equal(run.computerUse.calls, 3);
+  Chat.mergeChatSnapshot(state, { conversationId: 'conversation-a', streamId: 'stream-a', seq: 10, runs: [{ runId: 'turn-a', status: 'completed', computerUse: null }] }, 'ui-a');
+  assert.equal(run.computerUse, null);
+});
+
+test('CU-01 stored runs keep their count, and the policy comes from their run.started event', () => {
+  const page = {
+    protocolVersion: 1, thread: { clientThreadId: 'ui-h', localConversationId: 'local-h' }, messages: [],
+    runs: [{ localRunId: 'lr-1', runId: 'turn-h', status: 'completed', computerUse: { calls: 2, lastAt: null, servers: ['cua_repl'], active: false } }],
+    events: [
+      { seq: 1, event: 'run.started', localRunId: 'lr-1', details: { status: 'inProgress', computerControl: { policy: 'off' }, run: { localRunId: 'lr-1', runId: 'turn-h', status: 'inProgress' } } },
+      { seq: 2, event: 'computer.used', localRunId: 'lr-1', details: { runId: 'turn-h', calls: 1, lastAt: 5, active: true, run: { localRunId: 'lr-1', runId: 'turn-h', status: 'inProgress' } } },
+    ],
+  };
+  const normalized = Chat.normalizeLocalHistoryPage(page, 'ui-h');
+  const stored = normalized.runs.find(run => run.localRunId === 'lr-1');
+  assert.deepEqual(stored.computerUse, { calls: 2, lastAt: null, servers: ['cua_repl'], active: false }, 'the stored checkpoint wins over its earlier events');
+  assert.deepEqual(stored.computerControl, { policy: 'off' });
+  assert.equal(Chat.computerUseView(stored).text, '이 답변에서 컴퓨터를 2번 조작했어요', 'a history count without a time reads without one');
+  assert.equal(Chat.computerUseView(stored).active, false, 'a stored run is never in progress');
+});
+
+test('CU-01 the line under an answer, the activity record line, and the size-only row detail', () => {
+  const at = new Date(2026, 9, 24, 15, 30).getTime();
+  const row = (id, controlKind, extra = {}) => ({ id, kind: 'mcpToolCall', status: 'completed', title: 'x', detail: { server: 'cua_repl', tool: 'js', controlKind, ...extra } });
+  const run = { runId: 'turn-a', status: 'completed', computerUse: { calls: 3, lastAt: at, servers: ['cua_repl'], active: false },
+    activities: [row('a', 'computer'), row('b', 'browser'), row('c', 'computer'), { id: 'd', kind: 'commandExecution' }] };
+  const view = Chat.computerUseView(run, { formatTime: () => '오후 3:30' });
+  assert.deepEqual(view, { calls: 3, active: false, lastAt: at, text: '이 답변에서 컴퓨터를 3번 조작했어요 · 마지막 오후 3:30',
+    label: '이 답변에서 컴퓨터를 3번 조작했어요 · 마지막 오후 3:30 · 활동 기록에서 보기', activityId: 'c' }, 'pressing it goes to the latest computer row');
+  assert.equal(Chat.computerUseView(run).text, '이 답변에서 컴퓨터를 3번 조작했어요 · 마지막 15:30', 'the default clock is HH:MM');
+  const busy = { ...run, status: 'running', computerUse: { ...run.computerUse, active: true } };
+  assert.deepEqual([Chat.computerUseView(busy, { formatTime: () => '오후 3:30' }).text, Chat.computerUseView(busy, { formatTime: () => '오후 3:30' }).label],
+    ['이 답변에서 컴퓨터 조작 3번 · 마지막 오후 3:30', '이 답변에서 컴퓨터 조작 3번 · 마지막 오후 3:30 · 지금 조작 중 · 활동 기록에서 보기'],
+    "while a call is in progress the bubble says '컴퓨터 조작 중'; the line only counts");
+  assert.equal(Chat.computerUseView({ ...run, computerUse: { ...run.computerUse, active: true } }).active, false, 'a finished run is never shown in progress');
+  for (const quiet of [null, { status: 'completed' }, { status: 'completed', computerUse: { calls: 0, lastAt: null, active: false } }, { status: 'completed', computerUse: 'x' }]) {
+    assert.equal(Chat.computerUseView(quiet), null);
+  }
+  assert.equal(Chat.computerUseView({ status: 'running', computerUse: { calls: 0, active: true } }).text, '이 답변에서 컴퓨터 조작 0번');
+
+  assert.equal(Chat.computerUseRunLine(run, { formatTime: () => '오후 3:30' }), '컴퓨터 조작 3번 · 마지막 오후 3:30 · cua_repl');
+  assert.equal(Chat.computerUseRunLine(busy, { formatTime: () => '오후 3:30' }), '컴퓨터 조작 3번 · 마지막 오후 3:30 · 지금 조작 중 · cua_repl');
+  assert.equal(Chat.computerUseRunLine({ computerControl: { policy: 'off' } }), '컴퓨터 조작 끈 채로 실행');
+  assert.equal(Chat.computerUseRunLine({ computerControl: { policy: 'inherit' } }), '컴퓨터 조작 켜 둠 · 이 실행에서는 조작 안 함');
+  assert.equal(Chat.computerUseRunLine({}), null, 'an older bridge says nothing');
+
+  assert.equal(Chat.mcpCallDetailText(row('a', 'computer', { argumentsBytes: 120, resultImageCount: 1, resultTextBytes: 2150, durationMs: 1234 })),
+    'cua_repl · 인자 120바이트 · 화면 1장 · 글 2.1KB · 1.2초');
+  assert.equal(Chat.mcpCallDetailText(row('a', 'computer', { argumentsBytes: 3 * 1024 * 1024, resultImageCount: 0, resultTextBytes: 0, durationMs: 40 })),
+    'cua_repl · 인자 3MB · 화면 0장 · 40ms', 'no text bytes means no 글 part');
+  assert.equal(Chat.mcpCallDetailText(row('a', 'other', { argumentsBytes: null, resultImageCount: null, resultTextBytes: null, durationMs: null })), 'cua_repl');
+  const withContent = row('a', 'computer', { argumentsBytes: 9, arguments: { code: 'ARG_SENTINEL' }, result: 'RESULT_SENTINEL', resultImageCount: 2 });
+  assert.doesNotMatch(Chat.mcpCallDetailText(withContent), /SENTINEL/, 'only sizes and counts are read');
+  for (const other of [{ kind: 'commandExecution', detail: { server: 'x' } }, { kind: 'mcpToolCall', detail: 'text' }, null]) assert.equal(Chat.mcpCallDetailText(other), null);
+});
+
+test('CU-01 production Chat: the line sits under the last shown answer of the run, opens its row, and the activity record says it once', () => {
+  assert.match(surfaceSource, /          const lastAnswerOfRun = new Map\(\);\n          for \(const message of activeThread\.messages\) \{\n            if \(message\.role === 'assistant' && message\.runId && !\(message\.status === 'streaming' && !message\.content\)\) lastAnswerOfRun\.set\(message\.runId, message\.id\);/);
+  assert.match(surfaceSource, /const view = run \? ChatState\.computerUseView\(run, \{ formatTime: formatMessageTime \}\) : null;/);
+  assert.match(surfaceSource, /onclick: \(ev\) => \{ ev\.stopPropagation\(\); codexBridge\.openActivity\(activeThread\.id, \{ activityId: view\.activityId, runId: run\.runId \}\); \},/);
+  assert.match(surfaceSource, /const computerLine = message\.role === 'assistant' && message\.runId && lastAnswerOfRun\.get\(message\.runId\) === message\.id\n              \? computerUseLine\(roomRuns\.findLast\(run => run\.runId === message\.runId\)\) : null;/);
+  assert.match(surfaceSource, /const unansweredLine = workingRun\?\.runId && !lastAnswerOfRun\.has\(workingRun\.runId\) \? computerUseLine\(workingRun\) : null;/,
+    'a run with no answer shown yet keeps its count at the end');
+  assert.match(surfaceSource, /openActivity\(threadId = state\.codex\.activeThreadId, focus = null\) \{ openCodexActivityPanel\(threadId, focus\); \},/);
+  const panel = declaration('renderCodexActivityPanel') || '';
+  assert.match(panel, /const computerLine = ChatState\.computerUseRunLine\(run, \{ formatTime: formatMessageTime \}\);/);
+  assert.match(panel, /\} else if \(mcpDetail\) \{\n[^\n]*\n          row\.appendChild\(el\('p', \{ class: 'egd-codex-activity-sizes', data: \{ testid: 'chat-activity-sizes' \} \}, mcpDetail\)\);/);
+  assert.match(panel, /const target = state\.codex\.activityFocus\?\.threadId === thread\.id \? state\.codex\.activityFocus : null;\n    if \(target\) \{\n      state\.codex\.activityFocus = null;/, 'the record scrolls once');
+  // The production opener keeps the row to bring into view for that render only.
+  const renders = [];
+  const state = { codex: { activityThreadId: null, activityFocus: null } };
+  const open = compileFunction(`${declaration('openCodexActivityPanel')}\nreturn openCodexActivityPanel;`, ['state', 'renderCodexActivityPanel'])(state,
+    () => renders.push({ ...state.codex }));
+  open('thread-1', { activityId: 'cua-2', runId: 'turn-a' });
+  open('thread-1');
+  assert.deepEqual(renders, [
+    { activityThreadId: 'thread-1', activityFocus: { threadId: 'thread-1', activityId: 'cua-2', runId: 'turn-a' } },
+    { activityThreadId: 'thread-1', activityFocus: null },
+  ]);
+  // The production working row carries the computer state for its colour.
+  const document = settingsFakeDocument();
+  const parts = compileFunction(`${declaration('el')}\n${declaration('codexMessageAvatarFace')}\n${declaration('codexAgentWorkingRow')}\nreturn { codexAgentWorkingRow };`, ['document', 'ChatState'])(document, Chat);
+  const working = parts.codexAgentWorkingRow({ state: 'computer', text: '컴퓨터 조작 중' }, { runId: 'turn-a', name: 'Codex' });
+  assert.equal(working.dataset.state, 'computer');
+  assert.match(working.textContent, /컴퓨터 조작 중$/);
+  const block = surfaceCss.slice(surfaceCss.indexOf("/* CU-01 Settings '컴퓨터 조작' row"), surfaceCss.indexOf('/* DSN-01: rules a token cannot carry.'));
+  for (const selector of ['.egd-codex-computer-use', '.egd-codex-computer-use-active', '.egd-codex-run-computer', '.egd-codex-activity-sizes', '.egd-codex-activity-focus', '.egd-settings-computer-unsaved']) {
+    assert.ok(block.includes(`\n${selector} {`), `${selector} is styled with tokens`);
+  }
+  assert.match(block, /\.egd-codex-working-row\[data-state="computer"\] \.egd-codex-working-bubble \{/);
+});
+
+test('CU-01 Settings: a choice the bridge could not save reads 이번 실행에서만 적용, and 다시 저장 posts the same policy again', async () => {
+  assert.deepEqual(Chat.normalizeComputerControl({ policy: 'inherit', verified: null, persisted: false }), { policy: 'inherit', verified: null, persisted: false });
+  assert.deepEqual(Chat.normalizeComputerControl({ policy: 'off', verified: true, persisted: 'no' }), { policy: 'off', verified: true }, 'only a boolean is kept');
+  assert.equal(Chat.computerControlView({ policy: 'inherit', verified: null, persisted: true }).unsaved, null);
+  assert.equal(Chat.computerControlView({ policy: 'inherit', verified: null }).unsaved, null, 'a bridge without a settings store says nothing');
+  const unsaved = Chat.computerControlView({ policy: 'off', verified: true, persisted: false }).unsaved;
+  assert.deepEqual([unsaved.label, unsaved.action], ['이번 실행에서만 적용(저장 안 됨)', '다시 저장']);
+  assert.deepEqual(Chat.buildComputerControlRequest({ policy: 'off', verified: true, persisted: false }, 'off'),
+    { path: '/settings/computer-control', body: { policy: 'off' } }, 'the same policy is sent again while unsaved');
+  assert.equal(Chat.buildComputerControlRequest({ policy: 'off', verified: true, persisted: true }, 'off'), null);
+  assert.deepEqual(Chat.buildComputerControlRequest({ policy: 'off', verified: true, persisted: false }, 'inherit'), { path: '/settings/computer-control', body: { policy: 'inherit' } });
+
+  const h = computerControlSettingsHarness({ computerControl: { policy: 'inherit', verified: null, persisted: false } });
+  assert.match(h.part('settings-computer-control-unsaved').textContent, /^이번 실행에서만 적용\(저장 안 됨\)EG-Desk를 다시 시작하면/);
+  assert.equal(h.part('settings-computer-control-unsaved').getAttribute('role'), 'status');
+  h.respond(policy => ({ policy, verified: null, persisted: true }));
+  h.part('settings-computer-control-resave').fire('click');
+  await settle();
+  assert.deepEqual(h.calls, ['inherit'], '다시 저장 asks for the same policy');
+  assert.equal(h.part('settings-computer-control-unsaved'), null);
+  assert.equal(h.part('settings-computer-control-change').textContent, Chat.COMPUTER_CONTROL_SAVED_TEXT);
+  assert.equal(h.section().dataset.state, 'inherit');
+  // Saving failed again: the line stays and says so.
+  h.state.codex.computerControl = { policy: 'inherit', verified: null, persisted: false };
+  h.emit();
+  h.respond(policy => ({ policy, verified: null, persisted: false }));
+  h.part('settings-computer-control-resave').fire('click');
+  await settle();
+  assert.equal(h.part('settings-computer-control-change').textContent, Chat.COMPUTER_CONTROL_SAVE_FAILED_TEXT);
+  assert.ok(h.part('settings-computer-control-unsaved'));
+  // A real switch while unsaved is an ordinary change.
+  h.respond(policy => ({ policy, verified: null, persisted: true }));
+  h.part('settings-computer-control-switch').fire('click');
+  await settle();
+  assert.deepEqual(h.calls, ['inherit', 'inherit', 'off']);
+  assert.equal(h.part('settings-computer-control-change').textContent, '다음에 보내는 메시지부터 적용됩니다');
+  assert.doesNotMatch(h.section().textContent, /persisted|policy|inherit|true|false/);
+  h.card._cleanup();
+
+  // The production bridge call posts the same policy only while unsaved.
+  const body = surfaceSource.match(/      async setComputerControl\(policy\) \{\n([\s\S]*?)\n      \},/)?.[1];
+  const sent = [];
+  const state = { codex: { computerControl: { policy: 'off', verified: true, persisted: false } } };
+  const call = compileFunction(`return (async function setComputerControl(policy) {\n${body}\n});`, ['ChatState', 'state', 'fetchJson', 'update'])(
+    Chat, state, async (path, init) => { sent.push(JSON.parse(init.body)); return { policy: JSON.parse(init.body).policy, verified: true, persisted: true }; },
+    patch => Object.assign(state.codex, patch));
+  assert.deepEqual(await call('off'), { policy: 'off', verified: true, persisted: true }, 'the answer keeps persisted');
+  assert.deepEqual(await call('off'), { policy: 'off', verified: true, persisted: true });
+  assert.deepEqual(sent, [{ policy: 'off' }], 'once saved, the same policy is not posted again');
+});
+
+// ============ RT-03 .egdesk 내보내기 / 가져오기 over the bridge ============
+test('RT-03 support: only a bridge that lists export or import shows the menus; an older bridge shows none', () => {
+  const none = { export: false, inspect: false, importAsNew: false, passphrase: false, exportsList: false, storeUnavailable: false };
+  for (const older of [null, undefined, {}, { capabilities: {} }, { capabilities: { portable: 'export' } }]) assert.deepEqual(Portable.portableSupport(older), none);
+  assert.deepEqual(Portable.portableSupport({ capabilities: { portable: ['local-store-unavailable'] } }), { ...none, storeUnavailable: true });
+  assert.deepEqual(Portable.portableSupport({ capabilities: { portable: ['export', 'inspect', 'import-as-new', 'passphrase', 'exports-list'] } }),
+    { export: true, inspect: true, importAsNew: true, passphrase: true, exportsList: true, storeUnavailable: false });
+  assert.equal(Portable.portableSupport({ capabilities: { portable: ['import-as-new'] } }).importAsNew, false, 'import needs the check first');
+
+  // The production rail Desk menu lists what the bridge supports; with nothing it does not open.
+  const dom = boardRegionFakeDom();
+  const listeners = new Map();
+  const window = { addEventListener: (type, fn) => listeners.set(type, fn), removeEventListener: type => listeners.delete(type) };
+  let support = { export: true, importAsNew: true };
+  const actions = [];
+  const api = compileFunction(`let deskMenu = null;\n${topLevelFunction('closeDeskMenu')}\n${topLevelFunction('toggleDeskMenu')}\nreturn { toggleDeskMenu, current: () => deskMenu };`,
+    ['document', 'window', 'el', 'resolveFloatingMenuPlacement', 'portableExportReady', 'portableImportReady', 'openPortableExport', 'openPortableImport'])(
+    dom.document, window, dom.el, () => ({ left: 10, top: 40 }), () => support.export, () => support.importAsNew,
+    options => actions.push(['export', options]), () => actions.push(['import']));
+  const anchor = dom.el('button', { data: { testid: 'desk-menu' } });
+  anchor.getBoundingClientRect = () => ({ left: 0, top: 0, right: 20, bottom: 20 });
+  const menu = api.toggleDeskMenu(anchor);
+  assert.deepEqual(menu.children.map(item => [item.textContent, item.dataset.testid, item.getAttribute('role')]), [['내보내기…', 'desk-export', 'menuitem'], ['가져오기…', 'desk-import', 'menuitem']]);
+  assert.equal(anchor.getAttribute('aria-expanded'), 'true');
+  menu.children[0].onclick({ stopPropagation() {} });
+  assert.deepEqual(actions, [['export', { scope: 'desk' }]]);
+  assert.equal(api.current(), null);
+  api.toggleDeskMenu(anchor).children[1].onclick({ stopPropagation() {} });
+  assert.deepEqual(actions.at(-1), ['import']);
+  support = { export: true, importAsNew: false };
+  assert.deepEqual(api.toggleDeskMenu(anchor).children.map(item => item.dataset.testid), ['desk-export']);
+  api.toggleDeskMenu(anchor);
+  support = { export: false, importAsNew: false };
+  assert.equal(api.toggleDeskMenu(anchor), null, 'an older bridge: no menu');
+  // The rail button is hidden until the bridge says so, and follows each /v1/state read.
+  assert.match(surfaceSource, /id: 'egd-desk-menu-open', class: 'egd-rail-icon', title: 'Desk 작업', 'aria-label': 'Desk 작업',\n        'aria-haspopup': 'menu', 'aria-expanded': 'false', hidden: !portableExportReady\(\) && !portableImportReady\(\),/);
+  const opener = { hidden: true };
+  let current = Portable.portableSupport(null);
+  const sync = compileFunction(`${topLevelFunction('syncPortableEntryPoints')}\nreturn syncPortableEntryPoints;`, ['document', 'portableExportReady', 'portableImportReady', 'closeDeskMenu'])(
+    { getElementById: id => (id === 'egd-desk-menu-open' ? opener : null) }, () => current.export, () => current.importAsNew, () => {});
+  current = Portable.portableSupport({ capabilities: { portable: ['export', 'inspect', 'import-as-new'] } });
+  sync();
+  assert.equal(opener.hidden, false);
+  current = Portable.portableSupport(null);
+  sync();
+  assert.equal(opener.hidden, true);
+  assert.match(surfaceSource, /        portableBridgeObserved\(bridgeState\);\n        void deskStoreBridgeObserved\(bridgeState\);/);
+  assert.match(surfaceSource, /          portableBridgeObserved\(null\);\n          void deskStoreBridgeObserved\(null\);/);
+});
+
+test('RT-03 request bodies: export with or without a passphrase, inspect and import as a new copy, base64 of the picked file', () => {
+  assert.deepEqual(Portable.portableExportRequest({ scope: 'desk' }),
+    { method: 'POST', path: '/v1/portable/export', body: { scope: 'desk', include: { chats: false, profiles: false } } }, 'chats are off by default, no passphrase key when plain');
+  assert.deepEqual(Portable.portableExportRequest({ scope: 'board', boardId: 'agenda-alpha-001', includeChats: true, passphrase: '가나다라마바사아', confirm: '가나다라마바사아' }).body,
+    { scope: 'board', boardId: 'agenda-alpha-001', include: { chats: true, profiles: false }, passphrase: '가나다라마바사아' }, 'eight Korean letters are eight characters');
+  assert.deepEqual(Portable.portableExportRequest({ scope: 'desk', passphrase: 'short' }).error, { field: 'passphrase', text: '암호는 8자 이상이어야 합니다.' });
+  assert.deepEqual(Portable.portableExportRequest({ scope: 'desk', passphrase: 'correct horse', confirm: 'correct house' }).error.field, 'confirm');
+  assert.ok(Portable.portableExportRequest({ scope: 'board' }).error, 'a Board export needs its Board');
+  assert.ok(Portable.portableExportRequest({ scope: 'everything' }).error);
+
+  for (const length of [0, 1, 2, 3, 4, 5, 255, 70001]) {
+    const bytes = Uint8Array.from({ length }, (_, index) => (index * 37 + 11) % 256);
+    assert.equal(Portable.bytesToBase64(bytes), Buffer.from(bytes).toString('base64'), `${length} bytes`);
+  }
+  const picked = Portable.portableSourceFromBytes('보고.egdesk', Uint8Array.from([1, 2, 3, 4]));
+  assert.deepEqual(picked, { kind: 'file', fileName: '보고.egdesk', bytes: 4, bundle: 'AQIDBA==' });
+  assert.equal(Portable.portableSourceFromBytes('x.egdesk', new Uint8Array()), null);
+  const listed = Portable.portableSourceFromExport({ fileName: 'EG-Desk-Desk.egdesk', fileRef: { exportFile: 'EG-Desk-Desk.egdesk' } });
+  assert.deepEqual(Portable.portableInspectRequest(listed), { method: 'POST', path: '/v1/portable/inspect', body: { fileRef: { exportFile: 'EG-Desk-Desk.egdesk' } } });
+  assert.deepEqual(Portable.portableInspectRequest(picked, 'correct horse').body, { bundle: 'AQIDBA==', passphrase: 'correct horse' });
+  assert.deepEqual(Portable.portableImportRequest(listed, 'correct horse').body, { fileRef: { exportFile: 'EG-Desk-Desk.egdesk' }, passphrase: 'correct horse', mode: 'asNew' });
+  assert.deepEqual(Portable.portableImportRequest(picked).body, { bundle: 'AQIDBA==', mode: 'asNew' });
+});
+
+test('RT-03 what the person reads: the check before import, the result and every refusal in Korean, never a code', () => {
+  const at = new Date(2026, 9, 24, 15, 30, 12).getTime();
+  const summary = { encrypted: false, locked: false, bytes: 1234, formatVersion: '1.0', scope: 'desk', exportedAt: at, title: null, desk: true, boards: 2, cards: 5, deskCards: 2, chats: 0, profiles: 0 };
+  const desk = Portable.portablePreviewView(summary, { fileName: 'EG-Desk-Desk-20261024-153012.egdesk' });
+  assert.equal(desk.summary, 'Board 2개 · 카드 5개 · 대화 0개 · 2026-10-24 15:30에 만듦 · 암호 없음');
+  assert.deepEqual([desk.headline, desk.replacesDesk, desk.effect.tone, desk.confirmLabel], ['Desk 전체', true, 'warning', '새 사본으로 가져오기']);
+  assert.match(desk.effect.text, /지금 Desk 화면이 이 파일의 Desk로 바뀝니다\. 지금 화면은 먼저 복구 기록에 남기고/, 'it warns before the Desk view is replaced (Excalidraw Open)');
+  const board = Portable.portablePreviewView({ ...summary, scope: 'board', desk: false, title: 'Alpha 계획', boards: 1, chats: 1, profiles: 1, encrypted: true });
+  assert.deepEqual([board.headline, board.replacesDesk, board.effect.tone], ["Board 'Alpha 계획'", false, 'info']);
+  assert.equal(board.summary, 'Board 1개 · 카드 5개 · 대화 1개 · Agent 1개 · 2026-10-24 15:30에 만듦 · 암호로 잠김');
+  assert.deepEqual(Portable.portablePreviewView({ encrypted: true, locked: true, bytes: 2048 }, { fileName: 'x.egdesk' }), { locked: true, fileName: 'x.egdesk', sizeText: '2KB' });
+
+  const exported = Portable.portableExportDoneView({ fileName: 'EG-Desk-Desk-20261024-153012.egdesk', bytes: 1536, encrypted: false, displayPath: '~/Downloads/EG-Desk/EG-Desk-Desk-20261024-153012.egdesk',
+    contents: { ...summary, chatsOmitted: 3 }, fileRef: { exportFile: 'EG-Desk-Desk-20261024-153012.egdesk' }, redacted: { privateFields: 1, identifiers: 4, maskedTexts: 0 } });
+  assert.equal(exported.where, '~/Downloads/EG-Desk/EG-Desk-Desk-20261024-153012.egdesk');
+  assert.equal(exported.summary, 'Desk 전체 · Board 2개 · 카드 5개 · 대화 0개 · 1.5KB · 암호 없음');
+  assert.deepEqual(exported.notes, ['암호 없이 저장하면 파일을 가진 누구나 내용을 볼 수 있습니다.', '비밀번호·계정 정보처럼 이 PC에만 있어야 하는 값 5개는 빼고 저장했습니다.', '대화가 많아 3개는 넣지 못했습니다.']);
+  const locked = Portable.portableExportDoneView({ fileName: 'a.egdesk', bytes: 10, encrypted: true, contents: { scope: 'board', title: 'Alpha', boards: 1, cards: 1, chats: 0 } }, { saved: false });
+  assert.deepEqual(locked.notes, ['화면의 마지막 변경을 먼저 저장하지 못해, 그 변경은 파일에 빠졌을 수 있습니다.'], 'a locked file has no plain-file warning');
+  assert.equal(locked.where, 'a.egdesk');
+
+  const imported = Portable.portableImportDoneView({ mode: 'asNew', verified: false, contents: { ...summary, chats: 1, profiles: 2 }, desk: { generation: 2, unchanged: false },
+    boards: [{ boardId: 'agenda-import-1', idChanged: true }, { boardId: 'agenda-beta-002', idChanged: false }], chats: [{ clientThreadId: 'thread-import-1', idChanged: true, runs: 1 }],
+    profiles: [{ status: 'imported' }, { status: 'duplicate' }] }, { redrawn: false });
+  assert.deepEqual(imported.notes, ['같은 ID가 있어 새 사본(2개)으로 들어왔습니다.', '가져온 대화는 이어서 말하면 새 엔진 대화로 시작합니다.', 'Agent 1개를 더했습니다.',
+    '이미 있는 Agent 1개는 건너뛰었습니다.', '가져온 Desk를 화면에 다시 그리지 못했습니다. 복구 기록에서 열 수 있습니다.', '가져온 내용을 다시 열어 확인하지 못했습니다. Board 목록과 복구 기록에서 확인해 주세요.']);
+  assert.deepEqual(Portable.portableImportDoneView({ verified: true, contents: summary, desk: null, boards: [{ idChanged: false }], chats: [], profiles: [] }).notes, []);
+
+  const cases = [
+    [{ status: 400, code: 'PORTABLE_PASSPHRASE_REQUIRED' }, /암호로 잠긴 파일입니다/],
+    [{ status: 400, code: 'PORTABLE_PASSPHRASE_INVALID', encrypted: true }, /암호가 맞지 않거나 파일이 바뀌었습니다\. 아무것도 가져오지 않았습니다\./],
+    [{ status: 400, code: 'PORTABLE_PASSPHRASE_TOO_SHORT' }, /암호는 8자 이상/],
+    [{ status: 400, code: 'PORTABLE_FILE_DAMAGED', reason: 'ENVELOPE_TAG' }, /^파일이 손상되었거나 EG-Desk 파일이 아닙니다\. 아무것도 가져오지 않았습니다\.$/],
+    [{ status: 400, code: 'PORTABLE_VERSION_UNSUPPORTED' }, /더 새로운 EG-Desk에서 만든 파일입니다/],
+    [{ status: 400, code: 'PORTABLE_PRIVATE_FIELD' }, /보호 값이 들어 있어 가져오지 않았습니다/],
+    [{ status: 413, code: 'PORTABLE_FILE_TOO_LARGE' }, /최대 64MB/],
+    [{ status: 413, code: 'PORTABLE_EXPORT_TOO_LARGE' }, /파일을 만들지 않았습니다\. 대화 기록을 빼고/],
+    [{ status: 409, code: 'PORTABLE_NOTHING_TO_EXPORT' }, /내보낼 Desk나 저장된 Board가 아직 없습니다/],
+    [{ status: 409, code: 'PORTABLE_LIMIT' }, /보관할 수 있는 Board나 Agent 수를 넘어/],
+    [{ status: 409, code: 'PORTABLE_BUSY' }, /다른 내보내기나 가져오기가 진행 중/],
+    [{ status: 500, code: 'PORTABLE_IMPORT_PARTIAL', written: { desk: { generation: 3 }, boards: [{}, {}], chats: [{}], profiles: [] } }, /^가져오다 멈췄습니다\. Desk · Board 2개 · 대화 1개는 이미 들어왔습니다\. /],
+    [{ status: 503, code: 'PORTABLE_UNAVAILABLE' }, /저장소를 쓸 수 없어/],
+    [{ status: 503, code: 'PORTABLE_CHAT_STORE_UNAVAILABLE' }, /저장소를 쓸 수 없어/],
+    [{ status: 404, code: 'BOARD_NOT_FOUND' }, /이 Board가 아직 저장소에 없습니다/],
+    [{ status: 404 }, /지원하지 않습니다/],
+    [{ status: 403, code: 'PORTABLE_LOOPBACK_REQUIRED' }, /이 컴퓨터의 EG-Desk에서만/],
+    [{ status: 0 }, /연결하지 못했습니다/],
+    [{ status: -1, code: 'PORTABLE_DESK_NOT_KEPT' }, /복구 기록에 먼저 남기지 못해 가져오지 않았습니다/],
+  ];
+  for (const [error, text] of cases) {
+    const shown = Portable.portableErrorText(error);
+    assert.match(shown, text, JSON.stringify(error));
+    assert.doesNotMatch(shown, /[A-Z_]{4,}|ENVELOPE|undefined/, 'no code or reason on screen');
+  }
+  assert.match(Portable.portableErrorText({ status: 500, code: 'PORTABLE_EXPORT_FAILED' }, { action: 'export' }), /^내보내지 못했습니다\. 파일은 만들지 않았습니다\./);
+  assert.match(Portable.portableErrorText({ status: 500, code: 'X' }), /^가져오지 못했습니다\./);
+  assert.equal(Portable.portablePreviewView(null), null);
+  assert.deepEqual(Portable.portableExportFilesView({ displayPath: '~/Downloads/EG-Desk', files: [{ fileName: 'a.egdesk', bytes: 2048, modifiedAt: at, fileRef: { exportFile: 'a.egdesk' } }, { fileName: 'bad' }] }).rows
+    .map(row => [row.fileName, row.meta]), [['a.egdesk', '2KB · 2026-10-24 15:30']]);
+  assert.equal(Portable.portableExportFilesView({ displayPath: '/Users/someone/Downloads', files: [] }).folder, '내보내기 폴더', 'a full path is never shown');
+});
+
+async function portableBridge(t, name) {
+  const [{ openDeskStore }, { handleDeskHttp }, { openChatStore }, { openProfileStore, PROFILE_TEMPLATES }, { handlePortableHttp }, { createPortableService }, { loadEGDeskPortableDependencies }, { createPrivateQaTempDirectory }] = await Promise.all([
+    import('../helper/egdesk-desk-store.mjs'), import('../helper/egdesk-desk-http.mjs'), import('../helper/egdesk-chat-store.mjs'), import('../helper/egdesk-profile-store.mjs'),
+    import('../helper/egdesk-portable-http.mjs'), import('../helper/egdesk-portable-service.mjs'), import('../helper/egdesk-portable-bundle.mjs'), import('./egdesk-qa-platform.mjs')]);
+  let dependencies = null;
+  try { dependencies = await loadEGDeskPortableDependencies(); } catch { return null; }
+  const dataDir = createPrivateQaTempDirectory(`egdesk-surface-portable-${name}-`);
+  const at = new Date(2026, 9, 24, 15, 30, 12).getTime();
+  const desk = openDeskStore({ dataDir: `${dataDir}/desk`, ownerScope: 'local-desktop-v1', now: () => at, utcOffsetMinutes: 0 });
+  const chat = openChatStore({ dataDir: `${dataDir}/chat`, ownerScope: 'local-desktop-v1' });
+  const profiles = openProfileStore({ dataDir: `${dataDir}/chat`, ownerHash: 'local-desktop-v1' });
+  profiles.seedTemplates();
+  const service = createPortableService({ desk, chat, profiles, dependencies, now: () => at, home: dataDir, location: () => ({ directory: `${dataDir}/Downloads/EG-Desk`, folder: 'downloads' }) });
+  t.after(() => { desk.close(); chat.close(); profiles.close(); rmSync(dataDir, { recursive: true, force: true }); });
+  const calls = [];
+  let older = false;
+  const request = async (method, path, body) => {
+    calls.push({ method, path, body: body === undefined ? undefined : JSON.parse(JSON.stringify(body)) });
+    if (older) return { status: 404, body: { code: 'NOT_FOUND', error: 'Not found' } };
+    const req = Readable.from(body === undefined ? [] : [Buffer.from(JSON.stringify(body))]);
+    Object.assign(req, { method, url: path, socket: { remoteAddress: '127.0.0.1' },
+      headers: { host: '127.0.0.1:39218', ...(body === undefined ? {} : { 'content-type': 'application/json' }) } });
+    let answer = null;
+    const url = new URL(path, 'http://127.0.0.1:39218');
+    const send = (status, data) => { answer = { status, body: data }; };
+    if (!(await handlePortableHttp(req, url, { service, send }))) await handleDeskHttp(req, url, { store: desk, send });
+    return answer;
+  };
+  const board = (id, title, cards) => ({ version: 1, savedAt: at, agenda: { id, title, memberCardIds: cards.map(card => card.id), contextBindings: [] }, cards, shapes: [] });
+  desk.saveBoard('agenda-alpha-001', { body: board('agenda-alpha-001', 'Alpha 계획', [{ id: 'card-note', type: 'result', runtimeState: { text: 'Alpha note' } }]), expectedRevision: null });
+  desk.saveBoard('agenda-beta-002', { body: board('agenda-beta-002', 'Beta board', [{ id: 'card-web', type: 'browser', runtimeState: { uri: 'https://example.com/beta' } }]), expectedRevision: null });
+  const { chat: _chat, ...plainDesk } = storeDesk();
+  desk.saveCurrent({ state: { ...plainDesk, desk: { pan: { x: 0, y: 0 }, zoom: 1, activeAgendaId: 'agenda-alpha-001', activeCardId: null } }, parentGeneration: null });
+  return { desk, chat, profiles, request, calls, PROFILE_TEMPLATES, olderBridge: () => { older = true; } };
+}
+
+test('RT-03 flow over the real bridge routes: save first, export, check, ask for the passphrase, import as a new copy, redraw before autosave', async t => {
+  const bridge = await portableBridge(t, 'flow');
+  if (!bridge) { t.skip('yazl/yauzl/libsodium are not installed in helper/node_modules'); return; }
+  const seen = [];
+  const order = [];
+  const flow = Portable.createPortableFlow({
+    request: bridge.request,
+    saveBeforeExport: async target => { order.push(['save', target]); return { saved: true }; },
+    beforeImport: async options => { order.push(['hold', options]); return { ok: true }; },
+    applyImported: async result => { order.push(['apply', result.desk, result.boards.map(item => item.idChanged)]); return { redrawn: true }; },
+    afterImport: () => order.push(['release']),
+    onState: snapshot => seen.push(snapshot),
+  });
+  // Export: the passphrase is checked here first, then the screen is saved, then the file is written.
+  flow.openExport({ scope: 'desk' });
+  assert.deepEqual([flow.snapshot().step, flow.snapshot().mode, flow.snapshot().includeChats], ['form', 'export', false]);
+  let view = await flow.submitExport({ passphrase: 'short' });
+  assert.deepEqual([view.step, view.errorField, view.error], ['form', 'passphrase', '암호는 8자 이상이어야 합니다.']);
+  assert.equal(bridge.calls.length, 0, 'nothing is sent for a passphrase the bridge would refuse');
+  view = await flow.submitExport({ passphrase: 'correct horse battery', confirm: 'correct horse battery' });
+  assert.equal(view.step, 'done');
+  assert.deepEqual(order.shift(), ['save', { scope: 'desk', boardId: null }]);
+  assert.deepEqual(bridge.calls.at(-1), { method: 'POST', path: '/v1/portable/export', body: { scope: 'desk', include: { chats: false, profiles: false }, passphrase: 'correct horse battery' } });
+  assert.deepEqual([view.done.title, view.done.where], ['내보냈습니다', '~/Downloads/EG-Desk/EG-Desk-Desk-20261024-153012.egdesk']);
+  assert.match(view.done.summary, /^Desk 전체 · Board 2개 · 카드 \d+개 · 대화 0개 · .* · 암호로 잠김$/);
+  assert.ok(seen.some(snapshot => snapshot.step === 'saving') && seen.some(snapshot => snapshot.step === 'exporting'), 'the dialog says it saves first, then writes');
+  flow.openExport({ scope: 'board', boardId: 'agenda-beta-002', boardTitle: 'Beta board' });
+  view = await flow.submitExport({});
+  assert.deepEqual(bridge.calls.at(-1).body, { scope: 'board', boardId: 'agenda-beta-002', include: { chats: false, profiles: false } });
+  assert.deepEqual(view.done.notes, [Portable.PORTABLE_PLAIN_WARNING]);
+  order.length = 0;
+
+  // Import: the exported files are listed; the locked one asks for its passphrase.
+  view = await flow.openImport({ exportsList: true });
+  assert.deepEqual([view.step, view.filesStatus], ['choose', 'ready']);
+  assert.equal(view.files.folder, '~/Downloads/EG-Desk');
+  assert.equal(view.files.rows.length, 2);
+  const lockedFile = view.files.rows.find(row => row.fileName.startsWith('EG-Desk-Desk-'));
+  view = await flow.chooseExport({ fileRef: lockedFile.source.fileRef });
+  assert.deepEqual([view.step, view.preview.locked], ['locked', true]);
+  view = await flow.unlock('not the passphrase');
+  assert.deepEqual([view.step, view.errorField], ['locked', 'passphrase']);
+  assert.match(view.error, /암호가 맞지 않거나/);
+  view = await flow.unlock('correct horse battery');
+  assert.equal(view.step, 'preview');
+  assert.match(view.preview.summary, /^Board 2개 · 카드 \d+개 · 대화 0개 · 2026-10-24 15:30에 만듦 · 암호로 잠김$/);
+  assert.equal(view.preview.replacesDesk, true);
+  view = await flow.confirmImport();
+  assert.equal(view.step, 'done');
+  assert.deepEqual(order.map(([step]) => step), ['hold', 'apply', 'release'], 'hold → import → redraw → release');
+  assert.deepEqual(order[0][1], { replacesDesk: true });
+  assert.deepEqual(order[1][2], [true, true], 'the same machine already has both Boards: new copies');
+  assert.deepEqual(bridge.calls.at(-1), { method: 'POST', path: '/v1/portable/import', body: { fileRef: lockedFile.source.fileRef, passphrase: 'correct horse battery', mode: 'asNew' } });
+  assert.deepEqual(view.done.notes, ['같은 ID가 있어 새 사본(2개)으로 들어왔습니다.']);
+  assert.equal(bridge.desk.listBoards().boards.length, 4, 'nothing that existed was overwritten');
+  assert.equal(JSON.stringify(seen).includes('correct horse battery'), false, 'the passphrase never enters a snapshot');
+
+  // The store reads back the imported Desk and Board heads before the next autosave.
+  const sync = Recovery.createDeskStoreSync({ request: bridge.request });
+  await sync.observeBridge({ deskStorageReady: true });
+  const reloaded = await sync.reloadAfterImport({ desk: true });
+  assert.equal(reloaded.reloaded, true);
+  assert.equal(reloaded.state.desk.activeAgendaId, order[1][1] ? bridge.desk.current().state.desk.activeAgendaId : null);
+  assert.notEqual(reloaded.state.desk.activeAgendaId, 'agenda-alpha-001', 'the Desk follows the renamed Board');
+  assert.equal(sync.status().generation, bridge.desk.current().generation);
+  assert.ok(bridge.desk.listBoards().boards.every(item => sync.knownHead(item.boardId) === item.headRevision));
+  assert.deepEqual(await sync.reloadAfterImport({ desk: false }), { reloaded: true, state: null, generation: bridge.desk.current().generation });
+
+  // A file the person picked goes up as base64; a damaged one is refused in words and nothing changes.
+  const boardsBefore = bridge.desk.listBoards().boards.length;
+  const picker = Portable.createPortableFlow({ request: bridge.request, readFile: async () => ({ fileName: '깨진.egdesk', bytes: Uint8Array.from([80, 75, 3, 4, 1, 2, 3]) }) });
+  await picker.openImport({ exportsList: false });
+  view = await picker.chooseFile();
+  assert.equal(view.step, 'choose');
+  assert.equal(view.error, '파일이 손상되었거나 EG-Desk 파일이 아닙니다. 아무것도 가져오지 않았습니다.');
+  assert.equal(bridge.calls.at(-1).body.bundle, 'UEsDBAECAw==');
+  assert.equal(bridge.desk.listBoards().boards.length, boardsBefore);
+  // A cancelled picker is not an error.
+  const cancelled = Portable.createPortableFlow({ request: bridge.request, readFile: async () => null });
+  await cancelled.openImport({ exportsList: false });
+  view = await cancelled.chooseFile();
+  assert.deepEqual([view.step, view.error, view.busy], ['choose', null, false]);
+  // An older bridge answers 404: the words say so.
+  bridge.olderBridge();
+  const older = Portable.createPortableFlow({ request: bridge.request });
+  older.openExport({ scope: 'desk' });
+  view = await older.submitExport({});
+  assert.deepEqual([view.step, view.error], ['form', '지금 연결된 EG-Desk는 내보내기와 가져오기를 지원하지 않습니다.']);
+});
+
+test('RT-03 a Desk that cannot be kept in 복구 기록 first is not replaced; a plain Board file imports without holding anything', async () => {
+  const calls = [];
+  const summary = { encrypted: false, locked: false, bytes: 10, scope: 'desk', exportedAt: 1, desk: true, boards: 0, cards: 1, chats: 0, profiles: 0 };
+  const request = async (method, path, body) => {
+    calls.push(path);
+    if (path === '/v1/portable/inspect') return { status: 200, body: summary };
+    if (path === '/v1/portable/import') return { status: 201, body: { mode: 'asNew', verified: true, contents: summary, desk: { generation: 2 }, boards: [], chats: [], profiles: [] } };
+    return { status: 404, body: null };
+  };
+  const steps = [];
+  const flow = Portable.createPortableFlow({ request, beforeImport: async () => { steps.push('hold'); return { ok: false }; }, afterImport: () => steps.push('release') });
+  await flow.openImport({ exportsList: false });
+  await flow.chooseExport({ fileRef: { exportFile: 'a.egdesk' } });
+  const view = await flow.confirmImport();
+  assert.deepEqual([view.step, view.error], ['preview', '지금 Desk를 복구 기록에 먼저 남기지 못해 가져오지 않았습니다. 연결을 확인한 뒤 다시 시도해 주세요.']);
+  assert.deepEqual(calls, ['/v1/portable/inspect'], 'the import is never sent');
+  assert.deepEqual(steps, ['hold', 'release'], 'what was held is released');
+  // Closing while busy does nothing; closing after clears the dialog.
+  assert.equal(flow.close().open, false);
+});
+
+test('RT-03 production hooks: export saves the Desk or an unsaved Board first; import keeps the Desk, holds autosave, lists Boards and redraws', async () => {
+  const sources = ['savePortableExportSource', 'holdDeskForImport', 'releaseDeskAfterImport', 'applyPortableImport'].map(name => storeDeclaration(name));
+  assert.ok(sources.every(Boolean), 'the hooks remain directly testable');
+  const log = [];
+  let ready = true;
+  const heads = { 'agenda-a': 3 };
+  const surface = { restoring: false, recoveryProtected: false };
+  const projections = { 'egd-board-1': { id: 'egd-board-1', boardId: 'agenda-a', dirty: true }, 'egd-board-2': { id: 'egd-board-2', boardId: 'agenda-b', dirty: false } };
+  const agendaStore = { agendas: {}, meta: {} };
+  const sync = {
+    status: () => ({ ready }),
+    knownHead: id => heads[id] ?? null,
+    saveDesk: async (snapshot, options) => { log.push(['saveDesk', options.reason, surface.restoring]); return { stored: ready ? 'both' : 'prefs' }; },
+    pendingBoardSave: id => { log.push(['pending', id]); return Promise.resolve({ stored: 'both' }); },
+    reloadAfterImport: async options => { log.push(['reload', options.desk]); return { reloaded: true, state: options.desk ? { cards: [] } : null }; },
+    latestBoard: async id => ({ title: `T-${id}`, body: { agenda: { id, title: 'old' }, cards: [] } }),
+  };
+  const bridge = { loadLocalHistory: (...args) => log.push(['history', ...args]), loadProfiles: () => log.push(['profiles']) };
+  const api = compileFunction(`let portableImportHold = false;\n${sources.join('\n')}\nreturn { savePortableExportSource, holdDeskForImport, releaseDeskAfterImport, applyPortableImport, held: () => portableImportHold };`,
+    ['deskStoreSync', 'SurfaceState', 'state', 'serializeDeskSnapshot', 'saveCurrentAgendaState', 'persistDeskSession', 'coerceAgendaStore', 'cloneJson',
+      'writeAgendaStoreAndSync', 'redrawDeskFromState', 'syncViewportAgendaRail'])(
+    () => sync, Surface, { surface, boards: { projections }, codexBridge: bridge }, () => ({ snapshot: true }),
+    options => { log.push(['saveBoard', options.projectionId]); return { agenda: { id: 'agenda-a' } }; }, () => log.push(['persist', surface.restoring]),
+    () => agendaStore, value => JSON.parse(JSON.stringify(value)), store => { log.push(['writeList', Object.keys(store.agendas)]); return true; },
+    async snapshot => { log.push(['redraw', surface.restoring]); return true; }, () => log.push(['rail']));
+
+  assert.deepEqual(await api.savePortableExportSource({ scope: 'desk' }), { saved: true });
+  assert.deepEqual(await api.savePortableExportSource({ scope: 'board', boardId: 'agenda-a' }), { saved: true });
+  assert.deepEqual(await api.savePortableExportSource({ scope: 'board', boardId: 'agenda-b' }), { saved: true }, 'a Board the store never saw is saved first');
+  assert.deepEqual(await api.savePortableExportSource({ scope: 'board', boardId: 'agenda-c' }), { saved: false }, 'a closed Board the store does not have');
+  assert.deepEqual(log.splice(0), [['saveDesk', 'explicit', false], ['saveBoard', 'egd-board-1'], ['pending', 'agenda-a'], ['saveBoard', 'egd-board-2'], ['pending', 'agenda-b']]);
+  heads['agenda-b'] = 1;
+  projections['egd-board-2'].dirty = false;
+  log.length = 0;
+  assert.deepEqual(await api.savePortableExportSource({ scope: 'board', boardId: 'agenda-b' }), { saved: true });
+  assert.deepEqual(log.splice(0), [], 'a saved, unchanged Board is exported as it is');
+
+  // Import of a Desk file: the Desk as it is now is kept first, autosave waits until the redraw.
+  assert.deepEqual(await api.holdDeskForImport({ replacesDesk: false }), { ok: true });
+  assert.equal(api.held(), false);
+  assert.deepEqual(await api.holdDeskForImport({ replacesDesk: true }), { ok: true });
+  assert.deepEqual([api.held(), surface.restoring], [true, true]);
+  const applied = await api.applyPortableImport({ desk: { generation: 2 }, boards: [{ boardId: 'agenda-import-1', title: '복사본' }], chats: [{ clientThreadId: 't' }], profiles: [{ status: 'imported' }] });
+  assert.deepEqual(applied, { redrawn: true });
+  assert.deepEqual(agendaStore.meta['agenda-import-1'].title, 'T-agenda-import-1');
+  assert.equal(agendaStore.agendas['agenda-import-1'].agenda.title, 'T-agenda-import-1');
+  api.releaseDeskAfterImport();
+  assert.deepEqual([api.held(), surface.restoring], [false, false]);
+  assert.deepEqual(log.splice(0), [['saveDesk', 'explicit', false], ['reload', true], ['writeList', ['agenda-import-1']], ['redraw', true],
+    ['history', [], { force: true }], ['profiles'], ['rail'], ['persist', false]], 'Boards join the list before the Desk is drawn; autosave resumes after');
+  api.releaseDeskAfterImport();
+  assert.deepEqual(log, [], 'release runs once');
+  // Store not ready: a Desk file is not imported.
+  ready = false;
+  assert.deepEqual(await api.holdDeskForImport({ replacesDesk: true }), { ok: false });
+  assert.deepEqual(await api.savePortableExportSource({ scope: 'desk' }), { saved: false });
+});
+
+test('RT-03 production dialog: plain-file warning, passphrase twice, the check before import with its warning, and Korean only', () => {
+  const document = settingsFakeDocument();
+  const { portableDialogView } = compileFunction(`${declaration('el')}\n${declaration('portableDialogView')}\nreturn { portableDialogView };`, ['document', 'PortableState'])(document, Portable);
+  const nodes = (root, testid) => settingsNodes({ children: root.children }, node => node.dataset.testid === testid);
+  const actions = [];
+  const handlers = { onClose: () => actions.push(['close']), onSubmitExport: values => actions.push(['export', values]), onChooseExport: file => actions.push(['choose', file]),
+    onChooseFile: () => actions.push(['pick']), onUnlock: value => actions.push(['unlock', value]), onConfirmImport: () => actions.push(['confirm']), onBack: () => actions.push(['back']),
+    onReveal: where => actions.push(['reveal', where]), onReloadExports: () => actions.push(['reload']) };
+  const base = { open: true, busy: false, error: null, errorField: null, files: null, filesStatus: 'idle', source: null, preview: null, done: null, exportsList: false, includeChats: false };
+
+  const form = portableDialogView({ ...base, mode: 'export', step: 'form', scope: 'board', boardId: 'agenda-a', boardTitle: 'Alpha 계획' }, handlers);
+  assert.equal(form.label, "Board 'Alpha 계획' 내보내기");
+  const submit = nodes(form, 'portable-export-submit')[0];
+  const warning = nodes(form, 'portable-plain-warning')[0];
+  const pass = nodes(form, 'portable-passphrase')[0];
+  const confirm = nodes(form, 'portable-confirm')[0];
+  assert.deepEqual([submit.textContent, warning.hidden, warning.getAttribute('role'), warning.textContent], ['암호 없이 내보내기', false, 'note', '암호 없이 저장하면 파일을 가진 누구나 내용을 볼 수 있습니다.']);
+  assert.equal(pass.getAttribute('type'), 'password');
+  const chats = nodes(form, 'portable-include-chats')[0];
+  assert.equal(chats.checked, false, '대화 기록 포함 is off by default');
+  pass.value = 'correct horse battery';
+  pass.fire('input');
+  assert.deepEqual([submit.textContent, warning.hidden], ['암호로 잠가 내보내기', true]);
+  confirm.value = 'correct horse battery';
+  chats.checked = true;
+  submit.fire('click');
+  assert.deepEqual(actions.pop(), ['export', { passphrase: 'correct horse battery', confirm: 'correct horse battery', includeChats: true }]);
+  // Typed values survive a redraw only through the inputs.
+  const again = portableDialogView({ ...base, mode: 'export', step: 'form', scope: 'desk', error: '두 암호가 같지 않습니다. 다시 입력해 주세요.', errorField: 'confirm' },
+    { ...handlers, typed: { passphrase: 'abc', confirm: 'abd', includeChats: true } });
+  assert.deepEqual([nodes(again, 'portable-passphrase')[0].value, nodes(again, 'portable-confirm')[0].value, nodes(again, 'portable-include-chats')[0].checked], ['abc', 'abd', true]);
+  assert.equal(nodes(again, 'portable-confirm')[0].getAttribute('aria-invalid'), 'true');
+  assert.equal(nodes(again, 'portable-error')[0].getAttribute('role'), 'alert');
+  const saving = portableDialogView({ ...base, mode: 'export', step: 'saving', busy: true, scope: 'desk' }, handlers);
+  assert.equal(nodes(saving, 'portable-status')[0].textContent, '지금 화면을 먼저 저장하는 중…');
+  assert.equal(nodes(saving, 'portable-export-submit')[0].getAttribute('disabled'), 'true');
+  assert.equal(nodes(saving, 'portable-close')[0].getAttribute('disabled'), 'true', 'nothing closes while the file is written');
+  const exported = portableDialogView({ ...base, mode: 'export', step: 'done', scope: 'desk', done: { title: '내보냈습니다', where: '~/Downloads/EG-Desk/a.egdesk', summary: 'Desk 전체 · Board 2개', notes: ['n1'] } }, handlers);
+  nodes(exported, 'portable-reveal')[0].fire('click');
+  assert.deepEqual(actions.pop(), ['reveal', '~/Downloads/EG-Desk/a.egdesk']);
+  assert.equal(nodes(exported, 'portable-done')[0].textContent, '~/Downloads/EG-Desk/a.egdeskDesk 전체 · Board 2개n1');
+
+  const choose = portableDialogView({ ...base, mode: 'import', step: 'choose', exportsList: true, filesStatus: 'ready',
+    files: { folder: '~/Downloads/EG-Desk', empty: false, rows: [{ fileName: 'a.egdesk', meta: '2KB · 2026-10-24 15:30', source: { fileRef: { exportFile: 'a.egdesk' } } }] } }, handlers);
+  const screenText = view => view.children.map(child => child?.textContent || '').join(' ');
+  assert.match(screenText(choose), /최근 내보낸 파일 · ~\/Downloads\/EG-Desk/);
+  nodes(choose, 'portable-file')[0].fire('click');
+  assert.deepEqual(actions.pop(), ['choose', { fileRef: { exportFile: 'a.egdesk' } }]);
+  nodes(choose, 'portable-pick-file')[0].fire('click');
+  assert.deepEqual(actions.pop(), ['pick']);
+  const locked = portableDialogView({ ...base, mode: 'import', step: 'locked', source: { kind: 'export', fileName: 'a.egdesk' }, preview: { locked: true, sizeText: '2KB' } }, handlers);
+  assert.equal(locked.label, '암호로 잠긴 파일');
+  const unlock = nodes(locked, 'portable-unlock')[0];
+  assert.equal(unlock.tagName, 'BUTTON');
+  nodes(locked, 'portable-unlockPassphrase')[0].value = 'correct horse battery';
+  unlock.fire('click');
+  assert.deepEqual(actions.pop(), ['unlock', 'correct horse battery']);
+  const preview = portableDialogView({ ...base, mode: 'import', step: 'preview', source: { kind: 'export', fileName: 'a.egdesk' },
+    preview: Portable.portablePreviewView({ encrypted: false, locked: false, scope: 'desk', exportedAt: new Date(2026, 9, 24, 15, 30).getTime(), desk: true, boards: 2, cards: 5, chats: 0, profiles: 0 }) }, handlers);
+  const effect = nodes(preview, 'portable-effect')[0];
+  assert.deepEqual([effect.dataset.tone, effect.getAttribute('role')], ['warning', 'alert']);
+  assert.equal(nodes(preview, 'portable-preview-summary')[0].textContent, 'Board 2개 · 카드 5개 · 대화 0개 · 2026-10-24 15:30에 만듦 · 암호 없음');
+  nodes(preview, 'portable-import-confirm')[0].fire('click');
+  nodes(preview, 'portable-back')[0].fire('click');
+  assert.deepEqual(actions.splice(-2), [['confirm'], ['back']]);
+  for (const view of [form, again, saving, exported, choose, locked, preview]) {
+    const text = screenText(view);
+    assert.ok(text.length > 20);
+    assert.doesNotMatch(text, /PORTABLE_|agenda-|fileRef|undefined|null/, 'no code, ID or empty value on screen');
+  }
+  // The production renderer keeps typed values and drops empty children; CSS uses tokens.
+  const render = storeDeclaration('renderPortableDialog') || '';
+  assert.match(render, /panel\.replaceChildren\(\.\.\.content\.children\.filter\(Boolean\)\);/);
+  assert.match(render, /const typed = panel \? Object\.fromEntries\(\[\.\.\.panel\.querySelectorAll\('input\[data-field\]'\)\]/);
+  const css = surfaceCss.slice(surfaceCss.indexOf("/* RT-03 '내보내기'"), surfaceCss.indexOf('/* A short way back to the Chat'));
+  assert.ok(css.includes('#egd-portable-dialog {') && css.includes('.egd-portable-warning'));
+  assert.doesNotMatch(css, /#[0-9a-f]{3,8}\b|rgba?\(/i);
+  assert.match(surfaceCss, /#egd-desk-minimap, #egd-portable-dialog\) \{\n    color-scheme: dark;/);
+});
+
+test('RT-03 the store waits for a Board save in flight before an export reads it', async t => {
+  const bridge = await deskStoreBridge(t);
+  const sync = Recovery.createDeskStoreSync({ request: bridge.request });
+  await sync.observeBridge({ deskStorageReady: true });
+  assert.equal(sync.pendingBoardSave('agenda-a'), null);
+  const saving = sync.saveBoard('agenda-a', storeBoard('agenda-a', '주간 보고'), { title: '주간 보고' });
+  assert.equal(sync.pendingBoardSave('agenda-a'), saving);
+  const result = await sync.pendingBoardSave('agenda-a');
+  assert.equal(result.stored, 'both');
+  await settle();
+  assert.equal(sync.pendingBoardSave('agenda-a'), null, 'a finished save is forgotten');
+  // The legacy bundle-library controller stays exported for the helper's own test.
+  assert.equal(typeof Portable.createEGDeskPortableState, 'function');
 });

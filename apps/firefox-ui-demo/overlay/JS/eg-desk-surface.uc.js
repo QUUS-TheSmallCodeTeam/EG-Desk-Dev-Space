@@ -15,6 +15,7 @@
   const BriefingState = ChromeUtils.importESModule('chrome://userchrome/content/EGDeskBriefingState.sys.mjs');
   const FileCardState = ChromeUtils.importESModule('chrome://userchrome/content/EGDeskFileCardState.sys.mjs');
   const BrowserAgentReceipts = ChromeUtils.importESModule('chrome://userchrome/content/EGDeskBrowserAgentRuntimeParent.sys.mjs');
+  const PortableState = ChromeUtils.importESModule('chrome://userchrome/content/EGDeskPortableState.sys.mjs');
   const BROWSER_AGENT_ACTOR_NAME = 'EGDeskBrowserAgentRuntime';
   const BROWSER_AGENT_HISTORY_LIMIT = 100;
   const EGDESK_START_URI = 'chrome://userchrome/content/egdesk-start.html';
@@ -620,6 +621,8 @@
       legacyChatBackupKey: null,
       legacyChatBackupRequired: false,
       activityThreadId: null,
+      // CU-01: { threadId, activityId, runId } the activity record scrolls to once.
+      activityFocus: null,
       // CHAT-06 Await: task graphs seen on this screen (never saved), whether
       // the list is open, and the one '계속' being confirmed or sent; the one
       // approval decision and the resume on their way; the plans Agents proposed.
@@ -885,8 +888,10 @@
     return ['활동 기록', approvals ? `승인 ${approvals}건` : '', questions ? `질문 ${questions}건` : '', blocked ? `막힘 ${blocked}건` : ''].filter(Boolean).join(' · ');
   }
 
-  function openCodexActivityPanel(threadId) {
+  // focus { activityId, runId }: the row to bring into view (CU-01 computer-use line).
+  function openCodexActivityPanel(threadId, focus = null) {
     state.codex.activityThreadId = threadId;
+    state.codex.activityFocus = focus ? { threadId, activityId: focus.activityId || null, runId: focus.runId || null } : null;
     renderCodexActivityPanel();
   }
 
@@ -1804,6 +1809,9 @@
       // AGENT-04: the ceiling this run was started under, named under its head.
       const ceilingLine = ChatState.toolCeilingRunLine(run);
       if (ceilingLine) rows.push(el('p', { class: 'egd-codex-run-ceiling', data: { testid: 'chat-run-tool-ceiling', runId: run.runId } }, ceilingLine));
+      // CU-01: how often this run drove this Mac, or the computer control it ran under.
+      const computerLine = ChatState.computerUseRunLine(run, { formatTime: formatMessageTime });
+      if (computerLine) rows.push(el('p', { class: 'egd-codex-run-computer', data: { testid: 'chat-run-computer-use', runId: run.runId || '' } }, computerLine));
       // CTX-04: what this run's Agent can read and why it was picked.
       const resolverSection = contextResolverRecordSection(run);
       if (resolverSection) rows.push(resolverSection);
@@ -1835,15 +1843,21 @@
         const ceiling = ChatState.toolCeilingActivityView(activity);
         // CU-01: an MCP call names what its server can drive ('컴퓨터 조작' for this Mac); no arguments are shown.
         const control = ChatState.mcpControlBadge(activity);
+        // A title that already reads '컴퓨터 조작 · {tool}' carries no second badge.
+        const badge = ChatState.activityControlBadge(activity);
+        const mcpDetail = ChatState.mcpCallDetailText(activity);
         const row = el('article', { class: `egd-codex-activity-row${ceiling ? ' egd-codex-activity-row-ceiling' : ''}`,
           data: { activityId: activity.id, status: activity.status, ...(ceiling ? { kind: 'toolCeiling' } : {}), ...(control ? { controlKind: control.kind } : {}) } },
           el('strong', {}, activity.title || (ceiling ? '도구 제한' : activity.kind) || '활동'),
-          control ? el('span', { class: `egd-codex-activity-control egd-codex-activity-control-${control.kind}`, data: { testid: 'chat-activity-control' } }, control.label) : null,
+          badge ? el('span', { class: `egd-codex-activity-control egd-codex-activity-control-${badge.kind}`, data: { testid: 'chat-activity-control' } }, badge.label) : null,
           el('span', {}, ceiling ? ceiling.statusLabel : ({ inProgress: '진행 중', completed: '완료', failed: '실패', declined: '거절됨' })[activity.status] || activity.status || ''),
           typeof activity.detail === 'string' ? el('pre', {}, activity.detail) : null);
         if (ceiling) {
           if (ceiling.command) row.appendChild(el('pre', {}, ceiling.command));
           for (const note of ceiling.notes) row.appendChild(el('p', { class: 'egd-codex-activity-note', data: { testid: 'chat-ceiling-note' } }, note));
+        } else if (mcpDetail) {
+          // Sizes and counts only ('인자 N바이트 · 화면 N장'); the call's content never reaches the screen.
+          row.appendChild(el('p', { class: 'egd-codex-activity-sizes', data: { testid: 'chat-activity-sizes' } }, mcpDetail));
         } else if (activity.detail && typeof activity.detail === 'object') {
           for (const key of ['text', 'command', 'cwd', 'exitCode', 'durationMs', 'server', 'tool']) {
             const value = activity.detail[key];
@@ -1911,6 +1925,20 @@
     if (restored && !restored.disabled) {
       restored.focus({ preventScroll: true });
       if (focusState.start !== null) try { restored.setSelectionRange(focusState.start, focusState.end, focusState.direction); } catch {}
+    }
+    // CU-01: '이 답변에서 컴퓨터를 N번 조작했어요' opens here on that run's latest
+    // computer-control row (or its run head), once; later redraws keep the scroll.
+    const target = state.codex.activityFocus?.threadId === thread.id ? state.codex.activityFocus : null;
+    if (target) {
+      state.codex.activityFocus = null;
+      const node = [...body.querySelectorAll('[data-activity-id]')].find(item => target.activityId && item.dataset.activityId === target.activityId)
+        || [...body.querySelectorAll('h4[data-run-id]')].find(item => target.runId && item.dataset.runId === target.runId);
+      if (node) {
+        node.classList.add('egd-codex-activity-focus');
+        node.setAttribute('tabindex', '-1');
+        node.scrollIntoView?.({ block: 'center' });
+        node.focus({ preventScroll: true });
+      }
     }
   }
 
@@ -2011,6 +2039,9 @@
     check: [['path', { d: 'm4 12 5 5L20 6' }]],
     result: [['rect', { x: '5', y: '3', width: '14', height: '18', rx: '2' }], ['path', { d: 'M9 8h6M9 12h6M9 16h3' }]],
     account: [['circle', { cx: '12', cy: '8', r: '3' }], ['path', { d: 'M5.5 20a6.5 6.5 0 0 1 13 0' }]],
+    computer: [['rect', { x: '3', y: '4', width: '18', height: '12', rx: '2' }], ['path', { d: 'M8 20h8M12 16v4' }]],
+    export: [['path', { d: 'M12 15V3M8 7l4-4 4 4' }], ['path', { d: 'M5 13v6a2 2 0 0 0 2 2h10a2 2 0 0 0 2-2v-6' }]],
+    import: [['path', { d: 'M12 3v12m-4-4 4 4 4-4' }], ['path', { d: 'M5 13v6a2 2 0 0 0 2 2h10a2 2 0 0 0 2-2v-6' }]],
   };
 
   function deskIcon(name, className = 'egd-ui-icon') {
@@ -2670,6 +2701,9 @@
       boardVersionHistoryReady() ? item('버전 기록', '이 Board의 버전 기록', 'board-history', () => openBoardHistoryPanel(projection.boardId)) : null,
       item('Chat에 첨부', '이 Board의 요소를 Chat에 첨부', 'board-attach-chat',
         () => openChatInputPanel(state.codex.activeThreadId, { viewIds: projection.members.map(member => member.viewId) })),
+      // RT-03: only while the bridge can write .egdesk files.
+      portableExportReady() ? item('내보내기…', '이 Board를 .egdesk 파일로 내보내기', 'board-export',
+        () => openPortableExport({ scope: 'board', boardId: projection.boardId, boardTitle: projection.title })) : null,
       item('Board 닫기', '이 Board 닫기', 'board-close', () => closeCurrentAgenda({ projectionId })),
     ].filter(Boolean);
     const pos = resolveFloatingMenuPlacement(anchor.getBoundingClientRect(), 152, items.length * 36 + 4);
@@ -5603,6 +5637,12 @@
         },
       }, deskIcon('close')),
       el('button', { class: 'egd-rail-icon', title: '미니맵', 'aria-label': '미니맵', onclick: toggleDeskMinimap }, deskIcon('minimap')),
+      // RT-03 Desk 메뉴: '내보내기…' and '가져오기…', shown only while the bridge supports .egdesk files.
+      el('button', {
+        id: 'egd-desk-menu-open', class: 'egd-rail-icon', title: 'Desk 작업', 'aria-label': 'Desk 작업',
+        'aria-haspopup': 'menu', 'aria-expanded': 'false', hidden: !portableExportReady() && !portableImportReady(), data: { testid: 'desk-menu' },
+        onclick: (ev) => { ev.stopPropagation(); toggleDeskMenu(ev.currentTarget); },
+      }, deskIcon('menu')),
       el('button', { id: 'egd-recovery-open', class: 'egd-rail-icon', 'aria-label': '복구 기록', title: '복구 기록', hidden: true, onclick: () => openDeskRecoveryEntry() }, deskIcon('recovery')),
       el('button', { class: 'egd-rail-icon', title: '알림 연결 전', 'aria-label': '알림 연결 전', disabled: 'true' }, deskIcon('alert')),
       buildResourceGadget(),
@@ -6941,6 +6981,23 @@
           // BRW-13: 대표님 took a Browser Card back from this room's Agent. One quiet line, in time order.
           const controlNotices = ChatState.browserUserControlNoticesFor(codex.browserUserControlNotices, ChatState.clientThreadBinding(activeThread));
           let controlNoticeIndex = 0;
+          // CU-01: '이 답변에서 컴퓨터를 N번 조작했어요' sits under the last shown answer
+          // of each run that drove this Mac; pressing it opens that run's rows.
+          const roomRuns = codexRuns(activeThread);
+          const lastAnswerOfRun = new Map();
+          for (const message of activeThread.messages) {
+            if (message.role === 'assistant' && message.runId && !(message.status === 'streaming' && !message.content)) lastAnswerOfRun.set(message.runId, message.id);
+          }
+          const computerUseLine = (run) => {
+            const view = run ? ChatState.computerUseView(run, { formatTime: formatMessageTime }) : null;
+            if (!view) return null;
+            return el('button', {
+              class: `egd-codex-computer-use${view.active ? ' egd-codex-computer-use-active' : ''}`, type: 'button',
+              title: '활동 기록에서 보기', 'aria-label': view.label,
+              data: { testid: 'chat-computer-use', runId: run.runId || '', calls: String(view.calls), active: String(view.active) },
+              onclick: (ev) => { ev.stopPropagation(); codexBridge.openActivity(activeThread.id, { activityId: view.activityId, runId: run.runId }); },
+            }, deskIcon('computer', 'egd-codex-computer-use-mark'), el('span', { class: 'egd-codex-computer-use-text' }, view.text));
+          };
           const appendControlNotices = (until = Infinity) => {
             while (controlNoticeIndex < controlNotices.length && controlNotices[controlNoticeIndex].at <= until) {
               const notice = controlNotices[controlNoticeIndex++];
@@ -7042,7 +7099,9 @@
             const menuTrigger = renderMessageMenuTrigger(activeThread, message);
             const messageLine = el('div', { class: 'egd-codex-message-line' },
               message.role === 'user' ? menuTrigger : null, bubble, message.role === 'user' ? null : menuTrigger);
-            const messageStack = el('div', { class: 'egd-codex-message-stack' }, roleLabel, messageLine, answerFold, resultRow, briefingControl, meta);
+            const computerLine = message.role === 'assistant' && message.runId && lastAnswerOfRun.get(message.runId) === message.id
+              ? computerUseLine(roomRuns.findLast(run => run.runId === message.runId)) : null;
+            const messageStack = el('div', { class: 'egd-codex-message-stack' }, roleLabel, messageLine, answerFold, computerLine, resultRow, briefingControl, meta);
             if (message.inputReferences?.length) messageStack.appendChild(el('button', {
               class: 'egd-codex-result-chip', data: { testid: 'chat-message-inputs', requestId: message.requestId || '' },
               onclick: () => openCodexActivityPanel(activeThread.id),
@@ -7074,6 +7133,9 @@
               onOpen: () => codexBridge.openActivity(activeThread.id),
             }));
           }
+          // A run with no answer shown yet keeps its count at the end of the conversation.
+          const unansweredLine = workingRun?.runId && !lastAnswerOfRun.has(workingRun.runId) ? computerUseLine(workingRun) : null;
+          if (unansweredLine) messages.appendChild(el('div', { class: 'egd-codex-computer-use-row' }, unansweredLine));
         }
         conversation.appendChild(messages);
         if (codex.agentPeek?.threadId === activeThread.id) {
@@ -7607,6 +7669,8 @@
       window.clearTimeout(contextSuggestTimer);
       contextSuggestTimer = window.setTimeout(() => {
         contextSuggestTimer = 0;
+        // A room that left the screen during the pause is asked again when its composer opens.
+        if (![...document.querySelectorAll('.egd-codex-input')].some(input => input.dataset.threadId === threadId)) return;
         void resolveContextSuggestions(threadId, force);
       }, immediate ? 0 : CONTEXT_SUGGEST_DEBOUNCE_MS);
     }
@@ -7648,9 +7712,12 @@
         if (state.contextSuggest !== store || store.byThread[threadId]?.seq !== seq) return;
         if (error.status === 404) {
           // An older bridge has no /context/resolve: the area stays hidden (asked again later).
+          // A redraw replaces the Chat's buttons and drops a click under way, so
+          // it happens only when an area on screen has to leave.
+          const shown = Object.values(store.byThread).some(entry => ChatState.contextSuggestionShown(entry));
           store.unsupportedUntil = Date.now() + CONTEXT_SUGGEST_RETRY_MS;
           store.byThread = {};
-          emit();
+          if (shown) emit();
           return;
         }
         // Not signed in yet, a starting bridge or a lost connection hides the area quietly.
@@ -7660,8 +7727,10 @@
           error: quiet ? null : ChatState.contextResolverErrorText(error.code) || CONTEXT_SUGGEST_FAILED };
       }
       if (state.contextSuggest !== store || store.byThread[threadId]?.seq !== seq) return;
+      const shownBefore = ChatState.contextSuggestionShown(store.byThread[threadId]);
       store.byThread[threadId] = { ...store.byThread[threadId], ...next };
-      emit();
+      // Redraw only when the area appears, changes or leaves.
+      if (shownBefore || ChatState.contextSuggestionShown(store.byThread[threadId])) emit();
     }
 
     async function ensureNativeReadyForSend(thread) {
@@ -8365,6 +8434,7 @@
           ...bridgeEngineFields(bridgeState),
           ...bridgeSessionFields(bridgeState),
         });
+        portableBridgeObserved(bridgeState);
         void deskStoreBridgeObserved(bridgeState);
       } catch (error) {
         if (!epochScope.valid(token)) return;
@@ -8374,6 +8444,7 @@
           update({ authStatus: status, isStartingLogin: Boolean(status.loginInProgress), connected: true, error: null,
             ...bridgeConnectionFields(null), ...bridgeSessionFields(null) });
           // An older bridge without /v1/state: preferences only, as before.
+          portableBridgeObserved(null);
           void deskStoreBridgeObserved(null);
         } catch (fallbackError) {
           if (!epochScope.valid(token)) return;
@@ -8684,7 +8755,7 @@
       runState(threadId = state.codex.activeThreadId) {
         return cloneJson(ChatState.runsForThread(protocol, getCodexThreadById(state.codex, threadId)));
       },
-      openActivity(threadId = state.codex.activeThreadId) { openCodexActivityPanel(threadId); },
+      openActivity(threadId = state.codex.activeThreadId, focus = null) { openCodexActivityPanel(threadId, focus); },
       async replyApproval({ approvalId, conversationId, runId, decision }) {
         const run = protocol.runs[ChatState.runKey(conversationId, runId)];
         const approval = run?.pendingApprovals.find(item => (item.approvalId || item.id) === approvalId);
@@ -9429,6 +9500,7 @@
             ...bridgeEngineFields(bridgeState),
             ...bridgeSessionFields(bridgeState),
           });
+          portableBridgeObserved(bridgeState);
         } catch (error) {
           if (!epochScope.valid(token)) return;
           try {
@@ -12620,11 +12692,14 @@
     const changeComputerControl = async (policy) => {
       const api = bridge();
       if (computerControlChange?.phase === 'sending' || !api?.setComputerControl) return;
+      // The same policy again is '다시 저장' for a choice the bridge could not save.
+      const retrySave = ChatState.normalizeComputerControl(state.codex.computerControl)?.policy === policy;
       computerControlChange = { phase: 'sending', policy };
       if (activeTab === 'account') renderAccountTab();
       try {
-        await api.setComputerControl(policy);
-        computerControlChange = { phase: 'done', policy, text: ChatState.COMPUTER_CONTROL_APPLY_NOTE };
+        const result = await api.setComputerControl(policy);
+        computerControlChange = { phase: 'done', policy, text: !retrySave ? ChatState.COMPUTER_CONTROL_APPLY_NOTE
+          : result?.persisted === false ? ChatState.COMPUTER_CONTROL_SAVE_FAILED_TEXT : ChatState.COMPUTER_CONTROL_SAVED_TEXT };
       } catch (error) {
         computerControlChange = { phase: 'error', policy, text: ChatState.computerControlErrorText(error) };
       }
@@ -12648,6 +12723,15 @@
             class: `egd-settings-computer-check egd-settings-computer-check-${view.check.tone}`, data: { testid: 'settings-computer-control-check', tone: view.check.tone },
           }, view.check.label) : null),
         el('p', { class: 'egd-settings-section-sub egd-settings-computer-note' }, view.note),
+        // The bridge applied the choice but could not save it: it lasts until EG-Desk restarts.
+        view.unsaved ? el('div', { class: 'egd-settings-computer-unsaved', role: 'status', data: { testid: 'settings-computer-control-unsaved' } },
+          el('span', { class: 'egd-settings-computer-unsaved-label' }, view.unsaved.label),
+          el('span', { class: 'egd-settings-computer-unsaved-note' }, view.unsaved.note),
+          el('button', {
+            class: 'egd-settings-btn', type: 'button', disabled: sending ? 'true' : null,
+            data: { testid: 'settings-computer-control-resave' },
+            onclick: () => { void changeComputerControl(view.policy); },
+          }, view.unsaved.action)) : null,
         change ? el('div', {
           class: `egd-settings-computer-change egd-settings-computer-change-${change.phase}`, role: change.phase === 'error' ? 'alert' : 'status',
           data: { testid: 'settings-computer-control-change', phase: change.phase },
@@ -17453,6 +17537,381 @@
       if (result?.ready && result.connected) persistDeskSession();
     } catch (error) { console.warn(TAG, 'Desk store connection failed', error); }
     syncDeskHistoryOpener();
+  }
+
+  // ── RT-03: .egdesk 내보내기 / 가져오기 ──
+  // The bridge writes and reads the files; this screen saves what is on screen
+  // first, asks before importing, and redraws from the store right after an
+  // import (before the next autosave). Flow and texts: PortableState.
+  let portableSupportState = PortableState.portableSupport(null);
+  let portableImportHold = false;
+  let portableFlowRef = null;
+  let portableOpener = null;
+  // Each /v1/state read (null for an older bridge): what it says about .egdesk files.
+  function portableBridgeObserved(bridgeState) {
+    portableSupportState = PortableState.portableSupport(bridgeState);
+    syncPortableEntryPoints();
+  }
+  function portableExportReady() { return portableSupportState.export; }
+  function portableImportReady() { return portableSupportState.importAsNew; }
+  function portableFlow() {
+    if (!portableFlowRef) portableFlowRef = PortableState.createPortableFlow({
+      // Large files take longer than a Desk save.
+      request: (method, path, body) => deskStoreRequest(method, path, body, { timeoutMs: 180000 }),
+      saveBeforeExport: savePortableExportSource,
+      readFile: readPortableFile,
+      beforeImport: holdDeskForImport,
+      applyImported: applyPortableImport,
+      afterImport: releaseDeskAfterImport,
+      onState: renderPortableDialog,
+    });
+    return portableFlowRef;
+  }
+
+  function syncPortableEntryPoints() {
+    const opener = document.getElementById('egd-desk-menu-open');
+    if (opener) opener.hidden = !portableExportReady() && !portableImportReady();
+    if (opener?.hidden) closeDeskMenu();
+  }
+
+  let deskMenu = null;
+  function closeDeskMenu({ restoreFocus = false } = {}) {
+    const menu = deskMenu;
+    if (!menu) return;
+    deskMenu = null;
+    menu._dispose?.();
+    menu.remove();
+    menu._anchor.setAttribute('aria-expanded', 'false');
+    if (restoreFocus && menu._anchor.isConnected) menu._anchor.focus();
+  }
+
+  // The rail's Desk menu, built like the Board [⋯] menu.
+  function toggleDeskMenu(anchor) {
+    const open = !!deskMenu;
+    closeDeskMenu();
+    if (open || !anchor?.isConnected) return null;
+    const item = (label, title, testid, action) => el('button', {
+      type: 'button', class: 'egd-board-menu-item', role: 'menuitem', title, 'aria-label': title, data: { testid },
+      onclick: (ev) => { ev.stopPropagation(); closeDeskMenu(); action(); },
+    }, label);
+    const items = [
+      portableExportReady() ? item('내보내기…', 'Desk 전체를 .egdesk 파일로 내보내기', 'desk-export', () => openPortableExport({ scope: 'desk' })) : null,
+      portableImportReady() ? item('가져오기…', '.egdesk 파일을 새 사본으로 가져오기', 'desk-import', () => openPortableImport()) : null,
+    ].filter(Boolean);
+    if (!items.length) return null;
+    const pos = resolveFloatingMenuPlacement(anchor.getBoundingClientRect(), 152, items.length * 36 + 4);
+    const menu = el('div', {
+      class: 'egd-board-menu', role: 'menu', 'aria-label': 'Desk 작업', data: { testid: 'desk-menu-list' },
+      style: { left: `${Math.round(pos.left)}px`, top: `${Math.round(pos.top)}px` },
+    }, ...items);
+    menu.addEventListener('keydown', (ev) => {
+      if (ev.key === 'Escape') { ev.preventDefault(); ev.stopPropagation(); closeDeskMenu({ restoreFocus: true }); return; }
+      const current = items.indexOf(document.activeElement);
+      const next = ev.key === 'ArrowDown' ? (current + 1) % items.length : ev.key === 'ArrowUp' ? (current - 1 + items.length) % items.length
+        : ev.key === 'Home' ? 0 : ev.key === 'End' ? items.length - 1 : -1;
+      if (next < 0) return;
+      ev.preventDefault();
+      items[next].focus();
+    });
+    const onOutside = (ev) => { if (!menu.contains(ev.target) && !anchor.contains(ev.target)) closeDeskMenu(); };
+    window.addEventListener('mousedown', onOutside, true);
+    menu._anchor = anchor;
+    menu._dispose = () => window.removeEventListener('mousedown', onOutside, true);
+    document.documentElement.appendChild(menu);
+    anchor.setAttribute('aria-expanded', 'true');
+    deskMenu = menu;
+    items[0].focus();
+    return menu;
+  }
+
+  function openPortableExport({ scope = 'desk', boardId = null, boardTitle = null } = {}) {
+    if (!portableExportReady()) return null;
+    portableOpener = document.activeElement instanceof Element ? document.activeElement : null;
+    return portableFlow().openExport({ scope, boardId, boardTitle });
+  }
+
+  function openPortableImport() {
+    if (!portableImportReady()) return null;
+    portableOpener = document.activeElement instanceof Element ? document.activeElement : null;
+    return portableFlow().openImport({ exportsList: portableSupportState.exportsList });
+  }
+
+  function closePortableDialog() {
+    if (portableFlowRef?.snapshot().busy) return;
+    portableFlowRef?.close();
+    const opener = portableOpener;
+    portableOpener = null;
+    if (opener?.isConnected) opener.focus?.();
+    else document.getElementById('egd-desk-menu-open')?.focus();
+  }
+
+  // What the file holds goes to the store first: the Desk as it is now, or
+  // the Board if it has unsaved changes (or the store has never seen it).
+  async function savePortableExportSource({ scope, boardId }) {
+    const sync = deskStoreSync();
+    if (!sync.status().ready) return { saved: false };
+    if (scope === 'desk') {
+      if (!SurfaceState.canPersistDeskSession(state.surface)) return { saved: false };
+      const result = await sync.saveDesk(serializeDeskSnapshot(), { reason: 'explicit' });
+      return { saved: result?.stored === 'both' };
+    }
+    const projection = Object.values(state.boards.projections).find(item => item.boardId === boardId);
+    if (!projection) return { saved: sync.knownHead(boardId) !== null };
+    if (!projection.dirty && sync.knownHead(boardId) !== null) return { saved: true };
+    if (!saveCurrentAgendaState({ projectionId: projection.id })) return { saved: false };
+    const result = await sync.pendingBoardSave(boardId);
+    return { saved: result?.stored === 'both' };
+  }
+
+  // '다른 파일 선택…': one .egdesk file, read here and sent to the bridge as base64.
+  function readPortableFile() {
+    return new Promise((resolve, reject) => {
+      try {
+        const picker = Cc['@mozilla.org/filepicker;1'].createInstance(Ci.nsIFilePicker);
+        picker.init(window.browsingContext, '가져올 EG-Desk 파일', Ci.nsIFilePicker.modeOpen);
+        picker.appendFilter('EG-Desk 파일', `*${PortableState.PORTABLE_EXTENSION}`);
+        picker.appendFilters(Ci.nsIFilePicker.filterAll);
+        picker.open(async (result) => {
+          try {
+            if (result !== Ci.nsIFilePicker.returnOK || !picker.file) { resolve(null); return; }
+            const file = picker.file;
+            if (file.fileSize > PortableState.PORTABLE_MAX_FILE_BYTES) throw Object.assign(new Error('too large'), { code: 'PORTABLE_FILE_TOO_LARGE' });
+            const bytes = await IOUtils.read(file.path, { maxBytes: PortableState.PORTABLE_MAX_FILE_BYTES + 1 });
+            resolve({ fileName: file.leafName, bytes });
+          } catch (error) { reject(error); }
+        });
+      } catch (error) { reject(error); }
+    });
+  }
+
+  // A Desk file replaces the Desk view: the Desk as it is now becomes a 복구 기록
+  // point first, and autosave waits until the imported Desk is drawn.
+  async function holdDeskForImport({ replacesDesk }) {
+    if (!replacesDesk) return { ok: true };
+    const sync = deskStoreSync();
+    if (!sync.status().ready) return { ok: false };
+    if (SurfaceState.canPersistDeskSession(state.surface)) {
+      const saved = await sync.saveDesk(serializeDeskSnapshot(), { reason: 'explicit' });
+      if (saved?.stored !== 'both') return { ok: false };
+    }
+    portableImportHold = true;
+    state.surface.restoring = true;
+    return { ok: true };
+  }
+
+  function releaseDeskAfterImport() {
+    if (!portableImportHold) return;
+    portableImportHold = false;
+    state.surface.restoring = false;
+    persistDeskSession();
+  }
+
+  // Right after the import: imported Boards join this PC's Board list, the
+  // Desk is drawn from the store, and conversations and Agents are read again.
+  async function applyPortableImport(result) {
+    const sync = deskStoreSync();
+    const reloaded = await sync.reloadAfterImport({ desk: !!result?.desk });
+    const boards = Array.isArray(result?.boards) ? result.boards : [];
+    if (boards.length) {
+      const store = coerceAgendaStore();
+      for (const board of boards) {
+        const latest = await sync.latestBoard(board.boardId);
+        if (latest?.body?.agenda?.id !== board.boardId) continue;
+        const meta = store.meta[board.boardId] || {};
+        const name = latest.title || board.title || latest.body.agenda.title || 'Board';
+        const snapshot = { ...cloneJson(latest.body), savedAt: Date.now() };
+        snapshot.agenda = { ...snapshot.agenda, title: name };
+        store.agendas[board.boardId] = snapshot;
+        store.meta[board.boardId] = { ...meta, id: board.boardId, title: name, createdAt: meta.createdAt || snapshot.savedAt, updatedAt: snapshot.savedAt };
+      }
+      writeAgendaStoreAndSync(store);
+    }
+    let redrawn = true;
+    if (result?.desk) redrawn = reloaded?.state ? await redrawDeskFromState(reloaded.state) : false;
+    if (Array.isArray(result?.chats) && result.chats.length) void state.codexBridge?.loadLocalHistory?.([], { force: true });
+    if (Array.isArray(result?.profiles) && result.profiles.some(item => item?.status === 'imported')) void state.codexBridge?.loadProfiles?.();
+    syncViewportAgendaRail();
+    return { redrawn };
+  }
+
+  // '폴더에서 보기' for a file the bridge named under the home folder.
+  function revealPortableFile(displayPath) {
+    try {
+      if (typeof displayPath !== 'string' || !displayPath.startsWith('~/') || displayPath.includes('..')) throw new Error('path');
+      const file = servicesRef().dirsvc.get('Home', Ci.nsIFile);
+      for (const part of displayPath.slice(2).split('/')) if (part) file.append(part);
+      file.reveal();
+    } catch { boardNotice('파일 위치를 열지 못했습니다. 다운로드 폴더의 EG-Desk 폴더를 확인해 주세요.'); }
+  }
+
+  function renderPortableDialog(view = portableFlowRef?.snapshot()) {
+    let panel = document.getElementById('egd-portable-dialog');
+    if (!view?.open) { panel?.remove(); return; }
+    // Typed values live in the inputs only (never in the flow); keep them across a redraw.
+    const typed = panel ? Object.fromEntries([...panel.querySelectorAll('input[data-field]')].map(input => [input.dataset.field, input.type === 'checkbox' ? input.checked : input.value])) : {};
+    const focusKey = panel?.contains(document.activeElement) ? document.activeElement.dataset?.focusKey : null;
+    if (!panel) {
+      panel = el('section', { id: 'egd-portable-dialog', class: 'egd-store-panel', role: 'dialog', data: { testid: 'portable-dialog' } });
+      panel.addEventListener('keydown', (ev) => {
+        if (ev.key !== 'Escape') return;
+        ev.preventDefault();
+        ev.stopPropagation();
+        closePortableDialog();
+      });
+      panel.addEventListener('mousedown', ev => ev.stopPropagation());
+      document.documentElement.appendChild(panel);
+    }
+    const flow = portableFlow();
+    const content = portableDialogView(view, {
+      typed,
+      onClose: closePortableDialog,
+      onSubmitExport: values => void flow.submitExport(values),
+      onChooseExport: file => void flow.chooseExport(file),
+      onChooseFile: () => void flow.chooseFile(),
+      onReloadExports: () => void flow.loadExports(),
+      onUnlock: passphrase => void flow.unlock(passphrase),
+      onConfirmImport: () => void flow.confirmImport(),
+      onBack: () => flow.back(),
+      onReveal: revealPortableFile,
+    });
+    panel.dataset.mode = view.mode;
+    panel.dataset.step = view.step;
+    panel.setAttribute('aria-label', content.label);
+    panel.setAttribute('aria-busy', String(view.busy));
+    panel.replaceChildren(...content.children.filter(Boolean));
+    const target = (focusKey && panel.querySelector(`[data-focus-key="${focusKey}"]:not([disabled])`))
+      || panel.querySelector('[data-autofocus]:not([disabled])') || panel.querySelector('button:not([disabled])');
+    target?.focus();
+  }
+
+  // The dialog's content for one flow snapshot. Excalidraw's pattern: one clear
+  // primary action per step, a warning before something on screen is replaced,
+  // and a cancelled file choice is not an error.
+  function portableDialogView(view, actions = {}) {
+    const typed = actions.typed || {};
+    const busy = view.busy ? 'true' : null;
+    const head = (title) => el('div', { class: 'egd-store-panel-head' },
+      el('strong', {}, title),
+      el('button', { type: 'button', class: 'egd-store-panel-close', 'aria-label': `${title} 닫기`, disabled: busy, data: { focusKey: 'close', testid: 'portable-close' },
+        onclick: () => actions.onClose?.() }, '×'));
+    const error = view.error ? el('p', { class: 'egd-store-panel-status egd-portable-error', role: 'alert', data: { testid: 'portable-error' } }, view.error) : null;
+    const status = (text) => el('p', { class: 'egd-store-panel-status', role: 'status', data: { testid: 'portable-status' } }, text);
+    const field = (name, label, { autofocus = false, invalid = false } = {}) => {
+      const input = el('input', {
+        type: 'password', class: 'egd-portable-input', autocomplete: 'new-password', spellcheck: 'false', disabled: busy,
+        'aria-invalid': invalid ? 'true' : 'false', data: { field: name, focusKey: `field-${name}`, testid: `portable-${name}`, ...(autofocus ? { autofocus: 'true' } : {}) },
+      });
+      input.value = typeof typed[name] === 'string' ? typed[name] : '';
+      return { input, row: el('label', { class: 'egd-portable-field' }, el('span', { class: 'egd-portable-field-label' }, label), input) };
+    };
+    const doneView = (done, extra = []) => [
+      el('div', { class: 'egd-store-preview', role: 'region', 'aria-label': done.title, data: { testid: 'portable-done' } },
+        done.where ? el('strong', { class: 'egd-portable-where' }, done.where) : null,
+        el('p', {}, done.summary),
+        ...done.notes.map(note => el('p', { class: 'egd-portable-note', data: { testid: 'portable-note' } }, note))),
+      el('div', { class: 'egd-store-actions' }, ...extra,
+        el('button', { type: 'button', class: 'egd-store-primary', data: { focusKey: 'done', testid: 'portable-done-close', autofocus: 'true' }, onclick: () => actions.onClose?.() }, '닫기')),
+    ];
+
+    if (view.mode === 'export') {
+      const title = view.scope === 'board' ? `Board '${view.boardTitle}' 내보내기` : 'Desk 내보내기';
+      if (view.step === 'done' && view.done) {
+        const reveal = typeof view.done.where === 'string' && view.done.where.startsWith('~/')
+          ? el('button', { type: 'button', data: { focusKey: 'reveal', testid: 'portable-reveal' }, onclick: () => actions.onReveal?.(view.done.where) }, '폴더에서 보기') : null;
+        return { label: view.done.title, children: [head(view.done.title), ...doneView(view.done, reveal ? [reveal] : [])] };
+      }
+      const pass = field('passphrase', '암호 (선택 · 8자 이상)', { autofocus: true, invalid: view.errorField === 'passphrase' });
+      const confirm = field('confirm', '암호 확인', { invalid: view.errorField === 'confirm' });
+      const chats = el('input', { type: 'checkbox', disabled: busy, data: { field: 'includeChats', focusKey: 'field-includeChats', testid: 'portable-include-chats' } });
+      chats.checked = typeof typed.includeChats === 'boolean' ? typed.includeChats : view.includeChats === true;
+      const warning = el('p', { class: 'egd-portable-warning', role: 'note', data: { testid: 'portable-plain-warning' } }, PortableState.PORTABLE_PLAIN_WARNING);
+      const submit = el('button', { type: 'button', class: 'egd-store-primary', disabled: busy, data: { focusKey: 'submit', testid: 'portable-export-submit' },
+        onclick: () => actions.onSubmitExport?.({ passphrase: pass.input.value, confirm: confirm.input.value, includeChats: chats.checked }) });
+      const sync = () => {
+        const plain = !pass.input.value;
+        warning.hidden = !plain;
+        confirm.row.hidden = plain;
+        submit.textContent = plain ? '암호 없이 내보내기' : '암호로 잠가 내보내기';
+      };
+      pass.input.addEventListener('input', sync);
+      for (const input of [pass.input, confirm.input]) input.addEventListener('keydown', (ev) => { if (ev.key === 'Enter') { ev.preventDefault(); submit.click(); } });
+      sync();
+      return { label: title, children: [
+        head(title),
+        el('p', { class: 'egd-store-panel-copy' }, view.scope === 'board'
+          ? '이 Board를 .egdesk 파일 하나로 저장합니다. 다른 PC나 다른 EG-Desk에서 가져오면 새 사본으로 들어갑니다.'
+          : 'Desk와 저장된 Board를 .egdesk 파일 하나로 저장합니다. 다른 PC나 다른 EG-Desk에서 가져오면 새 사본으로 들어갑니다.'),
+        el('label', { class: 'egd-portable-check' }, chats, el('span', {}, '대화 기록 포함'),
+          el('small', {}, '꺼 두면 대화 내용은 파일에 넣지 않습니다.')),
+        pass.row, confirm.row, warning,
+        el('p', { class: 'egd-store-panel-copy egd-portable-small' }, '파일은 EG-Desk 내보내기 폴더에 저장되고, 같은 이름의 파일은 덮어쓰지 않습니다. 비밀번호·계정 정보는 넣지 않습니다.'),
+        view.step === 'saving' ? status('지금 화면을 먼저 저장하는 중…') : view.step === 'exporting' ? status('파일을 만드는 중…') : null,
+        error,
+        el('div', { class: 'egd-store-actions' }, submit,
+          el('button', { type: 'button', disabled: busy, data: { focusKey: 'cancel', testid: 'portable-cancel' }, onclick: () => actions.onClose?.() }, '취소')),
+      ] };
+    }
+
+    // Import
+    if (view.step === 'done' && view.done) return { label: view.done.title, children: [head(view.done.title), ...doneView(view.done)] };
+    const back = el('button', { type: 'button', disabled: busy, data: { focusKey: 'back', testid: 'portable-back' }, onclick: () => actions.onBack?.() }, '다른 파일 고르기');
+    if (view.step === 'locked') {
+      const pass = field('unlockPassphrase', '암호', { autofocus: true, invalid: view.errorField === 'passphrase' });
+      const unlock = el('button', { type: 'button', class: 'egd-store-primary', disabled: busy, data: { focusKey: 'unlock', testid: 'portable-unlock' },
+        onclick: () => actions.onUnlock?.(pass.input.value) }, '확인');
+      pass.input.addEventListener('keydown', (ev) => { if (ev.key === 'Enter') { ev.preventDefault(); unlock.click(); } });
+      return { label: '암호로 잠긴 파일', children: [
+        head('암호로 잠긴 파일'),
+        el('p', { class: 'egd-store-panel-copy' }, [view.source?.fileName, view.preview?.sizeText].filter(Boolean).join(' · ')),
+        el('p', { class: 'egd-store-panel-copy' }, '내보낼 때 정한 암호를 입력하면 안을 확인합니다. 암호는 저장하지 않습니다.'),
+        pass.row,
+        view.busy ? status('파일을 확인하는 중…') : null,
+        error,
+        el('div', { class: 'egd-store-actions' }, unlock, back),
+      ] };
+    }
+    if (view.step === 'preview' || view.step === 'importing') {
+      const preview = view.preview || {};
+      return { label: '가져오기 전 확인', children: [
+        head('가져오기 전 확인'),
+        el('div', { class: 'egd-store-preview', role: 'region', 'aria-label': '파일 내용', data: { testid: 'portable-preview' } },
+          el('strong', {}, preview.headline || ''),
+          el('p', { data: { testid: 'portable-preview-summary' } }, preview.summary || ''),
+          view.source?.fileName ? el('p', { class: 'egd-portable-small' }, view.source.fileName) : null),
+        preview.effect ? el('p', { class: `egd-portable-effect egd-portable-effect-${preview.effect.tone}`, role: preview.effect.tone === 'warning' ? 'alert' : 'note',
+          data: { testid: 'portable-effect', tone: preview.effect.tone } }, preview.effect.text) : null,
+        view.step === 'importing' ? status('가져오는 중…') : null,
+        error,
+        el('div', { class: 'egd-store-actions' },
+          el('button', { type: 'button', class: 'egd-store-primary', disabled: busy, data: { focusKey: 'confirm', testid: 'portable-import-confirm', autofocus: 'true' },
+            onclick: () => actions.onConfirmImport?.() }, preview.confirmLabel || '새 사본으로 가져오기'),
+          back,
+          el('button', { type: 'button', disabled: busy, data: { focusKey: 'cancel', testid: 'portable-cancel' }, onclick: () => actions.onClose?.() }, '취소')),
+      ] };
+    }
+    // choose / checking
+    const files = view.files;
+    const list = view.exportsList ? el('div', { class: 'egd-portable-files', role: 'group', 'aria-label': '내보낸 파일', data: { testid: 'portable-files' } },
+      el('p', { class: 'egd-store-panel-copy' }, `최근 내보낸 파일 · ${files?.folder || '내보내기 폴더'}`),
+      view.filesStatus === 'loading' ? status('목록을 불러오는 중…') : null,
+      view.filesStatus === 'error' ? el('button', { type: 'button', class: 'egd-store-more', disabled: busy, data: { focusKey: 'reload' }, onclick: () => actions.onReloadExports?.() }, '목록 다시 불러오기') : null,
+      files?.empty ? el('p', { class: 'egd-store-panel-copy', data: { testid: 'portable-files-empty' } }, '아직 내보낸 파일이 없습니다.') : null,
+      files && !files.empty ? el('div', { class: 'egd-store-list' }, ...files.rows.map((row, index) => el('button', {
+        type: 'button', class: 'egd-store-row egd-portable-file', disabled: busy, 'aria-label': `${row.fileName} · ${row.meta} 확인하기`,
+        data: { testid: 'portable-file', fileName: row.fileName, focusKey: `file-${index}` },
+        onclick: () => actions.onChooseExport?.({ fileRef: row.source.fileRef }),
+      }, el('span', { class: 'egd-store-row-time' }, row.fileName), el('span', { class: 'egd-store-row-meta' }, row.meta)))) : null) : null;
+    return { label: '가져오기', children: [
+      head('가져오기'),
+      el('p', { class: 'egd-store-panel-copy' }, '.egdesk 파일을 먼저 확인한 뒤 새 사본으로 가져옵니다. 지금 있는 Board와 대화는 덮어쓰지 않습니다.'),
+      list,
+      view.step === 'checking' ? status('파일을 확인하는 중…') : null,
+      error,
+      el('div', { class: 'egd-store-actions' },
+        el('button', { type: 'button', class: 'egd-store-primary', disabled: busy, data: { focusKey: 'pick', testid: 'portable-pick-file', autofocus: 'true' },
+          onclick: () => actions.onChooseFile?.() }, '다른 파일 선택…'),
+        el('button', { type: 'button', disabled: busy, data: { focusKey: 'cancel', testid: 'portable-cancel' }, onclick: () => actions.onClose?.() }, '취소')),
+    ] };
   }
 
   function syncDeskHistoryOpener() {

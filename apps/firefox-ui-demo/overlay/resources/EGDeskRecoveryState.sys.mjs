@@ -421,11 +421,22 @@ export function createDeskStoreSync({ request, readRawDesk = () => null, readAge
   }
 
   /** Board save (saveCurrentAgendaState): expectedRevision is the head this window knows, null for a new Board. */
-  async function saveBoard(boardId, body, { title } = {}) {
+  async function sendBoard(boardId, body, { title } = {}) {
     if (!ready()) return notReady();
     if (!DESK_STORE_BOARD_ID.test(boardId || '')) return { stored: 'prefs', skipped: 'board-id' };
     try { return await putBoard(boardId, body, title, heads.has(boardId) ? heads.get(boardId) : null); }
     catch { return { stored: 'prefs', error: 'BOARD_BODY_UNREADABLE' }; }
+  }
+  const boardSaves = new Map();
+  function saveBoard(boardId, body, options = {}) {
+    const pending = sendBoard(boardId, body, options);
+    boardSaves.set(boardId, pending);
+    void pending.then(() => { if (boardSaves.get(boardId) === pending) boardSaves.delete(boardId); });
+    return pending;
+  }
+  /** RT-03: the newest save of this Board still on its way (null when none), so an export waits for it. */
+  function pendingBoardSave(boardId) {
+    return boardSaves.get(boardId) || null;
   }
 
   /** After a conflict the person chose to keep theirs: a new version on top of the latest head. */
@@ -480,9 +491,32 @@ export function createDeskStoreSync({ request, readRawDesk = () => null, readAge
       unchanged: response.body?.unchanged === true };
   }
 
+  /**
+   * RT-03: after a .egdesk import wrote the store, read it back before the next
+   * autosave: the Desk to draw (state null when the import left it alone) and
+   * the Board heads, so later saves build on the imported versions.
+   */
+  async function reloadAfterImport({ desk = true } = {}) {
+    if (!ready()) return { unavailable: true };
+    let state = null;
+    if (desk) {
+      const current = await call('GET', '/v1/desk/current');
+      if (!ok(current) || !isPlainObject(current.body?.state)) return { error: codeOf(current) };
+      state = current.body.state;
+      lastLayout = null;
+      set({ generation: current.body.generation ?? status.generation, lastSavedAt: now() });
+    }
+    const boards = await call('GET', '/v1/boards');
+    if (!ok(boards)) return { error: codeOf(boards), state };
+    for (const board of boards.body?.boards || []) {
+      if (DESK_STORE_BOARD_ID.test(board?.boardId) && Number.isSafeInteger(board.headRevision)) heads.set(board.boardId, board.headRevision);
+    }
+    return { reloaded: true, state, generation: status.generation };
+  }
+
   return {
-    observeBridge, markOffline, saveDesk, generations, generation, restoreGeneration,
-    saveBoard, saveBoardAsNewVersion, latestBoard, boardRevisions, boardRevision, revertBoard,
+    observeBridge, markOffline, saveDesk, generations, generation, restoreGeneration, reloadAfterImport,
+    saveBoard, pendingBoardSave, saveBoardAsNewVersion, latestBoard, boardRevisions, boardRevision, revertBoard,
     status: snapshot, knownHead: boardId => heads.get(boardId) ?? null,
   };
 }
