@@ -42,6 +42,12 @@
 | 2026-10-24 | AGENT-04 도구 권한 상한, AGENT-02/CHAT-02 편집·점검표, CHAT-07 프로필 미리보기, AGENT-05 작업 중 버블 | → 완료/일부 | `a0b6ea2`·`9ce901c`·`18e8d7e`. 상한은 실제 Codex 일회성 쓰레드로 설정 수용·컴퓨터 조작 플러그인 차단 확인. AGENT-05의 Browser 카드 Agent 배지 외 부분은 남음 |
 | 2026-10-24 | CU-06 Codex 컴퓨터 조작 조사, CU-07 가시화·끄기 스위치 | → 완료/일부 | `4947219`·`7ddb434`. 일반 대화가 Codex 컴퓨터 조작 플러그인을 물려받음을 실측. 끄기 스위치(기본 inherit)와 readback 확인. 기본값은 대표님 결정 대기 |
 | 2026-10-24 | CTX-03 맥락 후보 해석기 | → 일부 | `b6b48b9`. 제안만·동의 필요·계정 범위 제외·원문 없는 기록. 화면 연결 남음 |
+| 2026-10-24 | CU-07 컴퓨터 조작 사용 기록(결정 Q1 (다) 후속) | 일부 → 일부(helper) | `0387f73`. Codex 컴퓨터 조작 호출마다 크기만 기록(인자 바이트·결과 이미지 수·결과 글자 바이트, 내용 없음), run별 `computerUse`(호출 수·마지막 시각·서버·진행 중), 바뀔 때마다 'computer.used' 이벤트, run.started에 컴퓨터 조작 정책 기록, 활동 행 제목 '컴퓨터 조작 · {도구}'. helper 단위 codex-computer-control 17/17. 화면 연결은 진행 중. 실제 모델 왕복은 미검증 |
+| 2026-10-24 | RT-03 .egdesk 내보내기·가져오기 | 일부 → 일부(helper HTTP) | `2f9b030`. 브리지에 내보내기·미리보기·가져오기·목록 HTTP(`/v1/portable/export·inspect·import`, `GET /v1/portable/exports`). Desk 또는 Board 묶음, 암호 선택, 대화·Profile은 기본 제외, 비밀값·계정 식별자 제외, `~/Downloads/EG-Desk`에 덮어쓰지 않고 저장, 파일 전체를 확인한 뒤 새 사본으로만 가져옴(겹치는 id는 참조와 함께 새 id). helper 테스트 754/762(실패 0), 그중 portable HTTP 10/10. 화면(내보내기·가져오기 패널) 연결은 진행 중. 실제 Firefox 창에서는 미검증 |
+| 2026-10-24 | CTX-03 맥락 후보, CTX-04 볼 자료와 고른 이유 | 일부 → 일부(화면 연결) | `0943557`(해석기 `b6b48b9` 위). Chat 입력칸에 들어가면 화면 신호로 후보를 물어 입력 트레이 위에 '이것도 붙일까요?'를 띄움. 고른 것만 붙음(로그인된 페이지는 따로 확인, 다른 계정은 흐리게 제외). 보낼 때 해석 결과가 함께 가고, 활동 기록에 Agent가 볼 자료와 고른 이유가 남음. 중앙 회귀 771/771, headless UI 회귀 274/274. headless 대화 흐름은 첫 화면 회귀로 실패 → 수정 진행 중. 실제 Firefox 창·실제 모델로는 미검증 |
+| 2026-10-24 | CTX-01 Board 버전·충돌, CTX-02 복구 기록, RT-07 Desk 저장소 | 일부 → 일부(저장소·화면 연결) | `35f772c`(로컬 SQLite 저장소, helper 720/728) 위에 `0943557`(화면). 브리지에 저장소가 있으면 기존 prefs를 한 번 가져오고(prefs는 남김), 자동 저장·Board 저장이 저장소에도 감. 복구 기록 패널에서 시점을 미리 보고 되돌리거나 합침. Board 메뉴에 버전 기록·되돌리기, 저장 충돌 시 덮어쓰지 않고 물어봄. 검증은 위 행과 같음(headless 대화 흐름 실패 → 수정 중). 보존 개수·기간은 임시값(결정 대기). 실제 Firefox 창·비정상 종료 복구는 미검증 |
+| 2026-10-24 | (검증 기반) helper 테스트 정리 경합 | 간헐 실패 수정 | `d6dc3f5`. task-native 시험이 불확실 기록 저장이 끝나기 전에 임시 폴더를 지워 드물게 ENOTEMPTY로 실패하던 것을 고침. 제품 변경 없음 |
+| 2026-10-24 | (문서) REA 구현 메커니즘 채택안, BRW-10 원인 정정 | 문서 추가·정정 | `6a07111`. [rea-mechanism-adoption.md](../../docs/references/rea-mechanism-adoption.md): REA 브라우저 조작(웹1~10)·Mac 조작(맥1~11) 방식을 Firefox·macOS 공개 API로 옮기는 안, 구현 묶음 가~차, 대표님 결정 12건. 소스 읽기 조사만이고 Firefox·Mac에서 실행 확인한 항목은 0개. 이 문서 2장에 따라 BRW-10 원인을 '포인터 순서·좌표 없음'으로 정정하고, BRW-09/10/12/13·CU-01~05에 해당 줄 링크 |
 
 ## 대표님 결정이 필요한 것
 
@@ -567,15 +573,17 @@ Chat·Agent·캐릭터성 영역은 "고른 프로필을 실제 지침으로 보
 - 빠진 것: DOM 텍스트만 관찰하므로 캔버스·이미지·차트 위주 페이지를 Agent가 이해하지 못함.
 - 환경 제약: headless에서는 캡처 미지원이라 시각 검증은 실제 창 Firefox 실행이 필요.
 - 구현 스케치: EGDeskBrowserAgentRuntimeParent 또는 chrome 측에서 browsingContext.currentWindowGlobal.drawSnapshot으로 카드 viewport 캡처, 민감 입력 영역 mask 후 이미지 contentItem으로 반환하는 egdesk_browser_screenshot spec 추가(runtime.mjs, provider.mjs).
+- REA 메커니즘 채택안: [docs/references/rea-mechanism-adoption.md](../../docs/references/rea-mechanism-adoption.md) 웹6(카드 스크린샷, 결정 3 대기·묶음 다)
 
-### BRW-10 — DOM click을 무시하는 사이트를 위한 좌표/trusted 입력 fallback
+### BRW-10 — DOM click에 반응하지 않는 사이트를 위한 좌표·포인터 순서 입력(사람처럼 누르기)
 
-- 출처: REA §6 EG-02, §7 R-04; 계약 impl-e24-computer-use
+- 출처: REA §6 EG-02, §7 R-04; 계약 impl-e24-computer-use; [rea-mechanism-adoption.md](../../docs/references/rea-mechanism-adoption.md) 2장 1·2번
 - 상태: 없음 · 크기 L · 선행: BRW-08, BRW-09
-- 근거: guarded click은 dom-click-no-pointerdown만 사용(EGDeskBrowserAgentRuntimeChild.sys.mjs:536-547). 좌표 입력 sendMouseEventToWindow는 legacy 비보호 경로에만 있음(:548-560). 도구 설명(runtime.mjs:31)도 'A site may ignore synthetic clicks'라고 명시. REA §7 R-04: frame·OS DPR·좌표 입력 조합 UNVERIFIED, EGQ7 coordinateInputVerified:false.
-- 빠진 것: 합성 클릭을 거부하는 사이트에서 Agent 클릭이 효과 없음. 좌표 입력의 page zoom·DPR·frame 조합 검증 없음.
+- 근거: guarded click은 `dom-click-no-pointerdown` 경로 하나다(EGDeskBrowserAgentRuntimeChild.sys.mjs:1105-1107의 `target.click()`). actor child가 system 코드로 부르므로 Gecko는 이 클릭을 trusted로 표시한다. 하지만 click 이벤트 하나뿐이고 pointerdown·mousedown·mouseup·hover·좌표가 없다(rea-mechanism-adoption.md 2장 1번, 확신 높음~중간). 좌표 입력 `sendMouseEventToWindow`는 legacy 비보호 경로에만 있다(:1116-1120). 이 API는 Firefox ESR 140에만 있고 Firefox 153 ESR·159 release에서는 제거되어, 그 경로는 오류 없이 `dispatchEvent`로 떨어진다. 이렇게 보낸 이벤트는 untrusted이고 영수증에는 `dispatchScope: "dom-fallback"`(:1140)으로만 남는다(같은 문서 2장 2번). 도구 설명(egdesk-browser-tool-runtime.mjs:45, 조사 당시 :31)의 'A site may ignore synthetic clicks'도 원인을 '합성'으로 적고 있어 정정 후보다. REA §7 R-04: frame·OS DPR·좌표 입력 조합 UNVERIFIED, EGQ7 coordinateInputVerified:false.
+- 빠진 것: 포인터 순서(pointerdown·mousedown·mouseup)나 좌표·hover에 반응하는 메뉴·버튼에서 Agent 클릭이 효과 없음. 지금 Firefox(153 ESR·159)에서 쓸 수 있는 trusted 좌표 입력 경로(`synthesizeMouseEvent`)가 없음. 좌표 입력의 page zoom·DPR·frame 조합 검증 없음.
 - 환경 제약: OS 화면 배율·전면 전환 조합 실험은 사용자 승인 필요(REA §7: OS 전면 실험 보류).
-- 구현 스케치: Child perform에 guarded coordinate 경로 추가(관찰 revision·viewport·DPR·zoom 일치 시에만, 변경 시 좌표 폐기). 실패 후 자동 재시도 금지 규칙(EG-01) 유지. EGQ7 하네스를 확장해 zoom/DPR 조합 시험.
+- 구현 스케치: Child perform에 guarded coordinate 경로 추가(관찰 revision·viewport·DPR·zoom 일치 시에만, 변경 시 좌표 폐기). 실패 후 자동 재시도 금지 규칙(EG-01) 유지. DOM click 결과가 미확인일 때 이 경로로 자동 전환하지 않는다. EGQ7 하네스를 확장해 zoom/DPR 조합 시험.
+- 다음 단계: REA 메커니즘 채택안 [rea-mechanism-adoption.md](../../docs/references/rea-mechanism-adoption.md) 웹1(사람처럼 누르기: `synthesizeMouseEvent`로 move→down→up, 기존 click은 그대로 두고 새 도구로만)·웹2(사람처럼 키 입력: `nsITextInputProcessor`). 둘 다 대표님 결정 1·2 대기(묶음 라).
 
 ### BRW-11 — Browser 조작 권한 수명(BROWSER-CARD-GRANT-01)과 여러 턴 연속 조작
 
@@ -594,6 +602,7 @@ Chat·Agent·캐릭터성 영역은 "고른 프로필을 실제 지침으로 보
 - 빠진 것: EG-Desk에 직접 해당하는 것은 R-01(같은 시계로 command ID·dispatch·timeout 연결)과 R-04(Gecko 조합). R-02/R-03/R-05는 OpenAI 앱 분석이라 제품 선행조건 아님.
 - 환경 제약: R-01 전환 재현·R-02·R-04 OS 배율 조합은 통제된 OS 전면 전환이 필요(사용자 승인 대상).
 - 구현 스케치: R-01: helper/codex-browser-tool-transport.mjs와 actor 영수증에 단조시계 timestamp·command ID를 붙여 소유 fixture에서 timeout 후 수신 여부 기록. R-04: EGQ7 하네스에 iframe·다른 zoom 조합 추가(배경 시험은 승인 범위 내).
+- REA 메커니즘 채택안: [docs/references/rea-mechanism-adoption.md](../../docs/references/rea-mechanism-adoption.md) 웹4·웹8·웹9·웹10(문서 번호 교차 확인, 시간 예산·보내기 전/후 구분, 문서 준비 대기, 요청 순번·같은 시계 기록 — 결정 불필요, 묶음 가), 웹1·웹3·웹5·웹7(결정 1·2·4·5·6 대기)
 
 ### BRW-13 — Desk 안에서 보이는 Agent 브라우저 활동: 카드별 행동 타임라인, 지속 표시, 사람의 일시중지/직접 조작 전환
 
@@ -602,6 +611,7 @@ Chat·Agent·캐릭터성 영역은 "고른 프로필을 실제 지침으로 보
 - 근거: 카드 상태 텍스트가 4초 후 사라짐(eg-desk-surface.uc.js:10657-10666, 12159-12185), 표시 전용 target marker(:10775-10777, createBrowserAgentProjection :10268, 커밋 96e1a74), 행동 이력 API browserAgent.history(:14013) 존재. Stop은 Chat에서만.
 - 빠진 것: 카드에 남는 행동 타임라인 UI, 'Agent 조작 중' 지속 배지, 카드에서 바로 일시중지·직접 조작·돌려주기 버튼이 없음. (A)/(B) 하위 Agent 진행 표시와는 별개 항목.
 - 구현 스케치: eg-desk-surface.uc.js 카드 identity slot에 활동 배지·타임라인 popover 추가(browserAgent.history 데이터 사용). 카드 헤더에 일시중지/중지 버튼을 두고 기존 Chat Stop·lease 철회 경로(browserToolStoppedRuns :10068, browserToolCardLeases :10070) 재사용.
+- REA 메커니즘 채택안: [docs/references/rea-mechanism-adoption.md](../../docs/references/rea-mechanism-adoption.md) 웹7(표시점 이동, 결정 5 대기·묶음 마)
 
 ### BRW-14 — 실제 모델로 일반(외부) 사이트에서 브라우저 도구 E2E 검증
 
@@ -621,6 +631,7 @@ Chat·Agent·캐릭터성 영역은 "고른 프로필을 실제 지침으로 보
 - 빠진 것: 관찰 View, 제어자 표시, 타임라인, 결과 확인 UI 전부 없음.
 - 환경 제약: 실제 앱 관찰은 macOS 화면 기록 권한이 필요.
 - 구현 스케치: overlay/JS/eg-desk-surface.uc.js에 kind:'host-activity' Desk Window 추가(spawnDeskWindowShell 재사용). helper에 host bridge 이벤트 스트림(SSE) 추가해 프레임·행동·lease 상태 전달. 결과 검증은 browser postcondition 패턴(runtime.mjs:95-97)을 일반화.
+- REA 메커니즘 채택안: [docs/references/rea-mechanism-adoption.md](../../docs/references/rea-mechanism-adoption.md) 맥10(Codex 조작 중 감독 — 관찰은 Q1 (다) 범위라 지금 가능, 자동 중지만 결정 10), 맥3·맥4·맥6·맥7·맥9(포인터 표시, 앞 앱 되돌리기, 사람이 손대면 양보, 앱 하나만 중지, 창 하나만 캡처 — 결정 7(Q3) 전제)
 
 ### CU-02 — Desk 밖 computer-use의 control-lease 모델 (입력권 확보·양보·회수, epoch, deadline, 사람 입력과 비중첩)
 
@@ -631,6 +642,7 @@ Chat·Agent·캐릭터성 영역은 "고른 프로필을 실제 지침으로 보
 - 결정: HUM-COLLAB-001(OPEN): PC 제어 위임 주체·범위·기간을 정해야 함.
 - 환경 제약: 사람 입력 감지는 macOS 입력 모니터링/손쉬운 사용 권한 필요.
 - 구현 스케치: helper/에 host-lease 모듈(run·target·epoch·deadline·grant) 추가, browser lease 코드의 epoch/tombstone 규칙 이식. UI는 CU-01 view와 Chat Stop에 연결.
+- REA 메커니즘 채택안: [docs/references/rea-mechanism-adoption.md](../../docs/references/rea-mechanism-adoption.md) 맥5(앱별 차례 줄)·맥6(사람이 손대면 양보)·맥2(그 앱에만 보내는 입력)·맥4(앞 앱 되돌리기). 결정 7(Q3)·11 전제
 
 ### CU-03 — macOS native adapter: 선택 창 캡처(ScreenCaptureKit) + 접근성(AX) action 우선 + CGEvent 좌표 입력 fallback
 
@@ -641,6 +653,7 @@ Chat·Agent·캐릭터성 영역은 "고른 프로필을 실제 지침으로 보
 - 결정: 자체 adapter를 만들지, Codex Computer Use 앱(CU-06)에 맡길지 결정 필요.
 - 환경 제약: macOS 화면 기록·손쉬운 사용 권한과 실제 데스크톱(OS 전면 입력) 필요.
 - 구현 스케치: helper/macos-gesture-helper(Swift Package) 또는 helper-rust에 capture/ax/input 명령 추가, Node helper가 JSON-RPC로 호출. 행동 순서 identity→권한→lease→관찰 revision→전제 검사→입력→readback(계약 L2589) 준수.
+- REA 메커니즘 채택안: [docs/references/rea-mechanism-adoption.md](../../docs/references/rea-mechanism-adoption.md) 맥1(권한을 가진 별도 도우미 앱, 결정 8·9)·맥2(그 앱에만 보내는 입력, 결정 7·11·12)·맥8(권한 3종과 앱별 승인)·맥9(창 하나만 캡처). 채택안은 기존 gesture helper·helper-rust를 키우지 않고 새 도우미 앱으로 만들자고 권한다(같은 문서 2장 4번)
 
 ### CU-04 — 격리 실행 우선(가상 디스플레이·VM·분리 데스크톱), 사용자 활성 데스크톱 제어 전 명시적 handoff
 
@@ -651,6 +664,7 @@ Chat·Agent·캐릭터성 영역은 "고른 프로필을 실제 지침으로 보
 - 결정: 격리 방식(macOS VM, 별도 사용자 세션, 클라우드 VM 등)과 비용·성능 허용 범위를 정해야 함.
 - 환경 제약: VM·가상 디스플레이 등 OS/외부 인프라가 있어야 구현·검증 가능.
 - 구현 스케치: helper에 execution-surface 추상화(local-active/isolated) 추가, isolated가 없을 때 handoff 대화상자를 거쳐서만 local-active lease 발급. UI는 CU-01 view의 범위 확인 단계로 구현.
+- REA 메커니즘 채택안: [docs/references/rea-mechanism-adoption.md](../../docs/references/rea-mechanism-adoption.md) 맥1(별도 도우미 앱)·맥4(앞 앱 되돌리기)·맥8(권한 3종과 앱별 승인). 결정 7(Q3)·8·9 전제
 
 ### CU-05 — 전역 긴급 중지 키(Ctrl+Alt+Shift+.)와 별도 watchdog 프로세스의 fail-closed 입력 gate
 
@@ -660,6 +674,7 @@ Chat·Agent·캐릭터성 영역은 "고른 프로필을 실제 지침으로 보
 - 빠진 것: Agent 입력을 즉시 끊는 물리 경로가 없음.
 - 환경 제약: macOS 입력 모니터링 권한과 실제 키보드 입력 필요.
 - 구현 스케치: macos-gesture-helper에 CGEventTap 기반 chord 감지 추가, 감지 시 helper host-lease epoch 증가·대기 입력 폐기·안전 key-up 후 ACK. watchdog 연결 상실 시 입력 차단.
+- REA 메커니즘 채택안: [docs/references/rea-mechanism-adoption.md](../../docs/references/rea-mechanism-adoption.md) 맥11(감시 프로세스와 긴급 중지 키)·맥7(앱 하나만 중지)·맥5(앱별 차례 줄)·맥6(사람이 손대면 양보)·맥1(별도 도우미 앱). 채택안은 gesture helper가 아니라 새 도우미 앱에 둔다. 결정 7(Q3) 전제
 
 ### CU-06 — Codex Computer Use 앱/Codex 쪽 browser·computer-use 연동 가능성
 
@@ -679,6 +694,8 @@ Chat·Agent·캐릭터성 영역은 "고른 프로필을 실제 지침으로 보
 - 빠진 것: 일반 thread에서 외부 브라우저·데스크톱 제어 MCP가 EG-Desk lease·guard 없이 호출될 수 있고, 어떤 제어 도구가 활성인지 사용자에게 보이지 않음.
 - 결정: 일반 대화에서 사용자 Codex MCP 상속을 허용·차단·선택 허용 중 무엇으로 할지 결정.
 - 구현 스케치: egdesk-native-capabilities.mjs buildCodexAppServerLaunch에 MCP 정책 옵션 추가(-c mcp_servers.<name>.enabled=false 등, 공식 설정 키는 Codex 문서로 확인 필요). 설정 화면에 상속 MCP 목록·토글 추가.
+- 진행(2026-10-24): 물려받은 MCP 이름·상태·종류 표시(`6126e93`·`135a97e`), 컴퓨터 조작 도구 분류·끄기 스위치(기본 inherit, `4947219`·`7ddb434`), 대표님 결정 Q1 (다) 기록(`6585727`: 일반 대화의 Codex 컴퓨터 조작은 켜 둔 채 표시 보강, 끄기 스위치는 설정 선택지로 유지). 그 후속으로 사용 기록 helper(`0387f73`): 호출마다 크기만 기록(인자 바이트·결과 이미지 수·결과 글자 바이트, 내용 없음), run별 `computerUse`(호출 수·마지막 시각·서버·진행 중), 'computer.used' 이벤트, run.started에 정책 기록, 활동 행 제목 '컴퓨터 조작 · {도구}'. helper 단위 codex-computer-control 17/17.
+- 남은 것(2026-10-24): 사용 기록의 화면 연결(진행 중). 실제 모델 왕복 미검증. 컴퓨터 조작 외 물려받은 MCP(playwright·firefox-devtools 등)의 차단 정책은 이 원장에 결정 기록 없음. OS 수준 관찰(앞 앱 변화·OpenAI 조작 서비스 실행)은 REA 채택안 맥10.
 
 ### CU-08 — 원격 host-activity 스트리밍·identity·authorization은 외부 인프라 승인 게이트 뒤에 둠
 
@@ -1029,6 +1046,8 @@ The SQLite-first persistence choice is already adopted in the CONTRACT (L79-80, 
 - 빠진 것: The vision checkbox is not updated to match the CONTRACT decision. Desk, Board and recovery are not on the SQLite generation model (the whole snapshot is kept as a single prefs string). Context and task stores are separate JSON stores. The sync backend is undecided.
 - 결정: The sync backend (PocketBase / Convex / none) is external infrastructure, so it is the owner's decision. SQLite-first local storage is already adopted in the CONTRACT, so only updating the vision checkbox needs confirmation.
 - 구현 스케치: Add helper/egdesk-desk-store.mjs (node:sqlite, generation, seq/parentSeq/stateHash) with /v1/desk HTTP routes. Change eg-desk-surface.uc.js persistDeskSession and saveCurrentAgendaState to bridge calls, and import existing prefs once while keeping the originals. Keep a prefs fallback for when the bridge is offline. Update vision L230.
+- 진행(2026-10-24): `35f772c` — helper/egdesk-desk-store.mjs·egdesk-desk-http.mjs(로컬 SQLite, 비공개 폴더·0600, `POST /v1/desk/import`로 prefs 1회 가져오기, 저장소를 못 열어도 브리지는 계속 동작). helper 720/728. `0943557` — 화면이 저장소에 연결: prefs를 한 번 가져오고(prefs는 남김), 자동 저장·Board 저장이 저장소에도 감. 중앙 회귀 771/771, headless UI 회귀 274/274.
+- 남은 것(2026-10-24): context 저장소·task 저장소는 여전히 별도 JSON(두 커밋 범위 밖). 동기화 백엔드 미결정. 비전 체크박스 미갱신. headless 대화 흐름 첫 화면 회귀 수정 진행 중. 실제 Firefox 창 미검증.
 
 ### CTX-02 — Automatically journaled Desk recovery surface (journal of generations and a browsable recovery list)
 
@@ -1038,6 +1057,8 @@ The SQLite-first persistence choice is already adopted in the CONTRACT (L79-80, 
 - 빠진 것: Saving is a single snapshot overwrite, not a generation journal (sessionId/seq/parentSeq/stateHash), so a normal but unwanted state (e.g. many cards closed by mistake) cannot be rolled back. The recovery UI exposes only the latest record; there is no list to browse.
 - 결정: How long and how many recovery generations to keep (disk use).
 - 구현 스케치: Use the RT-07 desk store generations. Extend EGDeskRecoveryState to list generations. Change renderDeskRecoveryNotice into a recovery list panel (time, card count, reason). Restore merges additively, reusing missingDeskRecoveryViews.
+- 진행(2026-10-24): 저장소 `35f772c` — Desk 자동 저장이 세대로 쌓임(같은 내용이면 새 세대 없음, 오래된 parent는 409와 head 반환, 어느 세대든 새 세대로 복원). helper 720/728. 화면 `0943557` — 브리지에 저장소가 있으면 prefs를 한 번 가져오고(prefs는 남김) 자동 저장이 저장소에도 감. 복구 기록 패널에서 세대를 미리 보고 되돌리거나 합침. 중앙 회귀 771/771, headless UI 회귀 274/274.
+- 남은 것(2026-10-24): 보존 개수·기간 결정(지금 최근 200 + 30일간 하루 1개, 512 MiB 이하는 임시값). headless 대화 흐름 첫 화면 회귀 수정 진행 중. 실제 Firefox 창에서 비정상 종료 뒤 복구는 미검증.
 
 ### CTX-01 — Separate saved Board revisions from the Desk recovery journal: Board immutable revisions, head, conflict handling
 
@@ -1047,15 +1068,19 @@ The SQLite-first persistence choice is already adopted in the CONTRACT (L79-80, 
 - 빠진 것: No CONTRACT-style Board model: metadataVersion, headRevision, immutable composition revisions (parent revision), expectedHead CAS, operationId idempotency, '저장됨 · 이후 변경 있음', 3-way conflict. No Board revision list or 'publish an old composition as a new revision' UI.
 - 결정: Board save-history policy: latest only vs full history, and retention period.
 - 구현 스케치: Add board/board_revision tables to the RT-07 store (expectedHead CAS in one transaction). Send operationId and expectedHead from saveCurrentAgendaState and handle conflict responses. Show revision list, restore and conflict preview in the Board switcher. Keep the agendaId identifier.
+- 진행(2026-10-24): 저장소 `35f772c` — Board 저장이 불변 버전으로 남고, expectedRevision이 어긋나면 409, 되돌리기는 새 버전으로 기록, 제목 변경은 메타데이터만 올림. helper 720/728. 화면 `0943557` — Board 저장이 저장소에도 가고, Board 메뉴에 버전 기록·되돌리기, 저장 충돌 시 덮어쓰지 않고 물어봄. 중앙 회귀 771/771, headless UI 회귀 274/274.
+- 남은 것(2026-10-24): 저장 기록 정책(전체 기록 / 최신만, 보존 기간) 결정 대기. headless 대화 흐름 첫 화면 회귀 수정 진행 중. 실제 Firefox 창에서 동시 수정 충돌은 미검증.
 
 ### CTX-03 — Resolve run context: combine explicit selection, best-matching Board, transient Desk grouping/layout, visible resources and account/permission scope
 
 - 출처: Vision P1 Context, Recovery, and Coding UX item 2; CONTRACT §2 Context 조립
-- 상태: 없음 · 크기 XL
+- 상태: 일부 · 크기 XL (감사 시점에는 없음)
 - 근거: Only explicit selection is implemented: EGDeskInputContext.sys.mjs:19-28 accepts only browser/file/board-element sources; the attach panel at eg-desk-surface.uc.js:745-800 is checkbox-based. Board contextBindings are always [] (eg-desk-surface.uc.js:1616, 1677). helper/egdesk-context-runtime.mjs:52-60 prepare takes only contextSnapshotIds/attachments. The only account scope is the owner key (context-runtime:33-37). Immutable snapshots, Reader and packets are done (commits f370eab, b135ef9, f84bc20; egdesk-context-core.test.mjs 20 tests).
 - 빠진 것: No context resolver: no best-matching Board, no use of spatial grouping, focus or visible resources as relevance signals, no recent interactions, no execution/permission scope. No record of which signals were chosen. No context revision update between model calls.
 - 결정: Default for automatic candidates: 'suggest only (user confirms)' vs 'auto-attach'. Whether visible Browsers/accounts are included by default (privacy and account scope).
 - 구현 스케치: Split into (1) a signal collector (overlay: current Board members, visible and focused cards, proximity clusters via SurfaceState.surfaceProximityClusters), (2) a ranking and policy filter (helper/egdesk-context-runtime: owner, permission and scope checks), and (3) a resolver record on the packet. Feed candidates to the existing attach chips so the user confirms before capture.
+- 진행(2026-10-24): 해석기 `b6b48b9`(`POST /context/resolve`: 화면 신호로 후보 최대 12개·고정 이유 코드, 제안만, 로그인된 페이지·브라우저 내용은 동의 필요, 다른 계정·권한 밖은 목록에만 두고 제외, 원문 없는 해석 기록). 화면 연결 `0943557`: Chat 입력칸에 들어가면 화면 신호로 후보를 물어 입력 트레이 위에 '이것도 붙일까요?'를 띄우고, 고른 것만 붙음. 보낼 때 해석 결과가 함께 감. 중앙 회귀 771/771, headless UI 회귀 274/274.
+- 남은 것(2026-10-24): headless 대화 흐름이 첫 화면 회귀로 실패 → 수정 진행 중. 실제 Firefox 창·실제 모델 미검증. 자동 후보 기본값은 구현상 '제안만(사용자 선택)'이며 대표님 확인 기록은 없음. 모델 호출 사이 맥락 갱신은 두 커밋 메시지에 없음.
 
 ### CTX-04 — Selected run context can be inspected and corrected without exposing the whole Desk by default
 
@@ -1064,6 +1089,8 @@ The SQLite-first persistence choice is already adopted in the CONTRACT (L79-80, 
 - 근거: For explicit attachments: chip view, re-inspect and remove (eg-desk-surface.uc.js:803-829); after-send '당시 입력 캡처' snapshot view (:749-751); GET /context/packets/:id with deliveryStatus (helper/egdesk-context-http.mjs:14-30); inspector pagination and range retention (commits a5d7445, 168f5ce, 19ffcbd, 4e920cd); Firefox context-briefing verification script scripts/verify-firefox-mcp-context-briefing.mjs.
 - 빠진 것: Only explicit attachments can be inspected. There is no 'why it was chosen' (signal), no pre-send preview of the overall scope, and no include/exclude correction of resolver candidates (depends on CTX-03). Context changes after tool results are not shown.
 - 구현 스케치: Extend buildChatInputTray with a 'candidates (unconfirmed)' section and reason labels. Add a resolver record to /context/packets. Add a 'this run's context' section that tracks context revisions in the activity panel.
+- 진행(2026-10-24): `0943557` — 보내기 전 입력 트레이 위 후보 행에 고른 이유가 보이고, 고른 것만 붙음(로그인된 페이지는 따로 확인, 다른 계정은 흐리게 제외). 활동 기록에 Agent가 볼 자료와 고른 이유가 남음. 해석 기록은 `b6b48b9`부터 /context/packets로 돌려줌. 중앙 회귀 771/771, headless UI 회귀 274/274.
+- 남은 것(2026-10-24): headless 대화 흐름 첫 화면 회귀 수정 진행 중. 실제 Firefox 창 미검증. 도구 결과 뒤 맥락 변화 표시는 커밋 메시지에 없음.
 
 ### RT-06 — Terminal/browser/auth/file watcher bus for cross-app workflow sync
 
@@ -1080,6 +1107,8 @@ The SQLite-first persistence choice is already adopted in the CONTRACT (L79-80, 
 - 근거: Library done: helper/egdesk-portable-bundle.mjs:93, 224, 456 (zip codec, encrypted envelope, bundle) and EGDeskPortableState.sys.mjs:4 (export/import presentation controller); helper/egdesk-portable-bundle.test.mjs 12 tests; commit e1f807a. Not wired: codex-bridge-server.mjs imports (:1-26) and eg-desk-surface.uc.js have no bundle references (grep 0).
 - 빠진 것: No HTTP route. No objectProvider/importStore adapters connecting to the chat, context and file stores. No export preview, password or import-as-new-copy UI. The user cannot reach the feature.
 - 구현 스케치: Add helper/egdesk-bundle-http.mjs and mount it in codex-bridge-server. Implement objectProvider on chat-store, context-store and drafts, and importStore. Add an export/import panel to the eg-desk-surface Board menu, with createEGDeskPortableState handling the presentation.
+- 진행(2026-10-24): `2f9b030` — 위 근거의 'Not wired'(HTTP 없음)는 helper 쪽에서 해소. helper/egdesk-portable-http.mjs + helper/egdesk-portable-service.mjs를 브리지에 연결: `POST /v1/portable/export|inspect|import`, `GET /v1/portable/exports`. Desk 또는 Board 묶음, 암호 선택, 대화·Profile은 기본 제외, 비밀값·계정 식별자 제외, `~/Downloads/EG-Desk`에 덮어쓰지 않고 저장, 파일 전체를 확인한 뒤 새 사본으로만 가져옴(겹치는 id는 참조와 함께 새 id). Desk·대화 저장소에 가져오기 메서드 추가. helper 테스트 754/762(실패 0), 그중 portable HTTP 10/10.
+- 남은 것(2026-10-24): 화면(Board 메뉴의 내보내기 미리보기·암호 입력·새 사본 가져오기 패널) 연결은 진행 중. 붙인 자료(context 저장소)·파일 초안은 이번 묶음 대상에 없음(portable-service가 Desk·대화·Profile 저장소만 연결). 실제 Firefox 창과 다른 PC에서 가져오기는 미검증.
 
 ### RT-04 — Rust helper consolidation for terminal/PTY/native functions
 
