@@ -159,3 +159,141 @@ export function createTerminalCompositionGate({
     boundary, invalidate,
   };
 }
+
+// ---- 2-X (D-X6): a project command run in the user's own terminal ----
+// The File view's '검사' runs a command the user typed for the project (never
+// a package.json suggestion by itself). The line is typed into the visible
+// terminal, so the user sees exactly what runs. After the command, the shell
+// prints an end marker carrying this run's nonce and exit status; the
+// collector keeps a bounded copy of the output until that marker (first 8 KiB
+// + last 64 KiB, the chat runtime's {head, tail, omittedBytes} capture shape
+// that EGDeskRunResult reads). The echoed command line cannot match the
+// marker: it holds a format string or an expression, not the digits.
+export const TERMINAL_RUN_LIMITS = Object.freeze({ headChars: 8 * 1024, tailChars: 64 * 1024, timeoutMs: 10 * 60_000, maxCommandChars: 1000 });
+const RUN_NONCE = /^[a-z0-9]{8,32}$/;
+const COMMAND_BAD = /[\u0000\r\n]/;
+
+export function quotePosixShell(value) {
+  return `'${String(value).replace(/'/g, `'\\''`)}'`;
+}
+
+export function quotePowerShell(value) {
+  return `'${String(value).replace(/'/g, "''")}'`;
+}
+
+export function terminalRunNonce(random = () => Math.random()) {
+  let nonce = '';
+  while (nonce.length < 16) nonce += Math.floor(random() * 36).toString(36);
+  return nonce.slice(0, 16);
+}
+
+// {command, cwd, nonce, shell: 'posix'|'powershell'} → the line to type,
+// ending in '\r' (Enter). cwd is the project folder the File view shows.
+export function terminalScriptLine({ command, cwd, nonce, shell = 'posix' } = {}) {
+  if (typeof command !== 'string' || !command.trim() || command.length > TERMINAL_RUN_LIMITS.maxCommandChars || COMMAND_BAD.test(command)) {
+    throw Object.assign(new Error('The project command must be one line'), { code: 'TERMINAL_RUN_COMMAND' });
+  }
+  if (typeof nonce !== 'string' || !RUN_NONCE.test(nonce)) throw Object.assign(new Error('A run nonce is required'), { code: 'TERMINAL_RUN_NONCE' });
+  if (cwd != null && (typeof cwd !== 'string' || !cwd || COMMAND_BAD.test(cwd))) throw Object.assign(new Error('Invalid project folder'), { code: 'TERMINAL_RUN_CWD' });
+  const text = command.trim();
+  if (shell === 'posix') {
+    const enter = cwd ? `cd -- ${quotePosixShell(cwd)} && ` : '';
+    return `${enter}${text}; printf '\\n[egdesk-run:%s:exit=%d]\\n' ${nonce} "$?"\r`;
+  }
+  if (shell === 'powershell') {
+    const enter = cwd ? `Set-Location -LiteralPath ${quotePowerShell(cwd)}; ` : '';
+    return `${enter}$global:LASTEXITCODE = $null; ${text}; $egdeskOk = $?; $egdeskExit = if ($null -ne $global:LASTEXITCODE) { $global:LASTEXITCODE } elseif ($egdeskOk) { 0 } else { 1 }; Write-Output ("\`n[egdesk-run:${nonce}:exit=" + $egdeskExit + "]")\r`;
+  }
+  throw Object.assign(new Error('This terminal shell is not supported for project commands'), { code: 'TERMINAL_RUN_SHELL' });
+}
+
+// Bounded output collector. push(data) returns null until the end marker for
+// this nonce arrives, then {exitCode, output: {head, tail, omittedBytes}}.
+export function createTerminalRunCollector({ nonce, headChars = TERMINAL_RUN_LIMITS.headChars, tailChars = TERMINAL_RUN_LIMITS.tailChars } = {}) {
+  if (typeof nonce !== 'string' || !RUN_NONCE.test(nonce)) throw Object.assign(new Error('A run nonce is required'), { code: 'TERMINAL_RUN_NONCE' });
+  const marker = new RegExp(`\\[egdesk-run:${nonce}:exit=(-?\\d{1,10})\\]`);
+  let head = '';
+  let tail = '';
+  let omitted = 0;
+  let window = '';
+  let result = null;
+  const keep = text => {
+    if (head.length < headChars) {
+      const take = text.slice(0, headChars - head.length);
+      head += take;
+      text = text.slice(take.length);
+    }
+    if (!text) return;
+    tail += text;
+    if (tail.length > tailChars) { omitted += tail.length - tailChars; tail = tail.slice(-tailChars); }
+  };
+  // The echoed command line (it contains 'egdesk-run:' but not the digits)
+  // is dropped from what the card shows.
+  const clean = text => text.split(/(?<=\n)/).filter(line => !line.includes('egdesk-run:')).join('');
+  return {
+    push(data) {
+      if (result || typeof data !== 'string' || !data) return result;
+      window += data;
+      const found = marker.exec(window);
+      if (!found) {
+        // Pass on whole lines only, so the echoed command line is judged as a
+        // whole and a marker split across chunks is still found.
+        const cut = window.lastIndexOf('\n');
+        if (cut >= 0) { keep(clean(window.slice(0, cut + 1))); window = window.slice(cut + 1); }
+        else if (window.length > tailChars) { keep(window.slice(0, -256)); window = window.slice(-256); }
+        return null;
+      }
+      keep(clean(window.slice(0, found.index)));
+      window = '';
+      result = Object.freeze({ exitCode: Number(found[1]), output: Object.freeze({ head, tail, omittedBytes: omitted }) });
+      return result;
+    },
+    get done() { return result !== null; },
+    snapshot: () => ({ done: result !== null, headChars: head.length, tailChars: tail.length, omittedBytes: omitted }),
+  };
+}
+
+// One project command: types the line through `write` (the terminal write
+// queue's enqueue), feeds terminal output to onData, and resolves with
+// {command, exitCode, output, durationMs, status}. A run that never prints
+// its marker resolves with status 'unknown' (not a failure, EG-01) and no
+// exit code; nothing is retried.
+export function createTerminalScriptRun({ write, command, cwd = null, shell = 'posix', nonce = terminalRunNonce(), now = () => Date.now(), schedule = (fn, ms) => setTimeout(fn, ms), cancel = id => clearTimeout(id), timeoutMs = TERMINAL_RUN_LIMITS.timeoutMs } = {}) {
+  if (typeof write !== 'function') throw new TypeError('A terminal write callback is required');
+  const line = terminalScriptLine({ command, cwd, nonce, shell });
+  const collector = createTerminalRunCollector({ nonce });
+  let settle = null;
+  let timer = null;
+  let startedAt = null;
+  const finished = new Promise(resolve => { settle = resolve; });
+  const finish = value => {
+    if (!settle) return;
+    if (timer != null) { cancel(timer); timer = null; }
+    const resolve = settle;
+    settle = null;
+    resolve(Object.freeze({ command: command.trim(), durationMs: startedAt == null ? null : now() - startedAt, ...value }));
+  };
+  return {
+    line,
+    nonce,
+    async start() {
+      if (startedAt != null) return finished;
+      startedAt = now();
+      timer = schedule(() => finish({ exitCode: null, output: null, status: 'unknown' }), timeoutMs);
+      try {
+        const written = await write(line);
+        if (written?.ok === false) finish({ exitCode: null, output: null, status: 'not-started', code: written.code || 'TERMINAL_INPUT_REJECTED' });
+      } catch (error) {
+        finish({ exitCode: null, output: null, status: 'not-started', code: error?.code || 'TERMINAL_INPUT_REJECTED' });
+      }
+      return finished;
+    },
+    onData(data) {
+      const result = collector.push(data);
+      if (result) finish({ exitCode: result.exitCode, output: result.output, status: result.exitCode === 0 ? 'completed' : 'failed' });
+      return !!result;
+    },
+    cancel() { finish({ exitCode: null, output: null, status: 'unknown' }); },
+    result: finished,
+  };
+}

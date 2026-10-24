@@ -1,11 +1,16 @@
 import { createEGDeskFileService, FileSurfaceError } from './egdesk-file-service.mjs'
 import { openEGDeskManagedDraftStore } from './egdesk-managed-drafts.mjs'
+import { openEGDeskProjectStore, projectReconnectState, suggestProjectScripts, PROJECT_LIMITS } from './egdesk-project-store.mjs'
 import { guardBridgeRequest, sendJson } from './codex-bridge-http.mjs'
 import { randomBytes, randomUUID } from 'node:crypto'
+import * as fs from 'node:fs/promises'
 import path from 'node:path'
 
 // git/* and search/contents are read-only. They take the opaque rootId or a
 // changeId from gitChanges; the helper resolves the verified root path itself.
+// 2-X (D-X1·X2·X3·X6): drafts/save-original and review/* are the only routes
+// that write an original file; projects/* attach a Board folder through a
+// picker selection only; resolve maps a printed path to a handle in a root.
 export const EGDESK_FILE_ENDPOINTS = Object.freeze({
   openPickerChannel: '/v1/files/picker/channel',
   beginPicker: '/v1/files/picker/begin',
@@ -26,6 +31,16 @@ export const EGDESK_FILE_ENDPOINTS = Object.freeze({
   gitStatus: '/v1/files/git/status',
   gitChanges: '/v1/files/git/changes',
   gitFileDiff: '/v1/files/git/diff',
+  resolvePath: '/v1/files/resolve',
+  saveOriginal: '/v1/files/drafts/save-original',
+  revertReviewed: '/v1/files/review/revert',
+  deleteCreated: '/v1/files/review/delete-created',
+  attachProject: '/v1/files/projects/attach',
+  openProject: '/v1/files/projects/open',
+  inheritRoomProject: '/v1/files/projects/inherit',
+  detachProject: '/v1/files/projects/detach',
+  setProjectScripts: '/v1/files/projects/scripts',
+  suggestProjectScripts: '/v1/files/projects/script-suggestions',
 })
 const OPERATIONS = new Map(Object.entries(EGDESK_FILE_ENDPOINTS).map(([name, route]) => [route, name]))
 const FIELDS = Object.freeze({
@@ -40,7 +55,19 @@ const FIELDS = Object.freeze({
   diffDraft: ['draftId'], sourceStatus: ['draftId'],
   reconnectDraft: ['draftId', 'expectedHead', 'fileId', 'operationId'],
   saveAs: ['draftId', 'expectedHead', 'directoryId', 'fileName', 'operationId'],
+  resolvePath: ['rootId', 'path'],
+  saveOriginal: ['draftId', 'expectedHead', 'bufferRevision', 'operationId', 'expectedSourceHash'],
+  revertReviewed: ['fileId', 'expectedSha256', 'text', 'operationId'],
+  deleteCreated: ['fileId', 'expectedSha256', 'operationId'],
+  attachProject: ['boardId', 'roomId', 'selectionId', 'title'],
+  openProject: ['boardId', 'roomId'],
+  inheritRoomProject: ['roomId'],
+  detachProject: ['boardId'],
+  setProjectScripts: ['projectId', 'scripts'],
+  suggestProjectScripts: ['projectId'],
 })
+const PROJECT_OPERATIONS = new Set(['attachProject', 'openProject', 'inheritRoomProject', 'detachProject', 'setProjectScripts', 'suggestProjectScripts'])
+const TEXT_OPERATIONS = new Set(['updateDraft', 'revertReviewed'])
 const SMALL_BODY_BYTES = 64 * 1024
 const TEXT_BODY_BYTES = 18 * 1024 * 1024
 const error = (code, message, status = 400) => Object.assign(new Error(message), { code, httpStatus: status })
@@ -51,10 +78,10 @@ const scopedOwner = ownerScope => {
 
 function responseError(cause) {
   const code = cause?.code || 'FILE_SERVICE_ERROR'
-  const conflicts = new Set(['DRAFT_CONFLICT', 'BUFFER_CONFLICT', 'TARGET_EXISTS', 'ROOT_CHANGED', 'RESOURCE_CHANGED', 'DRAFT_EXISTS', 'SOURCE_RECONNECT_CONFLICT'])
-  const missing = new Set(['UNKNOWN_ROOT', 'UNKNOWN_RESOURCE', 'UNKNOWN_DRAFT', 'UNKNOWN_CHANGE', 'RESOURCE_UNAVAILABLE', 'ROOT_UNAVAILABLE'])
+  const conflicts = new Set(['DRAFT_CONFLICT', 'BUFFER_CONFLICT', 'TARGET_EXISTS', 'ROOT_CHANGED', 'RESOURCE_CHANGED', 'DRAFT_EXISTS', 'SOURCE_RECONNECT_CONFLICT', 'SOURCE_CHANGED', 'SOURCE_RECONNECT_REQUIRED', 'ORIGINAL_HARD_LINKED', 'PROJECT_RECONNECT_REQUIRED'])
+  const missing = new Set(['UNKNOWN_ROOT', 'UNKNOWN_RESOURCE', 'UNKNOWN_DRAFT', 'UNKNOWN_CHANGE', 'RESOURCE_UNAVAILABLE', 'ROOT_UNAVAILABLE', 'UNKNOWN_PROJECT'])
   const large = new Set(['FILE_TOO_LARGE', 'DIRECTORY_TOO_LARGE', 'BODY_TOO_LARGE'])
-  const saveFailures = new Set(['SAVE_AS_INCOMPLETE', 'SAVE_AS_UNCERTAIN', 'SAVE_AS_FAILED'])
+  const saveFailures = new Set(['SAVE_AS_INCOMPLETE', 'SAVE_AS_UNCERTAIN', 'SAVE_AS_FAILED', 'SAVE_UNCERTAIN', 'SAVE_FAILED'])
   const gitFailures = { GIT_UNAVAILABLE: 503, GIT_TIMEOUT: 504, GIT_FAILED: 500 }
   const known = cause instanceof FileSurfaceError || cause?.httpStatus || conflicts.has(code) || missing.has(code) || large.has(code)
   const status = cause?.httpStatus || (conflicts.has(code) ? 409 : missing.has(code) ? 404 : large.has(code) ? 413 : code === 'SAVE_AS_UNAVAILABLE' ? 503 : saveFailures.has(code) ? 500 : code === 'UNSUPPORTED_EDIT' ? 415 : Object.hasOwn(gitFailures, code) && cause instanceof FileSurfaceError ? gitFailures[code] : cause instanceof FileSurfaceError ? 400 : 500)
@@ -63,7 +90,7 @@ function responseError(cause) {
 
 /** Route-specific bounded JSON reader; invoke this before the bridge's 64 KiB reader. */
 export async function readEGDeskFileBody(req, operation) {
-  const maximum = operation === 'updateDraft' ? TEXT_BODY_BYTES : SMALL_BODY_BYTES
+  const maximum = TEXT_OPERATIONS.has(operation) ? TEXT_BODY_BYTES : SMALL_BODY_BYTES
   const chunks = []
   let size = 0
   for await (const part of req) {
@@ -82,10 +109,13 @@ function checkedBody(operation, body) {
   if (!body || typeof body !== 'object' || Array.isArray(body) || ![Object.prototype, null].includes(Object.getPrototypeOf(body))) throw error('INVALID_JSON', 'Expected a JSON object')
   const allowed = new Set(FIELDS[operation])
   for (const key of Object.keys(body)) if (!allowed.has(key)) throw error('UNEXPECTED_FIELD', `Field is not allowed: ${key}`)
-  if (Buffer.byteLength(JSON.stringify(body)) > (operation === 'updateDraft' ? TEXT_BODY_BYTES : SMALL_BODY_BYTES)) throw error('BODY_TOO_LARGE', 'File request exceeds its bounded size limit', 413)
-  for (const key of ['requestId', 'selectionId', 'rootId', 'directoryId', 'fileId', 'draftId', 'expectedHead', 'operationId', 'changeId']) {
+  if (Buffer.byteLength(JSON.stringify(body)) > (TEXT_OPERATIONS.has(operation) ? TEXT_BODY_BYTES : SMALL_BODY_BYTES)) throw error('BODY_TOO_LARGE', 'File request exceeds its bounded size limit', 413)
+  for (const key of ['requestId', 'selectionId', 'rootId', 'directoryId', 'fileId', 'draftId', 'expectedHead', 'operationId', 'changeId', 'boardId', 'roomId', 'projectId', 'expectedSha256', 'expectedSourceHash']) {
     if (Object.hasOwn(body, key) && (typeof body[key] !== 'string' || !body[key] || body[key].length > 512)) throw error('INVALID_ID', `Invalid ${key}`)
   }
+  if (Object.hasOwn(body, 'path') && (typeof body.path !== 'string' || !body.path || body.path.length > 4096)) throw error('INVALID_PATH', 'Invalid path')
+  if (Object.hasOwn(body, 'title') && body.title != null && (typeof body.title !== 'string' || body.title.length > PROJECT_LIMITS.maxTitleChars)) throw error('INVALID_PROJECT_REQUEST', 'Invalid project title')
+  if (Object.hasOwn(body, 'scripts') && (!Array.isArray(body.scripts) || body.scripts.length > PROJECT_LIMITS.maxScripts)) throw error('INVALID_PROJECT_SCRIPT', 'Invalid project commands')
   return body
 }
 
@@ -102,8 +132,12 @@ function checkedBody(operation, body) {
  * Sec-Fetch-Site are both absent (the existing privileged chrome/local CLI
  * boundary), then bound to a short-lived in-memory nonce. Web-origin requests
  * cannot bootstrap or use this channel. Both forms share scoped services.
+ * Board projects (D-X3) live in projects-<owner hash>.sqlite under
+ * projectDirectory (default: draftDirectory); projectStoreForOwner(owner)
+ * may supply the store instead. resolveProjectWorkspace() is the backend-only
+ * hook the bridge uses for an Agent's working folder (wired by bundle 2-E).
  */
-export function createEGDeskFileHttpAdapter({ draftDirectory, localOwnerScope = 'egdesk-local', resolveRootSelection, createOnlyAdapter, storeForOwner, port = 39218, now = Date.now, onRootRegistered = null, gitReview } = {}) {
+export function createEGDeskFileHttpAdapter({ draftDirectory, projectDirectory, localOwnerScope = 'egdesk-local', resolveRootSelection, createOnlyAdapter, storeForOwner, projectStoreForOwner, port = 39218, now = Date.now, onRootRegistered = null, gitReview } = {}) {
   const localOwner = scopedOwner(localOwnerScope)
   const boundOwner = requested => {
     if (requested != null && requested !== localOwner) throw error('OWNER_SCOPE_MISMATCH', 'File operations belong to the configured local EG-Desk owner', 403)
@@ -139,6 +173,108 @@ export function createEGDeskFileHttpAdapter({ draftDirectory, localOwnerScope = 
       pending.catch(() => { if (owners.get(ownerScope) === pending) owners.delete(ownerScope) })
     }
     return owners.get(ownerScope)
+  }
+
+  const projectStores = new Map()
+  async function projectsForOwner(ownerScope) {
+    if (closed) throw error('ADAPTER_CLOSED', 'File adapter is closed', 503)
+    if (!projectStores.has(ownerScope)) {
+      const directory = projectDirectory || draftDirectory
+      if (!projectStoreForOwner && !directory) throw error('PROJECTS_UNAVAILABLE', 'Project folders are not configured', 503)
+      const pending = (async () => {
+        const store = projectStoreForOwner ? await projectStoreForOwner(ownerScope) : await openEGDeskProjectStore({ directory, ownerScope, now })
+        return { store, roots: new Map() }
+      })()
+      projectStores.set(ownerScope, pending)
+      pending.catch(() => { if (projectStores.get(ownerScope) === pending) projectStores.delete(ownerScope) })
+    }
+    return projectStores.get(ownerScope)
+  }
+
+  // A privileged picker selection → verified absolute folder (or null when the
+  // user cancelled). Shared by registerRoot and attachProject.
+  async function consumeSelection(selectionId, owner, request, context) {
+    if (!selectionId) throw error('SELECTION_REQUIRED', 'A privileged selection ID is required')
+    const grant = pickerSelections.get(selectionId)
+    pickerSelections.delete(selectionId)
+    if (grant?.owner === owner) {
+      if (requirePickerChannel(request, owner) !== grant.channel) throw error('PICKER_CHANNEL_EXPIRED', 'Native selection belongs to another channel', 403)
+      return grant.absolutePath
+    }
+    if (typeof resolveRootSelection === 'function') return resolveRootSelection({ selectionId, ownerScope: owner, context })
+    throw error('PICKER_GRANT_EXPIRED', 'Native selection is expired or already consumed', 409)
+  }
+
+  const sameFolder = (described, project) => described.absolutePath === project.workspaceRoot && described.identity.dev === project.identity.dev && described.identity.ino === project.identity.ino
+
+  // A stored project → a live root handle. Reuses a cached root while it
+  // still checks out; otherwise reconnects only when the folder at the stored
+  // path has the stored dev/ino (D-X3).
+  async function connectProject(service, projects, project) {
+    const cached = projects.roots.get(project.id)
+    if (cached) {
+      const described = await service.describeRoot(cached.rootId).catch(() => null)
+      if (described && sameFolder(described, project)) return { status: 'connected', root: cached }
+      projects.roots.delete(project.id)
+    }
+    const stat = await fs.lstat(project.workspaceRoot, { bigint: true }).catch(() => null)
+    const state = projectReconnectState(project, stat)
+    if (state !== 'connected') return { status: 'reconnect-required', reason: state }
+    const root = await service.registerRoot(project.workspaceRoot).catch(() => null)
+    const described = root ? await service.describeRoot(root.rootId).catch(() => null) : null
+    if (!described || !sameFolder(described, project)) return { status: 'reconnect-required', reason: 'identity-changed' }
+    projects.roots.set(project.id, root)
+    return { status: 'connected', root }
+  }
+
+  const projectView = (project, source, connection) => ({
+    projectId: project.id, title: project.title, name: path.basename(project.workspaceRoot) || project.title, source,
+    scripts: project.scripts.map(script => ({ ...script })), status: connection.status,
+    ...(connection.status === 'connected'
+      ? { rootId: connection.root.rootId, directoryId: connection.root.directoryId, displayPath: connection.root.displayPath, saveAsAvailable: connection.root.saveAsAvailable, capability: connection.root.capability }
+      : { reason: connection.reason }),
+  })
+
+  async function projectOperation(operation, body, { owner, request, context }) {
+    const { service } = await entryForOwner(owner)
+    const projects = await projectsForOwner(owner)
+    const { store } = projects
+    if (operation === 'attachProject') {
+      if (body.boardId == null && body.roomId == null) throw error('INVALID_PROJECT_REQUEST', 'A boardId or roomId is required')
+      const selected = await consumeSelection(body.selectionId, owner, request, context)
+      if (selected == null) return { cancelled: true }
+      const root = await service.registerRoot(selected)
+      const described = await service.describeRoot(root.rootId)
+      const folder = { workspaceRoot: described.absolutePath, identity: described.identity, title: body.title }
+      const project = body.roomId != null
+        ? await store.attachToRoom({ roomId: body.roomId, boardId: body.boardId ?? null, ...folder })
+        : await store.attachToBoard({ boardId: body.boardId, ...folder })
+      projects.roots.set(project.id, root)
+      return projectView(project, body.roomId != null ? 'room' : 'board', { status: 'connected', root })
+    }
+    if (operation === 'openProject') {
+      const { project, source } = await store.effective({ boardId: body.boardId ?? null, roomId: body.roomId ?? null })
+      if (!project) return { project: null, source: null }
+      return { project: projectView(project, source, await connectProject(service, projects, project)), source }
+    }
+    if (operation === 'inheritRoomProject') return { roomId: body.roomId, inherited: true, removed: await store.inheritRoom({ roomId: body.roomId }) }
+    if (operation === 'detachProject') return { boardId: body.boardId, removed: await store.detachBoard({ boardId: body.boardId }) }
+    if (operation === 'setProjectScripts') {
+      const project = await store.setScripts({ projectId: body.projectId, scripts: body.scripts })
+      return { projectId: project.id, scripts: project.scripts }
+    }
+    // suggestProjectScripts: package.json at the project folder, shown only.
+    const project = await store.get(body.projectId)
+    if (!project) throw error('UNKNOWN_PROJECT', 'Project is not attached', 404)
+    const connection = await connectProject(service, projects, project)
+    if (connection.status !== 'connected') throw error('PROJECT_RECONNECT_REQUIRED', 'Pick the project folder again', 409)
+    let suggestions = []
+    try {
+      const found = await service.resolvePath({ rootId: connection.root.rootId, path: 'package.json' })
+      const read = found.kind === 'file' ? await service.readFile({ fileId: found.id }) : null
+      if (read?.kind === 'text' && read.size <= PROJECT_LIMITS.maxPackageJsonBytes) suggestions = suggestProjectScripts(read.text)
+    } catch (cause) { if (!['RESOURCE_UNAVAILABLE', 'FILE_TOO_LARGE'].includes(cause?.code)) throw cause }
+    return { projectId: project.id, suggestions }
   }
 
   async function dispatch({ method, pathname, body = {}, ownerScope, context, request } = {}) {
@@ -178,19 +314,11 @@ export function createEGDeskFileHttpAdapter({ draftDirectory, localOwnerScope = 
         pickerSelections.set(selectionId, { ...grant, absolutePath: body.absolutePath })
         return { status: 200, body: { ok: true, result: { selectionId, expiresAt: grant.expiresAt } } }
       }
+      if (PROJECT_OPERATIONS.has(operation)) return { status: 200, body: { ok: true, result: await projectOperation(operation, body, { owner, request, context }) } }
       const { service } = await entryForOwner(owner)
       let result
       if (operation === 'registerRoot') {
-        if (!body.selectionId) throw error('SELECTION_REQUIRED', 'A privileged selection ID is required')
-        const grant = pickerSelections.get(body.selectionId)
-        pickerSelections.delete(body.selectionId)
-        let selectedPath
-        if (grant?.owner === owner) {
-          if (requirePickerChannel(request, owner) !== grant.channel) throw error('PICKER_CHANNEL_EXPIRED', 'Native selection belongs to another channel', 403)
-          selectedPath = grant.absolutePath
-        }
-        else if (typeof resolveRootSelection === 'function') selectedPath = await resolveRootSelection({ selectionId: body.selectionId, ownerScope: owner, context })
-        else throw error('PICKER_GRANT_EXPIRED', 'Native selection is expired or already consumed', 409)
+        const selectedPath = await consumeSelection(body.selectionId, owner, request, context)
         result = selectedPath == null ? { cancelled: true } : await service.registerRoot(selectedPath)
       } else result = await service[operation](body)
       return { status: 200, body: { ok: true, result } }
@@ -236,14 +364,31 @@ export function createEGDeskFileHttpAdapter({ draftDirectory, localOwnerScope = 
     return source
   }
 
+  // Backend-only (2-E wires it into the Agent's working folder and allowed
+  // roots): the effective project folder for a Board/room, verified by dev/ino.
+  // null when nothing is attached or the folder must be picked again.
+  async function resolveProjectWorkspace({ ownerScope, boardId = null, roomId = null } = {}) {
+    const owner = boundOwner(ownerScope)
+    const { service } = await entryForOwner(owner)
+    const projects = await projectsForOwner(owner)
+    const { project, source } = await projects.store.effective({ boardId, roomId })
+    if (!project) return null
+    const connection = await connectProject(service, projects, project)
+    if (connection.status !== 'connected') return { projectId: project.id, source, status: connection.status, reason: connection.reason }
+    const described = await service.describeRoot(connection.root.rootId)
+    return { projectId: project.id, source, status: 'connected', rootId: connection.root.rootId, absolutePath: described.absolutePath }
+  }
+
   async function close() {
     closed = true
     const settled = await Promise.allSettled(owners.values())
     for (const result of settled) if (result.status === 'fulfilled') await result.value.store.close?.()
     owners.clear()
+    for (const result of await Promise.allSettled(projectStores.values())) if (result.status === 'fulfilled') await result.value.store.close?.()
+    projectStores.clear()
     pickerRequests.clear(); pickerSelections.clear(); pickerChannels.clear()
   }
-  return { dispatch, handle, registerAuthorizedRoot, resolveCaptureSource, close, endpoints: EGDESK_FILE_ENDPOINTS }
+  return { dispatch, handle, registerAuthorizedRoot, resolveCaptureSource, resolveProjectWorkspace, close, endpoints: EGDESK_FILE_ENDPOINTS }
 }
 
 export async function handleEGDeskFiles(req, res, { adapter, ...context } = {}) {

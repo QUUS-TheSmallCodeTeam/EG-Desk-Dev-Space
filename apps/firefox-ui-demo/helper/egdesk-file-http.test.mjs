@@ -8,6 +8,11 @@ import { createHash } from 'node:crypto'
 import { createEGDeskFileHttpAdapter, EGDESK_FILE_ENDPOINTS, handleEGDeskFiles } from './egdesk-file-http.mjs'
 import { createEGDeskNativeCreateOnlyAdapter } from './egdesk-file-native.mjs'
 import { createEGDeskFileServiceCallbacks, createEGDeskNativeFilePickers, EGDESK_FILE_CLIENT_ENDPOINTS } from '../overlay/resources/EGDeskFileView.sys.mjs'
+import { execFileSync } from 'node:child_process'
+import { openEGDeskProjectStore, normalizeProjectScripts, suggestProjectScripts, projectReconnectState } from './egdesk-project-store.mjs'
+import { fileChangeFromCodex, fileChangeFromAcpDiff, fileChangeFromClaudeToolResult, fileChangesFromGitPatch, hunksToUnified, mergeTurnChanges, boundFileChanges, FILE_CHANGE_LIMITS } from './egdesk-file-change.mjs'
+import { createEGDeskGitCheckpoint, EGDESK_CHECKPOINT_REF_PREFIX } from './egdesk-git-checkpoint.mjs'
+import { fileDiffFromCodexChange } from '../overlay/resources/EGDeskDiffView.sys.mjs'
 
 async function fixture(t, options = {}) {
   const temp = await fs.mkdtemp(path.join(os.tmpdir(), 'egdesk-file-http-'))
@@ -374,4 +379,276 @@ test('git and content-search routes: bounded fields, opaque change ids, and git 
   const failed = await call('gitChanges', { rootId })
   assert.deepEqual([failed.status, failed.body.code], [500, 'GIT_FAILED'])
   for (const body of [timedOut.body, failed.body]) assert.equal(JSON.stringify(body).includes(root), false)
+})
+
+// ---- 2-X: Board projects (D-X3), project commands (D-X6), original save and review routes ----
+
+async function projectFixture(t) {
+  const temp = await fs.realpath(await fs.mkdtemp(path.join(os.tmpdir(), 'egdesk-file-projects-')))
+  const folders = { shop: path.join(temp, 'shop'), blog: path.join(temp, 'blog') }
+  for (const folder of Object.values(folders)) await fs.mkdir(folder)
+  await fs.writeFile(path.join(folders.shop, 'package.json'), JSON.stringify({ packageManager: 'pnpm@9.0.0', scripts: { test: 'node --test', build: 'tsc', start: 'node server.js', 'lint:fix': 'eslint --fix' } }))
+  await fs.writeFile(path.join(folders.shop, 'app.js'), 'one\n')
+  const draftDirectory = path.join(temp, 'drafts')
+  const resolveRootSelection = async ({ selectionId }) => selectionId === 'cancel' ? null : folders[selectionId.replace('pick-', '')]
+  const make = () => createEGDeskFileHttpAdapter({ draftDirectory, localOwnerScope: 'owner-p', resolveRootSelection })
+  let adapter = make()
+  t.after(async () => { await adapter.close(); await fs.rm(temp, { recursive: true, force: true }) })
+  const call = (operation, body) => adapter.dispatch({ method: 'POST', pathname: EGDESK_FILE_ENDPOINTS[operation], body, ownerScope: 'owner-p' })
+  return { temp, folders, draftDirectory, call, restart: async () => { await adapter.close(); adapter = make() }, adapter: () => adapter }
+}
+
+test('Board project: attach by picker selection only, rooms inherit or own a folder, restart reconnects only the same dev/ino', async t => {
+  const { folders, draftDirectory, call, restart, adapter } = await projectFixture(t)
+  const noSelection = await call('attachProject', { boardId: 'board-1' })
+  assert.deepEqual([noSelection.status, noSelection.body.code], [400, 'SELECTION_REQUIRED'])
+  const byPath = await call('attachProject', { boardId: 'board-1', absolutePath: folders.shop })
+  assert.deepEqual([byPath.status, byPath.body.code], [400, 'UNEXPECTED_FIELD'])
+  const attached = (await call('attachProject', { boardId: 'board-1', selectionId: 'pick-shop', title: 'Shop' })).body.result
+  assert.deepEqual([attached.status, attached.source, attached.title, attached.name, attached.displayPath], ['connected', 'board', 'Shop', 'shop', folders.shop])
+  const listed = (await call('listDirectory', { directoryId: attached.directoryId })).body.result
+  assert.deepEqual(listed.entries.map(entry => entry.name), ['app.js', 'package.json'])
+  if (process.platform !== 'win32') {
+    const database = (await fs.readdir(draftDirectory)).find(name => name.startsWith('projects-'))
+    assert.equal((await fs.stat(path.join(draftDirectory, database))).mode & 0o777, 0o600)
+  }
+
+  const inRoom = (await call('openProject', { boardId: 'board-1', roomId: 'room-1' })).body.result
+  assert.deepEqual([inRoom.source, inRoom.project.projectId, inRoom.project.rootId], ['board', attached.projectId, attached.rootId])
+  const own = (await call('attachProject', { boardId: 'board-1', roomId: 'room-2', selectionId: 'pick-blog' })).body.result
+  assert.deepEqual([own.source, own.name], ['room', 'blog'])
+  assert.equal((await call('openProject', { boardId: 'board-1', roomId: 'room-2' })).body.result.project.name, 'blog')
+  assert.equal((await call('openProject', { boardId: 'board-1', roomId: 'room-1' })).body.result.project.name, 'shop')
+  assert.equal((await call('inheritRoomProject', { roomId: 'room-2' })).body.result.removed, true)
+  assert.equal((await call('openProject', { boardId: 'board-1', roomId: 'room-2' })).body.result.project.name, 'shop')
+
+  const workspace = await adapter().resolveProjectWorkspace({ ownerScope: 'owner-p', boardId: 'board-1', roomId: 'room-1' })
+  assert.deepEqual([workspace.status, workspace.absolutePath, workspace.projectId, workspace.source], ['connected', folders.shop, attached.projectId, 'board'])
+  await assert.rejects(adapter().resolveProjectWorkspace({ ownerScope: 'someone-else', boardId: 'board-1' }), { code: 'OWNER_SCOPE_MISMATCH' })
+  assert.equal(await adapter().resolveProjectWorkspace({ ownerScope: 'owner-p', boardId: 'board-none' }), null)
+
+  // Restart: the same folder (same dev/ino) reconnects by itself.
+  await restart()
+  const reopened = (await call('openProject', { boardId: 'board-1' })).body.result.project
+  assert.equal(reopened.status, 'connected')
+  assert.equal(reopened.projectId, attached.projectId)
+  assert.notEqual(reopened.rootId, attached.rootId)
+  assert.equal((await call('listDirectory', { directoryId: reopened.directoryId })).status, 200)
+
+  // A different folder now at the same path is never adopted silently.
+  await fs.rename(folders.shop, `${folders.shop}-old`)
+  await fs.mkdir(folders.shop)
+  await restart()
+  const replaced = (await call('openProject', { boardId: 'board-1' })).body.result.project
+  assert.deepEqual([replaced.status, replaced.reason, replaced.rootId], ['reconnect-required', 'identity-changed', undefined])
+  assert.equal((await adapter().resolveProjectWorkspace({ ownerScope: 'owner-p', boardId: 'board-1' })).status, 'reconnect-required')
+  const picked = (await call('attachProject', { boardId: 'board-1', selectionId: 'pick-shop' })).body.result
+  assert.deepEqual([picked.projectId, picked.status], [attached.projectId, 'connected'])
+  assert.deepEqual((await call('attachProject', { boardId: 'board-1', selectionId: 'cancel' })).body.result, { cancelled: true })
+  assert.equal((await call('detachProject', { boardId: 'board-1' })).body.result.removed, true)
+  assert.deepEqual((await call('openProject', { boardId: 'board-1' })).body.result, { project: null, source: null })
+})
+
+test('project commands are what the user typed; package.json scripts come back as suggestions only', async t => {
+  const { call } = await projectFixture(t)
+  const attached = (await call('attachProject', { boardId: 'board-1', selectionId: 'pick-shop' })).body.result
+  const saved = (await call('setProjectScripts', { projectId: attached.projectId, scripts: [{ name: '테스트', command: '  pnpm run test  ', kind: 'test' }, { name: 'build', command: 'pnpm run build' }] })).body.result
+  assert.deepEqual(saved.scripts, [{ id: 'script-1', name: '테스트', command: 'pnpm run test', kind: 'test' }, { id: 'script-2', name: 'build', command: 'pnpm run build', kind: 'build' }])
+  for (const scripts of [[{ name: 'x', command: 'npm test\nrm -rf ~' }], [{ name: 'x', command: 'ok', kind: 'deploy' }], [{ name: 'x', command: 'ok', cwd: '/' }]]) {
+    const refused = await call('setProjectScripts', { projectId: attached.projectId, scripts })
+    assert.deepEqual([refused.status, refused.body.code], [400, 'INVALID_PROJECT_SCRIPT'])
+  }
+  const unknown = await call('setProjectScripts', { projectId: 'no-such-project', scripts: [] })
+  assert.deepEqual([unknown.status, unknown.body.code], [404, 'UNKNOWN_PROJECT'])
+  const suggestions = (await call('suggestProjectScripts', { projectId: attached.projectId })).body.result.suggestions
+  assert.deepEqual(suggestions, [
+    { name: 'test', command: 'pnpm run test', kind: 'test', suggested: true },
+    { name: 'build', command: 'pnpm run build', kind: 'build', suggested: true },
+    { name: 'lint:fix', command: 'pnpm run lint:fix', kind: 'lint', suggested: true },
+  ])
+  assert.equal((await call('openProject', { boardId: 'board-1' })).body.result.project.scripts.length, 2, 'suggestions are never saved')
+  assert.deepEqual(suggestProjectScripts('{"scripts":{"test":"jest"}}'), [{ name: 'test', command: 'npm run test', kind: 'test', suggested: true }])
+  assert.deepEqual(suggestProjectScripts('{"packageManager":"yarn@4","scripts":{"typecheck":"tsc"}}'), [{ name: 'typecheck', command: 'yarn typecheck', kind: 'typecheck', suggested: true }])
+  assert.deepEqual(suggestProjectScripts('not json'), [])
+  assert.deepEqual(normalizeProjectScripts([{ id: 'a', name: 'A', command: 'a' }, { id: 'a', name: 'B', command: 'b' }]).map(script => script.id), ['a', 'a-2'])
+})
+
+test('original save, review and resolve routes: conflicts are 409 with both hashes, paths outside the root are refused, text routes are bounded', async t => {
+  const { root, client, dispatch, adapter } = await fixture(t)
+  const authorized = await client.registerRoot({ selectionId: 'selected-owner-a' })
+  const found = await client.resolvePath({ rootId: authorized.rootId, path: 'source.txt' })
+  assert.deepEqual([found.kind, found.relativePath], ['file', 'source.txt'])
+  const outside = await dispatch('resolvePath', { rootId: authorized.rootId, path: '../escape.txt' })
+  assert.deepEqual([outside.status, outside.body.code], [400, 'NOT_IN_ROOT'])
+  const draft = await client.createDraft({ fileId: found.id })
+  const edited = await client.updateDraft({ draftId: draft.id, expectedHead: draft.head, text: 'saved through the route\n', operationId: 'e1' })
+  const saved = await client.saveOriginal({ draftId: draft.id, expectedHead: edited.head, bufferRevision: edited.bufferRevision, operationId: 's1' })
+  assert.equal(saved.receipt.originalUpdated, true)
+  assert.equal(await fs.readFile(path.join(root, 'source.txt'), 'utf8'), 'saved through the route\n')
+  const next = await client.updateDraft({ draftId: draft.id, expectedHead: saved.draft.head, text: 'second\n', operationId: 'e2' })
+  await fs.writeFile(path.join(root, 'source.txt'), 'someone else\n')
+  const conflict = await dispatch('saveOriginal', { draftId: draft.id, expectedHead: next.head, bufferRevision: next.bufferRevision, operationId: 's2' })
+  assert.deepEqual([conflict.status, conflict.body.code], [409, 'SOURCE_CHANGED'])
+  assert.equal(conflict.body.details.currentSourceHash, createHash('sha256').update('someone else\n').digest('hex'))
+  assert.equal(JSON.stringify(conflict.body).includes(root), false)
+  const current = await client.readFile({ fileId: found.id }).catch(error => error)
+  // The external writer replaced the inode; the old handle is refused, not followed.
+  assert.ok(current.code === 'RESOURCE_CHANGED' || current.text === 'someone else\n')
+  const fresh = await client.resolvePath({ rootId: authorized.rootId, path: 'source.txt' })
+  const disk = await client.readFile({ fileId: fresh.id })
+  const wrongHash = await dispatch('revertReviewed', { fileId: fresh.id, expectedSha256: 'f'.repeat(64), text: 'x\n', operationId: 'r1' })
+  assert.deepEqual([wrongHash.status, wrongHash.body.code], [409, 'SOURCE_CHANGED'])
+  const big = 'y'.repeat(100 * 1024)
+  const res = response()
+  await handleEGDeskFiles(request(EGDESK_FILE_ENDPOINTS.revertReviewed, { fileId: fresh.id, expectedSha256: disk.sha256, text: big, operationId: 'r2' }), res, { adapter, ownerScope: 'owner-a' })
+  assert.equal(res.status, 200)
+  assert.equal((await fs.readFile(path.join(root, 'source.txt'), 'utf8')).length, big.length)
+  const smallRoute = response()
+  await handleEGDeskFiles(request(EGDESK_FILE_ENDPOINTS.saveOriginal, { draftId: draft.id, expectedHead: next.head, bufferRevision: 1, operationId: 'x'.repeat(100 * 1024) }), smallRoute, { adapter, ownerScope: 'owner-a' })
+  assert.deepEqual([smallRoute.status, smallRoute.body.code], [413, 'BODY_TOO_LARGE'])
+  const extra = await dispatch('deleteCreated', { fileId: fresh.id, expectedSha256: disk.sha256, operationId: 'd', force: true })
+  assert.deepEqual([extra.status, extra.body.code], [400, 'UNEXPECTED_FIELD'])
+})
+
+test('project store: one project per folder identity, room overrides, replaced bindings drop unused projects', async t => {
+  const directory = await fs.mkdtemp(path.join(os.tmpdir(), 'egdesk-project-store-'))
+  t.after(() => fs.rm(directory, { recursive: true, force: true }))
+  let id = 0
+  const store = await openEGDeskProjectStore({ directory, ownerScope: 'owner', now: () => 1000, makeId: () => `p${++id}` })
+  t.after(() => store.close())
+  const folderA = { workspaceRoot: '/work/a', identity: { dev: '1', ino: '10' } }
+  const folderB = { workspaceRoot: '/work/b', identity: { dev: '1', ino: '20' } }
+  const a = store.attachToBoard({ boardId: 'b1', ...folderA })
+  assert.deepEqual(a, { id: 'p1', title: 'a', workspaceRoot: '/work/a', identity: { dev: '1', ino: '10' }, scripts: [], createdAt: 1000, updatedAt: 1000 })
+  assert.equal(store.attachToBoard({ boardId: 'b2', ...folderA }).id, 'p1', 'the same folder is one project')
+  store.setScripts({ projectId: 'p1', scripts: [{ name: 'test', command: 'npm test' }] })
+  store.attachToRoom({ roomId: 'r1', boardId: 'b1', ...folderB })
+  assert.deepEqual([store.effective({ boardId: 'b1', roomId: 'r1' }).source, store.effective({ boardId: 'b1', roomId: 'r1' }).project.id], ['room', 'p2'])
+  assert.equal(store.effective({ boardId: 'b1', roomId: 'r9' }).project.id, 'p1')
+  assert.deepEqual(store.effective({ boardId: 'none' }), { project: null, source: null })
+  store.inheritRoom({ roomId: 'r1' })
+  assert.deepEqual(store.list().map(project => project.id), ['p1'], 'a project no binding uses is dropped')
+  const moved = store.attachToBoard({ boardId: 'b1', workspaceRoot: '/work/a', identity: { dev: '1', ino: '99' } })
+  assert.deepEqual([moved.id, moved.identity.ino, moved.scripts.length], ['p1', '99', 1], 'picking the same path again keeps the project and its commands')
+  assert.throws(() => store.attachToBoard({ boardId: 'b3', workspaceRoot: 'relative', identity: { dev: '1', ino: '1' } }), { code: 'INVALID_PROJECT_REQUEST' })
+  assert.throws(() => store.attachToBoard({ boardId: 'b3', workspaceRoot: '/x', identity: { dev: 'x', ino: '1' } }), { code: 'INVALID_PROJECT_REQUEST' })
+  const stat = kind => ({ dev: 1n, ino: 99n, isDirectory: () => kind === 'dir', isSymbolicLink: () => kind === 'link' })
+  assert.equal(projectReconnectState(moved, stat('dir')), 'connected')
+  assert.equal(projectReconnectState(moved, { ...stat('dir'), ino: 5n }), 'identity-changed')
+  assert.equal(projectReconnectState(moved, stat('link')), 'not-a-directory')
+  assert.equal(projectReconnectState(moved, null), 'missing')
+  store.close()
+  const reopened = await openEGDeskProjectStore({ directory, ownerScope: 'owner' })
+  t.after(() => reopened.close())
+  assert.equal(reopened.forBoard('b2').id, 'p1')
+})
+
+// ---- 2-X: one change shape for Codex, Claude, ACP and shell edits ----
+
+test('file change shape: Codex, ACP, Claude tool results and git checkpoint patches read the same way', () => {
+  assert.deepEqual(fileChangeFromCodex({ path: '/p/a.txt', kind: { type: 'update', move_path: '/p/b.txt' }, diff: '@@ -1 +1 @@\n-a\n+b\n' }),
+    { path: '/p/a.txt', kind: 'update', movePath: '/p/b.txt', diff: '@@ -1 +1 @@\n-a\n+b\n', oldText: null, newText: null, source: 'codex', viaShell: false, omitted: null })
+  assert.equal(fileChangeFromCodex({ path: '/p/n.txt', kind: 'add', diff: 'new\n' }).kind, 'add')
+  assert.equal(fileChangeFromCodex({ kind: 'add' }), null)
+  assert.deepEqual(fileChangeFromAcpDiff({ type: 'diff', path: '/p/x.txt', oldText: null, newText: 'x\n' }).kind, 'add')
+  assert.deepEqual(fileChangeFromAcpDiff({ type: 'diff', path: '/p/x.txt', oldText: 'a\n', newText: 'b\n' }).kind, 'update')
+  // jsdiff convention: a zero-line side stores the line after the change.
+  assert.equal(hunksToUnified([{ oldStart: 3, oldLines: 0, newStart: 3, newLines: 1, lines: ['+inserted'] }]), '@@ -2,0 +3 @@\n+inserted\n')
+  const edit = fileChangeFromClaudeToolResult('Edit', { file_path: '/p/a.txt', old_string: 'a', new_string: 'b' }, { filePath: '/p/a.txt', originalFile: 'a\n', structuredPatch: [{ oldStart: 1, oldLines: 1, newStart: 1, newLines: 1, lines: ['-a', '+b'] }] })
+  assert.deepEqual([edit.kind, edit.diff, edit.oldText, edit.source], ['update', '@@ -1 +1 @@\n-a\n+b\n', 'a\n', 'claude'])
+  assert.equal(fileDiffFromCodexChange(edit).added, 1, 'EGDeskDiffView reads the shared shape')
+  const created = fileChangeFromClaudeToolResult('Write', { file_path: '/p/new.txt', content: 'hi\n' }, { type: 'create', filePath: '/p/new.txt', content: 'hi\n', originalFile: null })
+  assert.deepEqual([created.kind, created.diff, created.newText], ['add', 'hi\n', 'hi\n'])
+  assert.equal(fileChangeFromClaudeToolResult('Bash', {}, {}), null)
+
+  const patch = [
+    'diff --git a/src/app.js b/src/app.js', 'index 1..2 100644', '--- a/src/app.js', '+++ b/src/app.js', '@@ -1,2 +1,2 @@', ' keep', '-old', '+new',
+    'diff --git a/made.txt b/made.txt', 'new file mode 100644', '--- /dev/null', '+++ b/made.txt', '@@ -0,0 +1,2 @@', '+one', '+two',
+    'diff --git a/gone.txt b/gone.txt', 'deleted file mode 100644', '--- a/gone.txt', '+++ /dev/null', '@@ -1 +0,0 @@', '-bye', '\\ No newline at end of file',
+    'diff --git a/old.txt b/renamed.txt', 'similarity index 100%', 'rename from old.txt', 'rename to renamed.txt',
+    'diff --git a/logo.png b/logo.png', 'index 1..2 100644', 'Binary files a/logo.png and b/logo.png differ', '',
+  ].join('\n')
+  const changes = fileChangesFromGitPatch(patch)
+  assert.deepEqual(changes.map(change => [change.path, change.kind, change.movePath, change.omitted]), [['src/app.js', 'update', null, null], ['made.txt', 'add', null, null], ['gone.txt', 'delete', null, null], ['old.txt', 'update', 'renamed.txt', null], ['logo.png', 'update', null, 'unavailable']])
+  assert.equal(changes[0].diff, '@@ -1,2 +1,2 @@\n keep\n-old\n+new\n')
+  assert.deepEqual([changes[1].newText, changes[2].oldText], ['one\ntwo\n', 'bye'])
+  assert.ok(changes.every(change => change.viaShell && change.source === 'git'))
+
+  const merged = mergeTurnChanges({ engine: [fileChangeFromCodex({ path: '/proj/src/app.js', kind: 'update', diff: '@@ -1 +1 @@\n-a\n+b\n' })], checkpoint: changes, root: '/proj/' })
+  assert.deepEqual(merged.map(change => [change.path, change.source, change.viaShell]), [['/proj/src/app.js', 'codex', false], ['/proj/made.txt', 'git', true], ['/proj/gone.txt', 'git', true], ['/proj/old.txt', 'git', true], ['/proj/logo.png', 'git', true]])
+  const bounded = boundFileChanges([{ path: 'big', kind: 'add', diff: 'x'.repeat(FILE_CHANGE_LIMITS.maxFileBytes + 1), omitted: null }, ...Array.from({ length: 5 }, (_, index) => ({ path: `f${index}`, kind: 'add', diff: 'y'.repeat(250 * 1024), omitted: null }))])
+  assert.deepEqual(bounded.map(change => change.omitted), ['fileLimit', null, null, null, null, 'runLimit'])
+  assert.equal(bounded[0].diff, null)
+})
+
+// ---- 2-X: git checkpoint (D-X4, off by default) ----
+
+test('git checkpoint is off by default; when on it records turns under its own ref without touching the index, HEAD or files', async t => {
+  const calls = []
+  const off = createEGDeskGitCheckpoint({ execFile: (...args) => { calls.push(args); throw new Error('must not run') } })
+  assert.equal(off.enabled, false)
+  assert.deepEqual(await off.capture('/anywhere'), { enabled: false })
+  assert.deepEqual(await off.diff('/anywhere', { fromRef: 'x', toRef: 'y' }), { enabled: false })
+  assert.equal(calls.length, 0)
+
+  const base = await fs.realpath(await fs.mkdtemp(path.join(os.tmpdir(), 'egdesk-checkpoint-')))
+  t.after(() => fs.rm(base, { recursive: true, force: true }))
+  const home = path.join(base, 'home')
+  await fs.mkdir(home)
+  await fs.writeFile(path.join(home, 'gitconfig'), '')
+  const env = { ...process.env, HOME: home, GIT_CONFIG_GLOBAL: path.join(home, 'gitconfig'), GIT_CONFIG_NOSYSTEM: '1', GIT_CEILING_DIRECTORIES: base }
+  delete env.GIT_DIR; delete env.GIT_WORK_TREE; delete env.GIT_INDEX_FILE
+  const repo = path.join(base, 'repo')
+  await fs.mkdir(path.join(repo, 'app'), { recursive: true })
+  const git = (...args) => execFileSync('git', args, { cwd: repo, env, encoding: 'utf8' })
+  git('init', '-q', '-b', 'main'); git('config', 'user.email', 'c@example.invalid'); git('config', 'user.name', 'C'); git('config', 'commit.gpgsign', 'false')
+  await fs.writeFile(path.join(repo, 'app', 'a.txt'), 'one\n')
+  await fs.writeFile(path.join(repo, 'outside.txt'), 'root file\n')
+  git('add', '-A'); git('commit', '-qm', 'init')
+  await fs.writeFile(path.join(repo, 'app', 'staged.txt'), 'user staged\n')
+  git('add', 'app/staged.txt')
+  const head = git('rev-parse', 'HEAD').trim()
+  const statusBefore = git('status', '--porcelain=2')
+
+  let n = 0
+  const checkpoint = createEGDeskGitCheckpoint({ enabled: true, env, makeId: () => `turn-${++n}` })
+  const project = path.join(repo, 'app')
+  const start = await checkpoint.capture(project, { label: 'start' })
+  assert.deepEqual([start.isRepo, start.ref], [true, `${EGDESK_CHECKPOINT_REF_PREFIX}turn-1`])
+  // A shell command edits and creates files during the turn.
+  await fs.writeFile(path.join(project, 'a.txt'), 'one\ntwo\n')
+  await fs.writeFile(path.join(project, 'shell-made.txt'), 'made by a script\n')
+  const end = await checkpoint.capture(project, { label: 'end' })
+  const turn = await checkpoint.diff(project, { fromRef: start.ref, toRef: end.ref })
+  assert.deepEqual(turn.files.map(file => [file.relativePath, file.additions, file.deletions]).sort(), [['a.txt', 1, 0], ['shell-made.txt', 1, 0]])
+  assert.deepEqual(fileChangesFromGitPatch(turn.patch).map(change => [change.path, change.kind]).sort(), [['a.txt', 'update'], ['shell-made.txt', 'add']])
+  assert.equal(git('rev-parse', 'HEAD').trim(), head)
+  assert.equal(git('diff', '--cached', '--name-only').trim(), 'app/staged.txt', 'the user index keeps exactly what the user staged')
+  assert.notEqual(git('status', '--porcelain=2'), '')
+  assert.equal(statusBefore.includes('app/staged.txt'), true)
+  assert.deepEqual((await fs.readdir(path.join(repo, '.git'))).filter(name => name.startsWith('egdesk-checkpoint-index')), [])
+  await assert.rejects(checkpoint.diff(project, { fromRef: 'refs/heads/main', toRef: end.ref }), { code: 'INVALID_REF' })
+  assert.equal((await checkpoint.remove(project, start.ref)).removed, true)
+  assert.equal(git('for-each-ref', '--format=%(refname)', 'refs/egdesk/').trim(), end.ref)
+  const outsideRepo = path.join(base, 'plain')
+  await fs.mkdir(outsideRepo)
+  assert.deepEqual(await checkpoint.capture(outsideRepo), { enabled: true, isRepo: false })
+})
+
+test('chooseProjectFolder attaches a Board folder through the native picker channel; a cancelled pick attaches nothing', async t => {
+  const { root, adapter } = await fixture(t)
+  const service = createEGDeskFileServiceCallbacks({ request: async (route, body, options) => {
+    const headers = Object.fromEntries(Object.entries(options?.headers || {}).map(([key, value]) => [key.toLowerCase(), value]))
+    const res = response()
+    await adapter.handle(request(route, body, headers), res)
+    return res.body
+  } })
+  let pick = root
+  const pickers = createEGDeskNativeFilePickers({ service, pickDirectory: async () => pick })
+  const project = await pickers.chooseProjectFolder({ boardId: 'board-n', title: '쇼핑몰' })
+  assert.deepEqual([project.status, project.title, project.source], ['connected', '쇼핑몰', 'board'])
+  assert.equal((await service.openProject({ boardId: 'board-n' })).project.projectId, project.projectId)
+  pick = null
+  assert.equal(await pickers.chooseProjectFolder({ boardId: 'board-m' }), null)
+  assert.deepEqual(await service.openProject({ boardId: 'board-m' }), { project: null, source: null })
 })
