@@ -18,6 +18,9 @@
   const PortableState = ChromeUtils.importESModule('chrome://userchrome/content/EGDeskPortableState.sys.mjs');
   const BROWSER_AGENT_ACTOR_NAME = 'EGDeskBrowserAgentRuntime';
   const BROWSER_AGENT_HISTORY_LIMIT = 100;
+  // Time a Browser tool reply needs after a wait or settle, before the
+  // request deadline (REA 웹8 c, 웹9).
+  const BROWSER_TOOL_REPLY_MARGIN_MS = 500;
   const EGDESK_START_URI = 'chrome://userchrome/content/egdesk-start.html';
   let browserAgentActorReady = false;
   console.warn(TAG, 'loaded, readyState =', document.readyState);
@@ -13551,6 +13554,51 @@
       return ['http:', 'https:'].includes(parsed.protocol) && !parsed.username && !parsed.password;
     } catch { return false; }
   }
+  // Same-clock stamp shared with the helper and the page actor (REA 웹10):
+  // this chrome global's performance.timeOrigin + performance.now().
+  function browserToolClock() {
+    try {
+      const value = performance.timeOrigin + performance.now();
+      if (Number.isFinite(value) && value >= 0) return value;
+    } catch {}
+    return Date.now();
+  }
+  const BROWSER_TOOL_TIMING_MS = ['receivedAtMs', 'authorizedAtMs', 'performEnterMs', 'performExitMs', 'firstEventAtMs'];
+  const BROWSER_TOOL_PERFORM_MS = ['performEnterMs', 'performExitMs', 'firstEventAtMs'];
+  // Only the helper contract C keys, in their valid forms, reach a response.
+  function browserToolTiming(...parts) {
+    const timing = {};
+    for (const part of parts) {
+      if (!part || typeof part !== 'object') continue;
+      for (const key of BROWSER_TOOL_TIMING_MS) {
+        if (Number.isFinite(part[key]) && part[key] >= 0) timing[key] = part[key];
+      }
+      for (const key of ['performCallsBefore', 'performCallsAfter']) {
+        if (Number.isSafeInteger(part[key]) && part[key] >= 0) timing[key] = part[key];
+      }
+    }
+    return timing;
+  }
+  // REA 웹8 (a), helper contract B. 'not-dispatched' only when the lease was
+  // never authorized, or the actor proved its perform-entry count did not
+  // move. Any sign of perform entry, or anything unproven, is not that.
+  function browserToolDispatchPhase({ phase, leaseAuthorized, actor }) {
+    if (phase === 'post-actor') return 'dispatched';
+    const timing = actor?.timing && typeof actor.timing === 'object' ? actor.timing : {};
+    const before = timing.performCallsBefore, after = timing.performCallsAfter;
+    const countsKnown = Number.isSafeInteger(before) && Number.isSafeInteger(after);
+    const entered = BROWSER_TOOL_PERFORM_MS.some(key => timing[key] != null) || (countsKnown && after !== before) ||
+      actor?.dispatchPhase === 'dispatched';
+    if (entered) return actor?.dispatchPhase === 'dispatched' ? 'dispatched' : 'unknown';
+    if (!leaseAuthorized) return 'not-dispatched';
+    return actor?.dispatchPhase === 'not-dispatched' && countsKnown && after === before ? 'not-dispatched' : 'unknown';
+  }
+  // A refusal before any lease or actor work: nothing was sent to the page.
+  function browserToolRefusal(request, error, receivedAtMs) {
+    return { requestId: request.requestId, status: 'rejected', error,
+      ...(request.kind === 'act' ? { dispatchPhase: 'not-dispatched' } : {}),
+      timing: browserToolTiming({ receivedAtMs }) };
+  }
   function browserToolFixtureIdentity(cardId) {
     const card = document.getElementById(cardId);
     if (!card?.isConnected || !card.classList?.contains('egd-browser-card')) return null;
@@ -13623,6 +13671,13 @@
         ? authorization.reason : null,
       parentReason: recorded.parentReason,
       geckoError: recorded.geckoError, sampledAtMs: recorded.sampledAtMs };
+  }
+  // Owned QA fixture only: how the last tool observation reached a document
+  // (attempts, AbortError retry, inner window IDs). Diagnostic, never authority.
+  function browserToolFixtureObserveDiagnostic(cardId) {
+    if (!browserToolFixtureIdentity(cardId)) return null;
+    try { return document.getElementById(cardId)?._browserControls?.toolObserveDiagnostic?.() || null; }
+    catch { return null; }
   }
   // Last-observed target geometry is display-only. Never feed this point back
   // into input, hit testing, scrolling, actor guards or reference generation.
@@ -13706,7 +13761,7 @@
     return { prepare, invalidate, dispose() { disposed = true; invalidate(); } };
   }
   function browserToolAuthorizePhysicalAction({ browser, browsingContext, windowGlobal,
-    leaseId, requestId, deadlineMs, actionType, actionRef, actionUrl }) {
+    leaseId, requestId, deadlineMs, actionType, actionRef, actionUrl, innerWindowId, browsingContextId }) {
     const lease = browserToolActionLeases.get(leaseId);
     if (!lease) return false;
     const deny = reason => { browserToolRecordFixtureAuthorization(lease, reason); return false; };
@@ -13720,6 +13775,15 @@
     if (!browserToolSameNativeWindowGlobal(browsingContext?.currentWindowGlobal, windowGlobal) ||
         !browserToolSameNativeWindowGlobal(lease.browsingContext?.currentWindowGlobal, lease.windowGlobal)) {
       return deny('window-global-not-current');
+    }
+    // REA 웹4: the observed Gecko document must be the one asking to act.
+    if (innerWindowId !== undefined && innerWindowId !== windowGlobal?.innerWindowId) return deny('inner-window-id-mismatch');
+    if (browsingContextId !== undefined && browsingContextId !== browsingContext?.id) return deny('browsing-context-id-mismatch');
+    if (lease.guardInnerWindowId !== undefined && windowGlobal?.innerWindowId !== lease.guardInnerWindowId) {
+      return deny('inner-window-id-mismatch');
+    }
+    if (lease.guardBrowsingContextId !== undefined && browsingContext?.id !== lease.guardBrowsingContextId) {
+      return deny('browsing-context-id-mismatch');
     }
     if (browserToolRunBindings.get(lease.key) !== lease.bound) return deny('run-binding-changed');
     if (browserToolCancelledRuns.has(lease.key)) return deny('run-cancelled');
@@ -13742,6 +13806,7 @@
         .some(field => current[field] !== lease.bound.binding[field])) return deny('live-binding-changed');
     } catch { return deny('live-binding-unavailable'); }
     lease.authorized = true;
+    lease.authorizedAtMs = browserToolClock();
     browserToolRecordFixtureAuthorization(lease, 'approved');
     // Best-effort projection only: no await, animation gate, input coordinates
     // or success acknowledgement. Display failure cannot change approval.
@@ -13752,13 +13817,14 @@
   // run's bind included — is refused before any other check; a cancel still
   // cleans up. A hold never grants: only the Card menu's explicit grant does.
   // A Card that cannot answer whether it is held is treated as held.
-  function browserToolUserHoldRefusal(request) {
+  function browserToolUserHoldRefusal(request, receivedAtMs) {
     if (request?.kind === 'cancel') return null;
     let held;
     try { held = document.getElementById(request?.cardId)?._browserControls?.toolUserHold?.(request) === true; }
     catch { held = true; }
-    return held ? { requestId: request.requestId, status: 'rejected',
-      error: 'The user is operating this Browser Card directly; Agent requests are refused until the user allows control again from the Card' } : null;
+    return held ? browserToolRefusal(request,
+      'The user is operating this Browser Card directly; Agent requests are refused until the user allows control again from the Card',
+      receivedAtMs) : null;
   }
   // BRW-13 display-only record of a request that reached the Card. It never
   // feeds authorization, and a display failure never changes the reply.
@@ -13768,7 +13834,7 @@
   function browserToolActivityEnd(activity, response, inputAuthorized) {
     try { activity?.end(response, inputAuthorized === true); } catch {}
   }
-  async function browserToolDispatchOnce(request) {
+  async function browserToolDispatchOnce(request, receivedAtMs = browserToolClock()) {
     const requestId = request?.requestId;
     let diagnosticPhase = 'preflight';
     let activity = null, activityLease = null;
@@ -13785,6 +13851,19 @@
         sampledAtMs: Date.now(),
       };
       const rejected = { requestId, status: 'rejected', error: message };
+      if (request?.kind === 'act') {
+        const actor = error && typeof error === 'object' && error.browserToolActor ? error.browserToolActor : null;
+        rejected.dispatchPhase = browserToolDispatchPhase({ phase: diagnosticPhase,
+          leaseAuthorized: activityLease?.authorized === true, actor });
+        const timing = browserToolTiming({ receivedAtMs, authorizedAtMs: activityLease?.authorizedAtMs }, actor?.timing);
+        if (rejected.dispatchPhase === 'not-dispatched') {
+          for (const key of BROWSER_TOOL_PERFORM_MS) delete timing[key];
+          if (timing.performCallsBefore !== timing.performCallsAfter) {
+            delete timing.performCallsBefore; delete timing.performCallsAfter;
+          }
+        }
+        rejected.timing = timing;
+      } else if (request && typeof request === 'object') rejected.timing = browserToolTiming({ receivedAtMs });
       // Input the parent authorized may have landed: that row stays unknown, not refused.
       browserToolActivityEnd(activity, rejected, activityLease?.authorized === true);
       return rejected;
@@ -13819,7 +13898,7 @@
           browserToolUserSelections.delete(request.selectionToken);
         }
         browserToolCancelledRuns.set(key, request.deadlineMs);
-        return { requestId, status: 'cancelled' };
+        return { requestId, status: 'cancelled', timing: browserToolTiming({ receivedAtMs }) };
       }
       if (browserToolStoppedRuns.has(JSON.stringify([request.runId, request.clientThreadId]))) {
         throw new Error('Browser run was stopped');
@@ -13828,6 +13907,11 @@
       const card = document.getElementById(request.cardId);
       if (!card?.isConnected || !card.classList?.contains('egd-browser-card') ||
           !card._browserControls?.toolBinding) throw new Error('Selected Browser Card is closed');
+      // REA 웹9: an observation waits (shared per Card, bounded by this
+      // request's deadline) for a current document. An action never waits.
+      if (request.kind === 'observe' || request.kind === 'bind') {
+        await card._browserControls.toolWhenReady?.(request.deadlineMs);
+      }
       if (card._browserControls.toolBinding().cardEpoch !== request.targetCardEpoch) {
         throw new Error('Browser request belongs to a different Card generation');
       }
@@ -13852,7 +13936,8 @@
         const pending = { clientThreadId: request.clientThreadId, selectionToken: selection.selectionToken };
         browserToolPendingBindings.set(key, pending);
         try {
-          const live = await card._browserControls.toolObserve(current, { textLimit: 1, elementLimit: 1 });
+          const live = await card._browserControls.toolObserve(current, { textLimit: 1, elementLimit: 1 },
+            { deadlineMs: request.deadlineMs });
           if (!browserToolSameUrl(live.url, selection.selectedUrl) || browserToolCancelledRuns.has(key) ||
               browserToolStoppedRuns.has(JSON.stringify([request.runId, request.clientThreadId])) ||
               browserToolPendingBindings.get(key) !== pending ||
@@ -13861,7 +13946,7 @@
           selectedByUser.usedRunId = request.runId;
           browserToolRunBindings.set(key, { binding: current, permission: selection.permission,
             clientThreadId: request.clientThreadId, selectionToken: selection.selectionToken });
-          return { requestId, status: 'bound', binding: current };
+          return { requestId, status: 'bound', binding: current, timing: browserToolTiming({ receivedAtMs }) };
         } finally {
           if (browserToolPendingBindings.get(key) === pending) browserToolPendingBindings.delete(key);
         }
@@ -13879,9 +13964,10 @@
       if (request.kind === 'observe') {
         if (browserToolCardLeases.has(request.targetCardEpoch)) throw new Error('Browser Card is being operated; observe after it settles');
         activity = browserToolActivityStart(card, request);
-        const snapshot = await card._browserControls.toolObserve(authorized.binding, request.options || {});
+        const snapshot = await card._browserControls.toolObserve(authorized.binding, request.options || {},
+          { deadlineMs: request.deadlineMs });
         if (browserToolRunBindings.get(key) !== authorized) throw new Error('Browser run was cancelled during observation');
-        const observed = { requestId, status: 'observed', snapshot };
+        const observed = { requestId, status: 'observed', snapshot, timing: browserToolTiming({ receivedAtMs }) };
         browserToolActivityEnd(activity, observed, false);
         return observed;
       }
@@ -13892,6 +13978,14 @@
       }
       if (request.action.type === 'navigate' && !browserToolSafeNavigationUrl(request.action.url)) {
         throw new Error('Browser navigation requires an absolute http(s) URL without credentials');
+      }
+      const guardIdentity = {};
+      for (const [field, leaseField] of [['innerWindowId', 'guardInnerWindowId'], ['browsingContextId', 'guardBrowsingContextId']]) {
+        if (!Object.hasOwn(request.guard, field)) continue;
+        if (!Number.isSafeInteger(request.guard[field]) || request.guard[field] <= 0) {
+          throw new Error('Browser observation is stale; the observed document identity is invalid');
+        }
+        guardIdentity[leaseField] = request.guard[field];
       }
       if (browserToolCardLeases.has(request.targetCardEpoch)) throw new Error('Browser Card is already being operated');
       browserToolCardLeases.set(request.targetCardEpoch, requestId);
@@ -13908,17 +14002,17 @@
         browsingContext, windowGlobal, leaseId, requestId, runId: request.runId,
         cardEpoch: request.targetCardEpoch, deadlineMs: request.deadlineMs,
         actionType: request.action.type, actionRef: request.action.ref || null,
-        actionUrl: request.action.url || null, authorized: false,
+        actionUrl: request.action.url || null, authorized: false, ...guardIdentity,
         displayPoint: browserToolDisplayPoint(request.action, request.guard) };
       browserToolActionLeases.set(leaseId, actionLease);
       activityLease = actionLease;
       activity = browserToolActivityStart(card, request);
-      let receipt;
+      let receipt, actorTiming = null;
       try {
         try { actionLease.projection = card._browserControls.toolPrepareAgentProjection?.(actionLease); } catch {}
         diagnosticPhase = 'actor';
-        receipt = await card._browserControls.toolAct(authorized.binding, request.action, request.guard,
-          { leaseId, requestId, deadlineMs: request.deadlineMs });
+        ({ timing: actorTiming = null, ...receipt } = await card._browserControls.toolAct(authorized.binding,
+          request.action, request.guard, { leaseId, requestId, deadlineMs: request.deadlineMs }) || {});
       }
       finally {
         try { actionLease.projection?.clear(); } catch {}
@@ -13938,38 +14032,44 @@
         parentReason: null, geckoError: null,
         sampledAtMs: Date.now(),
       };
-      const acted = { requestId, status: 'acted', receipt };
+      const acted = { requestId, status: 'acted', receipt,
+        timing: browserToolTiming({ receivedAtMs, authorizedAtMs: actionLease.authorizedAtMs }, actorTiming) };
       browserToolActivityEnd(activity, acted, true);
       return acted;
     } catch (error) { return fail(error); }
   }
   function browserToolDispatch(request) {
+    const receivedAtMs = browserToolClock();
     const id = request?.requestId;
-    if (typeof id !== 'string' || !id || id.length > 160) return browserToolDispatchOnce(request);
-    const held = browserToolUserHoldRefusal(request);
+    if (typeof id !== 'string' || !id || id.length > 160) return browserToolDispatchOnce(request, receivedAtMs);
+    const held = browserToolUserHoldRefusal(request, receivedAtMs);
     if (held) return Promise.resolve(held);
     const key = `${request.runId}\u0000${request.cardId}\u0000${request.targetCardEpoch}`;
     if (request.kind !== 'cancel' && browserToolStoppedRuns.has(JSON.stringify([request.runId, request.clientThreadId]))) {
-      return Promise.resolve({ requestId: id, status: 'rejected', error: 'Browser run was stopped' });
+      return Promise.resolve(browserToolRefusal(request, 'Browser run was stopped', receivedAtMs));
     }
-    if (request.kind !== 'cancel' && browserToolCancelledRuns.has(key)) return Promise.resolve({
-      requestId: id, status: 'rejected', error: 'Browser run was cancelled',
-    });
+    if (request.kind !== 'cancel' && browserToolCancelledRuns.has(key)) {
+      return Promise.resolve(browserToolRefusal(request, 'Browser run was cancelled', receivedAtMs));
+    }
     let fingerprint;
-    try { fingerprint = JSON.stringify(request); } catch { return browserToolDispatchOnce(null); }
-    if (fingerprint.length > 24000) return Promise.resolve({ requestId: id, status: 'rejected', error: 'Browser request exceeds size limit' });
+    try { fingerprint = JSON.stringify(request); } catch { return browserToolDispatchOnce(null, receivedAtMs); }
+    // Refused before any lease or actor work, so 'not-dispatched' even when a
+    // newline-heavy fill fits the helper's larger JSON budget.
+    if (fingerprint.length > 24000) {
+      return Promise.resolve(browserToolRefusal(request, 'Browser request exceeds size limit', receivedAtMs));
+    }
     const previous = browserToolRequestReceipts.get(id);
     if (previous) return previous.fingerprint === fingerprint ? previous.result :
-      Promise.resolve({ requestId: id, status: 'rejected', error: 'Browser request ID reused with different payload' });
+      Promise.resolve(browserToolRefusal(request, 'Browser request ID reused with different payload', receivedAtMs));
     if (browserToolRequestReceipts.size >= 512) {
       for (const [oldId, item] of browserToolRequestReceipts) {
         if (item.deadline < Date.now()) browserToolRequestReceipts.delete(oldId);
       }
-      if (browserToolRequestReceipts.size >= 512) return Promise.resolve({
-        requestId: id, status: 'rejected', error: 'Browser request queue is full',
-      });
+      if (browserToolRequestReceipts.size >= 512) {
+        return Promise.resolve(browserToolRefusal(request, 'Browser request queue is full', receivedAtMs));
+      }
     }
-    const result = browserToolDispatchOnce(request);
+    const result = browserToolDispatchOnce(request, receivedAtMs);
     browserToolRequestReceipts.set(id, { fingerprint, result, deadline: request.deadlineMs });
     return result;
   }
@@ -15792,18 +15892,97 @@
         .some(key => current[key] !== expected[key])) throw new Error('Browser Card, profile or account context changed');
       return current;
     };
-    const browserToolObserve = async (expected, options = {}) => {
+    // REA 웹9: one shared wait per Card for a current, ready document. Each
+    // caller keeps its own deadline; the poll follows remote
+    // BrowsingContextUtils.sys.mjs:276-299 (waitForCurrentWindowGlobal).
+    // Observation and wait only: an action never waits or retries.
+    const toolWindowGlobalWaiters = new Set();
+    let toolWindowGlobalTimer = 0;
+    const readyToolWindowGlobal = () => {
+      try {
+        const context = xulBrowser?.browsingContext;
+        const windowGlobal = context?.currentWindowGlobal;
+        if (!context || context.isDiscarded || !windowGlobal || windowGlobal.isClosed === true ||
+            windowGlobal.isCurrentGlobal === false || typeof windowGlobal.getActor !== 'function') return null;
+        // A tab still loading its first page shows only its placeholder document.
+        if (windowGlobal.isInitialDocument === true && browserState.loading) return null;
+        return windowGlobal;
+      } catch { return null; }
+    };
+    const pollToolWindowGlobal = () => {
+      toolWindowGlobalTimer = 0;
+      const ready = readyToolWindowGlobal();
+      const gone = !card.isConnected || !xulBrowser?.isConnected;
+      const now = Date.now();
+      for (const waiter of [...toolWindowGlobalWaiters]) {
+        if (!ready && !gone && now < waiter.untilMs) continue;
+        toolWindowGlobalWaiters.delete(waiter);
+        if (ready) waiter.resolve(ready);
+        else waiter.reject(new Error(gone ? 'Selected Browser Card is unavailable'
+          : 'Browser document was not ready before the request deadline'));
+      }
+      if (toolWindowGlobalWaiters.size) toolWindowGlobalTimer = window.setTimeout(pollToolWindowGlobal, 20);
+    };
+    const whenToolWindowGlobalReady = (deadlineMs) => {
+      const ready = readyToolWindowGlobal();
+      if (ready || !Number.isFinite(deadlineMs)) return Promise.resolve(ready);
+      return new Promise((resolve, reject) => {
+        toolWindowGlobalWaiters.add({ untilMs: deadlineMs - BROWSER_TOOL_REPLY_MARGIN_MS, resolve, reject });
+        if (!toolWindowGlobalTimer) toolWindowGlobalTimer = window.setTimeout(pollToolWindowGlobal, 20);
+      });
+    };
+    const disposeToolWindowGlobalWaits = () => {
+      if (toolWindowGlobalTimer) window.clearTimeout(toolWindowGlobalTimer);
+      toolWindowGlobalTimer = 0;
+      for (const waiter of toolWindowGlobalWaiters) waiter.reject(new Error('Selected Browser Card is unavailable'));
+      toolWindowGlobalWaiters.clear();
+    };
+    // Last tool observation's attempt record, read only by the owned QA
+    // fixture diagnostic; never part of a reply or an authorization.
+    let lastToolObserve = null;
+    const browserToolObserve = async (expected, options = {}, { deadlineMs } = {}) => {
+      if (Number.isFinite(deadlineMs)) await whenToolWindowGlobalReady(deadlineMs);
       assertBrowserToolBinding(expected);
-      const context = xulBrowser.browsingContext;
-      const windowGlobal = context.currentWindowGlobal;
       showAgentActivity('Agent가 이 Browser를 관찰 중');
-      let snapshot;
-      try { snapshot = await browserAgentActorRequest('snapshot', { options }); }
-      catch (error) { showAgentActivity('Browser 관찰 불가 · 다시 확인 필요'); throw error; }
+      const startedAt = Date.now();
+      const attempt = { attempts: 0, abortRetried: false, innerWindowIds: [], waitOffsetMs: 0, sampledAtMs: null };
+      lastToolObserve = attempt;
+      let snapshot, context, windowGlobal, attemptOptions = options;
+      for (;;) {
+        attempt.attempts++;
+        context = xulBrowser.browsingContext;
+        windowGlobal = context.currentWindowGlobal;
+        attempt.innerWindowIds.push(Number.isSafeInteger(windowGlobal?.innerWindowId) ? windowGlobal.innerWindowId : null);
+        try { snapshot = await browserAgentActorRequest('snapshot', { options: attemptOptions }); break; }
+        catch (error) {
+          // remote RootTransport.sys.mjs:180-200: only an actor destroyed
+          // mid-query (AbortError) is retried, once, on the replacement
+          // document and inside the same deadline. A timeout never is.
+          const retry = attempt.attempts === 1 && error?.name === 'AbortError' && Number.isFinite(deadlineMs) &&
+            Date.now() < deadlineMs - BROWSER_TOOL_REPLY_MARGIN_MS;
+          if (!retry) { showAgentActivity('Browser 관찰 불가 · 다시 확인 필요'); throw error; }
+          attempt.abortRetried = true;
+          try {
+            await whenToolWindowGlobalReady(deadlineMs);
+            assertBrowserToolBinding(expected);
+          } catch (waitError) { showAgentActivity('Browser 관찰 불가 · 다시 확인 필요'); throw waitError; }
+          if (options.wait && Number.isSafeInteger(options.wait.timeoutMs)) {
+            // The retried wait gets only what is left of its own timeout.
+            attempt.waitOffsetMs = Date.now() - startedAt;
+            const left = Math.min(options.wait.timeoutMs - attempt.waitOffsetMs,
+              deadlineMs - BROWSER_TOOL_REPLY_MARGIN_MS - Date.now());
+            attemptOptions = { ...options, wait: { ...options.wait, timeoutMs: Math.max(0, Math.floor(left)) } };
+          }
+        }
+      }
       assertBrowserToolBinding(expected);
       if (xulBrowser.browsingContext !== context || context.currentWindowGlobal !== windowGlobal) {
         throw new Error('Browser document changed during observation');
       }
+      if (attempt.waitOffsetMs && snapshot?.wait && Number.isSafeInteger(snapshot.wait.elapsedMs)) {
+        snapshot = { ...snapshot, wait: { ...snapshot.wait, elapsedMs: snapshot.wait.elapsedMs + attempt.waitOffsetMs } };
+      }
+      attempt.sampledAtMs = Date.now();
       showAgentActivity('이 Browser 관찰 완료');
       return { cardId: card.id, ...snapshot };
     };
@@ -15816,11 +15995,23 @@
       // chrome-document fallbacks do not enforce document/target revisions.
       let result;
       try {
+        // settleMs is a cap: the actor shortens it to what the lease leaves (REA 웹8 c).
         result = await browserAgentActorRequest('act', {
           action, options: { guard, lease, settleMs: 150, snapshot: { textLimit: 60, elementLimit: 80 } },
         });
       } catch (error) { showAgentActivity('조작 결과 미확인 · 다시 관찰 필요'); throw error; }
-      assertBrowserToolBinding(expected);
+      if (result?.refused === true) {
+        // The actor's own phase claim and counts; dispatch decides with its lease.
+        showAgentActivity(result.dispatchPhase === 'not-dispatched'
+          ? '조작을 보내지 않음 · 다시 관찰 필요' : '조작 결과 미확인 · 다시 관찰 필요');
+        throw Object.assign(new Error(String(result.error || 'Browser action was refused').slice(0, 500)),
+          { browserToolActor: { dispatchPhase: result.dispatchPhase, timing: result.timing } });
+      }
+      try { assertBrowserToolBinding(expected); }
+      catch (error) {
+        // perform already ran: whatever fails now is after dispatch.
+        throw Object.assign(error, { browserToolActor: { dispatchPhase: 'dispatched', timing: result?.timing } });
+      }
       const documentStillCurrent = xulBrowser.browsingContext === context && context.currentWindowGlobal === windowGlobal;
       showAgentActivity(documentStillCurrent && result?.observation?.visibleTextChanged
         ? '이 Browser의 화면 변화 관찰' : '조작 요청 후 결과 확인 필요');
@@ -15832,7 +16023,9 @@
         ...(['scroll', 'press', 'fill'].includes(action.type)
           ? BrowserAgentReceipts.browserToolDispatchReceiptFields(action.type, result?.result?.dispatchDiagnostics) : {}) },
         after: documentStillCurrent ? { cardId: card.id, ...result.after } : null,
-        observation: documentStillCurrent ? result.observation : null };
+        observation: documentStillCurrent ? result.observation : null,
+        // Dispatch lifts this out of the receipt into the reply's top-level timing.
+        ...(result?.timing && typeof result.timing === 'object' ? { timing: result.timing } : {}) };
     };
     card._browserControls = {
       getState: () => getBrowserStateSnapshot(),
@@ -15860,6 +16053,9 @@
       toolBinding: browserToolBinding,
       toolBrowser: () => xulBrowser,
       toolObserve: browserToolObserve,
+      toolWhenReady: whenToolWindowGlobalReady,
+      toolObserveDiagnostic: () => lastToolObserve && { ...lastToolObserve,
+        innerWindowIds: [...lastToolObserve.innerWindowIds] },
       toolAct: browserToolAct,
       toolPrepareAgentProjection: agentProjection.prepare,
       toolActivity: startAgentToolActivity,
@@ -16021,6 +16217,7 @@
 
     const cleanupCard = () => {
       try { unregisterBrowserAuthorizer?.(); } catch {}
+      disposeToolWindowGlobalWaits();
       agentProjection.dispose();
       disposeAgentControl();
       unregisterBrowserAuthorizer = null;
@@ -18355,6 +18552,7 @@
           attachTransport: attachBrowserToolTransport,
           authorizePhysicalAction: browserToolAuthorizePhysicalAction,
           fixtureActionDiagnostic: browserToolFixtureActionDiagnostic,
+          fixtureObserveDiagnostic: browserToolFixtureObserveDiagnostic,
           rootSseReady: () => state.codexBridge?.rootSseReady?.() || {
             sourceReady: false, stable: false, eventSourceReadyState: null,
             browserTransportId: null, sampledAtMs: Date.now(),

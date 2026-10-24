@@ -2105,7 +2105,37 @@ const NEGATIVE_PROBE_NAMES = Object.freeze([
   'observe-only-interaction-denied', 'stop-before-first-bind-accept',
   'expired-request-before-actor', 'cancel-before-act',
   'readonly-fill-at-actor', 'disabled-fieldset-fill-at-actor', 'aria-disabled-ancestor-fill-at-actor',
+  'oversized-fill-not-dispatched',
 ]);
+// REA 웹8 (EGQ8): a newline-heavy fill B accepts (text <= 8000, text plus
+// postcondition JSON <= 40000) but the UI refuses before any lease (> 24000).
+const OVERSIZED_FILL_TEXT = 'Q\n\n\n'.repeat(1800);
+const NOT_DISPATCHED_RECOVERY_VALUE = 'QA_NOT_DISPATCHED_RECOVERY';
+const PERFORM_TIMING_MS = ['performEnterMs', 'performExitMs', 'firstEventAtMs'];
+
+// A UI act refused before input: helper contract B 'not-dispatched', the UI
+// receive stamp, and no perform evidence (counts, if any, unchanged).
+function assertNotDispatchedReceipt(request, label) {
+  const timing = request?.timing;
+  assert.ok(request?.status === 'rejected' && request.dispatchPhase === 'not-dispatched'
+    && timing && Number.isFinite(timing.receivedAtMs) && timing.receivedAtMs > 0
+    && PERFORM_TIMING_MS.every(key => timing[key] == null)
+    && timing.performCallsBefore === timing.performCallsAfter,
+  `${label} UI refusal is not a proven not-dispatched receipt`);
+}
+
+// A UI act that entered perform once, stamped on the UI and page clocks.
+// Ordering is checked within one global; the two processes share only epoch ms.
+function assertActedTiming(request, counterBefore, counterAfter, label) {
+  const timing = request?.timing;
+  assert.ok(timing && request.dispatchPhase === undefined
+    && [...PERFORM_TIMING_MS, 'receivedAtMs', 'authorizedAtMs'].every(key => Number.isFinite(timing[key]) && timing[key] > 0)
+    && timing.receivedAtMs <= timing.authorizedAtMs
+    && timing.performEnterMs <= timing.firstEventAtMs && timing.firstEventAtMs <= timing.performExitMs
+    && timing.performCallsBefore === counterBefore && timing.performCallsAfter === counterAfter
+    && counterAfter === counterBefore + 1,
+  `${label} lacks same-clock receive/authorize/perform timing for exactly one perform entry`);
+}
 
 const CHILD_TARGET_PROBES = Object.freeze([
   { name: 'readonly-fill-at-actor', label: 'QA readonly note', disabled: false,
@@ -2125,9 +2155,13 @@ function assertProbeActionDiagnostic(request, cardId, phase, status) {
 }
 
 function assertProbeGuard(request, snapshot, target) {
+  // B copies the observed Gecko identities (REA 웹4); a direct UI probe may
+  // omit them, but any it carries must be the observed ones.
+  const identity = Object.fromEntries(['innerWindowId', 'browsingContextId']
+    .filter(key => Object.hasOwn(request?.guard || {}, key)).map(key => [key, snapshot[key]]));
   assert.deepEqual(request.guard, { documentId: snapshot.documentId, revision: snapshot.revision,
     viewport: snapshot.viewport, url: snapshot.url,
-    focusedRef: snapshot.focusedElement?.ref || null, target },
+    focusedRef: snapshot.focusedElement?.ref || null, ...identity, target },
   'fixture action lost its exact observed guard');
   assert.equal(request.action?.ref, target?.ref, 'fixture action changed its observed target');
   assert.equal(request.action?.selector, undefined, 'fixture action cannot use a selector fallback');
@@ -2174,6 +2208,10 @@ function assertGuardedPositiveControls(proof, actorDocumentId) {
     assert.ok(target && !target.disabled && target.label === (item.action === 'fill' ? 'QA note' : 'Reveal QA details'),
       'guarded positive control targeted another fixture element');
     assertProbeGuard(acted, observed.snapshot, target);
+    assert.ok(['innerWindowId', 'browsingContextId'].every(key => Number.isSafeInteger(observed.snapshot[key])
+      && observed.snapshot[key] > 0 && acted.guard[key] === observed.snapshot[key]),
+    'guarded positive control did not carry the observed Gecko document identity');
+    assertActedTiming(acted, counterBefore.performCalls, counterAfter.performCalls, 'guarded positive control');
     assertProbeActionDiagnostic(acted, proof.cardId, 'post-actor', 'acted');
     assert.ok(requests.slice(requests.indexOf(acted) + 1).some(request => request.kind === 'observe'
       && request.status === 'observed' && request.attemptedAt >= acted.respondedAt),
@@ -2197,6 +2235,74 @@ function assertGuardedPositiveControls(proof, actorDocumentId) {
       && receipt.dispatchReceipt.targetClickObserved === true,
     'guarded click lacks its focus-safe target event receipt');
   }
+}
+
+// EGQ8: the size-refused fill spends only its observation; the same run,
+// without a new bind or selection, observes again and fills once.
+function assertNotDispatchedRecovery(proof) {
+  const probe = proof.probes.find(item => item.name === 'oversized-fill-not-dispatched');
+  const denied = probe.uiRequests.find(request => request.kind === 'act');
+  assert.ok(probe.code === 'BROWSER_OBSERVATION_STALE' && probe.uiActRequests === 1
+    && /size limit/i.test(denied?.error || '') && denied.action?.type === 'fill'
+    && denied.action.text === OVERSIZED_FILL_TEXT && OVERSIZED_FILL_TEXT.length <= 8000
+    && JSON.stringify(OVERSIZED_FILL_TEXT).length * 2 <= 40000 && denied.requestJsonLength > 24000,
+  'oversized fill was not refused by the UI size limit before input');
+  const recovery = proof.notDispatchedRecovery;
+  assert.ok(recovery?.cardId === proof.cardId && recovery.simulatorOnly === true
+    && recovery.syntheticRunId === probe.syntheticRunId && recovery.sourceId === probe.sourceId
+    && recovery.cardEpoch === probe.cardEpoch,
+  'not-dispatched recovery did not continue the same run on the same Card');
+  const requests = recovery.uiRequests;
+  assert.ok(Array.isArray(requests) && requests.every(request => request.runId === recovery.syntheticRunId
+    && request.cardId === proof.cardId && request.requestId && request.responseRequestId === request.requestId),
+  'not-dispatched recovery lost request/run/Card correlation');
+  assert.equal(requests.filter(request => request.kind === 'bind').length, 1,
+    'not-dispatched recovery rebound or reselected the Card');
+  const acts = requests.filter(request => request.kind === 'act');
+  assert.ok(acts.length === 2 && acts[0].requestId === denied.requestId && acts[1].status === 'acted'
+    && acts[1].action?.type === 'fill' && acts[1].action.text === NOT_DISPATCHED_RECOVERY_VALUE,
+  'not-dispatched recovery lacks exactly one later acted fill');
+  assert.ok(requests.slice(requests.indexOf(acts[0]) + 1, requests.indexOf(acts[1])).some(request =>
+    request.kind === 'observe' && request.status === 'observed'),
+  'not-dispatched recovery acted without a fresh observation');
+  assert.ok(recovery.observed?.status === 'observed' && recovery.observed.observationId
+    && recovery.observed.observationId !== recovery.deniedObservationId,
+  'not-dispatched recovery reused the spent observation');
+  const target = recovery.observed.snapshot.interactiveElements.find(element => element.ref === acts[1].action.ref);
+  assert.ok(target?.label === 'QA note', 'not-dispatched recovery filled another fixture element');
+  assertProbeGuard(acts[1], recovery.observed.snapshot, target);
+  const before = recovery.beforeAttempt?.qaDiagnostics, after = recovery.afterAttempt?.qaDiagnostics;
+  assertActedTiming(acts[1], before?.performCalls, after?.performCalls, 'not-dispatched recovery');
+  assert.ok(recovery.receipt?.status === 'postcondition-observed' && recovery.receipt.action === 'fill'
+    && recovery.receipt.postcondition?.matched === true
+    && recovery.afterAttempt.interactiveElements.find(element => element.ref === target.ref)?.value
+      === NOT_DISPATCHED_RECOVERY_VALUE,
+  'not-dispatched recovery fill is not independently observed');
+}
+
+// REA 웹9: an observation in flight when its document is replaced is retried
+// once on the replacement, inside the same request deadline.
+function assertNavigationObserveRetry(proof) {
+  const retry = proof.navigationObserveRetry;
+  const snapshot = retry?.response?.snapshot;
+  assert.ok(retry?.cardId === proof.cardId && retry.response?.status === 'observed'
+    && snapshot?.cardId === proof.cardId && snapshot.url === proof.fixture.url
+    && snapshot.text?.includes(proof.fixture.marker) && snapshot.readyState === 'complete'
+    && typeof retry.oldDocumentId === 'string' && snapshot.documentId !== retry.oldDocumentId
+    && snapshot.wait?.for === 'load' && snapshot.wait.outcome === 'met'
+    && Number.isSafeInteger(snapshot.wait.elapsedMs) && snapshot.wait.elapsedMs <= retry.waitTimeoutMs,
+  'navigation-time observation did not complete on the replacement document');
+  const diagnostic = retry.diagnostic;
+  assert.ok(diagnostic?.attempts === 2 && diagnostic.abortRetried === true
+    && Array.isArray(diagnostic.innerWindowIds) && diagnostic.innerWindowIds.length === 2
+    && diagnostic.innerWindowIds[0] === retry.oldInnerWindowId
+    && Number.isSafeInteger(diagnostic.innerWindowIds[1]) && diagnostic.innerWindowIds[1] !== retry.oldInnerWindowId
+    && snapshot.innerWindowId === diagnostic.innerWindowIds[1],
+  'navigation-time observation lacks its single AbortError retry on a new document');
+  assert.ok(Number.isFinite(retry.navigatedAt) && retry.attemptedAt <= retry.navigatedAt
+    && retry.navigatedAt <= retry.respondedAt && retry.respondedAt < retry.requestDeadlineMs
+    && Number.isFinite(retry.response.timing?.receivedAtMs),
+  'navigation-time observation is not ordered inside its request deadline');
 }
 
 export function assertBrowserNegativeProbeResults(proof) {
@@ -2248,6 +2354,7 @@ export function assertBrowserNegativeProbeResults(proof) {
     assert.equal(acts.length, expectedActs, `${item.name} UI act receipt count differs from its claim`);
     assert.ok(acts.every(request => request.status === 'rejected' && typeof request.error === 'string' && request.error),
       `${item.name} has no actual rejected UI act receipt`);
+    for (const request of acts) assertNotDispatchedReceipt(request, item.name);
     if (item.uiRequestId) assert.ok(acts.some(request => request.requestId === item.uiRequestId),
       `${item.name} rejected UI request ID is not in its trace`);
   }
@@ -2255,8 +2362,8 @@ export function assertBrowserNegativeProbeResults(proof) {
   assert.ok(revision.code === 'BROWSER_OBSERVATION_STALE' && revision.uiActRequests === 0
     && scheme.code === 'INVALID_BROWSER_TOOL' && scheme.serviceActRequests === 0
     && scheme.uiProtocolDenied === true
-    && dom.code === 'BROWSER_ACTION_UNVERIFIED' && dom.uiActRequests === 1
-    && resize.code === 'BROWSER_ACTION_UNVERIFIED' && resize.uiActRequests === 1
+    && dom.code === 'BROWSER_OBSERVATION_STALE' && dom.uiActRequests === 1
+    && resize.code === 'BROWSER_OBSERVATION_STALE' && resize.uiActRequests === 1
     && permission.code === 'BROWSER_INTERACTION_NOT_GRANTED'
     && permission.serviceActRequests === 0 && permission.uiProtocolDenied === true
     && ['BROWSER_BINDING_STALE', 'BROWSER_RUN_ENDED'].includes(stop.code)
@@ -2289,6 +2396,8 @@ export function assertBrowserNegativeProbeResults(proof) {
     assertProbeGuard(request, item.beforeAttempt, target);
     assertProbeActionDiagnostic(request, proof.cardId, 'actor', 'rejected');
   }
+  assertNotDispatchedRecovery(proof);
+  assertNavigationObserveRetry(proof);
   assert.equal(proof.requestsScopedToOwnedCard, true,
     'negative probes targeted a Card other than the newly owned fixture');
   assert.equal(proof.preexistingBrowserCardStylesUnchanged, true,
@@ -2410,13 +2519,43 @@ async function newNegativeService(harness, thread, cardId, source, deadlineMs,
       'negative probe requested another Chat thread');
     assert.equal(request.targetCardEpoch, source.browserToolIdentity.cardEpoch,
       'negative probe crossed Card epochs');
-    const sampled = await chrome(harness, async request => {
-      const attemptedAt = Date.now();
-      const response = await window.__egdesk.browserAgentTools.dispatch(request);
-      const actorDiagnostic = request.kind === 'act'
-        ? window.__egdesk.browserAgentTools.fixtureActionDiagnostic(request.cardId) : null;
-      return { attemptedAt, respondedAt: Date.now(), response, actorDiagnostic };
-    }, request);
+    const requestJson = JSON.stringify(request);
+    let sampled;
+    if (requestJson.length <= 8000) {
+      sampled = await chrome(harness, async request => {
+        const attemptedAt = Date.now();
+        const response = await window.__egdesk.browserAgentTools.dispatch(request);
+        const actorDiagnostic = request.kind === 'act'
+          ? window.__egdesk.browserAgentTools.fixtureActionDiagnostic(request.cardId) : null;
+        return { attemptedAt, respondedAt: Date.now(), response, actorDiagnostic };
+      }, request);
+    } else {
+      // A profile-bound Chrome evaluation is bounded (16 KiB). An oversized
+      // request is staged in parts in one owned chrome slot, then parsed back
+      // to the same JSON and dispatched once; the slot is removed before dispatch.
+      const slot = probeId('qa-staged-request');
+      await chrome(harness, slot => {
+        (window.__egdeskQaStagedRequests ||= new Map()).set(slot, []);
+        return true;
+      }, slot);
+      for (let at = 0; at < requestJson.length; at += 4000) {
+        await chrome(harness, ({ slot, part }) => {
+          window.__egdeskQaStagedRequests.get(slot).push(part);
+          return true;
+        }, { slot, part: requestJson.slice(at, at + 4000) });
+      }
+      sampled = await chrome(harness, async slot => {
+        const staged = window.__egdeskQaStagedRequests;
+        const request = JSON.parse(staged.get(slot).join(''));
+        staged.delete(slot);
+        if (!staged.size) delete window.__egdeskQaStagedRequests;
+        const attemptedAt = Date.now();
+        const response = await window.__egdesk.browserAgentTools.dispatch(request);
+        const actorDiagnostic = request.kind === 'act'
+          ? window.__egdesk.browserAgentTools.fixtureActionDiagnostic(request.cardId) : null;
+        return { attemptedAt, respondedAt: Date.now(), response, actorDiagnostic };
+      }, slot);
+    }
     const response = sampled.response;
     assert.equal(response?.requestId, request.requestId, 'negative UI response belongs to another request');
     trace.requests.push({ kind: request.kind, requestId: request.requestId,
@@ -2425,7 +2564,9 @@ async function newNegativeService(harness, thread, cardId, source, deadlineMs,
       targetCardEpoch: request.targetCardEpoch, deadlineMs: request.deadlineMs,
       attemptedAt: sampled.attemptedAt, respondedAt: sampled.respondedAt,
       ...(request.kind === 'act' ? { action: request.action, guard: request.guard,
-        actorDiagnostic: sampled.actorDiagnostic } : {}),
+        actorDiagnostic: sampled.actorDiagnostic, requestJsonLength: requestJson.length } : {}),
+      ...(Object.hasOwn(response || {}, 'dispatchPhase') ? { dispatchPhase: response.dispatchPhase } : {}),
+      ...(response?.timing && typeof response.timing === 'object' ? { timing: { ...response.timing } } : {}),
       status: response?.status || null, error: String(response?.error || '').slice(0, 200) });
     if (request.kind === 'bind' && response?.binding) trace.binding = response.binding;
     return response;
@@ -2917,7 +3058,7 @@ export function assertBrowserDocumentReplacement(proof) {
   assertReplacementTarget(beforeReload.snapshot, stale?.observed?.snapshot);
   assertReplacementTarget(afterReload.snapshot, positive?.observed?.snapshot);
   assertNegativeNoEffect(afterReload, afterDenied, 'stale-document denial');
-  assert.equal(stale?.code, 'BROWSER_ACTION_UNVERIFIED', 'old document action was not denied by the actual UI');
+  assert.equal(stale?.code, 'BROWSER_OBSERVATION_STALE', 'old document action was not denied by the actual UI');
   assert.equal(proof.explicitUiReselection, true, 'fresh action lacks explicit UI grant renewal after denial');
   assert.equal(proof.grantRenewal, 'owned-card-menu-after-cancel');
   assert.ok(stale.selectionToken && positive?.selectionToken && stale.selectionToken !== positive.selectionToken
@@ -2951,6 +3092,7 @@ export function assertBrowserDocumentReplacement(proof) {
     if (phase === stale) {
       assert.equal(act.status, 'rejected');
       assert.match(act.error, /observation is stale/i);
+      assertNotDispatchedReceipt(act, 'old document action');
       assertProbeActionDiagnostic(act, proof.cardId, 'actor', 'rejected');
       assert.ok(requests.some(request => request.kind === 'cancel' && request.status === 'cancelled'
         && request.respondedAt <= positive.selectedAt), 'denied run was not cancelled before UI reselection');
@@ -3143,15 +3285,17 @@ export async function runBrowserDocumentReplacement(harness, fixture, deadlineMs
     assertReplacementTarget(proof.beforeReload.snapshot, proof.afterReload.snapshot);
     assert.equal(proof.afterReload.snapshot.qaDiagnostics.performCalls, 0);
     assert.ok(proof.afterReload.snapshot.text.includes('QA click count: 0'));
+    // EG-07: the old document's action is refused before input. That refusal
+    // is not-dispatched, so B spends the observation without locking the Card.
     proof.stale.code = await expectNegativeCode(click(oldUnit, proof.stale.observed),
-      ['BROWSER_ACTION_UNVERIFIED'], 'old top-level document observation');
+      ['BROWSER_OBSERVATION_STALE'], 'old top-level document observation');
     proof.afterDenied = await sample();
     assertNegativeNoEffect(proof.afterReload, proof.afterDenied, 'stale-document denial');
     assert.equal(proof.afterDenied.snapshot.qaDiagnostics.performCalls, 0);
     await cancel(oldUnit);
     proof.stale.uiRequests = oldUnit.trace.requests.map(item => ({ ...item }));
-    // B intentionally locks uncertain outcomes. Renew through the existing
-    // rendered menu, never by editing a token, extending a lease or retrying.
+    // The fresh action still starts a new run through the existing rendered
+    // menu, never by editing a token, extending a lease or retrying.
     assertBeforeDeadline(deadlineMs);
     await prepareReload(proof.afterReload, 'beforeReselection');
     const freshSource = await selectOwnedProbeSource(actionHarness, thread, proof.cardId, ownerTag,
@@ -3253,7 +3397,8 @@ async function runBrowserNegativeProbes(harness, fixture, deadlineMs, result) {
     assert.deepEqual(unit.service.specs(unit.prepared).map(item => item.name),
       permission === 'observe' ? [BROWSER_TOOL_NAMES.observe]
         : [BROWSER_TOOL_NAMES.observe, 'egdesk_browser_navigate',
-          BROWSER_TOOL_NAMES.click, BROWSER_TOOL_NAMES.fill],
+          BROWSER_TOOL_NAMES.click, BROWSER_TOOL_NAMES.fill,
+          'egdesk_browser_scroll', 'egdesk_browser_press', 'egdesk_browser_wait'],
     'test-only B service exposed the wrong permission-bound catalog');
     const receipt = await unit.service.bind(unit.run, unit.prepared);
     assert.equal(receipt.cards?.length, 1, 'test-only B service did not bind one Card');
@@ -3396,7 +3541,7 @@ async function runBrowserNegativeProbes(harness, fixture, deadlineMs, result) {
     'stale-DOM setup also changed document or viewport');
     const code = await expectNegativeCode(unit.service.dispatch(unit.run, {
       tool: BROWSER_TOOL_NAMES.fill, callId: probeId('qa-stale-dom'), arguments: inputArgs,
-    }), ['BROWSER_ACTION_UNVERIFIED'], 'stale-DOM actor probe');
+    }), ['BROWSER_OBSERVATION_STALE'], 'stale-DOM actor probe');
     const denied = actorDenial(unit);
     const unchanged = assertNegativeNoEffect(changed,
       await ownedNegativeBrowserSnapshot(harness, cardId, ownerTag, fixture), 'stale DOM');
@@ -3434,7 +3579,7 @@ async function runBrowserNegativeProbes(harness, fixture, deadlineMs, result) {
     'resize setup also changed document, DOM text or keyboard focus');
     const code = await expectNegativeCode(unit.service.dispatch(unit.run, {
       tool: BROWSER_TOOL_NAMES.fill, callId: probeId('qa-resize'), arguments: inputArgs,
-    }), ['BROWSER_ACTION_UNVERIFIED'], 'resized-viewport actor probe');
+    }), ['BROWSER_OBSERVATION_STALE'], 'resized-viewport actor probe');
     const denied = actorDenial(unit);
     const unchanged = assertNegativeNoEffect(resized,
       await ownedNegativeBrowserSnapshot(harness, cardId, ownerTag, fixture), 'resized viewport');
@@ -3620,6 +3765,51 @@ async function runBrowserNegativeProbes(harness, fixture, deadlineMs, result) {
     } finally { await cancel(unit); }
   }
 
+  // REA 웹8 (EGQ8): the UI refuses an oversized fill before any lease, so it
+  // is not-dispatched. B spends only that observation and does not lock the
+  // Card: the same run observes again and fills, with no new selection.
+  result.browserNegativeStage = 'not-dispatched-without-lock';
+  let notDispatchedRecovery = null;
+  unit = await bound('interact');
+  try {
+    const observed = await observe(unit);
+    const target = observed.snapshot.interactiveElements.find(item => item.label === 'QA note');
+    assert.ok(target?.ref && target.tag === 'input' && target.disabled === false,
+      'oversized-fill fixture target is unavailable');
+    const baseline = await ownedNegativeBrowserSnapshot(harness, cardId, ownerTag, fixture);
+    const code = await expectNegativeCode(unit.service.dispatch(unit.run, {
+      tool: BROWSER_TOOL_NAMES.fill, callId: probeId('qa-oversized-fill'),
+      arguments: { cardId, observationId: observed.observationId, expectedRevision: observed.snapshot.revision,
+        ref: target.ref, expectedTarget: target, text: OVERSIZED_FILL_TEXT,
+        postcondition: { kind: 'target-value', value: OVERSIZED_FILL_TEXT } },
+    }), ['BROWSER_OBSERVATION_STALE'], 'oversized fill refused before input');
+    const denied = unit.trace.requests.at(-1);
+    assert.ok(denied.kind === 'act' && denied.status === 'rejected' && /size limit/i.test(denied.error),
+      'oversized fill was not refused by the actual UI size limit');
+    assertNotDispatchedReceipt(denied, 'oversized fill');
+    const unchanged = assertNegativeNoEffect(baseline,
+      await ownedNegativeBrowserSnapshot(harness, cardId, ownerTag, fixture), 'oversized fill');
+    record('oversized-fill-not-dispatched', code, unit, { ...unchanged, uiActRequests: 1,
+      uiStatus: denied.status, uiReason: denied.error, uiRequestId: denied.requestId,
+      uiDispatchPhase: denied.dispatchPhase, fillTextLength: OVERSIZED_FILL_TEXT.length });
+    const again = await observe(unit);
+    const before = await ownedNegativeBrowserSnapshot(harness, cardId, ownerTag, fixture);
+    const fresh = again.snapshot.interactiveElements.find(item => item.label === 'QA note');
+    assert.ok(fresh?.ref && fresh.value !== NOT_DISPATCHED_RECOVERY_VALUE, 'recovery fixture target is unavailable');
+    const receipt = await unit.service.dispatch(unit.run, {
+      tool: BROWSER_TOOL_NAMES.fill, callId: probeId('qa-not-dispatched-recovery'),
+      arguments: { cardId, observationId: again.observationId, expectedRevision: again.snapshot.revision,
+        ref: fresh.ref, expectedTarget: fresh, text: NOT_DISPATCHED_RECOVERY_VALUE,
+        postcondition: { kind: 'target-value', value: NOT_DISPATCHED_RECOVERY_VALUE } },
+    });
+    const after = await ownedNegativeBrowserSnapshot(harness, cardId, ownerTag, fixture);
+    notDispatchedRecovery = { cardId, simulatorOnly: true, syntheticRunId: unit.run.runId,
+      sourceId: unit.source.id, cardEpoch: unit.source.browserToolIdentity.cardEpoch,
+      deniedObservationId: observed.observationId, observed: again, receipt,
+      beforeAttempt: before.snapshot, afterAttempt: after.snapshot,
+      uiRequests: unit.trace.requests.map(item => ({ ...item })) };
+  } finally { await cancel(unit); }
+
   result.browserNegativeStage = 'camera-surface-isolation';
   const cameraSurfaceIsolation = await runBrowserCameraSurfaceIsolation(
     harness, fixture, deadlineMs, thread, cardId, ownerTag, result);
@@ -3627,6 +3817,49 @@ async function runBrowserNegativeProbes(harness, fixture, deadlineMs, result) {
   result.browserNegativeStage = 'top-level-document-replacement';
   const documentReplacement = await runBrowserDocumentReplacement(
     harness, fixture, deadlineMs, thread, cardId, ownerTag, cameraSurfaceIsolation.cardId, result);
+
+  // REA 웹9: a read-only wait in flight when the page reloads loses its actor
+  // (AbortError). The UI retries it once on the replacement document, inside
+  // the same deadline. The reload is fixture setup, not a model action.
+  result.browserNegativeStage = 'navigation-observe-retry';
+  let navigationObserveRetry = null;
+  unit = await bound('interact');
+  try {
+    const observed = await observe(unit);
+    const before = await ownedNegativeBrowserSnapshot(harness, cardId, ownerTag, fixture);
+    const waitTimeoutMs = 8000;
+    const request = { version: 1, requestId: probeId('qa-navigation-wait'),
+      runId: unit.run.runId, clientThreadId: unit.run.clientThreadId, cardId,
+      targetCardEpoch: unit.source.browserToolIdentity.cardEpoch, deadlineMs: Date.now() + 15000,
+      kind: 'observe', binding: unit.trace.binding,
+      options: { textLimit: 60, elementLimit: 80,
+        wait: { for: 'load', timeoutMs: waitTimeoutMs, notDocumentId: observed.snapshot.documentId } } };
+    assertBeforeDeadline(deadlineMs);
+    const sampled = await chrome(harness, async ({ request, ownerTag }) => {
+      const card = document.getElementById(request.cardId);
+      if (!card?.isConnected || card.dataset.egdeskQaNegativeOwner !== ownerTag)
+        throw new Error('navigation probe escaped the owned fixture Card');
+      const tools = window.__egdesk.browserAgentTools;
+      const attemptedAt = Date.now();
+      let navigatedAt = null;
+      const timer = window.setTimeout(() => { navigatedAt = Date.now(); card._browserControls.reload(); }, 400);
+      try {
+        const response = await tools.dispatch(request);
+        return { attemptedAt, respondedAt: Date.now(), navigatedAt, response,
+          diagnostic: tools.fixtureObserveDiagnostic(request.cardId) };
+      } finally { window.clearTimeout(timer); }
+    }, { request, ownerTag });
+    unit.trace.requests.push({ kind: 'observe', requestId: request.requestId,
+      responseRequestId: sampled.response?.requestId, runId: request.runId,
+      clientThreadId: request.clientThreadId, cardId, targetCardEpoch: request.targetCardEpoch,
+      deadlineMs: request.deadlineMs, attemptedAt: sampled.attemptedAt, respondedAt: sampled.respondedAt,
+      status: sampled.response?.status || null, error: String(sampled.response?.error || '').slice(0, 200) });
+    assert.equal(sampled.response?.requestId, request.requestId, 'navigation probe response belongs to another request');
+    navigationObserveRetry = { cardId, simulatorOnly: true, syntheticRunId: unit.run.runId,
+      oldDocumentId: observed.snapshot.documentId, oldInnerWindowId: before.snapshot.innerWindowId,
+      requestDeadlineMs: request.deadlineMs, waitTimeoutMs, ...sampled,
+      afterSnapshot: (await ownedNegativeBrowserSnapshot(harness, cardId, ownerTag, fixture)).snapshot };
+  } finally { await cancel(unit); }
 
   const final = await chrome(harness, initialCards => ({
     cards: initialCards.map(item => {
@@ -3648,7 +3881,7 @@ async function runBrowserNegativeProbes(harness, fixture, deadlineMs, result) {
     providerTurns: 0, actorPhysicalDispatchCounterVerified: false,
     actorPerformCounterVerified: true, actorPerformPositiveControl,
     cardId, fixture: { url: fixture.url, marker: fixture.marker }, probes, guardedActorPositiveControls,
-    cameraSurfaceIsolation, documentReplacement,
+    notDispatchedRecovery, navigationObserveRetry, cameraSurfaceIsolation, documentReplacement,
     requestsScopedToOwnedCard: true,
     preexistingBrowserCardStylesUnchanged: true, canvasPanZoomUnchanged: true };
   assertBrowserNegativeProbeResults(proof);

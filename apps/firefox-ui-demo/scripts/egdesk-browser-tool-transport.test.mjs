@@ -1111,3 +1111,388 @@ test('production Browser Card receipt carries only the bounded fill event order'
     beforeInputCanceled: false, egdeskWroteContent: true, readbackMatches: true })
   assert.equal(JSON.stringify(fill.dispatchReceipt).includes('TYPED_SECRET'), false)
 })
+
+// REA 웹8 (a), 웹4, 웹10: a refusal says whether input could have been sent.
+// actorLike stands in for browserToolAct + the guarded actor: it asks the
+// Parent-side authorizer with the native identities, then refuses or acts.
+function actorLike(f, behavior = {}) {
+  f.card._browserControls.toolAct = async (_binding, action, _guard, lease) => {
+    const windowGlobal = f.browser.browsingContext.currentWindowGlobal
+    if (behavior.beforeAuthorization) throw behavior.beforeAuthorization()
+    const permitted = f.authorize({ browser: f.browser, browsingContext: f.browser.browsingContext, windowGlobal,
+      leaseId: lease.leaseId, requestId: lease.requestId, deadlineMs: lease.deadlineMs, actionType: action.type,
+      actionRef: action.ref || null, actionUrl: action.url || null,
+      innerWindowId: windowGlobal.innerWindowId, browsingContextId: f.browser.browsingContext.id })
+    if (!permitted) {
+      throw Object.assign(new Error('Browser action authority was revoked before input [ui-denied]'),
+        { browserToolActor: { dispatchPhase: 'not-dispatched', timing: { performCallsBefore: 4, performCallsAfter: 4 } } })
+    }
+    if (behavior.afterAuthorization) throw behavior.afterAuthorization()
+    return { dispatchReceipt: { actor: 'JSWindowActor', eventDispatched: true, documentStillCurrent: true,
+      clickInputRoute: 'dom-click-no-pointerdown', targetClickObserved: true },
+    after: { cardId: 'browser-a' }, observation: null,
+    timing: { performEnterMs: 10.5, firstEventAtMs: 11.25, performExitMs: 12, performCallsBefore: 4, performCallsAfter: 5 } }
+  }
+}
+const actRequest = (f, bound, extra = {}) => f.req('act', { binding: bound.binding,
+  guard: { documentId: 'doc-1', revision: 2, innerWindowId: 201, browsingContextId: 101 },
+  action: { type: 'click', ref: 'el_1' }, ...extra })
+
+test('refusals before any lease or actor work are not-dispatched and carry the receive time', async () => {
+  for (const reason of ['hold', 'stop', 'cancel', 'size', 'reused']) {
+    const f = fixture()
+    const bound = await f.dispatch(f.req('bind', { selection: f.selection('interact') }))
+    let request = actRequest(f, bound)
+    if (reason === 'hold') f.card._browserControls.toolUserHold = () => true
+    if (reason === 'stop') f.stoppedRuns.add(JSON.stringify(['run-a', 'thread-a']))
+    if (reason === 'cancel') f.cancelled.set(`run-a\u0000browser-a\u0000card-generation-a`, f.now() + 60000)
+    // A newline-heavy fill the helper accepts (JSON 2 chars per newline,
+    // text plus postcondition under 40000) still exceeds the 24000 UI limit.
+    if (reason === 'size') {
+      const text = 'Q\n\n\n'.repeat(1800)
+      request = actRequest(f, bound, { action: { type: 'fill', ref: 'el_1', text },
+        postcondition: { kind: 'target-value', value: text } })
+      assert.ok(text.length <= 8000 && JSON.stringify(text).length * 2 < 40000 && JSON.stringify(request).length > 24000)
+    }
+    if (reason === 'reused') {
+      await f.dispatch(request)
+      request = { ...request, action: { type: 'click', ref: 'el_2' } }
+    }
+    const before = f.actionCalls
+    const refused = await f.dispatch(request)
+    assert.equal(refused.status, 'rejected', reason)
+    assert.equal(refused.dispatchPhase, 'not-dispatched', reason)
+    assert.ok(Number.isFinite(refused.timing.receivedAtMs) && refused.timing.receivedAtMs > 0, reason)
+    assert.deepEqual(Object.keys(refused.timing), ['receivedAtMs'], reason)
+    assert.equal(f.actionCalls, before, reason)
+    // An observation refusal never claims a dispatch phase.
+    const observe = await f.dispatch(f.req('observe', { binding: bound.binding,
+      ...(reason === 'size' ? { options: { pad: 'x'.repeat(25000) } } : {}) }))
+    if (observe.status === 'rejected') assert.equal(observe.dispatchPhase, undefined, reason)
+  }
+})
+
+test('an actor refusal is not-dispatched only without lease approval or with an unchanged perform count', async () => {
+  const expectations = {
+    'denied-identity': 'not-dispatched', 'before-authorization': 'not-dispatched',
+    'actor-proved-after-approval': 'not-dispatched', 'abort-after-approval': 'unknown',
+    'actor-claim-without-counts': 'unknown', 'perform-entered': 'dispatched', 'contradicted-claim': 'unknown',
+  }
+  for (const [variant, phase] of Object.entries(expectations)) {
+    const f = fixture()
+    f.current.url = 'http://127.0.0.1:39220/egdesk-qa/QA_URL_0123456789abcdef'
+    f.current.accountId = ''
+    const bound = await f.dispatch(f.req('bind', { selection: f.selection('interact') }))
+    const abort = () => Object.assign(new Error("Actor 'EGDeskBrowserAgentRuntime' destroyed before query 'act' was resolved"),
+      { name: 'AbortError' })
+    actorLike(f, {
+      'before-authorization': { beforeAuthorization: abort },
+      'actor-proved-after-approval': { afterAuthorization: () => Object.assign(new Error('Browser observation is stale'),
+        { browserToolActor: { dispatchPhase: 'not-dispatched', timing: { performCallsBefore: 4, performCallsAfter: 4 } } }) },
+      'abort-after-approval': { afterAuthorization: abort },
+      'actor-claim-without-counts': { afterAuthorization: () => Object.assign(new Error('Browser observation is stale'),
+        { browserToolActor: { dispatchPhase: 'not-dispatched', timing: {} } }) },
+      'perform-entered': { afterAuthorization: () => Object.assign(new Error('page click handler failed'),
+        { browserToolActor: { dispatchPhase: 'dispatched', timing: { performEnterMs: 3, performExitMs: 4,
+          performCallsBefore: 4, performCallsAfter: 5 } } }) },
+      'contradicted-claim': { afterAuthorization: () => Object.assign(new Error('Browser observation is stale'),
+        { browserToolActor: { dispatchPhase: 'not-dispatched', timing: { performEnterMs: 3, performCallsBefore: 4, performCallsAfter: 4 } } }) },
+    }[variant] || {})
+    const request = actRequest(f, bound, variant === 'denied-identity'
+      ? { guard: { documentId: 'doc-1', revision: 2, innerWindowId: 999, browsingContextId: 101 } } : {})
+    const refused = await f.dispatch(request)
+    assert.equal(refused.status, 'rejected', variant)
+    assert.equal(refused.dispatchPhase, phase, variant)
+    const authorized = !['denied-identity', 'before-authorization'].includes(variant)
+    assert.equal(Number.isFinite(refused.timing.authorizedAtMs), authorized, variant)
+    assert.ok(refused.timing.receivedAtMs <= (refused.timing.authorizedAtMs ?? Infinity), variant)
+    if (phase === 'not-dispatched') {
+      for (const key of ['performEnterMs', 'performExitMs', 'firstEventAtMs']) assert.equal(refused.timing[key], undefined, variant)
+      assert.equal(refused.timing.performCallsBefore, refused.timing.performCallsAfter, variant)
+    }
+    if (variant === 'denied-identity') {
+      assert.equal(f.fixtureActionDiagnostic('browser-a').authorizationReason, 'inner-window-id-mismatch')
+    }
+  }
+})
+
+test('the Parent check refuses a guard from another Gecko document and a malformed identity never leases', async () => {
+  const f = fixture()
+  f.current.url = 'http://127.0.0.1:39220/egdesk-qa/QA_URL_0123456789abcdef'
+  f.current.accountId = ''
+  const bound = await f.dispatch(f.req('bind', { selection: f.selection('interact') }))
+  actorLike(f)
+  const otherContext = await f.dispatch(actRequest(f, bound,
+    { guard: { documentId: 'doc-1', revision: 2, innerWindowId: 201, browsingContextId: 555 } }))
+  assert.equal(otherContext.dispatchPhase, 'not-dispatched')
+  assert.equal(f.fixtureActionDiagnostic('browser-a').authorizationReason, 'browsing-context-id-mismatch')
+  const calls = f.actionCalls
+  for (const innerWindowId of [0, -1, 1.5, '201', null]) {
+    const malformed = await f.dispatch(actRequest(f, bound, { guard: { documentId: 'doc-1', revision: 2, innerWindowId } }))
+    assert.equal(malformed.dispatchPhase, 'not-dispatched', String(innerWindowId))
+    assert.match(malformed.error, /stale/)
+  }
+  assert.equal(f.actionCalls, calls, 'no lease or actor call for a malformed identity')
+  assert.equal(f.actionLeases.size, 0)
+  // Without guard identities (an older helper) the native window-global checks still apply.
+  const plain = await f.dispatch(actRequest(f, bound, { guard: { documentId: 'doc-1', revision: 2 } }))
+  assert.equal(plain.status, 'acted')
+  assert.equal(f.domEffects, 0, 'actorLike counts no DOM effects')
+})
+
+test('an acted reply lifts actor timing out of the receipt into one top-level same-clock record', async () => {
+  const f = fixture()
+  const bound = await f.dispatch(f.req('bind', { selection: f.selection('interact') }))
+  actorLike(f)
+  const acted = await f.dispatch(actRequest(f, bound))
+  assert.equal(acted.status, 'acted')
+  assert.equal(acted.receipt.timing, undefined)
+  assert.deepEqual(Object.keys(acted.timing).sort(), ['authorizedAtMs', 'firstEventAtMs', 'performCallsAfter',
+    'performCallsBefore', 'performEnterMs', 'performExitMs', 'receivedAtMs'])
+  assert.ok(acted.timing.receivedAtMs <= acted.timing.authorizedAtMs)
+  assert.equal(acted.timing.performCallsAfter, acted.timing.performCallsBefore + 1)
+  const observed = await f.dispatch(f.req('observe', { binding: bound.binding }))
+  assert.deepEqual(Object.keys(observed.timing), ['receivedAtMs'])
+  assert.deepEqual(Object.keys((await f.dispatch(f.req('cancel'))).timing), ['receivedAtMs'])
+})
+
+// The helper (4c156f1) and this UI together: EGQ8 no longer needs a reselect.
+async function helperOverUi() {
+  const { createBrowserToolService } = await import('../helper/egdesk-browser-tool-runtime.mjs')
+  const f = fixture()
+  const selection = f.selection('interact')
+  const note = { value: '' }
+  const snapshot = () => ({ cardId: 'browser-a', documentId: 'doc-1', revision: 2, readyState: 'complete',
+    innerWindowId: 201, browsingContextId: 101,
+    viewport: { width: 720, height: 480, devicePixelRatio: 1 }, url: f.current.url, text: ['QA page'],
+    interactiveElements: [{ ref: 'el_note', role: 'textbox', label: 'QA note', tag: 'input', href: '',
+      value: note.value, disabled: false, bounds: { x: 10, y: 10, width: 100, height: 20 } }],
+    focusedElement: null, scroll: { x: 0, y: 0, maxY: 0 } })
+  f.card._browserControls.toolObserve = async () => snapshot()
+  const acts = []
+  f.card._browserControls.toolAct = async (_binding, action, guard, lease) => {
+    acts.push({ action, guard })
+    const windowGlobal = f.browser.browsingContext.currentWindowGlobal
+    if (!f.authorize({ browser: f.browser, browsingContext: f.browser.browsingContext, windowGlobal,
+      leaseId: lease.leaseId, requestId: lease.requestId, deadlineMs: lease.deadlineMs, actionType: action.type,
+      actionRef: action.ref || null, actionUrl: null, innerWindowId: windowGlobal.innerWindowId,
+      browsingContextId: f.browser.browsingContext.id })) throw new Error('Browser action authority was revoked before input')
+    if (f.abortAfterApproval) throw Object.assign(new Error('actor destroyed'), { name: 'AbortError' })
+    note.value = action.text
+    return { dispatchReceipt: { actor: 'JSWindowActor', eventDispatched: true, documentStillCurrent: true,
+      inputRoute: 'dom-value-setter', trustedInput: false, eventOrder: ['input', 'change'] },
+    after: snapshot(), observation: null }
+  }
+  const service = createBrowserToolService({ sendToUi: request => f.dispatch(request), getOwnerKey: () => selection.engineAccountKey })
+  const source = { id: selection.sourceId, kind: 'browser', selectedByUser: true, browserToolPermission: 'interact',
+    sourceRef: { viewId: 'browser-a', profileId: selection.profileId, accountId: selection.accountId, uri: selection.selectedUrl },
+    browserToolIdentity: { cardEpoch: selection.cardEpoch, userContextId: 0, engineAccountKey: selection.engineAccountKey,
+      authorityEpoch: selection.authorityEpoch },
+    browserToolSelection: { token: selection.selectionToken, threadId: 'thread-a' } }
+  const prepared = service.prepare({ selectedSources: [source], ownerKey: selection.engineAccountKey })
+  const run = { answerId: 'answer-a', runId: 'run-a', clientThreadId: 'thread-a', status: 'inProgress' }
+  await service.bind(run, prepared)
+  let calls = 0
+  const observe = () => service.dispatch(run, { tool: 'egdesk_browser_observe', callId: `observe-${++calls}`, arguments: { cardId: 'browser-a' } })
+  const fill = (observed, text) => service.dispatch(run, { tool: 'egdesk_browser_fill', callId: `fill-${++calls}`,
+    arguments: { cardId: 'browser-a', observationId: observed.observationId, expectedRevision: observed.snapshot.revision,
+      ref: 'el_note', expectedTarget: observed.snapshot.interactiveElements[0], text,
+      postcondition: { kind: 'target-value', value: text } } })
+  return { f, acts, note, observe, fill }
+}
+
+test('a newline-heavy fill refused for size spends only the observation; the same run re-observes and fills', async () => {
+  const h = await helperOverUi()
+  const first = await h.observe()
+  assert.equal(first.snapshot.innerWindowId, 201)
+  const long = 'Q\n\n\n'.repeat(1800)
+  await assert.rejects(h.fill(first, long), error => error.code === 'BROWSER_OBSERVATION_STALE' &&
+    error.dispatchPhase === 'not-dispatched' && Number.isFinite(error.timing.receivedAtMs))
+  assert.equal(h.acts.length, 0, 'nothing reached the actor')
+  await assert.rejects(h.fill(first, 'short'), error => error.code === 'BROWSER_OBSERVATION_STALE',
+    'the refused attempt spent its observation')
+  const again = await h.observe()
+  const filled = await h.fill(again, 'QA after refusal')
+  assert.equal(filled.status, 'postcondition-observed', 'no reselection was needed')
+  assert.equal(h.note.value, 'QA after refusal')
+  assert.equal(h.acts[0].guard.innerWindowId, 201)
+  assert.equal(h.acts[0].guard.browsingContextId, 101)
+  assert.ok(filled.timing.authorizedAtMs >= filled.timing.receivedAtMs)
+})
+
+test('an action whose outcome is unknown after approval still locks the Card (EG-01)', async () => {
+  const h = await helperOverUi()
+  h.f.abortAfterApproval = true
+  await assert.rejects(h.fill(await h.observe(), 'QA unknown'), error => error.code === 'BROWSER_ACTION_UNVERIFIED' &&
+    error.dispatchPhase === 'unknown')
+  h.f.abortAfterApproval = false
+  await assert.rejects(h.fill(await h.observe(), 'QA retry'), error => error.code === 'BROWSER_OUTCOME_UNKNOWN')
+  assert.equal(h.note.value, '')
+})
+
+// REA 웹9: shared document-ready wait and the single AbortError retry.
+const observeSource = between('    // REA 웹9: one shared wait per Card for a current, ready document.',
+  '    const browserToolAct = async (expected, action, guard, lease) => {')
+function observeFixture() {
+  const timers = new Set()
+  const win = {
+    setTimeout(fn, ms) { const id = setTimeout(() => { timers.delete(id); fn() }, ms); timers.add(id); return id },
+    clearTimeout(id) { timers.delete(id); clearTimeout(id) },
+  }
+  const windowGlobal = id => ({ innerWindowId: id, isClosed: false, isCurrentGlobal: true, getActor() { return {} } })
+  const context = { currentWindowGlobal: windowGlobal(1) }
+  const xulBrowser = { isConnected: true, browsingContext: context }
+  const card = { id: 'browser-a', isConnected: true }
+  const browserState = { loading: false }
+  const activity = []
+  const requests = []
+  let actor = async () => ({ documentId: 'doc-a' })
+  const api = new Function('xulBrowser', 'card', 'browserState', 'window', 'BROWSER_TOOL_REPLY_MARGIN_MS',
+    'assertBrowserToolBinding', 'showAgentActivity', 'browserAgentActorRequest',
+    `${observeSource}\nreturn { whenToolWindowGlobalReady, browserToolObserve, disposeToolWindowGlobalWaits,
+      diagnostic: () => lastToolObserve }`)(
+    xulBrowser, card, browserState, win, 500,
+    () => { if (!xulBrowser.browsingContext?.currentWindowGlobal) throw new Error('Selected Browser Card is unavailable') },
+    message => activity.push(message),
+    async (method, payload) => { requests.push({ method, payload, innerWindowId: context.currentWindowGlobal?.innerWindowId }); return actor(payload) })
+  return { ...api, context, xulBrowser, card, browserState, windowGlobal, timers, activity, requests,
+    setActor(fn) { actor = fn } }
+}
+const abortError = () => Object.assign(new Error("Actor 'EGDeskBrowserAgentRuntime' destroyed before query 'snapshot' was resolved"),
+  { name: 'AbortError' })
+const later = ms => new Promise(resolve => setTimeout(resolve, ms))
+
+test('an observation retries once on the replacement document after its actor is destroyed mid-query', async () => {
+  const o = observeFixture()
+  let call = 0
+  o.setActor(async () => {
+    if (++call === 1) {
+      o.context.currentWindowGlobal = null // replacement document not committed yet
+      setTimeout(() => { o.context.currentWindowGlobal = o.windowGlobal(2) }, 60)
+      throw abortError()
+    }
+    return { documentId: 'doc-b', url: 'http://127.0.0.1/egdesk-qa/next' }
+  })
+  const snapshot = await o.browserToolObserve({}, { textLimit: 60 }, { deadlineMs: Date.now() + 5000 })
+  assert.equal(snapshot.documentId, 'doc-b')
+  assert.equal(snapshot.cardId, 'browser-a')
+  assert.deepEqual(o.requests.map(item => item.innerWindowId), [1, 2])
+  const record = o.diagnostic()
+  assert.equal(record.attempts, 2)
+  assert.equal(record.abortRetried, true)
+  assert.deepEqual(record.innerWindowIds, [1, 2])
+  assert.equal(o.timers.size, 0)
+})
+
+test('a second AbortError, any other failure, or a spent deadline is not retried', async () => {
+  for (const variant of ['second-abort', 'timeout', 'deadline']) {
+    const o = observeFixture()
+    o.setActor(async () => {
+      if (variant === 'timeout') throw Object.assign(new Error('Browser UI response timed out'), { name: 'Error' })
+      throw abortError()
+    })
+    const deadlineMs = Date.now() + (variant === 'deadline' ? 400 : 5000)
+    await assert.rejects(o.browserToolObserve({}, {}, { deadlineMs }), variant === 'timeout' ? /timed out/ : /destroyed/)
+    assert.equal(o.requests.length, variant === 'second-abort' ? 2 : 1, variant)
+    assert.equal(o.activity.at(-1), 'Browser 관찰 불가 · 다시 확인 필요', variant)
+  }
+  // No deadline (an internal caller) keeps the old single attempt.
+  const o = observeFixture()
+  o.setActor(async () => { throw abortError() })
+  await assert.rejects(o.browserToolObserve({}, {}), /destroyed/)
+  assert.equal(o.requests.length, 1)
+})
+
+test('a retried wait gets only the rest of its own timeout and reports the whole elapsed time', async () => {
+  const o = observeFixture()
+  const waits = []
+  o.setActor(async payload => {
+    waits.push(payload.options.wait)
+    if (waits.length === 1) {
+      await later(80)
+      o.context.currentWindowGlobal = o.windowGlobal(2)
+      throw abortError()
+    }
+    return { documentId: 'doc-b', readyState: 'complete', wait: { for: 'load', outcome: 'met', elapsedMs: 5 } }
+  })
+  const wait = { for: 'load', timeoutMs: 3000, notDocumentId: 'doc-a' }
+  const snapshot = await o.browserToolObserve({}, { wait }, { deadlineMs: Date.now() + 10000 })
+  assert.deepEqual(waits[0], wait)
+  assert.equal(waits[1].notDocumentId, 'doc-a')
+  assert.ok(waits[1].timeoutMs <= 3000 - 80 && waits[1].timeoutMs >= 2500, String(waits[1].timeoutMs))
+  assert.ok(snapshot.wait.elapsedMs >= 85, String(snapshot.wait.elapsedMs))
+  assert.equal(wait.timeoutMs, 3000, 'the caller options are not mutated')
+  // The retry never outlives the request deadline.
+  const tight = observeFixture()
+  const seen = []
+  tight.setActor(async payload => {
+    seen.push(payload.options.wait.timeoutMs)
+    if (seen.length === 1) { tight.context.currentWindowGlobal = tight.windowGlobal(3); throw abortError() }
+    return { documentId: 'doc-c', wait: { for: 'load', outcome: 'timeout', elapsedMs: 0 } }
+  })
+  await tight.browserToolObserve({}, { wait: { for: 'load', timeoutMs: 9000 } }, { deadlineMs: Date.now() + 2000 })
+  assert.ok(seen[1] <= 1500, String(seen[1]))
+})
+
+test('document-ready waiters share one poll per Card and each keeps its own deadline', async () => {
+  const o = observeFixture()
+  o.context.currentWindowGlobal = null
+  const early = o.whenToolWindowGlobalReady(Date.now() + 560)
+  const patient = o.whenToolWindowGlobalReady(Date.now() + 5000)
+  assert.equal(o.timers.size, 1, 'one shared poll')
+  await assert.rejects(early, /not ready before the request deadline/)
+  assert.equal(o.timers.size, 1, 'the patient waiter keeps polling')
+  const replacement = o.windowGlobal(9)
+  o.context.currentWindowGlobal = replacement
+  assert.equal(await patient, replacement)
+  assert.equal(o.timers.size, 0)
+  // A tab still loading its first page shows only the placeholder document.
+  o.context.currentWindowGlobal = { ...o.windowGlobal(10), isInitialDocument: true }
+  o.browserState.loading = true
+  const initial = o.whenToolWindowGlobalReady(Date.now() + 5000)
+  await later(50)
+  o.browserState.loading = false
+  assert.equal((await initial).innerWindowId, 10)
+  // Closed globals and a closed Card never count as ready; closing rejects waiters.
+  o.context.currentWindowGlobal = { ...o.windowGlobal(11), isClosed: true }
+  const closing = o.whenToolWindowGlobalReady(Date.now() + 5000)
+  o.disposeToolWindowGlobalWaits()
+  await assert.rejects(closing, /unavailable/)
+  assert.equal(o.timers.size, 0)
+  assert.equal(await o.whenToolWindowGlobalReady(undefined), null, 'no deadline means no wait')
+})
+
+test('toolAct turns an actor refusal into a phase-carrying error and marks post-perform failures dispatched', async () => {
+  const binding = { cardId: 'browser-a' }
+  const context = { currentWindowGlobal: { id: 'window-global-a' } }
+  const xulBrowser = { browsingContext: context }
+  let actorResult, bindingFails = false
+  const activity = []
+  const toolAct = new Function('assertBrowserToolBinding', 'xulBrowser', 'showAgentActivity',
+    'browserAgentActorRequest', 'card', `${toolActSource}\nreturn browserToolAct`)(
+    () => { if (bindingFails) throw new Error('Browser Card, profile or account context changed') },
+    xulBrowser, message => activity.push(message),
+    async (method, payload) => {
+      assert.equal(method, 'act')
+      assert.equal(payload.options.settleMs, 150, 'the UI passes the settle cap; the actor bounds it by the lease')
+      bindingFails = actorResult.failAfter === true
+      return actorResult.value
+    }, { id: 'browser-a' })
+  const lease = { leaseId: 'lease-a', requestId: 'request-a', deadlineMs: Date.now() + 5000 }
+  actorResult = { value: { ok: false, refused: true, error: 'Browser observation is stale', dispatchPhase: 'not-dispatched',
+    timing: { performCallsBefore: 2, performCallsAfter: 2 } } }
+  await assert.rejects(toolAct(binding, { type: 'click', ref: 'el_1' }, {}, lease), error =>
+    /stale/.test(error.message) && error.browserToolActor.dispatchPhase === 'not-dispatched' &&
+    error.browserToolActor.timing.performCallsAfter === 2)
+  assert.equal(activity.at(-1), '조작을 보내지 않음 · 다시 관찰 필요')
+  const timing = { performEnterMs: 1, performExitMs: 2, performCallsBefore: 2, performCallsAfter: 3 }
+  actorResult = { failAfter: true, value: { ok: true, result: {}, after: {}, observation: null, timing } }
+  await assert.rejects(toolAct(binding, { type: 'click', ref: 'el_1' }, {}, lease), error =>
+    error.browserToolActor.dispatchPhase === 'dispatched' && error.browserToolActor.timing === timing)
+  bindingFails = false
+  actorResult = { value: { ok: true, result: { clickDiagnostics: { dispatchScope: 'dom-click-no-pointerdown',
+    targetClickObserved: true } }, after: { documentId: 'doc-a' }, observation: null, timing } }
+  const receipt = await toolAct(binding, { type: 'click', ref: 'el_1' }, {}, lease)
+  assert.equal(receipt.timing, timing, 'dispatch lifts this into the reply')
+  assert.equal(receipt.dispatchReceipt.eventDispatched, true)
+})

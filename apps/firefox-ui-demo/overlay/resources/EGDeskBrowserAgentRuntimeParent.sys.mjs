@@ -98,8 +98,11 @@ export class EGDeskBrowserAgentRuntimeParent extends JSWindowActorParent {
     const authorize = authorizerFor(browser, context);
     if (!authorize) return { authorized: false, reason: "missing-authorizer" };
     try {
+      // Native Gecko document identities go last so child data cannot
+      // replace them; the UI compares them with the observed guard (REA 웹4).
       const authorized = authorize({ ...message.data, browser,
-        browsingContext: context, windowGlobal: this.manager }) === true;
+        browsingContext: context, windowGlobal: this.manager,
+        innerWindowId: this.manager?.innerWindowId ?? null, browsingContextId: context.id ?? null }) === true;
       return { authorized, reason: authorized ? "approved" : "ui-denied" };
     } catch { return { authorized: false, reason: "parent-callback-error" }; }
   }

@@ -1018,12 +1018,13 @@ function negativeProbeProof() {
     'stale-dom-at-actor', 'resized-viewport-at-actor',
     'observe-only-interaction-denied', 'stop-before-first-bind-accept',
     'expired-request-before-actor', 'cancel-before-act',
-    'readonly-fill-at-actor', 'disabled-fieldset-fill-at-actor', 'aria-disabled-ancestor-fill-at-actor'];
+    'readonly-fill-at-actor', 'disabled-fieldset-fill-at-actor', 'aria-disabled-ancestor-fill-at-actor',
+    'oversized-fill-not-dispatched'];
   const receipts = [
     { code: 'BROWSER_OBSERVATION_STALE', uiActRequests: 0 },
     { code: 'INVALID_BROWSER_TOOL', serviceActRequests: 0, uiProtocolDenied: true, uiProtocolActRequests: 1 },
-    { code: 'BROWSER_ACTION_UNVERIFIED', uiActRequests: 1 },
-    { code: 'BROWSER_ACTION_UNVERIFIED', uiActRequests: 1 },
+    { code: 'BROWSER_OBSERVATION_STALE', uiActRequests: 1 },
+    { code: 'BROWSER_OBSERVATION_STALE', uiActRequests: 1 },
     { code: 'BROWSER_INTERACTION_NOT_GRANTED', serviceActRequests: 0,
       uiProtocolDenied: true, uiProtocolActRequests: 1 },
     { code: 'BROWSER_BINDING_STALE', cancelledBeforeBindAccepted: true,
@@ -1034,13 +1035,19 @@ function negativeProbeProof() {
       attemptedAt: 102, uiRequestId: 'act-7', cancelReceipt: { requestId: 'cancel-7', runId: 'qa-browser-simulator-7',
         cardId: 'owned-local-card', status: 'cancelled', at: 101 } },
     ...Array.from({ length: 3 }, () => ({ code: null, uiActRequests: 1 })),
+    { code: 'BROWSER_OBSERVATION_STALE', uiActRequests: 1 },
   ];
   const fixture = { url: 'http://127.0.0.1:39220/egdesk-qa/QA_URL_0123456789abcdef', marker: 'QA_DOM_0123456789abcdef' };
   const snapshot = (elements = []) => ({ cardId: 'owned-local-card', documentId: 'actor-owned',
+    innerWindowId: 41, browsingContextId: 7,
     url: fixture.url, revision: 1, viewport: { width: 800, height: 600, devicePixelRatio: 1 },
     text: [fixture.marker], focusedElement: null, interactiveElements: elements });
   const guard = (before, target) => ({ documentId: before.documentId, url: before.url,
-    revision: before.revision, viewport: before.viewport, focusedRef: null, target });
+    revision: before.revision, viewport: before.viewport, focusedRef: null,
+    innerWindowId: before.innerWindowId, browsingContextId: before.browsingContextId, target });
+  // Same-clock UI/page stamps for one perform entry (REA 웹10).
+  const actedTiming = (before, after) => ({ receivedAtMs: 100, authorizedAtMs: 100.5, performEnterMs: 101,
+    firstEventAtMs: 101.25, performExitMs: 101.5, performCallsBefore: before, performCallsAfter: after })
   const diagnostic = (actionType, phase, status) => ({ cardId: 'owned-local-card', actionType, phase, status, sampledAtMs: 102 });
   const guardedActorPositiveControls = ['fill', 'click'].map(action => {
     const target = { ref: `el-${action}`, label: action === 'fill' ? 'QA note' : 'Reveal QA details',
@@ -1064,7 +1071,8 @@ function negativeProbeProof() {
         postcondition: { kind: action === 'fill' ? 'target-value' : 'visible-text', value, matched: true, wasAlreadyTrue: false } },
       uiRequests: [{ ...uiRequest('act', 'acted', 100), action: { type: action, ref: target.ref,
         ...(action === 'fill' ? { text: value } : {}) }, guard: guard(before, target),
-        actorDiagnostic: diagnostic(action, 'post-actor', 'acted') }, uiRequest('observe', 'observed', 104)] };
+        actorDiagnostic: diagnostic(action, 'post-actor', 'acted'), timing: actedTiming(1, 2) },
+      uiRequest('observe', 'observed', 104)] };
   });
   const proof = { simulatorOnly: true, nativeModelOriginVerified: false,
     actorPhysicalDispatchCounterVerified: false,
@@ -1085,7 +1093,9 @@ function negativeProbeProof() {
         { kind: [0, 5].includes(index) ? 'bind' : 'act', requestId: `act-${index}`, responseRequestId: `act-${index}`,
           runId: `qa-browser-simulator-${index}`, cardId: 'owned-local-card', targetCardEpoch: 'card-epoch-owned',
           deadlineMs: index === 6 ? 90 : 1000, attemptedAt: index === 7 ? 102 : 100,
-          respondedAt: 103, status: [0, 5].includes(index) ? 'bound' : 'rejected', error: 'owned UI guard denied action' }],
+          respondedAt: 103, status: [0, 5].includes(index) ? 'bound' : 'rejected', error: 'owned UI guard denied action',
+          ...([0, 5].includes(index) ? {} : { dispatchPhase: 'not-dispatched',
+            timing: { receivedAtMs: 100, performCallsBefore: 1, performCallsAfter: 1 } }) }],
       ...receipts[index] })),
     requestsScopedToOwnedCard: true, preexistingBrowserCardStylesUnchanged: true,
     canvasPanZoomUnchanged: true };
@@ -1098,6 +1108,40 @@ function negativeProbeProof() {
       guard: guard(item.beforeAttempt, target), actorDiagnostic: diagnostic('fill', 'actor', 'rejected'),
       error: offset === 0 ? 'Browser target is not an editable field; observe again' : 'Browser target is unavailable; observe again' });
   }
+  // EGQ8: the size-refused fill, then the same run's fresh observe and fill.
+  const oversized = proof.probes[11];
+  const note = value => ({ ref: 'el-note', tag: 'input', label: 'QA note', disabled: false, value })
+  const oversizedText = 'Q\n\n\n'.repeat(1800);
+  Object.assign(oversized.uiRequests[0], { action: { type: 'fill', ref: 'el-note', text: oversizedText },
+    error: 'Browser request exceeds size limit', requestJsonLength: 26100, timing: { receivedAtMs: 100 } });
+  const recoveryBefore = { ...snapshot([note('QA_GUARDED_FILL_CONTROL')]),
+    qaDiagnostics: { kind: 'actor-perform-entry', actorDocumentId: 'actor-owned', performCalls: 3 } };
+  const recoveryAfter = { ...snapshot([note('QA_NOT_DISPATCHED_RECOVERY')]),
+    qaDiagnostics: { kind: 'actor-perform-entry', actorDocumentId: 'actor-owned', performCalls: 4 } };
+  const runRequest = (kind, status, requestId, at, extra = {}) => ({ kind, status, requestId, responseRequestId: requestId,
+    runId: oversized.syntheticRunId, cardId: 'owned-local-card', targetCardEpoch: 'card-epoch-owned',
+    attemptedAt: at, respondedAt: at + 1, ...extra })
+  proof.notDispatchedRecovery = { cardId: 'owned-local-card', simulatorOnly: true,
+    syntheticRunId: oversized.syntheticRunId, sourceId: oversized.sourceId, cardEpoch: oversized.cardEpoch,
+    deniedObservationId: 'oversized-observation',
+    observed: { status: 'observed', cardId: 'owned-local-card', observationId: 'recovery-observation',
+      snapshot: recoveryBefore },
+    receipt: { status: 'postcondition-observed', action: 'fill',
+      postcondition: { kind: 'target-value', value: 'QA_NOT_DISPATCHED_RECOVERY', matched: true, wasAlreadyTrue: false } },
+    beforeAttempt: recoveryBefore, afterAttempt: recoveryAfter,
+    uiRequests: [runRequest('bind', 'bound', 'recovery-bind', 90), runRequest('observe', 'observed', 'recovery-observe-1', 95),
+      { ...oversized.uiRequests[0] }, runRequest('observe', 'observed', 'recovery-observe-2', 105),
+      runRequest('act', 'acted', 'recovery-act', 110, { action: { type: 'fill', ref: 'el-note',
+        text: 'QA_NOT_DISPATCHED_RECOVERY' }, guard: guard(recoveryBefore, note('QA_GUARDED_FILL_CONTROL')),
+      timing: actedTiming(3, 4) })] };
+  // 웹9: the wait in flight across a reload, retried once on the new document.
+  proof.navigationObserveRetry = { cardId: 'owned-local-card', simulatorOnly: true,
+    oldDocumentId: 'actor-owned', oldInnerWindowId: 41, requestDeadlineMs: 20000, waitTimeoutMs: 8000,
+    attemptedAt: 1000, navigatedAt: 1400, respondedAt: 1700,
+    response: { status: 'observed', timing: { receivedAtMs: 1000.5 },
+      snapshot: { ...snapshot(), documentId: 'actor-reloaded', innerWindowId: 42, readyState: 'complete',
+        wait: { for: 'load', outcome: 'met', elapsedMs: 690 } } },
+    diagnostic: { attempts: 2, abortRetried: true, innerWindowIds: [41, 42], waitOffsetMs: 520 } };
   return proof;
 }
 
@@ -1126,6 +1170,50 @@ test('actual negative-probe result cannot claim a native model turn or skip an o
       ? { ...item, ownedFixtureContentUnchangedAfterDeniedAction: false } : item) }), /no-effect/);
   assert.throws(() => assertBrowserNegativeProbeResults({ ...proof,
     preexistingBrowserCardStylesUnchanged: false }), /preexisting Browser Card/);
+});
+
+test('negative probes require proven not-dispatched UI refusals, the unlocked same-run recovery and the navigation retry', () => {
+  const corruptions = {
+    'stale DOM still reported as unknown': p => { p.probes[2].code = 'BROWSER_ACTION_UNVERIFIED'; },
+    'probe act phase unknown': p => { p.probes[3].uiRequests[0].dispatchPhase = 'unknown'; },
+    'probe act phase missing': p => { delete p.probes[8].uiRequests[0].dispatchPhase; },
+    'probe act entered perform': p => { p.probes[2].uiRequests[0].timing.performEnterMs = 101; },
+    'probe act counts moved': p => { p.probes[2].uiRequests[0].timing.performCallsAfter = 2; },
+    'probe act without receive stamp': p => { delete p.probes[6].uiRequests[0].timing.receivedAtMs; },
+    'oversized fill under the UI limit': p => { p.probes[11].uiRequests[0].requestJsonLength = 23000; },
+    'oversized fill refused for another reason': p => { p.probes[11].uiRequests[0].error = 'Browser observation is stale'; },
+    'recovery rebound the Card': p => { p.notDispatchedRecovery.uiRequests.unshift({
+      ...p.notDispatchedRecovery.uiRequests[0], requestId: 'second-bind', responseRequestId: 'second-bind' }); },
+    'recovery in another run': p => { p.notDispatchedRecovery.syntheticRunId = 'qa-browser-simulator-other'; },
+    'recovery reused the spent observation': p => {
+      p.notDispatchedRecovery.observed.observationId = p.notDispatchedRecovery.deniedObservationId; },
+    'recovery without fresh observe': p => { p.notDispatchedRecovery.uiRequests.splice(3, 1); },
+    'recovery perform count mismatch': p => { p.notDispatchedRecovery.uiRequests.at(-1).timing.performCallsAfter = 5; },
+    'recovery not independently observed': p => {
+      p.notDispatchedRecovery.afterAttempt = structuredClone(p.notDispatchedRecovery.beforeAttempt);
+      p.notDispatchedRecovery.afterAttempt.qaDiagnostics.performCalls = 4; },
+    'recovery missing': p => { delete p.notDispatchedRecovery; },
+    'navigation without retry': p => { p.navigationObserveRetry.diagnostic.attempts = 1; },
+    'navigation retry not from an abort': p => { p.navigationObserveRetry.diagnostic.abortRetried = false; },
+    'navigation retry on the same window': p => { p.navigationObserveRetry.diagnostic.innerWindowIds = [41, 41]; },
+    'navigation answered from the old document': p => {
+      p.navigationObserveRetry.response.snapshot.documentId = p.navigationObserveRetry.oldDocumentId; },
+    'navigation wait not met': p => { p.navigationObserveRetry.response.snapshot.wait.outcome = 'timeout'; },
+    'navigation answered after its deadline': p => { p.navigationObserveRetry.respondedAt = 20001; },
+    'positive control without Gecko identity': p => {
+      const acted = p.guardedActorPositiveControls[0].uiRequests[0];
+      delete acted.guard.innerWindowId; delete acted.guard.browsingContextId; },
+    'positive control without authorize stamp': p => {
+      delete p.guardedActorPositiveControls[1].uiRequests[0].timing.authorizedAtMs; },
+    'positive control first event outside perform': p => {
+      p.guardedActorPositiveControls[0].uiRequests[0].timing.firstEventAtMs = 99; },
+  };
+  assert.equal(assertBrowserNegativeProbeResults(negativeProbeProof()), true);
+  for (const [label, corrupt] of Object.entries(corruptions)) {
+    const proof = negativeProbeProof();
+    corrupt(proof);
+    assert.throws(() => assertBrowserNegativeProbeResults(proof), undefined, label);
+  }
 });
 
 for (const action of ['fill', 'click']) {
@@ -1324,7 +1412,8 @@ function cameraSurfaceFixture({ failClick = false, failCancel = false, changeCon
       const before = snapshotFor(card);
       if (request.guard.documentId !== before.documentId && !staleActionAccepted) {
         diagnostic = { cardId: card.id, actionType: 'click', phase: 'actor', status: 'rejected', sampledAtMs: Date.now() };
-        return { ...base, status: 'rejected', error: 'Browser observation is stale; observe the current page again' };
+        return { ...base, status: 'rejected', error: 'Browser observation is stale; observe the current page again',
+          dispatchPhase: 'not-dispatched', timing: { receivedAtMs: Date.now(), performCallsBefore: 0, performCallsAfter: 0 } };
       }
       if (!staleActionAccepted || request.guard.documentId === before.documentId)
       assert.deepEqual(JSON.parse(JSON.stringify(request.guard)), { documentId: before.documentId,

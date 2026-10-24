@@ -1365,3 +1365,184 @@ test('a page past the scan budget still lists its interactive elements but reads
   assert.equal(byLabel(seen, 'Frame send'), undefined)
   assert.deepEqual(seen.inaccessibleFrames, [])
 })
+
+// REA 웹4/웹8/웹10: Gecko document identity, dispatch phase and same-clock timing.
+function identityFixture() {
+  const f = localDocumentFixture()
+  f.actor.manager = { innerWindowId: 4101 }
+  f.actor.browsingContext = { id: 77 }
+  return f
+}
+const guardedAct = (f, action, options) => f.actor.receiveMessage({ name: 'act', data: { action, options } })
+
+test('snapshot carries the actor Gecko document identity and an act from another document is stale before perform', async () => {
+  const f = identityFixture()
+  const before = f.actor.snapshot()
+  assert.equal(before.innerWindowId, 4101)
+  assert.equal(before.browsingContextId, 77)
+  const button = before.interactiveElements.find(item => item.role === 'button')
+  for (const [key, value] of [['innerWindowId', 4102], ['browsingContextId', 78]]) {
+    const refusal = await guardedAct(f, { type: 'click', ref: button.ref },
+      guarded({ ...guardFrom(before, button), innerWindowId: 4101, browsingContextId: 77, [key]: value }))
+    assert.equal(refusal.ok, false, key)
+    assert.equal(refusal.refused, true, key)
+    assert.match(refusal.error, /stale/, key)
+    assert.equal(refusal.dispatchPhase, 'not-dispatched', key)
+    assert.deepEqual(refusal.timing, { performCallsBefore: 0, performCallsAfter: 0 }, key)
+  }
+  assert.equal(f.clicks, 0)
+  // An identity the actor cannot read is not "this document".
+  delete f.actor.manager
+  const unreadable = await guardedAct(f, { type: 'click', ref: button.ref },
+    guarded({ ...guardFrom(f.actor.snapshot(), button), innerWindowId: 4101 }))
+  assert.equal(unreadable.dispatchPhase, 'not-dispatched')
+  assert.equal(f.actor.snapshot().innerWindowId, undefined, 'no identity is invented')
+  const current = identityFixture()
+  const seen = current.actor.snapshot()
+  const target = seen.interactiveElements.find(item => item.role === 'button')
+  const acted = await guardedAct(current, { type: 'click', ref: target.ref },
+    guarded({ ...guardFrom(seen, target), innerWindowId: 4101, browsingContextId: 77 }))
+  assert.equal(acted.ok, true)
+  assert.equal(current.clicks, 1)
+})
+
+test('a node whose document is no longer active is stale like remote dom.isStale, before perform', async () => {
+  const f = localDocumentFixture()
+  let active = true
+  f.actor.document.isActive = () => active
+  const before = f.actor.snapshot()
+  const button = before.interactiveElements.find(item => item.role === 'button')
+  active = false
+  const refusal = await guardedAct(f, { type: 'click', ref: button.ref }, guarded(guardFrom(before, button)))
+  assert.equal(refusal.dispatchPhase, 'not-dispatched')
+  assert.match(refusal.error, /unavailable|stale/)
+  assert.equal(f.actor.nodeForRef(button.ref), null)
+  assert.equal(f.clicks, 0)
+  active = true
+  assert.equal(f.actor.nodeForRef(button.ref)?.tagName, 'BUTTON')
+
+  const x = frameFixture()
+  const seen = x.actor.snapshot()
+  const frameButton = byLabel(seen, 'Frame send')
+  x.same.doc.isActive = () => false
+  assert.throws(() => x.actor.assertGuard({ type: 'click', ref: frameButton.ref }, guardFrom(seen, frameButton)),
+    /stale/, 'an inactive frame document ends its generation')
+  assert.equal(x.same.button.clickCount, 0)
+})
+
+test('guarded refusals answer as data with the phase the actor can prove; perform entry is dispatched', async () => {
+  for (const reason of ['stale-before-approval', 'lease-missing', 'authority-denied', 'stale-after-approval',
+    'deadline-after-approval', 'perform-threw']) {
+    const f = localDocumentFixture()
+    const before = f.actor.snapshot()
+    const button = before.interactiveElements.find(item => item.role === 'button')
+    const options = guarded(guardFrom(before, button))
+    let clockMs = Date.now()
+    f.actor.nowMs = () => clockMs
+    options.lease.deadlineMs = clockMs + 10000
+    if (reason === 'stale-before-approval') f.pendingMutations.push({})
+    if (reason === 'lease-missing') delete options.lease
+    if (reason === 'authority-denied') f.actor.sendQuery = async () => ({ authorized: false, reason: 'ui-denied' })
+    if (reason === 'stale-after-approval') f.actor.sendQuery = async () => { f.pendingMutations.push({}); return { authorized: true } }
+    if (reason === 'deadline-after-approval') f.actor.sendQuery = async () => { clockMs += 10001; return { authorized: true } }
+    if (reason === 'perform-threw') f.button.click = () => { throw new Error('page click handler failed') }
+    const refusal = await guardedAct(f, { type: 'click', ref: button.ref }, options)
+    assert.equal(refusal.ok, false, reason)
+    assert.equal(refusal.refused, true, reason)
+    assert.equal(typeof refusal.error, 'string', reason)
+    if (reason === 'perform-threw') {
+      assert.equal(refusal.dispatchPhase, 'dispatched')
+      assert.equal(refusal.timing.performCallsBefore, 0)
+      assert.equal(refusal.timing.performCallsAfter, 1)
+      assert.ok(Number.isFinite(refusal.timing.performEnterMs) && Number.isFinite(refusal.timing.performExitMs))
+      assert.ok(refusal.timing.performExitMs >= refusal.timing.performEnterMs)
+    } else {
+      assert.equal(refusal.dispatchPhase, 'not-dispatched', reason)
+      assert.deepEqual(refusal.timing, { performCallsBefore: 0, performCallsAfter: 0 }, reason)
+      assert.equal(f.actor.actorPerformCalls, 0, reason)
+    }
+    assert.equal(f.clicks, 0, reason)
+  }
+  // The direct act() contract stays a rejection, now carrying the same facts.
+  const f = localDocumentFixture()
+  const before = f.actor.snapshot()
+  const button = before.interactiveElements.find(item => item.role === 'button')
+  f.pendingMutations.push({})
+  await assert.rejects(f.actor.act({ type: 'click', ref: button.ref }, guarded(guardFrom(before, button))),
+    error => error.dispatchPhase === 'not-dispatched' && error.timing.performCallsAfter === 0 && /stale/.test(error.message))
+  // A perform count moved by another call is not proof that this one was never sent.
+  const g = localDocumentFixture()
+  const seen = g.actor.snapshot()
+  const target = seen.interactiveElements.find(item => item.role === 'button')
+  g.actor.sendQuery = async () => { g.actor.actorPerformCalls++; return { authorized: false, reason: 'ui-denied' } }
+  const contested = await guardedAct(g, { type: 'click', ref: target.ref }, guarded(guardFrom(seen, target)))
+  assert.equal(contested.dispatchPhase, 'unknown')
+  // Unguarded internal acts keep their thrown errors and record no timing.
+  const h = localDocumentFixture()
+  await assert.rejects(h.actor.receiveMessage({ name: 'act', data: { action: { type: 'click', ref: 'el_missing' }, options: {} } }),
+    error => !('dispatchPhase' in error))
+})
+
+test('a guarded action reports same-clock perform timing and bounds settle by what the lease leaves', async () => {
+  const f = localDocumentFixture()
+  let clockMs = 1000
+  f.actor.nowMs = () => clockMs
+  let pageClock = 5000
+  f.win.performance = { timeOrigin: 1700000000000, now: () => pageClock++ }
+  const delays = []
+  f.win.setTimeout = (fn, ms) => { delays.push(ms); fn() }
+  const before = f.actor.snapshot()
+  const button = before.interactiveElements.find(item => item.role === 'button')
+  const options = { guard: guardFrom(before, button), settleMs: 150,
+    lease: { leaseId: 'lease-a', requestId: 'request-a', deadlineMs: clockMs + 10000 } }
+  const acted = await guardedAct(f, { type: 'click', ref: button.ref }, options)
+  assert.equal(acted.ok, true)
+  const { timing } = acted
+  assert.deepEqual(Object.keys(timing).sort(), ['firstEventAtMs', 'performCallsAfter', 'performCallsBefore',
+    'performEnterMs', 'performExitMs'])
+  assert.equal(timing.performCallsBefore, 0)
+  assert.equal(timing.performCallsAfter, 1)
+  assert.ok(timing.performEnterMs >= 1700000005000, 'stamped on the page performance clock')
+  assert.ok(timing.performEnterMs < timing.firstEventAtMs && timing.firstEventAtMs < timing.performExitMs)
+  assert.deepEqual(delays, [150])
+
+  // 600ms left: settle = min(150, 600 - 500) = 100. 400ms left: settle 0.
+  for (const [left, expected] of [[600, 100], [400, 0]]) {
+    const seen = f.actor.snapshot()
+    const target = seen.interactiveElements.find(item => item.role === 'button')
+    delays.length = 0
+    await guardedAct(f, { type: 'click', ref: target.ref }, { guard: guardFrom(seen, target), settleMs: 150,
+      lease: { leaseId: `lease-${left}`, requestId: `request-${left}`, deadlineMs: clockMs + left } })
+    assert.deepEqual(delays, [expected], `${left}ms left`)
+  }
+  // Each guarded route stamps its first DOM event.
+  const fill = localDocumentFixture()
+  const observed = fill.actor.snapshot()
+  const input = observed.interactiveElements.find(item => item.tag === 'input')
+  const filled = await guardedAct(fill, { type: 'fill', ref: input.ref, text: 'note' }, guarded(guardFrom(observed, input)))
+  assert.ok(filled.timing.firstEventAtMs >= filled.timing.performEnterMs &&
+    filled.timing.firstEventAtMs <= filled.timing.performExitMs)
+})
+
+test('Parent hands the UI the native document identity after child data so a child cannot replace it', () => {
+  const parent = new EGDeskBrowserAgentRuntimeParent()
+  const ownerDocument = { nodePrincipal: { isSystemPrincipal: true } }
+  const ownerWindow = { document: ownerDocument, addEventListener() {}, removeEventListener() {} }
+  ownerDocument.defaultView = ownerWindow
+  const card = { isConnected: true }
+  const context = { id: 301 }
+  const browser = { localName: 'browser', isConnected: true, ownerDocument, browsingContext: context,
+    closest: selector => selector === '.egd-browser-card' ? card : null }
+  context.top = context
+  context.embedderElement = browser
+  let seen = null
+  const unregister = registerBrowserActionAuthorizer(browser, ownerWindow, request => { seen = request; return true })
+  parent.browsingContext = context
+  parent.manager = { innerWindowId: 9001 }
+  assert.deepEqual(parent.receiveMessage({ name: 'authorizeAct', data: { leaseId: 'lease-a',
+    innerWindowId: 1, browsingContextId: 2, windowGlobal: 'forged' } }), { authorized: true, reason: 'approved' })
+  assert.equal(seen.innerWindowId, 9001)
+  assert.equal(seen.browsingContextId, 301)
+  assert.equal(seen.windowGlobal, parent.manager)
+  unregister()
+})

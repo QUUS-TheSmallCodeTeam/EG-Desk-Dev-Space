@@ -32,6 +32,10 @@ const MAX_INACCESSIBLE_FRAMES = 20;
 const INTERACTIVE_SELECTOR = ["a[href]", "button", "input", "textarea", "select", "[role]", "[tabindex]",
   '[contenteditable=""]', '[contenteditable="true" i]', '[contenteditable="plaintext-only" i]'].join(",");
 const MUTATION_OPTIONS = Object.freeze({ subtree: true, childList: true, attributes: true, characterData: true });
+// Settle never spends the reply budget: min(requested, lease deadline - margin) (REA 웹8 c).
+const SETTLE_RESPONSE_MARGIN_MS = 500;
+// The only dispatch phases a guarded refusal may claim (helper contract B).
+const DISPATCH_PHASES = new Set(["not-dispatched", "dispatched", "unknown"]);
 
 export class EGDeskBrowserAgentRuntimeChild extends JSWindowActorChild {
   constructor() {
@@ -52,6 +56,9 @@ export class EGDeskBrowserAgentRuntimeChild extends JSWindowActorChild {
     this.lastViewport = null;
     // Entry into the side-effecting dispatcher, not physical input events.
     this.actorPerformCalls = 0;
+    // Same-clock record of the guarded action in flight; perform's DOM event
+    // points stamp firstEventAtMs into it.
+    this.performTiming = null;
     // The one field the last guarded action filled; key input may follow it.
     this.lastGuardedFill = null;
     this.waitPollMs = 100;
@@ -66,7 +73,14 @@ export class EGDeskBrowserAgentRuntimeChild extends JSWindowActorChild {
       return data.options?.wait ? this.waitThenSnapshot(data.options) : this.snapshot(data.options || {});
     }
     if (message.name === "captureInput") return captureDocumentText(this.document, data.options || {});
-    if (message.name === "act") return this.act(data.action || {}, data.options || {});
+    if (message.name === "act") {
+      if (!data.options?.guard) return this.act(data.action || {}, data.options || {});
+      // A guarded refusal answers as data, not as a thrown Error: a cloned
+      // Error keeps only its message, and the chrome side needs the phase and
+      // perform counts to tell "never sent" from "unknown" (REA 웹8 a).
+      try { return await this.act(data.action || {}, data.options); }
+      catch (error) { return this.guardedRefusal(error); }
+    }
     throw new Error(`Unsupported browser agent actor message: ${message.name}`);
   }
 
@@ -108,9 +122,11 @@ export class EGDeskBrowserAgentRuntimeChild extends JSWindowActorChild {
     return ref;
   }
 
+  // Stale like remote/shared/DOM.sys.mjs:552 isStale: disconnected, or its
+  // document is no longer the active document of its browsing context.
   nodeForRef(ref) {
     const node = this.nodeByRef.get(ref);
-    if (!node || !node.isConnected) return null;
+    if (!node || !node.isConnected || !this.documentActive(node.ownerDocument)) return null;
     const frame = this.frameForRef(ref);
     return frame === undefined || (frame && node.ownerDocument !== frame.document) ? null : node;
   }
@@ -143,9 +159,16 @@ export class EGDeskBrowserAgentRuntimeChild extends JSWindowActorChild {
       try { doc = current.frameElement.contentDocument; } catch {}
       if (this.frameByKey.get(current.key) !== current || !current.frameElement.isConnected ||
           current.frameElement.ownerDocument !== (current.parent?.document || this.document) ||
-          doc !== current.document || !this.sameOriginDocument(doc)) return false;
+          doc !== current.document || !this.documentActive(doc) || !this.sameOriginDocument(doc)) return false;
     }
     return true;
+  }
+
+  // Document.isActive() is ChromeOnly Gecko API; a harness without it is
+  // judged by the other checks alone.
+  documentActive(doc) {
+    if (typeof doc?.isActive !== "function") return true;
+    try { return doc.isActive() === true; } catch { return false; }
   }
 
   // Same origin as the top document by Gecko document principal (sandboxed
@@ -297,6 +320,38 @@ export class EGDeskBrowserAgentRuntimeChild extends JSWindowActorChild {
   }
 
   nowMs() { return Date.now(); }
+
+  // Same-clock stamp (helper contract C): this page global's
+  // performance.timeOrigin + performance.now(), the clock an owned fixture
+  // page records its own events with.
+  clockMs() {
+    for (const perf of [this.contentWindow?.performance, globalThis.performance]) {
+      try {
+        const value = perf.timeOrigin + perf.now();
+        if (Number.isFinite(value) && value >= 0) return value;
+      } catch {}
+    }
+    return Date.now();
+  }
+
+  markFirstEvent() {
+    if (this.performTiming && this.performTiming.firstEventAtMs == null) this.performTiming.firstEventAtMs = this.clockMs();
+  }
+
+  // Gecko identities of this document (REA 웹4): the WindowGlobalChild's
+  // innerWindowId and its BrowsingContext id. Absent where unavailable.
+  documentIdentity() {
+    const identity = {};
+    try {
+      const innerWindowId = this.manager?.innerWindowId;
+      if (Number.isSafeInteger(innerWindowId) && innerWindowId > 0) identity.innerWindowId = innerWindowId;
+    } catch {}
+    try {
+      const browsingContextId = this.browsingContext?.id;
+      if (Number.isSafeInteger(browsingContextId) && browsingContextId > 0) identity.browsingContextId = browsingContextId;
+    } catch {}
+    return identity;
+  }
 
   // Registrable domain from Gecko's Public Suffix List; null for IP,
   // single-label or unavailable data, which limits scope to the exact origin.
@@ -766,6 +821,7 @@ export class EGDeskBrowserAgentRuntimeChild extends JSWindowActorChild {
     const scan = this.scanRoots(doc);
     return {
       ...state,
+      ...this.documentIdentity(),
       ...this.qaPerformDiagnostics(options),
       url: this.contentWindow.location.href,
       title: doc.title || "",
@@ -870,6 +926,13 @@ export class EGDeskBrowserAgentRuntimeChild extends JSWindowActorChild {
         || guard.focusedRef !== (this.focusedElement(this.document)?.ref || null)
         || guard.url !== this.contentWindow.location.href) {
       throw new Error("Browser observation is stale; observe the current page again");
+    }
+    // An observed Gecko document identity must still be this actor's.
+    const identity = this.documentIdentity();
+    for (const key of ["innerWindowId", "browsingContextId"]) {
+      if (Object.hasOwn(guard, key) && guard[key] !== identity[key]) {
+        throw new Error("Browser observation is stale; the document changed");
+      }
     }
     if (action.type === "navigate") {
       // Guarded model navigation stays on the current document's site.
@@ -991,6 +1054,7 @@ export class EGDeskBrowserAgentRuntimeChild extends JSWindowActorChild {
     if (action.ref) {
       const target = this.nodeForRef(action.ref);
       if (!target) throw new Error(`Browser agent target not found: ${action.ref}`);
+      this.markFirstEvent();
       target.scrollIntoView?.({ block: "center", inline: "nearest", behavior: "instant" });
       const rect = target.getBoundingClientRect ? this.viewportRect(target) : null;
       const targetInView = !!rect && rect.width > 0 && rect.height > 0 && rect.top < win.innerHeight &&
@@ -1001,6 +1065,7 @@ export class EGDeskBrowserAgentRuntimeChild extends JSWindowActorChild {
     }
     const height = Math.max(0, Math.round(Number(win.innerHeight) || 0));
     const step = Math.round(height * (action.amount === "half" ? 0.5 : 0.9));
+    this.markFirstEvent();
     if (action.direction === "top") win.scrollTo({ left: before.x, top: 0, behavior: "instant" });
     else if (action.direction === "bottom") win.scrollTo({ left: before.x, top: before.maxY, behavior: "instant" });
     else win.scrollBy({ left: 0, top: action.direction === "down" ? step : -step, behavior: "instant" });
@@ -1037,6 +1102,7 @@ export class EGDeskBrowserAgentRuntimeChild extends JSWindowActorChild {
     const onKey = () => { targetKeyObserved = true; };
     target.addEventListener?.("keydown", onKey, true);
     let keydownNotCanceled;
+    this.markFirstEvent();
     try { keydownNotCanceled = target.dispatchEvent(new KeyboardEvent("keydown", init)); }
     finally { target.removeEventListener?.("keydown", onKey, true); }
     let keypressNotCanceled = keydownNotCanceled;
@@ -1067,6 +1133,7 @@ export class EGDeskBrowserAgentRuntimeChild extends JSWindowActorChild {
       const InputEvent = this.windowFor(target).InputEvent;
       if (typeof InputEvent !== "function") throw new Error("Browser input events are unavailable; use the native user path");
       const init = { bubbles: true, cancelable: true, composed: true, inputType: "insertReplacementText", data: text };
+      this.markFirstEvent();
       const beforeInputNotCanceled = target.dispatchEvent(new InputEvent("beforeinput", init));
       const eventOrder = ["beforeinput"];
       let egdeskWroteContent = false;
@@ -1081,6 +1148,7 @@ export class EGDeskBrowserAgentRuntimeChild extends JSWindowActorChild {
         egdeskWroteContent, readbackMatches: this.editorText(target) === text } };
     }
     if (!("value" in target)) throw new Error(`Browser agent target is not editable: ${ref}`);
+    this.markFirstEvent();
     target.value = text;
     this.dispatchInputEvents(target);
     return { ok: true, ref, dispatchDiagnostics: { inputRoute: "dom-value-setter", trustedInput: false,
@@ -1102,6 +1170,7 @@ export class EGDeskBrowserAgentRuntimeChild extends JSWindowActorChild {
       let targetClickObserved = false;
       const onClick = () => { targetClickObserved = true; };
       target.addEventListener?.("click", onClick, true);
+      this.markFirstEvent();
       try { target.click(); }
       finally { target.removeEventListener?.("click", onClick, true); }
       return { usedWindowUtils: false, dispatchScope: "dom-click-no-pointerdown", targetClickObserved };
@@ -1147,6 +1216,7 @@ export class EGDeskBrowserAgentRuntimeChild extends JSWindowActorChild {
     if (type === "navigate") {
       const url = this.safeNavigationUrl(action.url || action.value);
       if (!url) throw new Error("Browser navigation requires an absolute http(s) URL without credentials");
+      this.markFirstEvent();
       this.contentWindow.location.href = url;
       return { ok: true };
     }
@@ -1203,42 +1273,92 @@ export class EGDeskBrowserAgentRuntimeChild extends JSWindowActorChild {
   }
 
   async act(action = {}, options = {}) {
-    if (options.guard) this.assertGuard(action, options.guard);
-    const before = this.snapshot(options.snapshot || {});
-    if (options.guard) {
+    // Timing and phase are recorded for guarded actions only (REA 웹8 a, 웹10).
+    const timing = { performCallsBefore: this.actorPerformCalls };
+    let entered = false;
+    try {
+      if (options.guard) this.assertGuard(action, options.guard);
+      const before = this.snapshot(options.snapshot || {});
       const lease = options.lease;
-      if (!lease || typeof lease.leaseId !== "string" || !lease.leaseId ||
-          typeof lease.requestId !== "string" || !lease.requestId ||
-          !Number.isSafeInteger(lease.deadlineMs) || this.nowMs() >= lease.deadlineMs ||
-          typeof this.sendQuery !== "function") throw new Error("Browser action lease is missing or expired");
-      const authorization = await this.sendQuery("authorizeAct", {
-        leaseId: lease.leaseId, requestId: lease.requestId, deadlineMs: lease.deadlineMs,
-        actionType: action.type, actionRef: action.ref || null, actionUrl: action.url || null,
-      });
-      if (authorization?.authorized !== true || this.nowMs() >= lease.deadlineMs) {
-        const reason = this.nowMs() >= lease.deadlineMs ? "deadline-expired-after-approval" :
-          /^(?:missing-browsing-context|missing-embedder|missing-authorizer|ui-denied|parent-callback-error)$/.test(authorization?.reason)
-            ? authorization.reason : "unknown";
-        throw new Error(`Browser action authority was revoked before input [${reason}]`);
+      if (options.guard) {
+        if (!lease || typeof lease.leaseId !== "string" || !lease.leaseId ||
+            typeof lease.requestId !== "string" || !lease.requestId ||
+            !Number.isSafeInteger(lease.deadlineMs) || this.nowMs() >= lease.deadlineMs ||
+            typeof this.sendQuery !== "function") throw new Error("Browser action lease is missing or expired");
+        const authorization = await this.sendQuery("authorizeAct", {
+          leaseId: lease.leaseId, requestId: lease.requestId, deadlineMs: lease.deadlineMs,
+          actionType: action.type, actionRef: action.ref || null, actionUrl: action.url || null,
+        });
+        if (authorization?.authorized !== true || this.nowMs() >= lease.deadlineMs) {
+          const reason = this.nowMs() >= lease.deadlineMs ? "deadline-expired-after-approval" :
+            /^(?:missing-browsing-context|missing-embedder|missing-authorizer|ui-denied|parent-callback-error)$/.test(authorization?.reason)
+              ? authorization.reason : "unknown";
+          throw new Error(`Browser action authority was revoked before input [${reason}]`);
+        }
+        // The parent checked the current run/Card/account authority after the
+        // asynchronous actor hop. Recheck live page state immediately before I/O.
+        this.assertGuard(action, options.guard);
       }
-      // The parent checked the current run/Card/account authority after the
-      // asynchronous actor hop. Recheck live page state immediately before I/O.
-      this.assertGuard(action, options.guard);
+      // Failed perform calls also count. An unchanged count proves this actor
+      // never entered perform; it does not count physical events or successes.
+      this.actorPerformCalls++;
+      entered = true;
+      timing.performEnterMs = this.clockMs();
+      let result;
+      this.performTiming = options.guard ? timing : null;
+      try { result = this.perform(action, options); }
+      finally { this.performTiming = null; timing.performExitMs = this.clockMs(); }
+      // Settle is bounded by what is left of the lease (REA 웹8 c).
+      const requested = Number.isFinite(options.settleMs) ? options.settleMs : 250;
+      const remaining = options.guard && Number.isSafeInteger(lease?.deadlineMs)
+        ? lease.deadlineMs - this.nowMs() - SETTLE_RESPONSE_MARGIN_MS : Infinity;
+      const settleMs = Math.max(0, Math.min(requested, remaining));
+      await new Promise((resolve) => this.contentWindow.setTimeout(resolve, settleMs));
+      const after = this.snapshot(options.snapshot || {});
+      timing.performCallsAfter = this.actorPerformCalls;
+      return {
+        ok: true,
+        action,
+        result,
+        before,
+        after,
+        observation: this.diff(before, after),
+        ...(options.guard ? { timing: this.timingRecord(timing) } : {}),
+      };
+    } catch (error) {
+      if (options.guard && error && typeof error === "object") {
+        timing.performCallsAfter = this.actorPerformCalls;
+        // "not-dispatched" only when this call never entered perform and the
+        // perform-entry count did not move meanwhile.
+        error.dispatchPhase = entered ? "dispatched"
+          : timing.performCallsAfter === timing.performCallsBefore ? "not-dispatched" : "unknown";
+        error.timing = this.timingRecord(timing);
+      }
+      throw error;
     }
-    // Failed perform calls also count. An unchanged count proves this actor
-    // never entered perform; it does not count physical events or successes.
-    this.actorPerformCalls++;
-    const result = this.perform(action, options);
-    const settleMs = Number.isFinite(options.settleMs) ? options.settleMs : 250;
-    await new Promise((resolve) => this.contentWindow.setTimeout(resolve, Math.max(0, settleMs)));
-    const after = this.snapshot(options.snapshot || {});
-    return {
-      ok: true,
-      action,
-      result,
-      before,
-      after,
-      observation: this.diff(before, after),
-    };
+  }
+
+  // Only finite, non-negative stamps and safe-integer counts leave the actor.
+  timingRecord(timing) {
+    const record = {};
+    for (const key of ["performEnterMs", "performExitMs", "firstEventAtMs"]) {
+      if (Number.isFinite(timing[key]) && timing[key] >= 0) record[key] = timing[key];
+    }
+    for (const key of ["performCallsBefore", "performCallsAfter"]) {
+      if (Number.isSafeInteger(timing[key]) && timing[key] >= 0) record[key] = timing[key];
+    }
+    return record;
+  }
+
+  // Structured answer for a refused guarded act. The phase is the actor's own
+  // claim; the chrome side still decides with the lease it holds.
+  guardedRefusal(error) {
+    const phase = DISPATCH_PHASES.has(error?.dispatchPhase) ? error.dispatchPhase : "unknown";
+    const timing = error?.timing && typeof error.timing === "object" ? this.timingRecord(error.timing) : {};
+    if (phase === "not-dispatched") {
+      for (const key of ["performEnterMs", "performExitMs", "firstEventAtMs"]) delete timing[key];
+    }
+    return { ok: false, refused: true, error: String(error?.message || error || "Browser action was refused").slice(0, 500),
+      dispatchPhase: phase, timing };
   }
 }
