@@ -607,6 +607,203 @@ export function cameraMoveImmediate(options = {}, reducedMotion = false) {
   return typeof options?.immediate === 'boolean' ? options.immediate : reducedMotion === true;
 }
 
+// BRW-13: what an Agent did on a Browser Card, in 대표님's words. These are
+// display projections only: none reads or grants authority, and a row never
+// carries typed text (only its length), a field value, or a URL beyond its host.
+export const BROWSER_AGENT_TIMELINE_LIMIT = 30;
+export const BROWSER_AGENT_RECENT_MS = 60000;
+export const BROWSER_AGENT_POLL_MS = 1000;
+const AGENT_ACTION_WORDS = Object.freeze({ observe: '보기', snapshot: '보기', click: '클릭', fill: '입력', type: '입력',
+  scroll: '스크롤', press: '키', navigate: '이동', wait: '대기' });
+const AGENT_OUTCOME_WORDS = Object.freeze({ confirmed: '성공', unknown: '확인 필요', refused: '거부됨' });
+const AGENT_ROLE_WORDS = Object.freeze({ button: '버튼', link: '링크', textbox: '입력란', searchbox: '검색란',
+  combobox: '선택 상자', checkbox: '체크박스', radio: '선택 버튼', tab: '탭', menuitem: '메뉴', option: '항목',
+  switch: '스위치', slider: '슬라이더' });
+const AGENT_TAG_ROLES = Object.freeze({ a: 'link', button: 'button', input: 'textbox', textarea: 'textbox', select: 'combobox' });
+const AGENT_KEY_WORDS = Object.freeze({ Enter: 'Enter', Escape: 'Esc', Tab: 'Tab', Space: 'Space', Backspace: 'Backspace',
+  ArrowUp: '↑', ArrowDown: '↓', ArrowLeft: '←', ArrowRight: '→' });
+const AGENT_SCROLL_WORDS = Object.freeze({ down: '아래로', up: '위로', bottom: '맨 아래로', top: '맨 위로' });
+const AGENT_WAIT_WORDS = Object.freeze({ load: '페이지 로드', idle: '화면 안정' });
+
+/** The Card's Agent badge: 대표님's hold, then a live lease the Agent is using,
+ * then a count that fades. `recheckMs` says when to look again (0: on events). */
+export function browserAgentBadge({ hold = false, permission = null, inFlight = 0, count = 0, lastActiveAt = 0,
+  now = Date.now(), recentMs = BROWSER_AGENT_RECENT_MS } = {}) {
+  if (hold) return { mode: 'user', label: '대표님이 직접 조작 중', control: 'handback', recheckMs: 0 };
+  const live = permission === 'interact' || permission === 'observe';
+  if (inFlight > 0 || (live && count > 0)) {
+    return { mode: 'operating', label: permission === 'observe' ? 'Agent 읽는 중' : 'Agent 조작 중',
+      control: 'pause', recheckMs: BROWSER_AGENT_POLL_MS };
+  }
+  const left = lastActiveAt + recentMs - now;
+  if (count > 0 && left > 0) return { mode: 'recent', label: `최근 Agent 활동 ${count}건`, control: null, recheckMs: left };
+  return { mode: 'hidden', label: '', control: null, recheckMs: 0 };
+}
+
+function agentConditionSeen(condition, snapshot, ref) {
+  if (!condition || !snapshot || typeof condition.value !== 'string') return false;
+  if (condition.kind === 'url') {
+    try { return new URL(snapshot.url).href === new URL(condition.value).href; } catch { return false; }
+  }
+  if (condition.kind === 'visible-text') {
+    return !!condition.value && Array.isArray(snapshot.text) && snapshot.text.some(text => String(text).includes(condition.value));
+  }
+  if (condition.kind === 'target-value') {
+    return Array.isArray(snapshot.interactiveElements) &&
+      snapshot.interactiveElements.some(item => item?.ref === ref && item.value === condition.value);
+  }
+  return false;
+}
+
+/** The last reading a Card returned, kept only to tell whether an action's
+ * stated result was already true before it. Memory only; never shown. */
+export function browserAgentPriorReading(snapshot) {
+  if (!snapshot || typeof snapshot !== 'object') return null;
+  return {
+    documentId: snapshot.documentId ?? null, revision: snapshot.revision ?? null,
+    url: typeof snapshot.url === 'string' ? snapshot.url : '',
+    text: Array.isArray(snapshot.text) ? snapshot.text.slice(0, 200).map(String) : [],
+    interactiveElements: Array.isArray(snapshot.interactiveElements)
+      ? snapshot.interactiveElements.slice(0, 200).map(item => ({ ref: item?.ref, value: item?.value })) : [],
+  };
+}
+
+/** One Agent request as the Card saw it (REA EG-01/03). '성공' is a returned
+ * reading, a met wait, or an action whose target received it and whose stated
+ * result newly appeared in the same document. A dispatched action without that
+ * readback is '확인 필요'; a request stopped before any input is '거부됨'. */
+export function browserAgentActivityOutcome({ request, response, inputAuthorized = false, prior = null } = {}) {
+  const status = response?.status;
+  if (status === 'rejected') return inputAuthorized === true ? 'unknown' : 'refused';
+  if (request?.kind === 'observe') {
+    const snapshot = response?.snapshot;
+    if (status !== 'observed' || !snapshot || typeof snapshot !== 'object') return 'unknown';
+    const wait = request.options?.wait;
+    if (!wait) return 'confirmed';
+    const met = snapshot.wait?.outcome === 'met' &&
+      (wait.for === 'selector-visible' || snapshot.readyState === 'complete') &&
+      (!wait.notDocumentId || snapshot.documentId !== wait.notDocumentId) &&
+      (!wait.documentId || snapshot.documentId === wait.documentId);
+    return met ? 'confirmed' : 'unknown';
+  }
+  if (request?.kind !== 'act' || status !== 'acted') return 'unknown';
+  const action = request.action || {};
+  const receipt = response.receipt || {};
+  const dispatch = receipt.dispatchReceipt || {};
+  const after = receipt.after;
+  if (dispatch.eventDispatched !== true || dispatch.documentStillCurrent !== true || !after || typeof after !== 'object') return 'unknown';
+  // A dispatched navigation does not prove the load (helper: pageLoadVerified false).
+  if (action.type === 'navigate' || after.documentId !== request.guard?.documentId) return 'unknown';
+  if (action.type === 'scroll') {
+    if (dispatch.inputRoute !== 'dom-scroll-api') return 'unknown';
+    if (dispatch.scrollMode === 'into-view') return dispatch.targetInView === true ? 'confirmed' : 'unknown';
+    const before = request.guard?.scroll?.y, now = after.scroll?.y;
+    if (![before, now].every(Number.isFinite)) return 'unknown';
+    const down = ['down', 'bottom'].includes(action.direction), up = ['up', 'top'].includes(action.direction);
+    return (down && now > before) || (up && now < before) ? 'confirmed' : 'unknown';
+  }
+  const received = action.type === 'click'
+    ? dispatch.clickInputRoute === 'dom-click-no-pointerdown' && dispatch.targetClickObserved === true
+    : action.type === 'fill' ? dispatch.egdeskWroteContent === true && dispatch.readbackMatches === true
+      : action.type === 'press' ? dispatch.inputRoute === 'dom-keyboard-event' && dispatch.targetKeyObserved === true
+        : false;
+  const condition = request.postcondition;
+  if (!received || !condition || !agentConditionSeen(condition, after, action.ref)) return 'unknown';
+  // A result that was already true before the action proves nothing about it.
+  const samePrior = prior && prior.documentId === request.guard?.documentId && prior.revision === request.guard?.revision;
+  return samePrior && !agentConditionSeen(condition, prior, action.ref) ? 'confirmed' : 'unknown';
+}
+
+function agentShortText(value, max) {
+  const text = String(value ?? '').replace(/[\u0000-\u001f\u007f]+/g, ' ').replace(/\s+/g, ' ').trim();
+  const chars = [...text];
+  return chars.length > max ? `${chars.slice(0, max - 1).join('')}…` : text;
+}
+function agentHost(value) {
+  try {
+    const url = new URL(String(value || ''));
+    return ['http:', 'https:'].includes(url.protocol) ? url.hostname.replace(/^www\./, '') : '';
+  } catch { return ''; }
+}
+
+/** The history record of one Agent request: its kind, the target's role and
+ * short name, and typed-text length — never the text, a value or a URL path. */
+export function browserAgentActivityRecord(request) {
+  const raw = request?.action || {};
+  const type = request?.kind === 'observe' ? (request.options?.wait ? 'wait' : 'observe') : String(raw.type || '');
+  const action = { type };
+  if (typeof raw.ref === 'string' && raw.ref.length <= 160) action.ref = raw.ref;
+  if (type === 'fill' || type === 'type') action.textLength = [...String(raw.text ?? raw.value ?? '')].length;
+  if (type === 'press' && Object.hasOwn(AGENT_KEY_WORDS, raw.key)) action.key = raw.key;
+  if (type === 'scroll') {
+    if (Object.hasOwn(AGENT_SCROLL_WORDS, raw.direction)) action.direction = raw.direction;
+    if (raw.amount === 'half' || raw.amount === 'page') action.amount = raw.amount;
+  }
+  if (type === 'navigate') action.host = agentHost(raw.url);
+  const waitFor = request?.options?.wait?.for;
+  if (type === 'wait' && ['load', 'idle', 'selector-visible'].includes(waitFor)) action.waitFor = waitFor;
+  const guardTarget = request?.guard?.target;
+  const target = guardTarget && typeof guardTarget === 'object' ? {
+    role: typeof guardTarget.role === 'string' ? guardTarget.role.slice(0, 40) : '',
+    tag: typeof guardTarget.tag === 'string' ? guardTarget.tag.slice(0, 20) : '',
+    label: agentShortText(guardTarget.label, 80),
+  } : null;
+  return { action, target };
+}
+
+function agentClock(ms) {
+  if (!Number.isFinite(ms)) return '';
+  const date = new Date(ms);
+  return [date.getHours(), date.getMinutes(), date.getSeconds()].map(n => String(n).padStart(2, '0')).join(':');
+}
+function agentTargetName(entry) {
+  const ref = entry?.action?.ref;
+  const target = entry?.target || (Array.isArray(entry?.before?.interactiveElements)
+    ? entry.before.interactiveElements.find(item => item?.ref === ref) : null);
+  if (!target) return '';
+  const role = AGENT_ROLE_WORDS[target.role] || AGENT_ROLE_WORDS[AGENT_TAG_ROLES[String(target.tag || '').toLowerCase()]] || '요소';
+  let label = agentShortText(target.label, 24);
+  // An older record may still hold what was typed; a name that repeats it is dropped.
+  const typed = String(entry?.action?.text ?? entry?.action?.value ?? '');
+  if (label && typed && (label.includes(typed) || typed.includes(label))) label = '';
+  return label ? `"${label}" ${role}` : role;
+}
+
+/** Newest first, at most `limit` rows: time, action, a short target summary and
+ * the result in 대표님's words. Older developer records read the same way. */
+export function browserAgentTimelineRows(entries = [], { limit = BROWSER_AGENT_TIMELINE_LIMIT, formatTime = agentClock } = {}) {
+  if (!Array.isArray(entries) || limit <= 0) return [];
+  return entries.slice(-limit).reverse().map((entry, index) => {
+    const action = entry?.action || {};
+    const type = String(action.type || action.action || 'snapshot');
+    const outcome = Object.hasOwn(AGENT_OUTCOME_WORDS, entry?.outcome) ? entry.outcome
+      : type === 'snapshot' && entry?.ok === true ? 'confirmed' : 'unknown';
+    const startedMs = Date.parse(entry?.startedAt);
+    const name = agentTargetName(entry);
+    let target = '';
+    if (type === 'observe' || type === 'snapshot') target = agentHost(entry?.url) || '이 페이지';
+    else if (type === 'click') target = name;
+    else if (type === 'fill' || type === 'type') {
+      const length = Number.isSafeInteger(action.textLength) ? action.textLength : [...String(action.text ?? action.value ?? '')].length;
+      target = [name, `${length}자`].filter(Boolean).join(' · ');
+    } else if (type === 'press') target = [name, AGENT_KEY_WORDS[action.key] || ''].filter(Boolean).join(' · ');
+    else if (type === 'scroll') {
+      target = action.ref && name ? `${name}까지`
+        : `${AGENT_SCROLL_WORDS[action.direction] || ''}${action.amount === 'half' ? ' 반 화면' : ''}`.trim();
+    } else if (type === 'navigate') target = action.host || agentHost(action.url);
+    else if (type === 'wait') target = action.waitFor === 'selector-visible' ? [name, '표시'].filter(Boolean).join(' ') : AGENT_WAIT_WORDS[action.waitFor] || '';
+    return {
+      id: typeof entry?.id === 'string' ? entry.id : `agent-activity-${index}`,
+      iso: Number.isFinite(startedMs) ? new Date(startedMs).toISOString() : '',
+      time: formatTime(startedMs),
+      action: AGENT_ACTION_WORDS[type] || '기타',
+      target,
+      outcome,
+      outcomeLabel: AGENT_OUTCOME_WORDS[outcome],
+    };
+  });
+}
+
 const copy = value => value == null ? value : JSON.parse(JSON.stringify(value));
 export function ownedProjectionMembers(projection, ownership) {
   return projection.members.map(member => member.viewId).filter(id => ownership[id] === projection.id);

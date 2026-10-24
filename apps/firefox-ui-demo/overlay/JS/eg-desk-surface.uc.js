@@ -547,10 +547,14 @@
       legacyChatBackupRequired: false,
       activityThreadId: null,
       // CHAT-06 Await: task graphs seen on this screen (never saved), whether
-      // the list is open, and the one '계속' being confirmed or sent.
+      // the list is open, and the one '계속' being confirmed or sent; the one
+      // approval decision and the resume on their way; the plans Agents proposed.
       taskBoard: ChatState.createTaskBoard(),
       taskBoardOpen: false,
       taskContinue: null,
+      taskApproval: null,
+      taskResume: null,
+      planProposals: ChatState.createPlanProposals(),
       authCardEntityId: null,
       chatDockMode: 'hud',
       chatCardEntityId: null,
@@ -587,6 +591,9 @@
     if (!lastMessage || !lastMessage.content) {
       return codexThreadKindMeta(thread.type).emptyPreview;
     }
+    // A plan step resumed in place reads as its system line, not as 대표님's words.
+    const resumed = ChatState.awaitResumeMessageView(lastMessage);
+    if (resumed) return resumed.line.slice(0, 70);
     const prefix = lastMessage.role === 'user' ? '나: ' : '';
     return `${prefix}${lastMessage.content}`.slice(0, 70);
   }
@@ -823,7 +830,8 @@
   // for in order, with a check and the time once met. An outside condition offers
   // '계속', confirmed before anything is sent. Nothing shows while no graph is here.
   function renderChatTaskBoard(codex, actions, folderName) {
-    const view = ChatState.taskBoardView(codex.taskBoard, { folderName, continuing: codex.taskContinue });
+    const view = ChatState.taskBoardView(codex.taskBoard, { folderName, continuing: codex.taskContinue,
+      approving: codex.taskApproval, resuming: codex.taskResume });
     if (!view.visible) return null;
     const open = codex.taskBoardOpen === true;
     const summary = el('button', {
@@ -832,14 +840,31 @@
       data: { testid: 'chat-task-summary', focusKey: 'chat-task-summary' },
       onclick: () => actions.toggleTaskBoard(),
     }, el('span', { class: 'egd-task-board-summary-text' }, view.summary), deskIcon('chevron', 'egd-task-board-chevron'));
+    // A bridge restart holds started work until 대표님 says to go on; reconnecting never does.
+    const resuming = view.held?.phase === 'sending';
+    const hold = view.held ? el('div', { class: 'egd-task-hold', role: 'group', 'aria-label': '멈춘 작업', data: { testid: 'chat-task-hold' } },
+      el('span', { class: 'egd-task-hold-text' }, view.held.text),
+      el('button', {
+        class: 'egd-task-hold-resume', 'aria-disabled': resuming ? 'true' : null,
+        data: { testid: 'chat-task-resume', focusKey: 'chat-task-resume' },
+        onclick: () => { if (!resuming) actions.resumeHeldTasks(); },
+      }, resuming ? '이어 가는 중…' : '이어서 진행'),
+      view.held.error ? el('p', { class: 'egd-task-error', role: 'alert', data: { testid: 'chat-task-resume-error' } }, view.held.error) : null) : null;
     const board = (...children) => el('div', { class: 'egd-task-board', role: 'group', 'aria-label': '작업 목록',
-      data: { testid: 'chat-task-board', open: String(open) } }, summary, ...children);
+      data: { testid: 'chat-task-board', open: String(open) } }, hold, summary, ...children);
     if (!open) return board();
     const conditionRow = (group, task, condition) => {
       // The confirm buttons share the '계속' focus key, so the keyboard stays on the same condition.
       const key = `chat-task-gate:${group.graphId}:${task.taskId}:${condition.gateId}`;
       const sending = condition.phase === 'sending';
       const confirming = condition.continuable && (condition.phase === 'confirm' || sending);
+      // An approval the task asked for: 대표님 decides here, nothing approves by itself.
+      const deciding = condition.approvalPhase === 'sending';
+      const decisionButton = (decision, label, busyLabel) => el('button', {
+        class: decision === 'approved' ? 'egd-task-approve' : 'egd-task-reject', 'aria-disabled': deciding ? 'true' : null,
+        'aria-label': `${task.name} ${label}`, data: { testid: decision === 'approved' ? 'chat-task-approve' : 'chat-task-reject', focusKey: `${key}:${decision}` },
+        onclick: () => { if (!deciding) actions.decideTaskApproval(group.graphId, task.taskId, decision); },
+      }, deciding && condition.approvalDecision === decision ? busyLabel : label);
       return el('li', { class: 'egd-task-condition', data: { testid: 'chat-task-condition', state: condition.state } },
         condition.state === 'satisfied' ? deskIcon('check', 'egd-task-condition-mark') : el('span', { class: 'egd-task-condition-dot', 'aria-hidden': 'true' }),
         el('span', { class: 'egd-task-condition-text' }, condition.text),
@@ -859,6 +884,8 @@
             class: 'egd-task-confirm-cancel', data: { testid: 'chat-task-confirm-cancel', focusKey: key },
             onclick: () => actions.cancelTaskContinue(),
           }, '취소')) : null,
+        condition.approvable ? el('div', { class: 'egd-task-approval', role: 'group', 'aria-label': `${task.name} 승인 여부`, data: { testid: 'chat-task-approval' } },
+          decisionButton('approved', '승인', '승인하는 중…'), decisionButton('rejected', '거절', '거절하는 중…')) : null,
         condition.error ? el('p', { class: 'egd-task-error', role: 'alert', data: { testid: 'chat-task-error' } }, condition.error) : null);
     };
     return board(el('div', { id: 'egd-task-board-list', class: 'egd-task-board-list', data: { testid: 'chat-task-list' } },
@@ -870,6 +897,70 @@
             el('span', { class: 'egd-task-status' }, task.statusText)),
           task.conditions.length ? el('ul', { class: 'egd-task-conditions', 'aria-label': `${task.name} 대기 조건` },
             ...task.conditions.map(condition => conditionRow(group, task, condition))) : null))))));
+  }
+
+  // CHAT-06 Await: an Agent's plan waits under the answer that proposed it. Its
+  // steps read in order with what each waits for, and each step's instructions
+  // open in place. '승인하고 시작' asks once before anything runs; '거절' sends
+  // at once. Once decided the card says so, and the task list carries the work.
+  function renderChatPlanCard(entry, actions, folderName) {
+    const view = ChatState.planProposalView(entry, { folderName });
+    if (!view) return null;
+    const key = part => `chat-plan:${view.planId}:${part}`;
+    const decision = view.decision;
+    const confirming = view.decidable && decision?.action === 'approve' && (decision.phase === 'confirm' || view.sending);
+    const stepRow = step => el('li', { class: 'egd-plan-step', data: { testid: 'chat-plan-step' } },
+      el('div', { class: 'egd-plan-step-head' },
+        el('span', { class: 'egd-plan-step-number', 'aria-hidden': 'true' }, String(step.number)),
+        el('strong', { class: 'egd-plan-step-title' }, step.title),
+        el('button', {
+          class: 'egd-plan-step-toggle', 'aria-expanded': String(step.open), 'aria-label': `${step.number}단계 ${step.title} 지침 ${step.open ? '접기' : '보기'}`,
+          data: { testid: 'chat-plan-step-toggle', focusKey: key(`step:${step.taskId}`) },
+          onclick: () => actions.togglePlanStep(view.planId, step.taskId),
+        }, step.open ? '지침 접기' : '지침 보기')),
+      step.after ? el('p', { class: 'egd-plan-step-meta' }, step.after) : null,
+      ...step.waits.map(wait => el('p', { class: 'egd-plan-step-meta egd-plan-step-wait' }, wait)),
+      step.where ? el('p', { class: 'egd-plan-step-meta' }, step.where) : null,
+      step.instructions ? el('div', { class: 'egd-plan-step-instructions', data: { testid: 'chat-plan-instructions', state: step.instructions.state } },
+        el('p', {}, step.instructions.text),
+        step.instructions.state === 'error' ? el('button', {
+          class: 'egd-plan-step-toggle', data: { testid: 'chat-plan-instructions-retry', focusKey: key(`retry:${step.taskId}`) },
+          onclick: () => actions.retryPlanDetail(view.planId),
+        }, '다시 불러오기') : null) : null);
+    const decide = view.decidable && !confirming ? el('div', { class: 'egd-plan-actions', data: { testid: 'chat-plan-actions' } },
+      el('button', {
+        class: 'egd-plan-approve', 'aria-disabled': view.sending ? 'true' : null, data: { testid: 'chat-plan-approve', focusKey: key('approve') },
+        onclick: () => { if (!view.sending) actions.askPlanApprove(view.planId); },
+      }, '승인하고 시작'),
+      el('button', {
+        class: 'egd-plan-reject', 'aria-disabled': view.sending ? 'true' : null, data: { testid: 'chat-plan-reject', focusKey: key('reject') },
+        onclick: () => { if (!view.sending) actions.decidePlan(view.planId, 'reject'); },
+      }, view.sending && decision?.action === 'reject' ? '거절하는 중…' : '거절')) : null;
+    // The confirm buttons share the first button's focus key, so the keyboard stays put.
+    const confirm = confirming ? el('div', { class: 'egd-plan-confirm', role: 'group', 'aria-label': '계획 승인 확인', data: { testid: 'chat-plan-confirm' } },
+      el('span', {}, '승인하면 단계가 조건대로 저절로 진행됩니다.'),
+      el('button', {
+        class: 'egd-plan-confirm-go', 'aria-disabled': view.sending ? 'true' : null, data: { testid: 'chat-plan-confirm-go', focusKey: key('approve') },
+        onclick: () => { if (!view.sending) actions.decidePlan(view.planId, 'approve'); },
+      }, view.sending ? '승인하는 중…' : '승인'),
+      view.sending ? null : el('button', {
+        class: 'egd-plan-confirm-cancel', data: { testid: 'chat-plan-confirm-cancel', focusKey: key('approve') },
+        onclick: () => actions.cancelPlanDecision(view.planId),
+      }, '취소')) : null;
+    return el('section', { class: 'egd-plan-card', role: 'group', 'aria-label': `계획 제안 · ${view.title}`,
+      data: { testid: 'chat-plan-card', status: view.status } },
+    el('div', { class: 'egd-plan-card-head' },
+      el('span', { class: 'egd-plan-card-eyebrow' }, '계획 제안'),
+      el('span', { class: 'egd-plan-card-status', data: { testid: 'chat-plan-status' } }, view.statusText)),
+    el('strong', { class: 'egd-plan-card-title' }, view.title),
+    view.steps.length ? el('ol', { class: 'egd-plan-steps', 'aria-label': `${view.title} 단계` }, ...view.steps.map(stepRow)) : null,
+    view.note ? el('p', { class: 'egd-plan-card-note' }, view.note) : null,
+    decide, confirm,
+    decision?.phase === 'error' && decision.error ? el('p', { class: 'egd-plan-error', role: 'alert', data: { testid: 'chat-plan-error' } }, decision.error) : null,
+    view.showTaskList ? el('button', {
+      class: 'egd-plan-open-list', data: { testid: 'chat-plan-open-list', focusKey: key('list') },
+      onclick: () => actions.openTaskBoard(),
+    }, '작업 목록 보기') : null);
   }
 
   function chatInputSourceForView(view) {
@@ -6132,7 +6223,8 @@
           'aria-live': 'polite',
           data: {
             threadId: activeThread.id,
-            lastUserMessageId: activeThread.messages.filter(message => message.role === 'user').at(-1)?.id || '',
+            // A plan step resumed in place is not 대표님 sending: it never pulls the view down.
+            lastUserMessageId: activeThread.messages.filter(message => message.role === 'user' && !ChatState.awaitResumeMessageView(message)).at(-1)?.id || '',
           },
         });
         if (!hasConversation) {
@@ -6168,15 +6260,51 @@
           // Agent answers carry the Profile avatar captured at send; older answers
           // borrow the room's current Agent avatar only when the name still matches.
           const roomProfile = activeThread.profileEnabled === true ? codexThreadAgentProfile(activeThread) : null;
+          // CHAT-06 Await: each plan card sits under the Agent answer that proposed it.
+          const planPlacement = ChatState.planProposalPlacement(ChatState.planProposalsForThread(codex.planProposals, activeThread), activeThread.messages);
+          const appendPlanCards = (entries) => {
+            for (const entry of entries || []) {
+              const card = renderChatPlanCard(entry, codexBridge, connectedFolderName);
+              if (card) messages.appendChild(card);
+            }
+          };
+          // A plan step resumed in place is a system line; it never groups with 대표님's bubbles.
+          const groupRole = (message) => (message && ChatState.awaitResumeMessageView(message) ? 'system' : message?.role);
+          // BRW-13: 대표님 took a Browser Card back from this room's Agent. One quiet line, in time order.
+          const controlNotices = ChatState.browserUserControlNoticesFor(codex.browserUserControlNotices, ChatState.clientThreadBinding(activeThread));
+          let controlNoticeIndex = 0;
+          const appendControlNotices = (until = Infinity) => {
+            while (controlNoticeIndex < controlNotices.length && controlNotices[controlNoticeIndex].at <= until) {
+              const notice = controlNotices[controlNoticeIndex++];
+              const view = ChatState.browserUserControlNoticeView(notice);
+              messages.appendChild(el('div', {
+                class: 'egd-codex-browser-control', role: 'note', data: { testid: 'chat-browser-user-control' },
+              }, deskIcon('pointer', 'egd-codex-browser-control-mark'),
+              el('span', { class: 'egd-codex-browser-control-text' }, view.line),
+              el('span', { class: 'egd-codex-browser-control-detail' }, view.detail),
+              el('span', { class: 'egd-codex-message-time' }, formatMessageTime(notice.at))));
+            }
+          };
           activeThread.messages.forEach((message, index) => {
+            if (Number.isFinite(message.createdAt)) appendControlNotices(message.createdAt);
             if (message.role === 'assistant' && message.status === 'streaming' && !message.content) return;
+            const resumed = ChatState.awaitResumeMessageView(message);
+            if (resumed) {
+              messages.appendChild(el('div', {
+                class: 'egd-codex-await-resume', role: 'note',
+                data: { testid: 'chat-await-resume', messageId: message.id || '', runId: message.runId || '' },
+              }, deskIcon('check', 'egd-codex-await-resume-mark'),
+              el('span', { class: 'egd-codex-await-resume-text' }, resumed.line),
+              message.createdAt ? el('span', { class: 'egd-codex-message-time' }, formatMessageTime(message.createdAt)) : null));
+              return;
+            }
             const previous = activeThread.messages[index - 1] || null;
             const next = activeThread.messages[index + 1] || null;
             const previousDelta = message.createdAt && previous?.createdAt ? Math.abs(message.createdAt - previous.createdAt) : Infinity;
             const nextDelta = message.createdAt && next?.createdAt ? Math.abs(next.createdAt - message.createdAt) : Infinity;
             const author = codexMessageAuthorLabel(message);
-            const groupedWithPrevious = previous?.role === message.role && codexMessageAuthorLabel(previous) === author && previousDelta < 120000;
-            const groupedWithNext = next?.role === message.role && codexMessageAuthorLabel(next) === author && nextDelta < 120000;
+            const groupedWithPrevious = groupRole(previous) === message.role && codexMessageAuthorLabel(previous) === author && previousDelta < 120000;
+            const groupedWithNext = groupRole(next) === message.role && codexMessageAuthorLabel(next) === author && nextDelta < 120000;
             const parts = extractCodexResultLinks(message);
             const content = el('div', { class: 'egd-codex-bubble-content egd-codex-richtext' });
             appendRichText(content, parts.text || (message.status === 'streaming' ? '…' : ''), message, activeThread);
@@ -6236,7 +6364,10 @@
                 groupedWithPrevious ? 'egd-codex-message-row-grouped' : '',
               ].filter(Boolean).join(' '),
             }, avatar, messageStack));
+            appendPlanCards(planPlacement.byMessageId.get(message.id));
           });
+          appendPlanCards(planPlacement.trailing);
+          appendControlNotices();
         }
         conversation.appendChild(messages);
         const menuMessage = codex.messageMenu?.threadId === activeThread.id
@@ -6870,6 +7001,9 @@
         // Task graphs belong to the account that made them.
         state.codex.taskBoard = ChatState.createTaskBoard();
         state.codex.taskContinue = null;
+        state.codex.taskApproval = null;
+        state.codex.taskResume = null;
+        state.codex.planProposals = ChatState.createPlanProposals();
       }
       if (accountKey) state.codex.codexAccountKey = accountKey;
       Object.assign(state.codex, patch);
@@ -7246,12 +7380,60 @@
       if (entry && !entry.boardId) void readTaskGraph(entry.graphId);
       emit();
     };
+    // A plan gets its approval card; once approved its graph joins the task list.
     const taskPlanFrame = (plan) => {
-      state.codex.taskBoard = ChatState.taskBoardWithPlan(state.codex.taskBoard, plan);
-      const entry = ChatState.taskBoardEntry(state.codex.taskBoard, plan?.graphId);
-      if (entry && !entry.graph) void readTaskGraph(entry.graphId);
+      state.codex.planProposals = ChatState.planProposalsWithPlan(state.codex.planProposals, plan);
+      if (ChatState.planOnTaskBoard(plan)) {
+        state.codex.taskBoard = ChatState.taskBoardWithPlan(state.codex.taskBoard, plan);
+        const entry = ChatState.taskBoardEntry(state.codex.taskBoard, plan?.graphId);
+        if (entry && !entry.graph) void readTaskGraph(entry.graphId);
+      }
       emit();
     };
+    // chat.event 'plan.proposed': the card goes under that run's answer (the chat event's own emit draws it).
+    const planProposalFrame = (run, details) => {
+      state.codex.planProposals = ChatState.planProposalsWithEvent(state.codex.planProposals, run, details);
+    };
+    // GET /tasks/plans?planId=: this account's plan with each step's instructions.
+    const planDetailReads = new Map();
+    const readPlanDetail = (planId) => {
+      if (!ChatState.planRef(planId)) return Promise.resolve(null);
+      if (planDetailReads.has(planId)) return planDetailReads.get(planId);
+      state.codex.planProposals = ChatState.planProposalsWithDetail(state.codex.planProposals, planId, 'loading');
+      const read = fetchJson(`/tasks/plans?planId=${encodeURIComponent(planId)}`)
+        .then((payload) => {
+          state.codex.planProposals = ChatState.planProposalsWithPlan(state.codex.planProposals, payload?.plan);
+          if (ChatState.planProposalEntry(state.codex.planProposals, planId)?.detail !== 'loaded') {
+            state.codex.planProposals = ChatState.planProposalsWithDetail(state.codex.planProposals, planId, 'error');
+          }
+          return null;
+        })
+        .catch((error) => {
+          state.codex.planProposals = error?.code === 'PLAN_NOT_FOUND'
+            ? ChatState.planProposalsWithMissing(state.codex.planProposals, planId)
+            : ChatState.planProposalsWithDetail(state.codex.planProposals, planId, 'error');
+          return error;
+        })
+        .finally(() => { planDetailReads.delete(planId); emit(); });
+      planDetailReads.set(planId, read);
+      emit();
+      return read;
+    };
+    // After a (re)connect: plans waiting for 대표님 get their cards back, and
+    // approved plans still running rejoin the task list. Read only, never decided.
+    const loadTaskPlans = () => fetchJson('/tasks/plans')
+      .then((payload) => {
+        const plans = Array.isArray(payload?.plans) ? payload.plans.slice(0, ChatState.PLAN_PROPOSAL_LIMIT) : [];
+        for (const plan of [...plans].reverse()) {
+          state.codex.planProposals = ChatState.planProposalsWithPlan(state.codex.planProposals, plan);
+          if (plan?.status !== 'approved') continue;
+          state.codex.taskBoard = ChatState.taskBoardWithPlan(state.codex.taskBoard, plan);
+          const entry = ChatState.taskBoardEntry(state.codex.taskBoard, plan.graphId);
+          if (entry && !entry.graph) void readTaskGraph(entry.graphId);
+        }
+        emit();
+      })
+      .catch(() => {});
 
     const handleEvent = (event) => {
       if (event?.type?.startsWith('assistant-')) return;
@@ -7320,6 +7502,8 @@
           if (event.v === 2) {
             if (!ChatState.canAdmitChatEvent(protocol, state.codex.threads, event)) return;
             const run = ChatState.reduceChatEvent(protocol, event, ChatState.knownChatEngineIds(state.codex.engines));
+            // CHAT-06 Await: an Agent proposed a plan; its approval card goes under this run's answer.
+            if (run && event.event === 'plan.proposed') planProposalFrame(run, event.details);
             if (run) { syncProtocolRun(run); emit(); }
           }
           return;
@@ -7460,8 +7644,8 @@
       source.addEventListener('codex', receive);
       source.addEventListener('message', receive);
       source.addEventListener('chat.event', receive);
-      // CHAT-06: frames may have been missed while away; the graphs on screen are read again.
-      connectionSource.addEventListener('ready', () => { if (epochScope.valid(streamEpoch) && source === connectionSource) readTaskGraphs(); });
+      // CHAT-06: frames may have been missed while away; the graphs on screen and the plans are read again.
+      connectionSource.addEventListener('ready', () => { if (epochScope.valid(streamEpoch) && source === connectionSource) { readTaskGraphs(); void loadTaskPlans(); } });
 
       connectionSource.onerror = () => {
         if (!epochScope.valid(streamEpoch) || source !== connectionSource) return;
@@ -7486,6 +7670,13 @@
       reportBrowserLocation(cardId, url) {
         if (!state.codex.connected) return [];
         return browserWorkflow.location(cardId, url);
+      },
+      // BRW-13: 대표님 took a Browser Card back from this room's run. One local
+      // system line in that room; nothing is sent and nothing is saved.
+      noteBrowserUserControl(clientThreadId, host = '') {
+        const before = state.codex.browserUserControlNotices;
+        state.codex.browserUserControlNotices = ChatState.addBrowserUserControlNotice(before, { clientThreadId, host, at: Date.now() });
+        if (state.codex.browserUserControlNotices !== before) emit();
       },
       // CHAT-06 Await task list: open or close it in place.
       toggleTaskBoard() {
@@ -7526,6 +7717,117 @@
           if (error?.code === 'TASK_GATE_STALE') void readTaskGraph(graphId);
         }
         emit();
+      },
+      // An approval a task asked for: only 대표님's click decides; the approval ID
+      // comes from a state read, never from the screen.
+      async decideTaskApproval(graphId, taskId, decision) {
+        if (state.codex.taskApproval?.phase === 'sending') return;
+        const target = { graphId, taskId, decision };
+        state.codex.taskApproval = { ...target, phase: 'sending', error: null };
+        emit();
+        let sent = false;
+        try {
+          let entry = ChatState.taskBoardEntry(state.codex.taskBoard, graphId);
+          if (!ChatState.buildTaskApprovalRequest(entry, taskId, decision)) {
+            const readError = await readTaskGraph(graphId);
+            entry = ChatState.taskBoardEntry(state.codex.taskBoard, graphId);
+            if (!entry?.boardId && readError) throw readError;
+          }
+          const body = ChatState.buildTaskApprovalRequest(entry, taskId, decision);
+          if (!body) throw Object.assign(new Error('approval not pending'), { status: 409, code: 'TASK_APPROVAL_STALE' });
+          const ifRev = entry.rev;
+          sent = true;
+          const payload = await fetchJson('/tasks/approval', { method: 'POST', body: JSON.stringify(body) });
+          const fresh = ChatState.taskBoardEntry(state.codex.taskBoard, graphId)?.rev === ifRev;
+          state.codex.taskBoard = ChatState.taskBoardWithState(state.codex.taskBoard, payload, { ifRev });
+          if (fresh) browserWorkflow.graph(payload?.graph);
+          state.codex.taskApproval = null;
+        } catch (error) {
+          state.codex.taskApproval = { ...target, phase: 'error', error: ChatState.taskApprovalErrorText(error) };
+          if (sent && error?.status === 409) void readTaskGraph(graphId);
+        }
+        emit();
+      },
+      // '이어서 진행' after a bridge restart: POST /tasks/resume for each held graph.
+      async resumeHeldTasks() {
+        if (state.codex.taskResume?.phase === 'sending') return;
+        state.codex.taskResume = { phase: 'sending', error: null };
+        emit();
+        let failure = null;
+        for (const held of ChatState.taskBoardHeldEntries(state.codex.taskBoard)) {
+          const graphId = held.graphId;
+          let sent = false;
+          try {
+            const readError = held.boardId ? null : await readTaskGraph(graphId);
+            const entry = ChatState.taskBoardEntry(state.codex.taskBoard, graphId);
+            if (!entry?.boardId) throw readError || Object.assign(new Error('task board unknown'), { status: 404, code: 'TASK_NOT_FOUND' });
+            const body = ChatState.buildTaskResumeRequest(entry);
+            if (!body) continue;
+            const ifRev = entry.rev;
+            sent = true;
+            const payload = await fetchJson('/tasks/resume', { method: 'POST', body: JSON.stringify(body) });
+            const fresh = ChatState.taskBoardEntry(state.codex.taskBoard, graphId)?.rev === ifRev;
+            state.codex.taskBoard = ChatState.taskBoardWithState(state.codex.taskBoard, payload, { ifRev });
+            if (fresh) browserWorkflow.graph(payload?.graph);
+          } catch (error) {
+            failure ||= error;
+            if (sent && error?.status === 409) void readTaskGraph(graphId);
+          }
+        }
+        state.codex.taskResume = failure ? { phase: 'error', error: ChatState.taskResumeErrorText(failure) } : null;
+        emit();
+      },
+      openTaskBoard() {
+        state.codex.taskBoardOpen = true;
+        emit();
+      },
+      // CHAT-06 Await plan card: '승인하고 시작' first asks; only '승인' sends.
+      askPlanApprove(planId) {
+        const entry = ChatState.planProposalEntry(state.codex.planProposals, planId);
+        if (entry?.status !== 'proposed' || entry.decision?.phase === 'sending') return;
+        state.codex.planProposals = ChatState.planProposalsWithDecision(state.codex.planProposals, planId, { action: 'approve', phase: 'confirm' });
+        emit();
+      },
+      cancelPlanDecision(planId) {
+        if (ChatState.planProposalEntry(state.codex.planProposals, planId)?.decision?.phase === 'sending') return;
+        state.codex.planProposals = ChatState.planProposalsWithDecision(state.codex.planProposals, planId, null);
+        emit();
+      },
+      // POST /tasks/plans/:planId/approve|reject with an empty body. One decision at
+      // a time; the reply's plan updates the card and its graph joins the task list.
+      async decidePlan(planId, action) {
+        const entry = ChatState.planProposalEntry(state.codex.planProposals, planId);
+        const request = ChatState.buildPlanDecisionRequest(entry, action);
+        if (!request) return;
+        state.codex.planProposals = ChatState.planProposalsWithDecision(state.codex.planProposals, planId, { action, phase: 'sending' });
+        emit();
+        try {
+          const ifRev = ChatState.taskBoardEntry(state.codex.taskBoard, entry.graphId)?.rev ?? 0;
+          const payload = await fetchJson(request.path, { method: 'POST', body: JSON.stringify(request.body) });
+          state.codex.planProposals = ChatState.planProposalsWithDecision(
+            ChatState.planProposalsWithPlan(state.codex.planProposals, payload?.plan), planId, null);
+          if (ChatState.planOnTaskBoard(payload?.plan)) {
+            const fresh = (ChatState.taskBoardEntry(state.codex.taskBoard, entry.graphId)?.rev ?? 0) === ifRev;
+            state.codex.taskBoard = ChatState.taskBoardWithPlan(ChatState.taskBoardWithState(state.codex.taskBoard, payload, { ifRev }), payload.plan);
+            if (fresh) browserWorkflow.graph(payload?.graph);
+          }
+        } catch (error) {
+          state.codex.planProposals = ChatState.planProposalsWithDecision(state.codex.planProposals, planId,
+            { action, phase: 'error', error: ChatState.planDecisionErrorText(error, action) });
+          if (error?.code === 'PLAN_NOT_FOUND') state.codex.planProposals = ChatState.planProposalsWithMissing(state.codex.planProposals, planId);
+          else if (error?.status === 409) void readPlanDetail(planId);
+        }
+        emit();
+      },
+      // A step's instructions open in place; the first open reads them.
+      togglePlanStep(planId, taskId) {
+        state.codex.planProposals = ChatState.planProposalsWithStep(state.codex.planProposals, planId, taskId);
+        const entry = ChatState.planProposalEntry(state.codex.planProposals, planId);
+        emit();
+        if (entry?.openSteps.includes(taskId) && !entry.instructions && entry.detail !== 'loading') void readPlanDetail(planId);
+      },
+      retryPlanDetail(planId) {
+        void readPlanDetail(planId);
       },
       // '다시 시도' after the quiet retries ran out: start a fresh connect now
       // and say '다시 연결 중…' again while it runs.
@@ -8271,6 +8573,8 @@
         const prompt = thread.messages.findLast((message) => message.role === 'user' &&
           ((run?.requestId && message.requestId === run.requestId) || (runId && message.runId === runId)));
         if (!prompt?.content) { boardNotice('다시 보낼 메시지를 찾지 못했습니다.'); return null; }
+        // A plan step resumed in place is not 대표님's message to send again.
+        if (ChatState.awaitResumeMessageView(prompt)) { boardNotice('계획 단계에서 이어진 실행은 다시 보내지 않습니다. 작업 목록에서 상태를 확인해 주세요.'); return null; }
         if (getCodexThreadDraft(state.codex, threadId).trim()) {
           boardNotice('입력 중인 내용이 있어 다시 보내지 않았습니다. 입력창을 비운 뒤 다시 시도해 주세요.');
           return null;
@@ -12000,6 +12304,51 @@
     for (const key of revoked) browserToolCancelledRuns.set(key, expiresAt);
     return revoked.size;
   }
+  // BRW-13 [일시중지]: the Stop revocation above, scoped to one Card rather than
+  // one run. Every run's binding, pending bind, unused selection and in-flight
+  // action lease on this Card ends, and those keys refuse new dispatch. Input
+  // already authorized is not recalled. Returns the Chats whose run held it.
+  function revokeBrowserToolCard(cardId) {
+    const threads = new Set();
+    if (typeof cardId !== 'string' || !cardId) return threads;
+    const onCard = key => key.includes(`\u0000${cardId}\u0000`);
+    const revoked = new Set();
+    for (const [key, bound] of browserToolRunBindings) {
+      if (!onCard(key) && bound?.binding?.cardId !== cardId) continue;
+      browserToolRunBindings.delete(key);
+      if (bound.selectionToken) browserToolUserSelections.delete(bound.selectionToken);
+      if (bound.clientThreadId) threads.add(bound.clientThreadId);
+      revoked.add(key);
+    }
+    for (const [key, pending] of browserToolPendingBindings) {
+      if (!onCard(key)) continue;
+      browserToolPendingBindings.delete(key);
+      if (pending.selectionToken) browserToolUserSelections.delete(pending.selectionToken);
+      if (pending.clientThreadId) threads.add(pending.clientThreadId);
+      revoked.add(key);
+    }
+    for (const [token, selection] of browserToolUserSelections) {
+      if (selection.cardId === cardId) browserToolUserSelections.delete(token);
+    }
+    for (const [leaseId, lease] of browserToolActionLeases) {
+      if (!revoked.has(lease.key) && lease.card?.id !== cardId) continue;
+      try { lease.projection?.clear(); } catch {}
+      browserToolActionLeases.delete(leaseId);
+    }
+    const expiresAt = Date.now() + 60000;
+    for (const key of revoked) browserToolCancelledRuns.set(key, expiresAt);
+    return threads;
+  }
+  // BRW-13 display: the permission a live Agent run holds on this Card, if any.
+  function browserToolCardPermission(cardId) {
+    let permission = null;
+    for (const [key, bound] of browserToolRunBindings) {
+      if (bound?.binding?.cardId !== cardId || browserToolCancelledRuns.has(key)) continue;
+      if (bound.permission === 'interact') return 'interact';
+      if (bound.permission === 'observe') permission = 'observe';
+    }
+    return permission;
+  }
   function registerBrowserToolSelection(threadId, source, permission) {
     const thread = getCodexThreadById(state.codex, threadId);
     const clientThreadId = thread && ChatState.clientThreadBinding(thread);
@@ -12261,9 +12610,30 @@
     try { lease.projection?.show(); } catch { try { lease.projection?.clear(); } catch {} }
     return true;
   }
+  // BRW-13: while 대표님 holds a Card, every Agent request for it — a later
+  // run's bind included — is refused before any other check; a cancel still
+  // cleans up. A hold never grants: only the Card menu's explicit grant does.
+  // A Card that cannot answer whether it is held is treated as held.
+  function browserToolUserHoldRefusal(request) {
+    if (request?.kind === 'cancel') return null;
+    let held;
+    try { held = document.getElementById(request?.cardId)?._browserControls?.toolUserHold?.(request) === true; }
+    catch { held = true; }
+    return held ? { requestId: request.requestId, status: 'rejected',
+      error: 'The user is operating this Browser Card directly; Agent requests are refused until the user allows control again from the Card' } : null;
+  }
+  // BRW-13 display-only record of a request that reached the Card. It never
+  // feeds authorization, and a display failure never changes the reply.
+  function browserToolActivityStart(card, request) {
+    try { return card._browserControls.toolActivity?.(request) || null; } catch { return null; }
+  }
+  function browserToolActivityEnd(activity, response, inputAuthorized) {
+    try { activity?.end(response, inputAuthorized === true); } catch {}
+  }
   async function browserToolDispatchOnce(request) {
     const requestId = request?.requestId;
     let diagnosticPhase = 'preflight';
+    let activity = null, activityLease = null;
     const fail = (error) => {
       const message = String(error?.message || error || 'Browser request rejected').slice(0, 500);
       const binding = request?.kind === 'act' && browserToolFixtureIdentity(request.cardId);
@@ -12276,7 +12646,10 @@
         geckoError: message.match(/\bNS_ERROR_[A-Z_]+\b/)?.[0] || null,
         sampledAtMs: Date.now(),
       };
-      return { requestId, status: 'rejected', error: message };
+      const rejected = { requestId, status: 'rejected', error: message };
+      // Input the parent authorized may have landed: that row stays unknown, not refused.
+      browserToolActivityEnd(activity, rejected, activityLease?.authorized === true);
+      return rejected;
     };
     try {
       if (request?.version !== 1 || typeof requestId !== 'string' || !requestId ||
@@ -12367,9 +12740,12 @@
       }
       if (request.kind === 'observe') {
         if (browserToolCardLeases.has(request.targetCardEpoch)) throw new Error('Browser Card is being operated; observe after it settles');
+        activity = browserToolActivityStart(card, request);
         const snapshot = await card._browserControls.toolObserve(authorized.binding, request.options || {});
         if (browserToolRunBindings.get(key) !== authorized) throw new Error('Browser run was cancelled during observation');
-        return { requestId, status: 'observed', snapshot };
+        const observed = { requestId, status: 'observed', snapshot };
+        browserToolActivityEnd(activity, observed, false);
+        return observed;
       }
       if (request.kind !== 'act' || authorized.permission !== 'interact') throw new Error('Browser interaction was not selected');
       if (!['navigate', 'click', 'fill', 'scroll', 'press'].includes(request.action?.type) || !request.guard ||
@@ -12397,6 +12773,8 @@
         actionUrl: request.action.url || null, authorized: false,
         displayPoint: browserToolDisplayPoint(request.action, request.guard) };
       browserToolActionLeases.set(leaseId, actionLease);
+      activityLease = actionLease;
+      activity = browserToolActivityStart(card, request);
       let receipt;
       try {
         try { actionLease.projection = card._browserControls.toolPrepareAgentProjection?.(actionLease); } catch {}
@@ -12422,12 +12800,16 @@
         parentReason: null, geckoError: null,
         sampledAtMs: Date.now(),
       };
-      return { requestId, status: 'acted', receipt };
+      const acted = { requestId, status: 'acted', receipt };
+      browserToolActivityEnd(activity, acted, true);
+      return acted;
     } catch (error) { return fail(error); }
   }
   function browserToolDispatch(request) {
     const id = request?.requestId;
     if (typeof id !== 'string' || !id || id.length > 160) return browserToolDispatchOnce(request);
+    const held = browserToolUserHoldRefusal(request);
+    if (held) return Promise.resolve(held);
     const key = `${request.runId}\u0000${request.cardId}\u0000${request.targetCardEpoch}`;
     if (request.kind !== 'cancel' && browserToolStoppedRuns.has(JSON.stringify([request.runId, request.clientThreadId]))) {
       return Promise.resolve({ requestId: id, status: 'rejected', error: 'Browser run was stopped' });
@@ -12554,10 +12936,28 @@
 
     const pageTitle = el('div', { class: 'egd-card-page-title' }, browserState.title);
     const pageStatus = el('div', { class: 'egd-card-page-status' }, 'Loading');
-    const agentActivity = el('span', { class: 'egd-browser-agent-activity', role: 'status',
+    // A passing note; the persistent Agent badge below is the Card's only status region.
+    const agentActivity = el('span', { class: 'egd-browser-agent-activity',
       style: { fontSize: '11px', opacity: '0.8', whiteSpace: 'nowrap', maxWidth: '140px',
         overflow: 'hidden', textOverflow: 'ellipsis', flexShrink: '1' } }, '');
     agentActivity.hidden = true;
+    // BRW-13: who acts on this Card. The badge stays while an Agent lease is
+    // live and in use, then counts what happened for a while, and opens the
+    // timeline. [일시중지] / [돌려주기] sit beside it, outside the status region.
+    const agentBadge = el('button', {
+      type: 'button', class: 'egd-browser-agent-badge', hidden: true, title: 'Agent 활동 기록 보기',
+      'aria-haspopup': 'dialog', 'aria-expanded': 'false', data: { testid: 'browser-agent-badge', mode: 'hidden' },
+      onclick: (ev) => { ev.stopPropagation(); toggleAgentTimeline(); },
+    });
+    const agentBadgeStatus = el('span', { class: 'egd-browser-agent-status', role: 'status' }, agentBadge);
+    const agentHandButton = el('button', {
+      type: 'button', class: 'egd-browser-agent-hand', hidden: true, data: { testid: 'browser-agent-pause', action: '' },
+      onclick: (ev) => {
+        ev.stopPropagation();
+        if (agentHandButton.dataset.action === 'handback') handBackAgentControl();
+        else if (agentHandButton.dataset.action === 'pause') pauseAgentControl();
+      },
+    });
     let agentActivityTimer = 0;
     const showAgentActivity = (message) => {
       if (agentActivityTimer) window.clearTimeout(agentActivityTimer);
@@ -12628,7 +13028,7 @@
 
     const header = deskWindow.slots.header;
     deskWindow.slots.identity.classList.add('egd-card-page-meta');
-    deskWindow.slots.identity.append(pageTitle, pageStatus, agentActivity);
+    deskWindow.slots.identity.append(pageTitle, pageStatus, agentActivity, agentBadgeStatus, agentHandButton);
     deskWindow.slots.toolbar.append(
       el('div', { class: 'egd-card-nav' },
         backButton,
@@ -13931,7 +14331,8 @@
       showAgentActivity(permission === 'interact'
         ? '이번 Chat 조작 대상으로 선택됨' : '이번 Chat 읽기 자료로 선택됨');
     };
-    const showBrowserMenu = (anchor = menuButton, { focusFirst = false } = {}) => {
+    // `regrant`: opened by [돌려주기], it names and focuses '다시 조작 허용' and grants nothing itself.
+    const showBrowserMenu = (anchor = menuButton, { focusFirst = false, regrant = false } = {}) => {
       if (browserMenuPanel?.isConnected) {
         closeBrowserMenu();
         return null;
@@ -13959,13 +14360,15 @@
           }
         },
       }, label);
+      // An explicit pick here is 대표님 handing the Card back, so it also ends a hold.
+      const interactItem = item(regrant ? '다시 조작 허용' : 'Chat 조작 허용', `이 Browser만 이번 Chat 실행의 관찰·조작 대상으로 선택합니다. 사이트 계정: ${card._sourceRef?.accountId || '미확인'}(선택 메타데이터, 로그인 증거 아님). 외부 효과는 별도 확인이 필요합니다.`,
+        () => { endAgentHold(); return selectBrowserForChat('interact'); });
       const items = [
         item('복제', '현재 URL을 새 Desk Window로 열기', duplicateBrowser),
         item('URL 복사', browserState.uri, () => copyTextToClipboard(browserState.uri)),
         item('Chat에 읽기 첨부', '현재 Browser의 읽기 자료만 다음 Chat에 선택합니다. 기존 조작 허용이 있으면 읽기 전용으로 바뀝니다.',
-          () => selectBrowserForChat('observe')),
-        item('Chat 조작 허용', `이 Browser만 이번 Chat 실행의 관찰·조작 대상으로 선택합니다. 사이트 계정: ${card._sourceRef?.accountId || '미확인'}(선택 메타데이터, 로그인 증거 아님). 외부 효과는 별도 확인이 필요합니다.`,
-          () => selectBrowserForChat('interact')),
+          () => { endAgentHold(); return selectBrowserForChat('observe'); }),
+        interactItem,
         item('홈', browserState.homeUrl, () => navigateBrowser(browserState.homeUrl)),
         item(browserState.loading ? '중지' : '새로고침', browserState.loading ? '로드 중지' : '현재 페이지 새로고침', () => (browserState.loading ? stopBrowser() : reloadBrowser())),
         item(isCardFullscreen(card) ? '창 복귀' : '최대화', 'Desk Window 최대화 전환', () => toggleCardFullscreen(card)),
@@ -14022,7 +14425,8 @@
       };
       document.documentElement.appendChild(panel);
       anchor.setAttribute('aria-expanded', 'true');
-      if (focusFirst || document.activeElement !== anchor) items[0]?.focus();
+      if (regrant) interactItem.focus();
+      else if (focusFirst || document.activeElement !== anchor) items[0]?.focus();
       window.setTimeout(() => {
         if (browserMenuPanel === panel && panel._outsideHandler) {
           window.addEventListener('mousedown', panel._outsideHandler, true);
@@ -14031,6 +14435,193 @@
       return panel;
     };
     card._browserState = browserState;
+    // ---- BRW-13: Agent activity on this Card (display; authority stays in the transport) ----
+    const agentControl = { hold: null, inFlight: 0, count: 0, lastActiveAt: 0, timer: 0, popover: null, prior: null };
+    const agentBadgeView = (now) => SurfaceState.browserAgentBadge({ hold: !!agentControl.hold,
+      permission: browserToolCardPermission(card.id), inFlight: agentControl.inFlight,
+      count: agentControl.count, lastActiveAt: agentControl.lastActiveAt, now });
+    const refreshAgentControl = () => {
+      if (agentControl.timer) { window.clearTimeout(agentControl.timer); agentControl.timer = 0; }
+      const now = Date.now();
+      let view = agentBadgeView(now);
+      // An open timeline keeps its badge until 대표님 closes it.
+      if (view.mode === 'hidden' && agentControl.popover && agentControl.count > 0) {
+        agentControl.lastActiveAt = now;
+        view = agentBadgeView(now);
+      }
+      if (view.mode === 'operating') agentControl.lastActiveAt = now;
+      if (view.mode === 'hidden') agentControl.count = 0;
+      if (view.mode === 'hidden') delete card.dataset.egdAgentControl;
+      else card.dataset.egdAgentControl = view.mode;
+      const focused = document.activeElement;
+      agentBadge.hidden = view.mode === 'hidden';
+      agentBadge.dataset.mode = view.mode;
+      // The status region speaks when the label changes, never on a re-render.
+      if (agentBadge.textContent !== view.label) agentBadge.textContent = view.label;
+      agentHandButton.hidden = !view.control;
+      agentHandButton.dataset.action = view.control || '';
+      if (view.control) {
+        const handback = view.control === 'handback';
+        agentHandButton.dataset.testid = handback ? 'browser-agent-handback' : 'browser-agent-pause';
+        const text = handback ? '돌려주기' : '일시중지';
+        if (agentHandButton.textContent !== text) agentHandButton.textContent = text;
+        agentHandButton.title = handback
+          ? '직접 조작을 끝냅니다. 조작 권한은 자동으로 돌아가지 않고, 이어서 여는 메뉴에서 다시 허용할 수 있습니다.'
+          : 'Agent의 이 Browser 조작 권한을 거두고 직접 조작합니다';
+      }
+      if (agentBadge.hidden) closeAgentTimeline({ restoreFocus: !!agentControl.popover?.contains(focused) });
+      // Pausing keeps focus on the same button, now [돌려주기]; a control that goes away hands focus on.
+      if ((focused === agentHandButton && agentHandButton.hidden) || (focused === agentBadge && agentBadge.hidden)) {
+        (agentBadge.hidden ? menuButton : agentBadge).focus();
+      }
+      if (view.recheckMs > 0 && card.isConnected) {
+        agentControl.timer = window.setTimeout(() => { agentControl.timer = 0; refreshAgentControl(); }, view.recheckMs);
+      }
+      return view;
+    };
+    const renderAgentTimeline = () => {
+      const panel = agentControl.popover;
+      if (!panel?.isConnected) return;
+      const rows = SurfaceState.browserAgentTimelineRows(browserAgentHistory({ limit: SurfaceState.BROWSER_AGENT_TIMELINE_LIMIT }));
+      panel._count.textContent = rows.length ? `최근 ${rows.length}건` : '';
+      panel._list.replaceChildren(...(rows.length ? rows.map(row => el('li', {
+        class: 'egd-browser-agent-row', data: { testid: 'browser-agent-timeline-row', outcome: row.outcome },
+      }, el('time', { class: 'egd-browser-agent-row-time', datetime: row.iso || null }, row.time),
+      el('span', { class: 'egd-browser-agent-row-action' }, row.action),
+      el('span', { class: 'egd-browser-agent-row-target', title: row.target || null }, row.target || ''),
+      el('span', { class: 'egd-browser-agent-row-outcome', data: { outcome: row.outcome } }, row.outcomeLabel)))
+        : [el('li', { class: 'egd-browser-agent-row-empty' }, '아직 기록된 Agent 활동이 없습니다')]));
+    };
+    const closeAgentTimeline = ({ restoreFocus = false } = {}) => {
+      const panel = agentControl.popover;
+      if (!panel) return;
+      agentControl.popover = null;
+      window.removeEventListener('mousedown', panel._outside, true);
+      panel.remove();
+      agentBadge.setAttribute('aria-expanded', 'false');
+      agentBadge.removeAttribute('aria-controls');
+      if (restoreFocus && card.isConnected) (agentBadge.hidden ? menuButton : agentBadge).focus();
+    };
+    const openAgentTimeline = () => {
+      closeBrowserMenu();
+      const count = el('span', { class: 'egd-browser-agent-timeline-count' });
+      const list = el('ol', { class: 'egd-browser-agent-timeline-list', 'aria-label': '최근 Agent 활동, 최신순' });
+      const close = el('button', {
+        type: 'button', class: 'egd-browser-agent-timeline-close', 'aria-label': '활동 기록 닫기',
+        onclick: (ev) => { ev.stopPropagation(); closeAgentTimeline({ restoreFocus: true }); },
+      }, deskIcon('close'));
+      const panel = el('div', {
+        id: `${card.id}-agent-timeline`, class: 'egd-browser-agent-timeline egd-edge egd-frosted',
+        role: 'dialog', 'aria-label': 'Agent 활동 기록', data: { testid: 'browser-agent-timeline' },
+      }, el('div', { class: 'egd-browser-agent-timeline-head' },
+        el('strong', { class: 'egd-browser-agent-timeline-title' }, 'Agent 활동'), count, close),
+      list,
+      el('p', { class: 'egd-browser-agent-timeline-note' },
+        '입력한 글자는 길이만 표시합니다. 확인 필요는 결과를 아직 확인하지 못한 행동입니다.'));
+      panel._list = list;
+      panel._count = count;
+      panel.addEventListener('keydown', (ev) => {
+        if (ev.key !== 'Escape') return;
+        ev.preventDefault();
+        ev.stopPropagation();
+        closeAgentTimeline({ restoreFocus: true });
+      });
+      panel.addEventListener('mousedown', ev => ev.stopPropagation());
+      panel._outside = (ev) => {
+        if (agentControl.popover === panel && !panel.contains(ev.target) && !agentBadge.contains(ev.target)) closeAgentTimeline();
+      };
+      const rect = agentBadge.getBoundingClientRect();
+      const width = 320, margin = 8, viewportW = window.innerWidth || 1280, viewportH = window.innerHeight || 720;
+      const top = Math.min(rect.bottom + 6, viewportH - 160 - margin);
+      panel.style.left = `${Math.round(Math.max(margin, Math.min(viewportW - width - margin, rect.left)))}px`;
+      panel.style.top = `${Math.round(Math.max(margin, top))}px`;
+      panel.style.maxHeight = `${Math.round(Math.max(160, Math.min(360, viewportH - top - margin)))}px`;
+      document.documentElement.appendChild(panel);
+      agentControl.popover = panel;
+      agentBadge.setAttribute('aria-expanded', 'true');
+      agentBadge.setAttribute('aria-controls', panel.id);
+      renderAgentTimeline();
+      close.focus();
+      window.setTimeout(() => {
+        if (agentControl.popover === panel) window.addEventListener('mousedown', panel._outside, true);
+      }, 0);
+    };
+    const toggleAgentTimeline = () => (agentControl.popover
+      ? closeAgentTimeline({ restoreFocus: true }) : openAgentTimeline());
+    // Model-tool rows go into browserAgent.history with the same envelope as
+    // developer rows, sanitized by SurfaceState: no typed text, value or path.
+    const recordAgentToolActivity = (request, outcome, startedAtMs) => {
+      const endedAtMs = Date.now();
+      const summary = SurfaceState.browserAgentActivityRecord(request);
+      recordBrowserAgentAction({
+        id: `${card.id}-agent-action-${++agentActionSeq}`, cardId: card.id, sequence: agentActionSeq,
+        startedAt: new Date(startedAtMs).toISOString(), endedAt: new Date(endedAtMs).toISOString(),
+        durationMs: Math.max(0, endedAtMs - startedAtMs), source: 'model-tool', url: browserState.uri,
+        ok: outcome === 'confirmed', outcome, action: summary.action, target: summary.target,
+      });
+      agentControl.count++;
+      agentControl.lastActiveAt = endedAtMs;
+      refreshAgentControl();
+      renderAgentTimeline();
+    };
+    const startAgentToolActivity = (request) => {
+      const startedAtMs = Date.now();
+      let ended = false;
+      // The handle exists before any display work, so a display failure cannot strand inFlight.
+      const activity = {
+        end(response, inputAuthorized) {
+          if (ended) return;
+          ended = true;
+          agentControl.inFlight = Math.max(0, agentControl.inFlight - 1);
+          const outcome = SurfaceState.browserAgentActivityOutcome({ request, response, inputAuthorized, prior: agentControl.prior });
+          if (response?.status === 'observed') agentControl.prior = SurfaceState.browserAgentPriorReading(response.snapshot);
+          recordAgentToolActivity(request, outcome, startedAtMs);
+        },
+      };
+      agentControl.inFlight++;
+      try { refreshAgentControl(); } catch {}
+      return activity;
+    };
+    // One quiet Chat line per hold for each room whose run met this Card.
+    const noticeAgentHold = (clientThreadId) => {
+      const hold = agentControl.hold;
+      if (!hold || typeof clientThreadId !== 'string' || !clientThreadId || hold.noticed.has(clientThreadId)) return;
+      hold.noticed.add(clientThreadId);
+      try { state.codexBridge?.noteBrowserUserControl?.(clientThreadId, browserDisplayHost(browserState.uri)); } catch {}
+    };
+    // [일시중지]: the Stop revocation scoped to this Card; the Agent's next
+    // request is refused while 대표님 operates it. Authorized input is not recalled.
+    const pauseAgentControl = () => {
+      if (agentControl.hold) return;
+      const threads = revokeBrowserToolCard(card.id);
+      agentProjection.invalidate();
+      agentControl.hold = { since: Date.now(), noticed: new Set() };
+      for (const clientThreadId of threads) noticeAgentHold(clientThreadId);
+      refreshAgentControl();
+    };
+    // Ending a hold grants nothing; only the menu's explicit '조작 허용' does.
+    const endAgentHold = () => {
+      if (!agentControl.hold) return false;
+      agentControl.hold = null;
+      agentControl.lastActiveAt = Date.now();
+      refreshAgentControl();
+      return true;
+    };
+    const handBackAgentControl = () => {
+      if (!endAgentHold()) return;
+      showBrowserMenu(menuButton, { regrant: true });
+    };
+    const agentUserHold = (request) => {
+      if (!agentControl.hold) return false;
+      noticeAgentHold(request?.clientThreadId);
+      if (request?.kind === 'observe' || request?.kind === 'act') recordAgentToolActivity(request, 'refused', Date.now());
+      return true;
+    };
+    const disposeAgentControl = () => {
+      if (agentControl.timer) window.clearTimeout(agentControl.timer);
+      agentControl.timer = 0;
+      closeAgentTimeline();
+    };
     const browserToolBinding = () => {
       if (!card.isConnected || !xulBrowser?.isConnected || !xulBrowser?.browsingContext?.currentWindowGlobal) {
         throw new Error('Selected Browser Card is unavailable');
@@ -14133,6 +14724,12 @@
       toolObserve: browserToolObserve,
       toolAct: browserToolAct,
       toolPrepareAgentProjection: agentProjection.prepare,
+      toolActivity: startAgentToolActivity,
+      toolUserHold: agentUserHold,
+      agentControlState: () => ({ mode: card.dataset.egdAgentControl || 'hidden', held: !!agentControl.hold,
+        inFlight: agentControl.inFlight, count: agentControl.count }),
+      agentPause: pauseAgentControl,
+      agentHandBack: handBackAgentControl,
     };
     const presentation = createBrowserPresentationCache({ card, browser: xulBrowser,
       query: () => browserAgentActorRequest('presentationMetrics'),
@@ -14287,6 +14884,7 @@
     const cleanupCard = () => {
       try { unregisterBrowserAuthorizer?.(); } catch {}
       agentProjection.dispose();
+      disposeAgentControl();
       unregisterBrowserAuthorizer = null;
       presentation.dispose();
       delete card._browserPresentation;

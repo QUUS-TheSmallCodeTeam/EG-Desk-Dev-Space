@@ -19,6 +19,7 @@ import { publicError } from '../helper/codex-chat-values.mjs';
 import { publicModelRows } from '../helper/codex-model-catalog.mjs';
 import { gateMatchesEvent } from '../helper/egdesk-await-router.mjs';
 import { publicBrowserLocation } from '../helper/egdesk-event-bus.mjs';
+import { composeAwaitResume } from '../helper/egdesk-await-resume.mjs';
 
 // Exercise the actual production runtime-config body, without executing the
 // Firefox overlay bootstrap, DOM handlers, bridge requests, or runtime code.
@@ -1830,11 +1831,12 @@ function browserMenuHarness() {
     return { showBrowserMenu, closeBrowserMenu, get panel() { return browserMenuPanel; } };`,
     ['menuButton', 'card', 'document', 'window', 'el', 'browserState', 'resolveFloatingMenuPlacement',
       'spawnBrowserCard', 'copyTextToClipboard', 'navigateBrowser', 'stopBrowser', 'reloadBrowser',
-      'isCardFullscreen', 'toggleCardFullscreen', 'effects']);
+      'isCardFullscreen', 'toggleCardFullscreen', 'effects', 'endAgentHold']);
+  const holdEnds = [];
   const menu = build(menuButton, card, document, window, el, browserState, () => ({ left: 30, top: 40 }),
     () => { effects.push('duplicate'); return nextCard; }, () => { effects.push('copy'); outside.focus(); },
     url => effects.push(['navigate', url]), () => effects.push('stop'), () => effects.push('reload'),
-    () => false, () => effects.push('maximize'), effects);
+    () => false, () => effects.push('maximize'), effects, () => { holdEnds.push(effects.length); return false; });
   const triggerBody = surfaceSource.match(/    const menuButton = el\('button', \{[\s\S]*?onclick: \(ev\) => \{([\s\S]*?)\n      \},\n    \}, deskIcon\('menu'\)\);/)?.[1];
   assert.ok(triggerBody, 'Browser menu trigger must remain directly testable');
   const clickTrigger = compileFunction(`return ev => {${triggerBody}\n      }`,
@@ -1862,7 +1864,7 @@ function browserMenuHarness() {
     return { event, panel, target };
   };
   return { menu, pressTrigger, document, focused, menuButton, card, address, dockBrowser, outside,
-    nextCard, nextAddress, effects, flushTimers, macPointerDownItem };
+    nextCard, nextAddress, effects, holdEnds, flushTimers, macPointerDownItem };
 }
 
 test('Browser more-menu keyboard entry, navigation, dismissal and focus return use the production handlers', () => {
@@ -5016,7 +5018,7 @@ test('Browser scroll/press are wired into the Card dispatch allow-list and recei
 test('다시 시도 sends the failed request words once more, only into an empty composer', () => {
   const body = surfaceSource.match(/      retryRun\(threadId, runId\) \{([\s\S]*?)\n      \},\n      async sendMessage/)?.[1];
   assert.ok(body, 'production retryRun must remain directly testable');
-  const retry = compileFunction(body, ['threadId', 'runId', 'state', 'getCodexThreadById', 'threadBusy', 'codexRuns', 'boardNotice', 'getCodexThreadDraft']);
+  const retry = compileFunction(body, ['threadId', 'runId', 'state', 'getCodexThreadById', 'threadBusy', 'codexRuns', 'boardNotice', 'getCodexThreadDraft', 'ChatState']);
   const thread = { id: 'room', messages: [{ id: 'u1', role: 'user', content: '첫 질문', requestId: 'q1' }, { id: 'u2', role: 'user', content: '다시 보낼 질문', requestId: 'q2' }] };
   const state = { codex: { activeThreadId: 'other', threadDrafts: {} } };
   const notices = [];
@@ -5025,7 +5027,7 @@ test('다시 시도 sends the failed request words once more, only into an empty
   const run = (draft = '', busy = false) => {
     state.codex.threadDrafts.room = draft;
     return retry.call(ctx, 'room', 'turn-2', state, () => thread, () => busy, () => [{ runId: 'turn-2', requestId: 'q2' }],
-      text => notices.push(text), (codex, id) => codex.threadDrafts[id] || '');
+      text => notices.push(text), (codex, id) => codex.threadDrafts[id] || '', Chat);
   };
   assert.equal(run('입력 중'), null);
   assert.deepEqual(calls, [], 'a draft in progress is never replaced');
@@ -5035,6 +5037,12 @@ test('다시 시도 sends the failed request words once more, only into an empty
   assert.equal(run(''), 'sent');
   assert.deepEqual(calls, [['draft', '다시 보낼 질문', 'room'], ['send']]);
   assert.equal(state.codex.activeThreadId, 'room');
+  // A plan step resumed in place is the bridge's turn, not 대표님's words to send again.
+  calls.length = 0;
+  thread.messages[1] = { id: 'u2', role: 'user', content: '<egdesk-await-resume>\n  <await_id>g/s</await_id>\n</egdesk-await-resume>', requestId: 'q2' };
+  assert.equal(run(''), null);
+  assert.deepEqual(calls, [], 'the resume message never lands in the composer');
+  assert.match(notices.at(-1), /계획 단계에서 이어진 실행은 다시 보내지 않습니다/);
 });
 
 // A small element fake: enough for el(), events and text, so the production
@@ -7731,7 +7739,7 @@ test('await task list: task states and waiting conditions read as Korean sentenc
 test('await task list: the summary counts running and not-yet-started tasks, says what finished, and hides with no graph', () => {
   const empty = Chat.createTaskBoard();
   assert.equal(Chat.taskBoardSummary(empty).visible, false);
-  assert.deepEqual(Chat.taskBoardView(empty), { visible: false, summary: '', counts: Chat.taskBoardSummary(empty), groups: [] });
+  assert.deepEqual(Chat.taskBoardView(empty), { visible: false, summary: '', counts: Chat.taskBoardSummary(empty), held: null, groups: [] });
   assert.equal(Chat.taskBoardView(undefined).visible, false, 'no board at all is the same as an empty one');
   const planOnly = Chat.taskBoardWithPlan(empty, { planId: 'plan-1', graphId: 'graph-p', title: '견적', tasks: [{ taskId: 's1', title: '자료' }] });
   assert.equal(Chat.taskBoardView(planOnly).visible, false, 'a plan alone shows nothing until its graph is read');
@@ -7926,7 +7934,7 @@ test('await task list: the bridge keeps the list from task frames, reads the Boa
   // Routing, the read after a reconnect, and the account reset.
   assert.match(surfaceSource, /        case 'task\.native':\n          readTaskGraphs\(\{ openOnly: true \}\);\n          return;/);
   assert.match(surfaceSource, /        case 'task\.plan':\n          taskPlanFrame\(event\.plan\);\n          return;/);
-  assert.match(surfaceSource, /connectionSource\.addEventListener\('ready', \(\) => \{ if \(epochScope\.valid\(streamEpoch\) && source === connectionSource\) readTaskGraphs\(\); \}\);/);
+  assert.match(surfaceSource, /connectionSource\.addEventListener\('ready', \(\) => \{ if \(epochScope\.valid\(streamEpoch\) && source === connectionSource\) \{ readTaskGraphs\(\); void loadTaskPlans\(\); \} \}\);/);
   assert.match(surfaceSource, /resetThreadConversations\(\);\n        \/\/ Task graphs belong to the account that made them\.\n        state\.codex\.taskBoard = ChatState\.createTaskBoard\(\);\n        state\.codex\.taskContinue = null;/);
 });
 
@@ -8024,4 +8032,1019 @@ test('await task list styles use approved tokens, stay small, and outrank the HU
   assert.match(rule('.egd-task-board-list'), /max-height: 220px;[\s\S]*overflow-y: auto;/, 'a long list scrolls in place instead of pushing the conversation');
   assert.ok(surfaceCss.indexOf('button.egd-task-board-summary {') > surfaceCss.indexOf('.egd-edge button {'),
     'the button rules come after the HUD reset with the same weight');
+});
+
+// CHAT-06 Await, finished: the plan approval card (helper contract: chat.event
+// 'plan.proposed', SSE task.plan, GET /tasks/plans[?planId=], POST
+// /tasks/plans/:planId/approve|reject {}), task approvals (POST /tasks/approval),
+// the hold after a bridge restart (POST /tasks/resume) and the resumed step line.
+const planScope = { graphId: 'graph-plan-1', requestId: 'request-plan-1', runId: 'run-7', parentTaskId: null, requestedBy: 'agent-plan' };
+const planRun = { conversationId: 'conv-1', runId: 'run-7', clientThreadId: 'room-1' };
+const planEventDetails = (overrides = {}) => ({ planId: 'plan-1', graphId: 'graph-plan-1', boardId: 'board-plan-1', title: '견적서 보내기',
+  status: 'proposed', callId: 'call-1', tasks: [
+    { taskId: 'collect', title: '자료 모으기', resumeIn: 'sameThread', dependsOn: [], gates: [] },
+    { taskId: 'login', title: '거래처 포털 로그인', resumeIn: 'sameThread', dependsOn: ['collect'], gates: [{ gateId: 'sso', kind: 'oauth' }] },
+    { taskId: 'send', title: '견적서 보내기', resumeIn: 'newThread', dependsOn: ['collect', 'login'], gates: [{ gateId: 'ok', kind: 'userAction' }] },
+  ], ...overrides });
+const planRow = (overrides = {}) => ({ planId: 'plan-1', title: '견적서 보내기', status: 'proposed', createdAt: '2026-10-24T09:00:00.000Z', decidedAt: null,
+  boardId: 'board-plan-1', scope: planScope, graphId: 'graph-plan-1', origin: { conversationId: 'conv-1', clientThreadId: 'room-1' }, tasks: [
+    { taskId: 'collect', title: '자료 모으기', resumeIn: 'sameThread', status: 'queued', dependsOn: [], gates: [] },
+    { taskId: 'login', title: '거래처 포털 로그인', resumeIn: 'sameThread', status: 'queued', dependsOn: ['collect'], gates: [
+      { gateId: 'task:collect', kind: 'task', taskId: 'collect', status: 'waiting' },
+      { gateId: 'sso', kind: 'oauth', origin: 'https://portal.example.com', pathPrefix: '/callback', status: 'waiting', timeoutMs: 1800000, expiresAt: null }] },
+    { taskId: 'send', title: '견적서 보내기', resumeIn: 'newThread', status: 'queued', dependsOn: ['collect', 'login'], gates: [
+      { gateId: 'ok', kind: 'userAction', label: '금액 확인', status: 'waiting' }] },
+  ], ...overrides });
+const planGraph = (overrides = {}) => ({ ...planScope, activated: true, cancelRequested: false, recoveryHold: false, tasks: [
+  { taskId: 'collect', status: 'running', gates: [] },
+  { taskId: 'login', status: 'waiting-on-dependency', gates: [{ gateId: 'task:collect', kind: 'task', taskId: 'collect', status: 'waiting' }] },
+  { taskId: 'send', status: 'waiting-on-dependency', gates: [] },
+], ...overrides });
+const planDecision = (planOverrides = {}, graphOverrides = {}) => {
+  const graph = planGraph(graphOverrides);
+  return { plan: planRow(planOverrides), graph,
+    native: { boardId: 'board-plan-1', scope: { ...planScope, graphId: graph.graphId }, fenced: false, attempts: [], approvals: [] }, board: { boardId: 'board-plan-1' } };
+};
+// A small element fake for the render functions, and the actual bridge closures with HTTP stubbed.
+const awaitNode = (tag, props = {}, ...children) => ({ tag, props, className: props.class, children: children.filter(child => child != null) });
+const awaitText = value => typeof value === 'string' ? value : (value?.children || []).map(awaitText).join('');
+const awaitAll = (value, test) => (value && typeof value === 'object' ? [...(test(value) ? [value] : []), ...value.children.flatMap(child => awaitAll(child, test))] : []);
+const awaitByTestId = (value, id) => awaitAll(value, item => item.props?.data?.testid === id);
+const awaitIcon = name => ({ tag: 'svg', icon: name, props: {}, children: [] });
+function awaitBridge() {
+  const start = surfaceSource.indexOf('    const taskStateReads = new Map();');
+  const end = surfaceSource.indexOf('    const handleEvent = (event) => {', start);
+  const methodsStart = surfaceSource.indexOf('      toggleTaskBoard() {');
+  const methodsEnd = surfaceSource.indexOf("      // '다시 시도' after the quiet retries ran out", methodsStart);
+  assert.ok(start > 0 && end > start && methodsStart > 0 && methodsEnd > methodsStart, 'the bridge await code stays directly testable');
+  const requests = [];
+  const replies = [];
+  const graphs = [];
+  const state = { codex: { taskBoard: Chat.createTaskBoard(), taskBoardOpen: false, taskContinue: null, taskApproval: null, taskResume: null,
+    planProposals: Chat.createPlanProposals() } };
+  const fetchJson = async (path, options = {}) => {
+    requests.push([path, options.method || 'GET', options.body ? JSON.parse(options.body) : null]);
+    const reply = replies.shift();
+    if (reply instanceof Error) throw reply;
+    return typeof reply === 'function' ? reply() : reply;
+  };
+  const api = compileFunction(`${surfaceSource.slice(start, end)}\nreturn { taskGraphFrame, taskPlanFrame, planProposalFrame, loadTaskPlans, readTaskGraphs, methods: {\n${surfaceSource.slice(methodsStart, methodsEnd)}\n} };`,
+    ['state', 'ChatState', 'fetchJson', 'browserWorkflow', 'emit'])(state, Chat, fetchJson, { graph: graph => graphs.push(graph?.graphId ?? null) }, () => {});
+  return { api, requests, replies, graphs, state, settle: () => new Promise(resolve => setTimeout(resolve, 0)) };
+}
+const refusal = (status, code) => Object.assign(new Error('Task request could not be completed'), { status, code });
+
+test('await plan card: a proposed plan keeps one card in its conversation, placed under the answer that proposed it', () => {
+  let store = Chat.planProposalsWithEvent(undefined, planRun, planEventDetails());
+  let entry = Chat.planProposalEntry(store, 'plan-1');
+  assert.deepEqual([entry.status, entry.conversationId, entry.clientThreadId, entry.runId, entry.boardId, entry.graphId, entry.title],
+    ['proposed', 'conv-1', 'room-1', 'run-7', 'board-plan-1', 'graph-plan-1', '견적서 보내기']);
+  assert.deepEqual(entry.steps.map(step => [step.taskId, step.dependsOn, step.gates.map(gate => gate.kind), step.resumeIn]),
+    [['collect', [], [], 'sameThread'], ['login', ['collect'], ['oauth'], 'sameThread'], ['send', ['collect', 'login'], ['userAction'], 'newThread']]);
+  store = Chat.planProposalsWithPlan(store, planRow());
+  entry = Chat.planProposalEntry(store, 'plan-1');
+  assert.deepEqual(entry.steps[1].gates, [{ gateId: 'sso', kind: 'oauth', origin: 'https://portal.example.com', pathPrefix: '/callback', timeoutMs: 1800000, expiresAt: null }],
+    'the plan frame names each wait; an upstream step stays in dependsOn');
+  assert.deepEqual([entry.scope, entry.runId, entry.instructions, entry.detail], [planScope, 'run-7', null, 'idle'], 'the list shape carries no instructions');
+  assert.equal(Chat.planProposalEntry(Chat.planProposalsWithEvent(store, planRun, planEventDetails()), 'plan-1').steps[1].gates[0].origin,
+    'https://portal.example.com', 'a later event does not replace the fuller steps');
+  store = Chat.planProposalsWithPlan(store, planRow({ status: 'approved' }));
+  assert.equal(Chat.planProposalEntry(store, 'plan-1').status, 'approved');
+  assert.equal(Chat.planProposalEntry(Chat.planProposalsWithEvent(store, planRun, planEventDetails()), 'plan-1').status, 'approved', 'a decided plan never waits again');
+  assert.equal(Chat.planProposalEntry(Chat.planProposalsWithPlan(store, planRow({ status: 'proposed' })), 'plan-1').status, 'approved');
+  assert.equal(Chat.planProposalEntry(Chat.planProposalsWithPlan(store, planRow({ status: 'completed' })), 'plan-1').status, 'completed');
+  for (const bad of [null, {}, { planId: '../x', tasks: [] }, { planId: 'plan-1', tasks: 'x' }]) {
+    assert.equal(Chat.planProposalsWithPlan(store, bad), store, 'a malformed plan changes nothing');
+  }
+  assert.equal(Chat.planProposalsWithEvent(store, { conversationId: 'conv-1' }, planEventDetails()), store, 'an event without its run changes nothing');
+
+  const listed = Chat.planProposalEntry(Chat.planProposalsWithPlan(undefined, planRow()), 'plan-1');
+  assert.deepEqual([listed.conversationId, listed.clientThreadId, listed.runId], ['conv-1', 'room-1', 'run-7'],
+    'a plan seen only in the list is placed by its origin and the run in its scope');
+  const both = Chat.planProposalsWithPlan(Chat.planProposalsWithPlan(undefined, planRow()), planRow({ planId: 'plan-2', graphId: 'graph-plan-2',
+    origin: { conversationId: 'conv-2', clientThreadId: 'room-2' }, scope: { ...planScope, graphId: 'graph-plan-2', runId: 'run-9' } }));
+  assert.deepEqual(Chat.planProposalsForThread(both, { id: 'room-1', conversationId: 'conv-1' }).map(row => row.planId), ['plan-1']);
+  assert.deepEqual(Chat.planProposalsForThread(both, { id: 'room-2' }).map(row => row.planId), ['plan-2'], 'a room not bound yet matches by its binding');
+  assert.deepEqual(Chat.planProposalsForThread(both, null), []);
+
+  const messages = [
+    { id: 'm1', role: 'user', runId: 'run-7', content: '견적 보내 줘' },
+    { id: 'm2', role: 'assistant', runId: 'run-7', content: '계획을 세웠습니다.' },
+    { id: 'm3', role: 'assistant', runId: 'run-7', content: '승인해 주세요.' },
+    { id: 'm4', role: 'assistant', runId: 'run-8', status: 'streaming', content: '' },
+  ];
+  const plans = Chat.planProposalsForThread(store, { id: 'room-1', conversationId: 'conv-1' });
+  let placement = Chat.planProposalPlacement(plans, messages);
+  assert.deepEqual([[...placement.byMessageId.keys()], placement.trailing], [['m3'], []], 'after the last answer of the proposing run');
+  placement = Chat.planProposalPlacement([{ ...plans[0], runId: 'run-8', status: 'proposed' }], messages);
+  assert.deepEqual([placement.byMessageId.size, placement.trailing.length], [0, 1], 'a waiting plan whose answer is not shown yet goes after the conversation');
+  placement = Chat.planProposalPlacement([{ ...plans[0], runId: 'run-8', status: 'rejected' }], messages);
+  assert.deepEqual([placement.byMessageId.size, placement.trailing.length], [0, 0], 'a decided plan with no answer to sit under is not shown');
+
+  let many = Chat.planProposalsWithPlan(undefined, planRow({ planId: 'plan-done', status: 'rejected' }));
+  for (let index = 0; index < Chat.PLAN_PROPOSAL_LIMIT; index++) many = Chat.planProposalsWithPlan(many, planRow({ planId: `plan-${index}x` }));
+  assert.equal(many.plans.length, Chat.PLAN_PROPOSAL_LIMIT);
+  assert.equal(Chat.planProposalEntry(many, 'plan-done'), null, 'a decided plan leaves before one still waiting');
+  assert.deepEqual(['proposed', 'rejected', 'missing', 'approved', 'completed', 'cancelled', undefined].map(status => Chat.planOnTaskBoard({ status })),
+    [false, false, false, true, true, true, true], 'a plan joins the task list once approved');
+  assert.equal(Chat.taskBoardSummary(Chat.taskBoardWithGraph(Chat.createTaskBoard(), awaitGraph({ activated: false }))).visible, false,
+    'a graph nobody started is not a task to wait on');
+  let full = Chat.taskBoardWithGraph(Chat.createTaskBoard(), awaitGraph({ graphId: 'graph-old' }));
+  full = Chat.taskBoardWithGraph(full, awaitGraph({ graphId: 'graph-unapproved', activated: false }));
+  for (let index = 0; index < Chat.TASK_BOARD_LIMIT - 1; index++) full = Chat.taskBoardWithGraph(full, awaitGraph({ graphId: `graph-${index}` }));
+  assert.deepEqual([Chat.taskBoardEntry(full, 'graph-unapproved'), !!Chat.taskBoardEntry(full, 'graph-old')], [null, true],
+    'over the limit a plan nobody approved leaves before running work');
+});
+
+test('await plan card: steps read as Korean sentences in order with what each waits for, and instructions fold per step', () => {
+  let store = Chat.planProposalsWithPlan(undefined, planRow());
+  let view = Chat.planProposalView(Chat.planProposalEntry(store, 'plan-1'), { now: awaitNow });
+  assert.deepEqual([view.title, view.statusText, view.decidable, view.sending, view.note, view.showTaskList], ['견적서 보내기', '승인 대기', true, false, null, false]);
+  assert.deepEqual(view.steps.map(step => [step.number, step.title, step.after, step.waits, step.where, step.open, step.instructions]), [
+    [1, '자료 모으기', null, [], null, false, null],
+    [2, '거래처 포털 로그인', '먼저 끝낼 단계 · 1. 자료 모으기', ['로그인 완료 대기 · portal.example.com · 최대 30분'], null, false, null],
+    [3, '견적서 보내기', '먼저 끝낼 단계 · 1. 자료 모으기, 2. 거래처 포털 로그인', ['확인 대기 · 금액 확인'], '새 대화에서 진행', false, null],
+  ]);
+  const fromEvent = Chat.planProposalView(Chat.planProposalEntry(Chat.planProposalsWithEvent(undefined, planRun, planEventDetails()), 'plan-1'));
+  assert.deepEqual(fromEvent.steps.map(step => step.waits), [[], ['로그인 완료 대기'], ['확인 대기']], 'from the event alone a wait is named by its kind');
+
+  store = Chat.planProposalsWithStep(store, 'plan-1', 'login');
+  view = Chat.planProposalView(Chat.planProposalEntry(store, 'plan-1'));
+  assert.deepEqual([view.steps[1].open, view.steps[1].instructions], [true, { state: 'loading', text: '지침을 불러오는 중…' }]);
+  assert.equal(view.steps[0].instructions, null, 'other steps stay folded');
+  assert.deepEqual(Chat.planProposalView(Chat.planProposalEntry(Chat.planProposalsWithDetail(store, 'plan-1', 'error'), 'plan-1')).steps[1].instructions,
+    { state: 'error', text: '지침을 불러오지 못했습니다.' });
+  const bell = String.fromCharCode(7);
+  store = Chat.planProposalsWithPlan(store, planRow({ tasks: planRow().tasks.map(task => ({ ...task,
+    instructions: task.taskId === 'login' ? `포털에 로그인한 뒤\r\n견적 메뉴를 연다${bell}` : task.taskId === 'send' ? null : '자료를 모은다' })) }));
+  assert.equal(Chat.planProposalEntry(store, 'plan-1').detail, 'loaded');
+  view = Chat.planProposalView(Chat.planProposalEntry(Chat.planProposalsWithStep(store, 'plan-1', 'send'), 'plan-1'));
+  assert.deepEqual(view.steps[1].instructions, { state: 'loaded', text: '포털에 로그인한 뒤\n견적 메뉴를 연다' }, 'lines stay, control characters go');
+  assert.deepEqual(view.steps[2].instructions, { state: 'empty', text: '이 단계의 지침을 볼 수 없습니다.' });
+  assert.equal(Chat.planProposalView(Chat.planProposalEntry(Chat.planProposalsWithStep(store, 'plan-1', 'login'), 'plan-1')).steps[1].open, false, 'a second press folds it');
+
+  const decided = status => Chat.planProposalView(Chat.planProposalEntry(Chat.planProposalsWithPlan(store, planRow({ status })), 'plan-1'));
+  assert.deepEqual(['approved', 'rejected', 'cancelled', 'completed'].map(status => {
+    const shown = decided(status);
+    return [shown.statusText, shown.note, shown.steps.length, shown.decidable, shown.showTaskList];
+  }), [
+    ['승인됨', '단계가 조건대로 저절로 진행됩니다. 진행 상황은 작업 목록에서 볼 수 있습니다.', 0, false, true],
+    ['거절됨', '거절한 계획은 실행되지 않습니다.', 0, false, false],
+    ['취소됨', '취소되어 더 진행하지 않습니다.', 0, false, true],
+    ['완료', '모든 단계가 끝났습니다.', 0, false, true],
+  ]);
+  const missing = Chat.planProposalView(Chat.planProposalEntry(Chat.planProposalsWithMissing(store, 'plan-1'), 'plan-1'));
+  assert.deepEqual([missing.statusText, missing.note, missing.decidable], ['찾을 수 없음', '이 계획을 더 이상 찾을 수 없습니다.', false]);
+  const shown = JSON.stringify(Chat.planProposalView(Chat.planProposalEntry(Chat.planProposalsWithStep(store, 'plan-1', 'collect'), 'plan-1')),
+    (key, value) => ['planId', 'taskId', 'status', 'state'].includes(key) ? undefined : value);
+  for (const internal of ['plan-1', 'graph-plan', 'board-plan', 'collect', 'sso', 'oauth', 'userAction', 'newThread', '/callback', 'run-7']) {
+    assert.equal(shown.includes(internal), false, `${internal} never reaches the card text`);
+  }
+});
+
+test('await plan card: approving takes one confirm, rejecting sends at once, one decision at a time, and a refusal says why', () => {
+  const store = Chat.planProposalsWithPlan(undefined, planRow());
+  const entry = decision => Chat.planProposalEntry(Chat.planProposalsWithDecision(store, 'plan-1', decision), 'plan-1');
+  assert.equal(Chat.buildPlanDecisionRequest(entry(null), 'approve'), null, 'no approval without its confirm');
+  assert.deepEqual(Chat.buildPlanDecisionRequest(entry({ action: 'approve', phase: 'confirm' }), 'approve'), { path: '/tasks/plans/plan-1/approve', body: {} });
+  assert.deepEqual(Chat.buildPlanDecisionRequest(entry(null), 'reject'), { path: '/tasks/plans/plan-1/reject', body: {} });
+  assert.equal(Chat.buildPlanDecisionRequest(entry({ action: 'approve', phase: 'error', error: 'x' }), 'approve'), null, 'after a refusal it asks again');
+  for (const action of ['approve', 'reject']) assert.equal(Chat.buildPlanDecisionRequest(entry({ action, phase: 'sending' }), action), null, 'nothing is sent twice');
+  for (const status of ['approved', 'rejected', 'cancelled', 'completed', 'missing']) {
+    const changed = status === 'missing' ? Chat.planProposalsWithMissing(store, 'plan-1') : Chat.planProposalsWithPlan(store, planRow({ status }));
+    const decided = Chat.planProposalEntry(Chat.planProposalsWithDecision(changed, 'plan-1', { action: 'approve', phase: 'confirm' }), 'plan-1');
+    assert.equal(Chat.buildPlanDecisionRequest(decided, 'approve'), null, `a ${status} plan is not decided again`);
+    assert.equal(Chat.buildPlanDecisionRequest(decided, 'reject'), null);
+  }
+  assert.equal(Chat.buildPlanDecisionRequest(entry({ action: 'approve', phase: 'confirm' }), 'delete'), null);
+  assert.equal(Chat.buildPlanDecisionRequest({ ...entry({ action: 'approve', phase: 'confirm' }), planId: 'plan-1/../x' }, 'approve'), null);
+  const cases = [
+    [refusal(404, 'PLAN_NOT_FOUND'), 'approve', '이 계획을 찾을 수 없습니다. 이미 정리되었거나 다른 계정의 계획입니다.'],
+    [refusal(409, 'PLAN_STALE'), 'approve', '이미 거절된 계획이라 승인할 수 없습니다.'],
+    [refusal(409, 'PLAN_STALE'), 'reject', '이미 승인된 계획이라 거절할 수 없습니다.'],
+    [refusal(409, 'TASK_FENCED'), 'approve', '취소된 계획이라 승인할 수 없습니다.'],
+    [refusal(409, 'TASK_FENCED'), 'reject', '이미 취소된 계획입니다.'],
+    [refusal(404, 'TASK_ROUTE_NOT_FOUND'), 'approve', '지금 연결된 EG-Desk는 계획 승인을 지원하지 않습니다.'],
+    [refusal(401, 'LOGIN_REQUIRED'), 'reject', '로그인한 뒤 거절할 수 있습니다.'],
+    [refusal(503, 'BRIDGE_OFFLINE'), 'approve', 'AI 엔진이 아직 준비되지 않아 승인하지 못했습니다. 잠시 뒤 다시 시도해 주세요.'],
+    [refusal(409, 'E_TASK_SCOPE'), 'approve', '계획 상태가 바뀌어 승인하지 못했습니다. 다시 확인한 뒤 시도해 주세요.'],
+    [new TypeError('NetworkError when attempting to fetch resource.'), 'reject', 'EG-Desk에 연결하지 못해 거절하지 못했습니다. 연결을 확인한 뒤 다시 시도해 주세요.'],
+    [refusal(500, 'PLAN_ERROR'), 'approve', '승인하지 못했습니다. 잠시 뒤 다시 시도해 주세요.'],
+  ];
+  for (const [error, action, expected] of cases) assert.equal(Chat.planDecisionErrorText(error, action), expected);
+});
+
+test('await plan card: the bridge places the card, approves only after the confirm, rejects, and reads instructions only when opened', async () => {
+  const { api, requests, replies, graphs, state, settle } = awaitBridge();
+  const card = planId => Chat.planProposalView(Chat.planProposalEntry(state.codex.planProposals, planId));
+
+  // The proposal: the plan frame, its graph submitted but not started, then the chat event.
+  api.taskPlanFrame(planRow());
+  replies.push(planDecision({}, { activated: false, tasks: planGraph().tasks.map(task => ({ ...task, status: 'queued' })) }));
+  api.taskGraphFrame(planGraph({ activated: false, tasks: planGraph().tasks.map(task => ({ ...task, status: 'queued' })) }));
+  api.planProposalFrame(planRun, planEventDetails());
+  await settle();
+  assert.equal(card('plan-1').statusText, '승인 대기');
+  assert.equal(Chat.taskBoardView(state.codex.taskBoard).visible, false, 'a plan not approved yet is not in the task list');
+  assert.deepEqual(requests.map(([path, method]) => [path, method]), [['/tasks/state?graphId=graph-plan-1', 'GET']], 'a proposal sends nothing');
+  requests.length = 0;
+
+  await api.methods.decidePlan('plan-1', 'approve');
+  assert.equal(requests.length, 0, 'approving without the confirm sends nothing');
+  api.methods.askPlanApprove('plan-1');
+  assert.deepEqual(Chat.planProposalEntry(state.codex.planProposals, 'plan-1').decision, { action: 'approve', phase: 'confirm', error: null });
+  api.methods.cancelPlanDecision('plan-1');
+  assert.equal(Chat.planProposalEntry(state.codex.planProposals, 'plan-1').decision, null);
+  api.methods.askPlanApprove('plan-1');
+  let release;
+  replies.push(() => new Promise(resolve => { release = () => resolve(planDecision({ status: 'approved', decidedAt: '2026-10-24T09:05:00.000Z' })); }));
+  const approving = api.methods.decidePlan('plan-1', 'approve');
+  assert.equal(card('plan-1').sending, true);
+  await api.methods.decidePlan('plan-1', 'approve');
+  await api.methods.decidePlan('plan-1', 'reject');
+  api.methods.askPlanApprove('plan-1');
+  api.methods.cancelPlanDecision('plan-1');
+  assert.equal(card('plan-1').sending, true, 'a confirm or cancel while sending changes nothing');
+  assert.deepEqual(requests, [['/tasks/plans/plan-1/approve', 'POST', {}]], 'one request with the empty body the route accepts');
+  release();
+  await approving;
+  assert.deepEqual([card('plan-1').statusText, card('plan-1').decision], ['승인됨', null]);
+  const list = Chat.taskBoardView(state.codex.taskBoard);
+  assert.equal(list.summary, '진행 1건 · 대기 2건', 'once approved the steps carry on in the task list');
+  assert.deepEqual([list.groups[0].title, list.groups[0].tasks.map(task => task.name)], ['견적서 보내기', ['자료 모으기', '거래처 포털 로그인', '견적서 보내기']]);
+  assert.equal(Chat.taskBoardEntry(state.codex.taskBoard, 'graph-plan-1').boardId, 'board-plan-1');
+  assert.ok(graphs.includes('graph-plan-1'), 'the sign-in gate list hears the started graph');
+  api.methods.openTaskBoard();
+  assert.equal(state.codex.taskBoardOpen, true);
+  requests.length = 0;
+
+  // Instructions: one read for the whole plan, on the first open only.
+  const plan2 = planRow({ planId: 'plan-2', graphId: 'graph-plan-2', scope: { ...planScope, graphId: 'graph-plan-2', runId: 'run-8' } });
+  api.planProposalFrame({ ...planRun, runId: 'run-8' }, planEventDetails({ planId: 'plan-2', graphId: 'graph-plan-2' }));
+  replies.push({ plan: { ...plan2, tasks: plan2.tasks.map(task => ({ ...task, instructions: `${task.title} 진행` })) } });
+  api.methods.togglePlanStep('plan-2', 'login');
+  api.methods.togglePlanStep('plan-2', 'send');
+  await settle();
+  assert.deepEqual(requests, [['/tasks/plans?planId=plan-2', 'GET', null]]);
+  assert.deepEqual(card('plan-2').steps.map(step => step.instructions?.text ?? null), [null, '거래처 포털 로그인 진행', '견적서 보내기 진행']);
+  api.methods.togglePlanStep('plan-2', 'collect');
+  await settle();
+  assert.equal(requests.length, 1, 'instructions once read are not read again');
+  requests.length = 0;
+  api.planProposalFrame({ ...planRun, runId: 'run-9' }, planEventDetails({ planId: 'plan-3', graphId: 'graph-plan-3' }));
+  replies.push(refusal(500, 'PLAN_ERROR'));
+  api.methods.togglePlanStep('plan-3', 'collect');
+  await settle();
+  assert.equal(card('plan-3').steps[0].instructions.state, 'error');
+  replies.push({ plan: planRow({ planId: 'plan-3', graphId: 'graph-plan-3', tasks: planRow().tasks.map(task => ({ ...task, instructions: '다시 읽은 지침' })) }) });
+  api.methods.retryPlanDetail('plan-3');
+  await settle();
+  assert.equal(card('plan-3').steps[0].instructions.text, '다시 읽은 지침');
+  requests.length = 0;
+
+  // Reject goes at once; a refusal says why and reads the plan again.
+  replies.push(refusal(409, 'PLAN_STALE'), { plan: planRow({ planId: 'plan-2', graphId: 'graph-plan-2', status: 'approved' }) });
+  await api.methods.decidePlan('plan-2', 'reject');
+  await settle();
+  assert.deepEqual(requests, [['/tasks/plans/plan-2/reject', 'POST', {}], ['/tasks/plans?planId=plan-2', 'GET', null]]);
+  assert.deepEqual([card('plan-2').statusText, card('plan-2').decision.error], ['승인됨', '이미 승인된 계획이라 거절할 수 없습니다.']);
+  requests.length = 0;
+  replies.push(refusal(404, 'PLAN_NOT_FOUND'));
+  await api.methods.decidePlan('plan-3', 'reject');
+  assert.deepEqual([card('plan-3').statusText, card('plan-3').decision.error], ['찾을 수 없음', '이 계획을 찾을 수 없습니다. 이미 정리되었거나 다른 계정의 계획입니다.']);
+  requests.length = 0;
+  api.planProposalFrame({ ...planRun, runId: 'run-10' }, planEventDetails({ planId: 'plan-4', graphId: 'graph-plan-4' }));
+  replies.push(planDecision({ planId: 'plan-4', graphId: 'graph-plan-4', status: 'rejected', scope: { ...planScope, graphId: 'graph-plan-4' } },
+    { graphId: 'graph-plan-4', activated: false, cancelRequested: true, tasks: planGraph().tasks.map(task => ({ ...task, status: 'cancelled' })) }));
+  await api.methods.decidePlan('plan-4', 'reject');
+  assert.deepEqual(requests, [['/tasks/plans/plan-4/reject', 'POST', {}]]);
+  assert.equal(card('plan-4').statusText, '거절됨');
+  assert.equal(Chat.taskBoardEntry(state.codex.taskBoard, 'graph-plan-4'), null, 'a rejected plan never joins the task list');
+  requests.length = 0;
+
+  // After a reconnect: waiting plans get their cards back; a running approved plan rejoins the list.
+  state.codex.planProposals = Chat.createPlanProposals();
+  state.codex.taskBoard = Chat.createTaskBoard();
+  const running = { ...planScope, graphId: 'graph-run' };
+  replies.push({ plans: [planRow({ planId: 'plan-new' }), planRow({ planId: 'plan-run', status: 'approved', graphId: 'graph-run', scope: running }),
+    planRow({ planId: 'plan-old', status: 'completed', graphId: 'graph-old', scope: { ...planScope, graphId: 'graph-old' } })] },
+  { graph: planGraph({ graphId: 'graph-run' }), native: { boardId: 'board-plan-1', scope: running, approvals: [] } });
+  await api.loadTaskPlans();
+  await settle();
+  assert.deepEqual(requests.map(([path]) => path), ['/tasks/plans', '/tasks/state?graphId=graph-run']);
+  assert.deepEqual(state.codex.planProposals.plans.map(row => [row.planId, row.status]), [['plan-old', 'completed'], ['plan-run', 'approved'], ['plan-new', 'proposed']],
+    'the list is newest first, so it is taken oldest first');
+  assert.deepEqual(state.codex.taskBoard.graphs.map(row => row.graphId), ['graph-run'], 'only a running approved plan rejoins the task list');
+  replies.push(refusal(401, 'LOGIN_REQUIRED'));
+  await api.loadTaskPlans();
+  assert.equal(state.codex.planProposals.plans.length, 3, 'a refused list read changes nothing');
+
+  assert.match(surfaceSource, /            \/\/ CHAT-06 Await: an Agent proposed a plan; its approval card goes under this run's answer\.\n            if \(run && event\.event === 'plan\.proposed'\) planProposalFrame\(run, event\.details\);\n            if \(run\) \{ syncProtocolRun\(run\); emit\(\); \}/);
+  assert.match(surfaceSource, /state\.codex\.taskResume = null;\n        state\.codex\.planProposals = ChatState\.createPlanProposals\(\);/, 'plans belong to the account that saw them');
+});
+
+test('await plan card: the card lists the steps, asks once before approving, and hands over to the task list', () => {
+  const body = surfaceSource.match(/  function renderChatPlanCard\(entry, actions, folderName\) \{([\s\S]*?)\n  \}/)?.[1];
+  assert.ok(body, 'the plan card renderer stays directly testable');
+  const calls = [];
+  const actions = new Proxy({}, { get: (_target, name) => (...args) => calls.push([name, ...args]) });
+  const render = compileFunction(body, ['entry', 'actions', 'folderName', 'ChatState', 'el']);
+  const draw = entry => render(entry, actions, () => null, Chat, awaitNode);
+  let store = Chat.planProposalsWithPlan(undefined, planRow());
+  const entry = () => Chat.planProposalEntry(store, 'plan-1');
+
+  const card = draw(entry());
+  assert.deepEqual([card.props.role, card.props['aria-label'], card.props.data.status], ['group', '계획 제안 · 견적서 보내기', 'proposed']);
+  assert.equal(awaitText(awaitByTestId(card, 'chat-plan-status')[0]), '승인 대기');
+  assert.deepEqual(awaitByTestId(card, 'chat-plan-step').map(awaitText), [
+    '1자료 모으기지침 보기',
+    '2거래처 포털 로그인지침 보기먼저 끝낼 단계 · 1. 자료 모으기로그인 완료 대기 · portal.example.com · 최대 30분',
+    '3견적서 보내기지침 보기먼저 끝낼 단계 · 1. 자료 모으기, 2. 거래처 포털 로그인확인 대기 · 금액 확인새 대화에서 진행',
+  ]);
+  const [approve] = awaitByTestId(card, 'chat-plan-approve');
+  const [reject] = awaitByTestId(card, 'chat-plan-reject');
+  assert.deepEqual([awaitText(approve), awaitText(reject)], ['승인하고 시작', '거절']);
+  approve.props.onclick();
+  assert.deepEqual(calls.pop(), ['askPlanApprove', 'plan-1'], 'the first press only asks');
+  reject.props.onclick();
+  assert.deepEqual(calls.pop(), ['decidePlan', 'plan-1', 'reject'], 'reject sends at once');
+  const toggle = awaitByTestId(card, 'chat-plan-step-toggle')[1];
+  assert.deepEqual([toggle.props['aria-expanded'], toggle.props['aria-label']], ['false', '2단계 거래처 포털 로그인 지침 보기']);
+  toggle.props.onclick();
+  assert.deepEqual(calls.pop(), ['togglePlanStep', 'plan-1', 'login']);
+
+  store = Chat.planProposalsWithDecision(store, 'plan-1', { action: 'approve', phase: 'confirm' });
+  const confirming = draw(entry());
+  const [confirm] = awaitByTestId(confirming, 'chat-plan-confirm');
+  assert.equal(awaitText(confirm.children[0]), '승인하면 단계가 조건대로 저절로 진행됩니다.');
+  assert.equal(awaitByTestId(confirming, 'chat-plan-actions').length, 0, 'the confirm takes the buttons\' place');
+  const [go] = awaitByTestId(confirming, 'chat-plan-confirm-go');
+  const [cancel] = awaitByTestId(confirming, 'chat-plan-confirm-cancel');
+  assert.deepEqual([awaitText(go), awaitText(cancel)], ['승인', '취소']);
+  assert.equal(go.props.data.focusKey, approve.props.data.focusKey, 'the keyboard lands on 승인');
+  go.props.onclick();
+  assert.deepEqual(calls.pop(), ['decidePlan', 'plan-1', 'approve']);
+  cancel.props.onclick();
+  assert.deepEqual(calls.pop(), ['cancelPlanDecision', 'plan-1']);
+
+  store = Chat.planProposalsWithDecision(store, 'plan-1', { action: 'approve', phase: 'sending' });
+  const sending = draw(entry());
+  const [busy] = awaitByTestId(sending, 'chat-plan-confirm-go');
+  assert.deepEqual([awaitText(busy), busy.props['aria-disabled'], awaitByTestId(sending, 'chat-plan-confirm-cancel').length], ['승인하는 중…', 'true', 0]);
+  busy.props.onclick();
+  assert.equal(calls.length, 0, 'nothing is sent twice');
+  store = Chat.planProposalsWithDecision(store, 'plan-1', { action: 'reject', phase: 'sending' });
+  const rejecting = awaitByTestId(draw(entry()), 'chat-plan-actions')[0].children;
+  assert.deepEqual(rejecting.map(button => [awaitText(button), button.props['aria-disabled']]), [['승인하고 시작', 'true'], ['거절하는 중…', 'true']]);
+  for (const button of rejecting) button.props.onclick();
+  assert.equal(calls.length, 0, 'both stay quiet while a decision is on its way');
+
+  store = Chat.planProposalsWithDecision(store, 'plan-1', { action: 'approve', phase: 'error', error: '이미 거절된 계획이라 승인할 수 없습니다.' });
+  const failed = draw(entry());
+  const [alert] = awaitByTestId(failed, 'chat-plan-error');
+  assert.deepEqual([alert.props.role, awaitText(alert)], ['alert', '이미 거절된 계획이라 승인할 수 없습니다.']);
+  assert.equal(awaitByTestId(failed, 'chat-plan-approve').length, 1, '승인하고 시작 is offered again');
+
+  store = Chat.planProposalsWithDecision(Chat.planProposalsWithStep(store, 'plan-1', 'login'), 'plan-1', null);
+  let open = draw(entry());
+  assert.deepEqual([awaitByTestId(open, 'chat-plan-step-toggle')[1].props['aria-expanded'], awaitText(awaitByTestId(open, 'chat-plan-step-toggle')[1])], ['true', '지침 접기']);
+  assert.deepEqual(awaitByTestId(open, 'chat-plan-instructions').map(item => [item.props.data.state, awaitText(item)]), [['loading', '지침을 불러오는 중…']]);
+  store = Chat.planProposalsWithDetail(store, 'plan-1', 'error');
+  open = draw(entry());
+  const [retry] = awaitByTestId(open, 'chat-plan-instructions-retry');
+  assert.equal(awaitText(retry), '다시 불러오기');
+  retry.props.onclick();
+  assert.deepEqual(calls.pop(), ['retryPlanDetail', 'plan-1']);
+
+  store = Chat.planProposalsWithPlan(store, planRow({ status: 'approved' }));
+  const approved = draw(entry());
+  assert.deepEqual([awaitText(awaitByTestId(approved, 'chat-plan-status')[0]), awaitByTestId(approved, 'chat-plan-step').length, awaitByTestId(approved, 'chat-plan-approve').length],
+    ['승인됨', 0, 0]);
+  assert.ok(awaitText(approved).includes('단계가 조건대로 저절로 진행됩니다.'));
+  const [toList] = awaitByTestId(approved, 'chat-plan-open-list');
+  assert.equal(awaitText(toList), '작업 목록 보기');
+  toList.props.onclick();
+  assert.deepEqual(calls.pop(), ['openTaskBoard']);
+  const rejected = draw(Chat.planProposalEntry(Chat.planProposalsWithPlan(undefined, planRow({ status: 'rejected' })), 'plan-1'));
+  assert.deepEqual([awaitText(awaitByTestId(rejected, 'chat-plan-status')[0]), awaitByTestId(rejected, 'chat-plan-open-list').length], ['거절됨', 0]);
+  assert.equal(draw(null), null);
+
+  const shown = awaitText(card) + awaitText(confirming) + awaitText(open);
+  for (const internal of ['plan-1', 'graph-plan', 'board-plan', 'collect', 'login', 'sso', 'oauth', 'userAction', 'newThread', 'proposed', 'run-7']) {
+    assert.equal(shown.includes(internal), false, `${internal} is not screen text`);
+  }
+  // Placement in the conversation: under each proposing answer, then any still-waiting plan at the end.
+  assert.match(surfaceSource, /            \}, avatar, messageStack\)\);\n            appendPlanCards\(planPlacement\.byMessageId\.get\(message\.id\)\);\n          \}\);\n          appendPlanCards\(planPlacement\.trailing\);/);
+});
+
+test('await task approval: 승인 and 거절 appear only for an approval the task asked for, send the exact request, and never decide by themselves', async () => {
+  const approvalGraph = (overrides = {}) => awaitGraph({ tasks: awaitGraph().tasks.map(task => task.taskId !== 'report' ? task
+    : { ...task, status: 'approval-required', approvalRequested: true, gates: [{ gateId: 'approval', kind: 'approval', status: 'waiting', requested: true }] }), ...overrides });
+  const pending = [{ approvalId: 'task-approval-1', taskId: 'report', status: 'pending' }];
+  const approvalState = (graph = approvalGraph(), approvals = pending) => { const read = awaitState(graph); return { ...read, native: { ...read.native, approvals } }; };
+  const entryOf = (...args) => Chat.taskBoardEntry(Chat.taskBoardWithState(Chat.createTaskBoard(), approvalState(...args)), 'graph-a');
+  assert.equal(Chat.taskApprovalId(entryOf(), 'report'), 'task-approval-1');
+  const body = Chat.buildTaskApprovalRequest(entryOf(), 'report', 'approved');
+  assert.deepEqual(body, { boardId: 'board-a', scope: awaitScope, taskId: 'report', approvalId: 'task-approval-1', decision: 'approved' });
+  assert.deepEqual(Object.keys(body), ['boardId', 'scope', 'taskId', 'approvalId', 'decision'], 'only the fields POST /tasks/approval accepts');
+  assert.equal(Chat.buildTaskApprovalRequest(entryOf(), 'report', 'rejected').decision, 'rejected');
+  assert.equal(Chat.buildTaskApprovalRequest(entryOf(), 'report', 'accept'), null, 'only approved or rejected');
+  const notAsked = approvalGraph({ tasks: approvalGraph().tasks.map(task => task.taskId === 'report' ? { ...task, approvalRequested: false } : task) });
+  for (const [label, entry] of [
+    ['no approval issued yet', entryOf(approvalGraph(), [])],
+    ['an approval already decided', entryOf(approvalGraph(), [{ ...pending[0], status: 'approved' }])],
+    ['an approval for another task', entryOf(approvalGraph(), [{ ...pending[0], taskId: 'wrap' }])],
+    ['the task has not asked yet', entryOf(notAsked)],
+    ['a cancelled graph', entryOf(approvalGraph({ cancelRequested: true }))],
+    ['a graph not started', entryOf(approvalGraph({ activated: false }))],
+  ]) assert.equal(Chat.buildTaskApprovalRequest(entry, 'report', 'approved'), null, label);
+  assert.equal(Chat.taskApprovalId(Chat.taskBoardEntry(Chat.taskBoardWithGraph(Chat.createTaskBoard(), approvalGraph()), 'graph-a'), 'report'), null,
+    'a frame alone never carries an approval ID');
+  const view = Chat.taskBoardView(Chat.taskBoardWithState(Chat.createTaskBoard(), approvalState()), { now: awaitNow,
+    approving: { graphId: 'graph-a', taskId: 'report', decision: 'rejected', phase: 'error', error: '취소된 작업이라 승인 여부를 정할 수 없습니다.' } });
+  assert.deepEqual(view.groups[0].tasks[2].conditions.map(condition => [condition.text, condition.approvable, condition.continuable, condition.error]),
+    [['승인 대기', true, false, '취소된 작업이라 승인 여부를 정할 수 없습니다.']]);
+  assert.equal(view.groups[0].tasks.flatMap(task => task.conditions).filter(condition => condition.approvable).length, 1, 'only the approval line');
+  for (const [error, expected] of [
+    [refusal(409, 'TASK_APPROVAL_STALE'), '이 승인 요청은 이미 처리되었거나 바뀌었습니다. 목록을 다시 확인했습니다.'],
+    [refusal(409, 'TASK_FENCED'), '취소된 작업이라 승인 여부를 정할 수 없습니다.'],
+    [refusal(404, 'TASK_NOT_FOUND'), '이 작업을 더 이상 찾을 수 없습니다.'],
+    [refusal(404, 'TASK_ROUTE_NOT_FOUND'), '지금 연결된 EG-Desk는 작업 승인을 지원하지 않습니다.'],
+    [refusal(401, 'LOGIN_REQUIRED'), '로그인한 뒤 승인할 수 있습니다.'],
+    [refusal(503, 'BRIDGE_OFFLINE'), 'AI 엔진이 아직 준비되지 않아 처리하지 못했습니다. 잠시 뒤 다시 시도해 주세요.'],
+    [refusal(409, 'E_TASK_SCOPE'), '작업 상태가 바뀌어 처리하지 못했습니다. 목록을 다시 확인한 뒤 시도해 주세요.'],
+    [new TypeError('NetworkError when attempting to fetch resource.'), 'EG-Desk에 연결하지 못해 처리하지 못했습니다. 연결을 확인한 뒤 다시 시도해 주세요.'],
+    [refusal(500, 'TASK_ERROR'), '처리하지 못했습니다. 잠시 뒤 다시 시도해 주세요.'],
+  ]) assert.equal(Chat.taskApprovalErrorText(error), expected);
+
+  // The list draws the two buttons on that line; a press is one decision.
+  const renderBody = surfaceSource.match(/  function renderChatTaskBoard\(codex, actions, folderName\) \{([\s\S]*?)\n  \}/)?.[1];
+  const calls = [];
+  const actions = new Proxy({}, { get: (_target, name) => (...args) => calls.push([name, ...args]) });
+  const render = compileFunction(renderBody, ['codex', 'actions', 'folderName', 'ChatState', 'el', 'deskIcon']);
+  const board = Chat.taskBoardWithState(Chat.createTaskBoard(), approvalState());
+  const draw = codex => render({ taskBoardOpen: true, taskContinue: null, taskApproval: null, taskResume: null, taskBoard: board, ...codex },
+    actions, () => null, Chat, awaitNode, awaitIcon);
+  const open = draw({});
+  const [approve] = awaitByTestId(open, 'chat-task-approve');
+  const [reject] = awaitByTestId(open, 'chat-task-reject');
+  assert.deepEqual([awaitText(approve), awaitText(reject), approve.props['aria-label'], reject.props['aria-label']], ['승인', '거절', '작업 3 승인', '작업 3 거절']);
+  assert.equal(awaitByTestId(open, 'chat-task-approval').length, 1);
+  approve.props.onclick();
+  assert.deepEqual(calls.pop(), ['decideTaskApproval', 'graph-a', 'report', 'approved']);
+  reject.props.onclick();
+  assert.deepEqual(calls.pop(), ['decideTaskApproval', 'graph-a', 'report', 'rejected']);
+  const sending = draw({ taskApproval: { graphId: 'graph-a', taskId: 'report', decision: 'approved', phase: 'sending', error: null } });
+  const buttons = [...awaitByTestId(sending, 'chat-task-approve'), ...awaitByTestId(sending, 'chat-task-reject')];
+  assert.deepEqual(buttons.map(button => [awaitText(button), button.props['aria-disabled']]), [['승인하는 중…', 'true'], ['거절', 'true']]);
+  for (const button of buttons) button.props.onclick();
+  assert.equal(calls.length, 0, 'nothing is decided twice');
+  const refused = draw({ taskApproval: { graphId: 'graph-a', taskId: 'report', decision: 'rejected', phase: 'error', error: '취소된 작업이라 승인 여부를 정할 수 없습니다.' } });
+  assert.deepEqual(awaitByTestId(refused, 'chat-task-error').map(awaitText), ['취소된 작업이라 승인 여부를 정할 수 없습니다.']);
+  assert.equal(awaitByTestId(draw({ taskBoard: Chat.taskBoardWithState(Chat.createTaskBoard(), approvalState(approvalGraph(), [])) }), 'chat-task-approve').length, 0,
+    'no button before the approval is issued');
+
+  // The bridge reads the approval ID, then sends one decision.
+  const { api, requests, replies, state, settle } = awaitBridge();
+  replies.push(awaitState(approvalGraph()));
+  api.taskGraphFrame(approvalGraph());
+  await settle();
+  requests.length = 0;
+  let release;
+  replies.push(approvalState(), () => new Promise(resolve => { release = () => resolve(awaitState(awaitGraph({ tasks: approvalGraph().tasks.map(task => task.taskId === 'report'
+    ? { ...task, status: 'ready', gates: [{ gateId: 'approval', kind: 'approval', status: 'satisfied', requested: true }] } : task) }))); }));
+  const deciding = api.methods.decideTaskApproval('graph-a', 'report', 'approved');
+  await settle();
+  assert.equal(state.codex.taskApproval.phase, 'sending');
+  await api.methods.decideTaskApproval('graph-a', 'report', 'rejected');
+  assert.deepEqual(requests, [['/tasks/state?graphId=graph-a', 'GET', null],
+    ['/tasks/approval', 'POST', { boardId: 'board-a', scope: awaitScope, taskId: 'report', approvalId: 'task-approval-1', decision: 'approved' }]],
+  'the approval ID comes from a state read, then exactly one decision goes');
+  release();
+  await deciding;
+  assert.equal(state.codex.taskApproval, null);
+  assert.equal(Chat.taskBoardView(state.codex.taskBoard).groups[0].tasks[2].conditions[0].text, '승인됨');
+  requests.length = 0;
+  state.codex.taskBoard = Chat.taskBoardWithState(state.codex.taskBoard, approvalState());
+  replies.push(refusal(409, 'TASK_APPROVAL_STALE'), approvalState(approvalGraph(), []));
+  await api.methods.decideTaskApproval('graph-a', 'report', 'rejected');
+  await settle();
+  assert.deepEqual(requests.map(([path, method]) => [path, method]), [['/tasks/approval', 'POST'], ['/tasks/state?graphId=graph-a', 'GET']], 'a stale approval reads the graph again');
+  assert.deepEqual(state.codex.taskApproval, { graphId: 'graph-a', taskId: 'report', decision: 'rejected', phase: 'error',
+    error: '이 승인 요청은 이미 처리되었거나 바뀌었습니다. 목록을 다시 확인했습니다.' });
+  requests.length = 0;
+  replies.push(approvalState(approvalGraph(), []));
+  await api.methods.decideTaskApproval('graph-a', 'report', 'approved');
+  assert.equal(requests.some(([path]) => path === '/tasks/approval'), false, 'with no approval waiting nothing is sent');
+});
+
+test('await recovery hold: after a bridge restart the list says work is held, and only 이어서 진행 resumes it', async () => {
+  const held = (overrides = {}) => awaitGraph({ recoveryHold: true, ...overrides });
+  const board = Chat.taskBoardWithState(Chat.createTaskBoard(), awaitState(held()));
+  assert.deepEqual(Chat.taskBoardHeldEntries(board).map(entry => entry.graphId), ['graph-a']);
+  const body = Chat.buildTaskResumeRequest(Chat.taskBoardEntry(board, 'graph-a'));
+  assert.deepEqual(body, { boardId: 'board-a', scope: awaitScope });
+  assert.deepEqual(Object.keys(body), ['boardId', 'scope'], 'only the fields POST /tasks/resume accepts');
+  for (const [label, graph] of [['not held', awaitGraph()], ['never started', held({ activated: false })], ['cancelled', held({ cancelRequested: true })],
+    ['finished', held({ tasks: awaitTasks(awaitGraph(), ['completed', 'completed', 'failed', 'cancelled']) })]]) {
+    const other = Chat.taskBoardWithState(Chat.createTaskBoard(), awaitState(graph));
+    assert.equal(Chat.taskBoardHeldEntries(other).length, 0, label);
+    assert.equal(Chat.buildTaskResumeRequest(Chat.taskBoardEntry(other, 'graph-a')), null, label);
+  }
+  assert.equal(Chat.buildTaskResumeRequest(Chat.taskBoardEntry(Chat.taskBoardWithGraph(Chat.createTaskBoard(), held()), 'graph-a')), null, 'the Board must be known first');
+  assert.deepEqual(Chat.taskBoardView(board).held, { count: 1, text: '브리지가 다시 시작돼 작업이 멈춰 있습니다', phase: null, error: null });
+  assert.equal(Chat.taskBoardView(Chat.taskBoardWithState(Chat.createTaskBoard(), awaitState())).held, null);
+  assert.deepEqual(Chat.taskBoardView(board, { resuming: { phase: 'error', error: '안 됨' } }).held, { count: 1, text: '브리지가 다시 시작돼 작업이 멈춰 있습니다', phase: 'error', error: '안 됨' });
+  for (const [error, expected] of [
+    [refusal(409, 'TASK_FENCED'), '취소된 작업이라 이어 갈 수 없습니다.'],
+    [refusal(404, 'TASK_NOT_FOUND'), '이 작업을 더 이상 찾을 수 없습니다.'],
+    [refusal(404, 'TASK_ROUTE_NOT_FOUND'), '지금 연결된 EG-Desk는 이어 가기를 지원하지 않습니다.'],
+    [refusal(401, 'LOGIN_REQUIRED'), '로그인한 뒤 이어 갈 수 있습니다.'],
+    [refusal(503, 'BRIDGE_OFFLINE'), 'AI 엔진이 아직 준비되지 않아 이어 가지 못했습니다. 잠시 뒤 다시 시도해 주세요.'],
+    [refusal(409, 'E_TASK_RECONCILE'), '작업 상태를 아직 확인하는 중이라 이어 가지 못했습니다. 잠시 뒤 다시 시도해 주세요.'],
+    [new TypeError('NetworkError when attempting to fetch resource.'), 'EG-Desk에 연결하지 못해 이어 가지 못했습니다. 연결을 확인한 뒤 다시 시도해 주세요.'],
+    [refusal(500, 'TASK_ERROR'), '이어 가지 못했습니다. 잠시 뒤 다시 시도해 주세요.'],
+  ]) assert.equal(Chat.taskResumeErrorText(error), expected);
+
+  // Above the list, open or folded.
+  const renderBody = surfaceSource.match(/  function renderChatTaskBoard\(codex, actions, folderName\) \{([\s\S]*?)\n  \}/)?.[1];
+  const calls = [];
+  const actions = new Proxy({}, { get: (_target, name) => (...args) => calls.push([name, ...args]) });
+  const render = compileFunction(renderBody, ['codex', 'actions', 'folderName', 'ChatState', 'el', 'deskIcon']);
+  const draw = codex => render({ taskBoardOpen: false, taskContinue: null, taskApproval: null, taskResume: null, taskBoard: board, ...codex },
+    actions, () => null, Chat, awaitNode, awaitIcon);
+  const closed = draw({});
+  assert.deepEqual(closed.children.map(child => child.props.data.testid), ['chat-task-hold', 'chat-task-summary'], 'the notice sits above the list line');
+  const [resume] = awaitByTestId(closed, 'chat-task-resume');
+  assert.deepEqual([awaitText(closed.children[0]).replace('이어서 진행', ' [이어서 진행]'), resume.props['aria-disabled'] ?? null],
+    ['브리지가 다시 시작돼 작업이 멈춰 있습니다 [이어서 진행]', null]);
+  resume.props.onclick();
+  assert.deepEqual(calls.pop(), ['resumeHeldTasks']);
+  assert.equal(awaitByTestId(draw({ taskBoardOpen: true }), 'chat-task-hold').length, 1);
+  const busy = awaitByTestId(draw({ taskResume: { phase: 'sending', error: null } }), 'chat-task-resume')[0];
+  assert.deepEqual([awaitText(busy), busy.props['aria-disabled']], ['이어 가는 중…', 'true']);
+  busy.props.onclick();
+  assert.equal(calls.length, 0, 'nothing is sent twice');
+  assert.deepEqual(awaitByTestId(draw({ taskResume: { phase: 'error', error: '이어 가지 못했습니다. 잠시 뒤 다시 시도해 주세요.' } }), 'chat-task-resume-error').map(awaitText),
+    ['이어 가지 못했습니다. 잠시 뒤 다시 시도해 주세요.']);
+  assert.equal(awaitByTestId(draw({ taskBoard: Chat.taskBoardWithState(Chat.createTaskBoard(), awaitState()) }), 'chat-task-hold').length, 0);
+
+  // The bridge: a held frame is only read; '이어서 진행' resumes each held graph once.
+  const { api, requests, replies, state, settle } = awaitBridge();
+  replies.push(awaitState(held()));
+  api.taskGraphFrame(held());
+  replies.push(awaitState(held({ graphId: 'graph-b' })));
+  api.taskGraphFrame(held({ graphId: 'graph-b' }));
+  await settle();
+  assert.deepEqual(requests.map(([path]) => path), ['/tasks/state?graphId=graph-a', '/tasks/state?graphId=graph-b'], 'reconnecting never resumes by itself');
+  requests.length = 0;
+  let release;
+  replies.push(() => new Promise(resolve => { release = () => resolve(awaitState(awaitGraph())); }), awaitState(awaitGraph({ graphId: 'graph-b' })));
+  const resuming = api.methods.resumeHeldTasks();
+  assert.equal(state.codex.taskResume.phase, 'sending');
+  await api.methods.resumeHeldTasks();
+  await settle();
+  assert.equal(requests.length, 1, 'a second press while resuming sends nothing');
+  release();
+  await resuming;
+  assert.deepEqual(requests, [['/tasks/resume', 'POST', { boardId: 'board-a', scope: awaitScope }],
+    ['/tasks/resume', 'POST', { boardId: 'board-a', scope: { ...awaitScope, graphId: 'graph-b' } }]]);
+  assert.equal(state.codex.taskResume, null);
+  assert.equal(Chat.taskBoardView(state.codex.taskBoard).held, null, 'the notice leaves once the bridge confirms');
+  requests.length = 0;
+  state.codex.taskBoard = Chat.taskBoardWithState(state.codex.taskBoard, awaitState(held()));
+  replies.push(refusal(503, 'BRIDGE_OFFLINE'));
+  await api.methods.resumeHeldTasks();
+  assert.deepEqual(state.codex.taskResume, { phase: 'error', error: 'AI 엔진이 아직 준비되지 않아 이어 가지 못했습니다. 잠시 뒤 다시 시도해 주세요.' });
+  assert.equal(Chat.taskBoardView(state.codex.taskBoard).held.error, null, 'the error shows through the view only with the resume state');
+});
+
+test('await resume message: a plan step resumed in place reads as one system line, never as 대표님\'s bubble or raw XML', () => {
+  const titles = new Map([['collect', '자료 모으기'], ['login', '거래처 포털 로그인']]);
+  const first = composeAwaitResume({ graphId: 'graph-plan-1', planId: 'plan-1', planTitle: '견적서 보내기', task: { taskId: 'collect', title: '자료 모으기' },
+    instructions: '자료를 모은다 <b>]]></b>', gates: [], taskTitles: titles });
+  assert.ok(first.startsWith('<egdesk-await-resume>'), 'the helper\'s own message');
+  assert.deepEqual(Chat.awaitResumeMessageView({ role: 'user', content: first, requestId: 'task-native-1' }),
+    { text: '대기 조건이 풀려 작업을 이어갑니다', summary: '자료 모으기 · 계획 승인됨', line: '대기 조건이 풀려 작업을 이어갑니다 · 자료 모으기 · 계획 승인됨' });
+  const at = '2026-10-24T09:10:00.000Z';
+  const later = composeAwaitResume({ graphId: 'graph-plan-1', planId: 'plan-1', planTitle: '견적서 보내기', task: { taskId: 'send', title: '견적서 <보내기> & 확인' },
+    instructions: '보낸다', taskTitles: titles, gates: [
+      { gateId: 'task:collect', kind: 'task', taskId: 'collect', status: 'satisfied', satisfiedBy: 'task.completed', satisfiedAt: at },
+      { gateId: 'sso', kind: 'oauth', origin: 'https://portal.example.com', pathPrefix: '/cb', status: 'satisfied', satisfiedBy: 'browser.oauthCompleted', satisfiedAt: at },
+      { gateId: 'inbox', kind: 'file', root: 'root-1', relativeGlob: '*.pdf', status: 'satisfied', satisfiedBy: 'user.action', satisfiedAt: at },
+      { gateId: 'ok', kind: 'userAction', label: '금액', status: 'waiting' },
+    ] });
+  const laterView = Chat.awaitResumeMessageView({ role: 'user', text: later });
+  assert.equal(laterView.line, '대기 조건이 풀려 작업을 이어갑니다 · 견적서 <보내기> & 확인 · 앞 단계 완료 · 로그인 완료 · 파일 대기 건너뜀');
+  const many = composeAwaitResume({ graphId: 'g', planId: 'plan-1', planTitle: '묶음', task: { taskId: 'last', title: '마무리' }, instructions: '끝낸다', gates: [
+    { gateId: 'a', kind: 'task', taskId: 'collect', status: 'satisfied', satisfiedBy: 'task.completed' },
+    { gateId: 'b', kind: 'oauth', origin: 'https://x.example', pathPrefix: '/', status: 'satisfied', satisfiedBy: 'browser.oauthCompleted' },
+    { gateId: 'c', kind: 'file', root: 'r', relativeGlob: '*', status: 'satisfied', satisfiedBy: 'file.changed' },
+    { gateId: 'd', kind: 'terminalExit', sessionId: 'term-1', status: 'satisfied', satisfiedBy: 'terminal.exit' },
+    { gateId: 'e', kind: 'userAction', status: 'satisfied', satisfiedBy: 'user.action' },
+  ] });
+  assert.equal(Chat.awaitResumeMessageView({ role: 'user', content: many }).summary, '마무리 · 앞 단계 완료 · 로그인 완료 · 파일 도착 · 외 2건');
+  const lines = [Chat.awaitResumeMessageView({ role: 'user', content: first }).line, laterView.line];
+  for (const internal of ['<egdesk', 'await_id', 'graph-plan-1', 'plan-1', 'sso', 'portal.example.com', 'root-1', 'CDATA', '자료를 모은다', 'Continue the approved plan', 'approved']) {
+    assert.equal(lines.some(line => line.includes(internal)), false, `${internal} is not shown`);
+  }
+  assert.equal(Chat.awaitResumeMessageView({ role: 'user', content: first, requestId: 'request-abc' }), null, 'words typed on this screen stay a bubble');
+  assert.equal(Chat.awaitResumeMessageView({ role: 'user', content: first, clientId: 'request-abc' }), null);
+  assert.equal(Chat.awaitResumeMessageView({ role: 'assistant', content: first }), null);
+  assert.equal(Chat.awaitResumeMessageView({ role: 'user', content: '보고서 <egdesk-await-resume> 써 줘' }), null, 'only a message that starts with it');
+  assert.equal(Chat.awaitResumeMessageView(null), null);
+  assert.deepEqual(Chat.awaitResumeMessageView({ role: 'user', content: first.slice(0, first.indexOf('<summary>')) }),
+    { text: '대기 조건이 풀려 작업을 이어갑니다', summary: '', line: '대기 조건이 풀려 작업을 이어갑니다' }, 'a cut message still never shows XML');
+
+  // The room list preview says the same line.
+  const previewBody = surfaceSource.match(/  function codexThreadPreview\(thread\) \{([\s\S]*?)\n  \}/)?.[1];
+  assert.ok(previewBody, 'the room preview stays directly testable');
+  const preview = compileFunction(previewBody, ['thread', 'ChatState', 'codexThreadKindMeta']);
+  const meta = () => ({ emptyPreview: '대화 없음' });
+  assert.equal(preview({ messages: [{ role: 'user', content: first, requestId: 'task-native-1' }] }, Chat, meta), '대기 조건이 풀려 작업을 이어갑니다 · 자료 모으기 · 계획 승인됨');
+  assert.equal(preview({ messages: [{ role: 'user', content: '안녕하세요', requestId: 'request-1' }] }, Chat, meta), '나: 안녕하세요');
+  // In the conversation the line replaces the bubble and never groups with 대표님's bubbles.
+  assert.match(surfaceSource, /            const resumed = ChatState\.awaitResumeMessageView\(message\);\n            if \(resumed\) \{\n              messages\.appendChild\(el\('div', \{\n                class: 'egd-codex-await-resume', role: 'note',/);
+  assert.match(surfaceSource, /const groupedWithPrevious = groupRole\(previous\) === message\.role &&/);
+  assert.match(surfaceSource, /lastUserMessageId: activeThread\.messages\.filter\(message => message\.role === 'user' && !ChatState\.awaitResumeMessageView\(message\)\)\.at\(-1\)\?\.id \|\| '',/,
+    'a resumed step does not pull the view down as if 대표님 had sent it');
+});
+
+test('await plan card, approval and hold styles use approved tokens and keep 32px controls after the HUD reset', () => {
+  const rule = selector => surfaceCss.match(new RegExp(`^${selector.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')} \\{([^}]+)\\}`, 'm'))?.[1] || '';
+  const selectors = ['.egd-task-hold', '.egd-task-hold-text', '.egd-task-approval', '.egd-plan-card', '.egd-plan-card-head', '.egd-plan-card-eyebrow',
+    '.egd-plan-card-status', '.egd-plan-card-title', '.egd-plan-steps', '.egd-plan-step', '.egd-plan-step-head', '.egd-plan-step-number', '.egd-plan-step-title',
+    '.egd-plan-step-meta', '.egd-plan-step-instructions', '.egd-plan-step-instructions > p', '.egd-plan-card-note', '.egd-plan-actions', '.egd-plan-confirm',
+    '.egd-plan-error', '.egd-codex-await-resume', '.egd-codex-await-resume-mark', '.egd-codex-await-resume-text'];
+  for (const selector of selectors) {
+    assert.ok(rule(selector), `${selector} is styled`);
+    assert.doesNotMatch(rule(selector), /#[0-9a-f]{3,8}\b|rgba?\(/i, `${selector} uses approved tokens only`);
+  }
+  const planButtons = surfaceCss.match(/^button\.egd-plan-approve,\nbutton\.egd-plan-reject,\nbutton\.egd-plan-confirm-go,\nbutton\.egd-plan-confirm-cancel,\nbutton\.egd-plan-open-list,\nbutton\.egd-plan-step-toggle \{([^}]+)\}/m)?.[1] || '';
+  const taskButtons = surfaceCss.match(/^button\.egd-task-hold-resume,\nbutton\.egd-task-approve,\nbutton\.egd-task-reject \{([^}]+)\}/m)?.[1] || '';
+  for (const shared of [planButtons, taskButtons]) {
+    assert.match(shared, /min-height: 32px;/, 'inline controls keep the 32px target');
+    assert.doesNotMatch(shared, /#[0-9a-f]{3,8}\b|rgba?\(/i);
+  }
+  assert.match(rule('.egd-plan-step-instructions > p'), /white-space: pre-wrap;[\s\S]*max-height: 180px;[\s\S]*overflow-y: auto;/, 'long instructions keep their lines and scroll in place');
+  const block = surfaceCss.slice(surfaceCss.indexOf('/* CHAT-06 Await: a bridge restart holds'), surfaceCss.indexOf('.egd-codex-await-resume-text {'));
+  assert.ok(block.length > 1000);
+  assert.doesNotMatch(block, /#[0-9a-f]{3,8}\b|rgba?\(/i, 'the whole block stays on tokens, light and dark alike');
+  for (const selector of ['button.egd-plan-approve,', 'button.egd-task-hold-resume,']) {
+    assert.ok(surfaceCss.indexOf(selector) > surfaceCss.indexOf('.egd-edge button {'), `${selector} comes after the HUD reset with the same weight`);
+  }
+});
+
+// ---- BRW-13: Browser Card Agent activity (badge, timeline, pause / hand back) ----
+
+test('Browser Agent badge moves operating -> recent N -> hidden, and a hold outranks both', () => {
+  const t0 = 1_000_000;
+  const badge = (fields) => Surface.browserAgentBadge({ now: t0, ...fields });
+  assert.deepEqual(badge({}), { mode: 'hidden', label: '', control: null, recheckMs: 0 });
+  assert.equal(badge({ permission: 'interact' }).mode, 'hidden', 'a lease the Agent has not used yet shows nothing');
+  const working = badge({ permission: 'interact', inFlight: 1 });
+  assert.equal(working.mode, 'operating');
+  assert.equal(working.label, 'Agent 조작 중');
+  assert.equal(working.control, 'pause');
+  assert.equal(working.recheckMs, Surface.BROWSER_AGENT_POLL_MS, 'a live lease is rechecked so a Stop elsewhere shows');
+  assert.equal(badge({ permission: 'interact', count: 3 }).mode, 'operating', 'between tool calls the lease still reads as operating');
+  assert.equal(badge({ permission: 'observe', count: 1 }).label, 'Agent 읽는 중');
+  const recent = badge({ count: 3, lastActiveAt: t0 - 1000 });
+  assert.deepEqual(recent, { mode: 'recent', label: '최근 Agent 활동 3건', control: null, recheckMs: Surface.BROWSER_AGENT_RECENT_MS - 1000 });
+  assert.equal(badge({ count: 3, lastActiveAt: t0 - Surface.BROWSER_AGENT_RECENT_MS }).mode, 'hidden', 'the count fades after its window');
+  const held = badge({ hold: true, permission: 'interact', inFlight: 1, count: 4 });
+  assert.deepEqual(held, { mode: 'user', label: '대표님이 직접 조작 중', control: 'handback', recheckMs: 0 });
+  for (const view of [working, recent, held]) assert.doesNotMatch(view.label, /[a-z]+_[a-z]+|undefined|null/);
+});
+
+test('Browser Agent timeline says each action in Korean, newest first, with typed text only as its length', () => {
+  const at = (s) => new Date(Date.UTC(2026, 9, 24, 3, 0, s)).toISOString();
+  const secret = '비밀번호 hunter2-TYPED';
+  const fill = Surface.browserAgentActivityRecord({ kind: 'act', action: { type: 'fill', ref: 'el_3', text: secret },
+    guard: { target: { ref: 'el_3', role: 'textbox', tag: 'input', label: '검색어', value: 'PRIOR_FIELD_VALUE', href: '' } } });
+  assert.equal(JSON.stringify(fill).includes('hunter2'), false, 'the stored record never holds the typed text');
+  assert.equal(JSON.stringify(fill).includes('PRIOR_FIELD_VALUE'), false, 'nor the field value the Agent observed');
+  assert.equal(fill.action.textLength, [...secret].length);
+  const navigate = Surface.browserAgentActivityRecord({ kind: 'act', action: { type: 'navigate', url: 'https://www.shop.example/orders?token=abc#x' } });
+  assert.deepEqual(navigate.action, { type: 'navigate', host: 'shop.example' });
+  const entries = [
+    { id: 'a', startedAt: at(1), url: 'https://shop.example/cart?id=9', outcome: 'confirmed', action: { type: 'observe' } },
+    { id: 'b', startedAt: at(2), outcome: 'confirmed', ...Surface.browserAgentActivityRecord({ kind: 'act',
+      action: { type: 'click', ref: 'el_1' }, guard: { target: { ref: 'el_1', role: 'button', label: '  장바구니에\n담기  ' } } }) },
+    { id: 'c', startedAt: at(3), outcome: 'unknown', ...fill },
+    { id: 'd', startedAt: at(4), outcome: 'refused', ...Surface.browserAgentActivityRecord({ kind: 'act',
+      action: { type: 'press', ref: 'el_3', key: 'Enter' }, guard: { target: { ref: 'el_3', role: 'textbox', label: '검색어' } } }) },
+    { id: 'e', startedAt: at(5), outcome: 'confirmed', ...Surface.browserAgentActivityRecord({ kind: 'act', action: { type: 'scroll', direction: 'down', amount: 'half' } }) },
+    { id: 'f', startedAt: at(6), outcome: 'unknown', ...navigate },
+    { id: 'g', startedAt: at(7), outcome: 'confirmed', ...Surface.browserAgentActivityRecord({ kind: 'observe', options: { wait: { for: 'load', timeoutMs: 3000 } } }) },
+    // A developer-API row (browserAgent.act) keeps its raw value; the row still shows only its length.
+    { id: 'h', startedAt: at(8), ok: true, source: 'chrome-document', action: { type: 'fill', ref: 'el_9', value: secret },
+      before: { interactiveElements: [{ ref: 'el_9', role: 'textbox', label: '메모', value: 'old' }] } },
+    { id: 'i', startedAt: at(9), ok: true, source: 'jsactor', action: { type: 'snapshot' }, url: 'https://docs.example/a/b?c=d' },
+  ];
+  const rows = Surface.browserAgentTimelineRows(entries, { formatTime: ms => `t${new Date(ms).getUTCSeconds()}` });
+  assert.deepEqual(rows.map(row => row.id), ['i', 'h', 'g', 'f', 'e', 'd', 'c', 'b', 'a'], 'newest first');
+  assert.deepEqual(rows.map(row => [row.time, row.action, row.target, row.outcomeLabel]), [
+    ['t9', '보기', 'docs.example', '성공'],
+    ['t8', '입력', '"메모" 입력란 · ' + [...secret].length + '자', '확인 필요'],
+    ['t7', '대기', '페이지 로드', '성공'],
+    ['t6', '이동', 'shop.example', '확인 필요'],
+    ['t5', '스크롤', '아래로 반 화면', '성공'],
+    ['t4', '키', '"검색어" 입력란 · Enter', '거부됨'],
+    ['t3', '입력', `"검색어" 입력란 · ${[...secret].length}자`, '확인 필요'],
+    ['t2', '클릭', '"장바구니에 담기" 버튼', '성공'],
+    ['t1', '보기', 'shop.example', '성공'],
+  ]);
+  const shown = JSON.stringify(rows);
+  for (const hidden of ['hunter2', 'PRIOR_FIELD_VALUE', 'token=abc', '/orders', 'id=9', '/a/b']) {
+    assert.equal(shown.includes(hidden), false, `a timeline row never shows ${hidden}`);
+  }
+  assert.equal(rows[0].iso, at(9));
+  const many = Array.from({ length: 45 }, (_, i) => ({ id: `n${i}`, startedAt: at(i % 60), outcome: 'confirmed', action: { type: 'observe' } }));
+  const limited = Surface.browserAgentTimelineRows(many);
+  assert.equal(limited.length, Surface.BROWSER_AGENT_TIMELINE_LIMIT);
+  assert.equal(limited[0].id, 'n44');
+  assert.match(limited[0].time, /^\d\d:\d\d:\d\d$/);
+  const long = Surface.browserAgentTimelineRows([{ outcome: 'confirmed', target: { role: 'link', label: '가'.repeat(40) }, action: { type: 'click' } }]);
+  assert.equal([...long[0].target].length <= 24 + '"" 링크'.length, true, 'element names stay short');
+});
+
+test('Browser Agent outcome never reports an unconfirmed result as success (REA EG-01/03)', () => {
+  const outcome = Surface.browserAgentActivityOutcome;
+  const guard = { documentId: 'doc-1', revision: 4, scroll: { x: 0, y: 100 } };
+  const prior = Surface.browserAgentPriorReading({ documentId: 'doc-1', revision: 4, url: 'https://shop.example/', text: ['담기 전'],
+    interactiveElements: [{ ref: 'el_1', value: '' }] });
+  const acted = (dispatchReceipt, after = { documentId: 'doc-1', text: ['담겼습니다'], interactiveElements: [], scroll: { y: 420 } }) =>
+    ({ status: 'acted', receipt: { dispatchReceipt: { eventDispatched: true, documentStillCurrent: true, ...dispatchReceipt }, after } });
+  const click = { kind: 'act', action: { type: 'click', ref: 'el_1' }, guard, postcondition: { kind: 'visible-text', value: '담겼습니다' } };
+  const received = { clickInputRoute: 'dom-click-no-pointerdown', targetClickObserved: true };
+  assert.equal(outcome({ request: click, response: acted(received), prior }), 'confirmed');
+  assert.equal(outcome({ request: click, response: acted({ ...received, targetClickObserved: false }), prior }), 'unknown', 'dispatch alone is not reception');
+  assert.equal(outcome({ request: click, response: acted(received), prior: null }), 'unknown', 'no prior reading: newness unproven');
+  assert.equal(outcome({ request: click, response: acted(received),
+    prior: { ...prior, text: ['이미 담겼습니다'] } }), 'unknown', 'a result already true before the click proves nothing');
+  assert.equal(outcome({ request: click, response: acted(received, { documentId: 'doc-2', text: ['담겼습니다'] }), prior }), 'unknown');
+  assert.equal(outcome({ request: { ...click, postcondition: undefined }, response: acted(received), prior }), 'unknown');
+  assert.equal(outcome({ request: click, response: acted({ ...received, documentStillCurrent: false }), prior }), 'unknown');
+  const press = { kind: 'act', action: { type: 'press', ref: 'el_3', key: 'Tab' }, guard };
+  assert.equal(outcome({ request: press, response: acted({ inputRoute: 'dom-keyboard-event', targetKeyObserved: true }), prior }), 'unknown',
+    'a key without a stated result is dispatched, not verified');
+  const navigate = { kind: 'act', action: { type: 'navigate', url: 'https://shop.example/next' }, guard, postcondition: { kind: 'url', value: 'https://shop.example/next' } };
+  assert.equal(outcome({ request: navigate, response: acted({}, { documentId: 'doc-1', url: 'https://shop.example/next' }), prior }), 'unknown');
+  const scroll = { kind: 'act', action: { type: 'scroll', direction: 'down', amount: 'page' }, guard };
+  assert.equal(outcome({ request: scroll, response: acted({ inputRoute: 'dom-scroll-api', scrollMode: 'document' }), prior }), 'confirmed');
+  assert.equal(outcome({ request: { ...scroll, action: { type: 'scroll', direction: 'up' } },
+    response: acted({ inputRoute: 'dom-scroll-api', scrollMode: 'document' }), prior }), 'unknown');
+  assert.equal(outcome({ request: click, response: { status: 'rejected', error: 'stale' }, inputAuthorized: false }), 'refused');
+  assert.equal(outcome({ request: click, response: { status: 'rejected', error: 'cancelled after dispatch; outcome is unknown' }, inputAuthorized: true }),
+    'unknown', 'input the parent authorized may have landed');
+  const observe = { kind: 'observe', options: { textLimit: 60, elementLimit: 80 } };
+  assert.equal(outcome({ request: observe, response: { status: 'observed', snapshot: { documentId: 'doc-1' } } }), 'confirmed');
+  const wait = { kind: 'observe', options: { wait: { for: 'load', timeoutMs: 3000, notDocumentId: 'doc-1' } } };
+  assert.equal(outcome({ request: wait, response: { status: 'observed', snapshot: { documentId: 'doc-2', readyState: 'complete', wait: { outcome: 'met' } } } }), 'confirmed');
+  assert.equal(outcome({ request: wait, response: { status: 'observed', snapshot: { documentId: 'doc-1', readyState: 'complete', wait: { outcome: 'met' } } } }), 'unknown');
+  assert.equal(outcome({ request: wait, response: { status: 'observed', snapshot: { documentId: 'doc-2', readyState: 'complete', wait: { outcome: 'timeout' } } } }), 'unknown');
+});
+
+// The production transport (Stop-path revocation scoped to a Card + dispatch)
+// and the production Card block, wired as spawnBrowserCard wires them.
+function browserAgentControlHarness() {
+  const slice = (start, end) => {
+    const first = surfaceSource.indexOf(start);
+    const last = surfaceSource.indexOf(end, first);
+    assert.ok(first > 0 && last > first, `BRW-13 source boundary missing: ${start}`);
+    return surfaceSource.slice(first, last);
+  };
+  const revokeSource = slice('  function revokeBrowserToolCard(cardId) {', '  function registerBrowserToolSelection(');
+  const dispatchSource = slice('  function browserToolSameUrl(left, right) {', '  function attachBrowserToolTransport(');
+  const blockSource = slice('    // ---- BRW-13: Agent activity on this Card', '    const browserToolBinding = () => {');
+  const maps = { runBindings: new Map(), pendingBindings: new Map(), cancelled: new Map(), receipts: new Map(), cardLeases: new Map(),
+    selections: new Map(), actionLeases: new Map(), stopped: new Set() };
+  const current = { cardId: 'browser-a', cardEpoch: 'card-generation-a', profileId: 'firefox-default', accountId: '',
+    accountStatus: 'unverified', userContextId: 0, engineAccountKey: 'codex:chatgpt:fixture@example.test', authorityEpoch: 1,
+    url: 'https://shop.example/cart' };
+  const windowGlobal = { innerWindowId: 201 };
+  const browser = { browsingContext: { id: 101, currentWindowGlobal: windowGlobal } };
+  const calls = { observe: 0, act: 0, effects: 0 };
+  let authorize;
+  const node = (fields = {}) => ({ hidden: false, isConnected: true, dataset: {}, attrs: {}, textContent: '', title: '',
+    setAttribute(name, value) { this.attrs[name] = String(value); }, removeAttribute(name) { delete this.attrs[name]; },
+    getAttribute(name) { return this.attrs[name] ?? null; }, focus() { document.activeElement = this; },
+    contains(target) { return target === this; }, getBoundingClientRect: () => ({ left: 40, bottom: 60 }), ...fields });
+  const document = { activeElement: null, documentElement: { appended: [], appendChild(child) { this.appended.push(child); child.isConnected = true; } } };
+  const agentBadge = node({ hidden: true }), agentHandButton = node({ hidden: true }), menuButton = node();
+  const card = { id: 'browser-a', isConnected: true, dataset: {}, classList: { contains: name => name === 'egd-browser-card' } };
+  card._browserControls = {
+    toolBinding: () => ({ ...current }),
+    toolBrowser: () => browser,
+    toolObserve: async () => { calls.observe++; return { cardId: 'browser-a', documentId: 'doc-1', revision: 2, url: current.url,
+      text: ['장바구니 0개'], interactiveElements: [{ ref: 'el_1', role: 'button', label: '담기' }] }; },
+    toolAct: async (_binding, action, _guard, lease) => {
+      calls.act++;
+      if (!authorize({ browser, browsingContext: browser.browsingContext, windowGlobal, leaseId: lease.leaseId, requestId: lease.requestId,
+        deadlineMs: lease.deadlineMs, actionType: action.type, actionRef: action.ref || null, actionUrl: action.url || null })) {
+        throw new Error('Browser action authority was revoked before input');
+      }
+      calls.effects++;
+      return { dispatchReceipt: { actor: 'JSWindowActor', eventDispatched: true, documentStillCurrent: true,
+        clickInputRoute: 'dom-click-no-pointerdown', targetClickObserved: true },
+        after: { cardId: 'browser-a', documentId: 'doc-1', text: ['장바구니 1개'], interactiveElements: [] }, observation: null };
+    },
+  };
+  const doc = { getElementById: id => id === 'browser-a' ? card : null };
+  let nonce = 0;
+  const transport = new Function('document', 'ChatState', 'browserToolRunBindings', 'browserToolCancelledRuns',
+    'browserToolRequestReceipts', 'browserToolCardLeases', 'browserToolUserSelections', 'browserToolPendingBindings',
+    'browserToolActionLeases', 'browserToolStoppedRuns', 'chatBindingNonce',
+    `let browserToolFixtureLastAction = null;\nconst browserToolFixtureAuthorizationByCard = new Map();\n${revokeSource}\n${dispatchSource}\n` +
+    'return {browserToolDispatch,browserToolAuthorizePhysicalAction,revokeBrowserToolCard,browserToolCardPermission}')(doc,
+    { knownCodexAccountKey: key => typeof key === 'string' && key.startsWith('codex:') }, maps.runBindings, maps.cancelled,
+    maps.receipts, maps.cardLeases, maps.selections, maps.pendingBindings, maps.actionLeases, maps.stopped, () => `lease-${++nonce}`);
+  authorize = transport.browserToolAuthorizePhysicalAction;
+  const timers = new Map();
+  let timerSeq = 0;
+  const window = { innerWidth: 1280, innerHeight: 800,
+    setTimeout(fn, ms) { const id = ++timerSeq; timers.set(id, { fn, ms }); return id; }, clearTimeout(id) { timers.delete(id); },
+    addEventListener() {}, removeEventListener() {} };
+  const history = [], revokes = [], menus = [], notices = [];
+  const el = (tag, attrs = {}, ...children) => ({ ...node(), tag, id: attrs.id, attrs: { ...attrs }, children: children.filter(c => c != null),
+    listeners: {}, style: {}, addEventListener(name, fn) { this.listeners[name] = fn; }, remove() { this.isConnected = false; },
+    replaceChildren(...next) { this.children = next; }, contains(target) { return target === this || this.children.some(child => child?.contains?.(target)); },
+    focus() { document.activeElement = this; } });
+  const state = { codexBridge: { noteBrowserUserControl: (clientThreadId, host) => notices.push([clientThreadId, host]) } };
+  const block = new Function('card', 'window', 'document', 'SurfaceState', 'browserToolCardPermission', 'agentBadge', 'agentHandButton',
+    'menuButton', 'browserAgentHistory', 'el', 'deskIcon', 'closeBrowserMenu', 'recordBrowserAgentAction', 'agentActionSeq',
+    'browserState', 'state', 'browserDisplayHost', 'revokeBrowserToolCard', 'agentProjection', 'showBrowserMenu',
+    `${blockSource}\nreturn { agentControl, refreshAgentControl, startAgentToolActivity, agentUserHold, pauseAgentControl,
+      handBackAgentControl, endAgentHold, toggleAgentTimeline, disposeAgentControl };`)(
+    card, window, document, Surface, transport.browserToolCardPermission, agentBadge, agentHandButton, menuButton,
+    ({ limit } = {}) => structuredClone(history.slice(-limit)), el, () => el('svg'), () => {}, entry => history.push(entry), 0,
+    { uri: 'https://shop.example/cart' }, state, url => new URL(url).hostname,
+    cardId => { revokes.push(cardId); return transport.revokeBrowserToolCard(cardId); }, { invalidate() {} },
+    (anchor, options) => { menus.push([anchor, options]); });
+  card._browserControls.toolActivity = block.startAgentToolActivity;
+  card._browserControls.toolUserHold = block.agentUserHold;
+  let sequence = 0;
+  const req = (kind, extra = {}) => ({ version: 1, requestId: `request-${++sequence}`, deadlineMs: Date.now() + 10000,
+    runId: 'run-a', clientThreadId: 'thread-a', cardId: 'browser-a', targetCardEpoch: 'card-generation-a', kind, ...extra });
+  const select = (permission = 'interact', token = 'explicit-selection-a') => {
+    const value = { cardId: 'browser-a', cardEpoch: current.cardEpoch, profileId: current.profileId, accountId: current.accountId,
+      userContextId: current.userContextId, engineAccountKey: current.engineAccountKey, authorityEpoch: current.authorityEpoch,
+      selectedUrl: current.url, permission, selectionToken: token, clientThreadId: 'thread-a', sourceId: 'selected-source-a' };
+    maps.selections.set(token, { ...value, token, threadId: 'thread-a', usedRunId: null });
+    return value;
+  };
+  return { ...maps, block, transport, dispatch: transport.browserToolDispatch, req, select, calls, card, agentBadge, agentHandButton,
+    menuButton, document, history, revokes, menus, notices, timers };
+}
+
+test('[일시중지] revokes the Card lease through the Stop path, refuses the next Agent request with zero dispatch, and tells Chat once', async () => {
+  const h = browserAgentControlHarness();
+  const bound = await h.dispatch(h.req('bind', { selection: h.select('interact') }));
+  assert.equal(bound.status, 'bound');
+  assert.equal(h.calls.observe, 1, 'the bind check reads once and is not a timeline action');
+  assert.equal(h.history.length, 0);
+  assert.equal(h.agentBadge.hidden, true, 'a lease alone shows nothing');
+  const observed = await h.dispatch(h.req('observe', { binding: bound.binding, options: { textLimit: 60, elementLimit: 80 } }));
+  assert.equal(observed.status, 'observed');
+  assert.equal(h.agentBadge.hidden, false);
+  assert.equal(h.agentBadge.textContent, 'Agent 조작 중');
+  assert.equal(h.card.dataset.egdAgentControl, 'operating');
+  assert.equal(h.agentHandButton.hidden, false);
+  assert.equal(h.agentHandButton.textContent, '일시중지');
+  assert.equal(h.agentHandButton.dataset.testid, 'browser-agent-pause');
+  const acted = await h.dispatch(h.req('act', { binding: bound.binding, guard: { documentId: 'doc-1', revision: 2 },
+    action: { type: 'click', ref: 'el_1' }, postcondition: { kind: 'visible-text', value: '장바구니 1개' } }));
+  assert.equal(acted.status, 'acted');
+  assert.deepEqual(h.history.map(entry => [entry.source, entry.action.type, entry.outcome]),
+    [['model-tool', 'observe', 'confirmed'], ['model-tool', 'click', 'confirmed']]);
+  const before = { ...h.calls };
+
+  h.agentHandButton.focus();
+  h.agentHandButton.dataset.action === 'pause' && h.block.pauseAgentControl();
+  assert.deepEqual(h.revokes, ['browser-a']);
+  assert.equal(h.runBindings.size, 0, 'the run lease on this Card is revoked');
+  assert.equal(h.selections.size, 0, 'no unused grant for this Card survives');
+  assert.equal(h.block.agentControl.hold !== null, true);
+  assert.equal(h.agentBadge.textContent, '대표님이 직접 조작 중');
+  assert.equal(h.card.dataset.egdAgentControl, 'user');
+  assert.equal(h.agentHandButton.textContent, '돌려주기');
+  assert.equal(h.agentHandButton.dataset.testid, 'browser-agent-handback');
+  assert.equal(h.document.activeElement, h.agentHandButton, 'focus stays on the same button, now [돌려주기]');
+  assert.deepEqual(h.notices, [['thread-a', 'shop.example']]);
+
+  for (const kind of ['observe', 'act', 'bind']) {
+    const refused = await h.dispatch(h.req(kind, { binding: bound.binding, guard: { documentId: 'doc-1', revision: 2 },
+      action: { type: 'click', ref: 'el_1' }, selection: h.select('interact', `late-${kind}`) }));
+    assert.equal(refused.status, 'rejected');
+    assert.match(refused.error, /user is operating this Browser Card directly/);
+  }
+  assert.deepEqual(h.calls, before, 'no observe, act or DOM effect is dispatched while held');
+  assert.deepEqual(h.notices, [['thread-a', 'shop.example']], 'Chat hears it once per hold, not per refused request');
+  assert.deepEqual(h.history.slice(-2).map(entry => [entry.action.type, entry.outcome]), [['observe', 'refused'], ['click', 'refused']]);
+  const cancel = await h.dispatch(h.req('cancel'));
+  assert.equal(cancel.status, 'cancelled', 'a run can still clean up while the Card is held');
+});
+
+test('[돌려주기] ends the hold without granting anything; only the menu\'s explicit grant can', async () => {
+  const h = browserAgentControlHarness();
+  const bound = await h.dispatch(h.req('bind', { selection: h.select('interact') }));
+  await h.dispatch(h.req('observe', { binding: bound.binding, options: {} }));
+  h.block.pauseAgentControl();
+  h.agentHandButton.focus();
+  h.block.handBackAgentControl();
+  assert.equal(h.block.agentControl.hold, null);
+  assert.equal(h.runBindings.size, 0, 'no lease comes back');
+  assert.equal(h.selections.size, 0, 'no selection is registered for the Agent');
+  assert.equal(h.transport.browserToolCardPermission('browser-a'), null);
+  assert.deepEqual(h.menus.map(([anchor, options]) => [anchor === h.menuButton, options]), [[true, { regrant: true }]],
+    'it opens the Card menu at its own \'다시 조작 허용\' step');
+  assert.equal(h.agentBadge.textContent, '최근 Agent 활동 1건');
+  assert.equal(h.agentHandButton.hidden, true);
+  assert.equal(h.document.activeElement, h.agentBadge, 'a control that goes away hands focus to the badge');
+  const before = { ...h.calls };
+  const after = await h.dispatch(h.req('act', { binding: bound.binding, guard: { documentId: 'doc-1', revision: 2 }, action: { type: 'click', ref: 'el_1' } }));
+  assert.equal(after.status, 'rejected', 'the old run stays refused after the hold ends');
+  assert.deepEqual(h.calls, before);
+  // The menu item grant is the existing selectBrowserForChat path; its source ends a hold first.
+  assert.match(surfaceSource, /const interactItem = item\(regrant \? '다시 조작 허용' : 'Chat 조작 허용', [^\n]+\n        \(\) => \{ endAgentHold\(\); return selectBrowserForChat\('interact'\); \}\);/);
+  assert.match(surfaceSource, /      if \(regrant\) interactItem\.focus\(\);\n      else if \(focusFirst/);
+  const menu = browserMenuHarness();
+  menu.pressTrigger(0);
+  menu.menu.panel.children[3].onclick({ detail: 0, stopPropagation() {} });
+  assert.deepEqual(menu.effects, ['interact']);
+  assert.deepEqual(menu.holdEnds, [0], 'the explicit grant ends a hold before it selects');
+});
+
+test('Browser Agent badge fades after the run, keeps one status region, and its timeline is a keyboard dialog', async () => {
+  const h = browserAgentControlHarness();
+  const bound = await h.dispatch(h.req('bind', { selection: h.select('interact') }));
+  await h.dispatch(h.req('observe', { binding: bound.binding, options: {} }));
+  assert.equal(h.agentBadge.textContent, 'Agent 조작 중');
+  await h.dispatch(h.req('cancel'));
+  const view = h.block.refreshAgentControl();
+  assert.equal(view.mode, 'recent', 'the run ended: the lease is gone');
+  assert.equal(h.agentBadge.textContent, '최근 Agent 활동 1건');
+  assert.equal(h.agentHandButton.hidden, true, 'nothing to pause once the lease is gone');
+  h.block.agentControl.lastActiveAt -= Surface.BROWSER_AGENT_RECENT_MS;
+  assert.equal(h.block.refreshAgentControl().mode, 'hidden');
+  assert.equal(h.agentBadge.hidden, true);
+  assert.equal(h.block.agentControl.count, 0, 'the next run counts from zero');
+  assert.equal(h.card.dataset.egdAgentControl, undefined);
+
+  await h.dispatch(h.req('observe', { binding: bound.binding, options: {} })); // refused: cancelled run, never reaches the Card
+  assert.equal(h.agentBadge.hidden, true);
+  const second = await h.dispatch({ ...h.req('bind', { selection: h.select('interact', 'second') }), runId: 'run-b' });
+  await h.dispatch({ ...h.req('observe', { binding: second.binding, options: {} }), runId: 'run-b' });
+  h.agentBadge.focus();
+  h.block.toggleAgentTimeline();
+  const panel = h.document.documentElement.appended.at(-1);
+  assert.equal(panel.attrs.role, 'dialog');
+  assert.equal(panel.attrs['aria-label'], 'Agent 활동 기록');
+  assert.equal(h.agentBadge.attrs['aria-expanded'], 'true');
+  assert.equal(h.agentBadge.attrs['aria-controls'], panel.attrs.id);
+  const list = panel.children[1];
+  assert.equal(list.children.length, 2);
+  assert.deepEqual(list.children[0].children.slice(1).map(child => child.children[0]), ['보기', 'shop.example', '성공']);
+  assert.equal(h.document.activeElement.attrs['aria-label'], '활동 기록 닫기', 'focus moves into the dialog');
+  let prevented = false;
+  panel.listeners.keydown({ key: 'Escape', preventDefault() { prevented = true; }, stopPropagation() {} });
+  assert.equal(prevented, true);
+  assert.equal(panel.isConnected, false);
+  assert.equal(h.document.activeElement, h.agentBadge, 'Escape returns focus to the badge');
+  assert.equal(h.agentBadge.attrs['aria-expanded'], 'false');
+  h.block.disposeAgentControl();
+  assert.equal(h.block.agentControl.timer, 0);
+
+  const identity = surfaceSource.match(/    const agentActivity = el\('span', \{ class: 'egd-browser-agent-activity',\n/);
+  assert.ok(identity, 'the passing note is no longer a status region');
+  assert.match(surfaceSource, /const agentBadgeStatus = el\('span', \{ class: 'egd-browser-agent-status', role: 'status' \}, agentBadge\);/);
+  assert.match(surfaceSource, /deskWindow\.slots\.identity\.append\(pageTitle, pageStatus, agentActivity, agentBadgeStatus, agentHandButton\);/,
+    '[일시중지] sits outside the status region');
+  assert.equal((surfaceSource.match(/role: 'status'/g) || []).length >= 1, true);
+  assert.match(surfaceSource, /if \(agentBadge\.textContent !== view\.label\) agentBadge\.textContent = view\.label;/,
+    'the region speaks only when the label changes');
+});
+
+test('Chat gets one local system line when 대표님 holds a Browser Card, in time order, nothing sent', () => {
+  let list = Chat.addBrowserUserControlNotice([], { clientThreadId: 'thread-a', host: 'shop.example', at: 200 });
+  list = Chat.addBrowserUserControlNotice(list, { clientThreadId: 'thread-b', at: 100 });
+  list = Chat.addBrowserUserControlNotice(list, { clientThreadId: 'thread-a', at: 50 });
+  assert.equal(Chat.addBrowserUserControlNotice(list, { clientThreadId: '' }), list, 'no room, no line');
+  assert.deepEqual(Chat.browserUserControlNoticesFor(list, 'thread-a').map(notice => notice.at), [50, 200]);
+  assert.deepEqual(Chat.browserUserControlNoticeView(list[0]),
+    { line: '사용자가 Browser를 직접 조작 중입니다', detail: 'shop.example · Agent의 조작 요청은 거절됩니다' });
+  assert.equal(Chat.browserUserControlNoticeView({}).detail, 'Agent의 조작 요청은 거절됩니다');
+  let many = [];
+  for (let i = 0; i < 50; i++) many = Chat.addBrowserUserControlNotice(many, { clientThreadId: 'thread-a', at: i });
+  assert.equal(many.length, 40);
+  assert.match(surfaceSource, /      noteBrowserUserControl\(clientThreadId, host = ''\) \{\n        const before = state\.codex\.browserUserControlNotices;/);
+  assert.match(surfaceSource, /            if \(Number\.isFinite\(message\.createdAt\)\) appendControlNotices\(message\.createdAt\);\n/);
+  assert.match(surfaceSource, /          appendPlanCards\(planPlacement\.trailing\);\n          appendControlNotices\(\);/);
+  const rule = selector => surfaceCss.match(new RegExp(`^${selector.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')} \\{([^}]+)\\}`, 'm'))?.[1] || '';
+  for (const selector of ['.egd-codex-browser-control', '.egd-browser-agent-timeline', '.egd-browser-card .egd-browser-agent-badge',
+    '.egd-browser-card .egd-browser-agent-hand', '.egd-browser-agent-row']) {
+    assert.ok(rule(selector), `${selector} is styled`);
+    assert.doesNotMatch(rule(selector), /#[0-9a-f]{3,8}\b|rgba?\(/i, `${selector} uses approved tokens only`);
+  }
 });

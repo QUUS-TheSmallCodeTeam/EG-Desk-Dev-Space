@@ -1469,9 +1469,13 @@ export function inheritedMcpView(value) {
 // change, graph } with graph as the state route shows it, { type: 'task.native' }
 // as a hint to read the state again, { type: 'task.plan', plan } with step titles;
 // POST /tasks/continue { boardId, scope, taskId, gateId } for one waiting or
-// expired outside gate -> 200 state | 409 TASK_GATE_STALE). The screen keeps only
-// the graphs it has seen, at most TASK_BOARD_LIMIT, first seen first. No task,
-// gate or source ID and no English status ever reaches the screen text.
+// expired outside gate -> 200 state | 409 TASK_GATE_STALE; POST /tasks/approval
+// { boardId, scope, taskId, approvalId, decision: 'approved'|'rejected' } with the
+// approvalId from state.native.approvals; POST /tasks/resume { boardId, scope }
+// after a bridge restart left the graph on recoveryHold). The screen keeps only
+// the graphs it has seen, at most TASK_BOARD_LIMIT, first seen first, and shows
+// only graphs that were started (an Agent's plan joins once approved). No task,
+// gate, approval or source ID and no English status ever reaches the screen text.
 export const TASK_BOARD_LIMIT = 12;
 const TASK_REF = /^[A-Za-z0-9][A-Za-z0-9._:/-]{0,255}$/;
 const TASK_SCOPE_KEYS = ['graphId', 'requestId', 'runId', 'parentTaskId', 'requestedBy'];
@@ -1503,7 +1507,7 @@ function taskGraphShape(graph) {
     const gates = (Array.isArray(raw.gates) ? raw.gates : []).slice(0, 272)
       .filter(gate => gate && typeof gate === 'object' && typeof gate.gateId === 'string' && typeof gate.kind === 'string')
       .map(gate => Object.fromEntries(TASK_GATE_KEYS.filter(key => gate[key] !== undefined).map(key => [key, gate[key]])));
-    tasks.push({ taskId: raw.taskId, status: typeof raw.status === 'string' ? raw.status : null, gates });
+    tasks.push({ taskId: raw.taskId, status: typeof raw.status === 'string' ? raw.status : null, approvalRequested: raw.approvalRequested === true, gates });
   }
   return {
     ...Object.fromEntries(TASK_SCOPE_KEYS.map(key => [key, graph[key] ?? null])),
@@ -1527,10 +1531,12 @@ function upsertTaskEntry(board, graphId, change) {
   const current = board && Array.isArray(board.graphs) ? board : createTaskBoard();
   const existing = taskBoardEntry(current, graphId);
   const seen = (current.seen || 0) + (existing ? 0 : 1);
-  const entry = { ...(existing || { graphId, graph: null, rev: 0, boardId: null, scope: null, titles: {}, planTitle: null, order: seen }), ...change(existing) };
+  const entry = { ...(existing || { graphId, graph: null, rev: 0, boardId: null, scope: null, titles: {}, planTitle: null, approvals: [], order: seen }), ...change(existing) };
   let graphs = existing ? current.graphs.map(row => row.graphId === graphId ? entry : row) : [...current.graphs, entry];
+  // Over the limit: a finished graph leaves first, then one nobody started, then the oldest.
   while (graphs.length > TASK_BOARD_LIMIT) {
-    const drop = graphs.find(row => row.graphId !== graphId && taskGraphDone(row.graph)) || graphs.find(row => row.graphId !== graphId);
+    const drop = graphs.find(row => row.graphId !== graphId && taskGraphDone(row.graph))
+      || graphs.find(row => row.graphId !== graphId && row.graph && row.graph.activated !== true) || graphs.find(row => row.graphId !== graphId);
     graphs = graphs.filter(row => row !== drop);
   }
   return { graphs, seen };
@@ -1545,18 +1551,22 @@ export function taskBoardWithGraph(board, graph) {
 
 /**
  * GET /tasks/state or a POST /tasks/* reply: the Board and exact scope the
- * continue request needs, and the graph unless a newer frame arrived since the
- * read began (ifRev = the entry's rev when the read started).
+ * continue request needs, the approval requests the graph has issued, and the
+ * graph unless a newer frame arrived since the read began (ifRev = the entry's
+ * rev when the read started).
  */
 export function taskBoardWithState(board, payload, { ifRev } = {}) {
   const shaped = taskGraphShape(payload?.graph);
   if (!shaped) return board || createTaskBoard();
   const boardId = taskRef(payload?.native?.boardId) ? payload.native.boardId : null;
   const scope = taskScopeShape(payload?.native?.scope);
+  const approvals = Array.isArray(payload?.native?.approvals) ? payload.native.approvals
+    .filter(item => taskRef(item?.approvalId) && taskRef(item?.taskId) && typeof item.status === 'string').slice(-256)
+    .map(item => ({ approvalId: item.approvalId, taskId: item.taskId, status: item.status })) : null;
   return upsertTaskEntry(board, shaped.graphId, existing => {
     const fresh = ifRev === undefined || (existing?.rev || 0) === ifRev;
     return { ...(fresh ? { graph: shaped, rev: (existing?.rev || 0) + 1 } : {}),
-      ...(boardId ? { boardId } : {}), ...(scope && scope.graphId === shaped.graphId ? { scope } : {}) };
+      ...(boardId ? { boardId } : {}), ...(scope && scope.graphId === shaped.graphId ? { scope } : {}), ...(approvals ? { approvals } : {}) };
   });
 }
 
@@ -1579,9 +1589,12 @@ export function taskBoardWithout(board, graphId) {
 export const taskBoardOpenGraphIds = board => (board?.graphs || [])
   .filter(entry => !entry.graph || !taskGraphDone(entry.graph)).map(entry => entry.graphId);
 
+// A graph nobody started yet (an Agent's plan before approval) is not a task to wait on.
+const taskBoardShown = board => (board?.graphs || []).filter(entry => entry.graph?.activated === true);
+
 /** '진행 N건 · 대기 M건' (running; not started yet), or what finished when nothing is left. */
 export function taskBoardSummary(board) {
-  const tasks = (board?.graphs || []).flatMap(entry => entry.graph?.tasks || []);
+  const tasks = taskBoardShown(board).flatMap(entry => entry.graph.tasks);
   const count = statuses => tasks.filter(task => statuses.includes(task.status)).length;
   const running = count(['running']);
   const waiting = count(TASK_WAITING_STATUSES);
@@ -1664,15 +1677,85 @@ export function taskContinueErrorText(error) {
   return '진행하지 못했습니다. 잠시 뒤 다시 시도해 주세요.';
 }
 
+/** The approval a waiting task asked for (state.native.approvals), or null: never for an unstarted or cancelled graph. */
+export function taskApprovalId(entry, taskId) {
+  const graph = entry?.graph;
+  const task = graph?.tasks.find(row => row.taskId === taskId);
+  if (!graph || graph.activated !== true || graph.cancelRequested === true) return null;
+  if (task?.status !== 'approval-required' || task.approvalRequested !== true) return null;
+  const gate = task.gates.find(row => row.kind === 'approval');
+  if (gate && gate.status !== 'waiting') return null;
+  const pending = (entry.approvals || []).filter(row => row.taskId === taskId && row.status === 'pending');
+  return pending.length ? pending.at(-1).approvalId : null;
+}
+
+/** POST /tasks/approval body for 대표님's own decision, or null while nothing is waiting for one. */
+export function buildTaskApprovalRequest(entry, taskId, decision) {
+  if (!['approved', 'rejected'].includes(decision) || !taskRef(entry?.boardId)) return null;
+  const approvalId = taskApprovalId(entry, taskId);
+  if (!approvalId) return null;
+  const scope = entry.scope || taskScopeShape(entry.graph);
+  if (!scope || scope.graphId !== entry.graph.graphId) return null;
+  return { boardId: entry.boardId, scope: { ...scope }, taskId, approvalId, decision };
+}
+
+/** Korean text for a refused approval decision; the bridge message stays internal. */
+export function taskApprovalErrorText(error) {
+  const code = error?.code;
+  if (code === 'TASK_APPROVAL_STALE') return '이 승인 요청은 이미 처리되었거나 바뀌었습니다. 목록을 다시 확인했습니다.';
+  if (code === 'TASK_FENCED') return '취소된 작업이라 승인 여부를 정할 수 없습니다.';
+  if (code === 'TASK_NOT_FOUND') return '이 작업을 더 이상 찾을 수 없습니다.';
+  if (code === 'TASK_ROUTE_NOT_FOUND') return '지금 연결된 EG-Desk는 작업 승인을 지원하지 않습니다.';
+  if (code === 'LOGIN_REQUIRED') return '로그인한 뒤 승인할 수 있습니다.';
+  if (code === 'BRIDGE_OFFLINE') return 'AI 엔진이 아직 준비되지 않아 처리하지 못했습니다. 잠시 뒤 다시 시도해 주세요.';
+  if (code === 'TASK_SCOPE' || code === 'E_TASK_SCOPE' || code === 'TASK_RECONCILE_REQUIRED' || error?.status === 409)
+    return '작업 상태가 바뀌어 처리하지 못했습니다. 목록을 다시 확인한 뒤 시도해 주세요.';
+  if (!error?.status) return 'EG-Desk에 연결하지 못해 처리하지 못했습니다. 연결을 확인한 뒤 다시 시도해 주세요.';
+  return '처리하지 못했습니다. 잠시 뒤 다시 시도해 주세요.';
+}
+
+/** Graphs a bridge restart left on hold: started, not cancelled, not finished. Only '이어서 진행' moves them on. */
+export const taskBoardHeldEntries = board => (board?.graphs || []).filter(entry => {
+  const graph = entry.graph;
+  return !!graph && graph.recoveryHold === true && graph.activated === true && graph.cancelRequested !== true && !taskGraphDone(graph);
+});
+
+/** POST /tasks/resume body for one held graph, or null while its Board is unknown or it is not held. */
+export function buildTaskResumeRequest(entry) {
+  if (!taskRef(entry?.boardId) || !taskBoardHeldEntries({ graphs: [entry] }).length) return null;
+  const scope = entry.scope || taskScopeShape(entry.graph);
+  if (!scope || scope.graphId !== entry.graph.graphId) return null;
+  return { boardId: entry.boardId, scope: { ...scope } };
+}
+
+/** Korean text for a refused resume. */
+export function taskResumeErrorText(error) {
+  const code = error?.code;
+  if (code === 'TASK_FENCED') return '취소된 작업이라 이어 갈 수 없습니다.';
+  if (code === 'TASK_NOT_FOUND') return '이 작업을 더 이상 찾을 수 없습니다.';
+  if (code === 'TASK_ROUTE_NOT_FOUND') return '지금 연결된 EG-Desk는 이어 가기를 지원하지 않습니다.';
+  if (code === 'LOGIN_REQUIRED') return '로그인한 뒤 이어 갈 수 있습니다.';
+  if (code === 'BRIDGE_OFFLINE') return 'AI 엔진이 아직 준비되지 않아 이어 가지 못했습니다. 잠시 뒤 다시 시도해 주세요.';
+  if (error?.status === 409) return '작업 상태를 아직 확인하는 중이라 이어 가지 못했습니다. 잠시 뒤 다시 시도해 주세요.';
+  if (!error?.status) return 'EG-Desk에 연결하지 못해 이어 가지 못했습니다. 연결을 확인한 뒤 다시 시도해 주세요.';
+  return '이어 가지 못했습니다. 잠시 뒤 다시 시도해 주세요.';
+}
+
 /**
- * Everything the list draws: the summary, then each graph's tasks in order with
- * their conditions. A step title names a task when a plan gave one; otherwise
- * '작업 N' in graph order. continuing = { graphId, taskId, gateId, phase, error }.
+ * Everything the list draws: the hold notice, the summary, then each started
+ * graph's tasks in order with their conditions. A step title names a task when a
+ * plan gave one; otherwise '작업 N' in graph order.
+ * continuing = { graphId, taskId, gateId, phase, error } ('계속');
+ * approving = { graphId, taskId, decision, phase, error } (승인/거절);
+ * resuming = { phase, error } ('이어서 진행').
  */
-export function taskBoardView(board, { folderName = null, continuing = null, now = Date.now() } = {}) {
+export function taskBoardView(board, { folderName = null, continuing = null, approving = null, resuming = null, now = Date.now() } = {}) {
   const summary = taskBoardSummary(board);
-  if (!summary.visible) return { visible: false, summary: '', counts: summary, groups: [] };
-  const entries = (board.graphs || []).filter(entry => entry.graph?.tasks.length);
+  if (!summary.visible) return { visible: false, summary: '', counts: summary, held: null, groups: [] };
+  const heldCount = taskBoardHeldEntries(board).length;
+  const held = heldCount ? { count: heldCount, text: '브리지가 다시 시작돼 작업이 멈춰 있습니다',
+    phase: resuming?.phase || null, error: resuming?.phase === 'error' ? resuming.error || null : null } : null;
+  const entries = taskBoardShown(board).filter(entry => entry.graph.tasks.length);
   const groups = [...entries].sort((a, b) => b.order - a.order).map(entry => {
     const graph = entry.graph;
     const taskNames = Object.fromEntries(graph.tasks.map((task, index) => [task.taskId, entry.titles?.[task.taskId] || `작업 ${index + 1}`]));
@@ -1680,12 +1763,290 @@ export function taskBoardView(board, { folderName = null, continuing = null, now
       taskId: task.taskId, name: taskNames[task.taskId], status: task.status, statusText: taskStatusText(task.status),
       conditions: task.gates.map(gate => {
         const here = continuing && continuing.graphId === entry.graphId && continuing.taskId === task.taskId && continuing.gateId === gate.gateId;
+        const deciding = gate.kind === 'approval' && approving && approving.graphId === entry.graphId && approving.taskId === task.taskId ? approving : null;
         return { ...taskGateView(gate, { taskNames, folderName, now }), continuable: taskGateContinuable(graph, task, gate),
-          phase: here ? continuing.phase : null, error: here && continuing.phase === 'error' ? continuing.error || null : null };
+          phase: here ? continuing.phase : null,
+          approvable: gate.kind === 'approval' && !!taskApprovalId(entry, task.taskId),
+          approvalPhase: deciding ? deciding.phase : null, approvalDecision: deciding ? deciding.decision : null,
+          error: here && continuing.phase === 'error' ? continuing.error || null : deciding?.phase === 'error' ? deciding.error || null : null };
       }),
     }));
     const title = entry.planTitle || (entries.length > 1 ? `작업 묶음 ${entries.indexOf(entry) + 1}` : null);
     return { graphId: entry.graphId, title, tasks };
   });
-  return { visible: true, summary: summary.text, counts: summary, groups };
+  return { visible: true, summary: summary.text, counts: summary, held, groups };
+}
+
+// CHAT-06 Await: plans an Agent proposed (helper contract: chat.event
+// 'plan.proposed' on the proposing run, details { planId, graphId, boardId, title,
+// status, callId, tasks: [{ taskId, title, resumeIn, dependsOn, gates: [{ gateId,
+// kind }] }] }; SSE codex { type: 'task.plan', planId, change, plan } and GET
+// /tasks/plans -> { plans } with plan = { planId, title, status, boardId, scope,
+// graphId, origin: { conversationId, clientThreadId }, tasks: [{ taskId, title,
+// resumeIn, status, dependsOn, gates }] }; GET /tasks/plans?planId= adds each
+// step's instructions (this account's plans only); POST
+// /tasks/plans/:planId/approve|reject with an empty body -> { plan, graph, native,
+// board }). Nothing runs before 대표님 approves, and the screen never approves by
+// itself: approving takes one confirm. The card sits under the Agent answer that
+// proposed it. Plan, step, graph and gate IDs never reach the screen text.
+export const PLAN_PROPOSAL_LIMIT = 24;
+const PLAN_REF = /^plan-[A-Za-z0-9-]{1,80}$/;
+const PLAN_STATUSES = ['proposed', 'approved', 'rejected', 'cancelled', 'completed'];
+const PLAN_STATUS_TEXT = [['proposed', '승인 대기'], ['approved', '승인됨'], ['rejected', '거절됨'], ['cancelled', '취소됨'],
+  ['completed', '완료'], ['missing', '찾을 수 없음']];
+const PLAN_STATUS_NOTE = [['approved', '단계가 조건대로 저절로 진행됩니다. 진행 상황은 작업 목록에서 볼 수 있습니다.'],
+  ['rejected', '거절한 계획은 실행되지 않습니다.'], ['cancelled', '취소되어 더 진행하지 않습니다.'], ['completed', '모든 단계가 끝났습니다.'],
+  ['missing', '이 계획을 더 이상 찾을 수 없습니다.']];
+const PLAN_STEP_LIMIT = 12;
+const PLAN_GATE_KEYS = ['gateId', 'kind', 'origin', 'pathPrefix', 'root', 'relativeGlob', 'label', 'timeoutMs', 'expiresAt'];
+export const planRef = value => typeof value === 'string' && PLAN_REF.test(value);
+// Step instructions keep their lines; other control characters go.
+const planInstructions = value => typeof value === 'string'
+  ? value.replace(/\r\n?/g, '\n').replace(/[\u0000-\u0008\u000b-\u001f\u007f\u2028\u2029]/g, '').trim().slice(0, 4000) || null : null;
+// A decided plan never goes back to waiting on a late frame.
+const planStatusAfter = (previous, incoming) => !PLAN_STATUSES.includes(incoming) ? previous || 'proposed'
+  : previous && previous !== 'proposed' && incoming === 'proposed' ? previous : incoming;
+
+function planStepsShape(tasks) {
+  if (!Array.isArray(tasks)) return null;
+  const steps = [];
+  for (const raw of tasks.slice(0, PLAN_STEP_LIMIT)) {
+    if (!raw || typeof raw !== 'object' || !taskRef(raw.taskId) || steps.some(step => step.taskId === raw.taskId)) continue;
+    steps.push({
+      taskId: raw.taskId, title: taskLine(raw.title, 200), resumeIn: raw.resumeIn === 'newThread' ? 'newThread' : 'sameThread',
+      dependsOn: (Array.isArray(raw.dependsOn) ? raw.dependsOn : []).filter(taskRef).slice(0, PLAN_STEP_LIMIT),
+      // An upstream step is named through dependsOn; only outside waits are listed.
+      gates: (Array.isArray(raw.gates) ? raw.gates : []).slice(0, 16)
+        .filter(gate => gate && typeof gate === 'object' && typeof gate.gateId === 'string' && typeof gate.kind === 'string' && gate.kind !== 'task')
+        .map(gate => Object.fromEntries(PLAN_GATE_KEYS.filter(key => gate[key] !== undefined).map(key => [key, gate[key]]))),
+    });
+  }
+  return steps;
+}
+
+export const createPlanProposals = () => ({ plans: [], seen: 0 });
+export const planProposalEntry = (store, planId) => (store?.plans || []).find(entry => entry.planId === planId) || null;
+
+function upsertPlanEntry(store, planId, change) {
+  const current = store && Array.isArray(store.plans) ? store : createPlanProposals();
+  const existing = planProposalEntry(current, planId);
+  const seen = (current.seen || 0) + (existing ? 0 : 1);
+  const entry = { ...(existing || { planId, graphId: null, boardId: null, scope: null, title: '', status: 'proposed',
+    conversationId: null, clientThreadId: null, runId: null, steps: [], instructions: null, detail: 'idle',
+    openSteps: [], decision: null, order: seen }), ...change(existing) };
+  let plans = existing ? current.plans.map(row => row.planId === planId ? entry : row) : [...current.plans, entry];
+  while (plans.length > PLAN_PROPOSAL_LIMIT) {
+    const drop = plans.find(row => row.planId !== planId && row.status !== 'proposed') || plans.find(row => row.planId !== planId);
+    plans = plans.filter(row => row !== drop);
+  }
+  return { plans, seen };
+}
+const patchPlanEntry = (store, planId, change) => planProposalEntry(store, planId)
+  ? upsertPlanEntry(store, planId, change) : store || createPlanProposals();
+
+/** chat.event 'plan.proposed' on the run that proposed it: where the card goes. */
+export function planProposalsWithEvent(store, run, details) {
+  const steps = planStepsShape(details?.tasks);
+  if (!planRef(details?.planId) || !steps || !nonEmptyId(run?.conversationId) || !nonEmptyId(run?.runId)) return store || createPlanProposals();
+  return upsertPlanEntry(store, details.planId, existing => ({
+    graphId: taskRef(details.graphId) ? details.graphId : existing?.graphId ?? null,
+    boardId: taskRef(details.boardId) ? details.boardId : existing?.boardId ?? null,
+    title: taskLine(details.title, 200) || existing?.title || '',
+    status: planStatusAfter(existing?.status, details.status ?? 'proposed'),
+    conversationId: run.conversationId, clientThreadId: nonEmptyId(run.clientThreadId) || existing?.clientThreadId || null, runId: run.runId,
+    // The event names only each wait's kind; a plan frame's fuller steps stay.
+    steps: existing?.steps?.length ? existing.steps : steps,
+  }));
+}
+
+/** A task.plan frame, a GET /tasks/plans row or detail, or a decision reply's plan. */
+export function planProposalsWithPlan(store, plan) {
+  const steps = planStepsShape(plan?.tasks);
+  if (!plan || typeof plan !== 'object' || !planRef(plan.planId) || !steps) return store || createPlanProposals();
+  const scope = taskScopeShape(plan.scope);
+  const detailed = plan.tasks.some(task => task && typeof task === 'object' && Object.hasOwn(task, 'instructions'));
+  const instructions = detailed ? Object.fromEntries(plan.tasks.filter(task => taskRef(task?.taskId)).slice(0, PLAN_STEP_LIMIT)
+    .map(task => [task.taskId, planInstructions(task.instructions)])) : null;
+  return upsertPlanEntry(store, plan.planId, existing => ({
+    graphId: taskRef(plan.graphId) ? plan.graphId : scope?.graphId ?? existing?.graphId ?? null,
+    boardId: taskRef(plan.boardId) ? plan.boardId : existing?.boardId ?? null,
+    scope: scope || existing?.scope || null,
+    title: taskLine(plan.title, 200) || existing?.title || '',
+    status: planStatusAfter(existing?.status, plan.status),
+    conversationId: nonEmptyId(plan.origin?.conversationId) || existing?.conversationId || null,
+    clientThreadId: nonEmptyId(plan.origin?.clientThreadId) || existing?.clientThreadId || null,
+    // The proposing run: from the event, else the plan's own scope.
+    runId: existing?.runId || scope?.runId || null,
+    steps,
+    ...(instructions ? { instructions, detail: 'loaded' } : {}),
+  }));
+}
+
+/** 'loading' | 'error' while the step instructions are read. */
+export const planProposalsWithDetail = (store, planId, detail) => patchPlanEntry(store, planId, () => ({ detail }));
+/** Opens or folds one step's instructions. */
+export const planProposalsWithStep = (store, planId, taskId) => patchPlanEntry(store, planId, existing => ({
+  openSteps: existing.openSteps.includes(taskId) ? existing.openSteps.filter(id => id !== taskId) : [...existing.openSteps, taskId] }));
+/** decision = { action: 'approve'|'reject', phase: 'confirm'|'sending'|'error', error } or null. */
+export const planProposalsWithDecision = (store, planId, decision) => patchPlanEntry(store, planId, () => ({
+  decision: decision ? { action: decision.action, phase: decision.phase, error: decision.error || null } : null }));
+/** The bridge no longer has this plan for this account. */
+export const planProposalsWithMissing = (store, planId) => patchPlanEntry(store, planId, () => ({ status: 'missing' }));
+
+/** Whether a plan's graph belongs in the task list: once approved, also after it finished or stopped. */
+export const planOnTaskBoard = plan => !['proposed', 'rejected', 'missing'].includes(plan?.status);
+
+/** The plans a conversation proposed, first proposed first. */
+export function planProposalsForThread(store, thread) {
+  if (!thread) return [];
+  const binding = clientThreadBinding(thread);
+  return (store?.plans || []).filter(entry => (thread.conversationId && entry.conversationId === thread.conversationId)
+    || (binding && entry.clientThreadId === binding)).sort((a, b) => a.order - b.order);
+}
+
+/**
+ * Where each card goes: after the last shown Agent answer of the run that
+ * proposed it. A plan still waiting whose answer is not shown goes after the
+ * conversation; a decided one with no answer to sit under is not shown.
+ */
+export function planProposalPlacement(entries, messages) {
+  const byMessageId = new Map();
+  const trailing = [];
+  for (const entry of entries || []) {
+    const anchor = entry.runId ? (messages || []).findLast(message => message.role === 'assistant' && message.runId === entry.runId
+      && !(message.status === 'streaming' && !message.content)
+      && (!entry.conversationId || !message.conversationId || message.conversationId === entry.conversationId)) : null;
+    if (anchor) byMessageId.set(anchor.id, [...(byMessageId.get(anchor.id) || []), entry]);
+    else if (entry.status === 'proposed') trailing.push(entry);
+  }
+  return { byMessageId, trailing };
+}
+
+function durationText(ms) {
+  const minutes = Math.max(1, Math.round(ms / 60000));
+  if (minutes < 60) return `${minutes}분`;
+  const hours = Math.floor(minutes / 60), rest = minutes % 60;
+  if (!rest && hours >= 24 && hours % 24 === 0) return `${hours / 24}일`;
+  return rest ? `${hours}시간 ${rest}분` : `${hours}시간`;
+}
+
+/** One wait of a proposed step, in the task list's words, with how long it may wait. */
+function planWaitText(gate, { folderName, now }) {
+  const shown = taskGateView({ ...gate, status: 'waiting' }, { folderName, now });
+  const limit = Number.isSafeInteger(gate.timeoutMs) && gate.timeoutMs > 0 ? `최대 ${durationText(gate.timeoutMs)}` : null;
+  return [shown.text, shown.time, limit].filter(Boolean).join(' · ');
+}
+
+/** Everything one approval card draws. */
+export function planProposalView(entry, { folderName = null, now = Date.now() } = {}) {
+  if (!entry) return null;
+  const titles = new Map(entry.steps.map((step, index) => [step.taskId, step.title || `${index + 1}단계`]));
+  const numbers = new Map(entry.steps.map((step, index) => [step.taskId, index + 1]));
+  const steps = entry.steps.map((step, index) => {
+    const open = entry.openSteps.includes(step.taskId);
+    const after = step.dependsOn.filter(id => titles.has(id) && id !== step.taskId).map(id => `${numbers.get(id)}. ${titles.get(id)}`);
+    const text = entry.instructions ? entry.instructions[step.taskId] ?? null : null;
+    const instructions = !open ? null
+      : entry.instructions ? (text ? { state: 'loaded', text } : { state: 'empty', text: '이 단계의 지침을 볼 수 없습니다.' })
+        : entry.detail === 'error' ? { state: 'error', text: '지침을 불러오지 못했습니다.' }
+          : { state: 'loading', text: '지침을 불러오는 중…' };
+    return {
+      taskId: step.taskId, number: index + 1, title: step.title || `${index + 1}단계`,
+      after: after.length ? `먼저 끝낼 단계 · ${after.join(', ')}` : null,
+      waits: step.gates.map(gate => planWaitText(gate, { folderName, now })),
+      where: step.resumeIn === 'newThread' ? '새 대화에서 진행' : null,
+      open, instructions,
+    };
+  });
+  const decision = entry.decision ? { action: entry.decision.action, phase: entry.decision.phase, error: entry.decision.error || null } : null;
+  return {
+    planId: entry.planId, title: entry.title || '제목 없는 계획', status: entry.status,
+    statusText: lookup(PLAN_STATUS_TEXT, entry.status) || '상태 확인 중',
+    note: lookup(PLAN_STATUS_NOTE, entry.status),
+    decidable: entry.status === 'proposed', sending: decision?.phase === 'sending', decision,
+    steps: entry.status === 'proposed' ? steps : [],
+    stepCount: steps.length,
+    showTaskList: ['approved', 'completed', 'cancelled'].includes(entry.status),
+  };
+}
+
+/**
+ * POST /tasks/plans/:planId/approve|reject with an empty body, or null: only a
+ * plan still waiting, only one decision at a time, and approving only after its
+ * confirm ('승인하면 단계가 조건대로 저절로 진행됩니다').
+ */
+export function buildPlanDecisionRequest(entry, action) {
+  if (!['approve', 'reject'].includes(action) || !planRef(entry?.planId) || entry.status !== 'proposed') return null;
+  if (entry.decision?.phase === 'sending') return null;
+  if (action === 'approve' && !(entry.decision?.action === 'approve' && entry.decision.phase === 'confirm')) return null;
+  return { path: `/tasks/plans/${entry.planId}/${action}`, body: {} };
+}
+
+/** Korean text for a refused plan decision; the bridge message stays internal. */
+export function planDecisionErrorText(error, action) {
+  const verb = action === 'approve' ? '승인' : '거절';
+  const code = error?.code;
+  if (code === 'PLAN_NOT_FOUND') return '이 계획을 찾을 수 없습니다. 이미 정리되었거나 다른 계정의 계획입니다.';
+  if (code === 'PLAN_STALE') return action === 'approve' ? '이미 거절된 계획이라 승인할 수 없습니다.' : '이미 승인된 계획이라 거절할 수 없습니다.';
+  if (code === 'TASK_FENCED') return action === 'approve' ? '취소된 계획이라 승인할 수 없습니다.' : '이미 취소된 계획입니다.';
+  if (code === 'TASK_ROUTE_NOT_FOUND') return '지금 연결된 EG-Desk는 계획 승인을 지원하지 않습니다.';
+  if (code === 'LOGIN_REQUIRED' || code === 'TASK_AUTHORITY') return `로그인한 뒤 ${verb}할 수 있습니다.`;
+  if (code === 'BRIDGE_OFFLINE') return `AI 엔진이 아직 준비되지 않아 ${verb}하지 못했습니다. 잠시 뒤 다시 시도해 주세요.`;
+  if (error?.status === 409) return `계획 상태가 바뀌어 ${verb}하지 못했습니다. 다시 확인한 뒤 시도해 주세요.`;
+  if (!error?.status) return `EG-Desk에 연결하지 못해 ${verb}하지 못했습니다. 연결을 확인한 뒤 다시 시도해 주세요.`;
+  return `${verb}하지 못했습니다. 잠시 뒤 다시 시도해 주세요.`;
+}
+
+// CHAT-06 Await: an approved same-thread step comes back into its conversation
+// as a user turn that starts with <egdesk-await-resume> (helper
+// egdesk-await-resume.mjs). It reads as one system line, never as 대표님's
+// bubble and never as raw XML; only the step title and what was met are kept.
+const AWAIT_RESUME_TAG = '<egdesk-await-resume>';
+const AWAIT_CONDITION_TEXT = [['task', ['앞 단계 완료']], ['approval', ['계획 승인됨']], ['oauth', ['로그인 완료', '로그인 대기 건너뜀']],
+  ['file', ['파일 도착', '파일 대기 건너뜀']], ['terminalExit', ['터미널 종료', '터미널 대기 건너뜀']], ['userAction', ['확인됨']]];
+const xmlText = value => String(value).replace(/<!\[CDATA\[([\s\S]*?)\]\]>/g, '$1')
+  .replace(/&lt;/g, '<').replace(/&gt;/g, '>').replace(/&quot;/g, '"').replace(/&amp;/g, '&');
+
+/** The system line for a plan step resumed in place, or null for any other message. */
+export function awaitResumeMessageView(message) {
+  if (message?.role !== 'user') return null;
+  const raw = typeof message.content === 'string' && message.content ? message.content : typeof message.text === 'string' ? message.text : '';
+  if (!raw.trimStart().startsWith(AWAIT_RESUME_TAG)) return null;
+  // Words 대표님 typed on this screen stay a bubble, whatever they start with.
+  if ([message.requestId, message.clientId].some(id => typeof id === 'string' && id.startsWith('request-'))) return null;
+  const pick = pattern => { const match = pattern.exec(raw); return match ? taskLine(xmlText(match[1]), 120) : ''; };
+  const step = pick(/<next_task\b[^>]{0,400}>\s*<title>([\s\S]{0,1200}?)<\/title>/);
+  const plan = pick(/<plan\b[^>]{0,400}>([\s\S]{0,1200}?)<\/plan>/);
+  const met = [];
+  for (const match of raw.matchAll(/<condition\b([^>]{0,400})>/g)) {
+    const words = lookup(AWAIT_CONDITION_TEXT, /\bkind="([A-Za-z]+)"/.exec(match[1])?.[1]);
+    const word = words ? (/\bby="user\.action"/.test(match[1]) && words[1]) || words[0] : '조건 충족';
+    if (!met.includes(word)) met.push(word);
+    if (met.length > 8) break;
+  }
+  const shown = met.length > 3 ? [...met.slice(0, 3), `외 ${met.length - 3}건`] : met;
+  const summary = [step || plan, ...shown].filter(Boolean).join(' · ');
+  const text = '대기 조건이 풀려 작업을 이어갑니다';
+  return { text, summary, line: summary ? `${text} · ${summary}` : text };
+}
+
+// BRW-13: 대표님 took a Browser Card back while an Agent held it. A room whose
+// run held that Card gets one quiet system line per hold; nothing is sent.
+export const BROWSER_USER_CONTROL_LINE = '사용자가 Browser를 직접 조작 중입니다';
+export function addBrowserUserControlNotice(list, { clientThreadId, host = '', at = Date.now() } = {}, limit = 40) {
+  const previous = Array.isArray(list) ? list : [];
+  if (typeof clientThreadId !== 'string' || !clientThreadId || clientThreadId.length > 160) return previous;
+  const seq = (previous.at(-1)?.seq || 0) + 1;
+  return [...previous, { id: `browser-user-control-${seq}`, seq, clientThreadId,
+    host: typeof host === 'string' ? host.slice(0, 253) : '', at: Number.isFinite(at) ? at : Date.now() }].slice(-limit);
+}
+/** This room's lines, oldest first. */
+export function browserUserControlNoticesFor(list, clientThreadId) {
+  if (!Array.isArray(list) || typeof clientThreadId !== 'string' || !clientThreadId) return [];
+  return list.filter(notice => notice?.clientThreadId === clientThreadId && Number.isFinite(notice.at))
+    .sort((left, right) => left.at - right.at);
+}
+export function browserUserControlNoticeView(notice) {
+  const refused = 'Agent의 조작 요청은 거절됩니다';
+  return { line: BROWSER_USER_CONTROL_LINE, detail: notice?.host ? `${notice.host} · ${refused}` : refused };
 }

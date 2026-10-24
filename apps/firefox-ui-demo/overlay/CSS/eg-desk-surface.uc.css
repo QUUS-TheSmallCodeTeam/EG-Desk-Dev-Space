@@ -1527,6 +1527,143 @@
   background: var(--egd-card-hover-bg);
 }
 
+/* BRW-13: who acts on a Browser Card. A quiet pill in the title row (the only
+   status region), one text button beside it, and a timeline popover. Tokens
+   only, so dark follows the token block. */
+.egd-browser-agent-status {
+  display: inline-flex;
+  flex: 0 1 auto;
+  min-width: 0;
+}
+.egd-browser-card .egd-browser-agent-badge {
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
+  min-width: 0;
+  max-width: 160px;
+  height: 20px;
+  padding: 0 8px;
+  overflow: hidden;
+  border: 1px solid color-mix(in srgb, var(--egd-primary) 26%, transparent);
+  border-radius: 999px;
+  background: color-mix(in srgb, var(--egd-primary) 10%, transparent);
+  color: var(--egd-primary);
+  font: 600 11px/1 var(--egd-font);
+  white-space: nowrap;
+  cursor: pointer;
+}
+.egd-browser-card .egd-browser-agent-badge::before {
+  content: "";
+  flex: none;
+  width: 6px;
+  height: 6px;
+  border-radius: 50%;
+  background: currentColor;
+}
+.egd-browser-card .egd-browser-agent-badge[data-mode="recent"] {
+  border-color: var(--egd-outline);
+  background: transparent;
+  color: var(--egd-on-surface-variant);
+}
+.egd-browser-card .egd-browser-agent-badge[data-mode="recent"]::before { opacity: .55; }
+.egd-browser-card .egd-browser-agent-badge[data-mode="user"] {
+  border-color: color-mix(in srgb, var(--egd-warning-ink) 26%, transparent);
+  background: color-mix(in srgb, var(--egd-warning-ink) 10%, transparent);
+  color: var(--egd-warning-ink);
+}
+.egd-browser-card .egd-browser-agent-badge:hover { background: var(--egd-card-hover-bg); }
+.egd-browser-card .egd-browser-agent-hand {
+  flex: none;
+  height: 22px;
+  padding: 0 8px;
+  border: 1px solid var(--egd-outline);
+  border-radius: 6px;
+  background: var(--egd-surface-elevated);
+  color: var(--egd-on-surface);
+  font: 600 11px/1 var(--egd-font);
+  white-space: nowrap;
+  cursor: pointer;
+}
+.egd-browser-card .egd-browser-agent-hand:hover { background: var(--egd-card-hover-bg); color: var(--egd-primary); }
+.egd-browser-card .egd-browser-agent-badge:focus-visible,
+.egd-browser-card .egd-browser-agent-hand:focus-visible {
+  outline: 2px solid var(--egd-primary);
+  outline-offset: 1px;
+}
+.egd-browser-card .egd-browser-agent-badge[hidden],
+.egd-browser-card .egd-browser-agent-hand[hidden] { display: none; }
+/* The persistent badge says it; the passing note would only repeat it. */
+.egd-browser-card:is([data-egd-agent-control="operating"], [data-egd-agent-control="user"]) .egd-browser-agent-activity { display: none; }
+/* Readable at any Desk zoom, like the rest of the attached Browser bar. */
+.egd-browser-card[data-egd-browser-presentation] .egd-browser-agent-badge,
+.egd-browser-card[data-egd-browser-presentation] .egd-browser-agent-hand {
+  height: calc(20px * var(--egd-browser-ui-scale));
+  padding-inline: calc(8px * var(--egd-browser-ui-scale));
+  font-size: calc(11px * var(--egd-browser-ui-scale));
+}
+.egd-browser-card[data-egd-browser-presentation] .egd-browser-agent-badge { max-width: calc(160px * var(--egd-browser-ui-scale)); }
+
+.egd-browser-agent-timeline {
+  position: fixed;
+  z-index: 100020;
+  box-sizing: border-box;
+  width: 320px;
+  max-height: 360px;
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  padding: 10px 10px 8px;
+  border-radius: 8px;
+  color: var(--egd-on-surface);
+  font: 12px/1.45 var(--egd-font, system-ui);
+}
+.egd-browser-agent-timeline-head { display: flex; align-items: center; gap: 8px; }
+.egd-browser-agent-timeline-title { font-size: 12px; font-weight: 600; }
+.egd-browser-agent-timeline-count { flex: 1; color: var(--egd-on-surface-variant); font-size: 11px; }
+.egd-browser-agent-timeline .egd-browser-agent-timeline-close {
+  display: inline-grid;
+  place-items: center;
+  width: 24px;
+  height: 24px;
+  border-radius: 6px;
+  color: var(--egd-on-surface-variant);
+}
+.egd-browser-agent-timeline .egd-browser-agent-timeline-close:hover { background: var(--egd-card-hover-bg); }
+.egd-browser-agent-timeline .egd-browser-agent-timeline-close:focus-visible { outline: 2px solid var(--egd-primary); outline-offset: -2px; }
+.egd-browser-agent-timeline-close .egd-ui-icon { width: 14px; height: 14px; }
+.egd-browser-agent-timeline-list {
+  flex: 1 1 auto;
+  min-height: 0;
+  margin: 0;
+  padding: 0;
+  overflow-y: auto;
+  list-style: none;
+}
+.egd-browser-agent-row {
+  display: grid;
+  grid-template-columns: auto auto minmax(0, 1fr) auto;
+  align-items: baseline;
+  gap: 8px;
+  padding: 5px 2px;
+  border-top: 1px solid var(--egd-outline-variant);
+}
+.egd-browser-agent-row:first-child { border-top: 0; }
+.egd-browser-agent-row-time { color: var(--egd-on-surface-variant); font-size: 11px; font-variant-numeric: tabular-nums; }
+.egd-browser-agent-row-action { font-weight: 600; white-space: nowrap; }
+.egd-browser-agent-row-target {
+  min-width: 0;
+  overflow: hidden;
+  color: var(--egd-on-surface-variant);
+  white-space: nowrap;
+  text-overflow: ellipsis;
+}
+.egd-browser-agent-row-outcome { font-size: 11px; font-weight: 600; white-space: nowrap; }
+.egd-browser-agent-row-outcome[data-outcome="confirmed"] { color: var(--egd-success-ink); }
+.egd-browser-agent-row-outcome[data-outcome="unknown"] { color: var(--egd-warning-ink); }
+.egd-browser-agent-row-outcome[data-outcome="refused"] { color: var(--egd-danger-ink); }
+.egd-browser-agent-row-empty { padding: 8px 2px; color: var(--egd-on-surface-variant); }
+.egd-browser-agent-timeline-note { margin: 0; color: var(--egd-on-surface-variant); font-size: 11px; }
+
 .egd-card-body {
   flex: 1;
   overflow: hidden;
@@ -6735,6 +6872,183 @@ button.egd-task-confirm-go[aria-disabled="true"] { opacity: .6; cursor: default;
 }
 .egd-task-confirm > span { flex: 1 1 auto; min-width: 0; overflow-wrap: anywhere; }
 .egd-task-error { flex: 1 0 100%; margin: 2px 0 0; color: var(--egd-danger-ink); font-size: 11.5px; overflow-wrap: anywhere; }
+/* CHAT-06 Await: a bridge restart holds started work above the list until
+   '이어서 진행'; an approval a task asked for is decided on its own line. */
+.egd-task-hold {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 6px;
+  margin: 6px 6px 0;
+  padding: 6px 8px;
+  border: 1px solid var(--egd-note-line);
+  border-radius: 7px;
+  background: var(--egd-note-soft);
+  color: var(--egd-warning-ink);
+}
+.egd-task-hold-text { flex: 1 1 auto; min-width: 0; overflow-wrap: anywhere; font-weight: 600; }
+.egd-task-approval { flex: 1 0 100%; display: flex; flex-wrap: wrap; gap: 6px; padding-left: 14px; }
+button.egd-task-hold-resume,
+button.egd-task-approve,
+button.egd-task-reject {
+  flex: none;
+  min-height: 32px;
+  padding: 2px 10px;
+  border: 1px solid var(--egd-outline-variant);
+  border-radius: 6px;
+  background: var(--egd-surface-elevated);
+  color: var(--egd-primary);
+  font: 600 11.5px/1.4 var(--egd-font);
+}
+button.egd-task-hold-resume,
+button.egd-task-approve { border-color: var(--egd-primary); background: var(--egd-primary); color: var(--egd-on-primary); }
+button.egd-task-hold-resume:hover,
+button.egd-task-approve:hover { background: var(--egd-primary-strong); }
+button.egd-task-reject:hover { background: var(--egd-hover); }
+button.egd-task-hold-resume[aria-disabled="true"],
+button.egd-task-approve[aria-disabled="true"],
+button.egd-task-reject[aria-disabled="true"] { opacity: .6; cursor: default; }
+
+/* CHAT-06 Await plan card: sits in the Agent column under the answer that
+   proposed it, in the activity grammar (eyebrow, state word, numbered rows). */
+.egd-plan-card {
+  box-sizing: border-box;
+  flex-shrink: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  width: calc(min(100%, 760px) - 32px);
+  margin: -6px 0 0 calc(max(0px, (100% - 760px) / 2) + 32px);
+  padding: 12px 14px;
+  border: 1px solid var(--egd-outline-variant);
+  border-radius: 10px;
+  background: var(--egd-surface-elevated);
+  color: var(--egd-on-surface);
+  font: 12.5px/1.5 var(--egd-font);
+}
+.egd-plan-card-head { display: flex; align-items: center; justify-content: space-between; gap: 8px; }
+.egd-plan-card-eyebrow { color: var(--egd-on-surface-variant); font: 600 11px/1.4 var(--egd-font); }
+.egd-plan-card-status { flex: none; color: var(--egd-warning-ink); font: 600 11px/1.4 var(--egd-font); }
+.egd-plan-card[data-status="approved"] .egd-plan-card-status,
+.egd-plan-card[data-status="completed"] .egd-plan-card-status { color: var(--egd-success-ink); }
+.egd-plan-card[data-status="rejected"] .egd-plan-card-status,
+.egd-plan-card[data-status="cancelled"] .egd-plan-card-status,
+.egd-plan-card[data-status="missing"] .egd-plan-card-status { color: var(--egd-on-surface-variant); }
+.egd-plan-card-title { font: 600 13.5px/1.45 var(--egd-font); overflow-wrap: anywhere; }
+.egd-plan-steps { display: flex; flex-direction: column; margin: 0; padding: 0; list-style: none; border-top: 1px solid var(--egd-outline-variant); }
+.egd-plan-step { display: flex; flex-direction: column; gap: 2px; padding: 8px 0; border-bottom: 1px solid var(--egd-outline-variant); }
+.egd-plan-step-head { display: flex; align-items: center; gap: 8px; }
+.egd-plan-step-number {
+  flex: none;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 20px;
+  height: 20px;
+  border-radius: 50%;
+  background: var(--egd-window-alt);
+  color: var(--egd-on-surface-variant);
+  font: 600 11px/1 var(--egd-font);
+  font-variant-numeric: tabular-nums;
+}
+.egd-plan-step-title { flex: 1 1 auto; min-width: 0; overflow-wrap: anywhere; font-weight: 600; }
+.egd-plan-step-meta { margin: 0 0 0 28px; color: var(--egd-on-surface-variant); font-size: 11.5px; overflow-wrap: anywhere; }
+.egd-plan-step-instructions {
+  margin: 4px 0 0 28px;
+  padding: 8px 10px;
+  border-radius: 7px;
+  background: var(--egd-window-alt);
+  color: var(--egd-on-surface-variant);
+  font-size: 11.5px;
+  line-height: 1.6;
+}
+.egd-plan-step-instructions > p { margin: 0; white-space: pre-wrap; overflow-wrap: anywhere; max-height: 180px; overflow-y: auto; }
+.egd-plan-step-instructions[data-state="error"] > p { color: var(--egd-danger-ink); }
+.egd-plan-card-note { margin: 0; color: var(--egd-on-surface-variant); overflow-wrap: anywhere; }
+.egd-plan-actions { display: flex; flex-wrap: wrap; gap: 6px; }
+.egd-plan-confirm {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 6px;
+  padding: 6px 8px;
+  border: 1px solid var(--egd-note-line);
+  border-radius: 7px;
+  background: var(--egd-note-soft);
+  color: var(--egd-warning-ink);
+}
+.egd-plan-confirm > span { flex: 1 1 auto; min-width: 0; overflow-wrap: anywhere; }
+.egd-plan-error { margin: 0; color: var(--egd-danger-ink); font-size: 11.5px; overflow-wrap: anywhere; }
+button.egd-plan-approve,
+button.egd-plan-reject,
+button.egd-plan-confirm-go,
+button.egd-plan-confirm-cancel,
+button.egd-plan-open-list,
+button.egd-plan-step-toggle {
+  flex: none;
+  min-height: 32px;
+  padding: 2px 10px;
+  border: 1px solid var(--egd-outline-variant);
+  border-radius: 6px;
+  background: var(--egd-surface-elevated);
+  color: var(--egd-primary);
+  font: 600 11.5px/1.4 var(--egd-font);
+}
+button.egd-plan-step-toggle { align-self: flex-start; border-color: transparent; background: transparent; }
+.egd-plan-step-instructions > button.egd-plan-step-toggle { margin-top: 4px; }
+button.egd-plan-open-list { align-self: flex-start; }
+button.egd-plan-approve,
+button.egd-plan-confirm-go { border-color: var(--egd-primary); background: var(--egd-primary); color: var(--egd-on-primary); }
+button.egd-plan-approve:hover,
+button.egd-plan-confirm-go:hover { background: var(--egd-primary-strong); }
+button.egd-plan-reject:hover,
+button.egd-plan-confirm-cancel:hover,
+button.egd-plan-open-list:hover,
+button.egd-plan-step-toggle:hover { background: var(--egd-hover); }
+button.egd-plan-approve[aria-disabled="true"],
+button.egd-plan-reject[aria-disabled="true"],
+button.egd-plan-confirm-go[aria-disabled="true"] { opacity: .6; cursor: default; }
+
+/* CHAT-06 Await: a plan step resumed in its conversation reads as one quiet
+   system line in the timeline, not as 대표님's bubble. */
+.egd-codex-await-resume {
+  box-sizing: border-box;
+  flex-shrink: 0;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  flex-wrap: wrap;
+  gap: 2px 6px;
+  width: min(100%, 760px);
+  margin-inline: auto;
+  padding: 2px 12px;
+  color: var(--egd-on-surface-variant);
+  font: 12px/1.5 var(--egd-font);
+  text-align: center;
+}
+.egd-codex-await-resume-mark { flex: none; width: 14px; height: 14px; color: var(--egd-success-ink); }
+.egd-codex-await-resume-text { min-width: 0; overflow-wrap: anywhere; }
+
+/* BRW-13: 대표님 took a Browser Card back from this room's Agent. The same
+   quiet system line as a resumed step, with the warning ink on its mark. */
+.egd-codex-browser-control {
+  box-sizing: border-box;
+  flex-shrink: 0;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  flex-wrap: wrap;
+  gap: 2px 6px;
+  width: min(100%, 760px);
+  margin-inline: auto;
+  padding: 2px 12px;
+  color: var(--egd-on-surface-variant);
+  font: 12px/1.5 var(--egd-font);
+  text-align: center;
+}
+.egd-codex-browser-control-mark { flex: none; width: 14px; height: 14px; color: var(--egd-warning-ink); }
+.egd-codex-browser-control-text { min-width: 0; color: var(--egd-on-surface); overflow-wrap: anywhere; }
+.egd-codex-browser-control-detail { min-width: 0; overflow-wrap: anywhere; }
 
 /* DSN-01: rules a token cannot carry. Search result kinds keep their own hue;
    in dark the ink lifts toward the dark ink and the wash darkens. */
