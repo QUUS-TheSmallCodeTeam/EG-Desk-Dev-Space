@@ -2,13 +2,18 @@ import { randomUUID } from 'node:crypto'
 
 const fail = (code, message, httpStatus = 409) => Object.assign(new Error(message), { code, httpStatus })
 const short = (value, max = 160) => typeof value === 'string' && value.length > 0 && value.length <= max
+// Optional same-clock fields from the helper: a run-scoped seq (positive
+// integer) and sentAtMs (performance.timeOrigin + performance.now()).
+const badSeq = request => Object.hasOwn(request, 'seq') && !(Number.isSafeInteger(request.seq) && request.seq > 0)
+const badSentAt = request => Object.hasOwn(request, 'sentAtMs') && !(Number.isFinite(request.sentAtMs) && request.sentAtMs > 0)
 
 // One SSE client, one run and one native Browser request are bound together.
 // A response from another window or a stale stream cannot satisfy the call.
 export class BrowserToolTransport {
-  constructor({ getOwnerKey, now = Date.now, setTimer = setTimeout, clearTimer = clearTimeout } = {}) {
+  constructor({ getOwnerKey, now = Date.now, clock = () => performance.timeOrigin + performance.now(),
+    setTimer = setTimeout, clearTimer = clearTimeout } = {}) {
     if (typeof getOwnerKey !== 'function') throw new TypeError('Current owner key is required')
-    Object.assign(this, { getOwnerKey, now, setTimer, clearTimer })
+    Object.assign(this, { getOwnerKey, now, clock, setTimer, clearTimer })
     this.clients = new Map()
     this.runs = new Map()
     this.pending = new Map()
@@ -57,7 +62,7 @@ export class BrowserToolTransport {
     if (!request || typeof request !== 'object' || !short(request.requestId) || !short(request.runId, 300) ||
         !short(request.clientThreadId) ||
         !short(request.cardId) || !short(request.targetCardEpoch) || !Number.isSafeInteger(request.deadlineMs) ||
-        request.deadlineMs <= this.now() || request.deadlineMs > this.now() + 60000) {
+        request.deadlineMs <= this.now() || request.deadlineMs > this.now() + 60000 || badSeq(request) || badSentAt(request)) {
       throw fail('BROWSER_UI_PROTOCOL', 'Browser UI request has invalid correlation, target or deadline', 400)
     }
     const bound = this.runs.get(request.runId)
@@ -76,12 +81,14 @@ export class BrowserToolTransport {
     return new Promise((resolve, reject) => {
       // Capture the binding generation, not just a reusable run ID.
       const entry = { requestId: request.requestId, runId: request.runId, runBinding: bound, transportId: bound.transportId,
-        ownerKey: bound.ownerKey, deadlineMs: request.deadlineMs, resolve, reject, timer: null }
+        ownerKey: bound.ownerKey, deadlineMs: request.deadlineMs, resolve, reject, timer: null,
+        sent: { ...(Object.hasOwn(request, 'seq') ? { seq: request.seq } : {}),
+          ...(Object.hasOwn(request, 'sentAtMs') ? { sentAtMs: request.sentAtMs } : {}) } }
       const timer = this.setTimer(() => {
         if (this.pending.get(wireRequestId) !== entry) return
         this.pending.delete(wireRequestId)
         this.clearTimer(entry.timer)
-        reject(fail('BROWSER_UI_TIMEOUT', 'Browser UI response deadline passed; outcome is unknown'))
+        reject(this.timedOut(entry, 'Browser UI response deadline passed; outcome is unknown'))
       }, Math.max(1, request.deadlineMs - this.now()))
       timer?.unref?.()
       entry.timer = timer
@@ -105,7 +112,7 @@ export class BrowserToolTransport {
     if (this.now() >= entry.deadlineMs) {
       this.pending.delete(requestId)
       this.clearTimer(entry.timer)
-      entry.reject(fail('BROWSER_UI_TIMEOUT', 'Browser UI response arrived after its deadline'))
+      entry.reject(this.timedOut(entry, 'Browser UI response arrived after its deadline'))
       throw fail('BROWSER_UI_RESPONSE_STALE', 'Browser UI response arrived after its deadline')
     }
     if (!response || typeof response !== 'object' || Array.isArray(response) || JSON.stringify(response).length > 180000) {
@@ -115,6 +122,12 @@ export class BrowserToolTransport {
     this.clearTimer(entry.timer)
     entry.resolve({ ...response, requestId: entry.requestId })
     return { accepted: true, requestId }
+  }
+
+  // A timeout ends the wait, not the input (REA T-03): the record says when it
+  // was sent and when this transport stopped waiting, on the same clock.
+  timedOut(entry, message) {
+    return Object.assign(fail('BROWSER_UI_TIMEOUT', message), { ...entry.sent, timedOutAtMs: this.clock() })
   }
 
   reset({ dropClients = false } = {}) {

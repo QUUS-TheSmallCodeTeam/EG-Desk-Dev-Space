@@ -4,17 +4,18 @@ import { BrowserToolTransport } from './codex-browser-tool-transport.mjs'
 
 function harness() {
   let owner = 'codex:account-1'
-  let time = 1000
+  let time = 1000, clockTime = 50000.5
   const timers = new Map(), sent = []
   const transport = new BrowserToolTransport({
-    getOwnerKey: () => owner, now: () => time,
+    getOwnerKey: () => owner, now: () => time, clock: () => clockTime,
     setTimer: (callback, delay) => { const timer = { unref() {} }; timers.set(timer, { callback, delay }); return timer },
     clearTimer: timer => timers.delete(timer),
   })
   const client = name => ({ chatProtocol: 2, closed: false, send(frame) { sent.push({ name, frame }); return true } })
   const request = (id = 'request-1') => ({ version: 1, requestId: id, runId: 'run-1', clientThreadId: 'ui-thread-1', cardId: 'card-1', targetCardEpoch: 'epoch-1', deadlineMs: 1500, kind: 'observe' })
   const wire = (index = sent.length - 1) => JSON.parse(sent[index].frame.split('data: ')[1])
-  return { transport, timers, sent, client, request, wire, setOwner: value => { owner = value }, setTime: value => { time = value } }
+  return { transport, timers, sent, client, request, wire, setOwner: value => { owner = value }, setTime: value => { time = value },
+    setClock: value => { clockTime = value } }
 }
 
 test('Browser request targets only its selected v2 UI stream and accepts one matching response', async () => {
@@ -209,4 +210,69 @@ test('unique handoff IDs preserve duplicate-call rejection and the 64-request bo
   assert.equal(h.transport.pending.size, 0)
   assert.equal(h.timers.size, 0)
   assert.equal(h.sent.length, 64)
+})
+
+// REA 웹10: seq and sentAtMs ride the wire unchanged; UI timing returns unchanged; timeouts are dated.
+test('seq and sentAtMs reach the UI unchanged beside the unique wire ID; malformed values are refused before sending', async t => {
+  const h = harness()
+  t.after(() => h.transport.reset())
+  const chosen = h.transport.registerClient(h.client('chosen'))
+  h.transport.bindRun('run-1', 'ui-thread-1', chosen)
+  const first = h.transport.sendToUi({ ...h.request('seq-1'), seq: 7, sentAtMs: 49999.125 })
+  first.catch(() => {})
+  const second = h.transport.sendToUi({ ...h.request('seq-2'), seq: 8, sentAtMs: 49999.5 })
+  second.catch(() => {})
+  assert.deepEqual([h.wire(0).seq, h.wire(1).seq], [7, 8])
+  assert.deepEqual([h.wire(0).sentAtMs, h.wire(1).sentAtMs], [49999.125, 49999.5])
+  assert.notEqual(h.wire(0).requestId, 'seq-1', 'the wire ID stays a fresh handoff ID')
+  for (const [field, value] of [['seq', 0], ['seq', 1.5], ['seq', '9'], ['seq', null],
+    ['sentAtMs', Number.NaN], ['sentAtMs', -1], ['sentAtMs', '49999'], ['sentAtMs', Infinity]]) {
+    const refused = h.transport.sendToUi({ ...h.request(`bad-${field}-${String(value)}`), [field]: value })
+    refused.catch(() => {})
+    assert.equal(h.sent.length, 2, `${field}=${String(value)}: a malformed request never reaches the UI`)
+    await assert.rejects(refused, { code: 'BROWSER_UI_PROTOCOL' }, `${field}=${String(value)}`)
+  }
+  const legacy = h.transport.sendToUi(h.request('legacy'))
+  legacy.catch(() => {})
+  assert.equal(Object.hasOwn(h.wire(), 'seq'), false, 'a request without seq is still accepted as before')
+})
+
+test('UI timing in a response reaches the helper unchanged', async t => {
+  const h = harness()
+  t.after(() => h.transport.reset())
+  const chosen = h.transport.registerClient(h.client('chosen'))
+  h.transport.bindRun('run-1', 'ui-thread-1', chosen)
+  const pending = h.transport.sendToUi({ ...h.request(), kind: 'act', seq: 3, sentAtMs: 50000.25 })
+  const timing = { receivedAtMs: 50000.75, authorizedAtMs: 50001, performEnterMs: 50001.25, performExitMs: 50002,
+    performCallsBefore: 4, performCallsAfter: 5, firstEventAtMs: 50001.5 }
+  h.transport.receive(chosen, { requestId: h.wire().requestId, status: 'rejected', dispatchPhase: 'dispatched', timing })
+  assert.deepEqual(await pending, { requestId: 'request-1', status: 'rejected', dispatchPhase: 'dispatched', timing })
+})
+
+test('a transport timeout records seq, sentAtMs and timedOutAtMs and still leaves a late response stale', async t => {
+  const h = harness()
+  t.after(() => h.transport.reset())
+  const chosen = h.transport.registerClient(h.client('chosen'))
+  h.transport.bindRun('run-1', 'ui-thread-1', chosen)
+  const timed = h.transport.sendToUi({ ...h.request('timed'), kind: 'act', seq: 4, sentAtMs: 50000.25 }).catch(error => error)
+  h.setClock(50500.5)
+  ;[...h.timers.values()][0].callback()
+  const timeout = await timed
+  assert.equal(timeout.code, 'BROWSER_UI_TIMEOUT')
+  assert.match(timeout.message, /outcome is unknown/)
+  assert.deepEqual([timeout.seq, timeout.sentAtMs, timeout.timedOutAtMs], [4, 50000.25, 50500.5])
+  assert.throws(() => h.transport.receive(chosen, { requestId: h.wire().requestId, status: 'acted' }),
+    { code: 'BROWSER_UI_RESPONSE_STALE' })
+
+  const late = h.transport.sendToUi({ ...h.request('late'), kind: 'act', seq: 5, sentAtMs: 50600 }).catch(error => error)
+  h.setTime(1500)
+  h.setClock(50700.75)
+  assert.throws(() => h.transport.receive(chosen, { requestId: h.wire().requestId, status: 'acted' }),
+    { code: 'BROWSER_UI_RESPONSE_STALE' })
+  const lateTimeout = await late
+  assert.equal(lateTimeout.code, 'BROWSER_UI_TIMEOUT')
+  assert.deepEqual([lateTimeout.seq, lateTimeout.sentAtMs, lateTimeout.timedOutAtMs], [5, 50600, 50700.75])
+  assert.equal(h.transport.pending.size, 0)
+  assert.equal(h.timers.size, 0)
+  assert.equal(h.sent.length, 2, 'a timeout never resends')
 })

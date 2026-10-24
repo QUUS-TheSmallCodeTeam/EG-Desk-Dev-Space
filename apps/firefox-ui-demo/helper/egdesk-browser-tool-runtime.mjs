@@ -34,6 +34,12 @@ const WAIT_RESPONSE_MARGIN_MS = 2000
 const MAX_FILL_TEXT = 8000
 const MAX_FILL_REQUEST_JSON = 40000
 const OBSERVED_VALUE_MAX = 120
+// Same-clock receipts: helper, Firefox chrome and the page actor stamp
+// performance.timeOrigin + performance.now() (epoch ms, may be fractional).
+const sameClock = () => performance.timeOrigin + performance.now()
+// UI/actor timing fields copied into receipts as sent; malformed ones are dropped.
+const UI_TIMING_MS = ['receivedAtMs', 'authorizedAtMs', 'performEnterMs', 'performExitMs', 'firstEventAtMs']
+const UI_TIMING_COUNTS = ['performCallsBefore', 'performCallsAfter']
 function spec(name, description, properties, required) {
   return { type: 'function', name, description, inputSchema: { type: 'object', additionalProperties: false, properties, required } }
 }
@@ -237,9 +243,27 @@ function withoutWait(snapshot) {
   const { wait, ...rest } = snapshot
   return rest
 }
+function uiTiming(value) {
+  if (!record(value)) return {}
+  return Object.fromEntries([
+    ...UI_TIMING_MS.filter(key => Number.isFinite(value[key]) && value[key] >= 0),
+    ...UI_TIMING_COUNTS.filter(key => Number.isSafeInteger(value[key]) && value[key] >= 0),
+  ].map(key => [key, value[key]]))
+}
+// EGQ8: only an explicit, uncontradicted refusal before input frees the Card.
+// 'dispatched', 'unknown', a missing or malformed phase, any sign that the
+// actor entered perform, or a partial perform count keeps the outcome unknown (EG-01).
+function provenNotDispatched(response) {
+  const timing = response.timing ?? {}
+  const counts = [timing.performCallsBefore, timing.performCallsAfter]
+  return response.status === 'rejected' && response.dispatchPhase === 'not-dispatched' && record(timing) &&
+    response.receipt?.dispatchReceipt?.eventDispatched !== true &&
+    ['performEnterMs', 'performExitMs', 'firstEventAtMs'].every(key => timing[key] == null) &&
+    (counts.every(count => count === undefined) || (Number.isSafeInteger(counts[0]) && counts[1] === counts[0]))
+}
 
-export function createBrowserToolService({ sendToUi, getOwnerKey, timeoutMs = 15000, now = Date.now } = {}) {
-  if (typeof sendToUi !== 'function' || typeof getOwnerKey !== 'function' ||
+export function createBrowserToolService({ sendToUi, getOwnerKey, timeoutMs = 15000, now = Date.now, clock = sameClock } = {}) {
+  if (typeof sendToUi !== 'function' || typeof getOwnerKey !== 'function' || typeof clock !== 'function' ||
       !Number.isSafeInteger(timeoutMs) || timeoutMs < 1000 || timeoutMs > 60000) {
     throw new TypeError('Browser tool service requires UI transport, current account provider and bounded timeout')
   }
@@ -252,10 +276,12 @@ export function createBrowserToolService({ sendToUi, getOwnerKey, timeoutMs = 15
     return Promise.allSettled(binding.selectedCards.map(card => requestUi({ kind: 'cancel',
       runId: binding.runId, clientThreadId: binding.clientThreadId, cardId: card.cardId,
       cardEpoch: card.cardEpoch, selectionToken: card.selectionToken,
-    })))
+    }, binding)))
   }
 
-  async function requestUi(payload, binding, run) {
+  // trace receives this request's same-clock record: seq and sentAtMs at
+  // handoff, then responseAtMs plus the UI/actor timing, or timedOutAtMs.
+  async function requestUi(payload, binding, run, trace = {}) {
     const requestId = randomUUID()
     const targetCardEpoch = payload.selection?.cardEpoch || payload.binding?.cardEpoch || payload.cardEpoch
     if (!short(targetCardEpoch, 160)) reject('BROWSER_UI_PROTOCOL', 'Browser request has no exact Card generation')
@@ -267,14 +293,26 @@ export function createBrowserToolService({ sendToUi, getOwnerKey, timeoutMs = 15
               binding.ownerKey !== getOwnerKey() || run?.status !== 'inProgress')) {
             reject('BROWSER_RUN_ENDED', 'Browser run or account ended before UI dispatch')
           }
+          // Allocated at the actual handoff (open-browser-use moveSequence),
+          // so the run's seq rises with every request that left the helper.
+          if (binding) trace.seq = binding.seq = (binding.seq || 0) + 1
+          trace.sentAtMs = clock()
           return sendToUi({ version: 1, requestId, targetCardEpoch,
-            deadlineMs: now() + timeoutMs, ...payload })
+            deadlineMs: now() + timeoutMs, ...payload, ...(binding ? { seq: trace.seq } : {}), sentAtMs: trace.sentAtMs })
         }),
         new Promise((_, rejectTimeout) => { timer = setTimeout(() => rejectTimeout(Object.assign(new Error('Browser UI response timed out; outcome is unknown'), { code: 'BROWSER_UI_TIMEOUT' })), timeoutMs) }),
       ])
+      trace.responseAtMs = clock()
       if (!record(response) || response.requestId !== requestId) reject('BROWSER_UI_PROTOCOL', 'Browser UI response does not match this request')
       if (JSON.stringify(response).length > 180000) reject('BROWSER_UI_PROTOCOL', 'Browser UI response exceeded the bounded limit')
+      Object.assign(trace, uiTiming(response.timing))
       return response
+    } catch (error) {
+      // A timeout is neither "no effect" nor "cancelled" (REA T-03); it only
+      // records when the helper stopped waiting.
+      if (error?.code === 'BROWSER_UI_TIMEOUT' && Object.hasOwn(trace, 'sentAtMs')) trace.timedOutAtMs = clock()
+      if (record(error) && Object.hasOwn(trace, 'sentAtMs')) error.timing = { ...trace }
+      throw error
     } finally { clearTimeout(timer) }
   }
 
@@ -319,7 +357,7 @@ export function createBrowserToolService({ sendToUi, getOwnerKey, timeoutMs = 15
     if (bindings.has(run.answerId) || pendingBindings.has(run.answerId)) reject('BROWSER_BINDING_EXISTS', 'Browser run is already bound or binding')
     const binding = { ownerKey: prepared.ownerKey, runId: run.runId || run.answerId,
       clientThreadId: run.clientThreadId, selectedCards: [...prepared.cards.values()],
-      cards: new Map(), pending: new Set(), calls: new Map(), closed: false }
+      cards: new Map(), pending: new Set(), calls: new Map(), closed: false, seq: 0 }
     pendingBindings.set(run.answerId, binding)
     try {
       for (const card of prepared.cards.values()) {
@@ -339,7 +377,7 @@ export function createBrowserToolService({ sendToUi, getOwnerKey, timeoutMs = 15
         if (binding.closed || closedRuns.has(run.answerId) || run.status !== 'inProgress') reject('BROWSER_RUN_ENDED', 'Browser run ended during binding')
         if (prepared.ownerKey !== getOwnerKey()) reject('BROWSER_OWNER_CHANGED', 'Engine account changed during Browser binding')
         binding.cards.set(card.cardId, { ...card, ui: response.binding, observation: null,
-          busy: false, uncertain: false, pendingTransition: null, lastFill: null })
+          busy: false, uncertain: false, uncertainAction: null, pendingTransition: null, lastFill: null })
       }
       if (binding.closed || closedRuns.has(run.answerId) || prepared.ownerKey !== getOwnerKey() || run.status !== 'inProgress') {
         reject('BROWSER_RUN_ENDED', 'Browser run or account ended before binding completed')
@@ -368,17 +406,20 @@ export function createBrowserToolService({ sendToUi, getOwnerKey, timeoutMs = 15
       snapshot.documentId !== transition.priorDocumentId &&
       ['interactive', 'complete'].includes(snapshot.readyState) &&
       !transition.wasAlreadyTrue && checkPostcondition(transition.condition, snapshot, transition.ref))
-    if (transitionRecovered) { card.uncertain = false; card.pendingTransition = null }
+    if (transitionRecovered) { card.uncertain = false; card.uncertainAction = null; card.pendingTransition = null }
     if (card.lastFill && card.lastFill.documentId !== snapshot.documentId) card.lastFill = null
     card.observation = { id: randomUUID(), snapshot }
     return { navigationPostconditionReobserved: transitionRecovered && transition.actionType === 'navigate',
-      documentTransitionPostconditionReobserved: transitionRecovered }
+      documentTransitionPostconditionReobserved: transitionRecovered,
+      // While the Card stays locked, the observation repeats the unknown
+      // action's same-clock record so a late effect can be dated against it.
+      ...(card.uncertain && card.uncertainAction ? { uncertainAction: card.uncertainAction } : {}) }
   }
 
-  async function observeRequest(run, binding, card, options) {
+  async function observeRequest(run, binding, card, options, trace) {
     card.busy = true
     const pending = requestUi({ kind: 'observe', runId: binding.runId,
-      clientThreadId: binding.clientThreadId, cardId: card.cardId, binding: card.ui, options }, binding, run)
+      clientThreadId: binding.clientThreadId, cardId: card.cardId, binding: card.ui, options }, binding, run, trace)
     binding.pending.add(pending)
     try { return await pending } finally { binding.pending.delete(pending); card.busy = false }
   }
@@ -402,7 +443,8 @@ export function createBrowserToolService({ sendToUi, getOwnerKey, timeoutMs = 15
       ...(transition ? { notDocumentId: transition.priorDocumentId } : {}) }
     // A wait spends the current observation: the page is expected to change.
     card.observation = null
-    const response = await observeRequest(run, binding, card, { textLimit: 60, elementLimit: 80, wait })
+    const trace = {}
+    const response = await observeRequest(run, binding, card, { textLimit: 60, elementLimit: 80, wait }, trace)
     if (binding.closed || binding.ownerKey !== getOwnerKey()) reject('BROWSER_RUN_ENDED', 'Browser run ended during wait')
     const reported = response?.snapshot?.wait
     let snapshot
@@ -422,7 +464,7 @@ export function createBrowserToolService({ sendToUi, getOwnerKey, timeoutMs = 15
       wait: { for: args.for, timeoutMs: args.timeoutMs, elapsedMs: reported.elapsedMs,
         outcome: status === 'wait-condition-met' ? 'met' : status === 'wait-timeout' ? 'not-met-before-timeout' : 'unverified',
         documentReplaced: !!wait.notDocumentId && snapshot.documentId !== wait.notDocumentId },
-      ...recovery, externalEffectVerified: false }
+      ...recovery, timing: { ...trace }, externalEffectVerified: false }
   }
 
   async function executeDispatch(run, event) {
@@ -436,12 +478,13 @@ export function createBrowserToolService({ sendToUi, getOwnerKey, timeoutMs = 15
     if (card.busy) reject('BROWSER_CARD_BUSY', 'Wait for the current Browser request to finish')
     if (tool !== 'egdesk_browser_observe' && card.permission !== 'interact') reject('BROWSER_INTERACTION_NOT_GRANTED', 'Read-only Browser context does not authorize interaction')
     if (tool === 'egdesk_browser_observe') {
-      const response = await observeRequest(run, binding, card, { textLimit: 60, elementLimit: 80 })
+      const trace = {}
+      const response = await observeRequest(run, binding, card, { textLimit: 60, elementLimit: 80 }, trace)
       if (binding.closed || binding.ownerKey !== getOwnerKey()) reject('BROWSER_RUN_ENDED', 'Browser run ended during observation')
       const snapshot = observationFrom(response, card.cardId)
       const recovery = recordObservation(card, snapshot)
       return { status: 'observed', cardId: card.cardId, observationId: card.observation.id,
-        snapshot, ...recovery, externalEffectVerified: false }
+        snapshot, ...recovery, timing: { ...trace }, externalEffectVerified: false }
     }
     if (tool === 'egdesk_browser_wait') return waitForCondition(run, binding, card, args)
     if (card.uncertain) reject('BROWSER_OUTCOME_UNKNOWN', 'A prior Browser action has an unknown outcome; select the context again')
@@ -482,9 +525,11 @@ export function createBrowserToolService({ sendToUi, getOwnerKey, timeoutMs = 15
     const wasAlreadyTrue = condition ? checkPostcondition(condition, observed.snapshot, args.ref) : false
     // Scroll changes only the viewport, which the next observation reports in
     // full; its unknown outcome needs re-observation but does not lock the Card.
+    const trace = {}
     const markUnknown = () => {
       if (action.type === 'scroll') return
       card.uncertain = true
+      card.uncertainAction = { action: action.type, timing: { ...trace } }
       if (action.type === 'navigate' ||
           (['click', 'press'].includes(action.type) && condition && ['url', 'visible-text'].includes(condition.kind))) {
         card.pendingTransition = { condition, ref: args.ref || null,
@@ -494,13 +539,17 @@ export function createBrowserToolService({ sendToUi, getOwnerKey, timeoutMs = 15
     const guard = { documentId: observed.snapshot.documentId, revision: observed.snapshot.revision,
       viewport: observed.snapshot.viewport, url: observed.snapshot.url,
       focusedRef: observed.snapshot.focusedElement?.ref || null,
+      // Gecko document identities from the observation, passed through as
+      // observed; Firefox chrome compares them with the live document.
+      ...(Object.hasOwn(observed.snapshot, 'innerWindowId') ? { innerWindowId: observed.snapshot.innerWindowId } : {}),
+      ...(Object.hasOwn(observed.snapshot, 'browsingContextId') ? { browsingContextId: observed.snapshot.browsingContextId } : {}),
       ...(args.expectedTarget ? { target: args.expectedTarget } : {}),
       ...(action.type === 'navigate' ? { navigationScope: 'same-site' } : {}),
       ...(action.type === 'scroll' ? { scroll: observed.snapshot.scroll } : {}),
       ...(pressPolicy ? { pressPolicy } : {}) }
     const pending = requestUi({ kind: 'act', runId: binding.runId,
       clientThreadId: binding.clientThreadId, cardId: card.cardId, binding: card.ui,
-      action, guard, ...(condition ? { postcondition: condition } : {}) }, binding, run)
+      action, guard, ...(condition ? { postcondition: condition } : {}) }, binding, run, trace)
     binding.pending.add(pending)
     let response
     try { response = await pending }
@@ -508,8 +557,18 @@ export function createBrowserToolService({ sendToUi, getOwnerKey, timeoutMs = 15
     finally { binding.pending.delete(pending); card.busy = false }
     if (binding.closed || binding.ownerKey !== getOwnerKey()) reject('BROWSER_RUN_ENDED', 'Browser run ended during action; effect is unknown')
     if (response.status !== 'acted' || !record(response.receipt)) {
+      // Not sent: only this observation is spent; no lock, no retry. The
+      // model re-observes and may decide again under a new call ID.
+      if (provenNotDispatched(response)) {
+        throw Object.assign(new Error('Browser action was not sent; observe this Browser Card again before trying it'),
+          { code: 'BROWSER_OBSERVATION_STALE', dispatchPhase: 'not-dispatched', timing: { ...trace } })
+      }
       markUnknown()
-      reject('BROWSER_ACTION_UNVERIFIED', response.error || 'Browser action was not confirmed; do not retry blindly')
+      // The helper's conclusion, not the UI's claim: a contradicted
+      // 'not-dispatched' is reported as unknown.
+      throw Object.assign(new Error(response.error || 'Browser action was not confirmed; do not retry blindly'),
+        { code: 'BROWSER_ACTION_UNVERIFIED', timing: { ...trace },
+          dispatchPhase: response.dispatchPhase === 'dispatched' ? 'dispatched' : 'unknown' })
     }
     const after = response.receipt.after
     const dispatchReceipt = response.receipt.dispatchReceipt
@@ -528,7 +587,7 @@ export function createBrowserToolService({ sendToUi, getOwnerKey, timeoutMs = 15
         dispatchReceipt.key === args.key && dispatchReceipt.trustedInput === false &&
         dispatchReceipt.targetKeyObserved === true && dispatchReceipt.focusPolicy === pressPolicy))
     const common = { cardId: card.cardId, action: action.type, dispatchReceipt: dispatchReceipt || null,
-      after: after || null, observation: response.receipt.observation || null }
+      after: after || null, observation: response.receipt.observation || null, timing: { ...trace } }
     if (action.type === 'scroll') {
       const before = observed.snapshot.scroll
       const moved = readbackIsCurrent ? after.scroll.y - before.y : null

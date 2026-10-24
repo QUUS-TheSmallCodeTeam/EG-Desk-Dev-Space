@@ -1,6 +1,7 @@
 import assert from 'node:assert/strict'
 import { test } from 'node:test'
 import { BROWSER_TOOL_SPECS, boundedFieldValue, createBrowserToolService } from './egdesk-browser-tool-runtime.mjs'
+import { classifyPublicToolError } from './codex-tool-errors.mjs'
 
 test('click tool advertises the focus-safe DOM route and still requires a postcondition', () => {
   const click = BROWSER_TOOL_SPECS.find(item => item.name === 'egdesk_browser_click')
@@ -590,7 +591,7 @@ const actorReceipt = (extra = {}) => ({ actor: 'JSWindowActor', eventDispatched:
 const scrollReceipt = (mode = 'document', extra = {}) => actorReceipt({ inputRoute: 'dom-scroll-api', scrollMode: mode, ...extra })
 const keyReceipt = (key, focusPolicy, extra = {}) => actorReceipt({ inputRoute: 'dom-keyboard-event', key,
   trustedInput: false, targetKeyObserved: true, keydownDefaultPrevented: false, defaultActionEmulated: null, focusPolicy, ...extra })
-function guardedFixture({ timeoutMs } = {}) {
+function guardedFixture({ timeoutMs, clock } = {}) {
   let current = guardedSnapshot()
   let onAct = () => { throw new Error('unexpected act') }
   let onWait = null
@@ -609,7 +610,8 @@ function guardedFixture({ timeoutMs } = {}) {
     if (request.kind === 'act') return onAct(request)
     throw new Error('unexpected UI request')
   }
-  const service = createBrowserToolService({ sendToUi, getOwnerKey: () => 'engine-account-1', ...(timeoutMs ? { timeoutMs } : {}) })
+  const service = createBrowserToolService({ sendToUi, getOwnerKey: () => 'engine-account-1',
+    ...(timeoutMs ? { timeoutMs } : {}), ...(clock ? { clock } : {}) })
   let sequence = 0
   const dispatch = (tool, args, callId = `guarded-call-${++sequence}`) => service.dispatch(run, { tool, callId, arguments: args })
   const observe = () => dispatch('egdesk_browser_observe', { cardId: 'browser-1' })
@@ -1081,4 +1083,157 @@ test('a frame-ref fill after Stop reaches the UI zero times, and a timed-out lon
   const again = await f.observe()
   await assert.rejects(f.dispatch('egdesk_browser_fill', fillArgs(again, 'el_2', long)), { code: 'BROWSER_OUTCOME_UNKNOWN' })
   assert.equal(f.acts().length, 1, 'no automatic retry of an unknown fill')
+})
+
+// EGQ8 / REA 웹8(a), 웹10, 웹4: dispatchPhase, same-clock receipts, Gecko document identities.
+const notSent = (request, extra = {}) => ({ requestId: request.requestId, status: 'rejected',
+  error: 'Browser action authority was revoked before input [ui-denied]', dispatchPhase: 'not-dispatched', ...extra })
+const clickArgs = seen => ({ cardId: 'browser-1', observationId: seen.observationId, expectedRevision: seen.snapshot.revision,
+  ref: 'el_1', expectedTarget: targetOf(seen, 'el_1'), postcondition: { kind: 'visible-text', value: 'Count: 1' } })
+const clicked = (f, request, extra = {}) => ({ ...f.acted(request, guardedSnapshot({ text: ['Count: 1'] }),
+  actorReceipt({ clickInputRoute: 'dom-click-no-pointerdown', targetClickObserved: true })), ...extra })
+const flushHandoff = () => new Promise(resolve => setImmediate(resolve))
+
+test('a refusal proven not-dispatched spends only the observation: no lock, no resend, a fresh observation may act', async () => {
+  for (const timing of [undefined, { receivedAtMs: 10.5, authorizedAtMs: 11, performCallsBefore: 4, performCallsAfter: 4,
+    performEnterMs: null, performExitMs: null, firstEventAtMs: null }]) {
+    const f = guardedFixture()
+    await f.bind()
+    const seen = await f.observe()
+    f.setAct(request => notSent(request, timing ? { timing } : {}))
+    const refused = await f.dispatch('egdesk_browser_click', clickArgs(seen), 'not-sent-click').catch(error => error)
+    assert.equal(refused.code, 'BROWSER_OBSERVATION_STALE')
+    assert.equal(refused.dispatchPhase, 'not-dispatched')
+    const publicError = classifyPublicToolError(refused, { browser: true })
+    assert.equal(publicError.code, 'BROWSER_OBSERVATION_STALE', 'the model is told to observe again')
+    assert.match(publicError.message, /rejected/)
+    assert.doesNotMatch(publicError.message, /unknown/)
+    assert.equal(await f.dispatch('egdesk_browser_click', clickArgs(seen), 'not-sent-click').catch(error => error), refused,
+      'the same call ID returns the same refusal')
+    await assert.rejects(f.dispatch('egdesk_browser_click', clickArgs(seen)), { code: 'BROWSER_OBSERVATION_STALE' },
+      'the refused observation stays spent')
+    assert.equal(f.acts().length, 1, 'no automatic resend under either call ID')
+    const again = await f.observe()
+    assert.equal(again.uncertainAction, undefined, 'the Card is not locked')
+    f.setAct(request => clicked(f, request))
+    assert.equal((await f.dispatch('egdesk_browser_click', clickArgs(again))).status, 'postcondition-observed')
+    assert.equal(f.acts().length, 2)
+  }
+})
+
+test('dispatched, unknown, missing, malformed or contradicted phases keep the Card locked', async () => {
+  for (const [reason, response, phase] of [
+    ['dispatched', request => notSent(request, { dispatchPhase: 'dispatched' }), 'dispatched'],
+    ['unknown', request => notSent(request, { dispatchPhase: 'unknown' }), 'unknown'],
+    ['missing (older surface)', request => ({ requestId: request.requestId, status: 'rejected', error: 'Browser action failed' }), 'unknown'],
+    ['wrong case', request => notSent(request, { dispatchPhase: 'Not-Dispatched' }), 'unknown'],
+    ['boolean', request => notSent(request, { dispatchPhase: true }), 'unknown'],
+    ['object', request => notSent(request, { dispatchPhase: { phase: 'not-dispatched' } }), 'unknown'],
+    ['not a rejection', request => notSent(request, { status: 'failed' }), 'unknown'],
+    ['acted without receipt', request => notSent(request, { status: 'acted' }), 'unknown'],
+    ['perform count moved', request => notSent(request, { timing: { performCallsBefore: 4, performCallsAfter: 5 } }), 'unknown'],
+    ['partial perform count', request => notSent(request, { timing: { performCallsBefore: 4 } }), 'unknown'],
+    ['malformed perform count', request => notSent(request, { timing: { performCallsBefore: '4', performCallsAfter: '4' } }), 'unknown'],
+    ['perform entered', request => notSent(request, { timing: { performEnterMs: 1234.5 } }), 'unknown'],
+    ['malformed perform entry', request => notSent(request, { timing: { performEnterMs: 'soon' } }), 'unknown'],
+    ['first event seen', request => notSent(request, { timing: { firstEventAtMs: 1235 } }), 'unknown'],
+    ['timing not an object', request => notSent(request, { timing: 'late' }), 'unknown'],
+    ['dispatch receipt claims an event', request => notSent(request, { receipt: { dispatchReceipt: { eventDispatched: true } } }), 'unknown'],
+  ]) {
+    const f = guardedFixture()
+    await f.bind()
+    const seen = await f.observe()
+    f.setAct(response)
+    const error = await f.dispatch('egdesk_browser_click', clickArgs(seen)).catch(caught => caught)
+    assert.equal(error.code, 'BROWSER_ACTION_UNVERIFIED', reason)
+    assert.equal(error.dispatchPhase, phase, `${reason}: the error carries the helper's conclusion, not the UI claim`)
+    const again = await f.observe()
+    assert.equal(again.uncertainAction?.action, 'click', reason)
+    await assert.rejects(f.dispatch('egdesk_browser_click', clickArgs(again)), { code: 'BROWSER_OUTCOME_UNKNOWN' }, reason)
+    assert.equal(f.acts().length, 1, reason)
+  }
+})
+
+test('every UI request carries a run-scoped rising seq and same-clock sentAtMs; receipts keep only well-formed UI timing', async () => {
+  let time = 1000
+  const f = guardedFixture({ clock: () => (time += 0.5) })
+  f.current = guardedSnapshot({ innerWindowId: 2147483649, browsingContextId: 12 })
+  await f.bind()
+  const seen = await f.observe()
+  assert.deepEqual(seen.timing, { seq: 2, sentAtMs: 1001.5, responseAtMs: 1002 })
+  f.setAct(request => clicked(f, request, { timing: { receivedAtMs: 1002.6, authorizedAtMs: 1002.7,
+    performEnterMs: 1002.75, performExitMs: 1002.9, firstEventAtMs: 1002.8, performCallsBefore: 0, performCallsAfter: 1,
+    pageText: 'secret', sentAtMs: 1 } }))
+  const click = await f.dispatch('egdesk_browser_click', clickArgs(seen))
+  assert.deepEqual(click.timing, { seq: 3, sentAtMs: 1002.5, responseAtMs: 1003, receivedAtMs: 1002.6, authorizedAtMs: 1002.7,
+    performEnterMs: 1002.75, performExitMs: 1002.9, firstEventAtMs: 1002.8, performCallsBefore: 0, performCallsAfter: 1 },
+  'UI fields are kept as sent; unknown keys and a UI copy of sentAtMs never overwrite the helper record')
+  const next = await f.observe()
+  f.setAct(request => clicked(f, request, { timing: { receivedAtMs: '1004', authorizedAtMs: -1, performEnterMs: Number.NaN,
+    performCallsBefore: 1.5, performCallsAfter: '2', firstEventAtMs: null } }))
+  assert.deepEqual((await f.dispatch('egdesk_browser_click', clickArgs(next))).timing, { seq: 5, sentAtMs: 1004.5, responseAtMs: 1005 },
+    'malformed UI timing is omitted, not coerced')
+  const waited = await f.dispatch('egdesk_browser_wait', { cardId: 'browser-1', for: 'load', timeoutMs: 1000 })
+  assert.equal(waited.timing.seq, 6)
+  await f.service.cancelRun(run)
+  assert.deepEqual(f.requests.map(request => request.kind), ['bind', 'observe', 'act', 'observe', 'act', 'observe', 'cancel'])
+  assert.deepEqual(f.requests.map(request => request.seq), [1, 2, 3, 4, 5, 6, 7])
+  assert(f.requests.every((request, index) => Number.isFinite(request.sentAtMs) &&
+    (index === 0 || request.sentAtMs > f.requests[index - 1].sentAtMs)), 'sentAtMs rises on the same clock')
+  assert(f.requests.every(request => Number.isSafeInteger(request.deadlineMs)), 'the deadline stays on its own wall clock')
+
+  const other = guardedFixture()
+  await other.service.bind({ ...run, answerId: 'answer-2', runId: 'run-2' }, other.service.prepare({ selectedSources: [source()] }))
+  assert.equal(other.requests[0].seq, 1, 'each run starts its own sequence')
+  assert(Math.abs(other.requests[0].sentAtMs - (performance.timeOrigin + performance.now())) < 1000,
+    'the default clock is performance.timeOrigin + performance.now()')
+})
+
+test('a timed-out action records sentAtMs and timedOutAtMs, stays unknown, and the lock repeats that record', async t => {
+  t.mock.timers.enable({ apis: ['setTimeout'] })
+  let time = 5000.25
+  const f = guardedFixture({ clock: () => time })
+  await f.bind()
+  const seen = await f.observe()
+  f.setAct(() => new Promise(() => {}))
+  const pending = f.dispatch('egdesk_browser_click', clickArgs(seen), 'timed-out-timing')
+  await flushHandoff()
+  time = 20000.75
+  t.mock.timers.tick(15000)
+  const timedOut = await pending.catch(error => error)
+  assert.equal(timedOut.code, 'BROWSER_UI_TIMEOUT')
+  assert.match(timedOut.message, /outcome is unknown/)
+  assert.deepEqual(timedOut.timing, { seq: 3, sentAtMs: 5000.25, timedOutAtMs: 20000.75 })
+  assert.equal(f.acts()[0].seq, 3)
+  assert.equal(f.acts()[0].sentAtMs, 5000.25)
+  assert.equal(await f.dispatch('egdesk_browser_click', clickArgs(seen), 'timed-out-timing').catch(error => error), timedOut)
+  const again = await f.observe()
+  assert.deepEqual(again.uncertainAction, { action: 'click', timing: { seq: 3, sentAtMs: 5000.25, timedOutAtMs: 20000.75 } })
+  await assert.rejects(f.dispatch('egdesk_browser_click', clickArgs(again)), { code: 'BROWSER_OUTCOME_UNKNOWN' })
+  assert.equal(f.acts().length, 1, 'no automatic retry after a timeout')
+})
+
+test('Gecko innerWindowId and browsingContextId pass from the observation into the guard unchanged', async () => {
+  const f = guardedFixture()
+  f.current = guardedSnapshot({ innerWindowId: 2147483649, browsingContextId: 12 })
+  await f.bind()
+  const seen = await f.observe()
+  assert.equal(seen.snapshot.innerWindowId, 2147483649)
+  assert.equal(seen.snapshot.browsingContextId, 12)
+  f.setAct(request => clicked(f, request))
+  await f.dispatch('egdesk_browser_click', clickArgs(seen))
+  assert.equal(f.acts()[0].guard.innerWindowId, 2147483649)
+  assert.equal(f.acts()[0].guard.browsingContextId, 12)
+  f.current = guardedSnapshot({ innerWindowId: 'unexpected-form', browsingContextId: null })
+  const odd = await f.observe()
+  f.setAct(request => notSent(request, { dispatchPhase: 'not-dispatched' }))
+  await assert.rejects(f.dispatch('egdesk_browser_click', clickArgs(odd)), { code: 'BROWSER_OBSERVATION_STALE' })
+  assert.equal(f.acts()[1].guard.innerWindowId, 'unexpected-form', 'the helper forwards; Firefox chrome checks')
+  assert.equal(f.acts()[1].guard.browsingContextId, null)
+  f.current = guardedSnapshot()
+  const legacy = await f.observe()
+  f.setAct(request => clicked(f, request))
+  await f.dispatch('egdesk_browser_click', clickArgs(legacy))
+  assert.equal(Object.hasOwn(f.acts()[2].guard, 'innerWindowId'), false, 'an observation without the field adds nothing')
+  assert.equal(Object.hasOwn(f.acts()[2].guard, 'browsingContextId'), false)
 })
