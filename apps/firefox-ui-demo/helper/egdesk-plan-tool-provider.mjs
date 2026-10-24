@@ -1,3 +1,4 @@
+import { MAX_GATE_ANSWER_CHARS, MAX_GATE_CHOICES } from './egdesk-task-graph.mjs'
 import { MAX_PLAN_INSTRUCTIONS, MAX_PLAN_TASKS } from './egdesk-task-plans.mjs'
 
 /**
@@ -13,6 +14,10 @@ import { MAX_PLAN_INSTRUCTIONS, MAX_PLAN_TASKS } from './egdesk-task-plans.mjs'
  *   invalid   { status: 'invalid', code: 'PLAN_INVALID', reason }   (success: true, so the Agent can fix it)
  *   failure   success: false, { error: { code } }                   (signed out, storage unavailable, ...)
  * A proposal also emits the chat event 'plan.proposed' on the run.
+ *
+ * CHAT-06: a userAction gate may ask 대표님 a question instead of a plain
+ * confirm (response: 2-6 choices, or a short written answer). The step waits
+ * for the answer and starts with it; nothing else changes about the gate.
  */
 
 export const PLAN_TOOL_NAME = 'egdesk_propose_plan'
@@ -23,7 +28,22 @@ const gateSchema = {
   properties: {
     gateId: { type: 'string', description: 'Short ID of this condition, unique within the step.' },
     kind: { type: 'string', enum: ['userAction', 'oauth', 'file', 'terminalExit'] },
-    label: { type: 'string', description: 'userAction: what 대표님 confirms (<=200 chars).' },
+    label: { type: 'string', description: 'userAction: what 대표님 confirms, or the question 대표님 answers when response is given (<=200 chars).' },
+    response: {
+      type: 'object', additionalProperties: false, required: ['kind'],
+      description: `userAction only: ask instead of a plain confirm. choice = 대표님 picks one of 2-${MAX_GATE_CHOICES} options; text = 대표님 writes a short answer (<=${MAX_GATE_ANSWER_CHARS} chars). The answer is given to this step when it starts. Never ask for passwords, keys or personal numbers: such answers are refused.`,
+      properties: {
+        kind: { type: 'string', enum: ['choice', 'text'] },
+        options: {
+          type: 'array', minItems: 2, maxItems: MAX_GATE_CHOICES, description: 'choice: the options in the order 대표님 sees them.',
+          items: { type: 'object', additionalProperties: false, required: ['id', 'label'], properties: {
+            id: { type: 'string', description: 'Short option ID such as fast (letters, digits, ".", "_", "-").' },
+            label: { type: 'string', description: 'What 대표님 sees on the option (<=120 chars).' },
+          } },
+        },
+        maxLength: { type: 'integer', minimum: 1, maximum: MAX_GATE_ANSWER_CHARS, description: `text: optional shorter limit (default ${MAX_GATE_ANSWER_CHARS}).` },
+      },
+    },
     origin: { type: 'string', description: 'oauth: exact origin such as https://github.com.' },
     pathPrefix: { type: 'string', description: 'oauth: callback path with at least one segment, such as /login/oauth/callback.' },
     cardId: { type: 'string', description: 'oauth: optional Browser card that must finish the login.' },
@@ -42,7 +62,8 @@ export const PLAN_TOOL_SPECS = Object.freeze([{
   description: [
     'Propose a multi-step plan for 대표님 to approve. Nothing runs until 대표님 approves it on screen.',
     'After approval each step starts by itself once the steps in dependsOn completed and its gates are met:',
-    'userAction = 대표님 confirms; oauth = a login finishes at origin+pathPrefix; file = a file matching relativeGlob changes in connected folder root;',
+    'userAction = 대표님 confirms, or answers a question when it has response (choice or short text; the answer reaches the step);',
+    'oauth = a login finishes at origin+pathPrefix; file = a file matching relativeGlob changes in connected folder root;',
     'terminalExit = that Terminal session exits. resumeIn sameThread (default) continues the step in this conversation;',
     'newThread runs it in a fresh conversation, so its instructions must stand alone.',
     'After a successful proposal, end your turn and tell 대표님 the plan is waiting for approval. Do not start the steps yourself.',
@@ -106,7 +127,8 @@ export function createPlanToolProvider({ plans, schemaReady = () => true } = {})
         this.runtime?.emit?.(run, 'plan.proposed', { planId: plan.planId, graphId: plan.graphId, boardId: plan.boardId, title: plan.title,
           status: plan.status, callId: typeof event.callId === 'string' ? event.callId : null,
           tasks: plan.tasks.map(task => ({ taskId: task.taskId, title: task.title, resumeIn: task.resumeIn, dependsOn: task.dependsOn,
-            gates: task.gates.filter(gate => gate.kind !== 'task').map(gate => ({ gateId: gate.gateId, kind: gate.kind })) })) })
+            gates: task.gates.filter(gate => gate.kind !== 'task').map(gate => ({ gateId: gate.gateId, kind: gate.kind,
+              ...(gate.response ? { response: structuredClone(gate.response) } : {}) })) })) })
       } catch { /* the plan is saved; the screen also learns of it from SSE task.plan */ }
       return respond(true, {
         status: 'proposed', planId: plan.planId, graphId: plan.graphId, taskCount: plan.tasks.length,

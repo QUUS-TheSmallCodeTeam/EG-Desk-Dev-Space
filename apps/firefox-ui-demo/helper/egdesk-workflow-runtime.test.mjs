@@ -234,20 +234,21 @@ test('the bridge opens the workflow runtime after Chat, mounts its routes behind
   assert.ok(shutdown.indexOf('await workflow?.close()') < shutdown.indexOf('process.exit(0)'))
 })
 
-test('task sources persist privately beside the journal, stay bound to Board and owner, and drop the oldest past the bounds', async t => {
+test('task sources persist privately in the workflow store, stay bound to Board and owner, and drop the oldest past the bounds', async t => {
   const { openTaskSourceRegistry } = await import('./egdesk-task-sources.mjs')
-  const { readFile, stat, writeFile } = await import('node:fs/promises')
+  const { stat } = await import('node:fs/promises')
   const directory = path.join(await mkdtemp(path.join(os.tmpdir(), 'egdesk-sources-')), 'task-sources')
-  t.after(() => rm(path.dirname(directory), { recursive: true, force: true }))
+  const opened = []
+  t.after(async () => { for (const registry of opened) registry.close(); await rm(path.dirname(directory), { recursive: true, force: true }) })
+  const open = async options => { const registry = await openTaskSourceRegistry(options); opened.push(registry); return registry }
   let owner = 'owner-hash-A'
-  const first = await openTaskSourceRegistry({ directory, getOwnerKey: () => owner, maxSources: 2 })
+  const first = await open({ directory, getOwnerKey: () => owner, maxSources: 2 })
   const a = await first.register({ boardId: 'board-1', message: 'first task', cwd: '/tmp' })
   const b = await first.register({ boardId: 'board-1', message: 'second task' })
   await assert.rejects(first.register({ boardId: 'board-1', message: 'x', cwd: 'relative' }), { code: 'TASK_SOURCE_INPUT' })
   await assert.rejects(first.register({ boardId: '../board', message: 'x' }), { code: 'TASK_SOURCE_INPUT' })
-  const file = path.join(directory, 'task-sources.json')
-  assert.equal((await stat(file)).mode & 0o777, 0o600)
-  const reopened = await openTaskSourceRegistry({ directory, getOwnerKey: () => owner, maxSources: 2 })
+  assert.equal((await stat(path.join(directory, 'workflow.sqlite'))).mode & 0o777, 0o600)
+  const reopened = await open({ directory, getOwnerKey: () => owner, maxSources: 2 })
   assert.deepEqual(reopened.resolve({ binding: { sourceRef: a.sourceRef }, boardId: 'board-1' }), { message: 'first task', cwd: '/tmp' })
   assert.throws(() => reopened.resolve({ binding: { sourceRef: a.sourceRef }, boardId: 'board-2' }), { code: 'TASK_INPUT_UNRESOLVED' })
   owner = 'owner-hash-B'
@@ -256,8 +257,66 @@ test('task sources persist privately beside the journal, stay bound to Board and
   await reopened.register({ boardId: 'board-1', message: 'third task' })
   assert.throws(() => reopened.resolve({ binding: { sourceRef: a.sourceRef }, boardId: 'board-1' }), { code: 'TASK_INPUT_UNRESOLVED' }, 'oldest dropped')
   assert.equal(reopened.stats().sources, 2)
-  const bytes = await readFile(file, 'utf8')
-  await writeFile(file, bytes.replace('second task', 'tampered task'))
-  await assert.rejects(openTaskSourceRegistry({ directory, getOwnerKey: () => owner }), { code: 'E_TASK_SOURCES_CORRUPT' })
-  assert.match(await readFile(file, 'utf8'), /tampered task/, 'a corrupt file is left for inspection')
+  const third = await open({ directory, getOwnerKey: () => owner, maxSources: 2 })
+  assert.throws(() => third.resolve({ binding: { sourceRef: a.sourceRef }, boardId: 'board-1' }), { code: 'TASK_INPUT_UNRESOLVED' }, 'the drop was saved')
+  assert.equal(third.stats().sources, 2)
+})
+
+test('a task-sources.json written before is imported once and kept; a tampered one is refused and left for inspection', async t => {
+  const { openTaskSourceRegistry } = await import('./egdesk-task-sources.mjs')
+  const { readFile, writeFile, mkdir } = await import('node:fs/promises')
+  const { createHash } = await import('node:crypto')
+  const root = await mkdtemp(path.join(os.tmpdir(), 'egdesk-sources-legacy-'))
+  const opened = []
+  t.after(async () => { for (const registry of opened) registry.close(); await rm(root, { recursive: true, force: true }) })
+  const open = async options => { const registry = await openTaskSourceRegistry(options); opened.push(registry); return registry }
+  const sources = [['task-source-old-1', { boardId: 'board-1', owner: 'owner-hash-A', message: 'written before', cwd: '/tmp' }]]
+  const envelope = list => JSON.stringify({ version: 1, digest: createHash('sha256').update(JSON.stringify(list)).digest('hex'), sources: list })
+  const good = path.join(root, 'good')
+  await mkdir(good, { mode: 0o700 })
+  await writeFile(path.join(good, 'task-sources.json'), envelope(sources), { mode: 0o600 })
+  const registry = await open({ directory: good, getOwnerKey: () => 'owner-hash-A' })
+  assert.deepEqual(registry.resolve({ binding: { sourceRef: 'task-source-old-1' }, boardId: 'board-1' }), { message: 'written before', cwd: '/tmp' })
+  await registry.register({ boardId: 'board-1', message: 'written after' })
+  assert.equal(await readFile(path.join(good, 'task-sources.json'), 'utf8'), envelope(sources), 'the old file is never rewritten')
+  assert.equal((await open({ directory: good, getOwnerKey: () => 'owner-hash-A' })).stats().sources, 2, 'imported once')
+
+  const bad = path.join(root, 'bad')
+  await mkdir(bad, { mode: 0o700 })
+  const tampered = envelope(sources).replace('written before', 'tampered task')
+  await writeFile(path.join(bad, 'task-sources.json'), tampered, { mode: 0o600 })
+  await assert.rejects(openTaskSourceRegistry({ directory: bad, getOwnerKey: () => 'owner-hash-A' }), { code: 'E_TASK_SOURCES_CORRUPT' })
+  assert.equal(await readFile(path.join(bad, 'task-sources.json'), 'utf8'), tampered, 'a corrupt file is left for inspection')
+})
+
+test('a written gate answer is kept bound to its gate, Board and owner; secret-looking text is refused and never kept', async t => {
+  const { looksSecret, openTaskSourceRegistry } = await import('./egdesk-task-sources.mjs')
+  const directory = path.join(await mkdtemp(path.join(os.tmpdir(), 'egdesk-answers-')), 'task-sources')
+  const opened = []
+  t.after(async () => { for (const registry of opened) registry.close(); await rm(path.dirname(directory), { recursive: true, force: true }) })
+  let owner = 'owner-hash-A'
+  const registry = await openTaskSourceRegistry({ directory, getOwnerKey: () => owner, maxAnswers: 2 })
+  opened.push(registry)
+  const gate = { boardId: 'board-1', graphId: 'graph-1', taskId: 'step', gateId: 'note' }
+  const { textRef } = await registry.recordAnswer({ ...gate, text: '내일 오전 10시 이후로 잡아 주세요' })
+  assert.match(textRef, /^task-answer-/)
+  const reopened = await openTaskSourceRegistry({ directory, getOwnerKey: () => owner, maxAnswers: 2 })
+  opened.push(reopened)
+  assert.equal(reopened.answerText({ textRef, ...gate }), '내일 오전 10시 이후로 잡아 주세요')
+  assert.throws(() => reopened.answerText({ textRef, ...gate, gateId: 'other' }), { code: 'TASK_INPUT_UNRESOLVED' })
+  assert.throws(() => reopened.answerText({ textRef, ...gate, boardId: 'board-2' }), { code: 'TASK_INPUT_UNRESOLVED' })
+  owner = 'owner-hash-B'
+  assert.throws(() => reopened.answerText({ textRef, ...gate }), { code: 'TASK_INPUT_UNRESOLVED' })
+  owner = 'owner-hash-A'
+  for (const text of ['password: hunter2', '비밀번호: 1234abcd', 'sk-proj-abcdefghijklmnop', 'AKIAABCDEFGHIJKLMNOP', '4111 1111 1111 1111', '900101-1234567',
+    'ghp_abcdefghijklmnopqrstuvwxyz0123456789', 'token=abc123def456']) {
+    assert.equal(looksSecret(text), true, text)
+    await assert.rejects(reopened.recordAnswer({ ...gate, text }), { code: 'TASK_GATE_ANSWER_PRIVATE' }, text)
+  }
+  for (const text of ['빠른 길로 가 주세요', 'https://github.com/org/repo/pull/12', '2026-10-25 오전 9시', '메일은 team@example.com 으로']) assert.equal(looksSecret(text), false, text)
+  await assert.rejects(reopened.recordAnswer({ ...gate, text: 'x'.repeat(501) }), { code: 'TASK_GATE_ANSWER' })
+  assert.equal(reopened.stats().answers, 1, 'refused answers are not kept')
+  await reopened.recordAnswer({ ...gate, text: 'second' })
+  await reopened.recordAnswer({ ...gate, text: 'third' })
+  assert.throws(() => reopened.answerText({ textRef, ...gate }), { code: 'TASK_INPUT_UNRESOLVED' }, 'the oldest answer is dropped past the bound')
 })

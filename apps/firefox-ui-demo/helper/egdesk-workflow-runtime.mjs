@@ -1,7 +1,8 @@
-import { createHash } from 'node:crypto'
+import { createHash, randomUUID } from 'node:crypto'
 import path from 'node:path'
 import { sendJson } from './codex-bridge-http.mjs'
 import { publicText } from './codex-chat-values.mjs'
+import { appendAnswers } from './egdesk-await-resume.mjs'
 import { createAwaitGateRouter } from './egdesk-await-router.mjs'
 import { createWorkflowEventBus, createWorkflowEventHttpHandler } from './egdesk-event-bus.mjs'
 import { createConnectedRootWatcher } from './egdesk-file-watch.mjs'
@@ -9,9 +10,10 @@ import { openTaskGraph } from './egdesk-task-graph.mjs'
 import { createTaskHttpHandler, publicGraph } from './egdesk-task-http.mjs'
 import { createNativeTaskAdapter } from './egdesk-task-native.mjs'
 import { nativeHash, nativeTaskError, openNativeTaskLedger } from './egdesk-task-native-store.mjs'
-import { createTaskPlanHttpHandler, createTaskPlanService, openTaskPlanStore } from './egdesk-task-plans.mjs'
+import { createTaskPlanHttpHandler, createTaskPlanService, gateAnswerFacts, openTaskPlanStore } from './egdesk-task-plans.mjs'
 import { createTaskSourceHttpHandler, openTaskSourceRegistry } from './egdesk-task-sources.mjs'
 import { openTaskStore } from './egdesk-task-store.mjs'
+import { openWorkflowStore } from './egdesk-workflow-store.mjs'
 
 export const WORKFLOW_OWNER = 'egdesk-local'
 const hashed = (prefix, value) => `${prefix}-${createHash('sha256').update(String(value)).digest('hex').slice(0, 32)}`
@@ -36,6 +38,19 @@ const hashed = (prefix, value) => `${prefix}-${createHash('sha256').update(Strin
  * stay ready while that conversation is busy and start after its turn ends.
  *
  * Task storage failing to open leaves events working; task routes answer 503.
+ *
+ * Storage (RT-07): one SQLite file, dataDir/workflow-store/workflow.sqlite
+ * (egdesk-workflow-store.mjs), holds the graph journal, native ledger, task
+ * sources, gate answers and plans. The JSON files of earlier versions
+ * (dataDir/task-graph, task-native, task-sources, task-plans) are imported
+ * once and left as they are.
+ *
+ * Question gates (CHAT-06): POST /tasks/continue with answer opens a userAction
+ * gate that has response. A chosen option is journaled with the gate; written
+ * text is kept with the task sources and the journal names it. The bus event
+ * stays { graphId, taskId, gateId }, so no answer reaches SSE or /events/recent.
+ * The step's message carries the answers (plans: <answers> in the resume block;
+ * other graphs: lines after the task's own message).
  */
 export async function openWorkflowRuntime({
   dataDir, chat, port = 39218, broadcast = () => {}, ensureAuth, getOwnerKey,
@@ -89,6 +104,7 @@ export async function openWorkflowRuntime({
   let sources = null
   let plans = null
   let taskChat = null
+  let stores = null
   // While a same-thread plan step waits for its conversation, scheduling is
   // retried on chat turn endings and, as a fallback, once a second.
   let heldTimer = null
@@ -108,15 +124,11 @@ export async function openWorkflowRuntime({
     })
   }
   try {
-    // openStores (tests) may omit sourceDirectory/planDirectory to keep them in memory.
-    const stores = openStores ? await openStores() : {
-      store: await openTaskStore(path.join(dataDir, 'task-graph')),
-      ledger: await openNativeTaskLedger(path.join(dataDir, 'task-native')),
-      sourceDirectory: path.join(dataDir, 'task-sources'),
-      planDirectory: path.join(dataDir, 'task-plans'),
-    }
-    sources = await openTaskSourceRegistry({ directory: stores.sourceDirectory ?? null, getOwnerKey: ownerKey })
-    const planStore = await openTaskPlanStore({ directory: stores.planDirectory ?? null })
+    // openStores (tests) returns { store, ledger, sourceOptions?, planOptions?, close? };
+    // without sourceOptions/planOptions those stay in memory.
+    stores = openStores ? await openStores() : await openDurableStores(dataDir)
+    sources = await openTaskSourceRegistry({ ...(stores.sourceOptions ?? {}), getOwnerKey: ownerKey })
+    const planStore = await openTaskPlanStore(stores.planOptions ?? {})
     taskChat = sameThreadChat(chat, { wanted: body => {
       try {
         const attempt = stores.ledger.snapshot().attempts.find(item => item.requestId === body.requestId)
@@ -126,7 +138,7 @@ export async function openWorkflowRuntime({
       } catch { return false }
     } })
     adapter = createNativeTaskAdapter({ chat: taskChat, ledger: stores.ledger,
-      resolveTaskInput: context => plans?.resolveTaskInput(context) ?? sources.resolve(context),
+      resolveTaskInput: context => plans?.resolveTaskInput(context) ?? withAnswers(sources.resolve(context), context),
       captureScope, assertDelegationCurrent })
     graph = await openTaskGraph({ store: stores.store, maxConcurrency, execute: adapter.execute, interrupt: adapter.interrupt,
       requestApproval: adapter.requestApproval, verifyReceipt: adapter.verifyReceipt,
@@ -149,10 +161,7 @@ export async function openWorkflowRuntime({
     const unsubscribeJournal = unsubscribeGraph
     unsubscribeGraph = () => { unsubscribeJournal(); unsubscribeNative(); if (hintTimer) clearTimeout(hintTimer); hintTimer = null }
     router = createAwaitGateRouter({ graph, bus, owner })
-    handleTasks = createTaskHttpHandler({ graph, adapter, ensureAuth, port, continueGate: async ({ graphId, taskId, gateId }) => {
-      bus.publish({ topic: 'user.action', owner, payload: { graphId, taskId, gateId } })
-      await bus.flush()
-    } })
+    handleTasks = createTaskHttpHandler({ graph, adapter, ensureAuth, port, continueGate })
     handleSources = createTaskSourceHttpHandler({ sources, ensureAuth, port })
     handlePlans = createTaskPlanHttpHandler({ plans, ensureAuth, port })
   } catch (error) {
@@ -162,7 +171,36 @@ export async function openWorkflowRuntime({
     router?.close()
     graph?.close?.()
     taskChat?.close?.()
+    try { stores?.close?.() } catch { /* the open error is the one reported */ }
     graph = null; adapter = null; router = null; handleTasks = null; handleSources = null; handlePlans = null; plans = null; taskChat = null
+    stores = null
+  }
+
+  // A graph task that is not a plan step still gets 대표님's answers after its own message.
+  function withAnswers(input, context) {
+    const binding = context?.binding
+    const answers = gateAnswerFacts({ graph, sources, graphId: binding?.graphId, taskId: binding?.taskId, boardId: context?.boardId })
+    return answers.length ? { ...input, message: appendAnswers(input.message, answers) } : input
+  }
+
+  // POST /tasks/continue (already checked by egdesk-task-http.mjs). Without an
+  // answer: the user.action event opens the gate through the router, as before.
+  // With one: the answer is kept first (written text with the sources), then the
+  // gate is satisfied directly with it. The router's own attempt for the same
+  // event carries no answer and is refused by the graph, so it cannot open a
+  // question gate without its answer.
+  async function continueGate({ graphId, taskId, gateId, boardId, answer }) {
+    if (answer === undefined) {
+      bus.publish({ topic: 'user.action', owner, payload: { graphId, taskId, gateId } })
+      await bus.flush()
+      return
+    }
+    const journaled = answer.text === undefined ? { choice: answer.choice }
+      : { textRef: (await sources.recordAnswer({ boardId, graphId, taskId, gateId, text: answer.text })).textRef }
+    const event = bus.publish({ topic: 'user.action', owner, payload: { graphId, taskId, gateId } })
+    await graph.satisfyGate({ graphId, taskId, gateId, evidence: { eventId: event?.id ?? `wfe-${randomUUID()}`,
+      topic: 'user.action', at: event?.at ?? new Date().toISOString(), answer: journaled } })
+    await bus.flush()
   }
 
   async function handle(req, res, url) {
@@ -212,7 +250,30 @@ export async function openWorkflowRuntime({
       unsubscribeSse()
       files.close()
       bus.close()
+      // Writes already queued finish before the database closes; later ones are refused.
+      await Promise.allSettled([graph?.drain?.(), stores?.ledger?.drain?.()])
+      try { stores?.close?.() } catch { /* already closed */ }
     },
+  }
+}
+
+/**
+ * One SQLite store for the graph journal, native ledger, sources and plans,
+ * importing the JSON files of earlier versions once (they stay untouched).
+ */
+async function openDurableStores(dataDir) {
+  const workflowStore = openWorkflowStore({ directory: path.join(dataDir, 'workflow-store') })
+  try {
+    return {
+      store: await openTaskStore({ store: workflowStore, legacyDirectory: path.join(dataDir, 'task-graph') }),
+      ledger: await openNativeTaskLedger({ store: workflowStore, legacyDirectory: path.join(dataDir, 'task-native') }),
+      sourceOptions: { store: workflowStore, legacyDirectory: path.join(dataDir, 'task-sources') },
+      planOptions: { store: workflowStore, legacyDirectory: path.join(dataDir, 'task-plans') },
+      close: () => workflowStore.close(),
+    }
+  } catch (error) {
+    workflowStore.close()
+    throw error
   }
 }
 

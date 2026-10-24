@@ -4,6 +4,7 @@ import { createServer } from 'node:http'
 import { mkdtemp, readFile, rm, stat } from 'node:fs/promises'
 import os from 'node:os'
 import path from 'node:path'
+import { DatabaseSync } from 'node:sqlite'
 import { CodexChatRuntime } from './codex-chat-runtime.mjs'
 import { openChatStore } from './egdesk-chat-store.mjs'
 import { composeAwaitResume } from './egdesk-await-resume.mjs'
@@ -14,6 +15,12 @@ import { openTaskGraph } from './egdesk-task-graph.mjs'
 import { openTaskStore } from './egdesk-task-store.mjs'
 import { openWorkflowRuntime } from './egdesk-workflow-runtime.mjs'
 
+// The record rows of one kind in the workflow database (WAL content included).
+function storedRows(filename, kind) {
+  const db = new DatabaseSync(filename, { readOnly: true })
+  try { return db.prepare('SELECT record_json FROM records WHERE kind = ? ORDER BY ord').all(kind).map(row => row.record_json) }
+  finally { db.close() }
+}
 const delay = ms => new Promise(resolve => setTimeout(resolve, ms))
 async function until(predicate, label = 'expected state') {
   for (let count = 0; count < 1500; count += 1) { if (await predicate()) return; await delay(3) }
@@ -23,8 +30,8 @@ const listen = server => new Promise(resolve => server.listen(0, '127.0.0.1', ()
 const close = server => new Promise(resolve => { server.closeAllConnections?.(); server.close(() => resolve()) })
 const textOf = turn => turn.input.map(item => item.text).join('\n')
 
-async function bridge(t, { durable = false } = {}) {
-  const dataDir = await mkdtemp(path.join(os.tmpdir(), 'egdesk-plans-'))
+async function bridge(t, { durable = false, dataDir: preset = null } = {}) {
+  const dataDir = preset ?? await mkdtemp(path.join(os.tmpdir(), 'egdesk-plans-'))
   const frames = [], turnStarts = [], threadStarts = [], replies = []
   let runtime = null
   let threads = 0, turns = 0
@@ -126,13 +133,14 @@ test('Agent proposes a plan; nothing runs until approval, then steps continue in
   assert.deepEqual(listed.body.plans.map(plan => plan.planId), [planId])
   assert.equal(Object.hasOwn(listed.body.plans[0].tasks[0], 'instructions'), false)
 
-  // Instructions live in the private task-source file; the plan file keeps titles and IDs.
-  const planFile = path.join(h.dataDir, 'task-plans', 'task-plans.json')
-  const sourceFile = path.join(h.dataDir, 'task-sources', 'task-sources.json')
-  assert.equal((await stat(planFile)).mode & 0o777, 0o600)
-  assert.equal((await readFile(planFile, 'utf8')).includes('Collect the Q3'), false)
-  assert.equal((await readFile(sourceFile, 'utf8')).includes('Collect the Q3'), true)
-  assert.equal((await readFile(planFile, 'utf8')).includes('id:plan-account'), false, 'the owner is stored hashed')
+  // Instructions live in the private task-source rows; the plan row keeps titles and IDs.
+  const database = path.join(h.dataDir, 'workflow-store', 'workflow.sqlite')
+  assert.equal((await stat(database)).mode & 0o777, 0o600)
+  const planRows = storedRows(database, 'plan'), sourceRows = storedRows(database, 'source')
+  assert.equal(planRows.length, 1)
+  assert.equal(planRows.join('').includes('Collect the Q3'), false)
+  assert.equal(sourceRows.join('').includes('Collect the Q3'), true)
+  assert.equal([...planRows, ...sourceRows].join('').includes('id:plan-account'), false, 'the owner is stored hashed')
 
   // Approval activates; the first step waits for the proposing turn to end.
   const approved = await h.call('POST', `/tasks/plans/${planId}/approve`, {})
@@ -310,6 +318,137 @@ test('bounded and QA threads are never offered the plan tool, and a run with a p
   const offline = createPlanToolProvider({ plans: () => null })
   assert.equal(JSON.parse((await offline.dispatch({ answerId: 'a' }, { callId: 'c', tool: PLAN_TOOL_NAME, arguments: {} })).contentItems[0].text).error.code, 'PLAN_UNAVAILABLE')
   assert.deepEqual(createPlanToolProvider({ plans: () => null, schemaReady: () => false }).specs(), [])
+})
+
+const QUESTION_PLAN = {
+  title: '견적서 보내기',
+  tasks: [
+    { taskId: 'send', title: '견적서 보내기', instructions: 'Send the quote the way 대표님 chose.', dependsOn: [],
+      gates: [{ gateId: 'how', kind: 'userAction', label: '어떻게 보낼까요?',
+        response: { kind: 'choice', options: [{ id: 'email', label: '메일로' }, { id: 'kakao', label: '카카오톡으로' }] } }] },
+    { taskId: 'note', title: '메모 반영', instructions: 'Add the note to the quote file.', dependsOn: ['send'], resumeIn: 'newThread',
+      gates: [{ gateId: 'memo', kind: 'userAction', label: '견적서에 덧붙일 말', response: { kind: 'text', maxLength: 200 } }] },
+  ],
+}
+
+test('CHAT-06: an Agent asks with choices or a short written answer; the step waits, and the answer reaches it', async t => {
+  const h = await bridge(t)
+  const first = await h.chat.send({ message: '견적서를 보내 줘.', clientThreadId: 'chat-q' })
+  const tooFew = await h.propose(first, { title: 'x', tasks: [{ ...QUESTION_PLAN.tasks[0], gates: [{ gateId: 'how', kind: 'userAction', label: 'q',
+    response: { kind: 'choice', options: [{ id: 'only', label: 'only' }] } }] }] })
+  assert.deepEqual([tooFew.success, tooFew.result.status], [true, 'invalid'])
+  assert.match(tooFew.result.reason, /2-6 options/)
+  const { result } = await h.propose(first, QUESTION_PLAN)
+  assert.equal(result.status, 'proposed')
+  const proposedFrame = h.frames.find(frame => frame.type === 'chat.event' && frame.event === 'plan.proposed')
+  assert.deepEqual(proposedFrame.details.tasks[0].gates[0].response.options.map(option => option.id), ['email', 'kakao'])
+  assert.equal((await h.call('POST', `/tasks/plans/${result.planId}/approve`, {})).status, 200)
+  await h.finishTurn(0)
+  await delay(30)
+  assert.equal(h.turnStarts.length, 1, 'the step waits for the answer')
+  let state = await h.state(result.graphId)
+  const how = taskOf(state, 'send').gates.find(gate => gate.gateId === 'how')
+  assert.deepEqual([how.status, how.label, how.response.kind, how.response.options.map(option => option.label)], ['waiting', '어떻게 보낼까요?', 'choice', ['메일로', '카카오톡으로']])
+  const body = extra => ({ boardId: state.native.boardId, scope: graphScope(state.graph), taskId: 'send', gateId: 'how', ...extra })
+
+  // A question opens only with a fitting answer.
+  for (const [extra, code] of [[{}, 'TASK_GATE_ANSWER'], [{ answer: { choice: 'fax' } }, 'TASK_GATE_ANSWER'], [{ answer: { text: '메일' } }, 'TASK_GATE_ANSWER'],
+    [{ answer: { choice: 'email', text: 'x' } }, 'TASK_GATE_ANSWER'], [{ answer: 'email' }, 'TASK_GATE_ANSWER']]) {
+    const refused = await h.call('POST', '/tasks/continue', body(extra))
+    assert.deepEqual([refused.status, refused.body.code], [400, code], JSON.stringify(extra))
+  }
+  const chosen = await h.call('POST', '/tasks/continue', body({ answer: { choice: 'kakao' } }))
+  assert.equal(chosen.status, 200)
+  const answered = taskOf(chosen.body, 'send').gates.find(gate => gate.gateId === 'how')
+  assert.deepEqual([answered.status, answered.satisfiedBy, answered.answer], ['satisfied', 'user.action', { kind: 'choice', choice: 'kakao' }])
+  await until(() => h.turnStarts.length === 2, 'answered step in the same conversation')
+  const resume = textOf(h.turnStarts[1])
+  assert.match(resume, /<answer gate="how" kind="choice" option="kakao" question="어떻게 보낼까요\?">카카오톡으로<\/answer>/)
+  assert.match(resume, /"어떻게 보낼까요\?" was answered by 대표님/)
+  assert.match(resume, /following 대표님's answers above/)
+  assert.equal((await h.call('POST', '/tasks/continue', body({ answer: { choice: 'email' } }))).status, 409, 'answered once')
+
+  // A written answer: secret-looking text is refused and never kept; a fitting one reaches the next step.
+  await h.finishTurn(1)
+  await until(async () => taskOf(await h.state(result.graphId), 'send').status === 'completed', 'first step completed')
+  state = await h.state(result.graphId)
+  const memo = extra => ({ ...body(extra), taskId: 'note', gateId: 'memo' })
+  const secret = await h.call('POST', '/tasks/continue', memo({ answer: { text: '로그인 password: hunter2 로 해 줘' } }))
+  assert.deepEqual([secret.status, secret.body.code], [400, 'TASK_GATE_ANSWER_PRIVATE'])
+  const long = await h.call('POST', '/tasks/continue', memo({ answer: { text: '가'.repeat(201) } }))
+  assert.deepEqual([long.status, long.body.code], [400, 'TASK_GATE_ANSWER'], 'the gate maxLength applies')
+  const database = path.join(h.dataDir, 'workflow-store', 'workflow.sqlite')
+  assert.equal(storedRows(database, 'gate-answer').length, 0, 'refused answers are not kept')
+  const note = '  부가세 별도라고\r\n꼭 적어 주세요  '
+  const written = await h.call('POST', '/tasks/continue', memo({ answer: { text: note } }))
+  assert.equal(written.status, 200)
+  assert.deepEqual(taskOf(written.body, 'note').gates.find(gate => gate.gateId === 'memo').answer, { kind: 'text' }, 'the screen sees that it was answered, not the text')
+  await until(() => h.turnStarts.length === 3, 'new-thread step with the written answer')
+  const step = textOf(h.turnStarts[2])
+  assert.match(step, /대표님's answers \(follow them in this step\):\n- "견적서에 덧붙일 말": 부가세 별도라고\n꼭 적어 주세요/)
+  assert.match(step, /Add the note to the quote file\./)
+
+  // The text lives only in the private answer row: not in the journal, SSE task/workflow frames or the bus event.
+  assert.equal(storedRows(database, 'gate-answer').join('').includes('부가세 별도라고'), true)
+  const journal = new DatabaseSync(database, { readOnly: true })
+  try {
+    const events = journal.prepare('SELECT event_json FROM task_events').all().map(row => row.event_json).join('\n')
+    assert.equal(events.includes('부가세'), false)
+    assert.match(events, /"answer":\{"choice":"kakao"\}/)
+    assert.match(events, /"answer":\{"textRef":"task-answer-[^"]+"\}/)
+  } finally { journal.close() }
+  const screenFrames = JSON.stringify(h.frames.filter(frame => ['task.graph', 'task.plan', 'task.native', 'workflow.event'].includes(frame.type)))
+  assert.equal(screenFrames.includes('부가세'), false)
+  const actions = h.frames.filter(frame => frame.type === 'workflow.event' && frame.event.topic === 'user.action')
+  assert.ok(actions.length >= 2)
+  for (const frame of actions) assert.deepEqual(Object.keys(frame.event.payload).sort(), ['gateId', 'graphId', 'taskId'])
+})
+
+test('the JSON files of an earlier version are imported once into the workflow store and left as they were', async t => {
+  const { createHash } = await import('node:crypto')
+  const { mkdir, writeFile } = await import('node:fs/promises')
+  const { nativeHash } = await import('./egdesk-task-native-store.mjs')
+  const before = await bridge(t)
+  const first = await before.chat.send({ message: 'Prepare the quarterly report end to end.', clientThreadId: 'chat-legacy' })
+  const { result } = await before.propose(first, REPORT_PLAN)
+  const expected = await before.state(result.graphId)
+
+  // Rewrite what the new store holds in the four file formats used before RT-07.
+  const db = new DatabaseSync(path.join(before.dataDir, 'workflow-store', 'workflow.sqlite'), { readOnly: true })
+  let events, state, sources, plans
+  try {
+    events = db.prepare('SELECT event_json FROM task_events ORDER BY seq').all().map(row => JSON.parse(row.event_json))
+    const meta = db.prepare('SELECT revision FROM ledger_meta').get()
+    state = { version: 1, revision: meta.revision, graphs: [], attempts: [], approvals: [], boardFences: [] }
+    for (const row of db.prepare('SELECT collection, row_json FROM ledger_rows ORDER BY collection, pos').all()) state[row.collection].push(JSON.parse(row.row_json))
+    sources = db.prepare("SELECT record_key, record_json FROM records WHERE kind = 'source' ORDER BY ord").all().map(row => [row.record_key, JSON.parse(row.record_json)])
+    plans = db.prepare("SELECT record_json FROM records WHERE kind = 'plan' ORDER BY ord").all().map(row => JSON.parse(row.record_json))
+  } finally { db.close() }
+  const sha = value => createHash('sha256').update(JSON.stringify(value)).digest('hex')
+  const legacyDir = await mkdtemp(path.join(os.tmpdir(), 'egdesk-plans-legacy-'))
+  const files = {
+    'task-graph/task-events.json': JSON.stringify({ version: 1, digest: sha(events), events }),
+    'task-native/native-task-ledger.json': JSON.stringify({ digest: nativeHash(state), state }),
+    'task-sources/task-sources.json': JSON.stringify({ version: 1, digest: sha(sources), sources }),
+    'task-plans/task-plans.json': JSON.stringify({ version: 1, digest: sha(plans), plans }),
+  }
+  for (const [name, text] of Object.entries(files)) {
+    await mkdir(path.join(legacyDir, path.dirname(name)), { recursive: true, mode: 0o700 })
+    await writeFile(path.join(legacyDir, name), text, { mode: 0o600 })
+  }
+
+  const after = await bridge(t, { dataDir: legacyDir })
+  const listed = await after.call('GET', '/tasks/plans')
+  assert.deepEqual(listed.body.plans.map(plan => [plan.planId, plan.title, plan.status]), [[result.planId, 'Quarterly report', 'proposed']])
+  const detail = await after.call('GET', `/tasks/plans?planId=${result.planId}`)
+  assert.deepEqual(detail.body.plan.tasks.map(task => task.instructions), REPORT_PLAN.tasks.map(task => task.instructions), 'instructions came from the old source file')
+  const imported = await after.state(result.graphId)
+  assert.deepEqual(imported.graph.tasks.map(task => [task.taskId, task.status]), expected.graph.tasks.map(task => [task.taskId, task.status]))
+  assert.equal(imported.graph.recoveryHold, true, 'an imported graph waits for resume like any reloaded one')
+  assert.deepEqual(imported.native.scope, expected.native.scope)
+  for (const [name, text] of Object.entries(files)) assert.equal(await readFile(path.join(legacyDir, name), 'utf8'), text, `${name} is left as it was`)
+  assert.equal((await after.call('POST', `/tasks/plans/${result.planId}/approve`, {})).status, 200, 'an imported plan can still be approved')
+  assert.equal((await readFile(path.join(legacyDir, 'task-plans/task-plans.json'), 'utf8')), files['task-plans/task-plans.json'], 'approving writes SQLite only')
 })
 
 function graphHarness(store = null) {

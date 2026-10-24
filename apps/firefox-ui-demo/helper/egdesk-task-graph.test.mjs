@@ -356,3 +356,90 @@ test('recovered running attempt cannot be cancelled as an undispatched local cla
     await rm(directory, { recursive: true, force: true });
   }
 });
+
+test('CHAT-06 question gates: response is canonical, opens only with a fitting answer, and the answer is journaled', async (t) => {
+  const directory = await mkdtemp(path.join(os.tmpdir(), 'egdesk-question-gates-'));
+  const stores = [];
+  t.after(async () => { for (const store of stores) store.close(); await rm(directory, { recursive: true, force: true }); });
+  const openStore = async () => { const store = await openTaskStore(directory); stores.push(store); return store; };
+  const h = harness({ store: await openStore() });
+  const runtime = await openTaskGraph(h.callbacks);
+  t.after(() => runtime.close());
+  const withGates = (gates, suffix) => { const value = graph([['ask']], suffix); value.tasks[0].gates = gates; return value; };
+  for (const [response, message] of [
+    [{ kind: 'choice', options: [{ id: 'a', label: 'A' }] }, /2-6 options/],
+    [{ kind: 'choice', options: Array.from({ length: 7 }, (_, index) => ({ id: `o${index}`, label: `O${index}` })) }, /2-6 options/],
+    [{ kind: 'choice', options: [{ id: 'a', label: 'A' }, { id: 'a', label: 'B' }] }, /duplicate option/],
+    [{ kind: 'choice', options: [{ id: '../a', label: 'A' }, { id: 'b', label: 'B' }] }, /option id/],
+    [{ kind: 'choice', options: [{ id: 'a', label: '' }, { id: 'b', label: 'B' }] }, /option label/],
+    [{ kind: 'text', maxLength: 501 }, /maxLength/],
+    [{ kind: 'number' }, /choice or text/],
+    [{ kind: 'text', placeholder: 'x' }, /invalid shape/],
+  ]) {
+    await assert.rejects(runtime.submitGraph(withGates([{ gateId: 'q', kind: 'userAction', label: 'Q', response }], `bad-${Math.random().toString(36).slice(2)}`)),
+      { code: 'E_TASK_INPUT', message });
+  }
+  await assert.rejects(runtime.submitGraph(withGates([{ gateId: 'q', kind: 'terminalExit', sessionId: 'term-1', response: { kind: 'text' } }], 'bad-kind')),
+    { code: 'E_TASK_INPUT' }, 'only userAction gates ask');
+
+  const value = withGates([
+    { gateId: 'pick', kind: 'userAction', label: '어느 쪽?', response: { kind: 'choice', options: [{ id: 'fast', label: '빠른 길' }, { id: 'safe', label: '안전한 길' }] } },
+    { gateId: 'memo', kind: 'userAction', label: '메모', response: { kind: 'text', maxLength: 100 } },
+  ], 'question');
+  await runtime.submitGraph(value);
+  await runtime.activateGraph(scope(value));
+  const gates = task(runtime, value.graphId, 'ask').gates;
+  assert.deepEqual(gates.map((gate) => [gate.gateId, gate.response.kind]), [['memo', 'text'], ['pick', 'choice']]);
+  assert.deepEqual(gates.find((gate) => gate.gateId === 'pick').response.options.map((option) => option.id), ['fast', 'safe'], 'options keep their order');
+  const evidence = (extra = {}) => ({ eventId: `wfe-${Math.random().toString(36).slice(2)}`, topic: 'user.action', at: new Date().toISOString(), ...extra });
+
+  // The router's bare user.action, a wrong option, the wrong kind or another topic never opens a question.
+  for (const [gateId, input, code] of [
+    ['pick', evidence(), 'E_TASK_ANSWER'], ['pick', evidence({ answer: { choice: 'slow' } }), 'E_TASK_ANSWER'],
+    ['pick', evidence({ answer: { textRef: 'task-answer-1' } }), 'E_TASK_ANSWER'], ['memo', evidence({ answer: { choice: 'fast' } }), 'E_TASK_ANSWER'],
+    ['memo', { ...evidence({ answer: { textRef: 'task-answer-1' } }), topic: 'terminal.exit' }, 'E_TASK_INPUT'],
+    ['pick', evidence({ answer: { choice: 'fast', textRef: 'task-answer-1' } }), 'E_TASK_INPUT'],
+  ]) {
+    await assert.rejects(runtime.satisfyGate({ graphId: value.graphId, taskId: 'ask', gateId, evidence: input }), { code }, `${gateId} ${JSON.stringify(input.answer)}`);
+  }
+  assert.equal(task(runtime, value.graphId, 'ask').status, 'waiting-on-dependency');
+  await runtime.satisfyGate({ graphId: value.graphId, taskId: 'ask', gateId: 'pick', evidence: evidence({ answer: { choice: 'safe' } }) });
+  assert.equal(h.starts.length, 0, 'one question still open');
+  await runtime.satisfyGate({ graphId: value.graphId, taskId: 'ask', gateId: 'memo', evidence: evidence({ answer: { textRef: 'task-answer-7' } }) });
+  assert.equal(h.starts.length, 1, 'both answered: the step starts');
+  const answered = task(runtime, value.graphId, 'ask').gates;
+  assert.deepEqual(answered.map((gate) => [gate.gateId, gate.status, gate.answer]), [['memo', 'satisfied', { kind: 'text' }], ['pick', 'satisfied', { kind: 'choice', choice: 'safe' }]]);
+  assert.equal(JSON.stringify(answered).includes('task-answer-7'), false, 'the text reference stays out of the visible graph');
+  assert.deepEqual(runtime.gateAnswers(value.graphId, 'ask'), [{ gateId: 'memo', textRef: 'task-answer-7' }, { gateId: 'pick', choice: 'safe' }]);
+  assert.deepEqual(runtime.gateAnswers(value.graphId, 'missing'), []);
+
+  // A gate without a question takes no answer.
+  const plain = withGates([{ gateId: 'ok', kind: 'userAction', label: 'OK?' }], 'plain');
+  await runtime.submitGraph(plain);
+  await runtime.activateGraph(scope(plain));
+  await assert.rejects(runtime.satisfyGate({ graphId: plain.graphId, taskId: 'ask', gateId: 'ok', evidence: evidence({ answer: { choice: 'fast' } }) }), { code: 'E_TASK_ANSWER' });
+
+  // Journaled answers replay; a journal row whose answer does not fit is refused.
+  await runtime.drain();
+  const reopened = await openTaskGraph(harness({ store: await openStore() }).callbacks);
+  t.after(() => reopened.close());
+  assert.deepEqual(reopened.gateAnswers(value.graphId, 'ask'), runtime.gateAnswers(value.graphId, 'ask'));
+  const events = runtime.getEvents();
+  const forged = events.map((event) => event.type === 'task-gate-satisfied' && event.gateId === 'pick'
+    ? { ...event, evidence: { ...event.evidence, answer: { choice: 'slow' } } } : event);
+  await assert.rejects(openTaskGraph({ ...h.callbacks, store: { load: async () => forged, save: async () => {} } }), { code: 'E_TASK_JOURNAL' });
+});
+
+test('normalizeGateAnswer: the request form of an answer, checked against the question', async () => {
+  const { normalizeGateAnswer } = await import('./egdesk-task-graph.mjs');
+  const choice = { gateId: 'q', kind: 'userAction', response: { kind: 'choice', options: [{ id: 'a', label: 'A' }, { id: 'b', label: 'B' }] } };
+  const text = { gateId: 'q', kind: 'userAction', response: { kind: 'text' } };
+  assert.deepEqual(normalizeGateAnswer(choice, { choice: 'b' }), { choice: 'b' });
+  assert.deepEqual(normalizeGateAnswer(text, { text: ' 줄1\r\n줄2 ' }), { text: '줄1\n줄2' });
+  assert.equal(normalizeGateAnswer({ gateId: 'q', kind: 'oauth' }, undefined), undefined);
+  assert.equal(normalizeGateAnswer(text, { text: '가'.repeat(500) }).text.length, 500);
+  for (const [gate, answer] of [[choice, undefined], [choice, { choice: 'c' }], [text, { text: '' }], [text, { text: '가'.repeat(501) }],
+    [text, { text: 'tab\tok but bell \u0007' }], [{ gateId: 'q', kind: 'file' }, { text: 'x' }], [choice, { choice: 'a', extra: 1 }]]) {
+    assert.throws(() => normalizeGateAnswer(gate, answer), { code: 'E_TASK_ANSWER' }, JSON.stringify(answer));
+  }
+});

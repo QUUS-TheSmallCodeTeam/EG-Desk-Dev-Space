@@ -1,5 +1,7 @@
 import { guardBridgeRequest, readJsonBody, sendJson, setBridgeCors } from './codex-bridge-http.mjs';
+import { normalizeGateAnswer } from './egdesk-task-graph.mjs';
 import { nativeTaskError } from './egdesk-task-native-store.mjs';
+import { looksSecret } from './egdesk-task-sources.mjs';
 
 const SCOPE = ['graphId', 'requestId', 'runId', 'parentTaskId', 'requestedBy'];
 function fields(value, allowed, required = allowed) {
@@ -32,8 +34,15 @@ export function publicGraph(value) {
  * adapter.waitForBoardStop before removing that Board's UI.
  * POST /tasks/retry {boardId,scope,taskId,operationId}
  * POST /tasks/approval {boardId,scope,taskId,approvalId,decision:'approved'|'rejected'}
- * POST /tasks/continue {boardId,scope,taskId,gateId} manual fallback for one
+ * POST /tasks/continue {boardId,scope,taskId,gateId,answer?} manual fallback for one
  * waiting or expired external gate (userAction, oauth, file, terminalExit); needs continueGate.
+ *   A question gate (userAction with response, CHAT-06) needs answer
+ *   { choice: optionId } or { text } (1-500 characters, or the gate's maxLength):
+ *   400 TASK_GATE_ANSWER for a missing, wrong or extra answer, 400
+ *   TASK_GATE_ANSWER_PRIVATE for text that looks like a password, key or
+ *   personal number (nothing is kept). continueGate then gets
+ *   { graphId, taskId, gateId, boardId, answer } — without an answer, as before,
+ *   { graphId, taskId, gateId }.
  * No client execution settings, raw prompt, native approval or receipt endpoint.
  */
 export function createTaskHttpHandler({ graph, adapter, ensureAuth, port = 39218, continueGate = null }) {
@@ -79,8 +88,9 @@ export function createTaskHttpHandler({ graph, adapter, ensureAuth, port = 39218
         return true;
       }
       const extras = { activate: [], cancel: ['closeBoard'], retry: ['taskId', 'operationId'],
-        resume: [], approval: ['taskId', 'approvalId', 'decision'], continue: ['taskId', 'gateId'] }[action];
-      fields(body, ['boardId', 'scope', ...extras], ['boardId', 'scope', ...(action === 'cancel' ? [] : extras)]);
+        resume: [], approval: ['taskId', 'approvalId', 'decision'], continue: ['taskId', 'gateId', 'answer'] }[action];
+      const required = action === 'cancel' ? [] : action === 'continue' ? ['taskId', 'gateId'] : extras;
+      fields(body, ['boardId', 'scope', ...extras], ['boardId', 'scope', ...required]);
       fields(body.scope, SCOPE);
       adapter.assertScope(body.scope, body.boardId);
       if (action !== 'cancel') {
@@ -107,8 +117,19 @@ export function createTaskHttpHandler({ graph, adapter, ensureAuth, port = 39218
         const waiting = () => graph.getGraph(body.scope.graphId)?.tasks.find((item) => item.taskId === body.taskId)
           ?.gates?.find((gate) => gate.gateId === body.gateId && ['waiting', 'expired'].includes(gate.status) &&
             !['task', 'approval'].includes(gate.kind));
-        if (!waiting()) throw nativeTaskError('TASK_GATE_STALE', 'Gate is not waiting');
-        await continueGate({ graphId: body.scope.graphId, taskId: body.taskId, gateId: body.gateId });
+        const gate = waiting();
+        if (!gate) throw nativeTaskError('TASK_GATE_STALE', 'Gate is not waiting');
+        let answer;
+        try {
+          answer = normalizeGateAnswer(gate, body.answer);
+        } catch (cause) {
+          throw nativeTaskError('TASK_GATE_ANSWER', cause.code === 'E_TASK_ANSWER' ? cause.message : 'Invalid answer', 400);
+        }
+        if (answer?.text !== undefined && looksSecret(answer.text)) {
+          throw nativeTaskError('TASK_GATE_ANSWER_PRIVATE', 'The answer looks like a password, key or personal number', 400);
+        }
+        await continueGate({ graphId: body.scope.graphId, taskId: body.taskId, gateId: body.gateId,
+          ...(answer === undefined ? {} : { boardId: body.boardId, answer }) });
         adapter.assertScope(body.scope, body.boardId);
         if (waiting()) throw nativeTaskError('TASK_GATE_STALE', 'Gate could not be continued');
       } else if (action === 'approval') {

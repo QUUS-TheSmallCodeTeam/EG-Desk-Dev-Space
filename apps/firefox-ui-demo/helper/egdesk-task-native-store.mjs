@@ -1,6 +1,8 @@
-import { createHash, randomUUID } from 'node:crypto';
-import { promises as fs } from 'node:fs';
+import { createHash } from 'node:crypto';
 import path from 'node:path';
+import { LEDGER_COLLECTIONS, openWorkflowStore, readLegacyFile } from './egdesk-workflow-store.mjs';
+
+const LEGACY_FILE = 'native-task-ledger.json';
 
 export function nativeTaskError(code, message, httpStatus = 409) {
   return Object.assign(new Error(message), { code, httpStatus });
@@ -121,36 +123,75 @@ function validate(state) {
   for (const fence of state.boardFences) refs(fence, ['boardId', 'requestedBy']);
 }
 
-/** Single writer; dedicated app-owned directory, separate from the graph journal.
+/**
+ * Single writer on the workflow SQLite store (egdesk-workflow-store.mjs).
  * Only IDs, intent hashes and native evidence metadata are allowed. No resolved
  * message, profile prompt, context payload, credentials, or event text is stored.
+ * Each change writes only the ledger rows that changed plus the new revision and
+ * digest, in one transaction; a writer whose revision is stale is refused.
  * Corruption is preserved and reported; opening never resets a failed ledger.
+ *
+ * openNativeTaskLedger(directory)                    own store in that dedicated directory
+ * openNativeTaskLedger({ store, legacyDirectory? })  a shared workflow store
+ *   -> { snapshot(), transact(change), drain(), close() }
+ * Opening imports a native-task-ledger.json written before (in the directory, or
+ * legacyDirectory) once; that file is left untouched.
  */
-export async function openNativeTaskLedger(directory) {
-  if (typeof directory !== 'string' || !path.isAbsolute(directory) || directory === path.parse(directory).root) {
+export async function openNativeTaskLedger(target) {
+  const shared = target !== null && typeof target === 'object';
+  if (shared && typeof target.store?.ledger?.write !== 'function') throw new TypeError('A workflow store is required');
+  if (!shared && (typeof target !== 'string' || !path.isAbsolute(target) || target === path.parse(target).root)) {
     throw new TypeError('A dedicated absolute native-ledger directory is required');
   }
-  await fs.mkdir(directory, { recursive: true, mode: 0o700 });
-  const info = await fs.lstat(directory);
-  if (!info.isDirectory() || info.isSymbolicLink() || (info.mode & 0o077) !== 0 ||
-      (typeof process.getuid === 'function' && info.uid !== process.getuid())) {
-    throw new TypeError('Native ledger directory must be private and owned by this user');
+  let store;
+  try {
+    store = shared ? target.store : openWorkflowStore({ directory: target });
+  } catch (error) {
+    if (error instanceof TypeError) throw new TypeError('Native ledger directory must be private and owned by this user');
+    throw error;
   }
-  const filename = path.join(directory, 'native-task-ledger.json');
-  async function read() {
-    let bytes;
-    try { bytes = await fs.readFile(filename, 'utf8'); }
-    catch (error) { if (error.code === 'ENOENT') return null; throw error; }
-    try {
-      const envelope = JSON.parse(bytes);
-      validate(envelope.state);
-      if (envelope.digest !== nativeHash(envelope.state)) throw new Error('checksum');
-      return envelope;
-    } catch { throw nativeTaskError('NATIVE_LEDGER_CORRUPT', 'Native task ledger failed validation'); }
+  const legacyDirectory = shared ? target.legacyDirectory ?? null : target;
+  const corrupt = () => nativeTaskError('NATIVE_LEDGER_CORRUPT', 'Native task ledger failed validation');
+  const rowsOf = (state) => Object.fromEntries(LEDGER_COLLECTIONS.map((name) => [name, state[name].map((row) => JSON.stringify(row))]));
+  let loaded;
+  try {
+    if (legacyDirectory) {
+      store.legacy.importOnce('native-ledger', () => {
+        const bytes = readLegacyFile(legacyDirectory, LEGACY_FILE);
+        if (bytes === null) return { source: 'none' };
+        let envelope;
+        try {
+          envelope = JSON.parse(bytes);
+          validate(envelope.state);
+          if (envelope.digest !== nativeHash(envelope.state)) throw new Error('checksum');
+        } catch { throw corrupt(); }
+        // Rows written here are newer than any file; never mix the two.
+        if (store.ledger.read()) return { source: 'kept-existing' };
+        const rows = rowsOf(envelope.state);
+        store.ledger.write({ expectedDigest: null, revision: envelope.state.revision, digest: envelope.digest,
+          changes: LEDGER_COLLECTIONS.flatMap((collection) => rows[collection].map((json, pos) => ({ collection, pos, json }))) });
+        return { source: LEGACY_FILE, revision: envelope.state.revision, digest: envelope.digest };
+      });
+    }
+    const stored = store.ledger.read();
+    if (stored) {
+      try {
+        const state = { version: 1, revision: stored.revision };
+        for (const name of LEDGER_COLLECTIONS) state[name] = stored.rows[name].map((json) => JSON.parse(json));
+        validate(state);
+        if (stored.digest !== nativeHash(state)) throw new Error('checksum');
+        loaded = { state, digest: stored.digest, rows: stored.rows };
+      } catch { throw corrupt(); }
+    }
+  } catch (error) {
+    if (!shared) store.close();
+    if (error.code === 'NATIVE_LEDGER_CORRUPT' || error instanceof TypeError) throw error;
+    if (error.code === 'WORKFLOW_STORE_CORRUPT') throw corrupt();
+    throw error;
   }
-  const loaded = await read();
   let state = loaded?.state ?? { version: 1, revision: 0, graphs: [], attempts: [], approvals: [], boardFences: [] };
   let digest = loaded?.digest ?? null;
+  let rows = loaded?.rows ?? rowsOf(state);
   let queue = Promise.resolve();
   return {
     snapshot() { return structuredClone(state); },
@@ -162,31 +203,33 @@ export async function openNativeTaskLedger(directory) {
         if (stableJSON(next) === stableJSON(state)) return structuredClone(result);
         next.revision = state.revision + 1;
         validate(next);
-        if ((await read())?.digest !== (digest ?? undefined)) {
-          throw nativeTaskError('NATIVE_LEDGER_CONFLICT', 'Native ledger changed outside this writer');
-        }
         const nextDigest = nativeHash(next);
-        const temporary = path.join(directory, `.native-task-${randomUUID()}.tmp`);
-        let handle;
-        try {
-          handle = await fs.open(temporary, 'wx', 0o600);
-          await handle.writeFile(JSON.stringify({ digest: nextDigest, state: next }));
-          await handle.sync();
-          await handle.close();
-          handle = null;
-          await fs.rename(temporary, filename);
-          const directoryHandle = await fs.open(directory, 'r');
-          try { await directoryHandle.sync(); } finally { await directoryHandle.close(); }
-          state = next;
-          digest = nextDigest;
-          return structuredClone(result);
-        } finally {
-          if (handle) await handle.close();
-          await fs.unlink(temporary).catch((error) => { if (error.code !== 'ENOENT') throw error; });
+        const nextRows = rowsOf(next);
+        const changes = [];
+        for (const collection of LEDGER_COLLECTIONS) {
+          const before = rows[collection];
+          const after = nextRows[collection];
+          after.forEach((json, pos) => { if (before[pos] !== json) changes.push({ collection, pos, json }); });
+          for (let pos = after.length; pos < before.length; pos += 1) changes.push({ collection, pos, json: null });
         }
+        try {
+          store.ledger.write({ expectedDigest: digest, revision: next.revision, digest: nextDigest, changes });
+        } catch (error) {
+          if (error.code === 'WORKFLOW_STORE_CONFLICT') {
+            throw nativeTaskError('NATIVE_LEDGER_CONFLICT', 'Native ledger changed outside this writer');
+          }
+          throw error;
+        }
+        state = next;
+        digest = nextDigest;
+        rows = nextRows;
+        return structuredClone(result);
       });
       queue = work.catch(() => {});
       return work;
     },
+    /** Resolves once every change already queued has been written or refused. */
+    drain() { return queue; },
+    close() { if (!shared) store.close(); },
   };
 }

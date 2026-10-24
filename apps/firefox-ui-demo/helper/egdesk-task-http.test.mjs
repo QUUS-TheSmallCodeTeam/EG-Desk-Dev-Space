@@ -174,3 +174,38 @@ test('manual continue exists only with a continueGate callback and opens one wai
   assert.equal((await request(handler, 'POST', '/tasks/continue', { boardId: 'board-A', scope, taskId: 'task-A' })).status, 400);
   assert.equal(continued.length, 1);
 });
+
+test('CHAT-06: continue checks a question answer before calling continueGate; secret-looking text never leaves the route', async () => {
+  const h = fixture();
+  await request(h.handler, 'POST', '/tasks/submit', { boardId: 'board-A', graph: spec });
+  const continued = [];
+  h.projection.tasks[0].gates = [
+    { gateId: 'how', kind: 'userAction', label: '어떻게 보낼까요?', status: 'waiting',
+      response: { kind: 'choice', options: [{ id: 'email', label: '메일로' }, { id: 'kakao', label: '카카오톡으로' }] } },
+    { gateId: 'memo', kind: 'userAction', label: '덧붙일 말', status: 'waiting', response: { kind: 'text', maxLength: 20 } },
+    { gateId: 'login', kind: 'oauth', origin: 'https://login.example', pathPrefix: '/cb', status: 'waiting' }];
+  const handler = createTaskHttpHandler({ graph: h.graph, adapter: h.adapter, ensureAuth: async () => {},
+    continueGate: async (value) => { continued.push(value); h.projection.tasks[0].gates.find((gate) => gate.gateId === value.gateId).status = 'satisfied'; } });
+  const post = (gateId, answer) => request(handler, 'POST', '/tasks/continue',
+    { boardId: 'board-A', scope, taskId: 'task-A', gateId, ...(answer === undefined ? {} : { answer }) });
+  for (const [gateId, answer, code] of [
+    ['how', undefined, 'TASK_GATE_ANSWER'], ['how', { choice: 'fax' }, 'TASK_GATE_ANSWER'], ['how', { text: 'email' }, 'TASK_GATE_ANSWER'],
+    ['how', null, 'TASK_GATE_ANSWER'], ['how', ['email'], 'TASK_GATE_ANSWER'],
+    ['memo', { text: '   ' }, 'TASK_GATE_ANSWER'], ['memo', { text: '가'.repeat(21) }, 'TASK_GATE_ANSWER'], ['memo', { text: 'a\u0007b' }, 'TASK_GATE_ANSWER'],
+    ['memo', { text: 'pw: hunter2' }, 'TASK_GATE_ANSWER_PRIVATE'], ['memo', { text: 'sk-proj-abc123' }, 'TASK_GATE_ANSWER_PRIVATE'],
+    ['login', { choice: 'email' }, 'TASK_GATE_ANSWER'],
+  ]) {
+    const refused = await post(gateId, answer);
+    assert.deepEqual([refused.status, refused.body.code], [400, code], `${gateId} ${JSON.stringify(answer)}`);
+    assert.equal(JSON.stringify(refused.body).includes('hunter2'), false);
+  }
+  assert.equal(continued.length, 0, 'nothing reached continueGate');
+  assert.equal((await post('how', { choice: 'kakao' })).status, 200);
+  assert.equal((await post('memo', { text: ' 부가세 별도\r\n ' })).status, 200);
+  assert.equal((await post('login')).status, 200);
+  assert.deepEqual(continued, [
+    { graphId: scope.graphId, taskId: 'task-A', gateId: 'how', boardId: 'board-A', answer: { choice: 'kakao' } },
+    { graphId: scope.graphId, taskId: 'task-A', gateId: 'memo', boardId: 'board-A', answer: { text: '부가세 별도' } },
+    { graphId: scope.graphId, taskId: 'task-A', gateId: 'login' },
+  ]);
+});

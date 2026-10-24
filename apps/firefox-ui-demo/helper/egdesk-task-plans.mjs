@@ -1,11 +1,11 @@
 import { createHash, randomUUID } from 'node:crypto'
-import { promises as fs } from 'node:fs'
 import path from 'node:path'
 import { guardBridgeRequest, readJsonBody, sendJson, setBridgeCors } from './codex-bridge-http.mjs'
 import { composeAwaitResume, composePlanStep } from './egdesk-await-resume.mjs'
 import { assertGateWindow, normalizeTaskGate, normalizeTaskGraph } from './egdesk-task-graph.mjs'
 import { publicGraph } from './egdesk-task-http.mjs'
 import { nativeTaskError } from './egdesk-task-native-store.mjs'
+import { openWorkflowStore, readLegacyFile } from './egdesk-workflow-store.mjs'
 
 /**
  * Agent-proposed plans (egdesk_propose_plan). A plan is an ordinary task graph
@@ -13,9 +13,11 @@ import { nativeTaskError } from './egdesk-task-native-store.mjs'
  * screen approves it. Approval activates the graph, after which steps start by
  * themselves in dependency order and wait on their gates as usual.
  *
- * Each step's instructions are task sources (private 0600 file, bound to the
- * Board and the hashed owner). The plan record here keeps only IDs, the plan and
- * step titles, which conversation proposed it and where each step continues.
+ * Each step's instructions are task sources (private rows of the workflow
+ * store, bound to the Board and the hashed owner). The plan record here keeps
+ * only IDs, the plan and step titles, which conversation proposed it and where
+ * each step continues. A step whose userAction gate asks a question (CHAT-06)
+ * starts with 대표님's answer in its message (gateAnswerFacts).
  *
  * resumeIn 'sameThread' (default): when the step may start, its message is the
  * <egdesk-await-resume> block, sent as the next turn of the proposing
@@ -27,7 +29,7 @@ export const MAX_PLAN_TASKS = 12
 export const MAX_PLAN_INSTRUCTIONS = 4000
 export const PLAN_REQUESTER = 'agent-plan'
 export const PLAN_OWNER_ID = 'agent'
-const FILE_NAME = 'task-plans.json'
+const LEGACY_FILE = 'task-plans.json'
 const PLAN_ID = /^plan-[A-Za-z0-9-]{1,80}$/
 const TASK_ID = /^[A-Za-z0-9][A-Za-z0-9._-]{0,63}$/
 const ID = /^[A-Za-z0-9][A-Za-z0-9._:/-]*$/
@@ -61,77 +63,89 @@ function validRecord(record) {
 }
 
 /**
- * openTaskPlanStore({ directory?, maxPlans }) -> { find, byGraph, all, put, update, remove }
- * With a directory, plans persist in one private (0600) file; without, in memory.
+ * openTaskPlanStore({ directory? | store?, legacyDirectory?, maxPlans }) -> { find, byGraph, all, put, update, remove, close }
+ * Plans are rows of the workflow SQLite store (egdesk-workflow-store.mjs): a
+ * change writes that one plan, not the whole list. Without a directory or
+ * store they stay in memory. A task-plans.json written before is imported once
+ * and left untouched; a corrupt one is reported (E_TASK_PLANS_CORRUPT) and kept.
  * Records are rows in an array: no model- or user-chosen string becomes a key.
  */
-export async function openTaskPlanStore({ directory = null, maxPlans = 512 } = {}) {
+export async function openTaskPlanStore({ directory = null, store = null, legacyDirectory = null, maxPlans = 512 } = {}) {
   let plans = []
-  let file = null
-  let writeTail = Promise.resolve()
-  if (directory !== null) {
-    if (typeof directory !== 'string' || !path.isAbsolute(directory) || directory === path.parse(directory).root) throw new TypeError('A dedicated absolute task-plan directory is required')
-    await fs.mkdir(directory, { recursive: true, mode: 0o700 })
-    const info = await fs.lstat(directory)
-    if (!info.isDirectory() || info.isSymbolicLink() || (info.mode & 0o077) !== 0 ||
-        (typeof process.getuid === 'function' && info.uid !== process.getuid())) {
-      throw new TypeError('Task-plan directory must be private and owned by this user')
-    }
-    file = path.join(directory, FILE_NAME)
-    let bytes = null
-    try { bytes = await fs.readFile(file, 'utf8') } catch (error) { if (error.code !== 'ENOENT') throw error }
-    if (bytes !== null) {
-      let envelope
-      try { envelope = JSON.parse(bytes) } catch { envelope = null }
-      if (envelope?.version !== 1 || !Array.isArray(envelope.plans) || envelope.digest !== digest(envelope.plans) || !envelope.plans.every(validRecord)) {
-        throw Object.assign(new Error('Task plan file failed its version or checksum check'), { code: 'E_TASK_PLANS_CORRUPT' })
-      }
-      plans = envelope.plans
-    }
+  let backing = store
+  const own = !store && directory !== null
+  if (store && typeof store.records?.insert !== 'function') throw new TypeError('A workflow store is required')
+  if (own) {
+    try { backing = openWorkflowStore({ directory }) }
+    catch (error) { if (error instanceof TypeError) throw new TypeError('Task-plan directory must be private and owned by this user'); throw error }
   }
-
-  async function persist(next) {
-    if (!next.every(validRecord)) throw planError('PLAN_STORAGE', 'Plan record is invalid', 500)
-    if (!file) { plans = next; return }
-    const work = writeTail.then(async () => {
-      const temporary = path.join(directory, `.task-plans-${randomUUID()}.tmp`)
-      let handle
-      try {
-        handle = await fs.open(temporary, 'wx', 0o600)
-        await handle.writeFile(JSON.stringify({ version: 1, digest: digest(next), plans: next }))
-        await handle.sync()
-        await handle.close()
-        handle = null
-        await fs.rename(temporary, file)
-        plans = next
-      } finally {
-        if (handle) await handle.close()
-        await fs.unlink(temporary).catch(() => {})
+  if (backing) {
+    const corrupt = message => Object.assign(new Error(message), { code: 'E_TASK_PLANS_CORRUPT' })
+    try {
+      const legacyAt = own ? legacyDirectory ?? directory : legacyDirectory
+      if (legacyAt) {
+        backing.legacy.importOnce('task-plans', () => {
+          const bytes = readLegacyFile(legacyAt, LEGACY_FILE)
+          if (bytes === null) return { source: 'none' }
+          let envelope
+          try { envelope = JSON.parse(bytes) } catch { envelope = null }
+          if (envelope?.version !== 1 || !Array.isArray(envelope.plans) || envelope.digest !== digest(envelope.plans) || !envelope.plans.every(validRecord) ||
+              new Set(envelope.plans.map(plan => plan.planId)).size !== envelope.plans.length) {
+            throw corrupt('Task plan file failed its version or checksum check')
+          }
+          if (backing.records.count('plan') > 0) return { source: 'kept-existing' }
+          for (const plan of envelope.plans) backing.records.insert('plan', plan.planId, JSON.stringify(plan))
+          return { source: LEGACY_FILE, plans: envelope.plans.length, digest: envelope.digest }
+        })
       }
-    })
-    writeTail = work.catch(() => {})
-    return work
+      plans = backing.records.list('plan').map(row => {
+        let record = null
+        try { record = JSON.parse(row.json) } catch { /* refused below */ }
+        if (!validRecord(record) || record.planId !== row.key) throw corrupt('A stored task plan failed validation')
+        return record
+      })
+    } catch (error) {
+      if (own) backing.close()
+      throw error
+    }
   }
 
   const find = planId => plans.find(plan => plan.planId === planId) ?? null
+  const write = action => {
+    if (!backing) return
+    try { backing.transaction(action) } catch { throw planError('PLAN_STORAGE', 'Plan could not be saved', 503) }
+  }
   return {
     find: planId => structuredClone(find(planId)),
     byGraph: graphId => structuredClone(plans.find(plan => plan.scope.graphId === graphId) ?? null),
     // Read-only view for scheduling checks; callers never mutate it.
     all: () => plans,
-    async put(record) {
-      const next = [...plans.filter(plan => plan.planId !== record.planId), structuredClone(record)]
-      while (next.length > maxPlans) next.shift()
-      await persist(next)
+    async put(input) {
+      const record = structuredClone(input)
+      if (!validRecord(record)) throw planError('PLAN_STORAGE', 'Plan record is invalid', 500)
+      const next = [...plans.filter(plan => plan.planId !== record.planId), record]
+      const dropped = []
+      while (next.length > maxPlans) dropped.push(next.shift().planId)
+      write(() => {
+        backing.records.remove('plan', record.planId)
+        for (const planId of dropped) backing.records.remove('plan', planId)
+        backing.records.insert('plan', record.planId, JSON.stringify(record))
+      })
+      plans = next
     },
     async update(planId, patch) {
       const current = find(planId)
       if (!current) throw planError('PLAN_NOT_FOUND', 'No such plan', 404)
-      await persist(plans.map(plan => plan.planId === planId ? { ...structuredClone(plan), ...patch } : plan))
+      const record = { ...structuredClone(current), ...structuredClone(patch) }
+      if (!validRecord(record) || record.planId !== planId) throw planError('PLAN_STORAGE', 'Plan record is invalid', 500)
+      write(() => backing.records.replace('plan', planId, JSON.stringify(record)))
+      plans = plans.map(plan => plan.planId === planId ? record : plan)
     },
     async remove(planId) {
-      await persist(plans.filter(plan => plan.planId !== planId))
+      write(() => backing.records.remove('plan', planId))
+      plans = plans.filter(plan => plan.planId !== planId)
     },
+    close() { if (own) backing.close() },
   }
 }
 
@@ -167,6 +181,28 @@ export function normalizePlanArgs(args) {
       resumeIn: task.resumeIn ?? 'sameThread', gates }
   })
   return { title, tasks }
+}
+
+/**
+ * 대표님's answers to one task's question gates (CHAT-06), ready for the step's
+ * message: [{ gateId, question, kind: 'choice', choice, label } | { gateId, question, kind: 'text', text }].
+ * The chosen option comes from the journal; written text from the task sources,
+ * checked against the same gate, Board and owner (TASK_INPUT_UNRESOLVED otherwise).
+ */
+export function gateAnswerFacts({ graph, sources, graphId, taskId, boardId }) {
+  const answers = typeof graph?.gateAnswers === 'function' ? graph.gateAnswers(graphId, taskId) : []
+  if (!answers.length) return []
+  const gates = graph.getGraph(graphId)?.tasks.find(entry => entry.taskId === taskId)?.gates ?? []
+  return answers.map(answer => {
+    const gate = gates.find(entry => entry.gateId === answer.gateId)
+    const question = typeof gate?.label === 'string' ? gate.label : null
+    if (answer.choice !== undefined) {
+      const option = gate?.response?.options?.find(entry => entry.id === answer.choice)
+      return { gateId: answer.gateId, question, kind: 'choice', choice: answer.choice, label: option?.label ?? answer.choice }
+    }
+    return { gateId: answer.gateId, question, kind: 'text',
+      text: sources.answerText({ textRef: answer.textRef, graphId, taskId, gateId: answer.gateId, boardId }) }
+  })
 }
 
 function sameThreadTarget(plan, task) {
@@ -318,12 +354,13 @@ export function createTaskPlanService({ store, sources, graph, adapter, chat = n
     const step = graph.getGraph(plan.scope.graphId)?.tasks.find(entry => entry.taskId === task.taskId)
     const gates = step?.gates ?? []
     const taskTitles = new Map(plan.tasks.map(entry => [entry.taskId, entry.title]))
+    const answers = gateAnswerFacts({ graph, sources, graphId: plan.scope.graphId, taskId: task.taskId, boardId: plan.boardId })
     const target = sameThreadTarget(plan, task)
     if (target) {
       return { message: composeAwaitResume({ graphId: plan.scope.graphId, planId: plan.planId, planTitle: plan.title, task,
-        instructions: base.message, gates, taskTitles }), ...target }
+        instructions: base.message, gates, taskTitles, answers }), ...target }
     }
-    return { message: composePlanStep({ planTitle: plan.title, task, instructions: base.message, gates, taskTitles }),
+    return { message: composePlanStep({ planTitle: plan.title, task, instructions: base.message, gates, taskTitles, answers }),
       ...(base.cwd === undefined ? {} : { cwd: base.cwd }) }
   }
 

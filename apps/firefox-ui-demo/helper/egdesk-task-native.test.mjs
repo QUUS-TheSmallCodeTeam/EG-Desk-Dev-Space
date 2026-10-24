@@ -3,12 +3,21 @@ import { test } from 'node:test';
 import { mkdtemp, readFile, rm, writeFile } from 'node:fs/promises';
 import path from 'node:path';
 import os from 'node:os';
+import { DatabaseSync } from 'node:sqlite';
 import { CodexChatRuntime } from './codex-chat-runtime.mjs';
 import { openTaskGraph } from './egdesk-task-graph.mjs';
 import { openTaskStore } from './egdesk-task-store.mjs';
-import { openNativeTaskLedger } from './egdesk-task-native-store.mjs';
+import { nativeHash, openNativeTaskLedger } from './egdesk-task-native-store.mjs';
 import { createNativeTaskAdapter } from './egdesk-task-native.mjs';
 
+// Every text column of the workflow database (WAL content included), for "never stored" checks.
+function storedText(filename) {
+  const db = new DatabaseSync(filename, { readOnly: true });
+  try {
+    return [...db.prepare('SELECT row_json AS text FROM ledger_rows').all(), ...db.prepare('SELECT event_json AS text FROM task_events').all(),
+      ...db.prepare('SELECT record_json AS text FROM records').all()].map((row) => row.text).join('\n');
+  } finally { db.close(); }
+}
 const delay = () => new Promise((resolve) => setTimeout(resolve, 2));
 function deferred() { let resolve; const promise = new Promise((done) => { resolve = done; }); return { promise, resolve }; }
 async function until(predicate) {
@@ -30,7 +39,8 @@ async function fixture(t, options = {}) {
   // Cleanup order: stop the graphs, let every journal/ledger write that already
   // started finish, then remove the folder. A write still creating or renaming
   // its temp file while rm walks the folder fails rmdir with ENOTEMPTY.
-  const writes = new Set(), graphs = [];
+  // The SQLite stores are closed only after those writes, then the folder goes.
+  const writes = new Set(), graphs = [], stores = [];
   const tracked = (work) => {
     writes.add(work);
     void work.finally(() => writes.delete(work)).catch(() => {});
@@ -39,14 +49,17 @@ async function fixture(t, options = {}) {
   t.after(async () => {
     for (const graph of graphs) graph.close();
     while (writes.size) await Promise.allSettled([...writes]);
+    for (const store of stores) store.close();
     await rm(directory, { recursive: true, force: true });
   });
   async function openLedger() {
     const opened = await openNativeTaskLedger(path.join(directory, 'native'));
+    stores.push(opened);
     return { snapshot: () => opened.snapshot(), transact: (change) => tracked(opened.transact(change)) };
   }
   async function openGraph(callbacks) {
     const opened = await openTaskStore(path.join(directory, 'graph'));
+    stores.push(opened);
     const store = { ...opened, save: (events) => tracked(opened.save(events)) };
     const graph = await openTaskGraph({ store, maxConcurrency: 2, ...callbacks });
     graphs.push(graph);
@@ -137,7 +150,8 @@ test('native acceptance and answer items do not complete a task; actual terminal
   assert.equal(status(h.graph, value.graphId), 'completed');
   await until(() => h.adapter.getState(value.graphId).attempts[1]?.phase === 'accepted');
   assert.equal(h.calls.filter((call) => call.method === 'turn/start').length, 2);
-  const file = await readFile(path.join(h.directory, 'native/native-task-ledger.json'), 'utf8');
+  const file = storedText(path.join(h.directory, 'native', 'workflow.sqlite'));
+  assert(file.includes(first.native.conversationId), 'the ledger rows were read');
   assert(!file.includes('PRIVATE-RESOLVED'));
   assert(!file.includes('/authorized/work'));
   assert.deepEqual(h.eventErrors, []);
@@ -411,6 +425,39 @@ test('reconciliation resumes a persisted Board fence before any dependent dispat
   await h.finish(native, 'interrupted');
   await until(() => status(h.graph, value.graphId) === 'cancelled');
   assert.equal(h.calls.filter((call) => call.method === 'turn/start').length, 1);
+});
+
+test('a JSON ledger written before is imported once into SQLite rows and left untouched', async (t) => {
+  const directory = await mkdtemp(path.join(os.tmpdir(), 'egdesk-native-legacy-'));
+  const opened = [];
+  t.after(async () => { for (const ledger of opened) ledger.close(); await rm(directory, { recursive: true, force: true }); });
+  const value = spec('legacy');
+  const authority = { ownerKey: 'owner-A', delegationKey: 'delegation-A' };
+  const state = { version: 1, revision: 3, attempts: [], approvals: [], boardFences: [{ boardId: 'board-old', requestedBy: 'local-owner' }],
+    graphs: [{ boardId: 'board-legacy', scope: scope(value), fingerprint: 'fp-legacy', fenced: false, authority,
+      tasks: value.tasks.map(({ taskId, ownerId, sourceRef, dependsOn, approvalRequired }) => ({ taskId, ownerId, sourceRef, dependsOn, approvalRequired })) }] };
+  const filename = path.join(directory, 'native-task-ledger.json');
+  const original = JSON.stringify({ digest: nativeHash(state), state });
+  await writeFile(filename, original, { mode: 0o600 });
+  const first = await openNativeTaskLedger(directory);
+  opened.push(first);
+  assert.deepEqual(first.snapshot(), state);
+  await first.transact((next) => { next.boardFences.push({ boardId: 'board-new', requestedBy: 'local-owner' }); });
+  assert.equal(await readFile(filename, 'utf8'), original, 'the old file is never rewritten');
+  await writeFile(filename, JSON.stringify({ digest: nativeHash({ ...state, revision: 9 }), state: { ...state, revision: 9 } }));
+  const second = await openNativeTaskLedger(directory);
+  opened.push(second);
+  assert.equal(second.snapshot().revision, 4, 'imported once; later file changes are ignored');
+  assert.deepEqual(second.snapshot().boardFences.map((fence) => fence.boardId), ['board-old', 'board-new']);
+  // The first writer's view is now stale only if someone else wrote; here it is current.
+  await first.transact((next) => { next.boardFences.pop(); });
+  await assert.rejects(second.transact((next) => { next.boardFences.pop(); }), { code: 'NATIVE_LEDGER_CONFLICT' });
+  // A row changed behind the ledger's back fails its digest and is kept for inspection.
+  const db = new DatabaseSync(path.join(directory, 'workflow.sqlite'));
+  try { db.prepare("UPDATE ledger_rows SET row_json = replace(row_json, 'board-old', 'board-tampered') WHERE collection = 'boardFences'").run(); }
+  finally { db.close(); }
+  await assert.rejects(openNativeTaskLedger(directory), { code: 'NATIVE_LEDGER_CORRUPT' });
+  assert.match(storedText(path.join(directory, 'workflow.sqlite')), /board-tampered/);
 });
 
 test('native ledger corruption is preserved and refuses recovery reset', async (t) => {

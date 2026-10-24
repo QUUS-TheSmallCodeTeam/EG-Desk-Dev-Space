@@ -10,17 +10,32 @@
  *         cancelGraph(scope), retryTask({...scope, taskId, operationId}),
  *         resumeGraph(scope), getGraph(id), getEvents(id?),
  *         satisfyGate({ graphId, taskId, gateId, evidence }), openGates(),
- *         reschedule(), close().
+ *         gateAnswers(graphId, taskId), reschedule(), drain(), close().
+ *
+ * Each new journal event is applied to a copy of only the graph it names, and
+ * the store gets the whole list but persists just the new tail
+ * (egdesk-task-store.mjs), so one event costs the same however long the
+ * journal is. A full replay happens only when the journal is opened.
  *
  * Gates (CHAT-06): a task waits on every upstream task in dependsOn (kind
  * "task"), on optional external gates, then on approvalRequired (kind
  * "approval"). External gates are explicit, exact conditions:
- *   { gateId, kind: 'userAction', label? }
+ *   { gateId, kind: 'userAction', label?, response? }
  *   { gateId, kind: 'oauth', origin, pathPrefix, cardId? }
  *   { gateId, kind: 'file', root, relativeGlob }          (root = connected rootId)
  *   { gateId, kind: 'terminalExit', sessionId, exitCode? }
  * Satisfying one is journaled with a bounded evidence reference; when the last
  * gate is satisfied the task becomes ready and starts automatically.
+ *
+ * Question gates (CHAT-06): a userAction gate may carry response, so 대표님
+ * answers instead of only confirming. label is the question.
+ *   response { kind: 'choice', options: [{ id, label }] }   2-6 options
+ *   response { kind: 'text', maxLength? }                   1-500 characters
+ * Such a gate opens only through the manual continue (user.action) carrying
+ * the answer: evidence.answer { choice: optionId } or { textRef } — the written
+ * text itself lives with the task sources, never in this journal. The visible
+ * gate shows answer { kind: 'choice', choice } or { kind: 'text' };
+ * gateAnswers(graphId, taskId) gives the journaled answers to the step's input.
  *
  * Gate expiry: any external gate may also carry expiresAt (canonical ISO time)
  * or timeoutMs (counted from the moment the gate becomes the task's current
@@ -45,6 +60,10 @@ const GATE_KINDS = new Set(['userAction', 'oauth', 'file', 'terminalExit']);
 const GATE_EVIDENCE_TOPICS = new Set(['terminal.exit', 'file.changed', 'browser.oauthCompleted', 'user.action']);
 const MAX_GATES = 8;
 const MAX_GATE_WAIT_MS = 7 * 24 * 60 * 60 * 1000;
+export const MAX_GATE_CHOICES = 6;
+export const MAX_GATE_ANSWER_CHARS = 500;
+const OPTION_ID = /^[A-Za-z0-9][A-Za-z0-9._-]{0,63}$/;
+const ANSWER_CONTROL = /[\u0000-\u0008\u000b-\u001f\u007f]/;
 const CONTROL = /[\u0000-\u001f\u007f]/;
 
 function error(code, message) {
@@ -130,6 +149,30 @@ function normalizeExpiry(input) {
   return { expiresAt: input.expiresAt };
 }
 
+// What a question gate asks for; options keep the order the Agent gave.
+function normalizeResponse(input) {
+  assert(input !== null && typeof input === 'object' && !Array.isArray(input) && ['choice', 'text'].includes(input.kind),
+    'E_TASK_INPUT', 'response kind must be choice or text');
+  if (input.kind === 'choice') {
+    object(input, 'choice response', ['kind', 'options']);
+    assert(Array.isArray(input.options) && input.options.length >= 2 && input.options.length <= MAX_GATE_CHOICES,
+      'E_TASK_INPUT', `a choice response lists 2-${MAX_GATE_CHOICES} options`);
+    const options = input.options.map((option) => {
+      object(option, 'choice option', ['id', 'label']);
+      assert(typeof option.id === 'string' && OPTION_ID.test(option.id),
+        'E_TASK_INPUT', 'option id must be 1-64 letters, digits, ".", "_" or "-", starting with a letter or digit');
+      return { id: option.id, label: plainText(option.label, 'option label', 120) };
+    });
+    assert(new Set(options.map((option) => option.id)).size === options.length, 'E_TASK_INPUT', 'duplicate option id');
+    return { kind: 'choice', options };
+  }
+  object(input, 'text response', ['kind', 'maxLength']);
+  assert(input.maxLength === undefined ||
+    (Number.isSafeInteger(input.maxLength) && input.maxLength >= 1 && input.maxLength <= MAX_GATE_ANSWER_CHARS),
+  'E_TASK_INPUT', `maxLength must be 1-${MAX_GATE_ANSWER_CHARS}`);
+  return { kind: 'text', ...(input.maxLength === undefined ? {} : { maxLength: input.maxLength }) };
+}
+
 function normalizeGate(input) {
   assert(input !== null && typeof input === 'object' && !Array.isArray(input) && GATE_KINDS.has(input.kind),
     'E_TASK_INPUT', 'gate kind must be userAction, oauth, file or terminalExit');
@@ -138,9 +181,9 @@ function normalizeGate(input) {
   const expiry = ['expiresAt', 'timeoutMs'];
   switch (input.kind) {
     case 'userAction':
-      object(input, 'userAction gate', ['gateId', 'kind', 'label', ...expiry]);
+      object(input, 'userAction gate', ['gateId', 'kind', 'label', 'response', ...expiry]);
       return { gateId, kind: 'userAction', ...(input.label === undefined ? {} : { label: plainText(input.label, 'label', 200) }),
-        ...normalizeExpiry(input) };
+        ...(input.response === undefined ? {} : { response: normalizeResponse(input.response) }), ...normalizeExpiry(input) };
     case 'oauth': {
       object(input, 'oauth gate', ['gateId', 'kind', 'origin', 'pathPrefix', 'cardId', ...expiry]);
       const target = normalizeOAuthTarget(input.origin, input.pathPrefix);
@@ -175,11 +218,58 @@ export function assertGateWindow(graph, now = Date.now()) {
   }
 }
 
+/**
+ * Checks 대표님's answer against a gate's question, before anything is kept.
+ * -> { choice } or { text } (NFC, trimmed, CRLF -> LF); undefined for a gate
+ * without a question. Wrong shape, unknown option or bad length: E_TASK_ANSWER.
+ * Whether the text looks like a secret is the caller's check (task sources).
+ */
+export function normalizeGateAnswer(gate, answer) {
+  const response = gate?.response;
+  if (!response) {
+    assert(answer === undefined, 'E_TASK_ANSWER', 'this condition takes no answer');
+    return undefined;
+  }
+  assert(answer !== undefined, 'E_TASK_ANSWER', 'this condition needs an answer');
+  assert(answer !== null && typeof answer === 'object' && !Array.isArray(answer) &&
+    Object.keys(answer).length === 1 && Object.hasOwn(answer, response.kind),
+  'E_TASK_ANSWER', response.kind === 'choice' ? 'answer with { choice }' : 'answer with { text }');
+  if (response.kind === 'choice') {
+    assert(typeof answer.choice === 'string' && response.options.some((option) => option.id === answer.choice),
+      'E_TASK_ANSWER', 'choose one of the offered options');
+    return { choice: answer.choice };
+  }
+  const max = response.maxLength ?? MAX_GATE_ANSWER_CHARS;
+  const text = typeof answer.text === 'string' ? answer.text.normalize('NFC').replace(/\r\n?/g, '\n').trim() : '';
+  assert(text.length > 0 && Array.from(text).length <= max && !ANSWER_CONTROL.test(text),
+    'E_TASK_ANSWER', `the answer must be 1-${max} characters of plain text`);
+  return { text };
+}
+
+// Whether journaled evidence fits the gate: a question needs its answer, other gates take none.
+function answerFits(gate, answer) {
+  if (!gate.response) return answer === undefined;
+  if (gate.response.kind === 'choice') return answer?.choice !== undefined && gate.response.options.some((option) => option.id === answer.choice);
+  return answer?.textRef !== undefined;
+}
+
 function normalizeEvidence(input) {
-  object(input, 'gate evidence', ['eventId', 'topic', 'at']);
+  object(input, 'gate evidence', ['eventId', 'topic', 'at', 'answer']);
   assert(GATE_EVIDENCE_TOPICS.has(input.topic) && typeof input.at === 'string' && input.at.length <= 40 &&
     !Number.isNaN(Date.parse(input.at)), 'E_TASK_INPUT', 'gate evidence must name a known event');
-  return { eventId: id(input.eventId, 'eventId'), topic: input.topic, at: input.at };
+  const evidence = { eventId: id(input.eventId, 'eventId'), topic: input.topic, at: input.at };
+  if (input.answer !== undefined) {
+    assert(input.topic === 'user.action', 'E_TASK_INPUT', 'only a manual continue carries an answer');
+    object(input.answer, 'gate answer', ['choice', 'textRef']);
+    assert(Object.keys(input.answer).length === 1, 'E_TASK_INPUT', 'a gate answer is one choice or one textRef');
+    if (input.answer.choice !== undefined) {
+      assert(typeof input.answer.choice === 'string' && OPTION_ID.test(input.answer.choice), 'E_TASK_INPUT', 'answer choice must be an option id');
+      evidence.answer = { choice: input.answer.choice };
+    } else {
+      evidence.answer = { textRef: id(input.answer.textRef, 'textRef') };
+    }
+  }
+  return evidence;
 }
 
 function normalizeGraph(input) {
@@ -292,178 +382,224 @@ function taskStatus(graph, task) {
   return 'ready';
 }
 
-function project(events) {
-  const graphs = new Map();
-  const requestKeys = new Map();
-  const receiptIds = new Map();
-  const retryIds = new Set();
-  for (let index = 0; index < events.length; index += 1) {
-    const event = events[index];
-    assert(event?.seq === index + 1 && typeof event.at === 'string' && typeof event.type === 'string',
-      'E_TASK_JOURNAL', 'invalid event sequence');
-    if (event.type === 'graph-submitted') {
-      const spec = normalizeGraph(event.graph);
-      assert(JSON.stringify(spec) === JSON.stringify(event.graph), 'E_TASK_JOURNAL', 'noncanonical graph event');
-      const key = `${spec.runId}\0${spec.requestId}`;
-      assert(!graphs.has(spec.graphId) && !requestKeys.has(key),
-        'E_TASK_JOURNAL', 'duplicate graph or request ID');
-      const tasks = new Map(spec.tasks.map((task) => [task.taskId, {
-        spec: task, state: null, attempts: [], receipt: null,
-        approvalRequested: false, approvalReceipt: null,
-        uncertain: false, interruptUncertain: false, approvalDeliveryUncertain: false,
-        lateOutcomes: [], gatesSatisfied: new Map(), gatesExpired: new Map(), completedAt: null,
-      }]));
-      graphs.set(spec.graphId, { spec, tasks, activated: false, activatedAt: null, cancelRequested: false });
-      requestKeys.set(key, spec.graphId);
-      continue;
-    }
-    const graph = graphs.get(event.graphId);
-    assert(graph, 'E_TASK_JOURNAL', 'event references missing graph');
-    const task = event.taskId ? graph.tasks.get(event.taskId) : null;
-    if (event.taskId) assert(task, 'E_TASK_JOURNAL', 'event references missing task');
-    switch (event.type) {
-      case 'graph-activated':
-        assert(!graph.activated && !graph.cancelRequested, 'E_TASK_JOURNAL', 'invalid activation');
-        graph.activated = true;
-        graph.activatedAt = event.at;
-        break;
-      case 'graph-cancel-requested':
-        assert(!graph.cancelRequested, 'E_TASK_JOURNAL', 'duplicate cancellation');
-        graph.cancelRequested = true;
-        break;
-      case 'graph-resumed':
-        assert(graph.activated, 'E_TASK_JOURNAL', 'inactive graph cannot resume');
-        break;
-      case 'task-approval-requested':
-        assert(taskStatus(graph, task) === 'approval-required' && !task.approvalRequested,
-          'E_TASK_JOURNAL', 'invalid approval request');
-        task.approvalRequested = true;
-        break;
-      case 'task-approval-resolved':
-        assert(taskStatus(graph, task) === 'approval-required' && task.approvalRequested &&
-          ['approved', 'rejected'].includes(event.receipt?.outcome),
-        'E_TASK_JOURNAL', 'invalid approval decision');
-        assert(JSON.stringify(normalizeReceipt(event.receipt, binding(graph, task),
-          event.receipt.outcome)) === JSON.stringify(event.receipt),
-        'E_TASK_JOURNAL', 'invalid approval receipt binding');
-        task.approvalReceipt = event.receipt;
-        if (event.receipt.outcome === 'rejected') task.state = 'cancelled';
-        break;
-      case 'task-started':
-        assert(taskStatus(graph, task) === 'ready' &&
-          event.attemptId === nextAttemptId(graph, task),
-        'E_TASK_JOURNAL', 'invalid task start');
-        task.state = 'running';
-        task.uncertain = false;
-        task.interruptUncertain = false;
-        task.attempts.push({ attemptId: event.attemptId, status: 'running', receipt: null });
-        break;
-      case 'task-outcome-recorded': {
-        const attempt = task.attempts.at(-1);
-        assert(task.state === 'running' && attempt?.attemptId === event.receipt?.binding?.attemptId &&
-          ['completed', 'failed'].includes(event.receipt?.outcome),
-        'E_TASK_JOURNAL', 'invalid task outcome');
-        assert(JSON.stringify(normalizeReceipt(event.receipt,
-          binding(graph, task, attempt.attemptId), event.receipt.outcome)) === JSON.stringify(event.receipt),
-        'E_TASK_JOURNAL', 'invalid task outcome binding');
-        task.state = event.receipt.outcome;
-        task.receipt = event.receipt;
-        if (event.receipt.outcome === 'completed') task.completedAt = event.at;
-        attempt.status = event.receipt.outcome;
-        attempt.receipt = event.receipt;
-        break;
-      }
-      case 'task-cancelled': {
-        const attempt = task.attempts.at(-1);
-        assert(graph.cancelRequested && task.state === 'running' &&
-          attempt?.attemptId === event.receipt?.binding?.attemptId &&
-          event.receipt?.outcome === 'cancelled',
-        'E_TASK_JOURNAL', 'invalid cancellation confirmation');
-        assert(JSON.stringify(normalizeReceipt(event.receipt,
-          binding(graph, task, attempt.attemptId), 'cancelled')) === JSON.stringify(event.receipt),
-        'E_TASK_JOURNAL', 'invalid cancellation receipt binding');
-        task.state = 'cancelled';
-        task.receipt = event.receipt;
-        attempt.status = 'cancelled';
-        attempt.receipt = event.receipt;
-        break;
-      }
-      case 'task-dispatch-skipped': {
-        const attempt = task.attempts.at(-1);
-        assert(graph.cancelRequested && task.state === 'running' &&
-          attempt?.attemptId === event.attemptId,
-        'E_TASK_JOURNAL', 'invalid skipped dispatch');
-        task.state = 'cancelled';
-        attempt.status = 'cancelled';
-        break;
-      }
-      case 'task-late-outcome':
-        assert(task.state === 'cancelled' &&
-          task.attempts.at(-1)?.attemptId === event.receipt?.binding?.attemptId &&
-          ['completed', 'failed'].includes(event.receipt?.outcome),
-        'E_TASK_JOURNAL', 'invalid late outcome');
-        assert(JSON.stringify(normalizeReceipt(event.receipt,
-          binding(graph, task, task.attempts.at(-1).attemptId), event.receipt.outcome)) ===
-          JSON.stringify(event.receipt), 'E_TASK_JOURNAL', 'invalid late receipt binding');
-        task.lateOutcomes.push(event.receipt);
-        break;
-      case 'task-execution-uncertain':
-        assert(task.state === 'running' && task.attempts.at(-1)?.attemptId === event.attemptId,
-          'E_TASK_JOURNAL', 'invalid uncertain execution');
-        task.uncertain = true;
-        break;
-      case 'task-interrupt-uncertain':
-        assert(graph.cancelRequested && task.state === 'running' &&
-          task.attempts.at(-1)?.attemptId === event.attemptId,
-        'E_TASK_JOURNAL', 'invalid uncertain interruption');
-        task.interruptUncertain = true;
-        break;
-      case 'task-approval-delivery-uncertain':
-        assert(taskStatus(graph, task) === 'approval-required' && task.approvalRequested,
-          'E_TASK_JOURNAL', 'invalid uncertain approval delivery');
-        task.approvalDeliveryUncertain = true;
-        break;
-      case 'task-gate-satisfied': {
-        const gate = (task.spec.gates ?? []).find((entry) => entry.gateId === event.gateId);
-        assert(gate && !graph.cancelRequested && task.state === null && !task.gatesSatisfied.has(event.gateId),
-          'E_TASK_JOURNAL', 'invalid gate satisfaction');
-        assert(JSON.stringify(normalizeEvidence(event.evidence)) === JSON.stringify(event.evidence),
-          'E_TASK_JOURNAL', 'noncanonical gate evidence');
-        assert(!task.gatesExpired.has(event.gateId) || event.evidence.topic === 'user.action',
-          'E_TASK_JOURNAL', 'an expired gate opens only by hand');
-        task.gatesSatisfied.set(event.gateId, clone(event.evidence));
-        break;
-      }
-      case 'task-gate-expired': {
-        const gate = (task.spec.gates ?? []).find((entry) => entry.gateId === event.gateId);
-        assert(gate && (gate.expiresAt !== undefined || gate.timeoutMs !== undefined) && graph.activated &&
-          !graph.cancelRequested && task.state === null && !task.gatesSatisfied.has(event.gateId) &&
-          !task.gatesExpired.has(event.gateId), 'E_TASK_JOURNAL', 'invalid gate expiry');
-        task.gatesExpired.set(event.gateId, event.at);
-        break;
-      }
-      case 'task-retry-requested':
-        assert(task.state === 'failed' && !graph.cancelRequested &&
-          typeof event.operationId === 'string' && !retryIds.has(event.operationId),
-        'E_TASK_JOURNAL', 'invalid retry');
-        retryIds.add(event.operationId);
-        task.state = null;
-        task.receipt = null;
-        task.approvalRequested = false;
-        task.approvalReceipt = null;
-        task.uncertain = false;
-        break;
-      default:
-        throw error('E_TASK_JOURNAL', `unknown task event: ${event.type}`);
-    }
-    if (event.receipt) {
-      const prior = receiptIds.get(event.receipt.receiptId);
-      assert(!prior || JSON.stringify(prior) === JSON.stringify(event.receipt),
-        'E_TASK_JOURNAL', 'receipt ID collision');
-      receiptIds.set(event.receipt.receiptId, event.receipt);
-    }
+function emptyProjection() {
+  return { graphs: new Map(), requestKeys: new Map(), receiptIds: new Map(), retryIds: new Set() };
+}
+
+// Applies one journal event to a projection (mutating it); E_TASK_JOURNAL when
+// the event does not follow from what came before.
+function applyEvent({ graphs, requestKeys, receiptIds, retryIds }, event, index) {
+  assert(event?.seq === index + 1 && typeof event.at === 'string' && typeof event.type === 'string',
+    'E_TASK_JOURNAL', 'invalid event sequence');
+  if (event.type === 'graph-submitted') {
+    const spec = normalizeGraph(event.graph);
+    assert(JSON.stringify(spec) === JSON.stringify(event.graph), 'E_TASK_JOURNAL', 'noncanonical graph event');
+    const key = `${spec.runId}\0${spec.requestId}`;
+    assert(!graphs.has(spec.graphId) && !requestKeys.has(key),
+      'E_TASK_JOURNAL', 'duplicate graph or request ID');
+    const tasks = new Map(spec.tasks.map((task) => [task.taskId, {
+      spec: task, state: null, attempts: [], receipt: null,
+      approvalRequested: false, approvalReceipt: null,
+      uncertain: false, interruptUncertain: false, approvalDeliveryUncertain: false,
+      lateOutcomes: [], gatesSatisfied: new Map(), gatesExpired: new Map(), completedAt: null,
+    }]));
+    graphs.set(spec.graphId, { spec, tasks, activated: false, activatedAt: null, cancelRequested: false });
+    requestKeys.set(key, spec.graphId);
+    return;
   }
-  return { graphs, requestKeys, receiptIds, retryIds };
+  const graph = graphs.get(event.graphId);
+  assert(graph, 'E_TASK_JOURNAL', 'event references missing graph');
+  const task = event.taskId ? graph.tasks.get(event.taskId) : null;
+  if (event.taskId) assert(task, 'E_TASK_JOURNAL', 'event references missing task');
+  switch (event.type) {
+    case 'graph-activated':
+      assert(!graph.activated && !graph.cancelRequested, 'E_TASK_JOURNAL', 'invalid activation');
+      graph.activated = true;
+      graph.activatedAt = event.at;
+      break;
+    case 'graph-cancel-requested':
+      assert(!graph.cancelRequested, 'E_TASK_JOURNAL', 'duplicate cancellation');
+      graph.cancelRequested = true;
+      break;
+    case 'graph-resumed':
+      assert(graph.activated, 'E_TASK_JOURNAL', 'inactive graph cannot resume');
+      break;
+    case 'task-approval-requested':
+      assert(taskStatus(graph, task) === 'approval-required' && !task.approvalRequested,
+        'E_TASK_JOURNAL', 'invalid approval request');
+      task.approvalRequested = true;
+      break;
+    case 'task-approval-resolved':
+      assert(taskStatus(graph, task) === 'approval-required' && task.approvalRequested &&
+        ['approved', 'rejected'].includes(event.receipt?.outcome),
+      'E_TASK_JOURNAL', 'invalid approval decision');
+      assert(JSON.stringify(normalizeReceipt(event.receipt, binding(graph, task),
+        event.receipt.outcome)) === JSON.stringify(event.receipt),
+      'E_TASK_JOURNAL', 'invalid approval receipt binding');
+      task.approvalReceipt = event.receipt;
+      if (event.receipt.outcome === 'rejected') task.state = 'cancelled';
+      break;
+    case 'task-started':
+      assert(taskStatus(graph, task) === 'ready' &&
+        event.attemptId === nextAttemptId(graph, task),
+      'E_TASK_JOURNAL', 'invalid task start');
+      task.state = 'running';
+      task.uncertain = false;
+      task.interruptUncertain = false;
+      task.attempts.push({ attemptId: event.attemptId, status: 'running', receipt: null });
+      break;
+    case 'task-outcome-recorded': {
+      const attempt = task.attempts.at(-1);
+      assert(task.state === 'running' && attempt?.attemptId === event.receipt?.binding?.attemptId &&
+        ['completed', 'failed'].includes(event.receipt?.outcome),
+      'E_TASK_JOURNAL', 'invalid task outcome');
+      assert(JSON.stringify(normalizeReceipt(event.receipt,
+        binding(graph, task, attempt.attemptId), event.receipt.outcome)) === JSON.stringify(event.receipt),
+      'E_TASK_JOURNAL', 'invalid task outcome binding');
+      task.state = event.receipt.outcome;
+      task.receipt = event.receipt;
+      if (event.receipt.outcome === 'completed') task.completedAt = event.at;
+      attempt.status = event.receipt.outcome;
+      attempt.receipt = event.receipt;
+      break;
+    }
+    case 'task-cancelled': {
+      const attempt = task.attempts.at(-1);
+      assert(graph.cancelRequested && task.state === 'running' &&
+        attempt?.attemptId === event.receipt?.binding?.attemptId &&
+        event.receipt?.outcome === 'cancelled',
+      'E_TASK_JOURNAL', 'invalid cancellation confirmation');
+      assert(JSON.stringify(normalizeReceipt(event.receipt,
+        binding(graph, task, attempt.attemptId), 'cancelled')) === JSON.stringify(event.receipt),
+      'E_TASK_JOURNAL', 'invalid cancellation receipt binding');
+      task.state = 'cancelled';
+      task.receipt = event.receipt;
+      attempt.status = 'cancelled';
+      attempt.receipt = event.receipt;
+      break;
+    }
+    case 'task-dispatch-skipped': {
+      const attempt = task.attempts.at(-1);
+      assert(graph.cancelRequested && task.state === 'running' &&
+        attempt?.attemptId === event.attemptId,
+      'E_TASK_JOURNAL', 'invalid skipped dispatch');
+      task.state = 'cancelled';
+      attempt.status = 'cancelled';
+      break;
+    }
+    case 'task-late-outcome':
+      assert(task.state === 'cancelled' &&
+        task.attempts.at(-1)?.attemptId === event.receipt?.binding?.attemptId &&
+        ['completed', 'failed'].includes(event.receipt?.outcome),
+      'E_TASK_JOURNAL', 'invalid late outcome');
+      assert(JSON.stringify(normalizeReceipt(event.receipt,
+        binding(graph, task, task.attempts.at(-1).attemptId), event.receipt.outcome)) ===
+        JSON.stringify(event.receipt), 'E_TASK_JOURNAL', 'invalid late receipt binding');
+      task.lateOutcomes.push(event.receipt);
+      break;
+    case 'task-execution-uncertain':
+      assert(task.state === 'running' && task.attempts.at(-1)?.attemptId === event.attemptId,
+        'E_TASK_JOURNAL', 'invalid uncertain execution');
+      task.uncertain = true;
+      break;
+    case 'task-interrupt-uncertain':
+      assert(graph.cancelRequested && task.state === 'running' &&
+        task.attempts.at(-1)?.attemptId === event.attemptId,
+      'E_TASK_JOURNAL', 'invalid uncertain interruption');
+      task.interruptUncertain = true;
+      break;
+    case 'task-approval-delivery-uncertain':
+      assert(taskStatus(graph, task) === 'approval-required' && task.approvalRequested,
+        'E_TASK_JOURNAL', 'invalid uncertain approval delivery');
+      task.approvalDeliveryUncertain = true;
+      break;
+    case 'task-gate-satisfied': {
+      const gate = (task.spec.gates ?? []).find((entry) => entry.gateId === event.gateId);
+      assert(gate && !graph.cancelRequested && task.state === null && !task.gatesSatisfied.has(event.gateId),
+        'E_TASK_JOURNAL', 'invalid gate satisfaction');
+      assert(JSON.stringify(normalizeEvidence(event.evidence)) === JSON.stringify(event.evidence),
+        'E_TASK_JOURNAL', 'noncanonical gate evidence');
+      assert(!task.gatesExpired.has(event.gateId) || event.evidence.topic === 'user.action',
+        'E_TASK_JOURNAL', 'an expired gate opens only by hand');
+      assert(answerFits(gate, event.evidence.answer), 'E_TASK_JOURNAL', 'gate answer does not fit its question');
+      task.gatesSatisfied.set(event.gateId, clone(event.evidence));
+      break;
+    }
+    case 'task-gate-expired': {
+      const gate = (task.spec.gates ?? []).find((entry) => entry.gateId === event.gateId);
+      assert(gate && (gate.expiresAt !== undefined || gate.timeoutMs !== undefined) && graph.activated &&
+        !graph.cancelRequested && task.state === null && !task.gatesSatisfied.has(event.gateId) &&
+        !task.gatesExpired.has(event.gateId), 'E_TASK_JOURNAL', 'invalid gate expiry');
+      task.gatesExpired.set(event.gateId, event.at);
+      break;
+    }
+    case 'task-retry-requested':
+      assert(task.state === 'failed' && !graph.cancelRequested &&
+        typeof event.operationId === 'string' && !retryIds.has(event.operationId),
+      'E_TASK_JOURNAL', 'invalid retry');
+      retryIds.add(event.operationId);
+      task.state = null;
+      task.receipt = null;
+      task.approvalRequested = false;
+      task.approvalReceipt = null;
+      task.uncertain = false;
+      break;
+    default:
+      throw error('E_TASK_JOURNAL', `unknown task event: ${event.type}`);
+  }
+  if (event.receipt) {
+    const prior = receiptIds.get(event.receipt.receiptId);
+    assert(!prior || JSON.stringify(prior) === JSON.stringify(event.receipt),
+      'E_TASK_JOURNAL', 'receipt ID collision');
+    receiptIds.set(event.receipt.receiptId, event.receipt);
+  }
+}
+
+/** Full replay, used when the journal is opened. */
+function project(events) {
+  const projection = emptyProjection();
+  for (let index = 0; index < events.length; index += 1) applyEvent(projection, events[index], index);
+  return projection;
+}
+
+/**
+ * Validates one new event against the projection without changing it and
+ * returns commit(), which applies it. Only the graph the event names is
+ * copied, so the cost does not grow with the journal. Every event touches at
+ * most that one graph plus the request, receipt and retry indexes.
+ */
+function stageEvent(projection, event, index) {
+  const targetId = event?.type === 'graph-submitted' ? null : event?.graphId;
+  const base = targetId === null || targetId === undefined ? undefined : projection.graphs.get(targetId);
+  const copy = base ? structuredClone(base) : undefined;
+  const added = emptyProjection();
+  const overlay = {
+    graphs: {
+      get: (key) => (copy && key === targetId ? copy : added.graphs.get(key) ?? projection.graphs.get(key)),
+      has: (key) => added.graphs.has(key) || projection.graphs.has(key),
+      set: (key, value) => { added.graphs.set(key, value); },
+    },
+    requestKeys: {
+      has: (key) => added.requestKeys.has(key) || projection.requestKeys.has(key),
+      set: (key, value) => { added.requestKeys.set(key, value); },
+    },
+    receiptIds: {
+      get: (key) => (added.receiptIds.has(key) ? added.receiptIds.get(key) : projection.receiptIds.get(key)),
+      set: (key, value) => { added.receiptIds.set(key, value); },
+    },
+    retryIds: {
+      has: (key) => added.retryIds.has(key) || projection.retryIds.has(key),
+      add: (key) => { added.retryIds.add(key); },
+    },
+  };
+  applyEvent(overlay, event, index);
+  return () => {
+    if (copy) projection.graphs.set(targetId, copy);
+    for (const [key, value] of added.graphs) projection.graphs.set(key, value);
+    for (const [key, value] of added.requestKeys) projection.requestKeys.set(key, value);
+    for (const [key, value] of added.receiptIds) projection.receiptIds.set(key, value);
+    for (const key of added.retryIds) projection.retryIds.add(key);
+  };
 }
 
 // When an expiring gate runs out, in ms; null while its clock has not started.
@@ -495,6 +631,9 @@ function visibleGates(graph, task) {
     const deadline = timed ? gateDeadline(graph, task, gate) : null;
     return { ...clone(gate), status: evidence ? 'satisfied' : expiredAt ? 'expired' : 'waiting',
       ...(evidence ? { satisfiedBy: evidence.topic, satisfiedAt: evidence.at } : {}),
+      // The chosen option id, or only that a written answer was given (its text stays private).
+      ...(evidence?.answer ? { answer: evidence.answer.choice !== undefined
+        ? { kind: 'choice', choice: evidence.answer.choice } : { kind: 'text' } } : {}),
       // expiresAt: when this wait runs out; null while its clock has not started.
       ...(timed ? { expiresAt: deadline === null ? null : new Date(deadline).toISOString() } : {}),
       ...(expiredAt ? { expiredAt } : {}) };
@@ -594,6 +733,15 @@ class TaskGraphRuntime {
     this.#expiryTimer = null;
   }
 
+  /** Resolves once every journal write already queued has finished or failed. */
+  async drain() {
+    let tail;
+    do {
+      tail = this.#writeTail;
+      await tail;
+    } while (tail !== this.#writeTail);
+  }
+
   /** Re-runs scheduling, e.g. after canStart's answer may have changed. */
   async reschedule() {
     await this.#schedule();
@@ -678,11 +826,11 @@ class TaskGraphRuntime {
   async #append(fields) {
     const operation = this.#writeTail.then(async () => {
       const event = { seq: this.#events.length + 1, at: new Date().toISOString(), ...clone(fields) };
+      const commit = stageEvent(this.#projection, event, this.#events.length);
       const nextEvents = [...this.#events, event];
-      const nextProjection = project(nextEvents);
       if (this.#store) await this.#store.save(nextEvents);
       this.#events = nextEvents;
-      this.#projection = nextProjection;
+      commit();
       for (const listener of this.#listeners) {
         try { listener(clone(event)); } catch { /* observers do not alter the journal */ }
       }
@@ -897,6 +1045,10 @@ class TaskGraphRuntime {
       'E_TASK_SCOPE', 'gate targets an unknown task gate');
     const evidence = normalizeEvidence(input.evidence);
     if (task.gatesSatisfied.has(gateId)) return this.getGraph(graph.spec.graphId);
+    const gate = task.spec.gates.find((entry) => entry.gateId === gateId);
+    // A question opens only with its answer, so a bare user.action (or any other event) cannot open it.
+    assert(answerFits(gate, evidence.answer), 'E_TASK_ANSWER',
+      gate.response ? 'this condition needs an answer' : 'this condition takes no answer');
     assert(!graph.cancelRequested && task.state === null, 'E_TASK_STATE', 'gate is no longer waiting');
     assert(!task.gatesExpired.has(gateId) || evidence.topic === 'user.action',
       'E_TASK_STATE', 'an expired gate opens only by hand');
@@ -911,6 +1063,16 @@ class TaskGraphRuntime {
     }
     await this.#schedule();
     return this.getGraph(graph.spec.graphId);
+  }
+
+  /** Journaled answers to a task's question gates, in gate order: [{ gateId, choice } | { gateId, textRef }]. */
+  gateAnswers(graphId, taskId) {
+    const task = this.#projection.graphs.get(graphId)?.tasks.get(taskId);
+    if (!task) return [];
+    return (task.spec.gates ?? []).flatMap((gate) => {
+      const answer = task.gatesSatisfied.get(gate.gateId)?.answer;
+      return answer ? [{ gateId: gate.gateId, ...clone(answer) }] : [];
+    });
   }
 
   /** External gates still waiting in graphs that are not cancelled; expired ones say expired: true. */
