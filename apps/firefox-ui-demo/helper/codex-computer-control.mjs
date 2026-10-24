@@ -14,6 +14,8 @@ import { computerUseServerNames, nativeMcpServerKind } from './codex-inherited-m
 //   any turn and COMPUTER_CONTROL_UNVERIFIED refuses the turn on a mismatch.
 // Only thread settings change; the user's ~/.codex/config.toml never does.
 export const COMPUTER_CONTROL_POLICIES = Object.freeze(['inherit', 'off'])
+// Owner decision 2026-10-24 (computer-use-options.md Q1 (다)): keep inherit;
+// 'off' stays a user choice in Settings, and calls are surfaced instead.
 export const DEFAULT_COMPUTER_CONTROL_POLICY = 'inherit'
 // Codex's own switches for driving the Mac and the user's external browser.
 // browser_use (Codex's in-app browser) stays as the user set it: EG-Desk

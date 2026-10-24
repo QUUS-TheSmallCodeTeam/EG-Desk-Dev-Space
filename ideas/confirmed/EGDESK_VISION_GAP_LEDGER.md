@@ -49,7 +49,7 @@
 |---|---|---|
 | Claude 구독 연결 방식 | (a) Aside처럼 앱 안 claude.ai 로그인 — Anthropic이 승인 없는 서드파티에 금지 [공식, code.claude.com/docs/en/legal-and-compliance]. 권고하지 않음. (b) 대표님이 직접 설치·로그인한 무수정 `claude`를 EG-Desk가 하위 프로세스로 실행, EG-Desk는 토큰 미접근 — 개인·내부 사용에 가장 부합하는 해석 [제안], 외부 배포 전 Anthropic 문의 필요. (c) Anthropic API 키(종량 과금) — 명확히 허용. | SUB-08, SUB-09, SUB-11, SUB-15, AGENT-08 |
 | EG-Desk의 Claude 실행이 `~/.claude` 설정(hooks·CLAUDE.md·MCP·skills)을 상속할지 | 상속 / `CLAUDE_CONFIG_DIR`로 격리(격리 시 그 폴더에서 다시 로그인) | SUB-09 |
-| 컴퓨터 사용(Desk 밖 앱 제어)의 실행 방식 | 격리 실행(가상 디스플레이·VM) 우선 / 사용자 데스크톱 제어는 명시적 handoff 뒤. OS 전면 입력 검증은 이전 지시대로 보류 중 | CU-02, CU-03, CU-04 |
+| 컴퓨터 사용(Desk 밖 앱 제어)의 실행 방식 | 선택지 비교·권고: [computer-use-options.md](../../docs/references/computer-use-options.md). **2026-10-24 Q1 결정: (다) EG-Desk 일반 대화의 Codex 컴퓨터 조작은 켜 둔 채 표시만 보강**(끄기 스위치는 선택지로 유지). Q2(시험 1회)·Q3(장기 방향)·Q4(VM)는 결정 전. OS 전면 입력 검증은 이전 지시대로 보류 중 | CU-02, CU-03, CU-04 |
 | Agent 캐릭터 설정의 범위 | Profile 소유 범위(개인 로컬 / Desk 공유), 아바타(이모지·색·이니셜 / 이미지 업로드), 기본 제공 6종의 지위(예시 템플릿 / 제품 기본값). 결정 전에는 "개인 로컬 + 6종은 예시 템플릿 + 이모지·색 아바타"로 진행 | AGENT-01, AGENT-02, CHAT-02 |
 | 외부 배포 계획 | 배포형이면 Codex는 Sign in with ChatGPT client ID(현재 선택된 파트너 대상), Claude는 Anthropic 승인 필요. 개인 사용은 현재 방식 유지 권고 | SUB-13, RT-02 |
 
