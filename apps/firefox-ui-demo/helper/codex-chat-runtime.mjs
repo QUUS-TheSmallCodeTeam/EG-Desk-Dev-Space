@@ -11,6 +11,8 @@ import { engineError } from './engine-adapter.mjs'
 import { createCodexEngineAdapter } from './codex-engine-adapter.mjs'
 import { EngineRegistry } from './engine-registry.mjs'
 import { assertModelSelection } from './codex-model-catalog.mjs'
+import { mcpControlKind, nativeMcpServerKind, strongerControlKind } from './codex-inherited-mcp.mjs'
+import { DEFAULT_COMPUTER_CONTROL_POLICY, loadComputerControlOffOverrides, normalizeComputerControlPolicy, verifyComputerControlOff } from './codex-computer-control.mjs'
 
 const TERMINAL = new Set(['completed', 'interrupted', 'failed'])
 const ITEM_STATUS = new Set(['inProgress', 'completed', 'failed', 'declined'])
@@ -70,10 +72,13 @@ function safeItem(item) {
         kind: ['add', 'update', 'delete'].includes(change.kind?.type) ? change.kind.type : 'update',
       })) : [],
     }
+    // controlKind (CU-01): what the server can drive, from its name and plugin
+    // id; the plugin id, arguments, results and images are never kept.
     case 'mcpToolCall': return {
       ...base, status: ITEM_STATUS.has(item.status) ? item.status : 'inProgress',
       server: publicText(item.server, 120), tool: publicText(item.tool, 120),
       durationMs: Number.isFinite(item.durationMs) ? item.durationMs : null,
+      controlKind: mcpControlKind(nativeMcpServerKind({ name: typeof item.server === 'string' ? item.server : '', pluginId: typeof item.pluginId === 'string' ? item.pluginId : null })),
     }
     case 'dynamicToolCall': return { ...base, status: ITEM_STATUS.has(item.status) ? item.status : 'inProgress', tool: publicText(item.tool, 120) }
     // Native keys agentsStates by model-chosen thread IDs. Never keep that
@@ -170,8 +175,18 @@ function cleanNotification(method, p) {
 }
 
 export class CodexChatRuntime {
-  constructor({ request, respond, engines = null, emit = () => {}, emitLegacy = () => {}, verifyFile = verifyLocalFile, now = Date.now, contexts = null, toolProviders = [], expectedProcessConfiguration = null, store = null, requireStore = false, getOwnerKey = () => null, qaReady = () => true, getNativeContractFingerprint = () => null, profiles = null }) {
+  constructor({ request, respond, engines = null, emit = () => {}, emitLegacy = () => {}, verifyFile = verifyLocalFile, now = Date.now, contexts = null, toolProviders = [], expectedProcessConfiguration = null, store = null, requireStore = false, getOwnerKey = () => null, qaReady = () => true, getNativeContractFingerprint = () => null, profiles = null, mcpServerKind = null, computerControlPolicy = DEFAULT_COMPUTER_CONTROL_POLICY, onComputerControlChange = () => {} }) {
     Object.assign(this, { emitEvent: emit, emitLegacy, verifyFile, now })
+    // CU-07/CU-01: the inherited MCP kind of a server name (codex-inherited-mcp
+    // kindOf), or null; it can only strengthen an activity row's controlKind.
+    this.mcpServerKind = typeof mcpServerKind === 'function' ? mcpServerKind : () => null
+    // CU-01 stage 1: whether ordinary Codex threads keep the user's computer
+    // control ('inherit') or turn it off ('off'). verified: true after the last
+    // ordinary thread under 'off' read back as off, false after a refusal,
+    // null when nothing is confirmed (inherit, not checked yet, or a Codex
+    // build that cannot report thread features).
+    this.computerControl = { policy: normalizeComputerControlPolicy(computerControlPolicy), verified: null }
+    this.onComputerControlChange = onComputerControlChange
     // Engines: an EngineRegistry, or adapters to register. Without either the
     // given request/respond become the Codex adapter, which calls them with
     // the same methods and params as before.
@@ -1086,6 +1101,8 @@ export class CodexChatRuntime {
     // AGENT-04: the Agent's tool ceiling narrows this run; it never widens it.
     const ceiling = context.profileRun?.toolCeiling || null
     if (ceilingNarrows(ceiling) && engine.id !== 'codex') throw chatError('PROFILE_CEILING_UNSUPPORTED', 'This AI engine cannot enforce the Agent tool limits yet', 409)
+    // CU-01: 'off' applies to ordinary Codex threads; bounded threads already disable it all.
+    const computerOff = !bounded && engine.id === 'codex' && this.computerControl.policy === 'off'
     context.ceilingNotices = []
     const preparedProviders = new Map()
     for (const provider of this.toolProviders) if ((!bounded && provider.providerId !== 'egdesk-browser') ||
@@ -1184,7 +1201,11 @@ export class CodexChatRuntime {
       // change. A loaded thread must be detached first so resume overrides take.
       // A saved profile takes the same path, so a newly activated revision is
       // applied to this thread on its next send.
-      const mustReload = (bounded && !justRestored) || body.profileEnabled === true || body.profileEnabled === false || Boolean(context.profileRun)
+      // A thread loaded without verified 'off' settings (or with them, after a
+      // switch back to 'inherit') is reloaded so the current policy takes.
+      const computerOffApplied = this.threads.get(cid)?.computerControl === 'off'
+      const computerReload = !bounded && engine.id === 'codex' && (computerOff ? !computerOffApplied : computerOffApplied)
+      const mustReload = (bounded && !justRestored) || body.profileEnabled === true || body.profileEnabled === false || Boolean(context.profileRun) || computerReload
       if (mustReload && this.loadedThreads.has(cid)) {
         const detached = await engine.releaseThread(cid)
         this.loadedThreads.delete(cid)
@@ -1193,9 +1214,14 @@ export class CodexChatRuntime {
       if (!this.loadedThreads.has(cid)) {
         // A saved profile always reloads the thread, so a changed ceiling is re-applied here.
         const extra = ceilingNarrows(ceiling) ? await ceilingOverrides() : null
+        const computerExtra = computerOff ? await this.computerControlOffOverrides(overrides.cwd || this.threads.get(cid)?.cwd || null) : null
         if (epoch !== this.epochOf(engine.id)) throw chatError('CONTEXT_CHANGED', 'Codex connection or account changed', 409)
-        const resumed = await this.restoreThread(cid, context.clientThreadId, mergeCeilingOverrides({ ...overrides, ...(qaOverrides || {}) }, extra), { policy })
+        const resumed = await this.restoreThread(cid, context.clientThreadId, mergeCeilingOverrides(mergeCeilingOverrides({ ...overrides, ...(qaOverrides || {}) }, extra), computerExtra?.overrides), { policy })
         if (!bounded) context.ceilingNotices.push(...ceilingReportNotices(ceiling, await verifyCeilingNativeThread(this.request, ceiling, resumed, cid)))
+        if (computerExtra) {
+          await this.verifyComputerControl(cid, computerExtra)
+          this.threads.get(cid).computerControl = 'off'
+        }
         if (epoch !== this.epochOf(engine.id)) throw chatError('CONTEXT_CHANGED', 'Codex connection or account changed', 409)
       }
       if (bounded) this.persistExecutionPolicy(context, cid)
@@ -1208,6 +1234,11 @@ export class CodexChatRuntime {
       if (context.stateless) overrides.ephemeral = true
       if (ceilingNarrows(ceiling)) {
         mergeCeilingOverrides(overrides, await ceilingOverrides())
+        if (epoch !== this.epochOf(engine.id)) throw chatError('ACCOUNT_CHANGED', 'Codex account changed', 409)
+      }
+      const computerExtra = computerOff ? await this.computerControlOffOverrides(overrides.cwd || null) : null
+      if (computerExtra) {
+        mergeCeilingOverrides(overrides, computerExtra.overrides)
         if (epoch !== this.epochOf(engine.id)) throw chatError('ACCOUNT_CHANGED', 'Codex account changed', 409)
       }
       const result = await engine.startThread(overrides)
@@ -1223,8 +1254,11 @@ export class CodexChatRuntime {
         qaReceipt = verifyQaNativeThread(result, policy)
         qaReceipt = await verifyQaMcpIsolation(this.request, cid, qaReceipt)
       } else context.ceilingNotices.push(...ceilingReportNotices(ceiling, await verifyCeilingNativeThread(this.request, ceiling, result, cid)))
+      if (computerExtra) await this.verifyComputerControl(cid, computerExtra)
       if (epoch !== this.epochOf(engine.id)) throw chatError('ACCOUNT_CHANGED', 'Codex account changed', 409)
       this.rememberThread(cid, result, context.clientThreadId)
+      // rememberThread rebuilds the record; any later load drops this mark.
+      if (computerExtra) this.threads.get(cid).computerControl = 'off'
       this.threadToolOwners.set(cid, nativeTools.owners)
       this.threadToolManifests.set(cid, nativeTools.manifest)
       this.threadToolManifestStatus.set(cid, 'verified')
@@ -2118,7 +2152,7 @@ export class CodexChatRuntime {
     } else if (item.type === 'mcpToolCall') {
       activity.status = item.status
       activity.title = `${item.server} / ${item.tool}`
-      activity.detail = { server: item.server, tool: item.tool, durationMs: item.durationMs }
+      activity.detail = { server: item.server, tool: item.tool, durationMs: item.durationMs, controlKind: this.mcpCallControlKind(run, item) }
     } else if (item.type === 'dynamicToolCall') {
       activity.status = item.status
       activity.title = item.tool
@@ -2218,6 +2252,56 @@ export class CodexChatRuntime {
     if (!cid) return false
     return this.locks.has(cid) || this.pendingStarts.has(cid) || this.pendingResumes.has(cid) || this.uncertainThreads.has(cid)
       || [...this.runs.values()].some(run => run.conversationId === cid && !TERMINAL.has(run.status))
+  }
+
+  // controlKind of an MCP call: the call's own kind, strengthened by the
+  // inherited Codex classification of its server name (Codex runs only; a
+  // node_repl declared with a Computer Use marker becomes 'computer').
+  mcpCallControlKind(run, item) {
+    let inherited = null
+    if (this.runEngine(run) === 'codex') { try { inherited = this.mcpServerKind(item.server) } catch {} }
+    return strongerControlKind(item.controlKind || 'other', inherited ? mcpControlKind(inherited) : 'other')
+  }
+
+  computerControlSnapshot() {
+    return { policy: this.computerControl.policy, verified: this.computerControl.verified }
+  }
+
+  // POST /settings/computer-control. A changed policy is unconfirmed until the
+  // next ordinary thread is read back; loaded threads are reloaded on their next send.
+  setComputerControlPolicy(value) {
+    const policy = normalizeComputerControlPolicy(value)
+    if (policy !== this.computerControl.policy) this.updateComputerControl({ policy, verified: null })
+    return this.computerControlSnapshot()
+  }
+
+  updateComputerControl(patch) {
+    const next = { ...this.computerControl, ...patch }
+    if (next.policy === this.computerControl.policy && next.verified === this.computerControl.verified) return
+    this.computerControl = next
+    try { this.onComputerControlChange(this.computerControlSnapshot()) } catch {}
+  }
+
+  // 'off' thread settings for an ordinary Codex thread; a failure is recorded as unconfirmed.
+  async computerControlOffOverrides(cwd) {
+    try { return await loadComputerControlOffOverrides(this.request, { cwd }) }
+    catch (error) {
+      if (this.computerControl.policy === 'off') this.updateComputerControl({ verified: false })
+      throw error
+    }
+  }
+
+  // Reads the thread back and records the result; the caller marks the loaded
+  // thread as off only after this returns.
+  async verifyComputerControl(cid, prepared) {
+    let report
+    try { report = await verifyComputerControlOff(this.request, cid, prepared.plan) }
+    catch (error) {
+      if (this.computerControl.policy === 'off') this.updateComputerControl({ verified: false })
+      throw error
+    }
+    if (this.computerControl.policy === 'off') this.updateComputerControl({ verified: report.nativeFeatures === 'verified' ? true : null })
+    return report
   }
 
   snapshot(conversationId = null) {

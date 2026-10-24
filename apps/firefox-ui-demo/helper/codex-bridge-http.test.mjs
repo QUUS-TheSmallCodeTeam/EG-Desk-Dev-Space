@@ -597,7 +597,7 @@ test('reconnect state counts consecutive failures, shows only count and next tim
   assert.deepEqual(Object.keys(backoff.snapshot()), ['consecutiveFailures', 'nextAttemptAt'])
 })
 
-test('/v1/state keeps every existing field in order and adds bridge build, reconnect state, engines, inherited MCP and workflow', async () => {
+test('/v1/state keeps every existing field in order and adds bridge build, reconnect state, engines, inherited MCP, workflow and computer control', async () => {
   const source = await readFile(new URL('./codex-bridge-server.mjs', import.meta.url), 'utf8')
   const route = source.indexOf("if (req.method === 'GET' && route === '/v1/state') {")
   assert.notEqual(route, -1)
@@ -608,13 +608,14 @@ test('/v1/state keeps every existing field in order and adds bridge build, recon
   assert.deepEqual([...block.matchAll(/^ {6}([A-Za-z]\w*)(?=[:,])/gm)].map(match => match[1]), [
     'protocolVersion', 'provider', 'appServerReady', 'chatStorageReady', 'profileStorageReady', 'native',
     'engineConfiguration', 'memoryIsolation', 'node', 'auth', 'chat', 'capabilities',
-    'bridge', 'appServerReconnect', 'engines', 'inheritedMcp', 'workflow',
+    'bridge', 'appServerReconnect', 'engines', 'inheritedMcp', 'workflow', 'computerControl',
   ])
   assert.deepEqual([...block.matchAll(/^ {8}([A-Za-z]\w*)(?=:)/gm)].map(match => match[1]), ['auth', 'chat', 'context', 'files', 'profiles', 'engines'])
   assert.ok(block.includes('bridge: bridgeBuildState(bridgeBuild, expectedOverlayBuild(req.headers, url.searchParams)),'))
   assert.ok(block.includes('appServerReconnect: appServerBackoff.snapshot(),'))
   assert.ok(block.includes('inheritedMcp: inheritedMcp.snapshot(),'))
   assert.ok(block.includes('workflow: workflow.snapshot(),'))
+  assert.ok(block.includes('computerControl: chat.computerControlSnapshot(),'))
 })
 
 test('bridge hashes its source once at start, backs off app-server reconnects and resets on a ready connection', async () => {

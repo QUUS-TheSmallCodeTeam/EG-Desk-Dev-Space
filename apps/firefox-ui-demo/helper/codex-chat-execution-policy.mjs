@@ -52,12 +52,16 @@ export async function listNativeMcpServers(request, threadId = null, { detail } 
 // flattened config/read Config intentionally omits mcp_servers; only its
 // config layers show direct declarations. Inspect their shape, never copy
 // commands, URLs or env.
-export async function readNativeDirectMcpServerIds(request, cwd = null) {
+// Returns name → that name's declarations in the enabled layers, for names
+// with a command or URL transport. The declarations are raw configuration:
+// callers read them to classify a server (codex-inherited-mcp.mjs) and never
+// publish or keep them.
+export async function readNativeDirectMcpDeclarations(request, cwd = null) {
   let result
   try { result = await request('config/read', { includeLayers: true, cwd }) }
   catch { throw chatError('QA_TOOL_ISOLATION_UNVERIFIED', 'Native MCP configuration cannot be classified', 502) }
   if (!Array.isArray(result?.layers)) throw chatError('QA_TOOL_ISOLATION_UNVERIFIED', 'Native MCP configuration layers are unavailable', 502)
-  const direct = new Set()
+  const entriesByName = new Map(), direct = new Set()
   for (const layer of result.layers) {
     if (!layer || typeof layer !== 'object' || Array.isArray(layer) ||
         !layer.name || typeof layer.name.type !== 'string') {
@@ -80,9 +84,15 @@ export async function readNativeDirectMcpServerIds(request, cwd = null) {
       const url = typeof entry.url === 'string' && entry.url.length > 0
       if (command && url) throw chatError('QA_TOOL_ISOLATION_UNVERIFIED', 'Native MCP declaration has ambiguous transport', 502)
       if (command || url) direct.add(name)
+      if (!entriesByName.has(name)) entriesByName.set(name, [])
+      entriesByName.get(name).push(entry)
     }
   }
-  return direct
+  return new Map([...entriesByName].filter(([name]) => direct.has(name)))
+}
+
+export async function readNativeDirectMcpServerIds(request, cwd = null) {
+  return new Set((await readNativeDirectMcpDeclarations(request, cwd)).keys())
 }
 
 export function disabledNativeMcpConfig(servers, directIds) {

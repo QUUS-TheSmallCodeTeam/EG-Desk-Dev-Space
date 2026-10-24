@@ -2,8 +2,9 @@ import test from 'node:test'
 import assert from 'node:assert/strict'
 import { readFile } from 'node:fs/promises'
 import {
-  INHERITED_MCP_KINDS, INHERITED_MCP_NOTIFICATION, INHERITED_MCP_STATUSES,
-  classifyMcpServer, createInheritedMcpSync, publicInheritedMcpServer, startupStatus,
+  INHERITED_MCP_KINDS, INHERITED_MCP_NOTIFICATION, INHERITED_MCP_STATUSES, MCP_CONTROL_KINDS,
+  classifyMcpServer, computerUseServerNames, createInheritedMcpSync, hasComputerUseSignal, mcpControlKind, nativeMcpServerKind,
+  publicInheritedMcpServer, startupStatus, strongerControlKind,
 } from './codex-inherited-mcp.mjs'
 
 const ROW_KEYS = ['name', 'enabled', 'status', 'controlsExternal', 'kind']
@@ -33,6 +34,51 @@ test('server kind comes from whole name tokens first, then tool names; controlsE
   assert.equal(classifyMcpServer({ name: 'acme', toolNames: ['js', 'browser_click'] }).kind, 'browser', 'browser rules are checked before desktop and repl')
   assert.deepEqual(classifyMcpServer(), { controlsExternal: false, kind: 'other' })
   assert.deepEqual(INHERITED_MCP_KINDS, ['browser', 'desktop', 'repl', 'other'])
+})
+
+// Direct declarations shaped like this Mac's ~/.codex/config.toml (CU doc 2.1);
+// paths and values are stand-ins.
+const SKY_NODE_REPL = { command: '/Applications/ChatGPT.app/Contents/Resources/cua_node/bin/node', args: ['/x/node_repl.js'], env: { SKY_CUA_SERVICE_PATH: '/x/Codex Computer Use.app/Contents/MacOS/SkyComputerUseService' } }
+const SKY_CLIENT = { command: '/x/Codex Computer Use.app/Contents/SharedSupport/SkyComputerUseClient.app/Contents/MacOS/SkyComputerUseClient', args: ['mcp'] }
+
+test('a Computer Use marker in a direct declaration makes the server desktop whatever its name; without one node_repl stays repl', () => {
+  for (const declaration of [
+    SKY_NODE_REPL, SKY_CLIENT,
+    { command: 'node', env: { SKY_CUA_SERVICE_PATH: '/x' } },
+    { command: 'node', env: { OTHER: '/Applications/ChatGPT.app/Contents/Resources/cua_node/bin/node' } },
+    { command: 'node', args: ['/x/node_modules/@oai/cua-repl/bin/cua-repl.js'] },
+    { command: 'node', env_vars: ['CUA_REPL_ENABLED_SURFACES'] },
+    { command: 'node', env_vars: [{ name: 'SKY_CUA_SERVICE_PATH' }] },
+    { command: '/x/plugins/cache/openai-bundled/unified-computer-use/26.1/run' },
+    [{ command: 'node' }, { env: { SKY_CUA_SERVICE_PATH: '/x' } }],
+  ]) assert.equal(hasComputerUseSignal(declaration), true, JSON.stringify(declaration))
+  for (const declaration of [
+    { command: 'npx', args: ['@playwright/mcp'] }, { command: 'node', args: ['repl.js'], env: { API_KEY: 'SECRET' } },
+    { url: 'https://mcp.example/' }, {}, null, 'cua_node', [{ command: 7 }], { env: ['SKY_CUA_SERVICE_PATH'] },
+  ]) assert.equal(hasComputerUseSignal(declaration), false, JSON.stringify(declaration))
+  // The classification table: the marker comes before every name rule.
+  assert.deepEqual(classifyMcpServer({ name: 'node_repl', computerUse: true }), { controlsExternal: true, kind: 'desktop' })
+  assert.deepEqual(classifyMcpServer({ name: 'node_repl' }), { controlsExternal: true, kind: 'repl' })
+  assert.deepEqual(classifyMcpServer({ name: 'context7', computerUse: true }), { controlsExternal: true, kind: 'desktop' })
+  assert.equal(classifyMcpServer({ name: 'node_repl', computerUse: 'yes' }).kind, 'repl', 'only true counts')
+  assert.equal(nativeMcpServerKind({ name: 'node_repl', tools: { js: {} } }, { computerUse: true }), 'desktop')
+  assert.equal(nativeMcpServerKind({ name: 'node_repl', tools: { js: {} } }), 'repl')
+  const marked = computerUseServerNames(new Map([['node_repl', [SKY_NODE_REPL]], ['computer-use', [SKY_CLIENT]], ['playwright-electron', [{ command: 'npx' }]]]))
+  assert.deepEqual([...marked], ['node_repl', 'computer-use'])
+  assert.deepEqual([...computerUseServerNames(null)], [])
+  // A marked public row is desktop and still carries nothing from the declaration.
+  const row = publicInheritedMcpServer(server('node_repl', { tools: { js: { name: 'js' } } }), { computerUse: true })
+  assert.deepEqual(row, { name: 'node_repl', enabled: true, status: 'available', controlsExternal: true, kind: 'desktop' })
+  assert.deepEqual(Object.keys(row), ROW_KEYS)
+})
+
+test('an MCP call control kind maps desktop to computer and a lookup only ever strengthens it', () => {
+  assert.deepEqual(MCP_CONTROL_KINDS, ['computer', 'browser', 'repl', 'other'])
+  assert.deepEqual(['desktop', 'browser', 'repl', 'other', 'surprise', undefined].map(mcpControlKind), ['computer', 'browser', 'repl', 'other', 'other', 'other'])
+  assert.equal(strongerControlKind('repl', 'computer'), 'computer')
+  assert.equal(strongerControlKind('computer', 'other'), 'computer')
+  assert.equal(strongerControlKind('browser', 'repl'), 'browser')
+  assert.equal(strongerControlKind('other', 'surprise'), 'other')
 })
 
 test('a public row carries only name, enabled, status and the classification, never configuration or secrets', () => {
@@ -87,7 +133,9 @@ test('refresh reads the inherited list once per connection without a thread, pag
   const sync = createInheritedMcpSync({ request: native.request, onChange: rows => changes.push(rows) })
   assert.equal(sync.snapshot(), null, 'unknown until read')
   const rows = await sync.refresh()
-  assert.deepEqual(native.calls.map(([, params]) => params), [{ limit: 100, detail: 'toolsAndAuthOnly' }, { limit: 100, cursor: 'page-2', detail: 'toolsAndAuthOnly' }])
+  assert.deepEqual(native.calls.filter(([method]) => method === 'mcpServerStatus/list').map(([, params]) => params), [{ limit: 100, detail: 'toolsAndAuthOnly' }, { limit: 100, cursor: 'page-2', detail: 'toolsAndAuthOnly' }])
+  // The direct declarations are read once after the list; this fake refuses them, so the name rules stand.
+  assert.deepEqual(native.calls.filter(([method]) => method !== 'mcpServerStatus/list'), [['config/read', { includeLayers: true, cwd: null }]])
   assert.deepEqual(rows, [
     { name: 'playwright', enabled: true, status: 'available', controlsExternal: true, kind: 'browser' },
     { name: 'context7', enabled: true, status: 'available', controlsExternal: false, kind: 'other' },
@@ -100,6 +148,33 @@ test('refresh reads the inherited list once per connection without a thread, pag
   assert.equal(sync.snapshot()[0].status, 'available', 'callers get copies')
   await sync.refresh()
   assert.equal(changes.length, 1, 'an unchanged list is not announced again')
+  assert.deepEqual(['playwright', 'node_repl', 'computer-use', 'context7', 'missing', null].map(sync.kindOf), ['browser', 'repl', 'desktop', 'other', null, null])
+})
+
+test('a server declared with a Computer Use marker is listed as desktop; the declaration never reaches a row, a change or kindOf', async () => {
+  const calls = []
+  const request = async (method, params) => {
+    calls.push(method)
+    if (method === 'mcpServerStatus/list') return { data: [server('node_repl', { tools: { js: { name: 'js' } } }), server('computer-use'), server('playwright-electron'), server('cua_repl', { pluginId: 'unified-computer-use@openai-bundled' })], nextCursor: null }
+    if (method === 'config/read') return { config: {}, layers: [{ name: { type: 'user' }, config: { mcp_servers: {
+      node_repl: SKY_NODE_REPL, 'computer-use': SKY_CLIENT, 'playwright-electron': { command: 'npx', env: { TOKEN: 'SECRET-ENV' } }, 'late-sky': { command: 'node', env: { SKY_CUA_SERVICE_PATH: '/x' } },
+    } } }] }
+    throw new Error(`unexpected ${method}`)
+  }
+  const changes = []
+  const sync = createInheritedMcpSync({ request, onChange: rows => changes.push(rows) })
+  const rows = await sync.refresh()
+  assert.deepEqual(calls, ['mcpServerStatus/list', 'config/read'])
+  assert.deepEqual(rows.map(row => [row.name, row.kind]), [['node_repl', 'desktop'], ['computer-use', 'desktop'], ['playwright-electron', 'browser'], ['cua_repl', 'desktop']])
+  for (const row of rows) assert.deepEqual(Object.keys(row), ROW_KEYS)
+  assert.equal(sync.kindOf('node_repl'), 'desktop')
+  // A marked server that starts later keeps its classification.
+  sync.notify({ method: INHERITED_MCP_NOTIFICATION, params: { name: 'late-sky', status: 'ready' } })
+  assert.deepEqual(sync.snapshot().at(-1), { name: 'late-sky', enabled: true, status: 'connected', controlsExternal: true, kind: 'desktop' })
+  assert.doesNotMatch(JSON.stringify(changes), /SECRET|cua_node|SKY_CUA|SkyComputerUse|Applications|npx/)
+  // After a disconnect the marks are forgotten with the list.
+  sync.reset()
+  assert.equal(sync.kindOf('node_repl'), null)
 })
 
 test('a failed read, an unknown shape or an offline app-server leaves the list unknown (null)', async () => {

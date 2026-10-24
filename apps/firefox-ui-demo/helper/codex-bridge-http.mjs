@@ -143,6 +143,35 @@ export function createChatHttpHandler(chat, ensureAuth, history = chat) {
 }
 
 /**
+ * CU-01 computer control setting for ordinary Codex threads.
+ * POST /settings/computer-control {policy: 'inherit'|'off'} → 200 {policy, verified}
+ * Loopback/Origin guard, an application/json object with exactly one key. No
+ * Codex call is made, so it works signed out; the policy takes effect on the
+ * next send. /v1/state carries the same {policy, verified} as computerControl.
+ */
+export function createComputerControlHttpHandler(chat, { port = 39218 } = {}) {
+  return async (req, res, url) => {
+    if (url.pathname !== '/settings/computer-control') return false
+    if (!guardBridgeRequest(req, port)) {
+      sendJson(res, 403, { code: 'SETTINGS_LOOPBACK_REQUIRED', error: 'Untrusted settings request origin' })
+      return true
+    }
+    if (req.method !== 'POST') {
+      sendJson(res, 405, { code: 'METHOD_NOT_ALLOWED', error: 'Use POST with {policy}' })
+      return true
+    }
+    try {
+      const body = await readJsonBody(req, { maxBytes: 1024 })
+      if (Object.keys(body).length !== 1 || !Object.hasOwn(body, 'policy')) throw chatError('INVALID_COMPUTER_CONTROL_POLICY', "Send exactly {policy: 'inherit' | 'off'}", 400)
+      sendJson(res, 200, chat.setComputerControlPolicy(body.policy))
+    } catch (error) {
+      sendJson(res, error.httpStatus || 500, { code: typeof error.code === 'string' ? error.code : 'SETTINGS_ERROR', error: publicText(error.message, 2000) })
+    }
+    return true
+  }
+}
+
+/**
  * ChatGPT usage for the signed-in identity (account/rateLimits/read and the
  * sparse account/rateLimits/updated notification).
  * - A read answered after a sign-out or account switch is dropped.

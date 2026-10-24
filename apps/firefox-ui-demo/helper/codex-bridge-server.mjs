@@ -11,7 +11,7 @@ import { BrowserToolTransport } from './codex-browser-tool-transport.mjs'
 import { createCodexBrowserToolProvider } from './codex-browser-tool-provider.mjs'
 import { fixtureBrowserQaFromEnv } from './codex-browser-fixture-qa.mjs'
 import { classifyPublicToolError } from './codex-tool-errors.mjs'
-import { createChatHttpHandler, createRateLimitSync, createReconnectBackoff, guardBridgeRequest, readJsonBody, sendJson, setBridgeCors } from './codex-bridge-http.mjs'
+import { createChatHttpHandler, createComputerControlHttpHandler, createRateLimitSync, createReconnectBackoff, guardBridgeRequest, readJsonBody, sendJson, setBridgeCors } from './codex-bridge-http.mjs'
 import { bridgeBuildState, expectedOverlayBuild, startBridgeBuild } from './egdesk-bridge-build.mjs'
 import { createInheritedMcpSync } from './codex-inherited-mcp.mjs'
 import { BoundedSseClient } from './codex-bridge-sse.mjs'
@@ -208,6 +208,11 @@ const chat = new CodexChatRuntime({
   profiles: profileStore,
   emit: event => { broadcast(event, 2); workflow?.onChatEvent(event) },
   emitLegacy: event => broadcast(event, 1),
+  // CU-01: an MCP call's controlKind also reads the inherited classification
+  // (declared below; a Computer Use marker makes node_repl 'computer').
+  mcpServerKind: name => inheritedMcp.kindOf(name),
+  // CU-01 stage 1: 'inherit' until the decision; POST /settings/computer-control changes it.
+  onComputerControlChange: computerControl => broadcast({ type: 'computer.control', v: BRIDGE_PROTOCOL_VERSION, provider: PROVIDER_ID, computerControl, ts: Date.now() }),
 })
 if (chatStore) {
   try { chat.recoverInterruptedRuns() }
@@ -237,6 +242,7 @@ const ensureChatAuth = async (body = {}) => {
   if (!authState.isLoggedIn) throw chatError('LOGIN_REQUIRED', 'Codex ChatGPT login is required', 401)
 }
 const handleChatHttp = createChatHttpHandler(chat, ensureChatAuth)
+const handleComputerControlHttp = createComputerControlHttpHandler(chat, { port: BRIDGE_PORT })
 const handleContextHttp = createContextHttpHandler(contexts, ensureChatAuth)
 // Like /chat/history, profiles stay editable while Codex is signed out.
 const handleProfileHttp = createProfileHttpHandler({ store: () => profileStore, port: BRIDGE_PORT })
@@ -712,6 +718,8 @@ const bridgeServer = createServer(async (req, res) => {
       inheritedMcp: inheritedMcp.snapshot(),
       // RT-06/CHAT-06 { tasks, taskError, maxConcurrency, eventSeq, droppedEvents, watchedRoots, maxWatchedRoots, refusedRoots, droppedFileEvents }.
       workflow: workflow.snapshot(),
+      // CU-01 { policy: 'inherit'|'off', verified: true|false|null } for ordinary Codex threads.
+      computerControl: chat.computerControlSnapshot(),
     })
     return
   }
@@ -789,6 +797,7 @@ const bridgeServer = createServer(async (req, res) => {
     return
   }
 
+  if (await handleComputerControlHttp(req, res, url)) return
   if (await handleProfileHttp(req, res, url)) return
   if (await handleContextHttp(req, res, url)) return
   if (await handleChatHttp(req, res, url)) return

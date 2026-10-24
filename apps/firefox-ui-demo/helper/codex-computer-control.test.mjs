@@ -1,0 +1,361 @@
+import test from 'node:test'
+import assert from 'node:assert/strict'
+import { Readable } from 'node:stream'
+import { readFile } from 'node:fs/promises'
+import { CodexChatRuntime } from './codex-chat-runtime.mjs'
+import { createComputerControlHttpHandler } from './codex-bridge-http.mjs'
+import {
+  COMPUTER_CONTROL_FEATURES, COMPUTER_CONTROL_POLICIES, DEFAULT_COMPUTER_CONTROL_POLICY,
+  loadComputerControlOffOverrides, normalizeComputerControlPolicy, verifyComputerControlOff,
+} from './codex-computer-control.mjs'
+
+// CU-01 stage 1: computer control on ordinary Codex threads, inherited or off.
+const COMPUTER_PLUGIN = 'unified-computer-use@openai-bundled'
+// The inventory Codex 0.162.1 listed on this Mac (CU doc 2.2), trimmed:
+// the computer-use plugin, a harmless plugin, app-provided connectors, and the
+// user's direct servers (node_repl declared with the Sky service path).
+const listed = (extra = {}) => [
+  { name: 'cua_repl', pluginId: COMPUTER_PLUGIN, tools: { js: {}, js_reset: {}, turn_ended: {} } },
+  { name: 'code-review', pluginId: 'code-review@openai-bundled', tools: {} },
+  { name: 'browser-helper', pluginId: 'browser-helper@acme', tools: { browser_navigate: {} } },
+  { name: 'codex_apps', tools: { slack_send_message: {}, drive_search: {} } },
+  { name: 'computer-use', tools: {} },
+  { name: 'node_repl', tools: { js: {}, js_reset: {} } },
+  { name: 'firefox-devtools', tools: { navigate_page: {} } },
+  { name: 'context7', tools: { 'query-docs': {} } },
+].map(server => ({ resources: [], resourceTemplates: [], toolsError: null, ...server, ...(extra[server.name] || {}) }))
+const DIRECT = {
+  'computer-use': { command: '/x/SkyComputerUseClient.app/Contents/MacOS/SkyComputerUseClient', args: ['mcp'] },
+  node_repl: { command: '/Applications/ChatGPT.app/Contents/Resources/cua_node/bin/node', args: ['/x/repl.js'], env: { SKY_CUA_SERVICE_PATH: '/x/SkyComputerUseService', API_KEY: 'SECRET-ENV' } },
+  'firefox-devtools': { command: 'npx', args: ['firefox-devtools-mcp'] },
+  context7: { url: 'https://mcp.context7.example/mcp' },
+  // Declared but not started, so not in the inventory.
+  'desktop-commander': { command: 'npx', args: ['desktop-commander'] },
+}
+
+// A native fake whose thread catalog and feature switches follow the thread
+// settings, like Codex: a turned-off plugin's server is gone from the thread;
+// a turned-off direct server is listed disabled without tools.
+function native({ custom } = {}) {
+  const calls = []
+  const threadConfig = new Map()
+  let threads = 0, turns = 0
+  const features = config => ({ data: ['browser_use', 'browser_use_external', 'computer_use', 'default_mode_request_user_input']
+    .map(name => ({ name, enabled: config?.features?.[name] ?? true, stage: 'stable' })), nextCursor: null })
+  const defaults = async (method, params) => {
+    if (method === 'thread/start') { const id = `thread-${++threads}`; threadConfig.set(id, params.config || {}); return { thread: { id }, cwd: '/work' } }
+    if (method === 'thread/resume') { threadConfig.set(params.threadId, params.config || {}); return { thread: { id: params.threadId, turns: [] }, cwd: '/work' } }
+    if (method === 'thread/unsubscribe') return { status: 'unsubscribed' }
+    if (method === 'turn/start') return { turn: { id: `turn-${++turns}`, status: 'inProgress', items: [] } }
+    if (method === 'turn/interrupt') return {}
+    if (method === 'config/read') return { config: {}, layers: [{ name: { type: 'user' }, config: { mcp_servers: DIRECT } }] }
+    if (method === 'experimentalFeature/list') return features(threadConfig.get(params.threadId))
+    if (method === 'mcpServerStatus/list') {
+      const config = params.threadId ? threadConfig.get(params.threadId) || {} : null
+      const data = []
+      for (const server of listed()) {
+        if (config && server.pluginId && config.plugins?.[server.pluginId]?.enabled === false) continue
+        const off = config && !server.pluginId && config.mcp_servers?.[server.name]?.enabled === false
+        data.push({ ...server, tools: off ? {} : server.tools, ...(config ? { runtimeStatus: off ? 'disabled' : 'connected' } : {}) })
+      }
+      return { data, nextCursor: null }
+    }
+    throw new Error(`Unexpected method: ${method}`)
+  }
+  const request = async (method, params) => {
+    calls.push({ method, params })
+    const answer = custom ? await custom(method, params) : undefined
+    return answer !== undefined ? answer : defaults(method, params)
+  }
+  return { calls, request, threadConfig }
+}
+
+function runtime({ policy, custom, mcpServerKind } = {}) {
+  const fake = native({ custom })
+  const events = [], changes = []
+  const chat = new CodexChatRuntime({
+    request: fake.request, respond: () => {}, emit: event => events.push(event), verifyFile: async () => null,
+    ...(policy ? { computerControlPolicy: policy } : {}),
+    ...(mcpServerKind ? { mcpServerKind } : {}),
+    onComputerControlChange: value => changes.push(value),
+  })
+  chat.setConnection(true)
+  const finish = run => chat.handleNotification({ method: 'turn/completed', params: { threadId: run.conversationId, turn: { id: run.runId, status: 'completed', items: [] } } })
+  const methods = () => fake.calls.map(call => call.method)
+  return { chat, events, changes, finish, methods, ...fake }
+}
+
+test('the policy is inherit by default, only inherit or off is accepted, and off leaves browser_use alone', () => {
+  assert.deepEqual(COMPUTER_CONTROL_POLICIES, ['inherit', 'off'])
+  assert.equal(DEFAULT_COMPUTER_CONTROL_POLICY, 'inherit')
+  assert.deepEqual(COMPUTER_CONTROL_FEATURES, ['computer_use', 'browser_use_external'])
+  for (const value of ['inherit', 'off']) assert.equal(normalizeComputerControlPolicy(value), value)
+  for (const value of [undefined, null, '', 'OFF', 'on', true, {}]) {
+    assert.throws(() => normalizeComputerControlPolicy(value), error => error.code === 'INVALID_COMPUTER_CONTROL_POLICY' && error.httpStatus === 400)
+  }
+  assert.throws(() => new CodexChatRuntime({ request: async () => ({}), respond: () => {}, computerControlPolicy: 'sometimes' }), error => error.code === 'INVALID_COMPUTER_CONTROL_POLICY')
+})
+
+test('off turns off browser/desktop plugins by id, desktop direct servers (by name or a Computer Use marker) and the two Codex switches', async () => {
+  const fake = native()
+  const { overrides, plan } = await loadComputerControlOffOverrides(fake.request, { cwd: '/work' })
+  assert.deepEqual(fake.calls.map(call => [call.method, call.params]), [
+    ['mcpServerStatus/list', { limit: 100 }],
+    ['config/read', { includeLayers: true, cwd: '/work' }],
+  ])
+  assert.deepEqual(Object.keys(overrides), ['config'])
+  assert.deepEqual(overrides.config.features, { computer_use: false, browser_use_external: false })
+  assert.equal(Object.hasOwn(overrides.config.features, 'browser_use'), false)
+  assert.deepEqual({ ...overrides.config.plugins }, { [COMPUTER_PLUGIN]: { enabled: false }, 'browser-helper@acme': { enabled: false } })
+  // node_repl drives the Mac through the Sky service; firefox-devtools (browser)
+  // and context7 stay; codex_apps has no declaration to turn off.
+  assert.deepEqual({ ...overrides.config.mcp_servers }, { 'computer-use': { enabled: false }, node_repl: { enabled: false }, 'desktop-commander': { enabled: false } })
+  assert.deepEqual([...plan.computerUse], ['computer-use', 'node_repl'])
+  assert.doesNotMatch(JSON.stringify(overrides), /SECRET|cua_node|SKY_CUA|npx|context7\.example/)
+  // Nothing to turn off: only the switches.
+  const bare = await loadComputerControlOffOverrides(async method => method === 'config/read'
+    ? { config: {}, layers: [] } : { data: [{ name: 'context7', tools: {}, resources: [], resourceTemplates: [], toolsError: null }], nextCursor: null })
+  assert.deepEqual(bare.overrides, { config: { features: { computer_use: false, browser_use_external: false } } })
+  // An unreadable inventory or configuration refuses before any thread.
+  for (const failing of ['mcpServerStatus/list', 'config/read']) {
+    const broken = native({ custom: async method => { if (method === failing) throw new Error('offline: /Users/private/.codex/config.toml') } })
+    await assert.rejects(loadComputerControlOffOverrides(broken.request), error => error.code === 'COMPUTER_CONTROL_UNVERIFIED' && error.httpStatus === 502 && !/private/.test(error.message))
+  }
+})
+
+test('the thread readback accepts only a thread with no computer-control server live and both switches off', async () => {
+  const fake = native()
+  const { overrides, plan } = await loadComputerControlOffOverrides(fake.request)
+  fake.threadConfig.set('t-off', overrides.config)
+  assert.deepEqual(await verifyComputerControlOff(fake.request, 't-off', plan), { nativeFeatures: 'verified' })
+  const thread = (servers, features = { computer_use: false, browser_use_external: false }) => async (method, params) => {
+    if (method === 'mcpServerStatus/list') return { data: servers.map(server => ({ resources: [], resourceTemplates: [], toolsError: null, ...server })), nextCursor: null }
+    if (method === 'experimentalFeature/list') return { data: Object.entries(features).map(([name, enabled]) => ({ name, enabled, stage: 'stable' })), nextCursor: null }
+    throw new Error(`unexpected ${method} ${params}`)
+  }
+  const refused = [
+    // Codex kept the plugin's server running despite the switch.
+    thread([{ name: 'cua_repl', pluginId: COMPUTER_PLUGIN, tools: { js: {} }, runtimeStatus: 'connected' }]),
+    thread([{ name: 'cua_repl', pluginId: COMPUTER_PLUGIN, tools: {}, runtimeStatus: 'starting' }]),
+    // A marked direct server is still connected.
+    thread([{ name: 'node_repl', tools: { js: {} }, runtimeStatus: 'connected' }]),
+    // A desktop server from somewhere EG-Desk cannot turn off is still live.
+    thread([{ name: 'desktop-bridge', tools: { left_click: {} }, runtimeStatus: 'connected' }]),
+    // A switch is still on, or not reported at all.
+    thread([], { computer_use: false, browser_use_external: true }),
+    thread([], { computer_use: false }),
+    async method => { if (method === 'mcpServerStatus/list') throw new Error('lost'); return thread([])(method) },
+    async method => { if (method === 'experimentalFeature/list') throw Object.assign(new Error('thread not found'), { code: -32600 }); return thread([])(method) },
+  ]
+  for (const request of refused) {
+    await assert.rejects(verifyComputerControlOff(request, 't', plan), error => error.code === 'COMPUTER_CONTROL_UNVERIFIED' && error.httpStatus === 502 && /no turn was started/.test(error.message))
+  }
+  // Disabled servers, browser servers and harmless plugins pass.
+  assert.deepEqual(await verifyComputerControlOff(thread([
+    { name: 'node_repl', tools: {}, runtimeStatus: 'disabled' }, { name: 'firefox-devtools', tools: { navigate_page: {} }, runtimeStatus: 'connected' },
+    { name: 'code-review', pluginId: 'code-review@openai-bundled', tools: {}, runtimeStatus: 'disabled' }, { name: 'codex_apps', tools: { slack_send_message: {} }, runtimeStatus: 'connected' },
+  ]), 't', plan), { nativeFeatures: 'verified' })
+  // A Codex build that cannot report thread features: the MCP check still ran.
+  const absent = async (method, params) => {
+    if (method === 'experimentalFeature/list') throw Object.assign(new Error('Invalid request: unknown variant `experimentalFeature/list`'), { code: -32600 })
+    return thread([])(method, params)
+  }
+  assert.deepEqual(await verifyComputerControlOff(absent, 't', plan), { nativeFeatures: 'unavailable' })
+})
+
+test('inherit sends exactly what it sent before: no extra reads, no extra settings, no reload', async () => {
+  const baseline = runtime()
+  const inherit = runtime({ policy: 'inherit' })
+  for (const h of [baseline, inherit]) {
+    const run = await h.chat.send({ message: 'Hi', requestId: 'r-1' })
+    await h.finish(run)
+    await h.chat.send({ message: 'Again', requestId: 'r-2', conversationId: run.conversationId })
+  }
+  assert.deepEqual(inherit.calls, baseline.calls)
+  assert.deepEqual(inherit.methods(), ['thread/start', 'turn/start', 'turn/start'])
+  assert.deepEqual(inherit.calls[0].params.config, { features: { default_mode_request_user_input: true } })
+  assert.deepEqual(inherit.chat.computerControlSnapshot(), { policy: 'inherit', verified: null })
+  assert.deepEqual(inherit.changes, [])
+})
+
+test('off starts an ordinary thread with computer control off and reads it back before the turn', async () => {
+  const h = runtime({ policy: 'off' })
+  const run = await h.chat.send({ message: 'Hi', requestId: 'r-1', cwd: '/work' })
+  const start = h.calls.find(call => call.method === 'thread/start').params
+  assert.deepEqual(start.config.features, { default_mode_request_user_input: true, computer_use: false, browser_use_external: false })
+  assert.deepEqual({ ...start.config.plugins }, { [COMPUTER_PLUGIN]: { enabled: false }, 'browser-helper@acme': { enabled: false } })
+  assert.deepEqual(Object.keys(start.config.mcp_servers), ['computer-use', 'node_repl', 'desktop-commander'])
+  const at = method => h.calls.findIndex(call => call.method === method && call.params.threadId === run.conversationId)
+  const turnAt = h.methods().indexOf('turn/start')
+  assert.ok(h.methods().indexOf('config/read') < h.methods().indexOf('thread/start'))
+  for (const method of ['mcpServerStatus/list', 'experimentalFeature/list']) assert.ok(at(method) > h.methods().indexOf('thread/start') && at(method) < turnAt, method)
+  assert.deepEqual(h.chat.computerControlSnapshot(), { policy: 'off', verified: true })
+  assert.deepEqual(h.changes, [{ policy: 'off', verified: true }])
+  // The verified thread is not reloaded for the next send.
+  await h.finish(run)
+  const before = h.calls.length
+  await h.chat.send({ message: 'Again', requestId: 'r-2', conversationId: run.conversationId })
+  assert.deepEqual(h.calls.slice(before).map(call => call.method), ['turn/start'])
+})
+
+test('off refuses the turn when the thread does not read back as off, and records it as unconfirmed', async () => {
+  const cases = [
+    async (method, params) => method === 'mcpServerStatus/list' && params.threadId
+      ? { data: [{ name: 'cua_repl', pluginId: COMPUTER_PLUGIN, tools: { js: {} }, resources: [], resourceTemplates: [], toolsError: null, runtimeStatus: 'connected' }], nextCursor: null } : undefined,
+    async (method, params) => method === 'experimentalFeature/list' && params.threadId
+      ? { data: [{ name: 'computer_use', enabled: true }, { name: 'browser_use_external', enabled: false }], nextCursor: null } : undefined,
+  ]
+  for (const custom of cases) {
+    const h = runtime({ policy: 'off', custom })
+    await assert.rejects(h.chat.send({ message: 'Hi', requestId: 'r-1' }), error => error.code === 'COMPUTER_CONTROL_UNVERIFIED' && error.httpStatus === 502)
+    assert.equal(h.methods().includes('turn/start'), false)
+    assert.deepEqual(h.chat.computerControlSnapshot(), { policy: 'off', verified: false })
+  }
+  // An unreadable configuration refuses before any thread is started.
+  const h = runtime({ policy: 'off', custom: async method => { if (method === 'config/read') throw new Error('offline') } })
+  await assert.rejects(h.chat.send({ message: 'Hi', requestId: 'r-1' }), error => error.code === 'COMPUTER_CONTROL_UNVERIFIED')
+  assert.equal(h.methods().includes('thread/start'), false)
+  assert.equal(h.chat.computerControlSnapshot().verified, false)
+  // A build without thread feature reporting runs on the MCP check, unconfirmed.
+  const old = runtime({ policy: 'off', custom: async method => {
+    if (method === 'experimentalFeature/list') throw Object.assign(new Error('Invalid request: unknown variant `experimentalFeature/list`'), { code: -32600 })
+  } })
+  await old.chat.send({ message: 'Hi', requestId: 'r-1' })
+  assert.equal(old.methods().includes('turn/start'), true)
+  assert.deepEqual(old.chat.computerControlSnapshot(), { policy: 'off', verified: null })
+})
+
+test('a policy change reloads a loaded thread on its next send: off applies and is read back, inherit drops it', async () => {
+  const h = runtime()
+  const run = await h.chat.send({ message: 'Hi', requestId: 'r-1' })
+  await h.finish(run)
+  assert.deepEqual(h.chat.setComputerControlPolicy('off'), { policy: 'off', verified: null })
+  assert.deepEqual(h.chat.setComputerControlPolicy('off'), { policy: 'off', verified: null }, 'the same value is not a change')
+  let before = h.calls.length
+  const second = await h.chat.send({ message: 'Again', requestId: 'r-2', conversationId: run.conversationId })
+  const offCalls = h.calls.slice(before)
+  assert.deepEqual(offCalls.map(call => call.method).filter(method => ['thread/unsubscribe', 'thread/resume', 'turn/start'].includes(method)), ['thread/unsubscribe', 'thread/resume', 'turn/start'])
+  const resumed = offCalls.find(call => call.method === 'thread/resume').params
+  assert.deepEqual(resumed.config.features, { computer_use: false, browser_use_external: false, default_mode_request_user_input: true })
+  assert.equal(resumed.config.plugins[COMPUTER_PLUGIN].enabled, false)
+  const resumeAt = offCalls.findIndex(call => call.method === 'thread/resume')
+  assert.ok(offCalls.findIndex(call => call.method === 'experimentalFeature/list') > resumeAt)
+  assert.deepEqual(h.chat.computerControlSnapshot(), { policy: 'off', verified: true })
+  await h.finish(second)
+  // Viewing the conversation again (resume) loads it with the user's settings;
+  // the next send under off reloads it with them off again.
+  await h.chat.resume({ conversationId: run.conversationId })
+  before = h.calls.length
+  const third = await h.chat.send({ message: 'Third', requestId: 'r-3', conversationId: run.conversationId })
+  assert.ok(h.calls.slice(before).some(call => call.method === 'thread/unsubscribe'))
+  await h.finish(third)
+  // Back to inherit: one reload without the off settings, then none.
+  h.chat.setComputerControlPolicy('inherit')
+  before = h.calls.length
+  const fourth = await h.chat.send({ message: 'Fourth', requestId: 'r-4', conversationId: run.conversationId })
+  const inheritCalls = h.calls.slice(before)
+  assert.deepEqual(inheritCalls.map(call => call.method), ['thread/unsubscribe', 'thread/resume', 'turn/start'])
+  assert.deepEqual(inheritCalls[1].params.config, { features: { default_mode_request_user_input: true } })
+  await h.finish(fourth)
+  before = h.calls.length
+  await h.chat.send({ message: 'Fifth', requestId: 'r-5', conversationId: run.conversationId })
+  assert.deepEqual(h.calls.slice(before).map(call => call.method), ['turn/start'])
+  assert.deepEqual(h.changes.map(change => change.policy + ':' + change.verified), ['off:null', 'off:true', 'inherit:null'])
+})
+
+test('bounded QA threads are not touched by the off policy', async () => {
+  const h = runtime({ policy: 'off', custom: async (method, params) => {
+    if (method === 'thread/start') return { thread: { id: 'qa-thread' }, cwd: '/work', sandbox: { type: 'readOnly', networkAccess: false }, approvalPolicy: 'never' }
+    if (method === 'mcpServerStatus/list' && params.threadId) return { data: [], nextCursor: null }
+    if (method === 'experimentalFeature/list') return { data: ['browser_use', 'browser_use_external', 'computer_use'].map(name => ({ name, enabled: false })), nextCursor: null }
+  } })
+  await h.chat.send({ message: 'Read', requestId: 'qa-1', executionPolicy: { mode: 'readOnlyQa' } })
+  assert.equal(h.methods().filter(method => method === 'config/read').length, 1, 'only the QA isolation read')
+  assert.deepEqual(h.chat.computerControlSnapshot(), { policy: 'off', verified: null })
+})
+
+test('an MCP tool call row says what its server can control, never its plugin id, arguments, result or images', async () => {
+  const kinds = { node_repl: 'desktop', 'playwright-electron': 'browser', drive: 'other' }
+  const h = runtime({ mcpServerKind: name => kinds[name] ?? null })
+  const run = await h.chat.send({ message: 'Hi', requestId: 'r-1' })
+  const call = (id, server, extra = {}) => h.chat.handleNotification({ method: 'item/completed', params: { threadId: run.conversationId, turnId: run.runId, item: {
+    id, type: 'mcpToolCall', server, tool: 'js', status: 'completed', durationMs: 5,
+    arguments: { code: 'await cua.click("ARGUMENT_SENTINEL")' }, result: { content: [{ type: 'image', data: 'IMAGE_SENTINEL' }, { type: 'text', text: 'RESULT_SENTINEL' }] }, ...extra,
+  } } })
+  await call('cua', 'cua_repl', { pluginId: COMPUTER_PLUGIN })
+  await call('repl', 'node_repl')
+  await call('pw', 'playwright-electron')
+  await call('plugin-only', 'helper', { pluginId: 'unified-computer-use@openai-bundled' })
+  await call('drive', 'drive')
+  await call('unlisted', 'jupyter')
+  const rows = h.chat.snapshot().runs[0].activities.filter(activity => activity.kind === 'mcpToolCall')
+  assert.deepEqual(rows.map(row => [row.id, row.detail.controlKind]), [
+    ['cua', 'computer'], ['repl', 'computer'], ['pw', 'browser'], ['plugin-only', 'computer'], ['drive', 'other'], ['unlisted', 'repl'],
+  ])
+  assert.deepEqual(Object.keys(rows[0].detail), ['server', 'tool', 'durationMs', 'controlKind'])
+  assert.equal(rows[0].title, 'cua_repl / js')
+  const exposed = JSON.stringify([h.events, h.chat.snapshot()])
+  for (const hidden of ['ARGUMENT_SENTINEL', 'IMAGE_SENTINEL', 'RESULT_SENTINEL', COMPUTER_PLUGIN]) assert.ok(!exposed.includes(hidden), hidden)
+  // Without the inherited lookup node_repl reads as a REPL; a failing lookup changes nothing.
+  for (const mcpServerKind of [undefined, () => { throw new Error('not ready') }]) {
+    const plain = runtime({ mcpServerKind })
+    const other = await plain.chat.send({ message: 'Hi', requestId: 'r-1' })
+    await plain.chat.handleNotification({ method: 'item/completed', params: { threadId: other.conversationId, turnId: other.runId, item: { id: 'repl', type: 'mcpToolCall', server: 'node_repl', tool: 'js', status: 'completed' } } })
+    assert.equal(plain.chat.snapshot().runs[0].activities.find(row => row.id === 'repl').detail.controlKind, 'repl')
+  }
+})
+
+function settingsRequest(body, { method = 'POST', headers = {} } = {}) {
+  const req = Readable.from(body === null ? [] : [Buffer.from(body)])
+  req.method = method
+  req.url = '/settings/computer-control'
+  req.headers = { host: '127.0.0.1:39218', 'content-type': 'application/json', ...headers }
+  req.socket = { remoteAddress: '127.0.0.1' }
+  return req
+}
+function response() {
+  return { headers: {}, setHeader(key, value) { this.headers[key] = value }, writeHead(status, headers) { this.status = status; Object.assign(this.headers, headers) }, end(body) { this.body = body ? JSON.parse(body) : null } }
+}
+
+test('POST /settings/computer-control changes the policy behind the loopback/Origin guard and accepts only {policy}', async () => {
+  const h = runtime()
+  const handle = createComputerControlHttpHandler(h.chat, { port: 39218 })
+  const send = async (body, options) => {
+    const req = settingsRequest(body, options)
+    const res = response()
+    const owned = await handle(req, res, new URL(req.url, 'http://127.0.0.1:39218'))
+    return { owned, status: res.status, body: res.body }
+  }
+  assert.deepEqual(await send('{"policy":"off"}'), { owned: true, status: 200, body: { policy: 'off', verified: null } })
+  assert.equal(h.chat.computerControlSnapshot().policy, 'off')
+  for (const headers of [{ origin: 'https://evil.example' }, { origin: 'null' }, { 'sec-fetch-site': 'cross-site' }, { host: 'evil.example:39218' }]) {
+    const refused = await send('{"policy":"inherit"}', { headers })
+    assert.deepEqual([refused.status, refused.body.code], [403, 'SETTINGS_LOOPBACK_REQUIRED'], JSON.stringify(headers))
+  }
+  assert.equal(h.chat.computerControlSnapshot().policy, 'off', 'a refused request changes nothing')
+  for (const body of ['{}', '{"policy":"on"}', '{"policy":"off","verified":true}', null]) {
+    const bad = await send(body)
+    assert.deepEqual([bad.status, bad.body.code], [400, 'INVALID_COMPUTER_CONTROL_POLICY'], String(body))
+  }
+  assert.equal((await send('{"policy":"inherit"}', { headers: { 'content-type': 'text/plain' } })).status, 415)
+  assert.equal((await send('x'.repeat(2000))).status, 413)
+  assert.equal((await send(null, { method: 'GET' })).status, 405)
+  assert.deepEqual(await send('{"policy":"inherit"}', { headers: { origin: 'chrome://browser' } }), { owned: true, status: 200, body: { policy: 'inherit', verified: null } })
+  const other = settingsRequest('{}')
+  assert.equal(await handle(other, response(), new URL('/settings/other', 'http://127.0.0.1:39218')), false)
+})
+
+test('the bridge publishes computerControl last in /v1/state, broadcasts changes, mounts the route and gives Chat the inherited lookup', async () => {
+  const source = await readFile(new URL('./codex-bridge-server.mjs', import.meta.url), 'utf8')
+  const at = text => { const index = source.indexOf(text); assert.notEqual(index, -1, `missing server marker: ${text}`); return index }
+  const chat = source.slice(at('const chat = new CodexChatRuntime({'), at('if (chatStore) {'))
+  assert.match(chat, /mcpServerKind: name => inheritedMcp\.kindOf\(name\),/)
+  assert.match(chat, /onComputerControlChange: computerControl => broadcast\(\{ type: 'computer\.control', v: BRIDGE_PROTOCOL_VERSION, provider: PROVIDER_ID, computerControl, ts: Date\.now\(\) \}\),/)
+  assert.doesNotMatch(chat, /computerControlPolicy:/, 'the default (inherit) comes from codex-computer-control.mjs')
+  at('const handleComputerControlHttp = createComputerControlHttpHandler(chat, { port: BRIDGE_PORT })')
+  const mount = at('if (await handleComputerControlHttp(req, res, url)) return')
+  assert.ok(at('if (!guardBridgeRequest(req, BRIDGE_PORT)) {') < mount)
+  assert.ok(mount < at('if (await handleChatHttp(req, res, url)) return'))
+  const state = source.slice(at("if (req.method === 'GET' && route === '/v1/state') {"), at("if (req.method === 'GET' && route === '/auth/status') {"))
+  assert.ok(state.indexOf('workflow: workflow.snapshot(),') < state.indexOf('computerControl: chat.computerControlSnapshot(),'))
+})
