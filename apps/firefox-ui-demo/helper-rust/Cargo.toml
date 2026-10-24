@@ -2,7 +2,7 @@
 name = "egdesk-helper"
 version = "0.1.0"
 edition = "2021"
-description = "EG-Desk native helper — PTY, tray, hotkey, file-watch over WebSocket"
+description = "EG-Desk native helper — WebSocket PTY terminal and the macOS host observer (host-observe)"
 
 [dependencies]
 tokio = { version = "1", features = ["full"] }
@@ -14,6 +14,26 @@ serde_json = "1"
 uuid = { version = "1", features = ["v4"] }
 rand = "0.8"
 clap = { version = "4", features = ["derive"] }
+libc = "0.2"
+
+# macOS host observer (host-observe). Versions pinned to what trycua/cua
+# libs/cua-driver/rust (MIT) builds platform-macos with (its Cargo.lock):
+# objc2 0.5.2, objc2-foundation 0.2.2, objc2-app-kit 0.2.2, block2 0.5.1,
+# core-foundation 0.10.1, core-graphics 0.24.0. host-observe calls only
+# read-only APIs from these (src/host/macos.rs): no input, capture or
+# accessibility writes.
+[target.'cfg(target_os = "macos")'.dependencies]
+core-foundation = "=0.10.1"
+core-graphics = "=0.24.0"
+block2 = "=0.5.1"
+objc2 = "=0.5.2"
+objc2-foundation = { version = "=0.2.2", features = [
+    "NSArray", "NSString", "NSDictionary", "NSNotification", "NSOperation",
+    "NSObject", "NSURL", "block2", "libc",
+] }
+objc2-app-kit = { version = "=0.2.2", features = [
+    "NSRunningApplication", "NSWorkspace", "block2", "libc",
+] }
 
 [profile.release]
 opt-level = "z"

@@ -2,17 +2,24 @@ use std::collections::HashMap;
 use std::io::{Read, Write};
 use std::sync::Arc;
 
-use clap::Parser;
+use clap::{Parser, Subcommand};
 use futures_util::{SinkExt, StreamExt};
 use portable_pty::{native_pty_system, CommandBuilder, PtySize};
 use serde::{Deserialize, Serialize};
 use tokio::net::TcpListener;
 use tokio::sync::{mpsc, Mutex, RwLock};
-use tokio_tungstenite::accept_async;
+use tokio_tungstenite::accept_hdr_async;
+use tokio_tungstenite::tungstenite::handshake::server::{ErrorResponse, Request, Response};
+use tokio_tungstenite::tungstenite::http::{header, HeaderValue, StatusCode};
 use tokio_tungstenite::tungstenite::Message;
+
+mod auth;
+mod host;
 
 // ─── CLI Args ───────────────────────────────────────────────────────────────
 
+/// Without a subcommand: the WebSocket PTY terminal (JSON-RPC over
+/// ws://127.0.0.1:<port>). `host-observe`: the macOS host observer.
 #[derive(Parser, Debug)]
 #[command(name = "egdesk-helper")]
 struct Args {
@@ -20,9 +27,21 @@ struct Args {
     #[arg(long, default_value = "0")]
     port: u16,
 
-    /// Auth token for WebSocket connections
+    /// Auth token for WebSocket connections. Prefer EGDESK_HELPER_TOKEN: a
+    /// command-line value is visible to other local users in `ps`. With
+    /// neither, a random token is generated and reported on the ready line.
     #[arg(long, default_value = "")]
     token: String,
+
+    #[command(subcommand)]
+    command: Option<Command>,
+}
+
+#[derive(Subcommand, Debug)]
+enum Command {
+    /// macOS host observer: front app, running apps, windows, permission
+    /// preview, Codex computer-use service. Observation only, no OS input.
+    HostObserve(host::HostObserveArgs),
 }
 
 // ─── JSON-RPC Types ─────────────────────────────────────────────────────────
@@ -74,22 +93,70 @@ type ClientTx = mpsc::UnboundedSender<String>;
 
 // ─── Main ───────────────────────────────────────────────────────────────────
 
-#[tokio::main]
-async fn main() {
+fn main() {
     let args = Args::parse();
+    match args.command {
+        Some(Command::HostObserve(options)) => std::process::exit(host::run_observe(options)),
+        None => {
+            let env_token = std::env::var("EGDESK_HELPER_TOKEN").ok();
+            std::env::remove_var("EGDESK_HELPER_TOKEN"); // not inherited by PTY children
+            let token = match auth::resolve_terminal_token(&args.token, env_token.as_deref()) {
+                Ok(token) => token,
+                Err(message) => {
+                    eprintln!("egdesk-helper: {message}");
+                    std::process::exit(2);
+                }
+            };
+            if token.from_argv {
+                eprintln!("egdesk-helper: warning: --token is visible to other local users; prefer EGDESK_HELPER_TOKEN");
+            }
+            let runtime = tokio::runtime::Runtime::new().expect("Failed to start the async runtime");
+            runtime.block_on(run_ws_terminal(args.port, token));
+        }
+    }
+}
 
-    let addr = format!("127.0.0.1:{}", args.port);
+/// Handshake check: the connection must present this run's token (see
+/// auth::authorize_ws); otherwise it is refused with 401 before any JSON-RPC.
+/// The Err type is tungstenite's handshake callback contract.
+#[allow(clippy::result_large_err)]
+fn authorize_handshake(request: &Request, response: Response, expected: &str) -> Result<Response, ErrorResponse> {
+    let header_text = |name: header::HeaderName| request.headers().get(name).and_then(|value| value.to_str().ok());
+    match auth::authorize_ws(header_text(header::AUTHORIZATION), header_text(header::SEC_WEBSOCKET_PROTOCOL), expected) {
+        auth::WsAuth::Accepted { subprotocol } => {
+            let mut response = response;
+            if let Some(protocol) = subprotocol {
+                response.headers_mut().insert(header::SEC_WEBSOCKET_PROTOCOL, HeaderValue::from_static(protocol));
+            }
+            Ok(response)
+        }
+        auth::WsAuth::Rejected => {
+            let mut refusal = ErrorResponse::new(Some("unauthorized".to_string()));
+            *refusal.status_mut() = StatusCode::UNAUTHORIZED;
+            Err(refusal)
+        }
+    }
+}
+
+async fn run_ws_terminal(port: u16, token: auth::TerminalToken) {
+    let addr = format!("127.0.0.1:{}", port);
     let listener = TcpListener::bind(&addr).await.expect("Failed to bind");
     let local_addr = listener.local_addr().unwrap();
 
-    // Print ready message for chrome JS to parse (stdout)
-    let ready = serde_json::json!({
+    // Print ready message for chrome JS to parse (stdout). A generated token
+    // is reported here once, to the parent that reads our stdout.
+    let mut ready = serde_json::json!({
         "port": local_addr.port(),
-        "ready": true
+        "ready": true,
+        "auth": "bearer-or-subprotocol",
     });
+    if token.generated {
+        ready["token"] = serde_json::Value::String(token.value.clone());
+    }
     println!("{}", ready);
 
     let sessions: Sessions = Arc::new(RwLock::new(HashMap::new()));
+    let expected: Arc<str> = Arc::from(token.value.as_str());
 
     loop {
         let (stream, _) = match listener.accept().await {
@@ -97,9 +164,11 @@ async fn main() {
             Err(_) => continue,
         };
         let sessions = sessions.clone();
+        let expected = Arc::clone(&expected);
 
         tokio::spawn(async move {
-            let ws_stream = match accept_async(stream).await {
+            let check = move |request: &Request, response: Response| authorize_handshake(request, response, &expected);
+            let ws_stream = match accept_hdr_async(stream, check).await {
                 Ok(ws) => ws,
                 Err(e) => {
                     eprintln!("WebSocket handshake failed: {}", e);
@@ -455,4 +524,35 @@ fn send_error(tx: &ClientTx, id: serde_json::Value, code: i32, message: &str) {
         }),
     };
     let _ = tx.send(serde_json::to_string(&response).unwrap());
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    const TOKEN: &str = "0123456789abcdef0123456789abcdef";
+
+    #[allow(clippy::result_large_err)]
+    fn handshake(headers: &[(&str, &str)]) -> Result<Response, ErrorResponse> {
+        let mut builder = Request::builder().uri("ws://127.0.0.1:1/");
+        for (name, value) in headers {
+            builder = builder.header(*name, *value);
+        }
+        authorize_handshake(&builder.body(()).unwrap(), Response::new(()), TOKEN)
+    }
+
+    #[test]
+    fn websocket_without_the_token_is_refused_with_401() {
+        assert_eq!(handshake(&[]).unwrap_err().status(), StatusCode::UNAUTHORIZED);
+        let wrong = handshake(&[("Authorization", "Bearer ffffffffffffffffffffffffffffffff")]);
+        assert_eq!(wrong.unwrap_err().status(), StatusCode::UNAUTHORIZED);
+    }
+
+    #[test]
+    fn websocket_with_the_token_is_accepted() {
+        let bearer = handshake(&[("Authorization", &format!("Bearer {TOKEN}"))]).unwrap();
+        assert!(bearer.headers().get(header::SEC_WEBSOCKET_PROTOCOL).is_none());
+        let browser = handshake(&[("Sec-WebSocket-Protocol", &format!("egdesk.v1, egdesk.token.{TOKEN}"))]).unwrap();
+        assert_eq!(browser.headers().get(header::SEC_WEBSOCKET_PROTOCOL).unwrap(), "egdesk.v1");
+    }
 }
