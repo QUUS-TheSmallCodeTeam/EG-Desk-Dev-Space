@@ -19,7 +19,8 @@ const CONNECTION_STATUSES = new Set(['notStarted', 'starting', 'connected', 'aut
 // and at camelCase humps ("chromeDevtools" → chrome, devtools).
 const NAME_RULES = [
   ['browser', new Set(['playwright', 'puppeteer', 'selenium', 'webdriver', 'browser', 'browserbase', 'stagehand', 'chrome', 'chromium', 'firefox', 'devtools'])],
-  ['desktop', new Set(['computer', 'desktop', 'applescript', 'osascript', 'accessibility', 'uiautomation', 'pyautogui', 'autogui', 'xdotool', 'peekaboo'])],
+  // 'cua': Codex's own computer-use plugin server is named cua_repl.
+  ['desktop', new Set(['computer', 'cua', 'desktop', 'applescript', 'osascript', 'accessibility', 'uiautomation', 'pyautogui', 'autogui', 'xdotool', 'peekaboo'])],
   ['repl', new Set(['repl', 'jupyter', 'ipython', 'shell', 'terminal', 'bash', 'exec'])],
 ]
 // Used only when the name says nothing: the server's tool names.
@@ -39,6 +40,22 @@ export function classifyMcpServer({ name, toolNames = [] } = {}) {
     kind = TOOL_RULES.find(([, pattern]) => tools.some(tool => pattern.test(tool)))?.[0] || 'other'
   }
   return { controlsExternal: kind !== 'other', kind }
+}
+
+const serverToolNames = server => {
+  const tools = server?.tools && typeof server.tools === 'object' && !Array.isArray(server.tools) ? server.tools : {}
+  return Object.entries(tools).flatMap(([key, tool]) => [key, tool?.name])
+}
+
+/**
+ * The kind of one native mcpServerStatus/list entry, with the same rules:
+ * its name and, for a plugin's server, the plugin id are read together
+ * ("cua_repl" + "unified-computer-use@…" → desktop), then its tool names.
+ * Internal use only; plugin ids never reach a public row.
+ */
+export function nativeMcpServerKind(server) {
+  const name = [server?.name, server?.pluginId].filter(part => typeof part === 'string').join(' ')
+  return classifyMcpServer({ name, toolNames: serverToolNames(server) }).kind
 }
 
 const publicName = name => {
@@ -66,8 +83,7 @@ export function startupStatus(state, failureReason = null) {
 export function publicInheritedMcpServer(server) {
   const name = publicName(server?.name)
   if (!name) return null
-  const tools = server.tools && typeof server.tools === 'object' && !Array.isArray(server.tools) ? server.tools : {}
-  const toolNames = Object.entries(tools).flatMap(([key, tool]) => [key, tool?.name])
+  const toolNames = serverToolNames(server)
   const status = listedStatus(server)
   return { name, enabled: status !== 'disabled', status, ...classifyMcpServer({ name: server.name, toolNames }) }
 }

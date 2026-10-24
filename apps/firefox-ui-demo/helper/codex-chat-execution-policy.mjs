@@ -101,6 +101,10 @@ export function disabledNativeMcpConfig(servers, directIds) {
   return { mcp_servers, plugins }
 }
 
+// Codex's built-in switches that let the model drive a browser or the
+// desktop itself. Bounded threads observe only through EG-Desk tools.
+export const NATIVE_COMPUTER_FEATURES = Object.freeze(['browser_use', 'browser_use_external', 'computer_use'])
+
 export function qaThreadOverrides(servers, directIds) {
   const { mcp_servers, plugins } = disabledNativeMcpConfig(servers, directIds)
   return {
@@ -109,11 +113,46 @@ export function qaThreadOverrides(servers, directIds) {
       web_search: 'disabled',
       // Explicit false: a thread first started as ordinary Chat carries the
       // question feature, and a bounded resume must not inherit it.
-      features: { apps: false, hooks: false, multi_agent: false, plugins: false, remote_plugin: false, default_mode_request_user_input: false, code_mode: { enabled: false } },
+      features: {
+        apps: false, hooks: false, multi_agent: false, plugins: false, remote_plugin: false, default_mode_request_user_input: false, code_mode: { enabled: false },
+        ...Object.fromEntries(NATIVE_COMPUTER_FEATURES.map(name => [name, false])),
+      },
       mcp_servers, plugins,
     },
   }
 }
+
+// experimentalFeature/list with a threadId reports that thread's effective
+// switches (checked on Codex 0.162.1). A build without the method rejects it
+// as an unknown request variant: that, and only that, returns null so the
+// caller skips the check and says so. Any other failure or shape throws.
+const FEATURE_LIST_ABSENT = /unknown variant|method not found|unknown field `?threadId/i
+export async function readNativeThreadFeatures(request, threadId) {
+  const unreadable = () => chatError('NATIVE_FEATURES_UNVERIFIED', 'Native thread features could not be read', 502)
+  const features = new Map(), seen = new Set()
+  let cursor = null
+  for (let page = 0; page < 8; page++) {
+    let result
+    try { result = await request('experimentalFeature/list', { limit: 100, threadId, ...(cursor ? { cursor } : {}) }) }
+    catch (error) {
+      if (page === 0 && [-32600, -32601].includes(error?.code) && FEATURE_LIST_ABSENT.test(String(error?.message || ''))) return null
+      throw unreadable()
+    }
+    if (!Array.isArray(result?.data)) throw unreadable()
+    for (const feature of result.data) {
+      if (!feature || typeof feature !== 'object' || typeof feature.name !== 'string' || features.has(feature.name)) throw unreadable()
+      features.set(feature.name, feature.enabled)
+    }
+    if (result.nextCursor == null) return features
+    if (typeof result.nextCursor !== 'string' || !result.nextCursor || seen.has(result.nextCursor)) throw unreadable()
+    seen.add(result.nextCursor)
+    cursor = result.nextCursor
+  }
+  throw unreadable()
+}
+
+/** Names the thread does not report as exactly false; a missing name counts. */
+export const featuresNotOff = (features, names) => names.filter(name => features.get(name) !== false)
 
 export async function loadQaThreadOverrides(request, { threadId = null, cwd = null } = {}) {
   const directIds = await readNativeDirectMcpServerIds(request, cwd)
@@ -134,12 +173,21 @@ export function verifyQaNativeThread(result, mode = READ_ONLY_QA) {
   }
 }
 
+// Also checks Codex's own browser and computer switches are off on that
+// thread. nativeComputerFeatures is 'off', or 'unchecked' when this Codex
+// build cannot report thread features (the MCP check above still ran).
 export async function verifyQaMcpIsolation(request, threadId, receipt) {
   const servers = await listNativeMcpServers(request, threadId)
   if (servers.some(server => Object.keys(server.tools).length || server.resources.length || server.resourceTemplates.length || server.toolsError != null)) {
     throw chatError('QA_TOOL_ISOLATION_UNVERIFIED', 'Native thread still exposes external MCP capabilities; no turn was started', 502)
   }
-  return { ...receipt, externalMcpCatalog: 'empty', inspectedMcpServers: servers.length }
+  let features
+  try { features = await readNativeThreadFeatures(request, threadId) }
+  catch { throw chatError('QA_TOOL_ISOLATION_UNVERIFIED', 'Native thread features could not be read; no turn was started', 502) }
+  if (features && featuresNotOff(features, NATIVE_COMPUTER_FEATURES).length) {
+    throw chatError('QA_TOOL_ISOLATION_UNVERIFIED', 'Native thread still allows built-in browser or computer control; no turn was started', 502)
+  }
+  return { ...receipt, externalMcpCatalog: 'empty', inspectedMcpServers: servers.length, nativeComputerFeatures: features ? 'off' : 'unchecked' }
 }
 
 export const QA_TURN_OVERRIDES = Object.freeze({

@@ -32,10 +32,24 @@ function profileStore(t) {
   return { dataDir, profiles, add }
 }
 
-// A native fake whose reported sandbox follows the requested settings, like Codex.
-function harness({ profiles, sandboxMode = 'workspace-write', toolProviders, request: custom } = {}) {
+// Feature switches a ceiling turns off; Codex reports them per thread.
+const CEILING_FEATURES = ['shell_tool', 'browser_use', 'browser_use_external', 'computer_use']
+const featureList = values => ({ data: CEILING_FEATURES.map(name => ({ name, enabled: values[name] ?? true, stage: 'stable' })), nextCursor: null })
+// Servers as Codex 0.162.1 listed them: its computer-use plugin (cua_repl) and
+// a browser server the user added under mcp_servers.
+const COMPUTER_PLUGIN = 'unified-computer-use@openai-bundled'
+const computerServers = [
+  { name: 'cua_repl', pluginId: COMPUTER_PLUGIN, tools: { js: {}, js_reset: {}, turn_ended: {} } },
+  { name: 'firefox-devtools', tools: { navigate_page: {}, take_snapshot: {} } },
+]
+
+// A native fake whose reported sandbox, feature switches and MCP catalog follow
+// the requested thread settings, like Codex: a turned-off plugin's server is
+// gone from that thread's list; other servers stay connected.
+function harness({ profiles, sandboxMode = 'workspace-write', toolProviders, request: custom, servers = [] } = {}) {
   const calls = [], events = [], replies = []
   let threads = 0, turns = 0
+  const threadConfig = new Map()
   const sandboxFor = params => {
     const mode = params.sandbox || sandboxMode
     if (mode === 'read-only') return { type: 'readOnly', networkAccess: false }
@@ -43,17 +57,34 @@ function harness({ profiles, sandboxMode = 'workspace-write', toolProviders, req
     return { type: 'workspaceWrite', networkAccess: params.config?.sandbox_workspace_write?.network_access !== false }
   }
   const defaults = async (method, params) => {
-    if (method === 'thread/start') return { thread: { id: `thread-${++threads}` }, cwd: '/work', sandbox: sandboxFor(params), approvalPolicy: params.approvalPolicy || 'on-request' }
-    if (method === 'thread/resume') return { thread: { id: params.threadId, turns: [] }, cwd: '/work', sandbox: sandboxFor(params), approvalPolicy: params.approvalPolicy || 'on-request' }
+    if (method === 'thread/start') {
+      const id = `thread-${++threads}`
+      threadConfig.set(id, params.config || {})
+      return { thread: { id }, cwd: '/work', sandbox: sandboxFor(params), approvalPolicy: params.approvalPolicy || 'on-request' }
+    }
+    if (method === 'thread/resume') {
+      threadConfig.set(params.threadId, params.config || {})
+      return { thread: { id: params.threadId, turns: [] }, cwd: '/work', sandbox: sandboxFor(params), approvalPolicy: params.approvalPolicy || 'on-request' }
+    }
     if (method === 'thread/unsubscribe') return { status: 'unsubscribed' }
     if (method === 'turn/start') return { turn: { id: `turn-${++turns}`, status: 'inProgress', items: [] } }
     if (method === 'turn/interrupt') return {}
     if (method === 'config/read') return { config: { sandbox_mode: sandboxMode },
-      layers: [{ name: { type: 'user' }, config: { mcp_servers: { 'user-tools': { command: 'user-mcp' } } } }] }
-    if (method === 'mcpServerStatus/list') return { data: [
-      { name: 'user-tools', tools: params.threadId ? {} : { search: {} }, resources: [], resourceTemplates: [], toolsError: null },
-      { name: 'plugin-tools', pluginId: 'user-plugin', tools: params.threadId ? {} : { send: {} }, resources: [], resourceTemplates: [], toolsError: null },
-    ], nextCursor: null }
+      layers: [{ name: { type: 'user' }, config: { mcp_servers: { 'user-tools': { command: 'user-mcp' }, ...Object.fromEntries(servers.filter(server => !server.pluginId).map(server => [server.name, { command: server.name }])) } } }] }
+    if (method === 'experimentalFeature/list') return featureList(params.threadId ? threadConfig.get(params.threadId)?.features || {} : {})
+    if (method === 'mcpServerStatus/list') {
+      const config = params.threadId ? threadConfig.get(params.threadId) || {} : null
+      const listed = [
+        { name: 'user-tools', tools: params.threadId ? {} : { search: {} }, resources: [], resourceTemplates: [], toolsError: null },
+        { name: 'plugin-tools', pluginId: 'user-plugin', tools: params.threadId ? {} : { send: {} }, resources: [], resourceTemplates: [], toolsError: null },
+      ]
+      for (const server of servers) {
+        if (config && server.pluginId && (config.plugins?.[server.pluginId]?.enabled === false || config.features?.plugins === false)) continue
+        const off = config && !server.pluginId && config.mcp_servers?.[server.name]?.enabled === false
+        listed.push({ ...server, tools: off ? {} : server.tools, resources: [], resourceTemplates: [], toolsError: null, ...(config ? { runtimeStatus: off ? 'disabled' : 'connected' } : {}) })
+      }
+      return { data: listed, nextCursor: null }
+    }
     throw new Error(`Unexpected method: ${method}`)
   }
   const chat = new CodexChatRuntime({
@@ -198,6 +229,9 @@ test('terminal none removes the shell tool and declines command approvals with a
   assert.equal(h.started()[0].config.features.shell_tool, false)
   assert.equal(h.started()[0].config.features.default_mode_request_user_input, true)
   assert.equal(Object.hasOwn(h.started()[0], 'sandbox'), false)
+  // The thread itself reports the shell switch off before the turn starts.
+  const featureCheck = h.calls.findIndex(call => call.method === 'experimentalFeature/list' && call.params.threadId === run.conversationId)
+  assert.ok(featureCheck >= 0 && featureCheck < h.calls.findIndex(call => call.method === 'turn/start'))
   await h.approval(run, 'cmd-1', { command: 'npm run build', cwd: '/work' })
   assert.deepEqual(h.replies, [['cmd-1', { decision: 'decline' }]])
   const [row] = h.ceilingRows(run)
@@ -280,6 +314,119 @@ test('mcp none turns off the inherited MCP servers on that thread and checks the
   const noConfig = harness({ profiles: p.profiles, request: async method => method === 'config/read' ? { config: {}, layers: null } : undefined })
   await assert.rejects(noConfig.chat.send({ message: 'Plan the week', profileId: id }), error => error.code === 'PROFILE_CEILING_UNAVAILABLE')
   assert.equal(noConfig.calls.some(call => call.method === 'thread/start'), false)
+})
+
+test('browser none or observe turns off the computer-use plugin, leaves user-added MCP servers to the MCP axis and says so', async t => {
+  const p = profileStore(t)
+  for (const browser of ['none', 'observe']) {
+    const id = p.add({ name: `브라우저 ${browser}`, toolCeiling: { browser } })
+    const h = harness({ profiles: p.profiles, servers: computerServers })
+    const run = await h.chat.send({ message: 'Summarize the notes', profileId: id })
+    const start = h.started()[0]
+    assert.deepEqual({ ...start.config.plugins }, { [COMPUTER_PLUGIN]: { enabled: false } }, browser)
+    assert.equal(Object.hasOwn(start.config, 'mcp_servers'), false)
+    assert.deepEqual(['browser_use', 'browser_use_external', 'computer_use'].map(name => start.config.features[name]), [false, false, false])
+    // Before the turn: the thread's catalog and feature switches are both read back.
+    const turnAt = h.calls.findIndex(call => call.method === 'turn/start')
+    for (const method of ['mcpServerStatus/list', 'experimentalFeature/list']) {
+      const at = h.calls.findIndex(call => call.method === method && call.params.threadId === run.conversationId)
+      assert.ok(at >= 0 && at < turnAt, `${browser} ${method}`)
+    }
+    // firefox-devtools stays connected because MCP is inherited; the run says so.
+    assert.deepEqual(h.ceilingRows(run).map(row => [row.title, row.status, row.detail]), [
+      [CEILING_MESSAGES.browserExternalInherited, 'completed', { axis: 'browser', limit: browser, externalBrowserToolsStillInherited: true }],
+    ])
+  }
+})
+
+test('browser observe with MCP off turns off every plugin and user server and has nothing left to report', async t => {
+  const p = profileStore(t)
+  const id = p.add({ toolCeiling: { browser: 'observe', mcp: 'none' } })
+  const h = harness({ profiles: p.profiles, servers: computerServers })
+  const run = await h.chat.send({ message: 'Summarize the notes', profileId: id })
+  const start = h.started()[0]
+  assert.deepEqual({ ...start.config.plugins }, { 'user-plugin': { enabled: false }, [COMPUTER_PLUGIN]: { enabled: false } })
+  assert.deepEqual({ ...start.config.mcp_servers }, { 'user-tools': { enabled: false }, 'firefox-devtools': { enabled: false } })
+  // One inventory read before start feeds both axes; one read of the started thread.
+  assert.deepEqual(h.calls.filter(call => call.method === 'mcpServerStatus/list').map(call => call.params.threadId ?? null), [null, run.conversationId])
+  assert.deepEqual(h.ceilingRows(run), [])
+})
+
+test('browser none with no browser or computer servers adds no plugin switches and no notice', async t => {
+  const p = profileStore(t)
+  const id = p.add({ toolCeiling: { browser: 'none' } })
+  const h = harness({ profiles: p.profiles })
+  const run = await h.chat.send({ message: 'Summarize the notes', profileId: id })
+  assert.equal(Object.hasOwn(h.started()[0].config, 'plugins'), false)
+  assert.deepEqual(h.ceilingRows(run), [])
+})
+
+test('a thread that still allows the shell, built-in browser control or the computer-use plugin never starts a turn', async t => {
+  const p = profileStore(t)
+  const browserNone = p.add({ name: '브라우저 없음', toolCeiling: { browser: 'none' } })
+  const terminalNone = p.add({ name: '터미널 없음', toolCeiling: { terminal: 'none' } })
+  const cases = [
+    [browserNone, async (method, params) => method === 'experimentalFeature/list' && params.threadId ? featureList({ browser_use: false, browser_use_external: false }) : undefined],
+    [terminalNone, async (method, params) => method === 'experimentalFeature/list' && params.threadId ? featureList({}) : undefined],
+    // A feature the thread does not list is not proof it is off.
+    [terminalNone, async (method, params) => method === 'experimentalFeature/list' && params.threadId ? { data: [], nextCursor: null } : undefined],
+    // Codex kept the plugin's server running despite the switch.
+    [browserNone, async (method, params) => method === 'mcpServerStatus/list' && params.threadId
+      ? { data: [{ name: 'cua_repl', pluginId: COMPUTER_PLUGIN, tools: { js: {} }, resources: [], resourceTemplates: [], toolsError: null, runtimeStatus: 'connected' }], nextCursor: null } : undefined],
+    // Another native error is not "this Codex has no feature list".
+    [browserNone, async method => { if (method === 'experimentalFeature/list') throw Object.assign(new Error('thread not found: thread-1'), { code: -32600 }) }],
+    [terminalNone, async method => { if (method === 'experimentalFeature/list') throw new Error('connection lost') }],
+  ]
+  for (const [id, request] of cases) {
+    const h = harness({ profiles: p.profiles, servers: computerServers, request })
+    await assert.rejects(h.chat.send({ message: 'Hi', profileId: id }), error => error.code === 'PROFILE_CEILING_UNVERIFIED' && error.httpStatus === 502)
+    assert.equal(h.calls.some(call => call.method === 'turn/start'), false)
+  }
+})
+
+test('a Codex build without thread feature reporting runs on the other checks and records that the switches were not confirmed', async t => {
+  const p = profileStore(t)
+  const absent = async method => { if (method === 'experimentalFeature/list') throw Object.assign(new Error('Invalid request: unknown variant `experimentalFeature/list`, expected one of `initialize`'), { code: -32600 }) }
+  for (const [ceiling, axis] of [[{ terminal: 'none' }, 'terminal'], [{ browser: 'observe', terminal: 'none' }, 'browser']]) {
+    const id = p.add({ name: `확인 ${axis}`, toolCeiling: ceiling })
+    const h = harness({ profiles: p.profiles, request: absent })
+    const run = await h.chat.send({ message: 'Hi', profileId: id })
+    assert.equal(h.calls.filter(call => call.method === 'turn/start').length, 1)
+    assert.deepEqual(h.ceilingRows(run).map(row => [row.title, row.status, row.detail]), [
+      [CEILING_MESSAGES.nativeCheckUnavailable, 'completed', { axis, limit: ceiling[axis], nativeFeatureCheck: 'unavailable' }],
+    ])
+  }
+  // The plugin check still runs: a connected computer-use server still blocks the turn.
+  const id = p.add({ name: '확인 플러그인', toolCeiling: { browser: 'none' } })
+  const leaky = harness({ profiles: p.profiles, request: async (method, params) => method === 'mcpServerStatus/list' && params.threadId
+    ? { data: [{ name: 'cua_repl', pluginId: COMPUTER_PLUGIN, tools: {}, resources: [], resourceTemplates: [], toolsError: null, runtimeStatus: 'connected' }], nextCursor: null } : absent(method) })
+  await assert.rejects(leaky.chat.send({ message: 'Hi', profileId: id }), error => error.code === 'PROFILE_CEILING_UNVERIFIED')
+})
+
+test('browser none that cannot read the MCP inventory before start refuses without starting a thread', async t => {
+  const p = profileStore(t)
+  const id = p.add({ toolCeiling: { browser: 'none' } })
+  const h = harness({ profiles: p.profiles, request: async (method, params) => { if (method === 'mcpServerStatus/list' && !params.threadId) throw new Error('inventory unavailable') } })
+  await assert.rejects(h.chat.send({ message: 'Hi', profileId: id }), error => error.code === 'PROFILE_CEILING_UNAVAILABLE')
+  assert.equal(h.calls.some(call => call.method === 'thread/start'), false)
+})
+
+test('a revision that limits the browser is re-applied and re-checked on the resumed thread', async t => {
+  const p = profileStore(t)
+  const id = p.add({ toolCeiling: { terminal: 'none' } })
+  const h = harness({ profiles: p.profiles, servers: computerServers })
+  const first = await h.chat.send({ message: 'First', profileId: id })
+  await h.finish(first)
+  const second = p.profiles.saveDraft(id, body({ toolCeiling: { browser: 'none' } }), 1)
+  p.profiles.activate(id, second.revision, 1)
+  const next = await h.chat.send({ message: 'Next', conversationId: first.conversationId, profileId: id })
+  const resumeAt = h.calls.findLastIndex(call => call.method === 'thread/resume')
+  const resumed = h.calls[resumeAt].params
+  assert.deepEqual({ ...resumed.config.plugins }, { [COMPUTER_PLUGIN]: { enabled: false } })
+  assert.equal(resumed.config.features.browser_use, false)
+  const checkAt = h.calls.findLastIndex(call => call.method === 'experimentalFeature/list' && call.params.threadId === first.conversationId)
+  assert.ok(resumeAt < checkAt && checkAt < h.calls.findLastIndex(call => call.method === 'turn/start'))
+  assert.deepEqual(h.ceilingRows(next).map(row => row.detail.externalBrowserToolsStillInherited), [true])
 })
 
 // Browser tools appear only in bounded runs; a stand-in provider records what it was granted.
@@ -401,6 +548,8 @@ test('the run ceiling and its refusals are kept in local history and restored wi
       request: async (method, params) => {
         if (method === 'thread/start') return { thread: { id: 'native-ceiling' }, cwd: '/work', sandbox: { type: 'readOnly', networkAccess: false }, approvalPolicy: 'on-request' }
         if (method === 'turn/start') return { turn: { id: 'turn-ceiling', status: 'inProgress', items: [] } }
+        if (method === 'mcpServerStatus/list') return { data: [], nextCursor: null }
+        if (method === 'experimentalFeature/list') return featureList({ shell_tool: false, browser_use: false, browser_use_external: false, computer_use: false })
         throw new Error(`Unexpected native call: ${method}`)
       },
     })

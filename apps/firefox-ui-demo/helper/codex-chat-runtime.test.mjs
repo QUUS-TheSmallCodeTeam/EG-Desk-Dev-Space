@@ -13,6 +13,10 @@ import { composeDeveloperInstructions, openProfileStore } from './egdesk-profile
 import { explicitFileLinks, publicText, verifyLocalFile } from './codex-chat-values.mjs'
 import { createPrivateQaTempDirectory } from '../scripts/egdesk-qa-platform.mjs'
 
+// Codex reports a thread's effective feature switches (experimentalFeature/list
+// with threadId); a bounded thread has the built-in browser and computer ones off.
+const qaFeatureList = () => ({ data: ['browser_use', 'browser_use_external', 'computer_use'].map(name => ({ name, enabled: false, stage: 'stable' })), nextCursor: null })
+
 function harness(override = {}) {
   const calls = [], events = [], legacy = [], replies = []
   let turnCount = 0, threadCount = 0
@@ -48,6 +52,7 @@ function qaHarness(override = {}) {
       const custom = await override.request(method, params, chat, defaults)
       if (custom !== undefined) return custom
     }
+    if (method === 'experimentalFeature/list') return qaFeatureList()
     if (method === 'mcpServerStatus/list') return { data: [
       { name: 'account-tools', pluginId: 'account-plugin', tools: params.threadId ? {} : { write: {} }, resources: [], resourceTemplates: [], toolsError: null },
       { name: 'configured-tools', tools: params.threadId ? {} : { read: {} }, resources: [], resourceTemplates: [], toolsError: null },
@@ -84,6 +89,10 @@ test('read-only QA is explicit, verifies native thread and MCP isolation before 
   assert.equal(start.config.features.plugins, false)
   assert.equal(start.config.features.multi_agent, false)
   assert.equal(start.config.features.default_mode_request_user_input, false)
+  // Codex's own browser and computer switches are off too, and the thread reports them off.
+  assert.deepEqual([start.config.features.browser_use, start.config.features.browser_use_external, start.config.features.computer_use], [false, false, false])
+  assert.equal(accepted.executionPolicy.nativeComputerFeatures, 'off')
+  assert.ok(h.calls.findIndex(call => call.method === 'experimentalFeature/list' && call.params.threadId === accepted.conversationId) < h.calls.findIndex(call => call.method === 'turn/start'))
   assert.deepEqual(h.calls.find(call => call.method === 'config/read').params, { includeLayers: true, cwd: null })
   assert.equal(start.config.web_search, 'disabled')
   assert.deepEqual(start.dynamicTools.map(tool => tool.name), ['egdesk_list_context', 'egdesk_read_source'])
@@ -218,6 +227,36 @@ test('QA blocks provider turn when effective MCP catalog has tools, resources or
     await assert.rejects(h.chat.send({ message: 'test', executionPolicy: { mode: 'readOnlyQa' } }), error => error.code === 'QA_TOOL_ISOLATION_UNVERIFIED')
     assert.equal(h.calls.filter(call => call.method === 'turn/start').length, 0)
   }
+})
+
+test('QA blocks the provider turn when the thread still allows built-in browser or computer control, or its features cannot be read', async () => {
+  for (const name of ['browser_use', 'browser_use_external', 'computer_use']) {
+    const h = qaHarness({ request: async method => method === 'experimentalFeature/list'
+      ? { data: qaFeatureList().data.map(feature => feature.name === name ? { ...feature, enabled: true } : feature), nextCursor: null } : undefined })
+    await assert.rejects(h.chat.send({ message: 'test', executionPolicy: { mode: 'readOnlyQa' } }), error => error.code === 'QA_TOOL_ISOLATION_UNVERIFIED', name)
+    assert.equal(h.calls.filter(call => call.method === 'turn/start').length, 0)
+  }
+  // A missing switch is not proof it is off; another native error is not "method absent".
+  for (const answer of [
+    async () => ({ data: qaFeatureList().data.filter(feature => feature.name !== 'computer_use'), nextCursor: null }),
+    async () => { throw Object.assign(new Error('thread not found: native'), { code: -32600 }) },
+    async () => { throw new Error('connection lost') },
+    async () => ({ data: null }),
+  ]) {
+    const h = qaHarness({ request: async method => method === 'experimentalFeature/list' ? answer() : undefined })
+    await assert.rejects(h.chat.send({ message: 'test', executionPolicy: { mode: 'readOnlyQa' } }), error => error.code === 'QA_TOOL_ISOLATION_UNVERIFIED')
+    assert.equal(h.calls.filter(call => call.method === 'turn/start').length, 0)
+  }
+})
+
+test('a Codex build without thread feature reporting keeps QA running on the MCP check and says the switches were unchecked', async () => {
+  const h = qaHarness({ request: async method => {
+    if (method === 'experimentalFeature/list') throw Object.assign(new Error('Invalid request: unknown variant `experimentalFeature/list`, expected one of `initialize`'), { code: -32600 })
+  } })
+  const accepted = await h.chat.send({ message: 'test', executionPolicy: { mode: 'readOnlyQa' } })
+  assert.equal(accepted.executionPolicy.externalMcpCatalog, 'empty')
+  assert.equal(accepted.executionPolicy.nativeComputerFeatures, 'unchecked')
+  assert.equal(h.calls.filter(call => call.method === 'turn/start').length, 1)
 })
 
 test('same EG-Desk QA Run publishes only an exact nonce line from native command item/completed', async () => {
@@ -560,6 +599,7 @@ test('durable QA policy survives a fresh runtime and is reverified before its ne
       calls.push({ method, params })
       if (method === 'config/read') return { config: {}, layers: [{ name: { type: 'user' }, config: {} }] }
       if (method === 'mcpServerStatus/list') return { data: [], nextCursor: null }
+      if (method === 'experimentalFeature/list') return qaFeatureList()
       if (method === 'thread/start') return { thread: { id: 'native-qa' }, sandbox: { type: 'readOnly', networkAccess: false }, approvalPolicy: 'never', model: 'configured-model' }
       if (method === 'thread/resume') return { thread: { id: 'native-qa', turns: [] }, sandbox: { type: 'readOnly', networkAccess: false }, approvalPolicy: 'never', model: 'configured-model' }
       if (method === 'turn/start') return { turn: { id: `turn-${++turn}`, status: 'inProgress', items: [] } }
@@ -595,6 +635,7 @@ test('durably owned active QA turn rehydrates its restrictive guard and declines
     const request = async (method, params) => {
       if (method === 'config/read') return { config: {}, layers: [{ name: { type: 'user' }, config: {} }] }
       if (method === 'mcpServerStatus/list') return { data: [], nextCursor: null }
+      if (method === 'experimentalFeature/list') return qaFeatureList()
       if (method === 'thread/start') return { thread: { id: 'native-active-qa' }, sandbox: { type: 'readOnly', networkAccess: false }, approvalPolicy: 'never' }
       if (method === 'turn/start') return { turn: { id: 'native-active-turn', status: 'inProgress', items: [] } }
       if (method === 'thread/resume') return { thread: { id: params.threadId, turns: [{ id: 'native-active-turn', status: 'inProgress', items: [] }] }, sandbox: { type: 'readOnly', networkAccess: false }, approvalPolicy: 'never' }
@@ -635,6 +676,7 @@ test('Browser registration survives a bridge restart, while pre-Browser native h
       calls.push({ method, params })
       if (method === 'config/read') return { config: {}, layers: [{ name: { type: 'user' }, config: {} }] }
       if (method === 'mcpServerStatus/list') return { data: [], nextCursor: null }
+      if (method === 'experimentalFeature/list') return qaFeatureList()
       if (method === 'thread/start') return { thread: { id: `native-${++threadCount}` }, cwd: '/public-fixture', sandbox: { type: 'readOnly', networkAccess: false }, approvalPolicy: 'never' }
       if (method === 'thread/resume') return { thread: { id: params.threadId, turns: [] }, cwd: '/public-fixture', sandbox: { type: 'readOnly', networkAccess: false }, approvalPolicy: 'never' }
       if (method === 'turn/start') return { turn: { id: `turn-${++turnCount}`, status: 'inProgress', items: [] } }

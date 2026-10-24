@@ -6,7 +6,7 @@ import { classifyPublicToolError } from './codex-tool-errors.mjs'
 import { specManifestEntries, verifiedManifestOwners } from './codex-native-tool-manifest.mjs'
 import { nativeQaCommandReceipt, validateQaCommandNonce, validateQaOutputMarkers } from './codex-qa-command-receipt.mjs'
 import { MAX_COMPOSED } from './egdesk-profile-store.mjs'
-import { browserRefusal, ceilingAllowsBrowserTool, ceilingApprovalRefusal, ceilingBrowserSelection, ceilingNarrows, CEILING_MESSAGES, effectiveToolCeiling, liveBrowserSelected, loadCeilingThreadOverrides, mergeCeilingOverrides, recordedToolCeiling, verifyCeilingNativeThread } from './codex-chat-tool-ceiling.mjs'
+import { browserRefusal, ceilingAllowsBrowserTool, ceilingApprovalRefusal, ceilingBrowserSelection, ceilingNarrows, ceilingReportNotices, CEILING_MESSAGES, effectiveToolCeiling, liveBrowserSelected, loadCeilingThreadOverrides, mergeCeilingOverrides, recordedToolCeiling, verifyCeilingNativeThread } from './codex-chat-tool-ceiling.mjs'
 import { engineError } from './engine-adapter.mjs'
 import { createCodexEngineAdapter } from './codex-engine-adapter.mjs'
 import { EngineRegistry } from './engine-registry.mjs'
@@ -1195,7 +1195,7 @@ export class CodexChatRuntime {
         const extra = ceilingNarrows(ceiling) ? await ceilingOverrides() : null
         if (epoch !== this.epochOf(engine.id)) throw chatError('CONTEXT_CHANGED', 'Codex connection or account changed', 409)
         const resumed = await this.restoreThread(cid, context.clientThreadId, mergeCeilingOverrides({ ...overrides, ...(qaOverrides || {}) }, extra), { policy })
-        if (!bounded) await verifyCeilingNativeThread(this.request, ceiling, resumed, cid)
+        if (!bounded) context.ceilingNotices.push(...ceilingReportNotices(ceiling, await verifyCeilingNativeThread(this.request, ceiling, resumed, cid)))
         if (epoch !== this.epochOf(engine.id)) throw chatError('CONTEXT_CHANGED', 'Codex connection or account changed', 409)
       }
       if (bounded) this.persistExecutionPolicy(context, cid)
@@ -1222,7 +1222,7 @@ export class CodexChatRuntime {
       if (bounded) {
         qaReceipt = verifyQaNativeThread(result, policy)
         qaReceipt = await verifyQaMcpIsolation(this.request, cid, qaReceipt)
-      } else await verifyCeilingNativeThread(this.request, ceiling, result, cid)
+      } else context.ceilingNotices.push(...ceilingReportNotices(ceiling, await verifyCeilingNativeThread(this.request, ceiling, result, cid)))
       if (epoch !== this.epochOf(engine.id)) throw chatError('ACCOUNT_CHANGED', 'Codex account changed', 409)
       this.rememberThread(cid, result, context.clientThreadId)
       this.threadToolOwners.set(cid, nativeTools.owners)
@@ -1933,12 +1933,18 @@ export class CodexChatRuntime {
   }
 
   // AGENT-04: one activity row per refusal (or narrowed selection) so the
-  // activity record shows what the Agent's ceiling stopped. Fixed keys only.
-  noteCeiling(run, key, { axis, title, command = null, tool = null }) {
+  // activity record shows what the Agent's ceiling stopped. A 'completed' row
+  // is a notice from the thread check (external browser MCP still inherited,
+  // or feature state this Codex build could not report). Fixed keys only.
+  noteCeiling(run, key, { axis, title, status = 'declined', command = null, tool = null, externalBrowserToolsStillInherited = false, nativeFeatureCheck = null }) {
     const activity = {
       id: `ceiling-${createHash('sha256').update(`${run.answerId}\0${key}`).digest('hex').slice(0, 24)}`,
-      kind: 'toolCeiling', status: 'declined', title,
-      detail: { axis, limit: run.toolCeiling?.[axis] ?? null, ...(command ? { command: publicText(command, 2000) } : {}), ...(tool ? { tool: publicText(tool, 120) } : {}) },
+      kind: 'toolCeiling', status: status === 'completed' ? 'completed' : 'declined', title,
+      detail: {
+        axis, limit: run.toolCeiling?.[axis] ?? null, ...(command ? { command: publicText(command, 2000) } : {}), ...(tool ? { tool: publicText(tool, 120) } : {}),
+        ...(externalBrowserToolsStillInherited === true ? { externalBrowserToolsStillInherited: true } : {}),
+        ...(nativeFeatureCheck === 'unavailable' ? { nativeFeatureCheck: 'unavailable' } : {}),
+      },
       sourceRefs: [],
     }
     this.put(run, 'activities', activity)

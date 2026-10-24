@@ -1,5 +1,8 @@
 import { chatError } from './codex-chat-values.mjs'
-import { disabledNativeMcpConfig, listNativeMcpServers, readNativeDirectMcpServerIds } from './codex-chat-execution-policy.mjs'
+import {
+  NATIVE_COMPUTER_FEATURES, disabledNativeMcpConfig, featuresNotOff, listNativeMcpServers, readNativeDirectMcpServerIds, readNativeThreadFeatures,
+} from './codex-chat-execution-policy.mjs'
+import { nativeMcpServerKind } from './codex-inherited-mcp.mjs'
 import { normalizeToolCeiling } from './egdesk-profile-store.mjs'
 
 // AGENT-04: a saved Agent profile's tool ceiling, enforced on the Codex
@@ -8,8 +11,10 @@ import { normalizeToolCeiling } from './egdesk-profile-store.mjs'
 
 // Browser tools a ceiling of 'observe' still allows.
 const BROWSER_OBSERVE_TOOLS = new Set(['egdesk_browser_observe'])
-// Codex native features that drive a browser or the desktop themselves.
-const NATIVE_BROWSER_FEATURES = ['browser_use', 'browser_use_external', 'computer_use']
+// MCP server kinds (codex-inherited-mcp rules) that drive a browser or the desktop.
+const COMPUTER_CONTROL_KINDS = new Set(['browser', 'desktop'])
+const controlsComputer = server => COMPUTER_CONTROL_KINDS.has(nativeMcpServerKind(server))
+const LIVE_SERVER_STATUSES = new Set(['connected', 'starting'])
 
 export const CEILING_MESSAGES = Object.freeze({
   browserNone: '이 Agent는 브라우저 사용이 허용되지 않습니다',
@@ -19,6 +24,8 @@ export const CEILING_MESSAGES = Object.freeze({
   files: '이 Agent는 파일 쓰기가 허용되지 않습니다',
   terminal: '이 Agent는 터미널 명령이 허용되지 않습니다',
   network: '이 Agent는 인터넷 연결이 허용되지 않습니다',
+  browserExternalInherited: '직접 연결한 외부 브라우저·컴퓨터 조작 도구(MCP)는 이 Agent에서도 쓸 수 있습니다. 막으려면 외부 도구(MCP)도 끄세요',
+  nativeCheckUnavailable: '이 Codex 버전은 기능 상태를 알려 주지 않아, 브라우저·터미널 기능이 꺼졌는지는 확인하지 못했습니다',
 })
 
 /**
@@ -100,16 +107,24 @@ async function readSandboxMode(request, cwd) {
   return mode ?? null
 }
 
+/** Codex feature switches a ceiling turns off, which the thread must report as off. */
+function ceilingFeaturesOff(ceiling) {
+  return [...(ceiling.terminal === 'none' ? ['shell_tool'] : []), ...(ceiling.browser !== 'interact' ? NATIVE_COMPUTER_FEATURES : [])]
+}
+
 /**
  * Native thread/start or thread/resume overrides for a narrowing ceiling.
  * Bounded QA threads are already read-only, offline and MCP-free; they only
  * gain the shell and native browser switches.
+ * Browser 'none'/'observe' also turns off plugins whose MCP server drives a
+ * browser or the desktop (Codex's computer-use plugin serves cua_repl even
+ * with the browser features off). Servers the user added under mcp_servers
+ * stay with the MCP axis; verifyCeilingNativeThread reports them.
  */
 export async function loadCeilingThreadOverrides(request, ceiling, { bounded = false, cwd = null } = {}) {
   if (!ceilingNarrows(ceiling)) return null
   const features = {}
-  if (ceiling.terminal === 'none') features.shell_tool = false
-  if (ceiling.browser !== 'interact') for (const name of NATIVE_BROWSER_FEATURES) features[name] = false
+  for (const name of ceilingFeaturesOff(ceiling)) features[name] = false
   const config = {}
   const overrides = {}
   if (!bounded) {
@@ -125,12 +140,22 @@ export async function loadCeilingThreadOverrides(request, ceiling, { bounded = f
         else if (mode === 'read-only') overrides.sandbox = 'read-only'
       }
     }
-    if (ceiling.mcp === 'none') {
-      let mcp
-      try { mcp = disabledNativeMcpConfig(await listNativeMcpServers(request, null), await readNativeDirectMcpServerIds(request, cwd)) }
-      catch { throw unavailable() }
-      Object.assign(config, mcp)
-      features.apps = false
+    const browserLimited = ceiling.browser !== 'interact'
+    if (ceiling.mcp === 'none' || browserLimited) {
+      let servers
+      try { servers = await listNativeMcpServers(request, null) } catch { throw unavailable() }
+      if (ceiling.mcp === 'none') {
+        let mcp
+        try { mcp = disabledNativeMcpConfig(servers, await readNativeDirectMcpServerIds(request, cwd)) }
+        catch { throw unavailable() }
+        Object.assign(config, mcp)
+        features.apps = false
+      }
+      if (browserLimited) {
+        const plugins = config.plugins || Object.create(null)
+        for (const server of servers) if (server.pluginId && controlsComputer(server)) plugins[server.pluginId] = { enabled: false }
+        if (Object.keys(plugins).length) config.plugins = plugins
+      }
     }
   }
   if (Object.keys(features).length) config.features = features
@@ -153,15 +178,57 @@ export function mergeCeilingOverrides(target, extra) {
   return target
 }
 
-/** Checks the native thread's reported sandbox and MCP catalog against the ceiling. */
+/**
+ * Checks the started or resumed native thread against the ceiling before any
+ * turn: the reported sandbox, the thread's MCP catalog, and (through
+ * experimentalFeature/list) that the shell and built-in browser/computer
+ * switches are off. Returns what the run should show:
+ * - nativeFeatures: 'verified', 'unavailable' (this Codex build cannot
+ *   report thread features; the other checks still ran) or null (none needed).
+ * - externalBrowserToolsStillInherited: browser is limited, MCP is inherited,
+ *   and a non-plugin server that drives a browser or the desktop is enabled.
+ */
 export async function verifyCeilingNativeThread(request, ceiling, result, threadId) {
-  if (!ceilingNarrows(ceiling)) return
+  const report = { nativeFeatures: null, externalBrowserToolsStillInherited: false }
+  if (!ceilingNarrows(ceiling)) return report
   const sandbox = result?.sandbox
   if (ceiling.files === 'read' && sandbox?.type !== 'readOnly') throw unverified('read-only files')
   if (ceiling.network === 'off' && !(['readOnly', 'workspaceWrite'].includes(sandbox?.type) && sandbox.networkAccess !== true)) throw unverified('offline network')
-  if (ceiling.mcp === 'none') {
+  const browserLimited = ceiling.browser !== 'interact'
+  if (ceiling.mcp === 'none' || browserLimited) {
     let servers
-    try { servers = await listNativeMcpServers(request, threadId) } catch { throw unverified('MCP-off') }
-    if (servers.some(server => Object.keys(server.tools).length || server.resources.length || server.resourceTemplates.length || server.toolsError != null)) throw unverified('MCP-off')
+    try { servers = await listNativeMcpServers(request, threadId) } catch { throw unverified(ceiling.mcp === 'none' ? 'MCP-off' : 'browser') }
+    if (ceiling.mcp === 'none' && servers.some(server => Object.keys(server.tools).length || server.resources.length || server.resourceTemplates.length || server.toolsError != null)) throw unverified('MCP-off')
+    if (browserLimited) {
+      // A turned-off plugin's server is gone from the thread or listed without tools.
+      if (servers.some(server => server.pluginId && controlsComputer(server) && (Object.keys(server.tools).length || LIVE_SERVER_STATUSES.has(server.runtimeStatus)))) throw unverified('browser')
+      report.externalBrowserToolsStillInherited = ceiling.mcp !== 'none'
+        && servers.some(server => !server.pluginId && controlsComputer(server) && server.runtimeStatus !== 'disabled')
+    }
   }
+  const required = ceilingFeaturesOff(ceiling)
+  if (required.length) {
+    const axis = ceiling.terminal === 'none' && !browserLimited ? 'terminal' : 'browser'
+    let features
+    try { features = await readNativeThreadFeatures(request, threadId) } catch { throw unverified(axis) }
+    if (features === null) report.nativeFeatures = 'unavailable'
+    else {
+      const open = featuresNotOff(features, required)
+      if (open.length) throw unverified(open.includes('shell_tool') ? 'terminal' : 'browser')
+      report.nativeFeatures = 'verified'
+    }
+  }
+  return report
+}
+
+/** Activity notices for what verifyCeilingNativeThread reported; fixed keys only. */
+export function ceilingReportNotices(ceiling, report) {
+  const notices = []
+  if (report?.externalBrowserToolsStillInherited === true) {
+    notices.push({ key: 'browser-external-inherited', axis: 'browser', title: CEILING_MESSAGES.browserExternalInherited, status: 'completed', externalBrowserToolsStillInherited: true })
+  }
+  if (report?.nativeFeatures === 'unavailable') {
+    notices.push({ key: 'native-feature-check', axis: ceiling?.browser !== 'interact' ? 'browser' : 'terminal', title: CEILING_MESSAGES.nativeCheckUnavailable, status: 'completed', nativeFeatureCheck: 'unavailable' })
+  }
+  return notices
 }
