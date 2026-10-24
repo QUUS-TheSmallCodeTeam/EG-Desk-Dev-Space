@@ -251,6 +251,20 @@ export function assertContextEventIdentity(event, expected) {
   return true;
 }
 
+// CHAT-05/CNV-07 (egdesk_publish_briefing_multi): a step may also carry
+// targets[] (1–6). Then target must equal targets[0], and every item passes
+// the same key and binding checks as the singular target.
+const BRIEFING_MAX_TARGETS = 6;
+const BRIEFING_EMPHASIS = new Set(['spotlight', 'outline']);
+
+function stepTargetList(step) {
+  if (!Object.hasOwn(step, 'targets')) return [step.target];
+  assert.ok(Array.isArray(step.targets) && step.targets.length >= 1 && step.targets.length <= BRIEFING_MAX_TARGETS,
+    `Multi-target step needs 1–${BRIEFING_MAX_TARGETS} targets`);
+  assert.deepEqual(step.target, step.targets[0], 'Multi-target step target must equal targets[0]');
+  return step.targets;
+}
+
 export function assertBriefingTargets(briefing, { sourceIds, artifactIds = [], viewIds = [] }) {
   text(briefing?.id, 'Briefing id');
   text(briefing?.title, 'Briefing title');
@@ -264,18 +278,22 @@ export function assertBriefingTargets(briefing, { sourceIds, artifactIds = [], v
   for (const step of briefing.steps) {
     text(step.text, 'Step text');
     record(step.target, 'Singular Briefing target');
-    assert.ok(!Object.hasOwn(step, 'targets') && !Object.hasOwn(step, 'description'), 'Legacy Briefing shape is not accepted');
+    assert.ok(!Object.hasOwn(step, 'description'), 'Legacy Briefing shape is not accepted');
     assert.ok(Object.hasOwn(step, 'fallback'), 'Step must declare fallback');
-    assert.ok(Object.keys(step.target).every(key => ['sourceId', 'artifactId', 'viewId', 'range', 'hash'].includes(key)),
-      'Briefing cannot use raw-path or other unbound target fallbacks');
-    if (step.target.hash !== undefined) { text(step.target.sourceId, 'Hashed immutable sourceId'); text(step.target.hash, 'Immutable target hash'); }
-    let references = 0;
-    for (const [field, ids] of Object.entries(allowed)) {
-      if (step.target[field] === undefined) continue;
-      assert.ok(ids.has(step.target[field]), `Briefing ${field} is not bound to this answer/current run`);
-      references++;
+    if (step.emphasis !== undefined) assert.ok(BRIEFING_EMPHASIS.has(step.emphasis), 'Briefing emphasis must be spotlight or outline');
+    for (const target of stepTargetList(step)) {
+      record(target, 'Briefing target');
+      assert.ok(Object.keys(target).every(key => ['sourceId', 'artifactId', 'viewId', 'range', 'hash'].includes(key)),
+        'Briefing cannot use raw-path or other unbound target fallbacks');
+      if (target.hash !== undefined) { text(target.sourceId, 'Hashed immutable sourceId'); text(target.hash, 'Immutable target hash'); }
+      let references = 0;
+      for (const [field, ids] of Object.entries(allowed)) {
+        if (target[field] === undefined) continue;
+        assert.ok(ids.has(target[field]), `Briefing ${field} is not bound to this answer/current run`);
+        references++;
+      }
+      if (!references) assert.ok(step.fallback, 'Targetless step requires an explicit fallback');
     }
-    if (!references) assert.ok(step.fallback, 'Targetless step requires an explicit fallback');
   }
   return true;
 }
@@ -290,8 +308,10 @@ export function assertPublishedBriefing(briefing, { identity, captures, artifact
   assert.equal(briefing.presentationStatus, 'proposed', 'Publishing is not an instruction to navigate automatically');
   assertBriefingTargets(briefing, { sourceIds: captures.map(item => item.sourceId), artifactIds, viewIds });
   for (const step of briefing.steps) {
-    const capture = captures.find(item => item.sourceId === step.target.sourceId);
-    assert.ok(capture && step.target.hash === capture.hash, 'Published target lacks its verified immutable hash');
+    for (const target of stepTargetList(step)) {
+      const capture = captures.find(item => item.sourceId === target.sourceId);
+      assert.ok(capture && target.hash === capture.hash, 'Published target lacks its verified immutable hash');
+    }
   }
   return true;
 }

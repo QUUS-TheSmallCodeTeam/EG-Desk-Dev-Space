@@ -3,12 +3,17 @@ import { randomBytes } from 'node:crypto'
 import path from 'node:path'
 import { isOwnedAndPrivate } from './egdesk-private-files.mjs'
 import { COMPUTER_CONTROL_POLICIES } from './codex-computer-control.mjs'
+import { CONTEXT_SUGGEST_DEFAULT, normalizeContextSuggest } from './egdesk-context-resolver.mjs'
 
 // Bridge settings the user chose that must outlive a bridge restart.
 // One small JSON file in a private directory:
-//   { "version": 1, "computerControlPolicy": "inherit" | "off" }
+//   { "version": 1, "computerControlPolicy": "inherit" | "off",
+//     "contextSuggest": { "mode": "always" | "firstMessage" | "off",
+//                         "neverSuggest": [{ "kind": "site", "host": "bank.example.com" } | { "kind": "folder", "path": "/abs" }] } }
 // - Missing file or missing field: the module default applies
-//   (DEFAULT_COMPUTER_CONTROL_POLICY in codex-computer-control.mjs).
+//   (DEFAULT_COMPUTER_CONTROL_POLICY in codex-computer-control.mjs,
+//   CONTEXT_SUGGEST_DEFAULT in egdesk-context-resolver.mjs: always suggest,
+//   nothing on the list — D-R2 is not decided, so today's behaviour stays).
 // - A file that is not valid settings (bad JSON, wrong shape, not a private
 //   regular file) is kept beside it as bridge-settings.json.corrupt-<time>-<id>,
 //   logged, and the bridge starts with defaults.
@@ -17,16 +22,24 @@ import { COMPUTER_CONTROL_POLICIES } from './codex-computer-control.mjs'
 // Opening never throws: a broken store only means choices are not kept.
 export const BRIDGE_SETTINGS_FILE = 'bridge-settings.json'
 export const BRIDGE_SETTINGS_VERSION = 1
-export const MAX_BRIDGE_SETTINGS_BYTES = 16 * 1024
+// Room for contextSuggest at its limits (64 entries, folder paths up to 1024
+// characters) so a full list is never read back as a damaged file.
+export const MAX_BRIDGE_SETTINGS_BYTES = 256 * 1024
 
 const defaultLog = message => console.error(`[egdesk-codex-bridge] ${message}`)
 const errorCode = error => (typeof error?.code === 'string' && /^[A-Z0-9_]{1,32}$/.test(error.code) ? error.code : 'ERROR')
 const isPlainObject = value => Boolean(value) && typeof value === 'object' && !Array.isArray(value) && Object.getPrototypeOf(value) === Object.prototype
 
+const normalizedSuggest = value => { try { return normalizeContextSuggest(value) } catch { return null } }
 /** Settings fields this build reads and writes, with their validity rule. */
 const FIELDS = Object.freeze({
   computerControlPolicy: value => COMPUTER_CONTROL_POLICIES.includes(value),
+  contextSuggest: value => normalizedSuggest(value) !== null,
 })
+/** Fields kept in a normalized (frozen) form; others are stored as given. */
+const NORMALIZE = Object.freeze({ contextSuggest: normalizedSuggest })
+const normalized = (name, value) => (NORMALIZE[name] ? NORMALIZE[name](value) : value)
+const sameSetting = (a, b) => a === b || (a !== undefined && b !== undefined && JSON.stringify(a) === JSON.stringify(b))
 
 class SettingsContentError extends Error {}
 
@@ -44,7 +57,7 @@ function parseSettings(text) {
     if (key === 'version') continue
     if (Object.hasOwn(FIELDS, key)) {
       if (!FIELDS[key](value)) throw new SettingsContentError(`invalid ${key}`)
-      values[key] = value
+      values[key] = normalized(key, value)
     } else extra[key] = value // A field a newer build added at the same version is kept as is.
   }
   return { values, extra }
@@ -166,8 +179,9 @@ export function openBridgeSettings({ dataDir, log = defaultLog, now = Date.now }
     set(name, value) {
       if (!Object.hasOwn(FIELDS, name) || !FIELDS[name](value)) throw new TypeError(`Invalid bridge setting: ${name}`)
       if (!writable) return false
-      if (values[name] === value) return true
-      const next = { values: Object.assign(Object.create(null), values, { [name]: value }), extra }
+      const clean = normalized(name, value)
+      if (sameSetting(values[name], clean)) return true
+      const next = { values: Object.assign(Object.create(null), values, { [name]: clean }), extra }
       try { write(next) }
       catch (error) {
         say(`${BRIDGE_SETTINGS_FILE} could not be saved (${errorCode(error)}); the setting applies until the bridge restarts`)
@@ -184,6 +198,15 @@ export function openBridgeSettings({ dataDir, log = defaultLog, now = Date.now }
     // At start: whether a choice can be kept at all.
     get persisted() { return writable },
     save: policy => store.set('computerControlPolicy', policy),
+  })
+  // D-R2: the adapter ContextRuntime.attachServices takes as settings.
+  store.contextSuggest = Object.freeze({
+    // The saved setting, or CONTEXT_SUGGEST_DEFAULT (always suggest, empty list).
+    get value() { return store.get('contextSuggest') ?? CONTEXT_SUGGEST_DEFAULT },
+    // Whether a value is saved (false: the default applies).
+    get saved() { return store.get('contextSuggest') !== null },
+    get persisted() { return writable },
+    save: value => store.set('contextSuggest', value),
   })
   return store
 }

@@ -1,11 +1,23 @@
 import { guardBridgeRequest, readJsonBody, sendJson } from './codex-bridge-http.mjs'
 import { publicText } from './codex-chat-values.mjs'
 import { hashContent } from './egdesk-context-store.mjs'
-import { validateResolverSignals } from './egdesk-context-resolver.mjs'
+import { validateResolverRequest } from './egdesk-context-resolver.mjs'
 
 const RESOLVE_MAX_BYTES = 64 * 1024
 const COMMENT_MAX_BYTES = 16 * 1024
+const SUGGEST_SETTINGS_MAX_BYTES = 128 * 1024
 
+/**
+ * Context routes (all under /context/):
+ * POST /context/resolve                 CTX-03 suggestions (body: signals + optional query)
+ *   -> {resolutionId, policy, resolvedAt, signalsDigest, board, candidates, suggest: {mode, omittedByMode, omittedByUser}}
+ * GET|POST /context/suggest-settings    D-R2 {mode: 'always'|'firstMessage'|'off', neverSuggest: [{kind:'site',host}|{kind:'folder',path}]}
+ *   POST takes either field; -> {mode, neverSuggest, persisted}. Local setting, no account needed.
+ * GET  /context/sources?conversationId= CTX-04 attached sources of a conversation
+ *   -> {conversationId, sources: [{sourceId, kind, viewId?, state: 'active'|'stale', reason, changedAt, announcedAt}]}
+ * GET  /context/packets/:id             adds resolver and staleSources [{sourceId, reason, changedAt}]
+ * plus captures, outputs and briefing comments below.
+ */
 export function createContextHttpHandler(context, ensureAuth, { port = 39218 } = {}) {
   return async (req, res, url) => {
     if (!url.pathname.startsWith('/context/')) return false
@@ -15,14 +27,27 @@ export function createContextHttpHandler(context, ensureAuth, { port = 39218 } =
         // before any account lookup. Suggest-only — nothing is captured here.
         if (!guardBridgeRequest(req, port)) { sendJson(res, 403, { error: 'Trusted loopback origin is required', code: 'CONTEXT_LOOPBACK_REQUIRED' }); return true }
         if (req.method !== 'POST') { sendJson(res, 405, { error: 'Use POST for context suggestions', code: 'METHOD_NOT_ALLOWED' }); return true }
-        const signals = await readJsonBody(req, { maxBytes: RESOLVE_MAX_BYTES })
-        validateResolverSignals(signals)
+        const body = await readJsonBody(req, { maxBytes: RESOLVE_MAX_BYTES })
+        validateResolverRequest(body)
         await ensureAuth()
-        const { resolutionId, policy, resolvedAt, signalsDigest, board, candidates } = context.resolve(signals)
-        sendJson(res, 200, { resolutionId, policy, resolvedAt, signalsDigest, board, candidates })
+        const { resolutionId, policy, resolvedAt, signalsDigest, board, candidates, suggest } = context.resolve(body)
+        sendJson(res, 200, { resolutionId, policy, resolvedAt, signalsDigest, board, candidates, suggest })
+        return true
+      }
+      if (url.pathname === '/context/suggest-settings') {
+        // D-R2: the person's own suggestion setting; same guard as /settings/computer-control.
+        if (!guardBridgeRequest(req, port)) { sendJson(res, 403, { error: 'Trusted loopback origin is required', code: 'CONTEXT_LOOPBACK_REQUIRED' }); return true }
+        if (req.method === 'GET') sendJson(res, 200, context.suggestSnapshot())
+        else if (req.method === 'POST') sendJson(res, 200, context.setSuggestSettings(await readJsonBody(req, { maxBytes: SUGGEST_SETTINGS_MAX_BYTES })))
+        else sendJson(res, 405, { error: 'Use GET or POST for suggestion settings', code: 'METHOD_NOT_ALLOWED' })
         return true
       }
       await ensureAuth()
+      if (url.pathname === '/context/sources') {
+        if (req.method !== 'GET') { sendJson(res, 405, { error: 'Use GET for attached source states', code: 'METHOD_NOT_ALLOWED' }); return true }
+        sendJson(res, 200, context.sourceStatus({ conversationId: url.searchParams.get('conversationId') ?? undefined }))
+        return true
+      }
       if (req.method === 'POST' && url.pathname === '/context/captures') {
         sendJson(res, 201, await context.capture(await readJsonBody(req, { maxBytes: 2 * 1024 * 1024 })))
         return true
@@ -69,12 +94,15 @@ export function createContextHttpHandler(context, ensureAuth, { port = 39218 } =
         const { ownerScope, ...record } = await context.store.getRecord(owner, match[1], match[2])
         if (match[1] === 'packets' && hashContent(record.deliveryText) !== record.deliveryHash) throw Object.assign(new Error('Packet integrity check failed'), { code: 'PACKET_CORRUPT', httpStatus: 409 })
         const receipts = match[1] === 'packets' ? await context.store.listRecords(owner, 'deliveries', receipt => receipt.packetId === match[2]) : []
-        // CTX-04: the run's resolver record answers '왜 이것이 붙었나' (null when
-        // the run used explicit attachments only).
+        // CTX-03: the run's resolver record answers '왜 이것이 붙었나' (null when
+        // the run used explicit attachments only). CTX-04: staleSources lists
+        // the run's sources whose original changed after capture.
         const run = record.binding || {}
-        const resolver = match[1] === 'packets' && record.binding ? (await context.store.listRecords(owner, 'bindings', binding => binding.resolver && binding.conversationId === run.conversationId && binding.runId === run.runId && binding.answerId === run.answerId))[0]?.resolver ?? null : null
+        const runBindings = match[1] === 'packets' && record.binding ? await context.store.listRecords(owner, 'bindings', binding => binding.conversationId === run.conversationId && binding.runId === run.runId && binding.answerId === run.answerId) : []
+        const resolver = runBindings.find(binding => binding.resolver)?.resolver ?? null
+        const staleSources = match[1] === 'packets' ? context.staleSourcesFor?.(owner, run.conversationId, runBindings.flatMap(binding => binding.sourceIds || [])) ?? [] : []
         if (context.owner() !== owner || context.runtime?.epoch !== epoch) throw Object.assign(new Error('Account or connection changed during inspection'), { code: 'ACCOUNT_CHANGED', httpStatus: 403 })
-        sendJson(res, 200, match[1] === 'packets' ? { ...record, deliveryStatus: receipts.length ? 'sent-to-app-server' : 'prepared', resolver } : record)
+        sendJson(res, 200, match[1] === 'packets' ? { ...record, deliveryStatus: receipts.length ? 'sent-to-app-server' : 'prepared', resolver, staleSources } : record)
       }
     } catch (error) { sendJson(res, error.httpStatus || 500, { error: publicText(error.message, 2000), code: error.code || 'CONTEXT_ERROR' }) }
     return true

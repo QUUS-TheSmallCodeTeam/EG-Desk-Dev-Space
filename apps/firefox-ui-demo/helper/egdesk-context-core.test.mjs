@@ -1,6 +1,6 @@
 import test from 'node:test'
 import assert from 'node:assert/strict'
-import { mkdtemp, mkdir, writeFile, readFile, rm } from 'node:fs/promises'
+import { mkdtemp, mkdir, writeFile, readFile, realpath, rm } from 'node:fs/promises'
 import os from 'node:os'
 import path from 'node:path'
 import { Readable } from 'node:stream'
@@ -573,6 +573,8 @@ test('publish_output caps results per answer and restores output metadata on res
   for (let index = 0; index < 8; index++) assert.equal((await h.tool(run, 'egdesk_publish_output', { title: `Result ${index}`, markdown: `Body ${index}` }, `cap-${index}`)).result.success, true)
   const ninth = await h.tool(run, 'egdesk_publish_output', { title: 'Result 9', markdown: 'Body 9' }, 'cap-9')
   assert.equal(ninth.result.success, false)
+  // The model hears the cap by name, not as a generic provider failure.
+  assert.equal(JSON.parse(ninth.result.contentItems[0].text).error.code, 'OUTPUT_LIMIT')
   await assert.rejects(h.contexts.publishOutput(h.chat.runs.get(run.answerId), { title: 'Result 9', markdown: 'Body 9' }), e => e.code === 'OUTPUT_LIMIT')
   const live = h.chat.runs.get(run.answerId)
   const original = structuredClone(live.context.outputs)
@@ -678,4 +680,192 @@ test('only briefing comments are mutable; replacement is atomic and owner checke
   await assert.rejects(h.store.replaceRecord('email:b@example.com', 'briefing-comments', id, {}), e => e.code === 'CONTEXT_NOT_FOUND')
   const names = await (await import('node:fs/promises')).readdir(await h.store.directory(owner, 'briefing-comments'))
   assert.deepEqual(names, [`${id}.json`], 'no temporary file is left behind')
+})
+
+// ── CTX-04: attached sources that changed after they were sent ──
+
+async function trackingHarness(t, options = {}) {
+  const { createWorkflowEventBus } = await import('./egdesk-event-bus.mjs')
+  const dir = await mkdtemp(path.join(os.tmpdir(), 'egdesk-context-track-'))
+  t.after(() => rm(dir, { recursive: true, force: true }))
+  await mkdir(path.join(dir, 'workspace'))
+  const cwd = await realpath(path.join(dir, 'workspace'))
+  let owner = 'email:a@example.com', threadSeq = 0, turnSeq = 0, clock = 1_800_000_000_000
+  const store = new ImmutableContextStore({ dataDir: path.join(dir, 'state'), allowedRoots: [cwd], managedFileView: options.managedFileView, now: () => clock })
+  const contexts = new ContextRuntime({ store, reader: null, getOwnerKey: () => owner, now: () => clock })
+  const bus = createWorkflowEventBus({ now: () => clock })
+  t.after(() => bus.close())
+  contexts.attachServices({ bus })
+  const calls = [], replies = [], events = []
+  const chat = new CodexChatRuntime({
+    contexts, respond: (id, result, error) => replies.push({ id, result, error }), emit: e => events.push(e),
+    request: async (method, params) => {
+      calls.push({ method, params })
+      if (method === 'thread/start') return { thread: { id: `parent-${++threadSeq}` }, cwd, model: 'configured-model' }
+      if (method === 'turn/start') return { turn: { id: `turn-${++turnSeq}`, status: 'inProgress', items: [] } }
+      if (method === 'turn/interrupt') return {}
+      throw new Error(`Unexpected native method ${method}`)
+    },
+  })
+  chat.setConnection(true)
+  let sends = 0
+  const send = async (settings = {}) => {
+    const accepted = await chat.send({ message: 'Next step', requestId: `track-${++sends}`, clientThreadId: 'ui', cwd, ...settings })
+    await chat.handleNotification({ method: 'turn/completed', params: { threadId: accepted.conversationId, turn: { id: accepted.runId, status: 'completed', items: [], itemsView: 'notLoaded' } } })
+    return accepted
+  }
+  const lastTurn = () => calls.filter(call => call.method === 'turn/start').at(-1).params
+  const publish = async (topic, payload) => { bus.publish({ topic, owner: 'egdesk-local', payload }); await bus.flush() }
+  const browser = (viewId, url = 'https://example.com/page?token=private') => ({ id: `input-${viewId}`, kind: 'browser', label: 'Quarterly page', sourceRef: { viewId, resourceId: `page-${viewId}`, url }, capturedAt: 10, captureScope: { type: 'document-text', locator: 'body' }, content: { mime: 'text/plain', text: 'Captured page words', truncated: false } })
+  const caps = { contextCapabilities: { read: true, reader: true, publishBriefing: true } }
+  return { dir, cwd, store, contexts, chat, bus, calls, replies, events, send, lastTurn, publish, browser, caps, tick: ms => { clock += ms }, changeOwner: value => { owner = value } }
+}
+const changeNote = turn => turn.additionalContext?.egdesk_context_changes ? JSON.parse(turn.additionalContext.egdesk_context_changes.value) : null
+
+test('a Browser source shows changed after its card goes to another page, and the next message hears it once without content', async t => {
+  const h = await trackingHarness(t)
+  const first = await h.send({ attachments: [h.browser('egd-browser-card-1')], ...h.caps })
+  const sourceId = h.chat.runs.get(first.answerId).context.captures[0].sourceId
+  assert.equal(changeNote(h.lastTurn()), null)
+  assert.deepEqual(h.contexts.sourceStatus({ conversationId: first.conversationId }).sources.map(s => [s.sourceId, s.state]), [[sourceId, 'active']])
+  // Arriving at the captured origin + path again, or another card moving, changes nothing.
+  await h.publish('browser.navigated', { cardId: 'egd-browser-card-1', origin: 'https://example.com', path: '/page' })
+  await h.publish('browser.navigated', { cardId: 'egd-browser-card-2', origin: 'https://example.com', path: '/other' })
+  assert.equal(h.contexts.sourceStatus({ conversationId: first.conversationId }).sources[0].state, 'active')
+  h.tick(5000)
+  await h.publish('browser.navigated', { cardId: 'egd-browser-card-1', origin: 'https://example.com', path: '/other' })
+  const [stale] = h.contexts.sourceStatus({ conversationId: first.conversationId }).sources
+  assert.deepEqual({ ...stale }, { sourceId, kind: 'browser', viewId: 'egd-browser-card-1', state: 'stale', reason: 'navigated', changedAt: 1_800_000_005_000, announcedAt: null })
+
+  // A plain follow-up (no sources, no context capabilities) carries one content-free line.
+  const second = await h.send({ conversationId: first.conversationId })
+  const note = changeNote(h.lastTurn())
+  assert.deepEqual(note.changed, [{ sourceId, kind: 'browser', reason: 'navigated' }])
+  assert.equal(note.contract, 'egdesk-context-changes-v1')
+  assert.equal(h.lastTurn().additionalContext.egdesk_context, undefined, 'no source descriptors without context tools')
+  const raw = JSON.stringify(h.lastTurn().additionalContext)
+  for (const text of ['example.com', 'Quarterly page', 'Captured page words', '/other', 'token']) assert.ok(!raw.includes(text), text)
+  const noted = h.events.find(e => e.event === 'context.sources.changed')
+  assert.equal(noted.answerId, second.answerId)
+  assert.deepEqual(noted.details.sources.map(s => [s.sourceId, s.reason]), [[sourceId, 'navigated']])
+  assert.equal(h.chat.runs.get(second.answerId).context, undefined, 'the note binds nothing')
+  assert.equal(h.contexts.sourceStatus({ conversationId: first.conversationId }).sources[0].announcedAt, 1_800_000_005_000)
+
+  // Heard once: the next message is quiet until the card moves again.
+  await h.send({ conversationId: first.conversationId })
+  assert.equal(changeNote(h.lastTurn()), null)
+  await h.publish('browser.navigated', { cardId: 'egd-browser-card-1', origin: 'https://example.com', path: '/third' })
+  await h.send({ conversationId: first.conversationId })
+  assert.deepEqual(changeNote(h.lastTurn()).changed.map(c => c.sourceId), [sourceId])
+
+  // HTTP: the chip state, owner scoped.
+  const handler = createContextHttpHandler(h.contexts, async () => {})
+  const res = httpResponse()
+  await handler({ method: 'GET' }, res, new URL(`http://localhost/context/sources?conversationId=${encodeURIComponent(first.conversationId)}`))
+  assert.equal(res.status, 200)
+  assert.equal(res.body.sources[0].state, 'stale')
+  assert.ok(!JSON.stringify(res.body).includes('example.com'))
+  const missing = httpResponse()
+  await handler({ method: 'GET' }, missing, new URL('http://localhost/context/sources'))
+  assert.equal(missing.status, 400)
+  h.changeOwner('email:b@example.com')
+  const other = httpResponse()
+  await handler({ method: 'GET' }, other, new URL(`http://localhost/context/sources?conversationId=${encodeURIComponent(first.conversationId)}`))
+  assert.deepEqual(other.body.sources, [])
+})
+
+test('a file source changes through its connected root (canonical path or working-copy location) and a change before sending is not lost', async t => {
+  const location = { rootId: 'root-9', relativePath: 'docs/plan.md' }
+  const managedFileView = { resolveCaptureSource: async ({ captureRef, assertActive }) => {
+    assertActive()
+    const bytes = Buffer.from('Working copy text\n')
+    return { captureRef: { ...captureRef }, name: 'plan.md', mime: 'text/plain', bytes, sha256: hashContent(bytes), location }
+  } }
+  const h = await trackingHarness(t, { managedFileView })
+  await mkdir(path.join(h.cwd, 'notes'))
+  const file = path.join(h.cwd, 'notes', 'source.md'); await writeFile(file, 'first version\n')
+  // Captured first, changed, then sent: the change still counts.
+  const captured = (await h.contexts.capture({ clientThreadId: 'ui', attachments: [{ id: 'file-ui', kind: 'file', label: 'Source', sourceRef: { path: file }, captureScope: { type: 'file' } }] })).captures[0]
+  assert.equal(h.contexts.noteRoot({ rootId: 'root-1', absolutePath: h.cwd }), true)
+  await h.publish('file.changed', { rootId: 'root-1', relativePath: 'notes/other.md', change: 'change' })
+  await h.publish('file.changed', { rootId: 'root-2', relativePath: 'notes/source.md', change: 'change' })
+  assert.equal([...h.contexts.allTrackedSources()].find(e => e.sourceId === captured.sourceId).state, 'active', 'other files and unknown roots do not match')
+  await h.publish('file.changed', { rootId: 'root-1', relativePath: 'notes/source.md', change: 'rename' })
+  const managed = (await h.contexts.capture({ clientThreadId: 'ui', attachments: [{ id: 'managed-ui', kind: 'file', managedFileView: { fileId: 'f', draftId: 'd', head: 'h', revision: 0 }, captureScope: { type: 'file' } }] })).captures[0]
+  assert.deepEqual(managed.sourceRef.location, location)
+  const run = await h.send({ contextSnapshotIds: [captured.sourceId, managed.sourceId], ...h.caps })
+  // The first turn already says the file it sends changed since capture.
+  assert.deepEqual(changeNote(h.lastTurn()).changed, [{ sourceId: captured.sourceId, kind: 'file', reason: 'fileChanged' }])
+  assert.ok(h.lastTurn().additionalContext.egdesk_context, 'descriptors and the note travel together')
+  assert.ok(!JSON.stringify(changeNote(h.lastTurn())).includes(h.cwd))
+  await h.publish('file.changed', { rootId: 'root-9', relativePath: 'docs/plan.md', change: 'change' })
+  assert.deepEqual(h.contexts.sourceStatus({ conversationId: run.conversationId }).sources.map(s => [s.sourceId, s.state, s.reason]).sort(),
+    [[captured.sourceId, 'stale', 'fileChanged'], [managed.sourceId, 'stale', 'fileChanged']].sort())
+  // Sending the stale snapshot again repeats the note for it.
+  await h.send({ conversationId: run.conversationId, contextSnapshotIds: [captured.sourceId], ...h.caps })
+  assert.deepEqual(changeNote(h.lastTurn()).changed.map(c => c.sourceId).sort(), [captured.sourceId, managed.sourceId].sort())
+  await h.send({ conversationId: run.conversationId, contextSnapshotIds: [captured.sourceId], ...h.caps })
+  assert.deepEqual(changeNote(h.lastTurn()).changed.map(c => c.sourceId), [captured.sourceId], 'announced ones stay quiet unless sent again')
+  // A bad location from the file owner is dropped, not stored.
+  location.relativePath = '../escape.md'
+  const dropped = (await h.contexts.capture({ clientThreadId: 'ui', attachments: [{ id: 'managed-2', kind: 'file', managedFileView: { fileId: 'f', draftId: 'd', head: 'h', revision: 1 }, captureScope: { type: 'file' } }] })).captures[0]
+  assert.equal(dropped.sourceRef.location, undefined)
+})
+
+test('packets list stale run sources; tracking is bounded, cleared on account change, and the note never reaches a thread that lacks verified tools', async t => {
+  const h = await trackingHarness(t)
+  const run = await h.send({ attachments: [h.browser('egd-card-a')], ...h.caps })
+  const sourceId = h.chat.runs.get(run.answerId).context.captures[0].sourceId
+  // A read in a later turn of the same conversation gives a packet.
+  const reading = await h.chat.send({ message: 'Read it', requestId: 'read-turn', clientThreadId: 'ui', cwd: h.cwd, conversationId: run.conversationId, contextSnapshotIds: [sourceId], ...h.caps })
+  await h.chat.handleServerRequest({ id: 'read', method: 'item/tool/call', params: { threadId: reading.conversationId, turnId: reading.runId, callId: 'read', tool: 'egdesk_read_source', arguments: { snapshotId: sourceId, intent: 'Read' } } })
+  await h.contexts.calls.get(`${reading.answerId}/read`)
+  const packetId = JSON.parse(h.replies.find(r => r.id === 'read').result.contentItems[0].text).packetId
+  await h.chat.handleNotification({ method: 'turn/completed', params: { threadId: reading.conversationId, turn: { id: reading.runId, status: 'completed', items: [], itemsView: 'notLoaded' } } })
+  const handler = createContextHttpHandler(h.contexts, async () => {})
+  const before = httpResponse()
+  await handler({ method: 'GET' }, before, new URL(`http://localhost/context/packets/${packetId}`))
+  assert.deepEqual(before.body.staleSources, [])
+  await h.publish('browser.navigated', { cardId: 'egd-card-a', origin: 'https://example.org', path: '/' })
+  const after = httpResponse()
+  await handler({ method: 'GET' }, after, new URL(`http://localhost/context/packets/${packetId}`))
+  assert.deepEqual(after.body.staleSources.map(s => [s.sourceId, s.reason]), [[sourceId, 'navigated']])
+
+  // A thread whose tool ownership is not verified gets no note and sends normally.
+  h.chat.threadToolManifestStatus.set(run.conversationId, 'unverified')
+  const quiet = await h.chat.send({ message: 'Plain', requestId: 'plain-1', clientThreadId: 'ui', cwd: h.cwd, conversationId: run.conversationId }).catch(error => error)
+  assert.equal(quiet instanceof Error, false, quiet?.code)
+  assert.equal(changeNote(h.lastTurn()), null)
+  await h.chat.handleNotification({ method: 'turn/completed', params: { threadId: quiet.conversationId, turn: { id: quiet.runId, status: 'completed', items: [], itemsView: 'notLoaded' } } })
+  h.chat.threadToolManifestStatus.set(run.conversationId, 'verified')
+
+  // Bounds.
+  for (let i = 0; i < 200; i += 1) h.contexts.trackPending('email:a@example.com', [{ sourceId: `s-${i}`, kind: 'browser', sourceRef: { viewId: `v-${i}` } }])
+  assert.equal(h.contexts.pendingSources.size, 128)
+  for (let i = 0; i < 80; i += 1) h.contexts.trackBound('email:a@example.com', `conv-${i}`, [{ sourceId: `b-${i}`, kind: 'browser', sourceRef: { viewId: `w-${i}` } }])
+  assert.equal(h.contexts.trackedSources.size, 64)
+  // Board selections and sources without a card or path are not tracked.
+  h.contexts.trackBound('email:a@example.com', 'conv-x', [{ sourceId: 'board-1', kind: 'board', sourceRef: { viewId: 'board-view' } }, { sourceId: 'web-1', kind: 'browser', sourceRef: {} }])
+  assert.equal(h.contexts.trackedSources.has('conv-x'), false)
+  // Unknown topics and malformed payloads are ignored.
+  assert.equal(h.contexts.noteSourceEvent({ topic: 'auth.changed', payload: { signedIn: false } }), 0)
+  assert.equal(h.contexts.noteSourceEvent({ topic: 'file.changed' }), 0)
+  // Account change: the old account's records go.
+  h.changeOwner('email:b@example.com')
+  h.chat.reset()
+  assert.equal(h.contexts.trackedSources.size, 0)
+  assert.equal(h.contexts.pendingSources.size, 0)
+})
+
+test('the source-change bus owner is the workflow owner, and attachServices can be detached', async t => {
+  const { WORKFLOW_OWNER } = await import('./egdesk-workflow-runtime.mjs')
+  const { SOURCE_EVENT_OWNER } = await import('./egdesk-context-runtime.mjs')
+  assert.equal(SOURCE_EVENT_OWNER, WORKFLOW_OWNER)
+  const h = await trackingHarness(t)
+  await h.send({ attachments: [h.browser('egd-card-z')], ...h.caps })
+  assert.equal(h.bus.stats().subscribers, 1)
+  const detach = h.contexts.attachServices({ bus: h.bus })
+  assert.equal(h.bus.stats().subscribers, 1, 're-attaching replaces the subscription')
+  detach()
+  assert.equal(h.bus.stats().subscribers, 0)
 })

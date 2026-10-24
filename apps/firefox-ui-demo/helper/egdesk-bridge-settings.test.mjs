@@ -10,6 +10,7 @@ import { BRIDGE_SETTINGS_FILE, MAX_BRIDGE_SETTINGS_BYTES, openBridgeSettings } f
 import { CodexChatRuntime } from './codex-chat-runtime.mjs'
 import { createComputerControlHttpHandler } from './codex-bridge-http.mjs'
 import { DEFAULT_COMPUTER_CONTROL_POLICY } from './codex-computer-control.mjs'
+import { CONTEXT_SUGGEST_DEFAULT } from './egdesk-context-resolver.mjs'
 
 // CU-01: the computer control choice outlives a bridge restart.
 const posixOnly = { skip: process.platform === 'win32' ? 'POSIX permissions' : false }
@@ -211,4 +212,50 @@ test('the bridge opens settings before Chat and hands the computer control adapt
   assert.ok(opened < at('const chat = new CodexChatRuntime({'))
   assert.match(chat, /computerControlStore: bridgeSettings\.computerControl,/)
   assert.doesNotMatch(chat, /computerControlPolicy:/, 'the default still comes from codex-computer-control.mjs')
+})
+
+// D-R2: the suggestion mode and 'never suggest' list outlive a restart; the default stays today's behaviour.
+test('contextSuggest is saved normalized beside computer control, read back after a restart, and defaults to always with an empty list', posixOnly, async t => {
+  const f = fixture(t)
+  const first = f.open()
+  assert.equal(first.contextSuggest.value, CONTEXT_SUGGEST_DEFAULT)
+  assert.equal(first.contextSuggest.saved, false)
+  assert.equal(first.contextSuggest.persisted, true)
+  assert.equal(first.computerControl.save('off'), true)
+  assert.equal(first.contextSuggest.save({ mode: 'firstMessage', neverSuggest: [{ kind: 'site', host: '*.Bank.Example' }, { kind: 'folder', path: '/Users/me/Private/' }] }), true)
+  assert.deepEqual(JSON.parse(readFileSync(f.file, 'utf8')), { version: 1, computerControlPolicy: 'off', contextSuggest: { mode: 'firstMessage', neverSuggest: [{ kind: 'site', host: 'bank.example' }, { kind: 'folder', path: '/Users/me/Private' }] } })
+  assert.equal(statSync(f.file).mode & 0o777, 0o600)
+  // The same value again (in another spelling) writes nothing.
+  const inode = statSync(f.file).ino
+  assert.equal(first.contextSuggest.save({ mode: 'firstMessage', neverSuggest: [{ kind: 'site', host: 'bank.example' }, { kind: 'folder', path: '/Users/me/Private' }] }), true)
+  assert.equal(statSync(f.file).ino, inode)
+  // Restart.
+  const second = f.open()
+  assert.equal(second.status, 'loaded')
+  assert.equal(second.contextSuggest.saved, true)
+  assert.deepEqual(second.contextSuggest.value, { mode: 'firstMessage', neverSuggest: [{ kind: 'site', host: 'bank.example' }, { kind: 'folder', path: '/Users/me/Private' }] })
+  assert.ok(Object.isFrozen(second.contextSuggest.value), 'callers cannot change the kept value in place')
+  assert.equal(second.computerControl.policy, 'off')
+  assert.throws(() => second.contextSuggest.save({ mode: 'sometimes', neverSuggest: [] }), TypeError)
+  assert.deepEqual(f.logs, [])
+})
+
+test('an invalid stored contextSuggest is set aside like any damaged settings file', posixOnly, async t => {
+  const f = fixture(t)
+  f.plant('{"version":1,"contextSuggest":{"mode":"always","neverSuggest":[{"kind":"site","host":"https://bank.example"}]}}')
+  const settings = f.open()
+  assert.equal(settings.status, 'recovered')
+  assert.equal(settings.contextSuggest.value, CONTEXT_SUGGEST_DEFAULT)
+  assert.match(f.logs[0], /invalid contextSuggest/)
+  assert.ok(!f.logs[0].includes('bank.example'), 'file contents are never logged')
+})
+
+test('a full never-suggest list (64 long folder paths) still fits the settings file limit', posixOnly, async t => {
+  const f = fixture(t)
+  const neverSuggest = Array.from({ length: 64 }, (_, i) => ({ kind: 'folder', path: `/${String(i).padStart(2, '0')}${'p'.repeat(1020)}` }))
+  assert.equal(f.open().contextSuggest.save({ mode: 'always', neverSuggest }), true)
+  assert.ok(statSync(f.file).size < MAX_BRIDGE_SETTINGS_BYTES)
+  const back = f.open()
+  assert.equal(back.status, 'loaded')
+  assert.equal(back.contextSuggest.value.neverSuggest.length, 64)
 })

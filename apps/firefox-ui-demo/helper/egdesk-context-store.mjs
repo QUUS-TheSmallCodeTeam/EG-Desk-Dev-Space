@@ -4,8 +4,16 @@ import { mkdir, open, readFile, readdir, realpath, rename, rm, writeFile } from 
 import os from 'node:os'
 import path from 'node:path'
 import { chatError, publicText, verifyLocalFile } from './codex-chat-values.mjs'
+import { relativeRootPath } from './egdesk-event-bus.mjs'
 
 export const hashContent = value => createHash('sha256').update(value).digest('hex')
+// A connected-root location in the same form file.changed events carry; anything else is dropped.
+function managedLocation(value) {
+  if (!value || typeof value !== 'object' || Array.isArray(value) || Object.keys(value).some(key => !['rootId', 'relativePath'].includes(key))) return null
+  if (typeof value.rootId !== 'string' || !/^[A-Za-z0-9][A-Za-z0-9._:/-]{0,255}$/.test(value.rootId)) return null
+  const relativePath = relativeRootPath(value.relativePath)
+  return relativePath ? { rootId: value.rootId, relativePath } : null
+}
 const uuid = value => typeof value === 'string' && /^[\da-f-]{36}$/i.test(value)
 const fail = (code, message, status = 400) => { throw chatError(code, message, status) }
 const small = (value, max = 512) => typeof value === 'string' && value.length <= max ? value : null
@@ -223,6 +231,11 @@ export class ImmutableContextStore {
         source.resourceId = ref.fileId
         source.revision = String(ref.revision)
         source.managedFileView = { ...ref }
+        // CTX-04: where the working copy's original lives in its connected
+        // root, when the file owner says so ({rootId, relativePath}); a
+        // file.changed event for that place marks this source changed.
+        const location = managedLocation(selected.location)
+        if (location) source.location = location
         if (!attachment.label) source.title = publicText(selected.name || kind, 300)
         provenance = 'managed-working-copy'
         const expectedHash = selected.sha256

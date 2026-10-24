@@ -237,3 +237,30 @@ test('published Briefing requires native-answer identity and verified target has
   assert.throws(() => assertPublishedBriefing({ ...briefing, steps: [{ ...briefing.steps[0], target: { sourceId: capture.sourceId } }] }, scope), /immutable hash/);
   assert.throws(() => assertPublishedBriefing({ ...briefing, presentationStatus: 'open-now' }, scope), /not an instruction/);
 });
+
+test('multi-target Briefing steps: target equals targets[0] and every target passes the same binding and hash checks', () => {
+  const identity = { conversationId: 'conversation', runId: 'run', answerId: 'conversation/run' };
+  const a = { ...metadata(), sourceId: 'source-A', snapshotId: 'source-A', hash: 'hash-A' };
+  const b = { ...metadata(), id: 'attachment-B', sourceId: 'source-B', snapshotId: 'source-B', hash: 'hash-B' };
+  const first = { sourceId: 'source-A', hash: 'hash-A', range: { startLine: 2, endLine: 3 } };
+  const second = { sourceId: 'source-B', hash: 'hash-B', viewId: 'view-B' };
+  const step = { id: 'both', text: 'Both agree', target: first, targets: [first, second], emphasis: 'spotlight', fallback: 'Open both' };
+  const briefing = { id: 'briefing', title: 'Compare', ...identity, presentationStatus: 'proposed', steps: [step] };
+  const scope = { identity, captures: [a, b], viewIds: ['view-B'] };
+  assert.equal(assertPublishedBriefing(briefing, scope), true);
+  assert.equal(assertBriefingTargets(briefing, { sourceIds: ['source-A', 'source-B'], viewIds: ['view-B'] }), true);
+  // The original single-target shape still passes unchanged.
+  assert.equal(assertPublishedBriefing({ ...briefing, steps: [{ id: 'one', text: 'One', target: first, fallback: 'Open' }] }, scope), true);
+  const withStep = extra => ({ ...briefing, steps: [{ ...step, ...extra }] });
+  assert.throws(() => assertPublishedBriefing(withStep({ target: second }), scope), /equal targets\[0\]/);
+  assert.throws(() => assertPublishedBriefing(withStep({ targets: [] }), scope), /1–6 targets/);
+  assert.throws(() => assertPublishedBriefing(withStep({ targets: Array.from({ length: 7 }, () => first) }), scope), /1–6 targets/);
+  assert.throws(() => assertPublishedBriefing(withStep({ targets: [first, { sourceId: 'source-B' }] }), scope), /immutable hash/);
+  assert.throws(() => assertPublishedBriefing(withStep({ targets: [first, { ...second, hash: 'hash-A' }] }), scope), /immutable hash/);
+  assert.throws(() => assertBriefingTargets(withStep({ targets: [first, { path: '/unused/qa.txt' }] }), { sourceIds: ['source-A', 'source-B'] }), /raw-path/);
+  assert.throws(() => assertBriefingTargets(withStep({ targets: [first, { sourceId: 'source-C' }] }), { sourceIds: ['source-A', 'source-B'] }), /not bound/);
+  assert.throws(() => assertBriefingTargets(withStep({ targets: [first, { ...second, viewId: 'unrelated' }] }), { sourceIds: ['source-A', 'source-B'], viewIds: ['view-B'] }), /not bound/);
+  assert.throws(() => assertBriefingTargets(withStep({ targets: 'source-A' }), { sourceIds: ['source-A'] }), /1–6 targets/);
+  assert.throws(() => assertBriefingTargets(withStep({ emphasis: 'blink' }), { sourceIds: ['source-A', 'source-B'], viewIds: ['view-B'] }), /emphasis/);
+  assert.throws(() => assertBriefingTargets(withStep({ description: 'legacy' }), { sourceIds: ['source-A', 'source-B'], viewIds: ['view-B'] }), /Legacy/);
+});

@@ -5,8 +5,8 @@ import os from 'node:os'
 import path from 'node:path'
 import { Readable } from 'node:stream'
 import {
-  RESOLVER_LIMITS, RESOLVER_POLICY, RESOLVER_REASON_WEIGHTS, RECENT_WINDOW_MS,
-  resolveContext, resolverRecord, validateResolverChoice, validateResolverSignals,
+  CONTEXT_SUGGEST_DEFAULT, RESOLVER_EXCLUSIONS, RESOLVER_LIMITS, RESOLVER_POLICY, RESOLVER_REASON_WEIGHTS, RECENT_WINDOW_MS,
+  boardQueryWords, normalizeContextSuggest, resolveContext, resolverRecord, validateResolverChoice, validateResolverRequest, validateResolverSignals,
 } from './egdesk-context-resolver.mjs'
 import { ImmutableContextStore } from './egdesk-context-store.mjs'
 import { ContextRuntime } from './egdesk-context-runtime.mjs'
@@ -68,7 +68,7 @@ async function call(handler, method, url, body, headers) {
 }
 
 test('ranking table: fixed reason weights, deterministic order and tie-breaks', () => {
-  assert.deepEqual(RESOLVER_REASON_WEIGHTS, { explicit: 100, focused: 40, activeBoardMember: 30, sameCluster: 20, visibleLarge: 10, recentlyUsed: 8 })
+  assert.deepEqual(RESOLVER_REASON_WEIGHTS, { explicit: 100, focused: 40, activeBoardMember: 30, sameCluster: 20, matchingBoard: 15, visibleLarge: 10, recentlyUsed: 8 })
   const signals = {
     boardId: 'board-A',
     explicit: [{ kind: 'file', ref: 'egd-file-card-1' }],
@@ -267,7 +267,8 @@ test('HTTP: POST /context/resolve is guarded and bounded; packets carry the reso
   assert.equal(auths, 0, 'refused requests never reach account lookup')
   const resolved = await call(handler, 'POST', '/context/resolve', signals, { origin: 'chrome://browser' })
   assert.equal(resolved.status, 200)
-  assert.deepEqual(Object.keys(resolved.body), ['resolutionId', 'policy', 'resolvedAt', 'signalsDigest', 'board', 'candidates'])
+  assert.deepEqual(Object.keys(resolved.body), ['resolutionId', 'policy', 'resolvedAt', 'signalsDigest', 'board', 'candidates', 'suggest'])
+  assert.deepEqual(resolved.body.suggest, { mode: 'always', omittedByMode: 0, omittedByUser: 0 }, 'default: today\'s behaviour')
   assert.equal(resolved.body.policy, 'suggest-only')
   assert.deepEqual(resolved.body.candidates.map(c => c.reasons), [['focused'], ['visibleLarge']])
   assert.deepEqual(await h.kinds('sources'), [])
@@ -311,4 +312,168 @@ test('resume restores the resolver record; a different choice under the same req
   const second = h.contexts.resolve({ visible: [{ kind: 'browser', ref: 'egd-browser-card-1', focused: true }] })
   await h.chat.send({ ...body, contextResolution: { resolutionId: second.resolutionId, chosen: ['egd-browser-card-1'] } })
   await assert.rejects(h.chat.send({ ...body, contextResolution: { resolutionId: second.resolutionId, chosen: [] } }), e => e.code === 'REQUEST_CONFLICT')
+})
+
+// ── D-R2: suggestion mode and the 'never suggest' list (defaults = today) ──
+
+const withSuggest = (signals, suggest, extra = {}) => resolveContext(validateResolverSignals(signals), { now: NOW, suggest, ...extra })
+
+test('never-suggest sites and screen-marked folders drop out of suggestions; an explicit pick still shows', () => {
+  assert.deepEqual(CONTEXT_SUGGEST_DEFAULT, { mode: 'always', neverSuggest: [] })
+  assert.ok(RESOLVER_EXCLUSIONS.includes('userExcluded'))
+  const signals = {
+    explicit: [{ kind: 'browser', ref: 'egd-mail-picked', site: 'mail.example.com' }],
+    visible: [
+      { kind: 'browser', ref: 'egd-bank', focused: true, site: 'www.bank.example' },
+      { kind: 'browser', ref: 'egd-mail', area: 0.5, site: 'mail.example.com' },
+      { kind: 'browser', ref: 'egd-news', area: 0.5, site: 'news.example.org' },
+      { kind: 'file', ref: 'egd-private-file', area: 0.5, userExcluded: true },
+      { kind: 'file', ref: 'egd-plain-file', area: 0.5 },
+    ],
+  }
+  // Default: everything is suggested as before; the userExcluded mark alone already drops a folder match.
+  const before = withSuggest(signals, CONTEXT_SUGGEST_DEFAULT)
+  assert.deepEqual(before.candidates.map(c => c.ref), ['egd-mail-picked', 'egd-bank', 'egd-mail', 'egd-news', 'egd-plain-file'])
+  assert.deepEqual(before.suggest, { mode: 'always', omittedByMode: 0, omittedByUser: 1 })
+  const suggest = normalizeContextSuggest({ mode: 'always', neverSuggest: [{ kind: 'site', host: 'bank.example' }, { kind: 'site', host: 'example.com' }] })
+  const after = withSuggest(signals, suggest)
+  assert.deepEqual(after.candidates.map(c => c.ref), ['egd-mail-picked', 'egd-news', 'egd-plain-file'], 'subdomains of a listed site drop out; the explicit pick stays')
+  assert.deepEqual(after.suggest, { mode: 'always', omittedByMode: 0, omittedByUser: 3 })
+  // Left out entirely, not listed as excluded, and absent from the run record.
+  assert.ok(!after.candidates.some(c => c.excludedBy === 'userExcluded'))
+  assert.ok(!JSON.stringify(resolverRecord('00000000-0000-4000-8000-000000000000', after)).includes('egd-bank'))
+  // A host that only ends with the listed text is not its subdomain.
+  assert.equal(withSuggest({ visible: [{ kind: 'browser', ref: 'egd-x', focused: true, site: 'notbank.example' }] }, suggest).candidates.length, 1)
+  for (const site of ['https://bank.example', 'Bank.example', 'bank.example/path', 'bank.example:443', 'a@bank.example', '']) {
+    assert.throws(() => validateResolverSignals({ visible: [{ kind: 'browser', ref: 'egd-x', site }] }), invalidSignal, site)
+  }
+  assert.throws(() => validateResolverSignals({ visible: [{ kind: 'file', ref: 'egd-x', userExcluded: 'yes' }] }), invalidSignal)
+  // One resource cannot be reported with two sites.
+  assert.throws(() => resolve({ explicit: [{ kind: 'browser', ref: 'egd-x', site: 'a.example' }], visible: [{ kind: 'browser', ref: 'egd-x', site: 'b.example' }] }), invalidSignal)
+})
+
+test('mode: off keeps explicit picks only; firstMessage suggests only while the room has no message', () => {
+  const signals = { explicit: [{ kind: 'file', ref: 'egd-picked' }], visible: [{ kind: 'file', ref: 'egd-seen', focused: true }, { kind: 'file', ref: 'egd-big', area: 0.6 }] }
+  const off = withSuggest(signals, { mode: 'off', neverSuggest: [] })
+  assert.deepEqual(off.candidates.map(c => c.ref), ['egd-picked'])
+  assert.deepEqual(off.suggest, { mode: 'off', omittedByMode: 2, omittedByUser: 0 })
+  const first = { mode: 'firstMessage', neverSuggest: [] }
+  assert.equal(withSuggest({ ...signals, firstMessage: true }, first).candidates.length, 3)
+  assert.deepEqual(withSuggest({ ...signals, firstMessage: false }, first).candidates.map(c => c.ref), ['egd-picked'])
+  assert.deepEqual(withSuggest(signals, first).candidates.map(c => c.ref), ['egd-picked'], 'not knowing counts as a later message')
+  assert.throws(() => validateResolverSignals({ firstMessage: 'yes' }), invalidSignal)
+  // firstMessage is part of the screen state digest.
+  assert.notEqual(resolve({ firstMessage: true }).signalsDigest, resolve({}).signalsDigest)
+})
+
+test('suggestion settings normalize hosts and folders and refuse anything else', () => {
+  const value = normalizeContextSuggest({ mode: 'firstMessage', neverSuggest: [
+    { kind: 'site', host: ' *.Bank.Example. ' }, { kind: 'site', host: 'bank.example' },
+    { kind: 'folder', path: '/Users/me/Private/../Private/' }, { kind: 'folder', path: '/Users/me/Private' },
+  ] })
+  assert.deepEqual(value, { mode: 'firstMessage', neverSuggest: [{ kind: 'site', host: 'bank.example' }, { kind: 'folder', path: path.resolve('/Users/me/Private') }] })
+  assert.ok(Object.isFrozen(value) && Object.isFrozen(value.neverSuggest) && Object.isFrozen(value.neverSuggest[0]))
+  const refused = input => assert.throws(() => normalizeContextSuggest(input), e => e.code === 'INVALID_CONTEXT_SUGGEST' && e.httpStatus === 400, JSON.stringify(input)?.slice(0, 100))
+  refused(null)
+  refused({ mode: 'sometimes', neverSuggest: [] })
+  refused({ mode: 'always' })
+  refused({ mode: 'always', neverSuggest: [], extra: true })
+  refused({ mode: 'always', neverSuggest: [{ kind: 'site', host: 'https://bank.example/login' }] })
+  refused({ mode: 'always', neverSuggest: [{ kind: 'site', host: 'bank.example', note: 'x' }] })
+  refused({ mode: 'always', neverSuggest: [{ kind: 'folder', path: 'relative/folder' }] })
+  refused({ mode: 'always', neverSuggest: [{ kind: 'folder', path: `/x${'a'.repeat(1100)}` }] })
+  refused({ mode: 'always', neverSuggest: [{ kind: 'folder', path: '/bad\nname' }] })
+  refused({ mode: 'always', neverSuggest: [{ kind: 'app', name: 'Mail' }] })
+  refused({ mode: 'always', neverSuggest: Array.from({ length: 65 }, (_, i) => ({ kind: 'site', host: `s${i}.example` })) })
+})
+
+test('matching saved Boards become candidates by id and reason only, after the screen signals', () => {
+  const signals = { boardId: 'board-active', visible: [{ kind: 'file', ref: 'egd-file', area: 0.5 }, { kind: 'board-element', ref: 'board-collide', area: 0.01 }] }
+  const matchingBoards = [{ boardId: 'board-active' }, { boardId: 'board-b' }, { boardId: 'board-collide' }, { boardId: 'board-a' }, { boardId: 'board-c' }, { boardId: 'board-d' }, { boardId: 'bad id' }]
+  const result = withSuggest(signals, CONTEXT_SUGGEST_DEFAULT, { matchingBoards })
+  assert.deepEqual(summary(result), [
+    ['board-b', 15, 'matchingBoard'], ['board-a', 15, 'matchingBoard'], ['board-c', 15, 'matchingBoard'], ['egd-file', 10, 'visibleLarge'],
+  ], 'search order kept; the active Board and a ref already on screen are skipped; at most 3')
+  assert.deepEqual(Object.keys(result.candidates[0]).sort(), ['kind', 'reasons', 'ref', 'requiresConsent', 'score'])
+  assert.equal(result.candidates[0].kind, 'board')
+  const off = withSuggest(signals, { mode: 'off', neverSuggest: [] }, { matchingBoards })
+  assert.deepEqual(off.candidates, [])
+  assert.equal(off.suggest.omittedByMode, 4)
+})
+
+test('typed words for the Board search: Korean partial words, no single letters, at most 6 words and 200 characters', () => {
+  assert.deepEqual(boardQueryWords('지난주  매출 보고서 a 를 정리해줘 매출'), ['지난주', '매출', '보고서', '정리해줘'])
+  // The 6 longest words stay (ties keep typing order), shown in typing order.
+  assert.deepEqual(boardQueryWords('aa bbbbbbb cc ddddd eeeeee ff gggg hh'), ['aa', 'bbbbbbb', 'cc', 'ddddd', 'eeeeee', 'gggg'])
+  assert.ok(boardQueryWords(`${'가'.repeat(150)} ${'나'.repeat(150)}`).join(' ').length <= RESOLVER_LIMITS.query)
+  const { signals, query } = validateResolverRequest({ visible: [{ kind: 'file', ref: 'egd-a', focused: true }], query: '분기 매출' })
+  assert.equal(query, '분기 매출')
+  assert.deepEqual(signals, validateResolverSignals({ visible: [{ kind: 'file', ref: 'egd-a', focused: true }] }), 'the query is kept apart from the signals')
+  assert.equal(validateResolverRequest({ query: 'a' }).query, null)
+  assert.throws(() => validateResolverRequest({ query: 5 }), invalidSignal)
+  assert.throws(() => validateResolverSignals({ query: '분기' }), invalidSignal, 'signals alone never carry text')
+})
+
+test('runtime: Board search runs per typed word, the words are not kept, and settings change what is suggested', async t => {
+  const h = await harness(t)
+  const searched = []
+  const boards = { searchBoards({ query, limit }) {
+    searched.push({ query, limit })
+    if (query === '실패') throw new Error(`no such word ${query}`)
+    const rows = { 분기: ['board-sales', 'board-old', 'board-hr'], 매출: ['board-sales', 'board-old'], 정리: ['board-hr'] }[query] || []
+    return { query, index: 'fts5-trigram', boards: rows.map(boardId => ({ boardId, title: `Title ${boardId}`, lifecycle: boardId === 'board-old' ? 'archived' : 'active', snippet: 'secret snippet' })) }
+  } }
+  let saved = null
+  const settings = { get value() { return saved ?? CONTEXT_SUGGEST_DEFAULT }, get persisted() { return true }, save(value) { saved = value; return true } }
+  h.contexts.attachServices({ boards, settings })
+  const resolved = h.contexts.resolve({ visible: [{ kind: 'browser', ref: 'egd-mail', focused: true, site: 'mail.example.com' }], query: '분기 매출 실패' })
+  assert.deepEqual(searched.map(s => s.query), ['분기', '매출', '실패'])
+  assert.deepEqual(resolved.candidates.map(c => [c.ref, c.kind]), [['egd-mail', 'browser'], ['board-sales', 'board']], 'two words must match; archived Boards are skipped; a failing search is ignored')
+  const kept = JSON.stringify([...h.contexts.resolutions.values()])
+  for (const text of ['분기', '매출', 'Title', 'secret snippet']) assert.ok(!kept.includes(text), text)
+  assert.equal(resolved.signalsDigest, h.contexts.resolve({ visible: [{ kind: 'browser', ref: 'egd-mail', focused: true, site: 'mail.example.com' }] }).signalsDigest)
+  // One word is enough when only one was typed.
+  assert.deepEqual(h.contexts.resolve({ query: '정리' }).candidates.map(c => c.ref), ['board-hr'])
+
+  assert.deepEqual(h.contexts.suggestSnapshot(), { mode: 'always', neverSuggest: [], persisted: true })
+  assert.deepEqual(h.contexts.setSuggestSettings({ neverSuggest: [{ kind: 'site', host: 'example.com' }] }), { mode: 'always', neverSuggest: [{ kind: 'site', host: 'example.com' }], persisted: true })
+  assert.deepEqual(saved, { mode: 'always', neverSuggest: [{ kind: 'site', host: 'example.com' }] })
+  const listed = h.contexts.resolve({ visible: [{ kind: 'browser', ref: 'egd-mail', focused: true, site: 'mail.example.com' }] })
+  assert.deepEqual(listed.candidates, [])
+  assert.equal(listed.suggest.omittedByUser, 1)
+  // A screen choice of an item that was left out is not among the suggestions.
+  await assert.rejects(h.send({ attachments: [h.browserAttachment('egd-mail')], contextResolution: { resolutionId: listed.resolutionId, chosen: ['egd-mail'] } }), e => e.code === 'RESOLVER_CHOICE_UNKNOWN')
+  searched.length = 0
+  h.contexts.setSuggestSettings({ mode: 'off' })
+  assert.deepEqual(h.contexts.resolve({ query: '분기 매출' }).candidates, [])
+  assert.equal(searched.length, 0, 'mode off does not search Boards at all')
+  assert.throws(() => h.contexts.setSuggestSettings({}), e => e.code === 'INVALID_CONTEXT_SUGGEST')
+  assert.throws(() => h.contexts.setSuggestSettings({ mode: 'off', other: 1 }), e => e.code === 'INVALID_CONTEXT_SUGGEST')
+  // A failed save still applies until restart and says persisted: false.
+  settings.save = () => false
+  assert.deepEqual(h.contexts.setSuggestSettings({ mode: 'firstMessage' }).persisted, false)
+  assert.equal(h.contexts.suggestSnapshot().mode, 'firstMessage')
+})
+
+test('HTTP: suggestion settings are loopback-guarded, validated and read back; resolve takes the typed words', async t => {
+  const h = await harness(t)
+  let auths = 0
+  const handler = createContextHttpHandler(h.contexts, async () => { auths += 1 })
+  // Without a settings store the default applies and nothing is kept.
+  assert.deepEqual((await call(handler, 'GET', '/context/suggest-settings')).body, { mode: 'always', neverSuggest: [], persisted: false })
+  let saved = null
+  h.contexts.attachServices({ settings: { get value() { return saved ?? CONTEXT_SUGGEST_DEFAULT }, get persisted() { return true }, save(value) { saved = value; return true } } })
+  assert.equal((await call(handler, 'POST', '/context/suggest-settings', { mode: 'off' }, { origin: 'https://evil.example' })).status, 403)
+  assert.equal((await call(handler, 'DELETE', '/context/suggest-settings')).status, 405)
+  const bad = await call(handler, 'POST', '/context/suggest-settings', { neverSuggest: [{ kind: 'site', host: 'https://bank.example' }] })
+  assert.equal(bad.status, 400)
+  assert.equal(bad.body.code, 'INVALID_CONTEXT_SUGGEST')
+  const ok = await call(handler, 'POST', '/context/suggest-settings', { mode: 'firstMessage', neverSuggest: [{ kind: 'site', host: 'Bank.Example' }] })
+  assert.deepEqual(ok.body, { mode: 'firstMessage', neverSuggest: [{ kind: 'site', host: 'bank.example' }], persisted: true })
+  assert.deepEqual((await call(handler, 'GET', '/context/suggest-settings')).body, ok.body)
+  assert.equal(auths, 0, 'a local setting needs no account')
+  const resolved = await call(handler, 'POST', '/context/resolve', { visible: [{ kind: 'file', ref: 'egd-a', focused: true }], firstMessage: true, query: '분기 보고서' })
+  assert.equal(resolved.status, 200)
+  assert.deepEqual(resolved.body.suggest, { mode: 'firstMessage', omittedByMode: 0, omittedByUser: 0 })
+  assert.equal((await call(handler, 'POST', '/context/resolve', { query: { text: 'x' } })).status, 400)
 })
