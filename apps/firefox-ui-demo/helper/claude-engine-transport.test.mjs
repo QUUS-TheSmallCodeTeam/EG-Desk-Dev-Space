@@ -163,6 +163,19 @@ test('option values cannot smuggle flags', () => {
   assert.deepEqual(args.slice(args.indexOf('--model'), args.indexOf('--model') + 2), ['--model', 'claude-opus-4-1[1m]'])
 })
 
+test('built-in tools can be turned off or narrowed, and the system prompt snapshot can be switched off (2-E)', () => {
+  const none = buildClaudeArgs({ tools: [] })
+  assert.deepEqual(none.slice(none.indexOf('--tools'), none.indexOf('--tools') + 2), ['--tools', ''])
+  const some = buildClaudeArgs({ tools: ['Read', 'Grep'] })
+  assert.deepEqual(some.slice(some.indexOf('--tools'), some.indexOf('--tools') + 2), ['--tools', 'Read,Grep'])
+  assert.equal(buildClaudeArgs().includes('--tools'), false, 'default keeps the CLI built-in set')
+  assert.ok(buildClaudeArgs({ systemPromptSnapshot: 'off' }).includes('--system-prompt-snapshot=off'))
+  assert.equal(buildClaudeArgs().some(arg => arg.startsWith('--system-prompt-snapshot')), false)
+  for (const bad of [['Bash(git *)'], ['--verbose'], [''], 'Read', [7]]) assert.throws(() => buildClaudeArgs({ tools: bad }), { code: 'CLAUDE_OPTION_INVALID' })
+  assert.throws(() => buildClaudeArgs({ systemPromptSnapshot: 'never' }), { code: 'CLAUDE_OPTION_INVALID' })
+  for (const flag of claudeArgFlags([...none, ...buildClaudeArgs({ systemPromptSnapshot: 'off' })])) assert.ok(Object.hasOwn(CLAUDE_FLAG_SOURCES, flag), `no source for ${flag}`)
+})
+
 test('child env is an allowlist: login shared, keys and CLAUDECODE never copied, isolation env forced', () => {
   const parent = {
     ...BASE_ENV, CLAUDE_CONFIG_DIR: '/Users/test/.claude', CLAUDECODE: '1', ANTHROPIC_API_KEY: 'x', ANTHROPIC_AUTH_TOKEN: 'y',

@@ -6,8 +6,8 @@
 // `claude auth status --json` and keeps an allow-list of public fields. It
 // never opens the macOS Keychain, ~/.claude credential files or tokens, never
 // overrides HOME (that would move the Keychain lookup), and never writes
-// Claude settings. Whether EG-Desk runs Claude at all is still being decided
-// (SUB-12 / D1), so the engine row stays 'decisionPending' (engine-registry.mjs).
+// Claude settings. D-S1 (b) (2026-10-24): this check gates the runnable Claude
+// adapter (claude-engine-adapter.mjs): installed, version range, signed in.
 //
 // The `auth status --json` mapping is adapted from
 // agentclientprotocol/claude-agent-acp src/auth-status.ts:50-52, :88-99,
@@ -24,6 +24,7 @@ import { spawn } from 'node:child_process'
 import os from 'node:os'
 import path from 'node:path'
 import { engineVersionStatus } from './egdesk-native-capabilities.mjs'
+import { CLAUDE_TRANSPORT_MIN_VERSION } from './claude-engine-transport.mjs'
 
 // Upper bound on one CLI run, so a hung CLI cannot wedge later probes.
 export const CLAUDE_PROBE_TIMEOUT_MS = 5000
@@ -32,10 +33,12 @@ export const CLAUDE_STATUS_MAX_AGE_MS = 60_000
 // An explicit 'check again' is coalesced inside this window.
 export const CLAUDE_STATUS_MIN_INTERVAL_MS = 2000
 
-// Nothing has been checked against EG-Desk yet (no Claude run exists before
-// D1), so every installed version is 'untested'; below 2.1.111 is the
-// boundary t3code marks unsupported (apps/server/src/provider/model-manifest.json).
-export const CLAUDE_VERSION_POLICY = Object.freeze({ verified: Object.freeze([]), minimum: '2.1.111' })
+// No Claude turn has been run against EG-Desk yet (2-E: the CLI on this Mac
+// was signed out, so the live round trip was not attempted), so every
+// installed version is 'untested'. The minimum is the transport's run gate:
+// init.capabilities first appears in 2.1.205 (claude-agent-sdk-python
+// types.py:1509-1512); below it the adapter refuses to run, and the row says so.
+export const CLAUDE_VERSION_POLICY = Object.freeze({ verified: Object.freeze([]), minimum: CLAUDE_TRANSPORT_MIN_VERSION })
 
 export const CLAUDE_AUTH_STATUSES = Object.freeze(['signedIn', 'signedOut', 'unknown'])
 export const CLAUDE_AUTH_METHODS = Object.freeze(['claudeai', 'apiKey', 'gateway', 'external'])
@@ -196,6 +199,31 @@ export async function probeClaudeEngine({ env = process.env, cwd = os.tmpdir(), 
     auth = typeof answer?.stdout === 'string' ? claudeAuthFromCliStatus(answer.stdout) : null
   } catch { auth = null }
   return { installed: true, version, versionStatus: engineVersionStatus(version, CLAUDE_VERSION_POLICY), auth: auth ?? { ...UNKNOWN_AUTH }, checkedAt: now() }
+}
+
+// D-S1 login button (SUB-08·12): the screen opens a Terminal card
+// (POST /terminal/spawn) and writes `line` + Enter. The CLI's own login keeps
+// the credential (Keychain or its config folder); EG-Desk never reads, sees
+// or stores it. Afterwards the screen asks POST /engines/claude/refresh.
+// Methods are `claude auth login --help` (2.1.300): --claudeai (subscription,
+// the default) and --console (Anthropic Console, billed per use: the D-S4 API
+// key profile — the key stays with the CLI, never with EG-Desk). Pattern:
+// claude-agent-acp src/acp-agent.ts:2903-2941 terminal auth methods
+// (Apache-2.0); the code here is our own. `claude` is the PATH name in the
+// user's shell, so no executable path leaves the helper.
+export const CLAUDE_LOGIN_METHODS = Object.freeze({ claudeai: '--claudeai', console: '--console' })
+
+export function claudeLoginTerminalCommand(method = 'claudeai') {
+  const chosen = method ?? 'claudeai'
+  if (typeof chosen !== 'string' || !Object.hasOwn(CLAUDE_LOGIN_METHODS, chosen)) {
+    throw Object.assign(new Error("Claude login method must be 'claudeai' or 'console'"), { code: 'CLAUDE_LOGIN_METHOD_INVALID', httpStatus: 400 })
+  }
+  const argv = ['claude', 'auth', 'login', CLAUDE_LOGIN_METHODS[chosen]]
+  return {
+    method: chosen, billing: chosen === 'console' ? 'apiKey' : 'subscription',
+    argv, line: argv.join(' '), credentialStore: 'claude-cli',
+    afterward: { method: 'POST', route: '/engines/claude/refresh' },
+  }
 }
 
 const NOT_CHECKED = Object.freeze({ installed: null, version: null, versionStatus: null, auth: null, checkedAt: null })

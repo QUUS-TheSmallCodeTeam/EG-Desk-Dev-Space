@@ -5,8 +5,9 @@ import { normalizeNativeAuth, publicAuthIdentityKey, publicPlanType } from './co
 import { usageDisplay } from './codex-account-usage.mjs'
 import { CodexChatRuntime } from './codex-chat-runtime.mjs'
 import { codexDeviceLoginPatch, codexLoginInProgressResponse, codexLoginMode, codexLoginStartParams, createCodexEngineAdapter, describeCodexEngine, isStaleLoginFailure } from './codex-engine-adapter.mjs'
-import { EngineRegistry, createEngineStatusEmitter, describeClaudeEngine } from './engine-registry.mjs'
-import { createClaudeEngineStatus } from './claude-engine-auth.mjs'
+import { EngineRegistry, createEngineStatusEmitter } from './engine-registry.mjs'
+import { claudeLoginTerminalCommand, createClaudeEngineStatus } from './claude-engine-auth.mjs'
+import { createClaudeEngineAdapter } from './claude-engine-adapter.mjs'
 import { createModelCatalogSync } from './codex-model-catalog.mjs'
 import { BrowserToolTransport } from './codex-browser-tool-transport.mjs'
 import { createCodexBrowserToolProvider } from './codex-browser-tool-provider.mjs'
@@ -189,11 +190,12 @@ const modelCatalog = createModelCatalogSync({
   identity: () => modelAccountKey(authState),
   onChange: () => engineStatus.check(),
 })
-// Codex is the one runnable engine. Claude is listed for the settings screen
-// but refused until its connection method is decided (SUB-12).
+// Codex and Claude both run turns. The runtime answers every engine request
+// (approval, question, EG-Desk tool) through the Codex responder, so Claude's
+// own ids are handed to the Claude adapter first.
 const codexEngine = createCodexEngineAdapter({
   request: (method, params) => appServerRequest(method, params),
-  respond: nativeRespond,
+  respond: (...args) => claudeEngine.owns(args[0]) ? claudeEngine.respond(...args) : nativeRespond(...args),
   getOwnerKey: () => publicAuthIdentityKey(authState),
   isReady: () => appServerReady,
   getModels: () => modelCatalog.snapshot(),
@@ -206,9 +208,19 @@ const codexEngine = createCodexEngineAdapter({
     models: modelCatalog.snapshot(),
   }),
 })
+// D-S1 (b) (2026-10-24): the installed, unmodified `claude`, one child
+// process per conversation over the SDK stdio control channel. Gated by the
+// static check below (installed, version range, signed in); D-S2 isolation and
+// D-S4 API key confirmation live in the adapter and its transport.
+const claudeEngine = createClaudeEngineAdapter({
+  snapshot: () => claudeEngineStatus.snapshot(),
+  refreshStatus: options => claudeEngineStatus.refresh(options),
+  defaultCwd: process.cwd(),
+  onStatusChange: () => engineStatus.check(),
+})
 const engineRegistry = new EngineRegistry({ defaultEngineId: PROVIDER_ID })
 engineRegistry.register(codexEngine)
-engineRegistry.describe(describeClaudeEngine())
+engineRegistry.register(claudeEngine)
 // SSE engine.status (design §7): sent whenever a public engines[] row changes
 // (connection, sign-in or account change, model list), beside auth.status.
 const engineStatus = createEngineStatusEmitter({
@@ -217,12 +229,12 @@ const engineStatus = createEngineStatusEmitter({
   v: BRIDGE_PROTOCOL_VERSION,
 })
 // SUB-08/13: static Claude CLI check (`--version`, `auth status --json`) for
-// the listed Claude row: installed, version range, signed-in plan and email.
-// It never reads Keychain or credential files and never makes Claude
-// runnable; the row stays 'decisionPending' until SUB-12 is decided.
+// the Claude row: installed, version range, signed-in plan and email. It
+// never reads Keychain or credential files. A change re-gates the adapter;
+// becoming ready (or not) reaches Chat as a Claude connection change.
 const claudeEngineStatus = createClaudeEngineStatus({
-  onChange: snapshot => {
-    engineRegistry.updateListed(describeClaudeEngine(snapshot))
+  onChange: () => {
+    claudeEngine.syncStatus()
     engineStatus.check()
   },
 })
@@ -246,6 +258,12 @@ const chat = new CodexChatRuntime({
   // /settings/computer-control changes and saves it.
   computerControlStore: bridgeSettings.computerControl,
   onComputerControlChange: computerControl => broadcast({ type: 'computer.control', v: BRIDGE_PROTOCOL_VERSION, provider: PROVIDER_ID, computerControl, ts: Date.now() }),
+})
+// Claude conversation events reach the same runtime as app-server traffic.
+claudeEngine.subscribe({
+  notification: (_engineId, message) => { void chat.handleNotification(message) },
+  serverRequest: (_engineId, message) => { void chat.handleServerRequest(message) },
+  connection: (_engineId, state) => { chat.setConnection('claude', state.ready, state.processLost ? { processLost: true } : undefined) },
 })
 if (chatStore) {
   try { chat.recoverInterruptedRuns() }
@@ -864,6 +882,34 @@ const bridgeServer = createServer(async (req, res) => {
     return
   }
 
+  // D-S1 login button: the line a Terminal card runs (`claude auth login
+  // --claudeai|--console`). The CLI keeps the credential; EG-Desk never sees it.
+  if (req.method === 'GET' && route === '/engines/claude/login-command') {
+    try {
+      sendJson(res, 200, claudeLoginTerminalCommand(url.searchParams.get('method') ?? undefined))
+    } catch (error) {
+      sendJson(res, error.httpStatus || 400, { code: error.code || 'CLAUDE_LOGIN_METHOD_INVALID', error: publicText(error.message, 300) })
+    }
+    return
+  }
+
+  // D-S4: an Anthropic API key in EG-Desk's environment stops Claude starts
+  // until the user confirms running on the subscription without it. Names
+  // only, never values; the confirmation lasts for this helper run.
+  if (route === '/engines/claude/api-key-env' && (req.method === 'GET' || req.method === 'POST')) {
+    try {
+      if (req.method === 'POST') {
+        const body = await readJsonBody(req, { maxBytes: 1024 })
+        if (typeof body.confirm !== 'boolean') throw chatError('INVALID_CONFIRMATION', 'confirm must be true or false', 400)
+        claudeEngine.confirmApiKeyEnv(body.confirm)
+      }
+      sendJson(res, 200, { ...claudeEngine.apiKeyEnv(), engine: engineRegistry.publicEngines().find(row => row.id === 'claude') ?? null })
+    } catch (error) {
+      sendJson(res, error.httpStatus || 400, { code: error.code || 'INVALID_REQUEST', error: publicText(error.message, 300) })
+    }
+    return
+  }
+
   if (req.method === 'POST' && route === '/auth/cancel') {
     try {
       if (!authState.authSessionId) {
@@ -934,6 +980,8 @@ async function shutdown() {
   shuttingDown = true
   bridgeServer.close()
   systemResourceMonitor.close()
+  try { await claudeEngine.dispose() }
+  catch { console.error('[egdesk-codex-bridge] Claude conversations did not close cleanly') }
   try { await workflow?.close() }
   catch { console.error('[egdesk-codex-bridge] workflow runtime did not close cleanly') }
   try { await localFiles.close() }

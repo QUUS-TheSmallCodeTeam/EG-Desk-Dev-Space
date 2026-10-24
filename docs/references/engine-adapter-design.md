@@ -1,11 +1,13 @@
 # Agent 실행 엔진 계층(EngineAdapter) 설계 — SUB-06
 
-- 작성일: 2026-10-24 · 기준 코드: `ce20398`(브랜치 `claude/vision-gap-20261024`) · 상태: **설계안(미구현)**
+- 작성일: 2026-10-24 · 기준 코드: `ce20398`(브랜치 `claude/vision-gap-20261024`) · 상태: **설계안 + Claude 어댑터 부분 구현(§14, 실제 claude 미검증)**
 - 받는 쪽: 다음 구현을 지휘할 Main 개발자, 그리고 §11 결정을 내릴 대표님
 - 관련 원장 항목: SUB-06(이 문서), SUB-07~11, SUB-14, AGENT-08 — [EGDESK_VISION_GAP_LEDGER.md](../../ideas/confirmed/EGDESK_VISION_GAP_LEDGER.md)
 - 표기: [공식] 공식 문서·`--help` 문구 · [런타임] 이 Mac에서 직접 관찰 · [제안] 이 문서의 설계 판단(미구현·미검증) · [추정] 근거는 있으나 확인 안 됨
 - 조사 범위: 코드 읽기, 공식 문서, `claude --version`/`--help` 정적 조회, `ps` 관찰. 테스트·Firefox·모델 호출은 하지 않았다.
 - 갱신 2026-10-24(묶음 1-C): §5.3·§9·§10·§12를 공식 Agent SDK 코드에서 확인한 stdio 제어 통로 기준으로 고쳤다. 승인·질문은 `--permission-prompt-tool stdio`, EG-Desk 도구는 'sdk' MCP(포트·Run 토큰 없음), 질문 건너뛰기는 deny가 아니라 allow + 빈 답이다. 부품 3개(`claude-engine-permissions.mjs`, `egdesk-claude-mcp.mjs`, `claude-stream-translate.mjs`의 한도 창 구분)는 만들었고 단위 시험만 통과했다. 실제 `claude` 실행은 D1 결정 전이라 하지 않았다.
+
+- 갱신 2026-10-24(묶음 2-E): D-S1 (b)대로 Claude 어댑터(`helper/claude-engine-adapter.mjs`)를 만들어 bridge에 실행 가능한 엔진으로 등록했다. 설치·버전 범위·로그인 게이트, D-S2 격리, D-S4 키 확인, D-S5 자동 이어가기 끔, 로그인 버튼 명령 계약까지 넣었고 가짜 `claude`로 단위 시험만 통과했다. 이 Mac의 `claude`가 로그아웃 상태라 실제 왕복은 하지 않았다. 지금 상태와 남은 일은 §14에 있다.
 
 ---
 
@@ -506,3 +508,81 @@ Main 개발자 선에서 정할 것(대표님 결정 불필요): 일반 도구 �
 - `ps` 관찰: Claude 데스크톱 앱의 `claude` 2.1.308 stream-json 프로세스 플래그와 RSS [런타임]
 - `references/claude-code/CHANGELOG.md`(2.1.81까지, `--bare`·`--include-partial-messages`·`CLAUDE_CONFIG_DIR` 이력). `references/claude-agent-sdk/`는 비어 있음
 - 코드: `apps/firefox-ui-demo/helper/codex-chat-runtime.mjs`, `codex-bridge-server.mjs`, `egdesk-chat-store.mjs`, `codex-chat-values.mjs`, `codex-bridge-http.mjs`, `egdesk-native-capabilities.mjs`, `overlay/resources/EGDeskChatState.sys.mjs`, `docs/MULTI_CLI_CHAT_UIUX_IMPLEMENTATION_PLAN_V1.md`, 테스트 파일(§2)
+
+---
+
+## 14. Claude 어댑터 연결 상태 (묶음 2-E, 2026-10-24)
+
+### 14.1 대표님 화면에서 달라지는 점
+
+- 설정 '계정 & AI 엔진'의 Claude 줄이 '연결 방식 결정 대기'에서 실제 상태로 바뀐다: `ready` · `loginRequired` · `notInstalled` · `versionUnsupported`(버전 미확인·하한 미만·이 버전이 기능 목록을 보내지 않음) · `offline`(아직 확인 전·로그인 답이 이상함). [런타임: 단위 시험]
+- 로그인이 안 돼 있으면 Terminal 카드에서 공식 로그인을 띄운다. EG-Desk는 명령 한 줄만 주고 자격증명은 보지 않는다(§14.4). [런타임: 단위 시험]
+- EG-Desk 환경에 Anthropic API 키가 있으면 Claude 줄에 `statusReason: 'CLAUDE_API_KEY_DETECTED'`가 붙고, 확인 전에는 Claude 대화를 시작하지 않는다. 확인하면 이번 helper 실행 동안 키를 빼고 구독으로 돈다. [런타임: 단위 시험]
+- 한도 도달은 초기화 시각만 보여 주고 저절로 다시 보내지 않는다(`usage.autoResume: false`). [런타임: 단위 시험]
+- **아직 Chat에서 Claude로 보낼 수는 없다.** 런타임이 저장소가 있을 때 Codex 외 엔진을 막는다(`codex-chat-runtime.mjs` `send()`의 'Local chat history can bind only Codex conversations so far'). 이 줄을 푸는 일은 런타임 담당(2-R)이다(§14.6).
+
+### 14.2 구성 [런타임: 단위 시험, 실제 `claude` 미실행]
+
+| 부품 | 역할 | 파일 |
+|---|---|---|
+| 어댑터 | EngineAdapter 계약. 대화당 프로세스 1개, 첫 turn에 실행, 마지막 turn 뒤 5분 idle이면 종료, 동시 상주 2개(넘으면 가장 오래 쉰 것을 닫고, 모두 바쁘면 `ENGINE_BUSY` 429) | `helper/claude-engine-adapter.mjs` |
+| 전송 | `claude -p` stream-json 양방향, `--permission-prompt-tool stdio`, initialize, 제어 요청 | `helper/claude-engine-transport.mjs`(+ `--tools`, `--system-prompt-snapshot` 추가) |
+| 승인·질문 | `can_use_tool` → `item/commandExecution/requestApproval`·`item/fileChange/requestApproval`, `item/tool/requestUserInput`. '이번 대화 동안 허용'(`acceptForSession`)도 제안한다 | `helper/claude-engine-permissions.mjs` |
+| EG-Desk 도구 | 대화의 도구 목록(startThread `dynamicTools`)을 'sdk' MCP로. `--allowedTools mcp__egdesk` | `helper/egdesk-claude-mcp.mjs` |
+| 번역 | Claude 출력 → thread/turn/item 알림, `egdesk/engine/rateLimit` | `helper/claude-stream-translate.mjs` |
+| 게이트 | 설치·버전·로그인 정적 확인(표시 하한 = 실행 하한 2.1.205로 맞춤) | `helper/claude-engine-auth.mjs` |
+| 행 | 위 상태 결정, 연결 전 목록 전용 행(`decisionPending`)은 어댑터 없이 부를 때만 | `helper/engine-registry.mjs` `describeClaudeEngine(check, connection)` |
+
+메서드 대응:
+- `startThread` → 대화 id = Claude 세션 UUID를 정하고 기록만 만든다(프로세스 없음). 첫 turn이 `--session-id=<UUID>`로 실행한다.
+- `startTurn` → 프로세스가 없으면 실행(이후는 `--resume=<UUID>`), `turn/started`를 보내고 사용자 줄을 쓴다. 모델·추론 강도가 바뀌면 프로세스를 닫고 `--resume`으로 다시 연다. 작업 폴더는 대화를 시작한 폴더로 고정(`CWD_CHANGE_UNSUPPORTED` 409, Claude 세션 파일이 폴더별로 저장되기 때문).
+- `interruptTurn` → `control_request {subtype:'interrupt'}`. 10초 안에 답이 없거나 15초 안에 turn이 끝나지 않으면 프로세스를 닫고 그 turn을 `interrupted`로 끝낸다(claude-agent-acp `cancelTurns`의 backstop 패턴).
+- `releaseThread` → 프로세스를 닫는다. `resumeThread` → 기록을 다시 열고 다음 turn이 `--resume`. 이번 helper 실행에서 처음 보는 UUID도 `--resume`으로 연다(도구 목록은 런타임이 넘겨야 함, §14.6).
+- 프로세스가 turn 중에 끝나면 그 turn만 `turn/completed {status:'failed', error.code:'RUNTIME_LOST'}`(기능 확인 실패면 그 코드), 대기 중 승인은 `serverRequest/resolved`. 엔진 전체 연결은 그대로다(§4.1).
+- `sink.connection`은 로그인·버전·계정이 바뀔 때만 보낸다. 다른 계정이면 `{ready:false}` 뒤 `{ready:true}`.
+- 시작 전에 거절한 오류에는 `definite: true`를 붙인다(아무것도 Claude에 가지 않았음).
+
+### 14.3 격리와 실행 플래그 (D-S2·D-S4)
+
+- 항상: `-p --output-format stream-json --input-format stream-json --verbose --permission-prompt-tool stdio --settings {"disableAllHooks":true} --setting-sources= --strict-mcp-config --disable-slash-commands --include-partial-messages`, env는 허용 목록 + `ENABLE_CLAUDEAI_MCP_SERVERS=false`, API 키 변수는 넘기지 않는다. HOME·`CLAUDE_CONFIG_DIR`은 그대로라 로그인을 공유한다. [공식 `--help` 2.1.300 · 코드]
+- 2.1.300 이상에만: `--permission-mode manual`('바꾸기 전에 늘 묻기', 읽기 도구는 묻지 않음 — claude-agent-acp `session-mode.ts:358-362`), `--system-prompt-snapshot=off`(대화 중 Agent 지침이 바뀌어도 재개에서 반영). 더 낮은 버전은 이 두 플래그를 받는지 확인하지 않았다.
+- 도구가 있을 때만: `--mcp-config {"mcpServers":{"egdesk":{"type":"sdk","name":"egdesk"}}}`, `--allowedTools mcp__egdesk`.
+- CLAUDE.md·skills는 어댑터 옵션 `inherit: { instructions, skills }` 자리만 있고 bridge는 끈 채로 둔다.
+- 승인 카드가 없는 도구(WebFetch, WebSearch 등)를 Claude가 물으면 묻지 않고 거절한다(`approvals.tool` 능력 없음).
+
+### 14.4 bridge 경로
+
+| 경로 | 하는 일 |
+|---|---|
+| `GET /engines/claude/login-command?method=claudeai` (또는 `console`) | `{ method, billing, argv, line: 'claude auth login --claudeai', credentialStore: 'claude-cli', afterward: { method:'POST', route:'/engines/claude/refresh' } }`. 화면은 `POST /terminal/spawn` 뒤 `/terminal/write`로 `line` + Enter를 쓰고, 끝나면 refresh를 부른다. `console`은 D-S4 API 키 프로필(키는 CLI가 보관). 실행 파일 경로는 넣지 않는다(사용자 셸의 PATH 이름 `claude`). |
+| `GET /engines/claude/api-key-env` | `{ detected: [변수 이름], confirmed, engine }` (값은 읽지 않음) |
+| `POST /engines/claude/api-key-env {confirm: true}` (`false`면 취소) | D-S4 확인(이번 helper 실행 동안만, 저장 안 함) |
+| `POST /engines/claude/refresh` | 기존 그대로. 바뀌면 어댑터 게이트를 다시 계산한다 |
+
+`engines[].profiles[0].usage`(Claude): `usageDisplay` 형태(`level`, `percentLabel`, `windowLabel`, `resetLabel`, `resetsAt`, `stale`) + `windows`, `rejected`, `creditsRequired`, `billing`(`'subscription'` 또는 `'apiKey'`)(system/init `apiKeySource`), `autoResume: false`.
+
+### 14.5 확인하지 못한 것 (이 Mac `claude` 2.1.300이 로그아웃 상태: `auth status` → `loggedIn:false`, `authMethod:'none'`)
+
+| 항목 | 상태 |
+|---|---|
+| stdio 왕복(initialize → user 줄 → result) | 가짜 `claude`로만 [런타임: 단위 시험] |
+| `--setting-sources=`(빈 값) 수락, CLAUDE.md 제외 | 미확인 |
+| `system/init.capabilities` 실제 목록, `permissionMode` 값 | 미확인. 어댑터는 목록이 **있는지만** 요구한다(`requiredCapabilities: []`) |
+| `--permission-mode manual`·`--system-prompt-snapshot=off`가 stream-json 모드에서 받아지는지 | `--help` 문구만 [공식] |
+| 구독 로그인 공유(Keychain)와 격리 플래그의 조합 | 미확인 |
+| `--resume` + `--include-partial-messages` 조합, 재개 뒤 tools/list 재요청 | 미확인 |
+
+확인 절차(`claude auth login` 뒤 1~2회, 빈 임시 폴더): `createClaudeTransport({ executablePath, cwd: <임시폴더>, tools: [], sessionId: <새 UUID>, onMessage })`로 내장 도구까지 끈 채 `start()` → `sendUserMessage('Reply with exactly: ok')` → `result`를 받으면 `close()`. 받은 이벤트 종류(`type`/`subtype`)와 `system/init`의 `capabilities`·`permissionMode`·`apiKeySource`만 기록하고 답변 원문은 남기지 않는다. 그다음 같은 조건으로 어댑터(`startThread({cwd})` → `startTurn`)를 1회.
+
+### 14.6 런타임(2-R)에 필요한 변경 — 계약
+
+1. `send()`의 `this.store && engineId !== 'codex'` 거절을 풀고, 저장소의 `native.thread.bound`·`assertNativeAccount`가 Claude 바인딩을 받게 한다(ownerHash는 `adapter.ownerKey()` 해시, 형식 `claude:<method>:<email 소문자>`).
+2. `this.respond`가 Codex 응답기로만 가는 대신 rpc id의 엔진으로 보낸다(`adapter.owns?.(id)` 또는 `claudeRpcThreadId(id)` → `threadEngine`). 지금은 bridge가 Codex 응답기 앞에서 `claudeEngine.owns(id)`로 대신 가른다.
+3. `replyApproval`·`replyUserInput`의 `this.assertReady()`를 그 Run의 엔진 기준(`assertReady(this.runEngine(run))`)으로. 지금은 Codex가 끊기면 Claude 승인도 막힌다.
+4. 승인 선택지 필터(`['accept','decline','cancel']`)에 `acceptForSession`을 통과시키면 '이번 대화 동안 허용'이 동작한다(어댑터는 이미 제안하고 `updatedPermissions` destination 'session'으로 보낸다).
+5. 질문 공개 형태에 `multiSelect: true`를 남긴다(`safeUserInputQuestions`). 답은 `answers: { q0: { answers: [라벨…] } }` 그대로.
+6. `cleanNotification`이 `egdesk/engine/rateLimit`(`{engineId, status, window, windowMinutes, resetsAt, utilization, usedPercent, overageStatus, creditsRequired}`)을 버리지 않고 Run 오류·한도 표시에 쓴다. 자동 재시도는 하지 않는다(D-S5).
+7. 시작 전 거절(`error.definite === true`, 예: `CLAUDE_API_KEY_DETECTED` 409, `ENGINE_BUSY` 429)은 숫자 코드가 아니어도 '불확실한 대화'로 표시하지 않는다(`uncertainThreads`).
+8. 재개(`resumeThread`)에 그 대화의 `dynamicTools`와 기록된 `cwd`를 넘긴다(Claude는 도구 목록을 세션에 저장하지 않고, 세션 파일은 폴더별이다).
+
+출처(2-E에서 읽음): claude-agent-sdk-python `_internal/client.py:177-189`(initialize 뒤 prompt 줄), `types.py:1509-1512`(init.capabilities, 2.1.205부터); claude-agent-acp `src/acp-agent.ts:8620-8913`(cancelTurns·backstop), `:2903-2941`(터미널 로그인 방법 `auth login --claudeai|--console`), `src/session-mode.ts:358-362`('Manual' = default 모드); `claude 2.1.300 --help`(`--tools ""`, `--system-prompt-snapshot`, `--permission-mode` 선택지), `claude auth login --help`(`--claudeai`, `--console`).

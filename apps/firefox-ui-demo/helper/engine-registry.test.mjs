@@ -3,6 +3,7 @@ import assert from 'node:assert/strict'
 import { readFile } from 'node:fs/promises'
 import { CLAUDE_ENGINE_PROFILE_ID, EngineRegistry, createEngineStatusEmitter, describeClaudeEngine, publicEngineRow } from './engine-registry.mjs'
 import { CODEX_CAPABILITIES, createCodexEngineAdapter, describeCodexEngine } from './codex-engine-adapter.mjs'
+import { CLAUDE_CAPABILITIES, createClaudeEngineAdapter } from './claude-engine-adapter.mjs'
 
 const MODELS = [
   { id: 'gpt-6.1-sol', displayName: 'GPT-6.1-Sol', isDefault: true, supportedEfforts: ['low', 'medium', 'high', 'xhigh', 'max', 'ultra'], defaultEffort: 'low' },
@@ -87,12 +88,15 @@ test('registry refuses duplicate or unknown engines and reports an offline engin
   assert.equal(bridgeLikeRegistry().registry.assertReady('codex').id, 'codex')
 })
 
-test('bridge registers only Codex, lists Claude, authenticates the requested engine and publishes engines in /v1/state', async () => {
+test('bridge registers Codex and Claude, authenticates the requested engine and publishes engines in /v1/state', async () => {
   const source = await readFile(new URL('./codex-bridge-server.mjs', import.meta.url), 'utf8')
   const at = text => { const index = source.indexOf(text); assert.notEqual(index, -1, `missing server marker: ${text}`); return index }
   assert.ok(at('engineRegistry.register(codexEngine)') < at('const chat = new CodexChatRuntime({'))
-  at('engineRegistry.describe(describeClaudeEngine())')
-  assert.equal(source.match(/engineRegistry\.register\(/g).length, 1, 'Claude is listed, never registered as runnable')
+  // D-S1 (b): Claude is a runnable engine now, registered after Codex (the default).
+  assert.ok(at('engineRegistry.register(codexEngine)') < at('engineRegistry.register(claudeEngine)'))
+  assert.ok(at('engineRegistry.register(claudeEngine)') < at('const chat = new CodexChatRuntime({'))
+  assert.equal(source.match(/engineRegistry\.register\(/g).length, 2)
+  assert.equal(source.includes('engineRegistry.describe('), false, 'no listed-only Claude row any more')
   assert.ok(at('  engines: engineRegistry,') > at('const chat = new CodexChatRuntime({'))
   at('const engine = engineRegistry.require(body?.engineId ?? engineRegistry.defaultEngineId)')
   assert.ok(at("route === '/v1/state'") < at('engines: engineRegistry.publicEngines(),'))
@@ -156,7 +160,7 @@ test('bridge reads the model list after each ready connection and account change
   at('  getModels: () => modelCatalog.snapshot(),')
   at('    models: modelCatalog.snapshot(),')
   // engine.status rides the same SSE broadcast as auth.status and mcp.inherited.
-  assert.ok(at('const engineStatus = createEngineStatusEmitter({') > at('engineRegistry.describe(describeClaudeEngine())'))
+  assert.ok(at('const engineStatus = createEngineStatusEmitter({') > at('engineRegistry.register(claudeEngine)'))
   at('  engines: () => engineRegistry.publicEngines(),')
   at('  emit: event => broadcast(event),')
   at('  v: BRIDGE_PROTOCOL_VERSION,')
@@ -185,9 +189,10 @@ test('bridge reads the model list after each ready connection and account change
   assert.ok(spawned.indexOf('appServerProcess = child') < spawned.indexOf('engineStatus.check()'), 'the starting status is announced')
 })
 
-// SUB-08/13: the listed Claude row shows the static CLI check (installed,
-// version range, plan and email) but stays 'decisionPending' and unrunnable.
-test('the Claude row carries the static CLI check but stays decision pending and unrunnable', () => {
+// SUB-08/13: the listed-only Claude row (no adapter registered) shows the
+// static CLI check (installed, version range, plan and email) but stays
+// 'decisionPending' and unrunnable. The bridge registers the adapter instead.
+test('the listed-only Claude row carries the static CLI check but stays decision pending and unrunnable', () => {
   const registry = new EngineRegistry({ defaultEngineId: 'codex' })
   registry.register(createCodexEngineAdapter({ request: async () => ({}), respond: () => {} }))
   registry.describe(describeClaudeEngine())
@@ -228,14 +233,14 @@ test('engine rows publish versionStatus and installed only from their allow-list
   for (const installed of ['yes', 1, null, undefined]) assert.equal(publicEngineRow({ id: 'claude', installed }).installed, null)
 })
 
-test('bridge checks Claude statically at start, on /v1/state and on demand, and updates only the listed row', async () => {
+test('bridge checks Claude statically at start, on /v1/state and on demand, and re-gates the Claude adapter on a change', async () => {
   const source = await readFile(new URL('./codex-bridge-server.mjs', import.meta.url), 'utf8')
   const at = text => { const index = source.indexOf(text); assert.notEqual(index, -1, `missing server marker: ${text}`); return index }
-  at("import { createClaudeEngineStatus } from './claude-engine-auth.mjs'")
+  at("import { claudeLoginTerminalCommand, createClaudeEngineStatus } from './claude-engine-auth.mjs'")
   const status = source.slice(at('const claudeEngineStatus = createClaudeEngineStatus({'), at('const chat = new CodexChatRuntime({'))
   assert.ok(at('const engineStatus = createEngineStatusEmitter({') < at('const claudeEngineStatus = createClaudeEngineStatus({'))
-  assert.match(status, /engineRegistry\.updateListed\(describeClaudeEngine\(snapshot\)\)\n {4}engineStatus\.check\(\)/)
-  assert.equal(source.match(/engineRegistry\.register\(/g).length, 1, 'Claude is still never registered as runnable')
+  assert.match(status, /claudeEngine\.syncStatus\(\)\n {4}engineStatus\.check\(\)/)
+  assert.equal(source.includes('updateListed('), false)
   // /v1/state never waits for the CLI; the change arrives as engine.status.
   const state = source.slice(at("if (req.method === 'GET' && route === '/v1/state') {"), at("if (req.method === 'GET' && route === '/auth/status') {"))
   assert.match(state, /\n {4}void claudeEngineStatus\.refresh\(\)\n/)
@@ -247,4 +252,57 @@ test('bridge checks Claude statically at start, on /v1/state and on demand, and 
   assert.ok(listen.indexOf('void connectToAppServer()') < listen.indexOf('void claudeEngineStatus.refresh()'))
   // Codex publishes its Chat version range beside the exact schema contract.
   at('    versionStatus: nativeCapabilities.versionStatus ?? null,')
+})
+
+// D-S1 (b): with the adapter's runtime state the row is the real status.
+test('the connected Claude row gates on install, version range, init and sign-in, and asks before an API key is ignored', () => {
+  const check = { installed: true, version: '2.1.300', versionStatus: 'untested', auth: { status: 'signedIn', method: 'claudeai', label: 'Claude Max', account: 'owner@example.com', planType: 'max' } }
+  const connection = { minVersion: '2.1.205', capabilities: ['stream', 'resume'], residentProcesses: 1, residentLimit: 2, idleTimeoutMs: 300000, usage: { level: 'ok', autoResume: false } }
+  const row = publicEngineRow(describeClaudeEngine(check, connection))
+  assert.deepEqual([row.status, row.statusReason, row.capabilities, row.runtime.residentProcesses, row.profiles[0].usage], ['ready', undefined, ['stream', 'resume'], 1, { level: 'ok', autoResume: false }])
+  const statusOf = (nextCheck, nextConnection = connection) => { const r = publicEngineRow(describeClaudeEngine(nextCheck, nextConnection)); return [r.status, r.statusReason ?? null] }
+  assert.deepEqual(statusOf({ ...check, installed: null }), ['offline', 'notChecked'])
+  assert.deepEqual(statusOf({ ...check, installed: false }), ['notInstalled', null])
+  assert.deepEqual(statusOf({ ...check, version: null }), ['versionUnsupported', 'versionUnknown'])
+  assert.deepEqual(statusOf({ ...check, version: '2.1.204' }), ['versionUnsupported', 'belowMinimum'])
+  assert.deepEqual(statusOf(check, { ...connection, gateFailure: 'CLAUDE_CAPABILITIES_MISSING' }), ['versionUnsupported', 'CLAUDE_CAPABILITIES_MISSING'])
+  assert.deepEqual(statusOf(check, { ...connection, gateFailure: '/Users/me/secret' }), ['ready', null], 'only a code token is published')
+  assert.deepEqual(statusOf({ ...check, auth: { status: 'signedOut' } }), ['loginRequired', null])
+  assert.deepEqual(statusOf({ ...check, auth: null }), ['offline', 'authUnknown'])
+  assert.deepEqual(statusOf(check, { ...connection, apiKeyEnv: { detected: ['ANTHROPIC_API_KEY'], confirmed: false } }), ['ready', 'CLAUDE_API_KEY_DETECTED'])
+  assert.deepEqual(statusOf(check, { ...connection, apiKeyEnv: { detected: ['ANTHROPIC_API_KEY'], confirmed: true } }), ['ready', null])
+  assert.deepEqual(statusOf(check, { ...connection, disposed: true }), ['disabled', null])
+  // A registered adapter is runnable and is resolved like Codex; its row comes from the adapter.
+  const registry = new EngineRegistry({ defaultEngineId: 'codex' })
+  registry.register(createCodexEngineAdapter({ request: async () => ({}), respond: () => {} }))
+  const claude = registry.register(createClaudeEngineAdapter({ snapshot: () => check, defaultCwd: '/tmp', env: {}, platform: 'darwin' }))
+  assert.equal(registry.require('claude'), claude)
+  assert.equal(registry.resolve({ requested: 'claude' }), 'claude')
+  assert.equal(registry.assertReady('claude'), claude)
+  const published = registry.publicEngines().find(entry => entry.id === 'claude')
+  assert.deepEqual([published.status, published.isDefault, published.capabilities], ['ready', false, [...CLAUDE_CAPABILITIES]])
+})
+
+test('bridge wires the Claude adapter into Chat: events in, Claude answers routed out, login and API key routes, closed on shutdown', async () => {
+  const source = await readFile(new URL('./codex-bridge-server.mjs', import.meta.url), 'utf8')
+  const at = text => { const index = source.indexOf(text); assert.notEqual(index, -1, `missing server marker: ${text}`); return index }
+  at("import { createClaudeEngineAdapter } from './claude-engine-adapter.mjs'")
+  const adapter = source.slice(at('const claudeEngine = createClaudeEngineAdapter({'), at('const engineRegistry = new EngineRegistry('))
+  assert.match(adapter, /snapshot: \(\) => claudeEngineStatus\.snapshot\(\),/)
+  assert.match(adapter, /refreshStatus: options => claudeEngineStatus\.refresh\(options\),/)
+  assert.match(adapter, /onStatusChange: \(\) => engineStatus\.check\(\),/)
+  // The runtime's one responder hands Claude ids to the Claude adapter.
+  at('  respond: (...args) => claudeEngine.owns(args[0]) ? claudeEngine.respond(...args) : nativeRespond(...args),')
+  const sink = source.slice(at('claudeEngine.subscribe({'), at('if (chatStore) {'))
+  assert.ok(at('const chat = new CodexChatRuntime({') < at('claudeEngine.subscribe({'))
+  assert.match(sink, /notification: \(_engineId, message\) => \{ void chat\.handleNotification\(message\) \},/)
+  assert.match(sink, /serverRequest: \(_engineId, message\) => \{ void chat\.handleServerRequest\(message\) \},/)
+  assert.match(sink, /chat\.setConnection\('claude', state\.ready,/)
+  const login = source.slice(at("if (req.method === 'GET' && route === '/engines/claude/login-command') {"), at("if (route === '/engines/claude/api-key-env'"))
+  assert.match(login, /claudeLoginTerminalCommand\(url\.searchParams\.get\('method'\) \?\? undefined\)/)
+  const apiKey = source.slice(at("if (route === '/engines/claude/api-key-env'"), at("if (req.method === 'POST' && route === '/auth/cancel') {"))
+  assert.match(apiKey, /claudeEngine\.confirmApiKeyEnv\(body\.confirm\)/)
+  assert.match(apiKey, /typeof body\.confirm !== 'boolean'/)
+  const shutdown = source.slice(at('async function shutdown() {'), at("process.on('SIGINT', shutdown)"))
+  assert.match(shutdown, /await claudeEngine\.dispose\(\)/)
 })

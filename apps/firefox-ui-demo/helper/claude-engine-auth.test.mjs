@@ -4,10 +4,11 @@ import { mkdtemp, readFile, realpath, rm, writeFile } from 'node:fs/promises'
 import os from 'node:os'
 import path from 'node:path'
 import {
-  CLAUDE_AUTH_METHODS, CLAUDE_AUTH_STATUSES, CLAUDE_PROBE_TIMEOUT_MS, CLAUDE_STATUS_MAX_AGE_MS, CLAUDE_VERSION_POLICY,
-  claudeAuthFromCliStatus, claudeProbeEnvironment, createClaudeEngineStatus, parseClaudeVersion, probeClaudeEngine,
+  CLAUDE_AUTH_METHODS, CLAUDE_AUTH_STATUSES, CLAUDE_LOGIN_METHODS, CLAUDE_PROBE_TIMEOUT_MS, CLAUDE_STATUS_MAX_AGE_MS, CLAUDE_VERSION_POLICY,
+  claudeAuthFromCliStatus, claudeLoginTerminalCommand, claudeProbeEnvironment, createClaudeEngineStatus, parseClaudeVersion, probeClaudeEngine,
   resolveClaudeExecutable, runBounded,
 } from './claude-engine-auth.mjs'
+import { CLAUDE_TRANSPORT_MIN_VERSION } from './claude-engine-transport.mjs'
 import { engineVersionStatus } from './egdesk-native-capabilities.mjs'
 
 // Shape of `claude auth status --json` (Claude Code 2.1.300): absent fields
@@ -45,15 +46,35 @@ test('anything but the expected JSON object is unknown, never guessed', () => {
   }
 })
 
-test('version is read from the CLI banner only, and the range marks every installed Claude as not verified yet', () => {
+test('version is read from the CLI banner only, and the range marks every installed Claude as not verified yet, below the run gate as unsupported', () => {
   assert.equal(parseClaudeVersion('2.1.300 (Claude Code)\n'), '2.1.300')
   assert.equal(parseClaudeVersion('2.1.300\n'), '2.1.300')
   assert.equal(parseClaudeVersion('2.2.0-beta.1 (Claude Code)\nextra line'), '2.2.0-beta.1')
   for (const stdout of ['', 'claude 2.1.300', '2.1 (Claude Code)', '/Users/me/.local/bin/claude', 'v2.1.300', null, 7]) assert.equal(parseClaudeVersion(stdout), null, String(stdout))
-  assert.deepEqual(CLAUDE_VERSION_POLICY, { verified: [], minimum: '2.1.111' })
+  // 2-E: the display minimum is the transport's run gate, so the row and the run agree.
+  assert.deepEqual(CLAUDE_VERSION_POLICY, { verified: [], minimum: CLAUDE_TRANSPORT_MIN_VERSION })
+  assert.equal(CLAUDE_TRANSPORT_MIN_VERSION, '2.1.205')
   assert.equal(engineVersionStatus('2.1.300', CLAUDE_VERSION_POLICY), 'untested')
-  assert.equal(engineVersionStatus('2.1.111', CLAUDE_VERSION_POLICY), 'untested')
-  assert.equal(engineVersionStatus('2.1.110', CLAUDE_VERSION_POLICY), 'unsupported')
+  assert.equal(engineVersionStatus('2.1.205', CLAUDE_VERSION_POLICY), 'untested')
+  assert.equal(engineVersionStatus('2.1.204', CLAUDE_VERSION_POLICY), 'unsupported')
+  assert.equal(engineVersionStatus('2.1.111', CLAUDE_VERSION_POLICY), 'unsupported')
+})
+
+// D-S1 login button: a Terminal card runs the CLI's own login; EG-Desk sees no credential.
+test('the login button contract is the official `claude auth login` line, subscription by default and Console for the API key profile', () => {
+  assert.deepEqual(claudeLoginTerminalCommand(), {
+    method: 'claudeai', billing: 'subscription', argv: ['claude', 'auth', 'login', '--claudeai'], line: 'claude auth login --claudeai',
+    credentialStore: 'claude-cli', afterward: { method: 'POST', route: '/engines/claude/refresh' },
+  })
+  assert.equal(claudeLoginTerminalCommand(null).method, 'claudeai')
+  const consoleLogin = claudeLoginTerminalCommand('console')
+  assert.deepEqual([consoleLogin.line, consoleLogin.billing], ['claude auth login --console', 'apiKey'])
+  assert.deepEqual(Object.keys(CLAUDE_LOGIN_METHODS), ['claudeai', 'console'])
+  for (const bad of ['apiKey', '--sso', 'claudeai; rm -rf ~', 7, {}]) {
+    assert.throws(() => claudeLoginTerminalCommand(bad), error => error.code === 'CLAUDE_LOGIN_METHOD_INVALID' && error.httpStatus === 400)
+  }
+  // No path, token or email can appear: the line is built from fixed words only.
+  assert.equal(/\/|token|@/.test(JSON.stringify([claudeLoginTerminalCommand(), consoleLogin]).replaceAll('/engines/claude/refresh', '')), false)
 })
 
 test('probe environment only turns off the auto-updater; HOME and CLAUDE_CONFIG_DIR pass through', () => {

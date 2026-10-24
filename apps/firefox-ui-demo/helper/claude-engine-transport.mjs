@@ -125,6 +125,7 @@ export const CLAUDE_ISOLATION_SETTINGS = Object.freeze({ disableAllHooks: true }
 /** `--permission-mode` choices printed by CLI 2.1.300, without bypassPermissions. */
 export const CLAUDE_PERMISSION_MODES = Object.freeze(['manual', 'acceptEdits', 'plan', 'dontAsk', 'auto'])
 export const CLAUDE_EFFORT_LEVELS = Object.freeze(['low', 'medium', 'high', 'xhigh', 'max'])
+export const CLAUDE_SYSTEM_PROMPT_SNAPSHOT = Object.freeze(['on', 'off'])
 
 /** Requests the CLI sends us (SDK query.py:586-677); others can be handled by name too. */
 export const CLAUDE_INCOMING_CONTROL_SUBTYPES = Object.freeze(['can_use_tool', 'hook_callback', 'mcp_message'])
@@ -156,6 +157,8 @@ export const CLAUDE_FLAG_SOURCES = Object.freeze({
   '--allowedTools': 'claude 2.1.300 --help; SDK subprocess_cli.py:607-608',
   '--disallowedTools': 'claude 2.1.300 --help; SDK subprocess_cli.py:616-617',
   '--add-dir': 'claude 2.1.300 --help; SDK subprocess_cli.py:662-665',
+  '--tools': 'claude 2.1.300 --help (\'Use "" to disable all tools\')',
+  '--system-prompt-snapshot': 'claude 2.1.300 --help (on|off; off renders the prompt fresh every request)',
 })
 
 const MANAGED_MCP_PATHS = Object.freeze({
@@ -171,6 +174,8 @@ const SERVER_NAME = /^[A-Za-z0-9][A-Za-z0-9_-]{0,31}$/
 const SUBTYPE = /^[A-Za-z0-9_][A-Za-z0-9_.:/-]{0,63}$/
 // A rule like `mcp__egdesk` or `Bash(git status:*)`; commas split rules, so none inside one.
 const TOOL_RULE = /^[A-Za-z_][^,\0-\x1f\x7f]{0,299}$/
+// A built-in tool name for --tools (`Read`, `Bash`, ...); no rule syntax.
+const BUILTIN_TOOL = /^[A-Za-z][A-Za-z0-9_]{0,63}$/
 const DENIED_ENV = new Set(['CLAUDECODE']) // SDK filters it so the child does not think it runs inside Claude Code (#573)
 
 const plainObject = value => value && typeof value === 'object' && !Array.isArray(value) ? value : null
@@ -326,11 +331,16 @@ function toolRules(value, name) {
  *   inherit.skills — keep skills (needs the user and project sources).
  *   managedMcpConfig — a managed-mcp.json exists: the CLI refuses
  *     --strict-mcp-config next to it (t3code ClaudeHome.ts:49-65).
+ *   tools — null keeps the CLI's built-in set; [] disables every built-in
+ *     tool (`--tools ""`); names limit it (`--tools Read,Grep`).
+ *   systemPromptSnapshot — 'on' | 'off' (null: the CLI default). 'off' lets
+ *     a resumed conversation pick up changed --append-system-prompt text.
  */
 export function buildClaudeArgs({
   mcpConfig = null, managedMcpConfig = false, inherit = {}, includePartialMessages = true,
   model = null, effort = null, permissionMode = null, appendPrompt = null,
   sessionId = null, resume = null, allowedTools = null, disallowedTools = null, addDirs = null,
+  tools = null, systemPromptSnapshot = null,
   platform = process.platform,
 } = {}) {
   const inheritance = plainObject(inherit) || {}
@@ -388,6 +398,17 @@ export function buildClaudeArgs({
   if (addDirs != null) {
     if (!Array.isArray(addDirs) || addDirs.length > 32) throw optionError('addDirs must be an array of absolute paths')
     for (const dir of addDirs) args.push('--add-dir', absolutePath(dir, 'addDirs entry', platform))
+  }
+  if (tools != null) {
+    if (!Array.isArray(tools) || tools.length > 64 || tools.some(name => typeof name !== 'string' || !BUILTIN_TOOL.test(name))) {
+      throw optionError('tools must be an array of built-in tool names ([] disables all)')
+    }
+    // One value: '' (none) or a comma list; the next argv item is a flag, so the variadic option stops here.
+    args.push('--tools', tools.join(','))
+  }
+  if (systemPromptSnapshot != null) {
+    if (!CLAUDE_SYSTEM_PROMPT_SNAPSHOT.includes(systemPromptSnapshot)) throw optionError("systemPromptSnapshot must be 'on' or 'off'")
+    args.push(`--system-prompt-snapshot=${systemPromptSnapshot}`)
   }
   return args
 }
@@ -485,7 +506,8 @@ export function activeClaudeChildCount() {
  *   apiKeyEnvPolicy            'stop' (default: start() rejects CLAUDE_API_KEY_DETECTED) | 'strip' (user confirmed: run on the subscription)
  *   env, platform              parent environment / platform (tests)
  *   argv options               mcpConfig, inherit {instructions, skills}, model, effort, permissionMode,
- *                              appendPrompt, sessionId | resume, allowedTools, disallowedTools, addDirs, includePartialMessages
+ *                              appendPrompt, sessionId | resume, allowedTools, disallowedTools, addDirs, includePartialMessages,
+ *                              tools, systemPromptSnapshot
  *   managedMcpConfig           true/false, or null to check the managed-mcp.json path
  *   claudeConfigDir, inheritEnvNames[], extraEnv{}   env additions (API key names refused)
  *   initialize                 true (default) | false | { agents?, forwardSubagentText?, excludeDynamicSections? }

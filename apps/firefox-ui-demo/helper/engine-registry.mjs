@@ -71,32 +71,67 @@ export function createEngineStatusEmitter({ engines, emit, v = 1, now = Date.now
 
 export const CLAUDE_ENGINE_PROFILE_ID = 'claude-default'
 const CLAUDE_AUTH_STATUSES = new Set(['signedIn', 'signedOut', 'unknown'])
+const STATUS_REASON = /^[A-Za-z][A-Za-z0-9_]{0,59}$/
+const coreVersion = value => typeof value === 'string' && /^\d+\.\d+\.\d+/.test(value) ? value.split(/[-+]/)[0] : null
 
-// Claude is listed but cannot run until the connection method is decided
-// (SUB-12, decisions D1/D2), so status stays 'decisionPending' whatever the
-// static check says. The check (claude-engine-auth.mjs snapshot: installed,
-// version, versionStatus, auth) fills the version and the one CLI login slot
-// (SUB-08); before it, or without a CLI, profiles is empty. A later stage
-// replaces this row with a real adapter.
-export function describeClaudeEngine({ version = null, versionStatus = null, installed = null, auth = null } = {}) {
+/**
+ * The Claude engines[] row from the static CLI check (claude-engine-auth.mjs
+ * snapshot: installed, version, versionStatus, auth) and, when the Claude
+ * adapter is registered (D-S1 (b), 2026-10-24), its runtime state.
+ *
+ * Without `connection` the row is the listed-only form: 'decisionPending'
+ * (SUB-12), no capabilities, nothing runnable. It stays for callers that list
+ * Claude without running it.
+ *
+ * connection (claude-engine-adapter.mjs) → the real status, first match wins:
+ *   disabled (adapter disposed) → offline 'notChecked' (no check yet) →
+ *   notInstalled → versionUnsupported ('versionUnknown' | 'belowMinimum' |
+ *   the refused system/init code, e.g. CLAUDE_CAPABILITIES_MISSING) →
+ *   loginRequired (signed out) → offline 'authUnknown' (the CLI did not answer
+ *   in the expected shape) → ready. A ready row carries statusReason
+ *   'CLAUDE_API_KEY_DETECTED' while an API key in EG-Desk's environment waits
+ *   for the user's confirmation (D-S4), so the screen can ask before sending.
+ * The CLI keeps its own login (Keychain); EG-Desk never reads it (SUB-08).
+ */
+export function describeClaudeEngine({ version = null, versionStatus = null, installed = null, auth = null } = {}, connection = null) {
   const status = CLAUDE_AUTH_STATUSES.has(auth?.status) ? auth.status : 'unknown'
   const signedIn = status === 'signedIn'
+  const live = connection && typeof connection === 'object' ? connection : null
+  const profiles = installed === true ? [{
+    id: CLAUDE_ENGINE_PROFILE_ID, label: signedIn && typeof auth.label === 'string' ? auth.label : 'Claude', credentialStore: 'claude-cli', active: true,
+    auth: {
+      status,
+      method: signedIn && typeof auth.method === 'string' ? auth.method : null,
+      account: signedIn && typeof auth.account === 'string' ? auth.account : null,
+      planType: signedIn && typeof auth.planType === 'string' ? auth.planType : null,
+    },
+    usage: live && live.usage && typeof live.usage === 'object' && !Array.isArray(live.usage) ? live.usage : null,
+  }] : []
+  const count = value => Number.isSafeInteger(value) && value >= 0 ? value : 0
+  const runtime = live
+    ? { residentProcesses: count(live.residentProcesses), residentLimit: count(live.residentLimit) || 2, idleTimeoutMs: Number.isSafeInteger(live.idleTimeoutMs) && live.idleTimeoutMs > 0 ? live.idleTimeoutMs : 300000 }
+    : { residentProcesses: 0, residentLimit: 2, idleTimeoutMs: 300000 }
+  const base = { id: 'claude', label: 'Claude', version, versionSupported: null, versionStatus, installed: typeof installed === 'boolean' ? installed : null }
+  if (!live) return { ...base, status: 'decisionPending', statusReason: 'SUB-12', capabilities: [], profiles, runtime }
+  const minVersion = coreVersion(live.minVersion)
+  const core = coreVersion(version)
+  const below = core && minVersion ? core.split('.').map(Number).reduce((order, part, i) => order || Math.sign(part - minVersion.split('.').map(Number)[i]), 0) < 0 : versionStatus === 'unsupported'
+  const gate = typeof live.gateFailure === 'string' && STATUS_REASON.test(live.gateFailure) ? live.gateFailure : null
+  const [rowStatus, statusReason] =
+    live.disposed === true ? ['disabled', null]
+      : installed === null ? ['offline', 'notChecked']
+        : installed === false ? ['notInstalled', null]
+          : !core ? ['versionUnsupported', 'versionUnknown']
+            : below ? ['versionUnsupported', 'belowMinimum']
+              : gate ? ['versionUnsupported', gate]
+                : status === 'signedOut' ? ['loginRequired', null]
+                  : status !== 'signedIn' ? ['offline', 'authUnknown']
+                    : ['ready', live.apiKeyEnv?.detected?.length && live.apiKeyEnv.confirmed !== true ? 'CLAUDE_API_KEY_DETECTED' : null]
   return {
-    id: 'claude', label: 'Claude', status: 'decisionPending', statusReason: 'SUB-12',
-    version, versionSupported: null, versionStatus, installed: typeof installed === 'boolean' ? installed : null,
-    capabilities: [],
-    profiles: installed === true ? [{
-      // The CLI keeps its own login (Keychain); EG-Desk never reads it.
-      id: CLAUDE_ENGINE_PROFILE_ID, label: signedIn && typeof auth.label === 'string' ? auth.label : 'Claude', credentialStore: 'claude-cli', active: true,
-      auth: {
-        status,
-        method: signedIn && typeof auth.method === 'string' ? auth.method : null,
-        account: signedIn && typeof auth.account === 'string' ? auth.account : null,
-        planType: signedIn && typeof auth.planType === 'string' ? auth.planType : null,
-      },
-      usage: null,
-    }] : [],
-    runtime: { residentProcesses: 0, residentLimit: 2, idleTimeoutMs: 300000 },
+    ...base, status: rowStatus, ...(statusReason ? { statusReason } : {}),
+    capabilities: Array.isArray(live.capabilities) ? [...live.capabilities] : [],
+    profiles, runtime,
+    models: Array.isArray(live.models) ? live.models : null,
   }
 }
 
