@@ -16,6 +16,9 @@ import { AVATAR_PALETTE, PROFILE_TONES, normalizeProfileBody } from '../helper/e
 import { normalizeRateLimits, usageDisplay } from '../helper/codex-account-usage.mjs';
 import { PLAN_TYPES } from '../helper/codex-auth-state.mjs';
 import { publicError } from '../helper/codex-chat-values.mjs';
+import { publicModelRows } from '../helper/codex-model-catalog.mjs';
+import { gateMatchesEvent } from '../helper/egdesk-await-router.mjs';
+import { publicBrowserLocation } from '../helper/egdesk-event-bus.mjs';
 
 // Exercise the actual production runtime-config body, without executing the
 // Firefox overlay bootstrap, DOM handlers, bridge requests, or runtime code.
@@ -6526,6 +6529,349 @@ test('engine panel styles use approved tokens and outrank the HUD button reset',
   assert.match(surfaceCss, /\.egd-codex-conversation-hud-head:has\(> \.egd-codex-engine-chip\):has\(> \.egd-usage-meter\),\n\.egd-codex-thread-active-head:has\(> \.egd-codex-engine-chip\):has\(> \.egd-usage-meter\) \{ grid-template-columns: auto minmax\(0, 1fr\) auto auto auto; \}/);
 });
 
+// ============ Account models, effort words, engine.status, Browser location reports ============
+
+// helper-model-list: /v1/state engines[] codex row models (0.162.1 effort values).
+const modelRows = [
+  { id: 'gpt-6', displayName: 'GPT-6', isDefault: true, supportedEfforts: ['low', 'medium', 'high', 'xhigh', 'max', 'ultra'], defaultEffort: 'medium' },
+  { id: 'gpt-6-luna', displayName: 'GPT-6 Luna Extended Context', isDefault: false, supportedEfforts: ['low', 'medium', 'high', 'xhigh', 'max'], defaultEffort: 'high' },
+  { id: 'gpt-6-mini', displayName: 'GPT-6 mini', isDefault: false, supportedEfforts: ['minimal', 'low', 'turbo', 'deep'], defaultEffort: null },
+];
+const listedEngines = [{ ...engineRowsFixture[0], models: modelRows }, { ...engineRowsFixture[1], models: null }];
+const listedContext = { engines: listedEngines, auth: signedInPro, engineConfiguration: { effectiveModel: 'gpt-6' } };
+
+test('the account model list is read as the bridge publishes it; unknown stays unknown', () => {
+  assert.deepEqual(Chat.chatModelCatalog(listedEngines), publicModelRows(modelRows), 'the same rows the bridge validates against');
+  assert.equal(Chat.chatModelCatalog(engineRowsFixture), null, 'no models field: unknown');
+  assert.equal(Chat.chatModelCatalog([{ ...engineRowsFixture[0], models: null }]), null);
+  assert.equal(Chat.chatModelCatalog([{ ...engineRowsFixture[0], models: [] }]), null, 'an empty list is not an invented one');
+  assert.equal(Chat.chatModelCatalog(listedEngines, 'claude'), null, 'Claude lists no models');
+  const messy = Chat.chatModelCatalog([{ id: 'codex', models: [
+    { id: 'a', displayName: ' A\u2028model ', isDefault: true, supportedEfforts: ['low', 'HIGH', 'low', 7, 'high'], defaultEffort: 'xhigh' },
+    { id: 'a', displayName: 'dup' }, { id: 'bad id' }, { id: 'b', isDefault: true, supportedEfforts: null },
+  ] }]);
+  assert.deepEqual(messy, [
+    { id: 'a', displayName: 'A model', isDefault: true, supportedEfforts: ['low', 'high'], defaultEffort: null },
+    { id: 'b', displayName: 'b', isDefault: false, supportedEfforts: [], defaultEffort: null },
+  ], 'unique ids, one default, efforts as short tokens, a default effort only when listed');
+  const many = Array.from({ length: 60 }, (_, index) => ({ id: `m-${index}`, supportedEfforts: [] }));
+  assert.equal(Chat.chatModelCatalog([{ id: 'codex', models: many }]).length, 50);
+});
+
+test('effort words are Korean for every known value and never the raw token for an unknown one', () => {
+  assert.deepEqual(['minimal', 'low', 'medium', 'high', 'xhigh', 'max', 'ultra'].map(value => Chat.chatEffortLabel(value)),
+    ['최소', '낮음', '보통', '높음', '매우 높음', '최대', '초고']);
+  const efforts = modelRows[2].supportedEfforts;
+  assert.deepEqual(efforts.map(value => Chat.chatEffortLabel(value, efforts)), ['최소', '낮음', '기타 강도 1', '기타 강도 2']);
+  assert.equal(Chat.chatEffortLabel('mystery'), '기타 강도 1');
+});
+
+test('the panel shows the listed models, the default marked, and only the chosen model\'s efforts', () => {
+  const fresh = { id: 'new', messages: [] };
+  const view = Chat.chatModelView(fresh, listedContext);
+  assert.equal(view.listed, true);
+  assert.deepEqual(view.modelChoices.map(({ value, label, note, selected }) => [value, label, note, selected]), [
+    [null, 'GPT-6', '기본', true], ['gpt-6-luna', 'GPT-6 Luna Extended Context', null, false], ['gpt-6-mini', 'GPT-6 mini', null, false]]);
+  assert.deepEqual(view.effortChoices.map(row => row.label), ['낮음', '보통', '높음', '매우 높음', '최대', '초고']);
+  assert.equal(view.effort, 'medium', 'the default effort is the default choice');
+  assert.equal(view.effortChoices.find(row => row.isDefault).value, 'medium');
+  const luna = Chat.chatModelView({ ...fresh, model: 'gpt-6-luna', effort: 'ultra' }, listedContext);
+  assert.deepEqual([luna.model.id, luna.effort], ['gpt-6-luna', 'high'], 'an effort the model does not list falls back to its default');
+  assert.equal(luna.effortChoices.some(row => row.value === 'ultra'), false);
+  assert.equal(Chat.chatModelView({ ...fresh, model: 'gone' }, listedContext).model.id, 'gpt-6', 'an unlisted pick shows the default model');
+  assert.equal(Chat.chatModelView(fresh, { engines: listedEngines, engineConfiguration: { effectiveModel: 'gpt-6-luna' } }).defaultModel.id, 'gpt-6-luna',
+    'the verified launch model is what runs without a named model, so it is the default');
+  assert.equal(Chat.chatModelView(fresh, { engines: listedEngines, engineConfiguration: { effectiveModel: 'not-listed' } }).defaultModel.id, 'gpt-6');
+  const noDefault = [{ id: 'codex', models: modelRows.map(row => ({ ...row, isDefault: false })) }];
+  const unknownDefault = Chat.chatModelView(fresh, { engines: noDefault });
+  assert.deepEqual(unknownDefault.modelChoices[0], { value: null, id: null, label: '기본 모델', note: '계정 기본값', selected: true });
+  assert.deepEqual(unknownDefault.effortChoices, [], 'no efforts until a model is known');
+  const legacy = Chat.chatModelView({ ...fresh, model: 'gpt-6-luna', effort: 'high' }, { engines: engineRowsFixture, auth: signedInPro });
+  assert.deepEqual([legacy.listed, legacy.effort, legacy.effortChoices.map(row => row.label)], [false, 'high', ['기본', '낮음', '보통', '높음']],
+    'models null: \'기본 모델\' and the common efforts, as before');
+  for (const choice of [...view.modelChoices, ...view.effortChoices]) assert.doesNotMatch(`${choice.label} ${choice.note || ''}`, /xhigh|ultra|max\b|medium|minimal/);
+});
+
+test('a send carries the model with its effort, leaves the default model out, and names it when going back', () => {
+  const fields = thread => Chat.chatModelSendFields(thread, Chat.chatModelView(thread, listedContext));
+  assert.deepEqual(fields({ id: 'r' }), { effort: 'medium' }, 'default model: model left out, its default effort sent');
+  assert.deepEqual(fields({ id: 'r', model: 'gpt-6-luna' }), { model: 'gpt-6-luna', effort: 'high' });
+  assert.deepEqual(fields({ id: 'r', model: 'gpt-6-luna', effort: 'max' }), { model: 'gpt-6-luna', effort: 'max' });
+  assert.deepEqual(fields({ id: 'r', model: 'gpt-6-mini' }), { model: 'gpt-6-mini' }, 'a model without a default effort sends none');
+  assert.deepEqual(fields({ id: 'r', conversationId: 'c', sentModel: 'gpt-6-luna' }), { model: 'gpt-6', effort: 'medium' },
+    'Codex keeps the last named model, so going back to the default names it');
+  assert.deepEqual(fields({ id: 'r', conversationId: 'c', sentModel: 'gpt-6' }), { effort: 'medium' });
+  assert.deepEqual(fields({ id: 'r', sentModel: 'gpt-6-luna' }), { effort: 'medium' }, 'a new conversation starts on the default anyway');
+  const legacy = thread => Chat.chatModelSendFields(thread, Chat.chatModelView(thread, { engines: engineRowsFixture, auth: signedInPro }));
+  assert.deepEqual(legacy({ id: 'r', model: 'gpt-6-luna', effort: 'high' }), { effort: 'high' }, 'models null: no hidden model is sent');
+  assert.deepEqual(legacy({ id: 'r', effort: 'xhigh' }), {});
+  const body = Chat.buildChatRequest({ id: 'r' }, 'hi', 'q', { engineId: 'codex', ...fields({ id: 'r', model: 'gpt-6-luna' }) });
+  assert.deepEqual([body.model, body.effort], ['gpt-6-luna', 'high']);
+  assert.match(surfaceSource, /const modelFields = ChatState\.chatModelSendFields\(sendingThread, ChatState\.chatModelView\(sendingThread, \{\n            engineId, engines: state\.codex\.engines, auth: state\.codex\.authStatus, engineConfiguration: state\.codex\.engineConfiguration \}\)\);\n          runtimeConfig\.model = modelFields\.model;\n          runtimeConfig\.effort = modelFields\.effort;\n          runtimeConfig\.contextSnapshotIds/);
+  assert.match(surfaceSource, /if \(chatRequest\.model\) updateThreadById\(activeThread\.id, thread => \(\{ \.\.\.thread, sentModel: chatRequest\.model, nameModelNext: false \}\)\);\n            syncProtocolRun\(run\);/);
+  assert.match(surfaceSource, /if \(source\.sentModel\) target\.sentModel = source\.sentModel;/, 'a branch continues on the same model');
+});
+
+test('a refused model or effort says why in Korean and returns the choice to the default', () => {
+  assert.match(Chat.chatModelSendErrorText('MODEL_UNAVAILABLE'), /^선택한 모델을 지금 계정에서 쓸 수 없어 보내지 않았습니다\. 기본 모델로 되돌렸으니/);
+  assert.match(Chat.chatModelSendErrorText('EFFORT_UNSUPPORTED'), /^선택한 모델이 이 추론 강도를 지원하지 않아 보내지 않았습니다\. 기본 강도로 되돌렸으니/);
+  assert.equal(Chat.chatModelSendErrorText('PROFILE_NOT_FOUND'), null);
+  assert.deepEqual(Chat.chatModelRejectionReset('MODEL_UNAVAILABLE'), { model: null, effort: null, nameModelNext: true });
+  assert.deepEqual(Chat.chatModelRejectionReset('EFFORT_UNSUPPORTED'), { effort: null, nameModelNext: true });
+  assert.equal(Chat.chatModelRejectionReset('INVALID_STATELESS'), null);
+  for (const code of ['MODEL_UNAVAILABLE', 'EFFORT_UNSUPPORTED']) assert.doesNotMatch(Chat.chatModelSendErrorText(code), /[A-Z_]{4,}/);
+  assert.match(surfaceSource, /\|\| ChatState\.chatModelSendErrorText\(error\.code\);\n          if \(profileText\) error\.message = profileText;\n          \/\/ A refused model or effort returns the room's choice to the default\.\n          const modelReset = ChatState\.chatModelRejectionReset\(error\.code\);\n          if \(modelReset\) updateThreadById\(activeThread\.id, thread => \(\{ \.\.\.thread, \.\.\.modelReset \}\)\);/);
+  // The reset room names the default model with its default effort next time, so
+  // a conversation running another model is not refused the same way again.
+  const reset = { id: 'r', conversationId: 'c', model: 'gpt-6-luna', effort: 'max', ...Chat.chatModelRejectionReset('MODEL_UNAVAILABLE') };
+  assert.deepEqual(Chat.chatModelSendFields(reset, Chat.chatModelView(reset, listedContext)), { model: 'gpt-6', effort: 'medium' });
+  const accepted = { ...reset, sentModel: 'gpt-6', nameModelNext: false };
+  assert.deepEqual(Chat.chatModelSendFields(accepted, Chat.chatModelView(accepted, listedContext)), { effort: 'medium' }, 'once named, the default is left out again');
+});
+
+test('model and effort picks keep only offered values; another model starts on its default effort', () => {
+  const method = name => surfaceSource.match(new RegExp(`      ${name}\\(([^)]*)\\) \\{([\\s\\S]*?)\\n      \\},`));
+  const bind = (name, deps, values) => {
+    const [, params, body] = method(name) || [];
+    assert.ok(body, `${name} must remain directly testable`);
+    return compileFunction(`return function (${params}) {${body}\n}`, deps)(...values);
+  };
+  const state = { codex: { threads: [{ id: 'old', messages: [{ id: 'm' }], effort: 'max' }], engines: listedEngines, authStatus: signedInPro,
+    engineConfiguration: null, recentEngineId: 'codex' } };
+  let emits = 0;
+  const getThread = (_codex, id) => state.codex.threads.find(thread => thread.id === id) || null;
+  const update = (id, fn) => { state.codex.threads = state.codex.threads.map(thread => thread.id === id ? fn(thread) : thread); };
+  const values = [state, getThread, Chat, update, () => emits++];
+  const deps = ['state', 'getCodexThreadById', 'ChatState', 'updateThreadById', 'emit'];
+  const setModel = bind('setThreadModel', deps, values);
+  const setEffort = bind('setThreadEffort', deps, values);
+  setEffort('old', 'ultra');
+  assert.equal(getThread(null, 'old').effort, 'ultra', 'the default GPT-6 offers ultra');
+  setModel('old', 'gpt-6-luna');
+  assert.deepEqual([getThread(null, 'old').model, getThread(null, 'old').effort], ['gpt-6-luna', null], 'another model starts on its own default');
+  setEffort('old', 'ultra');
+  assert.equal(getThread(null, 'old').effort, null, 'Luna does not offer ultra');
+  setEffort('old', 'xhigh');
+  setModel('old', 'gpt-6-luna');
+  assert.equal(getThread(null, 'old').effort, 'xhigh', 'the same model keeps its effort');
+  setModel('old', 'unlisted');
+  assert.equal(getThread(null, 'old').model, 'gpt-6-luna', 'a model the list does not offer is ignored');
+  setModel('old', null);
+  assert.deepEqual([getThread(null, 'old').model, getThread(null, 'old').effort], [null, null], 'the default model is stored as no pick');
+  assert.equal(emits, 6);
+  assert.equal(Chat.chatModelPick({ id: 'r' }, 'gpt-6', { engines: listedEngines }), undefined, 'the default is offered as no pick, not its id');
+});
+
+test('engine panel: listed models as a radio list, the chosen model\'s efforts in Korean, and the chip names the model', () => {
+  const start = surfaceSource.indexOf('      const engineContext = {');
+  const end = surfaceSource.indexOf('      const renderThreadAgentRow = ', start);
+  const node = (tag, props = {}, ...children) => ({ tag, props, className: props.class, children: children.filter(child => child != null) });
+  const text = value => typeof value === 'string' ? value : (value?.children || []).map(text).join('');
+  const calls = [];
+  const bridge = new Proxy({}, { get: (_target, name) => (...args) => calls.push([name, ...args]) });
+  const ui = compileFunction(`${surfaceSource.slice(start, end)}\nreturn { renderEngineChip, renderEnginePanel };`,
+    ['codex', 'ChatState', 'el', 'deskIcon', 'codexBridge'])({ recentEngineId: 'codex', engines: listedEngines, authStatus: signedInPro,
+    engineConfiguration: null, engineMenu: { threadId: 'old', left: 0, top: 0 } }, Chat, node, name => ({ tag: 'svg', icon: name }), bridge);
+  const room = { id: 'old', messages: [{ id: 'm' }], model: 'gpt-6-luna', effort: 'max' };
+  const panel = ui.renderEnginePanel(room);
+  assert.equal(panel.children.some(child => child.className === 'egd-codex-engine-model'), false, 'no static model line when the list is known');
+  const models = panel.children.find(child => child.className === 'egd-codex-engine-models');
+  assert.deepEqual([models.props.role, models.props['aria-label']], ['radiogroup', '모델']);
+  assert.deepEqual(models.children.map(row => [text(row), row.props['aria-checked'], row.props.data.model]), [
+    ['GPT-6기본', 'false', 'gpt-6'], ['GPT-6 Luna Extended Context', 'true', 'gpt-6-luna'], ['GPT-6 mini', 'false', 'gpt-6-mini']]);
+  models.children[0].props.onclick();
+  assert.deepEqual(calls.pop(), ['setThreadModel', 'old', null], 'the default row sends no model id');
+  models.children[2].props.onclick();
+  assert.deepEqual(calls.pop(), ['setThreadModel', 'old', 'gpt-6-mini']);
+  const efforts = panel.children.find(child => child.className === 'egd-codex-engine-efforts');
+  assert.equal(efforts.props.data.columns, '3', 'five efforts sit in rows of three');
+  assert.deepEqual(efforts.children.map(row => [text(row), row.props['aria-checked']]),
+    [['낮음', 'false'], ['보통', 'false'], ['높음', 'false'], ['매우 높음', 'false'], ['최대', 'true']]);
+  assert.equal(efforts.children[2].props.title, '높음 · 이 모델의 기본 강도');
+  efforts.children[3].props.onclick();
+  assert.deepEqual(calls.pop(), ['setThreadEffort', 'old', 'xhigh']);
+  assert.ok(panel.children.some(child => child.className === 'egd-codex-engine-hint'));
+  const mini = ui.renderEnginePanel({ ...room, model: 'gpt-6-mini', effort: null });
+  assert.deepEqual(mini.children.find(child => child.className === 'egd-codex-engine-efforts').children.map(text), ['최소', '낮음', '기타 강도 1', '기타 강도 2']);
+  assert.equal(mini.children.find(child => child.className === 'egd-codex-engine-efforts').props.data.columns, '4');
+
+  const chip = ui.renderEngineChip(room);
+  assert.equal(text(chip), 'Codex · GPT-6 Luna Ex… · 최대', 'the chip names the model, shortened');
+  assert.equal(chip.props.title, 'AI 엔진 Codex · ChatGPT Pro · 이 대화에 고정 · 모델 GPT-6 Luna Extended Context · 추론 강도 최대');
+  const plain = Chat.chatEngineChipView({ id: 'r', messages: [] }, listedContext);
+  assert.deepEqual([plain.text, plain.title], ['Codex · GPT-6', 'AI 엔진 Codex · ChatGPT Pro · 새 대화에 사용 · 모델 GPT-6 (기본) · 추론 강도 보통']);
+  assert.equal(Chat.chatEngineChipView({ id: 'r', messages: [], effort: 'high' }, { ...listedContext, engines: engineRowsFixture }).text, 'Codex · 높음',
+    'models null: the chip reads as before');
+});
+
+test('engine model list styles use approved tokens and the HUD button reset is outranked', () => {
+  const rule = selector => surfaceCss.match(new RegExp(`^${selector.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')} \\{([^}]+)\\}`, 'm'))?.[1] || '';
+  for (const selector of ['.egd-codex-engine-models', 'button.egd-codex-engine-model-choice', '.egd-codex-engine-model-name',
+    '.egd-codex-engine-model-note', '.egd-codex-engine-model-check']) {
+    assert.ok(rule(selector), `${selector} is styled`);
+    assert.doesNotMatch(rule(selector), /#[0-9a-f]{3,8}\b|rgba?\(/i, `${selector} uses approved tokens only`);
+  }
+  assert.match(rule('.egd-codex-engine-models'), /max-height: 188px;[\s\S]*overflow-y: auto;/, 'a long list scrolls inside the panel');
+  assert.match(surfaceCss, /^\.egd-codex-engine-efforts\[data-columns="3"\] \{ grid-template-columns: repeat\(3, minmax\(0, 1fr\)\); \}$/m);
+  assert.match(surfaceCss, /^\.egd-codex-engine-efforts\[data-columns="3"\] > button\.egd-codex-engine-effort:nth-child\(n\+4\),\n\.egd-codex-engine-efforts\[data-columns="4"\] > button\.egd-codex-engine-effort:nth-child\(n\+5\) \{ border-top: 1px solid var\(--egd-outline-variant\); \}$/m);
+});
+
+test('engine.status replaces the engine rows; a brief \'로그인 필요\' after connecting is held, a lasting one applies', () => {
+  const ready = [{ id: 'codex', status: 'ready', models: modelRows }];
+  const readyNoModels = [{ id: 'codex', status: 'ready', models: null }];
+  const login = [{ id: 'codex', status: 'loginRequired', models: null }];
+  let engines = ready;
+  const applied = [];
+  const timers = new Map();
+  let nextTimer = 1;
+  const debouncer = Chat.createEngineStatusDebouncer({
+    current: () => engines, apply: rows => { applied.push(rows); engines = rows; },
+    setTimer: (fn, ms) => { assert.equal(ms, Chat.ENGINE_LOGIN_FLICKER_MS); timers.set(nextTimer, fn); return nextTimer++; },
+    clearTimer: id => timers.delete(id),
+  });
+  assert.equal(debouncer.push(login), false, 'held');
+  assert.deepEqual(applied, []);
+  assert.equal(debouncer.push(readyNoModels), true, 'a newer row arrives first: the flicker is dropped');
+  assert.equal(timers.size, 0);
+  debouncer.push(ready);
+  assert.deepEqual(applied, [readyNoModels, ready], 'the observed first-connection order ends with the models');
+  debouncer.push(login);
+  debouncer.push(login);
+  assert.equal(timers.size, 1, 'one timer per hold');
+  const [heldTimer, fire] = [...timers][0];
+  timers.delete(heldTimer);
+  fire();
+  assert.equal(applied.at(-1), login, 'a sign-out that lasts applies after the short hold');
+  assert.equal(debouncer.push([{ id: 'codex', status: 'loginRequired' }, { id: 'claude', status: 'ready' }]), true, 'already signed out: nothing to hold');
+  engines = null;
+  assert.equal(debouncer.push(login), false, 'before any row is known the first report is held too');
+  debouncer.cancel();
+  assert.equal(timers.size, 0, '/v1/state is fresher and cancels a held row');
+  assert.equal(debouncer.push('bad'), true);
+  assert.equal(applied.at(-1), null, 'a malformed frame reads as unknown');
+  assert.match(surfaceSource, /        case 'engine\.status':\n          engineStatus\.push\(event\.engines\);\n          return;/);
+  assert.match(surfaceSource, /apply: \(engines\) => update\(\{ engines \}\),/);
+  assert.equal(surfaceSource.match(/if \(!epochScope\.valid\(token\)\) return;\n {8,10}engineStatus\.cancel\(\);\n {8,10}const status = bridgeState\?\.auth \|\| state\.codex\.authStatus;/g)?.length, 2,
+    'both /v1/state reads cancel a held row');
+});
+
+test('a Browser card location leaves only as origin and path, http(s) only', () => {
+  const secret = 'https://user:pw@login.example.com:8443/oauth/callback?code=SECRET&state=abc#token=XYZ';
+  assert.deepEqual(Surface.browserEventLocation(secret), { origin: 'https://login.example.com:8443', path: '/oauth/callback' });
+  assert.deepEqual(Surface.browserEventLocation(secret), publicBrowserLocation(secret), 'the same reduction the bridge applies');
+  for (const value of ['about:blank', 'about:home', 'chrome://browser/content/browser.xhtml', 'file:///Users/me/a.txt', 'javascript:alert(1)',
+    'data:text/html,hi', 'moz-extension://x/y', 'resource://gre/x', 'not a url', '', null, 'https://a.example/\nx', `https://a.example/${'a'.repeat(2050)}`]) {
+    assert.equal(Surface.browserEventLocation(value), null, String(value).slice(0, 40));
+  }
+  assert.deepEqual(Surface.browserEventLocation('HTTPS://Example.COM'), { origin: 'https://example.com', path: '/' });
+});
+
+test('an open sign-in gate matches only the exact origin, a "/" boundary path and the named card — as the bridge does', () => {
+  const graph = { graphId: 'g1', cancelRequested: false, tasks: [
+    { taskId: 'a', status: 'waiting-on-dependency', gates: [
+      { gateId: 'task:x', kind: 'task', taskId: 'x', status: 'waiting' },
+      { gateId: 'login', kind: 'oauth', origin: 'https://login.example.com', pathPrefix: '/oauth/callback', status: 'waiting' },
+      { gateId: 'done', kind: 'oauth', origin: 'https://other.example', pathPrefix: '/cb', status: 'satisfied', satisfiedBy: 'browser.oauthCompleted' },
+    ] },
+    { taskId: 'b', status: 'queued', gates: [{ gateId: 'card', kind: 'oauth', origin: 'https://app.example', pathPrefix: '/auth/', cardId: 'egd-browser-card-2', status: 'waiting' }] },
+    { taskId: 'c', status: 'running', gates: [{ gateId: 'late', kind: 'oauth', origin: 'https://late.example', pathPrefix: '/cb', status: 'waiting' }] },
+    { taskId: 'd', status: 'approval-required', gates: [{ gateId: 'bad', kind: 'oauth', origin: 'https://bad.example/', pathPrefix: '/', status: 'waiting' }] },
+  ] };
+  const gates = Surface.waitingOAuthGates(graph);
+  assert.deepEqual(gates, [
+    { origin: 'https://login.example.com', pathPrefix: '/oauth/callback' },
+    { origin: 'https://app.example', pathPrefix: '/auth/', cardId: 'egd-browser-card-2' },
+  ], 'waiting oauth gates of tasks not started; satisfied, running and malformed ones are not kept');
+  assert.deepEqual(Surface.waitingOAuthGates({ ...graph, cancelRequested: true }), [], 'a cancelled graph has no open gate');
+  const cases = [
+    [gates[0], 'egd-browser-card-1', 'https://login.example.com/oauth/callback?code=1', true],
+    [gates[0], 'egd-browser-card-1', 'https://login.example.com/oauth/callback/done', true],
+    [gates[0], 'egd-browser-card-1', 'https://login.example.com/oauth/callbackx', false],
+    [gates[0], 'egd-browser-card-1', 'https://login.example.com/oauth', false],
+    [gates[0], 'egd-browser-card-1', 'http://login.example.com/oauth/callback', false],
+    [gates[0], 'egd-browser-card-1', 'https://login.example.com:444/oauth/callback', false],
+    [gates[0], 'egd-browser-card-1', 'https://login.example.com.evil.test/oauth/callback', false],
+    [gates[0], 'egd-browser-card-1', 'https://evil.test/login.example.com/oauth/callback', false],
+    [gates[0], 'egd-browser-card-1', 'https://sub.login.example.com/oauth/callback', false],
+    [gates[1], 'egd-browser-card-2', 'https://app.example/auth/', true],
+    [gates[1], 'egd-browser-card-2', 'https://app.example/auth/finish', true],
+    [gates[1], 'egd-browser-card-2', 'https://app.example/auth', false],
+    [gates[1], 'egd-browser-card-3', 'https://app.example/auth/finish', false],
+  ];
+  for (const [gate, cardId, url, expected] of cases) {
+    const location = Surface.browserEventLocation(url);
+    assert.equal(Surface.oauthGateMatches(gate, cardId, location), expected, `${url} on ${cardId}`);
+    assert.equal(gateMatchesEvent({ gateId: 'g', kind: 'oauth', ...gate }, { topic: 'browser.oauthCompleted', payload: { cardId, ...location } }), expected,
+      `the bridge agrees for ${url}`);
+  }
+});
+
+test('Browser location reports: one navigated per new location, a sign-in report only on a match, bounded per second, no query anywhere', async () => {
+  let clock = 0;
+  const posted = [];
+  const reporter = Surface.createBrowserWorkflowReporter({ post: async body => { posted.push(body); }, now: () => clock });
+  reporter.graph({ graphId: 'g1', tasks: [{ taskId: 'a', status: 'waiting-on-dependency',
+    gates: [{ gateId: 'login', kind: 'oauth', origin: 'https://login.example.com', pathPrefix: '/oauth/callback', status: 'waiting' }] }] });
+  reporter.graph({ graphId: 'bad id', tasks: [{ status: 'queued', gates: [{ kind: 'oauth', origin: 'https://x.example', pathPrefix: '/x', status: 'waiting' }] }] });
+  assert.equal(reporter.openGateCount(), 1);
+  assert.deepEqual(reporter.location('egd-browser-card-1', 'https://login.example.com/start?client=abc'),
+    [{ cardId: 'egd-browser-card-1', kind: 'navigated', url: 'https://login.example.com/start' }]);
+  assert.deepEqual(reporter.location('egd-browser-card-1', 'https://login.example.com/start?client=other#x'), [], 'same origin and path: nothing new');
+  assert.deepEqual(reporter.location('egd-browser-card-1', 'about:blank'), [], 'internal pages are not reported');
+  assert.deepEqual(reporter.location('egd-browser-card-1', 'https://login.example.com/oauth/callback?code=SECRET&state=s'), [
+    { cardId: 'egd-browser-card-1', kind: 'navigated', url: 'https://login.example.com/oauth/callback' },
+    { cardId: 'egd-browser-card-1', kind: 'oauthCompleted', url: 'https://login.example.com/oauth/callback' }]);
+  assert.deepEqual(reporter.location('egd-browser-card-2', 'https://login.example.com/oauth/callbackx?code=1').map(body => body.kind), ['navigated'],
+    'a look-alike path is not a finished sign-in');
+  assert.deepEqual(reporter.location('bad card id', 'https://a.example/'), []);
+  await reporter.settled();
+  assert.deepEqual(posted.map(body => body.kind), ['navigated', 'navigated', 'oauthCompleted', 'navigated'], 'sent in order');
+  for (const body of posted) {
+    assert.deepEqual(Object.keys(body), ['cardId', 'kind', 'url'], 'exactly the bridge fields');
+    assert.doesNotMatch(body.url, /[?#]|SECRET|code=|client=/);
+  }
+  reporter.graph({ graphId: 'g1', tasks: [{ taskId: 'a', status: 'running',
+    gates: [{ gateId: 'login', kind: 'oauth', origin: 'https://login.example.com', pathPrefix: '/oauth/callback', status: 'waiting' }] }] });
+  assert.equal(reporter.openGateCount(), 0, 'a started task closes its gate');
+  assert.deepEqual(reporter.location('egd-browser-card-3', 'https://login.example.com/oauth/callback').map(body => body.kind), ['navigated']);
+
+  clock = 10_000;
+  const burst = Array.from({ length: 12 }, (_, index) => reporter.location('egd-browser-card-4', `https://a.example/page-${index}`)).flat();
+  assert.equal(burst.length, Surface.BROWSER_NAVIGATED_PER_SECOND, 'navigation reports are capped per second');
+  reporter.graph({ graphId: 'g2', tasks: [{ taskId: 'b', status: 'queued',
+    gates: [{ gateId: 'cb', kind: 'oauth', origin: 'https://a.example', pathPrefix: '/cb', status: 'waiting' }] }] });
+  assert.deepEqual(reporter.location('egd-browser-card-4', 'https://a.example/cb').map(body => body.kind), ['oauthCompleted'],
+    'a finished sign-in still has room after the navigation cap');
+  clock = 11_000;
+  assert.equal(reporter.location('egd-browser-card-4', 'https://a.example/next').length, 1, 'the next second has room again');
+  assert.ok(Surface.BROWSER_EVENTS_PER_SECOND < 20, 'below the bridge limit');
+
+  let failures = 0;
+  const failing = Surface.createBrowserWorkflowReporter({ post: async () => { throw Object.assign(new Error('x'), { status: 429 }); },
+    onError: () => { failures += 1; } });
+  failing.location('egd-browser-card-1', 'https://a.example/1');
+  failing.location('egd-browser-card-1', 'https://a.example/2');
+  await failing.settled();
+  assert.equal(failures, 2, 'a refused report never stops the next one');
+});
+
+test('Browser cards report their arrived location for user cards only, through the bridge, with no URL in logs', () => {
+  const reportFn = surfaceSource.match(/    const reportBrowserLocation = \(uri\) => \{\n([\s\S]*?)\n    \};/)?.[1] || '';
+  assert.match(reportFn, /if \(card\.dataset\.codexRole === 'auth' \|\| !card\.isConnected\) return;/, 'the Codex sign-in card is not a workflow Browser');
+  assert.match(reportFn, /state\.codexBridge\?\.reportBrowserLocation\?\.\(card\.id, uri\)/);
+  assert.match(surfaceSource, /const readArrivedBrowserUri = \(\) => \{\n      try \{ return xulBrowser\?\.currentURI\?\.spec \|\| ''; \} catch \{ return ''; \}\n    \};/,
+    'the arrived location, never the requested src');
+  assert.match(surfaceSource, /const syncBrowserStateFromBrowser = \(options = \{\}\) => \{\n      reportBrowserLocation\(readArrivedBrowserUri\(\)\);/);
+  assert.match(surfaceSource, /onLocationChange\(webProgress, _request, location\) \{\n        if \(webProgress && webProgress\.isTopLevel === false\) return;\n        reportBrowserLocation\(location\?\.spec \|\| ''\);/);
+  assert.match(surfaceSource, /xulBrowser\.webProgress\?\.addProgressListener\(browserLocationListener, Ci\.nsIWebProgress\.NOTIFY_LOCATION\)/);
+  const bridgeMethod = surfaceSource.match(/      reportBrowserLocation\(cardId, url\) \{\n([\s\S]*?)\n      \},/)?.[1] || '';
+  assert.match(bridgeMethod, /if \(!state\.codex\.connected\) return \[\];\n        return browserWorkflow\.location\(cardId, url\);/);
+  assert.match(surfaceSource, /post: \(body\) => fetchJson\('\/events\/browser', \{ method: 'POST', body: JSON\.stringify\(body\) \}\),/);
+  assert.match(surfaceSource, /        case 'task\.graph':\n          browserWorkflow\.graph\(event\.graph\);\n          taskGraphFrame\(event\.graph\);\n          return;/);
+  const onError = surfaceSource.match(/onError: \(error\) => \{([^\n]*)\},/)?.[1] || '';
+  assert.ok(onError && !/url|uri|body/i.test(onError), 'a refused report logs its status, never the address');
+});
+
 // ============ Polish: header buttons in dark, keyboard room rows, room search focus, artifact camera ============
 
 test('card and Chat panel header buttons draw no native face and take their colours from tokens in both schemes', () => {
@@ -7315,4 +7661,367 @@ test('bridge build marker: /v1/state carries the installed build, and a missing 
   assert.equal((surfaceSource.match(/\.\.\.bridgeSessionFields\(bridgeState\),/g) || []).length, 2, 'connect and refresh both read them');
   assert.match(surfaceSource, /case 'mcp\.inherited':\n          update\(\{ inheritedMcp: Array\.isArray\(event\.inheritedMcp\) \? event\.inheritedMcp : null \}\);/,
     'the SSE codex event replaces the list');
+});
+
+// CHAT-06 Await task list (helper contract: GET /tasks/state, SSE task.graph /
+// task.native / task.plan, POST /tasks/continue).
+const awaitScope = { graphId: 'graph-a', requestId: 'req-a', runId: 'run-a', parentTaskId: null, requestedBy: 'agent-plan' };
+const awaitGraph = (overrides = {}) => ({
+  ...awaitScope, activated: true, cancelRequested: false, recoveryHold: false,
+  tasks: [
+    { taskId: 'collect', ownerId: 'agent', sourceRef: 'src-secret-1', dependsOn: [], status: 'running', blockedBy: [], gates: [], attempts: [{ attemptId: 'a1', status: 'running' }] },
+    { taskId: 'login', ownerId: 'agent', sourceRef: 'src-secret-2', dependsOn: ['collect'], status: 'waiting-on-dependency', gates: [
+      { gateId: 'task:collect', kind: 'task', taskId: 'collect', status: 'waiting' },
+      { gateId: 'sso', kind: 'oauth', origin: 'https://accounts.example.com', pathPrefix: '/callback', cardId: 'card-1', status: 'waiting' },
+    ] },
+    { taskId: 'report', ownerId: 'agent', sourceRef: 'src-secret-3', dependsOn: [], status: 'waiting-on-dependency', gates: [
+      { gateId: 'inbox', kind: 'file', root: 'root-1', relativeGlob: 'reports/*.pdf', status: 'satisfied', satisfiedBy: 'file.changed',
+        satisfiedAt: new Date(2026, 9, 24, 15, 12).toISOString() },
+      { gateId: 'build', kind: 'terminalExit', sessionId: 'term-123', status: 'expired', expiredAt: new Date(2026, 9, 24, 16, 0).toISOString() },
+      { gateId: 'ok', kind: 'userAction', label: '견적서 금액 확인', status: 'waiting' },
+      { gateId: 'approval', kind: 'approval', status: 'waiting', requested: false },
+    ] },
+    { taskId: 'wrap', ownerId: 'agent', sourceRef: 'src-secret-4', dependsOn: [], status: 'completed', gates: [] },
+  ],
+  ...overrides,
+});
+const awaitState = (graph = awaitGraph()) => ({ graph, native: { boardId: 'board-a', scope: { ...awaitScope, graphId: graph.graphId },
+  fenced: false, attempts: [], approvals: [] }, board: { boardId: 'board-a', graphIds: [graph.graphId] } });
+const awaitNow = new Date(2026, 9, 24, 18, 0).getTime();
+const awaitTasks = (graph, statuses) => graph.tasks.map((task, index) => ({ ...task, status: statuses[index] ?? task.status }));
+
+test('await task list: task states and waiting conditions read as Korean sentences, never IDs', () => {
+  assert.deepEqual(['queued', 'waiting-on-dependency', 'approval-required', 'ready', 'running', 'completed', 'failed', 'cancelled', 'mystery', undefined]
+    .map(Chat.taskStatusText), ['대기 중', '대기 중', '대기 중', '준비됨', '실행 중', '완료', '실패', '취소', '상태 확인 중', '상태 확인 중']);
+  const at = (day, h, m) => new Date(2026, 9, day, h, m).toISOString();
+  const view = gate => {
+    const shown = Chat.taskGateView(gate, { taskNames: { collect: '자료 모으기' }, folderName: id => (id === 'root-1' ? '견적' : null), now: awaitNow });
+    return [shown.state, shown.text, shown.time];
+  };
+  assert.deepEqual(view({ gateId: 'task:collect', kind: 'task', taskId: 'collect', status: 'waiting' }), ['waiting', '자료 모으기 완료 대기', null]);
+  assert.deepEqual(view({ gateId: 'task:x', kind: 'task', taskId: 'x', status: 'satisfied' }), ['satisfied', '앞 작업 완료', null]);
+  assert.deepEqual(view({ gateId: 'sso', kind: 'oauth', origin: 'https://accounts.example.com', pathPrefix: '/cb', status: 'waiting' }),
+    ['waiting', '로그인 완료 대기 · accounts.example.com', null]);
+  assert.deepEqual(view({ gateId: 'sso', kind: 'oauth', origin: 'http://127.0.0.1:8080', pathPrefix: '/cb', status: 'satisfied',
+    satisfiedBy: 'browser.oauthCompleted', satisfiedAt: at(24, 15, 12) }), ['satisfied', '로그인 완료 · 127.0.0.1:8080', '오후 3:12']);
+  assert.deepEqual(view({ gateId: 'f', kind: 'file', root: 'root-1', relativeGlob: 'reports/*.pdf', status: 'waiting' }), ['waiting', '견적/reports/*.pdf 도착 대기', null]);
+  assert.deepEqual(view({ gateId: 'f', kind: 'file', root: 'root-9', relativeGlob: '*.csv', status: 'satisfied', satisfiedBy: 'file.changed', satisfiedAt: at(23, 9, 5) }),
+    ['satisfied', '연결된 폴더/*.csv 도착', '10월 23일 오전 9:05'], 'an unknown folder is named plainly; another day shows its date');
+  assert.deepEqual(view({ gateId: 't', kind: 'terminalExit', sessionId: 'term-1', status: 'waiting', expiresAt: at(24, 17, 30) }),
+    ['waiting', '터미널 종료 대기', '오후 5:30까지'], 'a timed wait says until when');
+  assert.deepEqual(view({ gateId: 't', kind: 'terminalExit', sessionId: 'term-1', status: 'satisfied', satisfiedBy: 'user.action', satisfiedAt: at(24, 11, 0) }),
+    ['satisfied', '터미널 종료 · 직접 진행', '오전 11:00'], 'a condition continued by hand says so');
+  assert.deepEqual(view({ gateId: 't', kind: 'terminalExit', sessionId: 'term-1', status: 'expired', expiredAt: at(24, 16, 0) }),
+    ['expired', '터미널 종료 대기 · 시간 초과', '오후 4:00']);
+  assert.deepEqual(view({ gateId: 'u', kind: 'userAction', status: 'waiting' }), ['waiting', '확인 대기', null]);
+  assert.deepEqual(view({ gateId: 'u', kind: 'userAction', label: '견적서\n금액\u0007 확인', status: 'waiting' }), ['waiting', '확인 대기 · 견적서 금액 확인', null]);
+  assert.deepEqual(view({ gateId: 'u', kind: 'userAction', label: '견적서 금액 확인', status: 'satisfied', satisfiedBy: 'user.action', satisfiedAt: at(24, 13, 4) }),
+    ['satisfied', '확인됨 · 견적서 금액 확인', '오후 1:04'], 'a confirmation is always by hand; it does not add a second note');
+  assert.deepEqual(view({ gateId: 'approval', kind: 'approval', status: 'waiting', requested: true }), ['waiting', '승인 대기', null]);
+  assert.deepEqual(view({ gateId: 'approval', kind: 'approval', status: 'satisfied' }), ['satisfied', '승인됨', null]);
+  assert.deepEqual(view({ gateId: 'approval', kind: 'approval', status: 'rejected' }), ['rejected', '승인 거절됨', null]);
+  assert.deepEqual(view({ gateId: 'z', kind: 'somethingNew', status: 'waiting' }), ['waiting', '조건 대기', null]);
+  const allText = Chat.taskBoardView(Chat.taskBoardWithState(Chat.createTaskBoard(), awaitState()), { now: awaitNow }).groups
+    .flatMap(group => group.tasks.flatMap(task => [task.name, task.statusText, ...task.conditions.map(condition => condition.text)])).join(' ');
+  for (const internal of ['graph-a', 'collect', 'login', 'sso', 'root-1', 'term-123', 'src-secret', 'waiting', 'running', 'oauth', 'gate']) {
+    assert.equal(allText.includes(internal), false, `${internal} never reaches the screen text`);
+  }
+});
+
+test('await task list: the summary counts running and not-yet-started tasks, says what finished, and hides with no graph', () => {
+  const empty = Chat.createTaskBoard();
+  assert.equal(Chat.taskBoardSummary(empty).visible, false);
+  assert.deepEqual(Chat.taskBoardView(empty), { visible: false, summary: '', counts: Chat.taskBoardSummary(empty), groups: [] });
+  assert.equal(Chat.taskBoardView(undefined).visible, false, 'no board at all is the same as an empty one');
+  const planOnly = Chat.taskBoardWithPlan(empty, { planId: 'plan-1', graphId: 'graph-p', title: '견적', tasks: [{ taskId: 's1', title: '자료' }] });
+  assert.equal(Chat.taskBoardView(planOnly).visible, false, 'a plan alone shows nothing until its graph is read');
+
+  let board = Chat.taskBoardWithGraph(empty, awaitGraph());
+  const summary = Chat.taskBoardSummary(board);
+  assert.deepEqual([summary.visible, summary.running, summary.waiting, summary.completed, summary.text], [true, 1, 2, 1, '진행 1건 · 대기 2건']);
+  board = Chat.taskBoardWithGraph(board, awaitGraph({ graphId: 'graph-b', tasks: awaitTasks(awaitGraph(), ['ready', 'approval-required', 'queued', 'failed']) }));
+  assert.equal(Chat.taskBoardSummary(board).text, '진행 1건 · 대기 5건', 'ready, approval-required and queued are all still waiting to run');
+  const finished = Chat.taskBoardWithGraph(empty, awaitGraph({ tasks: awaitTasks(awaitGraph(), ['completed', 'failed', 'cancelled', 'completed']) }));
+  assert.equal(Chat.taskBoardSummary(finished).text, '작업 끝남 · 완료 2건 · 실패 1건 · 취소 1건');
+  assert.equal(Chat.taskBoardView(finished).visible, true, 'a finished graph stays to show what happened');
+});
+
+test('await task list: \'계속\' only for an outside condition still waiting in a started graph, with the exact Board and scope', () => {
+  const board = Chat.taskBoardWithState(Chat.createTaskBoard(), awaitState());
+  const entry = Chat.taskBoardEntry(board, 'graph-a');
+  const flags = Chat.taskBoardView(board, { now: awaitNow }).groups[0].tasks.map(task => task.conditions.map(condition => condition.continuable));
+  assert.deepEqual(flags, [[], [false, true], [false, true, true, false], []],
+    'upstream task and approval never; satisfied never; waiting oauth, run-out Terminal and confirmation yes');
+  const body = Chat.buildTaskContinueRequest(entry, 'login', 'sso');
+  assert.deepEqual(body, { boardId: 'board-a', scope: awaitScope, taskId: 'login', gateId: 'sso' });
+  assert.deepEqual(Object.keys(body), ['boardId', 'scope', 'taskId', 'gateId'], 'only the fields POST /tasks/continue accepts');
+  assert.deepEqual(Object.keys(body.scope), ['graphId', 'requestId', 'runId', 'parentTaskId', 'requestedBy']);
+  assert.ok(Chat.buildTaskContinueRequest(entry, 'report', 'build'), 'an expired outside condition can still be continued by hand');
+  for (const [taskId, gateId] of [['login', 'task:collect'], ['report', 'approval'], ['report', 'inbox'], ['report', 'missing'], ['nope', 'sso']]) {
+    assert.equal(Chat.buildTaskContinueRequest(entry, taskId, gateId), null, `${taskId}/${gateId} is not continued`);
+  }
+  const noBoard = Chat.taskBoardEntry(Chat.taskBoardWithGraph(Chat.createTaskBoard(), awaitGraph()), 'graph-a');
+  assert.equal(Chat.buildTaskContinueRequest(noBoard, 'login', 'sso'), null, 'the Board must be known first');
+  const withState = graph => Chat.taskBoardEntry(Chat.taskBoardWithState(Chat.createTaskBoard(), awaitState(graph)), 'graph-a');
+  assert.equal(Chat.buildTaskContinueRequest(withState(awaitGraph({ activated: false })), 'login', 'sso'), null, 'a plan not approved yet');
+  assert.equal(Chat.buildTaskContinueRequest(withState(awaitGraph({ cancelRequested: true })), 'login', 'sso'), null, 'a cancelled graph');
+  assert.equal(Chat.buildTaskContinueRequest(withState(awaitGraph({ tasks: awaitTasks(awaitGraph(), [, 'running']) })), 'login', 'sso'), null,
+    'a task already running');
+  const fromPlan = Chat.taskBoardEntry(Chat.taskBoardWithPlan(Chat.taskBoardWithGraph(Chat.createTaskBoard(), awaitGraph()),
+    { planId: 'plan-1', graphId: 'graph-a', boardId: 'board-p', title: '견적', tasks: [] }), 'graph-a');
+  assert.deepEqual(Chat.buildTaskContinueRequest(fromPlan, 'login', 'sso'), { boardId: 'board-p', scope: awaitScope, taskId: 'login', gateId: 'sso' },
+    'the graph\'s own scope serves when only a plan named the Board');
+});
+
+test('await task list: SSE frames update the list in place; an older state read never replaces a newer frame', () => {
+  const empty = Chat.createTaskBoard();
+  let board = Chat.taskBoardWithGraph(empty, awaitGraph());
+  let entry = Chat.taskBoardEntry(board, 'graph-a');
+  assert.deepEqual([entry.rev, entry.boardId, entry.scope], [1, null, null]);
+  assert.equal(JSON.stringify(entry.graph).includes('src-secret'), false, 'sources are not kept');
+  assert.equal(JSON.stringify(entry.graph).includes('term-123'), false, 'Terminal sessions are not kept');
+  const ifRev = entry.rev;
+  board = Chat.taskBoardWithGraph(board, awaitGraph({ tasks: awaitTasks(awaitGraph(), ['completed', 'running']) }));
+  board = Chat.taskBoardWithState(board, awaitState(awaitGraph()), { ifRev });
+  entry = Chat.taskBoardEntry(board, 'graph-a');
+  assert.deepEqual(entry.graph.tasks.map(task => task.status).slice(0, 2), ['completed', 'running'], 'the newer frame stays');
+  assert.deepEqual([entry.boardId, entry.scope], ['board-a', awaitScope], 'the read still names the Board and scope');
+  board = Chat.taskBoardWithState(board, awaitState(awaitGraph({ tasks: awaitTasks(awaitGraph(), ['completed', 'completed']) })), { ifRev: entry.rev });
+  assert.equal(Chat.taskBoardEntry(board, 'graph-a').graph.tasks[1].status, 'completed', 'a read with nothing newer takes the graph');
+  for (const bad of [null, {}, { graphId: '../x', tasks: [] }, { graphId: 'graph-a', tasks: 'x' }]) {
+    assert.equal(Chat.taskBoardWithGraph(board, bad), board, 'a malformed frame changes nothing');
+  }
+
+  board = Chat.taskBoardWithPlan(board, { planId: 'plan-1', graphId: 'graph-a', title: '견적\n준비', boardId: 'board-a',
+    tasks: [{ taskId: 'collect', title: '자료 모으기' }, { taskId: 'report', title: ' 보고서\u0000 쓰기 ' }] });
+  const view = Chat.taskBoardView(board, { now: awaitNow });
+  assert.equal(view.groups[0].title, '견적 준비');
+  assert.deepEqual(view.groups[0].tasks.map(task => task.name), ['자료 모으기', '작업 2', '보고서 쓰기', '작업 4'], 'a step title, else 작업 N in graph order');
+  assert.equal(view.groups[0].tasks[1].conditions[0].text, '자료 모으기 완료 대기', 'an upstream task is named the same way');
+
+  board = Chat.taskBoardWithGraph(board, awaitGraph({ graphId: 'graph-b' }));
+  assert.deepEqual(Chat.taskBoardView(board).groups.map(group => [group.graphId, group.title]), [['graph-b', '작업 묶음 2'], ['graph-a', '견적 준비']],
+    'the newest graph first; untitled graphs are numbered when there are several');
+  board = Chat.taskBoardWithGraph(board, awaitGraph({ graphId: 'graph-b', tasks: awaitTasks(awaitGraph(), ['completed']) }));
+  assert.deepEqual(Chat.taskBoardView(board).groups.map(group => group.graphId), ['graph-b', 'graph-a'], 'an update does not reorder the list');
+  assert.deepEqual(Chat.taskBoardOpenGraphIds(Chat.taskBoardWithGraph(board, awaitGraph({ graphId: 'graph-c',
+    tasks: awaitTasks(awaitGraph(), ['completed', 'completed', 'failed', 'cancelled']) }))), ['graph-a', 'graph-b'], 'finished graphs are not read again');
+  assert.deepEqual(Chat.taskBoardWithout(board, 'graph-a').graphs.map(row => row.graphId), ['graph-b']);
+
+  let many = Chat.taskBoardWithGraph(empty, awaitGraph({ graphId: 'old-done', tasks: awaitTasks(awaitGraph(), ['completed', 'completed', 'completed', 'completed']) }));
+  for (let index = 0; index < Chat.TASK_BOARD_LIMIT; index++) many = Chat.taskBoardWithGraph(many, awaitGraph({ graphId: `graph-${index}` }));
+  assert.equal(many.graphs.length, Chat.TASK_BOARD_LIMIT);
+  assert.equal(Chat.taskBoardEntry(many, 'old-done'), null, 'a finished graph leaves first');
+  many = Chat.taskBoardWithGraph(many, awaitGraph({ graphId: 'graph-new' }));
+  assert.deepEqual([many.graphs.length, many.graphs[0].graphId, many.graphs.at(-1).graphId], [Chat.TASK_BOARD_LIMIT, 'graph-1', 'graph-new'],
+    'then the oldest');
+});
+
+test('await task list: a refused \'계속\' says why in Korean', () => {
+  const cases = [
+    [{ status: 409, code: 'TASK_GATE_STALE' }, '이 조건은 이미 풀렸거나 더 이상 기다리지 않습니다. 목록을 다시 확인했습니다.'],
+    [{ status: 409, code: 'TASK_FENCED' }, '취소된 작업이라 진행할 수 없습니다.'],
+    [{ status: 404, code: 'TASK_NOT_FOUND' }, '이 작업을 더 이상 찾을 수 없습니다.'],
+    [{ status: 404, code: 'TASK_ROUTE_NOT_FOUND' }, '지금 연결된 EG-Desk는 수동 진행을 지원하지 않습니다.'],
+    [{ status: 401, code: 'LOGIN_REQUIRED' }, '로그인한 뒤 진행할 수 있습니다.'],
+    [{ status: 503, code: 'BRIDGE_OFFLINE' }, 'AI 엔진이 아직 준비되지 않아 진행하지 못했습니다. 잠시 뒤 다시 시도해 주세요.'],
+    [{ status: 409, code: 'E_TASK_SCOPE' }, '작업 상태가 바뀌어 진행하지 못했습니다. 목록을 다시 확인한 뒤 시도해 주세요.'],
+    [{ status: 409, code: 'SOMETHING' }, '작업 상태가 바뀌어 진행하지 못했습니다. 목록을 다시 확인한 뒤 시도해 주세요.'],
+    [new TypeError('NetworkError when attempting to fetch resource.'), 'EG-Desk에 연결하지 못해 진행하지 못했습니다. 연결을 확인한 뒤 다시 시도해 주세요.'],
+    [{ status: 500, code: 'TASK_ERROR' }, '진행하지 못했습니다. 잠시 뒤 다시 시도해 주세요.'],
+  ];
+  for (const [error, expected] of cases) assert.equal(Chat.taskContinueErrorText(error), expected);
+});
+
+test('await task list: the bridge keeps the list from task frames, reads the Board, and sends \'계속\' only after the confirm', async () => {
+  // The actual bridge closures, with the bridge HTTP and emit stubbed.
+  const start = surfaceSource.indexOf('    const taskStateReads = new Map();');
+  const end = surfaceSource.indexOf('    const handleEvent = (event) => {', start);
+  const methodsStart = surfaceSource.indexOf('      toggleTaskBoard() {');
+  const methodsEnd = surfaceSource.indexOf("      // '다시 시도' after the quiet retries ran out", methodsStart);
+  assert.ok(start > 0 && end > start && methodsStart > 0 && methodsEnd > methodsStart, 'the bridge task-list code stays directly testable');
+  const requests = [];
+  const replies = [];
+  const state = { codex: { taskBoard: Chat.createTaskBoard(), taskBoardOpen: false, taskContinue: null } };
+  const fetchJson = async (path, options = {}) => {
+    requests.push([path, options.method || 'GET', options.body ? JSON.parse(options.body) : null]);
+    const reply = replies.shift();
+    if (reply instanceof Error) throw reply;
+    return typeof reply === 'function' ? reply() : reply;
+  };
+  const graphs = [];
+  let emits = 0;
+  const api = compileFunction(`${surfaceSource.slice(start, end)}\nreturn { taskGraphFrame, taskPlanFrame, readTaskGraphs, methods: {\n${surfaceSource.slice(methodsStart, methodsEnd)}\n} };`,
+    ['state', 'ChatState', 'fetchJson', 'browserWorkflow', 'emit'])(state, Chat, fetchJson, { graph: graph => graphs.push(graph?.graphId ?? null) }, () => { emits++; });
+  const settle = () => new Promise(resolve => setTimeout(resolve, 0));
+
+  replies.push(awaitState());
+  api.taskGraphFrame(awaitGraph());
+  assert.equal(Chat.taskBoardView(state.codex.taskBoard).summary, '진행 1건 · 대기 2건', 'a frame shows at once');
+  await settle();
+  assert.deepEqual(requests.shift(), ['/tasks/state?graphId=graph-a', 'GET', null], 'an unknown Board is read once');
+  assert.equal(Chat.taskBoardEntry(state.codex.taskBoard, 'graph-a').boardId, 'board-a');
+  // collect finished: login now waits only for the sign-in.
+  const afterCollect = awaitGraph({ tasks: awaitGraph().tasks.map(task => task.taskId === 'collect' ? { ...task, status: 'completed' }
+    : task.taskId !== 'login' ? task : { ...task, gates: task.gates.map(gate => gate.kind === 'task' ? { ...gate, status: 'satisfied' } : gate) }) });
+  api.taskGraphFrame(afterCollect);
+  await settle();
+  assert.equal(requests.length, 0, 'a known Board is not read again on every frame');
+  assert.equal(Chat.taskBoardView(state.codex.taskBoard).summary, '진행 0건 · 대기 2건');
+
+  api.methods.toggleTaskBoard();
+  assert.equal(state.codex.taskBoardOpen, true);
+  api.methods.askTaskContinue('graph-a', 'login', 'sso');
+  assert.deepEqual(state.codex.taskContinue, { graphId: 'graph-a', taskId: 'login', gateId: 'sso', phase: 'confirm', error: null });
+  assert.equal(requests.length, 0, 'asking sends nothing');
+  api.methods.cancelTaskContinue();
+  assert.equal(state.codex.taskContinue, null);
+
+  const satisfied = awaitGraph({ tasks: afterCollect.tasks.map(task => task.taskId !== 'login' ? task : { ...task, status: 'running',
+    gates: task.gates.map(gate => gate.gateId === 'sso' ? { ...gate, status: 'satisfied', satisfiedBy: 'user.action', satisfiedAt: new Date(awaitNow).toISOString() } : gate) }) });
+  let release;
+  replies.push(() => new Promise(resolve => { release = () => resolve(awaitState(satisfied)); }));
+  const sending = api.methods.continueTaskGate('graph-a', 'login', 'sso');
+  assert.equal(state.codex.taskContinue.phase, 'sending');
+  await api.methods.continueTaskGate('graph-a', 'login', 'sso');
+  await settle();
+  assert.equal(requests.length, 1, 'a second press while sending sends nothing');
+  assert.deepEqual(requests.shift(), ['/tasks/continue', 'POST', { boardId: 'board-a', scope: awaitScope, taskId: 'login', gateId: 'sso' }]);
+  release();
+  await sending;
+  assert.equal(state.codex.taskContinue, null);
+  const login = Chat.taskBoardView(state.codex.taskBoard, { now: awaitNow }).groups[0].tasks[1];
+  assert.deepEqual([login.statusText, login.conditions[1].text, login.conditions[1].state], ['실행 중', '로그인 완료 · accounts.example.com · 직접 진행', 'satisfied']);
+  assert.ok(graphs.includes('graph-a'), 'the sign-in gate list hears the new graph too');
+
+  const stale = Object.assign(new Error('Task request could not be completed'), { status: 409, code: 'TASK_GATE_STALE' });
+  replies.push(stale, awaitState());
+  await api.methods.continueTaskGate('graph-a', 'report', 'ok');
+  assert.deepEqual(state.codex.taskContinue, { graphId: 'graph-a', taskId: 'report', gateId: 'ok', phase: 'error',
+    error: '이 조건은 이미 풀렸거나 더 이상 기다리지 않습니다. 목록을 다시 확인했습니다.' });
+  await settle();
+  assert.deepEqual(requests.map(([path, method]) => [path, method]), [['/tasks/continue', 'POST'], ['/tasks/state?graphId=graph-a', 'GET']],
+    'a stale condition reads the graph again');
+  requests.length = 0;
+
+  await api.methods.continueTaskGate('graph-a', 'report', 'approval');
+  await settle();
+  assert.equal(requests.some(([path]) => path === '/tasks/continue'), false, 'an approval is never continued by hand, even if asked');
+  assert.equal(state.codex.taskContinue.phase, 'error');
+  requests.length = 0;
+
+  replies.push(Object.assign(new Error('missing'), { status: 404, code: 'TASK_NOT_FOUND' }));
+  api.readTaskGraphs();
+  await settle();
+  assert.equal(Chat.taskBoardView(state.codex.taskBoard).visible, false, 'a graph the bridge no longer has leaves the list, and the line hides');
+  requests.length = 0;
+
+  replies.push(awaitState());
+  api.taskPlanFrame({ planId: 'plan-1', graphId: 'graph-a', title: '견적', tasks: [{ taskId: 'collect', title: '자료 모으기' }] });
+  await settle();
+  assert.deepEqual(requests.pop(), ['/tasks/state?graphId=graph-a', 'GET', null], 'a plan for an unseen graph reads it');
+  assert.equal(Chat.taskBoardView(state.codex.taskBoard).groups[0].tasks[0].name, '자료 모으기');
+  assert.ok(emits > 0);
+
+  // Routing, the read after a reconnect, and the account reset.
+  assert.match(surfaceSource, /        case 'task\.native':\n          readTaskGraphs\(\{ openOnly: true \}\);\n          return;/);
+  assert.match(surfaceSource, /        case 'task\.plan':\n          taskPlanFrame\(event\.plan\);\n          return;/);
+  assert.match(surfaceSource, /connectionSource\.addEventListener\('ready', \(\) => \{ if \(epochScope\.valid\(streamEpoch\) && source === connectionSource\) readTaskGraphs\(\); \}\);/);
+  assert.match(surfaceSource, /resetThreadConversations\(\);\n        \/\/ Task graphs belong to the account that made them\.\n        state\.codex\.taskBoard = ChatState\.createTaskBoard\(\);\n        state\.codex\.taskContinue = null;/);
+});
+
+test('await task list: one line under the run state opens the list; \'계속\' asks first; nothing shows without a graph', () => {
+  const body = surfaceSource.match(/  function renderChatTaskBoard\(codex, actions, folderName\) \{([\s\S]*?)\n  \}/)?.[1];
+  assert.ok(body, 'the task list renderer stays directly testable');
+  const node = (tag, props = {}, ...children) => ({ tag, props, className: props.class, children: children.filter(child => child != null) });
+  const text = value => typeof value === 'string' ? value : (value?.children || []).map(text).join('');
+  const all = (value, test) => (value && typeof value === 'object' ? [...(test(value) ? [value] : []), ...value.children.flatMap(child => all(child, test))] : []);
+  const byTestId = (value, id) => all(value, item => item.props?.data?.testid === id);
+  const calls = [];
+  const actions = new Proxy({}, { get: (_target, name) => (...args) => calls.push([name, ...args]) });
+  const render = compileFunction(body, ['codex', 'actions', 'folderName', 'ChatState', 'el', 'deskIcon']);
+  const FixedClockChat = { ...Chat, taskBoardView: (board, options) => Chat.taskBoardView(board, { ...options, now: awaitNow }) };
+  const draw = (codex) => render({ taskBoardOpen: false, taskContinue: null, ...codex }, actions, id => (id === 'root-1' ? '견적' : null), FixedClockChat, node,
+    name => ({ tag: 'svg', icon: name, props: {}, children: [] }));
+
+  assert.equal(draw({ taskBoard: Chat.createTaskBoard() }), null, 'no graph: nothing at all, not an empty summary');
+  assert.equal(draw({ taskBoard: undefined }), null);
+  const board = Chat.taskBoardWithState(Chat.createTaskBoard(), awaitState());
+  const closed = draw({ taskBoard: board });
+  assert.deepEqual([closed.props.data.open, closed.props['aria-label'], closed.children.length], ['false', '작업 목록', 1]);
+  const summary = closed.children[0];
+  assert.deepEqual([text(summary), summary.props['aria-expanded'], summary.props['aria-controls'] ?? null], ['진행 1건 · 대기 2건', 'false', null]);
+  summary.props.onclick();
+  assert.deepEqual(calls.pop(), ['toggleTaskBoard']);
+
+  const open = draw({ taskBoard: board, taskBoardOpen: true });
+  assert.equal(open.children[0].props['aria-expanded'], 'true');
+  assert.equal(open.children[0].props['aria-controls'], 'egd-task-board-list');
+  const rows = byTestId(open, 'chat-task-row');
+  assert.deepEqual(rows.map(row => [text(row.children[0].children[0]), text(row.children[0].children[1])]),
+    [['작업 1', '실행 중'], ['작업 2', '대기 중'], ['작업 3', '대기 중'], ['작업 4', '완료']]);
+  assert.deepEqual(byTestId(rows[2], 'chat-task-condition').map(row => [row.props.data.state, text(row).replace('계속', ' [계속]')]), [
+    ['satisfied', '견적/reports/*.pdf 도착오후 3:12'],
+    ['expired', '터미널 종료 대기 · 시간 초과오후 4:00 [계속]'],
+    ['waiting', '확인 대기 · 견적서 금액 확인 [계속]'],
+    ['waiting', '승인 대기'],
+  ]);
+  assert.equal(byTestId(rows[2], 'chat-task-condition')[0].children[0].icon, 'check', 'a met condition carries a check');
+  assert.deepEqual(byTestId(rows[1], 'chat-task-condition').map(text), ['작업 1 완료 대기', '로그인 완료 대기 · accounts.example.com계속']);
+  const continues = byTestId(open, 'chat-task-continue');
+  assert.equal(continues.length, 3, 'only outside conditions offer 계속');
+  continues[0].props.onclick();
+  assert.deepEqual(calls.pop(), ['askTaskContinue', 'graph-a', 'login', 'sso']);
+  assert.equal(calls.length, 0, 'the first press only asks');
+
+  const confirming = draw({ taskBoard: board, taskBoardOpen: true, taskContinue: { graphId: 'graph-a', taskId: 'login', gateId: 'sso', phase: 'confirm', error: null } });
+  const confirm = byTestId(confirming, 'chat-task-confirm');
+  assert.equal(confirm.length, 1);
+  assert.equal(text(confirm[0].children[0]), '조건을 기다리지 않고 진행합니다.');
+  assert.equal(byTestId(confirming, 'chat-task-continue').length, 2, 'the condition being confirmed shows the confirm instead');
+  const [go] = byTestId(confirming, 'chat-task-confirm-go');
+  const [cancel] = byTestId(confirming, 'chat-task-confirm-cancel');
+  assert.deepEqual([text(go), text(cancel)], ['진행', '취소']);
+  assert.equal(go.props.data.focusKey, continues[0].props.data.focusKey, 'the keyboard lands on 진행');
+  assert.equal(cancel.props.data.focusKey, continues[0].props.data.focusKey, 'and returns to 계속 after 취소');
+  go.props.onclick();
+  assert.deepEqual(calls.pop(), ['continueTaskGate', 'graph-a', 'login', 'sso']);
+  cancel.props.onclick();
+  assert.deepEqual(calls.pop(), ['cancelTaskContinue']);
+
+  const sending = draw({ taskBoard: board, taskBoardOpen: true, taskContinue: { graphId: 'graph-a', taskId: 'login', gateId: 'sso', phase: 'sending', error: null } });
+  const [busy] = byTestId(sending, 'chat-task-confirm-go');
+  assert.deepEqual([text(busy), busy.props['aria-disabled'], byTestId(sending, 'chat-task-confirm-cancel').length], ['진행 중…', 'true', 0]);
+  busy.props.onclick();
+  assert.equal(calls.length, 0, 'nothing is sent twice');
+
+  const failed = draw({ taskBoard: board, taskBoardOpen: true,
+    taskContinue: { graphId: 'graph-a', taskId: 'report', gateId: 'ok', phase: 'error', error: '취소된 작업이라 진행할 수 없습니다.' } });
+  const [alert] = byTestId(failed, 'chat-task-error');
+  assert.deepEqual([alert.props.role, text(alert)], ['alert', '취소된 작업이라 진행할 수 없습니다.']);
+  assert.equal(byTestId(failed, 'chat-task-continue').length, 3, '계속 is offered again after a refusal');
+
+  const shown = text(open);
+  for (const internal of ['graph-a', 'login', 'sso', 'board-a', 'waiting-on-dependency', 'running', 'term-123', 'root-1']) {
+    assert.equal(shown.includes(internal), false, `${internal} is not screen text`);
+  }
+  assert.match(surfaceSource, /codexActivityButtonLabel\(run\)\)\)\);\n        \/\/ CHAT-06 Await: the task list line sits right under the run state\.\n        const taskBoard = renderChatTaskBoard\(codex, codexBridge, connectedFolderName\);\n        if \(taskBoard\) conversation\.appendChild\(taskBoard\);/);
+});
+
+test('await task list styles use approved tokens, stay small, and outrank the HUD button reset', () => {
+  const rule = selector => surfaceCss.match(new RegExp(`^${selector.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')} \\{([^}]+)\\}`, 'm'))?.[1] || '';
+  const selectors = ['.egd-task-board', 'button.egd-task-board-summary', '.egd-task-board-list', '.egd-task-row', '.egd-task-name', '.egd-task-status',
+    '.egd-task-conditions', '.egd-task-condition', '.egd-task-condition-dot', '.egd-task-condition-mark', '.egd-task-condition-text',
+    '.egd-task-condition-time', '.egd-task-confirm', '.egd-task-error', 'button.egd-task-confirm-go'];
+  for (const selector of selectors) {
+    assert.ok(rule(selector), `${selector} is styled`);
+    assert.doesNotMatch(rule(selector), /#[0-9a-f]{3,8}\b|rgba?\(/i, `${selector} uses approved tokens only`);
+  }
+  const shared = surfaceCss.match(/^button\.egd-task-continue,\nbutton\.egd-task-confirm-go,\nbutton\.egd-task-confirm-cancel \{([^}]+)\}/m)?.[1] || '';
+  assert.match(shared, /min-height: 32px;/, 'inline controls keep the 32px target');
+  assert.doesNotMatch(shared, /#[0-9a-f]{3,8}\b|rgba?\(/i);
+  assert.match(rule('button.egd-task-board-summary'), /min-height: 32px;/);
+  assert.match(rule('.egd-task-board-list'), /max-height: 220px;[\s\S]*overflow-y: auto;/, 'a long list scrolls in place instead of pushing the conversation');
+  assert.ok(surfaceCss.indexOf('button.egd-task-board-summary {') > surfaceCss.indexOf('.egd-edge button {'),
+    'the button rules come after the HUD reset with the same weight');
 });

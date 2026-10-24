@@ -546,6 +546,11 @@
       legacyChatBackupKey: null,
       legacyChatBackupRequired: false,
       activityThreadId: null,
+      // CHAT-06 Await: task graphs seen on this screen (never saved), whether
+      // the list is open, and the one '계속' being confirmed or sent.
+      taskBoard: ChatState.createTaskBoard(),
+      taskBoardOpen: false,
+      taskContinue: null,
       authCardEntityId: null,
       chatDockMode: 'hud',
       chatCardEntityId: null,
@@ -802,6 +807,69 @@
   function openCodexActivityPanel(threadId) {
     state.codex.activityThreadId = threadId;
     renderCodexActivityPanel();
+  }
+
+  // A file condition names its folder as the File card that connected it does.
+  function connectedFolderName(rootId) {
+    for (const card of document.querySelectorAll('.egd-file-card')) {
+      const root = card._fileRecord?.root;
+      if (root?.rootId === rootId && root.name) return root.name;
+    }
+    return null;
+  }
+
+  // CHAT-06 Await: one quiet line under the run state, '진행 N건 · 대기 M건',
+  // opens the task list in place: each task's name and state, then what it waits
+  // for in order, with a check and the time once met. An outside condition offers
+  // '계속', confirmed before anything is sent. Nothing shows while no graph is here.
+  function renderChatTaskBoard(codex, actions, folderName) {
+    const view = ChatState.taskBoardView(codex.taskBoard, { folderName, continuing: codex.taskContinue });
+    if (!view.visible) return null;
+    const open = codex.taskBoardOpen === true;
+    const summary = el('button', {
+      class: 'egd-task-board-summary', 'aria-expanded': String(open), 'aria-controls': open ? 'egd-task-board-list' : null,
+      title: open ? '작업 목록 접기' : '작업 목록 열기',
+      data: { testid: 'chat-task-summary', focusKey: 'chat-task-summary' },
+      onclick: () => actions.toggleTaskBoard(),
+    }, el('span', { class: 'egd-task-board-summary-text' }, view.summary), deskIcon('chevron', 'egd-task-board-chevron'));
+    const board = (...children) => el('div', { class: 'egd-task-board', role: 'group', 'aria-label': '작업 목록',
+      data: { testid: 'chat-task-board', open: String(open) } }, summary, ...children);
+    if (!open) return board();
+    const conditionRow = (group, task, condition) => {
+      // The confirm buttons share the '계속' focus key, so the keyboard stays on the same condition.
+      const key = `chat-task-gate:${group.graphId}:${task.taskId}:${condition.gateId}`;
+      const sending = condition.phase === 'sending';
+      const confirming = condition.continuable && (condition.phase === 'confirm' || sending);
+      return el('li', { class: 'egd-task-condition', data: { testid: 'chat-task-condition', state: condition.state } },
+        condition.state === 'satisfied' ? deskIcon('check', 'egd-task-condition-mark') : el('span', { class: 'egd-task-condition-dot', 'aria-hidden': 'true' }),
+        el('span', { class: 'egd-task-condition-text' }, condition.text),
+        condition.time ? el('span', { class: 'egd-task-condition-time' }, condition.time) : null,
+        condition.continuable && !confirming ? el('button', {
+          class: 'egd-task-continue', 'aria-label': `${condition.text}, 기다리지 않고 계속`,
+          data: { testid: 'chat-task-continue', focusKey: key },
+          onclick: () => actions.askTaskContinue(group.graphId, task.taskId, condition.gateId),
+        }, '계속') : null,
+        confirming ? el('div', { class: 'egd-task-confirm', role: 'group', 'aria-label': '계속 확인', data: { testid: 'chat-task-confirm' } },
+          el('span', {}, '조건을 기다리지 않고 진행합니다.'),
+          el('button', {
+            class: 'egd-task-confirm-go', 'aria-disabled': sending ? 'true' : null, data: { testid: 'chat-task-confirm-go', focusKey: key },
+            onclick: () => { if (!sending) actions.continueTaskGate(group.graphId, task.taskId, condition.gateId); },
+          }, sending ? '진행 중…' : '진행'),
+          sending ? null : el('button', {
+            class: 'egd-task-confirm-cancel', data: { testid: 'chat-task-confirm-cancel', focusKey: key },
+            onclick: () => actions.cancelTaskContinue(),
+          }, '취소')) : null,
+        condition.error ? el('p', { class: 'egd-task-error', role: 'alert', data: { testid: 'chat-task-error' } }, condition.error) : null);
+    };
+    return board(el('div', { id: 'egd-task-board-list', class: 'egd-task-board-list', data: { testid: 'chat-task-list' } },
+      ...view.groups.map(group => el('section', { class: 'egd-task-group', 'aria-label': group.title || '작업' },
+        group.title ? el('p', { class: 'egd-task-group-title' }, group.title) : null,
+        ...group.tasks.map(task => el('article', { class: 'egd-task-row', data: { testid: 'chat-task-row', status: task.status || 'unknown' } },
+          el('div', { class: 'egd-task-row-head' },
+            el('strong', { class: 'egd-task-name' }, task.name),
+            el('span', { class: 'egd-task-status' }, task.statusText)),
+          task.conditions.length ? el('ul', { class: 'egd-task-conditions', 'aria-label': `${task.name} 대기 조건` },
+            ...task.conditions.map(condition => conditionRow(group, task, condition))) : null))))));
   }
 
   function chatInputSourceForView(view) {
@@ -5683,8 +5751,24 @@
         const engineId = ChatState.chatThreadEngineId(thread, engineContext);
         const choice = ChatState.chatEngineChoices(codex.engines, codex.authStatus).find((row) => row.id === engineId) || null;
         const label = choice?.label || engineId;
-        const effort = ChatState.chatEffortValue(thread.effort);
-        const effortChoices = ChatState.chatEffortChoices(choice);
+        // The account's models when the bridge lists them; each model offers only its own efforts.
+        const modelView = ChatState.chatModelView(thread, { ...engineContext, engineId });
+        const effort = modelView.effort;
+        const effortChoices = modelView.effortChoices;
+        const modelSection = modelView.listed
+          ? el('div', { class: 'egd-codex-engine-models', role: 'radiogroup', 'aria-label': '모델', data: { testid: 'chat-engine-models' } },
+            ...modelView.modelChoices.map((option) => el('button', {
+              class: `egd-codex-engine-model-choice${option.selected ? ' egd-codex-engine-model-choice-selected' : ''}`,
+              role: 'radio', 'aria-checked': option.selected ? 'true' : 'false',
+              title: option.note ? `${option.label} · ${option.note}` : option.label,
+              data: { testid: 'chat-engine-model', model: option.id || 'default' },
+              onclick: () => codexBridge.setThreadModel(thread.id, option.value),
+            },
+            el('span', { class: 'egd-codex-engine-model-name' }, option.label),
+            option.note ? el('span', { class: 'egd-codex-engine-model-note' }, option.note) : null,
+            option.selected ? deskIcon('check', 'egd-codex-engine-model-check') : null)))
+          : el('div', { class: 'egd-codex-engine-model' }, ChatState.chatModelLabel(codex.engineConfiguration));
+        const effortColumns = effortChoices.length <= 4 ? effortChoices.length : effortChoices.length <= 6 ? 3 : 4;
         // D3: a room that has started keeps its engine; switching means a new room.
         const engineSection = ChatState.chatThreadEngineLocked(thread)
           ? el('div', { class: 'egd-codex-engine-locked' },
@@ -5710,16 +5794,17 @@
         el('div', { class: 'egd-codex-engine-section-label' }, 'AI 엔진'),
         engineSection,
         el('div', { class: 'egd-codex-engine-section-label' }, '모델'),
-        el('div', { class: 'egd-codex-engine-model' }, ChatState.chatModelLabel(codex.engineConfiguration)),
+        modelSection,
         effortChoices.length ? el('div', { class: 'egd-codex-engine-section-label' }, '추론 강도') : null,
-        effortChoices.length ? el('div', { class: 'egd-codex-engine-efforts', role: 'radiogroup', 'aria-label': '추론 강도' },
+        effortChoices.length ? el('div', { class: 'egd-codex-engine-efforts', role: 'radiogroup', 'aria-label': '추론 강도', data: { columns: String(effortColumns) } },
           ...effortChoices.map((option) => el('button', {
             class: `egd-codex-engine-effort${option.value === effort ? ' egd-codex-engine-effort-selected' : ''}`,
             role: 'radio', 'aria-checked': option.value === effort ? 'true' : 'false',
+            title: option.isDefault ? `${option.label} · 이 모델의 기본 강도` : null,
             data: { testid: 'chat-engine-effort', effort: option.value || 'default' },
             onclick: () => codexBridge.setThreadEffort(thread.id, option.value),
           }, option.label))) : null,
-        effortChoices.length ? el('p', { class: 'egd-codex-engine-hint' }, '다음에 보내는 메시지부터 적용됩니다.') : null);
+        effortChoices.length || modelView.listed ? el('p', { class: 'egd-codex-engine-hint' }, '다음에 보내는 메시지부터 적용됩니다.') : null);
       };
 
       const renderThreadAgentRow = (thread, compact = false) => {
@@ -6197,7 +6282,10 @@
           data: { testid: 'chat-run-status', status, runId: run?.runId || '', stopConfirmed: String(run?.status === 'interrupted') },
         }, el('span', {}, statusText),
         el('button', { 'aria-label': '활동 기록 열기', data: { testid: 'chat-activity-open', threadId: activeThread.id }, onclick: () => codexBridge.openActivity(activeThread.id) }, codexActivityButtonLabel(run))));
-        const runError = run?.status === 'failed' && run.error && run.error.code !== 'RUNTIME_LOST'
+        // CHAT-06 Await: the task list line sits right under the run state.
+        const taskBoard = renderChatTaskBoard(codex, codexBridge, connectedFolderName);
+        if (taskBoard) conversation.appendChild(taskBoard);
+        const runError =run?.status === 'failed' && run.error && run.error.code !== 'RUNTIME_LOST'
           ? ChatState.runErrorNotice(run.error, codex.authStatus?.usage) : null;
         if (runError) conversation.appendChild(el('div', {
           class: `egd-codex-error egd-codex-run-error egd-codex-run-error-${runError.kind}`, role: 'alert',
@@ -6777,7 +6865,12 @@
     };
     const update = (patch) => {
       const accountKey = ChatState.codexAccountKey(patch.authStatus);
-      if (ChatState.codexAccountChanged(state.codex.codexAccountKey, patch.authStatus)) resetThreadConversations();
+      if (ChatState.codexAccountChanged(state.codex.codexAccountKey, patch.authStatus)) {
+        resetThreadConversations();
+        // Task graphs belong to the account that made them.
+        state.codex.taskBoard = ChatState.createTaskBoard();
+        state.codex.taskContinue = null;
+      }
       if (accountKey) state.codex.codexAccountKey = accountKey;
       Object.assign(state.codex, patch);
       state.codex.threads = state.codex.threads.map(thread => ChatState.reconcileNativeThread(thread, state.codex.authStatus));
@@ -7105,9 +7198,80 @@
       }, 1200);
     };
 
+    // SSE engine.status replaces engines[] (models included); a brief '로그인 필요'
+    // right after connecting is held so the panel does not flicker.
+    const engineStatus = ChatState.createEngineStatusDebouncer({
+      current: () => state.codex.engines,
+      apply: (engines) => update({ engines }),
+      setTimer: (fn, ms) => window.setTimeout(fn, ms),
+      clearTimer: (id) => window.clearTimeout(id),
+    });
+    // BRW-04: Browser card locations for workflow gates, origin + path only.
+    const browserWorkflow = SurfaceState.createBrowserWorkflowReporter({
+      post: (body) => fetchJson('/events/browser', { method: 'POST', body: JSON.stringify(body) }),
+      onError: (error) => { if (error?.status) console.warn(TAG, 'browser workflow event was not accepted', error.status, error.code || ''); },
+    });
+
+    // CHAT-06 Await task list: the graphs this screen has seen through task.graph
+    // and task.plan frames. A state read adds the Board and exact scope that
+    // '계속' needs; a read never replaces a frame that arrived after it began.
+    const taskStateReads = new Map();
+    const readTaskGraph = (graphId) => {
+      if (!ChatState.taskRef(graphId)) return Promise.resolve(null);
+      if (taskStateReads.has(graphId)) return taskStateReads.get(graphId);
+      const ifRev = ChatState.taskBoardEntry(state.codex.taskBoard, graphId)?.rev ?? 0;
+      const read = fetchJson(`/tasks/state?graphId=${encodeURIComponent(graphId)}`)
+        .then((payload) => {
+          const fresh = (ChatState.taskBoardEntry(state.codex.taskBoard, graphId)?.rev ?? 0) === ifRev;
+          state.codex.taskBoard = ChatState.taskBoardWithState(state.codex.taskBoard, payload, { ifRev });
+          if (fresh) browserWorkflow.graph(payload?.graph);
+          return null;
+        })
+        .catch((error) => {
+          if (error?.code === 'TASK_NOT_FOUND') state.codex.taskBoard = ChatState.taskBoardWithout(state.codex.taskBoard, graphId);
+          return error;
+        })
+        .finally(() => { taskStateReads.delete(graphId); emit(); });
+      taskStateReads.set(graphId, read);
+      return read;
+    };
+    const readTaskGraphs = ({ openOnly = false } = {}) => {
+      const graphIds = openOnly ? ChatState.taskBoardOpenGraphIds(state.codex.taskBoard)
+        : (state.codex.taskBoard?.graphs || []).map((entry) => entry.graphId);
+      for (const graphId of graphIds) void readTaskGraph(graphId);
+    };
+    const taskGraphFrame = (graph) => {
+      state.codex.taskBoard = ChatState.taskBoardWithGraph(state.codex.taskBoard, graph);
+      const entry = ChatState.taskBoardEntry(state.codex.taskBoard, graph?.graphId);
+      if (entry && !entry.boardId) void readTaskGraph(entry.graphId);
+      emit();
+    };
+    const taskPlanFrame = (plan) => {
+      state.codex.taskBoard = ChatState.taskBoardWithPlan(state.codex.taskBoard, plan);
+      const entry = ChatState.taskBoardEntry(state.codex.taskBoard, plan?.graphId);
+      if (entry && !entry.graph) void readTaskGraph(entry.graphId);
+      emit();
+    };
+
     const handleEvent = (event) => {
       if (event?.type?.startsWith('assistant-')) return;
       switch (event.type) {
+        case 'engine.status':
+          engineStatus.push(event.engines);
+          return;
+        // Task graph frames: the open sign-in gates (to tell a finished sign-in) and the task list.
+        case 'task.graph':
+          browserWorkflow.graph(event.graph);
+          taskGraphFrame(event.graph);
+          return;
+        // A hint only: unfinished graphs on screen are read again.
+        case 'task.native':
+          readTaskGraphs({ openOnly: true });
+          return;
+        // A plan names its steps; the list uses those titles.
+        case 'task.plan':
+          taskPlanFrame(event.plan);
+          return;
         case 'auth.status': {
           const status = event.status || state.codex.authStatus;
           if (
@@ -7193,6 +7357,7 @@
       try {
         const bridgeState = await fetchJson('/v1/state', { signal: token.signal, headers: await bridgeStateHeaders() });
         if (!epochScope.valid(token)) return;
+        engineStatus.cancel();
         const status = bridgeState?.auth || state.codex.authStatus;
         if (
           status?.loginInProgress &&
@@ -7295,6 +7460,8 @@
       source.addEventListener('codex', receive);
       source.addEventListener('message', receive);
       source.addEventListener('chat.event', receive);
+      // CHAT-06: frames may have been missed while away; the graphs on screen are read again.
+      connectionSource.addEventListener('ready', () => { if (epochScope.valid(streamEpoch) && source === connectionSource) readTaskGraphs(); });
 
       connectionSource.onerror = () => {
         if (!epochScope.valid(streamEpoch) || source !== connectionSource) return;
@@ -7314,6 +7481,52 @@
     return {
       loadLocalHistory,
       rootSseReady,
+      // BRW-04: a user's Browser card arrived at a new top-level location. The
+      // bridge hears origin + path, and a finished sign-in when an open gate matches.
+      reportBrowserLocation(cardId, url) {
+        if (!state.codex.connected) return [];
+        return browserWorkflow.location(cardId, url);
+      },
+      // CHAT-06 Await task list: open or close it in place.
+      toggleTaskBoard() {
+        state.codex.taskBoardOpen = !state.codex.taskBoardOpen;
+        emit();
+      },
+      // '계속' first asks; only '진행' sends. Upstream tasks and approvals never offer it.
+      askTaskContinue(graphId, taskId, gateId) {
+        if (state.codex.taskContinue?.phase === 'sending') return;
+        state.codex.taskContinue = { graphId, taskId, gateId, phase: 'confirm', error: null };
+        emit();
+      },
+      cancelTaskContinue() {
+        if (state.codex.taskContinue?.phase === 'sending') return;
+        state.codex.taskContinue = null;
+        emit();
+      },
+      // POST /tasks/continue for one outside condition: the task goes on without it.
+      async continueTaskGate(graphId, taskId, gateId) {
+        if (state.codex.taskContinue?.phase === 'sending') return;
+        const target = { graphId, taskId, gateId };
+        state.codex.taskContinue = { ...target, phase: 'sending', error: null };
+        emit();
+        try {
+          const readError = ChatState.taskBoardEntry(state.codex.taskBoard, graphId)?.boardId ? null : await readTaskGraph(graphId);
+          const entry = ChatState.taskBoardEntry(state.codex.taskBoard, graphId);
+          if (!entry?.boardId) throw readError || Object.assign(new Error('task board unknown'), { status: 404, code: 'TASK_NOT_FOUND' });
+          const body = ChatState.buildTaskContinueRequest(entry, taskId, gateId);
+          if (!body) throw Object.assign(new Error('gate not waiting'), { status: 409, code: 'TASK_GATE_STALE' });
+          const ifRev = entry.rev;
+          const payload = await fetchJson('/tasks/continue', { method: 'POST', body: JSON.stringify(body) });
+          const fresh = ChatState.taskBoardEntry(state.codex.taskBoard, graphId)?.rev === ifRev;
+          state.codex.taskBoard = ChatState.taskBoardWithState(state.codex.taskBoard, payload, { ifRev });
+          if (fresh) browserWorkflow.graph(payload?.graph);
+          state.codex.taskContinue = null;
+        } catch (error) {
+          state.codex.taskContinue = { ...target, phase: 'error', error: ChatState.taskContinueErrorText(error) };
+          if (error?.code === 'TASK_GATE_STALE') void readTaskGraph(graphId);
+        }
+        emit();
+      },
       // '다시 시도' after the quiet retries ran out: start a fresh connect now
       // and say '다시 연결 중…' again while it runs.
       reconnectNow() {
@@ -7693,9 +7906,18 @@
         emit();
       },
       // Model and effort apply per turn, so a started room can change them.
+      // Only offered values are kept; another model starts on its own default effort.
+      setThreadModel(threadId, model) {
+        const thread = getCodexThreadById(state.codex, threadId);
+        if (!thread) return;
+        const pick = ChatState.chatModelPick(thread, model, { ...state.codex, auth: state.codex.authStatus });
+        if (pick === undefined) return;
+        updateThreadById(threadId, (current) => ({ ...current, model: pick, effort: (current.model || null) === pick ? current.effort : null }));
+        emit();
+      },
       setThreadEffort(threadId, effort) {
         if (!getCodexThreadById(state.codex, threadId)) return;
-        updateThreadById(threadId, (current) => ({ ...current, effort: ChatState.chatEffortValue(effort) }));
+        updateThreadById(threadId, (current) => ({ ...current, effort: ChatState.chatEffortPick(current, effort, { ...state.codex, auth: state.codex.authStatus }) }));
         emit();
       },
       continueInNewThread(threadId) {
@@ -7738,6 +7960,7 @@
         });
         if (source.effort) target.effort = source.effort;
         if (source.model) target.model = source.model;
+        if (source.sentModel) target.sentModel = source.sentModel;
         const body = ChatState.buildChatForkRequest(source, ChatState.clientThreadBinding(target), fromTurnId, source.engineId);
         const token = epochScope.begin();
         forkingThreads.add(source.id);
@@ -7980,6 +8203,7 @@
         try {
           const bridgeState = await fetchJson('/v1/state', { signal: token.signal, headers: await bridgeStateHeaders() });
           if (!epochScope.valid(token)) return;
+          engineStatus.cancel();
           const status = bridgeState?.auth || state.codex.authStatus;
           update({
             provider: bridgeState?.provider || state.codex.provider,
@@ -8124,6 +8348,12 @@
         try {
           const runtimeConfig = codexThreadRuntimeConfig(activeThread);
           runtimeConfig.engineId = engineId;
+          // The model and effort the panel shows: a listed model with its effort, or nothing for '기본 모델'.
+          const sendingThread = getCodexThreadById(state.codex, activeThread.id) || activeThread;
+          const modelFields = ChatState.chatModelSendFields(sendingThread, ChatState.chatModelView(sendingThread, {
+            engineId, engines: state.codex.engines, auth: state.codex.authStatus, engineConfiguration: state.codex.engineConfiguration }));
+          runtimeConfig.model = modelFields.model;
+          runtimeConfig.effort = modelFields.effort;
           runtimeConfig.contextSnapshotIds = inputReferences.map(reference => reference.snapshotId);
           runtimeConfig.contextCapabilities = ChatState.contextCapabilitiesForRequest(activeThread, state.codex.authStatus, runtimeConfig.contextSnapshotIds);
           runtimeConfig.stateless = ChatState.chatStatelessStartView(activeThread, state.codex.chatCapabilities).on;
@@ -8147,10 +8377,13 @@
             if (chatRequest.stateless || chatRequest.executionPolicy) updateThreadById(activeThread.id, thread => ({ ...thread,
               ...(chatRequest.stateless ? { stateless: result.stateless === true, startStateless: false } : {}),
               ...(chatRequest.executionPolicy ? { executionBounded: true } : {}) }));
+            // Codex keeps a named model for later turns; going back to the default must name it.
+            if (chatRequest.model) updateThreadById(activeThread.id, thread => ({ ...thread, sentModel: chatRequest.model, nameModelNext: false }));
             syncProtocolRun(run);
           } else {
             const error = new Error(result.error || '실행 접수 상태를 확인하지 못했습니다.');
             error.status = result.accepted === false ? 400 : 0;
+            error.code = typeof result.code === 'string' ? result.code : null;
             error.conversationId = result.conversationId || null;
             error.accepted = result.accepted;
             error.resumeRequired = result.resumeRequired;
@@ -8162,8 +8395,12 @@
           if (error.code === 'BROWSER_TOOLS_UNAVAILABLE') {
             error.message = '이 대화는 Browser 조작 도구가 등록되기 전에 만들어졌습니다. 기존 기록과 초안은 유지됩니다. 새 Chat을 만든 뒤 Browser에서 이번 실행의 조작 대상을 다시 선택해 주세요.';
           }
-          const profileText = ChatState.profileSendErrorText(error.code) || ChatState.chatStatelessErrorText(error.code);
+          const profileText = ChatState.profileSendErrorText(error.code) || ChatState.chatStatelessErrorText(error.code)
+            || ChatState.chatModelSendErrorText(error.code);
           if (profileText) error.message = profileText;
+          // A refused model or effort returns the room's choice to the default.
+          const modelReset = ChatState.chatModelRejectionReset(error.code);
+          if (modelReset) updateThreadById(activeThread.id, thread => ({ ...thread, ...modelReset }));
           if (error.conversationId) {
             request.conversationId = error.conversationId;
             updateThreadById(activeThread.id, thread => ({ ...thread, conversationId: error.conversationId, ...ChatState.nativeBindingForRun(thread, { conversationId: error.conversationId, accountKey: request.accountKey }) }));
@@ -13525,7 +13762,18 @@
       }
       syncBrowserChrome();
     };
+    // BRW-04: the location the page actually arrived at (never the requested
+    // src), reported for workflow gates. The bridge hears origin + path only;
+    // the Codex sign-in card is EG-Desk's own and is not reported.
+    const readArrivedBrowserUri = () => {
+      try { return xulBrowser?.currentURI?.spec || ''; } catch { return ''; }
+    };
+    const reportBrowserLocation = (uri) => {
+      if (card.dataset.codexRole === 'auth' || !card.isConnected) return;
+      try { state.codexBridge?.reportBrowserLocation?.(card.id, uri); } catch {}
+    };
     const syncBrowserStateFromBrowser = (options = {}) => {
+      reportBrowserLocation(readArrivedBrowserUri());
       const previousUri = browserState.uri;
       const nextUri = normalizeBrowserUri(readBrowserUri());
       const requestedUri = readRequestedBrowserUri();
@@ -13917,6 +14165,19 @@
       try { xulBrowser.addEventListener(eventName, onBrowserLoadDone, true); } catch {}
     }
     try { xulBrowser.addEventListener('DOMTitleChanged', onBrowserTitle, true); } catch {}
+    // Top-level location changes between loads (redirect landings, route
+    // changes) are reported too. Reporting only; the card state keeps its own
+    // sync. The progress list holds listeners weakly, so the card keeps it.
+    const browserLocationListener = {
+      QueryInterface: ChromeUtils.generateQI(['nsIWebProgressListener', 'nsISupportsWeakReference']),
+      onLocationChange(webProgress, _request, location) {
+        if (webProgress && webProgress.isTopLevel === false) return;
+        reportBrowserLocation(location?.spec || '');
+      },
+      onStateChange() {}, onProgressChange() {}, onStatusChange() {}, onSecurityChange() {}, onContentBlockingEvent() {},
+    };
+    card._browserLocationListener = browserLocationListener;
+    try { xulBrowser.webProgress?.addProgressListener(browserLocationListener, Ci.nsIWebProgress.NOTIFY_LOCATION); } catch {}
     for (const eventName of ['FullZoomChange', 'TextZoomChange']) {
       xulBrowser.addEventListener(eventName, onBrowserPageZoom, true);
     }

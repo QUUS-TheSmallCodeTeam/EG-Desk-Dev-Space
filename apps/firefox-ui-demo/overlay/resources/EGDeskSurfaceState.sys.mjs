@@ -510,6 +510,97 @@ export function bridgeConnectionNotice({
   return { state: 'offline', text: '연결이 끊겼습니다', action: '다시 시도', details };
 }
 
+// Browser card events for workflow gates (BRW-04; helper contract: POST
+// /events/browser {cardId, kind:'navigated'|'oauthCompleted', url}, and task
+// SSE gates {kind:'oauth', origin, pathPrefix, cardId?, status}). Only an
+// http(s) top-level location leaves the screen, and only as origin + path: the
+// query, fragment and sign-in part never reach a body, state, log or data-*.
+const WORKFLOW_ID = /^[A-Za-z0-9][A-Za-z0-9._:/-]{0,159}$/;
+const URL_CONTROL = /[\u0000-\u001f\u007f]/;
+export function browserEventLocation(value) {
+  if (typeof value !== 'string' || !value || value.length > 8192 || URL_CONTROL.test(value)) return null;
+  let url = null;
+  try { url = new URL(value); } catch { return null; }
+  if (url.protocol !== 'http:' && url.protocol !== 'https:') return null;
+  const path = url.pathname || '/';
+  return path.length > 2048 ? null : { origin: url.origin, path };
+}
+
+// A gate is open while its task has not started and the graph is not cancelled
+// (helper openGates). Only exact, well-formed targets are kept.
+const GATE_OPEN_TASK_STATUSES = ['queued', 'waiting-on-dependency', 'approval-required', 'ready'];
+function oauthGateTarget(gate) {
+  if (gate?.kind !== 'oauth' || gate.status !== 'waiting' || typeof gate.origin !== 'string') return null;
+  if (browserEventLocation(gate.origin)?.origin !== gate.origin) return null;
+  const prefix = gate.pathPrefix;
+  if (typeof prefix !== 'string' || prefix.length < 2 || prefix.length > 512 || !prefix.startsWith('/') || /[?#\\\u0000-\u001f\u007f]/.test(prefix)) return null;
+  if (gate.cardId !== undefined && !(typeof gate.cardId === 'string' && WORKFLOW_ID.test(gate.cardId))) return null;
+  return { origin: gate.origin, pathPrefix: prefix, ...(gate.cardId === undefined ? {} : { cardId: gate.cardId }) };
+}
+export function waitingOAuthGates(graph) {
+  if (!graph || typeof graph !== 'object' || graph.cancelRequested === true || !Array.isArray(graph.tasks)) return [];
+  return graph.tasks.filter(task => GATE_OPEN_TASK_STATUSES.includes(task?.status) && Array.isArray(task.gates))
+    .flatMap(task => task.gates.map(oauthGateTarget).filter(Boolean));
+}
+/** Same origin, the prefix itself or below it on a '/' boundary, and the same card when the gate names one. */
+export function oauthGateMatches(gate, cardId, location) {
+  if (!gate || !location || gate.origin !== location.origin) return false;
+  const prefix = gate.pathPrefix;
+  const within = location.path === prefix || location.path.startsWith(prefix.endsWith('/') ? prefix : `${prefix}/`);
+  return within && (gate.cardId === undefined || gate.cardId === cardId);
+}
+
+// One report per new location of a card, sent in order. The bridge refuses more
+// than 20 a second; the screen stays under it and keeps room for a sign-in report.
+export const BROWSER_NAVIGATED_PER_SECOND = 8;
+export const BROWSER_EVENTS_PER_SECOND = 12;
+export function createBrowserWorkflowReporter({ post, now = Date.now, onError = null, maxCards = 256 } = {}) {
+  const gatesByGraph = new Map();
+  const lastLocation = new Map();
+  let budget = { start: -Infinity, navigated: 0, total: 0 };
+  let tail = Promise.resolve();
+  const take = kind => {
+    const at = now();
+    if (at - budget.start >= 1000) budget = { start: at, navigated: 0, total: 0 };
+    if (budget.total >= BROWSER_EVENTS_PER_SECOND || (kind === 'navigated' && budget.navigated >= BROWSER_NAVIGATED_PER_SECOND)) return false;
+    budget.total += 1;
+    if (kind === 'navigated') budget.navigated += 1;
+    return true;
+  };
+  return {
+    /** A task.graph frame: keeps that graph's open sign-in gates (none drops it). */
+    graph(graph) {
+      if (typeof graph?.graphId !== 'string' || !WORKFLOW_ID.test(graph.graphId)) return;
+      const gates = waitingOAuthGates(graph);
+      if (gates.length) gatesByGraph.set(graph.graphId, gates);
+      else gatesByGraph.delete(graph.graphId);
+    },
+    openGateCount: () => [...gatesByGraph.values()].reduce((sum, gates) => sum + gates.length, 0),
+    /** A card's arrived top-level URL; returns the bodies it sends. */
+    location(cardId, url) {
+      if (typeof cardId !== 'string' || !WORKFLOW_ID.test(cardId)) return [];
+      const location = browserEventLocation(url);
+      if (!location) return [];
+      const shown = `${location.origin}${location.path}`;
+      if (lastLocation.get(cardId) === shown) return [];
+      lastLocation.delete(cardId);
+      lastLocation.set(cardId, shown);
+      if (lastLocation.size > maxCards) lastLocation.delete(lastLocation.keys().next().value);
+      const events = [{ cardId, kind: 'navigated', url: shown }];
+      if ([...gatesByGraph.values()].some(gates => gates.some(gate => oauthGateMatches(gate, cardId, location)))) {
+        events.push({ cardId, kind: 'oauthCompleted', url: shown });
+      }
+      const sent = events.filter(event => take(event.kind));
+      for (const event of sent) {
+        tail = tail.then(() => post(event)).catch(error => { try { onError?.(error); } catch {} });
+      }
+      return sent;
+    },
+    forget(cardId) { lastLocation.delete(cardId); },
+    settled: () => tail,
+  };
+}
+
 // Camera moves settle at once when the system asks for reduced motion, unless
 // the caller chose explicitly.
 export function cameraMoveImmediate(options = {}, reducedMotion = false) {

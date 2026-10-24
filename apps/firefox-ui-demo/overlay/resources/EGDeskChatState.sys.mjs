@@ -1084,29 +1084,177 @@ export function chatThreadEngineId(thread, { recentEngineId = null, engines = nu
 }
 
 // ReasoningEffort is a model-advertised string (SDK type: minimal|low|medium|high|xhigh).
-// The picker offers the common three; '기본' sends nothing so the model default applies.
+// Without a model list the picker offers the common three; '기본' sends nothing so the model default applies.
 export const CHAT_EFFORT_CHOICES = Object.freeze([
   Object.freeze({ value: null, label: '기본' }), Object.freeze({ value: 'low', label: '낮음' }),
   Object.freeze({ value: 'medium', label: '보통' }), Object.freeze({ value: 'high', label: '높음' })]);
 export const chatEffortValue = value => CHAT_EFFORT_CHOICES.some(choice => choice.value && choice.value === value) ? value : null;
 /** Effort choices only when the engine reports per-turn effort selection. */
 export const chatEffortChoices = choice => choice?.capabilities?.includes('effortSelect.perTurn') ? CHAT_EFFORT_CHOICES : [];
-/** Model line: no model catalog is published yet, so only the default (with its verified name when reported). */
+/** Model line without a model list: only the default (with its verified name when reported). */
 export function chatModelLabel(engineConfiguration) {
   const model = typeof engineConfiguration?.effectiveModel === 'string' ? engineConfiguration.effectiveModel.trim().slice(0, 80) : '';
   return model ? `기본 모델 · ${model}` : '기본 모델';
 }
 
-/** Header chip and room badge: the engine name, plus the effort when one is chosen. */
+// The account's models (helper contract: engines[] row models: null | [{ id, displayName,
+// isDefault, supportedEfforts, defaultEffort }], in /v1/state and SSE engine.status).
+// null is unknown (signed out, not read yet, account just changed): the panel then
+// shows '기본 모델' alone. An effort shows as a Korean word; a value this screen does
+// not know reads '기타 강도 N', never the raw token.
+const MODEL_ID = /^[A-Za-z0-9][A-Za-z0-9._:/-]{0,127}$/;
+const EFFORT_TOKEN = /^[a-z][a-z0-9_-]{0,31}$/;
+const MODEL_LIST_LIMIT = 50;
+const EFFORT_LABELS = [['none', '없음'], ['minimal', '최소'], ['low', '낮음'], ['medium', '보통'], ['high', '높음'],
+  ['xhigh', '매우 높음'], ['max', '최대'], ['ultra', '초고']];
+const modelName = (value, id) => (typeof value === 'string' ? value.replace(/[\u0000-\u001f\u007f\u2028\u2029]+/g, ' ').trim().slice(0, 80) : '') || id;
+
+/** The engine's listed models in bridge order (unique ids, at most one default), or null when unknown. */
+export function chatModelCatalog(engines, engineId = DEFAULT_CHAT_ENGINE_ID) {
+  const row = engineRows(engines).find(entry => entry.id === engineId);
+  if (!Array.isArray(row?.models)) return null;
+  const models = [];
+  for (const raw of row.models) {
+    const id = typeof raw?.id === 'string' && MODEL_ID.test(raw.id) ? raw.id : null;
+    if (!id || models.some(model => model.id === id)) continue;
+    const supportedEfforts = [...new Set((Array.isArray(raw.supportedEfforts) ? raw.supportedEfforts : [])
+      .filter(value => typeof value === 'string' && EFFORT_TOKEN.test(value)))].slice(0, 16);
+    models.push({ id, displayName: modelName(raw.displayName, id), isDefault: raw.isDefault === true && !models.some(model => model.isDefault),
+      supportedEfforts, defaultEffort: supportedEfforts.includes(raw.defaultEffort) ? raw.defaultEffort : null });
+    if (models.length === MODEL_LIST_LIMIT) break;
+  }
+  return models.length ? models : null;
+}
+
+/** Korean word for an effort; an unknown value is numbered among the unknown ones of its model. */
+export function chatEffortLabel(value, efforts = []) {
+  const known = lookup(EFFORT_LABELS, value);
+  if (known) return known;
+  const unknown = (Array.isArray(efforts) ? efforts : []).filter(effort => !lookup(EFFORT_LABELS, effort));
+  const index = unknown.indexOf(value);
+  return `기타 강도 ${index >= 0 ? index + 1 : unknown.length + 1}`;
+}
+
+/**
+ * The room's model and effort as the panel shows them and /chat/send carries them.
+ * With a list: the room's model when it is listed, else the default one, which is
+ * what Codex runs when no model is named (the verified launch model when listed,
+ * else the bridge's isDefault); the room's effort when that model lists it, else
+ * the model's default effort. Without a list: '기본 모델' and the common effort
+ * picks, as before the list existed.
+ */
+export function chatModelView(thread, { engineId = DEFAULT_CHAT_ENGINE_ID, engines = null, auth = null, engineConfiguration = null } = {}) {
+  const choice = chatEngineChoices(engines, auth).find(row => row.id === engineId) || null;
+  const models = chatModelCatalog(engines, engineId);
+  if (!models) {
+    const effortChoices = chatEffortChoices(choice);
+    return { listed: false, models: null, model: null, defaultModel: null, modelChoices: [],
+      effortChoices, effort: effortChoices.length ? chatEffortValue(thread?.effort) : null };
+  }
+  const launched = typeof engineConfiguration?.effectiveModel === 'string' ? engineConfiguration.effectiveModel.trim() : '';
+  const defaultModel = models.find(row => row.id === launched) || models.find(row => row.isDefault) || null;
+  const model = models.find(row => row.id === thread?.model) || defaultModel;
+  const efforts = model ? model.supportedEfforts : [];
+  return {
+    listed: true, models, model, defaultModel,
+    modelChoices: [
+      ...(defaultModel ? [] : [{ value: null, id: null, label: '기본 모델', note: '계정 기본값', selected: !model }]),
+      ...models.map(row => ({ value: row === defaultModel ? null : row.id, id: row.id, label: row.displayName,
+        note: row === defaultModel ? '기본' : null, selected: row === model })),
+    ],
+    effortChoices: efforts.map(value => ({ value, label: chatEffortLabel(value, efforts), isDefault: value === model.defaultEffort })),
+    effort: efforts.includes(thread?.effort) ? thread.effort : model?.defaultEffort ?? null,
+  };
+}
+const modelViewContext = (thread, context = {}) => ({ ...context,
+  engineId: chatThreadEngineId(thread, { recentEngineId: context.recentEngineId ?? null, engines: context.engines ?? null }) });
+/** A model pick from the panel: null for the default model, the id for another listed one, undefined when not offered. */
+export function chatModelPick(thread, value, context = {}) {
+  const option = chatModelView(thread, modelViewContext(thread, context)).modelChoices.find(row => row.value === value);
+  return option ? option.value : undefined;
+}
+/** An effort pick from the panel: kept only when the room's model offers it, else null (its default). */
+export function chatEffortPick(thread, value, context = {}) {
+  return chatModelView(thread, modelViewContext(thread, context)).effortChoices.some(row => row.value && row.value === value) ? value : null;
+}
+
+/**
+ * /chat/send model and effort. With a list the effort goes with the model; the
+ * default model is left out, except when this conversation last ran another
+ * model (Codex keeps a turn's model for later turns, so going back names it) or
+ * after a refusal (nameModelNext), so the effort is checked against that model.
+ */
+export function chatModelSendFields(thread, view) {
+  if (!view?.listed) return view?.effort ? { effort: view.effort } : {};
+  const fields = {};
+  const sentOther = !!thread?.conversationId && typeof thread.sentModel === 'string' && thread.sentModel !== view.model?.id;
+  if (view.model && (view.model !== view.defaultModel || sentOther || thread?.nameModelNext === true)) fields.model = view.model.id;
+  if (view.effort) fields.effort = view.effort;
+  return fields;
+}
+
+/** Korean text for a refused model or effort; the choice then returns to the default. */
+export function chatModelSendErrorText(code) {
+  if (code === 'MODEL_UNAVAILABLE') return '선택한 모델을 지금 계정에서 쓸 수 없어 보내지 않았습니다. 기본 모델로 되돌렸으니 다시 보내 주세요.';
+  if (code === 'EFFORT_UNSUPPORTED') return '선택한 모델이 이 추론 강도를 지원하지 않아 보내지 않았습니다. 기본 강도로 되돌렸으니 다시 보내 주세요.';
+  return null;
+}
+/**
+ * The room fields a refusal resets: both for a model, the effort alone for an
+ * effort. The next send names the model, so a conversation that runs another
+ * model than the one shown cannot be refused the same way again.
+ */
+export function chatModelRejectionReset(code) {
+  if (code === 'MODEL_UNAVAILABLE') return { model: null, effort: null, nameModelNext: true };
+  if (code === 'EFFORT_UNSUPPORTED') return { effort: null, nameModelNext: true };
+  return null;
+}
+
+// SSE engine.status sends the engines[] rows whenever one changes. Right after
+// connecting, Codex reports '로그인 필요' for a moment before it signs in; a change
+// into that status is held this long and dropped when a newer row arrives first.
+export const ENGINE_LOGIN_FLICKER_MS = 1500;
+const codexRowStatus = engines => engineRows(engines).find(row => row.id === DEFAULT_CHAT_ENGINE_ID)?.status ?? null;
+export function chatEngineStatusHeld(current, next) {
+  return codexRowStatus(next) === 'loginRequired' && codexRowStatus(current) !== 'loginRequired';
+}
+export function createEngineStatusDebouncer({ current, apply, delayMs = ENGINE_LOGIN_FLICKER_MS,
+  setTimer = globalThis.setTimeout, clearTimer = globalThis.clearTimeout } = {}) {
+  let timer = null;
+  let pending = null;
+  const stop = () => { if (timer !== null) clearTimer(timer); timer = null; pending = null; };
+  return {
+    push(engines) {
+      const rows = Array.isArray(engines) ? engines : null;
+      if (chatEngineStatusHeld(current(), rows)) {
+        pending = rows;
+        if (timer === null) timer = setTimer(() => { const held = pending; timer = null; pending = null; apply(held); }, delayMs);
+        return false;
+      }
+      stop();
+      apply(rows);
+      return true;
+    },
+    cancel: stop,
+  };
+}
+
+const shortModelName = name => { const chars = Array.from(name); return chars.length > 14 ? `${chars.slice(0, 13).join('')}…` : name; };
+/** Header chip and room badge: the engine name, the model (short) when listed, plus the effort when one is chosen. */
 export function chatEngineChipView(thread, { recentEngineId = null, engines = null, auth = null, engineConfiguration = null } = {}) {
   const engineId = chatThreadEngineId(thread, { recentEngineId, engines });
   const choice = chatEngineChoices(engines, auth).find(row => row.id === engineId) || { id: engineId, label: engineId, account: null, capabilities: [] };
   const locked = chatThreadEngineLocked(thread);
-  const effort = chatEffortChoices(choice).find(row => row.value && row.value === chatEffortValue(thread?.effort)) || null;
+  const view = chatModelView(thread, { engineId, engines, auth, engineConfiguration });
+  const effort = view.effortChoices.find(row => row.value && row.value === thread?.effort) || null;
+  const model = view.listed ? view.model : null;
+  const effective = view.listed ? view.effortChoices.find(row => row.value === view.effort) || null : effort;
   return {
-    engineId, label: choice.label, locked, text: effort ? `${choice.label} · ${effort.label}` : choice.label,
+    engineId, label: choice.label, locked,
+    text: [choice.label, model ? shortModelName(model.displayName) : null, effort?.label].filter(Boolean).join(' · '),
     title: [`AI 엔진 ${choice.label}`, choice.account, locked ? '이 대화에 고정' : '새 대화에 사용',
-      chatModelLabel(engineConfiguration), effort ? `추론 강도 ${effort.label}` : null].filter(Boolean).join(' · '),
+      !view.listed ? chatModelLabel(engineConfiguration) : model ? `모델 ${model.displayName}${model === view.defaultModel ? ' (기본)' : ''}` : '기본 모델',
+      effective ? `추론 강도 ${effective.label}` : null].filter(Boolean).join(' · '),
   };
 }
 
@@ -1314,4 +1462,230 @@ export function inheritedMcpView(value) {
     };
   });
   return { status: rows.length ? 'listed' : 'empty', rows };
+}
+
+// CHAT-06 Await task list (helper contract: GET /tasks/state?graphId= -> { graph,
+// native: { boardId, scope }, board }; SSE codex { type: 'task.graph', graphId,
+// change, graph } with graph as the state route shows it, { type: 'task.native' }
+// as a hint to read the state again, { type: 'task.plan', plan } with step titles;
+// POST /tasks/continue { boardId, scope, taskId, gateId } for one waiting or
+// expired outside gate -> 200 state | 409 TASK_GATE_STALE). The screen keeps only
+// the graphs it has seen, at most TASK_BOARD_LIMIT, first seen first. No task,
+// gate or source ID and no English status ever reaches the screen text.
+export const TASK_BOARD_LIMIT = 12;
+const TASK_REF = /^[A-Za-z0-9][A-Za-z0-9._:/-]{0,255}$/;
+const TASK_SCOPE_KEYS = ['graphId', 'requestId', 'runId', 'parentTaskId', 'requestedBy'];
+const TASK_STATUS_TEXT = [['queued', '대기 중'], ['waiting-on-dependency', '대기 중'], ['approval-required', '대기 중'],
+  ['ready', '준비됨'], ['running', '실행 중'], ['completed', '완료'], ['failed', '실패'], ['cancelled', '취소']];
+const TASK_WAITING_STATUSES = ['queued', 'waiting-on-dependency', 'approval-required', 'ready'];
+const TASK_DONE_STATUSES = ['completed', 'failed', 'cancelled'];
+const TASK_GATE_KEYS = ['gateId', 'kind', 'status', 'taskId', 'origin', 'pathPrefix', 'root', 'relativeGlob', 'label',
+  'satisfiedBy', 'satisfiedAt', 'expiresAt', 'expiredAt', 'requested'];
+/** Outside conditions the user may continue by hand; an upstream task or an approval never. */
+export const TASK_CONTINUE_GATE_KINDS = Object.freeze(['userAction', 'oauth', 'file', 'terminalExit']);
+export const taskRef = value => typeof value === 'string' && TASK_REF.test(value);
+const taskLine = (value, max) => typeof value === 'string'
+  ? value.replace(/[\u0000-\u001f\u007f\u2028\u2029]+/g, ' ').replace(/\s+/g, ' ').trim().slice(0, max) : '';
+const taskTime = value => {
+  const at = typeof value === 'string' && value.length <= 40 ? Date.parse(value) : NaN;
+  return Number.isFinite(at) ? at : null;
+};
+
+/** Korean word for a task status; an unknown value never shows as the raw token. */
+export const taskStatusText = status => lookup(TASK_STATUS_TEXT, status) || '상태 확인 중';
+
+// Only the fields the list shows are kept from a frame or state read.
+function taskGraphShape(graph) {
+  if (!graph || typeof graph !== 'object' || !taskRef(graph.graphId) || !Array.isArray(graph.tasks) || graph.tasks.length > 256) return null;
+  const tasks = [];
+  for (const raw of graph.tasks) {
+    if (!raw || typeof raw !== 'object' || !taskRef(raw.taskId) || tasks.some(task => task.taskId === raw.taskId)) continue;
+    const gates = (Array.isArray(raw.gates) ? raw.gates : []).slice(0, 272)
+      .filter(gate => gate && typeof gate === 'object' && typeof gate.gateId === 'string' && typeof gate.kind === 'string')
+      .map(gate => Object.fromEntries(TASK_GATE_KEYS.filter(key => gate[key] !== undefined).map(key => [key, gate[key]])));
+    tasks.push({ taskId: raw.taskId, status: typeof raw.status === 'string' ? raw.status : null, gates });
+  }
+  return {
+    ...Object.fromEntries(TASK_SCOPE_KEYS.map(key => [key, graph[key] ?? null])),
+    activated: graph.activated === true, cancelRequested: graph.cancelRequested === true, recoveryHold: graph.recoveryHold === true,
+    tasks,
+  };
+}
+function taskScopeShape(scope) {
+  if (!scope || typeof scope !== 'object') return null;
+  const ok = TASK_SCOPE_KEYS.every(key => key === 'parentTaskId' ? scope[key] === null || taskRef(scope[key]) : taskRef(scope[key]));
+  return ok ? Object.fromEntries(TASK_SCOPE_KEYS.map(key => [key, scope[key]])) : null;
+}
+const taskGraphDone = graph => !!graph && graph.tasks.every(task => TASK_DONE_STATUSES.includes(task.status));
+
+export const createTaskBoard = () => ({ graphs: [], seen: 0 });
+export const taskBoardEntry = (board, graphId) => (board?.graphs || []).find(entry => entry.graphId === graphId) || null;
+
+// One entry per graph. rev counts graph updates so an older state read cannot
+// replace a newer SSE frame.
+function upsertTaskEntry(board, graphId, change) {
+  const current = board && Array.isArray(board.graphs) ? board : createTaskBoard();
+  const existing = taskBoardEntry(current, graphId);
+  const seen = (current.seen || 0) + (existing ? 0 : 1);
+  const entry = { ...(existing || { graphId, graph: null, rev: 0, boardId: null, scope: null, titles: {}, planTitle: null, order: seen }), ...change(existing) };
+  let graphs = existing ? current.graphs.map(row => row.graphId === graphId ? entry : row) : [...current.graphs, entry];
+  while (graphs.length > TASK_BOARD_LIMIT) {
+    const drop = graphs.find(row => row.graphId !== graphId && taskGraphDone(row.graph)) || graphs.find(row => row.graphId !== graphId);
+    graphs = graphs.filter(row => row !== drop);
+  }
+  return { graphs, seen };
+}
+
+/** A task.graph frame (or a state read's graph): the graph as shown now. */
+export function taskBoardWithGraph(board, graph) {
+  const shaped = taskGraphShape(graph);
+  if (!shaped) return board || createTaskBoard();
+  return upsertTaskEntry(board, shaped.graphId, existing => ({ graph: shaped, rev: (existing?.rev || 0) + 1 }));
+}
+
+/**
+ * GET /tasks/state or a POST /tasks/* reply: the Board and exact scope the
+ * continue request needs, and the graph unless a newer frame arrived since the
+ * read began (ifRev = the entry's rev when the read started).
+ */
+export function taskBoardWithState(board, payload, { ifRev } = {}) {
+  const shaped = taskGraphShape(payload?.graph);
+  if (!shaped) return board || createTaskBoard();
+  const boardId = taskRef(payload?.native?.boardId) ? payload.native.boardId : null;
+  const scope = taskScopeShape(payload?.native?.scope);
+  return upsertTaskEntry(board, shaped.graphId, existing => {
+    const fresh = ifRev === undefined || (existing?.rev || 0) === ifRev;
+    return { ...(fresh ? { graph: shaped, rev: (existing?.rev || 0) + 1 } : {}),
+      ...(boardId ? { boardId } : {}), ...(scope && scope.graphId === shaped.graphId ? { scope } : {}) };
+  });
+}
+
+/** A task.plan frame: step titles (and the plan's Board) for that graph. */
+export function taskBoardWithPlan(board, plan) {
+  if (!plan || typeof plan !== 'object' || !taskRef(plan.graphId) || !Array.isArray(plan.tasks)) return board || createTaskBoard();
+  const titles = Object.fromEntries(plan.tasks.filter(task => taskRef(task?.taskId) && taskLine(task.title, 200))
+    .slice(0, 256).map(task => [task.taskId, taskLine(task.title, 200)]));
+  const scope = taskScopeShape(plan.scope);
+  return upsertTaskEntry(board, plan.graphId, () => ({ titles, planTitle: taskLine(plan.title, 200) || null,
+    ...(taskRef(plan.boardId) ? { boardId: plan.boardId } : {}), ...(scope && scope.graphId === plan.graphId ? { scope } : {}) }));
+}
+
+export function taskBoardWithout(board, graphId) {
+  const current = board && Array.isArray(board.graphs) ? board : createTaskBoard();
+  return { ...current, graphs: current.graphs.filter(entry => entry.graphId !== graphId) };
+}
+
+/** Graphs still worth reading again (any task not finished). */
+export const taskBoardOpenGraphIds = board => (board?.graphs || [])
+  .filter(entry => !entry.graph || !taskGraphDone(entry.graph)).map(entry => entry.graphId);
+
+/** '진행 N건 · 대기 M건' (running; not started yet), or what finished when nothing is left. */
+export function taskBoardSummary(board) {
+  const tasks = (board?.graphs || []).flatMap(entry => entry.graph?.tasks || []);
+  const count = statuses => tasks.filter(task => statuses.includes(task.status)).length;
+  const running = count(['running']);
+  const waiting = count(TASK_WAITING_STATUSES);
+  const completed = count(['completed']), failed = count(['failed']), cancelled = count(['cancelled']);
+  const text = running || waiting ? `진행 ${running}건 · 대기 ${waiting}건`
+    : ['작업 끝남', completed ? `완료 ${completed}건` : '', failed ? `실패 ${failed}건` : '', cancelled ? `취소 ${cancelled}건` : ''].filter(Boolean).join(' · ');
+  return { visible: tasks.length > 0, running, waiting, completed, failed, cancelled, text };
+}
+
+const originHost = origin => { try { return new URL(origin).host || null; } catch { return null; } };
+
+/**
+ * One condition line. waiting: what the task waits for; satisfied: what happened
+ * with a check and the time; expired: the wait ran out (only a hand can open it).
+ */
+export function taskGateView(gate, { taskNames = {}, folderName = null, now = Date.now() } = {}) {
+  const kind = gate?.kind;
+  const status = ['waiting', 'satisfied', 'expired', 'rejected'].includes(gate?.status) ? gate.status : 'waiting';
+  let waitingText, doneText;
+  if (kind === 'task') {
+    const name = taskNames[gate.taskId] || '앞 작업';
+    waitingText = `${name} 완료 대기`; doneText = `${name} 완료`;
+  } else if (kind === 'oauth') {
+    const host = originHost(gate.origin);
+    waitingText = host ? `로그인 완료 대기 · ${host}` : '로그인 완료 대기'; doneText = host ? `로그인 완료 · ${host}` : '로그인 완료';
+  } else if (kind === 'file') {
+    const folder = taskLine(typeof folderName === 'function' ? folderName(gate.root) : null, 80) || '연결된 폴더';
+    const pattern = taskLine(gate.relativeGlob, 160);
+    const where = pattern ? `${folder}/${pattern}` : folder;
+    waitingText = `${where} 도착 대기`; doneText = `${where} 도착`;
+  } else if (kind === 'terminalExit') {
+    waitingText = '터미널 종료 대기'; doneText = '터미널 종료';
+  } else if (kind === 'userAction') {
+    const label = taskLine(gate.label, 200);
+    waitingText = label ? `확인 대기 · ${label}` : '확인 대기'; doneText = label ? `확인됨 · ${label}` : '확인됨';
+  } else if (kind === 'approval') {
+    waitingText = '승인 대기'; doneText = '승인됨';
+  } else {
+    waitingText = '조건 대기'; doneText = '조건 충족';
+  }
+  const byHand = status === 'satisfied' && gate.satisfiedBy === 'user.action' && kind !== 'userAction';
+  const clock = value => { const at = taskTime(value); return at === null ? null : formatResetClock(at, now); };
+  if (status === 'satisfied') return { gateId: gate.gateId, kind, state: status, text: byHand ? `${doneText} · 직접 진행` : doneText, time: clock(gate.satisfiedAt), byHand };
+  if (status === 'rejected') return { gateId: gate.gateId, kind, state: status, text: '승인 거절됨', time: null, byHand: false };
+  if (status === 'expired') return { gateId: gate.gateId, kind, state: status, text: `${waitingText} · 시간 초과`, time: clock(gate.expiredAt), byHand: false };
+  const until = clock(gate.expiresAt);
+  return { gateId: gate.gateId, kind, state: status, text: waitingText, time: until ? `${until}까지` : null, byHand: false };
+}
+
+/** The '계속' fallback: an outside condition still waiting (or run out) in a started, not cancelled graph. */
+export function taskGateContinuable(graph, task, gate) {
+  return !!graph && graph.activated === true && graph.cancelRequested !== true
+    && ['queued', 'waiting-on-dependency'].includes(task?.status)
+    && TASK_CONTINUE_GATE_KINDS.includes(gate?.kind) && ['waiting', 'expired'].includes(gate?.status) && taskRef(gate?.gateId);
+}
+
+/** POST /tasks/continue body, or null while the Board is unknown or the condition cannot be continued. */
+export function buildTaskContinueRequest(entry, taskId, gateId) {
+  const graph = entry?.graph;
+  const task = graph?.tasks.find(row => row.taskId === taskId);
+  const gate = task?.gates.find(row => row.gateId === gateId);
+  if (!taskRef(entry?.boardId) || !taskGateContinuable(graph, task, gate)) return null;
+  const scope = entry.scope || taskScopeShape(graph);
+  if (!scope || scope.graphId !== graph.graphId) return null;
+  return { boardId: entry.boardId, scope: { ...scope }, taskId, gateId };
+}
+
+/** Korean text for a refused continue; the bridge message stays internal. */
+export function taskContinueErrorText(error) {
+  const code = error?.code;
+  if (code === 'TASK_GATE_STALE') return '이 조건은 이미 풀렸거나 더 이상 기다리지 않습니다. 목록을 다시 확인했습니다.';
+  if (code === 'TASK_FENCED') return '취소된 작업이라 진행할 수 없습니다.';
+  if (code === 'TASK_NOT_FOUND') return '이 작업을 더 이상 찾을 수 없습니다.';
+  if (code === 'TASK_ROUTE_NOT_FOUND') return '지금 연결된 EG-Desk는 수동 진행을 지원하지 않습니다.';
+  if (code === 'LOGIN_REQUIRED') return '로그인한 뒤 진행할 수 있습니다.';
+  if (code === 'BRIDGE_OFFLINE') return 'AI 엔진이 아직 준비되지 않아 진행하지 못했습니다. 잠시 뒤 다시 시도해 주세요.';
+  if (code === 'TASK_SCOPE' || code === 'E_TASK_SCOPE' || code === 'TASK_RECONCILE_REQUIRED' || error?.status === 409)
+    return '작업 상태가 바뀌어 진행하지 못했습니다. 목록을 다시 확인한 뒤 시도해 주세요.';
+  if (!error?.status) return 'EG-Desk에 연결하지 못해 진행하지 못했습니다. 연결을 확인한 뒤 다시 시도해 주세요.';
+  return '진행하지 못했습니다. 잠시 뒤 다시 시도해 주세요.';
+}
+
+/**
+ * Everything the list draws: the summary, then each graph's tasks in order with
+ * their conditions. A step title names a task when a plan gave one; otherwise
+ * '작업 N' in graph order. continuing = { graphId, taskId, gateId, phase, error }.
+ */
+export function taskBoardView(board, { folderName = null, continuing = null, now = Date.now() } = {}) {
+  const summary = taskBoardSummary(board);
+  if (!summary.visible) return { visible: false, summary: '', counts: summary, groups: [] };
+  const entries = (board.graphs || []).filter(entry => entry.graph?.tasks.length);
+  const groups = [...entries].sort((a, b) => b.order - a.order).map(entry => {
+    const graph = entry.graph;
+    const taskNames = Object.fromEntries(graph.tasks.map((task, index) => [task.taskId, entry.titles?.[task.taskId] || `작업 ${index + 1}`]));
+    const tasks = graph.tasks.map(task => ({
+      taskId: task.taskId, name: taskNames[task.taskId], status: task.status, statusText: taskStatusText(task.status),
+      conditions: task.gates.map(gate => {
+        const here = continuing && continuing.graphId === entry.graphId && continuing.taskId === task.taskId && continuing.gateId === gate.gateId;
+        return { ...taskGateView(gate, { taskNames, folderName, now }), continuable: taskGateContinuable(graph, task, gate),
+          phase: here ? continuing.phase : null, error: here && continuing.phase === 'error' ? continuing.error || null : null };
+      }),
+    }));
+    const title = entry.planTitle || (entries.length > 1 ? `작업 묶음 ${entries.indexOf(entry) + 1}` : null);
+    return { graphId: entry.graphId, title, tasks };
+  });
+  return { visible: true, summary: summary.text, counts: summary, groups };
 }

@@ -6387,7 +6387,7 @@ button.egd-codex-engine-chip {
   display: inline-flex;
   align-items: center;
   gap: 3px;
-  max-width: 132px;
+  max-width: 168px;
   min-height: 26px;
   padding: 0 5px 0 8px;
   border: 1px solid var(--egd-chat-outline-soft);
@@ -6484,6 +6484,47 @@ button.egd-codex-engine-effort + button.egd-codex-engine-effort { border-left: 1
 button.egd-codex-engine-effort:hover { background: var(--egd-hover); color: var(--egd-on-surface); }
 button.egd-codex-engine-effort-selected,
 button.egd-codex-engine-effort-selected:hover { background: var(--egd-primary-container); color: var(--egd-primary); }
+/* A listed model offers its own efforts: up to four in one row, more in rows of three or four. */
+.egd-codex-engine-efforts[data-columns="1"] { grid-template-columns: minmax(0, 1fr); }
+.egd-codex-engine-efforts[data-columns="2"] { grid-template-columns: repeat(2, minmax(0, 1fr)); }
+.egd-codex-engine-efforts[data-columns="3"] { grid-template-columns: repeat(3, minmax(0, 1fr)); }
+.egd-codex-engine-efforts[data-columns="3"] > button.egd-codex-engine-effort:nth-child(3n+1),
+.egd-codex-engine-efforts[data-columns="4"] > button.egd-codex-engine-effort:nth-child(4n+1) { border-left: 0; }
+.egd-codex-engine-efforts[data-columns="3"] > button.egd-codex-engine-effort:nth-child(n+4),
+.egd-codex-engine-efforts[data-columns="4"] > button.egd-codex-engine-effort:nth-child(n+5) { border-top: 1px solid var(--egd-outline-variant); }
+/* The account's models when the bridge lists them: one quiet list, the default marked. */
+.egd-codex-engine-models {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  max-height: 188px;
+  padding: 2px;
+  overflow-y: auto;
+  border: 1px solid var(--egd-outline-variant);
+  border-radius: 8px;
+  background: var(--egd-window-alt);
+}
+button.egd-codex-engine-model-choice {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  flex: none;
+  width: 100%;
+  min-height: 28px;
+  padding: 4px 8px;
+  border: 1px solid transparent;
+  border-radius: 6px;
+  background: transparent;
+  color: var(--egd-on-surface);
+  font: 500 12px/1.3 var(--egd-font);
+  text-align: left;
+}
+button.egd-codex-engine-model-choice:hover { background: var(--egd-hover); }
+button.egd-codex-engine-model-choice-selected,
+button.egd-codex-engine-model-choice-selected:hover { border-color: var(--egd-primary); background: var(--egd-primary-container); }
+.egd-codex-engine-model-name { flex: 1 1 auto; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.egd-codex-engine-model-note { flex: none; font: 600 10.5px/1 var(--egd-font); color: var(--egd-on-surface-variant); }
+.egd-codex-engine-model-check { flex: none; width: 14px; height: 14px; color: var(--egd-primary); }
 .egd-codex-engine-start { display: flex; flex-direction: column; flex-shrink: 0; align-self: flex-start; gap: 6px; width: 100%; max-width: 300px; margin-top: 4px; }
 
 /* Run errors by kind: one sentence and, when it helps, one next step. */
@@ -6603,6 +6644,97 @@ button.egd-codex-stateless-toggle:disabled { background: var(--egd-window-alt); 
   color: var(--egd-on-surface);
 }
 .egd-settings-section > .egd-settings-empty + .egd-settings-pending-line { margin-top: 8px; }
+
+/* CHAT-06 Await task list: one quiet line under the run state that opens in place,
+   in the activity record's grammar (row, state word, separator), never a new panel. */
+.egd-task-board {
+  flex: 0 0 auto;
+  display: flex;
+  flex-direction: column;
+  margin: 0 16px 6px;
+  border: 1px solid var(--egd-outline-variant);
+  border-radius: 8px;
+  background: var(--egd-window-alt);
+  color: var(--egd-on-surface-variant);
+  font: 12px/1.5 var(--egd-font);
+}
+button.egd-task-board-summary {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  width: 100%;
+  min-height: 32px;
+  padding: 4px 10px;
+  border: 0;
+  border-radius: 8px;
+  background: transparent;
+  color: var(--egd-on-surface);
+  font: 600 12px/1.5 var(--egd-font);
+  text-align: left;
+}
+button.egd-task-board-summary:hover { background: var(--egd-hover); }
+.egd-task-board-summary-text { flex: 1 1 auto; min-width: 0; overflow-wrap: anywhere; }
+.egd-task-board-chevron { flex: none; width: 14px; height: 14px; color: var(--egd-on-surface-variant); }
+.egd-task-board[data-open="true"] .egd-task-board-chevron { transform: rotate(180deg); }
+.egd-task-board-list {
+  max-height: 220px;
+  overflow-y: auto;
+  padding: 0 10px 2px;
+  border-top: 1px solid var(--egd-outline-variant);
+  overscroll-behavior: contain;
+  scrollbar-width: thin;
+}
+.egd-task-group-title { margin: 8px 0 0; font: 600 11px/1.4 var(--egd-font); color: var(--egd-on-surface-variant); }
+.egd-task-row { display: flex; flex-direction: column; gap: 4px; padding: 8px 0; border-bottom: 1px solid var(--egd-outline-variant); }
+.egd-task-group:last-child > .egd-task-row:last-child { border-bottom: 0; }
+.egd-task-row-head { display: flex; align-items: baseline; gap: 8px; }
+.egd-task-name { flex: 1 1 auto; min-width: 0; overflow-wrap: anywhere; color: var(--egd-on-surface); font-weight: 600; }
+.egd-task-status { flex: none; font-size: 11px; color: var(--egd-on-surface-variant); }
+.egd-task-row[data-status="running"] .egd-task-status { color: var(--egd-primary); }
+.egd-task-row[data-status="completed"] .egd-task-status { color: var(--egd-success-ink); }
+.egd-task-row[data-status="failed"] .egd-task-status { color: var(--egd-danger-ink); }
+.egd-task-conditions { display: flex; flex-direction: column; gap: 2px; margin: 0; padding: 0; list-style: none; }
+.egd-task-condition { display: flex; flex-wrap: wrap; align-items: center; gap: 2px 6px; min-height: 24px; }
+.egd-task-condition-dot { flex: none; width: 6px; height: 6px; margin: 0 4px; border-radius: 50%; background: var(--egd-outline); }
+.egd-task-condition[data-state="expired"] .egd-task-condition-dot,
+.egd-task-condition[data-state="rejected"] .egd-task-condition-dot { background: var(--egd-warning); }
+.egd-task-condition-mark { flex: none; width: 14px; height: 14px; color: var(--egd-success-ink); }
+.egd-task-condition-text { flex: 1 1 auto; min-width: 0; overflow-wrap: anywhere; }
+.egd-task-condition[data-state="satisfied"] .egd-task-condition-text { color: var(--egd-on-surface); }
+.egd-task-condition[data-state="expired"] .egd-task-condition-text,
+.egd-task-condition[data-state="rejected"] .egd-task-condition-text { color: var(--egd-warning-ink); }
+.egd-task-condition-time { flex: none; font-size: 11px; color: var(--egd-on-surface-variant); font-variant-numeric: tabular-nums; }
+button.egd-task-continue,
+button.egd-task-confirm-go,
+button.egd-task-confirm-cancel {
+  flex: none;
+  min-height: 32px;
+  padding: 2px 9px;
+  border: 1px solid var(--egd-outline-variant);
+  border-radius: 6px;
+  background: var(--egd-surface-elevated);
+  color: var(--egd-primary);
+  font: 600 11.5px/1.4 var(--egd-font);
+}
+button.egd-task-continue:hover,
+button.egd-task-confirm-cancel:hover { background: var(--egd-hover); }
+button.egd-task-confirm-go { border-color: var(--egd-primary); background: var(--egd-primary); color: var(--egd-on-primary); }
+button.egd-task-confirm-go:hover { background: var(--egd-primary-strong); }
+button.egd-task-confirm-go[aria-disabled="true"] { opacity: .6; cursor: default; }
+.egd-task-confirm {
+  flex: 1 0 100%;
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 6px;
+  padding: 6px 8px;
+  border: 1px solid var(--egd-note-line);
+  border-radius: 7px;
+  background: var(--egd-note-soft);
+  color: var(--egd-warning-ink);
+}
+.egd-task-confirm > span { flex: 1 1 auto; min-width: 0; overflow-wrap: anywhere; }
+.egd-task-error { flex: 1 0 100%; margin: 2px 0 0; color: var(--egd-danger-ink); font-size: 11.5px; overflow-wrap: anywhere; }
 
 /* DSN-01: rules a token cannot carry. Search result kinds keep their own hue;
    in dark the ink lifts toward the dark ink and the wash darkens. */
