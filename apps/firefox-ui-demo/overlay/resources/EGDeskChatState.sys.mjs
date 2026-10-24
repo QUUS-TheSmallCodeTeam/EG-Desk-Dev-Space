@@ -1476,6 +1476,8 @@ export function runErrorNotice(error, usage = null, now = Date.now()) {
   }
   if (kind === 'permission') return { kind, text: '권한이 부족합니다.', action: null };
   if (kind === 'network') return { kind, text: '연결이 불안정합니다. 다시 시도해 주세요.', action: 'retry' };
+  const computerControl = computerControlSendErrorText(error.code);
+  if (computerControl) return { kind, text: computerControl, action: null };
   return { kind, text: error.message || error.code || '실행 오류', action: null };
 }
 
@@ -1618,22 +1620,90 @@ export function chatForkErrorText(error) {
 const MCP_STATUS_TEXT = [['connected', '연결됨'], ['starting', '시작 중'], ['notStarted', '시작 전'], ['available', '사용 가능'],
   ['authenticationRequired', '로그인 필요'], ['failed', '실패'], ['cancelled', '취소됨'], ['disabled', '꺼짐']];
 const MCP_STATUS_TONE = { connected: 'ok', available: 'ok', starting: 'idle', notStarted: 'idle', authenticationRequired: 'warn', failed: 'warn', cancelled: 'off', disabled: 'off' };
-const MCP_KIND_TEXT = [['browser', '브라우저 제어'], ['desktop', '데스크톱 제어'], ['repl', '코드 실행'], ['other', '기타']];
-/** Settings rows for the inherited tools: Korean status and kind; 'unknown' when the bridge cannot say. */
-export function inheritedMcpView(value) {
+const MCP_KIND_TEXT = [['browser', '브라우저 제어'], ['desktop', '컴퓨터 조작'], ['repl', '코드 실행'], ['other', '기타']];
+/**
+ * Settings rows for the inherited tools: Korean status and kind; 'unknown' when
+ * the bridge cannot say. With computer control off (CU-01), a tool that can
+ * drive this Mac reads 'EG-Desk 대화에서는 꺼짐' instead of its connection state.
+ */
+export function inheritedMcpView(value, { computerControl = null } = {}) {
   if (!Array.isArray(value)) return { status: 'unknown', rows: [] };
+  const controlOff = normalizeComputerControl(computerControl)?.policy === 'off';
   const rows = value.filter(row => row && typeof row === 'object' && typeof row.name === 'string' && row.name.trim()).slice(0, 64).map(row => {
     const status = lookup(MCP_STATUS_TEXT, row.status) ? row.status : null;
     const kind = lookup(MCP_KIND_TEXT, row.kind) ? row.kind : 'other';
+    const off = controlOff && kind === 'desktop';
     return {
       name: row.name.trim().slice(0, 80),
-      statusLabel: status ? lookup(MCP_STATUS_TEXT, status) : '확인 안 됨',
-      tone: status ? MCP_STATUS_TONE[status] : 'idle',
+      statusLabel: off ? COMPUTER_CONTROL_OFF_ROW_TEXT : status ? lookup(MCP_STATUS_TEXT, status) : '확인 안 됨',
+      tone: off ? 'off' : status ? MCP_STATUS_TONE[status] : 'idle',
       kind, kindLabel: lookup(MCP_KIND_TEXT, kind),
       controlsExternal: row.controlsExternal === true,
+      controlOff: off,
     };
   });
   return { status: rows.length ? 'listed' : 'empty', rows };
+}
+
+// CU-01 stage 1 computer control (helper contract: /v1/state.computerControl
+// { policy: 'inherit'|'off', verified: true|false|null }; SSE codex
+// { type: 'computer.control', computerControl } replaces it; POST
+// /settings/computer-control { policy } -> 200 { policy, verified } |
+// 400 INVALID_COMPUTER_CONTROL_POLICY | 403 SETTINGS_LOOPBACK_REQUIRED; a send the
+// bridge could not confirm fails with COMPUTER_CONTROL_UNVERIFIED). The screen
+// shows the bridge's value as it is (today 'inherit') and decides nothing.
+export const COMPUTER_CONTROL_POLICIES = Object.freeze(['inherit', 'off']);
+export const COMPUTER_CONTROL_APPLY_NOTE = '다음에 보내는 메시지부터 적용됩니다';
+export const COMPUTER_CONTROL_OFF_ROW_TEXT = 'EG-Desk 대화에서는 꺼짐';
+export const COMPUTER_CONTROL_UNVERIFIED_TEXT = '컴퓨터 조작이 꺼졌는지 확인하지 못해 보내지 않았습니다';
+/** { policy, verified } as the bridge reports it, or null when it does not say. */
+export function normalizeComputerControl(value) {
+  if (!value || typeof value !== 'object' || !COMPUTER_CONTROL_POLICIES.includes(value.policy)) return null;
+  return { policy: value.policy, verified: typeof value.verified === 'boolean' ? value.verified : null };
+}
+/** Everything the Settings '컴퓨터 조작' row draws. */
+export function computerControlView(value) {
+  const current = normalizeComputerControl(value);
+  if (!current) {
+    return { status: 'unknown', policy: null, on: false, available: false, statusLabel: '확인할 수 없음', check: null,
+      note: '코덱스 연결이 준비되면 다시 확인합니다.' };
+  }
+  if (current.policy === 'inherit') {
+    return { status: 'inherit', policy: 'inherit', on: true, available: true, statusLabel: '켜 둠 · 내 Codex 설정 그대로', check: null,
+      note: '내 Codex 설정에서 켜 둔 컴퓨터 조작 도구를 EG-Desk 대화의 Agent도 쓸 수 있습니다.' };
+  }
+  const check = current.verified === true ? { label: '꺼진 것을 확인함', tone: 'ok' }
+    : current.verified === false ? { label: '확인 실패', tone: 'warn' } : { label: '아직 확인 안 됨', tone: 'idle' };
+  return { status: 'off', policy: 'off', on: false, available: true, statusLabel: 'EG-Desk 대화에서는 끔', check,
+    note: '대화를 보낼 때마다 꺼졌는지 확인하고, 확인이 안 되면 보내지 않습니다. Codex 앱 설정은 바뀌지 않습니다.' };
+}
+/** POST /settings/computer-control for a real change, or null (unknown, same, or not a policy). */
+export function buildComputerControlRequest(value, policy) {
+  const current = normalizeComputerControl(value);
+  if (!current || !COMPUTER_CONTROL_POLICIES.includes(policy) || policy === current.policy) return null;
+  return { path: '/settings/computer-control', body: { policy } };
+}
+/** Korean text for a refused switch; the setting stays as it was. */
+export function computerControlErrorText(error) {
+  const code = error?.code;
+  if (code === 'INVALID_COMPUTER_CONTROL_POLICY') return '바꿀 수 없는 값이라 설정을 그대로 두었습니다.';
+  if (code === 'SETTINGS_LOOPBACK_REQUIRED' || error?.status === 403) return '이 컴퓨터의 EG-Desk에서만 바꿀 수 있습니다. 설정은 그대로입니다.';
+  if (error?.status === 404 || error?.status === 405) return '지금 연결된 EG-Desk는 이 설정을 지원하지 않습니다.';
+  if (!error?.status) return 'EG-Desk에 연결하지 못해 바꾸지 못했습니다. 연결을 확인한 뒤 다시 시도해 주세요.';
+  return '설정을 바꾸지 못했습니다. 잠시 뒤 다시 시도해 주세요.';
+}
+/** Korean text for /chat/send refused because computer control could not be confirmed off. */
+export function computerControlSendErrorText(code) {
+  if (code === 'COMPUTER_CONTROL_UNVERIFIED') return `${COMPUTER_CONTROL_UNVERIFIED_TEXT}. 잠시 뒤 다시 보내거나 설정의 컴퓨터 조작 상태를 확인해 주세요.`;
+  return null;
+}
+// An activity row of an MCP tool call names what its server can drive (detail.controlKind).
+const MCP_CONTROL_BADGES = [['computer', '컴퓨터 조작'], ['browser', '브라우저 제어'], ['repl', '코드 실행']];
+/** The badge for an mcpToolCall row, or null; no argument text is ever read. */
+export function mcpControlBadge(activity) {
+  if (activity?.kind !== 'mcpToolCall' || !activity.detail || typeof activity.detail !== 'object') return null;
+  const label = lookup(MCP_CONTROL_BADGES, activity.detail.controlKind);
+  return label ? { kind: activity.detail.controlKind, label } : null;
 }
 
 // CHAT-06 Await task list (helper contract: GET /tasks/state?graphId= -> { graph,
@@ -2221,4 +2291,146 @@ export function browserUserControlNoticesFor(list, clientThreadId) {
 export function browserUserControlNoticeView(notice) {
   const refused = 'Agent의 조작 요청은 거절됩니다';
   return { line: BROWSER_USER_CONTROL_LINE, detail: notice?.host ? `${notice.host} · ${refused}` : refused };
+}
+
+// CHAT-04/08 result cards. Chat ends in conversation: a long result body is not
+// pasted into Chat but reached through a chip to its Canvas result. An Agent
+// answer becomes a result card only when 대표님 presses '카드로 보기' (or
+// '카드로 펼치기' on a long answer); nothing moves to the Canvas by itself. The
+// card is a Board memo holding a copy of that answer (no file is written; files
+// the answer pointed to open through the existing flow) and where it came from,
+// so it leads back to the answer in Chat. A long answer keeps its whole text in
+// the message; Chat only draws a folded preview of it.
+// The copy is saved with the Desk and Boards, so a very long answer keeps its
+// opening here and the rest stays in Chat (the card says so and links back).
+export const RESULT_CARD_TEXT_LIMIT = 20000;
+export const RESULT_CARD_ARTIFACT_LIMIT = 24;
+const resultRef = value => typeof value === 'string' && value.length > 0 && value.length <= 256 && !/[\u0000-\u001f\u007f]/.test(value) ? value : null;
+const resultLine = (value, max) => typeof value === 'string' ? value.replace(/\s+/g, ' ').trim().slice(0, max) : '';
+const groupDigits = value => String(value).replace(/\B(?=(\d{3})+(?!\d))/g, ',');
+
+/** Whether this answer can be kept as a result card now (a finished Agent answer with something in it). */
+export function canKeepResultCard(thread, message) {
+  if (!thread?.id || nativeBindingHeld(thread) || message?.role !== 'assistant') return false;
+  if (message.status === 'streaming' || ['error', 'failed'].includes(message.status)) return false;
+  if (!resultRef(message.id) && !resultRef(message.answerId)) return false;
+  return (typeof message.content === 'string' && message.content.trim() !== '') || (Array.isArray(message.artifacts) && message.artifacts.some(usableArtifact));
+}
+
+// The first readable line, without markdown marks or code; else '<author>의 답변'.
+function resultCardTitle(text, author) {
+  let fenced = false;
+  for (const raw of String(text || '').split('\n')) {
+    const trimmed = raw.trim();
+    if (trimmed.startsWith('```')) { fenced = !fenced; continue; }
+    if (fenced || !trimmed) continue;
+    const line = trimmed.replace(/^#{1,6}\s+/, '').replace(/^>\s*/, '').replace(/^[-*+]\s+/, '').replace(/^\d+[.)]\s+/, '')
+      .replace(/\[([^\]]*)\]\([^)]*\)/g, '$1').replace(/[*_`~]/g, '').trim();
+    if (line) return line.length > 60 ? `${line.slice(0, 59)}…` : line;
+  }
+  return `${author || 'Codex'}의 답변`;
+}
+
+/** A stored card record, checked and capped (also for one read back from the Desk or a Board), or null. */
+export function restoreResultCardRecord(value) {
+  if (!value || typeof value !== 'object' || value.version !== 1) return null;
+  const source = value.source && typeof value.source === 'object' ? value.source : {};
+  const threadId = resultRef(source.threadId);
+  const messageId = resultRef(source.messageId), answerId = resultRef(source.answerId);
+  if (!threadId || (!messageId && !answerId)) return null;
+  const text = typeof value.text === 'string' ? value.text.slice(0, RESULT_CARD_TEXT_LIMIT) : '';
+  const artifacts = (Array.isArray(value.artifacts) ? value.artifacts : []).filter(usableArtifact).slice(0, RESULT_CARD_ARTIFACT_LIMIT).map(copy);
+  if (!text.trim() && !artifacts.length) return null;
+  const totalChars = Number.isSafeInteger(value.totalChars) && value.totalChars >= text.length ? value.totalChars : text.length;
+  const author = resultLine(source.author, 40) || 'Codex';
+  return {
+    version: 1, title: resultLine(value.title, 80) || resultCardTitle(text, author),
+    text, totalChars, truncated: totalChars > text.length, artifacts,
+    source: {
+      threadId, threadTitle: resultLine(source.threadTitle, 80), conversationId: resultRef(source.conversationId),
+      runId: resultRef(source.runId), answerId, messageId, author,
+      answeredAt: Number.isFinite(source.answeredAt) ? source.answeredAt : null,
+    },
+    createdAt: Number.isFinite(value.createdAt) ? value.createdAt : null,
+  };
+}
+
+/** The card record for one answer, at the moment 대표님 asks for it, or null. */
+export function resultCardRecord(thread, message, { author = 'Codex', now = Date.now() } = {}) {
+  if (!canKeepResultCard(thread, message)) return null;
+  const full = typeof message.content === 'string' ? message.content : '';
+  const name = resultLine(author, 40) || 'Codex';
+  return restoreResultCardRecord({
+    version: 1, title: resultCardTitle(full, name), text: full.slice(0, RESULT_CARD_TEXT_LIMIT), totalChars: full.length,
+    artifacts: (message.artifacts || []).filter(usableArtifact),
+    source: {
+      threadId: thread.id, threadTitle: thread.title, conversationId: message.conversationId || thread.conversationId || null,
+      runId: message.runId || null, answerId: message.answerId || null, messageId: message.id || null, author: name,
+      answeredAt: message.createdAt,
+    },
+    createdAt: now,
+  });
+}
+
+/** One open card per answer: the same answer asked for again focuses its card. */
+export function resultCardKey(record) {
+  const source = record?.source;
+  const room = source?.conversationId || source?.threadId;
+  const answer = source?.answerId || source?.messageId;
+  return room && answer ? `${room}/${answer}` : null;
+}
+
+/** The card's '출처' line and the note for a copy cut at the limit. */
+export function resultCardSourceView(record, { formatTime = null } = {}) {
+  const source = record?.source || {};
+  const room = source.threadTitle || '이름 없는';
+  const time = typeof formatTime === 'function' && Number.isFinite(source.answeredAt) ? formatTime(source.answeredAt) : '';
+  const parts = [`${room} 대화`, `${source.author || 'Codex'}의 답변`, time].filter(Boolean);
+  return {
+    line: `출처 · ${parts.join(' · ')}`,
+    truncatedNote: record?.truncated ? `답변이 길어 앞부분 ${groupDigits(record.text.length)}자만 담았습니다. 전체는 채팅에서 볼 수 있습니다.` : null,
+  };
+}
+
+/** The room and the answer a card came from, for '채팅에서 보기'; the message is null when the room no longer has it. */
+export function findResultCardMessage(threads, source) {
+  if (!source || !Array.isArray(threads)) return null;
+  const thread = threads.find(item => item?.id === source.threadId)
+    || (source.conversationId ? threads.find(item => item?.conversationId === source.conversationId) : null);
+  if (!thread) return null;
+  const messages = Array.isArray(thread.messages) ? thread.messages : [];
+  const message = (source.answerId && messages.find(item => item?.role === 'assistant' && item.answerId === source.answerId
+      && (!source.runId || !item.runId || item.runId === source.runId)))
+    || (source.messageId && messages.find(item => item?.id === source.messageId)) || null;
+  return { thread, message };
+}
+
+// A finished answer this long reads as a folded preview in Chat.
+export const LONG_ANSWER_LIMITS = Object.freeze({ chars: 4000, lines: 80, codeBlocks: 3, codeChars: 1600, previewChars: 1200, previewLines: 16 });
+/** Whether an answer folds, and the preview Chat draws (a cut code block is closed so it still reads as code). */
+export function longAnswerView(text, limits = LONG_ANSWER_LIMITS) {
+  const value = typeof text === 'string' ? text : '';
+  const lines = value.split('\n');
+  const codeBlocks = (value.match(/```[\w+-]*\n?[\s\S]*?```/g) || []).length;
+  const folded = { long: false, preview: value, totalChars: value.length, lineCount: lines.length, codeBlocks, summary: '' };
+  if (!(value.length > limits.chars || lines.length > limits.lines || (codeBlocks >= limits.codeBlocks && value.length > limits.codeChars))) return folded;
+  const kept = [];
+  let used = 0;
+  for (const line of lines) {
+    if (kept.length >= limits.previewLines || used >= limits.previewChars) break;
+    const room = limits.previewChars - used;
+    if (line.length > room) {
+      const cut = line.slice(0, room);
+      const space = cut.lastIndexOf(' ');
+      kept.push(`${space > room * 0.6 ? cut.slice(0, space) : cut}…`);
+      break;
+    }
+    kept.push(line);
+    used += line.length + 1;
+  }
+  let preview = kept.join('\n').replace(/\s+$/, '');
+  if ((preview.match(/```/g) || []).length % 2) preview += '\n```';
+  if (preview.length >= value.length) return folded;
+  const summary = ['긴 답변이라 앞부분만 보여 드립니다', `전체 ${groupDigits(value.length)}자`, codeBlocks ? `코드 ${codeBlocks}개` : null].filter(Boolean).join(' · ');
+  return { ...folded, long: true, preview, summary };
 }

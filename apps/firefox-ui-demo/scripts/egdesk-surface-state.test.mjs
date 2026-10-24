@@ -2781,7 +2781,8 @@ test('actual overlay rich-text path supplies the same-answer artifact scope and 
   const held = markdownDOM();
   draw(held);
   assert.equal(held.all('a').length, 0);
-  assert.ok(surfaceSource.includes("appendRichText(content, parts.text || (message.status === 'streaming' ? '…' : ''), message, activeThread)"));
+  // CHAT-08: a folded long answer draws its preview; otherwise the whole text, as before.
+  assert.ok(surfaceSource.includes("const shownText = fold?.long && !foldOpen ? fold.preview : parts.text;\n            appendRichText(content, shownText || (message.status === 'streaming' ? '…' : ''), message, activeThread)"));
 });
 
 const browserInput = () => ({ id: 'input-1', kind: 'browser', label: 'Page', sourceRef: { viewId: 'browser-1', uri: 'https://example.test/', boardId: 'board-1' } });
@@ -7576,7 +7577,7 @@ test('연결된 도구: inherited external tools read in Korean, with the extern
   assert.equal(view.status, 'listed');
   assert.deepEqual(view.rows.map(row => [row.name, row.statusLabel, row.tone, row.kindLabel, row.controlsExternal]), [
     ['chrome-devtools', '연결됨', 'ok', '브라우저 제어', true],
-    ['computer-use', '로그인 필요', 'warn', '데스크톱 제어', true],
+    ['computer-use', '로그인 필요', 'warn', '컴퓨터 조작', true],
     ['node-repl', '시작 중', 'idle', '코드 실행', true],
     ['docs', '꺼짐', 'off', '기타', false],
     ['later', '시작 전', 'idle', '기타', false],
@@ -7629,7 +7630,7 @@ test('연결된 도구: inherited external tools read in Korean, with the extern
 
 test('bridge build marker: /v1/state carries the installed build, and a missing or broken marker sends nothing', async () => {
   const api = compileFunction(`${declaration('readExpectedOverlayBuild')}\n${declaration('overlayBuildHeaders')}\n${declaration('bridgeSessionFields')}\nreturn { readExpectedOverlayBuild, overlayBuildHeaders, bridgeSessionFields };`,
-    ['OVERLAY_BUILD_MARKER_URL', 'fetch'])('chrome://userchrome/content/egdesk-bridge-build.json', () => { throw new Error('the default loader is not used here'); });
+    ['OVERLAY_BUILD_MARKER_URL', 'fetch', 'ChatState'])('chrome://userchrome/content/egdesk-bridge-build.json', () => { throw new Error('the default loader is not used here'); }, Chat);
   const hash = 'c'.repeat(64);
   const loads = [];
   const respond = value => async (url, init) => { loads.push([url, init]); return value; };
@@ -7664,10 +7665,12 @@ test('bridge build marker: /v1/state carries the installed build, and a missing 
   assert.equal(Surface.bridgeConnectionNotice({ connected: true, bridge: fields({ bridge: { buildHash: 'd'.repeat(64), startedAt: 1, sourceMismatch: true } }).bridgeBuild }).text,
     '브리지 버전이 맞지 않습니다 · 다시 시작 필요');
 
-  assert.deepEqual(api.bridgeSessionFields(null), { chatCapabilities: null, inheritedMcp: null });
-  assert.deepEqual(api.bridgeSessionFields({ capabilities: { chat: ['send', 'fork', 'stateless', 7] }, inheritedMcp: [{ name: 'x' }] }),
-    { chatCapabilities: ['send', 'fork', 'stateless'], inheritedMcp: [{ name: 'x' }] });
-  assert.deepEqual(api.bridgeSessionFields({ capabilities: {}, inheritedMcp: 'x' }), { chatCapabilities: null, inheritedMcp: null });
+  assert.deepEqual(api.bridgeSessionFields(null), { chatCapabilities: null, inheritedMcp: null, computerControl: null });
+  assert.deepEqual(api.bridgeSessionFields({ capabilities: { chat: ['send', 'fork', 'stateless', 7] }, inheritedMcp: [{ name: 'x' }],
+    computerControl: { policy: 'inherit', verified: null } }),
+  { chatCapabilities: ['send', 'fork', 'stateless'], inheritedMcp: [{ name: 'x' }], computerControl: { policy: 'inherit', verified: null } });
+  assert.deepEqual(api.bridgeSessionFields({ capabilities: {}, inheritedMcp: 'x', computerControl: { policy: 'maybe' } }),
+    { chatCapabilities: null, inheritedMcp: null, computerControl: null });
   assert.equal((surfaceSource.match(/\.\.\.bridgeSessionFields\(bridgeState\),/g) || []).length, 2, 'connect and refresh both read them');
   assert.match(surfaceSource, /case 'mcp\.inherited':\n          update\(\{ inheritedMcp: Array\.isArray\(event\.inheritedMcp\) \? event\.inheritedMcp : null \}\);/,
     'the SSE codex event replaces the list');
@@ -9406,6 +9409,474 @@ test('chat wiring: faces and names open the peek, the 작업 중 bubble closes t
   assert.ok(block.length > 2000, 'new styles found');
   assert.doesNotMatch(block.replace(/transparent/g, ''), /#[0-9a-f]{3,8}\b|rgba?\(/i, 'tokens only');
   for (const selector of ['button.egd-codex-message-avatar', 'button.egd-codex-working-bubble', '.egd-codex-agent-peek', '.egd-settings-readiness', '.egd-settings-switch', '.egd-codex-run-ceiling']) {
+    assert.ok(block.includes(`\n${selector} {`), `${selector} is styled`);
+  }
+});
+
+// ============ CU-01 computer control row, activity badge and refusal text ============
+test('컴퓨터 조작: the bridge value reads in Korean words, and a switch press asks for a real change only', () => {
+  assert.equal(Chat.normalizeComputerControl(null), null);
+  assert.equal(Chat.normalizeComputerControl({ policy: 'on' }), null, 'only the two bridge policies');
+  assert.deepEqual(Chat.normalizeComputerControl({ policy: 'off', verified: 'yes', extra: 1 }), { policy: 'off', verified: null });
+  assert.deepEqual(Chat.normalizeComputerControl({ policy: 'inherit', verified: true }), { policy: 'inherit', verified: true });
+
+  const unknown = Chat.computerControlView(null);
+  assert.equal(unknown.status, 'unknown');
+  assert.equal(unknown.available, false, 'an older or offline bridge: nothing to press');
+  assert.equal(unknown.statusLabel, '확인할 수 없음');
+  const inherit = Chat.computerControlView({ policy: 'inherit', verified: null });
+  assert.deepEqual([inherit.status, inherit.on, inherit.available, inherit.statusLabel, inherit.check], ['inherit', true, true, '켜 둠 · 내 Codex 설정 그대로', null]);
+  const checks = [[true, '꺼진 것을 확인함', 'ok'], [null, '아직 확인 안 됨', 'idle'], [false, '확인 실패', 'warn']];
+  for (const [verified, label, tone] of checks) {
+    const view = Chat.computerControlView({ policy: 'off', verified });
+    assert.deepEqual([view.status, view.on, view.statusLabel, view.check], ['off', false, 'EG-Desk 대화에서는 끔', { label, tone }]);
+  }
+  for (const view of [unknown, inherit, ...checks.map(([verified]) => Chat.computerControlView({ policy: 'off', verified }))]) {
+    assert.doesNotMatch(JSON.stringify([view.statusLabel, view.note, view.check?.label]), /inherit|"off"|verified|policy/i, 'no bridge value on screen');
+  }
+
+  assert.deepEqual(Chat.buildComputerControlRequest({ policy: 'inherit', verified: null }, 'off'),
+    { path: '/settings/computer-control', body: { policy: 'off' } });
+  assert.deepEqual(Chat.buildComputerControlRequest({ policy: 'off', verified: false }, 'inherit'),
+    { path: '/settings/computer-control', body: { policy: 'inherit' } });
+  assert.equal(Chat.buildComputerControlRequest({ policy: 'off', verified: true }, 'off'), null, 'the same policy is not sent again');
+  assert.equal(Chat.buildComputerControlRequest(null, 'off'), null, 'an unknown value is never overwritten');
+  assert.equal(Chat.buildComputerControlRequest({ policy: 'inherit' }, 'on'), null);
+  assert.equal(Chat.COMPUTER_CONTROL_APPLY_NOTE, '다음에 보내는 메시지부터 적용됩니다');
+
+  const errors = [
+    [{ status: 400, code: 'INVALID_COMPUTER_CONTROL_POLICY' }, /그대로 두었습니다/],
+    [{ status: 403, code: 'SETTINGS_LOOPBACK_REQUIRED' }, /이 컴퓨터의 EG-Desk에서만/],
+    [{ status: 404 }, /지원하지 않습니다/],
+    [{ status: 405 }, /지원하지 않습니다/],
+    [{ status: 0 }, /연결하지 못해/],
+    [{ status: 500, code: 'INTERNAL' }, /잠시 뒤 다시/],
+  ];
+  for (const [error, text] of errors) {
+    assert.match(Chat.computerControlErrorText(error), text);
+    assert.doesNotMatch(Chat.computerControlErrorText(error), /[A-Z_]{4,}/, 'no code on screen');
+  }
+});
+
+test('컴퓨터 조작: a send the bridge could not confirm off is refused in Korean, in the send and run paths alike', () => {
+  const text = Chat.computerControlSendErrorText('COMPUTER_CONTROL_UNVERIFIED');
+  assert.match(text, /^컴퓨터 조작이 꺼졌는지 확인하지 못해 보내지 않았습니다\. /);
+  assert.doesNotMatch(text, /[A-Z_]{4,}|no turn was started/);
+  for (const code of ['PROFILE_NOT_FOUND', 'MODEL_UNAVAILABLE', null, undefined]) assert.equal(Chat.computerControlSendErrorText(code), null);
+  assert.equal(Chat.runErrorNotice({ code: 'COMPUTER_CONTROL_UNVERIFIED', message: 'The thread still allows Codex computer control; no turn was started' }).text, text,
+    'a run that carries the code never shows the English bridge message');
+  assert.equal(Chat.runErrorNotice({ code: 'OTHER', message: 'kept' }).text, 'kept');
+  // /chat/send: the existing failure path turns the code into that text before it reaches the room.
+  assert.match(surfaceSource, /const profileText = ChatState\.profileSendErrorText\(error\.code\) \|\| ChatState\.chatStatelessErrorText\(error\.code\)\n            \|\| ChatState\.computerControlSendErrorText\(error\.code\) \|\| ChatState\.chatModelSendErrorText\(error\.code\);\n          if \(profileText\) error\.message = profileText;/);
+});
+
+test('활동 기록: an MCP call row carries what its server can drive, never its arguments', () => {
+  const row = (controlKind, extra = {}) => ({ id: 'a', kind: 'mcpToolCall', status: 'completed', title: 'cua_repl / js',
+    detail: { server: 'cua_repl', tool: 'js', durationMs: 4, ...(controlKind === undefined ? {} : { controlKind }), ...extra } });
+  assert.deepEqual(Chat.mcpControlBadge(row('computer')), { kind: 'computer', label: '컴퓨터 조작' });
+  assert.deepEqual(Chat.mcpControlBadge(row('browser')), { kind: 'browser', label: '브라우저 제어' });
+  assert.deepEqual(Chat.mcpControlBadge(row('repl')), { kind: 'repl', label: '코드 실행' });
+  for (const quiet of [row('other'), row(undefined), row('robot'), { ...row('computer'), kind: 'commandExecution' }, { kind: 'mcpToolCall', detail: 'text' }, null]) {
+    assert.equal(Chat.mcpControlBadge(quiet), null);
+  }
+  assert.deepEqual(Chat.mcpControlBadge(row('computer', { arguments: '{"code":"cua.click()"}' })), { kind: 'computer', label: '컴퓨터 조작' }, 'only the kind is read');
+  // The production activity record draws the badge beside the title; the detail keys it prints stay as before.
+  const panel = declaration('renderCodexActivityPanel') || '';
+  assert.match(panel, /const control = ChatState\.mcpControlBadge\(activity\);/);
+  assert.match(panel, /\.\.\.\(control \? \{ controlKind: control\.kind \} : \{\}\) \} \},\n          el\('strong', \{\}, activity\.title \|\| \(ceiling \? '도구 제한' : activity\.kind\) \|\| '활동'\),\n          control \? el\('span', \{ class: `egd-codex-activity-control egd-codex-activity-control-\$\{control\.kind\}`, data: \{ testid: 'chat-activity-control' \} \}, control\.label\) : null,/);
+  assert.match(panel, /for \(const key of \['text', 'command', 'cwd', 'exitCode', 'durationMs', 'server', 'tool'\]\)/, 'no arguments or controlKind printed');
+});
+
+test('연결된 도구: with computer control off, a tool that can drive this Mac reads off in EG-Desk chats', () => {
+  const reported = [
+    { name: 'cua_repl', enabled: true, status: 'connected', controlsExternal: true, kind: 'desktop' },
+    { name: 'chrome-devtools', enabled: true, status: 'connected', controlsExternal: true, kind: 'browser' },
+  ];
+  const inherit = Chat.inheritedMcpView(reported, { computerControl: { policy: 'inherit', verified: null } });
+  assert.deepEqual(inherit.rows.map(row => [row.kindLabel, row.statusLabel, row.tone, row.controlOff]),
+    [['컴퓨터 조작', '연결됨', 'ok', false], ['브라우저 제어', '연결됨', 'ok', false]]);
+  assert.deepEqual(Chat.inheritedMcpView(reported).rows.map(row => row.controlOff), [false, false], 'an unknown policy changes nothing');
+  const off = Chat.inheritedMcpView(reported, { computerControl: { policy: 'off', verified: true } });
+  assert.deepEqual(off.rows.map(row => [row.kindLabel, row.statusLabel, row.tone, row.controlOff]),
+    [['컴퓨터 조작', 'EG-Desk 대화에서는 꺼짐', 'off', true], ['브라우저 제어', '연결됨', 'ok', false]]);
+});
+
+function computerControlSettingsHarness({ computerControl = null, connected = true, inheritedMcp = null } = {}) {
+  const document = settingsFakeDocument();
+  const { el, codexProfileAvatar } = compileFunction(`${declaration('el')}\n${declaration('codexProfileAvatar')}\nreturn { el, codexProfileAvatar };`, ['document', 'ChatState'])(document, Chat);
+  const listeners = new Set();
+  const calls = [];
+  let answer = null;
+  const state = { codex: { connected, isStartingLogin: false, authStatus: { isLoggedIn: false }, inheritedMcp, computerControl } };
+  const emit = () => { for (const listener of listeners) listener(state.codex); };
+  state.codexBridge = {
+    subscribe(listener) { listeners.add(listener); listener(state.codex); return () => listeners.delete(listener); },
+    profileCatalog: () => ({ status: 'ready', profiles: [] }), loadProfiles: () => Promise.resolve(),
+    async setComputerControl(policy) {
+      calls.push(policy);
+      const result = await answer(policy);
+      state.codex.computerControl = Chat.normalizeComputerControl(result);
+      emit();
+      return state.codex.computerControl;
+    },
+  };
+  const spawn = compileFunction(`${declaration('spawnSettingsCard')}\nreturn spawnSettingsCard;`, ['singletonSourceRef', 'focusOpenSourceCard', 'cardSeq', 'resolveCanvasCardPlacement',
+    'revealPlacedCanvasCard', 'el', 'cardZ', 'closeCanvasCard', 'state', 'ChatState', 'codexProfileAvatar', 'document', 'window', 'bindCardSourceRef', 'markAgendaDirty', 'setActiveEntity',
+    'isCardFullscreen', 'focusCanvasCard', 'installCardHeaderFullscreenToggle', 'canvasZoom'])(
+    () => ({ kind: 'settings-card' }), () => null, 0, () => ({ x: 0, y: 0, width: 600, height: 600, inView: true }), () => {}, el, 0, () => {}, state, Chat, codexProfileAvatar,
+    document, { innerWidth: 1280, innerHeight: 800, confirm: () => false, setTimeout: () => 0 }, () => {}, () => {}, () => {}, () => false, () => {}, () => {}, () => 1);
+  const card = spawn();
+  const section = () => settingsNodes(card, node => node.dataset.testid === 'settings-computer-control')[0];
+  const part = testid => settingsNodes(section(), node => node.dataset.testid === testid)[0] || null;
+  return { card, state, calls, emit, section, part, respond: fn => { answer = fn; } };
+}
+
+test('production Settings 계정 tab: 컴퓨터 조작 shows the bridge value, posts the switch and follows the stream', async () => {
+  const h = computerControlSettingsHarness({ computerControl: { policy: 'inherit', verified: null },
+    inheritedMcp: [{ name: 'cua_repl', enabled: true, status: 'connected', controlsExternal: true, kind: 'desktop' }] });
+  const order = h.card.querySelector ? null : settingsNodes(h.card, node => node.tagName === 'SECTION').map(node => node.getAttribute('aria-label'));
+  assert.deepEqual(order, ['ChatGPT 계정', '컴퓨터 조작', '연결된 도구', 'Claude'], 'the row sits right above the connected tools');
+  assert.equal(h.section().dataset.state, 'inherit', 'the default is what the bridge reports');
+  const toggle = () => h.part('settings-computer-control-switch');
+  assert.equal(toggle().getAttribute('role'), 'switch');
+  assert.equal(toggle().getAttribute('aria-checked'), 'true');
+  assert.equal(toggle().getAttribute('disabled'), null);
+  assert.equal(h.part('settings-computer-control-status').textContent, '켜 둠 · 내 Codex 설정 그대로');
+  assert.equal(h.part('settings-computer-control-check'), null, 'no check state while it is on');
+  const mcpRow = () => settingsNodes(h.card, node => node.dataset.testid === 'settings-mcp-row')[0];
+  assert.match(mcpRow().textContent, /^cua_repl컴퓨터 조작연결됨/);
+
+  let release = null;
+  h.respond(policy => new Promise(resolve => { release = () => resolve({ policy, verified: null }); }));
+  toggle().fire('click');
+  assert.deepEqual(h.calls, ['off'], 'pressing the switch asks to turn it off');
+  assert.equal(toggle().getAttribute('disabled'), 'true', 'one change at a time');
+  assert.equal(h.part('settings-computer-control-status').textContent, '바꾸는 중…');
+  toggle().fire('click');
+  assert.deepEqual(h.calls, ['off']);
+  release();
+  await settle();
+  assert.equal(h.section().dataset.state, 'off');
+  assert.equal(toggle().getAttribute('aria-checked'), 'false');
+  assert.equal(h.part('settings-computer-control-status').textContent, 'EG-Desk 대화에서는 끔');
+  assert.equal(h.part('settings-computer-control-check').textContent, '아직 확인 안 됨');
+  assert.equal(h.part('settings-computer-control-change').textContent, '다음에 보내는 메시지부터 적용됩니다');
+  assert.equal(h.part('settings-computer-control-change').getAttribute('role'), 'status');
+  assert.match(mcpRow().textContent, /^cua_repl컴퓨터 조작EG-Desk 대화에서는 꺼짐Codex 앱에서는 그대로 쓸 수 있습니다$/);
+  assert.equal(settingsNodes(h.card, node => node.dataset.testid === 'settings-mcp-external').length, 0, 'an off tool loses the external-control note');
+
+  // SSE computer.control replaces the value; the row follows without a press.
+  h.state.codex.computerControl = { policy: 'off', verified: true };
+  h.emit();
+  assert.equal(h.part('settings-computer-control-check').textContent, '꺼진 것을 확인함');
+  assert.equal(h.part('settings-computer-control-check').dataset.tone, 'ok');
+  h.state.codex.computerControl = { policy: 'off', verified: false };
+  h.emit();
+  assert.equal(h.part('settings-computer-control-check').textContent, '확인 실패');
+
+  // A refused change keeps the value and says why in Korean.
+  h.respond(async () => { throw Object.assign(new Error('Settings changes are accepted only from loopback'), { status: 403, code: 'SETTINGS_LOOPBACK_REQUIRED' }); });
+  toggle().fire('click');
+  await settle();
+  assert.deepEqual(h.calls, ['off', 'inherit']);
+  assert.equal(h.section().dataset.state, 'off');
+  assert.equal(h.part('settings-computer-control-change').getAttribute('role'), 'alert');
+  assert.match(h.part('settings-computer-control-change').textContent, /이 컴퓨터의 EG-Desk에서만 바꿀 수 있습니다/);
+  assert.doesNotMatch(h.section().textContent, /loopback|SETTINGS_|inherit|policy/);
+
+  // Offline: '확인할 수 없음', nothing to press.
+  h.state.codex.connected = false;
+  h.emit();
+  assert.equal(h.section().dataset.state, 'unknown');
+  assert.equal(toggle().getAttribute('disabled'), 'true');
+  assert.match(h.section().textContent, /확인할 수 없음/);
+  h.card._cleanup();
+});
+
+test('컴퓨터 조작 bridge call: POST /settings/computer-control with { policy }, the answer replaces the value, the stream too', async () => {
+  const body = surfaceSource.match(/      async setComputerControl\(policy\) \{\n([\s\S]*?)\n      \},/)?.[1];
+  assert.ok(body, 'production setComputerControl remains directly testable');
+  const sent = [];
+  const state = { codex: { computerControl: { policy: 'inherit', verified: null } } };
+  const updates = [];
+  const call = compileFunction(`return (async function setComputerControl(policy) {\n${body}\n});`, ['ChatState', 'state', 'fetchJson', 'update'])(
+    Chat, state, async (path, init) => { sent.push([path, init.method, JSON.parse(init.body)]); return { policy: JSON.parse(init.body).policy, verified: null }; },
+    patch => { updates.push(patch); Object.assign(state.codex, patch); });
+  assert.deepEqual(await call('off'), { policy: 'off', verified: null });
+  assert.deepEqual(sent, [['/settings/computer-control', 'POST', { policy: 'off' }]]);
+  assert.deepEqual(updates, [{ computerControl: { policy: 'off', verified: null } }]);
+  assert.deepEqual(await call('off'), { policy: 'off', verified: null }, 'the same policy is not posted again');
+  assert.equal(sent.length, 1);
+  state.codex.computerControl = null;
+  await call('inherit');
+  assert.equal(sent.length, 1, 'an unknown value is never overwritten');
+  // fetchJson sends JSON (Content-Type application/json) to the bridge.
+  assert.match(surfaceSource, /    const fetchJson = async \(path, options = \{\}\) => \{[\s\S]*?'Content-Type': 'application\/json',/);
+  assert.match(surfaceSource, /case 'computer\.control':\n          update\(\{ computerControl: ChatState\.normalizeComputerControl\(event\.computerControl\) \}\);\n          return;/,
+    'the SSE codex event replaces the value');
+  assert.match(surfaceSource, /      computerControl: ChatState\.normalizeComputerControl\(bridgeState\?\.computerControl\),\n/);
+  const settings = declaration('spawnSettingsCard') || '';
+  assert.match(settings, /auth\.planType, auth\.usage, auth\.rateLimits, catalog\?\.status, catalog\?\.profiles, codex\.inheritedMcp, codex\.computerControl\]\);/,
+    'a stream change redraws the row');
+});
+
+// ============ CHAT-04/08 result cards and long answers ============
+const resultArtifact = () => ({ ...markdownArtifact(), conversationId: 'conv-1', runId: 'run-1', answerId: 'conv-1/run-1' });
+const resultThread = (extra = {}) => ({ id: 'room-1', title: '분기 매출 정리', conversationId: 'conv-1', messages: [], ...extra });
+const resultMessage = (extra = {}) => ({ id: 'msg-a1', role: 'assistant', status: 'completed', conversationId: 'conv-1', runId: 'run-1',
+  answerId: 'conv-1/run-1', createdAt: 1_700_000_000_000, content: '## 3분기 매출 요약\n\n- 매출 12% 증가\n- 비용 3% 감소', artifacts: [resultArtifact()], ...extra });
+
+test('결과 카드: a finished Agent answer becomes a card record with where it came from, only when it can', () => {
+  const thread = resultThread();
+  const record = Chat.resultCardRecord(thread, resultMessage({ authorName: '분석 담당' }), { author: '분석 담당', now: 5 });
+  assert.equal(record.version, 1);
+  assert.equal(record.title, '3분기 매출 요약', 'the first readable line, without markdown marks');
+  assert.equal(record.text, resultMessage().content);
+  assert.deepEqual([record.truncated, record.totalChars, record.createdAt], [false, resultMessage().content.length, 5]);
+  assert.deepEqual(record.source, { threadId: 'room-1', threadTitle: '분기 매출 정리', conversationId: 'conv-1', runId: 'run-1',
+    answerId: 'conv-1/run-1', messageId: 'msg-a1', author: '분석 담당', answeredAt: 1_700_000_000_000 });
+  assert.deepEqual(record.artifacts, [resultArtifact()]);
+  assert.equal(Chat.resultCardKey(record), 'conv-1/conv-1/run-1', 'one card per answer');
+
+  const unverified = { ...resultArtifact(), id: 'artifact-2', relation: 'mentioned' };
+  assert.deepEqual(Chat.resultCardRecord(thread, resultMessage({ artifacts: [unverified, resultArtifact()] })).artifacts.map(a => a.id), ['artifact-1'],
+    'only verified, available file references are kept');
+  assert.equal(Chat.resultCardRecord(thread, resultMessage({ content: '```js\nconst a = 1;\n```\n' })).title, 'Codex의 답변', 'code is never a title');
+  assert.equal(Chat.resultCardRecord(thread, resultMessage({ content: '', artifacts: [resultArtifact()] })).text, '', 'a file-only answer still makes a card');
+
+  for (const [why, args] of [
+    ['streaming', [thread, resultMessage({ status: 'streaming' })]],
+    ['failed', [thread, resultMessage({ status: 'failed' })]],
+    ['user words', [thread, resultMessage({ role: 'user' })]],
+    ['empty', [thread, resultMessage({ content: '  ', artifacts: [] })]],
+    ['no ids', [thread, resultMessage({ id: null, answerId: null })]],
+    ['held binding', [{ ...thread, conversationId: null, retainedNativeBinding: { conversationId: 'conv-1' } }, resultMessage()]],
+    ['no room', [null, resultMessage()]],
+  ]) {
+    assert.equal(Chat.canKeepResultCard(...args), false, why);
+    assert.equal(Chat.resultCardRecord(...args), null, why);
+  }
+
+  const long = 'x'.repeat(Chat.RESULT_CARD_TEXT_LIMIT + 10);
+  const cut = Chat.resultCardRecord(thread, resultMessage({ content: long }));
+  assert.equal(cut.text.length, Chat.RESULT_CARD_TEXT_LIMIT);
+  assert.deepEqual([cut.truncated, cut.totalChars], [true, Chat.RESULT_CARD_TEXT_LIMIT + 10]);
+  assert.match(Chat.resultCardSourceView(cut).truncatedNote, /^답변이 길어 앞부분 20,000자만 담았습니다\. 전체는 채팅에서 볼 수 있습니다\.$/);
+});
+
+test('결과 카드: a stored record is checked on restore, names its source in words and leads back to its answer', () => {
+  const record = Chat.resultCardRecord(resultThread(), resultMessage(), { author: 'Codex', now: 1 });
+  assert.deepEqual(Chat.restoreResultCardRecord(JSON.parse(JSON.stringify(record))), record, 'a saved Board member restores as it was');
+  for (const broken of [null, {}, { ...record, version: 2 }, { ...record, source: { ...record.source, threadId: '' } },
+    { ...record, source: { ...record.source, answerId: null, messageId: null } }, { ...record, text: '', artifacts: [] },
+    { ...record, source: { ...record.source, threadId: 'a\nb' } }]) {
+    assert.equal(Chat.restoreResultCardRecord(broken), null);
+  }
+  assert.equal(Chat.restoreResultCardRecord({ ...record, totalChars: 1 }).totalChars, record.text.length, 'a total never below the kept text');
+
+  assert.deepEqual(Chat.resultCardSourceView(record, { formatTime: () => '오후 3:12' }),
+    { line: '출처 · 분기 매출 정리 대화 · Codex의 답변 · 오후 3:12', truncatedNote: null });
+  assert.equal(Chat.resultCardSourceView({ ...record, source: { ...record.source, threadTitle: '', answeredAt: null } }).line, '출처 · 이름 없는 대화 · Codex의 답변');
+
+  const other = resultThread({ id: 'room-2', conversationId: 'conv-2', messages: [resultMessage({ id: 'x', answerId: 'conv-2/run-9' })] });
+  const answer = resultMessage({ id: 'msg-renamed' });
+  const room = resultThread({ messages: [{ id: 'u1', role: 'user', content: 'q' }, answer] });
+  assert.deepEqual(Chat.findResultCardMessage([other, room], record.source), { thread: room, message: answer }, 'found by its answer even after a local id change');
+  const moved = resultThread({ id: 'room-restored', messages: [answer] });
+  assert.equal(Chat.findResultCardMessage([moved], record.source).thread, moved, 'a room re-made for the same conversation');
+  assert.deepEqual(Chat.findResultCardMessage([resultThread({ messages: [] })], record.source).message, null, 'the room without the answer');
+  assert.equal(Chat.findResultCardMessage([other], { ...record.source, conversationId: null }), null);
+  assert.equal(Chat.findResultCardMessage(null, record.source), null);
+});
+
+test('긴 답변: a very long finished answer folds to a preview; the whole text stays and nothing folds by itself early', () => {
+  assert.equal(Chat.longAnswerView('짧은 답변').long, false);
+  assert.equal(Chat.longAnswerView(null).long, false);
+  const threeSmall = ['a', 'b', 'c'].map(name => `\`\`\`sh\necho ${name}\n\`\`\``).join('\n');
+  assert.equal(Chat.longAnswerView(threeSmall).long, false, 'three tiny commands stay as they are');
+
+  const prose = Array.from({ length: 30 }, (_, index) => `${index + 1}번째 문단입니다. ${'내용 '.repeat(40)}`).join('\n\n');
+  assert.ok(prose.length > Chat.LONG_ANSWER_LIMITS.chars);
+  const folded = Chat.longAnswerView(prose);
+  assert.equal(folded.long, true);
+  assert.ok(folded.preview.length <= Chat.LONG_ANSWER_LIMITS.previewChars + 2 && prose.startsWith(folded.preview.replace(/…$/, '')), 'the preview is the opening of the answer');
+  assert.equal(folded.totalChars, prose.length);
+  assert.match(folded.summary, /^긴 답변이라 앞부분만 보여 드립니다 · 전체 [\d,]+자$/);
+
+  const code = Array.from({ length: 4 }, (_, index) => `단계 ${index + 1}\n\`\`\`js\n${`const value${index} = ${index};\n`.repeat(30)}\`\`\``).join('\n');
+  assert.ok(code.length > Chat.LONG_ANSWER_LIMITS.codeChars && code.length < Chat.LONG_ANSWER_LIMITS.chars);
+  const codeView = Chat.longAnswerView(code);
+  assert.equal(codeView.long, true, 'many code blocks fold even under the length limit');
+  assert.equal(codeView.codeBlocks, 4);
+  assert.match(codeView.summary, / · 코드 4개$/);
+  assert.equal((codeView.preview.match(/```/g) || []).length % 2, 0, 'a cut code block is closed so it still reads as code');
+  assert.equal(Chat.longAnswerView(Array.from({ length: 120 }, (_, index) => `줄 ${index}`).join('\n')).long, true, 'many lines fold too');
+  assert.equal(Chat.longAnswerView('한 줄 '.repeat(2000)).preview.endsWith('…'), true, 'one huge line is cut with an ellipsis');
+});
+
+test("Chat: '카드로 보기' sits with the result chips, a long answer folds with '카드로 펼치기', and nothing moves by itself", () => {
+  assert.match(surfaceSource, /const fold = message\.role === 'assistant' && message\.status !== 'streaming' \? ChatState\.longAnswerView\(parts\.text\) : null;/);
+  assert.match(surfaceSource, /const foldOpen = !!fold\?\.long && !!codex\.expandedAnswers\?\.\[`\$\{activeThread\.id\}\/\$\{message\.id\}`\];/);
+  assert.match(surfaceSource, /const cardable = ChatState\.canKeepResultCard\(activeThread, message\);/);
+  assert.match(surfaceSource, /openAnswerResultCard\(activeThread, message, \{ opener: ev\.currentTarget\?\.closest\?\.\('\.egd-chat-card'\) \|\| null \}\);/, 'the Chat card is the opener');
+  assert.match(surfaceSource, /\}, '카드로 펼치기'\) : null,/);
+  assert.match(surfaceSource, /\}, foldOpen \? '접기' : '여기서 모두 보기'\)\) : null;/);
+  assert.match(surfaceSource, /const cardChip = cardable && !fold\?\.long \? el\('button', \{/);
+  assert.match(surfaceSource, /el\('span', \{ class: 'egd-codex-result-label' \}, '카드로 보기'\)\) : null;/);
+  assert.match(surfaceSource, /const messageStack = el\('div', \{ class: 'egd-codex-message-stack' \}, roleLabel, messageLine, answerFold, resultRow, briefingControl, meta\);/);
+  // Only a press calls these; no render, event or run end does.
+  assert.equal((surfaceSource.match(/openAnswerResultCard\(/g) || []).length, 2, 'the declaration and the one press handler');
+  assert.equal((surfaceSource.match(/spawnResultCard\(/g) || []).length, 4, 'declaration, the press path, and the two restore paths');
+
+  const body = surfaceSource.match(/      toggleAnswerFold\(threadId, messageId\) \{\n([\s\S]*?)\n      \},/)?.[1];
+  assert.ok(body, 'production toggleAnswerFold remains directly testable');
+  const state = { codex: { expandedAnswers: {} } };
+  let emits = 0;
+  const toggle = compileFunction(body, ['threadId', 'messageId', 'state', 'emit']);
+  toggle('room-1', 'msg-a1', state, () => emits++);
+  assert.deepEqual(state.codex.expandedAnswers, { 'room-1/msg-a1': true });
+  toggle('room-1', 'msg-a1', state, () => emits++);
+  assert.deepEqual(state.codex.expandedAnswers, {}, 'folded again');
+  toggle('', 'msg-a1', state, () => emits++);
+  assert.equal(emits, 2);
+  assert.doesNotMatch(declaration('serializeDeskSnapshot') || '', /expandedAnswers|revealMessage/, 'opening in place is never saved');
+});
+
+function resultCardHarness({ existing = null, inView = false } = {}) {
+  const document = settingsFakeDocument();
+  const { el } = compileFunction(`${declaration('el')}\nreturn { el };`, ['document'])(document);
+  const calls = { placements: [], reveals: [], shells: [], opened: [], back: [], markdown: [], revealOpen: [] };
+  const spawn = compileFunction(`${declaration('spawnResultCard')}\nreturn spawnResultCard;`, ['ChatState', 'makeSourceRef', 'focusOpenSourceCard', 'revealOpenCanvasCard',
+    'resolveCanvasCardPlacement', 'spawnDeskWindowShell', 'cardSeq', 'revealPlacedCanvasCard', 'formatMessageTime', 'el', 'Markdown', 'openCodexResultLink',
+    'openUrlInBrowserCard', 'deskIcon', 'openResultCardSource'])(
+    Chat, (kind, fields) => ({ kind, ...fields }), sourceRef => { calls.focusSource = sourceRef; return existing; },
+    (card, options) => calls.revealOpen.push([card, options]),
+    kind => { calls.placements.push(kind); return { x: 30, y: 40, width: 560, height: 560, inView }; },
+    options => {
+      const root = el('div', { id: options.id, class: `egd-canvas-card egd-desk-window ${options.className}` });
+      const shell = { root, slots: { identity: el('div'), content: el('div') } };
+      root._deskWindowShell = shell;
+      calls.shells.push(options);
+      return shell;
+    }, 0, (card, placement, options) => calls.reveals.push([card, placement, options]), () => '오후 3:12', el,
+    { appendMarkdown: (container, text, context) => { calls.markdown.push([text, context]); container.appendChild(document.createTextNode(text)); } },
+    (artifact, options) => calls.opened.push([artifact.id, options.opener]), () => {}, name => el('span', { class: `icon-${name}` }),
+    record => calls.back.push(record));
+  return { spawn, calls };
+}
+
+test('결과 카드: the production card opens where Views open, framed with its Chat, and leads back to the answer', () => {
+  const { spawn, calls } = resultCardHarness();
+  const record = Chat.resultCardRecord(resultThread(), resultMessage(), { author: 'Codex', now: 1 });
+  const chat = { id: 'egd-chat-card-1', isConnected: true };
+  const card = spawn({ record, opener: chat });
+  assert.deepEqual(calls.placements, ['result'], 'the shared placement policy, with the result size');
+  assert.deepEqual(calls.focusSource, { kind: 'chat-answer', id: 'conv-1/conv-1/run-1', scope: 'codex-answer' });
+  assert.equal(calls.shells[0].kind, 'result');
+  assert.equal(calls.shells[0].className, 'egd-result-card');
+  assert.deepEqual(calls.shells[0].sourceRef, calls.focusSource);
+  assert.deepEqual(calls.shells[0].style, { left: '30px', top: '40px', width: '560px', height: '560px' });
+  assert.equal(calls.reveals.length, 1);
+  assert.equal(calls.reveals[0][0], card);
+  assert.deepEqual(calls.reveals[0][2], { opener: chat, kind: 'result' }, 'the artifact-chip camera keeps the Chat in sight');
+  assert.deepEqual(card._resultRecord, record);
+  assert.equal(card._deskWindowShell.slots.identity.textContent, '3분기 매출 요약');
+  const content = card._deskWindowShell.slots.content;
+  const node = testid => settingsNodes(content, item => item.dataset.testid === testid)[0];
+  assert.equal(settingsNodes(node('result-card-source'), item => item.className === 'egd-result-card-source-line')[0].textContent,
+    '출처 · 분기 매출 정리 대화 · Codex의 답변 · 오후 3:12');
+  assert.equal(node('result-card-text').textContent, record.text, 'the answer body as Chat shows it');
+  assert.equal(calls.markdown[0][1].answerId, 'conv-1/run-1', 'inline file links keep the same-answer scope');
+  node('result-card-artifact').fire('click');
+  assert.deepEqual(calls.opened, [['artifact-1', card]], 'a file opens through the existing flow, beside this card');
+  node('result-card-open-chat').fire('click');
+  assert.deepEqual(calls.back, [record], "'채팅에서 보기' goes back to the answer");
+  assert.match(node('result-card-open-chat').textContent, /채팅에서 보기/);
+
+  // Restore writes the saved rect: no camera move, no focus of another card.
+  const restored = resultCardHarness();
+  restored.spawn({ record, restore: true });
+  assert.deepEqual([restored.calls.reveals.length, restored.calls.focusSource], [0, undefined]);
+  assert.equal(resultCardHarness().spawn({ record: { version: 1 } }), null, 'a broken record makes no card');
+
+  // The same answer again: its open card comes back into view instead of a second card.
+  const open = { id: 'egd-result-card-9', isConnected: true };
+  const again = resultCardHarness({ existing: open });
+  assert.equal(again.spawn({ record, opener: chat }), open);
+  assert.deepEqual([again.calls.shells.length, again.calls.placements.length], [0, 0]);
+  assert.deepEqual(again.calls.revealOpen, [[open, { opener: chat, kind: 'result' }]]);
+});
+
+test("결과 카드: the press builds the record, and '채팅에서 보기' opens that room in Chat and brings the answer into view once", () => {
+  const made = [], notices = [];
+  const openCard = compileFunction(`${declaration('openAnswerResultCard')}\nreturn openAnswerResultCard;`, ['ChatState', 'codexMessageAuthorLabel', 'boardNotice', 'spawnResultCard'])(
+    Chat, message => message.authorName || 'Codex', text => notices.push(text), options => { made.push(options); return { id: 'card' }; });
+  const chat = { id: 'chat' };
+  assert.deepEqual(openCard(resultThread(), resultMessage({ authorName: '분석 담당' }), { opener: chat }), { id: 'card' });
+  assert.equal(made[0].opener, chat);
+  assert.equal(made[0].record.source.author, '분석 담당');
+  assert.equal(openCard(resultThread(), resultMessage({ status: 'streaming' })), null);
+  assert.match(notices.at(-1), /아직 카드로 만들 수 없습니다/);
+  assert.equal(made.length, 1);
+
+  const record = Chat.resultCardRecord(resultThread(), resultMessage(), { now: 1 });
+  const answer = resultMessage({ id: 'msg-live' });
+  const steps = [];
+  const state = { codex: { threads: [resultThread({ messages: [answer] })], hudView: 'list', revealMessage: null } };
+  state.codexBridge = { selectThread: (id, options) => steps.push(['select', id, options.openConversation]) };
+  state.focusChatDockIfCompact = card => { steps.push(['compact', card.id]); return false; };
+  const back = compileFunction(`${declaration('openResultCardSource')}\nreturn openResultCardSource;`, ['ChatState', 'state', 'boardNotice', 'dismissChatReturnCue',
+    'spawnCodexChatCard', 'focusCanvasCard', 'revealOpenCanvasCard'])(
+    Chat, state, text => notices.push(text), () => steps.push(['cue']), () => { steps.push(['chat']); return { id: 'egd-chat-card-1' }; },
+    card => steps.push(['focus', card.id]), card => steps.push(['reveal', card.id]));
+  assert.equal(back(record), true);
+  assert.deepEqual(state.codex.revealMessage, { threadId: 'room-1', messageId: 'msg-live' });
+  assert.equal(state.codex.hudView, 'conversation');
+  assert.deepEqual(steps, [['cue'], ['chat'], ['select', 'room-1', true], ['compact', 'egd-chat-card-1'], ['focus', 'egd-chat-card-1'], ['reveal', 'egd-chat-card-1']],
+    'the Dock way to Chat, then the room');
+  state.codex.threads = [];
+  steps.length = 0;
+  assert.equal(back(record), false);
+  assert.deepEqual(steps, []);
+  assert.match(notices.at(-1), /이 결과가 나온 대화를 찾을 수 없습니다/);
+
+  // After the Chat draws, the asked answer scrolls into view, is ringed for a moment, and is asked for only once.
+  const timers = [];
+  const reveal = compileFunction(`${declaration('revealRequestedMessage')}\nreturn revealRequestedMessage;`, ['state', 'window'])(
+    state, { setTimeout: (fn, ms) => timers.push([fn, ms]) });
+  const classes = new Set();
+  const row = { dataset: { messageId: 'msg-live' }, classList: { add: name => classes.add(name), remove: name => classes.delete(name) },
+    getBoundingClientRect: () => ({ top: 840 }) };
+  const log = { isConnected: true, dataset: { threadId: 'room-1' }, scrollTop: 100, offsetHeight: 400,
+    getBoundingClientRect: () => ({ top: 40, height: 400 }), querySelectorAll: () => [{ dataset: { messageId: 'other' } }, row] };
+  state.codex.revealMessage = { threadId: 'room-2', messageId: 'msg-live' };
+  assert.equal(reveal(log), false, 'another room waits');
+  state.codex.revealMessage = { threadId: 'room-1', messageId: 'msg-live' };
+  assert.equal(reveal(log), true);
+  assert.equal(log.scrollTop, 100 + 800 - 16);
+  assert.ok(classes.has('egd-codex-message-row-revealed'));
+  assert.equal(state.codex.revealMessage, null);
+  timers[0][0]();
+  assert.equal(classes.size, 0);
+  assert.equal(reveal(log), false, 'once');
+  assert.match(surfaceSource, /      if \(msgEl && state\.codex\.revealMessage\) requestAnimationFrame\(\(\) => revealRequestedMessage\(msgEl\)\);\n    \};/,
+    'it runs after the Chat render and its scroll');
+});
+
+test('결과 카드: it is kept with the Desk and Boards as a result member, at the result size, styled with tokens', () => {
+  const kind = compileFunction(`${declaration('cardKindForPersistence')}\nreturn cardKindForPersistence;`, [])();
+  assert.equal(kind({ classList: { contains: name => name === 'egd-result-card' } }), 'result');
+  const record = Chat.resultCardRecord(resultThread(), resultMessage(), { now: 1 });
+  const runtime = compileFunction(`${declaration('runtimeStateForCard')}\nreturn runtimeStateForCard;`, ['cloneJson'])(value => JSON.parse(JSON.stringify(value)));
+  assert.deepEqual(runtime({ _resultRecord: record }, 'result'), record);
+  assert.match(declaration('mountBoardMember') || '', /else if \(record\.type === 'result'\) view = spawnResultCard\(\{ restore: true, record: record\.runtimeState \}\);/);
+  assert.match(declaration('restoreCardFromState') || '', /\} else if \(cardState\.type === 'result'\) \{\n      card = spawnResultCard\(\{ restore: true, record: runtime \}\);/);
+  assert.deepEqual(Surface.canvasViewSize('result'), { width: 560, height: 560, minWidth: 360, minHeight: 280 });
+  const block = surfaceCss.slice(surfaceCss.indexOf('/* CU-01 Settings \'컴퓨터 조작\' row'), surfaceCss.indexOf('/* DSN-01: rules a token cannot carry.'));
+  assert.ok(block.length > 2000, 'new styles found');
+  assert.doesNotMatch(block, /#[0-9a-f]{3,8}\b|rgba?\(/i, 'tokens only, so light and dark follow');
+  for (const selector of ['.egd-settings-computer-row', '.egd-settings-computer-check', '.egd-codex-activity-control', '.egd-codex-answer-fold',
+    '.egd-result-card .egd-card-body', '.egd-result-card-source', 'button.egd-result-card-back', '.egd-codex-message-row-revealed .egd-codex-bubble']) {
     assert.ok(block.includes(`\n${selector} {`), `${selector} is styled`);
   }
 });

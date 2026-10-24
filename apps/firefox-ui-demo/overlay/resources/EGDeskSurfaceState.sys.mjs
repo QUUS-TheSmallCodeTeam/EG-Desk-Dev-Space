@@ -284,6 +284,8 @@ export const CANVAS_VIEW_SIZES = Object.freeze({
   // The map fills the view up to its former 1760×900 cap.
   ontology: viewSize(1760, 900, 680, 440),
   'input-evidence': viewSize(640, 480),
+  // CHAT-04: an Agent answer kept on the Canvas reads like a page beside the Chat.
+  result: viewSize(560, 560, 360, 280),
 });
 const OTHER_VIEW_SIZE = viewSize(640, 480);
 

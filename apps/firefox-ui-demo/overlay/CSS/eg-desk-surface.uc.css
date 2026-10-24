@@ -7243,6 +7243,126 @@ button.egd-codex-working-bubble:focus-visible { outline: 2px solid var(--egd-pri
 .egd-codex-run-ceiling { margin: 0 0 4px; padding: 6px 10px; border-radius: 7px; background: var(--egd-window-alt); color: var(--egd-on-surface-variant); font-size: 12px; }
 .egd-codex-activity-note { margin: 0; font-size: 12px; color: var(--egd-on-surface-variant); }
 
+/* CU-01 Settings '컴퓨터 조작' row, its activity badge, and the 연결된 도구 row
+   it turns off. Tokens only, so light and dark follow the theme. */
+.egd-settings-computer-row { display: flex; flex-wrap: wrap; align-items: center; gap: 6px 10px; }
+.egd-settings-switch:disabled { opacity: .55; cursor: default; }
+.egd-settings-computer-check {
+  padding: 1px 8px;
+  border: 1px solid var(--egd-outline-variant);
+  border-radius: 999px;
+  background: var(--egd-window-alt);
+  color: var(--egd-on-surface-variant);
+  font-size: 11px;
+  font-weight: 600;
+}
+.egd-settings-computer-check-ok { background: var(--egd-success-bg); color: var(--egd-success-ink); }
+.egd-settings-computer-check-warn { border-color: var(--egd-note-line); background: var(--egd-note-soft); color: var(--egd-warning-ink); }
+.egd-settings-computer-note { margin: 6px 0 0; }
+.egd-settings-computer-change { margin-top: 6px; font-size: 11.5px; color: var(--egd-on-surface-variant); }
+.egd-settings-computer-change-done { color: var(--egd-success-ink); }
+.egd-settings-computer-change-error { color: var(--egd-warning-ink); }
+.egd-settings-mcp-status-off { color: var(--egd-on-surface-variant); }
+.egd-settings-mcp-off { margin-top: 6px; font-size: 11px; color: var(--egd-on-surface-variant); }
+.egd-codex-activity-control {
+  align-self: flex-start;
+  padding: 1px 8px;
+  border: 1px solid var(--egd-outline-variant);
+  border-radius: 999px;
+  background: var(--egd-window-alt);
+  color: var(--egd-on-surface-variant);
+  font-size: 11px;
+  font-weight: 600;
+}
+.egd-codex-activity-control-computer { border-color: var(--egd-note-line); background: var(--egd-note-soft); color: var(--egd-warning-ink); }
+
+/* CHAT-08: a long answer folds to a preview with a quiet line under it; CHAT-04:
+   '카드로 보기' sits with the result chips, and the result card reads as a page
+   with where it came from on top. The answer '채팅에서 보기' finds is ringed briefly. */
+.egd-codex-answer-fold {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 4px 10px;
+  margin-top: 6px;
+  padding: 6px 10px;
+  border: 1px dashed var(--egd-outline-variant);
+  border-radius: 8px;
+  background: var(--egd-window-alt);
+  color: var(--egd-on-surface-variant);
+  font: 12px/1.5 var(--egd-font);
+}
+.egd-codex-answer-fold-text { flex: 1 1 160px; min-width: 0; overflow-wrap: anywhere; }
+button.egd-codex-answer-fold-card,
+button.egd-codex-answer-fold-toggle {
+  min-height: 28px;
+  padding: 3px 9px;
+  border: 1px solid var(--egd-outline);
+  border-radius: 7px;
+  background: var(--egd-chat-paper);
+  color: var(--egd-primary);
+  font: 600 11.5px/1.4 var(--egd-font);
+  cursor: pointer;
+}
+button.egd-codex-answer-fold-toggle { color: var(--egd-on-surface-variant); }
+button.egd-codex-answer-fold-card:hover,
+button.egd-codex-answer-fold-toggle:hover { border-color: var(--egd-primary); background: var(--egd-hover); }
+button.egd-codex-answer-fold-card:focus-visible,
+button.egd-codex-answer-fold-toggle:focus-visible { outline: 2px solid var(--egd-primary); outline-offset: 2px; }
+.egd-codex-result-chip.egd-codex-result-chip-card { color: var(--egd-on-surface-variant) !important; }
+.egd-codex-message-row-revealed .egd-codex-bubble { box-shadow: 0 0 0 2px var(--egd-card-focus-ring); transition: box-shadow .2s ease; }
+.egd-result-card .egd-card-body {
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+  overflow: auto;
+  padding: 12px 14px;
+  box-sizing: border-box;
+  background: var(--egd-surface-elevated);
+  color: var(--egd-on-surface);
+  font: 13px/1.6 var(--egd-font);
+}
+.egd-result-card-title { min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.egd-result-card-source {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 4px 10px;
+  padding-bottom: 8px;
+  border-bottom: 1px solid var(--egd-outline-variant);
+  color: var(--egd-on-surface-variant);
+  font-size: 11.5px;
+}
+.egd-result-card-source-line { flex: 1 1 180px; min-width: 0; overflow-wrap: anywhere; }
+button.egd-result-card-back {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  min-height: 28px;
+  padding: 3px 9px;
+  border: 1px solid var(--egd-outline);
+  border-radius: 7px;
+  background: var(--egd-window-alt);
+  color: var(--egd-primary);
+  font: 600 11.5px/1.4 var(--egd-font);
+  cursor: pointer;
+}
+button.egd-result-card-back:hover { border-color: var(--egd-primary); background: var(--egd-hover); }
+button.egd-result-card-back:focus-visible { outline: 2px solid var(--egd-primary); outline-offset: 2px; }
+.egd-result-card-back .egd-ui-icon { width: 14px; height: 14px; }
+.egd-result-card-note {
+  margin: 0;
+  padding: 6px 10px;
+  border: 1px solid var(--egd-note-line);
+  border-radius: 7px;
+  background: var(--egd-note-soft);
+  color: var(--egd-on-surface);
+  font-size: 11.5px;
+}
+.egd-result-card-text { white-space: pre-wrap; word-break: keep-all; overflow-wrap: anywhere; }
+.egd-result-card-files { padding-top: 8px; border-top: 1px solid var(--egd-outline-variant); }
+.egd-result-card-files-title { color: var(--egd-on-surface-variant); font-size: 11.5px; font-weight: 650; }
+
 /* DSN-01: rules a token cannot carry. Search result kinds keep their own hue;
    in dark the ink lifts toward the dark ink and the wash darkens. */
 @media (prefers-color-scheme: dark) {

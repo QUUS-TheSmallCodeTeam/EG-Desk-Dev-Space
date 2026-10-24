@@ -604,6 +604,12 @@
       // null until a bridge reports them (older bridges never do).
       chatCapabilities: null,
       inheritedMcp: null,
+      // CU-01: /v1/state computerControl { policy, verified }; null until a bridge reports it.
+      computerControl: null,
+      // CHAT-08: long answers opened in place ('<threadId>/<messageId>' -> true), this screen only.
+      expandedAnswers: {},
+      // CHAT-04 '채팅에서 보기': the answer to bring into view once { threadId, messageId }.
+      revealMessage: null,
       messageMenu: null,
       localHistoryStatus: 'idle',
       localHistoryError: null,
@@ -1356,6 +1362,104 @@
     return shell.root;
   }
 
+  // CHAT-04/08 result card: an Agent answer 대표님 chose to keep on the Canvas.
+  // It opens where new Views open, framed with the Chat it came from (the
+  // artifact-chip camera); the same answer asked for again brings its open card
+  // back instead of making another. The card holds a copy of the answer and
+  // where it came from; files it points to open through the existing flow.
+  function openAnswerResultCard(thread, message, options = {}) {
+    const record = ChatState.resultCardRecord(thread, message, { author: codexMessageAuthorLabel(message) });
+    if (!record) { boardNotice('이 답변은 아직 카드로 만들 수 없습니다. 답변이 끝난 뒤 다시 눌러 주세요.'); return null; }
+    return spawnResultCard({ record, opener: options.opener || null });
+  }
+
+  function spawnResultCard(options = {}) {
+    const record = ChatState.restoreResultCardRecord(options.record);
+    const key = ChatState.resultCardKey(record);
+    if (!record || !key) return null;
+    const sourceRef = makeSourceRef('chat-answer', { id: key, scope: 'codex-answer' });
+    const existing = options.restore ? null : focusOpenSourceCard(sourceRef);
+    if (existing) { revealOpenCanvasCard(existing, { opener: options.opener || null, kind: 'result' }); return existing; }
+    const placement = resolveCanvasCardPlacement('result');
+    const shell = spawnDeskWindowShell({ id: `egd-result-card-${++cardSeq}`, kind: 'result', className: 'egd-result-card', sourceRef,
+      bodyClassName: 'egd-result-card-body', minWidth: 360, minHeight: 280,
+      style: { left: `${placement.x}px`, top: `${placement.y}px`, width: `${placement.width}px`, height: `${placement.height}px` } });
+    if (!options.restore) revealPlacedCanvasCard(shell.root, placement, { opener: options.opener || null, kind: 'result' });
+    shell.root._resultRecord = record;
+    const source = ChatState.resultCardSourceView(record, { formatTime: formatMessageTime });
+    shell.slots.identity.appendChild(el('strong', { class: 'egd-result-card-title', title: record.title }, record.title));
+    const text = el('div', { class: 'egd-result-card-text egd-codex-richtext', data: { testid: 'result-card-text' } });
+    if (record.text) {
+      Markdown.appendMarkdown(text, record.text, {
+        answerId: record.source.answerId, runId: record.source.runId, conversationId: record.source.conversationId,
+        artifacts: record.artifacts, openArtifact: artifact => openCodexResultLink(artifact, { opener: shell.root }),
+        openWeb: url => openUrlInBrowserCard(url),
+      });
+    }
+    const files = record.artifacts.length ? el('section', { class: 'egd-result-card-files', 'aria-label': '이 답변이 가리킨 파일', data: { testid: 'result-card-files' } },
+      el('div', { class: 'egd-result-card-files-title' }, '이 답변이 가리킨 파일'),
+      el('div', { class: 'egd-codex-result-chips' }, ...record.artifacts.map(artifact => el('button', {
+        class: 'egd-codex-result-chip egd-codex-result-chip-file', type: 'button',
+        'aria-label': `참조된 파일 열기: ${artifact.label || artifact.target.path.split('/').pop()}`, title: `참조된 기존 파일 · ${artifact.target.path}`,
+        data: { testid: 'result-card-artifact', artifactId: artifact.id },
+        onclick: (ev) => { ev.preventDefault(); ev.stopPropagation(); openCodexResultLink(artifact, { opener: shell.root }); },
+      }, el('span', { class: 'egd-codex-result-label' }, artifact.label || artifact.target.path.split('/').pop()),
+      el('span', { 'aria-hidden': 'true', class: 'egd-codex-result-arrow' }, '↗'))))) : null;
+    const parts = [
+      el('header', { class: 'egd-result-card-source', data: { testid: 'result-card-source' } },
+        el('span', { class: 'egd-result-card-source-line' }, source.line),
+        el('button', {
+          class: 'egd-result-card-back', type: 'button', data: { testid: 'result-card-open-chat' },
+          onclick: (ev) => { ev.stopPropagation(); openResultCardSource(shell.root._resultRecord); },
+        }, deskIcon('chat'), el('span', {}, '채팅에서 보기'))),
+      source.truncatedNote ? el('p', { class: 'egd-result-card-note', role: 'note' }, source.truncatedNote) : null,
+      record.text ? text : null,
+      files,
+    ];
+    for (const part of parts) if (part) shell.slots.content.appendChild(part);
+    return shell.root;
+  }
+
+  // After a Chat render: the answer '채팅에서 보기' asked for scrolls into view
+  // and is marked for a moment, once. It waits while that room is not shown.
+  function revealRequestedMessage(log) {
+    const reveal = state.codex.revealMessage;
+    if (!reveal || !log?.isConnected || log.dataset.threadId !== reveal.threadId) return false;
+    const row = Array.from(log.querySelectorAll('[data-testid="chat-message"]')).find(item => item.dataset.messageId === reveal.messageId);
+    if (!row) return false;
+    state.codex.revealMessage = null;
+    const box = log.getBoundingClientRect();
+    const scale = log.offsetHeight > 0 && box.height > 0 ? box.height / log.offsetHeight : 1;
+    log.scrollTop += (row.getBoundingClientRect().top - box.top) / scale - 16;
+    row.classList.add('egd-codex-message-row-revealed');
+    window.setTimeout(() => row.classList.remove('egd-codex-message-row-revealed'), 2400);
+    return true;
+  }
+
+  // An open card asked for again is brought into view the way a new one is.
+  function revealOpenCanvasCard(card, options = {}) {
+    if (!card?.isConnected) return;
+    const rect = persistentEntityGeometry(card);
+    const safe = safeViewportWorldRect();
+    const inView = rect.x >= safe.left && rect.y >= safe.top && rect.x + rect.width <= safe.right && rect.y + rect.height <= safe.bottom;
+    revealPlacedCanvasCard(card, { ...rect, inView }, options);
+  }
+
+  // '채팅에서 보기': the card's conversation opens in Chat (the Dock's way) and
+  // the answer it came from is brought into view once.
+  function openResultCardSource(record) {
+    const found = ChatState.findResultCardMessage(state.codex.threads, record?.source);
+    if (!found) { boardNotice('이 결과가 나온 대화를 찾을 수 없습니다. 대화방이 지워졌을 수 있습니다.'); return false; }
+    state.codex.revealMessage = found.message ? { threadId: found.thread.id, messageId: found.message.id } : null;
+    if (!found.message) boardNotice('대화방은 열었지만 이 답변은 찾지 못했습니다. 이 기기에 기록 일부만 남아 있을 수 있습니다.');
+    dismissChatReturnCue();
+    state.codex.hudView = 'conversation';
+    const chatCard = spawnCodexChatCard();
+    state.codexBridge?.selectThread(found.thread.id, { openConversation: true });
+    if (!state.focusChatDockIfCompact?.(chatCard)) { focusCanvasCard(chatCard); revealOpenCanvasCard(chatCard); }
+    return true;
+  }
+
   // Agent question drafts live only in this closure: never state.codex, thread
   // drafts, Desk storage, DOM attributes or logs (secret answers included).
   const userInputDrafts = new Map();
@@ -1552,9 +1656,12 @@
         if (activity.kind === 'collabAgentToolCall' || activity.kind === 'subAgentActivity') continue;
         // AGENT-04: a refusal or notice from the Agent's tool ceiling, in words.
         const ceiling = ChatState.toolCeilingActivityView(activity);
+        // CU-01: an MCP call names what its server can drive ('컴퓨터 조작' for this Mac); no arguments are shown.
+        const control = ChatState.mcpControlBadge(activity);
         const row = el('article', { class: `egd-codex-activity-row${ceiling ? ' egd-codex-activity-row-ceiling' : ''}`,
-          data: { activityId: activity.id, status: activity.status, ...(ceiling ? { kind: 'toolCeiling' } : {}) } },
+          data: { activityId: activity.id, status: activity.status, ...(ceiling ? { kind: 'toolCeiling' } : {}), ...(control ? { controlKind: control.kind } : {}) } },
           el('strong', {}, activity.title || (ceiling ? '도구 제한' : activity.kind) || '활동'),
+          control ? el('span', { class: `egd-codex-activity-control egd-codex-activity-control-${control.kind}`, data: { testid: 'chat-activity-control' } }, control.label) : null,
           el('span', {}, ceiling ? ceiling.statusLabel : ({ inProgress: '진행 중', completed: '완료', failed: '실패', declined: '거절됨' })[activity.status] || activity.status || ''),
           typeof activity.detail === 'string' ? el('pre', {}, activity.detail) : null);
         if (ceiling) {
@@ -1725,6 +1832,7 @@
     recovery: [['path', { d: 'M4 7v5h5m-5 0a8 8 0 1 1 2 6' }]],
     minimap: [['rect', { x: '3', y: '4', width: '18', height: '16', rx: '2' }], ['path', { d: 'M7 8h6v5H7zM15 15h3' }]],
     check: [['path', { d: 'm4 12 5 5L20 6' }]],
+    result: [['rect', { x: '5', y: '3', width: '14', height: '18', rx: '2' }], ['path', { d: 'M9 8h6M9 12h6M9 16h3' }]],
     account: [['circle', { cx: '12', cy: '8', r: '3' }], ['path', { d: 'M5.5 20a6.5 6.5 0 0 1 13 0' }]],
   };
 
@@ -2087,6 +2195,7 @@
     if (card.classList.contains('egd-ontology-card')) return 'ontology';
     if (card.classList.contains('egd-chat-card')) return 'chat';
     if (card.classList.contains('egd-input-evidence-card')) return 'input-evidence';
+    if (card.classList.contains('egd-result-card')) return 'result';
     if (card.classList.contains('egd-file-card')) return 'file';
     return 'card';
   }
@@ -2094,6 +2203,7 @@
   function runtimeStateForCard(card, type) {
     if (type === 'file') return cloneJson(card._fileRecord || { version: 1 });
     if (type === 'input-evidence') return { reference: cloneJson(card._inputReference) };
+    if (type === 'result') return cloneJson(card._resultRecord || null);
     if (type === 'browser') {
       return {
         uri: normalizeBrowserUri(card._browserState?.uri || card.querySelector('.egd-card-url')?.value || card._sourceRef?.uri || 'https://duckduckgo.com'),
@@ -2248,6 +2358,7 @@
         view = spawnBrowserCard(uri, { openMode: 'new', sourceRef: record.sourceRef || {}, firstUse: !!record.runtimeState?.firstUseBrowser && state.surface.restoring, fixedLogicalHeight: record.runtimeState?.fixedLogicalHeight });
       } else if (record.type === 'ontology') view = spawnOntologyMapCard(record.runtimeState || {});
       else if (record.type === 'input-evidence' && record.runtimeState?.reference) view = spawnInputEvidence(record.runtimeState.reference, null, { restore: true });
+      else if (record.type === 'result') view = spawnResultCard({ restore: true, record: record.runtimeState });
       else if (record.type === 'settings') view = spawnSettingsCard({ openMode: 'new' });
       else if (record.type === 'file') view = spawnFileCard({ openMode: 'new', restore: true, record: record.runtimeState });
       else if (record.type === 'terminal' && options.newTerminal === true) view = spawnTerminalCard();
@@ -2514,6 +2625,8 @@
       card = spawnCodexChatCard();
     } else if (cardState.type === 'terminal') {
       card = spawnTerminalCard();
+    } else if (cardState.type === 'result') {
+      card = spawnResultCard({ restore: true, record: runtime });
     }
     if (!card) return null;
     retargetRestoredEntityId(card, cardState.id);
@@ -5473,14 +5586,16 @@
     };
   }
 
-  // CHAT-09/CU-07: /v1/state capabilities.chat and inheritedMcp, kept as
-  // reported. An older bridge sends neither: no one-time start or branching,
-  // and the inherited tool list reads '확인할 수 없음'.
+  // CHAT-09/CU-07/CU-01: /v1/state capabilities.chat, inheritedMcp and
+  // computerControl, kept as reported. An older bridge sends none: no one-time
+  // start or branching, and the tool list and the computer control row read
+  // '확인할 수 없음'.
   function bridgeSessionFields(bridgeState) {
     const chat = bridgeState?.capabilities?.chat;
     return {
       chatCapabilities: Array.isArray(chat) ? chat.filter((name) => typeof name === 'string') : null,
       inheritedMcp: Array.isArray(bridgeState?.inheritedMcp) ? bridgeState.inheritedMcp : null,
+      computerControl: ChatState.normalizeComputerControl(bridgeState?.computerControl),
     };
   }
 
@@ -6428,8 +6543,37 @@
             const groupedWithNext = groupRole(next) === message.role && codexMessageAuthorLabel(next) === author && nextDelta < 120000;
             const parts = extractCodexResultLinks(message);
             const content = el('div', { class: 'egd-codex-bubble-content egd-codex-richtext' });
-            appendRichText(content, parts.text || (message.status === 'streaming' ? '…' : ''), message, activeThread);
+            // CHAT-08: a very long finished answer reads as a folded preview; the whole
+            // answer stays in the message and opens here or as a result card.
+            const fold = message.role === 'assistant' && message.status !== 'streaming' ? ChatState.longAnswerView(parts.text) : null;
+            const foldOpen = !!fold?.long && !!codex.expandedAnswers?.[`${activeThread.id}/${message.id}`];
+            const shownText = fold?.long && !foldOpen ? fold.preview : parts.text;
+            appendRichText(content, shownText || (message.status === 'streaming' ? '…' : ''), message, activeThread);
+            // CHAT-04: only 대표님's press keeps an answer on the Canvas as a result card.
+            const cardable = ChatState.canKeepResultCard(activeThread, message);
+            const keepAsCard = (ev) => {
+              ev.preventDefault(); ev.stopPropagation();
+              openAnswerResultCard(activeThread, message, { opener: ev.currentTarget?.closest?.('.egd-chat-card') || null });
+            };
+            const answerFold = fold?.long ? el('div', {
+              class: 'egd-codex-answer-fold', data: { testid: 'chat-answer-fold', state: foldOpen ? 'open' : 'folded', messageId: message.id || '' },
+            }, el('span', { class: 'egd-codex-answer-fold-text' }, foldOpen ? '전체 답변을 보고 있습니다' : fold.summary),
+            cardable ? el('button', {
+              class: 'egd-codex-answer-fold-card', type: 'button', data: { testid: 'chat-answer-card', answerId: message.answerId || '', messageId: message.id || '' },
+              onclick: keepAsCard,
+            }, '카드로 펼치기') : null,
+            el('button', {
+              class: 'egd-codex-answer-fold-toggle', type: 'button', 'aria-expanded': String(foldOpen), data: { testid: 'chat-answer-fold-toggle' },
+              onclick: (ev) => { ev.stopPropagation(); codexBridge.toggleAnswerFold(activeThread.id, message.id); },
+            }, foldOpen ? '접기' : '여기서 모두 보기')) : null;
             const resultChips = buildCodexResultChips(message, activeThread, parts.links);
+            const cardChip = cardable && !fold?.long ? el('button', {
+              class: 'egd-codex-result-chip egd-codex-result-chip-card', type: 'button',
+              title: '이 답변을 Canvas에 결과 카드로 남깁니다', data: { testid: 'chat-answer-card', answerId: message.answerId || '', messageId: message.id || '' },
+              onclick: keepAsCard,
+            }, el('span', { class: 'egd-codex-result-label' }, '카드로 보기')) : null;
+            const resultRow = resultChips || cardChip ? resultChips || el('div', { class: 'egd-codex-result-chips' }) : null;
+            if (cardChip) resultRow.appendChild(cardChip);
             const briefingControl = BriefingState.validBriefing(message.briefing) ? el('button', {
               class: 'egd-codex-result-chip', data: { testid: 'briefing-open', answerId: message.answerId },
               onclick: () => openAnswerBriefing(activeThread, message),
@@ -6466,7 +6610,7 @@
             const menuTrigger = renderMessageMenuTrigger(activeThread, message);
             const messageLine = el('div', { class: 'egd-codex-message-line' },
               message.role === 'user' ? menuTrigger : null, bubble, message.role === 'user' ? null : menuTrigger);
-            const messageStack = el('div', { class: 'egd-codex-message-stack' }, roleLabel, messageLine, resultChips, briefingControl, meta);
+            const messageStack = el('div', { class: 'egd-codex-message-stack' }, roleLabel, messageLine, answerFold, resultRow, briefingControl, meta);
             if (message.inputReferences?.length) messageStack.appendChild(el('button', {
               class: 'egd-codex-result-chip', data: { testid: 'chat-message-inputs', requestId: message.requestId || '' },
               onclick: () => openCodexActivityPanel(activeThread.id),
@@ -6803,6 +6947,8 @@
         const target = newInput && !newInput.disabled ? newInput : body.querySelector('.egd-codex-conversation-back');
         target?.focus({ preventScroll: true });
       } else restoreChatFocus(body, focusState);
+      // CHAT-04 '채팅에서 보기': once the scroll above has settled, the asked answer comes into view.
+      if (msgEl && state.codex.revealMessage) requestAnimationFrame(() => revealRequestedMessage(msgEl));
     };
 
     unsubscribe = codexBridge.subscribe(render)
@@ -7636,6 +7782,10 @@
         case 'mcp.inherited':
           update({ inheritedMcp: Array.isArray(event.inheritedMcp) ? event.inheritedMcp : null });
           return;
+        // CU-01: the computer control policy or its check changed.
+        case 'computer.control':
+          update({ computerControl: ChatState.normalizeComputerControl(event.computerControl) });
+          return;
         case 'chat.event': {
           if (event.v === 2) {
             if (!ChatState.canAdmitChatEvent(protocol, state.codex.threads, event)) return;
@@ -8135,6 +8285,24 @@
       async profileRequest(path, { method = 'GET', body } = {}) {
         if (typeof path !== 'string' || !/^\/profiles(?:[/?]|$)/.test(path)) throw new Error('Invalid profile path');
         return fetchJson(path, { method, ...(body === undefined ? {} : { body: JSON.stringify(body) }) });
+      },
+      // CU-01 Settings '컴퓨터 조작': the bridge answers with the policy it now
+      // holds, which takes effect from the next message sent.
+      async setComputerControl(policy) {
+        const request = ChatState.buildComputerControlRequest(state.codex.computerControl, policy);
+        if (!request) return state.codex.computerControl;
+        const result = await fetchJson(request.path, { method: 'POST', body: JSON.stringify(request.body) });
+        const computerControl = ChatState.normalizeComputerControl(result);
+        if (computerControl) update({ computerControl });
+        return computerControl;
+      },
+      // CHAT-08: a folded long answer opened in place, or folded again.
+      toggleAnswerFold(threadId, messageId) {
+        if (!threadId || !messageId) return;
+        const key = `${threadId}/${messageId}`;
+        const { [key]: open, ...rest } = state.codex.expandedAnswers || {};
+        state.codex.expandedAnswers = open ? rest : { ...rest, [key]: true };
+        emit();
       },
       addInputSources(threadId, sources) {
         const thread = getCodexThreadById(state.codex, threadId);
@@ -8882,7 +9050,7 @@
             error.message = '이 대화는 Browser 조작 도구가 등록되기 전에 만들어졌습니다. 기존 기록과 초안은 유지됩니다. 새 Chat을 만든 뒤 Browser에서 이번 실행의 조작 대상을 다시 선택해 주세요.';
           }
           const profileText = ChatState.profileSendErrorText(error.code) || ChatState.chatStatelessErrorText(error.code)
-            || ChatState.chatModelSendErrorText(error.code);
+            || ChatState.computerControlSendErrorText(error.code) || ChatState.chatModelSendErrorText(error.code);
           if (profileText) error.message = profileText;
           // A refused model or effort returns the room's choice to the default.
           const modelReset = ChatState.chatModelRejectionReset(error.code);
@@ -9447,7 +9615,7 @@
     }
 
     const identity = el('div', { class: 'egd-desk-window-identity' });
-    identity.appendChild(deskIcon({ browser: 'browser', ontology: 'ontology', file: 'file', 'input-evidence': 'file' }[kind] || 'square', 'egd-ui-icon egd-window-kind-icon'));
+    identity.appendChild(deskIcon({ browser: 'browser', ontology: 'ontology', file: 'file', 'input-evidence': 'file', result: 'result' }[kind] || 'square', 'egd-ui-icon egd-window-kind-icon'));
     const actions = el('div', { class: 'egd-desk-window-actions' });
     const topbar = el('div', { class: 'egd-card-topbar egd-desk-window-titlebar' },
       el('div', { class: 'egd-card-dots-shell' },
@@ -11866,17 +12034,61 @@
           ring.stale ? el('div', { class: 'egd-settings-usage-note' }, '확인한 지 오래되어 실제와 다를 수 있습니다.') : null,
           ring.level === 'limit' ? el('div', { class: 'egd-settings-usage-note egd-settings-usage-note-strong' }, '한도에 도달했습니다. 초기화 전까지는 새 요청이 거절될 수 있습니다.') : null)));
       }
-      contentArea.replaceChildren(section, renderConnectedTools(), el('section', { class: 'egd-settings-section', 'aria-label': 'Claude' },
+      contentArea.replaceChildren(section, renderComputerControl(), renderConnectedTools(), el('section', { class: 'egd-settings-section', 'aria-label': 'Claude' },
         el('div', { class: 'egd-settings-section-title' }, 'Claude'),
         el('div', { class: 'egd-settings-pending-line', data: { testid: 'settings-claude' } }, '준비 중 — 연결 방식 결정 대기')));
     };
 
+    // --- 컴퓨터 조작 (CU-01 stage 1): whether ordinary EG-Desk chats keep the
+    // Codex tools that can drive this Mac. The row shows the bridge's value as
+    // it is; the switch asks the bridge, and a change applies from the next
+    // message sent. Offline it reads '확인할 수 없음' and cannot be pressed.
+    let computerControlChange = null;
+    const changeComputerControl = async (policy) => {
+      const api = bridge();
+      if (computerControlChange?.phase === 'sending' || !api?.setComputerControl) return;
+      computerControlChange = { phase: 'sending', policy };
+      if (activeTab === 'account') renderAccountTab();
+      try {
+        await api.setComputerControl(policy);
+        computerControlChange = { phase: 'done', policy, text: ChatState.COMPUTER_CONTROL_APPLY_NOTE };
+      } catch (error) {
+        computerControlChange = { phase: 'error', policy, text: ChatState.computerControlErrorText(error) };
+      }
+      if (activeTab === 'account') renderAccountTab();
+    };
+    const renderComputerControl = () => {
+      const view = ChatState.computerControlView(state.codex.connected ? state.codex.computerControl : null);
+      const sending = computerControlChange?.phase === 'sending';
+      const change = computerControlChange?.phase === 'done' || computerControlChange?.phase === 'error' ? computerControlChange : null;
+      return el('section', { class: 'egd-settings-section egd-settings-computer', 'aria-label': '컴퓨터 조작', data: { testid: 'settings-computer-control', state: view.status } },
+        el('div', { class: 'egd-settings-section-title' }, '컴퓨터 조작'),
+        el('div', { class: 'egd-settings-computer-row' },
+          el('button', {
+            class: `egd-settings-switch${view.on ? ' egd-settings-switch-on' : ''}`, type: 'button', role: 'switch',
+            'aria-checked': String(view.on), 'aria-label': 'EG-Desk 대화에서 컴퓨터 조작 쓰기',
+            disabled: !view.available || sending ? 'true' : null, data: { testid: 'settings-computer-control-switch' },
+            onclick: () => { if (view.available) void changeComputerControl(view.on ? 'off' : 'inherit'); },
+          }, el('span', { class: 'egd-settings-switch-track', 'aria-hidden': 'true' }, el('span', { class: 'egd-settings-switch-thumb' })),
+          el('span', { class: 'egd-settings-switch-label', data: { testid: 'settings-computer-control-status' } }, sending ? '바꾸는 중…' : view.statusLabel)),
+          view.check ? el('span', {
+            class: `egd-settings-computer-check egd-settings-computer-check-${view.check.tone}`, data: { testid: 'settings-computer-control-check', tone: view.check.tone },
+          }, view.check.label) : null),
+        el('p', { class: 'egd-settings-section-sub egd-settings-computer-note' }, view.note),
+        change ? el('div', {
+          class: `egd-settings-computer-change egd-settings-computer-change-${change.phase}`, role: change.phase === 'error' ? 'alert' : 'status',
+          data: { testid: 'settings-computer-control-change', phase: change.phase },
+        }, change.text) : null);
+    };
+
     // --- 연결된 도구 (CU-07): external tools ordinary Codex chats inherit from
     // the user's Codex settings, as the bridge lists them. Blocking them waits
-    // for a decision, so there is no switch here.
+    // for a decision, so there is no switch here; a tool that can drive this
+    // Mac follows the '컴퓨터 조작' row above.
     const renderConnectedTools = () => {
       // Offline, a list from before may be stale: it reads '확인할 수 없음' until the bridge answers again.
-      const view = ChatState.inheritedMcpView(state.codex.connected ? state.codex.inheritedMcp : null);
+      const view = ChatState.inheritedMcpView(state.codex.connected ? state.codex.inheritedMcp : null,
+        { computerControl: state.codex.connected ? state.codex.computerControl : null });
       const section = el('section', { class: 'egd-settings-section', 'aria-label': '연결된 도구', data: { testid: 'settings-mcp', state: view.status } },
         el('div', { class: 'egd-settings-section-title' }, '연결된 도구'),
         el('p', { class: 'egd-settings-section-sub egd-settings-mcp-intro' }, '코덱스 설정에서 물려받아 일반 대화에서 쓰이는 외부 도구입니다.'));
@@ -11892,9 +12104,11 @@
           el('span', { class: 'egd-settings-mcp-name' }, row.name),
           el('span', { class: 'egd-settings-badge egd-settings-mcp-kind' }, row.kindLabel),
           el('span', { class: `egd-settings-mcp-status egd-settings-mcp-status-${row.tone}` }, row.statusLabel)),
-        row.controlsExternal
-          ? el('div', { class: 'egd-settings-mcp-note', data: { testid: 'settings-mcp-external' } }, '일반 대화에서 EG-Desk 승인 없이 쓸 수 있는 외부 제어 도구입니다')
-          : null))));
+        row.controlOff
+          ? el('div', { class: 'egd-settings-mcp-off', data: { testid: 'settings-mcp-control-off' } }, 'Codex 앱에서는 그대로 쓸 수 있습니다')
+          : row.controlsExternal
+            ? el('div', { class: 'egd-settings-mcp-note', data: { testid: 'settings-mcp-external' } }, '일반 대화에서 EG-Desk 승인 없이 쓸 수 있는 외부 제어 도구입니다')
+            : null))));
       }
       section.appendChild(el('div', { class: 'egd-settings-pending-line', data: { testid: 'settings-mcp-block-pending' } }, '차단 여부 결정 대기'));
       return section;
@@ -12406,7 +12620,7 @@
       const auth = codex.authStatus || {};
       const catalog = bridge()?.profileCatalog?.();
       const signature = JSON.stringify([codex.connected, codex.isStartingLogin, auth.isLoggedIn, auth.loginInProgress, auth.accountEmail,
-        auth.planType, auth.usage, auth.rateLimits, catalog?.status, catalog?.profiles, codex.inheritedMcp]);
+        auth.planType, auth.usage, auth.rateLimits, catalog?.status, catalog?.profiles, codex.inheritedMcp, codex.computerControl]);
       if (signature === lastCodexSignature) return;
       lastCodexSignature = signature;
       if (activeTab === 'account') renderAccountTab();
@@ -15586,12 +15800,12 @@
     const coarsePointer = window.matchMedia?.('(pointer: coarse)');
     const detailWidth = 240;
     const detailHeight = 180;
-    const icons = { browser: 'browser', chat: 'chat', file: 'file', terminal: 'terminal', settings: 'settings', ontology: 'ontology', 'input-evidence': 'file' };
-    const typeLabels = { browser: '브라우저', chat: '대화', file: '파일', terminal: '터미널', settings: '설정', ontology: '온톨로지', 'input-evidence': '자료' };
+    const icons = { browser: 'browser', chat: 'chat', file: 'file', terminal: 'terminal', settings: 'settings', ontology: 'ontology', 'input-evidence': 'file', result: 'result' };
+    const typeLabels = { browser: '브라우저', chat: '대화', file: '파일', terminal: '터미널', settings: '설정', ontology: '온톨로지', 'input-evidence': '자료', result: '결과' };
     const titles = {
       browser: '.egd-card-page-title', chat: '.egd-chat-card-title', file: '.egd-file-card-title',
       terminal: '.egd-terminal-title', settings: '.egd-settings-title', ontology: '.egd-ontology-title',
-      'input-evidence': '.egd-desk-window-identity strong',
+      'input-evidence': '.egd-desk-window-identity strong', result: '.egd-result-card-title',
     };
     let scheduled = 0;
     const request = () => {
