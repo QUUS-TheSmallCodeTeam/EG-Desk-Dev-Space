@@ -13,6 +13,7 @@ import { EngineRegistry } from './engine-registry.mjs'
 import { assertModelSelection } from './codex-model-catalog.mjs'
 import { mcpControlKind, nativeMcpServerKind, strongerControlKind } from './codex-inherited-mcp.mjs'
 import { DEFAULT_COMPUTER_CONTROL_POLICY, loadComputerControlOffOverrides, normalizeComputerControlPolicy, verifyComputerControlOff } from './codex-computer-control.mjs'
+import { RunOutputStore } from './codex-run-outputs.mjs'
 
 const TERMINAL = new Set(['completed', 'interrupted', 'failed'])
 const ITEM_STATUS = new Set(['inProgress', 'completed', 'failed', 'declined'])
@@ -49,6 +50,16 @@ const toolKey = (namespace, name) => `${namespace || ''}\0${name}`
 // the runtime remembers at most this many call IDs per run to count each once.
 const MAX_COMPUTER_SERVERS = 8
 const MAX_COMPUTER_CALL_IDS = 4096
+// CHAT-13·10: a child row keeps its last three activity lines; children Codex
+// announced before a row exists, and thread/read attempts, stay bounded.
+const MAX_SUBAGENT_RECENT = 3
+const MAX_CHILD_NOTES = 64
+const MAX_CHILD_READS = 2
+const MAX_CHILD_READ_RECORDS = 256
+const CHILD_READ = 'egdesk/childThreadRead'
+const CHILD_LINE_EMIT_MS = 1000
+// Output-only notifications: kept in RunOutputStore, never emitted.
+const OUTPUT_METHODS = new Set(['item/commandExecution/outputDelta', 'item/fileChange/patchUpdated', 'turn/diff/updated'])
 
 // Sizes only, never content: the UTF-8 length of an MCP call's arguments as
 // JSON, or null when absent or not serializable.
@@ -138,6 +149,60 @@ function safeItem(item) {
   }
 }
 
+// CHAT-13: Codex ThreadStatus (thread/status/changed, thread/read) as
+// { nativeStatus, waitingOn }. waitingOn lists 'approval' and/or 'userInput'
+// while an active thread waits on them (ThreadActiveFlag); [] otherwise.
+const THREAD_STATUS = new Set(['notLoaded', 'idle', 'systemError', 'active'])
+const WAITING_FLAGS = [['waitingOnApproval', 'approval'], ['waitingOnUserInput', 'userInput']]
+function safeThreadStatus(status) {
+  if (!status || typeof status !== 'object' || !THREAD_STATUS.has(status.type)) return null
+  const flags = status.type === 'active' && Array.isArray(status.activeFlags) ? status.activeFlags : []
+  return { nativeStatus: status.type, waitingOn: WAITING_FLAGS.filter(([flag]) => flags.includes(flag)).map(([, name]) => name) }
+}
+
+// The nickname and role Codex gave a spawned child (Thread.agentNickname and
+// agentRole). Values only, never keys; short public text or null.
+const childName = value => typeof value === 'string' && value.trim() && value.length <= 300 ? publicText(value.trim(), 80) || null : null
+function safeChildIdentity(thread) {
+  return { nickname: childName(thread?.agentNickname), role: childName(thread?.agentRole) }
+}
+
+// CHAT-13: one short line per child item, summarized the way Codex's own
+// /subagents preview does (openai/codex, Apache-2.0,
+// codex-rs/tui/src/app/agent_status_feed.rs:141-208; pattern only): the kind
+// plus a command, tool name or count. Message, reasoning and plan text stay
+// private. item is already sanitized by safeItem.
+const SUMMARY_COLLAB = new Set(['spawnAgent', 'sendInput', 'resumeAgent', 'wait', 'closeAgent'])
+function subAgentItemSummary(item) {
+  const line = (kind, text = null, count = null) => ({ itemId: item.id, kind, text, count })
+  switch (item?.type) {
+    case 'agentMessage': return line('message')
+    case 'reasoning': return line('reasoning')
+    case 'plan': return line('plan')
+    case 'commandExecution': return line('command', publicText(item.command, 120) || null)
+    case 'fileChange': return line('fileChange', null, item.changes.length)
+    case 'mcpToolCall': return line('mcpTool', `${item.server}/${item.tool}`.slice(0, 120))
+    case 'dynamicToolCall': return line('tool', item.tool || null)
+    case 'collabAgentToolCall': return SUMMARY_COLLAB.has(item.tool) ? line('agent', item.tool) : null
+    case 'subAgentActivity': return item.kind ? line('subAgent', item.kind) : null
+    default: return null
+  }
+}
+
+// CODE-05·06: the raw diff and output text of a notification. It rides on the
+// queued event only as far as RunOutputStore; it is never emitted or saved.
+function privateOutput(method, p) {
+  if (method === 'item/commandExecution/outputDelta') return typeof p.delta === 'string' ? { delta: p.delta } : null
+  if (method === 'turn/diff/updated') return typeof p.diff === 'string' ? { turnDiff: p.diff } : null
+  if (method === 'item/fileChange/patchUpdated') return Array.isArray(p.changes) ? { fileChanges: p.changes } : null
+  if (method === 'item/started' || method === 'item/completed') {
+    const item = p.item
+    if (item?.type === 'fileChange' && Array.isArray(item.changes)) return { fileChanges: item.changes }
+    if (method === 'item/completed' && item?.type === 'commandExecution') return { aggregatedOutput: typeof item.aggregatedOutput === 'string' ? item.aggregatedOutput : null }
+  }
+  return null
+}
+
 // Public question copy plus the private original labels. Only an option index
 // crosses back from the UI; redacted public labels are never sent to native.
 function safeUserInputQuestions(value) {
@@ -172,12 +237,13 @@ function threadSession(details) {
   return details?.stateless === true || forkedFrom ? { stateless: details.stateless === true, forkedFrom } : null
 }
 
-function safeTurn(turn) {
+// engineId: the engine that ran the turn, named as the error's origin.
+function safeTurn(turn, engineId = 'codex') {
   return {
     id: idText(turn?.id),
     status: TERMINAL.has(turn?.status) || turn?.status === 'inProgress' ? turn.status : 'unknown',
     items: Array.isArray(turn?.items) ? turn.items.slice(-MAX_ITEMS).map(safeItem).filter(Boolean) : [],
-    error: turn?.error ? publicError(turn.error, 'TURN_FAILED', 'codex') : null,
+    error: turn?.error ? publicError(turn.error, 'TURN_FAILED', engineId) : null,
     itemsView: ['notLoaded', 'summary', 'full'].includes(turn?.itemsView) ? turn.itemsView : 'full',
     // Native completion notifications can intentionally omit their item array;
     // those same items have already arrived in item events. This is not loss.
@@ -185,10 +251,24 @@ function safeTurn(turn) {
   }
 }
 
-function cleanNotification(method, p) {
+// engineId names the engine of the notification's thread as an error origin.
+function cleanNotification(method, p, engineId = 'codex') {
+  if (method === 'thread/started') {
+    // Only a child Agent thread matters (CHAT-13); the parent's own start stays ignored.
+    const thread = p?.thread
+    return thread && idText(thread.id) && idText(thread.parentThreadId)
+      ? { method, threadId: thread.id, turnId: null, parentThreadId: thread.parentThreadId, identity: safeChildIdentity(thread), status: safeThreadStatus(thread.status) }
+      : null
+  }
   if (!p || !idText(p.threadId)) return null
   const base = { method, threadId: p.threadId, turnId: idText(p.turnId) }
-  if (method === 'turn/started' || method === 'turn/completed') return { ...base, turnId: idText(p.turn?.id), turn: safeTurn(p.turn) }
+  if (method === 'thread/status/changed') {
+    const status = safeThreadStatus(p.status)
+    return status ? { ...base, status } : null
+  }
+  if (method === 'item/commandExecution/outputDelta' || method === 'item/fileChange/patchUpdated') return idText(p.itemId) && base.turnId ? { ...base, itemId: p.itemId } : null
+  if (method === 'turn/diff/updated') return base.turnId ? base : null
+  if (method === 'turn/started' || method === 'turn/completed') return { ...base, turnId: idText(p.turn?.id), turn: safeTurn(p.turn, engineId) }
   if (method === 'item/started' || method === 'item/completed') {
     const item = safeItem(p.item)
     return item ? { ...base, item } : null
@@ -200,7 +280,7 @@ function cleanNotification(method, p) {
     ...base, explanation: publicText(p.explanation, 2000),
     plan: Array.isArray(p.plan) ? p.plan.slice(0, 40).map(step => ({ step: publicText(step.step, 1000), status: ['pending', 'inProgress', 'completed'].includes(step.status) ? step.status : 'pending' })) : [],
   }
-  if (method === 'error') return { ...base, error: publicError(p.error, 'TURN_ERROR', 'codex'), willRetry: p.willRetry === true }
+  if (method === 'error') return { ...base, error: publicError(p.error, 'TURN_ERROR', engineId), willRetry: p.willRetry === true }
   if (method === 'thread/tokenUsage/updated') return { ...base, usage: { modelContextWindow: Number.isFinite(p.tokenUsage?.modelContextWindow) ? p.tokenUsage.modelContextWindow : null, usedTokens: Number.isFinite(p.tokenUsage?.last?.totalTokens) ? p.tokenUsage.last.totalTokens : null } }
   if (method === 'serverRequest/resolved') return { ...base, requestId: p.requestId }
   return null
@@ -311,6 +391,15 @@ export class CodexChatRuntime {
     this.incompleteHistory = new Set()
     this.truncated = false
     this.queue = Promise.resolve()
+    // CODE-05·06: diffs and command output of live runs, in memory only.
+    this.runOutputs = new RunOutputStore()
+    // CHAT-13: what Codex said about a child thread before its row existed
+    // (threadId → row fields), and thread/read attempts per child.
+    this.childNotes = new Map()
+    this.childReads = new Map()
+    this.childReadsPending = new Set()
+    // threadId → when its row was last announced for new activity lines.
+    this.childLineEmits = new Map()
   }
 
   assertReady(engineId = 'codex') {
@@ -485,7 +574,8 @@ export class CodexChatRuntime {
       for (const { clientThreadId, run } of pending) {
         const checkpoint = {
           ...run, status: 'unknown', historyComplete: false, pendingApprovals: [], pendingUserInputs: [],
-          ...(Array.isArray(run.subAgents) ? { subAgents: run.subAgents.map(row => SUBAGENT_DONE.has(row?.state) ? row : { ...row, state: 'unknown' }) } : {}),
+          // A child's last Codex status is no longer current either.
+          ...(Array.isArray(run.subAgents) ? { subAgents: run.subAgents.map(row => SUBAGENT_DONE.has(row?.state) ? row : { ...row, state: 'unknown', ...(row && 'nativeStatus' in row ? { nativeStatus: null, waitingOn: [] } : {}) }) } : {}),
           error: publicError('Bridge restarted before this run was confirmed complete', 'RUNTIME_RESTARTED'),
           messages: (run.messages || []).map(message => message.status === 'streaming' ? { ...message, status: 'partial' } : message),
         }
@@ -632,6 +722,9 @@ export class CodexChatRuntime {
     for (const map of [this.qaOutputMarkersByRun, this.rawMessages, this.visibleMessages, this.persistedRunStates]) {
       for (const key of [...map.keys()]) if (this.keyEngine(key) === engineId) map.delete(key)
     }
+    for (const key of this.runOutputs.keys()) if (this.keyEngine(key) === engineId) this.runOutputs.forget(key)
+    // Child Agent threads are Codex threads.
+    if (codex) { this.childNotes.clear(); this.childReads.clear(); this.childReadsPending.clear(); this.childLineEmits.clear() }
     this.forgetPendingRequests(engineId)
     for (const [requestId, record] of [...this.requests]) if ((record.engineId || 'codex') === engineId) this.requests.delete(requestId)
     if (!this.runs.size) this.truncated = false
@@ -663,7 +756,7 @@ export class CodexChatRuntime {
       // Tool providers keep serving the other engines; stop only this run.
       if (!codex) for (const provider of this.toolProviders) try { provider.cancelRun?.(run) } catch {}
       // A child Agent can outlive its parent turn; its last state is now unknown.
-      this.updateSubAgentRows(run, (run.subAgents || []).filter(row => !SUBAGENT_DONE.has(row.state) && row.state !== 'unknown').map(row => ({ threadId: row.threadId, state: 'unknown' })), true)
+      this.updateSubAgentRows(run, (run.subAgents || []).filter(row => !SUBAGENT_DONE.has(row.state) && row.state !== 'unknown').map(row => ({ threadId: row.threadId, state: 'unknown', nativeStatus: null })), true)
       if (TERMINAL.has(run.status)) continue
       run.status = processLost ? 'failed' : 'unknown'
       run.historyComplete = false
@@ -695,6 +788,7 @@ export class CodexChatRuntime {
       if (!entry) break
       this.runs.delete(entry[0])
       this.qaOutputMarkersByRun.delete(entry[0])
+      this.runOutputs.forget(entry[0])
       for (const key of this.rawMessages.keys()) if (key.startsWith(`${entry[0]}/`)) this.rawMessages.delete(key)
       for (const key of this.visibleMessages.keys()) if (key.startsWith(`${entry[0]}/`)) this.visibleMessages.delete(key)
       this.truncated = true
@@ -890,14 +984,21 @@ export class CodexChatRuntime {
     // A new request (replays above keep their first answer) may name only a
     // model the engine lists, and only an effort that model lists. Without a
     // list nothing changes. Unchosen settings still meet assertProcessConfiguration.
-    if (body.model !== undefined || body.effort !== undefined) {
+    // AGENT-08: an Agent's own model is checked the same way.
+    const modelSelection = this.modelSelection(body, profileRun, engineId)
+    if (modelSelection.model !== undefined || modelSelection.effort !== undefined) {
       const engine = this.engines.get(engineId)
       let listed = null
       try { listed = typeof engine?.models === 'function' ? engine.models() : null } catch {}
-      assertModelSelection(listed, {
-        model: body.model, effort: body.effort,
-        currentModel: conversationId ? this.threads.get(conversationId)?.model ?? null : this.expectedProcessConfiguration?.model ?? null,
-      })
+      try {
+        assertModelSelection(listed, {
+          model: modelSelection.model, effort: modelSelection.effort,
+          currentModel: conversationId ? this.threads.get(conversationId)?.model ?? null : this.expectedProcessConfiguration?.model ?? null,
+        })
+      } catch (error) {
+        if (modelSelection.source !== 'agent') throw error
+        throw chatError('PROFILE_MODEL_UNAVAILABLE', 'This Agent\'s model or reasoning effort is not offered to the signed-in account; choose a model for this chat or change the Agent', 409)
+      }
     }
     const lock = conversationId || `client:${clientThreadId || 'legacy'}`
     if (this.locks.has(lock)) throw chatError('RUN_IN_PROGRESS', 'A request is already starting for this conversation', 409)
@@ -979,6 +1080,7 @@ export class CodexChatRuntime {
       qaOutputMarkers: qaMarkers,
       policyUpgrade: Boolean(conversationId && requestedPolicy && !boundPolicy),
       profileRun,
+      modelSelection,
       stateless,
       // A stored binding may have named the engine after the early lookup.
       engine: this.engineRecord(conversationId ? this.threadEngines.get(conversationId) || engineId : engineId),
@@ -1039,16 +1141,36 @@ export class CodexChatRuntime {
       throw chatError('INVALID_PROFILE', `A saved profile must compose 1 to ${MAX_COMPOSED} characters of instructions`, 500)
     }
     // AGENT-04: the binding hash covers the ceiling, so the fingerprint already names it.
-    return { binding: { profileId: binding.profileId, revision: binding.revision, hash: binding.hash }, developerInstructions: instructions, toolCeiling: effectiveToolCeiling(resolved.toolCeiling) }
+    // AGENT-08: it covers the Agent's model too ({ engine, modelId, effort } or null).
+    const agentModel = resolved.model
+    const model = agentModel && typeof agentModel === 'object' && typeof agentModel.engine === 'string' && idText(agentModel.modelId)
+      ? { engine: agentModel.engine, modelId: agentModel.modelId, effort: idText(agentModel.effort) ? agentModel.effort : null } : null
+    return { binding: { profileId: binding.profileId, revision: binding.revision, hash: binding.hash }, developerInstructions: instructions, toolCeiling: effectiveToolCeiling(resolved.toolCeiling), model }
   }
 
-  threadOverrides(body, profileRun = null) {
+  // AGENT-08 (D-A4 recommendation, confirmation pending): which model and
+  // effort a send runs with. A model or effort named in the send — the screen
+  // sends the room's pick — wins; otherwise the Agent's saved model when it is
+  // for this engine; otherwise nothing, so Codex keeps its own default. Model
+  // and effort travel together as one selection (pingdotgg/t3code, MIT,
+  // packages/contracts/src/modelSelection.ts:17-50; openai/codex, Apache-2.0,
+  // codex-rs/core/src/agent/role.rs:69-90 — a role's model and effort override
+  // together; patterns only). source: 'request' | 'agent' | null.
+  modelSelection(body, profileRun = null, engineId = 'codex') {
+    if (body.model !== undefined || body.effort !== undefined) return { model: body.model, effort: body.effort, source: 'request' }
+    const agent = profileRun?.model
+    if (agent && agent.engine === engineId) return { model: agent.modelId, effort: agent.effort ?? undefined, source: 'agent' }
+    return { model: undefined, effort: undefined, source: null }
+  }
+
+  threadOverrides(body, profileRun = null, selection = null) {
     const options = {}
     const cwd = validateChatCwd(body)
     if (cwd !== undefined) options.cwd = cwd
-    if (body.model !== undefined) {
-      if (!idText(body.model) || !body.model.trim()) throw chatError('INVALID_MODEL', 'Invalid model')
-      options.model = body.model
+    const model = selection ? selection.model : body.model
+    if (model !== undefined) {
+      if (!idText(model) || !model.trim()) throw chatError('INVALID_MODEL', 'Invalid model')
+      options.model = model
     }
     if (profileRun) options.developerInstructions = profileRun.developerInstructions
     else if (body.profileEnabled === true) {
@@ -1151,7 +1273,8 @@ export class CodexChatRuntime {
   async startTurn(body, context) {
     const engine = this.engines.get(context.engine.id)
     const epoch = this.epochOf(engine.id)
-    const overrides = this.threadOverrides(body, context.profileRun)
+    const selection = context.modelSelection || this.modelSelection(body, context.profileRun, engine.id)
+    const overrides = this.threadOverrides(body, context.profileRun, selection)
     const policy = context.executionPolicy
     const qa = policy === READ_ONLY_QA
     const bounded = qa || policy === BROWSER_BOUNDED || policy === FIXTURE_BROWSER_QA
@@ -1196,7 +1319,7 @@ export class CodexChatRuntime {
     const ceilingOverrides = () => loadCeilingThreadOverrides(this.request, ceiling, {
       bounded, cwd: overrides.cwd || this.threads.get(context.conversationId)?.cwd || null,
     })
-    const effort = body.effort
+    const effort = selection.effort
     // CLI 0.156.1 defines ReasoningEffort as a non-empty model-advertised string.
     if (effort !== undefined && (!idText(effort) || !effort.trim())) throw chatError('INVALID_EFFORT', 'Invalid reasoning effort')
     if (this.store) {
@@ -1341,7 +1464,7 @@ export class CodexChatRuntime {
       throw chatError('NATIVE_TOOL_MANIFEST_UNVERIFIED', 'This native thread has no verified original tool ownership; keep its history and choose an explicit new conversation', 409)
     }
     // The expected configuration is the Codex app-server's process setting.
-    if (engine.id === 'codex') this.assertProcessConfiguration(this.threads.get(cid), { model: body.model, effort })
+    if (engine.id === 'codex') this.assertProcessConfiguration(this.threads.get(cid), { model: overrides.model, effort })
     if ([...this.runs.values()].some(run => run.conversationId === cid && !TERMINAL.has(run.status))) {
       throw chatError('RUN_IN_PROGRESS', 'This conversation already has an active or unreconciled turn', 409)
     }
@@ -1389,11 +1512,13 @@ export class CodexChatRuntime {
       const threadConfiguration = this.threads.get(cid)
       const nativeTurnModel = idText(result?.model) || idText(result?.turn?.model)
       const nativeTurnEffort = idText(result?.reasoningEffort) || idText(result?.turn?.reasoningEffort)
+      // AGENT-08: 'agent-profile' when the Agent's saved model or effort was sent.
+      const requested = selection.source === 'agent' ? 'agent-profile' : 'turn-request'
       const readerConfiguration = {
         model: nativeTurnModel || overrides.model || threadConfiguration?.model || null,
         effort: nativeTurnEffort || effort || threadConfiguration?.effort || null,
-        modelSource: nativeTurnModel ? 'native-turn' : overrides.model ? 'turn-request' : 'native-thread',
-        effortSource: nativeTurnEffort ? 'native-turn' : effort !== undefined ? 'turn-request' : 'native-thread',
+        modelSource: nativeTurnModel ? 'native-turn' : overrides.model ? requested : 'native-thread',
+        effortSource: nativeTurnEffort ? 'native-turn' : effort !== undefined ? requested : 'native-thread',
       }
       run.parentTurnConfiguration = readerConfiguration
       this.emit(run, 'run.configuration', { configuration: readerConfiguration })
@@ -1403,7 +1528,7 @@ export class CodexChatRuntime {
       // Notifications can precede the RPC response. Only the returned turn ID
       // may inherit this request's correlation; other turns remain unclaimed.
       while (pending.buffer.length) await this.apply(pending.buffer.shift())
-      if (TERMINAL.has(result.turn.status) && !TERMINAL.has(run.status)) await this.finish(run, safeTurn(result.turn))
+      if (TERMINAL.has(result.turn.status) && !TERMINAL.has(run.status)) await this.finish(run, safeTurn(result.turn, engine.id))
       return {
         accepted: true, durable: !this.store || this.storeHealthy,
         conversationId: cid, requestId: context.requestId, runId: run.runId, answerId: run.answerId,
@@ -1476,7 +1601,7 @@ export class CodexChatRuntime {
       else this.incompleteHistory.delete(cid)
       this.truncated ||= turns.length > MAX_RUNS
       for (const original of turns.slice(-MAX_RUNS)) {
-        const turn = safeTurn(original)
+        const turn = safeTurn(original, engineId)
         const retainedComplete = this.runs.get(runKey(cid, turn.id))?.historyComplete === true
         const run = this.ensureRun(cid, turn.id, null, false)
         if (!run) continue
@@ -1760,8 +1885,10 @@ export class CodexChatRuntime {
   }
 
   handleNotification(message) {
-    const event = cleanNotification(message.method, message.params)
+    const event = cleanNotification(message.method, message.params, this.threadEngine(idText(message.params?.threadId)))
     if (!event) return Promise.resolve()
+    const output = privateOutput(message.method, message.params)
+    if (output) event.privateOutput = output
     if (message.method === 'item/completed' && message.params?.item?.type === 'commandExecution') {
       const run = this.runs.get(runKey(event.threadId, event.turnId))
       const pending = this.pendingStarts.get(event.threadId)
@@ -1807,10 +1934,13 @@ export class CodexChatRuntime {
     const pending = this.pendingStarts.get(event.threadId) || this.pendingResumes.get(event.threadId)
     if (pending) {
       if (pending.buffer.length < 512) pending.buffer.push(event)
+      // Output text has an authoritative copy on item completion; dropping a
+      // piece here loses no answer, so it is not reported as truncation.
+      else if (OUTPUT_METHODS.has(event.method)) return Promise.resolve()
       else {
         this.truncated = true
         if (event.method === 'turn/completed' || event.method === 'item/completed') {
-          const expendable = pending.buffer.findIndex(entry => entry.method.endsWith('/delta'))
+          const expendable = pending.buffer.findIndex(entry => entry.method.endsWith('/delta') || OUTPUT_METHODS.has(entry.method))
           pending.buffer.splice(expendable < 0 ? 0 : expendable, 1)
           pending.buffer.push(event)
         } else if (event.method === 'approval' || event.method === 'dynamic') this.respond(event.rpcId, null, { code: -32000, message: 'Bridge event buffer is full' })
@@ -1843,13 +1973,18 @@ export class CodexChatRuntime {
       }
       return
     }
+    if (event.method === 'thread/status/changed' || event.method === 'thread/started' || event.method === CHILD_READ) return this.applyChildThread(event)
     const run = this.runs.get(runKey(event.threadId, event.turnId))
     if (!run || !this.ownedRuns.has(run)) {
       if (event.method === 'approval' || event.method === 'dynamic') this.respond(event.rpcId, null, { code: -32601, message: 'No matching EG-Desk run' })
       // A child Agent thread never gains authority; its parent row shows the stall.
       if (!run && event.method === 'approval' && event.nativeMethod !== USER_INPUT_METHOD) this.markSubAgentBlocked(event.threadId)
+      // A child's own items never become a run; its parent row shows a short line.
+      if (!run && (event.method === 'item/started' || event.method === 'item/completed')) this.noteSubAgentItem(event.threadId, event.item)
       return
     }
+    if (event.privateOutput) this.keepRunOutput(run, event)
+    if (OUTPUT_METHODS.has(event.method)) return
     if (event.method === 'approval') return this.receiveApproval(run, event)
     if (event.method === 'dynamic') {
       if (run.status !== 'inProgress' || this.connectionOf(this.runEngine(run)) !== 'ready') {
@@ -2055,11 +2190,127 @@ export class CodexChatRuntime {
     for (const input of cleared) this.emit(run, 'userInput.resolved', { userInputId: input.userInputId })
   }
 
+  // The newest owned run with a row for this child thread, or undefined.
+  subAgentRun(threadId) {
+    if (!threadId) return undefined
+    return [...this.runs.values()].reverse().find(candidate => this.ownedRuns.has(candidate) && candidate.subAgents?.some(row => row.threadId === threadId))
+  }
+
   // Display only: the child's request was already refused without authority.
   markSubAgentBlocked(threadId) {
-    if (!threadId) return
-    const run = [...this.runs.values()].reverse().find(candidate => this.ownedRuns.has(candidate) && candidate.subAgents?.some(row => row.threadId === threadId))
+    const run = this.subAgentRun(threadId)
     if (run) this.updateSubAgentRows(run, [{ threadId, create: false, blockedApproval: true }], true)
+  }
+
+  // CHAT-13·10: a child Agent thread's own status (thread/status/changed),
+  // its nickname and role (thread/started, or thread/read once), shown on the
+  // parent's row. Display only: nothing here grants or answers anything.
+  // Pattern: openai/codex (Apache-2.0) codex-rs/tui/src/app/agents_overview_view.rs:69-98
+  // groups threads by the same ThreadStatus and ThreadActiveFlag values.
+  applyChildThread(event) {
+    const run = this.subAgentRun(event.threadId)
+    const row = run?.subAgents.find(candidate => candidate.threadId === event.threadId)
+    // A read answers with an older snapshot than a live status that may have
+    // arrived since; its status counts only while the row has none.
+    const status = event.status && !(event.method === CHILD_READ && row?.nativeStatus) ? event.status : null
+    const update = { threadId: event.threadId, create: false, ...(event.identity || {}), ...(status || {}) }
+    if (row) {
+      this.updateSubAgentRows(run, [update], true)
+      if (event.method === 'thread/status/changed' && !row.nickname && !row.role) this.requestChildIdentity(run, event.threadId)
+      return
+    }
+    // Codex announces a child (thread/started with its parent) before the
+    // spawn item names it. Keep the newest word on a bounded number of such
+    // children until their row appears; other threads' statuses are ignored.
+    const ownedParent = parentId => this.pendingStarts.has(parentId) || [...this.runs.values()].some(candidate => candidate.conversationId === parentId && this.ownedRuns.has(candidate))
+    if (event.method === 'thread/started' ? !ownedParent(event.parentThreadId) : !this.childNotes.has(event.threadId)) return
+    const note = { ...this.childNotes.get(event.threadId) }
+    for (const [key, value] of Object.entries(update)) if (value != null && key !== 'create') note[key] = value
+    this.childNotes.delete(event.threadId)
+    this.childNotes.set(event.threadId, note)
+    while (this.childNotes.size > MAX_CHILD_NOTES) this.childNotes.delete(this.childNotes.keys().next().value)
+  }
+
+  // CHAT-13: the nickname and role of a child first seen without them, read
+  // from Codex (thread/read, no turns). Codex threads only, at most
+  // MAX_CHILD_READS tries per child; a failure leaves the row as it was.
+  requestChildIdentity(run, threadId) {
+    if (this.runEngine(run) !== 'codex' || !this.ownedRuns.has(run) || this.childReadsPending.has(threadId)) return
+    const attempts = this.childReads.get(threadId) || 0
+    if (attempts >= MAX_CHILD_READS) return
+    this.childReads.delete(threadId)
+    this.childReads.set(threadId, attempts + 1)
+    while (this.childReads.size > MAX_CHILD_READ_RECORDS) this.childReads.delete(this.childReads.keys().next().value)
+    this.childReadsPending.add(threadId)
+    const epoch = this.epoch
+    void Promise.resolve().then(() => this.request('thread/read', { threadId, includeTurns: false })).then(result => {
+      const thread = result?.thread
+      if (epoch !== this.epoch || !thread || thread.id !== threadId) return
+      const identity = safeChildIdentity(thread)
+      if (identity.nickname || identity.role) this.childReads.set(threadId, MAX_CHILD_READS)
+      return this.enqueue({ method: CHILD_READ, threadId, turnId: null, identity, status: safeThreadStatus(thread.status) })
+    }).catch(() => {}).finally(() => this.childReadsPending.delete(threadId))
+  }
+
+  // CHAT-13: one line of what a child Agent is doing, from its own item events.
+  // A busy child can produce many items; its row is announced (and saved) at
+  // most once per CHILD_LINE_EMIT_MS for new lines alone. Lines in between
+  // stay on the row and go out with the next announcement or status change.
+  noteSubAgentItem(threadId, item) {
+    const line = subAgentItemSummary(item)
+    const run = line && this.subAgentRun(threadId)
+    if (!run) return
+    const now = this.now()
+    const announce = !(now - (this.childLineEmits.get(threadId) ?? -Infinity) < CHILD_LINE_EMIT_MS)
+    if (announce) {
+      this.childLineEmits.delete(threadId)
+      this.childLineEmits.set(threadId, now)
+      while (this.childLineEmits.size > MAX_CHILD_READ_RECORDS) this.childLineEmits.delete(this.childLineEmits.keys().next().value)
+    }
+    this.updateSubAgentRows(run, [{ threadId, create: false, recent: line }], announce)
+  }
+
+  // CODE-05·06: raw diff and output text of an owned run, into memory only.
+  keepRunOutput(run, event) {
+    const output = event.privateOutput, key = run.answerId
+    if (output.delta !== undefined) this.runOutputs.appendCommandOutput(key, event.itemId, output.delta)
+    else if (output.turnDiff !== undefined) this.runOutputs.setTurnDiff(key, output.turnDiff)
+    else if (output.fileChanges) this.runOutputs.setFileChanges(key, event.itemId || event.item?.id, output.fileChanges, event.item?.status ?? null)
+    else if ('aggregatedOutput' in output) this.runOutputs.completeCommand(key, event.item?.id, output.aggregatedOutput)
+  }
+
+  /**
+   * CODE-05 GET /chat/run-changes {conversationId, runId, itemId?}: what the
+   * run's file changes would do or did, kept in memory while this bridge runs.
+   * → { protocolVersion: 1, conversationId, runId, retained, turn, items, commands, limits }
+   *   retained: false — nothing kept (a run from before a restart, or evicted).
+   *   turn: { diff, bytes, omitted } — Codex's aggregated git diff of the turn
+   *     (turn/diff/updated), or null; with itemId always null.
+   *   items: [{ itemId, status, truncated, files: [{ path, kind: 'add'|'delete'|'update',
+   *     movePath, diff, bytes, omitted }] }] — per fileChange item (one item with
+   *     itemId). An update's diff is hunk-only; add and delete carry the text.
+   *   omitted: null | 'unavailable' | 'fileLimit' | 'runLimit' | 'turnLimit' (diff is then null).
+   *   commands: [{ itemId, totalBytes, complete }] — commands with kept output.
+   * Text is redacted like other public text. RUN_NOT_FOUND (404) for an unknown run.
+   */
+  runChanges(query) {
+    const run = this.findRun(query)
+    const itemId = query.itemId == null ? null : idText(query.itemId)
+    return { protocolVersion: 1, conversationId: run.conversationId, runId: run.runId, ...this.runOutputs.changes(run.answerId, { itemId }) }
+  }
+
+  /**
+   * CODE-06 GET /chat/command-output {conversationId, runId, itemId}: a
+   * command's output as its first 8 KiB (head) and last 64 KiB (tail).
+   * → { protocolVersion: 1, conversationId, runId, itemId, head, tail, omittedBytes, totalBytes, complete, limits }
+   * complete: the command item finished (Codex's own copy was compared).
+   * RUN_NOT_FOUND or COMMAND_OUTPUT_UNAVAILABLE (404) when nothing is kept.
+   */
+  commandOutput(query) {
+    const run = this.findRun(query)
+    const output = this.runOutputs.commandOutput(run.answerId, idText(query.itemId))
+    if (!output) throw chatError('COMMAND_OUTPUT_UNAVAILABLE', 'No output is kept for this command', 404)
+    return { protocolVersion: 1, conversationId: run.conversationId, runId: run.runId, ...output }
   }
 
   updateSubAgents(run, item, announce) {
@@ -2086,30 +2337,64 @@ export class CodexChatRuntime {
   }
 
   // One bounded row per child thread; IDs stay values, never object keys.
+  // Row (helper contract, SSE subagent.updated and run.subAgents):
+  //   threadId, label (Codex agent path), nickname, role (CHAT-13: Codex's
+  //   agentNickname/agentRole), taskPreview, model, state, nativeStatus
+  //   (Codex ThreadStatus: 'active'|'idle'|'systemError'|'notLoaded'|null),
+  //   waitingOn (['approval','userInput'] subset, live while active), message,
+  //   lastTool, blocked ({reason: 'errored'|'notFound'|'approvalRequested'|
+  //   'userInputRequested'} or null), recent (≤3 {itemId, kind, text, count,
+  //   at}, oldest first), updatedAt, parentEnded.
   updateSubAgentRows(run, updates, announce) {
     if (!updates.length) return
     run.subAgents ||= []
     const changed = new Set()
-    for (const update of updates) {
+    for (let update of updates) {
       let row = run.subAgents.find(candidate => candidate.threadId === update.threadId)
+      let created = false
       if (!row) {
         if (update.create === false) continue
         if (run.subAgents.length >= MAX_SUBAGENTS) { run.truncated = true; continue }
-        row = { threadId: update.threadId, label: null, taskPreview: null, model: null, state: update.initialState || 'unknown', message: null, lastTool: null, blocked: null, updatedAt: this.now(), parentEnded: false }
+        row = { threadId: update.threadId, label: null, nickname: null, role: null, taskPreview: null, model: null, state: update.initialState || 'unknown', nativeStatus: null, waitingOn: [], message: null, lastTool: null, blocked: null, recent: [], updatedAt: this.now(), parentEnded: false }
+        // What Codex already said about this child (thread/started, status).
+        const note = this.childNotes.get(update.threadId)
+        if (note) {
+          this.childNotes.delete(update.threadId)
+          update = { ...Object.fromEntries(['nickname', 'role', 'nativeStatus', 'waitingOn'].filter(key => note[key] != null).map(key => [key, note[key]])), ...update }
+        }
         run.subAgents.push(row)
         changed.add(row)
+        created = true
       }
+      // Older rows from local history may lack the CHAT-13 fields.
+      row.waitingOn ||= []
+      row.recent ||= []
       const before = JSON.stringify({ ...row, updatedAt: 0 })
-      for (const key of ['label', 'taskPreview', 'model', 'lastTool']) if (update[key]) row[key] = update[key]
+      for (const key of ['label', 'nickname', 'role', 'taskPreview', 'model', 'lastTool']) if (update[key]) row[key] = update[key]
+      if (update.nativeStatus !== undefined) {
+        row.nativeStatus = update.nativeStatus
+        row.waitingOn = update.nativeStatus === 'active' && Array.isArray(update.waitingOn) ? [...update.waitingOn] : []
+        // Codex's own thread status is current, not a stale snapshot: an error
+        // stops the row and a turn in progress reopens it.
+        if (update.nativeStatus === 'systemError') update = { ...update, state: 'errored' }
+        else if (update.nativeStatus === 'active' && row.state !== 'running') update = { ...update, state: 'running', revive: true }
+      }
       // Only resume-type signals may reopen a finished child; stale snapshots may not.
       const regress = SUBAGENT_DONE.has(row.state) && ['running', 'starting'].includes(update.state) && !update.revive
       if (update.state && !regress) {
         row.state = update.state
         if (update.message !== undefined) row.message = update.message
       }
-      const approval = update.blockedApproval || (row.blocked?.reason === 'approvalRequested' && !SUBAGENT_DONE.has(row.state) && !update.revive)
-      row.blocked = row.state === 'errored' ? { reason: 'errored' } : row.state === 'notFound' ? { reason: 'notFound' } : approval ? { reason: 'approvalRequested' } : null
+      if (update.recent && !row.recent.some(line => line.itemId === update.recent.itemId)) {
+        row.recent = [...row.recent, { ...update.recent, at: this.now() }].slice(-MAX_SUBAGENT_RECENT)
+      }
+      // A refused approval stays shown until a resume-type signal or an end;
+      // a question is shown only while Codex says the child waits on it.
+      const approval = update.blockedApproval || row.waitingOn.includes('approval') || (row.blocked?.reason === 'approvalRequested' && !SUBAGENT_DONE.has(row.state) && !update.revive)
+      row.blocked = row.state === 'errored' ? { reason: 'errored' } : row.state === 'notFound' ? { reason: 'notFound' } : approval ? { reason: 'approvalRequested' }
+        : row.waitingOn.includes('userInput') ? { reason: 'userInputRequested' } : null
       if (JSON.stringify({ ...row, updatedAt: 0 }) !== before) { row.updatedAt = this.now(); changed.add(row) }
+      if (created && !row.nickname && !row.role) this.requestChildIdentity(run, row.threadId)
     }
     if (announce) for (const row of changed) this.emit(run, 'subagent.updated', { subAgent: row })
   }

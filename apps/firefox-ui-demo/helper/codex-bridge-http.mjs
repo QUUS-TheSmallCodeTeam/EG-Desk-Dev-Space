@@ -105,6 +105,26 @@ export function createChatHttpHandler(chat, ensureAuth, history = chat) {
       sendJson(res, 200, chat.snapshot(url.searchParams.get('conversationId')))
       return true
     }
+    // CODE-05·06: a run's changed lines and command output, from bridge
+    // memory (CodexChatRuntime.runChanges / commandOutput). Like /chat/state
+    // they need no account call; runs of a signed-out account are gone.
+    //   GET /chat/run-changes?conversationId=&runId=[&itemId=]
+    //   GET /chat/command-output?conversationId=&runId=&itemId=
+    if (req.method === 'GET' && (url.pathname === '/chat/run-changes' || url.pathname === '/chat/command-output')) {
+      try {
+        const id = (name, required = true) => {
+          const value = url.searchParams.get(name)
+          if (value === null && !required) return null
+          if (typeof value !== 'string' || !value.trim() || value.length > 300) throw chatError('INVALID_RUN_OUTPUT_QUERY', `${name} is required`)
+          return value
+        }
+        const query = { conversationId: id('conversationId'), runId: id('runId'), itemId: id('itemId', url.pathname === '/chat/command-output') }
+        sendJson(res, 200, url.pathname === '/chat/run-changes' ? chat.runChanges(query) : chat.commandOutput(query))
+      } catch (error) {
+        sendJson(res, error.httpStatus || 500, { code: typeof error.code === 'string' ? error.code : 'RUN_OUTPUT_ERROR', error: publicText(error.message, 2000) })
+      }
+      return true
+    }
     if (req.method !== 'POST' || !routes.has(url.pathname)) return false
     let body = {}
     try {

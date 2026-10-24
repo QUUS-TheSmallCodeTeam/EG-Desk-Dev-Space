@@ -631,3 +631,49 @@ test('bridge hashes its source once at start, backs off app-server reconnects an
   assert.equal(source.split('appServerBackoff.reset()').length, 2)
   at("'Access-Control-Allow-Headers': 'Content-Type, X-EGDesk-Overlay-Build',")
 })
+
+test('run changes and command output are read from bridge memory without an account call, with exact query checks', async () => {
+  let authCalls = 0
+  const chat = new CodexChatRuntime({
+    request: async (method) => {
+      if (method === 'thread/start') return { thread: { id: 'thread-1' }, cwd: '/work' }
+      if (method === 'turn/start') return { turn: { id: 'turn-1', status: 'inProgress', items: [] } }
+      throw new Error(`Unexpected method: ${method}`)
+    }, respond: () => {}, emit: () => {},
+  })
+  chat.setConnection(true)
+  const run = await chat.send({ message: 'Run tests' })
+  await chat.handleNotification({ method: 'item/commandExecution/outputDelta', params: { threadId: run.conversationId, turnId: run.runId, itemId: 'cmd-1', delta: 'ok 1\npassword=HTTP_SECRET\n' } })
+  await chat.handleNotification({ method: 'item/fileChange/patchUpdated', params: { threadId: run.conversationId, turnId: run.runId, itemId: 'edit-1', changes: [{ path: '/work/a.js', kind: { type: 'update' }, diff: '@@ -1 +1 @@\n-a\n+b\n' }] } })
+  const handler = createChatHttpHandler(chat, async () => { authCalls++ })
+  const get = async target => {
+    const req = request(''); req.method = 'GET'
+    const res = response()
+    assert.equal(await handler(req, res, new URL(`http://localhost${target}`)), true)
+    return res
+  }
+  const ids = `conversationId=${encodeURIComponent(run.conversationId)}&runId=${encodeURIComponent(run.runId)}`
+  const output = await get(`/chat/command-output?${ids}&itemId=cmd-1`)
+  assert.equal(output.status, 200)
+  assert.deepEqual([output.body.protocolVersion, output.body.itemId, output.body.head, output.body.tail, output.body.complete], [1, 'cmd-1', 'ok 1\npassword=[REDACTED]\n', '', false])
+  const changes = await get(`/chat/run-changes?${ids}`)
+  assert.equal(changes.status, 200)
+  assert.deepEqual(changes.body.items.map(item => [item.itemId, item.files[0].diff]), [['edit-1', '@@ -1 +1 @@\n-a\n+b\n']])
+  assert.deepEqual(changes.body.commands, [{ itemId: 'cmd-1', totalBytes: Buffer.byteLength('ok 1\npassword=HTTP_SECRET\n'), complete: false }])
+  assert.deepEqual((await get(`/chat/run-changes?${ids}&itemId=edit-1`)).body.items.length, 1)
+  for (const [target, status, code] of [
+    [`/chat/command-output?${ids}`, 400, 'INVALID_RUN_OUTPUT_QUERY'],
+    [`/chat/command-output?${ids}&itemId=`, 400, 'INVALID_RUN_OUTPUT_QUERY'],
+    [`/chat/run-changes?runId=${run.runId}`, 400, 'INVALID_RUN_OUTPUT_QUERY'],
+    [`/chat/run-changes?conversationId=${'x'.repeat(301)}&runId=r`, 400, 'INVALID_RUN_OUTPUT_QUERY'],
+    [`/chat/run-changes?conversationId=nope&runId=nope`, 404, 'RUN_NOT_FOUND'],
+    [`/chat/command-output?${ids}&itemId=cmd-9`, 404, 'COMMAND_OUTPUT_UNAVAILABLE'],
+  ]) {
+    const res = await get(target)
+    assert.deepEqual([res.status, res.body.code], [status, code], target)
+    assert.deepEqual(Object.keys(res.body), ['code', 'error'])
+  }
+  assert.equal(authCalls, 0)
+  const post = response()
+  assert.equal(await handler(request('{}', {}, '/chat/run-changes'), post, new URL('http://localhost/chat/run-changes')), false, 'only GET reads outputs')
+})

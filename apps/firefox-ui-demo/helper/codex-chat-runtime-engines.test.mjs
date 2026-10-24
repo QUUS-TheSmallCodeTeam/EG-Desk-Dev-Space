@@ -303,3 +303,18 @@ test('effort alone on a new conversation is checked against the launch-configure
     assert.equal(calls.find(call => call[1] === 'turn/start')[2].effort, 'max')
   })
 })
+
+test('a turn error names its own engine as origin, and a non-Codex child is never read through the Codex escape hatch', async () => {
+  const { chat, calls, runOf } = twoEngines()
+  const codexRun = await chat.send({ message: 'Codex work' })
+  const claudeRun = await chat.send({ message: 'Other engine work', engineId: 'claude' })
+  await chat.handleNotification({ method: 'error', params: { threadId: claudeRun.conversationId, turnId: claudeRun.runId, error: { message: 'engine hiccup' }, willRetry: true } })
+  assert.equal(runOf(claudeRun).error.origin, 'claude')
+  await chat.handleNotification({ method: 'turn/completed', params: { threadId: codexRun.conversationId, turn: { id: codexRun.runId, status: 'failed', items: [], error: { message: 'codex failed' } } } })
+  assert.equal(runOf(codexRun).error.origin, 'codex')
+  await chat.handleNotification({ method: 'item/completed', params: { threadId: claudeRun.conversationId, turnId: claudeRun.runId, item: {
+    id: 'spawn-1', type: 'collabAgentToolCall', tool: 'spawnAgent', status: 'completed', receiverThreadIds: ['claude-child'], agentsStates: {} } } })
+  for (let i = 0; i < 4; i++) await new Promise(resolve => setImmediate(resolve))
+  assert.deepEqual(runOf(claudeRun).subAgents.map(row => row.threadId), ['claude-child'])
+  assert.equal(calls.some(call => call[1] === 'thread/read'), false)
+})

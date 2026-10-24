@@ -2399,7 +2399,7 @@ test('sub-Agent collaboration becomes bounded per-child rows without prompt text
   assert.equal(h.chat.snapshot().runs[0].activities[0].status, 'inProgress')
   await h.item(run, spawnItem({ prompt }))
   let child = row(h, 'child-1')
-  assert.deepEqual(Object.keys(child).sort(), ['blocked', 'label', 'lastTool', 'message', 'model', 'parentEnded', 'state', 'taskPreview', 'threadId', 'updatedAt'])
+  assert.deepEqual(Object.keys(child).sort(), ['blocked', 'label', 'lastTool', 'message', 'model', 'nativeStatus', 'nickname', 'parentEnded', 'recent', 'role', 'state', 'taskPreview', 'threadId', 'updatedAt', 'waitingOn'])
   assert.deepEqual([child.state, child.label, child.model, child.lastTool, child.blocked, child.parentEnded], ['starting', null, 'gpt-child', 'spawnAgent', null, false])
   assert.ok(child.taskPreview.startsWith('PROMPT_START [REDACTED]'))
   assert.ok(child.taskPreview.length <= 160)
