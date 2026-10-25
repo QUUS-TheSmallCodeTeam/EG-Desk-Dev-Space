@@ -1,7 +1,8 @@
 import test from 'node:test'
 import assert from 'node:assert/strict'
 import { createHash } from 'node:crypto'
-import { rm } from 'node:fs/promises'
+import { rm, writeFile, unlink } from 'node:fs/promises'
+import path from 'node:path'
 import { Readable } from 'node:stream'
 import { CodexChatRuntime } from './codex-chat-runtime.mjs'
 import { createCodexEngineAdapter } from './codex-engine-adapter.mjs'
@@ -9,6 +10,8 @@ import { createClaudeEngineAdapter } from './claude-engine-adapter.mjs'
 import { createChatEngineAuth } from './codex-bridge-engine-auth.mjs'
 import { createChatHttpHandler } from './codex-bridge-http.mjs'
 import { ContextRuntime } from './egdesk-context-runtime.mjs'
+import { ImmutableContextStore } from './egdesk-context-store.mjs'
+import { createContextHttpHandler } from './egdesk-context-http.mjs'
 import { createPlanToolProvider } from './egdesk-plan-tool-provider.mjs'
 import { openChatStore } from './egdesk-chat-store.mjs'
 import { createPrivateQaTempDirectory } from '../scripts/egdesk-qa-platform.mjs'
@@ -29,6 +32,23 @@ function withStore(t) {
   const store = openChatStore({ dataDir, ownerScope: 'local-desktop-test' })
   t.after(async () => { store.close(); await rm(dataDir, { recursive: true, force: true }) })
   return store
+}
+
+function reopenableStore(t) {
+  const dataDir = createPrivateQaTempDirectory('egdesk-runtime-reopen-')
+  const stores = []
+  const open = () => { const store = openChatStore({ dataDir, ownerScope: 'local-desktop-test' }); stores.push(store); return store }
+  t.after(async () => { for (const store of stores) store.close(); await rm(dataDir, { recursive: true, force: true }) })
+  return { store: open(), reopen: () => { for (const store of stores) store.close(); return open() } }
+}
+
+function trackClaudeStarts(h) {
+  const calls = []
+  for (const method of ['startThread', 'startTurn']) {
+    const original = h.claude[method]
+    h.claude[method] = async (...args) => { calls.push(method); return original(...args) }
+  }
+  return calls
 }
 
 function harness(t, { store = null, env = {}, defaultCwd = CWD, toolProviders = [], contexts = null, residentLimit = 2,
@@ -92,18 +112,437 @@ const permission = (tool_name = 'Bash', input = { command: 'ls' }, extra = {}) =
 })
 const mcp = (method, params = {}) => ({ subtype: 'mcp_message', server_name: 'egdesk', message: { jsonrpc: '2.0', id: 1, method, params } })
 
-function http(h) {
+function http(h, { codexLoggedIn = false } = {}) {
   let refreshes = 0
-  const auth = createChatEngineAuth({ chat: h.chat, refreshCodexAccount: async () => { refreshes++ }, getCodexAuth: () => ({ isLoggedIn: false }) })
+  const auth = createChatEngineAuth({ chat: h.chat, refreshCodexAccount: async () => { refreshes++ }, getCodexAuth: () => ({ isLoggedIn: codexLoggedIn }) })
   const handler = createChatHttpHandler(h.chat, auth)
-  return { refreshes: () => refreshes, async post(path, body) {
+  const contextHandler = h.chat.contexts ? createContextHttpHandler(h.chat.contexts, auth) : null
+  const call = async (method, path, body = {}) => {
     const req = Readable.from([Buffer.from(JSON.stringify(body))])
-    Object.assign(req, { method: 'POST', url: path, headers: { 'content-type': 'application/json' } })
+    Object.assign(req, { method, url: path, headers: { host: '127.0.0.1:39218', 'content-type': 'application/json' }, socket: { remoteAddress: '127.0.0.1' } })
     const res = { writeHead(status) { this.status = status }, end(value) { this.body = JSON.parse(value) } }
-    await handler(req, res, new URL(`http://localhost${path}`))
+    const url = new URL(`http://localhost${path}`)
+    if (!contextHandler || !await contextHandler(req, res, url)) await handler(req, res, url)
     return res
-  } }
+  }
+  return { refreshes: () => refreshes, call, post: (path, body) => call('POST', path, body), get: path => call('GET', path) }
 }
+
+function scopedContextHarness(t, { store = withStore(t), contextDir, ...options } = {}) {
+  if (!contextDir) {
+    contextDir = createPrivateQaTempDirectory('egdesk-claude-b2-')
+    t.after(() => rm(contextDir, { recursive: true, force: true }))
+  }
+  const contextStore = new ImmutableContextStore({ dataDir: contextDir, allowedRoots: [contextDir] })
+  let h
+  const readerCalls = []
+  const contexts = new ContextRuntime({ store: contextStore,
+    reader: { read: async input => { readerCalls.push(input); throw new Error('Codex Reader must never serve Claude') }, disconnect() {} },
+    getOwnerKey: options.getOwnerKey || (() => null), getAuthority: hints => h.chat.contextAuthority(hints), schemaReady: () => true,
+  })
+  h = harness(t, { ...options, store, contexts })
+  return { ...h, store, contexts, contextStore, contextDir, readerCalls }
+}
+
+const contextRoute = { engineId: 'claude', engineProfileId: 'claude-default', clientThreadId: 'ui-claude' }
+const contextQuery = route => new URLSearchParams(route).toString()
+async function contextIntent(api, route = contextRoute) {
+  const result = await api.get(`/context/capabilities?${contextQuery(route)}`)
+  assert.equal(result.status, 200, JSON.stringify(result.body))
+  assert.match(result.body.expectedContextScope, /^[a-f0-9]{64}$/)
+  return { ...route, expectedContextScope: result.body.expectedContextScope }
+}
+const browserCapture = (text = 'SITE_CAPTURE_MARKER\n') => ({ kind: 'browser', label: 'Explicit site selection',
+  sourceRef: { resourceId: 'site-card', viewId: 'site-view', url: 'https://site.example/document', browserProfileId: 'site-profile', siteAccount: 'site-user@different.example' },
+  captureScope: { type: 'selection' }, content: { text, truncated: false },
+})
+async function readCaptured(h, run, sourceId, { requestId = 'source-read', range, intent = 'Read exactly the selected immutable source' } = {}) {
+  const transport = h.transports.at(-1)
+  transport.control(requestId, mcp('tools/call', { name: 'egdesk_read_source', arguments: { snapshotId: sourceId, intent, ...(range ? { range } : {}) } }))
+  await h.drain()
+  await Promise.all([...h.contexts.calls.values()])
+  await h.drain()
+  return transport.replies.find(reply => reply.id === requestId)?.write.response.response.mcp_response.result
+}
+async function selectedTurn(t, options = {}) {
+  const h = scopedContextHarness(t, options)
+  const api = http(h), intent = await contextIntent(api)
+  const captured = await api.post('/context/captures', { ...intent, attachments: [browserCapture()] })
+  assert.equal(captured.status, 201, JSON.stringify(captured.body))
+  const capture = captured.body.captures[0]
+  const sent = await api.post('/chat/send', { ...intent, requestId: 'selected', message: 'Read selected source', contextSnapshotIds: [capture.sourceId] })
+  assert.equal(sent.body.accepted, true, JSON.stringify(sent.body))
+  return { ...h, api, intent, capture, run: sent.body, owner: h.contexts.owner(h.chat.contextAuthority(contextRoute)) }
+}
+
+test('B2 unbound client stale capabilities cannot stamp an A-account browser intent as B before SSE arrives', async t => {
+  const h = scopedContextHarness(t), api = http(h)
+  const intentA = await contextIntent(api)
+  // Browser capture is asynchronous. The UI still holds A's routing/token;
+  // no simulated SSE update or refreshed capability is delivered to it.
+  await tick()
+  h.setAccount('account-b@example.com')
+  const authorityB = h.chat.contextAuthority(contextRoute)
+  const pending = { ...intentA, attachments: [browserCapture('ACCOUNT_A_SELECTION')] }
+  const capture = await api.post('/context/captures', pending)
+  assert.deepEqual([capture.status, capture.body.code], [409, 'CONTEXT_SCOPE_CHANGED'])
+  await assert.rejects(h.contexts.prepare(pending, authorityB), { code: 'CONTEXT_SCOPE_CHANGED' })
+  const send = await api.post('/chat/send', { ...pending, message: 'Do not silently change my account', requestId: 'stale-intent' })
+  assert.deepEqual([send.status, send.body.accepted, send.body.code], [409, false, 'CONTEXT_SCOPE_CHANGED'])
+  assert.deepEqual(await h.contextStore.listRecords(h.contexts.owner(authorityB), 'sources'), [])
+  assert.equal(h.transports.length, 0)
+  assert.deepEqual([...h.codexCalls, ...h.readerCalls], [])
+  // Only an explicit new intent can capture under the now-current account.
+  const intentB = await contextIntent(api)
+  assert.notEqual(intentB.expectedContextScope, intentA.expectedContextScope)
+  const retry = await api.post('/context/captures', { ...intentB, attachments: [browserCapture('EXPLICIT_B_SELECTION')] })
+  assert.equal(retry.status, 201)
+  assert.equal(h.transports.length, 0, 'capturing never auto-sends a model turn')
+})
+
+test('B2 actual Claude MCP cannot read an unselected source from this or another conversation', async t => {
+  const h = await selectedTurn(t)
+  for (const clientThreadId of ['ui-claude', 'other-conversation']) {
+    const intent = await contextIntent(h.api, { ...contextRoute, clientThreadId })
+    const captured = await h.api.post('/context/captures', { ...intent, attachments: [browserCapture(`PRIVATE_${clientThreadId}`)] })
+    assert.equal(captured.status, 201)
+    const response = await readCaptured(h, h.run, captured.body.captures[0].sourceId, { requestId: `unselected-${clientThreadId}` })
+    assert.equal(response.isError, true)
+    assert.equal(JSON.parse(response.content[0].text).error.code, 'CONTEXT_FORBIDDEN')
+    assert.equal(JSON.stringify(response).includes(`PRIVATE_${clientThreadId}`), false)
+  }
+  assert.deepEqual(await h.contextStore.listRecords(h.owner, 'deliveries'), [])
+})
+
+test('B2 bridge-scoped Context retains Codex legacy capture, read and native-only inspection without a Claude scope token', async t => {
+  const h = scopedContextHarness(t, { getOwnerKey: () => 'email:codex-owner@example.com' })
+  h.chat.setConnection(true)
+  const api = http(h, { codexLoggedIn: true })
+  const route = { clientThreadId: 'ui-codex' }
+  const captured = await api.post('/context/captures', { ...route, attachments: [browserCapture('CODEX_CAPTURE_BYTES\n')] })
+  assert.equal(captured.status, 201, JSON.stringify(captured.body))
+  const sourceId = captured.body.captures[0].sourceId
+  const sent = await api.post('/chat/send', { ...route, message: 'Read selected source', requestId: 'codex-context', contextSnapshotIds: [sourceId], contextCapabilities: { read: true, reader: false } })
+  assert.equal(sent.body.accepted, true, JSON.stringify(sent.body))
+  await h.chat.handleServerRequest({ id: 123, method: 'item/tool/call', params: { threadId: sent.body.conversationId, turnId: sent.body.runId, callId: 'codex-read', tool: 'egdesk_read_source', arguments: { snapshotId: sourceId, intent: 'Read the captured source' } } })
+  await h.drain()
+  await Promise.all([...h.contexts.calls.values()])
+  const response = h.codexReplies.find(reply => reply[0] === 123)?.[1]
+  assert.equal(response?.success, true, JSON.stringify(response))
+  assert.equal(JSON.parse(response.contentItems[0].text).content.text, 'CODEX_CAPTURE_BYTES\n')
+  const inspected = await api.get(`/context/captures/${sourceId}?${contextQuery({ conversationId: sent.body.conversationId })}`)
+  assert.equal(inspected.status, 200, JSON.stringify(inspected.body))
+  assert.equal(inspected.body.source.text, 'CODEX_CAPTURE_BYTES\n')
+  assert.equal(h.transports.length, 0)
+  assert.deepEqual(h.readerCalls, [])
+})
+
+test('B2 late own-engine results and failed Claude responses never acquire delivery receipts; Codex reset does not cancel Claude', async t => {
+  for (const mode of ['own-epoch', 'owner-change', 'codex-reset', 'respond-false']) await t.test(mode, async t => {
+    const h = await selectedTurn(t, { respondResult: mode !== 'respond-false' })
+    let entered, release
+    const began = new Promise(resolve => { entered = resolve })
+    const blocked = new Promise(resolve => { release = resolve })
+    const originalRead = h.contextStore.readProjection.bind(h.contextStore)
+    h.contextStore.readProjection = async (...args) => { entered(); await blocked; return originalRead(...args) }
+    const pending = readCaptured(h, h.run, h.capture.sourceId)
+    await began
+    if (mode === 'own-epoch') h.chat.reset('claude')
+    if (mode === 'owner-change') h.setAccount('late-account@example.com')
+    if (mode === 'codex-reset') { h.chat.setConnection(false); h.chat.reset('codex') }
+    release()
+    const response = await pending
+    const receipts = await h.contextStore.listRecords(h.owner, 'deliveries')
+    if (mode === 'codex-reset') {
+      assert.equal(JSON.parse(response.content[0].text).content.text, 'SITE_CAPTURE_MARKER\n')
+      assert.equal(receipts.length, 1)
+    } else {
+      assert.equal(receipts.length, 0)
+      assert.equal(h.events.some(event => event.event === 'context.read.completed'), false)
+      if (mode !== 'respond-false') assert.equal(response, undefined)
+      else assert.ok(h.events.some(event => event.event === 'context.read.failed' && event.details.code === 'CONTEXT_DELIVERY_FAILED'))
+    }
+    assert.deepEqual([...h.codexCalls, ...h.readerCalls], [])
+  })
+})
+
+test('B2 resume refuses missing original source, blob, binding or Context manifest without another thread', async t => {
+  for (const missing of ['source', 'blob', 'binding', 'manifest']) await t.test(missing, async t => {
+    const h = await selectedTurn(t)
+    await h.complete(h.transports[0])
+    let file
+    if (missing === 'source') file = path.join(await h.contextStore.directory(h.owner, 'sources'), `${h.capture.sourceId}.json`)
+    if (missing === 'blob') file = path.join(await h.contextStore.directory(h.owner, 'blobs'), h.capture.hash)
+    if (missing === 'binding') {
+      const [binding] = await h.contextStore.listRecords(h.owner, 'bindings')
+      file = path.join(await h.contextStore.directory(h.owner, 'bindings'), `${binding.id}.json`)
+    }
+    if (missing === 'manifest') {
+      const [marker] = await h.contextStore.listRecords(h.owner, 'threads')
+      file = path.join(await h.contextStore.directory(h.owner, 'threads'), `${marker.id}.json`)
+    }
+    // Explicit private test fixture only: emulate durable data loss, never a
+    // production source deletion or recapture from the live page/file.
+    await unlink(file)
+    const restarted = scopedContextHarness(t, { store: h.store, contextDir: h.contextDir })
+    const result = await http(restarted).post('/chat/resume', { ...contextRoute, conversationId: h.run.conversationId })
+    assert.notEqual(result.status, 200, JSON.stringify(result.body))
+    assert.equal(restarted.transports.length, 0)
+    assert.equal(h.store.getConversation('ui-claude').conversationId, h.run.conversationId)
+    assert.deepEqual([...restarted.codexCalls, ...restarted.readerCalls], [])
+  })
+})
+
+test('B2 incomplete and over-budget captures refuse the whole selected set before dispatch, with no NativeReader fallback', async t => {
+  for (const mode of ['truncated', 'too-large', 'aggregate']) await t.test(mode, async t => {
+    const h = scopedContextHarness(t), api = http(h), intent = await contextIntent(api)
+    const attachments = mode === 'aggregate' ? Array.from({ length: 12 }, (_, i) => browserCapture(`${i}\n${'complete selected text '.repeat(40)}`))
+      : [browserCapture(mode === 'too-large' ? 'selected text '.repeat(5000) : 'partial source')]
+    if (mode === 'truncated') attachments[0].content.truncated = true
+    const captured = await api.post('/context/captures', { ...intent, attachments })
+    if (mode === 'truncated') assert.deepEqual([captured.status, captured.body.code], [409, 'CONTEXT_CAPTURE_INCOMPLETE'])
+    else assert.equal(captured.status, 201, JSON.stringify(captured.body))
+    const selection = { ...intent, message: 'Read all selected materials', requestId: 'unavailable',
+      ...(mode === 'truncated' ? { attachments } : { contextSnapshotIds: captured.body.captures.map(capture => capture.sourceId) }) }
+    await assert.rejects(h.contexts.prepare(selection, h.chat.contextAuthority(contextRoute)), { code: mode === 'truncated' ? 'CONTEXT_CAPTURE_INCOMPLETE' : 'CLAUDE_CONTEXT_READER_UNSUPPORTED' })
+    const sent = await api.post('/chat/send', selection)
+    assert.equal(sent.body.accepted, false)
+    assert.equal(sent.body.code, mode === 'truncated' ? 'CONTEXT_CAPTURE_INCOMPLETE' : 'CLAUDE_CONTEXT_READER_UNSUPPORTED')
+    assert.equal(h.transports.length, 0)
+    assert.deepEqual([...h.codexCalls, ...h.readerCalls], [])
+    const owner = h.contexts.owner(h.chat.contextAuthority(contextRoute))
+    assert.deepEqual(await h.contextStore.listRecords(owner, 'bindings'), [])
+    assert.deepEqual(await h.contextStore.listRecords(owner, 'deliveries'), [])
+  })
+})
+
+test('B2 definitive prestart refusals survive reopening both real stores and replay without any native start', async t => {
+  for (const [mode, code, status] of [
+    ['too-large', 'CLAUDE_CONTEXT_READER_UNSUPPORTED', 409],
+    ['binary', 'UNSUPPORTED_SOURCE_FORMAT', 422],
+    ['truncated', 'CONTEXT_CAPTURE_INCOMPLETE', 409],
+    ['stale-scope', 'CONTEXT_SCOPE_CHANGED', 409],
+    ['wrong-thread', 'CONTEXT_THREAD_MISMATCH', 403],
+  ]) await t.test(mode, async t => {
+    const durable = reopenableStore(t)
+    const h = scopedContextHarness(t, { store: durable.store }), api = http(h), intent = await contextIntent(api)
+    const starts = trackClaudeStarts(h)
+    let attachments = [browserCapture(mode === 'too-large' ? 'selected text '.repeat(5000) : 'Complete selected bytes')]
+    if (mode === 'binary') {
+      const file = path.join(h.contextDir, 'selected.bin')
+      await writeFile(file, Buffer.from([0, 255, 0, 1]))
+      attachments = [{ kind: 'file', label: 'Selected binary', sourceRef: { path: file }, captureScope: { type: 'file' } }]
+    }
+    let selection
+    if (mode === 'truncated') {
+      attachments[0].content.truncated = true
+      selection = { attachments }
+    } else {
+      const captureIntent = mode === 'wrong-thread' ? await contextIntent(api, { ...contextRoute, clientThreadId: 'other-chat' }) : intent
+      const captured = await api.post('/context/captures', { ...captureIntent, attachments })
+      assert.equal(captured.status, 201, JSON.stringify(captured.body))
+      if (mode === 'binary') {
+        assert.equal(captured.body.captures[0].hash, sha256(Buffer.from([0, 255, 0, 1])))
+        assert.equal(captured.body.captures[0].shape.readable, false)
+      }
+      selection = { contextSnapshotIds: captured.body.captures.map(capture => capture.sourceId) }
+    }
+    if (mode === 'stale-scope') h.chat.reset('claude')
+    const body = { ...intent, ...selection, message: 'Keep this draft if the complete selection cannot be sent', requestId: `rejected-${mode}` }
+    const refused = await api.post('/chat/send', body)
+    assert.deepEqual([refused.status, refused.body.accepted, refused.body.code, refused.body.dispatchStatus, refused.body.resumeRequired], [status, false, code, 'rejected', false])
+    const record = h.store.getRequest({ clientThreadId: contextRoute.clientThreadId, requestId: body.requestId })
+    assert.equal(record.status, 'settled')
+    assert.deepEqual([record.outcome?.accepted, record.outcome?.dispatchStatus, record.outcome?.code, record.outcome?.error.code], [false, 'rejected', code, code])
+    assert.equal(h.store.getConversation(contextRoute.clientThreadId).conversationId, null)
+    assert.deepEqual(starts, [])
+    assert.equal(h.transports.length, 0)
+
+    const restarted = scopedContextHarness(t, { store: durable.reopen(), contextDir: h.contextDir })
+    const restartStarts = trackClaudeStarts(restarted)
+    // Deliberately replay the original request/token. This is an outcome
+    // audit, not a fresh capture or an automatic retry against a new scope.
+    const replay = await http(restarted).post('/chat/send', body)
+    assert.deepEqual([replay.status, replay.body.duplicate, replay.body.accepted, replay.body.dispatchStatus, replay.body.code, replay.body.error?.code], [202, true, false, 'rejected', code, code])
+    assert.equal(replay.body.conversationId, null)
+    assert.deepEqual(restarted.store.getRequest({ clientThreadId: contextRoute.clientThreadId, requestId: body.requestId }).outcome, record.outcome)
+    assert.deepEqual(restartStarts, [])
+    assert.equal(restarted.transports.length, 0)
+    assert.deepEqual([...h.codexCalls, ...h.readerCalls, ...restarted.codexCalls, ...restarted.readerCalls], [])
+  })
+})
+
+test('B2-like errors after an attempted Claude dispatch remain unknown across real-store reopen', async t => {
+  const durable = reopenableStore(t)
+  const h = scopedContextHarness(t, { store: durable.store }), api = http(h), intent = await contextIntent(api)
+  const captured = await api.post('/context/captures', { ...intent, attachments: [browserCapture()] })
+  assert.equal(captured.status, 201)
+  const start = h.claude.startTurn
+  h.claude.startTurn = async params => {
+    await start(params)
+    // Inject a lost reply only AFTER the actual adapter accepted the fake
+    // transport write. A familiar Context code cannot prove non-dispatch.
+    throw Object.assign(new Error('Fake lost native reply'), { code: 'CLAUDE_CONTEXT_READER_UNSUPPORTED', httpStatus: 409 })
+  }
+  const body = { ...intent, contextSnapshotIds: [captured.body.captures[0].sourceId], message: 'Already attempted', requestId: 'ambiguous-context-code' }
+  const result = await api.post('/chat/send', body)
+  assert.deepEqual([result.body.accepted, result.body.dispatchStatus, result.body.resumeRequired], [false, 'unknown', true])
+  assert.equal(h.transports[0].sent.length, 1)
+  const record = h.store.getRequest({ clientThreadId: contextRoute.clientThreadId, requestId: body.requestId })
+  assert.equal(record.outcome.dispatchStatus, 'unknown')
+  await h.claude.dispose()
+  await h.drain()
+  const restarted = scopedContextHarness(t, { store: durable.reopen(), contextDir: h.contextDir })
+  const replay = await http(restarted).post('/chat/send', body)
+  assert.deepEqual([replay.status, replay.body.duplicate, replay.body.dispatchStatus], [202, true, 'unknown'])
+  assert.equal(restarted.transports.length, 0)
+})
+
+test('B2 actual capture HTTP/store/runtime/Claude MCP delivers immutable bytes and exact range receipts after live change and restart', async t => {
+  const h = scopedContextHarness(t)
+  const api = http(h)
+  const capabilities = await api.get(`/context/capabilities?${contextQuery(contextRoute)}`)
+  assert.equal(capabilities.status, 200)
+  assert.equal(capabilities.body.contract, 'egdesk-context-b2')
+  assert.deepEqual(capabilities.body.tools, ['egdesk_list_context', 'egdesk_read_source'])
+  const intent = { ...contextRoute, expectedContextScope: capabilities.body.expectedContextScope }
+  const original = 'heading\nORIGINAL_CAPTURE_MARKER_7041\ntail\n'
+  const file = path.join(h.contextDir, 'selected.txt')
+  await writeFile(file, original)
+  const captured = await api.post('/context/captures', { ...intent, attachments: [
+    { kind: 'file', label: 'Selected file', sourceRef: { path: file }, captureScope: { type: 'file' } },
+    browserCapture('DIFFERENT_SITE_ACCOUNT_MARKER\n'),
+  ] })
+  assert.equal(captured.status, 201, JSON.stringify(captured.body))
+  const [capture, siteCapture] = captured.body.captures
+  assert.equal(capture.hash, sha256(original))
+  assert.equal(siteCapture.sourceRef.browserProfileId, 'site-profile')
+  assert.equal(siteCapture.sourceRef.siteAccount, 'site-user@different.example')
+  assert.equal(siteCapture.sourceRef.url, 'https://site.example/document')
+  assert.equal(h.events.some(event => event.event === 'context.read.completed'), false, 'captured is not delivered/read')
+  const scope = h.chat.contextAuthority(contextRoute)
+  const savedSite = await h.contextStore.getCapture(h.contexts.owner(scope), siteCapture.sourceId)
+  assert.equal(savedSite.sourceRef.browserProfileId, 'site-profile')
+  assert.equal(savedSite.sourceRef.siteAccount, 'site-user@different.example')
+  assert.deepEqual(await h.contextStore.listRecords(h.contexts.owner(scope), 'deliveries'), [])
+  await writeFile(file, 'LIVE_REPLACEMENT_MARKER\n')
+  const body = { ...intent, message: 'Read the selected immutable material', requestId: 'b2-first', contextSnapshotIds: [capture.sourceId, siteCapture.sourceId],
+    contextCapabilities: { read: true, reader: false, publishBriefing: false } }
+  const sent = await api.post('/chat/send', body)
+  assert.equal(sent.status, 202, JSON.stringify(sent.body))
+  assert.equal(sent.body.accepted, true)
+  const run = sent.body
+  const response = await readCaptured(h, run, capture.sourceId, { range: { startLine: 2, endLine: 2 } })
+  assert.notEqual(response.isError, true)
+  const returned = response.content[0].text
+  const packet = JSON.parse(returned)
+  assert.equal(packet.content.text, original.slice(packet.content.ranges[0].startOffset, packet.content.ranges[0].endOffset))
+  assert.match(packet.content.text, /ORIGINAL_CAPTURE_MARKER_7041/)
+  assert.equal(packet.content.text.includes('LIVE_REPLACEMENT_MARKER'), false)
+  assert.equal(packet.sourceHash, capture.hash)
+  assert.equal(packet.coverage.scope, 'line-range')
+  assert.deepEqual(packet.coverage.reviewedRanges, packet.content.ranges)
+  const receipts = await h.contextStore.listRecords(h.contexts.owner(scope), 'deliveries')
+  assert.equal(receipts.length, 1)
+  assert.equal(receipts[0].deliveryHash, sha256(returned))
+  assert.equal(receipts[0].binding.runId, run.runId)
+  const site = await readCaptured(h, run, siteCapture.sourceId, { requestId: 'site-read' })
+  assert.equal(JSON.parse(site.content[0].text).content.text, 'DIFFERENT_SITE_ACCOUNT_MARKER\n', 'site account need not match Claude subscription account')
+  await h.complete(h.transports[0])
+  const restarted = scopedContextHarness(t, { store: h.store, contextDir: h.contextDir })
+  const nextApi = http(restarted)
+  const bound = { ...contextRoute, conversationId: run.conversationId }
+  const resumed = await nextApi.post('/chat/resume', bound)
+  assert.equal(resumed.status, 200, JSON.stringify(resumed.body))
+  assert.equal(restarted.transports.length, 0)
+  const siteAfterRestart = await nextApi.get(`/context/captures/${siteCapture.sourceId}?${contextQuery(bound)}`)
+  assert.equal(siteAfterRestart.status, 200)
+  assert.equal(siteAfterRestart.body.capture.sourceRef.browserProfileId, 'site-profile')
+  assert.equal(siteAfterRestart.body.capture.sourceRef.siteAccount, 'site-user@different.example')
+  const next = await nextApi.post('/chat/send', { ...body, ...await contextIntent(nextApi, bound), requestId: 'b2-next' })
+  assert.equal(next.body.accepted, true, JSON.stringify(next.body))
+  const readAgain = await readCaptured(restarted, next.body, capture.sourceId)
+  assert.equal(JSON.parse(readAgain.content[0].text).content.text, original)
+  assert.equal(restarted.transports[0].options.resume, run.conversationId)
+  assert.equal(restarted.transports[0].options.cwd, CWD)
+  assert.deepEqual([...h.codexCalls, ...restarted.codexCalls, ...h.readerCalls, ...restarted.readerCalls], [])
+  assert.equal(api.refreshes() + nextApi.refreshes(), 0)
+  assert.equal(h.chat.connection, 'offline')
+})
+
+test('B2 actual Context HTTP rejects forged authority and cross-thread/engine sources before any Claude dispatch', async t => {
+  const h = scopedContextHarness(t, { getOwnerKey: () => OWNER })
+  h.chat.setConnection(true)
+  const api = http(h, { codexLoggedIn: true })
+  for (const forged of [{ ownerKey: OWNER }, { epoch: 0 }, { authority: { ...contextRoute, ownerKey: OWNER, epoch: 0 } }]) {
+    const rejected = await api.post('/context/captures', { ...contextRoute, attachments: [browserCapture()], ...forged })
+    assert.equal(rejected.status, 400)
+    assert.equal(rejected.body.code, 'INVALID_CONTEXT_ROUTE')
+  }
+  const captured = await api.post('/context/captures', { ...await contextIntent(api), attachments: [browserCapture()] })
+  assert.equal(captured.status, 201, JSON.stringify(captured.body))
+  const sourceId = captured.body.captures[0].sourceId
+  const codex = await api.get(`/context/captures/${sourceId}?${contextQuery({ engineId: 'codex', engineProfileId: 'codex-default', clientThreadId: 'ui-claude' })}`)
+  assert.notEqual(codex.status, 200, 'identical raw ownerKey still cannot cross engines')
+  const crossThread = await api.post('/chat/send', { ...await contextIntent(api, { ...contextRoute, clientThreadId: 'ui-other' }), message: 'Not selected for this conversation', requestId: 'cross-thread', contextSnapshotIds: [sourceId], contextCapabilities: { read: true } })
+  assert.equal(crossThread.body.accepted, false)
+  assert.equal(h.transports.length, 0)
+  assert.deepEqual(h.codexCalls, [])
+  h.setAccount('different-account@example.com')
+  const wrongAccount = await api.get(`/context/captures/${sourceId}?${contextQuery(contextRoute)}`)
+  assert.notEqual(wrongAccount.status, 200)
+})
+
+test('B2 existing stored conversation owner is checked before capability, capture and inspect even with the same profile id', async t => {
+  const h = scopedContextHarness(t)
+  const api = http(h)
+  const first = await h.send()
+  await h.complete(h.transports[0])
+  const bound = { ...contextRoute, conversationId: first.conversationId }
+  assert.equal(h.chat.contextAuthority({ conversationId: first.conversationId }).clientThreadId, 'ui-claude', 'native-only inspector routing resolves its verified local binding')
+  const wrongEngine = await api.get(`/context/capabilities?${contextQuery({ ...bound, engineId: 'codex' })}`)
+  assert.deepEqual([wrongEngine.status, wrongEngine.body.code], [409, 'ENGINE_MISMATCH'])
+  const wrongProfile = await api.get(`/context/capabilities?${contextQuery({ ...bound, engineProfileId: 'another-profile' })}`)
+  assert.deepEqual([wrongProfile.status, wrongProfile.body.code], [403, 'ENGINE_PROFILE_MISMATCH'])
+  const capture = await api.post('/context/captures', { ...await contextIntent(api, bound), attachments: [browserCapture()] })
+  assert.equal(capture.status, 201)
+  const sourceId = capture.body.captures[0].sourceId
+  h.setAccount('changed-owner@example.com')
+  assert.throws(() => h.chat.contextAuthority(bound), { code: 'NATIVE_ACCOUNT_MISMATCH' })
+  for (const action of [
+    () => api.get(`/context/capabilities?${contextQuery(bound)}`),
+    () => api.post('/context/captures', { ...bound, attachments: [browserCapture()] }),
+    () => api.get(`/context/captures/${sourceId}?${contextQuery(bound)}`),
+  ]) {
+    const result = await action()
+    assert.deepEqual([result.status, result.body.code], [403, 'NATIVE_ACCOUNT_MISMATCH'])
+  }
+  const unsent = await api.post('/context/captures', { ...await contextIntent(api, { ...contextRoute, clientThreadId: 'new-unsent' }), attachments: [browserCapture()] })
+  assert.equal(unsent.status, 201, 'new unsent chat uses the current Claude account')
+  assert.equal(api.refreshes(), 0)
+})
+
+test('B2 unsupported Reader and original empty manifest refuse attachments without fallback or another native turn', async t => {
+  const store = withStore(t)
+  const old = harness(t, { store })
+  const first = await old.send()
+  await old.complete(old.transports[0])
+  const h = scopedContextHarness(t, { store })
+  const api = http(h)
+  const intent = await contextIntent(api)
+  const captured = await api.post('/context/captures', { ...intent, attachments: [browserCapture()] })
+  assert.equal(captured.status, 201)
+  const ids = captured.body.captures.map(capture => capture.sourceId)
+  const selection = { ...intent, conversationId: first.conversationId, message: 'Read selected source', contextSnapshotIds: ids, contextCapabilities: { read: true } }
+  const reader = await api.post('/chat/send', { ...selection, requestId: 'reader', contextCapabilities: { read: true, reader: true } })
+  assert.deepEqual([reader.status, reader.body.accepted, reader.body.code], [409, false, 'CLAUDE_CONTEXT_READER_UNSUPPORTED'])
+  const unavailable = await api.post('/chat/send', { ...selection, requestId: 'empty-manifest' })
+  assert.equal(unavailable.body.accepted, false)
+  assert.equal(unavailable.body.code, 'CONTEXT_TOOLS_UNAVAILABLE')
+  assert.equal(h.transports.length, 0)
+  assert.deepEqual([...h.codexCalls, ...h.readerCalls], [])
+  assert.deepEqual(h.chat.threadToolManifests.get(first.conversationId), [], 'original empty catalog is not widened')
+})
 
 test('actual bridge auth sends and resumes stored Claude with Codex logged out, including restart and lost-reply audit', async t => {
   const store = withStore(t)

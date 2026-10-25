@@ -18,6 +18,9 @@ const uuid = value => typeof value === 'string' && /^[\da-f-]{36}$/i.test(value)
 const fail = (code, message, status = 400) => { throw chatError(code, message, status) }
 const small = (value, max = 512) => typeof value === 'string' && value.length <= max ? value : null
 const copy = value => JSON.parse(JSON.stringify(value))
+// This is provenance only, never an authority object. Do not persist or expose
+// subscription ownerKey or process-local epoch, even from an internal caller.
+const engineProvenance = engine => ({ engineId: engine.engineId, ...(small(engine.engineProfileId) ? { engineProfileId: engine.engineProfileId } : {}) })
 const RECORD_KINDS = ['sources', 'blobs', 'bindings', 'packets', 'briefings', 'readers', 'scratch', 'deliveries', 'threads', 'outputs', 'briefing-comments']
 // Everything else is write-once. A briefing comment keeps its text and anchor;
 // only its resolved state may change (CHAT-05).
@@ -69,7 +72,7 @@ export class ImmutableContextStore {
   }
 
   ownerScope(ownerKey) {
-    if (typeof ownerKey !== 'string' || !ownerKey) fail('IDENTITY_REQUIRED', 'A known Codex account identity is required', 403)
+    if (typeof ownerKey !== 'string' || !ownerKey) fail('IDENTITY_REQUIRED', 'A known engine account identity is required', 403)
     return hashContent(ownerKey)
   }
 
@@ -90,7 +93,9 @@ export class ImmutableContextStore {
 
   async readBlob(ownerKey, hash) {
     if (!/^[\da-f]{64}$/.test(hash)) fail('SNAPSHOT_CORRUPT', 'Invalid capture hash', 409)
-    const bytes = await readFile(path.join(await this.directory(ownerKey, 'blobs'), hash))
+    let bytes
+    try { bytes = await readFile(path.join(await this.directory(ownerKey, 'blobs'), hash)) }
+    catch (error) { if (error.code === 'ENOENT') fail('CONTEXT_NOT_FOUND', 'The immutable snapshot is missing; attach the source again explicitly', 404); throw error }
     if (hashContent(bytes) !== hash) fail('SNAPSHOT_CORRUPT', 'Stored capture integrity check failed', 409)
     return bytes
   }
@@ -165,31 +170,36 @@ export class ImmutableContextStore {
     return found
   }
 
-  async markNativeThread(ownerKey, conversationId) {
+  async markNativeThread(ownerKey, conversationId, manifest = undefined) {
     const key = hashContent(conversationId).slice(0, 32)
     const id = `${key.slice(0, 8)}-${key.slice(8, 12)}-${key.slice(12, 16)}-${key.slice(16, 20)}-${key.slice(20)}`
-    try { await this.putRecord(ownerKey, 'threads', { conversationId, toolsVersion: 1 }, id) } catch (error) { if (error.code !== 'EEXIST') throw error }
+    try { await this.putRecord(ownerKey, 'threads', { conversationId, toolsVersion: 1, ...(manifest ? { toolManifest: copy(manifest) } : {}) }, id) } catch (error) { if (error.code !== 'EEXIST') throw error }
+    if (!await this.hasNativeTools(ownerKey, conversationId, manifest)) fail('CONTEXT_TOOLS_UNAVAILABLE', 'The original context tool manifest does not match; start an explicit new conversation', 409)
     return id
   }
 
-  async hasNativeTools(ownerKey, conversationId) {
+  async hasNativeTools(ownerKey, conversationId, manifest = undefined) {
     const key = hashContent(conversationId).slice(0, 32)
     const id = `${key.slice(0, 8)}-${key.slice(8, 12)}-${key.slice(12, 16)}-${key.slice(16, 20)}-${key.slice(20)}`
-    try { const record = await this.getRecord(ownerKey, 'threads', id); return record.conversationId === conversationId && record.toolsVersion === 1 } catch (error) { if (error.code === 'CONTEXT_NOT_FOUND') return false; throw error }
+    try {
+      const record = await this.getRecord(ownerKey, 'threads', id)
+      return record.conversationId === conversationId && record.toolsVersion === 1 &&
+        (!manifest || (record.toolManifest ? JSON.stringify(record.toolManifest) === JSON.stringify(manifest) : manifest.engineId === 'codex'))
+    } catch (error) { if (error.code === 'CONTEXT_NOT_FOUND') return false; throw error }
   }
 
-  async captureAttachments(ownerKey, { clientThreadId, attachments }, { assertActive = () => {} } = {}) {
+  async captureAttachments(ownerKey, { clientThreadId, attachments }, { assertActive = () => {}, engine = undefined } = {}) {
     if (!small(clientThreadId) || !Array.isArray(attachments) || !attachments.length || attachments.length > 16) fail('INVALID_CAPTURE', 'Provide a clientThreadId and 1–16 selected attachments')
     const captures = []
     for (const attachment of attachments) {
       assertActive()
-      captures.push(await this.capture(ownerKey, clientThreadId, attachment, { assertActive }))
+      captures.push(await this.capture(ownerKey, clientThreadId, attachment, { assertActive, engine }))
     }
     assertActive()
     return captures
   }
 
-  async capture(ownerKey, clientThreadId, attachment, { scopedRoot = null, assertActive = () => {} } = {}) {
+  async capture(ownerKey, clientThreadId, attachment, { scopedRoot = null, assertActive = () => {}, engine = undefined } = {}) {
     assertActive()
     const kind = attachment?.kind
     if (!['file', 'browser', 'board'].includes(kind)) fail('INVALID_CAPTURE', 'Unsupported attachment kind')
@@ -199,6 +209,9 @@ export class ImmutableContextStore {
       kind, resourceId: small(sourceRef.resourceId) || small(attachment.id),
       title: publicText(attachment.label || attachment.source?.title || kind, 300),
       viewId, revision: small(sourceRef.revision), url: safeUrl(sourceRef.url),
+      // Source provenance is not the model subscription account or a grant.
+      ...(small(sourceRef.browserProfileId) ? { browserProfileId: sourceRef.browserProfileId } : {}),
+      ...(small(sourceRef.siteAccount) ? { siteAccount: publicText(sourceRef.siteAccount, 512) } : {}),
     }
     const scope = attachment.captureScope || { type: kind === 'file' ? 'file' : kind === 'board' ? 'board-selection' : 'selection' }
     if (!['file', 'document-text', 'dom-range', 'selection', 'board-selection'].includes(scope.type)) fail('INVALID_CAPTURE_SCOPE', 'Name the captured file, DOM range or selection')
@@ -295,6 +308,7 @@ export class ImmutableContextStore {
     const sourceId = randomUUID()
     const manifest = {
       version: 1, sourceId, snapshotId: sourceId, id: sourceId, uiId: small(attachment.id), clientThreadId,
+      ...(engine ? { engine: engineProvenance(engine) } : {}),
       hash: rawHash, revision: rawHash, capturedAt: kind !== 'file' && Number.isFinite(attachment.capturedAt) ? attachment.capturedAt : this.now(), storedAt: this.now(),
       kind, label: source.title, source, sourceRef: { ...source },
       captureScope: { type: scope.type, locator: small(scope.locator, 2000) }, truncated,
@@ -314,7 +328,7 @@ export class ImmutableContextStore {
 
   publicManifest(manifest) {
     const { ownerScope, ...value } = manifest
-    return copy({ ...value, id: value.uiId || value.sourceId })
+    return copy({ ...value, ...(value.engine ? { engine: engineProvenance(value.engine) } : {}), id: value.uiId || value.sourceId })
   }
 
   async getCapture(ownerKey, sourceId) {
@@ -324,6 +338,8 @@ export class ImmutableContextStore {
   async readProjection(ownerKey, sourceId) {
     const manifest = await this.getRecord(ownerKey, 'sources', sourceId)
     if (!manifest.payloads?.projection || !manifest.shape.readable) fail('UNSUPPORTED_SOURCE_FORMAT', 'Capture is preserved, but this format has no supported text projection', 422)
+    if (manifest.hash !== manifest.payloads.source?.hash) fail('SNAPSHOT_CORRUPT', 'Captured source hash does not match its payload manifest', 409)
+    await this.readBlob(ownerKey, manifest.hash)
     return { manifest: this.publicManifest(manifest), text: (await this.readBlob(ownerKey, manifest.payloads.projection.hash)).toString('utf8') }
   }
 
@@ -352,10 +368,10 @@ export class ImmutableContextStore {
 
   // resolver (optional): CTX-03 record of suggested/chosen candidates — ids,
   // reason codes and scores only, never source text.
-  async bind(ownerKey, run, sourceIds, capabilities, readerConfiguration, resolver = undefined) {
+  async bind(ownerKey, run, sourceIds, capabilities, readerConfiguration, resolver = undefined, engine = undefined) {
     const captures = []
     for (const id of sourceIds) captures.push(await this.getCapture(ownerKey, id))
-    const binding = { conversationId: run.conversationId, runId: run.runId, answerId: run.answerId, clientThreadId: run.clientThreadId, sourceIds: [...sourceIds], capabilities: { read: capabilities.read === true, reader: capabilities.reader === true, publishBriefing: capabilities.publishBriefing === true }, readerConfiguration, capturedAt: this.now(), ...(resolver ? { resolver: copy(resolver) } : {}) }
+    const binding = { conversationId: run.conversationId, runId: run.runId, answerId: run.answerId, clientThreadId: run.clientThreadId, sourceIds: [...sourceIds], capabilities: { read: capabilities.read === true, reader: capabilities.reader === true, publishBriefing: capabilities.publishBriefing === true }, readerConfiguration, capturedAt: this.now(), ...(engine ? { engine: engineProvenance(engine) } : {}), ...(resolver ? { resolver: copy(resolver) } : {}) }
     const id = await this.putRecord(ownerKey, 'bindings', binding)
     return { bindingId: id, ...binding, captures }
   }

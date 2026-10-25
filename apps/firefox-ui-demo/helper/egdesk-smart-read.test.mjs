@@ -126,3 +126,39 @@ test('failed reading integration retains completed leaf evidence for an explicit
   assert.equal(retried.packet.coverage.reviewedPartitions, retried.packet.coverage.totalPartitions)
   assert.equal(retried.packet.coverage.complete, true)
 })
+
+test('Claude refuses NativeReader and its continuation even when a Codex Reader is available', async t => {
+  const h = await setup(t)
+  await assert.rejects(h.engine.read({ ...h.options, engineId: 'claude' }), e => e.code === 'CLAUDE_CONTEXT_READER_UNSUPPORTED')
+  const direct = { ...h.options, engineId: 'claude', range: { startLine: 1, endLine: 1 } }
+  await assert.rejects(h.engine.read({ ...direct, readerSessionId: 'codex-reader-session' }), e => e.code === 'CLAUDE_CONTEXT_READER_UNSUPPORTED')
+  assert.equal(h.reads.length, 0)
+  assert.equal(h.engine.sessions.size, 0)
+  assert.equal((await h.store.listRecords('owner', 'readers')).length, 0)
+  assert.equal((await h.store.listRecords('owner', 'packets')).length, 0)
+})
+
+test('Claude direct line-range continuation is exact and names coverage honestly; preflight is not delivery', async t => {
+  const h = await setup(t)
+  const options = { ...h.options, engineId: 'claude', range: { startLine: 1, endLine: 1 } }
+  const prepared = await h.engine.read({ ...options, prepareOnly: true })
+  assert.equal(prepared.packet.mode, 'direct')
+  assert.equal((await h.store.listRecords('owner', 'packets')).length, 0)
+  const first = await h.engine.read(options)
+  const second = await h.engine.read({ ...options, range: { startLine: 2, endLine: 3 } })
+  assert.equal(first.packet.content.text, h.text.split('\n')[0])
+  assert.equal(second.packet.content.text, h.text.split('\n').slice(1, 3).join('\n'))
+  assert.equal(second.packet.sourceHash, first.packet.sourceHash)
+  assert.equal(second.packet.coverage.scope, 'line-range')
+  assert.equal(second.packet.coverage.complete, true)
+  assert.equal(second.packet.coverage.reviewedRanges[0].startOffset, first.packet.coverage.reviewedRanges[0].endOffset + 1)
+  assert.equal((await h.store.inspect('owner', h.capture.sourceId)).delivered, null)
+  assert.equal(h.reads.length, 0)
+})
+
+test('Claude rejects truncated captured coverage even for a fitting direct range', async t => {
+  const h = await setup(t, { truncated: true })
+  await assert.rejects(h.engine.read({ ...h.options, engineId: 'claude', range: { startLine: 1, endLine: 1 } }), e => e.code === 'CONTEXT_CAPTURE_INCOMPLETE')
+  assert.equal(h.reads.length, 0)
+  assert.equal((await h.store.listRecords('owner', 'packets')).length, 0)
+})

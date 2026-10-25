@@ -4,6 +4,7 @@ import { mkdtempSync, rmSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { compileFunction } from 'node:vm';
+import { Readable } from 'node:stream';
 import { readSurfaceSource } from './egdesk-surface-source.mjs';
 import * as ChatState from '../overlay/resources/EGDeskChatState.sys.mjs';
 import * as InputContext from '../overlay/resources/EGDeskInputContext.sys.mjs';
@@ -12,6 +13,11 @@ import { createCodexEngineAdapter } from '../helper/codex-engine-adapter.mjs';
 import { createClaudeEngineAdapter } from '../helper/claude-engine-adapter.mjs';
 import { openChatStore } from '../helper/egdesk-chat-store.mjs';
 import { describeClaudeEngine, publicEngineRow } from '../helper/engine-registry.mjs';
+import { ContextRuntime } from '../helper/egdesk-context-runtime.mjs';
+import { ImmutableContextStore } from '../helper/egdesk-context-store.mjs';
+import { createContextHttpHandler } from '../helper/egdesk-context-http.mjs';
+import { createChatEngineAuth } from '../helper/codex-bridge-engine-auth.mjs';
+import { createChatHttpHandler } from '../helper/codex-bridge-http.mjs';
 
 // Execute the current production functions, including el() and the bridge
 // handlers. Firefox bootstrap, browser/OS input and real engines never run.
@@ -21,13 +27,18 @@ const NOW = 1800000000000;
 const claudeRow = (patch = {}) => ({ ...publicEngineRow(describeClaudeEngine({ installed: true, version: '2.1.300',
   auth: { status: 'signedIn', method: 'claudeai', account: 'test@example.invalid' } }, { capabilities: ['stream', 'resume'] })), ...patch });
 const fileInput = (id = 'file') => ({ id, kind: 'file', label: '선택한 파일', sourceRef: { kind: 'file', path: `/work/${id}.txt` } });
+const b2Capability = { contract: 'egdesk-context-b2', engineId: 'claude', engineProfileId: 'claude-default',
+  expectedContextScope: 'test-server-issued-opaque-context-expectation',
+  selectedAttachments: true, immutableRead: true, nativeReader: false, tools: ['egdesk_list_context', 'egdesk_read_source'] };
+const captureReply = body => ({ captures: body.attachments.map(item => ({ id: item.id, sourceId: `stored-${item.id}`,
+  snapshotId: `stored-${item.id}`, hash: `hash-${item.id}`, sourceRef: item.sourceRef, captureScope: item.captureScope })) });
 function functionSource(name, indent = '  ') {
   const match = source.match(new RegExp(`^${indent}(?:async )?function ${name}\\([^]*?^${indent}\\}`, 'm'));
   assert.ok(match, `production function ${name}`);
   return match[0];
 }
 function methodSource(name) {
-  const match = source.match(new RegExp(`^      async ${name}\\([^]*?^      \\},`, 'm'));
+  const match = source.match(new RegExp(`^      (?:async )?${name}\\([^]*?^      \\},`, 'm'));
   assert.ok(match, `production bridge method ${name}`);
   return match[0].slice(0, -1);
 }
@@ -69,7 +80,9 @@ const attributes = node => all(node).map(item => ({ attributes: item.attributes,
 const choose = async (node, checked = true) => { node.checked = checked; await node.fire('change'); };
 const type = async (node, text) => { node.value = text; await node.fire('input'); };
 
-function surface({ run = null, thread = {}, auth = {}, fetchJson = async () => ({ accepted: false }), ensureReady = async () => true, nativeReady = false } = {}) {
+function surface({ run = null, thread = {}, auth = {}, fetchJson = async () => ({ accepted: false }), ensureReady = async () => true, nativeReady = false,
+  realCapture = false, captureChatInputs = async () => assert.fail('unexpected live capture'),
+  captureManagedFileInput = async () => assert.fail('unexpected managed file') } = {}) {
   const root = new Node('root');
   const document = { documentElement: root, activeElement: null, defaultView: { getComputedStyle: () => ({ maxHeight: '240' }) },
     createElement: tag => Object.assign(new Node(tag), { ownerDocument: document }),
@@ -88,6 +101,7 @@ function surface({ run = null, thread = {}, auth = {}, fetchJson = async () => (
   const epochScope = ChatState.createChatEpochScope();
   const userInputDrafts = new Map();
   const globals = { ChatState, InputContext, document, state, protocol, userInputDrafts, epochScope,
+    captureChatInputs, captureManagedFileInput, boardNotice: text => effects.logs.push(text),
     SELF_MEMBER: 'self', cloneJson: clone, formatMessageTime: String, contextBoardTitle: () => '',
     openChatFileReference: () => assert.fail('unexpected file open'), currentViewportAgendaLabel: () => '',
     serializeCardState: () => assert.fail('unexpected card'), serializeShapeState: () => assert.fail('unexpected shape'),
@@ -108,11 +122,14 @@ function surface({ run = null, thread = {}, auth = {}, fetchJson = async () => (
     'codexRuns', 'codexRunLabel', 'codexUserInputBlock', 'pruneUserInputDrafts', 'contextResolverRecordSection',
     'codexSubAgentSection', 'renderCodexActivityPanel', 'serializeDeskSnapshot'].map(name => functionSource(name)).join('\n');
   if (nativeReady) delete globals.ensureNativeReadyForSend;
+  if (realCapture) delete globals.captureThreadInputs;
   const api = compile(`${definitions}\n${functionSource('threadBusy', '    ')}\n${functionSource('refreshConversation', '    ')}
+    ${functionSource('requireClaudeContext', '    ')}
+    ${realCapture ? functionSource('captureThreadInputs', '    ') : ''}
     ${nativeReady ? functionSource('ensureNativeReadyForSend', '    ') : ''}
     let activityPanelComposing = false, activityPanelDeferred = false;
     ${source.match(/^  const userInputDraftKey = .*;$/m)[0]}
-    const bridge = { ${['replyApproval', 'replyUserInput', 'sendMessage'].map(methodSource).join(',\n')} };
+    const bridge = { ${['replyApproval', 'replyUserInput', 'sendMessage', 'captureInputs', 'readInput', 'setThreadEngine'].map(methodSource).join(',\n')} };
     return { ...bridge, render: renderCodexActivityPanel, question: codexUserInputBlock, serialize: serializeDeskSnapshot,
       refresh: refreshConversation, el };`, globals);
   state.codexBridge = { ...api, refreshConversation: () => {} };
@@ -150,7 +167,7 @@ function accountLifecycle(ui) {
     ${between('    const handleEvent = (event) => {', '    const connect = async')}
     return {update, reset: resetThreadConversations, event: handleEvent};`, {
     ChatState, state: ui.state, protocol: ui.protocol, userInputDrafts: ui.drafts, document: ui.document, effects,
-    epochScope: { ...ui.epochScope, reset: scope => { effects.reset++; effects.resetScopes.push(scope); ui.epochScope.reset(scope); } },
+    epochScope: { ...ui.epochScope, reset: (scope, profile) => { effects.reset++; effects.resetScopes.push(scope); ui.epochScope.reset(scope, profile); } },
     clearBrowserToolTransport: () => effects.cleared++,
     resumedNativeBindings: new Set(), refreshing: new Map(), chatBindingNonce: () => 'new-codex-binding',
     normalizeThreads: () => {}, emit: () => {}, scheduleReconnect: () => effects.reconnect++,
@@ -302,7 +319,8 @@ test('real delayed Codex captures abort on account switch while an actual Claude
     const oldToken = ui.epochScope.begin();
     const posts = [];
     const capture = compile(`${functionSource('captureThreadInputs', '    ')}\nreturn captureThreadInputs;`, {
-      ChatState, InputContext, epochScope:ui.epochScope,
+      ChatState, InputContext, epochScope:ui.epochScope, state:ui.state,
+      getCodexThreadById: (state, id) => state.threads.find(thread => thread.id === id),
       captureChatInputs: () => new Promise(resolve => { finishCapture = () => resolve([{text:'ACCOUNT_A_CAPTURE'}]); }),
       captureManagedFileInput: () => new Promise(resolve => { finishCapture = () => resolve({text:'ACCOUNT_A_CAPTURE'}); }),
       fetchJson: async (path, options) => { posts.push({path, account:ui.state.codex.authStatus.accountId, body:options.body}); return {captures:[]}; },
@@ -340,6 +358,308 @@ test('scoped epoch reset aborts active work and invalidates finished Codex token
   scope.reset();
   assert.equal(claude.signal.aborted, true); assert.equal(scope.valid(claude), false);
   assert.equal(scope.valid(stream), false);
+});
+
+test('B2 real capture carries the selected conversation routing, not site identity or active-room defaults', async () => {
+  const browser = { id:'site', kind:'browser', label:'Site', sourceRef:{viewId:'site-card', uri:'https://source.invalid/',
+    profileId:'site-profile', accountId:'site-user@source.invalid'} };
+  const ui = surface({realCapture:true, thread:{engineProfileId:'claude-default',clientBindingId:'recorded-wire',conversationId:'native-old'},
+    captureChatInputs: async ([input]) => [InputContext.inputSnapshot(input, {text:'EXACT SOURCE',url:input.sourceRef.uri})],
+    fetchJson: async (path, options) => path.startsWith('/context/capabilities?') ? b2Capability : captureReply(JSON.parse(options.body)) });
+  ui.state.codex.activeThreadId = 'other-codex';
+  ui.state.codex.threads.push({id:'other-codex',engineId:'codex',messages:[]});
+  const references = await ui.captureInputs('ui', [browser]);
+  const scope = {engineId:'claude',engineProfileId:'claude-default',clientThreadId:'recorded-wire',conversationId:'native-old'};
+  const query = new URL(ui.effects.requests[0].path,'http://local').searchParams;
+  for (const [key,value] of Object.entries(scope)) assert.equal(query.get(key),value);
+  const body = ui.effects.requests[1].body;
+  assert.deepEqual(Object.fromEntries(Object.keys(scope).map(key=>[key,body[key]])),scope);
+  assert.equal(body.attachments[0].content.text,'EXACT SOURCE');
+  assert.equal(body.expectedContextScope,b2Capability.expectedContextScope);
+  assert.equal(body.ownerKey,undefined); assert.equal(body.epoch,undefined);
+  assert.equal(references[0].localSource.sourceRef.accountId,'site-user@source.invalid');
+  assert.deepEqual(references[0].contextScope,scope);
+  assert.ok(Object.isFrozen(references[0]));
+});
+
+test('B2 capabilities are exact and fail closed before any source capture on old or mismatched bridges', async () => {
+  for (const descriptor of [null,{...b2Capability,expectedContextScope:undefined},{...b2Capability,contract:'dynamicTools'}, {...b2Capability,engineId:'codex'},
+    {...b2Capability,engineProfileId:'other'}, {...b2Capability,immutableRead:false}, {...b2Capability,nativeReader:true},
+    {...b2Capability,tools:['egdesk_list_context']}, {...b2Capability,tools:'egdesk_list_context egdesk_read_source'},
+    {...b2Capability,tools:[...b2Capability.tools,'egdesk_publish_briefing']}]) {
+    const ui = surface({realCapture:true,fetchJson:async()=>descriptor});
+    await assert.rejects(ui.captureInputs('ui',[fileInput()]),/현재 Claude 연결/);
+    assert.equal(ui.effects.requests.length,1);
+  }
+  const ui = surface({realCapture:true,fetchJson:async()=>{throw Object.assign(new Error('old bridge'),{status:404});}});
+  await assert.rejects(ui.captureInputs('ui',[fileInput()]),/현재 Claude 연결/);
+  assert.equal(ui.effects.requests.length,1);
+});
+
+test('B2 real capture never accepts an incomplete batch, truncated source or another route receipt', async () => {
+  for (const mutation of [reply=>({...reply,captures:[]}), reply=>({captures:[{...reply.captures[0],truncated:true}]}),
+    reply=>({captures:[{...reply.captures[0],contextScope:{engineId:'codex',engineProfileId:'codex-default',clientThreadId:'ui'}}]})]) {
+    const ui = surface({realCapture:true,fetchJson:async(path,options)=>path.startsWith('/context/capabilities?')
+      ? b2Capability : mutation(captureReply(JSON.parse(options.body)))});
+    await assert.rejects(ui.captureInputs('ui',[fileInput()]),/캡처|다른 엔진/);
+    assert.equal(ui.effects.requests.length,2);
+  }
+});
+
+test('same Claude slot with a changed email cancels real delayed capture, not an actual Codex send', async () => {
+  let finishCapture, finishCodex;
+  const browser={id:'browser-a',kind:'browser',label:'Site',sourceRef:{viewId:'card',uri:'https://source.invalid/'}};
+  const ui=surface({realCapture:true,thread:{engineId:'codex'},captureChatInputs:([input])=>new Promise(resolve=>{
+    finishCapture=()=>resolve([InputContext.inputSnapshot(input,{text:'ACCOUNT_A',url:input.sourceRef.uri})]);
+  }),fetchJson:async(path,options)=>{
+    if(path.startsWith('/context/capabilities?'))return b2Capability;
+    if(path==='/chat/send')return new Promise(resolve=>{finishCodex=()=>resolve({accepted:true,
+      requestId:JSON.parse(options.body).requestId,conversationId:'codex-kept',runId:'codex-run',engineId:'codex'});});
+    assert.fail('late Claude capture POST');
+  }});
+  const claude={id:'claude-room',engineId:'claude',engineProfileId:'claude-default',messages:[],inputSources:[browser],preparingInput:true};
+  ui.state.codex.threads.push(claude);
+  ui.state.codex.threadDrafts[claude.id]='retain';
+  const sending=ui.sendMessage();
+  await new Promise(resolve=>setImmediate(resolve));
+  const capturing=ui.captureInputs(claude.id,[browser]);
+  const rejected=assert.rejects(capturing,/연결이 바뀌어/);
+  await new Promise(resolve=>setImmediate(resolve));
+  assert.equal(typeof finishCapture,'function');
+  const next=clone(ui.state.codex.engines);
+  next.find(row=>row.id==='claude').profiles[0].auth.account='new-engine-user@other.invalid';
+  accountLifecycle(ui).update({engines:next});
+  finishCapture(); await rejected;
+  finishCodex(); await sending;
+  assert.equal(Object.values(ui.protocol.requests)[0].status,'accepted');
+  assert.equal(ui.state.codex.threadDrafts[claude.id],'retain');
+  assert.deepEqual(claude.inputSources,[browser]);
+  assert.equal(claude.preparingInput,false);
+  assert.equal(ui.effects.requests.filter(row=>row.path==='/context/captures').length,0);
+});
+
+test('profile epoch invalidation also rejects finished tokens but preserves other Claude profiles and Codex',()=>{
+  const scope=ChatState.createChatEpochScope();
+  const old=scope.begin('claude','one'), finished=scope.begin('claude','one');scope.finish(finished);
+  const legacy=scope.begin('claude');
+  const other=scope.begin('claude','two'), codex=scope.begin('codex','codex-default');
+  scope.reset('claude','one');
+  assert.equal(old.signal.aborted,true);assert.equal(scope.valid(finished),false);
+  assert.equal(scope.valid(legacy),false,'unscoped legacy run cannot retain an old account');
+  assert.equal(scope.valid(other),true);assert.equal(scope.valid(codex),true);
+  scope.reset('claude');assert.equal(scope.valid(other),false);assert.equal(scope.valid(codex),true);
+});
+
+test('immutable inspector uses recorded routing after UI restart/live change and rejects cross-engine/thread references',async()=>{
+  const reference={sourceId:'fixed',snapshotId:'fixed',hash:'original-hash',contextScope:{engineId:'claude',engineProfileId:'claude-default',clientThreadId:'ui'}};
+  const stored={capture:{sourceId:'fixed',hash:'original-hash',sourceRef:{},captureScope:{type:'file'}},
+    source:{role:'source',hash:'original-hash',rangeHash:'range-v1',text:'ORIGINAL VERSION',mime:'text/plain',range:{startLine:1,endLine:1,totalLines:1}},delivered:null,bindings:[]};
+  for(let restart=0;restart<2;restart++){
+    const ui=surface({thread:{messages:[{inputReferences:[clone(reference)]}]},realCapture:true,
+      fetchJson:async()=>clone(stored),captureChatInputs:async()=>assert.fail('must not recapture changed live source')});
+    ui.state.codex.activeThreadId='different';
+    const result=await ui.readInput(clone(reference),{threadId:'ui'});
+    assert.equal(result.source.text,'ORIGINAL VERSION');assert.equal(result.source.rangeHash,'range-v1');
+    const query=new URL(ui.effects.requests[0].path,'http://local').searchParams;
+    assert.equal(query.get('clientThreadId'),'ui');assert.equal(query.get('engineId'),'claude');
+    assert.equal(query.get('engineProfileId'),'claude-default');assert.equal(query.has('endLine'),false);
+    for(const field of ['engineId','engineProfileId','clientThreadId']){
+      const foreign=clone(reference);foreign.contextScope[field]='foreign';
+      assert.equal(await ui.readInput(foreign,{threadId:'ui'}),null);
+    }
+    assert.equal(ui.effects.requests.length,1,'foreign references never reach HTTP');
+  }
+});
+
+test('immutable inspector account/missing/manifest refusal never falls back to live recapture',async()=>{
+  for(const code of ['ACCOUNT_CHANGED','CONTEXT_THREAD_MISMATCH','CONTEXT_TOOLS_UNAVAILABLE','SNAPSHOT_NOT_FOUND']){
+    const ui=surface({fetchJson:async()=>{throw Object.assign(new Error(code),{code,status:409});}});
+    assert.equal(await ui.readInput({sourceId:'fixed',hash:'h'},{threadId:'ui'}),undefined);
+    assert.equal(ui.effects.requests.length,1);assert.deepEqual(ui.effects.capture,[]);
+  }
+});
+
+test('Claude attachment send uses real capture, explicit immutable ids and only the read grant; draft clears on acceptance',async()=>{
+  let finishSend;
+  const selected={id:'site',kind:'browser',label:'Site',selectedByUser:true,browserToolPermission:'observe',
+    sourceRef:{viewId:'card',uri:'https://site.invalid/',profileId:'site-slot',accountId:'site@other.invalid'}};
+  const ui=surface({realCapture:true,thread:{inputSources:[selected]},
+    captureChatInputs:async([input])=>[InputContext.inputSnapshot(input,{text:'EXACT',url:input.sourceRef.uri})],
+    fetchJson:async(path,options)=>{
+      if(path.startsWith('/context/capabilities?'))return b2Capability;
+      if(path==='/context/captures')return captureReply(JSON.parse(options.body));
+      assert.equal(path,'/chat/send');
+      return new Promise(resolve=>{finishSend=()=>resolve({accepted:true,requestId:JSON.parse(options.body).requestId,
+        conversationId:'bound',runId:'accepted',engineId:'claude'});});
+    }});
+  const sending=ui.sendMessage();await new Promise(resolve=>setImmediate(resolve));
+  assert.equal(ui.state.codex.threadDrafts.ui,'  keep my draft  ');
+  assert.deepEqual(ui.thread().inputSources,[selected]);
+  const request=ui.effects.requests.at(-1).body;
+  assert.deepEqual(request.contextSnapshotIds,['stored-site']);
+  assert.deepEqual(request.contextCapabilities,{read:true,reader:false,publishBriefing:false});
+  assert.equal(request.engineId,'claude');assert.equal(request.engineProfileId,'claude-default');
+  assert.equal(request.expectedContextScope,b2Capability.expectedContextScope);
+  assert.equal(request.expectedContextScope,ui.effects.requests.find(row=>row.path==='/context/captures').body.expectedContextScope);
+  assert.equal(JSON.stringify(ui.thread()).includes('expectedContextScope'),false,'operation expectation is not persisted in a thread or capture reference');
+  for(const field of ['ownerKey','epoch','selectedSources','executionPolicy','contextResolution'])assert.equal(request[field],undefined);
+  finishSend();await sending;
+  assert.equal(ui.state.codex.threadDrafts.ui,'');assert.deepEqual(ui.thread().inputSources,[]);
+  assert.equal(ui.thread().engineProfileId,'claude-default');
+});
+
+test('actual engine switch after definite Claude Reader refusal recaptures selected sources under Codex, never relabels old captures',async()=>{
+  const selected=fileInput('large-context'), receipts=[], sends=[];
+  const ui=surface({realCapture:true,thread:{inputSources:[selected]},fetchJson:async(path,options)=>{
+    if(path.startsWith('/context/capabilities?'))return b2Capability;
+    const body=JSON.parse(options.body);
+    if(path==='/context/captures'){
+      const expected=body.engineId==='claude'?'claude-default':'codex-selected-slot';
+      if(body.engineProfileId!==expected)throw Object.assign(new Error('Wrong engine profile'),{code:'ENGINE_PROFILE_MISMATCH',status:403});
+      const capture={...captureReply(body).captures[0],sourceId:`${body.engineId}-immutable`,snapshotId:`${body.engineId}-immutable`,
+        engine:{engineId:body.engineId,engineProfileId:body.engineProfileId}};
+      receipts.push(clone(capture));return{captures:[capture]};
+    }
+    assert.equal(path,'/chat/send');sends.push(body);
+    if(body.engineId==='claude')throw Object.assign(new Error('Reader required'),{code:'CLAUDE_CONTEXT_READER_UNSUPPORTED',status:409,accepted:false});
+    return{accepted:true,requestId:body.requestId,conversationId:'new-codex',runId:'codex-run',engineId:'codex'};
+  }});
+  ui.state.codex.engines[0].profiles=[{id:'codex-selected-slot',active:true,auth:{status:'signedIn'}}];
+  await ui.sendMessage();
+  assert.equal(ui.thread().engineProfileId,'claude-default');
+  assert.equal(ChatState.chatThreadEngineLocked(ui.thread()),false);
+  assert.match(ui.thread().sendError,/Smart Read/);
+  assert.deepEqual(ui.thread().messages,[]);
+  const oldReceipt=clone(receipts[0]);
+  const retained=clone({draft:ui.state.codex.threadDrafts.ui,inputs:ui.thread().inputSources,briefings:ui.thread().briefingInputs});
+  ui.setThreadEngine('ui','codex');
+  assert.deepEqual({draft:ui.state.codex.threadDrafts.ui,inputs:ui.thread().inputSources,briefings:ui.thread().briefingInputs},retained);
+  assert.equal(ChatState.chatThreadEngineProfileId(ui.thread(),ui.state.codex),'codex-selected-slot');
+  await ui.sendMessage();
+  assert.equal(receipts.length,2,'a fresh capture is made under the selected Codex authority');
+  assert.deepEqual(receipts[0],oldReceipt,'the Claude snapshot is never relabeled');
+  assert.deepEqual(sends.map(body=>body.contextSnapshotIds),[['claude-immutable'],['codex-immutable']]);
+  assert.equal(sends[1].expectedContextScope,undefined,'Claude expectation is not reused by Codex');
+  assert.deepEqual(ui.effects.requests.filter(row=>row.path==='/context/captures').map(row=>[row.body.engineId,row.body.engineProfileId]),
+    [['claude','claude-default'],['codex','codex-selected-slot']]);
+  assert.equal(ui.state.codex.threadDrafts.ui,'');
+  assert.equal(ui.effects.synced.at(-1).engineId,'codex');
+});
+
+test('actual engine selection keeps a same-engine slot and cannot reset a locked conversation profile',()=>{
+  const ui=surface({thread:{engineProfileId:'claude-default',inputSources:[fileInput()]}});
+  const before=clone(ui.thread());
+  ui.setThreadEngine('ui','claude');assert.deepEqual(ui.thread(),before);
+  ui.thread().conversationId='bound';
+  const locked=clone(ui.thread());
+  ui.setThreadEngine('ui','codex');assert.deepEqual(ui.thread(),locked);
+  ui.thread().conversationId=null;
+  ui.thread().messages=[{role:'user',content:'accepted'}];
+  const accepted=clone(ui.thread());
+  ui.setThreadEngine('ui','codex');assert.deepEqual(ui.thread(),accepted);
+});
+
+test('switching an unbound room never relabels or submits an already immutable foreign-engine reference',async()=>{
+  const reference={sourceId:'claude-fixed',snapshotId:'claude-fixed',hash:'h',
+    contextScope:{engineId:'claude',engineProfileId:'claude-default',clientThreadId:'ui'}};
+  const ui=surface({realCapture:true,thread:{engineProfileId:'claude-default',briefingInputs:[reference]}});
+  ui.setThreadEngine('ui','codex');
+  await ui.sendMessage();
+  assert.deepEqual(ui.thread().briefingInputs,[reference]);
+  assert.equal(ui.state.codex.threadDrafts.ui,'  keep my draft  ');
+  assert.deepEqual(ui.thread().messages,[]);assert.deepEqual(ui.effects.requests,[]);
+  assert.match(ui.thread().sendError,/다른 엔진 또는 대화/);
+});
+
+test('Claude capture and send failures preserve exact draft and all attachments with no retry or provider fallback',async()=>{
+  for(const phase of ['capture','send'])for(const code of ['CONTEXT_CAPTURE_INCOMPLETE','UNSUPPORTED_SOURCE_FORMAT',
+    'CLAUDE_CONTEXT_READER_UNSUPPORTED','CONTEXT_THREAD_MISMATCH','CONTEXT_TOOLS_UNAVAILABLE','CONTEXT_SCOPE_CHANGED','ACCOUNT_CHANGED','NETWORK']){
+    const inputs=[fileInput('one'),fileInput('two')];
+    const ui=surface({realCapture:true,thread:{inputSources:inputs},fetchJson:async(path,options)=>{
+      if(path.startsWith('/context/capabilities?'))return b2Capability;
+      if(phase==='send'&&path==='/context/captures')return captureReply(JSON.parse(options.body));
+      throw Object.assign(new Error(code),{code,...(code==='NETWORK'?{}:{status:409,accepted:false})});
+    }});
+    await ui.sendMessage();
+    assert.equal(ui.state.codex.threadDrafts.ui,'  keep my draft  ');
+    assert.deepEqual(ui.thread().inputSources,inputs);
+    assert.equal(ui.thread().engineId,'claude');assert.equal(ui.effects.timers,0);
+    assert.equal(ui.effects.requests.length,phase==='capture'?2:3);
+    if(phase==='capture'||ChatState.claudeContextSendErrorText(code))assert.deepEqual(ui.thread().messages,[]);
+    if(code==='CLAUDE_CONTEXT_READER_UNSUPPORTED')assert.match(ui.thread().sendError,/Smart Read.*지원하지 않아/);
+    assert.equal(ui.thread().preparingInput,false);
+  }
+});
+
+test('real Browser capture pins site profile/container independently of engine login and refuses source changes',async()=>{
+  const selected={id:'source',kind:'browser',label:'Site',sourceRef:{viewId:'card',uri:'https://site.invalid/',profileId:'site-slot',accountId:'site@other.invalid'},
+    browserToolIdentity:{cardEpoch:'card-one',userContextId:4,engineAccountKey:'old-codex-key',authorityEpoch:0}};
+  for(const changed of [null,'profileId','accountId','cardEpoch','userContextId']){
+    let resolve;
+    const binding={profileId:'site-slot',accountId:'site@other.invalid',cardEpoch:'card-one',userContextId:4,
+      engineAccountKey:'a-different-engine-key',authorityEpoch:99};
+    const card={isConnected:true,_browserControls:{toolBinding:()=>binding,captureInput:()=>new Promise(done=>{resolve=done;})}};
+    const capture=compile(`${functionSource('captureChatInputs')}\nreturn captureChatInputs;`,{
+      InputContext,document:{getElementById:()=>card},persistentEntityGeometry:()=>({x:0,y:0}),chatBindingNonce:()=> 'fixed',
+    });
+    const pending=capture([selected]);
+    if(changed)binding[changed]='changed';
+    resolve({text:'exact',url:selected.sourceRef.uri});
+    if(changed)await assert.rejects(pending,/자료 계정이나 창이 바뀌었습니다/);
+    else assert.equal((await pending)[0].content.text,'exact');
+  }
+});
+
+test('server-recorded engine profile survives real snapshot normalization and cannot silently switch slots',()=>{
+  const state=ChatState.createChatProtocolState();
+  const [run]=ChatState.mergeChatSnapshot(state,{conversationId:'c',runs:[{runId:'r',engine:{id:'claude',engineProfileId:'old-slot'},status:'completed',messages:[]}]},'ui');
+  assert.equal(run.engineProfileId,'old-slot');
+  assert.equal(ChatState.chatThreadEngineProfileId({id:'ui',engineId:'claude',engineProfileId:run.engineProfileId},{engines:[claudeRow()]}),'old-slot');
+  assert.equal(ChatState.chatThreadReadiness({engineId:'claude',engineProfileId:run.engineProfileId},{engines:[claudeRow()]}).ready,false);
+  assert.deepEqual(ChatState.mergeChatSnapshot(state,{conversationId:'c',runs:[{runId:'r',engine:{id:'claude',engineProfileId:'new-slot'},messages:[]}]},'ui'),[]);
+  assert.equal(run.engineProfileId,'old-slot');
+});
+
+test('unbound Claude chat rejects A capture intent under B before delayed SSE, using real HTTP, authority and immutable store',async t=>{
+  const h=await runtime(t,{store:true,initialSend:false});
+  const dir=mkdtempSync(join(tmpdir(),'egdesk-ui-scope-race-'));
+  t.after(()=>rmSync(dir,{recursive:true,force:true}));
+  const store=new ImmutableContextStore({dataDir:dir,allowedRoots:[dir]});
+  const contexts=new ContextRuntime({store,getAuthority:hints=>h.chat.contextAuthority(hints),schemaReady:()=>true});
+  contexts.runtime=h.chat;
+  const handler=createContextHttpHandler(contexts,async hints=>{h.chat.contextAuthority(hints);});
+  let releaseCapture;
+  const selected={id:'old-intent',kind:'browser',label:'Source',sourceRef:{viewId:'card',uri:'https://site.invalid/',
+    profileId:'site-profile',accountId:'different-site-account@site.invalid'}};
+  const ui=surface({realCapture:true,thread:{inputSources:[selected]},
+    captureChatInputs:([input])=>new Promise(resolve=>{releaseCapture=()=>resolve([InputContext.inputSnapshot(input,{text:'A_SELECTED_BYTES',url:input.sourceRef.uri})]);}),
+    fetchJson:async(path,options={})=>{
+      assert.notEqual(path,'/chat/send','stale intent must be refused before native send');
+      const req=Readable.from(options.body?[Buffer.from(options.body)]:[]);
+      req.method=options.method||'GET';req.headers={host:'localhost:39218','content-type':'application/json'};
+      const res={writeHead(status){this.status=status;},end(body){this.body=JSON.parse(body);}};
+      await handler(req,res,new URL(path,'http://localhost'));
+      if(res.status>=400)throw Object.assign(new Error(res.body.error),{code:res.body.code,status:res.status,accepted:false});
+      return res.body;
+    }});
+  const uiIdentity=clone(ui.state.codex.engines);
+  assert.equal(h.chat.store.getConversation('ui'),null,'client has no bound native conversation');
+  const sending=ui.sendMessage();
+  await new Promise(resolve=>setImmediate(resolve));
+  assert.equal(typeof releaseCapture,'function','capability A was read before delayed Browser capture');
+  h.changeAccount('account-b@example.invalid');
+  releaseCapture();await sending;
+  assert.deepEqual(ui.state.codex.engines,uiIdentity,'no SSE/account update reached the UI');
+  assert.equal(ui.state.codex.threadDrafts.ui,'  keep my draft  ');
+  assert.deepEqual(ui.thread().inputSources,[selected]);
+  const authorityB=h.chat.contextAuthority({engineId:'claude',engineProfileId:'claude-default',clientThreadId:'ui'});
+  assert.deepEqual(await store.listRecords(contexts.owner(authorityB),'sources'),[],'no account-A bytes persisted under B');
+  assert.deepEqual(ui.thread().messages,[]);
+  assert.equal(ui.effects.requests.filter(row=>row.path==='/chat/send').length,0);
+  assert.equal(ui.effects.requests.length,2,'one capability then one refused capture; never refresh/retry as B');
+  assert.match(ui.effects.requests[1].body.expectedContextScope,/^[a-f0-9]{64}$/);
+  assert.match(ui.thread().sendError,/Claude.*계정|연결.*바뀌/);
+  assert.equal(h.transports.length,0);assert.deepEqual(h.codexCalls,[]);
 });
 
 test('production engine popover reanchors to its fresh local chip across Canvas pan/zoom and HUD', () => {
@@ -396,17 +716,18 @@ test('production engine popover reanchors to its fresh local chip across Canvas 
 
 // Real adapter, runtime and SQLite public projections, with only the native
 // stdio transport replaced. No provider, credential, CLI or OS calls.
-async function runtime(t, { store = false } = {}) {
-  let chatStore = null;
-  if (store) {
+async function runtime(t, { store = false, initialSend = true } = {}) {
+  let chatStore = store && typeof store === 'object' ? store : null;
+  if (store === true) {
     const dir = mkdtempSync(join(tmpdir(), 'egdesk-surface-claude-'));
     chatStore = openChatStore({ dataDir: dir, ownerScope: 'surface-test' });
     t.after(() => { chatStore.close(); rmSync(dir, { recursive: true, force: true }); });
   }
   const events = [], transports = [], timers = [], codexCalls = [];
+  let account = 'test@example.invalid';
   const claude = createClaudeEngineAdapter({
     snapshot: () => ({ installed: true, version: '2.1.300', versionStatus: 'untested',
-      auth: { status: 'signedIn', method: 'claudeai', account: 'test@example.invalid' } }),
+      auth: { status: 'signedIn', method: 'claudeai', account } }),
     env: {}, defaultCwd: '/work/test', resolveExecutable: () => '/fake/claude',
     setTimer: (fn, ms) => { const value = { fn, ms }; timers.push(value); return value; }, clearTimer() {},
     createTransport: options => {
@@ -429,9 +750,10 @@ async function runtime(t, { store = false } = {}) {
   claude.syncStatus();
   const drain = async () => { await chat.queue; await new Promise(resolve => setImmediate(resolve)); await chat.queue; };
   t.after(async () => { unsubscribe(); await claude.dispose(); await drain(); });
-  const result = await chat.send({ message: 'test', engineId: 'claude', clientThreadId: 'ui', requestId: 'request-1' });
-  const run = chat.runs.get(`${result.conversationId}/${result.runId}`);
-  return { chat, result, run, events, transports, timers, codexCalls, drain,
+  const result = initialSend ? await chat.send({ message: 'test', engineId: 'claude', clientThreadId: 'ui', requestId: 'request-1' }) : null;
+  const run = result && chat.runs.get(`${result.conversationId}/${result.runId}`);
+  return { chat, claude, result, run, events, transports, timers, codexCalls, drain,
+    changeAccount: value => { account = value; claude.syncStatus(); },
     question: async (questions, id = 'question') => {
       transports[0].options.controlHandlers.can_use_tool({ subtype: 'can_use_tool', tool_name: 'AskUserQuestion',
         tool_use_id: id, input: { questions } }, { requestId: id });
@@ -837,21 +1159,25 @@ test('Claude quota errors never borrow Codex account resets, while Codex keeps i
   }
 });
 
-test('explicit Claude Context blocks before auth guard, capture, dispatch or any draft/selection change', async () => {
+test('unsupported Claude Context descriptor blocks capture/send without changing draft or selections', async () => {
   for (const selection of [{ inputSources: [{ ...fileInput(), resolverRef: 'ref' }] },
-    { briefingInputs: [{ snapshotId: 'briefing' }] }, { picked: ['context-choice'] }]) {
-    const ui = surface({ thread: { ...selection }, auth: { isLoggedIn: false } });
+    { briefingInputs: [{ snapshotId: 'briefing' }] }, { picked: ['context-choice'] },
+    {inputSources:[{...fileInput(),kind:'browser',browserToolPermission:'interact'}]}]) {
+    const ui = surface({ realCapture:true, thread: { ...selection }, auth: { isLoggedIn: false },
+      fetchJson:async()=>{throw Object.assign(new Error('old bridge'),{status:404});} });
     ui.state.codex.connected = false;
-    ui.state.codex.engines = [{ id: 'codex', status: 'ready' }, { id: 'claude', status: 'offline' }];
+    ui.state.codex.engines = [{ id: 'codex', status: 'offline' }, claudeRow()];
     ui.state.contextSuggest.byThread.ui = { picked: selection.picked || [], resolution: { resolutionId: 'keep-choice' } };
     const before = clone({ thread: ui.thread(), drafts: ui.state.codex.threadDrafts, context: ui.state.contextSuggest });
     await ui.sendMessage();
     assert.equal(ui.thread().sendError, ChatState.claudeContextSendErrorText('CLAUDE_CONTEXT_UNSUPPORTED'));
-    const { sendError, ...after } = ui.thread();
+    const { sendError, preparingInput, ...after } = ui.thread();
     assert.deepEqual(after, before.thread);
     assert.deepEqual(ui.state.codex.threadDrafts, before.drafts);
     assert.deepEqual(ui.state.contextSuggest, before.context);
-    assert.deepEqual(ui.effects.capture, []); assert.deepEqual(ui.effects.requests, []); assert.equal(ui.effects.ready, 0);
+    const early=!!selection.picked || selection.inputSources?.[0].browserToolPermission==='interact';
+    assert.deepEqual(ui.effects.capture, []); assert.equal(ui.effects.requests.length,early?0:1); assert.equal(ui.effects.ready, early?0:1);
+    assert.ok(ui.effects.requests.every(row=>row.path.startsWith('/context/capabilities?')));
     assert.deepEqual(ui.protocol.requests, {}); assert.equal(ui.state.codex.recentEngineId, 'codex');
   }
   assert.equal(ChatState.claudeContextSendErrorText('UNKNOWN'), null);
@@ -956,6 +1282,138 @@ test('actual HTTP error reader and accepted:false responses remove only the refu
     assert.equal(ui.effects.requests.length, 1); assert.equal(ui.effects.timers, 0);
     assert.equal(ui.effects.requests[0].body.engineId, 'claude');
   }
+});
+
+test('real HTTP 422 binary rejection and durable rejected reply keep draft/selections and unlock actual engine selection',async()=>{
+  for(const status of [422,202]){
+    const rejection={code:'UNSUPPORTED_SOURCE_FORMAT',message:'Unsupported immutable source format'};
+    const payload={accepted:false,code:rejection.code,dispatchStatus:'rejected',resumeRequired:false,saved:true,durable:true,
+      ...(status===202?{duplicate:true,status:'rejected',conversationId:null,
+        error:{...rejection,origin:'claude',kind:'unknown'}}:{error:rejection.message})};
+    const sendBodies=[];
+    const fetchJson=compile(`${between('    const fetchJson = async','\n\n    // One catalog read')}\nreturn fetchJson;`,{
+      fetch:async(url,options={})=>{
+        const path=new URL(url).pathname;
+        const body=options.body&&JSON.parse(options.body);
+        const reply=path==='/context/capabilities'?b2Capability:path==='/context/captures'?captureReply(body):payload;
+        const responseStatus=path==='/chat/send'?status:200;
+        if(path==='/chat/send')sendBodies.push(body);
+        return{ok:responseStatus<400,status:responseStatus,text:async()=>JSON.stringify(reply),json:async()=>reply};
+      },
+    });
+    const selected=[fileInput('unsupported-binary')];
+    const ui=surface({realCapture:true,thread:{inputSources:selected},fetchJson});
+    await ui.sendMessage();
+    assert.equal(sendBodies.length,1);
+    assert.deepEqual(sendBodies[0].contextSnapshotIds,['stored-unsupported-binary']);
+    assert.equal(sendBodies[0].expectedContextScope,b2Capability.expectedContextScope);
+    assert.equal(ui.thread().sendError,ChatState.claudeContextSendErrorText('UNSUPPORTED_SOURCE_FORMAT'));
+    assert.deepEqual(ui.thread().messages,[],'definitively refused optimistic row is not a sent conversation');
+    assert.equal(ui.state.codex.threadDrafts.ui,'  keep my draft  ');
+    assert.deepEqual(ui.thread().inputSources,selected);
+    assert.equal(Object.values(ui.protocol.requests)[0].status,'failed');
+    assert.equal(ChatState.chatThreadEngineLocked(ui.thread()),false);
+    ui.setThreadEngine('ui','codex');
+    assert.equal(ui.thread().engineId,'codex');
+    assert.equal(ChatState.chatThreadEngineProfileId(ui.thread(),ui.state.codex),'codex-default');
+    assert.deepEqual(ui.thread().inputSources,selected);
+    assert.equal(ui.effects.requests.length,3);assert.equal(ui.effects.timers,0);
+  }
+});
+
+test('real HTTP uncertain failures retain their optimistic row and do not unlock engine switching',async()=>{
+  for(const failure of [null,{status:502,payload:{code:'TOOL_PROVIDER_FAILED',error:'connection lost'}},
+    {status:422,payload:{accepted:false,code:'UNSUPPORTED_SOURCE_FORMAT',resumeRequired:true,error:'dispatch may have occurred'}},
+    {status:409,payload:{accepted:false,dispatchStatus:'unknown',
+      error:{code:'TURN_START_FAILED',origin:'claude',message:'Fake lost native reply',kind:'unknown'}}},
+    {status:202,payload:{accepted:false,dispatchStatus:'unknown',durable:true,duplicate:true,runId:null,conversationId:'exists',
+      error:{code:'TURN_START_FAILED',origin:'claude',message:'lost reply',kind:'unknown'}}}]){
+    const fetchJson=compile(`${between('    const fetchJson = async','\n\n    // One catalog read')}\nreturn fetchJson;`,{
+      fetch:async()=>{
+        if(!failure)throw new Error('network disconnected');
+        return{ok:failure.status<400,status:failure.status,text:async()=>JSON.stringify(failure.payload),json:async()=>failure.payload};
+      },
+    });
+    const selected=[fileInput('retained-uncertain')];
+    const ui=surface({thread:{inputSources:selected},fetchJson});
+    await ui.sendMessage();
+    assert.equal(ui.thread().messages.length,1);
+    assert.equal(ui.thread().messages[0].status,'unconfirmed');
+    assert.equal(Object.values(ui.protocol.requests)[0].status,'unconfirmed');
+    assert.match(ui.thread().sendError,/접수 여부를 확인하지 못했습니다/);
+    assert.equal(ui.thread().sendError.includes('[object Object]'),false);
+    if(failure?.payload?.error?.code==='TURN_START_FAILED'){
+      assert.equal(Object.hasOwn(failure.payload,'resumeRequired'),false);
+      assert.equal(Object.hasOwn(failure.payload,'code'),false);
+      assert.equal(ui.thread().sendError,`접수 여부를 확인하지 못했습니다. 자동으로 다시 보내지 않습니다. ${failure.payload.error.message}`);
+    }
+    assert.equal(ui.state.codex.threadDrafts.ui,'  keep my draft  ');
+    assert.deepEqual(ui.thread().inputSources,selected);
+    ui.setThreadEngine('ui','codex');assert.equal(ui.thread().engineId,'claude');
+    if(failure?.status===202){
+      assert.equal(ui.thread().conversationId,'exists');
+      assert.equal(ui.thread().engineProfileId,'claude-default');
+      assert.equal(ui.thread().bindingState,'server-check-required');
+    }
+    assert.equal(ui.effects.requests.length,1);assert.equal(ui.effects.timers,0);
+  }
+});
+
+test('actual reopened-store unknown replay without resumeRequired keeps the UI unconfirmed and its Claude binding',async t=>{
+  const dir=mkdtempSync(join(tmpdir(),'egdesk-surface-replay-'));
+  const stores=[];
+  const openStore=()=>{const store=openChatStore({dataDir:dir,ownerScope:'surface-test'});stores.push(store);return store;};
+  t.after(()=>{for(const store of stores)store.close();rmSync(dir,{recursive:true,force:true});});
+  const firstStore=openStore();
+  const first=await runtime(t,{store:firstStore,initialSend:false});
+  const start=first.claude.startTurn;
+  first.claude.startTurn=async params=>{
+    await start(params);
+    throw Object.assign(new Error('Fake lost native reply'),{code:'CLAUDE_CONTEXT_READER_UNSUPPORTED',httpStatus:409});
+  };
+  let replay,restarted;
+  const fetchJson=compile(`${between('    const fetchJson = async','\n\n    // One catalog read')}\nreturn fetchJson;`,{
+    fetch:async(url,options)=>{
+      const body=JSON.parse(options.body);
+      // Produce the real durable replay at the HTTP boundary. The UI makes
+      // exactly one request; this setup models an earlier lost native reply.
+      await assert.rejects(first.chat.send(body),error=>error.resumeRequired===true&&error.dispatchStatus==='unknown');
+      assert.equal(first.transports[0].sent.length,1);
+      await first.claude.dispose();await first.drain();firstStore.close();
+      restarted=await runtime(t,{store:openStore(),initialSend:false});
+      const auth=createChatEngineAuth({chat:restarted.chat,
+        refreshCodexAccount:async()=>assert.fail('Claude replay must not authenticate Codex'),getCodexAuth:()=>({isLoggedIn:false})});
+      const handler=createChatHttpHandler(restarted.chat,auth);
+      const req=Readable.from([Buffer.from(options.body)]);
+      Object.assign(req,{method:'POST',url:'/chat/send',headers:{host:'127.0.0.1:39218','content-type':'application/json'},
+        socket:{remoteAddress:'127.0.0.1'}});
+      const res={writeHead(status){this.status=status;},end(value){this.body=JSON.parse(value);}};
+      assert.equal(await handler(req,res,new URL(url)),true);
+      assert.equal(res.status,202);
+      replay=res.body;
+      assert.equal(Object.hasOwn(replay,'resumeRequired'),false,'exercise the stored shape, never add a flag');
+      assert.equal(Object.hasOwn(replay,'code'),false);
+      assert.deepEqual([replay.accepted,replay.dispatchStatus,replay.duplicate,replay.runId],[false,'unknown',true,null]);
+      assert.deepEqual(replay.error,{code:'TURN_START_FAILED',origin:'claude',message:'Fake lost native reply',kind:'unknown'});
+      return{ok:true,status:res.status,json:async()=>replay};
+    },
+  });
+  const ui=surface({fetchJson});
+  await ui.sendMessage();
+  assert.equal(ui.thread().messages.length,1);
+  assert.equal(ui.thread().messages[0].status,'unconfirmed');
+  assert.equal(Object.values(ui.protocol.requests)[0].status,'unconfirmed');
+  assert.equal(ui.thread().sendError,'접수 여부를 확인하지 못했습니다. 자동으로 다시 보내지 않습니다. Fake lost native reply');
+  assert.equal(ui.state.codex.threadDrafts.ui,'  keep my draft  ');
+  assert.equal(ui.thread().conversationId,replay.conversationId);
+  assert.equal(ui.thread().bindingState,'server-check-required');
+  assert.equal(ui.thread().engineProfileId,'claude-default');
+  ui.setThreadEngine('ui','codex');
+  assert.equal(ui.thread().engineId,'claude');
+  assert.equal(ui.thread().conversationId,replay.conversationId);
+  assert.equal(ui.effects.requests.length,1);assert.equal(ui.effects.timers,0);
+  assert.equal(restarted.transports.length,0,'replaying a durable outcome starts no new native transport');
+  assert.deepEqual([...first.codexCalls,...restarted.codexCalls],[]);
 });
 
 test('a late Context error cannot remove a request already accepted by SSE', async () => {

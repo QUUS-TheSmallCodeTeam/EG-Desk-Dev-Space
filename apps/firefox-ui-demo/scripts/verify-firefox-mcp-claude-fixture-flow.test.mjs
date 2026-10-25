@@ -4,8 +4,13 @@ import fs from 'node:fs';
 import { claudeFixtureOptions, assertClaudeFixturePeer, assertClaudeReady, assertSessionOffer,
   assertClaudeQuestionUi, selectClaudeQuestionAnswers, assertClaudeAnswers, assertNoAutomaticRequests,
   assertClaudeContextBlocked, assertClaudeRateUi, CLAUDE_CONTEXT_ERROR, observeClaudeUi,
-  selectClaudeInOpenEnginePicker, observeEnginePickerAnchor, assertEnginePickerAnchor } from './verify-firefox-mcp-claude-fixture-flow.mjs';
+  selectClaudeInOpenEnginePicker, observeEnginePickerAnchor, assertEnginePickerAnchor,
+  CLAUDE_READER_ERROR, assertClaudeReaderBlocked, assertClaudeContextRoute, assertClaudeContextCapture,
+  assertClaudeImmutablePacket, selectClaudeAttachment, observeAttachmentChoices,
+  observeClaudeContextInspector, assertClaudeContextInspector, observeClaudeFixtureViewport,
+  claudeFixtureCameraSettled, claudeFixtureChatNavigable, returnClaudeChatAfterFixtureSetup } from './verify-firefox-mcp-claude-fixture-flow.mjs';
 import { claudeFixtureEngines, CLAUDE_FIXTURE_QUESTIONS } from './egdesk-chat-fixture-transport.mjs';
+import { fingerprintQaBytes } from './egdesk-context-qa-contract.mjs';
 import { createChatProtocolState, mergeChatSnapshot, claudeContextSendErrorText } from '../overlay/resources/EGDeskChatState.sys.mjs';
 
 const clone = value => structuredClone(value);
@@ -220,7 +225,8 @@ test('question response evidence distinguishes multi indices from a single index
 });
 
 const quietFixture = () => ({ observed: { sends: [], resumes: [], interrupts: [], approvals: [], userInputs: [],
-  authWrites: [], blockedContexts: [] }, context: { captureBatches: 0, fileCaptureOperations: 0, inspectorReads: [], deliveries: [] }, runs: [] });
+  authWrites: [], blockedContexts: [], captures: [], contextRefusals: [] },
+context: { captureBatches: 0, fileCaptureOperations: 0, inspectorReads: [], deliveries: [] }, runs: [] });
 
 test('rate-limit proof binds the visible reset clock and percent to the same Claude run', () => {
   for (const [status, level, usedPercent] of [['allowed_warning', 'warn', 90], ['rejected', 'limit', 100]]) {
@@ -257,11 +263,234 @@ test('exact Context refusal must retain draft plus attachment, with no capture o
   }
 });
 
+const contextThread = { id: 'qa', engineId: 'claude', engineProfileId: 'claude-default', wireClientThreadId: 'qa-wire' };
+const contextRequest = () => ({ engineId: 'claude', engineProfileId: 'claude-default', clientThreadId: 'qa-wire',
+  expectedContextScope: 'opaque-server-expectation-not-authority' });
+const originalContext = 'V1 immutable original\nComplete final line';
+const changedContext = 'V2 live original must not replace V1';
+const sourceFile = '/owned/qa-fixtures/claude-context-test.txt';
+
+function contextEvidence() {
+  const captured = { sourceId: 'source-1', snapshotId: 'source-1', version: 1,
+    hash: fingerprintQaBytes(originalContext).sha256, truncated: false, sourceRef: { path: sourceFile } };
+  const run = { engineId: 'claude', clientThreadId: 'qa-wire', runId: 'run-1', conversationId: 'conversation-1',
+    answerId: 'conversation-1/run-1', fixtureStage: 'context-bound',
+    fixtureContextTools: ['egdesk_list_context', 'egdesk_read_source'], contextCaptures: [captured] };
+  const request = { ...contextRequest(), attachments: [{ id: 'selected-1', kind: 'file', sourceRef: { path: sourceFile } }] };
+  const before = quietFixture(), after = quietFixture();
+  after.observed.captures.push({ request, captures: [captured] });
+  after.observed.sends.push({ ...contextRequest(), runId: run.runId, contextSnapshotIds: [captured.sourceId],
+    contextCapabilities: { read: true, reader: false, publishBriefing: false } });
+  after.context.captureBatches = 1;
+  after.context.fileCaptureOperations = 1;
+  after.runs.push(run);
+  const coverage = { sourceId: captured.sourceId, range: { startLine: 1, endLine: 2 }, totalLines: 2, complete: true, sourceTruncated: false };
+  const text = JSON.stringify({ fixtureOnly: true, tool: 'egdesk_read_source', sourceId: captured.sourceId,
+    snapshotId: captured.sourceId, sourceHash: captured.hash, version: 1, text: originalContext, coverage });
+  const delivery = { sourceId: captured.sourceId, fixtureOnly: true, toolName: 'egdesk_read_source', packet: {
+    role: 'agent_input', packetId: 'packet-1', mode: 'qa-fixture-claude-direct-read', deliveryStatus: 'sent-to-app-server',
+    hash: fingerprintQaBytes(text).sha256, text, coverage, binding: { conversationId: run.conversationId, runId: run.runId, answerId: run.answerId } } };
+  const inspector = { threadId: 'qa', articleCount: 1, sourceId: captured.sourceId, sourceText: originalContext, sourceVisible: true,
+    sourceLabel: '원문 캡처 1–2 / 2행', sourceMetadata: `캡처 hash: ${captured.hash}`, packetId: delivery.packet.packetId,
+    payloadText: text, payloadVisible: true };
+  return { captured, run, before, after, delivery, inspector };
+}
+
+test('B2 proof requires exact UI engine/profile/thread routing, no owner grant and no browser/plan/computer tools', () => {
+  assertClaudeContextRoute(contextRequest(), contextThread);
+  for (const change of [{ engineId: 'codex' }, { engineProfileId: 'site-browser-profile' }, { clientThreadId: 'foreign' },
+    { expectedContextScope: undefined }, { expectedContextScope: '' }, { expectedContextScope: 'x'.repeat(513) },
+    { ownerKey: 'forged' }, { epoch: 1 }, { contextAuthority: {} }, { selectedSources: [] }, { browserToolSelection: {} },
+    { executionPolicy: 'computer' }, { contextCapabilities: { read: true, reader: true, publishBriefing: false } },
+    { contextCapabilities: { read: true, reader: false, publishBriefing: true } },
+    { contextCapabilities: { read: true, reader: false, publishBriefing: false, plan: true } }]) {
+    assert.throws(() => assertClaudeContextRoute({ ...contextRequest(), ...change }, contextThread));
+  }
+});
+
+test('B2 capture proof rejects wrong source/version/hash/binding, refreshed expectation and capture-as-delivery claims', () => {
+  const valid = contextEvidence();
+  assert.deepEqual(assertClaudeContextCapture(valid.before, valid.after, contextThread, valid.run, sourceFile, originalContext), valid.captured);
+  for (const mutate of [row => { row.after.observed.sends[0].expectedContextScope = 'silently-refreshed'; },
+    row => { row.after.observed.captures[0].request.attachments[0].sourceRef.path = '/foreign/file'; },
+    row => { row.captured.hash = fingerprintQaBytes(changedContext).sha256; }, row => { row.captured.version = 2; },
+    row => { row.captured.truncated = true; }, row => { row.captured.snapshotId = 'another'; },
+    row => { row.after.observed.sends[0].contextSnapshotIds = ['another']; }, row => { row.run.clientThreadId = 'foreign'; },
+    row => { row.run.fixtureContextTools.push('egdesk_browser_interact'); },
+    row => { row.after.context.deliveries.push({}); }, row => { row.after.context.captureBatches = 2; },
+    row => { row.after.observed.sends.push(clone(row.after.observed.sends[0])); }]) {
+    const changed = contextEvidence(); mutate(changed);
+    assert.throws(() => assertClaudeContextCapture(changed.before, changed.after, contextThread, changed.run, sourceFile, originalContext));
+  }
+});
+
+test('B2 immutable packet proof compares full original bytes, version, coverage, run and synthetic label', () => {
+  const valid = contextEvidence();
+  assertClaudeImmutablePacket(valid.delivery, valid.captured, valid.run, originalContext, changedContext);
+  const alterPayload = (row, mutate) => {
+    const payload = JSON.parse(row.delivery.packet.text); mutate(payload);
+    row.delivery.packet.text = JSON.stringify(payload);
+    row.delivery.packet.hash = fingerprintQaBytes(row.delivery.packet.text).sha256;
+  };
+  for (const mutate of [row => { row.delivery.fixtureOnly = false; }, row => { row.delivery.toolName = 'egdesk_browser_observe'; },
+    row => { row.delivery.packet.binding.runId = 'foreign'; }, row => { row.delivery.packet.hash = 'forged'; },
+    row => { row.delivery.packet.mode = 'native-reader'; }, row => { row.delivery.packet.coverage.complete = false; },
+    row => alterPayload(row, value => { value.text = changedContext; }),
+    row => alterPayload(row, value => { value.text = originalContext.split('\n')[0]; }),
+    row => alterPayload(row, value => { value.version = 2; }),
+    row => alterPayload(row, value => { value.sourceHash = 'forged'; }),
+    row => alterPayload(row, value => { value.coverage.sourceTruncated = true; }),
+    row => alterPayload(row, value => { value.fixtureOnly = false; })]) {
+    const changed = contextEvidence(); mutate(changed);
+    assert.throws(() => assertClaudeImmutablePacket(changed.delivery, changed.captured, changed.run, originalContext, changedContext));
+  }
+  assert.throws(() => assertClaudeImmutablePacket(valid.delivery, valid.captured, valid.run, originalContext, originalContext));
+});
+
+test('B2 inspector proof needs the exact visible source and separate exact visible synthetic packet in the same room', () => {
+  const { inspector, captured, delivery } = contextEvidence();
+  assertClaudeContextInspector(inspector, contextThread, captured, delivery, originalContext);
+  for (const change of [{ threadId: 'foreign' }, { articleCount: 2 }, { sourceId: 'foreign' }, { sourceText: changedContext },
+    { sourceVisible: false }, { sourceLabel: 'delivered' }, { sourceMetadata: 'missing hash' },
+    { packetId: 'foreign' }, { payloadText: originalContext }, { payloadVisible: false }]) {
+    assert.throws(() => assertClaudeContextInspector({ ...inspector, ...change }, contextThread, captured, delivery, originalContext));
+  }
+});
+
+function attachmentHarness(rows = [
+  { viewId: 'small', checked: false, type: 'checkbox', disabled: false },
+  { viewId: 'large', checked: true, type: 'checkbox', disabled: false },
+], { updateCheckbox = true } = {}) {
+  const choices = clone(rows), clicks = [], panel = '#egd-codex-input-panel[data-thread-id="qa"]';
+  return { clicks, choices, panel,
+    async inspect(selector) {
+      if (selector === panel) return [{ visible: true }];
+      const match = selector.match(/\[data-view-id="([^"]+)"\]/);
+      assert.ok(selector.startsWith(`${panel} `) && match);
+      return choices.filter(row => row.viewId === match[1]).map(() => ({ visible: true }));
+    },
+    async evaluateChrome() { return clone(choices); },
+    async click(selector) {
+      clicks.push(selector);
+      if (selector === '[data-testid="chat-attach-open"]' || selector === `${panel} [data-testid="chat-attach-confirm"]`) return;
+      assert.ok(selector.startsWith(`${panel} [data-testid="chat-attach-source"]`));
+      const id = selector.match(/\[data-view-id="([^"]+)"\]/)[1];
+      const target = choices.filter(row => row.viewId === id);
+      assert.equal(target.length, 1);
+      if (updateCheckbox) target[0].checked = !target[0].checked;
+    },
+  };
+}
+
+test('B2 attachment selection uses the current-room actual checkbox and confirm clicks, never draft injection', async () => {
+  const harness = attachmentHarness();
+  await selectClaudeAttachment(harness, 'qa', 'small', ['small', 'large']);
+  assert.deepEqual(harness.clicks, ['[data-testid="chat-attach-open"]',
+    `${harness.panel} [data-testid="chat-attach-source"][data-view-id="small"]`,
+    `${harness.panel} [data-testid="chat-attach-source"][data-view-id="large"]`,
+    `${harness.panel} [data-testid="chat-attach-confirm"]`]);
+  assert.deepEqual(harness.choices.filter(row => row.checked).map(row => row.viewId), ['small']);
+});
+
+test('B2 selection refuses ambiguous/missing/non-checkbox/foreign selection and unobserved checkbox changes', async () => {
+  const normal = attachmentHarness().choices;
+  for (const rows of [[normal[0], normal[0]], [normal[1]], [{ ...normal[0], type: 'radio' }],
+    [{ ...normal[0], disabled: true }], [normal[0], { ...normal[1], viewId: 'unowned' }]]) {
+    const harness = attachmentHarness(rows);
+    await assert.rejects(selectClaudeAttachment(harness, 'qa', 'small', ['small', 'large']));
+    assert.deepEqual(harness.clicks, ['[data-testid="chat-attach-open"]']);
+  }
+  const unchanged = attachmentHarness(normal, { updateCheckbox: false });
+  await assert.rejects(selectClaudeAttachment(unchanged, 'qa', 'small', ['small', 'large']));
+  assert.ok(unchanged.clicks.every(selector => !selector.includes('chat-attach-confirm')));
+});
+
+test('large-source refusal keeps draft+attachment and permits only one capture, never accepted send/delivery or silent retry', () => {
+  assert.equal(claudeContextSendErrorText('CLAUDE_CONTEXT_READER_UNSUPPORTED'), CLAUDE_READER_ERROR);
+  const before = { thread: { ...contextThread, conversationId: null, draft: 'unsent large draft',
+    inputSources: [{ id: 'large', kind: 'file', sourceRef: { path: sourceFile } }] }, composer: 'unsent large draft',
+  attachments: [{ id: 'large', text: 'large source · 미전송' }] };
+  const after = { ...clone(before), thread: { ...clone(before.thread), sendError: CLAUDE_READER_ERROR }, alerts: [CLAUDE_READER_ERROR] };
+  const start = quietFixture(), end = quietFixture();
+  end.context.captureBatches = 1;
+  end.context.fileCaptureOperations = 1;
+  end.observed.captures.push({ request: { ...contextRequest(), attachments: [{ sourceRef: { path: sourceFile } }] } });
+  end.observed.contextRefusals.push({ route: '/chat/send', code: 'CLAUDE_CONTEXT_READER_UNSUPPORTED' });
+  assertClaudeReaderBlocked(before, after, start, end);
+  for (const mutate of [row => { row.ui.composer = ''; }, row => { row.ui.thread.draft = ''; },
+    row => { row.ui.thread.inputSources = []; }, row => { row.ui.attachments = []; }, row => { row.ui.alerts = []; },
+    row => { row.ui.thread.sendError = CLAUDE_CONTEXT_ERROR; }, row => { row.fixture.context.captureBatches++; },
+    row => { row.fixture.observed.sends.push({ engineId: 'codex' }); }, row => { row.fixture.runs.push({}); },
+    row => { row.fixture.context.deliveries.push({}); }, row => { row.fixture.observed.contextRefusals.push({}); },
+    row => { row.fixture.observed.captures[0].request.attachments[0].sourceRef.path = '/foreign'; }]) {
+    const changed = { ui: clone(after), fixture: clone(end) }; mutate(changed);
+    assert.throws(() => assertClaudeReaderBlocked(before, changed.ui, start, changed.fixture));
+  }
+});
+
+const readyViewport = () => ({ shellCount: 1, shell: anchorBox(500, 100, 400, 600), dock: anchorBox(300, 750, 600, 40),
+  view: { width: 1200, height: 800 }, navigation: [{ rect: anchorBox(520, 140, 30, 30), disabled: false, hittable: true }],
+  camera: { pan: { x: 0, y: 0 }, panTarget: { x: 0, y: 0 }, zoom: 0.96, zoomTarget: 0.96 } });
+
+test('Claude fixture navigation requires settled camera, whole visible Chat and one unobscured native navigation control', () => {
+  assert.equal(claudeFixtureChatNavigable(readyViewport()), true);
+  for (const mutate of [row => { row.camera.panTarget.y = -500; }, row => { row.camera.zoomTarget = 0.8; },
+    row => { row.camera.pan.x = NaN; }, row => { row.camera.zoom = 0; }, row => { row.shell.top = -300; },
+    row => { row.shell.bottom = 820; }, row => { row.dock = anchorBox(600, 600, 500, 50); },
+    row => { row.shellCount = 2; }, row => { row.navigation = []; }, row => { row.navigation.push(clone(row.navigation[0])); },
+    row => { row.navigation[0].hittable = false; }, row => { row.navigation[0].disabled = true; },
+    row => { row.navigation[0].rect.top = -10; }]) {
+    const changed = readyViewport(); mutate(changed); assert.equal(claudeFixtureChatNavigable(changed), false);
+  }
+  assert.equal(claudeFixtureCameraSettled({}), false);
+});
+
+test('Claude setup waits through pending file-card pan before one native Dock return and then stable hit-tested navigation', async () => {
+  const ready = readyViewport(), moving = readyViewport(), offscreen = readyViewport(), returning = readyViewport(), covered = readyViewport();
+  moving.camera.panTarget.y = -500; // Current Chat rect still looks usable before the first camera frame.
+  offscreen.shell.top = -400; offscreen.shell.bottom = 200;
+  offscreen.navigation[0].rect.top = -360; offscreen.navigation[0].hittable = false;
+  offscreen.camera.pan.y = offscreen.camera.panTarget.y = -500;
+  returning.camera.pan.y = -20;
+  covered.navigation[0].hittable = false;
+  const before = [moving, moving, offscreen, offscreen], after = [returning, covered, ready, ready];
+  let returningHome = false, beforeReads = 0, afterReads = 0;
+  const clicks = [];
+  const harness = {
+    async evaluateChrome(script) {
+      if (!script.includes('shellCount: shells.length')) return clone(returningHome ? returning : offscreen); // Existing openChat's read-only observer.
+      return clone(returningHome ? after[Math.min(afterReads++, after.length - 1)] : before[Math.min(beforeReads++, before.length - 1)]);
+    },
+    async click(selector) {
+      assert.equal(beforeReads, 4, 'Do not return while the file-card camera target is still moving');
+      assert.equal(selector, '.egd-dock-btn[data-id="chat"]');
+      assert.equal(returningHome, false, 'No blind click retry');
+      clicks.push(selector); returningHome = true;
+    },
+  };
+  const result = await returnClaudeChatAfterFixtureSetup(harness);
+  assert.deepEqual(clicks, ['.egd-dock-btn[data-id="chat"]']);
+  assert.equal(result.before.camera.panTarget.y, -500);
+  assert.equal(result.settled.shell.top, -400);
+  assert.deepEqual(result.returned, ready);
+  assert.equal(afterReads, 4, 'Do not navigate until movement and occlusion are both gone for two samples');
+});
+
+test('Claude setup already in view uses observations only and does not click Dock or create a room', async () => {
+  const harness = { async evaluateChrome() { return readyViewport(); }, async click() { assert.fail('Already usable Chat needs no action'); } };
+  assert.deepEqual((await returnClaudeChatAfterFixtureSetup(harness)).returned, readyViewport());
+});
+
 test('verifier imports have no runtime and observations do not synthesize UI actions or replace transport', () => {
   assert.doesNotMatch(observeClaudeUi.toString(), /\.click\(|dispatchEvent|\.checked\s*=|\.value\s*=/);
+  for (const observer of [observeAttachmentChoices, observeClaudeContextInspector, observeClaudeFixtureViewport]) {
+    assert.doesNotMatch(observer.toString(), /\.click\(|dispatchEvent|\.checked\s*=|\.value\s*=|\.panTarget\s*=|\.zoomTarget\s*=/);
+  }
   const source = fs.readFileSync(new URL('./verify-firefox-mcp-claude-fixture-flow.mjs', import.meta.url), 'utf8');
   assert.doesNotMatch(source, /(?:loopbackJson|fetch)\(['"]\/(?:chat\/(?:send|approval|user-input)|auth\/)/);
   assert.doesNotMatch(source, /(?:window\.fetch|window\.EventSource)\s*=/);
+  assert.doesNotMatch(source, /codexBridge\.(?:addInputSources|send|previewInputs)|:39218/);
+  assert.match(source, /await selectClaudeAttachment\(harness, thread.id/);
   assert.match(source, /await sendFromComposer\(harness, prompt\)/);
   assert.match(source, /await selectQaThread\(harness, ordinary\)/);
   assert.match(source, /adapterExecutionVerified = false/);

@@ -5,10 +5,12 @@ import path from 'node:path';
 import { Readable } from 'node:stream';
 import { EventEmitter } from 'node:events';
 import test from 'node:test';
+import vm from 'node:vm';
 import { bootstrapQaProfile, canonicalTempRoot, LOADER_FILES } from './egdesk-chat-qa-profile.mjs';
 import { createQaFixtureTransport, CLAUDE_FIXTURE_QUESTIONS, CLAUDE_FIXTURE_TEXT } from './egdesk-chat-fixture-transport.mjs';
 import { prepareQaFirefox } from './run-firefox-mcp-target.mjs';
-import { assertNativeTerminalExit } from './egdesk-chat-qa-contract.sys.mjs';
+import { assertNativeTerminalExit, assertQaFixtureArtifact } from './egdesk-chat-qa-contract.sys.mjs';
+import { createChatProtocolState, mergeChatSnapshot, projectRunMessages, usableArtifact } from '../overlay/resources/EGDeskChatState.sys.mjs';
 import { assertPublishedBriefing, assertContextCaptureBatch, assertStoredAgentDelivery,
   captureContextReadEvidence, fingerprintQaBytes } from './egdesk-context-qa-contract.mjs';
 
@@ -81,12 +83,14 @@ test('fixture rejects unknown bridge/auth/send/approval URLs without forwarding 
   assert.equal(globalThis.EventSource, eventSourceBefore);
 });
 
-const claudeSend = (handler, scenario, extra = {}) => request(handler, 'POST', '/chat/send', {
+const claudeSend = async (handler, scenario, extra = {}) => request(handler, 'POST', '/chat/send', {
   message: `EGDESK_QA_CLAUDE_${scenario} unit`, engineId: 'claude', profileEnabled: false,
+  ...(scenario === 'CONTEXT' && !Object.hasOwn(extra, 'expectedContextScope')
+    ? { expectedContextScope: await claudeScope(handler, extra) } : {}),
   clientThreadId: 'qa-claude-thread', requestId: `qa-claude-${scenario}`, ...extra,
 });
 
-test('Claude fixture is separately gated, Codex-offline and Context-blocking without provider I/O', async t => {
+test('Claude fixture is separately gated, Codex-offline and refuses unsupported Context bodies without provider I/O', async t => {
   t.mock.method(globalThis, 'fetch', () => { throw new Error('No provider I/O in Claude fixture'); });
   const original = setup(t);
   assert.equal((await claudeSend(original.handler, 'TEXT')).status, 409);
@@ -107,7 +111,9 @@ test('Claude fixture is separately gated, Codex-offline and Context-blocking wit
     { attachments: [{ id: 's' }] }, { contextResolution: { resolutionId: 'r' } }]) {
     assert.equal((await claudeSend(handler, 'TEXT', extra)).body.code, 'CLAUDE_CONTEXT_UNSUPPORTED');
   }
-  assert.equal((await request(handler, 'POST', '/context/captures', { sources: [] })).body.code, 'CLAUDE_CONTEXT_UNSUPPORTED');
+  assert.equal((await request(handler, 'POST', '/context/captures', { sources: [] })).body.code, 'INVALID_CONTEXT_ROUTING');
+  await request(handler, 'POST', '/__qa/context-config', { claudeCapabilities: false }, TOKEN);
+  assert.equal((await request(handler, 'POST', '/context/captures', { engineId: 'claude', clientThreadId: 'qa-claude-thread', attachments: [] })).body.code, 'CLAUDE_CONTEXT_UNSUPPORTED');
   const control = await fixtureState(handler);
   assert.deepEqual(control.observed.sends, []);
   assert.deepEqual(control.runs, []);
@@ -198,6 +204,201 @@ test('Claude rate-limit warning/rejection retain reset time and schedule no retr
   assert.equal(timer.mock.callCount(), 0);
 });
 
+const CLAUDE_ROUTE = { engineId: 'claude', engineProfileId: 'claude-default', clientThreadId: 'qa-claude-thread' };
+const contextRoute = (sourceId, overrides = {}) => `/context/captures/${sourceId}?${new URLSearchParams({ ...CLAUDE_ROUTE, ...overrides })}`;
+const claudeScope = async (handler, overrides = {}) => {
+  const scope = Object.fromEntries(Object.entries({ ...CLAUDE_ROUTE, ...overrides })
+    .filter(([key]) => ['engineId', 'engineProfileId', 'clientThreadId', 'conversationId'].includes(key)));
+  return (await request(handler, 'GET', `/context/capabilities?${new URLSearchParams(scope)}`)).body.expectedContextScope;
+};
+const claudeCapture = async (handler, attachments, overrides = {}) => request(handler, 'POST', '/context/captures', {
+  ...CLAUDE_ROUTE, attachments, ...(!Object.hasOwn(overrides, 'expectedContextScope')
+    ? { expectedContextScope: await claudeScope(handler, overrides) } : {}), ...overrides });
+
+test('Claude B2 capability and capture routes require UI routing hints, never UI authority or Codex auth', async t => {
+  const { handler, info } = setup(t, { claude: true });
+  const route = `/context/capabilities?${new URLSearchParams(CLAUDE_ROUTE)}`;
+  const descriptor = (await request(handler, 'GET', route)).body;
+  assert.match(descriptor.expectedContextScope, /^[a-f0-9]{64}$/);
+  assert.deepEqual(descriptor, { contract: 'egdesk-context-b2', engineId: 'claude', engineProfileId: 'claude-default',
+    selectedAttachments: true, immutableRead: true, nativeReader: false, tools: ['egdesk_list_context', 'egdesk_read_source'],
+    expectedContextScope: descriptor.expectedContextScope });
+  assert.equal((await request(handler, 'GET', '/auth/status')).body.isLoggedIn, false);
+  for (const extra of [{ ownerKey: 'forged' }, { epoch: 0 }, { contextAuthority: { ownerKey: 'forged' } }]) {
+    assert.equal((await claudeCapture(handler, [attachment('A', { path: info.artifactPath })], extra)).status, 400);
+  }
+  for (const suffix of ['&ownerKey=forged', '&epoch=0']) assert.equal((await request(handler, 'GET', route + suffix)).status, 400);
+  for (const extra of [{ engineId: 'codex' }, { engineProfileId: 'other' }, { clientThreadId: '' }]) {
+    assert.ok((await claudeCapture(handler, [attachment('A', { path: info.artifactPath })], extra)).status >= 400);
+  }
+  await request(handler, 'POST', '/__qa/context-config', { claudeCapabilities: false }, TOKEN);
+  assert.equal((await request(handler, 'GET', route)).status, 404);
+  assert.equal((await claudeCapture(handler, [attachment('A', { path: info.artifactPath })])).body.code, 'CLAUDE_CONTEXT_UNSUPPORTED');
+  const state = await fixtureState(handler);
+  assert.equal(state.context.captureBatches, 0);
+  assert.deepEqual(state.observed.sends, []);
+  assert.deepEqual(state.observed.authWrites, []);
+});
+
+test('Claude B2 exact immutable source survives live mutation and resume; synthetic full read never clips at 40 lines', async t => {
+  const fetchSpy = t.mock.method(globalThis, 'fetch', () => { throw new Error('No provider or real bridge'); });
+  const { handler, info } = setup(t, { claude: true });
+  const file = path.join(info.profile, 'qa-fixtures', 'claude-original.txt');
+  const original = Array.from({ length: 80 }, (_, index) => `V1-${index + 1}`).join('\n');
+  fs.writeFileSync(file, original, { flag: 'wx', mode: 0o600 });
+  const receipt = await claudeCapture(handler, [attachment('file-A', { path: file })]);
+  assert.equal(receipt.status, 200);
+  const [capture] = receipt.body.captures;
+  const before = captureContextReadEvidence((await request(handler, 'GET', contextRoute(capture.sourceId))).body);
+  assert.equal(before.delivered, null);
+  assert.deepEqual(before.bindings, []);
+  assert.equal(before.source.text, original);
+  fs.writeFileSync(file, 'LIVE V2 MUST NOT REPLACE V1');
+  const sent = await claudeSend(handler, 'CONTEXT', { engineProfileId: 'claude-default', contextSnapshotIds: [capture.sourceId] });
+  assert.equal(sent.status, 202);
+  let state = await fixtureState(handler), run = state.runs[0];
+  assert.deepEqual(run.fixtureContextTools, ['egdesk_list_context', 'egdesk_read_source']);
+  assert.deepEqual(run.contextCaptures, [capture]);
+  assert.equal(state.context.deliveries.length, 0, 'capture/bind is not delivery');
+  assert.equal((await request(handler, 'POST', '/__qa/context-release', { runId: run.runId, phase: 'read' }, TOKEN)).status, 200);
+  state = await fixtureState(handler);
+  const [delivery] = state.context.deliveries;
+  const inspected = captureContextReadEvidence((await request(handler, 'GET', contextRoute(capture.sourceId,
+    { conversationId: run.conversationId, packetId: delivery.packet.packetId }))).body);
+  assert.equal(inspected.source.text, original);
+  assert.deepEqual(inspected.capture, before.capture);
+  const payload = JSON.parse(delivery.packet.text);
+  assert.equal(payload.fixtureOnly, true);
+  assert.equal(payload.text, original);
+  assert.equal(payload.sourceHash, fingerprintQaBytes(original).sha256);
+  assert.equal(payload.snapshotId, capture.sourceId);
+  assert.equal(payload.version, capture.version);
+  assert.deepEqual(payload.coverage.range, { startLine: 1, endLine: 80 });
+  assert.equal(payload.coverage.complete, true);
+  assert.equal(payload.coverage.sourceTruncated, false);
+  assert.equal(inspected.delivered.hash, fingerprintQaBytes(delivery.packet.text).sha256);
+  assert.equal((await request(handler, 'POST', '/__qa/context-release', { runId: run.runId, phase: 'briefing' }, TOKEN)).body.code, 'CONTEXT_TOOL_UNSUPPORTED');
+  await request(handler, 'POST', '/__qa/context-release', { runId: run.runId, phase: 'complete' }, TOKEN);
+  const resumed = (await request(handler, 'POST', '/chat/resume', { ...CLAUDE_ROUTE, conversationId: run.conversationId })).body;
+  assert.deepEqual(resumed.runs[0].contextCaptures, [capture]);
+  assert.equal(resumed.runs[0].status, 'completed');
+  assert.equal((await fixtureState(handler)).context.captureBatches, 1, 'resume does not recapture');
+  assert.equal((await fixtureState(handler)).providerTurns, 0);
+  assert.equal(fetchSpy.mock.callCount(), 0);
+});
+
+test('Claude B2 source site identity is independent; wrong engine/account/client/conversation are denied', async t => {
+  const { handler } = setup(t, { claude: true });
+  const source = attachment('site', { url: 'https://example.invalid/qa', viewId: 'qa-browser',
+    profileId: 'site-profile-not-engine-profile', accountId: 'site-person@egdesk.invalid',
+    browserProfileId: 'website-profile', siteAccount: 'website-user@egdesk.invalid' }, 'browser', 'Different site account; same explicitly selected immutable text.');
+  const [capture] = (await claudeCapture(handler, [source])).body.captures;
+  assert.equal(capture.sourceRef.accountId, 'site-person@egdesk.invalid');
+  assert.equal(capture.sourceRef.browserProfileId, 'website-profile');
+  assert.equal(capture.sourceRef.siteAccount, 'website-user@egdesk.invalid');
+  assert.equal((await request(handler, 'GET', contextRoute(capture.sourceId, { engineId: 'codex' }))).status, 403);
+  assert.equal((await request(handler, 'GET', contextRoute(capture.sourceId, { engineProfileId: 'foreign' }))).status, 403);
+  assert.equal((await request(handler, 'GET', contextRoute(capture.sourceId, { clientThreadId: 'foreign' }))).body.code, 'CONTEXT_THREAD_MISMATCH');
+  assert.equal((await claudeSend(handler, 'CONTEXT', { clientThreadId: 'foreign', contextSnapshotIds: [capture.sourceId] })).body.code, 'CONTEXT_THREAD_MISMATCH');
+  const first = await claudeSend(handler, 'CONTEXT', { contextSnapshotIds: [capture.sourceId] });
+  const other = await claudeSend(handler, 'TEXT');
+  assert.equal((await claudeSend(handler, 'CONTEXT', { conversationId: other.body.conversationId, contextSnapshotIds: [capture.sourceId] })).body.code, 'CONTEXT_THREAD_MISMATCH');
+  assert.equal((await request(handler, 'GET', contextRoute(capture.sourceId, { conversationId: other.body.conversationId }))).body.code, 'CONTEXT_THREAD_MISMATCH');
+  await request(handler, 'POST', '/__qa/account-change', { variant: 'b' }, TOKEN);
+  assert.equal((await request(handler, 'GET', contextRoute(capture.sourceId))).status, 200, 'Codex account change does not invalidate Claude');
+  await request(handler, 'POST', '/__qa/account-change', { engineId: 'claude', variant: 'b' }, TOKEN);
+  assert.equal((await request(handler, 'GET', contextRoute(capture.sourceId))).status, 404);
+  assert.equal((await request(handler, 'POST', '/__qa/context-release', { runId: first.body.runId, phase: 'read' }, TOKEN)).body.code, 'ACCOUNT_CHANGED');
+  assert.equal((await fixtureState(handler)).context.deliveries.length, 0);
+});
+
+test('Claude B2 late capture epoch cannot release success into a different engine account', async t => {
+  const { handler, info } = setup(t, { claude: true });
+  await request(handler, 'POST', '/__qa/context-config', { holdNextCapture: true }, TOKEN);
+  const pending = claudeCapture(handler, [attachment('A', { path: info.artifactPath })]);
+  await new Promise(resolve => setImmediate(resolve));
+  assert.equal((await fixtureState(handler)).pendingContextCaptures, 1);
+  await request(handler, 'POST', '/__qa/account-change', { engineId: 'claude', variant: 'b' }, TOKEN);
+  const release = await request(handler, 'POST', '/__qa/context-release', { phase: 'capture', clientThreadId: CLAUDE_ROUTE.clientThreadId }, TOKEN);
+  assert.equal(release.body.code, 'ACCOUNT_CHANGED');
+  assert.equal((await pending).body.code, 'ACCOUNT_CHANGED');
+  const state = await fixtureState(handler);
+  assert.equal(state.observed.sends.length, 0);
+  assert.equal(state.context.deliveries.length, 0);
+});
+
+test('Claude B2 capability-A/late-SSE/account-B rejects stale capture and send before any new store or binding', async t => {
+  const { handler, info } = setup(t, { claude: true });
+  const attachments = [attachment('A', { path: info.artifactPath })];
+  const scopeA = await claudeScope(handler);
+  const first = await claudeCapture(handler, attachments, { expectedContextScope: scopeA });
+  assert.equal(first.status, 200);
+  const ids = first.body.captures.map(row => row.sourceId);
+  assert.ok(first.body.captures.every(row => !Object.hasOwn(row, 'expectedContextScope')), 'Expectation is not persisted as snapshot authority');
+  await request(handler, 'POST', '/__qa/account-change', { engineId: 'claude', variant: 'b' }, TOKEN);
+  // Deliberately do not consult state/events or refresh the descriptor: model
+  // the unbound UI's old request arriving before it sees the account SSE.
+  const before = await fixtureState(handler);
+  for (const expectedContextScope of [scopeA, undefined, '', 'forged']) {
+    const captured = await claudeCapture(handler, attachments, { expectedContextScope });
+    assert.equal(captured.status, 409);
+    assert.equal(captured.body.code, 'CONTEXT_SCOPE_CHANGED');
+    const sent = await claudeSend(handler, 'CONTEXT', { expectedContextScope, contextSnapshotIds: ids });
+    assert.equal(sent.status, 409);
+    assert.equal(sent.body.code, 'CONTEXT_SCOPE_CHANGED');
+  }
+  const after = await fixtureState(handler);
+  assert.deepEqual(after.context, before.context, 'No B file read/capture/bind/delivery');
+  assert.deepEqual(after.runs, []);
+  assert.deepEqual(after.observed.sends, []);
+  assert.deepEqual(after.observed.captures, before.observed.captures);
+  const scopeB = await claudeScope(handler);
+  assert.notEqual(scopeB, scopeA);
+  assert.notEqual(scopeB, await claudeScope(handler, { clientThreadId: 'another-ui-thread' }));
+  assert.equal((await claudeCapture(handler, attachments, { expectedContextScope: scopeB,
+    clientThreadId: 'another-ui-thread' })).body.code, 'CONTEXT_SCOPE_CHANGED');
+  const second = await claudeCapture(handler, attachments, { expectedContextScope: scopeB });
+  assert.equal(second.status, 200, 'A fresh explicit user attempt may use B after confirming B');
+  const sent = await claudeSend(handler, 'CONTEXT', { expectedContextScope: scopeB,
+    contextSnapshotIds: second.body.captures.map(row => row.sourceId) });
+  assert.equal(sent.status, 202);
+  assert.equal(await claudeScope(handler, { conversationId: sent.body.conversationId }), scopeB, 'Native binding does not change the expectation');
+  await request(handler, 'POST', '/__qa/account-change', { variant: 'b' }, TOKEN);
+  assert.equal(await claudeScope(handler), scopeB, 'Other engine account changes do not invalidate Claude');
+  await request(handler, 'POST', '/__qa/account-change', { engineId: 'claude', variant: 'b' }, TOKEN);
+  assert.notEqual(await claudeScope(handler), scopeB, 'Own epoch changes invalidate even the same account identity');
+  assert.equal((await claudeCapture(handler, attachments, { expectedContextScope: scopeB })).body.code, 'CONTEXT_SCOPE_CHANGED');
+  const restarted = createQaFixtureTransport({ profile: info.profile, token: TOKEN,
+    env: { ...FIXTURE_ENV, EGDESK_QA_CLAUDE_FIXTURE: '1' } });
+  t.after(() => restarted.dispose());
+  assert.notEqual(await claudeScope(restarted.handler), scopeA, 'Fresh fixture lifetime invalidates old expectations');
+  assert.equal((await claudeCapture(restarted.handler, attachments, { expectedContextScope: scopeA })).body.code, 'CONTEXT_SCOPE_CHANGED');
+});
+
+test('Claude B2 large/truncated/binary/Reader/publish inputs fail without partial binding or a Codex fallback', async t => {
+  const { handler, info } = setup(t, { claude: true });
+  const file = path.join(info.profile, 'qa-fixtures', 'claude-large.txt');
+  fs.writeFileSync(file, 'QA immutable large source '.repeat(600), { flag: 'wx', mode: 0o600 });
+  const inputs = [attachment('small', { path: info.artifactPath }), attachment('large', { path: file })];
+  const captures = (await claudeCapture(handler, inputs)).body.captures;
+  const extra = { contextSnapshotIds: captures.map(row => row.sourceId) };
+  assert.equal((await claudeSend(handler, 'CONTEXT', extra)).body.code, 'CLAUDE_CONTEXT_READER_UNSUPPORTED');
+  for (const ref of captures) assert.deepEqual((await request(handler, 'GET', contextRoute(ref.sourceId))).body.bindings, []);
+  assert.equal((await claudeSend(handler, 'CONTEXT', { ...extra, contextCapabilities: { read: true, reader: true } })).body.code, 'CLAUDE_CONTEXT_READER_UNSUPPORTED');
+  assert.equal((await claudeSend(handler, 'CONTEXT', { ...extra, contextCapabilities: { read: true, publishBriefing: true } })).body.code, 'CONTEXT_TOOL_UNSUPPORTED');
+  const truncated = attachment('truncated', { viewId: 'qa-browser' }, 'browser', 'Incomplete text');
+  truncated.content.truncated = true;
+  assert.equal((await claudeCapture(handler, [truncated])).body.code, 'CONTEXT_CAPTURE_INCOMPLETE');
+  const binary = attachment('binary', { viewId: 'qa-browser' }, 'browser', 'binary\0content');
+  assert.equal((await claudeCapture(handler, [binary])).body.code, 'UNSUPPORTED_SOURCE_FORMAT');
+  const state = await fixtureState(handler);
+  assert.deepEqual(state.observed.sends, []);
+  assert.deepEqual(state.runs, []);
+  assert.equal(state.context.deliveries.length, 0);
+  assert.equal(state.context.captureBatches, 1);
+  assert.equal(state.observed.events.some(row => row.event.startsWith('reader.')), false);
+});
+
 test('fixture refuses ordinary prompts and unauthenticated control routes', async (t) => {
   const { handler } = setup(t);
   assert.equal((await request(handler, 'POST', '/chat/send', { message: 'ordinary real user request', profileEnabled: false })).status, 400);
@@ -252,6 +453,125 @@ const startStop = async handler => (await request(handler, 'POST', '/chat/send',
 })).body;
 const stopIdentity = run => ({ conversationId: run.conversationId, runId: run.runId, requestId: run.requestId });
 const fixtureState = async handler => (await request(handler, 'GET', '/__qa/state', null, TOKEN)).body;
+
+// Importing the rendered CLI would connect to Firefox. Evaluate only its real
+// pure predicate; no copied implementation and no browser/runtime startup.
+const chatVerifierSource = fs.readFileSync(new URL('./verify-firefox-mcp-chat-fixture-flow.mjs', import.meta.url), 'utf8');
+const artifactReadinessSource = chatVerifierSource.slice(chatVerifierSource.indexOf('function createArtifactClickReadiness()'),
+  chatVerifierSource.indexOf('async function observeArtifactClickTarget('));
+const makeArtifactReadiness = vm.runInNewContext(`(${artifactReadinessSource.trim()})`);
+const rectangle = (left, top, width, height) => ({ left, top, right: left + width, bottom: top + height, width, height });
+const artifactObservation = (top = 573.72, hittable = true) => ({ matchCount: 1, artifactId: 'qa-artifact', runId: 'qa-run', answerId: 'qa-conversation/qa-run',
+  rect: rectangle(603.85, top, 146.65, 30.83), logRect: rectangle(557.6, 237.12, 404.73, 401.65), scrollTop: 500,
+  viewport: rectangle(0, 0, 1440, 900), clippingAncestors: [{ rect: rectangle(557.6, 237.12, 404.73, 401.65), x: true, y: true }],
+  visible: true, disabled: false, hittable });
+
+test('Chat artifact waits out the observed End smooth-scroll trace, then needs three stable hit-tested observations', () => {
+  const ready = makeArtifactReadiness();
+  // Central native click at (677,658) hit chat-run-status while the chip was
+  // below its clipping log; a second click is not an acceptable workaround.
+  for (const top of [670.07, 654.8, 642.45]) assert.equal(ready(artifactObservation(top, false)), false);
+  assert.equal(ready(artifactObservation(590)), false);
+  assert.equal(ready(artifactObservation(580)), false);
+  assert.equal(ready(artifactObservation()), false);
+  assert.equal(ready(artifactObservation()), false);
+  assert.equal(ready(artifactObservation()), true);
+});
+
+test('Chat artifact readiness resets on occlusion, clipping, drift, identity change or invalid geometry', () => {
+  for (const mutate of [row => { row.hittable = false; }, row => { row.matchCount = 2; }, row => { row.disabled = true; },
+    row => { row.visible = false; }, row => { row.rect.left = -1; }, row => { row.rect.bottom = 640; },
+    row => { row.rect.top = NaN; }, row => { row.scrollTop = undefined; },
+    row => { row.clippingAncestors[0].rect.bottom = 590; }, row => { row.logRect = null; }]) {
+    const ready = makeArtifactReadiness();
+    assert.equal(ready(artifactObservation()), false);
+    assert.equal(ready(artifactObservation()), false);
+    const changed = artifactObservation(); mutate(changed); assert.equal(ready(changed), false);
+    assert.equal(ready(artifactObservation()), false);
+    assert.equal(ready(artifactObservation()), false);
+    assert.equal(ready(artifactObservation()), true);
+  }
+  for (const mutate of [row => { row.artifactId = 'different'; }, row => { row.scrollTop += 1; }, row => { row.rect.top += 1; }]) {
+    const ready = makeArtifactReadiness();
+    ready(artifactObservation()); ready(artifactObservation());
+    const changed = artifactObservation(); mutate(changed);
+    assert.equal(ready(changed), false);
+    assert.equal(ready(changed), false);
+    assert.equal(ready(changed), true);
+  }
+});
+
+test('Chat artifact readiness is observation-only before the existing one native click, keeping all 72 assertions', () => {
+  const stage = chatVerifierSource.slice(chatVerifierSource.indexOf('const artifactChip ='));
+  assert.ok(stage.indexOf("await harness.scrollWithKey('.egd-codex-messages', 'End')") < stage.indexOf('const clickReady ='));
+  assert.ok(stage.indexOf('}, clickReady,') < stage.indexOf('await harness.click(artifactChip)'));
+  assert.equal((chatVerifierSource.match(/await harness\.click\(artifactChip\)/g) || []).length, 1);
+  assert.equal((chatVerifierSource.match(/check\(/g) || []).length, 72);
+  const observe = chatVerifierSource.slice(chatVerifierSource.indexOf('async function observeArtifactClickTarget('),
+    chatVerifierSource.indexOf('async function beginArtifactClickDiagnostics('));
+  assert.doesNotMatch(artifactReadinessSource + observe, /dispatchEvent|\.click\(|\.focus\(|scrollIntoView|scrollTop\s*=|\.style\.\w+\s*=/);
+});
+
+test('Codex COMPLETE artifact stays usable and points to exact owned bytes after message release, SSE replay and hydration', async t => {
+  const fetchSpy = t.mock.method(globalThis, 'fetch', () => { throw new Error('No provider or file HTTP request'); });
+  const { handler, info } = setup(t);
+  const frames = [];
+  const stream = request(handler, 'GET', '/events?chatProtocol=2', null, null, response => {
+    response.write = frame => { frames.push(frame); return true; };
+  });
+  await new Promise(resolve => setImmediate(resolve));
+  const callbacks = [];
+  const timer = t.mock.method(globalThis, 'setTimeout', (callback, ms) => {
+    assert.ok([14, 15, 80].includes(ms)); callbacks.push(callback); return callbacks.length;
+  });
+  let sent;
+  try {
+    const pending = request(handler, 'POST', '/chat/send', {
+      message: 'EGDESK_QA_COMPLETE artifact regression', profileEnabled: false,
+      clientThreadId: 'artifact-client', requestId: 'artifact-request', engineId: 'codex', engineProfileId: 'codex-default',
+    });
+    await new Promise(resolve => setImmediate(resolve));
+    for (let count = 0; callbacks.length; count++) {
+      assert.ok(count < 100, 'Bounded fixture stream only'); callbacks.shift()();
+    }
+    sent = await pending;
+  } finally { timer.mock.restore(); }
+  assert.equal(sent.status, 202);
+  const before = await fixtureState(handler), runId = sent.body.runId;
+  assert.equal(before.runs[0].fixtureStage, 'streaming-visible');
+  assert.deepEqual(before.runs[0].artifacts, []);
+  await request(handler, 'POST', '/__qa/release', { runId, phase: 'message' }, TOKEN);
+  const afterMessage = await fixtureState(handler), run = afterMessage.runs[0];
+  assert.equal(run.status, 'running', 'Artifact must not fabricate run completion');
+  assert.equal(run.artifacts.length, 1);
+  const artifact = run.artifacts[0];
+  assertQaFixtureArtifact(info.profile, artifact);
+  assert.equal(usableArtifact(artifact), true);
+  assert.equal(artifact.target.path, info.artifactPath);
+  assert.equal(fs.readFileSync(artifact.target.path, 'utf8'), 'EG-Desk deterministic QA fixture reference only.\n');
+  const original = fs.readFileSync(artifact.target.path);
+  await request(handler, 'POST', '/__qa/release', { runId, phase: 'run' }, TOKEN);
+  await request(handler, 'POST', '/__qa/replay', {}, TOKEN);
+  const events = frames.filter(frame => frame.startsWith('event: codex\n'))
+    .map(frame => JSON.parse(frame.split('\ndata: ')[1].trim()));
+  assert.equal(events.some(event => event.type === 'engine.status'), false, 'Claude engine rows must not leak into Codex SSE');
+  const artifactEvents = events.filter(event => event.event === 'artifact.available');
+  assert.equal(artifactEvents.length, 2);
+  assert.deepEqual(artifactEvents[0].details.artifact, artifact);
+  assert.deepEqual(artifactEvents[1].details.artifact, artifact);
+  const snapshot = (await request(handler, 'GET', `/chat/state?conversationId=${run.conversationId}`)).body;
+  const [hydrated] = mergeChatSnapshot(createChatProtocolState(), snapshot, run.clientThreadId);
+  const messages = projectRunMessages([], hydrated);
+  const chips = messages.flatMap(message => message.artifacts || []);
+  assert.deepEqual(chips, [artifact], 'Real UI hydration retains one usable artifact, not a stale or duplicate reference');
+  assert.equal(usableArtifact(chips[0]), true);
+  assert.deepEqual(fs.readFileSync(artifact.target.path), original);
+  assert.equal((await request(handler, 'GET', '/v1/state')).body.auth.isLoggedIn, true);
+  assert.equal(Object.hasOwn((await request(handler, 'GET', '/v1/state')).body, 'engines'), false);
+  await request(handler, 'POST', '/__qa/reconnect', {}, TOKEN);
+  await stream;
+  assert.equal(fetchSpy.mock.callCount(), 0);
+});
 
 test('Codex STOP exposes a streaming message before the delayed POST ACK, including partial-history refresh', async t => {
   const { handler } = setup(t);

@@ -45,6 +45,8 @@ export function captureAttachment(source, snapshot = null, capturedAt = Date.now
   const attachment = { id: source.id, kind, label: source.label, capturedAt: snapshot?.capturedAt || capturedAt,
     sourceRef: { kind, resourceId: managedFileView?.fileId || ref.path || ref.uri || ref.viewId,
       ...(ref.path ? { path: ref.path } : {}), ...(ref.uri ? { url: ref.uri } : {}),
+      ...(kind === 'browser' && ref.profileId ? { browserProfileId: ref.profileId } : {}),
+      ...(kind === 'browser' && ref.accountId ? { siteAccount: ref.accountId } : {}),
       ...(ref.viewId ? { viewId: ref.viewId } : {}) },
     captureScope: { type: kind === 'file' ? 'file' : kind === 'browser' ? 'document-text' : 'board-selection' },
   };
@@ -57,10 +59,18 @@ export function captureAttachment(source, snapshot = null, capturedAt = Date.now
   return attachment;
 }
 
-export function capturedInputReference(source, receipt) {
+export function assertInputContextScope(reference, scope) {
+  if (reference?.contextScope && ['engineId', 'engineProfileId', 'clientThreadId'].some(key => reference.contextScope[key] !== scope?.[key])) {
+    throw new Error('이 고정 캡처는 다른 엔진 또는 대화에 속해 있습니다. 원래 대화에서 확인해 주세요.');
+  }
+}
+
+export function capturedInputReference(source, receipt, contextScope = null) {
   if (!receipt?.sourceId || receipt.snapshotId !== receipt.sourceId || !receipt.hash || !receipt.sourceRef
       || receipt.id !== source.id) throw new Error('캡처 저장 확인이 올바르지 않습니다.');
-  return freeze({ ...clone(receipt), localSource: clone(source) });
+  if (contextScope) assertInputContextScope(receipt, contextScope);
+  if (contextScope?.engineId === 'claude' && receipt.truncated === true) throw new Error('선택한 자료가 일부만 캡처되어 보내지 않았습니다. 초안과 선택 자료는 유지됩니다.');
+  return freeze({ ...clone(receipt), localSource: clone(source), ...(contextScope ? { contextScope: clone(contextScope) } : {}) });
 }
 
 // A named, bounded rendered-text capture, not a raw DOM dump or whole-page

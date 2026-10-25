@@ -869,3 +869,376 @@ test('the source-change bus owner is the workflow owner, and attachServices can 
   detach()
   assert.equal(h.bus.stats().subscribers, 0)
 })
+
+async function scopedContextHarness(t, options = {}) {
+  const dir = await mkdtemp(path.join(os.tmpdir(), 'egdesk-context-b2-'))
+  t.after(() => rm(dir, { recursive: true, force: true }))
+  const state = { codex: { ownerKey: 'subscription-account-not-a-site', epoch: 1 }, claude: { ownerKey: 'subscription-account-not-a-site', epoch: 1 } }
+  const route = { engineId: 'claude', engineProfileId: 'claude-profile', clientThreadId: 'ui-claude' }
+  const replies = [], events = [], authCalls = [], readerCalls = []
+  const getAuthority = hints => {
+    const engineId = hints.engineId || (hints.clientThreadId === 'ui-claude' ? 'claude' : 'codex')
+    return { ...hints, engineId, ...(engineId === 'claude' ? { engineProfileId: hints.engineProfileId || 'claude-profile' } : {}), ...state[engineId] }
+  }
+  const make = () => {
+    const store = new ImmutableContextStore({ dataDir: dir, allowedRoots: [dir] })
+    const contexts = new ContextRuntime({ store, getAuthority, getOwnerKey: () => state.codex.ownerKey,
+      schemaReady: authority => authority?.engineId === 'claude' || options.codexReady !== false,
+      reader: { read: async value => { readerCalls.push(value); throw new Error('No B2 NativeReader may start') }, disconnect: () => { readerCalls.push('disconnect') } },
+    })
+    contexts.runtime = { epoch: state.codex.epoch, respond: (id, response) => { replies.push({ id, response }); return options.rejectResponse ? false : true }, emit: (run, name, details) => events.push({ answerId: run.answerId, name, details }), threads: new Map(), threadToolManifestStatus: new Map() }
+    return { store, contexts }
+  }
+  const { store, contexts } = make()
+  const scope = (hints = route) => ({ ...hints, expectedContextScope: contexts.capabilities(contexts.authority(hints)).expectedContextScope })
+  const attachment = (text = 'First line\nOriginal immutable evidence\nThird line') => ({ kind: 'browser', id: 'selected', sourceRef: { url: 'https://site.example/document', browserProfileId: 'browser-profile-unrelated', siteAccount: 'person@site.example' }, captureScope: { type: 'dom-range', locator: '#selected' }, content: { text, mime: 'text/plain', truncated: false } })
+  const capture = async (text, hints = route, selected = attachment(text)) => (await contexts.capture({ ...scope(hints), attachments: [selected] })).captures[0]
+  let sequence = 0
+  const bind = async (captures, hints = route) => {
+    const authority = contexts.authority(hints)
+    const prepared = await contexts.prepare({ ...scope(hints), contextSnapshotIds: captures.map(c => c.sourceId), contextCapabilities: { read: true, reader: false, publishBriefing: false } }, authority)
+    const n = ++sequence
+    const run = { ...hints, conversationId: hints.conversationId || `native-${n}`, runId: `turn-${n}`, answerId: `answer-${n}`, status: 'inProgress', artifacts: [], activities: [] }
+    await contexts.registerThread(run.conversationId, authority)
+    await contexts.bindRun(run, prepared, undefined, authority)
+    return run
+  }
+  const tool = async (run, name, args = {}, target = contexts) => {
+    const callId = `b2-${replies.length}`
+    await target.dispatch(run, { tool: name, arguments: args, callId, rpcId: callId })
+    return replies.find(reply => reply.id === callId)?.response
+  }
+  const http = async (method, endpoint, body, target = contexts) => {
+    const req = Readable.from(body === undefined ? [] : [Buffer.from(JSON.stringify(body))])
+    req.method = method; req.url = endpoint; req.headers = { 'content-type': 'application/json', host: 'localhost:39218' }
+    const res = { writeHead(status) { this.status = status }, end(value) { this.body = JSON.parse(value) } }
+    await createContextHttpHandler(target, async hints => { authCalls.push(hints) })(req, res, new URL(endpoint, 'http://localhost'))
+    return res
+  }
+  return { dir, state, route, scope, store, contexts, capture, attachment, bind, tool, http, make, replies, events, authCalls, readerCalls }
+}
+
+test('B2 HTTP capability and capture use the engine account, independently of browser/site identity; no raw authority is public', async t => {
+  const h = await scopedContextHarness(t, { codexReady: false })
+  const query = new URLSearchParams(h.route)
+  const caps = await h.http('GET', `/context/capabilities?${query}`)
+  assert.equal(caps.status, 200)
+  const { expectedContextScope, ...descriptor } = caps.body
+  assert.match(expectedContextScope, /^[a-f0-9]{64}$/)
+  assert.deepEqual(descriptor, { contract: 'egdesk-context-b2', engineId: 'claude', engineProfileId: 'claude-profile', selectedAttachments: true, immutableRead: true, nativeReader: false, tools: ['egdesk_list_context', 'egdesk_read_source'] })
+  const response = await h.http('POST', '/context/captures', { ...h.route, expectedContextScope, attachments: [h.attachment()] })
+  assert.equal(response.status, 201)
+  const capture = response.body.captures[0]
+  assert.deepEqual(capture.engine, { engineId: 'claude', engineProfileId: 'claude-profile' })
+  assert.equal(capture.sourceRef.siteAccount, 'person@site.example')
+  assert.equal(capture.sourceRef.browserProfileId, 'browser-profile-unrelated')
+  const inspected = await h.http('GET', `/context/captures/${capture.sourceId}?${query}`)
+  assert.equal(inspected.status, 200)
+  assert.equal(inspected.body.delivered, null)
+  assert.equal(inspected.body.source.hash, hashContent(h.attachment().content.text))
+  for (const value of [caps.body, response.body, inspected.body]) {
+    assert.equal(JSON.stringify(value).includes(h.state.claude.ownerKey), false)
+    assert.equal(JSON.stringify(value).includes('ownerKey'), false)
+    assert.equal(JSON.stringify(value).includes('epoch'), false)
+  }
+  assert.ok(h.authCalls.every(hints => hints.engineId === 'claude'))
+  const stored = await h.store.getRecord(h.contexts.owner(h.contexts.authority(h.route)), 'sources', capture.sourceId)
+  assert.equal(JSON.stringify(stored).includes(h.state.claude.ownerKey), false)
+  const omitted = await h.http('GET', '/context/capabilities?clientThreadId=ui-claude')
+  assert.equal(omitted.body.engineId, 'claude')
+  assert.deepEqual(h.readerCalls, [])
+})
+
+test('B2 HTTP rejects client authority before authentication and keeps the 2 MiB capture bound', async t => {
+  const h = await scopedContextHarness(t)
+  for (const key of ['ownerKey', 'epoch', 'authority']) {
+    const reply = await h.http('POST', '/context/captures', { ...h.route, [key]: 'forged', attachments: [h.attachment()] })
+    assert.equal(reply.status, 400)
+    assert.equal(reply.body.code, 'INVALID_CONTEXT_ROUTE')
+    const get = await h.http('GET', `/context/capabilities?engineId=claude&${key}=forged`)
+    assert.equal(get.status, 400)
+  }
+  const oversized = await h.http('POST', '/context/captures', { ...h.route, attachments: [h.attachment('x'.repeat(2 * 1024 * 1024))] })
+  assert.equal(oversized.status, 413)
+  assert.equal(h.authCalls.length, 0)
+})
+
+test('B2 snapshot lookup denies cross-engine, cross-account, cross-profile and cross-client-thread selections', async t => {
+  const h = await scopedContextHarness(t)
+  const capture = await h.capture()
+  const prepare = hints => h.contexts.prepare({ ...h.scope({ ...h.route, ...hints }), contextSnapshotIds: [capture.sourceId], contextCapabilities: { read: true } })
+  await assert.rejects(prepare({ engineId: 'codex', engineProfileId: undefined }), e => e.code === 'CONTEXT_NOT_FOUND')
+  await assert.rejects(prepare({ engineProfileId: 'another-profile' }), e => e.code === 'CONTEXT_NOT_FOUND')
+  await assert.rejects(prepare({ clientThreadId: 'another-ui' }), e => e.code === 'CONTEXT_THREAD_MISMATCH')
+  h.state.claude.ownerKey = 'a-different-subscription'
+  await assert.rejects(prepare({}), e => e.code === 'CONTEXT_NOT_FOUND')
+  h.state.claude.ownerKey = h.state.codex.ownerKey
+  const [legacy] = await h.store.captureAttachments(h.state.codex.ownerKey, { clientThreadId: h.route.clientThreadId, attachments: [h.attachment('Legacy Codex record')] })
+  await assert.rejects(h.contexts.prepare({ ...h.scope(), contextSnapshotIds: [legacy.sourceId] }), e => e.code === 'CONTEXT_NOT_FOUND')
+  const noCallback = new ContextRuntime({ store: h.store, getOwnerKey: () => h.state.codex.ownerKey })
+  await assert.rejects(noCallback.capture({ ...h.route, attachments: [h.attachment()] }), e => e.code === 'CONTEXT_ENGINE_UNSUPPORTED')
+})
+
+test('B2 run reads only selected snapshots from its original conversation, with exact range/version delivery receipts', async t => {
+  const h = await scopedContextHarness(t)
+  const capture = await h.capture()
+  const unselected = await h.capture('Unselected same-account source')
+  const run = await h.bind([capture])
+  const denied = await h.tool(run, 'egdesk_read_source', { snapshotId: unselected.sourceId, intent: 'Read' })
+  assert.equal(denied.success, false)
+  const foreignRun = { ...run, conversationId: 'another-native-thread' }
+  assert.equal((await h.tool(foreignRun, 'egdesk_list_context')).success, false)
+  await assert.rejects(h.contexts.prepare({ ...h.scope(), conversationId: 'another-native-thread', contextSnapshotIds: [capture.sourceId] }), e => e.code === 'CONTEXT_THREAD_MISMATCH')
+  const response = await h.tool(run, 'egdesk_read_source', { snapshotId: capture.sourceId, intent: 'Read precisely the second line', range: { startLine: 2, endLine: 2 } })
+  assert.equal(response.success, true)
+  const packet = JSON.parse(response.contentItems[0].text)
+  assert.equal(packet.content.text, 'Original immutable evidence')
+  assert.equal(packet.sourceHash, capture.hash)
+  assert.equal(packet.projectionHash, capture.payloads.projection.hash)
+  assert.equal(packet.coverage.scope, 'line-range')
+  assert.equal(packet.coverage.complete, true)
+  assert.deepEqual(packet.coverage.reviewedRanges, [{ startOffset: 11, endOffset: 38 }])
+  const owner = h.contexts.owner(h.contexts.authority(h.route))
+  const inspected = await h.store.inspect(owner, capture.sourceId, { packetId: packet.packetId })
+  assert.equal(inspected.delivered.text, response.contentItems[0].text)
+  assert.equal(inspected.delivered.hash, hashContent(response.contentItems[0].text))
+  assert.equal(inspected.delivered.binding.conversationId, run.conversationId)
+  assert.equal(JSON.stringify(response).includes(h.state.claude.ownerKey), false)
+  assert.deepEqual(h.readerCalls, [])
+})
+
+test('B2 transport false is not delivered and cannot produce a receipt or read.completed', async t => {
+  const h = await scopedContextHarness(t, { rejectResponse: true })
+  const capture = await h.capture()
+  const run = await h.bind([capture])
+  await h.tool(run, 'egdesk_read_source', { snapshotId: capture.sourceId, intent: 'Read' })
+  const owner = h.contexts.owner(h.contexts.authority(h.route))
+  assert.equal((await h.store.listRecords(owner, 'deliveries')).length, 0)
+  assert.equal(run.context.packets.length, 0)
+  assert.equal(h.events.some(event => event.name === 'context.read.completed'), false)
+})
+
+test('B2 preflight refuses Reader request, oversized aggregate, truncated and unreadable sources without Reader/delivery', async t => {
+  const h = await scopedContextHarness(t)
+  const small = await h.capture('Small')
+  await assert.rejects(h.contexts.prepare({ ...h.scope(), contextSnapshotIds: [small.sourceId], contextCapabilities: { read: true, reader: true } }), e => e.code === 'CLAUDE_CONTEXT_READER_UNSUPPORTED')
+  const large = await h.capture('Complete selected evidence. '.repeat(1000))
+  await assert.rejects(h.contexts.prepare({ ...h.scope(), contextSnapshotIds: [large.sourceId], contextUsage: { modelContextWindow: 1000000, usedTokens: -1000000 } }), e => e.code === 'CLAUDE_CONTEXT_READER_UNSUPPORTED')
+  const selected = h.attachment('Clipped'); selected.content.truncated = true
+  await assert.rejects(h.contexts.capture({ ...h.scope(), attachments: [selected] }), e => e.code === 'CONTEXT_CAPTURE_INCOMPLETE')
+  const binary = path.join(h.dir, 'unreadable.bin'); await writeFile(binary, Buffer.from([0, 255, 0, 1]))
+  const captured = await h.capture(undefined, h.route, { kind: 'file', sourceRef: { path: binary }, captureScope: { type: 'file' } })
+  await assert.rejects(h.contexts.prepare({ ...h.scope(), contextSnapshotIds: [captured.sourceId] }), e => e.code === 'UNSUPPORTED_SOURCE_FORMAT')
+  const many = []
+  for (let i = 0; i < 5; i++) many.push(await h.capture(`Selected source ${i}`))
+  await assert.rejects(h.contexts.prepare({ ...h.scope(), contextSnapshotIds: many.map(c => c.sourceId) }), e => e.code === 'CLAUDE_CONTEXT_READER_UNSUPPORTED')
+  const owner = h.contexts.owner(h.contexts.authority(h.route))
+  for (const kind of ['packets', 'deliveries', 'readers', 'bindings']) assert.equal((await h.store.listRecords(owner, kind)).length, 0)
+  assert.deepEqual(h.readerCalls, [])
+})
+
+function pauseOnce(target, method) {
+  const original = target[method].bind(target)
+  let enter, release, paused = false
+  const entered = new Promise(resolve => { enter = resolve })
+  target[method] = async (...args) => {
+    const result = await original(...args)
+    if (!paused) { paused = true; enter(); await new Promise(resolve => { release = resolve }) }
+    return result
+  }
+  return { entered, release: () => release(), restore: () => { target[method] = original } }
+}
+
+test('B2 delayed capture is invalidated only by its own engine epoch/account', async t => {
+  const h = await scopedContextHarness(t)
+  let pause = pauseOnce(h.store, 'blob')
+  const stillValid = h.capture('Claude capture while Codex reconnects')
+  await pause.entered
+  h.state.codex.epoch++; h.contexts.runtime.epoch++; h.contexts.reset({ engineId: 'codex' })
+  pause.release()
+  assert.equal((await stillValid).engine.engineId, 'claude')
+  pause.restore()
+  pause = pauseOnce(h.store, 'blob')
+  const invalidated = h.capture('Never publish after Claude epoch change')
+  await pause.entered
+  h.state.claude.epoch++
+  pause.release()
+  await assert.rejects(invalidated, e => e.code === 'ACCOUNT_CHANGED')
+  pause.restore()
+  const owner = h.contexts.owner(h.contexts.authority(h.route))
+  assert.equal((await h.store.listRecords(owner, 'sources')).length, 1)
+})
+
+test('B2 delayed read survives other-engine disconnect but cannot emit or deliver after own account rotation', async t => {
+  const h = await scopedContextHarness(t)
+  const capture = await h.capture()
+  const run = await h.bind([capture])
+  let pause = pauseOnce(h.store, 'readProjection')
+  const good = h.tool(run, 'egdesk_read_source', { snapshotId: capture.sourceId, intent: 'Read before Codex logout' })
+  await pause.entered
+  h.state.codex.epoch++; h.contexts.runtime.epoch++; h.contexts.disconnect({ engineId: 'codex' }); h.contexts.reset({ engineId: 'codex' })
+  pause.release()
+  assert.equal((await good).success, true)
+  pause.restore()
+  pause = pauseOnce(h.store, 'readProjection')
+  const bad = h.tool(run, 'egdesk_read_source', { snapshotId: capture.sourceId, intent: 'Do not leak after account rotation' })
+  await pause.entered
+  const replies = h.replies.length, events = h.events.length
+  h.state.claude.ownerKey = 'new-claude-account'; h.state.claude.epoch++
+  h.contexts.reset({ engineId: 'claude' })
+  pause.release()
+  assert.equal(await bad, undefined)
+  assert.equal(h.replies.length, replies)
+  assert.equal(h.events.length, events)
+  pause.restore()
+})
+
+test('B2 restart restores exact original snapshots and manifest after live changes; missing manifest/blob never recaptures', async t => {
+  const h = await scopedContextHarness(t)
+  const file = path.join(h.dir, 'original.txt')
+  await writeFile(file, 'Original persisted evidence')
+  const capture = await h.capture(undefined, h.route, { kind: 'file', sourceRef: { path: file }, captureScope: { type: 'file' } })
+  const run = await h.bind([capture])
+  await h.tool(run, 'egdesk_read_source', { snapshotId: capture.sourceId, intent: 'Read original' })
+  const savedContext = structuredClone(run.context)
+  await writeFile(file, 'Changed live contents, never an implicit replacement')
+  const restarted = h.make()
+  const resumed = { ...run, context: savedContext }
+  await restarted.contexts.restoreRun(resumed, restarted.contexts.authority(resumed))
+  assert.deepEqual(resumed.context.captures, savedContext.captures)
+  assert.deepEqual(resumed.context.packets, savedContext.packets)
+  const response = await h.tool(resumed, 'egdesk_read_source', { snapshotId: capture.sourceId, intent: 'Read after restart' }, restarted.contexts)
+  assert.equal(JSON.parse(response.contentItems[0].text).content.text, 'Original persisted evidence')
+  const owner = restarted.contexts.owner(restarted.contexts.authority(resumed))
+  const marker = (await restarted.store.listRecords(owner, 'threads'))[0]
+  // Removing only this test's marker simulates an unavailable persisted manifest.
+  await rm(path.join(await restarted.store.directory(owner, 'threads'), `${marker.id}.json`))
+  const missingManifest = h.make()
+  await assert.rejects(missingManifest.contexts.restoreRun({ ...run }, missingManifest.contexts.authority(run)), e => e.code === 'CONTEXT_TOOLS_UNAVAILABLE')
+  await restarted.contexts.registerThread(run.conversationId, restarted.contexts.authority(run))
+  await rm(path.join(await restarted.store.directory(owner, 'blobs'), capture.hash))
+  const missingBlob = h.make()
+  await assert.rejects(missingBlob.contexts.restoreRun({ ...run }, missingBlob.contexts.authority(run)), e => e.code === 'CONTEXT_NOT_FOUND')
+  assert.equal((await restarted.store.listRecords(owner, 'sources')).length, 1)
+  assert.deepEqual(h.readerCalls, [])
+})
+
+test('B2 old or missing Claude tool registration is not inferred from legacy Codex records or generic readiness', async t => {
+  const h = await scopedContextHarness(t)
+  const capture = await h.capture()
+  const authority = h.contexts.authority(h.route)
+  const prepared = await h.contexts.prepare({ ...h.scope(), contextSnapshotIds: [capture.sourceId] }, authority)
+  await assert.rejects(h.contexts.requireThread('old-claude', prepared, authority), e => e.code === 'CONTEXT_TOOLS_UNAVAILABLE')
+  await h.store.markNativeThread(h.contexts.owner(authority), 'old-claude')
+  await assert.rejects(h.contexts.requireThread('old-claude', prepared, authority), e => e.code === 'CONTEXT_TOOLS_UNAVAILABLE')
+  await assert.rejects(h.contexts.registerThread('old-claude', authority), e => e.code === 'CONTEXT_TOOLS_UNAVAILABLE')
+  await assert.rejects(h.contexts.restoreRun({ ...h.route, conversationId: 'missing', runId: 'turn', answerId: 'answer', context: { bindingId: 'expected-original-binding' } }, authority), e => e.code === 'CONTEXT_BINDING_MISSING')
+})
+
+test('B2 same-account reconnect revalidates saved snapshots with the new epoch rather than retaining a stale binding', async t => {
+  const h = await scopedContextHarness(t)
+  const capture = await h.capture()
+  const run = await h.bind([capture])
+  const original = structuredClone(run.context)
+  h.state.claude.epoch++
+  h.contexts.disconnect({ engineId: 'claude' })
+  await h.contexts.restoreRun(run, h.contexts.authority(run))
+  assert.deepEqual(run.context.captures, original.captures)
+  const response = await h.tool(run, 'egdesk_read_source', { snapshotId: capture.sourceId, intent: 'Read after reconnect' })
+  assert.equal(response.success, true)
+  const owner = h.contexts.owner(h.contexts.authority(h.route))
+  await rm(path.join(await h.store.directory(owner, 'blobs'), capture.hash))
+  // Even an already-cached binding cannot skip exact snapshot revalidation.
+  await assert.rejects(h.contexts.restoreRun(run, h.contexts.authority(run)), e => e.code === 'CONTEXT_NOT_FOUND')
+})
+
+test('B2 HTTP inspection discards late own-epoch results and Codex resolver routing remains compatible', async t => {
+  const h = await scopedContextHarness(t)
+  const capture = await h.capture()
+  const pause = pauseOnce(h.store, 'inspect')
+  const pending = h.http('GET', `/context/captures/${capture.sourceId}?${new URLSearchParams(h.route)}`)
+  await pause.entered
+  h.state.claude.epoch++
+  pause.release()
+  const response = await pending
+  assert.equal(response.status, 403)
+  assert.equal(response.body.code, 'ACCOUNT_CHANGED')
+  assert.equal(JSON.stringify(response.body).includes('Original immutable evidence'), false)
+  pause.restore()
+  const suggested = await h.http('POST', '/context/resolve', { engineId: 'codex', clientThreadId: 'ui-codex', explicit: [{ kind: 'browser', ref: 'page-one' }] })
+  assert.equal(suggested.status, 200, JSON.stringify(suggested.body))
+  assert.equal(suggested.body.policy, 'suggest-only')
+  const refused = await h.http('POST', '/context/resolve', { ...h.route, explicit: [] })
+  assert.equal(refused.body.code, 'CONTEXT_TOOL_UNSUPPORTED')
+})
+
+test('B2 store strips raw authority from engine provenance even if an internal caller passes too much', async t => {
+  const h = await scopedContextHarness(t)
+  const authority = h.contexts.authority(h.route)
+  const owner = h.contexts.owner(authority)
+  const [capture] = await h.store.captureAttachments(owner, { clientThreadId: h.route.clientThreadId, attachments: [h.attachment()] }, { engine: authority })
+  const binding = await h.store.bind(owner, { conversationId: 'native', runId: 'turn', answerId: 'answer', clientThreadId: h.route.clientThreadId }, [capture.sourceId], { read: true }, undefined, undefined, authority)
+  for (const value of [capture, binding, ...await h.store.listRecords(owner, 'sources'), ...await h.store.listRecords(owner, 'bindings')]) {
+    assert.equal(JSON.stringify(value).includes('ownerKey'), false)
+    assert.equal(JSON.stringify(value).includes('epoch'), false)
+    assert.equal(JSON.stringify(value).includes(authority.ownerKey), false)
+    assert.deepEqual(value.engine, { engineId: 'claude', engineProfileId: 'claude-profile' })
+  }
+})
+
+test('B2 capabilities-to-capture race refuses a same-profile account switch before the UI learns of it', async t => {
+  const h = await scopedContextHarness(t)
+  const observed = await h.http('GET', `/context/capabilities?${new URLSearchParams(h.route)}`)
+  assert.equal(observed.status, 200)
+  // The UI still holds A's routing and capability response while Browser
+  // selection capture runs. Only the authoritative server account changes.
+  h.state.claude.ownerKey = 'subscription-B-same-profile'
+  const attempted = await h.http('POST', '/context/captures', { ...h.route, expectedContextScope: observed.body.expectedContextScope, attachments: [h.attachment('Selected under subscription A')] })
+  assert.equal(attempted.status, 409)
+  assert.equal(attempted.body.code, 'CONTEXT_SCOPE_CHANGED')
+  const ownerB = h.contexts.owner(h.contexts.authority(h.route))
+  assert.equal((await h.store.listRecords(ownerB, 'sources')).length, 0)
+})
+
+test('B2 opaque scope is an expectation, not a grant, and survives only unrelated-engine changes', async t => {
+  const h = await scopedContextHarness(t)
+  const observed = await h.http('GET', `/context/capabilities?${new URLSearchParams(h.route)}`)
+  const expectedContextScope = observed.body.expectedContextScope
+  assert.equal(expectedContextScope.includes(h.state.claude.ownerKey), false)
+  const request = { ...h.route, expectedContextScope, attachments: [h.attachment()] }
+  const missing = await h.http('POST', '/context/captures', { ...request, expectedContextScope: undefined })
+  assert.equal(missing.body.code, 'CONTEXT_SCOPE_CHANGED')
+  const forged = await h.http('POST', '/context/captures', { ...request, expectedContextScope: 'f'.repeat(64) })
+  assert.equal(forged.body.code, 'CONTEXT_SCOPE_CHANGED')
+  const crossThread = await h.http('POST', '/context/captures', { ...request, clientThreadId: 'different-ui' })
+  assert.equal(crossThread.body.code, 'CONTEXT_SCOPE_CHANGED')
+  h.state.codex.ownerKey = 'new-codex-account'; h.state.codex.epoch++
+  h.contexts.reset({ engineId: 'codex' })
+  const allowed = await h.http('POST', '/context/captures', request)
+  assert.equal(allowed.status, 201)
+  const capture = allowed.body.captures[0]
+  assert.equal(JSON.stringify(capture).includes(expectedContextScope), false)
+  // Resolving a native conversation for this same client does not change scope.
+  const prepared = await h.contexts.prepare({ ...h.route, conversationId: 'newly-bound-native', expectedContextScope, contextSnapshotIds: [capture.sourceId] })
+  assert.equal(prepared.captures[0].sourceId, capture.sourceId)
+  h.state.claude.epoch++
+  await assert.rejects(h.contexts.prepare({ ...h.route, expectedContextScope, contextSnapshotIds: [capture.sourceId] }), e => e.code === 'CONTEXT_SCOPE_CHANGED')
+  const restarted = h.make()
+  await assert.rejects(restarted.contexts.capture(request), e => e.code === 'CONTEXT_SCOPE_CHANGED')
+  assert.equal((await h.store.listRecords(h.contexts.owner(h.contexts.authority(h.route)), 'sources')).length, 1)
+})
+
+test('B2 capture-to-prepare account switch refuses stale scope before lookup/bind/model dispatch', async t => {
+  const h = await scopedContextHarness(t)
+  const observed = h.scope()
+  const { captures } = await h.contexts.capture({ ...observed, attachments: [h.attachment()] })
+  let lookups = 0
+  const getCapture = h.store.getCapture.bind(h.store)
+  h.store.getCapture = async (...args) => { lookups++; return getCapture(...args) }
+  h.state.claude.ownerKey = 'account-B-same-profile'
+  await assert.rejects(h.contexts.prepare({ ...observed, contextSnapshotIds: [captures[0].sourceId], contextCapabilities: { read: true, reader: false, publishBriefing: false } }), e => e.code === 'CONTEXT_SCOPE_CHANGED')
+  assert.equal(lookups, 0)
+  const ownerB = h.contexts.owner(h.contexts.authority(h.route))
+  for (const kind of ['sources', 'bindings', 'packets', 'deliveries']) assert.equal((await h.store.listRecords(ownerB, kind)).length, 0)
+  assert.equal(h.replies.length, 0)
+})

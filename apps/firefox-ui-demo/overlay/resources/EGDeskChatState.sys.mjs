@@ -334,18 +334,26 @@ export function createChatEpochScope({ makeController = () => new AbortControlle
   const active = new Set();
   const generations = new Map();
   const generation = scope => generations.get(scope) || 0;
+  const profileKey = (scope, profile) => JSON.stringify([scope, profile]);
   return {
     current: () => epoch,
-    begin: (scope = 'codex') => { const controller = makeController();
-      const token = { epoch, scope, generation: generation(scope), controller, signal: controller.signal };
+    begin: (scope = 'codex', profile = null) => { const controller = makeController();
+      const token = { epoch, scope, profile, generation: generation(scope),
+        profileGeneration: generation(profileKey(scope, profile)), controller, signal: controller.signal };
       active.add(token); return token; },
     valid: token => typeof token === 'number' ? token === epoch
-      : token.epoch === epoch && token.generation === generation(token.scope),
+      : token.epoch === epoch && token.generation === generation(token.scope)
+        && token.profileGeneration === generation(profileKey(token.scope, token.profile)),
     finish: token => active.delete(token),
-    reset: scope => {
+    reset: (scope, profile = null) => {
       if (scope === undefined) { epoch++; generations.clear(); }
-      else generations.set(scope, generation(scope) + 1);
-      for (const token of active) if (scope === undefined || token.scope === scope) {
+      else {
+        const key = profile === null ? scope : profileKey(scope, profile); generations.set(key, generation(key) + 1);
+        // Legacy run callbacks have no recorded slot: they cannot outlive an
+        // account change of that engine, but known other slots stay valid.
+        if (profile !== null) generations.set(profileKey(scope, null), generation(profileKey(scope, null)) + 1);
+      }
+      for (const token of active) if (scope === undefined || token.scope === scope && (profile === null || token.profile === null || token.profile === profile)) {
         token.controller.abort(); active.delete(token);
       }
     },
@@ -436,7 +444,9 @@ export function nativeBindingForRun(thread, run) {
   return { bindingAccountKey: accountKey, bindingState: knownCodexAccountKey(accountKey) ? 'verified' : 'live-unverified' };
 }
 export function submissionFailureStatus(error) {
-  if (error?.resumeRequired === true) return 'unconfirmed';
+  // Durable replay carries the dispatch outcome even when the original
+  // HTTP-only resume flag was not stored. Unknown is not a refusal.
+  if (error?.resumeRequired === true || error?.dispatchStatus === 'unknown') return 'unconfirmed';
   if (error?.accepted === false) return 'failed';
   if (error?.status >= 400 && error.status < 500 && error.status !== 408) return 'failed';
   return 'unconfirmed';
@@ -475,10 +485,13 @@ export function buildChatRequest(thread, message, requestId, runtime = {}) {
   for (const field of ['model', 'effort']) if (runtime[field]) body[field] = runtime[field];
   // The bridge binds a conversation to this engine and refuses a different one later.
   if (isEngineId(runtime.engineId)) body.engineId = runtime.engineId;
+  if (typeof runtime.engineProfileId === 'string' && runtime.engineProfileId) body.engineProfileId = runtime.engineProfileId;
   // CHAT-09: '기록 없이 시작' applies to the first send of a new conversation only.
   if (runtime.stateless === true && !thread.conversationId) body.stateless = true;
   if (Array.isArray(runtime.contextSnapshotIds)) body.contextSnapshotIds = [...new Set(runtime.contextSnapshotIds)];
-  if (runtime.contextCapabilities) body.contextCapabilities = { read: true, reader: true, publishBriefing: true };
+  if (runtime.engineId === 'claude' && runtime.expectedContextScope) body.expectedContextScope = runtime.expectedContextScope;
+  if (runtime.contextCapabilities) body.contextCapabilities = runtime.engineId === 'claude'
+    ? { read: true, reader: false, publishBriefing: false } : { read: true, reader: true, publishBriefing: true };
   // CTX-03: which suggestion list this turn answered, and the refs taken from it.
   if (typeof runtime.contextResolution?.resolutionId === 'string' && Array.isArray(runtime.contextResolution.chosen)) {
     body.contextResolution = { resolutionId: runtime.contextResolution.resolutionId, chosen: [...runtime.contextResolution.chosen] };
@@ -611,8 +624,16 @@ export function contextResolverErrorText(code) {
 }
 
 export function claudeContextSendErrorText(code) {
-  return code === 'CLAUDE_CONTEXT_UNSUPPORTED'
-    ? '현재 Claude 연결에서는 선택한 자료를 사용할 수 없어 보내지 않았습니다. 자료를 제외한 뒤 다시 보내세요.' : null;
+  const text = ({
+    CLAUDE_CONTEXT_UNSUPPORTED: '현재 Claude 연결에서는 선택한 자료를 사용할 수 없어 보내지 않았습니다. 자료를 제외한 뒤 다시 보내세요.',
+    CONTEXT_SCOPE_CHANGED: 'Claude 연결이 바뀌어 자료를 보내지 않았습니다. 현재 연결 계정을 확인한 뒤 다시 보내세요. 초안과 선택 자료는 유지됩니다.',
+    CLAUDE_CONTEXT_READER_UNSUPPORTED: '현재 Claude 연결에서는 이 자료의 Smart Read를 지원하지 않아 보내지 않았습니다. 더 작은 완전한 자료를 선택하거나 Codex 대화에서 다시 시도해 주세요. 초안과 선택 자료는 유지됩니다.',
+    CONTEXT_CAPTURE_INCOMPLETE: '선택한 자료가 일부만 캡처되어 보내지 않았습니다. 초안과 선택 자료는 유지됩니다.',
+    UNSUPPORTED_SOURCE_FORMAT: '현재 연결에서 읽을 수 없는 자료 형식이라 보내지 않았습니다. 초안과 선택 자료는 유지됩니다.',
+    CONTEXT_THREAD_MISMATCH: '선택한 고정 캡처가 이 대화에 속하지 않아 보내지 않았습니다. 원래 대화에서 확인해 주세요. 초안과 선택 자료는 유지됩니다.',
+    CONTEXT_TOOLS_UNAVAILABLE: '기존 대화의 자료 읽기 도구를 확인할 수 없어 보내지 않았습니다. 새 대화로 바꾸지 않았으며 초안과 선택 자료는 유지됩니다.',
+  })[code];
+  return typeof text === 'string' ? text : null;
 }
 
 // CTX-04 '왜 이것이 붙었나': names from the screen (or the capture label),
@@ -656,13 +677,17 @@ function ensureRun(state, identity) {
   if (!conversationId || !runId) return null;
   const key = runKey(conversationId, runId);
   const engineId = identity.engineId ?? identity.engine?.id;
+  const engineProfileId = identity.engine?.engineProfileId ?? identity.engineProfileId;
   if (engineId !== undefined && (!isEngineId(engineId) || !runEngineMatches(identity, engineId)
     || !runEngineMatches(state.runs[key], engineId))) return null;
+  if (engineProfileId !== undefined && (typeof engineProfileId !== 'string' || !engineProfileId.trim()
+      || state.runs[key]?.engineProfileId && state.runs[key].engineProfileId !== engineProfileId)) return null;
   const run = state.runs[key] ||= {
     conversationId, runId, answerId: key, status: 'running', stopRequested: false,
     messages: [], activities: [], artifacts: [], pendingApprovals: [], pendingUserInputs: [], subAgents: [], error: null, summary: '',
   };
   if (engineId !== undefined) run.engineId = engineId;
+  if (engineProfileId !== undefined) run.engineProfileId = engineProfileId;
   for (const field of ['requestId', 'clientThreadId', 'localThreadId', 'answerId', 'authorName', 'authorAvatar']) {
     if (identity[field] || request?.[field]) run[field] = identity[field] || request[field];
   }
@@ -1535,6 +1560,42 @@ export function chatThreadEngineId(thread, { recentEngineId = null, engines = nu
   return [thread?.engineId, recentEngineId].find(id => choices.some(choice => choice.id === id && choice.selectable)) || DEFAULT_CHAT_ENGINE_ID;
 }
 
+// Routing hints, never an owner grant. A recorded slot wins over today's active
+// slot; source-site account/profile ids are intentionally not consulted here.
+export function chatThreadEngineProfileId(thread, context = {}) {
+  if (typeof thread?.engineProfileId === 'string' && thread.engineProfileId.trim()) return thread.engineProfileId;
+  const engineId = chatThreadEngineId(thread, context);
+  const profiles = engineRows(context.engines).find(row => row.id === engineId)?.profiles;
+  const active = (Array.isArray(profiles) ? profiles : []).filter(profile => profile?.active === true && typeof profile.id === 'string' && profile.id !== 'unknown');
+  return active.length === 1 ? active[0].id : engineId === 'codex' ? 'codex-default' : null;
+}
+export function chatContextRequestScope(thread, context = {}) {
+  const scope = { engineId: chatThreadEngineId(thread, context), engineProfileId: chatThreadEngineProfileId(thread, context),
+    clientThreadId: clientThreadBinding(thread), ...(thread?.conversationId ? { conversationId: thread.conversationId } : {}) };
+  if (!scope.engineProfileId || !scope.clientThreadId) throw new Error('자료를 사용할 대화 연결을 확인하지 못했습니다. 초안은 유지됩니다.');
+  return scope;
+}
+export function supportsClaudeContext(descriptor, scope) {
+  return descriptor?.contract === 'egdesk-context-b2' && descriptor.engineId === 'claude'
+    && typeof descriptor.expectedContextScope === 'string' && descriptor.expectedContextScope.trim().length > 0 && descriptor.expectedContextScope.length <= 512
+    && (!descriptor.engineProfileId || descriptor.engineProfileId === scope.engineProfileId)
+    && descriptor.selectedAttachments === true && descriptor.immutableRead === true && descriptor.nativeReader === false
+    && Array.isArray(descriptor.tools) && descriptor.tools.length === 2
+    && ['egdesk_list_context', 'egdesk_read_source'].every(tool => descriptor.tools.includes(tool));
+}
+// Public identity is sufficient to invalidate local async work, not to confer
+// ownership. Same slot + changed account is a change; billing/usage is not.
+export function changedClaudeEngineProfiles(previous, next) {
+  const rows = value => {
+    const row = engineRows(value).find(item => item.id === 'claude');
+    return new Map((Array.isArray(row?.profiles) ? row.profiles : []).map(profile => [profile.id,
+      JSON.stringify([profile.active === true, row.status === 'ready' && !row.statusReason,
+        profile.auth?.status, profile.auth?.method, identityText(profile.auth?.account).toLowerCase()])]));
+  };
+  const before = rows(previous), after = rows(next);
+  return [...before.keys()].filter(id => before.get(id) !== after.get(id));
+}
+
 /** UI eligibility only. The helper remains authoritative for engine/account binding. */
 export function chatThreadReadiness(thread, context = {}) {
   const engineId = chatThreadEngineId(thread, context);
@@ -1543,7 +1604,9 @@ export function chatThreadReadiness(thread, context = {}) {
     reason: !auth?.isLoggedIn ? 'Codex 연결 후 전송할 수 있습니다' : !context.connected ? 'Codex 연결을 확인해 주세요' : null };
   const row = engineRows(context.engines).find(entry => entry.id === engineId);
   const profiles = (Array.isArray(row?.profiles) ? row.profiles : []).filter(profile => profile?.active === true);
-  const signedIn = profiles.length === 1 && profiles[0].auth?.status === 'signedIn';
+  const signedIn = profiles.length === 1 && typeof profiles[0].id === 'string' && profiles[0].id !== 'unknown'
+    && profiles[0].auth?.status === 'signedIn'
+    && (!thread?.engineProfileId || thread.engineProfileId === profiles[0].id);
   const ready = engineId === 'claude' && row?.status === 'ready' && signedIn && !row.statusReason;
   return { engineId, ready, reason: ready ? null : row?.status === 'loginRequired' || profiles[0]?.auth?.status === 'signedOut'
     ? 'Claude 로그인이 필요합니다' : row?.statusReason === 'CLAUDE_API_KEY_DETECTED'

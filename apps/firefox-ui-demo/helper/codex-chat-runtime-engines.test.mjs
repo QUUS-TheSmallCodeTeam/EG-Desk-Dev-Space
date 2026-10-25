@@ -263,6 +263,35 @@ test('Codex-only process configuration and ordinary instructions never apply to 
   await assert.rejects(chat.send({ message: 'Codex work' }), error => error.code === 'NATIVE_CONFIGURATION_MISMATCH')
 })
 
+test('Context authority uses the selected engine account and epoch, never caller identity or Codex fallback', () => {
+  const { chat } = twoEngines({ getOwnerKey: () => OWNER_KEY })
+  const scope = chat.contextAuthority({ engineId: 'claude', engineProfileId: 'claude-default', clientThreadId: 'local-claude', ownerKey: OWNER_KEY, epoch: 999 })
+  assert.deepEqual(scope, { engineId: 'claude', engineProfileId: 'claude-default', clientThreadId: 'local-claude', ownerKey: 'claude-account', epoch: 0 })
+  assert.equal(Object.isFrozen(scope), true)
+  assert.throws(() => chat.contextAuthority({ engineId: 'claude', engineProfileId: 'codex-default' }), { code: 'ENGINE_PROFILE_MISMATCH' })
+  chat.setConnection(false)
+  assert.equal(chat.contextAuthority({ engineId: 'claude' }).epoch, scope.epoch)
+  chat.reset()
+  assert.equal(chat.contextAuthority({ engineId: 'claude' }).ownerKey, scope.ownerKey)
+  chat.setConnection('claude', false)
+  assert.equal(chat.contextAuthority({ engineId: 'claude' }).epoch, scope.epoch + 1)
+})
+
+test('engine-aware Context lifecycle is scoped while other provider lifecycle keeps the Codex contract', () => {
+  const lifecycle = []
+  const contexts = { getAuthority: () => {}, reset: scope => lifecycle.push(['reset', scope]), disconnect: scope => lifecycle.push(['disconnect', scope]) }
+  const { chat, lifecycle: ordinary } = twoEngines({ contexts })
+  chat.setConnection(false, { processLost: true })
+  chat.reset()
+  chat.setConnection('claude', false)
+  chat.reset('claude')
+  assert.deepEqual(lifecycle, [
+    ['disconnect', { engineId: 'codex', processLost: true }], ['reset', { engineId: 'codex' }],
+    ['disconnect', { engineId: 'claude', processLost: false }], ['reset', { engineId: 'claude' }],
+  ])
+  assert.deepEqual(ordinary, ['disconnect', 'reset'])
+})
+
 // model/list rows as codex-model-catalog.mjs publishes them (engines[].models).
 const LISTED_MODELS = [
   { id: 'gpt-6.1-sol', displayName: 'GPT-6.1-Sol', isDefault: true, supportedEfforts: ['low', 'medium', 'high', 'ultra'], defaultEffort: 'low' },

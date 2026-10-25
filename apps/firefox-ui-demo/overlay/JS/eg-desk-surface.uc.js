@@ -379,6 +379,7 @@
       systemPrompt: codexThreadSystemPrompt(thread),
       // The room's engine pick and per-turn model/effort; the send path resolves an unset engine.
       ...(thread?.engineId ? { engineId: thread.engineId } : {}),
+      ...(thread?.engineProfileId ? { engineProfileId: thread.engineProfileId } : {}),
       ...(thread?.model ? { model: thread.model } : {}),
       ...(thread?.effort ? { effort: thread.effort } : {}),
       // Stored Agents run from their saved revision; the bridge composes the instructions.
@@ -1113,7 +1114,17 @@
         // Do not use resolveBrowserCard's convenience fallback for a bound input.
         const card = document.getElementById(source.sourceRef.viewId);
         if (!card?.isConnected || !card._browserControls?.captureInput) throw new Error('첨부한 Browser가 닫혔습니다. 다시 연결하거나 제거해 주세요.');
+        const assertSourceIdentity = () => {
+          const binding = card._browserControls?.toolBinding?.();
+          if (!card.isConnected || source.sourceRef.profileId && binding?.profileId !== source.sourceRef.profileId
+              || source.sourceRef.accountId !== undefined && binding?.accountId !== source.sourceRef.accountId
+              || source.browserToolIdentity && ['cardEpoch', 'userContextId'].some(key => binding?.[key] !== source.browserToolIdentity[key])) {
+            throw new Error('첨부한 Browser의 자료 계정이나 창이 바뀌었습니다. 현재 자료를 다시 선택해 주세요.');
+          }
+        };
+        assertSourceIdentity();
         const capture = await card._browserControls.captureInput();
+        assertSourceIdentity();
         return { ...capture, executionContext: { geometry: persistentEntityGeometry(card) } };
       },
       'board-element': source => {
@@ -7691,6 +7702,7 @@
       const liveRevision = liveEvent ? ++state.codex.liveRevision : null;
       const thread = updateThreadById(threadId, current => ({
         ...current, conversationId: run.conversationId, sendError: null,
+        ...(run.engineProfileId || run.engine?.engineProfileId ? { engineProfileId: run.engineProfileId || run.engine.engineProfileId } : {}),
         ...ChatState.nativeBindingForRun(current, run),
         contextToolsAvailable: current.contextToolsAvailable === true || Array.isArray(run.contextCaptures),
         messages: (liveEvent ? ChatState.projectRunMessages(current.messages, run)
@@ -7702,23 +7714,53 @@
       if (thread) markUserMessagesReadBy(threadId, thread.profileEnabled ? codexThreadAgentProfile(thread).name : 'Codex');
     }
 
+    async function requireClaudeContext(thread, token) {
+      const scope = ChatState.chatContextRequestScope(thread, state.codex);
+      if (scope.engineId !== 'claude') return;
+      let descriptor;
+      try {
+        const query = Object.entries(scope).map(([key, value]) => `${key}=${encodeURIComponent(value)}`).join('&');
+        descriptor = await fetchJson(`/context/capabilities?${query}`, { signal: token.signal });
+      } catch (error) {
+        if (error.status !== 404 && error.code !== 'CLAUDE_CONTEXT_UNSUPPORTED') throw error;
+      }
+      if (!epochScope.valid(token)) throw new Error('연결이 바뀌어 자료 준비를 중단했습니다.');
+      if (!ChatState.supportsClaudeContext(descriptor, scope)) throw Object.assign(
+        new Error(ChatState.claudeContextSendErrorText('CLAUDE_CONTEXT_UNSUPPORTED')), { code: 'CLAUDE_CONTEXT_UNSUPPORTED' });
+      // Request-local expectation, not ownership. Never refresh it after an
+      // async source capture: SSE may not yet report a server account switch.
+      token.expectedContextScope = descriptor.expectedContextScope;
+    }
+
     async function captureThreadInputs(thread, sources, token) {
       if (!sources?.length) return [];
       if (sources.length > 16) throw new Error('한 요청에는 최대 16개 자료를 첨부할 수 있습니다. 첨부를 나누거나 제거해 주세요.');
+      const contextScope = ChatState.chatContextRequestScope(thread, state.codex);
+      const assertCurrent = () => {
+        const current = getCodexThreadById(state.codex, thread.id);
+        if (!epochScope.valid(token) || token.scope !== contextScope.engineId
+            || contextScope.engineId === 'claude' && token.profile !== contextScope.engineProfileId
+            || !current || JSON.stringify(ChatState.chatContextRequestScope(current, state.codex)) !== JSON.stringify(contextScope)) {
+          throw new Error('연결이 바뀌어 자료 캡처를 중단했습니다.');
+        }
+      };
+      assertCurrent();
+      if (contextScope.engineId === 'claude') await requireClaudeContext(thread, token);
+      assertCurrent();
       const attachments = [];
       for (const source of sources || []) {
-        if (!epochScope.valid(token)) throw new Error('연결이 바뀌어 자료 캡처를 중단했습니다.');
+        assertCurrent();
         const snapshot = source.kind === 'file' ? null : (await captureChatInputs([source]))[0];
         const managedFileView = source.kind === 'file' && source.sourceRef?.draftId
           ? await captureManagedFileInput(source) : null;
-        if (!epochScope.valid(token)) throw new Error('연결이 바뀌어 자료 캡처를 중단했습니다.');
+        assertCurrent();
         attachments.push(InputContext.captureAttachment(source, snapshot, Date.now(), managedFileView));
       }
       const result = await fetchJson('/context/captures', { method: 'POST', signal: token.signal,
-        body: JSON.stringify({ clientThreadId: ChatState.clientThreadBinding(thread), attachments }) });
-      if (!epochScope.valid(token)) throw new Error('연결이 바뀌어 자료 캡처를 중단했습니다.');
+        body: JSON.stringify({ ...contextScope, ...(contextScope.engineId === 'claude' ? { expectedContextScope: token.expectedContextScope } : {}), attachments }) });
+      assertCurrent();
       if (!Array.isArray(result.captures) || result.captures.length !== sources.length) throw new Error('일부 첨부의 캡처 저장을 확인하지 못했습니다.');
-      return sources.map(source => InputContext.capturedInputReference(source, result.captures.find(capture => capture.id === source.id)));
+      return sources.map(source => InputContext.capturedInputReference(source, result.captures.find(capture => capture.id === source.id), contextScope));
     }
 
     // CTX-03: ask the helper which sources fit what is on screen now. Suggest
@@ -7758,7 +7800,7 @@
           || ChatState.chatThreadEngineId(thread, state.codex) !== 'codex'
           || !state.codex.connected || !state.codex.authStatus.isLoggedIn) return;
       let body;
-      try { body = JSON.stringify(collectContextResolverSignals(thread)); }
+      try { body = JSON.stringify({ ...collectContextResolverSignals(thread), ...ChatState.chatContextRequestScope(thread, state.codex) }); }
       catch (error) { console.warn(TAG, 'context signals failed', error); return; }
       if (body.length > 60 * 1024) return;
       const accountKey = ChatState.codexAccountKey(state.codex.authStatus) || null;
@@ -7820,7 +7862,7 @@
       if (!thread?.conversationId || refreshing.has(thread.conversationId)) return null;
       if (resume && !ChatState.canResumeNativeThread(thread, state.codex.authStatus, state.codex)) return null;
       const conversationId = thread.conversationId;
-      const token = epochScope.begin(ChatState.chatThreadEngineId(thread, state.codex));
+      const token = epochScope.begin(ChatState.chatThreadEngineId(thread, state.codex), ChatState.chatThreadEngineProfileId(thread, state.codex));
       refreshing.set(conversationId, token);
       updateThreadById(thread.id, current => ({ ...current, resuming: true }));
       emit();
@@ -7938,6 +7980,26 @@
         engineStatus.cancel();
         patch = { ...patch, engines: (state.codex.engines || []).map(row => row.id === 'claude'
           ? { ...row, status: 'offline', statusReason: 'bridgeDisconnected' } : row) };
+      }
+      if (Object.hasOwn(patch, 'engines')) {
+        for (const profileId of ChatState.changedClaudeEngineProfiles(state.codex.engines, patch.engines)) {
+          epochScope.reset('claude', profileId);
+          for (const thread of state.codex.threads) {
+            if (ChatState.chatThreadEngineId(thread, state.codex) !== 'claude'
+                || ChatState.chatThreadEngineProfileId(thread, state.codex) !== profileId) continue;
+            refreshing.delete(thread.conversationId);
+            if (state.contextSuggest?.byThread) delete state.contextSuggest.byThread[thread.id];
+            for (const request of Object.values(protocol.requests)) {
+              if (!ChatState.requestBelongsToThread(request, thread) || request.runId || request.status !== 'submitting') continue;
+              request.status = 'unconfirmed';
+              thread.messages = thread.messages.map(message => message.requestId === request.requestId
+                ? { ...message, status: 'unconfirmed' } : message);
+            }
+            thread.preparingInput = false;
+            thread.resuming = false;
+            thread.sendError = 'Claude 연결 계정이 바뀌었습니다. 초안과 선택 자료는 유지됩니다. 전송 기록을 확인한 뒤 다시 시도해 주세요.';
+          }
+        }
       }
       const accountKey = ChatState.codexAccountKey(patch.authStatus);
       if (ChatState.codexAccountChanged(state.codex.codexAccountKey, patch.authStatus)) {
@@ -8128,11 +8190,13 @@
         const text = await response.text();
         let payload = null;
         try { payload = JSON.parse(text); } catch {}
-        const error = new Error(payload?.error || text || `${response.status} ${response.statusText}`);
+        const error = new Error(typeof payload?.error === 'string' ? payload.error
+          : typeof payload?.error?.message === 'string' ? payload.error.message : text || `${response.status} ${response.statusText}`);
         error.status = response.status;
         error.code = payload?.code || null;
         error.conversationId = payload?.conversationId || null;
         error.accepted = payload?.accepted;
+        error.dispatchStatus = payload?.dispatchStatus;
         error.resumeRequired = payload?.resumeRequired;
         throw error;
       }
@@ -8188,6 +8252,7 @@
       const originalAccountKey = ChatState.knownCodexAccountKey(recordedAccountKey) ? recordedAccountKey : null;
       const restored = ChatState.reconcileNativeThread(ChatState.detachNativeThread({ ...base, id: clientThreadId,
         engineId: detail.engineId || summary.engineId || 'codex',
+        engineProfileId: detail.engineProfileId || summary.engineProfileId || null,
         clientBindingId: detail.clientBindingId || null,
         createdAt: summary.createdAt || base.createdAt, updatedAt: summary.updatedAt || base.updatedAt,
         conversationId: detail.conversationId || summary.conversationId || null,
@@ -8857,7 +8922,7 @@
         // Explicit recheck of an unconfirmed send: only the resume path can settle it.
         // A read-only refresh leaves the request unconfirmed and the room blocked.
         if (thread.conversationId) return refreshConversation(thread, true);
-        const token = epochScope.begin(ChatState.chatThreadEngineId(thread, state.codex));
+        const token = epochScope.begin(ChatState.chatThreadEngineId(thread, state.codex), ChatState.chatThreadEngineProfileId(thread, state.codex));
         try {
           const snapshot = await fetchJson('/chat/state', { signal: token.signal });
           if (!epochScope.valid(token)) return null;
@@ -9089,7 +9154,7 @@
       async captureInputs(threadId, sources) {
         const thread = getCodexThreadById(state.codex, threadId);
         if (!thread || ChatState.nativeBindingHeld(thread)) return null;
-        const token = epochScope.begin();
+        const token = epochScope.begin(ChatState.chatThreadEngineId(thread, state.codex), ChatState.chatThreadEngineProfileId(thread, state.codex));
         try { return await captureThreadInputs(thread, sources, token); }
         finally { epochScope.finish(token); }
       },
@@ -9097,7 +9162,7 @@
         const thread = getCodexThreadById(state.codex, threadId);
         if (!thread || !reference?.snapshotId) return;
         const nonce = state.codex.inputInspectNonce = (state.codex.inputInspectNonce || 0) + 1;
-        const stored = await this.readInput(reference, options);
+        const stored = await this.readInput(reference, { ...options, threadId });
         if (!stored || state.codex.inputInspectNonce !== nonce) return;
         const snapshot = InputContext.storedSnapshotForView(stored, reference);
         openChatInputPanel(threadId, { snapshots: [snapshot] });
@@ -9122,14 +9187,26 @@
       },
       async readInput(reference, options = {}) {
         if (!reference?.sourceId) return null;
-        const token = epochScope.begin();
+        // A restored evidence card uses its recorded room, never whichever room
+        // happens to be active. Legacy references must have one identifiable home.
+        const candidates = state.codex.threads.filter(thread => options.threadId ? thread.id === options.threadId
+          : reference.contextScope ? ChatState.clientThreadBinding(thread) === reference.contextScope.clientThreadId
+            : thread.messages?.some(message => message.inputReferences?.some(input => input.sourceId === reference.sourceId)));
+        if (candidates.length !== 1) { boardNotice('이 고정 캡처의 원래 대화 연결을 확인하지 못했습니다.'); return null; }
+        const thread = candidates[0];
+        let contextScope;
+        try { contextScope = ChatState.chatContextRequestScope(thread, state.codex); InputContext.assertInputContextScope(reference, contextScope); }
+        catch (error) { boardNotice(error.message); return null; }
+        const token = epochScope.begin(contextScope.engineId, contextScope.engineProfileId);
         try {
           const { startLine, endLine } = InputContext.projectionRange({ startLine: options.startLine, endLine: options.endLine });
-          const query = `?startLine=${startLine}${options.endLine !== undefined ? `&endLine=${endLine}` : ''}${options.packetId ? `&packetId=${encodeURIComponent(options.packetId)}` : ''}`;
+          const route = Object.entries(contextScope).map(([key, value]) => `${key}=${encodeURIComponent(value)}`).join('&');
+          const query = `?startLine=${startLine}${options.endLine !== undefined ? `&endLine=${endLine}` : ''}${options.packetId ? `&packetId=${encodeURIComponent(options.packetId)}` : ''}&${route}`;
           const stored = await fetchJson(`/context/captures/${encodeURIComponent(reference.sourceId)}${query}`, { signal: token.signal });
-          if (!epochScope.valid(token)) return;
+          if (!epochScope.valid(token) || JSON.stringify(ChatState.chatContextRequestScope(getCodexThreadById(state.codex, thread.id), state.codex)) !== JSON.stringify(contextScope)) return;
           InputContext.storedSnapshotForView(stored, reference);
-          if (stored.source.range && stored.source.range.startLine !== startLine) throw new Error('요청한 캡처 페이지 범위가 반환되지 않았습니다.');
+          if (stored.source.range && (stored.source.range.startLine !== startLine
+              || options.endLine !== undefined && stored.source.range.endLine !== endLine)) throw new Error('요청한 캡처 페이지 범위가 반환되지 않았습니다.');
           if (options.packetId && stored.delivered?.packetId !== options.packetId) throw new Error('지정한 과거 전달본이 반환되지 않았습니다.');
           return stored;
         } catch (error) { if (epochScope.valid(token)) boardNotice(`당시 입력을 열지 못했습니다: ${error.message}`); }
@@ -9137,7 +9214,7 @@
       },
       async openInputEvidence(threadId, reference, options = {}) {
         if (!getCodexThreadById(state.codex, threadId)) return null;
-        const stored = await this.readInput(reference, reference.presentationRange);
+        const stored = await this.readInput(reference, { ...reference.presentationRange, threadId });
         if (options.isCurrent && !options.isCurrent()) return null;
         if (stored?.source.text === null) { boardNotice('이 고정 원문은 바이너리입니다. 당시 입력 inspector에서 형식·전달 기록을 확인할 수 있습니다.'); return null; }
         return stored ? spawnInputEvidence(reference, stored) : null;
@@ -9280,7 +9357,11 @@
         const thread = getCodexThreadById(state.codex, threadId);
         if (!thread || ChatState.chatThreadEngineLocked(thread)) return;
         if (!ChatState.chatEngineChoices(state.codex.engines, state.codex.authStatus).some((choice) => choice.id === engineId && choice.selectable)) return;
-        updateThreadById(threadId, (current) => ({ ...current, engineId }));
+        // A refused first send may have recorded an engine slot without a
+        // native binding. A different engine must resolve its own active slot.
+        // Keep selected sources/references intact; never relabel a capture.
+        updateThreadById(threadId, (current) => ({ ...current, engineId,
+          ...(ChatState.chatThreadEngineId(current, state.codex) !== engineId ? { engineProfileId: null } : {}) }));
         emit();
       },
       // Model and effort apply per turn, so a started room can change them.
@@ -9707,19 +9788,26 @@
         // Keep explicit intent even when the engine's live availability changes.
         const engineId = ['codex', 'claude'].includes(activeThread?.engineId) ? activeThread.engineId
           : ChatState.chatThreadEngineId(activeThread, { recentEngineId: state.codex.recentEngineId, engines: state.codex.engines });
-        if (activeThread && engineId === 'claude' && (activeThread.inputSources?.length || activeThread.briefingInputs?.length
-            || state.contextSuggest?.byThread?.[activeThread.id]?.picked?.length)) {
+        if (activeThread && engineId === 'claude' && (state.contextSuggest?.byThread?.[activeThread.id]?.picked?.length
+            || activeThread.inputSources?.some(input => input.browserToolPermission === 'interact'))) {
           updateThreadById(activeThread.id, thread => ({ ...thread, sendError: ChatState.claudeContextSendErrorText('CLAUDE_CONTEXT_UNSUPPORTED') }));
           emit();
           return;
         }
         if (!activeThread || ChatState.nativeBindingHeld(activeThread) || !content || threadBusy(activeThread) || !ChatState.chatThreadReadiness(activeThread, state.codex).ready
             || (activeThread.conversationId && !ChatState.canResumeNativeThread(activeThread, state.codex.authStatus, state.codex))) return;
-        const token = epochScope.begin(engineId);
+        const token = epochScope.begin(engineId, ChatState.chatThreadEngineProfileId(activeThread, state.codex));
         const submittedDraft = ChatState.snapshotChatDraft(activeThread, draftText, state.codex.threadDraftRevisions[activeThread.id] || 0);
         const selectedInputs = submittedDraft.inputSources;
         let submittedWasCleared = false;
         let inputReferences;
+        const clearAcceptedClaudeDraft = () => {
+          if (engineId !== 'claude' || !ChatState.chatDraftMatches(getCodexThreadById(state.codex, activeThread.id),
+              getCodexThreadDraft(state.codex, activeThread.id), state.codex.threadDraftRevisions[activeThread.id] || 0, submittedDraft)) return;
+          updateThreadById(activeThread.id, thread => ({ ...thread, inputSources: [], briefingInputs: [] }));
+          state.codex.threadDrafts[activeThread.id] = '';
+          state.codex.draft = getCodexThreadDraft(state.codex, state.codex.activeThreadId);
+        };
         if (!await ensureNativeReadyForSend(activeThread) || !epochScope.valid(token)) { epochScope.finish(token); return; }
         const resumedThread = getCodexThreadById(state.codex, activeThread.id);
         if (!resumedThread || ChatState.clientThreadBinding(resumedThread) !== ChatState.clientThreadBinding(activeThread)
@@ -9728,21 +9816,26 @@
         updateThreadById(activeThread.id, thread => ({ ...thread, preparingInput: true, sendError: null }));
         emit();
         try {
+          if (engineId === 'claude' && !selectedInputs.length && submittedDraft.briefingInputs.length) await requireClaudeContext(activeThread, token);
           inputReferences = [...await captureThreadInputs(activeThread, selectedInputs, token), ...submittedDraft.briefingInputs];
+          for (const reference of inputReferences) if (reference.contextScope) InputContext.assertInputContextScope(reference, ChatState.chatContextRequestScope(activeThread, state.codex));
           if (!epochScope.valid(token)) { epochScope.finish(token); return; }
           const current = getCodexThreadById(state.codex, activeThread.id);
           if (!current || ChatState.clientThreadBinding(current) !== ChatState.clientThreadBinding(activeThread)) throw new Error('대화 연결이 바뀌었습니다. 초안을 다시 확인해 주세요.');
           const readiness = ChatState.chatThreadReadiness(current, state.codex);
           if (!readiness.ready) throw new Error(readiness.reason);
         } catch (error) {
-          if (epochScope.valid(token)) updateThreadById(activeThread.id, thread => ({ ...thread, sendError: `자료를 준비하지 못해 전송하지 않았습니다: ${error.message}` }));
+          if (epochScope.valid(token)) updateThreadById(activeThread.id, thread => ({ ...thread,
+            sendError: ChatState.claudeContextSendErrorText(error.code) || `자료를 준비하지 못해 전송하지 않았습니다: ${error.message}` }));
           epochScope.finish(token);
           return;
         } finally {
           if (epochScope.valid(token)) { updateThreadById(activeThread.id, thread => ({ ...thread, preparingInput: false })); emit(); }
         }
         const requestId = `request-${Date.now().toString(36)}-${Math.random().toString(36).slice(2)}`;
-        const selectedBrowserSources = browserToolSelectedSources(activeThread.id, selectedInputs);
+        // Claude B2 reads the selected immutable capture, not the live Browser
+        // actor. An explicit interaction request was refused above, never dropped.
+        const selectedBrowserSources = engineId === 'claude' ? [] : browserToolSelectedSources(activeThread.id, selectedInputs);
         const requestedBrowserInteraction = selectedInputs.some(input => input.kind === 'browser' &&
           input.selectedByUser === true && input.browserToolPermission === 'interact');
         if (requestedBrowserInteraction && !selectedBrowserSources.some(input => input.browserToolPermission === 'interact')) {
@@ -9760,7 +9853,8 @@
           return;
         }
         // The first send ties the room to its engine (D3) and makes it the app's recent one (D4).
-        updateThreadById(activeThread.id, thread => thread.engineId === engineId ? thread : { ...thread, engineId });
+        updateThreadById(activeThread.id, thread => ({ ...thread, engineId,
+          ...(engineId === 'claude' ? { engineProfileId: token.profile } : {}) }));
         state.codex.recentEngineId = engineId;
         const authorProfile = activeThread.profileEnabled ? codexThreadAgentProfile(activeThread) : null;
         ChatState.registerChatRequest(protocol, { requestId, clientThreadId: ChatState.clientThreadBinding(activeThread), localThreadId: activeThread.id, conversationId: activeThread.conversationId, authorName: authorProfile ? authorProfile.name : engineId === 'claude' ? 'Claude' : 'Codex', ...(authorProfile?.avatar ? { authorAvatar: authorProfile.avatar } : {}) }, state.codex.authStatus, engineId);
@@ -9770,7 +9864,7 @@
         state.codex.error = null;
         const currentComposer = getCodexThreadById(state.codex, activeThread.id);
         submittedWasCleared = ChatState.chatDraftMatches(currentComposer, getCodexThreadDraft(state.codex, activeThread.id), state.codex.threadDraftRevisions[activeThread.id] || 0, submittedDraft);
-        if (submittedWasCleared) {
+        if (submittedWasCleared && engineId !== 'claude') {
           updateThreadById(activeThread.id, thread => ({ ...thread, sendError: null, inputSources: [], briefingInputs: [] }));
           state.codex.threadDrafts = { ...state.codex.threadDrafts, [activeThread.id]: '' };
         }
@@ -9779,6 +9873,7 @@
         try {
           const runtimeConfig = codexThreadRuntimeConfig(activeThread);
           runtimeConfig.engineId = engineId;
+          if (engineId === 'claude') runtimeConfig.engineProfileId = ChatState.chatThreadEngineProfileId(activeThread, state.codex);
           // The model and effort the panel shows: a listed model with its effort, or nothing for '기본 모델'.
           const sendingThread = getCodexThreadById(state.codex, activeThread.id) || activeThread;
           const modelFields = ChatState.chatModelSendFields(sendingThread, ChatState.chatModelView(sendingThread, {
@@ -9786,7 +9881,8 @@
           runtimeConfig.model = modelFields.model;
           runtimeConfig.effort = modelFields.effort;
           runtimeConfig.contextSnapshotIds = inputReferences.map(reference => reference.snapshotId);
-          runtimeConfig.contextCapabilities = engineId === 'claude' ? null
+          if (engineId === 'claude' && inputReferences.length) runtimeConfig.expectedContextScope = token.expectedContextScope;
+          runtimeConfig.contextCapabilities = engineId === 'claude' ? (inputReferences.length ? { read: true, reader: false, publishBriefing: false } : null)
             : ChatState.contextCapabilitiesForRequest(activeThread, state.codex.authStatus, runtimeConfig.contextSnapshotIds);
           // CTX-03: the suggestion list this turn answered and the refs taken from it ([] when none).
           runtimeConfig.contextResolution = engineId === 'claude' ? null : ChatState.contextResolutionForSend(state.contextSuggest?.byThread?.[activeThread.id], selectedInputs,
@@ -9811,6 +9907,7 @@
           if (!epochScope.valid(token) || ChatState.clientThreadBinding(getCodexThreadById(state.codex, activeThread.id)) !== ChatState.clientThreadBinding(activeThread)) return;
           const run = ChatState.acceptChatRequest(protocol, result, requestId);
           if (run) {
+            clearAcceptedClaudeDraft();
             // CHAT-09: the reply confirms a one-time start; a bounded run keeps the room from branching.
             if (chatRequest.stateless || chatRequest.executionPolicy) updateThreadById(activeThread.id, thread => ({ ...thread,
               ...(chatRequest.stateless ? { stateless: result.stateless === true, startStateless: false } : {}),
@@ -9819,11 +9916,13 @@
             if (chatRequest.model) updateThreadById(activeThread.id, thread => ({ ...thread, sentModel: chatRequest.model, nameModelNext: false }));
             syncProtocolRun(run);
           } else {
-            const error = new Error(result.error || '실행 접수 상태를 확인하지 못했습니다.');
+            const error = new Error(typeof result.error === 'string' ? result.error
+              : typeof result.error?.message === 'string' ? result.error.message : '실행 접수 상태를 확인하지 못했습니다.');
             error.status = result.accepted === false ? 400 : 0;
             error.code = typeof result.code === 'string' ? result.code : null;
             error.conversationId = result.conversationId || null;
             error.accepted = result.accepted;
+            error.dispatchStatus = result.dispatchStatus;
             error.resumeRequired = result.resumeRequired;
             throw error;
           }
@@ -9851,6 +9950,7 @@
             updateThreadById(activeThread.id, thread => ({ ...thread, conversationId: error.conversationId, ...ChatState.nativeBindingForRun(thread, { conversationId: error.conversationId, accountKey: request.accountKey }) }));
           }
           // An event can prove acceptance before a failed/late HTTP response arrives.
+          if (request.runId) clearAcceptedClaudeDraft();
           if (!request.runId) {
             request.status = ChatState.submissionFailureStatus(error);
             const liveRevision = ++state.codex.liveRevision;

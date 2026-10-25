@@ -129,10 +129,19 @@ test('actual ContextRuntime attachment capture and dynamic read specs remain ava
     probe: () => ({ contextContract: true, qaContract: true, schemaFingerprint: 'a'.repeat(64) }), fingerprint: () => 'b'.repeat(64) })
   const captured = { sourceId: 'fixture-source', hash: 'fixture-hash', label: 'Public fixture', captureScope: 'full', truncated: false, shape: { kind: 'text' } }
   const observations = []
+  const nativeManifests = new Map()
   const store = {
     captureAttachments: async (owner, body) => { observations.push(['capture', owner, body.attachments.length]); return [captured] },
     getCapture: async (owner, id) => { assert.equal(id, captured.sourceId); return captured },
-    markNativeThread: async (owner, id) => observations.push(['registered', owner, id]),
+    markNativeThread: async (owner, id, manifest) => {
+      observations.push(['registered', owner, id])
+      nativeManifests.set(JSON.stringify([owner, id]), JSON.stringify(manifest))
+    },
+    hasNativeTools: async (owner, id, manifest) => {
+      observations.push(['manifest-checked', owner, id])
+      const key = JSON.stringify([owner, id])
+      return nativeManifests.has(key) && nativeManifests.get(key) === JSON.stringify(manifest)
+    },
     bind: async (owner, run, ids, capabilities, readerConfiguration) => {
       observations.push(['bound', owner, run.runId, ids])
       return { bindingId: 'binding-1', capabilities, readerConfiguration, captures: [captured] }
@@ -141,7 +150,7 @@ test('actual ContextRuntime attachment capture and dynamic read specs remain ava
   const contexts = new ContextRuntime({ store, reader: null, getOwnerKey: () => 'qa-account', schemaReady: () => native.schemaMatch })
   const h = qaHarness({ contexts, getOwnerKey: () => 'qa-account' })
   const accepted = await h.chat.send({ message: 'Read the attached public fixture', clientThreadId: 'fixture-chat', attachments: [{ kind: 'public-fixture' }], contextCapabilities: { read: true }, executionPolicy: { mode: 'readOnlyQa' } })
-  assert.deepEqual(observations.map(row => row[0]), ['capture', 'registered', 'bound'])
+  assert.deepEqual(observations.map(row => row[0]), ['capture', 'registered', 'manifest-checked', 'bound'])
   assert.deepEqual(h.calls.find(call => call.method === 'thread/start').params.dynamicTools.map(tool => tool.name), ['egdesk_list_context', 'egdesk_read_source'])
   const context = JSON.parse(h.calls.find(call => call.method === 'turn/start').params.additionalContext.egdesk_context.value)
   assert.equal(context.captures[0].sourceId, captured.sourceId)
@@ -153,10 +162,19 @@ test('ordinary Browser attachment keeps immutable Context read without live Brow
   const captured = { sourceId: 'browser-snapshot-1', hash: 'browser-hash', label: 'Selected Browser snapshot',
     captureScope: 'visible', truncated: false, shape: { kind: 'browser' } }
   const contextCalls = [], browserCalls = []
+  const nativeManifests = new Map()
   const contexts = new ContextRuntime({ getOwnerKey: () => owner, schemaReady: () => true, reader: null, store: {
     captureAttachments: async (key, body) => { contextCalls.push(['capture', key, body.attachments.length]); return [captured] },
     getCapture: async (key, id) => { contextCalls.push(['read-capture', key, id]); return captured },
-    markNativeThread: async (key, id) => contextCalls.push(['register', key, id]),
+    markNativeThread: async (key, id, manifest) => {
+      contextCalls.push(['register', key, id])
+      nativeManifests.set(JSON.stringify([key, id]), JSON.stringify(manifest))
+    },
+    hasNativeTools: async (key, id, manifest) => {
+      contextCalls.push(['manifest-checked', key, id])
+      const bindingKey = JSON.stringify([key, id])
+      return nativeManifests.has(bindingKey) && nativeManifests.get(bindingKey) === JSON.stringify(manifest)
+    },
     bind: async (key, run, ids, capabilities) => {
       contextCalls.push(['bind', key, run.runId, ids])
       return { bindingId: 'context-binding-1', capabilities, readerConfiguration: null, captures: [captured] }
@@ -188,7 +206,7 @@ test('ordinary Browser attachment keeps immutable Context read without live Brow
   assert.equal(Object.hasOwn(turn, 'sandboxPolicy'), false)
   assert.deepEqual(JSON.parse(turn.additionalContext.egdesk_context.value).captures.map(source => source.sourceId), [captured.sourceId])
   assert.equal(h.chat.snapshot(run.conversationId).runs[0].context.capabilities.read, true)
-  assert.deepEqual(contextCalls.map(call => call[0]), ['capture', 'read-capture', 'register', 'bind'])
+  assert.deepEqual(contextCalls.map(call => call[0]), ['capture', 'read-capture', 'register', 'manifest-checked', 'bind'])
   assert.deepEqual(browserCalls, [])
   await h.chat.handleServerRequest({ id: 'forbidden-browser-call', method: 'item/tool/call', params: {
     threadId: run.conversationId, turnId: run.runId, callId: 'call-1', tool: 'egdesk_browser_observe', arguments: { cardId: 'card-1' },

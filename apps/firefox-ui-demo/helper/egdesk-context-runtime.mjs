@@ -1,7 +1,8 @@
-import { createHash, randomUUID } from 'node:crypto'
+import { createHash, createHmac, randomBytes, randomUUID, timingSafeEqual } from 'node:crypto'
 import path from 'node:path'
 import { chatError, publicText } from './codex-chat-values.mjs'
 import { SmartReadEngine } from './egdesk-smart-read.mjs'
+import { hashContent } from './egdesk-context-store.mjs'
 import { CONTEXT_SUGGEST_DEFAULT, RESOLVER_LIMITS, normalizeContextSuggest, resolveContext, resolverRecord, validateResolverChoice, validateResolverRequest } from './egdesk-context-resolver.mjs'
 
 // Suggestions live only in memory until a send names one; nothing is written
@@ -40,6 +41,11 @@ const stepTargets = step => Array.isArray(step?.targets) && step.targets.length 
 const withoutOwner = ({ ownerScope, ...record }) => record
 const plainObject = value => Boolean(value) && typeof value === 'object' && !Array.isArray(value)
 const conversationOf = value => (typeof value === 'string' && value && value.length <= 512 ? value : null)
+const engineOf = authority => ({ engineId: authority.engineId, ...(authority.engineProfileId ? { engineProfileId: authority.engineProfileId } : {}) })
+const sameEngine = (a, b) => (a?.engineId || 'codex') === (b?.engineId || 'codex') && (a?.engineProfileId || null) === (b?.engineProfileId || null)
+const sameAuthority = (a, b) => sameEngine(a, b) && a.ownerKey === b.ownerKey && a.epoch === b.epoch
+const CLAUDE_CONTEXT_NAMES = new Set(['egdesk_list_context', 'egdesk_read_source'])
+const trackingKey = (ownerKey, conversationId) => `${ownerKey}\0${conversationId}`
 
 function webLocation(value) {
   if (typeof value !== 'string' || !value) return null
@@ -109,8 +115,8 @@ function argumentsFor(name, value) {
 }
 
 export class ContextRuntime {
-  constructor({ store, reader, getOwnerKey, schemaReady = () => true, now = Date.now }) {
-    Object.assign(this, { store, reader, getOwnerKey, schemaReady, now })
+  constructor({ store, reader, getOwnerKey, getAuthority, schemaReady = () => true, now = Date.now }) {
+    Object.assign(this, { store, reader, getOwnerKey, getAuthority, schemaReady, now })
     this.smartRead = new SmartReadEngine({ store, reader, now })
     this.runtime = null
     this.bindings = new Map()
@@ -130,6 +136,68 @@ export class ContextRuntime {
     this.suggestApplied = null
     this.suggestPersisted = null
     this.boards = null
+    this.scopeAuthorities = new Map()
+    this.contextScopeKey = randomBytes(32)
+  }
+
+  // Only the server callback resolves ownership. UI routing never supplies a
+  // grant; in particular a Claude request cannot use the legacy Codex getter.
+  authority(hints = {}) {
+    const route = {}
+    for (const key of ['engineId', 'engineProfileId', 'clientThreadId', 'conversationId']) {
+      if (hints[key] === undefined || hints[key] === null) continue
+      if (!conversationOf(hints[key])) reject('INVALID_CONTEXT_ROUTE', `Invalid ${key}`, 400)
+      route[key] = hints[key]
+    }
+    if (route.engineId && !['codex', 'claude'].includes(route.engineId)) reject('CONTEXT_ENGINE_UNSUPPORTED', 'Selected attachments are unavailable for this engine', 409)
+    let resolved
+    if (this.getAuthority) resolved = this.getAuthority(route)
+    else {
+      route.engineId ||= 'codex'
+      if (route.engineId !== 'codex') reject('CONTEXT_ENGINE_UNSUPPORTED', 'This bridge has no Claude context authority; update the bridge before sending selected attachments', 409)
+      resolved = { engineId: 'codex', ownerKey: this.getOwnerKey?.(), epoch: this.runtime?.epoch }
+    }
+    if (!resolved || !['codex', 'claude'].includes(resolved.engineId) || (route.engineId && resolved.engineId !== route.engineId) || (route.engineProfileId && resolved.engineProfileId !== route.engineProfileId) || typeof resolved.ownerKey !== 'string' || !resolved.ownerKey) reject('IDENTITY_REQUIRED', 'Context requires the selected engine subscription account', 403)
+    if (resolved.engineId === 'claude' && (!Number.isSafeInteger(resolved.epoch) || resolved.epoch < 0)) reject('IDENTITY_REQUIRED', 'Claude context requires a server connection generation', 403)
+    return Object.freeze({ ...route, ...engineOf(resolved), ownerKey: resolved.ownerKey, epoch: resolved.epoch,
+      ...(resolved.clientThreadId ? { clientThreadId: resolved.clientThreadId } : {}), ...(resolved.conversationId ? { conversationId: resolved.conversationId } : {}) })
+  }
+
+  assertAuthority(authority) {
+    let current
+    try { current = this.authority(authority) } catch { reject('ACCOUNT_CHANGED', 'Selected engine account or connection changed; retry with the current account', 403) }
+    if (!sameAuthority(current, authority)) reject('ACCOUNT_CHANGED', 'Selected engine account or connection changed; no late context result was delivered', 403)
+    return authority
+  }
+
+  scopedAuthority(hints, authority) {
+    const selected = authority || this.authority(hints)
+    if (hints?.engineId && hints.engineId !== selected.engineId || hints?.engineProfileId && hints.engineProfileId !== selected.engineProfileId) reject('CONTEXT_FORBIDDEN', 'Context routing does not match the selected engine authority', 403)
+    this.assertAuthority(selected)
+    return selected
+  }
+
+  toolManifest(authority) {
+    return { ...engineOf(authority), tools: this.specs(authority).map(spec => ({ name: spec.name, schemaHash: hashContent(JSON.stringify(spec.inputSchema)) })) }
+  }
+
+  capabilities(authority = this.authority()) {
+    this.assertAuthority(authority)
+    const specs = this.specs(authority)
+    return { contract: 'egdesk-context-b2', ...engineOf(authority), selectedAttachments: specs.length > 0, immutableRead: specs.some(spec => spec.name === 'egdesk_read_source'), nativeReader: authority.engineId === 'codex' && Boolean(this.reader), tools: specs.map(spec => spec.name), ...(authority.engineId === 'claude' ? { expectedContextScope: this.expectedContextScope(authority) } : {}) }
+  }
+
+  expectedContextScope(authority) {
+    // An opaque expectation, NOT an auth grant. Always recompute from current
+    // server authority before using it. A per-runtime key also invalidates old
+    // UI expectations on restart, without persisting identity-bearing tokens.
+    return createHmac('sha256', this.contextScopeKey).update(JSON.stringify([authority.engineId, authority.engineProfileId || null, authority.ownerKey, authority.epoch, authority.clientThreadId || null])).digest('hex')
+  }
+
+  assertExpectedContextScope(expected, authority) {
+    if (authority.engineId !== 'claude') return
+    const actual = this.expectedContextScope(this.assertAuthority(authority))
+    if (typeof expected !== 'string' || !/^[a-f0-9]{64}$/.test(expected) || !timingSafeEqual(Buffer.from(expected, 'hex'), Buffer.from(actual, 'hex'))) reject('CONTEXT_SCOPE_CHANGED', 'The selected engine account or connection changed since attachment capture began. The draft was not sent. Confirm the current account and explicitly retry; no source was captured for the new account', 409)
   }
 
   /**
@@ -189,7 +257,8 @@ export class ContextRuntime {
   trackBound(ownerKey, conversationId, captures) {
     const cid = conversationOf(conversationId)
     if (!cid || !ownerKey) return
-    let tracked = this.trackedSources.get(cid)
+    const key = trackingKey(ownerKey, cid)
+    let tracked = this.trackedSources.get(key)
     if (!tracked || tracked.ownerKey !== ownerKey) tracked = { ownerKey, sources: new Map() }
     const now = this.now()
     for (const capture of captures || []) {
@@ -199,7 +268,7 @@ export class ContextRuntime {
       this.pendingSources.delete(capture?.sourceId)
       if (entry) touch(tracked.sources, entry.sourceId, entry, SOURCE_TRACKING_LIMITS.sourcesPerConversation)
     }
-    if (tracked.sources.size) touch(this.trackedSources, cid, tracked, SOURCE_TRACKING_LIMITS.conversations)
+    if (tracked.sources.size) touch(this.trackedSources, key, tracked, SOURCE_TRACKING_LIMITS.conversations)
   }
 
   /**
@@ -241,7 +310,7 @@ export class ContextRuntime {
   // not yet announced, plus stale sources this turn sends (again, or for the
   // first time after a change seen between capture and send).
   pendingChanges(ownerKey, conversationId, sourceIds = []) {
-    const tracked = this.trackedSources.get(conversationOf(conversationId))
+    const tracked = this.trackedSources.get(trackingKey(ownerKey, conversationOf(conversationId)))
     const send = new Set(sourceIds)
     const entries = new Map()
     if (tracked && tracked.ownerKey === ownerKey) {
@@ -259,8 +328,9 @@ export class ContextRuntime {
   }
 
   announceChanges(run, prepared) {
-    if (!prepared?.changes?.length || this.getOwnerKey() !== prepared.ownerKey) return
-    const tracked = this.trackedSources.get(conversationOf(run.conversationId))
+    if (!prepared?.changes?.length) return
+    this.assertAuthority(prepared.authority || this.authority())
+    const tracked = this.trackedSources.get(trackingKey(prepared.ownerKey, conversationOf(run.conversationId)))
     if (!tracked || tracked.ownerKey !== prepared.ownerKey) return
     const at = this.now()
     for (const change of prepared.changes) {
@@ -271,17 +341,17 @@ export class ContextRuntime {
   }
 
   // GET /context/sources?conversationId= : what the attachment chips show.
-  sourceStatus({ conversationId } = {}) {
+  sourceStatus({ conversationId } = {}, authority = this.authority()) {
     const cid = conversationOf(conversationId)
     if (!cid) reject('INVALID_CONTEXT_QUERY', 'conversationId is required', 400)
-    const ownerKey = this.owner()
-    const tracked = this.trackedSources.get(cid)
+    const ownerKey = this.owner(authority)
+    const tracked = this.trackedSources.get(trackingKey(ownerKey, cid))
     const sources = tracked && tracked.ownerKey === ownerKey ? [...tracked.sources.values()].map(publicSource) : []
     return { conversationId: cid, sources }
   }
 
   staleSourcesFor(ownerKey, conversationId, sourceIds) {
-    const tracked = this.trackedSources.get(conversationOf(conversationId))
+    const tracked = this.trackedSources.get(trackingKey(ownerKey, conversationOf(conversationId)))
     if (!tracked || tracked.ownerKey !== ownerKey) return []
     const wanted = new Set(sourceIds)
     return [...tracked.sources.values()].filter(entry => entry.state === 'stale' && wanted.has(entry.sourceId))
@@ -353,20 +423,31 @@ export class ContextRuntime {
     if (this.getOwnerKey() !== ownerKey || this.runtime?.epoch !== epoch) reject('ACCOUNT_CHANGED', 'Account or connection changed during the request')
   }
 
-  owner() {
-    const key = this.getOwnerKey()
-    if (!key) reject('IDENTITY_REQUIRED', 'Context access requires a known current account identity', 403)
+  owner(authority = this.authority()) {
+    this.assertAuthority(authority)
+    // Preserve pre-B2 Codex records verbatim. Claude never looks in that scope,
+    // even if an adapter happens to return the same account-key string.
+    const key = authority.engineId === 'codex' ? authority.ownerKey : `egdesk-context:claude:${JSON.stringify([authority.engineProfileId || null, authority.ownerKey])}`
+    this.scopeAuthorities.set(key, authority)
     return key
   }
 
-  specs() { return this.schemaReady() ? CONTEXT_TOOL_SPECS : [] }
+  specs(authority) {
+    if (!this.schemaReady(authority)) return []
+    if (authority?.engineId === 'claude') return CONTEXT_TOOL_SPECS.filter(spec => CLAUDE_CONTEXT_NAMES.has(spec.name))
+    return CONTEXT_TOOL_SPECS
+  }
 
-  async capture(body) {
-    const owner = this.owner(), epoch = this.runtime?.epoch
-    const assertActive = () => {
-      if (this.getOwnerKey() !== owner || this.runtime?.epoch !== epoch) reject('ACCOUNT_CHANGED', 'Account or connection changed during capture')
-    }
-    const captures = await this.store.captureAttachments(owner, body, { assertActive })
+  async capture(body, selectedAuthority) {
+    if (!plainObject(body) || ['ownerKey', 'epoch', 'authority'].some(key => Object.hasOwn(body, key))) reject('INVALID_CONTEXT_ROUTE', 'Only engine and thread routing hints may be supplied by the client', 400)
+    const authority = this.scopedAuthority(body, selectedAuthority)
+    if (authority.engineId === 'claude' && !this.specs(authority).length) reject('CONTEXT_ENGINE_UNSUPPORTED', 'Claude selected attachments are unavailable until this engine connection supports the B2 context tools', 409)
+    this.assertExpectedContextScope(body.expectedContextScope, authority)
+    const owner = this.owner(authority)
+    const assertActive = () => this.assertAuthority(authority)
+    if (authority.clientThreadId && body.clientThreadId !== authority.clientThreadId) reject('CONTEXT_THREAD_MISMATCH', 'Capture belongs to another client conversation', 403)
+    if (authority.engineId === 'claude' && body.attachments?.some(item => item.content?.truncated === true)) reject('CONTEXT_CAPTURE_INCOMPLETE', 'Attach a complete selection before sending; this capture is truncated', 409)
+    const captures = await this.store.captureAttachments(owner, body, { assertActive, engine: engineOf(authority) })
     assertActive()
     this.trackPending(owner, captures)
     return { captures }
@@ -375,9 +456,10 @@ export class ContextRuntime {
   // CTX-03: rank what the screen reports as relevant. Policy is suggest-only:
   // this never captures, binds or reads anything. body.query (typed words)
   // only feeds the Board search and is not part of the stored resolution.
-  resolve(body) {
+  resolve(body, authority = this.authority()) {
     const { signals, query } = validateResolverRequest(body)
-    const ownerKey = this.owner()
+    if (authority.engineId !== 'codex') reject('CONTEXT_TOOL_UNSUPPORTED', 'Context suggestions are not part of Claude B2', 409)
+    const ownerKey = this.owner(authority)
     const now = this.now()
     for (const [id, saved] of this.resolutions) if (saved.expiresAt <= now) this.resolutions.delete(id)
     const suggest = this.suggestValue()
@@ -402,8 +484,8 @@ export class ContextRuntime {
     return saved.resolution
   }
 
-  async prepare(body) {
-    const epoch = this.runtime?.epoch
+  async prepare(body, selectedAuthority) {
+    if (['ownerKey', 'epoch', 'authority'].some(key => Object.hasOwn(body, key))) reject('INVALID_CONTEXT_ROUTE', 'Context authority must be resolved by the server', 400)
     const choice = body.contextResolution === undefined ? null : validateResolverChoice(body.contextResolution)
     const ids = body.contextSnapshotIds ?? []
     if (!Array.isArray(ids) || ids.length > 16 || ids.some(id => typeof id !== 'string')) reject('INVALID_CONTEXT', 'contextSnapshotIds must contain at most 16 immutable source IDs', 400)
@@ -412,19 +494,27 @@ export class ContextRuntime {
     const needsTools = ids.length || body.attachments?.length || caps.publishBriefing || caps.read || caps.reader
     if (!needsTools) {
       if (choice?.chosen.length) reject('RESOLVER_CHOICE_UNCAPTURED', 'Chosen suggestions must be attached through the normal capture path', 400)
-      return this.changesOnlyPrepared(body, epoch)
+      return (selectedAuthority?.engineId || body.engineId) === 'claude' ? null : this.changesOnlyPrepared(body, this.runtime?.epoch)
     }
-    if (!this.schemaReady()) reject('NATIVE_SCHEMA_MISMATCH', 'Context tools require the verified native app-server schema')
-    const ownerKey = this.owner()
+    const authority = this.scopedAuthority(body, selectedAuthority)
+    this.assertExpectedContextScope(body.expectedContextScope, authority)
+    if (!this.specs(authority).length) reject('NATIVE_SCHEMA_MISMATCH', 'Context tools require the verified native app-server schema')
+    if (authority.engineId === 'claude' && caps.reader) reject('CLAUDE_CONTEXT_READER_UNSUPPORTED', 'Claude NativeReader is temporarily unsupported. Keep this draft and select a smaller complete source or explicitly choose Codex', 409)
+    if (authority.engineId === 'claude' && (caps.publishBriefing || choice)) reject('CONTEXT_TOOL_UNSUPPORTED', 'Claude B2 supports explicit selected immutable sources only', 409)
+    const ownerKey = this.owner(authority)
     const resolution = choice ? this.resolution(choice, ownerKey) : null
-    if (body.attachments?.length && caps.read !== true) reject('CONTEXT_PERMISSION_REQUIRED', 'Attaching sources requires explicit read capability', 403)
-    const captures = body.attachments?.length ? (await this.capture({ clientThreadId: body.clientThreadId || body.thread?.id, attachments: body.attachments })).captures : []
+    const allowRead = authority.engineId === 'claude' ? Boolean(ids.length || body.attachments?.length) : caps.read === true
+    if (body.attachments?.length && !allowRead) reject('CONTEXT_PERMISSION_REQUIRED', 'Attaching sources requires explicit read capability', 403)
+    const clientThreadId = authority.clientThreadId || body.clientThreadId || body.thread?.id
+    const captures = body.attachments?.length ? (await this.capture({ ...engineOf(authority), clientThreadId, expectedContextScope: body.expectedContextScope, attachments: body.attachments }, authority)).captures : []
     const sourceIds = [...new Set([...ids, ...captures.map(capture => capture.sourceId)])]
     if (sourceIds.length > 16) reject('INVALID_CONTEXT', 'At most 16 sources can be selected per turn', 400)
-    if (sourceIds.length && caps.read !== true) reject('CONTEXT_PERMISSION_REQUIRED', 'Source reads must be explicitly enabled for this turn', 403)
+    if (sourceIds.length && !allowRead) reject('CONTEXT_PERMISSION_REQUIRED', 'Source reads must be explicitly enabled for this turn', 403)
     const resolved = []
     for (const id of sourceIds) resolved.push(await this.store.getCapture(ownerKey, id))
-    if (this.owner() !== ownerKey || this.runtime?.epoch !== epoch) reject('ACCOUNT_CHANGED', 'Account or connection changed during context preparation')
+    this.assertAuthority(authority)
+    await this.validateCaptures(authority, resolved, { ...body, clientThreadId })
+    if (authority.engineId === 'claude') await this.preflight(authority, resolved)
     let resolver
     if (resolution) {
       // A chosen suggestion counts only when this turn actually captured it.
@@ -437,7 +527,34 @@ export class ContextRuntime {
       resolver = resolverRecord(choice.resolutionId, resolution, chosen)
     }
     const changes = this.pendingChanges(ownerKey, body.conversationId, sourceIds)
-    return { ownerKey, sourceIds, captures: resolved, capabilities: { read: caps.read === true, reader: caps.reader === true, publishBriefing: caps.publishBriefing === true }, ...(resolver ? { resolver } : {}), ...(changes.length ? { changes } : {}) }
+    return { authority, ownerKey, clientThreadId, sourceIds, captures: resolved, capabilities: { read: allowRead, reader: caps.reader === true, publishBriefing: caps.publishBriefing === true }, ...(resolver ? { resolver } : {}), ...(changes.length ? { changes } : {}) }
+  }
+
+  async validateCaptures(authority, captures, route = {}) {
+    const ownerKey = this.owner(authority)
+    const clientThreadId = authority.clientThreadId || route.clientThreadId
+    for (const capture of captures) {
+      if (authority.engineId === 'claude' && (!capture.engine || !sameEngine(capture.engine, authority))) reject('CONTEXT_FORBIDDEN', 'Capture belongs to another engine or profile', 403)
+      if (authority.engineId === 'claude' && (!clientThreadId || capture.clientThreadId !== clientThreadId)) reject('CONTEXT_THREAD_MISMATCH', 'Capture belongs to another client conversation; attach it explicitly in this conversation', 403)
+      if (authority.engineId === 'claude') {
+        const prior = await this.store.listRecords(ownerKey, 'bindings', record => record.sourceIds?.includes(capture.sourceId))
+        const conversationId = authority.conversationId || route.conversationId
+        if (prior.some(record => !conversationId || record.conversationId !== conversationId)) reject('CONTEXT_THREAD_MISMATCH', 'Snapshot is already bound to another native conversation', 403)
+      }
+      this.assertAuthority(authority)
+    }
+  }
+
+  async preflight(authority, captures, usage = {}) {
+    const ownerKey = this.owner(authority)
+    // Account for every selected source, not a fitting subset. This writes no
+    // packet, delivery or Reader record and reads only immutable projections.
+    const budget = { ...usage }
+    for (const capture of captures) {
+      const record = await this.smartRead.read({ ownerKey, engineId: authority.engineId, run: { context: { captures } }, sourceId: capture.sourceId, intent: 'Read the complete selected immutable source', usage: budget, assertActive: () => this.assertAuthority(authority), prepareOnly: true })
+      budget.deliveryDebt = (budget.deliveryDebt || 0) + record.estimatedTokens
+    }
+    this.assertAuthority(authority)
   }
 
   // CTX-04: a plain follow-up message (no sources, no context capabilities)
@@ -447,22 +564,28 @@ export class ContextRuntime {
   async changesOnlyPrepared(body, epoch) {
     const conversationId = conversationOf(body.conversationId)
     const ownerKey = this.getOwnerKey()
-    if (!conversationId || !ownerKey || !this.trackedSources.has(conversationId)) return null
+    if (!conversationId || !ownerKey || !this.trackedSources.has(trackingKey(ownerKey, conversationId))) return null
     const changes = this.pendingChanges(ownerKey, conversationId)
     if (!changes.length || !this.schemaReady()) return null
     if (this.runtime?.threadToolManifestStatus?.get?.(conversationId) !== 'verified') return null
     if (!await this.store.hasNativeTools(ownerKey, conversationId)) return null
     if (this.getOwnerKey() !== ownerKey || this.runtime?.epoch !== epoch) reject('ACCOUNT_CHANGED', 'Account or connection changed during context preparation')
-    return { ownerKey, changesOnly: true, changes }
+    return { ownerKey, authority: this.authority(body), changesOnly: true, changes }
   }
 
-  async registerThread(conversationId) {
-    const ownerKey = this.getOwnerKey()
-    if (ownerKey && this.schemaReady()) await this.store.markNativeThread(ownerKey, conversationId)
+  async registerThread(conversationId, selectedAuthority) {
+    const authority = selectedAuthority || this.authority()
+    const ownerKey = this.owner(authority)
+    if (this.specs(authority).length) await this.store.markNativeThread(ownerKey, conversationId, this.toolManifest(authority))
+    this.assertAuthority(authority)
   }
 
-  async requireThread(conversationId, prepared) {
-    if (prepared && !await this.store.hasNativeTools(prepared.ownerKey, conversationId)) reject('CONTEXT_TOOLS_UNAVAILABLE', 'This older native thread has no registered context tools. Start an explicit new conversation; it was not silently replaced.')
+  async requireThread(conversationId, prepared, selectedAuthority) {
+    if (!prepared) return
+    const authority = selectedAuthority || prepared.authority || this.authority()
+    this.assertAuthority(authority)
+    if (prepared.ownerKey !== this.owner(authority) || !await this.store.hasNativeTools(prepared.ownerKey, conversationId, this.toolManifest(authority))) reject('CONTEXT_TOOLS_UNAVAILABLE', 'This older native thread has no registered context tools. Start an explicit new conversation; it was not silently replaced.')
+    this.assertAuthority(authority)
   }
 
   additionalContext(prepared) {
@@ -474,15 +597,20 @@ export class ContextRuntime {
     return entries
   }
 
-  async bindRun(run, prepared, readerConfiguration) {
+  bindingKey(run) { return run.engineId === 'claude' ? `claude:${run.engineProfileId || ''}:${run.answerId}` : run.answerId }
+
+  async bindRun(run, prepared, readerConfiguration, selectedAuthority) {
     if (!prepared) return
     if (prepared.changesOnly) { this.announceChanges(run, prepared); return }
-    const epoch = this.runtime.epoch
-    if (this.owner() !== prepared.ownerKey) reject('ACCOUNT_CHANGED', 'Account changed before context binding')
-    const binding = await this.store.bind(prepared.ownerKey, run, prepared.sourceIds, prepared.capabilities, readerConfiguration, prepared.resolver)
-    if (this.owner() !== prepared.ownerKey || this.runtime.epoch !== epoch) reject('ACCOUNT_CHANGED', 'Account or connection changed during context binding')
-    const value = { ...binding, ownerKey: prepared.ownerKey, controllers: new Set() }
-    this.bindings.set(run.answerId, value)
+    const authority = this.scopedAuthority(run, selectedAuthority || prepared.authority)
+    if (!sameAuthority(authority, prepared.authority || authority) || this.owner(authority) !== prepared.ownerKey) reject('ACCOUNT_CHANGED', 'Account changed before context binding', 403)
+    if (prepared.clientThreadId && run.clientThreadId !== prepared.clientThreadId) reject('CONTEXT_THREAD_MISMATCH', 'Run belongs to another client conversation', 403)
+    await this.validateCaptures(authority, prepared.captures, run)
+    await this.requireThread(run.conversationId, prepared, authority)
+    const binding = await this.store.bind(prepared.ownerKey, run, prepared.sourceIds, prepared.capabilities, readerConfiguration, prepared.resolver, engineOf(authority))
+    this.assertAuthority(authority)
+    const value = { ...binding, authority, ownerKey: prepared.ownerKey, controllers: new Set() }
+    this.bindings.set(this.bindingKey(run), value)
     const resolver = binding.resolver ? { resolver: binding.resolver } : {}
     run.context = { bindingId: binding.bindingId, capabilities: binding.capabilities, readerConfiguration: binding.readerConfiguration, captures: binding.captures, packets: [], briefings: [], outputs: [], ...resolver }
     this.runtime.emit(run, 'context.bound', { captures: binding.captures, bindingId: binding.bindingId, ...resolver })
@@ -490,16 +618,25 @@ export class ContextRuntime {
     this.announceChanges(run, prepared)
   }
 
-  async restoreRun(run) {
-    if (this.bindings.has(run.answerId)) return
-    const epoch = this.runtime.epoch
-    const ownerKey = this.getOwnerKey()
-    if (!ownerKey) return
+  async restoreRun(run, selectedAuthority) {
+    if (!selectedAuthority && run.engineId !== 'claude' && !this.getOwnerKey?.()) return
+    const authority = this.scopedAuthority(run, selectedAuthority)
+    const ownerKey = this.owner(authority)
+    const previous = this.bindings.get(this.bindingKey(run))
+    if (previous && (previous.ownerKey !== ownerKey || previous.conversationId !== run.conversationId || previous.runId !== run.runId)) reject('CONTEXT_FORBIDDEN', 'Existing context binding belongs to another account or conversation', 403)
     const records = await this.store.listRecords(ownerKey, 'bindings', record => record.conversationId === run.conversationId && record.runId === run.runId && record.answerId === run.answerId)
-    if (!records.length) return
+    this.assertAuthority(authority)
+    if (!records.length) {
+      if (run.context?.bindingId || run.context?.captures?.length) reject('CONTEXT_BINDING_MISSING', 'The original context binding is missing; the conversation was not replaced', 409)
+      return
+    }
+    if (authority.engineId === 'claude' && (!await this.store.hasNativeTools(ownerKey, run.conversationId, this.toolManifest(authority)) || records.some(record => !record.engine || !sameEngine(record.engine, authority)))) reject('CONTEXT_TOOLS_UNAVAILABLE', 'The original Claude context manifest is missing or different; no replacement or subset was loaded', 409)
+    if (records.some(record => record.clientThreadId && run.clientThreadId && record.clientThreadId !== run.clientThreadId)) reject('CONTEXT_THREAD_MISMATCH', 'Stored context belongs to another conversation', 403)
     const sourceIds = [...new Set(records.flatMap(record => record.sourceIds))]
     const captures = []
     for (const id of sourceIds) captures.push(await this.store.getCapture(ownerKey, id))
+    await this.validateCaptures(authority, captures, run)
+    if (authority.engineId === 'claude') await this.preflight(authority, captures)
     const matchesRun = record => record.conversationId === run.conversationId && record.runId === run.runId && record.answerId === run.answerId
     const receipts = await this.store.listRecords(ownerKey, 'deliveries', record => record.deliveryStatus === 'sent-to-app-server' && matchesRun(record.binding || {}))
     const packets = []
@@ -511,9 +648,10 @@ export class ContextRuntime {
     const briefings = (await this.store.listRecords(ownerKey, 'briefings', matchesRun)).map(({ ownerScope, ...briefing }) => briefing)
     // Metadata only: the markdown body stays in its blob until the screen opens it.
     const outputs = (await this.store.listOutputs(ownerKey, matchesRun)).sort((a, b) => a.createdAt - b.createdAt)
-    if (this.getOwnerKey() !== ownerKey || this.runtime.epoch !== epoch) reject('ACCOUNT_CHANGED', 'Account or connection changed during context resume')
-    const binding = { ...records[0], ownerKey, sourceIds, captures, bindingId: records[0].id, controllers: new Set() }
-    this.bindings.set(run.answerId, binding)
+    this.assertAuthority(authority)
+    const binding = { ...records[0], authority, ownerKey, sourceIds, captures, bindingId: records[0].id, controllers: new Set() }
+    for (const controller of previous?.controllers || []) controller.abort()
+    this.bindings.set(this.bindingKey(run), binding)
     const resolver = records.find(record => record.resolver)?.resolver
     run.context = { bindingId: binding.bindingId, capabilities: binding.capabilities, readerConfiguration: binding.readerConfiguration, captures, packets, briefings, outputs, ...(resolver ? { resolver } : {}) }
     // Watching starts again from now; changes while the bridge was down are
@@ -524,8 +662,9 @@ export class ContextRuntime {
   }
 
   assertBound(run, capability) {
-    const binding = this.bindings.get(run.answerId)
-    if (!binding || binding.ownerKey !== this.owner()) reject('CONTEXT_FORBIDDEN', 'This run has no context binding for the current account', 403)
+    const binding = this.bindings.get(this.bindingKey(run))
+    if (!binding || binding.conversationId !== run.conversationId || binding.runId !== run.runId || binding.answerId !== run.answerId || binding.clientThreadId !== run.clientThreadId || !sameEngine(binding.authority, run)) reject('CONTEXT_FORBIDDEN', 'This run has no context binding for the selected engine, account and conversation', 403)
+    this.assertAuthority(binding.authority)
     if (capability && binding.capabilities[capability] !== true) reject('CONTEXT_PERMISSION_REQUIRED', `${capability} is not enabled for this action`, 403)
     return binding
   }
@@ -553,7 +692,7 @@ export class ContextRuntime {
     await this.store.bind(binding.ownerKey, run, [capture.sourceId], binding.capabilities, binding.readerConfiguration)
     assertActive()
     this.assertBound(run, 'publishBriefing')
-    if (this.bindings.get(run.answerId) !== binding) reject('CONTEXT_CHANGED', 'Context binding changed while pinning output')
+    if (this.bindings.get(this.bindingKey(run)) !== binding) reject('CONTEXT_CHANGED', 'Context binding changed while pinning output')
     binding.sourceIds.push(capture.sourceId)
     binding.captures.push(capture)
     run.context.captures = binding.captures
@@ -727,23 +866,27 @@ export class ContextRuntime {
   }
 
   dispatch(run, event) {
-    const key = `${run.answerId}/${event.callId}`
+    const key = `${this.bindingKey(run)}/${event.callId}`
     if (this.calls.has(key)) return this.calls.get(key)
-    const controller = new AbortController(), epoch = this.runtime.epoch
+    const controller = new AbortController()
+    let dispatchAuthority
+    const current = () => { try { return !dispatchAuthority || Boolean(this.assertAuthority(dispatchAuthority)) } catch { return false } }
     const assertActive = () => {
-      if (controller.signal.aborted || epoch !== this.runtime.epoch || run.status !== 'inProgress') reject('READ_CANCELLED', 'Run ended or context authority changed; no result was delivered')
+      if (controller.signal.aborted || !current() || run.status !== 'inProgress') reject('READ_CANCELLED', 'Run ended or context authority changed; no result was delivered')
       this.assertBound(run)
     }
     const operation = (async () => {
       let packetRecord = null
       let responseSent = false
       try {
+        dispatchAuthority = this.authority(run)
         assertActive()
         const args = argumentsFor(event.tool, event.arguments)
         const binding = this.assertBound(run)
+        if (binding.authority.engineId === 'claude' && !CLAUDE_CONTEXT_NAMES.has(event.tool)) reject('CONTEXT_TOOL_UNSUPPORTED', 'Claude B2 only permits immutable context list/read', 403)
         binding.controllers.add(controller)
         let result
-        if (event.tool === 'egdesk_list_context') result = { captures: binding.captures, outputs: this.outputCandidates(run).map(({ id, label, sourceItemId }) => ({ artifactId: id, label, sourceItemId })), capabilities: binding.capabilities }
+        if (event.tool === 'egdesk_list_context') result = { captures: binding.captures, outputs: binding.authority.engineId === 'claude' ? [] : this.outputCandidates(run).map(({ id, label, sourceItemId }) => ({ artifactId: id, label, sourceItemId })), capabilities: binding.capabilities }
         else if (event.tool === 'egdesk_capture_output') result = { capture: await this.pinOutput(run, args.artifactId, assertActive) }
         else if (event.tool === 'egdesk_publish_briefing') result = { briefing: await this.publish(run, args, assertActive) }
         else if (event.tool === 'egdesk_publish_briefing_multi') result = { briefing: await this.publish(run, args, assertActive, { multiTarget: true }) }
@@ -757,38 +900,55 @@ export class ContextRuntime {
           if (!binding.sourceIds.includes(args.snapshotId)) reject('CONTEXT_FORBIDDEN', 'Source is not selected for this run', 403)
           const readId = randomUUID()
           this.runtime.emit(run, 'context.read.started', { readId, sourceId: args.snapshotId })
-          const reader = binding.capabilities.reader ? this.smartRead : new SmartReadEngine({ store: this.store, reader: null })
-          packetRecord = await reader.read({ ownerKey: binding.ownerKey, run, sourceId: args.snapshotId, intent: args.intent, query: args.query, range: args.range, readerSessionId: args.readerSessionId, usage: run.contextUsage, model: binding.readerConfiguration?.model, effort: binding.readerConfiguration?.effort, cwd: await this.store.directory(binding.ownerKey, 'scratch'), signal: controller.signal, assertActive, emit: (name, details) => {
-            if (epoch === this.runtime.epoch && this.getOwnerKey() === binding.ownerKey) this.runtime.emit(run, name, details, event.callId)
+          const reader = binding.authority.engineId === 'codex' && binding.capabilities.reader ? this.smartRead : new SmartReadEngine({ store: this.store, reader: null })
+          packetRecord = await reader.read({ ownerKey: binding.ownerKey, engineId: binding.authority.engineId, run, sourceId: args.snapshotId, intent: args.intent, query: args.query, range: args.range, readerSessionId: args.readerSessionId, usage: run.contextUsage, model: binding.readerConfiguration?.model, effort: binding.readerConfiguration?.effort, cwd: await this.store.directory(binding.ownerKey, 'scratch'), signal: controller.signal, assertActive, emit: (name, details) => {
+            if (current()) this.runtime.emit(run, name, details, event.callId)
           } })
           result = packetRecord.packet
         }
         assertActive()
         const text = packetRecord ? packetRecord.deliveryText : JSON.stringify(result)
         const response = { success: true, contentItems: [{ type: 'inputText', text }] }
-        this.runtime.respond(event.rpcId, response)
+        if (this.runtime.respond(event.rpcId, response) === false) reject('CONTEXT_DELIVERY_FAILED', 'The engine transport did not accept the result; no delivery receipt was recorded', 409)
         responseSent = true
         if (packetRecord) {
           const receiptId = await this.store.putRecord(binding.ownerKey, 'deliveries', { sourceId: packetRecord.packet.sourceId, packetId: packetRecord.packet.packetId, deliveryHash: packetRecord.deliveryHash, responseHash: createHash('sha256').update(JSON.stringify(response)).digest('hex'), nativeCallId: event.callId, binding: packetRecord.binding, deliveryStatus: 'sent-to-app-server', sentAt: this.now() })
-          if (epoch !== this.runtime.epoch || this.getOwnerKey() !== binding.ownerKey) return
+          if (!current()) return
           run.context.packets.push({ packetId: packetRecord.packet.packetId, sourceId: packetRecord.packet.sourceId, hash: packetRecord.deliveryHash, receiptId, mode: packetRecord.packet.mode, coverage: packetRecord.packet.coverage, deliveryStatus: 'sent-to-app-server' })
           run.contextUsage ||= {}
           run.contextUsage.deliveryDebt = (run.contextUsage.deliveryDebt || 0) + packetRecord.estimatedTokens
           this.runtime.emit(run, 'context.read.completed', run.context.packets.at(-1), event.callId)
         }
       } catch (error) {
-        if (epoch !== this.runtime.epoch) return
+        if (!current()) return
         this.runtime.emit(run, 'context.read.failed', { code: error.code || 'CONTEXT_FAILED', message: publicText(error.message, 1500), callId: event.callId, deliveryStatus: responseSent ? 'sent-record-failed' : 'not-sent' }, event.callId)
         // A failed/cancelled read never returns a made-up successful packet.
         if (!responseSent) try { this.runtime.respond(event.rpcId, { success: false, contentItems: [{ type: 'inputText', text: JSON.stringify({ error: { code: error.code || 'CONTEXT_FAILED', message: publicText(error.message, 1500) } }) }] }) } catch {}
-      } finally { this.bindings.get(run.answerId)?.controllers.delete(controller) }
+      } finally { this.bindings.get(this.bindingKey(run))?.controllers.delete(controller) }
     })()
     this.calls.set(key, operation)
     return operation
   }
 
-  cancelRun(run) { for (const controller of this.bindings.get(run.answerId)?.controllers || []) controller.abort() }
-  disconnect(options) { for (const binding of this.bindings.values()) for (const controller of binding.controllers) controller.abort(); this.calls.clear(); this.reader?.disconnect(options) }
+  cancelRun(run) { for (const controller of this.bindings.get(this.bindingKey(run))?.controllers || []) controller.abort() }
+
+  matchesScope(authority, options = {}) { return (!options.engineId || (authority?.engineId || 'codex') === options.engineId) && (!options.ownerKey || authority?.ownerKey === options.ownerKey) && (!options.engineProfileId || authority?.engineProfileId === options.engineProfileId) }
+
+  disconnect(options = {}) {
+    for (const [key, binding] of this.bindings) if (this.matchesScope(binding.authority, options)) {
+      for (const controller of binding.controllers) controller.abort()
+      for (const call of this.calls.keys()) if (call.startsWith(`${key}/`)) this.calls.delete(call)
+    }
+    if (!options.engineId || options.engineId === 'codex') this.reader?.disconnect(options)
+  }
   // Account change: suggestions and source-change records of the old account go too.
-  reset() { for (const binding of this.bindings.values()) for (const controller of binding.controllers) controller.abort(); this.bindings.clear(); this.calls.clear(); this.resolutions.clear(); this.pendingSources.clear(); this.trackedSources.clear(); this.smartRead.sessions.clear(); this.reader?.disconnect() }
+  reset(options = {}) {
+    this.disconnect(options)
+    for (const [key, binding] of this.bindings) if (this.matchesScope(binding.authority, options)) this.bindings.delete(key)
+    for (const map of [this.resolutions, this.pendingSources, this.trackedSources, this.smartRead.sessions]) {
+      for (const [key, value] of map) if (this.matchesScope(this.scopeAuthorities.get(value.ownerKey), options)) map.delete(key)
+    }
+    for (const [key, authority] of this.scopeAuthorities) if (this.matchesScope(authority, options)) this.scopeAuthorities.delete(key)
+    if (!options.engineId && !options.ownerKey && !options.engineProfileId) this.calls.clear()
+  }
 }

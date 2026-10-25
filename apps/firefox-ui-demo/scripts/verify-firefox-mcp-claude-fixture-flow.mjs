@@ -1,18 +1,22 @@
 #!/usr/bin/env node
 // Main-owned, model-free UI proof. Importing this module starts nothing.
 // Actions use the profile-bound MCP harness. Chrome evaluation only observes,
-// except the three named fixture setup operations below. Never calls an adapter.
+// except the named, owned fixture setup operations below. Never calls an adapter.
 import assert from 'node:assert/strict';
+import fs from 'node:fs';
 import path from 'node:path';
-import { fileURLToPath } from 'node:url';
+import { fileURLToPath, pathToFileURL } from 'node:url';
 import { qaBridgeConfig, validateQaFixtureIsolation } from './egdesk-qa-fixture-isolation.mjs';
 import { assertQaFixtureManifest } from './egdesk-chat-qa-profile.mjs';
-import { CLAUDE_FIXTURE_TEXT, CLAUDE_FIXTURE_QUESTIONS } from './egdesk-chat-fixture-transport.mjs';
+import { CLAUDE_FIXTURE_TEXT, CLAUDE_FIXTURE_QUESTIONS, CLAUDE_CONTEXT_TOOLS } from './egdesk-chat-fixture-transport.mjs';
+import { fingerprintQaBytes, observeQaFixtureFile } from './egdesk-context-qa-contract.mjs';
 import { runUiFlow, chrome, loopbackJson, newQaThread, selectQaThread, sendFromComposer,
-  replaceComposerText, visible, waitUntil } from './egdesk-qa-ui-flow.mjs';
+  replaceComposerText, visible, waitUntil, openChat, chatShellUsable } from './egdesk-qa-ui-flow.mjs';
 
 export const CLAUDE_CONTEXT_ERROR = '현재 Claude 연결에서는 선택한 자료를 사용할 수 없어 보내지 않았습니다. 자료를 제외한 뒤 다시 보내세요.';
+export const CLAUDE_READER_ERROR = '현재 Claude 연결에서는 이 자료의 Smart Read를 지원하지 않아 보내지 않았습니다. 더 작은 완전한 자료를 선택하거나 Codex 대화에서 다시 시도해 주세요. 초안과 선택 자료는 유지됩니다.';
 const PANEL = '#egd-codex-activity-panel';
+const INPUT_PANEL = '#egd-codex-input-panel';
 const ENGINE_PICKER = '[data-testid="chat-engine-panel"][role="dialog"][aria-label="AI 엔진 설정"]';
 const inputCard = id => `${PANEL} [data-testid="chat-user-input"][data-user-input-id=${JSON.stringify(id)}]`;
 const approvalCard = id => `${PANEL} [data-testid="chat-approval"][data-approval-id=${JSON.stringify(id)}]`;
@@ -181,7 +185,7 @@ export function assertClaudeAnswers(reply, run, input) {
 }
 
 export function assertNoAutomaticRequests(before, after) {
-  for (const key of ['sends', 'resumes', 'interrupts', 'approvals', 'userInputs', 'authWrites', 'blockedContexts']) {
+  for (const key of ['sends', 'resumes', 'interrupts', 'approvals', 'userInputs', 'authWrites', 'blockedContexts', 'captures', 'contextRefusals']) {
     assert.deepEqual(after.observed[key], before.observed[key], `Unexpected automatic ${key}`);
   }
   assert.deepEqual(after.context, before.context, 'No context capture/read/delivery is allowed');
@@ -197,11 +201,11 @@ export function assertClaudeRateUi(run, ui, level, clock) {
     && row.text.includes(`${run.rateLimit.usedPercent}%`) && row.text.includes('초기화') && row.text.includes(clock)));
 }
 
-export function assertClaudeContextBlocked(before, after, beforeFixture, afterFixture) {
+function assertContextDraftPreserved(before, after, message) {
   assert.equal(after.thread.id, before.thread.id);
   assert.equal(after.thread.engineId, 'claude');
-  assert.equal(after.thread.sendError, CLAUDE_CONTEXT_ERROR);
-  assert.ok(after.alerts.includes(CLAUDE_CONTEXT_ERROR), 'Exact Context error must be visible');
+  assert.equal(after.thread.sendError, message);
+  assert.ok(after.alerts.includes(message), 'Exact Context error must be visible');
   assert.ok(before.composer && before.thread.inputSources.length === 1, 'A draft and one selected fixture are required');
   assert.equal(after.composer, before.composer);
   assert.equal(after.thread.draft, before.thread.draft);
@@ -210,7 +214,154 @@ export function assertClaudeContextBlocked(before, after, beforeFixture, afterFi
   assert.deepEqual(after.attachments, before.attachments);
   assert.equal(after.attachments.length, 1);
   assert.equal(after.thread.conversationId, null);
+}
+
+export function assertClaudeContextBlocked(before, after, beforeFixture, afterFixture) {
+  assertContextDraftPreserved(before, after, CLAUDE_CONTEXT_ERROR);
   assertNoAutomaticRequests(beforeFixture, afterFixture);
+}
+
+export function assertClaudeReaderBlocked(before, after, beforeFixture, afterFixture) {
+  assertContextDraftPreserved(before, after, CLAUDE_READER_ERROR);
+  for (const key of ['sends', 'resumes', 'interrupts', 'approvals', 'userInputs', 'authWrites', 'blockedContexts']) {
+    assert.deepEqual(afterFixture.observed[key], beforeFixture.observed[key], `Rejected source cannot cause ${key}`);
+  }
+  assert.equal(afterFixture.runs.length, beforeFixture.runs.length);
+  assert.deepEqual(afterFixture.context.deliveries, beforeFixture.context.deliveries);
+  assert.deepEqual(afterFixture.context.inspectorReads, beforeFixture.context.inspectorReads);
+  assert.equal(afterFixture.context.captureBatches, beforeFixture.context.captureBatches + 1);
+  assert.equal(afterFixture.context.fileCaptureOperations, beforeFixture.context.fileCaptureOperations + 1);
+  assert.deepEqual(afterFixture.observed.captures.slice(0, -1), beforeFixture.observed.captures);
+  const attempt = afterFixture.observed.captures.at(-1);
+  assertClaudeContextRoute(attempt.request, before.thread);
+  assert.equal(attempt.request.attachments.length, 1);
+  assert.equal(attempt.request.attachments[0].sourceRef.path, before.thread.inputSources[0].sourceRef.path);
+  assert.deepEqual(afterFixture.observed.contextRefusals, [...beforeFixture.observed.contextRefusals,
+    { route: '/chat/send', code: 'CLAUDE_CONTEXT_READER_UNSUPPORTED' }]);
+}
+
+export function assertClaudeContextRoute(request, thread) {
+  assert.equal(request.engineId, 'claude');
+  assert.equal(request.engineProfileId, 'claude-default');
+  assert.equal(request.engineProfileId, thread.engineProfileId);
+  assert.equal(request.clientThreadId, thread.wireClientThreadId);
+  assert.ok(typeof request.expectedContextScope === 'string' && request.expectedContextScope.length > 0
+    && request.expectedContextScope.length <= 512, 'Selected Context must echo the opaque server-issued expectation');
+  for (const key of ['ownerKey', 'epoch', 'ownerScope', 'contextAuthority', 'selectedSources', 'browserToolSelection', 'executionPolicy']) {
+    assert.ok(!Object.hasOwn(request, key), `Unexpected UI authority or browser/OS grant: ${key}`);
+  }
+  if (request.contextCapabilities != null) assert.deepEqual(request.contextCapabilities,
+    { read: true, reader: false, publishBriefing: false });
+}
+
+export function assertClaudeContextCapture(before, after, thread, run, sourceFile, originalText) {
+  assert.equal(after.observed.sends.length, before.observed.sends.length + 1);
+  assert.equal(after.observed.captures.length, before.observed.captures.length + 1);
+  const sent = after.observed.sends.at(-1), attempt = after.observed.captures.at(-1);
+  assertClaudeContextRoute(sent, thread);
+  assertClaudeContextRoute(attempt.request, thread);
+  assert.equal(sent.expectedContextScope, attempt.request.expectedContextScope, 'Capture and send must retain the same expectation, not silently refresh it');
+  assert.equal(sent.runId, run.runId);
+  assert.equal(run.clientThreadId, thread.wireClientThreadId);
+  assert.equal(run.engineId, 'claude');
+  assert.equal(run.fixtureStage, 'context-bound');
+  assert.deepEqual(run.fixtureContextTools, ['egdesk_list_context', 'egdesk_read_source']);
+  assert.equal(attempt.request.attachments.length, 1);
+  assert.equal(attempt.request.attachments[0].kind, 'file');
+  assert.equal(attempt.request.attachments[0].sourceRef.path, sourceFile);
+  assert.equal(attempt.captures.length, 1);
+  const captured = attempt.captures[0];
+  assert.equal(captured.sourceRef.path, sourceFile);
+  assert.equal(captured.snapshotId, captured.sourceId);
+  assert.equal(captured.version, 1);
+  assert.equal(captured.hash, fingerprintQaBytes(originalText).sha256);
+  assert.equal(captured.truncated, false);
+  assert.deepEqual(run.contextCaptures, [captured]);
+  assert.deepEqual(sent.contextSnapshotIds, [captured.sourceId]);
+  assert.equal(after.context.captureBatches, before.context.captureBatches + 1);
+  assert.equal(after.context.fileCaptureOperations, before.context.fileCaptureOperations + 1);
+  assert.deepEqual(after.context.deliveries, before.context.deliveries, 'Capture and binding are not read/delivery proof');
+  return captured;
+}
+
+export function assertClaudeImmutablePacket(delivery, captured, run, originalText, changedText) {
+  assert.notEqual(originalText, changedText);
+  assert.equal(captured.hash, fingerprintQaBytes(originalText).sha256);
+  assert.notEqual(captured.hash, fingerprintQaBytes(changedText).sha256);
+  assert.equal(delivery.fixtureOnly, true);
+  assert.equal(delivery.sourceId, captured.sourceId);
+  assert.equal(delivery.toolName, 'egdesk_read_source');
+  const packet = delivery.packet, value = JSON.parse(packet.text);
+  assert.equal(packet.mode, 'qa-fixture-claude-direct-read');
+  assert.equal(packet.role, 'agent_input');
+  assert.equal(packet.deliveryStatus, 'sent-to-app-server'); // Synthetic receipt only, never actual adapter proof.
+  assert.equal(packet.hash, fingerprintQaBytes(packet.text).sha256);
+  assert.deepEqual(packet.binding, { conversationId: run.conversationId, runId: run.runId, answerId: run.answerId });
+  const coverage = { sourceId: captured.sourceId, range: { startLine: 1, endLine: originalText.split('\n').length },
+    totalLines: originalText.split('\n').length, complete: true, sourceTruncated: false };
+  assert.deepEqual(value, { fixtureOnly: true, tool: 'egdesk_read_source', sourceId: captured.sourceId,
+    snapshotId: captured.sourceId, sourceHash: captured.hash, version: captured.version, text: originalText, coverage });
+  assert.deepEqual(packet.coverage, coverage);
+}
+
+// Read-only checkbox observations; all changes below go through MCP click.
+export const observeAttachmentChoices = (harness, selector) => chrome(harness, rootSelector =>
+  [...document.querySelectorAll(`${rootSelector} [data-testid="chat-attach-source"]`)].map(node => ({
+    viewId: node.dataset.viewId, checked: node.checked, type: node.type, disabled: node.disabled,
+  })), selector);
+
+export async function selectClaudeAttachment(harness, threadId, targetViewId, ownedViewIds) {
+  assert.ok(threadId && targetViewId && ownedViewIds.includes(targetViewId));
+  await harness.click('[data-testid="chat-attach-open"]');
+  const panel = `${INPUT_PANEL}[data-thread-id=${JSON.stringify(threadId)}]`;
+  assert.equal((await visible(harness, panel)).length, 1, 'Expected the actual current-room attachment picker');
+  const choices = await observeAttachmentChoices(harness, panel);
+  assert.equal(new Set(choices.map(row => row.viewId)).size, choices.length, 'Ambiguous source choices');
+  assert.equal(choices.filter(row => row.viewId === targetViewId).length, 1, 'Owned source must be offered exactly once');
+  const target = choices.find(row => row.viewId === targetViewId);
+  assert.equal(target.type, 'checkbox');
+  assert.equal(target.disabled, false);
+  assert.ok(choices.every(row => !row.checked || ownedViewIds.includes(row.viewId)), 'Cannot alter unrelated preselected sources');
+  for (const row of choices) if (row.checked !== (row.viewId === targetViewId)) {
+    assert.equal(row.type, 'checkbox');
+    assert.equal(row.disabled, false);
+    const selector = `${panel} [data-testid="chat-attach-source"][data-view-id=${JSON.stringify(row.viewId)}]`;
+    const controls = await visible(harness, selector);
+    assert.equal(controls.length, 1, 'Expected one visible source checkbox');
+    await harness.click(selector);
+  }
+  const selected = (await observeAttachmentChoices(harness, panel)).filter(row => row.checked);
+  assert.deepEqual(selected.map(row => row.viewId), [targetViewId]);
+  await harness.click(`${panel} [data-testid="chat-attach-confirm"]`);
+}
+
+export const observeClaudeContextInspector = harness => chrome(harness, selector => {
+  const panel = document.querySelector(selector);
+  const articles = panel ? [...panel.querySelectorAll('[data-testid="chat-input-snapshot"]')] : [];
+  const article = articles.length === 1 ? articles[0] : null;
+  const source = article?.querySelector('[aria-label="당시 캡처 본문"]');
+  const payload = article?.querySelector('[aria-label="실제로 전달된 payload 원문"]');
+  const shown = node => !!node && node.getBoundingClientRect().width > 0 && node.getBoundingClientRect().height > 0
+    && getComputedStyle(node).visibility !== 'hidden' && getComputedStyle(node).display !== 'none';
+  return { threadId: panel?.dataset.threadId, articleCount: articles.length, sourceId: article?.dataset.snapshotId,
+    sourceText: source?.textContent, sourceVisible: shown(source),
+    sourceLabel: article?.querySelector('[data-testid="chat-input-source-label"]')?.textContent,
+    sourceMetadata: article?.querySelector('[data-testid="chat-input-source-details"]')?.textContent,
+    packetId: article?.querySelector('[data-testid="chat-input-delivery"]')?.dataset.packetId,
+    payloadText: payload?.textContent, payloadVisible: shown(payload) };
+}, INPUT_PANEL);
+
+export function assertClaudeContextInspector(observed, thread, captured, delivery, originalText) {
+  assert.equal(observed.threadId, thread.id);
+  assert.equal(observed.articleCount, 1);
+  assert.equal(observed.sourceId, captured.sourceId);
+  assert.equal(observed.sourceText, originalText);
+  assert.equal(observed.sourceVisible, true);
+  assert.ok(observed.sourceLabel?.includes('원문 캡처'));
+  assert.ok(observed.sourceMetadata?.includes(captured.hash));
+  assert.equal(observed.packetId, delivery.packet.packetId);
+  assert.equal(observed.payloadText, delivery.packet.text);
+  assert.equal(observed.payloadVisible, true);
 }
 
 // Read-only observations. No actions, event injection, setter calls or DOM edits.
@@ -226,6 +377,7 @@ export const observeClaudeUi = harness => chrome(harness, () => {
   return {
     codexLoggedIn: codex.authStatus?.isLoggedIn,
     thread: thread && { id: thread.id, title: thread.title, engineId: ChatState.chatThreadEngineId(thread, codex),
+      engineProfileId: ChatState.chatThreadEngineProfileId(thread, codex),
       wireClientThreadId: ChatState.clientThreadBinding(thread), conversationId: thread.conversationId || null,
       profileEnabled: thread.profileEnabled, sendError: thread.sendError || null, resuming: !!thread.resuming,
       bindingHeld: ChatState.nativeBindingHeld(thread), draft: codex.threadDrafts[thread.id] || '', inputSources: thread.inputSources || [] },
@@ -250,6 +402,60 @@ async function openActivity(harness) {
 
 async function closeActivity(harness) {
   if ((await harness.inspect(PANEL)).some(node => node.visible)) await harness.click(`${PANEL} button[aria-label="활동 기록 닫기"]`);
+}
+
+// Owned file-card setup changes the camera target before the next animation
+// frame. A momentarily visible Chat is not yet safe for Back/New-room clicks.
+// Observe settlement, then use the existing native Dock return (never setters).
+export const observeClaudeFixtureViewport = harness => chrome(harness, () => {
+  const box = node => {
+    const rect = node?.getBoundingClientRect();
+    return rect ? { left: rect.left, top: rect.top, right: rect.right, bottom: rect.bottom,
+      width: rect.width, height: rect.height } : null;
+  };
+  const shells = [...document.querySelectorAll('.egd-codex-chat-shell')];
+  const shell = shells.length === 1 ? shells[0] : null;
+  const state = window.__egdesk.state;
+  const navigation = [...shell?.querySelectorAll('.egd-codex-conversation-back, .egd-codex-thread-home-new') || []]
+    .filter(node => {
+      const rect = box(node), style = getComputedStyle(node);
+      return rect.width > 0 && rect.height > 0 && style.display !== 'none' && style.visibility !== 'hidden';
+    }).map(node => {
+      const rect = box(node), hit = document.elementFromPoint(rect.left + rect.width / 2, rect.top + rect.height / 2);
+      return { rect, disabled: node.disabled, hittable: !!hit && (hit === node || node.contains(hit)) };
+    });
+  return { shellCount: shells.length, shell: box(shell), dock: box(document.getElementById('egd-dock')),
+    view: { width: window.innerWidth, height: window.innerHeight }, navigation,
+    camera: { pan: { ...state.pan }, panTarget: { ...state.panTarget }, zoom: state.zoom, zoomTarget: state.zoomTarget } };
+});
+
+export function claudeFixtureCameraSettled({ camera } = {}) {
+  return !!camera && [camera.pan?.x, camera.pan?.y, camera.panTarget?.x, camera.panTarget?.y, camera.zoom, camera.zoomTarget].every(Number.isFinite)
+    && Math.abs(camera.pan.x - camera.panTarget.x) <= 0.5 && Math.abs(camera.pan.y - camera.panTarget.y) <= 0.5
+    && camera.zoom > 0 && camera.zoomTarget > 0 && Math.abs(camera.zoom - camera.zoomTarget) <= 0.001;
+}
+
+export function claudeFixtureChatNavigable(observed) {
+  if (!claudeFixtureCameraSettled(observed) || observed.shellCount !== 1
+      || !chatShellUsable(observed.shell, observed.dock, observed.view) || observed.navigation?.length !== 1) return false;
+  const control = observed.navigation[0], rect = control.rect;
+  return !!rect && control.disabled === false && control.hittable === true && rect.width > 0 && rect.height > 0
+    && rect.left >= 0 && rect.top >= 0 && rect.right <= observed.view.width && rect.bottom <= observed.view.height;
+}
+
+export async function returnClaudeChatAfterFixtureSetup(harness) {
+  const before = await observeClaudeFixtureViewport(harness);
+  const stable = async predicate => {
+    let samples = 0;
+    return waitUntil(() => observeClaudeFixtureViewport(harness), observed => {
+      samples = predicate(observed) ? samples + 1 : 0;
+      return samples >= 2;
+    }, { timeoutMs: 10000, intervalMs: 100 });
+  };
+  const settled = await stable(claudeFixtureCameraSettled);
+  await openChat(harness); // Existing actual Dock click only when Chat is not usable.
+  const returned = await stable(claudeFixtureChatNavigable);
+  return { action: 'existing-native-Dock-return-after-owned-file-card-setup', before, settled, returned };
 }
 
 export async function runClaudeFixtureFlow(options) {
@@ -283,8 +489,10 @@ export async function runClaudeFixtureFlow(options) {
     result.adapterExecutionVerified = false;
     result.osExecutionVerified = false;
     result.deadlineUtc = new Date(options.deadlineMs).toISOString();
-    result.scope = 'Visible Claude UI with Codex offline; not provider execution, permission persistence, full restart or backend adapter proof';
-    result.fixtureSetup = ['owned headless viewport', 'new-room QA title metadata', 'one manifest-owned draft attachment'];
+    result.scope = 'Visible Claude UI and selected immutable Context receipts with Codex offline; synthetic fixture only, not actual model reading, permission persistence, full restart or backend adapter proof';
+    result.fixtureSetup = ['owned headless viewport', 'new-room QA title metadata',
+      'two exclusive manifest-owned text files and file-URL cards', 'native Dock return after owned file-card camera settlement',
+      'controlled mutation of the owned small source after capture'];
     // Strict fixture setup 1: only resize the actual owned headless window.
     check('actual Firefox is headless browser chrome', await chrome(harness, () => {
       const gfx = Cc['@mozilla.org/gfx/info;1'].getService(Ci.nsIGfxInfo);
@@ -320,7 +528,8 @@ export async function runClaudeFixtureFlow(options) {
       assert.equal(ui.codexLoggedIn, false);
       assert.equal(ui.thread.profileEnabled, false);
       assert.equal(ui.thread.bindingHeld, false);
-      return { ...thread, wireClientThreadId: ui.thread.wireClientThreadId };
+      assert.equal(ui.thread.engineProfileId, 'claude-default');
+      return { ...thread, wireClientThreadId: ui.thread.wireClientThreadId, engineProfileId: ui.thread.engineProfileId };
     };
     const send = async (thread, scenario, suffix = '') => {
       deadline();
@@ -330,6 +539,7 @@ export async function runClaudeFixtureFlow(options) {
       const sent = state.observed.sends.filter(row => row.message === prompt);
       assert.equal(sent.length, 1);
       assert.equal(sent[0].engineId, 'claude');
+      assert.equal(sent[0].engineProfileId, thread.engineProfileId);
       assert.equal(sent[0].profileEnabled, false);
       assert.equal(sent[0].clientThreadId, thread.wireClientThreadId);
       const ready = await waitUntil(readFixture, state => state.runs.find(row => row.runId === sent[0].runId)?.messages.some(row => row.role === 'assistant')
@@ -444,36 +654,137 @@ export async function runClaudeFixtureFlow(options) {
     check('rejected quota displays reset time without automatic send/resume through reset +750ms', true);
     await capture('claude-rate-limit');
 
-    const contextThread = await newClaude('context-blocked');
-    // Strict fixture setup 3: seed only the manifest's own reference file into
-    // a fresh ordinary Claude draft. No OS picker, capture, file read or send.
-    await chrome(harness, ({ threadId, profile, artifactPath }) => {
-      const api = window.__egdesk, codex = api.state.codex;
-      const thread = codex.threads.find(row => row.id === codex.activeThreadId);
-      const ChatState = ChromeUtils.importESModule('chrome://userchrome/content/EGDeskChatState.sys.mjs');
-      if (thread?.id !== threadId || thread.conversationId || thread.messages.length || thread.profileEnabled
-          || thread.inputSources?.length || ChatState.chatThreadEngineId(thread, codex) !== 'claude'
-          || artifactPath !== `${profile}/qa-fixtures/fixture-reference.txt`) throw new Error('Unsafe Context fixture setup');
-      api.codexBridge.addInputSources(threadId, [{ id: 'qa-claude-context', kind: 'file', label: 'QA Claude Context fixture',
-        sourceRef: { path: artifactPath } }]);
-      return true;
-    }, { threadId: contextThread.id, profile: options.profile, artifactPath: manifest.artifactPath });
-    const contextPrompt = `EGDESK_QA_CLAUDE_CONTEXT_BLOCKED ${nonce}`;
-    await replaceComposerText(harness, contextPrompt);
-    const beforeContext = await observeClaudeUi(harness), beforeContextFixture = await readFixture();
-    await sendFromComposer(harness, contextPrompt);
-    const blocked = await waitUi(ui => ui.thread.sendError === CLAUDE_CONTEXT_ERROR, 'exact Context refusal');
-    assertClaudeContextBlocked(beforeContext, blocked, beforeContextFixture, await readFixture());
-    check('Context blocks before HTTP capture/send and preserves the exact draft and selected attachment', true);
-    await capture('claude-context-blocked');
+    // Strict fixture setup 3: new exclusive text files under the validated QA
+    // manifest root, plus their file-URL cards. Selection is never injected.
+    deadline();
+    const sourceFile = path.join(manifest.root, `claude-context-${nonce}.txt`);
+    const largeFile = path.join(manifest.root, `claude-context-large-${nonce}.txt`);
+    const originalText = `QA_CLAUDE_V1_${nonce}\nImmutable selected source.\nNo model/provider was invoked.`;
+    const changedText = `QA_CLAUDE_V2_${nonce}\nThe live file changed after the capture.\nDo not substitute these bytes.`;
+    fs.writeFileSync(sourceFile, originalText, { flag: 'wx', mode: 0o600 });
+    fs.writeFileSync(largeFile, `QA_CLAUDE_LARGE_${nonce}\n${'Complete fixture source requiring Smart Read.\n'.repeat(600)}`, { flag: 'wx', mode: 0o600 });
+    const originalFile = observeQaFixtureFile(options.profile, sourceFile);
+    observeQaFixtureFile(options.profile, largeFile);
+    const ownedUrls = [sourceFile, largeFile].map(file => pathToFileURL(file).href);
+    const scene = await chrome(harness, ({ rootUrl, urls }) => {
+      if (!rootUrl.startsWith('file:') || urls.length !== 2 || new Set(urls).size !== 2
+          || urls.some(url => !url.startsWith(rootUrl) || !/^claude-context-(?:large-)?[a-z0-9]+\.txt$/.test(url.slice(rootUrl.length)))) {
+        throw new Error('Unsafe owned Context fixture card setup');
+      }
+      return urls.map(url => window.__egdesk.cardRuntime.openBrowserCard(url, { openMode: 'new' }).id);
+    }, { rootUrl: `${pathToFileURL(manifest.root).href}/`, urls: ownedUrls });
+    assert.equal(scene.length, 2);
+    assert.equal(new Set(scene).size, 2);
+    assert.ok(scene.every(id => typeof id === 'string' && id));
+    result.fixtureCameraReturn = await returnClaudeChatAfterFixtureSetup(harness);
+    const attach = async (thread, viewId, file) => {
+      const before = await readFixture();
+      await selectClaudeAttachment(harness, thread.id, viewId, scene);
+      const ui = await waitUi(ui => ui.thread.inputSources.length === 1
+        && ui.thread.inputSources[0].sourceRef?.path === file, 'actual attachment checkbox confirmation');
+      assert.equal(ui.thread.inputSources[0].sourceRef.viewId, viewId);
+      assert.equal(ui.attachments.length, 1);
+      assertNoAutomaticRequests(before, await readFixture());
+      return ui;
+    };
+    const contextThread = await newClaude('context-selected');
+    await attach(contextThread, scene[0], sourceFile);
+    check('actual attach picker selects only the owned source; selection alone does not capture or send', true);
+    const beforeContext = await readFixture();
+    const contextRun = await send(contextThread, 'CONTEXT', 'immutable-selected');
+    const contextBound = await readFixture();
+    const captured = assertClaudeContextCapture(beforeContext, contextBound, contextThread, contextRun, sourceFile, originalText);
+    check('actual send binds the exact source/hash/version and only list/read tools to the selected Claude thread', true);
+
+    // Strict fixture setup 4: mutate only the file created above, not the
+    // product, copied overlay, personal profile or previously captured bytes.
+    assert.deepEqual(observeQaFixtureFile(options.profile, sourceFile), originalFile);
+    const fd = fs.openSync(sourceFile, fs.constants.O_WRONLY | fs.constants.O_NOFOLLOW);
+    try { fs.ftruncateSync(fd, 0); fs.writeFileSync(fd, changedText); } finally { fs.closeSync(fd); }
+    const changedFile = observeQaFixtureFile(options.profile, sourceFile);
+    assert.equal(changedFile.sha256, fingerprintQaBytes(changedText).sha256);
+    await readFixture();
+    await loopbackJson('/__qa/context-release', { method: 'POST', token, body: { runId: contextRun.runId, phase: 'read' } });
+    const afterRead = await readFixture();
+    assert.equal(afterRead.context.deliveries.length, beforeContext.context.deliveries.length + 1);
+    const delivery = afterRead.context.deliveries.at(-1);
+    assertClaudeImmutablePacket(delivery, captured, contextRun, originalText, changedText);
+    check('synthetic read receipt retains the complete original source/version after live-file mutation; not a model-read claim', true);
+
+    const inspectHistory = async label => {
+      await openActivity(harness);
+      const history = `${PANEL} [data-testid="chat-input-history"][data-run-id=${JSON.stringify(contextRun.runId)}]`;
+      assert.equal((await visible(harness, history)).length, 1);
+      if (!(await chrome(harness, selector => document.querySelector(selector)?.open === true, history))) await harness.click(`${history} > summary`);
+      await harness.click(`${history} [data-testid="chat-input-history-open"][data-snapshot-id=${JSON.stringify(captured.sourceId)}]`);
+      await waitUntil(() => observeClaudeContextInspector(harness), panel => panel.sourceId === captured.sourceId && panel.sourceVisible);
+      await harness.click(`${INPUT_PANEL} [data-testid="chat-input-delivery"] > summary`);
+      assertClaudeContextInspector(await observeClaudeContextInspector(harness), contextThread, captured, delivery, originalText);
+      await capture(label);
+      await harness.click(`${INPUT_PANEL} [aria-label="첨부 패널 닫기"]`);
+      await closeActivity(harness);
+    };
+    await inspectHistory('claude-context-original-and-synthetic-packet');
+    check('actual input-history inspector shows the original source and exact synthetic payload as separate records', true);
+    await readFixture();
+    await loopbackJson('/__qa/context-release', { method: 'POST', token, body: { runId: contextRun.runId, phase: 'complete' } });
+    await waitUi(ui => ui.runs.find(run => run.runId === contextRun.runId)?.status === 'completed', 'Context completion');
+    await newClaude('context-away');
+    const beforeContextResume = await readFixture();
+    await selectQaThread(harness, contextThread);
+    await waitUntil(readFixture, state => state.observed.resumes.length === beforeContextResume.observed.resumes.length + 1);
+    const restored = await waitUi(ui => ui.thread.id === contextThread.id && !ui.thread.resuming, 'Context room restore');
+    assert.equal(restored.thread.engineId, 'claude');
+    assert.equal(restored.thread.engineProfileId, contextThread.engineProfileId);
+    assert.equal(restored.thread.conversationId, contextRun.conversationId);
+    assert.deepEqual(restored.runs.find(run => run.runId === contextRun.runId)?.contextCaptures, [captured]);
+    await inspectHistory('claude-context-restored-original');
+    const contextRestored = await readFixture();
+    assert.deepEqual(contextRestored.observed.captures, beforeContextResume.observed.captures);
+    assert.deepEqual(contextRestored.context.deliveries, beforeContextResume.context.deliveries);
+    assert.deepEqual(observeQaFixtureFile(options.profile, sourceFile), changedFile);
+    check('room restore keeps Claude and the same immutable capture/receipt without recapture; not full-process restart proof', true);
+
+    const largeThread = await newClaude('context-reader-blocked');
+    await attach(largeThread, scene[1], largeFile);
+    const largePrompt = `EGDESK_QA_CLAUDE_CONTEXT ${nonce} reader-must-block`;
+    await replaceComposerText(harness, largePrompt);
+    const beforeLarge = await observeClaudeUi(harness), beforeLargeFixture = await readFixture();
+    await sendFromComposer(harness, largePrompt);
+    const largeBlocked = await waitUi(ui => ui.thread.sendError === CLAUDE_READER_ERROR, 'exact Claude Smart Read refusal');
+    const largeRefused = await readFixture();
+    assertClaudeReaderBlocked(beforeLarge, largeBlocked, beforeLargeFixture, largeRefused);
+    await capture('claude-context-reader-blocked-draft-retained');
+    assertNoAutomaticRequests(largeRefused, await readFixture());
+    check('large complete source is explicitly refused without Reader/Codex fallback, truncation, send acceptance or draft/attachment loss', true);
+
+    // Retain the original unsupported-server negative as a separate contract:
+    // no verified B2 descriptor means no capture or send, even for small text.
+    await loopbackJson('/__qa/context-config', { method: 'POST', token, body: { claudeCapabilities: false } });
+    const unsupportedThread = await newClaude('context-unavailable');
+    await attach(unsupportedThread, scene[0], sourceFile);
+    const unsupportedPrompt = `EGDESK_QA_CLAUDE_CONTEXT_BLOCKED ${nonce}`;
+    await replaceComposerText(harness, unsupportedPrompt);
+    const beforeUnavailable = await observeClaudeUi(harness), beforeUnavailableFixture = await readFixture();
+    await sendFromComposer(harness, unsupportedPrompt);
+    const unavailable = await waitUi(ui => ui.thread.sendError === CLAUDE_CONTEXT_ERROR, 'missing Context descriptor refusal');
+    assertClaudeContextBlocked(beforeUnavailable, unavailable, beforeUnavailableFixture, await readFixture());
+    check('missing B2 descriptor still blocks before capture/send and preserves draft plus attachment', true);
+    await capture('claude-context-unavailable-draft-retained');
     assertClaudeReady(await loopbackJson('/v1/state'));
     const final = await readFixture();
     assert.equal(final.observed.authWrites.length, 0);
     assert.equal(final.observed.blockedContexts.length, 0, 'UI must refuse before backend Context safety fallback');
-    assert.equal(final.context.captureBatches, 0);
+    assert.equal(final.context.captureBatches, 2);
+    assert.equal(final.context.deliveries.length, 1);
+    assert.deepEqual(CLAUDE_CONTEXT_TOOLS, ['egdesk_list_context', 'egdesk_read_source']);
+    assert.ok(final.observed.events.every(event => !['reader.started', 'reader.completed', 'briefing.published'].includes(event.event)));
+    result.contextFixture = { sourceFile, changedFile, captured, syntheticDelivery: delivery,
+      actualModelReadVerified: false, restartVerified: false };
     result.fixtureRequests = { sends: final.observed.sends.length, resumes: final.observed.resumes.length,
-      approvals: final.observed.approvals.length, userInputs: final.observed.userInputs.length };
-    check('Codex remains signed out; no login/logout, Context capture, real provider or OS action', true);
+      approvals: final.observed.approvals.length, userInputs: final.observed.userInputs.length,
+      captureBatches: final.context.captureBatches, syntheticDeliveries: final.context.deliveries.length };
+    check('Codex remains signed out; provider0, authWrites0, no browser/plan/computer/Reader execution', true);
   });
 }
 

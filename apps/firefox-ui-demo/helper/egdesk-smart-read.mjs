@@ -72,15 +72,20 @@ export class SmartReadEngine {
     this.sessions = new Map()
   }
 
-  async read({ ownerKey, run, sourceId, intent, query, range, readerSessionId, usage, model, effort, cwd, signal, assertActive, emit = () => {} }) {
+  async read({ ownerKey, run, sourceId, intent, query, range, readerSessionId, usage, model, effort, cwd, signal, assertActive, engineId = 'codex', prepareOnly = false, emit = () => {} }) {
     if (typeof intent !== 'string' || !intent.trim() || intent.length > 2000 || (query != null && (typeof query !== 'string' || query.length > 1000))) throw chatError('INVALID_READ', 'A bounded read intent and optional literal query are required')
     if (range && query) throw chatError('INVALID_READ', 'Choose an explicit line range or a literal query, not both')
     assertActive()
     const { manifest, text } = await this.store.readProjection(ownerKey, sourceId)
     assertActive()
+    if (engineId === 'claude' && (manifest.truncated || manifest.capture?.coverage?.complete !== true)) throw chatError('CONTEXT_CAPTURE_INCOMPLETE', 'This selected capture is incomplete. Attach a complete selection before sending; the draft has not been sent', 409)
     const selection = selectedRanges(text, query, range)
     const selected = selection.ranges.map(r => text.slice(r.startOffset, r.endOffset)).join('\n')
     const admission = readAdmission(selected, manifest.shape, usage, run.context?.captures?.length || 1)
+    // B2 does not port the Codex NativeReader, including for continuation IDs.
+    // Preflight and actual reads share this exact admission/packet path.
+    const readerUnsupported = () => { throw chatError('CLAUDE_CONTEXT_READER_UNSUPPORTED', 'Claude selected attachments temporarily support complete direct reads only. Select a smaller complete source or explicitly choose Codex; no Reader fallback or clipped source was sent', 409) }
+    if (engineId === 'claude' && (readerSessionId || admission.mode !== 'direct' || admission.availableTokens < 768)) readerUnsupported()
     if (admission.availableTokens < 768) throw chatError('CONTEXT_CAPACITY_REQUIRED', 'Insufficient remaining context for even a bounded packet; compact or continue in a fresh turn', 409)
     if (readerSessionId) admission.mode = 'reader'
     const packetId = randomUUID()
@@ -190,8 +195,13 @@ export class SmartReadEngine {
       assertActive()
       const deliveryText = JSON.stringify(packet)
       const deliveredTokens = estimateTokens(deliveryText)
-      if (deliveredTokens > admission.availableTokens) throw chatError('PACKET_ADMISSION_REQUIRED', 'Structured packet exceeds remaining context; no clipped packet was delivered', 409)
+      if (deliveredTokens > admission.availableTokens) {
+        if (engineId === 'claude') readerUnsupported()
+        throw chatError('PACKET_ADMISSION_REQUIRED', 'Structured packet exceeds remaining context; no clipped packet was delivered', 409)
+      }
       const record = { packet, deliveryText, deliveryHash: hashContent(deliveryText), binding: { conversationId: run.conversationId, runId: run.runId, answerId: run.answerId }, preparedAt: this.now(), estimatedTokens: deliveredTokens }
+      // Admission is not a read receipt or delivery: persist nothing on preflight.
+      if (prepareOnly) return record
       await this.store.putRecord(ownerKey, 'packets', record, packetId)
       assertActive()
       if (readSession) {

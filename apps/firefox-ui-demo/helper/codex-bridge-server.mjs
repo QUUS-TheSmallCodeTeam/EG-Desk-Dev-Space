@@ -175,7 +175,13 @@ const contextStore = new ImmutableContextStore({
   allowedRoots: process.env.EGDESK_CONTEXT_ROOTS ? process.env.EGDESK_CONTEXT_ROOTS.split(path.delimiter).filter(Boolean) : [process.cwd()],
 })
 const nativeReader = new NativeReaderClient({ request: (method, params) => appServerRequest(method, params), respond: nativeRespond, getOwnerKey: () => publicAuthIdentityKey(authState) })
-const contexts = new ContextRuntime({ store: contextStore, reader: nativeReader, getOwnerKey: () => publicAuthIdentityKey(authState), schemaReady: () => nativeCapabilities.schemaMatch && appServerReady })
+const contexts = new ContextRuntime({
+  store: contextStore, reader: nativeReader, getOwnerKey: () => publicAuthIdentityKey(authState),
+  getAuthority: hints => chat.contextAuthority(hints),
+  schemaReady: authority => authority?.engineId === 'claude'
+    ? claudeEngine.isReady() && claudeEngine.capabilities().has('dynamicTools')
+    : nativeCapabilities.schemaMatch && appServerReady,
+})
 const browserTransport = new BrowserToolTransport({ getOwnerKey: () => publicAuthIdentityKey(authState) })
 const browserProvider = createCodexBrowserToolProvider({ transport: browserTransport, getOwnerKey: () => publicAuthIdentityKey(authState), schemaReady: () => nativeCapabilities.qaReadOnly && appServerReady, fixtureQa: fixtureBrowserQaFromEnv(process.env) })
 // egdesk_propose_plan on ordinary threads: plans wait for approval in the

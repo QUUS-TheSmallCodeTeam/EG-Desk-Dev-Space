@@ -31,6 +31,150 @@ async function messages(harness) {
   });
 }
 
+// A native End key can return while smooth scrolling is still in flight.
+// Three consecutive, unclipped, hit-tested samples must agree before ONE click.
+function createArtifactClickReadiness() {
+  let anchor = null, consecutive = 0;
+  const validBox = rect => !!rect && ['left', 'top', 'right', 'bottom', 'width', 'height'].every(key => Number.isFinite(rect[key]))
+    && rect.width > 0 && rect.height > 0 && rect.right > rect.left && rect.bottom > rect.top;
+  return observed => {
+    const rect = observed?.rect, log = observed?.logRect, view = observed?.viewport;
+    const clips = observed?.clippingAncestors;
+    const contained = (outer, x = true, y = true) => validBox(outer)
+      && (!x || rect.left >= outer.left && rect.right <= outer.right)
+      && (!y || rect.top >= outer.top && rect.bottom <= outer.bottom);
+    const ready = observed?.matchCount === 1 && observed.artifactId && observed.visible === true && observed.disabled === false
+      && observed.hittable === true && validBox(rect) && Number.isFinite(observed.scrollTop)
+      && contained(log) && contained(view) && Array.isArray(clips)
+      && clips.every(clip => contained(clip.rect, clip.x, clip.y));
+    if (!ready) { anchor = null; consecutive = 0; return false; }
+    const identity = JSON.stringify([observed.artifactId, observed.runId, observed.answerId]);
+    const geometry = [rect.left, rect.top, rect.right, rect.bottom, log.left, log.top, log.right, log.bottom, observed.scrollTop,
+      view.width, view.height, ...clips.flatMap(clip => [clip.rect.left, clip.rect.top, clip.rect.right, clip.rect.bottom])];
+    if (anchor?.identity === identity && anchor.geometry.length === geometry.length
+        && geometry.every((value, index) => Math.abs(value - anchor.geometry[index]) <= 0.25)) consecutive++;
+    else { anchor = { identity, geometry }; consecutive = 1; }
+    return consecutive >= 3;
+  };
+}
+
+async function observeArtifactClickTarget(harness, selector) {
+  return chrome(harness, selector => {
+    const box = node => {
+      const rect = node?.getBoundingClientRect();
+      return rect ? { left: rect.left, top: rect.top, right: rect.right, bottom: rect.bottom, width: rect.width, height: rect.height } : null;
+    };
+    const matches = [...document.querySelectorAll(selector)], chip = matches.length === 1 ? matches[0] : null;
+    const rect = box(chip), log = chip?.closest('.egd-codex-messages'), style = chip && getComputedStyle(chip);
+    const hit = rect && document.elementFromPoint(rect.left + rect.width / 2, rect.top + rect.height / 2);
+    const clippingAncestors = [];
+    for (let node = chip?.parentElement; node; node = node.parentElement) {
+      const css = getComputedStyle(node), x = /^(auto|scroll|hidden|clip)$/.test(css.overflowX), y = /^(auto|scroll|hidden|clip)$/.test(css.overflowY);
+      if (x || y) clippingAncestors.push({ rect: box(node), x, y });
+    }
+    return { matchCount: matches.length, artifactId: chip?.dataset.artifactId, runId: chip?.dataset.runId, answerId: chip?.dataset.answerId,
+      rect, logRect: box(log), scrollTop: log?.scrollTop, clippingAncestors,
+      viewport: { left: 0, top: 0, right: window.innerWidth, bottom: window.innerHeight, width: window.innerWidth, height: window.innerHeight },
+      visible: !!chip && style.display !== 'none' && style.visibility !== 'hidden' && Number(style.opacity) > 0,
+      disabled: chip?.disabled, hittable: !!chip && !!hit && (chip === hit || chip.contains(hit)) };
+  }, selector);
+}
+
+// Passive, bounded diagnostics for the existing single native artifact click.
+// No dispatch, focus, scroll, DOM/style changes, or replacement product APIs.
+async function beginArtifactClickDiagnostics(harness, key, selector) {
+  return chrome(harness, ({ key, selector }) => {
+    if (Object.hasOwn(window, key)) throw new Error('Artifact diagnostic key already exists');
+    const brief = value => { try { return String(value ?? '').slice(0, 2000); } catch { return '<unreadable>'; } };
+    const describe = node => ({ node: node === window ? 'window' : node?.nodeName || null,
+      id: node?.id || null, testid: node?.getAttribute?.('data-testid') || null,
+      artifactId: node?.getAttribute?.('data-artifact-id') || null,
+      class: brief(node?.getAttribute?.('class')) });
+    const box = node => {
+      const rect = node?.getBoundingClientRect?.();
+      return rect ? { x: rect.x, y: rect.y, width: rect.width, height: rect.height,
+        top: rect.top, right: rect.right, bottom: rect.bottom, left: rect.left } : null;
+    };
+    const observe = () => {
+      const matches = [...document.querySelectorAll(selector)], chip = matches.length === 1 ? matches[0] : null;
+      const rect = box(chip), center = rect && { x: rect.left + rect.width / 2, y: rect.top + rect.height / 2 };
+      return { at: Date.now(), matchingArtifacts: matches.length, rect, center,
+        elementsFromPoint: center ? document.elementsFromPoint(center.x, center.y).slice(0, 12).map(node => ({
+          ...describe(node), withinArtifact: node === chip || chip.contains(node) })) : [],
+        cards: [...document.querySelectorAll('.egd-browser-card')].slice(0, 32).map(card => ({ id: card.id,
+          uri: brief(card._browserState?.uri || card._sourceRef?.uri || ''), sourceKey: brief(card.dataset.sourceKey), rect: box(card) })),
+        notice: brief(document.getElementById('egd-board-notice')?.textContent) || null };
+    };
+    const data = { before: observe(), mouseEvents: [], windowErrors: [], unhandledRejections: [],
+      dropped: { mouseEvents: 0, windowErrors: 0, unhandledRejections: 0 }, firstClickAt: null,
+      afterDispatch: null, afterOneSecond: null, listenersRemoved: false };
+    const append = (name, value, limit) => {
+      if (data[name].length < limit) data[name].push(value); else data.dropped[name]++;
+    };
+    let sampleTimer = null, dispatchTimer = null, samplePromise = null;
+    const removeListeners = () => {
+      for (const name of ['mousedown', 'mouseup', 'click']) window.removeEventListener(name, onMouse, true);
+      window.removeEventListener('error', onError, true);
+      window.removeEventListener('unhandledrejection', onRejection, true);
+      data.listenersRemoved = true;
+    };
+    const sampleAfterOneSecond = basis => {
+      if (samplePromise) return samplePromise;
+      samplePromise = new Promise(resolve => {
+        const startedAt = Date.now();
+        sampleTimer = window.setTimeout(() => {
+          try { data.afterOneSecond = { basis, elapsedMs: Date.now() - startedAt, ...observe() }; }
+          catch (error) { data.sampleError = brief(error?.message || error); }
+          finally { removeListeners(); resolve(); }
+        }, 1000);
+      });
+      return samplePromise;
+    };
+    function onMouse(event) {
+      append('mouseEvents', { type: event.type, at: Date.now(), isTrusted: event.isTrusted,
+        button: event.button, buttons: event.buttons, clientX: event.clientX, clientY: event.clientY,
+        screenX: event.screenX, screenY: event.screenY, defaultPreventedAtCapture: event.defaultPrevented,
+        target: describe(event.target), path: event.composedPath().slice(0, 16).map(describe) }, 32);
+      if (event.type === 'click' && data.firstClickAt === null) {
+        data.firstClickAt = Date.now();
+        dispatchTimer = window.setTimeout(() => {
+          try { data.afterDispatch = observe(); } catch (error) { data.dispatchObservationError = brief(error?.message || error); }
+        }, 0);
+        void sampleAfterOneSecond('first-observed-click');
+      }
+    }
+    function onError(event) {
+      append('windowErrors', { at: Date.now(), message: brief(event.message), filename: brief(event.filename),
+        line: event.lineno, column: event.colno, stack: brief(event.error?.stack) }, 8);
+    }
+    function onRejection(event) {
+      append('unhandledRejections', { at: Date.now(), reason: brief(event.reason?.message || event.reason),
+        stack: brief(event.reason?.stack) }, 8);
+    }
+    window[key] = { data, async finish() {
+      try { await sampleAfterOneSecond('no-click-observed; measured-from-diagnostic-finalization'); return data; }
+      finally {
+        window.clearTimeout(sampleTimer); window.clearTimeout(dispatchTimer);
+        removeListeners(); delete window[key];
+      }
+    } };
+    try {
+      for (const name of ['mousedown', 'mouseup', 'click']) window.addEventListener(name, onMouse, { capture: true, passive: true });
+      window.addEventListener('error', onError, { capture: true, passive: true });
+      window.addEventListener('unhandledrejection', onRejection, { capture: true, passive: true });
+    } catch (error) { removeListeners(); delete window[key]; throw error; }
+    return data.before;
+  }, { key, selector });
+}
+
+async function finishArtifactClickDiagnostics(harness, key) {
+  return chrome(harness, async key => {
+    const collection = window[key];
+    if (!collection) return { unavailable: true, reason: 'Diagnostic collection absent' };
+    return collection.finish();
+  }, key);
+}
+
 // Span boundaries in rendered text carry no meaning; compare without whitespace.
 const shows = (text, ...needles) => typeof text === 'string' && needles.every(needle => text.replace(/\s+/g, '').includes(String(needle).replace(/\s+/g, '')));
 
@@ -233,7 +377,36 @@ await runUiFlow('rendered-ui-fixture-transport', async ({ harness, check, captur
   // the native End key before the native click, and keep the geometry for a failure.
   const artifactChip = `[data-testid="chat-artifact"]${attributeSelector('data-artifact-id', artifact.id)}`;
   await harness.scrollWithKey('.egd-codex-messages', 'End');
+  const readiness = result.artifactClickReadiness = { observations: 0, samples: [] };
+  const clickReady = createArtifactClickReadiness();
+  await waitUntil(async () => {
+    const observed = await observeArtifactClickTarget(harness, artifactChip);
+    readiness.observations++;
+    readiness.samples.push(observed);
+    if (readiness.samples.length > 12) readiness.samples.shift();
+    return observed;
+  }, clickReady, { timeoutMs: 10000, intervalMs: 100 });
   const chipGeometry = { chip: (await harness.inspect(artifactChip))[0]?.rect, log: (await harness.inspect('.egd-codex-messages'))[0]?.rect };
+  const diagnosticKey = `__egdeskQaArtifactClick_${randomUUID().replaceAll('-', '')}`;
+  const diagnostics = result.artifactClickDiagnostics = { selector: artifactChip, artifactId: artifact.id, filePath: artifact.target.path, chipGeometry };
+  let diagnosticsCollected = false, diagnosticsInstalled = false;
+  const collectDiagnostics = async () => {
+    if (diagnosticsCollected) return;
+    if (!diagnosticsInstalled) { diagnosticsCollected = true; return; }
+    try {
+      Object.assign(diagnostics, await finishArtifactClickDiagnostics(harness, diagnosticKey));
+      diagnosticsCollected = true;
+    } catch (error) { diagnostics.collectionError = error.message; }
+  };
+  // If a transport call fails, the ordinary flow cleanup gets one last chance
+  // to collect/remove only our listeners; it never retries the artifact action.
+  defer(collectDiagnostics);
+  try {
+    diagnostics.before = await beginArtifactClickDiagnostics(harness, diagnosticKey, artifactChip);
+    diagnosticsInstalled = true;
+  }
+  catch (error) { diagnostics.installError = error.message; }
+  try {
   await harness.click(artifactChip);
   // The card is created by the click handler; wait for it and keep what was seen
   // (cards, any board notice) so a failure explains itself.
@@ -253,6 +426,7 @@ await runUiFlow('rendered-ui-fixture-transport', async ({ harness, check, captur
   }, artifact.target.path), Boolean);
   check('fixture artifact contents are rendered in its Canvas Browser view', true);
   await capture('fixture-artifact-open');
+  } finally { await collectDiagnostics(); }
 
   const threadB = await newQaThread(harness, `QA B ${nonce}`);
   // The artifact Browser took the camera away from Chat; opening Chat again must leave its input on screen.

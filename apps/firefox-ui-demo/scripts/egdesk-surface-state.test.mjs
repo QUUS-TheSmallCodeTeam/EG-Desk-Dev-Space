@@ -3066,7 +3066,11 @@ test('Briefing range matching uses immutable source/hash/range, never just the o
 test('production batch coordinator sends real content once and uses the rotated wire binding', async () => {
   const body = surfaceSource.match(/    async function captureThreadInputs\(thread, sources, token\) \{([\s\S]*?)\n    \}/)?.[1];
   assert.ok(body);
-  const run = compileFunction(`return (async () => {${body}\n})();`, ['thread', 'sources', 'token', 'epochScope', 'captureChatInputs', 'fetchJson', 'InputContext', 'ChatState', 'captureManagedFileInput']);
+  const run = compileFunction(`${declaration('getCodexThreadById')}\nreturn (async () => {${body}\n})();`, ['thread', 'sources', 'token', 'epochScope', 'captureChatInputs', 'fetchJson', 'InputContext', 'ChatState', 'captureManagedFileInput', 'state']);
+  const thread = { id: 'local-room', clientBindingId: 'wire-after-reset', engineId: 'codex' };
+  const state = { codex: { threads: [thread] } };
+  const epochScope = Chat.createChatEpochScope();
+  const token = epochScope.begin('codex', 'codex-default');
   const browser = browserInput(), file = { id: 'file-1', kind: 'file', label: 'File', sourceRef: { path: '/tmp/file.txt' } };
   const working = { id: 'working-1', kind: 'file', label: 'Working copy', sourceRef: { viewId: 'file-card', fileId: 'opaque-file', draftId: 'opaque-draft' } };
   const managedFileView = { fileId: 'opaque-file', draftId: 'opaque-draft', head: 'opaque-head', revision: 3 };
@@ -3077,12 +3081,15 @@ test('production batch coordinator sends real content once and uses the rotated 
     return { captures: payload.attachments.map(item => ({ id: item.id, sourceId: `stored-${item.id}`,
       snapshotId: `stored-${item.id}`, hash: `hash-${item.id}`, sourceRef: item.sourceRef, captureScope: item.captureScope })) };
   };
-  const references = await run({ id: 'local-room', clientBindingId: 'wire-after-reset' }, [browser, file, working], {}, { valid: () => true },
+  const references = await run(thread, [browser, file, working], token, epochScope,
     async ([source]) => [InputContext.inputSnapshot(source, { text: 'actual browser body', url: source.sourceRef.uri })], fetchJson, InputContext, Chat,
-    async source => { assert.equal(source.sourceRef.draftId, 'opaque-draft'); return managedFileView; });
+    async source => { assert.equal(source.sourceRef.draftId, 'opaque-draft'); return managedFileView; }, state);
   assert.equal(calls.length, 1);
   assert.equal(calls[0].route, '/context/captures');
   assert.equal(calls[0].payload.clientThreadId, 'wire-after-reset');
+  assert.equal(calls[0].payload.engineId, 'codex');
+  assert.equal(calls[0].payload.engineProfileId, 'codex-default');
+  assert.equal(calls[0].payload.expectedContextScope, undefined, 'Codex protocol needs no Claude expectation');
   assert.equal(calls[0].payload.attachments[0].content.text, 'actual browser body');
   assert.equal(calls[0].payload.attachments[1].content, undefined, 'helper reads actual file bytes');
   assert.deepEqual(calls[0].payload.attachments[2].managedFileView, managedFileView);
@@ -3098,7 +3105,8 @@ test('production batch coordinator sends real content once and uses the rotated 
   assert.equal(wire.profileEnabled, false);
   assert.equal(wire.systemPrompt, undefined);
   assert.equal(wire.attachments, undefined, 'Chat sends immutable IDs, not a second competing payload shape');
-  await assert.rejects(() => run({ id: 'room' }, [browser], {}, { valid: () => false }, () => assert.fail(), () => assert.fail(), InputContext, Chat, () => assert.fail()), /연결이 바뀌/);
+  epochScope.reset('codex');
+  await assert.rejects(() => run(thread, [browser], token, epochScope, () => assert.fail(), () => assert.fail(), InputContext, Chat, () => assert.fail(), state), /연결이 바뀌/);
 });
 
 test('context/Reader/Briefing events preserve answer provenance and never become chat tool spam', () => {
@@ -3546,14 +3554,16 @@ test('backend run.context hydration restores fixed input/output captures, packet
 test('production immutable read omits a default endLine so short captures remain readable', async () => {
   const body = surfaceSource.match(/      async readInput\(reference, options = \{\}\) \{([\s\S]*?)\n      \},/)?.[1];
   assert.ok(body);
-  const run = compileFunction(`return (async () => {${body}\n})();`, ['reference', 'options', 'epochScope', 'fetchJson', 'InputContext', 'boardNotice']);
-  const scope = { begin: () => ({}), valid: () => true, finish() {} };
+  const run = compileFunction(`${declaration('getCodexThreadById')}\nreturn (async () => {${body}\n})();`, ['reference', 'options', 'epochScope', 'fetchJson', 'InputContext', 'boardNotice', 'state', 'ChatState']);
+  const scope = Chat.createChatEpochScope();
+  const state = { codex: { threads: [{ id: 'original-room', engineId: 'codex', clientBindingId: 'original-wire' }] } };
   const reference = { sourceId: 'fixed', hash: 'hash' };
   const response = { capture: { sourceId: 'fixed', hash: 'hash', sourceRef: {}, capturedAt: 100, captureScope: { type: 'file' } },
     source: { role: 'source', mime: 'text/plain', hash: 'hash', rangeHash: 'range', text: 'one line', range: { startLine: 1, endLine: 1, totalLines: 1 }, nextLine: null }, delivered: null, bindings: [] };
   const urls = [];
-  const returned = await run(reference, {}, scope, async url => { urls.push(url); return response; }, InputContext, () => assert.fail('short source should not error'));
-  assert.equal(urls[0], '/context/captures/fixed?startLine=1');
+  const returned = await run(reference, { threadId: 'original-room' }, scope, async url => { urls.push(url); return response; }, InputContext, () => assert.fail('short source should not error'), state, Chat);
+  assert.equal(urls[0], '/context/captures/fixed?startLine=1&engineId=codex&engineProfileId=codex-default&clientThreadId=original-wire');
+  assert.equal(new URL(urls[0], 'http://local').searchParams.has('endLine'), false, 'short captures still omit a default endLine');
   assert.equal(returned.source.text, 'one line');
   const binary = InputContext.storedSnapshotForView({ ...response, source: { ...response.source, rangeHash: null, text: null, range: null, byteLength: 100 } }, reference);
   assert.equal(binary.binary, true);
@@ -10250,7 +10260,7 @@ test('CTX-03 resolve request: debounced reuse, Korean errors, quiet network loss
     async (path, options) => { requests.push([path, options.method, options.body]); return reply(); }, () => { emits++; }, { warn() {} }, '[test]',
     60_000, 600_000, '자료 추천을 지금 불러오지 못했어요. 필요한 자료는 ＋ 첨부로 붙여 주세요.', requests.length);
   await run(false);
-  assert.deepEqual(requests, [['/context/resolve', 'POST', JSON.stringify(signals)]]);
+  assert.deepEqual(requests, [['/context/resolve', 'POST', JSON.stringify({ ...signals, engineId: 'codex', engineProfileId: 'codex-default', clientThreadId: 'room' })]]);
   const entry = state.contextSuggest.byThread.room;
   assert.equal(entry.status, 'ready');
   assert.equal(entry.resolution.resolutionId, contextResolutionId);
