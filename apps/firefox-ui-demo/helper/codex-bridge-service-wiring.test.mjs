@@ -236,14 +236,15 @@ test('service integration: saved defaults and accepted immutable origins travers
     assert.equal(await handler({ method: 'GET' }, res, url), true)
     return res
   }
+  const publicMetadata = origin => ({ rootId: origin.rootId, directoryId: origin.directoryId, displayPath: origin.displayPath })
   let before = h.calls.length
-  assert.equal((await readOrigin(first)).body.rootId, a.rootId)
+  assert.deepEqual(publicMetadata((await readOrigin(first)).body), publicMetadata(a))
   assert.equal(h.calls.length, before)
   await h.chat.handleNotification({ method: 'turn/completed', params: { threadId: first.conversationId, turn: { id: first.runId, status: 'completed', items: [] } } })
   const next = await h.send({ conversationId: first.conversationId })
   assert.equal(h.calls.filter(call => call.method === 'turn/start').at(-1).params.cwd, h.otherRoot)
-  assert.equal((await readOrigin(next)).body.rootId, b.rootId)
-  assert.equal((await readOrigin(first)).body.rootId, a.rootId)
+  assert.deepEqual(publicMetadata((await readOrigin(next)).body), publicMetadata(b))
+  assert.deepEqual(publicMetadata((await readOrigin(first)).body), publicMetadata(a))
   await h.file('attachProject', { roomId: 'room-1', selectionId: 'pick-project' })
   const defaults = await h.file('readRoomProjectDefault', { roomId: 'room-1' })
   const explicit = await h.send({ conversationId: first.conversationId, projectTarget: { boardId: 'b', projectId: b.projectId, rootId: b.rootId } })
@@ -251,20 +252,23 @@ test('service integration: saved defaults and accepted immutable origins travers
   assert.deepEqual(await h.file('readRoomProjectDefault', { roomId: 'room-1' }), defaults)
   assert.deepEqual(h.store.allowedRoots, [h.root])
   assert.ok(h.calls.every(call => !Object.hasOwn(call.params, 'allowedRoots') && !Object.hasOwn(call.params, 'identity')))
-  assert.doesNotMatch(JSON.stringify(h.events), /fsIdentity|fileOwnerScope|startCwd|privateProjectOrigin/)
+  assert.doesNotMatch(JSON.stringify([h.events, h.chat.snapshot()]), /fsIdentity|fileOwnerScope|startCwd|privateProjectOrigin|directoryId|displayPath/)
   await h.file('inheritRoomProject', { roomId: 'room-1' })
   await h.file('detachProject', { boardId: 'a' })
-  assert.equal((await readOrigin(first)).body.status, 'unavailable')
+  const unavailable = (await readOrigin(first)).body
+  assert.equal(unavailable.status, 'unavailable')
+  for (const key of ['rootId', 'directoryId', 'displayPath']) assert.equal(Object.hasOwn(unavailable, key), false)
   const reattached = await h.file('attachProject', { boardId: 'a', selectionId: 'pick-project' })
   assert.notEqual(reattached.projectId, a.projectId, 'the old unreferenced project row was removed')
   const retainedOrigin = (await readOrigin(first)).body
   assert.equal(retainedOrigin.projectId, a.projectId, 'origin does not cascade-delete or adopt the new project ID')
-  assert.equal(retainedOrigin.rootId, reattached.rootId)
+  assert.deepEqual(publicMetadata(retainedOrigin), publicMetadata(reattached))
   h.changeOwner('another-account')
   before = h.calls.length
   const wrongAccount = await readOrigin(first)
   assert.equal(wrongAccount.status, 403)
   assert.equal(wrongAccount.body.code, 'PROJECT_ORIGIN_SCOPE_MISMATCH')
+  for (const key of ['rootId', 'directoryId', 'displayPath']) assert.equal(Object.hasOwn(wrongAccount.body, key), false)
   assert.equal(h.calls.length, before)
 })
 

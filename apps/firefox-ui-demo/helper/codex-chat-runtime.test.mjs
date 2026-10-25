@@ -2274,7 +2274,8 @@ test('run origin: Claude keeps its original accepted origin and requires an expl
   const seen = []
   const options = { resolveProjectWorkspace: async () => current, resolveRunProjectOrigin: async ({ origin }) => {
     seen.push(origin)
-    return { status: 'verified', verified: true, projectId: origin.project.projectId, rootId: `current-${origin.project.fsIdentity.ino}` }
+    return { status: 'verified', verified: true, projectId: origin.project.projectId, rootId: `current-${origin.project.fsIdentity.ino}`,
+      directoryId: `current-directory-${origin.project.fsIdentity.ino}`, displayPath: origin.project.projectId === 'project-one' ? '/fixture/one' : '/fixture/two' }
   } }
   const h = projectClaudeHarness({ store, ...options })
   const first = await h.chat.send({ engineId: 'claude', clientThreadId: 'claude-room-a', requestId: 'claude-first', message: 'A' })
@@ -2303,7 +2304,9 @@ test('run origin: accepted start identity stays immutable across default switche
   let current = workspace('one')
   const origins = []
   const options = { getOwnerKey: () => 'account-a', resolveProjectWorkspace: async () => current,
-    resolveRunProjectOrigin: async ({ origin, assertActive }) => { assertActive(); origins.push(origin); return { status: 'verified', verified: true, projectId: origin.project.projectId, rootId: `current-handle-${origin.project.fsIdentity.ino}` } } }
+    resolveRunProjectOrigin: async ({ origin, assertActive }) => { assertActive(); origins.push(origin); return { status: 'verified', verified: true, projectId: origin.project.projectId,
+      rootId: `current-handle-${origin.project.fsIdentity.ino}`, directoryId: `current-directory-${origin.project.fsIdentity.ino}`,
+      displayPath: origin.project.projectId === 'project-one' ? '/fixture/one' : '/fixture/two' } } }
   const h = projectHarness({ ...options, store })
   const first = await h.chat.send({ message: 'First', clientThreadId: 'room-a', requestId: 'origin-first' })
   assert.equal(first.accepted, true)
@@ -2318,7 +2321,7 @@ test('run origin: accepted start identity stays immutable across default switche
   assert.equal((await h.chat.runProjectOrigin(second)).rootId, 'current-handle-202')
   assert.equal((await h.chat.runProjectOrigin(first)).rootId, 'current-handle-101')
   assert.deepEqual(h.chat.snapshot().runs.map(run => run.cwdPublic), ['/fixture/one', '/fixture/two'])
-  assert.doesNotMatch(JSON.stringify([h.events, h.chat.snapshot(), store.listEvents('room-a'), store.listRuns('room-a')]), /fsIdentity|fileOwnerScope|startCwd|privateProjectOrigin/)
+  assert.doesNotMatch(JSON.stringify([h.events, h.chat.snapshot(), store.listEvents('room-a'), store.listRuns('room-a')]), /fsIdentity|fileOwnerScope|startCwd|privateProjectOrigin|directoryId|displayPath/)
   assert.ok(h.calls.every(({ params }) => !Object.hasOwn(params, 'identity') && !Object.hasOwn(params, 'allowedRoots') && !Object.hasOwn(params, 'fileOwnerScope')))
   await h.finish(second)
   store.close(); store = openChatStore({ dataDir, ownerScope: 'origin-tests' })
@@ -2356,7 +2359,8 @@ test('run origin: wrong account and account changes during asynchronous recheck 
   const entered = Promise.withResolvers(), release = Promise.withResolvers()
   const h = projectHarness({ store, getOwnerKey: () => owner,
     resolveProjectWorkspace: async () => ({ ...projectWorkspace(), fileOwnerScope: 'egdesk-local', identity: { dev: '1', ino: '2' } }),
-    resolveRunProjectOrigin: async ({ origin }) => { resolverCalls++; entered.resolve(); await release.promise; return { status: 'verified', verified: true, projectId: origin.project.projectId, rootId: 'must-not-escape' } } })
+    resolveRunProjectOrigin: async ({ origin }) => { resolverCalls++; entered.resolve(); await release.promise; return { status: 'verified', verified: true, projectId: origin.project.projectId,
+      rootId: 'must-not-escape', directoryId: 'directory-must-not-escape', displayPath: '/current/must-not-escape' } } })
   const run = await h.chat.send({ clientThreadId: 'room-race', requestId: 'origin-race', message: 'Run' })
   owner = 'account-b'
   await assert.rejects(h.chat.runProjectOrigin(run), { code: 'PROJECT_ORIGIN_SCOPE_MISMATCH' })
@@ -2375,7 +2379,8 @@ test('run origin: an existing plain-chat run is not retroactively verified when 
   t.after(async () => { store.close(); await rm(dataDir, { recursive: true, force: true }) })
   let current = null, reads = 0
   const h = projectHarness({ store, getOwnerKey: () => 'account-a', resolveProjectWorkspace: async () => current,
-    resolveRunProjectOrigin: async ({ origin }) => { reads++; return { status: 'verified', verified: true, projectId: origin.project.projectId, rootId: 'current-root' } } })
+    resolveRunProjectOrigin: async ({ origin }) => { reads++; return { status: 'verified', verified: true, projectId: origin.project.projectId,
+      rootId: 'current-root', directoryId: 'current-directory', displayPath: '/work' } } })
   const plain = await h.chat.send({ clientThreadId: 'legacy-room', requestId: 'plain', message: 'Plain legacy contract' })
   await h.finish(plain)
   current = { ...projectWorkspace(), absolutePath: '/work', fileOwnerScope: 'egdesk-local', identity: { dev: '1', ino: '2' } }
@@ -2385,6 +2390,41 @@ test('run origin: an existing plain-chat run is not retroactively verified when 
   assert.equal((await h.chat.runProjectOrigin(later)).verified, true)
   assert.equal((await h.chat.runProjectOrigin(plain)).status, 'unknown')
   assert.equal(reads, 1)
+})
+
+test('run origin: current metadata is explicitly allowlisted, never persisted, and absent on malformed or unavailable results', async t => {
+  const dataDir = await mkdtemp(path.join(os.tmpdir(), 'egdesk-origin-public-metadata-'))
+  const store = openChatStore({ dataDir, ownerScope: 'origin-public-metadata' })
+  t.after(async () => { store.close(); await rm(dataDir, { recursive: true, force: true }) })
+  const current = { status: 'verified', verified: true, projectId: 'project-one', rootId: 'live-root', directoryId: 'live-directory', displayPath: '/fixture/one' }
+  let result = { ...current, source: 'untrusted-source', capability: 'not-public', absolutePath: '/private/path', startCwd: '/private/start',
+    identity: { dev: 'private', ino: 'private' }, fsIdentity: { dev: 'private', ino: 'private' }, allowedRoots: ['/'], arbitrary: 'must-not-escape' }
+  const privateReads = []
+  const h = projectHarness({ store, getOwnerKey: () => 'account-a',
+    resolveProjectWorkspace: async () => ({ ...projectWorkspace(), fileOwnerScope: 'egdesk-local', identity: { dev: '1', ino: '2' } }),
+    resolveRunProjectOrigin: async ({ origin }) => { privateReads.push(origin); if (result instanceof Error) throw result; return result } })
+  const run = await h.chat.send({ clientThreadId: 'metadata-room', requestId: 'metadata-run', message: 'Read-only metadata' })
+  const publicState = () => JSON.stringify([h.events, h.chat.snapshot(), store.listEvents('metadata-room'), store.listRuns('metadata-room')])
+  const before = publicState(), callsBefore = h.calls.length
+  const envelope = { protocolVersion: 1, conversationId: run.conversationId, runId: run.runId }
+  assert.deepEqual(await h.chat.runProjectOrigin(run), { ...envelope, ...current, source: 'room' })
+  for (const patch of [{ rootId: undefined }, { directoryId: undefined }, { directoryId: '' }, { directoryId: ' ' }, { directoryId: [] },
+    { directoryId: 'bad\0id' }, { directoryId: 'x'.repeat(301) }, { displayPath: undefined }, { displayPath: '' }, { displayPath: 'relative' },
+    { displayPath: 42 }, { displayPath: '/bad\0path' }, { displayPath: `/${'x'.repeat(4096)}` }, { projectId: 'wrong-project' }, { verified: false },
+    { status: 'unknown' }, { status: 'unavailable' }, { status: 'reconnect-required' }]) {
+    result = { ...current, ...patch }
+    assert.deepEqual(await h.chat.runProjectOrigin(run), { ...envelope, status: patch.status === 'reconnect-required' ? 'reconnect-required' : 'unavailable', verified: false }, JSON.stringify(patch))
+  }
+  result = Object.assign(new Error('/private/error'), current)
+  assert.deepEqual(await h.chat.runProjectOrigin(run), { ...envelope, status: 'unavailable', verified: false })
+  assert.equal(publicState(), before, 'origin reads do not change event/history/export snapshot data')
+  assert.doesNotMatch(before, /directoryId|displayPath|live-root|live-directory|fsIdentity|startCwd/)
+  assert.equal(h.calls.length, callsBefore, 'no provider or native request from any read')
+  assert.ok(privateReads.length > 1)
+  for (const origin of privateReads) {
+    assert.deepEqual(origin, privateReads[0], 'private origin stays immutable across every metadata read')
+    assert.doesNotMatch(JSON.stringify(origin), /directoryId|displayPath|live-root|live-directory/)
+  }
 })
 
 test('Board rejected replay: reopened durable prestart refusals never become started or accepted', async t => {

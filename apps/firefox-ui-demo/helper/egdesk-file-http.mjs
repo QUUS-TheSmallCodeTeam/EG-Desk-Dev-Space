@@ -450,14 +450,23 @@ export function createEGDeskFileHttpAdapter({ draftDirectory, projectDirectory, 
       if (project.identity.dev !== p.fsIdentity?.dev || project.identity.ino !== p.fsIdentity?.ino) { changed = true; continue }
       const connection = projects.roots.get(project.id)
       if (!connection) continue
-      const described = await service.describeRoot(connection.rootId).catch(() => null)
+      // Snapshot only public fields from this already-authorized live handle.
+      // Neither saved provenance nor describeRoot's private fields are DTOs.
+      const publicRoot = { rootId: connection.rootId, directoryId: connection.directoryId, displayPath: connection.displayPath }
+      const validId = value => typeof value === 'string' && value.trim() && value.length <= 300 && !value.includes('\0')
+      if (!validId(publicRoot.rootId) || !validId(publicRoot.directoryId) || typeof publicRoot.displayPath !== 'string' ||
+          !path.isAbsolute(publicRoot.displayPath) || publicRoot.displayPath.length > 4096 || publicRoot.displayPath.includes('\0')) continue
+      const described = await service.describeRoot(publicRoot.rootId).catch(() => null)
       assertActive()
       if (!described || !sameFolder(described, project)) { changed = true; continue }
       // Check authorization again after the filesystem await. A detached or
       // rebound project must not release an old cached handle.
       const current = projects.store.get(project.id)
-      if (!current || !sameFolder(described, current) || projects.roots.get(project.id)?.rootId !== connection.rootId) continue
-      return { status: 'verified', verified: true, projectId: p.projectId, source: p.source, rootId: connection.rootId }
+      const currentConnection = projects.roots.get(project.id)
+      if (!current || !sameFolder(described, current) || currentConnection !== connection ||
+          Object.keys(publicRoot).some(key => currentConnection[key] !== publicRoot[key]) || publicRoot.displayPath !== described.absolutePath) continue
+      return { status: 'verified', verified: true, projectId: p.projectId, source: p.source,
+        rootId: publicRoot.rootId, directoryId: publicRoot.directoryId, displayPath: publicRoot.displayPath }
     }
     return { status: changed ? 'reconnect-required' : 'unavailable', verified: false, reason: changed ? 'identity-changed' : 'connection-required' }
   }

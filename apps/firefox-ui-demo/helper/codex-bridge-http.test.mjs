@@ -87,7 +87,7 @@ test('run project origin GET awaits server verification, rejects duplicate/autho
   const handler = createChatHttpHandler({ async runProjectOrigin(query) {
     queries.push(query)
     await Promise.resolve()
-    return { protocolVersion: 1, ...query, status: 'verified', verified: true, rootId: 'current-root', projectId: 'original-project', source: 'board' }
+    return { protocolVersion: 1, ...query, status: 'verified', verified: true, rootId: 'current-root', directoryId: 'current-directory', displayPath: '/authorized/current', projectId: 'original-project', source: 'board' }
   } }, async () => assert.fail('read must not make an auth/provider call'))
   const get = async suffix => {
     const res = response(), req = request('', {}, `/chat/run-project-origin${suffix}`); req.method = 'GET'
@@ -96,10 +96,12 @@ test('run project origin GET awaits server verification, rejects duplicate/autho
   }
   const valid = await get('?conversationId=original&runId=turn')
   assert.equal(valid.status, 200)
-  assert.equal(valid.body.rootId, 'current-root')
+  assert.deepEqual(valid.body, { protocolVersion: 1, conversationId: 'original', runId: 'turn', status: 'verified', verified: true,
+    rootId: 'current-root', directoryId: 'current-directory', displayPath: '/authorized/current', projectId: 'original-project', source: 'board' })
   assert.deepEqual(queries, [{ conversationId: 'original', runId: 'turn' }])
   for (const suffix of ['?runId=turn', '?conversationId=original&runId=', '?conversationId=a&conversationId=b&runId=t', '?conversationId=c&runId=a&runId=b',
-    '?conversationId=c&runId=r&rootId=forged', '?conversationId=c&runId=r&cwd=/private', '?conversationId=c&runId=r&ownerScope=forged', '?conversationId=c&runId=%00']) {
+    '?conversationId=c&runId=r&rootId=forged', '?conversationId=c&runId=r&directoryId=forged', '?conversationId=c&runId=r&displayPath=/forged',
+    '?conversationId=c&runId=r&cwd=/private', '?conversationId=c&runId=r&ownerScope=forged', '?conversationId=c&runId=%00']) {
     const res = await get(suffix)
     assert.deepEqual([res.status, res.body.code], [400, 'INVALID_RUN_ORIGIN_QUERY'])
   }

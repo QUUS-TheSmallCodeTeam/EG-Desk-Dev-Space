@@ -3383,8 +3383,12 @@ export class CodexChatRuntime {
       return { ...unknown, status: 'unavailable' }
     }
     assertActive()
-    if (resolved?.verified === true && resolved.status === 'verified' && resolved.projectId === origin.project.projectId && valid(resolved.rootId)) {
-      return { protocolVersion: 1, conversationId, runId, status: 'verified', verified: true, projectId: origin.project.projectId, source: origin.project.source, rootId: resolved.rootId }
+    if (resolved?.verified === true && resolved.status === 'verified' && resolved.projectId === origin.project.projectId && valid(resolved.rootId) && valid(resolved.directoryId) &&
+        typeof resolved.displayPath === 'string' && path.isAbsolute(resolved.displayPath) && resolved.displayPath.length <= 4096 && !resolved.displayPath.includes('\0')) {
+      // Current connection metadata is response-only: never attach it to the
+      // public run/history or copy the private origin's startCwd/identity.
+      return { protocolVersion: 1, conversationId, runId, status: 'verified', verified: true, projectId: origin.project.projectId, source: origin.project.source,
+        rootId: resolved.rootId, directoryId: resolved.directoryId, displayPath: resolved.displayPath }
     }
     return { ...unknown, status: resolved?.status === 'reconnect-required' ? 'reconnect-required' : 'unavailable' }
   }

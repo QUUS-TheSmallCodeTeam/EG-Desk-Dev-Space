@@ -3,6 +3,7 @@ import assert from 'node:assert/strict'
 import * as fs from 'node:fs/promises'
 import os from 'node:os'
 import path from 'node:path'
+import vm from 'node:vm'
 import { Readable } from 'node:stream'
 import { createHash } from 'node:crypto'
 import { DatabaseSync } from 'node:sqlite'
@@ -539,11 +540,19 @@ test('room defaults: changing the saved source while preparation awaits prevents
 test('run origin resolver: only current authorized connections qualify, never a saved-path registration or a replacement inode', async t => {
   const registrations = []
   const h = await projectFixture(t, { onRootRegistered: value => registrations.push(value) })
-  await h.call('attachProject', { boardId: 'a', selectionId: 'pick-shop' })
+  const initial = (await h.call('attachProject', { boardId: 'a', selectionId: 'pick-shop' })).body.result
   const workspace = await h.adapter().resolveProjectWorkspace({ ownerScope: 'owner-p', boardId: 'a', roomId: 'r' })
   const origin = { project: { fileOwnerScope: 'owner-p', projectId: workspace.projectId, source: 'board', startCwd: workspace.absolutePath, fsIdentity: workspace.identity } }
-  const read = () => h.adapter().resolveRunProjectOrigin({ ownerScope: 'owner-p', origin })
-  assert.equal((await read()).rootId, workspace.rootId)
+  const read = async () => {
+    const count = registrations.length
+    const result = await h.adapter().resolveRunProjectOrigin({ ownerScope: 'owner-p', origin })
+    assert.equal(registrations.length - count, 0, 'every origin reread registers zero roots')
+    if (!result.verified) for (const key of ['rootId', 'directoryId', 'displayPath']) assert.equal(Object.hasOwn(result, key), false)
+    return result
+  }
+  const expected = connection => ({ status: 'verified', verified: true, projectId: workspace.projectId, source: 'board',
+    rootId: connection.rootId, directoryId: connection.directoryId, displayPath: connection.displayPath })
+  assert.deepEqual(await read(), expected(initial))
   await assert.rejects(h.adapter().resolveRunProjectOrigin({ ownerScope: 'other', origin }), { code: 'OWNER_SCOPE_MISMATCH' })
   await assert.rejects(h.adapter().resolveRunProjectOrigin({ ownerScope: 'owner-p', origin: { project: { ...origin.project, fileOwnerScope: 'other' } } }), { code: 'PROJECT_ORIGIN_SCOPE_MISMATCH' })
   await h.restart()
@@ -552,17 +561,86 @@ test('run origin resolver: only current authorized connections qualify, never a 
   assert.equal(registrations.length, count, 'origin reread itself never registers a saved path')
   const connected = (await h.call('openProject', { boardId: 'a' })).body.result.project
   assert.notEqual(connected.rootId, workspace.rootId)
-  assert.equal((await read()).rootId, connected.rootId)
+  assert.notEqual(connected.directoryId, initial.directoryId)
+  assert.deepEqual(await read(), expected(connected))
+  const listing = (await h.call('listDirectory', { directoryId: connected.directoryId })).body.result
+  assert.deepEqual(listing.entries.map(entry => entry.name), ['app.js', 'package.json'])
+  const relative = (await h.call('resolvePath', { rootId: connected.rootId, path: 'app.js' })).body.result
+  const absolute = (await h.call('resolvePath', { rootId: connected.rootId, path: path.join(connected.displayPath, 'app.js') })).body.result
+  assert.deepEqual([relative.kind, relative.relativePath, absolute.kind, absolute.relativePath], ['file', 'app.js', 'file', 'app.js'])
   await h.call('detachProject', { boardId: 'a' })
   assert.equal((await read()).status, 'unavailable', 'a cached handle is not authorization after detach')
-  await h.call('attachProject', { boardId: 'a', selectionId: 'pick-shop' })
-  assert.equal((await read()).verified, true)
+  const reattached = (await h.call('attachProject', { boardId: 'a', selectionId: 'pick-shop' })).body.result
+  assert.deepEqual(await read(), expected(reattached))
   await fs.rename(h.folders.shop, `${h.folders.shop}-old`); await fs.mkdir(h.folders.shop)
   const beforeReplaced = registrations.length
   assert.equal((await read()).status, 'reconnect-required')
   assert.equal(registrations.length, beforeReplaced)
   await h.call('attachProject', { boardId: 'a', selectionId: 'pick-shop' })
   assert.equal((await read()).status, 'reconnect-required', 'same-path reauthorization cannot rewrite a past origin')
+})
+
+test('run origin resolver: detach after the filesystem await cannot release current root metadata', async t => {
+  const registrations = []
+  const h = await projectFixture(t, { onRootRegistered: value => registrations.push(value) })
+  const selected = (await h.call('attachProject', { boardId: 'a', selectionId: 'pick-shop' })).body.result
+  const store = await openEGDeskProjectStore({ directory: h.draftDirectory, ownerScope: 'owner-p' })
+  t.after(() => store.close())
+  const project = store.forBoard('a')
+  const origin = { project: { fileOwnerScope: 'owner-p', projectId: selected.projectId, source: 'board', startCwd: project.workspaceRoot, fsIdentity: project.identity } }
+  let checks = 0
+  const count = registrations.length
+  const result = await h.adapter().resolveRunProjectOrigin({ ownerScope: 'owner-p', origin, assertActive() {
+    // The third account fence runs immediately after describeRoot's await.
+    if (++checks === 3) store.detachBoard({ boardId: 'a' })
+  } })
+  assert.equal(checks, 3)
+  assert.deepEqual(result, { status: 'unavailable', verified: false, reason: 'connection-required' })
+  assert.equal(registrations.length - count, 0)
+})
+
+test('run origin resolver: production connection snapshot rejects metadata mismatch and replacement across its await', async t => {
+  // Exercise only the actual resolver body with a gated fake filesystem. No
+  // production injection hook, server, provider or root registration is added.
+  const source = await fs.readFile(new URL('./egdesk-file-http.mjs', import.meta.url), 'utf8')
+  const start = source.indexOf('  async function resolveRunProjectOrigin(')
+  const end = source.indexOf('\n  async function close()', start)
+  const sameFolder = source.match(/^  const sameFolder = .*$/m)?.[0]
+  assert.ok(start >= 0 && end > start && sameFolder)
+  for (const scenario of ['current', 'display-path-mismatch', 'connection-replaced', 'root-mutated', 'directory-mutated', 'display-mutated', 'authorization-removed']) await t.test(scenario, async () => {
+    const entered = Promise.withResolvers(), release = Promise.withResolvers()
+    const project = { id: 'project', workspaceRoot: '/authorized/current', identity: { dev: '1', ino: '2' } }
+    const connection = { rootId: 'root-current', directoryId: 'directory-current', displayPath: project.workspaceRoot, capability: 'not-a-public-origin-field' }
+    if (scenario === 'display-path-mismatch') connection.displayPath = '/different/authorized-looking-path'
+    let current = project, registrations = 0
+    const roots = new Map([[project.id, connection]])
+    const service = {
+      async describeRoot(rootId) {
+        assert.equal(rootId, 'root-current')
+        entered.resolve(); await release.promise
+        return { rootId, absolutePath: project.workspaceRoot, identity: project.identity }
+      },
+      registerRoot() { registrations++; assert.fail('origin must never create authorization') },
+    }
+    const projects = { roots, store: { list: () => [project], get: () => current } }
+    const resolve = vm.runInNewContext(`${sameFolder};\n(${source.slice(start, end)})`, {
+      path, boundOwner: owner => owner, error: (code, message) => Object.assign(new Error(message), { code }),
+      entryForOwner: async () => ({ service }), projectsForOwner: async () => projects,
+    })
+    const pending = resolve({ ownerScope: 'owner-p', origin: { project: { fileOwnerScope: 'owner-p', projectId: 'historic-project', source: 'room', startCwd: project.workspaceRoot, fsIdentity: project.identity } } })
+    await entered.promise
+    if (scenario === 'connection-replaced') roots.set(project.id, { ...connection })
+    if (scenario === 'root-mutated') connection.rootId = 'root-new'
+    if (scenario === 'directory-mutated') connection.directoryId = 'directory-new'
+    if (scenario === 'display-mutated') connection.displayPath = '/new/path'
+    if (scenario === 'authorization-removed') current = null
+    release.resolve()
+    const result = structuredClone(await pending)
+    assert.deepEqual(result, scenario === 'current'
+      ? { status: 'verified', verified: true, projectId: 'historic-project', source: 'room', rootId: 'root-current', directoryId: 'directory-current', displayPath: '/authorized/current' }
+      : { status: 'unavailable', verified: false, reason: 'connection-required' })
+    assert.equal(registrations, 0)
+  })
 })
 
 test('Board project: attach by picker selection only, rooms inherit or own a folder, restart reconnects only the same dev/ino', async t => {
