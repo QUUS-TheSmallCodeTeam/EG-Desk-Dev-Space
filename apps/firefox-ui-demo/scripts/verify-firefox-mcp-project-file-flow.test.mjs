@@ -7,7 +7,10 @@ import { assertProjectEnvironment, assertProjectFlowEvidence, PROJECT_VIEWPORTS,
   assertLongCommandNavigation, assertChatProjectEvidence, nativeCommandNavigationKeys,
   commandNavigationObservation, projectDialogLayoutIssues, assertRoomDefaultResponse,
   assertRoomDefaultStoreEvidence, assertRoomDefaultUiEvidence, roomProjectDetailsVisible,
-  fileResultLocationVisible, assertFileResultLocationEvidence } from './verify-firefox-mcp-project-file-flow.mjs';
+  fileResultLocationVisible, assertFileResultLocationEvidence, projectUiObservationSources,
+  PROJECT_OBSERVATION_SOURCE_BUDGET, mergeProjectUiObservations, observeProjectUi, waitStableProjectUi,
+  chatProjectFooterVisible, chatProjectReviewReady, chatProjectWaitDiagnostic,
+  assertChatProjectReviewScroll, assertChatRoomReadReceipt } from './verify-firefox-mcp-project-file-flow.mjs';
 import { parseCli } from './verify-firefox-mcp-headless-ui-regression.mjs';
 import { terminalScriptLine } from '../overlay/resources/EGDeskTerminalState.sys.mjs';
 
@@ -133,15 +136,16 @@ function chatProjectReceipts() {
     fragments: [{ inside: true, clipped: false, hitCount: 3, rect: { width: 120, height: 16 } }] });
   const base = { threadId: 'empty-room', roomId: 'canonical-client-binding', composerThreadId: 'empty-room', composerValue: '', draft: '',
     messageCount: 0, conversationId: null, activeBoardId: expected.boardId, target: null, draftRevision: 0,
-    viewportWidth: 1280, openerText: '실행 프로젝트', openerDescription: '실행 프로젝트', removeBox: null };
+    viewportWidth: 1280, openerText: '실행 프로젝트', openerDescription: '실행 프로젝트', removeBox: null, backBox: { visible: true } };
   const emptyPanel = { selectedBoardId: '', applyDisabled: true, threadId: base.threadId };
   const selectedPanel = { threadId: base.threadId, selectedBoardId: expected.boardId, applyDisabled: false,
+    actions: { operation: 'request', outsideBody: true },
     titlePaint: paint(expected.title), pathPaint: paint(expected.displayPath),
     layout: Object.fromEntries(['dialog', 'body', 'details'].map(name => [name, { clientWidth: 480, scrollWidth: 480, overflowX: 'auto' }])) };
   const applied = { ...base, target: expected, draftRevision: 1, openerText: `실행 프로젝트 · ${expected.title}`,
     openerDescription: `${expected.title} · ${expected.displayPath}`, removeBox: { visible: true } };
   const store = { terminalRequests: [{ route: '/terminal/write' }, { route: '/terminal/write' }],
-    fileRequests: [{ operation: 'attachProject' }], pickerResults: [{}, {}], sessions: [{}],
+    fileRequests: [{ operation: 'attachProject', sequence: 1 }], pickerResults: [{}, {}], sessions: [{}],
     providerTurns: 0, nativePickerInvocations: 0, nativeProcessSpawns: 0 };
   const proof = { initial: { ...base }, panelInitial: { ...base, panel: emptyPanel },
     selectedBeforeCancel: { ...base, panel: selectedPanel }, cancelled: { ...base },
@@ -149,14 +153,115 @@ function chatProjectReceipts() {
     narrowApplied: { ...applied, viewportWidth: 600, openerOverflowPx: 100, openerBox: { visible: true, inside: true, clipped: false } },
     details: { ...applied, viewportWidth: 600, panel: selectedPanel }, cancelledAfterApply: { ...applied },
     removed: { ...base, draftRevision: 2 }, reopenedAfterRemove: { ...base, draftRevision: 2, panel: emptyPanel },
-    beforeStore: structuredClone(store) };
-  const open = () => store.fileRequests.push({ operation: 'openProject', status: 200, request: { boardId: expected.boardId },
+    beforeStore: structuredClone(store), afterStoreAt: 100,
+    roomReadWindows: [{ entry: 'new-room', startedAt: 10, action: { kind: 'native-click', selector: '.egd-codex-thread-home-new', at: 11 },
+      observedAt: 12, beforeSequence: 1, ui: { ...base } }] };
+  const open = () => store.fileRequests.push({ operation: 'openProject', status: 200, sequence: store.fileRequests.length + 1,
+    request: { boardId: expected.boardId },
     response: { result: { project: { ...expected, status: 'connected' } } } });
   open(); open(); proof.selectedStore = structuredClone(store);
   open(); proof.appliedStore = structuredClone(store);
   open(); proof.afterStore = structuredClone(store);
   return { proof: structuredClone(proof), expected };
 }
+
+test('R11 loaded candidate is not proof of painted full path or reachable first-page actions', () => {
+  const { proof, expected } = chatProjectReceipts(), chat = proof.details;
+  const visible = { visible: true, inside: true, clipped: false, visibleHits: 9 };
+  chat.panel.applyBox = { ...visible }; chat.panel.cancelBox = { ...visible };
+  assert.equal(chatProjectReviewReady(chat, expected), true);
+  assert.equal(chatProjectFooterVisible(chat), true);
+  chat.panel.pathPaint.fragments[0].clipped = true;
+  chat.panel.pathPaint.fragments[0].hitCount = 0;
+  assert.equal(chatProjectReviewReady(chat, expected), true, 'loading and visibility are distinct predicates');
+  assert.equal(textFragmentsVisible(chat.panel.pathPaint, expected.displayPath), false);
+  for (const box of ['applyBox', 'cancelBox']) for (const patch of [
+    { inside: false }, { clipped: true }, { visible: false }, { visibleHits: 8 }]) {
+    const changed = structuredClone(chat); Object.assign(changed.panel[box], patch);
+    assert.equal(chatProjectFooterVisible(changed), false, 'scrolling cannot waive inaccessible actions');
+  }
+  for (const patch of [{ threadId: 'foreign' }, { selectedBoardId: '' }, { applyDisabled: true }]) {
+    assert.equal(chatProjectReviewReady({ ...chat, panel: { ...chat.panel, ...patch } }, expected), false);
+  }
+  for (const actions of [{ operation: 'room', outsideBody: true }, { operation: 'request', outsideBody: false }]) {
+    assert.equal(chatProjectFooterVisible({ ...chat, panel: { ...chat.panel, actions } }), false);
+  }
+  chat.roomProject = { saveBox: { ...visible }, cancelBox: { ...visible } };
+  assert.equal(chatProjectFooterVisible(chat), false, 'two competing operations cannot share the visible footer');
+});
+
+test('native review scroll proof keeps applied/current identity separate from the candidate and rejects hidden text', () => {
+  const { proof, expected } = chatProjectReceipts(), before = proof.details;
+  before.panel.applyBox = { visible: true, inside: true, clipped: false, visibleHits: 9 };
+  before.panel.cancelBox = { ...before.panel.applyBox };
+  Object.assign(before.panel.layout.body, { scrollTop: 0, scrollHeight: 640, clientHeight: 380, overflowY: 'auto' });
+  before.panel.pathPaint.fragments[0].clipped = true;
+  const after = structuredClone(before);
+  after.panel.layout.body.scrollTop = 260;
+  after.panel.pathPaint.fragments[0].clipped = false;
+  assert.equal(assertChatProjectReviewScroll(before, after, expected), true);
+  for (const corrupt of [
+    value => value.panel.layout.body.scrollTop = 0,
+    value => value.panel.layout.body.scrollWidth += 2,
+    value => value.panel.pathPaint.fragments[0].hitCount = 0,
+    value => value.panel.pathPaint.fragments[0].clipped = true,
+    value => value.panel.titlePaint.fragments[0].inside = false,
+    value => value.panel.cancelBox.visibleHits = 8,
+    value => value.panel.selectedBoardId = 'foreign',
+    value => value.target = null, value => value.draftRevision++,
+    value => value.roomId = 'active-board', value => value.composerValue = 'changed',
+  ]) {
+    const changed = structuredClone(after); corrupt(changed);
+    assert.throws(() => assertChatProjectReviewScroll(before, changed, expected));
+  }
+  const hiddenBefore = structuredClone(before); hiddenBefore.panel.applyBox.clipped = true;
+  assert.throws(() => assertChatProjectReviewScroll(hiddenBefore, after, expected), /first-page action footer/);
+});
+
+test('room review uses its own fixed Save/Cancel operation and complete path, never hidden request controls', () => {
+  const { proof, expected } = chatProjectReceipts(), before = proof.details;
+  before.panel.actions.operation = 'room';
+  Object.assign(before.panel.layout.body, { scrollTop: 0, scrollHeight: 640, clientHeight: 380, overflowY: 'auto' });
+  const box = { visible: true, inside: true, clipped: false, visibleHits: 9 };
+  before.roomProject = { selectedBoardId: expected.boardId, saveDisabled: false, saveBox: { ...box }, cancelBox: { ...box },
+    layout: structuredClone(before.panel.layout),
+    detailsPaint: { ...structuredClone(before.panel.pathPaint), text: `${expected.title} ${expected.displayPath}` } };
+  before.panel.layout.details = { scrollWidth: 0, clientWidth: 0 };
+  before.roomProject.detailsPaint.fragments[0].clipped = true;
+  assert.equal(chatProjectReviewReady(before, expected, 'room'), true);
+  assert.equal(chatProjectFooterVisible(before, 'room'), true);
+  assert.equal(chatProjectFooterVisible(before), false);
+  const after = structuredClone(before);
+  after.panel.layout.body.scrollTop = 260;
+  after.roomProject.detailsPaint.fragments[0].clipped = false;
+  assert.equal(assertChatProjectReviewScroll(before, after, expected, 'room'), true);
+  for (const corrupt of [value => value.roomProject.selectedBoardId = 'other',
+    value => value.roomProject.detailsPaint.text = expected.title,
+    value => value.roomProject.detailsPaint.fragments[0].hitCount = 0,
+    value => value.roomProject.saveBox.inside = false,
+    value => value.panel.applyBox = { ...box }]) {
+    const changed = structuredClone(after); corrupt(changed);
+    assert.throws(() => assertChatProjectReviewScroll(before, changed, expected, 'room'));
+  }
+});
+
+test('Chat wait diagnostics retain the actual failed predicates with bounded Range summaries, not offscreen File prefixes', () => {
+  const { proof, expected } = chatProjectReceipts(), chat = proof.details;
+  chat.panel.pathPaint.text = 'x'.repeat(20000);
+  chat.panel.pathPaint.fragments = Array.from({ length: 2000 }, () => ({ inside: false, clipped: true,
+    hitCount: 0, rect: { top: 550, bottom: 570 }, clip: { top: 130, bottom: 520 } }));
+  const diagnostic = chatProjectWaitDiagnostic(chat, expected);
+  assert.equal(diagnostic.conditions.sameThread, true);
+  assert.equal(diagnostic.conditions.selectedBoardMatches, true);
+  assert.equal(diagnostic.conditions.pathVisible, false);
+  assert.equal(diagnostic.conditions.footerVisible, false);
+  assert.equal(diagnostic.panel.path.textLength, 20000);
+  assert.equal(diagnostic.panel.path.text.length, 240);
+  assert.equal(diagnostic.panel.path.fragmentCount, 2000);
+  assert.equal(diagnostic.panel.path.fragments.length, 8);
+  assert.ok(JSON.stringify(diagnostic).length < 6000);
+  assert.equal(Object.hasOwn(diagnostic, 'fileView'), false);
+});
 
 test('Chat native project evidence separates active Board, pending selection, Apply, Cancel and Remove', () => {
   const { proof, expected } = chatProjectReceipts();
@@ -187,7 +292,7 @@ test('Chat native project evidence separates active Board, pending selection, Ap
 
 test('request-project baseline permits only canonical read-only empty-default receipts, not implicit Board authority or writes', () => {
   const { proof, expected } = chatProjectReceipts(), roomId = proof.initial.roomId;
-  const row = { operation: 'readRoomProjectDefault', status: 200, request: { roomId },
+  const row = { operation: 'readRoomProjectDefault', status: 200, sequence: 6, at: 50, request: { roomId },
     response: { ok: true, result: { roomId, override: null, inheritance: null, source: null, status: 'none', project: null } } };
   proof.afterStore.fileRequests.push(row);
   assert.equal(assertChatProjectEvidence(proof, expected), true);
@@ -195,6 +300,44 @@ test('request-project baseline permits only canonical read-only empty-default re
     value => value.request.boardId = expected.boardId, value => value.response.result.source = 'board',
     value => value.response.result.project = expected]) {
     const changed = structuredClone(proof); corrupt(changed.afterStore.fileRequests.at(-1));
+    assert.throws(() => assertChatProjectEvidence(changed, expected));
+  }
+});
+
+test('R13 initial Dock room read and native new-room reads are bound to separate observed entry windows', () => {
+  const { proof, expected } = chatProjectReceipts();
+  const oldUi = { ...proof.initial, threadId: 'initial-local-thread', roomId: 'initial-canonical-binding',
+    composerThreadId: 'initial-local-thread' };
+  proof.beforeDock = { threadId: oldUi.threadId, roomId: oldUi.roomId };
+  proof.roomReadWindows.unshift({ entry: 'dock-room', startedAt: 1,
+    action: { kind: 'native-click', selector: '#egd-dock .egd-dock-btn[data-id="chat"]', at: 3 },
+    observedAt: 5, ui: oldUi, beforeSequence: 1, throughSequence: 2,
+    leaveAction: { kind: 'native-click', selector: '.egd-codex-conversation-back', at: 7 },
+    homeUi: { homeNewBox: { visible: true } }, endedAt: 8 });
+  proof.roomReadWindows[1].beforeSequence = 2;
+  const receipt = (roomId, sequence, at) => ({ operation: 'readRoomProjectDefault', status: 200, sequence, at,
+    request: { roomId }, response: { ok: true, result: { roomId, override: null, inheritance: null, project: null, source: null, status: 'none' } } });
+  const oldRead = receipt(oldUi.roomId, 2, 2), newRead = receipt(proof.initial.roomId, 7, 14);
+  proof.afterStore.fileRequests = [proof.afterStore.fileRequests[0], oldRead,
+    ...proof.afterStore.fileRequests.slice(1).map(row => ({ ...row, sequence: row.sequence + 1 })), newRead];
+  assert.equal(assertChatProjectEvidence(proof, expected), true);
+  assert.equal(assertChatRoomReadReceipt(oldRead, proof), true);
+  assert.equal(assertChatRoomReadReceipt(newRead, proof), true);
+  for (const corrupt of [
+    value => value.roomReadWindows.shift(),
+    value => value.roomReadWindows[0].ui.roomId = 'unobserved-room',
+    value => value.roomReadWindows[0].ui.composerThreadId = 'foreign',
+    value => value.roomReadWindows[0].action.selector = '.unrelated-control',
+    value => value.roomReadWindows[0].homeUi.homeNewBox.visible = false,
+    value => value.roomReadWindows[1].ui.roomId = oldUi.roomId,
+    value => value.afterStore.fileRequests[1].at = 15,
+    value => value.afterStore.fileRequests[1].sequence = 8,
+    value => value.afterStore.fileRequests.at(-1).at = 9,
+    value => value.afterStore.fileRequests.at(-1).request.roomId = oldUi.roomId,
+    value => value.afterStore.fileRequests.at(-1).response.result.roomId = oldUi.roomId,
+    value => value.afterStore.fileRequests.at(-1).operation = 'saveRoomProjectDefault',
+  ]) {
+    const changed = structuredClone(proof); corrupt(changed);
     assert.throws(() => assertChatProjectEvidence(changed, expected));
   }
 });
@@ -465,13 +608,165 @@ test('all eight separate-content captures are mandatory and none can declare aut
   ]) { const value = receipts(); mutate(value); assert.throws(() => assertProjectFlowEvidence(value)); }
 });
 
+test('split observer sources fit the actual unchanged profile-bound MCP wrapper, retaining text/geometry/native checks', () => {
+  const harness = fs.readFileSync(new URL('./firefox-mcp-chat-harness.mjs', import.meta.url), 'utf8');
+  assert.ok(harness.includes("Buffer.byteLength(boundSource, 'utf8') >= 16 * 1024"));
+  const start = harness.indexOf('const boundSource = `') + 'const boundSource = '.length;
+  const end = harness.indexOf(';\n    if (Buffer.byteLength(boundSource', start);
+  assert.ok(start > 0 && end > start);
+  // Build only the exact existing wrapper string; no browser code is executed.
+  const bind = new Function('profile', 'functionSource', 'return ' + harness.slice(start, end).replaceAll('this.#profile', 'profile'));
+  const profile = '/private/var/folders/kp/6__wg5p50y74lp5cwm4hm8vm0000gn/T/egdesk-chat-test-nYm8Iu';
+  const sources = projectUiObservationSources();
+  assert.deepEqual(sources.map(row => row.part), ['file', 'result', 'chat', 'terminal']);
+  assert.equal(PROJECT_OBSERVATION_SOURCE_BUDGET, 14 * 1024);
+  for (const { part, source, bytes } of sources) {
+    assert.equal(bytes, Buffer.byteLength(source)); assert.ok(bytes < PROJECT_OBSERVATION_SOURCE_BUDGET, part);
+    for (const prefix of [profile, profile + '-long-경로-"quoted"-'.repeat(30)]) {
+      assert.ok(Buffer.byteLength(bind(prefix, source)) < 16 * 1024, part + ': full profile-bound source must fit');
+    }
+    assert.equal(typeof new Function('return (' + source + ');')(), 'function');
+    assert.ok(source.includes('const before = identity()') && source.includes('after: identity()'));
+    assert.ok(!/dispatchEvent|\.click\(|\.focus\(|\.value\s*=|\.style\.[a-z]+\s*=|\.open\s*=/.test(source));
+    assert.ok(!/globalThis\[|window\.__egdesk\s*=|eval\(/.test(source));
+  }
+  const byPart = Object.fromEntries(sources.map(row => [row.part, row.source]));
+  assert.ok(byPart.file.includes('getComputedStyle(semanticBody).fontSize'));
+  assert.ok(byPart.result.includes('cwdPaint: textPaint(locationCwd)') && byPart.result.includes('exitTextPaint: textPaint('));
+  assert.ok(byPart.chat.includes('chat-room-project-details') && byPart.chat.includes('scrollWidth: node.scrollWidth, clientWidth: node.clientWidth'));
+  assert.ok(byPart.terminal.includes('frameDocument.elementFromPoint') && byPart.terminal.includes('projectedFontPx'));
+});
+
+// Transport/coherence-validator unit samples only. No rendered DOM outcomes
+// are mocked into an acceptance run and these tests cannot claim a UI pass.
+function observationChunks() {
+  const identity = { documentURI: 'chrome://browser/content/browser.xhtml', width: 1280, height: 800,
+    fileIds: ['file-1'], fileSnapshot: { projectId: 'owned-project', rootId: 'owned-root' },
+    activeEntityId: 'file-1', boardId: 'owned-board', camera: { zoom: 1, zoomTarget: 1, pan: { x: 1, y: 2 }, panTarget: { x: 1, y: 2 } },
+    threadId: 'local-thread', roomId: 'client-binding', draftRevision: 3, target: null, composerThreadId: 'local-thread',
+    resultText: 'actual-result-marker', resultBusy: false, resultOutcome: 'passed', locationOpen: false,
+    panelText: 'reviewed project', projectChoice: 'owned-board', roomChoice: '', scrolls: [['div', 'file', 0, 20]],
+    terminals: [{ id: 'term-1', sessionId: 'owned-session', text: 'actual-output-marker', level: 'detail' }] };
+  const values = {
+    file: { count: 1, cardId: 'file-1', snapshot: identity.fileSnapshot, width: 1280, height: 800,
+      camera: identity.camera, activeEntityId: 'file-1', fileView: { inside: true } },
+    result: { result: { text: identity.resultText, busy: false, outcome: 'passed', location: { open: false } } },
+    chat: { chat: { threadId: identity.threadId, roomId: identity.roomId, draftRevision: 3, target: null, composerThreadId: identity.threadId } },
+    terminal: { terminals: identity.terminals },
+  };
+  return ['file', 'result', 'chat', 'terminal'].map(part => ({ part, before: structuredClone(identity),
+    value: structuredClone(values[part]), after: structuredClone(identity) }));
+}
+
+test('split observations reject changed room/File/viewport/revision/output/scroll identity and never merge cross-state evidence', () => {
+  const chunks = observationChunks(), merged = mergeProjectUiObservations(chunks);
+  assert.equal(merged.cardId, 'file-1'); assert.equal(merged.chat.roomId, 'client-binding');
+  assert.equal(merged.result.outcome, 'passed'); assert.equal(merged.terminals[0].sessionId, 'owned-session');
+  for (const mutate of [value => value.roomId = 'local-thread', value => value.threadId = 'other-room',
+    value => value.composerThreadId = 'other-room', value => value.fileIds = ['other-file'],
+    value => value.fileSnapshot.rootId = 'other-root', value => value.draftRevision++, value => value.target = { projectId: 'other' },
+    value => value.width = 600, value => value.camera.pan.x++, value => value.locationOpen = true,
+    value => value.resultText = 'new-run-output', value => value.resultBusy = true, value => value.resultOutcome = 'unknown',
+    value => value.terminals[0].sessionId = 'other-session', value => value.scrolls[0][3]++,
+    value => value.panelText = 'new project preview', value => value.projectChoice = 'other-board']) {
+    for (const edge of ['before', 'after']) {
+      const changed = observationChunks(); mutate(changed[2][edge]);
+      assert.throws(() => mergeProjectUiObservations(changed), { code: 'QA_PROJECT_OBSERVATION_CHANGED' });
+    }
+  }
+  for (const mutate of [value => value.pop(), value => value[2].part = 'file', value => value[0].value.cardId = 'other-file',
+    value => value[1].value.result.outcome = 'unknown', value => value[2].value.chat.roomId = 'active-board',
+    value => value[3].value.terminals[0].sessionId = 'other-session']) {
+    const changed = observationChunks(); mutate(changed); assert.throws(() => mergeProjectUiObservations(changed));
+  }
+});
+
+test('observation-only retries are bounded, discard changed samples and never retry native input', async () => {
+  const sources = projectUiObservationSources(), indexOf = source => sources.findIndex(row => row.source === source);
+  let calls = 0;
+  const harness = { async evaluateChrome(source) {
+    const index = indexOf(source); assert.ok(index >= 0);
+    const chunk = observationChunks()[index];
+    if (calls < 4 && index === 2) chunk.after.roomId = 'transient-room';
+    calls++; return chunk;
+  }, click() { assert.fail('observation cannot retry input'); }, press() { assert.fail('observation cannot dispatch keys'); } };
+  const value = await observeProjectUi(harness);
+  assert.equal(calls, 8); assert.equal(value.observationCoherence.attempts, 2);
+  assert.deepEqual(value.observationCoherence.changes, [{ attempt: 1, fields: ['roomId'] }]);
+  assert.equal(value.chat.roomId, 'client-binding');
+  calls = 0;
+  harness.evaluateChrome = async source => {
+    const chunk = observationChunks()[indexOf(source)]; calls++;
+    if (chunk.part === 'result') chunk.after.locationOpen = true;
+    return chunk;
+  };
+  await assert.rejects(observeProjectUi(harness), /three read-only observation attempts:.*locationOpen/);
+  assert.equal(calls, 12);
+});
+
+test('R12 smooth-scroll incoherence is discarded until three matching coherent observations, with zero input replay', async () => {
+  const sources = projectUiObservationSources();
+  let calls = 0, clock = 0, latest;
+  const harness = { async evaluateChrome(source) {
+    const index = sources.findIndex(row => row.source === source), round = Math.floor(calls++ / 4);
+    const chunk = observationChunks()[index];
+    if (round < 3) { if (index === 2) chunk.after.scrolls[0][4]++; }
+    else for (const edge of ['before', 'after']) chunk[edge].scrolls[0][4] = [32.15, 70, 94][Math.min(round - 3, 2)];
+    return chunk;
+  }, press() { assert.fail('native End must not be replayed'); }, click() { assert.fail('no click retry'); },
+  scrollWithKey() { assert.fail('no additional scroll input'); } };
+  const observed = await waitStableProjectUi(harness, 1000, { timeoutMs: 500, intervalMs: 10,
+    now: () => clock, pause: async ms => { clock += ms; }, onProgress: value => { latest = value; } });
+  assert.equal(calls, 32);
+  assert.equal(observed.observationStability.reads, 6);
+  assert.equal(observed.observationStability.transientErrors, 1);
+  assert.equal(observed.observationStability.stableSamples, 3);
+  assert.deepEqual(latest, observed.observationStability);
+  assert.deepEqual(latest.samples[0].changes.map(row => row.fields), [['scrolls'], ['scrolls'], ['scrolls']]);
+  assert.equal(new Set(latest.samples.slice(-3).map(row => row.fingerprint)).size, 1);
+  assert.equal(clock, 50);
+});
+
+test('stable observation resets on coherent motion, respects its time/deadline bounds and retains bounded diagnostics', async () => {
+  const sources = projectUiObservationSources();
+  let calls = 0, clock = 0, latest;
+  const harness = { async evaluateChrome(source) {
+    const index = sources.findIndex(row => row.source === source), round = Math.floor(calls++ / 4);
+    const chunk = observationChunks()[index];
+    for (const edge of ['before', 'after']) chunk[edge].scrolls[0][4] = round;
+    return chunk;
+  }, press() { assert.fail('no native input'); } };
+  const options = { timeoutMs: 250, intervalMs: 10, now: () => clock,
+    pause: async ms => { clock += ms; }, onProgress: value => { latest = value; } };
+  await assert.rejects(waitStableProjectUi(harness, 1000, options), { code: 'QA_PROJECT_STABILITY_TIMEOUT' });
+  assert.equal(clock, 250); assert.equal(calls, 100);
+  assert.equal(latest.stableSamples, 1); assert.equal(latest.samples.length, 16);
+  calls = 0; clock = 0;
+  await assert.rejects(waitStableProjectUi(harness, 15, options), { code: 'QA_PROJECT_STABILITY_TIMEOUT' });
+  assert.equal(clock, 15); assert.equal(calls, 8);
+});
+
+test('non-coherence failures are never retried and settling does not weaken candidate title/path proof', async () => {
+  let calls = 0;
+  await assert.rejects(waitStableProjectUi({ async evaluateChrome() { calls++; throw new Error('MCP size guard'); } }, 1000,
+    { now: () => 0, pause: async () => assert.fail('fatal errors cannot be retried') }), /MCP size guard/);
+  assert.equal(calls, 1);
+  const source = fs.readFileSync(new URL('./verify-firefox-mcp-project-file-flow.mjs', import.meta.url), 'utf8');
+  const key = source.indexOf("sample.scroll = await harness.scrollWithKey(selector, 'End')");
+  const settle = source.indexOf('const settled = await waitStableProjectUi', key);
+  const proof = source.indexOf('settled candidate title and full path are fully painted', settle);
+  assert.ok(key > 0 && settle > key && proof > settle);
+  assert.ok(source.includes('textFragmentsVisible(chat?.panel?.titlePaint, expected.title)'));
+  assert.ok(source.includes('textFragmentsVisible(chat?.panel?.pathPaint, expected.displayPath)'));
+});
+
 test('verifier is attach-only and does not inject attach/openProject or mutate evaluated DOM', () => {
   const source = fs.readFileSync(new URL('./verify-firefox-mcp-project-file-flow.mjs', import.meta.url), 'utf8');
   assert.ok(source.includes("runUiFlow('firefox-mcp-project-file-flow'"));
   assert.ok(source.includes('captureHeadlessScreenshot'));
   assert.ok(source.includes('resizeHeadless'));
   assert.ok(!/child_process|spawnSync|execFile|bootstrapQaProfile|prepareQaFirefox|createBrowserTab|\.openProject\(/.test(source));
-  const observation = source.slice(source.indexOf('export async function observeProjectUi'), source.indexOf('export async function runProjectFileFlow'));
+  const observation = source.slice(source.indexOf('function projectTextPaint'), source.indexOf('export async function runProjectFileFlow'));
   assert.ok(!/dispatchEvent|\.click\(|\.focus\(|\.value\s*=|\.style\.[a-z]+\s*=|\.openProject\(/.test(observation));
   assert.ok(observation.includes('NodeFilter.SHOW_TEXT') && observation.includes('range.getClientRects()'));
   assert.ok(observation.includes('exitTextPaint: textPaint('));
@@ -486,9 +781,15 @@ test('verifier is attach-only and does not inject attach/openProject or mutate e
   assert.ok(!/\.setRequestProjectTarget\(|\.readRequestProject\(|newQaThread\(/.test(source), 'Chat target selection cannot call runtime setters or inject room metadata');
   assert.ok(!/\.saveRoomProjectDefault\(|\.readRoomProjectDefault\(/.test(source), 'room defaults must be driven through native controls');
   assert.ok(source.includes('await selectQaThread(harness, { id: original.threadId, title: original.threadTitle })'));
+  assert.ok(source.includes("chatProof.details = await reviewProject('narrow-reopened-project-details')"));
+  assert.ok(source.indexOf('chatProjectFooterVisible(before, operation), chatProjectWaitDiagnostic(before, expected)') <
+    source.indexOf("sample.scroll = await harness.scrollWithKey(selector, 'End')"), 'first-page footer check precedes any review scrolling');
+  assert.ok(source.includes('chatProof.lastWait = { phase, at: Date.now(), observation: chatProjectWaitDiagnostic(chat, expected) }'));
+  assert.ok(!/\.scrollTop\s*=|\.scrollIntoView\(|\.setSelectionRange\(/.test(source));
   assert.ok(source.includes('row.sequence > roomProof.beforeReopenSequence'));
   for (const selector of ['chat-room-project-open', 'chat-room-project-editor', 'chat-room-project-board',
-    'chat-room-project-details', 'chat-room-project-save', 'chat-room-project-cancel', 'chat-room-project-current', 'chat-project-source']) {
+    'chat-room-project-details', 'chat-room-project-save', 'chat-room-project-cancel', 'chat-room-project-current', 'chat-project-source',
+    'chat-project-body', 'chat-project-actions', 'chat-project-scroll-hint']) {
     assert.ok(source.includes(selector));
   }
   assert.ok(source.includes("'new-files-dock'") && source.includes("'reopen-files-dock'"));

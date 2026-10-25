@@ -11,7 +11,8 @@ import { prepareQaFirefox } from './run-firefox-mcp-target.mjs';
 import { createQaFixtureTransport } from './egdesk-chat-fixture-transport.mjs';
 import { loopbackJson, observeChatEvents } from './egdesk-qa-ui-flow.mjs';
 import { qaBridgeConfig, qaBridgeUrl, transformQaFixtureSource, materializeQaFixtureIsolation,
-  validateQaFixtureIsolation, assertQaProfileBridge, QA_ISOLATION_MANIFEST, QA_RUN_OUTPUTS_FILES } from './egdesk-qa-fixture-isolation.mjs';
+  validateQaFixtureIsolation, assertQaProfileBridge, QA_ISOLATION_MANIFEST, QA_RUN_OUTPUTS_FILES,
+  QA_PORTABLE_TRANSFER_FILES } from './egdesk-qa-fixture-isolation.mjs';
 import { projectFileFixtureEnabled, transformProjectPickerResult, QA_PROJECT_PICKER_FILE } from './egdesk-qa-fixture-isolation.mjs';
 
 const ENV = Object.freeze({ EGDESK_QA_FIXTURE_TRANSPORT: '1', EGDESK_QA_FIXTURE_PORT: '39220' });
@@ -121,6 +122,59 @@ test('project picker copy, exact boundary descriptor and opt-in are bound into p
 });
 
 const RUN_OUTPUTS_ENV = Object.freeze({ ...ENV, EGDESK_QA_RUN_OUTPUTS_FIXTURE: '1', EGDESK_QA_REAL_TURN: '0' });
+const PORTABLE_ENV = Object.freeze({ ...ENV, EGDESK_QA_PORTABLE_TRANSFER_FIXTURE: '1', EGDESK_QA_REAL_TURN: '0' });
+
+test('portable mode fingerprints actual flow/presenter/IO adapter sources without replacing their bodies', t => {
+  assert.deepEqual(QA_PORTABLE_TRANSFER_FILES, ['resources/EGDeskBoardExport.sys.mjs', 'resources/EGDeskProfileTransfer.sys.mjs',
+    'resources/EGDeskProfileTransferView.sys.mjs', 'resources/EGDeskNativeFilePickers.sys.mjs']);
+  const before = Object.fromEntries(QA_PORTABLE_TRANSFER_FILES.map(name => [name, fs.readFileSync(path.join(overlay, name))]));
+  const profile = setup(t); prepareQaFirefox(profile, { env: PORTABLE_ENV });
+  const manifest = validateQaFixtureIsolation(profile, { env: PORTABLE_ENV });
+  for (const name of QA_PORTABLE_TRANSFER_FILES) {
+    assert.deepEqual(manifest.files[name], { originalSha256: hash(before[name]), transformedSha256: hash(before[name]),
+      replacements: { endpointUrls: 0, helperPortConstants: 0 } });
+    assert.deepEqual(fs.readFileSync(path.join(profile, 'chrome', name)), before[name]);
+    assert.deepEqual(fs.readFileSync(path.join(overlay, name)), before[name]);
+  }
+  assert.equal(manifest.files[QA_PROJECT_PICKER_FILE].projectPickerTransform, undefined);
+  assert.deepEqual(materializeQaFixtureIsolation(profile, { env: PORTABLE_ENV }), manifest);
+  assert.throws(() => validateQaFixtureIsolation(profile, { env: ENV }), /mismatch/);
+});
+
+test('portable mixed modes fail before copies/preferences/provenance writes', t => {
+  const profile = setup(t);
+  const writes = ['writeFileSync', 'renameSync', 'cpSync'].map(method => t.mock.method(fs, method, () => {
+    throw new Error('mode validation must precede profile writes');
+  }));
+  for (const patch of [{ EGDESK_QA_PORTABLE_TRANSFER_FIXTURE: 'yes' }, { EGDESK_QA_REAL_TURN: '1' },
+    { EGDESK_QA_REAL_TURN: undefined }, { EGDESK_QA_FIXTURE_TRANSPORT: '0' },
+    ...['EGDESK_QA_PROJECT_FILE_FIXTURE', 'EGDESK_QA_RUN_OUTPUTS_FIXTURE', 'EGDESK_QA_CLAUDE_FIXTURE',
+      'EGDESK_QA_BROWSER_NEGATIVE', 'EGDESK_QA_BROWSER_RELAY'].map(key => ({ [key]: '1' }))]) {
+    const env = { ...PORTABLE_ENV, ...patch };
+    assert.throws(() => qaBridgeConfig(env));
+    assert.throws(() => prepareQaFirefox(profile, { env }));
+  }
+  for (const spy of writes) assert.equal(spy.mock.callCount(), 0);
+});
+
+test('portable provenance rejects missing/tampered module entries and copied bytes', t => {
+  const profile = setup(t); prepareQaFirefox(profile, { env: PORTABLE_ENV });
+  const filename = path.join(profile, QA_ISOLATION_MANIFEST), original = fs.readFileSync(filename);
+  for (const name of QA_PORTABLE_TRANSFER_FILES) {
+    const missing = JSON.parse(original); delete missing.files[name];
+    fs.writeFileSync(filename, JSON.stringify(missing));
+    assert.throws(() => validateQaFixtureIsolation(profile, { env: PORTABLE_ENV }), /mismatch/);
+    const tampered = JSON.parse(original); tampered.files[name].originalSha256 = '0'.repeat(64);
+    fs.writeFileSync(filename, JSON.stringify(tampered));
+    assert.throws(() => validateQaFixtureIsolation(profile, { env: PORTABLE_ENV }), /mismatch/);
+    fs.writeFileSync(filename, original);
+    const copyPath = path.join(profile, 'chrome', name), bytes = fs.readFileSync(copyPath);
+    fs.appendFileSync(copyPath, '\n// invalid QA copy\n');
+    assert.throws(() => validateQaFixtureIsolation(profile, { env: PORTABLE_ENV }), /hash mismatch/);
+    fs.writeFileSync(copyPath, bytes);
+  }
+  assert.ok(validateQaFixtureIsolation(profile, { env: PORTABLE_ENV }));
+});
 
 test('RunOutputs opt-in fingerprints exactly its two Chat presenters and three unchanged renderers', t => {
   assert.deepEqual(QA_RUN_OUTPUTS_FILES, ['resources/EGDeskChatRunResult.sys.mjs', 'resources/EGDeskChatChangeReview.sys.mjs',

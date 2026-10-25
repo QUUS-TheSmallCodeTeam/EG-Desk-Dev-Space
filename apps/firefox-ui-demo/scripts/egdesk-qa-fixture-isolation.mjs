@@ -6,6 +6,7 @@ import { createHash } from 'node:crypto';
 import { assertQaFixtureManifest, qaProfileSourceFingerprints } from './egdesk-chat-qa-profile.mjs';
 import { isOwnedAndPrivate } from './egdesk-qa-platform.mjs';
 import { chatRunOutputsFixtureEnabled } from './egdesk-chat-run-outputs-fixture.mjs';
+import { portableTransferFixtureEnabled } from './egdesk-portable-transfer-fixture.mjs';
 
 export const QA_ISOLATION_MANIFEST = '.egdesk-qa-fixture-isolation.json';
 export const QA_PROJECT_PICKER_FILE = 'resources/surface/EGDeskSurfaceFileCard.mjs';
@@ -13,11 +14,18 @@ export const QA_RUN_OUTPUTS_FILES = Object.freeze([
   'resources/EGDeskChatRunResult.sys.mjs', 'resources/EGDeskChatChangeReview.sys.mjs',
   'resources/EGDeskRunResult.sys.mjs', 'resources/EGDeskDiffView.sys.mjs', 'resources/EGDeskChangeReview.mjs',
 ]);
+export const QA_PORTABLE_TRANSFER_FILES = Object.freeze([
+  'resources/EGDeskBoardExport.sys.mjs', 'resources/EGDeskProfileTransfer.sys.mjs',
+  'resources/EGDeskProfileTransferView.sys.mjs', 'resources/EGDeskNativeFilePickers.sys.mjs',
+]);
 const OVERLAY = fileURLToPath(new URL('../overlay/', import.meta.url));
 const sha256 = bytes => createHash('sha256').update(bytes).digest('hex');
 const fail = message => { throw new Error(`QA fixture isolation: ${message}`); };
 
 export function qaBridgeConfig(env = process.env) {
+  // A portable mode conflict must fail before bootstrap copies/preferences.
+  // This data-only module imports no isolation code and starts no services.
+  portableTransferFixtureEnabled(env);
   // prepareQaFirefox calls this before copying files or writing preferences.
   // Reuse the data-only sidecar gate (no dependency back to isolation), then
   // exclude Claude here as well as at the transport boundary.
@@ -165,7 +173,7 @@ export function transformQaFixtureSource(name, original, port, { projectFileFixt
   return { text, replacements };
 }
 
-function expectedFiles(profile, port, projectFileFixture = false, runOutputsFixture = false) {
+function expectedFiles(profile, port, projectFileFixture = false, runOutputsFixture = false, portableTransferFixture = false) {
   const files = {};
   const fingerprints = qaProfileSourceFingerprints(profile);
   if (projectFileFixture) {
@@ -175,6 +183,9 @@ function expectedFiles(profile, port, projectFileFixture = false, runOutputsFixt
     }
   }
   if (runOutputsFixture) for (const name of QA_RUN_OUTPUTS_FILES) {
+    fingerprints[name] = sha256(safeFile(path.join(profile, 'chrome', name), profile));
+  }
+  if (portableTransferFixture) for (const name of QA_PORTABLE_TRANSFER_FILES) {
     fingerprints[name] = sha256(safeFile(path.join(profile, 'chrome', name), profile));
   }
   for (const [name, copyHash] of Object.entries(fingerprints)) {
@@ -211,7 +222,8 @@ export function validateQaFixtureIsolation(profilePath, { env = process.env, req
   if (!config.fixture) fail('fixture mode is required');
   const { profile } = assertQaFixtureManifest(profilePath);
   if (requireFresh) assertFreshQaFixtureProfile(profile);
-  const files = expectedFiles(profile, config.port, projectFileFixtureEnabled(env), chatRunOutputsFixtureEnabled(env)), manifest = readManifest(profile);
+  const files = expectedFiles(profile, config.port, projectFileFixtureEnabled(env), chatRunOutputsFixtureEnabled(env),
+    portableTransferFixtureEnabled(env)), manifest = readManifest(profile);
   checkManifest(manifest, profile, config, files);
   for (const [name, entry] of Object.entries(files)) {
     if (sha256(safeFile(path.join(profile, 'chrome', name), profile)) !== entry.transformedSha256) {
@@ -234,7 +246,7 @@ export function materializeQaFixtureIsolation(profilePath, { env = process.env }
   if (!config.fixture) fail('fixture mode is required');
   const profile = assertFreshQaFixtureProfile(profilePath);
   const projectFileFixture = projectFileFixtureEnabled(env);
-  const files = expectedFiles(profile, config.port, projectFileFixture, chatRunOutputsFixtureEnabled(env));
+  const files = expectedFiles(profile, config.port, projectFileFixture, chatRunOutputsFixtureEnabled(env), portableTransferFixtureEnabled(env));
   const manifestPath = path.join(profile, QA_ISOLATION_MANIFEST);
   const existing = infoOrNull(manifestPath) ? readManifest(profile) : null;
   if (existing) checkManifest(existing, profile, config, files);

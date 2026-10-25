@@ -2,6 +2,7 @@
 // UI, picker grants, File service/SQLite and ScriptRun collector are real;
 // only the OS directory result and terminal HTTP shell I/O are synthetic.
 import assert from 'node:assert/strict';
+import { createHash } from 'node:crypto';
 import { fileURLToPath } from 'node:url';
 import { chrome, loopbackJson, runUiFlow, selectorForId, selectQaThread } from './egdesk-qa-ui-flow.mjs';
 import { projectFileFixtureEnabled, validateQaFixtureIsolation, QA_PROJECT_PICKER_FILE } from './egdesk-qa-fixture-isolation.mjs';
@@ -162,13 +163,82 @@ export function assertLongCommandNavigation(proof, command) {
 
 export function projectDialogLayoutIssues(layout) {
   const issues = [];
-  for (const name of ['dialog', 'body', 'details']) {
+  for (const name of ['dialog', 'body', 'details', ...(layout?.editor ? ['editor'] : [])]) {
     const value = layout?.[name];
     if (!value || !Number.isFinite(value.clientWidth) || !Number.isFinite(value.scrollWidth) || value.clientWidth <= 0) {
       issues.push(`${name}:missing-layout`);
     } else if (value.scrollWidth - value.clientWidth > 1) issues.push(`${name}:horizontal-overflow`);
   }
   return issues;
+}
+
+export function chatProjectFooterVisible(chat, operation = 'request') {
+  const request = [chat?.panel?.applyBox, chat?.panel?.cancelBox];
+  const room = [chat?.roomProject?.saveBox, chat?.roomProject?.cancelBox];
+  const actions = chat?.panel?.actions;
+  return ['request', 'room'].includes(operation) && actions?.operation === operation && actions.outsideBody === true &&
+    (operation === 'room' ? room : request).every(box => box?.visible && box.inside && !box.clipped && box.visibleHits === 9) &&
+    (operation === 'room' ? request : room).every(box => !box?.visible);
+}
+
+export function chatProjectReviewReady(chat, expected, operation = 'request') {
+  const panel = chat?.panel;
+  if (!panel || !chat.threadId || panel.threadId !== chat.threadId) return false;
+  if (operation === 'room') return chat.roomProject?.selectedBoardId === expected.boardId && chat.roomProject.saveDisabled === false &&
+    chat.roomProject.detailsPaint?.text.includes(expected.title) && chat.roomProject.detailsPaint.text.includes(expected.displayPath);
+  return operation === 'request' && panel.selectedBoardId === expected.boardId && panel.applyDisabled === false &&
+    panel.titlePaint?.text === expected.title && panel.pathPaint?.text === expected.displayPath;
+}
+
+function chatProjectReviewPainted(chat, expected, operation) {
+  return operation === 'room' ? roomProjectDetailsVisible(chat?.roomProject, expected) :
+    textFragmentsVisible(chat?.panel?.titlePaint, expected.title) && textFragmentsVisible(chat?.panel?.pathPaint, expected.displayPath);
+}
+
+// Keep the failed Chat predicate ahead of unrelated File geometry. Range
+// summaries are bounded; the complete successful evidence remains separate.
+export function chatProjectWaitDiagnostic(chat, expected) {
+  const paint = value => value ? { text: value.text?.slice(0, 240), textLength: value.text?.length,
+    styleVisible: value.styleVisible, missingTextRects: value.missingTextRects,
+    fragmentCount: value.fragments?.length, fragments: value.fragments?.slice(0, 8).map(fragment => ({
+      inside: fragment.inside, clipped: fragment.clipped, hitCount: fragment.hitCount,
+      rect: fragment.rect, clip: fragment.clip })) } : null;
+  const panel = chat?.panel;
+  return { threadId: chat?.threadId, roomId: chat?.roomId, composerThreadId: chat?.composerThreadId,
+    viewport: [chat?.viewportWidth, chat?.viewportHeight], draftRevision: chat?.draftRevision,
+    appliedProjectId: chat?.target?.projectId ?? null,
+    conditions: { panelPresent: !!panel, sameThread: !!panel && panel.threadId === chat?.threadId,
+      selectedBoardMatches: panel?.selectedBoardId === expected.boardId, applyEnabled: panel?.applyDisabled === false,
+      loaded: chatProjectReviewReady(chat, expected), footerVisible: chatProjectFooterVisible(chat),
+      titleVisible: textFragmentsVisible(panel?.titlePaint, expected.title),
+      pathVisible: textFragmentsVisible(panel?.pathPaint, expected.displayPath) },
+    panel: panel ? { threadId: panel.threadId, selectedBoardId: panel.selectedBoardId,
+      applyDisabled: panel.applyDisabled, applyBox: panel.applyBox, cancelBox: panel.cancelBox,
+      actions: panel.actions, scrollHint: panel.scrollHint, currentEffective: paint(panel.effectivePaint),
+      layout: panel.layout, title: paint(panel.titlePaint), path: paint(panel.pathPaint) } : null,
+    roomDefault: { editorVisible: chat?.roomProject?.editorBox?.visible ?? false,
+      selectedBoardId: chat?.roomProject?.selectedBoardId, saveDisabled: chat?.roomProject?.saveDisabled,
+      footerVisible: chatProjectFooterVisible(chat, 'room'),
+      source: chat?.roomProject?.currentSource, status: chat?.roomProject?.currentStatus,
+      details: paint(chat?.roomProject?.detailsPaint) } };
+}
+
+export function assertChatProjectReviewScroll(before, after, expected, operation = 'request') {
+  assert.ok(chatProjectReviewReady(before, expected, operation) && chatProjectReviewReady(after, expected, operation));
+  assert.ok(chatProjectFooterVisible(before, operation), 'do not scroll past an inaccessible first-page action footer');
+  assert.ok(chatProjectFooterVisible(after, operation), 'actions must remain reachable after reviewing the path');
+  for (const key of ['threadId', 'roomId', 'composerThreadId', 'target', 'draft', 'draftRevision',
+    'composerValue', 'messageCount', 'conversationId', 'activeBoardId', 'viewportWidth', 'viewportHeight']) {
+    assert.deepEqual(after[key], before[key], `native review scrolling must preserve ${key}`);
+  }
+  assert.equal(after.panel.selectedBoardId, before.panel.selectedBoardId);
+  if (operation === 'room') assert.equal(after.roomProject.selectedBoardId, before.roomProject.selectedBoardId);
+  assert.ok(before.panel.layout.body.scrollHeight > before.panel.layout.body.clientHeight);
+  assert.ok(after.panel.layout.body.scrollTop > before.panel.layout.body.scrollTop + 0.5);
+  for (const sample of [before, after]) assert.deepEqual(projectDialogLayoutIssues(
+    operation === 'room' ? sample.roomProject.layout : sample.panel.layout), []);
+  assert.ok(chatProjectReviewPainted(after, expected, operation));
+  return true;
 }
 
 // Pure D-X3 validators consume adapter/SQLite and native UI observations.
@@ -293,6 +363,50 @@ export function assertRoomDefaultUiEvidence(ui, expected, original) {
   return true;
 }
 
+export function assertChatRoomReadReceipt(row, proof) {
+  const visits = proof.roomReadWindows;
+  assert.ok(Array.isArray(visits) && visits.length >= 1 && visits.length <= 2,
+    'room reads need bounded observed native entry windows, not a room-ID allowlist');
+  const fresh = visits.at(-1);
+  assert.equal(fresh.entry, 'new-room');
+  assert.equal(fresh.ui.threadId, proof.initial.threadId);
+  assert.equal(fresh.ui.roomId, proof.initial.roomId);
+  const lastSequence = Math.max(0, ...proof.afterStore.fileRequests.map(value => value.sequence || 0));
+  for (const [index, visit] of visits.entries()) {
+    const old = visit.entry === 'dock-room';
+    assert.ok(!old || index === 0 && visits.length === 2);
+    assert.equal(visit.action.kind, 'native-click');
+    assert.equal(visit.action.selector, old ? '#egd-dock .egd-dock-btn[data-id="chat"]' : '.egd-codex-thread-home-new');
+    assert.ok(typeof visit.ui.roomId === 'string' && visit.ui.roomId);
+    assert.equal(visit.ui.composerThreadId, visit.ui.threadId);
+    assert.equal(visit.ui.backBox?.visible, true);
+    assert.ok(Number.isFinite(visit.startedAt) && visit.startedAt <= visit.action.at && visit.action.at <= visit.observedAt);
+    assert.ok(Number.isInteger(visit.beforeSequence) && visit.beforeSequence >= 0);
+    if (old) {
+      assert.equal(visit.ui.threadId, proof.beforeDock.threadId);
+      assert.equal(visit.ui.roomId, proof.beforeDock.roomId);
+      assert.equal(visit.leaveAction.kind, 'native-click');
+      assert.equal(visit.leaveAction.selector, '.egd-codex-conversation-back');
+      assert.equal(visit.homeUi.homeNewBox?.visible, true);
+      assert.ok(visit.observedAt <= visit.leaveAction.at && visit.leaveAction.at <= visit.endedAt);
+      assert.ok(Number.isInteger(visit.throughSequence) && visit.throughSequence >= visit.beforeSequence);
+      assert.ok(fresh.beforeSequence >= visit.throughSequence && fresh.startedAt >= visit.endedAt);
+      assert.notEqual(visit.ui.threadId, fresh.ui.threadId);
+      assert.notEqual(visit.ui.roomId, fresh.ui.roomId, 'a new room must not reuse the prior room binding');
+    }
+  }
+  assert.equal(row.operation, 'readRoomProjectDefault');
+  assert.equal(row.status, 200);
+  const owners = visits.filter(visit => row.request.roomId === visit.ui.roomId &&
+    Number.isInteger(row.sequence) && row.sequence > visit.beforeSequence &&
+    row.sequence <= (visit.throughSequence ?? lastSequence) && Number.isFinite(row.at) &&
+    row.at >= visit.startedAt && row.at <= (visit.endedAt ?? proof.afterStoreAt));
+  assert.equal(owners.length, 1, 'read receipt must belong to exactly one observed native room-entry phase');
+  assert.deepEqual(row.request, { roomId: owners[0].ui.roomId });
+  assertRoomDefaultResponse(row.response, { roomId: owners[0].ui.roomId });
+  return true;
+}
+
 export function assertChatProjectEvidence(proof, expected) {
   const { threadId } = proof.initial;
   assert.ok(threadId && typeof proof.initial.roomId === 'string' && proof.initial.roomId);
@@ -353,11 +467,7 @@ export function assertChatProjectEvidence(proof, expected) {
   for (const row of reads) {
     assert.equal(row.status, 200);
     if (row.operation === 'openProject') assert.deepEqual(row.request, { boardId: expected.boardId });
-    else {
-      assert.equal(row.operation, 'readRoomProjectDefault');
-      assert.deepEqual(row.request, { roomId: proof.initial.roomId });
-      assertRoomDefaultResponse(row.response, { roomId: proof.initial.roomId });
-    }
+    else assertChatRoomReadReceipt(row, proof);
   }
   return true;
 }
@@ -498,12 +608,7 @@ export function assertProjectFlowEvidence(proof) {
   return true;
 }
 
-export async function observeProjectUi(harness) {
-  return chrome(harness, () => {
-    // A wrapping inline span's union box can mostly be blank. Inspect only its
-    // real non-whitespace text ranges, retaining each rendered line fragment.
-    // This is observation, not a click target: no DOM/camera/style mutation.
-    const textPaint = node => {
+function projectTextPaint(node) {
       if (!node) return null;
       const text = (node.textContent || '').replace(/\s+/g, ' ').trim(), fragments = [];
       let styleVisible = !!node.isConnected && !node.closest('[hidden],[inert],[aria-hidden="true"]');
@@ -549,8 +654,9 @@ export async function observeProjectUi(harness) {
         }
       }
       return { text, styleVisible, textNodeCount, missingTextRects, fragments };
-    };
-    const box = node => {
+}
+
+function projectBox(node) {
       if (!node) return null;
       const r = node.getBoundingClientRect(), style = getComputedStyle(node);
       let left = Math.max(0, r.left), top = Math.max(0, r.top), right = Math.min(innerWidth, r.right), bottom = Math.min(innerHeight, r.bottom);
@@ -570,14 +676,12 @@ export async function observeProjectUi(harness) {
       return { visible, inside: r.left >= 0 && r.top >= 0 && r.right <= innerWidth && r.bottom <= innerHeight,
         visibleHits, clipped: right - left < r.width - 1 || bottom - top < r.height - 1,
         x: r.x, y: r.y, width: r.width, height: r.height };
-    };
+}
+
+function observeProjectFilePart({ box }) {
     const cards = [...document.querySelectorAll('[data-testid="file-card"]')];
     const card = cards.length === 1 ? cards[0] : null;
     const find = name => card?.querySelector(`[data-testid="${name}"]`);
-    const result = find('file-check-result');
-    const locationDetails = result?.querySelector('[data-testid="file-check-location-details"]');
-    const locationToggle = result?.querySelector('[data-testid="file-check-location-toggle"]');
-    const locationCwd = result?.querySelector('[data-testid="file-check-cwd"]');
     const connect = find('file-project-connect'), connectStyle = connect && getComputedStyle(connect);
     // Match the shipped semantic projection's font source without touching its
     // private cache, DOM, or camera. Record measured inputs, not a guessed LOD.
@@ -588,13 +692,6 @@ export async function observeProjectUi(harness) {
     const cardRect = card?.getBoundingClientRect();
     const projection = window.__egdesk?.state?.boards?.projections?.[window.__egdesk?.state?.boards?.activeProjectionId];
     const command = find('file-script-command');
-    const codex = window.__egdesk?.state?.codex, thread = codex?.threads?.find(row => row.id === codex.activeThreadId);
-    const roomId = thread ? ChromeUtils.importESModule('chrome://userchrome/content/EGDeskChatState.sys.mjs').clientThreadBinding(thread) : null;
-    const chatFind = name => document.querySelector(`[data-testid="${name}"]`);
-    const panel = chatFind('chat-project-panel'), choice = chatFind('chat-project-board'), details = chatFind('chat-project-details');
-    const opener = chatFind('chat-project-open'), composer = document.querySelector('.egd-codex-input');
-    const layout = node => node ? { scrollWidth: node.scrollWidth, clientWidth: node.clientWidth,
-      scrollLeft: node.scrollLeft, overflowX: getComputedStyle(node).overflowX } : null;
     return { count: cards.length, cardId: card?.id || null, fileView: box(find('file-view')),
       minimapTitle: card?._fileRecord?.root?.name || '파일', activeEntityId: window.__egdesk?.state?.activeEntityId || null,
       camera: { zoom, zoomTarget: window.__egdesk?.state?.zoomTarget, pan: { ...window.__egdesk?.state?.pan },
@@ -620,6 +717,49 @@ export async function observeProjectUi(harness) {
       commandNavigation: command ? { focused: document.activeElement === command, selectionStart: command.selectionStart,
         selectionEnd: command.selectionEnd, scrollLeft: command.scrollLeft, scrollWidth: command.scrollWidth,
         clientWidth: command.clientWidth } : null,
+      editor: find('file-editor')?.value ?? null,
+      status: card?.querySelector('.egdesk-file-status')?.textContent || '',
+      error: card?.querySelector('.egdesk-file-error:not([hidden])')?.textContent || null,
+      width: innerWidth, height: innerHeight };
+}
+
+function observeProjectResultPart({ box, textPaint }) {
+    const cards = [...document.querySelectorAll('[data-testid="file-card"]')];
+    const card = cards.length === 1 ? cards[0] : null;
+    const find = name => card?.querySelector(`[data-testid="${name}"]`);
+    const result = find('file-check-result');
+    const locationDetails = result?.querySelector('[data-testid="file-check-location-details"]');
+    const locationToggle = result?.querySelector('[data-testid="file-check-location-toggle"]');
+    const locationCwd = result?.querySelector('[data-testid="file-check-cwd"]');
+    return {
+      result: { text: result?.textContent || '', busy: result?.getAttribute('aria-busy') === 'true',
+        outcome: result?.querySelector('.egdesk-run-result')?.dataset.outcome || null, box: box(result),
+        headlineBox: box(result?.querySelector('.egdesk-run-result-headline')), exitBox: box(result?.querySelector('.egdesk-run-result-exit')),
+        exitTextPaint: textPaint(result?.querySelector('.egdesk-run-result-exit')),
+        outputBox: box(result?.querySelector('.egdesk-run-result-tail')),
+        location: { detailsTag: locationDetails?.localName || null, toggleTag: locationToggle?.localName || null,
+          detailsCount: result?.querySelectorAll('[data-testid="file-check-location-details"]').length || 0,
+          toggleCount: result?.querySelectorAll('[data-testid="file-check-location-toggle"]').length || 0,
+          cwdCount: result?.querySelectorAll('[data-testid="file-check-cwd"]').length || 0,
+          childrenOwned: !!locationDetails && locationToggle?.parentElement === locationDetails && locationCwd?.parentElement === locationDetails,
+          open: locationDetails?.open ?? null, toggleText: locationToggle?.textContent || '', toggleBox: box(locationToggle),
+          cwdBox: box(locationCwd), cwdPaint: textPaint(locationCwd) } },
+    };
+}
+
+function observeProjectChatPart({ box, textPaint }) {
+    const projection = window.__egdesk?.state?.boards?.projections?.[window.__egdesk?.state?.boards?.activeProjectionId];
+    const codex = window.__egdesk?.state?.codex, thread = codex?.threads?.find(row => row.id === codex.activeThreadId);
+    const roomId = thread ? ChromeUtils.importESModule('chrome://userchrome/content/EGDeskChatState.sys.mjs').clientThreadBinding(thread) : null;
+    const chatFind = name => document.querySelector(`[data-testid="${name}"]`);
+    const panel = chatFind('chat-project-panel'), choice = chatFind('chat-project-board'), details = chatFind('chat-project-details');
+    const body = chatFind('chat-project-body'), actions = chatFind('chat-project-actions');
+    const opener = chatFind('chat-project-open'), composer = document.querySelector('.egd-codex-input');
+    const layout = node => node ? { scrollWidth: node.scrollWidth, clientWidth: node.clientWidth,
+      scrollLeft: node.scrollLeft, overflowX: getComputedStyle(node).overflowX,
+      scrollTop: node.scrollTop, scrollHeight: node.scrollHeight, clientHeight: node.clientHeight,
+      overflowY: getComputedStyle(node).overflowY } : null;
+    return {
       chat: { threadId: thread?.id || null, threadTitle: thread?.title || null, roomId, conversationId: thread?.conversationId || null,
         messageCount: thread?.messages?.length ?? null, target: thread?.requestProjectTarget ? { ...thread.requestProjectTarget } : null,
         draft: codex?.threadDrafts?.[thread?.id] || '', draftRevision: codex?.threadDraftRevisions?.[thread?.id] || 0,
@@ -635,32 +775,29 @@ export async function observeProjectUi(harness) {
           selectedBoardId: chatFind('chat-room-project-board')?.value ?? null,
           options: [...(chatFind('chat-room-project-board')?.options || [])].map(option => ({ value: option.value, label: option.textContent })),
           saveDisabled: chatFind('chat-room-project-save')?.disabled ?? true,
+          saveBox: box(chatFind('chat-room-project-save')), cancelBox: box(chatFind('chat-room-project-cancel')),
           detailsPaint: textPaint(chatFind('chat-room-project-details')),
           currentText: chatFind('chat-room-project-current')?.textContent || '',
           currentSource: chatFind('chat-room-project-current')?.dataset.source || null,
           currentStatus: chatFind('chat-room-project-current')?.dataset.status || null,
-          layout: { dialog: layout(panel), body: layout(chatFind('chat-room-project-editor')), details: layout(chatFind('chat-room-project-details')) } },
+          layout: { dialog: layout(panel), body: layout(body), editor: layout(chatFind('chat-room-project-editor')),
+            details: layout(chatFind('chat-room-project-details')) } },
         homeNewBox: box(document.querySelector('.egd-codex-thread-home-new')),
         panel: panel ? { threadId: panel.dataset.threadId, box: box(panel), selectedBoardId: choice?.value ?? null,
-          layout: { dialog: layout(panel), body: layout(panel.querySelector('.egd-codex-input-panel-body')), details: layout(details) },
+          applyBox: box(chatFind('chat-project-apply')), cancelBox: box(chatFind('chat-project-cancel')),
+          actions: { operation: actions?.dataset.operation || null,
+            outsideBody: !!body && !!actions && panel.contains(actions) && !body.contains(actions) },
+          scrollHint: { box: box(chatFind('chat-project-scroll-hint')), text: chatFind('chat-project-scroll-hint')?.textContent || '' },
+          effectivePaint: textPaint(chatFind('chat-project-effective')),
+          layout: { dialog: layout(panel), body: layout(body), details: layout(details) },
           options: [...(choice?.options || [])].map(option => ({ value: option.value, label: option.textContent })),
           applyDisabled: chatFind('chat-project-apply')?.disabled ?? true, detailsText: details?.textContent || '',
           titlePaint: textPaint(details?.querySelector('strong')), pathPaint: textPaint(details?.querySelector('p')) } : null },
-      editor: find('file-editor')?.value ?? null,
-      status: card?.querySelector('.egdesk-file-status')?.textContent || '',
-      error: card?.querySelector('.egdesk-file-error:not([hidden])')?.textContent || null,
-      result: { text: result?.textContent || '', busy: result?.getAttribute('aria-busy') === 'true',
-        outcome: result?.querySelector('.egdesk-run-result')?.dataset.outcome || null, box: box(result),
-        headlineBox: box(result?.querySelector('.egdesk-run-result-headline')), exitBox: box(result?.querySelector('.egdesk-run-result-exit')),
-        exitTextPaint: textPaint(result?.querySelector('.egdesk-run-result-exit')),
-        outputBox: box(result?.querySelector('.egdesk-run-result-tail')),
-        location: { detailsTag: locationDetails?.localName || null, toggleTag: locationToggle?.localName || null,
-          detailsCount: result?.querySelectorAll('[data-testid="file-check-location-details"]').length || 0,
-          toggleCount: result?.querySelectorAll('[data-testid="file-check-location-toggle"]').length || 0,
-          cwdCount: result?.querySelectorAll('[data-testid="file-check-cwd"]').length || 0,
-          childrenOwned: !!locationDetails && locationToggle?.parentElement === locationDetails && locationCwd?.parentElement === locationDetails,
-          open: locationDetails?.open ?? null, toggleText: locationToggle?.textContent || '', toggleBox: box(locationToggle),
-          cwdBox: box(locationCwd), cwdPaint: textPaint(locationCwd) } },
+    };
+}
+
+function observeProjectTerminalPart({ box }) {
+    return {
       terminals: [...document.querySelectorAll('.egd-terminal-card')].map(node => {
         const frame = node._termBrowser, api = frame?.contentWindow?.terminalAPI, frameRect = frame?.getBoundingClientRect();
         const frameDocument = frame?.contentDocument;
@@ -683,8 +820,148 @@ export async function observeProjectUi(harness) {
         return { id: node.id, sessionId: api?.ptyId || null, connected: api?.isConnected?.() ?? false,
           level: node.dataset.egdSemanticLevel || null, renderedOutput,
           text: api?.bufferText?.() || '', box: box(node), contentBox: frameBox };
-      }), width: innerWidth, height: innerHeight };
+      }), };
+}
+
+// Every chunk carries its own read-only state fence. No browser globals are
+// installed, and no observation retry dispatches input or replays an action.
+function projectObservationIdentity() {
+  const state = window.__egdesk?.state, cards = [...document.querySelectorAll('[data-testid="file-card"]')];
+  const file = cards.length === 1 ? cards[0] : null, find = id => file?.querySelector('[data-testid="' + id + '"]');
+  const codex = state?.codex, thread = codex?.threads?.find(row => row.id === codex.activeThreadId);
+  const roomId = thread ? ChromeUtils.importESModule('chrome://userchrome/content/EGDeskChatState.sys.mjs').clientThreadBinding(thread) : null;
+  const panel = document.querySelector('[data-testid="chat-project-panel"]');
+  const result = find('file-check-result'), command = find('file-script-command');
+  const projection = state?.boards?.projections?.[state?.boards?.activeProjectionId];
+  const scrolls = [file, panel].filter(Boolean).flatMap(root => [root, ...root.querySelectorAll('*')]
+    .filter(node => node.scrollTop || node.scrollLeft || node.scrollWidth > node.clientWidth || node.scrollHeight > node.clientHeight)
+    .map(node => [node.localName, node.id, node.className, node.scrollLeft, node.scrollTop, node.clientWidth, node.clientHeight, node.scrollWidth, node.scrollHeight]));
+  return { documentURI: document.documentURI, width: innerWidth, height: innerHeight,
+    fileIds: cards.map(node => node.id), fileSnapshot: file?._fileView?.snapshot?.() || null,
+    activeEntityId: state?.activeEntityId || null, boardId: projection?.boardId || null,
+    level: file?.dataset.egdSemanticLevel || null, fullscreenCardId: state?.cardFullscreen?.cardId || null,
+    camera: { zoom: state?.zoom, zoomTarget: state?.zoomTarget, pan: { ...state?.pan }, panTarget: { ...state?.panTarget } },
+    scriptName: find('file-script-name')?.value ?? null, scriptCommand: command?.value ?? null,
+    commandSelection: command ? [command.selectionStart, command.selectionEnd, document.activeElement === command] : null,
+    editor: find('file-editor')?.value ?? null,
+    resultText: result?.textContent || '', resultBusy: result?.getAttribute('aria-busy') === 'true',
+    resultOutcome: result?.querySelector('.egdesk-run-result')?.dataset.outcome || null,
+    locationOpen: find('file-check-location-details')?.open ?? null,
+    threadId: thread?.id || null, roomId, conversationId: thread?.conversationId || null,
+    draftRevision: codex?.threadDraftRevisions?.[thread?.id] || 0,
+    target: thread?.requestProjectTarget ? { ...thread.requestProjectTarget } : null,
+    composerThreadId: document.querySelector('.egd-codex-input')?.dataset.threadId || null,
+    panelText: panel?.textContent || null, panelThreadId: panel?.dataset.threadId || null,
+    projectChoice: panel?.querySelector('[data-testid="chat-project-board"]')?.value ?? null,
+    roomChoice: panel?.querySelector('[data-testid="chat-room-project-board"]')?.value ?? null,
+    terminals: [...document.querySelectorAll('.egd-terminal-card')].map(node => {
+      const api = node._termBrowser?.contentWindow?.terminalAPI;
+      return { id: node.id, sessionId: api?.ptyId || null, text: api?.bufferText?.() || '', level: node.dataset.egdSemanticLevel || null };
+    }), scrolls };
+}
+
+const PROJECT_OBSERVATION_PARTS = Object.freeze([
+  ['file', observeProjectFilePart, false], ['result', observeProjectResultPart, true],
+  ['chat', observeProjectChatPart, true], ['terminal', observeProjectTerminalPart, false],
+]);
+// Leave headroom for the unchanged harness's profile-binding wrapper.
+export const PROJECT_OBSERVATION_SOURCE_BUDGET = 14 * 1024;
+export function projectUiObservationSources() {
+  return PROJECT_OBSERVATION_PARTS.map(([part, reader, needsText]) => {
+    const source = 'async () => {\nconst identity = (' + projectObservationIdentity.toString() + ');\n' +
+      'const before = identity();\nconst box = (' + projectBox.toString() + ');\n' +
+      (needsText ? 'const textPaint = (' + projectTextPaint.toString() + ');\n' : '') +
+      'const value = (' + reader.toString() + ')({ box' + (needsText ? ', textPaint' : '') + ' });\n' +
+      'return { part: ' + JSON.stringify(part) + ', before, value, after: identity() };\n}';
+    const bytes = Buffer.byteLength(source, 'utf8');
+    assert.ok(bytes < PROJECT_OBSERVATION_SOURCE_BUDGET, part + ' observation exceeds its bounded source budget: ' + bytes);
+    return { part, source, bytes };
   });
+}
+
+export function mergeProjectUiObservations(chunks) {
+  assert.deepEqual(chunks.map(chunk => chunk?.part), PROJECT_OBSERVATION_PARTS.map(([part]) => part));
+  const reference = chunks[0].before;
+  assert.ok(reference && typeof reference === 'object', 'split observations require an identity fence');
+  const changedFields = new Set();
+  for (const chunk of chunks) for (const identity of [chunk.before, chunk.after]) {
+    for (const key of new Set([...Object.keys(reference), ...Object.keys(identity || {})])) {
+      if (JSON.stringify(identity?.[key]) !== JSON.stringify(reference[key])) changedFields.add(key);
+    }
+  }
+  if (changedFields.size) throw Object.assign(new Error('Project UI changed across split observations: ' + [...changedFields].join(', ')),
+    { code: 'QA_PROJECT_OBSERVATION_CHANGED', changedFields: [...changedFields] });
+  const [file, result, chat, terminal] = chunks.map(chunk => chunk.value);
+  assert.equal(file.count, reference.fileIds.length);
+  assert.equal(file.cardId, reference.fileIds.length === 1 ? reference.fileIds[0] : null);
+  assert.deepEqual(file.snapshot, reference.fileSnapshot);
+  assert.equal(file.width, reference.width); assert.equal(file.height, reference.height);
+  assert.deepEqual(file.camera, reference.camera);
+  assert.equal(file.activeEntityId, reference.activeEntityId);
+  assert.equal(chat.chat.threadId, reference.threadId); assert.equal(chat.chat.roomId, reference.roomId);
+  assert.equal(chat.chat.draftRevision, reference.draftRevision);
+  assert.deepEqual(chat.chat.target, reference.target);
+  assert.equal(chat.chat.composerThreadId, reference.composerThreadId);
+  assert.equal(result.result.text, reference.resultText); assert.equal(result.result.busy, reference.resultBusy);
+  assert.equal(result.result.outcome, reference.resultOutcome); assert.equal(result.result.location.open, reference.locationOpen);
+  assert.deepEqual(terminal.terminals.map(({ id, sessionId, text, level }) => ({ id, sessionId, text, level })), reference.terminals);
+  return { ...file, ...result, ...chat, ...terminal };
+}
+
+export async function observeProjectUi(harness) {
+  const sources = projectUiObservationSources(), changes = [];
+  for (let attempt = 1; attempt <= 3; attempt++) {
+    const chunks = [];
+    for (const { source } of sources) chunks.push(await harness.evaluateChrome(source));
+    try {
+      return { ...mergeProjectUiObservations(chunks), observationCoherence: { coherent: true, attempts: attempt,
+        changes, fingerprint: createHash('sha256').update(JSON.stringify(chunks[0].before)).digest('hex'),
+        scripts: sources.map(({ part, bytes }) => ({ part, bytes })) } };
+    } catch (error) {
+      if (error.code !== 'QA_PROJECT_OBSERVATION_CHANGED') throw error;
+      changes.push({ attempt, fields: error.changedFields });
+    }
+  }
+  throw Object.assign(new Error('Project UI did not stabilize across three read-only observation attempts: ' + JSON.stringify(changes)),
+    { code: 'QA_PROJECT_OBSERVATION_UNSTABLE', changes });
+}
+
+// A native key can return while smooth scrolling is still moving. Discard
+// incoherent reads, not the user's action; never replay input or alter motion.
+// Require three matching coherent fences after the animation has settled.
+export async function waitStableProjectUi(harness, deadlineMs, { timeoutMs = 5000, intervalMs = 80,
+  now = Date.now, pause = ms => new Promise(resolve => setTimeout(resolve, ms)), onProgress = () => {} } = {}) {
+  assert.ok(timeoutMs > 0 && timeoutMs <= 5000 && intervalMs > 0 && intervalMs <= 200);
+  const started = now(), end = Math.min(started + timeoutMs, deadlineMs);
+  const progress = { requiredStableSamples: 3, stableSamples: 0, reads: 0, transientErrors: 0, samples: [] };
+  let previous = null, last;
+  const record = sample => {
+    progress.samples.push(sample);
+    if (progress.samples.length > 16) progress.samples.shift();
+    progress.elapsedMs = now() - started;
+    onProgress(structuredClone(progress));
+  };
+  assertBeforeDeadline(deadlineMs, now());
+  while (now() < end) {
+    assertBeforeDeadline(deadlineMs, now());
+    progress.reads++;
+    try {
+      last = await observeProjectUi(harness);
+      const fingerprint = last.observationCoherence.fingerprint;
+      progress.stableSamples = fingerprint === previous ? progress.stableSamples + 1 : 1;
+      previous = fingerprint;
+      record({ read: progress.reads, coherent: true, fingerprint, stableSamples: progress.stableSamples });
+      assertBeforeDeadline(deadlineMs, now());
+      if (now() < end && progress.stableSamples === 3) return { ...last, observationStability: structuredClone(progress) };
+    } catch (error) {
+      if (error.code !== 'QA_PROJECT_OBSERVATION_UNSTABLE') throw error;
+      previous = null; progress.stableSamples = 0; progress.transientErrors++;
+      record({ read: progress.reads, coherent: false, changes: error.changes });
+    }
+    if (now() < end) await pause(Math.min(intervalMs, end - now()));
+  }
+  throw Object.assign(new Error('Project UI did not produce three stable coherent observations within the bounded wait: ' + JSON.stringify(progress)),
+    { code: 'QA_PROJECT_STABILITY_TIMEOUT', progress });
 }
 
 export async function runProjectFileFlow({ harness, result, check }, { profile, deadlineMs, env = process.env }) {
@@ -697,6 +974,7 @@ export async function runProjectFileFlow({ harness, result, check }, { profile, 
     !!isolation.files['resources/EGDeskFileView.sys.mjs'] && !!isolation.files['resources/EGDeskRunResult.sys.mjs']);
   result.pickerTransform = descriptor;
   result.sourceProof = isolation.files;
+  result.observationScripts = projectUiObservationSources().map(({ part, bytes }) => ({ part, bytes }));
   result.scope = { actual: ['native headless UI input', 'picker channel/begin/complete', 'File HTTP adapter',
     'project SQLite persistence', 'terminal-init/write queue/ScriptRun collector'],
   synthetic: { picker: 'OS-directory-result-only', shell: 'terminal-http-io-only' },
@@ -888,11 +1166,65 @@ export async function runProjectFileFlow({ harness, result, check }, { profile, 
       rootId: proof.uiLost.snapshot.rootId, title: selectedProject.title, displayPath: proof.initial.workspace };
     check('owned project title exercises a long selected name without a fixture attach substitution',
       expected.title === BOARD_NAME && expected.title.length > 60);
-    const chatProof = proof.chatProject = { expected, beforeStore: await state() };
-    const waitChat = async accept => (await waitUi(value => accept(value.chat))).chat;
+    const chatProof = proof.chatProject = { expected, beforeStore: await state(), reviewReveals: [] };
+    const waitChat = async (accept, phase = 'chat-ui') => {
+      try {
+        return await waitFor(harness, async () => {
+          const chat = (await observeProjectUi(harness)).chat;
+          chatProof.lastWait = { phase, at: Date.now(), observation: chatProjectWaitDiagnostic(chat, expected) };
+          return chat;
+        }, accept, deadlineMs, { timeoutMs: 20000 });
+      } catch (error) {
+        throw new Error(`Chat project wait failed (${phase}): ${JSON.stringify(chatProof.lastWait)}; cause: ${error.message.slice(0, 180)}`);
+      }
+    };
     const openPanel = async () => {
       await click(testid('chat-project-open'), 'open actual Chat request-project selector');
-      return waitChat(value => !!value.panel && value.panel.threadId === value.threadId);
+      const opened = await waitChat(value => !!value.panel && value.panel.threadId === value.threadId, 'project-panel-open');
+      (chatProof.panelEntries ||= []).push(opened);
+      check('project panel first entry exposes only request Apply/Cancel outside its scroll body',
+        chatProjectFooterVisible(opened), chatProjectWaitDiagnostic(opened, expected));
+      return opened;
+    };
+    const reviewProject = async (phase, operation = 'request') => {
+      const before = await waitChat(value => chatProjectReviewReady(value, expected, operation), `${phase}:loaded`);
+      const sample = { phase, operation, before }; chatProof.reviewReveals.push(sample);
+      // R11 exposed a real 600px UX defect as well as an old QA assumption.
+      // Never scroll past hidden Apply/Cancel to manufacture an accessible UI.
+      check(`${phase}: first-page ${operation === 'room' ? 'Save' : 'Apply'}/Cancel are fully visible before review scrolling`,
+        chatProjectFooterVisible(before, operation), chatProjectWaitDiagnostic(before, expected));
+      check(`${phase}: loaded project dialog has no horizontal overflow`,
+        projectDialogLayoutIssues(operation === 'room' ? before.roomProject.layout : before.panel.layout).length === 0,
+        operation === 'room' ? before.roomProject.layout : before.panel.layout);
+      if (phase === 'narrow-reopened-project-details') await captureSupplement('chat-project-first-page-actions-600x600', before);
+      if (chatProjectReviewPainted(before, expected, operation)) {
+        sample.after = before; return before;
+      }
+      const body = before.panel.layout.body;
+      check(`${phase}: clipped full path has an actual vertical scroll container`,
+        /^(auto|scroll)$/.test(body.overflowY) && body.scrollHeight > body.clientHeight + 1 &&
+        body.scrollTop < body.scrollHeight - body.clientHeight - 0.5, body);
+      check(`${phase}: additional content has a visible scroll cue`,
+        !!before.panel.scrollHint.text && before.panel.scrollHint.box?.visible && before.panel.scrollHint.box.inside &&
+        !before.panel.scrollHint.box.clipped, before.panel.scrollHint);
+      const selector = testid('chat-project-body');
+      assertBeforeDeadline(deadlineMs);
+      sample.action = { label: 'native End to review the complete candidate project path',
+        kind: 'native-key', key: 'End', selector, at: Date.now() };
+      result.actions.push(sample.action);
+      sample.scroll = await harness.scrollWithKey(selector, 'End');
+      const settled = await waitStableProjectUi(harness, deadlineMs, { onProgress: progress => {
+        sample.settle = progress;
+        chatProof.lastWait = { phase: `${phase}:native-scroll-settle`, at: Date.now(), stability: progress };
+      } });
+      sample.after = settled.chat;
+      chatProof.lastWait = { phase: `${phase}:native-scroll-full-path`, at: Date.now(),
+        stability: settled.observationStability, observation: chatProjectWaitDiagnostic(sample.after, expected) };
+      check(`${phase}: settled candidate title and full path are fully painted`,
+        chatProjectReviewPainted(sample.after, expected, operation), chatProjectWaitDiagnostic(sample.after, expected));
+      check(`${phase}: native scroll preserves applied/draft identities and exposes full text and actions`,
+        sample.scroll.moved && assertChatProjectReviewScroll(before, sample.after, expected, operation), sample.scroll);
+      return sample.after;
     };
     const chooseBoard = async () => {
       const before = (await observeProjectUi(harness)).chat;
@@ -905,20 +1237,31 @@ export async function runProjectFileFlow({ harness, result, check }, { profile, 
         assertBeforeDeadline(deadlineMs); await harness.press(key, selector);
         result.actions.push({ label: 'native Board option key', key, selector, at: Date.now() });
       }
-      const selected = await waitChat(value => value.panel?.selectedBoardId === expected.boardId && !value.panel.applyDisabled &&
-        textFragmentsVisible(value.panel.titlePaint, expected.title) && textFragmentsVisible(value.panel.pathPaint, expected.displayPath));
+      const selected = await reviewProject('native-selected-project');
       check('loaded project dialog shows its full path without horizontal overflow', projectDialogLayoutIssues(selected.panel.layout).length === 0,
         { layout: selected.panel.layout, issues: projectDialogLayoutIssues(selected.panel.layout) });
       return selected;
     };
-    await click('#egd-dock .egd-dock-btn[data-id="chat"]', 'Chat from native Dock without a provider turn');
+    const lastFileSequence = value => Math.max(0, ...value.fileRequests.map(row => row.sequence));
+    chatProof.beforeDock = (await observeProjectUi(harness)).chat;
+    chatProof.roomReadWindows = [];
+    const dockStartedAt = Date.now();
+    const dockAction = await click('#egd-dock .egd-dock-btn[data-id="chat"]', 'Chat from native Dock without a provider turn');
     let chat = await waitChat(value => value.homeNewBox?.visible || value.backBox?.visible);
     if (chat.backBox?.visible) {
-      await click('.egd-codex-conversation-back', 'return to actual Chat room list');
-      await waitChat(value => value.homeNewBox?.visible);
+      const visit = { entry: 'dock-room', startedAt: dockStartedAt, action: dockAction,
+        observedAt: Date.now(), ui: chat, beforeSequence: lastFileSequence(chatProof.beforeStore) };
+      chatProof.roomReadWindows.push(visit);
+      visit.leaveAction = await click('.egd-codex-conversation-back', 'return to actual Chat room list');
+      visit.homeUi = await waitChat(value => value.homeNewBox?.visible, 'initial-room-left');
+      visit.throughSequence = lastFileSequence(await state());
+      visit.endedAt = Date.now();
     }
-    await click('.egd-codex-thread-home-new', 'create empty Chat through native new-room button');
+    const beforeNewRoom = await state(), newRoomStartedAt = Date.now();
+    const newRoomAction = await click('.egd-codex-thread-home-new', 'create empty Chat through native new-room button');
     chatProof.initial = await waitChat(value => value.openerCount === 1 && value.composerBox?.visible && value.composerThreadId === value.threadId);
+    chatProof.roomReadWindows.push({ entry: 'new-room', startedAt: newRoomStartedAt, action: newRoomAction,
+      observedAt: Date.now(), ui: chatProof.initial, beforeSequence: lastFileSequence(beforeNewRoom) });
     check('active Board is not inherited as Chat request authority', chatProof.initial.target === null &&
       chatProof.initial.activeBoardId === expected.boardId && chatProof.initial.messageCount === 0);
     chatProof.panelInitial = await openPanel();
@@ -941,8 +1284,7 @@ export async function runProjectFileFlow({ harness, result, check }, { profile, 
     await safeTarget(testid('chat-project-remove'));
     await captureSupplement('chat-selected-long-project-600x600', chatProof.narrowApplied);
     await openPanel();
-    chatProof.details = await waitChat(value => value.panel?.selectedBoardId === expected.boardId && !value.panel.applyDisabled &&
-      textFragmentsVisible(value.panel.titlePaint, expected.title) && textFragmentsVisible(value.panel.pathPaint, expected.displayPath));
+    chatProof.details = await reviewProject('narrow-reopened-project-details');
     check('600px full project path has no dialog/body/details horizontal overflow',
       projectDialogLayoutIssues(chatProof.details.panel.layout).length === 0,
       { layout: chatProof.details.panel.layout, issues: projectDialogLayoutIssues(chatProof.details.panel.layout) });
@@ -963,6 +1305,7 @@ export async function runProjectFileFlow({ harness, result, check }, { profile, 
     await click(testid('chat-project-cancel'), 'close empty selector after removal');
     await waitChat(value => !value.panel);
     chatProof.afterStore = await state();
+    chatProof.afterStoreAt = Date.now();
     check('native Chat select/apply/cancel/remove uses real project reads, preserves draft and never runs',
       assertChatProjectEvidence(chatProof, expected));
     await resize(PROJECT_VIEWPORTS[0]);
@@ -977,7 +1320,7 @@ export async function runProjectFileFlow({ harness, result, check }, { profile, 
     const waitRoom = async (phase, accept) => waitChat(value => {
       roomProof.lastObservation = { phase, value };
       return accept(value);
-    });
+    }, phase);
     const closeProjectPanel = async () => {
       if ((await observeProjectUi(harness)).chat.panel) {
         await click(testid('chat-project-cancel'), 'close project panel without changing request selection');
@@ -990,7 +1333,10 @@ export async function runProjectFileFlow({ harness, result, check }, { profile, 
       check('room-default entry is the explicit user-facing default-project control',
         ready.roomProject.openText.includes('이 방의 기본 프로젝트'), ready.roomProject.openText);
       await click(testid('chat-room-project-open'), 'open 이 방의 기본 프로젝트');
-      return waitRoom('room-default-editor', value => value.roomProject.editorBox?.visible && value.roomProject.options.length > 0);
+      const opened = await waitRoom('room-default-editor', value => value.roomProject.editorBox?.visible && value.roomProject.options.length > 0);
+      check('room editor first entry exposes only Save/Cancel outside its scroll body',
+        chatProjectFooterVisible(opened, 'room'), chatProjectWaitDiagnostic(opened, expected));
+      return opened;
     };
     const chooseDefaultBoard = async () => {
       const before = (await observeProjectUi(harness)).chat, options = before.roomProject.options;
@@ -1003,7 +1349,7 @@ export async function runProjectFileFlow({ harness, result, check }, { profile, 
         assertBeforeDeadline(deadlineMs); await harness.press(key, selector);
         result.actions.push({ label: 'native room-default Board option key', kind: 'native-key', key, selector, at: Date.now() });
       }
-      const selected = await waitRoom('review-room-default-path', value => roomProjectDetailsVisible(value.roomProject, expected));
+      const selected = await reviewProject('review-room-default-path', 'room');
       check('room-default full path has no horizontal dialog/editor/details overflow',
         projectDialogLayoutIssues(selected.roomProject.layout).length === 0, selected.roomProject.layout);
       return selected;
@@ -1055,8 +1401,8 @@ export async function runProjectFileFlow({ harness, result, check }, { profile, 
     await waitRoom('original-room-reopened', value => value.threadId === original.threadId && value.roomId === original.roomId &&
       value.composerThreadId === original.threadId);
     await openRoomEditor();
-    roomProof.ui.reopened = await waitRoom('persisted-default-details', value => roomProjectDetailsVisible(value.roomProject, expected) &&
-      value.roomProject.currentSource === 'board' && value.roomProject.currentStatus === 'connected');
+    await waitRoom('persisted-default-current', value => value.roomProject.currentSource === 'board' && value.roomProject.currentStatus === 'connected');
+    roomProof.ui.reopened = await reviewProject('persisted-default-details', 'room');
     roomProof.reopened = await waitFor(harness, state, value => operations(value, 'readRoomProjectDefault')
       .some(row => row.request.roomId === original.roomId && row.sequence > roomProof.beforeReopenSequence && row.status === 200), deadlineMs);
     await captureSupplement('chat-room-project-reopened-1280x800', roomProof.ui.reopened);

@@ -12,13 +12,14 @@ import { chatRunOutputFixtureIds, CHAT_RUN_OUTPUT_MARKER, CHAT_RUN_DIFF_MARKER }
 import { prepareQaFirefox } from './run-firefox-mcp-target.mjs';
 import { assertNativeTerminalExit, assertQaFixtureArtifact } from './egdesk-chat-qa-contract.sys.mjs';
 import { createChatProtocolState, mergeChatSnapshot, projectRunMessages, usableArtifact } from '../overlay/resources/EGDeskChatState.sys.mjs';
+import { createEGDeskFileServiceCallbacks, createEGDeskNativeFilePickers } from '../overlay/resources/EGDeskFileView.sys.mjs';
 import { assertPublishedBriefing, assertContextCaptureBatch, assertStoredAgentDelivery,
   captureContextReadEvidence, fingerprintQaBytes } from './egdesk-context-qa-contract.mjs';
 
 const TOKEN = 'unit-fixture-token-no-credentials';
 const FIXTURE_ENV = { EGDESK_QA_FIXTURE_TRANSPORT: '1', EGDESK_QA_FIXTURE_PORT: '49318' };
 
-function setup(t, { claude = false, reader = false, projectFile = false, runOutputs = false } = {}) {
+function setup(t, { claude = false, reader = false, projectFile = false, runOutputs = false, portable = false } = {}) {
   const source = fs.mkdtempSync(path.join(canonicalTempRoot(), 'egdesk-loader-fixture-'));
   for (const name of LOADER_FILES) fs.writeFileSync(path.join(source, name), `unit fixture ${name}\n`);
   const { profile } = bootstrapQaProfile({ loaderSource: source });
@@ -32,7 +33,8 @@ function setup(t, { claude = false, reader = false, projectFile = false, runOutp
   const fetchBefore = globalThis.fetch;
   const eventSourceBefore = globalThis.EventSource;
   const fixtureEnv = { ...FIXTURE_ENV, ...(projectFile ? { EGDESK_QA_PROJECT_FILE_FIXTURE: '1', EGDESK_QA_REAL_TURN: '0' } : {}),
-    ...(runOutputs ? { EGDESK_QA_RUN_OUTPUTS_FIXTURE: '1', EGDESK_QA_REAL_TURN: '0' } : {}) };
+    ...(runOutputs ? { EGDESK_QA_RUN_OUTPUTS_FIXTURE: '1', EGDESK_QA_REAL_TURN: '0' } : {}),
+    ...(portable ? { EGDESK_QA_PORTABLE_TRANSFER_FIXTURE: '1', EGDESK_QA_REAL_TURN: '0' } : {}) };
   prepareQaFirefox(profile, { env: fixtureEnv });
   const transport = createQaFixtureTransport({ profile, token: TOKEN,
     env: { ...fixtureEnv, ...(claude ? { EGDESK_QA_CLAUDE_FIXTURE: '1' } : {}),
@@ -51,6 +53,7 @@ async function request(handler, method, url, body = null, token = null, onRespon
   let resolve;
   const completed = new Promise((done) => { resolve = done; });
   const res = Object.assign(new EventEmitter(), {
+    setHeader(name, value) { headers[name] = value; },
     writeHead(value, nextHeaders = {}) { status = value; headers = nextHeaders; },
     end(value = '') { this.writableEnded = true; resolve({ status, body: value ? (/application\/json/.test(headers['Content-Type'] || '') ? JSON.parse(value) : value) : null }); this.emit('close'); },
     destroy() { this.destroyed = true; this.emit('close'); resolve({ status: 0, body: null }); },
@@ -66,6 +69,158 @@ const sendRunOutputs = (handler, scenario = 'RUN_OUTPUTS') => request(handler, '
   clientThreadId: `qa-output-${scenario}`, requestId: `qa-output-${scenario}` });
 const outputRoute = (path, run, itemId) => `${path}?${new URLSearchParams({ conversationId: run.conversationId, runId: run.runId,
   ...(itemId === undefined ? {} : { itemId }) })}`;
+
+test('portable opt-in mounts real Profile/Desk HTTP and SQLite without a second server or provider', async t => {
+  const fetchSpy = t.mock.method(globalThis, 'fetch', () => assert.fail('no provider/network forwarding'));
+  const transport = setup(t, { portable: true }), { handler } = transport;
+  const headers = { host: '127.0.0.1:49318', 'content-type': 'application/json', origin: 'chrome://browser' };
+  const send = (method, route, body = null, token = null) => request(handler, method, route, body, token, () => {}, headers);
+  const before = (await send('GET', '/__qa/state', null, TOKEN)).body, fixture = before.portableTransfer;
+  t.after(() => {
+    transport.dispose();
+    assert.equal(path.dirname(fixture.root), canonicalTempRoot());
+    assert.equal(fs.realpathSync.native(fixture.root), fixture.root);
+    assert.ok(path.basename(fixture.root).startsWith('egdesk-portable-transfer-'));
+    fs.rmSync(fixture.root, { recursive: true });
+  });
+  assert.equal(before.portableTransferFixture, true);
+  assert.deepEqual([before.providerTurns, before.nativePickerInvocations, before.nativeProcessSpawns], [0, 0, 0]);
+  assert.equal((await send('GET', '/auth/status')).body.isLoggedIn, false);
+  const seed = fixture.seed;
+  assert.equal((await send('GET', '/profiles')).body.profiles.length, 1);
+  const board = await send('GET', `/v1/boards/${seed.boardId}/export?format=json-canvas`);
+  assert.equal(board.status, 200); assert.ok(JSON.stringify(board.body.canvas).includes(seed.marker + '_SAVED_BOARD_HEAD'));
+  for (const revision of seed.revisions) for (const format of ['md', 'codex-toml']) {
+    const response = await send('GET', `/profiles/${seed.profileId}/export?format=${format}&revision=${revision.revision}`);
+    assert.equal(response.status, 200); assert.equal(response.body.hash, revision.hash);
+    assert.equal(response.body.text, revision.exports[format].text);
+  }
+  const input = { text: fs.readFileSync(seed.importPath, 'utf8'), filename: seed.importFilename, dryRun: true };
+  assert.equal(input.text, seed.importText);
+  const preview = await send('POST', '/profiles/import', input);
+  assert.equal(preview.status, 200); assert.equal(preview.body.dryRun, true);
+  const previewState = (await send('GET', '/__qa/portable-transfer/state', null, TOKEN)).body;
+  assert.deepEqual(previewState.persisted, fixture.initial, 'read/preview routes cannot fabricate a saved draft');
+  const saved = await send('POST', '/profiles/import', { ...input, dryRun: false });
+  assert.equal(saved.status, 201); assert.equal(saved.body.profile.activeRevision, null);
+  const after = (await send('GET', '/__qa/state', null, TOKEN)).body;
+  assert.equal(after.portableTransfer.persisted.profiles.records.length, fixture.initial.profiles.records.length + 1);
+  assert.deepEqual(after.portableTransfer.persisted.desk, fixture.initial.desk);
+  assert.deepEqual(after.runs, []); assert.deepEqual(after.observed.sends, []); assert.deepEqual(after.observed.authWrites, []);
+  assert.deepEqual(fs.readdirSync(fixture.exportsDir), [], 'native export-file writing is not claimed by handler tests');
+  assert.equal(fetchSpy.mock.callCount(), 0);
+});
+
+test('portable mount rejects activation/room/provider/terminal mutations before generic fixture fallbacks', async t => {
+  const transport = setup(t, { portable: true }), { handler } = transport;
+  const headers = { host: '127.0.0.1:49318', 'content-type': 'application/json', origin: 'chrome://browser' };
+  const send = (method, route, body = null, token = null, extra = {}) => request(handler, method, route, body, token, () => {}, { ...headers, ...extra });
+  const before = (await send('GET', '/__qa/state', null, TOKEN)).body;
+  const fixture = before.portableTransfer;
+  t.after(() => {
+    transport.dispose();
+    assert.equal(path.dirname(fixture.root), canonicalTempRoot());
+    assert.equal(fs.realpathSync.native(fixture.root), fixture.root);
+    assert.ok(path.basename(fixture.root).startsWith('egdesk-portable-transfer-'));
+    fs.rmSync(fixture.root, { recursive: true });
+  });
+  const blocked = [`/profiles/${fixture.seed.profileId}/activate`, '/rooms/assign', '/records',
+    '/chat/send', '/auth/signout', '/terminal/spawn', '/terminal/write', '/__qa/delta',
+    '/v1/files/projects/room-default/save'];
+  for (const route of blocked) assert.equal((await send('POST', route, {})).status, 403, route);
+  assert.equal((await send('GET', '/__qa/portable-transfer/state')).status, 403);
+  for (const route of ['/profiles', '/profiles/import', `/profiles/${fixture.seed.profileId}/export?format=md&revision=1`,
+    `/v1/boards/${fixture.seed.boardId}/export?format=json-canvas`]) assert.equal((await send('OPTIONS', route)).status, 204);
+  assert.equal((await send('OPTIONS', `/profiles/${fixture.seed.profileId}/activate`)).status, 403);
+  assert.equal((await send('OPTIONS', '/profiles', null, null, { origin: 'https://outside.invalid' })).status, 403);
+  assert.equal((await send('GET', '/profiles', null, null, { origin: 'https://outside.invalid' })).status, 403);
+  const after = (await send('GET', '/__qa/state', null, TOKEN)).body;
+  assert.deepEqual(after.portableTransfer.persisted, fixture.initial);
+  assert.deepEqual(after.portableTransfer.forbiddenPosts.map(row => row.path), blocked);
+  for (const key of ['sends', 'approvals', 'authWrites', 'events']) assert.deepEqual(after.observed[key], before.observed[key]);
+  assert.deepEqual(after.runs, []); assert.equal(after.providerTurns, 0);
+  transport.dispose();
+  assert.equal((await send('GET', '/profiles')).status, 503, 'disposed sidecar cannot fall through to another handler');
+});
+
+test('ordinary Chat, Claude/Reader and RunOutputs read only the canonical empty room default without provider or run effects', async t => {
+  const fetchSpy = t.mock.method(globalThis, 'fetch', () => { throw new Error('No provider/network forwarding'); });
+  const headers = { host: '127.0.0.1:49318', 'content-type': 'application/json', origin: 'chrome://browser' };
+  for (const mode of [{}, { claude: true }, { claude: true, reader: true }, { runOutputs: true }]) {
+    const { handler } = setup(t, mode);
+    const before = (await request(handler, 'GET', '/__qa/state', null, TOKEN)).body;
+    for (const roomId of ['actual-client-binding-not-active-board', '한'.repeat(512), ' opaque binding ']) {
+      const read = await request(handler, 'POST', '/v1/files/projects/room-default', { roomId }, null, () => {}, headers);
+      assert.equal(read.status, 200);
+      assert.deepEqual(read.body, { ok: true, result: { roomId, inheritance: null, override: null, project: null, source: null, status: 'none' } });
+    }
+    const after = (await request(handler, 'GET', '/__qa/state', null, TOKEN)).body;
+    assert.equal(after.observed.roomDefaultReads.length, 3);
+    assert.deepEqual(after.runs, before.runs); assert.equal(after.seq, before.seq);
+    for (const key of ['sends', 'approvals', 'authWrites', 'events']) assert.deepEqual(after.observed[key], before.observed[key]);
+    assert.deepEqual(after.context, before.context);
+    if (mode.claude || mode.runOutputs) assert.equal(after.providerTurns, 0);
+    if (mode.runOutputs) assert.deepEqual(after.runOutputs, before.runOutputs);
+  }
+  assert.equal(fetchSpy.mock.callCount(), 0);
+});
+
+test('empty-default fallback rejects invalid IDs/bodies/origins and unsupported writes; it never accepts a fake saved default', async t => {
+  const { handler } = setup(t);
+  const route = '/v1/files/projects/room-default';
+  const headers = { host: '127.0.0.1:49318', 'content-type': 'application/json' };
+  for (const body of [null, {}, [], 'not-an-object', { roomId: null }, { roomId: 1 }, { roomId: '' },
+    { roomId: ' \t\n' }, { roomId: 'has\0nul' }, { roomId: 'x'.repeat(513) },
+    { roomId: 'room', boardId: 'active-board' }, { roomId: 'room', cwd: '/outside' },
+    { roomId: 'room', result: { status: 'connected' } }, { clientThreadId: 'room' }]) {
+    assert.equal((await request(handler, 'POST', route, body, null, () => {}, headers)).status, 400);
+  }
+  assert.equal((await request(handler, 'POST', route, { roomId: 'room' }, null, () => {}, { ...headers, 'content-type': 'text/plain' })).status, 415);
+  assert.equal((await request(handler, 'POST', route, { roomId: 'x'.repeat(70 * 1024) }, null, () => {}, headers)).status, 413);
+  assert.equal((await request(handler, 'POST', route + '?roomId=other', { roomId: 'room' }, null, () => {}, headers)).status, 400);
+  for (const method of ['GET', 'PUT', 'DELETE']) assert.equal((await request(handler, method, route, null, null, () => {}, headers)).status, 405);
+  assert.equal((await request(handler, 'OPTIONS', route, null, null, () => {}, headers)).status, 204);
+  for (const extra of [{ origin: 'https://foreign.invalid' }, { 'sec-fetch-site': 'same-site' }]) {
+    for (const method of ['POST', 'OPTIONS']) assert.equal((await request(handler, method, route, { roomId: 'room' }, null, () => {}, { ...headers, ...extra })).status, 403);
+  }
+  assert.equal((await request(handler, 'POST', route, { roomId: 'room' }, null, () => {}, { ...headers, host: 'foreign.invalid' })).status, 400);
+  for (const pathname of [route + '/save', '/v1/files/projects/attach', '/v1/files/projects/inherit', '/v1/files/projects/detach']) {
+    for (const method of ['POST', 'OPTIONS']) assert.equal((await request(handler, method, pathname,
+      { roomId: 'room', boardId: 'active-board', expectedProjectId: 'project', expectedRootId: 'root' }, null, () => {}, headers)).status, 404);
+  }
+  const state = (await request(handler, 'GET', '/__qa/state', null, TOKEN)).body;
+  assert.equal(state.observed.roomDefaultReads, undefined);
+  assert.deepEqual(state.runs, []); assert.deepEqual(state.observed.sends, []); assert.deepEqual(state.observed.authWrites, []);
+});
+
+test('actual project handler wins before the empty fallback and persists/read-backs real Board inheritance', async t => {
+  const { handler } = setup(t, { projectFile: true });
+  const headers = { host: '127.0.0.1:49318', 'content-type': 'application/json' };
+  const post = (route, body, extra = {}) => request(handler, 'POST', route, body, null, () => {},
+    { ...headers, ...Object.fromEntries(Object.entries(extra).map(([key, value]) => [key.toLowerCase(), value])) });
+  const projectState = async () => (await request(handler, 'GET', '/__qa/project-file/state', null, TOKEN, () => {}, headers)).body;
+  const roomId = 'actual-client-binding', boardId = 'qa-default-handler-board';
+  assert.equal((await post('/v1/files/projects/room-default', { roomId })).body.result.status, 'none');
+  assert.equal((await projectState()).fileRequests.at(-1).operation, 'readRoomProjectDefault');
+  await request(handler, 'POST', '/__qa/project-file/config', { pickerResults: ['select-owned'] }, TOKEN, () => {}, headers);
+  const service = createEGDeskFileServiceCallbacks({ request: async (route, body, options) => (await post(route, body, options?.headers)).body });
+  const picker = createEGDeskNativeFilePickers({ service, pickDirectory: async () =>
+    (await post('/__qa/project-file/picker', {})).body.selection });
+  await picker.chooseProjectFolder({ boardId, title: 'Owned Board for routing proof' });
+  const project = (await service.openProject({ boardId })).project;
+  const saved = await post('/v1/files/projects/room-default/save', { roomId, boardId,
+    expectedProjectId: project.projectId, expectedRootId: project.rootId });
+  assert.equal(saved.status, 200); assert.equal(saved.body.result.status, 'connected');
+  const read = await post('/v1/files/projects/room-default', { roomId });
+  assert.equal(read.body.result.source, 'board'); assert.equal(read.body.result.project.projectId, project.projectId);
+  assert.deepEqual(read.body.result.inheritance, { boardId });
+  const persisted = await projectState();
+  assert.deepEqual(persisted.roomDefaults, [{ roomId, boardId }]);
+  assert.equal(persisted.fileRequests.filter(row => row.operation === 'saveRoomProjectDefault').length, 1);
+  const main = (await request(handler, 'GET', '/__qa/state', null, TOKEN)).body;
+  assert.equal(main.observed.roomDefaultReads, undefined, 'real project mode never reaches the empty fallback');
+  assert.equal(main.providerTurns, 0); assert.deepEqual(main.runs, []); assert.deepEqual(main.observed.sends, []);
+});
 
 test('RunOutputs transport mode is explicit, excludes project/Claude/real turns, and leaves default routes disabled', async t => {
   const fixture = setup(t), { handler, info } = fixture;

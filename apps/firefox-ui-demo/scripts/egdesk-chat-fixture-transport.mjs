@@ -15,7 +15,10 @@ import { qaBridgeConfig, validateQaFixtureIsolation } from './egdesk-qa-fixture-
 import { projectFileFixtureEnabled } from './egdesk-qa-fixture-isolation.mjs';
 import { createProjectFileFixture } from './egdesk-project-file-fixture.mjs';
 import { chatRunOutputsFixtureEnabled, createChatRunOutputsFixture } from './egdesk-chat-run-outputs-fixture.mjs';
+import { portableTransferFixtureEnabled, createPortableTransferFixture } from './egdesk-portable-transfer-fixture.mjs';
 import { routePermissionRequest } from '../helper/claude-engine-permissions.mjs'; // Pure shape translation only.
+import { guardBridgeRequest } from '../helper/codex-bridge-http.mjs';
+import { readEGDeskFileBody } from '../helper/egdesk-file-http.mjs';
 
 const SCENARIO = /^EGDESK_QA_(COMPLETE|TEXT_ONLY|STOP|APPROVAL|USER_INPUT|SUBAGENT|LOST|START_FAIL|REJECT|AMBIGUOUS|CONTEXT|CLAUDE_TEXT|CLAUDE_SESSION_APPROVAL|CLAUDE_APPROVAL_NO_SESSION|CLAUDE_MULTI_SELECT|CLAUDE_RATE_LIMIT|CLAUDE_CONTEXT|CLAUDE_CONTEXT_BLOCKED)\b/;
 export const CLAUDE_CONTEXT_TOOLS = Object.freeze(['egdesk_list_context', 'egdesk_read_source']);
@@ -91,6 +94,9 @@ const fixture = assertQaFixtureManifest(profilePath);
 const profile = fixture.profile;
 const projectFileFixture = projectFileFixtureEnabled(env)
   ? createProjectFileFixture({ profile, token, env }) : null;
+const portableTransferFixture = portableTransferFixtureEnabled(env)
+  ? createPortableTransferFixture({ profile, token, env }) : null;
+const modelFreeFixture = !!(projectFileFixture || portableTransferFixture);
 const artifactRoot = fixture.root;
 const artifactPath = fixture.artifactPath;
 const context = createQaContextFixture(profile);
@@ -103,9 +109,9 @@ const streamId = randomUUID();
 const contextScopeKey = randomUUID();
 let seq = 0;
 let turnCounter = 0;
-let connection = claudeFixture || projectFileFixture ? 'offline' : 'ready';
+let connection = claudeFixture || modelFreeFixture ? 'offline' : 'ready';
 let authLookupFails = false;
-let authLoggedIn = !claudeFixture && !projectFileFixture;
+let authLoggedIn = !claudeFixture && !modelFreeFixture;
 let accountVariant = 'a';
 let claudeAccountVariant = 'a';
 let claudeEpoch = 0;
@@ -218,7 +224,8 @@ function envelope(run, event, details = {}, itemId) {
 }
 
 function authSnapshot() {
-  if (projectFileFixture) return { isLoggedIn: false, loginInProgress: false, statusText: 'Project QA: no provider',
+  if (modelFreeFixture) return { isLoggedIn: false, loginInProgress: false,
+    statusText: portableTransferFixture ? 'Portable transfer QA: no provider' : 'Project QA: no provider',
     requiresOpenaiAuth: true, accountId: null, authMode: null, accountEmail: null };
   return { isLoggedIn: authLoggedIn, loginInProgress: false, statusText: 'QA fixture only',
     requiresOpenaiAuth: !authLoggedIn, accountId: 'chatgpt', authMode: 'chatgpt',
@@ -619,6 +626,37 @@ const handler = async (req, res) => {
     const outputResponse = runOutputsFixture?.route(req.method, url);
     if (outputResponse) return json(res, outputResponse.status, outputResponse.body);
     if (projectFileFixture && await projectFileFixture.handle(req, res, url)) return;
+    if (portableTransferFixture) {
+      // Preflight only for the sidecar's exact allowlisted routes. All actual
+      // reads/imports and all rejected mutations go through its real handlers.
+      const preflight = /^\/profiles(?:\/(?:import|tool-presets|[a-z0-9][a-z0-9-]{0,79}(?:\/revisions(?:\/[1-9]\d{0,8})?|\/export)?))?$/.test(url.pathname)
+        || /^\/v1\/boards(?:\/[A-Za-z0-9][A-Za-z0-9._-]{0,127}(?:\/export)?)?$/.test(url.pathname);
+      if (req.method === 'OPTIONS' && preflight) {
+        if (!guardBridgeRequest(req, PORT)) return json(res, 403, { code: 'QA_LOOPBACK_REQUIRED' });
+        return json(res, 204, {});
+      }
+      if (await portableTransferFixture.handle(req, res, url)) return;
+    }
+    // Ordinary Chat fixtures have no project store. D-X3 still reads this
+    // endpoint on room entry: return the canonical empty view, never a saved
+    // default, active-Board inference, or a successful write. Project mode's
+    // actual adapter above always owns its read/save routes first.
+    if (!projectFileFixture && url.pathname === '/v1/files/projects/room-default') {
+      if (!guardBridgeRequest(req, PORT)) return json(res, 403, { ok: false, code: 'LOOPBACK_REQUIRED', error: 'Trusted loopback origin is required' });
+      if (url.search) return json(res, 400, { ok: false, code: 'INVALID_PROJECT_REQUEST', error: 'Room-default query accepts no URL parameters' });
+      if (req.method === 'OPTIONS') return json(res, 204, {});
+      if (req.method !== 'POST') return json(res, 405, { ok: false, code: 'METHOD_NOT_ALLOWED', error: 'Room-default query requires POST' });
+      const body = await readEGDeskFileBody(req, 'readRoomProjectDefault');
+      if (!body || typeof body !== 'object' || Array.isArray(body) || Object.keys(body).length !== 1 ||
+          typeof body.roomId !== 'string' || !body.roomId.trim() || body.roomId.length > 512 || body.roomId.includes('\0')) {
+        return json(res, 400, { ok: false, code: 'INVALID_PROJECT_REQUEST', error: 'Exactly one bounded nonempty roomId is required' });
+      }
+      const reads = observed.roomDefaultReads ||= [];
+      if (reads.length >= 512) return json(res, 429, { ok: false, code: 'QA_TRACE_LIMIT', error: 'Bounded room-default read trace is full' });
+      reads.push({ roomId: body.roomId });
+      return json(res, 200, { ok: true, result: { roomId: body.roomId, inheritance: null, override: null,
+        project: null, source: null, status: 'none' } });
+    }
     if (projectFileFixture && req.method === 'POST' && url.pathname === '/chat/send') {
       return json(res, 403, { accepted: false, code: 'PROJECT_QA_MODEL_DISABLED', error: 'Project QA never starts model turns' });
     }
@@ -646,6 +684,8 @@ const handler = async (req, res) => {
           nativePickerInvocations: 0, nativeProcessSpawns: 0 } : {}),
         ...(claudeFixture ? { claudeFixture: true, claudeReaderFixture, providerTurns: 0 } : {}),
         ...(runOutputsFixture ? { runOutputsFixture: true, providerTurns: 0, runOutputs: runOutputsFixture.stats() } : {}),
+        ...(portableTransferFixture ? { portableTransferFixture: true, providerTurns: 0,
+          nativePickerInvocations: 0, nativeProcessSpawns: 0, portableTransfer: portableTransferFixture.snapshot() } : {}),
         streamId, seq, clients: clients.size, observed, context: context.stats, pendingContextCaptures: heldCaptures.length,
         runs: [...runs.values()].map((run) => ({ ...runState(run), conversationId: run.conversationId,
           requestId: run.requestId, clientThreadId: run.clientThreadId, fixtureStage: run.fixtureStage || null,
@@ -851,13 +891,13 @@ const handler = async (req, res) => {
       return json(res, 200, { ok: true });
     }
     if (req.method === 'GET' && url.pathname === '/health') return json(res, 200, {
-      ok: true, fixture: true, profile, host: HOST, port: PORT, origin, appServerReady: !claudeFixture && !projectFileFixture,
+      ok: true, fixture: true, profile, host: HOST, port: PORT, origin, appServerReady: !claudeFixture && !modelFreeFixture,
       ...(claudeFixture ? { claudeFixture: true, claudeReaderFixture, providerTurns: 0, engines: engineRows() } : {}) });
     if (req.method === 'GET' && (url.pathname === '/v1/state' || url.pathname === '/auth/status')) {
       if (authLookupFails) return json(res, 503, { error: 'QA account refresh temporarily unavailable' });
       const auth = authSnapshot();
       return json(res, 200, url.pathname === '/auth/status' ? auth : {
-        protocolVersion: 2, provider: 'codex', appServerReady: !claudeFixture && !projectFileFixture, auth,
+        protocolVersion: 2, provider: 'codex', appServerReady: !claudeFixture && !modelFreeFixture, auth,
         ...(claudeFixture ? { engines: engineRows() } : {}),
         capabilities: { auth: ['status'], chat: ['send', 'stream', 'interrupt', 'resume', 'user-input', 'subagent-status'] },
       });
@@ -1109,12 +1149,14 @@ const handler = async (req, res) => {
 const dispose = () => {
   for (const run of runs.values()) if (['armed', 'pending'].includes(run.stopAckHold?.state)) expireStopHold(run, 'disposed');
   runOutputsFixture?.dispose();
+  portableTransferFixture?.dispose();
   return projectFileFixture?.dispose();
 };
 return { handler, dispose, info: { kind: 'egdesk-qa-fixture-ready', host: HOST, port: PORT,
   ...(projectFileFixture ? projectFileFixture.info : {}),
   ...(claudeFixture ? { claudeFixture: true, claudeReaderFixture, providerTurns: 0 } : {}),
   ...(runOutputsFixture ? { runOutputsFixture: true, providerTurns: 0 } : {}),
+  ...(portableTransferFixture ? { portableTransferFixture: true, providerTurns: 0 } : {}),
   profile, artifactPath, streamId, isolation, scope: 'QA-only transformed copies, no shipped runtime replacement' } };
 }
 
