@@ -491,7 +491,7 @@ export function buildChatRequest(thread, message, requestId, runtime = {}) {
   if (Array.isArray(runtime.contextSnapshotIds)) body.contextSnapshotIds = [...new Set(runtime.contextSnapshotIds)];
   if (runtime.engineId === 'claude' && runtime.expectedContextScope) body.expectedContextScope = runtime.expectedContextScope;
   if (runtime.contextCapabilities) body.contextCapabilities = runtime.engineId === 'claude'
-    ? { read: true, reader: false, publishBriefing: false } : { read: true, reader: true, publishBriefing: true };
+    ? { read: true, reader: runtime.contextCapabilities.reader === true, publishBriefing: false } : { read: true, reader: true, publishBriefing: true };
   // CTX-03: which suggestion list this turn answered, and the refs taken from it.
   if (typeof runtime.contextResolution?.resolutionId === 'string' && Array.isArray(runtime.contextResolution.chosen)) {
     body.contextResolution = { resolutionId: runtime.contextResolution.resolutionId, chosen: [...runtime.contextResolution.chosen] };
@@ -623,7 +623,7 @@ export function contextResolverErrorText(code) {
   })[code] || null;
 }
 
-export function claudeContextSendErrorText(code) {
+export function claudeContextSendErrorText(code, engineId = 'claude') {
   const text = ({
     CLAUDE_CONTEXT_UNSUPPORTED: '현재 Claude 연결에서는 선택한 자료를 사용할 수 없어 보내지 않았습니다. 자료를 제외한 뒤 다시 보내세요.',
     CONTEXT_SCOPE_CHANGED: 'Claude 연결이 바뀌어 자료를 보내지 않았습니다. 현재 연결 계정을 확인한 뒤 다시 보내세요. 초안과 선택 자료는 유지됩니다.',
@@ -633,7 +633,37 @@ export function claudeContextSendErrorText(code) {
     CONTEXT_THREAD_MISMATCH: '선택한 고정 캡처가 이 대화에 속하지 않아 보내지 않았습니다. 원래 대화에서 확인해 주세요. 초안과 선택 자료는 유지됩니다.',
     CONTEXT_TOOLS_UNAVAILABLE: '기존 대화의 자료 읽기 도구를 확인할 수 없어 보내지 않았습니다. 새 대화로 바꾸지 않았으며 초안과 선택 자료는 유지됩니다.',
   })[code];
-  return typeof text === 'string' ? text : null;
+  if (typeof text === 'string') return text;
+  const readError = engineId === 'claude' ? claudeContextReadErrorText(code) : null;
+  return readError ? `${readError} 전송하지 않았으며 초안과 선택 자료는 유지됩니다.` : null;
+}
+
+// Used by the activity record after a run has started as well as pre-dispatch
+// refusals. Reading, main delivery and send acceptance are distinct outcomes.
+export function claudeContextReadErrorText(code) {
+  const text = ({
+    ENGINE_CAPACITY_UNKNOWN: '모델의 자료 읽기 용량을 확인하지 못했습니다. 연결 상태를 확인해 주세요.',
+    CONTEXT_CAPACITY_REQUIRED: '현재 대화에 자료를 전달할 여유가 부족합니다. 첨부 범위를 줄이거나 새 대화에서 다시 시도해 주세요.',
+    ENGINE_CONTEXT_CONFIGURATION_ERROR: '자료 읽기 설정을 확인하지 못했습니다. 연결 상태를 확인해 주세요.',
+    PACKET_ADMISSION_REQUIRED: '읽은 자료를 현재 대화에 전달할 수 있는 범위를 초과했습니다. 첨부 범위를 줄이거나 새 대화에서 다시 시도해 주세요.',
+    READER_UNAVAILABLE: '자료 읽기 준비 상태를 확인하지 못했습니다. 연결 상태를 확인한 뒤 다시 시도해 주세요.',
+    READER_ISOLATION_UNAVAILABLE: '독립된 자료 읽기 환경을 확인하지 못했습니다. 연결 설정을 확인해 주세요.',
+    READER_FAILED: '자료 읽기 처리에 실패했습니다. 상태를 확인한 뒤 다시 시도해 주세요.',
+    READER_RECEIPT_INVALID: '자료 읽기 결과의 근거를 확인하지 못했습니다. 입력 기록과 연결 상태를 확인해 주세요.',
+    ABORTED: '요청한 자료 읽기가 중단되었습니다.',
+    READ_CANCELLED: '요청한 자료 읽기가 중단되었습니다.',
+  })[code];
+  if (typeof text === 'string') return text;
+  if (['READER_CONFIGURATION_REQUIRED','READER_CONFIGURATION_MISMATCH'].includes(code))
+    return '자료 읽기의 모델·설정을 확인하지 못했습니다. 연결 설정을 확인해 주세요.';
+  if (['READER_BUSY','READER_SESSION_LIMIT','READER_STOP_PENDING'].includes(code))
+    return '이전 자료 읽기의 종료를 확인한 뒤 다시 시도해 주세요. 자동으로 다시 시도하지 않습니다.';
+  if (['READER_OFFLINE','READER_TIMEOUT'].includes(code))
+    return '자료 읽기의 완료를 확인하지 못했습니다. 연결과 입력 기록을 확인해 주세요.';
+  if (['READER_INPUT_INVALID','READER_SESSION_MISMATCH','READER_SCOPE_VIOLATION','READER_PROTOCOL_ERROR',
+    'READER_INVALID_PACKET','READER_INVALID_CITATION','READER_EVENT_LIMIT','READER_OUTPUT_LIMIT'].includes(code))
+    return '자료 읽기 범위나 결과를 검증하지 못했습니다. 입력 기록과 연결 설정을 확인해 주세요.';
+  return null;
 }
 
 // CTX-04 '왜 이것이 붙었나': names from the screen (or the capture label),
@@ -1579,7 +1609,9 @@ export function supportsClaudeContext(descriptor, scope) {
   return descriptor?.contract === 'egdesk-context-b2' && descriptor.engineId === 'claude'
     && typeof descriptor.expectedContextScope === 'string' && descriptor.expectedContextScope.trim().length > 0 && descriptor.expectedContextScope.length <= 512
     && (!descriptor.engineProfileId || descriptor.engineProfileId === scope.engineProfileId)
-    && descriptor.selectedAttachments === true && descriptor.immutableRead === true && descriptor.nativeReader === false
+    && descriptor.selectedAttachments === true && descriptor.immutableRead === true
+    && (descriptor.nativeReader === false || descriptor.nativeReader === true && descriptor.largeReader === true
+      && descriptor.reader?.ready === true && descriptor.reader.engineId === 'claude' && descriptor.reader.code === null)
     && Array.isArray(descriptor.tools) && descriptor.tools.length === 2
     && ['egdesk_list_context', 'egdesk_read_source'].every(tool => descriptor.tools.includes(tool));
 }
@@ -1869,6 +1901,8 @@ export function runErrorNotice(error, usage = null, now = Date.now()) {
   if (!error) return null;
   if (typeof error === 'string') return { kind: 'unknown', text: error, action: null };
   const kind = ERROR_KIND_VALUES.includes(error.kind) ? error.kind : 'unknown';
+  const readError = error.code === 'ABORTED' && error.origin !== 'claude' ? null : claudeContextReadErrorText(error.code);
+  if (readError) return { kind, text: readError, action: null };
   if (kind === 'auth') return { kind, text: '다시 로그인이 필요합니다.', action: 'login' };
   if (kind === 'quota') {
     if (error.origin === 'claude') {

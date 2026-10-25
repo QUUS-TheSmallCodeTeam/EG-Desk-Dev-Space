@@ -78,6 +78,9 @@ const { port: PORT, host: HOST, origin } = config;
 if (env.EGDESK_QA_CLAUDE_FIXTURE != null && env.EGDESK_QA_CLAUDE_FIXTURE !== '1') throw new Error('Invalid Claude fixture gate');
 const claudeFixture = env.EGDESK_QA_CLAUDE_FIXTURE === '1';
 if (claudeFixture && env.EGDESK_QA_REAL_TURN === '1') throw new Error('Claude fixtures forbid real-provider mode');
+if (env.EGDESK_QA_CLAUDE_READER_FIXTURE != null && !['0', '1'].includes(env.EGDESK_QA_CLAUDE_READER_FIXTURE)) throw new Error('Invalid synthetic Claude Reader gate');
+const claudeReaderFixture = env.EGDESK_QA_CLAUDE_READER_FIXTURE === '1';
+if (claudeReaderFixture && (!claudeFixture || env.EGDESK_QA_REAL_TURN !== '0')) throw new Error('Synthetic Reader requires isolated Claude fixture and explicit real-turn zero');
 if (typeof token !== 'string' || token.length < 16) throw new Error('Fixture token must contain at least 16 characters');
 const fixture = assertQaFixtureManifest(profilePath);
 const profile = fixture.profile;
@@ -100,6 +103,8 @@ let accountVariant = 'a';
 let claudeAccountVariant = 'a';
 let claudeEpoch = 0;
 let claudeContextAvailable = true;
+let claudeReaderAvailable = claudeReaderFixture;
+let claudeCapacityKnown = true;
 const engineRows = () => claudeFixtureEngines(claudeAccountVariant);
 let holdResume = false;
 let partialHistory = false;
@@ -229,6 +234,46 @@ function contextPhase(run, phase) {
   if (!['CONTEXT', 'CLAUDE_CONTEXT'].includes(run.scenario)) throw new Error('Not a scoped context fixture run');
   const directOnly = run.engineId === 'claude';
   if (directOnly) assertClaudeContextCurrent(run.fixtureContextAuthority);
+  if (directOnly && !activeRun(run)) contextError('CONTEXT_RUN_INACTIVE', 'Ended fixture runs cannot read, deliver or complete');
+  const record = (name, details) => {
+    const event = envelope(run, name, details);
+    run.contextEvents.push({ id: `${event.streamId}:${event.seq}`, event: name, ts: event.ts, details: structuredClone(details) });
+  };
+  if (run.fixtureReaderRequired) {
+    const sourceId = run.contextCaptures[0].sourceId;
+    if (phase === 'read' && ['context-bound', 'context-read-partial'].includes(run.fixtureStage)) {
+      if (!claudeReaderAvailable) contextError('CLAUDE_CONTEXT_READER_UNSUPPORTED', 'Synthetic Reader capability is unavailable');
+      if (!claudeCapacityKnown) contextError('ENGINE_CAPACITY_UNKNOWN', 'Synthetic capacity is unknown; no Reader started');
+      record('context.read.started', { sourceId, toolName: 'egdesk_read_source', fixtureOnly: true });
+      record('reader.started', context.startReader(sourceId, run, run.fixtureOwner));
+      run.fixtureStage = 'reader-running';
+      return;
+    }
+    if (phase === 'reader-processed' && run.fixtureStage === 'reader-running') {
+      record('reader.completed', context.processReader(sourceId, run, run.fixtureOwner));
+      run.fixtureStage = 'reader-prepared';
+      return;
+    }
+    if (phase === 'reader-deliver' && run.fixtureStage === 'reader-prepared') {
+      const packet = context.deliverReader(sourceId, run, run.fixtureOwner);
+      (run.contextPackets ||= []).push(packet);
+      record('context.read.completed', { sourceId, toolName: 'egdesk_read_source', packetId: packet.packetId,
+        hash: packet.hash, coverage: packet.coverage, deliveryStatus: packet.deliveryStatus, fixtureOnly: true });
+      run.fixtureStage = packet.coverage.complete ? 'context-read' : 'context-read-partial';
+      return;
+    }
+    if (phase === 'reader-fail' && ['reader-running', 'reader-prepared'].includes(run.fixtureStage)) {
+      context.abandonReader(sourceId, run, run.fixtureOwner);
+      run.error = { code: 'READER_FAILED', message: 'Synthetic QA Reader failure; no fallback or model invocation.' };
+      record('reader.failed', { sourceId, code: run.error.code, fixtureOnly: true });
+      record('context.read.failed', { sourceId, code: run.error.code, fixtureOnly: true });
+      run.status = 'failed';
+      run.fixtureStage = 'terminal';
+      envelope(run, 'run.completed', { status: 'failed', error: run.error });
+      return;
+    }
+    if (phase !== 'complete') contextError('CONTEXT_PHASE_MISMATCH', 'Reader requires explicit start, bounded processing and delivery phases');
+  }
   if (phase === 'read' && run.fixtureStage === 'context-bound') {
     run.contextPackets = [];
     for (const capture of run.contextCaptures) {
@@ -579,7 +624,7 @@ const handler = async (req, res) => {
     if (req.method === 'GET' && url.pathname === '/__qa/state') {
       if (req.headers['x-egdesk-qa-token'] !== token) return json(res, 403, { error: 'Fixture token required' });
       return json(res, 200, { fixture: true, profile, host: HOST, port: PORT, origin, artifactRoot, artifactPath,
-        ...(claudeFixture ? { claudeFixture: true, providerTurns: 0 } : {}),
+        ...(claudeFixture ? { claudeFixture: true, claudeReaderFixture, providerTurns: 0 } : {}),
         streamId, seq, clients: clients.size, observed, context: context.stats, pendingContextCaptures: heldCaptures.length,
         runs: [...runs.values()].map((run) => ({ ...runState(run), conversationId: run.conversationId,
           requestId: run.requestId, clientThreadId: run.clientThreadId, fixtureStage: run.fixtureStage || null,
@@ -621,6 +666,11 @@ const handler = async (req, res) => {
         failNextCapture = body.failNextCapture === true;
         holdNextCapture = body.holdNextCapture === true;
         if (claudeFixture && typeof body.claudeCapabilities === 'boolean') claudeContextAvailable = body.claudeCapabilities;
+        if (Object.hasOwn(body, 'claudeReader') || Object.hasOwn(body, 'claudeCapacityKnown')) {
+          if (!claudeReaderFixture) contextError('CLAUDE_CONTEXT_READER_UNSUPPORTED', 'Reader scenarios require their explicit synthetic fixture gate');
+          if (typeof body.claudeReader === 'boolean') claudeReaderAvailable = body.claudeReader;
+          if (typeof body.claudeCapacityKnown === 'boolean') claudeCapacityKnown = body.claudeCapacityKnown;
+        }
       }
       else if (body.phase === 'capture') {
         const index = heldCaptures.findIndex(item => item.clientThreadId === body.clientThreadId);
@@ -648,7 +698,11 @@ const handler = async (req, res) => {
       if (Object.keys(routing).some(key => !['engineId', 'engineProfileId', 'clientThreadId', 'conversationId'].includes(key))) contextError('INVALID_CONTEXT_ROUTING', 'Unknown context routing field', 400);
       const authority = claudeContextRouting(routing);
       return json(res, 200, { contract: 'egdesk-context-b2', engineId: authority.engineId, engineProfileId: authority.engineProfileId,
-        selectedAttachments: true, immutableRead: true, nativeReader: false, tools: [...CLAUDE_CONTEXT_TOOLS],
+        selectedAttachments: true, immutableRead: true, nativeReader: claudeReaderAvailable && claudeCapacityKnown,
+        ...(claudeReaderFixture ? { largeReader: claudeReaderAvailable && claudeCapacityKnown,
+          reader: { ready: claudeReaderAvailable && claudeCapacityKnown, engineId: 'claude',
+            code: !claudeReaderAvailable ? 'CLAUDE_CONTEXT_READER_UNSUPPORTED' : !claudeCapacityKnown ? 'ENGINE_CAPACITY_UNKNOWN' : null } } : {}),
+        tools: [...CLAUDE_CONTEXT_TOOLS],
         expectedContextScope: expectedClaudeContextScope(authority) });
     }
     if (req.method === 'POST' && url.pathname === '/context/captures') {
@@ -720,7 +774,12 @@ const handler = async (req, res) => {
         holdResume = false;
         for (const pending of heldResumes.splice(0)) {
           observed.releasedResumes++;
-          if (!pending.res.destroyed) json(pending.res, 200, pending.snapshot);
+          if (!pending.res.destroyed) {
+            try {
+              if (pending.authority) assertClaudeContextCurrent(pending.authority);
+              json(pending.res, 200, pending.snapshot);
+            } catch (error) { json(pending.res, error.httpStatus, { code: error.code, error: error.message }); }
+          }
         }
       }
       if (url.pathname === '/__qa/history') partialHistory = body.partial === true;
@@ -733,6 +792,9 @@ const handler = async (req, res) => {
       if (url.pathname === '/__qa/account-change') {
         if (!['a', 'b'].includes(body.variant)) return json(res, 400, { error: 'Only synthetic account variants a/b are permitted' });
         if (claudeFixture && body.engineId === 'claude') {
+          for (const run of runs.values()) if (run.fixtureReaderRequired && activeRun(run)) {
+            for (const capture of run.contextCaptures) context.abandonReader(capture.sourceId, run, run.fixtureOwner);
+          }
           claudeAccountVariant = body.variant; claudeEpoch++;
           broadcastFixtureEvent({ type: 'engine.status', v: 1, engines: engineRows(), ts: Date.now() });
         } else {
@@ -769,7 +831,7 @@ const handler = async (req, res) => {
     }
     if (req.method === 'GET' && url.pathname === '/health') return json(res, 200, {
       ok: true, fixture: true, profile, host: HOST, port: PORT, origin, appServerReady: !claudeFixture,
-      ...(claudeFixture ? { claudeFixture: true, providerTurns: 0, engines: engineRows() } : {}) });
+      ...(claudeFixture ? { claudeFixture: true, claudeReaderFixture, providerTurns: 0, engines: engineRows() } : {}) });
     if (req.method === 'GET' && (url.pathname === '/v1/state' || url.pathname === '/auth/status')) {
       if (authLookupFails) return json(res, 503, { error: 'QA account refresh temporarily unavailable' });
       const auth = authSnapshot();
@@ -800,6 +862,8 @@ const handler = async (req, res) => {
       return;
     }
     if (req.method === 'GET' && url.pathname === '/chat/state') {
+      const owned = [...runs.values()].find(run => run.conversationId === url.searchParams.get('conversationId'));
+      if (owned?.fixtureContextAuthority) assertClaudeContextCurrent(owned.fixtureContextAuthority);
       return json(res, 200, conversationState(url.searchParams.get('conversationId') || ''));
     }
     if (req.method === 'POST' && url.pathname === '/chat/resume') {
@@ -812,7 +876,9 @@ const handler = async (req, res) => {
       observed.resumes.push({ conversationId: body.conversationId, clientThreadId: body.clientThreadId || null,
         ...(claudeFixture ? { engineId: body.engineId } : {}) });
       const snapshot = conversationState(body.conversationId || '');
-      if (holdResume) { observed.heldResumes++; heldResumes.push({ res, snapshot }); return; }
+      const authority = [...runs.values()].find(run => run.conversationId === body.conversationId)?.fixtureContextAuthority;
+      if (authority) assertClaudeContextCurrent(authority);
+      if (holdResume) { observed.heldResumes++; heldResumes.push({ res, snapshot, authority }); return; }
       return json(res, 200, snapshot);
     }
     if (req.method === 'POST' && url.pathname === '/chat/send') {
@@ -824,7 +890,7 @@ const handler = async (req, res) => {
         claudeContextRouting(body);
         if (['selectedSources', 'attachments', 'briefingInputs', 'inputSources'].some(key => body[key]?.length)
             || body.contextResolution || body.browserToolSelection) return refuseClaudeContext(res, url.pathname);
-        if (body.contextCapabilities?.reader === true) contextError('CLAUDE_CONTEXT_READER_UNSUPPORTED', 'Claude Smart Read is temporarily unsupported');
+        if (body.contextCapabilities?.reader === true && !claudeReaderAvailable) contextError('CLAUDE_CONTEXT_READER_UNSUPPORTED', 'Claude Smart Read is temporarily unsupported');
         if (body.contextCapabilities && (Object.keys(body.contextCapabilities).some(key => !['read', 'reader', 'publishBriefing'].includes(key))
           || body.contextCapabilities.publishBriefing === true || body.contextCapabilities.read !== true)) contextError('CONTEXT_TOOL_UNSUPPORTED', 'Only explicit immutable Context reads are allowed');
         if (body.conversationId && ![...runs.values()].some(run => run.conversationId === body.conversationId
@@ -841,7 +907,12 @@ const handler = async (req, res) => {
         if (!claudeContextAvailable) return refuseClaudeContext(res, url.pathname);
         if (scenario !== 'CLAUDE_CONTEXT') contextError('CLAUDE_CONTEXT_UNSUPPORTED', 'Context requires its explicit fixture scenario');
         assertClaudeContextExpectation(body, claudeContextRouting(body));
-        context.validateDirect(body.contextSnapshotIds, body.clientThreadId, claudeOwner());
+        context.validateDirect(body.contextSnapshotIds, body.clientThreadId, claudeOwner(), { readerAvailable: claudeReaderAvailable });
+        if (context.requiresReader(body.contextSnapshotIds, body.clientThreadId, claudeOwner())) {
+          if (!claudeCapacityKnown) contextError('ENGINE_CAPACITY_UNKNOWN', 'Synthetic capacity is unknown; no model window was assumed');
+          if (body.contextCapabilities?.reader !== true) contextError('CLAUDE_CONTEXT_READER_UNSUPPORTED', 'This send did not retain the verified Reader capability');
+          if (body.contextSnapshotIds.length !== 1) contextError('CONTEXT_FIXTURE_UNSUPPORTED', 'Bounded Reader fixture requires exactly one explicit source');
+        }
       }
       if (scenario === 'REJECT' || scenario === 'AMBIGUOUS') {
         observed.sends.push({ ...body, scenario, outcome: scenario === 'REJECT' ? 'definite-rejection' : 'ambiguous-no-run' });
@@ -884,7 +955,8 @@ const handler = async (req, res) => {
       if (scenario === 'CLAUDE_CONTEXT') {
         run.fixtureOwner = claudeOwner();
         run.fixtureContextAuthority = claudeContextRouting(body);
-        run.contextCaptures = context.bind(body.contextSnapshotIds, run, run.fixtureOwner, { directOnly: true });
+        run.contextCaptures = context.bind(body.contextSnapshotIds, run, run.fixtureOwner, { directOnly: true, readerAvailable: claudeReaderAvailable });
+        run.fixtureReaderRequired = context.requiresReader(body.contextSnapshotIds, body.clientThreadId, run.fixtureOwner);
         run.contextEvents = [];
         run.fixtureContextTools = [...CLAUDE_CONTEXT_TOOLS];
         run.fixtureStage = 'context-bound';
@@ -917,6 +989,19 @@ const handler = async (req, res) => {
       const run = runs.get(body.runId);
       if (!run || run.conversationId !== body.conversationId || !activeRun(run)) {
         return json(res, 404, { accepted: false, stopRequested: false });
+      }
+      if (run.engineId === 'claude') {
+        if (body.engineId != null && body.engineId !== 'claude') contextError('ENGINE_MISMATCH', 'Stop belongs to another engine', 403);
+        if (run.fixtureContextAuthority) assertClaudeContextCurrent(run.fixtureContextAuthority);
+        if (run.stopRequested) return json(res, 409, { accepted: false, stopRequested: true, code: 'QA_STOP_ALREADY_REQUESTED' });
+        if (run.fixtureReaderRequired) for (const capture of run.contextCaptures) {
+          context.abandonReader(capture.sourceId, run, run.fixtureOwner);
+          const details = { sourceId: capture.sourceId, code: 'READ_CANCELLED', fixtureOnly: true };
+          for (const name of ['reader.failed', 'context.read.failed']) {
+            envelope(run, name, details);
+            run.contextEvents.push({ event: name, details: structuredClone(details) });
+          }
+        }
       }
       const hold = run.stopAckHold;
       if (hold && ['armed', 'pending'].includes(hold.state) && Date.now() >= hold.deadlineAt) expireStopHold(run);
@@ -991,7 +1076,7 @@ const handler = async (req, res) => {
     }
     return json(res, 404, { error: 'Fixture route not found' });
   } catch (error) {
-    if (claudeFixture && /^(?:CONTEXT_|CLAUDE_CONTEXT_|UNSUPPORTED_SOURCE_FORMAT)/.test(error.code || '')) {
+    if (claudeFixture && /^(?:CONTEXT_|CLAUDE_CONTEXT_|UNSUPPORTED_SOURCE_FORMAT|ENGINE_CAPACITY_UNKNOWN)/.test(error.code || '')) {
       observed.contextRefusals.push({ route: new URL(req.url, origin).pathname, code: error.code });
     }
     return json(res, error.httpStatus || 400, { error: error.message, ...(error.code ? { code: error.code } : {}) });
@@ -1001,7 +1086,7 @@ const dispose = () => {
   for (const run of runs.values()) if (['armed', 'pending'].includes(run.stopAckHold?.state)) expireStopHold(run, 'disposed');
 };
 return { handler, dispose, info: { kind: 'egdesk-qa-fixture-ready', host: HOST, port: PORT,
-  ...(claudeFixture ? { claudeFixture: true, providerTurns: 0 } : {}),
+  ...(claudeFixture ? { claudeFixture: true, claudeReaderFixture, providerTurns: 0 } : {}),
   profile, artifactPath, streamId, isolation, scope: 'QA-only transformed copies, no shipped runtime replacement' } };
 }
 

@@ -8,6 +8,8 @@ import { claudeFixtureOptions, assertClaudeFixturePeer, assertClaudeReady, asser
   CLAUDE_READER_ERROR, assertClaudeReaderBlocked, assertClaudeContextRoute, assertClaudeContextCapture,
   assertClaudeImmutablePacket, selectClaudeAttachment, observeAttachmentChoices,
   observeClaudeContextInspector, assertClaudeContextInspector, observeClaudeFixtureViewport,
+  assertClaudeReaderDescriptor, assertClaudeReaderProcessed, assertClaudeReaderPacket, assertClaudeReaderEnded,
+  claudeReaderPartialCaptureLabel,
   claudeFixtureCameraSettled, claudeFixtureChatNavigable, returnClaudeChatAfterFixtureSetup } from './verify-firefox-mcp-claude-fixture-flow.mjs';
 import { claudeFixtureEngines, CLAUDE_FIXTURE_QUESTIONS } from './egdesk-chat-fixture-transport.mjs';
 import { fingerprintQaBytes } from './egdesk-context-qa-contract.mjs';
@@ -48,6 +50,24 @@ test('peer identity requires the exact isolated profile, port, loopback origin a
     { host: '0.0.0.0' }, { fixture: false }, { claudeFixture: false }, { providerTurns: 1 }]) {
     assert.throws(() => assertClaudeFixturePeer({ ...peer, ...change }, options));
   }
+});
+
+test('B3 verifier requires matching explicit synthetic opt-in, scoped port and real-turn zero; B2 remains the default', () => {
+  assert.equal(claudeFixtureOptions(ARGS, ENV, NOW).readerMode, 'unavailable');
+  const env = { ...ENV, EGDESK_QA_CLAUDE_READER_FIXTURE: '1' };
+  const args = [...ARGS, '--reader-mode', 'synthetic'];
+  const options = claudeFixtureOptions(args, env, NOW);
+  assert.equal(options.readerMode, 'synthetic');
+  for (const [argv, environment] of [[ARGS, env], [args, ENV], [[...ARGS, '--reader-mode', 'real'], env],
+    [args, { ...env, EGDESK_QA_REAL_TURN: undefined }], [args, { ...env, EGDESK_QA_REAL_TURN: '1' }],
+    [args, { ...env, EGDESK_QA_FIXTURE_PORT: '49318' }], [ARGS, { ...ENV, EGDESK_QA_CLAUDE_READER_FIXTURE: 'true' }]]) {
+    assert.throws(() => claudeFixtureOptions(argv, environment, NOW));
+  }
+  const peer = { fixture: true, claudeFixture: true, claudeReaderFixture: true, providerTurns: 0,
+    profile: options.profile, host: options.bridge.host, port: options.bridge.port, origin: options.bridge.origin };
+  assertClaudeFixturePeer(peer, options);
+  assert.throws(() => assertClaudeFixturePeer({ ...peer, claudeReaderFixture: false }, options));
+  assert.throws(() => assertClaudeFixturePeer(peer, claudeFixtureOptions(ARGS, ENV, NOW)));
 });
 
 test('normal Claude proof rejects synthetic Codex login and requires one stored signed-in Claude profile', () => {
@@ -355,6 +375,143 @@ test('B2 inspector proof needs the exact visible source and separate exact visib
     { packetId: 'foreign' }, { payloadText: originalContext }, { payloadVisible: false }]) {
     assert.throws(() => assertClaudeContextInspector({ ...inspector, ...change }, contextThread, captured, delivery, originalContext));
   }
+});
+
+const readerDescriptor = ready => ({ contract: 'egdesk-context-b2', engineId: 'claude', engineProfileId: 'claude-default',
+  selectedAttachments: true, immutableRead: true, expectedContextScope: 'server-expectation',
+  nativeReader: ready, largeReader: ready, reader: { ready, engineId: 'claude', code: ready ? null : 'ENGINE_CAPACITY_UNKNOWN' },
+  tools: ['egdesk_list_context', 'egdesk_read_source'] });
+
+test('B3 readiness needs matched B2 scope plus verified largeReader/readiness, never an unconditional reader true', () => {
+  assertClaudeReaderDescriptor(readerDescriptor(true), contextThread, true);
+  assertClaudeReaderDescriptor(readerDescriptor(false), contextThread, false);
+  for (const mutate of [row => { row.contract = 'b3-incompatible'; }, row => { row.nativeReader = false; },
+    row => { delete row.largeReader; }, row => { row.largeReader = false; }, row => { row.reader.ready = false; },
+    row => { row.reader.engineId = 'codex'; }, row => { row.reader.code = 'ENGINE_CAPACITY_UNKNOWN'; },
+    row => { row.expectedContextScope = ''; }, row => { row.engineProfileId = 'site-profile'; },
+    row => { row.tools.push('computer'); }]) {
+    const changed = readerDescriptor(true); mutate(changed);
+    assert.throws(() => assertClaudeReaderDescriptor(changed, contextThread, true));
+  }
+  assertClaudeContextRoute({ ...contextRequest(), contextCapabilities: { read: true, reader: true, publishBriefing: false } }, contextThread, { reader: true });
+});
+
+function readerEvidence(reviewed = 1) {
+  const original = 'EXACT ORIGINAL SOURCE '.repeat(1200);
+  const { captured, run, before, after, delivery } = contextEvidence();
+  captured.hash = fingerprintQaBytes(original).sha256;
+  const total = 2, sessionId = 'synthetic-reader-session';
+  const coverage = { scope: 'capture', sourceId: captured.sourceId, complete: reviewed === total, sourceTruncated: false,
+    reviewedPartitions: reviewed, totalPartitions: total, continuation: reviewed < total ? { readerSessionId: sessionId, nextPartition: reviewed } : null };
+  const value = { fixtureOnly: true, synthetic: true, adapterExecutionVerified: false, tool: 'egdesk_read_source',
+    sourceId: captured.sourceId, snapshotId: captured.sourceId, sourceHash: captured.hash, version: captured.version, mode: 'reader',
+    summary: { text: `Synthetic QA Reader: ${reviewed}/${total} partitions processed; no model invoked.`,
+      structure: [{ label: 'QA coverage only', text: 'Not a real model summary or whole-source quotation.' }] },
+    selectedSpans: [{ startOffset: 0, endOffset: 80, quote: original.slice(0, 80) }], coverage,
+    reader: { sessionId, revision: reviewed }, omissionPolicy: { type: 'reader-summary', fixtureOnly: true } };
+  delivery.packet = { ...delivery.packet, mode: 'qa-fixture-claude-reader', text: JSON.stringify(value), coverage };
+  delivery.packet.hash = fingerprintQaBytes(delivery.packet.text).sha256;
+  return { original, captured, run, before, after, delivery, expected: { reviewed, total, sessionId } };
+}
+
+test('B3 partial Reader screenshots are unique for every bounded continuation step without overwriting evidence', () => {
+  for (let total = 2; total <= 8; total++) {
+    const labels = Array.from({ length: total - 1 }, (_, index) => claudeReaderPartialCaptureLabel(index + 1, total));
+    assert.equal(new Set(labels).size, total - 1, 'Every partial iteration must retain its own screenshot');
+    assert.ok(labels.every(label => /^[a-z0-9-]+$/.test(label)));
+  }
+  assert.deepEqual([1, 2].map(step => claudeReaderPartialCaptureLabel(step, 3)), [
+    'claude-reader-partial-structured-summary-step-1-of-3',
+    'claude-reader-partial-structured-summary-step-2-of-3',
+  ]);
+  for (const [step, total] of [[0, 3], [3, 3], [4, 3], [1, 1], [1.5, 3], [1, NaN]]) {
+    assert.throws(() => claudeReaderPartialCaptureLabel(step, total));
+  }
+  const source = fs.readFileSync(new URL('./verify-firefox-mcp-claude-fixture-flow.mjs', import.meta.url), 'utf8');
+  assert.match(source, /await inspectHistory\(claudeReaderPartialCaptureLabel\(reviewed, total\),/);
+  assert.doesNotMatch(source, /await inspectHistory\(['"]claude-reader-partial-structured-summary['"]/);
+});
+
+test('B3 summary proof rejects clipped/early complete coverage, lost quotes, fake native proof and changed live input', () => {
+  for (const reviewed of [1, 2]) {
+    const valid = readerEvidence(reviewed);
+    assertClaudeReaderPacket(valid.delivery, valid.captured, valid.run, valid.original, valid.expected);
+    for (const mutate of [value => { value.coverage.complete = !value.coverage.complete; },
+      value => { value.coverage.sourceTruncated = true; }, value => { value.coverage.reviewedPartitions = 99; },
+      value => { value.coverage.totalPartitions = 99; }, value => { value.coverage.continuation = {}; },
+      value => { value.reader.sessionId = 'foreign'; }, value => { value.sourceHash = fingerprintQaBytes(changedContext).sha256; },
+      value => { value.selectedSpans = []; }, value => { value.selectedSpans[0].quote = 'invented quotation'; },
+      value => { value.selectedSpans[0].endOffset = 10; }, value => { value.summary.text = 'Complete summary'; },
+      value => { value.summary.structure = []; }, value => { value.synthetic = false; },
+      value => { value.adapterExecutionVerified = true; }, value => { value.nativeThreadId = 'fake-native'; }]) {
+      const changed = readerEvidence(reviewed), value = JSON.parse(changed.delivery.packet.text);
+      mutate(value);
+      changed.delivery.packet.text = JSON.stringify(value);
+      changed.delivery.packet.hash = fingerprintQaBytes(changed.delivery.packet.text).sha256;
+      changed.delivery.packet.coverage = clone(value.coverage);
+      assert.throws(() => assertClaudeReaderPacket(changed.delivery, changed.captured, changed.run, changed.original, changed.expected));
+    }
+  }
+});
+
+function processedEvidence() {
+  const { original, captured, run } = readerEvidence();
+  const before = quietFixture(), after = quietFixture();
+  const text = JSON.stringify({ fixtureOnly: true, synthetic: true, sourceId: captured.sourceId, sourceHash: captured.hash,
+    range: { startOffset: 0, endOffset: 12000 }, sourceText: original.slice(0, 12000) });
+  after.context.readerProcessed = [{ sourceId: captured.sourceId, runId: run.runId, fixtureOnly: true,
+    adapterExecutionVerified: false, inputPayload: { text, hash: fingerprintQaBytes(text).sha256 } }];
+  after.observed.events = [{ event: 'reader.completed', runId: run.runId, details: { deliveryStatus: 'prepared', coverage: { complete: false } } }];
+  return { before, after, original, captured, run };
+}
+
+test('B3 processed proof hashes exact contiguous assigned input and never treats processing as Main receipt', () => {
+  const valid = processedEvidence();
+  assertClaudeReaderProcessed(valid.before, valid.after, valid.run, valid.captured, valid.original, 1);
+  for (const mutate of [row => { row.after.context.deliveries.push({}); },
+    row => { row.after.context.readerProcessed[0].inputPayload.hash = 'forged'; },
+    row => { row.after.context.readerProcessed[0].adapterExecutionVerified = true; },
+    row => { row.after.observed.events[0].details.coverage.complete = true; },
+    row => { row.after.observed.events[0].details.deliveryStatus = 'sent-to-app-server'; },
+    row => {
+      const receipt = row.after.context.readerProcessed[0].inputPayload;
+      const input = JSON.parse(receipt.text); input.sourceText = changedContext;
+      receipt.text = JSON.stringify(input); receipt.hash = fingerprintQaBytes(receipt.text).sha256;
+    }]) {
+    const changed = processedEvidence(); mutate(changed);
+    assert.throws(() => assertClaudeReaderProcessed(changed.before, changed.after, changed.run, changed.captured, changed.original, 1));
+  }
+});
+
+test('B3 failure/cancel proof retains accepted source but refuses false completion, delivery and fallback', () => {
+  for (const status of ['failed', 'interrupted']) {
+    const { run, captured } = readerEvidence();
+    const before = { ...quietFixture(), providerTurns: 0 };
+    before.runs.push({ ...run, messages: [] });
+    const after = clone(before); after.runs[0].status = status;
+    after.observed.events = [{ event: 'run.completed', runId: run.runId, details: { status } }];
+    assertClaudeReaderEnded(before, after, run, captured, status);
+    for (const mutate of [row => { row.runs[0].status = 'completed'; }, row => { row.runs[0].contextCaptures = []; },
+      row => { row.runs[0].messages.push({ role: 'assistant' }); }, row => { row.observed.sends.push({ engineId: 'codex' }); },
+      row => { row.observed.resumes.push({}); }, row => { row.observed.captures.push({}); }, row => { row.context.deliveries.push({}); },
+      row => { row.observed.events.push({ event: 'context.read.completed', runId: run.runId }); }, row => { row.providerTurns = 1; }]) {
+      const changed = clone(after); mutate(changed);
+      assert.throws(() => assertClaudeReaderEnded(before, changed, run, captured, status));
+    }
+  }
+});
+
+test('B3 capacity error uses the current actionable copy and retains unsent draft/source without a guessed read', () => {
+  const message = claudeContextSendErrorText('ENGINE_CAPACITY_UNKNOWN');
+  assert.ok(message.includes('용량') && message.includes('초안') && message.includes('전송하지'));
+  const before = { thread: { ...contextThread, draft: 'capacity draft', conversationId: null,
+    inputSources: [{ sourceRef: { path: sourceFile } }] }, composer: 'capacity draft', attachments: [{ id: 'large' }] };
+  const after = { ...clone(before), thread: { ...clone(before.thread), sendError: message }, alerts: [message] };
+  const start = quietFixture(), end = quietFixture();
+  end.context.captureBatches = end.context.fileCaptureOperations = 1;
+  end.observed.captures.push({ request: { ...contextRequest(), attachments: [{ sourceRef: { path: sourceFile } }] } });
+  end.observed.contextRefusals.push({ route: '/chat/send', code: 'ENGINE_CAPACITY_UNKNOWN' });
+  assertClaudeReaderBlocked(before, after, start, end, { message, code: 'ENGINE_CAPACITY_UNKNOWN' });
 });
 
 function attachmentHarness(rows = [

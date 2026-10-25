@@ -4,7 +4,7 @@ import fs from 'node:fs';
 import { randomUUID } from 'node:crypto';
 import { assertQaFixtureManifest } from './egdesk-chat-qa-profile.mjs';
 import { assertContextCaptureBatch, fingerprintQaBytes, observeQaFixtureFile } from './egdesk-context-qa-contract.mjs';
-import { readAdmission } from '../helper/egdesk-smart-read.mjs'; // Pure admission math; never constructs a Reader.
+import { readAdmission, partitionText } from '../helper/egdesk-smart-read.mjs'; // Pure math; never constructs a Reader.
 
 const copy = value => JSON.parse(JSON.stringify(value));
 const fail = (code, message, httpStatus = 400) => { throw Object.assign(new Error(message), { code, httpStatus }); };
@@ -12,6 +12,7 @@ const fail = (code, message, httpStatus = 400) => { throw Object.assign(new Erro
 export function createQaContextFixture(profile) {
   assertQaFixtureManifest(profile);
   const sources = new Map();
+  const readers = new Map();
   const stats = { captureBatches: 0, fileCaptureOperations: 0, inspectorReads: [], deliveries: [] };
   const find = (sourceId, owner) => {
     const entry = sources.get(sourceId);
@@ -26,14 +27,14 @@ export function createQaContextFixture(profile) {
       return entry;
     });
   };
-  const directEntries = (sourceIds, owner, clientThreadId) => {
+  const directEntries = (sourceIds, owner, clientThreadId, readerAvailable = false) => {
     const entries = scoped(sourceIds, owner, clientThreadId);
     let deliveryDebt = 0;
     for (const entry of entries) {
       if (entry.manifest.truncated) fail('CONTEXT_CAPTURE_INCOMPLETE', 'Selected capture is truncated; no subset is substituted', 409);
       if (!entry.manifest.shape.readable) fail('UNSUPPORTED_SOURCE_FORMAT', 'Selected capture has no readable projection', 422);
       const admission = readAdmission(entry.text, entry.manifest.shape, { deliveryDebt }, entries.length);
-      if (admission.mode !== 'direct') fail('CLAUDE_CONTEXT_READER_UNSUPPORTED', 'Claude Smart Read is temporarily unsupported; select a smaller complete source', 409);
+      if (admission.mode !== 'direct' && !readerAvailable) fail('CLAUDE_CONTEXT_READER_UNSUPPORTED', 'Claude Smart Read is temporarily unsupported; select a smaller complete source', 409);
       deliveryDebt += admission.estimatedTokens;
     }
     return entries;
@@ -77,17 +78,87 @@ export function createQaContextFixture(profile) {
       stats.captureBatches++;
       return response;
     },
-    validateDirect(sourceIds, clientThreadId, owner) {
-      return directEntries(sourceIds, owner, clientThreadId).map(entry => copy(entry.manifest));
+    validateDirect(sourceIds, clientThreadId, owner, { readerAvailable = false } = {}) {
+      return directEntries(sourceIds, owner, clientThreadId, readerAvailable).map(entry => copy(entry.manifest));
     },
-    bind(sourceIds, run, owner, { directOnly = false } = {}) {
-      const entries = directOnly ? directEntries(sourceIds, owner, run.clientThreadId) : scoped(sourceIds, owner);
+    requiresReader(sourceIds, clientThreadId, owner) {
+      let deliveryDebt = 0;
+      return scoped(sourceIds, owner, clientThreadId).map(entry => {
+        const admission = readAdmission(entry.text, entry.manifest.shape, { deliveryDebt }, sourceIds.length);
+        deliveryDebt += admission.estimatedTokens;
+        return admission.mode === 'reader';
+      }).some(Boolean);
+    },
+    bind(sourceIds, run, owner, { directOnly = false, readerAvailable = false } = {}) {
+      const entries = directOnly ? directEntries(sourceIds, owner, run.clientThreadId, readerAvailable) : scoped(sourceIds, owner);
       if (directOnly && entries.some(entry => entry.bindings.some(binding => binding.conversationId !== run.conversationId))) {
         fail('CONTEXT_THREAD_MISMATCH', 'Capture is already bound to another native conversation', 403);
       }
       const binding = { bindingId: randomUUID(), conversationId: run.conversationId, runId: run.runId, answerId: run.answerId };
       for (const entry of entries) entry.bindings.push(copy(binding));
       return entries.map(entry => copy(entry.manifest));
+    },
+    // Three separate synthetic boundaries: stored source, processed partition,
+    // and parent delivery. No native IDs, SDK, persona, child Chat or provider.
+    startReader(sourceId, run, owner) {
+      const entry = find(sourceId, owner);
+      if (!entry.bindings.some(binding => ['conversationId', 'runId', 'answerId'].every(key => binding[key] === run[key]))) fail('CONTEXT_UNBOUND', 'Reader source is not bound to this run', 403);
+      const key = `${run.runId}:${sourceId}`;
+      let session = readers.get(key);
+      if (!session) {
+        session = { id: randomUUID(), parts: partitionText(entry.text, [{ startOffset: 0, endOffset: entry.text.length }]),
+          next: 0, pending: null, busy: false, sourceId, owner };
+        readers.set(key, session);
+      }
+      if (session.owner !== owner || session.busy || session.pending || session.next >= session.parts.length) fail('READER_SESSION_MISMATCH', 'No available bounded Reader continuation', 409);
+      session.busy = true;
+      return { fixtureOnly: true, synthetic: true, adapterExecutionVerified: false, phase: 'preparing',
+        sourceId, sourceHash: entry.manifest.hash, readerSessionId: session.id,
+        nextPartition: session.next, totalPartitions: session.parts.length };
+    },
+    processReader(sourceId, run, owner) {
+      const entry = find(sourceId, owner), session = readers.get(`${run.runId}:${sourceId}`);
+      if (!session || session.owner !== owner || !session.busy || session.pending) fail('READER_SESSION_MISMATCH', 'No running synthetic Reader partition', 409);
+      const range = session.parts[session.next];
+      const inputText = JSON.stringify({ fixtureOnly: true, synthetic: true, sourceId, sourceHash: entry.manifest.hash,
+        range, sourceText: entry.text.slice(range.startOffset, range.endOffset) });
+      const inputPayload = { text: inputText, hash: fingerprintQaBytes(inputText).sha256 };
+      (stats.readerProcessed ||= []).push({ sourceId, readerSessionId: session.id, runId: run.runId,
+        fixtureOnly: true, adapterExecutionVerified: false, inputPayload });
+      session.next++;
+      session.busy = false;
+      const coverage = { scope: 'capture', sourceId, complete: session.next === session.parts.length,
+        sourceTruncated: false, reviewedPartitions: session.next, totalPartitions: session.parts.length,
+        continuation: session.next < session.parts.length ? { readerSessionId: session.id, nextPartition: session.next } : null };
+      const value = { fixtureOnly: true, synthetic: true, adapterExecutionVerified: false, tool: 'egdesk_read_source',
+        sourceId, snapshotId: sourceId, sourceHash: entry.manifest.hash, version: entry.manifest.version, mode: 'reader',
+        summary: { text: `Synthetic QA Reader: ${session.next}/${session.parts.length} partitions processed; no model invoked.`,
+          structure: [{ label: 'QA coverage only', text: 'Not a real model summary or whole-source quotation.' }] },
+        selectedSpans: [{ startOffset: 0, endOffset: Math.min(80, entry.text.length), quote: entry.text.slice(0, 80) }],
+        coverage, omissionPolicy: { type: 'reader-summary', fixtureOnly: true },
+        reader: { sessionId: session.id, revision: session.next } };
+      const text = JSON.stringify(value);
+      session.pending = { role: 'agent_input', packetId: randomUUID(), mime: 'application/json',
+        hash: fingerprintQaBytes(text).sha256, text, mode: 'qa-fixture-claude-reader', coverage,
+        deliveryStatus: 'prepared', binding: { conversationId: run.conversationId, runId: run.runId, answerId: run.answerId } };
+      return copy({ readerSessionId: session.id, sourceId, packetId: session.pending.packetId, coverage,
+        fixtureOnly: true, synthetic: true, adapterExecutionVerified: false, deliveryStatus: 'prepared' });
+    },
+    deliverReader(sourceId, run, owner) {
+      const entry = find(sourceId, owner), session = readers.get(`${run.runId}:${sourceId}`);
+      if (!session || session.owner !== owner || !session.pending || session.busy) fail('READER_SESSION_MISMATCH', 'No prepared synthetic packet', 409);
+      const packet = { ...session.pending, deliveryStatus: 'sent-to-app-server' };
+      session.pending = null;
+      entry.packets.push(packet);
+      stats.deliveries.push({ sourceId, toolName: 'egdesk_read_source', fixtureOnly: true, packet: copy(packet) });
+      return copy(packet);
+    },
+    abandonReader(sourceId, run, owner) {
+      const session = readers.get(`${run.runId}:${sourceId}`);
+      if (!session || session.owner !== owner) return;
+      session.pending = null;
+      session.busy = false;
+      readers.delete(`${run.runId}:${sourceId}`);
     },
     deliver(sourceId, run, owner, { directOnly = false } = {}) {
       const entry = find(sourceId, owner);

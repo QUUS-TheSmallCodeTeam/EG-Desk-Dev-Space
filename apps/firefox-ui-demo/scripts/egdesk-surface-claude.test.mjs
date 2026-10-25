@@ -14,7 +14,8 @@ import { createClaudeEngineAdapter } from '../helper/claude-engine-adapter.mjs';
 import { openChatStore } from '../helper/egdesk-chat-store.mjs';
 import { describeClaudeEngine, publicEngineRow } from '../helper/engine-registry.mjs';
 import { ContextRuntime } from '../helper/egdesk-context-runtime.mjs';
-import { ImmutableContextStore } from '../helper/egdesk-context-store.mjs';
+import { estimateClaudeReaderInput } from '../helper/egdesk-claude-reader.mjs';
+import { ImmutableContextStore, hashContent } from '../helper/egdesk-context-store.mjs';
 import { createContextHttpHandler } from '../helper/egdesk-context-http.mjs';
 import { createChatEngineAuth } from '../helper/codex-bridge-engine-auth.mjs';
 import { createChatHttpHandler } from '../helper/codex-bridge-http.mjs';
@@ -30,6 +31,8 @@ const fileInput = (id = 'file') => ({ id, kind: 'file', label: '선택한 파일
 const b2Capability = { contract: 'egdesk-context-b2', engineId: 'claude', engineProfileId: 'claude-default',
   expectedContextScope: 'test-server-issued-opaque-context-expectation',
   selectedAttachments: true, immutableRead: true, nativeReader: false, tools: ['egdesk_list_context', 'egdesk_read_source'] };
+const readerCapability = { ...b2Capability, nativeReader:true, largeReader:true,
+  reader:{ready:true,engineId:'claude',code:null,capacitySource:'native-observation',metadataHash:'fixture-capacity-proof'} };
 const captureReply = body => ({ captures: body.attachments.map(item => ({ id: item.id, sourceId: `stored-${item.id}`,
   snapshotId: `stored-${item.id}`, hash: `hash-${item.id}`, sourceRef: item.sourceRef, captureScope: item.captureScope })) });
 function functionSource(name, indent = '  ') {
@@ -97,7 +100,7 @@ function surface({ run = null, thread = {}, auth = {}, fetchJson = async () => (
     engines: [{ id: 'codex', status: 'ready' }, claudeRow()],
     authStatus: { isLoggedIn: true, accountId: 'test-account', ...auth }, connected: true, liveRevision: 0,
   } };
-  const effects = { emits: 0, capture: [], requests: [], ready: 0, timers: 0, synced: [], logs: [] };
+  const effects = { emits: 0, capture: [], requests: [], ready: 0, timers: 0, synced: [], logs: [], revoked: [] };
   const epochScope = ChatState.createChatEpochScope();
   const userInputDrafts = new Map();
   const globals = { ChatState, InputContext, document, state, protocol, userInputDrafts, epochScope,
@@ -113,6 +116,7 @@ function surface({ run = null, thread = {}, auth = {}, fetchJson = async () => (
     browserToolSelectedSources: () => [], rootSseReady: () => ({ sourceReady: true }),
     codexThreadAgentProfile: () => null, codexThreadRuntimeConfig: () => ({}),
     syncProtocolRun: value => effects.synced.push(value), expireContextSuggestions: () => assert.fail('unexpected context expiry'),
+    revokeBrowserToolRunImmediately: (run, item) => effects.revoked.push([run.runId, item.id]),
     setTimeout: () => { effects.timers++; assert.fail('automatic timer'); }, setInterval: () => assert.fail('automatic timer'),
     console: Object.fromEntries(['log', 'warn', 'error', 'debug', 'info'].map(name => [name, (...values) => effects.logs.push(values)])),
     fetchJson: async (path, options) => { effects.requests.push({ path, body: options?.body ? JSON.parse(options.body) : null }); return fetchJson(path, options); },
@@ -120,7 +124,8 @@ function surface({ run = null, thread = {}, auth = {}, fetchJson = async () => (
   };
   const definitions = ['el', 'getCodexThreadById', 'getActiveCodexThread', 'getCodexThreadDraft', 'createCodexMessage',
     'codexRuns', 'codexRunLabel', 'codexUserInputBlock', 'pruneUserInputDrafts', 'contextResolverRecordSection',
-    'codexSubAgentSection', 'renderCodexActivityPanel', 'serializeDeskSnapshot'].map(name => functionSource(name)).join('\n');
+    'codexSubAgentSection', 'renderCodexActivityPanel', 'serializeDeskSnapshot', 'codexMessageAvatarFace',
+    'codexAgentWorkingRow'].map(name => functionSource(name)).join('\n');
   if (nativeReady) delete globals.ensureNativeReadyForSend;
   if (realCapture) delete globals.captureThreadInputs;
   const api = compile(`${definitions}\n${functionSource('threadBusy', '    ')}\n${functionSource('refreshConversation', '    ')}
@@ -129,9 +134,9 @@ function surface({ run = null, thread = {}, auth = {}, fetchJson = async () => (
     ${nativeReady ? functionSource('ensureNativeReadyForSend', '    ') : ''}
     let activityPanelComposing = false, activityPanelDeferred = false;
     ${source.match(/^  const userInputDraftKey = .*;$/m)[0]}
-    const bridge = { ${['replyApproval', 'replyUserInput', 'sendMessage', 'captureInputs', 'readInput', 'setThreadEngine'].map(methodSource).join(',\n')} };
+    const bridge = { ${['replyApproval', 'replyUserInput', 'sendMessage', 'captureInputs', 'readInput', 'setThreadEngine', 'interrupt'].map(methodSource).join(',\n')} };
     return { ...bridge, render: renderCodexActivityPanel, question: codexUserInputBlock, serialize: serializeDeskSnapshot,
-      refresh: refreshConversation, el };`, globals);
+      refresh: refreshConversation, workingRow: codexAgentWorkingRow, el };`, globals);
   state.codexBridge = { ...api, refreshConversation: () => {} };
   return { ...api, state, protocol, effects, epochScope, drafts: userInputDrafts, document, root,
     thread: () => state.codex.threads[0], panel: () => document.getElementById('egd-codex-activity-panel') };
@@ -360,6 +365,77 @@ test('scoped epoch reset aborts active work and invalidates finished Codex token
   assert.equal(scope.valid(stream), false);
 });
 
+test('Reader progress stays in the existing activity/typing UI and only Main delivery offers a payload receipt',async()=>{
+  const ui=surface({thread:{conversationId:'reader-conversation'}});
+  let seq=0;
+  const event=(name,details={})=>ChatState.reduceChatEvent(ui.protocol,{type:'chat.event',v:2,event:name,
+    streamId:'reader-stream',seq:++seq,engineId:'claude',conversationId:'reader-conversation',runId:'reader-run',
+    clientThreadId:'ui',details},['claude']);
+  event('run.started');
+  const run=ui.protocol.runs[ChatState.runKey('reader-conversation','reader-run')];
+  event('context.bound',{captures:[{sourceId:'immutable-source',snapshotId:'immutable-source',label:'Selected source'}]});
+  event('reader.started',{sourceId:'immutable-source',readerSessionId:'native-reader',totalPartitions:3});
+  event('reader.completed',{sourceId:'immutable-source',readerSessionId:'native-reader',reviewedPartitions:1,totalPartitions:3,
+    text:'PRIVATE_READER_OUTPUT',complete:false});
+  assert.deepEqual(ChatState.projectRunMessages([],run),[],'Reader summary is not a chat answer');
+  ui.state.codex.activityThreadId=null;
+  ui.render();assert.equal(ui.panel(),null,'activity record is not made always visible');
+  const working=ui.workingRow(ChatState.agentWorkingView(run),{name:'Claude',runId:run.runId,
+    onOpen:()=>{ui.state.codex.activityThreadId='ui';ui.render();}});
+  assert.equal(working.querySelectorAll('.egd-codex-typing-dots').length,1);
+  assert.match(working.textContent,/Agent 작업 중/);
+  assert.doesNotMatch(working.textContent,/PRIVATE_READER_OUTPUT|Reader/);
+  await nodes(working,'chat-agent-working-open')[0].fire('click');
+  assert.equal(nodes(ui.panel(),'chat-context-activity').length,2);
+  assert.match(ui.panel().textContent,/Reader 요청 범위 처리 완료/);
+  assert.doesNotMatch(ui.panel().textContent,/PRIVATE_READER_OUTPUT|전체.*완료/);
+  assert.equal(nodes(ui.panel(),'chat-subagents').length,0);
+  assert.equal(nodes(ui.panel(),'chat-delivered-input-open').length,0,'Reader processing does not claim delivery to Main');
+  event('context.read.failed',{sourceId:'immutable-source',code:'ABORTED'});
+  ui.render();
+  assert.match(ui.panel().textContent,/요청한 자료 읽기가 중단되었습니다/);
+  event('reader.failed',{sourceId:'immutable-source',code:'ENGINE_CAPACITY_UNKNOWN'});
+  ui.render();
+  assert.match(ui.panel().textContent,/자료 읽기 용량을 확인하지 못했습니다/);
+  assert.doesNotMatch(ui.panel().textContent,/전송하지 않았으며/,'an accepted Main run is not called an unsent draft');
+  assert.equal(nodes(ui.panel(),'chat-delivered-input-open').length,0,'failed delivery creates no receipt button');
+  event('context.read.completed',{sourceId:'immutable-source',packetId:'delivered-range',complete:false});
+  ui.render();
+  const receipts=nodes(ui.panel(),'chat-delivered-input-open');
+  assert.equal(receipts.length,1);
+  assert.equal(receipts[0].dataset.packetId,'delivered-range');
+  const inspected=[];
+  ui.state.codexBridge.inspectInput=(...args)=>inspected.push(args);
+  await receipts[0].fire('click');
+  assert.deepEqual(inspected[0],['ui',run.contextCaptures[0],{packetId:'delivered-range'}]);
+  assert.deepEqual(ChatState.projectRunMessages([],run),[]);
+});
+
+test('Reader stop is engine/profile scoped and waits for a terminal event instead of claiming cancellation',async()=>{
+  let reply,signal;
+  const run={conversationId:'stopping-reader',runId:'stop-run',clientThreadId:'ui',engineId:'claude',
+    engineProfileId:'claude-default',status:'running',messages:[],activities:[],pendingApprovals:[],pendingUserInputs:[]};
+  const ui=surface({run,thread:{conversationId:run.conversationId,engineProfileId:'claude-default'},fetchJson:async(path,options)=>{
+    assert.equal(path,'/chat/interrupt');signal=options.signal;
+    return new Promise(resolve=>{reply=()=>resolve({accepted:true,stopRequested:true});});
+  }});
+  const stopping=ui.interrupt();
+  assert.equal(run.stopPending,true);
+  assert.deepEqual(ui.effects.revoked,[[run.runId,'ui']]);
+  assert.equal(ChatState.agentWorkingView(run).state,'stopping');
+  ui.epochScope.reset('codex');ui.epochScope.reset('claude','different-slot');
+  assert.equal(signal.aborted,false,'an unrelated engine or profile cannot settle this stop');
+  reply();await stopping;
+  assert.equal(run.status,'stopping');assert.equal(ChatState.isRunBusy(run),true);
+  assert.equal(run.stopRequested,true);assert.equal(run.stopPending,false);
+  assert.equal(await ui.interrupt(),false,'no duplicate stop request');
+  ChatState.reduceChatEvent(ui.protocol,{type:'chat.event',v:2,event:'run.completed',streamId:'stop-stream',seq:1,
+    engineId:'claude',conversationId:run.conversationId,runId:run.runId,clientThreadId:'ui',details:{status:'interrupted'}},['claude']);
+  assert.equal(ChatState.isRunBusy(run),false);
+  assert.equal(ChatState.agentWorkingView(run),null);
+  assert.equal(ui.effects.requests.length,1);assert.equal(ui.effects.timers,0);
+});
+
 test('B2 real capture carries the selected conversation routing, not site identity or active-room defaults', async () => {
   const browser = { id:'site', kind:'browser', label:'Site', sourceRef:{viewId:'site-card', uri:'https://source.invalid/',
     profileId:'site-profile', accountId:'site-user@source.invalid'} };
@@ -385,6 +461,12 @@ test('B2 real capture carries the selected conversation routing, not site identi
 test('B2 capabilities are exact and fail closed before any source capture on old or mismatched bridges', async () => {
   for (const descriptor of [null,{...b2Capability,expectedContextScope:undefined},{...b2Capability,contract:'dynamicTools'}, {...b2Capability,engineId:'codex'},
     {...b2Capability,engineProfileId:'other'}, {...b2Capability,immutableRead:false}, {...b2Capability,nativeReader:true},
+    {...b2Capability,nativeReader:'true'}, {...b2Capability,nativeReader:undefined},
+    {...readerCapability,largeReader:false}, {...readerCapability,reader:undefined},
+    {...readerCapability,reader:{...readerCapability.reader,ready:false}},
+    {...readerCapability,reader:{...readerCapability.reader,engineId:'codex'}},
+    {...readerCapability,reader:{...readerCapability.reader,code:'ENGINE_CAPACITY_UNKNOWN'}},
+    {...readerCapability,expectedContextScope:undefined}, {...readerCapability,engineProfileId:'other'},
     {...b2Capability,tools:['egdesk_list_context']}, {...b2Capability,tools:'egdesk_list_context egdesk_read_source'},
     {...b2Capability,tools:[...b2Capability.tools,'egdesk_publish_briefing']}]) {
     const ui = surface({realCapture:true,fetchJson:async()=>descriptor});
@@ -479,14 +561,16 @@ test('immutable inspector account/missing/manifest refusal never falls back to l
   }
 });
 
-test('Claude attachment send uses real capture, explicit immutable ids and only the read grant; draft clears on acceptance',async()=>{
+test('Claude attachment send uses server-confirmed Reader capability without granting Browser or publication tools',async()=>{
+  for(const capability of [b2Capability,{...b2Capability,largeReader:false,
+    reader:{ready:false,engineId:'claude',code:'ENGINE_CAPACITY_UNKNOWN'}},readerCapability]){
   let finishSend;
   const selected={id:'site',kind:'browser',label:'Site',selectedByUser:true,browserToolPermission:'observe',
     sourceRef:{viewId:'card',uri:'https://site.invalid/',profileId:'site-slot',accountId:'site@other.invalid'}};
   const ui=surface({realCapture:true,thread:{inputSources:[selected]},
     captureChatInputs:async([input])=>[InputContext.inputSnapshot(input,{text:'EXACT',url:input.sourceRef.uri})],
     fetchJson:async(path,options)=>{
-      if(path.startsWith('/context/capabilities?'))return b2Capability;
+      if(path.startsWith('/context/capabilities?'))return capability;
       if(path==='/context/captures')return captureReply(JSON.parse(options.body));
       assert.equal(path,'/chat/send');
       return new Promise(resolve=>{finishSend=()=>resolve({accepted:true,requestId:JSON.parse(options.body).requestId,
@@ -497,15 +581,20 @@ test('Claude attachment send uses real capture, explicit immutable ids and only 
   assert.deepEqual(ui.thread().inputSources,[selected]);
   const request=ui.effects.requests.at(-1).body;
   assert.deepEqual(request.contextSnapshotIds,['stored-site']);
-  assert.deepEqual(request.contextCapabilities,{read:true,reader:false,publishBriefing:false});
+  assert.deepEqual(request.contextCapabilities,{read:true,reader:capability.nativeReader,publishBriefing:false});
   assert.equal(request.engineId,'claude');assert.equal(request.engineProfileId,'claude-default');
   assert.equal(request.expectedContextScope,b2Capability.expectedContextScope);
   assert.equal(request.expectedContextScope,ui.effects.requests.find(row=>row.path==='/context/captures').body.expectedContextScope);
   assert.equal(JSON.stringify(ui.thread()).includes('expectedContextScope'),false,'operation expectation is not persisted in a thread or capture reference');
+  assert.equal(JSON.stringify(ui.thread()).includes('claudeContextCapabilities'),false,'readiness is request-local, never saved as authority');
+  const attachment=ui.effects.requests.find(row=>row.path==='/context/captures').body.attachments[0];
+  assert.equal(attachment.sourceRef.browserProfileId,'site-slot');
+  assert.equal(attachment.sourceRef.siteAccount,'site@other.invalid','source-site identity never has to match the engine account');
   for(const field of ['ownerKey','epoch','selectedSources','executionPolicy','contextResolution'])assert.equal(request[field],undefined);
   finishSend();await sending;
   assert.equal(ui.state.codex.threadDrafts.ui,'');assert.deepEqual(ui.thread().inputSources,[]);
   assert.equal(ui.thread().engineProfileId,'claude-default');
+  }
 });
 
 test('actual engine switch after definite Claude Reader refusal recaptures selected sources under Codex, never relabels old captures',async()=>{
@@ -573,7 +662,9 @@ test('switching an unbound room never relabels or submits an already immutable f
 
 test('Claude capture and send failures preserve exact draft and all attachments with no retry or provider fallback',async()=>{
   for(const phase of ['capture','send'])for(const code of ['CONTEXT_CAPTURE_INCOMPLETE','UNSUPPORTED_SOURCE_FORMAT',
-    'CLAUDE_CONTEXT_READER_UNSUPPORTED','CONTEXT_THREAD_MISMATCH','CONTEXT_TOOLS_UNAVAILABLE','CONTEXT_SCOPE_CHANGED','ACCOUNT_CHANGED','NETWORK']){
+    'CLAUDE_CONTEXT_READER_UNSUPPORTED','CONTEXT_THREAD_MISMATCH','CONTEXT_TOOLS_UNAVAILABLE','CONTEXT_SCOPE_CHANGED',
+    'ENGINE_CAPACITY_UNKNOWN','CONTEXT_CAPACITY_REQUIRED','ENGINE_CONTEXT_CONFIGURATION_ERROR','PACKET_ADMISSION_REQUIRED',
+    'READER_UNAVAILABLE','READER_ISOLATION_UNAVAILABLE','READER_FAILED','READER_RECEIPT_INVALID','ABORTED','READ_CANCELLED','ACCOUNT_CHANGED','NETWORK']){
     const inputs=[fileInput('one'),fileInput('two')];
     const ui=surface({realCapture:true,thread:{inputSources:inputs},fetchJson:async(path,options)=>{
       if(path.startsWith('/context/capabilities?'))return b2Capability;
@@ -589,6 +680,23 @@ test('Claude capture and send failures preserve exact draft and all attachments 
     if(code==='CLAUDE_CONTEXT_READER_UNSUPPORTED')assert.match(ui.thread().sendError,/Smart Read.*지원하지 않아/);
     assert.equal(ui.thread().preparingInput,false);
   }
+});
+
+test('Claude Reader diagnostics use bounded user copy and distinguish an accepted run from an unsent draft',()=>{
+  for(const code of ['ENGINE_CAPACITY_UNKNOWN','ENGINE_CONTEXT_CONFIGURATION_ERROR','CONTEXT_CAPACITY_REQUIRED',
+    'PACKET_ADMISSION_REQUIRED','READER_UNAVAILABLE','READER_ISOLATION_UNAVAILABLE','READER_RECEIPT_INVALID','READER_FAILED','READ_CANCELLED',
+    'READER_CONFIGURATION_REQUIRED','READER_CONFIGURATION_MISMATCH','READER_BUSY','READER_SESSION_LIMIT','READER_STOP_PENDING',
+    'READER_OFFLINE','READER_TIMEOUT','READER_INPUT_INVALID','READER_SESSION_MISMATCH','READER_SCOPE_VIOLATION','READER_PROTOCOL_ERROR',
+    'READER_INVALID_PACKET','READER_INVALID_CITATION','READER_EVENT_LIMIT','READER_OUTPUT_LIMIT'])for(const origin of ['claude','egdesk']){
+    const error={code,origin,kind:'unknown',message:'PRIVATE_READER_DETAILS'};
+    const notice=ChatState.runErrorNotice(error);
+    assert.equal(notice.text,ChatState.claudeContextReadErrorText(code));
+    assert.equal(notice.action,null);
+    assert.doesNotMatch(notice.text,/PRIVATE_READER_DETAILS|전송하지|초안/);
+    assert.match(ChatState.claudeContextSendErrorText(code),/전송하지 않았으며 초안과 선택 자료는 유지됩니다/);
+  }
+  assert.equal(ChatState.claudeContextReadErrorText('UNKNOWN_READER_INTERNAL'),null);
+  assert.equal(ChatState.claudeContextSendErrorText('READER_UNAVAILABLE','codex'),null);
 });
 
 test('real Browser capture pins site profile/container independently of engine login and refuses source changes',async()=>{
@@ -662,6 +770,131 @@ test('unbound Claude chat rejects A capture intent under B before delayed SSE, u
   assert.equal(h.transports.length,0);assert.deepEqual(h.codexCalls,[]);
 });
 
+// Synthetic capacity evidence exercises the positive contract, not the installed
+// Claude provider's readiness. Actual authority, planning, storage, HTTP and UI
+// functions run; a Reader or live native process must never run during preflight.
+async function contextSurface(t,{contents=['complete small source'],capacityKnown=true,readerReady=true,beforeSend}={}){
+  const dir=mkdtempSync(join(tmpdir(),'egdesk-ui-reader-'));
+  t.after(()=>rmSync(dir,{recursive:true,force:true}));
+  const store=new ImmutableContextStore({dataDir:dir,allowedRoots:[dir]});
+  const plans=[],replies=[];
+  const selection={model:'claude-sonnet-4-6',effort:'medium',revision:'synthetic-selection-v1'};
+  const engineBuild='2.1.300';
+  const metadataHash=hashContent('synthetic UI preflight capacity evidence; not production readiness');
+  let h;
+  const contexts=new ContextRuntime({store,getAuthority:hints=>h.chat.contextAuthority(hints),schemaReady:()=>true,
+    reader:{read:async()=>assert.fail('Claude must never fall back to Codex Reader'),disconnect(){}},
+    readers:{claude:{estimateInput:estimateClaudeReaderInput,readiness:({authority,model,effort})=>{
+      assert.equal(authority.engineId,'claude');
+      assert.equal(authority.engineProfileId,'claude-default');
+      assert.equal(model,selection.model,'Context resolves the server-selected Reader model');
+      assert.equal(effort,selection.effort,'Context resolves the server-selected Reader effort');
+      return{ready:readerReady,code:readerReady?null:'READER_ISOLATION_UNAVAILABLE'};
+    },
+      read:async()=>assert.fail('preflight must not execute Reader'),disconnect(){}}},
+    getReadCapacity:({authority})=>capacityKnown?{capacity:{status:'verified',engineId:'claude',fallback:false,source:'native-observation',
+      model:selection.model,engineBuild,metadataHash,
+      scope:{...authority},modelSelectionRevision:selection.revision,observedAt:Date.now(),
+      usableContextWindow:64000,toolOutputLimitTokens:8192,inputOverheadTokens:256,
+      estimator:{kind:'utf8-upper-bound',verified:true,version:'synthetic-test-v1'}},
+      selection:{...selection},engineBuild,
+      usage:{usedTokens:512},readerBudget:{maxInputTokens:4000,inputOverheadTokens:256}}:{},
+  });
+  const actualRead=contexts.smartRead.read.bind(contexts.smartRead);
+  contexts.smartRead.read=async options=>{
+    assert.equal(options.prepareOnly,true,'this UI admission test never executes a Reader');
+    const result=await actualRead(options);
+    plans.push(result.plan||{mode:result.packet.mode});return result;
+  };
+  h=await runtime(t,{store:true,initialSend:false,contexts});
+  const auth=createChatEngineAuth({chat:h.chat,refreshCodexAccount:async()=>assert.fail('Claude must not authenticate Codex'),
+    getCodexAuth:()=>({isLoggedIn:false})});
+  const contextHandler=createContextHttpHandler(contexts,async hints=>{h.chat.contextAuthority(hints);});
+  const chatHandler=createChatHttpHandler(h.chat,auth);
+  const fetchJson=compile(`${between('    const fetchJson = async','\n\n    // One catalog read')}\nreturn fetchJson;`,{
+    fetch:async(url,options={})=>{
+      const path=new URL(url).pathname;
+      if(path==='/chat/send')await beforeSend?.(h,contexts);
+      const req=Readable.from(options.body?[Buffer.from(options.body)]:[]);
+      Object.assign(req,{method:options.method||'GET',url,headers:{host:'127.0.0.1:39218','content-type':'application/json'},
+        socket:{remoteAddress:'127.0.0.1'}});
+      const res={writeHead(status){this.status=status;},end(body){this.body=JSON.parse(body);}};
+      if(!await contextHandler(req,res,new URL(url)))assert.equal(await chatHandler(req,res,new URL(url)),true);
+      replies.push({path,status:res.status,body:res.body});
+      return{ok:res.status<400,status:res.status,text:async()=>JSON.stringify(res.body),json:async()=>res.body};
+    },
+  });
+  const selected=contents.map((_,index)=>({id:`selected-${index}`,kind:'browser',label:`Source ${index}`,
+    sourceRef:{viewId:`card-${index}`,uri:`https://source.invalid/${index}`,profileId:'site-profile',accountId:'different-site-user@source.invalid'}}));
+  const ui=surface({realCapture:true,auth:{isLoggedIn:false},thread:{inputSources:selected},fetchJson,
+    captureChatInputs:async([input])=>[InputContext.inputSnapshot(input,{text:contents[selected.findIndex(row=>row.id===input.id)],url:input.sourceRef.uri})]});
+  ui.state.codex.connected=false;ui.state.codex.engines[0].status='offline';
+  return{ui,h,contexts,store,plans,replies,selected};
+}
+
+test('real Context capability and pure planning admit direct, large and aggregate UI selections without preflight Reader execution',async t=>{
+  for(const [name,contents,capacityKnown,expectedMode] of [
+    ['B2 direct with unknown capacity',['small complete source'],false,'direct'],
+    ['Reader-ready direct',['small complete source'],true,'direct'],
+    ['large complete source',['SOURCE_LINE\n'.repeat(1000)],true,'reader'],
+    ['aggregate of individually small sources',Array(3).fill('complete source '.repeat(20)),true,'reader'],
+  ])await t.test(name,async t=>{
+    const {ui,h,contexts,store,plans,replies,selected}=await contextSurface(t,{contents,capacityKnown});
+    await ui.sendMessage();
+    const capability=replies.find(row=>row.path==='/context/capabilities').body;
+    assert.equal(capability.nativeReader,capacityKnown);
+    assert.equal(capability.largeReader,capacityKnown);
+    assert.equal(capability.reader.ready,capacityKnown);
+    if(!capacityKnown)assert.equal(capability.reader.code,'ENGINE_CAPACITY_UNKNOWN');
+    assert.ok(plans.length>=selected.length,JSON.stringify(replies.at(-1)));
+    assert.ok(plans.every(plan=>plan.mode===expectedMode),JSON.stringify(plans));
+    const send=ui.effects.requests.find(row=>row.path==='/chat/send').body;
+    assert.deepEqual(send.contextCapabilities,{read:true,reader:capacityKnown,publishBriefing:false});
+    assert.equal(send.expectedContextScope,capability.expectedContextScope);
+    assert.equal(send.expectedContextScope,ui.effects.requests.find(row=>row.path==='/context/captures').body.expectedContextScope);
+    for(const field of ['capacity','usage','readerBudget','ownerKey','epoch'])assert.equal(send[field],undefined);
+    assert.equal(Object.values(ui.protocol.requests)[0].status,'accepted',JSON.stringify(replies.at(-1)));
+    assert.equal(ui.state.codex.threadDrafts.ui,'');assert.deepEqual(ui.thread().inputSources,[]);
+    assert.equal(contexts.smartRead.sessions.size,0);
+    const owner=contexts.owner(h.chat.contextAuthority({engineId:'claude',engineProfileId:'claude-default',clientThreadId:'ui'}));
+    for(const kind of ['readers','packets','deliveries'])assert.deepEqual(await store.listRecords(owner,kind),[]);
+    assert.equal(h.events.some(event=>/^reader\.|^context\.read\./.test(event.event)),false);
+    assert.equal(h.transports.length,1);assert.equal(h.transports[0].sent.length,1);assert.deepEqual(h.codexCalls,[]);
+  });
+});
+
+test('unknown capacity and unavailable Reader retain complete large/aggregate selections with real server errors and no fallback',async t=>{
+  for(const [capacityKnown,readerReady,code] of [[false,true,'ENGINE_CAPACITY_UNKNOWN'],[true,false,'READER_ISOLATION_UNAVAILABLE']]){
+    for(const contents of [['SOURCE_LINE\n'.repeat(1000)],Array(3).fill('complete source '.repeat(20))])await t.test(`${code}/${contents.length}`,async t=>{
+      const {ui,h,contexts,replies,selected}=await contextSurface(t,{contents,capacityKnown,readerReady});
+      await ui.sendMessage();
+      const capability=replies.find(row=>row.path==='/context/capabilities').body;
+      assert.equal(capability.nativeReader,false);assert.equal(capability.largeReader,false);assert.equal(capability.reader.ready,false);
+      assert.equal(replies.at(-1).body.code,code);
+      assert.equal(ui.thread().sendError,ChatState.claudeContextSendErrorText(code));
+      assert.equal(ui.state.codex.threadDrafts.ui,'  keep my draft  ');assert.deepEqual(ui.thread().inputSources,selected);
+      assert.deepEqual(ui.thread().messages,[]);assert.equal(Object.values(ui.protocol.requests)[0].status,'failed');
+      assert.equal(contexts.smartRead.sessions.size,0);assert.equal(h.transports.length,0);assert.deepEqual(h.codexCalls,[]);
+      assert.equal(ui.effects.requests.length,3);assert.equal(ui.effects.timers,0);
+    });
+  }
+});
+
+test('Reader-ready capture cannot refresh its scope or send as another account before late SSE arrives',async t=>{
+  const {ui,h,contexts,replies,selected}=await contextSurface(t,{contents:['complete small source'],
+    beforeSend:async h=>h.changeAccount('changed-before-ui-sse@example.invalid')});
+  const oldIdentity=clone(ui.state.codex.engines);
+  await ui.sendMessage();
+  assert.equal(replies[0].body.nativeReader,true);
+  assert.equal(replies.at(-1).body.code,'CONTEXT_SCOPE_CHANGED');
+  assert.deepEqual(ui.state.codex.engines,oldIdentity,'no account event reached the UI');
+  assert.equal(ui.state.codex.threadDrafts.ui,'  keep my draft  ');assert.deepEqual(ui.thread().inputSources,selected);
+  assert.deepEqual(ui.thread().messages,[]);assert.equal(Object.values(ui.protocol.requests)[0].status,'failed');
+  assert.equal(ui.effects.requests.length,3,'one capability, capture and refused send, no scope refresh or resend');
+  assert.equal(contexts.smartRead.sessions.size,0);assert.equal(h.transports.length,0);assert.deepEqual(h.codexCalls,[]);
+  assert.equal(ChatState.chatThreadEngineLocked(ui.thread()),false);
+});
+
 test('production engine popover reanchors to its fresh local chip across Canvas pan/zoom and HUD', () => {
   const window = {innerWidth:1440, innerHeight:900};
   const geometry = compile(`${functionSource('resolveFloatingMenuPlacement')}\n${functionSource('positionChatEngineMenu')}
@@ -716,7 +949,7 @@ test('production engine popover reanchors to its fresh local chip across Canvas 
 
 // Real adapter, runtime and SQLite public projections, with only the native
 // stdio transport replaced. No provider, credential, CLI or OS calls.
-async function runtime(t, { store = false, initialSend = true } = {}) {
+async function runtime(t, { store = false, initialSend = true, contexts = null } = {}) {
   let chatStore = store && typeof store === 'object' ? store : null;
   if (store === true) {
     const dir = mkdtempSync(join(tmpdir(), 'egdesk-surface-claude-'));
@@ -741,7 +974,7 @@ async function runtime(t, { store = false, initialSend = true } = {}) {
   });
   const codex = createCodexEngineAdapter({ request: async (...args) => { codexCalls.push(args); assert.fail('Codex fallback'); },
     respond: () => assert.fail('Claude response routed to Codex') });
-  const chat = new CodexChatRuntime({ engines: [codex, claude], store: chatStore, requireStore: !!chatStore,
+  const chat = new CodexChatRuntime({ engines: [codex, claude], store: chatStore, requireStore: !!chatStore, contexts,
     now: () => NOW, emit: event => events.push(event), verifyFile: async () => null,
     setTimer: () => assert.fail('runtime retry timer'), clearTimer() {} });
   const unsubscribe = claude.subscribe({ notification: (_, message) => chat.handleNotification(message),
@@ -1355,6 +1588,52 @@ test('real HTTP uncertain failures retain their optimistic row and do not unlock
       assert.equal(ui.thread().engineProfileId,'claude-default');
       assert.equal(ui.thread().bindingState,'server-check-required');
     }
+    assert.equal(ui.effects.requests.length,1);assert.equal(ui.effects.timers,0);
+  }
+});
+
+test('exact durable unknown with nested Context error is not a refusal, acceptance or permission to resend',async()=>{
+  for(const code of ['CLAUDE_CONTEXT_READER_UNSUPPORTED','ENGINE_CAPACITY_UNKNOWN','READER_FAILED']){
+  const payload={accepted:false,dispatchStatus:'unknown',
+    error:{code,message:code==='CLAUDE_CONTEXT_READER_UNSUPPORTED'?'Reader reply was lost':'PRIVATE_READER_DETAILS'},duplicate:true};
+  const selected=[fileInput('retained-reader')];
+  const ui=surface({realCapture:true,thread:{inputSources:selected},fetchJson:async(path,options)=>{
+    if(path.startsWith('/context/capabilities?'))return b2Capability;
+    if(path==='/context/captures')return captureReply(JSON.parse(options.body));
+    assert.equal(path,'/chat/send');return payload;
+  }});
+  await ui.sendMessage();
+  assert.equal(Object.values(ui.protocol.requests)[0].status,'unconfirmed');
+  assert.equal(ui.thread().messages.length,1);
+  assert.equal(ui.thread().messages[0].status,'unconfirmed');
+  assert.equal(ui.thread().sendError,`접수 여부를 확인하지 못했습니다. 자동으로 다시 보내지 않습니다. ${ChatState.claudeContextReadErrorText(code)||payload.error.message}`);
+  assert.doesNotMatch(ui.thread().sendError,/PRIVATE_READER_DETAILS|전송하지 않았으며/);
+  assert.equal(ui.state.codex.threadDrafts.ui,'  keep my draft  ');
+  assert.deepEqual(ui.thread().inputSources,selected);
+  assert.equal(ui.effects.synced.length,0);
+  ui.setThreadEngine('ui','codex');
+  assert.equal(ui.thread().engineId,'claude');
+  await ui.sendMessage();
+  assert.equal(ui.effects.requests.length,3,'unconfirmed request remains blocked without an automatic or repeated send');
+  assert.equal(ui.effects.timers,0);
+  }
+});
+
+test('definite Claude failures remove only the optimistic row and an empty room can explicitly change engine',async()=>{
+  for(const status of [409,202])for(const previous of [null,{id:'older',role:'user',content:'earlier accepted message',status:'complete'}]){
+    const payload={accepted:false,dispatchStatus:'rejected',error:{code:'TURN_START_FAILED',message:'Dispatch definitely refused'},duplicate:status===202};
+    const fetchJson=compile(`${between('    const fetchJson = async','\n\n    // One catalog read')}\nreturn fetchJson;`,{
+      fetch:async()=>({ok:status<400,status,text:async()=>JSON.stringify(payload),json:async()=>payload}),
+    });
+    const ui=surface({thread:{messages:previous?[clone(previous)]:[]},fetchJson});
+    await ui.sendMessage();
+    assert.equal(Object.values(ui.protocol.requests)[0].status,'failed');
+    assert.deepEqual(ui.thread().messages,previous?[previous]:[]);
+    assert.equal(ui.state.codex.threadDrafts.ui,'  keep my draft  ');
+    assert.equal(ui.effects.synced.length,0);
+    assert.equal(ChatState.chatThreadEngineLocked(ui.thread()),!!previous);
+    ui.setThreadEngine('ui','codex');
+    assert.equal(ui.thread().engineId,previous?'claude':'codex');
     assert.equal(ui.effects.requests.length,1);assert.equal(ui.effects.timers,0);
   }
 });

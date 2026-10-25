@@ -1,6 +1,6 @@
 import test from 'node:test'
 import assert from 'node:assert/strict'
-import { createHash } from 'node:crypto'
+import { createHash, randomUUID } from 'node:crypto'
 import { rm, writeFile, unlink } from 'node:fs/promises'
 import path from 'node:path'
 import { Readable } from 'node:stream'
@@ -13,6 +13,7 @@ import { ContextRuntime } from './egdesk-context-runtime.mjs'
 import { ImmutableContextStore } from './egdesk-context-store.mjs'
 import { createContextHttpHandler } from './egdesk-context-http.mjs'
 import { createPlanToolProvider } from './egdesk-plan-tool-provider.mjs'
+import { ClaudeReaderClient } from './egdesk-claude-reader.mjs'
 import { openChatStore } from './egdesk-chat-store.mjs'
 import { createPrivateQaTempDirectory } from '../scripts/egdesk-qa-platform.mjs'
 
@@ -128,7 +129,7 @@ function http(h, { codexLoggedIn = false } = {}) {
   return { refreshes: () => refreshes, call, post: (path, body) => call('POST', path, body), get: path => call('GET', path) }
 }
 
-function scopedContextHarness(t, { store = withStore(t), contextDir, ...options } = {}) {
+function scopedContextHarness(t, { store = withStore(t), contextDir, readerFactory, ...options } = {}) {
   if (!contextDir) {
     contextDir = createPrivateQaTempDirectory('egdesk-claude-b2-')
     t.after(() => rm(contextDir, { recursive: true, force: true }))
@@ -136,12 +137,14 @@ function scopedContextHarness(t, { store = withStore(t), contextDir, ...options 
   const contextStore = new ImmutableContextStore({ dataDir: contextDir, allowedRoots: [contextDir] })
   let h
   const readerCalls = []
+  const readerService = readerFactory?.(() => h)
   const contexts = new ContextRuntime({ store: contextStore,
     reader: { read: async input => { readerCalls.push(input); throw new Error('Codex Reader must never serve Claude') }, disconnect() {} },
     getOwnerKey: options.getOwnerKey || (() => null), getAuthority: hints => h.chat.contextAuthority(hints), schemaReady: () => true,
+    ...(readerService ? { readers: { claude: readerService.reader }, getReadCapacity: readerService.getReadCapacity } : {}),
   })
   h = harness(t, { ...options, store, contexts })
-  return { ...h, store, contexts, contextStore, contextDir, readerCalls }
+  return { ...h, store, contexts, contextStore, contextDir, readerCalls, readerService }
 }
 
 const contextRoute = { engineId: 'claude', engineProfileId: 'claude-default', clientThreadId: 'ui-claude' }
@@ -156,9 +159,9 @@ const browserCapture = (text = 'SITE_CAPTURE_MARKER\n') => ({ kind: 'browser', l
   sourceRef: { resourceId: 'site-card', viewId: 'site-view', url: 'https://site.example/document', browserProfileId: 'site-profile', siteAccount: 'site-user@different.example' },
   captureScope: { type: 'selection' }, content: { text, truncated: false },
 })
-async function readCaptured(h, run, sourceId, { requestId = 'source-read', range, intent = 'Read exactly the selected immutable source' } = {}) {
+async function readCaptured(h, run, sourceId, { requestId = 'source-read', range, query, readerSessionId, intent = 'Read exactly the selected immutable source' } = {}) {
   const transport = h.transports.at(-1)
-  transport.control(requestId, mcp('tools/call', { name: 'egdesk_read_source', arguments: { snapshotId: sourceId, intent, ...(range ? { range } : {}) } }))
+  transport.control(requestId, mcp('tools/call', { name: 'egdesk_read_source', arguments: { snapshotId: sourceId, intent, ...(range ? { range } : {}), ...(query ? { query } : {}), ...(readerSessionId ? { readerSessionId } : {}) } }))
   await h.drain()
   await Promise.all([...h.contexts.calls.values()])
   await h.drain()
@@ -174,6 +177,198 @@ async function selectedTurn(t, options = {}) {
   assert.equal(sent.body.accepted, true, JSON.stringify(sent.body))
   return { ...h, api, intent, capture, run: sent.body, owner: h.contexts.owner(h.chat.contextAuthority(contextRoute)) }
 }
+
+// This fixture supplies explicit TEST evidence to the real Reader validator;
+// negative cases revoke individual native inventories. It is never wired into
+// bridge readiness and does not stand in for a production security check.
+const READER_MODEL = 'claude-sonnet-4-6'
+function claudeReaderFixture(getHarness) {
+  const state = { mode: 'verified', hold: false, inputs: [], transports: [], pending: [], entered: null }
+  const getScope = () => getHarness().chat.contextAuthority(contextRoute)
+  const getReadCapacity = () => {
+    const scope = getScope()
+    if (state.mode === 'unknown') return null
+    const capacity = { status: 'verified', engineId: 'claude', source: state.mode === 'documented' ? 'documented-model-policy' : 'native-observation',
+      fallback: false, model: state.mode === 'model' ? 'claude-other' : READER_MODEL, modelSelectionRevision: 'fixture-selection-1',
+      engineBuild: state.mode === 'build' ? 'old-build' : '2.1.300', observedAt: Date.now(), metadataHash: sha256('test-only capacity export'),
+      scope: { ...scope, ...(state.mode === 'epoch' ? { epoch: scope.epoch - 1 } : {}), ...(state.mode === 'profile' ? { engineProfileId: 'another-profile' } : {}) },
+      usableContextWindow: 64000, toolOutputLimitTokens: 8192, inputOverheadTokens: 128,
+      estimator: { kind: 'utf8-upper-bound', verified: true, version: 'test-only-verified-text-path' } }
+    return { capacity, selection: { model: READER_MODEL, effort: 'medium', revision: 'fixture-selection-1' }, engineBuild: '2.1.300',
+      usage: { usedTokens: 1500 }, readerBudget: { maxInputTokens: 24000, inputOverheadTokens: 1500 } }
+  }
+  const reader = new ClaudeReaderClient({ getScope, getReadCapacity,
+    snapshot: () => ({ version: '2.1.300', auth: { status: 'signedIn', method: 'claudeai' } }), executablePath: '/fake/never-launched-claude', env: {},
+    getIsolationProof: ({ authority }) => ({ ...authority, status: 'verified', engineBuild: '2.1.300',
+      metadataHash: sha256('test-only isolated policy inventory'), expiresAt: Date.now() + 60000, hooksDisabled: true, noApiKey: true }),
+    createTransport: options => {
+      assert.equal(options.readerIsolation, true)
+      assert.deepEqual(options.tools, [])
+      assert.equal(options.resume, null)
+      const transport = {
+        options, closed: false,
+        async start() { return { managedMcpConfig: false, initialize: { models: [{ value: READER_MODEL }] } } },
+        async request(method) {
+          if (method === 'mcp_status') return { mcpServers: state.mode === 'mcp' ? [{ name: 'forbidden-server' }] : [] }
+          assert.equal(method, 'get_context_usage')
+          return { model: READER_MODEL, maxTokens: 64000, rawMaxTokens: 64000, totalTokens: 100, memoryFiles: [], mcpTools: [], agents: [], systemTools: [], deferredBuiltinTools: [] }
+        },
+        sendUserMessage(text) {
+          const assigned = JSON.parse(text)
+          state.inputs.push({ text, assigned, sessionId: options.sessionId })
+          const finish = () => {
+            options.onMessage({ type: 'system', subtype: 'init', session_id: options.sessionId, uuid: randomUUID(),
+              cwd: options.cwd, claude_code_version: '2.1.300', model: READER_MODEL, effort: 'medium', permissionMode: 'dontAsk', apiKeySource: 'none',
+              tools: [], mcp_servers: [], skills: [], plugins: [], slash_commands: [], agents: [], capabilities: [] })
+            options.onMessage({ type: 'result', subtype: 'success', session_id: options.sessionId, uuid: randomUUID(), is_error: false, num_turns: 1,
+              result: JSON.stringify({ summary: 'Evidence from the assigned immutable fragment, not a task conclusion.', structure: ['Source reading'], quotes: [assigned.sourceText.slice(0, 24)] }) })
+          }
+          if (state.hold) { state.pending.push(finish); state.entered?.() } else queueMicrotask(finish)
+        },
+        async interrupt() {},
+        async close() { if (!this.closed) { this.closed = true; options.onExit() } return { code: 0, signal: null } },
+      }
+      state.transports.push(transport)
+      return transport
+    },
+  })
+  return { reader, state, getReadCapacity }
+}
+
+async function largeClaudeTurn(t, options = {}) {
+  const h = scopedContextHarness(t, { readerFactory: claudeReaderFixture, ...options })
+  t.after(() => h.readerService.reader.disconnect())
+  const api = http(h), intent = await contextIntent(api)
+  const file = path.join(h.contextDir, 'large-original.txt')
+  const original = Array.from({ length: 1900 }, (_, i) => `ORIGINAL_${i} "quoted evidence" for immutable Reader coverage and range checks.\n`).join('')
+  await writeFile(file, original)
+  const captured = await api.post('/context/captures', { ...intent, attachments: [{ kind: 'file', label: 'Large original', sourceRef: { path: file }, captureScope: { type: 'file' } }] })
+  assert.equal(captured.status, 201, JSON.stringify(captured.body))
+  const capture = captured.body.captures[0]
+  await writeFile(file, 'MODIFIED_LIVE_ORIGINAL_MUST_NOT_BE_READ')
+  const body = { ...intent, requestId: 'large-source', message: 'Read every captured range', model: READER_MODEL, effort: 'medium', contextSnapshotIds: [capture.sourceId] }
+  const sent = await api.post('/chat/send', body)
+  assert.equal(sent.body.accepted, true, JSON.stringify(sent.body))
+  assert.equal(h.readerService.state.inputs.length, 0, 'capture and preflight never execute Reader')
+  const owner = h.contexts.owner(h.chat.contextAuthority(contextRoute))
+  for (const kind of ['packets', 'readers', 'deliveries']) assert.deepEqual(await h.contextStore.listRecords(owner, kind), [])
+  return { ...h, api, intent, file, original, capture, body, run: sent.body, owner }
+}
+
+test('B3 real HTTP/store/runtime/Claude adapter/Reader retain every large-file range, exact receipts and restart history', async t => {
+  const durable = reopenableStore(t)
+  const h = await largeClaudeTurn(t, { store: durable.store })
+  let response = await readCaptured(h, h.run, h.capture.sourceId)
+  assert.notEqual(response.isError, true, JSON.stringify(response))
+  let packet = JSON.parse(response.content[0].text)
+  assert.equal(packet.mode, 'reader')
+  assert.equal(packet.coverage.complete, false, 'four partitions are progress, not complete-file coverage')
+  const sessionId = packet.reader.sessionId
+  for (let i = 0; packet.coverage.continuation && i < 10; i++) {
+    response = await readCaptured(h, h.run, h.capture.sourceId, { requestId: `continue-${i}`, readerSessionId: sessionId })
+    assert.notEqual(response.isError, true, JSON.stringify(response))
+    packet = JSON.parse(response.content[0].text)
+  }
+  assert.equal(packet.coverage.complete, true)
+  const manifest = await h.contextStore.getRecord(h.owner, 'readers', packet.coverage.manifestId)
+  const pieces = []
+  for (const part of manifest.completed) {
+    const record = await h.contextStore.getRecord(h.owner, 'readers', part.recordId)
+    const input = JSON.parse(record.inputPayload.text)
+    assert.equal(input.sourceText, h.original.slice(part.startOffset, part.endOffset))
+    assert.equal(record.result.receipt.fragmentHash, sha256(input.sourceText))
+    assert.equal(record.result.receipt.nativeResultId, record.result.nativeTurnId)
+    pieces.push(input.sourceText)
+  }
+  assert.equal(pieces.join(''), h.original)
+  assert.ok(h.readerService.state.inputs.every(input => !input.text.includes('MODIFIED_LIVE_ORIGINAL')))
+  const bound = { ...contextRoute, conversationId: h.run.conversationId }
+  const before = await h.api.get(`/context/captures/${h.capture.sourceId}?${contextQuery(bound)}&packetId=${packet.packetId}`)
+  assert.equal(before.status, 200, JSON.stringify(before.body))
+  assert.equal(before.body.delivered.text, response.content[0].text)
+  assert.equal(before.body.delivered.hash, sha256(response.content[0].text))
+  const sentCount = h.readerService.state.inputs.length
+  const nativeRead = h.requests.find(request => request.params?.tool === 'egdesk_read_source')
+  assert.ok(nativeRead, 'the real Claude MCP adapter emitted the native tool request')
+  await h.chat.handleServerRequest(nativeRead)
+  await Promise.all([...h.contexts.calls.values()])
+  assert.equal(h.readerService.state.inputs.length, sentCount, 'duplicate native call never repeats Reader work')
+  const refined = await readCaptured(h, h.run, h.capture.sourceId, { requestId: 'refined-purpose', readerSessionId: sessionId,
+    intent: 'Inspect the original row 100 evidence from a different angle', query: 'ORIGINAL_100 ' })
+  assert.notEqual(refined.isError, true, JSON.stringify(refined))
+  const refinedPacket = JSON.parse(refined.content[0].text)
+  assert.equal(refinedPacket.coverage.scope, 'complete-literal-query-hit-set')
+  assert.equal(refinedPacket.lineage.refines, packet.packetId)
+  assert.match(h.readerService.state.inputs[sentCount].assigned.sourceText, /ORIGINAL_100 /)
+  assert.match(h.readerService.state.inputs[sentCount].assigned.intent, /different angle/)
+  await h.complete(h.transports[0])
+  const restarted = scopedContextHarness(t, { store: durable.reopen(), contextDir: h.contextDir, readerFactory: claudeReaderFixture })
+  t.after(() => restarted.readerService.reader.disconnect())
+  const nextApi = http(restarted)
+  restarted.readerService.state.mode = 'unknown'
+  const resumed = await nextApi.post('/chat/resume', bound)
+  assert.equal(resumed.status, 200, JSON.stringify(resumed.body))
+  const after = await nextApi.get(`/context/captures/${h.capture.sourceId}?${contextQuery(bound)}&packetId=${packet.packetId}`)
+  assert.equal(after.body.delivered.text, before.body.delivered.text, 'receipt restoration does not require a new read or current capacity')
+  assert.equal(restarted.readerService.state.transports.length, 0)
+  assert.deepEqual([...h.codexCalls, ...h.readerCalls, ...restarted.codexCalls, ...restarted.readerCalls], [])
+})
+
+test('B3 server readiness rejects unknown/stale model-profile-epoch-build evidence, ignores caller capacity, preserves B2 small reads', async t => {
+  for (const mode of ['unknown', 'model', 'profile', 'epoch', 'build', 'documented']) await t.test(mode, async t => {
+    const h = scopedContextHarness(t, { readerFactory: claudeReaderFixture }), api = http(h)
+    h.readerService.state.mode = mode
+    const capabilities = await api.get(`/context/capabilities?${contextQuery(contextRoute)}`)
+    assert.equal(capabilities.body.selectedAttachments, true)
+    assert.equal(capabilities.body.largeReader, false)
+    assert.equal(capabilities.body.reader.code, 'ENGINE_CAPACITY_UNKNOWN')
+    const intent = await contextIntent(api)
+    const captured = await api.post('/context/captures', { ...intent, attachments: [browserCapture('long source '.repeat(8000))] })
+    const refused = await api.post('/chat/send', { ...intent, requestId: `capacity-${mode}`, message: 'Read', contextSnapshotIds: [captured.body.captures[0].sourceId],
+      contextCapabilities: { read: true, reader: false }, capacity: { usableContextWindow: 1e9 }, contextUsage: { modelContextWindow: 1e9, usedTokens: 0 } })
+    assert.equal(refused.body.accepted, false)
+    assert.equal(refused.body.code, 'ENGINE_CAPACITY_UNKNOWN')
+    assert.equal(h.readerService.state.transports.length, 0)
+    const small = await api.post('/context/captures', { ...intent, attachments: [browserCapture()] })
+    const sent = await api.post('/chat/send', { ...intent, requestId: `small-${mode}`, message: 'Read short source', contextSnapshotIds: [small.body.captures[0].sourceId] })
+    assert.equal(sent.body.accepted, true, JSON.stringify(sent.body))
+    const read = await readCaptured(h, sent.body, small.body.captures[0].sourceId)
+    assert.equal(JSON.parse(read.content[0].text).content.text, 'SITE_CAPTURE_MARKER\n')
+  })
+})
+
+test('B3 real Reader rejects nonempty native MCP inventory without source send or coverage receipt', async t => {
+  const h = await largeClaudeTurn(t)
+  h.readerService.state.mode = 'mcp'
+  const response = await readCaptured(h, h.run, h.capture.sourceId)
+  assert.equal(response.isError, true)
+  assert.equal(h.readerService.state.inputs.length, 0)
+  for (const kind of ['packets', 'readers', 'deliveries']) assert.deepEqual(await h.contextStore.listRecords(h.owner, kind), [])
+})
+
+test('B3 stop/account/epoch/model changes suppress late Reader output; unrelated Codex reset does not', async t => {
+  for (const mode of ['stop', 'account', 'epoch', 'model', 'codex-reset']) await t.test(mode, async t => {
+    const h = await largeClaudeTurn(t)
+    const state = h.readerService.state
+    state.hold = true
+    const entered = new Promise(resolve => { state.entered = resolve })
+    const pending = readCaptured(h, h.run, h.capture.sourceId)
+    await entered
+    if (mode === 'stop') await h.chat.interrupt(h.run)
+    if (mode === 'account') h.setAccount('changed@example.com')
+    if (mode === 'epoch') h.chat.reset('claude')
+    if (mode === 'model') state.mode = 'model'
+    if (mode === 'codex-reset') h.chat.reset('codex')
+    state.hold = false
+    for (const finish of state.pending.splice(0)) finish()
+    const response = await pending
+    const deliveries = await h.contextStore.listRecords(h.owner, 'deliveries')
+    assert.equal(deliveries.length, mode === 'codex-reset' ? 1 : 0)
+    if (mode === 'codex-reset') assert.notEqual(response.isError, true, JSON.stringify(response))
+    else assert.equal(h.events.some(event => event.event === 'context.read.completed'), false)
+    assert.deepEqual(h.readerCalls, [])
+  })
+})
 
 test('B2 unbound client stale capabilities cannot stamp an A-account browser intent as B before SSE arrives', async t => {
   const h = scopedContextHarness(t), api = http(h)

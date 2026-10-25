@@ -789,30 +789,34 @@ test('account change or deadline expiry while actor pending leaves DOM unchanged
   }
 })
 
-function productionStopHarness(f) {
+function productionStopHarness(f, { run: runFields = {}, thread: threadFields = {}, engines = [] } = {}) {
   const revoke = new Function('browserToolRunBindings', 'browserToolPendingBindings',
     'browserToolActionLeases', 'browserToolCancelledRuns', 'browserToolStoppedRuns',
     'browserToolUserSelections', 'ChatState',
     `${stopRevokeSource}\nreturn revokeBrowserToolRunImmediately`)(
     f.runBindings, f.pendingBindings, f.actionLeases, f.cancelled, f.stoppedRuns, f.userSelections,
-    { clientThreadBinding: thread => thread.clientBindingId })
+    ChatState)
   const run = { runId: 'run-a', clientThreadId: 'thread-a', conversationId: 'conversation-a',
-    status: 'inProgress', stopPending: false }
-  const thread = { id: 'local-room', clientBindingId: 'thread-a' }
-  const state = { codex: { activeThreadId: thread.id } }
+    status: 'inProgress', stopPending: false, ...runFields }
+  const thread = { id: 'local-room', clientBindingId: 'thread-a', ...threadFields }
+  const state = { codex: { activeThreadId: thread.id, engines } }
+  const protocol = ChatState.createChatProtocolState()
+  protocol.runs[ChatState.runKey(run.conversationId, run.runId)] = run
+  const epochScope = ChatState.createChatEpochScope()
+  const begunScopes = []
   let releaseHttp
   const interrupt = new Function('state', 'getCodexThreadById', 'ChatState', 'protocol',
     'epochScope', 'revokeBrowserToolRunImmediately', 'emit', 'fetchJson', 'updateThreadById',
     `return async function interrupt(threadId = state.codex.activeThreadId) {${interruptBody}\n      }`)(
     state, (_codex, id) => id === thread.id ? thread : null,
-    { runsForThread: () => [run], isRunBusy: candidate => candidate.status === 'inProgress' }, {},
-    { begin: () => ({ signal: {} }), valid: () => true, finish() {} }, revoke, () => {},
+    ChatState, protocol,
+    { ...epochScope, begin: (...scope) => { begunScopes.push(scope); return epochScope.begin(...scope) } }, revoke, () => {},
     async (path, options) => {
       assert.equal(path, '/chat/interrupt')
       assert.deepEqual(JSON.parse(options.body), { conversationId: run.conversationId, runId: run.runId })
       return new Promise(resolve => { releaseHttp = resolve })
     }, () => {})
-  return { run, interrupt, get releaseHttp() { return releaseHttp } }
+  return { run, interrupt, begunScopes, get releaseHttp() { return releaseHttp } }
 }
 
 test('human Stop revokes Browser actor authority synchronously before interrupt HTTP resolves', async () => {
@@ -828,6 +832,7 @@ test('human Stop revokes Browser actor authority synchronously before interrupt 
 
   const stopping = stop.interrupt()
   assert.equal(typeof stop.releaseHttp, 'function')
+  assert.deepEqual(stop.begunScopes, [['codex', 'codex-default']])
   assert.equal(stop.run.stopPending, true)
   assert.equal(f.runBindings.size, 0, 'UI binding is revoked before the first HTTP await')
   assert.equal(f.actionLeases.size, 0, 'Parent approval has no live action lease after Stop')
@@ -836,6 +841,34 @@ test('human Stop revokes Browser actor authority synchronously before interrupt 
   assert.equal(f.domEffects, 0, 'Stop before physical approval must produce zero DOM effects')
   stop.releaseHttp({ accepted: true, stopRequested: true })
   await stopping
+})
+
+test('production Stop uses the recorded Claude run profile, then the actual thread profile resolver', async () => {
+  for (const [run, thread, expected] of [
+    [{ engineId: 'claude', engineProfileId: 'claude-run-slot' },
+      { engineId: 'claude', engineProfileId: 'claude-thread-slot' }, 'claude-run-slot'],
+    [{ engine: { id: 'claude', engineProfileId: 'claude-envelope-slot' } },
+      { engineId: 'claude', engineProfileId: 'claude-thread-slot' }, 'claude-envelope-slot'],
+    [{ engineId: 'claude' }, { engineId: 'claude', engineProfileId: 'claude-thread-slot' }, 'claude-thread-slot'],
+    [{ engineId: 'claude' }, { engineId: 'claude' }, 'claude-active-slot'],
+  ]) {
+    const f = fixture()
+    const stop = productionStopHarness(f, { run, thread,
+      engines: [{ id: 'claude', profiles: [{ id: 'claude-active-slot', active: true }] }] })
+    const stopping = stop.interrupt()
+    assert.deepEqual(stop.begunScopes, [['claude', expected]])
+    assert.equal(typeof stop.releaseHttp, 'function')
+    assert.equal(stop.run.stopPending, true)
+    assert(f.stoppedRuns.has(JSON.stringify(['run-a', 'thread-a'])),
+      'profile-aware Stop still tombstones the run before its HTTP response')
+    stop.releaseHttp({ accepted: true, stopRequested: true })
+    await stopping
+    assert.equal(stop.run.status, 'stopping')
+    assert.equal(stop.run.stopRequested, true)
+    assert.equal(stop.run.stopPending, false)
+    assert.equal(await stop.interrupt(), false, 'no duplicate Stop while stopping')
+    assert.equal(stop.begunScopes.length, 1)
+  }
 })
 
 test('human Stop tombstones run before delayed first UI bind arrives', async () => {

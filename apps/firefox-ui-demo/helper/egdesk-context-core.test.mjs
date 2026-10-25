@@ -48,6 +48,52 @@ test('app data defaults do not use a repository cwd; explicit config must be abs
   assert.throws(() => appDataDirectory({ EGDESK_DATA_DIR: 'relative' }), /absolute/)
 })
 
+test('concurrent source reads reserve context before asynchronous projection and cannot overspend aggregate allowance', async t => {
+  const h = await harness(t)
+  const capture = await h.capture('First selected bytes\n'.repeat(20))
+  const started = await h.start([capture.sourceId])
+  let entered, release
+  const blocked = new Promise(resolve => { entered = resolve })
+  const read = h.store.readProjection.bind(h.store)
+  h.store.readProjection = async (...args) => {
+    entered()
+    await new Promise(resolve => { release = resolve })
+    return read(...args)
+  }
+  const first = h.tool(started, 'egdesk_read_source', { snapshotId: capture.sourceId, intent: 'Read selected bytes' }, 'reserved-first')
+  await blocked
+  const second = await h.tool(started, 'egdesk_read_source', { snapshotId: capture.sourceId, intent: 'Read selected bytes' }, 'reserved-second')
+  assert.equal(second.result.success, false)
+  assert.match(JSON.stringify(second.result), /CONTEXT_CAPACITY_REQUIRED/)
+  const run = h.chat.runs.get(`${started.conversationId}/${started.runId}`)
+  assert.ok(run.contextUsage.reservedTokens > 0)
+  release()
+  assert.equal((await first).result.success, true)
+  assert.equal(run.contextUsage.reservedTokens, 0)
+  assert.ok(run.contextUsage.deliveryDebt > 0)
+  assert.equal((await h.store.listRecords('email:a@example.com', 'deliveries')).length, 1)
+})
+
+test('accepted delivery remains context debt when durable delivery receipt fails', async t => {
+  const h = await harness(t)
+  const capture = await h.capture('Selected evidence '.repeat(40))
+  const started = await h.start([capture.sourceId])
+  const put = h.store.putRecord.bind(h.store)
+  h.store.putRecord = async (owner, kind, ...args) => {
+    if (kind === 'deliveries') throw Object.assign(new Error('private receipt diagnostic'), { code: 'STORE_FAILED' })
+    return put(owner, kind, ...args)
+  }
+  const response = await h.tool(started, 'egdesk_read_source', { snapshotId: capture.sourceId, intent: 'Read source' })
+  assert.equal(response.result.success, true)
+  const run = h.chat.runs.get(`${started.conversationId}/${started.runId}`)
+  assert.ok(run.contextUsage.deliveryDebt > 0)
+  assert.equal(run.contextUsage.reservedTokens, 0)
+  assert.equal(run.context.packets.length, 0)
+  assert.deepEqual(await h.store.listRecords('email:a@example.com', 'deliveries'), [])
+  assert.equal((await h.store.inspect('email:a@example.com', capture.sourceId)).delivered, null)
+  assert.equal(h.events.find(event => event.event === 'context.read.failed')?.details.deliveryStatus, 'sent-record-failed')
+})
+
 test('file capture is immutable, root scoped, and new bytes require a new source/hash', async t => {
   const h = await harness(t)
   const file = path.join(h.cwd, 'source.md'); await writeFile(file, 'first version\nsecond line')
@@ -925,7 +971,8 @@ test('B2 HTTP capability and capture use the engine account, independently of br
   assert.equal(caps.status, 200)
   const { expectedContextScope, ...descriptor } = caps.body
   assert.match(expectedContextScope, /^[a-f0-9]{64}$/)
-  assert.deepEqual(descriptor, { contract: 'egdesk-context-b2', engineId: 'claude', engineProfileId: 'claude-profile', selectedAttachments: true, immutableRead: true, nativeReader: false, tools: ['egdesk_list_context', 'egdesk_read_source'] })
+  assert.deepEqual(descriptor, { contract: 'egdesk-context-b2', engineId: 'claude', engineProfileId: 'claude-profile', selectedAttachments: true, immutableRead: true, nativeReader: false,
+    largeReader: false, reader: { ready: false, engineId: 'claude', code: 'CLAUDE_CONTEXT_READER_UNSUPPORTED' }, tools: ['egdesk_list_context', 'egdesk_read_source'] })
   const response = await h.http('POST', '/context/captures', { ...h.route, expectedContextScope, attachments: [h.attachment()] })
   assert.equal(response.status, 201)
   const capture = response.body.captures[0]

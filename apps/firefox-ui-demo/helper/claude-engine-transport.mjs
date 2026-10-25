@@ -130,7 +130,7 @@ export const CLAUDE_SYSTEM_PROMPT_SNAPSHOT = Object.freeze(['on', 'off'])
 /** Requests the CLI sends us (SDK query.py:586-677); others can be handled by name too. */
 export const CLAUDE_INCOMING_CONTROL_SUBTYPES = Object.freeze(['can_use_tool', 'hook_callback', 'mcp_message'])
 /** Requests we may send (SDK query.py:340-363, :784-812). */
-export const CLAUDE_OUTGOING_CONTROL_SUBTYPES = Object.freeze(['initialize', 'interrupt', 'set_permission_mode', 'set_model', 'mcp_status'])
+export const CLAUDE_OUTGOING_CONTROL_SUBTYPES = Object.freeze(['initialize', 'interrupt', 'set_permission_mode', 'set_model', 'mcp_status', 'get_context_usage'])
 
 /**
  * Every flag buildClaudeArgs can emit and where it was checked. A flag without
@@ -159,6 +159,12 @@ export const CLAUDE_FLAG_SOURCES = Object.freeze({
   '--add-dir': 'claude 2.1.300 --help; SDK subprocess_cli.py:662-665',
   '--tools': 'claude 2.1.300 --help (\'Use "" to disable all tools\')',
   '--system-prompt-snapshot': 'claude 2.1.300 --help (on|off; off renders the prompt fresh every request)',
+  '--system-prompt': 'official SDK python @ 0e89b298e771259378a6cd3734e00d323dff5703 subprocess_cli.py _build_command; https://code.claude.com/docs/en/cli-reference (2026-10-25)',
+  '--max-turns': 'same pinned SDK _build_command; official CLI reference (2026-10-25): per-message agentic turn ceiling in stream-json mode',
+  '--no-session-persistence': 'https://code.claude.com/docs/en/cli-reference (2026-10-25): print-only, no saved/resumable session',
+  '--restricted': 'official CLI reference (2026-10-25): >=2.1.248; no command tools or user/project settings; NOT an OS sandbox',
+  '--safe-mode': 'official CLI reference (2026-10-25): customizations off, auth retained; managed hooks can still apply',
+  '--no-chrome': 'official CLI reference (2026-10-25): disables Chrome integration',
 })
 
 const MANAGED_MCP_PATHS = Object.freeze({
@@ -340,7 +346,7 @@ export function buildClaudeArgs({
   mcpConfig = null, managedMcpConfig = false, inherit = {}, includePartialMessages = true,
   model = null, effort = null, permissionMode = null, appendPrompt = null,
   sessionId = null, resume = null, allowedTools = null, disallowedTools = null, addDirs = null,
-  tools = null, systemPromptSnapshot = null,
+  tools = null, systemPromptSnapshot = null, readerIsolation = false, systemPrompt = null,
   platform = process.platform,
 } = {}) {
   const inheritance = plainObject(inherit) || {}
@@ -348,6 +354,26 @@ export function buildClaudeArgs({
   const skills = inheritance.skills === true
   const sources = instructions ? ['user', 'project', 'local'] : skills ? ['user', 'project'] : []
   const mcp = normalizeMcpConfig(mcpConfig)
+
+  // This is deliberately separate from chat's empty dynamicTools catalog:
+  // that catalog does NOT disable built-in tools. Reader callers must also
+  // establish managed-policy safety before spawn (safe-mode cannot do that).
+  if (readerIsolation) {
+    if (managedMcpConfig) throw transportError('READER_ISOLATION_UNAVAILABLE', 'Managed MCP configuration cannot be relaxed for a Reader')
+    if (instructions || skills || mcp || resume != null || appendPrompt != null ||
+        (tools != null && (!Array.isArray(tools) || tools.length)) ||
+        (allowedTools != null && (!Array.isArray(allowedTools) || allowedTools.length)) ||
+        (addDirs != null && (!Array.isArray(addDirs) || addDirs.length))) {
+      throw optionError('Reader isolation cannot inherit tools, settings, directories or history')
+    }
+    if (typeof systemPrompt !== 'string' || !systemPrompt || systemPrompt.length > CLAUDE_TRANSPORT_LIMITS.maxAppendPromptChars || systemPrompt.includes('\0')) {
+      throw optionError('Reader isolation requires a bounded replacement system prompt')
+    }
+    tools = []
+    permissionMode = 'dontAsk'
+    includePartialMessages = false
+    disallowedTools = ['mcp__*']
+  } else if (systemPrompt != null) throw optionError('A replacement system prompt is only supported for the isolated Reader')
 
   const args = [
     '-p',
@@ -362,6 +388,10 @@ export function buildClaudeArgs({
   if (mcp) args.push('--mcp-config', JSON.stringify(mcp))
   if (!skills) args.push('--disable-slash-commands')
   if (includePartialMessages !== false) args.push('--include-partial-messages')
+  if (readerIsolation) args.push(
+    '--mcp-config', '{"mcpServers":{}}', '--restricted', '--safe-mode', '--no-chrome',
+    '--no-session-persistence', '--max-turns', '1', `--system-prompt=${systemPrompt}`,
+  )
 
   if (model != null) {
     if (typeof model !== 'string' || !MODEL.test(model)) throw optionError('model must be a model id or alias')
@@ -644,6 +674,7 @@ export function createClaudeTransport(options = {}) {
     if (!handler) {
       stats.unsupportedControl++
       writeLine(controlError(requestId, `Unsupported control request subtype: ${subtype}`))
+      notice('CLAUDE_UNSUPPORTED_CONTROL', false)
       return
     }
     const abort = new AbortController()

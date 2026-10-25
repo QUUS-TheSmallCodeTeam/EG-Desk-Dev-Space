@@ -93,6 +93,45 @@ function harness({ child = fakeChild(), version = '2.1.300 (Claude Code)', env =
 
 const lastWritten = child => child.written[child.written.length - 1]
 
+test('isolated Reader argv disables built-ins without changing ordinary chat, including actual fake spawn', async () => {
+  const h = harness({ readerIsolation: true, systemPrompt: 'Read only supplied immutable text.', sessionId: SESSION, version: '2.1.300' })
+  await h.transport.start()
+  const args = h.spawnCalls[0].args
+  assert.deepEqual(args.slice(args.indexOf('--tools'), args.indexOf('--tools') + 2), ['--tools', ''])
+  assert.equal(args[args.indexOf('--mcp-config') + 1], '{"mcpServers":{}}')
+  assert.equal(args[args.indexOf('--max-turns') + 1], '1')
+  for (const flag of ['--restricted', '--safe-mode', '--no-chrome', '--no-session-persistence', '--strict-mcp-config']) {
+    assert.ok(args.includes(flag)); assert.equal(buildClaudeArgs().includes(flag), flag === '--strict-mcp-config')
+  }
+  assert.equal(buildClaudeArgs({ mcpConfig: { mcpServers: {} } }).includes('--tools'), false, 'ordinary chat retains its native tools')
+  for (const flag of claudeArgFlags(args)) assert.ok(CLAUDE_FLAG_SOURCES[flag], flag)
+  assert.equal(h.spawnCalls[0].opts.shell, false)
+  await h.transport.close()
+})
+
+test('Reader rejects inherited capability/history and managed MCP rather than relaxing isolation', () => {
+  const base = { readerIsolation: true, systemPrompt: 'Only source text.' }
+  for (const options of [{ inherit: { instructions: true } }, { inherit: { skills: true } }, { tools: ['Read'] },
+    { allowedTools: ['Bash'] }, { addDirs: ['/live'] }, { resume: SESSION }, { appendPrompt: 'extra' },
+    { mcpConfig: { mcpServers: { egdesk: { type: 'sdk', name: 'egdesk' } } } }]) {
+    assert.throws(() => buildClaudeArgs({ ...base, ...options }), { code: 'CLAUDE_OPTION_INVALID' })
+  }
+  assert.throws(() => buildClaudeArgs({ ...base, managedMcpConfig: true }), { code: 'READER_ISOLATION_UNAVAILABLE' })
+})
+
+test('pinned SDK get_context_usage is a control-only request, not a user/model prompt', async () => {
+  const h = harness({ version: '2.1.300' })
+  await h.transport.start()
+  const response = h.transport.request('get_context_usage')
+  const sent = lastWritten(h.child)
+  assert.deepEqual(sent.request, { subtype: 'get_context_usage' })
+  h.child.send({ type: 'control_response', response: { subtype: 'success', request_id: sent.request_id,
+    response: { model: 'claude-fixture', totalTokens: 20, maxTokens: 80000, rawMaxTokens: 100000 } } })
+  assert.equal((await response).maxTokens, 80000)
+  assert.equal(h.child.written.some(message => message.type === 'user'), false)
+  await h.transport.close()
+})
+
 test('default argv: stream-json both ways, stdio control channel, D-S2 isolation', () => {
   const args = buildClaudeArgs()
   assert.deepEqual(args, [

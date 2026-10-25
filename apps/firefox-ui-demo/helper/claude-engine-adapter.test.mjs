@@ -127,6 +127,44 @@ async function firstTurn(h, params = {}, text = 'Reply with exactly: ok') {
   return { threadId: started.thread.id, turnId: turn.turn.id, child: h.children.at(-1), started, turn }
 }
 
+for (const pause of ['slot', 'initialize']) for (const change of ['owner', 'epoch', 'stop', 'release', 'dispose']) {
+  test(`pending ${pause}: ${change} prevents stale user input`, async () => {
+    let releaseGate, entered = false, epoch = 1
+    const gate = new Promise(resolve => { releaseGate = resolve })
+    const processes = []
+    const h = harness({ residentLimit: 1, getEpoch: () => epoch,
+      createTransport: options => {
+        const index = processes.length
+        const proc = { options, sends: [] }; processes.push(proc)
+        return {
+          start: async () => { if (pause === 'initialize' && index === 1) { entered = true; await gate } },
+          sendUserMessage: text => { proc.sends.push(text); return true },
+          close: async () => { if (pause === 'slot' && index === 0) { entered = true; await gate }; options.onExit({ code: 0 }) },
+          info: () => ({ init: null }), interrupt: async () => {},
+        }
+      },
+    })
+    const first = await h.adapter.startThread()
+    await h.adapter.startTurn({ threadId: first.thread.id, input: [{ type: 'text', text: 'first' }] })
+    processes[0].options.onMessage({ type: 'result', subtype: 'success', is_error: false, result: 'done', session_id: first.thread.id })
+    const second = await h.adapter.startThread()
+    const pending = h.adapter.startTurn({ threadId: second.thread.id, input: [{ type: 'text', text: 'MUST_NOT_SEND' }] })
+    const rejected = assert.rejects(pending)
+    await until(() => entered)
+    let stopping
+    if (change === 'owner') h.setCheck({ ...SIGNED_IN, auth: { ...SIGNED_IN.auth, account: 'new-owner@example.com' } })
+    if (change === 'epoch') epoch++
+    if (change === 'stop') stopping = h.adapter.interruptTurn(second.thread.id, null)
+    if (change === 'release') stopping = h.adapter.releaseThread(second.thread.id)
+    if (change === 'dispose') stopping = h.adapter.dispose()
+    releaseGate()
+    await rejected; await stopping
+    assert.equal(processes.slice(1).flatMap(proc => proc.sends).length, 0)
+    if (pause === 'slot') assert.equal(processes.length, 1, 'stale scope never creates the next process')
+    await h.adapter.dispose()
+  })
+}
+
 // Deliberately reuse both CLI request_ids (and the inner MCP id) in every process.
 const permissionRequest = () => ({ type: 'control_request', request_id: 'reused-permission', request: {
   subtype: 'can_use_tool', tool_name: 'Bash', tool_use_id: 'reused-tool', input: { command: 'echo hi' },

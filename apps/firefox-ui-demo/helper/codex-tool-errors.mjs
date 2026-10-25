@@ -28,6 +28,10 @@ const CONTEXT_CODES = new Set([
   'CONTEXT_THREAD_MISMATCH', 'CONTEXT_CAPTURE_INCOMPLETE', 'CONTEXT_BINDING_MISSING',
   'CONTEXT_DELIVERY_FAILED', 'CLAUDE_CONTEXT_READER_UNSUPPORTED', 'CONTEXT_SCOPE_CHANGED',
   'UNSUPPORTED_SOURCE_FORMAT',
+  // B3: public classifications only; the fixed message below still hides
+  // provider diagnostics, input text, account information and capacity data.
+  'ENGINE_CAPACITY_UNKNOWN', 'ENGINE_CONTEXT_CONFIGURATION_ERROR',
+  'CONTEXT_CAPACITY_REQUIRED', 'PACKET_ADMISSION_REQUIRED',
   // CHAT-08: egdesk_publish_output per-answer cap (fixed message, no content).
   'OUTPUT_LIMIT',
   'PACKET_CORRUPT', 'READ_CANCELLED',

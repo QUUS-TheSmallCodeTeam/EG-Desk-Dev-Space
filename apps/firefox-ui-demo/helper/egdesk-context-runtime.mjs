@@ -1,7 +1,7 @@
 import { createHash, createHmac, randomBytes, randomUUID, timingSafeEqual } from 'node:crypto'
 import path from 'node:path'
 import { chatError, publicText } from './codex-chat-values.mjs'
-import { SmartReadEngine } from './egdesk-smart-read.mjs'
+import { SmartReadEngine, estimateTokens, readAdmission, strictReadAdmission } from './egdesk-smart-read.mjs'
 import { hashContent } from './egdesk-context-store.mjs'
 import { CONTEXT_SUGGEST_DEFAULT, RESOLVER_LIMITS, normalizeContextSuggest, resolveContext, resolverRecord, validateResolverChoice, validateResolverRequest } from './egdesk-context-resolver.mjs'
 
@@ -114,10 +114,17 @@ function argumentsFor(name, value) {
   return value
 }
 
+// No default-engine lookup: a missing Claude Reader must never select Codex.
+export function createEngineReaderFactory({ codex = null, claude = null } = {}) {
+  const readers = new Map([['codex', codex], ['claude', claude]])
+  return engineId => readers.get(engineId) || null
+}
+
 export class ContextRuntime {
-  constructor({ store, reader, getOwnerKey, getAuthority, schemaReady = () => true, now = Date.now }) {
-    Object.assign(this, { store, reader, getOwnerKey, getAuthority, schemaReady, now })
-    this.smartRead = new SmartReadEngine({ store, reader, now })
+  constructor({ store, reader, readers = {}, getReadCapacity, getOwnerKey, getAuthority, schemaReady = () => true, now = Date.now }) {
+    Object.assign(this, { store, reader, getReadCapacity, getOwnerKey, getAuthority, schemaReady, now })
+    this.readerForEngine = createEngineReaderFactory({ codex: reader, ...readers })
+    this.smartRead = new SmartReadEngine({ store, getReader: this.readerForEngine, now })
     this.runtime = null
     this.bindings = new Map()
     this.calls = new Map()
@@ -184,7 +191,42 @@ export class ContextRuntime {
   capabilities(authority = this.authority()) {
     this.assertAuthority(authority)
     const specs = this.specs(authority)
-    return { contract: 'egdesk-context-b2', ...engineOf(authority), selectedAttachments: specs.length > 0, immutableRead: specs.some(spec => spec.name === 'egdesk_read_source'), nativeReader: authority.engineId === 'codex' && Boolean(this.reader), tools: specs.map(spec => spec.name), ...(authority.engineId === 'claude' ? { expectedContextScope: this.expectedContextScope(authority) } : {}) }
+    const reader = this.readerReadiness(authority)
+    return { contract: 'egdesk-context-b2', ...engineOf(authority), selectedAttachments: specs.length > 0, immutableRead: specs.some(spec => spec.name === 'egdesk_read_source'),
+      nativeReader: specs.length > 0 && reader.ready, largeReader: specs.length > 0 && reader.ready, reader,
+      tools: specs.map(spec => spec.name), ...(authority.engineId === 'claude' ? { expectedContextScope: this.expectedContextScope(authority) } : {}) }
+  }
+
+  readEnvironment(authority, run, configuration) {
+    // Never copy capacity or usage from an HTTP request. The adapter/server
+    // supplies evidence for this selected engine/profile and parent model.
+    const evidence = this.getReadCapacity?.({ authority, run, configuration }) || {}
+    const capacity = evidence.capacity
+    const selectedModel = configuration?.model || evidence.selection?.model
+    const matches = capacity?.status === 'verified' && capacity.source === 'native-observation' && capacity.fallback === false &&
+      capacity?.scope && sameAuthority(capacity.scope, authority) && capacity.engineId === authority.engineId &&
+      capacity.model === selectedModel && typeof capacity.modelSelectionRevision === 'string' &&
+      capacity.modelSelectionRevision === evidence.selection?.revision && capacity.engineBuild === evidence.engineBuild &&
+      Number.isFinite(capacity.observedAt) && capacity.observedAt > 0 && capacity.observedAt <= this.now()
+    const observed = run?.contextUsage || [...(this.runtime?.runs?.values?.() || [])].reverse()
+      .find(item => item.conversationId === authority.conversationId && (item.engineId || 'codex') === authority.engineId)?.contextUsage
+    return { capacity: matches ? structuredClone(capacity) : undefined, readerBudget: matches ? { ...evidence.readerBudget } : undefined,
+      configuration: { model: selectedModel || null, effort: configuration?.effort || evidence.selection?.effort || null },
+      usage: { ...observed, ...(matches ? evidence.usage : {}), deliveryDebt: observed?.deliveryDebt || 0, reservedTokens: observed?.reservedTokens || 0 } }
+  }
+
+  readerReadiness(authority, run, configuration) {
+    const reader = this.readerForEngine(authority.engineId)
+    if (authority.engineId === 'codex') return { ready: Boolean(reader), engineId: 'codex', code: reader ? null : 'READER_UNAVAILABLE' }
+    if (!reader) return { ready: false, engineId: authority.engineId, code: 'CLAUDE_CONTEXT_READER_UNSUPPORTED' }
+    const environment = this.readEnvironment(authority, run, configuration)
+    try {
+      strictReadAdmission('', {}, environment.capacity, environment.usage, 1, { authority, model: configuration?.model })
+      if (!(environment.readerBudget?.maxInputTokens > environment.readerBudget?.inputOverheadTokens)) throw chatError('ENGINE_CAPACITY_UNKNOWN', 'Verified Reader input capacity is unavailable', 409)
+      const readiness = reader.readiness?.({ authority, ...environment.configuration })
+      if (readiness?.ready !== true) return { ready: false, engineId: 'claude', code: readiness?.code || 'READER_ISOLATION_UNAVAILABLE' }
+      return { ready: true, engineId: 'claude', code: null, capacitySource: environment.capacity.source, metadataHash: environment.capacity.metadataHash }
+    } catch (error) { return { ready: false, engineId: 'claude', code: error.code || 'ENGINE_CAPACITY_UNKNOWN' } }
   }
 
   expectedContextScope(authority) {
@@ -484,7 +526,7 @@ export class ContextRuntime {
     return saved.resolution
   }
 
-  async prepare(body, selectedAuthority) {
+  async prepare(body, selectedAuthority, readerConfiguration) {
     if (['ownerKey', 'epoch', 'authority'].some(key => Object.hasOwn(body, key))) reject('INVALID_CONTEXT_ROUTE', 'Context authority must be resolved by the server', 400)
     const choice = body.contextResolution === undefined ? null : validateResolverChoice(body.contextResolution)
     const ids = body.contextSnapshotIds ?? []
@@ -499,7 +541,8 @@ export class ContextRuntime {
     const authority = this.scopedAuthority(body, selectedAuthority)
     this.assertExpectedContextScope(body.expectedContextScope, authority)
     if (!this.specs(authority).length) reject('NATIVE_SCHEMA_MISMATCH', 'Context tools require the verified native app-server schema')
-    if (authority.engineId === 'claude' && caps.reader) reject('CLAUDE_CONTEXT_READER_UNSUPPORTED', 'Claude NativeReader is temporarily unsupported. Keep this draft and select a smaller complete source or explicitly choose Codex', 409)
+    const readerReadiness = this.readerReadiness(authority, null, readerConfiguration)
+    if (authority.engineId === 'claude' && caps.reader && !readerReadiness.ready) reject(readerReadiness.code, 'The selected Claude Reader is not verified ready; the draft was not sent', 409)
     if (authority.engineId === 'claude' && (caps.publishBriefing || choice)) reject('CONTEXT_TOOL_UNSUPPORTED', 'Claude B2 supports explicit selected immutable sources only', 409)
     const ownerKey = this.owner(authority)
     const resolution = choice ? this.resolution(choice, ownerKey) : null
@@ -514,7 +557,8 @@ export class ContextRuntime {
     for (const id of sourceIds) resolved.push(await this.store.getCapture(ownerKey, id))
     this.assertAuthority(authority)
     await this.validateCaptures(authority, resolved, { ...body, clientThreadId })
-    if (authority.engineId === 'claude') await this.preflight(authority, resolved)
+    const readPlan = authority.engineId === 'claude' ? await this.preflight(authority, resolved, this.readEnvironment(authority, null, readerConfiguration),
+      { readerConfiguration, allowReader: caps.reader !== false }) : null
     let resolver
     if (resolution) {
       // A chosen suggestion counts only when this turn actually captured it.
@@ -527,7 +571,7 @@ export class ContextRuntime {
       resolver = resolverRecord(choice.resolutionId, resolution, chosen)
     }
     const changes = this.pendingChanges(ownerKey, body.conversationId, sourceIds)
-    return { authority, ownerKey, clientThreadId, sourceIds, captures: resolved, capabilities: { read: allowRead, reader: caps.reader === true, publishBriefing: caps.publishBriefing === true }, ...(resolver ? { resolver } : {}), ...(changes.length ? { changes } : {}) }
+    return { authority, ownerKey, clientThreadId, sourceIds, captures: resolved, readPlan, capabilities: { read: allowRead, reader: authority.engineId === 'claude' ? readerReadiness.ready && caps.reader !== false : caps.reader === true, publishBriefing: caps.publishBriefing === true }, ...(resolver ? { resolver } : {}), ...(changes.length ? { changes } : {}) }
   }
 
   async validateCaptures(authority, captures, route = {}) {
@@ -545,16 +589,36 @@ export class ContextRuntime {
     }
   }
 
-  async preflight(authority, captures, usage = {}) {
+  async preflight(authority, captures, environment = {}, { readerConfiguration, allowReader = true, validateOnly = false } = {}) {
     const ownerKey = this.owner(authority)
     // Account for every selected source, not a fitting subset. This writes no
     // packet, delivery or Reader record and reads only immutable projections.
-    const budget = { ...usage }
+    const budget = { ...(environment.usage || {}) }
+    const projections = []
     for (const capture of captures) {
-      const record = await this.smartRead.read({ ownerKey, engineId: authority.engineId, run: { context: { captures } }, sourceId: capture.sourceId, intent: 'Read the complete selected immutable source', usage: budget, assertActive: () => this.assertAuthority(authority), prepareOnly: true })
+      projections.push(await this.store.readProjection(ownerKey, capture.sourceId))
+      this.assertAuthority(authority)
+      if (authority.engineId === 'claude' && (capture.truncated || capture.capture?.coverage?.complete !== true)) reject('CONTEXT_CAPTURE_INCOMPLETE', 'Original Claude capture is incomplete; it was not replaced or clipped', 409)
+    }
+    // Aggregate shape-weighted cost decides routing before a single result
+    // is prepared. A fitting first source must not hide the rest of the set.
+    const aggregateTokens = projections.reduce((sum, item) => sum + estimateTokens(item.text, item.manifest.shape) + 800, 0)
+    const forceReader = aggregateTokens > readAdmission('', {}, budget, captures.length).availableTokens && captures.length > 1
+    const readiness = this.readerReadiness(authority, null, readerConfiguration)
+    const plans = []
+    for (const capture of captures) {
+      if (validateOnly) continue // Restore verifies original bytes, not today's capacity or a new read.
+      const record = await this.smartRead.read({ ownerKey, engineId: authority.engineId, authority, run: { context: { captures } }, sourceId: capture.sourceId,
+        intent: 'Read the complete selected immutable source', ...environment, usage: budget, forceReader, allowReader,
+        readerUnavailableCode: readiness.code, ...environment.configuration,
+        assertActive: () => this.assertAuthority(authority), prepareOnly: true })
+      if (record.plan?.mode === 'reader' && !readiness.ready) reject(readiness.code, 'Claude Reader is not verified ready; no source was sent', 409)
+      plans.push(record.plan || { mode: record.packet.mode, sourceId: capture.sourceId })
       budget.deliveryDebt = (budget.deliveryDebt || 0) + record.estimatedTokens
     }
     this.assertAuthority(authority)
+    return { mode: plans.some(plan => plan.mode === 'reader') ? 'reader' : 'direct', aggregateTokens, attachmentCount: captures.length,
+      readerConfiguration: environment.configuration, plans }
   }
 
   // CTX-04: a plain follow-up message (no sources, no context capabilities)
@@ -607,7 +671,10 @@ export class ContextRuntime {
     if (prepared.clientThreadId && run.clientThreadId !== prepared.clientThreadId) reject('CONTEXT_THREAD_MISMATCH', 'Run belongs to another client conversation', 403)
     await this.validateCaptures(authority, prepared.captures, run)
     await this.requireThread(run.conversationId, prepared, authority)
-    const binding = await this.store.bind(prepared.ownerKey, run, prepared.sourceIds, prepared.capabilities, readerConfiguration, prepared.resolver, engineOf(authority))
+    const binding = await this.store.bind(prepared.ownerKey, run, prepared.sourceIds, prepared.capabilities,
+      { ...readerConfiguration, ...(prepared.readPlan ? { readPlan: prepared.readPlan,
+        model: readerConfiguration?.model || prepared.readPlan.readerConfiguration?.model || null,
+        effort: readerConfiguration?.effort || prepared.readPlan.readerConfiguration?.effort || null } : {}) }, prepared.resolver, engineOf(authority))
     this.assertAuthority(authority)
     const value = { ...binding, authority, ownerKey: prepared.ownerKey, controllers: new Set() }
     this.bindings.set(this.bindingKey(run), value)
@@ -636,7 +703,7 @@ export class ContextRuntime {
     const captures = []
     for (const id of sourceIds) captures.push(await this.store.getCapture(ownerKey, id))
     await this.validateCaptures(authority, captures, run)
-    if (authority.engineId === 'claude') await this.preflight(authority, captures)
+    if (authority.engineId === 'claude') await this.preflight(authority, captures, {}, { validateOnly: true })
     const matchesRun = record => record.conversationId === run.conversationId && record.runId === run.runId && record.answerId === run.answerId
     const receipts = await this.store.listRecords(ownerKey, 'deliveries', record => record.deliveryStatus === 'sent-to-app-server' && matchesRun(record.binding || {}))
     const packets = []
@@ -870,14 +937,21 @@ export class ContextRuntime {
     if (this.calls.has(key)) return this.calls.get(key)
     const controller = new AbortController()
     let dispatchAuthority
+    let checkCapacity = null
     const current = () => { try { return !dispatchAuthority || Boolean(this.assertAuthority(dispatchAuthority)) } catch { return false } }
     const assertActive = () => {
       if (controller.signal.aborted || !current() || run.status !== 'inProgress') reject('READ_CANCELLED', 'Run ended or context authority changed; no result was delivered')
       this.assertBound(run)
+      checkCapacity?.()
     }
     const operation = (async () => {
       let packetRecord = null
       let responseSent = false
+      let reservation = 0
+      const releaseReservation = () => {
+        if (reservation) run.contextUsage.reservedTokens = Math.max(0, (run.contextUsage.reservedTokens || 0) - reservation)
+        reservation = 0
+      }
       try {
         dispatchAuthority = this.authority(run)
         assertActive()
@@ -900,23 +974,55 @@ export class ContextRuntime {
           if (!binding.sourceIds.includes(args.snapshotId)) reject('CONTEXT_FORBIDDEN', 'Source is not selected for this run', 403)
           const readId = randomUUID()
           this.runtime.emit(run, 'context.read.started', { readId, sourceId: args.snapshotId })
-          const reader = binding.authority.engineId === 'codex' && binding.capabilities.reader ? this.smartRead : new SmartReadEngine({ store: this.store, reader: null })
-          packetRecord = await reader.read({ ownerKey: binding.ownerKey, engineId: binding.authority.engineId, run, sourceId: args.snapshotId, intent: args.intent, query: args.query, range: args.range, readerSessionId: args.readerSessionId, usage: run.contextUsage, model: binding.readerConfiguration?.model, effort: binding.readerConfiguration?.effort, cwd: await this.store.directory(binding.ownerKey, 'scratch'), signal: controller.signal, assertActive, emit: (name, details) => {
+          const environment = this.readEnvironment(binding.authority, run, binding.readerConfiguration)
+          if (environment.capacity) {
+            const revision = environment.capacity.modelSelectionRevision, metadataHash = environment.capacity.metadataHash
+            checkCapacity = () => {
+              const current = this.readEnvironment(binding.authority, run, binding.readerConfiguration).capacity
+              if (!current || current.modelSelectionRevision !== revision || current.metadataHash !== metadataHash) reject('ENGINE_CAPACITY_UNKNOWN', 'Selected model capacity changed during the read; no stale result was delivered', 409)
+            }
+          }
+          // Reserve synchronously, before scratch/projection/Reader awaits.
+          // Concurrent calls see this reservation even before a receipt exists.
+          const reserveAdmission = environment.capacity?.status === 'verified'
+            ? strictReadAdmission('', {}, environment.capacity, environment.usage, binding.captures.length, { authority: binding.authority, model: binding.readerConfiguration?.model })
+            : readAdmission('', {}, environment.usage, binding.captures.length)
+          if (reserveAdmission.availableTokens < 768) reject('CONTEXT_CAPACITY_REQUIRED', 'Other reads or prior deliveries consume the remaining context; no additional read was started', 409)
+          reservation = reserveAdmission.availableTokens
+          run.contextUsage ||= {}
+          run.contextUsage.reservedTokens = (run.contextUsage.reservedTokens || 0) + reservation
+          const cwd = await this.store.directory(binding.ownerKey, 'scratch')
+          assertActive()
+          packetRecord = await this.smartRead.read({ ownerKey: binding.ownerKey, engineId: binding.authority.engineId, authority: binding.authority, run, sourceId: args.snapshotId, intent: args.intent, query: args.query, range: args.range, readerSessionId: args.readerSessionId,
+            ...environment, forceReader: binding.readerConfiguration?.readPlan?.mode === 'reader' && !args.range && !args.query,
+            readerUnavailableCode: this.readerReadiness(binding.authority, run, binding.readerConfiguration).code,
+            allowReader: binding.capabilities.reader, model: environment.configuration.model, effort: environment.configuration.effort, cwd, signal: controller.signal, assertActive, emit: (name, details) => {
             if (current()) this.runtime.emit(run, name, details, event.callId)
           } })
           result = packetRecord.packet
         }
         assertActive()
+        if (packetRecord) {
+          const environment = this.readEnvironment(binding.authority, run, binding.readerConfiguration)
+          const usage = { ...environment.usage, reservedTokens: Math.max(0, (environment.usage.reservedTokens || 0) - reservation) }
+          const admission = packetRecord.packet.admission.measurement === 'verified-utf8-upper-bound'
+            ? strictReadAdmission('', {}, environment.capacity, usage, binding.captures.length, { authority: binding.authority, model: binding.readerConfiguration?.model })
+            : readAdmission('', {}, usage, binding.captures.length)
+          if (packetRecord.estimatedTokens > admission.availableTokens) reject('PACKET_ADMISSION_REQUIRED', 'Current parent context no longer admits this whole packet; it was not delivered or clipped', 409)
+        }
         const text = packetRecord ? packetRecord.deliveryText : JSON.stringify(result)
         const response = { success: true, contentItems: [{ type: 'inputText', text }] }
         if (this.runtime.respond(event.rpcId, response) === false) reject('CONTEXT_DELIVERY_FAILED', 'The engine transport did not accept the result; no delivery receipt was recorded', 409)
         responseSent = true
         if (packetRecord) {
+          // The transport has accepted these bytes. Storage failure must not
+          // make them free again or permit another read to overspend context.
+          releaseReservation()
+          run.contextUsage.deliveryDebt = (run.contextUsage.deliveryDebt || 0) + packetRecord.estimatedTokens
+          assertActive()
           const receiptId = await this.store.putRecord(binding.ownerKey, 'deliveries', { sourceId: packetRecord.packet.sourceId, packetId: packetRecord.packet.packetId, deliveryHash: packetRecord.deliveryHash, responseHash: createHash('sha256').update(JSON.stringify(response)).digest('hex'), nativeCallId: event.callId, binding: packetRecord.binding, deliveryStatus: 'sent-to-app-server', sentAt: this.now() })
           if (!current()) return
           run.context.packets.push({ packetId: packetRecord.packet.packetId, sourceId: packetRecord.packet.sourceId, hash: packetRecord.deliveryHash, receiptId, mode: packetRecord.packet.mode, coverage: packetRecord.packet.coverage, deliveryStatus: 'sent-to-app-server' })
-          run.contextUsage ||= {}
-          run.contextUsage.deliveryDebt = (run.contextUsage.deliveryDebt || 0) + packetRecord.estimatedTokens
           this.runtime.emit(run, 'context.read.completed', run.context.packets.at(-1), event.callId)
         }
       } catch (error) {
@@ -924,7 +1030,7 @@ export class ContextRuntime {
         this.runtime.emit(run, 'context.read.failed', { code: error.code || 'CONTEXT_FAILED', message: publicText(error.message, 1500), callId: event.callId, deliveryStatus: responseSent ? 'sent-record-failed' : 'not-sent' }, event.callId)
         // A failed/cancelled read never returns a made-up successful packet.
         if (!responseSent) try { this.runtime.respond(event.rpcId, { success: false, contentItems: [{ type: 'inputText', text: JSON.stringify({ error: { code: error.code || 'CONTEXT_FAILED', message: publicText(error.message, 1500) } }) }] }) } catch {}
-      } finally { this.bindings.get(this.bindingKey(run))?.controllers.delete(controller) }
+      } finally { releaseReservation(); this.bindings.get(this.bindingKey(run))?.controllers.delete(controller) }
     })()
     this.calls.set(key, operation)
     return operation
@@ -939,7 +1045,7 @@ export class ContextRuntime {
       for (const controller of binding.controllers) controller.abort()
       for (const call of this.calls.keys()) if (call.startsWith(`${key}/`)) this.calls.delete(call)
     }
-    if (!options.engineId || options.engineId === 'codex') this.reader?.disconnect(options)
+    for (const engineId of ['codex', 'claude']) if (!options.engineId || options.engineId === engineId) this.readerForEngine(engineId)?.disconnect?.({ ...options, engineId })
   }
   // Account change: suggestions and source-change records of the old account go too.
   reset(options = {}) {

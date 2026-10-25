@@ -1860,8 +1860,11 @@
       if (resolverSection) rows.push(resolverSection);
       for (const entry of run.contextEvents || []) {
         const labels = { 'context.read.started': '자료 읽기 시작', 'context.read.completed': '요청 범위의 자료 읽기 완료',
-          'context.read.failed': '자료 읽기 실패', 'reader.started': 'Reader 처리 시작', 'reader.completed': 'Reader 처리 완료', 'reader.failed': 'Reader 처리 실패' };
-        rows.push(el('p', { data: { testid: 'chat-context-activity', event: entry.event, sourceId: entry.details.sourceId || '' } }, labels[entry.event] || entry.event));
+          'context.read.failed': '자료 읽기 실패', 'reader.started': 'Reader 처리 시작', 'reader.completed': 'Reader 요청 범위 처리 완료', 'reader.failed': 'Reader 처리 실패' };
+        const failure = [thread.engineId, run.engineId, run.engine?.id].includes('claude') && entry.event.endsWith('.failed')
+          ? ChatState.claudeContextReadErrorText(entry.details.code) : null;
+        rows.push(el('p', { data: { testid: 'chat-context-activity', event: entry.event, sourceId: entry.details.sourceId || '' } },
+          `${labels[entry.event] || entry.event}${failure ? ` · ${failure}` : ''}`));
       }
       const packets = [...new Map([...(run.contextPackets || []), ...(run.contextEvents || []).filter(entry => entry.event === 'context.read.completed').map(entry => entry.details)]
         .filter(packet => packet.packetId).map(packet => [packet.packetId, packet])).values()];
@@ -7730,6 +7733,7 @@
       // Request-local expectation, not ownership. Never refresh it after an
       // async source capture: SSE may not yet report a server account switch.
       token.expectedContextScope = descriptor.expectedContextScope;
+      token.claudeContextCapabilities = { read: true, reader: descriptor.nativeReader === true, publishBriefing: false };
     }
 
     async function captureThreadInputs(thread, sources, token) {
@@ -8193,7 +8197,8 @@
         const error = new Error(typeof payload?.error === 'string' ? payload.error
           : typeof payload?.error?.message === 'string' ? payload.error.message : text || `${response.status} ${response.statusText}`);
         error.status = response.status;
-        error.code = payload?.code || null;
+        error.code = typeof payload?.code === 'string' ? payload.code
+          : typeof payload?.error?.code === 'string' ? payload.error.code : null;
         error.conversationId = payload?.conversationId || null;
         error.accepted = payload?.accepted;
         error.dispatchStatus = payload?.dispatchStatus;
@@ -9006,7 +9011,8 @@
         const thread = getCodexThreadById(state.codex, threadId);
         const run = ChatState.runsForThread(protocol, thread).findLast(ChatState.isRunBusy);
         if (!run || run.stopPending || run.stopRequested) return false;
-        const token = epochScope.begin(run.engineId || run.engine?.id || 'codex');
+        const token = epochScope.begin(run.engineId || run.engine?.id || 'codex',
+          run.engineProfileId || run.engine?.engineProfileId || ChatState.chatThreadEngineProfileId(thread, state.codex));
         run.stopPending = true;
         run.stopUnconfirmed = false;
         revokeBrowserToolRunImmediately(run, thread);
@@ -9826,7 +9832,7 @@
           if (!readiness.ready) throw new Error(readiness.reason);
         } catch (error) {
           if (epochScope.valid(token)) updateThreadById(activeThread.id, thread => ({ ...thread,
-            sendError: ChatState.claudeContextSendErrorText(error.code) || `자료를 준비하지 못해 전송하지 않았습니다: ${error.message}` }));
+            sendError: ChatState.claudeContextSendErrorText(error.code, engineId) || `자료를 준비하지 못해 전송하지 않았습니다: ${error.message}` }));
           epochScope.finish(token);
           return;
         } finally {
@@ -9882,7 +9888,7 @@
           runtimeConfig.effort = modelFields.effort;
           runtimeConfig.contextSnapshotIds = inputReferences.map(reference => reference.snapshotId);
           if (engineId === 'claude' && inputReferences.length) runtimeConfig.expectedContextScope = token.expectedContextScope;
-          runtimeConfig.contextCapabilities = engineId === 'claude' ? (inputReferences.length ? { read: true, reader: false, publishBriefing: false } : null)
+          runtimeConfig.contextCapabilities = engineId === 'claude' ? (inputReferences.length ? token.claudeContextCapabilities : null)
             : ChatState.contextCapabilitiesForRequest(activeThread, state.codex.authStatus, runtimeConfig.contextSnapshotIds);
           // CTX-03: the suggestion list this turn answered and the refs taken from it ([] when none).
           runtimeConfig.contextResolution = engineId === 'claude' ? null : ChatState.contextResolutionForSend(state.contextSuggest?.byThread?.[activeThread.id], selectedInputs,
@@ -9919,7 +9925,8 @@
             const error = new Error(typeof result.error === 'string' ? result.error
               : typeof result.error?.message === 'string' ? result.error.message : '실행 접수 상태를 확인하지 못했습니다.');
             error.status = result.accepted === false ? 400 : 0;
-            error.code = typeof result.code === 'string' ? result.code : null;
+            error.code = typeof result.code === 'string' ? result.code
+              : typeof result.error?.code === 'string' ? result.error.code : null;
             error.conversationId = result.conversationId || null;
             error.accepted = result.accepted;
             error.dispatchStatus = result.dispatchStatus;
@@ -9942,8 +9949,12 @@
           // asked again and shown again, and the message is not resent.
           const resolverText = ChatState.contextResolverErrorText(error.code);
           if (resolverText) error.message = resolverText;
-          const claudeContextText = ChatState.claudeContextSendErrorText(error.code);
-          if (claudeContextText) error.message = claudeContextText;
+          // A durable unknown outcome can carry the same code as a refusal.
+          // Do not describe it as "not sent" without a definite dispatch result.
+          const claudeContextText = ChatState.submissionFailureStatus(error) === 'failed'
+            ? ChatState.claudeContextSendErrorText(error.code, engineId) : null;
+          const claudeReadText = engineId === 'claude' ? ChatState.claudeContextReadErrorText(error.code) : null;
+          if (claudeContextText || claudeReadText) error.message = claudeContextText || claudeReadText;
           if (error.code === 'RESOLUTION_EXPIRED') expireContextSuggestions(activeThread.id);
           if (error.conversationId) {
             request.conversationId = error.conversationId;
@@ -9956,9 +9967,9 @@
             const liveRevision = ++state.codex.liveRevision;
             updateThreadById(activeThread.id, thread => ({ ...thread,
               sendError: request.status === 'unconfirmed' ? `접수 여부를 확인하지 못했습니다. 자동으로 다시 보내지 않습니다. ${error.message}` : error.message,
-              // A definite Context refusal happened before native dispatch, so
-              // its temporary outgoing row is not part of the conversation.
-              messages: claudeContextText && request.status === 'failed'
+              // A definite Claude refusal is not a sent conversation, including
+              // Reader failures. Unknown outcomes retain the row and engine lock.
+              messages: request.status === 'failed' && (engineId === 'claude' || claudeContextText)
                 ? thread.messages.filter(message => message.requestId !== requestId)
                 : thread.messages.map(message => message.requestId === requestId ? { ...message, status: request.status, liveRevision, localHistory: false } : message),
             }));

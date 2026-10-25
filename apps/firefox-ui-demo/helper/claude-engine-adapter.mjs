@@ -167,7 +167,7 @@ export function createClaudeEngineAdapter(options = {}) {
     minVersion = CLAUDE_TRANSPORT_MIN_VERSION, requiredCapabilities = [],
     onStatusChange = () => {},
     resolveExecutable = resolveClaudeExecutable, createTransport = createClaudeTransport, transportOptions = {},
-    randomUUID = nodeRandomUUID, now = Date.now,
+    randomUUID = nodeRandomUUID, now = Date.now, getEpoch = () => 0,
     setTimer = (fn, ms) => { const timer = setTimeout(fn, ms); timer.unref?.(); return timer },
     clearTimer = timer => clearTimeout(timer),
   } = options
@@ -188,6 +188,7 @@ export function createClaudeEngineAdapter(options = {}) {
   let billing = null // 'subscription' | 'apiKey' from the last system/init apiKeySource
   let lastReady = false
   let lastOwner = null
+  let ownerEpoch = 0 // includes signed-out/back-in to the same owner
 
   const deliver = (kind, value) => { for (const sink of [...sinks]) { try { sink[kind]?.(CLAUDE_ENGINE_ID, value) } catch {} } }
   const statusChanged = () => { try { onStatusChange() } catch {} }
@@ -287,7 +288,7 @@ export function createClaudeEngineAdapter(options = {}) {
     }
     const session = {
       threadId, spec, hasHistory, loaded: true, proc: null, starting: null, activeTurn: null, turnStarting: false,
-      lastUsedAt: now(), idleTimer: null, settleTimer: null,
+      lastUsedAt: now(), idleTimer: null, settleTimer: null, dispatchEpoch: 0,
       translator: createClaudeTranslator({ threadId, egdeskMcpServer: EGDESK_MCP_SERVER_NAME }),
     }
     sessions.set(threadId, session)
@@ -377,11 +378,12 @@ export function createClaudeEngineAdapter(options = {}) {
     }
   }
 
-  function ensureProcess(session) {
+  function ensureProcess(session, assertDispatch = () => {}) {
     if (session.proc && !session.proc.exited) return Promise.resolve(session.proc)
     if (session.starting) return session.starting
     session.starting = (async () => {
       await makeRoom(session)
+      assertDispatch()
       let executablePath = null
       try { executablePath = resolveExecutable(env, { platform }) } catch {}
       if (!executablePath) throw definite(engineError('ENGINE_NOT_INSTALLED'), 'CLAUDE_NOT_FOUND')
@@ -444,9 +446,11 @@ export function createClaudeEngineAdapter(options = {}) {
       session.proc = proc
       try {
         await proc.transport.start()
+        assertDispatch()
       } catch (error) {
         if (session.proc === proc) session.proc = null
         await proc.transport.close({ graceMs: 0 }).catch(() => {})
+        if (error?.definite === true) throw error
         throw claudeStartError(error)
       }
       statusChanged()
@@ -464,6 +468,7 @@ export function createClaudeEngineAdapter(options = {}) {
     const owner = ownerKey()
     const accountChanged = lastReady && ready && owner !== lastOwner
     if (!ready || accountChanged) {
+      ownerEpoch++
       for (const session of sessions.values()) void closeProcess(session, { graceMs: 0 })
     }
     if (accountChanged) deliver('connection', { ready: false })
@@ -532,6 +537,7 @@ export function createClaudeEngineAdapter(options = {}) {
       const session = typeof threadId === 'string' ? sessions.get(threadId.toLowerCase()) : null
       if (!session || !session.loaded) return { status: 'notLoaded' }
       session.loaded = false
+      session.dispatchEpoch++
       await closeProcess(session)
       return { status: 'unsubscribed' }
     },
@@ -556,11 +562,24 @@ export function createClaudeEngineAdapter(options = {}) {
         next.cwd = params.cwd
       }
       session.turnStarting = true
+      const expectedOwner = ownerKey(), expectedEpoch = ownerEpoch, externalEpoch = getEpoch(), dispatchEpoch = session.dispatchEpoch
+      const assertDispatch = () => {
+        if (ownerKey() !== expectedOwner || ownerEpoch !== expectedEpoch || getEpoch() !== externalEpoch) {
+          throw definite(chatError('ACCOUNT_CHANGED', 'Claude account scope changed before dispatch', 409))
+        }
+        if (!session.loaded || session.dispatchEpoch !== dispatchEpoch || sessions.get(threadId) !== session) {
+          throw definite(chatError('READ_CANCELLED', 'Claude dispatch was stopped before input was sent', 409))
+        }
+        assertUsable()
+        assertApiKeyEnv()
+      }
       try {
         clearIdle(session)
         if (session.proc && flagsDiffer(session.proc.flags, next)) await closeProcess(session)
+        assertDispatch()
         session.spec = next
-        const proc = await ensureProcess(session)
+        const proc = await ensureProcess(session, assertDispatch)
+        assertDispatch()
         const turnId = String(randomUUID()).toLowerCase()
         // Synchronous from here: no stdout line can arrive between these steps.
         const started = session.translator.beginTurn(turnId)
@@ -582,6 +601,13 @@ export function createClaudeEngineAdapter(options = {}) {
     async interruptTurn(threadId, turnId) {
       const session = typeof threadId === 'string' ? sessions.get(threadId.toLowerCase()) : null
       const turn = session?.activeTurn
+      // A stop while makeRoom/initialize is pending has no native turn yet.
+      // Invalidate that dispatch without inventing a successful native stop.
+      if (!turn && session?.turnStarting && turnId == null) {
+        session.dispatchEpoch++
+        await closeProcess(session, { graceMs: 0 })
+        return {}
+      }
       if (!turn || (turnId != null && turn.turnId !== turnId)) return {}
       turn.interruptRequested = true
       session.translator.markInterruptRequested()

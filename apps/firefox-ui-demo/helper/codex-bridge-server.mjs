@@ -7,7 +7,7 @@ import { CodexChatRuntime } from './codex-chat-runtime.mjs'
 import { createChatEngineAuth } from './codex-bridge-engine-auth.mjs'
 import { codexDeviceLoginPatch, codexLoginInProgressResponse, codexLoginMode, codexLoginStartParams, createCodexEngineAdapter, describeCodexEngine, isStaleLoginFailure } from './codex-engine-adapter.mjs'
 import { EngineRegistry, createEngineStatusEmitter } from './engine-registry.mjs'
-import { claudeLoginTerminalCommand, createClaudeEngineStatus } from './claude-engine-auth.mjs'
+import { claudeLoginTerminalCommand, createClaudeEngineStatus, resolveClaudeExecutable } from './claude-engine-auth.mjs'
 import { createClaudeEngineAdapter } from './claude-engine-adapter.mjs'
 import { createModelCatalogSync } from './codex-model-catalog.mjs'
 import { BrowserToolTransport } from './codex-browser-tool-transport.mjs'
@@ -34,6 +34,7 @@ import { openBridgeSettings } from './egdesk-bridge-settings.mjs'
 import { createDeskHttpHandler } from './egdesk-desk-http.mjs'
 import { createPortableHttpHandler } from './egdesk-portable-http.mjs'
 import { NativeReaderClient } from './egdesk-native-reader.mjs'
+import { ClaudeReaderClient, estimateClaudeReaderInput } from './egdesk-claude-reader.mjs'
 import { ContextRuntime } from './egdesk-context-runtime.mjs'
 import { createContextHttpHandler } from './egdesk-context-http.mjs'
 import { buildCodexAppServerLaunch, inspectNativeCapabilities, preflightOwnedAppServer, resolveCodexExecutable, NATIVE_SCHEMA_VERSION } from './egdesk-native-capabilities.mjs'
@@ -175,8 +176,37 @@ const contextStore = new ImmutableContextStore({
   allowedRoots: process.env.EGDESK_CONTEXT_ROOTS ? process.env.EGDESK_CONTEXT_ROOTS.split(path.delimiter).filter(Boolean) : [process.cwd()],
 })
 const nativeReader = new NativeReaderClient({ request: (method, params) => appServerRequest(method, params), respond: nativeRespond, getOwnerKey: () => publicAuthIdentityKey(authState) })
+// Stock get_context_usage supplies partial window/usage metadata, not the
+// verified tool-output/estimator and managed-policy evidence strict B3 needs.
+// No fixture, model-name table, caller window or Codex metadata is a substitute.
+// Wire authoritative exports here when available; ordinary chat/B2 stay ready.
+const getClaudeReadCapacity = () => null
+const getClaudeReaderIsolationProof = () => null
+let claudeReaderClient = null
+const claudeReader = {
+  estimateInput: estimateClaudeReaderInput,
+  readiness(options) {
+    if (!getClaudeReadCapacity(options)) return { ready: false, engineId: 'claude', code: 'ENGINE_CAPACITY_UNKNOWN' }
+    return this.client().readiness(options)
+  },
+  client() {
+    if (!claudeReaderClient) {
+      const executablePath = resolveClaudeExecutable(process.env)
+      if (!executablePath) throw chatError('ENGINE_NOT_INSTALLED', 'Claude Reader executable is unavailable', 409)
+      claudeReaderClient = new ClaudeReaderClient({ executablePath, getScope: () => chat.contextAuthority({ engineId: 'claude' }),
+        snapshot: () => claudeEngineStatus.snapshot(), getReadCapacity: getClaudeReadCapacity, getIsolationProof: getClaudeReaderIsolationProof })
+    }
+    return claudeReaderClient
+  },
+  read(options) {
+    if (!getClaudeReadCapacity(options)) throw chatError('ENGINE_CAPACITY_UNKNOWN', 'Strict Claude Reader capacity is not verified; no native process was started', 409)
+    return this.client().read(options)
+  },
+  disconnect(options) { return claudeReaderClient?.disconnect(options) },
+}
 const contexts = new ContextRuntime({
-  store: contextStore, reader: nativeReader, getOwnerKey: () => publicAuthIdentityKey(authState),
+  store: contextStore, reader: nativeReader, readers: { claude: claudeReader }, getReadCapacity: getClaudeReadCapacity,
+  getOwnerKey: () => publicAuthIdentityKey(authState),
   getAuthority: hints => chat.contextAuthority(hints),
   schemaReady: authority => authority?.engineId === 'claude'
     ? claudeEngine.isReady() && claudeEngine.capabilities().has('dynamicTools')

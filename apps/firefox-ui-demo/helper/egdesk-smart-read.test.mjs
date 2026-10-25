@@ -4,7 +4,8 @@ import { mkdtemp, rm } from 'node:fs/promises'
 import path from 'node:path'
 import os from 'node:os'
 import { ImmutableContextStore, hashContent } from './egdesk-context-store.mjs'
-import { SmartReadEngine, readAdmission, partitionText } from './egdesk-smart-read.mjs'
+import { SmartReadEngine, readAdmission, strictReadAdmission, partitionText } from './egdesk-smart-read.mjs'
+import { estimateClaudeReaderInput } from './egdesk-claude-reader.mjs'
 
 async function setup(t, { failAt = -1, maxPartitionsPerCall = 4, partitionChars = 12000, truncated = false } = {}) {
   const dir = await mkdtemp(path.join(os.tmpdir(), 'egdesk-read-test-'))
@@ -13,12 +14,14 @@ async function setup(t, { failAt = -1, maxPartitionsPerCall = 4, partitionChars 
   const text = Array.from({ length: 400 }, (_, i) => `Source line ${i}: selected evidence for reading.`).join('\n')
   const [capture] = await store.captureAttachments('owner', { clientThreadId: 'ui', attachments: [{ id: 'source', kind: 'browser', label: 'Source', sourceRef: {}, captureScope: { type: 'document-text' }, content: { mime: 'text/plain', text, truncated } }] })
   const reads = []
-  const reader = { read: async options => {
+  const reader = { estimateInput: estimateClaudeReaderInput, read: async options => {
     reads.push(options)
     if (reads.length === failAt) throw Object.assign(new Error('Reader failure'), { code: 'READER_FAILED' })
     const quote = options.text.slice(0, 20)
     const inputText = JSON.stringify({ sourceId: options.sourceId, sourceHash: options.sourceHash, sourceText: options.text, range: options.range, intent: options.intent })
-    return { summary: 'A bounded source reading summary.', structure: ['Source structure'], selectedSpans: quote ? [{ quote, startOffset: options.range.startOffset, endOffset: options.range.startOffset + quote.length }] : [], nativeThreadId: 'test-native-reader', nativeTurnId: `test-native-turn-${reads.length}`, inputPayload: { text: inputText, hash: hashContent(inputText) } }
+    return { summary: 'A bounded source reading summary.', structure: ['Source structure'], selectedSpans: quote ? [{ quote, startOffset: options.range.startOffset, endOffset: options.range.startOffset + quote.length }] : [], nativeThreadId: 'test-native-reader', nativeTurnId: `test-native-turn-${reads.length}`, inputPayload: { text: inputText, hash: hashContent(inputText) },
+      ...(options.engineId === 'claude' ? { receipt: { ...options.authority, sourceId: options.sourceId, sourceHash: options.sourceHash, range: options.range,
+        fragmentHash: hashContent(options.text), inputPayloadHash: hashContent(inputText), nativeSessionId: 'test-native-reader', nativeResultId: `test-native-turn-${reads.length}` } } : {}) }
   } }
   const engine = new SmartReadEngine({ store, reader, maxPartitionsPerCall, partitionChars })
   const events = []
@@ -161,4 +164,93 @@ test('Claude rejects truncated captured coverage even for a fitting direct range
   await assert.rejects(h.engine.read({ ...h.options, engineId: 'claude', range: { startLine: 1, endLine: 1 } }), e => e.code === 'CONTEXT_CAPTURE_INCOMPLETE')
   assert.equal(h.reads.length, 0)
   assert.equal((await h.store.listRecords('owner', 'packets')).length, 0)
+})
+
+const verifiedCapacity = () => ({ status: 'verified', engineId: 'claude', source: 'native-observation', fallback: false,
+  scope: { engineId: 'claude', engineProfileId: 'test', ownerKey: 'owner', epoch: 1 },
+  model: 'fixture-model', engineBuild: 'fixture-build', metadataHash: hashContent('fixture metadata, not production evidence'),
+  usableContextWindow: 64000, toolOutputLimitTokens: 8192, inputOverheadTokens: 128,
+  estimator: { kind: 'utf8-upper-bound', verified: true, version: 'fixture-utf8-v1' } })
+const strictOptions = () => ({ engineId: 'claude', authority: { engineId: 'claude', engineProfileId: 'test', ownerKey: 'owner', epoch: 1 },
+  capacity: verifiedCapacity(), readerBudget: { maxInputTokens: 4800, inputOverheadTokens: 400 }, usage: { usedTokens: 2000 } })
+
+test('B3 strict capacity never treats an unknown, fallback, documented or caller window as native evidence', () => {
+  for (const capacity of [null, {}, { ...verifiedCapacity(), fallback: true }, { ...verifiedCapacity(), source: 'documented-model-policy' },
+    { ...verifiedCapacity(), estimator: { kind: 'utf8-upper-bound', verified: false } }]) {
+    assert.throws(() => strictReadAdmission('text', {}, capacity, { modelContextWindow: 1e9, usedTokens: 0 }), { code: 'ENGINE_CAPACITY_UNKNOWN' })
+  }
+  assert.throws(() => strictReadAdmission('text', {}, verifiedCapacity()), { code: 'ENGINE_CAPACITY_UNKNOWN' })
+  const first = strictReadAdmission('text', {}, verifiedCapacity(), { usedTokens: 50000 })
+  const busy = strictReadAdmission('text', {}, verifiedCapacity(), { usedTokens: 50000, reservedTokens: 1000 })
+  assert.ok(busy.availableTokens < first.availableTokens)
+  assert.equal(first.measurement, 'verified-utf8-upper-bound')
+})
+
+test('B3 and Codex prepareOnly cannot execute Reader, mutate sessions, emit lifecycle or write any record', async t => {
+  const h = await setup(t)
+  const engine = new SmartReadEngine({ store: h.store, getReader: () => h.engine.reader })
+  for (const extra of [{}, strictOptions()]) {
+    const result = await engine.read({ ...h.options, ...extra, prepareOnly: true })
+    assert.equal(result.plan.mode, 'reader')
+    assert.equal(result.plan.coverage, 'pending')
+    assert.ok(result.plan.totalPartitions > 1)
+  }
+  assert.equal(h.reads.length, 0)
+  assert.equal(h.events.length, 0)
+  assert.equal(engine.sessions.size, 0)
+  for (const kind of ['packets', 'deliveries', 'readers']) assert.deepEqual(await h.store.listRecords('owner', kind), [])
+})
+
+test('B3 huge source is partitioned by verified Reader input budget and continues all immutable ranges', async t => {
+  const h = await setup(t)
+  const engine = new SmartReadEngine({ store: h.store, getReader: id => id === 'claude' ? h.engine.reader : null, maxPartitionsPerCall: 2 })
+  const options = { ...h.options, ...strictOptions() }
+  let record = await engine.read(options)
+  assert.equal(record.packet.coverage.complete, false)
+  assert.equal(record.packet.coverage.reviewedPartitions, 2)
+  const readerSessionId = record.packet.reader.sessionId
+  while (record.packet.coverage.continuation) record = await engine.read({ ...options, readerSessionId })
+  assert.equal(record.packet.coverage.complete, true)
+  const coverage = await h.store.getRecord('owner', 'readers', record.packet.coverage.manifestId)
+  const fragments = []
+  for (const part of coverage.completed) {
+    const receipt = await h.store.getRecord('owner', 'readers', part.recordId)
+    const input = JSON.parse(receipt.inputPayload.text)
+    assert.equal(input.sourceText, h.text.slice(part.startOffset, part.endOffset))
+    assert.ok(Buffer.byteLength(input.sourceText) <= 4400)
+    fragments.push(input.sourceText)
+  }
+  assert.equal(fragments.join(''), h.text)
+  assert.equal(record.packet.reader.engineId, 'claude')
+  assert.equal(record.packet.reader.purpose, 'source-reading')
+})
+
+test('B3 continuation refuses engine/profile/epoch/conversation drift and refinement rereads the original source', async t => {
+  const h = await setup(t)
+  const engine = new SmartReadEngine({ store: h.store, getReader: () => h.engine.reader })
+  const options = { ...h.options, ...strictOptions() }
+  const first = await engine.read(options)
+  const readerSessionId = first.packet.reader.sessionId
+  for (const change of [{ authority: { ...options.authority, epoch: 2 } }, { authority: { ...options.authority, engineProfileId: 'other' } },
+    { run: { ...options.run, conversationId: 'other' } }, { engineId: 'codex' }]) {
+    await assert.rejects(engine.read({ ...options, ...change, readerSessionId }), { code: 'READER_SESSION_MISMATCH' })
+  }
+  const count = h.reads.length
+  const refined = await engine.read({ ...options, readerSessionId, intent: 'Inspect exact original evidence for another question' })
+  assert.equal(refined.packet.lineage.refines, first.packet.packetId)
+  assert.equal(h.reads[count].text, h.text.slice(0, h.reads[count].range.endOffset))
+  assert.match(h.reads[count].intent, /another question/)
+})
+
+test('Reader integration preserves original quote identities/ranges despite JSON quotes and newlines', async t => {
+  const h = await setup(t)
+  const original = 'First "quoted" line\nSecond line\\path\n'.repeat(1000)
+  const [capture] = await h.store.captureAttachments('owner', { clientThreadId: 'ui', attachments: [{ kind: 'browser', label: 'Quotes', sourceRef: {}, captureScope: { type: 'document-text' }, content: { text: original, truncated: false } }] })
+  const record = await h.engine.read({ ...h.options, sourceId: capture.sourceId })
+  assert.ok(record.packet.selectedSpans.length)
+  for (const span of record.packet.selectedSpans) {
+    assert.match(span.spanId, /^[a-f0-9]{64}$/)
+    assert.equal(original.slice(span.startOffset, span.endOffset), span.quote)
+  }
+  assert.ok(record.packet.selectedSpans.some(span => span.quote.includes('"')))
 })

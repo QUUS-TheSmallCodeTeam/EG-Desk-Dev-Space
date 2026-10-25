@@ -25,28 +25,33 @@ export function claudeFixtureOptions(argv, env = process.env, now = Date.now()) 
   const options = new Map();
   for (let i = 0; i < argv.length; i += 2) {
     const key = argv[i], value = argv[i + 1];
-    assert.ok(['--profile', '--deadline-utc'].includes(key) && value && !value.startsWith('--') && !options.has(key),
-      'Expected --profile PATH and optional --deadline-utc UTC_ISO_TIMESTAMP');
+    assert.ok(['--profile', '--deadline-utc', '--reader-mode'].includes(key) && value && !value.startsWith('--') && !options.has(key),
+      'Expected --profile PATH, optional --deadline-utc UTC_ISO_TIMESTAMP and --reader-mode unavailable|synthetic');
     options.set(key, value);
   }
   const profile = options.get('--profile');
   assert.ok(profile && path.isAbsolute(profile), 'An explicit absolute QA --profile is required');
   const bridge = qaBridgeConfig(env);
   assert.ok(bridge.fixture && env.EGDESK_QA_CLAUDE_FIXTURE === '1', 'Explicit isolated Claude fixture mode required');
-  assert.ok(env.EGDESK_QA_REAL_TURN == null || env.EGDESK_QA_REAL_TURN === '0', 'Real-provider mode is forbidden');
+  assert.equal(env.EGDESK_QA_REAL_TURN, '0', 'Explicit real-provider turn zero is required');
   assert.equal(env.MOZ_HEADLESS, '1', 'Claude fixture UI proof is headless-only');
   assert.equal(String(env.EGDESK_MARIONETTE_PORT || '2829'), '2829', 'Only Main-owned QA Marionette 2829 is allowed');
   assert.ok(![2828, 2829, 6000, 6001].includes(bridge.port), 'Fixture must not share an automation port');
+  assert.equal(bridge.port, 39220, 'Only the Main-owned fixture port 39220 is allowed');
   assert.ok(typeof env.EGDESK_QA_FIXTURE_TOKEN === 'string' && env.EGDESK_QA_FIXTURE_TOKEN.length >= 16, 'Fixture control token required');
   const utc = options.get('--deadline-utc');
   if (utc) assert.match(utc, /^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}(?:\.\d{1,3})?Z$/, 'Deadline must be an explicit UTC ISO timestamp');
   const deadlineMs = utc ? Date.parse(utc) : now + 6 * 60_000;
   assert.ok(Number.isFinite(deadlineMs) && deadlineMs > now && deadlineMs - now <= 15 * 60_000,
     'Deadline must be in the future and within 15 minutes');
-  return { profile, bridge, deadlineMs };
+  const readerMode = options.get('--reader-mode') || 'unavailable';
+  assert.ok(['unavailable', 'synthetic'].includes(readerMode), 'Reader mode must be unavailable or explicitly synthetic');
+  assert.equal(env.EGDESK_QA_CLAUDE_READER_FIXTURE === '1', readerMode === 'synthetic', 'Verifier and fixture Reader opt-in must match');
+  assert.ok(env.EGDESK_QA_CLAUDE_READER_FIXTURE == null || ['0', '1'].includes(env.EGDESK_QA_CLAUDE_READER_FIXTURE), 'Invalid Reader fixture gate');
+  return { profile, bridge, deadlineMs, readerMode };
 }
 
-export function assertClaudeFixturePeer(peer, { profile, bridge }) {
+export function assertClaudeFixturePeer(peer, { profile, bridge, readerMode }) {
   assert.equal(peer.fixture, true);
   assert.equal(peer.claudeFixture, true, 'Start the separate Claude fixture, not the Chat72 fixture');
   assert.equal(peer.profile, profile, 'Fixture must belong to the exact QA profile');
@@ -54,6 +59,8 @@ export function assertClaudeFixturePeer(peer, { profile, bridge }) {
   assert.equal(peer.port, bridge.port);
   assert.equal(peer.origin, bridge.origin);
   assert.equal(peer.providerTurns, 0);
+  if (readerMode === 'synthetic') assert.equal(peer.claudeReaderFixture, true, 'B3 proof requires the explicitly synthetic Reader fixture');
+  else assert.notEqual(peer.claudeReaderFixture, true, 'B2 proof cannot silently run against a B3 fixture');
 }
 
 export function assertClaudeReady(state) {
@@ -221,8 +228,8 @@ export function assertClaudeContextBlocked(before, after, beforeFixture, afterFi
   assertNoAutomaticRequests(beforeFixture, afterFixture);
 }
 
-export function assertClaudeReaderBlocked(before, after, beforeFixture, afterFixture) {
-  assertContextDraftPreserved(before, after, CLAUDE_READER_ERROR);
+export function assertClaudeReaderBlocked(before, after, beforeFixture, afterFixture, { message = CLAUDE_READER_ERROR, code = 'CLAUDE_CONTEXT_READER_UNSUPPORTED' } = {}) {
+  assertContextDraftPreserved(before, after, message);
   for (const key of ['sends', 'resumes', 'interrupts', 'approvals', 'userInputs', 'authWrites', 'blockedContexts']) {
     assert.deepEqual(afterFixture.observed[key], beforeFixture.observed[key], `Rejected source cannot cause ${key}`);
   }
@@ -237,10 +244,10 @@ export function assertClaudeReaderBlocked(before, after, beforeFixture, afterFix
   assert.equal(attempt.request.attachments.length, 1);
   assert.equal(attempt.request.attachments[0].sourceRef.path, before.thread.inputSources[0].sourceRef.path);
   assert.deepEqual(afterFixture.observed.contextRefusals, [...beforeFixture.observed.contextRefusals,
-    { route: '/chat/send', code: 'CLAUDE_CONTEXT_READER_UNSUPPORTED' }]);
+    { route: '/chat/send', code }]);
 }
 
-export function assertClaudeContextRoute(request, thread) {
+export function assertClaudeContextRoute(request, thread, { reader = false } = {}) {
   assert.equal(request.engineId, 'claude');
   assert.equal(request.engineProfileId, 'claude-default');
   assert.equal(request.engineProfileId, thread.engineProfileId);
@@ -251,15 +258,15 @@ export function assertClaudeContextRoute(request, thread) {
     assert.ok(!Object.hasOwn(request, key), `Unexpected UI authority or browser/OS grant: ${key}`);
   }
   if (request.contextCapabilities != null) assert.deepEqual(request.contextCapabilities,
-    { read: true, reader: false, publishBriefing: false });
+    { read: true, reader, publishBriefing: false });
 }
 
-export function assertClaudeContextCapture(before, after, thread, run, sourceFile, originalText) {
+export function assertClaudeContextCapture(before, after, thread, run, sourceFile, originalText, options) {
   assert.equal(after.observed.sends.length, before.observed.sends.length + 1);
   assert.equal(after.observed.captures.length, before.observed.captures.length + 1);
   const sent = after.observed.sends.at(-1), attempt = after.observed.captures.at(-1);
-  assertClaudeContextRoute(sent, thread);
-  assertClaudeContextRoute(attempt.request, thread);
+  assertClaudeContextRoute(sent, thread, options);
+  assertClaudeContextRoute(attempt.request, thread, options);
   assert.equal(sent.expectedContextScope, attempt.request.expectedContextScope, 'Capture and send must retain the same expectation, not silently refresh it');
   assert.equal(sent.runId, run.runId);
   assert.equal(run.clientThreadId, thread.wireClientThreadId);
@@ -302,6 +309,105 @@ export function assertClaudeImmutablePacket(delivery, captured, run, originalTex
   assert.deepEqual(value, { fixtureOnly: true, tool: 'egdesk_read_source', sourceId: captured.sourceId,
     snapshotId: captured.sourceId, sourceHash: captured.hash, version: captured.version, text: originalText, coverage });
   assert.deepEqual(packet.coverage, coverage);
+}
+
+export function assertClaudeReaderDescriptor(descriptor, thread, reader) {
+  assert.equal(descriptor.contract, 'egdesk-context-b2', 'B3 must preserve B2 readiness');
+  assert.equal(descriptor.engineId, 'claude');
+  assert.equal(descriptor.engineProfileId, thread.engineProfileId);
+  assert.equal(descriptor.selectedAttachments, true);
+  assert.equal(descriptor.immutableRead, true);
+  assert.equal(descriptor.nativeReader, reader, 'Reader availability must be explicit server evidence');
+  if (reader || descriptor.largeReader != null) {
+    assert.equal(descriptor.largeReader, reader);
+    assert.equal(descriptor.reader?.ready, reader);
+    assert.equal(descriptor.reader?.engineId, 'claude');
+    if (reader) assert.equal(descriptor.reader.code, null);
+    else assert.ok(['CLAUDE_CONTEXT_READER_UNSUPPORTED', 'ENGINE_CAPACITY_UNKNOWN', 'READER_ISOLATION_UNAVAILABLE'].includes(descriptor.reader.code));
+  }
+  assert.deepEqual([...descriptor.tools].sort(), [...CLAUDE_CONTEXT_TOOLS].sort());
+  assertClaudeContextRoute({ ...thread, clientThreadId: thread.wireClientThreadId,
+    expectedContextScope: descriptor.expectedContextScope }, thread);
+}
+
+export function assertClaudeReaderProcessed(before, after, run, captured, originalText, reviewed) {
+  assert.deepEqual(after.context.deliveries, before.context.deliveries, 'Reader processed is not Main received');
+  assert.equal(after.context.readerProcessed.length, (before.context.readerProcessed?.length || 0) + 1);
+  const records = after.context.readerProcessed.filter(row => row.runId === run.runId);
+  assert.equal(records.length, reviewed);
+  let nextOffset = 0;
+  for (const record of records) {
+    assert.equal(record.sourceId, captured.sourceId);
+    assert.equal(record.fixtureOnly, true);
+    assert.equal(record.adapterExecutionVerified, false);
+    assert.equal(record.inputPayload.hash, fingerprintQaBytes(record.inputPayload.text).sha256);
+    const input = JSON.parse(record.inputPayload.text);
+    assert.equal(input.fixtureOnly && input.synthetic, true);
+    assert.equal(input.sourceId, captured.sourceId);
+    assert.equal(input.sourceHash, captured.hash);
+    assert.equal(input.range.startOffset, nextOffset, 'Assigned source partitions must be contiguous');
+    assert.ok(Number.isInteger(input.range.endOffset) && input.range.endOffset > nextOffset && input.range.endOffset <= originalText.length);
+    assert.equal(input.sourceText, originalText.slice(nextOffset, input.range.endOffset));
+    nextOffset = input.range.endOffset;
+  }
+  const event = after.observed.events.at(-1);
+  assert.equal(event.event, 'reader.completed');
+  assert.equal(event.runId, run.runId);
+  assert.equal(event.details.deliveryStatus, 'prepared');
+  assert.equal(event.details.coverage.complete, nextOffset === originalText.length, 'A clipped summary cannot establish complete input coverage');
+}
+
+export function assertClaudeReaderPacket(delivery, captured, run, originalText, { reviewed, total, sessionId }) {
+  assert.equal(delivery.fixtureOnly, true);
+  assert.equal(delivery.sourceId, captured.sourceId);
+  assert.equal(delivery.toolName, 'egdesk_read_source');
+  assert.equal(captured.hash, fingerprintQaBytes(originalText).sha256);
+  const packet = delivery.packet, value = JSON.parse(packet.text);
+  assert.equal(packet.role, 'agent_input');
+  assert.equal(packet.mode, 'qa-fixture-claude-reader');
+  assert.equal(packet.hash, fingerprintQaBytes(packet.text).sha256);
+  assert.equal(packet.deliveryStatus, 'sent-to-app-server'); // Synthetic receipt only.
+  assert.deepEqual(packet.binding, { conversationId: run.conversationId, runId: run.runId, answerId: run.answerId });
+  assert.equal(value.fixtureOnly && value.synthetic, true);
+  assert.equal(value.adapterExecutionVerified, false);
+  assert.equal(value.mode, 'reader');
+  assert.equal(value.tool, 'egdesk_read_source');
+  assert.equal(value.sourceId, captured.sourceId);
+  assert.equal(value.snapshotId, captured.sourceId);
+  assert.equal(value.sourceHash, captured.hash);
+  assert.equal(value.version, captured.version);
+  assert.ok(Number.isInteger(total) && total > 1 && Number.isInteger(reviewed) && reviewed > 0 && reviewed <= total);
+  assert.equal(value.summary.text, `Synthetic QA Reader: ${reviewed}/${total} partitions processed; no model invoked.`);
+  assert.deepEqual(value.summary.structure, [{ label: 'QA coverage only', text: 'Not a real model summary or whole-source quotation.' }]);
+  assert.deepEqual(value.selectedSpans, [{ startOffset: 0, endOffset: Math.min(80, originalText.length), quote: originalText.slice(0, 80) }]);
+  assert.deepEqual(value.coverage, { scope: 'capture', sourceId: captured.sourceId, complete: reviewed === total,
+    sourceTruncated: false, reviewedPartitions: reviewed, totalPartitions: total,
+    continuation: reviewed < total ? { readerSessionId: sessionId, nextPartition: reviewed } : null });
+  assert.deepEqual(packet.coverage, value.coverage);
+  assert.deepEqual(value.reader, { sessionId, revision: reviewed });
+  assert.deepEqual(value.omissionPolicy, { type: 'reader-summary', fixtureOnly: true });
+  assert.ok(!Object.hasOwn(value, 'text') && !Object.hasOwn(value, 'nativeThreadId'), 'A synthetic summary is not a raw source or native-model receipt');
+}
+
+export function claudeReaderPartialCaptureLabel(reviewed, total) {
+  assert.ok(Number.isSafeInteger(total) && total > 1 && Number.isSafeInteger(reviewed) && reviewed > 0 && reviewed < total,
+    'Partial Reader capture requires a completed step before the final partition');
+  return `claude-reader-partial-structured-summary-step-${reviewed}-of-${total}`;
+}
+
+export function assertClaudeReaderEnded(before, after, run, captured, status) {
+  assert.ok(['failed', 'interrupted'].includes(status));
+  const ended = after.runs.find(row => row.runId === run.runId);
+  assert.equal(ended.status, status);
+  assert.deepEqual(ended.contextCaptures, [captured]);
+  assert.equal(ended.messages.some(row => row.role === 'assistant'), false);
+  assert.deepEqual(after.observed.sends, before.observed.sends, 'No automatic fallback send');
+  assert.deepEqual(after.observed.captures, before.observed.captures, 'No automatic recapture');
+  assert.deepEqual(after.observed.resumes, before.observed.resumes, 'No automatic fallback resume');
+  assert.deepEqual(after.context.deliveries, before.context.deliveries, 'Failed/cancelled Reader must not deliver');
+  assert.equal(after.observed.events.some(row => row.runId === run.runId &&
+    (row.event === 'context.read.completed' || row.event === 'run.completed' && row.details.status === 'completed')), false);
+  assert.equal(after.providerTurns, 0);
 }
 
 // Read-only checkbox observations; all changes below go through MCP click.
@@ -376,6 +482,7 @@ export const observeClaudeUi = harness => chrome(harness, () => {
   const nodes = selector => [...document.querySelectorAll(selector)].filter(shown);
   return {
     codexLoggedIn: codex.authStatus?.isLoggedIn,
+    threadIds: codex.threads.map(item => item.id),
     thread: thread && { id: thread.id, title: thread.title, engineId: ChatState.chatThreadEngineId(thread, codex),
       engineProfileId: ChatState.chatThreadEngineProfileId(thread, codex),
       wireClientThreadId: ChatState.clientThreadBinding(thread), conversationId: thread.conversationId || null,
@@ -390,6 +497,7 @@ export const observeClaudeUi = harness => chrome(harness, () => {
       status: node.dataset.status, text: node.textContent, options: [...node.querySelectorAll('[data-testid="chat-user-input-option"]')].map(control => ({
         questionId: control.dataset.questionId, optionIndex: control.dataset.optionIndex, type: control.type, checked: control.checked, disabled: control.disabled })) })),
     rates: nodes('[data-testid="chat-run-rate-limit"]').map(node => ({ level: node.dataset.level, text: node.textContent })),
+    contextActivities: nodes('[data-testid="chat-context-activity"]').map(node => ({ event: node.dataset.event, sourceId: node.dataset.sourceId, text: node.textContent })),
     alerts: nodes('.egd-codex-error[role="alert"]').map(node => node.textContent),
     attachments: nodes('[data-testid="chat-attachment"]').map(node => ({ id: node.dataset.sourceId, text: node.textContent })),
   };
@@ -464,6 +572,7 @@ export async function runClaudeFixtureFlow(options) {
   validateQaFixtureIsolation(options.profile);
   const manifest = assertQaFixtureManifest(options.profile);
   const token = process.env.EGDESK_QA_FIXTURE_TOKEN;
+  const readerEnabled = options.readerMode === 'synthetic';
   const deadline = () => assert.ok(Date.now() < options.deadlineMs, 'Claude fixture UTC deadline reached');
   const readFixture = async () => {
     deadline();
@@ -474,6 +583,18 @@ export async function runClaudeFixtureFlow(options) {
   const control = async (runId, phase) => {
     await readFixture();
     return loopbackJson('/__qa/release', { method: 'POST', token, body: { runId, phase } });
+  };
+  const contextControl = async (runId, phase) => {
+    await readFixture();
+    return loopbackJson('/__qa/context-release', { method: 'POST', token, body: { runId, phase } });
+  };
+  const readerDescriptor = async (thread, ready) => {
+    deadline();
+    const descriptor = await loopbackJson(`/context/capabilities?${new URLSearchParams({ engineId: 'claude',
+      engineProfileId: thread.engineProfileId, clientThreadId: thread.wireClientThreadId,
+      ...(thread.conversationId ? { conversationId: thread.conversationId } : {}) })}`);
+    assertClaudeReaderDescriptor(descriptor, { ...thread, engineId: 'claude' }, ready);
+    return descriptor;
   };
   const health = await loopbackJson('/health');
   assertClaudeFixturePeer(health, options);
@@ -488,8 +609,10 @@ export async function runClaudeFixtureFlow(options) {
     result.qaOnly = true;
     result.adapterExecutionVerified = false;
     result.osExecutionVerified = false;
+    result.readerMode = options.readerMode;
+    result.actualModelReadVerified = false;
     result.deadlineUtc = new Date(options.deadlineMs).toISOString();
-    result.scope = 'Visible Claude UI and selected immutable Context receipts with Codex offline; synthetic fixture only, not actual model reading, permission persistence, full restart or backend adapter proof';
+    result.scope = 'Visible Claude UI and selected immutable Context/optional bounded Reader receipts with Codex offline; synthetic fixture only, not actual model reading, permission persistence, full restart, capacity discovery or backend adapter proof';
     result.fixtureSetup = ['owned headless viewport', 'new-room QA title metadata',
       'two exclusive manifest-owned text files and file-URL cards', 'native Dock return after owned file-card camera settlement',
       'controlled mutation of the owned small source after capture'];
@@ -662,7 +785,9 @@ export async function runClaudeFixtureFlow(options) {
     const originalText = `QA_CLAUDE_V1_${nonce}\nImmutable selected source.\nNo model/provider was invoked.`;
     const changedText = `QA_CLAUDE_V2_${nonce}\nThe live file changed after the capture.\nDo not substitute these bytes.`;
     fs.writeFileSync(sourceFile, originalText, { flag: 'wx', mode: 0o600 });
-    fs.writeFileSync(largeFile, `QA_CLAUDE_LARGE_${nonce}\n${'Complete fixture source requiring Smart Read.\n'.repeat(600)}`, { flag: 'wx', mode: 0o600 });
+    const largeOriginal = `QA_CLAUDE_LARGE_${nonce}\n${'Complete fixture source requiring Smart Read.\n'.repeat(600)}`;
+    const largeChanged = `QA_CLAUDE_LARGE_CHANGED_${nonce}\n${'Changed live source must not replace captured Reader input.\n'.repeat(600)}`;
+    fs.writeFileSync(largeFile, largeOriginal, { flag: 'wx', mode: 0o600 });
     const originalFile = observeQaFixtureFile(options.profile, sourceFile);
     observeQaFixtureFile(options.profile, largeFile);
     const ownedUrls = [sourceFile, largeFile].map(file => pathToFileURL(file).href);
@@ -688,12 +813,13 @@ export async function runClaudeFixtureFlow(options) {
       return ui;
     };
     const contextThread = await newClaude('context-selected');
+    await readerDescriptor(contextThread, readerEnabled);
     await attach(contextThread, scene[0], sourceFile);
     check('actual attach picker selects only the owned source; selection alone does not capture or send', true);
     const beforeContext = await readFixture();
     const contextRun = await send(contextThread, 'CONTEXT', 'immutable-selected');
     const contextBound = await readFixture();
-    const captured = assertClaudeContextCapture(beforeContext, contextBound, contextThread, contextRun, sourceFile, originalText);
+    const captured = assertClaudeContextCapture(beforeContext, contextBound, contextThread, contextRun, sourceFile, originalText, { reader: readerEnabled });
     check('actual send binds the exact source/hash/version and only list/read tools to the selected Claude thread', true);
 
     // Strict fixture setup 4: mutate only the file created above, not the
@@ -711,15 +837,23 @@ export async function runClaudeFixtureFlow(options) {
     assertClaudeImmutablePacket(delivery, captured, contextRun, originalText, changedText);
     check('synthetic read receipt retains the complete original source/version after live-file mutation; not a model-read claim', true);
 
-    const inspectHistory = async label => {
+    const inspectHistory = async (label, record = { thread: contextThread, run: contextRun, captured, delivery, text: originalText }) => {
+      const { thread, run, captured: source, delivery: receipt, text } = record;
       await openActivity(harness);
-      const history = `${PANEL} [data-testid="chat-input-history"][data-run-id=${JSON.stringify(contextRun.runId)}]`;
+      const history = `${PANEL} [data-testid="chat-input-history"][data-run-id=${JSON.stringify(run.runId)}]`;
       assert.equal((await visible(harness, history)).length, 1);
       if (!(await chrome(harness, selector => document.querySelector(selector)?.open === true, history))) await harness.click(`${history} > summary`);
-      await harness.click(`${history} [data-testid="chat-input-history-open"][data-snapshot-id=${JSON.stringify(captured.sourceId)}]`);
-      await waitUntil(() => observeClaudeContextInspector(harness), panel => panel.sourceId === captured.sourceId && panel.sourceVisible);
-      await harness.click(`${INPUT_PANEL} [data-testid="chat-input-delivery"] > summary`);
-      assertClaudeContextInspector(await observeClaudeContextInspector(harness), contextThread, captured, delivery, originalText);
+      await harness.click(`${history} [data-testid="chat-input-history-open"][data-snapshot-id=${JSON.stringify(source.sourceId)}]`);
+      const panel = await waitUntil(() => observeClaudeContextInspector(harness), panel => panel.sourceId === source.sourceId && panel.sourceVisible);
+      if (receipt) {
+        await harness.click(`${INPUT_PANEL} [data-testid="chat-input-delivery"] > summary`);
+        assertClaudeContextInspector(await observeClaudeContextInspector(harness), thread, source, receipt, text);
+      } else {
+        assert.equal(panel.threadId, thread.id);
+        assert.equal(panel.sourceText, text);
+        assert.equal(panel.packetId, undefined, 'Stored source is not a delivered Main input');
+        assert.equal(panel.payloadVisible, false);
+      }
       await capture(label);
       await harness.click(`${INPUT_PANEL} [aria-label="첨부 패널 닫기"]`);
       await closeActivity(harness);
@@ -745,7 +879,141 @@ export async function runClaudeFixtureFlow(options) {
     assert.deepEqual(observeQaFixtureFile(options.profile, sourceFile), changedFile);
     check('room restore keeps Claude and the same immutable capture/receipt without recapture; not full-process restart proof', true);
 
+    let b3 = null;
+    if (readerEnabled) {
+      const thread = await newClaude('large-reader');
+      await attach(thread, scene[1], largeFile);
+      const descriptor = await readerDescriptor(thread, true);
+      const before = await readFixture(), run = await send(thread, 'CONTEXT', 'bounded-synthetic-reader');
+      const bound = await readFixture();
+      const source = assertClaudeContextCapture(before, bound, thread, run, largeFile, largeOriginal, { reader: true });
+      assert.equal(bound.observed.sends.at(-1).expectedContextScope, descriptor.expectedContextScope);
+      const largeBefore = observeQaFixtureFile(options.profile, largeFile);
+      assert.equal(largeBefore.sha256, source.hash);
+      const fd = fs.openSync(largeFile, fs.constants.O_WRONLY | fs.constants.O_NOFOLLOW);
+      try { fs.ftruncateSync(fd, 0); fs.writeFileSync(fd, largeChanged); } finally { fs.closeSync(fd); }
+      const largeAfter = observeQaFixtureFile(options.profile, largeFile);
+      assert.equal(largeAfter.sha256, fingerprintQaBytes(largeChanged).sha256);
+      const firstPage = largeOriginal.split('\n').slice(0, 200).join('\n');
+      await inspectHistory('claude-reader-capture-not-main-input', { thread, run, captured: source, delivery: null, text: firstPage });
+      check('B3 actual selected large source is stored without claiming Reader processing or Main receipt', true);
+
+      const readerThreadIds = (await observeClaudeUi(harness)).threadIds;
+      let reviewed = 0, total, sessionId, lastDelivery;
+      do {
+        await contextControl(run.runId, 'read');
+        const started = await readFixture(), event = started.observed.events.at(-1);
+        assert.equal(event.event, 'reader.started');
+        assert.equal(event.runId, run.runId);
+        assert.equal(event.details.sourceId, source.sourceId);
+        total ||= event.details.totalPartitions;
+        sessionId ||= event.details.readerSessionId;
+        assert.ok(total > 1 && total <= 8, 'This bounded synthetic fixture must have 2–8 partitions');
+        assert.equal(event.details.totalPartitions, total);
+        assert.equal(event.details.readerSessionId, sessionId);
+        assert.equal(event.details.nextPartition, reviewed);
+        await openActivity(harness);
+        const progressUi = await waitUi(ui => ui.contextActivities.some(row => row.sourceId === source.sourceId && row.event === 'reader.started'), 'visible internal Reader progress');
+        assert.deepEqual(progressUi.threadIds, readerThreadIds, 'Internal Reader must not create a persona or Chat room');
+        assert.equal(started.runs.length, bound.runs.length, 'No internal Reader Chat/card or subagent');
+        assert.deepEqual(started.runs.find(row => row.runId === run.runId).subAgents, []);
+        if (!reviewed) await capture('claude-reader-progress-not-complete');
+        await contextControl(run.runId, 'reader-processed');
+        const processed = await readFixture();
+        assertClaudeReaderProcessed(started, processed, run, source, largeOriginal, reviewed + 1);
+        await contextControl(run.runId, 'reader-deliver');
+        const delivered = await readFixture();
+        assert.equal(delivered.context.deliveries.length, before.context.deliveries.length + reviewed + 1);
+        lastDelivery = delivered.context.deliveries.at(-1);
+        reviewed++;
+        assertClaudeReaderPacket(lastDelivery, source, run, largeOriginal, { reviewed, total, sessionId });
+        await waitUi(ui => ui.runs.find(row => row.runId === run.runId)?.contextEvents?.filter(row => row.event === 'context.read.completed').length === reviewed,
+          'Reader receipt reflected in the selected room');
+        assert.equal(delivered.runs.find(row => row.runId === run.runId).status, 'inProgress');
+        if (reviewed < total) {
+          await assert.rejects(contextControl(run.runId, 'complete'));
+          await inspectHistory(claudeReaderPartialCaptureLabel(reviewed, total), { thread, run, captured: source, delivery: lastDelivery, text: firstPage });
+        }
+      } while (reviewed < total);
+      check('internal Reader progress is visible; bounded continuation keeps one session and cannot claim whole-source completion early', true);
+      check('each Reader partition retains exact original bytes while prepared and Main-received boundaries stay separate', true);
+      await inspectHistory('claude-reader-exact-source-and-structured-summary', { thread, run, captured: source, delivery: lastDelivery, text: firstPage });
+      check('actual inspector separates captured old source from exact synthetic structured summary and source quote spans', true);
+      await contextControl(run.runId, 'complete');
+      await waitUi(ui => ui.runs.find(row => row.runId === run.runId)?.status === 'completed', 'synthetic Reader parent completion');
+      await newClaude('large-reader-away');
+      const beforeResume = await readFixture();
+      await selectQaThread(harness, thread);
+      await waitUntil(readFixture, state => state.observed.resumes.length === beforeResume.observed.resumes.length + 1);
+      const ui = await waitUi(ui => ui.thread.id === thread.id && !ui.thread.resuming, 'large Reader room restore');
+      assert.deepEqual(ui.runs.find(row => row.runId === run.runId)?.contextCaptures, [source]);
+      assert.equal(ui.thread.engineId, 'claude');
+      await inspectHistory('claude-reader-restored-old-source', { thread, run, captured: source, delivery: lastDelivery, text: firstPage });
+      const resumed = await readFixture();
+      assert.deepEqual(resumed.context.readerProcessed, beforeResume.context.readerProcessed);
+      assert.deepEqual(resumed.context.deliveries, beforeResume.context.deliveries);
+      assert.deepEqual(resumed.observed.captures, beforeResume.observed.captures);
+      assert.deepEqual(observeQaFixtureFile(options.profile, largeFile), largeAfter);
+      check('large-source room resume retains the old source and exact synthetic summary without reread/recapture after live mutation', true);
+      b3 = { sourceFile: largeFile, captured: source, changedFile: largeAfter, syntheticDelivery: lastDelivery,
+        partitions: total, actualModelReadVerified: false, adapterExecutionVerified: false, aggregateBudgetVerified: false };
+
+      for (const outcome of ['failure', 'cancel']) {
+        const thread = await newClaude(`reader-${outcome}`);
+        await attach(thread, scene[1], largeFile);
+        await readerDescriptor(thread, true);
+        const before = await readFixture(), run = await send(thread, 'CONTEXT', `reader-${outcome}`);
+        const source = assertClaudeContextCapture(before, await readFixture(), thread, run, largeFile, largeChanged, { reader: true });
+        await contextControl(run.runId, 'read');
+        await openActivity(harness);
+        await waitUi(ui => ui.contextActivities.some(row => row.sourceId === source.sourceId && row.event === 'reader.started'), 'Reader pending before failure/cancel');
+        await contextControl(run.runId, 'reader-processed'); // Prepared output must still be discarded.
+        const beforeEnd = await readFixture();
+        if (outcome === 'failure') await contextControl(run.runId, 'reader-fail');
+        else {
+          await closeActivity(harness);
+          await harness.click('[data-testid="chat-stop"]');
+          const stopping = await waitUntil(readFixture, state => state.runs.find(row => row.runId === run.runId)?.stopRequested);
+          assert.equal(stopping.runs.find(row => row.runId === run.runId).status, 'inProgress', 'Stop ACK is not completion');
+          assert.equal(stopping.observed.interrupts.length, beforeEnd.observed.interrupts.length + 1);
+          await control(run.runId, 'run');
+        }
+        const status = outcome === 'failure' ? 'failed' : 'interrupted';
+        const endedUi = await waitUi(ui => ui.runs.find(row => row.runId === run.runId)?.status === status, `visible Reader ${status}`);
+        assert.deepEqual(endedUi.runs.find(row => row.runId === run.runId).contextCaptures, [source]);
+        await assert.rejects(contextControl(run.runId, 'reader-deliver'));
+        await assert.rejects(contextControl(run.runId, 'complete'));
+        const ended = await readFixture();
+        assertClaudeReaderEnded(beforeEnd, ended, run, source, status);
+        await openActivity(harness);
+        await waitUi(ui => ui.contextActivities.some(row => row.sourceId === source.sourceId && row.event === 'reader.failed'
+          && row.text.includes(outcome === 'failure' ? '다시 시도' : '중단')), 'visible Reader required-action failure');
+        await inspectHistory(`claude-reader-${outcome}-source-retained`, { thread, run, captured: source, delivery: null,
+          text: largeChanged.split('\n').slice(0, 200).join('\n') });
+        assertNoAutomaticRequests(await readFixture(), await readFixture());
+        check(`Reader ${outcome} keeps accepted source history, discards prepared output and never auto-completes or falls back`, true);
+      }
+      // Unknown capacity is not a guessed model-window success. Keep the
+      // negative before the unavailable-reader and missing-B2 negatives.
+      await loopbackJson('/__qa/context-config', { method: 'POST', token, body: { claudeCapacityKnown: false } });
+      const capacityThread = await newClaude('reader-capacity-unknown');
+      await attach(capacityThread, scene[1], largeFile);
+      const unavailable = await readerDescriptor(capacityThread, false);
+      assert.equal(unavailable.reader.code, 'ENGINE_CAPACITY_UNKNOWN');
+      const prompt = `EGDESK_QA_CLAUDE_CONTEXT ${nonce} capacity-unknown`;
+      await replaceComposerText(harness, prompt);
+      const beforeUi = await observeClaudeUi(harness), beforeFixture = await readFixture();
+      await sendFromComposer(harness, prompt);
+      const rejected = await waitUi(ui => !!ui.thread.sendError, 'capacity unknown is a visible actionable error');
+      assert.ok(rejected.thread.sendError.includes('용량') && rejected.thread.sendError.includes('초안'));
+      assertClaudeReaderBlocked(beforeUi, rejected, beforeFixture, await readFixture(), { message: rejected.thread.sendError, code: 'ENGINE_CAPACITY_UNKNOWN' });
+      check('unknown capacity is an explicit visible server error with draft/source retained and no guessed Reader run', true);
+      await capture('claude-reader-capacity-unknown-draft-retained');
+      await loopbackJson('/__qa/context-config', { method: 'POST', token, body: { claudeCapacityKnown: true, claudeReader: false } });
+    }
+
     const largeThread = await newClaude('context-reader-blocked');
+    await readerDescriptor(largeThread, false);
     await attach(largeThread, scene[1], largeFile);
     const largePrompt = `EGDESK_QA_CLAUDE_CONTEXT ${nonce} reader-must-block`;
     await replaceComposerText(harness, largePrompt);
@@ -771,20 +1039,58 @@ export async function runClaudeFixtureFlow(options) {
     assertClaudeContextBlocked(beforeUnavailable, unavailable, beforeUnavailableFixture, await readFixture());
     check('missing B2 descriptor still blocks before capture/send and preserves draft plus attachment', true);
     await capture('claude-context-unavailable-draft-retained');
+    if (readerEnabled) {
+      await loopbackJson('/__qa/context-config', { method: 'POST', token,
+        body: { claudeCapabilities: true, claudeReader: true } });
+      const thread = await newClaude('reader-late-account');
+      await attach(thread, scene[1], largeFile);
+      const descriptor = await readerDescriptor(thread, true);
+      const before = await readFixture(), run = await send(thread, 'CONTEXT', 'reader-account-epoch');
+      const source = assertClaudeContextCapture(before, await readFixture(), thread, run, largeFile, largeChanged, { reader: true });
+      await contextControl(run.runId, 'read');
+      await contextControl(run.runId, 'reader-processed');
+      // A Codex-only account notification must not invalidate Claude work.
+      await loopbackJson('/__qa/account-change', { method: 'POST', token, body: { variant: 'b' } });
+      assert.equal((await readerDescriptor(thread, true)).expectedContextScope, descriptor.expectedContextScope);
+      const beforeAccountUi = await observeClaudeUi(harness);
+      await loopbackJson('/__qa/account-change', { method: 'POST', token, body: { engineId: 'claude', variant: 'b' } });
+      const changedUi = await waitUi(ui => ui.thread?.sendError?.includes('계정이 바뀌었습니다'), 'visible Claude account invalidation');
+      assert.equal(changedUi.composer, beforeAccountUi.composer);
+      assert.equal(changedUi.thread.draft, beforeAccountUi.thread.draft);
+      assert.deepEqual(changedUi.thread.inputSources, beforeAccountUi.thread.inputSources);
+      assert.ok(changedUi.alerts.some(text => text.includes('계정이 바뀌었습니다')));
+      const beforeLate = await readFixture();
+      for (const phase of ['reader-deliver', 'complete']) await assert.rejects(contextControl(run.runId, phase), /ACCOUNT_CHANGED/);
+      await assert.rejects(loopbackJson(`/context/captures/${source.sourceId}?${new URLSearchParams({ engineId: 'claude',
+        engineProfileId: thread.engineProfileId, clientThreadId: thread.wireClientThreadId })}`), /CONTEXT_NOT_FOUND/);
+      const afterLate = await readFixture();
+      assert.deepEqual(afterLate.observed.contextRefusals, [...beforeLate.observed.contextRefusals,
+        { route: `/context/captures/${source.sourceId}`, code: 'CONTEXT_NOT_FOUND' }]);
+      assertNoAutomaticRequests({ ...beforeLate, observed: { ...beforeLate.observed,
+        contextRefusals: afterLate.observed.contextRefusals } }, afterLate);
+      assert.deepEqual(afterLate.observed.events, beforeLate.observed.events);
+      assert.equal(afterLate.runs.find(row => row.runId === run.runId).status, 'inProgress', 'An invalidated operation is not a confirmed completion');
+      check('only the selected engine account epoch blocks late Reader delivery/completion; visible draft state is retained without fallback', true);
+      await capture('claude-reader-late-account-rejected');
+      b3.accountInvalidation = { sourceId: source.sourceId, runId: run.runId, lateDeliveryAccepted: false, completionConfirmed: false };
+    }
     assertClaudeReady(await loopbackJson('/v1/state'));
     const final = await readFixture();
     assert.equal(final.observed.authWrites.length, 0);
     assert.equal(final.observed.blockedContexts.length, 0, 'UI must refuse before backend Context safety fallback');
-    assert.equal(final.context.captureBatches, 2);
-    assert.equal(final.context.deliveries.length, 1);
+    assert.equal(final.context.captureBatches, readerEnabled ? 7 : 2);
+    assert.equal(final.context.deliveries.length, readerEnabled ? 1 + b3.partitions : 1);
     assert.deepEqual(CLAUDE_CONTEXT_TOOLS, ['egdesk_list_context', 'egdesk_read_source']);
-    assert.ok(final.observed.events.every(event => !['reader.started', 'reader.completed', 'briefing.published'].includes(event.event)));
+    assert.ok(final.observed.events.every(event => event.event !== 'briefing.published'
+      && (readerEnabled || !['reader.started', 'reader.completed'].includes(event.event))));
     result.contextFixture = { sourceFile, changedFile, captured, syntheticDelivery: delivery,
       actualModelReadVerified: false, restartVerified: false };
+    result.readerFixture = b3;
     result.fixtureRequests = { sends: final.observed.sends.length, resumes: final.observed.resumes.length,
       approvals: final.observed.approvals.length, userInputs: final.observed.userInputs.length,
       captureBatches: final.context.captureBatches, syntheticDeliveries: final.context.deliveries.length };
-    check('Codex remains signed out; provider0, authWrites0, no browser/plan/computer/Reader execution', true);
+    check(readerEnabled ? 'Codex remains signed out; provider0/authWrites0; all Reader receipts synthetic, no real adapter/browser/computer execution'
+      : 'Codex remains signed out; provider0, authWrites0, no browser/plan/computer/Reader execution', true);
   });
 }
 

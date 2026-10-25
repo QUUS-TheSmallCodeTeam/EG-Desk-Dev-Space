@@ -29,6 +29,10 @@ test('reviewed B2 context codes retain refusal status but never private diagnost
     ['CLAUDE_CONTEXT_READER_UNSUPPORTED', 409],
     ['CONTEXT_SCOPE_CHANGED', 409],
     ['UNSUPPORTED_SOURCE_FORMAT', 422],
+    ['ENGINE_CAPACITY_UNKNOWN', 409],
+    ['ENGINE_CONTEXT_CONFIGURATION_ERROR', 409],
+    ['CONTEXT_CAPACITY_REQUIRED', 409],
+    ['PACKET_ADMISSION_REQUIRED', 409],
   ]) {
     const error = { code, httpStatus, message: sentinel, stack: sentinel, details: { ownerKey: sentinel, source: sentinel } }
     const classified = classifyPublicToolError(error, { context: true })

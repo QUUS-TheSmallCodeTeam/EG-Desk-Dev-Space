@@ -259,7 +259,9 @@ test('engine rows publish versionStatus and installed only from their allow-list
 test('bridge checks Claude statically at start, on /v1/state and on demand, and re-gates the Claude adapter on a change', async () => {
   const source = await readFile(new URL('./codex-bridge-server.mjs', import.meta.url), 'utf8')
   const at = text => { const index = source.indexOf(text); assert.notEqual(index, -1, `missing server marker: ${text}`); return index }
-  at("import { claudeLoginTerminalCommand, createClaudeEngineStatus } from './claude-engine-auth.mjs'")
+  const authImports = source.match(/import\s*\{([^}]+)\}\s*from\s*['"]\.\/claude-engine-auth\.mjs['"]/)?.[1]
+    .split(',').map(name => name.trim()) || []
+  for (const name of ['claudeLoginTerminalCommand', 'createClaudeEngineStatus']) assert.ok(authImports.includes(name), `missing auth import: ${name}`)
   const status = source.slice(at('const claudeEngineStatus = createClaudeEngineStatus({'), at('const chat = new CodexChatRuntime({'))
   assert.ok(at('const engineStatus = createEngineStatusEmitter({') < at('const claudeEngineStatus = createClaudeEngineStatus({'))
   assert.match(status, /claudeEngine\.syncStatus\(\)\n {4}engineStatus\.check\(\)/)

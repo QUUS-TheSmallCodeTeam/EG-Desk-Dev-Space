@@ -847,7 +847,8 @@ export class CodexChatRuntime {
     // Only the explicitly engine-aware Context provider can lift B1's gate.
     // Browser actor selections and publishing remain outside this read lane.
     if (typeof this.contexts?.getAuthority === 'function' && !nonempty(body.selectedSources)) {
-      if (capabilities?.reader === true) throw chatError('CLAUDE_CONTEXT_READER_UNSUPPORTED', '현재 Claude 연결에서는 이 자료의 Reader 읽기를 지원하지 않아 보내지 않았습니다. 자료를 제외하거나 더 작은 완전한 자료를 선택한 뒤 다시 보내세요.', 409)
+      // Context preparation owns engine-specific Reader readiness and capacity.
+      // Do not remove its preflight by routing this through the Codex Reader.
       if (capabilities?.publishBriefing === true) throw chatError('CONTEXT_TOOL_UNSUPPORTED', 'Claude Context currently supports selected source reads only', 409)
       return
     }
@@ -1813,7 +1814,9 @@ export class CodexChatRuntime {
           context.ceilingNotices.push({ key: 'browser-selection', axis: 'browser', title: CEILING_MESSAGES.browserDowngraded })
         }
       }
-      preparedProviders.set(provider, await this.callProvider(provider, 'prepare', { ...input, effectiveExecutionPolicy: policy }, provider === this.contexts ? contextAuthority : undefined) || null)
+      preparedProviders.set(provider, await this.callProvider(provider, 'prepare', { ...input, effectiveExecutionPolicy: policy }, provider === this.contexts ? contextAuthority : undefined,
+        provider === this.contexts ? { model: overrides.model || this.threads.get(context.conversationId)?.model || null,
+          effort: selection.effort || this.threads.get(context.conversationId)?.effort || null } : undefined) || null)
     }
     const browserInteractionRequested = policy === BROWSER_BOUNDED && [...preparedProviders]
       .some(([provider, prepared]) => provider.providerId === 'egdesk-browser' && prepared?.interactionRequested === true)
@@ -2849,7 +2852,7 @@ export class CodexChatRuntime {
     if (TERMINAL.has(run.status)) return
     switch (event.method) {
       case 'turn/started': return
-      case 'thread/tokenUsage/updated': run.contextUsage = { ...event.usage, deliveryDebt: 0 }; this.seq++; return
+      case 'thread/tokenUsage/updated': run.contextUsage = { ...event.usage, deliveryDebt: 0, reservedTokens: run.contextUsage?.reservedTokens || 0 }; this.seq++; return
       case 'egdesk/engine/rateLimit': {
         run.rateLimit = event.rateLimit
         if (event.rateLimit.status === 'rejected' || event.rateLimit.creditsRequired) {

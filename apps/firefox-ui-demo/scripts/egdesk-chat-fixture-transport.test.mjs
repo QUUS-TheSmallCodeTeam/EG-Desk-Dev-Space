@@ -17,7 +17,7 @@ import { assertPublishedBriefing, assertContextCaptureBatch, assertStoredAgentDe
 const TOKEN = 'unit-fixture-token-no-credentials';
 const FIXTURE_ENV = { EGDESK_QA_FIXTURE_TRANSPORT: '1', EGDESK_QA_FIXTURE_PORT: '49318' };
 
-function setup(t, { claude = false } = {}) {
+function setup(t, { claude = false, reader = false } = {}) {
   const source = fs.mkdtempSync(path.join(canonicalTempRoot(), 'egdesk-loader-fixture-'));
   for (const name of LOADER_FILES) fs.writeFileSync(path.join(source, name), `unit fixture ${name}\n`);
   const { profile } = bootstrapQaProfile({ loaderSource: source });
@@ -32,7 +32,8 @@ function setup(t, { claude = false } = {}) {
   const eventSourceBefore = globalThis.EventSource;
   prepareQaFirefox(profile, { env: FIXTURE_ENV });
   const transport = createQaFixtureTransport({ profile, token: TOKEN,
-    env: { ...FIXTURE_ENV, ...(claude ? { EGDESK_QA_CLAUDE_FIXTURE: '1' } : {}) } });
+    env: { ...FIXTURE_ENV, ...(claude ? { EGDESK_QA_CLAUDE_FIXTURE: '1' } : {}),
+      ...(reader ? { EGDESK_QA_CLAUDE_READER_FIXTURE: '1', EGDESK_QA_REAL_TURN: '0' } : {}) } });
   t.after(() => transport.dispose());
   assert.equal(globalThis.fetch, fetchBefore);
   assert.equal(globalThis.EventSource, eventSourceBefore);
@@ -397,6 +398,186 @@ test('Claude B2 large/truncated/binary/Reader/publish inputs fail without partia
   assert.equal(state.context.deliveries.length, 0);
   assert.equal(state.context.captureBatches, 1);
   assert.equal(state.observed.events.some(row => row.event.startsWith('reader.')), false);
+});
+
+const readerRelease = (handler, run, phase) => request(handler, 'POST', '/__qa/context-release', { runId: run.runId, phase }, TOKEN);
+async function startLargeReader(t) {
+  const transport = setup(t, { claude: true, reader: true });
+  const { handler, info } = transport;
+  const file = path.join(info.profile, 'qa-fixtures', 'claude-b3-large.txt');
+  const original = Array.from({ length: 620 }, (_, n) => `QA_ORIGINAL_${n} synthetic source only; no model proof.`).join('\n');
+  fs.writeFileSync(file, original, { flag: 'wx', mode: 0o600 });
+  const receipt = await claudeCapture(handler, [attachment('large', { path: file })]);
+  assert.equal(receipt.status, 200);
+  const [captured] = receipt.body.captures;
+  const sent = await claudeSend(handler, 'CONTEXT', { ...CLAUDE_ROUTE, contextSnapshotIds: [captured.sourceId],
+    contextCapabilities: { read: true, reader: true, publishBriefing: false } });
+  assert.equal(sent.status, 202);
+  return { ...transport, file, original, captured, run: (await fixtureState(handler)).runs[0] };
+}
+
+test('B3 synthetic Reader is opt-in; verified nativeReader changes neither B2 scope nor list/read tools', async t => {
+  const { handler, info } = setup(t, { claude: true });
+  assert.equal((await request(handler, 'POST', '/__qa/context-config', { claudeReader: true }, TOKEN)).body.code, 'CLAUDE_CONTEXT_READER_UNSUPPORTED');
+  for (const extra of [{}, { EGDESK_QA_CLAUDE_FIXTURE: '1' }, { EGDESK_QA_CLAUDE_FIXTURE: '1', EGDESK_QA_REAL_TURN: '1' }]) {
+    assert.throws(() => createQaFixtureTransport({ profile: info.profile, token: TOKEN,
+      env: { ...FIXTURE_ENV, EGDESK_QA_CLAUDE_READER_FIXTURE: '1', ...extra } }));
+  }
+  const enabled = setup(t, { claude: true, reader: true });
+  const route = `/context/capabilities?${new URLSearchParams(CLAUDE_ROUTE)}`;
+  const before = (await request(enabled.handler, 'GET', route)).body;
+  assert.equal(before.nativeReader, true);
+  assert.equal(before.contract, 'egdesk-context-b2');
+  assert.equal(before.selectedAttachments && before.immutableRead, true);
+  assert.deepEqual(before.tools, ['egdesk_list_context', 'egdesk_read_source']);
+  await request(enabled.handler, 'POST', '/__qa/context-config', { claudeReader: false }, TOKEN);
+  assert.deepEqual((await request(enabled.handler, 'GET', route)).body, { ...before, nativeReader: false, largeReader: false,
+    reader: { ready: false, engineId: 'claude', code: 'CLAUDE_CONTEXT_READER_UNSUPPORTED' } });
+  assert.equal((await fixtureState(enabled.handler)).providerTurns, 0);
+});
+
+test('B3 bounded Reader separates capture/processing/Main receipt, continues the same snapshot, and resumes exact old input', async t => {
+  const fetchSpy = t.mock.method(globalThis, 'fetch', () => { throw new Error('No native adapter or provider'); });
+  const { handler, file, original, captured, run } = await startLargeReader(t);
+  fs.writeFileSync(file, 'LIVE CHANGED AFTER CAPTURE; never Reader input');
+  assert.equal((await fixtureState(handler)).context.deliveries.length, 0);
+  assert.equal((await request(handler, 'GET', contextRoute(captured.sourceId))).body.delivered, null);
+  let sessionId, complete = false, partitions = 0;
+  while (!complete && partitions < 8) {
+    assert.equal((await readerRelease(handler, run, 'read')).status, 200);
+    const started = await fixtureState(handler);
+    const event = started.observed.events.at(-1);
+    assert.equal(event.event, 'reader.started');
+    assert.equal(event.details.nextPartition, partitions);
+    sessionId ||= event.details.readerSessionId;
+    assert.equal(event.details.readerSessionId, sessionId);
+    assert.ok(event.details.totalPartitions > 1);
+    assert.equal((await readerRelease(handler, run, 'complete')).status, 409, 'Processing is not Main completion');
+    assert.equal((await readerRelease(handler, run, 'reader-deliver')).status, 409);
+    assert.equal((await readerRelease(handler, run, 'reader-processed')).status, 200);
+    const processed = await fixtureState(handler);
+    const receipt = processed.context.readerProcessed.at(-1), input = JSON.parse(receipt.inputPayload.text);
+    assert.equal(receipt.adapterExecutionVerified, false);
+    assert.equal(receipt.inputPayload.hash, fingerprintQaBytes(receipt.inputPayload.text).sha256);
+    assert.equal(input.sourceId, captured.sourceId);
+    assert.equal(input.sourceHash, captured.hash);
+    assert.equal(input.sourceText, original.slice(input.range.startOffset, input.range.endOffset));
+    assert.equal(processed.context.deliveries.length, partitions, 'Reader processing alone is not Main receipt');
+    assert.equal(processed.observed.events.at(-1).details.deliveryStatus, 'prepared');
+    assert.equal((await readerRelease(handler, run, 'reader-processed')).status, 409, 'One bounded partition per step');
+    assert.equal((await readerRelease(handler, run, 'reader-deliver')).status, 200);
+    const delivered = await fixtureState(handler), packet = delivered.context.deliveries.at(-1).packet;
+    const value = JSON.parse(packet.text);
+    partitions++;
+    assert.equal(value.fixtureOnly && value.synthetic, true);
+    assert.equal(value.adapterExecutionVerified, false);
+    assert.equal(value.mode, 'reader');
+    assert.ok(value.summary.text.includes('no model invoked') && value.summary.structure.length > 0);
+    assert.equal(value.sourceHash, captured.hash);
+    assert.equal(value.version, 1);
+    assert.equal(value.coverage.reviewedPartitions, partitions);
+    assert.equal(value.coverage.complete, partitions === value.coverage.totalPartitions);
+    complete = value.coverage.complete;
+    assert.deepEqual(value.coverage.continuation, complete ? null : { readerSessionId: sessionId, nextPartition: partitions });
+    assert.equal(packet.deliveryStatus, 'sent-to-app-server');
+    assert.equal(packet.hash, fingerprintQaBytes(packet.text).sha256);
+    const inspected = captureContextReadEvidence((await request(handler, 'GET', contextRoute(captured.sourceId,
+      { conversationId: run.conversationId, packetId: packet.packetId }))).body);
+    assert.equal(inspected.source.text, original.split('\n').slice(0, 200).join('\n'));
+    assert.equal(inspected.delivered.text, packet.text);
+    assert.equal((await readerRelease(handler, run, 'reader-deliver')).status, 409);
+    if (!complete) assert.equal((await readerRelease(handler, run, 'complete')).status, 409);
+  }
+  assert.equal(complete, true);
+  const before = await fixtureState(handler);
+  const inputs = before.context.readerProcessed.map(row => JSON.parse(row.inputPayload.text));
+  assert.equal(inputs.map(row => row.sourceText).join(''), original, 'Every assigned original byte was processed once');
+  for (let n = 1; n < inputs.length; n++) assert.equal(inputs[n].range.startOffset, inputs[n - 1].range.endOffset);
+  assert.equal((await readerRelease(handler, run, 'complete')).status, 200);
+  const resumed = (await request(handler, 'POST', '/chat/resume', { ...CLAUDE_ROUTE, conversationId: run.conversationId })).body;
+  assert.equal(resumed.runs[0].status, 'completed');
+  assert.deepEqual(resumed.runs[0].contextCaptures, [captured]);
+  assert.deepEqual(resumed.runs[0].contextEvents, before.runs[0].contextEvents);
+  const after = await fixtureState(handler);
+  assert.deepEqual(after.context, before.context, 'Resume neither recaptures nor processes nor delivers again');
+  assert.equal(after.runs.length, 1, 'Internal Reader is not a delegated Chat');
+  assert.deepEqual(after.runs[0].subAgents, []);
+  assert.equal(after.providerTurns, 0);
+  assert.equal(fetchSpy.mock.callCount(), 0);
+});
+
+test('B3 failure and explicit cancel discard prepared output and cannot complete or auto-fallback', async t => {
+  for (const outcome of ['failure', 'cancel']) {
+    const { handler, captured, run } = await startLargeReader(t);
+    await readerRelease(handler, run, 'read');
+    await readerRelease(handler, run, 'reader-processed');
+    if (outcome === 'failure') assert.equal((await readerRelease(handler, run, 'reader-fail')).status, 200);
+    else {
+      assert.equal((await request(handler, 'POST', '/chat/interrupt', { ...run, engineId: 'codex' })).body.code, 'ENGINE_MISMATCH');
+      await request(handler, 'POST', '/__qa/account-change', { variant: 'b' }, TOKEN); // Other engine is unrelated.
+      assert.equal((await request(handler, 'POST', '/chat/interrupt', { ...run, engineId: 'claude' })).status, 202);
+      assert.equal((await request(handler, 'POST', '/chat/interrupt', { ...run, engineId: 'claude' })).status, 409);
+      assert.equal((await fixtureState(handler)).runs[0].status, 'inProgress', 'Stop ACK is not confirmed termination');
+      assert.equal((await request(handler, 'POST', '/__qa/release', { runId: run.runId, phase: 'run' }, TOKEN)).status, 200);
+    }
+    for (const phase of ['read', 'reader-processed', 'reader-deliver', 'complete']) assert.ok((await readerRelease(handler, run, phase)).status >= 400);
+    const state = await fixtureState(handler);
+    assert.equal(state.runs[0].status, outcome === 'failure' ? 'failed' : 'interrupted');
+    assert.deepEqual(state.runs[0].contextCaptures, [captured]);
+    assert.equal(state.observed.events.some(event => event.event === 'run.completed' && event.details.status === 'completed'), false);
+    assert.equal(state.observed.events.some(event => event.event === 'context.read.completed'), false);
+    assert.equal(state.context.deliveries.length, 0);
+    assert.equal((await request(handler, 'GET', contextRoute(captured.sourceId))).body.delivered, null);
+    assert.equal(state.observed.sends.length, 1);
+    assert.equal(state.observed.resumes.length, 0);
+    assert.equal(state.observed.authWrites.length, 0);
+    assert.equal(state.runs[0].messages.some(message => message.role === 'assistant'), false);
+    assert.equal(state.providerTurns, 0);
+  }
+});
+
+test('B3 missing authoritative capacity or unavailable Reader rejects before bind and never guesses a model window', async t => {
+  const { handler, info } = setup(t, { claude: true, reader: true });
+  const file = path.join(info.profile, 'qa-fixtures', 'b3-capacity.txt');
+  fs.writeFileSync(file, 'synthetic large source\n'.repeat(900), { flag: 'wx', mode: 0o600 });
+  const [captured] = (await claudeCapture(handler, [attachment('large', { path: file })])).body.captures;
+  const body = { contextSnapshotIds: [captured.sourceId], contextCapabilities: { read: true, reader: true, publishBriefing: false } };
+  await request(handler, 'POST', '/__qa/context-config', { claudeCapacityKnown: false }, TOKEN);
+  assert.equal((await claudeSend(handler, 'CONTEXT', body)).body.code, 'ENGINE_CAPACITY_UNKNOWN');
+  await request(handler, 'POST', '/__qa/context-config', { claudeCapacityKnown: true, claudeReader: false }, TOKEN);
+  assert.equal((await claudeSend(handler, 'CONTEXT', body)).body.code, 'CLAUDE_CONTEXT_READER_UNSUPPORTED');
+  assert.deepEqual((await request(handler, 'GET', contextRoute(captured.sourceId))).body.bindings, []);
+  const state = await fixtureState(handler);
+  assert.deepEqual(state.runs, []);
+  assert.deepEqual(state.observed.sends, []);
+  assert.deepEqual(state.context.deliveries, []);
+});
+
+test('B3 late Reader/prepared/resume work is invalidated only by its own engine account epoch', async t => {
+  for (const prepared of [false, true]) {
+    const { handler, captured, run } = await startLargeReader(t);
+    const scopeA = await claudeScope(handler);
+    await readerRelease(handler, run, 'read');
+    if (prepared) await readerRelease(handler, run, 'reader-processed');
+    await request(handler, 'POST', '/__qa/account-change', { variant: 'b' }, TOKEN);
+    assert.equal(await claudeScope(handler), scopeA);
+    await request(handler, 'POST', '/__qa/hold-resume', { hold: true }, TOKEN);
+    const pending = request(handler, 'POST', '/chat/resume', { ...CLAUDE_ROUTE, conversationId: run.conversationId });
+    await new Promise(resolve => setImmediate(resolve));
+    await request(handler, 'POST', '/__qa/account-change', { engineId: 'claude', variant: 'b' }, TOKEN);
+    const before = await fixtureState(handler);
+    for (const phase of ['reader-processed', 'reader-deliver', 'complete']) assert.equal((await readerRelease(handler, run, phase)).body.code, 'ACCOUNT_CHANGED');
+    assert.equal((await request(handler, 'POST', '/chat/interrupt', { ...run, engineId: 'claude' })).body.code, 'ACCOUNT_CHANGED');
+    assert.equal((await request(handler, 'GET', contextRoute(captured.sourceId))).status, 404);
+    assert.equal((await request(handler, 'GET', `/chat/state?conversationId=${run.conversationId}`)).body.code, 'ACCOUNT_CHANGED');
+    await request(handler, 'POST', '/__qa/release-resume', {}, TOKEN);
+    assert.equal((await pending).body.code, 'ACCOUNT_CHANGED');
+    const after = await fixtureState(handler);
+    assert.deepEqual(after.context, before.context);
+    assert.deepEqual(after.observed.events, before.observed.events, 'No late success into the changed account');
+    assert.deepEqual(after.observed.sends, before.observed.sends);
+    assert.equal(after.context.deliveries.length, 0);
+  }
 });
 
 test('fixture refuses ordinary prompts and unauthenticated control routes', async (t) => {
