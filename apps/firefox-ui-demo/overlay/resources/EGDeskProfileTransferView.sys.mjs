@@ -1,4 +1,6 @@
 // Settings presentation only. The caller owns the flow, binding and adapters.
+import { PROFILE_TOOL_CEILING_AXES, toolCeilingNotes, chatEffortLabel } from './EGDeskChatState.sys.mjs'
+
 const BUSY = new Set(['reading', 'previewing', 'committing', 'fetching', 'saving'])
 const TERMINAL_BINDING = new Set(['stale', 'disposed'])
 const text = value => typeof value === 'string' ? value : ''
@@ -72,10 +74,64 @@ export function createEGDeskProfileTransferView({ document } = {}) {
     return node
   }
   const metadata = value => {
-    // Plain JSON values are retained, never interpreted as URLs or rich content.
+    // Unknown values retain their original text, never URLs or rich content.
     if (value == null) return '미설정'
     if (typeof value === 'string') return value
     return JSON.stringify(value)
+  }
+  const named = (value, names) => names.find(([key]) => key === value)?.[1] ?? metadata(value)
+  const fields = (value, definitions) => !object(value) ? metadata(value) : list([
+    ...definitions.map(([key, label, format = metadata]) => `${label}: ${format(value[key])}`),
+    ...Object.keys(value).filter(key => !definitions.some(([known]) => key === known))
+      .map(key => `${key}: ${metadata(value[key])}`),
+  ])
+  const model = value => fields(value, [
+    ['engine', '엔진', engine => named(engine, [['codex', 'Codex'], ['claude', 'Claude']])],
+    ['modelId', '모델 ID'],
+    ['effort', '추론 강도', effort => ['none', 'minimal', 'low', 'medium', 'high', 'xhigh', 'max', 'ultra'].includes(effort)
+      ? `${chatEffortLabel(effort)} (${effort})` : metadata(effort)],
+  ])
+  const avatar = value => fields(value, [
+    ['kind', '종류', kind => named(kind, [['initial', '글자'], ['emoji', '이모지'], ['image', '사진']])],
+    ['value', '표시 값'],
+    ['color', '색상', color => named(color, [
+      ['#49634f', '짙은 초록 (#49634f)'], ['#a9c5a9', '연한 초록 (#a9c5a9)'],
+      ['#958879', '회갈색 (#958879)'], ['#7b8079', '회색 (#7b8079)'],
+      ['#252a26', '짙은 회색 (#252a26)'], ['#f5f0df', '크림색 (#f5f0df)'],
+    ])],
+  ])
+  const toolCeiling = value => {
+    if (value != null && !object(value)) return metadata(value)
+    // Project only the shared note input to the coerced mode. The imported
+    // value stays intact; native approval settings may not prompt every time.
+    const notes = toolCeilingNotes(value?.terminal === 'allow' ? { ...value, terminal: 'ask' } : value)
+    return list([
+      ...PROFILE_TOOL_CEILING_AXES.map(({ axis, label, options }) => `${label}: ${value == null
+        ? '별도 제한 미설정' : options.find(option => option.value === value[axis])?.label ?? metadata(value[axis])}`),
+      ...(value == null ? ['현재 연결과 승인 설정을 따릅니다. 모든 권한을 허용한다는 뜻은 아닙니다.'] : [
+        ...Object.keys(value).filter(key => !PROFILE_TOOL_CEILING_AXES.some(({ axis }) => axis === key))
+          .map(key => `${key}: ${metadata(value[key])}`),
+        ...notes,
+        ...(value.terminal === 'allow' ? ['자동 승인은 제공하지 않으며 현재 승인 설정을 따릅니다.'] : []),
+      ]),
+    ])
+  }
+  const adjustment = item => {
+    const field = text(item?.field), reason = text(item?.reason)
+    const label = named(field, [['name', '이름'], ['description', '역할'], ['color', '아바타 색상'],
+      ['emoji', '아바타 이모지'], ['vibe', '말투 메모'], ['avatar', '아바타'], ['instructions', '지침'],
+      ['model', '모델'], ['tools', '허용 도구'], ['disallowedTools', '제외 도구'], ['toolCeiling', '도구 범위']])
+    const message = [
+      ['avatar:photo-not-included', '사진은 가져오기에 포함하지 않았습니다.'],
+      ['instructions:edited-outside-egdesk', 'EG-Desk 밖에서 수정된 파일의 지침을 가져왔습니다.'],
+      ['color:not-in-palette', '지원하지 않는 색상이라 기본 색상으로 바꿨습니다.'],
+      ['emoji:not-one-emoji', '하나의 이모지로 읽을 수 없어 반영하지 않았습니다.'],
+      ['model:unsupported', '지원하지 않는 모델이라 지정하지 않았습니다.'],
+      ['toolCeiling:narrowed-by-tool-list', '가져온 파일의 도구 목록에 맞춰 사용 범위를 줄였습니다.'],
+    ].find(([key]) => key === `${field}:${reason}`)?.[1] ?? named(reason, [
+      ['unreadable', '내용을 읽을 수 없었습니다.'], ['shortened', '길이 제한에 맞춰 줄였습니다.'],
+    ])
+    return `${label}: ${message}`
   }
 
   function update({ state, actions, exportTarget = null } = {}) {
@@ -155,15 +211,15 @@ export function createEGDeskProfileTransferView({ document } = {}) {
       instructions.setAttribute('role', 'region')
       instructions.setAttribute('aria-label', '가져올 Agent 지침 전문')
       details.append(row('파일', text(state.source?.filename)), row('이름', text(body.name)), row('역할', text(body.role)),
-        row('지침', instructions), row('모델', metadata(body.model)), row('아바타', metadata(body.avatar)),
-        row('도구 범위', metadata(body.toolCeiling)))
+        row('지침', instructions), row('모델', model(body.model)), row('아바타', avatar(body.avatar)),
+        row('도구 범위', toolCeiling(body.toolCeiling)))
       const unknownFields = Array.isArray(warnings.unknownFields) ? warnings.unknownFields.map(text) : []
       const count = Number.isSafeInteger(warnings.unknownFieldCount) ? warnings.unknownFieldCount : unknownFields.length
       details.append(row('지원하지 않는 항목', hook(list([
         `전체 ${count}개 · 이름 표시 ${unknownFields.length}개`, ...unknownFields]), 'import-unknown-fields')),
       row('연결되지 않은 도구', hook(list(Array.isArray(warnings.unmappedTools) ? warnings.unmappedTools.map(text) : []), 'import-unmapped-tools')),
       row('변경된 설정', hook(list(Array.isArray(warnings.adjusted)
-        ? warnings.adjusted.map(item => `${text(item?.field)}: ${text(item?.reason)}`) : []), 'import-adjusted')))
+        ? warnings.adjusted.map(adjustment) : []), 'import-adjusted')))
       preview.append(details, make('p', 'egd-settings-callout', '가져온 Agent는 검토할 초안입니다. 자동 활성화하거나 대화방에 배정하지 않습니다.'))
       const confirmControls = make('div', 'egd-settings-detail-actions')
       confirmControls.append(button('settings-agent-import-confirm', '초안 가져오기', 'confirmImport', confirmation, !canConfirm, false, true))

@@ -5,6 +5,7 @@ import { createEGDeskProfileTransferView } from '../overlay/resources/EGDeskProf
 import { createEGDeskProfileTransfer } from '../overlay/resources/EGDeskProfileTransfer.sys.mjs'
 import { importAgentFile, exportAgentFile } from '../helper/egdesk-profile-file.mjs'
 import { profileHash } from '../helper/egdesk-profile-store.mjs'
+import { PROFILE_TOOL_CEILING_AXES, toolCeilingNotes } from '../overlay/resources/EGDeskChatState.sys.mjs'
 
 // Small RunResult-style DOM fixture. Production listeners and the actual flow
 // run here; no native picker, server, filesystem write, browser or provider.
@@ -42,6 +43,9 @@ class Node {
 const walk = node => [node, ...node.children.flatMap(walk)]
 const find = (node, selector) => walk(node).find(item => item.getAttribute('data-testid') === selector)
 const byClass = (node, name) => walk(node).filter(item => item.className.split(' ').includes(name))
+const detail = (h, label) => byClass(h.node('import-preview'), 'egd-settings-detail-row')
+  .find(node => node.children[0].textContent === label)?.children[1]
+const items = node => walk(node).filter(item => item.tagName === 'LI').map(item => item.textContent)
 const deferred = () => { let resolve, reject; const promise = new Promise((yes, no) => { resolve = yes; reject = no }); return { promise, resolve, reject } }
 const settle = async () => { for (let i = 0; i < 20; i++) await Promise.resolve() }
 const source = () => ({ filename: 'reviewer.MD', text: [
@@ -156,12 +160,134 @@ test('all unsupported fields, total count, unmapped tools and adjusted metadata 
   const state = h.flow.snapshot()
   for (const field of state.preview.unknownFields) assert.ok(h.node('import-unknown-fields').textContent.includes(field))
   for (const tool of state.preview.unmappedTools) assert.ok(h.node('import-unmapped-tools').textContent.includes(tool))
-  for (const adjustment of state.preview.adjusted) {
-    assert.ok(h.node('import-adjusted').textContent.includes(adjustment.field))
-    assert.ok(h.node('import-adjusted').textContent.includes(adjustment.reason))
-  }
+  assert.deepEqual(items(h.node('import-adjusted')), [
+    '아바타 색상: 지원하지 않는 색상이라 기본 색상으로 바꿨습니다.',
+    '도구 범위: 가져온 파일의 도구 목록에 맞춰 사용 범위를 줄였습니다.',
+  ])
+  assert.equal(items(h.node('import-adjusted')).length, state.preview.adjusted.length)
   h.view.update({ state: { ...state, preview: { ...state.preview, unknownFieldCount: 57 } }, actions: h.actions, exportTarget: target() })
   assert.match(h.node('import-unknown-fields').textContent, /전체 57개 · 이름 표시 2개/)
+})
+
+test('tool scope shows all five Korean axes, every existing option and the actual terminal/external-browser caveats', async () => {
+  const h = fixture(); await h.click(IMPORT)
+  assert.deepEqual(items(detail(h, '도구 범위')), ['브라우저: 쓰지 않음', '파일: 읽기만', '터미널 명령: 실행 안 함',
+    '인터넷: 연결 안 함', '연결된 외부 도구: 쓰지 않음'])
+  const state = h.flow.snapshot(), before = JSON.stringify(state)
+  const ceiling = { browser: 'observe', files: 'read', terminal: 'allow', network: 'off', mcp: 'inherited' }
+  h.view.update({ state: { ...state, body: { ...state.body, toolCeiling: ceiling } }, actions: h.actions })
+  assert.deepEqual(items(detail(h, '도구 범위')), ['브라우저: 보기만', '파일: 읽기만', '터미널 명령: 묻지 않고 실행',
+    '인터넷: 연결 안 함', '연결된 외부 도구: 내 설정 그대로',
+    '직접 연결한 브라우저 도구(예: firefox-devtools)는 계속 쓸 수 있습니다',
+    '자동 승인은 제공하지 않으며 현재 승인 설정을 따릅니다.'])
+  for (const { axis, label, options } of PROFILE_TOOL_CEILING_AXES) for (const option of options) {
+    const toolCeiling = { ...ceiling, [axis]: option.value }
+    h.view.update({ state: { ...state, body: { ...state.body, toolCeiling } }, actions: h.actions })
+    const rows = items(detail(h, '도구 범위'))
+    assert.equal(rows[PROFILE_TOOL_CEILING_AXES.findIndex(item => item.axis === axis)], `${label}: ${option.label}`)
+    const expectedNotes = []
+    if (toolCeiling.browser !== 'interact' && toolCeiling.mcp === 'inherited') {
+      expectedNotes.push('직접 연결한 브라우저 도구(예: firefox-devtools)는 계속 쓸 수 있습니다')
+    }
+    if (toolCeiling.terminal === 'allow') expectedNotes.push('자동 승인은 제공하지 않으며 현재 승인 설정을 따릅니다.')
+    assert.deepEqual(rows.slice(5), expectedNotes)
+  }
+  assert.equal(JSON.stringify(state), before); assert.equal(h.calls.requests.length, 1)
+})
+
+test('terminal allow with otherwise-default axes does not promise a prompt or change the imported/shared settings', async () => {
+  const h = fixture(); await h.click(IMPORT)
+  const state = h.flow.snapshot()
+  const ceiling = { browser: 'interact', files: 'write', terminal: 'allow', network: 'on', mcp: 'inherited' }
+  const before = JSON.stringify(ceiling), sharedNotes = toolCeilingNotes(ceiling)
+  h.view.update({ state: { ...state, body: { ...state.body, toolCeiling: ceiling } }, actions: h.actions })
+  assert.deepEqual(items(detail(h, '도구 범위')).slice(5), ['자동 승인은 제공하지 않으며 현재 승인 설정을 따릅니다.'])
+  assert.doesNotMatch(detail(h, '도구 범위').textContent, /지금은 실행 전에 묻습니다|항상 묻/)
+  assert.equal(JSON.stringify(ceiling), before)
+  assert.deepEqual(toolCeilingNotes(ceiling), sharedNotes, 'the shared note function and its input remain unchanged')
+  assert.equal(h.calls.requests.length, 1); assert.equal(h.calls.confirmations.length, 0)
+})
+
+test('unset tool scope never claims all permissions; unknown axes and values remain literal rather than open defaults', async () => {
+  const h = fixture({ readText: () => ({ filename: 'plain.md', text: '---\nname: A\n---\nInstructions.' }) })
+  await h.click(IMPORT)
+  assert.equal(h.flow.snapshot().body.toolCeiling, undefined)
+  assert.equal(h.flow.snapshot().preview.toolCeiling, null)
+  const rows = items(detail(h, '도구 범위'))
+  assert.deepEqual(rows.slice(0, 5), PROFILE_TOOL_CEILING_AXES.map(({ label }) => `${label}: 별도 제한 미설정`))
+  assert.equal(rows[5], '현재 연결과 승인 설정을 따릅니다. 모든 권한을 허용한다는 뜻은 아닙니다.')
+  assert.equal(detail(h, '모델').textContent, '미설정'); assert.equal(detail(h, '아바타').textContent, '미설정')
+  const state = h.flow.snapshot(), raw = '<script>unknown()</script>'
+  h.view.update({ state: { ...state, body: { ...state.body, toolCeiling: null } }, actions: h.actions })
+  assert.deepEqual(items(detail(h, '도구 범위')), rows, 'explicit null and an omitted limit both remain unset')
+  h.view.update({ state: { ...state, body: { ...state.body, toolCeiling: { browser: raw, futureAxis: 'new-setting' } } }, actions: h.actions })
+  assert.deepEqual(items(detail(h, '도구 범위')), [`브라우저: ${raw}`, '파일: 미설정', '터미널 명령: 미설정',
+    '인터넷: 미설정', '연결된 외부 도구: 미설정', 'futureAxis: new-setting'])
+  assert.equal(walk(h.view.element).some(node => node.tagName === 'SCRIPT'), false)
+})
+
+test('model/avatar preview names the imported exact values without altering full instructions or confirmation identity', async () => {
+  const body = { ...exportBody, avatar: { kind: 'emoji', value: '🦉', color: '#49634f' }, instructions: 'First line.\n\n마지막 줄.' }
+  const file = exportAgentFile(body, 'md'), input = { filename: file.filename, text: file.text }
+  const h = fixture({ readText: () => input }); await h.click(IMPORT)
+  const state = h.flow.snapshot(), confirmation = state.confirmation, before = JSON.stringify(state)
+  assert.deepEqual(items(detail(h, '모델')), ['엔진: Codex', '모델 ID: gpt-6-astra', '추론 강도: 최대 (max)'])
+  assert.deepEqual(items(detail(h, '아바타')), ['종류: 이모지', '표시 값: 🦉', '색상: 짙은 초록 (#49634f)'])
+  assert.equal(h.node('import-instructions').textContent, body.instructions)
+  assert.deepEqual(byClass(h.node('import-preview'), 'egd-settings-detail-row').map(node => node.children[0].textContent),
+    ['파일', '이름', '역할', '지침', '모델', '아바타', '도구 범위', '지원하지 않는 항목', '연결되지 않은 도구', '변경된 설정'])
+  h.update(); assert.equal(JSON.stringify(h.flow.snapshot()), before)
+  await h.click(CONFIRM)
+  assert.equal(h.calls.confirmations[0], confirmation); assert.equal(h.calls.drafts.length, 1)
+  assert.deepEqual(h.calls.requests.map(call => call.init.body), [{ ...input, dryRun: true }, { ...input, dryRun: false }])
+})
+
+test('unknown model/avatar fields and adjustment reasons keep their text and item order, including duplicates', async () => {
+  const h = fixture(); await h.click(IMPORT)
+  const state = h.flow.snapshot(), raw = '<img src=x onerror="bad()">'
+  const adjusted = [{ field: 'futureField', reason: raw }, { field: 'model', reason: 'future-reason' },
+    { field: 'futureField', reason: raw }, { field: 'avatar', reason: 'photo-not-included' },
+    { field: 'instructions', reason: 'edited-outside-egdesk' }]
+  h.view.update({ state: { ...state, body: { ...state.body, model: { engine: raw, modelId: 'exact/model@v2+test', effort: 'future-effort', future: 7 },
+    avatar: { kind: 'future-kind', value: raw, color: '#123456', future: true } }, preview: { ...state.preview, adjusted } }, actions: h.actions })
+  assert.deepEqual(items(detail(h, '모델')), [`엔진: ${raw}`, '모델 ID: exact/model@v2+test', '추론 강도: future-effort', 'future: 7'])
+  assert.deepEqual(items(detail(h, '아바타')), ['종류: future-kind', `표시 값: ${raw}`, '색상: #123456', 'future: true'])
+  assert.deepEqual(items(h.node('import-adjusted')), [`futureField: ${raw}`, '모델: future-reason', `futureField: ${raw}`,
+    '아바타: 사진은 가져오기에 포함하지 않았습니다.', '지침: EG-Desk 밖에서 수정된 파일의 지침을 가져왔습니다.'])
+  assert.equal(walk(h.view.element).some(node => node.tagName === 'IMG'), false)
+  assert.equal(h.calls.requests.length, 1); assert.equal(h.calls.confirmations.length, 0)
+})
+
+test('actual importer adjustments render in original order without inventing previous values', async () => {
+  const h = fixture({ readText: () => ({ filename: 'adjustments.md', text: ['---', `name: ${'n'.repeat(41)}`,
+    `description: ${'d'.repeat(81)}`, 'color: orange', 'emoji: not-an-emoji', `vibe: ${'v'.repeat(501)}`,
+    'model: not a model id', 'tools:', '  nested: unreadable', '---', 'Exact\n\ninstructions.'].join('\n') }) })
+  await h.click(IMPORT)
+  assert.deepEqual(h.flow.snapshot().preview.adjusted.map(item => `${item.field}:${item.reason}`),
+    ['name:shortened', 'description:shortened', 'color:not-in-palette', 'emoji:not-one-emoji', 'vibe:shortened',
+      'model:unsupported', 'tools:unreadable', 'toolCeiling:narrowed-by-tool-list'])
+  assert.deepEqual(items(h.node('import-adjusted')), ['이름: 길이 제한에 맞춰 줄였습니다.', '역할: 길이 제한에 맞춰 줄였습니다.',
+    '아바타 색상: 지원하지 않는 색상이라 기본 색상으로 바꿨습니다.', '아바타 이모지: 하나의 이모지로 읽을 수 없어 반영하지 않았습니다.',
+    '말투 메모: 길이 제한에 맞춰 줄였습니다.', '모델: 지원하지 않는 모델이라 지정하지 않았습니다.', '허용 도구: 내용을 읽을 수 없었습니다.',
+    '도구 범위: 가져온 파일의 도구 목록에 맞춰 사용 범위를 줄였습니다.'])
+  assert.equal(h.node('import-instructions').textContent, 'Exact\n\ninstructions.')
+  assert.equal(h.calls.drafts.length, 0)
+})
+
+test('actual photo exclusion and externally edited instructions show the resulting initial and exact Claude model', async () => {
+  const egdesk = { v: 1, avatar: { kind: 'image', value: 'R', color: '#a9c5a9', assetId: `img-${'a'.repeat(64)}` },
+    model: { engine: 'claude', modelId: 'claude-opus-4-1', effort: 'high' } }
+  const h = fixture({ readText: () => ({ filename: 'photo.md', text: `---\nname: reviewer\negdesk: ${JSON.stringify(egdesk)}\n---\nExternal\n\ninstructions.` }) })
+  await h.click(IMPORT)
+  assert.deepEqual(h.flow.snapshot().preview.adjusted, [
+    { field: 'avatar', reason: 'photo-not-included' }, { field: 'instructions', reason: 'edited-outside-egdesk' },
+  ])
+  assert.deepEqual(items(h.node('import-adjusted')), ['아바타: 사진은 가져오기에 포함하지 않았습니다.',
+    '지침: EG-Desk 밖에서 수정된 파일의 지침을 가져왔습니다.'])
+  assert.deepEqual(items(detail(h, '아바타')), ['종류: 글자', '표시 값: R', '색상: 연한 초록 (#a9c5a9)'])
+  assert.deepEqual(items(detail(h, '모델')), ['엔진: Claude', '모델 ID: claude-opus-4-1', '추론 강도: 높음 (high)'])
+  assert.equal(h.node('import-instructions').textContent, 'External\n\ninstructions.')
+  assert.equal(h.view.element.textContent.includes(egdesk.avatar.assetId), false)
 })
 
 test('full long instructions, exact line breaks and malicious values remain readable text under inherited bounded layout', async () => {
@@ -418,9 +544,11 @@ test('throwing or rejecting action callback cannot leak an error or unlock dupli
   }
 })
 
-test('view source has no flow creation, native adapter, network, HTML sink, logging, styling or module-global document', () => {
+test('view uses only pure shared ChatState labels, with no flow creation, native adapter, network, HTML sink or styling', () => {
   const sourceText = readFileSync(new URL('../overlay/resources/EGDeskProfileTransferView.sys.mjs', import.meta.url), 'utf8')
-  assert.equal(/\bimport\s|createEGDeskProfileTransfer\(|innerHTML|outerHTML|insertAdjacentHTML|\beval\(|\bfetch\(|XMLHttpRequest|IOUtils|FilePicker|ChromeUtils|console\.|\.style\b|globalThis|window\./.test(sourceText), false)
+  const labelImport = "import { PROFILE_TOOL_CEILING_AXES, toolCeilingNotes, chatEffortLabel } from './EGDeskChatState.sys.mjs'"
+  assert.equal(sourceText.split(labelImport).length, 2)
+  assert.equal(/\bimport\s|createEGDeskProfileTransfer\(|innerHTML|outerHTML|insertAdjacentHTML|\beval\(|\bfetch\(|XMLHttpRequest|IOUtils|FilePicker|ChromeUtils|console\.|\.style\b|globalThis|window\./.test(sourceText.replace(labelImport, '')), false)
 })
 
 test('rebinding a ready preview retires its token and button before another file can be confirmed', async () => {
