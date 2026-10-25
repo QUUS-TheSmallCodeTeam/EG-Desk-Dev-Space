@@ -763,6 +763,16 @@
   max-height: calc(100vh - 160px);
 }
 .egd-portable-field { display: flex; flex-direction: column; gap: 4px; }
+.egd-board-canvas-export {
+  box-sizing: border-box;
+  left: 50%;
+  top: 64px;
+  transform: translateX(-50%);
+  width: min(480px, calc(100vw - 32px));
+  max-height: calc(100vh - 160px);
+  overflow-y: auto;
+  overflow-wrap: anywhere;
+}
 .egd-portable-field[hidden] { display: none; }
 .egd-portable-field-label { font-size: 12px; font-weight: 600; color: var(--egd-on-surface-variant); }
 .egd-portable-input {
@@ -5022,6 +5032,7 @@
   scrollbar-color: var(--egd-outline) transparent;
 }
 .egd-settings-section { margin-bottom: 18px; }
+.egd-settings-content [data-testid="settings-agent-transfer"] { min-width: 0; overflow-wrap: anywhere; }
 .egd-settings-section-head {
   display: flex;
   align-items: flex-start;

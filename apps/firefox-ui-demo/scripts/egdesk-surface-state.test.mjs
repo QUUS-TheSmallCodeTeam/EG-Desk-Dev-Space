@@ -17,11 +17,17 @@ import { createEGDeskFileServiceCallbacks, createEGDeskNativeFilePickers } from 
 import { createDeskRecoveryStore, missingDeskRecoveryViews } from '../overlay/resources/EGDeskRecoveryState.sys.mjs';
 import * as Recovery from '../overlay/resources/EGDeskRecoveryState.sys.mjs';
 import * as Portable from '../overlay/resources/EGDeskPortableState.sys.mjs';
+import * as TextFilePickers from '../overlay/resources/EGDeskNativeFilePickers.sys.mjs';
+import * as BoardExport from '../overlay/resources/EGDeskBoardExport.sys.mjs';
+import * as ProfileTransfer from '../overlay/resources/EGDeskProfileTransfer.sys.mjs';
+import * as ProfileTransferView from '../overlay/resources/EGDeskProfileTransferView.sys.mjs';
 import { createTerminalCloseController, terminalExitEvidence, terminalResponsePacket } from '../overlay/resources/EGDeskTerminalState.sys.mjs';
 import { AVATAR_PALETTE, PROFILE_TONES, TOOL_CEILING_AXES, normalizeProfileBody } from '../helper/egdesk-profile-store.mjs';
 import { normalizeRateLimits, usageDisplay } from '../helper/codex-account-usage.mjs';
 import { PLAN_TYPES } from '../helper/codex-auth-state.mjs';
 import { publicError } from '../helper/codex-chat-values.mjs';
+import { exportAgentFile, importAgentFile } from '../helper/egdesk-profile-file.mjs';
+import { profileHash } from '../helper/egdesk-profile-store.mjs';
 import { publicModelRows } from '../helper/codex-model-catalog.mjs';
 import { gateMatchesEvent } from '../helper/egdesk-await-router.mjs';
 import { publicBrowserLocation } from '../helper/egdesk-event-bus.mjs';
@@ -5145,12 +5151,16 @@ function settingsFakeDocument() {
   const doc = { activeElement: null };
   class FakeNode {
     constructor(tag) { this.tagName = tag.toUpperCase(); this.children = []; this.attributes = {}; this.dataset = {}; this.style = {}; this.listeners = {}; this.className = ''; this.ownText = ''; this.value = ''; this.isConnected = true; }
-    appendChild(child) { this.children.push(child); return child; }
-    replaceChildren(...children) { this.children = []; this.ownText = ''; for (const child of children) if (child != null) this.appendChild(typeof child === 'string' ? doc.createTextNode(child) : child); }
-    setAttribute(key, value) { this.attributes[key] = String(value); if (key === 'id') byId.set(String(value), this); }
+    _connect(value) { this.isConnected = value; for (const child of this.children) { if (child._connect) child._connect(value); else child.isConnected = value; } }
+    appendChild(child) { child.remove?.(); this.children.push(child); child.parentNode = this; if (child._connect) child._connect(this.isConnected); else child.isConnected = this.isConnected; return child; }
+    append(...children) { for (const child of children) this.appendChild(typeof child === 'string' ? doc.createTextNode(child) : child); }
+    remove() { if (this.parentNode) this.parentNode.children = this.parentNode.children.filter(child => child !== this); this.parentNode = null; this._connect(false); }
+    contains(node) { return this === node || this.children.some(child => child === node || child.contains?.(node)); }
+    replaceChildren(...children) { for (const child of [...this.children]) child.remove?.(); this.children = []; this.ownText = ''; this.append(...children.filter(child => child != null)); }
+    setAttribute(key, value) { this.attributes[key] = String(value); if (key === 'id') byId.set(String(value), this); if (key.startsWith('data-')) this.dataset[key.slice(5).replace(/-([a-z])/g, (_, letter) => letter.toUpperCase())] = String(value); }
     getAttribute(key) { return this.attributes[key] ?? null; }
     addEventListener(type, fn) { (this.listeners[type] ||= []).push(fn); }
-    removeEventListener() {}
+    removeEventListener(type, fn) { this.listeners[type] = (this.listeners[type] || []).filter(item => item !== fn); }
     get textContent() { return this.ownText + this.children.map(child => child.textContent).join(''); }
     set textContent(value) { this.children = []; this.ownText = String(value); }
     focus() { doc.activeElement = this; }
@@ -5172,6 +5182,11 @@ const settingsNodes = (node, predicate, found = []) => {
 };
 const settingsButton = (root, text) => settingsNodes(root, node => node.tagName === 'BUTTON' && node.textContent.trim() === text)[0];
 const settle = async () => { for (let i = 0; i < 6; i++) await new Promise(resolve => setImmediate(resolve)); };
+
+function settingsTransferDeps(document, state, files = { readText: async () => ({ cancelled: true }), saveText: async () => ({ cancelled: true }) }) {
+  return compileFunction(`${declaration('settingsProfileAccountKey')}\n${declaration('createSettingsProfileTransfer')}\nreturn { settingsProfileAccountKey, createSettingsProfileTransfer };`,
+    ['document', 'state', 'ProfileTransfer', 'ProfileTransferView', 'nativeTextFilePickers'])(document, state, ProfileTransfer, ProfileTransferView, () => files);
+}
 
 test('production Settings card renders the reported account and drives Agent edits through the profile routes', async () => {
   const document = settingsFakeDocument();
@@ -5207,10 +5222,10 @@ test('production Settings card renders the reported account and drives Agent edi
   const spawn = compileFunction(`${spawnSource}\nreturn spawnSettingsCard;`, ['singletonSourceRef', 'focusOpenSourceCard', 'cardSeq', 'resolveCanvasCardPlacement',
     'revealPlacedCanvasCard', 'el', 'cardZ',
     'closeCanvasCard', 'state', 'ChatState', 'codexProfileAvatar', 'document', 'window', 'bindCardSourceRef', 'markAgendaDirty', 'setActiveEntity',
-    'isCardFullscreen', 'focusCanvasCard', 'installCardHeaderFullscreenToggle', 'canvasZoom'])(
+    'isCardFullscreen', 'focusCanvasCard', 'installCardHeaderFullscreenToggle', 'canvasZoom', 'settingsProfileAccountKey', 'createSettingsProfileTransfer'])(
     () => ({ kind: 'settings-card' }), () => null, 0, kind => { placements.push(kind); return { x: 10, y: 20, width: 600, height: 600, inView: true }; },
     () => {}, el, 0, () => {}, state, Chat, codexProfileAvatar, document, windowStub,
-    () => {}, () => {}, () => {}, () => false, () => {}, () => {}, () => 1);
+    () => {}, () => {}, () => {}, () => false, () => {}, () => {}, () => 1, ...Object.values(settingsTransferDeps(document, state)));
   const card = spawn();
   assert.deepEqual(placements, ['settings'], 'Settings opens through the shared placement policy');
   assert.deepEqual([card.style.left, card.style.top, card.style.width, card.style.height], ['10px', '20px', '600px', '600px']);
@@ -5706,11 +5721,11 @@ test('production Board [⋯] menu offers save, Chat attach and close for that Bo
   let portableReady = false;
   const api = compileFunction(`let boardRegionMenu = null;\n${close}\n${toggle}\nreturn { toggleBoardRegionMenu, closeBoardRegionMenu, current: () => boardRegionMenu };`,
     ['state', 'document', 'window', 'el', 'resolveFloatingMenuPlacement', 'saveCurrentAgendaState', 'openChatInputPanel', 'closeCurrentAgenda', 'boardVersionHistoryReady', 'openBoardHistoryPanel',
-      'portableExportReady', 'openPortableExport'])(
+      'portableExportReady', 'openPortableExport', 'openBoardCanvasExport'])(
     state, dom.document, window, dom.el, (rect, width, height) => { placements.push([width, height]); return { left: 300.4, top: 120.6 }; },
     options => actions.push(['save', options]), (threadId, options) => actions.push(['attach', threadId, options]),
     options => actions.push(['close', options]), () => storeReady, boardId => actions.push(['history', boardId]),
-    () => portableReady, options => actions.push(['export', options]));
+    () => portableReady, options => actions.push(['export', options]), projectionId => actions.push(['canvas', projectionId]));
   const anchor = dom.el('button', { data: { testid: 'board-menu' } });
   anchor.getBoundingClientRect = () => ({ left: 280, top: 90, right: 304, bottom: 114 });
   const menu = api.toggleBoardRegionMenu(projection.id, anchor);
@@ -5751,9 +5766,10 @@ test('production Board [⋯] menu offers save, Chat attach and close for that Bo
   storeReady = true;
   const withHistory = api.toggleBoardRegionMenu(projection.id, anchor);
   assert.deepEqual(withHistory.children.map(item => [item.textContent, item.dataset.testid]), [
-    ['저장', 'board-save'], ['버전 기록', 'board-history'], ['Chat에 첨부', 'board-attach-chat'], ['Board 닫기', 'board-close'],
+    ['저장', 'board-save'], ['버전 기록', 'board-history'], ['Chat에 첨부', 'board-attach-chat'], ['저장본을 .canvas로 내보내기…', 'board-export-json-canvas'], ['Board 닫기', 'board-close'],
   ]);
-  assert.equal(placements.at(-1)[1], 148, 'the menu is placed for four actions');
+  assert.equal(placements.at(-1)[1], 184, 'the menu is placed for five actions');
+  assert.equal(placements.at(-1)[0], 232); assert.equal(withHistory.style.width, '232px', 'the visible saved-copy label has its measured menu width');
   withHistory.children[1].onclick({ stopPropagation() {} });
   assert.deepEqual(actions.at(-1), ['history', 'agenda-weekly']);
   assert.equal(api.current(), null);
@@ -5762,11 +5778,13 @@ test('production Board [⋯] menu offers save, Chat attach and close for that Bo
   portableReady = true;
   const withExport = api.toggleBoardRegionMenu(projection.id, anchor);
   assert.deepEqual(withExport.children.map(item => [item.textContent, item.dataset.testid]), [
-    ['저장', 'board-save'], ['버전 기록', 'board-history'], ['Chat에 첨부', 'board-attach-chat'], ['내보내기…', 'board-export'], ['Board 닫기', 'board-close'],
+    ['저장', 'board-save'], ['버전 기록', 'board-history'], ['Chat에 첨부', 'board-attach-chat'], ['내보내기…', 'board-export'], ['저장본을 .canvas로 내보내기…', 'board-export-json-canvas'], ['Board 닫기', 'board-close'],
   ]);
   withExport.children[3].onclick({ stopPropagation() {} });
   assert.deepEqual(actions.at(-1), ['export', { scope: 'board', boardId: 'agenda-weekly', boardTitle: '주간 보고' }]);
   assert.equal(api.current(), null);
+  api.toggleBoardRegionMenu(projection.id, anchor).children[4].onclick({ stopPropagation() {} });
+  assert.deepEqual(actions.at(-1), ['canvas', projection.id], 'the saved-copy action captures the clicked projection, not the active Board');
 });
 
 test('Board region and mark CSS use approved tokens: faint solid edge, 14px corners, 2px current Board', () => {
@@ -7758,9 +7776,9 @@ test('연결된 도구: inherited external tools read in Korean, with the extern
   };
   const spawn = compileFunction(`${declaration('spawnSettingsCard')}\nreturn spawnSettingsCard;`, ['singletonSourceRef', 'focusOpenSourceCard', 'cardSeq', 'resolveCanvasCardPlacement',
     'revealPlacedCanvasCard', 'el', 'cardZ', 'closeCanvasCard', 'state', 'ChatState', 'codexProfileAvatar', 'document', 'window', 'bindCardSourceRef', 'markAgendaDirty', 'setActiveEntity',
-    'isCardFullscreen', 'focusCanvasCard', 'installCardHeaderFullscreenToggle', 'canvasZoom'])(
+    'isCardFullscreen', 'focusCanvasCard', 'installCardHeaderFullscreenToggle', 'canvasZoom', 'settingsProfileAccountKey', 'createSettingsProfileTransfer'])(
     () => ({ kind: 'settings-card' }), () => null, 0, () => ({ x: 0, y: 0, width: 600, height: 600, inView: true }), () => {}, el, 0, () => {}, state, Chat, codexProfileAvatar,
-    document, { innerWidth: 1280, innerHeight: 800, confirm: () => false, setTimeout: () => 0 }, () => {}, () => {}, () => {}, () => false, () => {}, () => {}, () => 1);
+    document, { innerWidth: 1280, innerHeight: 800, confirm: () => false, setTimeout: () => 0 }, () => {}, () => {}, () => {}, () => false, () => {}, () => {}, () => 1, ...Object.values(settingsTransferDeps(document, state)));
   const card = spawn();
   const section = () => settingsNodes(card, node => node.dataset.testid === 'settings-mcp')[0];
   assert.equal(section().dataset.state, 'unknown');
@@ -9437,10 +9455,10 @@ test('Agent 관리 shows 사용 준비 on the detail and saves the tool section 
   const spawn = compileFunction(`${declaration('spawnSettingsCard')}\nreturn spawnSettingsCard;`, ['singletonSourceRef', 'focusOpenSourceCard', 'cardSeq', 'resolveCanvasCardPlacement',
     'revealPlacedCanvasCard', 'el', 'cardZ',
     'closeCanvasCard', 'state', 'ChatState', 'codexProfileAvatar', 'document', 'window', 'bindCardSourceRef', 'markAgendaDirty', 'setActiveEntity',
-    'isCardFullscreen', 'focusCanvasCard', 'installCardHeaderFullscreenToggle', 'canvasZoom'])(
+    'isCardFullscreen', 'focusCanvasCard', 'installCardHeaderFullscreenToggle', 'canvasZoom', 'settingsProfileAccountKey', 'createSettingsProfileTransfer'])(
     () => ({ kind: 'settings-card' }), () => null, 0, () => ({ x: 10, y: 20, width: 600, height: 600, inView: true }),
     () => {}, el, 0, () => {}, state, Chat, codexProfileAvatar, document, windowStub,
-    () => {}, () => {}, () => {}, () => false, () => {}, () => {}, () => 1);
+    () => {}, () => {}, () => {}, () => false, () => {}, () => {}, () => 1, ...Object.values(settingsTransferDeps(document, state)));
   // CHAT-07 [Agent 설정 열기] opens straight onto the Agent's detail.
   const card = spawn({ tab: 'agents', profileId: 'review-verifier' });
   await settle();
@@ -9692,9 +9710,9 @@ function computerControlSettingsHarness({ computerControl = null, connected = tr
   };
   const spawn = compileFunction(`${declaration('spawnSettingsCard')}\nreturn spawnSettingsCard;`, ['singletonSourceRef', 'focusOpenSourceCard', 'cardSeq', 'resolveCanvasCardPlacement',
     'revealPlacedCanvasCard', 'el', 'cardZ', 'closeCanvasCard', 'state', 'ChatState', 'codexProfileAvatar', 'document', 'window', 'bindCardSourceRef', 'markAgendaDirty', 'setActiveEntity',
-    'isCardFullscreen', 'focusCanvasCard', 'installCardHeaderFullscreenToggle', 'canvasZoom'])(
+    'isCardFullscreen', 'focusCanvasCard', 'installCardHeaderFullscreenToggle', 'canvasZoom', 'settingsProfileAccountKey', 'createSettingsProfileTransfer'])(
     () => ({ kind: 'settings-card' }), () => null, 0, () => ({ x: 0, y: 0, width: 600, height: 600, inView: true }), () => {}, el, 0, () => {}, state, Chat, codexProfileAvatar,
-    document, { innerWidth: 1280, innerHeight: 800, confirm: () => false, setTimeout: () => 0 }, () => {}, () => {}, () => {}, () => false, () => {}, () => {}, () => 1);
+    document, { innerWidth: 1280, innerHeight: 800, confirm: () => false, setTimeout: () => 0 }, () => {}, () => {}, () => {}, () => false, () => {}, () => {}, () => 1, ...Object.values(settingsTransferDeps(document, state)));
   const card = spawn();
   const section = () => settingsNodes(card, node => node.dataset.testid === 'settings-computer-control')[0];
   const part = testid => settingsNodes(section(), node => node.dataset.testid === testid)[0] || null;
@@ -10888,7 +10906,7 @@ test('Board saves keep versions: a 409 never overwrites, the list reads 직접 �
   // saveCurrentAgendaState hands each saved Board to the store; a conflict opens the choice.
   assert.match(storeDeclaration('saveCurrentAgendaState'), /if \(!writeAgendaStoreAndSync\(store\)\) return null;\n[^\n]*\n    void syncBoardToStore\(agendaId, snapshot, store\.meta\[agendaId\]\.title\);/);
   const shown = [];
-  const syncBoard = compileFunction(`${storeDeclaration('syncBoardToStore')}\nreturn syncBoardToStore;`, ['deskStoreSync', 'showBoardConflict', 'document', 'loadBoardHistory'])(
+  const syncBoard = compileFunction(`let boardCanvasExportRef = null;\n${storeDeclaration('syncBoardCanvasExport')}\n${storeDeclaration('syncBoardToStore')}\nreturn syncBoardToStore;`, ['deskStoreSync', 'showBoardConflict', 'document', 'loadBoardHistory'])(
     () => ({ saveBoard: async (boardId, body, options) => (boardId === 'agenda-a' ? { stored: 'prefs', conflict: true, headRevision: 6 } : { stored: 'both', revision: 2, options }) }),
     conflict => shown.push(conflict), { getElementById: () => null }, () => shown.push('reload'));
   const body = storeBoard('agenda-a', '주간 보고', 7);
@@ -13077,4 +13095,318 @@ test('project sheet: bounded body yields height to a nonshrinking footer instead
   assert.equal(duplicate['white-space'], 'normal'); assert.equal(duplicate['overflow-wrap'], 'anywhere');
   assert.equal(duplicate.overflow, undefined, 'the full candidate title is not clipped');
   assert.equal(duplicate['text-overflow'], undefined, 'the full candidate title is not ellipsized');
+});
+
+// Portable UI glue: actual native adapter, workflow and views, with only the
+// picker result, in-memory byte IO and HTTP edges supplied by the fixture.
+function nativeTextGlueHarness() {
+  const pickers = [], io = [], files = new Map();
+  const Ci = { nsIFilePicker: { modeOpen: 1, modeSave: 2, returnOK: 0, returnCancel: 1, returnReplace: 2 } };
+  const window = { browsingContext: { owned: true } };
+  const Cc = { '@mozilla.org/filepicker;1': { createInstance() {
+    return { init(...args) { this.initArgs = args; }, appendFilter(...args) { this.filter = args; },
+      open(callback) { this.answer = (result, path = '/chosen/agent.md') => { this.file = { path, leafName: path.split('/').at(-1) }; callback(result); }; pickers.push(this); } };
+  } } };
+  const IOUtils = {
+    async stat(path) { io.push(['stat', path]); const bytes = files.get(path); return { type: 'regular', size: bytes?.length || 0 }; },
+    async read(path, options) { io.push(['read', path, options]); return files.get(path).slice(0, options.maxBytes); },
+    async write(path, bytes, options) { io.push(['write', path, options]); if (files.has(path)) throw Object.assign(new Error('collision'), { code: 'EEXIST' }); files.set(path, new Uint8Array(bytes)); return bytes.length; },
+  };
+  const native = compileFunction(['pickNativeTextOpenFile', 'pickNativeTextSaveFile', 'nativeTextFilePickers'].map(storeDeclaration).join('\n')
+    + '\nreturn { pickNativeTextOpenFile, pickNativeTextSaveFile, nativeTextFilePickers };', ['Cc', 'Ci', 'window', 'IOUtils', 'TextFilePickers'])(Cc, Ci, window, IOUtils, TextFilePickers);
+  return { ...native, files, pickers, io, window, Ci, adapter: native.nativeTextFilePickers() };
+}
+
+test('portable native glue: owned window, exact chosen file, sentinel read, exclusive create and no replacement gate', async () => {
+  const h = nativeTextGlueHarness(), source = '\uFEFFAgent\r\n한글';
+  h.files.set('/chosen/source.md', new TextEncoder().encode(source));
+  const read = h.adapter.readText({ accept: '.md', encoding: 'utf-8', maxBytes: 100 });
+  assert.equal(h.pickers[0].initArgs[0], h.window.browsingContext);
+  h.pickers[0].answer(h.Ci.nsIFilePicker.returnOK, '/chosen/source.md');
+  assert.deepEqual(await read, { filename: 'source.md', text: source });
+  assert.deepEqual(h.io[1], ['read', '/chosen/source.md', { maxBytes: 101 }]);
+  let gates = 0;
+  const options = { fileName: 'suggestion.canvas', text: '{"nodes":[]}', contentType: 'application/json', beginWrite: () => { gates++; return true; } };
+  const replace = h.adapter.saveText(options);
+  h.pickers.at(-1).answer(h.Ci.nsIFilePicker.returnReplace, '/chosen/source.md');
+  await assert.rejects(replace, { code: 'TEXT_FILE_EXISTS' });
+  assert.equal(gates, 0); assert.equal(h.io.filter(row => row[0] === 'write').length, 0);
+  const save = h.adapter.saveText(options);
+  h.pickers.at(-1).answer(h.Ci.nsIFilePicker.returnOK, '/chosen/actual.canvas');
+  assert.deepEqual(await save, { saved: true }); assert.equal(gates, 1);
+  assert.deepEqual(h.io.at(-1), ['write', '/chosen/actual.canvas', { mode: 'create', flush: true }]);
+  assert.equal(new TextDecoder().decode(h.files.get('/chosen/actual.canvas')), options.text);
+  const collision = h.adapter.saveText(options);
+  h.pickers.at(-1).answer(h.Ci.nsIFilePicker.returnOK, '/chosen/actual.canvas');
+  await assert.rejects(collision, { code: 'TEXT_FILE_EXISTS' });
+  assert.equal(new TextDecoder().decode(h.files.get('/chosen/actual.canvas')), options.text, 'exclusive create preserves existing bytes');
+});
+
+test('portable native glue: cancel and stale picker results perform zero reads or writes', async () => {
+  const h = nativeTextGlueHarness(), controller = new AbortController();
+  const pending = h.adapter.readText({ accept: '.md', encoding: 'utf-8', maxBytes: 10, signal: controller.signal });
+  controller.abort(); assert.deepEqual(await pending, { cancelled: true });
+  h.pickers[0].answer(0, '/chosen/late.md'); await settle(); assert.deepEqual(h.io, []);
+  const cancelled = h.adapter.saveText({ fileName: 'a.canvas', text: '{}', contentType: 'application/json', beginWrite: () => assert.fail('cancel cannot enter gate') });
+  h.pickers[1].answer(1); assert.deepEqual(await cancelled, { cancelled: true }); assert.deepEqual(h.io, []);
+});
+
+function boardCanvasGlueHarness({ head = 1, latest = async () => ({ missing: true }), request } = {}) {
+  const document = settingsFakeDocument(), native = nativeTextGlueHarness(), requests = [];
+  const el = compileFunction(`${declaration('el')}\nreturn el;`, ['document'])(document);
+  const projection = { id: 'projection-a', boardId: 'board-a', title: '저장된 Board', dirty: true, members: [] };
+  const region = el('section', { id: projection.id }); document.documentElement.appendChild(region);
+  const state = { boards: { projections: { [projection.id]: projection }, activeProjectionId: 'unrelated' } };
+  const store = { ready: true, generation: 1, head };
+  const sync = { status: () => store, knownHead: () => store.head, latestBoard: latest };
+  const packet = { canvas: { nodes: [], edges: [] }, report: { nodes: 0, edges: 0, omitted: [{ id: null, kind: 'attachment', reason: '원본 제외' }] } };
+  const create = compileFunction(`${declaration('createBoardCanvasExportSession')}\nreturn createBoardCanvasExportSession;`,
+    ['deskStoreSync', 'nativeTextFilePickers', 'state', 'el', 'document', 'BoardExport', 'deskStoreRequest'])(
+    () => sync, () => native.adapter, state, el, document, BoardExport, async (...args) => { requests.push(args); return request ? request(...args) : { status: 200, body: packet }; });
+  const session = create(projection, region);
+  const part = id => settingsNodes(document.documentElement, node => node.dataset.testid === id)[0];
+  return { session, region, state, store, native, requests, part, packet };
+}
+
+test('saved Board canvas glue: clicked saved head only; dirty/camera changes do not save or retarget; duplicate joins', async () => {
+  const h = boardCanvasGlueHarness(), first = h.session.start();
+  assert.equal(h.session.start(), first); h.store.generation++; h.state.boards.activeProjectionId = 'another';
+  await settle(); assert.equal(h.session.current(), true, 'camera/Desk generation is not saved Board identity');
+  assert.equal(h.requests.length, 1); assert.equal(h.requests[0][0], 'GET');
+  assert.equal(h.requests[0][1], '/v1/boards/board-a/export?format=json-canvas');
+  assert.equal(h.requests[0][2], undefined); assert.equal(h.native.pickers.length, 1);
+  h.native.pickers[0].answer(0, '/chosen/board.canvas'); await first;
+  assert.equal(h.part('board-canvas-export').dataset.state, 'saved');
+  assert.deepEqual(JSON.parse(new TextDecoder().decode(h.native.files.get('/chosen/board.canvas'))), h.packet.canvas);
+  assert.match(h.part('board-canvas-export').textContent, /미저장 변경은 포함하지/);
+  assert.match(h.part('board-canvas-omitted').textContent, /원본 제외/);
+  assert.equal(h.native.io.filter(row => row[0] === 'write').length, 1);
+});
+
+test('saved Board canvas glue: absent stored head requires Save; failure does not fabricate a stored copy', async () => {
+  for (const latest of [async () => ({ missing: true }), async () => ({ unavailable: true })]) {
+    const h = boardCanvasGlueHarness({ head: null, latest }); await h.session.start();
+    assert.equal(h.requests.length, 0); assert.equal(h.native.pickers.length, 0);
+    assert.match(h.part('board-canvas-status').textContent, /저장|확인하지 못/);
+  }
+});
+
+test('saved Board canvas glue: head change, destroyed view and close during lookup fence late work', async () => {
+  for (const change of [h => { h.store.head++; }, h => h.region._disposeBoardCanvasExport()]) {
+    const h = boardCanvasGlueHarness(), pending = h.session.start(); await settle();
+    change(h); h.native.pickers[0].answer(0, '/chosen/stale.canvas'); await pending;
+    assert.equal(h.native.io.length, 0);
+  }
+  let resolve;
+  const h = boardCanvasGlueHarness({ head: null, latest: () => new Promise(done => { resolve = done; }) });
+  const pending = h.session.start(); h.part('board-canvas-close').fire('click'); resolve({ headRevision: 1 }); await pending;
+  assert.equal(h.requests.length, 0); assert.equal(h.native.pickers.length, 0); assert.equal(h.part('board-canvas-export'), undefined);
+});
+
+test('saved Board canvas glue: pre-write name collision stays actionable; post-gate collision remains unknown', async () => {
+  for (const before of [true, false]) {
+    const h = boardCanvasGlueHarness(), pending = h.session.start(); await settle();
+    if (!before) h.native.files.set('/chosen/exists.canvas', new Uint8Array([1]));
+    h.native.pickers[0].answer(before ? 2 : 0, '/chosen/exists.canvas'); await pending;
+    assert.equal(h.part('board-canvas-export').dataset.state, before ? 'failed' : 'unknown');
+    assert.equal(!!h.part('board-canvas-file-exists'), before);
+    assert.equal(h.native.io.length, before ? 0 : 1);
+  }
+});
+
+function profileTransferBridgeMethods(fetchJson, epochScope) {
+  const method = signature => {
+    const start = surfaceSource.indexOf(`      ${signature}`), end = surfaceSource.indexOf('\n      },', start);
+    assert.ok(start >= 0 && end > start); return surfaceSource.slice(start, end + 8);
+  };
+  return compileFunction(`return { ${method('async profileRequest(')}, ${method('createProfileTransferScope(')} };`, ['fetchJson', 'epochScope'])(fetchJson, epochScope);
+}
+
+function portableSettingsHarness({ respond } = {}) {
+  const document = settingsFakeDocument(), native = nativeTextGlueHarness(), calls = [], listeners = new Set();
+  const epoch = Chat.createChatEpochScope(), state = { codex: { connected: true, codexAccountKey: 'account-a', authStatus: { isLoggedIn: true, accountEmail: 'a@example.test' } } };
+  const body = normalizeProfileBody({ name: '보이는 Agent', role: '검토', instructions: 'Visible revision instructions.' });
+  const detail = { id: 'visible-agent', lifecycle: 'active', activeRevision: 2, headRevision: 3, hasDraft: true,
+    active: { revision: 2, hash: profileHash(body), body }, head: { revision: 3, hash: 'b'.repeat(64), body: { ...body, name: '숨은 새 초안' } } };
+  const catalog = () => ({ status: 'ready', profiles: [{ id: detail.id, name: body.name, role: body.role, lifecycle: 'active', activeRevision: detail.activeRevision, headRevision: detail.headRevision }] });
+  let refreshes = 0;
+  const methods = profileTransferBridgeMethods(async (path, options = {}) => {
+    calls.push({ path, ...options });
+    if (respond) { const custom = respond(path, options); if (custom !== undefined) return custom; }
+    if (path === '/profiles/visible-agent') return structuredClone(detail);
+    if (path === '/profiles/visible-agent/revisions') return { revisions: [] };
+    if (path === '/profiles/import') {
+      const input = JSON.parse(options.body), parsed = importAgentFile(input.text, { filename: input.filename });
+      if (input.dryRun) return { dryRun: true, ...parsed };
+      const hash = profileHash(parsed.body), id = 'imported-agent';
+      return { id, revision: 1, hash, unchanged: false, preview: parsed.preview, profile: { id, lifecycle: 'draft', activeRevision: null, active: null,
+        reviewRequired: true, headRevision: 1, hasDraft: true, head: { profileId: id, revision: 1, hash, body: parsed.body } } };
+    }
+    const url = new URL(path, 'http://fixture.invalid');
+    if (url.pathname === '/profiles/visible-agent/export') return { profileId: detail.id, revision: Number(url.searchParams.get('revision')), hash: detail.active.hash,
+      ...exportAgentFile(body, url.searchParams.get('format')) };
+    throw Object.assign(new Error('unexpected route'), { status: 404, code: 'NOT_FOUND' });
+  }, epoch);
+  state.codexBridge = { ...methods, profileCatalog: catalog, loadProfiles: async () => { refreshes++; }, subscribe(fn) { listeners.add(fn); fn(); return () => listeners.delete(fn); } };
+  const el = compileFunction(`${declaration('el')}\nreturn el;`, ['document'])(document);
+  const codexProfileAvatar = compileFunction(`${declaration('codexProfileAvatar')}\nreturn codexProfileAvatar;`, ['document', 'el', 'ChatState'])(document, el, Chat);
+  const deps = { singletonSourceRef: () => ({ kind: 'settings-card' }), focusOpenSourceCard: () => null, cardSeq: 0,
+    resolveCanvasCardPlacement: () => ({ x: 0, y: 0, width: 600, height: 600 }), revealPlacedCanvasCard() {}, el, cardZ: 0, closeCanvasCard() {}, state, ChatState: Chat,
+    codexProfileAvatar, document, window: { setTimeout: () => 0, confirm: () => false }, bindCardSourceRef() {}, markAgendaDirty() {}, setActiveEntity() {},
+    isCardFullscreen: () => false, focusCanvasCard() {}, installCardHeaderFullscreenToggle() {}, canvasZoom: () => 1, ...settingsTransferDeps(document, state, native.adapter) };
+  const spawn = compileFunction(`${declaration('spawnSettingsCard')}\nreturn spawnSettingsCard;`, Object.keys(deps))(...Object.values(deps));
+  const card = spawn({ tab: 'agents', profileId: detail.id });
+  const part = id => settingsNodes(card, node => node.dataset.testid === id)[0];
+  const emit = () => { for (const fn of listeners) fn(); };
+  const pickImport = async sourceOverride => {
+    const text = sourceOverride ?? '---\nname: reviewer\ndescription: Checks work\ntools: Read, MagicTool\ncolor: orange\nunknownFlag: keep-warning\n---\nFull instructions <literal>.\n';
+    native.files.set('/chosen/reviewer.md', new TextEncoder().encode(text));
+    part('settings-agent-import').fire('click'); native.pickers.at(-1).answer(0, '/chosen/reviewer.md'); await settle();
+    return text;
+  };
+  return { card, state, detail, calls, native, part, emit, epoch, pickImport, refreshes: () => refreshes };
+}
+
+test('Settings portable glue: initial actions, visible active revision not hidden head, real save gate and omitted notes', async () => {
+  const h = portableSettingsHarness(); await settle();
+  assert.equal(h.part('settings-agent-export-md').disabled, false);
+  assert.match(h.part('transfer-export-target').textContent, /보이는 Agent · 사용 중 버전 2/);
+  assert.equal(h.part('transfer-export-target').dataset.profileId, 'visible-agent');
+  h.part('settings-agent-export-toml').fire('click'); await settle();
+  assert.ok(h.calls.some(call => call.path === '/profiles/visible-agent/export?format=codex-toml&revision=2'));
+  assert.ok(!h.calls.some(call => /revision=3/.test(call.path)));
+  h.native.pickers.at(-1).answer(0, '/chosen/visible.toml'); await settle();
+  assert.equal(h.part('transfer-status').dataset.state, 'saved'); assert.ok(h.part('transfer-omitted'));
+  assert.equal(h.native.io.filter(row => row[0] === 'write').length, 1); assert.equal(h.refreshes(), 0);
+});
+
+test('Settings portable glue: real preview warnings/instructions, same binding refresh retains confirmation and exactly one draft', async () => {
+  const h = portableSettingsHarness(); await settle(); await h.pickImport();
+  assert.match(h.part('import-instructions').textContent, /Full instructions <literal>/);
+  assert.match(h.part('import-unknown-fields').textContent, /unknownFlag/);
+  assert.match(h.part('import-unmapped-tools').textContent, /MagicTool/);
+  assert.ok(h.part('import-adjusted').children.length);
+  const confirm = h.part('settings-agent-import-confirm');
+  h.emit(); h.card._settingsOpenProfile(h.detail.id); await settle();
+  assert.equal(h.part('settings-agent-import-confirm'), confirm, 'same account/view/visible saved version keeps the preview DOM and ticket');
+  confirm.fire('click'); confirm.fire('click'); await settle();
+  const imports = h.calls.filter(call => call.path === '/profiles/import');
+  assert.deepEqual(imports.map(call => JSON.parse(call.body).dryRun), [true, false]);
+  assert.equal(h.part('transfer-status').dataset.state, 'imported'); assert.equal(h.refreshes(), 1);
+  assert.ok(!h.calls.some(call => /activate|lifecycle|room/.test(call.path)));
+});
+
+test('Settings portable glue: changed revision/account/view and dispose revoke retained confirmation, no implicit assignment', async () => {
+  for (const change of [
+    async h => { h.detail.active.hash = 'c'.repeat(64); h.card._settingsOpenProfile(h.detail.id); await settle(); },
+    async h => { h.state.codex.codexAccountKey = 'account-b'; h.emit(); await settle(); },
+    async h => { const request = h.state.codexBridge.profileRequest; h.state.codexBridge.profileRequest = (...args) => request(...args); h.emit(); await settle(); },
+    async h => { h.card._settingsShowTab('account'); },
+    async h => { h.card._cleanup(); },
+  ]) {
+    const h = portableSettingsHarness(); await settle(); await h.pickImport();
+    const confirm = h.part('settings-agent-import-confirm'); await change(h); confirm.fire('click'); await settle();
+    assert.equal(h.calls.filter(call => call.path === '/profiles/import' && JSON.parse(call.body).dryRun === false).length, 0);
+  }
+});
+
+test('Settings portable glue: account epoch abort does not create a replacement token during reset; late preview never publishes', async () => {
+  let resolve;
+  const h = portableSettingsHarness({ respond: (path, options) => path === '/profiles/import' ? new Promise(done => { resolve = done; }) : undefined });
+  await settle(); await h.pickImport();
+  const request = h.calls.find(call => call.path === '/profiles/import');
+  h.epoch.reset('codex'); assert.equal(request.signal.aborted, true);
+  assert.equal(h.part('settings-agent-import').disabled, true);
+  resolve({ dryRun: true, ...importAgentFile(JSON.parse(request.body).text, { filename: 'reviewer.md' }) }); await settle();
+  assert.equal(h.part('import-preview'), undefined);
+  h.emit(); assert.equal(h.part('settings-agent-import').disabled, false);
+});
+
+test('Settings profile HTTP adapter keeps caller cancellation and definite 4xx distinction without retry', async () => {
+  const calls = [], controller = new AbortController();
+  const api = profileTransferBridgeMethods(async (path, options) => { calls.push([path, options]); throw Object.assign(new Error('rejected'), { status: 409, code: 'PROFILE_CONFLICT' }); }, Chat.createChatEpochScope());
+  await assert.rejects(api.profileRequest('/profiles/import', { method: 'POST', body: { dryRun: false }, signal: controller.signal }), { httpStatus: 409, code: 'PROFILE_CONFLICT' });
+  assert.equal(calls.length, 1); assert.equal(calls[0][1].body, '{"dryRun":false}'); assert.equal(calls[0][1].signal, controller.signal);
+  controller.abort(); await assert.rejects(api.profileRequest('/profiles/import', { method: 'POST', signal: controller.signal }), { name: 'AbortError' });
+  assert.equal(calls.length, 1); await assert.rejects(api.profileRequest('/v1/files'), /Invalid profile path/);
+});
+
+test('Settings portable glue: long preview retains first/end text in keyboard region; explicit Cancel creates no draft', async () => {
+  const h = portableSettingsHarness(); await settle();
+  await h.pickImport(`---\nname: long-reviewer\ndescription: Review\n---\nFIRST_LINE\n${'Full instruction line.\n'.repeat(200)}LAST_LINE\n`);
+  const instructions = h.part('import-instructions');
+  assert.match(instructions.textContent, /^FIRST_LINE/); assert.match(instructions.textContent, /LAST_LINE$/);
+  assert.equal(instructions.getAttribute('tabindex'), '0'); assert.equal(instructions.getAttribute('role'), 'region');
+  const nodes = settingsNodes(h.card, () => true);
+  assert.ok(nodes.indexOf(instructions) < nodes.indexOf(h.part('settings-agent-import-confirm')));
+  assert.ok(nodes.indexOf(h.part('settings-agent-import-confirm')) < nodes.indexOf(h.part('transfer-cancel')));
+  const css = cssDeclarationsFor(surfaceCss, '.egd-settings-instructions');
+  assert.equal(css.overflow, 'auto'); assert.equal(css['white-space'], 'pre-wrap');
+  h.part('transfer-cancel').fire('click'); await settle();
+  assert.equal(h.part('transfer-status').dataset.state, 'cancelled');
+  assert.equal(h.calls.filter(call => call.path === '/profiles/import' && !JSON.parse(call.body).dryRun).length, 0);
+});
+
+test('Settings portable glue: same active v2 survives newer head and history comparison; export still names visible v2', async () => {
+  const h = portableSettingsHarness({ respond: path => path.includes('/diff?') ? { from: 2, to: 3, changes: [] } : undefined });
+  await settle(); await h.pickImport(); const confirm = h.part('settings-agent-import-confirm');
+  h.detail.headRevision = 4; h.emit();
+  settingsButton(h.card, '사용 중인 버전과 차이 보기').fire('click'); await settle();
+  assert.equal(h.part('settings-agent-import-confirm'), confirm);
+  assert.match(h.part('transfer-export-target').textContent, /보이는 Agent · 사용 중 버전 2/);
+  assert.equal(h.part('transfer-export-target').dataset.source, 'active');
+});
+
+test('Settings portable glue: stale account chooser cannot write; collisions distinguish pre-gate failure from unknown write', async () => {
+  const stale = portableSettingsHarness(); await settle();
+  stale.part('settings-agent-export-md').fire('click'); await settle();
+  stale.state.codex.codexAccountKey = 'account-b'; stale.emit();
+  stale.native.pickers[0].answer(0, '/chosen/stale.md'); await settle();
+  assert.equal(stale.native.io.length, 0);
+  for (const before of [true, false]) {
+    const h = portableSettingsHarness(); await settle();
+    h.part('settings-agent-export-md').fire('click'); await settle();
+    if (!before) h.native.files.set('/chosen/exists.md', new Uint8Array([7]));
+    h.native.pickers[0].answer(before ? 2 : 0, '/chosen/exists.md'); await settle();
+    const status = h.part('transfer-status');
+    assert.equal(status.dataset.state, before ? 'failed' : 'unknown');
+    assert.equal(status.dataset.code, before ? 'TEXT_FILE_EXISTS' : 'PROFILE_EXPORT_WRITE_UNCONFIRMED');
+    if (before) assert.match(h.card.textContent, /다른 이름이나 위치/);
+    else assert.equal(h.part('settings-agent-export-md').disabled, true);
+    assert.equal(h.calls.filter(call => call.path.includes('/export?')).length, 1);
+  }
+});
+
+test('portable Board panel remains bounded and scrollable without changing the shared result namespace', () => {
+  const css = cssDeclarationsFor(surfaceCss, '.egd-board-canvas-export');
+  assert.equal(css['box-sizing'], 'border-box'); assert.equal(css['overflow-y'], 'auto');
+  assert.equal(css['overflow-wrap'], 'anywhere'); assert.match(css.width, /100vw - 32px/);
+  assert.match(css['max-height'], /100vh - 160px/);
+  assert.match(storeDeclaration('finishAgendaClose'), /_disposeBoardCanvasExport\?\.\(\)/);
+  assert.match(storeDeclaration('redrawDeskFromState'), /_disposeBoardCanvasExport\?\.\(\)/);
+  const target = cssDeclarationsFor(surfaceCss, '.egd-settings-content [data-testid="settings-agent-transfer"]');
+  assert.equal(target['min-width'], '0'); assert.equal(target['overflow-wrap'], 'anywhere');
+});
+
+test('portable Board glue: Cancel during saved-head lookup stays cancelled after the late lookup', async () => {
+  let resolve;
+  const h = boardCanvasGlueHarness({ head: null, latest: () => new Promise(done => { resolve = done; }) });
+  const pending = h.session.start(); h.part('board-canvas-cancel').fire('click');
+  assert.equal(h.part('board-canvas-export').dataset.state, 'cancelled');
+  resolve({ headRevision: 2 }); await pending;
+  assert.equal(h.requests.length, 0); assert.equal(h.native.pickers.length, 0);
+  assert.equal(h.part('board-canvas-export').dataset.state, 'cancelled');
+});
+
+test('Settings portable glue: saved draft is named as a draft, and unsaved form is neither discarded nor exported', async () => {
+  const h = portableSettingsHarness(); await settle();
+  h.detail.active = null; h.detail.activeRevision = null; h.detail.lifecycle = 'draft';
+  h.card._settingsOpenProfile(h.detail.id); await settle();
+  assert.match(h.part('transfer-export-target').textContent, /숨은 새 초안 · 초안 버전 3/);
+  assert.equal(h.part('transfer-export-target').dataset.source, 'draft');
+  settingsButton(h.card, '편집').fire('click');
+  const form = h.part('settings-agent-form');
+  assert.equal(h.part('settings-agent-transfer'), undefined, 'editing is not an exportable saved revision');
+  h.emit(); assert.equal(h.part('settings-agent-form'), form, 'account/catalog notifications do not redraw the edit form');
+  assert.equal(h.calls.filter(call => call.path.includes('/export?')).length, 0);
 });

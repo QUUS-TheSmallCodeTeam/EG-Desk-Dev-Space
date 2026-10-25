@@ -18,6 +18,10 @@
   const FileCardState = ChromeUtils.importESModule('chrome://userchrome/content/EGDeskFileCardState.sys.mjs');
   const BrowserAgentReceipts = ChromeUtils.importESModule('chrome://userchrome/content/EGDeskBrowserAgentRuntimeParent.sys.mjs');
   const PortableState = ChromeUtils.importESModule('chrome://userchrome/content/EGDeskPortableState.sys.mjs');
+  const TextFilePickers = ChromeUtils.importESModule('chrome://userchrome/content/EGDeskNativeFilePickers.sys.mjs');
+  const BoardExport = ChromeUtils.importESModule('chrome://userchrome/content/EGDeskBoardExport.sys.mjs');
+  const ProfileTransfer = ChromeUtils.importESModule('chrome://userchrome/content/EGDeskProfileTransfer.sys.mjs');
+  const ProfileTransferView = ChromeUtils.importESModule('chrome://userchrome/content/EGDeskProfileTransferView.sys.mjs');
   const BROWSER_AGENT_ACTOR_NAME = 'EGDeskBrowserAgentRuntime';
   const BROWSER_AGENT_HISTORY_LIMIT = 100;
   // Time a Browser tool reply needs after a wait or settle, before the
@@ -3373,12 +3377,15 @@
       // RT-03: only while the bridge can write .egdesk files.
       portableExportReady() ? item('내보내기…', '이 Board를 .egdesk 파일로 내보내기', 'board-export',
         () => openPortableExport({ scope: 'board', boardId: projection.boardId, boardTitle: projection.title })) : null,
+      boardVersionHistoryReady() ? item('저장본을 .canvas로 내보내기…', '저장된 Board를 .canvas 파일로 내보내기', 'board-export-json-canvas',
+        () => openBoardCanvasExport(projectionId)) : null,
       item('Board 닫기', '이 Board 닫기', 'board-close', () => closeCurrentAgenda({ projectionId })),
     ].filter(Boolean);
-    const pos = resolveFloatingMenuPlacement(anchor.getBoundingClientRect(), 152, items.length * 36 + 4);
+    const menuWidth = items.some(button => button.dataset.testid === 'board-export-json-canvas') ? 232 : 152;
+    const pos = resolveFloatingMenuPlacement(anchor.getBoundingClientRect(), menuWidth, items.length * 36 + 4);
     const menu = el('div', {
       class: 'egd-board-menu', role: 'menu', 'aria-label': `${projection.title} Board 작업`,
-      data: { projectionId }, style: { left: `${Math.round(pos.left)}px`, top: `${Math.round(pos.top)}px` },
+      data: { projectionId }, style: { left: `${Math.round(pos.left)}px`, top: `${Math.round(pos.top)}px`, ...(menuWidth !== 152 ? { width: `${menuWidth}px` } : {}) },
     }, ...items);
     const onKeydown = (ev) => {
       if (ev.key === 'Escape') {
@@ -3428,6 +3435,7 @@
   // A conflict never overwrites the stored head; the person chooses what happens next.
   async function syncBoardToStore(boardId, snapshot, title) {
     const result = await deskStoreSync().saveBoard(boardId, snapshot, { title });
+    syncBoardCanvasExport();
     if (result.conflict) showBoardConflict({ boardId, snapshot, title, headRevision: result.headRevision });
     else if (result.stored === 'both' && document.getElementById('egd-board-history')?.dataset.boardId === boardId) void loadBoardHistory();
     return result;
@@ -3984,6 +3992,7 @@
         return false;
       }
     }
+    document.getElementById(projection.id)?._disposeBoardCanvasExport?.();
     document.getElementById(projection.id)?.remove();
     delete state.boards.projections[projection.id];
     boardCloseRequests.delete(projection.id);
@@ -9922,9 +9931,19 @@
         return loadProfileCatalog();
       },
       // Settings-only access to the local profile routes; nothing else is reachable here.
-      async profileRequest(path, { method = 'GET', body } = {}) {
+      async profileRequest(path, { method = 'GET', body, signal } = {}) {
         if (typeof path !== 'string' || !/^\/profiles(?:[/?]|$)/.test(path)) throw new Error('Invalid profile path');
-        return fetchJson(path, { method, ...(body === undefined ? {} : { body: JSON.stringify(body) }) });
+        if (signal?.aborted) throw Object.assign(new Error('Profile request cancelled'), { name: 'AbortError' });
+        try { return await fetchJson(path, { method, ...(signal ? { signal } : {}), ...(body === undefined ? {} : { body: JSON.stringify(body) }) }); }
+        catch (error) {
+          if (Number.isInteger(error?.status)) error.httpStatus = error.status;
+          throw error;
+        }
+      },
+      createProfileTransferScope() {
+        const token = epochScope.begin('codex');
+        return { signal: token.signal, current: () => epochScope.valid(token) && !token.signal.aborted,
+          dispose: () => { token.controller.abort(); epochScope.finish(token); } };
       },
       // CU-01 Settings '컴퓨터 조작': the bridge answers with the policy it now
       // holds, which takes effect from the next message sent.
@@ -11820,6 +11839,93 @@
   // ============ Settings Canvas Card ============
   // 계정: the real ChatGPT sign-in, plan and usage from the bridge.
   // Agent 관리: Agent Profiles in the local profile store (/profiles).
+  function settingsProfileAccountKey() {
+    const auth = state.codex.authStatus || {};
+    return JSON.stringify([state.codex.connected, state.codex.codexAccountKey, auth.isLoggedIn,
+      auth.accountId, auth.accountEmail, auth.authMode, auth.identityStatus]);
+  }
+
+  function createSettingsProfileTransfer({ card, bridge, readView, refreshCatalog }) {
+    const files = nativeTextFilePickers();
+    const view = ProfileTransferView.createEGDeskProfileTransferView({ document });
+    let disposed = false, binding = null, actions = null, imported = null;
+    const identity = () => {
+      const visible = readView();
+      return { ...visible, key: JSON.stringify([settingsProfileAccountKey(), visible.key, visible.target]) };
+    };
+    const current = own => !disposed && card.isConnected && own && own === binding
+      && own.api === bridge() && own.request === own.api.profileRequest && own.key === identity().key && own.scope.current();
+    const update = snapshot => {
+      view.update({ state: snapshot, actions, exportTarget: binding?.target || null });
+      // Presentation comes from the SAME visible revision as the opaque action
+      // IDs. History comparison is not a revision-selection control.
+      const note = [...view.element.children].find(node => node.getAttribute?.('data-testid') === 'transfer-export-target');
+      if (note && binding?.target) {
+        note.textContent = binding.label;
+        note.dataset.profileId = binding.target.profileId;
+        note.dataset.revision = String(binding.target.revision);
+        note.dataset.source = binding.source;
+      }
+    };
+    const flow = ProfileTransfer.createEGDeskProfileTransfer({
+      request: async (path, options) => {
+        const own = binding;
+        if (!current(own) || options.signal.aborted) throw Object.assign(new Error('Profile binding changed'), { name: 'AbortError' });
+        const result = await own.request.call(own.api, path, options);
+        if (!current(own) || options.signal.aborted) throw Object.assign(new Error('Profile binding changed'), { name: 'AbortError' });
+        return result;
+      },
+      readText: options => current(binding) ? files.readText(options) : Promise.resolve({ cancelled: true }),
+      saveText: options => files.saveText({ ...options, beginWrite: () => current(binding) && options.beginWrite() }),
+      onState: snapshot => {
+        if (!current(binding)) return;
+        update(snapshot);
+        if (snapshot.status === 'imported' && imported !== snapshot.draft) {
+          imported = snapshot.draft;
+          // Catalog refresh only. No activation, assignment, or navigation.
+          void refreshCatalog();
+        }
+      },
+    });
+    const invalidate = () => {
+      const previous = binding;
+      binding = null; actions = null;
+      previous?.scope.signal.removeEventListener('abort', invalidate);
+      previous?.scope.dispose();
+      flow.invalidate();
+      if (!disposed) update(flow.snapshot());
+    };
+    const sync = () => {
+      if (disposed) return;
+      const visible = identity(), api = bridge();
+      if (current(binding)) return;
+      invalidate();
+      if (visible.enabled && api?.profileRequest && api?.createProfileTransferScope) {
+        const scope = api.createProfileTransferScope();
+        binding = { api, request: api.profileRequest, key: visible.key, target: visible.target, label: visible.label, source: visible.source, scope };
+        // Abort is synchronous inside the epoch reset. Do not allocate another
+        // epoch token until a later view refresh has the new account state.
+        scope.signal.addEventListener('abort', invalidate, { once: true });
+        actions = flow.bind();
+      }
+      update(flow.snapshot());
+    };
+    // Creation does not publish an initial state. It still renders inert until
+    // the first mounted, current binding is explicitly supplied.
+    update(flow.snapshot());
+    return {
+      sync,
+      mount(host) { sync(); host.appendChild(view.element); },
+      dispose() {
+        if (disposed) return;
+        disposed = true;
+        const old = binding; binding = null; actions = null;
+        old?.scope.signal.removeEventListener('abort', invalidate); old?.scope.dispose();
+        flow.dispose(); view.dispose();
+      },
+    };
+  }
+
   function spawnSettingsCard(options = {}) {
     const sourceRef = singletonSourceRef('settings', { kind: 'settings-card' });
     const existing = options.openMode === 'new' ? null : focusOpenSourceCard(sourceRef);
@@ -12011,6 +12117,17 @@
       return api.profileRequest(path, init);
     };
     const refreshCatalog = () => Promise.resolve(bridge()?.loadProfiles?.()).catch(() => {});
+    let profileReadSequence = 0;
+    const profileTransfer = createSettingsProfileTransfer({ card, bridge, refreshCatalog,
+      readView: () => {
+        const detail = agents.detailBinding === settingsProfileAccountKey() && agents.detailApi === bridge()
+          && agents.detailRequest === bridge()?.profileRequest ? agents.detail : null;
+        const shown = agents.mode === 'detail' && detail?.id === agents.profileId ? detail.active || detail.head : null;
+        const source = detail?.active ? detail.lifecycle === 'active' ? 'active' : 'last-active' : 'draft';
+        return { key: `${activeTab}:${agents.mode}:${agents.profileId || ''}`, enabled: activeTab === 'agents' && agents.mode !== 'edit',
+          source, label: shown ? `내보낼 Agent: ${typeof shown.body?.name === 'string' ? shown.body.name : 'Agent'} · ${source === 'active' ? '사용 중' : source === 'last-active' ? '마지막 사용' : '초안'} 버전 ${shown.revision}` : '',
+          target: shown ? { profileId: detail.id, revision: shown.revision, ...(shown.hash ? { hash: shown.hash } : {}) } : null };
+      } });
     const reloadAfter = (error, profileId) => {
       agents.notice = ChatState.profileRequestErrorText(error);
       if (['PROFILE_REVISION_CONFLICT', 'PROFILE_LIFECYCLE_CONFLICT', 'PROFILE_NOT_FOUND', 'PROFILE_REVISION_NOT_FOUND'].includes(error?.code)) {
@@ -12023,19 +12140,25 @@
       return null;
     };
     const openProfile = async (profileId, notice = null) => {
+      const sequence = ++profileReadSequence, account = settingsProfileAccountKey(), api = bridge(), request = api?.profileRequest;
+      const current = () => card.isConnected && sequence === profileReadSequence && api === bridge()
+        && request === api?.profileRequest && account === settingsProfileAccountKey() && agents.profileId === profileId && agents.mode === 'detail';
       Object.assign(agents, { mode: 'detail', profileId, notice, diff: null, busy: true, errors: [] });
-      if (agents.detail?.id !== profileId) agents.detail = null;
+      if (agents.detail?.id !== profileId || agents.detailBinding !== account) agents.detail = null;
       renderAgentsTab();
       try {
         const [detail, history] = await Promise.all([profileApi(profilePath(profileId)), profileApi(profilePath(profileId, '/revisions'))]);
-        if (agents.profileId !== profileId) return;
+        if (!current()) return;
         agents.detail = detail;
+        agents.detailBinding = account;
+        agents.detailApi = api;
+        agents.detailRequest = request;
         agents.revisions = Array.isArray(history?.revisions) ? history.revisions : [];
       } catch (error) {
-        if (agents.profileId !== profileId) return;
+        if (!current()) return;
         agents.notice = ChatState.profileRequestErrorText(error);
       } finally {
-        if (agents.profileId === profileId && agents.mode === 'detail') { agents.busy = false; renderAgentsTab(); }
+        if (current()) { agents.busy = false; renderAgentsTab(); }
       }
     };
     const startEdit = (detail = null) => {
@@ -12458,6 +12581,8 @@
       if (agents.mode === 'edit' && agents.form) renderAgentForm();
       else if (agents.mode === 'detail') renderAgentDetail();
       else renderAgentList();
+      if (agents.mode !== 'edit') profileTransfer.mount(contentArea);
+      else profileTransfer.sync();
       if (agents.focusField) {
         document.getElementById(fieldId(agents.focusField))?.focus();
         agents.focusField = null;
@@ -12475,7 +12600,7 @@
         tabs.appendChild(el('button', {
           class: 'egd-settings-tab' + (activeTab === t.id ? ' egd-settings-tab-active' : ''), role: 'tab',
           'aria-selected': String(activeTab === t.id), data: { testid: `settings-tab-${t.id}` },
-          onclick: () => { activeTab = t.id; renderTabs(); t.render(); },
+          onclick: () => { activeTab = t.id; profileTransfer.sync(); renderTabs(); t.render(); },
         }, t.label));
       }
     };
@@ -12483,6 +12608,7 @@
       const target = tabDefs.find((t) => t.id === tab);
       if (!target) return;
       activeTab = target.id;
+      profileTransfer.sync();
       renderTabs();
       target.render();
     };
@@ -12500,10 +12626,26 @@
     let unsubscribeCodex = null;
     let subscribeAttempts = 0;
     let lastCodexSignature = '';
+    let lastProfileAccount = settingsProfileAccountKey();
+    let lastProfileApi = bridge(), lastProfileRequest = bridge()?.profileRequest;
     const onCodexChange = () => {
       const codex = state.codex;
       const auth = codex.authStatus || {};
       const catalog = bridge()?.profileCatalog?.();
+      const account = settingsProfileAccountKey(), accountChanged = account !== lastProfileAccount;
+      lastProfileAccount = account;
+      const adapterChanged = lastProfileApi !== bridge() || lastProfileRequest !== bridge()?.profileRequest;
+      lastProfileApi = bridge(); lastProfileRequest = bridge()?.profileRequest;
+      const detail = agents.detail, row = catalog?.profiles?.find(item => item.id === agents.profileId);
+      const shownRevisionChanged = agents.mode === 'detail' && detail && catalog?.status === 'ready'
+        && (!row || (row.activeRevision || row.headRevision) !== (detail.active?.revision || detail.head?.revision));
+      if (accountChanged || adapterChanged || shownRevisionChanged) {
+        if (agents.mode === 'detail') { profileReadSequence++; agents.detail = null; agents.revisions = []; agents.busy = false; }
+      }
+      profileTransfer.sync();
+      if ((accountChanged || adapterChanged || shownRevisionChanged) && activeTab === 'agents' && agents.mode === 'detail' && !agents.busy) {
+        void openProfile(agents.profileId);
+      }
       const signature = JSON.stringify([codex.connected, codex.isStartingLogin, auth.isLoggedIn, auth.loginInProgress, auth.accountEmail,
         auth.planType, auth.usage, auth.rateLimits, catalog?.status, catalog?.profiles, codex.inheritedMcp, codex.computerControl]);
       if (signature === lastCodexSignature) return;
@@ -12578,6 +12720,8 @@
     document.addEventListener('mousemove', onMove);
     document.addEventListener('mouseup', onUp);
     card._cleanup = () => {
+      profileReadSequence++;
+      profileTransfer.dispose();
       document.removeEventListener('mousemove', onMove);
       document.removeEventListener('mouseup', onUp);
       unsubscribeCodex?.();
@@ -16887,14 +17031,17 @@
       readRawDesk: rawDeskRecord,
       readAgendaStore: () => coerceAgendaStore(),
       onNotice: message => boardNotice(message),
-      onChange: () => syncDeskHistoryOpener(),
+      onChange: () => { syncDeskHistoryOpener(); syncBoardCanvasExport(); },
     });
     return deskStoreSyncRef;
   }
 
   // Resolves {status, body}; throws when the bridge cannot be reached or the time runs out.
-  async function deskStoreRequest(method, path, body, { timeoutMs = 10000 } = {}) {
+  async function deskStoreRequest(method, path, body, { timeoutMs = 10000, signal } = {}) {
     const controller = new AbortController();
+    const abort = () => controller.abort();
+    if (signal?.aborted) throw Object.assign(new Error('Desk request cancelled'), { name: 'AbortError' });
+    signal?.addEventListener('abort', abort, { once: true });
     const timer = window.setTimeout(() => controller.abort(), timeoutMs);
     try {
       const response = await fetch(`http://127.0.0.1:39218${path}`, {
@@ -16904,7 +17051,7 @@
       let payload = null;
       try { payload = await response.json(); } catch { /* An empty or non-JSON answer. */ }
       return { status: response.status, body: payload };
-    } finally { window.clearTimeout(timer); }
+    } finally { window.clearTimeout(timer); signal?.removeEventListener('abort', abort); }
   }
 
   // Each /v1/state read (null for an older bridge). A store that just became
@@ -16915,6 +17062,162 @@
       if (result?.ready && result.connected) persistDeskSession();
     } catch (error) { console.warn(TAG, 'Desk store connection failed', error); }
     syncDeskHistoryOpener();
+  }
+
+  // Native chooser RESULT boundaries. File validation/read/write stay in the
+  // shared adapter; the owning chrome window, not the selected web page, owns UI.
+  async function pickNativeTextOpenFile({ accept, signal }) {
+    if (signal?.aborted) return { cancelled: true };
+    const ownedWindow = window;
+    const picker = Cc['@mozilla.org/filepicker;1'].createInstance(Ci.nsIFilePicker);
+    picker.init(ownedWindow.browsingContext, '가져올 Agent Markdown 파일', Ci.nsIFilePicker.modeOpen);
+    picker.appendFilter('Markdown', `*${accept}`);
+    return new Promise((resolve, reject) => picker.open(result => {
+      if (signal?.aborted || result === Ci.nsIFilePicker.returnCancel) { resolve({ cancelled: true }); return; }
+      try {
+        const chosen = result === Ci.nsIFilePicker.returnOK ? picker.file : null;
+        if (!chosen) throw new Error('File selection unavailable');
+        resolve({ path: String(chosen.path), filename: String(chosen.leafName) });
+      } catch { reject(new Error('File selection unavailable')); }
+    }));
+  }
+
+  async function pickNativeTextSaveFile({ fileName, contentType, signal }) {
+    if (signal?.aborted) return { cancelled: true };
+    const ownedWindow = window;
+    const picker = Cc['@mozilla.org/filepicker;1'].createInstance(Ci.nsIFilePicker);
+    picker.init(ownedWindow.browsingContext, '파일로 내보내기', Ci.nsIFilePicker.modeSave);
+    picker.defaultString = fileName;
+    const extension = fileName.split('.').at(-1);
+    picker.defaultExtension = extension;
+    picker.appendFilter(contentType.startsWith('application/json') ? 'JSON Canvas' : extension === 'toml' ? 'Codex TOML' : 'Markdown', `*.${extension}`);
+    return new Promise((resolve, reject) => picker.open(result => {
+      if (signal?.aborted || result === Ci.nsIFilePicker.returnCancel) { resolve({ cancelled: true }); return; }
+      // The picker can offer replacement; this workflow never grants it.
+      if (result === Ci.nsIFilePicker.returnReplace) { reject(Object.assign(new Error('Choose another file name'), { code: 'EEXIST' })); return; }
+      try {
+        const chosen = result === Ci.nsIFilePicker.returnOK ? picker.file : null;
+        if (!chosen) throw new Error('File selection unavailable');
+        resolve({ path: String(chosen.path), filename: String(chosen.leafName) });
+      } catch { reject(new Error('File selection unavailable')); }
+    }));
+  }
+
+  function nativeTextFilePickers() {
+    const check = signal => { if (signal?.aborted) throw Object.assign(new Error('File transfer cancelled'), { name: 'AbortError' }); };
+    return TextFilePickers.createEGDeskTextFilePickers({
+      pickOpenFile: pickNativeTextOpenFile, pickSaveFile: pickNativeTextSaveFile,
+      stat: (path, { signal }) => { check(signal); return IOUtils.stat(path); },
+      readBytes: (path, { maxBytes, signal }) => { check(signal); return IOUtils.read(path, { maxBytes }); },
+      writeNewFile: (path, bytes, { signal }) => { check(signal); return IOUtils.write(path, bytes, { mode: 'create', flush: true }); },
+    });
+  }
+
+  let boardCanvasExportRef = null;
+  function syncBoardCanvasExport() {
+    if (boardCanvasExportRef && !boardCanvasExportRef.current()) {
+      boardCanvasExportRef.dispose(); boardCanvasExportRef = null;
+    }
+  }
+
+  function createBoardCanvasExportSession(projection, region) {
+    const sync = deskStoreSync(), boardId = projection.boardId;
+    const storedKey = () => JSON.stringify([sync.status().ready, sync.knownHead(boardId)]);
+    const key = storedKey(), files = nativeTextFilePickers();
+    let disposed = false, panel = null, pending = null, fileExists = false, generation = 0;
+    const current = () => !disposed && region.isConnected && state.boards.projections[projection.id] === projection
+      && projection.boardId === boardId && key === storedKey();
+    const render = view => {
+      if (!current()) return;
+      const created = !panel;
+      const focusId = panel?.contains(document.activeElement) ? document.activeElement.dataset?.testid : null;
+      if (!panel) {
+        panel = el('section', { class: 'egd-store-panel egd-board-canvas-export', role: 'dialog',
+          'aria-label': '저장된 Board 내보내기', data: { testid: 'board-canvas-export', boardId } });
+        panel.addEventListener('mousedown', event => event.stopPropagation());
+        panel.addEventListener('keydown', event => { if (event.key === 'Escape') { event.preventDefault(); event.stopPropagation(); close(); } });
+        document.documentElement.appendChild(panel);
+      }
+      const busy = ['fetching', 'saving'].includes(view.status);
+      panel.dataset.state = view.status;
+      panel.setAttribute('aria-busy', String(busy));
+      panel.replaceChildren(...[
+        el('div', { class: 'egd-store-panel-head' }, el('strong', {}, 'JSON Canvas 내보내기'),
+          el('button', { type: 'button', class: 'egd-store-panel-close', 'aria-label': '내보내기 안내 닫기',
+            data: { testid: 'board-canvas-close' }, onclick: close }, '×')),
+        el('p', { class: 'egd-store-panel-status', role: 'status', data: { testid: 'board-canvas-status' } }, view.message),
+        fileExists && view.status === 'failed' ? el('p', { class: 'egd-portable-warning', data: { testid: 'board-canvas-file-exists' } },
+          '같은 이름의 파일이 있습니다. 기존 파일은 덮어쓰지 않습니다. 다른 이름이나 위치를 선택해 주세요.') : null,
+        ...view.notes.map(note => el('p', { class: 'egd-portable-note' }, note)),
+        view.report?.omitted?.length ? el('details', { data: { testid: 'board-canvas-omitted' } },
+          el('summary', {}, `변환에서 제외된 항목 ${view.report.omitted.length}개`),
+          el('ul', {}, ...view.report.omitted.map(item => el('li', {}, `${item.kind}: ${item.reason}`)))) : null,
+        busy ? el('button', { type: 'button', data: { testid: 'board-canvas-cancel' }, onclick: () => {
+          generation++; pending = null;
+          const stopped = flow.cancel();
+          if (stopped.status === 'idle') render({ status: 'cancelled', message: '내보내기를 취소했습니다. 파일을 쓰지 않았습니다.', notes: [] });
+        } }, '중단 요청') : null].filter(Boolean));
+      if (created || focusId) {
+        const controls = [...panel.children].flatMap(node => [node, ...node.children]);
+        (controls.find(node => node.dataset?.testid === focusId) || controls.find(node => node.dataset?.testid === 'board-canvas-close'))?.focus();
+      }
+    };
+    const close = () => { generation++; pending = null; flow.cancel(); panel?.remove(); panel = null; };
+    const flow = BoardExport.createEGDeskBoardExport({
+      request: async (path, { method, signal }) => {
+        if (!current() || signal.aborted) throw new Error('Board export binding changed');
+        const response = await deskStoreRequest(method, path, undefined, { signal });
+        if (!current() || signal.aborted) throw new Error('Board export binding changed');
+        if (response.status < 200 || response.status >= 300) throw Object.assign(new Error('Board export unavailable'), { code: response.body?.code });
+        return response.body;
+      },
+      saveText: async options => {
+        let entered = false;
+        try { return await files.saveText({ ...options, beginWrite: () => {
+          if (!current()) return false;
+          const allowed = options.beginWrite(); entered = allowed === true; return allowed;
+        } }); }
+        catch (error) { if (current() && !entered && error?.code === 'TEXT_FILE_EXISTS') fileExists = true; throw error; }
+      }, onState: render,
+    });
+    const session = {
+      current,
+      start() {
+        if (!current()) return Promise.resolve(null);
+        if (pending) return pending;
+        const ticket = ++generation;
+        const title = projection.title, hasUnsavedChanges = !!projection.dirty;
+        fileExists = false;
+        render({ status: 'fetching', message: '저장된 Board를 확인하고 있습니다.', notes: ['미저장 변경은 포함하지 않습니다. 자동으로 저장하지 않습니다.'] });
+        pending = (async () => {
+          let hasStoredBoard = Number.isSafeInteger(sync.knownHead(boardId));
+          if (!hasStoredBoard) {
+            const latest = await sync.latestBoard(boardId);
+            if (!current() || ticket !== generation) return null;
+            if (latest.error || latest.unavailable) { render({ status: 'failed', message: '저장된 Board를 확인하지 못했습니다. 다시 연결한 뒤 내보내세요.', notes: [] }); return null; }
+            hasStoredBoard = Number.isSafeInteger(latest.headRevision);
+          }
+          if (!current() || ticket !== generation) return null;
+          return flow.exportBoard({ boardId, title, hasStoredBoard, hasUnsavedChanges });
+        })().finally(() => { if (ticket === generation) pending = null; });
+        return pending;
+      },
+      dispose() { if (disposed) return; disposed = true; flow.dispose(); panel?.remove(); panel = null;
+        if (region._disposeBoardCanvasExport === session.dispose) delete region._disposeBoardCanvasExport; },
+    };
+    region._disposeBoardCanvasExport = session.dispose;
+    return session;
+  }
+
+  function openBoardCanvasExport(projectionId) {
+    const projection = state.boards.projections[projectionId], region = document.getElementById(projectionId);
+    if (!projection || !region?.isConnected || !boardVersionHistoryReady()) return;
+    if (boardCanvasExportRef?.projectionId !== projectionId || !boardCanvasExportRef?.current()) {
+      boardCanvasExportRef?.dispose();
+      boardCanvasExportRef = createBoardCanvasExportSession(projection, region);
+      boardCanvasExportRef.projectionId = projectionId;
+    }
+    return boardCanvasExportRef.start();
   }
 
   // ── RT-03: .egdesk 내보내기 / 가져오기 ──
@@ -17427,7 +17730,10 @@
     if (!snapshot?.agenda?.id) return false;
     if (!(await clearCanvasEntitiesForRestore())) return false;
     closeBoardRegionMenu();
-    for (const region of Array.from(document.querySelectorAll('.egd-board-region'))) region.remove();
+    for (const region of Array.from(document.querySelectorAll('.egd-board-region'))) {
+      region._disposeBoardCanvasExport?.();
+      region.remove();
+    }
     state.boards = { projections: {}, activeProjectionId: null };
     const { chat, ...layout } = snapshot;
     return restoreDeskSession(layout);
