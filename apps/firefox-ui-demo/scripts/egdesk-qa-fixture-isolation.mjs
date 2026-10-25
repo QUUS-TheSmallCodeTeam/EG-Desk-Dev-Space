@@ -11,6 +11,7 @@ import { taskGateFixtureEnabled } from './egdesk-task-gate-fixture.mjs';
 
 export const QA_ISOLATION_MANIFEST = '.egdesk-qa-fixture-isolation.json';
 export const QA_PROJECT_PICKER_FILE = 'resources/surface/EGDeskSurfaceFileCard.mjs';
+export const QA_ROOM_PROJECT_PICKER_FILE = 'JS/eg-desk-surface.uc.js';
 export const QA_RUN_OUTPUTS_FILES = Object.freeze([
   'resources/EGDeskChatRunResult.sys.mjs', 'resources/EGDeskChatChangeReview.sys.mjs',
   'resources/EGDeskRunResult.sys.mjs', 'resources/EGDeskDiffView.sys.mjs', 'resources/EGDeskChangeReview.mjs',
@@ -50,6 +51,9 @@ function originFileFixtureOptIn(env) {
 }
 
 export function qaBridgeConfig(env = process.env) {
+  // The room-picker result seam belongs only to explicit project QA. Reject
+  // mixed modes before bootstrap writes any copied source or preferences.
+  projectFileFixtureEnabled(env);
   // A portable mode conflict must fail before bootstrap copies/preferences.
   // This data-only module imports no isolation code and starts no services.
   portableTransferFixtureEnabled(env);
@@ -134,8 +138,12 @@ export function projectFileFixtureEnabled(env = process.env) {
   const flag = env.EGDESK_QA_PROJECT_FILE_FIXTURE;
   if (flag != null && flag !== '0' && flag !== '1') fail('invalid project File fixture opt-in');
   if (flag !== '1') return false;
-  if (env.EGDESK_QA_FIXTURE_TRANSPORT !== '1' || env.EGDESK_QA_REAL_TURN !== '0'
-      || env.EGDESK_QA_CLAUDE_FIXTURE === '1') fail('project File fixture requires isolated, model-free transport');
+  if (env.EGDESK_QA_FIXTURE_TRANSPORT !== '1' || env.EGDESK_QA_REAL_TURN !== '0') fail('project File fixture requires isolated, model-free transport');
+  for (const [key, value] of Object.entries(env)) {
+    if ((/^EGDESK_QA_.*_FIXTURE$/.test(key) && key !== 'EGDESK_QA_PROJECT_FILE_FIXTURE'
+      || ['EGDESK_QA_BROWSER_NEGATIVE', 'EGDESK_QA_BROWSER_RELAY'].includes(key))
+      && value != null && value !== '' && value !== '0') fail(`project File fixture excludes ${key}`);
+  }
   return true;
 }
 
@@ -174,6 +182,56 @@ export function transformProjectPickerResult(original, port) {
   return { text: original.slice(0, from) + replacement + original.slice(to),
     descriptor: { kind: 'project-file-os-directory-result-v1',
       sourceBoundarySha256: sha256(before), replacementSha256: sha256(replacement),
+      synthetic: 'OS-picker-result-only', nativePickerInvocations: 0,
+      endpoint: `http://127.0.0.1:${port}/__qa/project-file/picker` } };
+}
+
+// No prepare/grant/HTTP/attach implementation is replaced. A reviewed single
+// native function body is the complete mutation boundary in the fresh copy.
+export function transformRoomProjectPickerResult(original, port) {
+  qaBridgeConfig({ EGDESK_QA_FIXTURE_TRANSPORT: '1', EGDESK_QA_FIXTURE_PORT: String(port) });
+  const name = 'pickNativeRoomProjectDirectory';
+  const matches = [...original.matchAll(/^  function pickNativeRoomProjectDirectory\(\) \{\r?\n/gm)];
+  if (matches.length !== 1 || [...original.matchAll(/\bfunction\s+pickNativeRoomProjectDirectory\s*\(/g)].length !== 1) {
+    fail('room project picker function missing or ambiguous');
+  }
+  const match = matches[0], from = match.index + match[0].length, closing = /\n  \}(?=\r?\n|$)/g;
+  closing.lastIndex = from;
+  const end = closing.exec(original);
+  if (!end) fail('room project picker closing boundary missing');
+  const to = end.index, body = original.slice(from, to);
+  try { new Function('return (' + original.slice(match.index, to + end[0].length).trim() + ');'); }
+  catch { fail('room project picker function boundary does not parse'); }
+  const reviewedBody = `
+    return new Promise((resolve, reject) => {
+      try {
+        const picker = Cc['@mozilla.org/filepicker;1'].createInstance(Ci.nsIFilePicker);
+        picker.init(window.browsingContext, '이 방에서 사용할 프로젝트 폴더', Ci.nsIFilePicker.modeGetFolder);
+        picker.open(result => {
+          try { resolve(result === Ci.nsIFilePicker.returnOK ? picker.file.path : null); }
+          catch (error) { reject(error); }
+        });
+      } catch (error) { reject(error); }
+    });`;
+  if (body.replace(/\s/g, '') !== reviewedBody.replace(/\s/g, '')) {
+    fail('room project picker differs from reviewed OS-result-only body');
+  }
+  const replacement = `    // Owned QA copy: synthetic OS result only; real one-use grant stays outside.
+    return fetch('http://127.0.0.1:${port}/__qa/project-file/picker', {
+      method: 'POST', headers: { 'Content-Type': 'application/json' }, body: '{}',
+    }).then(async response => {
+      const packet = await response.json();
+      if (!response.ok || packet?.kind !== 'egdesk-project-file-picker-result'
+          || packet.synthetic !== true || !(packet.selection === null
+          || (typeof packet.selection === 'string' && packet.selection.startsWith('/')
+              && !/[\\u0000-\\u001f\\u007f]/.test(packet.selection)))) {
+        throw new Error('Owned QA room picker result unavailable; no native fallback');
+      }
+      return packet.selection;
+    });`;
+  return { text: original.slice(0, from) + replacement + original.slice(to),
+    descriptor: { kind: 'chat-room-project-os-directory-result-v1', functionName: name,
+      sourceBodySha256: sha256(body), replacementBodySha256: sha256(replacement),
       synthetic: 'OS-picker-result-only', nativePickerInvocations: 0,
       endpoint: `http://127.0.0.1:${port}/__qa/project-file/picker` } };
 }
@@ -241,6 +299,7 @@ export function transformPortablePickerResults(original, port) {
 
 export function transformQaFixtureSource(name, original, port, { projectFileFixture = false, portableTransferFixture = false } = {}) {
   qaBridgeConfig({ EGDESK_QA_FIXTURE_TRANSPORT: '1', EGDESK_QA_FIXTURE_PORT: String(port) });
+  if (projectFileFixture && portableTransferFixture) fail('project and portable picker transforms are mutually exclusive');
   let text = original;
   const replacements = { endpointUrls: 0, helperPortConstants: 0 };
   for (const [rules, key] of [[ENDPOINT_RULES, 'endpointUrls'], [CONSTANT_RULES, 'helperPortConstants']]) {
@@ -264,6 +323,11 @@ export function transformQaFixtureSource(name, original, port, { projectFileFixt
     const transformed = transformPortablePickerResults(text, port);
     return { text: transformed.text, replacements: { ...replacements, osPickerResultBoundaries: 2 },
       portablePickerTransform: transformed.descriptor };
+  }
+  if (projectFileFixture && name === QA_ROOM_PROJECT_PICKER_FILE) {
+    const transformed = transformRoomProjectPickerResult(text, port);
+    return { text: transformed.text, replacements: { ...replacements, osPickerResultBoundaries: 1 },
+      roomProjectPickerTransform: transformed.descriptor };
   }
   return { text, replacements };
 }
@@ -292,10 +356,12 @@ function expectedFiles(profile, port, projectFileFixture = false, runOutputsFixt
     files[name] = { originalSha256: sha256(original), transformedSha256: sha256(transformed.text),
       replacements: transformed.replacements,
       ...(transformed.projectPickerTransform ? { projectPickerTransform: transformed.projectPickerTransform } : {}),
+      ...(transformed.roomProjectPickerTransform ? { roomProjectPickerTransform: transformed.roomProjectPickerTransform } : {}),
       ...(transformed.portablePickerTransform ? { portablePickerTransform: transformed.portablePickerTransform } : {}) };
   }
   if (!files['JS/eg-desk-surface.uc.js']?.replacements.endpointUrls) fail('missing surface bridge endpoints');
   if (projectFileFixture && !files[QA_PROJECT_PICKER_FILE]?.projectPickerTransform) fail('missing project picker transform fingerprint');
+  if (projectFileFixture && !files[QA_ROOM_PROJECT_PICKER_FILE]?.roomProjectPickerTransform) fail('missing room project picker transform fingerprint');
   if (portableTransferFixture && !files[QA_PORTABLE_PICKER_FILE]?.portablePickerTransform) fail('missing portable picker transform fingerprint');
   return files;
 }

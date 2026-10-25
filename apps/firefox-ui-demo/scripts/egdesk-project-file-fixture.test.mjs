@@ -5,6 +5,7 @@ import { Readable } from 'node:stream';
 import test from 'node:test';
 import { bootstrapQaProfile, canonicalTempRoot, LOADER_FILES } from './egdesk-chat-qa-profile.mjs';
 import { createProjectFileFixture, parseProjectTerminalWrite, assertProjectTerminalResponse } from './egdesk-project-file-fixture.mjs';
+import { assertRoomFolderStoreEvidence } from './verify-firefox-mcp-project-file-flow.mjs';
 import { createEGDeskFileServiceCallbacks, createEGDeskNativeFilePickers } from '../overlay/resources/EGDeskFileView.sys.mjs';
 import { terminalScriptLine, createTerminalScriptRun } from '../overlay/resources/EGDeskTerminalState.sys.mjs';
 
@@ -141,6 +142,102 @@ test('D-X3 uses real room-default read/save routes and SQLite inheritance, never
   assert.deepEqual([after.providerTurns, after.nativePickerInvocations, after.nativeProcessSpawns], [0, 0, 0]);
 });
 
+test('prepared room folder is a real unused picker grant until Save; Cancel writes no binding and inheritance survives override removal', async t => {
+  const fixture = setup(t), { pickers } = client(fixture), roomId = 'original-client-binding-not-local-thread';
+  const read = () => request(fixture, '/v1/files/projects/room-default', { roomId });
+  await configure(fixture, { pickerResults: ['select-owned'] });
+  const board = await pickers.chooseProjectFolder({ boardId: 'owned-board', title: 'Owned Board project' });
+  const saved = await request(fixture, '/v1/files/projects/room-default/save', { roomId, boardId: 'owned-board',
+    expectedProjectId: board.projectId, expectedRootId: board.rootId });
+  assert.equal(saved.status, 200);
+  const baseline = fixture.snapshot(), attaches = value => value.fileRequests.filter(row => row.operation === 'attachProject');
+  await configure(fixture, { pickerResults: ['cancel', 'select-owned-room', 'select-owned-room'] });
+  assert.equal(await pickers.prepareProjectFolder({ roomId }), null, 'actual picker cancel completes without selection/attach');
+  const osCancelled = fixture.snapshot();
+  const prepared = await pickers.prepareProjectFolder({ roomId });
+  assert.equal(prepared.displayPath, baseline.roomWorkspace);
+  assert.notEqual(prepared.displayPath, baseline.workspace);
+  const preview = fixture.snapshot();
+  assert.deepEqual(preview.persisted, baseline.persisted); assert.deepEqual(preview.roomDefaults, baseline.roomDefaults);
+  assert.equal(attaches(preview).length, attaches(baseline).length);
+  assert.equal(prepared.cancel(), true);
+  await assert.rejects(prepared.consume(), { code: 'PICKER_PREPARATION_CANCELLED' });
+  assert.deepEqual(fixture.snapshot().persisted, baseline.persisted);
+  const cancelled = fixture.snapshot();
+  const selected = await pickers.prepareProjectFolder({ roomId }), beforeSave = fixture.snapshot();
+  assert.equal(attaches(beforeSave).length, attaches(baseline).length);
+  const attached = await selected.consume(), afterSave = fixture.snapshot();
+  assert.equal(attached.status, 'connected'); assert.equal(attached.source, 'room');
+  assert.equal(attached.displayPath, baseline.roomWorkspace);
+  assert.notEqual(attached.projectId, board.projectId); assert.notEqual(attached.rootId, board.rootId);
+  assert.equal(attaches(afterSave).length, attaches(baseline).length + 1);
+  const receipt = attaches(afterSave).at(-1);
+  assert.equal(receipt.status, 200); assert.equal(receipt.request.roomId, roomId);
+  assert.equal(Object.hasOwn(receipt.request, 'boardId'), false);
+  assert.deepEqual(afterSave.roomDefaults, baseline.roomDefaults, 'room attachment cannot overwrite inherited Board');
+  assert.deepEqual(afterSave.persisted.bindings.filter(row => row.scope !== 'room'), baseline.persisted.bindings);
+  assert.equal(afterSave.persisted.bindings.filter(row => row.scope === 'room').length, 1);
+  const view = (await read()).body.result;
+  const savedSnapshot = fixture.snapshot();
+  assert.equal(view.roomId, roomId); assert.equal(view.source, 'room'); assert.equal(view.project.projectId, attached.projectId);
+  assert.deepEqual(view.inheritance, { boardId: 'owned-board' });
+  await assert.rejects(selected.consume(), { code: 'PICKER_PREPARATION_USED' });
+  assert.equal(attaches(fixture.snapshot()).length, attaches(afterSave).length, 'Save cannot replay a consumed grant');
+  const clearPrepared = fixture.snapshot();
+  const inherited = await request(fixture, '/v1/files/projects/inherit', { roomId });
+  assert.equal(inherited.status, 200); assert.equal(inherited.body.result.inherited, true);
+  const restored = (await read()).body.result, final = fixture.snapshot();
+  assert.equal(restored.source, 'board'); assert.equal(restored.override, null);
+  assert.equal(restored.project.projectId, board.projectId); assert.equal(restored.project.rootId, board.rootId);
+  assert.deepEqual(final.roomDefaults, baseline.roomDefaults);
+  assert.deepEqual(final.persisted.bindings, baseline.persisted.bindings, 'only the room override binding is removed');
+  assert.deepEqual(final.persisted.projects.find(row => row.id === board.projectId), baseline.persisted.projects.find(row => row.id === board.projectId));
+  assert.equal(final.fileRequests.some(row => row.operation === 'detachProject'), false);
+  assert.deepEqual(final.terminalRequests, []); assert.equal(final.currentOriginalSha256, baseline.currentOriginalSha256);
+  assert.deepEqual([final.providerTurns, final.nativePickerInvocations, final.nativeProcessSpawns], [0, 0, 0]);
+  const proof = { initial: baseline, osCancelled, preparedCancel: preview, cancelled, preparedSave: beforeSave,
+    saved: savedSnapshot, clearPrepared, cleared: final };
+  const expected = { roomId, boardId: 'owned-board', projectId: board.projectId, rootId: board.rootId, displayPath: baseline.workspace };
+  const expectations = assertRoomFolderStoreEvidence(proof, expected);
+  assert.equal(expectations.roomExpectation.source, 'room'); assert.equal(expectations.roomExpectation.boardId, null);
+  assert.equal(expectations.boardExpectation.source, 'board'); assert.equal(expectations.boardExpectation.boardId, 'owned-board');
+  const polled = structuredClone(proof);
+  for (const [index, state] of Object.values(polled).entries()) state.sessions = [{ sessionId: 'existing-owned-terminal', reads: index, writes: 2 }];
+  assert.doesNotThrow(() => assertRoomFolderStoreEvidence(polled, expected), 'background idle reads are not shell writes');
+  polled.saved.sessions[0].writes++;
+  assert.throws(() => assertRoomFolderStoreEvidence(polled, expected), 'any extra shell write still fails');
+  for (const corrupt of [
+    p => { p.cancelled.persisted.bindings.push({ scope: 'room', key: roomId, projectId: attached.projectId }); },
+    p => { p.saved.fileRequests.findLast(row => row.operation === 'attachProject').request.roomId = 'wrong-local-thread'; },
+    p => { p.saved.fileRequests.findLast(row => row.operation === 'attachProject').request.boardId = 'active-board'; },
+    p => { p.saved.fileRequests.findLast(row => row.operation === 'attachProject').request.selectionId = 'forged'; },
+    p => { p.saved.pickerResults.at(-1).selection = baseline.workspace; },
+    p => { p.cleared.roomDefaults = []; },
+    p => { p.cleared.fileRequests.findLast(row => row.operation === 'inheritRoomProject').operation = 'detachProject'; },
+    p => { p.cleared.fileRequests.findLast(row => row.operation === 'readRoomProjectDefault').response.result.source = null; },
+    p => { p.clearPrepared.persisted.bindings = []; },
+    p => { p.saved.blockedRoutes.push({ route: '/v1/files/projects/detach' }); },
+    p => { p.saved.providerTurns = 1; },
+  ]) { const changed = structuredClone(proof); corrupt(changed); assert.throws(() => assertRoomFolderStoreEvidence(changed, expected)); }
+});
+
+test('owned room picker result cannot be completed as the Board folder or an arbitrary path; Board detach stays disabled', async t => {
+  const fixture = setup(t);
+  await configure(fixture, { pickerResults: ['select-owned-room'] });
+  const channel = (await request(fixture, '/v1/files/picker/channel')).body.result;
+  const headers = { 'x-egdesk-picker-channel': channel.token };
+  const begin = (await request(fixture, '/v1/files/picker/begin', { purpose: 'folder' }, { headers })).body.result;
+  const selection = (await request(fixture, '/__qa/project-file/picker')).body.selection;
+  assert.equal(selection, fixture.snapshot().roomWorkspace);
+  for (const absolutePath of [fixture.snapshot().workspace, '/tmp/foreign-room']) {
+    const result = await request(fixture, '/v1/files/picker/complete', { requestId: begin.requestId, absolutePath }, { headers });
+    assert.equal(result.status, 403); assert.equal(result.body.code, 'QA_PICKER_RESULT_MISMATCH');
+  }
+  assert.equal((await request(fixture, '/v1/files/picker/complete', { requestId: begin.requestId, absolutePath: selection }, { headers })).status, 200);
+  assert.equal((await request(fixture, '/v1/files/projects/detach', { boardId: 'owned-board' })).status, 403);
+  assert.equal(fixture.snapshot().persisted.projects.length, 0);
+});
+
 test('D-X3 wrong IDs, stale project/root, extra paths and cross-origin saves cannot persist a default', async t => {
   const fixture = setup(t), { pickers } = client(fixture);
   await configure(fixture, { pickerResults: ['select-owned'] });
@@ -158,7 +255,8 @@ test('D-X3 wrong IDs, stale project/root, extra paths and cross-origin saves can
   assert.equal((await request(fixture, '/v1/files/projects/room-default', { roomId: body.roomId, boardId: body.boardId })).body.code, 'UNEXPECTED_FIELD');
   assert.equal((await request(fixture, '/v1/files/projects/room-default/save', body, { headers: { origin: 'https://foreign.invalid' } })).status, 403);
   assert.equal((await request(fixture, '/v1/files/projects/room-default', {}, { method: 'GET' })).body.code, 'QA_FILE_OPERATION_DISABLED');
-  assert.equal((await request(fixture, '/v1/files/projects/inherit', { roomId: body.roomId })).body.code, 'QA_FILE_OPERATION_DISABLED');
+  assert.equal((await request(fixture, '/v1/files/projects/inherit', { roomId: body.roomId, boardId: body.boardId })).body.code, 'UNEXPECTED_FIELD');
+  assert.equal((await request(fixture, '/v1/files/projects/inherit', {})).status, 400);
   assert.deepEqual(fixture.snapshot().roomDefaults, []);
   assert.deepEqual(fixture.snapshot().terminalRequests, []);
 });

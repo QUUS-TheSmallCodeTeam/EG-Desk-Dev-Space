@@ -15,7 +15,7 @@ const hash = value => createHash('sha256').update(value).digest('hex');
 const require = createRequire(import.meta.url);
 const OPERATIONS = new Map(Object.entries(EGDESK_FILE_ENDPOINTS).map(([key, route]) => [route, key]));
 const FILE_OPERATIONS = new Set(['openPickerChannel', 'beginPicker', 'completePicker', 'attachProject', 'openProject',
-  'readRoomProjectDefault', 'saveRoomProjectDefault',
+  'readRoomProjectDefault', 'saveRoomProjectDefault', 'inheritRoomProject',
   'setProjectScripts', 'listDirectory', 'readFile', 'createDraft', 'readDraft', 'updateDraft', 'saveDraft',
   'diffDraft', 'sourceStatus', 'resolvePath']);
 const TERMINAL_ROUTES = new Set(['/terminal/shells', '/terminal/spawn', '/terminal/write', '/terminal/read',
@@ -73,8 +73,9 @@ export function createProjectFileFixture({ profile: profilePath, token, env = pr
   const config = qaBridgeConfig(env), manifest = assertQaFixtureManifest(profilePath);
   assert.ok(manifest.backendDataDir, 'Owned QA backend data directory is required');
   const root = fs.mkdtempSync(path.join(manifest.backendDataDir, 'project-file-qa-'));
-  const workspace = path.join(root, 'workspace'), store = path.join(root, 'store');
+  const workspace = path.join(root, 'workspace'), roomWorkspace = path.join(root, 'room-only-owned-folder'), store = path.join(root, 'store');
   fs.mkdirSync(workspace, { mode: 0o700 });
+  fs.mkdirSync(roomWorkspace, { mode: 0o700 });
   fs.mkdirSync(store, { mode: 0o700 });
   const outputMarker = `QA_PROJECT_OUTPUT_${randomBytes(12).toString('hex')}`;
   const originalText = `Owned project FileView fixture\n${outputMarker}\n`;
@@ -111,7 +112,7 @@ export function createProjectFileFixture({ profile: profilePath, token, env = pr
   };
   const snapshot = () => ({ kind: 'egdesk-project-file-fixture', profile: manifest.profile,
     fixture: true, host: config.host, port: config.port, origin: config.origin,
-    root, workspace, store, originalPath, originalText, originalSha256: hash(originalText),
+    root, workspace, roomWorkspace, store, originalPath, originalText, originalSha256: hash(originalText),
     currentOriginalSha256: hash(fs.readFileSync(originalPath)), command, outputMarker,
     synthetic: { picker: 'OS-directory-result-only', shell: 'terminal-http-io-only' },
     realComponents: ['File HTTP adapter', 'managed drafts', 'project SQLite store'],
@@ -143,7 +144,7 @@ export function createProjectFileFixture({ profile: profilePath, token, env = pr
         if (body.pickerResults !== undefined) {
           if (pickerResults.length || pendingPickers.size) throw error('QA_PICKER_PENDING', 'An owned picker operation is already pending', 409);
           if (!Array.isArray(body.pickerResults) || !body.pickerResults.length || body.pickerResults.length > 3
-              || body.pickerResults.some(value => !['cancel', 'select-owned'].includes(value))) throw error('QA_PICKER_RESULT', 'Only cancel or owned directory selections are allowed');
+              || body.pickerResults.some(value => !['cancel', 'select-owned', 'select-owned-room'].includes(value))) throw error('QA_PICKER_RESULT', 'Only cancel or owned directory selections are allowed');
         }
         if (body.nextTerminalOutcome !== undefined) {
           if (!['complete', 'output-loss'].includes(body.nextTerminalOutcome)) throw error('QA_TERMINAL_OUTCOME', 'Unknown synthetic shell outcome');
@@ -160,7 +161,8 @@ export function createProjectFileFixture({ profile: profilePath, token, env = pr
         const pending = [...pendingPickers.entries()].filter(([, value]) => !value.delivered);
         if (pending.length !== 1 || !pickerResults.length) throw error('QA_PICKER_NOT_ARMED', 'Actual beginPicker and one controlled result are required', 409);
         const [requestId, value] = pending[0];
-        const selection = pickerResults.shift() === 'cancel' ? null : workspace;
+        const result = pickerResults.shift();
+        const selection = result === 'cancel' ? null : result === 'select-owned-room' ? roomWorkspace : workspace;
         value.delivered = true; value.selection = selection;
         record(evidence.pickerResults, { requestId, selection, synthetic: true, nativePickerInvocations: 0 });
         sendJson(res, 200, { kind: 'egdesk-project-file-picker-result', synthetic: true, selection }); return true;
@@ -175,7 +177,7 @@ export function createProjectFileFixture({ profile: profilePath, token, env = pr
         if (operation === 'completePicker') {
           const pending = pendingPickers.get(body.requestId);
           if (!pending?.delivered || (pending.selection === null ? body.cancelled !== true || body.absolutePath !== undefined
-            : body.cancelled === true || body.absolutePath !== workspace)) {
+            : body.cancelled === true || body.absolutePath !== pending.selection)) {
             throw error('QA_PICKER_RESULT_MISMATCH', 'Completion must use the OS result from this actual picker begin', 403);
           }
         }

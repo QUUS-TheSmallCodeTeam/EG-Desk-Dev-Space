@@ -313,6 +313,124 @@ export function assertRoomDefaultStoreEvidence(proof, expected) {
   return true;
 }
 
+export function roomFolderPreviewVisible(chat, workspace) {
+  const room = chat?.roomProject, paint = room?.detailsPaint;
+  return room?.mode === 'folder' && room.saveDisabled === false && paint?.text.includes(workspace)
+    && textFragmentsVisible(paint, paint.text) && chatProjectFooterVisible(chat, 'room');
+}
+
+// A comparison identity derived from an actual read receipt, not a sent payload.
+export function assertRoomFolderResponse(packet, expected, source) {
+  assert.ok(['room', 'board'].includes(source));
+  assert.equal(packet?.ok, true);
+  const value = packet.result;
+  assert.equal(value.roomId, expected.roomId); assert.equal(value.source, source); assert.equal(value.status, 'connected');
+  assert.deepEqual(value.inheritance, { boardId: expected.boardId });
+  assert.deepEqual(value.override, source === 'room' ? { projectId: expected.projectId } : null);
+  assert.equal(value.project.status, 'connected');
+  for (const key of ['projectId', 'rootId', 'displayPath']) assert.equal(value.project[key], expected[key]);
+  return { roomId: expected.roomId, status: 'connected', source, boardId: source === 'board' ? expected.boardId : null,
+    projectId: expected.projectId, rootId: expected.rootId };
+}
+
+export function assertRoomFolderStoreEvidence(proof, expected) {
+  const { initial, osCancelled, preparedCancel, cancelled, preparedSave, saved, clearPrepared, cleared } = proof;
+  const attaches = value => operations(value, 'attachProject').slice(operations(initial, 'attachProject').length);
+  const inherits = value => operations(value, 'inheritRoomProject').slice(operations(initial, 'inheritRoomProject').length);
+  const boardBindings = value => value.persisted.bindings.filter(row => row.scope !== 'room' || row.key !== expected.roomId);
+  const roomBinding = value => value.persisted.bindings.filter(row => row.scope === 'room' && row.key === expected.roomId);
+  const sessionEffects = value => value.sessions.map(({ reads, ...session }) => session);
+  assert.equal(roomBinding(initial).length, 0);
+  assert.deepEqual(initial.roomDefaults.filter(row => row.roomId === expected.roomId), [{ roomId: expected.roomId, boardId: expected.boardId }]);
+  for (const value of [osCancelled, preparedCancel, cancelled, preparedSave]) {
+    assert.deepEqual(value.persisted, initial.persisted, 'picker preparation/cancellation is not a project attachment');
+    assert.equal(attaches(value).length, 0); assert.equal(inherits(value).length, 0);
+  }
+  assert.deepEqual(clearPrepared.persisted, saved.persisted, 'choosing inheritance without Save changes no binding');
+  assert.equal(inherits(clearPrepared).length, 0);
+  const selections = saved.pickerResults.slice(initial.pickerResults.length);
+  assert.deepEqual(selections.map(row => row.selection), [null, initial.roomWorkspace, initial.roomWorkspace]);
+  assert.notEqual(initial.roomWorkspace, initial.workspace);
+  assert.equal(osCancelled.pickerResults.length, initial.pickerResults.length + 1);
+  assert.equal(cancelled.pickerResults.length, initial.pickerResults.length + 2);
+  assert.equal(attaches(saved).length, 1); const attached = attaches(saved)[0];
+  assert.equal(attached.status, 200);
+  assert.deepEqual(Object.keys(attached.request).sort(), ['roomId', 'selectionId']);
+  assert.equal(attached.request.roomId, expected.roomId);
+  const completed = operations(preparedSave, 'completePicker').at(-1);
+  assert.equal(completed.status, 200); assert.equal(completed.request.requestId, selections[2].requestId);
+  assert.equal(completed.request.absolutePath, initial.roomWorkspace);
+  assert.equal(attached.request.selectionId, completed.response.result.selectionId);
+  assert.ok(attached.sequence > completed.sequence);
+  const room = attached.response.result;
+  assert.equal(room.status, 'connected'); assert.equal(room.source, 'room'); assert.equal(room.displayPath, initial.roomWorkspace);
+  assert.notEqual(room.projectId, expected.projectId); assert.notEqual(room.rootId, expected.rootId);
+  assert.equal(roomBinding(saved).length, 1); assert.equal(roomBinding(saved)[0].projectId, room.projectId);
+  const roomExpected = { ...expected, projectId: room.projectId, rootId: room.rootId, displayPath: initial.roomWorkspace };
+  const read = value => operations(value, 'readRoomProjectDefault').findLast(row => row.request.roomId === expected.roomId);
+  assert.ok(read(saved).sequence > attached.sequence);
+  const roomExpectation = assertRoomFolderResponse(read(saved).response, roomExpected, 'room');
+  const restored = inherits(cleared);
+  assert.equal(restored.length, 1); assert.equal(restored[0].status, 200);
+  assert.deepEqual(restored[0].request, { roomId: expected.roomId });
+  assert.equal(restored[0].response.result.roomId, expected.roomId); assert.equal(restored[0].response.result.inherited, true);
+  assert.ok(read(cleared).sequence > restored[0].sequence);
+  const boardExpectation = assertRoomFolderResponse(read(cleared).response, expected, 'board');
+  assert.deepEqual(cleared.persisted.bindings, initial.persisted.bindings, 'clear only the room override, never detach the Board');
+  for (const value of [osCancelled, preparedCancel, cancelled, preparedSave, saved, clearPrepared, cleared]) {
+    assert.deepEqual(value.blockedRoutes, initial.blockedRoutes, 'no unexpected forbidden operation attempts');
+    assert.deepEqual(value.roomDefaults, initial.roomDefaults);
+    assert.deepEqual(boardBindings(value), boardBindings(initial));
+    assert.deepEqual(value.persisted.projects.filter(row => row.id === expected.projectId), initial.persisted.projects.filter(row => row.id === expected.projectId));
+    assert.deepEqual(value.terminalRequests, initial.terminalRequests);
+    assert.deepEqual(sessionEffects(value), sessionEffects(initial), 'idle terminal reads may advance, shell effects may not');
+    assert.equal(value.currentOriginalSha256, initial.currentOriginalSha256);
+    assert.deepEqual([value.providerTurns, value.nativePickerInvocations, value.nativeProcessSpawns], [0, 0, 0]);
+    for (const row of value.fileRequests.slice(initial.fileRequests.length)) {
+      assert.equal(row.status, 200);
+      assert.ok(['openPickerChannel', 'beginPicker', 'completePicker', 'attachProject', 'inheritRoomProject', 'readRoomProjectDefault', 'openProject'].includes(row.operation));
+      if (['attachProject', 'inheritRoomProject', 'readRoomProjectDefault'].includes(row.operation)) assert.equal(row.request.roomId, expected.roomId);
+      if (row.operation === 'openProject') assert.deepEqual(row.request, { boardId: expected.boardId });
+    }
+  }
+  assert.equal(attaches(cleared).length, 1, 'clearing/reviewing cannot replay attachment');
+  return { roomExpectation, boardExpectation, basis: 'actual room-default receipts; no Chat send performed' };
+}
+
+export function assertRoomFolderUiEvidence(ui, expected, original, workspace) {
+  assert.ok(expected.roomId && expected.roomId === original.roomId);
+  for (const sample of Object.values(ui)) {
+    for (const key of ['threadId', 'roomId', 'conversationId']) assert.equal(sample[key], original[key]);
+    assert.equal(sample.composerThreadId, original.threadId); assert.equal(sample.messageCount, 0);
+    assert.equal(sample.draft, ''); assert.equal(sample.composerValue, '');
+  }
+  for (const keys of [['initial', 'osCancelled', 'preparedCancel', 'cancelled', 'preparedSave', 'saved'], ['requestAgain', 'clearPrepared', 'cleared']]) {
+    const first = ui[keys[0]];
+    for (const field of ['boardId', 'projectId', 'rootId', 'title', 'displayPath']) assert.equal(first.target[field], expected[field]);
+    for (const key of keys) {
+      assert.deepEqual(ui[key].target, first.target); assert.equal(ui[key].draftRevision, first.draftRevision);
+      assert.equal(ui[key].roomProject.effectiveSource, 'request', 'room setting changes never replace the request draft');
+    }
+  }
+  for (const key of ['preparedCancel', 'preparedSave']) {
+    assert.ok(roomFolderPreviewVisible(ui[key], workspace));
+    assert.deepEqual(projectDialogLayoutIssues(ui[key].roomProject.layout), []);
+  }
+  assert.equal(ui.osCancelled.roomProject.saveDisabled, true);
+  assert.equal(ui.cancelled.roomProject.editorBox, null);
+  assert.equal(ui.saved.roomProject.currentSource, 'room'); assert.equal(ui.saved.roomProject.currentStatus, 'connected');
+  assert.ok(ui.saved.roomProject.savedText.includes('저장됨'));
+  assert.equal(ui.clearPrepared.roomProject.mode, 'inherit'); assert.ok(chatProjectFooterVisible(ui.clearPrepared, 'room'));
+  assert.equal(ui.clearPrepared.roomProject.saveDisabled, false);
+  assert.equal(ui.cleared.roomProject.currentSource, 'board'); assert.equal(ui.cleared.roomProject.currentStatus, 'connected');
+  assert.ok(ui.cleared.roomProject.savedText.includes('지정 해제됨'));
+  for (const [key, source, location] of [['roomRevealed', '방 기본', workspace], ['boardRevealed', 'Board 상속', expected.displayPath]]) {
+    const sample = ui[key]; assert.equal(sample.target, null);
+    assert.ok(textFragmentsVisible(sample.projectSourcePaint, source)); assert.ok(sample.openerDescription.includes(location));
+  }
+  return true;
+}
+
 export function roomProjectDetailsVisible(room, expected) {
   const paint = room?.detailsPaint;
   return room?.selectedBoardId === expected.boardId && room.saveDisabled === false &&
@@ -772,6 +890,12 @@ function observeProjectChatPart({ box, textPaint }) {
         projectSourcePaint: textPaint(chatFind('chat-project-source')),
         roomProject: { openBox: box(chatFind('chat-room-project-open')), openText: chatFind('chat-room-project-open')?.textContent || '',
           editorBox: box(chatFind('chat-room-project-editor')),
+          bodyBox: box(body),
+          mode: chatFind('chat-room-project-editor')?.dataset.mode || null,
+          chooseFolderBox: box(chatFind('chat-room-project-choose-folder')), inheritBox: box(chatFind('chat-room-project-inherit')),
+          savedText: chatFind('chat-room-project-saved')?.textContent || '',
+          effectiveSource: chatFind('chat-project-effective')?.dataset.source || null,
+          effectivePaint: textPaint(chatFind('chat-project-effective')),
           selectedBoardId: chatFind('chat-room-project-board')?.value ?? null,
           options: [...(chatFind('chat-room-project-board')?.options || [])].map(option => ({ value: option.value, label: option.textContent })),
           saveDisabled: chatFind('chat-room-project-save')?.disabled ?? true,
@@ -854,6 +978,9 @@ function projectObservationIdentity() {
     panelText: panel?.textContent || null, panelThreadId: panel?.dataset.threadId || null,
     projectChoice: panel?.querySelector('[data-testid="chat-project-board"]')?.value ?? null,
     roomChoice: panel?.querySelector('[data-testid="chat-room-project-board"]')?.value ?? null,
+    roomMode: panel?.querySelector('[data-testid="chat-room-project-editor"]')?.dataset.mode || null,
+    roomSource: panel?.querySelector('[data-testid="chat-room-project-current"]')?.dataset.source || null,
+    effectiveSource: panel?.querySelector('[data-testid="chat-project-effective"]')?.dataset.source || null,
     terminals: [...document.querySelectorAll('.egd-terminal-card')].map(node => {
       const api = node._termBrowser?.contentWindow?.terminalAPI;
       return { id: node.id, sessionId: api?.ptyId || null, text: api?.bufferText?.() || '', level: node.dataset.egdSemanticLevel || null };
@@ -973,6 +1100,10 @@ export async function runProjectFileFlow({ harness, result, check }, { profile, 
     descriptor?.kind === 'project-file-os-directory-result-v1' &&
     !!isolation.files['resources/EGDeskFileView.sys.mjs'] && !!isolation.files['resources/EGDeskRunResult.sys.mjs']);
   result.pickerTransform = descriptor;
+  const roomPickerDescriptor = isolation.files['JS/eg-desk-surface.uc.js']?.roomProjectPickerTransform;
+  check('room folder uses a separately fingerprinted OS-result-only boundary before any native input',
+    roomPickerDescriptor?.kind === 'chat-room-project-os-directory-result-v1');
+  result.roomPickerTransform = roomPickerDescriptor;
   result.sourceProof = isolation.files;
   result.observationScripts = projectUiObservationSources().map(({ part, bytes }) => ({ part, bytes }));
   result.scope = { actual: ['native headless UI input', 'picker channel/begin/complete', 'File HTTP adapter',
@@ -1416,6 +1547,100 @@ export async function runProjectFileFlow({ harness, result, check }, { profile, 
       assertRoomDefaultUiEvidence(roomProof.ui, roomExpected, original));
     check('D-X3 native actions persisted exactly one real SQLite inheritance and re-read it after room reopen',
       assertRoomDefaultStoreEvidence(roomProof, roomExpected));
+
+    // Existing Board inheritance is the starting authority. Only native Save
+    // may attach the separately owned room folder; request draft is independent.
+    const folderProof = proof.roomFolder = { expected: roomExpected, original, ui: {}, reveals: [] };
+    const folderPath = proof.initial.roomWorkspace;
+    const bodyKey = async (key, label) => {
+      assertBeforeDeadline(deadlineMs);
+      const selector = testid('chat-project-body');
+      result.actions.push({ label, kind: 'native-key', key, selector, at: Date.now() });
+      const scroll = await harness.scrollWithKey(selector, key);
+      const settled = await waitStableProjectUi(harness, deadlineMs);
+      folderProof.reveals.push({ label, key, scroll, chat: settled.chat });
+      return settled.chat;
+    };
+    const roomControl = async (name, boxKey, label) => {
+      for (let attempt = 0; attempt < 4; attempt++) {
+        const chat = (await observeProjectUi(harness)).chat, target = chat.roomProject[boxKey], body = chat.roomProject.bodyBox;
+        if (target?.visible && target.inside && !target.clipped && target.visibleHits === 9) break;
+        const key = target && body && target.y < body.y ? 'PageUp'
+          : target && body && target.y + target.height > body.y + body.height ? 'PageDown' : null;
+        if (!key) break;
+        await bodyKey(key, `native reveal ${name}`);
+      }
+      await click(testid(name), label); // unchanged complete 9/9 click preflight
+    };
+    const folderPreview = async phase => {
+      let sample = await waitRoom(phase, value => value.roomProject.mode === 'folder' && !value.roomProject.saveDisabled &&
+        value.roomProject.detailsPaint?.text.includes(folderPath));
+      check(`${phase}: Save/Cancel visible before review scroll`, chatProjectFooterVisible(sample, 'room'));
+      if (!roomFolderPreviewVisible(sample, folderPath)) sample = await bodyKey('End', 'native review of complete room-folder preview');
+      check(`${phase}: actual full path and Save/Cancel are painted`, roomFolderPreviewVisible(sample, folderPath));
+      check(`${phase}: no horizontal dialog overflow`, projectDialogLayoutIssues(sample.roomProject.layout).length === 0);
+      return sample;
+    };
+    const applyRequestAgain = async () => {
+      await openPanel(); await chooseBoard();
+      await click(testid('chat-project-apply'), 'preserve independent request-only Board target while editing room folder');
+      await waitRoom('independent-request-applied', value => !value.panel && value.target?.projectId === expected.projectId);
+      await openPanel();
+      return waitRoom('independent-request-effective', value => value.roomProject.effectiveSource === 'request');
+    };
+    folderProof.ui.initial = await applyRequestAgain();
+    folderProof.initial = await state();
+    await configure({ pickerResults: ['cancel', 'select-owned-room', 'select-owned-room'] });
+    await openRoomEditor();
+    await roomControl('chat-room-project-choose-folder', 'chooseFolderBox', 'native cancel of room OS picker result');
+    folderProof.ui.osCancelled = await waitRoom('room-picker-cancel', value => value.roomProject.mode === 'folder' &&
+      value.roomProject.saveDisabled && value.roomProject.detailsPaint?.text.includes('취소'));
+    folderProof.osCancelled = await state();
+    await click(testid('chat-room-project-cancel'), 'close OS-cancelled room editor');
+    await waitRoom('room-picker-cancel-closed', value => !value.roomProject.editorBox);
+    await openRoomEditor();
+    await roomControl('chat-room-project-choose-folder', 'chooseFolderBox', 'prepare owned room folder without attachment');
+    folderProof.ui.preparedCancel = await folderPreview('room-folder-before-cancel');
+    folderProof.preparedCancel = await state();
+    await captureSupplement('chat-room-folder-preview-before-cancel-1280x800', folderProof.ui.preparedCancel);
+    await click(testid('chat-room-project-cancel'), 'cancel prepared grant without saving a room binding');
+    folderProof.ui.cancelled = await waitRoom('prepared-room-folder-cancelled', value => !value.roomProject.editorBox);
+    folderProof.cancelled = await state();
+    check('OS cancel and prepared-folder Cancel made no attachment or binding changes',
+      JSON.stringify(folderProof.cancelled.persisted) === JSON.stringify(folderProof.initial.persisted));
+    await openRoomEditor();
+    await roomControl('chat-room-project-choose-folder', 'chooseFolderBox', 'prepare owned room folder for explicit Save');
+    folderProof.ui.preparedSave = await folderPreview('room-folder-before-save');
+    folderProof.preparedSave = await state();
+    await click(testid('chat-room-project-save'), 'save prepared folder once to the original client-bound room');
+    folderProof.ui.saved = await waitRoom('room-folder-saved', value => !value.roomProject.editorBox &&
+      value.roomProject.currentSource === 'room' && value.roomProject.currentStatus === 'connected' &&
+      value.roomProject.effectiveSource === 'request' && value.roomProject.savedText.includes('저장됨'));
+    folderProof.saved = await state();
+    await captureSupplement('chat-room-folder-saved-request-still-effective-1280x800', folderProof.ui.saved);
+    await closeProjectPanel();
+    await click(testid('chat-project-remove'), 'remove only request override to reveal the saved room folder');
+    folderProof.ui.roomRevealed = await waitRoom('room-folder-effective', value => value.target === null &&
+      value.projectSourcePaint?.text === '방 기본' && value.openerDescription.includes(folderPath));
+    folderProof.ui.requestAgain = await applyRequestAgain();
+    await openRoomEditor();
+    await roomControl('chat-room-project-inherit', 'inheritBox', 'choose return to existing Board inheritance without detaching it');
+    folderProof.ui.clearPrepared = await waitRoom('room-inherit-prepared', value => value.roomProject.mode === 'inherit' && !value.roomProject.saveDisabled);
+    check('inheritance confirmation exposes Save/Cancel', chatProjectFooterVisible(folderProof.ui.clearPrepared, 'room'));
+    folderProof.clearPrepared = await state();
+    await click(testid('chat-room-project-save'), 'save removal of only the original room override');
+    folderProof.ui.cleared = await waitRoom('room-folder-override-cleared', value => !value.roomProject.editorBox &&
+      value.roomProject.currentSource === 'board' && value.roomProject.currentStatus === 'connected' &&
+      value.roomProject.effectiveSource === 'request' && value.roomProject.savedText.includes('지정 해제됨'));
+    folderProof.cleared = await state();
+    await closeProjectPanel();
+    await click(testid('chat-project-remove'), 'reveal preserved Board inheritance after room override removal');
+    folderProof.ui.boardRevealed = await waitRoom('inherited-Board-effective', value => value.target === null &&
+      value.projectSourcePaint?.text === 'Board 상속' && value.openerDescription.includes(expected.displayPath));
+    check('native room folder Cancel/Save/clear preserve original room, request draft and full preview',
+      assertRoomFolderUiEvidence(folderProof.ui, roomExpected, original, folderPath));
+    folderProof.expectations = assertRoomFolderStoreEvidence(folderProof, roomExpected);
+    check('one actual room attach and one inherit restore have real HTTP/SQLite receipts; no project send asserted', true, folderProof.expectations);
   };
 
   const guard = await observeGuard(harness);
@@ -1546,10 +1771,11 @@ export async function runProjectFileFlow({ harness, result, check }, { profile, 
   result.longCommandNavigationVerified = true;
   result.resultLocationDisclosureVerified = true;
   result.roomProjectDefaultVerified = true;
+  result.roomProjectFolderOverrideVerified = true;
   result.providerTurns = 0; result.nativePickerInvocations = 0; result.nativeProcessSpawns = 0;
   result.visualReview = 'pending-first-person-review'; result.visualPass = null;
   result.unverified = ['Actual native picker and shell/PTY (explicitly synthetic)', 'Hardware foreground behavior (not exercised)',
-    'Visual quality requires first-person review of the eight core, four project-selection/navigation, two expanded-location and two room-default captures',
+    'Visual quality requires first-person review of all core, project-selection/navigation, expanded-location, room-default and room-folder captures',
     'Provider send/frozen request execution (not exercised)', 'No-replay observed for bounded post-loss interval only'];
 }
 

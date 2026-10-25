@@ -10,7 +10,8 @@ import { assertProjectEnvironment, assertProjectFlowEvidence, PROJECT_VIEWPORTS,
   fileResultLocationVisible, assertFileResultLocationEvidence, projectUiObservationSources,
   PROJECT_OBSERVATION_SOURCE_BUDGET, mergeProjectUiObservations, observeProjectUi, waitStableProjectUi,
   chatProjectFooterVisible, chatProjectReviewReady, chatProjectWaitDiagnostic,
-  assertChatProjectReviewScroll, assertChatRoomReadReceipt } from './verify-firefox-mcp-project-file-flow.mjs';
+  assertChatProjectReviewScroll, assertChatRoomReadReceipt, roomFolderPreviewVisible,
+  assertRoomFolderResponse, assertRoomFolderUiEvidence } from './verify-firefox-mcp-project-file-flow.mjs';
 import { parseCli } from './verify-firefox-mcp-headless-ui-regression.mjs';
 import { terminalScriptLine } from '../overlay/resources/EGDeskTerminalState.sys.mjs';
 
@@ -438,6 +439,81 @@ test('D-X3 UI receipts separate saved default, request override, Cancel and nati
     assert.throws(() => assertRoomDefaultUiEvidence(changed, expected, base));
   }
   assert.throws(() => assertRoomDefaultUiEvidence(ui, { ...expected, roomId: base.threadId }, base));
+});
+
+test('room-folder response comparison distinguishes room authority from preserved Board inheritance', () => {
+  const expected = { roomId: 'client-room', boardId: 'owned-board', projectId: 'room-project', rootId: 'room-root', displayPath: '/owned/room' };
+  const packet = { ok: true, result: { roomId: expected.roomId, source: 'room', status: 'connected',
+    inheritance: { boardId: expected.boardId }, override: { projectId: expected.projectId }, project: { ...expected, status: 'connected' } } };
+  assert.deepEqual(assertRoomFolderResponse(packet, expected, 'room'), { roomId: expected.roomId,
+    status: 'connected', source: 'room', boardId: null, projectId: expected.projectId, rootId: expected.rootId });
+  const board = structuredClone(packet); board.result.source = 'board'; board.result.override = null;
+  assert.equal(assertRoomFolderResponse(board, expected, 'board').boardId, expected.boardId);
+  for (const corrupt of [p => { p.ok = false; }, p => { p.result.roomId = 'provider-conversation'; },
+    p => { p.result.source = 'board'; }, p => { p.result.status = 'none'; }, p => { p.result.inheritance = null; },
+    p => { p.result.override.projectId = 'foreign'; }, p => { p.result.project.rootId = 'foreign'; },
+    p => { p.result.project.displayPath = '/foreign'; }, p => { p.result.project.status = 'disconnected'; }]) {
+    const changed = structuredClone(packet); corrupt(changed); assert.throws(() => assertRoomFolderResponse(changed, expected, 'room'));
+  }
+  assert.throws(() => assertRoomFolderResponse(packet, expected, 'request'));
+});
+
+test('room-folder UI proof requires complete preview, fixed footer, unchanged request draft and original client binding', () => {
+  // Validator samples only; these cannot stand in for native browser evidence.
+  const target = { boardId: 'owned-board', projectId: 'board-project', rootId: 'board-root', title: 'Owned Board project', displayPath: '/owned/board' };
+  const expected = { ...target, roomId: 'client-binding' }, workspace = '/owned/room-folder';
+  const paint = text => ({ text, styleVisible: true, textNodeCount: 1, missingTextRects: 0,
+    fragments: [{ inside: true, clipped: false, hitCount: 3, rect: { width: 200, height: 18 } }] });
+  const box = { visible: true, inside: true, clipped: false, visibleHits: 9 };
+  const layout = Object.fromEntries(['dialog', 'body', 'editor', 'details'].map(key => [key, { clientWidth: 480, scrollWidth: 480 }]));
+  const original = { threadId: 'local-thread', roomId: expected.roomId, conversationId: null };
+  const base = { ...original, composerThreadId: original.threadId, messageCount: 0, draft: '', composerValue: '',
+    target, draftRevision: 10, roomProject: { effectiveSource: 'request', editorBox: null },
+    panel: { applyBox: null, cancelBox: null, actions: { operation: 'room', outsideBody: true } } };
+  const preview = { ...base, roomProject: { ...base.roomProject, editorBox: box, mode: 'folder', saveDisabled: false,
+    detailsPaint: paint(`선택한 방 전용 폴더 ${workspace}`), saveBox: box, cancelBox: box, layout } };
+  const ui = { initial: base, osCancelled: { ...base, roomProject: { ...base.roomProject, saveDisabled: true } },
+    preparedCancel: preview, cancelled: base, preparedSave: preview,
+    saved: { ...base, roomProject: { ...base.roomProject, currentSource: 'room', currentStatus: 'connected', savedText: '방 기본값 저장됨' } },
+    roomRevealed: { ...base, target: null, projectSourcePaint: paint('방 기본'), openerDescription: workspace },
+    requestAgain: { ...base, draftRevision: 12 },
+    clearPrepared: { ...preview, draftRevision: 12, roomProject: { ...preview.roomProject, mode: 'inherit' } },
+    cleared: { ...base, draftRevision: 12, roomProject: { ...base.roomProject, currentSource: 'board', currentStatus: 'connected', savedText: '방 전용 지정 해제됨' } },
+    boardRevealed: { ...base, target: null, projectSourcePaint: paint('Board 상속'), openerDescription: target.displayPath } };
+  assert.equal(roomFolderPreviewVisible(preview, workspace), true);
+  assert.equal(assertRoomFolderUiEvidence(ui, expected, original, workspace), true);
+  const mutations = [u => { u.saved.roomId = 'provider-conversation'; }, u => { u.saved.composerThreadId = 'other'; },
+    u => { u.cancelled.messageCount++; }, u => { u.saved.draft = 'sent'; }, u => { u.saved.composerValue = 'sent'; },
+    u => { u.preparedCancel.target = { ...target, rootId: 'foreign' }; }, u => { u.cancelled.draftRevision++; },
+    u => { u.saved.roomProject.effectiveSource = 'room'; }, u => { u.preparedSave.roomProject.detailsPaint.fragments[0].clipped = true; },
+    u => { u.preparedSave.roomProject.detailsPaint.text = '/different'; }, u => { u.preparedSave.roomProject.saveBox.visibleHits = 6; },
+    u => { u.preparedSave.roomProject.layout.body.scrollWidth += 3; }, u => { u.preparedSave.panel.actions.outsideBody = false; },
+    u => { u.osCancelled.roomProject.saveDisabled = false; }, u => { u.cancelled.roomProject.editorBox = box; },
+    u => { u.saved.roomProject.savedText = ''; }, u => { u.saved.roomProject.currentSource = 'board'; },
+    u => { u.clearPrepared.roomProject.mode = 'folder'; }, u => { u.cleared.roomProject.currentSource = 'room'; },
+    u => { u.cleared.roomProject.savedText = ''; }, u => { u.roomRevealed.target = target; },
+    u => { u.boardRevealed.projectSourcePaint.text = '없음'; }, u => { u.boardRevealed.openerDescription = ''; }];
+  for (const corrupt of mutations) {
+    // JSON avoids aliasing shared unit samples, like separately collected UI observations.
+    const changed = JSON.parse(JSON.stringify(ui)); corrupt(changed);
+    assert.throws(() => assertRoomFolderUiEvidence(changed, expected, original, workspace));
+  }
+  assert.throws(() => assertRoomFolderUiEvidence(ui, { ...expected, roomId: 'active-board' }, original, workspace));
+});
+
+test('room-folder native acceptance fails closed without its OS-only provenance and preserves all production flow boundaries', () => {
+  const source = fs.readFileSync(new URL('./verify-firefox-mcp-project-file-flow.mjs', import.meta.url), 'utf8');
+  assert.ok(source.indexOf('roomProjectPickerTransform') < source.indexOf("await harness.press('meta+-')"));
+  assert.ok(source.includes("roomPickerDescriptor?.kind === 'chat-room-project-os-directory-result-v1'"));
+  for (const selector of ['chat-room-project-choose-folder', 'chat-room-project-inherit', 'chat-room-project-save', 'chat-room-project-cancel']) assert.ok(source.includes(`'${selector}'`));
+  assert.ok(source.includes("pickerResults: ['cancel', 'select-owned-room', 'select-owned-room']"));
+  assert.ok(source.includes('assertRoomFolderStoreEvidence(folderProof, roomExpected)'));
+  assert.ok(source.includes("basis: 'actual room-default receipts; no Chat send performed'"));
+  for (const { source: observation } of projectUiObservationSources()) {
+    assert.ok(Buffer.byteLength(observation) <= PROJECT_OBSERVATION_SOURCE_BUDGET);
+    for (const key of ['roomMode:', 'roomSource:', 'effectiveSource:']) assert.ok(observation.includes(key));
+  }
+  assert.doesNotMatch(source, /\.setSelectionRange\(|\.openProject\(|\.consume\(|\.attachProject\(/);
 });
 
 test('Board primary title avoids secondary buttons without hiding the actually observed whole-row overflow', () => {

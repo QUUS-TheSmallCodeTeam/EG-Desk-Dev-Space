@@ -16,6 +16,7 @@ import { qaBridgeConfig, qaBridgeUrl, transformQaFixtureSource, materializeQaFix
 import { QA_TASK_GATE_SOURCE_FILES, QA_CHAT_ORIGIN_FILE_SOURCE_FILES } from './egdesk-qa-fixture-isolation.mjs';
 import { chatOriginFileFixtureEnabled } from './egdesk-chat-origin-file-fixture.mjs';
 import { projectFileFixtureEnabled, transformProjectPickerResult, QA_PROJECT_PICKER_FILE } from './egdesk-qa-fixture-isolation.mjs';
+import { transformRoomProjectPickerResult, QA_ROOM_PROJECT_PICKER_FILE } from './egdesk-qa-fixture-isolation.mjs';
 
 const ENV = Object.freeze({ EGDESK_QA_FIXTURE_TRANSPORT: '1', EGDESK_QA_FIXTURE_PORT: '39220' });
 const overlay = fileURLToPath(new URL('../overlay/', import.meta.url));
@@ -23,6 +24,7 @@ const hash = bytes => createHash('sha256').update(bytes).digest('hex');
 const token = 'unit-isolation-no-credentials';
 const TASK_ENV = { ...ENV, EGDESK_QA_TASK_GATE_FIXTURE: '1', EGDESK_QA_REAL_TURN: '0' };
 const ORIGIN_ENV = { ...ENV, EGDESK_QA_CHAT_ORIGIN_FILE_FIXTURE: '1', EGDESK_QA_REAL_TURN: '0' };
+const PROJECT_ENV = { ...ENV, EGDESK_QA_PROJECT_FILE_FIXTURE: '1', EGDESK_QA_REAL_TURN: '0' };
 
 function setup(t) {
   const source = fs.mkdtempSync(path.join(canonicalTempRoot(), 'egdesk-isolation-loader-'));
@@ -245,6 +247,147 @@ test('project picker transform is explicit and replaces only the OS-result funct
     { ...ENV, EGDESK_QA_PROJECT_FILE_FIXTURE: '1', EGDESK_QA_REAL_TURN: '0', EGDESK_QA_CLAUDE_FIXTURE: '1' }]) {
     assert.throws(() => projectFileFixtureEnabled(env));
   }
+});
+
+function roomPickerParts(source) {
+  const start = source.indexOf('  function pickNativeRoomProjectDirectory() {');
+  const from = source.indexOf('\n', start) + 1, to = source.indexOf('\n  }', from);
+  return { prefix: source.slice(0, from), body: source.slice(from, to), suffix: source.slice(to),
+    functionSource: source.slice(start, to + '\n  }'.length) };
+}
+
+test('room picker transform replaces exactly one reviewed OS-result body and leaves all surrounding real flows byte-identical', () => {
+  const original = fs.readFileSync(path.join(overlay, QA_ROOM_PROJECT_PICKER_FILE), 'utf8');
+  const ordinary = transformQaFixtureSource(QA_ROOM_PROJECT_PICKER_FILE, original, 39220);
+  assert.equal(ordinary.roomProjectPickerTransform, undefined);
+  const transformed = transformQaFixtureSource(QA_ROOM_PROJECT_PICKER_FILE, original, 39220, { projectFileFixture: true });
+  const before = roomPickerParts(ordinary.text), after = roomPickerParts(transformed.text);
+  assert.equal(after.prefix, before.prefix); assert.equal(after.suffix, before.suffix);
+  assert.deepEqual(transformed.roomProjectPickerTransform, { kind: 'chat-room-project-os-directory-result-v1',
+    functionName: 'pickNativeRoomProjectDirectory', sourceBodySha256: hash(before.body), replacementBodySha256: hash(after.body),
+    synthetic: 'OS-picker-result-only', nativePickerInvocations: 0, endpoint: 'http://127.0.0.1:39220/__qa/project-file/picker' });
+  assert.equal(transformed.replacements.osPickerResultBoundaries, 1);
+  assert.doesNotMatch(after.body, /createInstance|prepareRoomProjectFolder|prepareProjectFolder|completePicker|attachProject|openProject|IOUtils|__egdesk|window\[/);
+  assert.ok(after.suffix.includes('createEGDeskNativeFilePickers({ service, pickDirectory: pickNativeRoomProjectDirectory })'));
+  assert.deepEqual(fs.readFileSync(path.join(overlay, QA_ROOM_PROJECT_PICKER_FILE), 'utf8'), original);
+});
+
+test('room picker body returns only string/null and rejects errors or malformed results once with no native fallback', async () => {
+  const original = fs.readFileSync(path.join(overlay, QA_ROOM_PROJECT_PICKER_FILE), 'utf8');
+  const { functionSource } = roomPickerParts(transformRoomProjectPickerResult(original, 39220).text);
+  const good = selection => ({ kind: 'egdesk-project-file-picker-result', synthetic: true, selection });
+  for (const selection of [null, '/owned/qa/방 전용 폴더']) {
+    const calls = [];
+    const picker = new Function('fetch', `return (${functionSource});`)(async (url, options) => {
+      calls.push({ url, options }); return { ok: true, json: async () => good(selection) };
+    });
+    assert.equal(await picker(), selection);
+    assert.deepEqual(calls, [{ url: 'http://127.0.0.1:39220/__qa/project-file/picker', options: {
+      method: 'POST', headers: { 'Content-Type': 'application/json' }, body: '{}' } }]);
+  }
+  for (const response of [
+    { ok: false, json: async () => good('/owned/qa') },
+    ...[{}, null, { ...good(null), synthetic: false }, { ...good(null), kind: 'fake' },
+      good(undefined), good({ path: '/owned/qa' }), good(['owned']), good('relative'), good('/owned/\nqa')]
+      .map(packet => ({ ok: true, json: async () => packet })),
+    { ok: true, json: async () => { throw new Error('invalid JSON'); } },
+    new Error('connection unavailable'),
+  ]) {
+    let calls = 0;
+    const picker = new Function('fetch', `return (${functionSource});`)(async () => {
+      calls++; if (response instanceof Error) throw response; return response;
+    });
+    await assert.rejects(picker()); assert.equal(calls, 1, 'no retry, fallback or alternate input path');
+  }
+});
+
+test('room picker missing/duplicate/changed signatures and body drift fail closed instead of installing implementation', () => {
+  const original = fs.readFileSync(path.join(overlay, QA_ROOM_PROJECT_PICKER_FILE), 'utf8');
+  const { functionSource } = roomPickerParts(original);
+  for (const source of ['', original.replace(functionSource, ''), original + functionSource,
+    original + functionSource.replace('function pickNativeRoomProjectDirectory()', 'function  pickNativeRoomProjectDirectory ()'),
+    original.replace('function pickNativeRoomProjectDirectory()', 'function pickNativeRoomProjectDirectory(options)'),
+    original.replace(functionSource, functionSource.replace('picker.file.path', 'changed.path')),
+    original.replace(functionSource, functionSource.replace('return new Promise', 'IOUtils.read("outside"); return new Promise')),
+    original.replace(functionSource, functionSource.replace('returnOK', 'returnReplace')),
+    original.replace(functionSource, functionSource.slice(0, -1))]) {
+    assert.throws(() => transformRoomProjectPickerResult(source, 39220), /room project picker/);
+  }
+  assert.throws(() => transformRoomProjectPickerResult(original, 39218), /FIXTURE_PORT/);
+  assert.throws(() => transformQaFixtureSource(QA_ROOM_PROJECT_PICKER_FILE, original, 39220,
+    { projectFileFixture: true, portableTransferFixture: true }), /mutually exclusive/);
+});
+
+test('room picker is project-only; every other standalone fixture retains the native body without a room transform', t => {
+  const source = fs.readFileSync(path.join(overlay, QA_ROOM_PROJECT_PICKER_FILE), 'utf8'), body = roomPickerParts(source).body;
+  for (const key of [null, 'EGDESK_QA_CLAUDE_FIXTURE', 'EGDESK_QA_CLAUDE_READER_FIXTURE', 'EGDESK_QA_RUN_OUTPUTS_FIXTURE',
+    'EGDESK_QA_PORTABLE_TRANSFER_FIXTURE', 'EGDESK_QA_TASK_GATE_FIXTURE', 'EGDESK_QA_CHAT_ORIGIN_FILE_FIXTURE',
+    'EGDESK_QA_BROWSER_NEGATIVE', 'EGDESK_QA_BROWSER_RELAY']) {
+    const env = { ...ENV, EGDESK_QA_REAL_TURN: '0', ...(key ? { [key]: '1' } : {}) };
+    const profile = setup(t); prepareQaFirefox(profile, { env });
+    const manifest = validateQaFixtureIsolation(profile, { env });
+    assert.equal(manifest.files[QA_ROOM_PROJECT_PICKER_FILE].roomProjectPickerTransform, undefined, key || 'ordinary');
+    assert.equal(roomPickerParts(fs.readFileSync(path.join(profile, 'chrome', QA_ROOM_PROJECT_PICKER_FILE), 'utf8')).body, body);
+  }
+});
+
+test('project mode conflicts and malformed flags fail before all bootstrap copy/preference writes', t => {
+  const profile = setup(t), spies = ['cpSync', 'writeFileSync'].map(name => t.mock.method(fs, name, () => assert.fail('unexpected prevalidation write')));
+  try {
+    for (const patch of [{ EGDESK_QA_PROJECT_FILE_FIXTURE: 'true' }, { EGDESK_QA_REAL_TURN: '1' },
+      { EGDESK_QA_REAL_TURN: undefined }, { EGDESK_QA_FIXTURE_TRANSPORT: '0' },
+      ...['EGDESK_QA_CLAUDE_FIXTURE', 'EGDESK_QA_CLAUDE_READER_FIXTURE', 'EGDESK_QA_RUN_OUTPUTS_FIXTURE',
+        'EGDESK_QA_PORTABLE_TRANSFER_FIXTURE', 'EGDESK_QA_TASK_GATE_FIXTURE', 'EGDESK_QA_CHAT_ORIGIN_FILE_FIXTURE',
+        'EGDESK_QA_BROWSER_NEGATIVE', 'EGDESK_QA_BROWSER_RELAY'].map(key => ({ [key]: '1' }))]) {
+      assert.throws(() => prepareQaFirefox(profile, { env: { ...PROJECT_ENV, ...patch } }), /fixture/i);
+    }
+    for (const spy of spies) assert.equal(spy.mock.callCount(), 0);
+  } finally { for (const spy of spies) spy.mock.restore(); }
+});
+
+test('missing actual room picker rejects materialization before endpoint/body writes', t => {
+  const profile = setup(t); prepareQaFirefox(profile, { env: {} });
+  const source = path.join(overlay, QA_ROOM_PROJECT_PICKER_FILE), original = fs.readFileSync(source);
+  const copyPath = path.join(profile, 'chrome', QA_ROOM_PROJECT_PICKER_FILE), copyBefore = fs.readFileSync(copyPath);
+  const read = fs.readFileSync;
+  const missing = t.mock.method(fs, 'readFileSync', function(file, ...args) {
+    if (file === source) return Buffer.from(original.toString().replace('function pickNativeRoomProjectDirectory()', 'function removedRoomPicker()'));
+    return read.call(fs, file, ...args);
+  });
+  const write = t.mock.method(fs, 'writeFileSync', () => assert.fail('missing function must precede any write'));
+  try { assert.throws(() => materializeQaFixtureIsolation(profile, { env: PROJECT_ENV }), /room project picker/); assert.equal(write.mock.callCount(), 0); }
+  finally { missing.mock.restore(); write.mock.restore(); }
+  assert.deepEqual(fs.readFileSync(source), original); assert.deepEqual(fs.readFileSync(copyPath), copyBefore);
+  assert.equal(fs.existsSync(path.join(profile, QA_ISOLATION_MANIFEST)), false);
+});
+
+test('room picker whole-source/body provenance rejects missing or tampered manifests and copied bytes; originals stay intact', t => {
+  const profile = setup(t), source = path.join(overlay, QA_ROOM_PROJECT_PICKER_FILE), before = fs.readFileSync(source);
+  prepareQaFirefox(profile, { env: PROJECT_ENV });
+  const manifest = validateQaFixtureIsolation(profile, { env: PROJECT_ENV }), entry = manifest.files[QA_ROOM_PROJECT_PICKER_FILE];
+  const copy = path.join(profile, 'chrome', QA_ROOM_PROJECT_PICKER_FILE), copyBytes = fs.readFileSync(copy);
+  assert.equal(entry.originalSha256, hash(before)); assert.equal(entry.transformedSha256, hash(copyBytes));
+  assert.notEqual(entry.originalSha256, entry.transformedSha256);
+  assert.equal(entry.roomProjectPickerTransform.sourceBodySha256, hash(roomPickerParts(before.toString()).body));
+  assert.equal(entry.roomProjectPickerTransform.replacementBodySha256, hash(roomPickerParts(copyBytes.toString()).body));
+  const fileModule = 'resources/EGDeskFileView.sys.mjs';
+  assert.equal(manifest.files[fileModule].originalSha256, manifest.files[fileModule].transformedSha256, 'actual prepare/grant/consume module unchanged');
+  const manifestPath = path.join(profile, QA_ISOLATION_MANIFEST), manifestBytes = fs.readFileSync(manifestPath);
+  for (const mutate of [e => { delete e.roomProjectPickerTransform; }, e => { e.originalSha256 = '0'.repeat(64); },
+    e => { e.transformedSha256 = '0'.repeat(64); }, e => { e.roomProjectPickerTransform.sourceBodySha256 = '0'.repeat(64); },
+    e => { e.roomProjectPickerTransform.replacementBodySha256 = '0'.repeat(64); },
+    e => { e.roomProjectPickerTransform.kind = 'forged'; }]) {
+    const changed = structuredClone(manifest); mutate(changed.files[QA_ROOM_PROJECT_PICKER_FILE]);
+    fs.writeFileSync(manifestPath, JSON.stringify(changed));
+    assert.throws(() => validateQaFixtureIsolation(profile, { env: PROJECT_ENV }), /mismatch/);
+  }
+  fs.writeFileSync(manifestPath, manifestBytes);
+  fs.appendFileSync(copy, '\n// changed owned QA copy\n');
+  assert.throws(() => validateQaFixtureIsolation(profile, { env: PROJECT_ENV }), /hash mismatch/);
+  fs.writeFileSync(copy, copyBytes);
+  assert.deepEqual(materializeQaFixtureIsolation(profile, { env: PROJECT_ENV }), manifest);
+  assert.throws(() => validateQaFixtureIsolation(profile, { env: ENV }), /mismatch/);
+  assert.deepEqual(fs.readFileSync(source), before);
 });
 
 test('project picker copy, exact boundary descriptor and opt-in are bound into provenance', t => {
