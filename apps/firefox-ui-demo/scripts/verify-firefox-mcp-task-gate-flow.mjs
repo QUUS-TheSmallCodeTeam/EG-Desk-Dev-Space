@@ -4,9 +4,10 @@
 import assert from 'node:assert/strict';
 import { createHash } from 'node:crypto';
 import { fileURLToPath } from 'node:url';
-import { chrome, loopbackJson, openChat, replaceFieldText, runUiFlow, sendFromComposer } from './egdesk-qa-ui-flow.mjs';
+import { chrome, loopbackJson, openChat, replaceFieldText, runUiFlow, sendFromComposer, waitUntil } from './egdesk-qa-ui-flow.mjs';
 import { assertQaFixtureManifest } from './egdesk-chat-qa-profile.mjs';
 import { parseCli, assertBeforeDeadline, observeGuard, waitFor } from './verify-firefox-mcp-headless-ui-regression.mjs';
+import { prepareRunOutputDesk } from './verify-firefox-mcp-chat-run-outputs-flow.mjs';
 import { taskGateFixtureEnabled, TASK_GATE_SEED_MESSAGE, TASK_GATE_STATE_ROUTE, TASK_GATE_CONTROL_ROUTE } from './egdesk-task-gate-fixture.mjs';
 
 // Proposed Harvey contract; no production selectors are added by this file.
@@ -165,6 +166,21 @@ async function observeTarget(harness, selector) {
   }, selector);
 }
 
+// Only the first-use fields needed by the established native Desk exit. A
+// missing Browser/fullscreen is not a matching fullscreen (undefined === undefined).
+// Keep this read local; no shared observer or product state is changed.
+export async function observeTaskGateDesk(harness) {
+  return chrome(harness, () => {
+    const api = window.__egdesk;
+    const surface = api.surface.snapshot();
+    const card = surface.browserCardId ? document.getElementById(surface.browserCardId) : null;
+    const fullscreen = api.state.cardFullscreen;
+    return { initialBrowserFocus: surface.initialBrowserFocus === true,
+      fullscreen: !!card?.id && !!fullscreen && fullscreen.cardId === card.id,
+      cardId: card?.id || null, browserContextId: card?._xulBrowser?.browsingContext?.id ?? null };
+  });
+}
+
 export async function runTaskGateFlow({ harness, result, check, capture, defer }, { profile, deadlineMs, env = process.env }) {
   assertTaskGateEnvironment(env); assertQaFixtureManifest(profile); assertBeforeDeadline(deadlineMs);
   const guard = await observeGuard(harness);
@@ -208,6 +224,8 @@ export async function runTaskGateFlow({ harness, result, check, capture, defer }
     if (current.pauseBroadcast) await loopbackJson(TASK_GATE_CONTROL_ROUTE, { method: 'POST', body: { action: 'flush' }, token, env });
   });
   assert.equal((await state()).original, null, 'fresh task fixture, not an earlier UI run');
+  result.initialDesk = await prepareRunOutputDesk(harness, { deadlineMs, readFirstUse: observeTaskGateDesk, waitUntil });
+  check('Native first-use exit exposes the Chat Dock without replacing the Browser', true, result.initialDesk);
   assertBeforeDeadline(deadlineMs);
   await openChat(harness);
   if ((await harness.inspect('.egd-codex-conversation-back')).some(node => node.visible)) await click('.egd-codex-conversation-back');

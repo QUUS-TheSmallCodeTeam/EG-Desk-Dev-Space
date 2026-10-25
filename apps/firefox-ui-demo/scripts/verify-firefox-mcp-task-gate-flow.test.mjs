@@ -3,10 +3,12 @@ import assert from 'node:assert/strict';
 import fs from 'node:fs';
 import net from 'node:net';
 import childProcess from 'node:child_process';
+import vm from 'node:vm';
 import { createHash } from 'node:crypto';
+import { prepareRunOutputDesk } from './verify-firefox-mcp-chat-run-outputs-flow.mjs';
 import { TASK_GATE_SELECTORS, taskGateRowSelector, assertTaskGateEnvironment, assertQuestionIdentity, assertNoContinue,
   assertDraftRetained, assertNewQuestionCleared, assertCodePointLimit, assertOneAnswer, assertTaskGateEvidence,
-  observeTaskGate, runTaskGateFlow, runCli } from './verify-firefox-mcp-task-gate-flow.mjs';
+  observeTaskGate, observeTaskGateDesk, runTaskGateFlow, runCli } from './verify-firefox-mcp-task-gate-flow.mjs';
 
 const ENV = { EGDESK_QA_TASK_GATE_FIXTURE: '1', EGDESK_QA_FIXTURE_TRANSPORT: '1', EGDESK_QA_REAL_TURN: '0',
   EGDESK_QA_FIXTURE_PORT: '49319', EGDESK_QA_FIXTURE_TOKEN: 'owned-task-gate-verifier-unit-token' };
@@ -143,9 +145,76 @@ test('full validator rejects missing stages, lost drafts, wrong original thread,
 test('observation is bounded read-only chrome source; no input or DOM/state mutation occurs during reads', async () => {
   const sources = [], harness = { evaluateChrome(source) { sources.push(source); return Promise.resolve({ count: 0 }); } };
   await observeTaskGate(harness, identity());
-  assert.equal(sources.length, 1); assert.ok(Buffer.byteLength(sources[0]) < 12000);
-  for (const forbidden of [/dispatchEvent/, /new (?:InputEvent|KeyboardEvent|Event)\(/, /\.value\s*=/, /\.click\(/,
-    /innerHTML\s*=/, /__egdesk[^\n]*\s=\s/, /\.style\s*[.=]/]) assert.doesNotMatch(sources[0], forbidden);
+  await observeTaskGateDesk(harness);
+  assert.equal(sources.length, 2);
+  for (const source of sources) {
+    assert.ok(Buffer.byteLength(source) < 12000);
+    for (const forbidden of [/dispatchEvent/, /new (?:InputEvent|KeyboardEvent|Event)\(/, /\.value\s*=/, /\.click\(/,
+      /innerHTML\s*=/, /__egdesk[^\n]*\s=\s/, /\.style\s*[.=]/]) assert.doesNotMatch(source, forbidden);
+  }
+});
+
+// Native sequencing unit doubles only; these are not actual UI acceptance evidence.
+function initialDesk({ focused = true, visible = false, reveal = true, browser = true,
+  replaceBrowser = false, replaceContext = false, expired = false, delayReads = 0 } = {}) {
+  const calls = []; let pressed = false, readsAfterPress = 0;
+  const h = {
+    async evaluateChrome(source) {
+      calls.push(['read']);
+      const exited = pressed && reveal && ++readsAfterPress > delayReads;
+      const inFocus = focused && !exited;
+      const card = browser ? Object.freeze({ id: pressed && replaceBrowser ? 'different-browser' : 'original-browser',
+        _xulBrowser: Object.freeze({ browsingContext: Object.freeze({ id: pressed && replaceContext ? 22 : 11 }) }) }) : null;
+      const api = Object.freeze({ state: Object.freeze({ cardFullscreen: inFocus && card ? Object.freeze({ cardId: card.id }) : null }),
+        surface: Object.freeze({ snapshot: () => Object.freeze({ initialBrowserFocus: inFocus, browserCardId: card?.id ?? null }) }) });
+      return vm.runInNewContext(`(${source})()`, { window: Object.freeze({ __egdesk: api }),
+        document: Object.freeze({ getElementById: id => card?.id === id ? card : null }) });
+    },
+    async inspect(selector) {
+      calls.push(['inspect', selector]);
+      return [{ visible: visible || pressed && reveal && readsAfterPress > delayReads, disabled: false }];
+    },
+    async press(key) { calls.push(['native-key', key]); pressed = true; },
+  };
+  const options = { deadlineMs: 100, now: () => expired ? 101 : 1, readFirstUse: observeTaskGateDesk,
+    waitUntil: async (read, accept, timing) => {
+      assert.equal(timing.timeoutMs, 10000); assert.equal(timing.intervalMs, 100);
+      for (let attempt = 0; attempt < 4; attempt++) { const value = await read(); if (accept(value)) return value; }
+      throw new Error('native Desk never became ready');
+    } };
+  return { h, options, calls };
+}
+
+test('Task R1 first-use focus exits once before Dock access, waiting read-only for the native transition', async () => {
+  const f = initialDesk({ delayReads: 2 });
+  const proof = await prepareRunOutputDesk(f.h, f.options);
+  assert.equal(proof.action, 'native first-use zoom-out');
+  assert.equal(proof.before.initialBrowserFocus, true); assert.equal(proof.before.dockVisible, false);
+  assert.equal(proof.after.initialBrowserFocus, false); assert.equal(proof.after.fullscreen, false);
+  assert.equal(proof.after.dockVisible, true);
+  assert.equal(proof.before.cardId, proof.after.cardId);
+  assert.equal(proof.before.browserContextId, proof.after.browserContextId);
+  assert.deepEqual(f.calls.filter(call => call[0] === 'native-key'), [['native-key', 'meta+-']]);
+});
+
+test('Task Desk observer handles null fullscreen and missing Browser; already-ready Desk needs no native input', async () => {
+  for (const browser of [true, false]) {
+    const f = initialDesk({ focused: false, visible: true, browser });
+    const proof = await prepareRunOutputDesk(f.h, f.options);
+    assert.equal(proof.action, 'already-ready'); assert.equal(proof.after.fullscreen, false);
+    assert.equal(proof.after.cardId, browser ? 'original-browser' : null);
+    assert.equal(proof.after.browserContextId, browser ? 11 : null);
+    assert.equal(f.calls.some(call => call[0] === 'native-key'), false);
+  }
+});
+
+test('Task initial Desk refuses hidden non-focus, ineffective exit, identity replacement and expiry without input replay', async () => {
+  for (const config of [{ focused: false }, { reveal: false }, { replaceBrowser: true }, { replaceContext: true }, { expired: true }]) {
+    const f = initialDesk(config);
+    await assert.rejects(prepareRunOutputDesk(f.h, f.options));
+    assert.equal(f.calls.filter(call => call[0] === 'native-key').length, config.focused === false || config.expired ? 0 : 1);
+    if (config.expired) assert.equal(f.calls.length, 0);
+  }
 });
 
 test('CLI/environment/deadline refusals happen before any harness or UI action', async () => {
@@ -159,6 +228,9 @@ test('verifier delegates only native input and fixture controls, never directly 
   assert.match(source, /press\('Enter'/);
   assert.match(source, /harness\.click\(field\(choice, 'continue'\)\)/, 'duplicate uses a second native click');
   assert.match(source, /replaceFieldText\(/);
+  assert.match(source, /readFirstUse: observeTaskGateDesk, waitUntil/);
+  assert.ok(source.indexOf('result.initialDesk = await prepareRunOutputDesk(') < source.indexOf('await openChat(harness)'),
+    'first-use native exit and usable Dock proof must precede Chat Dock access');
   assert.doesNotMatch(source, /loopbackJson\(['"]\/tasks\/continue/);
   assert.doesNotMatch(source, /dispatchEvent|new (?:KeyboardEvent|InputEvent)|\.value\s*=|innerHTML\s*=/);
   assert.doesNotMatch(source, /newQaThread\(/, 'that shared helper writes fixture metadata; this flow uses native creation and read-only identity');
