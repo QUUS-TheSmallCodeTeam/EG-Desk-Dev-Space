@@ -875,7 +875,7 @@
     if (!run) return '대화 준비';
     if (run.localHistory === true && !['completed', 'interrupted', 'failed', 'cancelled', 'unavailable'].includes(run.status)) return '지난 실행 · 현재 상태 미확인';
     if (run.status === 'interrupted') return '중지됨';
-    if (run.status === 'completed') return '완료';
+    if (run.status === 'completed') return '응답 완료';
     const stopping = run.stopPending || run.stopRequested || run.status === 'stopping';
     // RUNTIME_LOST is reduced to failed, but does not prove native termination.
     if (run.error?.code === 'RUNTIME_LOST') return '연결 끊김 · 실행 상태 확인 필요';
@@ -1049,6 +1049,7 @@
         showCount(); controls.appendChild(input); controls.appendChild(counter);
       }
       row.appendChild(controls);
+      row.appendChild(error);
       row.appendChild(el('div', { class: 'egd-task-answer-actions' },
         el('button', { type: 'button', class: 'egd-task-confirm-go', disabled: sending ? 'true' : null, 'aria-disabled': String(sending),
           data: { testid: 'chat-task-answer-continue', focusKey: `${key}:continue` },
@@ -1056,8 +1057,7 @@
         el('button', { type: 'button', class: 'egd-task-confirm-cancel', disabled: sending ? 'true' : null,
           data: { testid: 'chat-task-answer-cancel', focusKey: `${key}:cancel` },
           onclick: () => { if (live()) actions.cancelTaskAnswer(draft); } }, '취소')));
-    }
-    row.appendChild(error);
+    } else row.appendChild(error);
     row.appendChild(el('p', { class: 'egd-task-answer-note', data: { testid: 'chat-task-answer-next' } }, accepted
       ? '답변 전달됨' : condition.responseInvalid ? '질문 내용을 다시 불러온 뒤 답해 주세요.'
         : '계속을 누르면 답변만 전달합니다. 다른 대기 항목은 그대로 유지됩니다.'));
@@ -12567,6 +12567,24 @@
     };
     const refreshCatalog = () => Promise.resolve(bridge()?.loadProfiles?.()).catch(() => {});
     let profileReadSequence = 0;
+    let profileDuplicate = null;
+    const duplicateViewKey = () => {
+      const codex = state.codex, thread = codex.threads?.find(item => item.id === codex.activeThreadId);
+      return JSON.stringify([settingsProfileAccountKey(), activeTab, agents.mode, agents.profileId, profileReadSequence,
+        ChatState.chatThreadEngineId(thread, codex), ChatState.chatThreadEngineProfileId(thread, codex)]);
+    };
+    const cancelProfileDuplicate = () => {
+      const own = profileDuplicate;
+      if (!own) return;
+      profileDuplicate = null;
+      own.scope.dispose();
+      if (agents.detail === own.detail && profileReadSequence === own.sequence) agents.busy = false;
+    };
+    const syncProfileDuplicate = () => {
+      if (!profileDuplicate || profileDuplicate.current()) return false;
+      cancelProfileDuplicate();
+      return true;
+    };
     const profileTransfer = createSettingsProfileTransfer({ card, bridge, refreshCatalog,
       readView: () => {
         const detail = agents.detailBinding === settingsProfileAccountKey() && agents.detailApi === bridge()
@@ -12589,6 +12607,7 @@
       return null;
     };
     const openProfile = async (profileId, notice = null) => {
+      cancelProfileDuplicate();
       const sequence = ++profileReadSequence, account = settingsProfileAccountKey(), api = bridge(), request = api?.profileRequest;
       const current = () => card.isConnected && sequence === profileReadSequence && api === bridge()
         && request === api?.profileRequest && account === settingsProfileAccountKey() && agents.profileId === profileId && agents.mode === 'detail';
@@ -12608,6 +12627,50 @@
         agents.notice = ChatState.profileRequestErrorText(error);
       } finally {
         if (current()) { agents.busy = false; renderAgentsTab(); }
+      }
+    };
+    const duplicateProfile = async (detail, revision, control) => {
+      const api = bridge(), request = api?.profileRequest, account = settingsProfileAccountKey();
+      const shown = detail?.active || detail?.head;
+      if (agents.busy || profileDuplicate || !control?.isConnected || !card.isConnected || activeTab !== 'agents' || agents.mode !== 'detail'
+          || agents.detail !== detail || agents.profileId !== detail.id || agents.detailBinding !== account
+          || agents.detailApi !== api || agents.detailRequest !== request || !api?.createProfileTransferScope
+          || !ChatState.isProfileId(detail.id) || !Number.isSafeInteger(revision) || revision < 1 || shown?.revision !== revision) return;
+      const own = { detail, sequence: profileReadSequence, key: duplicateViewKey(), scope: api.createProfileTransferScope(), hash: shown.hash };
+      own.current = () => profileDuplicate === own && card.isConnected && own.scope.current() && own.key === duplicateViewKey()
+        && api === bridge() && request === api.profileRequest && agents.detail === detail
+        && (detail.active || detail.head)?.revision === revision && (detail.active || detail.head)?.hash === own.hash;
+      profileDuplicate = own;
+      if (!own.current()) { cancelProfileDuplicate(); return; }
+      agents.busy = true; agents.notice = null; renderAgentsTab();
+      try {
+        if (!own.current()) return;
+        // The displayed saved revision, not the latest head or a history comparison.
+        const saved = await request.call(api, profilePath(detail.id, '/duplicate'), { method: 'POST', body: { revision }, signal: own.scope.signal });
+        if (!own.current()) return;
+        const copy = saved?.profile;
+        if (!ChatState.isProfileId(saved?.id) || saved.id === detail.id || copy?.id !== saved.id || saved.revision !== 1
+            || copy.lifecycle !== 'draft' || copy.activeRevision != null || copy.active != null || copy.headRevision !== 1
+            || copy.head?.revision !== 1 || typeof copy.head?.body?.name !== 'string') throw new Error('Unconfirmed duplicate receipt');
+        cancelProfileDuplicate();
+        profileReadSequence++;
+        Object.assign(agents, { mode: 'detail', profileId: copy.id, detail: copy, detailBinding: account, detailApi: api, detailRequest: request,
+          revisions: [{ revision: 1, parentRevision: null, createdAt: copy.head.createdAt }], diff: null, busy: false, errors: [],
+          notice: '복제한 새 초안을 만들었습니다. 원본은 그대로이며, 아직 사용하거나 대화방에 배정하지 않았습니다.' });
+        renderAgentsTab();
+        void refreshCatalog();
+      } catch (error) {
+        if (!own.current()) return;
+        cancelProfileDuplicate();
+        const status = error?.httpStatus ?? error?.status;
+        agents.notice = Number.isInteger(status) && status >= 400 && status < 500 && ![408, 499].includes(status)
+          ? ['PROFILE_NOT_FOUND', 'PROFILE_REVISION_NOT_FOUND'].includes(error.code) ? '원본 Agent 또는 표시 중인 버전을 찾지 못했습니다. 목록에서 다시 확인해 주세요.'
+            : error.code === 'PROFILE_LIFECYCLE_CONFLICT' ? '지금 상태에서는 이 Agent를 복제할 수 없습니다. 목록에서 다시 확인해 주세요.'
+              : ChatState.profileRequestErrorText(error)
+          : '복제 결과를 확인하지 못했습니다. 다시 복제하기 전에 Agent 목록에서 사본을 확인해 주세요. 자동으로 다시 시도하지 않습니다.';
+        renderAgentsTab();
+      } finally {
+        if (profileDuplicate === own) cancelProfileDuplicate();
       }
     };
     const startEdit = (detail = null) => {
@@ -12782,6 +12845,7 @@
       }
       const status = ChatState.profileStatusView(detail);
       const shownRevision = detail.active || detail.head;
+      const duplicateRevision = shownRevision?.revision;
       const body = shownRevision?.body || {};
       const editable = ['draft', 'active', 'disabled'].includes(detail.lifecycle);
       const pendingDraft = editable && (detail.hasDraft || detail.lifecycle !== 'active');
@@ -12807,6 +12871,10 @@
       el('div', { class: 'egd-settings-readiness-tools' }, `쓸 수 있는 도구: ${readiness.tools}`)) : null;
       const actions = el('div', { class: 'egd-settings-detail-actions' },
         editable ? el('button', { class: 'egd-settings-btn', disabled: agents.busy ? 'true' : null, onclick: () => startEdit(detail) }, '편집') : null,
+        detail.lifecycle !== 'deleted' ? el('button', { class: 'egd-settings-btn', type: 'button',
+          data: { testid: 'settings-agent-duplicate', profileId: detail.id, revision: String(duplicateRevision || ''), state: profileDuplicate ? 'pending' : 'idle' },
+          disabled: agents.busy || !Number.isSafeInteger(duplicateRevision) || !bridge()?.createProfileTransferScope ? 'true' : null,
+          onclick: ev => { void duplicateProfile(detail, duplicateRevision, ev.currentTarget); } }, profileDuplicate ? '복제 중…' : '복제해서 새로 만들기') : null,
         pendingDraft ? el('button', { class: 'egd-settings-btn egd-settings-btn-primary', data: { testid: 'settings-agent-activate' }, disabled: agents.busy ? 'true' : null,
           'aria-describedby': readiness?.countText ? readinessCountId : null,
           onclick: () => activateHead(detail) }, `사용 시작 (버전 ${detail.headRevision})`) : null,
@@ -12816,7 +12884,8 @@
         editable ? el('button', { class: 'egd-settings-btn', disabled: agents.busy ? 'true' : null, onclick: () => changeLifecycle(detail, 'archive', body.name) }, '보관') : null,
         detail.lifecycle === 'archived' ? el('button', { class: 'egd-settings-btn', disabled: agents.busy ? 'true' : null, onclick: () => changeLifecycle(detail, 'restore', body.name) }, '복원') : null,
         el('button', { class: 'egd-settings-btn egd-settings-btn-danger', disabled: agents.busy ? 'true' : null, onclick: () => changeLifecycle(detail, 'delete', body.name) }, '삭제'));
-      const section = el('section', { class: 'egd-settings-section egd-settings-agent-detail', data: { testid: 'settings-agent-detail', profileId: detail.id } },
+      const section = el('section', { class: 'egd-settings-section egd-settings-agent-detail', data: { testid: 'settings-agent-detail', profileId: detail.id,
+        revision: String(shownRevision?.revision || ''), lifecycle: detail.lifecycle } },
         back,
         el('div', { class: 'egd-settings-detail-head' },
           codexProfileAvatar(body.avatar, body.name, 'egd-settings-detail-avatar'),
@@ -12858,7 +12927,8 @@
           el('span', { class: 'egd-settings-version-name' }, `버전 ${revision.revision}`,
             revision.revision === detail.activeRevision
               ? el('span', { class: 'egd-settings-badge egd-settings-badge-strong' }, detail.lifecycle === 'active' ? '사용 중' : '마지막 사용 버전') : null,
-            revision.revision === detail.headRevision && (detail.hasDraft || !detail.activeRevision) ? el('span', { class: 'egd-settings-badge' }, '최신 초안') : null),
+            revision.revision === detail.headRevision && (detail.hasDraft || !detail.activeRevision) ? el('span', { class: 'egd-settings-badge' },
+              revision.revision === shownRevision?.revision ? '표시 중인 초안' : '저장된 초안') : null),
           el('span', { class: 'egd-settings-version-time' }, ChatState.formatResetClock(revision.createdAt) || ''),
           compareFrom ? el('button', { class: 'egd-settings-link', onclick: () => showDiff(detail, compareFrom, revision.revision) }, '차이 보기') : null,
           editable && revision.revision !== detail.headRevision ? el('button', {
@@ -13025,6 +13095,7 @@
     };
 
     const renderAgentsTab = () => {
+      syncProfileDuplicate();
       if (activeTab !== 'agents') return;
       chipInputs.clear();
       if (agents.mode === 'edit' && agents.form) renderAgentForm();
@@ -13044,6 +13115,7 @@
       { id: 'agents', label: 'Agent 관리', render: renderAgentsTab },
     ];
     const renderTabs = () => {
+      syncProfileDuplicate();
       tabs.textContent = '';
       for (const t of tabDefs) {
         tabs.appendChild(el('button', {
@@ -13078,6 +13150,7 @@
     let lastProfileAccount = settingsProfileAccountKey();
     let lastProfileApi = bridge(), lastProfileRequest = bridge()?.profileRequest;
     const onCodexChange = () => {
+      const duplicateInvalidated = syncProfileDuplicate();
       const codex = state.codex;
       const auth = codex.authStatus || {};
       const catalog = bridge()?.profileCatalog?.();
@@ -13095,6 +13168,7 @@
       if ((accountChanged || adapterChanged || shownRevisionChanged) && activeTab === 'agents' && agents.mode === 'detail' && !agents.busy) {
         void openProfile(agents.profileId);
       }
+      if (duplicateInvalidated && activeTab === 'agents') renderAgentsTab();
       const signature = JSON.stringify([codex.connected, codex.isStartingLogin, auth.isLoggedIn, auth.loginInProgress, auth.accountEmail,
         auth.planType, auth.usage, auth.rateLimits, catalog?.status, catalog?.profiles, codex.inheritedMcp, codex.computerControl]);
       if (signature === lastCodexSignature) return;
@@ -13169,6 +13243,7 @@
     document.addEventListener('mousemove', onMove);
     document.addEventListener('mouseup', onUp);
     card._cleanup = () => {
+      cancelProfileDuplicate();
       profileReadSequence++;
       profileTransfer.dispose();
       document.removeEventListener('mousemove', onMove);

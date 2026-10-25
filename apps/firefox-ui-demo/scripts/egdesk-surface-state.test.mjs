@@ -322,7 +322,7 @@ test('Stop feedback honors stopping status even before its boolean flag is popul
 });
 
 test('Stop feedback keeps actual terminal outcomes when an accepted ACK arrives later', async () => {
-  for (const [status, label] of [['completed', '완료'], ['interrupted', '중지됨'], ['failed', '실행 실패']]) {
+  for (const [status, label] of [['completed', '응답 완료'], ['interrupted', '중지됨'], ['failed', '실행 실패']]) {
     const f = stopFeedbackFixture();
     const pending = f.interrupt();
     Chat.reduceChatEvent(f.protocol, envelope('run.completed', 2, { status }));
@@ -13354,7 +13354,7 @@ function profileTransferBridgeMethods(fetchJson, epochScope) {
   return compileFunction(`return { ${method('async profileRequest(')}, ${method('createProfileTransferScope(')} };`, ['fetchJson', 'epochScope'])(fetchJson, epochScope);
 }
 
-function portableSettingsHarness({ respond, fullscreen = false } = {}) {
+function portableSettingsHarness({ respond, fullscreen = false, initialDetail = null } = {}) {
   const document = settingsFakeDocument(), native = nativeTextGlueHarness(), calls = [], listeners = new Set();
   if (fullscreen) {
     const decorate = node => {
@@ -13369,7 +13369,7 @@ function portableSettingsHarness({ respond, fullscreen = false } = {}) {
   }
   const epoch = Chat.createChatEpochScope(), state = { codex: { connected: true, codexAccountKey: 'account-a', authStatus: { isLoggedIn: true, accountEmail: 'a@example.test' } } };
   const body = normalizeProfileBody({ name: '보이는 Agent', role: '검토', instructions: 'Visible revision instructions.' });
-  const detail = { id: 'visible-agent', lifecycle: 'active', activeRevision: 2, headRevision: 3, hasDraft: true,
+  const detail = initialDetail || { id: 'visible-agent', lifecycle: 'active', activeRevision: 2, headRevision: 3, hasDraft: true,
     active: { revision: 2, hash: profileHash(body), body }, head: { revision: 3, hash: 'b'.repeat(64), body: { ...body, name: '숨은 새 초안' } } };
   const catalog = () => ({ status: 'ready', profiles: [{ id: detail.id, name: body.name, role: body.role, lifecycle: 'active', activeRevision: detail.activeRevision, headRevision: detail.headRevision }] });
   let refreshes = 0;
@@ -13419,6 +13419,156 @@ function portableSettingsHarness({ respond, fullscreen = false } = {}) {
   };
   return { card, state, detail, calls, native, part, emit, epoch, document, pickImport, refreshes: () => refreshes };
 }
+
+async function duplicateSettingsHarness(t, { reply, lifecycle = 'active' } = {}) {
+  const [{ openProfileStore }, { handleProfileHttp }, { createPrivateQaTempDirectory }] = await Promise.all([
+    import('../helper/egdesk-profile-store.mjs'), import('../helper/egdesk-profile-http.mjs'), import('./egdesk-qa-platform.mjs')]);
+  const dataDir = createPrivateQaTempDirectory('egdesk-settings-duplicate-');
+  const store = openProfileStore({ dataDir, ownerHash: 'duplicate-owner' });
+  t.after(() => { store.close(); rmSync(dataDir, { recursive: true, force: true }); });
+  const created = store.createDraft({ name: '표시할 Agent', role: '원본 역할', instructions: 'VERSION_ONE' });
+  const sourceId = created.id;
+  store.saveDraft(sourceId, { ...created.profile.head.body, instructions: 'SHOWN_VERSION_TWO' }, 1);
+  if (lifecycle !== 'draft') store.activate(sourceId, 2, null);
+  store.saveDraft(sourceId, { ...created.profile.head.body, instructions: 'STORED_HEAD_THREE' }, 2);
+  if (lifecycle === 'archived') store.lifecycle(sourceId, 'archive');
+  const before = store.get(sourceId);
+  const h = portableSettingsHarness({ initialDetail: before, respond: async (path, options = {}) => {
+    const req = Readable.from(options.body === undefined ? [] : [Buffer.from(options.body)]);
+    Object.assign(req, { method: options.method || 'GET', url: path, socket: { remoteAddress: '127.0.0.1' },
+      headers: { host: '127.0.0.1:39218', ...(options.body === undefined ? {} : { 'content-type': 'application/json' }) } });
+    let response;
+    assert.equal(await handleProfileHttp(req, new URL(path, 'http://127.0.0.1:39218'), { store,
+      send: (status, body) => { response = { status, body }; } }), true);
+    if (response.status >= 400) throw Object.assign(new Error('Profile request refused'), { status: response.status, ...response.body });
+    return path.endsWith('/duplicate') && reply ? reply(response.body) : response.body;
+  } });
+  await settle();
+  return { ...h, store, sourceId, before: structuredClone(before), posts: () => h.calls.filter(call => call.method === 'POST') };
+}
+
+test('Settings duplicate: explicit displayed v2 goes through real HTTP/store into a new unused draft; original and room choice stay unchanged', async t => {
+  const h = await duplicateSettingsHarness(t);
+  h.state.codex.threads = [{ id: 'room-copy', engineId: 'codex', assignedAgentProfileId: h.sourceId }];
+  h.state.codex.activeThreadId = 'room-copy'; const room = structuredClone(h.state.codex.threads);
+  const control = h.part('settings-agent-duplicate');
+  assert.equal(control.textContent, '복제해서 새로 만들기'); assert.equal(control.getAttribute('type'), 'button');
+  assert.deepEqual([control.dataset.profileId, control.dataset.revision, control.dataset.state], [h.sourceId, '2', 'idle']);
+  assert.deepEqual([h.part('settings-agent-detail').dataset.profileId, h.part('settings-agent-detail').dataset.revision], [h.sourceId, '2']);
+  assert.equal(h.posts().length, 0); assert.equal(h.detail.headRevision, 3);
+  control.fire('click'); control.fire('click'); h.part('settings-agent-duplicate').fire('click');
+  assert.equal(h.part('settings-agent-duplicate').dataset.state, 'pending');
+  assert.equal(h.part('settings-agent-duplicate').getAttribute('disabled'), 'true');
+  await settle();
+  assert.equal(h.posts().length, 1);
+  assert.equal(h.posts()[0].path, `/profiles/${h.sourceId}/duplicate`);
+  assert.deepEqual(JSON.parse(h.posts()[0].body), { revision: 2 });
+  const shown = h.part('settings-agent-detail'), copied = h.store.get(shown.dataset.profileId);
+  assert.notEqual(copied.id, h.sourceId); assert.deepEqual([shown.dataset.lifecycle, shown.dataset.revision], ['draft', '1']);
+  assert.equal(copied.head.body.instructions, 'SHOWN_VERSION_TWO'); assert.equal(copied.activeRevision, null);
+  assert.deepEqual(copied.source.at(-1).profileId, h.sourceId); assert.equal(copied.source.at(-1).revision, 2);
+  assert.match(h.part('settings-agent-notice').textContent, /새 초안.*원본은 그대로.*아직 사용하거나 대화방에 배정하지 않았습니다/);
+  assert.deepEqual(h.store.get(h.sourceId), h.before); assert.deepEqual(h.state.codex.threads, room);
+  assert.equal(h.refreshes(), 1); assert.equal(h.calls.some(call => /\/(activate|lifecycle|draft)$/.test(call.path)), false);
+});
+
+test('Settings duplicate: saved draft and archived profile use the revision actually displayed', async t => {
+  for (const lifecycle of ['draft', 'archived']) await t.test(lifecycle, async t => {
+    const h = await duplicateSettingsHarness(t, { lifecycle });
+    const revision = lifecycle === 'draft' ? 3 : 2;
+    assert.equal(h.part('settings-agent-duplicate').dataset.revision, String(revision));
+    h.part('settings-agent-duplicate').fire('click'); await settle();
+    assert.deepEqual(JSON.parse(h.posts()[0].body), { revision });
+    assert.equal(h.store.get(h.part('settings-agent-detail').dataset.profileId).lifecycle, 'draft');
+    assert.deepEqual(h.store.get(h.sourceId), h.before);
+  });
+});
+
+test('Settings duplicate: head advancement and same-view refresh do not replace the captured displayed revision', async t => {
+  let release, receipt;
+  const h = await duplicateSettingsHarness(t, { reply: value => { receipt = value; return new Promise(done => { release = done; }); } });
+  h.part('settings-agent-duplicate').fire('click'); await settle();
+  h.store.saveDraft(h.sourceId, { ...h.before.head.body, instructions: 'NEWER_HEAD_FOUR' }, 3);
+  h.detail.headRevision = 4; h.emit();
+  assert.equal(h.part('settings-agent-duplicate').dataset.state, 'pending');
+  release(receipt); await settle();
+  assert.equal(h.posts().length, 1); assert.deepEqual(JSON.parse(h.posts()[0].body), { revision: 2 });
+  assert.equal(h.store.get(h.part('settings-agent-detail').dataset.profileId).head.body.instructions, 'SHOWN_VERSION_TWO');
+});
+
+test('Settings duplicate: export unknown does not lock this independent action or unpin its source revision', async t => {
+  const h = await duplicateSettingsHarness(t);
+  h.part('settings-agent-export-md').fire('click'); await settle();
+  h.native.files.set('/chosen/already.md', new Uint8Array([7]));
+  h.native.pickers[0].answer(0, '/chosen/already.md'); await settle();
+  assert.equal(h.part('transfer-status').dataset.state, 'unknown');
+  assert.equal(h.part('settings-agent-duplicate').getAttribute('disabled'), null);
+  assert.equal(h.part('settings-agent-duplicate').dataset.revision, '2');
+  h.part('settings-agent-duplicate').fire('click'); await settle();
+  assert.equal(h.posts().length, 1); assert.deepEqual(JSON.parse(h.posts()[0].body), { revision: 2 });
+  assert.equal(h.part('settings-agent-detail').dataset.lifecycle, 'draft');
+});
+
+test('Settings duplicate: account/card/profile/tab/engine/epoch changes reject late success and failure without followup or stale notice', async t => {
+  const changes = {
+    account: async h => { h.state.codex.codexAccountKey = 'account-b'; h.emit(); },
+    rawAccount: async h => { h.state.codex.authStatus.accountEmail = 'b@example.test'; h.emit(); },
+    rawAccountWithoutEmit: async h => { h.state.codex.authStatus.accountEmail = 'b@example.test'; },
+    epoch: async h => { h.epoch.reset('codex'); h.emit(); },
+    adapter: async h => { const request = h.state.codexBridge.profileRequest; h.state.codexBridge.profileRequest = (...args) => request(...args); h.emit(); },
+    card: async h => { h.card._cleanup(); h.card.remove(); },
+    removedWithoutCleanup: async h => { h.card.remove(); },
+    tab: async h => { h.card._settingsShowTab('account'); },
+    tabRoundTrip: async h => { h.card._settingsShowTab('account'); h.card._settingsShowTab('agents'); },
+    profile: async h => { const other = h.store.createDraft({ name: '다른 Agent', role: '다른 역할' }); h.card._settingsOpenProfile(other.id); },
+    revision: async h => { h.store.activate(h.sourceId, 3, 2); h.detail.activeRevision = 3; h.emit(); },
+    engine: async h => { h.state.codex.threads[0].engineId = 'claude'; h.emit(); },
+    engineRoundTrip: async h => { h.state.codex.threads[0].engineId = 'claude'; h.emit(); h.state.codex.threads[0].engineId = 'codex'; h.emit(); },
+    engineProfile: async h => { h.state.codex.threads[0].engineProfileId = 'changed-slot'; h.emit(); },
+  };
+  for (const [name, change] of Object.entries(changes)) for (const failure of [false, true]) await t.test(`${name}-${failure ? 'failure' : 'success'}`, async t => {
+    let resolve, reject, receipt;
+    const h = await duplicateSettingsHarness(t, { reply: value => { receipt = value; return new Promise((yes, no) => { resolve = yes; reject = no; }); } });
+    h.state.codex.threads = [{ id: 'engine-room', engineId: 'codex', engineProfileId: 'original-slot' }]; h.state.codex.activeThreadId = 'engine-room';
+    const control = h.part('settings-agent-duplicate'); control.fire('click'); await settle();
+    await change(h); await settle();
+    const visible = h.card.textContent, calls = h.calls.length, refreshes = h.refreshes();
+    if (failure) reject(new Error('LATE_PRIVATE_FAILURE')); else resolve(receipt);
+    await settle();
+    assert.equal(h.card.textContent, visible); assert.equal(h.calls.length, calls); assert.equal(h.refreshes(), refreshes);
+    assert.notEqual(h.part('settings-agent-detail')?.dataset.profileId, receipt.id);
+    assert.equal(h.posts().length, 1); assert.equal(h.posts()[0].signal.aborted, true);
+    control.fire('click'); await settle(); assert.equal(h.posts().length, 1, 'old detached action is inert');
+  });
+});
+
+test('Settings duplicate: uncertain or malformed receipt never claims success or automatically retries a possibly-created draft', async t => {
+  for (const mode of ['lost-response', 'malformed']) await t.test(mode, async t => {
+    const h = await duplicateSettingsHarness(t, { reply: saved => {
+      if (mode === 'lost-response') throw new Error('connection lost after write');
+      return { ...saved, profile: { ...saved.profile, activeRevision: 1 } };
+    } });
+    h.part('settings-agent-duplicate').fire('click'); await settle();
+    assert.match(h.part('settings-agent-notice').textContent, /결과를 확인하지 못했습니다.*목록에서 사본.*자동으로 다시 시도하지 않습니다/);
+    assert.equal(h.part('settings-agent-detail').dataset.profileId, h.sourceId);
+    const calls = h.calls.length; h.emit(); await settle();
+    assert.equal(h.posts().length, 1); assert.equal(h.calls.length, calls); assert.equal(h.refreshes(), 0);
+    assert.equal(h.store.list().profiles.length, 2, 'the lost response is not treated as a rolled-back server write');
+    assert.deepEqual(h.store.get(h.sourceId), h.before);
+  });
+});
+
+test('Settings duplicate: definite lifecycle refusal retains the displayed original with an actionable notice and no retry', async t => {
+  const h = await duplicateSettingsHarness(t);
+  h.store.lifecycle(h.sourceId, 'delete');
+  const calls = h.calls.length;
+  h.part('settings-agent-duplicate').fire('click'); await settle();
+  assert.equal(h.posts().length, 1); assert.equal(h.calls.length, calls + 1);
+  assert.equal(h.part('settings-agent-detail').dataset.profileId, h.sourceId);
+  assert.match(h.part('settings-agent-notice').textContent, /지금 상태에서는.*복제할 수 없습니다.*목록에서 다시 확인/);
+  assert.doesNotMatch(h.part('settings-agent-notice').textContent, /만들었습니다|다시 불러왔습니다/);
+  assert.equal(h.refreshes(), 0); assert.equal(h.store.list().profiles.length, 0);
+});
 
 test('Settings green control: click, Enter and Space use actual shared fullscreen geometry and restore only this card', () => {
   const h = portableSettingsHarness({ fullscreen: true });
@@ -13532,6 +13682,23 @@ test('Settings portable glue: same active v2 survives newer head and history com
   assert.equal(h.part('settings-agent-import-confirm'), confirm);
   assert.match(h.part('transfer-export-target').textContent, /보이는 Agent · 사용 중 버전 2/);
   assert.equal(h.part('transfer-export-target').dataset.source, 'active');
+});
+
+test('Settings version badge names the displayed draft without claiming it is latest or moving the export target', async () => {
+  const h = portableSettingsHarness({ respond: path => path.endsWith('/revisions')
+    ? { revisions: [{ revision: 3, parentRevision: 2 }, { revision: 2, parentRevision: 1 }] } : undefined });
+  await settle();
+  assert.match(h.part('settings-agent-versions').textContent, /버전 3저장된 초안/);
+  assert.doesNotMatch(h.part('settings-agent-versions').textContent, /최신 초안|표시 중인 초안/);
+  Object.assign(h.detail, { lifecycle: 'draft', active: null, activeRevision: null, headRevision: 2 });
+  h.detail.head.revision = 2;
+  h.card._settingsOpenProfile(h.detail.id); await settle();
+  const target = h.part('transfer-export-target');
+  assert.match(h.part('settings-agent-versions').textContent, /버전 2표시 중인 초안/);
+  assert.doesNotMatch(h.part('settings-agent-versions').textContent, /최신 초안/);
+  h.detail.headRevision = 3; h.detail.head.revision = 3;
+  assert.equal(h.part('transfer-export-target'), target, 'an unobserved new head does not replace the displayed/exported revision');
+  assert.equal(target.dataset.revision, '2'); assert.match(target.textContent, /초안 버전 2/);
 });
 
 test('Settings portable glue: stale account chooser cannot write; collisions distinguish pre-gate failure from unknown write', async () => {
@@ -13764,6 +13931,16 @@ test('Task question UI: failures retain the same answer, Cancel clears only loca
   h.type('PRIVATE_DRAFT'); h.replies.push(refusal(400, 'TASK_GATE_ANSWER_PRIVATE'));
   h.part('chat-task-answer-continue').fire('click'); await settle();
   assert.equal(h.part('chat-task-answer-text').value, 'PRIVATE_DRAFT'); assert.match(h.part('chat-task-error').textContent, /비밀번호·키·인증번호/);
+  const nodes = settingsNodes(h.question(), () => true), error = h.part('chat-task-error');
+  assert.ok(nodes.indexOf(h.part('chat-task-answer-text')) < nodes.indexOf(error), 'reason and remedy follow the answer input');
+  assert.ok(nodes.indexOf(error) < nodes.indexOf(h.part('chat-task-answer-continue')), 'the full remedy precedes the action buttons');
+  assert.equal(error.textContent, Chat.taskContinueErrorText({ code: 'TASK_GATE_ANSWER_PRIVATE' }));
+  const errorStyle = cssDeclarationsFor(surfaceCss, '.egd-task-error');
+  assert.equal(errorStyle['overflow-wrap'], 'anywhere');
+  assert.equal(errorStyle['max-height'], undefined); assert.equal(errorStyle['text-overflow'], undefined);
+  const response = stopFeedbackFixture(); response.run.status = 'completed';
+  assert.equal(response.ui().label, '응답 완료');
+  assert.equal(Chat.taskBoardEntry(h.state.codex.taskBoard, 'graph-a').graph.tasks[0].status, 'waiting-on-dependency');
   h.frame(structuredClone(graph)); assert.equal(h.part('chat-task-answer-text').value, 'PRIVATE_DRAFT');
   assert.equal(JSON.stringify(h.state.codex).includes('PRIVATE_DRAFT'), false);
   h.type('corrected answer'); h.frame(structuredClone(graph));
