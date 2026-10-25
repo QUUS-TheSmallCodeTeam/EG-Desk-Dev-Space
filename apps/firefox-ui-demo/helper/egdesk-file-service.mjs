@@ -588,7 +588,12 @@ export function createEGDeskFileService({ draftStore, createOnlyAdapter, makeId 
       draft.text.includes('\0') || !draft.text.isWellFormed()) fail('INVALID_DRAFT', 'Managed working copy is invalid')
     const bytes = Buffer.from(draft.text, 'utf8')
     if (bytes.length > MAX_READ_BYTES) fail('FILE_TOO_LARGE', 'Managed working copy exceeds the 8 MiB capture limit')
-    return { bytes, mime: captureMime(draft.name), name: draft.name, sha256: hash(bytes), captureRef: { ...captureRef } }
+    // Tracking metadata comes only from the registered file handle, never a
+    // renderer path or the draft's old rootId. A restored/disconnected draft
+    // stays capturable without inventing a location or reading its original.
+    const resource = resources.get(draft.fileId)
+    const location = resource?.kind === 'file' ? { rootId: resource.rootId, relativePath: toPosix(resource.relativePath) } : null
+    return { bytes, mime: captureMime(draft.name), name: draft.name, sha256: hash(bytes), captureRef: { ...captureRef }, ...(location ? { location } : {}) }
   }
 
   async function swapDraft(draft, expectedHead, next, operationId) {

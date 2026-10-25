@@ -167,9 +167,18 @@ try {
 // with defaults (computerControl.persisted then tells the screen).
 const bridgeSettings = openBridgeSettings({ dataDir: path.join(dataDir, 'settings') })
 // RT-06/CHAT-06 workflow runtime (event bus, connected-root watcher, task
-// graph). Opened after Chat below; callbacks that fire earlier are no-ops.
+// graph). Opened after Chat below. Keep roots registered during construction
+// until both the context tracker and workflow watcher can receive them.
 let workflow = null
-const localFiles = createEGDeskFileMount({ dataDir, port: BRIDGE_PORT, onRootRegistered: root => workflow?.watchRoot(root) })
+let contexts = null
+let acceptingFileRoots = true
+const pendingFileRoots = new Map()
+const localFiles = createEGDeskFileMount({ dataDir, port: BRIDGE_PORT, onRootRegistered: root => {
+  if (!acceptingFileRoots) return
+  if (!contexts || !workflow) pendingFileRoots.set(root.rootId, root)
+  contexts?.noteRoot(root)
+  workflow?.watchRoot(root)
+} })
 const contextStore = new ImmutableContextStore({
   dataDir,
   managedFileView: localFiles.managedFileView,
@@ -204,7 +213,7 @@ const claudeReader = {
   },
   disconnect(options) { return claudeReaderClient?.disconnect(options) },
 }
-const contexts = new ContextRuntime({
+contexts = new ContextRuntime({
   store: contextStore, reader: nativeReader, readers: { claude: claudeReader }, getReadCapacity: getClaudeReadCapacity,
   getOwnerKey: () => publicAuthIdentityKey(authState),
   getAuthority: hints => chat.contextAuthority(hints),
@@ -212,6 +221,7 @@ const contexts = new ContextRuntime({
     ? claudeEngine.isReady() && claudeEngine.capabilities().has('dynamicTools')
     : nativeCapabilities.schemaMatch && appServerReady,
 })
+for (const root of pendingFileRoots.values()) contexts.noteRoot(root)
 const browserTransport = new BrowserToolTransport({ getOwnerKey: () => publicAuthIdentityKey(authState) })
 const browserProvider = createCodexBrowserToolProvider({ transport: browserTransport, getOwnerKey: () => publicAuthIdentityKey(authState), schemaReady: () => nativeCapabilities.qaReadOnly && appServerReady, fixtureQa: fixtureBrowserQaFromEnv(process.env) })
 // egdesk_propose_plan on ordinary threads: plans wait for approval in the
@@ -276,6 +286,7 @@ const claudeEngineStatus = createClaudeEngineStatus({
 const chat = new CodexChatRuntime({
   engines: engineRegistry,
   contexts,
+  resolveProjectWorkspace: request => localFiles.resolveProjectWorkspace(request),
   toolProviders: [browserProvider, planProvider],
   store: chatStore,
   requireStore: true,
@@ -333,6 +344,9 @@ workflow = await openWorkflowRuntime({
   dataDir, chat, port: BRIDGE_PORT, broadcast: event => broadcast(event),
   ensureAuth: () => ensureChatAuth(), getOwnerKey: () => publicAuthIdentityKey(authState), maxConcurrency: 2,
 })
+const detachContextServices = contexts.attachServices({ bus: workflow.bus, settings: bridgeSettings.contextSuggest, boards: deskStore })
+for (const root of pendingFileRoots.values()) workflow.watchRoot(root)
+pendingFileRoots.clear()
 if (workflow.snapshot().taskError) console.error('[egdesk-codex-bridge] local task storage unavailable:', workflow.snapshot().taskError)
 // ChatGPT plan usage of the signed-in identity, refreshed after sign-in and
 // after each turn; a failed read leaves rateLimits as it was (null at first).
@@ -1003,6 +1017,10 @@ let shuttingDown = false
 async function shutdown() {
   if (shuttingDown) return
   shuttingDown = true
+  acceptingFileRoots = false
+  pendingFileRoots.clear()
+  try { detachContextServices() }
+  catch { console.error('[egdesk-codex-bridge] context services did not detach cleanly') }
   bridgeServer.close()
   systemResourceMonitor.close()
   try { await claudeEngine.dispose() }
@@ -1022,6 +1040,9 @@ async function shutdown() {
 process.on('SIGINT', shutdown)
 process.on('SIGTERM', shutdown)
 process.on('exit', () => {
+  acceptingFileRoots = false
+  pendingFileRoots.clear()
+  try { detachContextServices() } catch {}
   systemResourceMonitor.close()
   workflow?.files.close()
   rpc?.close()

@@ -1,6 +1,6 @@
 import test from 'node:test'
 import assert from 'node:assert/strict'
-import { mkdtemp, mkdir, writeFile, readFile, realpath, rm } from 'node:fs/promises'
+import { mkdtemp, mkdir, writeFile, readFile, readdir, realpath, rm } from 'node:fs/promises'
 import os from 'node:os'
 import path from 'node:path'
 import { Readable } from 'node:stream'
@@ -9,6 +9,7 @@ import { ContextRuntime, CONTEXT_TOOL_SPECS } from './egdesk-context-runtime.mjs
 import { createContextHttpHandler } from './egdesk-context-http.mjs'
 import { CodexChatRuntime } from './codex-chat-runtime.mjs'
 import { NativeReaderClient } from './egdesk-native-reader.mjs'
+import { createEGDeskFileService } from './egdesk-file-service.mjs'
 
 async function harness(t, options = {}) {
   const dir = await mkdtemp(path.join(os.tmpdir(), 'egdesk-context-test-'))
@@ -730,6 +731,25 @@ test('only briefing comments are mutable; replacement is atomic and owner checke
 
 // ── CTX-04: attached sources that changed after they were sent ──
 
+function fakeSourceBus() {
+  const subscriptions = [], queue = []
+  return {
+    subscriptions,
+    subscribe({ owner, topics }, listener) {
+      const entry = { owner, topics, listener, active: true }
+      subscriptions.push(entry)
+      return () => { entry.active = false }
+    },
+    publish({ owner, topic, payload }) {
+      for (const entry of subscriptions) if (entry.active && entry.owner === owner && entry.topics.includes(topic)) queue.push(() => entry.listener({ topic, payload }))
+    },
+    // Deliberately deliver already queued callbacks after unsubscribe too.
+    async flush() { for (const callback of queue.splice(0)) await callback() },
+    stats: () => ({ subscribers: subscriptions.filter(entry => entry.active).length }),
+    close() { queue.length = 0; for (const entry of subscriptions) entry.active = false },
+  }
+}
+
 async function trackingHarness(t, options = {}) {
   const { createWorkflowEventBus } = await import('./egdesk-event-bus.mjs')
   const dir = await mkdtemp(path.join(os.tmpdir(), 'egdesk-context-track-'))
@@ -739,7 +759,7 @@ async function trackingHarness(t, options = {}) {
   let owner = 'email:a@example.com', threadSeq = 0, turnSeq = 0, clock = 1_800_000_000_000
   const store = new ImmutableContextStore({ dataDir: path.join(dir, 'state'), allowedRoots: [cwd], managedFileView: options.managedFileView, now: () => clock })
   const contexts = new ContextRuntime({ store, reader: null, getOwnerKey: () => owner, now: () => clock })
-  const bus = createWorkflowEventBus({ now: () => clock })
+  const bus = options.bus || createWorkflowEventBus({ now: () => clock })
   t.after(() => bus.close())
   contexts.attachServices({ bus })
   const calls = [], replies = [], events = []
@@ -914,6 +934,175 @@ test('the source-change bus owner is the workflow owner, and attachServices can 
   assert.equal(h.bus.stats().subscribers, 1, 're-attaching replaces the subscription')
   detach()
   assert.equal(h.bus.stats().subscribers, 0)
+})
+
+test('actual file service integration marks immutable path and working-copy captures stale without recapture or dispatch', async t => {
+  let service, resolves = 0
+  const managedFileView = { async resolveCaptureSource({ captureRef, assertActive }) {
+    assertActive()
+    resolves += 1
+    const value = await service.resolveCaptureSource(captureRef)
+    assertActive()
+    return value
+  } }
+  const h = await trackingHarness(t, { managedFileView, bus: fakeSourceBus() })
+  const drafts = new Map(), watched = []
+  service = createEGDeskFileService({
+    gitReview: null,
+    draftStore: {
+      async create(value) { drafts.set(value.id, structuredClone(value)) },
+      async get(id) { return structuredClone(drafts.get(id)) },
+      async compareAndSwap(id, head, value) {
+        assert.equal(drafts.get(id).head, head)
+        drafts.set(id, structuredClone(value))
+        return structuredClone(value)
+      },
+    },
+    onRootRegistered(root) { watched.push(root); h.contexts.noteRoot(root) },
+  })
+  const root = await service.registerRoot(h.cwd)
+  assert.deepEqual(watched, [{ rootId: root.rootId, absolutePath: h.cwd }])
+  await mkdir(path.join(h.cwd, 'notes'))
+  const original = path.join(h.cwd, 'notes', 'source.md')
+  await writeFile(original, 'Original disk bytes\n')
+  const file = (await service.search({ rootId: root.rootId, query: 'source' })).matches[0]
+  const draft = await service.createDraft({ fileId: file.id })
+  const edited = await service.updateDraft({ draftId: draft.id, expectedHead: draft.head, text: 'Selected working-copy bytes\n', operationId: 'edit' })
+  const captures = (await h.contexts.capture({ clientThreadId: 'ui', attachments: [
+    { id: 'path-source', kind: 'file', sourceRef: { path: original }, captureScope: { type: 'file' } },
+    { id: 'working-source', kind: 'file', managedFileView: { fileId: file.id, draftId: edited.id, head: edited.head, revision: edited.bufferRevision }, captureScope: { type: 'file' } },
+  ] })).captures
+  assert.deepEqual(captures[1].sourceRef.location, { rootId: root.rootId, relativePath: 'notes/source.md' })
+  assert.equal(await readFile(original, 'utf8'), 'Original disk bytes\n')
+  assert.equal(h.calls.length, 0, 'connecting, registering, opening, editing and explicitly capturing dispatch no model request')
+  assert.equal(h.chat.runs.size, 0)
+  const run = await h.chat.send({ message: 'Read my selection', requestId: 'integrated-read', clientThreadId: 'ui', cwd: h.cwd, contextSnapshotIds: captures.map(c => c.sourceId), ...h.caps })
+  await h.chat.handleServerRequest({ id: 'read-integrated', method: 'item/tool/call', params: {
+    threadId: run.conversationId, turnId: run.runId, callId: 'read-integrated', tool: 'egdesk_read_source', arguments: { snapshotId: captures[1].sourceId, intent: 'Read selected copy' },
+  } })
+  await h.contexts.calls.get(`${run.answerId}/read-integrated`)
+  await h.chat.handleNotification({ method: 'turn/completed', params: { threadId: run.conversationId, turn: { id: run.runId, status: 'completed', items: [], itemsView: 'notLoaded' } } })
+  const inspected = await h.store.inspect('email:a@example.com', captures[1].sourceId)
+  assert.ok(inspected.delivered, 'the previously delivered immutable snapshot is part of the proof')
+  const calls = h.calls.length, runs = h.chat.runs.size, captureResolves = resolves
+  await writeFile(original, 'External replacement bytes\n')
+  h.bus.publish({ owner: 'other-workflow', topic: 'file.changed', payload: { rootId: root.rootId, relativePath: 'notes/source.md' } })
+  await h.bus.flush()
+  assert.ok(h.contexts.sourceStatus({ conversationId: run.conversationId }).sources.every(source => source.state === 'active'))
+  await h.publish('file.changed', { rootId: root.rootId, relativePath: 'notes/source.md', change: 'change' })
+  const status = h.contexts.sourceStatus({ conversationId: run.conversationId })
+  assert.ok(status.sources.every(source => source.state === 'stale' && source.reason === 'fileChanged'))
+  assert.ok(!JSON.stringify(status).includes(h.cwd))
+  assert.deepEqual(await h.store.inspect('email:a@example.com', captures[1].sourceId), inspected)
+  assert.equal((await h.store.inspect('email:a@example.com', captures[0].sourceId)).source.text, 'Original disk bytes\n')
+  assert.equal(h.calls.length, calls)
+  assert.equal(h.chat.runs.size, runs)
+  assert.equal(resolves, captureResolves, 'stale marking and viewing never resolve the live working copy again')
+  const room = { conversationId: run.conversationId, clientThreadId: 'ui' }
+  const prepared = await h.contexts.prepare(room)
+  assert.equal(prepared.changesOnly, true)
+  assert.equal(prepared.changes.length, 2)
+  assert.deepEqual((await h.contexts.prepare(room)).changes, prepared.changes, 'preparation cannot consume the change notification')
+  assert.equal(h.calls.length, calls)
+  assert.ok(status.sources.every(source => source.announcedAt === null))
+  assert.deepEqual(h.contexts.sourceStatus({ conversationId: 'other-room' }).sources, [])
+  assert.equal(await h.contexts.prepare({ conversationId: 'other-room', clientThreadId: 'ui-other' }), null)
+  h.changeOwner('email:other@example.com')
+  assert.deepEqual(h.contexts.sourceStatus(room).sources, [])
+  assert.equal(await h.contexts.prepare(room), null)
+  h.changeOwner('email:a@example.com')
+  await h.send(room)
+  assert.deepEqual(changeNote(h.lastTurn()).changed.map(source => source.sourceId).sort(), captures.map(c => c.sourceId).sort())
+  const changed = h.events.find(event => event.event === 'context.sources.changed')
+  assert.deepEqual(Object.keys(changed.details.sources[0]).sort(), ['changedAt', 'kind', 'reason', 'sourceId'])
+  await h.send(room)
+  assert.equal(changeNote(h.lastTurn()), null)
+  assert.equal(resolves, captureResolves)
+  assert.deepEqual(await h.store.inspect('email:a@example.com', captures[1].sourceId), inspected)
+})
+
+test('service lifecycle is connection-specific, rejects broken adapters and ignores late callbacks without dispatch', async t => {
+  const h = await harness(t)
+  const bus = fakeSourceBus()
+  const first = h.contexts.attachServices({ bus })
+  const captured = await h.capture()
+  const entry = h.contexts.pendingSources.get(captured.sourceId).entry
+  bus.publish({ owner: 'egdesk-local', topic: 'browser.navigated', payload: { cardId: 'view-1', origin: 'https://example.com', path: '/old-queued' } })
+  const second = h.contexts.attachServices({ bus })
+  first(); first()
+  assert.equal(bus.stats().subscribers, 1)
+  await bus.flush()
+  assert.equal(entry.state, 'active', 'the old queued callback cannot mutate current tracking')
+  for (const adapter of [{ bus: {} }, { settings: {} }, { boards: {} }, { rootPath: 'not-a-function' }, { bus: { subscribe: () => undefined } }]) {
+    assert.throws(() => h.contexts.attachServices(adapter), { code: 'CONTEXT_SERVICE_INVALID' })
+    assert.equal(bus.stats().subscribers, 1)
+  }
+  assert.throws(() => h.contexts.attachServices({ bus: { subscribe() { throw new Error('private backend details') } } }), { code: 'CONTEXT_SERVICE_UNAVAILABLE' })
+  bus.publish({ owner: 'egdesk-local', topic: 'browser.navigated', payload: { cardId: 'view-1', origin: 'https://example.com', path: '/current' } })
+  await bus.flush()
+  assert.equal(entry.state, 'stale', 'a failed replacement does not remove the working connection')
+  second(); second()
+  assert.equal(bus.stats().subscribers, 0)
+  const version = entry.changeVersion
+  bus.subscriptions.at(-1).listener({ topic: 'browser.navigated', payload: { cardId: 'view-1', origin: 'https://example.com', path: '/late' } })
+  assert.equal(entry.changeVersion, version)
+  h.contexts.attachServices({ bus })
+  h.contexts.attachServices({ bus: null })()
+  assert.equal(bus.stats().subscribers, 0)
+  let lateCallback
+  const brokenDetach = h.contexts.attachServices({ bus: { subscribe(scope, listener) {
+    lateCallback = listener
+    return () => { throw new Error('private teardown failure') }
+  } } })
+  assert.throws(() => h.contexts.attachServices({ bus }), { code: 'CONTEXT_SERVICE_UNAVAILABLE' })
+  assert.equal(bus.stats().subscribers, 0, 'the tentative replacement is also cleaned up if old teardown fails')
+  assert.equal(h.contexts.detachServices, null)
+  assert.doesNotThrow(brokenDetach, 'even a failed teardown is idempotent')
+  lateCallback({ topic: 'browser.navigated', payload: { cardId: 'view-1', origin: 'https://example.com', path: '/after-failed-detach' } })
+  assert.equal(entry.changeVersion, version)
+  assert.equal(h.calls.length, 0)
+  assert.equal(h.chat.runs.size, 0)
+})
+
+test('source changes arriving after preparation stay pending even at the same timestamp, and paths cannot escape roots', async t => {
+  const h = await trackingHarness(t, { bus: fakeSourceBus() })
+  const run = await h.send({ attachments: [h.browser('racing-card')], ...h.caps })
+  const change = () => h.publish('browser.navigated', { cardId: 'racing-card', origin: 'https://example.com', path: '/changed' })
+  await change()
+  const prepared = await h.contexts.prepare({ conversationId: run.conversationId })
+  await change()
+  h.contexts.announceChanges(run, prepared)
+  assert.equal(h.contexts.sourceStatus(run).sources[0].announcedAt, null)
+  assert.equal((await h.contexts.prepare({ conversationId: run.conversationId })).changes.length, 1)
+  h.contexts.trackPending('email:a@example.com', [{ sourceId: 'outside', kind: 'file', sourceRef: { path: path.join(h.dir, 'outside.md') } }])
+  h.contexts.noteRoot({ rootId: 'root', absolutePath: h.cwd })
+  for (const relativePath of ['../outside.md', '/outside.md', './outside.md', 'a/../../outside.md', 'a\\outside.md']) {
+    assert.equal(h.contexts.noteSourceEvent({ topic: 'file.changed', payload: { rootId: 'root', relativePath } }), 0)
+  }
+  assert.equal(h.contexts.pendingSources.get('outside').entry.state, 'active')
+})
+
+test('prepareOnly direct and Reader plans allocate no session, write no records and emit or dispatch nothing', async t => {
+  let readerCalls = 0
+  const h = await harness(t, { reader: { async read() { readerCalls += 1; throw new Error('Preparation must not call a Reader') } } })
+  const capture = await h.capture('Exact immutable bytes for preparation')
+  const before = (await readdir(h.store.root, { recursive: true })).sort()
+  const input = { ownerKey: 'email:a@example.com', run: { conversationId: 'prepared-room', clientThreadId: 'ui', context: { captures: [capture] } },
+    sourceId: capture.sourceId, intent: 'Plan a selected read', usage: {}, model: 'configured-model', effort: 'high', cwd: h.cwd,
+    assertActive: () => {}, prepareOnly: true, emit: () => assert.fail('Preparation must not emit Reader lifecycle events') }
+  const direct = await h.contexts.smartRead.read(input)
+  assert.equal(direct.packet.mode, 'direct')
+  const reader = await h.contexts.smartRead.read({ ...input, forceReader: true })
+  assert.equal(reader.plan.mode, 'reader')
+  assert.equal(reader.plan.coverage, 'pending')
+  assert.equal(reader.packet, undefined)
+  assert.deepEqual((await readdir(h.store.root, { recursive: true })).sort(), before)
+  assert.equal(h.contexts.smartRead.sessions.size, 0)
+  assert.equal(h.contexts.bindings.size, 0)
+  assert.equal(h.chat.runs.size, 0)
+  assert.equal(h.calls.length, 0)
+  assert.equal(h.events.length, 0)
+  assert.equal(readerCalls, 0)
 })
 
 async function scopedContextHarness(t, options = {}) {

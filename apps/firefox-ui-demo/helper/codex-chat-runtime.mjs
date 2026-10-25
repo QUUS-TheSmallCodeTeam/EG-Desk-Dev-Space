@@ -51,6 +51,10 @@ const CLAUDE_CONTEXT_PRESTART_REFUSALS = new Set([
   'CLAUDE_CONTEXT_READER_UNSUPPORTED', 'CONTEXT_SCOPE_CHANGED', 'UNSUPPORTED_SOURCE_FORMAT',
   'CONTEXT_FORBIDDEN', 'CONTEXT_TOOLS_UNAVAILABLE',
 ])
+const PROJECT_PRESTART_REFUSALS = new Set([
+  'PROJECT_RECONNECT_REQUIRED', 'PROJECT_WORKSPACE_UNAVAILABLE', 'PROJECT_WORKSPACE_UNVERIFIED', 'PROJECT_WORKSPACE_CHANGED',
+  'NATIVE_CWD_UNVERIFIED', 'CWD_CHANGE_UNSUPPORTED',
+])
 const idText = value => typeof value === 'string' && value.length <= 300 ? value : null
 const runKey = (threadId, turnId) => `${threadId}/${turnId}`
 const copy = value => JSON.parse(JSON.stringify(value))
@@ -603,8 +607,10 @@ function cleanNotification(method, p, engineId = 'codex') {
 }
 
 export class CodexChatRuntime {
-  constructor({ request, respond, engines = null, emit = () => {}, emitLegacy = () => {}, verifyFile = verifyLocalFile, now = Date.now, contexts = null, toolProviders = [], expectedProcessConfiguration = null, store = null, requireStore = false, getOwnerKey = () => null, qaReady = () => true, getNativeContractFingerprint = () => null, profiles = null, mcpServerKind = null, computerControlPolicy = null, computerControlStore = null, onComputerControlChange = () => {}, hostLease = null, setTimer = (fn, ms) => setTimeout(fn, ms), clearTimer = handle => clearTimeout(handle) }) {
+  constructor({ request, respond, engines = null, emit = () => {}, emitLegacy = () => {}, verifyFile = verifyLocalFile, now = Date.now, contexts = null, toolProviders = [], expectedProcessConfiguration = null, store = null, requireStore = false, getOwnerKey = () => null, qaReady = () => true, getNativeContractFingerprint = () => null, profiles = null, resolveProjectWorkspace = null, mcpServerKind = null, computerControlPolicy = null, computerControlStore = null, onComputerControlChange = () => {}, hostLease = null, setTimer = (fn, ms) => setTimeout(fn, ms), clearTimer = handle => clearTimeout(handle) }) {
     Object.assign(this, { emitEvent: emit, emitLegacy, verifyFile, now, setTimer, clearTimer })
+    if (resolveProjectWorkspace !== null && typeof resolveProjectWorkspace !== 'function') throw new TypeError('resolveProjectWorkspace must be a server-owned callback')
+    this.resolveProjectWorkspace = resolveProjectWorkspace
     // CU-02·03: this Mac's control lease (egdesk-host-lease createHostLease),
     // or null. With it, EG-Desk computer tools may be offered and are checked
     // before dispatch, and a Codex computer call (cua_repl) is stopped as soon
@@ -1369,6 +1375,7 @@ export class CodexChatRuntime {
     const clientThreadId = idText(body.clientThreadId) || idText(body.thread?.id)
     const conversationId = idText(body.conversationId)
     if (body.conversationId != null && !conversationId) throw chatError('INVALID_THREAD_ID', 'Invalid conversationId')
+    const projectScope = this.projectScope(body, internal?.board?.record?.roomClientThreadId || clientThreadId)
     const storedThread = this.store && clientThreadId ? this.store.getConversation(clientThreadId) : null
     let boundPolicy = this.threads.get(conversationId)?.executionPolicy || null
     // After a helper restart the binding, not the default engine or Codex's
@@ -1422,6 +1429,9 @@ export class CodexChatRuntime {
       engineId: typeof body.engineId === 'string' ? body.engineId : undefined,
       // Same rule: only an explicit one-time request changes identity.
       stateless: stateless || undefined,
+      // Explicit association hints affect replay identity; old plain-chat
+      // fingerprints remain byte-for-byte compatible.
+      project: body.boardId != null || body.roomId != null ? projectScope : undefined,
       // D-M2 / D-M1: a Board recipient or a hand-back is its own request.
       board: internal?.board ? { room: internal.board.record.roomClientThreadId, profileId: internal.board.record.profileId, reason: internal.board.record.reason } : undefined,
       blocks: internal?.blocks ? Object.keys(internal.blocks).sort() : undefined,
@@ -1432,7 +1442,7 @@ export class CodexChatRuntime {
       return previous.promise
     }
     if (this.store && !clientThreadId) throw chatError('INVALID_CLIENT_THREAD_ID', 'clientThreadId is required for durable chat', 400)
-    const requestOwnerHash = this.store ? this.engineOwnerHash(engineId) : null
+    const requestOwnerHash = this.engineOwnerHash(engineId)
     if (this.store) {
       const knownThread = this.store.getConversation(clientThreadId)
       const knownRequest = knownThread ? this.store.getRequest({ clientThreadId, requestId }) : null
@@ -1551,6 +1561,7 @@ export class CodexChatRuntime {
       profileRun,
       modelSelection,
       stateless,
+      projectScope,
       // A stored binding may have named the engine after the early lookup.
       engine: this.engineRecord(conversationId ? this.threadEngines.get(conversationId) || engineId : engineId),
       board: internal?.board?.record || null,
@@ -1560,6 +1571,7 @@ export class CodexChatRuntime {
     record.promise = this.startTurn(body, context).catch(error => {
       const failure = error instanceof Error ? error : new Error('Codex request failed')
       const contextRefusal = context.engine.id === 'claude' && CLAUDE_CONTEXT_PRESTART_REFUSALS.has(failure.code)
+      const prestartRefusal = contextRefusal || PROJECT_PRESTART_REFUSALS.has(failure.code)
       if (this.store && acceptedLocal && !context.turnStartAttempted && (contextRefusal || failure.definite === true || [
         'QA_POLICY_UNVERIFIED', 'QA_TOOL_ISOLATION_UNVERIFIED', 'QA_POLICY_UNAVAILABLE',
         'BROWSER_POLICY_REQUIRED', 'INVALID_BROWSER_SELECTION', 'BROWSER_UI_UNAVAILABLE',
@@ -1573,8 +1585,8 @@ export class CodexChatRuntime {
               accepted: false, dispatchStatus: 'rejected', conversationId: context.conversationId || null, localRunId: context.localRunId,
               // Durable duplicates keep the same actionable refusal, not a
               // QA fallback code or a fresh attempt with a newer scope token.
-              ...(contextRefusal ? { code: failure.code, resumeRequired: false } : {}),
-              error: publicError(failure, contextRefusal ? failure.code : failure.definite === true ? 'TURN_START_FAILED' : 'QA_POLICY_UNVERIFIED', context.engine.id),
+              ...(prestartRefusal ? { code: failure.code, resumeRequired: false } : {}),
+              error: publicError(failure, prestartRefusal ? failure.code : failure.definite === true ? 'TURN_START_FAILED' : 'QA_POLICY_UNVERIFIED', context.engine.id),
             },
           })
         } catch { this.storeHealthy = false }
@@ -1675,6 +1687,38 @@ export class CodexChatRuntime {
       options.developerInstructions = prompt
     }
     return options
+  }
+
+  projectScope(body, roomId) {
+    const identifier = value => value == null || (typeof value === 'string' && value.trim() && value.length <= 512 && !value.includes('\0'))
+    if (!identifier(body.boardId) || !identifier(body.roomId) || !identifier(roomId)) throw chatError('INVALID_PROJECT_SCOPE', 'Project routing requires opaque Board and room IDs', 400)
+    if (body.roomId != null && roomId && body.roomId !== roomId) throw chatError('INVALID_PROJECT_SCOPE', 'Project room must match the sending chat or original Board room', 400)
+    if (!this.resolveProjectWorkspace && (body.boardId != null || body.roomId != null)) throw chatError('PROJECT_WORKSPACE_UNAVAILABLE', 'Project folder lookup is unavailable; no message was sent', 503)
+    return Object.freeze({ boardId: body.boardId ?? null, roomId: roomId || body.roomId || null })
+  }
+
+  async projectWorkspace(scope, assertActive) {
+    assertActive()
+    let workspace
+    try { workspace = await this.resolveProjectWorkspace({ ...scope }) }
+    catch {
+      assertActive()
+      throw Object.assign(chatError('PROJECT_WORKSPACE_UNAVAILABLE', 'The associated project folder could not be verified; no message was sent', 503), { definite: true })
+    }
+    assertActive()
+    // Only an explicit null means no association. An unavailable resolver or
+    // a missing/replaced configured folder must never become a default cwd.
+    if (workspace === null) return null
+    if (workspace?.status === 'reconnect-required') throw Object.assign(chatError('PROJECT_RECONNECT_REQUIRED', 'Pick the associated project folder again before sending', 409), { definite: true })
+    if (workspace?.status !== 'connected' || !['board', 'room'].includes(workspace.source) ||
+        ![workspace.projectId, workspace.rootId].every(value => typeof value === 'string' && value && value.length <= 512 && !value.includes('\0')) ||
+        typeof workspace.absolutePath !== 'string' || !path.isAbsolute(workspace.absolutePath) || workspace.absolutePath.includes('\0')) {
+      throw Object.assign(chatError('PROJECT_WORKSPACE_UNVERIFIED', 'Project folder lookup did not return a verified workspace; no message was sent', 409), { definite: true })
+    }
+    // Copy only the verified identity and path, never permissions or roots
+    // from a request or a resolver extension. Existing ceilings stay intact.
+    const { projectId, source, rootId, absolutePath } = workspace
+    return Object.freeze({ projectId, source, rootId, absolutePath })
   }
 
   assertProcessConfiguration(thread, { model, effort } = {}) {
@@ -1783,9 +1827,30 @@ export class CodexChatRuntime {
   async startTurn(body, context) {
     const engine = this.engines.get(context.engine.id)
     const epoch = this.epochOf(engine.id)
+    const assertPreparationActive = () => {
+      if (epoch !== this.epochOf(engine.id) || this.engineOwnerHash(engine.id, context.engine.engineProfileId) !== context.ownerHash ||
+          this.engineRecord(engine.id).engineProfileId !== context.engine.engineProfileId) {
+        throw Object.assign(chatError('ACCOUNT_CHANGED', 'AI engine account or connection changed before dispatch', 409), { definite: true })
+      }
+    }
     const contextAuthority = this.scopedContextAuthority({ ...body, engineId: engine.id })
     const selection = context.modelSelection || this.modelSelection(body, context.profileRun, engine.id)
     const overrides = this.threadOverrides(body, context.profileRun, selection)
+    const workspace = this.resolveProjectWorkspace ? await this.projectWorkspace(context.projectScope, assertPreparationActive) : null
+    if (workspace) overrides.cwd = workspace.absolutePath
+    const assertWorkspaceCurrent = async () => {
+      assertPreparationActive()
+      if (!this.resolveProjectWorkspace) return
+      const current = await this.projectWorkspace(context.projectScope, assertPreparationActive)
+      if (JSON.stringify(current) !== JSON.stringify(workspace)) throw Object.assign(chatError('PROJECT_WORKSPACE_CHANGED', 'Project association changed while preparing this message; send again with the current folder', 409), { definite: true })
+    }
+    // A continued Claude process/session cannot be moved by changing a Board
+    // association, even when it is already loaded and skips thread/resume.
+    if (engine.id === 'claude' && context.conversationId && overrides.cwd) {
+      const originalCwd = this.threadResumeCwds.get(context.conversationId)
+      if (!originalCwd) throw Object.assign(chatError('NATIVE_CWD_UNVERIFIED', 'The original working folder was not recorded; this conversation cannot be continued safely', 409), { definite: true })
+      if (overrides.cwd !== originalCwd) throw Object.assign(chatError('CWD_CHANGE_UNSUPPORTED', 'A Claude conversation keeps the folder it started in; start a new conversation for another folder', 409), { definite: true })
+    }
     const policy = context.executionPolicy
     const qa = policy === READ_ONLY_QA
     const bounded = qa || policy === BROWSER_BOUNDED || policy === FIXTURE_BROWSER_QA
@@ -1830,6 +1895,7 @@ export class CodexChatRuntime {
     const additionalContext = Object.keys(extraContext).length
       ? { ...(toolContext || {}), ...Object.fromEntries(Object.entries(extraContext).map(([key, value]) => [key, { kind: 'application', value }])) }
       : toolContext
+    await assertWorkspaceCurrent()
     if (epoch !== this.epochOf(engine.id)) throw chatError('ACCOUNT_CHANGED', 'Codex account or connection changed', 409)
     if (this.store && engine.id === 'claude' && this.engineOwnerHash(engine.id, context.engine.engineProfileId) !== context.ownerHash) {
       throw Object.assign(chatError('ACCOUNT_CHANGED', 'AI engine account changed before dispatch', 409), { definite: true })
@@ -1883,7 +1949,7 @@ export class CodexChatRuntime {
       // Hydrate native history before deciding whether a new turn is safe.
       // This also supplies the historical cwd for profile-off config/read.
       const justRestored = !this.loadedThreads.has(cid)
-      if (justRestored) await this.restoreThread(cid, context.clientThreadId, qaOverrides || {}, { policy })
+      if (justRestored) await this.restoreThread(cid, context.clientThreadId, qaOverrides || {}, { policy, beforeResume: assertWorkspaceCurrent })
       if ([...this.runs.values()].some(run => run.conversationId === cid && !TERMINAL.has(run.status))) {
         throw chatError('RUN_IN_PROGRESS', 'This conversation already has an active or unreconciled turn', 409)
       }
@@ -1925,7 +1991,7 @@ export class CodexChatRuntime {
         const computerExtra = computerOff ? await this.computerControlOffOverrides(overrides.cwd || this.threads.get(cid)?.cwd || null) : null
         if (epoch !== this.epochOf(engine.id)) throw chatError('CONTEXT_CHANGED', 'Codex connection or account changed', 409)
         // A bounded thread resumed with the ceiling's shell_tool false must read it back off.
-        const resumed = await this.restoreThread(cid, context.clientThreadId, mergeCeilingOverrides(mergeCeilingOverrides({ ...overrides, ...(qaOverrides || {}) }, extra), computerExtra?.overrides), { policy, shellOff: Boolean(extra) && ceiling?.terminal === 'none' })
+        const resumed = await this.restoreThread(cid, context.clientThreadId, mergeCeilingOverrides(mergeCeilingOverrides({ ...overrides, ...(qaOverrides || {}) }, extra), computerExtra?.overrides), { policy, shellOff: Boolean(extra) && ceiling?.terminal === 'none', beforeResume: assertWorkspaceCurrent })
         if (!bounded) context.ceilingNotices.push(...ceilingReportNotices(ceiling, await verifyCeilingNativeThread(this.request, ceiling, resumed, cid)))
         if (computerExtra) {
           await this.verifyComputerControl(cid, computerExtra)
@@ -1950,10 +2016,13 @@ export class CodexChatRuntime {
         mergeCeilingOverrides(overrides, computerExtra.overrides)
         if (epoch !== this.epochOf(engine.id)) throw chatError('ACCOUNT_CHANGED', 'Codex account changed', 409)
       }
+      await assertWorkspaceCurrent()
+      assertPreparationActive()
       const result = await engine.startThread(overrides)
       if (epoch !== this.epochOf(engine.id)) throw chatError('ACCOUNT_CHANGED', 'Codex account changed', 409)
       cid = result?.thread?.id
       if (!idText(cid)) throw chatError('INVALID_THREAD_RESPONSE', 'Codex did not return a thread ID', 502)
+      if (workspace && (result.cwd || result.thread?.cwd) !== workspace.absolutePath) throw Object.assign(chatError('PROJECT_WORKSPACE_UNVERIFIED', 'The AI engine did not confirm the associated working folder; no message was sent', 409), { definite: true })
       // Never call a thread one-time when the engine says it saved it.
       if (context.stateless && result.thread.ephemeral === false) throw chatError('STATELESS_UNVERIFIED', 'The AI engine saved this conversation; it was not bound as one-time', 502)
       this.threadEngines.set(cid, engine.id)
@@ -2005,6 +2074,8 @@ export class CodexChatRuntime {
     this.pendingStarts.set(cid, pending)
     let turnStartAttempted = false
     try {
+      await assertWorkspaceCurrent()
+      assertPreparationActive()
       if (this.store && this.engineOwnerHash(engine.id, context.engine.engineProfileId) !== context.ownerHash) throw Object.assign(chatError('ACCOUNT_CHANGED', 'AI engine account changed before dispatch', 409), { definite: true })
       turnStartAttempted = context.turnStartAttempted = true
       const result = await engine.startTurn({
@@ -2019,6 +2090,9 @@ export class CodexChatRuntime {
       })
       if (epoch !== this.epochOf(engine.id)) throw chatError('ACCOUNT_CHANGED', 'Codex account changed', 409)
       context.nativeTurnId = idText(result?.turn?.id)
+      // Update only after an accepted turn, never on a Board switch or while
+      // a previous run is active. Its existing run snapshot keeps its cwd.
+      if (workspace) this.threads.get(cid).cwd = workspace.absolutePath
       if (this.store) {
         try {
           this.store.bindNative({ clientThreadId: context.clientThreadId, conversationId: cid, localRunId: context.localRunId, runId: result?.turn?.id })
@@ -2127,7 +2201,7 @@ export class CodexChatRuntime {
     throw chatError('CONTEXT_HISTORY_UNVERIFIED', 'Stored Context history could not be completely verified; no conversation was resumed', 409)
   }
 
-  async restoreThread(cid, clientThreadId, overrides = {}, { policy = null, shellOff = false } = {}) {
+  async restoreThread(cid, clientThreadId, overrides = {}, { policy = null, shellOff = false, beforeResume = null } = {}) {
     const engineId = this.threadEngine(cid)
     const epoch = this.epochOf(engineId)
     const contextAuthority = this.scopedContextAuthority({ engineId, clientThreadId, conversationId: cid })
@@ -2155,6 +2229,7 @@ export class CodexChatRuntime {
         await this.restoreClaudeContext(cid, clientThreadId, contextAuthority)
       }
       // Never fall back to thread/start if a historical ID is invalid or unavailable.
+      if (beforeResume) await beforeResume()
       const result = await this.engineOf(cid).resumeThread({ threadId: cid, ...resumeOverrides, ...(policy ? {} : { config: ordinaryThreadConfig(overrides.config) }) })
       if (epoch !== this.epochOf(engineId)) throw chatError('CONTEXT_CHANGED', 'Codex connection or account changed', 409)
       if (result?.thread?.id !== cid) throw chatError('THREAD_MISMATCH', 'Codex resumed a different thread', 502)

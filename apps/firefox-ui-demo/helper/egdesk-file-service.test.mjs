@@ -144,6 +144,7 @@ test('capture source resolves exact edited working-copy bytes without reading th
   assert.equal(captured.name, 'data.json')
   assert.equal(captured.sha256, createHash('sha256').update(captured.bytes).digest('hex'))
   assert.deepEqual(captured.captureRef, ref)
+  assert.deepEqual(captured.location, { rootId: rootHandle.rootId, relativePath: 'data.json' })
   assert.equal(await fs.readFile(original, 'utf8'), '{"version":1}\n')
   await fs.rm(original)
   assert.deepEqual((await service.resolveCaptureSource(ref)).bytes, captured.bytes)
@@ -153,6 +154,28 @@ test('capture source resolves exact edited working-copy bytes without reading th
   const next = await service.updateDraft({ draftId: edited.id, expectedHead: edited.head, text: '{"version":3}\n', operationId: 'edit-v3' })
   await assert.rejects(service.resolveCaptureSource(ref), { code: 'CAPTURE_STALE' })
   assert.deepEqual((await service.resolveCaptureSource({ ...ref, head: next.head, revision: next.bufferRevision })).bytes, Buffer.from('{"version":3}\n'))
+})
+
+test('capture source location follows the registered file resource and is absent for a disconnected working copy', async t => {
+  const { root, store, service, rootHandle } = await fixture(t, { gitReview: null })
+  await fs.mkdir(path.join(root, 'notes'))
+  const original = path.join(root, 'notes', '한글.md')
+  await fs.writeFile(original, 'immutable working copy')
+  const found = await service.search({ rootId: rootHandle.rootId, query: '한글' })
+  const opened = await service.createDraft({ fileId: found.matches[0].id })
+  const ref = { fileId: opened.fileId, draftId: opened.id, head: opened.head, revision: opened.bufferRevision }
+  // A draft's retained rootId is not a grant to invent a connected location.
+  store.records.get(opened.id).rootId = 'stale-draft-root'
+  const captured = await service.resolveCaptureSource(ref)
+  assert.deepEqual(captured.location, { rootId: rootHandle.rootId, relativePath: 'notes/한글.md' })
+  await fs.rm(original)
+  assert.deepEqual((await service.resolveCaptureSource(ref)).location, captured.location)
+  const reopened = createEGDeskFileService({ draftStore: store })
+  const disconnected = await reopened.resolveCaptureSource(ref)
+  assert.equal(disconnected.location, undefined)
+  assert.deepEqual(disconnected.bytes, captured.bytes)
+  assert.equal(disconnected.sha256, captured.sha256)
+  assert.ok(!JSON.stringify(disconnected).includes(root))
 })
 
 test('Save As delegates to the native provider contract and a collision retains the draft', async t => {

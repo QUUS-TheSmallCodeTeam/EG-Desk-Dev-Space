@@ -128,6 +128,47 @@ test('bridge registers Codex and Claude, authenticates the stored engine before 
   assert.ok(at('provider: PROVIDER_ID,\n      appServerReady,') < at('engines: engineRegistry.publicEngines(),'))
 })
 
+test('static bridge wiring: project lookup stays in the local file mount and context services attach after workflow construction', async () => {
+  // Read only: importing the entrypoint would start real servers and engines.
+  const source = await readFile(new URL('./codex-bridge-server.mjs', import.meta.url), 'utf8')
+  const at = text => { const index = source.indexOf(text); assert.notEqual(index, -1, `missing server marker: ${text}`); return index }
+  const mount = at('const localFiles = createEGDeskFileMount({')
+  assert.ok(at('let contexts = null') < mount)
+  assert.ok(at('const pendingFileRoots = new Map()') < mount)
+  const roots = source.slice(mount, at('const contextStore = new ImmutableContextStore({'))
+  assert.match(roots, /if \(!acceptingFileRoots\) return/)
+  assert.match(roots, /if \(!contexts \|\| !workflow\) pendingFileRoots\.set\(root\.rootId, root\)/)
+  assert.match(roots, /contexts\?\.noteRoot\(root\)/)
+  assert.match(roots, /workflow\?\.watchRoot\(root\)/)
+  assert.doesNotMatch(roots, /ownerScope|publicAuthIdentityKey|authState/)
+  const replayContexts = at('for (const root of pendingFileRoots.values()) contexts.noteRoot(root)')
+  assert.ok(at('contexts = new ContextRuntime({') < replayContexts)
+  assert.ok(replayContexts < at('const chat = new CodexChatRuntime({'))
+  const chat = source.slice(at('const chat = new CodexChatRuntime({'), at('claudeEngine.subscribe({'))
+  assert.match(chat, /resolveProjectWorkspace: request => localFiles\.resolveProjectWorkspace\(request\),/)
+  assert.doesNotMatch(chat, /resolveProjectWorkspace[^\n]*(?:ownerKey|ownerScope|absolutePath|allowedRoots)/)
+  const attach = at('const detachContextServices = contexts.attachServices({ bus: workflow.bus, settings: bridgeSettings.contextSuggest, boards: deskStore })')
+  assert.ok(at('workflow = await openWorkflowRuntime({') < attach)
+  const replayWorkflow = at('for (const root of pendingFileRoots.values()) workflow.watchRoot(root)')
+  assert.ok(attach < replayWorkflow)
+  assert.ok(replayWorkflow < source.indexOf('pendingFileRoots.clear()', replayWorkflow))
+  for (const block of [
+    source.slice(at('async function shutdown() {'), at("process.on('SIGINT', shutdown)")),
+    source.slice(at("process.on('exit', () => {")),
+  ]) {
+    assert.ok(block.indexOf('acceptingFileRoots = false') < block.indexOf('detachContextServices()'))
+    assert.ok(block.indexOf('detachContextServices()') < block.indexOf('workflow?.'))
+  }
+})
+
+test('static bridge wiring: strict Claude Reader capacity and isolation stay unknown and cannot activate production reading', async () => {
+  const source = await readFile(new URL('./codex-bridge-server.mjs', import.meta.url), 'utf8')
+  assert.match(source, /const getClaudeReadCapacity = \(\) => null/)
+  assert.match(source, /const getClaudeReaderIsolationProof = \(\) => null/)
+  assert.match(source, /if \(!getClaudeReadCapacity\(options\)\) return \{ ready: false, engineId: 'claude', code: 'ENGINE_CAPACITY_UNKNOWN' \}/)
+  assert.match(source, /if \(!getClaudeReadCapacity\(options\)\) throw chatError\('ENGINE_CAPACITY_UNKNOWN'/)
+})
+
 test('engine rows publish models only through the allow-list, in order, and never an empty or invented list', () => {
   const row = publicEngineRow({
     id: 'codex', status: 'ready',

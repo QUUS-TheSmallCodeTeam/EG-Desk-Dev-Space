@@ -213,7 +213,11 @@ test('the bridge opens the workflow runtime after Chat, mounts its routes behind
   const source = await readFile(new URL('./codex-bridge-server.mjs', import.meta.url), 'utf8')
   const at = text => { const index = source.indexOf(text); assert.notEqual(index, -1, `missing server marker: ${text}`); return index }
   at("import { openWorkflowRuntime } from './egdesk-workflow-runtime.mjs'")
-  assert.ok(at('let workflow = null') < at('const localFiles = createEGDeskFileMount({ dataDir, port: BRIDGE_PORT, onRootRegistered: root => workflow?.watchRoot(root) })'))
+  const files = at('const localFiles = createEGDeskFileMount({ dataDir, port: BRIDGE_PORT, onRootRegistered: root => {')
+  assert.ok(at('let workflow = null') < files)
+  const rootCallback = source.slice(files, at('const contextStore = new ImmutableContextStore({'))
+  assert.match(rootCallback, /contexts\?\.noteRoot\(root\)/)
+  assert.match(rootCallback, /workflow\?\.watchRoot\(root\)/)
   assert.ok(at('let workflow = null') < at('const chat = new CodexChatRuntime({'))
   assert.ok(at('  profiles: profileStore,') > at('const chat = new CodexChatRuntime({'))
   at('  emit: event => { broadcast(event, 2); workflow?.onChatEvent(event) },')

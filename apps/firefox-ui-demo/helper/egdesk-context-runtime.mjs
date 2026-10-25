@@ -3,6 +3,7 @@ import path from 'node:path'
 import { chatError, publicText } from './codex-chat-values.mjs'
 import { SmartReadEngine, estimateTokens, readAdmission, strictReadAdmission } from './egdesk-smart-read.mjs'
 import { hashContent } from './egdesk-context-store.mjs'
+import { relativeRootPath } from './egdesk-event-bus.mjs'
 import { CONTEXT_SUGGEST_DEFAULT, RESOLVER_LIMITS, normalizeContextSuggest, resolveContext, resolverRecord, validateResolverChoice, validateResolverRequest } from './egdesk-context-resolver.mjs'
 
 // Suggestions live only in memory until a send names one; nothing is written
@@ -135,6 +136,7 @@ export class ContextRuntime {
     // CTX-04 tracking: captured-not-yet-sent sources, then per conversation.
     this.pendingSources = new Map() // sourceId -> { ownerKey, entry }
     this.trackedSources = new Map() // conversationId -> { ownerKey, sources: Map<sourceId, entry> }
+    this.sourceChangeVersion = 0
     this.roots = new Map() // connected rootId -> absolute folder (noteRoot)
     this.rootPath = null
     this.detachServices = null
@@ -251,20 +253,43 @@ export class ContextRuntime {
    * boards: an object with searchBoards({ query, limit }) (egdesk-desk-store.mjs).
    * rootPath(rootId): absolute folder of a connected root, when the caller has
    *   it; otherwise roots given to noteRoot() are used.
-   * Fields left undefined keep what was attached before. Returns detach().
+   * Fields left undefined keep what was attached before. Returns an idempotent
+   * unsubscribe for this connection only (not a later replacement). Call it
+   * before closing the workflow bus. bus:null explicitly disconnects it.
    */
   attachServices({ bus, owner = SOURCE_EVENT_OWNER, settings, boards, rootPath } = {}) {
+    if (bus != null && typeof bus.subscribe !== 'function' ||
+        settings != null && (typeof settings.save !== 'function' || !('value' in Object(settings))) ||
+        boards != null && typeof boards.searchBoards !== 'function' ||
+        rootPath != null && typeof rootPath !== 'function') reject('CONTEXT_SERVICE_INVALID', 'Context service adapters do not match the bridge contract', 500)
     if (bus !== undefined) {
-      this.detachServices?.()
-      const unsubscribe = bus && typeof bus.subscribe === 'function'
-        ? bus.subscribe({ owner, topics: SOURCE_EVENT_TOPICS }, event => { this.noteSourceEvent(event) })
-        : null
-      this.detachServices = () => { try { unsubscribe?.() } catch {} this.detachServices = null }
+      let active = false, unsubscribe = null
+      if (bus !== null) {
+        try { unsubscribe = bus.subscribe({ owner, topics: [...SOURCE_EVENT_TOPICS] }, event => active ? this.noteSourceEvent(event) : 0) }
+        catch { reject('CONTEXT_SERVICE_UNAVAILABLE', 'Context source-change subscription could not be attached', 503) }
+        if (typeof unsubscribe !== 'function') reject('CONTEXT_SERVICE_INVALID', 'Context source-change subscription requires an unsubscribe function', 500)
+      }
+      // A failed replacement leaves the previous subscription intact. Late
+      // callbacks from a detached subscription are inert even on a fake bus.
+      try { this.detachServices?.() }
+      catch {
+        try { unsubscribe?.() } catch {}
+        reject('CONTEXT_SERVICE_UNAVAILABLE', 'Previous context source-change subscription could not be detached', 503)
+      }
+      active = true
+      const detach = () => {
+        if (!active) return
+        active = false
+        try { unsubscribe?.() }
+        catch { reject('CONTEXT_SERVICE_UNAVAILABLE', 'Context source-change subscription could not be detached', 503) }
+        finally { if (this.detachServices === detach) this.detachServices = null }
+      }
+      this.detachServices = detach
     }
     if (settings !== undefined) { this.suggestSettings = settings; this.suggestApplied = null; this.suggestPersisted = null }
-    if (boards !== undefined) this.boards = boards
+    if (boards !== undefined && boards !== this.boards) { this.boards = boards; this.resolutions.clear() }
     if (rootPath !== undefined) this.rootPath = typeof rootPath === 'function' ? rootPath : null
-    return () => this.detachServices?.()
+    return this.detachServices || (() => {})
   }
 
   // A connected folder (egdesk-file-service onRootRegistered {rootId, absolutePath}).
@@ -325,7 +350,7 @@ export class ContextRuntime {
     if (!payload) return 0
     let matches, reason
     if (event.topic === 'file.changed') {
-      if (typeof payload.rootId !== 'string' || typeof payload.relativePath !== 'string') return 0
+      if (typeof payload.rootId !== 'string' || !payload.rootId || !relativeRootPath(payload.relativePath)) return 0
       const root = this.rootPathOf(payload.rootId)
       const absolute = root ? path.join(root, ...payload.relativePath.split('/')) : null
       reason = 'fileChanged'
@@ -339,10 +364,11 @@ export class ContextRuntime {
         !(entry.web && entry.web.origin === payload.origin && entry.web.path === payload.path)
     } else return 0
     const at = this.now()
+    const changeVersion = ++this.sourceChangeVersion
     let count = 0
     for (const entry of this.allTrackedSources()) if (matches(entry)) {
       // A new change after the note re-arms it: the next message hears again.
-      Object.assign(entry, { state: 'stale', reason, changedAt: at, announcedAt: null })
+      Object.assign(entry, { state: 'stale', reason, changedAt: at, changeVersion, announcedAt: null })
       count += 1
     }
     return count
@@ -366,7 +392,7 @@ export class ContextRuntime {
       .filter(entry => entry.state === 'stale')
       .sort((a, b) => a.changedAt - b.changedAt || (a.sourceId < b.sourceId ? -1 : 1))
       .slice(0, SOURCE_TRACKING_LIMITS.changeNote)
-      .map(entry => ({ sourceId: entry.sourceId, kind: entry.kind, reason: entry.reason, changedAt: entry.changedAt }))
+      .map(entry => ({ sourceId: entry.sourceId, kind: entry.kind, reason: entry.reason, changedAt: entry.changedAt, changeVersion: entry.changeVersion }))
   }
 
   announceChanges(run, prepared) {
@@ -377,15 +403,16 @@ export class ContextRuntime {
     const at = this.now()
     for (const change of prepared.changes) {
       const entry = tracked.sources.get(change.sourceId)
-      if (entry && entry.state === 'stale') entry.announcedAt = at
+      if (entry && entry.state === 'stale' && entry.changeVersion === change.changeVersion) entry.announcedAt = at
     }
-    this.runtime.emit(run, 'context.sources.changed', { sources: prepared.changes.map(change => ({ ...change })) })
+    this.runtime.emit(run, 'context.sources.changed', { sources: prepared.changes.map(({ sourceId, kind, reason, changedAt }) => ({ sourceId, kind, reason, changedAt })) })
   }
 
   // GET /context/sources?conversationId= : what the attachment chips show.
   sourceStatus({ conversationId } = {}, authority = this.authority()) {
     const cid = conversationOf(conversationId)
     if (!cid) reject('INVALID_CONTEXT_QUERY', 'conversationId is required', 400)
+    if (authority.conversationId && authority.conversationId !== cid) reject('CONTEXT_THREAD_MISMATCH', 'Source status belongs to another conversation', 403)
     const ownerKey = this.owner(authority)
     const tracked = this.trackedSources.get(trackingKey(ownerKey, cid))
     const sources = tracked && tracked.ownerKey === ownerKey ? [...tracked.sources.values()].map(publicSource) : []
@@ -403,15 +430,17 @@ export class ContextRuntime {
   // ── D-R2 suggestion settings ──
   suggestValue() {
     if (this.suggestApplied) return this.suggestApplied
+    if (!this.suggestSettings) return CONTEXT_SUGGEST_DEFAULT
     try {
-      const saved = this.suggestSettings?.value
-      return saved && saved !== CONTEXT_SUGGEST_DEFAULT ? normalizeContextSuggest(saved) : CONTEXT_SUGGEST_DEFAULT
-    } catch { return CONTEXT_SUGGEST_DEFAULT }
+      return normalizeContextSuggest(this.suggestSettings.value)
+    } catch { reject('CONTEXT_SETTINGS_UNAVAILABLE', 'Context suggestion settings could not be read', 503) }
   }
 
   suggestSnapshot() {
     const value = this.suggestValue()
-    const persisted = this.suggestPersisted ?? (this.suggestSettings ? this.suggestSettings.persisted === true : false)
+    let persisted
+    try { persisted = this.suggestPersisted ?? (this.suggestSettings ? this.suggestSettings.persisted === true : false) }
+    catch { reject('CONTEXT_SETTINGS_UNAVAILABLE', 'Context suggestion settings could not be read', 503) }
     return { mode: value.mode, neverSuggest: value.neverSuggest.map(entry => ({ ...entry })), persisted }
   }
 
@@ -438,11 +467,15 @@ export class ContextRuntime {
     const words = query.split(' ').filter(Boolean)
     const found = new Map()
     for (const word of words) {
-      let rows = null
-      try { rows = boards.searchBoards({ query: word, limit: BOARD_SEARCH_ROWS })?.boards } catch { rows = null }
-      if (!Array.isArray(rows)) continue
+      let rows
+      try { rows = boards.searchBoards({ query: word, limit: BOARD_SEARCH_ROWS })?.boards }
+      catch { reject('CONTEXT_BOARD_SEARCH_UNAVAILABLE', 'Saved Board suggestions could not be searched; retry when the Board service is available', 503) }
+      if (!Array.isArray(rows)) reject('CONTEXT_BOARD_SEARCH_UNAVAILABLE', 'Saved Board search returned an invalid result', 503)
+      const seen = new Set()
       rows.forEach((row, index) => {
-        if (!row || typeof row.boardId !== 'string' || (row.lifecycle !== undefined && row.lifecycle !== 'active')) return
+        if (!row || typeof row.boardId !== 'string') reject('CONTEXT_BOARD_SEARCH_UNAVAILABLE', 'Saved Board search returned an invalid result', 503)
+        if (seen.has(row.boardId) || row.lifecycle !== undefined && row.lifecycle !== 'active') return
+        seen.add(row.boardId)
         const hit = found.get(row.boardId) || { boardId: row.boardId, hits: 0, best: Infinity, first: found.size }
         hit.hits += 1
         hit.best = Math.min(hit.best, index)
@@ -508,16 +541,21 @@ export class ContextRuntime {
     const implicit = suggest.mode === 'always' || (suggest.mode === 'firstMessage' && signals.firstMessage === true)
     const matchingBoards = implicit && query ? this.matchingBoards(query) : []
     const resolution = resolveContext(signals, { now, suggest, matchingBoards })
+    this.assertAuthority(authority)
     const resolutionId = randomUUID()
-    this.resolutions.set(resolutionId, { ownerKey, resolution, expiresAt: now + RESOLUTION_TTL_MS })
+    this.resolutions.set(resolutionId, { ownerKey, authority, resolution, expiresAt: now + RESOLUTION_TTL_MS })
     while (this.resolutions.size > MAX_RESOLUTIONS) this.resolutions.delete(this.resolutions.keys().next().value)
     return { resolutionId, ...resolution }
   }
 
-  resolution(choice, ownerKey) {
+  resolution(choice, ownerKey, authority, route = {}) {
     const saved = this.resolutions.get(choice.resolutionId)
     if (!saved || saved.expiresAt <= this.now()) reject('RESOLUTION_EXPIRED', 'These context suggestions expired; ask for suggestions again', 409)
     if (saved.ownerKey !== ownerKey) reject('ACCOUNT_CHANGED', 'Context suggestions belong to another account', 403)
+    if (saved.authority && authority && !sameAuthority(saved.authority, authority)) reject('ACCOUNT_CHANGED', 'Context suggestions belong to another connection', 403)
+    for (const key of ['clientThreadId', 'conversationId']) {
+      if (saved.authority?.[key] && saved.authority[key] !== (authority?.[key] || route[key])) reject('CONTEXT_THREAD_MISMATCH', 'Context suggestions belong to another conversation; request suggestions in this room', 403)
+    }
     for (const ref of choice.chosen) {
       const candidate = saved.resolution.candidates.find(item => item.ref === ref)
       if (!candidate) reject('RESOLVER_CHOICE_UNKNOWN', 'A chosen item was not among the suggestions', 400)
@@ -545,7 +583,7 @@ export class ContextRuntime {
     if (authority.engineId === 'claude' && caps.reader && !readerReadiness.ready) reject(readerReadiness.code, 'The selected Claude Reader is not verified ready; the draft was not sent', 409)
     if (authority.engineId === 'claude' && (caps.publishBriefing || choice)) reject('CONTEXT_TOOL_UNSUPPORTED', 'Claude B2 supports explicit selected immutable sources only', 409)
     const ownerKey = this.owner(authority)
-    const resolution = choice ? this.resolution(choice, ownerKey) : null
+    const resolution = choice ? this.resolution(choice, ownerKey, authority, { ...body, clientThreadId: body.clientThreadId || body.thread?.id }) : null
     const allowRead = authority.engineId === 'claude' ? Boolean(ids.length || body.attachments?.length) : caps.read === true
     if (body.attachments?.length && !allowRead) reject('CONTEXT_PERMISSION_REQUIRED', 'Attaching sources requires explicit read capability', 403)
     const clientThreadId = authority.clientThreadId || body.clientThreadId || body.thread?.id

@@ -12,6 +12,8 @@ import { ImmutableContextStore } from './egdesk-context-store.mjs'
 import { ContextRuntime } from './egdesk-context-runtime.mjs'
 import { createContextHttpHandler } from './egdesk-context-http.mjs'
 import { CodexChatRuntime } from './codex-chat-runtime.mjs'
+import { openBridgeSettings } from './egdesk-bridge-settings.mjs'
+import { openDeskStore } from './egdesk-desk-store.mjs'
 
 const NOW = 1_800_000_000_000
 const resolve = (signals, now = NOW) => resolveContext(validateResolverSignals(signals), { now })
@@ -426,9 +428,12 @@ test('runtime: Board search runs per typed word, the words are not kept, and set
   let saved = null
   const settings = { get value() { return saved ?? CONTEXT_SUGGEST_DEFAULT }, get persisted() { return true }, save(value) { saved = value; return true } }
   h.contexts.attachServices({ boards, settings })
-  const resolved = h.contexts.resolve({ visible: [{ kind: 'browser', ref: 'egd-mail', focused: true, site: 'mail.example.com' }], query: '분기 매출 실패' })
-  assert.deepEqual(searched.map(s => s.query), ['분기', '매출', '실패'])
-  assert.deepEqual(resolved.candidates.map(c => [c.ref, c.kind]), [['egd-mail', 'browser'], ['board-sales', 'board']], 'two words must match; archived Boards are skipped; a failing search is ignored')
+  const resolved = h.contexts.resolve({ visible: [{ kind: 'browser', ref: 'egd-mail', focused: true, site: 'mail.example.com' }], query: '분기 매출' })
+  assert.deepEqual(searched.map(s => s.query), ['분기', '매출'])
+  assert.deepEqual(resolved.candidates.map(c => [c.ref, c.kind]), [['egd-mail', 'browser'], ['board-sales', 'board']], 'two words must match; archived Boards are skipped')
+  const beforeFailure = h.contexts.resolutions.size
+  assert.throws(() => h.contexts.resolve({ query: '분기 매출 실패' }), { code: 'CONTEXT_BOARD_SEARCH_UNAVAILABLE' })
+  assert.equal(h.contexts.resolutions.size, beforeFailure, 'a partial failed search is not saved as a successful resolution')
   const kept = JSON.stringify([...h.contexts.resolutions.values()])
   for (const text of ['분기', '매출', 'Title', 'secret snippet']) assert.ok(!kept.includes(text), text)
   assert.equal(resolved.signalsDigest, h.contexts.resolve({ visible: [{ kind: 'browser', ref: 'egd-mail', focused: true, site: 'mail.example.com' }] }).signalsDigest)
@@ -476,4 +481,104 @@ test('HTTP: suggestion settings are loopback-guarded, validated and read back; r
   assert.equal(resolved.status, 200)
   assert.deepEqual(resolved.body.suggest, { mode: 'firstMessage', omittedByMode: 0, omittedByUser: 0 })
   assert.equal((await call(handler, 'POST', '/context/resolve', { query: { text: 'x' } })).status, 400)
+})
+
+test('actual Board and settings services keep choices room/account scoped and settings survive reopen without dispatch', async t => {
+  const h = await harness(t)
+  const board = (id, title) => ({ version: 1, savedAt: NOW, agenda: { id, title, memberCardIds: [], contextBindings: [] }, cards: [], shapes: [] })
+  const deskA = openDeskStore({ dataDir: path.join(h.dir, 'desks'), ownerScope: 'desk-owner-a' })
+  const deskB = openDeskStore({ dataDir: path.join(h.dir, 'desks'), ownerScope: 'desk-owner-b' })
+  t.after(() => { deskA.close(); deskB.close() })
+  deskA.saveBoard('board-a', { body: board('board-a', '분기 매출 A'), expectedRevision: null })
+  deskB.saveBoard('board-b', { body: board('board-b', '분기 매출 B'), expectedRevision: null })
+  const settingsDir = path.join(h.dir, 'settings')
+  const settings = openBridgeSettings({ dataDir: settingsDir, log: () => {} })
+  h.contexts.attachServices({ boards: deskA, settings: settings.contextSuggest })
+  const handler = createContextHttpHandler(h.contexts, async () => {})
+  const room = { clientThreadId: 'ui-room-a', conversationId: 'native-room-a' }
+  const response = await call(handler, 'POST', '/context/resolve', { ...room, query: '분기 매출' })
+  assert.equal(response.status, 200)
+  assert.deepEqual(response.body.candidates.map(item => [item.ref, item.kind, item.reasons]), [['board-a', 'board', ['matchingBoard']]])
+  assert.ok(!JSON.stringify(response.body).includes('분기'))
+  const choice = { resolutionId: response.body.resolutionId, chosen: ['board-a'] }
+  const attachment = { id: 'picked-board', kind: 'board', sourceRef: { viewId: 'board-a' }, captureScope: { type: 'board-selection' }, content: { text: 'Explicitly selected Board bytes', mime: 'text/plain', truncated: false } }
+  const prepare = extra => h.contexts.prepare({ ...room, contextCapabilities: { read: true }, contextResolution: choice, ...extra })
+  await assert.rejects(prepare({ clientThreadId: 'ui-room-b', attachments: [attachment] }), { code: 'CONTEXT_THREAD_MISMATCH' })
+  await assert.rejects(prepare({ conversationId: 'native-room-b', attachments: [attachment] }), { code: 'CONTEXT_THREAD_MISMATCH' })
+  h.setOwner('email:b@example.com')
+  await assert.rejects(prepare({ attachments: [attachment] }), { code: 'ACCOUNT_CHANGED' })
+  h.setOwner('email:a@example.com')
+  await assert.rejects(prepare({}), { code: 'RESOLVER_CHOICE_UNCAPTURED' })
+  assert.deepEqual(await h.kinds('sources'), [], 'suggestion and rejected room choices cannot capture a Board')
+  assert.deepEqual(await h.kinds('bindings'), [])
+  assert.equal(h.calls.length, 0)
+  assert.equal(h.chat.runs.size, 0)
+  const capture = (await h.contexts.capture({ clientThreadId: room.clientThreadId, attachments: [attachment] })).captures[0]
+  await assert.rejects(prepare({ contextSnapshotIds: [capture.sourceId], contextCapabilities: {} }), { code: 'CONTEXT_PERMISSION_REQUIRED' })
+  const prepared = await prepare({ contextSnapshotIds: [capture.sourceId] })
+  assert.deepEqual(prepared.sourceIds, [capture.sourceId])
+  assert.equal(prepared.resolver.candidates[0].sourceId, capture.sourceId)
+  assert.deepEqual(await h.kinds('bindings'), [], 'preparing an explicit choice is not binding or dispatch')
+  // Replacing the scoped local store invalidates old suggestion handles.
+  h.contexts.attachServices({ boards: deskB })
+  await assert.rejects(prepare({ contextSnapshotIds: [capture.sourceId] }), { code: 'RESOLUTION_EXPIRED' })
+  assert.deepEqual(h.contexts.resolve({ query: '분기 매출' }).candidates.map(item => item.ref), ['board-b'])
+  const saved = await call(handler, 'POST', '/context/suggest-settings', { mode: 'firstMessage', neverSuggest: [{ kind: 'site', host: 'Bank.Example' }, { kind: 'folder', path: h.cwd }] })
+  assert.equal(saved.status, 200)
+  assert.equal(saved.body.persisted, true)
+  const reopened = openBridgeSettings({ dataDir: settingsDir, log: () => {} })
+  const restored = new ContextRuntime({ store: h.store, getOwnerKey: () => 'email:a@example.com', now: () => NOW })
+  restored.attachServices({ boards: deskA, settings: reopened.contextSuggest })
+  assert.deepEqual(restored.suggestSnapshot(), saved.body)
+  assert.deepEqual(restored.resolve({ query: '분기 매출' }).candidates, [], 'firstMessage remains off for later messages after reopen')
+  assert.deepEqual(restored.resolve({ query: '분기 매출', firstMessage: true }).candidates.map(item => item.ref), ['board-a'])
+  assert.equal(restored.resolve({ firstMessage: true, visible: [{ kind: 'browser', ref: 'bank', focused: true, site: 'bank.example' }] }).suggest.omittedByUser, 1)
+  assert.equal(h.calls.length, 0)
+  assert.equal(h.chat.runs.size, 0)
+  assert.deepEqual(await h.kinds('packets'), [])
+  assert.deepEqual(await h.kinds('deliveries'), [])
+  deskA.close()
+  const failed = await call(createContextHttpHandler(restored, async () => {}), 'POST', '/context/resolve', { firstMessage: true, query: '분기 매출' })
+  assert.equal(failed.status, 503)
+  assert.equal(failed.body.code, 'CONTEXT_BOARD_SEARCH_UNAVAILABLE')
+  assert.equal(failed.body.candidates, undefined, 'closed services are not reported as valid empty context')
+})
+
+test('Board search and settings failures are explicit HTTP errors, never successful empty/default context', async t => {
+  const h = await harness(t)
+  const handler = createContextHttpHandler(h.contexts, async () => {})
+  for (const searchBoards of [() => { throw new Error('private path and query') }, () => undefined, () => ({ boards: null }), () => ({ boards: [null] })]) {
+    h.contexts.attachServices({ boards: { searchBoards } })
+    const result = await call(handler, 'POST', '/context/resolve', { query: '보고서' })
+    assert.equal(result.status, 503)
+    assert.equal(result.body.code, 'CONTEXT_BOARD_SEARCH_UNAVAILABLE')
+    assert.equal(result.body.resolutionId, undefined)
+    assert.ok(!JSON.stringify(result.body).includes('private'))
+    assert.equal(h.contexts.resolutions.size, 0)
+  }
+  h.contexts.attachServices({ boards: null, settings: { get value() { throw new Error('private settings filename') }, save: () => true } })
+  for (const [method, url, body] of [['GET', '/context/suggest-settings'], ['POST', '/context/resolve', {}], ['POST', '/context/suggest-settings', { mode: 'off' }]]) {
+    const result = await call(handler, method, url, body)
+    assert.equal(result.status, 503)
+    assert.equal(result.body.code, 'CONTEXT_SETTINGS_UNAVAILABLE')
+    assert.ok(!JSON.stringify(result.body).includes('private'))
+  }
+  h.contexts.attachServices({ settings: { value: { mode: 'bad', neverSuggest: [] }, save: () => true } })
+  assert.equal((await call(handler, 'GET', '/context/suggest-settings')).status, 503)
+  h.contexts.attachServices({ settings: null })
+  assert.deepEqual(h.contexts.suggestSnapshot(), { mode: 'always', neverSuggest: [], persisted: false }, 'an absent optional adapter keeps the original default')
+  assert.equal(h.calls.length, 0)
+  assert.equal(h.chat.runs.size, 0)
+  assert.deepEqual(await h.kinds('sources'), [])
+  assert.deepEqual(await h.kinds('bindings'), [])
+})
+
+test('Board search counts each word once and cannot keep a resolution across an account change during search', async t => {
+  const h = await harness(t)
+  h.contexts.attachServices({ boards: { searchBoards({ query }) { return { boards: query === '분기' ? [{ boardId: 'only-one-word' }, { boardId: 'only-one-word' }] : [] } } } })
+  assert.deepEqual(h.contexts.resolve({ query: '분기 매출' }).candidates, [])
+  h.contexts.attachServices({ boards: { searchBoards() { h.setOwner('email:changed@example.com'); return { boards: [{ boardId: 'old-account' }] } } } })
+  assert.throws(() => h.contexts.resolve({ query: '분기' }), { code: 'ACCOUNT_CHANGED' })
+  assert.equal(h.contexts.resolutions.size, 0)
+  assert.equal(h.calls.length, 0)
 })

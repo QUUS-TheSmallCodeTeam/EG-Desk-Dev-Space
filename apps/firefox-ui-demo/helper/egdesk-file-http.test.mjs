@@ -6,6 +6,8 @@ import path from 'node:path'
 import { Readable } from 'node:stream'
 import { createHash } from 'node:crypto'
 import { createEGDeskFileHttpAdapter, EGDESK_FILE_ENDPOINTS, handleEGDeskFiles } from './egdesk-file-http.mjs'
+import { createEGDeskFileMount } from './egdesk-file-mount.mjs'
+import { CodexChatRuntime } from './codex-chat-runtime.mjs'
 import { createEGDeskNativeCreateOnlyAdapter } from './egdesk-file-native.mjs'
 import { createEGDeskFileServiceCallbacks, createEGDeskNativeFilePickers, EGDESK_FILE_CLIENT_ENDPOINTS } from '../overlay/resources/EGDeskFileView.sys.mjs'
 import { execFileSync } from 'node:child_process'
@@ -447,6 +449,81 @@ test('Board project: attach by picker selection only, rooms inherit or own a fol
   assert.deepEqual((await call('attachProject', { boardId: 'board-1', selectionId: 'cancel' })).body.result, { cancelled: true })
   assert.equal((await call('detachProject', { boardId: 'board-1' })).body.result.removed, true)
   assert.deepEqual((await call('openProject', { boardId: 'board-1' })).body.result, { project: null, source: null })
+})
+
+test('project workspace mount fixes local file owner and forwards only Board/room IDs to the server resolver', async () => {
+  const scopes = []
+  const connected = { projectId: 'project-one', rootId: 'root-one', source: 'board', status: 'connected', absolutePath: '/verified/project' }
+  let current = connected
+  const mount = createEGDeskFileMount({ dataDir: path.join(os.tmpdir(), 'unused-project-mount'),
+    createNativeAdapter: () => ({ capability: 'unavailable' }),
+    createHttpAdapter: options => {
+      assert.equal(options.localOwnerScope, 'egdesk-local')
+      return { resolveProjectWorkspace: async scope => { scopes.push(scope); return current }, close: async () => {} }
+    },
+  })
+  assert.equal(await mount.resolveProjectWorkspace({ boardId: 'board-1', roomId: 'room-1', ownerScope: 'ai-account', owner: 'ai-account', absolutePath: '/ui-path' }), connected)
+  assert.deepEqual(scopes[0], { ownerScope: 'egdesk-local', boardId: 'board-1', roomId: 'room-1' })
+  current = null
+  assert.equal(await mount.resolveProjectWorkspace(), null)
+  assert.deepEqual(scopes[1], { ownerScope: 'egdesk-local', boardId: null, roomId: null })
+  current = { status: 'reconnect-required', projectId: 'project-one', source: 'board', reason: 'identity-changed' }
+  assert.equal(await mount.resolveProjectWorkspace({ boardId: 'board-1' }), current)
+  await mount.close()
+})
+
+test('project workspace chat integration: real room override and Board inheritance reach fake execution; replaced or missing folders block', async t => {
+  const { folders, call, adapter, restart } = await projectFixture(t)
+  await call('attachProject', { boardId: 'board-1', selectionId: 'pick-shop' })
+  await call('attachProject', { boardId: 'board-1', roomId: 'room-own', selectionId: 'pick-blog' })
+  const calls = []
+  let threadCount = 0, turnCount = 0
+  const chat = new CodexChatRuntime({
+    resolveProjectWorkspace: scope => adapter().resolveProjectWorkspace({ ...scope, ownerScope: 'owner-p' }),
+    request: async (method, params) => {
+      calls.push({ method, params })
+      if (method === 'thread/start') return { thread: { id: `native-${++threadCount}` }, cwd: params.cwd || '/legacy-default' }
+      if (method === 'turn/start') return { turn: { id: `turn-${++turnCount}`, status: 'completed', items: [] } }
+      throw new Error(`Unexpected fake call: ${method}`)
+    }, respond: () => {},
+  })
+  chat.setConnection(true)
+  const own = await chat.send({ clientThreadId: 'room-own', message: 'Use direct room project', cwd: '/untrusted-path' })
+  assert.equal(calls.find(entry => entry.method === 'turn/start').params.cwd, folders.blog)
+  await chat.send({ clientThreadId: 'room-inherit', boardId: 'board-1', message: 'Use Board project' })
+  assert.equal(calls.filter(entry => entry.method === 'turn/start').at(-1).params.cwd, folders.shop)
+  await chat.send({ clientThreadId: 'unassociated', message: 'Plain chat' })
+  assert.equal(Object.hasOwn(calls.filter(entry => entry.method === 'turn/start').at(-1).params, 'cwd'), false)
+  // Cached roots must verify the identity too, not just on helper restart.
+  await fs.rename(folders.blog, `${folders.blog}-old`)
+  await fs.mkdir(folders.blog)
+  const beforeReplacement = calls.length
+  await assert.rejects(chat.send({ clientThreadId: 'room-own', conversationId: own.conversationId, message: 'Do not use replacement', cwd: '/fallback' }), { code: 'PROJECT_RECONNECT_REQUIRED' })
+  assert.equal(calls.length, beforeReplacement)
+  await fs.rename(folders.shop, `${folders.shop}-moved`)
+  await restart()
+  await assert.rejects(chat.send({ clientThreadId: 'room-after-restart', boardId: 'board-1', message: 'Do not use missing folder' }), { code: 'PROJECT_RECONNECT_REQUIRED' })
+  assert.equal(calls.length, beforeReplacement)
+  assert.ok(calls.every(entry => !Object.hasOwn(entry.params, 'allowedRoots')))
+})
+
+test('project workspace chat integration: replacement during asynchronous preparation blocks fake execution', async t => {
+  const { folders, call, adapter } = await projectFixture(t)
+  await call('attachProject', { roomId: 'room-1', selectionId: 'pick-shop' })
+  const entered = Promise.withResolvers(), released = Promise.withResolvers(), calls = []
+  const chat = new CodexChatRuntime({
+    resolveProjectWorkspace: scope => adapter().resolveProjectWorkspace({ ...scope, ownerScope: 'owner-p' }),
+    request: async (method, params) => { calls.push({ method, params }); throw new Error('Replaced folder must never reach the engine') }, respond: () => {},
+    toolProviders: [{ providerId: 'project-test', specs: () => [], prepare: async () => { entered.resolve(); await released.promise; return null } }],
+  })
+  chat.setConnection(true)
+  const pending = chat.send({ clientThreadId: 'room-1', message: 'Prepare with selected project' })
+  await entered.promise
+  await fs.rename(folders.shop, `${folders.shop}-old`)
+  await fs.mkdir(folders.shop)
+  released.resolve()
+  await assert.rejects(pending, { code: 'PROJECT_RECONNECT_REQUIRED', definite: true })
+  assert.deepEqual(calls, [])
 })
 
 test('project commands are what the user typed; package.json scripts come back as suggestions only', async t => {
