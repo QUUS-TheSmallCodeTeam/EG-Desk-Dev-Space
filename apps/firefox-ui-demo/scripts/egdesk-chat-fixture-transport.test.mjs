@@ -11,6 +11,7 @@ import { bootstrapQaProfile, canonicalTempRoot, LOADER_FILES } from './egdesk-ch
 import { createQaFixtureTransport, CLAUDE_FIXTURE_QUESTIONS, CLAUDE_FIXTURE_TEXT } from './egdesk-chat-fixture-transport.mjs';
 import { chatRunOutputFixtureIds, CHAT_RUN_OUTPUT_MARKER, CHAT_RUN_DIFF_MARKER } from './egdesk-chat-run-outputs-fixture.mjs';
 import { TASK_GATE_SEED_MESSAGE } from './egdesk-task-gate-fixture.mjs';
+import { CHAT_ORIGIN_FILE_SEED, CHAT_ORIGIN_FILE_TEXT, CHAT_ORIGIN_FILE_OUTPUT } from './egdesk-chat-origin-file-fixture.mjs';
 import { prepareQaFirefox } from './run-firefox-mcp-target.mjs';
 import { assertNativeTerminalExit, assertQaFixtureArtifact } from './egdesk-chat-qa-contract.sys.mjs';
 import { createChatProtocolState, mergeChatSnapshot, projectRunMessages, usableArtifact } from '../overlay/resources/EGDeskChatState.sys.mjs';
@@ -21,7 +22,7 @@ import { assertPublishedBriefing, assertContextCaptureBatch, assertStoredAgentDe
 const TOKEN = 'unit-fixture-token-no-credentials';
 const FIXTURE_ENV = { EGDESK_QA_FIXTURE_TRANSPORT: '1', EGDESK_QA_FIXTURE_PORT: '49318' };
 
-function setup(t, { claude = false, reader = false, projectFile = false, runOutputs = false, portable = false, taskGate = false } = {}) {
+function setup(t, { claude = false, reader = false, projectFile = false, runOutputs = false, portable = false, taskGate = false, originFile = false } = {}) {
   const source = fs.mkdtempSync(path.join(canonicalTempRoot(), 'egdesk-loader-fixture-'));
   for (const name of LOADER_FILES) fs.writeFileSync(path.join(source, name), `unit fixture ${name}\n`);
   const { profile } = bootstrapQaProfile({ loaderSource: source });
@@ -37,7 +38,8 @@ function setup(t, { claude = false, reader = false, projectFile = false, runOutp
   const fixtureEnv = { ...FIXTURE_ENV, ...(projectFile ? { EGDESK_QA_PROJECT_FILE_FIXTURE: '1', EGDESK_QA_REAL_TURN: '0' } : {}),
     ...(runOutputs ? { EGDESK_QA_RUN_OUTPUTS_FIXTURE: '1', EGDESK_QA_REAL_TURN: '0' } : {}),
     ...(portable ? { EGDESK_QA_PORTABLE_TRANSFER_FIXTURE: '1', EGDESK_QA_REAL_TURN: '0' } : {}),
-    ...(taskGate ? { EGDESK_QA_TASK_GATE_FIXTURE: '1', EGDESK_QA_REAL_TURN: '0' } : {}) };
+    ...(taskGate ? { EGDESK_QA_TASK_GATE_FIXTURE: '1', EGDESK_QA_REAL_TURN: '0' } : {}),
+    ...(originFile ? { EGDESK_QA_CHAT_ORIGIN_FILE_FIXTURE: '1', EGDESK_QA_REAL_TURN: '0' } : {}) };
   prepareQaFirefox(profile, { env: fixtureEnv });
   const transport = createQaFixtureTransport({ profile, token: TOKEN,
     env: { ...fixtureEnv, ...(claude ? { EGDESK_QA_CLAUDE_FIXTURE: '1' } : {}),
@@ -72,6 +74,127 @@ const sendRunOutputs = (handler, scenario = 'RUN_OUTPUTS') => request(handler, '
   clientThreadId: `qa-output-${scenario}`, requestId: `qa-output-${scenario}` });
 const outputRoute = (path, run, itemId) => `${path}?${new URLSearchParams({ conversationId: run.conversationId, runId: run.runId,
   ...(itemId === undefined ? {} : { itemId }) })}`;
+
+async function setupOriginMount(t) {
+  const transport = setup(t, { originFile: true });
+  assert.ok(transport.ready instanceof Promise);
+  const headers = { host: '127.0.0.1:49318', 'content-type': 'application/json', origin: 'chrome://browser' };
+  const send = (method, route, body = null, token = null, extra = {}) => request(transport.handler, method, route, body, token, () => {}, { ...headers, ...extra });
+  const initial = await send('GET', '/__qa/state', null, TOKEN); // Handler waits for the async real mount.
+  assert.equal(initial.status, 200); const root = initial.body.chatOriginFile.root;
+  t.after(async () => {
+    await transport.dispose(); assert.equal(path.dirname(root), canonicalTempRoot());
+    assert.equal(fs.realpathSync.native(root), root); assert.ok(path.basename(root).startsWith('egdesk-chat-origin-file-'));
+    fs.rmSync(root, { recursive: true });
+  });
+  const state = async () => (await send('GET', '/__qa/chat-origin-file/state', null, TOKEN)).body;
+  const control = (action, extra = {}) => send('POST', '/__qa/chat-origin-file/control', { action, ...extra }, TOKEN);
+  const seed = async () => {
+    assert.equal((await control('prepare-room', { clientThreadId: 'owned-origin-room' })).status, 200);
+    const room = await send('POST', '/v1/files/projects/room-default', { roomId: 'owned-origin-room' });
+    assert.equal(room.status, 200); const view = room.body.result;
+    const expectedRoomProject = { roomId: view.roomId, status: view.status, source: view.source, boardId: view.inheritance.boardId,
+      projectId: view.project.projectId, rootId: view.project.rootId };
+    return send('POST', '/chat/send', { message: CHAT_ORIGIN_FILE_SEED, clientThreadId: 'owned-origin-room',
+      requestId: 'owned-origin-request', profileEnabled: false, expectedRoomProject });
+  };
+  return { transport, send, state, seed, control, initial: initial.body, headers };
+}
+
+test('Origin async mount owns real Chat and room project reads before every synthetic fallback, no listener/provider', async t => {
+  const fetchSpy = t.mock.method(globalThis, 'fetch', () => assert.fail('No external network'));
+  const listenSpy = t.mock.method(net.Server.prototype, 'listen', () => assert.fail('No listener'));
+  const { transport, send, state, seed, initial } = await setupOriginMount(t);
+  await transport.ready;
+  assert.equal(initial.chatOriginFileFixture, true); assert.equal(initial.providerTurns, 0);
+  assert.deepEqual(initial.chatOriginFile.persisted.origins, []);
+  assert.equal(initial.chatOriginFile.effects.profileCatalogWrites, 1);
+  assert.equal((await send('GET', '/health')).body.ok, true, 'false handle still reaches discovery');
+  const accepted = await seed(); assert.equal(accepted.status, 202); assert.equal(accepted.body.accepted, true);
+  const after = await state(); assert.equal(after.persisted.origins.length, 1);
+  assert.equal(after.original.runId, accepted.body.runId); assert.equal(after.original.clientThreadId, 'owned-origin-room');
+  assert.equal(after.persisted.origins[0].project.startCwd, after.folders.original);
+  const room = (await send('POST', '/v1/files/projects/room-default', { roomId: 'owned-origin-room' })).body.result;
+  assert.equal(room.project.projectId, after.projects.original.projectId, 'not the common canonical empty default');
+  for (const route of ['/chat/state', '/chat/history?clientThreadId=owned-origin-room']) {
+    const response = await send('GET', route); assert.equal(response.status, 200); assert.ok(JSON.stringify(response.body).includes(after.original.runId));
+  }
+  const common = (await send('GET', '/__qa/state', null, TOKEN)).body;
+  assert.deepEqual(common.runs, []); assert.deepEqual(common.observed.sends, []); assert.equal(common.observed.roomDefaultReads, undefined);
+  assert.deepEqual(common.chatOriginFile.fakeRpc.map(row => row.method), ['thread/start', 'turn/start']);
+  assert.equal(fetchSpy.mock.callCount(), 0); assert.equal(listenSpy.mock.callCount(), 0);
+});
+
+test('Origin mount forwards unchanged real SSE, pins HISTORIC output and opens CURRENT through actual File/managed-draft SQL', async t => {
+  const { transport, send, state, seed, control, headers } = await setupOriginMount(t), frames = [];
+  const req = Object.assign(new EventEmitter(), { method: 'GET', url: '/events?chatProtocol=2', headers });
+  const res = { writeHead(status) { assert.equal(status, 200); }, write(wire) { frames.push(wire); return true; } };
+  await transport.handler(req, res); t.after(() => req.emit('close'));
+  await seed(); const before = await state(), original = before.original;
+  const events = frames.filter(wire => wire.startsWith('event: codex\n')).map(wire => JSON.parse(wire.split('\ndata: ')[1]));
+  for (const frame of before.frames) assert.ok(events.some(event => JSON.stringify(event) === JSON.stringify(frame)));
+  assert.ok(events.some(frame => frame.event === 'activity.completed' && frame.itemId === original.itemId));
+  const query = new URLSearchParams({ conversationId: original.conversationId, runId: original.runId });
+  const outputPath = `/chat/command-output?${query}&itemId=${original.itemId}`;
+  const historical = await send('GET', outputPath); assert.equal(historical.body.head + historical.body.tail, CHAT_ORIGIN_FILE_OUTPUT);
+  assert.equal((await control('advance-current')).status, 200);
+  assert.equal((await control('choose-other-default')).status, 200);
+  const origin = await send('GET', `/chat/run-project-origin?${query}`);
+  assert.equal(origin.status, 200); assert.equal(origin.body.verified, true);
+  assert.equal(origin.body.rootId, before.projects.original.rootId);
+  const resolved = await send('POST', '/v1/files/resolve', { rootId: origin.body.rootId, path: before.sourcePath });
+  assert.equal(resolved.status, 200); const fileId = resolved.body.result.id;
+  const read = await send('POST', '/v1/files/read', { fileId }); assert.equal(read.status, 200);
+  assert.match(JSON.stringify(read.body), /CURRENT/); assert.doesNotMatch(JSON.stringify(read.body), /OTHER_BOARD_DO_NOT_READ/);
+  assert.equal((await send('POST', '/v1/files/drafts/create', { fileId })).status, 200);
+  assert.deepEqual(await send('GET', outputPath), historical);
+  const after = await state(); assert.deepEqual(after.persisted.origins, before.persisted.origins);
+  assert.equal(after.effects.managedDraftSqlWrites, 1); assert.equal(after.persisted.drafts, 1);
+  assert.equal(after.effects.uiOriginalWrites, 0); assert.equal(after.effects.controlledSourceWrites, 1);
+  assert.equal(fs.readFileSync(after.sourcePath, 'utf8'), CHAT_ORIGIN_FILE_TEXT.current);
+  assert.equal(after.otherSha256, before.otherSha256); assert.deepEqual(after.fakeRpc, before.fakeRpc);
+});
+
+test('Origin unknown Chat/File paths and writes are consumed/refused, preserving token/origin/CORS guards', async t => {
+  const { send, state } = await setupOriginMount(t);
+  assert.equal((await send('OPTIONS', '/chat/run-project-origin')).status, 204);
+  assert.equal((await send('OPTIONS', '/v1/files/read')).status, 204);
+  assert.equal((await send('GET', '/__qa/chat-origin-file/state')).status, 403);
+  assert.equal((await send('GET', '/chat/state', null, null, { origin: 'https://outside.invalid' })).status, 403);
+  assert.equal((await send('GET', '/chat/state', null, null, { host: 'outside.invalid' })).status, 400);
+  for (const route of ['/chat/approval', '/chat/user-input', '/chat/not-real', '/v1/files/not-real',
+    '/v1/files/projects/room-default/save', '/v1/files/picker/begin', '/terminal/spawn', '/providers/start']) {
+    assert.equal((await send('POST', route, {})).status, 403, route);
+  }
+  assert.equal((await send('POST', '/chat/send', { message: 'EGDESK_QA_COMPLETE forbidden fallback',
+    profileEnabled: false, clientThreadId: 'room', requestId: 'request' })).status, 403);
+  const after = await state(); assert.deepEqual(after.fakeRpc, []); assert.deepEqual(after.persisted.origins, []);
+  assert.equal(after.effects.approvalPosts, 2, 'rejected attempts remain distinguishable from successful writes');
+  const common = (await send('GET', '/__qa/state', null, TOKEN)).body;
+  assert.deepEqual(common.observed.approvals, []); assert.deepEqual(common.observed.userInputs, []);
+});
+
+test('Origin mount rejects a prefs-bearing profile before common writes and awaits disposal even during initialization', async t => {
+  const transport = setup(t, { originFile: true });
+  const closing = transport.dispose(); assert.ok(closing instanceof Promise); assert.equal(transport.dispose(), closing);
+  await closing; const fixture = await transport.ready, snapshot = fixture.snapshot();
+  assert.equal(snapshot.disposed, true);
+  t.after(() => {
+    const root = snapshot.root; assert.equal(path.dirname(root), canonicalTempRoot());
+    assert.equal(fs.realpathSync.native(root), root); assert.ok(path.basename(root).startsWith('egdesk-chat-origin-file-'));
+    fs.rmSync(root, { recursive: true });
+  });
+  const prefs = path.join(transport.info.profile, 'prefs.js'), before = fs.readFileSync(prefs);
+  const mkdir = t.mock.method(fs, 'mkdtempSync', () => assert.fail('No writes before prefs guard'));
+  try {
+    assert.throws(() => createQaFixtureTransport({ profile: transport.info.profile, token: TOKEN,
+      env: { ...FIXTURE_ENV, EGDESK_QA_CHAT_ORIGIN_FILE_FIXTURE: '1', EGDESK_QA_REAL_TURN: '0' } }), /prefs-less/);
+    assert.equal(mkdir.mock.callCount(), 0);
+  } finally { mkdir.mock.restore(); }
+  assert.deepEqual(fs.readFileSync(prefs), before);
+  const after = await request(transport.handler, 'POST', '/chat/send', {}, null, () => {}, { host: '127.0.0.1:49318' });
+  assert.equal(after.status, 503); assert.equal(after.body.code, 'QA_FIXTURE_CLOSED');
+});
 
 async function setupTaskMount(t) {
   const transport = setup(t, { taskGate: true });

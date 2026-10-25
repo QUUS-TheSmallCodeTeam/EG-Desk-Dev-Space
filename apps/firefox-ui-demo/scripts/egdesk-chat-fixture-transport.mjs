@@ -17,6 +17,7 @@ import { createProjectFileFixture } from './egdesk-project-file-fixture.mjs';
 import { chatRunOutputsFixtureEnabled, createChatRunOutputsFixture } from './egdesk-chat-run-outputs-fixture.mjs';
 import { portableTransferFixtureEnabled, createPortableTransferFixture } from './egdesk-portable-transfer-fixture.mjs';
 import { taskGateFixtureEnabled, createTaskGateFixture } from './egdesk-task-gate-fixture.mjs';
+import { chatOriginFileFixtureEnabled, createChatOriginFileFixture } from './egdesk-chat-origin-file-fixture.mjs';
 import { routePermissionRequest } from '../helper/claude-engine-permissions.mjs'; // Pure shape translation only.
 import { guardBridgeRequest } from '../helper/codex-bridge-http.mjs';
 import { readEGDeskFileBody } from '../helper/egdesk-file-http.mjs';
@@ -87,16 +88,20 @@ const claudeFixture = env.EGDESK_QA_CLAUDE_FIXTURE === '1';
 if (claudeFixture && env.EGDESK_QA_REAL_TURN === '1') throw new Error('Claude fixtures forbid real-provider mode');
 const runOutputsEnabled = chatRunOutputsFixtureEnabled(env);
 const taskGateEnabled = taskGateFixtureEnabled(env);
+const originFileEnabled = chatOriginFileFixtureEnabled(env);
 if (runOutputsEnabled && claudeFixture) throw new Error('Run outputs require a separate fixture mode from Claude');
 if (env.EGDESK_QA_CLAUDE_READER_FIXTURE != null && !['0', '1'].includes(env.EGDESK_QA_CLAUDE_READER_FIXTURE)) throw new Error('Invalid synthetic Claude Reader gate');
 const claudeReaderFixture = env.EGDESK_QA_CLAUDE_READER_FIXTURE === '1';
 if (claudeReaderFixture && (!claudeFixture || env.EGDESK_QA_REAL_TURN !== '0')) throw new Error('Synthetic Reader requires isolated Claude fixture and explicit real-turn zero');
 if (typeof token !== 'string' || token.length < 16) throw new Error('Fixture token must contain at least 16 characters');
-if (taskGateEnabled && env.EGDESK_QA_FIXTURE_TOKEN != null && token !== env.EGDESK_QA_FIXTURE_TOKEN) {
-  throw new Error('Task fixture canonical token mismatch');
+if ((taskGateEnabled || originFileEnabled) && env.EGDESK_QA_FIXTURE_TOKEN != null && token !== env.EGDESK_QA_FIXTURE_TOKEN) {
+  throw new Error('Async fixture canonical token mismatch');
 }
 const fixture = assertQaFixtureManifest(profilePath);
 const profile = fixture.profile;
+if (originFileEnabled && fs.lstatSync(path.join(profile, 'prefs.js'), { throwIfNoEntry: false })) {
+  throw new Error('Origin File requires a fresh prefs-less owned QA profile');
+}
 const projectFileFixture = projectFileFixtureEnabled(env)
   ? createProjectFileFixture({ profile, token, env }) : null;
 const portableTransferFixture = portableTransferFixtureEnabled(env)
@@ -148,6 +153,13 @@ const taskGateReady = taskGateEnabled ? createTaskGateFixture({ profile, token, 
 // A caller may attach the HTTP handler before awaiting readiness. Keep a
 // rejected initialization observable by ready/handler/dispose, not unhandled.
 if (taskGateReady) void taskGateReady.catch(() => {});
+let originFileFixture = null, originFileClosing = false, originFileClosePromise = null;
+const originFileReady = originFileEnabled ? createChatOriginFileFixture({ profile, token, env,
+  broadcast: frame => {
+    observed.originFileBroadcasts = (observed.originFileBroadcasts || 0) + 1;
+    broadcastFixtureEvent(frame);
+  } }).then(value => { originFileFixture = value; return value; }) : null;
+if (originFileReady) void originFileReady.catch(() => {});
 const runConnection = run => run?.engineId === 'claude' ? 'ready' : connection;
 const activeRun = run => ['running', 'inProgress'].includes(run?.status);
 const contextError = (code, message, httpStatus = 409) => { throw Object.assign(new Error(message), { code, httpStatus }); };
@@ -638,6 +650,14 @@ const handler = async (req, res) => {
         || (req.socket?.remoteAddress && !['127.0.0.1', '::ffff:127.0.0.1'].includes(req.socket.remoteAddress))) {
       return json(res, 400, { error: 'Fixture accepts only its loopback origin' });
     }
+    if (originFileReady) {
+      if (originFileClosing) return json(res, 503, { code: 'QA_FIXTURE_CLOSED', error: 'Origin File fixture is closed' });
+      try { await originFileReady; }
+      catch { return json(res, 503, { code: 'QA_ORIGIN_FILE_UNAVAILABLE', error: 'Real Origin File fixture initialization failed' }); }
+      // This sidecar owns EVERY Chat/File path, including refusals. It must
+      // precede both synthetic Chat and the ordinary empty room-default read.
+      if (await originFileFixture.handle(req, res, url)) return;
+    }
     if (taskGateReady) {
       if (taskGateClosing) return json(res, 503, { code: 'QA_FIXTURE_CLOSED', error: 'Task fixture is closed' });
       try { await taskGateReady; }
@@ -711,6 +731,7 @@ const handler = async (req, res) => {
         ...(portableTransferFixture ? { portableTransferFixture: true, providerTurns: 0,
           nativePickerInvocations: 0, nativeProcessSpawns: 0, portableTransfer: portableTransferFixture.snapshot() } : {}),
         ...(taskGateFixture ? { taskGateFixture: true, providerTurns: 0, nativeProcessSpawns: 0, taskGate: taskGateFixture.snapshot() } : {}),
+        ...(originFileFixture ? { chatOriginFileFixture: true, providerTurns: 0, nativeProcessSpawns: 0, chatOriginFile: originFileFixture.snapshot() } : {}),
         streamId, seq, clients: clients.size, observed, context: context.stats, pendingContextCaptures: heldCaptures.length,
         runs: [...runs.values()].map((run) => ({ ...runState(run), conversationId: run.conversationId,
           requestId: run.requestId, clientThreadId: run.clientThreadId, fixtureStage: run.fixtureStage || null,
@@ -1173,6 +1194,11 @@ const handler = async (req, res) => {
   }
 };
 const dispose = () => {
+  if (originFileReady) {
+    originFileClosing = true;
+    if (!originFileClosePromise) originFileClosePromise = originFileReady.then(value => value.dispose());
+    return originFileClosePromise;
+  }
   if (taskGateReady) {
     taskGateClosing = true;
     if (!taskGateClosePromise) taskGateClosePromise = taskGateReady.then(value => value.dispose());
@@ -1183,12 +1209,13 @@ const dispose = () => {
   portableTransferFixture?.dispose();
   return projectFileFixture?.dispose();
 };
-return { handler, dispose, ...(taskGateReady ? { ready: taskGateReady } : {}), info: { kind: 'egdesk-qa-fixture-ready', host: HOST, port: PORT,
+return { handler, dispose, ...(taskGateReady || originFileReady ? { ready: taskGateReady || originFileReady } : {}), info: { kind: 'egdesk-qa-fixture-ready', host: HOST, port: PORT,
   ...(projectFileFixture ? projectFileFixture.info : {}),
   ...(claudeFixture ? { claudeFixture: true, claudeReaderFixture, providerTurns: 0 } : {}),
   ...(runOutputsFixture ? { runOutputsFixture: true, providerTurns: 0 } : {}),
   ...(portableTransferFixture ? { portableTransferFixture: true, providerTurns: 0 } : {}),
   ...(taskGateEnabled ? { taskGateFixture: true, providerTurns: 0 } : {}),
+  ...(originFileEnabled ? { chatOriginFileFixture: true, providerTurns: 0 } : {}),
   profile, artifactPath, streamId, isolation, scope: 'QA-only transformed copies, no shipped runtime replacement' } };
 }
 

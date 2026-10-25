@@ -13,7 +13,8 @@ import { loopbackJson, observeChatEvents } from './egdesk-qa-ui-flow.mjs';
 import { qaBridgeConfig, qaBridgeUrl, transformQaFixtureSource, materializeQaFixtureIsolation,
   validateQaFixtureIsolation, assertQaProfileBridge, QA_ISOLATION_MANIFEST, QA_RUN_OUTPUTS_FILES,
   QA_PORTABLE_TRANSFER_FILES, QA_PORTABLE_PICKER_FILE, transformPortablePickerResults } from './egdesk-qa-fixture-isolation.mjs';
-import { QA_TASK_GATE_SOURCE_FILES } from './egdesk-qa-fixture-isolation.mjs';
+import { QA_TASK_GATE_SOURCE_FILES, QA_CHAT_ORIGIN_FILE_SOURCE_FILES } from './egdesk-qa-fixture-isolation.mjs';
+import { chatOriginFileFixtureEnabled } from './egdesk-chat-origin-file-fixture.mjs';
 import { projectFileFixtureEnabled, transformProjectPickerResult, QA_PROJECT_PICKER_FILE } from './egdesk-qa-fixture-isolation.mjs';
 
 const ENV = Object.freeze({ EGDESK_QA_FIXTURE_TRANSPORT: '1', EGDESK_QA_FIXTURE_PORT: '39220' });
@@ -21,6 +22,7 @@ const overlay = fileURLToPath(new URL('../overlay/', import.meta.url));
 const hash = bytes => createHash('sha256').update(bytes).digest('hex');
 const token = 'unit-isolation-no-credentials';
 const TASK_ENV = { ...ENV, EGDESK_QA_TASK_GATE_FIXTURE: '1', EGDESK_QA_REAL_TURN: '0' };
+const ORIGIN_ENV = { ...ENV, EGDESK_QA_CHAT_ORIGIN_FILE_FIXTURE: '1', EGDESK_QA_REAL_TURN: '0' };
 
 function setup(t) {
   const source = fs.mkdtempSync(path.join(canonicalTempRoot(), 'egdesk-isolation-loader-'));
@@ -124,6 +126,79 @@ test('Task missing canonical QA source refuses materialization before endpoint r
   finally { missing.mock.restore(); }
   assert.deepEqual(fs.readFileSync(surface), before);
   assert.equal(fs.existsSync(path.join(profile, QA_ISOLATION_MANIFEST)), false);
+});
+
+test('Origin source provenance binds exactly four unchanged Halley files without injected profile copies or picker transforms', t => {
+  assert.deepEqual(QA_CHAT_ORIGIN_FILE_SOURCE_FILES, ['scripts/egdesk-chat-origin-file-fixture.mjs', 'scripts/egdesk-chat-origin-file-fixture.test.mjs',
+    'scripts/verify-firefox-mcp-chat-origin-file-flow.mjs', 'scripts/verify-firefox-mcp-chat-origin-file-flow.test.mjs']);
+  const root = path.dirname(overlay.slice(0, -1));
+  const before = Object.fromEntries(QA_CHAT_ORIGIN_FILE_SOURCE_FILES.map(name => [name, fs.readFileSync(path.join(root, name))]));
+  const profile = setup(t); prepareQaFirefox(profile, { env: ORIGIN_ENV });
+  const manifest = validateQaFixtureIsolation(profile, { env: ORIGIN_ENV });
+  assert.deepEqual(Object.keys(manifest.qaSourceFiles), QA_CHAT_ORIGIN_FILE_SOURCE_FILES);
+  for (const name of QA_CHAT_ORIGIN_FILE_SOURCE_FILES) {
+    assert.deepEqual(manifest.qaSourceFiles[name], { originalSha256: hash(before[name]), transformedSha256: hash(before[name]),
+      kind: 'unchanged-qa-source-not-profile-injected' });
+    assert.deepEqual(fs.readFileSync(path.join(root, name)), before[name]);
+    assert.equal(fs.existsSync(path.join(profile, 'chrome', name)), false);
+  }
+  assert.ok(manifest.files['JS/eg-desk-surface.uc.js']);
+  assert.equal(manifest.files[QA_PROJECT_PICKER_FILE].projectPickerTransform, undefined);
+  assert.equal(manifest.files[QA_PORTABLE_PICKER_FILE].portablePickerTransform, undefined);
+  assert.throws(() => validateQaFixtureIsolation(profile, { env: ENV }), /mismatch/);
+  assert.throws(() => validateQaFixtureIsolation(profile, { env: TASK_ENV }), /mismatch/);
+});
+
+test('Origin bootstrap gate agrees with actual factory gate and rejects mixed/invalid flags before all copying/writes', t => {
+  assert.equal(chatOriginFileFixtureEnabled(ORIGIN_ENV), true); assert.equal(qaBridgeConfig(ORIGIN_ENV).fixture, true);
+  const profile = setup(t);
+  const copy = t.mock.method(fs, 'cpSync', () => assert.fail('No copy before Origin mode validation'));
+  const write = t.mock.method(fs, 'writeFileSync', () => assert.fail('No write before Origin mode validation'));
+  try {
+    for (const patch of [{ EGDESK_QA_CHAT_ORIGIN_FILE_FIXTURE: 'true' }, { EGDESK_QA_REAL_TURN: '1' },
+      { EGDESK_QA_FIXTURE_TRANSPORT: '0' }, { EGDESK_QA_REAL_TURN: undefined },
+      ...['EGDESK_QA_PROJECT_FILE_FIXTURE', 'EGDESK_QA_PORTABLE_TRANSFER_FIXTURE', 'EGDESK_QA_RUN_OUTPUTS_FIXTURE',
+        'EGDESK_QA_CLAUDE_FIXTURE', 'EGDESK_QA_CLAUDE_READER_FIXTURE', 'EGDESK_QA_BROWSER_NEGATIVE',
+        'EGDESK_QA_BROWSER_RELAY', 'EGDESK_QA_TASK_GATE_FIXTURE'].map(key => ({ [key]: '1' }))]) {
+      const env = { ...ORIGIN_ENV, ...patch };
+      assert.throws(() => chatOriginFileFixtureEnabled(env)); assert.throws(() => prepareQaFirefox(profile, { env }));
+    }
+    assert.equal(copy.mock.callCount(), 0); assert.equal(write.mock.callCount(), 0);
+  } finally { copy.mock.restore(); write.mock.restore(); }
+});
+
+test('Origin manifest missing/tampered source hashes fail closed while originals remain unchanged', t => {
+  const profile = setup(t); prepareQaFirefox(profile, { env: ORIGIN_ENV });
+  const file = path.join(profile, QA_ISOLATION_MANIFEST), original = fs.readFileSync(file), manifest = JSON.parse(original);
+  const root = path.dirname(overlay.slice(0, -1));
+  const sourceBytes = Object.fromEntries(QA_CHAT_ORIGIN_FILE_SOURCE_FILES.map(name => [name, fs.readFileSync(path.join(root, name))]));
+  for (const name of QA_CHAT_ORIGIN_FILE_SOURCE_FILES) {
+    for (const modify of [value => { delete value.qaSourceFiles[name]; },
+      value => { value.qaSourceFiles[name].originalSha256 = '0'.repeat(64); },
+      value => { value.qaSourceFiles[name].transformedSha256 = '1'.repeat(64); }]) {
+      const changed = structuredClone(manifest); modify(changed); fs.writeFileSync(file, JSON.stringify(changed));
+      assert.throws(() => validateQaFixtureIsolation(profile, { env: ORIGIN_ENV }), /mismatch/);
+    }
+  }
+  fs.writeFileSync(file, original);
+  for (const name of QA_CHAT_ORIGIN_FILE_SOURCE_FILES) assert.deepEqual(fs.readFileSync(path.join(root, name)), sourceBytes[name]);
+});
+
+test('Origin missing or linked QA source refuses materialization before changing endpoint copies', t => {
+  const profile = setup(t); prepareQaFirefox(profile, { env: {} });
+  const surface = path.join(profile, 'chrome', 'JS/eg-desk-surface.uc.js'), before = fs.readFileSync(surface);
+  const target = path.join(path.dirname(overlay.slice(0, -1)), QA_CHAT_ORIGIN_FILE_SOURCE_FILES[0]), stat = fs.lstatSync;
+  for (const kind of ['missing', 'linked']) {
+    const injectedStat = t.mock.method(fs, 'lstatSync', function(file, ...args) {
+      if (file !== target) return stat.call(fs, file, ...args);
+      if (kind === 'missing') throw Object.assign(new Error('Unit missing Origin source'), { code: 'ENOENT' });
+      const info = stat.call(fs, file, ...args);
+      return new Proxy(info, { get(object, key) { return key === 'isSymbolicLink' ? () => true : object[key]; } });
+    });
+    try { assert.throws(() => materializeQaFixtureIsolation(profile, { env: ORIGIN_ENV }), /missing Origin source|noncanonical/); }
+    finally { injectedStat.mock.restore(); }
+    assert.deepEqual(fs.readFileSync(surface), before); assert.equal(fs.existsSync(path.join(profile, QA_ISOLATION_MANIFEST)), false);
+  }
 });
 
 test('only approved endpoint literals and named constants change, not numbers or log text', () => {

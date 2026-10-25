@@ -24,16 +24,37 @@ export const QA_TASK_GATE_SOURCE_FILES = Object.freeze([
   'scripts/egdesk-task-gate-fixture.mjs', 'scripts/egdesk-task-gate-fixture.test.mjs',
   'scripts/verify-firefox-mcp-task-gate-flow.mjs', 'scripts/verify-firefox-mcp-task-gate-flow.test.mjs',
 ]);
+export const QA_CHAT_ORIGIN_FILE_SOURCE_FILES = Object.freeze([
+  'scripts/egdesk-chat-origin-file-fixture.mjs', 'scripts/egdesk-chat-origin-file-fixture.test.mjs',
+  'scripts/verify-firefox-mcp-chat-origin-file-flow.mjs', 'scripts/verify-firefox-mcp-chat-origin-file-flow.test.mjs',
+]);
 const OVERLAY = fileURLToPath(new URL('../overlay/', import.meta.url));
 const APP_ROOT = fileURLToPath(new URL('../', import.meta.url)).replace(/\/$/, '');
 const sha256 = bytes => createHash('sha256').update(bytes).digest('hex');
 const fail = message => { throw new Error(`QA fixture isolation: ${message}`); };
+
+// Bootstrap validation only. The actual factory repeats its authoritative
+// gate on creation. It imports isolation, so importing it here would cycle.
+function originFileFixtureOptIn(env) {
+  const flag = env.EGDESK_QA_CHAT_ORIGIN_FILE_FIXTURE;
+  if (flag == null || flag === '0') return false;
+  if (flag !== '1' || env.EGDESK_QA_FIXTURE_TRANSPORT !== '1' || env.EGDESK_QA_REAL_TURN !== '0') {
+    fail('Origin File requires explicit model-free fixture mode');
+  }
+  for (const [key, value] of Object.entries(env)) {
+    if ((/^EGDESK_QA_.*_FIXTURE$/.test(key) && key !== 'EGDESK_QA_CHAT_ORIGIN_FILE_FIXTURE'
+      || ['EGDESK_QA_BROWSER_NEGATIVE', 'EGDESK_QA_BROWSER_RELAY'].includes(key))
+      && value != null && value !== '' && value !== '0') fail(`Origin File excludes ${key}`);
+  }
+  return true;
+}
 
 export function qaBridgeConfig(env = process.env) {
   // A portable mode conflict must fail before bootstrap copies/preferences.
   // This data-only module imports no isolation code and starts no services.
   portableTransferFixtureEnabled(env);
   taskGateFixtureEnabled(env);
+  originFileFixtureOptIn(env);
   // prepareQaFirefox calls this before copying files or writing preferences.
   // Reuse the data-only sidecar gate (no dependency back to isolation), then
   // exclude Claude here as well as at the transport boundary.
@@ -284,9 +305,11 @@ function readManifest(profile) {
   return JSON.parse(safeFile(file, profile).toString('utf8'));
 }
 
-function taskGateSourceFiles(env) {
-  if (!taskGateFixtureEnabled(env)) return undefined;
-  return Object.fromEntries(QA_TASK_GATE_SOURCE_FILES.map(name => {
+function qaFixtureSourceFiles(env) {
+  const names = taskGateFixtureEnabled(env) ? QA_TASK_GATE_SOURCE_FILES
+    : originFileFixtureOptIn(env) ? QA_CHAT_ORIGIN_FILE_SOURCE_FILES : null;
+  if (!names) return undefined;
+  return Object.fromEntries(names.map(name => {
     const digest = sha256(safeFile(path.join(APP_ROOT, name), APP_ROOT));
     return [name, { originalSha256: digest, transformedSha256: digest, kind: 'unchanged-qa-source-not-profile-injected' }];
   }));
@@ -309,7 +332,7 @@ export function validateQaFixtureIsolation(profilePath, { env = process.env, req
   if (requireFresh) assertFreshQaFixtureProfile(profile);
   const files = expectedFiles(profile, config.port, projectFileFixtureEnabled(env), chatRunOutputsFixtureEnabled(env),
     portableTransferFixtureEnabled(env)), manifest = readManifest(profile);
-  checkManifest(manifest, profile, config, files, taskGateSourceFiles(env));
+  checkManifest(manifest, profile, config, files, qaFixtureSourceFiles(env));
   for (const [name, entry] of Object.entries(files)) {
     if (sha256(safeFile(path.join(profile, 'chrome', name), profile)) !== entry.transformedSha256) {
       fail(`transformed hash mismatch: ${name}`);
@@ -333,7 +356,7 @@ export function materializeQaFixtureIsolation(profilePath, { env = process.env }
   const projectFileFixture = projectFileFixtureEnabled(env);
   const portableTransferFixture = portableTransferFixtureEnabled(env);
   const files = expectedFiles(profile, config.port, projectFileFixture, chatRunOutputsFixtureEnabled(env), portableTransferFixture);
-  const qaSourceFiles = taskGateSourceFiles(env);
+  const qaSourceFiles = qaFixtureSourceFiles(env);
   const manifestPath = path.join(profile, QA_ISOLATION_MANIFEST);
   const existing = infoOrNull(manifestPath) ? readManifest(profile) : null;
   if (existing) checkManifest(existing, profile, config, files, qaSourceFiles);
