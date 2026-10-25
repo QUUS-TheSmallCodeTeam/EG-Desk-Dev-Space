@@ -261,6 +261,49 @@ export async function observeOriginDesk(harness) {
   }`);
 }
 
+export async function observeOriginRoomUi(harness) {
+  return harness.evaluateChrome(`() => {
+    const geometry = ${readOriginEditorGeometry.toString()}, visible = ${originEditorVisible.toString()};
+    const c = window.__egdesk?.state?.codex, t = c?.threads?.find(value => value.id === c.activeThreadId);
+    const inputs = [...document.querySelectorAll('.egd-codex-input')], input = inputs.length === 1 ? inputs[0] : null;
+    return { hudView: c?.hudView, threadIds: c?.threads?.map(value => value.id) || [],
+      account: { connected: c?.connected === true, loggedIn: c?.authStatus?.isLoggedIn === true, key: c?.codexAccountKey || null },
+      thread: { id: t?.id, clientThreadId: t?.clientBindingId || t?.id, conversationId: t?.conversationId,
+        messages: t?.messages?.length, profileEnabled: t?.profileEnabled },
+      homeNewCount: document.querySelectorAll('.egd-codex-thread-home-new').length,
+      backCount: document.querySelectorAll('.egd-codex-conversation-back').length,
+      openerCount: document.querySelectorAll('[data-testid="chat-project-open"]').length,
+      composer: { count: inputs.length, threadId: input?.dataset.threadId, visible: visible(geometry(input)) } };
+  }`);
+}
+
+export function originNewRoomReady(value, before) {
+  return value?.account.connected === true && value.account.loggedIn === true && !!value.account.key && value.account.key === before.account.key
+    && value.hudView === 'conversation' && !!value.thread.id && !before.threadIds.includes(value.thread.id)
+    && !!value.thread.clientThreadId && !value.thread.conversationId && value.thread.messages === 0 && value.thread.profileEnabled !== true
+    && value.homeNewCount === 0 && value.backCount === 1 && value.openerCount === 1
+    && value.composer.count === 1 && value.composer.visible === true && value.composer.threadId === value.thread.id;
+}
+
+export async function enterOriginNewRoom(harness, { click, waitUntil, trace = {} }) {
+  const read = async () => { const value = await observeOriginRoomUi(harness); trace.last = value; return value; };
+  let before = await waitUntil(read, value => value.account.connected && value.account.loggedIn && value.account.key
+    && (value.hudView === 'list' && value.homeNewCount === 1 || value.hudView === 'conversation' && value.backCount === 1), { timeoutMs: 15000 });
+  trace.initial = before;
+  if (before.hudView === 'conversation') {
+    await click('.egd-codex-conversation-back');
+    before = await waitUntil(read, value => value.hudView === 'list' && value.homeNewCount === 1 && value.backCount === 0
+      && value.account.key === trace.initial.account.key, { timeoutMs: 10000 });
+  }
+  trace.beforeNew = before;
+  await click('.egd-codex-thread-home-new');
+  // R15 checks the actual composer/opener after creation. An unchanged old
+  // room on the list is not success, even if the native click acknowledged.
+  const after = await waitUntil(read, value => originNewRoomReady(value, before), { timeoutMs: 15000 });
+  trace.created = after;
+  return after.thread;
+}
+
 export async function observeOriginProjectUi(harness) {
   return harness.evaluateChrome(`() => {
     const geometry = ${readOriginEditorGeometry.toString()};
@@ -351,33 +394,64 @@ export async function prepareOriginRoomForSend(harness, room, { click, state, pr
   return { initial, reviewed, nativeInspection: true, sendAttemptsBeforeReview: 0 };
 }
 
+export async function clickOriginPoint(harness, selector, { deadlineMs, waitUntil, observeViewport,
+  waitStableViewport, observeTargets, targetIssues, trace = [] }) {
+  const deadline = () => assert.ok(Date.now() < deadlineMs, 'Origin File QA deadline reached');
+  const screen = () => harness.evaluateChrome(`() => {
+    const s = window.__egdesk?.state, c = s?.codex, t = c?.threads?.find(value => value.id === c.activeThreadId);
+    const panel = document.querySelector('[data-testid="chat-project-panel"]');
+    return { width: innerWidth, height: innerHeight, threadId: t?.id || null,
+      clientThreadId: t?.clientBindingId || t?.id || null, hudView: c?.hudView || null,
+      accountKey: c?.codexAccountKey || null, fullscreen: s?.cardFullscreen?.cardId || null,
+      panelThreadId: panel?.dataset.threadId || null };
+  }`);
+  const read = async () => {
+    deadline(); const before = await screen(), targets = await observeTargets(harness, selector), after = await screen();
+    deadline(); assert.deepEqual(after, before, 'Origin click screen changed during observation; no input or retry');
+    return { screen: after, targets };
+  };
+  deadline(); const size = await observeViewport(harness);
+  await waitStableViewport(harness, size, deadlineMs);
+  let previous = null, stable = 0;
+  const observed = await waitUntil(read, value => {
+    const usable = value.targets.length === 1 && targetIssues(value.targets[0]).length === 0;
+    const fingerprint = JSON.stringify(value);
+    stable = usable ? fingerprint === previous ? stable + 1 : 1 : 0;
+    previous = fingerprint;
+    return stable >= 3;
+  }, { timeoutMs: 5000, intervalMs: 80 });
+  const current = await read();
+  assert.deepEqual(current, observed, 'Origin click target moved or screen became stale; no input or retry');
+  const target = observed.targets[0], { x, y, width, height } = target.rect;
+  const point = Object.freeze({ x: x + width / 2, y: y + height / 2 });
+  assert.ok(Number.isFinite(point.x) && Number.isFinite(point.y) && point.x >= 0 && point.y >= 0
+    && point.x < observed.screen.width && point.y < observed.screen.height, 'Observed center is inside the owned viewport');
+  const action = { action: 'click-point', selector, target, screen: observed.screen, point, completed: false };
+  trace.push(action);
+  deadline(); await harness.clickPoint(point); // Exactly one native input, never UID resolution or DOM scrolling.
+  action.completed = true;
+  await waitStableViewport(harness, size, deadlineMs);
+  return point;
+}
+
 export async function runChatOriginFileFlow(options) {
   const provenance = originFileModuleProvenance(options.profile);
-  const { runUiFlow, loopbackJson, openChat, sendFromComposer, visible, waitUntil } = await import('./egdesk-qa-ui-flow.mjs');
+  const { runUiFlow, loopbackJson, openChat, sendFromComposer, waitUntil } = await import('./egdesk-qa-ui-flow.mjs');
+  const { observeViewport, waitStableViewport, observeTargets, targetIssues } = await import('./verify-firefox-mcp-headless-ui-regression.mjs');
   const token = process.env.EGDESK_QA_FIXTURE_TOKEN;
   const deadline = () => assert.ok(Date.now() < options.deadlineMs, 'Origin File QA deadline reached');
   const state = async () => { deadline(); const value = await loopbackJson(CHAT_ORIGIN_FILE_STATE, { token }); assertChatOriginFilePeer(value, options); return value; };
   const control = (action, extra = {}) => { deadline(); return loopbackJson(CHAT_ORIGIN_FILE_CONTROL, { method: 'POST', token, body: { action, ...extra } }); };
   await runUiFlow('chat-origin-current-file', async ({ harness, result, check, capture }) => {
     assert.equal(harness.profile, options.profile);
-    const click = async selector => {
-      deadline(); await visible(harness, selector);
-      await waitUntil(() => harness.evaluateChrome(`() => { const nodes = [...document.querySelectorAll(${JSON.stringify(selector)})], n = nodes.length === 1 ? nodes[0] : null, r = n?.getBoundingClientRect();
-        const hit = r && document.elementFromPoint(r.left + r.width / 2, r.top + r.height / 2);
-        return { count: nodes.length, ready: !!n && !n.disabled && !!r && r.width > 0 && r.height > 0 && r.left >= 0 && r.top >= 0 && r.right <= innerWidth && r.bottom <= innerHeight && (n === hit || n.contains(hit)) }; }`),
-      value => value.count === 1 && value.ready, { timeoutMs: 5000 });
-      deadline(); await harness.click(selector);
-      result.nativeControls.push({ action: 'click', selector });
-    };
+    const click = selector => clickOriginPoint(harness, selector, { deadlineMs: options.deadlineMs, waitUntil,
+      observeViewport, waitStableViewport, observeTargets, targetIssues, trace: result.nativeControls });
     const initial = await state(); assert.equal(initial.original, null); assert.equal(initial.persisted.origins.length, 0);
     result.moduleProvenance = provenance; result.nativeControls = [];
     await prepareRunOutputDesk(harness, { deadlineMs: options.deadlineMs, readFirstUse: observeOriginDesk, waitUntil });
     await openChat(harness);
-    if ((await harness.inspect('.egd-codex-conversation-back')).some(node => node.visible)) await click('.egd-codex-conversation-back');
-    await click('.egd-codex-thread-home-new');
-    const room = await harness.evaluateChrome(`() => { const c = window.__egdesk.state.codex, t = c.threads.find(value => value.id === c.activeThreadId);
-      return { id: t?.id, clientThreadId: t?.clientBindingId || t?.id, conversationId: t?.conversationId, messages: t?.messages?.length, profileEnabled: t?.profileEnabled }; }`);
-    assert.ok(room.id && !room.conversationId && room.messages === 0 && room.profileEnabled !== true);
+    result.originNavigation = {};
+    const room = await enterOriginNewRoom(harness, { click, waitUntil, trace: result.originNavigation });
     result.originPreparation = await prepareOriginRoomForSend(harness, room, { click, state, waitUntil,
       prepareRoom: clientThreadId => control('prepare-room', { clientThreadId }) });
     check('original room identity and full project path are natively reviewed before the only Send; engine/request counts remain zero', true);

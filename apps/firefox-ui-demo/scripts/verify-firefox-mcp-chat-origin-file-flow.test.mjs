@@ -4,12 +4,15 @@ import net from 'node:net';
 import childProcess from 'node:child_process';
 import { createHash } from 'node:crypto';
 import { readFileSync } from 'node:fs';
-import { runInNewContext } from 'node:vm';
+import { compileFunction, runInNewContext } from 'node:vm';
 import { originCommandSelector, chatOriginFileOptions, assertChatOriginFilePeer, assertOriginReadWindow,
   assertCurrentOriginFileUi, assertOriginActiveRoom, observeChatOriginFileUi, originEditorVisible,
   readOriginEditorGeometry, observeOriginDesk, observeOriginProjectUi, assertOriginRoomProjectReview,
-  prepareOriginRoomForSend } from './verify-firefox-mcp-chat-origin-file-flow.mjs';
+  prepareOriginRoomForSend, originNewRoomReady, enterOriginNewRoom, clickOriginPoint } from './verify-firefox-mcp-chat-origin-file-flow.mjs';
 import { CHAT_ORIGIN_FILE_TEXT, CHAT_ORIGIN_FILE_OUTPUT, CHAT_ORIGIN_FILE_BOARDS } from './egdesk-chat-origin-file-fixture.mjs';
+import { readSurfaceSource } from './egdesk-surface-source.mjs';
+import * as ChatState from '../overlay/resources/EGDeskChatState.sys.mjs';
+import { targetIssues } from './verify-firefox-mcp-headless-ui-regression.mjs';
 
 const hash = value => createHash('sha256').update(value).digest('hex');
 const env = { EGDESK_QA_CHAT_ORIGIN_FILE_FIXTURE: '1', EGDESK_QA_FIXTURE_TRANSPORT: '1', EGDESK_QA_REAL_TURN: '0',
@@ -85,6 +88,114 @@ function preparation(status = 'none') {
     summary: { status, source } };
   return { peer, view };
 }
+
+function productRoomControls(source = readSurfaceSource()) {
+  class Element {
+    constructor(tag, text = '') { this.tag = tag; this.text = text; this.children = []; this.dataset = {}; this.attributes = {}; this.events = {}; this.style = {}; }
+    appendChild(node) { this.children.push(node); return node; }
+    setAttribute(key, value) { this.attributes[key] = String(value); }
+    addEventListener(name, handler) { this.events[name] = handler; }
+    get textContent() { return this.text + this.children.map(node => node.textContent).join(''); }
+    querySelectorAll(selector) {
+      const matches = node => selector.startsWith('.') ? node.className?.split(' ').includes(selector.slice(1))
+        : node.dataset.testid === /^\[data-testid="([^"]+)"\]$/.exec(selector)?.[1];
+      return this.children.flatMap(node => [...(matches(node) ? [node] : []), ...node.querySelectorAll(selector)]);
+    }
+  }
+  const document = { createElement: tag => new Element(tag), createTextNode: text => new Element('#text', text) };
+  const state = { codex: { threads: [], threadNonce: 0, threadDrafts: {}, hudView: 'list' } }, opened = [];
+  const declaration = name => { const match = source.match(new RegExp(`^  function ${name}\\([^]*?^  \\}`, 'm')); assert.ok(match, name); return match[0]; };
+  const deps = { document, state, ChatState, SELF_MEMBER: 'self', uniqueNames: names => [...new Set(names)],
+    codexAgentProfile: () => ({}), buildThreadSubtitle: () => '', emit() {}, chatProjectDraftActions: new Map(),
+    chatRequestProjectSelection: () => ({ target: null, invalid: false }),
+    chatRoomProjectState: () => ({ status: 'ready', value: { status: 'none' } }),
+    openChatRequestProjectPanel: id => opened.push(id) };
+  const functions = ['el', 'createCodexThread', 'buildChatRequestProjectControl', 'buildChatInputTray'];
+  const method = source.match(/^      createThread\([^]*?^      \},/m); assert.ok(method);
+  const api = compileFunction(functions.map(declaration).join('\n') + `\nreturn { el, buildChatInputTray, bridge: { ${method[0].slice(0, -1)} } };`,
+    Object.keys(deps))(...Object.values(deps));
+  const start = source.indexOf('      if (isHudListView) {\n        const unreadCountTotal');
+  const end = source.indexOf('\n      const threadSearch = ', start); assert.ok(start >= 0 && end > start);
+  const top = new Element('div');
+  compileFunction(source.slice(start, end), ['isHudListView', 'codex', 'threadTop', 'el', 'codexBridge', 'codexBridgeSummary', 'codexAuthSummary', 'dmThreads', 'groupThreads'])(
+    true, state.codex, top, api.el, api.bridge, () => '', () => '', [], []);
+  return { state, opened, top, tray: () => api.buildChatInputTray(state.codex.threads[0], { ensureRoomProjectDefault() {} }) };
+}
+
+test('origin verifier: real product new-room handler and real tray DOM own the exact selectors and active-room binding', () => {
+  const verify = source => {
+    const product = productRoomControls(source), buttons = product.top.querySelectorAll('.egd-codex-thread-home-new');
+    assert.equal(buttons.length, 1); buttons[0].events.click();
+    assert.equal(product.state.codex.hudView, 'conversation'); assert.equal(product.state.codex.threads.length, 1);
+    const thread = product.state.codex.threads[0], tray = product.tray();
+    assert.equal(tray.dataset.testid, 'chat-attachments'); assert.equal(tray.dataset.threadId, thread.id);
+    const openers = tray.querySelectorAll('[data-testid="chat-project-open"]'); assert.equal(openers.length, 1);
+    assert.equal(tray.querySelectorAll('[data-testid="chat-project-target"]').length, 1);
+    openers[0].events.click(); assert.deepEqual(product.opened, [thread.id]);
+  };
+  const source = readSurfaceSource(); verify(source);
+  assert.throws(() => verify(source.replace("testid: 'chat-project-open'", "testid: 'renamed-project-open'")), /0 !== 1/);
+  assert.throws(() => verify(source.replace("class: 'egd-codex-thread-home-new'", "class: 'renamed-new-room'")), /0 !== 1/);
+  const reference = readFileSync(new URL('./verify-firefox-mcp-project-file-flow.mjs', import.meta.url), 'utf8');
+  assert.match(reference, /newRoomAction = await click\('\.egd-codex-thread-home-new'/);
+  assert.match(reference, /openerCount === 1 && value\.composerBox\?\.visible && value\.composerThreadId === value\.threadId/);
+});
+
+test('origin verifier: acknowledged new-room click cannot promote the old list room or an unrelated composer', async () => {
+  const before = { account: { connected: true, loggedIn: true, key: 'account' }, hudView: 'list', threadIds: ['old'],
+    thread: { id: 'old' }, homeNewCount: 1, backCount: 0, openerCount: 0, composer: { count: 0, visible: false } };
+  const after = { ...structuredClone(before), hudView: 'conversation', threadIds: ['fresh', 'old'],
+    thread: { id: 'fresh', clientThreadId: 'fresh', messages: 0, profileEnabled: false }, homeNewCount: 0, backCount: 1, openerCount: 1,
+    composer: { count: 1, visible: true, threadId: 'fresh' } };
+  assert.equal(originNewRoomReady(after, before), true);
+  for (const mutate of [value => { value.thread.id = 'old'; }, value => { value.hudView = 'list'; },
+    value => { value.composer.threadId = 'other'; }, value => { value.openerCount = 0; },
+    value => { value.account.key = 'other'; }, value => { value.composer.visible = false; }]) {
+    const value = structuredClone(after); mutate(value); assert.equal(originNewRoomReady(value, before), false);
+  }
+  for (const completed of [false, true]) {
+    const actions = [], trace = {}; let clicked = false, samples = 0;
+    const pending = enterOriginNewRoom({ evaluateChrome: async () => clicked && completed && ++samples > 1 ? after : before }, {
+      click: async selector => { actions.push(selector); clicked = true; }, trace,
+      waitUntil: async (read, accept) => { for (let i = 0; i < 3; i++) { const value = await read(); if (accept(value)) return value; } throw new Error('new room was not rendered'); },
+    });
+    if (completed) assert.equal((await pending).id, 'fresh');
+    else { await assert.rejects(pending, /new room was not rendered/); assert.equal(trace.last.hudView, 'list'); }
+    assert.deepEqual(actions, ['.egd-codex-thread-home-new'], 'No click retry or old-room/project fallback');
+  }
+});
+
+test('origin verifier: stable nine-hit center dispatches one point input with no UID or DOM-scroll path', async () => {
+  const scripts = [], points = [], trace = []; let reads = 0;
+  const screen = { width: 800, height: 600, threadId: 'room', clientThreadId: 'wire', hudView: 'list', accountKey: 'a', fullscreen: null, panelThreadId: null };
+  const target = { visible: true, disabled: false, readOnly: false, inViewport: true, hitCount: 9, rect: { x: 20, y: 40, width: 30, height: 40 } };
+  const harness = { evaluateChrome: async script => { scripts.push(script); return structuredClone(screen); },
+    clickPoint: async point => points.push(point), click: () => assert.fail('No UID input'), uidFor: () => assert.fail('No UID lookup'),
+    scrollWithKey: () => assert.fail('No scroll fallback') };
+  const options = { deadlineMs: Date.now() + 10000, trace, targetIssues,
+    observeViewport: async () => ({ width: 800, height: 600 }), waitStableViewport: async () => {},
+    observeTargets: async () => { reads++; return [structuredClone(target)]; },
+    waitUntil: async (read, accept) => { for (let i = 0; i < 5; i++) { const value = await read(); if (accept(value)) return value; } throw new Error('Not stable'); } };
+  assert.deepEqual(await clickOriginPoint(harness, '.egd-codex-thread-home-new', options), { x: 35, y: 60 });
+  assert.equal(reads, 4, 'Three stable hit snapshots plus one final stale check');
+  assert.deepEqual(points, [{ x: 35, y: 60 }]); assert.equal(Object.isFrozen(points[0]), true);
+  assert.equal(trace.length, 1); assert.equal(trace[0].completed, true);
+  for (const script of scripts) assert.doesNotMatch(script, /scrollIntoView|\.click\(|\.focus\(|dispatchEvent|setAttribute\(|\.value\s*=/);
+  for (const mode of ['moved-target', 'changed-room', 'occluded', 'input-failed']) {
+    points.length = 0; trace.length = 0; reads = 0; let screenReads = 0;
+    const changed = { ...harness,
+      evaluateChrome: async () => ({ ...screen, ...(mode === 'changed-room' && ++screenReads > 6 ? { threadId: 'other' } : {}) }),
+      clickPoint: async point => { points.push(point); if (mode === 'input-failed') throw new Error('native input uncertain'); } };
+    await assert.rejects(clickOriginPoint(changed, '.egd-codex-thread-home-new', { ...options,
+      observeTargets: async () => { reads++; const value = structuredClone(target);
+        if (reads === 4 && mode === 'moved-target') value.rect.x++;
+        if (reads === 4 && mode === 'occluded') value.hitCount = 8;
+        return [value]; },
+    }), mode === 'input-failed' ? /native input uncertain/ : /stale; no input or retry/);
+    assert.equal(points.length, mode === 'input-failed' ? 1 : 0, mode);
+    assert.equal(reads, 4, 'Never reacquire/retry after a stale final screen or failed input');
+  }
+});
 
 test('origin verifier: native review binds full path and six real HTTP identity fields before any engine or Send work', () => {
   for (const status of ['none', 'connected']) {
@@ -267,7 +378,8 @@ test('origin verifier: observation is read-only and actions remain native; share
   assert.doesNotMatch(scripts[0], /dispatchEvent|\.click\(|\.focus\(|setAttribute\(|innerHTML\s*=|\.value\s*=|\.open\s*=|setStringPref/);
   const source = readFileSync(new URL('./verify-firefox-mcp-chat-origin-file-flow.mjs', import.meta.url), 'utf8');
   assert.doesNotMatch(source, /newQaThread|\.title\s*=|dispatchEvent|\.style\.[a-zA-Z]+\s*=|\.hidden\s*=|setStringPref|createServer|\.listen\(/);
-  assert.match(source, /await harness\.click/); assert.match(source, /await harness\.press/);
+  assert.match(source, /await harness\.clickPoint\(point\)/); assert.match(source, /await harness\.press/);
+  assert.doesNotMatch(clickOriginPoint.toString(), /harness\.click\(|uidFor|scrollIntoView|scrollWithKey|catch\s*\(/);
   assert.match(source, /originFileModuleProvenance\(options\.profile\)/);
   assert.equal((source.match(/await sendFromComposer\(/g) || []).length, 1, 'Exactly one Send, never a guard-bypassing retry');
   assert.ok(source.indexOf('result.originPreparation = await prepareOriginRoomForSend') < source.indexOf('await sendFromComposer('));
