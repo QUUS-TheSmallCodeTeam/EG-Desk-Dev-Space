@@ -6,7 +6,7 @@ import childProcess from 'node:child_process';
 import { createHash } from 'node:crypto';
 import { Readable } from 'node:stream';
 import test from 'node:test';
-import { createPortableTransferFixture, portableTransferFixtureEnabled } from './egdesk-portable-transfer-fixture.mjs';
+import { createPortableTransferFixture, portableTransferFixtureEnabled, assertPortableBoardCatalogSeed } from './egdesk-portable-transfer-fixture.mjs';
 import { bootstrapQaProfile, canonicalTempRoot, LOADER_FILES } from './egdesk-chat-qa-profile.mjs';
 import { createPrivateQaTempDirectory } from './egdesk-qa-platform.mjs';
 import { boardToJsonCanvas } from '../helper/egdesk-json-canvas.mjs';
@@ -87,9 +87,109 @@ test('import and factory launch no listener, native process, provider or OS pick
   assert.ok(state.persisted.profiles.records.every(row => row.active_revision === null && row.lifecycle === 'draft'));
   assert.equal(state.persisted.desk.boards.length, 1);
   assert.equal(state.persisted.desk.boards[0].head_revision, 1);
-  assert.equal(state.persisted.desk.generations.length, 0);
+  assert.equal(state.persisted.desk.generations.length, 1);
+  assert.equal(state.seed.deskGeneration, 1);
   assert.deepEqual(fs.readdirSync(state.exportsDir), [], 'fixture does not fake a native export-file write');
   for (const spy of spies) assert.equal(spy.mock.callCount(), 0);
+});
+
+test('prelaunch catalog is the exact real saved Board, provenance is explicit and tampering is refused', t => {
+  const fixture = setup(t), state = fixture.snapshot();
+  assert.equal(assertPortableBoardCatalogSeed(state), true);
+  assert.equal(state.catalogSeed.coherentBeforeLaunch, true);
+  assert.equal(state.catalogSeed.setupOnly, true);
+  assert.equal(state.catalogSeed.sqliteRevision, 1);
+  assert.equal(state.catalogSeed.boardId, state.seed.boardId);
+  const changed = structuredClone(state);
+  changed.persisted.desk.revisions[0].body_json = JSON.stringify({ agenda: { id: state.seed.boardId }, cards: [] });
+  assert.throws(() => assertPortableBoardCatalogSeed(changed), /same content/);
+  fs.appendFileSync(state.catalogSeed.path, '// altered before launch\n');
+  assert.throws(() => assertPortableBoardCatalogSeed(state), /bytes changed/);
+  const mkdir = t.mock.method(fs, 'mkdtempSync', () => assert.fail('No second fixture or active-profile writes'));
+  assert.throws(() => createPortableTransferFixture({ profile: state.profile, token: TOKEN, env: ENV }), /new unused profile/);
+  assert.equal(mkdir.mock.callCount(), 0);
+});
+
+test('owned picker result queue returns only confirmed DTOs/cancel without performing file IO or profile writes', async t => {
+  const fixture = setup(t), before = fixture.snapshot();
+  const control = body => request(fixture, 'POST', '/__qa/portable-transfer/control', body, { token: true });
+  const pick = body => request(fixture, 'POST', '/__qa/portable-transfer/picker', body);
+  assert.equal((await pick({ kind: 'open', accept: '.md' })).status, 409);
+  assert.equal((await control({ operation: 'queue-picker', kind: 'open', result: 'cancel' })).status, 200);
+  assert.equal((await pick({ kind: 'open', accept: '.md' })).body.result.cancelled, true);
+  assert.equal((await control({ operation: 'queue-picker', kind: 'open', result: 'input' })).status, 200);
+  assert.equal((await pick({ kind: 'open', accept: '.txt' })).status, 400);
+  const opened = await pick({ kind: 'open', accept: '.md' });
+  assert.deepEqual(opened.body.result, { path: before.seed.importPath, filename: before.seed.importFilename });
+  assert.equal(opened.body.synthetic, true);
+  assert.equal((await pick({ kind: 'open', accept: '.md' })).status, 409, 'a selection is consumed once');
+  assert.equal((await control({ operation: 'queue-picker', kind: 'save', result: 'path', filename: 'owned-result.canvas' })).status, 200);
+  const saved = await pick({ kind: 'save', fileName: 'Suggested.canvas', contentType: 'application/json; charset=utf-8' });
+  assert.deepEqual(saved.body.result, { path: path.join(before.exportsDir, 'owned-result.canvas'), filename: 'owned-result.canvas' });
+  assert.equal(fs.existsSync(saved.body.result.path), false, 'picker result cannot stand in for the real native write');
+  assert.deepEqual(fixture.snapshot().persisted, before.persisted);
+  assert.deepEqual(fixture.snapshot().exports, []);
+  assert.equal(fixture.snapshot().currentImportSha256, before.seed.importSha256);
+});
+
+test('portable controls reject arbitrary paths, body injection, wrong token/origin and unowned replace results', async t => {
+  const fixture = setup(t), before = fixture.snapshot(), route = '/__qa/portable-transfer/control';
+  const queue = { operation: 'queue-picker', kind: 'save', result: 'path', filename: 'owned.md' };
+  assert.equal((await request(fixture, 'POST', route, queue)).status, 403);
+  assert.equal((await request(fixture, 'POST', route, queue, { token: true, headers: { origin: 'https://outside.invalid' } })).status, 403);
+  for (const body of [{ ...queue, filename: '../outside.md' }, { ...queue, path: '/outside.md' },
+    { ...queue, text: 'injected output' }, { ...queue, result: 'replace' }, { operation: 'replace-http-response', result: {} },
+    { operation: 'advance-profile-head', expectedHeadRevision: 2, instructions: 'injected' }]) {
+    assert.ok((await request(fixture, 'POST', route, body, { token: true })).status >= 400);
+  }
+  const filename = path.join(before.exportsDir, queue.filename);
+  fs.writeFileSync(filename, 'owned existing bytes\n', { flag: 'wx', mode: 0o600 });
+  const hash = sha256(fs.readFileSync(filename));
+  assert.equal((await request(fixture, 'POST', route, { ...queue, result: 'replace' }, { token: true })).status, 200);
+  const replaced = await request(fixture, 'POST', '/__qa/portable-transfer/picker',
+    { kind: 'save', fileName: 'agent.md', contentType: 'text/markdown; charset=utf-8' });
+  assert.equal(replaced.body.error, 'EEXIST'); assert.equal(replaced.body.result, undefined);
+  assert.equal(sha256(fs.readFileSync(filename)), hash);
+  assert.deepEqual(fixture.snapshot().persisted, before.persisted);
+});
+
+test('controlled new head uses real SQLite while the older visible revision export stays byte-pinned', async t => {
+  const fixture = setup(t), before = fixture.snapshot(), seed = before.seed;
+  const route = `/profiles/${seed.profileId}/export?format=md&revision=2`;
+  const pinnedBefore = await request(fixture, 'GET', route);
+  const advance = await request(fixture, 'POST', '/__qa/portable-transfer/control',
+    { operation: 'advance-profile-head', expectedHeadRevision: 2 }, { token: true });
+  assert.equal(advance.status, 200); assert.equal(advance.body.revision, 3);
+  const after = fixture.snapshot();
+  assert.deepEqual(after.persisted.profiles.records, before.persisted.profiles.records);
+  assert.equal(after.persisted.profiles.revisions.length, before.persisted.profiles.revisions.length + 1);
+  assert.equal(after.persisted.profiles.revisions.at(-1).revision, 3);
+  assert.deepEqual(after.persisted.desk, before.persisted.desk);
+  assert.deepEqual((await request(fixture, 'GET', route)).body, pinnedBefore.body);
+  const latest = await request(fixture, 'GET', `/profiles/${seed.profileId}/export?format=md`);
+  assert.equal(latest.body.revision, 3); assert.notEqual(latest.body.text, pinnedBefore.body.text);
+  assert.equal((await request(fixture, 'POST', '/__qa/portable-transfer/control',
+    { operation: 'advance-profile-head', expectedHeadRevision: 2 }, { token: true })).status, 400);
+  assert.equal(fixture.snapshot().headAdvances.length, 1);
+});
+
+test('Desk readiness has an exact real initial generation; current reads and refused autosaves cannot change it or the Board', async t => {
+  const fixture = setup(t), before = fixture.snapshot();
+  assert.deepEqual(before.seed.deskState, { version: 1, savedAt: Date.parse('2026-10-25T00:00:00Z'),
+    cards: [], shapes: [], qaMarker: `${before.seed.marker}_INITIAL_DESK` });
+  assert.deepEqual(before.deskReadiness, { storeOpen: true, seedGeneration: 1, currentReads: 0 });
+  const current = await request(fixture, 'GET', '/v1/desk/current');
+  assert.equal(current.status, 200); assert.equal(current.body.generation, 1);
+  assert.deepEqual(current.body.state, before.seed.deskState);
+  assert.equal(current.body.stateHash, before.persisted.desk.generations[0].state_hash);
+  assert.equal(fixture.snapshot().deskReadiness.currentReads, 1);
+  assert.equal(fixture.snapshot().requests.at(-1).delegated, true);
+  for (const [method, route, body] of [['PUT', '/v1/desk/current', { state: { cards: ['unwanted'] }, parentGeneration: 1 }],
+    ['POST', '/v1/desk/import', { desk: {} }], ['POST', '/v1/desk/restore', { generation: 1 }]]) {
+    assert.equal((await request(fixture, method, route, body)).status, 403);
+  }
+  await request(fixture, 'GET', `/v1/boards/${before.seed.boardId}/export?format=json-canvas`);
+  assert.deepEqual(fixture.snapshot().persisted.desk, before.persisted.desk);
 });
 
 test('read-only Profile list/detail/revisions are actual saved SQLite records', async t => {

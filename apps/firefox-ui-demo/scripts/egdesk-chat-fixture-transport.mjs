@@ -630,7 +630,7 @@ const handler = async (req, res) => {
       // Preflight only for the sidecar's exact allowlisted routes. All actual
       // reads/imports and all rejected mutations go through its real handlers.
       const preflight = /^\/profiles(?:\/(?:import|tool-presets|[a-z0-9][a-z0-9-]{0,79}(?:\/revisions(?:\/[1-9]\d{0,8})?|\/export)?))?$/.test(url.pathname)
-        || /^\/v1\/boards(?:\/[A-Za-z0-9][A-Za-z0-9._-]{0,127}(?:\/export)?)?$/.test(url.pathname);
+        || /^\/v1\/boards(?:\/[A-Za-z0-9][A-Za-z0-9._-]{0,127}(?:\/export)?)?$/.test(url.pathname) || url.pathname === '/v1/desk/current';
       if (req.method === 'OPTIONS' && preflight) {
         if (!guardBridgeRequest(req, PORT)) return json(res, 403, { code: 'QA_LOOPBACK_REQUIRED' });
         return json(res, 204, {});
@@ -898,6 +898,7 @@ const handler = async (req, res) => {
       const auth = authSnapshot();
       return json(res, 200, url.pathname === '/auth/status' ? auth : {
         protocolVersion: 2, provider: 'codex', appServerReady: !claudeFixture && !modelFreeFixture, auth,
+        ...(portableTransferFixture ? { deskStorageReady: portableTransferFixture.snapshot().deskReadiness.storeOpen } : {}),
         ...(claudeFixture ? { engines: engineRows() } : {}),
         capabilities: { auth: ['status'], chat: ['send', 'stream', 'interrupt', 'resume', 'user-input', 'subagent-status'] },
       });

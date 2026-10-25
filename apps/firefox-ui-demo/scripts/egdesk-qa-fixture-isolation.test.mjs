@@ -12,7 +12,7 @@ import { createQaFixtureTransport } from './egdesk-chat-fixture-transport.mjs';
 import { loopbackJson, observeChatEvents } from './egdesk-qa-ui-flow.mjs';
 import { qaBridgeConfig, qaBridgeUrl, transformQaFixtureSource, materializeQaFixtureIsolation,
   validateQaFixtureIsolation, assertQaProfileBridge, QA_ISOLATION_MANIFEST, QA_RUN_OUTPUTS_FILES,
-  QA_PORTABLE_TRANSFER_FILES } from './egdesk-qa-fixture-isolation.mjs';
+  QA_PORTABLE_TRANSFER_FILES, QA_PORTABLE_PICKER_FILE, transformPortablePickerResults } from './egdesk-qa-fixture-isolation.mjs';
 import { projectFileFixtureEnabled, transformProjectPickerResult, QA_PROJECT_PICKER_FILE } from './egdesk-qa-fixture-isolation.mjs';
 
 const ENV = Object.freeze({ EGDESK_QA_FIXTURE_TRANSPORT: '1', EGDESK_QA_FIXTURE_PORT: '39220' });
@@ -123,6 +123,58 @@ test('project picker copy, exact boundary descriptor and opt-in are bound into p
 
 const RUN_OUTPUTS_ENV = Object.freeze({ ...ENV, EGDESK_QA_RUN_OUTPUTS_FIXTURE: '1', EGDESK_QA_REAL_TURN: '0' });
 const PORTABLE_ENV = Object.freeze({ ...ENV, EGDESK_QA_PORTABLE_TRANSFER_FIXTURE: '1', EGDESK_QA_REAL_TURN: '0' });
+
+// Parser/transform specimens only. They are never installed into a profile or
+// used to claim an actual UI run while the shipped glue is missing.
+const portablePickerSpecimen = `const untouchedBefore = 1;
+  function pickNativeTextOpenFile({ accept, signal }) {
+    return new Promise(resolve => {
+      const picker = Cc['@mozilla.org/filepicker;1'].createInstance(Ci.nsIFilePicker);
+      picker.init(window.browsingContext, 'Open', Ci.nsIFilePicker.modeOpen);
+      picker.open(result => resolve(result === Ci.nsIFilePicker.returnCancel ? { cancelled: true } : { path: picker.file.path, filename: picker.file.leafName }));
+    });
+  }
+  function pickNativeTextSaveFile({ fileName, contentType, signal }) {
+    return new Promise(resolve => {
+      const picker = Cc['@mozilla.org/filepicker;1'].createInstance(Ci.nsIFilePicker);
+      picker.init(window.browsingContext, 'Save', Ci.nsIFilePicker.modeSave);
+      picker.open(result => resolve(result === Ci.nsIFilePicker.returnCancel ? { cancelled: true } : { path: picker.file.path, filename: picker.file.leafName }));
+    });
+  }
+  function actualIoOutsidePicker() { return IOUtils.write(path, bytes, { mode: 'create', flush: true }); }
+`;
+
+test('portable picker source transform replaces exactly two native-result bodies and fingerprints both', () => {
+  const transformed = transformPortablePickerResults(portablePickerSpecimen, 39220);
+  assert.equal(transformed.descriptor.kind, 'portable-text-os-picker-results-v1');
+  assert.equal(transformed.descriptor.functions.length, 2);
+  for (const name of ['pickNativeTextOpenFile', 'pickNativeTextSaveFile']) {
+    const body = source => source.slice(source.indexOf('\n', source.indexOf('  function ' + name)) + 1,
+      source.indexOf('\n  }', source.indexOf('  function ' + name)));
+    const descriptor = transformed.descriptor.functions.find(row => row.name === name);
+    assert.equal(descriptor.sourceBodySha256, hash(body(portablePickerSpecimen)));
+    assert.equal(descriptor.replacementBodySha256, hash(body(transformed.text)));
+    assert.ok(!/IOUtils|\.open\(|createInstance|beginWrite|readText|saveText/.test(body(transformed.text)));
+  }
+  const eraseBodies = source => source.replace(/(  function pickNativeText(?:Open|Save)File\([^\n]+\) \{\n)[\s\S]*?(\n  \})/g, '$1BODY$2');
+  assert.equal(eraseBodies(transformed.text), eraseBodies(portablePickerSpecimen));
+  assert.ok(transformed.text.includes("IOUtils.write(path, bytes, { mode: 'create', flush: true })"));
+  assert.equal(transformQaFixtureSource(QA_PORTABLE_PICKER_FILE, portablePickerSpecimen, 39220).text, portablePickerSpecimen);
+  assert.equal(transformQaFixtureSource(QA_PORTABLE_PICKER_FILE, portablePickerSpecimen, 39220,
+    { portableTransferFixture: true }).replacements.osPickerResultBoundaries, 2);
+});
+
+test('portable picker source missing/duplicate/changed boundaries fail instead of installing fake product glue', () => {
+  for (const source of ['', 'const productNotImplementedYet = true;', portablePickerSpecimen + portablePickerSpecimen,
+    portablePickerSpecimen.replace('function pickNativeTextOpenFile', 'function absentOpenFile'),
+    portablePickerSpecimen.replace('{ accept, signal }', '{ signal }'),
+    portablePickerSpecimen.replace('Ci.nsIFilePicker.modeOpen', 'Ci.nsIFilePicker.modeGetFolder'),
+    portablePickerSpecimen.replace('picker.open(result', 'IOUtils.read(result'),
+    portablePickerSpecimen.replace('    return new Promise(resolve => {', '    return readText(); new Promise(resolve => {')]) {
+    assert.throws(() => transformPortablePickerResults(source, 39220), /portable picker/);
+  }
+  assert.throws(() => transformPortablePickerResults(portablePickerSpecimen, 39218), /FIXTURE_PORT/);
+});
 
 test('portable mode fingerprints actual flow/presenter/IO adapter sources without replacing their bodies', t => {
   assert.deepEqual(QA_PORTABLE_TRANSFER_FILES, ['resources/EGDeskBoardExport.sys.mjs', 'resources/EGDeskProfileTransfer.sys.mjs',

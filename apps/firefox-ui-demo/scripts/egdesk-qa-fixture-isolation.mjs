@@ -18,6 +18,7 @@ export const QA_PORTABLE_TRANSFER_FILES = Object.freeze([
   'resources/EGDeskBoardExport.sys.mjs', 'resources/EGDeskProfileTransfer.sys.mjs',
   'resources/EGDeskProfileTransferView.sys.mjs', 'resources/EGDeskNativeFilePickers.sys.mjs',
 ]);
+export const QA_PORTABLE_PICKER_FILE = 'JS/eg-desk-surface.uc.js';
 const OVERLAY = fileURLToPath(new URL('../overlay/', import.meta.url));
 const sha256 = bytes => createHash('sha256').update(bytes).digest('hex');
 const fail = message => { throw new Error(`QA fixture isolation: ${message}`); };
@@ -149,7 +150,68 @@ export function transformProjectPickerResult(original, port) {
       endpoint: `http://127.0.0.1:${port}/__qa/project-file/picker` } };
 }
 
-export function transformQaFixtureSource(name, original, port, { projectFileFixture = false } = {}) {
+export function transformPortablePickerResults(original, port) {
+  qaBridgeConfig({ EGDESK_QA_FIXTURE_TRANSPORT: '1', EGDESK_QA_FIXTURE_PORT: String(port) });
+  const boundaries = [];
+  for (const [name, kind, parameters, nativeMode] of [
+    ['pickNativeTextOpenFile', 'open', '{accept,signal}', 'modeOpen'],
+    ['pickNativeTextSaveFile', 'save', '{fileName,contentType,signal}', 'modeSave'],
+  ]) {
+    const expression = new RegExp('^  (?:async )?function ' + name + '\\(([^\\n]*)\\) \\{\\r?\\n', 'gm');
+    const matches = [...original.matchAll(expression)];
+    if (matches.length !== 1 || original.split('function ' + name + '(').length !== 2) {
+      fail(`portable picker function missing or ambiguous: ${name}`);
+    }
+    const match = matches[0], signature = match[1].replace(/\s/g, '');
+    if (![parameters, parameters + '={}'].includes(signature)) fail(`portable picker signature changed: ${name}`);
+    const from = match.index + match[0].length, closing = /\n  \}(?=\r?\n|$)/g;
+    closing.lastIndex = from;
+    const end = closing.exec(original);
+    if (!end) fail(`portable picker closing boundary missing: ${name}`);
+    const to = end.index, body = original.slice(from, to);
+    try { new Function('return (' + original.slice(match.index, to + end[0].length).trim() + ');'); }
+    catch { fail(`portable picker function boundary does not parse: ${name}`); }
+    if (!body.includes('Ci.nsIFilePicker.' + nativeMode) || !body.includes('picker.open(') ||
+        !body.includes('Ci.nsIFilePicker.returnCancel') || !body.includes('picker.file') ||
+        /\b(?:IOUtils|readText|saveText|beginWrite|readBytes|writeNewFile|fetch|openProject|attachProject)\b/.test(body)) {
+      fail(`portable picker is not the reviewed native-result-only boundary: ${name}`);
+    }
+    const request = kind === 'open' ? "{ kind: 'open', accept }" : "{ kind: 'save', fileName, contentType }";
+    const replacement = `    // Owned QA copy: only the native picker result is synthetic.
+    if (signal?.aborted) return Promise.resolve({ cancelled: true });
+    return fetch('http://127.0.0.1:${port}/__qa/portable-transfer/picker', {
+      method: 'POST', headers: { 'Content-Type': 'application/json' }, signal,
+      body: JSON.stringify(${request}),
+    }).then(async response => {
+      const packet = await response.json();
+      if (!response.ok || packet?.kind !== 'egdesk-portable-picker-result' ||
+          packet.operation !== '${kind}' || packet.synthetic !== true) {
+        throw new Error('Owned QA picker result unavailable; no native fallback');
+      }
+      if (packet.error === 'EEXIST' && '${kind}' === 'save' && !packet.result) {
+        throw Object.assign(new Error('Owned target already exists'), { code: 'EEXIST' });
+      }
+      const chosen = packet.result;
+      if (!packet.error && chosen?.cancelled === true && Object.keys(chosen).length === 1) return { cancelled: true };
+      if (!packet.error && chosen && Object.keys(chosen).length === 2 &&
+          typeof chosen.path === 'string' && chosen.path.startsWith('/') &&
+          typeof chosen.filename === 'string' && chosen.path.split('/').at(-1) === chosen.filename) {
+        return { path: chosen.path, filename: chosen.filename };
+      }
+      throw new Error('Invalid owned QA picker result; no native fallback');
+    });`;
+    boundaries.push({ name, from, to, body, replacement });
+  }
+  const ordered = boundaries.slice().sort((a, b) => a.from - b.from);
+  if (ordered[0].to >= ordered[1].from) fail('portable picker boundaries overlap');
+  let text = original;
+  for (const boundary of ordered.slice().reverse()) text = text.slice(0, boundary.from) + boundary.replacement + text.slice(boundary.to);
+  return { text, descriptor: { kind: 'portable-text-os-picker-results-v1', synthetic: 'OS-picker-result-only', nativePickerInvocations: 0,
+    endpoint: `http://127.0.0.1:${port}/__qa/portable-transfer/picker`,
+    functions: boundaries.map(({ name, body, replacement }) => ({ name, sourceBodySha256: sha256(body), replacementBodySha256: sha256(replacement) })) } };
+}
+
+export function transformQaFixtureSource(name, original, port, { projectFileFixture = false, portableTransferFixture = false } = {}) {
   qaBridgeConfig({ EGDESK_QA_FIXTURE_TRANSPORT: '1', EGDESK_QA_FIXTURE_PORT: String(port) });
   let text = original;
   const replacements = { endpointUrls: 0, helperPortConstants: 0 };
@@ -169,6 +231,11 @@ export function transformQaFixtureSource(name, original, port, { projectFileFixt
     const transformed = transformProjectPickerResult(text, port);
     return { text: transformed.text, replacements: { ...replacements, osPickerResultBoundaries: 1 },
       projectPickerTransform: transformed.descriptor };
+  }
+  if (portableTransferFixture && name === QA_PORTABLE_PICKER_FILE) {
+    const transformed = transformPortablePickerResults(text, port);
+    return { text: transformed.text, replacements: { ...replacements, osPickerResultBoundaries: 2 },
+      portablePickerTransform: transformed.descriptor };
   }
   return { text, replacements };
 }
@@ -193,13 +260,15 @@ function expectedFiles(profile, port, projectFileFixture = false, runOutputsFixt
     if (!sourceInfo && copyHash === null) continue;
     if (!sourceInfo || copyHash === null) fail(`overlay copy/source missing: ${name}`);
     const original = safeFile(source, path.resolve(OVERLAY));
-    const transformed = transformQaFixtureSource(name, original.toString('utf8'), port, { projectFileFixture });
+    const transformed = transformQaFixtureSource(name, original.toString('utf8'), port, { projectFileFixture, portableTransferFixture });
     files[name] = { originalSha256: sha256(original), transformedSha256: sha256(transformed.text),
       replacements: transformed.replacements,
-      ...(transformed.projectPickerTransform ? { projectPickerTransform: transformed.projectPickerTransform } : {}) };
+      ...(transformed.projectPickerTransform ? { projectPickerTransform: transformed.projectPickerTransform } : {}),
+      ...(transformed.portablePickerTransform ? { portablePickerTransform: transformed.portablePickerTransform } : {}) };
   }
   if (!files['JS/eg-desk-surface.uc.js']?.replacements.endpointUrls) fail('missing surface bridge endpoints');
   if (projectFileFixture && !files[QA_PROJECT_PICKER_FILE]?.projectPickerTransform) fail('missing project picker transform fingerprint');
+  if (portableTransferFixture && !files[QA_PORTABLE_PICKER_FILE]?.portablePickerTransform) fail('missing portable picker transform fingerprint');
   return files;
 }
 
@@ -246,7 +315,8 @@ export function materializeQaFixtureIsolation(profilePath, { env = process.env }
   if (!config.fixture) fail('fixture mode is required');
   const profile = assertFreshQaFixtureProfile(profilePath);
   const projectFileFixture = projectFileFixtureEnabled(env);
-  const files = expectedFiles(profile, config.port, projectFileFixture, chatRunOutputsFixtureEnabled(env), portableTransferFixtureEnabled(env));
+  const portableTransferFixture = portableTransferFixtureEnabled(env);
+  const files = expectedFiles(profile, config.port, projectFileFixture, chatRunOutputsFixtureEnabled(env), portableTransferFixture);
   const manifestPath = path.join(profile, QA_ISOLATION_MANIFEST);
   const existing = infoOrNull(manifestPath) ? readManifest(profile) : null;
   if (existing) checkManifest(existing, profile, config, files);
@@ -260,7 +330,7 @@ export function materializeQaFixtureIsolation(profilePath, { env = process.env }
     if (currentHash !== entry.originalSha256) fail(`not an unchanged overlay copy: ${name}`);
     const original = safeFile(path.join(OVERLAY, name), path.resolve(OVERLAY));
     if (sha256(original) !== entry.originalSha256) fail('source changed during materialization');
-    writes.push([destination, transformQaFixtureSource(name, original.toString('utf8'), config.port, { projectFileFixture }).text]);
+    writes.push([destination, transformQaFixtureSource(name, original.toString('utf8'), config.port, { projectFileFixture, portableTransferFixture }).text]);
   }
   for (const [destination, text] of writes) fs.writeFileSync(destination, text);
   const manifest = { kind: 'egdesk-qa-fixture-isolation-v1', qaOnly: true, profile,
