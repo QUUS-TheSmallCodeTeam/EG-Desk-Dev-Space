@@ -8,7 +8,7 @@ import { publicText } from './codex-chat-values.mjs'
 import { PRIVATE_KEYS } from './egdesk-chat-store.mjs'
 import { MAX_BOARDS, MAX_BOARD_BODY_BYTES, MAX_DESK_STATE_BYTES } from './egdesk-desk-store.mjs'
 import { PortableBundleError, createEGDeskPortableBundle, loadEGDeskPortableDependencies } from './egdesk-portable-bundle.mjs'
-import { MAX_PROFILES, PROFILE_TEMPLATES, normalizeProfileBody, profileHash } from './egdesk-profile-store.mjs'
+import { MAX_PROFILES, PROFILE_TEMPLATES, normalizeProfileBody, profileHash, withoutAvatarImage } from './egdesk-profile-store.mjs'
 
 // RT-03: the .egdesk portable bundle wired to the local Desk, chat and profile
 // stores. Export writes one file (optionally passphrase-encrypted with the
@@ -271,7 +271,7 @@ function exportProfiles(profiles) {
     if (!record) continue
     // Unchanged built-in examples exist on every install; edited ones travel.
     if (view.origin === 'template' && templates.get(view.id) === record.hash) continue
-    chosen.push({ kind: KIND.profile, v: 1, lifecycle: view.lifecycle === 'active' ? 'active' : 'draft', body: record.body })
+    chosen.push({ kind: KIND.profile, v: 1, lifecycle: view.lifecycle === 'active' ? 'active' : 'draft', body: withoutAvatarImage(record.body) })
   }
   return chosen
 }

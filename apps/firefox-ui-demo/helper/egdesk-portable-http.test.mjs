@@ -201,6 +201,70 @@ test('a Board exports with its chat and profiles; import adds a new conversation
   assert.equal(a.chat.getConversation(copy.clientThreadId).conversationId, null)
 })
 
+for (const lifecycle of ['active', 'draft']) test(`portable export keeps a local ${lifecycle} photo profile and writes only its safe initial`, needsBundle, async t => {
+  const a = device(t, `photo-${lifecycle}-a`)
+  a.desk.saveBoard('agenda-photo-001', { body: boardBody('agenda-photo-001', 'Photo export', []), expectedRevision: null })
+  // A real 1×1 RGB PNG goes through the store's image validation and asset storage.
+  const imageBase64 = 'iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAIAAACQd1PeAAAADElEQVR4nGPgFlMEAAByAEMwyWmKAAAAAElFTkSuQmCC'
+  const { assetId } = a.profiles.putAvatarImage({ mediaType: 'image/png', imageBase64 })
+  const initial = { kind: 'initial', value: '김', color: PROFILE_TEMPLATES[0].body.avatar.color }
+  const created = a.profiles.createDraft({ ...PROFILE_TEMPLATES[0].body, name: 'Photo reviewer', avatar: { ...initial, kind: 'image', assetId } })
+  if (lifecycle === 'active') {
+    a.profiles.activate(created.id, 1, null)
+    a.profiles.saveDraft(created.id, { ...a.profiles.get(created.id).head.body, name: 'Unactivated photo edit' }, 1)
+  }
+  const original = a.profiles.get(created.id)
+  const originalImage = a.profiles.getAvatarImage(assetId)
+  const selected = original.active ?? original.head
+  const portableBody = { ...selected.body, avatar: initial }
+  const out = await a.api('POST', '/v1/portable/export', { scope: 'board', boardId: 'agenda-photo-001', include: { chats: false, profiles: true } })
+  assert.equal(out.status, 201)
+  assert.equal(out.data.contents.profiles, 1, 'unchanged built-in templates still do not travel')
+  const file = path.join(a.exportDir, out.data.fileName)
+  const entries = new Map()
+  await dependencies.codec.read(readFileSync(file), async entry => { entries.set(entry.name, await collect(entry.bytes())) })
+  const manifest = JSON.parse(entries.get('manifest.json').toString('utf8'))
+  const profileNode = manifest.nodes.find(node => node.id === 'profile-1')
+  assert.ok(profileNode, 'the real exported archive contains the selected profile')
+  const exported = JSON.parse(entries.get(`objects/${profileNode.objects[0].sha256}`).toString('utf8'))
+  assert.deepEqual(exported.body, portableBody, 'only the avatar changes; active revision takes precedence over a newer draft')
+  assert.equal(exported.lifecycle, lifecycle)
+  assert.equal(Object.hasOwn(exported.body.avatar, 'assetId'), false)
+  for (const [name, bytes] of entries) {
+    assert.equal(has(bytes, assetId), false, `${name} must not contain a local image asset ID`)
+    assert.equal(bytes.includes(originalImage.bytes), false, `${name} must not contain image bytes`)
+    assert.equal(has(bytes, imageBase64), false, `${name} must not contain a base64 image`)
+  }
+  assert.deepEqual(a.profiles.get(created.id), original, 'export leaves source revisions, hashes and bodies unchanged')
+  assert.deepEqual(a.profiles.getAvatarImage(assetId), originalImage, 'export leaves the original image asset unchanged')
+
+  const b = device(t, `photo-${lifecycle}-b`)
+  const imported = await b.api('POST', '/v1/portable/import', { ...upload(file), mode: 'asNew' })
+  assert.equal(imported.status, 201)
+  assert.deepEqual(imported.data.profiles.map(item => [item.name, item.status, item.active, item.reviewRequired]), [['Photo reviewer', 'imported', false, true]])
+  const copy = b.profiles.get(imported.data.profiles[0].profileId)
+  assert.deepEqual([copy.lifecycle, copy.activeRevision, copy.reviewRequired], ['draft', null, true])
+  assert.deepEqual(copy.head.body, portableBody)
+  assert.deepEqual([copy.source.at(-1).kind, copy.source.at(-1).format], ['import', 'egdesk'])
+  assert.throws(() => b.profiles.runProfile(copy.id), error => error.code === 'PROFILE_NOT_RUNNABLE')
+  assert.throws(() => b.profiles.getAvatarImage(assetId), error => error.code === 'PROFILE_ASSET_NOT_FOUND')
+  const profileCount = b.profiles.list().profiles.length
+  const again = await b.api('POST', '/v1/portable/import', { ...upload(file), mode: 'asNew' })
+  assert.equal(again.status, 201)
+  assert.deepEqual(again.data.profiles.map(item => item.status), ['duplicate'])
+  assert.equal(b.profiles.list().profiles.length, profileCount, 'reimport uses existing draft deduplication')
+
+  const excluded = await a.api('POST', '/v1/portable/export', { scope: 'board', boardId: 'agenda-photo-001', include: { chats: false, profiles: false } })
+  assert.equal(excluded.status, 201)
+  assert.equal(excluded.data.contents.profiles, 0)
+  const excludedImport = await b.api('POST', '/v1/portable/import', { ...upload(path.join(a.exportDir, excluded.data.fileName)), mode: 'asNew' })
+  assert.equal(excludedImport.status, 201)
+  assert.deepEqual(excludedImport.data.profiles, [], 'profiles:false remains excluded from the actual export/import flow')
+  assert.equal(b.profiles.list().profiles.length, profileCount)
+  assert.deepEqual(a.profiles.get(created.id), original)
+  assert.deepEqual(a.profiles.getAvatarImage(assetId), originalImage)
+})
+
 test('a passphrase locks the file: inspect reports locked, a wrong one is refused, import needs it, short ones are refused', needsBundle, async t => {
   const a = device(t, 'pass-a')
   seed(a)
