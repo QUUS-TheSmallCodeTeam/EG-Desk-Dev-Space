@@ -9,7 +9,7 @@ import { createPrivateQaTempDirectory } from './egdesk-qa-platform.mjs';
 import { assertPortableEnvironment, assertPortableStoreInvariant, assertPortableImportedDraft,
   assertPortableExportFile, assertPortablePinnedExport, assertPortableNoReplay,
   assertPortableMissingHead, assertPortableAttachmentOmission,
-  observePortableFirstUse,
+  observePortableFirstUse, preparePortableInstructionEdge,
   portableObservationSources, PORTABLE_OBSERVATION_BUDGET, portableTextVisible } from './verify-firefox-mcp-portable-transfer-flow.mjs';
 
 const TOKEN = 'portable-verifier-unit-only-token';
@@ -83,6 +83,78 @@ test('paint predicates require actual full text rectangles, clipping and hit evi
     { fragments: [{ inside: true, hits: [true, false, true] }] }]) {
     assert.equal(portableTextVisible({ ...good, ...delta }, 'first\nlast', 'last'), false);
   }
+});
+
+function instructionScrollFixture() {
+  const ui = { transferState: 'preview', active: { testid: 'import-instructions' }, contentBox: { scrollTop: 435, clientHeight: 533 },
+    instructions: { text: 'ORIGINAL\nlong unchanged instructions\nEND', box: { scrollTop: 0, scrollHeight: 661, clientHeight: 160,
+      left: 225, top: 210, width: 1030, height: 160 } } };
+  const target = { visible: true, disabled: false, readOnly: false, inViewport: true, hitCount: 9 };
+  const calls = [];
+  let pauses = 0;
+  const options = { expectedText: ui.instructions.text, readUi: async () => structuredClone(ui), readTargets: async () => [target],
+    press: async (...args) => {
+      calls.push(args);
+      if (args[0] === 'Tab') ui.active.testid = 'import-instructions';
+      else ui.instructions.box.scrollTop = args[0] === 'Home' ? 0 : 501;
+    }, pause: async () => { pauses++; }, assertDeadline() {} };
+  return { ui, target, calls, options, pauses: () => pauses };
+}
+
+test('instruction edge at top sends no Home/refocus, preserving the outer scroll before first-marker proof', async () => {
+  const h = instructionScrollFixture();
+  // R4's unnecessary Home could move the ancestor while its first marker was
+  // still briefly painted. Edge preparation must issue no key in this state.
+  h.options.press = async () => { h.ui.contentBox.scrollTop = 0; assert.fail('Already at local edge'); };
+  const result = await preparePortableInstructionEdge({ ...h.options, edge: 'Home' });
+  assert.deepEqual(result, { key: null, focusKeys: 0, before: 0, after: 0, outerScrollTop: 435 });
+  assert.ok(h.pauses() >= 3, 'Even a no-op edge waits for stable local and outer layout');
+});
+
+test('instruction End is selectorless native input after focus and waits through smooth local scrolling', async () => {
+  const h = instructionScrollFixture(); h.ui.active.testid = 'another-control';
+  const stops = [160, 400, 501, 501, 501]; let moving = false, pauses = 0;
+  h.options.press = async (...args) => {
+    h.calls.push(args);
+    if (args[0] === 'Tab') h.ui.active.testid = 'import-instructions';
+    if (args[0] === 'End') moving = true;
+  };
+  h.options.pause = async () => { pauses++; if (moving && stops.length) h.ui.instructions.box.scrollTop = stops.shift(); };
+  const result = await preparePortableInstructionEdge({ ...h.options, edge: 'End' });
+  assert.deepEqual(h.calls, [['Tab'], ['End']], 'Never pass a selector that refocuses the region');
+  assert.equal(result.after, 501); assert.equal(result.focusKeys, 1); assert.ok(pauses >= 6);
+  h.calls.length = 0;
+  assert.equal((await preparePortableInstructionEdge({ ...h.options, edge: 'End' })).key, null);
+  assert.deepEqual(h.calls, []);
+});
+
+test('instruction edge never accepts clipped, covered, stale, focus-lost or non-scrolling UI', async () => {
+  const variants = [
+    h => { h.target.hitCount = 3; }, h => { h.target.inViewport = false; },
+    h => { h.options.readTargets = async () => []; },
+    h => { h.options.readTargets = async () => [h.target, h.target]; },
+    h => { h.ui.transferState = 'cancelled'; },
+    h => { h.options.pause = async () => { h.ui.instructions.text = 'substituted'; }; },
+    h => { h.options.pause = async () => { h.ui.active.testid = 'another-control'; }; },
+    h => { h.options.press = async (...args) => { h.calls.push(args); }; },
+    h => { h.options.press = async (...args) => { h.calls.push(args); h.ui.instructions.box.scrollTop = 501;
+      h.ui.contentBox.scrollTop = 0; h.target.hitCount = 3; }; },
+  ];
+  for (const mutate of variants) {
+    const h = instructionScrollFixture(); mutate(h);
+    await assert.rejects(preparePortableInstructionEdge({ ...h.options, edge: 'End' }));
+    assert.ok(h.calls.length <= 1, 'No blind repeat or fallback input after a failed scroll');
+  }
+});
+
+test('instruction focus traversal and scroll sampling obey bounds and the deadline', async () => {
+  const h = instructionScrollFixture(); h.ui.active.testid = 'another-control';
+  h.options.press = async (...args) => { h.calls.push(args); };
+  await assert.rejects(preparePortableInstructionEdge({ ...h.options, edge: 'End' }), /Native Tab/);
+  assert.equal(h.calls.length, 64); assert.ok(h.calls.every(args => args.length === 1 && args[0] === 'Tab'));
+  const expired = instructionScrollFixture(); expired.options.assertDeadline = () => { throw new Error('deadline'); };
+  await assert.rejects(preparePortableInstructionEdge({ ...expired.options, edge: 'End' }), /deadline/);
+  assert.deepEqual(expired.calls, []);
 });
 
 test('store receipt assertions reject changed Board head, unexpected activation, provider or output injection', t => {

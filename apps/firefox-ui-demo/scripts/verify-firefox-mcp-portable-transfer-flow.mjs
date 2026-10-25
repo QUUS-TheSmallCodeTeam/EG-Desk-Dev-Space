@@ -242,6 +242,56 @@ export function portableTextVisible(paint, expected, needle = null) {
     paint.fragments.every(r => r.inside && r.hits.length === 3 && r.hits.every(Boolean));
 }
 
+export async function preparePortableInstructionEdge({ edge, expectedText, readUi, readTargets, press, pause, assertDeadline }) {
+  assert.ok(edge === 'Home' || edge === 'End');
+  const read = async () => {
+    assertDeadline();
+    const ui = await readUi(), box = ui.instructions?.box;
+    assert.equal(ui.transferState, 'preview');
+    assert.equal(ui.instructions?.text, expectedText, 'The same original preview must remain mounted');
+    assert.ok(box && [box.scrollTop, box.scrollHeight, box.clientHeight].every(Number.isFinite) && box.clientHeight > 0);
+    return ui;
+  };
+  let ui = await read(), focusKeys = 0;
+  while (ui.active?.testid !== 'import-instructions') {
+    const targets = await readTargets();
+    assert.equal(targets.length, 1, 'One existing instruction region required');
+    assert.equal(targets[0].disabled, false);
+    assert.ok(focusKeys < 64, 'Native Tab did not focus the instruction region');
+    assertDeadline(); await press('Tab'); focusKeys++; await pause(); ui = await read();
+  }
+  const safeRegion = async () => {
+    const targets = await readTargets();
+    assert.equal(targets.length, 1);
+    assert.deepEqual(targetIssues(targets[0]), [], 'Instruction region must remain fully reachable, not clipped by its parent');
+  };
+  await safeRegion();
+  const atEdge = value => {
+    const box = value.instructions.box, max = Math.max(0, box.scrollHeight - box.clientHeight);
+    return edge === 'Home' ? box.scrollTop <= 0.5 : box.scrollTop >= max - 0.5;
+  };
+  const before = ui.instructions.box.scrollTop, key = atEdge(ui) ? null : edge;
+  // Do not send Home/End at an already-reached edge: nested scrolling may
+  // move the outer Settings region. Focus was established by native Tab, so
+  // omit the selector (the MCP's targeted press calls element.focus()).
+  if (key) { assertDeadline(); await press(key); }
+  let previous = null, stable = 0;
+  for (let sample = 0; sample < 40; sample++) {
+    await pause(); ui = await read();
+    assert.equal(ui.active?.testid, 'import-instructions', 'Focus changed during instruction scrolling');
+    const box = ui.instructions.box;
+    const position = JSON.stringify([box.scrollTop, box.scrollHeight, box.clientHeight, box.left, box.top, box.width, box.height,
+      ui.contentBox?.scrollTop, ui.contentBox?.clientHeight]);
+    stable = atEdge(ui) && position === previous ? stable + 1 : 0;
+    previous = position;
+    if (stable >= 2) {
+      await safeRegion();
+      return { key, focusKeys, before, after: box.scrollTop, outerScrollTop: ui.contentBox?.scrollTop };
+    }
+  }
+  throw new Error(`Native instruction ${edge} did not settle at its local edge; UI remains unverified`);
+}
+
 export async function runPortableTransferFlow({ harness, result, check }, { profile, deadlineMs, env = process.env }) {
   assertPortableEnvironment(env); assertBeforeDeadline(deadlineMs);
   const isolation = validateQaFixtureIsolation(profile, { env }), descriptor = isolation.files[QA_PORTABLE_PICKER_FILE].portablePickerTransform;
@@ -430,11 +480,15 @@ export async function runPortableTransferFlow({ harness, result, check }, { prof
   await reach(testid('import-instructions'));
   const instructions = (await observePortableUi(harness)).instructions.text;
   check('preview retains first and last original instructions', instructions.includes(`${proof.initial.seed.marker}_IMPORT_ORIGINAL`) && instructions.includes(`${proof.initial.seed.marker}_IMPORT_END`));
-  await key('Home', testid('import-instructions'));
+  const instructionEdge = edge => preparePortableInstructionEdge({ edge, expectedText: instructions,
+    readUi: () => observePortableUi(harness), readTargets: () => observeTargets(harness, testid('import-instructions')),
+    press: value => key(value), pause: () => new Promise(resolve => setTimeout(resolve, 75)),
+    assertDeadline: () => assertBeforeDeadline(deadlineMs) });
+  proof.instructionScroll = { first: await instructionEdge('Home') };
   await waitFor(harness, () => observePortableText(harness, testid('import-instructions'), `${proof.initial.seed.marker}_IMPORT_ORIGINAL`),
     paint => portableTextVisible(paint, instructions, `${proof.initial.seed.marker}_IMPORT_ORIGINAL`), deadlineMs);
   await capture('import-instruction-first', [{ selector: testid('import-instructions'), text: instructions, needle: `${proof.initial.seed.marker}_IMPORT_ORIGINAL` }], await observePortableUi(harness));
-  await key('End', testid('import-instructions'));
+  proof.instructionScroll.last = await instructionEdge('End');
   await waitFor(harness, () => observePortableText(harness, testid('import-instructions'), `${proof.initial.seed.marker}_IMPORT_END`),
     paint => portableTextVisible(paint, instructions, `${proof.initial.seed.marker}_IMPORT_END`), deadlineMs);
   await capture('import-instruction-end', [{ selector: testid('import-instructions'), text: instructions, needle: `${proof.initial.seed.marker}_IMPORT_END` }], await observePortableUi(harness));
