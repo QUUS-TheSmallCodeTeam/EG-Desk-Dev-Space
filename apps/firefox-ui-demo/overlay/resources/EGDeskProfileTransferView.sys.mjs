@@ -3,6 +3,8 @@ import { PROFILE_TOOL_CEILING_AXES, toolCeilingNotes, chatEffortLabel } from './
 
 const BUSY = new Set(['reading', 'previewing', 'committing', 'fetching', 'saving'])
 const TERMINAL_BINDING = new Set(['stale', 'disposed'])
+const EXPORT_UNKNOWN_MESSAGE = '파일이 일부 또는 전부 저장되었을 수 있습니다. 저장 위치의 파일을 확인하기 전에는 다시 저장하지 마세요.'
+const EXPORT_EXISTS_MESSAGE = '같은 이름의 파일이 있습니다. 기존 파일은 덮어쓰지 않습니다. 다른 이름이나 위치를 선택해 주세요.'
 const text = value => typeof value === 'string' ? value : ''
 const binding = value => Number.isSafeInteger(value) && value >= 0
 const object = value => value !== null && typeof value === 'object' && !Array.isArray(value)
@@ -156,7 +158,11 @@ export function createEGDeskProfileTransferView({ document } = {}) {
     status.setAttribute('role', 'status')
     status.setAttribute('aria-live', 'polite')
     status.setAttribute('aria-atomic', 'true')
-    status.textContent = text(state?.message) || (valid
+    // Presentation only: the write boundary's status, never a code alone,
+    // determines whether the outcome is known. Keep the raw flow receipt intact.
+    const exportNotice = state?.operation === 'export' ? uncertain ? EXPORT_UNKNOWN_MESSAGE
+      : statusName === 'failed' && state?.code === 'TEXT_FILE_EXISTS' ? EXPORT_EXISTS_MESSAGE : null : null
+    status.textContent = exportNotice || text(state?.message) || (valid
       ? 'Markdown 파일을 골라 내용을 확인한 뒤 초안으로 가져오세요.'
       : 'Agent 연결을 확인한 뒤 다시 열어 주세요.')
     status.setAttribute('data-state', statusName || 'unbound')
@@ -196,11 +202,12 @@ export function createEGDeskProfileTransferView({ document } = {}) {
       ? `내보낼 Agent: ${target.profileId} · 저장 버전 ${target.revision}`
       : '내보내려면 Agent의 저장 버전을 선택하세요.'), 'transfer-export-target')
     const content = [head, controls, targetNote, status]
-    if (state?.code === 'TEXT_FILE_EXISTS') content.push(make('p', 'egd-settings-callout',
-      '같은 이름의 파일이 있습니다. 기존 파일은 덮어쓰지 않습니다. 다른 이름이나 위치를 선택해 주세요.'))
-    if (uncertain) content.push(make('p', 'egd-settings-callout', state?.operation === 'import'
+    // These export explanations now lead the live status; do not repeat them
+    // below it or suggest another write while the export outcome is unknown.
+    if (!exportNotice && state?.code === 'TEXT_FILE_EXISTS') content.push(make('p', 'egd-settings-callout', EXPORT_EXISTS_MESSAGE))
+    if (!exportNotice && uncertain) content.push(make('p', 'egd-settings-callout', state?.operation === 'import'
       ? '초안이 만들어졌을 수 있습니다. Agent 목록에서 결과를 확인하기 전에는 다시 가져오지 마세요.'
-      : '파일이 일부 또는 전부 저장되었을 수 있습니다. 저장 위치의 파일을 확인하기 전에는 다시 저장하지 마세요.'))
+      : EXPORT_UNKNOWN_MESSAGE))
 
     if (object(state?.body) && object(state?.preview)) {
       const preview = hook(make('section', 'egd-settings-section'), 'import-preview')

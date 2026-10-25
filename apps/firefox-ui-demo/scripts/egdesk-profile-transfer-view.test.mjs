@@ -408,17 +408,24 @@ test('duplicate confirmation clicks while POST is pending dispatch once; interru
 })
 
 test('post-write failure remains unknown, preserves omitted warnings and never retries', async () => {
-  const h = fixture({ saveText: init => {
+  const h = fixture({ saveText: (init, calls) => {
     assert.equal(init.beginWrite(), true)
+    calls.writes.push(init.text)
     throw Object.assign(new Error('/private/picked/path partial'), { code: 'EEXIST' })
   } })
   await h.click(TOML)
-  assert.equal(h.flow.snapshot().status, 'unknown')
-  assert.match(h.view.element.textContent, /일부 또는 전부 저장되었을 수 있습니다/)
+  const raw = h.flow.snapshot()
+  assert.equal(raw.status, 'unknown')
+  assert.equal(h.node('transfer-status').textContent,
+    '파일이 일부 또는 전부 저장되었을 수 있습니다. 저장 위치의 파일을 확인하기 전에는 다시 저장하지 마세요.')
+  assert.equal(h.node('transfer-status').getAttribute('data-state'), raw.status)
+  assert.equal(h.node('transfer-status').getAttribute('data-code'), raw.code)
+  assert.equal((h.view.element.textContent.match(/파일이 일부 또는 전부 저장되었을 수 있습니다/g) || []).length, 1)
   assert.equal(h.view.element.textContent.includes('/private/picked/path'), false)
   assert.ok(h.node('transfer-omitted').textContent.includes('avatarImage'))
+  h.update(); assert.deepEqual(h.flow.snapshot(), raw, 'presentation never rewrites the original message/code/status')
   for (const selector of [IMPORT, MD, TOML]) { assert.equal(h.node(selector).disabled, true); await h.node(selector).fire() }
-  assert.equal(h.calls.saves.length, 1)
+  assert.equal(h.calls.saves.length, 1); assert.equal(h.calls.writes.length, 1)
 })
 
 test('known-existing target failure clearly asks for another name, without claiming cancel or save', async () => {
@@ -426,9 +433,83 @@ test('known-existing target failure clearly asks for another name, without claim
   await h.click(MD)
   assert.equal(h.flow.snapshot().status, 'failed'); assert.equal(h.calls.writes.length, 0)
   assert.equal(h.node('transfer-status').getAttribute('data-code'), 'TEXT_FILE_EXISTS')
-  assert.match(h.view.element.textContent, /기존 파일은 덮어쓰지 않습니다.*다른 이름이나 위치/)
+  assert.equal(h.node('transfer-status').textContent,
+    '같은 이름의 파일이 있습니다. 기존 파일은 덮어쓰지 않습니다. 다른 이름이나 위치를 선택해 주세요.')
+  assert.equal((h.view.element.textContent.match(/같은 이름의 파일이 있습니다/g) || []).length, 1)
   assert.equal(h.view.element.textContent.includes('저장했습니다'), false)
   assert.equal(h.node(MD).disabled, false, 'another deliberate picker attempt is possible')
+  const raw = h.flow.snapshot(); h.update(); await settle()
+  assert.deepEqual(h.flow.snapshot(), raw); assert.equal(h.calls.saves.length, 1); assert.equal(h.calls.writes.length, 0)
+})
+
+test('PROFILE_EXPORT_SAVE_UNCONFIRMED first status follows the actual write boundary, not the shared error code', async () => {
+  for (const began of [false, true]) {
+    const h = fixture({ saveText: (init, calls) => {
+      if (began) { assert.equal(init.beginWrite(), true); calls.writes.push(init.text) }
+      return {}
+    } })
+    await h.click(MD)
+    const raw = h.flow.snapshot()
+    assert.equal(raw.code, 'PROFILE_EXPORT_SAVE_UNCONFIRMED'); assert.equal(raw.status, began ? 'unknown' : 'failed')
+    assert.equal(h.node('transfer-status').textContent, began
+      ? '파일이 일부 또는 전부 저장되었을 수 있습니다. 저장 위치의 파일을 확인하기 전에는 다시 저장하지 마세요.'
+      : raw.message)
+    assert.equal(h.node('transfer-status').getAttribute('data-state'), raw.status)
+    assert.equal(h.node('transfer-status').getAttribute('data-code'), raw.code)
+    assert.equal(h.node(MD).disabled, began)
+    h.update(); await settle(); assert.deepEqual(h.flow.snapshot(), raw)
+    if (began) for (const selector of [IMPORT, MD, TOML]) await h.node(selector).fire()
+    assert.equal(h.calls.saves.length, 1); assert.equal(h.calls.writes.length, Number(began))
+  }
+})
+
+test('post-write adapter failures stay unknown and never suggest another filename or retry', async () => {
+  for (const code of ['TEXT_FILE_EXISTS', 'OTHER_WRITE_ERROR']) {
+    const h = fixture({ saveText: (init, calls) => {
+      assert.equal(init.beginWrite(), true); calls.writes.push(init.text)
+      throw Object.assign(new Error('/private/write-result'), { code })
+    } })
+    await h.click(MD)
+    const raw = h.flow.snapshot(); assert.equal(raw.status, 'unknown'); assert.equal(raw.code, 'PROFILE_EXPORT_WRITE_UNCONFIRMED')
+    assert.equal(h.node('transfer-status').textContent,
+      '파일이 일부 또는 전부 저장되었을 수 있습니다. 저장 위치의 파일을 확인하기 전에는 다시 저장하지 마세요.')
+    assert.doesNotMatch(h.view.element.textContent, /다른 이름이나 위치|\/private\/write-result/)
+    h.update(); assert.deepEqual(h.flow.snapshot(), raw)
+    for (const selector of [IMPORT, MD, TOML]) { assert.equal(h.node(selector).disabled, true); await h.node(selector).fire() }
+    assert.equal(h.calls.saves.length, 1); assert.equal(h.calls.writes.length, 1)
+  }
+})
+
+test('unknown export first status takes priority over every code without changing its receipt', async () => {
+  for (const code of ['TEXT_FILE_EXISTS', 'PROFILE_EXPORT_SAVE_UNCONFIRMED', 'OTHER_WRITE_ERROR', '']) {
+    const h = fixture(), raw = Object.freeze({ ...h.flow.snapshot(), operation: 'export', status: 'unknown', code, message: '원래 상태 안내' })
+    const before = JSON.stringify(raw)
+    h.view.update({ state: raw, actions: h.actions, exportTarget: target() })
+    assert.equal(h.node('transfer-status').textContent,
+      '파일이 일부 또는 전부 저장되었을 수 있습니다. 저장 위치의 파일을 확인하기 전에는 다시 저장하지 마세요.')
+    assert.equal(h.node('transfer-status').getAttribute('data-state'), 'unknown')
+    assert.equal(h.node('transfer-status').getAttribute('data-code'), code)
+    assert.doesNotMatch(h.view.element.textContent, /다른 이름이나 위치/)
+    for (const selector of [IMPORT, MD, TOML]) { assert.equal(h.node(selector).disabled, true); await h.node(selector).fire() }
+    assert.equal(JSON.stringify(raw), before)
+    assert.equal(h.calls.saves.length, 0); assert.equal(h.calls.writes.length, 0); assert.equal(h.calls.requests.length, 0)
+  }
+})
+
+test('import, cancellation and unrelated failures keep their raw first status instead of borrowing export notices', () => {
+  for (const [operation, status, code] of [
+    ['import', 'unknown', 'PROFILE_EXPORT_SAVE_UNCONFIRMED'], ['import', 'failed', 'TEXT_FILE_EXISTS'],
+    ['export', 'cancelled', 'TEXT_FILE_EXISTS'], ['export', 'failed', 'EEXIST'],
+  ]) {
+    const h = fixture(), raw = Object.freeze({ ...h.flow.snapshot(), operation, status, code, message: '원래 상태 안내' })
+    const before = JSON.stringify(raw)
+    h.view.update({ state: raw, actions: h.actions, exportTarget: target() })
+    assert.equal(h.node('transfer-status').textContent, raw.message)
+    assert.equal(h.node('transfer-status').getAttribute('data-state'), status)
+    assert.equal(h.node('transfer-status').getAttribute('data-code'), code)
+    assert.equal(JSON.stringify(raw), before); assert.equal(h.calls.saves.length, 0); assert.equal(h.calls.requests.length, 0)
+    if (operation === 'import' && status === 'unknown') assert.match(h.view.element.textContent, /Agent 목록에서 결과를 확인/)
+  }
 })
 
 test('recoverable preview errors keep source in the flow without rendering secret raw input', async () => {
