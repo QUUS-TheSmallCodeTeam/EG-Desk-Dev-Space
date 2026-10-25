@@ -7,6 +7,8 @@ import { compileFunction } from 'node:vm';
 import { Readable } from 'node:stream';
 import { readSurfaceSource } from './egdesk-surface-source.mjs';
 import * as ChatState from '../overlay/resources/EGDeskChatState.sys.mjs';
+import * as ChatRunResult from '../overlay/resources/EGDeskChatRunResult.sys.mjs';
+import * as ChatChangeReview from '../overlay/resources/EGDeskChatChangeReview.sys.mjs';
 import * as InputContext from '../overlay/resources/EGDeskInputContext.sys.mjs';
 import { CodexChatRuntime } from '../helper/codex-chat-runtime.mjs';
 import { createCodexEngineAdapter } from '../helper/codex-engine-adapter.mjs';
@@ -61,23 +63,30 @@ class Node {
   constructor(tag, text = '') {
     this.tag = tag; this.text = text; this.children = []; this.attributes = {};
     this.dataset = {}; this.style = {}; this.events = {}; this.disabled = false;
-    this.checked = false; this.value = ''; this.className = ''; this.scrollTop = 0; this.isConnected = true; this.scrollHeight = 40;
+    this.checked = false; this.value = ''; this.className = ''; this.scrollTop = 0; this.scrollLeft = 0; this.isConnected = true; this.scrollHeight = 40; this.parent = null;
   }
-  setAttribute(key, value) { this.attributes[key] = String(value); if (key === 'disabled') this.disabled = true; }
+  setAttribute(key, value) { this.attributes[key] = String(value); if (key === 'disabled') this.disabled = true;
+    if (key.startsWith('data-')) this.dataset[key.slice(5).replace(/-([a-z])/g, (_, char) => char.toUpperCase())] = String(value); }
   getAttribute(key) { return this.attributes[key] ?? null; }
   addEventListener(name, fn) { (this.events[name] ||= []).push(fn); }
-  appendChild(node) { node.parent = this; this.children.push(node); return node; }
-  replaceChildren(...nodes) { this.children = []; nodes.forEach(node => this.appendChild(node)); }
+  removeEventListener(name, fn) { this.events[name] = (this.events[name] || []).filter(listener => listener !== fn); }
+  appendChild(node) { node.remove(); node.parent = this; this.children.push(node); return node; }
+  append(...nodes) { nodes.forEach(node => this.appendChild(node)); }
+  prepend(...nodes) { for (const node of nodes.reverse()) { node.remove(); node.parent = this; this.children.unshift(node); } }
+  replaceChildren(...nodes) { for (const child of this.children) child.parent = null; this.children = []; this.text = ''; nodes.forEach(node => this.appendChild(node)); }
+  replaceWith(node) { const parent = this.parent; if (!parent) return; const index = parent.children.indexOf(this); node.remove(); parent.children[index] = node; node.parent = parent; this.parent = null; }
   contains(node) { return this === node || this.children.some(child => child.contains(node)); }
-  remove() { if (this.parent) this.parent.children = this.parent.children.filter(node => node !== this); }
+  remove() { if (this.parent) this.parent.children = this.parent.children.filter(node => node !== this); this.parent = null; }
   querySelectorAll(selector) {
-    const matches = node => selector.startsWith('.') ? node.className.split(' ').includes(selector.slice(1))
-      : selector.startsWith('#') ? node.getAttribute('id') === selector.slice(1)
-        : node.tag === selector;
+    const matches = node => selector.split(',').some(part => { const selected = part.trim();
+      return selected.startsWith('.') ? node.className.split(' ').includes(selected.slice(1))
+        : selected.startsWith('#') ? node.getAttribute('id') === selected.slice(1)
+          : node.tag === selected; });
     return this.children.flatMap(node => [...(matches(node) ? [node] : []), ...node.querySelectorAll(selector)]);
   }
   querySelector(selector) { return this.querySelectorAll(selector)[0] || null; }
   get textContent() { return this.text + this.children.map(node => node.textContent).join(''); }
+  set textContent(value) { this.replaceChildren(); this.text = String(value); }
   fire(type, data = {}) { return Promise.all((this.events[type] || []).map(fn => fn({ target: this, preventDefault() {}, stopPropagation() {}, ...data }))); }
 }
 const all = node => [node, ...node.children.flatMap(all)];
@@ -106,7 +115,8 @@ function surface({ run = null, thread = {}, auth = {}, fetchJson = async () => (
   const effects = { emits: 0, capture: [], requests: [], ready: 0, timers: 0, synced: [], logs: [], revoked: [] };
   const epochScope = ChatState.createChatEpochScope();
   const userInputDrafts = new Map();
-  const globals = { ChatState, InputContext, document, state, protocol, userInputDrafts, epochScope,
+  const globals = { ChatState, ChatRunResult, ChatChangeReview, InputContext, document, state, protocol, userInputDrafts, epochScope,
+    window: { AbortController }, queueMicrotask,
     captureChatInputs, captureManagedFileInput, boardNotice: text => effects.logs.push(text),
     SELF_MEMBER: 'self', cloneJson: clone, formatMessageTime: String, contextBoardTitle: () => '',
     openChatFileReference: () => assert.fail('unexpected file open'), currentViewportAgendaLabel: () => '',
@@ -127,7 +137,8 @@ function surface({ run = null, thread = {}, auth = {}, fetchJson = async () => (
   };
   const definitions = ['el', 'getCodexThreadById', 'getActiveCodexThread', 'getCodexThreadDraft', 'createCodexMessage',
     'codexRuns', 'codexRunLabel', 'codexUserInputBlock', 'pruneUserInputDrafts', 'contextResolverRecordSection',
-    'codexSubAgentSection', 'renderCodexActivityPanel', 'serializeDeskSnapshot', 'codexMessageAvatarFace',
+    'codexSubAgentSection', 'codexActivityDetailTarget', 'codexCommandInfo', 'createCodexActivityReadScope',
+    'replaceCodexActivityDetails', 'createCodexActivityDetailsView', 'renderCodexActivityPanel', 'serializeDeskSnapshot', 'codexMessageAvatarFace',
     'codexAgentWorkingRow'].map(name => functionSource(name)).join('\n');
   if (nativeReady) delete globals.ensureNativeReadyForSend;
   if (realCapture) delete globals.captureThreadInputs;
@@ -135,9 +146,9 @@ function surface({ run = null, thread = {}, auth = {}, fetchJson = async () => (
     ${functionSource('requireClaudeContext', '    ')}
     ${realCapture ? functionSource('captureThreadInputs', '    ') : ''}
     ${nativeReady ? functionSource('ensureNativeReadyForSend', '    ') : ''}
-    let activityPanelComposing = false, activityPanelDeferred = false;
+    let activityPanelComposing = false, activityPanelDeferred = false, activityDetailsGeneration = 0, activityDetailsView = null;
     ${source.match(/^  const userInputDraftKey = .*;$/m)[0]}
-    const bridge = { ${['replyApproval', 'replyUserInput', 'sendMessage', 'captureInputs', 'readInput', 'setThreadEngine', 'interrupt'].map(methodSource).join(',\n')} };
+    const bridge = { ${['createActivityReadScope', 'replyApproval', 'replyUserInput', 'sendMessage', 'captureInputs', 'readInput', 'setThreadEngine', 'interrupt'].map(methodSource).join(',\n')} };
     return { ...bridge, render: renderCodexActivityPanel, question: codexUserInputBlock, serialize: serializeDeskSnapshot,
       refresh: refreshConversation, workingRow: codexAgentWorkingRow, el };`, globals);
   state.codexBridge = { ...api, refreshConversation: () => {} };

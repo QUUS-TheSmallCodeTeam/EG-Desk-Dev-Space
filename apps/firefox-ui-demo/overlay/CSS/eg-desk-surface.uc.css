@@ -4345,6 +4345,52 @@
 .egd-codex-activity-row button, .egd-codex-approval-pending p { overflow-wrap: anywhere; text-align: left; }
 .egd-codex-approval-pending { margin: 12px 0; padding: 14px; background: var(--egd-note-soft); border: 1px solid var(--egd-note-line); border-radius: 10px; }
 
+/* Retained Chat details stay inside the activity record and open on demand.
+   Shared RunResult typography/spacing is owned by .egdesk-run-result-* below. */
+.egd-chat-retained-detail,
+.egd-chat-command-result,
+.egdesk-chat-change-review,
+.egdesk-chat-change-content {
+  box-sizing: border-box;
+  min-width: 0;
+  max-width: 100%;
+}
+.egd-chat-command-result { display: flex; flex-direction: column; gap: 8px; }
+.egd-chat-command-result > button { align-self: flex-start; max-width: 100%; }
+.egd-chat-command-result > p { margin: 0; }
+.egd-chat-command-result > p:empty { display: none; }
+.egd-chat-command-info { min-width: 0; max-width: 100%; margin-top: 8px; }
+.egd-chat-command-info > summary { cursor: pointer; padding-block: 4px; }
+.egd-chat-command-info > pre { margin-top: 6px; }
+.egd-chat-retained-note { margin: 8px 0 4px; color: var(--egd-on-surface-variant); overflow-wrap: anywhere; }
+.egdesk-chat-change-review { margin-top: 4px; }
+.egdesk-chat-change-summary,
+.egdesk-chat-change-review > .egdesk-change-approval-details > .egdesk-change-approval-summary { padding: 6px 0; cursor: pointer; overflow-wrap: anywhere; }
+.egdesk-chat-change-content { display: flex; flex-direction: column; gap: 8px; padding-top: 6px; }
+.egdesk-chat-change-note { margin: 0; color: var(--egd-on-surface-variant); overflow-wrap: anywhere; }
+.egdesk-chat-change-review .egdesk-diff-view,
+.egdesk-chat-change-review .egdesk-diff-file { min-width: 0; max-width: 100%; box-sizing: border-box; }
+.egdesk-chat-change-review .egdesk-diff-summary,
+.egdesk-chat-change-review .egdesk-diff-note,
+.egdesk-chat-change-review .egdesk-diff-file-move { margin: 6px 0; overflow-wrap: anywhere; }
+.egdesk-chat-change-review .egdesk-diff-file { margin: 8px 0; }
+.egdesk-chat-change-review .egdesk-diff-file-summary { padding: 6px 0; cursor: pointer; overflow-wrap: anywhere; }
+.egdesk-chat-change-review .egdesk-diff-file-summary > span { margin-inline-end: 8px; }
+.egdesk-chat-change-review .egdesk-diff-file-change,
+.egdesk-chat-change-review .egdesk-diff-file-added,
+.egdesk-chat-change-review .egdesk-diff-file-removed { display: inline-block; white-space: nowrap; }
+.egdesk-chat-change-review .egdesk-diff-hunk,
+.egdesk-chat-change-review .egdesk-diff-raw { box-sizing: border-box; min-width: 0; max-width: 100%; max-height: 18rem; overflow: auto; padding-bottom: 12px; background: var(--egd-window-alt); border-radius: 7px; }
+.egdesk-chat-change-review .egdesk-diff-raw { white-space: pre; overflow-wrap: normal; word-break: normal; }
+.egdesk-chat-change-review .egdesk-diff-hunk-header { margin: 0; padding: 6px 8px; color: var(--egd-on-surface-variant); font-size: 11px; }
+.egdesk-chat-change-review .egdesk-diff-lines { width: max-content; min-width: 100%; box-sizing: border-box; margin: 0; padding: 0; list-style: none; font: 12px/1.65 ui-monospace, monospace; }
+.egdesk-chat-change-review .egdesk-diff-line { display: grid; grid-template-columns: 4ch 4ch 2ch minmax(0, 1fr); padding-inline: 4px 8px; }
+.egdesk-chat-change-review .egdesk-diff-ln { color: var(--egd-on-surface-variant); text-align: right; padding-right: 1ch; }
+.egdesk-chat-change-review .egdesk-diff-sign { text-align: center; }
+.egdesk-chat-change-review .egdesk-diff-text { white-space: pre; font: inherit; text-decoration: none; }
+.egdesk-chat-change-review .egdesk-diff-line-add { background: var(--egd-success-bg); }
+.egdesk-chat-change-review .egdesk-diff-line-delete { background: var(--egd-danger-bg); }
+
 .egd-codex-message-row-assistant,
 .egd-codex-message-row-system {
   justify-content: flex-start;
@@ -4776,7 +4822,7 @@
 .egdesk-run-result-meta { display: flex; flex-wrap: wrap; align-items: baseline; gap: 6px 12px; min-width: 0; max-width: 100%; margin: 8px 0; }
 .egdesk-run-result .egdesk-run-result-command,
 .egdesk-run-result .egdesk-run-result-tail { display: block; width: 100%; min-width: 0; max-width: 100%; box-sizing: border-box; overflow-x: auto; white-space: pre; overflow-wrap: normal; word-break: normal; font-family: ui-monospace, monospace; }
-.egdesk-run-result-command { flex: 0 1 100%; }
+.egdesk-run-result-command { flex: 0 1 100%; line-height: 1.5; padding-bottom: 16px; min-height: calc(1.5em + 16px); }
 .egdesk-run-result .egdesk-run-result-tail { max-height: 18rem; overflow-y: auto; margin: 8px 0; padding: 8px; font-size: 12px; }
 .egdesk-run-result-command:focus-visible, .egdesk-run-result-tail:focus-visible { outline: var(--egd-focus-outline); outline-offset: var(--egd-focus-outline-offset); }
 .egdesk-run-result-failures { min-width: 0; max-width: 100%; box-sizing: border-box; padding-left: 20px; }
@@ -6336,10 +6382,26 @@
 }
 #egd-codex-input-panel.egd-chat-project-panel .egd-chat-project-board {
   box-sizing: border-box;
+  display: block;
+  contain: inline-size;
+  width: 100%;
+  /* Firefox chrome adds 0.125rem on each side; outside a 100% border-box
+     these native control margins overflow the scrollable picker body. */
+  margin-inline: 0;
+  min-width: 0;
+  max-width: 100%;
+  font: inherit;
+}
+#egd-codex-input-panel.egd-chat-project-panel > header,
+#egd-codex-input-panel.egd-chat-project-panel > .egd-codex-input-panel-body {
+  box-sizing: border-box;
   width: 100%;
   min-width: 0;
   max-width: 100%;
+  overflow-wrap: anywhere;
 }
+#egd-codex-input-panel.egd-chat-project-panel > header > strong { min-width: 0; }
+#egd-codex-input-panel.egd-chat-project-panel > header > button { flex: 0 0 auto; }
 #egd-codex-input-panel.egd-chat-project-panel .egd-chat-project-details {
   min-width: 0;
   max-width: 100%;

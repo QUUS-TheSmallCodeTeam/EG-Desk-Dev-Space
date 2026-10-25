@@ -7,6 +7,8 @@ import { readSurfaceSource } from './egdesk-surface-source.mjs';
 import { initialSurfaceMode, shouldFocusInitialBrowser, planBoardProjection, snapshotBoardProjection, remapMemberReferences, recoverDeskSnapshot, canPersistDeskSession, ownedProjectionMembers, missingProjectionMembers, fitSurfaceCamera, surfaceSemanticLevel, surfaceProximityClusters } from '../overlay/resources/EGDeskSurfaceState.sys.mjs';
 import * as Surface from '../overlay/resources/EGDeskSurfaceState.sys.mjs';
 import * as Chat from '../overlay/resources/EGDeskChatState.sys.mjs';
+import * as ChatRunResult from '../overlay/resources/EGDeskChatRunResult.sys.mjs';
+import * as ChatChangeReview from '../overlay/resources/EGDeskChatChangeReview.sys.mjs';
 import * as Markdown from '../overlay/resources/EGDeskMarkdown.sys.mjs';
 import * as InputContext from '../overlay/resources/EGDeskInputContext.sys.mjs';
 import * as Briefing from '../overlay/resources/EGDeskBriefingState.sys.mjs';
@@ -11047,8 +11049,8 @@ test('CU-01 production Chat: the line sits under the last shown answer of the ru
   open('thread-1', { activityId: 'cua-2', runId: 'turn-a' });
   open('thread-1');
   assert.deepEqual(renders, [
-    { activityThreadId: 'thread-1', activityFocus: { threadId: 'thread-1', activityId: 'cua-2', runId: 'turn-a' } },
-    { activityThreadId: 'thread-1', activityFocus: null },
+    { activityThreadId: 'thread-1', activityFocus: { threadId: 'thread-1', activityId: 'cua-2', runId: 'turn-a' }, activityRoomGeneration: 1 },
+    { activityThreadId: 'thread-1', activityFocus: null, activityRoomGeneration: 1 },
   ]);
   // The production working row carries the computer state for its colour.
   const document = settingsFakeDocument();
@@ -11573,24 +11575,50 @@ function requestProjectDOM() {
   class Node {
     constructor(tag, text = '') {
       Object.assign(this, { tag, text, children: [], attributes: {}, dataset: {}, listeners: {}, style: {},
-        className: '', parent: null, ownerDocument: document, disabled: false, value: '' });
+        className: '', parent: null, ownerDocument: document, disabled: false, value: '', scrollTop: 0, scrollLeft: 0, _open: false });
+      this.classList = { contains: name => this.className.split(' ').includes(name),
+        add: name => { if (!this.classList.contains(name)) this.className += ' ' + name; } };
     }
+    get tagName() { return this.tag.toUpperCase(); }
     get isConnected() { return this === document.documentElement || !!this.parent?.isConnected; }
-    appendChild(child) { this.children.push(child); child.parent = this; return child; }
+    appendChild(child) { child.remove(); this.children.push(child); child.parent = this; return child; }
+    append(...children) { children.forEach(child => this.appendChild(child)); }
+    prepend(...children) { for (const child of children.reverse()) { child.remove(); this.children.unshift(child); child.parent = this; } }
     replaceChildren(...children) { for (const child of this.children) child.parent = null; this.children = []; this.text = ''; children.forEach(child => this.appendChild(child)); }
+    replaceWith(node) { const parent = this.parent; if (!parent) return; const index = parent.children.indexOf(this); node.remove(); parent.children[index] = node; node.parent = parent; this.parent = null; }
     remove() { if (this.parent) this.parent.children = this.parent.children.filter(child => child !== this); this.parent = null; }
     setAttribute(key, value) {
       this.attributes[key] = String(value);
       if (key === 'id' || key === 'value') this[key] = String(value);
       if (key === 'disabled') this.disabled = true;
+      if (key.startsWith('data-')) this.dataset[key.slice(5).replace(/-([a-z])/g, (_, letter) => letter.toUpperCase())] = String(value);
     }
+    getAttribute(key) { return this.attributes[key] ?? null; }
     addEventListener(type, callback) { (this.listeners[type] ||= []).push(callback); }
+    removeEventListener(type, callback) { this.listeners[type] = (this.listeners[type] || []).filter(listener => listener !== callback); }
+    contains(node) { return node === this || this.children.some(child => child.contains(node)); }
+    matches(selector) {
+      const tag = selector.match(/^[a-z][\w-]*/i)?.[0];
+      if (tag && this.tag !== tag) return false;
+      for (const [, name] of selector.matchAll(/\.([\w-]+)/g)) if (!this.classList.contains(name)) return false;
+      for (const [, name, value] of selector.matchAll(/\[([^=\]]+)(?:="([^"]*)")?\]/g)) {
+        const actual = name.startsWith('data-') ? this.dataset[name.slice(5).replace(/-([a-z])/g, (_, letter) => letter.toUpperCase())] : this.getAttribute(name);
+        if (actual == null || value !== undefined && actual !== value) return false;
+      }
+      return true;
+    }
+    querySelectorAll(selectors) { return this.all(node => selectors.split(',').some(selector => node.matches(selector.trim()))); }
+    querySelector(selector) { return this.querySelectorAll(selector)[0] || null; }
+    get open() { return this._open; }
+    set open(value) { if (this._open === !!value) return; this._open = !!value; queueMicrotask(() => { void this.dispatch('toggle'); }); }
     get textContent() { return this.text + this.children.map(child => child.textContent).join(''); }
     set textContent(value) { this.replaceChildren(); this.text = String(value); }
     set innerHTML(_) { assert.fail('project UI must use text nodes'); }
     all(predicate) { return this.children.flatMap(child => [...(predicate(child) ? [child] : []), ...child.all(predicate)]); }
     testid(id) { return this.all(child => child.dataset.testid === id)[0] || null; }
     focus() { document.activeElement = this; }
+    scrollIntoView() {}
+    async click() { await this.dispatch('click'); if (this.tag === 'summary' && this.parent?.tag === 'details') this.parent.open = !this.parent.open; await settle(); }
     async dispatch(type, fields = {}) {
       if (type === 'click' && this.disabled) return;
       const event = { target: this, preventDefault() {}, stopPropagation() {}, ...fields };
@@ -12124,4 +12152,319 @@ test('File-only compact focus uses the real existing camera transition, retainin
   }
   state.surface.restoring = true; assert.equal(focus(card), false);
   assert.equal(cameraTargets.length, 1);
+});
+
+// The actual Surface panel, real retained-output modules and scoped bridge
+// adapter together. No provider, OS input, network listener or filesystem open.
+function activityDetailsHarness({ fetchRead, approval = true } = {}) {
+  const document = requestProjectDOM();
+  const thread = { id: 'room-original', clientBindingId: 'binding-original', conversationId: 'conversation / original', engineId: 'codex', messages: [] };
+  const command = { id: 'command / original', kind: 'commandExecution', title: '명령 실행', status: 'completed',
+    detail: { command: 'node --test', cwd: '/not-authority', exitCode: 0, durationMs: 1250 } };
+  const change = { id: 'change / original', kind: 'fileChange', title: '파일 변경', status: 'completed', detail: { text: '보존된 변경' } };
+  const pending = { approvalId: 'approval-original', itemId: 'approval-item-original', kind: 'fileChange', status: 'pending',
+    choices: ['accept', 'decline'], reason: '확인할 변경', paths: ['/not-authority/code.js'] };
+  const run = { conversationId: thread.conversationId, runId: 'run / original', clientThreadId: thread.clientBindingId, localThreadId: thread.id,
+    status: 'inProgress', messages: [], activities: [command, change], pendingApprovals: approval ? [pending] : [], pendingUserInputs: [], subAgents: [] };
+  const protocol = Chat.createChatProtocolState();
+  protocol.runs[Chat.runKey(run.conversationId, run.runId)] = run;
+  const state = { codex: { threads: [thread], activeThreadId: thread.id, activityThreadId: thread.id, chatProtocol: protocol } };
+  const calls = [], decisions = [], scopes = [];
+  const epochScope = Chat.createChatEpochScope();
+  const packet = target => ({ protocolVersion: 1, ...target, retained: true, complete: true,
+    head: '', tail: '# tests 2\n# pass 2\n# fail 0\n', totalBytes: 31, omittedBytes: 0 });
+  const changes = target => ({ protocolVersion: 1, conversationId: target.conversationId, runId: target.runId, retained: true,
+    items: [{ itemId: target.itemId, status: 'completed', files: [{ path: '/not-authority/code.js', kind: 'update',
+      diff: '@@ -1 +1 @@\n-old\n+kept change\n', omitted: null }] }], turn: null });
+  const fetchJson = async (path, options) => {
+    const url = new URL(path, 'http://unused.invalid');
+    const target = Object.fromEntries(url.searchParams);
+    calls.push({ path, options, target });
+    assert.equal(options.method, 'GET');
+    assert.equal(Object.hasOwn(options, 'body'), false);
+    assert.ok(['/chat/command-output', '/chat/run-changes'].includes(url.pathname));
+    return fetchRead ? fetchRead(url.pathname, target, options) : url.pathname === '/chat/command-output' ? packet(target) : changes(target);
+  };
+  const deps = { state, document, window: { AbortController }, ChatState: Chat, ChatRunResult, ChatChangeReview,
+    pruneUserInputDrafts() {}, contextResolverRecordSection: () => null, codexSubAgentSection: () => null,
+    formatMessageTime: () => '', queueMicrotask, openChatFileReference: () => assert.fail('no inferred FileView authority'),
+    codexUserInputBlock: () => assert.fail('this fixture has no Agent answer'), userInputDrafts: new Map(), userInputDraftKey: () => '' };
+  const names = ['el', 'getCodexThreadById', 'codexRuns', 'codexRunLabel', 'openCodexActivityPanel', 'codexActivityDetailTarget',
+    'codexCommandInfo', 'createCodexActivityReadScope', 'replaceCodexActivityDetails', 'createCodexActivityDetailsView', 'renderCodexActivityPanel'];
+  const api = compileFunction('let activityPanelComposing = false, activityPanelDeferred = false, activityDetailsGeneration = 0, activityDetailsView = null;\n'
+    + names.map(declaration).join('\n') + '\nreturn { ' + names.join(', ') + ', generation: () => activityDetailsGeneration };', Object.keys(deps))(...Object.values(deps));
+  const bridgeFactory = requestProjectBridgeMethod('createActivityReadScope', { createCodexActivityReadScope: api.createCodexActivityReadScope, epochScope, fetchJson });
+  state.codexBridge = { createActivityReadScope: (...args) => { const scope = bridgeFactory(...args); scopes.push(scope); return scope; },
+    replyApproval: request => decisions.push(request), refreshConversation: () => assert.fail('no implicit conversation refresh') };
+  const panel = () => document.getElementById('egd-codex-activity-panel');
+  const result = () => panel().testid('chat-command-result');
+  return { ...api, state, document, thread, run, command, change, pending, calls, decisions, scopes, epochScope, packet, changes, panel, result,
+    async openResult() { await result().querySelector('button').click(); },
+    async openChanges(kind = 'activity') { const node = panel().testid(kind === 'approval' ? 'chat-approval-changes' : 'chat-activity-changes'); await node.querySelector('summary').click(); return node; },
+  };
+}
+
+test('Chat retained details integration: actual activity/approval DOM opens only exact original-ID GETs', async () => {
+  const h = activityDetailsHarness();
+  h.renderCodexActivityPanel();
+  assert.deepEqual(h.calls, []);
+  assert.equal(h.result().getAttribute('data-state'), 'closed');
+  assert.equal(h.panel().testid('chat-activity-changes').querySelector('details').open, false);
+  assert.equal(h.panel().testid('chat-approval-changes').querySelector('details').open, false);
+  const storedBefore = JSON.stringify(h.state.codex);
+  await h.openResult(); await h.openChanges(); await h.openChanges('approval');
+  assert.equal(JSON.stringify(h.state.codex), storedBefore, 'retained text and view state never enter persisted Chat state');
+  assert.deepEqual(h.calls.map(call => call.target), [h.command.id, h.change.id, h.pending.itemId].map(itemId => ({ conversationId: h.run.conversationId, runId: h.run.runId, itemId })));
+  assert.equal(h.result().querySelector('.egdesk-run-result').getAttribute('data-outcome'), 'passed');
+  assert.equal(h.panel().querySelectorAll('.egdesk-diff-view').length, 2);
+  assert.deepEqual(h.decisions, []);
+  assert.equal(h.panel().testid('chat-approval-changes').querySelectorAll('button').length, 0, 'diff adds no decision/FileView controls');
+  const choice = h.panel().querySelectorAll('[data-testid="chat-approval-choice"]').find(node => node.dataset.decision === 'decline');
+  await choice.click();
+  assert.deepEqual(h.decisions, [{ approvalId: h.pending.approvalId, conversationId: h.run.conversationId, runId: h.run.runId, decision: 'decline' }]);
+  assert.equal(h.calls.length, 3, 'existing approval controls alone own decisions');
+  await settle(); assert.equal(h.calls.length, 3, 'read completion does not emit a render/read loop');
+});
+
+test('Chat retained details integration: unrelated same-run SSE preserves open readers, local scroll and zero extra GET', async () => {
+  const h = activityDetailsHarness(); h.renderCodexActivityPanel();
+  await h.openResult(); const diff = await h.openChanges(); const approval = await h.openChanges('approval');
+  const result = h.result(), tail = result.querySelector('.egdesk-run-result-tail'), hunk = diff.querySelector('.egdesk-diff-hunk');
+  tail.scrollTop = 83; tail.scrollLeft = 41; hunk.scrollTop = 29; hunk.scrollLeft = 76;
+  const output = result.querySelector('.egdesk-run-result-output'); output.open = true; await settle();
+  const generation = h.generation();
+  const replace = h.panel().replaceChildren.bind(h.panel());
+  h.panel().replaceChildren = (...children) => { replace(...children); tail.scrollTop = 0; tail.scrollLeft = 0; hunk.scrollTop = 0; hunk.scrollLeft = 0; };
+  h.run.summary = 'a later assistant delta';
+  h.run.activities.push({ id: 'unrelated', kind: 'reasoning', title: '계속 작업 중', status: 'inProgress' });
+  h.renderCodexActivityPanel(); await settle();
+  assert.equal(h.result(), result); assert.equal(h.panel().testid('chat-activity-changes'), diff); assert.equal(h.panel().testid('chat-approval-changes'), approval);
+  assert.equal(h.generation(), generation); assert.equal(h.scopes.length, 1);
+  assert.equal(output.open, true); assert.equal(diff.querySelector('details').open, true); assert.equal(approval.querySelector('details').open, true);
+  assert.deepEqual([tail.scrollTop, tail.scrollLeft, hunk.scrollTop, hunk.scrollLeft], [83, 41, 29, 76]);
+  assert.match(h.panel().textContent, /a later assistant delta/);
+  assert.equal(h.calls.length, 3); assert.deepEqual(h.decisions, []);
+  assert.equal(h.panel().testid('chat-activity-detail-refresh'), null);
+});
+
+test('Chat retained details integration: command metadata is collapsed after the primary result, with command-scoped status', async () => {
+  const h = activityDetailsHarness(); h.state.codex.connected = true; h.renderCodexActivityPanel();
+  const row = h.panel().querySelectorAll('[data-activity-id]').find(node => node.dataset.activityId === h.command.id);
+  const info = row.testid('chat-command-info');
+  assert.ok(info); assert.equal(info.tag, 'details'); assert.equal(info.open, false);
+  assert.equal(info.querySelector('summary').textContent, '명령 정보');
+  assert.deepEqual(info.querySelectorAll('pre').map(node => node.textContent),
+    ['command: node --test', 'cwd: /not-authority', 'exitCode: 0', 'durationMs: 1250']);
+  assert.equal(row.children.filter(node => node.tag === 'pre').length, 0, 'no four-block raw metadata before the primary result');
+  assert.equal(info.parent.children[0], h.result(), 'RunResult precedes the raw-information disclosure');
+  assert.ok(row.children.some(node => node.tag === 'span' && node.textContent === '명령 완료'));
+  assert.equal(h.panel().querySelector('h4').textContent, '승인 대기', 'overall run label remains independently awaiting approval');
+  assert.equal(h.panel().testid('chat-approval').querySelector('strong').textContent, '승인 필요');
+  assert.equal(h.pending.status, 'pending'); assert.deepEqual(h.decisions, []);
+  await info.querySelector('summary').click();
+  assert.equal(info.open, true); assert.deepEqual(h.calls, [], 'raw metadata opening performs no retained-output read');
+  await h.openResult();
+  assert.equal(h.result().querySelector('.egdesk-run-result').getAttribute('data-outcome'), 'passed');
+  assert.equal(h.panel().querySelector('h4').textContent, '승인 대기');
+  assert.equal(h.calls.length, 1); assert.equal(h.pending.status, 'pending');
+});
+
+test('Chat retained details integration: expanded command information survives unrelated SSE without any GET', async () => {
+  const h = activityDetailsHarness(); h.renderCodexActivityPanel();
+  const info = h.panel().testid('chat-command-info'); await info.querySelector('summary').click();
+  const before = info.textContent;
+  h.run.summary = 'later work'; h.run.activities.push({ id: 'later', kind: 'reasoning', detail: { text: 'separate activity' } });
+  h.renderCodexActivityPanel(); await settle();
+  assert.equal(h.panel().testid('chat-command-info'), info); assert.equal(info.open, true); assert.equal(info.textContent, before);
+  assert.deepEqual(h.calls, []); assert.deepEqual(h.decisions, []);
+  h.command.detail = { ...h.command.detail, cwd: '/changed-location' }; h.renderCodexActivityPanel();
+  assert.equal(h.panel().testid('chat-command-info'), info); assert.equal(info.textContent, before);
+  assert.match(info.parent.textContent, /이전 조회 기록/); assert.deepEqual(h.calls, []);
+});
+
+test('Chat retained details integration: unqueryable command records still preserve all raw information inside details', () => {
+  const h = activityDetailsHarness(); h.command.id = '';
+  h.renderCodexActivityPanel();
+  assert.equal(h.result(), null);
+  const info = h.panel().testid('chat-command-info');
+  assert.ok(info); assert.equal(info.open, false);
+  assert.match(info.textContent, /command: node --test/); assert.match(info.textContent, /durationMs: 1250/);
+  h.command.detail = 'retained original command metadata'; h.renderCodexActivityPanel();
+  assert.equal(h.panel().testid('chat-command-info').querySelector('pre').textContent, 'retained original command metadata');
+  assert.deepEqual(h.calls, []);
+});
+
+test('Chat retained details integration: changed source keeps previous read, fences old callback, refresh is explicit', async () => {
+  const h = activityDetailsHarness(); h.renderCodexActivityPanel(); await h.openResult();
+  const previous = h.result(), kept = previous.textContent;
+  h.command.detail = { ...h.command.detail, exitCode: 1 }; h.command.status = 'failed';
+  h.renderCodexActivityPanel();
+  assert.equal(h.result(), previous); assert.equal(previous.textContent, kept);
+  assert.match(previous.parent.textContent, /이전 조회 기록/);
+  assert.equal(previous.querySelector('button').disabled, true);
+  assert.equal(h.calls.length, 1);
+  await h.panel().testid('chat-activity-detail-refresh').click();
+  assert.notEqual(h.result(), previous); assert.equal(previous.getAttribute('data-state'), 'disposed');
+  assert.equal(h.result().querySelector('.egdesk-run-result').getAttribute('data-outcome'), 'failed');
+  assert.equal(h.calls.length, 2); assert.deepEqual(h.calls[0].target, h.calls[1].target);
+  h.renderCodexActivityPanel(); await settle(); assert.equal(h.calls.length, 2);
+  const pending = requestProjectDeferred(), late = activityDetailsHarness({ fetchRead: () => pending.promise });
+  late.renderCodexActivityPanel(); const opening = late.openResult();
+  late.command.detail = { ...late.command.detail, command: 'changed command' }; late.renderCodexActivityPanel();
+  pending.resolve(late.packet(late.calls[0].target)); await opening;
+  assert.equal(late.result().querySelector('.egdesk-run-result'), null, 'a reply for the previous source snapshot cannot become the new result');
+  assert.match(late.result().parent.textContent, /이전 조회 기록/);
+});
+
+test('Chat retained details integration: IME defers actual replacement without retiring or fetching readers', async () => {
+  const pending = requestProjectDeferred(), h = activityDetailsHarness({ fetchRead: () => pending.promise });
+  h.renderCodexActivityPanel(); const result = h.result(), opening = h.openResult();
+  const input = h.document.createElement('input'); h.panel().appendChild(input); input.focus();
+  await h.panel().dispatch('compositionstart');
+  h.run.summary = 'arrived during composition'; h.renderCodexActivityPanel();
+  assert.equal(h.result(), result); assert.equal(h.scopes.length, 1); assert.equal(h.calls[0].options.signal.aborted, false);
+  pending.resolve(h.packet(h.calls[0].target)); await opening;
+  assert.equal(result.getAttribute('data-state'), 'ready');
+  await h.panel().dispatch('compositionend'); await settle();
+  assert.equal(h.result(), result); assert.match(h.panel().textContent, /arrived during composition/); assert.equal(h.calls.length, 1);
+});
+
+test('Chat retained details integration: room, binding, account, close and removal fence pending reads', async t => {
+  const changes = {
+    room: h => { h.state.codex.threads.push({ id: 'other', clientBindingId: 'other-binding', messages: [] }); h.openCodexActivityPanel('other'); h.openCodexActivityPanel(h.thread.id); },
+    binding: h => { h.thread.clientBindingId = 'new-binding'; h.renderCodexActivityPanel(); },
+    account: h => { h.epochScope.reset('codex'); },
+    close: async h => { await h.panel().querySelector('[aria-label="활동 기록 닫기"]').click(); },
+    removed: h => { h.run.activities = []; h.renderCodexActivityPanel(); },
+  };
+  for (const [name, change] of Object.entries(changes)) await t.test(name, async () => {
+    const pending = requestProjectDeferred(), h = activityDetailsHarness({ fetchRead: () => pending.promise });
+    h.renderCodexActivityPanel(); const result = h.result(), opening = h.openResult();
+    await change(h);
+    pending.resolve(h.packet(h.calls[0].target)); await opening;
+    assert.equal(result.getAttribute('data-state'), 'disposed');
+    assert.equal(result.querySelector('.egdesk-run-result'), null);
+    assert.equal(h.calls[0].options.signal.aborted, true);
+    assert.equal(h.calls.length, 1); assert.deepEqual(h.decisions, []);
+  });
+});
+
+test('Chat retained details integration: original pending approval identity cannot survive resolution/replacement', async t => {
+  for (const kind of ['resolved', 'replacement', 'item', 'approvalId', 'replyPending', 'stale']) await t.test(kind, async () => {
+    const pending = requestProjectDeferred(), h = activityDetailsHarness({ fetchRead: () => pending.promise });
+    h.renderCodexActivityPanel(); const review = h.panel().testid('chat-approval-changes');
+    review.querySelector('details').open = true; await settle();
+    if (kind === 'resolved') h.run.pendingApprovals = [];
+    else if (kind === 'replacement') h.run.pendingApprovals = [{ ...h.pending }];
+    else if (kind === 'item') h.pending.itemId = 'different-item';
+    else if (kind === 'approvalId') h.pending.approvalId = 'different-approval';
+    else h.pending[kind] = true;
+    // Reject a late response even before the scheduled SSE render runs.
+    pending.resolve(h.changes(h.calls[0].target)); await settle();
+    assert.equal(review.querySelector('.egdesk-diff-view'), null);
+    h.renderCodexActivityPanel();
+    assert.notEqual(h.panel().testid('chat-approval-changes'), review);
+    assert.equal(review.querySelector('details').open, false);
+    assert.equal(h.calls.length, 1); assert.deepEqual(h.decisions, []);
+  });
+});
+
+test('Chat retained details integration: exact IDs and retained account binding are required before any GET', async t => {
+  for (const field of ['conversationId', 'runId', 'itemId']) await t.test(field, async () => {
+    const h = activityDetailsHarness();
+    if (field === 'itemId') h.command.id = '';
+    else h.run[field] = '';
+    h.renderCodexActivityPanel();
+    assert.equal(h.result(), null); assert.deepEqual(h.calls, []);
+  });
+  const h = activityDetailsHarness(); h.renderCodexActivityPanel();
+  const scope = h.scopes[0];
+  await assert.rejects(scope.readCommandOutput({ conversationId: 'another-conversation', runId: h.run.runId, itemId: h.command.id }));
+  await assert.rejects(scope.readRunChanges({ conversationId: h.run.conversationId, runId: 'another-run', itemId: h.change.id }));
+  await assert.rejects(scope.readRunChanges({ conversationId: h.run.conversationId, runId: h.run.runId, itemId: 'another-item' }));
+  await assert.rejects(scope.readCommandOutput({ conversationId: h.run.conversationId, runId: h.run.runId, itemId: h.change.id }));
+  assert.deepEqual(h.calls, []);
+  assert.doesNotMatch(declaration('createCodexActivityDetailsView'), /projectRoot|onOpenLocation|onOpenFile|getVerifiedOrigin|activeBoard|activeProjectionId/);
+  assert.doesNotMatch(declaration('createCodexActivityReadScope'), /emit\(|POST|setTimeout|setInterval/);
+});
+
+test('Chat retained details integration: changing any original ID before a late reply cannot display it', async t => {
+  for (const field of ['conversationId', 'runId', 'itemId']) await t.test(field, async () => {
+    const pending = requestProjectDeferred(), h = activityDetailsHarness({ fetchRead: () => pending.promise });
+    h.renderCodexActivityPanel(); const result = h.result(), opening = h.openResult();
+    if (field === 'itemId') h.command.id = 'changed-item';
+    else h.run[field] = 'changed-' + field;
+    pending.resolve(h.packet(h.calls[0].target)); await opening;
+    assert.equal(result.querySelector('.egdesk-run-result'), null);
+    assert.equal(h.calls.length, 1);
+    h.renderCodexActivityPanel(); assert.equal(result.getAttribute('data-state'), 'disposed');
+    assert.equal(h.calls.length, 1, 'replacement never silently reads the newly identified item');
+  });
+});
+
+test('Chat retained details integration: changed diff preserves previous text until explicit refresh', async () => {
+  const h = activityDetailsHarness(); h.renderCodexActivityPanel();
+  const previous = await h.openChanges(), text = previous.textContent;
+  h.change.detail = { text: 'new source snapshot' }; h.renderCodexActivityPanel();
+  assert.equal(h.panel().testid('chat-activity-changes'), previous); assert.equal(previous.textContent, text);
+  assert.match(previous.parent.textContent, /이전 조회 기록/); assert.equal(h.calls.length, 1);
+  await previous.parent.testid('chat-activity-detail-refresh').click();
+  const refreshed = h.panel().testid('chat-activity-changes');
+  assert.notEqual(refreshed, previous); assert.equal(previous.querySelector('details').open, false);
+  assert.equal(refreshed.querySelector('details').open, true); assert.equal(refreshed.getAttribute('data-state'), 'ready');
+  assert.equal(h.calls.length, 2); assert.deepEqual(h.calls[0].target, h.calls[1].target); assert.deepEqual(h.decisions, []);
+});
+
+test('Chat retained details integration: unopened changed items remain collapsed with no false previous-read notice', async () => {
+  const h = activityDetailsHarness(); h.renderCodexActivityPanel();
+  const result = h.result(), diff = h.panel().testid('chat-activity-changes');
+  h.command.detail = { ...h.command.detail, command: 'updated command' }; h.change.detail = { text: 'updated change' };
+  h.renderCodexActivityPanel();
+  assert.notEqual(h.result(), result); assert.notEqual(h.panel().testid('chat-activity-changes'), diff);
+  assert.equal(h.result().getAttribute('data-state'), 'closed');
+  assert.equal(h.panel().testid('chat-activity-changes').querySelector('details').open, false);
+  assert.equal(h.panel().testid('chat-activity-detail-refresh'), null);
+  assert.doesNotMatch(h.panel().textContent, /이전 조회 기록/); assert.deepEqual(h.calls, []);
+});
+
+test('Chat retained details integration: account invalidation also disables an explicit refresh left on a stale record', async () => {
+  const h = activityDetailsHarness(); h.renderCodexActivityPanel(); await h.openResult();
+  h.command.status = 'failed'; h.renderCodexActivityPanel();
+  const refresh = h.panel().testid('chat-activity-detail-refresh'); assert.ok(refresh);
+  h.epochScope.reset('codex');
+  assert.equal(refresh.disabled, true); await refresh.click(); assert.equal(h.calls.length, 1);
+});
+
+test('Chat retained details integration: A to B to A while IME defers replacement cannot revive an old reader', async () => {
+  const pending = requestProjectDeferred(), h = activityDetailsHarness({ fetchRead: () => pending.promise });
+  h.renderCodexActivityPanel(); const previous = h.result(), opening = h.openResult();
+  const input = h.document.createElement('input'); h.panel().appendChild(input); input.focus(); await h.panel().dispatch('compositionstart');
+  h.state.codex.threads.push({ id: 'other', clientBindingId: 'other-binding', messages: [] });
+  h.openCodexActivityPanel('other'); h.openCodexActivityPanel(h.thread.id);
+  assert.equal(h.result(), previous, 'IME retains the DOM until its actual replacement');
+  pending.resolve(h.packet(h.calls[0].target)); await opening;
+  assert.equal(previous.querySelector('.egdesk-run-result'), null);
+  await h.panel().dispatch('compositionend'); await settle();
+  assert.notEqual(h.result(), previous); assert.equal(previous.getAttribute('data-state'), 'disposed');
+  assert.equal(h.calls.length, 1);
+});
+
+test('Chat retained detail styles bound code scrolling locally and project dialog intrinsic sizing without whole-panel clipping', () => {
+  const css = readFileSync(new URL('../overlay/CSS/eg-desk-surface.uc.css', import.meta.url), 'utf8');
+  for (const selector of ['.egd-chat-retained-detail', '.egd-chat-command-result', '.egdesk-chat-change-review']) {
+    const rule = cssDeclarationsFor(css, selector);
+    assert.equal(rule['min-width'], '0'); assert.equal(rule['max-width'], '100%'); assert.equal(rule['box-sizing'], 'border-box');
+  }
+  for (const selector of ['.egdesk-chat-change-review .egdesk-diff-hunk', '.egdesk-chat-change-review .egdesk-diff-raw']) {
+    const rule = cssDeclarationsFor(css, selector); assert.equal(rule.overflow, 'auto'); assert.equal(rule['max-height'], '18rem'); assert.equal(rule['max-width'], '100%');
+  }
+  const summary = cssDeclarationsFor(css, '.egdesk-chat-change-review .egdesk-diff-file-summary');
+  assert.equal(summary.display, undefined, 'native summary markers and keyboard operation remain');
+  for (const selector of ['#egd-codex-input-panel.egd-chat-project-panel > header', '#egd-codex-input-panel.egd-chat-project-panel > .egd-codex-input-panel-body']) {
+    const rule = cssDeclarationsFor(css, selector);
+    assert.equal(rule['box-sizing'], 'border-box'); assert.equal(rule.width, '100%'); assert.equal(rule['min-width'], '0');
+    assert.equal(rule.overflow, undefined, 'no overflow hidden/clip workaround');
+  }
+  const select = cssDeclarationsFor(css, '#egd-codex-input-panel.egd-chat-project-panel .egd-chat-project-board');
+  assert.equal(select.contain, 'inline-size'); assert.equal(select.display, 'block');
 });

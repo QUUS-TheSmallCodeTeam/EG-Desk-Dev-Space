@@ -10,6 +10,8 @@
   const SurfaceState = ChromeUtils.importESModule('chrome://userchrome/content/EGDeskSurfaceState.sys.mjs');
   const RecoveryState = ChromeUtils.importESModule('chrome://userchrome/content/EGDeskRecoveryState.sys.mjs');
   const ChatState = ChromeUtils.importESModule('chrome://userchrome/content/EGDeskChatState.sys.mjs');
+  const ChatRunResult = ChromeUtils.importESModule('chrome://userchrome/content/EGDeskChatRunResult.sys.mjs');
+  const ChatChangeReview = ChromeUtils.importESModule('chrome://userchrome/content/EGDeskChatChangeReview.sys.mjs');
   const Markdown = ChromeUtils.importESModule('chrome://userchrome/content/EGDeskMarkdown.sys.mjs');
   const InputContext = ChromeUtils.importESModule('chrome://userchrome/content/EGDeskInputContext.sys.mjs');
   const BriefingState = ChromeUtils.importESModule('chrome://userchrome/content/EGDeskBriefingState.sys.mjs');
@@ -894,6 +896,7 @@
 
   // focus { activityId, runId }: the row to bring into view (CU-01 computer-use line).
   function openCodexActivityPanel(threadId, focus = null) {
+    if (state.codex.activityThreadId !== threadId) state.codex.activityRoomGeneration = (state.codex.activityRoomGeneration || 0) + 1;
     state.codex.activityThreadId = threadId;
     state.codex.activityFocus = focus ? { threadId, activityId: focus.activityId || null, runId: focus.runId || null } : null;
     renderCodexActivityPanel();
@@ -1782,7 +1785,217 @@
   const userInputDrafts = new Map();
   let activityPanelComposing = false;
   let activityPanelDeferred = false;
+  let activityDetailsGeneration = 0;
+  let activityDetailsView = null;
   const userInputDraftKey = (run, userInputId) => `${run.conversationId}/${run.runId}/${userInputId}`;
+
+  function codexActivityDetailTarget(run, itemId) {
+    const target = { conversationId: run?.conversationId, runId: run?.runId, itemId };
+    if (Object.values(target).some(value => typeof value !== 'string' || !value.trim() || value.length > 300 || value.includes('\0'))) return null;
+    return Object.freeze(target);
+  }
+
+  function codexCommandInfo(activity) {
+    const rows = [];
+    if (typeof activity.detail === 'string') rows.push(el('pre', {}, activity.detail));
+    else if (activity.detail && typeof activity.detail === 'object') {
+      for (const key of ['text', 'command', 'cwd', 'exitCode', 'durationMs', 'server', 'tool']) {
+        const value = activity.detail[key];
+        if (value !== undefined && value !== null && value !== '') rows.push(el('pre', {}, `${key}: ${value}`));
+      }
+    }
+    return rows.length ? el('details', { class: 'egd-chat-command-info', data: { testid: 'chat-command-info' } },
+      el('summary', {}, '명령 정보'), ...rows) : null;
+  }
+
+  // One account/binding scope per visible activity view. Only the two retained
+  // read endpoints enter this surface; a response never emits Chat state.
+  function createCodexActivityReadScope(threadId, epochScope, fetchJson, onInvalidate) {
+    const original = getCodexThreadById(state.codex, threadId);
+    if (!original || ChatState.nativeBindingHeld(original)) return null;
+    const binding = ChatState.clientThreadBinding(original);
+    const conversationId = original.conversationId;
+    const token = epochScope.begin(ChatState.chatThreadEngineId(original, state.codex), ChatState.chatThreadEngineProfileId(original, state.codex));
+    let disposed = false;
+    token.signal.addEventListener('abort', () => { if (!disposed) onInvalidate?.(); }, { once: true });
+    const isCurrent = () => {
+      const thread = getCodexThreadById(state.codex, threadId);
+      return !disposed && epochScope.valid(token) && !!thread && !ChatState.nativeBindingHeld(thread)
+        && ChatState.clientThreadBinding(thread) === binding && thread.conversationId === conversationId;
+    };
+    const read = async (endpoint, target, { signal } = {}) => {
+      const identity = codexActivityDetailTarget(target, target?.itemId);
+      const thread = getCodexThreadById(state.codex, threadId);
+      const runs = identity ? codexRuns(thread).filter(run => run.conversationId === identity.conversationId && run.runId === identity.runId) : [];
+      const run = runs.length === 1 ? runs[0] : null;
+      const kind = endpoint === '/chat/command-output' ? 'commandExecution' : 'fileChange';
+      const ownsItem = run && ((run.activities || []).some(activity => activity.id === identity.itemId && activity.kind === kind)
+        || kind === 'fileChange' && (run.pendingApprovals || []).some(approval => approval.itemId === identity.itemId
+          && approval.kind === kind && approval.status === 'pending' && !approval.stale && !approval.replyPending));
+      if (!identity || !isCurrent() || !ownsItem) {
+        throw new Error('이 활동의 원래 실행 연결을 확인할 수 없습니다.');
+      }
+      const controller = new window.AbortController();
+      const abort = () => controller.abort();
+      token.signal.addEventListener('abort', abort, { once: true });
+      signal?.addEventListener('abort', abort, { once: true });
+      if (token.signal.aborted || signal?.aborted) abort();
+      try {
+        if (controller.signal.aborted) throw new Error('활동 조회가 취소되었습니다.');
+        const query = Object.entries(identity).map(([key, value]) => `${key}=${encodeURIComponent(value)}`).join('&');
+        const result = await fetchJson(`${endpoint}?${query}`, { method: 'GET', signal: controller.signal });
+        if (!isCurrent() || controller.signal.aborted) throw new Error('활동 조회 연결이 바뀌었습니다.');
+        return result;
+      } finally {
+        token.signal.removeEventListener('abort', abort);
+        signal?.removeEventListener('abort', abort);
+      }
+    };
+    return Object.freeze({ isCurrent,
+      readCommandOutput: (target, options) => read('/chat/command-output', target, options),
+      readRunChanges: target => read('/chat/run-changes', target),
+      dispose() { if (disposed) return; disposed = true; token.controller.abort(); epochScope.finish(token); },
+    });
+  }
+
+  function replaceCodexActivityDetails(next = null) {
+    if (activityDetailsView === next) { next?.commit(); return; }
+    activityDetailsGeneration++;
+    activityDetailsView?.dispose();
+    activityDetailsView = next;
+    next?.commit();
+  }
+
+  function createCodexActivityDetailsView(thread, panel) {
+    if (activityDetailsView?.matches(thread, panel)) {
+      activityDetailsView.begin();
+      return activityDetailsView;
+    }
+    const generation = activityDetailsGeneration + 1;
+    const roomGeneration = state.codex.activityRoomGeneration || 0;
+    const binding = ChatState.clientThreadBinding(thread);
+    const readScope = state.codexBridge?.createActivityReadScope(thread.id, () => view.dispose());
+    const owned = new Map();
+    let seen = new Set(), itemGeneration = 0, scrollState = [];
+    let disposed = false;
+    const sameRoom = () => !disposed && roomGeneration === (state.codex.activityRoomGeneration || 0)
+      && state.codex.activityThreadId === thread.id && readScope?.isCurrent()
+      && ChatState.clientThreadBinding(getCodexThreadById(state.codex, thread.id)) === binding;
+    const currentRun = target => {
+      const latest = getCodexThreadById(state.codex, thread.id);
+      const runs = codexRuns(latest).filter(run => run.conversationId === target.conversationId && run.runId === target.runId);
+      return runs.length === 1 ? runs[0] : null;
+    };
+    const fingerprint = activity => JSON.stringify([activity.kind, activity.status, activity.detail ?? null]);
+    const current = (entry, target) => {
+      const original = entry.target;
+      if (disposed || activityDetailsView !== view || generation !== activityDetailsGeneration
+          || !sameRoom() || panel.isConnected !== true || owned.get(entry.key) !== entry || entry.stale
+          || !['conversationId', 'runId', 'itemId'].every(key => original[key] === target?.[key])) return false;
+      const run = currentRun(original);
+      if (!run) return false;
+      const approval = entry.approval;
+      if (approval) return run.localHistory !== true && (run.pendingApprovals || []).includes(approval)
+        && (approval.approvalId || approval.id) === entry.approvalId
+        && approval.kind === 'fileChange' && approval.itemId === original.itemId && approval.status === 'pending'
+        && !approval.replyPending && !approval.stale;
+      const activity = (run.activities || []).find(item => item.id === original.itemId && item.kind === entry.kind);
+      return !!activity && fingerprint(activity) === entry.fingerprint;
+    };
+    const item = (run, activity, approval = null) => {
+      const target = codexActivityDetailTarget(run, approval ? approval.itemId : activity.id);
+      if (!target || !readScope) return null;
+      const approvalId = approval ? approval.approvalId || approval.id : null;
+      const key = JSON.stringify([target.conversationId, target.runId, target.itemId, approval ? 'approval' : 'activity', approvalId]);
+      seen.add(key);
+      const prior = owned.get(key);
+      const changed = prior && !approval && prior.fingerprint !== fingerprint(activity);
+      const opened = prior && (prior.kind === 'commandExecution'
+        ? prior.node.getAttribute('data-state') !== 'closed' || prior.info?.open === true : prior.node.querySelector('details').open);
+      if (prior && prior.approval === approval && prior.kind === activity.kind && (!changed || opened)) {
+        if (changed && !prior.stale) {
+          prior.stale = true;
+          prior.host.dataset.stale = 'true';
+          // Keep an already-open record readable, but do not call it current.
+          // A pending old reply fails the identity/generation fence above.
+          for (const button of prior.node.querySelectorAll('button')) button.disabled = true;
+          const refresh = el('button', { type: 'button', data: { testid: 'chat-activity-detail-refresh' }, onclick: () => {
+            if (!sameRoom() || activityDetailsView !== view || owned.get(key) !== prior || !prior.host.isConnected) return;
+            const latestRun = currentRun(target);
+            const latest = latestRun?.activities?.find(row => row.id === target.itemId && row.kind === prior.kind);
+            if (!latest) return;
+            prior.reader.dispose();
+            owned.delete(key);
+            const nextHost = item(latestRun, latest);
+            prior.host.replaceWith(nextHost);
+            const next = owned.get(key);
+            if (next.kind === 'commandExecution') void next.reader.open();
+            else next.node.querySelector('details').open = true;
+          } }, '새 기록 확인');
+          prior.host.prepend(el('div', { class: 'egd-chat-retained-status' },
+            el('p', { class: 'egd-chat-retained-note', role: 'status' }, '이 항목이 갱신됐습니다. 표시된 내용은 이전 조회 기록입니다.'), refresh));
+        }
+        return prior.host;
+      }
+      prior?.reader.dispose();
+      const host = el('div', { class: 'egd-chat-retained-detail', data: { testid: 'chat-activity-detail', viewGeneration: ++itemGeneration } });
+      const entry = { key, target, kind: activity.kind, approval, approvalId,
+        fingerprint: approval ? null : fingerprint(activity), stale: false, host, reader: null, node: null };
+      owned.set(key, entry);
+      if (activity.kind === 'commandExecution') {
+        entry.reader = ChatRunResult.createChatRunResultView({ document, run, activity,
+          fetchJson: (_path, options) => readScope.readCommandOutput(target, options),
+          isCurrent: candidate => current(entry, candidate),
+        });
+        entry.node = entry.reader.element;
+        entry.node.className = 'egd-chat-command-result';
+        for (const [name, value] of Object.entries(target)) entry.node.dataset[name] = value;
+      } else {
+        entry.reader = ChatChangeReview.createChatChangeReview({ document,
+          fetchRunChanges: () => readScope.readRunChanges(target),
+          isCurrent: candidate => current(entry, candidate),
+        });
+        entry.node = approval ? entry.reader.renderApproval(target) : entry.reader.renderActivity(target);
+        entry.node.dataset.testid = approval ? 'chat-approval-changes' : 'chat-activity-changes';
+        if (approval) entry.node.dataset.approvalId = approvalId;
+      }
+      host.appendChild(entry.node);
+      if (activity.kind === 'commandExecution') {
+        entry.info = codexCommandInfo(activity);
+        if (entry.info) host.appendChild(entry.info);
+      }
+      return host;
+    };
+    const view = {
+      matches(candidate, node) { return candidate.id === thread.id && node === panel && sameRoom(); },
+      begin() {
+        seen = new Set();
+        scrollState = [...owned.values()].flatMap(entry => [...entry.host.querySelectorAll('.egdesk-run-result-tail, .egdesk-run-result-command, .egdesk-diff-hunk, .egdesk-diff-raw')]
+          .map(node => ({ node, top: node.scrollTop, left: node.scrollLeft })));
+      },
+      commit() { for (const [key, entry] of owned) if (!seen.has(key)) { entry.reader.dispose(); owned.delete(key); } },
+      restoreScroll() { for (const { node, top, left } of scrollState) if (node.isConnected) { node.scrollTop = top; node.scrollLeft = left; } scrollState = []; },
+      activity(run, activity) {
+        return ['commandExecution', 'fileChange'].includes(activity.kind) ? item(run, activity) : null;
+      },
+      approval(run, approval) {
+        if (approval.kind !== 'fileChange' || approval.status !== 'pending' || approval.stale || approval.replyPending) return null;
+        return item(run, { kind: 'fileChange' }, approval);
+      },
+      dispose() {
+        if (disposed) return;
+        disposed = true;
+        for (const entry of owned.values()) {
+          entry.reader.dispose();
+          entry.info?.remove();
+          for (const button of entry.host.querySelectorAll('button')) button.disabled = true;
+        }
+        owned.clear();
+        readScope?.dispose();
+      },
+    };
+    return view;
+  }
 
   function pruneUserInputDrafts() {
     if (!userInputDrafts.size) return;
@@ -1923,7 +2136,7 @@
     pruneUserInputDrafts();
     const thread = getCodexThreadById(state.codex, state.codex.activityThreadId);
     let panel = document.getElementById('egd-codex-activity-panel');
-    if (!thread) { activityPanelComposing = false; activityPanelDeferred = false; panel?.remove(); return; }
+    if (!thread) { activityPanelComposing = false; activityPanelDeferred = false; replaceCodexActivityDetails(); panel?.remove(); return; }
     // An SSE re-render must not cut IME composition in an Agent answer.
     if (activityPanelComposing && panel?.contains(document.activeElement)) { activityPanelDeferred = true; return; }
     activityPanelComposing = false;
@@ -1948,6 +2161,7 @@
       start: typeof focused.selectionStart === 'number' ? focused.selectionStart : null,
       end: focused.selectionEnd, direction: focused.selectionDirection || 'none' } : null;
     const rows = [];
+    const detailsView = createCodexActivityDetailsView(thread, panel);
     for (const message of thread.messages || []) {
       if (!message.inputReferences?.length) continue;
       rows.push(el('details', { data: { testid: 'chat-input-history', requestId: message.requestId || '', runId: message.runId || '' } },
@@ -2015,19 +2229,21 @@
         // A title that already reads '컴퓨터 조작 · {tool}' carries no second badge.
         const badge = ChatState.activityControlBadge(activity);
         const mcpDetail = ChatState.mcpCallDetailText(activity);
+        const commandActivity = activity.kind === 'commandExecution';
+        const activityStatus = ({ inProgress: '진행 중', completed: '완료', failed: '실패', declined: '거절됨' })[activity.status] || activity.status || '';
         const row = el('article', { class: `egd-codex-activity-row${ceiling ? ' egd-codex-activity-row-ceiling' : ''}`,
           data: { activityId: activity.id, status: activity.status, ...(ceiling ? { kind: 'toolCeiling' } : {}), ...(control ? { controlKind: control.kind } : {}) } },
           el('strong', {}, activity.title || (ceiling ? '도구 제한' : activity.kind) || '활동'),
           badge ? el('span', { class: `egd-codex-activity-control egd-codex-activity-control-${badge.kind}`, data: { testid: 'chat-activity-control' } }, badge.label) : null,
-          el('span', {}, ceiling ? ceiling.statusLabel : ({ inProgress: '진행 중', completed: '완료', failed: '실패', declined: '거절됨' })[activity.status] || activity.status || ''),
-          typeof activity.detail === 'string' ? el('pre', {}, activity.detail) : null);
+          el('span', {}, ceiling ? ceiling.statusLabel : commandActivity ? `명령 ${activityStatus || '상태 미확인'}` : activityStatus),
+          !commandActivity && typeof activity.detail === 'string' ? el('pre', {}, activity.detail) : null);
         if (ceiling) {
           if (ceiling.command) row.appendChild(el('pre', {}, ceiling.command));
           for (const note of ceiling.notes) row.appendChild(el('p', { class: 'egd-codex-activity-note', data: { testid: 'chat-ceiling-note' } }, note));
         } else if (mcpDetail) {
           // Sizes and counts only ('인자 N바이트 · 화면 N장'); the call's content never reaches the screen.
           row.appendChild(el('p', { class: 'egd-codex-activity-sizes', data: { testid: 'chat-activity-sizes' } }, mcpDetail));
-        } else if (activity.detail && typeof activity.detail === 'object') {
+        } else if (!commandActivity && activity.detail && typeof activity.detail === 'object') {
           for (const key of ['text', 'command', 'cwd', 'exitCode', 'durationMs', 'server', 'tool']) {
             const value = activity.detail[key];
             if (value !== undefined && value !== null && value !== '') row.appendChild(el('pre', {}, `${key}: ${value}`));
@@ -2040,6 +2256,12 @@
             'aria-label': `활동의 파일 열기: ${ref.target.path}`,
             onclick: () => openChatFileReference(ref),
           }, ref.target.path));
+        }
+        const retainedDetail = detailsView.activity(run, activity);
+        if (retainedDetail) row.appendChild(retainedDetail);
+        else if (commandActivity) {
+          const info = codexCommandInfo(activity);
+          if (info) row.appendChild(info);
         }
         rows.push(row);
       }
@@ -2056,6 +2278,8 @@
           block.appendChild(el('p', {}, `네트워크 대상: ${approval.networkApprovalContext.protocol || '프로토콜 미확인'} · ${approval.networkApprovalContext.host || '호스트 미확인'} · 이번 요청`));
         }
         if (!ChatState.approvalScopeKnown(approval)) block.appendChild(el('p', {}, approval.acceptDisabledReason || '요청 범위를 확인하지 못해 허용할 수 없습니다. 거절하거나 취소할 수 있습니다.'));
+        const changes = detailsView.approval(run, approval);
+        if (changes) block.appendChild(changes);
         for (const decision of Array.isArray(approval.choices) ? approval.choices : []) {
           if (!['accept', 'acceptForSession', 'decline', 'cancel'].includes(decision)) continue;
           const label = { accept: approval.choices.includes('acceptForSession') ? '이번만 허용' : '허용',
@@ -2089,13 +2313,17 @@
     }
     if (!rows.length) rows.push(el('p', {}, '기록된 활동이 없습니다.'));
     const body = el('div', { class: 'egd-codex-activity-body' }, ...rows);
+    // Reconcile only on actual replacement, after the IME return. Keyed readers
+    // survive unrelated SSE updates; disappeared or invalidated ones retire.
+    replaceCodexActivityDetails(detailsView);
     panel.replaceChildren(el('header', {}, el('strong', {}, '활동 기록'), el('button', {
       'aria-label': '활동 상태 다시 확인', onclick: () => state.codexBridge.refreshConversation(thread.id),
     }, '새로고침'), el('button', {
       'aria-label': '활동 기록 닫기', onclick: () => {
-        state.codex.activityThreadId = null; activityPanelComposing = false; activityPanelDeferred = false; panel.remove();
+        state.codex.activityThreadId = null; activityPanelComposing = false; activityPanelDeferred = false; replaceCodexActivityDetails(); panel.remove();
       },
     }, '닫기')), body);
+    detailsView.restoreScroll();
     body.scrollTop = scrollTop;
     // Restore focus/caret to the same Agent answer control after replacement.
     const restored = focusState && [...body.querySelectorAll('[data-focus-key]')].find(node => node.dataset.focusKey === focusState.key);
@@ -8197,6 +8425,7 @@
     const setActiveThread = (threadId) => {
       const index = findThreadIndexById(threadId);
       if (index < 0) return false;
+      if (state.codex.activeThreadId !== threadId) state.codex.activityRoomGeneration = (state.codex.activityRoomGeneration || 0) + 1;
       state.codex.activeThreadId = threadId;
       state.codex.threads[index] = {
         ...state.codex.threads[index],
@@ -9094,6 +9323,9 @@
       },
       runState(threadId = state.codex.activeThreadId) {
         return cloneJson(ChatState.runsForThread(protocol, getCodexThreadById(state.codex, threadId)));
+      },
+      createActivityReadScope(threadId, onInvalidate) {
+        return createCodexActivityReadScope(threadId, epochScope, fetchJson, onInvalidate);
       },
       openActivity(threadId = state.codex.activeThreadId, focus = null) { openCodexActivityPanel(threadId, focus); },
       async replyApproval({ approvalId, conversationId, runId, decision }) {
