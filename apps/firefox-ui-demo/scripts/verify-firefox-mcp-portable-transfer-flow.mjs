@@ -7,7 +7,7 @@ import { fileURLToPath } from 'node:url';
 import { chrome, loopbackJson, runUiFlow, selectorForId } from './egdesk-qa-ui-flow.mjs';
 import { portableTransferFixtureEnabled } from './egdesk-portable-transfer-fixture.mjs';
 import { validateQaFixtureIsolation, QA_PORTABLE_TRANSFER_FILES, QA_PORTABLE_PICKER_FILE } from './egdesk-qa-fixture-isolation.mjs';
-import { parseCli, assertBeforeDeadline, observeGuard, observeFirstUse, resizeHeadless, waitStableViewport,
+import { parseCli, assertBeforeDeadline, observeGuard, resizeHeadless, waitStableViewport,
   waitFor, observeTargets, targetIssues, captureHeadlessScreenshot } from './verify-firefox-mcp-headless-ui-regression.mjs';
 
 const testid = value => `[data-testid=${JSON.stringify(value)}]`;
@@ -96,6 +96,17 @@ export function assertPortableNoReplay(before, samples, expectedStatus) {
   return true;
 }
 
+function portableFirstUseDom() {
+  const api = window.__egdesk, surface = api.surface.snapshot();
+  const card = surface.browserCardId ? document.getElementById(surface.browserCardId) : null;
+  const fullscreen = api.state.cardFullscreen;
+  // With no first-use Browser, undefined === undefined is not a match.
+  // This portable flow needs no browser geometry or fullscreen restore rect.
+  return { initialBrowserFocus: surface.initialBrowserFocus === true, cardId: card?.id || null,
+    fullscreen: !!card?.id && !!fullscreen && fullscreen.cardId === card.id };
+}
+export const observePortableFirstUse = harness => chrome(harness, portableFirstUseDom);
+
 export function assertPortableMissingHead(before, after, boardId, ui) {
   assert.match(boardId, /^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$/);
   assert.equal(after.persisted.desk.boards.some(row => row.board_id === boardId), false);
@@ -180,7 +191,7 @@ function portableTextDom({ selector, needle }) {
 }
 
 export function portableObservationSources() {
-  return [portableUiDom, portableTextDom].map(fn => {
+  return [portableUiDom, portableTextDom, portableFirstUseDom].map(fn => {
     const source = fn.toString(), bytes = Buffer.byteLength(source);
     assert.ok(bytes < PORTABLE_OBSERVATION_BUDGET, 'Read-only observations fit the unchanged MCP size guard');
     return { name: fn.name, source, bytes };
@@ -274,9 +285,9 @@ export async function runPortableTransferFlow({ harness, result, check }, { prof
     proof.initial.catalogSeed?.coherentBeforeLaunch && proof.initial.catalogSeed.sqliteRevision === 1 && proof.initial.exports.length === 0 &&
     proof.initial.pickerResults.length === 0 && proof.initial.headAdvances.length === 0, proof.initial.catalogSeed);
   await resizeHeadless(harness, size, deadlineMs); await waitStableViewport(harness, size, deadlineMs);
-  const first = await observeFirstUse(harness);
+  const first = await observePortableFirstUse(harness);
   if (first.initialBrowserFocus || first.fullscreen) {
-    await key('meta+-'); await waitFor(harness, observeFirstUse, ui => !ui.initialBrowserFocus && !ui.fullscreen, deadlineMs);
+    await key('meta+-'); await waitFor(harness, observePortableFirstUse, ui => !ui.initialBrowserFocus && !ui.fullscreen, deadlineMs);
   }
 
   // The catalog seed is setup only. Selection, menu and export below are UI.

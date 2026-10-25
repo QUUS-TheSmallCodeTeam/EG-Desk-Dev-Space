@@ -9,6 +9,7 @@ import { createPrivateQaTempDirectory } from './egdesk-qa-platform.mjs';
 import { assertPortableEnvironment, assertPortableStoreInvariant, assertPortableImportedDraft,
   assertPortableExportFile, assertPortablePinnedExport, assertPortableNoReplay,
   assertPortableMissingHead,
+  observePortableFirstUse,
   portableObservationSources, PORTABLE_OBSERVATION_BUDGET, portableTextVisible } from './verify-firefox-mcp-portable-transfer-flow.mjs';
 
 const TOKEN = 'portable-verifier-unit-only-token';
@@ -53,6 +54,23 @@ test('small observation scripts are read-only and cannot install fabricated outc
     assert.equal(part.bytes, Buffer.byteLength(part.source));
     assert.doesNotMatch(part.source, /(?:\.click\(|\.focus\(|scrollIntoView|dispatchEvent|setSelectionRange|\.openProfile\(|\.openProject\(|IOUtils|fetch\()/);
     new Function(`return (${part.source})`); // compile only; no simulated DOM acceptance
+  }
+});
+
+test('first-use observation is null-safe when portable setup has no Browser and no fullscreen state', async () => {
+  // Observer regression only; these inputs never count as native UI evidence.
+  for (const [browserCardId, found, fullscreen, expected] of [
+    [undefined, null, null, false], [null, null, undefined, false],
+    ['browser', null, { cardId: 'browser' }, false],
+    ['browser', { id: 'browser' }, null, false],
+    ['browser', { id: 'browser' }, { cardId: 'other' }, false],
+    ['browser', { id: 'browser' }, { cardId: 'browser' }, true],
+  ]) {
+    const observed = await observePortableFirstUse({ evaluateChrome: source =>
+      new Function('window', 'document', `return (${source})()`)(
+        { __egdesk: { surface: { snapshot: () => ({ browserCardId, initialBrowserFocus: false }) }, state: { cardFullscreen: fullscreen } } },
+        { getElementById: () => found }) });
+    assert.deepEqual(observed, { initialBrowserFocus: false, cardId: found?.id || null, fullscreen: expected });
   }
 });
 
