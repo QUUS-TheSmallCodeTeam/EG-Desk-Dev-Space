@@ -125,6 +125,31 @@ function checkedRecord(record) {
   return record
 }
 
+function initializeProjects(db) {
+  db.exec('PRAGMA journal_mode=WAL; PRAGMA synchronous=FULL; PRAGMA busy_timeout=5000;')
+  if (db.prepare('PRAGMA quick_check').get().quick_check !== 'ok') fail('PROJECT_STORE_CORRUPT', 'Project store is damaged; nothing was reset', 500)
+  const version = db.prepare('PRAGMA user_version').get().user_version
+  const tables = new Set(db.prepare("SELECT name FROM sqlite_master WHERE type='table'").all().map(row => row.name))
+  const columns = (table, expected) => {
+    const actual = db.prepare(`PRAGMA table_info(${table})`).all()
+    return actual.length === expected.length && expected.every(([name, type, pk], index) => actual[index].name === name && actual[index].type === type && actual[index].pk === pk)
+  }
+  const baseValid = () => columns('projects', [['id', 'TEXT', 1], ['payload', 'TEXT', 0]]) && columns('bindings', [['scope', 'TEXT', 1], ['key', 'TEXT', 2], ['projectId', 'TEXT', 0], ['boardId', 'TEXT', 0]])
+  if (version === 1) {
+    if (!baseValid() || !columns('room_project_inheritance', [['roomId', 'TEXT', 1], ['boardId', 'TEXT', 0]])) fail('PROJECT_STORE_CORRUPT', 'Project schema is incomplete; nothing was reset', 500)
+    return
+  }
+  if (version !== 0) fail('UNSUPPORTED_PROJECT_STORE_VERSION', 'Project schema is unsupported; nothing was reset', 500)
+  // Version 0 is either a new database or the original exact two-table store.
+  if (tables.size && (tables.size !== 2 || !tables.has('projects') || !tables.has('bindings') || !baseValid())) fail('PROJECT_STORE_CORRUPT', 'Project schema is incomplete; nothing was reset', 500)
+  db.exec('BEGIN IMMEDIATE')
+  try {
+    if (!tables.size) db.exec("CREATE TABLE projects (id TEXT PRIMARY KEY, payload TEXT NOT NULL); CREATE TABLE bindings (scope TEXT NOT NULL CHECK (scope IN ('board','room')), key TEXT NOT NULL, projectId TEXT NOT NULL, boardId TEXT, PRIMARY KEY (scope, key));")
+    db.exec('CREATE TABLE room_project_inheritance (roomId TEXT PRIMARY KEY, boardId TEXT NOT NULL); PRAGMA user_version=1;')
+    db.exec('COMMIT')
+  } catch (cause) { db.exec('ROLLBACK'); throw cause }
+}
+
 /**
  * One SQLite file per local owner (projects-<sha256(owner)>.sqlite, 0600, in
  * a 0700 directory). Tables: projects(id, payload) and bindings(scope 'board'
@@ -143,9 +168,7 @@ export async function openEGDeskProjectStore({ directory, ownerScope, now = Date
   await fs.chmod(databasePath, 0o600)
   const { DatabaseSync } = await import('node:sqlite')
   const db = new DatabaseSync(databasePath)
-  db.exec(`PRAGMA journal_mode=WAL; PRAGMA synchronous=FULL; PRAGMA busy_timeout=5000;
-    CREATE TABLE IF NOT EXISTS projects (id TEXT PRIMARY KEY, payload TEXT NOT NULL);
-    CREATE TABLE IF NOT EXISTS bindings (scope TEXT NOT NULL CHECK (scope IN ('board','room')), key TEXT NOT NULL, projectId TEXT NOT NULL, boardId TEXT, PRIMARY KEY (scope, key));`)
+  try { initializeProjects(db) } catch (cause) { db.close(); throw cause }
   const selectProject = db.prepare('SELECT payload FROM projects WHERE id = ?')
   const allProjects = db.prepare('SELECT payload FROM projects ORDER BY id')
   const upsertProject = db.prepare('INSERT INTO projects (id, payload) VALUES (?, ?) ON CONFLICT(id) DO UPDATE SET payload = excluded.payload')
@@ -154,6 +177,7 @@ export async function openEGDeskProjectStore({ directory, ownerScope, now = Date
   const upsertBinding = db.prepare('INSERT INTO bindings (scope, key, projectId, boardId) VALUES (?, ?, ?, ?) ON CONFLICT(scope, key) DO UPDATE SET projectId = excluded.projectId, boardId = excluded.boardId')
   const deleteBinding = db.prepare('DELETE FROM bindings WHERE scope = ? AND key = ?')
   const countBindings = db.prepare('SELECT COUNT(*) AS count FROM bindings WHERE projectId = ?')
+  const selectInheritance = db.prepare('SELECT boardId FROM room_project_inheritance WHERE roomId = ?')
   let closed = false
   const ensureOpen = () => { if (closed) fail('STORE_CLOSED', 'Project store is closed', 503) }
   const read = id => { const row = selectProject.get(id); return row ? checkedRecord(JSON.parse(row.payload)) : null }
@@ -209,7 +233,16 @@ export async function openEGDeskProjectStore({ directory, ownerScope, now = Date
     if (key == null) return null
     opaqueId(key, scope === 'board' ? 'boardId' : 'roomId')
     const binding = selectBinding.get(scope, key)
-    return binding ? read(binding.projectId) : null
+    const record = binding ? read(binding.projectId) : null
+    if (binding && !record) fail('PROJECT_ASSOCIATION_BROKEN', 'Configured project no longer exists; select its folder again', 409)
+    return record
+  }
+
+  function inheritanceForRoom(roomId) {
+    ensureOpen(); opaqueId(roomId, 'roomId')
+    const row = selectInheritance.get(roomId)
+    if (row) opaqueId(row.boardId, 'boardId')
+    return row ? { boardId: row.boardId } : null
   }
 
   return {
@@ -217,6 +250,24 @@ export async function openEGDeskProjectStore({ directory, ownerScope, now = Date
     attachToRoom: ({ roomId, boardId = null, ...folder }) => bind('room', roomId, boardId, folder),
     detachBoard: ({ boardId }) => unbind('board', boardId),
     inheritRoom: ({ roomId }) => unbind('room', roomId),
+    inheritanceForRoom,
+    // Only the HTTP adapter supplies expectedProject, after verifying the
+    // selected root handle and filesystem identity. The final association
+    // comparison and both writes are one synchronous transaction.
+    saveRoomInheritance({ roomId, boardId, expectedProject }) {
+      ensureOpen(); opaqueId(roomId, 'roomId'); opaqueId(boardId, 'boardId')
+      checkedRecord(expectedProject)
+      return transaction(() => {
+        const current = forScope('board', boardId)
+        if (!current || current.id !== expectedProject.id || current.workspaceRoot !== expectedProject.workspaceRoot ||
+            current.identity.dev !== expectedProject.identity.dev || current.identity.ino !== expectedProject.identity.ino) fail('PROJECT_TARGET_CHANGED', 'The selected Board project changed; review it and Save again', 409)
+        db.prepare('INSERT INTO room_project_inheritance VALUES (?, ?) ON CONFLICT(roomId) DO UPDATE SET boardId=excluded.boardId').run(roomId, boardId)
+        const previous = selectBinding.get('room', roomId)
+        deleteBinding.run('room', roomId)
+        if (previous) dropIfUnused(previous.projectId)
+        return { roomId, boardId }
+      })
+    },
     get(projectId) { ensureOpen(); opaqueId(projectId, 'projectId'); return read(projectId) },
     forBoard: boardId => forScope('board', boardId),
     forRoom: roomId => forScope('room', roomId),
@@ -225,8 +276,11 @@ export async function openEGDeskProjectStore({ directory, ownerScope, now = Date
     effective({ boardId = null, roomId = null } = {}) {
       const room = roomId == null ? null : forScope('room', roomId)
       if (room) return { project: room, source: 'room' }
-      const board = boardId == null ? null : forScope('board', boardId)
-      return board ? { project: board, source: 'board' } : { project: null, source: null }
+      const inherited = roomId == null ? null : inheritanceForRoom(roomId)
+      const selectedBoard = inherited?.boardId ?? boardId
+      const board = selectedBoard == null ? null : forScope('board', selectedBoard)
+      if (inherited && !board) fail('PROJECT_INHERITANCE_UNAVAILABLE', 'The saved Board has no project; choose a default project before sending', 409)
+      return board ? { project: board, source: 'board', ...(inherited ? { boardId: selectedBoard } : {}) } : { project: null, source: null }
     },
     setScripts({ projectId, scripts }) {
       ensureOpen(); opaqueId(projectId, 'projectId')

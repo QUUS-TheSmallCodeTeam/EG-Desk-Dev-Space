@@ -38,6 +38,8 @@ export const EGDESK_FILE_ENDPOINTS = Object.freeze({
   attachProject: '/v1/files/projects/attach',
   openProject: '/v1/files/projects/open',
   inheritRoomProject: '/v1/files/projects/inherit',
+  readRoomProjectDefault: '/v1/files/projects/room-default',
+  saveRoomProjectDefault: '/v1/files/projects/room-default/save',
   detachProject: '/v1/files/projects/detach',
   setProjectScripts: '/v1/files/projects/scripts',
   suggestProjectScripts: '/v1/files/projects/script-suggestions',
@@ -62,11 +64,13 @@ const FIELDS = Object.freeze({
   attachProject: ['boardId', 'roomId', 'selectionId', 'title'],
   openProject: ['boardId', 'roomId'],
   inheritRoomProject: ['roomId'],
+  readRoomProjectDefault: ['roomId'],
+  saveRoomProjectDefault: ['roomId', 'boardId', 'expectedProjectId', 'expectedRootId'],
   detachProject: ['boardId'],
   setProjectScripts: ['projectId', 'scripts'],
   suggestProjectScripts: ['projectId'],
 })
-const PROJECT_OPERATIONS = new Set(['attachProject', 'openProject', 'inheritRoomProject', 'detachProject', 'setProjectScripts', 'suggestProjectScripts'])
+const PROJECT_OPERATIONS = new Set(['attachProject', 'openProject', 'inheritRoomProject', 'readRoomProjectDefault', 'saveRoomProjectDefault', 'detachProject', 'setProjectScripts', 'suggestProjectScripts'])
 const TEXT_OPERATIONS = new Set(['updateDraft', 'revertReviewed'])
 const SMALL_BODY_BYTES = 64 * 1024
 const TEXT_BODY_BYTES = 18 * 1024 * 1024
@@ -116,6 +120,9 @@ function checkedBody(operation, body) {
   if (Object.hasOwn(body, 'path') && (typeof body.path !== 'string' || !body.path || body.path.length > 4096)) throw error('INVALID_PATH', 'Invalid path')
   if (Object.hasOwn(body, 'title') && body.title != null && (typeof body.title !== 'string' || body.title.length > PROJECT_LIMITS.maxTitleChars)) throw error('INVALID_PROJECT_REQUEST', 'Invalid project title')
   if (Object.hasOwn(body, 'scripts') && (!Array.isArray(body.scripts) || body.scripts.length > PROJECT_LIMITS.maxScripts)) throw error('INVALID_PROJECT_SCRIPT', 'Invalid project commands')
+  if (operation === 'readRoomProjectDefault' || operation === 'saveRoomProjectDefault') {
+    for (const key of FIELDS[operation]) if (typeof body[key] !== 'string' || !body[key].trim() || body[key].length > 512 || body[key].includes('\0')) throw error('INVALID_PROJECT_REQUEST', `${key} is required`)
+  }
   return body
 }
 
@@ -235,10 +242,37 @@ export function createEGDeskFileHttpAdapter({ draftDirectory, projectDirectory, 
       : { reason: connection.reason }),
   })
 
+  async function roomDefaultView(roomId, service, projects) {
+    const inheritance = projects.store.inheritanceForRoom(roomId)
+    const override = projects.store.forRoom(roomId)
+    let selected
+    try { selected = projects.store.effective({ roomId }) }
+    catch (cause) {
+      if (cause.code !== 'PROJECT_INHERITANCE_UNAVAILABLE') throw cause
+      return { roomId, inheritance, override: null, project: null, source: 'board', status: 'unavailable', reason: cause.code }
+    }
+    const connection = selected.project ? await connectProject(service, projects, selected.project) : null
+    return { roomId, inheritance, override: override ? { projectId: override.id } : null,
+      project: selected.project ? projectView(selected.project, selected.source, connection) : null,
+      source: selected.source, status: connection?.status ?? 'none', ...(connection?.reason ? { reason: connection.reason } : {}) }
+  }
+
   async function projectOperation(operation, body, { owner, request, context }) {
     const { service } = await entryForOwner(owner)
     const projects = await projectsForOwner(owner)
     const { store } = projects
+    if (operation === 'readRoomProjectDefault') return roomDefaultView(body.roomId, service, projects)
+    if (operation === 'saveRoomProjectDefault') {
+      const project = store.forBoard(body.boardId)
+      if (!project || project.id !== body.expectedProjectId) throw error('PROJECT_TARGET_CHANGED', 'The selected Board project changed; review it and Save again', 409)
+      const connection = await connectProject(service, projects, project)
+      if (connection.status !== 'connected') throw error('PROJECT_RECONNECT_REQUIRED', 'Reconnect the selected project folder before saving', 409)
+      if (connection.root.rootId !== body.expectedRootId) throw error('PROJECT_TARGET_CHANGED', 'The selected folder connection changed; review it and Save again', 409)
+      const described = await service.describeRoot(body.expectedRootId)
+      if (!sameFolder(described, project)) throw error('PROJECT_RECONNECT_REQUIRED', 'The selected folder identity changed', 409)
+      store.saveRoomInheritance({ roomId: body.roomId, boardId: body.boardId, expectedProject: project })
+      return roomDefaultView(body.roomId, service, projects)
+    }
     if (operation === 'attachProject') {
       if (body.boardId == null && body.roomId == null) throw error('INVALID_PROJECT_REQUEST', 'A boardId or roomId is required')
       const selected = await consumeSelection(body.selectionId, owner, request, context)
@@ -367,16 +401,65 @@ export function createEGDeskFileHttpAdapter({ draftDirectory, projectDirectory, 
   // Backend-only (2-E wires it into the Agent's working folder and allowed
   // roots): the effective project folder for a Board/room, verified by dev/ino.
   // null when nothing is attached or the folder must be picked again.
-  async function resolveProjectWorkspace({ ownerScope, boardId = null, roomId = null } = {}) {
+  async function resolveProjectWorkspace({ ownerScope, boardId = null, roomId = null, projectTarget = null } = {}) {
     const owner = boundOwner(ownerScope)
     const { service } = await entryForOwner(owner)
     const projects = await projectsForOwner(owner)
-    const { project, source } = await projects.store.effective({ boardId, roomId })
+    const identifier = value => typeof value === 'string' && value.trim() && value.length <= 512 && !value.includes('\0')
+    if ([boardId, roomId].some(value => value !== null && !identifier(value))) throw error('INVALID_PROJECT_SCOPE', 'Only opaque Board and room IDs are accepted')
+    let selected
+    if (projectTarget !== null) {
+      if (!projectTarget || typeof projectTarget !== 'object' || Array.isArray(projectTarget) || Object.keys(projectTarget).length !== 3 ||
+          !['boardId', 'projectId', 'rootId'].every(key => Object.hasOwn(projectTarget, key) && identifier(projectTarget[key])) || (boardId !== null && boardId !== projectTarget.boardId)) throw error('INVALID_PROJECT_TARGET', 'Only matching opaque target IDs are accepted')
+      const project = projects.store.forBoard(projectTarget.boardId)
+      if (!project || project.id !== projectTarget.projectId) throw error('PROJECT_TARGET_CHANGED', 'The selected project changed; select it and Apply again', 409)
+      selected = { project, source: 'request', boardId: projectTarget.boardId }
+    } else selected = await projects.store.effective({ boardId, roomId })
+    const { project, source } = selected
     if (!project) return null
     const connection = await connectProject(service, projects, project)
     if (connection.status !== 'connected') return { projectId: project.id, source, status: connection.status, reason: connection.reason }
+    if (projectTarget && connection.root.rootId !== projectTarget.rootId) throw error('PROJECT_TARGET_CHANGED', 'The selected folder connection changed; select it and Apply again', 409)
     const described = await service.describeRoot(connection.root.rootId)
-    return { projectId: project.id, source, status: 'connected', rootId: connection.root.rootId, absolutePath: described.absolutePath }
+    if (!sameFolder(described, project)) throw error('PROJECT_RECONNECT_REQUIRED', 'Project folder identity changed', 409)
+    const latest = projectTarget
+      ? { project: projects.store.forBoard(projectTarget.boardId), source: 'request', boardId: projectTarget.boardId }
+      : projects.store.effective({ boardId, roomId })
+    if (!latest.project || latest.project.id !== project.id || latest.source !== source || latest.boardId !== selected.boardId ||
+        !sameFolder(described, latest.project) || projects.roots.get(project.id)?.rootId !== connection.root.rootId) {
+      throw error(projectTarget ? 'PROJECT_TARGET_CHANGED' : 'PROJECT_WORKSPACE_CHANGED', 'Project selection changed during verification; review it before sending', 409)
+    }
+    return { projectId: project.id, source, status: 'connected', rootId: connection.root.rootId, absolutePath: described.absolutePath,
+      fileOwnerScope: owner, identity: { ...described.identity }, boardId: selected.boardId ?? (source === 'board' ? boardId : null), roomId }
+  }
+
+  // Read-only: an origin is evidence, never a grant to register its saved path.
+  // After restart, an ordinary authorized project open must establish a live
+  // connection first. Its handle may differ, but the original dev/ino may not.
+  async function resolveRunProjectOrigin({ ownerScope, origin, assertActive = () => {} } = {}) {
+    const owner = boundOwner(ownerScope)
+    assertActive()
+    const p = origin?.project
+    if (!p || p.fileOwnerScope !== owner) throw error('PROJECT_ORIGIN_SCOPE_MISMATCH', 'Run origin belongs to another local file owner', 403)
+    const { service } = await entryForOwner(owner)
+    const projects = await projectsForOwner(owner)
+    assertActive()
+    const candidates = projects.store.list().filter(project => project.workspaceRoot === p.startCwd)
+    let changed = false
+    for (const project of candidates) {
+      if (project.identity.dev !== p.fsIdentity?.dev || project.identity.ino !== p.fsIdentity?.ino) { changed = true; continue }
+      const connection = projects.roots.get(project.id)
+      if (!connection) continue
+      const described = await service.describeRoot(connection.rootId).catch(() => null)
+      assertActive()
+      if (!described || !sameFolder(described, project)) { changed = true; continue }
+      // Check authorization again after the filesystem await. A detached or
+      // rebound project must not release an old cached handle.
+      const current = projects.store.get(project.id)
+      if (!current || !sameFolder(described, current) || projects.roots.get(project.id)?.rootId !== connection.rootId) continue
+      return { status: 'verified', verified: true, projectId: p.projectId, source: p.source, rootId: connection.rootId }
+    }
+    return { status: changed ? 'reconnect-required' : 'unavailable', verified: false, reason: changed ? 'identity-changed' : 'connection-required' }
   }
 
   async function close() {
@@ -388,7 +471,7 @@ export function createEGDeskFileHttpAdapter({ draftDirectory, projectDirectory, 
     projectStores.clear()
     pickerRequests.clear(); pickerSelections.clear(); pickerChannels.clear()
   }
-  return { dispatch, handle, registerAuthorizedRoot, resolveCaptureSource, resolveProjectWorkspace, close, endpoints: EGDESK_FILE_ENDPOINTS }
+  return { dispatch, handle, registerAuthorizedRoot, resolveCaptureSource, resolveProjectWorkspace, resolveRunProjectOrigin, close, endpoints: EGDESK_FILE_ENDPOINTS }
 }
 
 export async function handleEGDeskFiles(req, res, { adapter, ...context } = {}) {

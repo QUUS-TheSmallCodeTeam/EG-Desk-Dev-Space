@@ -53,7 +53,7 @@ const CLAUDE_CONTEXT_PRESTART_REFUSALS = new Set([
 ])
 const PROJECT_PRESTART_REFUSALS = new Set([
   'PROJECT_RECONNECT_REQUIRED', 'PROJECT_WORKSPACE_UNAVAILABLE', 'PROJECT_WORKSPACE_UNVERIFIED', 'PROJECT_WORKSPACE_CHANGED',
-  'PROJECT_TARGET_CHANGED',
+  'PROJECT_TARGET_CHANGED', 'PROJECT_INHERITANCE_UNAVAILABLE', 'PROJECT_ASSOCIATION_BROKEN',
   'NATIVE_CWD_UNVERIFIED', 'CWD_CHANGE_UNSUPPORTED',
 ])
 const idText = value => typeof value === 'string' && value.length <= 300 ? value : null
@@ -608,10 +608,12 @@ function cleanNotification(method, p, engineId = 'codex') {
 }
 
 export class CodexChatRuntime {
-  constructor({ request, respond, engines = null, emit = () => {}, emitLegacy = () => {}, verifyFile = verifyLocalFile, now = Date.now, contexts = null, toolProviders = [], expectedProcessConfiguration = null, store = null, requireStore = false, getOwnerKey = () => null, qaReady = () => true, getNativeContractFingerprint = () => null, profiles = null, resolveProjectWorkspace = null, mcpServerKind = null, computerControlPolicy = null, computerControlStore = null, onComputerControlChange = () => {}, hostLease = null, setTimer = (fn, ms) => setTimeout(fn, ms), clearTimer = handle => clearTimeout(handle) }) {
+  constructor({ request, respond, engines = null, emit = () => {}, emitLegacy = () => {}, verifyFile = verifyLocalFile, now = Date.now, contexts = null, toolProviders = [], expectedProcessConfiguration = null, store = null, requireStore = false, getOwnerKey = () => null, qaReady = () => true, getNativeContractFingerprint = () => null, profiles = null, resolveProjectWorkspace = null, resolveRunProjectOrigin = null, mcpServerKind = null, computerControlPolicy = null, computerControlStore = null, onComputerControlChange = () => {}, hostLease = null, setTimer = (fn, ms) => setTimeout(fn, ms), clearTimer = handle => clearTimeout(handle) }) {
     Object.assign(this, { emitEvent: emit, emitLegacy, verifyFile, now, setTimer, clearTimer })
     if (resolveProjectWorkspace !== null && typeof resolveProjectWorkspace !== 'function') throw new TypeError('resolveProjectWorkspace must be a server-owned callback')
     this.resolveProjectWorkspace = resolveProjectWorkspace
+    if (resolveRunProjectOrigin !== null && typeof resolveRunProjectOrigin !== 'function') throw new TypeError('resolveRunProjectOrigin must be a server-owned callback')
+    this.resolveRunProjectOrigin = resolveRunProjectOrigin
     // CU-02·03: this Mac's control lease (egdesk-host-lease createHostLease),
     // or null. With it, EG-Desk computer tools may be offered and are checked
     // before dispatch, and a Codex computer call (cua_repl) is stopped as soon
@@ -1718,9 +1720,15 @@ export class CodexChatRuntime {
   async projectWorkspace(scope, assertActive, expectedTarget = null) {
     assertActive()
     let workspace
-    try { workspace = await this.resolveProjectWorkspace({ ...scope }) }
-    catch {
+    try { workspace = await this.resolveProjectWorkspace({ ...scope, ...(expectedTarget ? { projectTarget: expectedTarget } : {}) }) }
+    catch (cause) {
       assertActive()
+      if (['PROJECT_TARGET_CHANGED', 'PROJECT_WORKSPACE_CHANGED', 'PROJECT_INHERITANCE_UNAVAILABLE', 'PROJECT_ASSOCIATION_BROKEN', 'PROJECT_RECONNECT_REQUIRED'].includes(cause?.code)) {
+        const message = cause.code === 'PROJECT_TARGET_CHANGED' ? 'The selected project changed; select the current project and Apply again before sending'
+          : cause.code === 'PROJECT_RECONNECT_REQUIRED' ? 'Reconnect the project folder before sending'
+          : 'The selected or saved project is unavailable or changed; review the project selection before sending'
+        throw Object.assign(chatError(cause.code, message, 409), { definite: true })
+      }
       throw Object.assign(chatError('PROJECT_WORKSPACE_UNAVAILABLE', 'The associated project folder could not be verified; no message was sent', 503), { definite: true })
     }
     assertActive()
@@ -1732,7 +1740,7 @@ export class CodexChatRuntime {
       return null
     }
     if (workspace?.status === 'reconnect-required') throw Object.assign(chatError('PROJECT_RECONNECT_REQUIRED', 'Pick the associated project folder again before sending', 409), { definite: true })
-    if (workspace?.status !== 'connected' || !['board', 'room'].includes(workspace.source) ||
+    if (workspace?.status !== 'connected' || !['request', 'board', 'room'].includes(workspace.source) ||
         ![workspace.projectId, workspace.rootId].every(value => typeof value === 'string' && value && value.length <= 512 && !value.includes('\0')) ||
         typeof workspace.absolutePath !== 'string' || !path.isAbsolute(workspace.absolutePath) || workspace.absolutePath.includes('\0')) {
       throw Object.assign(chatError('PROJECT_WORKSPACE_UNVERIFIED', 'Project folder lookup did not return a verified workspace; no message was sent', 409), { definite: true })
@@ -1741,7 +1749,16 @@ export class CodexChatRuntime {
     // Copy only the verified identity and path, never permissions or roots
     // from a request or a resolver extension. Existing ceilings stay intact.
     const { projectId, source, rootId, absolutePath } = workspace
-    return Object.freeze({ projectId, source, rootId, absolutePath })
+    let provenance = {}
+    if (workspace.identity != null || workspace.fileOwnerScope != null) {
+      if (typeof workspace.fileOwnerScope !== 'string' || !workspace.fileOwnerScope || workspace.fileOwnerScope.length > 512 || workspace.fileOwnerScope.includes('\0') ||
+          !workspace.identity || !['dev', 'ino'].every(key => typeof workspace.identity[key] === 'string' && /^\d+$/.test(workspace.identity[key])) ||
+          ['boardId', 'roomId'].some(key => workspace[key] != null && (typeof workspace[key] !== 'string' || !workspace[key] || workspace[key].length > 512 || workspace[key].includes('\0')))) {
+        throw Object.assign(chatError('PROJECT_WORKSPACE_UNVERIFIED', 'Project origin identity could not be verified; no message was sent', 409), { definite: true })
+      }
+      provenance = { fileOwnerScope: workspace.fileOwnerScope, identity: Object.freeze({ dev: workspace.identity.dev, ino: workspace.identity.ino }), boardId: workspace.boardId ?? null, roomId: workspace.roomId ?? null }
+    }
+    return Object.freeze({ projectId, source, rootId, absolutePath, ...provenance })
   }
 
   assertProcessConfiguration(thread, { model, effort } = {}) {
@@ -2124,6 +2141,18 @@ export class CodexChatRuntime {
             outcome: { accepted: true, dispatchStatus: 'confirmed', conversationId: cid, runId: result?.turn?.id, localRunId: context.localRunId, accountIdentity: { ownerHash: context.ownerHash, status: 'verified' } },
           })
         } catch { this.storeHealthy = false }
+      }
+      // Native acceptance has already happened. Origin failure cannot turn it
+      // into a pre-start refusal or trigger a retry. Nothing private is put on
+      // the public run/context checkpoint; absent provenance remains unknown.
+      if (workspace?.identity && this.storeHealthy && typeof this.store?.bindRunProjectOrigin === 'function') {
+        try {
+          this.store.bindRunProjectOrigin({ clientThreadId: context.clientThreadId, localRunId: context.localRunId,
+            requestId: context.requestId, conversationId: cid, runId: context.nativeTurnId,
+            accountOwnerHash: context.ownerHash, engineId: context.engine.id, engineProfileId: context.engine.engineProfileId,
+            project: { fileOwnerScope: workspace.fileOwnerScope, projectId: workspace.projectId, source: workspace.source,
+              boardId: workspace.boardId, roomId: workspace.roomId, startCwd: workspace.absolutePath, fsIdentity: workspace.identity }, ts: this.now() })
+        } catch { /* Accepted run is unchanged; the dedicated read returns unknown. */ }
       }
       const run = this.ensureRun(cid, result?.turn?.id, context)
       if (!run) throw chatError('INVALID_TURN_RESPONSE', 'Codex did not return a turn ID', 502)
@@ -3328,6 +3357,38 @@ export class CodexChatRuntime {
    *   commands: [{ itemId, totalBytes, complete }] — commands with kept output.
    * Text is redacted like other public text. RUN_NOT_FOUND (404) for an unknown run.
    */
+  async runProjectOrigin(query) {
+    const valid = value => typeof value === 'string' && value.trim() && value.length <= 300 && !value.includes('\0')
+    if (!valid(query?.conversationId) || !valid(query?.runId)) throw chatError('INVALID_RUN_ORIGIN_QUERY', 'Original conversationId and runId are required')
+    const { conversationId, runId } = query
+    const unknown = { protocolVersion: 1, conversationId, runId, status: 'unknown', verified: false }
+    if (!this.store?.getRunProjectOrigin || !this.resolveRunProjectOrigin) return unknown
+    const thread = this.store.getConversationByNative(conversationId)
+    if (!thread?.engineId || !thread.engineProfileId) return unknown
+    const engineId = thread.engineId, engineProfileId = thread.engineProfileId
+    const accountOwnerHash = this.engineOwnerHash(engineId, engineProfileId), epoch = this.epochOf(engineId)
+    if (!accountOwnerHash) return unknown
+    const origin = this.store.getRunProjectOrigin({ clientThreadId: thread.clientThreadId, conversationId, runId, accountOwnerHash, engineId, engineProfileId })
+    if (!origin) return unknown
+    const assertActive = () => {
+      if (epoch !== this.epochOf(engineId) || accountOwnerHash !== this.engineOwnerHash(engineId, engineProfileId) || this.engineRecord(engineId).engineProfileId !== engineProfileId) throw chatError('PROJECT_ORIGIN_SCOPE_MISMATCH', 'Account or engine changed while verifying the run origin', 403)
+      this.assertNativeAccount(thread.clientThreadId, conversationId, engineId)
+    }
+    assertActive()
+    let resolved
+    try { resolved = await this.resolveRunProjectOrigin({ origin, assertActive }) }
+    catch (cause) {
+      assertActive()
+      if (cause?.code === 'PROJECT_ORIGIN_SCOPE_MISMATCH') throw chatError(cause.code, 'Run origin belongs to another local file owner', 403)
+      return { ...unknown, status: 'unavailable' }
+    }
+    assertActive()
+    if (resolved?.verified === true && resolved.status === 'verified' && resolved.projectId === origin.project.projectId && valid(resolved.rootId)) {
+      return { protocolVersion: 1, conversationId, runId, status: 'verified', verified: true, projectId: origin.project.projectId, source: origin.project.source, rootId: resolved.rootId }
+    }
+    return { ...unknown, status: resolved?.status === 'reconnect-required' ? 'reconnect-required' : 'unavailable' }
+  }
+
   runChanges(query) {
     const run = this.findRun(query)
     const itemId = query.itemId == null ? null : idText(query.itemId)

@@ -8,6 +8,7 @@ import { DatabaseSync } from 'node:sqlite'
 import { MAX_ROOM_MEMBERS, PRIVATE_KEYS, openChatStore as openNativeChatStore, roomMemberKey, roomMembersFromLegacy } from './egdesk-chat-store.mjs'
 import { createPrivateQaTempDirectory } from '../scripts/egdesk-qa-platform.mjs'
 import { isOwnedAndPrivate } from './egdesk-private-files.mjs'
+import { DESK_STORE_PRIVATE_KEYS, deskImportBody, storeSafeCopy } from '../overlay/resources/EGDeskRecoveryState.sys.mjs'
 
 const T = 1_800_000_000_000
 const fixtureStores = new Map()
@@ -83,7 +84,7 @@ test('accepted user message and request fingerprint commit together and survive 
   assert.equal(isOwnedAndPrivate(path.join(dataDir, filename), statSync(path.join(dataDir, filename)), 0o077), true)
   const raw = new DatabaseSync(path.join(dataDir, filename))
   assert.equal(raw.prepare('PRAGMA journal_mode').get().journal_mode, 'wal')
-  assert.equal(raw.prepare('PRAGMA user_version').get().user_version, 3)
+  assert.equal(raw.prepare('PRAGMA user_version').get().user_version, 4)
   raw.close()
 })
 
@@ -450,7 +451,7 @@ function writeV1Database(dataDir, ownerScope) {
   return filename
 }
 
-test('a v1 database is backed up, then opens as v3 with every conversation, run and request kept and Codex as its engine', t => {
+test('a v1 database is backed up, then opens as v4 with every conversation, run and request kept and Codex as its engine', t => {
   const dataDir = fixture(t)
   const filename = writeV1Database(dataDir, 'desktop/profile-a')
   const store = openChatStore({ dataDir, ownerScope: 'desktop/profile-a' })
@@ -471,7 +472,7 @@ test('a v1 database is backed up, then opens as v3 with every conversation, run 
   assert.equal(store.getConversation('client-draft').engineId, 'codex')
   store.close()
   const raw = new DatabaseSync(filename)
-  assert.equal(raw.prepare('PRAGMA user_version').get().user_version, 3)
+  assert.equal(raw.prepare('PRAGMA user_version').get().user_version, 4)
   assert.equal(raw.prepare("SELECT engine_id FROM runs WHERE local_run_id='local-run-1'").get().engine_id, 'codex')
   raw.close()
   const backup = `${filename}.v1.bak`
@@ -553,7 +554,7 @@ function privateKeysIn(value, found = []) {
   return found
 }
 
-test('a v2 database is backed up, then opens as v3 with every conversation kept and no room Agent or members yet', t => {
+test('a v2 database is backed up, then opens as v4 with every conversation kept and no room Agent or members yet', t => {
   const dataDir = fixture(t)
   const filename = writeV1Database(dataDir, 'desktop/profile-v2')
   const upgrade = new DatabaseSync(filename)
@@ -566,7 +567,7 @@ test('a v2 database is backed up, then opens as v3 with every conversation kept 
   assert.deepEqual(store.listRoomMembers('client-sent'), { clientThreadId: 'client-sent', members: [] })
   store.close()
   const raw = new DatabaseSync(filename)
-  assert.equal(raw.prepare('PRAGMA user_version').get().user_version, 3)
+  assert.equal(raw.prepare('PRAGMA user_version').get().user_version, 4)
   raw.close()
   const backup = `${filename}.v2.bak`
   assert.equal(isOwnedAndPrivate(backup, statSync(backup), 0o077), true)
@@ -582,6 +583,83 @@ test('a v2 database is backed up, then opens as v3 with every conversation kept 
   mark.close()
   assert.throws(() => openChatStore({ dataDir: other, ownerScope: 'desktop/broken-v2-upgrade' }), { code: 'STORE_CORRUPT' })
   assert.equal(readdirSync(other).some(name => name.includes('.bak')), false)
+})
+
+test('v3 to v4 backs up the full prior store and adds only private run origins; damaged v3/v4 fail closed', t => {
+  const { dataDir, store } = opened(t)
+  conversation(store)
+  store.setRoomMembers({ clientThreadId: 'client-1', members: [{ kind: 'user', role: 'owner' }], ts: T })
+  const members = store.listRoomMembers('client-1')
+  store.close()
+  const filename = path.join(dataDir, readdirSync(dataDir).find(name => name.endsWith('.sqlite')))
+  const v3 = new DatabaseSync(filename)
+  v3.exec('DROP TABLE run_project_origins; PRAGMA user_version=3;')
+  v3.close()
+  const reopened = openChatStore({ dataDir, ownerScope: 'desktop/profile-a' })
+  assert.deepEqual(reopened.listRoomMembers('client-1'), members)
+  reopened.close()
+  const backup = new DatabaseSync(`${filename}.v3.bak`)
+  assert.equal(backup.prepare('PRAGMA user_version').get().user_version, 3)
+  assert.equal(backup.prepare("SELECT count(*) AS n FROM sqlite_master WHERE name='run_project_origins'").get().n, 0)
+  backup.close()
+  const current = new DatabaseSync(filename)
+  assert.equal(current.prepare('PRAGMA user_version').get().user_version, 4)
+  current.exec('ALTER TABLE run_project_origins DROP COLUMN private_json;')
+  current.close()
+  assert.throws(() => openChatStore({ dataDir, ownerScope: 'desktop/profile-a' }), { code: 'STORE_CORRUPT' })
+  const other = fixture(t)
+  openChatStore({ dataDir: other, ownerScope: 'broken-v3' }).close()
+  const brokenFile = path.join(other, readdirSync(other).find(name => name.endsWith('.sqlite')))
+  const broken = new DatabaseSync(brokenFile)
+  broken.exec('DROP TABLE run_project_origins; DROP TABLE room_members; PRAGMA user_version=3;')
+  broken.close()
+  assert.throws(() => openChatStore({ dataDir: other, ownerScope: 'broken-v3' }), { code: 'STORE_CORRUPT' })
+  assert.equal(readdirSync(other).some(name => name.includes('.bak')), false)
+})
+
+test('run origins require accepted exact scope, bind once, survive reopen and never enter public history or imports', t => {
+  const { dataDir, store } = opened(t)
+  conversation(store)
+  store.acceptRequest({ clientThreadId: 'client-1', requestId: 'request-1', fingerprint: 'origin-request', ts: T, localMessageId: 'origin-user', message: userMessage() })
+  store.bindNative({ clientThreadId: 'client-1', conversationId: 'native-thread-1', engineId: 'codex', engineProfileId: 'codex-default', localRunId: 'local-run-1', runId: 'native-run-1' })
+  const scope = { clientThreadId: 'client-1', conversationId: 'native-thread-1', runId: 'native-run-1', engineId: 'codex', engineProfileId: 'codex-default', accountOwnerHash: 'account-a' }
+  const input = { ...scope, requestId: 'request-1', localRunId: 'local-run-1', ts: T,
+    project: { fileOwnerScope: 'egdesk-local', projectId: 'project-a', source: 'board', boardId: 'board-a', roomId: 'client-1', startCwd: '/private/origin-only', fsIdentity: { dev: '1', ino: '2345' } } }
+  assert.throws(() => store.bindRunProjectOrigin(input), { code: 'PROJECT_ORIGIN_UNBOUND' })
+  store.recordRequestOutcome({ clientThreadId: 'client-1', requestId: 'request-1', ts: T + 1,
+    outcome: { accepted: true, conversationId: scope.conversationId, runId: scope.runId, localRunId: input.localRunId, accountIdentity: { ownerHash: scope.accountOwnerHash, status: 'verified' } } })
+  const saved = store.bindRunProjectOrigin(input)
+  assert.deepEqual(store.bindRunProjectOrigin({ ...input, ts: T + 2 }), saved)
+  assert.throws(() => store.bindRunProjectOrigin({ ...input, project: { ...input.project, startCwd: '/changed' } }), { code: 'PROJECT_ORIGIN_CONFLICT' })
+  for (const key of ['accountOwnerHash', 'engineId', 'engineProfileId']) {
+    assert.throws(() => store.getRunProjectOrigin({ ...scope, [key]: 'wrong' }), { code: 'PROJECT_ORIGIN_SCOPE_MISMATCH' })
+    assert.throws(() => store.bindRunProjectOrigin({ ...input, [key]: 'wrong' }), { code: 'PROJECT_ORIGIN_UNBOUND' })
+  }
+  for (const key of ['requestId', 'localRunId', 'conversationId', 'runId']) assert.throws(() => store.bindRunProjectOrigin({ ...input, [key]: 'wrong' }), { code: 'PROJECT_ORIGIN_UNBOUND' })
+  assert.equal(store.getRunProjectOrigin({ ...scope, runId: 'legacy-without-origin' }), null)
+  const publicHistory = JSON.stringify([store.listConversations(), store.listEvents('client-1'), store.listRuns('client-1'), store.listMessages('client-1')])
+  assert.doesNotMatch(publicHistory, /origin-only|2345|fileOwnerScope|startCwd|fsIdentity/)
+  assert.throws(() => store.appendEvent({ clientThreadId: 'client-1', eventKey: 'leak', ts: T, event: 'run.started', details: { privateProjectOrigin: saved } }), { code: 'PRIVATE_CHAT_PAYLOAD' })
+  assert.throws(() => store.importSnapshot({ clientThreadId: 'client-1', importId: 'forged-origin', snapshot: { protocolVersion: 2, runs: [{ ...publicRun('import'), startCwd: '/forged' }], truncated: false, historyComplete: true } }), { code: 'PRIVATE_CHAT_PAYLOAD' })
+  store.close()
+  const reopened = openChatStore({ dataDir, ownerScope: 'desktop/profile-a' })
+  assert.deepEqual(reopened.getRunProjectOrigin(scope), saved)
+  assert.equal(reopened.getConversation('client-1').conversationId, scope.conversationId)
+})
+
+test('RecoveryState private-key parity strips nested origin keys and underscore/hyphen variants before Desk/Board serialization', () => {
+  assert.deepEqual(new Set(DESK_STORE_PRIVATE_KEYS), PRIVATE_KEYS)
+  const names = ['privateprojectorigin', 'privateProjectOrigin', 'private_project_origin', 'PRIVATE-PROJECT-ORIGIN',
+    'startcwd', 'startCwd', 'start_cwd', 'START-CWD', 'fsidentity', 'fsIdentity', 'fs_identity', 'FS-IDENTITY']
+  const privateFields = Object.fromEntries(names.map(name => [name, { value: 'PRIVATE_ORIGIN_MUST_NOT_SERIALIZE', startCwd: '/private/origin-only' }]))
+  const source = { title: 'Kept', ...privateFields, nested: { ...privateFields, items: [{ label: 'Kept row', ...privateFields }] } }
+  const expected = { title: 'Kept', nested: { items: [{ label: 'Kept row' }] } }
+  assert.deepEqual(storeSafeCopy(source), expected)
+  assert.ok(Object.hasOwn(source.nested.items[0], 'private_project_origin'), 'sanitization does not mutate the original preference data')
+  const imported = deskImportBody({ rawDesk: JSON.stringify(source), agendaStore: { agendas: { 'board-a': source }, meta: { 'board-a': { title: 'Board' } } } })
+  assert.deepEqual(JSON.parse(imported.body.deskSnapshot), expected)
+  assert.deepEqual(imported.body.boards[0].body, expected)
+  assert.doesNotMatch(JSON.stringify(imported.body), /PRIVATE_ORIGIN_MUST_NOT_SERIALIZE|origin-only|private.project.origin|start.cwd|fs.identity/i)
 })
 
 test('CHAT-01: each room remembers the Agent picked for it (profile and revision) across restarts, apart from its engine', t => {

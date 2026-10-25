@@ -11,6 +11,8 @@ import { ContextRuntime } from './egdesk-context-runtime.mjs'
 import { ImmutableContextStore } from './egdesk-context-store.mjs'
 import { openBridgeSettings } from './egdesk-bridge-settings.mjs'
 import { openWorkflowRuntime } from './egdesk-workflow-runtime.mjs'
+import { openChatStore } from './egdesk-chat-store.mjs'
+import { createChatHttpHandler } from './codex-bridge-http.mjs'
 
 // Never import or boot the production entrypoint. Only these explicitly
 // bounded service-wiring blocks run in a VM with fake server/process/native
@@ -28,8 +30,10 @@ const serviceAttachment = block('const detachContextServices = contexts.attachSe
 const shutdownBlock = block('let shuttingDown = false', "process.on('SIGINT', shutdown)")
 const resolverExpression = source.match(/^  resolveProjectWorkspace: (request => localFiles\.resolveProjectWorkspace\(request\)),\s*$/m)?.[1]
 assert.ok(resolverExpression, 'the production Chat constructor must inject the file-mount resolver')
+const originResolverExpression = source.match(/^  resolveRunProjectOrigin: (request => localFiles\.resolveRunProjectOrigin\(request\)),\s*$/m)?.[1]
+assert.ok(originResolverExpression, 'the production Chat constructor must inject the read-only origin resolver')
 
-async function harness(t, { constructionRoots = false, failingUnsubscribe = false, unavailableTasks = false } = {}) {
+async function harness(t, { constructionRoots = false, failingUnsubscribe = false, unavailableTasks = false, durable = false } = {}) {
   const temp = await realpath(await mkdtemp(path.join(os.tmpdir(), 'egdesk-bridge-services-')))
   const root = path.join(temp, 'project'), otherRoot = path.join(temp, 'room-project')
   const dataDir = path.join(temp, 'state')
@@ -39,7 +43,7 @@ async function harness(t, { constructionRoots = false, failingUnsubscribe = fals
   const calls = [], events = [], lifecycle = [], warnings = [], projectRequests = [], searched = []
   const watchers = new Map()
   const selections = new Map([['pick-project', root], ['pick-room', otherRoot]])
-  let adapter, localFiles, workflow, chat, onRootRegistered, wired = false
+  let adapter, localFiles, workflow, chat, onRootRegistered, durableChatStore, wired = false
   let owner = 'engine-account-a', requestSeq = 0, threadSeq = 0, turnSeq = 0
   const bridgeSettings = openBridgeSettings({ dataDir: path.join(dataDir, 'settings') })
   const deskStore = {
@@ -84,7 +88,7 @@ async function harness(t, { constructionRoots = false, failingUnsubscribe = fals
     try { if (wired) await vm.runInContext('shutdown()', sandbox) }
     finally {
       try { await workflow?.close() }
-      finally { try { await localFiles?.close() } finally { await rm(temp, { recursive: true, force: true }) } }
+      finally { try { await localFiles?.close(); durableChatStore?.close() } finally { await rm(temp, { recursive: true, force: true }) } }
     }
   })
   vm.runInContext(rootSetup, sandbox)
@@ -93,7 +97,9 @@ async function harness(t, { constructionRoots = false, failingUnsubscribe = fals
   sandbox.providedContexts = contexts
   vm.runInContext(`contexts = providedContexts\n${contextReplay}`, sandbox)
   const resolver = vm.runInContext(`(${resolverExpression})`, sandbox)
-  chat = new CodexChatRuntime({ contexts, getOwnerKey: () => owner, resolveProjectWorkspace: resolver,
+  const originResolver = vm.runInContext(`(${originResolverExpression})`, sandbox)
+  if (durable) durableChatStore = openChatStore({ dataDir: path.join(dataDir, 'chat'), ownerScope: 'service-wiring' })
+  chat = new CodexChatRuntime({ contexts, store: durableChatStore, getOwnerKey: () => owner, resolveProjectWorkspace: resolver, resolveRunProjectOrigin: originResolver,
     respond: () => assert.fail('no native tool or Reader response expected'),
     emit: event => { events.push(event); workflow?.onChatEvent(event) },
     request: async (method, params) => {
@@ -212,6 +218,54 @@ test('service integration: verified Board/room project cwd reaches fake Chat RPC
   assert.equal(forged.absolutePath, h.root)
   assert.deepEqual(h.store.allowedRoots, [h.root], 'project cwd does not rewrite context file authorization')
   assert.ok(h.calls.every(call => !Object.hasOwn(call.params, 'allowedRoots')), 'no new permission field is sent')
+})
+
+test('service integration: saved defaults and accepted immutable origins traverse production mount/runtime/HTTP wiring without extra permissions or provider reads', async t => {
+  const h = await harness(t, { durable: true })
+  const a = await h.file('attachProject', { boardId: 'a', selectionId: 'pick-project' })
+  const b = await h.file('attachProject', { boardId: 'b', selectionId: 'pick-room' })
+  const save = (boardId, project) => h.file('saveRoomProjectDefault', { roomId: 'room-1', boardId, expectedProjectId: project.projectId, expectedRootId: project.rootId })
+  await save('a', a)
+  const first = await h.chat.send({ clientThreadId: 'room-1', requestId: 'first-default', message: 'Start in A' })
+  await save('b', b)
+  assert.equal(h.chat.snapshot(first.conversationId).runs[0].cwdPublic, h.root)
+  const handler = createChatHttpHandler(h.chat, async () => assert.fail('origin reads never authenticate with a provider'))
+  const readOrigin = async run => {
+    const url = new URL(`http://localhost/chat/run-project-origin?conversationId=${run.conversationId}&runId=${run.runId}`)
+    const res = { writeHead(status) { this.status = status }, end(text) { this.body = JSON.parse(text) } }
+    assert.equal(await handler({ method: 'GET' }, res, url), true)
+    return res
+  }
+  let before = h.calls.length
+  assert.equal((await readOrigin(first)).body.rootId, a.rootId)
+  assert.equal(h.calls.length, before)
+  await h.chat.handleNotification({ method: 'turn/completed', params: { threadId: first.conversationId, turn: { id: first.runId, status: 'completed', items: [] } } })
+  const next = await h.send({ conversationId: first.conversationId })
+  assert.equal(h.calls.filter(call => call.method === 'turn/start').at(-1).params.cwd, h.otherRoot)
+  assert.equal((await readOrigin(next)).body.rootId, b.rootId)
+  assert.equal((await readOrigin(first)).body.rootId, a.rootId)
+  await h.file('attachProject', { roomId: 'room-1', selectionId: 'pick-project' })
+  const defaults = await h.file('readRoomProjectDefault', { roomId: 'room-1' })
+  const explicit = await h.send({ conversationId: first.conversationId, projectTarget: { boardId: 'b', projectId: b.projectId, rootId: b.rootId } })
+  assert.equal((await readOrigin(explicit)).body.source, 'request')
+  assert.deepEqual(await h.file('readRoomProjectDefault', { roomId: 'room-1' }), defaults)
+  assert.deepEqual(h.store.allowedRoots, [h.root])
+  assert.ok(h.calls.every(call => !Object.hasOwn(call.params, 'allowedRoots') && !Object.hasOwn(call.params, 'identity')))
+  assert.doesNotMatch(JSON.stringify(h.events), /fsIdentity|fileOwnerScope|startCwd|privateProjectOrigin/)
+  await h.file('inheritRoomProject', { roomId: 'room-1' })
+  await h.file('detachProject', { boardId: 'a' })
+  assert.equal((await readOrigin(first)).body.status, 'unavailable')
+  const reattached = await h.file('attachProject', { boardId: 'a', selectionId: 'pick-project' })
+  assert.notEqual(reattached.projectId, a.projectId, 'the old unreferenced project row was removed')
+  const retainedOrigin = (await readOrigin(first)).body
+  assert.equal(retainedOrigin.projectId, a.projectId, 'origin does not cascade-delete or adopt the new project ID')
+  assert.equal(retainedOrigin.rootId, reattached.rootId)
+  h.changeOwner('another-account')
+  before = h.calls.length
+  const wrongAccount = await readOrigin(first)
+  assert.equal(wrongAccount.status, 403)
+  assert.equal(wrongAccount.body.code, 'PROJECT_ORIGIN_SCOPE_MISMATCH')
+  assert.equal(h.calls.length, before)
 })
 
 test('service integration: a replaced project blocks dispatch instead of falling back; an explicit unattached project remains ordinary Chat', async t => {

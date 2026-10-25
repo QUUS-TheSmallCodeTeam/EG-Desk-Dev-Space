@@ -42,6 +42,8 @@ function harness(override = {}) {
     verifyFile: override.verifyFile || (async () => null),
     profiles: override.profiles,
     resolveProjectWorkspace: override.resolveProjectWorkspace,
+    resolveRunProjectOrigin: override.resolveRunProjectOrigin,
+    store: override.store,
   })
   chat.setConnection(true)
   const notify = (method, params) => chat.handleNotification({ method, params })
@@ -1888,7 +1890,7 @@ test('project target: an Apply snapshot supplies only Board routing and expected
   const body = { message: 'Use my selection', clientThreadId: 'room-1', requestId: 'applied', projectTarget: selectedProjectTarget(), cwd: '/renderer-path' }
   const result = await h.chat.send(body)
   assert.ok(scopes.length >= 3)
-  assert.ok(scopes.every(scope => JSON.stringify(scope) === JSON.stringify({ boardId: 'board-1', roomId: 'room-1' })))
+  assert.ok(scopes.every(scope => JSON.stringify(scope) === JSON.stringify({ boardId: 'board-1', roomId: 'room-1', projectTarget: selectedProjectTarget() })))
   for (const { params } of h.calls) {
     assert.equal(params.cwd, '/fixture/one')
     for (const key of ['projectTarget', 'boardId', 'projectId', 'rootId', 'allowedRoots', 'sandbox', 'sandboxPolicy', 'approvalPolicy']) assert.equal(Object.hasOwn(params, key), false)
@@ -1933,17 +1935,17 @@ test('project target: selection changed before the first lookup is a definite re
   }
 })
 
-test('project target: the original Board room override still wins lookup and cannot be bypassed by an explicit Board selection', async () => {
+test('project target: explicit selection reaches the resolver ahead of the default while keeping the original Board room', async () => {
   const scopes = [], prepared = []
   const h = projectHarness({ profiles: { runProfile: profileId => ({ binding: { profileId, revision: 1, hash: 'hash' }, developerInstructions: `You are ${profileId}` }) },
-    resolveProjectWorkspace: async scope => { scopes.push(scope); return projectWorkspace('room-override', 'room') },
+    resolveProjectWorkspace: async scope => { scopes.push(scope); return scope.projectTarget ? projectWorkspace('board', 'request') : projectWorkspace('room-override', 'room') },
     toolProviders: [{ providerId: 'probe', prepare: async () => { prepared.push(true) }, specs: () => [] }] })
   const result = await h.chat.sendBoard({ clientThreadId: 'original-room', message: '@Coder check', projectTarget: selectedProjectTarget('board'), leadProfileId: 'lead', members: [{ kind: 'agent', profileId: 'coder', label: 'Coder' }] })
-  assert.equal(result.accepted, false)
-  assert.deepEqual(result.recipients.map(row => [row.clientThreadId, row.status, row.code]), [[boardMemberThreadId('original-room', 'coder'), 'failed', 'PROJECT_TARGET_CHANGED']])
-  assert.deepEqual(scopes, [{ boardId: 'board-1', roomId: 'original-room' }])
-  assert.deepEqual(prepared, [])
-  assert.deepEqual(h.calls, [])
+  assert.equal(result.accepted, true)
+  assert.ok(scopes.length >= 3)
+  assert.ok(scopes.every(scope => scope.roomId === 'original-room' && scope.projectTarget.projectId === 'project-board'))
+  assert.equal(prepared.length, 1)
+  assert.equal(h.calls.at(-1).params.cwd, '/fixture/board')
 })
 
 test('project target: a selection is per request, while unselected plain chat and the old Board field retain their contracts', async () => {
@@ -2158,7 +2160,7 @@ test('project workspace: changing Board folder leaves an active run target intac
   assert.deepEqual(h.chat.snapshot().runs.map(run => run.cwdPublic), ['/fixture/one', '/fixture/two'])
 })
 
-function projectClaudeHarness({ store = null, resolveProjectWorkspace, getOwnerKey = () => 'claude-owner', toolProviders = [], turnStatus = 'completed', profiles = null, contexts = null } = {}) {
+function projectClaudeHarness({ store = null, resolveProjectWorkspace, resolveRunProjectOrigin, getOwnerKey = () => 'claude-owner', toolProviders = [], turnStatus = 'completed', profiles = null, contexts = null } = {}) {
   const calls = [], events = []
   let threadCount = 0, turnCount = 0
   const codex = createCodexEngineAdapter({ request: async () => { throw new Error('Claude must never use Codex') }, respond: () => {} })
@@ -2171,7 +2173,7 @@ function projectClaudeHarness({ store = null, resolveProjectWorkspace, getOwnerK
     async startTurn(params) { calls.push({ method: 'turn/start', params }); return { turn: { id: `claude-turn-${++turnCount}`, status: turnStatus, items: [] } } },
     interruptTurn: async () => {}, respond: () => {}, subscribe: () => () => {}, dispose: async () => {},
   }
-  const chat = new CodexChatRuntime({ engines: [codex, claude], store, requireStore: Boolean(store), resolveProjectWorkspace, toolProviders, profiles, contexts, emit: event => events.push(event) })
+  const chat = new CodexChatRuntime({ engines: [codex, claude], store, requireStore: Boolean(store), resolveProjectWorkspace, resolveRunProjectOrigin, toolProviders, profiles, contexts, emit: event => events.push(event) })
   chat.setConnection('claude', true)
   return { chat, calls, events }
 }
@@ -2263,14 +2265,139 @@ test('project target: an explicit current selection cannot retarget a reopened l
   assert.equal(reopened.chat.threadResumeCwds.get(first.conversationId), '/legacy/claude')
 })
 
+test('run origin: Claude keeps its original accepted origin and requires an explicit new conversation for a different default', async t => {
+  const dataDir = await mkdtemp(path.join(os.tmpdir(), 'egdesk-origin-claude-'))
+  let store = openChatStore({ dataDir, ownerScope: 'origin-claude' })
+  t.after(async () => { store.close(); await rm(dataDir, { recursive: true, force: true }) })
+  const workspace = name => ({ ...projectWorkspace(name, 'board'), fileOwnerScope: 'egdesk-local', identity: { dev: '1', ino: name === 'one' ? '1' : '2' } })
+  let current = workspace('one')
+  const seen = []
+  const options = { resolveProjectWorkspace: async () => current, resolveRunProjectOrigin: async ({ origin }) => {
+    seen.push(origin)
+    return { status: 'verified', verified: true, projectId: origin.project.projectId, rootId: `current-${origin.project.fsIdentity.ino}` }
+  } }
+  const h = projectClaudeHarness({ store, ...options })
+  const first = await h.chat.send({ engineId: 'claude', clientThreadId: 'claude-room-a', requestId: 'claude-first', message: 'A' })
+  assert.equal((await h.chat.runProjectOrigin(first)).rootId, 'current-1')
+  assert.equal(seen[0].engineId, 'claude')
+  assert.equal(seen[0].engineProfileId, 'claude-slot')
+  current = workspace('two')
+  const before = h.calls.length
+  await assert.rejects(h.chat.send({ engineId: 'claude', clientThreadId: 'claude-room-a', conversationId: first.conversationId, requestId: 'claude-blocked', message: 'B', projectTarget: selectedProjectTarget('two') }), { code: 'CWD_CHANGE_UNSUPPORTED' })
+  assert.equal(h.calls.length, before, 'no silent resume, turn or fork')
+  assert.equal((await h.chat.runProjectOrigin(first)).rootId, 'current-1')
+  const explicitNew = await h.chat.send({ engineId: 'claude', clientThreadId: 'claude-room-b', requestId: 'claude-explicit-new', message: 'B', projectTarget: selectedProjectTarget('two') })
+  assert.notEqual(explicitNew.conversationId, first.conversationId)
+  assert.equal((await h.chat.runProjectOrigin(explicitNew)).rootId, 'current-2')
+  store.close(); store = openChatStore({ dataDir, ownerScope: 'origin-claude' })
+  const reopened = projectClaudeHarness({ store, ...options })
+  assert.equal((await reopened.chat.runProjectOrigin(first)).rootId, 'current-1')
+  assert.deepEqual(reopened.calls, [])
+})
+
+test('run origin: accepted start identity stays immutable across default switches and store/runtime restart without public provenance or native reads', async t => {
+  const dataDir = await mkdtemp(path.join(os.tmpdir(), 'egdesk-run-origin-'))
+  let store = openChatStore({ dataDir, ownerScope: 'origin-tests' })
+  t.after(async () => { store.close(); await rm(dataDir, { recursive: true, force: true }) })
+  const workspace = name => ({ ...projectWorkspace(name, 'board'), fileOwnerScope: 'egdesk-local', identity: { dev: '1', ino: name === 'one' ? '101' : '202' }, boardId: 'board-a', roomId: 'room-a' })
+  let current = workspace('one')
+  const origins = []
+  const options = { getOwnerKey: () => 'account-a', resolveProjectWorkspace: async () => current,
+    resolveRunProjectOrigin: async ({ origin, assertActive }) => { assertActive(); origins.push(origin); return { status: 'verified', verified: true, projectId: origin.project.projectId, rootId: `current-handle-${origin.project.fsIdentity.ino}` } } }
+  const h = projectHarness({ ...options, store })
+  const first = await h.chat.send({ message: 'First', clientThreadId: 'room-a', requestId: 'origin-first' })
+  assert.equal(first.accepted, true)
+  current = workspace('two')
+  const read = await h.chat.runProjectOrigin(first)
+  assert.equal(read.rootId, 'current-handle-101')
+  assert.equal(origins[0].project.startCwd, '/fixture/one')
+  assert.equal(origins[0].engineId, 'codex')
+  assert.equal(origins[0].requestId, 'origin-first')
+  await h.finish(first)
+  const second = await h.chat.send({ message: 'Second', clientThreadId: 'room-a', conversationId: first.conversationId, requestId: 'origin-second' })
+  assert.equal((await h.chat.runProjectOrigin(second)).rootId, 'current-handle-202')
+  assert.equal((await h.chat.runProjectOrigin(first)).rootId, 'current-handle-101')
+  assert.deepEqual(h.chat.snapshot().runs.map(run => run.cwdPublic), ['/fixture/one', '/fixture/two'])
+  assert.doesNotMatch(JSON.stringify([h.events, h.chat.snapshot(), store.listEvents('room-a'), store.listRuns('room-a')]), /fsIdentity|fileOwnerScope|startCwd|privateProjectOrigin/)
+  assert.ok(h.calls.every(({ params }) => !Object.hasOwn(params, 'identity') && !Object.hasOwn(params, 'allowedRoots') && !Object.hasOwn(params, 'fileOwnerScope')))
+  await h.finish(second)
+  store.close(); store = openChatStore({ dataDir, ownerScope: 'origin-tests' })
+  const reopened = projectHarness({ ...options, store })
+  assert.deepEqual(await reopened.chat.runProjectOrigin(first), read)
+  assert.deepEqual(reopened.calls, [], 'origin lookup never resumes a native session or calls a provider')
+  assert.deepEqual(await reopened.chat.runProjectOrigin({ conversationId: first.conversationId, runId: 'legacy' }), { protocolVersion: 1, conversationId: first.conversationId, runId: 'legacy', status: 'unknown', verified: false })
+})
+
+test('run origin: a post-acceptance persistence failure stays accepted with unknown origin and no automatic replay dispatch', async t => {
+  const dataDir = await mkdtemp(path.join(os.tmpdir(), 'egdesk-origin-failure-'))
+  const store = openChatStore({ dataDir, ownerScope: 'origin-failure' })
+  t.after(async () => { store.close(); await rm(dataDir, { recursive: true, force: true }) })
+  let attempts = 0
+  const h = projectHarness({ store: { ...store, bindRunProjectOrigin() { attempts++; throw new Error('simulated origin storage failure') } }, getOwnerKey: () => 'account-a',
+    resolveProjectWorkspace: async () => ({ ...projectWorkspace(), fileOwnerScope: 'egdesk-local', identity: { dev: '1', ino: '2' } }),
+    resolveRunProjectOrigin: async () => assert.fail('failed origin must not invoke filesystem resolver') })
+  const body = { clientThreadId: 'room-failure', requestId: 'one-attempt', message: 'Run once' }
+  const accepted = await h.chat.send(body)
+  assert.equal(accepted.accepted, true)
+  assert.equal(attempts, 1)
+  assert.equal(store.getRequest({ clientThreadId: body.clientThreadId, requestId: body.requestId }).outcome.accepted, true)
+  assert.equal((await h.chat.runProjectOrigin(accepted)).status, 'unknown')
+  assert.equal((await h.chat.send(body)).accepted, true)
+  assert.equal(h.calls.filter(call => call.method === 'turn/start').length, 1)
+  assert.equal(attempts, 1)
+  assert.equal(h.events.some(event => event.event === 'run.started'), true)
+})
+
+test('run origin: wrong account and account changes during asynchronous recheck cannot release a verified root', async t => {
+  const dataDir = await mkdtemp(path.join(os.tmpdir(), 'egdesk-origin-race-'))
+  const store = openChatStore({ dataDir, ownerScope: 'origin-race' })
+  t.after(async () => { store.close(); await rm(dataDir, { recursive: true, force: true }) })
+  let owner = 'account-a', resolverCalls = 0
+  const entered = Promise.withResolvers(), release = Promise.withResolvers()
+  const h = projectHarness({ store, getOwnerKey: () => owner,
+    resolveProjectWorkspace: async () => ({ ...projectWorkspace(), fileOwnerScope: 'egdesk-local', identity: { dev: '1', ino: '2' } }),
+    resolveRunProjectOrigin: async ({ origin }) => { resolverCalls++; entered.resolve(); await release.promise; return { status: 'verified', verified: true, projectId: origin.project.projectId, rootId: 'must-not-escape' } } })
+  const run = await h.chat.send({ clientThreadId: 'room-race', requestId: 'origin-race', message: 'Run' })
+  owner = 'account-b'
+  await assert.rejects(h.chat.runProjectOrigin(run), { code: 'PROJECT_ORIGIN_SCOPE_MISMATCH' })
+  assert.equal(resolverCalls, 0)
+  owner = 'account-a'
+  const reading = h.chat.runProjectOrigin(run)
+  await entered.promise
+  owner = 'account-b'; release.resolve()
+  await assert.rejects(reading, { code: 'PROJECT_ORIGIN_SCOPE_MISMATCH' })
+  assert.equal(h.calls.filter(call => call.method === 'turn/start').length, 1)
+})
+
+test('run origin: an existing plain-chat run is not retroactively verified when a project is attached to the same cwd', async t => {
+  const dataDir = await mkdtemp(path.join(os.tmpdir(), 'egdesk-origin-legacy-'))
+  const store = openChatStore({ dataDir, ownerScope: 'origin-legacy' })
+  t.after(async () => { store.close(); await rm(dataDir, { recursive: true, force: true }) })
+  let current = null, reads = 0
+  const h = projectHarness({ store, getOwnerKey: () => 'account-a', resolveProjectWorkspace: async () => current,
+    resolveRunProjectOrigin: async ({ origin }) => { reads++; return { status: 'verified', verified: true, projectId: origin.project.projectId, rootId: 'current-root' } } })
+  const plain = await h.chat.send({ clientThreadId: 'legacy-room', requestId: 'plain', message: 'Plain legacy contract' })
+  await h.finish(plain)
+  current = { ...projectWorkspace(), absolutePath: '/work', fileOwnerScope: 'egdesk-local', identity: { dev: '1', ino: '2' } }
+  assert.equal((await h.chat.runProjectOrigin(plain)).status, 'unknown')
+  assert.equal(reads, 0)
+  const later = await h.chat.send({ clientThreadId: 'legacy-room', conversationId: plain.conversationId, requestId: 'later', message: 'Now associated' })
+  assert.equal((await h.chat.runProjectOrigin(later)).verified, true)
+  assert.equal((await h.chat.runProjectOrigin(plain)).status, 'unknown')
+  assert.equal(reads, 1)
+})
+
 test('Board rejected replay: reopened durable prestart refusals never become started or accepted', async t => {
-  for (const code of ['PROJECT_TARGET_CHANGED', 'CLAUDE_CONTEXT_READER_UNSUPPORTED', 'CONTEXT_SCOPE_CHANGED']) await t.test(code, async t => {
+  for (const code of ['PROJECT_TARGET_CHANGED', 'PROJECT_INHERITANCE_UNAVAILABLE', 'PROJECT_ASSOCIATION_BROKEN', 'CLAUDE_CONTEXT_READER_UNSUPPORTED', 'CONTEXT_SCOPE_CHANGED']) await t.test(code, async t => {
     const dataDir = await mkdtemp(path.join(os.tmpdir(), 'egdesk-board-rejected-replay-'))
     let store = openChatStore({ dataDir, ownerScope: 'board-replay-tests' })
     t.after(async () => { store.close(); await rm(dataDir, { recursive: true, force: true }) })
     const profiles = { runProfile: profileId => ({ binding: { profileId, revision: 1, hash: `hash-${profileId}` }, developerInstructions: `You are ${profileId}` }) }
-    const contexts = code === 'PROJECT_TARGET_CHANGED' ? null : { getAuthority: () => {}, specs: () => [], prepare: async () => { throw Object.assign(new Error('Prestart Context refusal'), { code }) } }
-    const first = projectClaudeHarness({ store, profiles, contexts, resolveProjectWorkspace: async () => projectWorkspace(code === 'PROJECT_TARGET_CHANGED' ? 'two' : 'one') })
+    const contexts = code.startsWith('PROJECT_') ? null : { getAuthority: () => {}, specs: () => [], prepare: async () => { throw Object.assign(new Error('Prestart Context refusal'), { code }) } }
+    const first = projectClaudeHarness({ store, profiles, contexts, resolveProjectWorkspace: async () => {
+      if (['PROJECT_INHERITANCE_UNAVAILABLE', 'PROJECT_ASSOCIATION_BROKEN'].includes(code)) throw Object.assign(new Error('Saved default is unavailable'), { code })
+      return projectWorkspace(code === 'PROJECT_TARGET_CHANGED' ? 'two' : 'one')
+    } })
     const body = { engineId: 'claude', clientThreadId: 'board-room', message: '@Lead @Coder check selected work', requestId: 'board-retry',
       projectTarget: selectedProjectTarget(), leadProfileId: 'lead', members: [
         { kind: 'agent', profileId: 'lead', label: 'Lead', role: 'admin' }, { kind: 'agent', profileId: 'coder', label: 'Coder' },

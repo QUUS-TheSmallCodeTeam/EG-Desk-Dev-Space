@@ -64,6 +64,7 @@ export const DESK_STORE_PRIVATE_KEYS = Object.freeze([
   'authorization', 'authpayload', 'authtoken', 'accesstoken',
   'refreshtoken', 'sessiontoken', 'apikey', 'privatekey', 'secret',
   'password', 'passphrase', 'clientsecret', 'systemprompt',
+  'privateprojectorigin', 'startcwd', 'fsidentity',
 ]);
 export const DESK_STORE_LIMITS = Object.freeze({ deskStateBytes: 4 * 1024 * 1024, boardBodyBytes: 4 * 1024 * 1024, boards: 500 });
 export const DESK_REASON_LABELS = Object.freeze({ autosave: '자동 저장', explicit: '직접 저장', import: '가져옴', restore: '복원' });

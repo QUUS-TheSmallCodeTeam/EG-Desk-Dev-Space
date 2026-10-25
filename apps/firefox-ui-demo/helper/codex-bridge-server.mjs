@@ -287,6 +287,7 @@ const chat = new CodexChatRuntime({
   engines: engineRegistry,
   contexts,
   resolveProjectWorkspace: request => localFiles.resolveProjectWorkspace(request),
+  resolveRunProjectOrigin: request => localFiles.resolveRunProjectOrigin(request),
   toolProviders: [browserProvider, planProvider],
   store: chatStore,
   requireStore: true,

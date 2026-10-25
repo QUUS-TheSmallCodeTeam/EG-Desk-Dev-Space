@@ -4,7 +4,7 @@ import path from 'node:path'
 import { DatabaseSync } from 'node:sqlite'
 import { isOwnedAndPrivate } from './egdesk-private-files.mjs'
 
-const VERSION = 3
+const VERSION = 4
 const MAX_RECORD_BYTES = 16 * 1024 * 1024
 const MAX_IMPORT_BYTES = 64 * 1024 * 1024
 const TERMINAL_RUN = new Set(['completed', 'failed', 'interrupted', 'cancelled'])
@@ -15,6 +15,7 @@ export const PRIVATE_KEYS = new Set([
   'authorization', 'authpayload', 'authtoken', 'accesstoken',
   'refreshtoken', 'sessiontoken', 'apikey', 'privatekey', 'secret',
   'password', 'passphrase', 'clientsecret', 'systemprompt',
+  'privateprojectorigin', 'startcwd', 'fsidentity',
 ])
 
 function fail(code, message, httpStatus = 400, cause) {
@@ -333,6 +334,19 @@ const V3_UPGRADE = `
     CREATE INDEX room_members_profile ON room_members(profile_id);
 `
 const V3_COLUMNS = { threads: [...V2_COLUMNS.threads, 'agent_profile_id', 'agent_profile_revision', 'agent_set_at'], runs: V2_COLUMNS.runs }
+// Server-only provenance. Never projected into events, runs, imports or exports.
+// No project foreign key: changing/detaching a project cannot rewrite history.
+const V4_UPGRADE = `
+    CREATE TABLE run_project_origins (
+      local_conversation_id TEXT NOT NULL, local_run_id TEXT NOT NULL,
+      conversation_id TEXT NOT NULL, run_id TEXT NOT NULL, private_json TEXT NOT NULL,
+      PRIMARY KEY(local_conversation_id, local_run_id),
+      UNIQUE(local_conversation_id, conversation_id, run_id),
+      FOREIGN KEY(local_conversation_id) REFERENCES threads(local_conversation_id)
+    );
+`
+const V4_TABLES = [...V3_TABLES, 'run_project_origins']
+const V4_COLUMNS = { ...V3_COLUMNS, run_project_origins: ['local_conversation_id', 'local_run_id', 'conversation_id', 'run_id', 'private_json'] }
 
 // Older builds refuse a newer file (closed, never reset), so the exact data is
 // kept beside it first. VACUUM INTO writes one consistent copy, WAL included,
@@ -368,15 +382,15 @@ function initialize(db, filename) {
     return names.every(name => found.has(name))
   })
   if (version === VERSION) {
-    if (!tablesPresent(V3_TABLES) || !columnsPresent(V3_COLUMNS)) fail('STORE_CORRUPT', 'Chat schema is incomplete; database was not reset', 500)
+    if (!tablesPresent(V4_TABLES) || !columnsPresent(V4_COLUMNS)) fail('STORE_CORRUPT', 'Chat schema is incomplete; database was not reset', 500)
     return
   }
-  if (version === 1 || version === 2) {
-    if (!tablesPresent() || (version === 2 && !columnsPresent(V2_COLUMNS))) fail('STORE_CORRUPT', 'Chat schema is incomplete; database was not reset', 500)
+  if ([1, 2, 3].includes(version)) {
+    if (!tablesPresent(version === 3 ? V3_TABLES : REQUIRED_TABLES) || (version >= 2 && !columnsPresent(version === 3 ? V3_COLUMNS : V2_COLUMNS))) fail('STORE_CORRUPT', 'Chat schema is incomplete; database was not reset', 500)
     backupVersion(db, filename, version)
     db.exec('BEGIN IMMEDIATE')
     try {
-      db.exec(`${version === 1 ? V2_UPGRADE : ''} ${V3_UPGRADE} PRAGMA user_version=${VERSION};`)
+      db.exec(`${version === 1 ? V2_UPGRADE : ''} ${version < 3 ? V3_UPGRADE : ''} ${V4_UPGRADE} PRAGMA user_version=${VERSION};`)
       db.exec('COMMIT')
     } catch (error) {
       try { db.exec('ROLLBACK') } catch { /* Preserve original failure. */ }
@@ -389,6 +403,7 @@ function initialize(db, filename) {
     ${V1_TABLES}
     ${V2_UPGRADE}
     ${V3_UPGRADE}
+    ${V4_UPGRADE}
     PRAGMA user_version=${VERSION};
     COMMIT;`)
 }
@@ -663,6 +678,57 @@ export function openChatStore({ dataDir, ownerScope } = {}) {
       })
     },
     getRequest({ clientThreadId, requestId }) { ensureOpen(); const row = requireThread(clientThreadId); return request(q.request.get(row.local_conversation_id, identifier(requestId, 'requestId'))) },
+    // Called only by the runtime after an accepted native turn and its durable
+    // request/native binding. UI history imports cannot create this record.
+    bindRunProjectOrigin(input) {
+      ensureOpen()
+      shape(input, ['clientThreadId', 'localRunId', 'requestId', 'conversationId', 'runId', 'accountOwnerHash', 'engineId', 'engineProfileId', 'project', 'ts'])
+      const row = requireThread(input.clientThreadId)
+      for (const key of ['localRunId', 'requestId', 'conversationId', 'runId', 'accountOwnerHash', 'engineId', 'engineProfileId']) identifier(input[key], key)
+      const p = input.project
+      shape(p, ['fileOwnerScope', 'projectId', 'source', 'boardId', 'roomId', 'startCwd', 'fsIdentity'])
+      for (const key of ['fileOwnerScope', 'projectId']) identifier(p[key], key)
+      for (const key of ['boardId', 'roomId']) if (p[key] != null) identifier(p[key], key)
+      if (!['request', 'room', 'board'].includes(p.source) || typeof p.startCwd !== 'string' || !path.isAbsolute(p.startCwd) || p.startCwd.length > 4096 || p.startCwd.includes('\0')) fail('INVALID_PROJECT_ORIGIN', 'Verified start folder is required')
+      shape(p.fsIdentity, ['dev', 'ino'])
+      if (!['dev', 'ino'].every(key => typeof p.fsIdentity[key] === 'string' && /^\d+$/.test(p.fsIdentity[key]))) fail('INVALID_PROJECT_ORIGIN', 'Verified folder identity is required')
+      const record = {
+        ownerScope, clientThreadId: input.clientThreadId, localConversationId: row.local_conversation_id,
+        localRunId: input.localRunId, requestId: input.requestId, conversationId: input.conversationId, runId: input.runId,
+        accountOwnerHash: input.accountOwnerHash, engineId: input.engineId, engineProfileId: input.engineProfileId,
+        project: { fileOwnerScope: p.fileOwnerScope, projectId: p.projectId, source: p.source, boardId: p.boardId ?? null, roomId: p.roomId ?? null,
+          startCwd: p.startCwd, fsIdentity: { dev: p.fsIdentity.dev, ino: p.fsIdentity.ino } }, recordedAt: time(input.ts),
+      }
+      return tx(() => {
+        const native = db.prepare('SELECT run_id FROM native_runs WHERE local_conversation_id=? AND local_run_id=?').get(row.local_conversation_id, input.localRunId)
+        const outcome = request(q.request.get(row.local_conversation_id, input.requestId))?.outcome
+        if (row.conversation_id !== input.conversationId || row.engine_id !== input.engineId || row.engine_profile_id !== input.engineProfileId || native?.run_id !== input.runId ||
+            outcome?.accepted !== true || outcome.conversationId !== input.conversationId || outcome.runId !== input.runId || outcome.localRunId !== input.localRunId || outcome.accountIdentity?.ownerHash !== input.accountOwnerHash) {
+          fail('PROJECT_ORIGIN_UNBOUND', 'Origin requires the exact accepted engine, account, request and run', 409)
+        }
+        const prior = db.prepare('SELECT private_json FROM run_project_origins WHERE local_conversation_id=? AND local_run_id=?').get(row.local_conversation_id, input.localRunId)
+        if (prior) {
+          const saved = parse(prior.private_json)
+          if (JSON.stringify({ ...saved, recordedAt: record.recordedAt }) !== JSON.stringify(record)) fail('PROJECT_ORIGIN_CONFLICT', 'A run origin cannot be changed', 409)
+          return saved
+        }
+        db.prepare('INSERT INTO run_project_origins VALUES (?, ?, ?, ?, ?)').run(row.local_conversation_id, input.localRunId, input.conversationId, input.runId, JSON.stringify(record))
+        return record
+      })
+    },
+    getRunProjectOrigin(input) {
+      ensureOpen()
+      shape(input, ['clientThreadId', 'conversationId', 'runId', 'accountOwnerHash', 'engineId', 'engineProfileId'])
+      const row = requireThread(input.clientThreadId)
+      for (const key of ['conversationId', 'runId', 'accountOwnerHash', 'engineId', 'engineProfileId']) identifier(input[key], key)
+      const found = db.prepare('SELECT private_json FROM run_project_origins WHERE local_conversation_id=? AND conversation_id=? AND run_id=?').get(row.local_conversation_id, input.conversationId, input.runId)
+      if (!found) return null
+      const record = parse(found.private_json)
+      if (record.ownerScope !== ownerScope || record.clientThreadId !== input.clientThreadId || record.localConversationId !== row.local_conversation_id ||
+          ['conversationId', 'runId', 'accountOwnerHash', 'engineId', 'engineProfileId'].some(key => record[key] !== input[key]) ||
+          row.conversation_id !== input.conversationId || row.engine_id !== input.engineId || row.engine_profile_id !== input.engineProfileId) fail('PROJECT_ORIGIN_SCOPE_MISMATCH', 'Run origin belongs to another engine, account or conversation', 403)
+      return record
+    },
     recordRequestOutcome(input) {
       ensureOpen(); shape(input, ['clientThreadId', 'requestId', 'ts', 'outcome'])
       const row = requireThread(input.clientThreadId)

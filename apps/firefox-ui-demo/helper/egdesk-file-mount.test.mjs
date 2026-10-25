@@ -56,6 +56,23 @@ test('production mount uses fixed local ownership and adapter-owned request read
   assert.equal(closed, true)
 })
 
+test('project execution and run-origin mount callbacks pin file ownership and forward only server contract fields', async () => {
+  const calls = []
+  const mount = createEGDeskFileMount({ dataDir: '/unused', createNativeAdapter: () => ({ capability: 'unavailable' }),
+    createHttpAdapter: () => ({
+      resolveProjectWorkspace: async value => { calls.push(value); return null },
+      resolveRunProjectOrigin: async value => { calls.push(value); return { status: 'unknown' } },
+      close: async () => {},
+    }) })
+  const projectTarget = Object.freeze({ boardId: 'b', projectId: 'p', rootId: 'r' })
+  await mount.resolveProjectWorkspace({ boardId: 'b', roomId: 'room', projectTarget, ownerScope: 'forged', cwd: '/forged', allowedRoots: ['/forged'] })
+  assert.deepEqual(calls[0], { ownerScope: 'egdesk-local', boardId: 'b', roomId: 'room', projectTarget })
+  const origin = { project: { fileOwnerScope: 'egdesk-local' } }, assertActive = () => {}
+  await mount.resolveRunProjectOrigin({ origin, assertActive, ownerScope: 'forged', absolutePath: '/forged', rootId: 'forged' })
+  assert.deepEqual(calls[1], { ownerScope: 'egdesk-local', origin, assertActive })
+  await mount.close()
+})
+
 test('native create failures preserve collision and partial-file semantics through the mount', async () => {
   let adapter
   let failure = Object.assign(new Error('existing file'), { code: 'EGDESK_NATIVE_REFUSED', nativeStatus: 5, created: false })

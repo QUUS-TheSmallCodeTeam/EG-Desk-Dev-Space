@@ -116,6 +116,23 @@ export function createChatHttpHandler(chat, ensureAuth, history = chat) {
       sendJson(res, 200, chat.snapshot(url.searchParams.get('conversationId')))
       return true
     }
+    // A server-owned origin lookup. IDs are selectors, never path/owner
+    // authority; the runtime rechecks account and current root without RPCs.
+    if (req.method === 'GET' && url.pathname === '/chat/run-project-origin') {
+      try {
+        if ([...url.searchParams.keys()].some(key => !['conversationId', 'runId'].includes(key))) throw chatError('INVALID_RUN_ORIGIN_QUERY', 'Only original conversation and run IDs are accepted')
+        const query = {}
+        for (const key of ['conversationId', 'runId']) {
+          const values = url.searchParams.getAll(key)
+          if (values.length !== 1 || !values[0].trim() || values[0].length > 300 || values[0].includes('\0')) throw chatError('INVALID_RUN_ORIGIN_QUERY', `Exactly one ${key} is required`)
+          query[key] = values[0]
+        }
+        sendJson(res, 200, await chat.runProjectOrigin(query))
+      } catch (cause) {
+        sendJson(res, cause.httpStatus || 500, { code: cause.code || 'RUN_ORIGIN_ERROR', error: 'Run project origin could not be verified' })
+      }
+      return true
+    }
     // CODE-05·06: a run's changed lines and command output, from bridge
     // memory (CodexChatRuntime.runChanges / commandOutput). Like /chat/state
     // they need no account call; runs of a signed-out account are gone.

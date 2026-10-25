@@ -5,6 +5,7 @@ import os from 'node:os'
 import path from 'node:path'
 import { Readable } from 'node:stream'
 import { createHash } from 'node:crypto'
+import { DatabaseSync } from 'node:sqlite'
 import { createEGDeskFileHttpAdapter, EGDESK_FILE_ENDPOINTS, handleEGDeskFiles } from './egdesk-file-http.mjs'
 import { createEGDeskFileMount } from './egdesk-file-mount.mjs'
 import { CodexChatRuntime } from './codex-chat-runtime.mjs'
@@ -49,7 +50,11 @@ const request = (route, body, headers = {}) => Object.assign(Readable.from([Buff
 const response = () => ({ writeHead(status, headers) { this.status = status; this.headers = headers }, end(body) { this.body = JSON.parse(body) } })
 
 test('frozen UI/server endpoint map supports persisted working-copy flow and create-only Save As', async t => {
-  assert.deepEqual(EGDESK_FILE_CLIENT_ENDPOINTS, EGDESK_FILE_ENDPOINTS)
+  // The read/save-default routes land backend-first; every shipped client
+  // operation must retain its exact route while the UI wiring follows.
+  for (const [name, route] of Object.entries(EGDESK_FILE_CLIENT_ENDPOINTS)) assert.equal(EGDESK_FILE_ENDPOINTS[name], route)
+  assert.equal(EGDESK_FILE_ENDPOINTS.readRoomProjectDefault, '/v1/files/projects/room-default')
+  assert.equal(EGDESK_FILE_ENDPOINTS.saveRoomProjectDefault, '/v1/files/projects/room-default/save')
   const { root, client, dispatch } = await fixture(t)
   const authorized = await client.registerRoot({ selectionId: 'selected-owner-a' })
   const listed = await client.listDirectory({ directoryId: authorized.directoryId })
@@ -385,7 +390,7 @@ test('git and content-search routes: bounded fields, opaque change ids, and git 
 
 // ---- 2-X: Board projects (D-X3), project commands (D-X6), original save and review routes ----
 
-async function projectFixture(t) {
+async function projectFixture(t, options = {}) {
   const temp = await fs.realpath(await fs.mkdtemp(path.join(os.tmpdir(), 'egdesk-file-projects-')))
   const folders = { shop: path.join(temp, 'shop'), blog: path.join(temp, 'blog') }
   for (const folder of Object.values(folders)) await fs.mkdir(folder)
@@ -393,12 +398,172 @@ async function projectFixture(t) {
   await fs.writeFile(path.join(folders.shop, 'app.js'), 'one\n')
   const draftDirectory = path.join(temp, 'drafts')
   const resolveRootSelection = async ({ selectionId }) => selectionId === 'cancel' ? null : folders[selectionId.replace('pick-', '')]
-  const make = () => createEGDeskFileHttpAdapter({ draftDirectory, localOwnerScope: 'owner-p', resolveRootSelection })
+  const make = () => createEGDeskFileHttpAdapter({ draftDirectory, localOwnerScope: 'owner-p', resolveRootSelection, ...options })
   let adapter = make()
   t.after(async () => { await adapter.close(); await fs.rm(temp, { recursive: true, force: true }) })
   const call = (operation, body) => adapter.dispatch({ method: 'POST', pathname: EGDESK_FILE_ENDPOINTS[operation], body, ownerScope: 'owner-p' })
   return { temp, folders, draftDirectory, call, restart: async () => { await adapter.close(); adapter = make() }, adapter: () => adapter }
 }
+
+test('room defaults: explicit request > override > saved inheritance > legacy, only absence descends and selection never saves', async t => {
+  const h = await projectFixture(t)
+  const a = (await h.call('attachProject', { boardId: 'a', selectionId: 'pick-shop' })).body.result
+  const b = (await h.call('attachProject', { boardId: 'b', selectionId: 'pick-blog' })).body.result
+  const save = await h.call('saveRoomProjectDefault', { roomId: 'r', boardId: 'a', expectedProjectId: a.projectId, expectedRootId: a.rootId })
+  assert.equal(save.status, 200)
+  assert.deepEqual(save.body.result.inheritance, { boardId: 'a' })
+  assert.equal(save.body.result.override, null)
+  const resolve = options => h.adapter().resolveProjectWorkspace({ ownerScope: 'owner-p', roomId: 'r', ...options })
+  assert.equal((await resolve()).projectId, a.projectId)
+  await h.call('attachProject', { roomId: 'r', selectionId: 'pick-blog' })
+  assert.equal((await resolve()).projectId, b.projectId)
+  const targetA = { boardId: 'a', projectId: a.projectId, rootId: a.rootId }
+  assert.equal((await resolve({ projectTarget: targetA })).source, 'request')
+  assert.equal((await resolve({ projectTarget: targetA })).projectId, a.projectId)
+  assert.equal((await resolve()).projectId, b.projectId, 'clearing the request reveals the unchanged default')
+  const before = (await h.call('readRoomProjectDefault', { roomId: 'r' })).body.result
+  for (const target of [{ ...targetA, projectId: 'stale' }, { ...targetA, rootId: 'stale' }, { ...targetA, boardId: 'missing' }]) {
+    await assert.rejects(resolve({ projectTarget: target }), { code: 'PROJECT_TARGET_CHANGED' })
+  }
+  assert.deepEqual((await h.call('readRoomProjectDefault', { roomId: 'r' })).body.result, before)
+  await h.call('inheritRoomProject', { roomId: 'r' })
+  assert.equal((await resolve({ boardId: 'b' })).projectId, a.projectId, 'saved inheritance outranks a legacy Board hint')
+  await h.restart()
+  assert.equal((await resolve()).projectId, a.projectId)
+  assert.deepEqual((await h.call('readRoomProjectDefault', { roomId: 'r' })).body.result.inheritance, { boardId: 'a' })
+  await h.call('detachProject', { boardId: 'a' })
+  await assert.rejects(resolve({ boardId: 'b' }), { code: 'PROJECT_INHERITANCE_UNAVAILABLE' })
+  assert.equal((await h.call('readRoomProjectDefault', { roomId: 'r' })).body.result.status, 'unavailable')
+  const currentB = (await h.call('openProject', { boardId: 'b' })).body.result.project
+  assert.equal((await resolve({ projectTarget: { boardId: 'b', projectId: b.projectId, rootId: currentB.rootId } })).projectId, b.projectId)
+  assert.equal(await h.adapter().resolveProjectWorkspace({ ownerScope: 'owner-p', roomId: 'plain' }), null)
+})
+
+test('room defaults: Save validates expected IDs and filesystem identity, and atomic CAS preserves baseline/override on a race', async t => {
+  const h = await projectFixture(t)
+  const a = (await h.call('attachProject', { boardId: 'a', selectionId: 'pick-shop' })).body.result
+  const b = (await h.call('attachProject', { boardId: 'b', selectionId: 'pick-blog' })).body.result
+  await h.call('saveRoomProjectDefault', { roomId: 'r', boardId: 'b', expectedProjectId: b.projectId, expectedRootId: b.rootId })
+  await h.call('attachProject', { roomId: 'r', selectionId: 'pick-shop' })
+  const input = { roomId: 'r', boardId: 'a', expectedProjectId: a.projectId, expectedRootId: a.rootId }
+  for (const body of [{ ...input, expectedProjectId: 'old' }, { ...input, expectedRootId: 'old' }]) assert.equal((await h.call('saveRoomProjectDefault', body)).body.code, 'PROJECT_TARGET_CHANGED')
+  for (const body of [{ ...input, path: h.folders.shop }, { ...input, ownerScope: 'owner-p' }, { ...input, allowedRoots: [] }]) assert.equal((await h.call('saveRoomProjectDefault', body)).body.code, 'UNEXPECTED_FIELD')
+  for (const key of Object.keys(input)) {
+    const body = { ...input }; delete body[key]
+    assert.equal((await h.call('saveRoomProjectDefault', body)).status, 400)
+  }
+  const store = await openEGDeskProjectStore({ directory: h.draftDirectory, ownerScope: 'owner-p' })
+  t.after(() => store.close())
+  const checked = store.forBoard('a')
+  await h.call('attachProject', { boardId: 'a', selectionId: 'pick-blog' })
+  assert.throws(() => store.saveRoomInheritance({ roomId: 'r', boardId: 'a', expectedProject: checked }), { code: 'PROJECT_TARGET_CHANGED' })
+  assert.deepEqual(store.inheritanceForRoom('r'), { boardId: 'b' })
+  assert.equal(store.forRoom('r').id, a.projectId)
+  const fresh = (await h.call('openProject', { boardId: 'a' })).body.result.project
+  await fs.rename(h.folders.blog, `${h.folders.blog}-old`); await fs.mkdir(h.folders.blog)
+  assert.equal((await h.call('saveRoomProjectDefault', { ...input, expectedProjectId: fresh.projectId, expectedRootId: fresh.rootId })).body.code, 'PROJECT_RECONNECT_REQUIRED')
+  assert.deepEqual(store.inheritanceForRoom('r'), { boardId: 'b' })
+  assert.equal(store.forRoom('r').id, a.projectId)
+})
+
+test('project store schema: exact legacy schema upgrades additively; incomplete current and legacy schemas fail closed', async t => {
+  const h = await projectFixture(t)
+  await h.call('attachProject', { boardId: 'a', selectionId: 'pick-shop' })
+  await h.adapter().close()
+  const filename = path.join(h.draftDirectory, `projects-${createHash('sha256').update('owner-p').digest('hex')}.sqlite`)
+  const db = new DatabaseSync(filename)
+  db.exec('DROP TABLE room_project_inheritance; PRAGMA user_version=0;')
+  db.close()
+  const upgraded = await openEGDeskProjectStore({ directory: h.draftDirectory, ownerScope: 'owner-p' })
+  assert.ok(upgraded.forBoard('a'))
+  assert.equal(upgraded.inheritanceForRoom('r'), null, 'legacy room.boardId metadata is not inferred as a saved inheritance choice')
+  upgraded.close()
+  const broken = new DatabaseSync(filename)
+  assert.equal(broken.prepare('PRAGMA user_version').get().user_version, 1)
+  broken.exec('ALTER TABLE room_project_inheritance DROP COLUMN boardId;')
+  broken.close()
+  await assert.rejects(openEGDeskProjectStore({ directory: h.draftDirectory, ownerScope: 'owner-p' }), { code: 'PROJECT_STORE_CORRUPT' })
+  const legacy = new DatabaseSync(filename)
+  legacy.exec('DROP TABLE room_project_inheritance; DROP TABLE bindings; PRAGMA user_version=0;')
+  legacy.close()
+  await assert.rejects(openEGDeskProjectStore({ directory: h.draftDirectory, ownerScope: 'owner-p' }), { code: 'PROJECT_STORE_CORRUPT' })
+  const kept = new DatabaseSync(filename)
+  assert.equal(kept.prepare('SELECT count(*) AS n FROM projects').get().n, 1)
+  assert.equal(kept.prepare('PRAGMA user_version').get().user_version, 0)
+  kept.close()
+})
+
+test('room defaults: HTTP Save loses a last-moment association race without clearing the override or changing the saved source', async t => {
+  let backing, h, race = false
+  h = await projectFixture(t, { projectStoreForOwner: async ownerScope => {
+    backing = await openEGDeskProjectStore({ directory: h.draftDirectory, ownerScope })
+    return { ...backing, saveRoomInheritance(input) {
+      if (race) {
+        race = false
+        const replacement = backing.forBoard('b')
+        backing.attachToBoard({ boardId: 'a', workspaceRoot: replacement.workspaceRoot, identity: replacement.identity, title: replacement.title })
+      }
+      return backing.saveRoomInheritance(input)
+    } }
+  } })
+  const a = (await h.call('attachProject', { boardId: 'a', selectionId: 'pick-shop' })).body.result
+  const b = (await h.call('attachProject', { boardId: 'b', selectionId: 'pick-blog' })).body.result
+  await h.call('saveRoomProjectDefault', { roomId: 'r', boardId: 'b', expectedProjectId: b.projectId, expectedRootId: b.rootId })
+  await h.call('attachProject', { roomId: 'r', selectionId: 'pick-shop' })
+  race = true
+  const lost = await h.call('saveRoomProjectDefault', { roomId: 'r', boardId: 'a', expectedProjectId: a.projectId, expectedRootId: a.rootId })
+  assert.deepEqual([lost.status, lost.body.code], [409, 'PROJECT_TARGET_CHANGED'])
+  assert.deepEqual(backing.inheritanceForRoom('r'), { boardId: 'b' })
+  assert.equal(backing.forRoom('r').id, a.projectId)
+})
+
+test('room defaults: changing the saved source while preparation awaits prevents all fake engine dispatch', async t => {
+  const h = await projectFixture(t)
+  const a = (await h.call('attachProject', { boardId: 'a', selectionId: 'pick-shop' })).body.result
+  const b = (await h.call('attachProject', { boardId: 'b', selectionId: 'pick-blog' })).body.result
+  const save = (boardId, project) => h.call('saveRoomProjectDefault', { roomId: 'r', boardId, expectedProjectId: project.projectId, expectedRootId: project.rootId })
+  await save('a', a)
+  const entered = Promise.withResolvers(), release = Promise.withResolvers(), calls = []
+  const runtime = new CodexChatRuntime({ request: async (...args) => { calls.push(args); assert.fail('no fake native call expected') }, respond: () => {},
+    resolveProjectWorkspace: args => h.adapter().resolveProjectWorkspace({ ...args, ownerScope: 'owner-p' }),
+    toolProviders: [{ providerId: 'gate', specs: () => [], prepare: async () => { entered.resolve(); await release.promise } }] })
+  runtime.setConnection(true)
+  const pending = runtime.send({ clientThreadId: 'r', message: 'Prepare in A' })
+  await entered.promise
+  await save('b', b)
+  release.resolve()
+  await assert.rejects(pending, { code: 'PROJECT_WORKSPACE_CHANGED', definite: true })
+  assert.deepEqual(calls, [])
+})
+
+test('run origin resolver: only current authorized connections qualify, never a saved-path registration or a replacement inode', async t => {
+  const registrations = []
+  const h = await projectFixture(t, { onRootRegistered: value => registrations.push(value) })
+  await h.call('attachProject', { boardId: 'a', selectionId: 'pick-shop' })
+  const workspace = await h.adapter().resolveProjectWorkspace({ ownerScope: 'owner-p', boardId: 'a', roomId: 'r' })
+  const origin = { project: { fileOwnerScope: 'owner-p', projectId: workspace.projectId, source: 'board', startCwd: workspace.absolutePath, fsIdentity: workspace.identity } }
+  const read = () => h.adapter().resolveRunProjectOrigin({ ownerScope: 'owner-p', origin })
+  assert.equal((await read()).rootId, workspace.rootId)
+  await assert.rejects(h.adapter().resolveRunProjectOrigin({ ownerScope: 'other', origin }), { code: 'OWNER_SCOPE_MISMATCH' })
+  await assert.rejects(h.adapter().resolveRunProjectOrigin({ ownerScope: 'owner-p', origin: { project: { ...origin.project, fileOwnerScope: 'other' } } }), { code: 'PROJECT_ORIGIN_SCOPE_MISMATCH' })
+  await h.restart()
+  const count = registrations.length
+  assert.equal((await read()).status, 'unavailable')
+  assert.equal(registrations.length, count, 'origin reread itself never registers a saved path')
+  const connected = (await h.call('openProject', { boardId: 'a' })).body.result.project
+  assert.notEqual(connected.rootId, workspace.rootId)
+  assert.equal((await read()).rootId, connected.rootId)
+  await h.call('detachProject', { boardId: 'a' })
+  assert.equal((await read()).status, 'unavailable', 'a cached handle is not authorization after detach')
+  await h.call('attachProject', { boardId: 'a', selectionId: 'pick-shop' })
+  assert.equal((await read()).verified, true)
+  await fs.rename(h.folders.shop, `${h.folders.shop}-old`); await fs.mkdir(h.folders.shop)
+  const beforeReplaced = registrations.length
+  assert.equal((await read()).status, 'reconnect-required')
+  assert.equal(registrations.length, beforeReplaced)
+  await h.call('attachProject', { boardId: 'a', selectionId: 'pick-shop' })
+  assert.equal((await read()).status, 'reconnect-required', 'same-path reauthorization cannot rewrite a past origin')
+})
 
 test('Board project: attach by picker selection only, rooms inherit or own a folder, restart reconnects only the same dev/ino', async t => {
   const { folders, draftDirectory, call, restart, adapter } = await projectFixture(t)

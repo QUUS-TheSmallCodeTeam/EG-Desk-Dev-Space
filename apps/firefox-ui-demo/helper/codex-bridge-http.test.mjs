@@ -82,6 +82,31 @@ test('JSON reader rejects oversized bodies, non-JSON types and non-object data',
   await assert.rejects(readJsonBody(request('x'.repeat(65537))), e => e.httpStatus === 413)
 })
 
+test('run project origin GET awaits server verification, rejects duplicate/authority fields, and never authenticates or dispatches', async () => {
+  const queries = []
+  const handler = createChatHttpHandler({ async runProjectOrigin(query) {
+    queries.push(query)
+    await Promise.resolve()
+    return { protocolVersion: 1, ...query, status: 'verified', verified: true, rootId: 'current-root', projectId: 'original-project', source: 'board' }
+  } }, async () => assert.fail('read must not make an auth/provider call'))
+  const get = async suffix => {
+    const res = response(), req = request('', {}, `/chat/run-project-origin${suffix}`); req.method = 'GET'
+    assert.equal(await handler(req, res, new URL(`http://localhost${req.url}`)), true)
+    return res
+  }
+  const valid = await get('?conversationId=original&runId=turn')
+  assert.equal(valid.status, 200)
+  assert.equal(valid.body.rootId, 'current-root')
+  assert.deepEqual(queries, [{ conversationId: 'original', runId: 'turn' }])
+  for (const suffix of ['?runId=turn', '?conversationId=original&runId=', '?conversationId=a&conversationId=b&runId=t', '?conversationId=c&runId=a&runId=b',
+    '?conversationId=c&runId=r&rootId=forged', '?conversationId=c&runId=r&cwd=/private', '?conversationId=c&runId=r&ownerScope=forged', '?conversationId=c&runId=%00']) {
+    const res = await get(suffix)
+    assert.deepEqual([res.status, res.body.code], [400, 'INVALID_RUN_ORIGIN_QUERY'])
+  }
+  assert.equal(queries.length, 1)
+  assert.equal(await handler(request('{}', {}, '/chat/run-project-origin'), response(), new URL('http://localhost/chat/run-project-origin')), false)
+})
+
 test('HTTP send preserves accepted/conversationId and adds run IDs without listening on a socket', async () => {
   let received
   const handler = createChatHttpHandler({ send: async body => { received = body; return { accepted: true, conversationId: 'thread', runId: 'turn', answerId: 'thread/turn' } } }, async () => {})
