@@ -1,6 +1,6 @@
 # EG-Desk 비전 Gap 원장
 
-**기준일**: 2026-10-25 (최초 조사 코드 기준 `bebe45c`, 상태 표 집계는 `5760981`까지. 그 이후 연결·검증은 아래 2026-10-25 체크포인트에 기록. 작업 브랜치 `claude/vision-gap-20261024`)
+**기준일**: 2026-10-26 (최초 조사 코드 기준 `bebe45c`, 상태 표 집계는 `5760981`까지. 그 이후 연결·검증은 아래 날짜별 체크포인트에 기록. 작업 브랜치 `claude/vision-gap-20261024`)
 
 **정본 백로그**: [EGDESK_PRODUCT_VISION_AND_DEV_TODO.md](./EGDESK_PRODUCT_VISION_AND_DEV_TODO.md)  
 **범위**: 비전 문서의 미체크 항목 + 2026-10-24 대표님 추가 목표(기능·UI/UX·디자인 전부, Codex+Claude 구독 지원, 브라우저 제어, 컴퓨터 사용, Agent 캐릭터 설정)
@@ -138,9 +138,42 @@ Claude 전용 Reader와 큰 텍스트 자료의 엔진별 읽기 경로를 추�
 
 Git 전송 확인 범위는 기존 `ff9ae10`·`4b40588`까지다. B3 후속은 별도 로컬 체크포인트로 보존하며, 원격 전송·main 통합 여부와 구분한다. 이 검증으로 원격 전송이나 main 통합을 완료했다고 표시하지 않는다.
 
+### 프로젝트·화면 연결 진행 체크포인트 (2026-10-26)
+
+이번 회차의 종료 시각은 한국시간 2026-10-26 10:00이다. 아래는 진행 중 상태이며, 화면 검증 또는 전체 기능 완료 선언이 아니다.
+
+- `87502b2`: helper가 확인한 프로젝트 폴더를 실행 cwd에 연결하고, Context 서비스·파일 변경 알림·고정 원문 저장 경로를 연결했다. 원문 변경은 기존 캡처를 덮어쓰지 않는다.
+- `6981082`: 요청별 프로젝트 선택의 세 식별자와 실제 연결을 대조한다. 잘못되거나 변경된 선택을 기본 폴더로 바꾸어 실행하지 않는다. 저장소 재개방 뒤 거절된 요청을 다시 조회해도 Board 작업 시작·하위 Agent 작업 인계 성공으로 표시하지 않는다.
+- `98f77ea`: File의 명시적 Board 프로젝트 연결·직접 입력한 검사 명령·출력 수집, Chat의 요청별 프로젝트 선택, Browser actor 연결을 화면에 반영했다. 격리한 headless R8은 118/118 통과했다. 긴 이름의 프로젝트 선택·적용·취소·제거와 전체 경로 확인, 600px 명령 입력의 macOS `⌘←`·`⌘→` 이동 및 값 보존까지 포함한다. OS 포커스나 실제 셸 실행의 증거로 확대하지 않는다.
+- `5b88c91`: 보관된 명령 출력과 파일 변경 내용을 읽기 전용으로 표시하는 Chat 모듈을 추가했다. 집중 시험 39/39 및 독립 소스 검토를 통과했다. 이 커밋 자체는 모듈이며, 실제 활동 기록·승인 화면 연결과 headless 검증은 별도다. 조회는 실행·승인·되돌리기를 발생시키지 않는다.
+- `361e62e`: 저장된 Board를 JSON Canvas로 읽어 내는 HTTP 경로를 연결했다. 실제 임시 Desk 저장소 기반 시험 17/17 통과. 저장된 최신 리비전만 대상이며 첨부·캡처 원본은 제외한다. 다운로드 화면·파일 저장과 미저장 화면 내용은 이 완료 범위가 아니다.
+- `5a99422`: 채팅방의 기본 Board 상속과 개별 프로젝트 지정, 실행 당시 프로젝트 귀속의 비공개 저장·재검증을 연결했다. 요청별 지정 → 방의 개별 지정 → 저장된 Board 상속 순서이며, 잘못된 상위 선택을 하위 기본값으로 바꾸지 않는다. helper 전체 1,355 pass / 0 fail / 9 skip 및 독립 소스 리뷰를 거쳤다. 방 기본값 설정 UI와 결과의 파일 열기 버튼은 이 커밋에 포함되지 않는다.
+- `fde5bfc`: 보존된 명령 결과·diff를 기존 Chat 활동 행과 승인 영역에서 명시적으로 여는 UI를 연결했다. headless R3의 8개 흐름 검사를 통과했고 Main이 캡처 6개를 확인했다. 같은 실행의 새 메시지 후 펼침·로컬 스크롤 유지, 추가 조회 0회, 승인 POST 0회, 실제로 소실된 출력의 사용 불가 표시를 포함한다. PM은 중복 기술 필드를 상세로 접은 시각 보정을 검토했다. 합성 응답이며 실제 모델·파일 변경·승인을 실행한 증거는 아니다.
+- `776b0b0`: 검증된 실행 출처 조회에 현재 허용된 연결의 `directoryId`·`displayPath`만 추가했다. 폴더 교체·연결 변경·계정 변경은 다시 확인하며, 과거 경로를 새 권한으로 등록하지 않는다. helper 전체 1,365 pass / 0 fail / 9 skip 및 독립 소스 리뷰를 거쳤다. FileView 이동 UI는 후속 연결이다.
+- `4b6d208`: 저장본 JSON Canvas 내보내기의 취소·화면 변경·쓰기 시작 이후 결과 불명 처리를 순수 흐름 모듈로 추가했다. 집중 17개, HTTP·변환기 포함 34/34 통과. 미저장 편집이 있어도 기존 저장본만 내보내고 초안·리비전을 바꾸지 않는다. 메뉴·실제 저장 선택기는 아직 연결 전이다.
+- `96af557`: Agent Markdown 가져오기 미리보기 → 명시적 확인 → 검토용 초안 생성과, 선택한 프로필 리비전의 Markdown·Codex TOML 내보내기 흐름을 추가했다. 새 모듈 39개·기존 프로필 계약 20개, 59/59 및 독립 소스 검토를 통과했다. 가져오기는 자동 활성화·방 배정을 하지 않으며, 생성 결과 불명은 같은 원문을 재전송하지 않는다. Settings·실제 파일 선택·저장 UI는 아직 연결 전이다.
+- `e46d08a`: 프로젝트·보존 출력·Browser relay의 격리 headless 검증 도구와 출처 대조를 저장했다. 관련 단위·transport 시험 173/173 통과. 기존 R9·출력 R3의 실제 검증 근거와 별개로, 이 커밋에 포함된 방 기본값·실행 위치 확장 R10 검사는 제품 연결 뒤 실행할 준비 단계다. 검증 코드의 존재만으로 해당 화면 검증을 통과했다고 표시하지 않는다.
+- `1b572ce`: 텍스트 파일 선택·읽기·저장의 주입형 어댑터와 실제 임시 Profile/Desk 저장소 기반 전송 fixture를 추가했다. 전송 모듈 포함 89개·fixture 9개 검사 통과. 읽기는 크기 상한과 UTF-8 오류를 확인하고 원문을 자르지 않는다. 저장은 기존 파일을 덮어쓰지 않는 배타적 생성이며, 전체 파일의 원자적 공개를 보장하는 것으로 표현하지 않는다. 쓰기 실패 뒤 부분 파일 가능성은 결과 불명으로 남긴다. 실제 Firefox 선택창·파일 I/O 글루와 메뉴 검증은 별도다.
+- `852be31`: 기존 Settings 스타일을 사용하는 Agent 가져오기·내보내기 표시 모듈을 추가했다. 지침 전문·경고·제외 항목을 평문으로 표시하고 확인 객체와 표시 리비전을 유지하며, 오래된 버튼은 동작하지 않는다. 새 시험 32개와 독립 소스 검토를 거쳤다. 관련 흐름·파일 어댑터·검증 도구를 합친 Main 시험은 172/172 통과했다. 실제 Settings 진입점 연결 전이므로 사용 가능한 완성 기능으로 집계하지 않는다.
+- `42a74a1`: 기존 Task 질문의 선택지·짧은 답을 Chat 상태와 실제 HTTP 요청 계약에 연결했다. 잘못된 질문 정의와 답변은 차단하며, 글자 수는 backend와 같은 정규화·Unicode 기준으로 확인하고 자르지 않는다. Main의 새 계약·실제 HTTP 시험 30/30과 독립 소스 검토를 거쳤다. 답 초안의 화면 수명·실제 계속 버튼 연결은 후속 작업이다.
+- 06:30 KST 중간 검증: 스크립트 전체 1,478 pass / 0 fail / 1 skip. 방 기본값 조회를 추가한 뒤에도 격리 headless 일반 Chat R4 72/72, 보존 출력 R4 8/8이 통과했다. 실제 모델 호출·구독 사용은 없었다. 프로젝트 R11은 123개 항목이 통과한 뒤 600px 프로젝트 대화상자의 전체 경로 가시성 대기에서 종료되어 전체 통과가 아니다. Main은 캡처 13개와 실패 화면을 확인했다. PM은 적용·취소 버튼이 아래로 밀리고 스크롤 단서가 부족한 사용성 문제를 별도로 확인했으며, 검증 조건과 제품 배치를 각각 보완 중이다.
+- `26498a9`·`2174d04`: 방의 Board 상속 기본값 UI, 전송 전 재조회, 좁은 프로젝트 선택창의 고정 행동 버튼과 전체 경로 표시, File 결과의 실행 위치 접기·불필요한 빈 안내 제거를 반영했다. R14는 198/198 통과했다. 취소·선택·명시적 저장·실제 임시 저장소 재조회·같은 방 재진입과 요청별 지정의 독립성을 확인했다. 캡처는 17개이며 PM의 시각 인수는 600px 요청 상세와 1280px 저장 후·재진입에 한정한다. 600px 방 기본값 저장 화면까지 확인했다고 확대하지 않는다. 후속 Claude 격리 회귀는 18/18, 수정 전후 전체 스크립트 체크포인트는 1,522 pass / 0 fail / 1 skip이다. 실제 provider 호출은 없었다.
+- R12·R13의 중간 실패는 별도로 보존했다. R12는 native End 직후 진행 중인 스크롤을 일관되지 않은 관찰로 처리한 조기 종료였고, R13은 기존 방을 연 뒤 새 방을 만드는 정상 순서를 단일 방 ID로 검사한 오류였다. 검증기는 입력 재실행 없이 안정된 관찰을 기다리고, 실제 관찰한 진입 시점·영수증 구간별 방 신원을 대조하도록 고쳤다. 미관찰 방·늦은 이전 방 조회·다른 방 저장은 계속 실패한다.
+- File의 보드 프로젝트 연결, 사용자가 입력한 검사 명령 저장, Terminal 출력 수집과 결과 표시는 작업 트리에서 연결했다. 격리한 headless 화면 검사 R6에서 취소·연결·명령 저장 시 실행 0회·검사 1회·미저장 편집 중 검사 차단·출력 유실 뒤 재실행 없음 등 84/84를 확인했다. 실제 File 서비스·프로젝트 저장소·출력 수집기를 통하지만 OS 폴더 선택 결과와 셸 출력은 시험용이다. 실제 구독 모델·사용자 셸 실행의 증거는 아니다.
+- 작은 창의 도구줄·명령 편집기, Chat 프로젝트 칩과 긴 Board 제목의 글자 단위 줄바꿈을 실제 캡처에서 발견해 수정했다. 새 File과 다시 연 File이 추가 확대 클릭 없이 읽을 수 있는 상태로 열리는 것도 확인했다. R9은 118/118 통과했고 Main이 12개 캡처를 확인했다. 명령·시간·종료 코드 구분과 명령 행 스크롤바의 글자 겹침은 개선됐다. 당시 남았던 프로젝트 선택창의 불필요한 가로 막대와 행동 버튼 도달성은 R14에서 보정·확인했다. 600px Terminal 캡처는 Canvas 밖으로 이어지는 카드의 일부이며 모든 제어가 한 화면에 보인다는 증거가 아니다. 동작 검사 통과를 시각 완성으로 간주하지 않는다.
+- S1의 호출 식별자·남은 시간·재조회·대화상자 종류·가림 상태를 연결하고, 실제 Browser actor를 통하는 격리 시험을 수행했다. 합성 도구 요청의 중복 클릭 방지·늦은 요청 차단 근거이며, 실제 모델 호출·좌표 입력·OS 포커스·응답 유실 뒤 자동 복구의 전체 증거는 아니다.
+
+**D-X3의 남은 연결**: Board 프로젝트를 채팅방이 상속하고 개별 지정할 수 있다는 정책은 이미 결정됐다. 방의 기본 상속 관계와 서버의 우선순위 처리는 `5a99422`에, 요청별 선택과 별도로 Board 상속 기본값을 보고 저장하는 화면은 `26498a9`에 들어갔다. Canvas에서 Chat 카드가 놓인 위치, 현재 선택된 Board, Agent 참여자 라우팅 정보에서 상속 기준을 역산하지 않는다. 방 전용 프로젝트를 직접 지정하는 별도 UI 등 남은 범위는 사용자 결정 대기가 아니라 구현 공백이다.
+
+현재 화면 연결 범위는 **상속할 Board를 방 기본값으로 저장**하는 경로다. 방 전용 프로젝트를 직접 지정하는 별도 UI까지 완료한 것으로 보지 않는다. 독립 검토에서 같은 방·계정에서 Board의 폴더를 바꾸면 표시 캐시가 이전 폴더를 유지하는 문제를 찾아, 연결 변경·방 재진입·전송 전 재조회를 추가했다. 변경·연결 끊김은 접수 전 멈추고 초안을 보존하며, 중복 전송·계정·방 전환 회귀 시험과 독립 소스 재검토를 거쳤다. 실제 방 기본값 저장·재열기 검증은 R14에서 통과했다. 이 재조회와 backend의 최초 프로젝트 해석 사이에는 현재 원자적 비교 조건이 없으므로, 그 짧은 사이의 재변경까지 막았다고 주장하지 않는다. 이는 별도 구현 보강 범위이며 상속값을 요청별 override로 위장해서 해결하지 않는다.
+
+**결과에서 파일로 이동하기 전 필요한 연결**: `5a99422` 이후 수락된 실행에는 검증된 프로젝트 귀속을 별도로 저장하고 원래 계정·엔진·실행·폴더 식별을 재검증할 수 있다. 예전 실행은 이 기록이 없다고 새 연결로 소급 확인하지 않는다. 조회 자체가 저장된 경로를 다시 권한 등록하지도 않는다. 이 경로를 FileView 이동 UI에 연결하는 작업은 남아 있으며, 과거 출력의 경로 문자열이나 현재 Board만으로 파일을 열지 않는다. 변경 diff·명령 출력의 읽기 전용 표시는 독립적으로 연결할 수 있지만, 가림 처리된 diff로 과거 파일을 복원하거나 되돌리기를 활성화하지 않는다.
+
+현재 로컬 브랜치는 `claude/vision-gap-20261024`이며, 이 회차의 main 통합·push는 하지 않았다. B3 실제 구독 Reader 비활성 경계와 운영 프로필·Windows·OS 전면 입력의 미검증 범위는 유지한다.
+
 ## 이전 세션 인계 원본 (2026-10-24 마감)
 
-아래는 당시 상태와 계획이다. 완료 여부가 달라진 항목은 위 2026-10-25 체크포인트를 우선한다.
+아래는 당시 상태와 계획이다. 완료 여부가 달라진 항목은 위 날짜별 체크포인트를 우선한다.
 
 **지금 상태**: 브랜치 `claude/vision-gap-20261024`, 마지막 기능 커밋 `5760981`(1-A 브라우저 정확도, 이 원장 갱신 커밋은 그 위에 얹힘). 진행 중인 변경은 없다. 합친 상태에서 helper 시험 1104/1113 통과·실패 0(skip 9), 화면 쪽 시험 764/768 통과·실패 0·todo 4(todo는 S1·S5 몫). 마지막 headless 대화 흐름 72/72·UI 회귀 274/274는 `9dbfa51`·`b3ae83e` 시점 값이다. 그 뒤 1-A(`5760981`)가 Browser actor를 바꿨으므로 headless browser-negative와 대화 흐름을 다시 돌려 확인해야 한다.
 
@@ -1119,27 +1152,27 @@ The SQLite-first persistence choice is already adopted in the CONTRACT (L79-80, 
 ### CODE-02 — Project/folder as the unit of coding work: let the user choose a project folder for a Chat/Board so the agent cwd and the File Card root use the same project
 
 - 출처: Vision P1 Context, Recovery, and Coding UX item 5 (project/folder); CONTRACT §6 사람 중심 코딩 표면
-- 상태: 없음 · 크기 M
-- 근거: overlay/JS/eg-desk-surface.uc.js:244 sends thread.cwd only when it is already set; only 3 lines in the surface mention cwd (244, 1044, 1065) and none of them sets thread.cwd. helper/codex-bridge-server.mjs:321 spawns app-server with cwd: process.cwd(); :123 EGDESK_CONTEXT_ROOTS defaults to [process.cwd()]. Explicit-cwd validation exists (commits d4c59c7, 09001f2). The File Card root comes from a separate picker (eg-desk-surface.uc.js:9655-9661).
-- 빠진 것: No UI to pick or show the project folder for a thread or Board. The agent's working folder and the File Card's connected folder are unrelated. The Chat header does not show the current project.
-- 결정: What the project folder is attached to: a Board, a Chat room, or both (inheritance rule). Also how a project switch applies to runs that are already in progress.
-- 구현 스케치: Add a project chip and folder picker (reuse createEGDeskNativeFilePickers.chooseRoot) to the Chat header in eg-desk-surface.uc.js. Store cwd on thread/Board; codexThreadRuntimeConfig already forwards cwd. Have the File Card open the same root handle. Add the cwd to the allowed roots in helper/egdesk-context-store/codex-bridge-server.
+- 상태: 일부 · 크기 M
+- 근거: `8580896`의 저장 기반에 이어 `87502b2`·`6981082`에서 확인한 프로젝트와 실행 cwd를 연결했다. `98f77ea`의 File·요청별 프로젝트 UI는 격리 headless R8/R9에서 각 118/118 통과했다. `5a99422`·`776b0b0`은 방의 기본 상속 관계와 실행별 귀속 저장·현재 연결 재검증을 포함한다.
+- 결정됨(D-X3): 프로젝트는 Board에 연결하고 채팅방은 상속하되 개별 지정 가능하다. 진행 중 회차의 폴더는 유지하며, 재시작 뒤 같은 폴더(dev/ino 동일)일 때만 자동 재연결한다.
+- 빠진 것: 방 전용 프로젝트를 직접 지정하는 별도 UI, 검증된 실행 출처를 이용한 File 이동 UI, 실제 엔진 왕복 검증. Board 상속 기본값의 저장·조회 UI는 `26498a9`와 headless R14에서 확인했으며 요청별 선택과 구분한다.
+- 연결 원칙: 화면은 식별자만 전달하고 helper가 실제 폴더를 확인한다. 경로 표시·현재 Board·카드 위치를 실행 권한으로 사용하거나 허용 루트를 임의 확장하지 않는다.
 
 ### CODE-05 — Diff and proposed changes: show the hunks the agent changed or proposed
 
 - 출처: Vision P1 Coding UX item 5 (diff); CONTRACT §6 'diff와 제안된 변경'
 - 상태: 일부 · 크기 L · 선행: CODE-01
-- 근거: The user's own working-copy diff is done: overlay/resources/EGDeskFileView.sys.mjs:406-428 (hunk before/after) and helper/egdesk-file-service.mjs:302-305 lineDiff. Agent changes keep only path and kind: helper/codex-chat-runtime.mjs:44-50, 1510-1520. 'turn/diff', 'outputDelta' and 'unifiedDiff' are never consumed (grep 0 hits in helper/codex-*.mjs). The fileChange approval exists (EGDeskChatState.sys.mjs:643, commit b706baa).
-- 빠진 것: No per-file diff of the agent's fileChange or turn diff. The approval card shows no change content. No per-hunk accept/reject and no side-by-side view. No overlap with the scheduled (A) requestUserInput and (B) subAgent work, but it attaches to the fileChange approval card.
-- 구현 스케치: Project the turn/diff/updated notification and fileChange change content (diff) in codex-chat-runtime.mjs, with a size limit. Add a diff projection to EGDeskChatState. Render a diff view in the approval and activity rows of eg-desk-surface.uc.js, or in a File Card 'proposed changes' tab. Reuse the hunk markup from EGDeskFileView.review.
+- 근거: 사용자의 File 작업사본 diff와 별도로, `5b88c91`·`fde5bfc`에서 보존된 Agent 변경 내용을 원래 활동·승인 항목의 식별자로 조회하고 파일별 추가·삭제 줄을 읽기 전용으로 표시한다. headless R3은 활동 diff·승인 diff의 명시적 GET과 승인 상태 불변·승인 POST 0회를 확인했다.
+- 빠진 것: 실제 provider가 만든 변경의 전체 왕복, 원래 프로젝트를 검증한 파일 이동, 나란히 보기. 이 읽기 전용 조회를 줄별 적용·거절이나 되돌리기 구현으로 해석하지 않는다.
+- 연결 원칙: 보존 diff는 현재 파일 상태나 적용 완료의 증거가 아니다. 일부가 가려진 기록으로 파일을 재구성하거나, 내용을 펼친 것만으로 승인하지 않는다.
 
 ### CODE-06 — Run/build/test/review result surface
 
 - 출처: Vision P1 Coding UX item 5; CONTRACT §6 'run·build·test·review 결과'
-- 상태: 없음 · 크기 L · 선행: CODE-02
-- 근거: The File Card '검사' button exists (EGDeskFileView.sys.mjs:462-475), but spawnFileCard does not pass runCheck (eg-desk-surface.uc.js:9655-9663), so the button is always disabled. Chat activity rows list only command/cwd/exitCode/durationMs as 'key: value' pre lines (eg-desk-surface.uc.js:1038-1047). Command output (aggregatedOutput) is not projected (grep 0 hits in codex-chat-runtime.mjs).
-- 빠진 것: No result card for test or build runs: no pass/fail counts, no failing-item → file:line link, no output view. The File Card check runner is not connected.
-- 구현 스케치: Add bounded projection of commandExecution output to codex-chat-runtime.mjs. Add a result-card type to eg-desk-surface.uc.js with summary first and expandable original output. Connect the FileView runCheck to the project's test command, chosen explicitly by the user, through the terminal/bridge. Parse failure locations into file refs.
+- 상태: 일부 · 크기 L · 선행: CODE-02
+- 근거: `4d2a1a4`·`a684c9d`의 보존 출력·결과 렌더러를 `98f77ea`에서 File 검사와 Terminal 출력 수집에, `fde5bfc`에서 Chat의 원래 명령 활동에 연결했다. 격리 R9는 File 경로, R3는 보존 출력의 통과·실패·소실과 읽던 상태 유지를 확인했다. File의 실행 위치 접기·빈 안내 보정은 `26498a9`와 R14에서 확인했다.
+- 빠진 것: 당시 실행 프로젝트를 검증한 Chat 결과의 파일 줄 이동, 실제 사용자 셸·엔진 왕복 검증. 결과 모듈 존재나 시험용 출력만으로 완료로 올리지 않는다.
+- 연결 원칙: 저장과 실행을 구분하고, 결과 열기는 재실행하지 않는다. 출력 소실·시간 초과·사용자 입력 경합을 성공으로 표시하거나 명령을 자동 재전송하지 않는다. 결과와 Terminal은 각각 읽을 수 있는 배율로 확인한다.
 
 ### CODE-07 — Make the IDE Dock entry a real entry into the coding workspace
 
