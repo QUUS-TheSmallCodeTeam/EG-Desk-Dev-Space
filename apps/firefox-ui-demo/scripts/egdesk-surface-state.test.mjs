@@ -11681,7 +11681,7 @@ function requestProjectSurfaceConstants() {
   const end = surfaceSource.indexOf('\n  function normalizeChatRequestProjectDraft(', start);
   assert.ok(start >= 0 && end > start);
   return compileFunction(surfaceSource.slice(start, end)
-    + '\nreturn { chatRequestProjectDisplays, chatRequestProjectDisplayScopes, chatRoomProjectDefaults, chatProjectDraftActions, fileProjectAssociations, CHAT_REQUEST_PROJECT_INVALID, CHAT_REQUEST_PROJECT_CONNECT, CHAT_ROOM_PROJECT_UNAVAILABLE };')();
+    + '\nreturn { chatRequestProjectDisplays, chatRequestProjectDisplayScopes, chatRoomProjectDefaults, chatProjectDraftActions, chatRoomProjectPreparations, fileProjectAssociations, CHAT_REQUEST_PROJECT_INVALID, CHAT_REQUEST_PROJECT_CONNECT, CHAT_ROOM_PROJECT_UNAVAILABLE };')();
 }
 
 function actualProjectSendBlock() {
@@ -11713,7 +11713,7 @@ function installDefaultProjectSendFixture(state) {
 }
 
 function requestProjectBridgeMethod(name, deps) {
-  const prefix = ['readRequestProject', 'readRoomProjectDefault', 'refreshRoomProjectDefault', 'prepareRoomProjectSend', 'saveRoomProjectDefault', 'clearRequestProjectTarget', 'sendMessage'].includes(name) ? 'async ' : '';
+  const prefix = ['readRequestProject', 'readRoomProjectDefault', 'refreshRoomProjectDefault', 'prepareRoomProjectSend', 'saveRoomProjectDefault', 'prepareRoomProjectFolder', 'saveRoomProjectOverride', 'clearRequestProjectTarget', 'sendMessage'].includes(name) ? 'async ' : '';
   const start = surfaceSource.indexOf('      ' + prefix + name + '(');
   const end = surfaceSource.indexOf('\n      },', start);
   assert.ok(start >= 0 && end > start, 'actual bridge method: ' + name);
@@ -11790,7 +11790,7 @@ const roomProjectDefault = (target, { roomId = 'wire-room', source = 'board', st
   project: { projectId: target.projectId, title: target.title, rootId: target.rootId, displayPath: target.displayPath, source, status }, source, status,
 });
 
-function requestProjectUiHarness({ target, read, roomRead, roomSave, resizeObserver } = {}) {
+function requestProjectUiHarness({ target, read, roomRead, roomSave, resizeObserver, pickFolder, folderRequest } = {}) {
   const constants = requestProjectSurfaceConstants();
   const document = requestProjectDOM();
   const el = compileFunction('return function el(tag, props = {}, ...children) {' + elBody + '\n};', ['document'])(document);
@@ -11812,13 +11812,15 @@ function requestProjectUiHarness({ target, read, roomRead, roomSave, resizeObser
     getCodexThreadDraft: (codex, id) => codex.threadDrafts[id] || '', refreshConversation() {},
     coerceAgendaStore: () => ({ agendas: {}, meta: {} }),
     window: { AbortController, ResizeObserver: resizeObserver, setTimeout(fn) { const id = ++timerSeq; timers.set(id, fn); return id; }, clearTimeout: id => timers.delete(id) },
+    pickNativeRoomProjectDirectory: () => { assert.ok(pickFolder, 'only an explicit folder fixture supplies a native result'); return pickFolder(); },
     ChromeUtils: { importESModule(url) {
       assert.equal(url, 'chrome://userchrome/content/EGDeskFileView.sys.mjs');
-      return { createEGDeskFileServiceCallbacks };
+      return { createEGDeskFileServiceCallbacks, createEGDeskNativeFilePickers };
     } },
     fetchJson: async (path, options) => {
       const body = JSON.parse(options.body);
       assert.equal(options.method, 'POST');
+      if (folderRequest && ['/v1/files/picker/channel', '/v1/files/picker/begin', '/v1/files/picker/complete', '/v1/files/projects/attach', '/v1/files/projects/inherit'].includes(path)) return folderRequest(path, body, options);
       if (path === '/v1/files/projects/room-default') {
         assert.deepEqual(Object.keys(body), ['roomId']);
         roomCalls.push({ path, body });
@@ -11851,7 +11853,7 @@ function requestProjectUiHarness({ target, read, roomRead, roomSave, resizeObser
   const emitDeps = { document, state, taskAnswers: productionTaskAnswerFactory()(() => state.codex, epochScope), normalizeThreads() {}, listeners: [], renderCodexActivityPanel() {}, scheduleDeskSessionSave() {} };
   deps.emit = compileFunction('return () => {' + emitSource + '\n};', Object.keys(emitDeps))(...Object.values(emitDeps));
   const bridge = Object.fromEntries(['createProjectScope', 'readRequestProject', 'setRequestProjectTarget', 'ensureRoomProjectDefault', 'readRoomProjectDefault',
-    'refreshRoomProjectDefault', 'invalidateRoomProjectDefaults', 'prepareRoomProjectSend', 'selectThread', 'saveRoomProjectDefault', 'clearRequestProjectTarget'].map(name => [name, requestProjectBridgeMethod(name, deps)]));
+    'refreshRoomProjectDefault', 'invalidateRoomProjectDefaults', 'prepareRoomProjectSend', 'selectThread', 'saveRoomProjectDefault', 'prepareRoomProjectFolder', 'saveRoomProjectOverride', 'clearRequestProjectTarget'].map(name => [name, requestProjectBridgeMethod(name, deps)]));
   bridge.continueInNewThread = id => continued.push(id);
   state.codexBridge = bridge;
   return { ...api, ...constants, state, document, bridge, calls, roomCalls, timers, continued, epochScope, emit: deps.emit,
@@ -13951,4 +13953,107 @@ test('origin host: account/engine/profile/binding/source/item/epoch changes reje
       projectId: 'p', rootId: 'r', directoryId: 'd', displayPath: '/old-account-root' }); await rejected;
     assert.equal(h.calls.length, 1); assert.deepEqual(h.decisions, []);
   });
+});
+
+function roomOverrideUiHarness({ picker, afterAttach, source = 'board' } = {}) {
+  const writes = [], native = [];
+  const baseline = roomProjectDefault(requestProjectA());
+  let value = source === 'room' ? roomProjectDefault(requestProjectB(), { source: 'room' }) : baseline;
+  const h = requestProjectUiHarness({ target: requestProjectA(), roomRead: () => ({ ok: true, result: value }),
+    pickFolder: picker || (() => '/chosen/room-folder'),
+    folderRequest: async (route, body, options) => {
+      native.push({ route, body, options });
+      const expiresAt = Date.now() + 120000;
+      if (route.endsWith('/channel')) return { ok: true, result: { token: 'native-channel', expiresAt } };
+      if (route.endsWith('/begin')) return { ok: true, result: { requestId: 'native-grant', expiresAt } };
+      if (route.endsWith('/complete')) return { ok: true, result: body.cancelled ? { cancelled: true } : { selectionId: 'chosen-selection', expiresAt } };
+      writes.push({ route, body });
+      if (route.endsWith('/attach')) {
+        assert.deepEqual(body, { roomId: 'wire-room', selectionId: 'chosen-selection' });
+        value = roomProjectDefault({ ...requestProjectB(), displayPath: '/chosen/room-folder' }, { source: 'room' });
+        value.inheritance = baseline.inheritance;
+        if (afterAttach) await afterAttach();
+        return { ok: true, result: value.project };
+      }
+      assert.equal(route, '/v1/files/projects/inherit'); assert.deepEqual(body, { roomId: 'wire-room' });
+      value = baseline; return { ok: true, result: { roomId: 'wire-room', inherited: true, removed: true } };
+    } });
+  return { ...h, writes, native, value: () => value,
+    async open() { h.openChatRequestProjectPanel('room'); await settle(); await h.panel().testid('chat-room-project-open').click(); await settle(); },
+    part(id) { return h.panel()?.testid(id); },
+  };
+}
+
+test('room override UI: explicit folder preview stays in existing settings/footer; Cancel writes nothing and Save consumes once', async () => {
+  const h = roomOverrideUiHarness(); await h.open(); const draft = structuredClone(h.thread());
+  await h.part('chat-room-project-choose-folder').click();
+  assert.equal(h.part('chat-room-project-editor').dataset.mode, 'folder');
+  assert.match(h.part('chat-room-project-details').textContent, /선택한 방 전용 폴더.*\/chosen\/room-folder.*저장을 눌러야/);
+  assert.equal(h.part('chat-project-actions').dataset.operation, 'room');
+  assert.equal(h.part('chat-room-project-save').isConnected, true); assert.deepEqual(h.writes, []);
+  assert.deepEqual(h.thread(), draft); assert.equal(h.state.codex.threadDrafts.room, 'keep my words');
+  await h.part('chat-room-project-cancel').click(); assert.equal(h.part('chat-room-project-editor'), null); assert.deepEqual(h.writes, []);
+  await h.part('chat-room-project-open').click(); await settle(); await h.part('chat-room-project-choose-folder').click();
+  const save = h.part('chat-room-project-save'); await save.click(); await save.click();
+  assert.equal(h.writes.length, 1); assert.equal(h.writes[0].route, '/v1/files/projects/attach');
+  assert.equal(h.part('chat-room-project-editor'), null); assert.match(h.part('chat-room-project-saved').textContent, /저장됨.*이번 요청 선택 유지/);
+  assert.match(h.part('chat-room-project-current').textContent, /방 전용.*\/chosen\/room-folder/);
+  assert.deepEqual(h.thread(), draft); assert.equal(h.state.codex.threadDrafts.room, 'keep my words');
+  assert.equal(h.part('chat-project-effective').dataset.source, 'request', 'the request override remains the effective target');
+});
+
+test('room override UI: clear is preview-only until the scoped Save and reveals the existing Board baseline', async () => {
+  const h = roomOverrideUiHarness({ source: 'room' }); await h.open();
+  const before = structuredClone(h.thread()); await h.part('chat-room-project-inherit').click();
+  assert.match(h.part('chat-room-project-details').textContent, /방 전용.*해제.*상속 기준.*이번 요청 선택은 유지/);
+  assert.equal(h.part('chat-room-project-save').textContent, '방 전용 해제'); assert.deepEqual(h.writes, []);
+  await h.part('chat-room-project-cancel').click(); assert.deepEqual(h.writes, []); assert.equal(h.value().source, 'room');
+  await h.part('chat-room-project-open').click(); await settle(); await h.part('chat-room-project-inherit').click(); await h.part('chat-room-project-save').click();
+  assert.deepEqual(h.writes, [{ route: '/v1/files/projects/inherit', body: { roomId: 'wire-room' } }]);
+  assert.equal(h.chatRoomProjectState(h.thread()).value.source, 'board'); assert.deepEqual(h.thread(), before);
+  assert.match(h.part('chat-room-project-saved').textContent, /방 전용 지정 해제됨.*이번 요청 선택 유지/);
+});
+
+test('room override UI: late native choice is inert after Cancel, panel replacement, account/engine or same-account room change', async t => {
+  for (const mode of ['cancel', 'replace', 'account', 'engine', 'room']) await t.test(mode, async () => {
+    const pending = requestProjectDeferred(), entered = requestProjectDeferred();
+    const h = roomOverrideUiHarness({ picker: () => { entered.resolve(); return pending.promise; } }); await h.open();
+    const original = h.panel(), choosing = h.part('chat-room-project-choose-folder').click(); await entered.promise;
+    if (mode === 'cancel') await h.part('chat-room-project-cancel').click();
+    if (mode === 'replace') h.openChatRequestProjectPanel('room');
+    if (mode === 'account') { h.state.codex.authStatus = { accountEmail: 'other@example.test', isLoggedIn: true }; h.emit(); }
+    if (mode === 'engine') { h.thread().engineId = 'claude'; h.emit(); }
+    if (mode === 'room') { h.state.codex.activeThreadId = 'other'; h.emit(); h.state.codex.activeThreadId = 'room'; h.emit(); }
+    pending.resolve('/late/private-folder'); await choosing;
+    assert.deepEqual(h.writes, []); assert.doesNotMatch(h.panel()?.textContent || '', /late\/private-folder/);
+    if (mode !== 'cancel') assert.equal(original.isConnected, false);
+    assert.deepEqual(h.thread().requestProjectTarget, requestProjectA()); assert.equal(h.state.codex.threadDrafts.room, 'keep my words');
+  });
+});
+
+test('room override UI: unknown Save keeps the draft, disables resubmit and never describes cancellation as rollback', async () => {
+  const h = roomOverrideUiHarness({ afterAttach: async () => { throw new Error('lost reply'); } }); await h.open();
+  await h.part('chat-room-project-choose-folder').click(); await h.part('chat-room-project-save').click();
+  assert.match(h.part('chat-room-project-details').textContent, /저장 결과를 확인하지 못.*자동으로 다시 저장하지 않습니다/);
+  assert.equal(h.part('chat-room-project-cancel').textContent, '닫기', 'dismissal after a write attempt does not promise rollback');
+  assert.equal(h.part('chat-room-project-save').disabled, true); await h.part('chat-room-project-save').click();
+  assert.equal(h.writes.length, 1); assert.equal(h.value().source, 'room', 'the lost response may already have persisted');
+  await h.part('chat-room-project-cancel').click(); assert.equal(h.writes.length, 1);
+  assert.deepEqual(h.thread().requestProjectTarget, requestProjectA()); assert.equal(h.state.codex.threadDrafts.room, 'keep my words');
+});
+
+test('room override UI: pending Save blocks duplicate and Cancel, while a newer request-only draft is left intact', async () => {
+  const entered = requestProjectDeferred(), release = requestProjectDeferred();
+  const h = roomOverrideUiHarness({ afterAttach: async () => { entered.resolve(); await release.promise; } }); await h.open();
+  await h.part('chat-room-project-choose-folder').click();
+  assert.doesNotMatch(h.panel().textContent, /native-channel|native-grant|chosen-selection/);
+  const save = h.part('chat-room-project-save'), cancel = h.part('chat-room-project-cancel'), saving = save.click(); await entered.promise;
+  assert.equal(save.disabled, true); assert.equal(cancel.disabled, true); await save.click(); await cancel.click();
+  assert.equal(h.writes.length, 1); assert.ok(h.part('chat-room-project-editor'));
+  h.state.codex.threadDrafts.room = 'new request words'; h.state.codex.threadDraftRevisions.room++;
+  h.bridge.setRequestProjectTarget('room', requestProjectB());
+  release.resolve(); await saving;
+  assert.equal(h.writes.length, 1); assert.equal(h.part('chat-room-project-editor'), null);
+  assert.equal(h.state.codex.threadDrafts.room, 'new request words'); assert.deepEqual(h.thread().requestProjectTarget, requestProjectB());
+  assert.equal(h.timers.size, 0);
 });

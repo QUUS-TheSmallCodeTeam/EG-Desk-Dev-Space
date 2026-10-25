@@ -1375,6 +1375,7 @@
   const chatRequestProjectDisplayScopes = new Map();
   const chatRoomProjectDefaults = new Map();
   const chatProjectDraftActions = new Map();
+  const chatRoomProjectPreparations = new WeakMap();
   const fileProjectAssociations = new WeakMap();
   const CHAT_REQUEST_PROJECT_INVALID = '실행 프로젝트를 다시 선택하거나 제거한 뒤 보내세요.';
   const CHAT_REQUEST_PROJECT_CONNECT = '연결된 프로젝트 폴더가 없습니다. File에서 이 Board의 ‘보드 프로젝트 연결’을 먼저 사용하세요.';
@@ -1496,13 +1497,29 @@
     for (const changed of new Set([previous?.boardId, boardId].filter(Boolean))) state.codexBridge?.invalidateRoomProjectDefaults(changed);
   }
 
+  // Native result boundary only. Grants, expiry and one-use attachment stay in
+  // the existing File adapter; a saved/display path never enters this callback.
+  function pickNativeRoomProjectDirectory() {
+    return new Promise((resolve, reject) => {
+      try {
+        const picker = Cc['@mozilla.org/filepicker;1'].createInstance(Ci.nsIFilePicker);
+        picker.init(window.browsingContext, '이 방에서 사용할 프로젝트 폴더', Ci.nsIFilePicker.modeGetFolder);
+        picker.open(result => {
+          try { resolve(result === Ci.nsIFilePicker.returnOK ? picker.file.path : null); }
+          catch (error) { reject(error); }
+        });
+      } catch (error) { reject(error); }
+    });
+  }
+
   function buildChatRoomProjectSettings(thread, panelCurrent, actionHost) {
     const threadId = thread.id, binding = ChatState.clientThreadBinding(thread);
     const section = el('section', { class: 'egd-chat-room-project' });
     const effective = el('div', { class: 'egd-chat-project-details', role: 'status', data: { testid: 'chat-project-effective' } });
     const summary = el('div', { class: 'egd-chat-project-details', role: 'status', data: { testid: 'chat-room-project-current' } }, '방 기본 프로젝트를 확인하는 중…');
     const saved = el('p', { role: 'status', data: { testid: 'chat-room-project-saved' } });
-    let editor = null, generation = 0, saving = false, verifiedRequest = null, requestDisplayError = false;
+    let editor = null, generation = 0, saving = false, verifiedRequest = null, requestDisplayError = false, disposeFolder = () => {};
+    section._disposeRoomProjectSettings = () => { generation++; disposeFolder(); };
     const current = () => panelCurrent() && ChatState.clientThreadBinding(getCodexThreadById(state.codex, threadId)) === binding;
     const showEffective = () => {
       if (!current()) return;
@@ -1540,44 +1557,51 @@
       if (entry?.status !== 'ready') { summary.textContent = entry?.status === 'error' ? CHAT_ROOM_PROJECT_UNAVAILABLE : '방 기본 프로젝트를 확인하는 중…'; return; }
       if (value.status === 'none') { summary.textContent = '저장된 방 기본 프로젝트가 없습니다.'; return; }
       if (value.status !== 'connected') { summary.textContent = '저장된 프로젝트 연결을 사용할 수 없습니다. File에서 Board의 프로젝트 폴더를 다시 연결한 뒤 선택하세요.'; return; }
-      summary.textContent = `방 기본 · ${value.source === 'board' ? 'Board 상속' : '방 전용'} · ${value.project.title}`;
+      summary.replaceChildren(el('strong', {}, `방 기본 · ${value.source === 'board' ? 'Board 상속' : '방 전용'} · ${value.project.title}`),
+        ...(value.source === 'room' ? [el('p', {}, value.project.displayPath)] : []));
     };
     section._refreshRoomDetails = showCurrent;
     const opener = el('button', { type: 'button', data: { testid: 'chat-room-project-open' }, onclick: () => {
       if (!current() || editor) return;
       const ticket = ++generation;
       const candidates = chatRequestProjectCandidates();
-      editor = el('fieldset', { class: 'egd-chat-room-project-editor', data: { testid: 'chat-room-project-editor' } }, el('legend', {}, 'Board에서 상속'));
+      editor = el('fieldset', { class: 'egd-chat-room-project-editor', data: { testid: 'chat-room-project-editor' } }, el('legend', {}, '이 방의 기본 프로젝트'));
       const ownsEditor = () => current() && ticket === generation && editor?.isConnected === true;
       const choice = el('select', { class: 'egd-chat-project-board', 'aria-label': '기본 프로젝트를 상속할 Board', data: { testid: 'chat-room-project-board' } }, el('option', { value: '' }, 'Board를 선택하세요'));
       for (const candidate of candidates) choice.appendChild(el('option', { value: candidate.boardId }, candidate.title));
       choice.value = '';
       const preview = el('div', { class: 'egd-chat-project-details', role: 'status', data: { testid: 'chat-room-project-details' } }, 'Board를 선택하고 연결된 프로젝트의 전체 위치를 확인하세요. 선택만으로 저장되지 않습니다.');
-      let lookup = 0, selected = null;
+      let lookup = 0, selected = null, mode = 'board', prepared = null, folderController = null;
+      disposeFolder = () => { folderController?.abort(); folderController = null; prepared?.cancel(); prepared = null; };
       const cancel = el('button', { type: 'button', data: { testid: 'chat-room-project-cancel' }, onclick: () => {
         if (!ownsEditor() || saving) return;
-        generation++; editor.remove(); editor = null; actionHost.request(); opener.focus();
+        disposeFolder(); generation++; editor.remove(); editor = null; actionHost.request(); opener.focus();
       } }, '취소');
       const save = el('button', { type: 'button', disabled: 'true', data: { testid: 'chat-room-project-save' }, onclick: async () => {
-        if (!ownsEditor() || !selected || saving) return;
+        if (!ownsEditor() || saving || (mode === 'board' ? !selected : mode === 'folder' && !prepared)) return;
         const reviewed = selected;
-        saving = true; save.disabled = true; cancel.disabled = true; choice.disabled = true;
+        saving = true; save.disabled = true; cancel.disabled = true; choice.disabled = true; folder.disabled = true; inherit.disabled = true;
         preview.textContent = '확인한 프로젝트를 이 방의 기본값으로 저장하는 중…';
         try {
-          await state.codexBridge.saveRoomProjectDefault(threadId, reviewed, binding);
+          if (mode === 'board') await state.codexBridge.saveRoomProjectDefault(threadId, reviewed, binding);
+          else await state.codexBridge.saveRoomProjectOverride(threadId, binding, mode === 'folder' ? prepared : null, { signal: folderController?.signal });
           if (!ownsEditor()) return;
-          showCurrent(); saved.textContent = '방 기본값 저장됨 · 이번 요청 선택 유지'; generation++; editor.remove(); editor = null; actionHost.request(); opener.focus();
+          showCurrent(); saved.textContent = mode === 'inherit' ? '방 전용 지정 해제됨 · 상속 기준과 이번 요청 선택 유지' : '방 기본값 저장됨 · 이번 요청 선택 유지';
+          disposeFolder(); generation++; editor.remove(); editor = null; actionHost.request(); opener.focus();
         } catch (error) {
           if (!ownsEditor()) return;
-          selected = null;
+          selected = null; disposeFolder();
+          if (mode !== 'board') cancel.textContent = '닫기';
           preview.textContent = error.message || CHAT_ROOM_PROJECT_UNAVAILABLE;
         } finally {
           saving = false;
-          if (ownsEditor()) { cancel.disabled = false; choice.disabled = false; }
+          if (ownsEditor()) { cancel.disabled = false; choice.disabled = false; folder.disabled = false; inherit.disabled = false; }
           actionHost.changed();
         }
       } }, '저장');
       const load = async () => {
+        if (!ownsEditor() || saving) return;
+        disposeFolder(); mode = 'board'; editor.dataset.mode = mode; save.textContent = '저장'; cancel.textContent = '취소'; folder.disabled = false;
         const boardId = choice.value, request = ++lookup;
         selected = null; save.disabled = true;
         if (!boardId) { preview.textContent = '상속할 Board를 선택하세요.'; return; }
@@ -1592,8 +1616,38 @@
         } catch (error) { if (ownsEditor() && request === lookup) preview.textContent = error.message || CHAT_REQUEST_PROJECT_CONNECT; }
         finally { actionHost.changed(); }
       };
+      const folder = el('button', { type: 'button', data: { testid: 'chat-room-project-choose-folder' }, onclick: async () => {
+        if (!ownsEditor() || saving || folder.disabled) return;
+        disposeFolder(); const request = ++lookup;
+        folder.disabled = true;
+        mode = 'folder'; editor.dataset.mode = mode; selected = null; choice.value = ''; save.disabled = true; save.textContent = '방 전용으로 저장'; cancel.textContent = '취소';
+        folderController = new window.AbortController(); const signal = folderController.signal;
+        preview.textContent = '폴더를 선택한 뒤 전체 위치를 확인하세요. 저장 전에는 이 방에 연결되지 않습니다.';
+        try {
+          const result = await state.codexBridge.prepareRoomProjectFolder(threadId, binding, { signal });
+          if (!ownsEditor() || lookup !== request || signal.aborted) { result?.cancel(); return; }
+          prepared = result;
+          if (!result) { preview.textContent = '폴더 선택을 취소했습니다. 방 기본값과 이번 요청 선택은 바뀌지 않았습니다.'; return; }
+          preview.replaceChildren(el('strong', {}, '선택한 방 전용 폴더'), el('p', {}, result.displayPath),
+            el('p', {}, '저장을 눌러야 이 방의 기본 폴더로 연결합니다. Board 상속 기준과 이번 요청 선택은 유지됩니다.'));
+          save.disabled = false;
+        } catch (error) { if (ownsEditor() && lookup === request) preview.textContent = error.message || CHAT_ROOM_PROJECT_UNAVAILABLE; }
+        finally { if (ownsEditor() && lookup === request && !saving) folder.disabled = false; actionHost.changed(); }
+      } }, '방 전용 폴더 선택…');
+      const inherit = el('button', { type: 'button', data: { testid: 'chat-room-project-inherit' }, onclick: () => {
+        if (!ownsEditor() || saving) return;
+        disposeFolder(); lookup++; selected = null; choice.value = ''; mode = 'inherit'; editor.dataset.mode = mode;
+        folderController = new window.AbortController(); save.textContent = '방 전용 해제'; save.disabled = false; cancel.textContent = '취소'; folder.disabled = false;
+        preview.textContent = '방 전용 폴더 지정만 해제합니다. 저장된 Board 상속 기준으로 돌아가며, 상속 기준이 없으면 기본 프로젝트가 없는 상태가 됩니다. 이번 요청 선택은 유지됩니다.';
+        actionHost.changed();
+      } }, chatRoomProjectState(thread)?.value?.inheritance ? 'Board 상속으로 돌아가기…' : '방 전용 지정 해제…');
       choice.addEventListener('change', () => { void load(); });
-      editor.appendChild(choice); editor.appendChild(preview);
+      editor.dataset.mode = mode;
+      editor.appendChild(el('p', { class: 'egd-chat-room-project-note' }, 'Board에서 상속'));
+      editor.appendChild(choice);
+      editor.appendChild(el('div', { class: 'egd-chat-room-project-actions' }, folder,
+        chatRoomProjectState(thread)?.value?.source === 'room' ? inherit : null));
+      editor.appendChild(preview);
       section.appendChild(editor);
       actionHost.room(save, cancel);
       const inherited = chatRoomProjectState(thread)?.value?.inheritance?.boardId;
@@ -1636,9 +1690,9 @@
     document.getElementById('egd-codex-input-panel')?.remove();
     const panel = el('section', { id: 'egd-codex-input-panel', class: 'egd-chat-project-panel', role: 'dialog', 'aria-label': '실행 프로젝트 선택',
       data: { testid: 'chat-project-panel', threadId } });
-    let lookup = 0, selected = null, operation = 'request', bodyObserver = null;
+    let lookup = 0, selected = null, operation = 'request', bodyObserver = null, roomSettings = null;
     const scope = state.codexBridge.createProjectScope(threadId);
-    panel._finishProjectScope = () => { bodyObserver?.disconnect(); scope?.finish(); };
+    panel._finishProjectScope = () => { bodyObserver?.disconnect(); roomSettings?._disposeRoomProjectSettings(); scope?.finish(); };
     scope?.signal.addEventListener('abort', () => { panel._finishProjectScope(); panel.remove(); }, { once: true });
     const close = () => { if (chatRoomProjectState(thread)?.status === 'saving') return; lookup++; panel._finishProjectScope(); panel.remove(); };
     const current = () => scope?.current() && panel.isConnected && state.codex.activeThreadId === threadId
@@ -1732,7 +1786,7 @@
       if (next === 'request' && !selected && choice.value) void load();
       syncScrollCue();
     };
-    const roomSettings = buildChatRoomProjectSettings(thread, current, {
+    roomSettings = buildChatRoomProjectSettings(thread, current, {
       room: (save, cancel) => setOperation('room', [save, cancel]),
       request: () => setOperation('request', [apply, requestCancel]), changed: syncScrollCue,
     });
@@ -10118,6 +10172,88 @@
         })();
         emit();
         return entry.promise;
+      },
+      async prepareRoomProjectFolder(threadId, expectedBinding, { signal } = {}) {
+        const thread = getCodexThreadById(state.codex, threadId), binding = ChatState.clientThreadBinding(thread);
+        const scope = this.createProjectScope(threadId);
+        const current = () => scope?.current() && !signal?.aborted && state.codex.activeThreadId === threadId
+          && binding === expectedBinding && ChatState.clientThreadBinding(getCodexThreadById(state.codex, threadId)) === binding;
+        const abort = () => scope?.abort();
+        const finish = () => { signal?.removeEventListener('abort', abort); scope?.finish(); };
+        signal?.addEventListener('abort', abort, { once: true });
+        let prepared;
+        try {
+          if (!current()) throw new Error(CHAT_ROOM_PROJECT_UNAVAILABLE);
+          const fileModule = ChromeUtils.importESModule('chrome://userchrome/content/EGDeskFileView.sys.mjs');
+          const allowed = new Set(['/v1/files/picker/channel', '/v1/files/picker/begin', '/v1/files/picker/complete', '/v1/files/projects/attach']);
+          const service = fileModule.createEGDeskFileServiceCallbacks({ request: async (path, body, options) => {
+            if (!current() || !allowed.has(path)) throw new Error('원래 방의 폴더 선택 연결이 바뀌었습니다.');
+            const packet = await fetchJson(path, { method: 'POST', body: JSON.stringify(body), headers: options?.headers, signal: scope.signal });
+            if (!current()) throw new Error('원래 방에서 폴더 연결 결과를 다시 확인하세요.');
+            return packet;
+          } });
+          const pickers = fileModule.createEGDeskNativeFilePickers({ service, pickDirectory: pickNativeRoomProjectDirectory });
+          prepared = await pickers.prepareProjectFolder({ roomId: binding, signal: scope.signal });
+          if (!current() || !prepared) { prepared?.cancel(); finish(); return null; }
+          let used = false;
+          const handle = Object.freeze({ displayPath: prepared.displayPath, expiresAt: prepared.expiresAt,
+            async consume() {
+              if (used || !current()) throw new Error('폴더 선택이 만료되었거나 대화 연결이 바뀌었습니다. 다시 선택하세요.');
+              used = true;
+              try { return await prepared.consume(); } finally { finish(); }
+            },
+            cancel() {
+              if (used) return false; // Dispatch is not undone by a later close.
+              used = true; chatRoomProjectPreparations.delete(handle);
+              const cancelled = prepared.cancel(); abort(); finish(); return cancelled;
+            },
+          });
+          chatRoomProjectPreparations.set(handle, { threadId, binding, abort, current });
+          return handle;
+        } catch (error) { const stale = !current(); prepared?.cancel(); abort(); finish(); if (stale) return null; throw error; }
+      },
+      async saveRoomProjectOverride(threadId, expectedBinding, prepared, { signal } = {}) {
+        const thread = getCodexThreadById(state.codex, threadId), binding = ChatState.clientThreadBinding(thread);
+        const owner = prepared && chatRoomProjectPreparations.get(prepared);
+        if (!thread || binding !== expectedBinding || state.codex.activeThreadId !== threadId || signal?.aborted
+            || prepared !== null && (owner?.threadId !== threadId || owner.binding !== binding || !owner.current())
+            || chatRoomProjectState(thread)?.status === 'saving') throw new Error(CHAT_ROOM_PROJECT_UNAVAILABLE);
+        const scope = this.createProjectScope(threadId);
+        if (!scope) throw new Error(CHAT_ROOM_PROJECT_UNAVAILABLE);
+        const entry = { binding, scope, status: 'saving', value: chatRoomProjectState(thread)?.value || null };
+        const current = () => scope.current() && !signal?.aborted && state.codex.activeThreadId === threadId
+          && chatRoomProjectDefaults.get(threadId) === entry;
+        const abort = () => { scope.abort(); owner?.abort(); };
+        signal?.addEventListener('abort', abort, { once: true });
+        const timer = window.setTimeout(abort, 15000);
+        chatRoomProjectDefaults.set(threadId, entry);
+        entry.promise = (async () => {
+          try {
+            if (!current()) throw new Error(CHAT_ROOM_PROJECT_UNAVAILABLE);
+            let attached = null;
+            if (prepared) {
+              chatRoomProjectPreparations.delete(prepared);
+              attached = await prepared.consume();
+              if (attached?.status !== 'connected' || attached.source !== 'room') throw new Error(CHAT_ROOM_PROJECT_UNAVAILABLE);
+            } else {
+              const reply = await fetchJson('/v1/files/projects/inherit', { method: 'POST', signal: scope.signal, body: JSON.stringify({ roomId: binding }) });
+              if (reply?.ok !== true || reply.result?.roomId !== binding || reply.result.inherited !== true) throw new Error(CHAT_ROOM_PROJECT_UNAVAILABLE);
+            }
+            if (!current()) throw new Error(CHAT_ROOM_PROJECT_UNAVAILABLE);
+            const packet = await fetchJson('/v1/files/projects/room-default', { method: 'POST', signal: scope.signal, body: JSON.stringify({ roomId: binding }) });
+            if (packet?.ok !== true || !Object.hasOwn(packet, 'result')) throw new Error(CHAT_ROOM_PROJECT_UNAVAILABLE);
+            const value = normalizeChatRoomProjectDefault(packet.result, binding);
+            if (!current() || (prepared ? value.source !== 'room' || value.status !== 'connected'
+                || value.project?.projectId !== attached.projectId || value.project?.rootId !== attached.rootId
+              : value.override !== null || value.source === 'room')) throw new Error(CHAT_ROOM_PROJECT_UNAVAILABLE);
+            entry.value = value; entry.status = 'ready'; return value;
+          } catch (error) {
+            if (scope.current() && chatRoomProjectDefaults.get(threadId) === entry) entry.status = 'error';
+            throw new Error(error.code === 'PICKER_GRANT_EXPIRED' ? '폴더 선택 시간이 만료되었습니다. 폴더를 다시 선택하세요.'
+              : '저장 결과를 확인하지 못했습니다. 자동으로 다시 저장하지 않습니다. 원래 방의 기본 프로젝트를 다시 열어 확인하세요. 이번 요청의 선택은 유지했습니다.');
+          } finally { window.clearTimeout(timer); signal?.removeEventListener('abort', abort); scope.finish(); if (current()) emit(); }
+        })();
+        emit(); return entry.promise;
       },
       async clearRequestProjectTarget(threadId) {
         const thread = getCodexThreadById(state.codex, threadId);
