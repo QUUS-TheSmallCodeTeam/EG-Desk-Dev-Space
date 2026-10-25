@@ -173,6 +173,122 @@ test('controlled new head uses real SQLite while the older visible revision expo
   assert.equal(fixture.snapshot().headAdvances.length, 1);
 });
 
+test('actual duplicate POST pins visible v2 at head v3 and records one new draft v1 without changing the original or exports', async t => {
+  const fixture = setup(t), before = fixture.snapshot(), id = before.seed.profileId;
+  assert.deepEqual(before.duplicateEvents, []);
+  const exports = {};
+  for (const format of ['md', 'codex-toml']) {
+    exports[format] = await request(fixture, 'GET', `/profiles/${id}/export?format=${format}&revision=2`);
+    assert.equal(exports[format].status, 200);
+  }
+  assert.equal((await request(fixture, 'POST', '/__qa/portable-transfer/control',
+    { operation: 'advance-profile-head', expectedHeadRevision: 2 }, { token: true })).body.revision, 3);
+  const original = await request(fixture, 'GET', `/profiles/${id}`), advanced = fixture.snapshot();
+  assert.equal(original.body.headRevision, 3);
+  const payload = { revision: 2 }; // The native duplicate button sends exactly this, not a replacement body.
+  const route = `/profiles/${id}/duplicate`, copied = await request(fixture, 'POST', route, payload);
+  assert.equal(copied.status, 201);
+  assert.notEqual(copied.body.id, id);
+  assert.deepEqual([copied.body.revision, copied.body.profile.headRevision, copied.body.profile.activeRevision,
+    copied.body.profile.lifecycle, copied.body.profile.reviewRequired], [1, 1, null, 'draft', false]);
+  const source = before.seed.revisions[1], name = `${source.body.name} 사본`;
+  assert.deepEqual(copied.body.profile.head.body, { ...source.body, name });
+  assert.deepEqual(copied.body.profile.source.map(({ at, ...entry }) => entry),
+    [{ kind: 'duplicate', origin: 'user', profileId: id, revision: 2, hash: source.hash, name: source.body.name }]);
+  const after = fixture.snapshot(), traces = after.requests.filter(row => row.method === 'POST' && row.path === route);
+  assert.equal(traces.length, 1, 'one native POST must yield one real handler call and one copy');
+  const trace = traces[0];
+  assert.deepEqual([trace.delegated, trace.status, trace.request, trace.requestTruncated], [true, 201, payload, false]);
+  assert.equal(Object.hasOwn(trace.request, 'name'), false, 'an omitted name is not synthesized into request evidence');
+  assert.equal(trace.requestBytes, Buffer.byteLength(JSON.stringify(payload)));
+  assert.equal(trace.requestSha256, sha256(JSON.stringify(payload)));
+  assert.deepEqual(trace.response, copied.body); assert.equal(trace.responseSha256, sha256(copied.text));
+  assert.deepEqual(trace.before, advanced.persisted); assert.deepEqual(trace.after, after.persisted);
+  assert.deepEqual(after.duplicateEvents, [{ sequence: trace.sequence, sourceProfileId: id, sourceRevision: 2,
+    sourceHash: source.hash, profileId: copied.body.id, revision: 1, hash: copied.body.hash, name,
+    lifecycle: 'draft', activeRevision: null }]);
+  const record = after.persisted.profiles.records.find(row => row.id === copied.body.id);
+  const revision = after.persisted.profiles.revisions.find(row => row.profile_id === copied.body.id);
+  assert.deepEqual([record.lifecycle, record.active_revision, revision.revision, revision.parent_revision], ['draft', null, 1, null]);
+  assert.deepEqual(JSON.parse(record.source_json), copied.body.profile.source);
+  assert.deepEqual(JSON.parse(revision.body_json), { ...source.body, name });
+  assert.equal(revision.hash, copied.body.hash); assert.equal(revision.hash, sha256(revision.body_json));
+  assert.deepEqual(after.persisted.profiles.records.filter(row => row.id !== copied.body.id), advanced.persisted.profiles.records);
+  assert.deepEqual(after.persisted.profiles.revisions.filter(row => row.profile_id !== copied.body.id), advanced.persisted.profiles.revisions);
+  assert.equal(after.persisted.profiles.records.length, advanced.persisted.profiles.records.length + 1);
+  assert.equal(after.persisted.profiles.revisions.length, advanced.persisted.profiles.revisions.length + 1);
+  assert.deepEqual((await request(fixture, 'GET', `/profiles/${id}`)).body, original.body);
+  for (const format of ['md', 'codex-toml']) {
+    assert.equal((await request(fixture, 'GET', `/profiles/${id}/export?format=${format}&revision=2`)).text, exports[format].text);
+  }
+  assert.deepEqual(after.persisted.desk, advanced.persisted.desk);
+  assert.deepEqual(after.exports, before.exports); assert.deepEqual(after.seed, before.seed);
+  assert.equal(after.currentImportSha256, before.currentImportSha256);
+  assert.deepEqual(after.forbiddenPosts, []);
+  assert.deepEqual([after.providerTurns, after.nativePickerInvocations, after.nativeProcessSpawns], [0, 0, 0]);
+});
+
+test('duplicate optional name and omitted revision keep the actual store defaults and trace only supplied fields', async t => {
+  const fixture = setup(t), before = fixture.snapshot(), route = `/profiles/${before.seed.profileId}/duplicate`;
+  for (const payload of [{ name: 'Owned named copy' }, {}]) {
+    const copied = await request(fixture, 'POST', route, payload);
+    assert.equal(copied.status, 201);
+    const source = before.seed.revisions[1], name = payload.name ?? `${source.body.name} 사본`;
+    assert.deepEqual(copied.body.profile.head.body, { ...source.body, name });
+    assert.deepEqual([copied.body.profile.source.at(-1).revision, copied.body.revision,
+      copied.body.profile.lifecycle, copied.body.profile.activeRevision], [2, 1, 'draft', null]);
+    const state = fixture.snapshot(), trace = state.requests.at(-1), event = state.duplicateEvents.at(-1);
+    assert.deepEqual(trace.request, payload);
+    assert.deepEqual([event.sequence, event.sourceRevision, event.name, event.profileId], [trace.sequence, 2, name, copied.body.id]);
+  }
+  const after = fixture.snapshot();
+  assert.equal(after.duplicateEvents.length, 2);
+  assert.equal(new Set(after.duplicateEvents.map(event => event.profileId)).size, 2, 'each POST invokes the real copy operation once');
+  assert.deepEqual(after.persisted.profiles.revisions.filter(row => row.profile_id === before.seed.profileId), before.persisted.profiles.revisions);
+  assert.deepEqual(after.persisted.desk, before.persisted.desk);
+});
+
+test('duplicate route, payload and owner-scope checks grant no extra parameters, account access or other mutations', async t => {
+  const fixture = setup(t), before = fixture.snapshot(), id = before.seed.profileId, route = `/profiles/${id}/duplicate`;
+  for (const [method, url] of [['GET', route], ['PUT', route], ['POST', `${route}/`], ['POST', `${route}/activate`],
+    ['POST', `/profiles/${id}/revisions/2/duplicate`], ['POST', '/profiles/UPPER/duplicate'],
+    ['POST', `/profiles/%70${id.slice(1)}/duplicate`], ['POST', `${route}?revision=2`],
+    ['POST', `${route}?accountId=other`], ['POST', `${route}?allow=true`]]) {
+    const blocked = await request(fixture, method, url, { revision: 2 }, { token: true });
+    assert.deepEqual([blocked.status, blocked.body.code], [403, 'QA_PORTABLE_ROUTE_BLOCKED'], url);
+    assert.equal(fixture.snapshot().requests.at(-1).delegated, false);
+  }
+  const cases = [
+    [null, 400, 'INVALID_JSON'], [[], 400, 'INVALID_JSON'], ['{malformed', 400, 'INVALID_JSON'],
+    [{ revision: '2' }, 400, 'INVALID_PROFILE_REVISION'], [{ revision: 0 }, 400, 'INVALID_PROFILE_REVISION'],
+    [{ revision: 999 }, 404, 'PROFILE_REVISION_NOT_FOUND'], [{ revision: 2, name: '' }, 400, 'INVALID_PROFILE'],
+    ...['accountId', 'ownerHash', 'profileId', 'body', 'activeRevision', 'activate', 'roomId', 'toolPreset', 'allow']
+      .map(key => [{ revision: 2, [key]: 'not-a-grant' }, 400, 'PROFILE_HTTP_INPUT']),
+  ];
+  for (const [payload, status, code] of cases) {
+    const blocked = await request(fixture, 'POST', route, payload, { token: true });
+    assert.deepEqual([blocked.status, blocked.body.code], [status, code]);
+    assert.equal(fixture.snapshot().requests.at(-1).delegated, true, 'the real HTTP/store validation owns payload errors');
+  }
+  for (const options of [{ headers: { host: 'evil.invalid' } }, { headers: { origin: 'https://evil.invalid' } },
+    { headers: { 'sec-fetch-site': 'same-site' } }, { remoteAddress: '192.0.2.1' },
+    { suppliedUrl: new URL(`http://127.0.0.1:49318/profiles/other/duplicate`) }]) {
+    const blocked = await request(fixture, 'POST', route, { revision: 2 }, options);
+    assert.deepEqual([blocked.status, blocked.body.code], [403, 'QA_LOOPBACK_REQUIRED']);
+    assert.equal(fixture.snapshot().requests.at(-1).delegated, false);
+  }
+  const other = setup(t), otherBefore = other.snapshot();
+  const foreign = await request(other, 'POST', route, { revision: 2 }, { token: true });
+  assert.deepEqual([foreign.status, foreign.body.code], [404, 'PROFILE_NOT_FOUND']);
+  assert.equal(other.snapshot().requests.at(-1).delegated, true, 'a valid foreign ID is resolved only in this fixture owner store');
+  assert.deepEqual(other.snapshot().persisted, otherBefore.persisted);
+  assert.deepEqual(other.snapshot().duplicateEvents, []);
+  const after = fixture.snapshot();
+  assert.deepEqual(after.persisted, before.persisted); assert.deepEqual(after.exports, before.exports);
+  assert.deepEqual(after.duplicateEvents, []);
+  assert.equal(after.forbiddenPosts.length, after.requests.filter(row => row.method === 'POST').length);
+});
+
 test('Desk readiness has an exact real initial generation; current reads and refused autosaves cannot change it or the Board', async t => {
   const fixture = setup(t), before = fixture.snapshot();
   assert.deepEqual(before.seed.deskState, { version: 1, savedAt: Date.parse('2026-10-25T00:00:00Z'),
@@ -277,7 +393,7 @@ test('MD and TOML exports pin exact revision bytes and hashes without activating
 
 test('activation, record/room assignment, provider, terminal and other writes are refused and forbidden POST attempts remain visible', async t => {
   const fixture = setup(t), before = fixture.snapshot(), id = before.seed.profileId;
-  const posts = [`/profiles/${id}/activate`, `/profiles/${id}/duplicate`, `/profiles/${id}/lifecycle`, '/profiles',
+  const posts = [`/profiles/${id}/activate`, `/profiles/${id}/lifecycle`, '/profiles',
     '/records/activate', '/chat/profile/assign', '/rooms/assign', '/chat/send', '/provider/run', '/terminal/spawn', '/terminal/write', '/__qa/portable-transfer/inject'];
   for (const route of posts) {
     const blocked = await request(fixture, 'POST', route, { revision: 1, profileId: id, roomId: 'owned-room', command: 'must-not-run' });

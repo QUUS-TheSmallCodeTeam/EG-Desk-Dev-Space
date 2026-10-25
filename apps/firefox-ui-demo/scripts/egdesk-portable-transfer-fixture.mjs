@@ -25,6 +25,7 @@ const BOARD_CATALOG_PREF = 'egdesk.agendaState.v1';
 const PROFILE = '[a-z0-9][a-z0-9-]{0,79}';
 const BOARD = '[A-Za-z0-9][A-Za-z0-9._-]{0,127}';
 const GET_PROFILE = new RegExp(`^/profiles(?:/(?:tool-presets|${PROFILE}(?:/revisions(?:/[1-9]\\d{0,8})?|/export)?))?$`);
+const POST_DUPLICATE = new RegExp(`^/profiles/(${PROFILE})/duplicate$`);
 const GET_BOARD = new RegExp(`^/v1/boards(?:/${BOARD}(?:/export)?)?$`);
 const failure = (code, message, httpStatus = 403) => Object.assign(new Error(message), { code, httpStatus });
 
@@ -182,7 +183,7 @@ export function createPortableTransferFixture({ profile, token, env = process.en
     catalogSeed.coherentBeforeLaunch = true;
     const profileHandler = createProfileHttpHandler({ store: () => profiles, port: config.port });
     const deskHandler = createDeskHttpHandler({ store: () => desk, port: config.port });
-    const requests = [], forbiddenPosts = [], pickerResults = [], headAdvances = [];
+    const requests = [], forbiddenPosts = [], pickerResults = [], headAdvances = [], duplicateEvents = [];
     let queuedPicker = null;
     let disposed = false, sequence = 0;
     const exportFiles = () => {
@@ -204,7 +205,7 @@ export function createPortableTransferFixture({ profile, token, env = process.en
         seed: structuredClone(seed), catalogSeed: structuredClone(catalogSeed), initial: structuredClone(initial), persisted: persisted(), disposed,
         currentImportSha256: sha256(fs.readFileSync(importPath)), requests: structuredClone(requests), forbiddenPosts: structuredClone(forbiddenPosts),
         queuedPicker: structuredClone(queuedPicker), pickerResults: structuredClone(pickerResults),
-        headAdvances: structuredClone(headAdvances), exports: exportFiles(),
+        headAdvances: structuredClone(headAdvances), duplicateEvents: structuredClone(duplicateEvents), exports: exportFiles(),
         deskReadiness: { storeOpen: !disposed, seedGeneration: seed.deskGeneration,
           currentReads: requests.filter(row => row.method === 'GET' && row.path === '/v1/desk/current' && row.status === 200).length },
         providerTurns: 0, nativePickerInvocations: 0, nativeProcessSpawns: 0,
@@ -290,10 +291,11 @@ export function createPortableTransferFixture({ profile, token, env = process.en
           pickerResults.push({ sequence: entry.sequence, request: body, ...packet });
           entry.status = 200; sendJson(res, 200, packet); return true;
         }
-        const profileRoute = req.method === 'GET' && GET_PROFILE.test(route) || req.method === 'POST' && route === '/profiles/import';
+        const duplicateMatch = req.method === 'POST' ? POST_DUPLICATE.exec(route) : null;
+        const profileRoute = req.method === 'GET' && GET_PROFILE.test(route) || req.method === 'POST' && route === '/profiles/import' || !!duplicateMatch;
         const boardRoute = req.method === 'GET' && (GET_BOARD.test(route) || route === '/v1/desk/current');
-        if (!profileRoute && !boardRoute) throw failure('QA_PORTABLE_ROUTE_BLOCKED', 'Only profile reads/import and saved Board reads/export are permitted');
-        if (req.method === 'POST' && url.search) throw failure('QA_PORTABLE_ROUTE_BLOCKED', 'Profile import has no fixture query controls');
+        if (!profileRoute && !boardRoute) throw failure('QA_PORTABLE_ROUTE_BLOCKED', 'Only profile reads/import/duplicate and saved Board reads/export are permitted');
+        if (req.method === 'POST' && url.search) throw failure('QA_PORTABLE_ROUTE_BLOCKED', 'Profile mutations have no fixture query controls');
         entry.before = persisted();
         // Observe the very bytes consumed by the actual handler. Do not replace
         // its parser, store result or HTTP success envelope with fixture data.
@@ -325,10 +327,22 @@ export function createPortableTransferFixture({ profile, token, env = process.en
             const body = JSON.parse(raw.toString('utf8'));
             entry.request = { ...(Object.hasOwn(body, 'dryRun') ? { dryRun: body.dryRun } : {}),
               ...(Object.hasOwn(body, 'filename') ? { filename: body.filename } : {}),
+              ...(duplicateMatch && Object.hasOwn(body, 'revision') ? { revision: body.revision } : {}),
+              ...(duplicateMatch && Object.hasOwn(body, 'name') ? { name: body.name } : {}),
               ...(typeof body.text === 'string' ? { textSha256: sha256(body.text), textBytes: Buffer.byteLength(body.text) } : {}) };
           } catch { /* Real handler records invalid JSON; do not invent a body. */ }
         }
         entry.after = persisted();
+        if (duplicateMatch && entry.status === 201) {
+          // Evidence from the real handler response; never a substitute DTO or
+          // another store write. before/after retain the matching SQLite proof.
+          const created = entry.response, source = created?.profile?.source?.at(-1);
+          duplicateEvents.push({ sequence: entry.sequence, sourceProfileId: duplicateMatch[1],
+            sourceRevision: source?.revision, sourceHash: source?.hash,
+            profileId: created?.id, revision: created?.revision, hash: created?.hash,
+            name: created?.profile?.head?.body?.name, lifecycle: created?.profile?.lifecycle,
+            activeRevision: created?.profile?.activeRevision });
+        }
         if (req.method === 'POST' && entry.status >= 400) {
           forbiddenPosts.push({ sequence: entry.sequence, path: route, code: entry.response?.code || 'PROFILE_ERROR' });
         }
