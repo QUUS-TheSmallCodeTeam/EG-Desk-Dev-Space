@@ -53,6 +53,7 @@ const CLAUDE_CONTEXT_PRESTART_REFUSALS = new Set([
 ])
 const PROJECT_PRESTART_REFUSALS = new Set([
   'PROJECT_RECONNECT_REQUIRED', 'PROJECT_WORKSPACE_UNAVAILABLE', 'PROJECT_WORKSPACE_UNVERIFIED', 'PROJECT_WORKSPACE_CHANGED',
+  'PROJECT_TARGET_CHANGED',
   'NATIVE_CWD_UNVERIFIED', 'CWD_CHANGE_UNSUPPORTED',
 ])
 const idText = value => typeof value === 'string' && value.length <= 300 ? value : null
@@ -1375,7 +1376,8 @@ export class CodexChatRuntime {
     const clientThreadId = idText(body.clientThreadId) || idText(body.thread?.id)
     const conversationId = idText(body.conversationId)
     if (body.conversationId != null && !conversationId) throw chatError('INVALID_THREAD_ID', 'Invalid conversationId')
-    const projectScope = this.projectScope(body, internal?.board?.record?.roomClientThreadId || clientThreadId)
+    const projectTarget = this.projectTarget(body)
+    const projectScope = this.projectScope(body, internal?.board?.record?.roomClientThreadId || clientThreadId, projectTarget)
     const storedThread = this.store && clientThreadId ? this.store.getConversation(clientThreadId) : null
     let boundPolicy = this.threads.get(conversationId)?.executionPolicy || null
     // After a helper restart the binding, not the default engine or Codex's
@@ -1431,7 +1433,8 @@ export class CodexChatRuntime {
       stateless: stateless || undefined,
       // Explicit association hints affect replay identity; old plain-chat
       // fingerprints remain byte-for-byte compatible.
-      project: body.boardId != null || body.roomId != null ? projectScope : undefined,
+      project: projectTarget || body.boardId != null || body.roomId != null ? projectScope : undefined,
+      projectTarget: projectTarget || undefined,
       // D-M2 / D-M1: a Board recipient or a hand-back is its own request.
       board: internal?.board ? { room: internal.board.record.roomClientThreadId, profileId: internal.board.record.profileId, reason: internal.board.record.reason } : undefined,
       blocks: internal?.blocks ? Object.keys(internal.blocks).sort() : undefined,
@@ -1562,6 +1565,7 @@ export class CodexChatRuntime {
       modelSelection,
       stateless,
       projectScope,
+      projectTarget,
       // A stored binding may have named the engine after the early lookup.
       engine: this.engineRecord(conversationId ? this.threadEngines.get(conversationId) || engineId : engineId),
       board: internal?.board?.record || null,
@@ -1689,15 +1693,29 @@ export class CodexChatRuntime {
     return options
   }
 
-  projectScope(body, roomId) {
+  projectTarget(body) {
+    if (body.projectTarget === undefined) return null
+    const target = body.projectTarget
+    const keys = ['boardId', 'projectId', 'rootId']
+    if (!target || typeof target !== 'object' || Array.isArray(target) || Object.keys(target).length !== keys.length ||
+        !keys.every(key => Object.hasOwn(target, key) && typeof target[key] === 'string' && target[key].trim() && target[key].length <= 512 && !target[key].includes('\0')) ||
+        (body.boardId !== undefined && body.boardId !== target.boardId)) {
+      throw chatError('INVALID_PROJECT_TARGET', 'projectTarget must contain only boardId, projectId and rootId identifiers; a duplicate boardId must match', 400)
+    }
+    // The person's Apply choice is a per-request expectation, never a new
+    // association or filesystem authority. Snapshot it before any await.
+    return Object.freeze({ boardId: target.boardId, projectId: target.projectId, rootId: target.rootId })
+  }
+
+  projectScope(body, roomId, target = null) {
     const identifier = value => value == null || (typeof value === 'string' && value.trim() && value.length <= 512 && !value.includes('\0'))
     if (!identifier(body.boardId) || !identifier(body.roomId) || !identifier(roomId)) throw chatError('INVALID_PROJECT_SCOPE', 'Project routing requires opaque Board and room IDs', 400)
     if (body.roomId != null && roomId && body.roomId !== roomId) throw chatError('INVALID_PROJECT_SCOPE', 'Project room must match the sending chat or original Board room', 400)
-    if (!this.resolveProjectWorkspace && (body.boardId != null || body.roomId != null)) throw chatError('PROJECT_WORKSPACE_UNAVAILABLE', 'Project folder lookup is unavailable; no message was sent', 503)
-    return Object.freeze({ boardId: body.boardId ?? null, roomId: roomId || body.roomId || null })
+    if (!this.resolveProjectWorkspace && (target || body.boardId != null || body.roomId != null)) throw Object.assign(chatError('PROJECT_WORKSPACE_UNAVAILABLE', 'Project folder lookup is unavailable; no message was sent', 503), { definite: true })
+    return Object.freeze({ boardId: target?.boardId ?? body.boardId ?? null, roomId: roomId || body.roomId || null })
   }
 
-  async projectWorkspace(scope, assertActive) {
+  async projectWorkspace(scope, assertActive, expectedTarget = null) {
     assertActive()
     let workspace
     try { workspace = await this.resolveProjectWorkspace({ ...scope }) }
@@ -1708,13 +1726,18 @@ export class CodexChatRuntime {
     assertActive()
     // Only an explicit null means no association. An unavailable resolver or
     // a missing/replaced configured folder must never become a default cwd.
-    if (workspace === null) return null
+    const targetChanged = () => Object.assign(chatError('PROJECT_TARGET_CHANGED', 'The selected project is no longer the effective folder for this chat; select the current project and Apply again before sending', 409), { definite: true })
+    if (workspace === null) {
+      if (expectedTarget) throw targetChanged()
+      return null
+    }
     if (workspace?.status === 'reconnect-required') throw Object.assign(chatError('PROJECT_RECONNECT_REQUIRED', 'Pick the associated project folder again before sending', 409), { definite: true })
     if (workspace?.status !== 'connected' || !['board', 'room'].includes(workspace.source) ||
         ![workspace.projectId, workspace.rootId].every(value => typeof value === 'string' && value && value.length <= 512 && !value.includes('\0')) ||
         typeof workspace.absolutePath !== 'string' || !path.isAbsolute(workspace.absolutePath) || workspace.absolutePath.includes('\0')) {
       throw Object.assign(chatError('PROJECT_WORKSPACE_UNVERIFIED', 'Project folder lookup did not return a verified workspace; no message was sent', 409), { definite: true })
     }
+    if (expectedTarget && (workspace.projectId !== expectedTarget.projectId || workspace.rootId !== expectedTarget.rootId)) throw targetChanged()
     // Copy only the verified identity and path, never permissions or roots
     // from a request or a resolver extension. Existing ceilings stay intact.
     const { projectId, source, rootId, absolutePath } = workspace
@@ -1836,12 +1859,12 @@ export class CodexChatRuntime {
     const contextAuthority = this.scopedContextAuthority({ ...body, engineId: engine.id })
     const selection = context.modelSelection || this.modelSelection(body, context.profileRun, engine.id)
     const overrides = this.threadOverrides(body, context.profileRun, selection)
-    const workspace = this.resolveProjectWorkspace ? await this.projectWorkspace(context.projectScope, assertPreparationActive) : null
+    const workspace = this.resolveProjectWorkspace ? await this.projectWorkspace(context.projectScope, assertPreparationActive, context.projectTarget) : null
     if (workspace) overrides.cwd = workspace.absolutePath
     const assertWorkspaceCurrent = async () => {
       assertPreparationActive()
       if (!this.resolveProjectWorkspace) return
-      const current = await this.projectWorkspace(context.projectScope, assertPreparationActive)
+      const current = await this.projectWorkspace(context.projectScope, assertPreparationActive, context.projectTarget)
       if (JSON.stringify(current) !== JSON.stringify(workspace)) throw Object.assign(chatError('PROJECT_WORKSPACE_CHANGED', 'Project association changed while preparing this message; send again with the current folder', 409), { definite: true })
     }
     // A continued Claude process/session cannot be moved by changing a Board
@@ -2506,6 +2529,20 @@ export class CodexChatRuntime {
           ...(conversationId ? { conversationId } : {}),
           ...(profileRevision != null && profileId === recipient.profileId ? { profileRevision } : {}),
         }, { board: { record, block: boardContextBlock({ members, recipient, leadProfileId: lead, recentMessages }) } })
+        // A durable replay returns its saved outcome, including refusals;
+        // Promise fulfillment alone does not mean a native turn started.
+        if (accepted?.accepted !== true) {
+          results.push({
+            ...row, status: 'failed',
+            code: typeof accepted?.code === 'string' ? accepted.code : typeof accepted?.error?.code === 'string' ? accepted.error.code : 'BOARD_SEND_FAILED',
+            error: publicText(accepted?.error?.message || 'The message was not accepted; check its saved status before retrying', 500),
+            dispatchStatus: accepted?.dispatchStatus || 'unknown',
+            conversationId: accepted?.conversationId || null, runId: accepted?.runId || null,
+            ...(accepted?.duplicate ? { duplicate: true } : {}),
+            ...(typeof accepted?.resumeRequired === 'boolean' ? { resumeRequired: accepted.resumeRequired } : {}),
+          })
+          continue
+        }
         slots--
         results.push({ ...row, status: 'started', conversationId: accepted.conversationId || null, runId: accepted.runId || null, ...(accepted.duplicate ? { duplicate: true } : {}) })
       } catch (error) {
@@ -2555,6 +2592,9 @@ export class CodexChatRuntime {
       clientThreadId: run.clientThreadId, conversationId: run.conversationId, requestId,
       ...(run.profileBinding ? { profileId: run.profileBinding.profileId } : {}),
     }, { blocks: { egdesk_subagent_handback: subAgentHandbackBlock(row) }, ...(run.board ? { board: { record: run.board, block: null } } : {}) })
+    // Cached prestart refusals are returned values, not thrown errors. Keep
+    // that outcome without claiming or recording a successful hand-back.
+    if (accepted?.accepted !== true) return accepted
     this.emit(run, 'subagent.handedBack', { threadId, requestId, runId: accepted.runId || null })
     return { ...accepted, handedBack: { threadId, fromRunId: run.runId } }
   }
