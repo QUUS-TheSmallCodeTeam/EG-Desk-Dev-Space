@@ -50,6 +50,7 @@ async function request(fixture, method, route, body, options = {}) {
 const control = (fixture, action) => request(fixture, 'POST', TASK_GATE_CONTROL_ROUTE, { action }, { token: true });
 const seed = fixture => request(fixture, 'POST', '/chat/send', { message: TASK_GATE_SEED_MESSAGE,
   clientThreadId: 'qa-original-local-binding', requestId: 'qa-original-request', profileEnabled: false });
+const noRoomProject = (roomId = 'qa-original-local-binding') => ({ roomId, status: 'none', source: null, boardId: null, projectId: null, rootId: null });
 function bodyFor(state, taskId, gateId, answer, index = 0) {
   const plan = state.plans[index];
   return { boardId: plan.boardId, scope: plan.scope, taskId, gateId, answer };
@@ -120,6 +121,51 @@ test('native seed route delegates real Chat and seeds a real approved plan waiti
   assert.ok(forwarded.some(frame => frame.type === 'task.graph' && frame.graphId === state.plans[0].graphId));
   assert.ok(forwarded.some(frame => frame.type === 'chat.event' && frame.clientThreadId === state.original.clientThreadId));
   assert.equal((await seed(fixture)).status, 403, 'no accidental second original room');
+});
+
+test('HOST expected-none uses the actual Chat runtime with exact client binding and no connected workspace/provider', async t => {
+  const fetchSpy = t.mock.method(globalThis, 'fetch', () => assert.fail('no provider/network'));
+  const socketSpy = t.mock.method(net.Socket.prototype, 'connect', () => assert.fail('no socket'));
+  const { fixture } = await setup(t), expectedRoomProject = noRoomProject();
+  const result = await request(fixture, 'POST', '/chat/send', { message: TASK_GATE_SEED_MESSAGE, profileEnabled: false,
+    clientThreadId: expectedRoomProject.roomId, requestId: 'qa-host-none', expectedRoomProject });
+  assert.equal(result.status, 202); assert.equal(result.body.accepted, true);
+  const snapshot = fixture.snapshot();
+  assert.equal(snapshot.original.clientThreadId, expectedRoomProject.roomId);
+  assert.equal(snapshot.fakeProviderTurns.length, 1); assert.equal(snapshot.providerTurns, 0); assert.equal(snapshot.nativeProcessSpawns, 0);
+  assert.ok(snapshot.projectResolutions.length >= 2, 'actual preparation rechecks the resolver');
+  for (const resolution of snapshot.projectResolutions) {
+    assert.deepEqual(resolution.scope, { boardId: null, roomId: expectedRoomProject.roomId, expectedRoomProject });
+    assert.equal(resolution.result, null); assert.equal(resolution.contract, 'fixture-owned-no-project');
+  }
+  const receipt = snapshot.requests.find(row => row.path === '/chat/send');
+  assert.equal(receipt.delegated, true); assert.equal(receipt.status, 202);
+  assert.equal(snapshot.plans.length, 1); assert.ok(snapshot.persisted.journalCount > 0);
+  assert.equal(fetchSpy.mock.callCount(), 0); assert.equal(socketSpy.mock.callCount(), 0);
+});
+
+test('HOST mismatched/connected/malformed project expectations fail real Chat HTTP before fake RPC or workflow writes', async t => {
+  const { fixture } = await setup(t), none = noRoomProject();
+  const cases = [
+    [{ expectedRoomProject: noRoomProject('wrong-room') }, 409, 'PROJECT_WORKSPACE_CHANGED'],
+    [{ expectedRoomProject: { ...none, status: 'connected', source: 'room', projectId: 'p', rootId: 'r' } }, 409, 'PROJECT_WORKSPACE_CHANGED'],
+    [{ expectedRoomProject: none, boardId: 'unowned-active-board' }, 409, 'PROJECT_WORKSPACE_CHANGED'],
+    [{ expectedRoomProject: none, roomId: 'different-explicit-room' }, 400, 'INVALID_PROJECT_SCOPE'],
+    [{ expectedRoomProject: null }, 400, 'INVALID_EXPECTED_ROOM_PROJECT'],
+    [{ expectedRoomProject: { ...none, rootId: 'not-none' } }, 400, 'INVALID_EXPECTED_ROOM_PROJECT'],
+    [{ expectedRoomProject: { ...none, absolutePath: '/outside' } }, 400, 'INVALID_EXPECTED_ROOM_PROJECT'],
+    [{ projectTarget: { boardId: 'b', projectId: 'p', rootId: 'r' } }, 409, 'PROJECT_TARGET_CHANGED'],
+  ];
+  for (const [index, [patch, status, code]] of cases.entries()) {
+    const result = await request(fixture, 'POST', '/chat/send', { message: TASK_GATE_SEED_MESSAGE, profileEnabled: false,
+      clientThreadId: none.roomId, requestId: `qa-invalid-project-${index}`, ...patch });
+    assert.deepEqual([result.status, result.body.code], [status, code]);
+    const snapshot = fixture.snapshot();
+    assert.equal(snapshot.requests.at(-1).delegated, true, 'actual Chat HTTP refusal');
+    assert.equal(snapshot.fakeProviderTurns.length, 0); assert.equal(snapshot.providerTurns, 0);
+    assert.equal(snapshot.original, null); assert.equal(snapshot.plans.length, 0); assert.equal(snapshot.persisted.journalCount, 0);
+  }
+  assert.equal((await seed(fixture)).status, 202, 'legacy absent expectation remains supported after refused requests');
 });
 
 test('real continue accepts one choice, resumes only original conversation, and duplicate gets real stale response', async t => {

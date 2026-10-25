@@ -49,6 +49,35 @@ const answerTrace = answer => answer && typeof answer === 'object' && !Array.isA
     ...(typeof answer.text === 'string' ? { textCodePoints: Array.from(answer.text).length, textBytes: Buffer.byteLength(answer.text) } : {}) }
   : { kind: answer === undefined ? 'absent' : answer === null ? 'null' : typeof answer };
 
+// Test-only authority: these modes own no connected/saved project. Null is an
+// explicit absence, never an unavailable or "verified" folder. Keep production
+// expectation/target shape validation and exact client room binding unchanged.
+export function resolveQaEmptyProjectWorkspace(scope) {
+  const model = CodexChatRuntime.prototype;
+  const expected = model.expectedRoomProject({ ...(scope.expectedRoomProject !== undefined ? { expectedRoomProject: scope.expectedRoomProject } : {}),
+    ...(scope.projectTarget !== undefined ? { projectTarget: scope.projectTarget } : {}) });
+  if (scope.projectTarget != null) throw failure('PROJECT_TARGET_CHANGED', 'This QA fixture owns no connected project target', 409);
+  if (scope.boardId != null || expected && (expected.status !== 'none' || expected.roomId !== scope.roomId)) {
+    throw failure('PROJECT_WORKSPACE_CHANGED', 'This QA fixture owns only the exact sending room with no project', 409);
+  }
+  return null;
+}
+
+// Shared by synthetic Chat/Claude transport, which does not instantiate the
+// production Chat runtime. Never delete the new field or claim a real project.
+export function assertQaEmptyProjectSend(body) {
+  if (body.expectedRoomProject === undefined && body.projectTarget === undefined) return null; // unchanged legacy sends
+  const model = CodexChatRuntime.prototype, expected = model.expectedRoomProject(body), target = model.projectTarget(body);
+  if (expected && (typeof body.clientThreadId !== 'string' || !body.clientThreadId.trim()
+      || body.clientThreadId.length > 512 || body.clientThreadId.includes('\0'))) {
+    throw failure('INVALID_PROJECT_SCOPE', 'Expected room project requires the actual sending clientThreadId', 400);
+  }
+  const scope = model.projectScope.call({ resolveProjectWorkspace: resolveQaEmptyProjectWorkspace }, body,
+    body.clientThreadId || null, target, expected);
+  resolveQaEmptyProjectWorkspace({ ...scope, ...(target ? { projectTarget: target } : {}), ...(expected ? { expectedRoomProject: expected } : {}) });
+  return expected;
+}
+
 /**
  * await createTaskGateFixture({profile,token,env,broadcast}) -> handle/snapshot/dispose.
  * Singer mounts handle BEFORE common synthetic Chat/Task fallbacks and forwards
@@ -75,7 +104,7 @@ export async function createTaskGateFixture({ profile, token, env = process.env,
   fs.mkdirSync(dataDir, { mode: 0o700 });
   const database = path.join(dataDir, 'workflow-store', 'workflow.sqlite');
   const owner = `qa-task-gate:${randomUUID()}`, nonce = randomUUID();
-  const requests = [], frames = [], turns = [], plans = [], controls = [], queuedFrames = [];
+  const requests = [], frames = [], turns = [], plans = [], controls = [], queuedFrames = [], projectResolutions = [];
   let runtime = null, original = null, disposed = false, closing = null, cached = null, seedStarting = false;
   let threadCount = 0, held = null, holdNext = false, pauseBroadcast = false;
   const emit = frame => {
@@ -86,6 +115,11 @@ export async function createTaskGateFixture({ profile, token, env = process.env,
     else broadcast(frame);
   };
   const chat = new CodexChatRuntime({
+    resolveProjectWorkspace: scope => {
+      const workspace = resolveQaEmptyProjectWorkspace(scope);
+      bounded(projectResolutions, { scope: structuredClone(scope), result: workspace, contract: 'fixture-owned-no-project' });
+      return workspace;
+    },
     request: async (method, params) => {
       if (disposed) throw failure('QA_FIXTURE_CLOSED', 'Task fixture is closed', 503);
       if (method === 'thread/start') return { thread: { id: `qa-task-thread-${nonce}-${++threadCount}` }, cwd: dataDir };
@@ -161,6 +195,7 @@ export async function createTaskGateFixture({ profile, token, env = process.env,
     return { kind: 'egdesk-task-gate-fixture', profile: manifest.profile, ...config, root, dataDir, database, disposed,
       original: structuredClone(original), plans: structuredClone(plans), requests: structuredClone(requests),
       frames: structuredClone(frames), controls: structuredClone(controls), fakeProviderTurns: structuredClone(turns),
+      projectResolutions: structuredClone(projectResolutions),
       held: held ? { sequence: held.sequence, graphId: held.body.scope?.graphId, taskId: held.body.taskId, gateId: held.body.gateId } : null,
       pauseBroadcast, queuedFrames: queuedFrames.length, persisted: persisted(),
       graphs: plans.map(plan => publicGraph(runtime.graph.getGraph(plan.graphId))),

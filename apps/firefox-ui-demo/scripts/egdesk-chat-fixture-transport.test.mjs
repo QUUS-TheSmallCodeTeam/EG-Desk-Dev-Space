@@ -212,7 +212,8 @@ async function setupTaskMount(t) {
   });
   const state = async () => (await send('GET', '/__qa/task-gate/state', null, TOKEN)).body;
   const seed = () => send('POST', '/chat/send', { message: TASK_GATE_SEED_MESSAGE, profileEnabled: false,
-    clientThreadId: 'owned-task-mount-room', requestId: 'owned-task-mount-request' });
+    clientThreadId: 'owned-task-mount-room', requestId: 'owned-task-mount-request',
+    expectedRoomProject: { roomId: 'owned-task-mount-room', status: 'none', source: null, boardId: null, projectId: null, rootId: null } });
   const control = action => send('POST', '/__qa/task-gate/control', { action }, TOKEN);
   return { transport, send, state, seed, control, initial: initial.body, headers };
 }
@@ -386,6 +387,44 @@ test('ordinary Chat, Claude/Reader and RunOutputs read only the canonical empty 
     if (mode.runOutputs) assert.deepEqual(after.runOutputs, before.runOutputs);
   }
   assert.equal(fetchSpy.mock.callCount(), 0);
+});
+
+test('ordinary/Claude/Reader/RunOutputs validate HOST observed-none without ignoring it or inventing a verified project', async t => {
+  const fetchSpy = t.mock.method(globalThis, 'fetch', () => assert.fail('no provider/network'));
+  const socketSpy = t.mock.method(net.Socket.prototype, 'connect', () => assert.fail('no socket'));
+  for (const mode of [{}, { claude: true }, { claude: true, reader: true }, { runOutputs: true }]) {
+    const { handler } = setup(t, mode), roomId = 'owned-host-none-room';
+    const expectedRoomProject = { roomId, status: 'none', source: null, boardId: null, projectId: null, rootId: null };
+    const body = { message: `EGDESK_QA_${mode.claude ? 'CLAUDE_TEXT' : mode.runOutputs ? 'RUN_OUTPUTS' : 'TEXT_ONLY'}`,
+      profileEnabled: false, clientThreadId: roomId, requestId: 'owned-host-none-send', ...(mode.claude ? { engineId: 'claude' } : {}) };
+    const before = (await request(handler, 'GET', '/__qa/state', null, TOKEN)).body;
+    const bad = [
+      [{ expectedRoomProject: { ...expectedRoomProject, roomId: 'foreign' } }, 409, 'PROJECT_WORKSPACE_CHANGED'],
+      [{ expectedRoomProject: { ...expectedRoomProject, status: 'connected', source: 'room', projectId: 'p', rootId: 'r' } }, 409, 'PROJECT_WORKSPACE_CHANGED'],
+      [{ expectedRoomProject: { ...expectedRoomProject, rootId: 'r' } }, 400, 'INVALID_EXPECTED_ROOM_PROJECT'],
+      [{ expectedRoomProject: { ...expectedRoomProject, cwd: '/outside' } }, 400, 'INVALID_EXPECTED_ROOM_PROJECT'],
+      [{ expectedRoomProject: null }, 400, 'INVALID_EXPECTED_ROOM_PROJECT'],
+      [{ expectedRoomProject, clientThreadId: undefined }, 400, 'INVALID_PROJECT_SCOPE'],
+      [{ expectedRoomProject, roomId: 'different-room' }, 400, 'INVALID_PROJECT_SCOPE'],
+      [{ expectedRoomProject, boardId: 'active-board' }, 409, 'PROJECT_WORKSPACE_CHANGED'],
+      [{ projectTarget: { boardId: 'b', projectId: 'p', rootId: 'r' } }, 409, 'PROJECT_TARGET_CHANGED'],
+    ];
+    for (const [patch, status, code] of bad) {
+      const result = await request(handler, 'POST', '/chat/send', { ...body, ...patch });
+      assert.deepEqual([result.status, result.body.code], [status, code]);
+    }
+    const refused = (await request(handler, 'GET', '/__qa/state', null, TOKEN)).body;
+    assert.deepEqual(refused.observed, before.observed); assert.deepEqual(refused.runs, before.runs); assert.equal(refused.seq, before.seq);
+    const result = await request(handler, 'POST', '/chat/send', { ...body, expectedRoomProject });
+    assert.equal(result.status, 202); assert.equal(result.body.accepted, true);
+    const after = (await request(handler, 'GET', '/__qa/state', null, TOKEN)).body;
+    assert.deepEqual(after.observed.sends[0].expectedRoomProject, expectedRoomProject, 'never strip the exact observation from the request');
+    assert.deepEqual(after.observed.roomProjectExpectations, [{ clientThreadId: roomId, expectedRoomProject, result: null, contract: 'fixture-owned-no-project' }]);
+    if (mode.claude || mode.runOutputs) assert.equal(after.providerTurns, 0);
+    const legacy = await request(handler, 'POST', '/chat/send', { ...body, clientThreadId: `${roomId}-legacy`, requestId: 'legacy-without-expectation' });
+    assert.equal(legacy.status, 202, 'legacy send without the new optional field is unchanged');
+  }
+  assert.equal(fetchSpy.mock.callCount(), 0); assert.equal(socketSpy.mock.callCount(), 0);
 });
 
 test('empty-default fallback rejects invalid IDs/bodies/origins and unsupported writes; it never accepts a fake saved default', async t => {

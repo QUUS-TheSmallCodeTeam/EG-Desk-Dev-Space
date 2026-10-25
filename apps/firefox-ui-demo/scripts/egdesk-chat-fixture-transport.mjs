@@ -16,7 +16,7 @@ import { projectFileFixtureEnabled } from './egdesk-qa-fixture-isolation.mjs';
 import { createProjectFileFixture } from './egdesk-project-file-fixture.mjs';
 import { chatRunOutputsFixtureEnabled, createChatRunOutputsFixture } from './egdesk-chat-run-outputs-fixture.mjs';
 import { portableTransferFixtureEnabled, createPortableTransferFixture } from './egdesk-portable-transfer-fixture.mjs';
-import { taskGateFixtureEnabled, createTaskGateFixture } from './egdesk-task-gate-fixture.mjs';
+import { taskGateFixtureEnabled, createTaskGateFixture, assertQaEmptyProjectSend } from './egdesk-task-gate-fixture.mjs';
 import { chatOriginFileFixtureEnabled, createChatOriginFileFixture } from './egdesk-chat-origin-file-fixture.mjs';
 import { routePermissionRequest } from '../helper/claude-engine-permissions.mjs'; // Pure shape translation only.
 import { guardBridgeRequest } from '../helper/codex-bridge-http.mjs';
@@ -992,6 +992,15 @@ const handler = async (req, res) => {
     if (req.method === 'POST' && url.pathname === '/chat/send') {
       const body = await bodyJson(req);
       assertOrdinarySend(body);
+      // Origin/Task real handlers already ran above. Ordinary synthetic modes
+      // have no project authority: validate the exact observed-none identity,
+      // never silently discard expectedRoomProject or accept a connected target.
+      const expectedRoomProject = assertQaEmptyProjectSend(body);
+      if (expectedRoomProject) {
+        const expectations = observed.roomProjectExpectations ||= [];
+        if (expectations.length >= 512) return json(res, 429, { code: 'QA_TRACE_LIMIT', error: 'Bounded room-project expectation trace is full' });
+        expectations.push({ clientThreadId: body.clientThreadId, expectedRoomProject, result: null, contract: 'fixture-owned-no-project' });
+      }
       if (claudeFixture) {
         if (body.engineId !== 'claude' || body.profileEnabled !== false) return json(res, 409, {
           code: 'ENGINE_UNAVAILABLE', error: 'This isolated fixture only accepts ordinary Claude turns; Codex is offline' });
