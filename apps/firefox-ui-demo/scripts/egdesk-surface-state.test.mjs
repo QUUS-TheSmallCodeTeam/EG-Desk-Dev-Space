@@ -4146,7 +4146,7 @@ test('Chat pending scroll intent preserves the rendered viewport across SSE rere
     cleanup,
     '};',
     'return { render, gesture: onMessageScrollGesture, cleanup };',
-  ].join('\n'), ['body', 'document', 'Element', 'requestAnimationFrame', 'window']);
+  ].join('\n'), ['body', 'document', 'Element', 'requestAnimationFrame', 'window', 'codexBridge']);
 
   const harness = (initial = new ChatScrollLog({ last: '', height: 100, rows: [] })) => {
     const frames = [], removed = [];
@@ -4159,7 +4159,7 @@ test('Chat pending scroll intent preserves the rendered viewport across SSE rere
     const api = bind(body,
       { activeElement: null, removeEventListener(type) { removed.push('document:' + type); } },
       ChatScrollElement, callback => frames.push(callback),
-      { removeEventListener(type) { removed.push('window:' + type); } });
+      { removeEventListener(type) { removed.push('window:' + type); } }, { clearTaskAnswers: () => productionTaskAnswerFactory()(() => ({}), Chat.createChatEpochScope()).dispose() });
     return {
       render: api.render,
       gesture: event => api.gesture({ target: body.log, ...event }),
@@ -8042,8 +8042,8 @@ test('await task list: the bridge keeps the list from task frames, reads the Boa
   };
   const graphs = [];
   let emits = 0;
-  const api = compileFunction(`${surfaceSource.slice(start, end)}\nreturn { taskGraphFrame, taskPlanFrame, readTaskGraphs, methods: {\n${surfaceSource.slice(methodsStart, methodsEnd)}\n} };`,
-    ['state', 'ChatState', 'fetchJson', 'browserWorkflow', 'emit'])(state, Chat, fetchJson, { graph: graph => graphs.push(graph?.graphId ?? null) }, () => { emits++; });
+  const api = compileFunction(`let taskAnswers = null;\n${surfaceSource.slice(start, end)}\nreturn { taskGraphFrame, taskPlanFrame, readTaskGraphs, methods: {\n${surfaceSource.slice(methodsStart, methodsEnd)}\n} };`,
+    ['state', 'ChatState', 'fetchJson', 'browserWorkflow', 'emit', 'createChatTaskAnswers', 'epochScope'])(state, Chat, fetchJson, { graph: graph => graphs.push(graph?.graphId ?? null) }, () => { emits++; }, productionTaskAnswerFactory(), Chat.createChatEpochScope());
   const settle = () => new Promise(resolve => setTimeout(resolve, 0));
 
   replies.push(awaitState());
@@ -8263,17 +8263,20 @@ function awaitBridge() {
   const requests = [];
   const replies = [];
   const graphs = [];
+  const epochScope = Chat.createChatEpochScope(), signals = [];
+  let emits = 0;
   const state = { codex: { taskBoard: Chat.createTaskBoard(), taskBoardOpen: false, taskContinue: null, taskApproval: null, taskResume: null,
     planProposals: Chat.createPlanProposals() } };
   const fetchJson = async (path, options = {}) => {
     requests.push([path, options.method || 'GET', options.body ? JSON.parse(options.body) : null]);
+    signals.push(options.signal);
     const reply = replies.shift();
     if (reply instanceof Error) throw reply;
     return typeof reply === 'function' ? reply() : reply;
   };
-  const api = compileFunction(`${surfaceSource.slice(start, end)}\nreturn { taskGraphFrame, taskPlanFrame, planProposalFrame, loadTaskPlans, readTaskGraphs, methods: {\n${surfaceSource.slice(methodsStart, methodsEnd)}\n} };`,
-    ['state', 'ChatState', 'fetchJson', 'browserWorkflow', 'emit'])(state, Chat, fetchJson, { graph: graph => graphs.push(graph?.graphId ?? null) }, () => {});
-  return { api, requests, replies, graphs, state, settle: () => new Promise(resolve => setTimeout(resolve, 0)) };
+  const api = compileFunction(`let taskAnswers = null;\n${surfaceSource.slice(start, end)}\nreturn { taskGraphFrame, taskPlanFrame, planProposalFrame, loadTaskPlans, readTaskGraphs, methods: {\n${surfaceSource.slice(methodsStart, methodsEnd)}\n} };`,
+    ['state', 'ChatState', 'fetchJson', 'browserWorkflow', 'emit', 'createChatTaskAnswers', 'epochScope'])(state, Chat, fetchJson, { graph: graph => graphs.push(graph?.graphId ?? null) }, () => { emits++; }, productionTaskAnswerFactory(), epochScope);
+  return { api, requests, replies, graphs, state, epochScope, signals, emits: () => emits, settle: () => new Promise(resolve => setTimeout(resolve, 0)) };
 }
 const refusal = (status, code) => Object.assign(new Error('Task request could not be completed'), { status, code });
 
@@ -8524,6 +8527,97 @@ test('await plan card: the bridge places the card, approves only after the confi
 
   assert.match(surfaceSource, /            \/\/ CHAT-06 Await: an Agent proposed a plan; its approval card goes under this run's answer\.\n            if \(run && event\.event === 'plan\.proposed'\) planProposalFrame\(run, event\.details\);\n            if \(run\) \{ syncProtocolRun\(run\); emit\(\); \}/);
   assert.match(surfaceSource, /state\.codex\.taskResume = null;\n        state\.codex\.planProposals = ChatState\.createPlanProposals\(\);/, 'plans belong to the account that saw them');
+});
+
+test('await plan bootstrap: late prior-account success/error changes no state and starts no graph read', async t => {
+  for (const reset of ['account', 'epoch', 'both']) for (const failed of [false, true]) await t.test(`${reset}/${failed ? 'error' : 'success'}`, async () => {
+    const h = awaitBridge();
+    Object.assign(h.state.codex, { codexAccountKey: 'account-a', authStatus: { isLoggedIn: true, accountEmail: 'a@example.test' } });
+    let resolve, reject;
+    h.replies.push(() => new Promise((yes, no) => { resolve = yes; reject = no; }));
+    const pending = h.api.loadTaskPlans();
+    assert.ok(h.signals[0] instanceof AbortSignal);
+    if (reset !== 'epoch') Object.assign(h.state.codex, { codexAccountKey: 'account-b', authStatus: { isLoggedIn: true, accountEmail: 'b@example.test' } });
+    if (reset !== 'account') h.epochScope.reset('codex');
+    h.state.codex.taskBoard = Chat.createTaskBoard();
+    h.state.codex.planProposals = Chat.planProposalsWithPlan(Chat.createPlanProposals(), planRow({ planId: 'current-account-plan', title: '현재 계정의 계획' }));
+    const before = JSON.stringify(h.state.codex), emits = h.emits();
+    if (failed) reject(refusal(401, 'LOGIN_REQUIRED'));
+    else resolve({ plans: [planRow({ status: 'approved', title: '이전 계정의 계획' })] });
+    await pending; await h.settle();
+    assert.equal(JSON.stringify(h.state.codex), before); assert.equal(h.emits(), emits);
+    assert.deepEqual(h.requests, [['/tasks/plans', 'GET', null]]); assert.deepEqual(h.graphs, []);
+    assert.equal(h.signals[0].aborted, true);
+  });
+});
+
+test('await plan bootstrap: same account room changes retain account-wide restoration without automatic decisions', async () => {
+  const h = awaitBridge();
+  Object.assign(h.state.codex, { codexAccountKey: 'account-a', authStatus: { isLoggedIn: true, accountEmail: 'a@example.test' },
+    threads: [{ id: 'room-a', engineId: 'codex', clientBindingId: 'binding-a' }], activeThreadId: 'room-a' });
+  let resolve; h.replies.push(() => new Promise(done => { resolve = done; }));
+  const pending = h.api.loadTaskPlans();
+  h.state.codex.threads.push({ id: 'room-b', engineId: 'codex', clientBindingId: 'binding-b' }); h.state.codex.activeThreadId = 'room-b';
+  h.replies.push(planDecision()); resolve({ plans: [planRow({ status: 'approved' })] });
+  await pending; await h.settle();
+  assert.equal(Chat.planProposalEntry(h.state.codex.planProposals, 'plan-1').status, 'approved');
+  assert.deepEqual(h.requests.map(([path, method]) => [path, method]), [['/tasks/plans', 'GET'], ['/tasks/state?graphId=graph-plan-1', 'GET']]);
+});
+
+test('await plan detail: late prior-account success/missing/error cannot change current plans or emit followups', async t => {
+  for (const reset of ['account', 'epoch', 'both']) for (const outcome of ['success', 'missing', 'error']) await t.test(`${reset}/${outcome}`, async () => {
+    const h = awaitBridge();
+    Object.assign(h.state.codex, { codexAccountKey: 'account-a', authStatus: { isLoggedIn: true, accountEmail: 'a@example.test' } });
+    h.api.taskPlanFrame(planRow());
+    let resolve, reject; h.replies.push(() => new Promise((yes, no) => { resolve = yes; reject = no; }));
+    h.api.methods.togglePlanStep('plan-1', 'collect');
+    assert.equal(Chat.planProposalEntry(h.state.codex.planProposals, 'plan-1').detail, 'loading');
+    if (reset !== 'epoch') Object.assign(h.state.codex, { codexAccountKey: 'account-b', authStatus: { isLoggedIn: true, accountEmail: 'b@example.test' } });
+    if (reset !== 'account') h.epochScope.reset('codex');
+    h.state.codex.planProposals = Chat.planProposalsWithPlan(Chat.createPlanProposals(), planRow({ title: '현재 계정의 계획' }));
+    h.state.codex.taskBoard = Chat.createTaskBoard();
+    const before = JSON.stringify(h.state.codex), emits = h.emits();
+    if (outcome === 'success') resolve({ plan: planRow({ title: '이전 계정의 지침', tasks: planRow().tasks.map(task => ({ ...task, instructions: '이전 계정의 내용' })) }) });
+    else reject(refusal(outcome === 'missing' ? 404 : 500, outcome === 'missing' ? 'PLAN_NOT_FOUND' : 'PLAN_ERROR'));
+    await settle();
+    assert.equal(JSON.stringify(h.state.codex), before); assert.equal(h.emits(), emits);
+    assert.deepEqual(h.requests, [['/tasks/plans?planId=plan-1', 'GET', null]]); assert.deepEqual(h.graphs, []);
+    assert.equal(h.signals[0].aborted, true);
+  });
+});
+
+test('await plan detail: same account room changes keep the original read and instructions; duplicates still join', async () => {
+  const h = awaitBridge();
+  Object.assign(h.state.codex, { codexAccountKey: 'account-a', authStatus: { isLoggedIn: true, accountEmail: 'a@example.test' },
+    threads: [{ id: 'room-a', engineId: 'codex', clientBindingId: 'binding-a' }], activeThreadId: 'room-a' });
+  h.api.taskPlanFrame(planRow());
+  let resolve; h.replies.push(() => new Promise(done => { resolve = done; }));
+  h.api.methods.togglePlanStep('plan-1', 'collect');
+  h.state.codex.threads.push({ id: 'room-b', engineId: 'codex', clientBindingId: 'binding-b' }); h.state.codex.activeThreadId = 'room-b';
+  h.api.methods.retryPlanDetail('plan-1'); assert.equal(h.requests.length, 1);
+  resolve({ plan: planRow({ tasks: planRow().tasks.map(task => ({ ...task, instructions: '같은 계정의 원래 계획 지침' })) }) }); await settle();
+  const entry = Chat.planProposalEntry(h.state.codex.planProposals, 'plan-1');
+  assert.equal(entry.detail, 'loaded'); assert.equal(Chat.planProposalView(entry).steps[0].instructions.text, '같은 계정의 원래 계획 지침');
+  assert.deepEqual(h.requests, [['/tasks/plans?planId=plan-1', 'GET', null]]);
+});
+
+test('await plan detail: new account does not join old read; old success/error/finally cannot remove the new pending read', async t => {
+  for (const failed of [false, true]) await t.test(failed ? 'error' : 'success', async () => {
+    const h = awaitBridge(); h.state.codex.codexAccountKey = 'account-a'; h.api.taskPlanFrame(planRow());
+    let oldResolve, oldReject, newResolve;
+    h.replies.push(() => new Promise((yes, no) => { oldResolve = yes; oldReject = no; })); h.api.methods.retryPlanDetail('plan-1');
+    h.state.codex.codexAccountKey = 'account-b'; h.state.codex.planProposals = Chat.planProposalsWithPlan(Chat.createPlanProposals(), planRow({ title: '새 계정' }));
+    h.replies.push(() => new Promise(done => { newResolve = done; })); h.api.methods.retryPlanDetail('plan-1');
+    assert.equal(h.requests.length, 2); assert.equal(h.signals[0].aborted, true);
+    const before = JSON.stringify(h.state.codex), emits = h.emits();
+    if (failed) oldReject(refusal(404, 'PLAN_NOT_FOUND')); else oldResolve({ plan: planRow({ title: '이전 계정' }) });
+    await settle(); assert.equal(JSON.stringify(h.state.codex), before); assert.equal(h.emits(), emits);
+    h.api.methods.retryPlanDetail('plan-1'); assert.equal(h.requests.length, 2, 'late cleanup cannot discard the current deduplication entry');
+    newResolve({ plan: planRow({ title: '새 계정', tasks: planRow().tasks.map(task => ({ ...task, instructions: '현재 지침' })) }) }); await settle();
+    assert.equal(Chat.planProposalEntry(h.state.codex.planProposals, 'plan-1').detail, 'loaded');
+    assert.equal(Chat.planProposalEntry(h.state.codex.planProposals, 'plan-1').title, '새 계정');
+    assert.equal(h.requests.filter(([, method]) => method === 'POST').length, 0);
+  });
 });
 
 test('await plan card: the card lists the steps, asks once before approving, and hands over to the task list', () => {
@@ -11744,7 +11838,7 @@ function requestProjectUiHarness({ target, read, roomRead, roomSave, resizeObser
   Object.assign(deps, api);
   const emitSource = surfaceSource.match(/    const emit = \(\) => \{([\s\S]*?)\n    \};/)?.[1];
   assert.ok(emitSource);
-  const emitDeps = { document, state, normalizeThreads() {}, listeners: [], renderCodexActivityPanel() {}, scheduleDeskSessionSave() {} };
+  const emitDeps = { document, state, taskAnswers: productionTaskAnswerFactory()(() => state.codex, epochScope), normalizeThreads() {}, listeners: [], renderCodexActivityPanel() {}, scheduleDeskSessionSave() {} };
   deps.emit = compileFunction('return () => {' + emitSource + '\n};', Object.keys(emitDeps))(...Object.values(emitDeps));
   const bridge = Object.fromEntries(['createProjectScope', 'readRequestProject', 'setRequestProjectTarget', 'ensureRoomProjectDefault', 'readRoomProjectDefault',
     'refreshRoomProjectDefault', 'invalidateRoomProjectDefaults', 'prepareRoomProjectSend', 'selectThread', 'saveRoomProjectDefault', 'clearRequestProjectTarget'].map(name => [name, requestProjectBridgeMethod(name, deps)]));
@@ -13191,6 +13285,26 @@ test('saved Board canvas glue: absent stored head requires Save; failure does no
   }
 });
 
+test('saved Board canvas glue: cancelled export never claims attachment names were included; successful loss policy stays visible', async () => {
+  for (const cancelled of [true, false]) {
+    const h = boardCanvasGlueHarness();
+    h.packet.canvas.nodes.push({ id: 'capture-one', egdesk: { omitted: 'attachment' } }); h.packet.report.nodes = 1;
+    const pending = h.session.start(); await settle();
+    h.native.pickers[0].answer(cancelled ? 1 : 0, '/chosen/report.canvas'); await pending;
+    const copy = h.part('board-canvas-export').textContent;
+    assert.match(copy, /미저장 변경은 포함하지/);
+    assert.match(copy, /모든 Board 기능이 그대로 이동하지는 않습니다/);
+    assert.match(h.part('board-canvas-omitted').textContent, /원본 제외/);
+    if (cancelled) {
+      assert.match(copy, /취소했습니다.*파일을 쓰지 않았습니다/);
+      assert.doesNotMatch(copy, /이름만 포함했습니다/); assert.equal(h.native.io.length, 0);
+    } else {
+      assert.match(copy, /첨부·캡처 1개의 원본은 제외하고 이름만 포함했습니다/);
+      assert.equal(h.native.io.filter(row => row[0] === 'write').length, 1);
+    }
+  }
+});
+
 test('saved Board canvas glue: head change, destroyed view and close during lookup fence late work', async () => {
   for (const change of [h => { h.store.head++; }, h => h.region._disposeBoardCanvasExport()]) {
     const h = boardCanvasGlueHarness(), pending = h.session.start(); await settle();
@@ -13222,8 +13336,19 @@ function profileTransferBridgeMethods(fetchJson, epochScope) {
   return compileFunction(`return { ${method('async profileRequest(')}, ${method('createProfileTransferScope(')} };`, ['fetchJson', 'epochScope'])(fetchJson, epochScope);
 }
 
-function portableSettingsHarness({ respond } = {}) {
+function portableSettingsHarness({ respond, fullscreen = false } = {}) {
   const document = settingsFakeDocument(), native = nativeTextGlueHarness(), calls = [], listeners = new Set();
+  if (fullscreen) {
+    const decorate = node => {
+      Object.defineProperty(node, 'id', { get: () => node.getAttribute('id') });
+      const names = () => node.className.split(/\s+/).filter(Boolean);
+      node.classList = { contains: name => names().includes(name),
+        add: (...values) => { node.className = [...new Set([...names(), ...values])].join(' '); },
+        remove: (...values) => { node.className = names().filter(name => !values.includes(name)).join(' '); } };
+      node.click = () => node.fire('click'); return node;
+    };
+    const create = document.createElement; document.createElement = tag => decorate(create(tag)); decorate(document.documentElement);
+  }
   const epoch = Chat.createChatEpochScope(), state = { codex: { connected: true, codexAccountKey: 'account-a', authStatus: { isLoggedIn: true, accountEmail: 'a@example.test' } } };
   const body = normalizeProfileBody({ name: '보이는 Agent', role: '검토', instructions: 'Visible revision instructions.' });
   const detail = { id: 'visible-agent', lifecycle: 'active', activeRevision: 2, headRevision: 3, hasDraft: true,
@@ -13254,6 +13379,16 @@ function portableSettingsHarness({ respond } = {}) {
     resolveCanvasCardPlacement: () => ({ x: 0, y: 0, width: 600, height: 600 }), revealPlacedCanvasCard() {}, el, cardZ: 0, closeCanvasCard() {}, state, ChatState: Chat,
     codexProfileAvatar, document, window: { setTimeout: () => 0, confirm: () => false }, bindCardSourceRef() {}, markAgendaDirty() {}, setActiveEntity() {},
     isCardFullscreen: () => false, focusCanvasCard() {}, installCardHeaderFullscreenToggle() {}, canvasZoom: () => 1, ...settingsTransferDeps(document, state, native.adapter) };
+  if (fullscreen) {
+    Object.assign(state, { cardFullscreen: null, surface: { initialBrowserFocus: false }, pan: { x: 0, y: 0 } });
+    const fullDeps = { state, document, cardZ: 0, canvasZoom: () => 1,
+      safeViewportRect: () => ({ left: 10, top: 10, width: 980, height: 680 }),
+      setActiveEntity: card => { state.activeEntityId = card?.id; }, syncViewportAgendaRail() {}, syncHudViewportFit() {},
+      closeDeskMinimap() {}, toggleDeskMinimap() {}, scheduleDeskSessionSave() {} };
+    const source = ['isCardFullscreen', 'getCardRect', 'applyCardRect', 'setHudPresentationHidden', 'syncCardFullscreenLayout',
+      'enterCardFullscreen', 'exitCardFullscreen', 'toggleCardFullscreen'].map(declaration).join('\n');
+    Object.assign(deps, compileFunction(`${source}\nreturn { isCardFullscreen, toggleCardFullscreen };`, Object.keys(fullDeps))(...Object.values(fullDeps)));
+  }
   const spawn = compileFunction(`${declaration('spawnSettingsCard')}\nreturn spawnSettingsCard;`, Object.keys(deps))(...Object.values(deps));
   const card = spawn({ tab: 'agents', profileId: detail.id });
   const part = id => settingsNodes(card, node => node.dataset.testid === id)[0];
@@ -13264,8 +13399,32 @@ function portableSettingsHarness({ respond } = {}) {
     part('settings-agent-import').fire('click'); native.pickers.at(-1).answer(0, '/chosen/reviewer.md'); await settle();
     return text;
   };
-  return { card, state, detail, calls, native, part, emit, epoch, pickImport, refreshes: () => refreshes };
+  return { card, state, detail, calls, native, part, emit, epoch, document, pickImport, refreshes: () => refreshes };
 }
+
+test('Settings green control: click, Enter and Space use actual shared fullscreen geometry and restore only this card', () => {
+  const h = portableSettingsHarness({ fullscreen: true });
+  const control = settingsNodes(h.card, node => node.className.split(' ').includes('egd-card-dot-max'))[0];
+  const other = h.document.createElement('div'); other.setAttribute('id', 'another-card');
+  Object.assign(other.style, { left: '80px', top: '90px', width: '300px', height: '240px' });
+  h.document.documentElement.appendChild(other);
+  const original = { ...h.card.style }, untouched = { ...other.style };
+  assert.equal(control.getAttribute('role'), 'button'); assert.equal(control.getAttribute('tabindex'), '0');
+  assert.match(control.getAttribute('aria-label'), /최대화.*복원/);
+  for (const key of [null, 'Enter', ' ']) {
+    let prevented = 0;
+    const activate = () => key === null ? control.fire('click') : control.fire('keydown', { key, preventDefault() { prevented++; } });
+    activate();
+    assert.equal(h.state.cardFullscreen.cardId, h.card.id); assert.equal(h.state.activeEntityId, h.card.id);
+    assert.equal(h.card.classList.contains('egd-card-fullscreen'), true);
+    assert.deepEqual([h.card.style.left, h.card.style.top, h.card.style.width, h.card.style.height], ['10px', '10px', '980px', '680px']);
+    assert.equal(other.classList.contains('egd-card-fullscreen'), false); assert.deepEqual(other.style, untouched);
+    activate(); assert.equal(h.state.cardFullscreen, null); assert.equal(h.card.classList.contains('egd-card-fullscreen'), false);
+    assert.deepEqual(h.card.style, original); assert.deepEqual(other.style, untouched);
+    assert.equal(prevented, key === null ? 0 : 2);
+  }
+  control.fire('keydown', { key: 'ArrowDown' }); assert.equal(h.state.cardFullscreen, null);
+});
 
 test('Settings portable glue: initial actions, visible active revision not hidden head, real save gate and omitted notes', async () => {
   const h = portableSettingsHarness(); await settle();
@@ -13409,4 +13568,233 @@ test('Settings portable glue: saved draft is named as a draft, and unsaved form 
   assert.equal(h.part('settings-agent-transfer'), undefined, 'editing is not an exportable saved revision');
   h.emit(); assert.equal(h.part('settings-agent-form'), form, 'account/catalog notifications do not redraw the edit form');
   assert.equal(h.calls.filter(call => call.path.includes('/export?')).length, 0);
+});
+
+function productionTaskAnswerFactory() {
+  return compileFunction(`${declaration('createChatTaskAnswers')}\nreturn createChatTaskAnswers;`, ['ChatState'])(Chat);
+}
+
+function taskQuestionGraph({ response = { kind: 'choice', options: [{ id: 'email', label: '메일로 보내기' }, { id: 'hold', label: '잠시 보관하기' }] },
+  label = '어떤 방법으로 전달할까요?', status = 'waiting', graphId = 'graph-a', gateId = 'question', taskStatus = 'waiting-on-dependency' } = {}) {
+  return awaitGraph({ graphId, tasks: [{ taskId: 'answer-task', status: taskStatus,
+    gates: [{ gateId, kind: 'userAction', status, label, response }, { gateId: 'later-file', kind: 'file', root: 'root-1', relativeGlob: '*.pdf', status: 'waiting' }] }] });
+}
+
+function taskQuestionHarness(graph = taskQuestionGraph(), { boardKnown = true } = {}) {
+  const document = settingsFakeDocument(), root = document.createElement('section'); document.documentElement.appendChild(root);
+  const epochScope = Chat.createChatEpochScope(), requests = [], replies = [], graphReceipts = [];
+  const thread = { id: 'room-a', clientBindingId: 'binding-a', engineId: 'codex', type: 'dm', profileEnabled: false, messages: [] };
+  const state = { codex: { threads: [thread], activeThreadId: thread.id, codexAccountKey: 'account-a', authStatus: { isLoggedIn: true, accountEmail: 'a@example.test' },
+    taskBoard: boardKnown ? Chat.taskBoardWithState(Chat.createTaskBoard(), awaitState(graph)) : Chat.taskBoardWithGraph(Chat.createTaskBoard(), graph),
+    taskBoardOpen: true, taskContinue: null, taskApproval: null, taskResume: null, planProposals: Chat.createPlanProposals() } };
+  const el = compileFunction(`${declaration('el')}\nreturn el;`, ['document'])(document);
+  const renderer = compileFunction(`${declaration('renderChatTaskQuestion')}\n${declaration('renderChatTaskBoard')}\nreturn renderChatTaskBoard;`,
+    ['ChatState', 'el', 'deskIcon'])(Chat, el, () => document.createElement('svg'));
+  let api;
+  const draw = () => { root.replaceChildren(renderer(state.codex, api.methods, () => '연결된 폴더')); };
+  const start = surfaceSource.indexOf('    const taskStateReads = new Map();'), end = surfaceSource.indexOf('    const handleEvent = (event) => {', start);
+  const methodsStart = surfaceSource.indexOf('      toggleTaskBoard() {'), methodsEnd = surfaceSource.indexOf("      // '다시 시도' after the quiet retries ran out", methodsStart);
+  const emitBody = surfaceSource.match(/    const emit = \(\) => \{([\s\S]*?)\n    \};/)?.[1];
+  const deps = { state, ChatState: Chat, epochScope, createChatTaskAnswers: productionTaskAnswerFactory(), document,
+    normalizeThreads() {}, listeners: [() => { if (api) draw(); }], renderCodexActivityPanel() {}, scheduleDeskSessionSave() {},
+    browserWorkflow: { graph: value => graphReceipts.push(value) },
+    fetchJson: async (path, options = {}) => {
+      requests.push({ path, method: options.method || 'GET', body: options.body && JSON.parse(options.body), signal: options.signal });
+      const answer = replies.shift();
+      if (answer instanceof Error) throw answer;
+      return typeof answer === 'function' ? answer(path, options) : answer;
+    } };
+  api = compileFunction(`let taskAnswers = null;\nconst emit = () => {${emitBody}\n};\n${surfaceSource.slice(start, end)}\nreturn { emit, taskGraphFrame, readTaskGraphs, methods: {\n${surfaceSource.slice(methodsStart, methodsEnd)}\n} };`, Object.keys(deps))(...Object.values(deps));
+  draw();
+  const parts = id => settingsNodes(root, node => node.dataset.testid === id);
+  const part = id => parts(id)[0];
+  const question = () => part('chat-task-condition');
+  const draft = () => api.methods.taskAnswerDraft(graph.graphId, 'answer-task', graph.tasks[0].gates[0].gateId,
+    Chat.taskGateView(Chat.taskBoardEntry(state.codex.taskBoard, graph.graphId).graph.tasks[0].gates[0]).responseKey);
+  const type = value => { const input = part('chat-task-answer-text'); input.value = value; input.fire('input'); return input; };
+  const choose = id => { const input = parts('chat-task-answer-choice').find(node => node.dataset.choiceId === id); input.checked = true; input.fire('change'); return input; };
+  return { api, state, thread, root, document, epochScope, requests, replies, graphReceipts, draw, parts, part, question, draft, type, choose,
+    post: () => requests.filter(request => request.method === 'POST'), frame: next => api.taskGraphFrame(next) };
+}
+
+test('Task question UI: full question first, native choices/selection/Enter do not submit; explicit 계속 sends original scoped answer', async () => {
+  const h = taskQuestionHarness(), row = h.question();
+  assert.equal(row.children[0].dataset.testid, 'chat-task-question'); assert.equal(row.children[0].textContent, '어떤 방법으로 전달할까요?');
+  assert.deepEqual([row.dataset.graphId, row.dataset.taskId, row.dataset.gateId], ['graph-a', 'answer-task', 'question']);
+  assert.equal(row.dataset.responseKey, h.draft().responseKey);
+  const input = h.choose('email'); assert.equal(input.getAttribute('type'), 'radio');
+  input.fire('keydown', { key: 'Enter' }); assert.equal(h.post().length, 0);
+  assert.match(h.part('chat-task-answer-next').textContent, /답변만 전달.*다른 대기 항목/);
+  h.replies.push(awaitState(taskQuestionGraph({ status: 'satisfied' })));
+  h.part('chat-task-answer-continue').fire('click'); await settle();
+  assert.equal(h.post().length, 1);
+  assert.deepEqual(h.post()[0].body, { boardId: 'board-a', scope: awaitScope, taskId: 'answer-task', gateId: 'question', answer: { choice: 'email' } });
+  assert.ok(h.post()[0].signal instanceof AbortSignal);
+  assert.equal(h.part('chat-task-answer-continue'), undefined);
+  assert.match(h.question().textContent, /답변을 전달했습니다.*작업이 완료되었다는 뜻은 아닙니다/);
+  assert.equal(Chat.taskBoardEntry(h.state.codex.taskBoard, 'graph-a').graph.tasks[0].status, 'waiting-on-dependency');
+});
+
+test('Task question UI: text/Enter never posts, NFC code-point limit is visible, over-limit is retained not truncated', async () => {
+  const h = taskQuestionHarness(taskQuestionGraph({ response: { kind: 'text', maxLength: 2 } }));
+  let input = h.type('  e\u0301😀  '); input.fire('keydown', { key: 'Enter', metaKey: true });
+  assert.equal(h.post().length, 0); assert.equal(input.getAttribute('maxlength'), null);
+  assert.equal(h.part('chat-task-answer-limit').dataset.maxLength, '2'); assert.equal(h.part('chat-task-answer-limit').dataset.codePoints, '2');
+  h.type('😀😀😀'); h.part('chat-task-answer-continue').fire('click'); await settle();
+  assert.equal(h.post().length, 0); assert.equal(h.part('chat-task-answer-text').value, '😀😀😀');
+  assert.match(h.part('chat-task-error').textContent, /글자 수 제한/);
+  h.type('  e\u0301😀  '); h.replies.push(awaitState(taskQuestionGraph({ response: { kind: 'text', maxLength: 2 }, status: 'satisfied' })));
+  h.part('chat-task-answer-continue').fire('click'); await settle();
+  assert.deepEqual(h.post()[0].body.answer, { text: 'é😀' });
+});
+
+test('Task question UI: missing choice/text refuses without POST and malformed descriptors never become legacy Continue', async () => {
+  for (const response of [{ kind: 'text' }, { kind: 'choice', options: [{ id: 'a', label: 'A' }, { id: 'b', label: 'B' }] }]) {
+    const h = taskQuestionHarness(taskQuestionGraph({ response })); h.part('chat-task-answer-continue').fire('click'); await settle();
+    assert.equal(h.post().length, 0); assert.match(h.part('chat-task-error').textContent, /답변을 확인/);
+  }
+  for (const status of ['waiting', 'satisfied']) {
+    const h = taskQuestionHarness(taskQuestionGraph({ response: { kind: 'choice', options: [] }, status }));
+    assert.equal(h.part('chat-task-answer-continue'), undefined);
+    assert.equal(settingsNodes(h.question(), node => node.dataset?.testid === 'chat-task-continue').length, 0);
+    assert.ok(h.part('chat-task-continue'), 'the unrelated legacy file condition keeps its existing Continue');
+    assert.match(h.part('chat-task-error').textContent, /질문 내용을 확인하지/);
+    assert.doesNotMatch(h.question().textContent, /답변을 전달했습니다/); assert.equal(h.post().length, 0);
+  }
+});
+
+test('Task question UI: same-question SSE keeps typed answer and identity; stale detached control cannot send', async () => {
+  const graph = taskQuestionGraph({ response: { kind: 'text', maxLength: 50 } }), h = taskQuestionHarness(graph);
+  const input = h.type('PRIVATE_DRAFT'), oldContinue = h.part('chat-task-answer-continue'), original = h.draft();
+  input.selectionStart = 3; input.selectionEnd = 7;
+  const snapshot = compileFunction(`${declaration('chatFocusSnapshot')}\nreturn chatFocusSnapshot;`, ['document'])(h.document)(h.root, input);
+  h.frame(structuredClone(graph));
+  assert.equal(h.draft(), original); assert.equal(h.part('chat-task-answer-text').value, 'PRIVATE_DRAFT');
+  assert.equal(h.part('chat-task-answer-text').dataset.focusKey, snapshot.key);
+  const replacement = h.part('chat-task-answer-text');
+  h.root.querySelectorAll = () => settingsNodes(h.root, node => !!node.dataset.focusKey);
+  replacement.setSelectionRange = (start, end, direction) => { Object.assign(replacement, { selectionStart: start, selectionEnd: end, selectionDirection: direction }); };
+  const restore = compileFunction(`${declaration('restoreChatFocus')}\nreturn restoreChatFocus;`, [])();
+  assert.equal(restore(h.root, snapshot), true); assert.equal(h.document.activeElement, replacement);
+  assert.deepEqual([replacement.selectionStart, replacement.selectionEnd], [3, 7]);
+  oldContinue.fire('click'); assert.equal(h.post().length, 0, 'detached old render is inert');
+  assert.equal(JSON.stringify(h.state.codex).includes('PRIVATE_DRAFT'), false, 'answer is not in persistable Chat/Board state');
+});
+
+test('Task question UI: failures retain the same answer, Cancel clears only local input and creates no request', async () => {
+  const graph = taskQuestionGraph({ response: { kind: 'text' } }), h = taskQuestionHarness(graph);
+  h.type('PRIVATE_DRAFT'); h.replies.push(refusal(400, 'TASK_GATE_ANSWER_PRIVATE'));
+  h.part('chat-task-answer-continue').fire('click'); await settle();
+  assert.equal(h.part('chat-task-answer-text').value, 'PRIVATE_DRAFT'); assert.match(h.part('chat-task-error').textContent, /비밀번호·키·인증번호/);
+  h.frame(structuredClone(graph)); assert.equal(h.part('chat-task-answer-text').value, 'PRIVATE_DRAFT');
+  assert.equal(JSON.stringify(h.state.codex).includes('PRIVATE_DRAFT'), false);
+  h.type('corrected answer'); h.frame(structuredClone(graph));
+  assert.equal(h.part('chat-task-answer-text').value, 'corrected answer'); assert.equal(h.part('chat-task-error').textContent, '');
+  const calls = h.requests.length; h.part('chat-task-answer-cancel').fire('click');
+  assert.equal(h.part('chat-task-answer-text').value, ''); assert.equal(h.requests.length, calls); assert.equal(h.state.codex.taskContinue, null);
+});
+
+test('Task question UI: duplicate Continue is locked; edits and Cancel cannot retarget an in-flight answer', async () => {
+  const h = taskQuestionHarness(); h.choose('email'); const original = h.draft();
+  let resolve; h.replies.push(() => new Promise(done => { resolve = done; }));
+  h.part('chat-task-answer-continue').fire('click');
+  h.part('chat-task-answer-continue').fire('click'); h.choose('hold'); h.part('chat-task-answer-cancel').fire('click');
+  assert.equal(h.post().length, 1); assert.deepEqual(original.answer, { choice: 'email' });
+  assert.equal(h.state.codex.taskContinue.responseKey, original.responseKey);
+  assert.equal(h.part('chat-task-answer-continue').getAttribute('aria-disabled'), 'true');
+  resolve(awaitState(taskQuestionGraph({ status: 'satisfied' }))); await settle(); assert.equal(h.post().length, 1);
+});
+
+test('Task question UI: identity changes clear draft and announce; account/room/engine/profile/epoch callbacks stay fenced', async t => {
+  const graph = taskQuestionGraph({ response: { kind: 'text', maxLength: 50 } });
+  const cases = {
+    question: h => h.frame(taskQuestionGraph({ label: '새 질문입니다', response: { kind: 'text', maxLength: 50 } })),
+    schema: h => h.frame(taskQuestionGraph({ response: { kind: 'text', maxLength: 40 } })),
+    account: h => { h.state.codex.codexAccountKey = 'account-b'; h.api.emit(); },
+    room: h => { h.state.codex.threads.push({ ...h.thread, id: 'room-b', clientBindingId: 'binding-b' }); h.state.codex.activeThreadId = 'room-b'; h.api.emit(); },
+    binding: h => { h.thread.clientBindingId = 'binding-next'; h.api.emit(); },
+    engine: h => { h.thread.engineId = 'claude'; h.thread.engineProfileId = 'claude-slot'; h.api.emit(); },
+    profile: h => { h.thread.engineProfileId = 'codex-slot'; h.api.emit(); },
+    epoch: h => { h.epochScope.reset('codex'); h.api.emit(); },
+  };
+  for (const [name, change] of Object.entries(cases)) await t.test(name, async () => {
+    const h = taskQuestionHarness(graph); h.type('PRIVATE_OLD'); const original = h.draft(), oldContinue = h.part('chat-task-answer-continue');
+    let resolve; h.replies.push(() => new Promise(done => { resolve = done; })); oldContinue.fire('click');
+    change(h); assert.equal(original.answer, null);
+    assert.match(h.part('chat-task-answer-changed').textContent, /바뀌어 이전 답변을 지웠습니다/);
+    assert.equal(h.part('chat-task-answer-text').value, '');
+    resolve(awaitState(taskQuestionGraph({ response: { kind: 'text', maxLength: 50 }, status: 'satisfied' }))); await settle();
+    assert.equal(h.part('chat-task-answer-text').value, ''); assert.doesNotMatch(h.question().textContent, /답변을 전달했습니다/);
+    oldContinue.fire('click'); assert.equal(h.post().length, 1);
+  });
+});
+
+test('Task question UI: question changes during original Board read stop before POST and do not transfer old answer', async () => {
+  const graph = taskQuestionGraph({ response: { kind: 'text' } }), h = taskQuestionHarness(graph, { boardKnown: false });
+  h.type('original answer'); let resolve; h.replies.push(() => new Promise(done => { resolve = done; }));
+  h.part('chat-task-answer-continue').fire('click'); assert.equal(h.requests[0].path, '/tasks/state?graphId=graph-a');
+  const next = taskQuestionGraph({ label: '다른 질문', response: { kind: 'text' } });
+  h.frame(next); resolve(awaitState(graph)); await settle();
+  assert.equal(h.post().length, 0); assert.equal(h.part('chat-task-question').textContent, '다른 질문');
+  assert.equal(h.part('chat-task-answer-text').value, '');
+});
+
+test('Task question UI: pending original state reads cannot publish after account/room/epoch/view changes', async t => {
+  const cases = {
+    account: h => { h.state.codex.codexAccountKey = 'account-b'; h.state.codex.taskBoard = Chat.createTaskBoard(); h.api.emit(); },
+    room: h => { h.state.codex.threads.push({ ...h.thread, id: 'room-b', clientBindingId: 'binding-b' }); h.state.codex.activeThreadId = 'room-b'; h.api.emit(); },
+    epoch: h => { h.epochScope.reset('codex'); h.api.emit(); },
+    view: h => h.api.methods.clearTaskAnswers(),
+  };
+  for (const [name, change] of Object.entries(cases)) await t.test(name, async () => {
+    const graph = taskQuestionGraph({ response: { kind: 'text' } }), h = taskQuestionHarness(graph, { boardKnown: false });
+    h.type('old account answer'); let resolve; h.replies.push(() => new Promise(done => { resolve = done; }));
+    h.part('chat-task-answer-continue').fire('click'); change(h);
+    const before = JSON.stringify(h.state.codex.taskBoard);
+    resolve(awaitState(graph)); await settle();
+    assert.equal(h.post().length, 0); assert.equal(JSON.stringify(h.state.codex.taskBoard), before);
+    assert.equal(h.graphReceipts.length, 0); assert.equal(h.requests[0].signal.aborted, true);
+  });
+});
+
+test('Task question UI: a new read does not join an old room read and the late old finally cannot remove it', async () => {
+  const graph = taskQuestionGraph(), h = taskQuestionHarness(graph, { boardKnown: false });
+  let first, second;
+  h.replies.push(() => new Promise(done => { first = done; })); h.api.readTaskGraphs();
+  h.thread.clientBindingId = 'binding-next'; h.api.emit();
+  h.replies.push(() => new Promise(done => { second = done; })); h.api.readTaskGraphs();
+  assert.equal(h.requests.length, 2); assert.equal(h.requests[0].signal.aborted, true);
+  first(awaitState(graph)); await settle(); h.api.readTaskGraphs();
+  assert.equal(h.requests.length, 2, 'the new current read still deduplicates');
+  assert.equal(Chat.taskBoardEntry(h.state.codex.taskBoard, 'graph-a').boardId, null);
+  second(awaitState(graph)); await settle();
+  assert.equal(Chat.taskBoardEntry(h.state.codex.taskBoard, 'graph-a').boardId, 'board-a');
+});
+
+test('Task question UI: malformed 2xx receipt is not accepted/completed; same draft remains for an explicit retry', async () => {
+  const h = taskQuestionHarness(); h.choose('hold'); h.replies.push({ ok: true });
+  h.part('chat-task-answer-continue').fire('click'); await settle();
+  assert.equal(h.post().length, 1); assert.equal(h.draft().answer.choice, 'hold');
+  assert.match(h.part('chat-task-error').textContent, /진행하지 못했습니다/); assert.doesNotMatch(h.question().textContent, /답변을 전달했습니다/);
+});
+
+test('Task question UI: cancelled graph, stale response key and view cleanup cannot dispatch retained drafts', async () => {
+  const h = taskQuestionHarness(); h.choose('hold'); const draft = h.draft();
+  await h.api.methods.continueTaskGate('graph-a', 'answer-task', 'question', draft.answer, 'wrong-key', draft); assert.equal(h.post().length, 0);
+  h.api.methods.clearTaskAnswers(); assert.equal(draft.answer, null);
+  await h.api.methods.continueTaskGate('graph-a', 'answer-task', 'question', { choice: 'hold' }, draft.responseKey, draft); assert.equal(h.post().length, 0);
+  h.frame({ ...taskQuestionGraph(), cancelRequested: true }); assert.equal(h.part('chat-task-answer-continue'), undefined);
+});
+
+test('Task question UI: list is native-keyboard scrollable and input keeps full values with bounded wrapping; IME uses existing deferred render', () => {
+  const h = taskQuestionHarness(taskQuestionGraph({ label: '긴 질문 '.repeat(100), response: { kind: 'text' } }));
+  assert.equal(h.part('chat-task-list').getAttribute('tabindex'), '0'); assert.equal(h.part('chat-task-list').getAttribute('role'), 'region');
+  assert.equal(h.part('chat-task-question').textContent, '긴 질문 '.repeat(100).trim());
+  const list = cssDeclarationsFor(surfaceCss, '.egd-task-board-list'); assert.equal(list['overflow-y'], 'auto'); assert.equal(list['max-height'], '220px');
+  const field = cssDeclarationsFor(surfaceCss, '.egd-task-answer-text'); assert.equal(field['box-sizing'], 'border-box'); assert.equal(field['min-width'], '0');
+  assert.equal(field['white-space'], 'pre-wrap'); assert.equal(field['overflow-wrap'], 'anywhere');
+  const mount = declaration('mountCodexHUD');
+  assert.match(mount, /taskBoard\.addEventListener\('compositionstart',[\s\S]*?chat-task-answer-text'\) compositionInProgress = true/);
+  assert.match(mount, /taskBoard\.addEventListener\('compositionend',[\s\S]*?queueMicrotask\(\(\) => render\(next\)\)/);
+  assert.match(mount, /newTaskList\.scrollTop = taskScroll\.top/); assert.match(mount, /codexBridge\.clearTaskAnswers\?\.\(\)/);
 });

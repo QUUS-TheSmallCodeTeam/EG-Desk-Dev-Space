@@ -915,6 +915,154 @@
     return null;
   }
 
+  // Answers live only in this UI closure, never on codex/taskBoard or in Desk
+  // serialization. Equal SSE copies retain a draft; a changed question cannot.
+  function createChatTaskAnswers(readCodex, epochScope) {
+    const drafts = new Map();
+    let binding = null, sequence = 0, changed = false, viewGeneration = 0;
+    const accountKey = () => {
+      const codex = readCodex(), auth = codex.authStatus || {};
+      return JSON.stringify([codex.codexAccountKey, auth.accountId, auth.accountEmail, auth.isLoggedIn]);
+    };
+    const context = () => {
+      const codex = readCodex(), thread = (codex.threads || []).find(row => row.id === codex.activeThreadId);
+      if (!thread || ChatState.nativeBindingHeld(thread)) return null;
+      const engine = ChatState.chatThreadEngineId(thread, codex), profile = ChatState.chatThreadEngineProfileId(thread, codex);
+      return { engine, profile, key: JSON.stringify([accountKey(), thread.id, ChatState.clientThreadBinding(thread), engine, profile]) };
+    };
+    const condition = (graphId, taskId, gateId) => {
+      const entry = ChatState.taskBoardEntry(readCodex().taskBoard, graphId);
+      const task = entry?.graph?.tasks.find(row => row.taskId === taskId), gate = task?.gates.find(row => row.gateId === gateId);
+      return gate ? { entry, task, gate, view: ChatState.taskGateView(gate) } : null;
+    };
+    const baseKey = (graphId, taskId, gateId) => JSON.stringify([graphId, taskId, gateId]);
+    const discard = draft => {
+      draft.token.controller.abort(); epochScope.finish(draft.token); draft.answer = null; drafts.delete(draft.base);
+      const notice = readCodex().taskContinue;
+      if (notice?.responseKey === draft.responseKey && notice.graphId === draft.graphId && notice.taskId === draft.taskId && notice.gateId === draft.gateId) readCodex().taskContinue = null;
+    };
+    const sync = () => {
+      const next = context();
+      if (binding !== next?.key) {
+        changed ||= drafts.size > 0;
+        for (const draft of drafts.values()) discard(draft);
+        binding = next?.key || null;
+      }
+      for (const draft of drafts.values()) {
+        const latest = condition(draft.graphId, draft.taskId, draft.gateId);
+        if (!epochScope.valid(draft.token) || draft.token.signal.aborted || latest?.view.responseKey !== draft.responseKey
+            || !ChatState.taskGateContinuable(latest?.entry.graph, latest?.task, latest?.gate)) {
+          changed ||= draft.phase !== 'accepted' && latest?.view.state !== 'satisfied';
+          discard(draft);
+        }
+      }
+      return next;
+    };
+    const current = draft => {
+      const latest = draft && condition(draft.graphId, draft.taskId, draft.gateId);
+      return !!draft && drafts.get(draft.base) === draft && draft.binding === context()?.key
+        && epochScope.valid(draft.token) && !draft.token.signal.aborted && latest?.view.responseKey === draft.responseKey
+        && ChatState.taskGateContinuable(latest?.entry.graph, latest?.task, latest?.gate);
+    };
+    return {
+      sync, current, condition,
+      readScope({ roomBound = true } = {}) {
+        const owner = context(), account = accountKey(), generation = viewGeneration;
+        const token = epochScope.begin(roomBound ? owner?.engine : 'codex', roomBound ? owner?.profile : null);
+        let closed = false;
+        return { signal: token.signal,
+          current: () => !closed && account === accountKey() && (!roomBound || generation === viewGeneration && owner?.key === context()?.key)
+            && epochScope.valid(token) && !token.signal.aborted,
+          dispose() { if (closed) return; closed = true; token.controller.abort(); epochScope.finish(token); } };
+      },
+      draft(graphId, taskId, gateId, responseKey) {
+        const owner = sync(), latest = condition(graphId, taskId, gateId);
+        if (!owner || !latest?.view.response || latest.view.responseKey !== responseKey
+            || !ChatState.taskGateContinuable(latest.entry.graph, latest.task, latest.gate)) return null;
+        const base = baseKey(graphId, taskId, gateId);
+        if (!drafts.has(base)) {
+          drafts.set(base, { base, graphId, taskId, gateId, responseKey, binding: owner.key,
+            token: epochScope.begin(owner.engine, owner.profile), id: ++sequence, answer: null, error: null, phase: 'editing',
+            notice: changed ? '대화나 질문이 바뀌어 이전 답변을 지웠습니다. 내용을 다시 확인해 주세요.' : null });
+          changed = false;
+        }
+        return drafts.get(base);
+      },
+      update(draft, answer) {
+        if (!current(draft) || ['sending', 'accepted'].includes(draft.phase)) return false;
+        const response = condition(draft.graphId, draft.taskId, draft.gateId).view.response;
+        draft.answer = response.kind === 'choice' ? { choice: typeof answer?.choice === 'string' ? answer.choice : '' }
+          : { text: typeof answer?.text === 'string' ? answer.text : '' };
+        draft.error = null; draft.notice = null; draft.phase = 'editing'; return true;
+      },
+      clear(draft) {
+        if (!current(draft) || draft.phase === 'sending') return false;
+        draft.answer = null; draft.error = null; draft.notice = null; draft.phase = 'editing'; return true;
+      },
+      dispose() { viewGeneration++; changed ||= drafts.size > 0; for (const draft of drafts.values()) discard(draft); binding = null; },
+    };
+  }
+
+  function renderChatTaskQuestion(codex, actions, group, task, condition) {
+    const entry = ChatState.taskBoardEntry(codex.taskBoard, group.graphId);
+    const original = entry?.graph?.tasks.find(row => row.taskId === task.taskId)?.gates.find(row => row.gateId === condition.gateId);
+    const question = typeof original?.label === 'string' && original.label.trim() ? original.label.trim() : '진행할 내용을 알려 주세요.';
+    const draft = condition.continuable && condition.response ? actions.taskAnswerDraft(group.graphId, task.taskId, condition.gateId, condition.responseKey) : null;
+    const sending = draft?.phase === 'sending', accepted = !condition.responseInvalid && (condition.state === 'satisfied' || draft?.phase === 'accepted');
+    const key = `task-answer:${group.graphId}:${task.taskId}:${condition.gateId}:${draft?.id || 'closed'}`;
+    const row = el('li', { class: 'egd-task-condition egd-task-question', data: { testid: 'chat-task-condition', state: condition.state,
+      graphId: group.graphId, taskId: task.taskId, gateId: condition.gateId, responseKey: condition.responseKey || '' } });
+    const live = () => row.isConnected && draft && actions.taskAnswerCurrent(draft);
+    row.appendChild(el('strong', { class: 'egd-task-question-title', data: { testid: 'chat-task-question' } }, question));
+    row.appendChild(el('p', { class: 'egd-task-answer-note' }, accepted ? '답변을 전달했습니다. 작업이 완료되었다는 뜻은 아닙니다.' : '이 작업은 답변을 기다리고 있습니다.'));
+    if (draft?.notice) row.appendChild(el('p', { class: 'egd-task-answer-note', role: 'status', data: { testid: 'chat-task-answer-changed' } }, draft.notice));
+    const error = el('p', { class: 'egd-task-error', role: 'alert', data: { testid: 'chat-task-error' } }, draft?.error || condition.error || '');
+    if (draft && !accepted) {
+      const controls = el('fieldset', { class: 'egd-task-answer-fields', disabled: sending ? 'true' : null, 'aria-label': question });
+      const update = answer => {
+        if (!live() || !actions.updateTaskAnswer(draft, answer)) return false;
+        error.textContent = ''; return true;
+      };
+      if (condition.response.kind === 'choice') {
+        controls.appendChild(el('legend', { class: 'egd-task-answer-note' }, '한 항목을 선택하세요. 선택만으로는 전달되지 않습니다.'));
+        for (const option of condition.response.options) {
+          const input = el('input', { type: 'radio', name: key, value: option.id, disabled: sending ? 'true' : null,
+            data: { testid: 'chat-task-answer-choice', choiceId: option.id, focusKey: `${key}:${option.id}` },
+            onchange: ev => { if (ev.currentTarget.checked) update({ choice: option.id }); },
+            onkeydown: ev => { if (ev.key === 'Enter') ev.stopPropagation(); } });
+          input.checked = draft.answer?.choice === option.id;
+          controls.appendChild(el('label', { class: 'egd-task-answer-choice' }, input, el('span', {}, option.label)));
+        }
+      } else {
+        const limit = condition.response.maxLength;
+        const count = value => Array.from(value.normalize('NFC').replace(/\r\n?/g, '\n').trim()).length;
+        const counter = el('span', { class: 'egd-task-answer-note', data: { testid: 'chat-task-answer-limit', maxLength: String(limit) } });
+        const input = el('textarea', { class: 'egd-task-answer-text', rows: '3', disabled: sending ? 'true' : null,
+          'aria-label': `${question} 답변, 최대 ${limit}자`, data: { testid: 'chat-task-answer-text', focusKey: key },
+          oninput: ev => { if (update({ text: ev.currentTarget.value })) showCount(); },
+          oncompositionend: ev => { if (update({ text: ev.currentTarget.value })) showCount(); },
+          onkeydown: ev => { if (ev.key === 'Enter') ev.stopPropagation(); } });
+        input.value = draft.answer?.text || '';
+        const showCount = () => { const length = count(input.value); counter.textContent = `${length} / ${limit}자 · 입력 후 계속을 누르세요.`;
+          counter.dataset.codePoints = String(length); input.setAttribute('aria-invalid', String(length > limit)); };
+        showCount(); controls.appendChild(input); controls.appendChild(counter);
+      }
+      row.appendChild(controls);
+      row.appendChild(el('div', { class: 'egd-task-answer-actions' },
+        el('button', { type: 'button', class: 'egd-task-confirm-go', disabled: sending ? 'true' : null, 'aria-disabled': String(sending),
+          data: { testid: 'chat-task-answer-continue', focusKey: `${key}:continue` },
+          onclick: () => { if (live() && draft.phase !== 'sending') void actions.continueTaskGate(group.graphId, task.taskId, condition.gateId, draft.answer, condition.responseKey, draft); } }, sending ? '전달 중…' : '계속'),
+        el('button', { type: 'button', class: 'egd-task-confirm-cancel', disabled: sending ? 'true' : null,
+          data: { testid: 'chat-task-answer-cancel', focusKey: `${key}:cancel` },
+          onclick: () => { if (live()) actions.cancelTaskAnswer(draft); } }, '취소')));
+    }
+    row.appendChild(error);
+    row.appendChild(el('p', { class: 'egd-task-answer-note', data: { testid: 'chat-task-answer-next' } }, accepted
+      ? '작업 진행 상태는 위의 표시에서 확인하세요.' : condition.responseInvalid ? '질문 내용을 다시 불러온 뒤 답해 주세요.'
+        : '계속을 누르면 답변만 전달합니다. 다른 대기 항목은 그대로 유지됩니다.'));
+    return row;
+  }
+
   // CHAT-06 Await: one quiet line under the run state, '진행 N건 · 대기 M건',
   // opens the task list in place: each task's name and state, then what it waits
   // for in order, with a check and the time once met. An outside condition offers
@@ -944,6 +1092,7 @@
       data: { testid: 'chat-task-board', open: String(open) } }, hold, summary, ...children);
     if (!open) return board();
     const conditionRow = (group, task, condition) => {
+      if (condition.response || condition.responseInvalid) return renderChatTaskQuestion(codex, actions, group, task, condition);
       // The confirm buttons share the '계속' focus key, so the keyboard stays on the same condition.
       const key = `chat-task-gate:${group.graphId}:${task.taskId}:${condition.gateId}`;
       const sending = condition.phase === 'sending';
@@ -978,7 +1127,8 @@
           decisionButton('approved', '승인', '승인하는 중…'), decisionButton('rejected', '거절', '거절하는 중…')) : null,
         condition.error ? el('p', { class: 'egd-task-error', role: 'alert', data: { testid: 'chat-task-error' } }, condition.error) : null);
     };
-    return board(el('div', { id: 'egd-task-board-list', class: 'egd-task-board-list', data: { testid: 'chat-task-list' } },
+    return board(el('div', { id: 'egd-task-board-list', class: 'egd-task-board-list', tabindex: '0', role: 'region', 'aria-label': '작업 목록과 질문',
+      data: { testid: 'chat-task-list', threadId: codex.activeThreadId || '', focusKey: 'chat-task-list' } },
       ...view.groups.map(group => el('section', { class: 'egd-task-group', 'aria-label': group.title || '작업' },
         group.title ? el('p', { class: 'egd-task-group-title' }, group.title) : null,
         ...group.tasks.map(task => el('article', { class: 'egd-task-row', data: { testid: 'chat-task-row', status: task.status || 'unknown' } },
@@ -6914,6 +7064,8 @@
       }
       const oldInput = body.querySelector('.egd-codex-input');
       const oldMessages = body.querySelector('.egd-codex-messages');
+      const oldTaskList = body.querySelector('[data-testid="chat-task-list"]');
+      const taskScroll = oldTaskList ? { threadId: oldTaskList.dataset.threadId, top: oldTaskList.scrollTop } : null;
       const inputState = oldInput ? {
         threadId: oldInput.dataset.threadId,
         focused: document.activeElement === oldInput,
@@ -7909,6 +8061,16 @@
         // CHAT-06 Await: the task list line sits right under the run state.
         const taskBoard = renderChatTaskBoard(codex, codexBridge, connectedFolderName);
         if (taskBoard) conversation.appendChild(taskBoard);
+        if (taskBoard) {
+          taskBoard.addEventListener('compositionstart', event => {
+            if (event.target.dataset?.testid === 'chat-task-answer-text') compositionInProgress = true;
+          });
+          taskBoard.addEventListener('compositionend', event => {
+            if (event.target.dataset?.testid !== 'chat-task-answer-text') return;
+            compositionInProgress = false;
+            if (deferredCodex) { const next = deferredCodex; deferredCodex = null; queueMicrotask(() => render(next)); }
+          });
+        }
         const rateLimit = ChatState.runRateLimitNotice(run);
         if (rateLimit) conversation.appendChild(el('p', { class: rateLimit.level === 'limit' ? 'egd-codex-error' : 'egd-codex-run-status', role: 'status',
           data: { testid: 'chat-run-rate-limit', level: rateLimit.level } }, rateLimit.text));
@@ -8168,6 +8330,8 @@
           pendingMessageScroll = null;
         });
       }
+      const newTaskList = body.querySelector('[data-testid="chat-task-list"]');
+      if (newTaskList && taskScroll?.threadId === newTaskList.dataset.threadId) newTaskList.scrollTop = taskScroll.top;
       const newInput = body.querySelector('.egd-codex-input');
       if (newInput && inputState?.threadId === activeThread?.id && inputState.focused) {
         restoringComposerFocus = true;
@@ -8186,6 +8350,7 @@
     unsubscribe = codexBridge.subscribe(render)
     body._codexCleanup = () => {
       unsubscribe?.();
+      codexBridge.clearTaskAnswers?.();
       composerObserver?.disconnect();
       compositionInProgress = false;
       deferredCodex = null;
@@ -8276,6 +8441,7 @@
     const listeners = new Set();
     const protocol = state.codex.chatProtocol;
     const epochScope = ChatState.createChatEpochScope({ makeController: () => new window.AbortController() });
+    let taskAnswers = null;
     const refreshing = new Map();
     const resumedNativeBindings = new Set();
     const confirmedLegacyImports = new Set();
@@ -8619,6 +8785,7 @@
 
     const emit = () => {
       normalizeThreads();
+      taskAnswers?.sync();
       const projectPanel = document.getElementById('egd-codex-input-panel');
       if (projectPanel?._projectScopeCurrent && !projectPanel._projectScopeCurrent()) {
         projectPanel._finishProjectScope(); projectPanel.remove();
@@ -9060,24 +9227,30 @@
     // and task.plan frames. A state read adds the Board and exact scope that
     // '계속' needs; a read never replaces a frame that arrived after it began.
     const taskStateReads = new Map();
+    taskAnswers = createChatTaskAnswers(() => state.codex, epochScope);
     const readTaskGraph = (graphId) => {
       if (!ChatState.taskRef(graphId)) return Promise.resolve(null);
-      if (taskStateReads.has(graphId)) return taskStateReads.get(graphId);
+      const previous = taskStateReads.get(graphId);
+      if (previous?.scope.current()) return previous.promise;
+      previous?.scope.dispose();
+      const scope = taskAnswers.readScope(), read = { scope, promise: null };
       const ifRev = ChatState.taskBoardEntry(state.codex.taskBoard, graphId)?.rev ?? 0;
-      const read = fetchJson(`/tasks/state?graphId=${encodeURIComponent(graphId)}`)
+      read.promise = fetchJson(`/tasks/state?graphId=${encodeURIComponent(graphId)}`, { signal: scope.signal })
         .then((payload) => {
+          if (!scope.current()) return null;
           const fresh = (ChatState.taskBoardEntry(state.codex.taskBoard, graphId)?.rev ?? 0) === ifRev;
           state.codex.taskBoard = ChatState.taskBoardWithState(state.codex.taskBoard, payload, { ifRev });
           if (fresh) browserWorkflow.graph(payload?.graph);
           return null;
         })
         .catch((error) => {
+          if (!scope.current()) return null;
           if (error?.code === 'TASK_NOT_FOUND') state.codex.taskBoard = ChatState.taskBoardWithout(state.codex.taskBoard, graphId);
           return error;
         })
-        .finally(() => { taskStateReads.delete(graphId); emit(); });
+        .finally(() => { scope.dispose(); if (taskStateReads.get(graphId) === read) taskStateReads.delete(graphId); emit(); });
       taskStateReads.set(graphId, read);
-      return read;
+      return read.promise;
     };
     const readTaskGraphs = ({ openOnly = false } = {}) => {
       const graphIds = openOnly ? ChatState.taskBoardOpenGraphIds(state.codex.taskBoard)
@@ -9108,10 +9281,14 @@
     const planDetailReads = new Map();
     const readPlanDetail = (planId) => {
       if (!ChatState.planRef(planId)) return Promise.resolve(null);
-      if (planDetailReads.has(planId)) return planDetailReads.get(planId);
+      const previous = planDetailReads.get(planId);
+      if (previous?.scope.current()) return previous.promise;
+      previous?.scope.dispose();
+      const scope = taskAnswers.readScope({ roomBound: false }), read = { scope, promise: null };
       state.codex.planProposals = ChatState.planProposalsWithDetail(state.codex.planProposals, planId, 'loading');
-      const read = fetchJson(`/tasks/plans?planId=${encodeURIComponent(planId)}`)
+      read.promise = fetchJson(`/tasks/plans?planId=${encodeURIComponent(planId)}`, { signal: scope.signal })
         .then((payload) => {
+          if (!scope.current()) return null;
           state.codex.planProposals = ChatState.planProposalsWithPlan(state.codex.planProposals, payload?.plan);
           if (ChatState.planProposalEntry(state.codex.planProposals, planId)?.detail !== 'loaded') {
             state.codex.planProposals = ChatState.planProposalsWithDetail(state.codex.planProposals, planId, 'error');
@@ -9119,31 +9296,45 @@
           return null;
         })
         .catch((error) => {
+          if (!scope.current()) return null;
           state.codex.planProposals = error?.code === 'PLAN_NOT_FOUND'
             ? ChatState.planProposalsWithMissing(state.codex.planProposals, planId)
             : ChatState.planProposalsWithDetail(state.codex.planProposals, planId, 'error');
           return error;
         })
-        .finally(() => { planDetailReads.delete(planId); emit(); });
+        .finally(() => {
+          const current = scope.current();
+          scope.dispose();
+          if (planDetailReads.get(planId) === read) planDetailReads.delete(planId);
+          if (current) emit();
+        });
       planDetailReads.set(planId, read);
       emit();
-      return read;
+      return read.promise;
     };
     // After a (re)connect: plans waiting for 대표님 get their cards back, and
     // approved plans still running rejoin the task list. Read only, never decided.
-    const loadTaskPlans = () => fetchJson('/tasks/plans')
-      .then((payload) => {
-        const plans = Array.isArray(payload?.plans) ? payload.plans.slice(0, ChatState.PLAN_PROPOSAL_LIMIT) : [];
-        for (const plan of [...plans].reverse()) {
-          state.codex.planProposals = ChatState.planProposalsWithPlan(state.codex.planProposals, plan);
-          if (plan?.status !== 'approved') continue;
-          state.codex.taskBoard = ChatState.taskBoardWithPlan(state.codex.taskBoard, plan);
-          const entry = ChatState.taskBoardEntry(state.codex.taskBoard, plan.graphId);
-          if (entry && !entry.graph) void readTaskGraph(entry.graphId);
-        }
-        emit();
-      })
-      .catch(() => {});
+    const loadTaskPlans = () => {
+      // Bootstrap lists this account's plans, not a room's. A room switch may
+      // keep the read, but an account/epoch change may never publish it.
+      const scope = taskAnswers.readScope({ roomBound: false });
+      return fetchJson('/tasks/plans', { signal: scope.signal })
+        .then((payload) => {
+          if (!scope.current()) return;
+          const plans = Array.isArray(payload?.plans) ? payload.plans.slice(0, ChatState.PLAN_PROPOSAL_LIMIT) : [];
+          for (const plan of [...plans].reverse()) {
+            if (!scope.current()) return;
+            state.codex.planProposals = ChatState.planProposalsWithPlan(state.codex.planProposals, plan);
+            if (plan?.status !== 'approved') continue;
+            state.codex.taskBoard = ChatState.taskBoardWithPlan(state.codex.taskBoard, plan);
+            const entry = ChatState.taskBoardEntry(state.codex.taskBoard, plan.graphId);
+            if (scope.current() && entry && !entry.graph) void readTaskGraph(entry.graphId);
+          }
+          if (scope.current()) emit();
+        })
+        .catch(() => {})
+        .finally(() => scope.dispose());
+    };
 
     const handleEvent = (event) => {
       if (event?.type?.startsWith('assistant-')) return;
@@ -9411,6 +9602,22 @@
         state.codex.taskBoardOpen = !state.codex.taskBoardOpen;
         emit();
       },
+      taskAnswerDraft(graphId, taskId, gateId, responseKey) { return taskAnswers.draft(graphId, taskId, gateId, responseKey); },
+      taskAnswerCurrent(draft) { return taskAnswers.current(draft); },
+      updateTaskAnswer(draft, answer) {
+        if (!taskAnswers.update(draft, answer)) return false;
+        const pending = state.codex.taskContinue;
+        if (pending?.phase === 'error' && pending.responseKey === draft.responseKey && pending.graphId === draft.graphId
+            && pending.taskId === draft.taskId && pending.gateId === draft.gateId) state.codex.taskContinue = null;
+        return true;
+      },
+      cancelTaskAnswer(draft) {
+        if (!taskAnswers.clear(draft)) return;
+        const pending = state.codex.taskContinue;
+        if (pending?.responseKey === draft.responseKey && pending.graphId === draft.graphId && pending.taskId === draft.taskId && pending.gateId === draft.gateId) state.codex.taskContinue = null;
+        emit();
+      },
+      clearTaskAnswers() { taskAnswers.dispose(); },
       // '계속' first asks; only '진행' sends. Upstream tasks and approvals never offer it.
       askTaskContinue(graphId, taskId, gateId) {
         if (state.codex.taskContinue?.phase === 'sending') return;
@@ -9423,24 +9630,43 @@
         emit();
       },
       // POST /tasks/continue for one outside condition: the task goes on without it.
-      async continueTaskGate(graphId, taskId, gateId) {
+      async continueTaskGate(graphId, taskId, gateId, answer, responseKey, draft) {
         if (state.codex.taskContinue?.phase === 'sending') return;
-        const target = { graphId, taskId, gateId };
+        const question = taskAnswers.condition(graphId, taskId, gateId)?.view;
+        const answering = !!(question?.response || question?.responseInvalid || responseKey !== undefined || draft);
+        if (answering && (!question?.response || question.responseKey !== responseKey || !taskAnswers.current(draft)
+            || draft.graphId !== graphId || draft.taskId !== taskId || draft.gateId !== gateId || draft.responseKey !== responseKey)) {
+          taskAnswers.sync(); emit(); return;
+        }
+        const submittedAnswer = answer && typeof answer === 'object' ? { ...answer } : answer;
+        const target = { graphId, taskId, gateId, ...(answering ? { responseKey } : {}) };
+        if (answering) { draft.phase = 'sending'; draft.error = null; }
         state.codex.taskContinue = { ...target, phase: 'sending', error: null };
         emit();
         try {
           const readError = ChatState.taskBoardEntry(state.codex.taskBoard, graphId)?.boardId ? null : await readTaskGraph(graphId);
+          if (answering && !taskAnswers.current(draft)) return;
           const entry = ChatState.taskBoardEntry(state.codex.taskBoard, graphId);
           if (!entry?.boardId) throw readError || Object.assign(new Error('task board unknown'), { status: 404, code: 'TASK_NOT_FOUND' });
-          const body = ChatState.buildTaskContinueRequest(entry, taskId, gateId);
+          const body = ChatState.buildTaskContinueRequest(entry, taskId, gateId, submittedAnswer);
           if (!body) throw Object.assign(new Error('gate not waiting'), { status: 409, code: 'TASK_GATE_STALE' });
           const ifRev = entry.rev;
-          const payload = await fetchJson('/tasks/continue', { method: 'POST', body: JSON.stringify(body) });
+          const payload = await fetchJson('/tasks/continue', { method: 'POST', body: JSON.stringify(body), ...(answering ? { signal: draft.token.signal } : {}) });
+          if (answering) {
+            if (!taskAnswers.current(draft)) return;
+            const receipt = ChatState.taskBoardEntry(ChatState.taskBoardWithState(ChatState.createTaskBoard(), payload), graphId);
+            const gate = receipt?.graph?.tasks.find(row => row.taskId === taskId)?.gates.find(row => row.gateId === gateId);
+            const received = ChatState.taskGateView(gate);
+            if (received.responseKey !== responseKey || received.state !== 'satisfied') throw Object.assign(new Error('Answer receipt not confirmed'), { status: 502 });
+            draft.phase = 'accepted'; draft.answer = null;
+          }
           const fresh = ChatState.taskBoardEntry(state.codex.taskBoard, graphId)?.rev === ifRev;
           state.codex.taskBoard = ChatState.taskBoardWithState(state.codex.taskBoard, payload, { ifRev });
           if (fresh) browserWorkflow.graph(payload?.graph);
           state.codex.taskContinue = null;
         } catch (error) {
+          if (answering && !taskAnswers.current(draft)) return;
+          if (answering) { draft.phase = 'error'; draft.error = ChatState.taskContinueErrorText(error); }
           state.codex.taskContinue = { ...target, phase: 'error', error: ChatState.taskContinueErrorText(error) };
           if (error?.code === 'TASK_GATE_STALE') void readTaskGraph(graphId);
         }
@@ -11949,13 +12175,22 @@
       },
     });
 
+    const maximizeControl = el('span', {
+      class: 'egd-card-dot egd-card-dot-max egd-desk-window-control', role: 'button', tabindex: '0',
+      title: '설정 창 최대화 또는 복원', 'aria-label': '설정 창 최대화 또는 복원',
+      onclick: (ev) => { ev.stopPropagation(); toggleCardFullscreen(card); },
+    });
+    maximizeControl.addEventListener('keydown', (ev) => {
+      if (ev.key !== 'Enter' && ev.key !== ' ') return;
+      ev.preventDefault(); ev.stopPropagation(); maximizeControl.click();
+    });
     const header = el('div', { class: 'egd-card-header' },
       el('div', { class: 'egd-card-topbar' },
         el('div', { class: 'egd-card-dots-shell' },
           el('div', { class: 'egd-card-dots' },
             el('span', { class: 'egd-card-dot egd-card-dot-close', onclick: (ev) => { ev.stopPropagation(); closeCanvasCard(card); } }),
             el('span', { class: 'egd-card-dot egd-card-dot-min' }),
-            el('span', { class: 'egd-card-dot egd-card-dot-max' }),
+            maximizeControl,
           ),
         ),
       ),
@@ -17148,7 +17383,8 @@
         el('p', { class: 'egd-store-panel-status', role: 'status', data: { testid: 'board-canvas-status' } }, view.message),
         fileExists && view.status === 'failed' ? el('p', { class: 'egd-portable-warning', data: { testid: 'board-canvas-file-exists' } },
           '같은 이름의 파일이 있습니다. 기존 파일은 덮어쓰지 않습니다. 다른 이름이나 위치를 선택해 주세요.') : null,
-        ...view.notes.map(note => el('p', { class: 'egd-portable-note' }, note)),
+        ...view.notes.filter(note => view.status !== 'cancelled' || !note.endsWith('이름만 포함했습니다.'))
+          .map(note => el('p', { class: 'egd-portable-note' }, note)),
         view.report?.omitted?.length ? el('details', { data: { testid: 'board-canvas-omitted' } },
           el('summary', {}, `변환에서 제외된 항목 ${view.report.omitted.length}개`),
           el('ul', {}, ...view.report.omitted.map(item => el('li', {}, `${item.kind}: ${item.reason}`)))) : null,
