@@ -1,6 +1,7 @@
 import { guardBridgeRequest, readJsonBody, sendJson } from './codex-bridge-http.mjs'
 import { publicText } from './codex-chat-values.mjs'
 import { MAX_BOARD_BODY_BYTES, MAX_DESK_STATE_BYTES } from './egdesk-desk-store.mjs'
+import { boardToJsonCanvas } from './egdesk-json-canvas.mjs'
 
 // RT-07 / CTX-01 / CTX-02 Desk and Board routes over the local Desk store.
 // Same contract as the profile routes: loopback/Origin guard, application/json
@@ -29,6 +30,7 @@ const ROUTES = [
   ['POST', /^\/v1\/desk\/import$/, 'import'],
   ['GET', /^\/v1\/boards$/, 'boards'],
   ['GET', new RegExp(`^/v1/boards/${BOARD}$`), 'board'],
+  ['GET', new RegExp(`^/v1/boards/${BOARD}/export$`), 'exportBoard'],
   ['PUT', new RegExp(`^/v1/boards/${BOARD}$`), 'saveBoard'],
   ['GET', new RegExp(`^/v1/boards/${BOARD}/revisions$`), 'revisions'],
   ['GET', new RegExp(`^/v1/boards/${BOARD}/revisions/${NUMBER}$`), 'revision'],
@@ -36,7 +38,7 @@ const ROUTES = [
   ['POST', new RegExp(`^/v1/boards/${BOARD}/merge$`), 'merge'],
 ]
 const BODY_LIMIT = { save: 'deskState', saveBoard: 'board', import: 'import', restore: 'small', revert: 'small', merge: 'board' }
-const QUERY_KEYS = { generations: ['limit', 'before'], revisions: ['limit', 'before'], search: ['q', 'limit'] }
+const QUERY_KEYS = { generations: ['limit', 'before'], revisions: ['limit', 'before'], search: ['q', 'limit'], exportBoard: ['format'] }
 
 function httpError(code, message, httpStatus = 400) {
   return Object.assign(new Error(message), { code, httpStatus })
@@ -71,6 +73,7 @@ const isDeskPath = pathname => pathname === '/v1/desk' || pathname.startsWith('/
  *                                               → 201 imported | 200 {duplicate: true}
  * GET  /v1/boards                               → {boards}
  * GET  /v1/boards/:id                           → Board with head revision body
+ * GET  /v1/boards/:id/export?format=json-canvas → {canvas, report} from the saved head; attachment records excluded
  * PUT  /v1/boards/:id {body, expectedRevision, title?}
  *                                               → 201 new revision | 200 unchanged; 409 BOARD_REVISION_CONFLICT {headRevision}
  * GET  /v1/boards/:id/revisions?limit=&before=  → summaries, newest first
@@ -124,6 +127,13 @@ export async function handleDeskHttp(req, url, { store, readJson = readJsonBody,
     else if (action === 'board') {
       result = desk.board(match[1])
       if (!result) throw httpError('BOARD_NOT_FOUND', 'Board does not exist', 404)
+    } else if (action === 'exportBoard') {
+      if (url.searchParams.get('format') !== 'json-canvas') throw httpError('DESK_HTTP_INPUT', 'format must be json-canvas')
+      const saved = desk.board(match[1])
+      if (!saved) throw httpError('BOARD_NOT_FOUND', 'Board does not exist', 404)
+      // Only the store's head is input. No renderer body, filesystem lookup or
+      // attachment opt-in; preserve the converter's omission/report contract.
+      result = boardToJsonCanvas(saved.head.body, { title: saved.title, includeAttachments: false })
     } else if (action === 'saveBoard') {
       fields(body, ['body', 'expectedRevision', 'title'], ['body', 'expectedRevision'])
       result = desk.saveBoard(match[1], body)

@@ -7,6 +7,7 @@ import { Readable } from 'node:stream'
 import { createPrivateQaTempDirectory } from '../scripts/egdesk-qa-platform.mjs'
 import { MAX_DESK_STATE_BYTES, openDeskStore } from './egdesk-desk-store.mjs'
 import { DESK_BODY_LIMITS, createDeskHttpHandler, handleDeskHttp } from './egdesk-desk-http.mjs'
+import { boardToJsonCanvas } from './egdesk-json-canvas.mjs'
 
 const T0 = Date.UTC(2026, 9, 1, 12)
 function fixture(t) {
@@ -99,6 +100,101 @@ test('Board routes keep immutable revisions, refuse stale saves with BOARD_REVIS
     assert.equal(answer.status, 404, url)
   }
   assert.equal((await api('GET', '/v1/desk/current')).data.generation, null, 'Board saves never touch the Desk journal')
+})
+
+test('Board export converts the actual saved head to JSON Canvas with D-R3 omissions, without changing Board or Desk', async t => {
+  const store = fixture(t).open()
+  const api = (...args) => call({ store }, ...args)
+  const geometry = (x, y, width = 100, height = 100) => ({ x, y, width, height, zIndex: 1 })
+  const body = board('본문의 제목', {
+    cards: [
+      { id: 'browser', type: 'browser', geometry: geometry(0, 0), sourceRef: null, runtimeState: { uri: 'https://example.com/saved', title: '저장된 Browser' } },
+      { id: 'result', type: 'result', geometry: geometry(200, 0), sourceRef: null, runtimeState: { title: '결과 요약', text: '저장된 답변\n둘째 줄' } },
+      { id: 'file', type: 'file', geometry: geometry(0, 400), sourceRef: { path: '/private/attachment-path-sentinel' },
+        runtimeState: { root: { name: '첨부 이름', displayPath: '/private/attachment-root-sentinel' }, draftId: 'draft-sentinel' } },
+      { id: 'capture', type: 'input-evidence', geometry: geometry(200, 400), sourceRef: { id: 'capture-source-sentinel' },
+        runtimeState: { title: '캡처 이름', dataUrl: 'data:image/png;base64,capture-bytes-sentinel' } },
+      { id: 'terminal', type: 'terminal', geometry: geometry(400, 400), runtimeState: { command: 'terminal-command-sentinel' } },
+      { id: 'no-geometry', type: 'browser', runtimeState: { uri: 'https://example.com/not-drawable' } },
+    ],
+    shapes: [
+      { id: 'label', type: 'label', geometry: geometry(0, 250), runtimeState: { text: '도형 글자' } },
+      { id: 'box', type: 'rect', geometry: geometry(-20, -20, 350, 200), runtimeState: {} },
+      { id: 'arrow', type: 'arrow', geometry: geometry(100, 42, 100, 16), runtimeState: { transform: 'rotate(0deg)' } },
+      { id: 'freehand', type: 'path', geometry: geometry(1000, 1000), runtimeState: { points: [[0, 0], [20, 20]] } },
+    ],
+  })
+  assert.equal((await api('PUT', '/v1/desk/current', { state: desk(1), parentGeneration: null })).status, 201)
+  assert.equal((await api('PUT', '/v1/boards/agenda-a', { body: board('이전 버전'), expectedRevision: null })).status, 201)
+  assert.equal((await api('PUT', '/v1/boards/agenda-a', { body, title: '저장소의 Board 제목', expectedRevision: 1 })).status, 201)
+  const snapshot = () => ({ board: store.board('agenda-a'), revisions: store.boardRevisions('agenda-a'), boards: store.listBoards(),
+    current: store.current(), generations: store.generations() })
+  const before = snapshot()
+  const url = '/v1/boards/agenda-a/export?format=json-canvas'
+  const handler = createDeskHttpHandler({ store: () => store })
+  const res = { headers: null, status: null, body: '', writeHead(status, headers) { this.status = status; this.headers = headers }, end(value) { this.body = value } }
+  assert.equal(await handler(fakeRequest('GET', url), res, new URL(url, 'http://127.0.0.1:39218')), true)
+  assert.equal(res.status, 200); assert.equal(res.headers['Cache-Control'], 'no-store')
+  assert.equal(res.headers['Content-Type'], 'application/json; charset=utf-8')
+  const exported = JSON.parse(res.body), node = id => exported.canvas.nodes.find(item => item.id === id)
+  assert.deepEqual(Object.keys(exported).sort(), ['canvas', 'report'], 'the existing Desk HTTP success envelope is unwrapped')
+  assert.deepEqual(exported, boardToJsonCanvas(before.board.head.body, { title: before.board.title, includeAttachments: false }))
+  assert.equal(exported.canvas.nodes[0].label, '저장소의 Board 제목')
+  assert.deepEqual([node('browser').type, node('browser').url], ['link', 'https://example.com/saved'])
+  assert.deepEqual([node('result').type, node('result').text], ['text', '## 결과 요약\n\n저장된 답변\n둘째 줄'])
+  assert.deepEqual([node('label').type, node('label').text, node('box').type], ['text', '도형 글자', 'group'])
+  assert.deepEqual(exported.canvas.edges.map(edge => [edge.id, edge.fromNode, edge.toNode, edge.toEnd]), [['arrow', 'browser', 'result', 'arrow']])
+  for (const id of ['file', 'capture']) {
+    assert.equal(node(id).type, 'text'); assert.equal(node(id).egdesk.omitted, 'attachment')
+    assert.equal(node(id).egdesk.runtimeState, undefined); assert.equal(node(id).egdesk.sourceRef, undefined)
+  }
+  assert.equal(node('file').text, '파일 카드 · 첨부 이름'); assert.equal(node('capture').text, '입력 캡처 카드 · 캡처 이름')
+  assert.deepEqual(exported.report.omitted, [{ id: 'no-geometry', kind: 'card', reason: 'no-geometry' }, { id: 'freehand', kind: 'shape', reason: 'freehand' }])
+  assert.deepEqual(exported.canvas.egdesk.shapes.map(shape => shape.id), ['freehand'], 'unsupported drawing is reported and retained only as EG-Desk metadata')
+  assert.equal(exported.report.nodes, exported.canvas.nodes.length); assert.equal(exported.report.edges, 1)
+  assert.doesNotMatch(res.body, /attachment-path-sentinel|attachment-root-sentinel|draft-sentinel|capture-source-sentinel|capture-bytes-sentinel|terminal-command-sentinel/)
+  const ignoredBody = await call({ store, readJson: () => assert.fail('export must not read a caller-supplied Board') }, 'GET', url,
+    { body: board('injected'), includeAttachments: true, title: 'injected', canvas: { nodes: [{ id: 'injected' }] } })
+  assert.equal(ignoredBody.status, 200); assert.deepEqual(ignoredBody.data, exported)
+  assert.deepEqual(snapshot(), before, 'export creates no revisions/generations, edits, imports, or metadata updates')
+})
+
+test('Board export rejects missing Boards, formats/options, methods and untrusted origins without writes', async t => {
+  const store = fixture(t).open(), api = (...args) => call({ store }, ...args)
+  await api('PUT', '/v1/boards/agenda-a', { body: board('기획'), expectedRevision: null })
+  const before = { board: store.board('agenda-a'), current: store.current(), generations: store.generations(), revisions: store.boardRevisions('agenda-a') }
+  const missing = await api('GET', '/v1/boards/missing/export?format=json-canvas')
+  assert.deepEqual([missing.status, missing.data.code], [404, 'BOARD_NOT_FOUND'])
+  for (const suffix of ['', '?format=', '?format=canvas', '?format=JSON-Canvas', '?format=json-canvas&format=json-canvas',
+    '?format=json-canvas&includeAttachments=true', '?format=json-canvas&includeEgdesk=false', '?format=json-canvas&title=injected',
+    '?format=json-canvas&revision=1', '?format=json-canvas&path=/private/injected']) {
+    const answer = await api('GET', `/v1/boards/agenda-a/export${suffix}`)
+    assert.deepEqual([answer.status, answer.data.code], [400, 'DESK_HTTP_INPUT'], suffix)
+    assert.equal(typeof answer.data.error, 'string')
+  }
+  for (const method of ['POST', 'PUT', 'DELETE']) {
+    const answer = await api(method, '/v1/boards/agenda-a/export?format=json-canvas', { body: board('injected') })
+    assert.deepEqual([answer.status, answer.data.code], [405, 'METHOD_NOT_ALLOWED'])
+  }
+  for (const headers of [{ origin: 'https://example.com' }, { origin: 'http://127.0.0.1:9999' }, { 'sec-fetch-site': 'cross-site' }, { host: 'evil.test' }]) {
+    const answer = await call({ store: () => assert.fail('untrusted export must not access storage') }, 'GET', '/v1/boards/agenda-a/export?format=json-canvas', undefined, headers)
+    assert.deepEqual([answer.status, answer.data.code], [403, 'DESK_LOOPBACK_REQUIRED'])
+  }
+  const unavailable = await call({ store: null }, 'GET', '/v1/boards/agenda-a/export?format=json-canvas')
+  assert.deepEqual([unavailable.status, unavailable.data.code], [503, 'DESK_STORE_UNAVAILABLE'])
+  assert.deepEqual({ board: store.board('agenda-a'), current: store.current(), generations: store.generations(), revisions: store.boardRevisions('agenda-a') }, before)
+})
+
+test('Board export preserves empty-board output and the existing Board route for an ID named export', async t => {
+  const store = fixture(t).open(), api = (...args) => call({ store }, ...args)
+  await api('PUT', '/v1/boards/export', { body: board('빈 Board'), expectedRevision: null })
+  assert.equal((await api('GET', '/v1/boards/export')).data.title, '빈 Board')
+  const answer = await api('GET', '/v1/boards/export/export?format=json-canvas')
+  assert.equal(answer.status, 200); assert.deepEqual(answer.data.canvas.nodes, []); assert.deepEqual(answer.data.canvas.edges, [])
+  assert.deepEqual(answer.data.report, { nodes: 0, edges: 0, omitted: [] })
+  assert.deepEqual((await api('GET', '/v1/boards/export/revisions')).data.revisions.map(item => item.revision), [1])
+  const broken = await call({ store: { board() { throw new Error('read failed at /private/path-sentinel') } } }, 'GET', '/v1/boards/export/export?format=json-canvas')
+  assert.deepEqual([broken.status, broken.data], [500, { code: 'DESK_ERROR', error: 'Desk request could not be completed' }])
 })
 
 test('import of earlier preference values answers 201 once and 200 duplicate after', async t => {
