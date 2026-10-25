@@ -7,6 +7,7 @@ import { assertQaFixtureManifest, qaProfileSourceFingerprints } from './egdesk-c
 import { isOwnedAndPrivate } from './egdesk-qa-platform.mjs';
 import { chatRunOutputsFixtureEnabled } from './egdesk-chat-run-outputs-fixture.mjs';
 import { portableTransferFixtureEnabled } from './egdesk-portable-transfer-fixture.mjs';
+import { taskGateFixtureEnabled } from './egdesk-task-gate-fixture.mjs';
 
 export const QA_ISOLATION_MANIFEST = '.egdesk-qa-fixture-isolation.json';
 export const QA_PROJECT_PICKER_FILE = 'resources/surface/EGDeskSurfaceFileCard.mjs';
@@ -19,7 +20,12 @@ export const QA_PORTABLE_TRANSFER_FILES = Object.freeze([
   'resources/EGDeskProfileTransferView.sys.mjs', 'resources/EGDeskNativeFilePickers.sys.mjs',
 ]);
 export const QA_PORTABLE_PICKER_FILE = 'JS/eg-desk-surface.uc.js';
+export const QA_TASK_GATE_SOURCE_FILES = Object.freeze([
+  'scripts/egdesk-task-gate-fixture.mjs', 'scripts/egdesk-task-gate-fixture.test.mjs',
+  'scripts/verify-firefox-mcp-task-gate-flow.mjs', 'scripts/verify-firefox-mcp-task-gate-flow.test.mjs',
+]);
 const OVERLAY = fileURLToPath(new URL('../overlay/', import.meta.url));
+const APP_ROOT = fileURLToPath(new URL('../', import.meta.url)).replace(/\/$/, '');
 const sha256 = bytes => createHash('sha256').update(bytes).digest('hex');
 const fail = message => { throw new Error(`QA fixture isolation: ${message}`); };
 
@@ -27,6 +33,7 @@ export function qaBridgeConfig(env = process.env) {
   // A portable mode conflict must fail before bootstrap copies/preferences.
   // This data-only module imports no isolation code and starts no services.
   portableTransferFixtureEnabled(env);
+  taskGateFixtureEnabled(env);
   // prepareQaFirefox calls this before copying files or writing preferences.
   // Reuse the data-only sidecar gate (no dependency back to isolation), then
   // exclude Claude here as well as at the transport boundary.
@@ -277,11 +284,20 @@ function readManifest(profile) {
   return JSON.parse(safeFile(file, profile).toString('utf8'));
 }
 
-function checkManifest(manifest, profile, config, files) {
+function taskGateSourceFiles(env) {
+  if (!taskGateFixtureEnabled(env)) return undefined;
+  return Object.fromEntries(QA_TASK_GATE_SOURCE_FILES.map(name => {
+    const digest = sha256(safeFile(path.join(APP_ROOT, name), APP_ROOT));
+    return [name, { originalSha256: digest, transformedSha256: digest, kind: 'unchanged-qa-source-not-profile-injected' }];
+  }));
+}
+
+function checkManifest(manifest, profile, config, files, qaSourceFiles) {
   if (manifest.kind !== 'egdesk-qa-fixture-isolation-v1' || manifest.profile !== profile
       || manifest.host !== config.host || manifest.port !== config.port
       || manifest.origin !== config.origin || manifest.qaOnly !== true
-      || JSON.stringify(manifest.files) !== JSON.stringify(files)) {
+      || JSON.stringify(manifest.files) !== JSON.stringify(files)
+      || JSON.stringify(manifest.qaSourceFiles) !== JSON.stringify(qaSourceFiles)) {
     fail('profile/port/source/provenance manifest mismatch');
   }
 }
@@ -293,7 +309,7 @@ export function validateQaFixtureIsolation(profilePath, { env = process.env, req
   if (requireFresh) assertFreshQaFixtureProfile(profile);
   const files = expectedFiles(profile, config.port, projectFileFixtureEnabled(env), chatRunOutputsFixtureEnabled(env),
     portableTransferFixtureEnabled(env)), manifest = readManifest(profile);
-  checkManifest(manifest, profile, config, files);
+  checkManifest(manifest, profile, config, files, taskGateSourceFiles(env));
   for (const [name, entry] of Object.entries(files)) {
     if (sha256(safeFile(path.join(profile, 'chrome', name), profile)) !== entry.transformedSha256) {
       fail(`transformed hash mismatch: ${name}`);
@@ -317,9 +333,10 @@ export function materializeQaFixtureIsolation(profilePath, { env = process.env }
   const projectFileFixture = projectFileFixtureEnabled(env);
   const portableTransferFixture = portableTransferFixtureEnabled(env);
   const files = expectedFiles(profile, config.port, projectFileFixture, chatRunOutputsFixtureEnabled(env), portableTransferFixture);
+  const qaSourceFiles = taskGateSourceFiles(env);
   const manifestPath = path.join(profile, QA_ISOLATION_MANIFEST);
   const existing = infoOrNull(manifestPath) ? readManifest(profile) : null;
-  if (existing) checkManifest(existing, profile, config, files);
+  if (existing) checkManifest(existing, profile, config, files, qaSourceFiles);
   const writes = [];
   // Complete validation before the first write. Re-applying to the same copy,
   // or to a freshly recopied original overlay, has identical provenance.
@@ -334,7 +351,7 @@ export function materializeQaFixtureIsolation(profilePath, { env = process.env }
   }
   for (const [destination, text] of writes) fs.writeFileSync(destination, text);
   const manifest = { kind: 'egdesk-qa-fixture-isolation-v1', qaOnly: true, profile,
-    host: config.host, port: config.port, origin: config.origin, files };
+    host: config.host, port: config.port, origin: config.origin, files, ...(qaSourceFiles ? { qaSourceFiles } : {}) };
   if (!existing) fs.writeFileSync(manifestPath, `${JSON.stringify(manifest, null, 2)}\n`, { flag: 'wx', mode: 0o600 });
   return validateQaFixtureIsolation(profile, { env, requireFresh: true });
 }

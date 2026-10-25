@@ -13,12 +13,14 @@ import { loopbackJson, observeChatEvents } from './egdesk-qa-ui-flow.mjs';
 import { qaBridgeConfig, qaBridgeUrl, transformQaFixtureSource, materializeQaFixtureIsolation,
   validateQaFixtureIsolation, assertQaProfileBridge, QA_ISOLATION_MANIFEST, QA_RUN_OUTPUTS_FILES,
   QA_PORTABLE_TRANSFER_FILES, QA_PORTABLE_PICKER_FILE, transformPortablePickerResults } from './egdesk-qa-fixture-isolation.mjs';
+import { QA_TASK_GATE_SOURCE_FILES } from './egdesk-qa-fixture-isolation.mjs';
 import { projectFileFixtureEnabled, transformProjectPickerResult, QA_PROJECT_PICKER_FILE } from './egdesk-qa-fixture-isolation.mjs';
 
 const ENV = Object.freeze({ EGDESK_QA_FIXTURE_TRANSPORT: '1', EGDESK_QA_FIXTURE_PORT: '39220' });
 const overlay = fileURLToPath(new URL('../overlay/', import.meta.url));
 const hash = bytes => createHash('sha256').update(bytes).digest('hex');
 const token = 'unit-isolation-no-credentials';
+const TASK_ENV = { ...ENV, EGDESK_QA_TASK_GATE_FIXTURE: '1', EGDESK_QA_REAL_TURN: '0' };
 
 function setup(t) {
   const source = fs.mkdtempSync(path.join(canonicalTempRoot(), 'egdesk-isolation-loader-'));
@@ -47,6 +49,81 @@ test('fixture config is explicit, loopback only, never 39218; real-provider defa
   for (const route of ['//evil.test/auth/status', '/\\evil.test', 'http://evil.test', '/\nauth/status']) {
     assert.throws(() => qaBridgeUrl(route, ENV), /route/);
   }
+});
+
+test('Task opt-in binds four unchanged QA sources and existing real runtime fingerprints without injecting those sources', t => {
+  assert.deepEqual(QA_TASK_GATE_SOURCE_FILES, ['scripts/egdesk-task-gate-fixture.mjs', 'scripts/egdesk-task-gate-fixture.test.mjs',
+    'scripts/verify-firefox-mcp-task-gate-flow.mjs', 'scripts/verify-firefox-mcp-task-gate-flow.test.mjs']);
+  const root = path.dirname(overlay.slice(0, -1));
+  const before = Object.fromEntries(QA_TASK_GATE_SOURCE_FILES.map(name => [name, fs.readFileSync(path.join(root, name))]));
+  const profile = setup(t); prepareQaFirefox(profile, { env: TASK_ENV });
+  const manifest = validateQaFixtureIsolation(profile, { env: TASK_ENV });
+  assert.deepEqual(Object.keys(manifest.qaSourceFiles), QA_TASK_GATE_SOURCE_FILES);
+  for (const name of QA_TASK_GATE_SOURCE_FILES) {
+    assert.deepEqual(manifest.qaSourceFiles[name], { originalSha256: hash(before[name]), transformedSha256: hash(before[name]),
+      kind: 'unchanged-qa-source-not-profile-injected' });
+    assert.deepEqual(fs.readFileSync(path.join(root, name)), before[name]);
+    assert.equal(fs.existsSync(path.join(profile, 'chrome', name)), false);
+  }
+  assert.ok(manifest.files['JS/eg-desk-surface.uc.js']);
+  assert.ok(manifest.files['resources/EGDeskChatState.sys.mjs']);
+  assert.equal(manifest.files[QA_PORTABLE_PICKER_FILE].portablePickerTransform, undefined);
+  assert.throws(() => validateQaFixtureIsolation(profile, { env: ENV }), /mismatch/, 'Task source manifest is not ordinary mode');
+});
+
+test('Task invalid or mixed modes reject before copying or preference/provenance writes', t => {
+  const profile = setup(t);
+  const copy = t.mock.method(fs, 'cpSync', () => assert.fail('No copy before mode validation'));
+  const write = t.mock.method(fs, 'writeFileSync', () => assert.fail('No write before mode validation'));
+  try {
+    for (const patch of [{ EGDESK_QA_TASK_GATE_FIXTURE: 'true' }, { EGDESK_QA_REAL_TURN: '1' },
+      { EGDESK_QA_FIXTURE_TRANSPORT: '0' }, { EGDESK_QA_REAL_TURN: undefined },
+      ...['EGDESK_QA_PROJECT_FILE_FIXTURE', 'EGDESK_QA_PORTABLE_TRANSFER_FIXTURE', 'EGDESK_QA_RUN_OUTPUTS_FIXTURE',
+        'EGDESK_QA_CLAUDE_FIXTURE', 'EGDESK_QA_CLAUDE_READER_FIXTURE', 'EGDESK_QA_BROWSER_NEGATIVE',
+        'EGDESK_QA_BROWSER_RELAY', 'EGDESK_QA_CHAT_ORIGIN_FILE_FIXTURE'].map(key => ({ [key]: '1' }))]) {
+      assert.throws(() => prepareQaFirefox(profile, { env: { ...TASK_ENV, ...patch } }));
+    }
+    assert.equal(copy.mock.callCount(), 0); assert.equal(write.mock.callCount(), 0);
+  } finally { copy.mock.restore(); write.mock.restore(); }
+});
+
+test('Task source manifest missing/tampered entries and changed source bytes fail closed without editing source originals', t => {
+  const profile = setup(t); prepareQaFirefox(profile, { env: TASK_ENV });
+  const manifestPath = path.join(profile, QA_ISOLATION_MANIFEST), original = fs.readFileSync(manifestPath), manifest = JSON.parse(original);
+  for (const name of QA_TASK_GATE_SOURCE_FILES) {
+    for (const change of [value => { delete value.qaSourceFiles[name]; },
+      value => { value.qaSourceFiles[name].originalSha256 = '0'.repeat(64); },
+      value => { value.qaSourceFiles[name].transformedSha256 = '1'.repeat(64); }]) {
+      const changed = structuredClone(manifest); change(changed);
+      fs.writeFileSync(manifestPath, JSON.stringify(changed));
+      assert.throws(() => validateQaFixtureIsolation(profile, { env: TASK_ENV }), /mismatch/);
+    }
+  }
+  fs.writeFileSync(manifestPath, original);
+  const target = path.join(path.dirname(overlay.slice(0, -1)), QA_TASK_GATE_SOURCE_FILES[0]);
+  const sourceBefore = fs.readFileSync(target), read = fs.readFileSync;
+  const changedRead = t.mock.method(fs, 'readFileSync', function(file, ...args) {
+    if (file === target) return Buffer.concat([sourceBefore, Buffer.from('\n// simulated source drift\n')]);
+    return read.call(fs, file, ...args);
+  });
+  try { assert.throws(() => validateQaFixtureIsolation(profile, { env: TASK_ENV }), /mismatch/); }
+  finally { changedRead.mock.restore(); }
+  assert.deepEqual(fs.readFileSync(target), sourceBefore);
+  assert.deepEqual(fs.readFileSync(manifestPath), original);
+});
+
+test('Task missing canonical QA source refuses materialization before endpoint rewrites', t => {
+  const profile = setup(t); prepareQaFirefox(profile, { env: {} });
+  const surface = path.join(profile, 'chrome', 'JS/eg-desk-surface.uc.js'), before = fs.readFileSync(surface);
+  const target = path.join(path.dirname(overlay.slice(0, -1)), QA_TASK_GATE_SOURCE_FILES[2]), stat = fs.lstatSync;
+  const missing = t.mock.method(fs, 'lstatSync', function(file, ...args) {
+    if (file === target) throw Object.assign(new Error('Unit missing canonical Task source'), { code: 'ENOENT' });
+    return stat.call(fs, file, ...args);
+  });
+  try { assert.throws(() => materializeQaFixtureIsolation(profile, { env: TASK_ENV }), /missing canonical Task source/); }
+  finally { missing.mock.restore(); }
+  assert.deepEqual(fs.readFileSync(surface), before);
+  assert.equal(fs.existsSync(path.join(profile, QA_ISOLATION_MANIFEST)), false);
 });
 
 test('only approved endpoint literals and named constants change, not numbers or log text', () => {

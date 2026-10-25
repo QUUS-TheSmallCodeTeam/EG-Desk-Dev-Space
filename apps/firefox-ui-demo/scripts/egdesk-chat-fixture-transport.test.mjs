@@ -6,9 +6,11 @@ import { Readable } from 'node:stream';
 import { EventEmitter } from 'node:events';
 import test from 'node:test';
 import vm from 'node:vm';
+import net from 'node:net';
 import { bootstrapQaProfile, canonicalTempRoot, LOADER_FILES } from './egdesk-chat-qa-profile.mjs';
 import { createQaFixtureTransport, CLAUDE_FIXTURE_QUESTIONS, CLAUDE_FIXTURE_TEXT } from './egdesk-chat-fixture-transport.mjs';
 import { chatRunOutputFixtureIds, CHAT_RUN_OUTPUT_MARKER, CHAT_RUN_DIFF_MARKER } from './egdesk-chat-run-outputs-fixture.mjs';
+import { TASK_GATE_SEED_MESSAGE } from './egdesk-task-gate-fixture.mjs';
 import { prepareQaFirefox } from './run-firefox-mcp-target.mjs';
 import { assertNativeTerminalExit, assertQaFixtureArtifact } from './egdesk-chat-qa-contract.sys.mjs';
 import { createChatProtocolState, mergeChatSnapshot, projectRunMessages, usableArtifact } from '../overlay/resources/EGDeskChatState.sys.mjs';
@@ -19,7 +21,7 @@ import { assertPublishedBriefing, assertContextCaptureBatch, assertStoredAgentDe
 const TOKEN = 'unit-fixture-token-no-credentials';
 const FIXTURE_ENV = { EGDESK_QA_FIXTURE_TRANSPORT: '1', EGDESK_QA_FIXTURE_PORT: '49318' };
 
-function setup(t, { claude = false, reader = false, projectFile = false, runOutputs = false, portable = false } = {}) {
+function setup(t, { claude = false, reader = false, projectFile = false, runOutputs = false, portable = false, taskGate = false } = {}) {
   const source = fs.mkdtempSync(path.join(canonicalTempRoot(), 'egdesk-loader-fixture-'));
   for (const name of LOADER_FILES) fs.writeFileSync(path.join(source, name), `unit fixture ${name}\n`);
   const { profile } = bootstrapQaProfile({ loaderSource: source });
@@ -34,7 +36,8 @@ function setup(t, { claude = false, reader = false, projectFile = false, runOutp
   const eventSourceBefore = globalThis.EventSource;
   const fixtureEnv = { ...FIXTURE_ENV, ...(projectFile ? { EGDESK_QA_PROJECT_FILE_FIXTURE: '1', EGDESK_QA_REAL_TURN: '0' } : {}),
     ...(runOutputs ? { EGDESK_QA_RUN_OUTPUTS_FIXTURE: '1', EGDESK_QA_REAL_TURN: '0' } : {}),
-    ...(portable ? { EGDESK_QA_PORTABLE_TRANSFER_FIXTURE: '1', EGDESK_QA_REAL_TURN: '0' } : {}) };
+    ...(portable ? { EGDESK_QA_PORTABLE_TRANSFER_FIXTURE: '1', EGDESK_QA_REAL_TURN: '0' } : {}),
+    ...(taskGate ? { EGDESK_QA_TASK_GATE_FIXTURE: '1', EGDESK_QA_REAL_TURN: '0' } : {}) };
   prepareQaFirefox(profile, { env: fixtureEnv });
   const transport = createQaFixtureTransport({ profile, token: TOKEN,
     env: { ...fixtureEnv, ...(claude ? { EGDESK_QA_CLAUDE_FIXTURE: '1' } : {}),
@@ -46,7 +49,7 @@ function setup(t, { claude = false, reader = false, projectFile = false, runOutp
 }
 
 async function request(handler, method, url, body = null, token = null, onResponse = () => {}, extraHeaders = {}) {
-  const req = Readable.from(body === null ? [] : [JSON.stringify(body)]);
+  const req = Readable.from(body === null ? [] : [Buffer.from(JSON.stringify(body))]);
   Object.assign(req, { method, url, headers: { ...(token ? { 'x-egdesk-qa-token': token } : {}), ...extraHeaders } });
   let status;
   let headers = {};
@@ -69,6 +72,103 @@ const sendRunOutputs = (handler, scenario = 'RUN_OUTPUTS') => request(handler, '
   clientThreadId: `qa-output-${scenario}`, requestId: `qa-output-${scenario}` });
 const outputRoute = (path, run, itemId) => `${path}?${new URLSearchParams({ conversationId: run.conversationId, runId: run.runId,
   ...(itemId === undefined ? {} : { itemId }) })}`;
+
+async function setupTaskMount(t) {
+  const transport = setup(t, { taskGate: true });
+  assert.ok(transport.ready instanceof Promise, 'Task adds async readiness without changing the sync factory');
+  const headers = { host: '127.0.0.1:49318', 'content-type': 'application/json', origin: 'chrome://browser' };
+  const send = (method, route, body = null, token = null, extra = {}) => request(transport.handler, method, route, body, token, () => {}, { ...headers, ...extra });
+  // Intentionally issue a request before await ready: the handler must wait,
+  // never race the generic synthetic Chat fallback during initialization.
+  const initial = await send('GET', '/__qa/state', null, TOKEN);
+  assert.equal(initial.status, 200); const root = initial.body.taskGate.root;
+  t.after(async () => {
+    await transport.dispose();
+    assert.equal(path.dirname(root), canonicalTempRoot()); assert.equal(fs.realpathSync.native(root), root);
+    assert.ok(path.basename(root).startsWith('egdesk-task-gate-')); fs.rmSync(root, { recursive: true });
+  });
+  const state = async () => (await send('GET', '/__qa/task-gate/state', null, TOKEN)).body;
+  const seed = () => send('POST', '/chat/send', { message: TASK_GATE_SEED_MESSAGE, profileEnabled: false,
+    clientThreadId: 'owned-task-mount-room', requestId: 'owned-task-mount-request' });
+  const control = action => send('POST', '/__qa/task-gate/control', { action }, TOKEN);
+  return { transport, send, state, seed, control, initial: initial.body, headers };
+}
+
+test('Task async mount owns actual Chat/Task HTTP and workflow SQLite before common fallback, without a listener/provider', async t => {
+  const fetchSpy = t.mock.method(globalThis, 'fetch', () => assert.fail('no provider/network request'));
+  const listenSpy = t.mock.method(net.Server.prototype, 'listen', () => assert.fail('factory must not listen'));
+  const { transport, send, state, seed, initial } = await setupTaskMount(t);
+  await transport.ready;
+  assert.equal(initial.taskGateFixture, true); assert.equal(initial.providerTurns, 0);
+  assert.equal(initial.taskGate.persisted.journalCount, 0);
+  assert.equal((await send('GET', '/health')).body.ok, true, 'false sidecar handle reaches normal discovery');
+  assert.equal((await send('POST', '/v1/files/projects/room-default', { roomId: 'owned-task-mount-room' })).body.result.status, 'none');
+  const sent = await seed(); assert.equal(sent.status, 202); assert.equal(sent.body.accepted, true);
+  const after = await state(); assert.equal(after.plans.length, 1);
+  assert.equal(after.original.runId, sent.body.runId); assert.equal(after.original.clientThreadId, 'owned-task-mount-room');
+  assert.equal(after.fakeProviderTurns.length, 1); assert.equal(after.providerTurns, 0);
+  assert.ok(after.persisted.journalCount > 0);
+  const graph = await send('GET', `/tasks/state?graphId=${after.plans[0].graphId}`);
+  assert.equal(graph.status, 200); assert.equal(graph.body.graph.graphId, after.plans[0].graphId);
+  const chat = await send('GET', `/chat/state?conversationId=${after.original.conversationId}`);
+  assert.equal(chat.status, 200); assert.ok(JSON.stringify(chat.body).includes(after.original.runId));
+  const common = (await send('GET', '/__qa/state', null, TOKEN)).body;
+  assert.deepEqual(common.runs, []); assert.deepEqual(common.observed.sends, [], 'generic send was not used');
+  assert.equal(common.taskGate.requests.find(row => row.path === '/chat/send').delegated, true);
+  assert.equal(fetchSpy.mock.callCount(), 0); assert.equal(listenSpy.mock.callCount(), 0);
+});
+
+test('Task broadcasts unchanged real graph/chat frames through existing codex SSE and continue stays real/stale', async t => {
+  const { transport, send, state, seed, control, headers } = await setupTaskMount(t), frames = [];
+  const req = Object.assign(new EventEmitter(), { method: 'GET', url: '/events?chatProtocol=2', headers });
+  const res = { writeHead(status) { assert.equal(status, 200); }, write(wire) { frames.push(wire); return true; } };
+  await transport.handler(req, res); t.after(() => req.emit('close'));
+  assert.match(frames[0], /^event: ready/);
+  await seed(); const before = await state(), plan = before.plans[0];
+  const events = frames.filter(wire => wire.startsWith('event: codex\n')).map(wire => JSON.parse(wire.split('\ndata: ')[1]));
+  const graphFrame = before.frames.find(frame => frame.type === 'task.graph');
+  assert.ok(graphFrame); assert.ok(events.some(frame => JSON.stringify(frame) === JSON.stringify(graphFrame)));
+  assert.ok(events.some(frame => frame.type === 'chat.event' && frame.clientThreadId === before.original.clientThreadId));
+  const body = { boardId: plan.boardId, scope: plan.scope, taskId: 'send', gateId: 'how', answer: { choice: 'kakao' } };
+  assert.equal((await send('POST', '/tasks/continue', body)).status, 200);
+  const duplicate = await send('POST', '/tasks/continue', body);
+  assert.equal(duplicate.status, 409); assert.equal(duplicate.body.code, 'TASK_GATE_STALE');
+  for (let i = 0; i < 100 && (await state()).fakeProviderTurns.length < 2; i++) await new Promise(resolve => setImmediate(resolve));
+  const after = await state(); assert.equal(after.fakeProviderTurns.length, 2);
+  assert.ok(after.fakeProviderTurns.every(turn => turn.conversationId === before.original.conversationId));
+  assert.equal((await control('complete-turn')).status, 200);
+  req.emit('close'); assert.equal((await send('GET', '/__qa/state', null, TOKEN)).body.clients, 0);
+});
+
+test('Task controls/HTTP keep token, CORS, loopback and refusal semantics; unsupported send cannot fall back', async t => {
+  const { send, state } = await setupTaskMount(t);
+  assert.equal((await send('OPTIONS', '/tasks/continue')).status, 204);
+  assert.equal((await send('GET', '/__qa/task-gate/state')).status, 403);
+  assert.equal((await send('POST', '/__qa/task-gate/control', { action: 'refresh' }, TOKEN, { origin: 'https://outside.invalid' })).status, 403);
+  assert.equal((await send('GET', '/tasks/state', null, null, { host: 'outside.invalid' })).status, 400);
+  for (const route of ['/terminal/spawn', '/providers/start', '/tasks/invented']) {
+    assert.equal((await send('POST', route, {})).status, 403);
+  }
+  assert.equal((await send('POST', '/chat/send', { message: 'EGDESK_QA_COMPLETE must not reach generic fixture',
+    profileEnabled: false, clientThreadId: 'wrong-room', requestId: 'wrong-request' })).status, 403);
+  assert.equal((await state()).fakeProviderTurns.length, 0);
+});
+
+test('awaited Task disposal releases a held real request and refuses post-close dispatch without replay', async t => {
+  const { transport, send, state, seed, control } = await setupTaskMount(t);
+  await seed(); const before = await state(), plan = before.plans[0];
+  await control('hold-next');
+  const pending = send('POST', '/tasks/continue', { boardId: plan.boardId, scope: plan.scope,
+    taskId: 'send', gateId: 'how', answer: { choice: 'email' } });
+  let held;
+  for (let i = 0; i < 100; i++) { held = await state(); if (held.held) break; await new Promise(resolve => setImmediate(resolve)); }
+  assert.ok(held.held);
+  const close = transport.dispose(); assert.ok(close instanceof Promise); assert.equal(transport.dispose(), close);
+  await close;
+  assert.equal((await pending).status, 503);
+  assert.equal((await send('POST', '/chat/send', {})).status, 503);
+  assert.equal((await transport.ready).snapshot().disposed, true);
+});
 
 test('portable opt-in mounts real Profile/Desk HTTP and SQLite without a second server or provider', async t => {
   const fetchSpy = t.mock.method(globalThis, 'fetch', () => assert.fail('no provider/network forwarding'));
