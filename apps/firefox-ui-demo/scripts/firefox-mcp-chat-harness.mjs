@@ -11,6 +11,48 @@ export const CACHED_MCP_ENTRY = process.env.EGDESK_QA_MCP_ENTRY || (process.plat
 export const CACHED_GECKODRIVER = process.env.EGDESK_QA_GECKODRIVER || (process.platform === 'darwin'
   ? '/Users/minsoocha/.cache/selenium/geckodriver/mac-arm64/0.37.0/geckodriver' : null);
 export const QA_MARIONETTE_PORT = 2829;
+export const QA_NATIVE_INPUT_MAX_DELTA = 8192;
+
+function cloneQaNativePointInput(kind, input) {
+  const keys = kind === 'click' ? ['x', 'y'] : kind === 'wheel' ? ['x', 'y', 'deltaX', 'deltaY'] : null;
+  if (!keys || !input || typeof input !== 'object' || Array.isArray(input) ||
+      Reflect.ownKeys(input).length !== keys.length) throw new Error('Invalid native point input');
+  const copy = {};
+  for (const key of keys) {
+    const descriptor = Object.getOwnPropertyDescriptor(input, key);
+    if (!descriptor || !('value' in descriptor) || !Number.isFinite(descriptor.value)) {
+      throw new Error(`Native input ${key} must be a finite number data property`);
+    }
+    copy[key] = descriptor.value;
+  }
+  if (copy.x < 0 || copy.y < 0) throw new Error('Native input coordinates must be nonnegative');
+  if (kind === 'wheel' && (!keys.every(key => Number.isSafeInteger(copy[key])) ||
+      Math.abs(copy.deltaX) > QA_NATIVE_INPUT_MAX_DELTA || Math.abs(copy.deltaY) > QA_NATIVE_INPUT_MAX_DELTA ||
+      (copy.deltaX === 0 && copy.deltaY === 0))) {
+    throw new Error(`Wheel input requires integer coordinates and a nonzero delta bounded by ${QA_NATIVE_INPUT_MAX_DELTA}`);
+  }
+  return copy;
+}
+
+// Pure wire serialization; CSS viewport coordinates, never DOM scrolling/focus.
+// https://developer.mozilla.org/en-US/docs/Web/WebDriver/Reference/BiDi/Modules/input/performActions
+export function serializeQaNativeInput(kind, input, { context, width, height } = {}) {
+  const point = cloneQaNativePointInput(kind, input);
+  if (typeof context !== 'string' || !/^[0-9a-f]{8}(?:-[0-9a-f]{4}){3}-[0-9a-f]{12}$/i.test(context)) {
+    throw new Error('Native input requires the selected browser-chrome context');
+  }
+  if (!Number.isFinite(width) || !Number.isFinite(height) || width <= 0 || height <= 0 ||
+      point.x >= width || point.y >= height) throw new Error('Native input point is outside the observed viewport');
+  const source = kind === 'click'
+    ? { type: 'pointer', id: 'egdesk_qa_point_mouse', parameters: { pointerType: 'mouse' }, actions: [
+      { type: 'pointerMove', origin: 'viewport', x: point.x, y: point.y, duration: 0 },
+      { type: 'pointerDown', button: 0 }, { type: 'pointerUp', button: 0 },
+    ] }
+    : { type: 'wheel', id: 'egdesk_qa_point_wheel', actions: [
+      { type: 'scroll', origin: 'viewport', ...point, duration: 0 },
+    ] };
+  return { method: 'input.performActions', params: { context, actions: [source] } };
+}
 
 // 2829 remains the chat QA default. Main may explicitly select the separately
 // launched 2828 target, but arbitrary ports are never accepted by this harness.
@@ -485,6 +527,41 @@ export class FirefoxMcpChatHarness {
       return this.#call('click_by_uid', { uid });
     });
   }
+
+  async #pointInput(kind, input) {
+    // Own caller data before the first await; never accept context/tool overrides.
+    const point = cloneQaNativePointInput(kind, input);
+    const connection = this.#proc;
+    const context = this.#context;
+    const assertCurrent = () => {
+      if (!connection || !connection.stdin.writable || this.#proc !== connection ||
+          !context || this.#context !== context) throw new Error('Native input connection/context changed or unavailable');
+      if (!this.#tools.has('send_bidi_command')) throw new Error('Cached MCP lacks native input tool: send_bidi_command');
+    };
+    assertCurrent();
+    const viewport = await this.evaluateChrome(`() => {
+      const bc = window.docShell?.browsingContext;
+      if (window.document.documentURI !== 'chrome://browser/content/browser.xhtml' ||
+          bc?.isContent !== false || bc?.parent !== null || bc?.currentWindowGlobal?.isCurrentGlobal !== true) {
+        throw new Error('Native input refused a stale or non-root browser-chrome context');
+      }
+      return { width: window.innerWidth, height: window.innerHeight };
+    }`);
+    assertCurrent();
+    const payload = serializeQaNativeInput(kind, point, { context, width: viewport?.width, height: viewport?.height });
+    await this.assertRemoteProfile();
+    assertCurrent();
+    // One request on this MCP transport, always with the original context ID.
+    // Inside the owned isolated QA runner, MCP may recover its protocol session
+    // (and tabs) before dispatch. Session/context survival is not guaranteed;
+    // a missing original context must fail, never be replaced by a fresh one.
+    // No harness retry, ambiguous input replay, selector fallback or releaseActions.
+    return this.#call('send_bidi_command', payload);
+  }
+
+  async clickPoint(input) { return this.#pointInput('click', input); }
+
+  async wheelAt(input) { return this.#pointInput('wheel', input); }
 
   async fill(selector, value) {
     return this.#withFreshUid(async () => {

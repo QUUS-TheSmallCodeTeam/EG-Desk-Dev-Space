@@ -227,8 +227,81 @@ function portableTextDom({ selector, needle }) {
   return { count: 1, text, needle, matches, missing, visible, fragments };
 }
 
+function portableSettingsNavigationDom({ selector, settingsId }) {
+  const cards = [...document.querySelectorAll('.egd-settings-card')].filter(node => node.id === settingsId);
+  const card = cards.length === 1 ? cards[0] : null;
+  const contents = card ? [...card.querySelectorAll('.egd-settings-content')] : [];
+  const content = contents.length === 1 ? contents[0] : null;
+  const targets = [...document.querySelectorAll(selector)], target = targets.length === 1 ? targets[0] : null;
+  const rect = node => { const r = node.getBoundingClientRect();
+    return { left: r.left, top: r.top, right: r.right, bottom: r.bottom, width: r.width, height: r.height }; };
+  const visible = node => {
+    for (let n = node; n; n = n.parentElement) {
+      const s = getComputedStyle(n);
+      if (!n.isConnected || n.hidden || n.inert || s.display === 'none' || s.visibility !== 'visible' || Number(s.opacity) === 0) return false;
+    }
+    return !!node && !node.closest('[aria-hidden="true"]');
+  };
+  const clip = node => {
+    const result = { left: 0, top: 0, right: innerWidth, bottom: innerHeight };
+    for (let n = node; n; n = n.parentElement) {
+      const s = getComputedStyle(n), b = rect(n);
+      if (s.display === 'inline' || s.display === 'contents') continue;
+      const sx = n.offsetWidth ? b.width / n.offsetWidth : 1, sy = n.offsetHeight ? b.height / n.offsetHeight : 1;
+      if (/(auto|scroll|hidden|clip)/.test(s.overflowX)) {
+        result.left = Math.max(result.left, b.left + n.clientLeft * sx);
+        result.right = Math.min(result.right, b.left + (n.clientLeft + n.clientWidth) * sx);
+      }
+      if (/(auto|scroll|hidden|clip)/.test(s.overflowY)) {
+        result.top = Math.max(result.top, b.top + n.clientTop * sy);
+        result.bottom = Math.min(result.bottom, b.top + (n.clientTop + n.clientHeight) * sy);
+      }
+    }
+    return result;
+  };
+  const inside = (b, c) => b.left >= c.left && b.top >= c.top && b.right <= c.right && b.bottom <= c.bottom;
+  const owns = (node, x, y) => { const hit = document.elementFromPoint(x, y); return !!hit && (hit === node || node.contains(hit)); };
+  const base = { settingsId, selector, cards: cards.length, contents: contents.length, count: targets.length,
+    transferState: card?.querySelector('[data-testid="transfer-status"]')?.dataset.state || null,
+    activeTestid: document.activeElement?.dataset?.testid || null, focused: target === document.activeElement };
+  if (!card || !content || !target || !content.contains(target)) return { ...base, owned: false };
+  const bounds = rect(content), viewport = clip(content), targetRect = rect(target), targetClip = clip(target.parentElement);
+  viewport.left = Math.max(viewport.left, bounds.left); viewport.right = Math.min(viewport.right, bounds.right);
+  viewport.top = Math.max(viewport.top, bounds.top); viewport.bottom = Math.min(viewport.bottom, bounds.bottom);
+  const targetVisible = visible(target) && targetRect.width > 0 && targetRect.height > 0;
+  const disabled = !!target.disabled || !!target.readOnly;
+  const targetHits = [0.2, 0.5, 0.8].flatMap(x => [0.2, 0.5, 0.8].map(y =>
+    owns(target, targetRect.left + targetRect.width * x, targetRect.top + targetRect.height * y)));
+  const point = { x: Math.round(targetRect.left + targetRect.width / 2), y: Math.round(targetRect.top + targetRect.height / 2) };
+  const scrollOwner = node => {
+    for (let n = node; n; n = n.parentElement) {
+      if (n === content) return content;
+      if (/(auto|scroll)/.test(getComputedStyle(n).overflowY) && n.scrollHeight > n.clientHeight + 1) return n;
+    }
+    return null;
+  };
+  // Settings padding is outside nested instruction scrollers. A real wheel
+  // must land on this exact outer scroll owner, not the canvas or a popup.
+  let wheelPoint = null;
+  for (const x of [viewport.left + 12, viewport.left + 8, viewport.right - 12]) {
+    for (const fraction of [0.5, 0.25, 0.75]) {
+      const y = viewport.top + (viewport.bottom - viewport.top) * fraction;
+      const px = Math.round(x), py = Math.round(y);
+      if (px <= viewport.left + 2 || px >= viewport.right - 2 || py <= viewport.top + 2 || py >= viewport.bottom - 2) continue;
+      if ([-1, 0, 1].every(dx => [-1, 0, 1].every(dy => {
+        const hit = document.elementFromPoint(px + dx, py + dy);
+        return !!hit && content.contains(hit) && scrollOwner(hit) === content;
+      }))) { wheelPoint = { x: px, y: py }; break; }
+    }
+    if (wheelPoint) break;
+  }
+  return { ...base, owned: true, contentVisible: visible(content), targetVisible, disabled, targetRect, targetClip,
+    targetReady: targetVisible && !disabled && inside(targetRect, targetClip) && targetHits.every(Boolean) && owns(target, point.x, point.y),
+    point, wheelPoint, bounds, viewport, scrollTop: content.scrollTop, scrollHeight: content.scrollHeight, clientHeight: content.clientHeight };
+}
+
 export function portableObservationSources() {
-  return [portableUiDom, portableTextDom, portableFirstUseDom].map(fn => {
+  return [portableUiDom, portableTextDom, portableFirstUseDom, portableSettingsNavigationDom].map(fn => {
     const source = fn.toString(), bytes = Buffer.byteLength(source);
     assert.ok(bytes < PORTABLE_OBSERVATION_BUDGET, 'Read-only observations fit the unchanged MCP size guard');
     return { name: fn.name, source, bytes };
@@ -236,10 +309,66 @@ export function portableObservationSources() {
 }
 export const observePortableUi = harness => chrome(harness, portableUiDom);
 export const observePortableText = (harness, selector, needle = null) => chrome(harness, portableTextDom, { selector, needle });
+export const observePortableSettingsNavigation = (harness, selector, settingsId) => chrome(harness, portableSettingsNavigationDom, { selector, settingsId });
 export function portableTextVisible(paint, expected, needle = null) {
   return paint?.count === 1 && paint.text === expected && paint.needle === needle && paint.matches > 0 &&
     (needle == null || paint.matches === 1) && paint.missing === 0 && paint.visible && paint.fragments.length > 0 &&
     paint.fragments.every(r => r.inside && r.hits.length === 3 && r.hits.every(Boolean));
+}
+
+export async function navigatePortableSettings({ read, wheelAt, clickPoint, pause, assertDeadline, focus = false, trace = [] }) {
+  let binding;
+  const observe = async () => {
+    assertDeadline(); const value = await read();
+    assert.ok(value.owned && value.cards === 1 && value.contents === 1 && value.count === 1, 'One target in the same Settings content is required');
+    assert.ok(value.contentVisible && value.targetVisible && !value.disabled, 'Settings target is unavailable');
+    const next = JSON.stringify([value.settingsId, value.selector, value.transferState]);
+    if (binding === undefined) binding = next;
+    assert.equal(next, binding, 'Settings view changed during native navigation');
+    assert.ok([value.scrollTop, value.scrollHeight, value.clientHeight].every(Number.isFinite) && value.clientHeight > 0);
+    return value;
+  };
+  const position = value => JSON.stringify([value.targetRect, value.targetClip, value.bounds, value.viewport, value.scrollTop,
+    value.scrollHeight, value.clientHeight, value.point, value.wheelPoint, value.targetReady, value.focused, value.activeTestid]);
+  const settle = async (before = null, direction = 0) => {
+    let previous = null, stable = 0;
+    for (let sample = 0; sample < 30; sample++) {
+      await pause(); const value = await observe(), next = position(value);
+      const progressed = !direction || direction * (value.scrollTop - before.scrollTop) > 0.5;
+      stable = progressed && next === previous ? stable + 1 : 0; previous = next;
+      if (stable >= 2) return value;
+    }
+    throw new Error('Settings native wheel did not move and settle; no input retry or keyboard fallback');
+  };
+  let value = await settle();
+  for (let step = 0; step <= 12; step++) {
+    const fresh = await observe();
+    assert.equal(position(fresh), position(value), 'Settings geometry changed before native input'); value = fresh;
+    if (value.targetReady) {
+      if (focus && !value.focused) {
+        assert.equal(value.selector, testid('import-instructions'), 'Only the non-action instruction region may be clicked for focus');
+        assertDeadline(); await clickPoint(value.point);
+        trace.push({ kind: 'native-focus-point', selector: value.selector, ...value.point });
+        value = await settle();
+        assert.ok(value.targetReady && value.focused, 'Visible-point click did not leave focus on the instruction region');
+      }
+      return value;
+    }
+    assert.ok(step < 12, 'Settings target was not revealed within the bounded wheel budget');
+    const r = value.targetRect, c = value.viewport;
+    assert.ok(r.left >= c.left && r.right <= c.right && r.height + 24 <= c.bottom - c.top,
+      'Target cannot fit the visible Settings scroll area');
+    const delta = r.top < c.top + 12 ? r.top - c.top - 12 : r.bottom > c.bottom - 12 ? r.bottom - c.bottom + 12 : 0;
+    assert.ok(delta !== 0, 'Target is covered or clipped without a safe outer-scroll route');
+    const direction = Math.sign(delta), max = Math.max(0, value.scrollHeight - value.clientHeight);
+    assert.ok(direction > 0 ? value.scrollTop < max - 0.5 : value.scrollTop > 0.5, 'Settings is already at its scroll boundary');
+    assert.ok(value.wheelPoint && Number.isFinite(value.wheelPoint.x) && Number.isFinite(value.wheelPoint.y), 'No observed unobstructed Settings wheel point');
+    const input = { ...value.wheelPoint, deltaX: 0, deltaY: direction * Math.min(240, Math.max(24, Math.ceil(Math.abs(delta)))) };
+    assertDeadline(); await wheelAt(input);
+    trace.push({ kind: 'native-wheel', selector: value.selector, ...input, before: value.scrollTop });
+    value = await settle(value, direction);
+    trace.at(-1).after = value.scrollTop;
+  }
 }
 
 export async function preparePortableInstructionEdge({ edge, expectedText, readUi, readTargets, press, pause, assertDeadline }) {
@@ -252,27 +381,23 @@ export async function preparePortableInstructionEdge({ edge, expectedText, readU
     assert.ok(box && [box.scrollTop, box.scrollHeight, box.clientHeight].every(Number.isFinite) && box.clientHeight > 0);
     return ui;
   };
-  let ui = await read(), focusKeys = 0;
-  while (ui.active?.testid !== 'import-instructions') {
-    const targets = await readTargets();
-    assert.equal(targets.length, 1, 'One existing instruction region required');
-    assert.equal(targets[0].disabled, false);
-    assert.ok(focusKeys < 64, 'Native Tab did not focus the instruction region');
-    assertDeadline(); await press('Tab'); focusKeys++; await pause(); ui = await read();
-  }
+  let ui = await read();
+  assert.equal(ui.active?.testid, 'import-instructions', 'Observe native point focus before any instruction key');
   const safeRegion = async () => {
     const targets = await readTargets();
     assert.equal(targets.length, 1);
     assert.deepEqual(targetIssues(targets[0]), [], 'Instruction region must remain fully reachable, not clipped by its parent');
   };
   await safeRegion();
+  ui = await read();
+  assert.equal(ui.active?.testid, 'import-instructions', 'Focus changed before the instruction key');
   const atEdge = value => {
     const box = value.instructions.box, max = Math.max(0, box.scrollHeight - box.clientHeight);
     return edge === 'Home' ? box.scrollTop <= 0.5 : box.scrollTop >= max - 0.5;
   };
   const before = ui.instructions.box.scrollTop, key = atEdge(ui) ? null : edge;
   // Do not send Home/End at an already-reached edge: nested scrolling may
-  // move the outer Settings region. Focus was established by native Tab, so
+  // move the outer Settings region. Focus was established by a native click, so
   // omit the selector (the MCP's targeted press calls element.focus()).
   if (key) { assertDeadline(); await press(key); }
   let previous = null, stable = 0;
@@ -286,7 +411,7 @@ export async function preparePortableInstructionEdge({ edge, expectedText, readU
     previous = position;
     if (stable >= 2) {
       await safeRegion();
-      return { key, focusKeys, before, after: box.scrollTop, outerScrollTop: ui.contentBox?.scrollTop };
+      return { key, before, after: box.scrollTop, outerScrollTop: ui.contentBox?.scrollTop };
     }
   }
   throw new Error(`Native instruction ${edge} did not settle at its local edge; UI remains unverified`);
@@ -294,6 +419,8 @@ export async function preparePortableInstructionEdge({ edge, expectedText, readU
 
 export async function runPortableTransferFlow({ harness, result, check }, { profile, deadlineMs, env = process.env }) {
   assertPortableEnvironment(env); assertBeforeDeadline(deadlineMs);
+  assert.equal(typeof harness.clickPoint, 'function', 'Owned native clickPoint harness API required');
+  assert.equal(typeof harness.wheelAt, 'function', 'Owned native wheelAt harness API required');
   const isolation = validateQaFixtureIsolation(profile, { env }), descriptor = isolation.files[QA_PORTABLE_PICKER_FILE].portablePickerTransform;
   check('only two fingerprinted native OS-result bodies are transformed', descriptor?.kind === 'portable-text-os-picker-results-v1' && descriptor.functions.length === 2);
   check('actual flow/view/IO-adapter modules have unchanged fingerprints', QA_PORTABLE_TRANSFER_FILES.every(name =>
@@ -315,28 +442,30 @@ export async function runPortableTransferFlow({ harness, result, check }, { prof
     const targets = await observeTargets(harness, selector);
     check(`unobstructed native target ${selector}`, targets.length === 1 && targetIssues(targets[0]).length === 0,
       { count: targets.length, issues: targetIssues(targets[0]), rect: targets[0]?.rect });
+    return targets[0];
   };
   const click = async (selector, label) => {
-    await safe(selector); assertBeforeDeadline(deadlineMs); await harness.click(selector);
-    result.actions.push({ kind: 'native-click', selector, label, at: Date.now() });
+    const observed = await safe(selector), fresh = await observeTargets(harness, selector);
+    assert.equal(fresh.length, 1); assert.deepEqual(targetIssues(fresh[0]), []);
+    assert.deepEqual(fresh[0].rect, observed.rect, 'Native click geometry changed after hit testing');
+    const point = { x: Math.round(fresh[0].rect.x + fresh[0].rect.width / 2), y: Math.round(fresh[0].rect.y + fresh[0].rect.height / 2) };
+    assertBeforeDeadline(deadlineMs); await harness.clickPoint(point);
+    result.actions.push({ kind: 'native-click-point', selector, label, ...point, at: Date.now() });
     await waitStableViewport(harness, size, deadlineMs);
   };
   const key = async (value, selector) => {
     assertBeforeDeadline(deadlineMs); await harness.press(value, selector);
     result.actions.push({ kind: 'native-key', key: value, selector, at: Date.now() });
   };
-  // Keyboard traversal is a real focus/scroll path. No evaluate-focus,
-  // scrollIntoView, style edits or direct selection manipulation is allowed.
-  const reach = async (selector, direction = 'Tab') => {
-    for (let step = 0; step < 64; step++) {
-      const targets = await observeTargets(harness, selector);
-      assert.equal(targets.length, 1, `One existing target for keyboard reach: ${selector}`);
-      if (targetIssues(targets[0]).length === 0) return;
-      assert.equal(targets[0].disabled, false, 'Never navigate past a disabled action');
-      await key(direction);
-      await waitStableViewport(harness, size, deadlineMs);
-    }
-    throw new Error(`Native keyboard could not reveal ${selector}; UI remains unverified`);
+  // Settings navigation never cycles through unrelated focus targets. Wheel
+  // points belong to the observed outer scroller, followed by fresh geometry.
+  const reach = async (selector, { focus = false } = {}) => {
+    const settingsId = (await observePortableUi(harness)).settingsId;
+    assert.ok(settingsId, 'Existing Settings card required for native scrolling');
+    return navigatePortableSettings({ read: () => observePortableSettingsNavigation(harness, selector, settingsId),
+      wheelAt: input => harness.wheelAt(input), clickPoint: point => harness.clickPoint(point),
+      pause: () => new Promise(resolve => setTimeout(resolve, 75)), assertDeadline: () => assertBeforeDeadline(deadlineMs),
+      focus, trace: result.actions });
   };
   const capture = async (stage, subjects, observation) => {
     const paints = [];
@@ -477,7 +606,7 @@ export async function runPortableTransferFlow({ harness, result, check }, { prof
     return waitUi(value => value.transferState === 'preview');
   };
   await preview();
-  await reach(testid('import-instructions'));
+  await reach(testid('import-instructions'), { focus: true });
   const instructions = (await observePortableUi(harness)).instructions.text;
   check('preview retains first and last original instructions', instructions.includes(`${proof.initial.seed.marker}_IMPORT_ORIGINAL`) && instructions.includes(`${proof.initial.seed.marker}_IMPORT_END`));
   const instructionEdge = edge => preparePortableInstructionEdge({ edge, expectedText: instructions,
@@ -508,7 +637,7 @@ export async function runPortableTransferFlow({ harness, result, check }, { prof
   await captureStatus('imported-draft');
 
   const row = `${testid('settings-agent-row')}[data-profile-id=${JSON.stringify(proof.initial.seed.profileId)}]`;
-  await reach(row, 'Shift+Tab'); await click(row, 'open actual current saved profile revision');
+  await reach(row); await click(row, 'open actual current saved profile revision');
   await waitUi(value => value.detailId === proof.initial.seed.profileId && value.target.revision === '2');
   await reach(testid('settings-agent-export-md'));
   ui = await observePortableUi(harness);

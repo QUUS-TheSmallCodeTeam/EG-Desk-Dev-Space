@@ -1,5 +1,6 @@
 import assert from 'node:assert/strict';
 import { spawnSync, execFileSync } from 'node:child_process';
+import { EventEmitter } from 'node:events';
 import fs from 'node:fs';
 import path from 'node:path';
 import test from 'node:test';
@@ -12,7 +13,7 @@ import { assertQaProfile, bootstrapQaProfile, canonicalTempRoot,
 import { assertQaEvidenceDirectory, chooseNativeScrollKey, contextIdFromList, createQaEvidenceDirectory, firstSnapshotUid,
   captureQaScreenshot, decodeQaEvaluationResult, FirefoxMcpChatHarness, isUnsupportedBidiScreenshotError,
   mcpResultText, parseMcpJson,
-  resolveQaMarionettePort } from './firefox-mcp-chat-harness.mjs';
+  resolveQaMarionettePort, serializeQaNativeInput, QA_NATIVE_INPUT_MAX_DELTA } from './firefox-mcp-chat-harness.mjs';
 import { assertQaFixtureArtifact } from './egdesk-chat-qa-contract.sys.mjs';
 import { chatShellUsable, chooseQaThreadRow, composerIsReady } from './egdesk-qa-ui-flow.mjs';
 
@@ -29,6 +30,310 @@ function otherWritable(target, writable, privateMode = 0o600) {
       : ['/remove:g', '*S-1-5-32-545'])], { windowsHide: true, stdio: 'pipe' });
   } else fs.chmodSync(target, writable ? privateMode | 0o022 : privateMode);
 }
+
+const POINT_CONTEXT = '12345678-1234-1234-1234-123456789abc';
+const POINT_VIEWPORT = { context: POINT_CONTEXT, width: 800, height: 600 };
+
+// Execute the real class/transport in a VM with an in-memory child and clock.
+// No process, port, evidence directory, Firefox, or provider is created here.
+function offlinePointHarness({ rawTool = true } = {}) {
+  const profile = '/qa/egdesk-chat-test-offline';
+  const state = { profile, calls: [], spawns: 0, holdInput: false, inputError: null,
+    beforeEvaluate: null, viewport: { width: 800, height: 600 }, root: true,
+    protocolSessions: 0, recoverBeforeInput: null, protocolContext: POINT_CONTEXT, protocolInputs: [] };
+  const timers = new Map();
+  let timerId = 0;
+  const required = ['list_privileged_contexts', 'select_privileged_context', 'evaluate_privileged_script',
+    'take_snapshot', 'clear_snapshot', 'click_by_uid', 'fill_by_uid', 'press_key', 'type_text', 'screenshot_page'];
+  const textResult = text => ({ content: [{ type: 'text', text }] });
+  const spawn = () => {
+    state.spawns++;
+    const child = new EventEmitter();
+    state.child = child;
+    child.stdout = new EventEmitter();
+    child.stderr = new EventEmitter();
+    child.stdout.destroy = child.stderr.destroy = child.unref = () => {};
+    child.exitCode = child.signalCode = null;
+    child.stdin = new EventEmitter();
+    child.stdin.writable = true;
+    child.stdin.end = () => { child.stdin.writable = false; child.exitCode = 0; child.emit('exit', 0, null); };
+    child.stdin.write = line => {
+      const request = JSON.parse(line);
+      state.calls.push(request);
+      if (!request.id) return true;
+      Promise.resolve().then(async () => {
+        let result = {};
+        if (request.method === 'tools/list') result = { tools: [...required, ...(rawTool ? ['send_bidi_command'] : [])].map(name => ({ name })) };
+        if (request.method === 'tools/call') {
+          const { name, arguments: args } = request.params;
+          if (name === 'list_privileged_contexts') {
+            if (!state.protocolSessions) state.protocolSessions = 1;
+            result = textResult(`${state.protocolContext}: chrome://browser/content/browser.xhtml`);
+          }
+          else if (name === 'evaluate_privileged_script') {
+            assert.equal(args.context, POINT_CONTEXT);
+            if (state.beforeEvaluate) await state.beforeEvaluate(args.function);
+            const value = await runInNewContext(`(${args.function})()`, {
+              Services: { dirsvc: { get: () => ({ path: state.profile }) } }, Ci: { nsIFile: {} },
+              window: { document: { documentURI: 'chrome://browser/content/browser.xhtml' },
+                innerWidth: state.viewport.width, innerHeight: state.viewport.height,
+                docShell: { browsingContext: { isContent: !state.root, parent: null,
+                  currentWindowGlobal: { isCurrentGlobal: true } } } },
+            });
+            result = { structuredContent: value };
+          } else if (name === 'send_bidi_command') {
+            // Model getFirefox recovery separately from the MCP child. Either
+            // the original UUID still resolves or it is lost; never assume it
+            // survives a real session replacement. No real connection occurs.
+            if (state.recoverBeforeInput) {
+              state.protocolSessions++;
+              if (state.recoverBeforeInput === 'context-lost') state.protocolContext = '87654321-4321-4321-4321-cba987654321';
+              state.recoverBeforeInput = null;
+            }
+            state.protocolInputs.push({ session: state.protocolSessions, ...structuredClone(args) });
+            if (args.params.context !== state.protocolContext) {
+              result = { isError: true, ...textResult('Error: BiDi error: "no such frame"') };
+            } else {
+              if (state.holdInput) return;
+              result = state.inputError ? { isError: true, ...textResult(state.inputError) } : textResult('{}');
+            }
+          }
+        }
+        child.stdout.emit('data', Buffer.from(JSON.stringify({ jsonrpc: '2.0', id: request.id, result }) + '\n'));
+      }).catch(error => child.stdout.emit('data', Buffer.from(JSON.stringify({ jsonrpc: '2.0', id: request.id,
+        error: { message: error.message } }) + '\n')));
+      return true;
+    };
+    return child;
+  };
+  const source = fs.readFileSync(new URL('./firefox-mcp-chat-harness.mjs', import.meta.url), 'utf8')
+    .replace(/^import[\s\S]*?;\n/gm, '').replace(/^export /gm, '');
+  const Harness = runInNewContext(`${source}\nFirefoxMcpChatHarness`, {
+    Buffer, path, spawn,
+    process: { platform: 'darwin', execPath: '/qa/node', env: {
+      EGDESK_QA_MCP_ENTRY: '/qa/mcp.mjs', EGDESK_QA_GECKODRIVER: '/qa/geckodriver', PATH: '/qa' } },
+    fs: { lstatSync: () => ({ isFile: () => true, isDirectory: () => true, isSymbolicLink: () => false }),
+      realpathSync: { native: value => value }, accessSync() {}, constants: { X_OK: 1 } },
+    assertQaProfile: value => { assert.equal(value, profile); return value; },
+    canonicalTempRoot: () => '/qa', createPrivateQaTempDirectory: () => '/qa/egdesk-chat-evidence-offline',
+    isOwnedAndPrivate: () => true,
+    setTimeout: callback => { const id = ++timerId; timers.set(id, callback); return id; },
+    clearTimeout: id => timers.delete(id),
+  });
+  return { harness: new Harness({ profile }), state, timers,
+    inputs: () => state.calls.filter(call => call.params?.name === 'send_bidi_command'),
+    expire: () => { for (const [id, callback] of [...timers]) { timers.delete(id); callback(); } } };
+}
+
+async function flushPointTransport() {
+  for (let i = 0; i < 100; i++) await Promise.resolve();
+}
+
+test('native point serializer emits only fixed-context pointer or wheel actions', () => {
+  assert.deepEqual(serializeQaNativeInput('click', { x: 12.5, y: 20 }, POINT_VIEWPORT), {
+    method: 'input.performActions', params: { context: POINT_CONTEXT, actions: [{
+      type: 'pointer', id: 'egdesk_qa_point_mouse', parameters: { pointerType: 'mouse' }, actions: [
+        { type: 'pointerMove', origin: 'viewport', x: 12.5, y: 20, duration: 0 },
+        { type: 'pointerDown', button: 0 }, { type: 'pointerUp', button: 0 },
+      ],
+    }] },
+  });
+  assert.deepEqual(serializeQaNativeInput('wheel', { x: 12, y: 20, deltaX: -30, deltaY: 240 }, POINT_VIEWPORT), {
+    method: 'input.performActions', params: { context: POINT_CONTEXT, actions: [{
+      type: 'wheel', id: 'egdesk_qa_point_wheel', actions: [
+        { type: 'scroll', origin: 'viewport', x: 12, y: 20, deltaX: -30, deltaY: 240, duration: 0 },
+      ],
+    }] },
+  });
+});
+
+test('native point serializer rejects invalid, out-of-viewport and unbounded inputs without coercion', () => {
+  for (const point of [null, [], {}, { x: '1', y: 1 }, { x: NaN, y: 1 }, { x: Infinity, y: 1 },
+    { x: -1, y: 1 }, { x: 800, y: 1 }, { x: 1, y: 600 }, { x: 1, y: 1, context: POINT_CONTEXT },
+    { get x() { throw new Error('must not invoke getter'); }, y: 1 }]) {
+    assert.throws(() => serializeQaNativeInput('click', point, POINT_VIEWPORT), /Native|native/);
+  }
+  for (const point of [{ x: 1.5, y: 1, deltaX: 0, deltaY: 1 }, { x: 1, y: 1, deltaX: 0, deltaY: 0 },
+    { x: 1, y: 1, deltaX: 0, deltaY: 1.5 }, { x: 1, y: 1, deltaX: Infinity, deltaY: 1 },
+    { x: 1, y: 1, deltaX: 0, deltaY: QA_NATIVE_INPUT_MAX_DELTA + 1 }]) {
+    assert.throws(() => serializeQaNativeInput('wheel', point, POINT_VIEWPORT), /Wheel|finite/);
+  }
+  for (const viewport of [{ ...POINT_VIEWPORT, context: 'other' }, { ...POINT_VIEWPORT, width: 0 },
+    { ...POINT_VIEWPORT, height: NaN }, { ...POINT_VIEWPORT, width: Infinity }]) {
+    assert.throws(() => serializeQaNativeInput('click', { x: 1, y: 1 }, viewport), /context|viewport/);
+  }
+  assert.doesNotThrow(() => serializeQaNativeInput('wheel',
+    { x: 799, y: 599, deltaX: -QA_NATIVE_INPUT_MAX_DELTA, deltaY: QA_NATIVE_INPUT_MAX_DELTA }, POINT_VIEWPORT));
+});
+
+test('real harness point methods clone before await and profile-check before each single MCP input request', async () => {
+  const fake = offlinePointHarness();
+  await fake.harness.connect();
+  const point = { x: 10.5, y: 20 };
+  const pending = fake.harness.clickPoint(point);
+  point.x = 700;
+  await pending;
+  await fake.harness.wheelAt({ x: 30, y: 40, deltaX: 0, deltaY: -120 });
+  assert.equal(fake.inputs().length, 2);
+  assert.deepEqual(fake.inputs()[0].params.arguments, serializeQaNativeInput('click', { x: 10.5, y: 20 }, POINT_VIEWPORT));
+  assert.deepEqual(fake.inputs()[1].params.arguments, serializeQaNativeInput('wheel', { x: 30, y: 40, deltaX: 0, deltaY: -120 }, POINT_VIEWPORT));
+  for (const input of fake.inputs()) {
+    const before = fake.state.calls[fake.state.calls.indexOf(input) - 1];
+    assert.equal(before.params.name, 'evaluate_privileged_script');
+    assert.match(before.params.arguments.function, /ProfD/);
+    assert.doesNotMatch(before.params.arguments.function, /qaEvaluation/);
+    assert.equal(before.params.arguments.context, POINT_CONTEXT);
+  }
+  assert.equal(fake.state.spawns, 1);
+  assert.equal(fake.timers.size, 0);
+  await fake.harness.close();
+});
+
+test('point input refuses absent tool without breaking legacy connection or trying another input', async () => {
+  const fake = offlinePointHarness({ rawTool: false });
+  await fake.harness.connect();
+  const baseline = fake.state.calls.length;
+  await assert.rejects(fake.harness.clickPoint({ x: 1, y: 1 }), /lacks native input tool/);
+  await assert.rejects(fake.harness.wheelAt({ x: 1, y: 1, deltaX: 0, deltaY: 1 }), /lacks native input tool/);
+  assert.equal(fake.state.calls.length, baseline);
+  await fake.harness.press('Escape');
+  assert.equal(fake.state.calls.at(-1).params.name, 'press_key');
+  await fake.harness.close();
+});
+
+test('point input fails before dispatch for early, observation-time and final profile mismatch', async () => {
+  for (const phase of ['early', 'observation', 'final']) {
+    const fake = offlinePointHarness();
+    await fake.harness.connect();
+    let profileReads = 0;
+    if (phase === 'early') fake.state.profile = '/qa/other-profile';
+    else fake.state.beforeEvaluate = source => {
+      if (!source.includes('qaEvaluation')) profileReads++;
+      if ((phase === 'observation' && source.includes('qaEvaluation')) ||
+          (phase === 'final' && profileReads === 2)) fake.state.profile = '/qa/other-profile';
+    };
+    await assert.rejects(fake.harness.clickPoint({ x: 1, y: 1 }), /different.*profile/i);
+    assert.equal(fake.inputs().length, 0);
+    assert.equal(fake.state.spawns, 1);
+    await fake.harness.close();
+  }
+});
+
+test('point input refuses an MCP transport lost during the viewport observation', async () => {
+  const fake = offlinePointHarness();
+  await fake.harness.connect();
+  fake.state.beforeEvaluate = source => {
+    if (source.includes('qaEvaluation')) fake.state.child.stdin.writable = false;
+  };
+  await assert.rejects(fake.harness.clickPoint({ x: 1, y: 1 }), /connection\/context/);
+  assert.equal(fake.inputs().length, 0);
+  assert.equal(fake.state.spawns, 1);
+  await fake.harness.close();
+});
+
+test('point input refuses invalid data before any read and stale root/outside viewport before any input', async () => {
+  const fake = offlinePointHarness();
+  await fake.harness.connect();
+  const baseline = fake.state.calls.length;
+  await assert.rejects(fake.harness.clickPoint({ x: NaN, y: 1 }), /finite/);
+  assert.equal(fake.state.calls.length, baseline);
+  await assert.rejects(fake.harness.clickPoint({ x: 800, y: 1 }), /viewport/);
+  fake.state.root = false;
+  await assert.rejects(fake.harness.wheelAt({ x: 1, y: 1, deltaX: 0, deltaY: 1 }), /non-root/);
+  assert.equal(fake.inputs().length, 0);
+  await fake.harness.close();
+  await assert.rejects(fake.harness.clickPoint({ x: 1, y: 1 }), /connection\/context/);
+});
+
+test('point input timeout sends once with no harness retry, fallback, reconnect or release action', async () => {
+  for (const method of ['clickPoint', 'wheelAt']) {
+    const fake = offlinePointHarness();
+    await fake.harness.connect();
+    const baseline = fake.state.calls.length;
+    fake.state.holdInput = true;
+    fake.state.recoverBeforeInput = 'original-context';
+    const pending = fake.harness[method](method === 'clickPoint' ? { x: 1, y: 1 } : { x: 1, y: 1, deltaX: 0, deltaY: 100 });
+    const rejected = assert.rejects(pending, /timed out.*never retried/);
+    await flushPointTransport();
+    assert.equal(fake.inputs().length, 1);
+    assert.equal(fake.timers.size, 1);
+    fake.expire();
+    await rejected;
+    await flushPointTransport();
+    assert.equal(fake.inputs().length, 1);
+    assert.equal(fake.state.spawns, 1);
+    assert.equal(fake.state.protocolSessions, 2, 'pre-dispatch protocol recovery is not input replay');
+    assert.equal(fake.state.protocolInputs.length, 1);
+    assert.equal(fake.state.protocolInputs[0].params.context, POINT_CONTEXT);
+    assert.deepEqual(fake.state.calls.slice(baseline).map(call => call.params.name), [
+      'evaluate_privileged_script', 'evaluate_privileged_script', 'evaluate_privileged_script', 'send_bidi_command',
+    ]);
+    assert.equal(fake.timers.size, 0);
+    await fake.harness.close();
+  }
+});
+
+test('protocol recovery retaining the original UUID sends unchanged input once without restarting MCP', async () => {
+  for (const [method, kind, point] of [
+    ['clickPoint', 'click', { x: 15, y: 20 }],
+    ['wheelAt', 'wheel', { x: 15, y: 20, deltaX: 0, deltaY: 120 }],
+  ]) {
+    const fake = offlinePointHarness();
+    await fake.harness.connect();
+    const baseline = fake.state.calls.length;
+    fake.state.recoverBeforeInput = 'original-context';
+    await fake.harness[method](point);
+    const payload = serializeQaNativeInput(kind, point, POINT_VIEWPORT);
+    assert.equal(fake.state.spawns, 1, 'MCP child identity is not protocol-session identity');
+    assert.equal(fake.state.protocolSessions, 2);
+    assert.deepEqual(fake.state.protocolInputs, [{ session: 2, ...payload }]);
+    assert.equal(fake.inputs().length, 1);
+    assert.deepEqual(fake.inputs()[0].params.arguments, payload);
+    assert.deepEqual(fake.state.calls.slice(baseline).map(call => call.params.name), [
+      'evaluate_privileged_script', 'evaluate_privileged_script', 'evaluate_privileged_script', 'send_bidi_command',
+    ]);
+    assert.equal(fake.timers.size, 0);
+    await fake.harness.close();
+  }
+});
+
+test('protocol recovery losing the original UUID fails with no retarget, second input or ambiguous replay', async () => {
+  for (const [method, kind, point] of [
+    ['clickPoint', 'click', { x: 15, y: 20 }],
+    ['wheelAt', 'wheel', { x: 15, y: 20, deltaX: 0, deltaY: 120 }],
+  ]) {
+    const fake = offlinePointHarness();
+    await fake.harness.connect();
+    const baseline = fake.state.calls.length;
+    fake.state.recoverBeforeInput = 'context-lost';
+    await assert.rejects(fake.harness[method](point), /no such frame/);
+    await flushPointTransport();
+    const payload = serializeQaNativeInput(kind, point, POINT_VIEWPORT);
+    assert.equal(fake.state.spawns, 1);
+    assert.equal(fake.state.protocolSessions, 2);
+    assert.notEqual(fake.state.protocolContext, POINT_CONTEXT);
+    assert.deepEqual(fake.state.protocolInputs, [{ session: 2, ...payload }]);
+    assert.equal(fake.inputs().length, 1);
+    assert.deepEqual(fake.inputs()[0].params.arguments, payload);
+    assert.deepEqual(fake.state.calls.slice(baseline).map(call => call.params.name), [
+      'evaluate_privileged_script', 'evaluate_privileged_script', 'evaluate_privileged_script', 'send_bidi_command',
+    ], 'no context lookup/selection, fallback input, or retry follows failure');
+    assert.equal(fake.timers.size, 0);
+    await fake.harness.close();
+  }
+});
+
+test('point input propagates stale/invalid MCP failure without the selector API retry', async () => {
+  const fake = offlinePointHarness();
+  await fake.harness.connect();
+  fake.state.inputError = 'Error: stale/invalid native input';
+  await assert.rejects(fake.harness.clickPoint({ x: 1, y: 1 }), /stale\/invalid/);
+  await flushPointTransport();
+  assert.equal(fake.inputs().length, 1);
+  assert.equal(fake.timers.size, 0);
+  assert.equal(fake.state.spawns, 1);
+  await fake.harness.close();
+});
 
 test('bootstrap copies only allowlisted loader utilities into a guarded mkdtemp profile', (t) => {
   const source = fs.mkdtempSync(path.join(canonicalTempRoot(), 'egdesk-loader-fixture-'));

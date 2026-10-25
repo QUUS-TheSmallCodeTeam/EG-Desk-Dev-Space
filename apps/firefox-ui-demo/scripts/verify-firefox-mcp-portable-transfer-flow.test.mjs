@@ -9,7 +9,7 @@ import { createPrivateQaTempDirectory } from './egdesk-qa-platform.mjs';
 import { assertPortableEnvironment, assertPortableStoreInvariant, assertPortableImportedDraft,
   assertPortableExportFile, assertPortablePinnedExport, assertPortableNoReplay,
   assertPortableMissingHead, assertPortableAttachmentOmission,
-  observePortableFirstUse, preparePortableInstructionEdge,
+  observePortableFirstUse, preparePortableInstructionEdge, observePortableSettingsNavigation, navigatePortableSettings,
   portableObservationSources, PORTABLE_OBSERVATION_BUDGET, portableTextVisible } from './verify-firefox-mcp-portable-transfer-flow.mjs';
 
 const TOKEN = 'portable-verifier-unit-only-token';
@@ -95,8 +95,7 @@ function instructionScrollFixture() {
   const options = { expectedText: ui.instructions.text, readUi: async () => structuredClone(ui), readTargets: async () => [target],
     press: async (...args) => {
       calls.push(args);
-      if (args[0] === 'Tab') ui.active.testid = 'import-instructions';
-      else ui.instructions.box.scrollTop = args[0] === 'Home' ? 0 : 501;
+      ui.instructions.box.scrollTop = args[0] === 'Home' ? 0 : 501;
     }, pause: async () => { pauses++; }, assertDeadline() {} };
   return { ui, target, calls, options, pauses: () => pauses };
 }
@@ -107,22 +106,21 @@ test('instruction edge at top sends no Home/refocus, preserving the outer scroll
   // still briefly painted. Edge preparation must issue no key in this state.
   h.options.press = async () => { h.ui.contentBox.scrollTop = 0; assert.fail('Already at local edge'); };
   const result = await preparePortableInstructionEdge({ ...h.options, edge: 'Home' });
-  assert.deepEqual(result, { key: null, focusKeys: 0, before: 0, after: 0, outerScrollTop: 435 });
+  assert.deepEqual(result, { key: null, before: 0, after: 0, outerScrollTop: 435 });
   assert.ok(h.pauses() >= 3, 'Even a no-op edge waits for stable local and outer layout');
 });
 
 test('instruction End is selectorless native input after focus and waits through smooth local scrolling', async () => {
-  const h = instructionScrollFixture(); h.ui.active.testid = 'another-control';
+  const h = instructionScrollFixture();
   const stops = [160, 400, 501, 501, 501]; let moving = false, pauses = 0;
   h.options.press = async (...args) => {
     h.calls.push(args);
-    if (args[0] === 'Tab') h.ui.active.testid = 'import-instructions';
     if (args[0] === 'End') moving = true;
   };
   h.options.pause = async () => { pauses++; if (moving && stops.length) h.ui.instructions.box.scrollTop = stops.shift(); };
   const result = await preparePortableInstructionEdge({ ...h.options, edge: 'End' });
-  assert.deepEqual(h.calls, [['Tab'], ['End']], 'Never pass a selector that refocuses the region');
-  assert.equal(result.after, 501); assert.equal(result.focusKeys, 1); assert.ok(pauses >= 6);
+  assert.deepEqual(h.calls, [['End']], 'Never pass a selector that refocuses the region');
+  assert.equal(result.after, 501); assert.ok(pauses >= 5);
   h.calls.length = 0;
   assert.equal((await preparePortableInstructionEdge({ ...h.options, edge: 'End' })).key, null);
   assert.deepEqual(h.calls, []);
@@ -147,14 +145,157 @@ test('instruction edge never accepts clipped, covered, stale, focus-lost or non-
   }
 });
 
-test('instruction focus traversal and scroll sampling obey bounds and the deadline', async () => {
+test('instruction keys refuse wrong focus rather than cycling Tab, and obey the deadline', async () => {
   const h = instructionScrollFixture(); h.ui.active.testid = 'another-control';
   h.options.press = async (...args) => { h.calls.push(args); };
-  await assert.rejects(preparePortableInstructionEdge({ ...h.options, edge: 'End' }), /Native Tab/);
-  assert.equal(h.calls.length, 64); assert.ok(h.calls.every(args => args.length === 1 && args[0] === 'Tab'));
+  await assert.rejects(preparePortableInstructionEdge({ ...h.options, edge: 'End' }), /native point focus/);
+  assert.deepEqual(h.calls, []);
+  const shifted = instructionScrollFixture(); let reads = 0;
+  shifted.options.readUi = async () => {
+    if (++reads === 2) shifted.ui.active.testid = 'global-search';
+    return structuredClone(shifted.ui);
+  };
+  await assert.rejects(preparePortableInstructionEdge({ ...shifted.options, edge: 'End' }), /Focus changed before/);
+  assert.deepEqual(shifted.calls, []);
   const expired = instructionScrollFixture(); expired.options.assertDeadline = () => { throw new Error('deadline'); };
   await assert.rejects(preparePortableInstructionEdge({ ...expired.options, edge: 'End' }), /deadline/);
   assert.deepEqual(expired.calls, []);
+});
+
+const INSTRUCTIONS = '[data-testid="import-instructions"]';
+function settingsNavigationFixture({ top = 1000 } = {}) {
+  const model = { top, scrollTop: 0, scrollHeight: 1600, focused: false, activeTestid: 'settings-agent-import', reads: 0 };
+  const wheels = [], clicks = [], trace = [];
+  const read = async () => {
+    model.reads++;
+    const targetRect = { left: 220, right: 1200, top: model.top - model.scrollTop, bottom: model.top - model.scrollTop + 160, width: 980, height: 160 };
+    const viewport = { left: 100, top: 200, right: 1250, bottom: 730 };
+    return { settingsId: 'settings-original', selector: INSTRUCTIONS, cards: 1, contents: 1, count: 1,
+      transferState: 'preview', owned: true, contentVisible: true, targetVisible: true, disabled: false,
+      focused: model.focused, activeTestid: model.activeTestid,
+      targetRect, targetClip: viewport, viewport, bounds: { ...viewport, width: 1150, height: 530 },
+      targetReady: targetRect.top >= viewport.top && targetRect.bottom <= viewport.bottom,
+      point: { x: 710, y: Math.round(targetRect.top + 80) }, wheelPoint: { x: 112, y: 465 },
+      scrollTop: model.scrollTop, scrollHeight: model.scrollHeight, clientHeight: 530 };
+  };
+  const options = { read, wheelAt: async input => { wheels.push(input); model.scrollTop += input.deltaY; },
+    clickPoint: async point => { clicks.push(point); model.focused = true; model.activeTestid = 'import-instructions'; },
+    pause: async () => {}, assertDeadline() {}, focus: true, trace };
+  return { model, wheels, clicks, trace, options };
+}
+
+test('Settings navigation wheels only the observed outer area, reobserves progress, then clicks and verifies focus', async () => {
+  const h = settingsNavigationFixture(), value = await navigatePortableSettings(h.options);
+  assert.equal(h.wheels.length, 2); assert.equal(h.clicks.length, 1); assert.equal(value.focused, true);
+  assert.deepEqual(h.wheels, [{ x: 112, y: 465, deltaX: 0, deltaY: 240 }, { x: 112, y: 465, deltaX: 0, deltaY: 202 }]);
+  assert.deepEqual(h.clicks[0], value.point);
+  assert.deepEqual(h.trace.map(row => row.kind), ['native-wheel', 'native-wheel', 'native-focus-point']);
+  assert.ok(h.trace.filter(row => row.kind === 'native-wheel').every(row => row.after > row.before));
+  assert.ok(h.model.reads >= 15, 'Each input uses fresh settled observations');
+  const reveal = settingsNavigationFixture(); reveal.options.focus = false;
+  await navigatePortableSettings(reveal.options); assert.deepEqual(reveal.clicks, [], 'Revealing a control never activates it');
+});
+
+test('Settings navigation refuses ambiguous, foreign, disabled, covered, clipped or unstable targets before input', async () => {
+  const variants = [value => { value.count = 2; }, value => { value.cards = 0; }, value => { value.contents = 2; },
+    value => { value.owned = false; }, value => { value.disabled = true; }, value => { value.targetVisible = false; },
+    value => { value.wheelPoint = null; }, value => { value.targetRect.left = -10; },
+    value => { value.targetRect.height = 900; }, value => { value.scrollHeight = value.clientHeight; },
+    value => { value.targetRect.top = 300; value.targetRect.bottom = 460; value.targetReady = false; }];
+  for (const alter of variants) {
+    const h = settingsNavigationFixture(), read = h.options.read;
+    h.options.read = async () => { const value = await read(); alter(value); return value; };
+    await assert.rejects(navigatePortableSettings(h.options));
+    assert.deepEqual(h.wheels, []); assert.deepEqual(h.clicks, []);
+  }
+  for (const alter of [value => { value.settingsId = 'other-settings'; }, value => { value.transferState = 'cancelled'; },
+    value => { value.wheelPoint.x++; }]) {
+    const h = settingsNavigationFixture(), read = h.options.read;
+    h.options.read = async () => { const value = await read(); if (h.model.reads === 4) alter(value); return value; };
+    await assert.rejects(navigatePortableSettings(h.options)); assert.deepEqual(h.wheels, []); assert.deepEqual(h.clicks, []);
+  }
+});
+
+test('Settings native input errors, no wheel progress and lost focus fail without repeat or Tab fallback', async () => {
+  for (const behavior of ['throw', 'no-progress', 'wrong-direction']) {
+    const h = settingsNavigationFixture();
+    h.options.wheelAt = async input => { h.wheels.push(input);
+      if (behavior === 'throw') throw new Error('native wheel failed');
+      if (behavior === 'wrong-direction') h.model.scrollTop -= 10;
+    };
+    await assert.rejects(navigatePortableSettings(h.options)); assert.equal(h.wheels.length, 1); assert.deepEqual(h.clicks, []);
+  }
+  for (const behavior of ['throw', 'search-focus']) {
+    const h = settingsNavigationFixture({ top: 300 });
+    h.options.clickPoint = async point => { h.clicks.push(point);
+      if (behavior === 'throw') throw new Error('native click failed');
+      h.model.activeTestid = 'global-search';
+    };
+    await assert.rejects(navigatePortableSettings(h.options)); assert.equal(h.clicks.length, 1); assert.deepEqual(h.wheels, []);
+  }
+});
+
+test('Settings native navigation has a finite wheel budget and honors the deadline before any action', async () => {
+  const h = settingsNavigationFixture({ top: 100000 }); h.model.scrollHeight = 200000;
+  await assert.rejects(navigatePortableSettings(h.options), /wheel budget/);
+  assert.equal(h.wheels.length, 12); assert.deepEqual(h.clicks, []);
+  const expired = settingsNavigationFixture(); expired.options.assertDeadline = () => { throw new Error('deadline'); };
+  await assert.rejects(navigatePortableSettings(expired.options), /deadline/);
+  assert.deepEqual(expired.wheels, []); assert.deepEqual(expired.clicks, []);
+});
+
+function settingsNavigationDomFixture() {
+  const box = (left, top, width, height) => ({ left, top, width, height, right: left + width, bottom: top + height });
+  const node = (bounds, parentElement = null, style = {}) => ({ bounds, parentElement, isConnected: true, hidden: false, inert: false,
+    style: { display: 'block', visibility: 'visible', opacity: '1', overflowX: 'visible', overflowY: 'visible', ...style },
+    clientLeft: 0, clientTop: 0, offsetWidth: bounds.width, offsetHeight: bounds.height,
+    clientWidth: bounds.width, clientHeight: bounds.height, scrollTop: 0, scrollHeight: bounds.height,
+    getBoundingClientRect() { return { ...this.bounds }; }, closest() { return null; },
+    contains(other) { for (let n = other; n; n = n.parentElement) if (n === this) return true; return false; } });
+  const card = node(box(90, 60, 1180, 670)), content = node(box(100, 200, 1150, 530), card, { overflowY: 'auto' });
+  const target = node(box(220, 640, 980, 160), content, { overflowY: 'auto' });
+  const nested = node(box(100, 200, 1150, 530), content, { overflowY: 'auto' }); nested.scrollHeight = 2000;
+  card.id = 'settings-original'; content.scrollHeight = 1600; target.scrollHeight = 661;
+  const config = { coverTarget: false, wheelHit: null, duplicate: false };
+  card.querySelectorAll = () => [content]; card.querySelector = () => ({ dataset: { state: 'preview' } });
+  const inBox = (b, x, y) => x >= b.left && x < b.right && y >= b.top && y < b.bottom;
+  const document = { activeElement: target,
+    querySelectorAll: selector => selector === '.egd-settings-card' ? [card] : config.duplicate ? [target, target] : [target],
+    elementFromPoint(x, y) {
+      if (!inBox(content.bounds, x, y)) return null;
+      if (x < 120 || x > 1230) return config.wheelHit === 'nested' ? nested : config.wheelHit === 'overlay' ? {} : content;
+      if (inBox(target.bounds, x, y)) return config.coverTarget ? {} : target;
+      return content;
+    } };
+  const harness = { evaluateChrome: source => new Function('document', 'innerWidth', 'innerHeight', 'getComputedStyle', `return (${source})();`)(
+    document, 1280, 800, value => value.style) };
+  return { card, content, target, config, observe: () => observePortableSettingsNavigation(harness, INSTRUCTIONS, card.id) };
+}
+
+test('Settings observer finds an outer-padding wheel point and requires the entire target to clear ancestor clipping', async () => {
+  const h = settingsNavigationDomFixture();
+  const clipped = await h.observe();
+  assert.equal(clipped.owned, true); assert.equal(clipped.focused, true); assert.equal(clipped.targetReady, false);
+  assert.deepEqual(clipped.wheelPoint, { x: 112, y: 465 });
+  h.target.bounds.top = 300; h.target.bounds.bottom = 460;
+  const clear = await h.observe(); assert.equal(clear.targetReady, true); assert.deepEqual(clear.point, { x: 710, y: 380 });
+  h.config.coverTarget = true; assert.equal((await h.observe()).targetReady, false);
+  h.config.duplicate = true; assert.equal((await h.observe()).owned, false);
+});
+
+test('Settings observer refuses wheel points owned by a nested scroller, popup or hidden Settings', async () => {
+  const h = settingsNavigationDomFixture();
+  for (const hit of ['nested', 'overlay']) {
+    h.config.wheelHit = hit; assert.equal((await h.observe()).wheelPoint, null);
+  }
+  h.card.style.visibility = 'hidden'; assert.equal((await h.observe()).contentVisible, false);
+});
+
+test('portable callsite uses point/wheel APIs and contains no UID-click or Tab navigation fallback', () => {
+  const source = fs.readFileSync(new URL('./verify-firefox-mcp-portable-transfer-flow.mjs', import.meta.url), 'utf8');
+  assert.match(source, /await harness\.clickPoint\(point\)/);
+  assert.match(source, /wheelAt: input => harness\.wheelAt\(input\)/);
+  assert.doesNotMatch(source, /harness\.click\(|press\('Tab'\)|key\(direction\)|Shift\+Tab/);
 });
 
 test('store receipt assertions reject changed Board head, unexpected activation, provider or output injection', t => {
