@@ -3596,7 +3596,8 @@ test('actual send path preserves draft B and new attachments typed during delaye
   assert.ok(body);
   const deps = ['state', 'getActiveCodexThread', 'getCodexThreadDraft', 'ChatState', 'threadBusy', 'epochScope', 'ensureNativeReadyForSend', 'updateThreadById', 'emit',
     'captureThreadInputs', 'getCodexThreadById', 'protocol', 'codexThreadAgentProfile', 'appendMessageToThread', 'createCodexMessage', 'SELF_MEMBER', 'codexThreadRuntimeConfig', 'fetchJson', 'syncProtocolRun', 'browserToolSelectedSources',
-    'rootSseReady', 'chatRequestProjectDisplays', 'CHAT_REQUEST_PROJECT_INVALID', 'chatRoomProjectSendBlock', 'chatRoomProjectState'];
+    'rootSseReady', 'chatRequestProjectDisplays', 'CHAT_REQUEST_PROJECT_INVALID', 'chatRoomProjectSendBlock', 'chatRoomProjectState',
+    'normalizeChatRoomProjectDefault', 'snapshotChatRoomProjectExpectation', 'CHAT_ROOM_PROJECT_UNAVAILABLE'];
   const send = compileFunction(`return (async () => {${body}\n})();`, deps);
   const selectedBody = surfaceSource.match(/  function browserToolSelectedSources\(threadId, candidates = null\) \{([\s\S]*?)\n  \}/)?.[1];
   assert.ok(selectedBody, 'test the production selected-source filter rather than inventing a permissive selector');
@@ -3629,7 +3630,8 @@ test('actual send path preserves draft B and new attachments typed during delaye
     (id, message) => update(id, thread => ({ ...thread, messages: [...thread.messages, message] })),
     (role, content, status, options) => ({ role, content, status, ...options }), 'self', () => ({}),
     async (_url, request) => { sendCount++; payload = JSON.parse(request.body); return { accepted: true, conversationId: 'c', runId: 'r', answerId: 'c/r' }; }, () => {},
-    actualSelectedSources, () => ({ sourceReady: true, eventSourceReadyState: 1, browserTransportId: 'ui-stream-1' }), new Map(), requestProjectSurfaceConstants().CHAT_REQUEST_PROJECT_INVALID, projectDefaults.chatRoomProjectSendBlock, projectDefaults.chatRoomProjectState);
+    actualSelectedSources, () => ({ sourceReady: true, eventSourceReadyState: 1, browserTransportId: 'ui-stream-1' }), new Map(), requestProjectSurfaceConstants().CHAT_REQUEST_PROJECT_INVALID, projectDefaults.chatRoomProjectSendBlock, projectDefaults.chatRoomProjectState,
+    projectDefaults.normalizeChatRoomProjectDefault, projectDefaults.snapshotChatRoomProjectExpectation, requestProjectSurfaceConstants().CHAT_ROOM_PROJECT_UNAVAILABLE);
   state.codex.threadDrafts.room = 'B';
   state.codex.threadDraftRevisions.room = 2;
   update('room', thread => ({ ...thread, inputSources: [...thread.inputSources, { id: 'b' }] }));
@@ -3667,7 +3669,8 @@ test('actual send path preserves draft B and new attachments typed during delaye
     (id, message) => update(id, thread => ({ ...thread, messages: [...thread.messages, message] })),
     (role, content, status, options) => ({ role, content, status, ...options }), 'self', () => ({}),
     async () => { assert.fail('a selected Browser must not submit without its ready SSE transport ID'); }, () => {},
-    actualSelectedSources, connectingStatus, new Map(), requestProjectSurfaceConstants().CHAT_REQUEST_PROJECT_INVALID, projectDefaults.chatRoomProjectSendBlock, projectDefaults.chatRoomProjectState);
+    actualSelectedSources, connectingStatus, new Map(), requestProjectSurfaceConstants().CHAT_REQUEST_PROJECT_INVALID, projectDefaults.chatRoomProjectSendBlock, projectDefaults.chatRoomProjectState,
+    projectDefaults.normalizeChatRoomProjectDefault, projectDefaults.snapshotChatRoomProjectExpectation, requestProjectSurfaceConstants().CHAT_ROOM_PROJECT_UNAVAILABLE);
   assert.equal(payload, null);
   assert.equal(sendCount, 1);
   assert.equal(state.codex.threadDrafts.room, 'B');
@@ -3681,7 +3684,8 @@ test('actual send path preserves draft B and new attachments typed during delaye
     (id, message) => update(id, thread => ({ ...thread, messages: [...thread.messages, message] })),
     (role, content, status, options) => ({ role, content, status, ...options }), 'self', () => ({}),
     async () => { assert.fail('stale interaction authority must not degrade silently to a normal read-only send'); }, () => {},
-    actualSelectedSources, () => ({ sourceReady: true, eventSourceReadyState: 1, browserTransportId: 'ui-stream-1' }), new Map(), requestProjectSurfaceConstants().CHAT_REQUEST_PROJECT_INVALID, projectDefaults.chatRoomProjectSendBlock, projectDefaults.chatRoomProjectState);
+    actualSelectedSources, () => ({ sourceReady: true, eventSourceReadyState: 1, browserTransportId: 'ui-stream-1' }), new Map(), requestProjectSurfaceConstants().CHAT_REQUEST_PROJECT_INVALID, projectDefaults.chatRoomProjectSendBlock, projectDefaults.chatRoomProjectState,
+    projectDefaults.normalizeChatRoomProjectDefault, projectDefaults.snapshotChatRoomProjectExpectation, requestProjectSurfaceConstants().CHAT_ROOM_PROJECT_UNAVAILABLE);
   assert.equal(sendCount, 1);
   assert.equal(getThread(null).messages.length, 1);
   assert.equal(state.codex.threadDrafts.room, 'B');
@@ -7481,7 +7485,8 @@ test('기록 없이 시작: the switch, the first-send body, the confirmed badge
   assert.ok(body);
   const deps = ['state', 'getActiveCodexThread', 'getCodexThreadDraft', 'ChatState', 'threadBusy', 'epochScope', 'ensureNativeReadyForSend', 'updateThreadById', 'emit',
     'captureThreadInputs', 'getCodexThreadById', 'protocol', 'codexThreadAgentProfile', 'appendMessageToThread', 'createCodexMessage', 'SELF_MEMBER', 'codexThreadRuntimeConfig', 'fetchJson', 'syncProtocolRun', 'browserToolSelectedSources',
-    'rootSseReady', 'InputContext', 'chatRequestProjectDisplays', 'CHAT_REQUEST_PROJECT_INVALID', 'chatRoomProjectSendBlock', 'chatRoomProjectState'];
+    'rootSseReady', 'InputContext', 'chatRequestProjectDisplays', 'CHAT_REQUEST_PROJECT_INVALID', 'chatRoomProjectSendBlock', 'chatRoomProjectState',
+    'normalizeChatRoomProjectDefault', 'snapshotChatRoomProjectExpectation', 'CHAT_ROOM_PROJECT_UNAVAILABLE'];
   const send = async (room, capabilities, reply) => {
     const state = { codex: { activeThreadId: 'room', threads: [{ id: 'room', messages: [], inputSources: [], briefingInputs: [], profileEnabled: false, ...room }],
       threadDrafts: { room: '안녕' }, threadDraftRevisions: { room: 1 }, authStatus: sessionAuth, connected: true, chatCapabilities: capabilities } };
@@ -7494,7 +7499,8 @@ test('기록 없이 시작: the switch, the first-send body, the confirmed badge
       (id, message) => update(id, thread => ({ ...thread, messages: [...thread.messages, message] })),
       (role, content, status, options) => ({ id: `message-${role}`, role, content, status, ...options }), '나', () => ({}),
       async (_url, request) => { payload = JSON.parse(request.body); return reply(payload); }, () => {}, () => [],
-      () => ({ sourceReady: true, eventSourceReadyState: 1, browserTransportId: null }), InputContext, new Map(), requestProjectSurfaceConstants().CHAT_REQUEST_PROJECT_INVALID, projectDefaults.chatRoomProjectSendBlock, projectDefaults.chatRoomProjectState);
+      () => ({ sourceReady: true, eventSourceReadyState: 1, browserTransportId: null }), InputContext, new Map(), requestProjectSurfaceConstants().CHAT_REQUEST_PROJECT_INVALID, projectDefaults.chatRoomProjectSendBlock, projectDefaults.chatRoomProjectState,
+      projectDefaults.normalizeChatRoomProjectDefault, projectDefaults.snapshotChatRoomProjectExpectation, requestProjectSurfaceConstants().CHAT_ROOM_PROJECT_UNAVAILABLE);
     return { payload, thread: getThread(null) };
   };
   const accepted = request => ({ accepted: true, conversationId: 'native-one', runId: 'r1', answerId: 'native-one/r1', ...(request.stateless ? { stateless: true } : {}) });
@@ -10541,7 +10547,8 @@ test('CTX-03 send: contextResolution names the list and the refs taken from it, 
   assert.ok(body);
   const deps = ['state', 'getActiveCodexThread', 'getCodexThreadDraft', 'ChatState', 'threadBusy', 'epochScope', 'ensureNativeReadyForSend', 'updateThreadById', 'emit',
     'captureThreadInputs', 'getCodexThreadById', 'protocol', 'codexThreadAgentProfile', 'appendMessageToThread', 'createCodexMessage', 'SELF_MEMBER', 'codexThreadRuntimeConfig', 'fetchJson', 'syncProtocolRun', 'browserToolSelectedSources',
-    'rootSseReady', 'InputContext', 'expireContextSuggestions', 'chatRequestProjectDisplays', 'CHAT_REQUEST_PROJECT_INVALID', 'chatRoomProjectSendBlock', 'chatRoomProjectState'];
+    'rootSseReady', 'InputContext', 'expireContextSuggestions', 'chatRequestProjectDisplays', 'CHAT_REQUEST_PROJECT_INVALID', 'chatRoomProjectSendBlock', 'chatRoomProjectState',
+    'normalizeChatRoomProjectDefault', 'snapshotChatRoomProjectExpectation', 'CHAT_ROOM_PROJECT_UNAVAILABLE'];
   const send = async ({ inputSources = [], suggest = { resolution, receivedAt: Date.now(), accountKey }, reply }) => {
     const state = { codex: { activeThreadId: 'room', threads: [{ id: 'room', messages: [], inputSources, briefingInputs: [], profileEnabled: false }],
       threadDrafts: { room: '이 자료로 정리해 줘' }, threadDraftRevisions: { room: 1 }, authStatus: sessionAuth, connected: true, chatCapabilities: ['send'] },
@@ -10558,7 +10565,8 @@ test('CTX-03 send: contextResolution names the list and the refs taken from it, 
       (id, message) => update(id, thread => ({ ...thread, messages: [...thread.messages, message] })),
       (role, content, status, options) => ({ id: `message-${role}`, role, content, status, ...options }), '나', () => ({}),
       async (_url, request) => { payload = JSON.parse(request.body); return reply(payload); }, () => {}, () => [],
-      () => ({ sourceReady: true, eventSourceReadyState: 1, browserTransportId: null }), InputContext, id => expired.push(id), new Map(), requestProjectSurfaceConstants().CHAT_REQUEST_PROJECT_INVALID, projectDefaults.chatRoomProjectSendBlock, projectDefaults.chatRoomProjectState);
+      () => ({ sourceReady: true, eventSourceReadyState: 1, browserTransportId: null }), InputContext, id => expired.push(id), new Map(), requestProjectSurfaceConstants().CHAT_REQUEST_PROJECT_INVALID, projectDefaults.chatRoomProjectSendBlock, projectDefaults.chatRoomProjectState,
+      projectDefaults.normalizeChatRoomProjectDefault, projectDefaults.snapshotChatRoomProjectExpectation, requestProjectSurfaceConstants().CHAT_ROOM_PROJECT_UNAVAILABLE);
     return { payload, thread: getThread(null), state, expired };
   };
   const accepted = () => ({ accepted: true, conversationId: 'native-one', runId: 'r1', answerId: 'native-one/r1' });
@@ -11696,7 +11704,8 @@ function installDefaultProjectSendFixture(state) {
       return { ok: true, result: { roomId, inheritance: null, override: null, project: null, source: null, status: 'none' } };
     },
   };
-  const names = ['chatRequestProjectSelection', 'chatRoomProjectState', 'chatRoomProjectSendBlock', 'createChatProjectScope', 'normalizeChatRoomProjectDefault', 'chatRoomProjectTargetsMatch'];
+  const names = ['chatRequestProjectSelection', 'chatRoomProjectState', 'chatRoomProjectSendBlock', 'createChatProjectScope', 'normalizeChatRoomProjectDefault',
+    'snapshotChatRoomProjectExpectation', 'chatRoomProjectExpectation', 'chatRoomProjectTargetsMatch'];
   const api = compileFunction(names.map(declaration).join('\n') + '\nreturn { ' + names.join(', ') + ' };', Object.keys(deps))(...Object.values(deps));
   Object.assign(deps, api);
   state.codexBridge = Object.fromEntries(['createProjectScope', 'readRoomProjectDefault', 'prepareRoomProjectSend'].map(name => [name, requestProjectBridgeMethod(name, deps)]));
@@ -11832,6 +11841,7 @@ function requestProjectUiHarness({ target, read, roomRead, roomSave, resizeObser
     },
   };
   const names = ['normalizeChatRequestProjectDraft', 'chatRequestProjectSelection', 'chatRoomProjectState', 'createChatProjectScope', 'normalizeChatRoomProjectDefault',
+    'snapshotChatRoomProjectExpectation', 'chatRoomProjectExpectation',
     'chatRoomProjectSendBlock', 'chatRoomProjectTargetsMatch', 'observeFileProjectAssociation', 'buildChatRoomProjectSettings', 'chatRequestProjectCandidates', 'openChatRequestProjectPanel', 'buildChatRequestProjectControl'];
   const api = compileFunction(names.map(declaration).join('\n') + '\nreturn { ' + names.join(', ') + ' };',
     Object.keys(deps))(...Object.values(deps));
@@ -11890,7 +11900,8 @@ function requestProjectSendHarness({ target, capture, reply, roomRead, inputSour
     },
     syncProtocolRun() {}, browserToolSelectedSources: () => [], rootSseReady: () => ({ sourceReady: true }), expireContextSuggestions() {},
   };
-  const names = ['chatRequestProjectSelection', 'chatRoomProjectState', 'createChatProjectScope', 'chatRoomProjectSendBlock', 'normalizeChatRoomProjectDefault', 'chatRoomProjectTargetsMatch'];
+  const names = ['chatRequestProjectSelection', 'chatRoomProjectState', 'createChatProjectScope', 'chatRoomProjectSendBlock', 'normalizeChatRoomProjectDefault',
+    'snapshotChatRoomProjectExpectation', 'chatRoomProjectExpectation', 'chatRoomProjectTargetsMatch'];
   Object.assign(deps, compileFunction(names.map(declaration).join('\n') + '\nreturn { ' + names.join(', ') + ' };', Object.keys(deps))(...Object.values(deps)));
   const send = requestProjectBridgeMethod('sendMessage', deps);
   const setTarget = requestProjectBridgeMethod('setRequestProjectTarget', deps);
@@ -12346,7 +12357,7 @@ test('File-only compact focus uses the real existing camera transition, retainin
 
 // The actual Surface panel, real retained-output modules and scoped bridge
 // adapter together. No provider, OS input, network listener or filesystem open.
-function activityDetailsHarness({ fetchRead, approval = true } = {}) {
+function activityDetailsHarness({ fetchRead, approval = true, openFile } = {}) {
   const document = requestProjectDOM();
   const thread = { id: 'room-original', clientBindingId: 'binding-original', conversationId: 'conversation / original', engineId: 'codex', messages: [] };
   const command = { id: 'command / original', kind: 'commandExecution', title: '명령 실행', status: 'completed',
@@ -12372,12 +12383,14 @@ function activityDetailsHarness({ fetchRead, approval = true } = {}) {
     calls.push({ path, options, target });
     assert.equal(options.method, 'GET');
     assert.equal(Object.hasOwn(options, 'body'), false);
-    assert.ok(['/chat/command-output', '/chat/run-changes'].includes(url.pathname));
-    return fetchRead ? fetchRead(url.pathname, target, options) : url.pathname === '/chat/command-output' ? packet(target) : changes(target);
+    assert.ok(['/chat/command-output', '/chat/run-changes', '/chat/run-project-origin'].includes(url.pathname));
+    return fetchRead ? fetchRead(url.pathname, target, options) : url.pathname === '/chat/command-output' ? packet(target)
+      : url.pathname === '/chat/run-project-origin' ? { protocolVersion: 1, ...target, status: 'unavailable', verified: false } : changes(target);
   };
   const deps = { state, document, window: { AbortController }, ChatState: Chat, ChatRunResult, ChatChangeReview,
     pruneUserInputDrafts() {}, contextResolverRecordSection: () => null, codexSubAgentSection: () => null,
     formatMessageTime: () => '', queueMicrotask, openChatFileReference: () => assert.fail('no inferred FileView authority'),
+    openVerifiedRunFile: request => openFile ? openFile(request) : assert.fail('no verified file opening requested by this fixture'),
     codexUserInputBlock: () => assert.fail('this fixture has no Agent answer'), userInputDrafts: new Map(), userInputDraftKey: () => '' };
   const names = ['el', 'getCodexThreadById', 'codexRuns', 'codexRunLabel', 'openCodexActivityPanel', 'codexActivityDetailTarget',
     'codexCommandInfo', 'createCodexActivityReadScope', 'replaceCodexActivityDetails', 'createCodexActivityDetailsView', 'renderCodexActivityPanel'];
@@ -12788,7 +12801,7 @@ test('D-X3: pending request removal preserves newer draft intent and never subst
 });
 
 test('D-X3: pending reads and ready caches are fenced by account epoch, engine, profile and binding, including unchanged client IDs', async t => {
-  for (const phase of ['pending', 'ready']) for (const mode of ['account', 'engine', 'profile', 'binding']) await t.test(phase + ' ' + mode, async () => {
+  for (const phase of ['pending', 'ready']) for (const mode of ['account', 'account-without-epoch', 'engine', 'profile', 'binding']) await t.test(phase + ' ' + mode, async () => {
     const pending = requestProjectDeferred();
     const h = requestProjectUiHarness({ roomRead: () => phase === 'pending' ? pending.promise : { ok: true, result: roomProjectDefault(requestProjectA()) } });
     if (mode === 'profile') Object.assign(h.thread(), { engineId: 'claude', engineProfileId: 'slot-a' });
@@ -12796,6 +12809,7 @@ test('D-X3: pending reads and ready caches are fenced by account epoch, engine, 
     if (phase === 'ready') { await reading; assert.equal(h.chatRoomProjectState(h.thread()).status, 'ready'); }
     const oldEntry = h.chatRoomProjectDefaults.get('room');
     if (mode === 'account') h.epochScope.reset('codex');
+    if (mode === 'account-without-epoch') h.state.codex.authStatus = { accountEmail: 'another@example.test', isLoggedIn: true };
     if (mode === 'engine') h.thread().engineId = 'claude';
     if (mode === 'profile') { h.epochScope.reset('claude', 'slot-a'); h.thread().engineProfileId = 'slot-b'; }
     if (mode === 'binding') h.thread().clientBindingId = 'new-binding';
@@ -12854,7 +12868,7 @@ test('D-X3: known pending/invalid defaults stop before capture or provider, whil
   await explicit.send(); assert.equal(explicit.calls.provider.length, 1);
   assert.deepEqual(explicit.calls.provider[0].projectTarget, { boardId: 'board-a', projectId: 'project-a', rootId: 'root-a' });
   const inherited = requestProjectSendHarness({ roomRead: body => ({ ok: true, result: roomProjectDefault(requestProjectB(), { roomId: body.roomId }) }) });
-  inherited.chatRoomProjectDefaults.set('room', { binding: 'original-wire-room', scope: inherited.projectScope(), status: 'ready', value: roomProjectDefault(requestProjectB()) });
+  inherited.chatRoomProjectDefaults.set('room', { binding: 'original-wire-room', scope: inherited.projectScope(), status: 'ready', value: roomProjectDefault(requestProjectB(), { roomId: 'original-wire-room' }) });
   await inherited.send(); assert.equal(inherited.calls.provider.length, 1);
   assert.equal(Object.hasOwn(inherited.calls.provider[0], 'projectTarget'), false, 'the backend resolves inheritance, not a UI-generated request override');
   assert.equal(Object.hasOwn(inherited.calls.provider[0], 'boardId'), false);
@@ -13034,7 +13048,7 @@ test('D-X3 freshness: unavailable, disconnected, malformed and failed pre-send r
 });
 
 test('D-X3 freshness: a pending send recheck rejects duplicates and changes to draft, room, binding, account, engine or profile', async t => {
-  for (const mode of ['duplicate', 'text', 'target', 'room', 'binding', 'account', 'engine', 'profile', 'new-draft-error']) await t.test(mode, async () => {
+  for (const mode of ['duplicate', 'text', 'target', 'room', 'binding', 'account', 'account-without-epoch', 'engine', 'profile', 'new-draft-error']) await t.test(mode, async () => {
     const pending = requestProjectDeferred();
     const h = requestProjectSendHarness({ roomRead: () => pending.promise });
     if (mode === 'profile') {
@@ -13050,6 +13064,7 @@ test('D-X3 freshness: a pending send recheck rejects duplicates and changes to d
     if (mode === 'room') h.state.codex.activeThreadId = 'other';
     if (mode === 'binding') h.thread().clientBindingId = 'new-binding';
     if (mode === 'account') h.epoch.reset('codex');
+    if (mode === 'account-without-epoch') h.state.codex.authStatus = { ...h.state.codex.authStatus, accountEmail: 'another@example.test' };
     if (mode === 'engine') h.thread().engineId = 'claude';
     if (mode === 'profile') h.thread().engineProfileId = 'slot-b';
     if (mode === 'new-draft-error') pending.reject(new Error('old failure'));
@@ -13797,4 +13812,143 @@ test('Task question UI: list is native-keyboard scrollable and input keeps full 
   assert.match(mount, /taskBoard\.addEventListener\('compositionstart',[\s\S]*?chat-task-answer-text'\) compositionInProgress = true/);
   assert.match(mount, /taskBoard\.addEventListener\('compositionend',[\s\S]*?queueMicrotask\(\(\) => render\(next\)\)/);
   assert.match(mount, /newTaskList\.scrollTop = taskScroll\.top/); assert.match(mount, /codexBridge\.clearTaskAnswers\?\.\(\)/);
+});
+
+test('room expectation host: default none, Board inheritance and room override send six observed IDs only; explicit request stays exclusive', async () => {
+  for (const source of [null, 'board', 'room']) {
+    const value = source ? roomProjectDefault(requestProjectA(), { roomId: 'original-wire-room', source })
+      : { roomId: 'original-wire-room', status: 'none', source: null, inheritance: null, override: null, project: null };
+    const h = requestProjectSendHarness({ roomRead: () => ({ ok: true, result: value }) });
+    h.chatRoomProjectDefaults.set('room', { binding: 'original-wire-room', scope: h.projectScope(), status: 'ready', value });
+    await h.send(); assert.equal(h.calls.provider.length, 1);
+    const body = h.calls.provider[0];
+    assert.deepEqual(body.expectedRoomProject, { roomId: 'original-wire-room', status: source ? 'connected' : 'none', source,
+      boardId: source === 'board' ? 'board-a' : null, projectId: source ? 'project-a' : null, rootId: source ? 'root-a' : null });
+    assert.equal(Object.hasOwn(body, 'projectTarget'), false); assert.equal(Object.hasOwn(body, 'boardId'), false);
+    assert.doesNotMatch(JSON.stringify(body.expectedRoomProject), /\/owned\/|Project A|displayPath|override|inheritance/);
+  }
+  const h = requestProjectSendHarness({ target: requestProjectA() }); await h.send();
+  assert.equal(h.roomCalls.length, 0); assert.equal(Object.hasOwn(h.calls.provider[0], 'expectedRoomProject'), false);
+  assert.deepEqual(h.calls.provider[0].projectTarget, { boardId: 'board-a', projectId: 'project-a', rootId: 'root-a' });
+});
+
+test('room expectation host: observed cache is cloned before capture; mutating its Board/root cannot silently change the send', async () => {
+  const pending = requestProjectDeferred(), observed = roomProjectDefault(requestProjectA(), { roomId: 'original-wire-room' });
+  const h = requestProjectSendHarness({ capture: () => pending.promise, roomRead: () => ({ ok: true, result: observed }) });
+  h.chatRoomProjectDefaults.set('room', { binding: 'original-wire-room', scope: h.projectScope(), status: 'ready', value: observed });
+  const sending = h.send(); await settle();
+  observed.inheritance.boardId = 'board-b'; Object.assign(observed.project, { projectId: 'project-b', rootId: 'root-b', displayPath: '/owned/project-b' });
+  pending.resolve([]); await sending;
+  assert.equal(h.calls.provider.length, 0); assert.equal(h.thread().messages.length, 0);
+  assert.equal(h.state.codex.threadDrafts.room, 'original words'); assert.equal(h.thread().requestProjectTarget, undefined);
+  assert.match(h.thread().sendError, /기본 프로젝트가 바뀌었습니다/);
+});
+
+test('room expectation host: new request override/account/room during capture stops the default-based send before lookup', async t => {
+  for (const mode of ['target', 'account', 'room']) await t.test(mode, async () => {
+    const pending = requestProjectDeferred(), h = requestProjectSendHarness({ capture: () => pending.promise });
+    const sending = h.send(); await settle();
+    if (mode === 'target') h.setTarget(requestProjectB());
+    if (mode === 'account') h.state.codex.authStatus = { ...h.state.codex.authStatus, accountEmail: 'other@example.test' };
+    if (mode === 'room') h.state.codex.activeThreadId = 'different-room';
+    pending.resolve([]); await sending;
+    assert.equal(h.roomCalls.length, 0); assert.equal(h.calls.provider.length, 0); assert.equal(h.thread().messages.length, 0);
+    assert.equal(h.state.codex.threadDrafts.room, 'original words');
+    assert.deepEqual(h.thread().requestProjectTarget, mode === 'target' ? requestProjectB() : undefined);
+  });
+});
+
+test('room expectation host: wrong-room cached observation fails before preparation; backend mismatch preserves draft without retry', async () => {
+  const invalid = requestProjectSendHarness();
+  invalid.chatRoomProjectDefaults.set('room', { binding: 'original-wire-room', scope: invalid.projectScope(), status: 'ready', value: roomProjectDefault(requestProjectA(), { roomId: 'wrong-room' }) });
+  await invalid.send(); assert.equal(invalid.calls.prepare, 0); assert.equal(invalid.calls.provider.length, 0);
+  assert.equal(invalid.state.codex.threadDrafts.room, 'original words'); assert.equal(invalid.thread().messages.length, 0);
+  const h = requestProjectSendHarness({ reply: () => { throw Object.assign(new Error('Changed observed room default'), { status: 409, code: 'PROJECT_WORKSPACE_CHANGED', accepted: false }); } });
+  await h.send(); await settle();
+  assert.equal(h.calls.provider.length, 1); assert.equal(h.calls.provider[0].expectedRoomProject.status, 'none');
+  assert.equal(h.state.codex.threadDrafts.room, 'original words'); assert.equal(h.thread().requestProjectTarget, undefined);
+  assert.match(h.thread().sendError, /실행 프로젝트 연결이 바뀌었거나/);
+});
+
+test('origin host: explicit failed-command result reads only original conversation/run, then forwards a fresh scoped reader on each file click', async () => {
+  const opened = [];
+  const failure = 'FAIL src/math.test.js\n  ● math › subtracts\n\n    Expected: 1\n    Received: 2\n\n      at Object.toBe (src/math.test.js:11:19)\n\nTests:       1 failed, 2 passed, 3 total\n';
+  let h;
+  h = activityDetailsHarness({ fetchRead: (path, target) => path === '/chat/command-output'
+    ? { ...h.packet(target), tail: failure, totalBytes: failure.length }
+    : { protocolVersion: 1, ...target, status: 'verified', verified: true, projectId: 'original-project', rootId: 'original-root', directoryId: 'original-dir', displayPath: '/verified-root' },
+    openFile: async request => {
+      opened.push(request); assert.equal(request.isCurrent(request.target), true);
+      const origin = await request.readOrigin(request.target, { signal: request.signal });
+      assert.equal(origin.rootId, 'original-root'); return { status: 'opened', cardId: 'separate-file-card' };
+    } });
+  Object.assign(h.command.detail, { command: 'npm test', cwd: '/verified-root', exitCode: 1 });
+  h.renderCodexActivityPanel(); assert.equal(h.calls.length, 0);
+  await h.openResult();
+  assert.deepEqual(h.calls.map(call => new URL(call.path, 'http://test').pathname), ['/chat/command-output', '/chat/run-project-origin']);
+  assert.deepEqual(h.calls[1].target, { conversationId: h.run.conversationId, runId: h.run.runId });
+  assert.equal(h.result().getAttribute('data-state'), 'ready', h.result().textContent);
+  const button = h.result().querySelector('.egdesk-run-result-location'); assert.equal(button.tag, 'button');
+  await button.click(); assert.equal(opened.length, 1); assert.equal(h.calls.length, 3);
+  assert.deepEqual(opened[0].target, { conversationId: h.run.conversationId, runId: h.run.runId, itemId: h.command.id });
+  assert.equal(opened[0].location.path, '/verified-root/src/math.test.js'); assert.equal(opened[0].location.line, 11);
+  assert.equal(Object.isFrozen(opened[0].target), true); assert.ok(opened[0].signal instanceof AbortSignal);
+  h.run.summary = 'unrelated same-run SSE'; h.renderCodexActivityPanel(); await settle();
+  assert.equal(h.result().querySelector('.egdesk-run-result-location'), button); assert.equal(h.calls.length, 3);
+  await button.click(); assert.equal(opened.length, 2); assert.equal(h.calls.length, 4, 'origin is read again, never a cached opening grant');
+  h.command.detail.command = 'changed original command'; await button.click(); assert.equal(opened.length, 2);
+  assert.equal(h.calls.length, 4); assert.deepEqual(h.decisions, []);
+  assert.match(surfaceSource, /const openVerifiedRunFile = surfaceForward\('fileCard', 'openVerifiedRunFile'\)/);
+});
+
+test('origin host: unavailable origin or original cwd outside its verified root leaves retained text readable without a file action', async t => {
+  for (const verified of [false, true]) await t.test(verified ? 'mismatched original cwd' : 'unverified origin', async () => {
+    const failure = 'FAIL src/math.test.js\n  ● math\n\n    Expected: 1\n    Received: 2\n\n      at Object.toBe (src/math.test.js:11:19)\n\nTests: 1 failed, 3 total\n';
+    let h;
+    h = activityDetailsHarness({ fetchRead: (path, target) => path === '/chat/command-output'
+      ? { ...h.packet(target), tail: failure, totalBytes: failure.length }
+      : { protocolVersion: 1, ...target, status: verified ? 'verified' : 'unavailable', verified,
+        projectId: 'original-project', rootId: 'original-root', directoryId: 'original-dir', displayPath: '/verified-root' } });
+    Object.assign(h.command.detail, { command: 'npm test', cwd: '/not-authority', exitCode: 1 });
+    h.renderCodexActivityPanel(); await h.openResult();
+    assert.equal(h.result().getAttribute('data-state'), 'ready');
+    assert.match(h.result().querySelector('.egdesk-run-result-tail').textContent, /Expected: 1/);
+    assert.equal(h.result().querySelectorAll('button.egdesk-run-result-location').length, 0);
+    assert.deepEqual(h.calls.map(call => new URL(call.path, 'http://test').pathname), ['/chat/command-output', '/chat/run-project-origin']);
+    assert.deepEqual(h.decisions, []);
+  });
+});
+
+test('origin host: only an exact command item may query; arbitrary target fields never enter the origin URL', async () => {
+  const h = activityDetailsHarness(); h.renderCodexActivityPanel(); const scope = h.scopes[0];
+  const target = { conversationId: h.run.conversationId, runId: h.run.runId, itemId: h.command.id };
+  for (const wrong of [{ ...target, itemId: h.change.id }, { ...target, itemId: h.pending.itemId }, { ...target, runId: 'wrong' }, { ...target, conversationId: 'wrong' }]) await assert.rejects(scope.readOrigin(wrong));
+  assert.equal(h.calls.length, 0);
+  await scope.readOrigin({ ...target, boardId: 'arbitrary-active-board', rootId: 'arbitrary-root', path: '/arbitrary', cwd: '/arbitrary' });
+  assert.deepEqual(h.calls[0].target, { conversationId: h.run.conversationId, runId: h.run.runId });
+  assert.equal(h.calls[0].options.method, 'GET'); assert.equal(Object.hasOwn(h.calls[0].options, 'body'), false);
+  h.run.activities.push({ ...h.command }); await assert.rejects(scope.readOrigin(target)); assert.equal(h.calls.length, 1);
+});
+
+test('origin host: account/engine/profile/binding/source/item/epoch changes reject late origin DTOs without opening a file', async t => {
+  const changes = {
+    account: h => { h.state.codex.codexAccountKey = 'new-account'; },
+    'account-without-epoch': h => { h.state.codex.authStatus = { accountEmail: 'another@example.test', isLoggedIn: true }; },
+    room: h => { h.state.codex.threads.push({ id: 'other', clientBindingId: 'other-binding', messages: [] }); h.openCodexActivityPanel('other'); h.openCodexActivityPanel(h.thread.id); },
+    engine: h => { h.thread.engineId = 'claude'; },
+    profile: h => { h.thread.engineProfileId = 'new-profile'; },
+    binding: h => { h.thread.clientBindingId = 'new-binding'; },
+    source: h => { h.command.detail = { ...h.command.detail, command: 'changed' }; },
+    item: h => { h.command.id = 'different-item'; },
+    epoch: h => h.epochScope.reset('codex'),
+    close: h => h.scopes[0].dispose(),
+  };
+  for (const [name, change] of Object.entries(changes)) await t.test(name, async () => {
+    const pending = requestProjectDeferred(), h = activityDetailsHarness({ fetchRead: () => pending.promise }); h.renderCodexActivityPanel();
+    const target = { conversationId: h.run.conversationId, runId: h.run.runId, itemId: h.command.id };
+    const reading = h.scopes[0].readOrigin(target), rejected = assert.rejects(reading);
+    change(h); pending.resolve({ protocolVersion: 1, conversationId: target.conversationId, runId: target.runId, verified: true, status: 'verified',
+      projectId: 'p', rootId: 'r', directoryId: 'd', displayPath: '/old-account-root' }); await rejected;
+    assert.equal(h.calls.length, 1); assert.deepEqual(h.decisions, []);
+  });
 });

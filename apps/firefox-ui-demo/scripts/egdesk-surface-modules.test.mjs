@@ -128,8 +128,10 @@ async function install(script, namespaces, { transformNamespace = (_, namespace)
   const coreNames = namesAtCoreScope(script);
   for (const name of dependencies) assert.ok(coreNames.has(name), `installer dependency ${name} is declared by core`);
   const forwards = forwardsIn(script);
+  const expectedForwards = zones.map(zone => [zone.method, zone.key, zone.method]);
+  expectedForwards.splice(2, 0, ['openVerifiedRunFile', 'fileCard', 'openVerifiedRunFile']);
   assert.deepEqual(forwards.map(({ binding, zone, method }) => [binding, zone, method]),
-    zones.map(zone => [zone.method, zone.key, zone.method]), 'every stage1 forwarding declaration');
+    expectedForwards, 'every stage1 forwarding declaration');
   const footer = installerSource(script);
   for (const forward of forwards) assert.ok(forward.index < script.indexOf(footer), 'forwarders are constructed before zones');
   const events = [], imports = [], received = [];

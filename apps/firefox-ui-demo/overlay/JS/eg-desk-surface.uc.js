@@ -1404,12 +1404,15 @@
     if (!original || ChatState.nativeBindingHeld(original)) return null;
     const binding = ChatState.clientThreadBinding(original);
     const engineId = ChatState.chatThreadEngineId(original, state.codex), profileId = ChatState.chatThreadEngineProfileId(original, state.codex);
+    const accountKey = () => JSON.stringify([state.codex.codexAccountKey, state.codex.authStatus?.accountId,
+      state.codex.authStatus?.accountEmail, state.codex.authStatus?.isLoggedIn]);
+    const account = accountKey();
     const token = epochScope.begin(engineId, profileId);
     return {
       signal: token.signal, abort: () => token.controller.abort(), finish: () => epochScope.finish(token),
       current: () => {
         const latest = getCodexThreadById(state.codex, threadId);
-        return epochScope.valid(token) && !!latest && !ChatState.nativeBindingHeld(latest)
+        return epochScope.valid(token) && account === accountKey() && !!latest && !ChatState.nativeBindingHeld(latest)
           && ChatState.clientThreadBinding(latest) === binding && ChatState.chatThreadEngineId(latest, state.codex) === engineId
           && ChatState.chatThreadEngineProfileId(latest, state.codex) === profileId;
       },
@@ -1429,7 +1432,7 @@
       if (!id(source.projectId) || source.status !== value.status || source.source !== value.source) invalid();
       const title = typeof source.title === 'string' && source.title ? source.title
         : typeof source.name === 'string' && source.name ? source.name : '프로젝트';
-      project = { projectId: source.projectId, title: title.slice(0, 120), status: source.status };
+      project = { projectId: source.projectId, title: title.slice(0, 120), status: source.status, source: source.source };
       if (value.status === 'connected') {
         if (!id(source.rootId) || typeof source.displayPath !== 'string' || !source.displayPath || source.displayPath.length > 4096 || source.displayPath.includes('\0')) invalid();
         Object.assign(project, { rootId: source.rootId, displayPath: source.displayPath });
@@ -1453,6 +1456,28 @@
     if (!entry) return null; // The runtime still resolves and validates the saved default before dispatch.
     if (entry.status === 'loading' || entry.status === 'saving') return '이 방의 기본 프로젝트를 확인하는 중입니다.';
     return entry.status !== 'ready' || !['none', 'connected'].includes(entry.value?.status) ? CHAT_ROOM_PROJECT_UNAVAILABLE : null;
+  }
+
+  // Comparison only, never a project selection or filesystem grant. Keep the
+  // six-field observation detached from mutable DTO/cache objects at every await.
+  function snapshotChatRoomProjectExpectation(value, roomId) {
+    const keys = ['roomId', 'status', 'source', 'boardId', 'projectId', 'rootId'];
+    const id = text => typeof text === 'string' && !!text.trim() && text.length <= 512 && !text.includes('\0');
+    if (!value || typeof value !== 'object' || Array.isArray(value) || Object.keys(value).length !== keys.length
+        || !keys.every(key => Object.hasOwn(value, key)) || !id(roomId) || value.roomId !== roomId
+        || !(value.status === 'none' ? ['source', 'boardId', 'projectId', 'rootId'].every(key => value[key] === null)
+          : value.status === 'connected' && id(value.projectId) && id(value.rootId)
+            && (value.source === 'board' ? id(value.boardId) : value.source === 'room' && value.boardId === null))) {
+      throw new Error(CHAT_ROOM_PROJECT_UNAVAILABLE);
+    }
+    return Object.freeze(Object.fromEntries(keys.map(key => [key, value[key]])));
+  }
+
+  function chatRoomProjectExpectation(value, roomId) {
+    const observed = normalizeChatRoomProjectDefault(value, roomId);
+    return snapshotChatRoomProjectExpectation({ roomId, status: observed.status, source: observed.source,
+      boardId: observed.source === 'board' ? observed.inheritance.boardId : null,
+      projectId: observed.project?.projectId ?? null, rootId: observed.project?.rootId ?? null }, roomId);
   }
 
   function chatRoomProjectTargetsMatch(left, right) {
@@ -2226,31 +2251,40 @@
       el('summary', {}, '명령 정보'), ...rows) : null;
   }
 
-  // One account/binding scope per visible activity view. Only the two retained
-  // read endpoints enter this surface; a response never emits Chat state.
+  // One account/binding scope per visible activity view. Only retained-output
+  // and original-run read endpoints enter here; responses never emit Chat state.
   function createCodexActivityReadScope(threadId, epochScope, fetchJson, onInvalidate) {
     const original = getCodexThreadById(state.codex, threadId);
     if (!original || ChatState.nativeBindingHeld(original)) return null;
     const binding = ChatState.clientThreadBinding(original);
     const conversationId = original.conversationId;
-    const token = epochScope.begin(ChatState.chatThreadEngineId(original, state.codex), ChatState.chatThreadEngineProfileId(original, state.codex));
+    const engineId = ChatState.chatThreadEngineId(original, state.codex), profileId = ChatState.chatThreadEngineProfileId(original, state.codex);
+    const accountKey = () => JSON.stringify([state.codex.codexAccountKey, state.codex.authStatus?.accountId,
+      state.codex.authStatus?.accountEmail, state.codex.authStatus?.isLoggedIn]);
+    const account = accountKey(), token = epochScope.begin(engineId, profileId);
     let disposed = false;
     token.signal.addEventListener('abort', () => { if (!disposed) onInvalidate?.(); }, { once: true });
     const isCurrent = () => {
       const thread = getCodexThreadById(state.codex, threadId);
-      return !disposed && epochScope.valid(token) && !!thread && !ChatState.nativeBindingHeld(thread)
+      return !disposed && epochScope.valid(token) && account === accountKey() && !!thread && !ChatState.nativeBindingHeld(thread)
+        && ChatState.chatThreadEngineId(thread, state.codex) === engineId && ChatState.chatThreadEngineProfileId(thread, state.codex) === profileId
         && ChatState.clientThreadBinding(thread) === binding && thread.conversationId === conversationId;
     };
     const read = async (endpoint, target, { signal } = {}) => {
       const identity = codexActivityDetailTarget(target, target?.itemId);
-      const thread = getCodexThreadById(state.codex, threadId);
-      const runs = identity ? codexRuns(thread).filter(run => run.conversationId === identity.conversationId && run.runId === identity.runId) : [];
-      const run = runs.length === 1 ? runs[0] : null;
-      const kind = endpoint === '/chat/command-output' ? 'commandExecution' : 'fileChange';
-      const ownsItem = run && ((run.activities || []).some(activity => activity.id === identity.itemId && activity.kind === kind)
-        || kind === 'fileChange' && (run.pendingApprovals || []).some(approval => approval.itemId === identity.itemId
-          && approval.kind === kind && approval.status === 'pending' && !approval.stale && !approval.replyPending));
-      if (!identity || !isCurrent() || !ownsItem) {
+      const origin = endpoint === '/chat/run-project-origin';
+      const kind = origin || endpoint === '/chat/command-output' ? 'commandExecution' : 'fileChange';
+      const ownedItem = () => {
+        const thread = getCodexThreadById(state.codex, threadId);
+        const runs = identity ? codexRuns(thread).filter(run => run.conversationId === identity.conversationId && run.runId === identity.runId) : [];
+        const run = runs.length === 1 ? runs[0] : null;
+        const items = (run?.activities || []).filter(activity => activity.id === identity.itemId && activity.kind === kind);
+        if (items.length === 1) return origin ? JSON.stringify([items[0].kind, items[0].status, items[0].detail ?? null]) : true;
+        return !origin && kind === 'fileChange' && (run?.pendingApprovals || []).some(approval => approval.itemId === identity.itemId
+          && approval.kind === kind && approval.status === 'pending' && !approval.stale && !approval.replyPending);
+      };
+      const source = identity && ownedItem();
+      if (!identity || !isCurrent() || !source) {
         throw new Error('이 활동의 원래 실행 연결을 확인할 수 없습니다.');
       }
       const controller = new window.AbortController();
@@ -2260,9 +2294,11 @@
       if (token.signal.aborted || signal?.aborted) abort();
       try {
         if (controller.signal.aborted) throw new Error('활동 조회가 취소되었습니다.');
-        const query = Object.entries(identity).map(([key, value]) => `${key}=${encodeURIComponent(value)}`).join('&');
+        const queryTarget = origin ? { conversationId: identity.conversationId, runId: identity.runId } : identity;
+        const query = Object.entries(queryTarget).map(([key, value]) => `${key}=${encodeURIComponent(value)}`).join('&');
         const result = await fetchJson(`${endpoint}?${query}`, { method: 'GET', signal: controller.signal });
-        if (!isCurrent() || controller.signal.aborted) throw new Error('활동 조회 연결이 바뀌었습니다.');
+        const latestSource = ownedItem();
+        if (!isCurrent() || controller.signal.aborted || !latestSource || origin && latestSource !== source) throw new Error('활동 조회 연결이 바뀌었습니다.');
         return result;
       } finally {
         token.signal.removeEventListener('abort', abort);
@@ -2272,6 +2308,7 @@
     return Object.freeze({ isCurrent,
       readCommandOutput: (target, options) => read('/chat/command-output', target, options),
       readRunChanges: target => read('/chat/run-changes', target),
+      readOrigin: (target, options) => read('/chat/run-project-origin', target, options),
       dispose() { if (disposed) return; disposed = true; token.controller.abort(); epochScope.finish(token); },
     });
   }
@@ -2364,6 +2401,13 @@
         entry.reader = ChatRunResult.createChatRunResultView({ document, run, activity,
           fetchJson: (_path, options) => readScope.readCommandOutput(target, options),
           isCurrent: candidate => current(entry, candidate),
+          readOrigin: async (candidate, options) => {
+            if (!current(entry, candidate)) throw new Error('이 실행 결과의 연결이 바뀌었습니다.');
+            const origin = await readScope.readOrigin(candidate, options);
+            if (!current(entry, candidate)) throw new Error('이 실행 결과의 연결이 바뀌었습니다.');
+            return origin;
+          },
+          onOpenVerifiedFile: request => openVerifiedRunFile(request),
         });
         entry.node = entry.reader.element;
         entry.node.className = 'egd-chat-command-result';
@@ -10011,7 +10055,9 @@
         chatProjectDraftActions.set(threadId, action); emit();
         let draft;
         try {
+          previous = previous ? normalizeChatRoomProjectDefault(previous, binding) : null;
           draft = ChatState.snapshotChatDraft(thread, state.codex.threadDrafts[threadId] || '', state.codex.threadDraftRevisions[threadId] || 0);
+          if (draft.requestProjectTarget) return false;
           const value = await this.readRoomProjectDefault(threadId, { force: true, supersede: true });
           const current = getCodexThreadById(state.codex, threadId);
           if (!scope.current() || state.codex.activeThreadId !== threadId
@@ -10023,7 +10069,7 @@
             updateThreadById(threadId, current => ({ ...current, sendError: '방 기본 프로젝트가 바뀌었습니다. 표시된 프로젝트와 전체 위치를 확인한 뒤 다시 보내세요. 초안은 유지했습니다.' }));
             return false;
           }
-          return true;
+          return chatRoomProjectExpectation(value, binding);
         } catch {
           const current = getCodexThreadById(state.codex, threadId);
           if (scope.current() && (!draft || ChatState.chatDraftMatches(current, state.codex.threadDrafts[threadId] || '', state.codex.threadDraftRevisions[threadId] || 0, draft))) {
@@ -10902,8 +10948,23 @@
         const roomProjectBlock = chatRoomProjectSendBlock(activeThread);
         if (roomProjectBlock) { updateThreadById(activeThread.id, thread => ({ ...thread, sendError: roomProjectBlock })); emit(); return; }
         const submittedProjectDisplay = chatRequestProjectDisplays.get(activeThread.id);
-        const submittedRoomDefault = chatRoomProjectState(activeThread)?.value || null;
+        let submittedRoomDefault;
+        try {
+          const observed = submittedDraft.requestProjectTarget ? null : chatRoomProjectState(activeThread)?.value;
+          submittedRoomDefault = observed ? normalizeChatRoomProjectDefault(observed, ChatState.clientThreadBinding(activeThread)) : null;
+        } catch { updateThreadById(activeThread.id, thread => ({ ...thread, sendError: CHAT_ROOM_PROJECT_UNAVAILABLE })); emit(); return; }
         const token = epochScope.begin(engineId, ChatState.chatThreadEngineProfileId(activeThread, state.codex));
+        const projectBinding = ChatState.clientThreadBinding(activeThread), projectProfile = ChatState.chatThreadEngineProfileId(activeThread, state.codex);
+        const projectAccountKey = () => JSON.stringify([state.codex.codexAccountKey, state.codex.authStatus?.accountId,
+          state.codex.authStatus?.accountEmail, state.codex.authStatus?.isLoggedIn]);
+        const projectAccount = projectAccountKey();
+        const defaultSendCurrent = () => {
+          const current = getCodexThreadById(state.codex, activeThread.id);
+          return epochScope.valid(token) && projectAccount === projectAccountKey() && state.codex.activeThreadId === activeThread.id
+            && current && ChatState.clientThreadBinding(current) === projectBinding
+            && ChatState.chatThreadEngineId(current, state.codex) === engineId && ChatState.chatThreadEngineProfileId(current, state.codex) === projectProfile
+            && ChatState.requestProjectTargetsMatch(submittedDraft.requestProjectTarget, current.requestProjectTarget);
+        };
         const selectedInputs = submittedDraft.inputSources;
         let submittedWasCleared = false;
         let inputReferences;
@@ -10959,10 +11020,15 @@
           epochScope.finish(token);
           return;
         }
-        // Re-read immediately before accepting a default-based send. This is
-        // freshness/notice, not an atomic expected-default check at the helper.
-        if (!submittedDraft.requestProjectTarget && !await state.codexBridge.prepareRoomProjectSend(activeThread.id, submittedRoomDefault)) {
-          epochScope.finish(token); return;
+        // Re-read before accepting, then carry that exact observation to the
+        // helper's comparison. Inheritance remains inheritance, not an override.
+        let expectedRoomProject = null;
+        if (!submittedDraft.requestProjectTarget) {
+          if (!defaultSendCurrent()) { epochScope.finish(token); return; }
+          const observed = await state.codexBridge.prepareRoomProjectSend(activeThread.id, submittedRoomDefault);
+          if (!observed || !defaultSendCurrent()) { epochScope.finish(token); return; }
+          try { expectedRoomProject = snapshotChatRoomProjectExpectation(observed, projectBinding); }
+          catch { updateThreadById(activeThread.id, thread => ({ ...thread, sendError: CHAT_ROOM_PROJECT_UNAVAILABLE })); epochScope.finish(token); emit(); return; }
         }
         if (!epochScope.valid(token)) { epochScope.finish(token); return; }
         // The first send ties the room to its engine (D3) and makes it the app's recent one (D4).
@@ -11007,6 +11073,12 @@
           runtimeConfig.stateless = ChatState.chatStatelessStartView(activeThread, state.codex.chatCapabilities).on;
           runtimeConfig.projectTarget = submittedDraft.requestProjectTarget;
           const chatRequest = ChatState.buildChatRequest(activeThread, content, requestId, runtimeConfig);
+          if (expectedRoomProject) {
+            if (!defaultSendCurrent() || chatRequest.projectTarget !== undefined) {
+              throw Object.assign(new Error(CHAT_ROOM_PROJECT_UNAVAILABLE), { status: 409, code: 'PROJECT_WORKSPACE_CHANGED', accepted: false });
+            }
+            chatRequest.expectedRoomProject = snapshotChatRoomProjectExpectation(expectedRoomProject, projectBinding);
+          }
           if (selectedBrowserSources.length) {
             chatRequest.selectedSources = selectedBrowserSources;
             chatRequest.browserTransportId = selectedBrowserTransportId;
@@ -12053,6 +12125,7 @@
   const spawnOntologyMapCard = surfaceForward('ontology', 'spawnOntologyMapCard');
 
   const spawnFileCard = surfaceForward('fileCard', 'spawnFileCard');
+  const openVerifiedRunFile = surfaceForward('fileCard', 'openVerifiedRunFile');
 
   function getProjectTarget() {
     // Resolve only when the user chooses File's Board project connection.

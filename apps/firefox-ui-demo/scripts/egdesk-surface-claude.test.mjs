@@ -143,7 +143,7 @@ function surface({ run = null, thread = {}, auth = {}, fetchJson = async () => (
   };
   const definitions = ['el', 'getCodexThreadById', 'getActiveCodexThread', 'getCodexThreadDraft', 'createCodexMessage',
     'chatRequestProjectSelection', 'chatRoomProjectState', 'chatRoomProjectSendBlock',
-    'createChatProjectScope', 'normalizeChatRoomProjectDefault', 'chatRoomProjectTargetsMatch',
+    'createChatProjectScope', 'normalizeChatRoomProjectDefault', 'snapshotChatRoomProjectExpectation', 'chatRoomProjectExpectation', 'chatRoomProjectTargetsMatch',
     'codexRuns', 'codexRunLabel', 'codexUserInputBlock', 'pruneUserInputDrafts', 'contextResolverRecordSection',
     'codexSubAgentSection', 'codexActivityDetailTarget', 'codexCommandInfo', 'createCodexActivityReadScope',
     'replaceCodexActivityDetails', 'createCodexActivityDetailsView', 'renderCodexActivityPanel', 'serializeDeskSnapshot', 'codexMessageAvatarFace',
@@ -998,6 +998,9 @@ async function runtime(t, { store = false, initialSend = true, contexts = null }
   const codex = createCodexEngineAdapter({ request: async (...args) => { codexCalls.push(args); assert.fail('Codex fallback'); },
     respond: () => assert.fail('Claude response routed to Codex') });
   const chat = new CodexChatRuntime({ engines: [codex, claude], store: chatStore, requireStore: !!chatStore, contexts,
+    // This fixture's room-default DTO explicitly reports none. Keep the real
+    // runtime comparison enabled without inventing an attached workspace.
+    resolveProjectWorkspace: async () => null,
     now: () => NOW, emit: event => events.push(event), verifyFile: async () => null,
     setTimer: () => assert.fail('runtime retry timer'), clearTimer() {} });
   const unsubscribe = claude.subscribe({ notification: (_, message) => chat.handleNotification(message),
