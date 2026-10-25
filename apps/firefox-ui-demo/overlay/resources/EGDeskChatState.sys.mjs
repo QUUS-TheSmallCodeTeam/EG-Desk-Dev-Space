@@ -1384,7 +1384,7 @@ export function toolCeilingNotes(value) {
   if (!ceiling) return [];
   const notes = [];
   if (ceiling.browser !== 'interact' && ceiling.mcp === 'inherited') notes.push(TOOL_CEILING_EXTERNAL_BROWSER_NOTE);
-  if (ceiling.terminal === 'allow') notes.push('묻지 않고 실행은 아직 준비 중이라, 지금은 실행 전에 묻습니다.');
+  if (ceiling.terminal === 'allow') notes.push('자동 승인은 제공하지 않으며 현재 승인 설정을 따릅니다.');
   return notes;
 }
 /** The preset this ceiling matches exactly, or null. */

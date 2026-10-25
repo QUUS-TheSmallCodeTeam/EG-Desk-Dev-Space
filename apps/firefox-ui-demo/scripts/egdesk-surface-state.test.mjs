@@ -9378,10 +9378,10 @@ test('the Agent tool section mirrors the store axes in Korean and maps switch, a
   const bad = Chat.validateProfileForm({ ...reopened, toolCeiling: { ...RESEARCH_CEILING, browser: 'drive' } });
   assert.equal(bad.ok, false);
   assert.deepEqual(bad.errors, [{ field: 'toolCeiling', message: '쓸 수 있는 도구를 다시 골라 주세요.' }]);
-  // 묻지 않고 실행 saved elsewhere stays as saved; it narrows nothing and the form says it still asks.
+  // A saved raw allow stays as saved; the note makes no promise of automatic approval or an unconditional prompt.
   const allow = { ...RESEARCH_CEILING, terminal: 'allow' };
   assert.deepEqual(Chat.validateProfileForm({ ...reopened, toolCeiling: allow }).body.toolCeiling, allow);
-  assert.match(Chat.toolCeilingNotes(allow).join(' '), /준비 중이라, 지금은 실행 전에 묻습니다/);
+  assert.deepEqual(Chat.toolCeilingNotes(allow), [Chat.TOOL_CEILING_EXTERNAL_BROWSER_NOTE, '자동 승인은 제공하지 않으며 현재 승인 설정을 따릅니다.']);
   // A browser kept to 쓰지 않음/보기만 with outside tools inherited names what stays reachable.
   assert.equal(Chat.TOOL_CEILING_EXTERNAL_BROWSER_NOTE, '직접 연결한 브라우저 도구(예: firefox-devtools)는 계속 쓸 수 있습니다');
   assert.deepEqual(Chat.toolCeilingNotes(RESEARCH_CEILING), [Chat.TOOL_CEILING_EXTERNAL_BROWSER_NOTE]);
@@ -9393,7 +9393,7 @@ test('the Agent tool section mirrors the store axes in Korean and maps switch, a
   assert.equal(Chat.toolCeilingSummary(RESEARCH_CEILING), '브라우저 보기만 · 파일 읽기만 · 터미널 실행 안 함');
   assert.equal(Chat.toolCeilingSummary(null), '제한 없음');
   assert.equal(Chat.toolCeilingSummary(Chat.openToolCeiling()), '제한 없음');
-  assert.equal(Chat.toolCeilingSummary(allow), '브라우저 보기만 · 파일 읽기만', '묻지 않고 실행 runs as 실행 전에 묻기, so it narrows nothing');
+  assert.equal(Chat.toolCeilingSummary(allow), '브라우저 보기만 · 파일 읽기만', 'raw allow remains unchanged without a new approval promise');
   assert.equal(Chat.toolCeilingSummary({ browser: 'none', files: 'write', terminal: 'ask', network: 'off', mcp: 'none' }),
     '브라우저 쓰지 않음 · 인터넷 연결 안 함 · 외부 도구 쓰지 않음');
   assert.equal(Chat.publicToolCeiling({ ...RESEARCH_CEILING, extra: 'x' }), null, 'an unknown key is not a ceiling');
@@ -9594,6 +9594,7 @@ test('Agent 관리 shows 사용 준비 on the detail and saves the tool section 
   assert.equal(option('browser', 'interact').attributes['aria-pressed'], 'true', 'switching on starts from today\'s behavior');
   assert.equal(option('terminal', 'allow').attributes.disabled, 'true');
   assert.equal(option('terminal', 'allow').textContent, '묻지 않고 실행 · 준비 중');
+  assert.equal(option('terminal', 'allow').attributes.title, '자동 승인은 제공하지 않으며 현재 승인 설정을 따릅니다.');
   assert.equal(preset().textContent, '리서치 Agent');
   preset().fire('click');
   assert.equal(preset().attributes['aria-pressed'], 'true');
@@ -13648,8 +13649,67 @@ test('Task question UI: full question first, native choices/selection/Enter do n
   assert.deepEqual(h.post()[0].body, { boardId: 'board-a', scope: awaitScope, taskId: 'answer-task', gateId: 'question', answer: { choice: 'email' } });
   assert.ok(h.post()[0].signal instanceof AbortSignal);
   assert.equal(h.part('chat-task-answer-continue'), undefined);
-  assert.match(h.question().textContent, /답변을 전달했습니다.*작업이 완료되었다는 뜻은 아닙니다/);
+  assert.equal(h.part('chat-task-answer-next').textContent, '답변 전달됨');
+  assert.match(h.part('chat-task-answer-status').textContent, /답변을 전달했습니다.*작업이 완료되었다는 뜻은 아닙니다/);
   assert.equal(Chat.taskBoardEntry(h.state.codex.taskBoard, 'graph-a').graph.tasks[0].status, 'waiting-on-dependency');
+});
+
+test('Task question UI: accepted explanation appears once across groups; every question/status and waiting draft survive SSE', async () => {
+  const graph = taskQuestionGraph({ status: 'satisfied', taskStatus: 'running', label: '전달 방법을 골라 주세요.' });
+  const pending = taskQuestionGraph({ label: '다음 전달 문구를 입력해 주세요.', response: { kind: 'text', maxLength: 50 } }).tasks[0];
+  pending.taskId = 'waiting-task'; pending.gates[0].gateId = 'waiting-question'; graph.tasks.push(pending);
+  const other = taskQuestionGraph({ graphId: 'graph-b', status: 'satisfied', label: '별도 작업의 전달 방법도 골라 주세요.' });
+  const h = taskQuestionHarness(graph);
+  h.state.codex.taskBoard = Chat.taskBoardWithState(h.state.codex.taskBoard, awaitState(other)); h.draw();
+  const row = (graphId, taskId) => h.parts('chat-task-condition').find(node => node.dataset.graphId === graphId && node.dataset.taskId === taskId);
+  const within = (node, id) => settingsNodes(node, item => item.dataset.testid === id);
+  const assertNotice = () => {
+    assert.equal(h.parts('chat-task-answer-status').length, 1, 'one common explanation, not one per question/group');
+    assert.equal((h.root.textContent.match(/작업이 완료되었다는 뜻은 아닙니다/g) || []).length, 1);
+    assert.match(h.part('chat-task-answer-status').textContent, /진행 상태는 각 작업의 표시에서 확인하세요/);
+    for (const [graphId, taskId, question] of [
+      ['graph-a', 'answer-task', '전달 방법을 골라 주세요.'],
+      ['graph-b', 'answer-task', '별도 작업의 전달 방법도 골라 주세요.'],
+    ]) {
+      const accepted = row(graphId, taskId);
+      assert.equal(accepted.dataset.state, 'satisfied');
+      assert.equal(accepted.children[0].dataset.testid, 'chat-task-question');
+      assert.equal(accepted.children[0].textContent, question);
+      assert.equal(within(accepted, 'chat-task-answer-next')[0].textContent, '답변 전달됨');
+      assert.equal(within(accepted, 'chat-task-answer-continue').length, 0);
+      assert.doesNotMatch(accepted.textContent, /작업이 완료되었다는 뜻은 아닙니다|진행 상태는/);
+    }
+    const waiting = row('graph-a', 'waiting-task');
+    assert.equal(waiting.dataset.state, 'waiting');
+    assert.equal(waiting.children[0].textContent, '다음 전달 문구를 입력해 주세요.');
+    assert.match(waiting.textContent, /답변을 기다리고 있습니다/);
+    assert.match(within(waiting, 'chat-task-answer-next')[0].textContent, /답변만 전달.*다른 대기 항목/);
+    assert.equal(within(waiting, 'chat-task-answer-continue').length, 1);
+    assert.equal(within(waiting, 'chat-task-answer-cancel').length, 1);
+    assert.deepEqual(h.parts('chat-task-row').map(node => node.dataset.status).sort(),
+      ['running', 'waiting-on-dependency', 'waiting-on-dependency']);
+  };
+  assertNotice();
+  h.type('KEEP_PENDING').fire('keydown', { key: 'Enter' });
+  h.frame(structuredClone(graph)); await settle();
+  assertNotice(); assert.equal(h.part('chat-task-answer-text').value, 'KEEP_PENDING');
+  assert.equal(h.requests.length, 0, 'rendering, typing and the known-graph SSE neither read nor submit');
+  h.api.methods.toggleTaskBoard();
+  assert.equal(h.part('chat-task-list'), undefined); assert.equal(h.part('chat-task-answer-status'), undefined);
+  h.api.methods.toggleTaskBoard(); assertNotice();
+  assert.equal(h.part('chat-task-answer-text').value, 'KEEP_PENDING'); assert.equal(h.requests.length, 0);
+});
+
+test('Task question UI: waiting-only list has no accepted notice after rendering or SSE', () => {
+  const graph = taskQuestionGraph(), h = taskQuestionHarness(graph);
+  for (let i = 0; i < 2; i++) {
+    assert.equal(h.part('chat-task-answer-status'), undefined);
+    assert.doesNotMatch(h.question().textContent, /답변 전달됨|답변을 전달했습니다/);
+    assert.match(h.question().textContent, /답변을 기다리고 있습니다/);
+    assert.equal(h.parts('chat-task-answer-continue').length, 1);
+    h.frame(structuredClone(graph));
+  }
+  assert.equal(h.requests.length, 0);
 });
 
 test('Task question UI: text/Enter never posts, NFC code-point limit is visible, over-limit is retained not truncated', async () => {
@@ -13676,7 +13736,8 @@ test('Task question UI: missing choice/text refuses without POST and malformed d
     assert.equal(settingsNodes(h.question(), node => node.dataset?.testid === 'chat-task-continue').length, 0);
     assert.ok(h.part('chat-task-continue'), 'the unrelated legacy file condition keeps its existing Continue');
     assert.match(h.part('chat-task-error').textContent, /질문 내용을 확인하지/);
-    assert.doesNotMatch(h.question().textContent, /답변을 전달했습니다/); assert.equal(h.post().length, 0);
+    assert.doesNotMatch(h.question().textContent, /답변을 전달했습니다|답변 전달됨/);
+    assert.equal(h.part('chat-task-answer-status'), undefined); assert.equal(h.post().length, 0);
   }
 });
 
@@ -13741,7 +13802,8 @@ test('Task question UI: identity changes clear draft and announce; account/room/
     assert.match(h.part('chat-task-answer-changed').textContent, /바뀌어 이전 답변을 지웠습니다/);
     assert.equal(h.part('chat-task-answer-text').value, '');
     resolve(awaitState(taskQuestionGraph({ response: { kind: 'text', maxLength: 50 }, status: 'satisfied' }))); await settle();
-    assert.equal(h.part('chat-task-answer-text').value, ''); assert.doesNotMatch(h.question().textContent, /답변을 전달했습니다/);
+    assert.equal(h.part('chat-task-answer-text').value, ''); assert.doesNotMatch(h.question().textContent, /답변을 전달했습니다|답변 전달됨/);
+    assert.equal(h.part('chat-task-answer-status'), undefined);
     oldContinue.fire('click'); assert.equal(h.post().length, 1);
   });
 });
@@ -13792,7 +13854,8 @@ test('Task question UI: malformed 2xx receipt is not accepted/completed; same dr
   const h = taskQuestionHarness(); h.choose('hold'); h.replies.push({ ok: true });
   h.part('chat-task-answer-continue').fire('click'); await settle();
   assert.equal(h.post().length, 1); assert.equal(h.draft().answer.choice, 'hold');
-  assert.match(h.part('chat-task-error').textContent, /진행하지 못했습니다/); assert.doesNotMatch(h.question().textContent, /답변을 전달했습니다/);
+  assert.match(h.part('chat-task-error').textContent, /진행하지 못했습니다/); assert.doesNotMatch(h.question().textContent, /답변을 전달했습니다|답변 전달됨/);
+  assert.equal(h.part('chat-task-answer-status'), undefined);
 });
 
 test('Task question UI: cancelled graph, stale response key and view cleanup cannot dispatch retained drafts', async () => {

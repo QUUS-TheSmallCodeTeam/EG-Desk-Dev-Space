@@ -1003,7 +1003,7 @@
     };
   }
 
-  function renderChatTaskQuestion(codex, actions, group, task, condition) {
+  function renderChatTaskQuestion(codex, actions, group, task, condition, onAccepted = () => {}) {
     const entry = ChatState.taskBoardEntry(codex.taskBoard, group.graphId);
     const original = entry?.graph?.tasks.find(row => row.taskId === task.taskId)?.gates.find(row => row.gateId === condition.gateId);
     const question = typeof original?.label === 'string' && original.label.trim() ? original.label.trim() : '진행할 내용을 알려 주세요.';
@@ -1014,7 +1014,8 @@
       graphId: group.graphId, taskId: task.taskId, gateId: condition.gateId, responseKey: condition.responseKey || '' } });
     const live = () => row.isConnected && draft && actions.taskAnswerCurrent(draft);
     row.appendChild(el('strong', { class: 'egd-task-question-title', data: { testid: 'chat-task-question' } }, question));
-    row.appendChild(el('p', { class: 'egd-task-answer-note' }, accepted ? '답변을 전달했습니다. 작업이 완료되었다는 뜻은 아닙니다.' : '이 작업은 답변을 기다리고 있습니다.'));
+    if (accepted) onAccepted();
+    else row.appendChild(el('p', { class: 'egd-task-answer-note' }, '이 작업은 답변을 기다리고 있습니다.'));
     if (draft?.notice) row.appendChild(el('p', { class: 'egd-task-answer-note', role: 'status', data: { testid: 'chat-task-answer-changed' } }, draft.notice));
     const error = el('p', { class: 'egd-task-error', role: 'alert', data: { testid: 'chat-task-error' } }, draft?.error || condition.error || '');
     if (draft && !accepted) {
@@ -1058,7 +1059,7 @@
     }
     row.appendChild(error);
     row.appendChild(el('p', { class: 'egd-task-answer-note', data: { testid: 'chat-task-answer-next' } }, accepted
-      ? '작업 진행 상태는 위의 표시에서 확인하세요.' : condition.responseInvalid ? '질문 내용을 다시 불러온 뒤 답해 주세요.'
+      ? '답변 전달됨' : condition.responseInvalid ? '질문 내용을 다시 불러온 뒤 답해 주세요.'
         : '계속을 누르면 답변만 전달합니다. 다른 대기 항목은 그대로 유지됩니다.'));
     return row;
   }
@@ -1091,8 +1092,9 @@
     const board = (...children) => el('div', { class: 'egd-task-board', role: 'group', 'aria-label': '작업 목록',
       data: { testid: 'chat-task-board', open: String(open) } }, hold, summary, ...children);
     if (!open) return board();
+    let hasAcceptedAnswer = false;
     const conditionRow = (group, task, condition) => {
-      if (condition.response || condition.responseInvalid) return renderChatTaskQuestion(codex, actions, group, task, condition);
+      if (condition.response || condition.responseInvalid) return renderChatTaskQuestion(codex, actions, group, task, condition, () => { hasAcceptedAnswer = true; });
       // The confirm buttons share the '계속' focus key, so the keyboard stays on the same condition.
       const key = `chat-task-gate:${group.graphId}:${task.taskId}:${condition.gateId}`;
       const sending = condition.phase === 'sending';
@@ -1127,16 +1129,19 @@
           decisionButton('approved', '승인', '승인하는 중…'), decisionButton('rejected', '거절', '거절하는 중…')) : null,
         condition.error ? el('p', { class: 'egd-task-error', role: 'alert', data: { testid: 'chat-task-error' } }, condition.error) : null);
     };
-    return board(el('div', { id: 'egd-task-board-list', class: 'egd-task-board-list', tabindex: '0', role: 'region', 'aria-label': '작업 목록과 질문',
-      data: { testid: 'chat-task-list', threadId: codex.activeThreadId || '', focusKey: 'chat-task-list' } },
-      ...view.groups.map(group => el('section', { class: 'egd-task-group', 'aria-label': group.title || '작업' },
+    const groups = view.groups.map(group => el('section', { class: 'egd-task-group', 'aria-label': group.title || '작업' },
         group.title ? el('p', { class: 'egd-task-group-title' }, group.title) : null,
         ...group.tasks.map(task => el('article', { class: 'egd-task-row', data: { testid: 'chat-task-row', status: task.status || 'unknown' } },
           el('div', { class: 'egd-task-row-head' },
             el('strong', { class: 'egd-task-name' }, task.name),
             el('span', { class: 'egd-task-status' }, task.statusText)),
           task.conditions.length ? el('ul', { class: 'egd-task-conditions', 'aria-label': `${task.name} 대기 조건` },
-            ...task.conditions.map(condition => conditionRow(group, task, condition))) : null))))));
+            ...task.conditions.map(condition => conditionRow(group, task, condition))) : null))));
+    return board(el('div', { id: 'egd-task-board-list', class: 'egd-task-board-list', tabindex: '0', role: 'region', 'aria-label': '작업 목록과 질문',
+      data: { testid: 'chat-task-list', threadId: codex.activeThreadId || '', focusKey: 'chat-task-list' } },
+      hasAcceptedAnswer ? el('p', { class: 'egd-task-answer-note', role: 'status', data: { testid: 'chat-task-answer-status' } },
+        '답변을 전달했습니다. 작업이 완료되었다는 뜻은 아닙니다. 진행 상태는 각 작업의 표시에서 확인하세요.') : null,
+      ...groups));
   }
 
   // CHAT-06 Await: an Agent's plan waits under the answer that proposed it. Its
@@ -12954,7 +12959,7 @@
             return el('button', {
               class: `egd-settings-segment${active ? ' egd-settings-segment-active' : ''}${option.pending ? ' egd-settings-segment-pending' : ''}`,
               type: 'button', 'aria-pressed': String(active), disabled: option.pending ? 'true' : null,
-              title: option.pending ? '준비 중입니다. 지금은 실행 전에 묻습니다.' : null,
+              title: option.pending ? '자동 승인은 제공하지 않으며 현재 승인 설정을 따릅니다.' : null,
               data: { testid: 'settings-agent-ceiling-option', axis, value: option.value },
               onclick: () => ceilingPick(axis, option.value),
             }, option.pending ? `${option.label} · 준비 중` : option.label);
