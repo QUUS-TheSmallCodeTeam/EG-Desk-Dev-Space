@@ -199,7 +199,7 @@ test('retained command -> explicit current file -> a separate production File Ca
   assert.match(current.querySelector('.egdesk-file-editor').value, /CURRENT_SOURCE/);
   const notice = current.querySelector('.egd-file-card-notice');
   assert.equal(notice.hidden, false);
-  for (const value of [target.runId, target.conversationId, target.itemId, h.source, '당시 행 참조', '같음을 확인한 것은 아닙니다']) assert.ok(notice.textContent.includes(value));
+  for (const value of [target.runId, target.conversationId, target.itemId, h.source, '당시 행 참조', '당시 내용과 다를 수 있습니다']) assert.ok(notice.textContent.includes(value));
   assert.equal(chat.element.querySelector('.egdesk-run-result-tail').textContent, outputBefore);
   assert.equal(outputReads, 1); assert.equal(h.registrations.length, registrationCount);
   assertReadEffects(h, { drafts: 1, boardReads });
@@ -207,6 +207,50 @@ test('retained command -> explicit current file -> a separate production File Ca
   await link.click();
   assert.equal(h.cards().length, 3, 'a later explicit click also does not reuse a preexisting Card');
   assertReadEffects(h, { drafts: 2, boardReads });
+});
+
+test('origin presentation keeps raw identities in native source details closed by default without extra actions', async t => {
+  const h = await harness(t);
+  assert.equal((await h.open()).status, 'opened');
+  const card = h.cards()[0], notice = card.querySelector('.egd-file-card-notice'), details = notice.querySelector('details');
+  assert.ok(details); assert.equal(details.open, false); assert.equal(details.getAttribute('open'), null);
+  assert.equal(details.querySelector('summary').textContent, '출처 상세');
+  const defaultText = notice.children.filter(child => child !== details).map(child => child.textContent).join('\n');
+  assert.equal(notice.children.filter(child => child.tagName === 'p').length, 2);
+  for (const id of Object.values(target)) {
+    assert.ok(details.textContent.includes(id), 'original identity remains available inside details');
+    assert.equal(defaultText.includes(id), false, 'raw identity does not occupy the default notice');
+  }
+  const requestCount = h.requests.length, originCount = h.originRequests.length, before = card._fileView.snapshot();
+  await details.querySelector('summary').click(); assert.equal(details.open, true);
+  await details.querySelector('summary').click(); assert.equal(details.open, false);
+  assert.deepEqual(card._fileView.snapshot(), before);
+  assert.equal(h.requests.length, requestCount); assert.equal(h.originRequests.length, originCount);
+  assertReadEffects(h, { drafts: 1 });
+});
+
+test('origin presentation states current content briefly and distinguishes the historical line and column', async t => {
+  const h = await harness(t);
+  assert.equal((await h.open()).status, 'opened');
+  const card = h.cards()[0], notice = card.querySelector('.egd-file-card-notice'), details = notice.querySelector('details');
+  assert.equal(notice.hidden, false);
+  assert.equal(card.querySelector('.egd-file-card-state').textContent, '현재 파일');
+  assert.equal(notice.children[0].textContent, '현재 파일 · 이전 실행의 출력에서 열었습니다. 당시 내용과 다를 수 있습니다.');
+  assert.ok(details.children.some(child => child.textContent === '당시 행 참조 · 2행 3열. 현재 파일의 행·열과 일치하지 않을 수 있습니다.'));
+  assertReadEffects(h, { drafts: 1 });
+});
+
+test('origin presentation exposes the entire long target path as wrapping text outside collapsed details', async t => {
+  const h = await harness(t), source = path.join(h.roots[0], 'long-current-source-'.repeat(8) + 'test.js');
+  await fs.writeFile(source, 'current long-path fixture\n');
+  assert.equal((await h.open({ location: { ...h.location, path: source } })).status, 'opened');
+  const notice = h.cards()[0].querySelector('.egd-file-card-notice');
+  const pathLine = notice.children.find(child => child.tagName === 'p' && child.textContent === `경로 · ${source}`);
+  assert.ok(pathLine, 'full absolute path is visible text, not only a tooltip or collapsed metadata');
+  assert.equal(notice.hidden, false); assert.equal(pathLine.hidden, false);
+  assert.equal(notice.style.overflowWrap, 'anywhere');
+  assert.equal(notice.querySelector('details').open, false);
+  assertReadEffects(h, { drafts: 1 });
 });
 
 test('wrong/unknown original run and malformed verified DTOs cannot create a File Card', async t => {

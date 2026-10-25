@@ -324,10 +324,13 @@ export function createFileCardZone(deps) {
           }
           runFileOrigin = Object.freeze({ rootId: origin.rootId, fileId: view.snapshot().fileId });
           notice.replaceChildren(
-            el('p', {}, `현재 파일 · 이전 실행 ${target.runId}의 출력에서 열었습니다.`),
-            el('p', {}, `원래 대화 · ${target.conversationId} · 명령 항목 · ${target.itemId}`),
+            el('p', {}, '현재 파일 · 이전 실행의 출력에서 열었습니다. 당시 내용과 다를 수 있습니다.'),
             el('p', {}, `경로 · ${location.path}`),
-            el('p', {}, `당시 행 참조 · ${location.line}행${location.column ? ` ${location.column}열` : ''}. 현재 파일의 위치는 달라졌을 수 있으며, 당시 내용과 같음을 확인한 것은 아닙니다.`));
+            el('details', {},
+              el('summary', {}, '출처 상세'),
+              el('p', {}, `이전 실행 · ${target.runId}`),
+              el('p', {}, `원래 대화 · ${target.conversationId} · 명령 항목 · ${target.itemId}`),
+              el('p', {}, `당시 행 참조 · ${location.line}행${location.column ? ` ${location.column}열` : ''}. 현재 파일의 행·열과 일치하지 않을 수 있습니다.`)));
           notice.style.overflowWrap = 'anywhere';
           notice.hidden = false;
           originOpened = true; card._fileOpenStatus = 'opened';
