@@ -1098,3 +1098,154 @@ test('chooseProjectFolder attaches a Board folder through the native picker chan
   assert.equal(await pickers.chooseProjectFolder({ boardId: 'board-m' }), null)
   assert.deepEqual(await service.openProject({ boardId: 'board-m' }), { project: null, source: null })
 })
+
+// Actual HTTP grants and project store, but a fake native picker and a local
+// clock. No OS picker, listener, provider, Git command or new grant endpoint.
+async function preparedProjectPickerFixture(t) {
+  const temp = await fs.realpath(await fs.mkdtemp(path.join(os.tmpdir(), 'egdesk-prepared-project-')))
+  const root = path.join(temp, 'selected'); await fs.mkdir(root)
+  let clockMs = 1800000000000, pickerCalls = 0
+  const calls = [], registrations = [], hooks = { before: async () => {}, after: async () => {} }
+  const adapter = createEGDeskFileHttpAdapter({ draftDirectory: path.join(temp, 'drafts'), now: () => clockMs,
+    onRootRegistered: value => registrations.push(value) })
+  t.after(async () => { await adapter.close(); await fs.rm(temp, { recursive: true, force: true }) })
+  const service = createEGDeskFileServiceCallbacks({ request: async (route, body, options) => {
+    const operation = Object.keys(EGDESK_FILE_ENDPOINTS).find(key => EGDESK_FILE_ENDPOINTS[key] === route)
+    const headers = Object.fromEntries(Object.entries(options?.headers || {}).map(([key, value]) => [key.toLowerCase(), value]))
+    const call = { operation, body: structuredClone(body), headers }; calls.push(call)
+    await hooks.before(call)
+    const res = response(); await adapter.handle(request(route, body, headers), res)
+    await hooks.after(call, res)
+    return res.body
+  } })
+  let pick = async () => root
+  // Run the imported production factory unchanged; only its Date boundary is
+  // deterministic, without replacing the process-wide clock for other tests.
+  const factory = vm.runInNewContext(`(${createEGDeskNativeFilePickers.toString()})`, { Date: { now: () => clockMs } })
+  const pickers = factory({ service, pickDirectory: async () => { pickerCalls++; return pick() } })
+  return { root, service, pickers, calls, registrations, hooks, now: () => clockMs,
+    advance: ms => { clockMs += ms }, setPicker: callback => { pick = callback }, pickerCalls: () => pickerCalls,
+    count: operation => calls.filter(call => call.operation === operation).length }
+}
+
+test('prepareProjectFolder prepares and locally cancels without registering a root or binding a room', async t => {
+  const h = await preparedProjectPickerFixture(t)
+  const prepared = await h.pickers.prepareProjectFolder({ roomId: 'original-room', title: '원래 폴더' })
+  assert.ok(Object.isFrozen(prepared))
+  assert.deepEqual(Object.keys(prepared), ['displayPath', 'expiresAt', 'consume', 'cancel'])
+  assert.equal(prepared.displayPath, h.root); assert.equal(prepared.expiresAt, h.now() + 120000)
+  assert.equal(JSON.stringify(prepared), JSON.stringify({ displayPath: h.root, expiresAt: prepared.expiresAt }), 'selection and channel remain private')
+  assert.deepEqual(h.calls.map(call => call.operation), ['openPickerChannel', 'beginPicker', 'completePicker'])
+  const beforeCancel = h.calls.length
+  assert.equal(prepared.cancel(), true); assert.equal(prepared.cancel(), false)
+  await assert.rejects(prepared.consume(), { code: 'PICKER_PREPARATION_CANCELLED' })
+  assert.equal(h.calls.length, beforeCancel, 'local cancel adds no server revoke/renew/attach request')
+  assert.equal(h.count('registerRoot'), 0); assert.equal(h.count('attachProject'), 0); assert.equal(h.registrations.length, 0)
+  assert.deepEqual(await h.service.openProject({ roomId: 'original-room' }), { project: null, source: null })
+})
+
+test('prepareProjectFolder explicit Save attaches once to the frozen original room and title', async t => {
+  const h = await preparedProjectPickerFixture(t), entered = Promise.withResolvers(), release = Promise.withResolvers()
+  const options = { roomId: 'original-room', title: '원래 이름' }
+  h.setPicker(async () => { entered.resolve(); await release.promise; return h.root })
+  const preparing = h.pickers.prepareProjectFolder(options); await entered.promise
+  Object.assign(options, { roomId: 'later-room', title: '나중 이름', boardId: 'later-board' }); release.resolve()
+  const prepared = await preparing
+  assert.equal(h.count('attachProject'), 0); assert.equal(h.registrations.length, 0)
+  const project = await prepared.consume()
+  assert.equal(project.status, 'connected'); assert.equal(project.source, 'room'); assert.equal(project.title, '원래 이름')
+  const attached = h.calls.find(call => call.operation === 'attachProject')
+  assert.deepEqual(Object.keys(attached.body), ['roomId', 'title', 'selectionId'])
+  assert.equal(attached.body.roomId, 'original-room'); assert.equal(attached.body.title, '원래 이름')
+  assert.equal(attached.headers['x-egdesk-picker-channel'], h.calls.find(call => call.operation === 'beginPicker').headers['x-egdesk-picker-channel'])
+  await assert.rejects(prepared.consume(), { code: 'PICKER_PREPARATION_USED' })
+  assert.equal(prepared.cancel(), false)
+  assert.equal(h.count('attachProject'), 1); assert.equal(h.count('registerRoot'), 0); assert.equal(h.registrations.length, 1)
+  assert.equal((await h.service.openProject({ roomId: 'original-room' })).project.projectId, project.projectId)
+  assert.deepEqual(await h.service.openProject({ roomId: 'later-room' }), { project: null, source: null })
+})
+
+test('prepareProjectFolder blocks an expired handle locally without renewing or retrying Save', async t => {
+  const h = await preparedProjectPickerFixture(t)
+  const prepared = await h.pickers.prepareProjectFolder({ roomId: 'room' })
+  h.advance(prepared.expiresAt - h.now())
+  const requestCount = h.calls.length
+  await assert.rejects(prepared.consume(), { code: 'PICKER_GRANT_EXPIRED' })
+  await assert.rejects(prepared.consume(), { code: 'PICKER_PREPARATION_USED' })
+  assert.equal(prepared.cancel(), false)
+  assert.equal(h.calls.length, requestCount); assert.equal(h.registrations.length, 0)
+  assert.deepEqual(await h.service.openProject({ roomId: 'room' }), { project: null, source: null })
+})
+
+test('prepareProjectFolder cancellation before or after preparation prevents Save, with account/view guards supplied by the caller', async t => {
+  const h = await preparedProjectPickerFixture(t), before = new AbortController()
+  before.abort()
+  assert.equal(await h.pickers.prepareProjectFolder({ roomId: 'room', signal: before.signal }), null)
+  assert.equal(h.calls.length, 0); assert.equal(h.pickerCalls(), 0)
+  const callerScope = new AbortController()
+  const prepared = await h.pickers.prepareProjectFolder({ roomId: 'room', signal: callerScope.signal })
+  callerScope.abort() // The host, not the picker, detects an account/room/view epoch change.
+  const requestCount = h.calls.length
+  await assert.rejects(prepared.consume(), { code: 'PICKER_PREPARATION_CANCELLED' })
+  assert.equal(h.calls.length, requestCount); assert.equal(h.count('attachProject'), 0); assert.equal(h.registrations.length, 0)
+})
+
+test('prepareProjectFolder native cancellation or a late picker reply cannot attach or expose a usable handle', async t => {
+  for (const phase of ['native-cancel', 'channel', 'begin', 'picker', 'complete']) await t.test(phase, async t => {
+    const h = await preparedProjectPickerFixture(t), controller = new AbortController()
+    h.hooks.after = async call => {
+      if (call.operation === { channel: 'openPickerChannel', begin: 'beginPicker', complete: 'completePicker' }[phase]) controller.abort()
+    }
+    h.setPicker(async () => {
+      if (phase === 'native-cancel') return null
+      if (phase === 'picker') { await Promise.resolve(); controller.abort() }
+      return h.root
+    })
+    assert.equal(await h.pickers.prepareProjectFolder({ roomId: 'room', signal: controller.signal }), null)
+    assert.equal(h.count('attachProject'), 0); assert.equal(h.count('registerRoot'), 0); assert.equal(h.registrations.length, 0)
+    assert.equal(h.pickerCalls(), ['channel', 'begin'].includes(phase) ? 0 : 1)
+    if (['native-cancel', 'begin', 'picker'].includes(phase)) assert.equal(h.calls.find(call => call.operation === 'completePicker').body.cancelled, true)
+    assert.deepEqual(await h.service.openProject({ roomId: 'room' }), { project: null, source: null })
+  })
+})
+
+test('prepareProjectFolder does not renew a grant that expires while the native picker is open', async t => {
+  const h = await preparedProjectPickerFixture(t)
+  h.setPicker(async () => { h.advance(120001); return h.root })
+  await assert.rejects(h.pickers.prepareProjectFolder({ roomId: 'room' }), { code: 'PICKER_GRANT_EXPIRED' })
+  assert.equal(h.pickerCalls(), 1); assert.equal(h.count('beginPicker'), 1); assert.equal(h.count('completePicker'), 1)
+  assert.equal(h.count('openPickerChannel'), 1); assert.equal(h.count('attachProject'), 0); assert.equal(h.registrations.length, 0)
+})
+
+test('prepareProjectFolder claims Save before awaiting it; duplicate or cancellation after dispatch is not rollback', async t => {
+  const h = await preparedProjectPickerFixture(t), entered = Promise.withResolvers(), release = Promise.withResolvers(), controller = new AbortController()
+  const prepared = await h.pickers.prepareProjectFolder({ roomId: 'room', signal: controller.signal })
+  h.hooks.after = async call => { if (call.operation === 'attachProject') { entered.resolve(); await release.promise } }
+  const saving = prepared.consume(); await entered.promise
+  assert.equal(h.registrations.length, 1, 'the real helper already attached before its reply was delayed')
+  controller.abort(); assert.equal(prepared.cancel(), false)
+  await assert.rejects(prepared.consume(), { code: 'PICKER_PREPARATION_USED' })
+  release.resolve()
+  const project = await saving
+  assert.equal(project.status, 'connected', 'return the real committed result, not a false cancellation/rollback')
+  assert.equal((await h.service.openProject({ roomId: 'room' })).project.projectId, project.projectId)
+  assert.equal(h.count('attachProject'), 1)
+})
+
+test('prepareProjectFolder an ambiguous Save failure is terminal and never automatically attaches again', async t => {
+  const h = await preparedProjectPickerFixture(t)
+  const prepared = await h.pickers.prepareProjectFolder({ roomId: 'room' })
+  h.hooks.after = async call => { if (call.operation === 'attachProject') throw Object.assign(new Error('reply lost'), { code: 'TEST_REPLY_LOST' }) }
+  await assert.rejects(prepared.consume(), { code: 'TEST_REPLY_LOST' })
+  await assert.rejects(prepared.consume(), { code: 'PICKER_PREPARATION_USED' })
+  assert.equal(prepared.cancel(), false); assert.equal(h.count('attachProject'), 1); assert.equal(h.registrations.length, 1)
+  assert.equal((await h.service.openProject({ roomId: 'room' })).project.status, 'connected', 'an unknown reply is not a rollback claim')
+})
+
+test('prepareProjectFolder rejects a missing or malformed original room before invoking the picker or channel', async t => {
+  const h = await preparedProjectPickerFixture(t)
+  for (const roomId of [undefined, null, '', ' ', {}, 'x'.repeat(513), 'room\nother']) {
+    await assert.rejects(h.pickers.prepareProjectFolder({ roomId }))
+  }
+  assert.equal(h.calls.length, 0); assert.equal(h.pickerCalls(), 0)
+})

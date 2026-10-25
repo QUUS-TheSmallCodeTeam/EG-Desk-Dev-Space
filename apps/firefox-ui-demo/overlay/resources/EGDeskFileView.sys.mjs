@@ -167,7 +167,67 @@ export function createEGDeskNativeFilePickers({ service, pickDirectory, pickSave
       }
     }
   }
+  // Prepare is not a project binding. Only an explicit consume (Save) attaches
+  // the original room. The caller must fence that Save and signal by the same
+  // account/room/view epoch; this local picker channel is not account authority.
+  async function prepareProjectFolder({ roomId, title = null, signal } = {}) {
+    if (typeof roomId !== 'string' || !roomId.trim() || roomId.length > 512 || /[\u0000-\u001f\u007f]/.test(roomId)) throw new TypeError('프로젝트를 연결할 원래 채팅방이 필요합니다.')
+    if (title != null && (typeof title !== 'string' || title.length > 120 || /[\u0000-\u001f\u007f]/.test(title))) throw new TypeError('프로젝트 이름이 올바르지 않습니다.')
+    if (typeof pickDirectory !== 'function' || typeof service.attachProject !== 'function') throw new Error('프로젝트 폴더 선택이 준비되지 않았습니다.')
+    const target = Object.freeze({ roomId, ...(title ? { title } : {}) })
+    const aborted = () => signal?.aborted === true
+    if (aborted()) return null
+    const requestOptions = await channelOptions()
+    if (aborted()) return null
+    const grant = await service.beginPicker({ purpose: 'folder' }, requestOptions)
+    const abandon = () => service.completePicker({ requestId: grant.requestId, cancelled: true }, requestOptions).catch(() => {})
+    if (aborted()) { await abandon(); return null }
+    let picked
+    try { picked = await pickDirectory() }
+    catch (cause) { await abandon(); if (aborted()) return null; throw cause }
+    if (aborted() || picked == null || picked === '') { await abandon(); return null }
+    // No renewal of an expired selection and no root registration during
+    // preparation. A failed/late picker must require a new explicit choice.
+    const completed = await service.completePicker({ requestId: grant.requestId, absolutePath: picked }, requestOptions)
+    if (aborted() || completed?.cancelled) return null
+    if (typeof picked !== 'string' || typeof completed?.selectionId !== 'string' || !completed.selectionId
+        || !Number.isSafeInteger(completed.expiresAt) || !Number.isSafeInteger(grant.expiresAt)) {
+      throw new Error('선택한 폴더의 연결 준비를 확인하지 못했습니다.')
+    }
+    const expiresAt = Math.min(grant.expiresAt, completed.expiresAt)
+    const unavailable = (code, message) => Object.assign(new Error(message), { code })
+    if (expiresAt <= Date.now()) throw unavailable('PICKER_GRANT_EXPIRED', '폴더 선택 시간이 만료되었습니다. 폴더를 다시 선택하세요.')
+    let selectionId = completed.selectionId, state = 'ready'
+    const cancel = () => {
+      if (state !== 'ready') return false
+      state = 'cancelled'; selectionId = null
+      // The unused server selection expires by its existing TTL. No revoke API
+      // or new authority is introduced by dismissing this local handle.
+      return true
+    }
+    const consume = async () => {
+      if (state === 'cancelled' || aborted() && state === 'ready') {
+        cancel(); throw unavailable('PICKER_PREPARATION_CANCELLED', '폴더 선택이 취소되었습니다.')
+      }
+      if (state !== 'ready') throw unavailable('PICKER_PREPARATION_USED', '이미 사용했거나 완료를 확인해야 하는 폴더 선택입니다.')
+      if (expiresAt <= Date.now()) {
+        state = 'expired'; selectionId = null
+        throw unavailable('PICKER_GRANT_EXPIRED', '폴더 선택 시간이 만료되었습니다. 폴더를 다시 선택하세요.')
+      }
+      const selected = selectionId
+      state = 'consuming'; selectionId = null // Claim once, before the first await.
+      try {
+        const project = await service.attachProject({ ...target, selectionId: selected }, requestOptions)
+        state = 'consumed'
+        // Cancellation after dispatch is not rollback. Preserve the real reply;
+        // a failure is also terminal, since the helper may already have bound it.
+        return project
+      } catch (cause) { state = 'failed'; throw cause }
+    }
+    return Object.freeze({ displayPath: picked, expiresAt, consume, cancel })
+  }
   return {
+    prepareProjectFolder,
     chooseRoot: async () => (await select('folder', pickDirectory))?.root || null,
     // D-X3: pick a project folder for a Board (or one room). The helper
     // stores it and answers the project view (see openProject in the view).
