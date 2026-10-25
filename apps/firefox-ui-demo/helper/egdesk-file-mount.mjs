@@ -65,7 +65,8 @@ export function createEGDeskFileMount({ dataDir, port = 39218, nativeExecutable,
     managedFileView,
     // Server-only chat hook. IDs select existing associations; neither a UI
     // path nor an AI account can change this mount's local file authority.
-    resolveProjectWorkspace: ({ boardId = null, roomId = null, projectTarget } = {}) => adapter.resolveProjectWorkspace({ ownerScope: 'egdesk-local', boardId, roomId, ...(projectTarget !== undefined ? { projectTarget } : {}) }),
+    resolveProjectWorkspace: ({ boardId = null, roomId = null, projectTarget, expectedRoomProject } = {}) => adapter.resolveProjectWorkspace({ ownerScope: 'egdesk-local', boardId, roomId,
+      ...(projectTarget !== undefined ? { projectTarget } : {}), ...(expectedRoomProject !== undefined ? { expectedRoomProject } : {}) }),
     resolveRunProjectOrigin: ({ origin, assertActive } = {}) => adapter.resolveRunProjectOrigin({ ownerScope: 'egdesk-local', origin, assertActive }),
     handle: (req, res, url) => adapter.handle(req, res, { url }),
     close: () => adapter.close(),

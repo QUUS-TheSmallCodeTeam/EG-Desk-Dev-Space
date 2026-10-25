@@ -406,6 +406,126 @@ async function projectFixture(t, options = {}) {
   return { temp, folders, draftDirectory, call, restart: async () => { await adapter.close(); adapter = make() }, adapter: () => adapter }
 }
 
+const observedRoomProject = view => ({ roomId: view.roomId, status: view.status, source: view.source,
+  boardId: view.source === 'board' ? view.inheritance.boardId : null,
+  projectId: view.project?.projectId ?? null, rootId: view.project?.rootId ?? null })
+
+test('expected room project: adapter validates and snapshots only identity before any await', async t => {
+  const calls = []
+  const adapter = createEGDeskFileHttpAdapter({ storeForOwner: async () => { calls.push('drafts'); throw new Error('must not open') },
+    projectStoreForOwner: async () => { calls.push('projects'); throw new Error('must not open') } })
+  t.after(() => adapter.close())
+  const connected = { roomId: 'r', status: 'connected', source: 'board', boardId: 'a', projectId: 'p', rootId: 'root' }
+  const none = { roomId: 'r', status: 'none', source: null, boardId: null, projectId: null, rootId: null }
+  const invalid = [null, false, [], {}, 'r', { ...none, source: 'board' }, { ...connected, status: 'unavailable' },
+    { ...connected, source: 'request' }, { ...connected, source: 'room' }, { ...connected, boardId: null }]
+  for (const key of Object.keys(connected)) {
+    const missing = { ...connected }; delete missing[key]; invalid.push(missing)
+    for (const value of ['', ' ', '\0', 'x'.repeat(513), 12, {}]) invalid.push({ ...connected, [key]: value })
+  }
+  for (const key of ['cwd', 'absolutePath', 'allowedRoots', 'ownerScope', 'permissions']) invalid.push({ ...connected, [key]: '/not-authority' })
+  for (const expectedRoomProject of invalid) await assert.rejects(adapter.resolveProjectWorkspace({ roomId: 'r', expectedRoomProject }), { code: 'INVALID_EXPECTED_ROOM_PROJECT', httpStatus: 400 })
+  await assert.rejects(adapter.resolveProjectWorkspace({ roomId: 'r', expectedRoomProject: connected, projectTarget: { boardId: 'a', projectId: 'p', rootId: 'root' } }), { code: 'INVALID_EXPECTED_ROOM_PROJECT', httpStatus: 400 })
+  await assert.rejects(adapter.resolveProjectWorkspace({ roomId: 'other', expectedRoomProject: none }), { code: 'PROJECT_WORKSPACE_CHANGED', httpStatus: 409 })
+  assert.deepEqual(calls, [])
+
+  const h = await projectFixture(t)
+  await h.call('attachProject', { roomId: 'r', selectionId: 'pick-shop' })
+  const before = (await h.call('readRoomProjectDefault', { roomId: 'r' })).body.result
+  const expectedRoomProject = observedRoomProject(before)
+  const pending = h.adapter().resolveProjectWorkspace({ roomId: 'r', expectedRoomProject })
+  Object.assign(expectedRoomProject, { rootId: 'mutated', roomId: 'other' })
+  assert.equal((await pending).rootId, before.project.rootId, 'the direct backend boundary clones before opening either store')
+})
+
+test('expected room project: UI observation changed before first resolve refuses before fake provider or engine calls', async t => {
+  for (const scenario of ['Board replaced', 'override attached', 'same project different source', 'same project different Board',
+    'none to inheritance', 'none to override', 'override to none', 'root reconnected', 'folder replaced', 'other room']) await t.test(scenario, async t => {
+    const h = await projectFixture(t)
+    await h.call('attachProject', { boardId: 'a', selectionId: 'pick-shop' })
+    const b = (await h.call('attachProject', { boardId: 'b', selectionId: scenario === 'same project different Board' ? 'pick-shop' : 'pick-blog' })).body.result
+    const a = (await h.call('openProject', { boardId: 'a' })).body.result.project
+    const save = (boardId, project) => h.call('saveRoomProjectDefault', { roomId: 'r', boardId, expectedProjectId: project.projectId, expectedRootId: project.rootId })
+    if (scenario === 'override to none') await h.call('attachProject', { roomId: 'r', selectionId: 'pick-shop' })
+    else if (!scenario.startsWith('none')) assert.equal((await save('a', a)).status, 200)
+    const observed = (await h.call('readRoomProjectDefault', { roomId: 'r' })).body.result
+    const expectedRoomProject = observedRoomProject(observed)
+    if (scenario === 'Board replaced') await h.call('attachProject', { boardId: 'a', selectionId: 'pick-blog' })
+    if (scenario === 'override attached' || scenario === 'none to override') await h.call('attachProject', { roomId: 'r', selectionId: 'pick-blog' })
+    if (scenario === 'same project different source') await h.call('attachProject', { roomId: 'r', selectionId: 'pick-shop' })
+    if (scenario === 'same project different Board') assert.equal((await save('b', b)).status, 200)
+    if (scenario === 'none to inheritance') assert.equal((await save('a', a)).status, 200)
+    if (scenario === 'override to none') await h.call('inheritRoomProject', { roomId: 'r' })
+    if (scenario === 'root reconnected') await h.restart()
+    if (scenario === 'folder replaced') { await fs.rename(h.folders.shop, `${h.folders.shop}-old`); await fs.mkdir(h.folders.shop) }
+    if (scenario === 'other room') expectedRoomProject.roomId = 'another-room'
+    const calls = [], prepared = []
+    const runtime = new CodexChatRuntime({ request: async (...args) => { calls.push(args); assert.fail('stale observation must not reach fake execution') }, respond: () => {},
+      resolveProjectWorkspace: args => h.adapter().resolveProjectWorkspace({ ...args, ownerScope: 'owner-p' }),
+      toolProviders: [{ providerId: 'probe', specs: () => [], prepare: async () => { prepared.push(true) } }] })
+    runtime.setConnection(true)
+    await assert.rejects(runtime.send({ clientThreadId: 'r', message: 'Use what I observed', expectedRoomProject, cwd: '/never-fallback' }),
+      { code: scenario === 'folder replaced' ? 'PROJECT_RECONNECT_REQUIRED' : 'PROJECT_WORKSPACE_CHANGED', httpStatus: 409, definite: true, dispatchStatus: 'rejected', resumeRequired: false })
+    assert.deepEqual(calls, [])
+    assert.deepEqual(prepared, [])
+  })
+})
+
+test('expected room project: comparison never selects or saves and only omission retains legacy fallback', async t => {
+  const h = await projectFixture(t)
+  const a = (await h.call('attachProject', { boardId: 'a', selectionId: 'pick-shop' })).body.result
+  const b = (await h.call('attachProject', { boardId: 'b', selectionId: 'pick-blog' })).body.result
+  await h.call('saveRoomProjectDefault', { roomId: 'r', boardId: 'a', expectedProjectId: a.projectId, expectedRootId: a.rootId })
+  const read = async roomId => (await h.call('readRoomProjectDefault', { roomId })).body.result
+  const before = await read('r')
+  const resolve = input => h.adapter().resolveProjectWorkspace({ roomId: 'r', ...input })
+  const current = await resolve({ boardId: 'b', expectedRoomProject: observedRoomProject(before) })
+  assert.deepEqual([current.projectId, current.boardId, current.source], [a.projectId, 'a', 'board'])
+  assert.deepEqual(await read('r'), before)
+  await h.call('saveRoomProjectDefault', { roomId: 'r', boardId: 'b', expectedProjectId: b.projectId, expectedRootId: b.rootId })
+  await h.call('saveRoomProjectDefault', { roomId: 'r', boardId: 'a', expectedProjectId: a.projectId, expectedRootId: a.rootId })
+  assert.equal((await resolve({ expectedRoomProject: observedRoomProject(before) })).projectId, a.projectId,
+    'identity equality deliberately does not detect A-to-B-to-A history')
+  const expectedNone = observedRoomProject(await read('plain'))
+  assert.equal(await resolve({ roomId: 'plain', expectedRoomProject: expectedNone }), null)
+  await assert.rejects(resolve({ roomId: 'plain', boardId: 'b', expectedRoomProject: expectedNone }), { code: 'PROJECT_WORKSPACE_CHANGED', httpStatus: 409 })
+  assert.equal((await resolve({ roomId: 'plain', boardId: 'b' })).source, 'board', 'omission preserves the legacy Board hint')
+  await h.call('detachProject', { boardId: 'a' })
+  await assert.rejects(resolve({ expectedRoomProject: observedRoomProject(before) }), { code: 'PROJECT_INHERITANCE_UNAVAILABLE', httpStatus: 409 })
+  assert.equal((await read('r')).status, 'unavailable', 'broken saved inheritance never becomes explicit none')
+})
+
+test('expected room project: observation and resolver recheck selection after connecting the folder', async t => {
+  for (const phase of ['room-default view', 'workspace resolver']) await t.test(phase, async t => {
+    let h, backing, change = false
+    h = await projectFixture(t, { projectStoreForOwner: async ownerScope => {
+      backing = await openEGDeskProjectStore({ directory: h.draftDirectory, ownerScope })
+      return { ...backing, effective(scope) {
+        const selected = backing.effective(scope)
+        if (change) {
+          change = false
+          queueMicrotask(() => {
+            const next = backing.forBoard('b')
+            backing.attachToRoom({ roomId: 'r', workspaceRoot: next.workspaceRoot, identity: next.identity })
+          })
+        }
+        return selected
+      } }
+    } })
+    await h.call('attachProject', { roomId: 'r', selectionId: 'pick-shop' })
+    await h.call('attachProject', { boardId: 'b', selectionId: 'pick-blog' })
+    const before = (await h.call('readRoomProjectDefault', { roomId: 'r' })).body.result
+    change = true
+    if (phase === 'room-default view') {
+      const result = await h.call('readRoomProjectDefault', { roomId: 'r' })
+      assert.deepEqual([result.status, result.body.code], [409, 'PROJECT_WORKSPACE_CHANGED'])
+      assert.equal(Object.hasOwn(result.body, 'result'), false)
+    } else await assert.rejects(h.adapter().resolveProjectWorkspace({ roomId: 'r', expectedRoomProject: observedRoomProject(before) }), { code: 'PROJECT_WORKSPACE_CHANGED', httpStatus: 409 })
+    assert.equal(change, false)
+    assert.equal((await h.call('readRoomProjectDefault', { roomId: 'r' })).body.result.project.name, 'blog')
+  })
+})
+
 test('room defaults: explicit request > override > saved inheritance > legacy, only absence descends and selection never saves', async t => {
   const h = await projectFixture(t)
   const a = (await h.call('attachProject', { boardId: 'a', selectionId: 'pick-shop' })).body.result
@@ -694,7 +814,7 @@ test('Board project: attach by picker selection only, rooms inherit or own a fol
   assert.deepEqual((await call('openProject', { boardId: 'board-1' })).body.result, { project: null, source: null })
 })
 
-test('project workspace mount fixes local file owner and forwards only Board/room IDs to the server resolver', async () => {
+test('project workspace mount fixes local file owner and forwards only routing and identity conditions to the server resolver', async () => {
   const scopes = []
   const connected = { projectId: 'project-one', rootId: 'root-one', source: 'board', status: 'connected', absolutePath: '/verified/project' }
   let current = connected
@@ -712,6 +832,12 @@ test('project workspace mount fixes local file owner and forwards only Board/roo
   assert.deepEqual(scopes[1], { ownerScope: 'egdesk-local', boardId: null, roomId: null })
   current = { status: 'reconnect-required', projectId: 'project-one', source: 'board', reason: 'identity-changed' }
   assert.equal(await mount.resolveProjectWorkspace({ boardId: 'board-1' }), current)
+  const expectedRoomProject = { roomId: 'room-1', status: 'none', source: null, boardId: null, projectId: null, rootId: null }
+  await mount.resolveProjectWorkspace({ roomId: 'room-1', expectedRoomProject, ownerScope: 'ui-owner', cwd: '/ui-cwd', allowedRoots: ['/'] })
+  assert.deepEqual(scopes.at(-1), { ownerScope: 'egdesk-local', boardId: null, roomId: 'room-1', expectedRoomProject })
+  const projectTarget = { boardId: 'board-1', projectId: 'project-one', rootId: 'root-one' }
+  await mount.resolveProjectWorkspace({ roomId: 'room-1', projectTarget })
+  assert.deepEqual(scopes.at(-1), { ownerScope: 'egdesk-local', boardId: null, roomId: 'room-1', projectTarget })
   await mount.close()
 })
 

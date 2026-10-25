@@ -252,6 +252,15 @@ export function createEGDeskFileHttpAdapter({ draftDirectory, projectDirectory, 
       return { roomId, inheritance, override: null, project: null, source: 'board', status: 'unavailable', reason: cause.code }
     }
     const connection = selected.project ? await connectProject(service, projects, selected.project) : null
+    // Connecting a folder yields. Do not publish an observation combining an
+    // old selection with a new connection or inheritance choice.
+    const latest = projects.store.effective({ roomId })
+    if (latest.project?.id !== selected.project?.id || latest.source !== selected.source || latest.boardId !== selected.boardId ||
+        (latest.project && !sameFolder({ absolutePath: selected.project.workspaceRoot, identity: selected.project.identity }, latest.project)) ||
+        projects.store.inheritanceForRoom(roomId)?.boardId !== inheritance?.boardId || projects.store.forRoom(roomId)?.id !== override?.id ||
+        (connection?.status === 'connected' && projects.roots.get(selected.project.id)?.rootId !== connection.root.rootId)) {
+      throw error('PROJECT_WORKSPACE_CHANGED', 'Room project changed during verification; read the current default again', 409)
+    }
     return { roomId, inheritance, override: override ? { projectId: override.id } : null,
       project: selected.project ? projectView(selected.project, selected.source, connection) : null,
       source: selected.source, status: connection?.status ?? 'none', ...(connection?.reason ? { reason: connection.reason } : {}) }
@@ -400,31 +409,64 @@ export function createEGDeskFileHttpAdapter({ draftDirectory, projectDirectory, 
 
   // Backend-only (2-E wires it into the Agent's working folder and allowed
   // roots): the effective project folder for a Board/room, verified by dev/ino.
-  // null when nothing is attached or the folder must be picked again.
-  async function resolveProjectWorkspace({ ownerScope, boardId = null, roomId = null, projectTarget = null } = {}) {
+  // Only null means no association; disconnected folders retain their status.
+  // expectedRoomProject compares the observed identity, not a revision/CAS.
+  async function resolveProjectWorkspace({ ownerScope, boardId = null, roomId = null, projectTarget = null, expectedRoomProject } = {}) {
     const owner = boundOwner(ownerScope)
-    const { service } = await entryForOwner(owner)
-    const projects = await projectsForOwner(owner)
     const identifier = value => typeof value === 'string' && value.trim() && value.length <= 512 && !value.includes('\0')
     if ([boardId, roomId].some(value => value !== null && !identifier(value))) throw error('INVALID_PROJECT_SCOPE', 'Only opaque Board and room IDs are accepted')
-    let selected
     if (projectTarget !== null) {
       if (!projectTarget || typeof projectTarget !== 'object' || Array.isArray(projectTarget) || Object.keys(projectTarget).length !== 3 ||
           !['boardId', 'projectId', 'rootId'].every(key => Object.hasOwn(projectTarget, key) && identifier(projectTarget[key])) || (boardId !== null && boardId !== projectTarget.boardId)) throw error('INVALID_PROJECT_TARGET', 'Only matching opaque target IDs are accepted')
+      projectTarget = Object.freeze({ boardId: projectTarget.boardId, projectId: projectTarget.projectId, rootId: projectTarget.rootId })
+    }
+    if (expectedRoomProject !== undefined) {
+      const value = expectedRoomProject
+      const keys = ['roomId', 'status', 'source', 'boardId', 'projectId', 'rootId']
+      if (projectTarget || !value || typeof value !== 'object' || Array.isArray(value) || Object.keys(value).length !== keys.length ||
+          !keys.every(key => Object.hasOwn(value, key)) || !identifier(value.roomId) ||
+          !(value.status === 'none'
+            ? ['source', 'boardId', 'projectId', 'rootId'].every(key => value[key] === null)
+            : value.status === 'connected' && identifier(value.projectId) && identifier(value.rootId) &&
+              (value.source === 'board' ? identifier(value.boardId) : value.source === 'room' && value.boardId === null))) {
+        throw error('INVALID_EXPECTED_ROOM_PROJECT', 'expectedRoomProject requires an exact connected or none identity and cannot accompany projectTarget')
+      }
+      // A comparison precondition, never a selection, override or grant.
+      // Snapshot before even the first store-opening await.
+      expectedRoomProject = Object.freeze(Object.fromEntries(keys.map(key => [key, value[key]])))
+      if (expectedRoomProject.roomId !== roomId) throw error('PROJECT_WORKSPACE_CHANGED', 'The observed project belongs to another room; review the current room before sending', 409)
+    }
+    const assertExpectedSelection = (selected, rootId) => {
+      if (!expectedRoomProject) return
+      const project = selected.project
+      if (expectedRoomProject.status !== (project ? 'connected' : 'none') ||
+          expectedRoomProject.source !== (selected.source ?? null) || expectedRoomProject.projectId !== (project?.id ?? null) ||
+          expectedRoomProject.boardId !== (project && selected.source === 'board' ? selected.boardId ?? boardId : null) ||
+          (rootId !== undefined && expectedRoomProject.rootId !== rootId)) {
+        throw error('PROJECT_WORKSPACE_CHANGED', 'The observed room project changed; review the current default before sending', 409)
+      }
+    }
+    const { service } = await entryForOwner(owner)
+    const projects = await projectsForOwner(owner)
+    let selected
+    if (projectTarget !== null) {
       const project = projects.store.forBoard(projectTarget.boardId)
       if (!project || project.id !== projectTarget.projectId) throw error('PROJECT_TARGET_CHANGED', 'The selected project changed; select it and Apply again', 409)
       selected = { project, source: 'request', boardId: projectTarget.boardId }
-    } else selected = await projects.store.effective({ boardId, roomId })
+    } else selected = projects.store.effective({ boardId, roomId })
+    assertExpectedSelection(selected)
     const { project, source } = selected
     if (!project) return null
     const connection = await connectProject(service, projects, project)
     if (connection.status !== 'connected') return { projectId: project.id, source, status: connection.status, reason: connection.reason }
     if (projectTarget && connection.root.rootId !== projectTarget.rootId) throw error('PROJECT_TARGET_CHANGED', 'The selected folder connection changed; select it and Apply again', 409)
+    assertExpectedSelection(selected, connection.root.rootId)
     const described = await service.describeRoot(connection.root.rootId)
     if (!sameFolder(described, project)) throw error('PROJECT_RECONNECT_REQUIRED', 'Project folder identity changed', 409)
     const latest = projectTarget
       ? { project: projects.store.forBoard(projectTarget.boardId), source: 'request', boardId: projectTarget.boardId }
       : projects.store.effective({ boardId, roomId })
+    assertExpectedSelection(latest, connection.root.rootId)
     if (!latest.project || latest.project.id !== project.id || latest.source !== source || latest.boardId !== selected.boardId ||
         !sameFolder(described, latest.project) || projects.roots.get(project.id)?.rootId !== connection.root.rootId) {
       throw error(projectTarget ? 'PROJECT_TARGET_CHANGED' : 'PROJECT_WORKSPACE_CHANGED', 'Project selection changed during verification; review it before sending', 409)

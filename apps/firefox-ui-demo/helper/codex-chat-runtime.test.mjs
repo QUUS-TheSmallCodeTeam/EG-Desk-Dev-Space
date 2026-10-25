@@ -1884,6 +1884,172 @@ function preparationGate() {
   return { entered, released, provider: { providerId: 'project-test', specs: () => [], prepare: async () => { entered.resolve(); await released.promise; return null } } }
 }
 
+const expectedRoomProject = (name = 'one', source = 'room', roomId = 'room-1') => ({ roomId, status: 'connected', source,
+  boardId: source === 'board' ? 'saved-board' : null, projectId: `project-${name}`, rootId: `root-${name}` })
+const expectedNoRoomProject = (roomId = 'room-1') => ({ roomId, status: 'none', source: null, boardId: null, projectId: null, rootId: null })
+const roomProjectWorkspace = (name = 'one', source = 'room', roomId = 'room-1') => ({ ...projectWorkspace(name, source),
+  roomId, boardId: source === 'board' ? 'saved-board' : null })
+
+test('expected room project: validates exact connected or explicit none shape before resolver or provider work', async () => {
+  const connected = expectedRoomProject('one', 'board'), none = expectedNoRoomProject()
+  const invalid = [null, false, 'room-1', [], {}, { ...connected, status: 'unavailable' }, { ...connected, source: 'request' },
+    { ...connected, source: 'room' }, { ...connected, boardId: null }, { ...none, source: 'room' }, { ...none, rootId: 'root-one' }]
+  for (const key of Object.keys(connected)) {
+    const missing = { ...connected }; delete missing[key]; invalid.push(missing)
+    for (const value of [undefined, '', ' ', 'bad\0id', 'x'.repeat(513), 12, {}, []]) invalid.push({ ...connected, [key]: value })
+  }
+  for (const key of ['cwd', 'absolutePath', 'allowedRoots', 'ownerScope', 'permissions']) invalid.push({ ...connected, [key]: '/not-authority' })
+  const probes = []
+  const h = projectHarness({ resolveProjectWorkspace: async () => { probes.push('resolve'); return roomProjectWorkspace() },
+    toolProviders: [{ providerId: 'probe', specs: () => [], prepare: async () => { probes.push('prepare') } }] })
+  for (const expectation of invalid) await assert.rejects(h.chat.send({ message: 'Invalid observation', clientThreadId: 'room-1', expectedRoomProject: expectation }), { code: 'INVALID_EXPECTED_ROOM_PROJECT', httpStatus: 400 })
+  await assert.rejects(h.chat.send({ message: 'Two conditions', clientThreadId: 'room-1', expectedRoomProject: connected, projectTarget: selectedProjectTarget() }), { code: 'INVALID_EXPECTED_ROOM_PROJECT', httpStatus: 400 })
+  assert.deepEqual(probes, [])
+  assert.deepEqual(h.calls, [])
+  for (const expectation of [connected, none]) {
+    const missing = harness()
+    await assert.rejects(missing.chat.send({ message: 'No resolver', clientThreadId: 'room-1', expectedRoomProject: expectation }), { code: 'PROJECT_WORKSPACE_UNAVAILABLE', httpStatus: 503, definite: true })
+    assert.deepEqual(missing.calls, [])
+  }
+})
+
+test('expected room project: forwards comparison on every resolve without selecting a Board or granting native authority', async () => {
+  for (const source of ['room', 'board']) {
+    const scopes = []
+    const h = projectHarness({ resolveProjectWorkspace: async scope => { scopes.push(scope); return roomProjectWorkspace('one', source) } })
+    const expectation = expectedRoomProject('one', source)
+    await h.chat.send({ message: 'Observed default', clientThreadId: 'room-1', boardId: 'legacy-board', expectedRoomProject: expectation, cwd: '/ui-fallback' })
+    assert.ok(scopes.length >= 3)
+    assert.ok(scopes.every(scope => scope.boardId === 'legacy-board' && scope.roomId === 'room-1'))
+    for (const scope of scopes) {
+      assert.deepEqual(scope.expectedRoomProject, expectation)
+      assert.notEqual(scope.expectedRoomProject, expectation)
+      assert.ok(Object.isFrozen(scope.expectedRoomProject))
+    }
+    for (const { params } of h.calls) {
+      assert.equal(params.cwd, '/fixture/one')
+      for (const key of ['expectedRoomProject', 'projectTarget', 'boardId', 'roomId', 'projectId', 'rootId', 'allowedRoots', 'sandbox', 'approvalPolicy']) assert.equal(Object.hasOwn(params, key), false)
+    }
+  }
+  for (const cwd of [undefined, '/legacy-cwd']) {
+    const scopes = []
+    const h = projectHarness({ resolveProjectWorkspace: async scope => { scopes.push(scope); return null } })
+    await h.chat.send({ message: 'Observed no project', clientThreadId: 'room-1', expectedRoomProject: expectedNoRoomProject(), ...(cwd ? { cwd } : {}) })
+    assert.ok(scopes.length >= 3)
+    assert.ok(scopes.every(scope => scope.boardId === null && scope.expectedRoomProject.status === 'none'))
+    assert.equal(h.calls.at(-1).params.cwd, cwd)
+  }
+})
+
+test('expected room project: first lookup mismatch is a definite 409 before fake provider or native calls', async () => {
+  for (const [expectation, current, code = 'PROJECT_WORKSPACE_CHANGED'] of [
+    [expectedRoomProject(), roomProjectWorkspace('two')],
+    [expectedRoomProject(), null],
+    [expectedNoRoomProject(), roomProjectWorkspace()],
+    [expectedRoomProject(), { ...roomProjectWorkspace(), rootId: 'reconnected-root' }],
+    [expectedRoomProject(), { ...roomProjectWorkspace(), projectId: 'another-project' }],
+    [expectedRoomProject(), roomProjectWorkspace('one', 'board')],
+    [expectedRoomProject('one', 'board'), { ...roomProjectWorkspace('one', 'board'), boardId: 'other-board' }],
+    [expectedRoomProject(), roomProjectWorkspace('one', 'room', 'other-room')],
+    [expectedRoomProject(), { ...roomProjectWorkspace(), roomId: undefined }],
+    [expectedRoomProject('one', 'room', 'other-room'), roomProjectWorkspace()],
+    [expectedRoomProject(), { status: 'reconnect-required', reason: 'missing' }, 'PROJECT_RECONNECT_REQUIRED'],
+  ]) {
+    const prepared = []
+    const h = projectHarness({ resolveProjectWorkspace: async () => current,
+      toolProviders: [{ providerId: 'probe', specs: () => [], prepare: async () => { prepared.push(true) } }] })
+    await assert.rejects(h.chat.send({ message: 'No silent switch', clientThreadId: 'room-1', expectedRoomProject: expectation, cwd: '/fallback' }),
+      { code, httpStatus: 409, definite: true, dispatchStatus: 'rejected', resumeRequired: false })
+    assert.deepEqual(prepared, [])
+    assert.deepEqual(h.calls, [])
+  }
+})
+
+test('expected room project: all six identity fields and omission affect replay but key order does not', async () => {
+  const h = projectHarness({ resolveProjectWorkspace: async () => roomProjectWorkspace('one', 'board') })
+  const expectation = expectedRoomProject('one', 'board')
+  const body = { message: 'Exactly once', clientThreadId: 'room-1', requestId: 'observed-replay', expectedRoomProject: expectation }
+  const first = await h.chat.send(body)
+  const reordered = Object.fromEntries(Object.entries(expectation).reverse())
+  assert.deepEqual(await h.chat.send({ ...body, expectedRoomProject: reordered }), first)
+  const alternatives = ['roomId', 'boardId', 'projectId', 'rootId'].map(key => ({ ...expectation, [key]: 'changed' }))
+  alternatives.push(expectedRoomProject(), expectedNoRoomProject(), undefined)
+  for (const expectedRoomProject of alternatives) await assert.rejects(h.chat.send({ ...body, expectedRoomProject }), { code: 'REQUEST_CONFLICT', httpStatus: 409 })
+  assert.equal(h.calls.filter(call => call.method === 'turn/start').length, 1)
+})
+
+test('expected room project: immutable snapshot survives input mutation during initial resolution and later preparation', async t => {
+  for (const phase of ['resolver', 'provider']) await t.test(phase, async () => {
+    const gate = preparationGate(), scopes = []
+    let current = roomProjectWorkspace()
+    const h = projectHarness({ resolveProjectWorkspace: async scope => {
+      scopes.push(scope)
+      if (phase === 'resolver' && scopes.length === 1) { gate.entered.resolve(); await gate.released.promise }
+      return current
+    }, toolProviders: phase === 'provider' ? [gate.provider] : [] })
+    const original = expectedRoomProject()
+    const body = { message: 'Keep observation', clientThreadId: 'room-1', requestId: 'immutable-observation', expectedRoomProject: { ...original } }
+    const pending = h.chat.send(body)
+    await gate.entered.promise
+    current = roomProjectWorkspace('two')
+    Object.assign(body.expectedRoomProject, expectedRoomProject('two'))
+    body.roomId = 'different-room'
+    body.boardId = 'different-board'
+    gate.released.resolve()
+    await assert.rejects(pending, { code: 'PROJECT_WORKSPACE_CHANGED', definite: true })
+    assert.ok(scopes.every(scope => scope.roomId === 'room-1' && scope.boardId === null))
+    for (const scope of scopes) { assert.deepEqual(scope.expectedRoomProject, original); assert.ok(Object.isFrozen(scope.expectedRoomProject)) }
+    assert.deepEqual(h.calls, [])
+  })
+})
+
+test('expected room project: change while native thread preparation awaits still blocks turn dispatch', async () => {
+  const entered = Promise.withResolvers(), released = Promise.withResolvers()
+  let current = null
+  const h = projectHarness({ resolveProjectWorkspace: async () => current, request: async (method, params, _chat, defaults) => {
+    if (method === 'thread/start') { entered.resolve(); await released.promise }
+    return defaults(method, params)
+  } })
+  const pending = h.chat.send({ message: 'Observed none', clientThreadId: 'room-1', expectedRoomProject: expectedNoRoomProject() })
+  await entered.promise
+  current = roomProjectWorkspace()
+  released.resolve()
+  await assert.rejects(pending, { code: 'PROJECT_WORKSPACE_CHANGED', httpStatus: 409, definite: true, resumeRequired: false })
+  assert.equal(h.calls.filter(call => call.method === 'thread/start').length, 1)
+  assert.equal(h.calls.some(call => call.method === 'turn/start'), false)
+})
+
+test('expected room project: Board members compare the original room identity, not their generated conversation IDs', async () => {
+  const scopes = []
+  const h = projectHarness({ profiles: { runProfile: profileId => ({ binding: { profileId, revision: 1, hash: `hash-${profileId}` }, developerInstructions: `You are ${profileId}` }) },
+    resolveProjectWorkspace: async scope => { scopes.push(scope); return roomProjectWorkspace() } })
+  const result = await h.chat.sendBoard({ clientThreadId: 'room-1', message: '@Lead @Coder check', expectedRoomProject: expectedRoomProject(), leadProfileId: 'lead', members: [
+    { kind: 'agent', profileId: 'lead', label: 'Lead' }, { kind: 'agent', profileId: 'coder', label: 'Coder' },
+  ] })
+  assert.deepEqual(result.recipients.map(row => row.status), ['started', 'started'])
+  assert.ok(scopes.length >= 6)
+  assert.ok(scopes.every(scope => scope.roomId === 'room-1' && scope.expectedRoomProject.roomId === 'room-1'))
+})
+
+test('expected room project: Board fan-out freezes the observation before the first member awaits', async () => {
+  const gate = preparationGate(), scopes = []
+  let current = roomProjectWorkspace()
+  const h = projectHarness({ profiles: { runProfile: profileId => ({ binding: { profileId, revision: 1, hash: `hash-${profileId}` }, developerInstructions: `You are ${profileId}` }) },
+    resolveProjectWorkspace: async scope => { scopes.push(scope); return current }, toolProviders: [gate.provider] })
+  const body = { clientThreadId: 'room-1', message: '@Lead @Coder check', expectedRoomProject: expectedRoomProject(), leadProfileId: 'lead', members: [
+    { kind: 'agent', profileId: 'lead', label: 'Lead' }, { kind: 'agent', profileId: 'coder', label: 'Coder' },
+  ] }
+  const pending = h.chat.sendBoard(body)
+  await gate.entered.promise
+  current = roomProjectWorkspace('two')
+  Object.assign(body.expectedRoomProject, expectedRoomProject('two'))
+  gate.released.resolve()
+  const result = await pending
+  assert.deepEqual(result.recipients.map(row => [row.status, row.code]), [['failed', 'PROJECT_WORKSPACE_CHANGED'], ['failed', 'PROJECT_WORKSPACE_CHANGED']])
+  assert.ok(scopes.every(scope => scope.expectedRoomProject.projectId === 'project-one'))
+  assert.deepEqual(h.calls, [])
+})
+
 test('project target: an Apply snapshot supplies only Board routing and expected IDs, never native path or permissions', async () => {
   const scopes = []
   const h = projectHarness({ resolveProjectWorkspace: async scope => { scopes.push(scope); return projectWorkspace('one', 'board') } })
@@ -2177,6 +2343,48 @@ function projectClaudeHarness({ store = null, resolveProjectWorkspace, resolveRu
   chat.setConnection('claude', true)
   return { chat, calls, events }
 }
+
+test('expected room project: durable rejection survives restart and a different observation needs a new request ID', async t => {
+  for (const engineId of ['codex', 'claude']) await t.test(engineId, async t => {
+    const dataDir = await mkdtemp(path.join(os.tmpdir(), 'egdesk-room-project-replay-'))
+    const store = openChatStore({ dataDir, ownerScope: 'project-tests' })
+    t.after(async () => { store.close(); await rm(dataDir, { recursive: true, force: true }) })
+    const factory = engineId === 'codex' ? projectHarness : projectClaudeHarness
+    const options = { store, getOwnerKey: () => 'fake-owner', resolveProjectWorkspace: async () => roomProjectWorkspace('two') }
+    const h = factory(options)
+    const body = { engineId, message: 'Observed before change', clientThreadId: 'room-1', requestId: 'observed-one', expectedRoomProject: expectedRoomProject() }
+    await assert.rejects(h.chat.send(body), { code: 'PROJECT_WORKSPACE_CHANGED', httpStatus: 409, definite: true, dispatchStatus: 'rejected', resumeRequired: false })
+    assert.deepEqual(h.calls, [])
+    const probes = []
+    const reopened = factory({ ...options, resolveProjectWorkspace: async () => { probes.push('resolve'); return roomProjectWorkspace('two') } })
+    const replay = await reopened.chat.send(body)
+    assert.deepEqual([replay.duplicate, replay.accepted, replay.dispatchStatus, replay.code, replay.error.code, replay.resumeRequired],
+      [true, false, 'rejected', 'PROJECT_WORKSPACE_CHANGED', 'PROJECT_WORKSPACE_CHANGED', false])
+    await assert.rejects(reopened.chat.send({ ...body, expectedRoomProject: expectedRoomProject('two') }), { code: 'REQUEST_CONFLICT', httpStatus: 409 })
+    assert.deepEqual(probes, [])
+    assert.deepEqual(reopened.calls, [])
+    await reopened.chat.send({ ...body, requestId: 'observed-two', expectedRoomProject: expectedRoomProject('two') })
+    assert.equal(reopened.calls.at(-1).params.cwd, '/fixture/two')
+  })
+})
+
+test('expected room project: a matching new default cannot bypass loaded or reopened Claude original-cwd guards', async t => {
+  const dataDir = await mkdtemp(path.join(os.tmpdir(), 'egdesk-room-project-claude-'))
+  const store = openChatStore({ dataDir, ownerScope: 'project-tests' })
+  t.after(async () => { store.close(); await rm(dataDir, { recursive: true, force: true }) })
+  let current = null
+  const options = { store, resolveProjectWorkspace: async () => current }
+  const original = projectClaudeHarness(options)
+  const first = await original.chat.send({ message: 'Original plain chat', engineId: 'claude', clientThreadId: 'room-1', requestId: 'plain', expectedRoomProject: expectedNoRoomProject() })
+  current = roomProjectWorkspace()
+  for (const [label, h] of [['loaded', original], ['reopened', projectClaudeHarness(options)]]) {
+    const before = h.calls.length
+    await assert.rejects(h.chat.send({ message: 'Observed current default', engineId: 'claude', clientThreadId: 'room-1', conversationId: first.conversationId,
+      requestId: `observed-${label}`, expectedRoomProject: expectedRoomProject() }), { code: 'CWD_CHANGE_UNSUPPORTED', httpStatus: 409, definite: true })
+    assert.equal(h.calls.length, before, 'a current observation cannot authorize resume or turn in another cwd')
+    assert.equal(h.chat.threadResumeCwds.get(first.conversationId), '/legacy/claude')
+  }
+})
 
 test('project workspace: Claude keeps its original cwd while loaded, after reopen, and when a legacy plain chat gains an association', async t => {
   for (const initiallyAssociated of [true, false]) {

@@ -1379,7 +1379,8 @@ export class CodexChatRuntime {
     const conversationId = idText(body.conversationId)
     if (body.conversationId != null && !conversationId) throw chatError('INVALID_THREAD_ID', 'Invalid conversationId')
     const projectTarget = this.projectTarget(body)
-    const projectScope = this.projectScope(body, internal?.board?.record?.roomClientThreadId || clientThreadId, projectTarget)
+    const expectedRoomProject = this.expectedRoomProject(body)
+    const projectScope = this.projectScope(body, internal?.board?.record?.roomClientThreadId || clientThreadId, projectTarget, expectedRoomProject)
     const storedThread = this.store && clientThreadId ? this.store.getConversation(clientThreadId) : null
     let boundPolicy = this.threads.get(conversationId)?.executionPolicy || null
     // After a helper restart the binding, not the default engine or Codex's
@@ -1435,8 +1436,9 @@ export class CodexChatRuntime {
       stateless: stateless || undefined,
       // Explicit association hints affect replay identity; old plain-chat
       // fingerprints remain byte-for-byte compatible.
-      project: projectTarget || body.boardId != null || body.roomId != null ? projectScope : undefined,
+      project: projectTarget || expectedRoomProject || body.boardId != null || body.roomId != null ? projectScope : undefined,
       projectTarget: projectTarget || undefined,
+      expectedRoomProject: expectedRoomProject || undefined,
       // D-M2 / D-M1: a Board recipient or a hand-back is its own request.
       board: internal?.board ? { room: internal.board.record.roomClientThreadId, profileId: internal.board.record.profileId, reason: internal.board.record.reason } : undefined,
       blocks: internal?.blocks ? Object.keys(internal.blocks).sort() : undefined,
@@ -1568,6 +1570,7 @@ export class CodexChatRuntime {
       stateless,
       projectScope,
       projectTarget,
+      expectedRoomProject,
       // A stored binding may have named the engine after the early lookup.
       engine: this.engineRecord(conversationId ? this.threadEngines.get(conversationId) || engineId : engineId),
       board: internal?.board?.record || null,
@@ -1709,18 +1712,38 @@ export class CodexChatRuntime {
     return Object.freeze({ boardId: target.boardId, projectId: target.projectId, rootId: target.rootId })
   }
 
-  projectScope(body, roomId, target = null) {
+  expectedRoomProject(body) {
+    if (body.expectedRoomProject === undefined) return null
+    const value = body.expectedRoomProject
+    const keys = ['roomId', 'status', 'source', 'boardId', 'projectId', 'rootId']
+    const identifier = value => typeof value === 'string' && value.trim() && value.length <= 512 && !value.includes('\0')
+    if (body.projectTarget !== undefined || !value || typeof value !== 'object' || Array.isArray(value) || Object.keys(value).length !== keys.length ||
+        !keys.every(key => Object.hasOwn(value, key)) || !identifier(value.roomId) ||
+        !(value.status === 'none'
+          ? ['source', 'boardId', 'projectId', 'rootId'].every(key => value[key] === null)
+          : value.status === 'connected' && identifier(value.projectId) && identifier(value.rootId) &&
+            (value.source === 'board' ? identifier(value.boardId) : value.source === 'room' && value.boardId === null))) {
+      throw chatError('INVALID_EXPECTED_ROOM_PROJECT', 'expectedRoomProject requires an exact connected or none identity and cannot accompany projectTarget', 400)
+    }
+    // Identity only: keep the UI observation immutable across preparation and
+    // retries. It never supplies routing, a path or filesystem permissions.
+    return Object.freeze(Object.fromEntries(keys.map(key => [key, value[key]])))
+  }
+
+  projectScope(body, roomId, target = null, expectedRoomProject = null) {
     const identifier = value => value == null || (typeof value === 'string' && value.trim() && value.length <= 512 && !value.includes('\0'))
     if (!identifier(body.boardId) || !identifier(body.roomId) || !identifier(roomId)) throw chatError('INVALID_PROJECT_SCOPE', 'Project routing requires opaque Board and room IDs', 400)
     if (body.roomId != null && roomId && body.roomId !== roomId) throw chatError('INVALID_PROJECT_SCOPE', 'Project room must match the sending chat or original Board room', 400)
-    if (!this.resolveProjectWorkspace && (target || body.boardId != null || body.roomId != null)) throw Object.assign(chatError('PROJECT_WORKSPACE_UNAVAILABLE', 'Project folder lookup is unavailable; no message was sent', 503), { definite: true })
+    if (!this.resolveProjectWorkspace && (target || expectedRoomProject || body.boardId != null || body.roomId != null)) throw Object.assign(chatError('PROJECT_WORKSPACE_UNAVAILABLE', 'Project folder lookup is unavailable; no message was sent', 503), { definite: true })
     return Object.freeze({ boardId: target?.boardId ?? body.boardId ?? null, roomId: roomId || body.roomId || null })
   }
 
-  async projectWorkspace(scope, assertActive, expectedTarget = null) {
+  async projectWorkspace(scope, assertActive, expectedTarget = null, expectedRoomProject = null) {
     assertActive()
+    const roomProjectChanged = () => Object.assign(chatError('PROJECT_WORKSPACE_CHANGED', 'The observed room project changed; review the current default before sending', 409), { definite: true })
+    if (expectedRoomProject && expectedRoomProject.roomId !== scope.roomId) throw roomProjectChanged()
     let workspace
-    try { workspace = await this.resolveProjectWorkspace({ ...scope, ...(expectedTarget ? { projectTarget: expectedTarget } : {}) }) }
+    try { workspace = await this.resolveProjectWorkspace({ ...scope, ...(expectedTarget ? { projectTarget: expectedTarget } : {}), ...(expectedRoomProject ? { expectedRoomProject } : {}) }) }
     catch (cause) {
       assertActive()
       if (['PROJECT_TARGET_CHANGED', 'PROJECT_WORKSPACE_CHANGED', 'PROJECT_INHERITANCE_UNAVAILABLE', 'PROJECT_ASSOCIATION_BROKEN', 'PROJECT_RECONNECT_REQUIRED'].includes(cause?.code)) {
@@ -1737,6 +1760,7 @@ export class CodexChatRuntime {
     const targetChanged = () => Object.assign(chatError('PROJECT_TARGET_CHANGED', 'The selected project is no longer the effective folder for this chat; select the current project and Apply again before sending', 409), { definite: true })
     if (workspace === null) {
       if (expectedTarget) throw targetChanged()
+      if (expectedRoomProject && expectedRoomProject.status !== 'none') throw roomProjectChanged()
       return null
     }
     if (workspace?.status === 'reconnect-required') throw Object.assign(chatError('PROJECT_RECONNECT_REQUIRED', 'Pick the associated project folder again before sending', 409), { definite: true })
@@ -1746,6 +1770,9 @@ export class CodexChatRuntime {
       throw Object.assign(chatError('PROJECT_WORKSPACE_UNVERIFIED', 'Project folder lookup did not return a verified workspace; no message was sent', 409), { definite: true })
     }
     if (expectedTarget && (workspace.projectId !== expectedTarget.projectId || workspace.rootId !== expectedTarget.rootId)) throw targetChanged()
+    if (expectedRoomProject && (expectedRoomProject.status !== 'connected' || workspace.roomId !== expectedRoomProject.roomId ||
+        workspace.source !== expectedRoomProject.source || (workspace.boardId ?? null) !== expectedRoomProject.boardId ||
+        workspace.projectId !== expectedRoomProject.projectId || workspace.rootId !== expectedRoomProject.rootId)) throw roomProjectChanged()
     // Copy only the verified identity and path, never permissions or roots
     // from a request or a resolver extension. Existing ceilings stay intact.
     const { projectId, source, rootId, absolutePath } = workspace
@@ -1876,12 +1903,12 @@ export class CodexChatRuntime {
     const contextAuthority = this.scopedContextAuthority({ ...body, engineId: engine.id })
     const selection = context.modelSelection || this.modelSelection(body, context.profileRun, engine.id)
     const overrides = this.threadOverrides(body, context.profileRun, selection)
-    const workspace = this.resolveProjectWorkspace ? await this.projectWorkspace(context.projectScope, assertPreparationActive, context.projectTarget) : null
+    const workspace = this.resolveProjectWorkspace ? await this.projectWorkspace(context.projectScope, assertPreparationActive, context.projectTarget, context.expectedRoomProject) : null
     if (workspace) overrides.cwd = workspace.absolutePath
     const assertWorkspaceCurrent = async () => {
       assertPreparationActive()
       if (!this.resolveProjectWorkspace) return
-      const current = await this.projectWorkspace(context.projectScope, assertPreparationActive, context.projectTarget)
+      const current = await this.projectWorkspace(context.projectScope, assertPreparationActive, context.projectTarget, context.expectedRoomProject)
       if (JSON.stringify(current) !== JSON.stringify(workspace)) throw Object.assign(chatError('PROJECT_WORKSPACE_CHANGED', 'Project association changed while preparing this message; send again with the current folder', 409), { definite: true })
     }
     // A continued Claude process/session cannot be moved by changing a Board
@@ -2527,6 +2554,9 @@ export class CodexChatRuntime {
     if (body.conversationId != null || body.profileEnabled === false || body.executionPolicy != null || body.stateless === true) {
       throw chatError('INVALID_BOARD_SEND', 'A Board send picks each member\'s conversation and Agent itself', 400)
     }
+    // Every recipient compares the same observation, including recipients
+    // reached after an earlier member's asynchronous preparation.
+    const expectedRoomProject = this.expectedRoomProject(body)
     const requestId = idText(body.requestId) || randomUUID()
     let rawMembers = body.members
     if (rawMembers === undefined && typeof this.store?.listRoomMembers === 'function') {
@@ -2544,6 +2574,7 @@ export class CodexChatRuntime {
     if (!recipients.length) throw chatError('BOARD_NO_RECIPIENT', 'Mention an Agent in this room, or choose the room\'s Lead Agent', 409)
     let slots = MAX_BOARD_CONCURRENT - [...this.runs.values()].filter(run => run.board?.roomClientThreadId === room && !TERMINAL.has(run.status)).length
     const { clientThreadId: _room, members: _members, leadProfileId: _lead, recentMessages: _recent, requestId: _request, profileId, profileRevision, ...rest } = body
+    if (expectedRoomProject) rest.expectedRoomProject = expectedRoomProject
     const results = []
     for (const recipient of recipients) {
       const target = recipient.lead ? room : boardMemberThreadId(room, recipient.profileId)
