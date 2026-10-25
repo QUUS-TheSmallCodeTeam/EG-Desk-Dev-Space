@@ -7,8 +7,9 @@ import { readFileSync } from 'node:fs';
 import { runInNewContext } from 'node:vm';
 import { originCommandSelector, chatOriginFileOptions, assertChatOriginFilePeer, assertOriginReadWindow,
   assertCurrentOriginFileUi, assertOriginActiveRoom, observeChatOriginFileUi, originEditorVisible,
-  readOriginEditorGeometry, observeOriginDesk } from './verify-firefox-mcp-chat-origin-file-flow.mjs';
-import { CHAT_ORIGIN_FILE_TEXT, CHAT_ORIGIN_FILE_OUTPUT } from './egdesk-chat-origin-file-fixture.mjs';
+  readOriginEditorGeometry, observeOriginDesk, observeOriginProjectUi, assertOriginRoomProjectReview,
+  prepareOriginRoomForSend } from './verify-firefox-mcp-chat-origin-file-flow.mjs';
+import { CHAT_ORIGIN_FILE_TEXT, CHAT_ORIGIN_FILE_OUTPUT, CHAT_ORIGIN_FILE_BOARDS } from './egdesk-chat-origin-file-fixture.mjs';
 
 const hash = value => createHash('sha256').update(value).digest('hex');
 const env = { EGDESK_QA_CHAT_ORIGIN_FILE_FIXTURE: '1', EGDESK_QA_FIXTURE_TRANSPORT: '1', EGDESK_QA_REAL_TURN: '0',
@@ -67,6 +68,73 @@ function views() {
       details: [{ open: false, summary: '출처 상세', text: `출처 상세 이전 실행 ${original.runId} 원래 대화 ${original.conversationId} 명령 항목 ${original.itemId} 당시 행 참조 2행 3열` }] } });
   return { before, after };
 }
+
+function preparation(status = 'none') {
+  const peer = state(), connected = status === 'connected', source = connected ? 'board' : 'none';
+  peer.original = null; peer.fakeRpc = []; peer.preparedRoom = connected ? initialRoom.clientThreadId : null;
+  peer.persisted = { requests: 0, events: 0, drafts: 0, origins: [] };
+  const value = { roomId: initialRoom.clientThreadId, status, source: connected ? 'board' : null,
+    inheritance: connected ? { boardId: CHAT_ORIGIN_FILE_BOARDS.original } : null, override: null,
+    project: connected ? { ...peer.projects.original, displayPath: peer.folders.original, title: 'QA Original Project' } : null };
+  peer.requests = [{ sequence: connected ? 2 : 1, path: '/v1/files/projects/room-default', method: 'POST', status: 200,
+    delegated: true, query: {}, request: { roomId: initialRoom.clientThreadId }, response: { ok: true, result: value } }];
+  const view = { thread: { ...initialRoom, conversationId: null, messages: 0, requestProjectTarget: null, sendError: null },
+    panelCount: 1, panelThreadId: initialRoom.id, chip: { count: 1, source, text: connected ? 'Board 상속 · QA Original Project' : '실행 프로젝트' },
+    effective: { source, title: connected ? 'Board 상속 · QA Original Project' : undefined,
+      path: connected ? peer.folders.original : undefined, geometry: readOriginEditorGeometry(editorNode()) },
+    summary: { status, source } };
+  return { peer, view };
+}
+
+test('origin verifier: native review binds full path and six real HTTP identity fields before any engine or Send work', () => {
+  for (const status of ['none', 'connected']) {
+    const { peer, view } = preparation(status);
+    assert.equal(assertOriginRoomProjectReview(view, peer, initialRoom, status, status === 'connected' ? 1 : 0).expectedRoomProject.status, status);
+  }
+  for (const mutate of [
+    pair => { pair.view.thread.id = 'other-ui-room'; }, pair => { pair.view.thread.clientThreadId = 'other-room'; },
+    pair => { pair.view.thread.requestProjectTarget = { projectId: 'override' }; }, pair => { pair.view.thread.messages = 1; },
+    pair => { pair.view.panelThreadId = 'stale-panel'; }, pair => { pair.view.summary.status = 'loading'; },
+    pair => { pair.view.chip.count = 2; }, pair => { pair.view.chip.source = 'request'; },
+    pair => { pair.view.effective.path = '/owned/orig…'; }, pair => { pair.view.effective.title = 'Board 상속 · Other'; },
+    pair => { pair.view.effective.geometry.hits[4] = false; }, pair => { pair.view.effective.geometry.rect = rectangle(0, 5000); },
+    pair => { pair.peer.preparedRoom = 'other-room'; }, pair => { pair.peer.fakeRpc.push({ method: 'thread/start' }); },
+    pair => { pair.peer.persisted.requests = 1; }, pair => { pair.peer.requests.push({ path: '/chat/send' }); },
+    pair => { pair.peer.requests[0].sequence = 1; }, pair => { pair.peer.requests[0].delegated = false; },
+    pair => { pair.peer.requests[0].status = 409; }, pair => { pair.peer.requests[0].response.result.project.rootId = 'other-root'; },
+    pair => { pair.peer.requests[0].response.result.project.projectId = 'other-project'; },
+    pair => { pair.peer.requests[0].response.result.roomId = 'wrong-room'; },
+    pair => { pair.peer.requests[0].response.result.source = 'room'; },
+    pair => { pair.peer.requests[0].response.result.inheritance.boardId = CHAT_ORIGIN_FILE_BOARDS.other; },
+    pair => { pair.peer.requests[0].response.result.override = { projectId: 'override' }; },
+    pair => { pair.peer.requests[0].response.result.project.displayPath = '/other'; },
+  ]) { const pair = preparation('connected'); mutate(pair); assert.throws(() => assertOriginRoomProjectReview(pair.view, pair.peer, initialRoom, 'connected', 1)); }
+});
+
+test('origin verifier: settles initial none then natively reopens Details after preparation, with no speculative Send or retry', async () => {
+  const calls = [], scripts = [], samples = [];
+  let prepared = false, opened = false, reread = false;
+  const value = () => preparation(prepared ? 'connected' : 'none');
+  const harness = { evaluateChrome: async script => { samples.push('ui'); scripts.push(script); const { view } = value(); view.panelCount = opened ? 1 : 0; return view; } };
+  const reviewed = await prepareOriginRoomForSend(harness, initialRoom, {
+    click: async selector => { calls.push(selector); opened = selector.includes('chat-project-open'); if (prepared && opened) reread = true; },
+    state: async () => {
+      samples.push('http');
+      const { peer } = value();
+      if (prepared && !reread) peer.requests = preparation().peer.requests;
+      return peer;
+    },
+    prepareRoom: async id => { calls.push(`prepare:${id}`); prepared = true; },
+    waitUntil: async (read, accept) => { const result = await read(); assert.equal(accept(result), true); return result; },
+  });
+  assert.deepEqual(calls, ['[data-testid="chat-project-open"]', '[data-testid="chat-project-cancel"]',
+    `prepare:${initialRoom.clientThreadId}`, '[data-testid="chat-project-open"]', '[data-testid="chat-project-cancel"]']);
+  assert.equal(reviewed.initial.expectedRoomProject.status, 'none');
+  assert.equal(reviewed.reviewed.expectedRoomProject.rootId, 'original-root');
+  assert.equal(reviewed.sendAttemptsBeforeReview, 0);
+  assert.deepEqual(samples, ['ui', 'http', 'http', 'ui', 'http', 'ui', 'http'], 'A ready UI sample precedes its corresponding HTTP trace');
+  for (const script of scripts) assert.doesNotMatch(script, /dispatchEvent|\.click\(|\.focus\(|setAttribute\(|\.value\s*=|\.open\s*=|fetch\(/);
+});
 
 test('origin verifier: import is inert and CLI accepts only explicit isolated headless bounded mode', async t => {
   const spies = [t.mock.method(net.Server.prototype, 'listen', () => assert.fail('No listener')),
@@ -201,6 +269,12 @@ test('origin verifier: observation is read-only and actions remain native; share
   assert.doesNotMatch(source, /newQaThread|\.title\s*=|dispatchEvent|\.style\.[a-zA-Z]+\s*=|\.hidden\s*=|setStringPref|createServer|\.listen\(/);
   assert.match(source, /await harness\.click/); assert.match(source, /await harness\.press/);
   assert.match(source, /originFileModuleProvenance\(options\.profile\)/);
+  assert.equal((source.match(/await sendFromComposer\(/g) || []).length, 1, 'Exactly one Send, never a guard-bypassing retry');
+  assert.ok(source.indexOf('result.originPreparation = await prepareOriginRoomForSend') < source.indexOf('await sendFromComposer('));
+  const projectScripts = [];
+  await observeOriginProjectUi({ evaluateChrome: async script => { projectScripts.push(script); return {}; } });
+  assert.match(projectScripts[0], /chat-project-effective/);
+  assert.doesNotMatch(projectScripts[0], /dispatchEvent|\.click\(|\.focus\(|setAttribute\(|innerHTML\s*=|\.value\s*=|\.open\s*=|fetch\(/);
   const factory = readFileSync(new URL('./egdesk-chat-origin-file-fixture.mjs', import.meta.url), 'utf8');
   assert.doesNotMatch(factory, /bindRunProjectOrigin\s*\(|INSERT INTO run_project_origins|new RunOutputStore|createServer|\.listen\(/,
     'No manually seeded origin DTO or parallel synthetic output store');

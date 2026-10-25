@@ -6,11 +6,14 @@ import net from 'node:net';
 import childProcess from 'node:child_process';
 import { Readable } from 'node:stream';
 import { createHash } from 'node:crypto';
+import { compileFunction } from 'node:vm';
 import { createChatOriginFileFixture, chatOriginFileFixtureEnabled, CHAT_ORIGIN_FILE_SEED, CHAT_ORIGIN_FILE_STATE,
   CHAT_ORIGIN_FILE_CONTROL, CHAT_ORIGIN_FILE_TEXT, CHAT_ORIGIN_FILE_OUTPUT } from './egdesk-chat-origin-file-fixture.mjs';
 import { bootstrapQaProfile, canonicalTempRoot, LOADER_FILES } from './egdesk-chat-qa-profile.mjs';
 import { createPrivateQaTempDirectory } from './egdesk-qa-platform.mjs';
 import { assertOriginReadWindow } from './verify-firefox-mcp-chat-origin-file-flow.mjs';
+import { readSurfaceSource } from './egdesk-surface-source.mjs';
+import * as ChatState from '../overlay/resources/EGDeskChatState.sys.mjs';
 
 const TOKEN = 'owned-origin-file-unit-token';
 const ENV = { EGDESK_QA_CHAT_ORIGIN_FILE_FIXTURE: '1', EGDESK_QA_FIXTURE_TRANSPORT: '1', EGDESK_QA_REAL_TURN: '0', EGDESK_QA_FIXTURE_PORT: '49321' };
@@ -53,6 +56,34 @@ async function seed(fixture) {
     requestId: 'qa-origin-request', profileEnabled: false, expectedRoomProject });
   assert.equal(result.status, 202, JSON.stringify(result.body)); assert.equal(result.body.accepted, true);
   return result;
+}
+
+function actualRoomPreparation(fixture) {
+  const source = readSurfaceSource(), roomId = 'qa-origin-room';
+  const state = { codex: { activeThreadId: 'local-room', threads: [{ id: 'local-room', clientBindingId: roomId,
+    engineId: 'codex', messages: [], inputSources: [], briefingInputs: [] }],
+    threadDrafts: { 'local-room': CHAT_ORIGIN_FILE_SEED }, threadDraftRevisions: { 'local-room': 0 } } };
+  const deps = { state, ChatState, epochScope: ChatState.createChatEpochScope(),
+    window: { AbortController, setTimeout, clearTimeout }, chatRoomProjectDefaults: new Map(), chatProjectDraftActions: new Map(),
+    CHAT_ROOM_PROJECT_UNAVAILABLE: 'Room project unavailable', CHAT_REQUEST_PROJECT_INVALID: 'Invalid request project', emit() {},
+    getCodexThreadById: (codex, id) => codex.threads.find(thread => thread.id === id),
+    updateThreadById: (id, update) => { state.codex.threads = state.codex.threads.map(thread => thread.id === id ? update(thread) : thread); },
+    fetchJson: async (route, options) => {
+      assert.equal(route, '/v1/files/projects/room-default'); assert.equal(options.method, 'POST');
+      const response = await request(fixture, options.method, route, JSON.parse(options.body));
+      assert.equal(response.status, 200); return response.body;
+    } };
+  const functions = ['createChatProjectScope', 'chatRoomProjectState', 'normalizeChatRoomProjectDefault',
+    'chatRoomProjectTargetsMatch', 'snapshotChatRoomProjectExpectation', 'chatRoomProjectExpectation'].map(name => {
+    const match = source.match(new RegExp(`^  function ${name}\\([^]*?^  \\}`, 'm'));
+    assert.ok(match, `Actual host function ${name}`); return match[0];
+  });
+  const methods = ['createProjectScope', 'readRoomProjectDefault', 'prepareRoomProjectSend'].map(name => {
+    const match = source.match(new RegExp(`^      (?:async )?${name}\\([^]*?^      \\},`, 'm'));
+    assert.ok(match, `Actual host method ${name}`); return match[0].slice(0, -1);
+  });
+  const bridge = compileFunction(`${functions.join('\n')}\nreturn { ${methods.join(',\n')} };`, Object.keys(deps))(...Object.values(deps));
+  return { state, bridge, roomId };
 }
 
 test('origin fixture: strict exclusive opt-in, owned fresh profile and token before new effects', async t => {
@@ -121,6 +152,34 @@ test('origin fixture: real rejected send has no private origin, fake turn or rep
   const replay = await request(fixture, 'POST', '/chat/send', body);
   assert.equal(replay.body.accepted, false); assert.equal(replay.body.code, 'PROJECT_WORKSPACE_CHANGED');
   assert.deepEqual(fixture.snapshot().fakeRpc, []);
+});
+
+test('origin fixture: actual host blocks stale none before HTTP send; a fresh Details read prepares the same real six-field origin', async t => {
+  const { fixture } = await setup(t), { state, bridge, roomId } = actualRoomPreparation(fixture);
+  const none = await bridge.readRoomProjectDefault('local-room');
+  assert.equal(none.status, 'none');
+  await control(fixture, 'prepare-room', { clientThreadId: roomId });
+  assert.equal(await bridge.prepareRoomProjectSend('local-room', none), false);
+  assert.match(state.codex.threads[0].sendError, /방 기본 프로젝트가 바뀌었습니다.*초안은 유지/);
+  assert.equal(state.codex.threadDrafts['local-room'], CHAT_ORIGIN_FILE_SEED);
+  const blocked = fixture.snapshot();
+  assert.deepEqual(blocked.fakeRpc, []); assert.equal(blocked.persisted.requests, 0); assert.deepEqual(blocked.persisted.origins, []);
+  assert.equal(blocked.requests.some(row => row.path === '/chat/send'), false, 'The R1 guard is before send HTTP, not a backend six-field mismatch');
+  // Native project Details calls this exact force-read method. No cache/DTO
+  // replacement, user Send retry or synthetic origin grant is involved.
+  const reviewed = await bridge.readRoomProjectDefault('local-room', { force: true });
+  assert.equal(reviewed.project.displayPath, blocked.folders.original);
+  const expectedRoomProject = await bridge.prepareRoomProjectSend('local-room', reviewed);
+  assert.equal(Object.isFrozen(expectedRoomProject), true);
+  assert.deepEqual(expectedRoomProject, { roomId, status: 'connected', source: 'board', boardId: blocked.boards.original,
+    projectId: blocked.projects.original.projectId, rootId: blocked.projects.original.rootId });
+  const accepted = await request(fixture, 'POST', '/chat/send', { message: CHAT_ORIGIN_FILE_SEED, clientThreadId: roomId,
+    requestId: 'reviewed-origin-only-send', profileEnabled: false, expectedRoomProject });
+  assert.equal(accepted.status, 202); assert.equal(accepted.body.accepted, true);
+  const after = fixture.snapshot();
+  assert.equal(after.requests.filter(row => row.path === '/chat/send').length, 1);
+  assert.equal(after.persisted.origins.length, 1); assert.equal(after.original.clientThreadId, roomId);
+  assert.equal(after.persisted.origins[0].project.startCwd, reviewed.project.displayPath);
 });
 
 test('origin fixture: CURRENT source is separately counted while HISTORIC output and original root survive another Board', async t => {

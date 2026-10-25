@@ -261,6 +261,96 @@ export async function observeOriginDesk(harness) {
   }`);
 }
 
+export async function observeOriginProjectUi(harness) {
+  return harness.evaluateChrome(`() => {
+    const geometry = ${readOriginEditorGeometry.toString()};
+    const c = window.__egdesk?.state?.codex, t = c?.threads?.find(value => value.id === c.activeThreadId);
+    const panels = [...document.querySelectorAll('[data-testid="chat-project-panel"]')], panel = panels.length === 1 ? panels[0] : null;
+    const effective = panel?.querySelector('[data-testid="chat-project-effective"]');
+    const summary = panel?.querySelector('[data-testid="chat-room-project-current"]');
+    const chips = [...document.querySelectorAll('[data-testid="chat-attachments"]')]
+      .filter(node => node.dataset.threadId === t?.id)
+      .flatMap(node => [...node.querySelectorAll('[data-testid="chat-project-target"]')]);
+    const chip = chips.length === 1 ? chips[0] : null;
+    return { thread: { id: t?.id, clientThreadId: t?.clientBindingId || t?.id, conversationId: t?.conversationId,
+        messages: t?.messages?.length, requestProjectTarget: t?.requestProjectTarget || null, sendError: t?.sendError || null },
+      panelCount: panels.length, panelThreadId: panel?.dataset.threadId,
+      chip: { count: chips.length, source: chip?.dataset.source, text: chip?.textContent },
+      effective: { source: effective?.dataset.source, title: effective?.querySelector('strong')?.textContent,
+        path: effective?.querySelector('p')?.textContent, geometry: geometry(effective) },
+      summary: { status: summary?.dataset.status, source: summary?.dataset.source, text: summary?.textContent } };
+  }`);
+}
+
+export function assertOriginRoomUnsent(peer, room) {
+  assert.ok(room?.id && room.clientThreadId);
+  assert.equal(peer.original, null); assert.deepEqual(peer.fakeRpc, [], 'No fake engine acceptance before the reviewed Send');
+  assert.equal(peer.persisted.requests, 0); assert.equal(peer.persisted.events, 0); assert.deepEqual(peer.persisted.origins, []);
+  assert.equal(peer.requests.some(row => row.path === '/chat/send'), false, 'No first-send/retry workaround');
+}
+
+export function assertOriginRoomProjectReview(view, peer, room, status, afterSequence = 0) {
+  assertOriginRoomUnsent(peer, room);
+  assert.ok(['none', 'connected'].includes(status));
+  assert.equal(view.thread.id, room.id); assert.equal(view.thread.clientThreadId, room.clientThreadId);
+  assert.ok(!view.thread.conversationId); assert.equal(view.thread.messages, 0); assert.equal(view.thread.requestProjectTarget, null);
+  assert.equal(view.panelCount, 1); assert.equal(view.panelThreadId, room.id);
+  const source = status === 'none' ? 'none' : 'board';
+  assert.equal(view.summary.status, status); assert.equal(view.summary.source, source);
+  assert.equal(view.effective.source, source); assert.equal(view.chip.count, 1); assert.equal(view.chip.source, source);
+  assert.equal(originEditorVisible(view.effective.geometry), true, 'The effective project and full path must be visibly readable');
+  const reads = peer.requests.filter(row => row.path === '/v1/files/projects/room-default' && row.request?.roomId === room.clientThreadId);
+  const read = reads.at(-1);
+  assert.ok(read?.sequence > afterSequence, 'A fresh UI room-default HTTP read is required after fixture preparation');
+  assert.equal(read.method, 'POST'); assert.equal(read.status, 200); assert.equal(read.delegated, true);
+  assert.deepEqual(read.query, {}); assert.deepEqual(read.request, { roomId: room.clientThreadId });
+  assert.equal(read.response?.ok, true);
+  const value = read.response.result;
+  assert.equal(value.roomId, room.clientThreadId); assert.equal(value.status, status);
+  const expected = { roomId: room.clientThreadId, status, source: status === 'none' ? null : 'board',
+    boardId: status === 'none' ? null : CHAT_ORIGIN_FILE_BOARDS.original,
+    projectId: status === 'none' ? null : peer.projects.original.projectId,
+    rootId: status === 'none' ? null : peer.projects.original.rootId };
+  assert.deepEqual({ roomId: value.roomId, status: value.status, source: value.source, boardId: value.inheritance?.boardId ?? null,
+    projectId: value.project?.projectId ?? null, rootId: value.project?.rootId ?? null }, expected);
+  assert.equal(value.override, null);
+  if (status === 'none') {
+    assert.equal(value.inheritance, null); assert.equal(value.project, null); assert.equal(peer.preparedRoom, null);
+  } else {
+    assert.equal(peer.preparedRoom, room.clientThreadId);
+    assert.equal(value.project.displayPath, peer.folders.original);
+    assert.equal(view.effective.path, peer.folders.original, 'Full path, not a tooltip or truncated chip');
+    assert.equal(view.effective.title, `Board 상속 · ${value.project.title}`);
+    assert.ok(view.chip.text.includes(value.project.title));
+  }
+  return { expectedRoomProject: expected, displayPath: value.project?.displayPath ?? null, readSequence: read.sequence };
+}
+
+export async function prepareOriginRoomForSend(harness, room, { click, state, prepareRoom, waitUntil }) {
+  // Read the UI first: its completed render must precede the HTTP trace
+  // snapshot, otherwise a just-completed read can be absent from that snapshot.
+  const observe = async () => { const view = await observeOriginProjectUi(harness); return { view, peer: await state() }; };
+  // Settle the new room's initial read before changing the fixture's server
+  // default. Reopening native Details then performs a fresh production read.
+  await click(testid('chat-project-open'));
+  const empty = await waitUntil(observe, value => value.view.summary.status === 'none' && value.view.chip.source === 'none'
+    && originEditorVisible(value.view.effective.geometry), { timeoutMs: 10000 });
+  const initial = assertOriginRoomProjectReview(empty.view, empty.peer, room, 'none');
+  await click(testid('chat-project-cancel'));
+  await prepareRoom(room.clientThreadId);
+  const prepared = await state(); assertOriginRoomUnsent(prepared, room);
+  await click(testid('chat-project-open'));
+  const connected = await waitUntil(observe, value => value.view.summary.status === 'connected' && value.view.chip.source === 'board'
+    && originEditorVisible(value.view.effective.geometry), { timeoutMs: 10000 });
+  const reviewed = assertOriginRoomProjectReview(connected.view, connected.peer, room, 'connected', prepared.requests.length);
+  await click(testid('chat-project-cancel'));
+  const closed = await waitUntil(() => observeOriginProjectUi(harness), value => value.panelCount === 0, { timeoutMs: 5000 });
+  assert.equal(closed.thread.id, room.id); assert.equal(closed.thread.clientThreadId, room.clientThreadId);
+  assert.equal(closed.thread.requestProjectTarget, null); assert.equal(closed.chip.count, 1); assert.equal(closed.chip.source, 'board');
+  assertOriginRoomUnsent(await state(), room);
+  return { initial, reviewed, nativeInspection: true, sendAttemptsBeforeReview: 0 };
+}
+
 export async function runChatOriginFileFlow(options) {
   const provenance = originFileModuleProvenance(options.profile);
   const { runUiFlow, loopbackJson, openChat, sendFromComposer, visible, waitUntil } = await import('./egdesk-qa-ui-flow.mjs');
@@ -277,6 +367,7 @@ export async function runChatOriginFileFlow(options) {
         return { count: nodes.length, ready: !!n && !n.disabled && !!r && r.width > 0 && r.height > 0 && r.left >= 0 && r.top >= 0 && r.right <= innerWidth && r.bottom <= innerHeight && (n === hit || n.contains(hit)) }; }`),
       value => value.count === 1 && value.ready, { timeoutMs: 5000 });
       deadline(); await harness.click(selector);
+      result.nativeControls.push({ action: 'click', selector });
     };
     const initial = await state(); assert.equal(initial.original, null); assert.equal(initial.persisted.origins.length, 0);
     result.moduleProvenance = provenance; result.nativeControls = [];
@@ -287,9 +378,22 @@ export async function runChatOriginFileFlow(options) {
     const room = await harness.evaluateChrome(`() => { const c = window.__egdesk.state.codex, t = c.threads.find(value => value.id === c.activeThreadId);
       return { id: t?.id, clientThreadId: t?.clientBindingId || t?.id, conversationId: t?.conversationId, messages: t?.messages?.length, profileEnabled: t?.profileEnabled }; }`);
     assert.ok(room.id && !room.conversationId && room.messages === 0 && room.profileEnabled !== true);
-    await control('prepare-room', { clientThreadId: room.clientThreadId });
+    result.originPreparation = await prepareOriginRoomForSend(harness, room, { click, state, waitUntil,
+      prepareRoom: clientThreadId => control('prepare-room', { clientThreadId }) });
+    check('original room identity and full project path are natively reviewed before the only Send; engine/request counts remain zero', true);
     deadline(); await sendFromComposer(harness, CHAT_ORIGIN_FILE_SEED);
-    const seeded = await waitUntil(state, value => value.original && value.chat.runs.some(run => run.runId === value.original.runId && run.status === 'completed'), { timeoutMs: 15000 });
+    const seeded = await waitUntil(async () => {
+      const peer = await state();
+      if (!peer.original) {
+        const view = await observeOriginProjectUi(harness);
+        assert.ok(!view.thread.sendError, `Initial ordinary Send was refused; no retry: ${view.thread.sendError}`);
+      }
+      return peer;
+    }, value => value.original && value.chat.runs.some(run => run.runId === value.original.runId && run.status === 'completed'), { timeoutMs: 15000 });
+    const sends = seeded.requests.filter(row => row.path === '/chat/send');
+    assert.equal(sends.length, 1); assert.equal(sends[0].status, 202); assert.equal(sends[0].delegated, true);
+    assert.deepEqual(sends[0].request.expectedRoomProject, result.originPreparation.reviewed.expectedRoomProject);
+    assert.equal(Object.hasOwn(sends[0].request, 'projectTarget'), false);
     assert.equal(seeded.original.clientThreadId, room.clientThreadId);
     assert.equal(seeded.requests.filter(row => row.path === '/chat/command-output').length, 0, 'Metadata alone must not fetch output');
     await control('advance-current');
