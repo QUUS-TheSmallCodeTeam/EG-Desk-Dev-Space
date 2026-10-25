@@ -163,19 +163,19 @@ test('instruction keys refuse wrong focus rather than cycling Tab, and obey the 
 });
 
 const INSTRUCTIONS = '[data-testid="import-instructions"]';
-function settingsNavigationFixture({ top = 1000 } = {}) {
+function settingsNavigationFixture({ top = 1000, height = 160, selector = INSTRUCTIONS, transferState = 'preview' } = {}) {
   const model = { top, scrollTop: 0, scrollHeight: 1600, focused: false, activeTestid: 'settings-agent-import', reads: 0 };
   const wheels = [], clicks = [], trace = [];
   const read = async () => {
     model.reads++;
-    const targetRect = { left: 220, right: 1200, top: model.top - model.scrollTop, bottom: model.top - model.scrollTop + 160, width: 980, height: 160 };
+    const targetRect = { left: 220, right: 1200, top: model.top - model.scrollTop, bottom: model.top - model.scrollTop + height, width: 980, height };
     const viewport = { left: 100, top: 200, right: 1250, bottom: 730 };
-    return { settingsId: 'settings-original', selector: INSTRUCTIONS, cards: 1, contents: 1, count: 1,
-      transferState: 'preview', owned: true, contentVisible: true, targetVisible: true, disabled: false,
+    return { settingsId: 'settings-original', selector, cards: 1, contents: 1, count: 1,
+      transferState, owned: true, contentVisible: true, targetVisible: true, disabled: false,
       focused: model.focused, activeTestid: model.activeTestid,
       targetRect, targetClip: viewport, viewport, bounds: { ...viewport, width: 1150, height: 530 },
       targetReady: targetRect.top >= viewport.top && targetRect.bottom <= viewport.bottom,
-      point: { x: 710, y: Math.round(targetRect.top + 80) }, wheelPoint: { x: 112, y: 465 },
+      point: { x: 710, y: Math.round(targetRect.top + height / 2) }, wheelPoint: { x: 112, y: 465 },
       scrollTop: model.scrollTop, scrollHeight: model.scrollHeight, clientHeight: 530 };
   };
   const options = { read, wheelAt: async input => { wheels.push(input); model.scrollTop += input.deltaY; },
@@ -183,6 +183,34 @@ function settingsNavigationFixture({ top = 1000 } = {}) {
     pause: async () => {}, assertDeadline() {}, focus: true, trace };
   return { model, wheels, clicks, trace, options };
 }
+
+test('R6 visible export controls do not prove the lower version/status notice is painted', async () => {
+  for (const [selector, transferState] of [
+    ['[data-testid="transfer-export-target"]', 'failed'],
+    ['[data-testid="transfer-status"]', 'unknown'],
+  ]) {
+    // R6 had an on-screen button row at 692..720, but the notice text started
+    // below the clipped content. Read-only notice navigation must not click
+    // controls (which are disabled in the unknown state) or award paint early.
+    const h = settingsNavigationFixture({ top: 729, height: 40, selector, transferState });
+    const text = '내보낼 Agent: Owned QA portable profile · 초안 버전 2';
+    const paint = () => {
+      const top = 739 - h.model.scrollTop, bottom = top + 16, inside = top >= 200 && bottom <= 730;
+      return { count: 1, text, needle: null, matches: 1, missing: 0, visible: true,
+        fragments: [{ top, bottom, inside, hits: [inside, inside, inside] }] };
+    };
+    assert.equal(portableTextVisible(paint(), text), false, 'The original clipped-text assertion still rejects R6 geometry');
+    const value = await navigatePortableSettings({ ...h.options, focus: false });
+    assert.equal(value.selector, selector); assert.equal(value.transferState, transferState);
+    assert.equal(value.targetReady, true);
+    assert.deepEqual(h.wheels, [{ x: 112, y: 465, deltaX: 0, deltaY: 51 }]);
+    assert.deepEqual(h.clicks, [], 'Revealing a notice must not trigger export, retry, or focus');
+    assert.equal(portableTextVisible(paint(), text), true);
+    const covered = paint(); covered.fragments[0].hits[1] = false;
+    assert.equal(portableTextVisible(covered, text), false, 'Native navigation does not bypass occlusion proof');
+    assert.equal(portableTextVisible(paint(), `${text} changed`), false);
+  }
+});
 
 test('Settings navigation wheels only the observed outer area, reobserves progress, then clicks and verifies focus', async () => {
   const h = settingsNavigationFixture(), value = await navigatePortableSettings(h.options);
@@ -296,6 +324,22 @@ test('portable callsite uses point/wheel APIs and contains no UID-click or Tab n
   assert.match(source, /await harness\.clickPoint\(point\)/);
   assert.match(source, /wheelAt: input => harness\.wheelAt\(input\)/);
   assert.doesNotMatch(source, /harness\.click\(|press\('Tab'\)|key\(direction\)|Shift\+Tab/);
+});
+
+test('Settings notice captures reveal the exact subject rather than its adjacent action row', () => {
+  const source = fs.readFileSync(new URL('./verify-firefox-mcp-portable-transfer-flow.mjs', import.meta.url), 'utf8');
+  const status = source.slice(source.indexOf('const captureStatus ='), source.indexOf('const noReplay ='));
+  assert.match(status, /await reach\(testid\('transfer-status'\)\)/);
+  assert.doesNotMatch(status, /settings-agent-import/);
+  for (const stage of ['profile-visible-draft-version-2', 'visible-version-2-with-stored-head-3']) {
+    const before = source.slice(0, source.indexOf(`await capture('${stage}'`));
+    assert.ok(before.includes("await reach(testid('transfer-export-target'))"));
+    assert.ok(before.lastIndexOf("await reach(testid('transfer-export-target'))") > before.lastIndexOf('await capture('));
+  }
+  assert.match(source, /assert\.equal\(ui\.detailId, selectedVersion\.detailId/);
+  assert.match(source, /assert\.deepEqual\(ui\.target, selectedVersion\.target/);
+  assert.match(source, /assert\.deepEqual\(ui\.target, proof\.visibleAfterAdvance\.target/);
+  assert.match(source, /await captureStatus\('profile-write-unknown-no-retry'\)/);
 });
 
 test('store receipt assertions reject changed Board head, unexpected activation, provider or output injection', t => {

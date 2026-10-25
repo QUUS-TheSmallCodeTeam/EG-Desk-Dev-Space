@@ -479,8 +479,9 @@ export async function runPortableTransferFlow({ harness, result, check }, { prof
     result.screenshots.push(shot); proof.captures.push(shot); return shot;
   };
   const captureStatus = async stage => {
-    await reach(testid('settings-agent-import'));
-    // The status is adjacent to the action row, but must be observed painted.
+    // Reveal the text being proved, not a nearby button that can be visible
+    // while this notice is still clipped below the Settings viewport.
+    await reach(testid('transfer-status'));
     const ui = await observePortableUi(harness);
     return capture(stage, [{ selector: testid('transfer-status'), text: ui.transferText }], ui);
   };
@@ -638,9 +639,12 @@ export async function runPortableTransferFlow({ harness, result, check }, { prof
 
   const row = `${testid('settings-agent-row')}[data-profile-id=${JSON.stringify(proof.initial.seed.profileId)}]`;
   await reach(row); await click(row, 'open actual current saved profile revision');
-  await waitUi(value => value.detailId === proof.initial.seed.profileId && value.target.revision === '2');
-  await reach(testid('settings-agent-export-md'));
+  const selectedVersion = await waitUi(value => value.detailId === proof.initial.seed.profileId &&
+    value.target.profileId === proof.initial.seed.profileId && value.target.revision === '2');
+  await reach(testid('transfer-export-target'));
   ui = await observePortableUi(harness);
+  assert.equal(ui.detailId, selectedVersion.detailId, 'Revealing the version notice must preserve the selected profile');
+  assert.deepEqual(ui.target, selectedVersion.target, 'Revealing the version notice must preserve the original export target');
   await capture('profile-visible-draft-version-2', [{ selector: testid('transfer-export-target'), text: ui.target.text }], ui);
   const exportProfile = async (format, selection, filename, expectedState) => {
     const selector = testid(format === 'md' ? 'settings-agent-export-md' : 'settings-agent-export-toml');
@@ -666,15 +670,17 @@ export async function runPortableTransferFlow({ harness, result, check }, { prof
   await control({ operation: 'advance-profile-head', expectedHeadRevision: 2 });
   proof.visibleAfterAdvance = await observePortableUi(harness);
   check('new SQLite head does not silently replace the visible old version', JSON.stringify(proof.visibleAfterAdvance.target) === JSON.stringify(proof.visibleBeforeAdvance.target));
-  await capture('visible-version-2-with-stored-head-3', [{ selector: testid('transfer-export-target'), text: proof.visibleAfterAdvance.target.text }], proof.visibleAfterAdvance);
+  await reach(testid('transfer-export-target'));
+  ui = await observePortableUi(harness);
+  assert.deepEqual(ui.target, proof.visibleAfterAdvance.target, 'Revealing the version notice must preserve the original export target');
+  await capture('visible-version-2-with-stored-head-3', [{ selector: testid('transfer-export-target'), text: ui.target.text }], ui);
   await exportProfile('md', 'path', 'owned-pinned-v2.md', 'saved');
   check('native export remains pinned to displayed v2 while real head is v3', assertPortablePinnedExport(proof.beforeAdvance, await state(),
     proof.visibleBeforeAdvance, await observePortableUi(harness), 'owned-pinned-v2.md'));
   // The owned file was already made through actual UI. A confirmed path DTO
   // now exercises the REAL exclusive-create collision after beginWrite.
   await exportProfile('md', 'path', 'owned-agent.md', 'unknown');
-  ui = await observePortableUi(harness);
-  await capture('profile-write-unknown-no-retry', [{ selector: testid('transfer-status'), text: ui.transferText }], ui);
+  await captureStatus('profile-write-unknown-no-retry');
   await noReplay('unknown');
   proof.final = await state();
   check('stored data and authority remain bounded', assertPortableStoreInvariant(proof.initial, proof.final, { imported: 1, headAdvanced: true }));
