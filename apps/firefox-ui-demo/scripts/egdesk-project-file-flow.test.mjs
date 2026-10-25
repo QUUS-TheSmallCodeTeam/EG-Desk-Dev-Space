@@ -17,6 +17,7 @@ class Element {
     this.ownerDocument = document; this.tagName = tag; this.children = []; this.parentElement = null;
     this.attributes = {}; this.listeners = new Map(); this.dataset = {}; this.style = {};
     this.className = ''; this.value = ''; this.hidden = false; this.disabled = false; this.scrollTop = 0;
+    if (tag === 'details') this.open = false;
   }
   set textContent(text) { this.text = String(text); this.replaceChildren(); }
   get textContent() { return (this.text || '') + this.children.map(child => child.textContent).join(''); }
@@ -51,7 +52,11 @@ class Element {
       if (event.stopped) break;
     }
   }
-  click() { if (!this.disabled) this.fire('click'); }
+  click() {
+    if (this.disabled) return;
+    this.fire('click');
+    if (this.tagName === 'summary' && this.parentElement?.tagName === 'details') this.parentElement.open = !this.parentElement.open;
+  }
 }
 function fakeDocument() {
   const document = { createElement: tag => new Element(document, tag), activeElement: null };
@@ -245,6 +250,8 @@ test('shared RunResult styles separate metadata and bound command/output scrolli
     assert.equal(node.tabIndex, 0, 'long text can be scrolled with the keyboard');
   }
   assert.match(style('.egdesk-run-result-command'), /flex: 0 1 100%/);
+  assert.match(style('.egdesk-run-result-command'), /line-height: 1\.5; padding-bottom: 16px; min-height: calc\(1\.5em \+ 16px\)/,
+    'the native overlay scrollbar has space below the glyph line without changing copyable command text');
   assert.match(style('.egdesk-run-result .egdesk-run-result-tail'), /max-height: 18rem; overflow-y: auto/);
   assert.match(style('.egdesk-run-result-failure'), /margin: 8px 0/);
   assert.match(style('.egdesk-run-result-failure-name'), /display: block; margin-bottom: 4px/);
@@ -266,6 +273,150 @@ test('project-only runner never exposes or dispatches the legacy working-copy ch
   await h.view.openProject(project()); await h.view.check(); assert.equal(runs.length, 0);
   assert.match(h.find('.egdesk-file-status').textContent, /명령을 먼저 저장/);
 });
+
+test('check outcome precedes compact execution details; opening them reveals the unchanged original project and full path', async t => {
+  const completion = deferred(), runs = [];
+  const h = viewFixture(t, { runCheck: request => { runs.push(request); return completion.promise; } });
+  const original = { ...project('a', [typed]), title: '실행한 프로젝트 '.repeat(15), displayPath: `/private/${'long-folder/'.repeat(12)}original-workspace` };
+  await h.view.openProject(original);
+  h.find('.egdesk-file-project-check').click(); await settle();
+  await h.view.openProject({ ...project('b', [typed]), title: '나중에 선택한 프로젝트', displayPath: '/later/workspace' });
+  completion.resolve({ status: 'completed', exitCode: 0, output: 'original run\n' }); await settle();
+  const card = h.find('.egdesk-run-result'), details = h.find('[data-testid="file-check-location-details"]');
+  const toggle = h.find('[data-testid="file-check-location-toggle"]'), path = h.find('[data-testid="file-check-cwd"]');
+  assert.equal(details.tagName, 'details'); assert.equal(details.open, false); assert.equal(toggle.tagName, 'summary');
+  assert.deepEqual(card.children.slice(0, 3).map(node => node.className), ['egdesk-run-result-header', 'egdesk-file-check-context', 'egdesk-run-result-meta']);
+  assert.equal(h.find('.egdesk-run-result-headline').textContent, '테스트 통과');
+  assert.equal(toggle.textContent, `실행 위치 · ${original.title}`);
+  assert.equal(toggle.textContent.includes(original.displayPath), false, 'collapsed location does not show the multi-line raw path');
+  assert.match(h.find('.egdesk-file-check-context-label').getAttribute('style'), /text-overflow: ellipsis; white-space: nowrap/);
+  toggle.click();
+  assert.equal(details.open, true); assert.equal(path.parentElement, details);
+  assert.equal(path.textContent, `실행 폴더 · ${original.displayPath}`);
+  assert.equal(h.find('.egdesk-file-check-project-name').textContent, `프로젝트 · ${original.title}`);
+  assert.equal(details.textContent.includes('/later/workspace'), false);
+  assert.equal(h.find('.egdesk-file-check-stale').hidden, false);
+  assert.equal(runs.length, 1); assert.equal(runs[0].projectId, 'project-a'); assert.equal(runs[0].rootId, 'root-a');
+  toggle.click(); assert.equal(details.open, false); assert.equal(runs.length, 1, 'details never reruns or retargets a check');
+});
+
+test('file selection empty state follows rendered results and restores after result clear and root reset without extra actions', async t => {
+  const completion = deferred(), runs = [], serviceCalls = [];
+  const h = viewFixture(t, { runCheck: request => { runs.push(request); return completion.promise; } });
+  for (const [name, callback] of Object.entries(h.service)) {
+    h.service[name] = async (...args) => { serviceCalls.push(name); return callback(...args); };
+  }
+  const viewer = h.find('.egdesk-file-viewer'), panel = h.find('.egdesk-file-check-result');
+  assert.equal(viewer.hidden, true, 'an unconnected view keeps its initial state');
+  await h.view.openProject(project('a', [typed]));
+  assert.equal(panel.hidden, true); assert.equal(viewer.hidden, false);
+  assert.equal(viewer.textContent, '트리에서 파일을 선택하세요.');
+  const treeItem = h.find('[role="treeitem"]'); treeItem.focus();
+  const buttons = h.view.element.querySelectorAll('button');
+  h.find('.egdesk-file-project-check').click(); await settle();
+  assert.equal(panel.hidden, false); assert.equal(panel.getAttribute('aria-busy'), 'true');
+  assert.equal(viewer.hidden, false, 'a pending run is not a rendered result');
+  completion.resolve({ status: 'completed', exitCode: 0, output: 'passed\n' }); await settle();
+  assert.equal(panel.hidden, false); assert.equal(viewer.hidden, true, 'a visible outcome replaces only the no-file prompt');
+  assert.equal(viewer.textContent, '트리에서 파일을 선택하세요.', 'the prompt is retained for restoration');
+  assert.equal(h.find('.egdesk-file-tree').hidden, false); assert.equal(h.find('[role="treeitem"]'), treeItem);
+  assert.equal(h.document.activeElement, treeItem, 'result presentation does not move focus');
+  assert.deepEqual(h.view.element.querySelectorAll('button'), buttons, 'result presentation adds no action');
+  assert.deepEqual(serviceCalls, ['listDirectory'], 'rendering does not read, save, pick, or connect anything');
+  h.find('[data-testid="file-check-location-toggle"]').click();
+  assert.deepEqual(serviceCalls, ['listDirectory']); assert.equal(runs.length, 1);
+  await h.view.openRoot({ rootId: 'ordinary', directoryId: 'ordinary-dir', name: '일반 폴더' });
+  assert.equal(viewer.hidden, true, 'a retained stale result still replaces the no-file prompt after a root change');
+  assert.equal(h.find('.egdesk-file-check-stale').hidden, false);
+  await h.view.openFile('file-ordinary-dir');
+  assert.equal(panel.hidden, true, 'opening a file clears the displayed result');
+  assert.equal(h.find('.egdesk-file-editor-label').hidden, false);
+  assert.equal(h.find('.egdesk-file-editor').value, 'start');
+  await h.view.openRoot({ rootId: 'ordinary', directoryId: 'ordinary-dir', name: '일반 폴더' });
+  assert.equal(panel.hidden, true); assert.equal(viewer.hidden, false, 'resetting the no-file view restores its prompt');
+  assert.equal(viewer.textContent, '트리에서 파일을 선택하세요.');
+  assert.equal(h.view.snapshot().fileId, null); assert.equal(h.find('.egdesk-file-editor-label').hidden, true);
+  assert.equal(h.find('.egdesk-file-tree').hidden, false); assert.equal(runs.length, 1);
+  assert.deepEqual(serviceCalls, ['listDirectory', 'listDirectory', 'readFile', 'createDraft', 'listDirectory'],
+    'only the explicit root/file actions reach the service');
+});
+
+test('replacing a result with command choice or a pending run restores the prompt until an actual result is rendered', async t => {
+  const completions = [deferred(), deferred()], runs = [], renderer = deferred();
+  const h = viewFixture(t, { parts: { runResult: renderer.promise },
+    runCheck: request => { runs.push(request); return completions[runs.length - 1].promise; } });
+  await h.view.openProject(project('a', [typed]));
+  h.find('.egdesk-file-project-check').click(); await settle();
+  completions[0].resolve({ status: 'completed', exitCode: 0, output: 'first\n' }); await settle();
+  assert.equal(h.find('.egdesk-file-check-result').getAttribute('aria-busy'), 'false');
+  assert.equal(h.find('.egdesk-file-viewer').hidden, false, 'a receipt without rendered result content is not enough');
+  renderer.resolve(RunResult); await settle();
+  assert.equal(h.find('.egdesk-file-viewer').hidden, true);
+  h.view.setProjectScripts([typed, { ...typed, id: 'other', name: '다른 검사', command: 'echo other' }]);
+  assert.equal(h.find('.egdesk-file-viewer').hidden, true, 'marking an existing result stale does not clear it');
+  h.find('.egdesk-file-project-check').click(); await settle();
+  assert.ok(h.find('.egdesk-file-check-scripts')); assert.equal(h.find('.egdesk-run-result'), null);
+  assert.equal(h.find('.egdesk-file-viewer').hidden, false); assert.equal(runs.length, 1);
+  h.find('.egdesk-file-check-script').click(); await settle();
+  assert.equal(h.find('.egdesk-file-check-result').getAttribute('aria-busy'), 'true');
+  assert.equal(h.find('.egdesk-file-viewer').hidden, false); assert.equal(runs.length, 2);
+  completions[1].resolve({ status: 'failed', exitCode: 7, output: 'second failed\n' }); await settle();
+  assert.equal(h.find('.egdesk-file-viewer').hidden, true);
+  assert.match(h.find('.egdesk-run-result-exit').textContent, /7/);
+  assert.match(h.find('.egdesk-file-check-result').textContent, /second failed/);
+  assert.equal(runs.length, 2, 'only the two explicit check selections run');
+});
+
+test('plain and unavailable-renderer check results also replace only the no-file prompt', async t => {
+  for (const scenario of [
+    { parts: { runResult: RunResult }, result: { summary: 'plain result' } },
+    { parts: { runResult: null }, result: { summary: 'renderer unavailable', exitCode: 0, output: 'completed\n' } },
+  ]) {
+    let runs = 0;
+    const h = viewFixture(t, { parts: scenario.parts, runCheck: async () => { runs++; return scenario.result; } });
+    await h.view.openProject(project('a', [typed]));
+    assert.equal(h.find('.egdesk-file-viewer').hidden, false);
+    await h.view.check();
+    assert.equal(h.find('.egdesk-file-check-result').hidden, false);
+    assert.equal(h.find('.egdesk-file-viewer').hidden, true);
+    assert.equal(h.find('.egdesk-file-check-body').textContent, scenario.result.summary);
+    assert.equal(h.find('[data-testid="file-check-location-details"]').open, false);
+    assert.equal(h.find('.egdesk-file-tree').hidden, false); assert.equal(runs, 1);
+  }
+});
+
+for (const selection of ['none', 'text', 'binary']) {
+  test('check results preserve real errors, the tree, and ' + selection + ' file state', async t => {
+    const completion = deferred(), runs = [];
+    const h = viewFixture(t, { runCheck: request => { runs.push(request); return completion.promise; } });
+    const readFile = h.service.readFile;
+    let rejectRead = false;
+    h.service.readFile = async request => {
+      if (rejectRead) throw Object.assign(new Error('missing source'), { code: 'RESOURCE_UNAVAILABLE' });
+      return { ...await readFile(request), kind: selection === 'binary' ? 'binary' : 'text' };
+    };
+    await h.view.openProject(project('a', [typed]));
+    if (selection !== 'none') await h.view.openFile('file-dir-a');
+    const before = h.view.snapshot(), editor = h.find('.egdesk-file-editor');
+    const viewer = h.find('.egdesk-file-viewer'), text = viewer.textContent;
+    h.find('.egdesk-file-project-check').click(); await settle();
+    rejectRead = true;
+    h.find('[role="treeitem"]').click(); await settle();
+    const error = h.find('.egdesk-file-error'), errorText = error.textContent;
+    assert.equal(error.hidden, false); assert.match(errorText, /파일을 찾을 수 없거나/);
+    completion.resolve({ status: 'completed', exitCode: 0, output: 'finished\n' }); await settle();
+    assert.equal(h.find('.egdesk-file-check-result').hidden, false);
+    assert.equal(error.hidden, false); assert.equal(error.textContent, errorText, 'a result must not suppress an independent real error');
+    assert.equal(h.find('.egdesk-file-tree').hidden, false);
+    assert.equal(h.find('.egdesk-file-editor-label').hidden, selection !== 'text');
+    assert.equal(viewer.hidden, selection !== 'binary');
+    assert.equal(viewer.textContent, text, 'read-only information and retained empty text are never overwritten');
+    if (selection === 'text') assert.equal(editor.value, 'start');
+    if (selection === 'binary') assert.equal(viewer.textContent, '이 형식은 편집할 수 없습니다.');
+    assert.equal(h.view.snapshot().fileId, before.fileId); assert.equal(h.view.snapshot().draftId, before.draftId);
+    assert.equal(runs.length, 1);
+  });
+}
 
 test('dirty original blocks execution; edits and folder changes make the fixed run receipt visibly stale', async t => {
   const completion = deferred(), runs = [];

@@ -2239,13 +2239,13 @@ test('Chat composer starts compact but expands and scrolls for long requests', (
   const body = surfaceSource.match(/            const resizeComposer = \(\) => \{([\s\S]*?)\n            \};\n            input\.addEventListener\('input'/)?.[1];
   assert.ok(body);
   const resize = compileFunction(`return function resizeComposer() {${body}\n            }`,
-    ['input', 'activeThread', 'ChatState', 'codex', 'sendButton']);
+    ['input', 'activeThread', 'ChatState', 'codex', 'sendButton', 'chatRoomProjectSendBlock']);
   const input = { isConnected: true, scrollHeight: 30, style: {}, value: 'draft',
     ownerDocument: { defaultView: { getComputedStyle: () => ({ maxHeight: '144px' }) } } };
   const sendButton = { disabled: true, title: '' };
   const activeThread = { id: 'thread-a', conversationId: null, preparingInput: false };
   const codex = { authStatus: { isLoggedIn: true }, connected: true, isSending: false };
-  const run = resize(input, activeThread, Chat, codex, sendButton);
+  const run = resize(input, activeThread, Chat, codex, sendButton, actualProjectSendBlock());
   run();
   assert.equal(input.style.height, '40px');
   assert.equal(input.style.overflowY, 'hidden');
@@ -3590,7 +3590,7 @@ test('actual send path preserves draft B and new attachments typed during delaye
   assert.ok(body);
   const deps = ['state', 'getActiveCodexThread', 'getCodexThreadDraft', 'ChatState', 'threadBusy', 'epochScope', 'ensureNativeReadyForSend', 'updateThreadById', 'emit',
     'captureThreadInputs', 'getCodexThreadById', 'protocol', 'codexThreadAgentProfile', 'appendMessageToThread', 'createCodexMessage', 'SELF_MEMBER', 'codexThreadRuntimeConfig', 'fetchJson', 'syncProtocolRun', 'browserToolSelectedSources',
-    'rootSseReady', 'chatRequestProjectDisplays', 'CHAT_REQUEST_PROJECT_INVALID'];
+    'rootSseReady', 'chatRequestProjectDisplays', 'CHAT_REQUEST_PROJECT_INVALID', 'chatRoomProjectSendBlock', 'chatRoomProjectState'];
   const send = compileFunction(`return (async () => {${body}\n})();`, deps);
   const selectedBody = surfaceSource.match(/  function browserToolSelectedSources\(threadId, candidates = null\) \{([\s\S]*?)\n  \}/)?.[1];
   assert.ok(selectedBody, 'test the production selected-source filter rather than inventing a permissive selector');
@@ -3602,6 +3602,7 @@ test('actual send path preserves draft B and new attachments typed during delaye
     briefingInputs: [], messages: [], profileEnabled: false };
   const state = { codex: { activeThreadId: 'room', threads: [initial], threadDrafts: { room: 'A' }, threadDraftRevisions: { room: 1 },
     authStatus: { isLoggedIn: true, authMode: 'chatgpt', accountEmail: 'known@example.test', identityStatus: 'known' }, connected: true } };
+  const projectDefaults = installDefaultProjectSendFixture(state);
   let release;
   const delayed = new Promise(resolve => { release = resolve; });
   const getThread = (_codex, id = 'room') => state.codex.threads.find(thread => thread.id === id);
@@ -3622,7 +3623,7 @@ test('actual send path preserves draft B and new attachments typed during delaye
     (id, message) => update(id, thread => ({ ...thread, messages: [...thread.messages, message] })),
     (role, content, status, options) => ({ role, content, status, ...options }), 'self', () => ({}),
     async (_url, request) => { sendCount++; payload = JSON.parse(request.body); return { accepted: true, conversationId: 'c', runId: 'r', answerId: 'c/r' }; }, () => {},
-    actualSelectedSources, () => ({ sourceReady: true, eventSourceReadyState: 1, browserTransportId: 'ui-stream-1' }), new Map(), requestProjectSurfaceConstants().CHAT_REQUEST_PROJECT_INVALID);
+    actualSelectedSources, () => ({ sourceReady: true, eventSourceReadyState: 1, browserTransportId: 'ui-stream-1' }), new Map(), requestProjectSurfaceConstants().CHAT_REQUEST_PROJECT_INVALID, projectDefaults.chatRoomProjectSendBlock, projectDefaults.chatRoomProjectState);
   state.codex.threadDrafts.room = 'B';
   state.codex.threadDraftRevisions.room = 2;
   update('room', thread => ({ ...thread, inputSources: [...thread.inputSources, { id: 'b' }] }));
@@ -3660,7 +3661,7 @@ test('actual send path preserves draft B and new attachments typed during delaye
     (id, message) => update(id, thread => ({ ...thread, messages: [...thread.messages, message] })),
     (role, content, status, options) => ({ role, content, status, ...options }), 'self', () => ({}),
     async () => { assert.fail('a selected Browser must not submit without its ready SSE transport ID'); }, () => {},
-    actualSelectedSources, connectingStatus, new Map(), requestProjectSurfaceConstants().CHAT_REQUEST_PROJECT_INVALID);
+    actualSelectedSources, connectingStatus, new Map(), requestProjectSurfaceConstants().CHAT_REQUEST_PROJECT_INVALID, projectDefaults.chatRoomProjectSendBlock, projectDefaults.chatRoomProjectState);
   assert.equal(payload, null);
   assert.equal(sendCount, 1);
   assert.equal(state.codex.threadDrafts.room, 'B');
@@ -3674,7 +3675,7 @@ test('actual send path preserves draft B and new attachments typed during delaye
     (id, message) => update(id, thread => ({ ...thread, messages: [...thread.messages, message] })),
     (role, content, status, options) => ({ role, content, status, ...options }), 'self', () => ({}),
     async () => { assert.fail('stale interaction authority must not degrade silently to a normal read-only send'); }, () => {},
-    actualSelectedSources, () => ({ sourceReady: true, eventSourceReadyState: 1, browserTransportId: 'ui-stream-1' }), new Map(), requestProjectSurfaceConstants().CHAT_REQUEST_PROJECT_INVALID);
+    actualSelectedSources, () => ({ sourceReady: true, eventSourceReadyState: 1, browserTransportId: 'ui-stream-1' }), new Map(), requestProjectSurfaceConstants().CHAT_REQUEST_PROJECT_INVALID, projectDefaults.chatRoomProjectSendBlock, projectDefaults.chatRoomProjectState);
   assert.equal(sendCount, 1);
   assert.equal(getThread(null).messages.length, 1);
   assert.equal(state.codex.threadDrafts.room, 'B');
@@ -4256,7 +4257,7 @@ test('Chat composer reserves title, status and log space on compact cards', asyn
   const observerBody = surfaceSource.match(/            let composerWidth = 0;[\s\S]*?            composerObserver\.observe\(body\);/)?.[0];
   assert.ok(resizeBody && observerBody, 'production composer resizing remains directly testable');
   const bindResize = compileFunction('return function resizeComposer() {' + resizeBody + '\n}', [
-    'input', 'activeThread', 'ChatState', 'codex', 'sendButton',
+    'input', 'activeThread', 'ChatState', 'codex', 'sendButton', 'chatRoomProjectSendBlock',
   ]);
   const layout = ({ viewport = 385, notice = 26, noticeMargin = 0 } = {}) => {
     const compact = () => main.dataset.compactComposer === 'true';
@@ -4283,7 +4284,7 @@ test('Chat composer reserves title, status and log space on compact cards', asyn
       querySelector: selector => selector === '.egd-codex-conversation-pane' ? pane : null };
     const sendButton = { disabled: true, title: '' };
     const resize = bindResize(input, { conversationId: null, preparingInput: false },
-      Chat, { authStatus: { isLoggedIn: true }, connected: true, isSending: false }, sendButton);
+      Chat, { authStatus: { isLoggedIn: true }, connected: true, isSending: false }, sendButton, actualProjectSendBlock());
     return { input, main, resize, sendButton,
       remainingLogContentHeight: () => main.clientHeight - header.offsetHeight - 44 - notice
         - noticeMargin * 2 - (compact() ? 106 : 128) - input.offsetHeight - (compact() ? 24 : 52) };
@@ -7462,10 +7463,11 @@ test('기록 없이 시작: the switch, the first-send body, the confirmed badge
   assert.ok(body);
   const deps = ['state', 'getActiveCodexThread', 'getCodexThreadDraft', 'ChatState', 'threadBusy', 'epochScope', 'ensureNativeReadyForSend', 'updateThreadById', 'emit',
     'captureThreadInputs', 'getCodexThreadById', 'protocol', 'codexThreadAgentProfile', 'appendMessageToThread', 'createCodexMessage', 'SELF_MEMBER', 'codexThreadRuntimeConfig', 'fetchJson', 'syncProtocolRun', 'browserToolSelectedSources',
-    'rootSseReady', 'InputContext', 'chatRequestProjectDisplays', 'CHAT_REQUEST_PROJECT_INVALID'];
+    'rootSseReady', 'InputContext', 'chatRequestProjectDisplays', 'CHAT_REQUEST_PROJECT_INVALID', 'chatRoomProjectSendBlock', 'chatRoomProjectState'];
   const send = async (room, capabilities, reply) => {
     const state = { codex: { activeThreadId: 'room', threads: [{ id: 'room', messages: [], inputSources: [], briefingInputs: [], profileEnabled: false, ...room }],
       threadDrafts: { room: '안녕' }, threadDraftRevisions: { room: 1 }, authStatus: sessionAuth, connected: true, chatCapabilities: capabilities } };
+    const projectDefaults = installDefaultProjectSendFixture(state);
     const getThread = (_codex, id = 'room') => state.codex.threads.find(thread => thread.id === id);
     const update = (id, fn) => { const index = state.codex.threads.findIndex(thread => thread.id === id); state.codex.threads[index] = fn(state.codex.threads[index]); return state.codex.threads[index]; };
     let payload = null;
@@ -7474,7 +7476,7 @@ test('기록 없이 시작: the switch, the first-send body, the confirmed badge
       (id, message) => update(id, thread => ({ ...thread, messages: [...thread.messages, message] })),
       (role, content, status, options) => ({ id: `message-${role}`, role, content, status, ...options }), '나', () => ({}),
       async (_url, request) => { payload = JSON.parse(request.body); return reply(payload); }, () => {}, () => [],
-      () => ({ sourceReady: true, eventSourceReadyState: 1, browserTransportId: null }), InputContext, new Map(), requestProjectSurfaceConstants().CHAT_REQUEST_PROJECT_INVALID);
+      () => ({ sourceReady: true, eventSourceReadyState: 1, browserTransportId: null }), InputContext, new Map(), requestProjectSurfaceConstants().CHAT_REQUEST_PROJECT_INVALID, projectDefaults.chatRoomProjectSendBlock, projectDefaults.chatRoomProjectState);
     return { payload, thread: getThread(null) };
   };
   const accepted = request => ({ accepted: true, conversationId: 'native-one', runId: 'r1', answerId: 'native-one/r1', ...(request.stateless ? { stateless: true } : {}) });
@@ -10427,11 +10429,12 @@ test('CTX-03 send: contextResolution names the list and the refs taken from it, 
   assert.ok(body);
   const deps = ['state', 'getActiveCodexThread', 'getCodexThreadDraft', 'ChatState', 'threadBusy', 'epochScope', 'ensureNativeReadyForSend', 'updateThreadById', 'emit',
     'captureThreadInputs', 'getCodexThreadById', 'protocol', 'codexThreadAgentProfile', 'appendMessageToThread', 'createCodexMessage', 'SELF_MEMBER', 'codexThreadRuntimeConfig', 'fetchJson', 'syncProtocolRun', 'browserToolSelectedSources',
-    'rootSseReady', 'InputContext', 'expireContextSuggestions', 'chatRequestProjectDisplays', 'CHAT_REQUEST_PROJECT_INVALID'];
+    'rootSseReady', 'InputContext', 'expireContextSuggestions', 'chatRequestProjectDisplays', 'CHAT_REQUEST_PROJECT_INVALID', 'chatRoomProjectSendBlock', 'chatRoomProjectState'];
   const send = async ({ inputSources = [], suggest = { resolution, receivedAt: Date.now(), accountKey }, reply }) => {
     const state = { codex: { activeThreadId: 'room', threads: [{ id: 'room', messages: [], inputSources, briefingInputs: [], profileEnabled: false }],
       threadDrafts: { room: '이 자료로 정리해 줘' }, threadDraftRevisions: { room: 1 }, authStatus: sessionAuth, connected: true, chatCapabilities: ['send'] },
     contextSuggest: { unsupportedUntil: 0, byThread: suggest ? { room: suggest } : {} } };
+    const projectDefaults = installDefaultProjectSendFixture(state);
     const getThread = (_codex, id = 'room') => state.codex.threads.find(thread => thread.id === id);
     const update = (id, fn) => { const index = state.codex.threads.findIndex(thread => thread.id === id); state.codex.threads[index] = fn(state.codex.threads[index]); return state.codex.threads[index]; };
     let payload = null;
@@ -10443,7 +10446,7 @@ test('CTX-03 send: contextResolution names the list and the refs taken from it, 
       (id, message) => update(id, thread => ({ ...thread, messages: [...thread.messages, message] })),
       (role, content, status, options) => ({ id: `message-${role}`, role, content, status, ...options }), '나', () => ({}),
       async (_url, request) => { payload = JSON.parse(request.body); return reply(payload); }, () => {}, () => [],
-      () => ({ sourceReady: true, eventSourceReadyState: 1, browserTransportId: null }), InputContext, id => expired.push(id), new Map(), requestProjectSurfaceConstants().CHAT_REQUEST_PROJECT_INVALID);
+      () => ({ sourceReady: true, eventSourceReadyState: 1, browserTransportId: null }), InputContext, id => expired.push(id), new Map(), requestProjectSurfaceConstants().CHAT_REQUEST_PROJECT_INVALID, projectDefaults.chatRoomProjectSendBlock, projectDefaults.chatRoomProjectState);
     return { payload, thread: getThread(null), state, expired };
   };
   const accepted = () => ({ accepted: true, conversationId: 'native-one', runId: 'r1', answerId: 'native-one/r1' });
@@ -11558,11 +11561,38 @@ function requestProjectSurfaceConstants() {
   const end = surfaceSource.indexOf('\n  function normalizeChatRequestProjectDraft(', start);
   assert.ok(start >= 0 && end > start);
   return compileFunction(surfaceSource.slice(start, end)
-    + '\nreturn { chatRequestProjectDisplays, CHAT_REQUEST_PROJECT_INVALID, CHAT_REQUEST_PROJECT_CONNECT };')();
+    + '\nreturn { chatRequestProjectDisplays, chatRequestProjectDisplayScopes, chatRoomProjectDefaults, chatProjectDraftActions, fileProjectAssociations, CHAT_REQUEST_PROJECT_INVALID, CHAT_REQUEST_PROJECT_CONNECT, CHAT_ROOM_PROJECT_UNAVAILABLE };')();
+}
+
+function actualProjectSendBlock() {
+  const deps = { ...requestProjectSurfaceConstants(), ChatState: Chat };
+  return compileFunction(['chatRequestProjectSelection', 'chatRoomProjectState', 'chatRoomProjectSendBlock'].map(declaration).join('\n')
+    + '\nreturn chatRoomProjectSendBlock;', Object.keys(deps))(...Object.values(deps));
+}
+
+// Older send fixtures retain their provider/Context assertions. Only the new
+// room-default HTTP boundary is supplied here; all freshness guards are real.
+function installDefaultProjectSendFixture(state) {
+  const constants = requestProjectSurfaceConstants();
+  const deps = { ...constants, state, ChatState: Chat, epochScope: Chat.createChatEpochScope(),
+    getCodexThreadById: (_codex, id) => state.codex.threads.find(thread => thread.id === id),
+    updateThreadById: (id, update) => { state.codex.threads = state.codex.threads.map(thread => thread.id === id ? update(thread) : thread); },
+    emit() {}, window: { AbortController, setTimeout: () => 1, clearTimeout() {} },
+    fetchJson: async (path, options) => {
+      assert.equal(path, '/v1/files/projects/room-default'); assert.equal(options.method, 'POST');
+      const { roomId } = JSON.parse(options.body);
+      return { ok: true, result: { roomId, inheritance: null, override: null, project: null, source: null, status: 'none' } };
+    },
+  };
+  const names = ['chatRequestProjectSelection', 'chatRoomProjectState', 'chatRoomProjectSendBlock', 'createChatProjectScope', 'normalizeChatRoomProjectDefault', 'chatRoomProjectTargetsMatch'];
+  const api = compileFunction(names.map(declaration).join('\n') + '\nreturn { ' + names.join(', ') + ' };', Object.keys(deps))(...Object.values(deps));
+  Object.assign(deps, api);
+  state.codexBridge = Object.fromEntries(['createProjectScope', 'readRoomProjectDefault', 'prepareRoomProjectSend'].map(name => [name, requestProjectBridgeMethod(name, deps)]));
+  return api;
 }
 
 function requestProjectBridgeMethod(name, deps) {
-  const prefix = ['readRequestProject', 'sendMessage'].includes(name) ? 'async ' : '';
+  const prefix = ['readRequestProject', 'readRoomProjectDefault', 'refreshRoomProjectDefault', 'prepareRoomProjectSend', 'saveRoomProjectDefault', 'clearRequestProjectTarget', 'sendMessage'].includes(name) ? 'async ' : '';
   const start = surfaceSource.indexOf('      ' + prefix + name + '(');
   const end = surfaceSource.indexOf('\n      },', start);
   assert.ok(start >= 0 && end > start, 'actual bridge method: ' + name);
@@ -11634,8 +11664,12 @@ function requestProjectDOM() {
 const requestProjectA = () => ({ boardId: 'board-a', projectId: 'project-a', rootId: 'root-a', title: 'Project A', displayPath: '/owned/project-a' });
 const requestProjectB = () => ({ boardId: 'board-b', projectId: 'project-b', rootId: 'root-b', title: 'Project B', displayPath: '/owned/project-b' });
 const requestProjectPacket = target => ({ ok: true, result: { project: { ...target, status: 'connected' } } });
+const roomProjectDefault = (target, { roomId = 'wire-room', source = 'board', status = 'connected' } = {}) => ({
+  roomId, inheritance: { boardId: target.boardId }, override: source === 'room' ? { projectId: target.projectId } : null,
+  project: { projectId: target.projectId, title: target.title, rootId: target.rootId, displayPath: target.displayPath, source, status }, source, status,
+});
 
-function requestProjectUiHarness({ target, read } = {}) {
+function requestProjectUiHarness({ target, read, roomRead, roomSave, resizeObserver } = {}) {
   const constants = requestProjectSurfaceConstants();
   const document = requestProjectDOM();
   const el = compileFunction('return function el(tag, props = {}, ...children) {' + elBody + '\n};', ['document'])(document);
@@ -11648,17 +11682,36 @@ function requestProjectUiHarness({ target, read } = {}) {
   Object.defineProperty(state.boards, 'activeProjectionId', { get() { assert.fail('Chat project selection must not read the active Board'); } });
   const getThread = (_codex, id) => state.codex.threads.find(thread => thread.id === id) || null;
   const update = (id, action) => { state.codex.threads = state.codex.threads.map(thread => thread.id === id ? action(thread) : thread); };
-  const calls = [], timers = new Map();
+  const calls = [], roomCalls = [], timers = new Map(), continued = [], epochScope = Chat.createChatEpochScope();
+  let roomValue = { roomId: 'wire-room', inheritance: null, override: null, project: null, source: null, status: 'none' };
+  let roomReader = roomRead || (() => ({ ok: true, result: roomValue }));
   let timerSeq = 0, reader = read || (boardId => requestProjectPacket(boardId === 'board-a' ? requestProjectA() : requestProjectB()));
-  const deps = { ...constants, state, document, el, ChatState: Chat, getCodexThreadById: getThread, updateThreadById: update, emit() {},
+  const deps = { ...constants, state, document, el, epochScope, ChatState: Chat, getCodexThreadById: getThread, updateThreadById: update, emit() {},
+    setActiveThread: id => { if (!getThread(null, id)) return false; state.codex.activeThreadId = id; return true; },
+    getCodexThreadDraft: (codex, id) => codex.threadDrafts[id] || '', refreshConversation() {},
     coerceAgendaStore: () => ({ agendas: {}, meta: {} }),
-    window: { AbortController, setTimeout(fn) { const id = ++timerSeq; timers.set(id, fn); return id; }, clearTimeout: id => timers.delete(id) },
+    window: { AbortController, ResizeObserver: resizeObserver, setTimeout(fn) { const id = ++timerSeq; timers.set(id, fn); return id; }, clearTimeout: id => timers.delete(id) },
     ChromeUtils: { importESModule(url) {
       assert.equal(url, 'chrome://userchrome/content/EGDeskFileView.sys.mjs');
       return { createEGDeskFileServiceCallbacks };
     } },
     fetchJson: async (path, options) => {
       const body = JSON.parse(options.body);
+      assert.equal(options.method, 'POST');
+      if (path === '/v1/files/projects/room-default') {
+        assert.deepEqual(Object.keys(body), ['roomId']);
+        roomCalls.push({ path, body });
+        return roomReader(body);
+      }
+      if (path === '/v1/files/projects/room-default/save') {
+        assert.deepEqual(Object.keys(body), ['roomId', 'boardId', 'expectedProjectId', 'expectedRootId']);
+        roomCalls.push({ path, body });
+        if (roomSave) return roomSave(body);
+        const selected = body.boardId === 'board-a' ? requestProjectA() : requestProjectB();
+        assert.equal(body.expectedProjectId, selected.projectId); assert.equal(body.expectedRootId, selected.rootId);
+        roomValue = roomProjectDefault(selected, { roomId: body.roomId });
+        return { ok: true, result: roomValue };
+      }
       calls.push({ path, body });
       assert.equal(path, '/v1/files/projects/open', 'only project inspection, never commands or provider dispatch');
       assert.deepEqual(Object.keys(body), ['boardId']);
@@ -11666,21 +11719,30 @@ function requestProjectUiHarness({ target, read } = {}) {
       return reader(body.boardId);
     },
   };
-  const bridge = { readRequestProject: requestProjectBridgeMethod('readRequestProject', deps),
-    setRequestProjectTarget: requestProjectBridgeMethod('setRequestProjectTarget', deps) };
-  state.codexBridge = bridge;
-  const names = ['normalizeChatRequestProjectDraft', 'chatRequestProjectSelection', 'chatRequestProjectCandidates', 'openChatRequestProjectPanel', 'buildChatRequestProjectControl'];
+  const names = ['normalizeChatRequestProjectDraft', 'chatRequestProjectSelection', 'chatRoomProjectState', 'createChatProjectScope', 'normalizeChatRoomProjectDefault',
+    'chatRoomProjectSendBlock', 'chatRoomProjectTargetsMatch', 'observeFileProjectAssociation', 'buildChatRoomProjectSettings', 'chatRequestProjectCandidates', 'openChatRequestProjectPanel', 'buildChatRequestProjectControl'];
   const api = compileFunction(names.map(declaration).join('\n') + '\nreturn { ' + names.join(', ') + ' };',
     Object.keys(deps))(...Object.values(deps));
-  return { ...api, ...constants, state, document, bridge, calls, timers,
+  Object.assign(deps, api);
+  const emitSource = surfaceSource.match(/    const emit = \(\) => \{([\s\S]*?)\n    \};/)?.[1];
+  assert.ok(emitSource);
+  const emitDeps = { document, state, normalizeThreads() {}, listeners: [], renderCodexActivityPanel() {}, scheduleDeskSessionSave() {} };
+  deps.emit = compileFunction('return () => {' + emitSource + '\n};', Object.keys(emitDeps))(...Object.values(emitDeps));
+  const bridge = Object.fromEntries(['createProjectScope', 'readRequestProject', 'setRequestProjectTarget', 'ensureRoomProjectDefault', 'readRoomProjectDefault',
+    'refreshRoomProjectDefault', 'invalidateRoomProjectDefaults', 'prepareRoomProjectSend', 'selectThread', 'saveRoomProjectDefault', 'clearRequestProjectTarget'].map(name => [name, requestProjectBridgeMethod(name, deps)]));
+  bridge.continueInNewThread = id => continued.push(id);
+  state.codexBridge = bridge;
+  return { ...api, ...constants, state, document, bridge, calls, roomCalls, timers, continued, epochScope, emit: deps.emit,
     thread: () => getThread(null, 'room'), setReader: value => { reader = value; },
+    setRoomReader: value => { roomReader = value; },
     panel: () => document.getElementById('egd-codex-input-panel'),
     control: () => api.buildChatRequestProjectControl(getThread(null, 'room'), bridge),
     async choose(boardId) { const select = this.panel().testid('chat-project-board'); select.value = boardId; await select.dispatch('change'); await settle(); },
+    async chooseDefault(boardId) { const select = this.panel().testid('chat-room-project-board'); select.value = boardId; await select.dispatch('change'); await settle(); },
   };
 }
 
-function requestProjectSendHarness({ target, capture, reply, inputSources = [{ id: 'attachment', kind: 'board-element', label: 'Selected element', sourceRef: { viewId: 'element-a' } }] } = {}) {
+function requestProjectSendHarness({ target, capture, reply, roomRead, inputSources = [{ id: 'attachment', kind: 'board-element', label: 'Selected element', sourceRef: { viewId: 'element-a' } }] } = {}) {
   const constants = requestProjectSurfaceConstants();
   const state = { codex: { activeThreadId: 'room', threads: [{ id: 'room', clientBindingId: 'original-wire-room', profileEnabled: false,
     messages: [], inputSources, briefingInputs: [], ...(target === undefined ? {} : { requestProjectTarget: target }) }],
@@ -11690,11 +11752,15 @@ function requestProjectSendHarness({ target, capture, reply, inputSources = [{ i
   const getThread = (_codex, id = 'room') => state.codex.threads.find(thread => thread.id === id) || null;
   const update = (id, action) => { state.codex.threads = state.codex.threads.map(thread => thread.id === id ? action(thread) : thread); };
   const calls = { begin: 0, prepare: 0, capture: 0, provider: [] };
+  const epoch = Chat.createChatEpochScope();
+  const roomCalls = [];
+  let roomReader = roomRead || (body => ({ ok: true, result: { roomId: body.roomId, inheritance: null, override: null, project: null, source: null, status: 'none' } }));
   const protocol = Chat.createChatProtocolState();
   if (target) constants.chatRequestProjectDisplays.set('room', target);
   const deps = { ...constants, state, ChatState: Chat, InputContext, protocol,
+    window: { AbortController, setTimeout: () => 1, clearTimeout() {} },
     getActiveCodexThread: () => getThread(null), getCodexThreadDraft: (codex, id) => codex.threadDrafts[id] || '', getCodexThreadById: getThread,
-    threadBusy: () => false, epochScope: { begin: () => { calls.begin++; return {}; }, valid: () => true, finish() {} },
+    threadBusy: () => false, epochScope: { ...epoch, begin: (...args) => { calls.begin++; return epoch.begin(...args); } },
     ensureNativeReadyForSend: async () => { calls.prepare++; return true; }, updateThreadById: update, emit() {},
     captureThreadInputs: async (thread, inputs) => { calls.capture++; return capture ? capture(thread, inputs) : inputs.map((input, index) => ({ snapshotId: 'snapshot-' + index, sourceId: input.id })); },
     codexThreadAgentProfile: () => null,
@@ -11702,6 +11768,9 @@ function requestProjectSendHarness({ target, capture, reply, inputSources = [{ i
     createCodexMessage: (role, content, status, options) => ({ id: 'message-' + role, role, content, status, ...options }),
     SELF_MEMBER: 'self', codexThreadRuntimeConfig: () => ({}),
     fetchJson: async (path, options) => {
+      if (path === '/v1/files/projects/room-default') {
+        const body = JSON.parse(options.body); roomCalls.push(body); return roomReader(body);
+      }
       assert.equal(path, '/chat/send');
       const body = JSON.parse(options.body);
       calls.provider.push(body);
@@ -11709,9 +11778,15 @@ function requestProjectSendHarness({ target, capture, reply, inputSources = [{ i
     },
     syncProtocolRun() {}, browserToolSelectedSources: () => [], rootSseReady: () => ({ sourceReady: true }), expireContextSuggestions() {},
   };
+  const names = ['chatRequestProjectSelection', 'chatRoomProjectState', 'createChatProjectScope', 'chatRoomProjectSendBlock', 'normalizeChatRoomProjectDefault', 'chatRoomProjectTargetsMatch'];
+  Object.assign(deps, compileFunction(names.map(declaration).join('\n') + '\nreturn { ' + names.join(', ') + ' };', Object.keys(deps))(...Object.values(deps)));
   const send = requestProjectBridgeMethod('sendMessage', deps);
   const setTarget = requestProjectBridgeMethod('setRequestProjectTarget', deps);
-  return { ...constants, state, protocol, calls, send, thread: () => getThread(null),
+  const bridge = Object.fromEntries(['createProjectScope', 'readRoomProjectDefault', 'prepareRoomProjectSend'].map(name => [name, requestProjectBridgeMethod(name, deps)]));
+  state.codexBridge = bridge;
+  return { ...constants, state, protocol, calls, send, bridge, roomCalls, epoch, thread: () => getThread(null),
+    setRoomReader: reader => { roomReader = reader; },
+    projectScope: () => { const scope = deps.createChatProjectScope('room', epoch); scope.finish(); return scope; },
     setTarget: target => setTarget('room', target),
     edit(text, target) {
       state.codex.threadDrafts.room = text; state.codex.threadDraftRevisions.room++;
@@ -11752,11 +11827,12 @@ test('실행 프로젝트: Apply verifies the same attachment again; remove affe
   assert.equal(h.panel(), null);
   assert.deepEqual(h.thread().requestProjectTarget, requestProjectA());
   assert.equal(h.calls.length, 2);
-  assert.match(h.control().textContent, /실행 프로젝트.*Project A/);
+  assert.match(h.control().textContent, /이번 요청.*Project A/);
   assert.doesNotMatch(h.control().textContent, /\/owned\/project-a/, 'the full path belongs in accessible detail, not the composer');
   assert.match(h.control().testid('chat-project-open').attributes['aria-label'], /Project A.*\/owned\/project-a/);
   const { inputSources, briefingInputs } = h.thread();
   await h.control().testid('chat-project-remove').dispatch('click');
+  await settle();
   assert.equal(Object.hasOwn(h.thread(), 'requestProjectTarget'), false);
   assert.equal(h.state.codex.threadDrafts.room, 'keep my words');
   assert.equal(h.thread().inputSources, inputSources);
@@ -11841,6 +11917,7 @@ test('실행 프로젝트: restoration preserves invalid intent, hides its field
   assert.doesNotMatch(h.control().textContent, /DO.NOT.RENDER|arbitrary/);
   assert.equal(Chat.chatDraftMatches(restored, 'text', 1, { text: 'text', revision: 1, inputSources: [], briefingInputs: [] }), false);
   await h.control().testid('chat-project-remove').dispatch('click');
+  await settle();
   assert.equal(h.thread().requestProjectTarget, undefined);
   const valid = requestProjectA();
   assert.deepEqual(h.normalizeChatRequestProjectDraft({ id: 'saved', requestProjectTarget: valid }).requestProjectTarget, valid);
@@ -11968,8 +12045,9 @@ test('Board list secondary actions keep Enter/Space while the primary row still 
   assert.deepEqual(opened, ['board-a', 'board-a']);
 });
 
-test('실행 프로젝트 chip reserves a one-line short label instead of the inherited 32px remove-button basis', () => {
+test('실행 프로젝트 chip reserves a one-line short label instead of the inherited 32px remove-button basis', async () => {
   const h = requestProjectUiHarness();
+  await h.bridge.ensureRoomProjectDefault('room');
   const control = h.control(), button = control.testid('chat-project-open');
   assert.equal(control.children.length, 1, 'the unselected control has only an opener');
   assert.equal(button.textContent, '실행 프로젝트');
@@ -12028,7 +12106,7 @@ test('실행 프로젝트 long titles truncate visually while full title/path re
   assert.match(panel.className, /egd-chat-project-panel/);
   assert.ok(details.textContent.includes(normalized.title));
   assert.ok(details.textContent.includes(normalized.displayPath));
-  assert.equal(h.document.activeElement, panel.testid('chat-project-board'), 'opening moves keyboard focus into the details editor');
+  assert.equal(h.document.activeElement, panel.testid('chat-project-body'), 'opening focuses the scrollable detail region without skipping the current target');
   const detailCss = cssDeclarationsFor(surfaceCss, '#egd-codex-input-panel.egd-chat-project-panel .egd-chat-project-details');
   assert.equal(detailCss['overflow-wrap'], 'anywhere');
   assert.equal(detailCss['white-space'], 'normal');
@@ -12467,4 +12545,536 @@ test('Chat retained detail styles bound code scrolling locally and project dialo
   }
   const select = cssDeclarationsFor(css, '#egd-codex-input-panel.egd-chat-project-panel .egd-chat-project-board');
   assert.equal(select.contain, 'inline-size'); assert.equal(select.display, 'block');
+});
+
+test('D-X3: default lookup uses the actual client binding, deduplicates renders and never writes or infers a Board', async () => {
+  const h = requestProjectUiHarness();
+  h.thread().conversationId = 'native-is-not-room';
+  const before = structuredClone(h.thread());
+  h.control(); h.control(); h.control(); await settle(); h.control(); await settle();
+  assert.deepEqual(h.roomCalls, [{ path: '/v1/files/projects/room-default', body: { roomId: 'wire-room' } }]);
+  assert.deepEqual(h.calls, []); assert.deepEqual(h.thread(), before);
+  assert.equal(h.control().testid('chat-project-source').dataset.source, 'none');
+  h.openChatRequestProjectPanel('room'); await settle();
+  await h.panel().testid('chat-room-project-open').click();
+  assert.equal(h.panel().testid('chat-room-project-board').value, '');
+  assert.equal(h.panel().testid('chat-room-project-save').disabled, true);
+  assert.equal(h.calls.length, 0);
+});
+
+test('D-X3: select/preview/Cancel keeps text, attachments, request override and room identity without a save', async () => {
+  const h = requestProjectUiHarness({ target: requestProjectA() });
+  Object.assign(h.thread(), { participants: ['self', 'agent'], agentProfileId: 'unchanged-persona', type: 'group' });
+  const before = structuredClone(h.thread());
+  h.openChatRequestProjectPanel('room'); await settle();
+  await h.panel().testid('chat-room-project-open').click(); await h.chooseDefault('board-b');
+  assert.match(h.panel().testid('chat-room-project-details').textContent, /Project B.*\/owned\/project-b/);
+  assert.equal(h.panel().testid('chat-room-project-save').disabled, false);
+  await h.panel().testid('chat-room-project-cancel').click();
+  assert.equal(h.panel().testid('chat-room-project-editor'), null);
+  assert.deepEqual(h.thread(), before); assert.equal(h.state.codex.threadDrafts.room, 'keep my words');
+  assert.ok(h.roomCalls.every(call => call.path === '/v1/files/projects/room-default'));
+});
+
+test('D-X3: Save sends only reviewed opaque IDs; request removal reveals the saved Board default without inherit/write', async () => {
+  const h = requestProjectUiHarness({ target: requestProjectA() });
+  const before = structuredClone(h.thread());
+  h.openChatRequestProjectPanel('room'); await settle();
+  await h.panel().testid('chat-room-project-open').click(); await h.chooseDefault('board-b');
+  await h.panel().testid('chat-room-project-save').click();
+  assert.equal(h.panel().testid('chat-room-project-editor'), null);
+  assert.deepEqual(h.roomCalls.filter(call => call.path.endsWith('/save')), [{ path: '/v1/files/projects/room-default/save',
+    body: { roomId: 'wire-room', boardId: 'board-b', expectedProjectId: 'project-b', expectedRootId: 'root-b' } }]);
+  assert.deepEqual(h.thread(), before, 'default writes do not rewrite Chat, membership, persona or the request draft');
+  assert.match(h.panel().testid('chat-room-project-current').textContent, /Board 상속.*Project B/);
+  assert.equal(h.panel().testid('chat-room-project-saved').textContent, '방 기본값 저장됨 · 이번 요청 선택 유지');
+  assert.equal(h.control().testid('chat-project-source').textContent, '이번 요청');
+  await h.control().testid('chat-project-remove').click();
+  assert.equal(h.thread().requestProjectTarget, undefined);
+  assert.equal(h.control().testid('chat-project-source').textContent, 'Board 상속');
+  assert.match(h.control().textContent, /Project B/);
+  assert.doesNotMatch(h.control().textContent, /\/owned/);
+  assert.match(h.control().testid('chat-project-open').getAttribute('aria-label'), /\/owned\/project-b/);
+  assert.equal(h.roomCalls.filter(call => call.path.endsWith('/save')).length, 1, 'clear is lookup-only, never inherit or save');
+  h.openChatRequestProjectPanel('room'); await settle();
+  await h.panel().testid('chat-room-project-open').click();
+  assert.equal(h.panel().testid('chat-room-project-board').value, 'board-b', 'only the saved inheritance is preselected');
+});
+
+test('D-X3: default Save failure or a late room/account response never clears the existing request', async t => {
+  for (const mode of ['changed-root', 'binding', 'account', 'engine', 'profile']) await t.test(mode, async () => {
+    const pending = requestProjectDeferred();
+    const h = requestProjectUiHarness({ target: requestProjectA(), roomSave: () => pending.promise });
+    if (mode === 'profile') Object.assign(h.thread(), { engineId: 'claude', engineProfileId: 'slot-a' });
+    h.openChatRequestProjectPanel('room'); await settle();
+    await h.panel().testid('chat-room-project-open').click(); await h.chooseDefault('board-b');
+    const saving = h.panel().testid('chat-room-project-save').dispatch('click');
+    assert.deepEqual(h.thread().requestProjectTarget, requestProjectA());
+    assert.equal(h.panel().testid('chat-room-project-cancel').disabled, true);
+    if (mode === 'binding') h.thread().clientBindingId = 'new-binding';
+    if (mode === 'account') h.epochScope.reset('codex');
+    if (mode === 'engine') h.thread().engineId = 'claude';
+    if (mode === 'profile') h.thread().engineProfileId = 'slot-b';
+    if (mode === 'changed-root') pending.reject(Object.assign(new Error('not UI copy'), { code: 'PROJECT_TARGET_CHANGED', status: 409 }));
+    else pending.resolve({ ok: true, result: roomProjectDefault(requestProjectB()) });
+    await saving;
+    assert.deepEqual(h.thread().requestProjectTarget, requestProjectA());
+    assert.equal(h.state.codex.threadDrafts.room, 'keep my words');
+    assert.equal(h.roomCalls.filter(call => call.path.endsWith('/save')).length, 1, 'no write retry');
+    if (mode === 'changed-root') {
+      assert.match(h.panel().testid('chat-room-project-details').textContent, /다시 선택.*전체 위치/);
+      assert.equal(h.panel().testid('chat-room-project-save').disabled, true);
+      assert.equal(h.chatRoomProjectState(h.thread()).status, 'error');
+    } else assert.equal(h.chatRoomProjectState(h.thread()), null, 'an old scope cannot publish a ready default');
+  });
+});
+
+test('D-X3: late Board previews cannot cross Cancel, selection, binding or account change', async t => {
+  for (const mode of ['cancel', 'selection', 'room', 'binding', 'account']) await t.test(mode, async () => {
+    const pending = requestProjectDeferred(), h = requestProjectUiHarness();
+    h.openChatRequestProjectPanel('room'); await settle();
+    await h.panel().testid('chat-room-project-open').click();
+    h.setReader(boardId => boardId === 'board-a' ? pending.promise : requestProjectPacket(requestProjectB()));
+    await h.chooseDefault('board-a');
+    const oldPanel = h.panel();
+    if (mode === 'cancel') await oldPanel.testid('chat-room-project-cancel').click();
+    if (mode === 'selection') await h.chooseDefault('board-b');
+    if (mode === 'room') h.state.codex.activeThreadId = 'other';
+    if (mode === 'binding') h.thread().clientBindingId = 'new-binding';
+    if (mode === 'account') h.epochScope.reset('codex');
+    pending.resolve(requestProjectPacket(requestProjectA())); await settle();
+    assert.doesNotMatch(oldPanel.testid('chat-room-project-details')?.textContent || '', /Project A/);
+    if (mode === 'selection') assert.match(oldPanel.testid('chat-room-project-details').textContent, /Project B/);
+    assert.equal(h.roomCalls.filter(call => call.path.endsWith('/save')).length, 0);
+  });
+});
+
+test('D-X3: pending request removal preserves newer draft intent and never substitutes an invalid default', async t => {
+  for (const mode of ['edit', 'target', 'remove', 'binding', 'account', 'unavailable', 'valid']) await t.test(mode, async () => {
+    const pending = requestProjectDeferred(), h = requestProjectUiHarness({ target: requestProjectA() });
+    await h.bridge.ensureRoomProjectDefault('room');
+    h.setRoomReader(() => pending.promise);
+    const clearing = h.bridge.clearRequestProjectTarget('room');
+    assert.deepEqual(h.thread().requestProjectTarget, requestProjectA());
+    assert.match(h.chatRoomProjectSendBlock(h.thread()), /확인하는 중/);
+    if (mode === 'edit') { h.state.codex.threadDrafts.room = 'new draft'; h.state.codex.threadDraftRevisions.room++; }
+    if (mode === 'target') h.bridge.setRequestProjectTarget('room', requestProjectB());
+    if (mode === 'remove') h.bridge.setRequestProjectTarget('room', null);
+    if (mode === 'binding') h.thread().clientBindingId = 'new-binding';
+    if (mode === 'account') h.epochScope.reset('codex');
+    pending.resolve({ ok: true, result: mode === 'unavailable'
+      ? { roomId: 'wire-room', inheritance: { boardId: 'board-b' }, override: null, project: null, source: 'board', status: 'unavailable' }
+      : roomProjectDefault(requestProjectB(), { source: 'room' }) });
+    assert.equal(await clearing, mode === 'valid');
+    assert.deepEqual(h.thread().requestProjectTarget, mode === 'target' ? requestProjectB() : ['remove', 'valid'].includes(mode) ? undefined : requestProjectA());
+    assert.equal(h.state.codex.threadDrafts.room, mode === 'edit' ? 'new draft' : 'keep my words');
+    if (mode === 'valid') assert.equal(h.control().testid('chat-project-source').textContent, '방 기본');
+    if (mode === 'unavailable') assert.match(h.thread().sendError, /선택은 유지/);
+    if (mode === 'account') assert.equal(h.thread().sendError, undefined, 'old-account failure cannot mutate the new-account draft');
+    assert.ok(h.roomCalls.every(call => !call.path.endsWith('/save')));
+  });
+});
+
+test('D-X3: pending reads and ready caches are fenced by account epoch, engine, profile and binding, including unchanged client IDs', async t => {
+  for (const phase of ['pending', 'ready']) for (const mode of ['account', 'engine', 'profile', 'binding']) await t.test(phase + ' ' + mode, async () => {
+    const pending = requestProjectDeferred();
+    const h = requestProjectUiHarness({ roomRead: () => phase === 'pending' ? pending.promise : { ok: true, result: roomProjectDefault(requestProjectA()) } });
+    if (mode === 'profile') Object.assign(h.thread(), { engineId: 'claude', engineProfileId: 'slot-a' });
+    const reading = h.bridge.readRoomProjectDefault('room');
+    if (phase === 'ready') { await reading; assert.equal(h.chatRoomProjectState(h.thread()).status, 'ready'); }
+    const oldEntry = h.chatRoomProjectDefaults.get('room');
+    if (mode === 'account') h.epochScope.reset('codex');
+    if (mode === 'engine') h.thread().engineId = 'claude';
+    if (mode === 'profile') { h.epochScope.reset('claude', 'slot-a'); h.thread().engineProfileId = 'slot-b'; }
+    if (mode === 'binding') h.thread().clientBindingId = 'new-binding';
+    if (phase === 'pending') {
+      const rejected = assert.rejects(reading, /연결이 바뀌었습니다/);
+      pending.resolve({ ok: true, result: roomProjectDefault(requestProjectA()) }); await rejected;
+      if (['account', 'profile'].includes(mode)) assert.equal(oldEntry.scope.signal.aborted, true);
+    }
+    assert.equal(h.chatRoomProjectState(h.thread()), null);
+    h.setRoomReader(body => ({ ok: true, result: roomProjectDefault(requestProjectB(), { roomId: body.roomId }) }));
+    const value = await h.bridge.readRoomProjectDefault('room');
+    assert.equal(value.project.projectId, 'project-b'); assert.equal(h.roomCalls.length, 2);
+    assert.doesNotMatch(h.control().textContent, /Project A/);
+  });
+});
+
+test('D-X3: scoped resets preserve other engine/profile caches, but stale request display metadata is not reused', async () => {
+  const h = requestProjectUiHarness({ roomRead: () => ({ ok: true, result: roomProjectDefault(requestProjectA()) }) });
+  Object.assign(h.thread(), { engineId: 'claude', engineProfileId: 'slot-a' });
+  await h.bridge.readRoomProjectDefault('room'); h.bridge.setRequestProjectTarget('room', requestProjectB());
+  h.epochScope.reset('codex'); h.epochScope.reset('claude', 'slot-b');
+  assert.equal(h.chatRoomProjectState(h.thread()).status, 'ready');
+  assert.match(h.control().textContent, /Project B/);
+  h.epochScope.reset('claude', 'slot-a');
+  assert.equal(h.chatRoomProjectState(h.thread()), null);
+  assert.equal(h.chatRequestProjectSelection(h.thread()).display, null);
+  assert.deepEqual(h.thread().requestProjectTarget, requestProjectB(), 'invalidating display authority never erases the chosen draft');
+});
+
+test('D-X3: malformed default DTOs fail closed, never render their fields or fall back to another project', async t => {
+  const base = roomProjectDefault(requestProjectA());
+  for (const value of [null, { ...base, roomId: 'native-conversation' }, { ...base, source: 'activeBoard' },
+    { ...base, inheritance: null }, { ...base, project: { ...base.project, rootId: '' } },
+    { ...base, status: 'none' }, { ...base, override: { projectId: 'other' } }]) await t.test(JSON.stringify(value), async () => {
+    const h = requestProjectUiHarness({ roomRead: () => ({ ok: true, result: value }) });
+    await assert.rejects(h.bridge.readRoomProjectDefault('room'), /기본 프로젝트를 확인하지 못/);
+    assert.equal(h.chatRoomProjectState(h.thread()).status, 'error');
+    assert.doesNotMatch(h.control().textContent, /Project A|owned|native-conversation|activeBoard/);
+    h.control(); await settle(); assert.equal(h.roomCalls.length, 1, 'render does not retry a rejected cache in a loop');
+  });
+});
+
+test('D-X3: known pending/invalid defaults stop before capture or provider, while an explicit request remains the higher priority', async t => {
+  for (const status of ['loading', 'saving', 'error', 'unavailable', 'reconnect-required']) await t.test(status, async () => {
+    const h = requestProjectSendHarness();
+    h.chatRoomProjectDefaults.set('room', { binding: 'original-wire-room', scope: h.projectScope(),
+      status: ['unavailable', 'reconnect-required'].includes(status) ? 'ready' : status,
+      value: { status } });
+    await h.send();
+    assert.deepEqual(h.calls, { begin: 0, prepare: 0, capture: 0, provider: [] });
+    assert.equal(h.thread().messages.length, 0); assert.equal(h.state.codex.threadDrafts.room, 'original words');
+    assert.match(h.thread().sendError, /기본 프로젝트/);
+  });
+  const explicit = requestProjectSendHarness({ target: requestProjectA() });
+  explicit.chatRoomProjectDefaults.set('room', { binding: 'original-wire-room', scope: explicit.projectScope(), status: 'ready', value: { status: 'unavailable' } });
+  await explicit.send(); assert.equal(explicit.calls.provider.length, 1);
+  assert.deepEqual(explicit.calls.provider[0].projectTarget, { boardId: 'board-a', projectId: 'project-a', rootId: 'root-a' });
+  const inherited = requestProjectSendHarness({ roomRead: body => ({ ok: true, result: roomProjectDefault(requestProjectB(), { roomId: body.roomId }) }) });
+  inherited.chatRoomProjectDefaults.set('room', { binding: 'original-wire-room', scope: inherited.projectScope(), status: 'ready', value: roomProjectDefault(requestProjectB()) });
+  await inherited.send(); assert.equal(inherited.calls.provider.length, 1);
+  assert.equal(Object.hasOwn(inherited.calls.provider[0], 'projectTarget'), false, 'the backend resolves inheritance, not a UI-generated request override');
+  assert.equal(Object.hasOwn(inherited.calls.provider[0], 'boardId'), false);
+});
+
+test('D-X3: existing Claude conversation explains original cwd and offers only explicit new-conversation navigation', async () => {
+  const h = requestProjectUiHarness({ target: requestProjectA() });
+  Object.assign(h.thread(), { engineId: 'claude', engineProfileId: 'slot-a', conversationId: 'native-original' });
+  const before = structuredClone(h.thread());
+  h.openChatRequestProjectPanel('room'); await settle();
+  assert.match(h.panel().testid('chat-project-cwd-guard').textContent, /처음 시작한 폴더.*새 대화.*기존 초안과 기록/);
+  assert.deepEqual(h.continued, []);
+  await h.panel().testid('chat-project-new-conversation').click();
+  assert.deepEqual(h.continued, ['room']); assert.deepEqual(h.thread(), before);
+  assert.equal(h.panel(), null);
+});
+
+test('D-X3: default editor bounds native fieldset/select intrinsic sizing without hiding horizontal content', () => {
+  const editor = cssDeclarationsFor(surfaceCss, '.egd-chat-room-project-editor');
+  assert.equal(editor['box-sizing'], 'border-box'); assert.equal(editor.width, '100%'); assert.equal(editor['min-width'], '0');
+  assert.equal(editor['max-width'], '100%'); assert.equal(editor.overflow, undefined);
+  const select = cssDeclarationsFor(surfaceCss, '#egd-codex-input-panel.egd-chat-project-panel .egd-chat-project-board');
+  assert.equal(select['margin-inline'], '0'); assert.equal(select['min-width'], '0');
+});
+
+test('D-X3: inherited chip opens effective source/full path first without manufacturing a request override', async () => {
+  const h = requestProjectUiHarness({ roomRead: () => ({ ok: true, result: roomProjectDefault(requestProjectA()) }) });
+  await h.bridge.ensureRoomProjectDefault('room');
+  await h.control().testid('chat-project-open').click();
+  const panel = h.panel(), effective = panel.testid('chat-project-effective');
+  assert.match(effective.textContent, /Board 상속.*Project A.*\/owned\/project-a/);
+  assert.equal(panel.testid('chat-project-board').value, '');
+  assert.equal(h.calls.length, 0, 'opening inherited details does not reselect the Board as a request');
+  assert.equal(h.thread().requestProjectTarget, undefined);
+  assert.ok(panel.textContent.indexOf('/owned/project-a') < panel.textContent.indexOf('이번 요청만 변경'));
+  assert.equal(panel.children[0].children[1].textContent, '닫기');
+  await panel.children[0].children[1].click();
+  assert.equal(h.panel(), null); assert.equal(h.chatRoomProjectState(h.thread()).value.source, 'board');
+  assert.ok(h.roomCalls.every(call => !call.path.endsWith('/save')));
+});
+
+test('D-X3: explicit request is the effective first summary and Claude cwd guard precedes request Apply', async () => {
+  const h = requestProjectUiHarness({ target: requestProjectB(), roomRead: () => ({ ok: true, result: roomProjectDefault(requestProjectA()) }) });
+  Object.assign(h.thread(), { engineId: 'claude', conversationId: 'native-original' });
+  h.openChatRequestProjectPanel('room'); await settle();
+  assert.match(h.panel().testid('chat-project-effective').textContent, /이번 요청.*Project B.*\/owned\/project-b/);
+  assert.doesNotMatch(h.panel().testid('chat-project-effective').textContent, /Project A/);
+  const nodes = h.panel().all(() => true);
+  assert.ok(nodes.indexOf(h.panel().testid('chat-project-cwd-guard')) < nodes.indexOf(h.panel().testid('chat-project-apply')));
+  assert.equal(h.control().testid('chat-project-remove').getAttribute('aria-label'), '이번 요청 지정 해제');
+});
+
+test('D-X3: previewing a different request does not relabel the current effective target; changed original attachment is actionable', async () => {
+  const h = requestProjectUiHarness({ target: requestProjectA() });
+  h.openChatRequestProjectPanel('room'); await settle();
+  await h.choose('board-b');
+  assert.match(h.panel().testid('chat-project-effective').textContent, /이번 요청.*Project A.*\/owned\/project-a/);
+  assert.match(h.panel().testid('chat-project-details').textContent, /Project B/);
+  assert.deepEqual(h.thread().requestProjectTarget, requestProjectA());
+  h.setReader(() => requestProjectPacket({ ...requestProjectA(), rootId: 'changed-root', displayPath: '/different-root' }));
+  await h.choose('board-a');
+  assert.match(h.panel().testid('chat-project-effective').textContent, /연결을 다시 선택.*전체 위치/);
+  assert.doesNotMatch(h.panel().testid('chat-project-effective').textContent, /owned|different-root/);
+  assert.deepEqual(h.thread().requestProjectTarget, requestProjectA());
+});
+
+test('D-X3: actual emit closes stale project panels after room/engine/profile changes without erasing drafts', async t => {
+  for (const mode of ['room', 'engine', 'profile']) await t.test(mode, async () => {
+    const h = requestProjectUiHarness({ target: requestProjectA() });
+    if (mode === 'profile') Object.assign(h.thread(), { engineId: 'claude', engineProfileId: 'slot-a' });
+    h.openChatRequestProjectPanel('room'); await settle();
+    const old = h.panel();
+    if (mode === 'room') h.state.codex.activeThreadId = 'other';
+    if (mode === 'engine') h.thread().engineId = 'claude';
+    if (mode === 'profile') h.thread().engineProfileId = 'slot-b';
+    h.emit(); assert.equal(h.panel(), null);
+    await old.testid('chat-project-apply').dispatch('click');
+    assert.deepEqual(h.thread().requestProjectTarget, requestProjectA());
+    assert.equal(h.state.codex.threadDrafts.room, 'keep my words');
+  });
+});
+
+test('D-X3: a timed-out lookup stays actionable even if a transport ignores AbortSignal, without automatic retry', async () => {
+  const pending = requestProjectDeferred(), h = requestProjectUiHarness({ roomRead: () => pending.promise });
+  const reading = h.bridge.readRoomProjectDefault('room');
+  const rejected = assert.rejects(reading, /연결이 바뀌었습니다/);
+  for (const timeout of h.timers.values()) timeout();
+  pending.resolve({ ok: true, result: roomProjectDefault(requestProjectA()) }); await rejected;
+  assert.equal(h.chatRoomProjectState(h.thread()).status, 'error');
+  assert.match(h.chatRoomProjectSendBlock(h.thread()), /기본 프로젝트를 확인하지 못/);
+  h.control(); await settle(); assert.equal(h.roomCalls.length, 1);
+  assert.equal(h.timers.size, 0);
+});
+
+test('D-X3 freshness: actual File publish invalidates only the associated Board default and updates an open effective-path panel', async () => {
+  let current = requestProjectA();
+  const h = requestProjectUiHarness({ roomRead: body => ({ ok: true, result: roomProjectDefault(current, { roomId: body.roomId }) }) });
+  h.openChatRequestProjectPanel('room'); await settle();
+  const before = structuredClone(h.thread()), panel = h.panel();
+  const card = { dataset: {}, _fileRecord: { project: { boardId: 'board-a', projectId: 'project-a' }, root: { rootId: 'root-a', directoryId: 'dir-a' } } };
+  h.state.agenda = {};
+  const deps = { state: h.state, observeFileProjectAssociation: h.observeFileProjectAssociation, scheduleDeskSessionSave() {},
+    refreshBoardRegion() { assert.fail('unrelated Board geometry'); }, syncViewportAgendaRail() { assert.fail('unrelated camera'); } };
+  const publish = compileFunction(declaration('markAgendaDirty') + '\nreturn markAgendaDirty;', Object.keys(deps))(...Object.values(deps));
+  publish('file-view-state', card); await settle();
+  const count = h.roomCalls.length;
+  publish('file-view-state', card); await settle(); assert.equal(h.roomCalls.length, count, 'file edits with the same association do not poll');
+  current = { ...requestProjectB(), boardId: 'board-a' };
+  card._fileRecord = { project: { boardId: 'board-a', projectId: 'project-b' }, root: { rootId: 'root-b', directoryId: 'dir-b' } };
+  publish('file-view-state', card); await settle();
+  assert.equal(h.roomCalls.length, count + 1);
+  assert.equal(h.panel(), panel, 'refresh keeps the editor and its local state');
+  assert.match(panel.testid('chat-project-effective').textContent, /Board 상속.*Project B.*\/owned\/project-b/);
+  assert.doesNotMatch(panel.testid('chat-project-effective').textContent, /owned\/project-a/);
+  assert.equal(panel.testid('chat-project-board').value, '');
+  assert.match(h.control().textContent, /Board 상속.*Project B/);
+  assert.equal(h.thread().requestProjectTarget, undefined);
+  assert.deepEqual(h.thread().inputSources, before.inputSources); assert.equal(h.state.codex.threadDrafts.room, 'keep my words');
+  assert.match(h.thread().sendError, /방 기본 프로젝트가 바뀌었습니다/);
+  const unrelated = { dataset: {}, _fileRecord: { project: { boardId: 'unrelated', projectId: 'other' }, root: { rootId: 'other', directoryId: 'other-dir' } } };
+  publish('file-view-state', unrelated); await settle(); assert.equal(h.roomCalls.length, count + 1);
+  const fileCard = readFileSync(new URL('../overlay/resources/surface/EGDeskSurfaceFileCard.mjs', import.meta.url), 'utf8');
+  assert.match(fileCard, /card\._fileRecord = FileCardState\.fileCardRecord\(rootHandle, snapshot, projectReference\)/);
+  assert.match(fileCard, /markAgendaDirty\('file-view-state', card\)/, 'the existing File publisher reaches the actual monolith hook');
+});
+
+test('D-X3 freshness: re-entering a room rereads its own binding and surfaces changed or broken inheritance', async t => {
+  for (const broken of [false, true]) await t.test(broken ? 'unavailable' : 'A to B', async () => {
+    let current = roomProjectDefault(requestProjectA());
+    const h = requestProjectUiHarness({ roomRead: body => ({ ok: true, result: { ...current, roomId: body.roomId } }) });
+    await h.bridge.ensureRoomProjectDefault('room');
+    h.bridge.selectThread('other'); await settle();
+    current = broken ? { roomId: 'wire-room', inheritance: { boardId: 'board-a' }, override: null, project: null, source: 'board', status: 'unavailable' }
+      : roomProjectDefault({ ...requestProjectB(), boardId: 'board-a' });
+    h.bridge.selectThread('room'); await settle();
+    assert.equal(h.roomCalls.filter(call => call.body.roomId === 'wire-room').length, 2);
+    assert.equal(h.chatRoomProjectState(h.thread()).value.status, broken ? 'unavailable' : 'connected');
+    assert.doesNotMatch(h.control().textContent, /Project A/);
+    assert.match(h.control().textContent, broken ? /기본값 확인 필요/ : /Project B/);
+    assert.equal(h.state.codex.threadDrafts.room, 'keep my words'); assert.equal(h.thread().requestProjectTarget, undefined);
+  });
+});
+
+test('D-X3 freshness: A to B immediately before send stops before accepted rows, preserves the draft and retries only after another explicit Send', async () => {
+  const h = requestProjectSendHarness({ roomRead: body => ({ ok: true, result: roomProjectDefault(requestProjectB(), { roomId: body.roomId }) }) });
+  const before = structuredClone(h.thread());
+  h.chatRoomProjectDefaults.set('room', { binding: 'original-wire-room', scope: h.projectScope(), status: 'ready', value: roomProjectDefault(requestProjectA(), { roomId: 'original-wire-room' }) });
+  await h.send();
+  assert.equal(h.roomCalls.length, 1); assert.equal(h.calls.provider.length, 0);
+  assert.equal(h.thread().messages.length, 0); assert.equal(Object.keys(h.protocol.requests).length, 0);
+  assert.deepEqual(h.thread().inputSources, before.inputSources); assert.equal(h.state.codex.threadDrafts.room, 'original words');
+  assert.equal(h.thread().requestProjectTarget, undefined);
+  assert.equal(h.chatRoomProjectDefaults.get('room').value.project.projectId, 'project-b');
+  assert.match(h.thread().sendError, /방 기본 프로젝트가 바뀌었습니다.*다시 보내세요/);
+  await settle(); assert.equal(h.calls.provider.length, 0, 'refresh must not resend automatically');
+  await h.send(); assert.equal(h.calls.provider.length, 1); assert.equal(h.roomCalls.length, 2);
+  assert.equal(Object.hasOwn(h.calls.provider[0], 'projectTarget'), false);
+  assert.equal(Object.hasOwn(h.calls.provider[0], 'boardId'), false);
+  assert.equal(h.calls.provider[0].clientThreadId, 'original-wire-room');
+});
+
+test('D-X3 freshness: unavailable, disconnected, malformed and failed pre-send reads cannot fall back or dispatch', async t => {
+  for (const mode of ['unavailable', 'reconnect-required', 'wrong-room', 'failure']) await t.test(mode, async () => {
+    const h = requestProjectSendHarness({ roomRead: body => {
+      if (mode === 'failure') throw new Error('network failed');
+      if (mode === 'unavailable') return { ok: true, result: { roomId: body.roomId, inheritance: { boardId: 'board-a' }, override: null, project: null, source: 'board', status: 'unavailable' } };
+      return { ok: true, result: roomProjectDefault(requestProjectA(), { roomId: mode === 'wrong-room' ? 'different' : body.roomId, status: 'reconnect-required' }) };
+    } });
+    h.chatRoomProjectDefaults.set('room', { binding: 'original-wire-room', scope: h.projectScope(), status: 'ready', value: roomProjectDefault(requestProjectA(), { roomId: 'original-wire-room' }) });
+    const before = structuredClone(h.thread());
+    await h.send();
+    assert.equal(h.roomCalls.length, 1); assert.equal(h.calls.provider.length, 0); assert.equal(h.thread().messages.length, 0);
+    assert.equal(Object.keys(h.protocol.requests).length, 0);
+    assert.deepEqual(h.thread().inputSources, before.inputSources); assert.equal(h.state.codex.threadDrafts.room, 'original words');
+    assert.equal(h.thread().requestProjectTarget, undefined); assert.match(h.thread().sendError, /기본 프로젝트.*초안은 유지/);
+  });
+});
+
+test('D-X3 freshness: a pending send recheck rejects duplicates and changes to draft, room, binding, account, engine or profile', async t => {
+  for (const mode of ['duplicate', 'text', 'target', 'room', 'binding', 'account', 'engine', 'profile', 'new-draft-error']) await t.test(mode, async () => {
+    const pending = requestProjectDeferred();
+    const h = requestProjectSendHarness({ roomRead: () => pending.promise });
+    if (mode === 'profile') {
+      Object.assign(h.thread(), { engineId: 'claude', engineProfileId: 'slot-a' });
+      h.state.codex.engines = [{ id: 'claude', status: 'ready', profiles: [{ id: 'slot-a', active: true, auth: { status: 'signedIn' } }] }];
+    }
+    h.chatRoomProjectDefaults.set('room', { binding: 'original-wire-room', scope: h.projectScope(), status: 'ready', value: roomProjectDefault(requestProjectA(), { roomId: 'original-wire-room' }) });
+    const sending = h.send(); await settle();
+    assert.equal(h.roomCalls.length, 1); assert.equal(h.calls.provider.length, 0);
+    if (mode === 'duplicate') { await h.send(); assert.equal(h.roomCalls.length, 1); assert.equal(h.calls.capture, 1); }
+    if (mode === 'text' || mode === 'new-draft-error') h.edit('new words', null);
+    if (mode === 'target') h.setTarget(requestProjectB());
+    if (mode === 'room') h.state.codex.activeThreadId = 'other';
+    if (mode === 'binding') h.thread().clientBindingId = 'new-binding';
+    if (mode === 'account') h.epoch.reset('codex');
+    if (mode === 'engine') h.thread().engineId = 'claude';
+    if (mode === 'profile') h.thread().engineProfileId = 'slot-b';
+    if (mode === 'new-draft-error') pending.reject(new Error('old failure'));
+    else pending.resolve({ ok: true, result: roomProjectDefault(requestProjectA(), { roomId: 'original-wire-room' }) });
+    await sending;
+    assert.equal(h.calls.provider.length, mode === 'duplicate' ? 1 : 0);
+    if (mode !== 'duplicate') {
+      assert.equal(h.thread().messages.length, 0);
+      assert.equal(h.state.codex.threadDrafts.room, ['text', 'new-draft-error'].includes(mode) ? 'new words' : 'original words');
+      assert.deepEqual(h.thread().requestProjectTarget, mode === 'target' ? requestProjectB() : undefined);
+    }
+    if (mode === 'new-draft-error') assert.doesNotMatch(h.thread().sendError || '', /old failure|기본 프로젝트를 확인하지 못/);
+  });
+});
+
+test('D-X3 freshness: File association change supersedes a pending old read; its late A cannot replace B or authorize the waiting send', async () => {
+  const h = requestProjectUiHarness({ roomRead: body => ({ ok: true, result: roomProjectDefault(requestProjectA(), { roomId: body.roomId }) }) });
+  await h.bridge.ensureRoomProjectDefault('room');
+  const old = h.chatRoomProjectState(h.thread()).value, a = requestProjectDeferred(), b = requestProjectDeferred();
+  let reads = 0;
+  h.setRoomReader(() => ++reads === 1 ? a.promise : b.promise);
+  const checking = h.bridge.prepareRoomProjectSend('room', old); await settle();
+  h.observeFileProjectAssociation({ _fileRecord: { project: { boardId: 'board-a', projectId: 'project-b' }, root: { rootId: 'root-b', directoryId: 'dir-b' } } });
+  b.resolve({ ok: true, result: roomProjectDefault({ ...requestProjectB(), boardId: 'board-a' }) }); await settle();
+  a.resolve({ ok: true, result: roomProjectDefault(requestProjectA()) });
+  assert.equal(await checking, false);
+  assert.equal(h.chatRoomProjectState(h.thread()).value.project.projectId, 'project-b');
+  assert.equal(h.state.codex.threadDrafts.room, 'keep my words'); assert.equal(h.thread().requestProjectTarget, undefined);
+  assert.match(h.thread().sendError, /방 기본 프로젝트가 바뀌었습니다.*다시 보내세요/);
+  assert.equal(reads, 2);
+});
+
+test('project sheet: request actions are outside the scroll body on first open, with current and candidate full paths retained', async () => {
+  const target = { ...requestProjectA(), title: '긴 프로젝트 이름 '.repeat(12), displayPath: '/owned/' + '긴-폴더/'.repeat(45) };
+  const h = requestProjectUiHarness({ target, read: () => requestProjectPacket(target) });
+  h.openChatRequestProjectPanel('room'); await settle();
+  const panel = h.panel(), body = panel.testid('chat-project-body'), footer = panel.testid('chat-project-actions');
+  assert.equal(footer.parent, panel); assert.equal(body.parent, panel);
+  assert.equal(panel.children.indexOf(footer), panel.children.indexOf(body) + 1);
+  for (const id of ['chat-project-apply', 'chat-project-cancel']) {
+    assert.equal(footer.contains(panel.testid(id)), true); assert.equal(body.contains(panel.testid(id)), false);
+  }
+  assert.equal(footer.dataset.operation, 'request'); assert.match(footer.textContent, /이번 요청만 변경/);
+  assert.equal(body.getAttribute('tabindex'), '0'); assert.equal(body.getAttribute('role'), 'region');
+  assert.equal(h.document.activeElement, body);
+  assert.ok(body.testid('chat-project-effective').textContent.includes(target.displayPath));
+  assert.ok(body.testid('chat-project-details').textContent.includes(target.displayPath));
+  const title = body.testid('chat-project-details').children[0];
+  assert.equal(title.className, 'egd-chat-project-repeat-title');
+  assert.equal(title.textContent, Chat.normalizeRequestProjectTarget(target).title, 'the candidate retains its full title for wrapping beside its full path');
+  assert.ok(body.textContent.indexOf(target.displayPath) < body.textContent.indexOf('이번 요청만 변경'));
+});
+
+test('project sheet: room editing owns the footer exclusively; Cancel restores request actions with no writes', async () => {
+  const h = requestProjectUiHarness();
+  h.openChatRequestProjectPanel('room'); await h.choose('board-a');
+  const panel = h.panel(), footer = panel.testid('chat-project-actions'), oldApply = panel.testid('chat-project-apply'), oldCancel = panel.testid('chat-project-cancel');
+  await panel.testid('chat-room-project-open').click(); await h.chooseDefault('board-b');
+  assert.equal(footer.dataset.operation, 'room'); assert.match(footer.textContent, /이 방의 기본 프로젝트/);
+  assert.equal(panel.testid('chat-project-request-editor').hidden, true);
+  assert.equal(panel.testid('chat-project-apply'), null); assert.equal(panel.testid('chat-project-cancel'), null);
+  assert.equal(footer.contains(panel.testid('chat-room-project-save')), true);
+  assert.equal(footer.contains(panel.testid('chat-room-project-cancel')), true);
+  // Even a retained event reference cannot apply/cancel another operation.
+  for (const button of [oldApply, oldCancel]) for (const callback of button.listeners.click) await callback({});
+  assert.equal(h.panel(), panel); assert.equal(h.thread().requestProjectTarget, undefined);
+  const oldSave = panel.testid('chat-room-project-save');
+  await panel.testid('chat-room-project-cancel').click();
+  assert.equal(footer.dataset.operation, 'request'); assert.equal(panel.testid('chat-project-request-editor').hidden, false);
+  assert.equal(panel.testid('chat-room-project-save'), null); assert.equal(panel.testid('chat-project-apply'), oldApply);
+  for (const callback of oldSave.listeners.click) await callback({});
+  assert.equal(h.roomCalls.filter(call => call.path.endsWith('/save')).length, 0);
+  assert.equal(h.thread().requestProjectTarget, undefined);
+});
+
+test('project sheet: changing operation while request Apply is pending invalidates that callback, not the draft', async () => {
+  const pending = requestProjectDeferred(), h = requestProjectUiHarness();
+  h.openChatRequestProjectPanel('room'); await h.choose('board-a');
+  h.setReader(boardId => boardId === 'board-a' ? pending.promise : requestProjectPacket(requestProjectB()));
+  const applying = h.panel().testid('chat-project-apply').dispatch('click');
+  await h.panel().testid('chat-room-project-open').click(); await h.chooseDefault('board-b');
+  pending.resolve(requestProjectPacket(requestProjectA())); await applying;
+  assert.equal(h.panel().testid('chat-project-actions').dataset.operation, 'room');
+  assert.equal(h.thread().requestProjectTarget, undefined); assert.equal(h.state.codex.threadDrafts.room, 'keep my words');
+  await h.panel().testid('chat-room-project-cancel').click();
+  assert.equal(h.panel().testid('chat-project-apply').disabled, false, 'a fresh explicit Apply still rechecks the candidate');
+});
+
+test('project sheet: failed room Save retains its scoped visible actions and never mutates the request', async () => {
+  const h = requestProjectUiHarness({ target: requestProjectA(), roomSave: () => { throw Object.assign(new Error('changed'), { code: 'PROJECT_TARGET_CHANGED' }); } });
+  h.openChatRequestProjectPanel('room'); await settle();
+  await h.panel().testid('chat-room-project-open').click(); await h.chooseDefault('board-b');
+  await h.panel().testid('chat-room-project-save').click();
+  const footer = h.panel().testid('chat-project-actions');
+  assert.equal(footer.dataset.operation, 'room');
+  assert.equal(footer.testid('chat-room-project-save').disabled, true);
+  assert.equal(footer.testid('chat-room-project-cancel').disabled, false);
+  assert.equal(footer.testid('chat-project-apply'), null);
+  assert.deepEqual(h.thread().requestProjectTarget, requestProjectA());
+});
+
+test('project sheet: measured overflow cues respond to scroll/resize and disconnect with the panel', async () => {
+  const observations = [];
+  class ResizeObserver {
+    constructor(callback) { this.callback = callback; this.nodes = []; this.disconnected = 0; observations.push(this); }
+    observe(node) { this.nodes.push(node); }
+    disconnect() { this.disconnected++; }
+  }
+  const h = requestProjectUiHarness({ resizeObserver: ResizeObserver });
+  h.openChatRequestProjectPanel('room'); await settle();
+  const panel = h.panel(), body = panel.testid('chat-project-body'), hint = panel.testid('chat-project-scroll-hint');
+  assert.equal(observations.length, 1); assert.equal(observations[0].nodes.length, 3);
+  Object.assign(body, { clientHeight: 240, scrollHeight: 800, scrollTop: 0 });
+  observations[0].callback();
+  assert.equal(hint.hidden, false); assert.match(hint.textContent, /아래로 스크롤/); assert.equal(body.dataset.overflow, 'true');
+  body.scrollTop = 200; await body.dispatch('scroll'); assert.match(hint.textContent, /위·아래로/);
+  body.scrollTop = 560; await body.dispatch('scroll'); assert.match(hint.textContent, /위로 스크롤/);
+  Object.assign(body, { clientHeight: 800, scrollHeight: 800, scrollTop: 0 }); observations[0].callback();
+  assert.equal(hint.hidden, true); assert.equal(body.dataset.overflow, 'false');
+  await panel.testid('chat-project-cancel').click(); assert.equal(observations[0].disconnected, 1);
+  Object.assign(body, { clientHeight: 100, scrollHeight: 900 }); observations[0].callback();
+  assert.equal(hint.hidden, true, 'a disposed observer cannot update the old panel');
+});
+
+test('project sheet: bounded body yields height to a nonshrinking footer instead of scrolling actions away at 600px', () => {
+  const body = cssDeclarationsFor(surfaceCss, '#egd-codex-input-panel.egd-chat-project-panel > .egd-chat-project-body');
+  assert.equal(body.flex, '1 1 auto'); assert.equal(body['min-height'], '0'); assert.equal(body['overflow-y'], 'auto'); assert.equal(body['scrollbar-gutter'], 'stable');
+  const footer = cssDeclarationsFor(surfaceCss, '#egd-codex-input-panel.egd-chat-project-panel > .egd-chat-project-footer');
+  assert.equal(footer.flex, '0 0 auto'); assert.equal(footer['box-sizing'], 'border-box'); assert.equal(footer['flex-direction'], 'column');
+  assert.equal(footer['min-width'], '0'); assert.equal(footer['max-width'], '100%'); assert.equal(footer.position, undefined, 'footer participates in the panel flex layout');
+  const actions = cssDeclarationsFor(surfaceCss, '.egd-chat-project-action-buttons');
+  assert.equal(actions.flex, '0 0 auto'); assert.equal(actions.display, 'flex');
+  const detail = cssDeclarationsFor(surfaceCss, '#egd-codex-input-panel.egd-chat-project-panel .egd-chat-project-details');
+  assert.equal(detail['overflow-wrap'], 'anywhere'); assert.equal(detail['white-space'], 'normal');
+  const duplicate = cssDeclarationsFor(surfaceCss, '#egd-codex-input-panel.egd-chat-project-panel .egd-chat-project-repeat-title');
+  assert.equal(duplicate.display, 'block'); assert.equal(duplicate['min-width'], '0'); assert.equal(duplicate['max-width'], '100%');
+  assert.equal(duplicate['white-space'], 'normal'); assert.equal(duplicate['overflow-wrap'], 'anywhere');
+  assert.equal(duplicate.overflow, undefined, 'the full candidate title is not clipped');
+  assert.equal(duplicate['text-overflow'], undefined, 'the full candidate title is not ellipsized');
 });

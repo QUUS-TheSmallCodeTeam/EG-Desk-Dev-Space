@@ -492,8 +492,16 @@ export function createEGDeskFileView({ document, service, chooseRoot, chooseProj
     announce(details?.fileMayExist === true ? '새 파일 확인 필요 · 작업사본 유지' : '작업에 실패했습니다. 편집 중인 내용은 그대로 남아 있습니다.')
   }
   const clearError = () => { error.textContent = ''; error.hidden = true }
+  // The viewer also carries read-only file information. Only its no-file
+  // prompt yields to a rendered result, never to a pending run or script chooser.
+  const refreshViewerVisibility = () => {
+    const hasResult = !checkPanel.hidden && (checkPanel.querySelector('.egdesk-run-result') || checkPanel.querySelector('.egdesk-file-check-body'))
+    viewer.hidden = !editorLabel.hidden || (!activeFileId && !!hasResult)
+  }
+  const showCheckPanel = () => { checkPanel.hidden = false; refreshViewerVisibility() }
   const setEditable = enabled => {
-    editorLabel.hidden = !enabled; viewer.hidden = enabled; actions.hidden = !enabled
+    editorLabel.hidden = !enabled; actions.hidden = !enabled
+    refreshViewerVisibility()
     saveAsButton.disabled = !enabled || !chooseSaveAs || draft?.saveAsAvailable !== true
     saveAsButton.title = draft?.saveAsAvailable === true ? '기존 파일은 덮어쓰지 않습니다.' : '새 파일 저장 기능을 준비 중입니다.'
     saveOriginalButton.disabled = !enabled || sourceDisconnected
@@ -1189,11 +1197,12 @@ export function createEGDeskFileView({ document, service, chooseRoot, chooseProj
       }
     }
     if (disposed || generation !== treeGeneration || activeProject?.projectId !== projectId || checking) return
-    const receipt = { projectId, rootId, cwd: activeRoot?.displayPath || null, revision: projectRevision, bufferRevision: draft?.bufferRevision ?? null, stale: false }
+    const receipt = { projectId, rootId, projectTitle: activeProject.title || activeRoot?.name || projectId,
+      cwd: activeRoot?.displayPath || null, revision: projectRevision, bufferRevision: draft?.bufferRevision ?? null, stale: false }
     checkReceipt = receipt
     checking = true; refreshProjectCheck()
     checkPanel.replaceChildren(el('h3', 'egdesk-file-check-heading', `검사 중 · ${script.name}`))
-    checkPanel.hidden = false
+    showCheckPanel()
     checkPanel.setAttribute('aria-busy', 'true')
     announce(`검사를 시작했습니다 · ${script.name}`)
     let result
@@ -1221,30 +1230,50 @@ export function createEGDeskFileView({ document, service, chooseRoot, chooseProj
       list.append(choice)
     }
     checkPanel.append(list)
-    checkPanel.hidden = false
+    showCheckPanel()
     announce('실행할 명령을 고르세요.')
   }
 
   async function renderCheckResult(result, script, receipt) {
     const runResult = result && (Object.hasOwn(result, 'output') || Object.hasOwn(result, 'exitCode')) ? await part('runResult') : null
     if (disposed || checkReceipt !== receipt) return
-    const context = el('p', 'egdesk-file-check-context', `실행 폴더 · ${receipt.cwd || '확인되지 않음'}${receipt.bufferRevision == null ? '' : ` · 작업사본 버전 ${receipt.bufferRevision}`}`)
+    // Keep the original run's identity, not the currently selected project.
+    // Native details makes the full path available by keyboard/click without
+    // putting several path lines ahead of the actual outcome on a narrow Card.
+    const context = el('details', 'egdesk-file-check-context')
+    context.setAttribute('data-testid', 'file-check-location-details')
+    const locationToggle = el('summary', 'egdesk-file-check-context-summary')
+    locationToggle.setAttribute('data-testid', 'file-check-location-toggle')
+    layout(locationToggle, 'white-space: nowrap; cursor: pointer;')
+    const locationLabel = el('span', 'egdesk-file-check-context-label', `실행 위치 · ${receipt.projectTitle}`)
+    layout(locationLabel, 'display: inline-block; max-width: calc(100% - 1.5em); vertical-align: bottom; overflow: hidden; text-overflow: ellipsis; white-space: nowrap;')
+    locationToggle.append(locationLabel)
+    const projectLabel = el('p', 'egdesk-file-check-project-name', `프로젝트 · ${receipt.projectTitle}`)
+    const fullPath = el('p', 'egdesk-file-check-cwd', `실행 폴더 · ${receipt.cwd || '확인되지 않음'}`)
+    fullPath.setAttribute('data-testid', 'file-check-cwd')
+    context.append(locationToggle, projectLabel, fullPath)
+    if (receipt.bufferRevision != null) context.append(el('p', 'egdesk-file-check-buffer-revision', `작업사본 버전 ${receipt.bufferRevision}`))
     if (runResult) {
       const summary = runResult.summarizeRunResult({ command: result.command || script.command, exitCode: result.exitCode, status: result.status, durationMs: result.durationMs, output: result.output ?? '', cwd: receipt.cwd, projectRoot: receipt.cwd })
       const card = runResult.renderRunResultCard({ document, result: summary, onOpenLocation: location => act(() => {
         if (activeRoot?.rootId !== receipt.rootId || activeProject?.projectId !== receipt.projectId) { announce('이 결과를 실행한 프로젝트를 먼저 열어 주세요.'); return }
         return openAt(location)
       }) })
-      checkPanel.replaceChildren(el('h3', 'egdesk-file-check-heading', `검사 결과 · ${script.name}`), context, card)
+      const meta = card.querySelector('.egdesk-run-result-meta')
+      const contents = [...card.children]
+      const metaIndex = contents.indexOf(meta)
+      contents.splice(metaIndex < 0 ? contents.length : metaIndex, 0, context)
+      card.replaceChildren(...contents)
+      checkPanel.replaceChildren(el('h3', 'egdesk-file-check-heading', `검사 결과 · ${script.name}`), card)
       layoutCheckResult()
-      checkPanel.hidden = false
+      showCheckPanel()
       refreshCheckStale()
       announce(`검사 결과 · ${summary.headline}`)
       return
     }
-    checkPanel.replaceChildren(el('h3', 'egdesk-file-check-heading', `검사 결과 · ${script.name}`), context, el('pre', 'egdesk-file-check-body', result?.summary || '검사 결과를 확인할 수 없습니다.'))
+    checkPanel.replaceChildren(el('h3', 'egdesk-file-check-heading', `검사 결과 · ${script.name}`), el('pre', 'egdesk-file-check-body', result?.summary || '검사 결과를 확인할 수 없습니다.'), context)
     layoutCheckResult()
-    checkPanel.hidden = false
+    showCheckPanel()
     refreshCheckStale()
     announce(`검사 결과 · ${script.name}`)
   }
@@ -1253,7 +1282,7 @@ export function createEGDeskFileView({ document, service, chooseRoot, chooseProj
     // Shared RunResult classes are styled once by the surface stylesheet.
     // Only File's own context/fallback and native keyboard scrolling live here.
     for (const node of checkPanel.querySelectorAll('.egdesk-file-check-context')) {
-      layout(node, 'min-width: 0; max-width: 100%; overflow-wrap: anywhere;')
+      layout(node, 'min-width: 0; max-width: 100%; margin: 8px 0; overflow-wrap: anywhere;')
     }
     for (const node of checkPanel.querySelectorAll('.egdesk-file-check-body')) {
       layout(node, 'display: block; width: 100%; min-width: 0; max-width: 100%; max-height: 18rem; box-sizing: border-box; overflow: auto; white-space: pre; overflow-wrap: normal; word-break: normal; font-family: ui-monospace, monospace;')
@@ -1276,7 +1305,7 @@ export function createEGDeskFileView({ document, service, chooseRoot, chooseProj
     if (!present(generation) || draft?.id !== targetDraftId) return
     checkPanel.replaceChildren(el('h3', 'egdesk-file-check-heading', '검사 결과'), el('pre', 'egdesk-file-check-body', checked?.summary || '검사 결과를 확인할 수 없습니다.'))
     layoutCheckResult()
-    checkPanel.hidden = false
+    showCheckPanel()
     announce(`검사 결과 · 작업사본 ${targetRevision}${draft.bufferRevision !== targetRevision ? ' · 이후 변경 있음' : ''}`)
   }
 

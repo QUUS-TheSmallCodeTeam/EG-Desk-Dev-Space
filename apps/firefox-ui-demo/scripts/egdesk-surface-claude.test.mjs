@@ -112,11 +112,11 @@ function surface({ run = null, thread = {}, auth = {}, fetchJson = async () => (
     engines: [{ id: 'codex', status: 'ready' }, claudeRow()],
     authStatus: { isLoggedIn: true, accountId: 'test-account', ...auth }, connected: true, liveRevision: 0,
   } };
-  const effects = { emits: 0, capture: [], requests: [], ready: 0, timers: 0, synced: [], logs: [], revoked: [] };
+  const effects = { emits: 0, capture: [], requests: [], projectRequests: [], ready: 0, timers: 0, synced: [], logs: [], revoked: [] };
   const epochScope = ChatState.createChatEpochScope();
   const userInputDrafts = new Map();
   const globals = { ChatState, ChatRunResult, ChatChangeReview, InputContext, document, state, protocol, userInputDrafts, epochScope,
-    window: { AbortController }, queueMicrotask,
+    window: { AbortController, setTimeout: () => 1, clearTimeout() {} }, queueMicrotask,
     captureChatInputs, captureManagedFileInput, boardNotice: text => effects.logs.push(text),
     SELF_MEMBER: 'self', cloneJson: clone, formatMessageTime: String, contextBoardTitle: () => '',
     openChatFileReference: () => assert.fail('unexpected file open'), currentViewportAgendaLabel: () => '',
@@ -132,10 +132,18 @@ function surface({ run = null, thread = {}, auth = {}, fetchJson = async () => (
     revokeBrowserToolRunImmediately: (run, item) => effects.revoked.push([run.runId, item.id]),
     setTimeout: () => { effects.timers++; assert.fail('automatic timer'); }, setInterval: () => assert.fail('automatic timer'),
     console: Object.fromEntries(['log', 'warn', 'error', 'debug', 'info'].map(name => [name, (...values) => effects.logs.push(values)])),
-    fetchJson: async (path, options) => { effects.requests.push({ path, body: options?.body ? JSON.parse(options.body) : null }); return fetchJson(path, options); },
+    fetchJson: async (path, options) => {
+      if (path === '/v1/files/projects/room-default') {
+        const body = JSON.parse(options.body); effects.projectRequests.push({ path, body });
+        return { ok: true, result: { roomId: body.roomId, inheritance: null, override: null, project: null, source: null, status: 'none' } };
+      }
+      effects.requests.push({ path, body: options?.body ? JSON.parse(options.body) : null }); return fetchJson(path, options);
+    },
     refreshing: new Map(), resumedNativeBindings: new Set(),
   };
   const definitions = ['el', 'getCodexThreadById', 'getActiveCodexThread', 'getCodexThreadDraft', 'createCodexMessage',
+    'chatRequestProjectSelection', 'chatRoomProjectState', 'chatRoomProjectSendBlock',
+    'createChatProjectScope', 'normalizeChatRoomProjectDefault', 'chatRoomProjectTargetsMatch',
     'codexRuns', 'codexRunLabel', 'codexUserInputBlock', 'pruneUserInputDrafts', 'contextResolverRecordSection',
     'codexSubAgentSection', 'codexActivityDetailTarget', 'codexCommandInfo', 'createCodexActivityReadScope',
     'replaceCodexActivityDetails', 'createCodexActivityDetailsView', 'renderCodexActivityPanel', 'serializeDeskSnapshot', 'codexMessageAvatarFace',
@@ -148,9 +156,9 @@ function surface({ run = null, thread = {}, auth = {}, fetchJson = async () => (
     ${nativeReady ? functionSource('ensureNativeReadyForSend', '    ') : ''}
     let activityPanelComposing = false, activityPanelDeferred = false, activityDetailsGeneration = 0, activityDetailsView = null;
     ${source.match(/^  const userInputDraftKey = .*;$/m)[0]}
-    const bridge = { ${['createActivityReadScope', 'replyApproval', 'replyUserInput', 'sendMessage', 'captureInputs', 'readInput', 'setThreadEngine', 'interrupt'].map(methodSource).join(',\n')} };
+    const bridge = { ${['createActivityReadScope', 'createProjectScope', 'readRoomProjectDefault', 'prepareRoomProjectSend', 'replyApproval', 'replyUserInput', 'sendMessage', 'captureInputs', 'readInput', 'setThreadEngine', 'interrupt'].map(methodSource).join(',\n')} };
     return { ...bridge, render: renderCodexActivityPanel, question: codexUserInputBlock, serialize: serializeDeskSnapshot,
-      refresh: refreshConversation, workingRow: codexAgentWorkingRow, el };`, globals);
+      refresh: refreshConversation, workingRow: codexAgentWorkingRow, projectBlock: chatRoomProjectSendBlock, el };`, globals);
   state.codexBridge = { ...api, refreshConversation: () => {} };
   return { ...api, state, protocol, effects, epochScope, drafts: userInputDrafts, document, root,
     thread: () => state.codex.threads[0], panel: () => document.getElementById('egd-codex-activity-panel') };
@@ -160,6 +168,7 @@ function composer(ui) {
   const block = between("            const input = el('textarea', {", "            input.addEventListener('input'");
   const controls = compile(`${functionSource('getCodexThreadDraft')}\n${block}\nreturn {input, sendButton, resizeComposer};`, {
     el: ui.el, ChatState, activeThread: ui.thread(), codex: ui.state.codex, codexBridge: ui,
+    chatRoomProjectSendBlock: ui.projectBlock,
     compositionInProgress: false,
   });
   controls.resizeComposer();
@@ -1736,4 +1745,21 @@ test('runtime Claude Context HTTP409 precedes native dispatch; empty Context sta
   assert.deepEqual(h.codexCalls, []);
   await h.chat.send({ clientThreadId: 'plain-ui', requestId: 'plain', engineId: 'claude', message: 'plain', contextSnapshotIds: [] });
   assert.equal(h.transports.length, 2); assert.equal(h.transports[1].sent.length, 1);
+});
+
+test('D-X3 Claude cwd refusal preserves the original draft and explicit target without silently forking', async t => {
+  for (const code of ['CWD_CHANGE_UNSUPPORTED', 'NATIVE_CWD_UNVERIFIED']) await t.test(code, async () => {
+    const target = { boardId: 'board', projectId: 'project', rootId: 'root', title: 'Selected', displayPath: '/reviewed/folder' };
+    const ui = surface({ thread: { conversationId: 'native-original', requestProjectTarget: target }, fetchJson: async path => {
+      assert.equal(path, '/chat/send');
+      throw Object.assign(new Error('original cwd'), { code, status: 409, accepted: false, dispatchStatus: 'not-dispatched' });
+    } });
+    await ui.sendMessage();
+    assert.equal(ui.effects.requests.length, 1);
+    assert.equal(ui.state.codex.threads.length, 1);
+    assert.equal(ui.thread().conversationId, 'native-original');
+    assert.equal(ui.state.codex.threadDrafts.ui, '  keep my draft  ');
+    assert.deepEqual(ui.thread().requestProjectTarget, target);
+    assert.match(ui.thread().sendError, /시작 폴더.*새 대화 열기.*기존 초안과 선택은 유지/);
+  });
 });

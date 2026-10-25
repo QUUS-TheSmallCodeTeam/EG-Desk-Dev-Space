@@ -6408,6 +6408,32 @@
   white-space: normal;
   overflow-wrap: anywhere;
 }
+#egd-codex-input-panel.egd-chat-project-panel > .egd-chat-project-body {
+  flex: 1 1 auto;
+  min-height: 0;
+  overflow-y: auto;
+  scrollbar-gutter: stable;
+}
+#egd-codex-input-panel.egd-chat-project-panel > .egd-chat-project-footer {
+  box-sizing: border-box;
+  flex: 0 0 auto;
+  flex-direction: column;
+  align-items: stretch;
+  gap: 4px;
+  min-width: 0;
+  max-width: 100%;
+  padding: 8px 16px;
+}
+.egd-chat-project-action-row { display: flex; align-items: center; justify-content: space-between; gap: 8px; min-width: 0; }
+.egd-chat-project-action-row > strong { min-width: 0; overflow-wrap: anywhere; }
+.egd-chat-project-action-buttons { display: flex; flex: 0 0 auto; gap: 6px; }
+.egd-chat-project-scroll-hint { margin: 0; color: var(--egd-on-surface-variant); font-size: 12px; overflow-wrap: anywhere; }
+#egd-codex-input-panel.egd-chat-project-panel .egd-chat-project-repeat-title { display: block; min-width: 0; max-width: 100%; white-space: normal; overflow-wrap: anywhere; }
+.egd-chat-room-project { min-width: 0; max-width: 100%; margin-bottom: 12px; padding-bottom: 12px; border-bottom: 1px solid var(--egd-outline-variant); }
+.egd-chat-room-project-editor { box-sizing: border-box; width: 100%; min-width: 0; max-width: 100%; margin: 10px 0 0; padding: 10px; border: 1px solid var(--egd-outline-variant); border-radius: 7px; }
+.egd-chat-room-project-editor > legend { max-width: 100%; padding-inline: 4px; overflow-wrap: anywhere; }
+.egd-chat-room-project-actions { display: flex; flex-wrap: wrap; gap: 6px; margin-top: 10px; }
+.egd-chat-room-project-note { color: var(--egd-on-surface-variant); overflow-wrap: anywhere; }
 
 /* Diagnostics remain available, with a bounded, readable detail area. */
 .egd-codex-diagnostics-shell { flex-shrink: 0; gap: 6px; margin: 0 16px 10px; padding-top: 0; }
