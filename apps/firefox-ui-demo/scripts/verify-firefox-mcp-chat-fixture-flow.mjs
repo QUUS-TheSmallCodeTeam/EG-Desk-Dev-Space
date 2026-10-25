@@ -2,10 +2,11 @@
 // Real rendered UI driven by an explicitly selected test HTTP/SSE transport.
 // Main owns both fixture-server and Firefox startup/shutdown.
 import { createHmac, randomUUID } from 'node:crypto';
+import assert from 'node:assert/strict';
 import { assertFreshAccountRoom, assertOrdinarySend, assertPlainRenderedMessage, assertQaFixtureArtifact } from './egdesk-chat-qa-contract.sys.mjs';
 import { assertQaFixtureManifest } from './egdesk-chat-qa-profile.mjs';
 import { attributeSelector, chatIdentity, chrome, loopbackJson, newQaThread, openChat,
-  replaceComposerText, runUiFlow, selectQaThread, sendFromComposer, visible, waitUntil } from './egdesk-qa-ui-flow.mjs';
+  replaceComposerText, replaceFieldText, runUiFlow, sendFromComposer, visible, waitUntil } from './egdesk-qa-ui-flow.mjs';
 
 const token = process.env.EGDESK_QA_FIXTURE_TOKEN || '';
 if (process.env.EGDESK_QA_FIXTURE_TRANSPORT !== '1' || token.length < 16) {
@@ -81,6 +82,84 @@ async function returnFromArtifactRoomToHome(harness, result, threadId) {
   trace.clicked = true;
   trace.after = await waitUntil(() => observe('.egd-codex-thread-home-new'), createChatNavigationReadiness(),
     { timeoutMs: 10000, intervalMs: 120 });
+}
+
+// Local to this verifier: long room lists need the existing native search,
+// not a click at an offscreen row's stale coordinates. Common helpers stay put.
+function qaThreadSelectionCandidate(thread, observed) {
+  const model = observed.threads.filter(item => item.title === thread.title);
+  assert.ok(model.length === 1 && model[0].id === thread.id, 'Requested room label is not unique for its local ID');
+  if (observed.searchCount !== 1 || observed.searchValue !== thread.title || observed.query !== thread.title) return null;
+  return observed.rows.find(row => row.title === thread.title && row.focusKey === `room-${thread.id}` &&
+    row.count === 1 && row.target?.visible === true && row.target.disabled === false &&
+    row.target.inside === true && row.target.clipped === false && row.target.hitCount === 9) || null;
+}
+
+function createQaThreadSelectionReadiness(thread) {
+  const stable = createChatNavigationReadiness();
+  return observed => stable(qaThreadSelectionCandidate(thread, observed));
+}
+
+async function observeQaThreadSelection(harness) {
+  return chrome(harness, () => {
+    const state = window.__egdesk.state, searches = [...document.querySelectorAll('.egd-codex-thread-search')];
+    const selectorFor = node => {
+      const root = node.closest('#egd-hud, .egd-chat-card');
+      if (!root?.id) throw new Error('Chat row has no owned surface root');
+      const parts = [];
+      for (let current = node; current !== root; current = current.parentElement) {
+        parts.unshift(`${current.localName}:nth-child(${[...current.parentElement.children].indexOf(current) + 1})`);
+      }
+      return { rootId: root.id, selector: `#${CSS.escape(root.id)} > ${parts.join(' > ')}` };
+    };
+    return { query: state.codex.threadQuery, searchCount: searches.length, searchValue: searches[0]?.value,
+      threads: state.codex.threads.map(item => ({ id: item.id, title: item.title })),
+      rows: [...document.querySelectorAll('.egd-codex-thread-item')].map(node => {
+        const { selector, rootId } = selectorFor(node), r = node.getBoundingClientRect(), style = getComputedStyle(node);
+        let clipped = false, hitCount = 0;
+        for (let parent = node.parentElement; parent; parent = parent.parentElement) {
+          const css = getComputedStyle(parent), box = parent.getBoundingClientRect();
+          if (/(auto|scroll|hidden|clip)/.test(css.overflowX) && (r.left < box.left || r.right > box.right) ||
+              /(auto|scroll|hidden|clip)/.test(css.overflowY) && (r.top < box.top || r.bottom > box.bottom)) clipped = true;
+        }
+        for (const y of [0.2, 0.5, 0.8]) for (const x of [0.2, 0.5, 0.8]) {
+          const hit = document.elementFromPoint(r.left + r.width * x, r.top + r.height * y);
+          if (hit && (hit === node || node.contains(hit))) hitCount++;
+        }
+        return { selector, rootId, count: document.querySelectorAll(selector).length,
+          threadId: state.codex.activeThreadId, title: node.querySelector('.egd-codex-thread-title')?.textContent?.trim() || '',
+          focusKey: node.dataset.focusKey,
+          target: { visible: !node.closest('[hidden],[inert],[aria-hidden="true"],.egd-hud-hidden') &&
+            style.display !== 'none' && style.visibility !== 'hidden' && Number(style.opacity) > 0 && r.width > 0 && r.height > 0,
+            disabled: !!node.disabled || node.getAttribute('aria-disabled') === 'true', clipped, hitCount,
+            inside: r.left >= 0 && r.top >= 0 && r.right <= innerWidth && r.bottom <= innerHeight,
+            rect: { left: r.left, top: r.top, right: r.right, bottom: r.bottom } },
+          camera: { x: state.pan?.x, y: state.pan?.y, zoom: state.zoom,
+            targetX: state.panTarget?.x, targetY: state.panTarget?.y, targetZoom: state.zoomTarget } };
+      }) };
+  });
+}
+
+async function selectQaThread(harness, thread) {
+  assert.ok(typeof thread?.id === 'string' && thread.id && typeof thread.title === 'string' && thread.title.trim(), 'Exact QA room ID and title required');
+  await openChat(harness);
+  const back = '.egd-codex-conversation-back', search = '.egd-codex-thread-search';
+  if ((await harness.inspect(back)).some(node => node.visible)) {
+    await waitUntil(() => observeChatNavigation(harness, back), createChatNavigationReadiness(), { timeoutMs: 10000, intervalMs: 120 });
+    await harness.click(back);
+  }
+  await waitUntil(() => observeChatNavigation(harness, search), createChatNavigationReadiness(), { timeoutMs: 10000, intervalMs: 120 });
+  // Native focus/select-all/type emits the actual input event and lets the
+  // product filter/re-render. No threadQuery/value/scroll/DOM writes here.
+  await replaceFieldText(harness, search, thread.title);
+  const ready = createQaThreadSelectionReadiness(thread);
+  const observed = await waitUntil(() => observeQaThreadSelection(harness), ready, { timeoutMs: 10000, intervalMs: 120 });
+  const row = qaThreadSelectionCandidate(thread, observed);
+  const fresh = await observeQaThreadSelection(harness), current = qaThreadSelectionCandidate(thread, fresh);
+  assert.ok(ready(fresh) && current?.selector === row.selector, 'Requested room changed or became clipped before its native click');
+  await harness.click(current.selector);
+  await visible(harness, '[data-testid="chat-composer"]');
+  assert.equal((await chatIdentity(harness)).threadId, thread.id, 'UI selected a different Chat thread');
 }
 
 async function messages(harness) {
