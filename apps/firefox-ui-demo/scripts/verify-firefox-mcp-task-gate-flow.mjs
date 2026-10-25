@@ -356,7 +356,7 @@ export async function runTaskGateFlow({ harness, result, check, capture, defer }
     await control('replay'); await waitState(value => value.frames.some(frame => frame.type === 'task.native')); await control('refresh');
     await waitState(value => reads(value) > before);
   };
-  const evidence = { nativeInputs: true, domInjection: false, noPosts: [], limitPaint: [] };
+  const evidence = { nativeInputs: true, domInjection: false, noPosts: [], limitPaint: [], captures: [] };
   const readableLimit = async (identity, raw) => {
     const painted = await readTaskGateLimit(harness, identity, deadlineMs), current = await read(identity);
     assertTaskGateLimitPaint(painted.proof, current, identity, raw);
@@ -405,6 +405,11 @@ export async function runTaskGateFlow({ harness, result, check, capture, defer }
   assert.equal((await read(choice)).choice, null, 'cancel clears only the local choice');
   await choose('kakao');
   const selectedChoice = await read(choice);
+  // This is the existing initial question, not a changed-choice scenario.
+  // Preserve the full question/options and selected value beside the image;
+  // its readability still requires Main's visual review.
+  evidence.captures.push({ stage: 'initial-choice-before-continue', identity: choice, ui: selectedChoice,
+    screenshot: await capture('task-gate-initial-choice-before-continue'), visualReview: 'pending' });
   const choiceBefore = await state(); await control('hold-next'); await click(field(choice, 'continue'));
   const whileHeld = await waitState(value => value.held !== null), busy = await read(choice);
   assert.equal(busy.continueDisabled, true);
@@ -447,6 +452,10 @@ export async function runTaskGateFlow({ harness, result, check, capture, defer }
   evidence.rejected = { identity: text, before: rejectedBefore, after: rejectedAfter, typed, ui: rejectedUi, refreshed };
   assertDraftRetained(rejectedUi, refreshed, { notice: true });
   check('Same-question private-answer rejection and refresh retain draft and explanation', true);
+  // Capture the preserved failed answer/error and existing Continue action
+  // before the fixture changes the question or any text is replaced.
+  evidence.captures.push({ stage: 'same-question-text-failure', identity: text, ui: refreshed,
+    screenshot: await capture('task-gate-same-question-text-failure'), visualReview: 'pending' });
   // Change identity while an actual failed draft and notice are still present,
   // not after a successful answer has already cleared them.
   evidence.previousQuestion = await read(text);

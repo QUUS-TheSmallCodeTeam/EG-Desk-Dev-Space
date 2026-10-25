@@ -387,6 +387,101 @@ test('CLI/environment/deadline refusals happen before any harness or UI action',
   await assert.rejects(runTaskGateFlow({}, { profile: '/not-a-profile', deadlineMs: Date.now() + 10000, env: {} }));
 });
 
+// Execute the actual checkpoint callsites with unit-only capture/input doubles.
+// No screenshot, browser, fixture transport or provider is started here.
+function runCaptureSection(start, end, context) {
+  const source = fs.readFileSync(new URL('./verify-firefox-mcp-task-gate-flow.mjs', import.meta.url), 'utf8');
+  const from = source.indexOf(start), to = source.indexOf(end, from);
+  assert.ok(from >= 0 && to > from, 'actual flow checkpoint boundaries exist');
+  return vm.runInNewContext(`(async () => {\n${source.slice(from, to)}\n})()`, context);
+}
+
+test('initial-choice screenshot precedes the existing hold and only Continue, retaining its stage, receipt and original question', async () => {
+  const proof = evidence().choice, trace = [], captured = { captures: [] };
+  const screenshot = { path: '/owned/unit-only/task-gate-initial-choice-before-continue.png', method: 'unit-double' };
+  await runCaptureSection("  await choose('kakao');", '  const whileHeld =', {
+    choice: proof.identity, evidence: captured,
+    choose: async id => trace.push(['choose', id]), read: async () => { trace.push(['read']); return proof.ui; },
+    capture: async stage => { trace.push(['capture', stage]); return screenshot; },
+    state: async () => { trace.push(['state']); return proof.before; },
+    control: async action => trace.push(['control', action]), field: (_identity, name) => name,
+    click: async selector => trace.push(['click', selector]),
+  });
+  assert.deepEqual(trace, [['choose', 'kakao'], ['read'], ['capture', 'task-gate-initial-choice-before-continue'],
+    ['state'], ['control', 'hold-next'], ['click', 'continue']]);
+  assert.equal(captured.captures.length, 1);
+  const checkpoint = captured.captures[0];
+  assert.equal(checkpoint.stage, 'initial-choice-before-continue');
+  assert.equal(checkpoint.identity, proof.identity); assert.equal(checkpoint.ui, proof.ui);
+  assert.equal(checkpoint.identity.label, proof.ui.question);
+  assert.deepEqual(checkpoint.identity.response.options.map(option => option.id), ['email', 'kakao']);
+  assert.equal(checkpoint.ui.choice, 'kakao'); assert.equal(checkpoint.ui.continueDisabled, false);
+  assert.equal(checkpoint.screenshot, screenshot); assert.equal(checkpoint.screenshot.path, screenshot.path);
+  assert.equal(checkpoint.visualReview, 'pending', 'unit receipt is not actual UI or visual approval');
+});
+
+test('failed intermediate choice capture stops before hold/Continue with no retry or false checkpoint', async () => {
+  const proof = evidence().choice, captured = { captures: [] }; let captures = 0;
+  await assert.rejects(runCaptureSection("  await choose('kakao');", '  const whileHeld =', {
+    choice: proof.identity, evidence: captured, choose: async () => {}, read: async () => proof.ui,
+    capture: async () => { captures++; throw new Error('capture failed'); },
+    state: () => assert.fail('no later state read'), control: () => assert.fail('no hold'),
+    field: () => assert.fail('no Continue target'), click: () => assert.fail('no Continue'),
+  }), /capture failed/);
+  assert.equal(captures, 1); assert.deepEqual(captured.captures, []);
+});
+
+test('same-question failure screenshot follows required retained-draft/error assertions and exposes the retry state', async () => {
+  const proof = evidence().rejected, trace = [], captured = { captures: [] };
+  const screenshot = { path: '/owned/unit-only/task-gate-same-question-text-failure.png', method: 'unit-double' };
+  const context = {
+    text: proof.identity, evidence: captured, rejectedBefore: proof.before, rejectedAfter: proof.after,
+    typed: proof.typed, rejectedUi: proof.ui, refreshed: proof.refreshed,
+    assertDraftRetained: (...args) => { trace.push('assert-retained'); return assertDraftRetained(...args); },
+    check: (label, passed) => { trace.push('check'); assert.equal(passed, true); assert.match(label, /retain draft and explanation/); },
+    capture: async stage => { trace.push(stage); return screenshot; },
+  };
+  await runCaptureSection('  evidence.rejected =', '  // Change identity while', context);
+  assert.deepEqual(trace, ['assert-retained', 'check', 'task-gate-same-question-text-failure']);
+  const checkpoint = captured.captures[0];
+  assert.equal(checkpoint.stage, 'same-question-text-failure'); assert.equal(checkpoint.identity, proof.identity);
+  assert.equal(checkpoint.ui, proof.refreshed); assert.equal(checkpoint.ui.value, proof.typed.value);
+  assert.ok(checkpoint.ui.notice); assert.equal(checkpoint.ui.continueDisabled, false);
+  assert.equal(checkpoint.screenshot, screenshot); assert.equal(checkpoint.visualReview, 'pending');
+  for (const patch of [{ value: '' }, { notice: '' }, { responseKey: 'other-question' }, { threadId: 'other-room' }]) {
+    trace.length = 0;
+    const invalid = { ...context, evidence: { captures: [] }, refreshed: { ...proof.refreshed, ...patch } };
+    await assert.rejects(runCaptureSection('  evidence.rejected =', '  // Change identity while', invalid));
+    assert.deepEqual(trace, ['assert-retained'], 'lost answer/error/identity cannot be captured as the preserved failure');
+    assert.deepEqual(invalid.evidence.captures, []);
+  }
+});
+
+test('intermediate captures retain all existing flow assertions and the final capture in their original order', () => {
+  const source = fs.readFileSync(new URL('./verify-firefox-mcp-task-gate-flow.mjs', import.meta.url), 'utf8');
+  assert.deepEqual([...source.matchAll(/await capture\('([^']+)'\)/g)].map(match => match[1]), [
+    'task-gate-initial-choice-before-continue', 'task-gate-same-question-text-failure', 'task-gate-answer-flow',
+  ]);
+  let previous = -1;
+  for (const required of [
+    'assertQuestionIdentity(initialChoice, choice, local.id);',
+    "await capture('task-gate-initial-choice-before-continue')",
+    "await control('hold-next'); await click(field(choice, 'continue'));",
+    'assertOneAnswer(choiceBefore, choiceAfter, choice);',
+    'assertDraftRetained(rejectedUi, refreshed, { notice: true });',
+    "await capture('task-gate-same-question-text-failure')",
+    "await control('next-question');",
+    'assertNewQuestionCleared(evidence.previousQuestion, emptyNext);',
+    'assertOneAnswer(textBefore, textAfter, text);',
+    'assertTaskGateStaleReconciled(evidence.stale, local.id);',
+    'assertTaskGateEvidence(evidence);',
+    "await capture('task-gate-answer-flow');",
+  ]) {
+    const at = source.indexOf(required, previous + 1);
+    assert.ok(at > previous, `required assertion/stage remains ordered: ${required}`); previous = at;
+  }
+});
+
 test('verifier delegates only native input and fixture controls, never directly POSTs a user task answer or fabricates DOM state', () => {
   const source = fs.readFileSync(new URL('./verify-firefox-mcp-task-gate-flow.mjs', import.meta.url), 'utf8');
   assert.match(source, /runUiFlow\('firefox-mcp-task-gate-flow'/);
