@@ -1373,11 +1373,11 @@ test('an action whose outcome is unknown after approval still locks the Card (EG
 // REA 웹9: shared document-ready wait and the single AbortError retry.
 const observeSource = between('    // REA 웹9: one shared wait per Card for a current, ready document.',
   '    const browserToolAct = async (expected, action, guard, lease) => {')
-function observeFixture() {
+function observeFixture({ now = Date.now, scheduler = { setTimeout, clearTimeout } } = {}) {
   const timers = new Set()
   const win = {
-    setTimeout(fn, ms) { const id = setTimeout(() => { timers.delete(id); fn() }, ms); timers.add(id); return id },
-    clearTimeout(id) { timers.delete(id); clearTimeout(id) },
+    setTimeout(fn, ms) { const id = scheduler.setTimeout(() => { timers.delete(id); fn() }, ms); timers.add(id); return id },
+    clearTimeout(id) { timers.delete(id); scheduler.clearTimeout(id) },
   }
   const windowGlobal = id => ({ innerWindowId: id, isClosed: false, isCurrentGlobal: true, getActor() { return {} } })
   const context = { currentWindowGlobal: windowGlobal(1) }
@@ -1388,13 +1388,13 @@ function observeFixture() {
   const requests = []
   let actor = async () => ({ documentId: 'doc-a' })
   const api = new Function('xulBrowser', 'card', 'browserState', 'window', 'BROWSER_TOOL_REPLY_MARGIN_MS',
-    'assertBrowserToolBinding', 'showAgentActivity', 'browserAgentActorRequest',
+    'assertBrowserToolBinding', 'showAgentActivity', 'browserAgentActorRequest', 'Date',
     `${observeSource}\nreturn { whenToolWindowGlobalReady, browserToolObserve, disposeToolWindowGlobalWaits,
       diagnostic: () => lastToolObserve }`)(
     xulBrowser, card, browserState, win, 500,
     () => { if (!xulBrowser.browsingContext?.currentWindowGlobal) throw new Error('Selected Browser Card is unavailable') },
     message => activity.push(message),
-    async (method, payload) => { requests.push({ method, payload, innerWindowId: context.currentWindowGlobal?.innerWindowId }); return actor(payload) })
+    async (method, payload) => { requests.push({ method, payload, innerWindowId: context.currentWindowGlobal?.innerWindowId }); return actor(payload) }, { now })
   return { ...api, context, xulBrowser, card, browserState, windowGlobal, timers, activity, requests,
     setActor(fn) { actor = fn } }
 }
@@ -1443,35 +1443,66 @@ test('a second AbortError, any other failure, or a spent deadline is not retried
   assert.equal(o.requests.length, 1)
 })
 
-test('a retried wait gets only the rest of its own timeout and reports the whole elapsed time', async () => {
-  const o = observeFixture()
-  const waits = []
-  o.setActor(async payload => {
-    waits.push(payload.options.wait)
-    if (waits.length === 1) {
-      await later(80)
-      o.context.currentWindowGlobal = o.windowGlobal(2)
-      throw abortError()
+test('a retried wait gets only the rest of its own timeout and reports the whole elapsed time', async t => {
+  // A real setTimeout(80) is not proof that Date.now() advanced by >= 80.
+  // Exercise the unchanged production source against one local clock/timer
+  // boundary; exact measured costs replace scheduling-dependent tolerances.
+  const cases = [
+    { name: '79 measured ms leaves exactly 2921 ms', spentMs: 79, timeoutMs: 3000, deadlineInMs: 10000, remainingMs: 2921, elapsedMs: 84 },
+    { name: '80 measured ms leaves exactly 2920 ms', spentMs: 80, timeoutMs: 3000, deadlineInMs: 10000, remainingMs: 2920, elapsedMs: 85 },
+    { name: 'request deadline minus its reply margin caps the retry at 1420 ms', spentMs: 80, timeoutMs: 9000, deadlineInMs: 2000, remainingMs: 1420, elapsedMs: 85 },
+  ]
+  for (const row of cases) await t.test(row.name, async () => {
+    let clockMs = 10000, sequence = 0
+    const pending = new Map()
+    const now = () => clockMs
+    const scheduler = {
+      setTimeout(fn, ms) { const id = ++sequence; pending.set(id, { fn, at: clockMs + ms }); return id },
+      clearTimeout(id) { pending.delete(id) },
     }
-    return { documentId: 'doc-b', readyState: 'complete', wait: { for: 'load', outcome: 'met', elapsedMs: 5 } }
+    const delay = ms => new Promise(resolve => scheduler.setTimeout(resolve, ms))
+    const tick = ms => {
+      const until = clockMs + ms
+      for (;;) {
+        const next = [...pending].filter(([, timer]) => timer.at <= until).sort((a, b) => a[1].at - b[1].at)[0]
+        if (!next) break
+        const [id, timer] = next
+        pending.delete(id); clockMs = timer.at; timer.fn()
+      }
+      clockMs = until
+    }
+    const o = observeFixture({ now, scheduler }), firstStarted = Promise.withResolvers(), retryStarted = Promise.withResolvers()
+    const waits = [], retryElapsedMs = 5, startedAt = now()
+    o.setActor(async payload => {
+      waits.push(payload.options.wait)
+      if (waits.length === 1) {
+        firstStarted.resolve()
+        await delay(row.spentMs)
+        o.context.currentWindowGlobal = o.windowGlobal(2)
+        throw abortError()
+      }
+      retryStarted.resolve()
+      await delay(retryElapsedMs)
+      return { documentId: 'doc-b', readyState: 'complete', wait: { for: 'load', outcome: 'met', elapsedMs: retryElapsedMs } }
+    })
+    const wait = { for: 'load', timeoutMs: row.timeoutMs, notDocumentId: 'doc-a' }
+    const observing = o.browserToolObserve({}, { wait }, { deadlineMs: startedAt + row.deadlineInMs })
+    await firstStarted.promise
+    assert.equal(waits.length, 1)
+    assert.deepEqual(waits[0], wait)
+    tick(row.spentMs)
+    await retryStarted.promise
+    assert.deepEqual(waits[1], { ...wait, timeoutMs: row.remainingMs }, 'only the measured remaining budget is sent')
+    assert.notEqual(waits[1], wait, 'retry options are a separate object')
+    tick(retryElapsedMs)
+    const snapshot = await observing
+    assert.equal(snapshot.wait.elapsedMs, row.elapsedMs, 'elapsed includes the first attempt exactly once')
+    assert.deepEqual(o.diagnostic(), { attempts: 2, abortRetried: true, innerWindowIds: [1, 2],
+      waitOffsetMs: row.spentMs, sampledAtMs: startedAt + row.elapsedMs })
+    assert.deepEqual(wait, { for: 'load', timeoutMs: row.timeoutMs, notDocumentId: 'doc-a' }, 'caller options are not mutated')
+    assert.equal(o.requests.length, 2, 'one retry, never a new full wait')
+    assert.equal(o.timers.size, 0); assert.equal(pending.size, 0)
   })
-  const wait = { for: 'load', timeoutMs: 3000, notDocumentId: 'doc-a' }
-  const snapshot = await o.browserToolObserve({}, { wait }, { deadlineMs: Date.now() + 10000 })
-  assert.deepEqual(waits[0], wait)
-  assert.equal(waits[1].notDocumentId, 'doc-a')
-  assert.ok(waits[1].timeoutMs <= 3000 - 80 && waits[1].timeoutMs >= 2500, String(waits[1].timeoutMs))
-  assert.ok(snapshot.wait.elapsedMs >= 85, String(snapshot.wait.elapsedMs))
-  assert.equal(wait.timeoutMs, 3000, 'the caller options are not mutated')
-  // The retry never outlives the request deadline.
-  const tight = observeFixture()
-  const seen = []
-  tight.setActor(async payload => {
-    seen.push(payload.options.wait.timeoutMs)
-    if (seen.length === 1) { tight.context.currentWindowGlobal = tight.windowGlobal(3); throw abortError() }
-    return { documentId: 'doc-c', wait: { for: 'load', outcome: 'timeout', elapsedMs: 0 } }
-  })
-  await tight.browserToolObserve({}, { wait: { for: 'load', timeoutMs: 9000 } }, { deadlineMs: Date.now() + 2000 })
-  assert.ok(seen[1] <= 1500, String(seen[1]))
 })
 
 test('document-ready waiters share one poll per Card and each keeps its own deadline', async () => {
