@@ -2334,7 +2334,7 @@ const TASK_STATUS_TEXT = [['queued', '대기 중'], ['waiting-on-dependency', '�
 const TASK_WAITING_STATUSES = ['queued', 'waiting-on-dependency', 'approval-required', 'ready'];
 const TASK_DONE_STATUSES = ['completed', 'failed', 'cancelled'];
 const TASK_GATE_KEYS = ['gateId', 'kind', 'status', 'taskId', 'origin', 'pathPrefix', 'root', 'relativeGlob', 'label',
-  'satisfiedBy', 'satisfiedAt', 'expiresAt', 'expiredAt', 'requested'];
+  'satisfiedBy', 'satisfiedAt', 'expiresAt', 'expiredAt', 'requested', 'response'];
 /** Outside conditions the user may continue by hand; an upstream task or an approval never. */
 export const TASK_CONTINUE_GATE_KINDS = Object.freeze(['userAction', 'oauth', 'file', 'terminalExit']);
 export const taskRef = value => typeof value === 'string' && TASK_REF.test(value);
@@ -2356,7 +2356,11 @@ function taskGraphShape(graph) {
     if (!raw || typeof raw !== 'object' || !taskRef(raw.taskId) || tasks.some(task => task.taskId === raw.taskId)) continue;
     const gates = (Array.isArray(raw.gates) ? raw.gates : []).slice(0, 272)
       .filter(gate => gate && typeof gate === 'object' && typeof gate.gateId === 'string' && typeof gate.kind === 'string')
-      .map(gate => Object.fromEntries(TASK_GATE_KEYS.filter(key => gate[key] !== undefined).map(key => [key, gate[key]])));
+      .map(gate => Object.fromEntries(TASK_GATE_KEYS.filter(key => gate[key] !== undefined)
+        // Copy only the public question schema. Invalid descriptors keep an
+        // explicit null sentinel; dropping them would turn a question into a
+        // legacy no-answer gate. Never retain an answer or a private textRef.
+        .map(key => [key, key === 'response' ? taskGateView(gate).response : gate[key]])));
     tasks.push({ taskId: raw.taskId, status: typeof raw.status === 'string' ? raw.status : null, approvalRequested: raw.approvalRequested === true, gates });
   }
   return {
@@ -2463,6 +2467,37 @@ const originHost = origin => { try { return new URL(origin).host || null; } catc
 export function taskGateView(gate, { taskNames = {}, folderName = null, now = Date.now() } = {}) {
   const kind = gate?.kind;
   const status = ['waiting', 'satisfied', 'expired', 'rejected'].includes(gate?.status) ? gate.status : 'waiting';
+  // Mirrors the helper's public response schema, without importing a Node
+  // runtime module. Text answer length is Unicode code points, not textarea
+  // maxLength's UTF-16 units. The server remains the authority for secrets.
+  // Legacy gates omit these fields. A present but malformed response is not a
+  // legacy gate: UI and request construction both fail closed.
+  let question = {};
+  if (gate?.response !== undefined) {
+    const raw = gate.response;
+    const shape = (value, keys) => value !== null && typeof value === 'object' && !Array.isArray(value)
+      && Object.keys(value).every(key => keys.includes(key));
+    let response = null;
+    if (kind === 'userAction' && shape(raw, ['kind', 'options']) && raw.kind === 'choice'
+        && Array.isArray(raw.options) && raw.options.length >= 2 && raw.options.length <= 6
+        && raw.options.every(option => shape(option, ['id', 'label'])
+          && typeof option.id === 'string' && /^[A-Za-z0-9][A-Za-z0-9._-]{0,63}$/.test(option.id)
+          && typeof option.label === 'string' && option.label.trim().length > 0 && option.label.length <= 120
+          && !/[\u0000-\u001f\u007f]/.test(option.label))
+        && new Set(raw.options.map(option => option.id)).size === raw.options.length) {
+      response = { kind: 'choice', options: raw.options.map(option => ({ id: option.id, label: option.label })) };
+    } else if (kind === 'userAction' && shape(raw, ['kind', 'maxLength']) && raw.kind === 'text'
+        && (raw.maxLength === undefined || Number.isSafeInteger(raw.maxLength) && raw.maxLength >= 1 && raw.maxLength <= 500)) {
+      response = { kind: 'text', maxLength: raw.maxLength ?? 500 };
+    }
+    // Equality key for the UI's account/room/graph/task/gate-scoped draft.
+    // Stable across equal SSE/refresh copies; changes with the original question,
+    // option order/labels/IDs or effective text limit. Never contains an answer
+    // and is not an authority token or user-facing text.
+    question = response ? { response, responseKey: JSON.stringify([kind, typeof gate.label === 'string' ? gate.label : null, response]) }
+      : { response: null, responseKey: null, responseInvalid: true,
+        responseError: '질문 내용을 확인하지 못했습니다. 목록을 다시 불러와 주세요.' };
+  }
   let waitingText, doneText;
   if (kind === 'task') {
     const name = taskNames[gate.taskId] || '앞 작업';
@@ -2487,11 +2522,11 @@ export function taskGateView(gate, { taskNames = {}, folderName = null, now = Da
   }
   const byHand = status === 'satisfied' && gate.satisfiedBy === 'user.action' && kind !== 'userAction';
   const clock = value => { const at = taskTime(value); return at === null ? null : formatResetClock(at, now); };
-  if (status === 'satisfied') return { gateId: gate.gateId, kind, state: status, text: byHand ? `${doneText} · 직접 진행` : doneText, time: clock(gate.satisfiedAt), byHand };
-  if (status === 'rejected') return { gateId: gate.gateId, kind, state: status, text: '승인 거절됨', time: null, byHand: false };
-  if (status === 'expired') return { gateId: gate.gateId, kind, state: status, text: `${waitingText} · 시간 초과`, time: clock(gate.expiredAt), byHand: false };
+  if (status === 'satisfied') return { gateId: gate.gateId, kind, state: status, text: byHand ? `${doneText} · 직접 진행` : doneText, time: clock(gate.satisfiedAt), byHand, ...question };
+  if (status === 'rejected') return { gateId: gate.gateId, kind, state: status, text: '승인 거절됨', time: null, byHand: false, ...question };
+  if (status === 'expired') return { gateId: gate.gateId, kind, state: status, text: `${waitingText} · 시간 초과`, time: clock(gate.expiredAt), byHand: false, ...question };
   const until = clock(gate.expiresAt);
-  return { gateId: gate.gateId, kind, state: status, text: waitingText, time: until ? `${until}까지` : null, byHand: false };
+  return { gateId: gate.gateId, kind, state: status, text: waitingText, time: until ? `${until}까지` : null, byHand: false, ...question };
 }
 
 /** The '계속' fallback: an outside condition still waiting (or run out) in a started, not cancelled graph. */
@@ -2501,20 +2536,58 @@ export function taskGateContinuable(graph, task, gate) {
     && TASK_CONTINUE_GATE_KINDS.includes(gate?.kind) && ['waiting', 'expired'].includes(gate?.status) && taskRef(gate?.gateId);
 }
 
-/** POST /tasks/continue body, or null while the Board is unknown or the condition cannot be continued. */
-export function buildTaskContinueRequest(entry, taskId, gateId) {
+/**
+ * POST /tasks/continue body, or null while the Board is unknown or the gate is
+ * no longer continuable. Optional answer is exactly {choice: optionId} or
+ * {text}; required only for a question. Invalid answers/descriptors throw a
+ * path/input-free {code:'TASK_GATE_ANSWER', status:400}; use
+ * taskContinueErrorText() for display. Legacy no-answer bodies are unchanged.
+ * Text normalization/validation matches helper normalizeGateAnswer: NFC,
+ * CRLF/CR -> LF, trim, then 1..maxLength Unicode code points (default 500),
+ * allowing tab/LF but not the helper's other control characters. No clipping.
+ * No answer is kept in Board state. The UI owns transient drafts scoped to
+ * account/room/graph/task/gate/question; failures retain that same draft only.
+ * Build/send only on explicit Continue, never selection, typing or Enter. The
+ * host must compare the captured responseKey and binding with the current row
+ * before sending, and lock duplicate submits until its result is known. A
+ * satisfied question means answer accepted, not that its task resumed/finished.
+ */
+export function buildTaskContinueRequest(entry, taskId, gateId, answer) {
   const graph = entry?.graph;
   const task = graph?.tasks.find(row => row.taskId === taskId);
   const gate = task?.gates.find(row => row.gateId === gateId);
   if (!taskRef(entry?.boardId) || !taskGateContinuable(graph, task, gate)) return null;
   const scope = entry.scope || taskScopeShape(graph);
   if (!scope || scope.graphId !== graph.graphId) return null;
-  return { boardId: entry.boardId, scope: { ...scope }, taskId, gateId };
+  const question = taskGateView(gate);
+  const refuse = () => { throw Object.assign(new Error(taskContinueErrorText({ code: 'TASK_GATE_ANSWER' })),
+    { code: 'TASK_GATE_ANSWER', status: 400 }); };
+  let normalized;
+  if (question.responseInvalid) refuse();
+  if (!question.response) {
+    if (answer !== undefined) refuse();
+  } else {
+    const response = question.response;
+    if (answer === null || typeof answer !== 'object' || Array.isArray(answer)
+        || Object.keys(answer).length !== 1 || !Object.hasOwn(answer, response.kind)) refuse();
+    if (response.kind === 'choice') {
+      if (typeof answer.choice !== 'string' || !response.options.some(option => option.id === answer.choice)) refuse();
+      normalized = { choice: answer.choice };
+    } else {
+      const value = typeof answer.text === 'string' ? answer.text.normalize('NFC').replace(/\r\n?/g, '\n').trim() : '';
+      if (!value.length || Array.from(value).length > response.maxLength || /[\u0000-\u0008\u000b-\u001f\u007f]/.test(value)) refuse();
+      normalized = { text: value };
+    }
+  }
+  return { boardId: entry.boardId, scope: { ...scope }, taskId, gateId,
+    ...(normalized === undefined ? {} : { answer: normalized }) };
 }
 
 /** Korean text for a refused continue; the bridge message stays internal. */
 export function taskContinueErrorText(error) {
   const code = error?.code;
+  if (code === 'TASK_GATE_ANSWER') return '답변을 확인해 주세요. 제시된 항목 하나를 선택하거나 글자 수 제한에 맞는 내용을 입력해 주세요.';
+  if (code === 'TASK_GATE_ANSWER_PRIVATE') return '비밀번호·키·인증번호·개인정보처럼 보이는 내용은 보낼 수 없습니다. 해당 값을 빼고 다시 답해 주세요.';
   if (code === 'TASK_GATE_STALE') return '이 조건은 이미 풀렸거나 더 이상 기다리지 않습니다. 목록을 다시 확인했습니다.';
   if (code === 'TASK_FENCED') return '취소된 작업이라 진행할 수 없습니다.';
   if (code === 'TASK_NOT_FOUND') return '이 작업을 더 이상 찾을 수 없습니다.';
@@ -2595,7 +2668,9 @@ export function taskResumeErrorText(error) {
  * Everything the list draws: the hold notice, the summary, then each started
  * graph's tasks in order with their conditions. A step title names a task when a
  * plan gave one; otherwise '작업 N' in graph order.
- * continuing = { graphId, taskId, gateId, phase, error } ('계속');
+ * continuing = { graphId, taskId, gateId, responseKey?, phase, error } ('계속');
+ * For questions, capture responseKey with the transient draft/notice so an
+ * older question's phase or error cannot appear on a changed descriptor.
  * approving = { graphId, taskId, decision, phase, error } (승인/거절);
  * resuming = { phase, error } ('이어서 진행').
  */
@@ -2612,13 +2687,15 @@ export function taskBoardView(board, { folderName = null, continuing = null, app
     const tasks = graph.tasks.map(task => ({
       taskId: task.taskId, name: taskNames[task.taskId], status: task.status, statusText: taskStatusText(task.status),
       conditions: task.gates.map(gate => {
-        const here = continuing && continuing.graphId === entry.graphId && continuing.taskId === task.taskId && continuing.gateId === gate.gateId;
+        const condition = taskGateView(gate, { taskNames, folderName, now });
+        const here = continuing && continuing.graphId === entry.graphId && continuing.taskId === task.taskId && continuing.gateId === gate.gateId
+          && (continuing.responseKey === undefined || continuing.responseKey === condition.responseKey);
         const deciding = gate.kind === 'approval' && approving && approving.graphId === entry.graphId && approving.taskId === task.taskId ? approving : null;
-        return { ...taskGateView(gate, { taskNames, folderName, now }), continuable: taskGateContinuable(graph, task, gate),
+        return { ...condition, continuable: !condition.responseInvalid && taskGateContinuable(graph, task, gate),
           phase: here ? continuing.phase : null,
           approvable: gate.kind === 'approval' && !!taskApprovalId(entry, task.taskId),
           approvalPhase: deciding ? deciding.phase : null, approvalDecision: deciding ? deciding.decision : null,
-          error: here && continuing.phase === 'error' ? continuing.error || null : deciding?.phase === 'error' ? deciding.error || null : null };
+          error: here && continuing.phase === 'error' ? continuing.error || null : deciding?.phase === 'error' ? deciding.error || null : condition.responseError || null };
       }),
     }));
     const title = entry.planTitle || (entries.length > 1 ? `작업 묶음 ${entries.indexOf(entry) + 1}` : null);
