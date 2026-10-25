@@ -64,9 +64,14 @@ export function assertNewQuestionCleared(before, after) {
 }
 export function assertCodePointLimit(ui, raw, limit, { invalid = false } = {}) {
   assert.equal(ui.value, raw, 'native text was not silently clipped/normalized');
-  assert.equal(ui.limit, limit, 'limit comes from the rendered descriptor, not a guessed number');
-  assert.equal(ui.counted, Array.from(normalized(raw)).length, 'display uses normalized code points, not UTF-16 units');
-  assert.ok(ui.limitText.includes(String(limit)), 'limit is readable');
+  assert.ok(Number.isSafeInteger(limit) && limit > 0, 'maximum length comes from the actual question contract');
+  const counted = Array.from(normalized(ui.value)).length;
+  const visible = /^\s*(\d+)\s*\/\s*(\d+)\s*자(?:\s*·[^\r\n]*)?\s*$/.exec(ui.limitText);
+  assert.ok(visible, 'visible count/limit text must be parseable');
+  assert.equal(Number(visible[1]), counted, 'VISIBLE counter equals actual input NFC/code-point count, not only dataset');
+  assert.equal(Number(visible[2]), limit, 'VISIBLE maximum equals the original question contract');
+  assert.equal(ui.limit, limit, 'dataset maximum also matches the original question contract');
+  assert.equal(ui.counted, counted, 'dataset count also matches normalized code points, not UTF-16 units');
   if (invalid) assert.ok(ui.continueDisabled || ui.notice.trim(), 'oversize input has a visible block or explanation');
   return true;
 }
@@ -110,7 +115,7 @@ export function assertTaskGateEvidence(evidence) {
   assertDraftRetained(evidence.rejected.typed, evidence.rejected.ui);
   assertDraftRetained(evidence.rejected.ui, evidence.rejected.refreshed, { notice: true });
   assertOneAnswer(evidence.text.before, evidence.text.after, evidence.text.identity);
-  assertCodePointLimit(evidence.text.ui, evidence.text.value, 20);
+  assertCodePointLimit(evidence.text.ui, evidence.text.value, evidence.text.identity.response.maxLength);
   assert.ok(evidence.text.after.persisted.answers.some(row => row.graphId === evidence.text.identity.graphId
     && row.taskId === evidence.text.identity.taskId && row.gateId === evidence.text.identity.gateId
     && row.textSha256 === hash(normalized(evidence.text.value)) && row.codePoints === 20));
@@ -146,7 +151,7 @@ export async function observeTaskGate(harness, identity) {
       continueDisabled: !button || button.disabled === true || button.getAttribute('aria-disabled') === 'true' };
   }, { selector, names: TASK_GATE_SELECTORS });
 }
-async function observeTarget(harness, selector) {
+export async function observeTaskGateTarget(harness, selector) {
   return chrome(harness, selector => {
     const nodes = [...document.querySelectorAll(selector)], node = nodes.length === 1 ? nodes[0] : null;
     const r = node?.getBoundingClientRect(), css = node && getComputedStyle(node); let hits = 0, clipped = false;
@@ -159,11 +164,97 @@ async function observeTarget(harness, selector) {
       }
     }
     const list = node?.closest('[data-testid="chat-task-list"]'), listBox = list?.getBoundingClientRect();
-    return { count: nodes.length, visible: !!r && r.width > 0 && r.height > 0 && css.display !== 'none' && css.visibility !== 'hidden',
+    return { selector, count: nodes.length, rect: r && { x: r.x, y: r.y, width: r.width, height: r.height },
+      visible: !!r && r.width > 0 && r.height > 0 && css.display !== 'none' && css.visibility !== 'hidden',
       inside: !!r && r.left >= 0 && r.top >= 0 && r.right <= innerWidth && r.bottom <= innerHeight,
       hits, clipped, disabled: !node || node.disabled || node.getAttribute('aria-disabled') === 'true',
       scrollDirection: listBox && r ? r.bottom > listBox.bottom ? 'PageDown' : r.top < listBox.top ? 'PageUp' : null : null };
   }, selector);
+}
+
+// A noninteractive count label is not a click target. Inspect its actual text
+// line rectangles, not the stretched flex span's whitespace. Controls still
+// use the unchanged nine-point element hit test above.
+export async function observeTaskGateLimit(harness, identity) {
+  const selector = `${taskGateRowSelector(identity)} ${testid(TASK_GATE_SELECTORS.limit)}`;
+  return chrome(harness, selector => {
+    const nodes = [...document.querySelectorAll(selector)], node = nodes.length === 1 ? nodes[0] : null;
+    const text = (node?.textContent || '').trim(), fragments = [];
+    let styleVisible = !!node?.isConnected && !node.closest('[hidden],[inert],[aria-hidden="true"]');
+    const clip = { left: 0, top: 0, right: innerWidth, bottom: innerHeight };
+    for (let parent = node; parent; parent = parent.parentElement) {
+      const css = getComputedStyle(parent), r = parent.getBoundingClientRect();
+      if (css.display === 'none' || css.visibility !== 'visible' || Number(css.opacity) === 0 || css.contentVisibility === 'hidden') styleVisible = false;
+      if (css.display === 'inline' || css.display === 'contents') continue;
+      const sx = parent.offsetWidth ? r.width / parent.offsetWidth : 1, sy = parent.offsetHeight ? r.height / parent.offsetHeight : 1;
+      if (/(auto|scroll|hidden|clip)/.test(css.overflowX)) {
+        clip.left = Math.max(clip.left, r.left + parent.clientLeft * sx);
+        clip.right = Math.min(clip.right, r.left + (parent.clientLeft + parent.clientWidth) * sx);
+      }
+      if (/(auto|scroll|hidden|clip)/.test(css.overflowY)) {
+        clip.top = Math.max(clip.top, r.top + parent.clientTop * sy);
+        clip.bottom = Math.min(clip.bottom, r.top + (parent.clientTop + parent.clientHeight) * sy);
+      }
+    }
+    if (node) {
+      const range = document.createRange(); range.selectNodeContents(node);
+      for (const r of range.getClientRects()) {
+        if (r.width <= 0 || r.height <= 0) continue;
+        const hits = [.2, .5, .8].map(x => {
+          const hit = document.elementFromPoint(r.left + r.width * x, r.top + r.height * .5);
+          return { owned: !!hit && (hit === node || node.contains(hit)), tag: hit?.localName || null,
+            testId: hit?.getAttribute('data-testid') || null };
+        });
+        fragments.push({ rect: { left: r.left, top: r.top, right: r.right, bottom: r.bottom, width: r.width, height: r.height },
+          inside: r.left >= 0 && r.top >= 0 && r.right <= innerWidth && r.bottom <= innerHeight,
+          clipped: r.left < clip.left - .5 || r.top < clip.top - .5 || r.right > clip.right + .5 || r.bottom > clip.bottom + .5,
+          hits, hitCount: hits.filter(hit => hit.owned).length });
+      }
+      range.detach?.();
+    }
+    const list = node?.closest('[data-testid="chat-task-list"]');
+    const above = fragments.some(part => part.rect.top < clip.top - .5), below = fragments.some(part => part.rect.bottom > clip.bottom + .5);
+    const scrollDirection = list && above && list.scrollTop > .5 ? 'PageUp'
+      : list && below && list.scrollTop < list.scrollHeight - list.clientHeight - .5 ? 'PageDown' : null;
+    return { selector, count: nodes.length, text, limit: node ? Number(node.dataset.maxLength) : null,
+      counted: node ? Number(node.dataset.codePoints) : null, styleVisible, clip, fragments, scrollDirection };
+  }, selector);
+}
+
+export function taskGateLimitReadable(proof) {
+  return proof?.count === 1 && proof.styleVisible === true && typeof proof.text === 'string' && proof.text.trim().length > 0
+    && proof.fragments?.length > 0 && proof.fragments.every(part => part.inside === true && part.clipped === false
+      && part.hitCount === 3 && part.hits.length === 3 && part.hits.every(hit => hit.owned === true));
+}
+
+export function assertTaskGateLimitPaint(proof, ui, identity, raw) {
+  assert.ok(taskGateLimitReadable(proof), 'all actual counter text must be painted, unclipped and unoccluded');
+  assert.equal(identity.response.kind, 'text');
+  assert.equal(proof.text, ui.limitText.trim(), 'the painted label and current observation agree');
+  assert.equal(proof.counted, ui.counted); assert.equal(proof.limit, ui.limit);
+  assertCodePointLimit({ ...ui, limitText: proof.text }, raw, identity.response.maxLength);
+  return true;
+}
+
+export async function readTaskGateLimit(harness, identity, deadlineMs,
+  { read = observeTaskGateLimit, wait = waitFor } = {}) {
+  const observations = [], scrolls = [];
+  const sample = async () => {
+    assertBeforeDeadline(deadlineMs);
+    const proof = await read(harness, identity);
+    observations.push(proof);
+    if (observations.length > 3) observations.shift();
+    return proof;
+  };
+  for (let attempt = 0; attempt < 6; attempt++) {
+    const proof = await sample();
+    if (taskGateLimitReadable(proof)) return { proof, observations, scrolls };
+    if (!proof.scrollDirection) break;
+    assertBeforeDeadline(deadlineMs);
+    scrolls.push(await harness.scrollWithKey('[data-testid="chat-task-list"]', proof.scrollDirection));
+  }
+  const proof = await wait(harness, sample, taskGateLimitReadable, deadlineMs);
+  return { proof, observations, scrolls };
 }
 
 // Only the first-use fields needed by the established native Desk exit. A
@@ -194,13 +285,13 @@ export async function runTaskGateFlow({ harness, result, check, capture, defer }
   const ready = async selector => {
     assertBeforeDeadline(deadlineMs);
     for (let i = 0; i < 6; i++) {
-      const target = await waitFor(harness, () => observeTarget(harness, selector), value => value.count === 1 && value.visible, deadlineMs);
+      const target = await waitFor(harness, () => observeTaskGateTarget(harness, selector), value => value.count === 1 && value.visible, deadlineMs);
       if (target.inside && !target.clipped && target.hits === 9 && !target.disabled) return;
       if (!target.scrollDirection) break;
       assertBeforeDeadline(deadlineMs);
       await harness.scrollWithKey('[data-testid="chat-task-list"]', target.scrollDirection);
     }
-    await waitFor(harness, () => observeTarget(harness, selector), value => value.count === 1 && value.visible && value.inside && !value.clipped && value.hits === 9 && !value.disabled, deadlineMs);
+    await waitFor(harness, () => observeTaskGateTarget(harness, selector), value => value.count === 1 && value.visible && value.inside && !value.clipped && value.hits === 9 && !value.disabled, deadlineMs);
   };
   const click = async selector => {
     await ready(selector);
@@ -215,7 +306,12 @@ export async function runTaskGateFlow({ harness, result, check, capture, defer }
     await control('replay'); await waitState(value => value.frames.some(frame => frame.type === 'task.native')); await control('refresh');
     await waitState(value => reads(value) > before);
   };
-  const evidence = { nativeInputs: true, domInjection: false, noPosts: [] };
+  const evidence = { nativeInputs: true, domInjection: false, noPosts: [], limitPaint: [] };
+  const readableLimit = async (identity, raw) => {
+    const painted = await readTaskGateLimit(harness, identity, deadlineMs), current = await read(identity);
+    assertTaskGateLimitPaint(painted.proof, current, identity, raw);
+    evidence.limitPaint.push({ identity, inputValue: current.value, ...painted });
+  };
   result.taskGate = evidence;
   // Best effort releases only fixture-owned holds, never a user process.
   defer(async () => {
@@ -277,13 +373,13 @@ export async function runTaskGateFlow({ harness, result, check, capture, defer }
   assertQuestionIdentity(await read(text), text, local.id);
   const tooLong = '😀'.repeat(21);
   await withoutPost('typing', () => type(text, tooLong));
-  await ready(field(text, 'limit'));
-  const over = await read(text); assertCodePointLimit(over, tooLong, 20);
+  await readableLimit(text, tooLong);
+  const over = await read(text); assertCodePointLimit(over, tooLong, text.response.maxLength);
   await withoutPost('oversize', async () => {
     if (over.continueDisabled) { assertBeforeDeadline(deadlineMs); await harness.click(field(text, 'continue')); }
     else await click(field(text, 'continue'));
   });
-  assertCodePointLimit(await read(text), tooLong, 20, { invalid: true });
+  assertCodePointLimit(await read(text), tooLong, text.response.maxLength, { invalid: true });
   const validText = '😀'.repeat(20);
   await type(text, validText);
   await withoutPost('text-enter', () => press('Enter', field(text, 'text')));
@@ -307,7 +403,7 @@ export async function runTaskGateFlow({ harness, result, check, capture, defer }
   assertQuestionIdentity(emptyNext, next, local.id); evidence.newQuestion = emptyNext;
   assertNewQuestionCleared(evidence.previousQuestion, emptyNext);
   await type(text, validText);
-  await ready(field(text, 'limit'));
+  await readableLimit(text, validText);
   const textUi = await read(text), textBefore = await state();
   await click(field(text, 'continue'));
   const textAfter = await waitState(value => posts(value).at(-1)?.status === 200 && value.persisted.answers.length === 1 && value.fakeProviderTurns.length === 3);

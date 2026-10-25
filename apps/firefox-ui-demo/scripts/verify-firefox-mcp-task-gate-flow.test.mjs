@@ -8,7 +8,8 @@ import { createHash } from 'node:crypto';
 import { prepareRunOutputDesk } from './verify-firefox-mcp-chat-run-outputs-flow.mjs';
 import { TASK_GATE_SELECTORS, taskGateRowSelector, assertTaskGateEnvironment, assertQuestionIdentity, assertNoContinue,
   assertDraftRetained, assertNewQuestionCleared, assertCodePointLimit, assertOneAnswer, assertTaskGateEvidence,
-  observeTaskGate, observeTaskGateDesk, runTaskGateFlow, runCli } from './verify-firefox-mcp-task-gate-flow.mjs';
+  observeTaskGate, observeTaskGateDesk, observeTaskGateTarget, observeTaskGateLimit, taskGateLimitReadable, assertTaskGateLimitPaint, readTaskGateLimit,
+  runTaskGateFlow, runCli } from './verify-firefox-mcp-task-gate-flow.mjs';
 
 const ENV = { EGDESK_QA_TASK_GATE_FIXTURE: '1', EGDESK_QA_FIXTURE_TRANSPORT: '1', EGDESK_QA_REAL_TURN: '0',
   EGDESK_QA_FIXTURE_PORT: '49319', EGDESK_QA_FIXTURE_TOKEN: 'owned-task-gate-verifier-unit-token' };
@@ -106,9 +107,20 @@ test('limit evidence requires exact native value and normalized code points; gue
   for (const patch of [{ value: raw.trim() }, { counted: raw.length }, { limit: 500 }, { limitText: '제한 있음' }]) {
     assert.throws(() => assertCodePointLimit({ ...valid, ...patch }, raw, 20));
   }
-  const over = ui({ value: '😀'.repeat(21), counted: 21, continueDisabled: true });
+  const over = ui({ value: '😀'.repeat(21), counted: 21, limitText: '21 / 20자', continueDisabled: true });
   assert.equal(assertCodePointLimit(over, over.value, 20, { invalid: true }), true);
   assert.throws(() => assertCodePointLimit({ ...over, continueDisabled: false, notice: '' }, over.value, 20, { invalid: true }));
+});
+
+test('visible counter numbers must match actual NFC/code-point input and the independent question contract', () => {
+  const raw = '😀'.repeat(21), actual = ui({ value: raw, counted: 21, limitText: '21 / 20자 · 입력 후 계속을 누르세요.' });
+  assert.equal(assertCodePointLimit(actual, raw, identity().response.maxLength), true);
+  for (const limitText of ['0 / 20자', '20 / 20자', '42 / 20자', '21 / 200자', 'counter 21 / 20', '20자 제한']) {
+    assert.throws(() => assertCodePointLimit({ ...actual, limitText }, raw, identity().response.maxLength));
+  }
+  assert.throws(() => assertCodePointLimit({ ...actual, limit: 200, limitText: '21 / 200자' }, raw, identity().response.maxLength), /VISIBLE maximum/);
+  const decomposed = ' e\u0301😀\r\n ';
+  assert.equal(assertCodePointLimit(ui({ value: decomposed, counted: 2, limitText: '2 / 20자' }), decomposed, 20), true);
 });
 
 test('one explicit continue must have one production-handler receipt for the original identity', () => {
@@ -146,12 +158,92 @@ test('observation is bounded read-only chrome source; no input or DOM/state muta
   const sources = [], harness = { evaluateChrome(source) { sources.push(source); return Promise.resolve({ count: 0 }); } };
   await observeTaskGate(harness, identity());
   await observeTaskGateDesk(harness);
-  assert.equal(sources.length, 2);
+  await observeTaskGateTarget(harness, '[data-testid="chat-task-answer-continue"]');
+  await observeTaskGateLimit(harness, identity());
+  assert.equal(sources.length, 4);
   for (const source of sources) {
     assert.ok(Buffer.byteLength(source) < 12000);
     for (const forbidden of [/dispatchEvent/, /new (?:InputEvent|KeyboardEvent|Event)\(/, /\.value\s*=/, /\.click\(/,
       /innerHTML\s*=/, /__egdesk[^\n]*\s=\s/, /\.style\s*[.=]/]) assert.doesNotMatch(source, forbidden);
   }
+});
+
+function limitPaintDom({ clipped = false, occluded = false, hidden = false, missing = false, offscreen = false } = {}) {
+  const calls = [], rect = (left, top, width, height) => ({ x: left, y: top, left, top, right: left + width, bottom: top + height, width, height });
+  const list = { parentElement: null, scrollTop: 0, scrollHeight: 1000, clientHeight: 600, clientWidth: clipped ? 200 : 800,
+    clientLeft: 0, clientTop: 0, offsetWidth: 800, offsetHeight: 600, localName: 'div', getAttribute: () => null,
+    getBoundingClientRect: () => rect(0, 0, 800, 600) };
+  const node = { isConnected: true, textContent: '21 / 20자 · 입력 후 계속을 누르세요.', dataset: { maxLength: '20', codePoints: '21' },
+    parentElement: list, clientWidth: 300, clientHeight: 60, offsetWidth: 300, offsetHeight: 60, clientLeft: 0, clientTop: 0,
+    localName: 'span', contains: () => false, getAttribute: name => name === 'data-testid' ? 'chat-task-answer-limit' : null,
+    closest: selector => selector === '[data-testid="chat-task-list"]' ? list : null,
+    getBoundingClientRect: () => rect(20, 20, 300, 60) };
+  const rangeBox = rect(offscreen ? 790 : 20, 24, 280, 12);
+  const context = { innerWidth: 800, innerHeight: 600,
+    getComputedStyle: target => ({ display: 'block', visibility: hidden ? 'hidden' : 'visible', opacity: '1',
+      overflowX: target === list ? 'auto' : 'visible', overflowY: target === list ? 'auto' : 'visible' }),
+    document: {
+      querySelectorAll: () => [node],
+      createRange: () => ({ selectNodeContents: selected => { assert.equal(selected, node); calls.push('Range text'); },
+        getClientRects: () => missing ? [] : [rangeBox], detach() {} }),
+      elementFromPoint: (x, y) => !occluded && x >= rangeBox.left && x <= rangeBox.right && y >= rangeBox.top && y <= rangeBox.bottom ? node : list,
+    } };
+  return { calls, h: { evaluateChrome: source => vm.runInNewContext(`(${source})()`, context) } };
+}
+
+test('Task R2 count label uses actual painted text while the stretched span remains a failed nine-point click target', async () => {
+  const f = limitPaintDom();
+  const element = await observeTaskGateTarget(f.h, 'exact-limit-span');
+  assert.equal(element.hits, 3, 'reproduce the span whitespace hit mismatch');
+  const proof = await observeTaskGateLimit(f.h, identity());
+  assert.equal(proof.counted, 21); assert.equal(proof.limit, 20);
+  assert.equal(proof.fragments.length, 1); assert.equal(proof.fragments[0].hitCount, 3);
+  assert.equal(taskGateLimitReadable(proof), true);
+  assert.deepEqual(f.calls, ['Range text']);
+});
+
+test('actual count text must have all line rectangles visible, in viewport, unclipped and unoccluded', async () => {
+  for (const config of [{ clipped: true }, { occluded: true }, { hidden: true }, { missing: true }, { offscreen: true }]) {
+    const f = limitPaintDom(config);
+    assert.equal(taskGateLimitReadable(await observeTaskGateLimit(f.h, identity())), false);
+  }
+  const proof = await observeTaskGateLimit(limitPaintDom().h, identity());
+  for (const patch of [{ count: 2 }, { text: '' }, { fragments: [] }, { fragments: [...proof.fragments,
+    { ...proof.fragments[0], clipped: true }] }, { fragments: [{ ...proof.fragments[0], hitCount: 2 }] }]) {
+    assert.equal(taskGateLimitReadable({ ...proof, ...patch }), false);
+  }
+});
+
+test('fully visible 0/20 cannot pass with 21 actual input code points and matching 21-count datasets', async () => {
+  const raw = '😀'.repeat(21), painted = await observeTaskGateLimit(limitPaintDom().h, identity());
+  const current = ui({ value: raw, counted: 21, limitText: painted.text });
+  assert.equal(assertTaskGateLimitPaint(painted, current, identity(), raw), true);
+  const stale = { ...painted, text: '0 / 20자 · 입력 후 계속을 누르세요.' };
+  assert.equal(taskGateLimitReadable(stale), true, 'visibility alone is deliberately insufficient');
+  assert.throws(() => assertTaskGateLimitPaint(stale, { ...current, limitText: stale.text }, identity(), raw), /VISIBLE counter/);
+  const wrongMaximum = { ...painted, limit: 200, text: '21 / 200자' };
+  assert.throws(() => assertTaskGateLimitPaint(wrongMaximum, { ...current, limit: 200, limitText: wrongMaximum.text }, identity(), raw), /VISIBLE maximum/);
+  assert.throws(() => assertTaskGateLimitPaint({ ...painted, fragments: [] }, current, identity(), raw), /painted/);
+});
+
+test('readable count metadata receives no native click or scroll; clipped text can use measured native list scrolling', async () => {
+  const proof = await observeTaskGateLimit(limitPaintDom().h, identity());
+  let calls = 0; const keys = [], h = { scrollWithKey: async (selector, key) => { keys.push([selector, key]); return { moved: true, key }; } };
+  const deadlineMs = Date.now() + 10000;
+  const first = await readTaskGateLimit(h, identity(), deadlineMs, { read: async () => proof });
+  assert.equal(first.proof, proof); assert.deepEqual(keys, []);
+  const scrolled = await readTaskGateLimit(h, identity(), deadlineMs, { read: async () => ++calls === 1
+    ? { ...proof, fragments: [{ ...proof.fragments[0], clipped: true }], scrollDirection: 'PageDown' } : proof });
+  assert.equal(scrolled.proof, proof);
+  assert.deepEqual(keys, [['[data-testid="chat-task-list"]', 'PageDown']]);
+});
+
+test('count text occlusion cannot be waived or fixed by blind scrolling, and expired reads do nothing', async () => {
+  const proof = await observeTaskGateLimit(limitPaintDom({ occluded: true }).h, identity());
+  const h = { scrollWithKey: () => assert.fail('no scroll direction was observed') };
+  const wait = async (_h, read, accept) => { assert.equal(accept(await read()), false); throw new Error('text still occluded'); };
+  await assert.rejects(readTaskGateLimit(h, identity(), Date.now() + 10000, { read: async () => proof, wait }), /text still occluded/);
+  await assert.rejects(readTaskGateLimit(h, identity(), 1, { read: () => assert.fail('expired observation') }));
 });
 
 // Native sequencing unit doubles only; these are not actual UI acceptance evidence.
@@ -231,6 +323,8 @@ test('verifier delegates only native input and fixture controls, never directly 
   assert.match(source, /readFirstUse: observeTaskGateDesk, waitUntil/);
   assert.ok(source.indexOf('result.initialDesk = await prepareRunOutputDesk(') < source.indexOf('await openChat(harness)'),
     'first-use native exit and usable Dock proof must precede Chat Dock access');
+  assert.doesNotMatch(source, /ready\(field\(text, 'limit'\)\)/, 'noninteractive metadata is not treated as a button');
+  assert.match(source, /target\.hits === 9/); assert.match(source, /value\.hits === 9/, 'click controls keep all nine points');
   assert.doesNotMatch(source, /loopbackJson\(['"]\/tasks\/continue/);
   assert.doesNotMatch(source, /dispatchEvent|new (?:KeyboardEvent|InputEvent)|\.value\s*=|innerHTML\s*=/);
   assert.doesNotMatch(source, /newQaThread\(/, 'that shared helper writes fixture metadata; this flow uses native creation and read-only identity');
