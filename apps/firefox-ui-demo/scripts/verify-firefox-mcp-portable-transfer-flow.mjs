@@ -69,6 +69,43 @@ export function assertPortableExportFile(state, filename, expectedText) {
   return files[0];
 }
 
+export function assertPortableAttachmentOmission(state, converted, ui) {
+  const boardId = state.seed.boardId;
+  assert.equal(converted?.method, 'GET'); assert.equal(converted?.delegated, true);
+  assert.equal(converted?.path, `/v1/boards/${boardId}/export`); assert.equal(converted?.status, 200);
+  assert.equal(new URLSearchParams(converted.query).get('format'), 'json-canvas');
+  const head = state.persisted.desk.boards.find(row => row.board_id === boardId);
+  const revision = state.persisted.desk.revisions.find(row => row.board_id === boardId && row.revision === head?.head_revision);
+  const files = JSON.parse(revision.body_json).cards.filter(card => card.type === 'file');
+  assert.equal(files.length, 1); assert.equal(files[0].id, 'qa-file');
+  assert.equal(files[0].sourceRef.path, state.seed.importPath);
+  const { canvas, report } = converted.response;
+  assert.equal(report.nodes, canvas.nodes.length); assert.equal(report.edges, canvas.edges.length);
+  assert.ok(Array.isArray(report.omitted));
+  assert.ok(report.omitted.every(item => item && (item.id === null || typeof item.id === 'string') &&
+    typeof item.kind === 'string' && typeof item.reason === 'string'));
+  // report.omitted describes undrawable records (e.g. freehand), not withheld
+  // attachments. A named text placeholder carries the attachment exclusion.
+  const nodes = canvas.nodes.filter(node => node.id === files[0].id);
+  assert.equal(nodes.length, 1, 'The original saved file has one named placeholder');
+  const node = nodes[0];
+  assert.deepEqual(Object.keys(node).sort(), ['id', 'x', 'y', 'width', 'height', 'type', 'text', 'egdesk'].sort());
+  assert.equal(node.type, 'text');
+  assert.equal(node.text, `파일 카드 · ${files[0].runtimeState.root.name}`);
+  assert.deepEqual(node.egdesk, { kind: 'card', type: 'file', omitted: 'attachment' });
+  assert.deepEqual(canvas.nodes.filter(row => row.egdesk?.omitted === 'attachment').map(row => row.id), [files[0].id]);
+  const serialized = JSON.stringify(canvas);
+  for (const excluded of [state.seed.importPath, files[0].runtimeState.root.displayPath,
+    `${state.seed.marker}_IMPORT_ORIGINAL`, `${state.seed.marker}_IMPORT_END`]) {
+    assert.ok(typeof excluded === 'string' && excluded.length > 0);
+    assert.equal(serialized.includes(excluded), false, 'Attachment paths and original text are absent from the entire canvas');
+  }
+  assert.equal(ui.boardDialog?.state, 'saved');
+  assert.ok(ui.boardDialog.notes.some(note => note.text === '첨부·캡처 1개의 원본은 제외하고 이름만 포함했습니다.'),
+    'Visible export note must describe the actual attachment exclusion');
+  return true;
+}
+
 export function assertPortablePinnedExport(beforeAdvance, after, uiBefore, uiAfter, filename) {
   const id = beforeAdvance.seed.profileId;
   for (const ui of [uiBefore, uiAfter]) {
@@ -335,7 +372,8 @@ export async function runPortableTransferFlow({ harness, result, check }, { prof
   const converted = proof.boardSaved.requests.filter(row => row.path === `/v1/boards/${boardId}/export` && row.status === 200).at(-1);
   check('actual .canvas bytes equal real saved-head conversion', !!assertPortableExportFile(proof.boardSaved, 'owned-board.canvas', `${JSON.stringify(converted.response.canvas, null, 2)}\n`));
   check('stored Board revision is unchanged after export', assertPortableStoreInvariant(proof.initial, proof.boardSaved));
-  check('file attachment omission is a real converter report', converted.response.report.omitted.length > 0);
+  check('file attachment omission is verified by the real converter placeholder and visible note',
+    assertPortableAttachmentOmission(proof.boardSaved, converted, ui));
   check('export visibly excludes unsaved changes and never autosaves', ui.boardDialog.notes.some(note => /미저장/.test(note.text)));
   await click(testid('board-canvas-close'), 'close saved Board export');
   // A new local Board is made through the normal UI. Its real store write is

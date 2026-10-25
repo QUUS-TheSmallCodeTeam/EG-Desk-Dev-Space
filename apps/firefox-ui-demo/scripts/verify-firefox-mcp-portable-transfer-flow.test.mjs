@@ -8,7 +8,7 @@ import { bootstrapQaProfile, canonicalTempRoot, LOADER_FILES } from './egdesk-ch
 import { createPrivateQaTempDirectory } from './egdesk-qa-platform.mjs';
 import { assertPortableEnvironment, assertPortableStoreInvariant, assertPortableImportedDraft,
   assertPortableExportFile, assertPortablePinnedExport, assertPortableNoReplay,
-  assertPortableMissingHead,
+  assertPortableMissingHead, assertPortableAttachmentOmission,
   observePortableFirstUse,
   portableObservationSources, PORTABLE_OBSERVATION_BUDGET, portableTextVisible } from './verify-firefox-mcp-portable-transfer-flow.mjs';
 
@@ -95,6 +95,61 @@ test('store receipt assertions reject changed Board head, unexpected activation,
     state => state.requests.push({ method: 'PUT', path: '/v1/desk/current', status: 200 })];
   for (const alter of variants) {
     const after = structuredClone(before); alter(after); assert.throws(() => assertPortableStoreInvariant(before, after));
+  }
+});
+
+async function attachmentExport(t) {
+  const fixture = setup(t), before = fixture.snapshot();
+  const packet = await request(fixture, 'GET', `/v1/boards/${before.seed.boardId}/export?format=json-canvas`);
+  assert.equal(packet.status, 200);
+  const state = fixture.snapshot(), converted = state.requests.at(-1);
+  assert.equal(assertPortableStoreInvariant(before, state), true);
+  // Assertion-only UI input: this is not evidence of a native painted notice.
+  const ui = { boardDialog: { state: 'saved', notes: [{ text: '첨부·캡처 1개의 원본은 제외하고 이름만 포함했습니다.' }] } };
+  return { state, converted, ui };
+}
+
+test('real saved-head converter excludes attachment records on the named node with an empty omission report', async t => {
+  const { state, converted, ui } = await attachmentExport(t);
+  assert.deepEqual(converted.response.report.omitted, []);
+  assert.deepEqual(converted.response.canvas.nodes.find(node => node.id === 'qa-file').egdesk,
+    { kind: 'card', type: 'file', omitted: 'attachment' });
+  assert.equal(assertPortableAttachmentOmission(state, converted, ui), true);
+});
+
+test('attachment proof rejects wrong or absent original node; unrelated report entries cannot substitute', async t => {
+  const { state, converted, ui } = await attachmentExport(t);
+  const variants = [row => { row.delegated = false; }, row => { row.method = 'POST'; },
+    row => { row.path = '/v1/boards/another-board/export'; }, row => { row.status = 404; },
+    row => { row.query = '?format=other'; },
+    row => { row.response.canvas.nodes.find(node => node.id === 'qa-file').id = 'other-file'; },
+    row => { row.response.canvas.nodes.push(structuredClone(row.response.canvas.nodes.find(node => node.id === 'qa-file'))); row.response.report.nodes++; },
+    row => { row.response.canvas.nodes.find(node => node.id === 'qa-file').text = '파일 카드 · another file'; },
+    row => { row.response.canvas.nodes.find(node => node.id === 'qa-file').type = 'file'; },
+    row => { delete row.response.canvas.nodes.find(node => node.id === 'qa-file').egdesk.omitted; },
+    row => { row.response.canvas.nodes.find(node => node.id === 'qa-file').egdesk.type = 'result'; }];
+  for (const alter of variants) {
+    const changed = structuredClone(converted);
+    changed.response.report.omitted.push({ id: 'unrelated-shape', kind: 'shape', reason: 'freehand' });
+    alter(changed);
+    assert.throws(() => assertPortableAttachmentOmission(state, changed, ui));
+  }
+});
+
+test('attachment proof rejects original path or text leaks and missing or inaccurate exclusion notice', async t => {
+  const { state, converted, ui } = await attachmentExport(t);
+  const variants = [row => { row.response.canvas.nodes.find(node => node.id === 'qa-file').egdesk.sourceRef = { path: state.seed.importPath }; },
+    row => { row.response.canvas.nodes.find(node => node.id === 'qa-file').runtimeState = { text: state.seed.importText }; },
+    row => { row.response.canvas.egdesk.leakedPath = state.seed.importPath; },
+    row => { row.response.canvas.egdesk.leakedRoot = state.seed.importPath.slice(0, state.seed.importPath.lastIndexOf('/')); },
+    row => { row.response.canvas.nodes.find(node => node.id === 'qa-result').text += state.seed.importText; },
+    row => { row.response.report.nodes++; }];
+  for (const alter of variants) {
+    const changed = structuredClone(converted); alter(changed);
+    assert.throws(() => assertPortableAttachmentOmission(state, changed, ui));
+  }
+  for (const text of ['', '첨부·캡처 원본은 기본적으로 제외됩니다.', '첨부·캡처 2개의 원본은 제외하고 이름만 포함했습니다.']) {
+    assert.throws(() => assertPortableAttachmentOmission(state, converted, { boardDialog: { state: 'saved', notes: [{ text }] } }));
   }
 });
 
