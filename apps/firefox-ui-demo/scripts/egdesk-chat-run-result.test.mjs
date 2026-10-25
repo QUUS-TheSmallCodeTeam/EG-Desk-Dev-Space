@@ -378,3 +378,136 @@ test('invalid or non-command identities and absent current-view fences fail befo
     assert.throws(() => createChatRunResultView({ ...base, ...patch }), TypeError)
   }
 });
+
+const origin = (patch = {}) => ({ protocolVersion: 1, conversationId: identity.conversationId, runId: identity.runId,
+  status: 'verified', verified: true, projectId: 'project-original', rootId: 'root-original', directoryId: 'directory-original', displayPath: '/work/project', ...patch })
+const failedActivity = () => activity({ status: 'failed', detail: { command: 'npm test', cwd: '/work/project', exitCode: 1 } })
+const retainedFailure = () => output({ tail: failedOutput, totalBytes: failedOutput.length })
+
+test('origin hooks keep item-scoped frozen identity and label the explicit action as current-file opening', async () => {
+  const reads = [], opens = []
+  const readOrigin = async (target, options) => { reads.push({ target, options }); return origin() }
+  const ui = fixture({ activity: failedActivity(), fetchJson: async () => retainedFailure(), projectRoot: '/wrong/active-board',
+    readOrigin, onOpenVerifiedFile: async request => {
+      opens.push(request)
+      assert.equal(request.readOrigin, readOrigin)
+      assert.equal(request.isCurrent(identity), true)
+      assert.equal(request.isCurrent({ ...identity, itemId: 'foreign' }), false)
+      const verified = await request.readOrigin(request.target, { signal: request.signal })
+      return { status: verified.verified ? 'opened' : 'unavailable', cardId: 'separate-card' }
+    } })
+  assert.equal(reads.length, 0); assert.equal(opens.length, 0)
+  await ui.button.click()
+  assert.equal(reads.length, 1); assert.equal(opens.length, 0, 'display-only origin verification opens nothing')
+  assert.deepEqual(reads[0].target, identity); assert.equal(Object.isFrozen(reads[0].target), true)
+  assert.ok(reads[0].options.signal instanceof AbortSignal)
+  const location = byClass(ui.element, 'egdesk-run-result-location')[0]
+  assert.equal(location.textContent, '현재 파일 열기 · src/math.test.js:11:19')
+  assert.equal(location.getAttribute('aria-label'), location.textContent)
+  const before = byClass(ui.element, 'egdesk-run-result-tail')[0].textContent
+  await location.click()
+  assert.equal(reads.length, 2); assert.equal(opens.length, 1)
+  assert.deepEqual(opens[0].target, identity); assert.equal(Object.isFrozen(opens[0].location), true)
+  assert.equal(opens[0].location.path, '/work/project/src/math.test.js', 'an active Board parsing hint is ignored')
+  assert.match(ui.element.textContent, /별도 파일 창에서 현재 파일/)
+  assert.equal(byClass(ui.element, 'egdesk-run-result-tail')[0].textContent, before)
+  await location.click()
+  assert.equal(reads.length, 3); assert.equal(opens.length, 2); assert.equal(ui.calls.length, 1)
+})
+
+test('unverified or malformed origin responses leave retained results readable and never fall back to the old opener', async () => {
+  for (const patch of [{ protocolVersion: 2 }, { verified: false }, { status: 'unavailable' }, { conversationId: 'foreign' },
+    { runId: 'foreign' }, { rootId: '' }, { directoryId: '' }, { projectId: '' }, { displayPath: 'relative' }]) {
+    let opens = 0
+    const ui = fixture({ activity: failedActivity(), fetchJson: async () => retainedFailure(),
+      readOrigin: async () => origin(patch), onOpenVerifiedFile: () => { opens++; },
+      onOpenLocation: () => assert.fail('no legacy opener fallback') })
+    await ui.button.click()
+    assert.equal(ui.element.getAttribute('data-state'), 'ready')
+    assert.equal(byClass(ui.element, 'egdesk-run-result-location')[0].tagName, 'SPAN')
+    assert.match(ui.element.textContent, /보관된 출력 기준/)
+    assert.equal(opens, 0)
+  }
+})
+
+test('partial origin hooks and lookup errors cannot turn cwd into file permission or discard retained text', async () => {
+  for (const hooks of [{ readOrigin: async () => origin() }, { onOpenVerifiedFile: () => assert.fail('unverified') },
+    { readOrigin: async () => { throw new Error('PRIVATE_ORIGIN_FAILURE') }, onOpenVerifiedFile: () => assert.fail('unverified') }]) {
+    const ui = fixture({ activity: failedActivity(), fetchJson: async () => retainedFailure(),
+      onOpenLocation: () => assert.fail('new origin mode cannot fall back to legacy'), ...hooks })
+    await ui.button.click()
+    assert.equal(byClass(ui.element, 'egdesk-run-result-location')[0].tagName, 'SPAN')
+    assert.match(ui.element.textContent, /보관된 출력 기준/)
+    assert.doesNotMatch(ui.element.textContent, /PRIVATE_ORIGIN_FAILURE/)
+  }
+})
+
+test('verified origin still cannot make redacted or outside paths actionable', async () => {
+  for (const file of ['src/[redacted].test.js', '/elsewhere/source.test.js']) {
+    const text = failedOutput.replaceAll('src/math.test.js', file)
+    const ui = fixture({ activity: failedActivity(), fetchJson: async () => output({ tail: text, totalBytes: text.length }),
+      readOrigin: async () => origin(), onOpenVerifiedFile: () => assert.fail('unsafe location') })
+    await ui.button.click()
+    assert.ok(byClass(ui.element, 'egdesk-run-result-location').every(node => node.tagName === 'SPAN'))
+    assert.doesNotMatch(ui.element.textContent, /현재 파일 열기/)
+    assert.ok(byClass(ui.element, 'egdesk-run-result-tail')[0].textContent.includes(file), 'the retained output is still readable')
+  }
+})
+
+test('a room/render change during the display origin await prevents stale controls and content', async () => {
+  const pending = deferred()
+  let viewEpoch = 1
+  const ui = fixture({ activity: failedActivity(), fetchJson: async () => retainedFailure(), isCurrent: () => viewEpoch === 1,
+    readOrigin: () => pending.promise, onOpenVerifiedFile: () => assert.fail('stale origin') })
+  const reading = ui.button.click()
+  await Promise.resolve(); await Promise.resolve()
+  viewEpoch = 3; pending.resolve(origin())
+  await reading
+  assert.equal(resultCard(ui.element), undefined)
+})
+
+for (const invalidate of ['refresh', 'dispose']) {
+  test(invalidate + ' aborts an in-flight current-file action and retires its retained listener', async () => {
+    const pending = deferred(), entered = deferred(), requests = []
+    const ui = fixture({ activity: failedActivity(), fetchJson: async () => retainedFailure(), readOrigin: async () => origin(),
+      onOpenVerifiedFile: request => { requests.push(request); entered.resolve(); return pending.promise } })
+    await ui.button.click()
+    const location = byClass(ui.element, 'egdesk-run-result-location')[0]
+    const opening = location.click(); await entered.promise
+    await location.click()
+    assert.equal(requests.length, 1, 'duplicate clicks do not create parallel File Cards')
+    if (invalidate === 'refresh') await ui.button.click(); else ui.dispose()
+    assert.equal(requests[0].signal.aborted, true); assert.equal(requests[0].isCurrent(identity), false)
+    const before = ui.element.textContent
+    pending.resolve({ status: 'opened', cardId: 'late-card' }); await opening
+    assert.equal(ui.element.textContent, before)
+    await location.click(); assert.equal(requests.length, 1)
+  })
+}
+
+test('origin revoked after rendering is rechecked on click and leaves old command output unchanged', async () => {
+  let allowed = true, reads = 0
+  const ui = fixture({ activity: failedActivity(), fetchJson: async () => retainedFailure(),
+    readOrigin: async () => { reads++; return allowed ? origin() : origin({ verified: false, status: 'unavailable' }) },
+    onOpenVerifiedFile: async request => {
+      const current = await request.readOrigin(request.target, { signal: request.signal })
+      return { status: current.verified ? 'opened' : 'unavailable' }
+    } })
+  await ui.button.click()
+  const before = byClass(ui.element, 'egdesk-run-result-tail')[0].textContent
+  allowed = false
+  await byClass(ui.element, 'egdesk-run-result-location')[0].click()
+  assert.equal(reads, 2); assert.equal(ui.calls.length, 1)
+  assert.match(ui.element.textContent, /현재 파일을 열지 못했습니다. 보관된 출력은 유지/)
+  assert.equal(byClass(ui.element, 'egdesk-run-result-tail')[0].textContent, before)
+})
+
+test('current-file hooks are not consulted for an unfinished command or output', async () => {
+  for (const patch of [{ complete: false }, { complete: true, running: true }]) {
+    const ui = fixture({ activity: patch.running ? { ...failedActivity(), status: 'inProgress' } : failedActivity(),
+      fetchJson: async () => ({ ...retainedFailure(), complete: patch.complete }),
+      readOrigin: () => assert.fail('not a completed retained result'), onOpenVerifiedFile: () => assert.fail('not a completed retained result') })
+    await ui.button.click()
+    assert.equal(byClass(ui.element, 'egdesk-run-result-location').length, 0)
+  }
+})

@@ -169,7 +169,7 @@ async function install(script, namespaces, { transformNamespace = (_, namespace)
             const api = target[name](strictDeps);
             const expected = factoryDeps(read(modulePath(zone)));
             assert.deepEqual(sorted(reads), expected, `${zone.file}: actual factory reads exactly its declared deps`);
-            assert.deepEqual(Object.keys(api), [zone.method], `${zone.file}: actual returned interface`);
+            assert.deepEqual(Object.keys(api), zone.key === 'fileCard' ? [zone.method, 'openVerifiedRunFile'] : [zone.method], `${zone.file}: actual returned interface`);
             assert.equal(typeof api[zone.method], 'function');
             received.push({ zone, deps, api, reads });
             return api;

@@ -92,7 +92,53 @@ export function createFileCardZone(deps) {
     });
   }
 
+  const verifiedRunOpens = new WeakSet();
+  const validRunId = value => typeof value === 'string' && !!value.trim() && value.length <= 300 && !/[\u0000-\u001f\u007f]/.test(value);
+  const absoluteRunPath = value => typeof value === 'string' && value.length <= 4096
+    && (/^\//.test(value) || /^[A-Za-z]:[\\/]/.test(value)) && !/[\u0000-\u001f\u007f]|\[redacted\]|•••/i.test(value);
+
+  // readOrigin is the activity's account/epoch-bound GET reader. The target's
+  // itemId stays in that local fence, never in the server origin query. No
+  // supplied path, Board, cached origin or picker can authorize this opening.
+  async function openVerifiedRunFile({ target, location, readOrigin, isCurrent, signal } = {}) {
+    if (!['conversationId', 'runId', 'itemId'].every(key => validRunId(target?.[key]))
+        || !absoluteRunPath(location?.path) || !Number.isSafeInteger(location?.line) || location.line < 1
+        || location.column != null && (!Number.isSafeInteger(location.column) || location.column < 1)
+        || typeof readOrigin !== 'function' || typeof isCurrent !== 'function') return { status: 'unavailable' };
+    const selected = Object.freeze(Object.fromEntries(['conversationId', 'runId', 'itemId'].map(key => [key, target[key]])));
+    const place = Object.freeze({ path: location.path, line: location.line, column: location.column ?? null });
+    const current = () => {
+      try { return !signal?.aborted && isCurrent(selected) === true; } catch { return false; }
+    };
+    if (!current()) return { status: 'stale' };
+    let response;
+    try { response = await readOrigin(selected, { signal }); }
+    catch { return { status: current() ? 'unavailable' : 'stale' }; }
+    if (!current()) return { status: 'stale' };
+    if (response?.protocolVersion !== 1 || response.verified !== true || response.status !== 'verified'
+        || response.conversationId !== selected.conversationId || response.runId !== selected.runId
+        || !['projectId', 'rootId', 'directoryId'].every(key => validRunId(response[key]))
+        || !absoluteRunPath(response.displayPath)) return { status: 'unavailable' };
+    const origin = Object.freeze({ projectId: response.projectId, rootId: response.rootId,
+      directoryId: response.directoryId, displayPath: response.displayPath });
+    const verify = async () => {
+      if (!current()) throw new Error('실행 파일 요청이 더 이상 유효하지 않습니다.');
+      const latest = await readOrigin(selected, { signal });
+      if (!current() || latest?.protocolVersion !== 1 || latest.status !== 'verified' || latest.verified !== true
+          || latest.conversationId !== selected.conversationId || latest.runId !== selected.runId
+          || Object.keys(origin).some(key => latest[key] !== origin[key])) throw new Error('실행의 현재 폴더 연결이 바뀌었습니다.');
+    };
+    const opening = Object.freeze({ target: selected, location: place, origin, current, verify, signal });
+    verifiedRunOpens.add(opening);
+    const card = spawnFileCard({ openMode: 'new', verifiedRunOpen: opening });
+    const ready = await card._fileReady;
+    if (!current() || !card.isConnected || card.dataset.closeState || card._fileOpenStatus === 'stale') return { status: 'stale' };
+    return ready === true && card._fileOpenStatus === 'opened' ? { status: 'opened', cardId: card.id } : { status: 'unavailable' };
+  }
+
   function spawnFileCard(options = {}) {
+    const runFile = options.verifiedRunOpen || null;
+    if (runFile && !verifiedRunOpens.delete(runFile)) throw new Error('확인된 실행 파일 요청이 필요합니다.');
     if (options.openMode !== 'new' && !options.restore && !options.project) {
       const existing = document.querySelector('.egd-file-card');
       if (existing) { focusCanvasCard(existing); return existing; }
@@ -122,7 +168,8 @@ export function createFileCardZone(deps) {
     shell.slots.content.append(notice, mount);
     let rootHandle = options.record?.root || null;
     let view = null;
-    let restoring = !!options.record;
+    let restoring = !!options.record || !!runFile;
+    let openingCancelled = false, originOpened = false, runFileOrigin = null;
     let preserveRestoreRecord = false;
     let rootNeedsReconnect = false;
     let projectTarget = options.projectTarget ? Object.freeze({ boardId: options.projectTarget.boardId, title: options.projectTarget.title }) : null;
@@ -138,6 +185,14 @@ export function createFileCardZone(deps) {
         preserveRestoreRecord = false;
       }
       badge.textContent = failedOriginal ? '복구 확인 필요' : rootNeedsReconnect || snapshot.sourceConnection === 'reconnect-required' ? '보관 사본 · 원본 재연결 필요' : snapshot.dirty ? '작업사본 · 미저장' : '파일';
+      if (runFileOrigin) {
+        if (snapshot.rootId === runFileOrigin.rootId && snapshot.fileId === runFileOrigin.fileId && snapshot.sourceConnection !== 'reconnect-required') {
+          badge.textContent = snapshot.dirty ? '현재 파일 · 작업사본 미저장' : '현재 파일';
+        } else {
+          runFileOrigin = null;
+          notice.hidden = true; notice.replaceChildren();
+        }
+      }
       title.textContent = rootHandle?.name || '파일';
       title.title = title.textContent;
       attachButton.disabled = !snapshot.fileId || !snapshot.draftId;
@@ -146,7 +201,26 @@ export function createFileCardZone(deps) {
     const ready = (async () => {
       try {
         const fileModule = ChromeUtils.importESModule('chrome://userchrome/content/EGDeskFileView.sys.mjs');
-        const service = fileModule.createEGDeskFileServiceCallbacks({ request: requestLocalFilePacket });
+        const service = { ...fileModule.createEGDeskFileServiceCallbacks({ request: requestLocalFilePacket }) };
+        if (runFile) {
+          // File handles alone can outlive a project detach. Revalidate the
+          // pinned origin after each service await before releasing its result
+          // to the view. This never registers/reconnects a stored path.
+          for (const name of ['listDirectory', 'resolvePath', 'readFile', 'readDraft', 'createDraft']) {
+            const read = service[name];
+            if (typeof read !== 'function') continue;
+            service[name] = async (...args) => {
+              if (originOpened) return read(...args);
+              const current = () => !openingCancelled && card.isConnected && runFile.current();
+              if (!current()) throw new Error('실행 파일 요청이 더 이상 유효하지 않습니다.');
+              const value = await read(...args);
+              if (!current()) throw new Error('실행 파일 요청이 더 이상 유효하지 않습니다.');
+              await runFile.verify();
+              if (!current()) throw new Error('실행 파일 요청이 더 이상 유효하지 않습니다.');
+              return value;
+            };
+          }
+        }
         const pickers = fileModule.createEGDeskNativeFilePickers({ service, pickDirectory: pickNativeFileDirectory, pickSaveFile: pickNativeFileSaveFile });
         const rememberProject = (project, target) => {
           projectTarget = Object.freeze({ boardId: target.boardId, title: target.title });
@@ -219,16 +293,16 @@ export function createFileCardZone(deps) {
             if (selected) { rootHandle = selected; projectTarget = null; projectConnection = null; projectReference = null; rootNeedsReconnect = false; notice.hidden = true; }
             return selected;
           },
-          getProjectTarget,
-          chooseProject: typeof getProjectTarget === 'function' ? chooseProject : undefined,
+          getProjectTarget: runFile ? undefined : getProjectTarget,
+          chooseProject: !runFile && typeof getProjectTarget === 'function' ? chooseProject : undefined,
           chooseSaveAs: options => pickers.chooseSaveAs(options),
           runCheck: typeof spawnTerminalCard === 'function' ? runCheck : undefined,
           projectChecksOnly: true,
           onState: publish,
         });
         card._fileView = view;
-        view.element.inert = !!options.record;
-        view.element.setAttribute('aria-busy', String(!!options.record));
+        view.element.inert = !!options.record || !!runFile;
+        view.element.setAttribute('aria-busy', String(!!options.record || !!runFile));
         mount.appendChild(view.element);
         view.element.dataset.testid = 'file-view';
         for (const [selector, testid] of Object.entries({
@@ -238,6 +312,26 @@ export function createFileCardZone(deps) {
           '.egdesk-file-editor': 'file-editor', '.egdesk-file-review-button': 'file-review',
           '.egdesk-file-save-button': 'file-save-copy', '.egdesk-file-save-as-button': 'file-save-as', '.egdesk-file-reconnect-button': 'file-reconnect-source',
         })) view.element.querySelector(selector)?.setAttribute('data-testid', testid);
+        if (runFile) {
+          const { origin, location, target } = runFile;
+          const scope = Object.freeze({ rootId: origin.rootId, signal: runFile.signal,
+            isCurrent: () => !openingCancelled && card.isConnected && view.element.isConnected && runFile.current() });
+          rootHandle = { rootId: origin.rootId, directoryId: origin.directoryId, displayPath: origin.displayPath,
+            name: origin.displayPath.split(/[\\/]/).filter(Boolean).at(-1) || '실행 폴더' };
+          if (!scope.isCurrent() || !await view.openRoot(rootHandle, { project: null, scope }) || !scope.isCurrent()
+              || !await view.openAt(location, { scope }) || !scope.isCurrent() || view.snapshot().rootId !== origin.rootId) {
+            throw new Error('실행 파일을 여는 동안 연결이 바뀌었습니다.');
+          }
+          runFileOrigin = Object.freeze({ rootId: origin.rootId, fileId: view.snapshot().fileId });
+          notice.replaceChildren(
+            el('p', {}, `현재 파일 · 이전 실행 ${target.runId}의 출력에서 열었습니다.`),
+            el('p', {}, `원래 대화 · ${target.conversationId} · 명령 항목 · ${target.itemId}`),
+            el('p', {}, `경로 · ${location.path}`),
+            el('p', {}, `당시 행 참조 · ${location.line}행${location.column ? ` ${location.column}열` : ''}. 현재 파일의 위치는 달라졌을 수 있으며, 당시 내용과 같음을 확인한 것은 아닙니다.`));
+          notice.style.overflowWrap = 'anywhere';
+          notice.hidden = false;
+          originOpened = true; card._fileOpenStatus = 'opened';
+        }
         if (options.project && projectTarget) {
           rememberProject(options.project, projectTarget);
           await view.openProject(options.project);
@@ -296,15 +390,22 @@ export function createFileCardZone(deps) {
         return true;
       } catch (error) {
         restoring = false;
+        if (runFile) {
+          card._fileOpenStatus = openingCancelled || !card.isConnected || !runFile.current() ? 'stale' : 'unavailable';
+          // An unfinished origin Card must not retain a usable tree after its
+          // source epoch is lost. Only this newly created Card is disposed.
+          await view?.close().catch(() => {});
+        }
         notice.hidden = false;
-        notice.textContent = `파일 화면을 준비하지 못했습니다: ${error.message}`;
+        notice.textContent = runFile ? '현재 파일을 열지 못했습니다. 원래 출력은 유지됩니다. 실행의 현재 연결을 확인한 뒤 다시 선택하세요.' : `파일 화면을 준비하지 못했습니다: ${error.message}`;
         badge.textContent = '연결 확인 필요';
         return false;
-      } finally { if (view) { view.element.inert = false; view.element.setAttribute('aria-busy', 'false'); } }
+      } finally { if (view) { view.element.inert = !!runFile && !originOpened; view.element.setAttribute('aria-busy', 'false'); } }
     })();
     const closeGate = FileCardState.createFileCloseGate({
       dispose: async () => { await ready; return view ? view.close() : true; },
       onState: status => {
+        if (runFile && status.status === 'closing') openingCancelled = true;
         card.dataset.closeState = status.status;
         if (status.status !== 'closed') { notice.hidden = false; notice.textContent = status.message; }
       },
@@ -314,5 +415,5 @@ export function createFileCardZone(deps) {
     return card;
   }
 
-  return { spawnFileCard };
+  return { spawnFileCard, openVerifiedRunFile };
 }

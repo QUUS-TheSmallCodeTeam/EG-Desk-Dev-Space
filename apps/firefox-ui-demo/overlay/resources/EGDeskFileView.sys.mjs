@@ -475,6 +475,15 @@ export function createEGDeskFileView({ document, service, chooseRoot, chooseProj
   const draftsByFile = new Map()
   const token = () => ++operation
   const present = generation => !disposed && generation === operation
+  // Optional original-run fence. It is authority supplied by the caller, not
+  // derived from a printed path or the currently selected Board.
+  const scopeCurrent = scope => {
+    if (disposed || scope?.signal?.aborted) return false
+    if (!scope) return true
+    try { return typeof scope.rootId === 'string' && !!scope.rootId && typeof scope.isCurrent === 'function' && scope.isCurrent() === true } catch { return false }
+  }
+  const openCurrent = (generation, rootId, scope) => present(generation) && scopeCurrent(scope)
+    && (activeRoot?.rootId || null) === rootId && (!scope || scope.rootId === rootId)
   const announce = message => { status.textContent = message; onState(snapshot()) }
   const showError = cause => {
     const details = cause?.details
@@ -609,15 +618,20 @@ export function createEGDeskFileView({ document, service, chooseRoot, chooseProj
     return holder
   }
 
-  async function appendDirectory(directoryId, group, cursor = 0, generation = treeGeneration, parentPath = '') {
-    const result = await service.listDirectory({ directoryId, cursor, limit: 100 })
-    if (disposed || generation !== treeGeneration) return
+  async function appendDirectory(directoryId, group, cursor = 0, generation = treeGeneration, parentPath = '', opening = null) {
+    const current = () => !disposed && generation === treeGeneration && (!opening || openCurrent(opening.generation, opening.rootId, opening.scope))
+    if (!current()) return false
+    let result
+    try { result = await service.listDirectory({ directoryId, cursor, limit: 100 }) }
+    catch (cause) { if (!current()) return false; throw cause }
+    if (!current()) return false
     const key = keyOf(parentPath)
     if (cursor === 0) loadedGroups.set(key, { group, directoryId, parentPath, loaded: 0 })
     const registered = loadedGroups.get(key)
     if (registered?.group === group) registered.loaded += result.entries.length
     for (const entry of result.entries) group.append(makeTreeItem(entry, parentPath))
     if (result.nextCursor != null) group.append(moreRow(directoryId, group, result.nextCursor, generation, parentPath))
+    return true
   }
 
   function forgetLoaded(relativePath) {
@@ -694,10 +708,18 @@ export function createEGDeskFileView({ document, service, chooseRoot, chooseProj
     return result
   }
 
-  async function openRoot(rootHandle, { preserveDraft = false, project = undefined } = {}) {
+  async function openRoot(rootHandle, { preserveDraft = false, project = undefined, scope = null } = {}) {
     if (!rootHandle?.rootId || !rootHandle?.directoryId) throw new Error('허용된 폴더 핸들이 없습니다.')
-    if (draft && editor.value !== draft.text) await flush()
+    if (!scopeCurrent(scope) || scope && scope.rootId !== rootHandle.rootId) return false
+    // Claim the operation before the first await; an older flush may not adopt
+    // a new root after a more recent file/root selection or close.
     const generation = token()
+    rootHandle = { ...rootHandle }
+    if (draft && editor.value !== draft.text) {
+      try { await flush() }
+      catch (cause) { if (!present(generation) || !scopeCurrent(scope)) return false; throw cause }
+      if (!present(generation) || !scopeCurrent(scope)) return false
+    }
     treeGeneration++
     markCheckStale()
     scriptPanel.hidden = true
@@ -712,13 +734,18 @@ export function createEGDeskFileView({ document, service, chooseRoot, chooseProj
     searchResults.replaceChildren()
     changeList.replaceChildren(); changesSummary.textContent = ''; changeDiffPanel.hidden = true
     if (!preserveDraft) { setTitle(rootHandle.name || '연결된 폴더'); setEditable(false); viewer.textContent = '트리에서 파일을 선택하세요.' }
-    await appendDirectory(rootHandle.directoryId, tree, 0, treeGeneration, '')
-    if (present(generation)) {
+    await appendDirectory(rootHandle.directoryId, tree, 0, treeGeneration, '', scope ? { generation, rootId: rootHandle.rootId, scope } : null)
+    if (openCurrent(generation, rootHandle.rootId, scope)) {
       tree.querySelector('[role="treeitem"]')?.setAttribute('tabindex', '0'); announce('폴더가 연결되었습니다.')
       // Background: a slow git status must not hold the tree or a restore.
-      refreshGitStatus().catch(() => {})
-      if (activeTab === 'changes') refreshChanges().catch(() => {})
+      // An original-run read opens only files, not an implicit git subprocess.
+      if (!scope) {
+        refreshGitStatus().catch(() => {})
+        if (activeTab === 'changes') refreshChanges().catch(() => {})
+      }
+      return true
     }
+    return false
   }
 
   function selectTab(name) {
@@ -861,27 +888,38 @@ export function createEGDeskFileView({ document, service, chooseRoot, chooseProj
     return true
   }
 
-  async function openFile(fileId, restoredDraftId = null, { focus = true, keepChangeDiff = false } = {}) {
-    const generation = token()
-    const restored = restoredDraftId && typeof service.readDraft === 'function' ? await service.readDraft({ draftId: restoredDraftId }) : null
+  async function openFile(fileId, restoredDraftId = null, { focus = true, keepChangeDiff = false, scope = null, operationGeneration = null } = {}) {
+    const rootId = activeRoot?.rootId || null
+    if (!scopeCurrent(scope) || scope && scope.rootId !== rootId) return false
+    const generation = operationGeneration ?? token()
+    const current = () => openCurrent(generation, rootId, scope)
+    const readOrStale = promise => Promise.resolve(promise).catch(cause => { if (current()) throw cause; return null })
+    if (!current()) return false
+    const restored = restoredDraftId && typeof service.readDraft === 'function' ? await readOrStale(service.readDraft({ draftId: restoredDraftId })) : null
+    if (!current()) return false
     let read
     let disconnected = false
     try { read = await service.readFile({ fileId }) }
     catch (cause) {
-      if (!restored || restored.fileId !== fileId) throw cause
+      if (!current()) return false
+      if (scope || !restored || restored.fileId !== fileId) throw cause
       read = { name: restored.name, size: null, sha256: restored.sourceHash, diskRevision: restored.sourceRevision, kind: 'text' }
       disconnected = true
     }
-    if (!present(generation)) return
+    if (!current()) return false
+    if (scope && read.fileId !== fileId) throw new Error('확인한 파일과 읽은 파일이 일치하지 않습니다.')
     let nextDraft = null
     if (read.kind === 'text') {
       const prior = draftsByFile.get(fileId)
       if (restoredDraftId && typeof service.readDraft !== 'function') throw new Error('작업사본 재열기 기능이 연결되지 않았습니다.')
-      nextDraft = restored || (restoredDraftId ? await service.readDraft({ draftId: restoredDraftId })
-        : prior && typeof service.readDraft === 'function' ? await service.readDraft({ draftId: prior.id })
-          : prior || await service.createDraft({ fileId }))
-      if (!present(generation)) return
+      nextDraft = await readOrStale(restored || (restoredDraftId ? service.readDraft({ draftId: restoredDraftId })
+        : prior && typeof service.readDraft === 'function' ? service.readDraft({ draftId: prior.id })
+          : prior || service.createDraft({ fileId })))
+      if (!current()) return false
       if (nextDraft.fileId !== fileId) throw new Error('작업사본과 파일 대상이 일치하지 않습니다.')
+      if (scope && (nextDraft.rootId !== rootId || nextDraft.sourceHash !== read.sha256 || nextDraft.sourceRevision !== read.diskRevision)) {
+        throw new Error('파일 연결 또는 내용이 읽는 동안 바뀌었습니다. 현재 파일 열기를 다시 선택하세요.')
+      }
     }
 
     // A remains the active visual/editing target while B is prepared. Preserve
@@ -889,12 +927,12 @@ export function createEGDeskFileView({ document, service, chooseRoot, chooseProj
     // typing while that preservation write is in flight, before adopting B.
     while (draft) {
       if (composing) { announce('입력을 마친 후 파일을 다시 여세요.'); return }
-      await flush()
-      if (!present(generation)) return
+      await readOrStale(flush())
+      if (!current()) return false
       if (composing) { announce('입력을 마친 후 파일을 다시 여세요.'); return }
       if (!draft || editor.value === draft.text) break
     }
-    if (!present(generation)) return
+    if (!current()) return false
     // Reopening the same draft must use the freshly preserved revision, not the
     // candidate read before the user's intervening input.
     if (nextDraft && draft?.id === nextDraft.id) nextDraft = draft
@@ -926,6 +964,7 @@ export function createEGDeskFileView({ document, service, chooseRoot, chooseProj
       if (focus) viewer.focus()
       announce('읽기 전용 파일 정보가 열렸습니다.')
     }
+    return true
   }
 
   async function beginReconnect() {
@@ -1333,11 +1372,21 @@ export function createEGDeskFileView({ document, service, chooseRoot, chooseProj
 
   // A path printed by an Agent, a test run or a file link → that file in this
   // view at the line. Only inside the connected folder (helper resolve).
-  async function openAt({ path: printed, relativePath, line } = {}) {
+  async function openAt({ path: printed, relativePath, line } = {}, { scope = null } = {}) {
+    if (!scopeCurrent(scope)) return false
     if (!activeRoot || typeof service.resolvePath !== 'function') { announce('먼저 폴더를 연결하세요.'); return false }
-    const found = await service.resolvePath({ rootId: activeRoot.rootId, path: relativePath || printed })
+    const rootId = activeRoot.rootId
+    if (scope && scope.rootId !== rootId) return false
+    const generation = token()
+    // Original-run links use their pinned absolute path, never a relative-path
+    // hint that could reinterpret an outside location under another root.
+    let found
+    try { found = await service.resolvePath({ rootId, path: scope ? printed : relativePath || printed }) }
+    catch (cause) { if (!openCurrent(generation, rootId, scope)) return false; throw cause }
+    if (!openCurrent(generation, rootId, scope)) return false
     if (found?.kind !== 'file') { announce('폴더는 트리에서 열 수 있습니다.'); return false }
-    await openFile(found.id)
+    const opened = await openFile(found.id, null, { scope, operationGeneration: generation })
+    if (!opened || !openCurrent(generation, rootId, scope)) return false
     if (activeFileId === found.id && Number.isInteger(line) && line > 0) revealLine(line)
     return activeFileId === found.id
   }

@@ -44,6 +44,16 @@ function safeLocation(location) {
     && (location.column == null || Number.isSafeInteger(location.column) && location.column > 0)
 }
 
+function verifiedOrigin(output, identity) {
+  const id = value => typeof value === 'string' && !!value.trim() && value.length <= 300 && !/[\u0000-\u001f\u007f]/.test(value)
+  return output?.protocolVersion === 1 && output.status === 'verified' && output.verified === true
+    && output.conversationId === identity.conversationId && output.runId === identity.runId
+    && ['projectId', 'rootId', 'directoryId'].every(key => id(output[key]))
+    && typeof output.displayPath === 'string' && output.displayPath.length <= 4096
+    && (/^\//.test(output.displayPath) || /^[A-Za-z]:[\\/]/.test(output.displayPath))
+    && !/[\u0000-\u001f\u007f]|\[redacted\]|•••/i.test(output.displayPath)
+}
+
 /**
  * A retained-output affordance for one original Chat command activity.
  * fetchJson(path, { method: 'GET', signal }) returns the existing bridge body.
@@ -57,12 +67,20 @@ function safeLocation(location) {
  * run's project authority. Neither cwd nor an active Board supplies that proof.
  * An injected onOpenLocation(location, identity) must perform a safe FileView
  * open with that original authority; it is called only by a file-location click.
+ * Optional readOrigin(target, {signal}) and onOpenVerifiedFile(request) replace
+ * that legacy callback as a pair. The reader is account/epoch scoped and sends
+ * only conversationId/runId in GET /chat/run-project-origin. Display verification
+ * is not an opening grant: onOpenVerifiedFile receives readOrigin and MUST read
+ * it again on every click before resolving the path in a separate File Card.
  */
 export function createChatRunResultView({ document, run, activity, fetchJson, isCurrent,
-  projectRoot, os, onOpenLocation } = {}) {
+  projectRoot, os, onOpenLocation, readOrigin = null, onOpenVerifiedFile = null } = {}) {
   if (!document?.createElement || typeof fetchJson !== 'function' || typeof isCurrent !== 'function') {
     throw new TypeError('A document, output fetch callback and current-view fence are required')
   }
+  if ([readOrigin, onOpenVerifiedFile].some(hook => hook != null && typeof hook !== 'function')) throw new TypeError('Original-run file hooks must be functions')
+  const wantsOrigin = readOrigin != null || onOpenVerifiedFile != null
+  const originHooks = typeof readOrigin === 'function' && typeof onOpenVerifiedFile === 'function'
   const identity = snapshotIdentity(run, activity)
   const item = snapshotItem(activity)
   const path = `/chat/command-output?${ID_FIELDS.map(key => `${key}=${encodeURIComponent(identity[key])}`).join('&')}`
@@ -80,6 +98,7 @@ export function createChatRunResultView({ document, run, activity, fetchJson, is
   const body = document.createElement('div')
   element.append(button, notice, body)
   let generation = 0, disposed = false, loading = false, controller = null
+  let fileController = null, openingFile = false
 
   const current = ticket => {
     if (disposed || ticket !== generation || element.isConnected !== true) return false
@@ -99,6 +118,7 @@ export function createChatRunResultView({ document, run, activity, fetchJson, is
   async function open() {
     if (!current(generation)) return 'stale'
     if (loading) return 'loading'
+    fileController?.abort(); fileController = null; openingFile = false
     const ticket = ++generation
     loading = true
     controller = new AbortController()
@@ -125,8 +145,8 @@ export function createChatRunResultView({ document, run, activity, fetchJson, is
         show('missing', '보관된 출력 내용이 없어 성공·실패 결과를 확인할 수 없습니다.')
         return 'missing'
       }
-      const result = runResultFromCodexItem(item, { output: { head: output.head, tail: output.tail,
-        omittedBytes: output.omittedBytes }, projectRoot, os })
+      const retained = { head: output.head, tail: output.tail, omittedBytes: output.omittedBytes }
+      let result = runResultFromCodexItem(item, { output: retained, projectRoot: wantsOrigin ? undefined : projectRoot, os })
       // Retained text and counts alone cannot promote a running/unknown item to
       // success. Only a completed output plus the original successful exit can.
       if (item.status === 'inProgress') {
@@ -140,18 +160,56 @@ export function createChatRunResultView({ document, run, activity, fetchJson, is
         result.failures = []
         result.firstLocation = null
       }
+      let origin = null
+      if (originHooks && result.failures.some(failure => failure.location)) {
+        // Failure to verify origin never hides or replaces the retained output.
+        try {
+          const response = await readOrigin(identity, { signal: controller.signal })
+          if (!current(ticket)) return 'stale'
+          if (verifiedOrigin(response, identity)) origin = Object.freeze({ displayPath: response.displayPath })
+        } catch { if (!current(ticket)) return 'stale' }
+        if (origin) result = runResultFromCodexItem(item, { output: retained, projectRoot: origin.displayPath, os })
+      }
       const locations = result.failures.map(failure => failure.location).filter(Boolean)
-      const canOpen = typeof onOpenLocation === 'function' && locations.every(safeLocation)
-      const openLocation = canOpen ? location => {
-        if (!current(ticket) || !safeLocation(location)) return
+      const canOpen = (wantsOrigin ? originHooks && !!origin : typeof onOpenLocation === 'function') && locations.every(safeLocation)
+      const openLocation = canOpen ? async location => {
+        if (!current(ticket) || !safeLocation(location) || openingFile) return
         // Copy the parsed location. A callback never receives an active Board or
         // a newly selected file as an implicit substitute for this original run.
         const selected = Object.freeze({ path: location.path, relativePath: location.relativePath,
           line: location.line, column: location.column, label: location.label, inProject: location.inProject })
         const failed = () => { if (current(ticket)) notice.textContent = '이 실행의 파일 위치를 열지 못했습니다.' }
-        try { Promise.resolve(onOpenLocation(selected, identity)).catch(failed) } catch { failed() }
+        if (!wantsOrigin) {
+          try { await onOpenLocation(selected, identity) } catch { failed() }
+          return
+        }
+        const opening = new AbortController()
+        fileController = opening; openingFile = true
+        const stillCurrent = target => current(ticket) && fileController === opening && !opening.signal.aborted
+          && ID_FIELDS.every(key => target?.[key] === identity[key])
+        notice.textContent = '이 실행의 연결을 다시 확인하고 현재 파일을 여는 중입니다.'
+        try {
+          const opened = await onOpenVerifiedFile({ target: identity, location: selected, readOrigin,
+            isCurrent: stillCurrent, signal: opening.signal })
+          if (!stillCurrent(identity)) return
+          notice.textContent = opened?.status === 'opened'
+            ? '별도 파일 창에서 현재 파일을 열었습니다. 아래 보관된 출력은 당시 기록입니다.'
+            : '현재 파일을 열지 못했습니다. 보관된 출력은 유지됩니다. 실행의 현재 연결을 확인해 주세요.'
+        } catch { failed() }
+        finally { if (fileController === opening) { openingFile = false; fileController = null } }
       } : undefined
-      body.append(renderRunResultCard({ document, result, onOpenLocation: openLocation }))
+      const card = renderRunResultCard({ document, result, onOpenLocation: openLocation })
+      if (wantsOrigin && canOpen) {
+        const label = node => {
+          if (node.className?.split(' ').includes('egdesk-run-result-location') && node.tagName?.toLowerCase() === 'button') {
+            node.textContent = `현재 파일 열기 · ${node.textContent}`
+            node.setAttribute('aria-label', node.textContent)
+          }
+          for (const child of node.children) label(child)
+        }
+        label(card)
+      }
+      body.append(card)
       note('보관된 출력 기준입니다. 민감한 내용이 가려졌을 수 있습니다.')
       if (output.omittedBytes > 0) note('보관 한도로 출력 일부가 생략되어 있습니다. 전체 로그가 아닙니다.')
       if (!output.complete || item.status === 'inProgress') note('실행 중이거나 출력 완료가 아직 확인되지 않아 최종 성공 결과로 표시하지 않습니다.')
@@ -181,6 +239,7 @@ export function createChatRunResultView({ document, run, activity, fetchJson, is
     disposed = true
     generation++
     controller?.abort()
+    fileController?.abort(); fileController = null; openingFile = false
     button.disabled = true
     button.removeEventListener('click', clicked)
     body.replaceChildren()
