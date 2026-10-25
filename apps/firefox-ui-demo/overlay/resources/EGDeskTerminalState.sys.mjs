@@ -79,12 +79,18 @@ export function createTerminalWriteQueue({ write, onError = () => {} }) {
     },
     invalidate() { sessionId = null; generation++; },
     snapshot: () => ({ sessionId, generation }),
-    enqueue(data) {
+    enqueue(data, { isCurrent = () => true, beforeWrite = null } = {}) {
       if (typeof data !== 'string') return Promise.reject(new TypeError('Terminal input must be text'));
       const id = sessionId, revision = generation;
       if (!id || !data) return Promise.resolve({ ok: false, skipped: true, code: 'TERMINAL_INPUT_INACTIVE' });
       const pending = tail.then(async () => {
-        if (!current(id, revision)) return { ok: false, skipped: true, code: 'TERMINAL_INPUT_STALE' };
+        const active = () => current(id, revision) && isCurrent();
+        if (!active()) return { ok: false, skipped: true, code: 'TERMINAL_INPUT_STALE' };
+        if (beforeWrite) {
+          const permission = await beforeWrite();
+          if (permission?.ok === false) return { ...permission, skipped: true };
+        }
+        if (!active()) return { ok: false, skipped: true, code: 'TERMINAL_INPUT_STALE' };
         try {
           const result = await write(id, data);
           if (result?.ok === false || result?.error) throw new Error(result.error || 'Terminal input was rejected');
@@ -171,7 +177,7 @@ export function createTerminalCompositionGate({
 // marker: it holds a format string or an expression, not the digits.
 export const TERMINAL_RUN_LIMITS = Object.freeze({ headChars: 8 * 1024, tailChars: 64 * 1024, timeoutMs: 10 * 60_000, maxCommandChars: 1000 });
 const RUN_NONCE = /^[a-z0-9]{8,32}$/;
-const COMMAND_BAD = /[\u0000\r\n]/;
+const COMMAND_BAD = /[\u0000-\u001f\u007f\u2028\u2029]/;
 
 export function quotePosixShell(value) {
   return `'${String(value).replace(/'/g, `'\\''`)}'`;
@@ -198,11 +204,13 @@ export function terminalScriptLine({ command, cwd, nonce, shell = 'posix' } = {}
   const text = command.trim();
   if (shell === 'posix') {
     const enter = cwd ? `cd -- ${quotePosixShell(cwd)} && ` : '';
-    return `${enter}${text}; printf '\\n[egdesk-run:%s:exit=%d]\\n' ${nonce} "$?"\r`;
+    // The complete user command is gated on cd, including semicolon-separated
+    // commands and comments. A subshell also keeps its cd/exit from escaping.
+    return `( ${enter}eval ${quotePosixShell(text)} ); printf '\\n[egdesk-run:%s:exit=%d]\\n' ${nonce} "$?"\r`;
   }
   if (shell === 'powershell') {
-    const enter = cwd ? `Set-Location -LiteralPath ${quotePowerShell(cwd)}; ` : '';
-    return `${enter}$global:LASTEXITCODE = $null; ${text}; $egdeskOk = $?; $egdeskExit = if ($null -ne $global:LASTEXITCODE) { $global:LASTEXITCODE } elseif ($egdeskOk) { 0 } else { 1 }; Write-Output ("\`n[egdesk-run:${nonce}:exit=" + $egdeskExit + "]")\r`;
+    const enter = cwd ? `Set-Location -LiteralPath ${quotePowerShell(cwd)} -ErrorAction Stop; ` : '';
+    return `& { $egdeskExit = 1; $egdeskLocation = Get-Location; try { ${enter}$global:LASTEXITCODE = $null; & ([scriptblock]::Create(${quotePowerShell(text)})); $egdeskOk = $?; $egdeskExit = if ($null -ne $global:LASTEXITCODE) { $global:LASTEXITCODE } elseif ($egdeskOk) { 0 } else { 1 } } catch { Write-Output $_; $egdeskExit = 1 } finally { Set-Location -LiteralPath $egdeskLocation.Path -ErrorAction SilentlyContinue }; Write-Output ("\`n[egdesk-run:${nonce}:exit=" + $egdeskExit + "]") }\r`;
   }
   throw Object.assign(new Error('This terminal shell is not supported for project commands'), { code: 'TERMINAL_RUN_SHELL' });
 }
@@ -211,6 +219,7 @@ export function terminalScriptLine({ command, cwd, nonce, shell = 'posix' } = {}
 // this nonce arrives, then {exitCode, output: {head, tail, omittedBytes}}.
 export function createTerminalRunCollector({ nonce, headChars = TERMINAL_RUN_LIMITS.headChars, tailChars = TERMINAL_RUN_LIMITS.tailChars } = {}) {
   if (typeof nonce !== 'string' || !RUN_NONCE.test(nonce)) throw Object.assign(new Error('A run nonce is required'), { code: 'TERMINAL_RUN_NONCE' });
+  if (![headChars, tailChars].every(size => Number.isInteger(size) && size >= 0 && size <= TERMINAL_RUN_LIMITS.tailChars)) throw new RangeError('Invalid terminal output bound');
   const marker = new RegExp(`\\[egdesk-run:${nonce}:exit=(-?\\d{1,10})\\]`);
   let head = '';
   let tail = '';
@@ -225,7 +234,7 @@ export function createTerminalRunCollector({ nonce, headChars = TERMINAL_RUN_LIM
     }
     if (!text) return;
     tail += text;
-    if (tail.length > tailChars) { omitted += tail.length - tailChars; tail = tail.slice(-tailChars); }
+    if (tail.length > tailChars) { omitted += tail.length - tailChars; tail = tailChars ? tail.slice(-tailChars) : ''; }
   };
   // The echoed command line (it contains 'egdesk-run:' but not the digits)
   // is dropped from what the card shows.
@@ -249,6 +258,10 @@ export function createTerminalRunCollector({ nonce, headChars = TERMINAL_RUN_LIM
       return result;
     },
     get done() { return result !== null; },
+    output() {
+      if (window) { keep(clean(window)); window = ''; }
+      return Object.freeze({ head, tail, omittedBytes: omitted });
+    },
     snapshot: () => ({ done: result !== null, headChars: head.length, tailChars: tail.length, omittedBytes: omitted }),
   };
 }
@@ -276,24 +289,30 @@ export function createTerminalScriptRun({ write, command, cwd = null, shell = 'p
   return {
     line,
     nonce,
-    async start() {
-      if (startedAt != null) return finished;
+    start() {
+      if (startedAt != null || !settle) return finished;
       startedAt = now();
-      timer = schedule(() => finish({ exitCode: null, output: null, status: 'unknown' }), timeoutMs);
+      timer = schedule(() => finish({ exitCode: null, output: collector.output(), status: 'unknown' }), timeoutMs);
+      if (!settle) return finished;
       try {
-        const written = await write(line);
-        if (written?.ok === false) finish({ exitCode: null, output: null, status: 'not-started', code: written.code || 'TERMINAL_INPUT_REJECTED' });
+        // A lost write acknowledgement must not hold the result hostage after
+        // the collector timed out, was cancelled, or received an exit marker.
+        Promise.resolve(write(line)).then(written => {
+          if (written?.ok === false) finish({ exitCode: null, output: null, status: 'not-started', code: written.code || 'TERMINAL_INPUT_REJECTED' });
+        }, error => finish({ exitCode: null, output: collector.output(), status: 'unknown', code: error?.code || 'TERMINAL_INPUT_UNCONFIRMED' }));
       } catch (error) {
-        finish({ exitCode: null, output: null, status: 'not-started', code: error?.code || 'TERMINAL_INPUT_REJECTED' });
+        finish({ exitCode: null, output: collector.output(), status: 'unknown', code: error?.code || 'TERMINAL_INPUT_UNCONFIRMED' });
       }
       return finished;
     },
     onData(data) {
+      if (startedAt == null || !settle) return false;
       const result = collector.push(data);
       if (result) finish({ exitCode: result.exitCode, output: result.output, status: result.exitCode === 0 ? 'completed' : 'failed' });
       return !!result;
     },
-    cancel() { finish({ exitCode: null, output: null, status: 'unknown' }); },
+    cancel() { finish({ exitCode: null, output: collector.output(), status: 'unknown' }); },
+    get active() { return startedAt != null && !!settle; },
     result: finished,
   };
 }

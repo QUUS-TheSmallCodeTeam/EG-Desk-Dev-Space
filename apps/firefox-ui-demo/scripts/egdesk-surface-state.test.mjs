@@ -3588,7 +3588,7 @@ test('actual send path preserves draft B and new attachments typed during delaye
   assert.ok(body);
   const deps = ['state', 'getActiveCodexThread', 'getCodexThreadDraft', 'ChatState', 'threadBusy', 'epochScope', 'ensureNativeReadyForSend', 'updateThreadById', 'emit',
     'captureThreadInputs', 'getCodexThreadById', 'protocol', 'codexThreadAgentProfile', 'appendMessageToThread', 'createCodexMessage', 'SELF_MEMBER', 'codexThreadRuntimeConfig', 'fetchJson', 'syncProtocolRun', 'browserToolSelectedSources',
-    'rootSseReady'];
+    'rootSseReady', 'chatRequestProjectDisplays', 'CHAT_REQUEST_PROJECT_INVALID'];
   const send = compileFunction(`return (async () => {${body}\n})();`, deps);
   const selectedBody = surfaceSource.match(/  function browserToolSelectedSources\(threadId, candidates = null\) \{([\s\S]*?)\n  \}/)?.[1];
   assert.ok(selectedBody, 'test the production selected-source filter rather than inventing a permissive selector');
@@ -3620,7 +3620,7 @@ test('actual send path preserves draft B and new attachments typed during delaye
     (id, message) => update(id, thread => ({ ...thread, messages: [...thread.messages, message] })),
     (role, content, status, options) => ({ role, content, status, ...options }), 'self', () => ({}),
     async (_url, request) => { sendCount++; payload = JSON.parse(request.body); return { accepted: true, conversationId: 'c', runId: 'r', answerId: 'c/r' }; }, () => {},
-    actualSelectedSources, () => ({ sourceReady: true, eventSourceReadyState: 1, browserTransportId: 'ui-stream-1' }));
+    actualSelectedSources, () => ({ sourceReady: true, eventSourceReadyState: 1, browserTransportId: 'ui-stream-1' }), new Map(), requestProjectSurfaceConstants().CHAT_REQUEST_PROJECT_INVALID);
   state.codex.threadDrafts.room = 'B';
   state.codex.threadDraftRevisions.room = 2;
   update('room', thread => ({ ...thread, inputSources: [...thread.inputSources, { id: 'b' }] }));
@@ -3658,7 +3658,7 @@ test('actual send path preserves draft B and new attachments typed during delaye
     (id, message) => update(id, thread => ({ ...thread, messages: [...thread.messages, message] })),
     (role, content, status, options) => ({ role, content, status, ...options }), 'self', () => ({}),
     async () => { assert.fail('a selected Browser must not submit without its ready SSE transport ID'); }, () => {},
-    actualSelectedSources, connectingStatus);
+    actualSelectedSources, connectingStatus, new Map(), requestProjectSurfaceConstants().CHAT_REQUEST_PROJECT_INVALID);
   assert.equal(payload, null);
   assert.equal(sendCount, 1);
   assert.equal(state.codex.threadDrafts.room, 'B');
@@ -3672,7 +3672,7 @@ test('actual send path preserves draft B and new attachments typed during delaye
     (id, message) => update(id, thread => ({ ...thread, messages: [...thread.messages, message] })),
     (role, content, status, options) => ({ role, content, status, ...options }), 'self', () => ({}),
     async () => { assert.fail('stale interaction authority must not degrade silently to a normal read-only send'); }, () => {},
-    actualSelectedSources, () => ({ sourceReady: true, eventSourceReadyState: 1, browserTransportId: 'ui-stream-1' }));
+    actualSelectedSources, () => ({ sourceReady: true, eventSourceReadyState: 1, browserTransportId: 'ui-stream-1' }), new Map(), requestProjectSurfaceConstants().CHAT_REQUEST_PROJECT_INVALID);
   assert.equal(sendCount, 1);
   assert.equal(getThread(null).messages.length, 1);
   assert.equal(state.codex.threadDrafts.room, 'B');
@@ -7460,7 +7460,7 @@ test('기록 없이 시작: the switch, the first-send body, the confirmed badge
   assert.ok(body);
   const deps = ['state', 'getActiveCodexThread', 'getCodexThreadDraft', 'ChatState', 'threadBusy', 'epochScope', 'ensureNativeReadyForSend', 'updateThreadById', 'emit',
     'captureThreadInputs', 'getCodexThreadById', 'protocol', 'codexThreadAgentProfile', 'appendMessageToThread', 'createCodexMessage', 'SELF_MEMBER', 'codexThreadRuntimeConfig', 'fetchJson', 'syncProtocolRun', 'browserToolSelectedSources',
-    'rootSseReady', 'InputContext'];
+    'rootSseReady', 'InputContext', 'chatRequestProjectDisplays', 'CHAT_REQUEST_PROJECT_INVALID'];
   const send = async (room, capabilities, reply) => {
     const state = { codex: { activeThreadId: 'room', threads: [{ id: 'room', messages: [], inputSources: [], briefingInputs: [], profileEnabled: false, ...room }],
       threadDrafts: { room: '안녕' }, threadDraftRevisions: { room: 1 }, authStatus: sessionAuth, connected: true, chatCapabilities: capabilities } };
@@ -7472,7 +7472,7 @@ test('기록 없이 시작: the switch, the first-send body, the confirmed badge
       (id, message) => update(id, thread => ({ ...thread, messages: [...thread.messages, message] })),
       (role, content, status, options) => ({ id: `message-${role}`, role, content, status, ...options }), '나', () => ({}),
       async (_url, request) => { payload = JSON.parse(request.body); return reply(payload); }, () => {}, () => [],
-      () => ({ sourceReady: true, eventSourceReadyState: 1, browserTransportId: null }), InputContext);
+      () => ({ sourceReady: true, eventSourceReadyState: 1, browserTransportId: null }), InputContext, new Map(), requestProjectSurfaceConstants().CHAT_REQUEST_PROJECT_INVALID);
     return { payload, thread: getThread(null) };
   };
   const accepted = request => ({ accepted: true, conversationId: 'native-one', runId: 'r1', answerId: 'native-one/r1', ...(request.stateless ? { stateless: true } : {}) });
@@ -8985,7 +8985,10 @@ function browserAgentControlHarness() {
     accountStatus: 'unverified', userContextId: 0, engineAccountKey: 'codex:chatgpt:fixture@example.test', authorityEpoch: 1,
     url: 'https://shop.example/cart' };
   const windowGlobal = { innerWindowId: 201 };
-  const browser = { browsingContext: { id: 101, currentWindowGlobal: windowGlobal } };
+  const browserEvents = new Map();
+  const browser = { browsingContext: { id: 101, currentWindowGlobal: windowGlobal },
+    addEventListener(name, listener) { browserEvents.set(name, listener); },
+    removeEventListener(name, listener) { if (browserEvents.get(name) === listener) browserEvents.delete(name); } };
   const calls = { observe: 0, act: 0, effects: 0 };
   let authorize;
   const node = (fields = {}) => ({ hidden: false, isConnected: true, dataset: {}, attrs: {}, textContent: '', title: '',
@@ -9016,11 +9019,12 @@ function browserAgentControlHarness() {
   let nonce = 0;
   const transport = new Function('document', 'ChatState', 'browserToolRunBindings', 'browserToolCancelledRuns',
     'browserToolRequestReceipts', 'browserToolCardLeases', 'browserToolUserSelections', 'browserToolPendingBindings',
-    'browserToolActionLeases', 'browserToolStoppedRuns', 'chatBindingNonce',
+    'browserToolActionLeases', 'browserToolStoppedRuns', 'chatBindingNonce', 'BROWSER_TOOL_REPLY_MARGIN_MS',
     `let browserToolFixtureLastAction = null;\nconst browserToolFixtureAuthorizationByCard = new Map();\n${revokeSource}\n${dispatchSource}\n` +
-    'return {browserToolDispatch,browserToolAuthorizePhysicalAction,revokeBrowserToolCard,browserToolCardPermission}')(doc,
+    'return {browserToolDispatch,browserToolAuthorizePhysicalAction,revokeBrowserToolCard,browserToolCardPermission,createBrowserToolDialogObserver}')(doc,
     { knownCodexAccountKey: key => typeof key === 'string' && key.startsWith('codex:') }, maps.runBindings, maps.cancelled,
-    maps.receipts, maps.cardLeases, maps.selections, maps.pendingBindings, maps.actionLeases, maps.stopped, () => `lease-${++nonce}`);
+    maps.receipts, maps.cardLeases, maps.selections, maps.pendingBindings, maps.actionLeases, maps.stopped, () => `lease-${++nonce}`,
+    Number(surfaceSource.match(/const BROWSER_TOOL_REPLY_MARGIN_MS = (\d+);/)[1]));
   authorize = transport.browserToolAuthorizePhysicalAction;
   const timers = new Map();
   let timerSeq = 0;
@@ -9036,13 +9040,14 @@ function browserAgentControlHarness() {
   const block = new Function('card', 'window', 'document', 'SurfaceState', 'browserToolCardPermission', 'agentBadge', 'agentHandButton',
     'menuButton', 'browserAgentHistory', 'el', 'deskIcon', 'closeBrowserMenu', 'recordBrowserAgentAction', 'agentActionSeq',
     'browserState', 'state', 'browserDisplayHost', 'revokeBrowserToolCard', 'agentProjection', 'showBrowserMenu',
+    'createBrowserToolDialogObserver', 'xulBrowser',
     `${blockSource}\nreturn { agentControl, refreshAgentControl, startAgentToolActivity, agentUserHold, pauseAgentControl,
       handBackAgentControl, endAgentHold, toggleAgentTimeline, disposeAgentControl };`)(
     card, window, document, Surface, transport.browserToolCardPermission, agentBadge, agentHandButton, menuButton,
     ({ limit } = {}) => structuredClone(history.slice(-limit)), el, () => el('svg'), () => {}, entry => history.push(entry), 0,
     { uri: 'https://shop.example/cart' }, state, url => new URL(url).hostname,
     cardId => { revokes.push(cardId); return transport.revokeBrowserToolCard(cardId); }, { invalidate() {} },
-    (anchor, options) => { menus.push([anchor, options]); });
+    (anchor, options) => { menus.push([anchor, options]); }, transport.createBrowserToolDialogObserver, browser);
   card._browserControls.toolActivity = block.startAgentToolActivity;
   card._browserControls.toolUserHold = block.agentUserHold;
   let sequence = 0;
@@ -10420,7 +10425,7 @@ test('CTX-03 send: contextResolution names the list and the refs taken from it, 
   assert.ok(body);
   const deps = ['state', 'getActiveCodexThread', 'getCodexThreadDraft', 'ChatState', 'threadBusy', 'epochScope', 'ensureNativeReadyForSend', 'updateThreadById', 'emit',
     'captureThreadInputs', 'getCodexThreadById', 'protocol', 'codexThreadAgentProfile', 'appendMessageToThread', 'createCodexMessage', 'SELF_MEMBER', 'codexThreadRuntimeConfig', 'fetchJson', 'syncProtocolRun', 'browserToolSelectedSources',
-    'rootSseReady', 'InputContext', 'expireContextSuggestions'];
+    'rootSseReady', 'InputContext', 'expireContextSuggestions', 'chatRequestProjectDisplays', 'CHAT_REQUEST_PROJECT_INVALID'];
   const send = async ({ inputSources = [], suggest = { resolution, receivedAt: Date.now(), accountKey }, reply }) => {
     const state = { codex: { activeThreadId: 'room', threads: [{ id: 'room', messages: [], inputSources, briefingInputs: [], profileEnabled: false }],
       threadDrafts: { room: '이 자료로 정리해 줘' }, threadDraftRevisions: { room: 1 }, authStatus: sessionAuth, connected: true, chatCapabilities: ['send'] },
@@ -10436,7 +10441,7 @@ test('CTX-03 send: contextResolution names the list and the refs taken from it, 
       (id, message) => update(id, thread => ({ ...thread, messages: [...thread.messages, message] })),
       (role, content, status, options) => ({ id: `message-${role}`, role, content, status, ...options }), '나', () => ({}),
       async (_url, request) => { payload = JSON.parse(request.body); return reply(payload); }, () => {}, () => [],
-      () => ({ sourceReady: true, eventSourceReadyState: 1, browserTransportId: null }), InputContext, id => expired.push(id));
+      () => ({ sourceReady: true, eventSourceReadyState: 1, browserTransportId: null }), InputContext, id => expired.push(id), new Map(), requestProjectSurfaceConstants().CHAT_REQUEST_PROJECT_INVALID);
     return { payload, thread: getThread(null), state, expired };
   };
   const accepted = () => ({ accepted: true, conversationId: 'native-one', runId: 'r1', answerId: 'native-one/r1' });
@@ -11543,4 +11548,580 @@ test('RT-03 the store waits for a Board save in flight before an export reads it
   assert.equal(sync.pendingBoardSave('agenda-a'), null, 'a finished save is forgotten');
   // The legacy bundle-library controller stays exported for the helper's own test.
   assert.equal(typeof Portable.createEGDeskPortableState, 'function');
+});
+
+// Request-local execution project: the actual renderer/bridge methods, no provider or OS calls.
+function requestProjectSurfaceConstants() {
+  const start = surfaceSource.indexOf('  const chatRequestProjectDisplays = ');
+  const end = surfaceSource.indexOf('\n  function normalizeChatRequestProjectDraft(', start);
+  assert.ok(start >= 0 && end > start);
+  return compileFunction(surfaceSource.slice(start, end)
+    + '\nreturn { chatRequestProjectDisplays, CHAT_REQUEST_PROJECT_INVALID, CHAT_REQUEST_PROJECT_CONNECT };')();
+}
+
+function requestProjectBridgeMethod(name, deps) {
+  const prefix = ['readRequestProject', 'sendMessage'].includes(name) ? 'async ' : '';
+  const start = surfaceSource.indexOf('      ' + prefix + name + '(');
+  const end = surfaceSource.indexOf('\n      },', start);
+  assert.ok(start >= 0 && end > start, 'actual bridge method: ' + name);
+  return compileFunction('return { ' + surfaceSource.slice(start, end + 8) + '\n };',
+    Object.keys(deps))(...Object.values(deps))[name];
+}
+
+function requestProjectDOM() {
+  let document;
+  class Node {
+    constructor(tag, text = '') {
+      Object.assign(this, { tag, text, children: [], attributes: {}, dataset: {}, listeners: {}, style: {},
+        className: '', parent: null, ownerDocument: document, disabled: false, value: '' });
+    }
+    get isConnected() { return this === document.documentElement || !!this.parent?.isConnected; }
+    appendChild(child) { this.children.push(child); child.parent = this; return child; }
+    replaceChildren(...children) { for (const child of this.children) child.parent = null; this.children = []; this.text = ''; children.forEach(child => this.appendChild(child)); }
+    remove() { if (this.parent) this.parent.children = this.parent.children.filter(child => child !== this); this.parent = null; }
+    setAttribute(key, value) {
+      this.attributes[key] = String(value);
+      if (key === 'id' || key === 'value') this[key] = String(value);
+      if (key === 'disabled') this.disabled = true;
+    }
+    addEventListener(type, callback) { (this.listeners[type] ||= []).push(callback); }
+    get textContent() { return this.text + this.children.map(child => child.textContent).join(''); }
+    set textContent(value) { this.replaceChildren(); this.text = String(value); }
+    set innerHTML(_) { assert.fail('project UI must use text nodes'); }
+    all(predicate) { return this.children.flatMap(child => [...(predicate(child) ? [child] : []), ...child.all(predicate)]); }
+    testid(id) { return this.all(child => child.dataset.testid === id)[0] || null; }
+    focus() { document.activeElement = this; }
+    async dispatch(type, fields = {}) {
+      if (type === 'click' && this.disabled) return;
+      const event = { target: this, preventDefault() {}, stopPropagation() {}, ...fields };
+      await Promise.all((this.listeners[type] || []).map(listener => listener(event)));
+    }
+  }
+  document = { createElement: tag => new Node(tag), createTextNode: text => new Node('#text', text),
+    getElementById: id => document.documentElement.all(node => node.id === id)[0] || null };
+  document.documentElement = new Node('html');
+  return document;
+}
+
+const requestProjectA = () => ({ boardId: 'board-a', projectId: 'project-a', rootId: 'root-a', title: 'Project A', displayPath: '/owned/project-a' });
+const requestProjectB = () => ({ boardId: 'board-b', projectId: 'project-b', rootId: 'root-b', title: 'Project B', displayPath: '/owned/project-b' });
+const requestProjectPacket = target => ({ ok: true, result: { project: { ...target, status: 'connected' } } });
+
+function requestProjectUiHarness({ target, read } = {}) {
+  const constants = requestProjectSurfaceConstants();
+  const document = requestProjectDOM();
+  const el = compileFunction('return function el(tag, props = {}, ...children) {' + elBody + '\n};', ['document'])(document);
+  const state = { codex: { activeThreadId: 'room', threads: [
+    { id: 'room', clientBindingId: 'wire-room', title: 'Original room', messages: [], inputSources: [{ id: 'attached' }], briefingInputs: [{ sourceId: 'briefing' }],
+      ...(target === undefined ? {} : { requestProjectTarget: target }) },
+    { id: 'other', clientBindingId: 'wire-other', title: 'Other room', messages: [] }],
+    threadDrafts: { room: 'keep my words' }, threadDraftRevisions: { room: 1 } },
+  boards: { projections: { first: { boardId: 'board-a', title: 'Board A' }, second: { boardId: 'board-b', title: 'Board B' } } } };
+  Object.defineProperty(state.boards, 'activeProjectionId', { get() { assert.fail('Chat project selection must not read the active Board'); } });
+  const getThread = (_codex, id) => state.codex.threads.find(thread => thread.id === id) || null;
+  const update = (id, action) => { state.codex.threads = state.codex.threads.map(thread => thread.id === id ? action(thread) : thread); };
+  const calls = [], timers = new Map();
+  let timerSeq = 0, reader = read || (boardId => requestProjectPacket(boardId === 'board-a' ? requestProjectA() : requestProjectB()));
+  const deps = { ...constants, state, document, el, ChatState: Chat, getCodexThreadById: getThread, updateThreadById: update, emit() {},
+    coerceAgendaStore: () => ({ agendas: {}, meta: {} }),
+    window: { AbortController, setTimeout(fn) { const id = ++timerSeq; timers.set(id, fn); return id; }, clearTimeout: id => timers.delete(id) },
+    ChromeUtils: { importESModule(url) {
+      assert.equal(url, 'chrome://userchrome/content/EGDeskFileView.sys.mjs');
+      return { createEGDeskFileServiceCallbacks };
+    } },
+    fetchJson: async (path, options) => {
+      const body = JSON.parse(options.body);
+      calls.push({ path, body });
+      assert.equal(path, '/v1/files/projects/open', 'only project inspection, never commands or provider dispatch');
+      assert.deepEqual(Object.keys(body), ['boardId']);
+      assert.equal(options.method, 'POST');
+      return reader(body.boardId);
+    },
+  };
+  const bridge = { readRequestProject: requestProjectBridgeMethod('readRequestProject', deps),
+    setRequestProjectTarget: requestProjectBridgeMethod('setRequestProjectTarget', deps) };
+  state.codexBridge = bridge;
+  const names = ['normalizeChatRequestProjectDraft', 'chatRequestProjectSelection', 'chatRequestProjectCandidates', 'openChatRequestProjectPanel', 'buildChatRequestProjectControl'];
+  const api = compileFunction(names.map(declaration).join('\n') + '\nreturn { ' + names.join(', ') + ' };',
+    Object.keys(deps))(...Object.values(deps));
+  return { ...api, ...constants, state, document, bridge, calls, timers,
+    thread: () => getThread(null, 'room'), setReader: value => { reader = value; },
+    panel: () => document.getElementById('egd-codex-input-panel'),
+    control: () => api.buildChatRequestProjectControl(getThread(null, 'room'), bridge),
+    async choose(boardId) { const select = this.panel().testid('chat-project-board'); select.value = boardId; await select.dispatch('change'); await settle(); },
+  };
+}
+
+function requestProjectSendHarness({ target, capture, reply, inputSources = [{ id: 'attachment', kind: 'board-element', label: 'Selected element', sourceRef: { viewId: 'element-a' } }] } = {}) {
+  const constants = requestProjectSurfaceConstants();
+  const state = { codex: { activeThreadId: 'room', threads: [{ id: 'room', clientBindingId: 'original-wire-room', profileEnabled: false,
+    messages: [], inputSources, briefingInputs: [], ...(target === undefined ? {} : { requestProjectTarget: target }) }],
+    threadDrafts: { room: 'original words' }, threadDraftRevisions: { room: 1 }, authStatus: sessionAuth, connected: true },
+  boards: {} };
+  Object.defineProperty(state.boards, 'activeProjectionId', { get() { assert.fail('sending must never infer an active Board target'); } });
+  const getThread = (_codex, id = 'room') => state.codex.threads.find(thread => thread.id === id) || null;
+  const update = (id, action) => { state.codex.threads = state.codex.threads.map(thread => thread.id === id ? action(thread) : thread); };
+  const calls = { begin: 0, prepare: 0, capture: 0, provider: [] };
+  const protocol = Chat.createChatProtocolState();
+  if (target) constants.chatRequestProjectDisplays.set('room', target);
+  const deps = { ...constants, state, ChatState: Chat, InputContext, protocol,
+    getActiveCodexThread: () => getThread(null), getCodexThreadDraft: (codex, id) => codex.threadDrafts[id] || '', getCodexThreadById: getThread,
+    threadBusy: () => false, epochScope: { begin: () => { calls.begin++; return {}; }, valid: () => true, finish() {} },
+    ensureNativeReadyForSend: async () => { calls.prepare++; return true; }, updateThreadById: update, emit() {},
+    captureThreadInputs: async (thread, inputs) => { calls.capture++; return capture ? capture(thread, inputs) : inputs.map((input, index) => ({ snapshotId: 'snapshot-' + index, sourceId: input.id })); },
+    codexThreadAgentProfile: () => null,
+    appendMessageToThread: (id, message) => update(id, thread => ({ ...thread, messages: [...thread.messages, message] })),
+    createCodexMessage: (role, content, status, options) => ({ id: 'message-' + role, role, content, status, ...options }),
+    SELF_MEMBER: 'self', codexThreadRuntimeConfig: () => ({}),
+    fetchJson: async (path, options) => {
+      assert.equal(path, '/chat/send');
+      const body = JSON.parse(options.body);
+      calls.provider.push(body);
+      return reply ? reply(body) : { accepted: true, conversationId: 'native', runId: 'run', answerId: 'native/run' };
+    },
+    syncProtocolRun() {}, browserToolSelectedSources: () => [], rootSseReady: () => ({ sourceReady: true }), expireContextSuggestions() {},
+  };
+  const send = requestProjectBridgeMethod('sendMessage', deps);
+  const setTarget = requestProjectBridgeMethod('setRequestProjectTarget', deps);
+  return { ...constants, state, protocol, calls, send, thread: () => getThread(null),
+    setTarget: target => setTarget('room', target),
+    edit(text, target) {
+      state.codex.threadDrafts.room = text; state.codex.threadDraftRevisions.room++;
+      update('room', thread => Chat.applyRequestProjectTarget({ ...thread, inputSources: [{ id: 'new-attachment' }] }, target));
+    },
+  };
+}
+
+function requestProjectDeferred() {
+  let resolve, reject;
+  const promise = new Promise((yes, no) => { resolve = yes; reject = no; });
+  return { promise, resolve, reject };
+}
+
+test('실행 프로젝트: opening the real editor never infers a Board; lookup and Cancel preserve the draft', async () => {
+  const h = requestProjectUiHarness();
+  const before = structuredClone(h.thread());
+  h.openChatRequestProjectPanel('room');
+  assert.equal(h.panel().testid('chat-project-board').value, '');
+  assert.deepEqual(h.calls, [], 'candidate Boards are not execution intent');
+  assert.equal(h.panel().testid('chat-project-apply').disabled, true);
+  await h.choose('board-a');
+  assert.match(h.panel().testid('chat-project-details').textContent, /Project A.*\/owned\/project-a/);
+  assert.deepEqual(h.thread(), before, 'inspection cannot apply a target');
+  await h.panel().testid('chat-project-cancel').dispatch('click');
+  assert.equal(h.panel(), null);
+  assert.deepEqual(h.thread(), before);
+  assert.equal(h.state.codex.threadDrafts.room, 'keep my words');
+  assert.deepEqual(h.calls.map(call => call.path), ['/v1/files/projects/open']);
+  assert.equal(h.timers.size, 0);
+});
+
+test('실행 프로젝트: Apply verifies the same attachment again; remove affects only the target', async () => {
+  const h = requestProjectUiHarness();
+  h.openChatRequestProjectPanel('room');
+  await h.choose('board-a');
+  await h.panel().testid('chat-project-apply').dispatch('click');
+  assert.equal(h.panel(), null);
+  assert.deepEqual(h.thread().requestProjectTarget, requestProjectA());
+  assert.equal(h.calls.length, 2);
+  assert.match(h.control().textContent, /실행 프로젝트.*Project A/);
+  assert.doesNotMatch(h.control().textContent, /\/owned\/project-a/, 'the full path belongs in accessible detail, not the composer');
+  assert.match(h.control().testid('chat-project-open').attributes['aria-label'], /Project A.*\/owned\/project-a/);
+  const { inputSources, briefingInputs } = h.thread();
+  await h.control().testid('chat-project-remove').dispatch('click');
+  assert.equal(Object.hasOwn(h.thread(), 'requestProjectTarget'), false);
+  assert.equal(h.state.codex.threadDrafts.room, 'keep my words');
+  assert.equal(h.thread().inputSources, inputSources);
+  assert.equal(h.thread().briefingInputs, briefingInputs);
+  assert.equal(h.calls.length, 2, 'remove never inspects, attaches or starts anything');
+});
+
+test('실행 프로젝트: missing/reconnect/changed attachments refuse Apply without rendering unverified fields', async t => {
+  for (const project of [null, { status: 'reconnect-required', title: 'UNVERIFIED', displayPath: '/UNVERIFIED' }]) {
+    await t.test(project ? 'reconnect required' : 'missing project', async () => {
+      const h = requestProjectUiHarness({ read: () => ({ ok: true, result: { project } }) });
+      h.openChatRequestProjectPanel('room');
+      await h.choose('board-a');
+      assert.equal(h.panel().testid('chat-project-apply').disabled, true);
+      assert.match(h.panel().textContent, /File.*보드 프로젝트 연결/);
+      assert.doesNotMatch(h.panel().textContent, /UNVERIFIED/);
+      assert.equal(h.thread().requestProjectTarget, undefined);
+    });
+  }
+  const h = requestProjectUiHarness();
+  h.openChatRequestProjectPanel('room'); await h.choose('board-a');
+  h.setReader(() => requestProjectPacket({ ...requestProjectA(), rootId: 'root-changed' }));
+  await h.panel().testid('chat-project-apply').dispatch('click');
+  assert.match(h.panel().testid('chat-project-details').textContent, /연결이 바뀌었습니다/);
+  assert.equal(h.thread().requestProjectTarget, undefined);
+  assert.equal(h.panel().testid('chat-project-apply').disabled, true);
+});
+
+test('실행 프로젝트: late lookup cannot cross Cancel, another selection, or a room change', async t => {
+  await t.test('Cancel while reading', async () => {
+    const pending = requestProjectDeferred();
+    const h = requestProjectUiHarness({ read: () => pending.promise });
+    h.openChatRequestProjectPanel('room'); await h.choose('board-a');
+    await h.panel().testid('chat-project-cancel').dispatch('click');
+    pending.resolve(requestProjectPacket(requestProjectA())); await settle();
+    assert.equal(h.panel(), null); assert.equal(h.thread().requestProjectTarget, undefined);
+  });
+  await t.test('a newer Board selection wins', async () => {
+    const a = requestProjectDeferred(), b = requestProjectDeferred();
+    const h = requestProjectUiHarness({ read: boardId => boardId === 'board-a' ? a.promise : b.promise });
+    h.openChatRequestProjectPanel('room'); await h.choose('board-a'); await h.choose('board-b');
+    b.resolve(requestProjectPacket(requestProjectB())); await settle();
+    a.resolve(requestProjectPacket(requestProjectA())); await settle();
+    assert.match(h.panel().testid('chat-project-details').textContent, /Project B/);
+    assert.doesNotMatch(h.panel().testid('chat-project-details').textContent, /Project A/);
+    await h.panel().testid('chat-project-apply').dispatch('click');
+    assert.deepEqual(h.thread().requestProjectTarget, requestProjectB());
+  });
+  await t.test('Apply cannot write after switching rooms', async () => {
+    const h = requestProjectUiHarness(), pending = requestProjectDeferred();
+    h.openChatRequestProjectPanel('room'); await h.choose('board-a');
+    h.setReader(() => pending.promise);
+    const applying = h.panel().testid('chat-project-apply').dispatch('click');
+    h.state.codex.activeThreadId = 'other';
+    pending.resolve(requestProjectPacket(requestProjectA())); await applying;
+    assert.equal(h.thread().requestProjectTarget, undefined);
+    assert.equal(h.state.codex.threads[1].requestProjectTarget, undefined);
+  });
+});
+
+test('실행 프로젝트: an edit or explicit removal during pending Apply is never overwritten', async t => {
+  for (const change of ['edit', 'remove']) await t.test(change, async () => {
+    const h = requestProjectUiHarness({ target: requestProjectA() }), pending = requestProjectDeferred();
+    h.openChatRequestProjectPanel('room'); await settle(); await h.choose('board-b');
+    h.setReader(() => pending.promise);
+    const applying = h.panel().testid('chat-project-apply').dispatch('click');
+    if (change === 'remove') h.bridge.setRequestProjectTarget('room', null);
+    else { h.state.codex.threadDrafts.room = 'new words'; h.state.codex.threadDraftRevisions.room++; }
+    pending.resolve(requestProjectPacket(requestProjectB())); await applying;
+    assert.match(h.panel().testid('chat-project-details').textContent, /초안이 바뀌었습니다/);
+    assert.deepEqual(h.thread().requestProjectTarget, change === 'remove' ? undefined : requestProjectA());
+    assert.equal(h.state.codex.threadDrafts.room, change === 'edit' ? 'new words' : 'keep my words');
+  });
+});
+
+test('실행 프로젝트: restoration preserves invalid intent, hides its fields, and allows explicit removal', async () => {
+  const malformed = { boardId: 'board-a', title: 'DO NOT RENDER', displayPath: '/DO-NOT-RENDER', cwd: '/arbitrary' };
+  const h = requestProjectUiHarness({ target: malformed });
+  const restored = h.normalizeChatRequestProjectDraft(h.thread());
+  assert.equal(restored.requestProjectTarget, malformed, 'no null fallback from malformed persisted intent');
+  assert.match(h.control().textContent, /다시 선택하세요/);
+  assert.doesNotMatch(h.control().textContent, /DO.NOT.RENDER|arbitrary/);
+  assert.equal(Chat.chatDraftMatches(restored, 'text', 1, { text: 'text', revision: 1, inputSources: [], briefingInputs: [] }), false);
+  await h.control().testid('chat-project-remove').dispatch('click');
+  assert.equal(h.thread().requestProjectTarget, undefined);
+  const valid = requestProjectA();
+  assert.deepEqual(h.normalizeChatRequestProjectDraft({ id: 'saved', requestProjectTarget: valid }).requestProjectTarget, valid);
+  const saved = requestProjectUiHarness({ target: valid });
+  assert.doesNotMatch(saved.control().textContent, /\/owned\//, 'restored presentation is not current service evidence');
+  saved.openChatRequestProjectPanel('room'); await settle();
+  assert.match(saved.panel().testid('chat-project-details').textContent, /Project A.*\/owned\/project-a/);
+  for (const name of ['serializeDeskSnapshot', 'restoreDeskSession']) assert.match(declaration(name), /normalizeChatRequestProjectDraft\(thread\)/);
+});
+
+test('실행 프로젝트: malformed targets stop before readiness work, capture, accepted rows or provider dispatch', async t => {
+  for (const target of ['wrong', [], { boardId: 'board-a' }, { ...requestProjectA(), cwd: '/arbitrary' }]) {
+    await t.test(JSON.stringify(target), async () => {
+      const h = requestProjectSendHarness({ target });
+      const before = structuredClone(h.thread());
+      await h.send();
+      assert.deepEqual(h.calls, { begin: 0, prepare: 0, capture: 0, provider: [] });
+      assert.equal(h.state.codex.threadDrafts.room, 'original words');
+      assert.deepEqual(h.thread().requestProjectTarget, target);
+      assert.deepEqual(h.thread().inputSources, before.inputSources);
+      assert.equal(h.thread().messages.length, 0);
+      assert.match(h.thread().sendError, /실행 프로젝트.*다시 선택/);
+      assert.equal(Object.keys(h.protocol.requests).length, 0);
+    });
+  }
+});
+
+test('실행 프로젝트: Board references alone never set a target; an accepted explicit target is one-draft only', async () => {
+  const plain = requestProjectSendHarness({ inputSources: [{ id: 'board-reference', kind: 'board-element', sourceRef: { boardId: 'board-a' } }] });
+  await plain.send();
+  assert.equal(plain.calls.provider.length, 1);
+  assert.equal(Object.hasOwn(plain.calls.provider[0], 'projectTarget'), false);
+  assert.equal(Object.hasOwn(plain.calls.provider[0], 'boardId'), false);
+  const chosen = requestProjectSendHarness({ target: requestProjectA() });
+  await chosen.send();
+  const body = chosen.calls.provider[0];
+  assert.deepEqual(body.projectTarget, { boardId: 'board-a', projectId: 'project-a', rootId: 'root-a' });
+  assert.equal(body.clientThreadId, 'original-wire-room');
+  assert.equal(Object.hasOwn(body, 'boardId'), false);
+  assert.doesNotMatch(JSON.stringify(body), /\/owned\/|Project A/);
+  assert.equal(chosen.thread().requestProjectTarget, undefined);
+  assert.equal(chosen.state.codex.threadDrafts.room, '');
+  assert.equal(chosen.chatRequestProjectDisplays.has('room'), false);
+});
+
+test('실행 프로젝트: capture latency freezes the submitted target and preserves later edit/removal', async t => {
+  for (const next of [requestProjectB(), null]) await t.test(next ? 'new project' : 'removed project', async () => {
+    const pending = requestProjectDeferred(), h = requestProjectSendHarness({ target: requestProjectA(), capture: () => pending.promise });
+    const sending = h.send();
+    await settle();
+    h.setTarget(next);
+    pending.resolve([{ sourceId: 'captured', snapshotId: 'captured' }]); await sending;
+    assert.deepEqual(h.calls.provider[0].projectTarget, { boardId: 'board-a', projectId: 'project-a', rootId: 'root-a' });
+    assert.deepEqual(h.thread().requestProjectTarget, next || undefined);
+    assert.equal(h.state.codex.threadDrafts.room, 'original words', 'a changed target is a new draft even when the text is unchanged');
+    assert.deepEqual(h.thread().inputSources.map(input => input.id), ['attachment']);
+  });
+});
+
+test('실행 프로젝트: definite refusal restores exactly the cleared target, but never overwrites a new draft', async t => {
+  const refusal = () => Object.assign(new Error('project attachment changed'), { status: 409, code: 'PROJECT_TARGET_CHANGED', accepted: false, dispatchStatus: 'not-dispatched' });
+  assert.equal(Chat.submissionFailureStatus(refusal()), 'failed');
+  await t.test('restore matching cleared draft', async () => {
+    const h = requestProjectSendHarness({ target: requestProjectA(), reply: () => { throw refusal(); } });
+    await h.send();
+    assert.equal(h.calls.provider.length, 1);
+    assert.deepEqual(h.thread().requestProjectTarget, requestProjectA());
+    assert.equal(h.state.codex.threadDrafts.room, 'original words');
+    assert.deepEqual(h.thread().inputSources.map(input => input.id), ['attachment']);
+    assert.deepEqual(h.chatRequestProjectDisplays.get('room'), requestProjectA());
+  });
+  await t.test('preserve the new draft during a delayed refusal', async () => {
+    const pending = requestProjectDeferred();
+    const h = requestProjectSendHarness({ target: requestProjectA(), reply: () => pending.promise });
+    const sending = h.send(); await settle();
+    assert.equal(h.thread().requestProjectTarget, undefined);
+    h.edit('new words', requestProjectB());
+    pending.reject(refusal()); await sending;
+    assert.equal(h.calls.provider.length, 1);
+    assert.deepEqual(h.thread().requestProjectTarget, requestProjectB());
+    assert.equal(h.state.codex.threadDrafts.room, 'new words');
+    assert.deepEqual(h.thread().inputSources.map(input => input.id), ['new-attachment']);
+  });
+});
+
+test('Board list rows use a shrinking border box without clipping secondary actions, including long titles', () => {
+  const row = cssDeclarationsFor(surfaceCss, '.egd-agenda-switch-row');
+  assert.equal(row['box-sizing'], 'border-box');
+  assert.equal(row.width, '100%');
+  assert.equal(row['min-width'], '0');
+  assert.equal(row['grid-template-columns'], '10px minmax(0, 1fr) auto');
+  assert.equal(cssDeclarationsFor(surfaceCss, '.egd-agenda-switch-row-main')['min-width'], '0');
+  const title = cssDeclarationsFor(surfaceCss, '.egd-agenda-switch-row-title');
+  assert.equal(title.overflow, 'hidden'); assert.equal(title['text-overflow'], 'ellipsis'); assert.equal(title['white-space'], 'nowrap');
+  const actions = cssDeclarationsFor(surfaceCss, '.egd-agenda-switch-row-actions');
+  assert.equal(actions.display, 'inline-flex');
+  const action = cssDeclarationsFor(surfaceCss, '.egd-agenda-switch-row-action');
+  assert.equal(action.width, '24px');
+  for (const innerWidth of [338, 260, 220]) {
+    const titleWidth = innerWidth - 22 - 10 - 20 - (3 * 24 + 2 * 3);
+    assert.ok(titleWidth > 0, 'all three actions fit at inner width ' + innerWidth);
+    assert.ok('아주 긴 Board 제목 '.repeat(50).length > titleWidth, 'long titles use the shrinking ellipsis column');
+  }
+});
+
+test('Board list secondary actions keep Enter/Space while the primary row still opens from the keyboard', () => {
+  const render = declaration('renderAgendaSwitcherPanel');
+  const row = render.slice(render.indexOf('const rows = entries.map'), render.indexOf('panel.replaceChildren('));
+  const body = row.match(/onkeydown: \(ev\) => \{([\s\S]*?)\n      \},/)?.[1];
+  assert.ok(body);
+  const opened = [];
+  const onkeydown = compileFunction('return ev => {' + body + '};', ['switchAgenda', 'entry'])(id => opened.push(id), { id: 'board-a' });
+  for (const action of ['rename', 'duplicate', 'delete']) for (const key of ['Enter', ' ']) {
+    let prevented = false, stopped = false;
+    onkeydown({ key, target: { closest: selector => selector === '.egd-agenda-switch-row-action' ? { action } : null },
+      preventDefault() { prevented = true; }, stopPropagation() { stopped = true; } });
+    assert.equal(prevented, false, action + ' keeps its native keyboard activation');
+    assert.equal(stopped, false); assert.deepEqual(opened, []);
+  }
+  for (const key of ['Enter', ' ']) {
+    let prevented = false;
+    onkeydown({ key, target: { closest: () => null }, preventDefault() { prevented = true; }, stopPropagation() {} });
+    assert.equal(prevented, true);
+  }
+  assert.deepEqual(opened, ['board-a', 'board-a']);
+});
+
+test('실행 프로젝트 chip reserves a one-line short label instead of the inherited 32px remove-button basis', () => {
+  const h = requestProjectUiHarness();
+  const control = h.control(), button = control.testid('chat-project-open');
+  assert.equal(control.children.length, 1, 'the unselected control has only an opener');
+  assert.equal(button.textContent, '실행 프로젝트');
+  assert.match(control.className, /(?:^|\s)egd-chat-project-target(?:\s|$)/);
+  assert.equal(button.className, 'egd-chat-project-open');
+  assert.equal(button.style.whiteSpace, undefined, 'no inline wrap override can defeat the scoped CSS');
+  const selector = '.egd-codex-footer .egd-chat-input-chip.egd-chat-project-target > button.egd-chat-project-open';
+  const opener = cssDeclarationsFor(surfaceCss, selector);
+  assert.equal(opener.flex, '1 1 auto');
+  assert.equal(opener['min-width'], '8em');
+  assert.equal(opener['white-space'], 'nowrap');
+  assert.equal(opener['box-sizing'], 'border-box');
+  assert.equal(opener.overflow, 'hidden');
+  assert.equal(opener['text-overflow'], 'ellipsis');
+  const legacy = '.egd-codex-footer .egd-chat-input-chip button:last-child';
+  assert.equal(cssDeclarationsFor(surfaceCss, legacy).flex, '0 0 32px', 'unrelated attachment removal controls are unchanged');
+  assert.ok(surfaceCss.indexOf(selector) > surfaceCss.indexOf(legacy));
+  // The dedicated selector has four classes, versus three class/pseudo-class
+  // components in the legacy rule; it also follows it, so the 32px basis loses.
+  assert.equal((selector.match(/\.[\w-]+/g) || []).length, 4);
+  const font = parseFloat(cssDeclarationsFor(surfaceCss, '.egd-codex-footer .egd-chat-input-tray button')['font-size']);
+  const padding = parseFloat(opener['padding-inline']) * 2;
+  const buttonMinimum = parseFloat(opener['min-width']) * font;
+  const fullWidthCharacters = [...button.textContent].filter(char => /[^\x00-\x7f]/.test(char)).length;
+  const otherCharacters = button.textContent.length - fullWidthCharacters;
+  const conservativeTextWidth = (fullWidthCharacters + otherCharacters / 2) * font;
+  assert.ok(buttonMinimum - padding >= conservativeTextWidth, 'the six Korean glyphs plus a space fit at the actual 12px font');
+  for (const chatWidth of [360, 405]) {
+    const composerWidth = chatWidth - 48;
+    assert.ok(54 + 6 + buttonMinimum + 2 <= composerWidth, 'attach + gap + one-line project opener fit at Chat width ' + chatWidth);
+  }
+  const chip = cssDeclarationsFor(surfaceCss, '.egd-codex-footer .egd-chat-input-chip.egd-chat-project-target');
+  assert.equal(chip['max-width'], 'min(100%, 280px)');
+  assert.equal(cssDeclarationsFor(surfaceCss,
+    '.egd-codex-footer .egd-chat-input-chip.egd-chat-project-target > button.egd-chat-project-remove').flex, '0 0 32px');
+});
+
+test('실행 프로젝트 long titles truncate visually while full title/path remain in accessible, keyboard-openable detail', async () => {
+  const title = '선택한 프로젝트 이름 '.repeat(7), displayPath = '/owned/' + '긴-프로젝트-폴더/'.repeat(20);
+  const target = { ...requestProjectA(), title, displayPath };
+  const h = requestProjectUiHarness({ read: () => requestProjectPacket(target) });
+  h.openChatRequestProjectPanel('room'); await h.choose('board-a');
+  await h.panel().testid('chat-project-apply').dispatch('click');
+  const normalized = Chat.normalizeRequestProjectTarget(target);
+  const control = h.control(), button = control.testid('chat-project-open');
+  assert.equal(button.tag, 'button', 'native keyboard activation is retained');
+  assert.equal(button.attributes['aria-haspopup'], 'dialog');
+  assert.ok(button.textContent.includes(normalized.title), 'CSS ellipsis does not delete the underlying title');
+  assert.equal(control.textContent.includes(normalized.displayPath), false, 'no giant path in the composer');
+  for (const attribute of ['aria-label', 'title']) {
+    assert.ok(button.attributes[attribute].includes(normalized.title));
+    assert.ok(button.attributes[attribute].includes(normalized.displayPath));
+  }
+  await button.dispatch('click'); await settle();
+  const panel = h.panel(), details = panel.testid('chat-project-details');
+  assert.match(panel.className, /egd-chat-project-panel/);
+  assert.ok(details.textContent.includes(normalized.title));
+  assert.ok(details.textContent.includes(normalized.displayPath));
+  assert.equal(h.document.activeElement, panel.testid('chat-project-board'), 'opening moves keyboard focus into the details editor');
+  const detailCss = cssDeclarationsFor(surfaceCss, '#egd-codex-input-panel.egd-chat-project-panel .egd-chat-project-details');
+  assert.equal(detailCss['overflow-wrap'], 'anywhere');
+  assert.equal(detailCss['white-space'], 'normal');
+  assert.equal(detailCss['max-width'], '100%');
+});
+
+function explicitFileOpenHarness({ existing = false, ready = Promise.resolve(true) } = {}) {
+  const card = { id: 'new-file', isConnected: true, _fileReady: ready, contains: node => node?.insideFile === true };
+  const initialFocus = { id: 'files-button' };
+  const document = { activeElement: initialFocus, querySelector: selector => {
+    assert.equal(selector, '.egd-file-card');
+    return existing ? card : null;
+  } };
+  const focused = [];
+  const state = { activeEntityId: card.id, zoom: 0.71, zoomTarget: 0.71, pan: { x: 10, y: 20 }, panTarget: { x: 10, y: 20 },
+    panModifier: false, surface: { restoring: false }, agenda: { restoreInProgress: false }, focusFileDockIfCompact: value => focused.push(value) };
+  let spawned = 0;
+  const open = compileFunction(declaration('openFileFromUserAction') + '\nreturn openFileFromUserAction;',
+    ['document', 'state', 'spawnFileCard'])(document, state, () => { spawned++; return card; });
+  return { card, state, document, focused, open, spawned: () => spawned };
+}
+
+test('explicit Files Dock/sidebar open waits for successful new-card readiness only', async t => {
+  const h = explicitFileOpenHarness(), pending = requestProjectDeferred();
+  h.card._fileReady = pending.promise;
+  assert.equal(h.open(), h.card);
+  assert.equal(h.spawned(), 1);
+  assert.deepEqual(h.focused, []);
+  pending.resolve(true); await settle();
+  assert.deepEqual(h.focused, [h.card]);
+  const reused = explicitFileOpenHarness({ existing: true });
+  reused.open(); await settle();
+  assert.deepEqual(reused.focused, [], 'an existing Card retains its established open behavior');
+  for (const result of [false, null, undefined]) await t.test('not ready: ' + String(result), async () => {
+    const fixture = explicitFileOpenHarness({ ready: Promise.resolve(result) });
+    fixture.open(); await settle(); assert.deepEqual(fixture.focused, []);
+  });
+  await t.test('preparation failure', async () => {
+    const pending = requestProjectDeferred(), fixture = explicitFileOpenHarness({ ready: pending.promise });
+    fixture.open(); pending.reject(new Error('File setup failed')); await settle();
+    assert.deepEqual(fixture.focused, []);
+  });
+  const dockStart = surfaceSource.indexOf('  function buildDock() {');
+  const dockBody = surfaceSource.slice(dockStart, surfaceSource.indexOf('    const divider =', dockStart))
+    .match(/onclick: \(\) => \{([\s\S]*?)\n\s*\},\n\s*\}, el\('span', \{ class: 'egd-dock-icon' \}/)?.[1];
+  assert.ok(dockBody);
+  let explicitCalls = 0;
+  compileFunction('return () => {' + dockBody + '};', ['kind', 'item', 'openFileFromUserAction'])(
+    'left', { id: 'shelf' }, () => explicitCalls++)();
+  assert.equal(explicitCalls, 1);
+  assert.match(declaration('buildPresetBag'), /testid: 'file-sidebar-open' \}, onclick: \(\) => openFileFromUserAction\(\)/);
+  assert.equal((surfaceSource.match(/openFileFromUserAction\(\)/g) || []).length, 3, 'definition and exactly the two explicit Files clicks');
+  assert.doesNotMatch(declaration('mountBoardMember'), /openFileFromUserAction/);
+  assert.doesNotMatch(declaration('restoreCardFromState'), /openFileFromUserAction/);
+});
+
+test('pending explicit Files open never overrides a newer camera, focus, close, or restore', async t => {
+  const changes = {
+    zoom: h => { h.state.zoomTarget = 0.9; },
+    pan: h => { h.state.panTarget = { x: 88, y: 99 }; },
+    selection: h => { h.state.activeEntityId = 'another-card'; },
+    keyboardFocus: h => { h.document.activeElement = { id: 'another-input' }; },
+    close: h => { h.card.isConnected = false; },
+    panModifier: h => { h.state.panModifier = true; },
+    deskRestore: h => { h.state.surface.restoring = true; },
+    boardRestore: h => { h.state.agenda.restoreInProgress = true; },
+  };
+  for (const [name, change] of Object.entries(changes)) await t.test(name, async () => {
+    const pending = requestProjectDeferred(), h = explicitFileOpenHarness({ ready: pending.promise });
+    h.open(); change(h);
+    const camera = { zoom: h.state.zoomTarget, pan: { ...h.state.panTarget } };
+    pending.resolve(true); await settle();
+    assert.deepEqual(h.focused, []);
+    assert.deepEqual({ zoom: h.state.zoomTarget, pan: h.state.panTarget }, camera, 'the newer camera is never reset');
+  });
+});
+
+test('File-only compact focus uses the real existing camera transition, retaining world/Board geometry and readable cards', () => {
+  const projectionBody = surfaceSource.match(/    const focusProjection = \(entry, \{ revealHeader = false \} = \{\}\) => \{([\s\S]*?)\n    \};/)?.[1];
+  const fileBody = surfaceSource.match(/    const focusFileDockIfCompact = card => \{([\s\S]*?)\n    \};/)?.[1];
+  const screenBody = surfaceSource.match(/    const screenRect = \(card, zoom, pan\) => \{([\s\S]*?)\n    \};/)?.[1];
+  assert.ok(projectionBody && fileBody && screenBody);
+  const card = { id: 'file', isConnected: true, hidden: false,
+    classList: { contains: name => name === 'egd-file-card' },
+    style: { left: '500px', top: '300px', width: '900px', height: '620px' } };
+  const worldBefore = { ...card.style };
+  const savedBoard = { members: [{ viewId: card.id, geometry: { x: 500, y: 300, width: 900, height: 620 } }], camera: { zoom: 0.71, pan: { x: 10, y: 20 } } };
+  const savedBefore = structuredClone(savedBoard);
+  const state = { activeEntityId: card.id, panModifier: false, surface: { restoring: false }, agenda: { restoreInProgress: false },
+    zoom: 0.71, zoomTarget: 0.71, pan: { x: 10, y: 20 }, panTarget: { x: 10, y: 20 } };
+  const previousCamera = { zoom: state.zoom, pan: { ...state.pan } };
+  const safe = { left: 88, top: 76, right: 1188, bottom: 676, width: 1100, height: 600 };
+  const entries = new Map([[card, { card, kind: 'file', bodyFontPx: 13, level: 'outline' }]]);
+  const entry = entries.get(card), cameraTargets = [], focused = [];
+  state.setCanvasViewportTarget = target => { cameraTargets.push(target); state.zoomTarget = target.zoom; state.panTarget = { ...target.pan }; };
+  const parsePxNumber = (value, fallback = 0) => Number.parseFloat(value) || fallback;
+  const screenRect = compileFunction('return (card, zoom, pan) => {' + screenBody + '};', ['parsePxNumber'])(parsePxNumber);
+  const authorVisible = current => !current.card.hidden;
+  const focusProjection = compileFunction('return (entry, { revealHeader = false } = {}) => {' + projectionBody + '};',
+    ['state', 'authorVisible', 'screenRect', 'safeViewportRect', 'SurfaceState', 'ZOOM_MAX', 'detailWidth', 'detailHeight', 'focusCanvasCard'])(
+    state, authorVisible, screenRect, () => safe, Surface, 4, 240, 180, target => focused.push(target));
+  const focus = compileFunction('return card => {' + fileBody + '};',
+    ['state', 'syncEntries', 'entries', 'authorVisible', 'screenRect', 'SurfaceState', 'detailWidth', 'detailHeight', 'isCardFullscreen', 'focusProjection'])(
+    state, () => {}, entries, authorVisible, screenRect, Surface, 240, 180, () => false, focusProjection);
+  assert.equal(focus(card), true);
+  assert.equal(cameraTargets.length, 1);
+  assert.deepEqual(focused, [card], 'the same File View is focused');
+  assert.equal(surfaceSemanticLevel({ width: 900 * state.zoomTarget, height: 620 * state.zoomTarget, fontPx: 13 * state.zoomTarget,
+    previous: 'outline', detailWidth: 240, detailHeight: 180 }), 'detail');
+  assert.ok(state.panTarget.y + 300 * state.zoomTarget >= safe.top, 'the existing revealHeader route keeps controls reachable');
+  assert.deepEqual(card.style, worldBefore, 'no position, dimensions, transform or temporary cap rewrite');
+  assert.deepEqual(savedBoard, savedBefore, 'saved Board layout and camera are not rewritten');
+  assert.deepEqual({ zoom: state.zoom, pan: state.pan }, previousCamera, 'the transition begins from the prior camera, without a direct reset');
+  assert.equal(focus(card), false, 'a pending readable target needs no second transition');
+  assert.equal(cameraTargets.length, 1);
+  state.zoomTarget = 0.71; state.panTarget = { ...previousCamera.pan };
+  card.hidden = true; assert.equal(focus(card), false); card.hidden = false;
+  for (const kind of ['chat', 'browser', 'terminal']) {
+    const other = { ...card, classList: { contains: name => name === 'egd-' + kind + '-card' } };
+    assert.equal(focus(other), false, 'not an all-card policy: ' + kind);
+  }
+  state.surface.restoring = true; assert.equal(focus(card), false);
+  assert.equal(cameraTargets.length, 1);
 });

@@ -1339,8 +1339,11 @@ test('File view hosts the change review: chunk revert writes against the read ha
 
 test('terminal project command: quoted folder, one-line commands only, marker-bounded output, unknown when no marker', async t => {
   const nonce = 'abcdefgh12345678'
-  assert.equal(TerminalState.terminalScriptLine({ command: 'npm test', cwd: "/tmp/it's here", nonce }), `cd -- '/tmp/it'\\''s here' && npm test; printf '\\n[egdesk-run:%s:exit=%d]\\n' ${nonce} "$?"\r`)
-  assert.match(TerminalState.terminalScriptLine({ command: 'npm test', cwd: "C:\\it's", nonce, shell: 'powershell' }), /^Set-Location -LiteralPath 'C:\\it''s'; /)
+  assert.equal(TerminalState.terminalScriptLine({ command: 'npm test', cwd: "/tmp/it's here", nonce }), `( cd -- '/tmp/it'\\''s here' && eval 'npm test' ); printf '\\n[egdesk-run:%s:exit=%d]\\n' ${nonce} "$?"\r`)
+  const powershell = TerminalState.terminalScriptLine({ command: 'npm test', cwd: "C:\\it's", nonce, shell: 'powershell' })
+  assert.match(powershell, /Set-Location -LiteralPath 'C:\\it''s' -ErrorAction Stop;/)
+  assert.match(powershell, /\[scriptblock\]::Create\('npm test'\)/)
+  assert.match(powershell, /finally \{ Set-Location -LiteralPath \$egdeskLocation.Path/)
   for (const command of ['npm test\nrm -rf /', 'a\rb', '', 'x'.repeat(1001)]) assert.throws(() => TerminalState.terminalScriptLine({ command, nonce }), { code: 'TERMINAL_RUN_COMMAND' })
   assert.throws(() => TerminalState.terminalScriptLine({ command: 'ls', nonce: 'short' }), { code: 'TERMINAL_RUN_NONCE' })
   assert.throws(() => TerminalState.terminalScriptLine({ command: 'ls', nonce, shell: 'cmd' }), { code: 'TERMINAL_RUN_SHELL' })

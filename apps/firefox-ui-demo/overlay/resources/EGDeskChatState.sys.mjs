@@ -469,19 +469,89 @@ export function registerChatRequest(state, request, authStatus, engineId = 'code
   state.requests[request.requestId] = { ...request, ...(engineId === 'claude' ? { engineId } : {}),
     accountKey: engineId === 'claude' ? null : codexAccountKey(authStatus), status: 'submitting' };
 }
+const REQUEST_PROJECT_TARGET_IDS = ['boardId', 'projectId', 'rootId'];
+const REQUEST_PROJECT_TARGET_PRESENTATION = ['title', 'displayPath'];
+const REQUEST_PROJECT_TARGET_FIELDS = new Set([...REQUEST_PROJECT_TARGET_IDS, ...REQUEST_PROJECT_TARGET_PRESENTATION]);
+const REQUEST_PROJECT_TARGET_DISPLAY_LIMITS = { title: 120, displayPath: 1000 };
+
+// An explicit selection for this request draft, not room ownership or authority.
+// Copy only data fields; extra path/permission fields and accessors are refused.
+// The bridge alone resolves these opaque IDs and checks their actual binding.
+export function normalizeRequestProjectTarget(target) {
+  if (target == null) return null;
+  const invalid = () => new TypeError('Invalid request project target');
+  if (typeof target !== 'object' || Array.isArray(target)) throw invalid();
+  // Firefox windows and shared ES modules have different Object.prototype
+  // identities. Check record structure without reading constructor/toString
+  // (or Symbol.toStringTag), which could invoke an input object's accessors.
+  const prototype = Object.getPrototypeOf(target);
+  if (prototype !== null && Object.getPrototypeOf(prototype) !== null) throw invalid();
+  const fields = Object.getOwnPropertyDescriptors(target);
+  for (const key of Reflect.ownKeys(fields)) {
+    if (!REQUEST_PROJECT_TARGET_FIELDS.has(key) || !Object.hasOwn(fields[key], 'value')) throw invalid();
+  }
+  const normalized = {};
+  for (const key of REQUEST_PROJECT_TARGET_IDS) {
+    const value = Object.hasOwn(fields, key) ? fields[key].value : undefined;
+    // Match the bridge's projectTarget contract without interpreting ID syntax.
+    if (typeof value !== 'string' || !value.trim() || value.length > 512 || value.includes('\0')) throw invalid();
+    normalized[key] = value;
+  }
+  for (const key of REQUEST_PROJECT_TARGET_PRESENTATION) {
+    if (!Object.hasOwn(fields, key)) continue;
+    if (typeof fields[key].value !== 'string') throw invalid();
+    normalized[key] = taskLine(fields[key].value, REQUEST_PROJECT_TARGET_DISPLAY_LIMITS[key]);
+  }
+  return normalized;
+}
+
+// Keep the submitted choice detached and immutable across asynchronous reads.
+// Use normalizeRequestProjectTarget for a separate, mutable editor value.
+export function snapshotRequestProjectTarget(target) {
+  const snapshot = normalizeRequestProjectTarget(target);
+  return snapshot ? Object.freeze(snapshot) : null;
+}
+
+export function requestProjectTargetsMatch(left, right) {
+  try {
+    return JSON.stringify(normalizeRequestProjectTarget(left)) === JSON.stringify(normalizeRequestProjectTarget(right));
+  } catch {
+    // A malformed current or submitted choice must never clear the composer.
+    return false;
+  }
+}
+
+// Applying/removing only returns draft state. Cancel discards the editor value
+// without calling this helper; neither operation submits or grants execution.
+export function applyRequestProjectTarget(thread, target) {
+  const normalized = normalizeRequestProjectTarget(target);
+  const next = { ...thread };
+  if (normalized) next.requestProjectTarget = normalized;
+  else delete next.requestProjectTarget;
+  return next;
+}
+
 export function snapshotChatDraft(thread, text, revision = 0) {
-  return { text, revision, inputSources: copy(thread?.inputSources || []), briefingInputs: copy(thread?.briefingInputs || []) };
+  return { text, revision, inputSources: copy(thread?.inputSources || []), briefingInputs: copy(thread?.briefingInputs || []),
+    requestProjectTarget: snapshotRequestProjectTarget(thread?.requestProjectTarget) };
 }
 export function chatDraftMatches(thread, text, revision, submitted) {
   return text === submitted.text && revision === submitted.revision
     && JSON.stringify(thread?.inputSources || []) === JSON.stringify(submitted.inputSources)
-    && JSON.stringify(thread?.briefingInputs || []) === JSON.stringify(submitted.briefingInputs);
+    && JSON.stringify(thread?.briefingInputs || []) === JSON.stringify(submitted.briefingInputs)
+    && requestProjectTargetsMatch(thread?.requestProjectTarget, submitted.requestProjectTarget);
 }
 export function buildChatRequest(thread, message, requestId, runtime = {}) {
+  // The caller passes submittedDraft.requestProjectTarget, never a live Board
+  // or the current thread draft after an await. Absence keeps the old wire shape.
+  const projectTarget = snapshotRequestProjectTarget(runtime.projectTarget);
   const body = { message, requestId, clientThreadId: clientThreadBinding(thread), profileEnabled: thread.profileEnabled === true };
   if (thread.conversationId) body.conversationId = thread.conversationId;
   const cwd = runtime.cwd !== undefined ? runtime.cwd : thread.cwd;
   if (cwd !== undefined) body.cwd = cwd;
+  if (projectTarget) body.projectTarget = {
+    boardId: projectTarget.boardId, projectId: projectTarget.projectId, rootId: projectTarget.rootId,
+  };
   for (const field of ['model', 'effort']) if (runtime[field]) body[field] = runtime[field];
   // The bridge binds a conversation to this engine and refuses a different one later.
   if (isEngineId(runtime.engineId)) body.engineId = runtime.engineId;

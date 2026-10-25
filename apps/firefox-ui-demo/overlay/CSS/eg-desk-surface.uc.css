@@ -2465,6 +2465,8 @@
 }
 
 .egd-agenda-switch-row {
+  box-sizing: border-box;
+  min-width: 0;
   width: 100%;
   min-height: 52px;
   display: grid;
@@ -4730,8 +4732,8 @@
 /* The managed File factory lives inside the normal Desk Card input boundary. */
 .egd-file-card .egd-card-body { display: flex; flex-direction: column; overflow: hidden; min-height: 0; }
 .egd-file-card-mount { flex: 1; min-height: 0; overflow: hidden; }
-.egd-file-card-title { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
-.egd-file-card-state { opacity: .7; margin-left: 10px; font-size: 11px; }
+.egd-file-card-title { flex: 1 1 0%; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.egd-file-card-state { flex: 0 0 auto; white-space: nowrap; opacity: .7; margin-left: 10px; font-size: 11px; }
 .egd-file-chat-attach { border: 1px solid color-mix(in srgb, var(--egd-on-surface) 28%, transparent); border-radius: 6px; padding: 2px 8px; background: transparent; color: inherit; font: 11px sans-serif; white-space: nowrap; cursor: pointer; }
 .egd-file-chat-attach:disabled { opacity: var(--egd-opacity-disabled); cursor: default; }
 .egd-file-card-notice { padding: 8px 12px; font-size: 12px; background: var(--egd-note-soft); color: var(--egd-warning-ink); }
@@ -4765,6 +4767,23 @@
 .egdesk-file-hunk-after { background: var(--egd-success-bg); }
 .egdesk-file-status, .egdesk-file-error { grid-column: 1 / -1; margin: 0; padding: 5px 10px; font-size: 12px; }
 .egdesk-file-error { background: var(--egd-danger-bg); color: var(--egd-danger-ink); }
+
+/* Shared plain-DOM RunResult contract, independent of the File/Chat host. */
+.egdesk-run-result { min-width: 0; width: 100%; max-width: 100%; box-sizing: border-box; overflow-wrap: anywhere; }
+.egdesk-run-result-header { display: flex; flex-wrap: wrap; align-items: baseline; gap: 4px 10px; min-width: 0; }
+.egdesk-run-result-kind, .egdesk-run-result-duration, .egdesk-run-result-exit { flex: 0 0 auto; white-space: nowrap; }
+.egdesk-run-result-headline { min-width: 0; overflow-wrap: anywhere; }
+.egdesk-run-result-meta { display: flex; flex-wrap: wrap; align-items: baseline; gap: 6px 12px; min-width: 0; max-width: 100%; margin: 8px 0; }
+.egdesk-run-result .egdesk-run-result-command,
+.egdesk-run-result .egdesk-run-result-tail { display: block; width: 100%; min-width: 0; max-width: 100%; box-sizing: border-box; overflow-x: auto; white-space: pre; overflow-wrap: normal; word-break: normal; font-family: ui-monospace, monospace; }
+.egdesk-run-result-command { flex: 0 1 100%; }
+.egdesk-run-result .egdesk-run-result-tail { max-height: 18rem; overflow-y: auto; margin: 8px 0; padding: 8px; font-size: 12px; }
+.egdesk-run-result-command:focus-visible, .egdesk-run-result-tail:focus-visible { outline: var(--egd-focus-outline); outline-offset: var(--egd-focus-outline-offset); }
+.egdesk-run-result-failures { min-width: 0; max-width: 100%; box-sizing: border-box; padding-left: 20px; }
+.egdesk-run-result-failure { min-width: 0; margin: 8px 0; overflow-wrap: anywhere; }
+.egdesk-run-result-failure-name { display: block; margin-bottom: 4px; }
+.egdesk-run-result-location { max-width: 100%; box-sizing: border-box; white-space: normal; overflow-wrap: anywhere; }
+.egdesk-run-result-output { min-width: 0; max-width: 100%; margin-top: 8px; }
 
 .egd-codex-footer {
   display: flex;
@@ -6294,6 +6313,39 @@
 .egd-codex-footer .egd-chat-input-chip { min-width: 0; border: 1px solid var(--egd-outline-variant); border-radius: 6px; background: var(--egd-window-alt); }
 .egd-codex-footer .egd-chat-input-chip button { border: 0; border-radius: 5px; background: transparent; }
 .egd-codex-footer .egd-chat-input-chip button:last-child { flex: 0 0 32px; padding-inline: 5px; color: var(--egd-on-surface-variant); }
+
+/* Request project: the only button is an opener, not the chip's 32px remove action. */
+.egd-codex-footer .egd-chat-input-chip.egd-chat-project-target {
+  box-sizing: border-box;
+  flex: 0 1 auto;
+  min-width: 0;
+  max-width: min(100%, 280px);
+}
+.egd-codex-footer .egd-chat-input-chip.egd-chat-project-target > button.egd-chat-project-open {
+  box-sizing: border-box;
+  flex: 1 1 auto;
+  min-width: 8em;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  padding-inline: 8px;
+}
+.egd-codex-footer .egd-chat-input-chip.egd-chat-project-target > button.egd-chat-project-remove {
+  flex: 0 0 32px;
+  min-width: 32px;
+}
+#egd-codex-input-panel.egd-chat-project-panel .egd-chat-project-board {
+  box-sizing: border-box;
+  width: 100%;
+  min-width: 0;
+  max-width: 100%;
+}
+#egd-codex-input-panel.egd-chat-project-panel .egd-chat-project-details {
+  min-width: 0;
+  max-width: 100%;
+  white-space: normal;
+  overflow-wrap: anywhere;
+}
 
 /* Diagnostics remain available, with a bounded, readable detail area. */
 .egd-codex-diagnostics-shell { flex-shrink: 0; gap: 6px; margin: 0 16px 10px; padding-top: 0; }

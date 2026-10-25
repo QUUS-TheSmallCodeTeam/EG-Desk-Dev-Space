@@ -3,7 +3,10 @@
 const string = value => typeof value === 'string' && value ? value : null;
 const copy = value => value == null ? value : JSON.parse(JSON.stringify(value));
 
-export function fileCardRecord(root, view = {}) {
+export function fileCardRecord(root, view = {}, project = null) {
+  const projectId = string(project?.projectId), boardId = string(project?.boardId);
+  const projectRef = projectId && boardId && [projectId, boardId].every(id => id.length <= 512 && !id.includes('\0'))
+    ? { projectId, boardId } : null;
   return {
     version: 1,
     root: root?.rootId && root?.directoryId ? { rootId: string(root.rootId), directoryId: string(root.directoryId), name: string(root.name) || '연결된 폴더' } : null,
@@ -13,6 +16,8 @@ export function fileCardRecord(root, view = {}) {
     savedRevision: Number.isInteger(view.savedRevision) ? view.savedRevision : null,
     // Scroll can be restored, never caret, selection or input activation.
     scrollTop: Number.isFinite(view.scrollTop) ? Math.max(0, view.scrollTop) : 0,
+    // This is an association reference, not filesystem or execution authority.
+    ...(projectRef ? { project: projectRef } : {}),
   };
 }
 

@@ -28,6 +28,8 @@ export function createTerminalZone(deps) {
   const TERMINAL_HTML_URL = 'chrome://userchrome/content/terminal.html';
 
   function spawnTerminalCard(options = {}) {
+    const activate = options?.activate !== false;
+    const reveal = options?.reveal !== false;
     const requestedShellId = typeof options?.shellId === 'string'
       && /^[a-z][a-z0-9-]{0,31}$/.test(options.shellId) ? options.shellId : null;
     const id = `egd-terminal-card-${allocCardSeq()}`;
@@ -88,12 +90,15 @@ export function createTerminalZone(deps) {
     host.appendChild(card);
     bindCardSourceRef(card, sourceRef);
     markAgendaDirty('create-terminal-card', card);
-    setActiveEntity(card);
-    revealPlacedCanvasCard(card, placement);
+    if (activate) setActiveEntity(card);
+    if (reveal) revealPlacedCanvasCard(card, placement);
 
     // ---- Use iframe for terminal.html to isolate keyboard events ----
+    const query = [];
+    if (requestedShellId) query.push('shellId=' + encodeURIComponent(requestedShellId));
+    if (!activate) query.push('autofocus=0');
     const termBrowser = el('iframe', {
-      src: requestedShellId ? TERMINAL_HTML_URL + '?shellId=' + encodeURIComponent(requestedShellId) : TERMINAL_HTML_URL,
+      src: TERMINAL_HTML_URL + (query.length ? '?' + query.join('&') : ''),
       style: { width: '100%', height: '100%', border: '0', background: '#1a1a2e', display: 'block' },
     });
     body.appendChild(termBrowser);
@@ -142,7 +147,7 @@ export function createTerminalZone(deps) {
       if (ev.data?.type === 'terminal-ready') {
         const label = ev.data.shellLabel;
         if (typeof label === 'string' && label.length <= 80) header.querySelector('.egd-terminal-title').textContent = '>_ ' + label;
-        focusTerminal();
+        if (activate) focusTerminal();
       }
       if (['terminal-ready', 'terminal-exit-confirmed', 'terminal-no-session'].includes(ev.data?.type)
           && boardCloseRequests.has(card.dataset.projectionId)) {

@@ -53,6 +53,9 @@ function between(start, end, from = 0) {
 function compile(body, bindings) {
   return compileFunction(body, Object.keys(bindings), { filename: 'egdesk-surface-production.js' })(...Object.values(bindings));
 }
+// sendMessage and serializeDeskSnapshot share this production draft closure.
+// Instantiate its real map, constants and normalizer for each isolated surface.
+const requestProjectDraftSource = between('  const chatRequestProjectDisplays = ', '  function chatRequestProjectSelection(');
 
 class Node {
   constructor(tag, text = '') {
@@ -128,7 +131,7 @@ function surface({ run = null, thread = {}, auth = {}, fetchJson = async () => (
     'codexAgentWorkingRow'].map(name => functionSource(name)).join('\n');
   if (nativeReady) delete globals.ensureNativeReadyForSend;
   if (realCapture) delete globals.captureThreadInputs;
-  const api = compile(`${definitions}\n${functionSource('threadBusy', '    ')}\n${functionSource('refreshConversation', '    ')}
+  const api = compile(`${requestProjectDraftSource}\n${definitions}\n${functionSource('threadBusy', '    ')}\n${functionSource('refreshConversation', '    ')}
     ${functionSource('requireClaudeContext', '    ')}
     ${realCapture ? functionSource('captureThreadInputs', '    ') : ''}
     ${nativeReady ? functionSource('ensureNativeReadyForSend', '    ') : ''}

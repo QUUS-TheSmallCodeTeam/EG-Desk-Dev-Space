@@ -1,6 +1,6 @@
 'use strict';
 (async () => {
-  const { createTerminalCloseController, createTerminalWriteQueue, createTerminalCompositionGate, terminalExitEvidence, terminalResponsePacket } = await import('chrome://userchrome/content/EGDeskTerminalState.sys.mjs');
+  const { createTerminalCloseController, createTerminalWriteQueue, createTerminalCompositionGate, createTerminalScriptRun, terminalExitEvidence, terminalResponsePacket } = await import('chrome://userchrome/content/EGDeskTerminalState.sys.mjs');
   const HELPER_PORT = 39218;
   const HELPER_ORIGIN = `http://127.0.0.1:${HELPER_PORT}`;
   const statusEl = document.getElementById('status-overlay');
@@ -67,12 +67,15 @@
   let closeRequested = false;
   let unloaded = false, connectionGeneration = 0, connectPending = null, readPending = false;
   let shellCatalog = null, sessionInfo = null;
+  let activeScript = null;
+  let inputRevision = 0;
   let spawnPhase = 'idle', noSessionClosed = false;
   const definiteSpawnRejection = error => [
     'WINDOWS_PTY_UNAVAILABLE', 'WINDOWS_CONPTY_UNSUPPORTED', 'INVALID_TERMINAL_SHELL',
     'TERMINAL_SHELL_UNAVAILABLE', 'INVALID_TERMINAL_SIZE',
   ].includes(error.code) && Number.isInteger(error.httpStatus) && error.httpStatus >= 400;
   const requestedShellId = new URLSearchParams(window.location.search).get('shellId');
+  const autoFocus = new URLSearchParams(window.location.search).get('autofocus') !== '0';
   const shellIdIsValid = value => typeof value === 'string' && /^[a-z][a-z0-9-]{0,31}$/.test(value);
   const reportAsyncError = error => console.warn('EG-Desk Terminal:', error.message || error);
 
@@ -108,6 +111,21 @@
     }
   }
 
+  function invalidateScriptRun() {
+    if (!activeScript) return;
+    activeScript.cancelled = true;
+    activeScript.run?.cancel();
+  }
+
+  // Only the PTY output transport feeds the receipt collector. term.onData is
+  // keyboard/input traffic, even when it happens to contain an exit marker.
+  function receiveTerminalOutput(data, sessionId) {
+    if (typeof data !== 'string' || !data) return;
+    term.write(data);
+    if (activeScript && !activeScript.cancelled && activeScript.sessionId === sessionId
+        && activeScript.generation === connectionGeneration) activeScript.run?.onData(data);
+  }
+
   function showDisconnected(message) {
     if (closeRequested) { renderCloseState({ phase: 'offline', error: message }); return; }
     statusEl.textContent = message || 'Disconnected. Click to reconnect.';
@@ -125,12 +143,15 @@
   async function readTerminalOutput() {
     if (!ptyId || !connected || readPending || unloaded) return;
     const sessionAtRead = ptyId;
+    const generationAtRead = connectionGeneration;
     readPending = true;
     try {
-      const result = await postTerminal('/terminal/read', { sessionId: sessionAtRead });
-      if (ptyId !== sessionAtRead) return;
-      if (result.data) term.write(result.data);
+      const result = await postTerminal('/terminal/read', { sessionId: sessionAtRead }, { timeoutMs: 5000 });
+      if (ptyId !== sessionAtRead || connectionGeneration !== generationAtRead || unloaded) return;
+      if (result.sessionId !== sessionAtRead || result.status === 'UNKNOWN') throw new Error('터미널 출력의 세션을 확인하지 못했습니다.');
+      receiveTerminalOutput(result.data, sessionAtRead);
       if (terminalExitEvidence(result, sessionAtRead)) {
+        invalidateScriptRun();
         exitConfirmed = true;
         confirmedExitSessionId = sessionAtRead;
         spawnPhase = 'exited';
@@ -144,7 +165,8 @@
         notifyTerminalExit();
       }
     } catch (e) {
-      if (ptyId !== sessionAtRead || closeRequested || unloaded) return;
+      if (ptyId !== sessionAtRead || connectionGeneration !== generationAtRead || closeRequested || unloaded) return;
+      invalidateScriptRun();
       connected = false;
       term.options.disableStdin = true;
       stopPolling();
@@ -182,11 +204,12 @@
     requestKill: sessionId => postTerminal('/terminal/kill', { sessionId }, { timeoutMs: 1500, passErrors: true }),
     readStatus: sessionId => postTerminal('/terminal/read', { sessionId }, { timeoutMs: 1500, passErrors: true }),
     wait: ms => new Promise(resolve => window.setTimeout(resolve, ms)),
-    onOutput: data => term.write(data),
+    onOutput: data => receiveTerminalOutput(data, terminalCloser.snapshot().sessionId),
     onState: closeState => {
       if (ptyId && closeState.sessionId !== ptyId) return;
       renderCloseState(closeState);
       if (closeState.phase === 'confirmed') {
+        invalidateScriptRun();
         exitConfirmed = true;
         confirmedExitSessionId = closeState.sessionId;
         spawnPhase = 'exited';
@@ -204,6 +227,7 @@
   async function closeForBoard() {
     if (exitConfirmed) return true;
     closeRequested = true;
+    invalidateScriptRun();
     term.options.disableStdin = true;
     shellButton.disabled = true;
     connectionGeneration++;
@@ -226,9 +250,10 @@
   }
 
   const writeQueue = createTerminalWriteQueue({
-    write: (sessionId, data) => postTerminal('/terminal/write', { sessionId, data }),
+    write: (sessionId, data) => postTerminal('/terminal/write', { sessionId, data }, { timeoutMs: 10000 }),
     onError: (error, sessionId) => {
       if (ptyId !== sessionId || unloaded) return;
+      invalidateScriptRun();
       connected = false;
       term.options.disableStdin = true;
       stopPolling();
@@ -236,7 +261,7 @@
       showDisconnected('입력을 보내지 못했습니다. 명령을 자동으로 다시 보내지 않습니다. ' + error.message);
     },
   });
-  const writeToTerminal = data => writeQueue.enqueue(data);
+  const writeToTerminal = data => { inputRevision++; return writeQueue.enqueue(data); };
   const composition = createTerminalCompositionGate({
     send: writeToTerminal,
     sessionKey: () => writeQueue.snapshot().generation,
@@ -247,9 +272,67 @@
     onError: reportAsyncError,
   });
 
+  async function runScript(request = {}) {
+    const fail = (code, message) => { throw Object.assign(new Error(message), { code }); };
+    if (!request || typeof request !== 'object' || Object.keys(request).some(key => !['boardId', 'projectId', 'rootId', 'script'].includes(key))) {
+      fail('TERMINAL_RUN_REQUEST', '프로젝트 검사에는 임의 실행 경로를 전달할 수 없습니다.');
+    }
+    const { boardId, projectId, rootId } = request;
+    const script = request.script ? { ...request.script } : null;
+    if (![boardId, projectId, rootId].every(id => typeof id === 'string' && id && id.length <= 512)
+        || !script || typeof script.id !== 'string' || typeof script.name !== 'string' || typeof script.command !== 'string') {
+      fail('TERMINAL_RUN_REQUEST', '프로젝트와 저장된 검사 명령이 필요합니다.');
+    }
+    if (activeScript) fail('TERMINAL_RUN_BUSY', '이 터미널에서 이미 검사를 진행 중입니다.');
+    if (!ptyId || !connected || closeRequested || unloaded) fail('TERMINAL_INPUT_INACTIVE', '연결된 터미널이 없습니다.');
+    const runContext = { sessionId: ptyId, generation: connectionGeneration, inputRevision, cancelled: false, run: null };
+    // Human input can take an idle shell into a REPL during either authority
+    // lookup or queue wait. Fence only undispatched scripts, not that input or
+    // the receipt collection for a command already sent to the terminal.
+    const current = () => activeScript === runContext && !runContext.cancelled && connected && !unloaded && !closeRequested
+      && ptyId === runContext.sessionId && connectionGeneration === runContext.generation && inputRevision === runContext.inputRevision;
+    activeScript = runContext;
+    try {
+      // Resolve authority from the existing helper-owned Board association.
+      // A display path supplied by the File renderer is never executable input.
+      const packet = await postTerminal('/v1/files/projects/open', { boardId }, { timeoutMs: 5000 });
+      const project = packet.ok === true ? packet.result?.project : null;
+      if (!current()) fail('TERMINAL_INPUT_STALE', '터미널 연결이 바뀌었거나 사용자 입력이 발생해 검사를 시작하지 않았습니다.');
+      if (project?.status !== 'connected' || project.projectId !== projectId || project.rootId !== rootId
+          || typeof project.displayPath !== 'string' || !/^(?:\/|[A-Za-z]:[\\/]|\\\\)/.test(project.displayPath)
+          || !project.scripts?.some(saved => saved.id === script.id && saved.name === script.name && saved.command === script.command)) {
+        fail('TERMINAL_PROJECT_CHANGED', '프로젝트 폴더 또는 저장된 명령을 다시 확인하세요.');
+      }
+      const shell = shellCatalog?.platform === 'win32'
+        ? ['powershell', 'pwsh'].includes(sessionInfo?.shellId) ? 'powershell' : null
+        : /(?:^|[\s/(])(bash|zsh|sh|dash|ksh)(?:$|[\s)])/i.test(sessionInfo?.shellLabel || '') ? 'posix' : null;
+      if (!shell) fail('TERMINAL_RUN_SHELL', '이 셸에서는 프로젝트 검사를 지원하지 않습니다.');
+      const cwd = project.displayPath;
+      const run = createTerminalScriptRun({ command: script.command, cwd, shell,
+        write: data => writeQueue.enqueue(data, {
+          isCurrent: () => current() && run.active,
+          beforeWrite: async () => {
+            // The queue may have waited behind human input. Revalidate at its
+            // dispatch point, then fence again before the transport call.
+            try {
+              const fresh = await postTerminal('/v1/files/projects/open', { boardId }, { timeoutMs: 5000 });
+              const checked = fresh.ok === true ? fresh.result?.project : null;
+              return checked?.status === 'connected' && checked.projectId === projectId && checked.rootId === rootId && checked.displayPath === cwd
+                && checked.scripts?.some(saved => saved.id === script.id && saved.name === script.name && saved.command === script.command)
+                ? { ok: true } : { ok: false, code: 'TERMINAL_PROJECT_CHANGED' };
+            } catch { return { ok: false, code: 'TERMINAL_PROJECT_UNCONFIRMED' }; }
+          },
+        }) });
+      runContext.run = run;
+      const result = await run.start();
+      return { ...result, projectId, rootId, sessionId: runContext.sessionId, cwd };
+    } finally { if (activeScript === runContext) activeScript = null; }
+  }
+
   function exposeTerminalApi() {
     window.terminalAPI = {
       closeForBoard,
+      runScript,
       closeState: () => terminalCloser.snapshot(),
       get ptyId() {
         return ptyId;
@@ -275,6 +358,7 @@
         term.paste(String(data ?? ''));
       },
       dataEventCount: () => dataEvents,
+      inputRevision: () => inputRevision,
       kill: async () => {
         const sessionId = ptyId || confirmedExitSessionId;
         const confirmed = await closeForBoard();
@@ -349,6 +433,7 @@
       return false;
     }
     if (connectPending) return connectPending;
+    invalidateScriptRun();
     const generation = ++connectionGeneration;
     const current = () => !unloaded && !closeRequested && generation === connectionGeneration;
     statusEl.textContent = ptyId ? '같은 터미널 세션 연결 확인 중…' : '터미널 연결 중…';
@@ -364,7 +449,8 @@
           const sessionId = ptyId;
           const result = await postTerminal('/terminal/read', { sessionId }, { timeoutMs: 5000 });
           if (!current() || ptyId !== sessionId) return false;
-          if (result.data) term.write(result.data);
+          if (result.sessionId !== sessionId || result.status === 'UNKNOWN') throw new Error('터미널 출력의 세션을 확인하지 못했습니다.');
+          receiveTerminalOutput(result.data, sessionId);
           if (terminalExitEvidence(result, sessionId)) {
             exitConfirmed = true; confirmedExitSessionId = sessionId; ptyId = null;
             spawnPhase = 'exited';
@@ -426,7 +512,7 @@
           shellId: sessionInfo?.shellId, shellLabel: sessionInfo?.shellLabel }, '*');
         readTimer = setInterval(readTerminalOutput, 80);
         void readTerminalOutput();
-        term.focus();
+        if (autoFocus) term.focus();
         return true;
       } catch (error) {
         if (spawnPhase === 'pending') spawnPhase = definiteSpawnRejection(error) ? 'rejected' : 'unknown';
@@ -503,6 +589,7 @@
   exposeTerminalApi();
   window.addEventListener('unload', () => {
     unloaded = true;
+    invalidateScriptRun();
     connected = false;
     term.options.disableStdin = true;
     connectionGeneration++;

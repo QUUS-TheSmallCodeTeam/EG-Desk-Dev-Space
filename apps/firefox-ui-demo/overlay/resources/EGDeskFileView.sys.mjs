@@ -194,7 +194,7 @@ export function createEGDeskNativeFilePickers({ service, pickDirectory, pickSave
 // result card; resolvePath lights up openAt({path, line}); showChangeReview()
 // hosts the after-apply change review (D-X2). parts = {diffView, runResult,
 // changeReview} may inject the display modules (null turns one off).
-export function createEGDeskFileView({ document, service, chooseRoot, chooseSaveAs, runCheck, onState = () => {}, fileChangeDelayMs = 250, parts = {} }) {
+export function createEGDeskFileView({ document, service, chooseRoot, chooseProject, getProjectTarget, chooseSaveAs, runCheck, projectChecksOnly = false, onState = () => {}, fileChangeDelayMs = 250, parts = {} }) {
   if (!document?.createElement || !service || !['listDirectory', 'search', 'readFile', 'createDraft', 'updateDraft', 'saveDraft', 'saveAs', 'diffDraft'].every(name => typeof service[name] === 'function')) {
     throw new Error('File view requires a document and file-service callbacks')
   }
@@ -211,6 +211,9 @@ export function createEGDeskFileView({ document, service, chooseRoot, chooseSave
     node.addEventListener('click', action)
     return node
   }
+  // Card-local layout only: retain the shared File surface's colors, controls
+  // and focus treatment without changing the concurrently owned stylesheet.
+  const layout = (node, declarations) => node.setAttribute('style', declarations)
   const hasGitChanges = typeof service.gitChanges === 'function' && typeof service.gitFileDiff === 'function'
   const hasContentSearch = typeof service.searchContents === 'function'
   const hasOriginalSave = typeof service.saveOriginal === 'function'
@@ -235,6 +238,11 @@ export function createEGDeskFileView({ document, service, chooseRoot, chooseSave
   const root = el('section', 'egdesk-file-view')
   root.setAttribute('aria-label', '파일 작업')
   const toolbar = el('div', 'egdesk-file-toolbar')
+  layout(toolbar, 'flex-wrap: wrap; gap: 6px; min-width: 0;')
+  const connections = el('div', 'egdesk-file-connections')
+  layout(connections, 'display: flex; align-items: center; gap: 6px; flex: 1 1 18rem; min-width: 0; max-width: 100%;')
+  const projectActions = el('div', 'egdesk-file-project-actions')
+  layout(projectActions, 'display: flex; flex-wrap: wrap; align-items: center; gap: 6px; flex: 0 0 auto;')
   const treePanel = el('section', 'egdesk-file-tree-panel')
   const treeHeading = el('h2', 'egdesk-file-tree-heading', '파일')
   const tree = el('ul', 'egdesk-file-tree')
@@ -284,7 +292,9 @@ export function createEGDeskFileView({ document, service, chooseRoot, chooseSave
   changesPanel.append(scopeGroup, refreshChangesButton, changesSummary, changeList)
   treePanel.append(treeHeading, tabs, tree, changesPanel)
   const searchForm = el('form', 'egdesk-file-search')
+  layout(searchForm, 'flex: 1 1 24rem; flex-wrap: wrap; min-width: 0; max-width: 100%;')
   const modeGroup = el('div', 'egdesk-file-search-modes')
+  layout(modeGroup, 'display: flex; gap: 5px; flex: 0 0 auto;')
   modeGroup.setAttribute('role', 'radiogroup')
   modeGroup.setAttribute('aria-label', '검색 방식')
   const modeRadio = (label, mode, enabled) => {
@@ -300,8 +310,11 @@ export function createEGDeskFileView({ document, service, chooseRoot, chooseSave
   modeGroup.append(nameModeButton, contentModeButton)
   bindRovingKeys(modeGroup, () => [nameModeButton, contentModeButton], node => setSearchMode(node.dataset.mode))
   const searchLabel = el('label', 'egdesk-file-search-label')
+  layout(searchLabel, 'flex: 1 1 14rem; min-width: 0;')
   const searchLabelText = el('span', 'egdesk-file-search-label-text', '파일 이름 검색')
+  layout(searchLabelText, 'white-space: nowrap; flex: 0 0 auto;')
   const searchInput = el('input', 'egdesk-file-search-input')
+  layout(searchInput, 'flex: 1 1 8rem; width: 0; min-width: 4rem; box-sizing: border-box;')
   searchInput.type = 'search'
   searchInput.maxLength = 256
   searchLabel.append(searchLabelText, searchInput)
@@ -310,7 +323,10 @@ export function createEGDeskFileView({ document, service, chooseRoot, chooseSave
   searchForm.append(modeGroup, searchLabel, searchButton)
   const searchResults = el('div', 'egdesk-file-search-results')
   const workspace = el('section', 'egdesk-file-workspace')
+  layout(workspace, 'min-width: 0;')
   const title = el('h2', 'egdesk-file-title', '파일을 선택하세요')
+  layout(title, 'min-width: 0; flex-shrink: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap;')
+  const setTitle = text => { title.textContent = text; title.title = text }
   const fileDetails = el('details', 'egdesk-file-details')
   fileDetails.append(el('summary', 'egdesk-file-details-summary', '파일 정보'))
   const meta = el('p', 'egdesk-file-meta')
@@ -330,8 +346,13 @@ export function createEGDeskFileView({ document, service, chooseRoot, chooseSave
   changeDiffPanel.hidden = true
   changeDiffPanel.setAttribute('aria-label', '커밋 안 한 변경 보기')
   const checkPanel = el('section', 'egdesk-file-check-result')
+  layout(checkPanel, 'flex: 0 0 auto; min-width: 0; max-width: 100%; box-sizing: border-box; overflow-wrap: anywhere;')
   checkPanel.hidden = true
   checkPanel.setAttribute('aria-label', '검사 결과')
+  const scriptPanel = el('section', 'egdesk-file-script-settings')
+  layout(scriptPanel, 'display: flex; flex-direction: column; gap: 8px; flex: 0 1 auto; min-width: 0; min-height: 0; max-height: 100%; overflow: hidden;')
+  scriptPanel.hidden = true
+  scriptPanel.setAttribute('aria-label', '검사 명령 설정')
   const sourceConflictPanel = el('section', 'egdesk-file-source-conflict')
   sourceConflictPanel.hidden = true
   sourceConflictPanel.setAttribute('aria-label', '원본 비교')
@@ -346,11 +367,48 @@ export function createEGDeskFileView({ document, service, chooseRoot, chooseSave
   error.hidden = true
   const connectButton = button('폴더 연결', 'egdesk-file-connect', async () => {
     if (!chooseRoot) return
-    try { const selected = await chooseRoot(); if (selected) await openRoot(selected) }
+    try { const selected = await chooseRoot(); if (selected && !disposed) await openRoot(selected, { project: null }) }
     catch (cause) { showError(cause) }
   })
   connectButton.disabled = typeof chooseRoot !== 'function'
   connectButton.title = chooseRoot ? 'OS 선택기로 허용할 폴더를 고릅니다.' : '폴더 선택기가 연결되지 않았습니다.'
+  const projectConnectButton = button('보드 프로젝트 연결', 'egdesk-file-project-connect', () => act(async () => {
+    if (projectConnecting || typeof chooseProject !== 'function') return
+    // Read the Board once, synchronously with the click, never after a picker.
+    const selectedTarget = getProjectTarget?.()
+    if (!selectedTarget?.boardId) { announce('프로젝트를 연결할 보드를 먼저 선택하세요.'); return }
+    const target = Object.freeze({ boardId: selectedTarget.boardId, title: selectedTarget.title || '선택한 보드' })
+    projectConnecting = true
+    projectConnectButton.disabled = true; connectButton.disabled = true
+    showProjectTarget(target)
+    try {
+      const project = await chooseProject(target)
+      if (project && !disposed) await openProject(project)
+    } finally {
+      projectConnecting = false
+      projectConnectButton.disabled = typeof chooseProject !== 'function'
+      connectButton.disabled = typeof chooseRoot !== 'function'
+    }
+  }))
+  const projectActionLabel = el('span', 'egdesk-file-project-connect-label', '보드 프로젝트 연결')
+  const projectTargetLabel = el('span', 'egdesk-file-project-target')
+  layout(projectConnectButton, 'display: inline-flex; align-items: center; min-width: 0; max-width: 100%; white-space: nowrap; overflow: hidden;')
+  layout(projectActionLabel, 'flex: 0 0 auto;')
+  layout(projectTargetLabel, 'flex: 0 1 auto; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap;')
+  projectConnectButton.replaceChildren(projectActionLabel, projectTargetLabel)
+  const showProjectTarget = target => {
+    projectTargetLabel.textContent = target?.title ? ` · ${target.title}` : ''
+    projectConnectButton.setAttribute('aria-label', `보드 프로젝트 연결${target?.title ? ` · ${target.title}` : ''}`)
+    projectConnectButton.title = target?.boardId ? `${target.title || '선택한 보드'}의 기존 프로젝트를 열거나 폴더를 연결합니다.` : '프로젝트를 연결할 보드를 먼저 선택하세요.'
+  }
+  projectConnectButton.hidden = typeof chooseProject !== 'function' || typeof getProjectTarget !== 'function'
+  const refreshProjectTarget = () => {
+    if (projectConnecting || projectConnectButton.hidden) return
+    const target = getProjectTarget?.()
+    showProjectTarget(target)
+  }
+  projectConnectButton.addEventListener('focus', refreshProjectTarget)
+  projectConnectButton.addEventListener('mouseenter', refreshProjectTarget)
   const reviewButton = button('변경 비교', 'egdesk-file-review-button', () => act(review))
   const saveOriginalButton = button('원본에 저장', 'egdesk-file-save-original-button', () => act(() => saveOriginal()))
   saveOriginalButton.hidden = !hasOriginalSave
@@ -363,17 +421,30 @@ export function createEGDeskFileView({ document, service, chooseRoot, chooseSave
   reconnectButton.disabled = !chooseRoot || typeof service.reconnectDraft !== 'function'
   saveAsButton.disabled = typeof chooseSaveAs !== 'function'
   checkButton.disabled = typeof runCheck !== 'function'
+  checkButton.hidden = projectChecksOnly
   saveAsButton.title = chooseSaveAs ? '기존 파일은 덮어쓰지 않습니다.' : '저장 위치 선택기가 연결되지 않았습니다.'
   checkButton.title = runCheck ? '현재 저장된 작업사본에 검사를 실행합니다.' : '검사 실행기가 연결되지 않았습니다.'
   const projectCheckButton = button('검사', 'egdesk-file-project-check', () => act(() => check()))
   projectCheckButton.hidden = true
+  const scriptSettingsButton = button('검사 명령 설정', 'egdesk-file-script-settings-button', () => act(showScriptSettings))
+  scriptSettingsButton.hidden = true
+  projectActions.hidden = true
+  for (const control of [connectButton, scriptSettingsButton, projectCheckButton, nameModeButton, contentModeButton, searchButton]) {
+    layout(control, 'white-space: nowrap; flex-shrink: 0;')
+  }
   actions.append(reviewButton, saveOriginalButton, saveButton, saveAsButton, checkButton, reconnectButton)
-  toolbar.append(connectButton, projectCheckButton, searchForm)
-  workspace.append(title, fileDetails, editorLabel, viewer, actions, sourceConflictPanel, reviewPanel, changeDiffPanel, checkPanel, changeReviewPanel)
+  connections.append(connectButton, projectConnectButton)
+  projectActions.append(scriptSettingsButton, projectCheckButton)
+  toolbar.append(connections, projectActions, searchForm)
+  workspace.append(title, fileDetails, scriptPanel, editorLabel, viewer, actions, sourceConflictPanel, reviewPanel, changeDiffPanel, checkPanel, changeReviewPanel)
   root.append(toolbar, treePanel, searchResults, workspace, status, error)
 
   let activeRoot = null
   let activeProject = null
+  let projectConnecting = false
+  let checking = false
+  let projectRevision = 0
+  let checkReceipt = null
   let changeReview = null
   let activeFileId = null
   let draft = null
@@ -431,11 +502,29 @@ export function createEGDeskFileView({ document, service, chooseRoot, chooseSave
   const refreshProjectCheck = () => {
     const scripts = activeProject?.scripts || []
     projectCheckButton.hidden = !scripts.length || typeof runCheck !== 'function'
-    projectCheckButton.title = scripts.length === 1 ? `${scripts[0].name}: ${scripts[0].command}` : '프로젝트에 저장한 명령 중 하나를 터미널에서 실행합니다.'
-    checkButton.disabled = typeof runCheck !== 'function'
+    projectCheckButton.title = `${scripts.length === 1 ? `${scripts[0].name}: ${scripts[0].command}` : '프로젝트에 저장한 명령 중 하나를 실행합니다.'} · 디스크에 저장된 원본 기준`
+    projectCheckButton.disabled = checking
+    scriptSettingsButton.hidden = !activeProject || typeof service.setProjectScripts !== 'function'
+    projectActions.hidden = scriptSettingsButton.hidden && projectCheckButton.hidden
+    checkButton.disabled = typeof runCheck !== 'function' || checking
+    checkButton.hidden = projectChecksOnly || !!activeProject
   }
   const dirty = () => !!draft && (editor.value !== draft.text || draft.bufferRevision !== draft.savedRevision)
-  const snapshot = () => ({ rootId: activeRoot?.rootId || null, projectId: activeProject?.projectId || null, fileId: activeFileId, draftId: draft?.id || null, sourceRevision: readReceipt?.diskRevision || null, sourceConnection: sourceDisconnected ? 'reconnect-required' : 'connected', bufferRevision: draft?.bufferRevision ?? null, savedRevision: draft?.savedRevision ?? null, dirty: dirty(), scrollTop: editorLabel.hidden ? viewer.scrollTop : editor.scrollTop })
+  const snapshot = () => ({ rootId: activeRoot?.rootId || null, projectId: activeProject?.projectId || null, fileId: activeFileId, draftId: draft?.id || null, sourceRevision: readReceipt?.diskRevision || null, sourceConnection: sourceDisconnected ? 'reconnect-required' : 'connected', bufferRevision: draft?.bufferRevision ?? null, savedRevision: draft?.savedRevision ?? null, dirty: dirty(), originalDirty: !!draft && typeof draft.baseText === 'string' && editor.value !== draft.baseText, scrollTop: editorLabel.hidden ? viewer.scrollTop : editor.scrollTop })
+
+  function markCheckStale() {
+    projectRevision++
+    if (!checkReceipt) return
+    checkReceipt.stale = true
+    refreshCheckStale()
+  }
+  function refreshCheckStale() {
+    if (!checkReceipt) return
+    let label = checkPanel.querySelector('.egdesk-file-check-stale')
+    if (!label) { label = el('p', 'egdesk-file-check-stale'); label.setAttribute('role', 'status'); label.setAttribute('data-testid', 'file-check-stale'); checkPanel.append(label) }
+    label.textContent = checkReceipt.stale ? '실행 이후 변경 있음 · 아래 결과는 실행을 시작한 폴더·내용 기준입니다.' : ''
+    label.hidden = !checkReceipt.stale
+  }
 
   async function act(work) { clearError(); try { await work() } catch (cause) { showError(cause) } }
 
@@ -602,6 +691,8 @@ export function createEGDeskFileView({ document, service, chooseRoot, chooseSave
     if (draft && editor.value !== draft.text) await flush()
     const generation = token()
     treeGeneration++
+    markCheckStale()
+    scriptPanel.hidden = true
     activeProject = project !== undefined ? project : activeProject?.rootId === rootHandle.rootId ? activeProject : null
     refreshProjectCheck()
     changeReview?.dispose(); changeReview = null; changeReviewPanel.hidden = true; sourceConflictPanel.hidden = true
@@ -612,7 +703,7 @@ export function createEGDeskFileView({ document, service, chooseRoot, chooseSave
     tree.replaceChildren()
     searchResults.replaceChildren()
     changeList.replaceChildren(); changesSummary.textContent = ''; changeDiffPanel.hidden = true
-    if (!preserveDraft) { title.textContent = rootHandle.name || '연결된 폴더'; setEditable(false); viewer.textContent = '트리에서 파일을 선택하세요.' }
+    if (!preserveDraft) { setTitle(rootHandle.name || '연결된 폴더'); setEditable(false); viewer.textContent = '트리에서 파일을 선택하세요.' }
     await appendDirectory(rootHandle.directoryId, tree, 0, treeGeneration, '')
     if (present(generation)) {
       tree.querySelector('[role="treeitem"]')?.setAttribute('tabindex', '0'); announce('폴더가 연결되었습니다.')
@@ -721,6 +812,7 @@ export function createEGDeskFileView({ document, service, chooseRoot, chooseSave
   function onFileChanged(event) {
     const change = normalizeFileChangedEvent(event)
     if (disposed || !change || !activeRoot || change.rootId !== activeRoot.rootId) return false
+    markCheckStale()
     pendingFolders.add(keyOf(parentFolderOf(change.relativePath)))
     if (!fileChangeTimer) fileChangeTimer = setTimeout(() => { fileChangeTimer = null; flushFileChanges().catch(() => {}) }, fileChangeDelayMs)
     return true
@@ -806,7 +898,7 @@ export function createEGDeskFileView({ document, service, chooseRoot, chooseSave
     sourceDisconnected = disconnected
     pendingReconnect = false
     readReceipt = { name: read.name, size: read.size, sha256: read.sha256, diskRevision: read.diskRevision }
-    title.textContent = read.name
+    setTitle(read.name)
     meta.textContent = `${read.size == null ? '원본 위치 확인 필요' : `${read.size} byte`} · SHA-256 ${read.sha256}`
     reviewPanel.hidden = true
     checkPanel.hidden = true
@@ -848,7 +940,7 @@ export function createEGDeskFileView({ document, service, chooseRoot, chooseSave
     if (!present(generation) || draft?.id !== targetDraftId) return
     draft = reconnected.draft; activeFileId = fileId; readReceipt = reconnected.source
     sourceDisconnected = false; pendingReconnect = false
-    title.textContent = reconnected.source.name
+    setTitle(reconnected.source.name)
     meta.textContent = `${reconnected.source.size} byte · SHA-256 ${reconnected.source.sha256}`
     setEditable(true)
     announce('원본을 다시 연결했습니다. 작업사본은 유지됩니다.')
@@ -877,7 +969,7 @@ export function createEGDeskFileView({ document, service, chooseRoot, chooseSave
 
   editor.addEventListener('compositionstart', () => { composing = true })
   editor.addEventListener('compositionend', () => { composing = false; compositionEndedAt = Date.now(); scheduleFlush() })
-  editor.addEventListener('input', () => { localRevision++; announce('저장되지 않은 변경이 있습니다.'); if (!composing) scheduleFlush() })
+  editor.addEventListener('input', () => { localRevision++; markCheckStale(); announce('저장되지 않은 변경이 있습니다.'); if (!composing) scheduleFlush() })
   function scheduleFlush() { if (timer) clearTimeout(timer); timer = setTimeout(() => { timer = null; act(flush) }, 250) }
 
   // Working copy vs the original it was opened from. With EGDeskDiffView the
@@ -1004,12 +1096,91 @@ export function createEGDeskFileView({ document, service, chooseRoot, chooseSave
   // Several commands → the user picks one (the exact command is shown). The
   // command runs on the files on disk, so working-copy text that was not
   // saved to the original is reported first instead of tested silently.
+  function showScriptSettings() {
+    if (!activeProject || typeof service.setProjectScripts !== 'function') return
+    const projectId = activeProject.projectId, rootId = activeRoot?.rootId
+    const fields = el('fieldset', 'egdesk-file-script-fields')
+    fields.setAttribute('aria-label', '저장할 검사 명령')
+    layout(fields, 'display: flex; flex-direction: column; gap: 12px; flex: 1 1 auto; min-width: 0; min-height: 0; max-height: 20rem; overflow: auto; margin: 0; padding: 2px; border: 0;')
+    const rows = []
+    const add = value => {
+      if (rows.length >= 12) return
+      const row = el('div', 'egdesk-file-script-row')
+      layout(row, 'display: grid; grid-template-columns: minmax(0, 1fr) auto; align-items: end; gap: 6px; flex: 0 0 auto; min-width: 0;')
+      const nameLabel = el('label', 'egdesk-file-script-name-label', '이름')
+      layout(nameLabel, 'display: flex; flex-direction: column; gap: 4px; min-width: 0; grid-column: 1; grid-row: 1;')
+      const name = el('input', 'egdesk-file-script-name')
+      name.type = 'text'; name.maxLength = 60; name.value = value?.name || ''
+      name.setAttribute('aria-label', '검사 명령 이름')
+      name.setAttribute('data-testid', 'file-script-name')
+      const commandLabel = el('label', 'egdesk-file-script-command-label', '명령')
+      layout(commandLabel, 'display: flex; flex-direction: column; gap: 4px; min-width: 0; grid-column: 1 / -1; grid-row: 2;')
+      const command = el('input', 'egdesk-file-script-command')
+      command.type = 'text'; command.maxLength = 1000; command.value = value?.command || ''
+      command.setAttribute('aria-label', '실행할 정확한 명령')
+      command.setAttribute('data-testid', 'file-script-command')
+      for (const input of [name, command]) {
+        layout(input, `width: 100%; min-width: 0; box-sizing: border-box; font: ${input === command ? '13px/1.55 ui-monospace, monospace' : 'inherit'}; color: inherit; background: var(--egd-surface-elevated); border: 1px solid var(--egd-outline); border-radius: 6px; padding: 4px 7px;`)
+      }
+      command.setAttribute('spellcheck', 'false')
+      const entry = { row, name, command, id: value?.id || `script-${Date.now().toString(36)}-${Math.random().toString(36).slice(2, 8)}`, kind: value?.kind }
+      const remove = button('삭제', 'egdesk-file-script-remove', () => { rows.splice(rows.indexOf(entry), 1); row.remove(); addButton.disabled = false })
+      layout(remove, 'grid-column: 2; grid-row: 1; white-space: nowrap;')
+      nameLabel.append(name); commandLabel.append(command)
+      row.append(nameLabel, commandLabel, remove); fields.append(row); rows.push(entry)
+      addButton.disabled = rows.length >= 12
+    }
+    const addButton = button('명령 추가', 'egdesk-file-script-add', () => add())
+    const saveButton = button('명령 저장', 'egdesk-file-script-save', () => act(async () => {
+      if (fields.disabled || disposed || activeProject?.projectId !== projectId || activeRoot?.rootId !== rootId) return
+      const scripts = rows.map(({ id, name, command, kind }) => {
+        const typedName = name.value.trim(), typedCommand = command.value.trim()
+        if (!typedName || typedName.length > 60 || !typedCommand || typedCommand.length > 1000 || /[\u0000-\u001f\u007f\u2028\u2029]/.test(typedName + typedCommand)) {
+          throw new Error('이름(60자 이내)과 실행할 명령(1000자 이내)을 한 줄씩 입력하세요.')
+        }
+        return { id, name: typedName, command: typedCommand, ...(kind ? { kind } : {}) }
+      })
+      fields.disabled = true; saveButton.disabled = true; addButton.disabled = true
+      try {
+        const result = await service.setProjectScripts({ projectId, scripts })
+        if (result?.projectId !== projectId || !Array.isArray(result.scripts)) throw new Error('검사 명령 저장 결과를 확인하지 못했습니다.')
+        if (disposed || activeProject?.projectId !== projectId || activeRoot?.rootId !== rootId) return
+        setProjectScripts(result.scripts)
+        scriptPanel.hidden = true
+        announce('검사 명령을 저장했습니다. 실행하려면 검사를 누르세요.')
+      } finally { fields.disabled = false; saveButton.disabled = false; addButton.disabled = rows.length >= 12 }
+    }))
+    saveButton.setAttribute('data-testid', 'file-script-save')
+    const heading = el('h3', '', '검사 명령 설정')
+    layout(heading, 'flex: 0 0 auto; margin: 4px 0 0; font: inherit; font-weight: bold;')
+    const hint = el('p', '', '직접 입력한 명령만 저장합니다. 저장하거나 프로젝트를 여는 것만으로 실행하지 않습니다.')
+    layout(hint, 'flex: 0 0 auto; margin: 0;')
+    const editorActions = el('div', 'egdesk-file-script-actions')
+    layout(editorActions, 'display: flex; flex-wrap: wrap; gap: 5px; flex: 0 0 auto; padding: 2px 0;')
+    const closeButton = button('닫기', 'egdesk-file-script-cancel', () => { scriptPanel.hidden = true })
+    for (const control of [addButton, saveButton, closeButton]) layout(control, 'white-space: nowrap; flex-shrink: 0;')
+    editorActions.append(addButton, saveButton, closeButton)
+    scriptPanel.replaceChildren(heading, hint, fields, editorActions)
+    const scripts = activeProject.scripts || []
+    for (const script of scripts) add(script)
+    if (!scripts.length) add()
+    scriptPanel.hidden = false
+  }
+
   async function check(chosen = null) {
-    if (typeof runCheck !== 'function') return
+    if (typeof runCheck !== 'function' || checking) return
     const scripts = activeProject?.scripts || []
-    if (!scripts.length) return legacyCheck()
+    if (!scripts.length) {
+      if (activeProject || projectChecksOnly) { announce(activeProject ? '검사 명령 설정에서 실행할 명령을 먼저 저장하세요.' : '검사할 보드 프로젝트를 먼저 연결하세요.'); return }
+      return legacyCheck()
+    }
     const script = chosen || (scripts.length === 1 ? scripts[0] : null)
     if (!script) { showScriptChooser(scripts); return }
+    if (!scripts.some(saved => saved.id === script.id && saved.name === script.name && saved.command === script.command)) {
+      announce('검사 명령이 바뀌었습니다. 저장된 명령을 다시 선택하세요.'); return
+    }
+    const projectId = activeProject.projectId, rootId = activeRoot?.rootId
+    const generation = treeGeneration
     if (draft) {
       await flush()
       if (draft && typeof draft.baseText === 'string' && (editor.value !== draft.text || draft.text !== draft.baseText)) {
@@ -1017,17 +1188,24 @@ export function createEGDeskFileView({ document, service, chooseRoot, chooseSave
         return
       }
     }
-    const generation = treeGeneration
-    const projectId = activeProject.projectId
+    if (disposed || generation !== treeGeneration || activeProject?.projectId !== projectId || checking) return
+    const receipt = { projectId, rootId, cwd: activeRoot?.displayPath || null, revision: projectRevision, bufferRevision: draft?.bufferRevision ?? null, stale: false }
+    checkReceipt = receipt
+    checking = true; refreshProjectCheck()
     checkPanel.replaceChildren(el('h3', 'egdesk-file-check-heading', `검사 중 · ${script.name}`))
     checkPanel.hidden = false
     checkPanel.setAttribute('aria-busy', 'true')
     announce(`검사를 시작했습니다 · ${script.name}`)
     let result
-    try { result = await runCheck({ projectId, rootId: activeRoot?.rootId || null, script: { ...script } }) }
-    finally { checkPanel.setAttribute('aria-busy', 'false') }
-    if (disposed || generation !== treeGeneration || activeProject?.projectId !== projectId) return
-    await renderCheckResult(result, script)
+    try { result = await runCheck({ projectId, rootId, script: { ...script } }) }
+    catch (cause) {
+      const notStarted = ['TERMINAL_RUN_REQUEST', 'TERMINAL_RUN_BUSY', 'TERMINAL_INPUT_INACTIVE', 'TERMINAL_INPUT_STALE', 'TERMINAL_PROJECT_CHANGED', 'TERMINAL_RUN_SHELL', 'TERMINAL_NOT_READY'].includes(cause?.code)
+      result = { command: script.command, status: notStarted ? 'not-started' : 'unknown', exitCode: null, output: cause?.message || '검사 실행을 확인하지 못했습니다.' }
+    }
+    finally { checking = false; refreshProjectCheck(); checkPanel.setAttribute('aria-busy', 'false') }
+    if (disposed) return
+    receipt.stale ||= receipt.revision !== projectRevision || activeProject?.projectId !== projectId || activeRoot?.rootId !== rootId
+    await renderCheckResult(result, script, receipt)
   }
 
   function showScriptChooser(scripts) {
@@ -1047,19 +1225,44 @@ export function createEGDeskFileView({ document, service, chooseRoot, chooseSave
     announce('실행할 명령을 고르세요.')
   }
 
-  async function renderCheckResult(result, script) {
+  async function renderCheckResult(result, script, receipt) {
     const runResult = result && (Object.hasOwn(result, 'output') || Object.hasOwn(result, 'exitCode')) ? await part('runResult') : null
+    if (disposed || checkReceipt !== receipt) return
+    const context = el('p', 'egdesk-file-check-context', `실행 폴더 · ${receipt.cwd || '확인되지 않음'}${receipt.bufferRevision == null ? '' : ` · 작업사본 버전 ${receipt.bufferRevision}`}`)
     if (runResult) {
-      const summary = runResult.summarizeRunResult({ command: result.command || script.command, exitCode: result.exitCode, status: result.status, durationMs: result.durationMs, output: result.output ?? '', cwd: result.cwd || activeRoot?.displayPath || null, projectRoot: activeRoot?.displayPath || null })
-      const card = runResult.renderRunResultCard({ document, result: summary, onOpenLocation: location => act(() => openAt(location)) })
-      checkPanel.replaceChildren(el('h3', 'egdesk-file-check-heading', `검사 결과 · ${script.name}`), card)
+      const summary = runResult.summarizeRunResult({ command: result.command || script.command, exitCode: result.exitCode, status: result.status, durationMs: result.durationMs, output: result.output ?? '', cwd: receipt.cwd, projectRoot: receipt.cwd })
+      const card = runResult.renderRunResultCard({ document, result: summary, onOpenLocation: location => act(() => {
+        if (activeRoot?.rootId !== receipt.rootId || activeProject?.projectId !== receipt.projectId) { announce('이 결과를 실행한 프로젝트를 먼저 열어 주세요.'); return }
+        return openAt(location)
+      }) })
+      checkPanel.replaceChildren(el('h3', 'egdesk-file-check-heading', `검사 결과 · ${script.name}`), context, card)
+      layoutCheckResult()
       checkPanel.hidden = false
+      refreshCheckStale()
       announce(`검사 결과 · ${summary.headline}`)
       return
     }
-    checkPanel.replaceChildren(el('h3', 'egdesk-file-check-heading', `검사 결과 · ${script.name}`), el('pre', 'egdesk-file-check-body', result?.summary || '검사 결과를 확인할 수 없습니다.'))
+    checkPanel.replaceChildren(el('h3', 'egdesk-file-check-heading', `검사 결과 · ${script.name}`), context, el('pre', 'egdesk-file-check-body', result?.summary || '검사 결과를 확인할 수 없습니다.'))
+    layoutCheckResult()
     checkPanel.hidden = false
+    refreshCheckStale()
     announce(`검사 결과 · ${script.name}`)
+  }
+
+  function layoutCheckResult() {
+    // Shared RunResult classes are styled once by the surface stylesheet.
+    // Only File's own context/fallback and native keyboard scrolling live here.
+    for (const node of checkPanel.querySelectorAll('.egdesk-file-check-context')) {
+      layout(node, 'min-width: 0; max-width: 100%; overflow-wrap: anywhere;')
+    }
+    for (const node of checkPanel.querySelectorAll('.egdesk-file-check-body')) {
+      layout(node, 'display: block; width: 100%; min-width: 0; max-width: 100%; max-height: 18rem; box-sizing: border-box; overflow: auto; white-space: pre; overflow-wrap: normal; word-break: normal; font-family: ui-monospace, monospace;')
+    }
+    for (const selector of ['.egdesk-run-result-command', '.egdesk-run-result-tail', '.egdesk-file-check-body']) {
+      for (const node of checkPanel.querySelectorAll(selector)) {
+        node.tabIndex = 0 // Native keyboard scrolling of text, not another action.
+      }
+    }
   }
 
   async function legacyCheck() {
@@ -1072,25 +1275,27 @@ export function createEGDeskFileView({ document, service, chooseRoot, chooseSave
     const checked = await runCheck({ draftId: draft.id, revision: targetRevision, sha256: draft.savedHash })
     if (!present(generation) || draft?.id !== targetDraftId) return
     checkPanel.replaceChildren(el('h3', 'egdesk-file-check-heading', '검사 결과'), el('pre', 'egdesk-file-check-body', checked?.summary || '검사 결과를 확인할 수 없습니다.'))
+    layoutCheckResult()
     checkPanel.hidden = false
     announce(`검사 결과 · 작업사본 ${targetRevision}${draft.bufferRevision !== targetRevision ? ' · 이후 변경 있음' : ''}`)
   }
 
   // A Board project (helper projects/open or attach result) → its folder in
   // this view, with its commands behind '검사'.
-  async function openProject(project) {
+  async function openProject(project, { preserveDraft = false } = {}) {
     if (!project?.projectId) throw new Error('프로젝트가 없습니다.')
     if (project.status !== 'connected' || !project.rootId || !project.directoryId) {
       announce(`${project.title || project.name || '프로젝트'} 폴더를 다시 골라 주세요.`)
       return false
     }
     const scripts = Array.isArray(project.scripts) ? project.scripts.filter(script => script && typeof script.name === 'string' && typeof script.command === 'string').map(script => ({ ...script })) : []
-    await openRoot({ rootId: project.rootId, directoryId: project.directoryId, name: project.title || project.name, displayPath: project.displayPath, saveAsAvailable: project.saveAsAvailable }, { project: { projectId: project.projectId, rootId: project.rootId, title: project.title || project.name, scripts } })
+    await openRoot({ rootId: project.rootId, directoryId: project.directoryId, name: project.title || project.name, displayPath: project.displayPath, saveAsAvailable: project.saveAsAvailable }, { preserveDraft, project: { projectId: project.projectId, rootId: project.rootId, title: project.title || project.name, scripts } })
     return true
   }
 
   function setProjectScripts(scripts) {
     if (!activeProject) return false
+    markCheckStale()
     activeProject = { ...activeProject, scripts: Array.isArray(scripts) ? scripts.map(script => ({ ...script })) : [] }
     refreshProjectCheck()
     onState(snapshot())
@@ -1195,6 +1400,7 @@ export function createEGDeskFileView({ document, service, chooseRoot, chooseSave
 
   setSearchMode('names')
   selectTab('files')
+  refreshProjectTarget()
 
   root.addEventListener('keydown', event => {
     if (event.defaultPrevented || event.isComposing || composing || event.keyCode === 229 || Date.now() - compositionEndedAt < 100) return

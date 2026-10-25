@@ -22,6 +22,18 @@ const selectedSources = between('  function registerBrowserToolSelection(threadI
 const menuSelection = between('    const selectBrowserForChat = (permission) => {', '    const showBrowserMenu = ')
 const stopRevokeSource = between('  function revokeBrowserToolRunImmediately(run, thread) {', '  function registerBrowserToolSelection(')
 const toolActSource = between('    const browserToolAct = async (expected, action, guard, lease) => {', '    card._browserControls = {')
+const budgetSource = between('  function browserToolRemainingBudget(', '  function browserToolDialog(')
+const dialogSource = between('  function browserToolDialog(', '  // Only the helper contract C keys')
+function cardTools({ browser, query, bindingCheck = () => {}, activity = () => {}, now = Date.now,
+  dialogs = { checkpoint: () => 0, read: () => ({ open: false, seen: false, dialog: null }) },
+  scheduler = { setTimeout, clearTimeout } } = {}) {
+  const remaining = new Function('Date', 'browserToolClock', 'BROWSER_TOOL_REPLY_MARGIN_MS',
+    `${budgetSource}\nreturn browserToolRemainingBudget`)({ now }, now, 500)
+  return new Function('assertBrowserToolBinding', 'xulBrowser', 'showAgentActivity', 'browserAgentActorRequest',
+    'card', 'BrowserAgentReceipts', 'browserToolRemainingBudget', 'toolDialogs', 'window',
+    `${toolActSource}\nreturn { act: browserToolAct, reconcile: browserToolReconcile }`)(
+    bindingCheck, browser, activity, query, { id: 'browser-a' }, BrowserAgentReceipts, remaining, dialogs, scheduler)
+}
 const toolBindingSource = between('    const browserToolBinding = () => {', '    const assertBrowserToolBinding = (expected) => {')
 const interruptBody = between('      async interrupt(threadId = state.codex.activeThreadId) {', '      },\n      subscribe(listener) {')
   .slice('      async interrupt(threadId = state.codex.activeThreadId) {'.length)
@@ -182,12 +194,12 @@ function fixture() {
   let nonce = 0
   const transport = new Function('document', 'ChatState', 'browserToolRunBindings', 'browserToolCancelledRuns',
     'browserToolRequestReceipts', 'browserToolCardLeases', 'browserToolUserSelections', 'browserToolPendingBindings',
-    'browserToolActionLeases', 'browserToolStoppedRuns', 'chatBindingNonce', 'Date',
+    'browserToolActionLeases', 'browserToolStoppedRuns', 'chatBindingNonce', 'Date', 'performance', 'BROWSER_TOOL_REPLY_MARGIN_MS',
     `let browserToolFixtureLastAction = null;\nconst browserToolFixtureAuthorizationByCard = new Map();\n${dispatchSource}\n` +
     'return {browserToolDispatch,browserToolAuthorizePhysicalAction,browserToolFixtureActionDiagnostic}')(doc,
     { knownCodexAccountKey: key => typeof key === 'string' && key.startsWith('codex:') },
     runBindings, cancelled, receipts, leases, userSelections, pendingBindings, actionLeases, stoppedRuns,
-    () => `lease-${++nonce}`, { now: () => clockMs })
+    () => `lease-${++nonce}`, { now: () => clockMs }, { timeOrigin: 0, now: () => clockMs }, 500)
   authorizePhysicalAction = transport.browserToolAuthorizePhysicalAction
   let sequence = 0
   const req = (kind, extra = {}) => ({ version: 1, requestId: `request-${++sequence}`,
@@ -731,14 +743,12 @@ test('production Browser Card receipt carries only the bounded click route, not 
   const actorResult = { ok: true, result: { clickDiagnostics: {
     dispatchScope: 'dom-click-no-pointerdown', targetClickObserved: true, x: 442, y: 218,
   } }, after: { documentId: 'doc-a' }, observation: { visibleTextChanged: true } }
-  const toolAct = new Function('assertBrowserToolBinding', 'xulBrowser', 'showAgentActivity',
-    'browserAgentActorRequest', 'card', `${toolActSource}\nreturn browserToolAct`)(
-    expected => assert.equal(expected, binding), xulBrowser, () => {},
-    async (method, payload) => {
+  const toolAct = cardTools({ browser: xulBrowser, bindingCheck: expected => assert.equal(expected, binding),
+    query: async (method, payload) => {
       assert.equal(method, 'act')
       assert.deepEqual(payload.action, { type: 'click', ref: 'el_2' })
       return actorResult
-    }, card)
+    } }).act
   const receipt = await toolAct(binding, { type: 'click', ref: 'el_2' }, { revision: 2 }, {
     leaseId: 'lease-a', requestId: 'request-a', deadlineMs: Date.now() + 5000,
   })
@@ -1077,9 +1087,7 @@ test('production Browser Card receipt carries only the bounded scroll/press rout
   const windowGlobal = { id: 'window-global-a' }
   const xulBrowser = { browsingContext: { currentWindowGlobal: windowGlobal } }
   let actorResult
-  const toolAct = new Function('assertBrowserToolBinding', 'xulBrowser', 'showAgentActivity',
-    'browserAgentActorRequest', 'card', 'BrowserAgentReceipts', `${toolActSource}\nreturn browserToolAct`)(
-    () => {}, xulBrowser, () => {}, async () => actorResult, { id: 'browser-a' }, BrowserAgentReceipts)
+  const toolAct = cardTools({ browser: xulBrowser, query: async () => actorResult }).act
   const lease = { leaseId: 'lease-a', requestId: 'request-a', deadlineMs: Date.now() + 5000 }
   actorResult = { ok: true, result: { dispatchDiagnostics: { inputRoute: 'dom-scroll-api', mode: 'document',
     scrollBefore: { x: 0, y: 0 }, scrollAfter: { x: 0, y: 432 }, raw: 'actor-internal' } },
@@ -1135,9 +1143,7 @@ test('production Browser Card receipt carries only the bounded fill event order'
     trustedInput: false, focusApi: 'not-called', selectionApi: 'not-called', eventOrder: ['beforeinput', 'input'],
     beforeInputCanceled: false, egdeskWroteContent: true, readbackMatches: true, text: 'TYPED_SECRET' } },
   after: { documentId: 'doc-a' }, observation: {} }
-  const toolAct = new Function('assertBrowserToolBinding', 'xulBrowser', 'showAgentActivity',
-    'browserAgentActorRequest', 'card', 'BrowserAgentReceipts', `${toolActSource}\nreturn browserToolAct`)(
-    () => {}, xulBrowser, () => {}, async () => actorResult, { id: 'browser-a' }, BrowserAgentReceipts)
+  const toolAct = cardTools({ browser: xulBrowser, query: async () => actorResult }).act
   const fill = await toolAct({}, { type: 'fill', ref: 'f1/el_2', text: 'TYPED_SECRET' }, {},
     { leaseId: 'lease-a', requestId: 'request-a', deadlineMs: Date.now() + 5000 })
   assert.deepEqual(fill.dispatchReceipt, { actor: 'JSWindowActor', eventDispatched: true, documentStillCurrent: true,
@@ -1502,16 +1508,15 @@ test('toolAct turns an actor refusal into a phase-carrying error and marks post-
   const xulBrowser = { browsingContext: context }
   let actorResult, bindingFails = false
   const activity = []
-  const toolAct = new Function('assertBrowserToolBinding', 'xulBrowser', 'showAgentActivity',
-    'browserAgentActorRequest', 'card', `${toolActSource}\nreturn browserToolAct`)(
-    () => { if (bindingFails) throw new Error('Browser Card, profile or account context changed') },
-    xulBrowser, message => activity.push(message),
-    async (method, payload) => {
+  const toolAct = cardTools({ browser: xulBrowser,
+    bindingCheck: () => { if (bindingFails) throw new Error('Browser Card, profile or account context changed') },
+    activity: message => activity.push(message), query: async (method, payload) => {
       assert.equal(method, 'act')
-      assert.equal(payload.options.settleMs, 150, 'the UI passes the settle cap; the actor bounds it by the lease')
+      assert.equal(payload.options.settleMs, undefined, 'guarded settle uses the actor contract, not the legacy delay')
+      assert.ok(payload.options.budgetMs > 0 && payload.options.budgetMs <= 4500)
       bindingFails = actorResult.failAfter === true
       return actorResult.value
-    }, { id: 'browser-a' })
+    } }).act
   const lease = { leaseId: 'lease-a', requestId: 'request-a', deadlineMs: Date.now() + 5000 }
   actorResult = { value: { ok: false, refused: true, error: 'Browser observation is stale', dispatchPhase: 'not-dispatched',
     timing: { performCallsBefore: 2, performCallsAfter: 2 } } }
@@ -1529,4 +1534,291 @@ test('toolAct turns an actor refusal into a phase-carrying error and marks post-
   const receipt = await toolAct(binding, { type: 'click', ref: 'el_1' }, {}, lease)
   assert.equal(receipt.timing, timing, 'dispatch lifts this into the reply')
   assert.equal(receipt.dispatchReceipt.eventDispatched, true)
+})
+
+function connectCardTools(f, options) {
+  const controls = cardTools({ browser: f.browser, now: f.now,
+    bindingCheck(expected) {
+      for (const key of ['cardId', 'cardEpoch', 'profileId', 'accountId', 'userContextId', 'engineAccountKey', 'authorityEpoch']) {
+        if (expected[key] !== f.current[key]) throw new Error('Browser Card, profile or account context changed')
+      }
+    }, ...options })
+  f.card._browserControls.toolAct = controls.act
+  f.card._browserControls.toolReconcile = controls.reconcile
+  return controls
+}
+const reconcileRequest = (f, bound, extra = {}) => f.req('reconcile', { binding: bound.binding,
+  callId: 'native-call-a', actRequestId: 'wire-act-a', actSeq: 2, budgetMs: 3000, sentAtMs: f.now(),
+  guard: { documentId: 'doc-1', innerWindowId: 201, browsingContextId: 101 }, ...extra })
+
+test('S1 forwards original call and wire IDs with only the budget left after transport and UI work', async () => {
+  const f = fixture(), queries = []
+  const bound = await f.dispatch(f.req('bind', { selection: f.selection() }))
+  connectCardTools(f, { query: async (method, payload) => {
+    queries.push({ method, payload })
+    return { ok: true, result: {}, after: {}, timing: { actorReceivedAtMs: f.now() } }
+  } })
+  f.card._browserControls.toolPrepareAgentProjection = () => { f.advance(200) }
+  const request = f.req('act', { binding: bound.binding, callId: 'native-original-call',
+    budgetMs: 4000, sentAtMs: f.now() - 1000, guard: { documentId: 'doc-1', revision: 2 },
+    action: { type: 'click', ref: 'el_1' } })
+  const result = await f.dispatch(request)
+  assert.equal(result.status, 'acted')
+  assert.equal(queries.length, 1)
+  assert.equal(queries[0].payload.options.callId, 'native-original-call')
+  assert.equal(queries[0].payload.options.lease.requestId, request.requestId)
+  assert.equal(queries[0].payload.options.budgetMs, 2300)
+  assert.equal(queries[0].payload.options.settleMs, undefined)
+  assert.equal(result.timing.actorReceivedAtMs, f.now())
+  assert.equal(result.receipt.timing, undefined)
+  assert.deepEqual(await f.dispatch(request), result, 'a duplicate wire request returns its original receipt')
+  assert.equal((await f.dispatch({ ...request, callId: 'replacement-call' })).dispatchPhase, 'not-dispatched')
+  assert.equal(queries.length, 1, 'neither a duplicate nor changed payload dispatches a second action')
+})
+
+test('S1 rejects malformed or spent relative budgets and spends projection time before the actor hop', async () => {
+  for (const extra of [{ budgetMs: 0 }, { budgetMs: 60001 }, { budgetMs: 1.5 }, { budgetMs: '1000' },
+    { callId: '' }, { callId: 'x'.repeat(161) }, { callId: 42 }, { sentAtMs: NaN }, { sentAtMs: 0 },
+    { budgetMs: 500 }, { budgetMs: 1000, spent: 500 }, { budgetMs: 1000, projectionTime: 500 }]) {
+    const f = fixture()
+    const bound = await f.dispatch(f.req('bind', { selection: f.selection() }))
+    let queries = 0
+    connectCardTools(f, { query: async () => { queries++; return { ok: true } } })
+    f.card._browserControls.toolPrepareAgentProjection = () => { f.advance(extra.projectionTime || 0) }
+    const request = f.req('act', { binding: bound.binding, guard: { documentId: 'doc-1', revision: 2 },
+      action: { type: 'click', ref: 'el_1' }, ...extra })
+    if (extra.spent) request.sentAtMs = f.now() - extra.spent
+    const result = await f.dispatch(request)
+    assert.equal(result.dispatchPhase, 'not-dispatched', JSON.stringify(extra))
+    assert.equal(queries, 0)
+    assert.equal(f.actionLeases.size, 0)
+    assert.equal(f.leases.size, 0)
+  }
+})
+
+test('S1 reconcile bypasses only the in-flight card lock, preserving call identity without a new lease', async () => {
+  const f = fixture(), queries = []
+  const bound = await f.dispatch(f.req('bind', { selection: f.selection('observe') }))
+  f.leases.set(f.current.cardEpoch, 'in-flight-original-act')
+  f.card._browserControls.toolWhenReady = () => { throw new Error('reconcile must not wait for navigation') }
+  connectCardTools(f, { query: async (method, payload) => {
+    queries.push({ method, payload })
+    return { version: 1, ...payload, entered: false, fenced: true }
+  } })
+  const response = await f.dispatch(reconcileRequest(f, bound))
+  assert.equal(response.status, 'reconciled')
+  assert.deepEqual(queries, [{ method: 'reconcile', payload: {
+    callId: 'native-call-a', requestId: 'wire-act-a', documentId: 'doc-1' } }])
+  assert.equal(response.reconcile.entered, false)
+  assert.equal(response.reconcile.fenced, true)
+  assert.equal(f.leases.get(f.current.cardEpoch), 'in-flight-original-act')
+  assert.equal(f.actionLeases.size, 0)
+  assert.equal(f.domEffects, 0)
+  assert.deepEqual(Object.keys(response.timing), ['receivedAtMs'])
+})
+
+test('S1 reconcile keeps stopped, cancelled, held, cross-chat, account and malformed-identity requests closed', async () => {
+  for (const variant of ['stopped', 'cancelled', 'held', 'thread', 'account', 'epoch', 'call', 'document', 'window', 'context', 'request', 'sequence']) {
+    const f = fixture(), bound = await f.dispatch(f.req('bind', { selection: f.selection() }))
+    let queries = 0
+    connectCardTools(f, { query: async () => { queries++; return {} } })
+    const request = reconcileRequest(f, bound)
+    if (variant === 'stopped') f.stoppedRuns.add(JSON.stringify(['run-a', 'thread-a']))
+    if (variant === 'cancelled') await f.dispatch(f.req('cancel'))
+    if (variant === 'held') f.card._browserControls.toolUserHold = () => true
+    if (variant === 'thread') request.clientThreadId = 'other-chat'
+    if (variant === 'account') f.current.engineAccountKey = 'codex:other-account'
+    if (variant === 'epoch') f.current.authorityEpoch++
+    if (variant === 'call') delete request.callId
+    if (variant === 'document') request.guard.documentId = ''
+    if (variant === 'window') request.guard.innerWindowId = '201'
+    if (variant === 'context') request.guard.browsingContextId = -1
+    if (variant === 'request') request.actRequestId = ''
+    if (variant === 'sequence') request.actSeq = 0
+    assert.equal((await f.dispatch(request)).status, 'rejected', variant)
+    assert.equal(queries, 0, variant)
+    assert.equal(f.actionLeases.size, 0)
+  }
+})
+
+test('S1 never asks a replacement document to prove an old call was not dispatched', async () => {
+  for (const field of ['innerWindowId', 'browsingContextId']) {
+    const f = fixture(), bound = await f.dispatch(f.req('bind', { selection: f.selection() }))
+    let queries = 0
+    connectCardTools(f, { query: async () => { queries++; return {} } })
+    const request = reconcileRequest(f, bound)
+    request.guard[field]++
+    const response = await f.dispatch(request)
+    assert.equal(response.status, 'reconciled')
+    assert.equal(response.reconcile.entered, 'unknown')
+    assert.equal(response.reconcile.reason, 'other-document')
+    assert.equal(queries, 0)
+  }
+})
+
+test('S1 discards a late reconcile proof after document, account or run replacement', async () => {
+  for (const variant of ['document', 'account', 'cancel']) {
+    const f = fixture(), bound = await f.dispatch(f.req('bind', { selection: f.selection() }))
+    let release
+    connectCardTools(f, { query: () => new Promise(resolve => { release = resolve }) })
+    const pending = f.dispatch(reconcileRequest(f, bound))
+    if (variant === 'document') f.browser.browsingContext.currentWindowGlobal = { innerWindowId: 202 }
+    if (variant === 'account') f.current.authorityEpoch++
+    if (variant === 'cancel') await f.dispatch(f.req('cancel'))
+    release({ version: 1, callId: 'native-call-a', documentId: 'doc-1', entered: false, fenced: true })
+    const response = await pending
+    if (variant === 'document') assert.equal(response.reconcile.entered, 'unknown')
+    else assert.equal(response.status, 'rejected', variant)
+  }
+})
+
+function dialogFixture() {
+  const listeners = new Map()
+  const browser = { addEventListener: (name, fn) => listeners.set(name, fn), removeEventListener: name => listeners.delete(name) }
+  const observer = new Function('browserToolSameNativeBrowser', `${dialogSource}\nreturn createBrowserToolDialogObserver`)(
+    (a, b) => a === b)(browser)
+  return { browser, observer, listeners,
+    emit(name, detail, extra = {}) { listeners.get(name)?.({ isTrusted: true, target: browser, detail, ...extra }) } }
+}
+
+test('S1 native dialog observation keeps only four types and never reads prompt text or values', () => {
+  const d = dialogFixture(), start = d.observer.checkpoint()
+  const secret = { get text() { assert.fail('prompt text was read') }, get value() { assert.fail('prompt value was read') } }
+  d.emit('DOMWillOpenModalDialog', { promptType: 'alert' }, { isTrusted: false })
+  d.emit('DOMWillOpenModalDialog', { promptType: 'alert' }, { target: {} })
+  assert.deepEqual(d.observer.read(start), { open: false, seen: false, dialog: null })
+  for (const type of ['alert', 'confirm', 'prompt', 'beforeunload']) {
+    const args = Object.create(secret)
+    args.promptType = type === 'beforeunload' ? 'confirmEx' : type
+    args.inPermitUnload = type === 'beforeunload'
+    d.emit('DOMWillOpenModalDialog', { inPermitUnload: args.inPermitUnload })
+    d.browser.tabDialogBox = { getContentDialogManager: () => ({ dialogs: [{ frameContentWindow: { Dialog: { args } } }] }) }
+    assert.deepEqual(d.observer.read().dialog, { type })
+    d.browser.tabDialogBox = null
+    const checkpoint = d.observer.checkpoint()
+    d.emit('DOMModalDialogClosed', { promptType: type, get value() { assert.fail('close value was read') } })
+    assert.deepEqual(d.observer.read(checkpoint), { open: false, seen: true, dialog: { type } })
+    assert.equal(d.observer.read().dialog, null, 'closed dialogs do not leak into later calls')
+  }
+  d.emit('DOMWillOpenModalDialog', { promptType: 'promptPassword' })
+  assert.deepEqual(d.observer.read(), { open: true, seen: true, dialog: null })
+  d.observer.dispose()
+  assert.equal(d.listeners.size, 0)
+  assert.match(source, /toolDialogs\.dispose\(\)/)
+})
+
+test('S1 carries dialog type through acted, rejected and bounded reconcile replies without inventing success', async () => {
+  for (const kind of ['acted', 'refused', 'lost', 'reconcile']) {
+    const f = fixture(), bound = await f.dispatch(f.req('bind', { selection: f.selection() }))
+    const dialogs = { checkpoint: () => 0, read: () => ({ open: true, seen: true, dialog: { type: 'prompt', text: 'SECRET' } }) }
+    let timeout, cleared = 0
+    connectCardTools(f, { dialogs, scheduler: { setTimeout(fn, ms) { timeout = fn; assert.equal(ms, 2500); return 1 },
+      clearTimeout() { cleared++ } }, query: async () => {
+      if (kind === 'reconcile') return new Promise(() => {})
+      if (kind === 'lost') throw new Error('actor disappeared')
+      if (kind === 'refused') return { refused: true, dispatchPhase: 'not-dispatched', error: 'stale' }
+      return { ok: true, result: {}, after: {} }
+    } })
+    const pending = f.dispatch(kind === 'reconcile' ? reconcileRequest(f, bound) : actRequest(f, bound))
+    if (kind === 'reconcile') timeout()
+    const response = await pending
+    assert.deepEqual(response.dialog, { type: 'prompt' }, kind)
+    assert.equal(JSON.stringify(response).includes('SECRET'), false)
+    assert.equal(response.receipt?.dialog, undefined)
+    if (kind === 'reconcile') {
+      assert.equal(response.reconcile.entered, 'unknown')
+      assert.equal(response.reconcile.reason, 'no-answer')
+      assert.equal(cleared, 1)
+    }
+  }
+  assert.match(source, /const outcome = response\?\.dialog \|\| response\?\.dispatchPhase === 'unknown' \? 'unknown'/,
+    'the visible activity row must not turn a dialog-bound response into confirmed success')
+})
+
+test('S1 an untyped native modal cannot turn a fenced response into proof of no input', async () => {
+  const f = fixture(), bound = await f.dispatch(f.req('bind', { selection: f.selection() }))
+  connectCardTools(f, { dialogs: { checkpoint: () => 0, read: () => ({ open: true, seen: true, dialog: null }) },
+    query: async (_method, payload) => ({ version: 1, ...payload, entered: false, fenced: true }) })
+  const response = await f.dispatch(reconcileRequest(f, bound))
+  assert.equal(response.reconcile.entered, 'unknown')
+  assert.equal(response.reconcile.reason, 'dialog-open')
+  assert.equal(response.dialog, undefined, 'unknown types are not mislabeled')
+})
+
+test('S1 an untyped native modal also keeps actor refusal and lost response outcomes unknown', async () => {
+  for (const lost of [false, true]) {
+    const f = fixture(), bound = await f.dispatch(f.req('bind', { selection: f.selection() }))
+    connectCardTools(f, { dialogs: { checkpoint: () => 0, read: () => ({ open: true, seen: true, dialog: null }) },
+      query: async () => {
+        if (lost) throw new Error('actor lost')
+        return { refused: true, dispatchPhase: 'not-dispatched', timing: { performCallsBefore: 0, performCallsAfter: 0 } }
+      } })
+    const response = await f.dispatch(actRequest(f, bound))
+    assert.equal(response.status, 'rejected')
+    assert.equal(response.dispatchPhase, 'unknown')
+    assert.equal(response.dialog, undefined)
+  }
+})
+
+test('S1 relays structural obscuredBy and actor hop timing on refusals, never arbitrary actor fields', async () => {
+  for (const obscuredBy of ['div#shade.modal role=dialog', 'SECRET\nvalue', { text: 'SECRET' }, 'x'.repeat(161)]) {
+    const f = fixture(), bound = await f.dispatch(f.req('bind', { selection: f.selection() }))
+    connectCardTools(f, { query: async () => ({ refused: true, error: 'Browser target is obscured',
+      obscuredBy, secret: 'SECRET', dispatchPhase: 'not-dispatched',
+      timing: { actorReceivedAtMs: f.now(), performCallsBefore: 4, performCallsAfter: 4, secret: 'SECRET' } }) })
+    const response = await f.dispatch(actRequest(f, bound))
+    assert.equal(response.dispatchPhase, 'not-dispatched')
+    assert.equal(response.obscuredBy, typeof obscuredBy === 'string' && obscuredBy.startsWith('div') ? obscuredBy : undefined)
+    assert.equal(response.timing.actorReceivedAtMs, f.now())
+    assert.equal(JSON.stringify(response).includes('SECRET'), false)
+  }
+})
+
+test('S1 actual actor fencing prevents a late approved call from entering perform after reconciliation', async () => {
+  globalThis.JSWindowActorChild ||= class {}
+  const { EGDeskBrowserAgentRuntimeChild } = await import('../overlay/resources/EGDeskBrowserAgentRuntimeChild.sys.mjs')
+  const f = fixture(), bound = await f.dispatch(f.req('bind', { selection: f.selection() }))
+  const actor = new EGDeskBrowserAgentRuntimeChild()
+  actor.documentId = 'doc-1'
+  actor.assertGuard = () => {}
+  actor.snapshot = () => ({ documentId: 'doc-1' })
+  actor.clockMs = f.now
+  actor.monoNow = f.now
+  let release, performed = 0
+  actor.perform = () => { performed++; return {} }
+  actor.sendQuery = async (_name, lease) => {
+    await new Promise(resolve => { release = resolve })
+    return { authorized: f.authorize({ ...lease, browser: f.browser,
+      browsingContext: f.browser.browsingContext, windowGlobal: f.browser.browsingContext.currentWindowGlobal }) }
+  }
+  connectCardTools(f, { query: (name, data) => actor.receiveMessage({ name, data }) })
+  const request = actRequest(f, bound)
+  request.callId = 'native-call-a'
+  const pending = f.dispatch(request)
+  assert.equal(f.leases.size, 1)
+  const reconciled = await f.dispatch(reconcileRequest(f, bound, { actRequestId: request.requestId }))
+  assert.equal(reconciled.reconcile.entered, false)
+  assert.equal(reconciled.reconcile.fenced, true)
+  assert.equal(actor.fences.has('call:native-call-a'), true)
+  assert.equal(actor.fences.has(`request:${request.requestId}`), true)
+  release()
+  const refused = await pending
+  assert.equal(refused.dispatchPhase, 'not-dispatched')
+  assert.equal(refused.timing.performCallsBefore, refused.timing.performCallsAfter)
+  assert.equal(actor.actorPerformCalls, 0)
+  assert.equal(performed, 0)
+  assert.equal(f.leases.size, 0)
+  actor.recordPerformEntry(['call:entered-call'], f.now())
+  const entered = await f.dispatch(reconcileRequest(f, bound, { callId: 'entered-call' }))
+  assert.equal(entered.reconcile.entered, true)
+  assert.equal(entered.reconcile.performing, true)
+  assert.equal(entered.reconcile.timing.performEnterMs, f.now())
+})
+
+test('S1 wait_text activity recording never stores the sought text', async () => {
+  const SurfaceState = await import('../overlay/resources/EGDeskSurfaceState.sys.mjs')
+  const recorded = SurfaceState.browserAgentActivityRecord({ kind: 'observe', options: { wait: {
+    for: 'text', text: 'SECRET_WAIT_NEEDLE', timeoutMs: 1000 } } })
+  assert.equal(recorded.action.type, 'wait')
+  assert.equal(JSON.stringify(recorded).includes('SECRET_WAIT_NEEDLE'), false)
 })

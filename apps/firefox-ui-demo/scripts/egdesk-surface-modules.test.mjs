@@ -134,6 +134,11 @@ async function install(script, namespaces, { transformNamespace = (_, namespace)
   for (const forward of forwards) assert.ok(forward.index < script.indexOf(footer), 'forwarders are constructed before zones');
   const events = [], imports = [], received = [];
   const bindings = Object.fromEntries([...coreNames].map(name => [name, poisonValue(name, events)]));
+  // A forwarded function is declared in the actual evaluated installer scope,
+  // not the host's poisoned placeholder. Capture that exact lexical identity
+  // before installation so a wrong or wrapped callback still fails the guard.
+  const forwardReferences = {};
+  bindings.captureForwardReferences = references => Object.assign(forwardReferences, references);
   const chromeUtils = Object.freeze({
     importESModule(url, options) {
       imports.push(url);
@@ -150,7 +155,7 @@ async function install(script, namespaces, { transformNamespace = (_, namespace)
           return deps => {
             assert.ok(Object.isFrozen(deps), 'installer freezes the shared dependency object');
             assert.deepEqual(Object.keys(deps), dependencies);
-            for (const key of dependencies) assert.equal(deps[key], bindings[key], `core reference identity: ${key}`);
+            for (const key of dependencies) assert.equal(deps[key], own(forwardReferences, key) ? forwardReferences[key] : bindings[key], `core reference identity: ${key}`);
             if (received.length) assert.equal(deps, received[0].deps, 'all zones share one deps object');
             const reads = [];
             const strictDeps = new Proxy(deps, {
@@ -178,7 +183,7 @@ async function install(script, namespaces, { transformNamespace = (_, namespace)
   const installerConsole = { error: (...args) => { throw args.at(-1); } };
   poisonGlobals(bindings, events, { ChromeUtils: chromeUtils, console: installerConsole });
   const result = await withoutEnvironment(() => runInNewContext(
-    `${forwards.map(item => item.declaration).join('\n')}\n${footer}\n` +
+    `${forwards.map(item => item.declaration).join('\n')}\ncaptureForwardReferences({ ${forwards.map(item => item.binding).join(', ')} });\n${footer}\n` +
     `;({ surfaceZones, surfaceForward, forwards: { ${forwards.map(item => item.binding).join(', ')} } });`,
     bindings, { timeout: 1000, filename: 'production-surface-installer.js' }));
   assert.deepEqual(events, [], 'installation defines zones without calling dependencies or touching window globals');
@@ -361,7 +366,9 @@ test('real ESM factories and actual installer use one frozen dependency object w
   const installed = await install(core, await importModules());
   const required = sorted(new Set(zones.flatMap(zone => factoryDeps(read(modulePath(zone))))));
   assert.deepEqual(installerDeps(core), required, 'installer supplies exactly the actual factory dependency union');
-  assert.equal(required.length, 31, 'stage1 dependency boundary');
+  assert.equal(required.length, 33, 'stage1 plus explicit project target and Terminal Card callbacks');
+  assert.equal(installed.received[1].deps.getProjectTarget, installed.bindings.getProjectTarget);
+  assert.equal(installed.received[1].deps.spawnTerminalCard, installed.forwards.spawnTerminalCard);
   const api = readBootApi(core, installed.forwards);
   for (const [key, method] of [
     ['openOntologyMapCard', 'spawnOntologyMapCard'], ['openFileCard', 'spawnFileCard'], ['openTerminalCard', 'spawnTerminalCard'],
@@ -402,6 +409,12 @@ test('installer guards reject missing/wrong deps, wrong imports, factory mismatc
     '  function installSurfaceZones() {\n    const el = svgEl;\n');
   assert.notEqual(wrongReference, core);
   await assert.rejects(() => install(wrongReference, namespaces), /core reference identity: el/);
+  for (const callback of ['getProjectTarget', 'spawnTerminalCard']) {
+    const wrongCallback = core.replace('  function installSurfaceZones() {\n',
+      `  function installSurfaceZones() {\n    const ${callback} = el;\n`);
+    assert.notEqual(wrongCallback, core);
+    await assert.rejects(() => install(wrongCallback, namespaces), new RegExp(`core reference identity: ${callback}`));
+  }
   const wrongGlobal = core.replace("{ global: 'current' }", "{ global: 'shared' }");
   assert.notEqual(wrongGlobal, core);
   await assert.rejects(() => install(wrongGlobal, namespaces), /window-scoped import/);
@@ -502,4 +515,49 @@ test('shared sequence and z-order helpers retain the live core counters', () => 
   assert.deepEqual(Array.from(actual.after), [81, 201]);
   assert.equal(actual.cardSeq, 81);
   assert.equal(actual.cardZ, 201);
+});
+
+test('actual Terminal Card background options keep Canvas representation without activation, reveal or ready focus', async () => {
+  const { createTerminalZone } = await import(new URL('resources/surface/EGDeskSurfaceTerminal.mjs', overlay));
+  for (const options of [{}, { activate: false, reveal: false }, { activate: false }, { reveal: false }]) {
+    const events = [], messages = new Map();
+    const node = (tag, props = {}, ...children) => {
+      const value = { tag, ...props, className: props.class || '', style: props.style || {}, dataset: props.data || {}, children: [], listeners: new Map(),
+        appendChild(child) { this.children.push(child); child.parent = this; return child; },
+        addEventListener(type, callback) { const list = this.listeners.get(type) || []; list.push(callback); this.listeners.set(type, list); },
+        removeEventListener() {},
+        querySelector(selector) { return this.children.find(child => child.className.split(' ').includes(selector.slice(1)))
+          || this.children.map(child => child.querySelector?.(selector)).find(Boolean) || null; },
+        focus() { events.push('frame-focus'); },
+      };
+      for (const child of children) if (child && typeof child === 'object') value.appendChild(child);
+      if (tag === 'iframe') value.contentWindow = { terminalAPI: { focus: () => events.push('terminal-focus') } };
+      return value;
+    };
+    const host = node('main');
+    const deps = Object.fromEntries(factoryDeps(read('resources/surface/EGDeskSurfaceTerminal.mjs')).map(name => [name, () => {}]));
+    Object.assign(deps, { TAG: 'unit', allocCardSeq: () => 1, el: node, raiseCardZ: () => 2,
+      makeSourceRef: (kind, details) => ({ kind, ...details }), resolveCanvasCardPlacement: () => ({ x: 1, y: 2, width: 400, height: 300 }),
+      setActiveEntity: () => events.push('activate'), revealPlacedCanvasCard: () => events.push('reveal'),
+      markAgendaDirty: () => events.push('persist-card'), boardCloseRequests: new Set(), state: {} });
+    const globals = { document: { getElementById: () => host, addEventListener() {}, removeEventListener() {} },
+      window: { addEventListener: (type, callback) => messages.set(type, callback), removeEventListener() {} }, console: { warn() {} } };
+    const saved = new Map(Object.keys(globals).map(key => [key, Object.getOwnPropertyDescriptor(globalThis, key)]));
+    try {
+      for (const [key, value] of Object.entries(globals)) Object.defineProperty(globalThis, key, { configurable: true, writable: true, value });
+      const card = createTerminalZone(deps).spawnTerminalCard(options);
+      assert.equal(host.children.includes(card), true, 'background execution remains a real Canvas Card');
+      assert.equal(events.filter(event => event === 'persist-card').length, 1);
+      assert.equal(events.includes('activate'), options.activate !== false);
+      assert.equal(events.includes('reveal'), options.reveal !== false);
+      assert.equal(new URL(card._termBrowser.src).searchParams.get('autofocus'), options.activate === false ? '0' : null);
+      messages.get('message')({ source: {}, data: { type: 'terminal-ready' } });
+      assert.equal(events.includes('frame-focus'), false, 'foreign frame cannot focus this Card');
+      messages.get('message')({ source: card._termBrowser.contentWindow, data: { type: 'terminal-ready', shellLabel: 'zsh' } });
+      assert.equal(events.includes('frame-focus'), options.activate !== false);
+      assert.equal(events.includes('terminal-focus'), options.activate !== false);
+    } finally {
+      for (const [key, descriptor] of saved) { if (descriptor) Object.defineProperty(globalThis, key, descriptor); else delete globalThis[key]; }
+    }
+  }
 });

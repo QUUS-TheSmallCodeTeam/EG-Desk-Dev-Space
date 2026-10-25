@@ -2,6 +2,7 @@ import test from 'node:test';
 import assert from 'node:assert/strict';
 import { readFileSync } from 'node:fs';
 import { compileFunction } from 'node:vm';
+import { spawnSync } from 'node:child_process';
 import { readSurfaceSource } from './egdesk-surface-source.mjs';
 import * as TerminalState from '../overlay/resources/EGDeskTerminalState.sys.mjs';
 
@@ -139,7 +140,7 @@ class Element {
   querySelector(selector) { return selector === '.xterm-helper-textarea' ? this.textarea : null; }
 }
 
-async function uiFixture({ search = '', platform = 'win32', transport = 'conpty', respond = null } = {}) {
+async function uiFixture({ search = '', platform = 'win32', transport = 'conpty', respond = null, timeouts = null } = {}) {
   const ids = ['status-overlay', 'terminal-container', 'terminal-shell-select', 'terminal-shell-start', 'terminal-shell-label', 'terminal-operation-status'];
   const elements = Object.fromEntries(ids.map(id => [id, new Element(id)]));
   elements['terminal-shell-select'].disabled = true;
@@ -176,12 +177,12 @@ async function uiFixture({ search = '', platform = 'win32', transport = 'conpty'
   const fetch = async (url, options) => {
     const route = new URL(url).pathname, body = options.body ? JSON.parse(options.body) : null;
     requests.push({ route, body, method: options.method });
-    const value = respond ? await respond(route, body, defaults) : defaults(route, body);
+    const value = respond ? await respond(route, body, defaults, options) : defaults(route, body);
     const status = value.httpStatus || 200;
     return { ok: status >= 200 && status < 300, status, json: async () => value };
   };
   const window = { location: { search }, parent: { postMessage: value => messages.push(value) },
-    setTimeout, addEventListener: (type, fn) => windowListeners.set(type, fn) };
+    setTimeout: timeouts?.set || setTimeout, addEventListener: (type, fn) => windowListeners.set(type, fn) };
   const document = { getElementById: id => elements[id], createElement: () => new Element() };
   const source = initializer.replace("await import('chrome://userchrome/content/EGDeskTerminalState.sys.mjs')", 'TerminalState')
     .replace('(async () => {', 'return (async () => {');
@@ -190,7 +191,7 @@ async function uiFixture({ search = '', platform = 'win32', transport = 'conpty'
     'requestAnimationFrame', 'ResizeObserver', 'setTimeout', 'clearTimeout', 'setInterval', 'clearInterval', 'AbortController', 'URLSearchParams', 'console']);
   await run(TerminalState, FakeTerminal, { FitAddon: class { fit() {} } }, undefined, document, window, fetch,
     fn => frames.push(fn), class { constructor(fn) { observer = this; this.callback = fn; } observe() {} disconnect() { this.disconnected = true; } },
-    setTimeout, clearTimeout, fn => { intervals.set(++intervalId, fn); return intervalId; }, id => intervals.delete(id),
+    timeouts?.set || setTimeout, timeouts?.clear || clearTimeout, fn => { intervals.set(++intervalId, fn); return intervalId; }, id => intervals.delete(id),
     AbortController, URLSearchParams, { warn: (...args) => warnings.push(args) });
   const h = { elements, requests, messages, term, window, intervals, warnings, observer,
     api: window.terminalAPI, boot: async () => { await frames.shift()(); await settle(); },
@@ -330,9 +331,9 @@ test('production Card routes a shell request to a separate Card and rejects othe
   const ownFrame = {}, opened = [], title = { textContent: '' };
   let focused = 0;
   const handler = compileFunction('return ev => {' + body + '\n};',
-    ['termBrowser', 'spawnTerminalCard', 'header', 'focusTerminal', 'boardCloseRequests', 'card', 'completeAgendaClose'])(
+    ['termBrowser', 'spawnTerminalCard', 'header', 'focusTerminal', 'boardCloseRequests', 'card', 'completeAgendaClose', 'activate'])(
     { contentWindow: ownFrame }, options => opened.push(options), { querySelector: () => title },
-    () => focused++, new Set(), { dataset: {} }, () => assert.fail('no Board close is pending'));
+    () => focused++, new Set(), { dataset: {} }, () => assert.fail('no Board close is pending'), true);
   handler({ source: {}, data: { type: 'terminal-new-session', shellId: 'cmd' } });
   handler({ source: ownFrame, data: { type: 'terminal-new-session', shellId: '/bin/zsh' } });
   assert.deepEqual(opened, []);
@@ -449,4 +450,267 @@ test('typed ambiguous Windows startup response never becomes NO_SESSION or a rep
   assert.equal(result.status, 'STOP_UNCONFIRMED');
   assert.equal(result.exitConfirmed, false);
   assert.equal(h.messages.some(message => message.type === 'terminal-exit-confirmed'), false);
+});
+
+const storedProject = () => ({ projectId: 'project-a', rootId: 'root-a', status: 'connected', displayPath: '/verified/project',
+  scripts: [{ id: 'test', name: '검사', command: 'npm test', kind: 'test' }] });
+const runRequest = () => ({ boardId: 'board-a', projectId: 'project-a', rootId: 'root-a', script: { ...storedProject().scripts[0] } });
+const runNonce = line => / ([a-z0-9]{16}) "\$\?"/.exec(line)?.[1] || /\[egdesk-run:([a-z0-9]{16}):exit=/.exec(line)?.[1];
+
+async function scriptFixture(t, { project = storedProject(), respond } = {}) {
+  const stream = [];
+  const h = await uiFixture({ platform: 'darwin', search: '?autofocus=0', respond: async (route, body, defaults) => {
+    if (respond) { const override = await respond(route, body); if (override !== undefined) return override; }
+    if (route === '/v1/files/projects/open') return { ok: true, result: { project } };
+    if (route === '/terminal/read') {
+      const output = stream.shift();
+      if (output instanceof Error) throw output;
+      return { ...defaults(route, body), data: output || '' };
+    }
+    return defaults(route, body);
+  } });
+  t.after(() => h.event('unload'));
+  await h.boot();
+  h.output = async data => { stream.push(data); await [...h.intervals.values()][0]?.(); await settle(); };
+  h.scriptWrites = () => h.requests.filter(item => item.route === '/terminal/write');
+  return h;
+}
+
+test('project run verifies the attached Board and only PTY output completes its split receipt', async t => {
+  const h = await scriptFixture(t);
+  assert.equal(h.term.focusCalls, 0, 'background terminals do not autofocus');
+  assert.equal(h.api.inputRevision(), 0);
+  assert.equal(h.scriptWrites().length, 0, 'opening a terminal never runs a project command');
+  const request = runRequest();
+  const pending = h.api.runScript(request);
+  request.boardId = 'later-selected-board'; request.script.command = 'other command';
+  let completed = false; void pending.then(() => { completed = true; });
+  await settle(); await settle();
+  assert.deepEqual(h.requests.find(item => item.route === '/v1/files/projects/open').body, { boardId: 'board-a' });
+  const line = h.scriptWrites()[0].body.data, nonce = runNonce(line);
+  assert.equal(h.api.inputRevision(), 0, 'owned script dispatch is distinct from human input');
+  assert.ok(nonce); assert.match(line, /cd -- '\/verified\/project'/); assert.match(line, /eval 'npm test'/);
+  h.term.send(`[egdesk-run:${nonce}:exit=0]`); await settle();
+  assert.equal(h.api.inputRevision(), 1);
+  assert.equal(completed, false, 'term.onData is input, not output evidence');
+  await h.output(`${line.replace(/\r$/, '\r\n')}actual log\n[egdesk-run:${nonce}:exit=`);
+  assert.equal(completed, false);
+  await h.output('7]\n');
+  const result = await pending;
+  assert.equal(result.status, 'failed'); assert.equal(result.exitCode, 7);
+  assert.equal(result.cwd, '/verified/project'); assert.equal(result.projectId, 'project-a');
+  assert.equal(result.command, 'npm test'); assert.match(result.output.head, /actual log/);
+  assert.doesNotMatch(result.output.head, /eval 'npm test'/);
+  assert.equal(h.scriptWrites().filter(item => item.body.data.includes('eval ')).length, 1);
+  assert.equal(h.term.focusCalls, 0);
+  await h.api.write('human API write'); assert.equal(h.api.inputRevision(), 2);
+  h.api.paste('human paste'); await settle(); assert.equal(h.api.inputRevision(), 3);
+});
+
+test('project runs reject raw paths, reassociation, edited commands and unknown shells before writing', async t => {
+  for (const project of [null, { ...storedProject(), projectId: 'different' }, { ...storedProject(), rootId: 'different' },
+    { ...storedProject(), status: 'reconnect-required' }, { ...storedProject(), displayPath: 'relative/path' },
+    { ...storedProject(), scripts: [{ ...storedProject().scripts[0], command: 'changed' }] }]) {
+    const h = await scriptFixture(t, { project });
+    await assert.rejects(h.api.runScript(runRequest()), { code: 'TERMINAL_PROJECT_CHANGED' });
+    assert.equal(h.scriptWrites().length, 0);
+  }
+  const h = await scriptFixture(t);
+  await assert.rejects(h.api.runScript({ ...runRequest(), cwd: '/untrusted/path' }), { code: 'TERMINAL_RUN_REQUEST' });
+  assert.equal(h.scriptWrites().length, 0);
+  const cmd = await uiFixture({ search: '?shellId=cmd', respond: (route, body, defaults) => route === '/v1/files/projects/open'
+    ? { ok: true, result: { project: storedProject() } } : defaults(route, body) });
+  t.after(() => cmd.event('unload')); await cmd.boot();
+  await assert.rejects(cmd.api.runScript(runRequest()), { code: 'TERMINAL_RUN_SHELL' });
+  assert.equal(cmd.requests.some(item => item.route === '/terminal/write'), false);
+});
+
+test('disconnect keeps bounded logs with unknown status and reconnect never replays the command', async t => {
+  const h = await scriptFixture(t);
+  const pending = h.api.runScript(runRequest()); await settle(); await settle();
+  const nonce = runNonce(h.scriptWrites()[0].body.data);
+  await h.output('received before disconnect\n');
+  await h.output(new Error('stream disconnected'));
+  const result = await pending;
+  assert.equal(result.status, 'unknown'); assert.equal(result.exitCode, null);
+  assert.match(result.output.head, /received before disconnect/);
+  h.elements['status-overlay'].onclick(); await settle(); await settle();
+  await h.output(`[egdesk-run:${nonce}:exit=0]\n`);
+  assert.equal(result.status, 'unknown'); assert.equal(h.scriptWrites().length, 1);
+  assert.equal(h.requests.filter(item => item.route === '/terminal/spawn').length, 1);
+});
+
+test('pending authority lookup, wrong-session output and close cannot complete or replay a run', async t => {
+  const lookup = deferred();
+  const h = await scriptFixture(t, { respond: (route) => route === '/v1/files/projects/open' ? lookup.promise : undefined });
+  const pending = h.api.runScript(runRequest());
+  const rejected = assert.rejects(pending, { code: 'TERMINAL_INPUT_STALE' });
+  await settle(); await h.api.closeForBoard();
+  lookup.resolve({ ok: true, result: { project: storedProject() } }); await rejected;
+  assert.equal(h.scriptWrites().length, 0);
+  let mismatch = false;
+  const other = await scriptFixture(t, { respond: route => mismatch && route === '/terminal/read'
+    ? { ok: true, sessionId: 'foreign', status: 'RUNNING', data: 'foreign output' } : undefined });
+  const running = other.api.runScript(runRequest()); await settle(); await settle();
+  await assert.rejects(other.api.runScript(runRequest()), { code: 'TERMINAL_RUN_BUSY' });
+  mismatch = true; await other.output('');
+  assert.equal((await running).status, 'unknown');
+  assert.equal(other.term.output.includes('foreign output'), false);
+  assert.equal(other.scriptWrites().length, 1);
+});
+
+test('human input during either delayed project lookup prevents idle-terminal reuse dispatch without replay', async t => {
+  for (const delayedLookup of [1, 2]) {
+    const lookup = deferred(); let preparingReuse = false, lookups = 0;
+    const h = await scriptFixture(t, { respond: route => {
+      if (preparingReuse && route === '/v1/files/projects/open' && ++lookups === delayedLookup) return lookup.promise;
+    } });
+    // Establish a completed owned run, then reuse the same idle session.
+    const first = h.api.runScript(runRequest()); await settle(); await settle();
+    await h.output(`[egdesk-run:${runNonce(h.scriptWrites()[0].body.data)}:exit=0]\n`);
+    assert.equal((await first).status, 'completed');
+    const previousWrites = h.scriptWrites().length, sessionId = h.api.ptyId;
+    preparingReuse = true;
+    const pending = h.api.runScript(runRequest()).then(result => ({ result }), error => ({ error }));
+    await settle(); await settle();
+    assert.equal(lookups, delayedLookup);
+    h.term.send('node\r'); await settle();
+    assert.equal(h.api.inputRevision(), 1);
+    lookup.resolve({ ok: true, result: { project: storedProject() } });
+    await settle(); await settle();
+    assert.equal(h.scriptWrites().slice(previousWrites).some(item => item.body.data.includes('[egdesk-run:')), false,
+      'intervening human input must fence the project write before dispatch');
+    const outcome = await pending;
+    if (delayedLookup === 1) assert.equal(outcome.error?.code, 'TERMINAL_INPUT_STALE');
+    else {
+      assert.equal(outcome.result?.status, 'not-started');
+      assert.equal(outcome.result?.code, 'TERMINAL_INPUT_STALE');
+    }
+    await h.api.write('human later\r'); await settle();
+    assert.deepEqual(h.scriptWrites().slice(previousWrites).map(item => item.body.data), ['node\r', 'human later\r'],
+      'zero project writes; both ordinary human inputs remain ordered and available');
+    assert.equal(h.api.ptyId, sessionId); assert.equal(h.api.isConnected(), true);
+    assert.equal(h.requests.filter(item => item.route === '/terminal/spawn').length, 1, 'no automatic replacement terminal');
+    assert.equal(lookups, delayedLookup, 'no automatic authority lookup or command retry');
+  }
+});
+
+test('collector bounds incomplete output and cancellation before start never writes', async () => {
+  const nonce = 'abcdefgh12345678';
+  const collector = TerminalState.createTerminalRunCollector({ nonce, headChars: 4, tailChars: 6 });
+  collector.push('x'.repeat(10000));
+  const output = collector.output();
+  assert.equal(output.head.length, 4); assert.equal(output.tail.length, 6); assert.equal(output.omittedBytes, 9990);
+  let writes = 0;
+  const run = TerminalState.createTerminalScriptRun({ nonce, command: 'echo test', write: () => { writes++; } });
+  run.cancel(); assert.equal((await run.start()).status, 'unknown'); assert.equal(writes, 0);
+  assert.equal(run.onData(`[egdesk-run:${nonce}:exit=0]`), false);
+});
+
+test('whole typed command is folder-gated, and a comment or cd inside it cannot swallow the receipt', () => {
+  const nonce = 'abcdefgh12345678';
+  const execute = options => spawnSync('/bin/sh', ['-c', TerminalState.terminalScriptLine({ nonce, ...options }).replace(/\r$/, '\n')], { encoding: 'utf8' });
+  if (process.platform !== 'win32') {
+    const absent = execute({ cwd: '/__egdesk_nonexistent_project_fixture__', command: 'printf FIRST; printf MUST_NOT_RUN' });
+    assert.doesNotMatch(absent.stdout, /FIRST|MUST_NOT_RUN/); assert.match(absent.stdout, /exit=[1-9]/);
+    const safe = execute({ cwd: '/tmp', command: 'printf EXACT; cd /; exit 7 # typed comment' });
+    assert.match(safe.stdout, /EXACT/); assert.match(safe.stdout, /exit=7/);
+  }
+  const windows = TerminalState.terminalScriptLine({ nonce, cwd: "C:\\it's here", command: 'Write-Output test', shell: 'powershell' });
+  assert.match(windows, /Set-Location -LiteralPath 'C:\\it''s here' -ErrorAction Stop/);
+  assert.match(windows, /try \{.*scriptblock.*catch.*finally/);
+  assert.match(windows, /Set-Location -LiteralPath \$egdeskLocation.Path/);
+});
+
+test('collector timeout, cancellation and output receipt settle independently of a never-resolving write ack', async () => {
+  for (const finish of ['timeout', 'cancel', 'receipt']) {
+    let timeout;
+    const run = TerminalState.createTerminalScriptRun({ command: 'echo check', nonce: 'abcdefgh12345678', write: () => new Promise(() => {}),
+      schedule: fn => { timeout = fn; return 1; }, cancel() {} });
+    const pending = run.start();
+    run.onData('already received\n');
+    if (finish === 'timeout') timeout();
+    else if (finish === 'cancel') run.cancel();
+    else run.onData('[egdesk-run:abcdefgh12345678:exit=0]\n');
+    const deadline = Symbol('deadlock');
+    const result = await Promise.race([pending, new Promise(resolve => setTimeout(() => resolve(deadline), 20))]);
+    assert.notEqual(result, deadline, finish);
+    assert.equal(result.status, finish === 'receipt' ? 'completed' : 'unknown');
+    assert.match(result.output.head, /already received/); assert.equal(run.active, false);
+  }
+});
+
+test('cancelled or expired queued script is fenced at actual dispatch, preserving later human input', async () => {
+  for (const reason of ['timeout', 'cancel']) {
+    const held = deferred(), sent = [];
+    const queue = TerminalState.createTerminalWriteQueue({ write: async (id, data) => { sent.push(data); if (data === 'human first') await held.promise; return { ok: true }; } });
+    queue.bind('one');
+    const human = queue.enqueue('human first'); await settle();
+    let timeout;
+    const run = TerminalState.createTerminalScriptRun({ command: 'must not run', nonce: 'abcdefgh12345678',
+      write: data => queue.enqueue(data, { isCurrent: () => run.active }), schedule: fn => { timeout = fn; return 1; }, cancel() {} });
+    const pending = run.start(); await settle();
+    if (reason === 'timeout') timeout(); else run.cancel();
+    assert.equal((await pending).status, 'unknown');
+    held.resolve(); await human; await queue.enqueue('human later');
+    assert.deepEqual(sent, ['human first', 'human later']);
+  }
+});
+
+test('project association is revalidated after queued human input and before the script transport dispatch', async t => {
+  const held = deferred(); let changed = false;
+  const h = await scriptFixture(t, { respond: async (route, body) => {
+    if (route === '/terminal/write' && body.data === 'human first') { await held.promise; return { ok: true }; }
+    if (route === '/v1/files/projects/open' && changed) return { ok: true, result: { project: { ...storedProject(), rootId: 'changed-root' } } };
+  } });
+  const human = h.api.write('human first'); await settle();
+  const pending = h.api.runScript(runRequest()); await settle();
+  changed = true; held.resolve(); await human;
+  const result = await pending;
+  assert.equal(result.status, 'not-started'); assert.equal(result.code, 'TERMINAL_PROJECT_CHANGED');
+  assert.deepEqual(h.scriptWrites().map(item => item.body.data), ['human first']);
+  assert.equal(h.api.isConnected(), true, 'authority drift is not a transport failure');
+});
+
+test('intervening human input fences a queued project run before its final authority lookup', async t => {
+  const held = deferred();
+  const h = await scriptFixture(t, { respond: async (route, body) => {
+    if (route === '/terminal/write' && body.data === 'human first') { await held.promise; return { ok: true }; }
+  } });
+  const first = h.api.write('human first'); await settle();
+  const pending = h.api.runScript(runRequest()); await settle(); await settle();
+  const intervening = h.api.write('node\r');
+  held.resolve(); await first;
+  const result = await pending; await intervening;
+  assert.equal(result.status, 'not-started'); assert.equal(result.code, 'TERMINAL_INPUT_STALE');
+  assert.deepEqual(h.scriptWrites().map(item => item.body.data), ['human first', 'node\r']);
+  assert.equal(h.requests.filter(item => item.route === '/v1/files/projects/open').length, 1,
+    'stale queued scripts are rejected before final authority lookup, without automatic retry');
+  assert.equal(h.api.isConnected(), true); assert.equal(h.api.inputRevision(), 2);
+});
+
+test('actual write and read transports time out, settle unknown, and invalidate queued commands without replay', async t => {
+  for (const stalledRoute of ['/terminal/write', '/terminal/read']) {
+    const timers = new Map(); let nextTimer = 0, stallRead = false;
+    const timeouts = { set: (fn, ms) => { timers.set(++nextTimer, { fn, ms }); return nextTimer; }, clear: id => timers.delete(id) };
+    const h = await uiFixture({ platform: 'darwin', timeouts, respond: (route, body, defaults, options) => {
+      if (route === '/v1/files/projects/open') return { ok: true, result: { project: storedProject() } };
+      if (route === stalledRoute && (route === '/terminal/write' || stallRead)) {
+        assert.ok(options.signal, 'the actual HTTP request has a bounded abort signal');
+        return new Promise((resolve, reject) => options.signal.addEventListener('abort', () => reject(Object.assign(new Error('transport timeout'), { name: 'AbortError' }))));
+      }
+      return defaults(route, body);
+    } });
+    t.after(() => h.event('unload')); await h.boot();
+    const pending = h.api.runScript(runRequest()); await settle(); await settle();
+    let reading;
+    if (stalledRoute === '/terminal/read') { stallRead = true; reading = [...h.intervals.values()][0](); await settle(); }
+    const delayed = [...timers.values()].find(timer => timer.ms === (stalledRoute === '/terminal/write' ? 10000 : 5000));
+    assert.ok(delayed); delayed.fn(); await settle();
+    if (reading) await reading;
+    const result = await pending;
+    assert.equal(result.status, 'unknown'); assert.equal(result.exitCode, null); assert.equal(h.api.isConnected(), false);
+    assert.equal((await h.api.write('must not replay')).skipped, true);
+    assert.equal(h.requests.filter(item => item.route === '/terminal/write').length, 1);
+  }
 });
